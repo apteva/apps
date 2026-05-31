@@ -145,6 +145,7 @@ func filterFromArgs(args map[string]any) Filter {
 		App:       stringArg(args, "app"),
 		Topic:     stringArg(args, "topic"),
 		ProjectID: stringArg(args, "project_id"),
+		Source:    stringArg(args, "source"),
 		Since:     int64Arg(args, "since"),
 		Until:     int64Arg(args, "until"),
 	}

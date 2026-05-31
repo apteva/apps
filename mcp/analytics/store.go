@@ -64,6 +64,7 @@ type Filter struct {
 	App       string
 	Topic     string
 	ProjectID string
+	Source    string
 	Since     int64 // unix ms; 0 = no lower bound
 	Until     int64 // unix ms; 0 = no upper bound
 
@@ -88,6 +89,10 @@ func (f Filter) buildWhere() (string, []any) {
 	if f.ProjectID != "" {
 		conds = append(conds, "project_id = ?")
 		args = append(args, f.ProjectID)
+	}
+	if f.Source != "" {
+		conds = append(conds, "source = ?")
+		args = append(args, f.Source)
 	}
 	if f.Since > 0 {
 		conds = append(conds, "ts >= ?")

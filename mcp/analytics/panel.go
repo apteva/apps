@@ -32,6 +32,7 @@ func filterFromQuery(r *http.Request) Filter {
 		App:       q.Get("app"),
 		Topic:     q.Get("topic"),
 		ProjectID: q.Get("project_id"),
+		Source:    q.Get("source"),
 		Since:     parseInt64(q.Get("since")),
 		Until:     parseInt64(q.Get("until")),
 	}

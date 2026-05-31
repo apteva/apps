@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: analytics
 display_name: Analytics
-version: 0.6.1
+version: 0.7.0
 description: |
   Generic event analytics for Apteva apps. Other apps call
   analytics_track to record typed events; analytics_query / count /
@@ -30,6 +30,11 @@ description: |
   dependency on analytics to be measured. Off by default; toggle it,
   pick a mode (all / denylist / allowlist) + topic patterns + sample
   rate, in the panel's Capture tab.
+
+  v0.7 adds saved live dashboards with stat, timeseries, top values,
+  breakdown, and feed widgets. The first built-in template is Website
+  Traffic for live page views, active sessions, top pages, devices,
+  and recent activity.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/analytics

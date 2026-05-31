@@ -13,6 +13,7 @@ package main
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"database/sql"
 	"encoding/json"
 	"fmt"
@@ -62,7 +63,7 @@ func loadCaptureConfig(db *sql.DB) captureConfig {
 	if patterns != "" {
 		_ = json.Unmarshal([]byte(patterns), &c.Topics)
 	}
-	if c.SampleRate <= 0 || c.SampleRate > 1 {
+	if c.SampleRate < 0 || c.SampleRate > 1 {
 		c.SampleRate = 1.0
 	}
 	return c
@@ -76,7 +77,7 @@ func saveCaptureConfig(db *sql.DB, c captureConfig) error {
 	if c.Mode != "all" && c.Mode != "allowlist" && c.Mode != "denylist" {
 		c.Mode = "denylist"
 	}
-	if c.SampleRate <= 0 || c.SampleRate > 1 {
+	if c.SampleRate < 0 || c.SampleRate > 1 {
 		c.SampleRate = 1.0
 	}
 	patterns, _ := json.Marshal(c.Topics)
@@ -184,7 +185,15 @@ func streamFirehose(ctx *sdk.AppCtx, gateway, token string, lastSeq *uint64) err
 	if *lastSeq > 0 {
 		url += "?since=" + strconv.FormatUint(*lastSeq, 10)
 	}
-	req, err := http.NewRequest("GET", url, nil)
+	reqCtx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if ctx.Done() != nil {
+		go func() {
+			<-ctx.Done()
+			cancel()
+		}()
+	}
+	req, err := http.NewRequestWithContext(reqCtx, "GET", url, nil)
 	if err != nil {
 		return err
 	}

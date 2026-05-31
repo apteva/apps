@@ -19,7 +19,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: analytics
 display_name: Analytics
-version: 0.6.1
+version: 0.7.0
 description: |
   Generic event analytics for Apteva apps. Other apps call
   analytics_track to record typed events; analytics_query / count /
@@ -30,7 +30,8 @@ description: |
   website can send page views like a classic analytics snippet. v0.6 adds
   opt-in bus auto-capture: analytics subscribes to the platform's all-apps
   event firehose and records what apps already emit — so no app needs a
-  dependency on analytics. Toggle it in the panel's Capture tab.
+  dependency on analytics. Toggle it in the panel's Capture tab. v0.7 adds
+  saved dashboards with stat, timeseries, top, breakdown, and feed widgets.
 author: Apteva
 tags: [analytics, events, observability]
 scopes: [global]
@@ -132,6 +133,12 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		// Bus auto-capture config — operator-only.
 		{Method: "GET", Pattern: "/capture", Handler: a.handleCaptureGet},
 		{Method: "POST", Pattern: "/capture", Handler: a.handleCaptureSet},
+
+		// Saved dashboards and widget evaluation.
+		{Pattern: "/dashboards", Handler: a.handleDashboards},
+		{Pattern: "/dashboards/", Handler: a.handleDashboardItem},
+		{Pattern: "/widgets/", Handler: a.handleWidgetItem},
+		{Pattern: "/query-widget", Handler: a.handleWidgetQuery},
 	}
 }
 func (a *App) Channels() []sdk.ChannelFactory    { return nil }

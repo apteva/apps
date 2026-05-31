@@ -142,6 +142,23 @@ interface Dimensions {
   topics: string[];
 }
 
+interface DashboardWidget {
+  id: number;
+  dashboard_id?: number;
+  type: "stat" | "timeseries" | "top" | "breakdown" | "feed";
+  title: string;
+  position: number;
+  config: Record<string, unknown>;
+}
+
+interface Dashboard {
+  id: number;
+  project_id: string;
+  name: string;
+  description: string;
+  widgets?: DashboardWidget[];
+}
+
 const WINDOWS = [
   { key: "24h", label: "24h", ms: 24 * 3600e3 },
   { key: "7d", label: "7d", ms: 7 * 24 * 3600e3 },
@@ -720,8 +737,267 @@ function CaptureTab({ projectId }: { projectId: string }) {
   );
 }
 
+function widgetPreset(type: DashboardWidget["type"], position: number): Partial<DashboardWidget> {
+  switch (type) {
+    case "stat":
+      return {
+        type,
+        title: "Page Views",
+        position,
+        config: { topic: "page_view", window: "24h" },
+      };
+    case "timeseries":
+      return {
+        type,
+        title: "Live Page Views",
+        position,
+        config: { topic: "page_view", window: "30m", interval: "minute" },
+      };
+    case "top":
+      return {
+        type,
+        title: "Top Pages",
+        position,
+        config: { topic: "page_view", window: "24h", by: "props.path", limit: 8 },
+      };
+    case "breakdown":
+      return {
+        type,
+        title: "Devices",
+        position,
+        config: { topic: "page_view", window: "24h", by: "props.device", limit: 5 },
+      };
+    default:
+      return {
+        type: "feed",
+        title: "Live Activity",
+        position,
+        config: { topic: "page_view", window: "30m", limit: 20 },
+      };
+  }
+}
+
+function WidgetView({ widget, data }: { widget: DashboardWidget; data: any }) {
+  const body = !data ? (
+    <Empty label="Loading widget…" />
+  ) : widget.type === "stat" ? (
+    <div className="text-text font-semibold tabular-nums" style={{ fontSize: "34px", lineHeight: 1 }}>
+      {fmt(data.value ?? 0)}
+    </div>
+  ) : widget.type === "timeseries" ? (
+    <BarSeries data={(data.series ?? []).map((p: any) => ({ day: p.bucket, count: p.count }))} />
+  ) : widget.type === "feed" ? (
+    <EventFeed rows={data.events ?? []} />
+  ) : (
+    <TopBars rows={data.top ?? []} />
+  );
+  return (
+    <section className="border border-border rounded p-4 flex flex-col gap-3">
+      <div className="flex items-center gap-2">
+        <div className="text-text-dim text-xs uppercase truncate">{widget.title}</div>
+        <span className="ml-auto text-text-dim text-xs">{String(widget.config.window || "24h")}</span>
+      </div>
+      {body}
+    </section>
+  );
+}
+
+function DashboardsTab({ projectId }: { projectId: string }) {
+  const [dashboards, setDashboards] = useState<Dashboard[]>([]);
+  const [selectedId, setSelectedId] = useState(0);
+  const [selected, setSelected] = useState<Dashboard | null>(null);
+  const [widgetData, setWidgetData] = useState<Record<number, any>>({});
+  const [status, setStatus] = useState("");
+  const reloadTimer = useRef<number | null>(null);
+
+  const loadList = useCallback(async () => {
+    try {
+      const r = await fetch(`${API}/dashboards?project_id=${encodeURIComponent(projectId)}`, {
+        credentials: "same-origin",
+      });
+      if (!r.ok) {
+        setStatus(`dashboards ${r.status}`);
+        return;
+      }
+      const rows = (await r.json()).dashboards ?? [];
+      setDashboards(rows);
+      if (!selectedId && rows[0]) setSelectedId(rows[0].id);
+    } catch (e) {
+      setStatus((e as Error).message);
+    }
+  }, [projectId, selectedId]);
+
+  const loadDashboard = useCallback(async (id: number) => {
+    if (!id) {
+      setSelected(null);
+      return;
+    }
+    try {
+      const r = await fetch(`${API}/dashboards/${id}`, { credentials: "same-origin" });
+      if (!r.ok) {
+        setStatus(`dashboard ${r.status}`);
+        return;
+      }
+      const d = await r.json();
+      setSelected(d);
+    } catch (e) {
+      setStatus((e as Error).message);
+    }
+  }, []);
+
+  const refreshWidgets = useCallback(async (d: Dashboard | null) => {
+    if (!d?.widgets?.length) return;
+    setStatus("refreshing…");
+    try {
+      const pairs = await Promise.all(
+        d.widgets.map(async (widget) => {
+          const r = await fetch(`${API}/query-widget`, {
+            method: "POST",
+            credentials: "same-origin",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ project_id: projectId, widget }),
+          });
+          return [widget.id, r.ok ? await r.json() : { error: await r.text() }] as const;
+        }),
+      );
+      setWidgetData(Object.fromEntries(pairs));
+      setStatus("");
+    } catch (e) {
+      setStatus((e as Error).message);
+    }
+  }, [projectId]);
+
+  useEffect(() => {
+    loadList();
+  }, [loadList]);
+
+  useEffect(() => {
+    loadDashboard(selectedId);
+  }, [selectedId, loadDashboard]);
+
+  useEffect(() => {
+    refreshWidgets(selected);
+  }, [selected, refreshWidgets]);
+
+  useAppEvents("analytics", projectId, () => {
+    if (reloadTimer.current) window.clearTimeout(reloadTimer.current);
+    reloadTimer.current = window.setTimeout(() => refreshWidgets(selected), 1000);
+  });
+
+  const createTemplate = async () => {
+    setStatus("creating…");
+    const r = await fetch(`${API}/dashboards`, {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ project_id: projectId, template: "website_traffic" }),
+    });
+    if (r.ok) {
+      const d = await r.json();
+      setSelectedId(d.id);
+      setSelected(d);
+      await loadList();
+      setStatus("");
+    } else {
+      setStatus(await r.text());
+    }
+  };
+
+  const addWidget = async (type: DashboardWidget["type"]) => {
+    if (!selected) return;
+    const preset = widgetPreset(type, selected.widgets?.length ?? 0);
+    const r = await fetch(`${API}/dashboards/${selected.id}/widgets`, {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(preset),
+    });
+    if (r.ok) loadDashboard(selected.id);
+    else setStatus(await r.text());
+  };
+
+  return (
+    <div className="flex-1 min-h-0 flex">
+      <aside className="border-r border-border p-3 flex flex-col gap-2" style={{ width: "230px" }}>
+        <button
+          onClick={createTemplate}
+          className="px-3 py-1.5 text-sm bg-accent text-bg rounded font-bold"
+        >
+          Website Traffic
+        </button>
+        <div className="text-text-dim text-xs uppercase mt-2">Dashboards</div>
+        <div className="flex flex-col gap-1 overflow-auto">
+          {dashboards.map((d) => (
+            <button
+              key={d.id}
+              onClick={() => setSelectedId(d.id)}
+              className={
+                "text-left px-2 py-1.5 text-sm rounded border truncate " +
+                (selectedId === d.id
+                  ? "border-accent text-accent"
+                  : "border-border text-text-muted hover:text-text")
+              }
+            >
+              {d.name}
+            </button>
+          ))}
+        </div>
+      </aside>
+      <main className="flex-1 overflow-auto p-4 flex flex-col gap-4">
+        {!selected ? (
+          <section className="border border-border rounded p-6">
+            <div className="text-text font-medium">Create a live analytics dashboard</div>
+            <div className="text-text-muted text-sm mt-1">
+              Start with Website Traffic to visualize page views, active sessions, top pages,
+              devices, and live activity from the tracking tag.
+            </div>
+          </section>
+        ) : (
+          <>
+            <div className="flex items-center gap-2">
+              <div>
+                <div className="text-text font-medium">{selected.name}</div>
+                <div className="text-text-dim text-xs">
+                  {selected.widgets?.length ?? 0} widgets · live refresh
+                </div>
+              </div>
+              <button
+                onClick={() => refreshWidgets(selected)}
+                className="ml-auto px-3 py-1 text-sm border border-border rounded text-text-muted hover:text-text"
+              >
+                Refresh
+              </button>
+              <select
+                onChange={(e) => {
+                  if (e.target.value) addWidget(e.target.value as DashboardWidget["type"]);
+                  e.currentTarget.value = "";
+                }}
+                className="bg-bg-input border border-border rounded px-2 py-1 text-sm"
+                defaultValue=""
+              >
+                <option value="" disabled>Add widget</option>
+                <option value="stat">Stat</option>
+                <option value="timeseries">Timeseries</option>
+                <option value="top">Top values</option>
+                <option value="breakdown">Breakdown</option>
+                <option value="feed">Feed</option>
+              </select>
+            </div>
+            {status && <div className="text-text-dim text-xs">{status}</div>}
+            <div className="grid gap-4" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))" }}>
+              {(selected.widgets ?? []).map((widget) => (
+                <WidgetView key={widget.id} widget={widget} data={widgetData[widget.id]} />
+              ))}
+            </div>
+          </>
+        )}
+      </main>
+    </div>
+  );
+}
+
 export default function AnalyticsPanel({ projectId }: NativePanelProps) {
-  const [view, setView] = useState<"overview" | "tracking" | "capture">("overview");
+  const [view, setView] = useState<"overview" | "tracking" | "capture" | "dashboards">("overview");
   const [windowKey, setWindowKey] = useState("7d");
   const [byKey, setByKey] = useState("props.platform");
   const [appF, setAppF] = useState("");
@@ -857,7 +1133,7 @@ export default function AnalyticsPanel({ projectId }: NativePanelProps) {
           Analytics
         </div>
         <div className="flex items-center gap-1 ml-2">
-          {(["overview", "tracking", "capture"] as const).map((v) => (
+          {(["overview", "dashboards", "tracking", "capture"] as const).map((v) => (
             <button
               key={v}
               onClick={() => setView(v)}
@@ -868,7 +1144,13 @@ export default function AnalyticsPanel({ projectId }: NativePanelProps) {
                   : "border-border text-text-muted hover:text-text")
               }
             >
-              {v === "overview" ? "Overview" : v === "tracking" ? "Tracking" : "Capture"}
+              {v === "overview"
+                ? "Overview"
+                : v === "dashboards"
+                  ? "Dashboards"
+                  : v === "tracking"
+                    ? "Tracking"
+                    : "Capture"}
             </button>
           ))}
         </div>
@@ -912,6 +1194,8 @@ export default function AnalyticsPanel({ projectId }: NativePanelProps) {
         <TrackingTab projectId={projectId} />
       ) : view === "capture" ? (
         <CaptureTab projectId={projectId} />
+      ) : view === "dashboards" ? (
+        <DashboardsTab projectId={projectId} />
       ) : (
       <>
       <div className="flex items-center gap-2 flex-wrap border-b border-border px-4 py-2">
