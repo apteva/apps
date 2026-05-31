@@ -33,7 +33,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: crm
 display_name: CRM
-version: 0.8.10
+version: 0.8.11
 description: |
   Contacts store for Apteva agents and human teams. Multi-value channels,
   typed custom attributes with provenance, append-only activity log,
@@ -1965,7 +1965,13 @@ func dbUpdate(db *sql.DB, pid string, id int64, patch map[string]any, source str
 			return nil, err
 		}
 	}
-	return dbGetByID(db, pid, id)
+	c, err := dbGetByID(db, pid, id)
+	if err != nil || c == nil {
+		return c, err
+	}
+	_ = loadChannels(db, c)
+	_ = loadTags(db, c)
+	return c, nil
 }
 
 func applyChannelsPatch(db *sql.DB, pid string, contactID int64, raw any, source string) error {

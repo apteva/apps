@@ -5,6 +5,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -139,6 +140,35 @@ func TestUpdate_ReplacesChannelsAndMirrorsPrimary(t *testing.T) {
 	}
 	if len(got.Channels) != 1 || got.Channels[0].Kind != "email" {
 		t.Fatalf("channels after replace: %#v", got.Channels)
+	}
+}
+
+func TestHTTPUpdate_ReturnsChannelsAfterPatch(t *testing.T) {
+	ctx := newTestCtx(t)
+	globalCtx = ctx
+	app := &App{}
+	c := mustCreate(t, ctx, map[string]any{
+		"first_name": "Alice",
+		"channels":   []any{map[string]any{"kind": "email", "value": "alice@example.com", "is_primary": true}},
+	})
+	body := bytes.NewBufferString(`{"channels":[{"kind":"email","value":"alice@example.com","is_primary":true},{"kind":"phone","value":"+1 555 123 0000","is_primary":true}],"source":"human"}`)
+	r := httptest.NewRequest(http.MethodPatch, "/contacts/"+strconv.FormatInt(c.ID, 10)+"?project_id=test-proj", body)
+	w := httptest.NewRecorder()
+	app.handleHTTPUpdate(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	var out struct {
+		Contact Contact `json:"contact"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if len(out.Contact.Channels) != 2 {
+		t.Fatalf("response channels=%d, want 2: %#v", len(out.Contact.Channels), out.Contact.Channels)
+	}
+	if out.Contact.PrimaryPhone != "+15551230000" {
+		t.Fatalf("primary_phone=%q, want +15551230000", out.Contact.PrimaryPhone)
 	}
 }
 
