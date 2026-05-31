@@ -1,0 +1,65 @@
+package main
+
+import (
+	"testing"
+
+	sdk "github.com/apteva/app-sdk"
+)
+
+// TestManifestParses guards the embedded YAML against drift — if the
+// constant in main.go stops matching apteva.yaml's schema, this fails
+// before the sidecar boot does.
+func TestManifestParses(t *testing.T) {
+	m, err := sdk.ParseManifest([]byte(manifestYAML))
+	if err != nil {
+		t.Fatalf("parse embedded manifest: %v", err)
+	}
+	if m.Name != "community" {
+		t.Fatalf("name = %q", m.Name)
+	}
+	if m.Version == "" {
+		t.Fatal("version missing")
+	}
+	if m.Runtime.Kind != "source" {
+		t.Fatalf("runtime.kind = %q", m.Runtime.Kind)
+	}
+	if m.DB == nil || m.DB.Driver != "sqlite" {
+		t.Fatalf("db.driver missing")
+	}
+	if len(m.Provides.UIPanels) == 0 {
+		t.Fatal("expected at least one UI panel")
+	}
+	if m.Provides.UIPanels[0].Entry != "/ui/CommunityPanel.mjs" {
+		t.Fatalf("panel entry = %q", m.Provides.UIPanels[0].Entry)
+	}
+}
+
+// TestToolSetMatchesManifest catches forgetting to wire a manifest-
+// declared MCP tool into MCPTools(). The platform displays manifest
+// tools to operators; missing handlers manifest as "tool not found"
+// at MCP call time, which is too late.
+func TestToolSetMatchesManifest(t *testing.T) {
+	m, err := sdk.ParseManifest([]byte(manifestYAML))
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	declared := map[string]bool{}
+	for _, t := range m.Provides.MCPTools {
+		declared[t.Name] = true
+	}
+	app := &App{}
+	implemented := map[string]bool{}
+	for _, t := range app.MCPTools() {
+		implemented[t.Name] = true
+	}
+	for name := range declared {
+		if !implemented[name] {
+			t.Errorf("manifest declares %q but no handler is registered", name)
+		}
+	}
+	for name := range implemented {
+		if !declared[name] {
+			t.Errorf("handler %q registered but not declared in manifest", name)
+		}
+	}
+}

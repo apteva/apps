@@ -1,0 +1,132 @@
+schema: apteva-app/v1
+
+name: community
+display_name: Community
+version: 0.2.0
+description: |
+  Circle/Skool-shaped community platform. Multiple communities per install,
+  each with spaces (feed/forum/chat/course), member directory, posts +
+  reactions, in-app DMs, and courses (sections + lessons + progress).
+  Panel updates live via the platform event bus.
+  Storage and ffmpeg are optional: bind storage to attach lesson videos,
+  bind ffmpeg to auto-probe video duration.
+
+author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/community
+icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/community/icon.svg
+tags: [community, courses, membership, forum, dms]
+
+scopes: [project, global]
+min_apteva_version: "0.10.0"
+
+requires:
+  permissions:
+    - db.write.app
+    - platform.apps.call
+  integrations:
+    - role: storage
+      kind: app
+      compatible_app_names: [storage]
+      capabilities: [files.read, files.write]
+      required: false
+      hint: "Bind storage to attach lesson videos + post attachments. Files live under /.community/."
+    - role: ffmpeg
+      kind: app
+      compatible_app_names: [ffmpeg]
+      capabilities: [probe]
+      required: false
+      hint: "When bound, lessons_attach_video auto-fills duration_seconds via ffmpeg_probe."
+
+provides:
+  http_routes:
+    - prefix: /
+  mcp_tools:
+    # ─── communities ───────────────────────────────────────────
+    - { name: communities_create,  description: "Create a community." }
+    - { name: communities_list,    description: "List communities in this scope." }
+    - { name: communities_get,     description: "Fetch one community by id or slug." }
+    - { name: communities_update,  description: "Update a community's name or description." }
+    - { name: communities_archive, description: "Soft-delete a community (rows preserved, hidden from default lists)." }
+    # ─── members ───────────────────────────────────────────────
+    - { name: members_create,      description: "Create a member in a community." }
+    - { name: members_list,        description: "List members of a community." }
+    - { name: members_get,         description: "Fetch one member by id or handle." }
+    - { name: members_update,      description: "Update a member's display_name, bio, status, or contact_id." }
+    # ─── spaces ────────────────────────────────────────────────
+    - { name: spaces_create,       description: "Create a space (feed|forum|chat|course) in a community." }
+    - { name: spaces_list,         description: "List spaces in a community." }
+    - { name: spaces_update,       description: "Update a space's name, visibility, or sort_order." }
+    - { name: spaces_archive,      description: "Soft-delete a space." }
+    - { name: spaces_add_member,   description: "Add a member to a space." }
+    # ─── threads + posts ───────────────────────────────────────
+    - { name: threads_create,      description: "Open a new thread in a space." }
+    - { name: threads_list,        description: "List threads in a space." }
+    - { name: threads_pin,         description: "Pin or unpin a thread." }
+    - { name: threads_lock,        description: "Lock or unlock a thread (locked threads reject new posts)." }
+    - { name: posts_create,        description: "Post in a thread. Reply by passing reply_to_id." }
+    - { name: posts_list,          description: "List posts in a thread, oldest first." }
+    - { name: posts_edit,          description: "Edit a post's body. Author only." }
+    - { name: posts_react,         description: "Add a reaction to a post. Toggle off by re-sending the same emoji." }
+    - { name: posts_remove,        description: "Soft-delete a post." }
+    # ─── DMs ───────────────────────────────────────────────────
+    - { name: dms_open,            description: "Open (or fetch) a DM thread between two or more members." }
+    - { name: dms_send,            description: "Send a message in a DM thread." }
+    - { name: dms_list_threads,    description: "List DM threads a member participates in, with unread counts." }
+    - { name: dms_get_thread,      description: "Fetch a DM thread with its messages." }
+    - { name: dms_mark_read,       description: "Mark a member's read cursor in a DM thread up to now." }
+    - { name: dms_unread_count,    description: "Total unread DM messages for a member across all threads." }
+    # ─── courses ───────────────────────────────────────────────
+    - { name: courses_create,      description: "Create a course (sugar for spaces_create with kind=course)." }
+    - { name: sections_create,     description: "Create a section inside a course." }
+    - { name: sections_list,       description: "List sections of a course." }
+    - { name: sections_reorder,    description: "Reorder sections within a course." }
+    - { name: lessons_create,      description: "Create a lesson inside a section." }
+    - { name: lessons_update,      description: "Update a lesson's title or body." }
+    - { name: lessons_publish,     description: "Set or clear a lesson's published_at timestamp." }
+    - { name: lessons_reorder,     description: "Reorder lessons within a section." }
+    - { name: lessons_list,        description: "List lessons in a course (optionally including drafts + caller progress)." }
+    - { name: lessons_get,         description: "Fetch one lesson with full body + caller progress." }
+    - { name: lessons_attach_video, description: "Attach a storage file as the lesson's video. If ffmpeg is bound, duration_seconds is auto-filled from ffmpeg_probe." }
+    - { name: lessons_mark_complete, description: "Mark a lesson complete (or in_progress with last_position_seconds) for a member." }
+    - { name: lessons_progress,    description: "Get one member's progress across a course." }
+    - { name: course_progress,     description: "Funnel across all members: started / 50% / completed counts per lesson." }
+    - { name: lesson_comments_post, description: "Post a comment on a lesson." }
+    - { name: lesson_comments_list, description: "List comments on a lesson, oldest first." }
+  ui_panels:
+    - slot: project.page
+      label: Community
+      icon: users
+      entry: /ui/CommunityPanel.mjs
+
+runtime:
+  kind: source
+  source:
+    repo: github.com/apteva/apps
+    ref: main
+    entry: mcp/community
+  port: 8080
+  health_check: /health
+
+db:
+  driver: sqlite
+  path: /data/community.db
+  migrations: migrations/
+
+config_schema:
+  - name: default_community_slug
+    type: text
+    default: "main"
+    label: Default community slug
+    description: "Slug seeded on first boot so single-community installs don't have to pick one. Empty disables auto-seed."
+  - name: default_visibility
+    type: text
+    default: "members"
+    label: Default space visibility
+    description: "members | public — applied to newly created spaces when not specified."
+  - name: lesson_storage_folder
+    type: text
+    default: ".community/lessons"
+    label: Recommended storage folder for lesson videos
+    description: "Surfaced in lessons_attach_video's docstring so callers organise uploads consistently. Storage-app dotted-folder convention."
+
+upgrade_policy: auto-patch
