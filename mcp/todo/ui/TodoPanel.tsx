@@ -157,7 +157,7 @@ const PRIORITY_TONE: Record<number, string> = {
   4: "text-text-dim",
 };
 
-const SOFT_BORDER = "rgba(148, 163, 184, 0.16)";
+const SOFT_BORDER = "rgba(148, 163, 184, 0.10)";
 
 export default function TodoPanel({ projectId }: NativePanelProps) {
   const [view, setView] = useState<View>("today");
@@ -745,15 +745,13 @@ function CalendarView({
   }, [calendarTodos]);
 
   const gridDays = useMemo(() => monthGrid(month), [month]);
-  const monthDays = useMemo(() => daysInMonth(month), [month]);
+  const heatMonths = useMemo(
+    () => [0, 1, 2].map((offset) => addMonths(month, offset)),
+    [month],
+  );
   const selectedTodos = buckets.get(selectedDay) || [];
   const selectedListGroups = groupTodosByList(selectedTodos, listByID);
   const monthLabel = month.toLocaleDateString(undefined, { month: "long", year: "numeric" });
-  const hotDays = monthDays
-    .map((day) => ({ day, key: dateKey(day), count: buckets.get(dateKey(day))?.length || 0 }))
-    .filter((day) => day.count > 0)
-    .sort((a, b) => b.count - a.count || a.day.getTime() - b.day.getTime())
-    .slice(0, 8);
 
   const changeMonth = (delta: number) => {
     const next = new Date(month);
@@ -847,58 +845,58 @@ function CalendarView({
       </div>
 
       {activeTab === "heatmap" && (
-        <div className="grid gap-3 lg:grid-cols-[minmax(0,1fr)_18rem]">
-          <div className="rounded bg-bg-input/30 p-3" style={{ border: `1px solid ${SOFT_BORDER}` }}>
-            <div className="mb-2 flex items-center justify-between gap-3 text-[10px] uppercase text-text-dim">
-              <span>Month load</span>
-              <span>{calendarTodos.length} scheduled</span>
-            </div>
-            <div
-              className="grid gap-1"
-              style={{ gridTemplateColumns: `repeat(${monthDays.length}, minmax(0, 1fr))` }}
-            >
-              {monthDays.map((day) => {
-                const key = dateKey(day);
-                const count = buckets.get(key)?.length || 0;
-                return (
-                  <button
-                    key={key}
-                    type="button"
-                    onClick={() => pickDay(key)}
-                    className={`h-10 rounded-sm text-[10px] font-medium ${heatClass(count)} ${
-                      selectedDay === key ? "ring-1 ring-accent" : ""
-                    }`}
-                    title={`${formatShortDate(day)}: ${count} task${count === 1 ? "" : "s"}`}
-                  >
-                    <span className="block text-[9px] text-text-dim">{day.getDate()}</span>
-                    {count > 0 ? count : ""}
-                  </button>
-                );
-              })}
-            </div>
-          </div>
-          <div className="rounded bg-bg-input/20 p-3" style={{ border: `1px solid ${SOFT_BORDER}` }}>
-            <div className="mb-2 text-[10px] uppercase text-text-dim">Hot days</div>
-            {hotDays.length === 0 ? (
-              <div className="py-6 text-center text-sm text-text-muted">No scheduled tasks.</div>
-            ) : (
-              <div className="flex flex-col gap-1.5">
-                {hotDays.map((day) => (
-                  <button
-                    key={day.key}
-                    type="button"
-                    onClick={() => pickDay(day.key)}
-                    className="flex items-center justify-between rounded px-2 py-1.5 text-left hover:bg-bg-card"
-                  >
-                    <span className="text-sm text-text">{formatShortDate(day.day)}</span>
-                    <span className={`rounded px-2 py-0.5 text-xs ${heatBadgeClass(day.count)}`}>
-                      {day.count} {heatLabel(day.count)}
-                    </span>
-                  </button>
-                ))}
+        <div className="grid gap-4 xl:grid-cols-3 lg:grid-cols-2">
+          {heatMonths.map((heatMonth) => {
+            const heatMonthDays = miniMonthGrid(heatMonth);
+            const scheduled = daysInMonth(heatMonth)
+              .reduce((sum, day) => sum + (buckets.get(dateKey(day))?.length || 0), 0);
+            return (
+              <div
+                key={dateKey(heatMonth)}
+                className="rounded bg-bg-input/20 p-4"
+                style={{ border: `1px solid ${SOFT_BORDER}` }}
+              >
+                <div className="mb-4 flex items-baseline justify-between gap-3">
+                  <div className="text-lg font-medium text-text">
+                    {heatMonth.toLocaleDateString(undefined, { month: "long" })}
+                  </div>
+                  <div className="text-xs text-text-dim">{scheduled} tasks</div>
+                </div>
+                <div
+                  className="grid gap-x-2 gap-y-2"
+                  style={{ gridTemplateColumns: "repeat(7, minmax(0, 1fr))" }}
+                >
+                  {["M", "T", "W", "T", "F", "S", "S"].map((label, index) => (
+                    <div key={`${label}-${index}`} className="pb-1 text-center text-[11px] font-medium text-text-dim">
+                      {label}
+                    </div>
+                  ))}
+                  {heatMonthDays.map((day) => {
+                    const key = dateKey(day);
+                    const count = buckets.get(key)?.length || 0;
+                    const inMonth = day.getMonth() === heatMonth.getMonth();
+                    return (
+                      <button
+                        key={key}
+                        type="button"
+                        onClick={() => pickDay(key)}
+                        className={`relative h-9 rounded text-center text-sm font-medium transition hover:bg-bg-card ${
+                          selectedDay === key ? "ring-1 ring-accent" : ""
+                        } ${inMonth ? "text-text" : "text-text-dim opacity-35"}`}
+                        style={heatCellStyle(count)}
+                        title={`${formatShortDate(day)}: ${count} task${count === 1 ? "" : "s"}`}
+                      >
+                        <span>{day.getDate()}</span>
+                        {count > 0 && (
+                          <span className="absolute bottom-0.5 right-1 text-[9px] opacity-80">{count}</span>
+                        )}
+                      </button>
+                    );
+                  })}
+                </div>
               </div>
-            )}
-          </div>
+            );
+          })}
         </div>
       )}
 
@@ -1053,6 +1051,10 @@ function startOfMonth(d: Date): Date {
   return new Date(d.getFullYear(), d.getMonth(), 1);
 }
 
+function addMonths(d: Date, count: number): Date {
+  return new Date(d.getFullYear(), d.getMonth() + count, 1);
+}
+
 function parseDateKey(key: string): Date {
   const [year, month, day] = key.split("-").map(Number);
   return new Date(year, month - 1, day);
@@ -1079,6 +1081,20 @@ function monthGrid(month: Date): Date[] {
   return out;
 }
 
+function miniMonthGrid(month: Date): Date[] {
+  const first = startOfMonth(month);
+  const start = new Date(first);
+  const mondayIndex = (first.getDay() + 6) % 7;
+  start.setDate(first.getDate() - mondayIndex);
+  const out: Date[] = [];
+  for (let i = 0; i < 42; i++) {
+    const day = new Date(start);
+    day.setDate(start.getDate() + i);
+    out.push(day);
+  }
+  return out;
+}
+
 function daysInMonth(month: Date): Date[] {
   const out: Date[] = [];
   const lastDay = new Date(month.getFullYear(), month.getMonth() + 1, 0).getDate();
@@ -1088,12 +1104,20 @@ function daysInMonth(month: Date): Date[] {
   return out;
 }
 
-function heatClass(count: number): string {
-  if (count === 0) return "border-border bg-bg-input text-text-dim";
-  if (count <= 3) return "border-info/30 bg-info/10 text-info";
-  if (count <= 7) return "border-success/30 bg-success/15 text-success";
-  if (count <= 12) return "border-warn/40 bg-warn/20 text-warn";
-  return "border-error/50 bg-error/25 text-error";
+function heatCellStyle(count: number): React.CSSProperties {
+  if (count === 0) {
+    return { background: "transparent", boxShadow: `inset 0 0 0 1px ${SOFT_BORDER}` };
+  }
+  if (count <= 3) {
+    return { background: "rgba(59, 130, 246, 0.16)", color: "#bfdbfe" };
+  }
+  if (count <= 7) {
+    return { background: "rgba(34, 197, 94, 0.18)", color: "#bbf7d0" };
+  }
+  if (count <= 12) {
+    return { background: "rgba(245, 158, 11, 0.22)", color: "#fde68a" };
+  }
+  return { background: "rgba(239, 68, 68, 0.26)", color: "#fecaca" };
 }
 
 function heatBadgeClass(count: number): string {
