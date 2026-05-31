@@ -138,6 +138,7 @@ interface WorkSummary {
 }
 
 type View = "inbox" | "today" | "upcoming" | "overdue" | "all" | "done";
+type PanelMode = "tasks" | "calendar";
 
 const VIEWS: { key: View; label: string }[] = [
   { key: "inbox",    label: "Inbox" },
@@ -157,13 +158,21 @@ const PRIORITY_TONE: Record<number, string> = {
 
 export default function TodoPanel({ projectId }: NativePanelProps) {
   const [view, setView] = useState<View>("today");
+  const [mode, setMode] = useState<PanelMode>("tasks");
   const [pickedList, setPickedList] = useState<number | null>(null);
   const [pickedTag, setPickedTag] = useState<string | null>(null);
   const [todos, setTodos] = useState<Todo[]>([]);
+  const [allOpenTodos, setAllOpenTodos] = useState<Todo[]>([]);
+  const [doneTodos, setDoneTodos] = useState<Todo[]>([]);
   const [lists, setLists] = useState<List[]>([]);
   const [groups, setGroups] = useState<ListGroup[]>([]);
   const [tags, setTags] = useState<Tag[]>([]);
   const [summary, setSummary] = useState<WorkSummary>({ overdue: 0, today: 0, future: 0 });
+  const [calendarMonth, setCalendarMonth] = useState(() => dateKey(startOfMonth(new Date())));
+  const [calendarSelectedDay, setCalendarSelectedDay] = useState(() => dateKey(new Date()));
+  const [calendarGroup, setCalendarGroup] = useState<number | "all">("all");
+  const [calendarList, setCalendarList] = useState<number | "all">("all");
+  const [calendarIncludeDone, setCalendarIncludeDone] = useState(false);
   const [quick, setQuick] = useState("");
   const [statusMsg, setStatusMsg] = useState("");
   const [editing, setEditing] = useState<Todo | null>(null);
@@ -218,16 +227,27 @@ export default function TodoPanel({ projectId }: NativePanelProps) {
       const res = await fetch(`${API}/todos?view=all`, { credentials: "same-origin" });
       if (!res.ok) return;
       const data: Todo[] = await res.json();
-      setSummary(summarizeWork(data || []));
+      const items = data || [];
+      setAllOpenTodos(items);
+      setSummary(summarizeWork(items));
+    } catch {}
+  }, []);
+
+  const loadDoneTodos = useCallback(async () => {
+    try {
+      const res = await fetch(`${API}/todos?view=done`, { credentials: "same-origin" });
+      if (res.ok) setDoneTodos(await res.json() || []);
     } catch {}
   }, []);
 
   useEffect(() => { loadTodos(); }, [loadTodos]);
   useEffect(() => { loadLists(); loadGroups(); loadTags(); loadSummary(); }, [loadLists, loadGroups, loadTags, loadSummary]);
+  useEffect(() => { if (calendarIncludeDone) loadDoneTodos(); }, [calendarIncludeDone, loadDoneTodos]);
 
   const refreshAll = useCallback(() => {
     loadTodos(); loadLists(); loadGroups(); loadTags(); loadSummary();
-  }, [loadTodos, loadLists, loadGroups, loadTags, loadSummary]);
+    if (calendarIncludeDone) loadDoneTodos();
+  }, [loadTodos, loadLists, loadGroups, loadTags, loadSummary, loadDoneTodos, calendarIncludeDone]);
 
   useAppEvents("todo", projectId, (ev) => {
     switch (ev.topic) {
@@ -351,6 +371,7 @@ export default function TodoPanel({ projectId }: NativePanelProps) {
     setCollapsedGroups((s) => ({ ...s, [id]: !s[id] }));
 
   const headerLabel = useMemo(() => {
+    if (mode === "calendar") return "Calendar";
     const parts: string[] = [];
     if (pickedList) {
       const l = lists.find((x) => x.id === pickedList);
@@ -361,7 +382,7 @@ export default function TodoPanel({ projectId }: NativePanelProps) {
     }
     if (pickedTag) parts.push(`@${pickedTag}`);
     return parts.join(" · ") || "Today";
-  }, [view, pickedList, pickedTag, lists]);
+  }, [mode, view, pickedList, pickedTag, lists]);
 
   return (
     <div className="h-full flex w-full overflow-hidden">
@@ -369,9 +390,9 @@ export default function TodoPanel({ projectId }: NativePanelProps) {
         {VIEWS.map((v) => (
           <button
             key={v.key}
-            onClick={() => { setView(v.key); setPickedList(null); }}
+            onClick={() => { setMode("tasks"); setView(v.key); setPickedList(null); }}
             className={`text-left px-2 py-1 rounded ${
-              view === v.key && !pickedList
+              mode === "tasks" && view === v.key && !pickedList
                 ? "bg-bg-card text-text"
                 : "text-text-muted hover:text-text"
             }`}
@@ -379,6 +400,16 @@ export default function TodoPanel({ projectId }: NativePanelProps) {
             {v.label}
           </button>
         ))}
+        <button
+          onClick={() => { setMode("calendar"); setPickedList(null); }}
+          className={`text-left px-2 py-1 rounded ${
+            mode === "calendar"
+              ? "bg-bg-card text-text"
+              : "text-text-muted hover:text-text"
+          }`}
+        >
+          Calendar
+        </button>
 
         <div className="flex items-center justify-between px-2 mt-3 mb-1">
           <span className="text-xs uppercase text-text-dim">Lists</span>
@@ -418,8 +449,8 @@ export default function TodoPanel({ projectId }: NativePanelProps) {
             key={l.id}
             list={l}
             groups={groups}
-            active={pickedList === l.id}
-            onClick={() => { setPickedList(l.id); setView("today"); }}
+            active={mode === "tasks" && pickedList === l.id}
+            onClick={() => { setMode("tasks"); setPickedList(l.id); setView("today"); }}
             onUpdate={(fields) => updateList(l.id, fields)}
             onDelete={() => deleteList(l.id)}
           />
@@ -445,8 +476,8 @@ export default function TodoPanel({ projectId }: NativePanelProps) {
                   list={l}
                   groups={groups}
                   nested
-                  active={pickedList === l.id}
-                  onClick={() => { setPickedList(l.id); setView("today"); }}
+                  active={mode === "tasks" && pickedList === l.id}
+                  onClick={() => { setMode("tasks"); setPickedList(l.id); setView("today"); }}
                   onUpdate={(fields) => updateList(l.id, fields)}
                   onDelete={() => deleteList(l.id)}
                 />
@@ -490,8 +521,8 @@ export default function TodoPanel({ projectId }: NativePanelProps) {
           )}
           <SummaryPills
             summary={summary}
-            activeView={view}
-            onSelect={(next) => { setView(next); setPickedList(null); }}
+            activeView={mode === "tasks" ? view : undefined}
+            onSelect={(next) => { setMode("tasks"); setView(next); setPickedList(null); }}
           />
           <span className="ml-auto text-text-dim text-xs">{statusMsg}</span>
         </header>
@@ -515,7 +546,31 @@ export default function TodoPanel({ projectId }: NativePanelProps) {
         </form>
 
         <div className="flex-1 overflow-y-auto overflow-x-hidden px-2 py-2">
-          {todos.length === 0 ? (
+          {mode === "calendar" ? (
+            <CalendarView
+              openTodos={allOpenTodos}
+              doneTodos={doneTodos}
+              lists={lists}
+              groups={groups}
+              month={parseDateKey(calendarMonth)}
+              selectedDay={calendarSelectedDay}
+              groupFilter={calendarGroup}
+              listFilter={calendarList}
+              includeDone={calendarIncludeDone}
+              onMonthChange={(next) => {
+                setCalendarMonth(dateKey(startOfMonth(next)));
+                setCalendarSelectedDay(dateKey(next));
+              }}
+              onSelectedDayChange={setCalendarSelectedDay}
+              onGroupFilterChange={(next) => {
+                setCalendarGroup(next);
+                setCalendarList("all");
+              }}
+              onListFilterChange={setCalendarList}
+              onIncludeDoneChange={setCalendarIncludeDone}
+              onEditTodo={setEditing}
+            />
+          ) : todos.length === 0 ? (
             <div className="py-12 text-center text-text-muted text-sm">
               Nothing here.
             </div>
@@ -575,7 +630,7 @@ function SummaryPills({
   summary, activeView, onSelect,
 }: {
   summary: WorkSummary;
-  activeView: View;
+  activeView?: View;
   onSelect: (view: View) => void;
 }) {
   const items: { key: View; label: string; value: number; tone: string }[] = [
@@ -602,6 +657,374 @@ function SummaryPills({
       ))}
     </div>
   );
+}
+
+function CalendarView({
+  openTodos,
+  doneTodos,
+  lists,
+  groups,
+  month,
+  selectedDay,
+  groupFilter,
+  listFilter,
+  includeDone,
+  onMonthChange,
+  onSelectedDayChange,
+  onGroupFilterChange,
+  onListFilterChange,
+  onIncludeDoneChange,
+  onEditTodo,
+}: {
+  openTodos: Todo[];
+  doneTodos: Todo[];
+  lists: List[];
+  groups: ListGroup[];
+  month: Date;
+  selectedDay: string;
+  groupFilter: number | "all";
+  listFilter: number | "all";
+  includeDone: boolean;
+  onMonthChange: (month: Date) => void;
+  onSelectedDayChange: (day: string) => void;
+  onGroupFilterChange: (group: number | "all") => void;
+  onListFilterChange: (list: number | "all") => void;
+  onIncludeDoneChange: (include: boolean) => void;
+  onEditTodo: (todo: Todo) => void;
+}) {
+  const listByID = useMemo(() => new Map(lists.map((l) => [l.id, l])), [lists]);
+  const activeGroups = useMemo(
+    () => groups.filter((g) => !g.archived),
+    [groups],
+  );
+  const activeLists = useMemo(
+    () => lists.filter((l) => !l.archived),
+    [lists],
+  );
+  const filteredLists = useMemo(() => {
+    if (groupFilter === "all") return activeLists;
+    return activeLists.filter((l) => l.group_id === groupFilter);
+  }, [activeLists, groupFilter]);
+
+  const calendarTodos = useMemo(() => {
+    const source = includeDone ? [...openTodos, ...doneTodos] : openTodos;
+    return source
+      .filter((t) => {
+        if (!t.due_at) return false;
+        if (listFilter !== "all") return t.list_id === listFilter;
+        if (groupFilter !== "all") {
+          const list = t.list_id ? listByID.get(t.list_id) : undefined;
+          return list?.group_id === groupFilter;
+        }
+        return true;
+      })
+      .sort(compareTodosByDue);
+  }, [doneTodos, groupFilter, includeDone, listByID, listFilter, openTodos]);
+
+  const buckets = useMemo(() => {
+    const out = new Map<string, Todo[]>();
+    for (const todo of calendarTodos) {
+      const due = todo.due_at ? new Date(todo.due_at) : null;
+      if (!due || Number.isNaN(due.getTime())) continue;
+      const key = dateKey(due);
+      const existing = out.get(key);
+      if (existing) existing.push(todo);
+      else out.set(key, [todo]);
+    }
+    return out;
+  }, [calendarTodos]);
+
+  const gridDays = useMemo(() => monthGrid(month), [month]);
+  const monthDays = useMemo(() => daysInMonth(month), [month]);
+  const selectedTodos = buckets.get(selectedDay) || [];
+  const selectedListGroups = groupTodosByList(selectedTodos, listByID);
+  const monthLabel = month.toLocaleDateString(undefined, { month: "long", year: "numeric" });
+
+  const changeMonth = (delta: number) => {
+    const next = new Date(month);
+    next.setMonth(next.getMonth() + delta);
+    onMonthChange(next);
+  };
+
+  return (
+    <section className="flex flex-col gap-3 p-2">
+      <div className="flex flex-wrap items-center gap-2">
+        <button
+          type="button"
+          onClick={() => changeMonth(-1)}
+          className="h-8 w-8 border border-border rounded text-text-muted hover:text-text hover:bg-bg-card"
+          title="Previous month"
+        >
+          ‹
+        </button>
+        <button
+          type="button"
+          onClick={() => onMonthChange(new Date())}
+          className="h-8 px-3 border border-border rounded text-sm text-text-muted hover:text-text hover:bg-bg-card"
+        >
+          Today
+        </button>
+        <button
+          type="button"
+          onClick={() => changeMonth(1)}
+          className="h-8 w-8 border border-border rounded text-text-muted hover:text-text hover:bg-bg-card"
+          title="Next month"
+        >
+          ›
+        </button>
+        <div className="text-text font-medium min-w-[9rem]">{monthLabel}</div>
+        <select
+          value={groupFilter}
+          onChange={(e) => onGroupFilterChange(e.target.value === "all" ? "all" : Number(e.target.value))}
+          className="h-8 bg-bg-input border border-border rounded px-2 text-sm text-text"
+          title="Filter by group"
+        >
+          <option value="all">All groups</option>
+          {activeGroups.map((g) => (
+            <option key={g.id} value={g.id}>{g.name}</option>
+          ))}
+        </select>
+        <select
+          value={listFilter}
+          onChange={(e) => onListFilterChange(e.target.value === "all" ? "all" : Number(e.target.value))}
+          className="h-8 bg-bg-input border border-border rounded px-2 text-sm text-text"
+          title="Filter by list"
+        >
+          <option value="all">All lists</option>
+          {filteredLists.map((l) => (
+            <option key={l.id} value={l.id}>{l.name}</option>
+          ))}
+        </select>
+        <label className="ml-auto h-8 flex items-center gap-2 text-sm text-text-muted">
+          <input
+            type="checkbox"
+            checked={includeDone}
+            onChange={(e) => onIncludeDoneChange(e.target.checked)}
+          />
+          Done
+        </label>
+      </div>
+
+      <div className="flex items-end gap-1 overflow-x-auto py-1">
+        {monthDays.map((day) => {
+          const key = dateKey(day);
+          const count = buckets.get(key)?.length || 0;
+          return (
+            <button
+              key={key}
+              type="button"
+              onClick={() => onSelectedDayChange(key)}
+              className={`h-8 min-w-7 rounded border text-[10px] ${heatClass(count)} ${
+                selectedDay === key ? "ring-1 ring-accent" : ""
+              }`}
+              title={`${formatShortDate(day)}: ${count} task${count === 1 ? "" : "s"}`}
+            >
+              {day.getDate()}
+            </button>
+          );
+        })}
+      </div>
+
+      <div className="grid grid-cols-7 border-t border-l border-border">
+        {["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"].map((label) => (
+          <div key={label} className="border-r border-b border-border px-2 py-1 text-[10px] uppercase text-text-dim">
+            {label}
+          </div>
+        ))}
+        {gridDays.map((day) => {
+          const key = dateKey(day);
+          const items = buckets.get(key) || [];
+          const inMonth = day.getMonth() === month.getMonth();
+          const uniqueLists = new Set(items.map((t) => t.list_id).filter(Boolean)).size;
+          return (
+            <button
+              key={key}
+              type="button"
+              onClick={() => onSelectedDayChange(key)}
+              className={`min-h-[8rem] border-r border-b border-border p-2 text-left align-top hover:bg-bg-card/60 ${
+                selectedDay === key ? "bg-bg-card" : ""
+              } ${inMonth ? "" : "opacity-45"}`}
+            >
+              <div className="flex items-start justify-between gap-2">
+                <span className="text-xs text-text">{day.getDate()}</span>
+                {items.length > 0 && (
+                  <span className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${heatBadgeClass(items.length)}`}>
+                    {items.length}
+                  </span>
+                )}
+              </div>
+              {uniqueLists > 1 && (
+                <div className="mt-1 text-[10px] text-text-dim">{uniqueLists} lists</div>
+              )}
+              <div className="mt-2 flex flex-col gap-1">
+                {items.slice(0, 4).map((todo) => {
+                  const list = todo.list_id ? listByID.get(todo.list_id) : undefined;
+                  return (
+                    <div key={todo.id} className="flex items-center gap-1 min-w-0 text-[11px] text-text-muted">
+                      <span
+                        className="h-1.5 w-1.5 rounded-full shrink-0"
+                        style={{ background: list?.color || "#6b7280" }}
+                      />
+                      <span className={todo.status === "done" ? "truncate line-through" : "truncate"}>
+                        {todo.title}
+                      </span>
+                    </div>
+                  );
+                })}
+                {items.length > 4 && (
+                  <div className="text-[10px] text-text-dim">+{items.length - 4} more</div>
+                )}
+              </div>
+            </button>
+          );
+        })}
+      </div>
+
+      <div className="border border-border rounded bg-bg-card/30">
+        <div className="flex items-center justify-between border-b border-border px-3 py-2">
+          <div>
+            <div className="text-sm font-medium text-text">{formatLongDate(parseDateKey(selectedDay))}</div>
+            <div className="text-xs text-text-dim">{selectedTodos.length} task{selectedTodos.length === 1 ? "" : "s"}</div>
+          </div>
+          <div className={`rounded px-2 py-1 text-xs ${heatBadgeClass(selectedTodos.length)}`}>
+            {heatLabel(selectedTodos.length)}
+          </div>
+        </div>
+        {selectedTodos.length === 0 ? (
+          <div className="px-3 py-6 text-center text-sm text-text-muted">No scheduled tasks.</div>
+        ) : (
+          <div className="flex flex-col divide-y divide-border/60">
+            {selectedListGroups.map(({ list, todos: dayTodos }) => (
+              <div key={list?.id ?? "inbox"} className="px-3 py-2">
+                <div className="mb-1 flex items-center gap-2 text-xs uppercase text-text-dim">
+                  <span
+                    className="h-2 w-2 rounded-full"
+                    style={{ background: list?.color || "#6b7280" }}
+                  />
+                  {list?.name || "Inbox"}
+                  <span className="normal-case">{dayTodos.length}</span>
+                </div>
+                <div className="flex flex-col">
+                  {dayTodos.map((todo) => (
+                    <button
+                      key={todo.id}
+                      type="button"
+                      onClick={() => onEditTodo(todo)}
+                      className="flex items-center gap-2 rounded px-2 py-1 text-left text-sm hover:bg-bg-card"
+                    >
+                      <span className="w-11 shrink-0 text-xs text-text-dim">{formatTime(todo.due_at)}</span>
+                      <span className={`min-w-0 flex-1 truncate text-text ${todo.status === "done" ? "line-through text-text-dim" : ""}`}>
+                        {todo.title}
+                      </span>
+                      {todo.priority < 4 && (
+                        <span className={`shrink-0 text-xs ${PRIORITY_TONE[todo.priority]}`}>P{todo.priority}</span>
+                      )}
+                    </button>
+                  ))}
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </section>
+  );
+}
+
+function compareTodosByDue(a: Todo, b: Todo): number {
+  const ad = a.due_at ? new Date(a.due_at).getTime() : Number.MAX_SAFE_INTEGER;
+  const bd = b.due_at ? new Date(b.due_at).getTime() : Number.MAX_SAFE_INTEGER;
+  if (ad !== bd) return ad - bd;
+  return a.id - b.id;
+}
+
+function groupTodosByList(todos: Todo[], listByID: Map<number, List>) {
+  const grouped = new Map<number | "inbox", { list?: List; todos: Todo[] }>();
+  for (const todo of todos) {
+    const key = todo.list_id ?? "inbox";
+    const existing = grouped.get(key);
+    if (existing) existing.todos.push(todo);
+    else grouped.set(key, { list: todo.list_id ? listByID.get(todo.list_id) : undefined, todos: [todo] });
+  }
+  return Array.from(grouped.values());
+}
+
+function startOfMonth(d: Date): Date {
+  return new Date(d.getFullYear(), d.getMonth(), 1);
+}
+
+function parseDateKey(key: string): Date {
+  const [year, month, day] = key.split("-").map(Number);
+  return new Date(year, month - 1, day);
+}
+
+function dateKey(d: Date): string {
+  const year = d.getFullYear();
+  const month = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
+function monthGrid(month: Date): Date[] {
+  const first = startOfMonth(month);
+  const start = new Date(first);
+  start.setDate(first.getDate() - first.getDay());
+  const last = new Date(month.getFullYear(), month.getMonth() + 1, 0);
+  const end = new Date(last);
+  end.setDate(last.getDate() + (6 - last.getDay()));
+  const out: Date[] = [];
+  for (const d = new Date(start); d <= end; d.setDate(d.getDate() + 1)) {
+    out.push(new Date(d));
+  }
+  return out;
+}
+
+function daysInMonth(month: Date): Date[] {
+  const out: Date[] = [];
+  const lastDay = new Date(month.getFullYear(), month.getMonth() + 1, 0).getDate();
+  for (let day = 1; day <= lastDay; day++) {
+    out.push(new Date(month.getFullYear(), month.getMonth(), day));
+  }
+  return out;
+}
+
+function heatClass(count: number): string {
+  if (count === 0) return "border-border bg-bg-input text-text-dim";
+  if (count <= 3) return "border-info/30 bg-info/10 text-info";
+  if (count <= 7) return "border-success/30 bg-success/15 text-success";
+  if (count <= 12) return "border-warn/40 bg-warn/20 text-warn";
+  return "border-error/50 bg-error/25 text-error";
+}
+
+function heatBadgeClass(count: number): string {
+  if (count === 0) return "bg-bg-input text-text-dim";
+  if (count <= 3) return "bg-info/10 text-info";
+  if (count <= 7) return "bg-success/15 text-success";
+  if (count <= 12) return "bg-warn/20 text-warn";
+  return "bg-error/25 text-error";
+}
+
+function heatLabel(count: number): string {
+  if (count === 0) return "Empty";
+  if (count <= 3) return "Light";
+  if (count <= 7) return "Medium";
+  if (count <= 12) return "Heavy";
+  return "Hot";
+}
+
+function formatShortDate(d: Date): string {
+  return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}
+
+function formatLongDate(d: Date): string {
+  return d.toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric" });
+}
+
+function formatTime(dueAt?: string): string {
+  if (!dueAt) return "";
+  const d = new Date(dueAt);
+  if (Number.isNaN(d.getTime())) return "";
+  return `${d.getHours().toString().padStart(2, "0")}:${d.getMinutes().toString().padStart(2, "0")}`;
 }
 
 function TodoRow({
