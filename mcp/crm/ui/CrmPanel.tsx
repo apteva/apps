@@ -383,6 +383,8 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
   const [status, setStatus] = useState("");
   const [edits, setEdits] = useState<Partial<Contact>>({});
   const [composer, setComposer] = useState<ComposerState | null>(null);
+  const [composerContact, setComposerContact] = useState<Contact | null>(null);
+  const composerAfterSendRef = useRef<(() => void | Promise<void>) | null>(null);
   const [verifiedSenders, setVerifiedSenders] = useState<SenderOption[]>([]);
   const [messagingTemplates, setMessagingTemplates] = useState<TemplateOption[]>([]);
   const [errorToast, setErrorToast] = useState<string | null>(null);
@@ -825,10 +827,17 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
   // Composer wiring. New send opens with no pre-filled subject; reply
   // pre-fills "Re: <subject>" and pins the conversation_id so the
   // outbound stays in-thread.
-  const openCompose = (preset: Partial<ComposerState> = {}) => {
-    if (!detail) return;
-    const channel = preset.channel || preferredChannel(detail, verifiedSenders) || "email";
+  const openCompose = (
+    preset: Partial<ComposerState> = {},
+    targetContact?: Contact | null,
+    afterSend?: () => void | Promise<void>,
+  ) => {
+    const target = targetContact || detail;
+    if (!target) return;
+    const channel = preset.channel || preferredChannel(target, verifiedSenders) || "email";
     const defaultForChannel = preferredSenderForChannel(verifiedSenders, channel);
+    setComposerContact(target);
+    composerAfterSendRef.current = afterSend || null;
     setComposer({
       mode: preset.mode || "new",
       channel,
@@ -846,8 +855,8 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
   };
 
   useEffect(() => {
-    if (!composer || !detail || composer.channel !== "whatsapp") return;
-    const to = addressForChannel(detail, "whatsapp");
+    if (!composer || !composerContact || composer.channel !== "whatsapp") return;
+    const to = addressForChannel(composerContact, "whatsapp");
     const from = composer.from;
     if (!from || !to || to.startsWith("(no ")) {
       setComposer((prev) => prev ? { ...prev, whatsAppSession: { state: "idle" } } : prev);
@@ -869,9 +878,9 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
           ...prev,
           whatsAppSession: { state: "error", error: (e as Error).message },
         } : prev);
-      });
+    });
     return () => { cancelled = true; };
-  }, [api, composer?.channel, composer?.from, detail?.id, detail?.primary_phone]);
+  }, [api, composer?.channel, composer?.from, composerContact?.id, composerContact?.primary_phone]);
 
   useEffect(() => {
     if (!composer || composer.from) return;
@@ -910,10 +919,11 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
   );
 
   const handleSendFromComposer = async () => {
-    if (!composer || !detail) return;
+    const target = composerContact || detail;
+    if (!composer || !target) return;
     setComposer({ ...composer, busy: true, error: null });
     try {
-      const path = composer.mode === "reply" ? `/contacts/${detail.id}/reply` : `/contacts/${detail.id}/messages`;
+      const path = composer.mode === "reply" ? `/contacts/${target.id}/reply` : `/contacts/${target.id}/messages`;
       const useTemplate = composer.channel === "whatsapp" && whatsappSessionRequiresTemplate(composer.whatsAppSession);
       await api(
         "POST",
@@ -932,7 +942,14 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
         },
       );
       setComposer(null);
-      reloadActivities(detail.id);
+      setComposerContact(null);
+      const afterSend = composerAfterSendRef.current;
+      composerAfterSendRef.current = null;
+      if (afterSend) {
+        await afterSend();
+      } else if (detail && String(detail.id) === String(target.id)) {
+        reloadActivities(detail.id);
+      }
     } catch (e) {
       setComposer((prev) => prev ? { ...prev, busy: false, error: (e as Error).message } : prev);
     }
@@ -1231,8 +1248,16 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
         ) : tab === "inbox" ? (
           <InboxTab
             api={api}
+            projectId={projectId}
             lists={lists}
             onOpenContact={(id) => { setTab("contacts"); selectContact(String(id)); }}
+            onReply={(contact, activity, conversation, afterSend) => openCompose({
+              mode: "reply",
+              channel: channelOfKind(activity.kind) || conversation.channel || undefined,
+              conversationId: conversation.id,
+              subject: conversation.subject,
+              replyToActivityId: activity.id,
+            }, contact, afterSend)}
           />
         ) : tab === "lists" ? (
           <ListsTab
@@ -1266,13 +1291,17 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
         )}
       </div>
 
-      {composer && detail && (
+      {composer && composerContact && (
         <ComposerModal
           composer={composer}
-          contact={detail}
+          contact={composerContact}
           senders={verifiedSenders}
           templates={messagingTemplates}
-          onCancel={() => setComposer(null)}
+          onCancel={() => {
+            setComposer(null);
+            setComposerContact(null);
+            composerAfterSendRef.current = null;
+          }}
           onChange={(patch) => setComposer((prev) => prev ? { ...prev, ...patch } : prev)}
           onSend={handleSendFromComposer}
         />
@@ -2288,12 +2317,21 @@ function stripDomainPrefix(value: string): string {
   return value.trim().replace(/^@+/, "");
 }
 
-function InboxTab({ api, lists, onOpenContact }: {
+function InboxTab({ api, projectId, lists, onOpenContact, onReply }: {
   api: <T,>(method: string, path: string, body?: any, params?: Record<string, string>) => Promise<T>;
+  projectId: string;
   lists: List[];
   onOpenContact: (contactId: number) => void;
+  onReply: (contact: Contact, activity: Activity, conversation: Conversation, afterSend: () => void | Promise<void>) => void;
 }) {
   const [items, setItems] = useState<InboxItem[] | null>(null);
+  const [selected, setSelected] = useState<InboxItem | null>(null);
+  const [threadContact, setThreadContact] = useState<Contact | null>(null);
+  const [threadConversation, setThreadConversation] = useState<Conversation | null>(null);
+  const [threadActivities, setThreadActivities] = useState<Activity[]>([]);
+  const [threadLoading, setThreadLoading] = useState(false);
+  const [threadErr, setThreadErr] = useState<string | null>(null);
+  const [statusBusy, setStatusBusy] = useState(false);
   const [statusFilter, setStatusFilter] = useState("open");
   const [channelFilter, setChannelFilter] = useState("");
   const [fromFilter, setFromFilter] = useState("");
@@ -2317,10 +2355,83 @@ function InboxTab({ api, lists, onOpenContact }: {
       const params: Record<string, string> = { status: statusFilter };
       if (filters.length) params.filters = JSON.stringify(filters);
       const r = await api<{ inbox?: InboxItem[] }>("GET", "/inbox", undefined, params);
-      setItems(r.inbox || []);
+      const rows = r.inbox || [];
+      setItems(rows);
+      setSelected((cur) => {
+        if (cur) {
+          const stillHere = rows.find((row) => String(row.id) === String(cur.id));
+          if (stillHere) return stillHere;
+        }
+        return rows[0] || null;
+      });
     } catch (e) { setErr((e as Error).message); setItems([]); }
   }, [api, statusFilter, channelFilter, fromFilter, toFilter, listFilter, tagFilter]);
   useEffect(() => { load(); }, [load]);
+
+  const loadThreadFor = useCallback(async (item: InboxItem) => {
+    setThreadLoading(true);
+    setThreadErr(null);
+    try {
+      const [contact, convo] = await Promise.all([
+        api<{ contact: Contact }>("GET", `/contacts/${item.contact_id}`),
+        api<{ conversation?: Conversation; activities?: Activity[] }>("GET", `/contacts/${item.contact_id}/conversations/${item.id}`),
+      ]);
+      setThreadContact(contact.contact);
+      setThreadConversation(convo.conversation || null);
+      setThreadActivities(convo.activities || []);
+    } catch (e) {
+      setThreadErr((e as Error).message);
+      setThreadContact(null);
+      setThreadConversation(null);
+      setThreadActivities([]);
+    } finally {
+      setThreadLoading(false);
+    }
+  }, [api]);
+
+  useEffect(() => {
+    if (!selected) {
+      setThreadContact(null);
+      setThreadConversation(null);
+      setThreadActivities([]);
+      setThreadErr(null);
+      return;
+    }
+    loadThreadFor(selected);
+  }, [selected, loadThreadFor]);
+
+  const reloadSelectedThread = useCallback(async () => {
+    if (selected) await loadThreadFor(selected);
+    await load();
+  }, [load, loadThreadFor, selected]);
+
+  useAppEvents("crm", projectId, (ev) => {
+    if (
+      ev.topic === "conversation.message.received" ||
+      ev.topic === "conversation.status.changed" ||
+      ev.topic === "contact.activity.added" ||
+      ev.topic === "contact.merged"
+    ) {
+      load();
+      if (selected) loadThreadFor(selected);
+    }
+  });
+
+  const setThreadStatus = useCallback(async (
+    conversationId: string,
+    patch: { status?: string; priority?: string; spam_scope?: string; force?: boolean },
+  ) => {
+    if (!selected) return;
+    setStatusBusy(true);
+    try {
+      await api("POST", `/contacts/${selected.contact_id}/conversations/${conversationId}/status`, patch);
+      await reloadSelectedThread();
+    } catch (e) {
+      setThreadErr("Status update failed: " + (e as Error).message);
+    } finally {
+      setStatusBusy(false);
+    }
+  }, [api, reloadSelectedThread, selected]);
 
   const clearFilters = () => {
     setChannelFilter("");
@@ -2331,6 +2442,16 @@ function InboxTab({ api, lists, onOpenContact }: {
   };
   const hasFilters = channelFilter || fromFilter.trim() || toFilter.trim() || listFilter || tagFilter.trim();
   const inp = "bg-bg-input border border-border rounded px-2 py-1 text-xs";
+  const selectedGroup: Extract<Group, { kind: "conversation" }> | null = threadConversation ? {
+    kind: "conversation",
+    conversationId: String(threadConversation.id),
+    channel: threadConversation.channel,
+    subject: threadConversation.subject || "",
+    status: threadConversation.status || "open",
+    priority: threadConversation.priority || "normal",
+    activities: threadActivities,
+  } : null;
+  const lastReceived = [...threadActivities].reverse().find((a) => RECEIVED_KINDS.has(a.kind)) || null;
 
   return (
     <div className="h-full flex flex-col">
@@ -2386,36 +2507,143 @@ function InboxTab({ api, lists, onOpenContact }: {
           )}
         </div>
       </div>
-      <div className="flex-1 overflow-auto">
-        {err && <div className="p-4 text-red text-xs">Error: {err}</div>}
-        {items === null ? (
-          <div className="p-4 text-text-muted text-sm">Loading…</div>
-        ) : items.length === 0 ? (
-          <div className="p-4 text-text-muted text-sm">Nothing here. New inbound conversations show up as they arrive.</div>
-        ) : (
-          <ul className="divide-y divide-border">
-            {items.map((it) => (
-              <li
-                key={it.id}
-                onClick={() => onOpenContact(it.contact_id)}
-                className="px-4 py-3 hover:bg-bg-input/40 cursor-pointer"
-              >
-                <div className="flex items-center gap-2 mb-0.5">
-                  <span className={`inline-block w-1.5 h-1.5 rounded-full shrink-0 ${PRIORITY_DOT[it.priority] || PRIORITY_DOT.normal}`} title={`priority: ${it.priority}`} />
-                  <span className="text-sm text-text font-medium truncate flex-1">
-                    {it.contact_name || it.contact_email || `contact #${it.contact_id}`}
-                  </span>
-                  <span className="text-[10px] uppercase text-text-dim">{it.channel}</span>
-                  <span className={`text-[10px] px-1.5 py-0.5 rounded ${STATUS_STYLES[it.status] || STATUS_STYLES.open}`}>{it.status}</span>
+      <div className="flex-1 min-h-0 grid grid-cols-[minmax(320px,420px)_minmax(0,1fr)_280px]">
+        <aside className="min-h-0 border-r border-border overflow-auto">
+          {err && <div className="p-4 text-red text-xs">Error: {err}</div>}
+          {items === null ? (
+            <div className="p-4 text-text-muted text-sm">Loading…</div>
+          ) : items.length === 0 ? (
+            <div className="p-4 text-text-muted text-sm">Nothing here. New inbound conversations show up as they arrive.</div>
+          ) : (
+            <ul className="divide-y divide-border">
+              {items.map((it) => (
+                <li
+                  key={it.id}
+                  onClick={() => setSelected(it)}
+                  className={`px-4 py-3 hover:bg-bg-input/40 cursor-pointer ${String(selected?.id) === String(it.id) ? "bg-bg-input" : ""}`}
+                >
+                  <div className="flex items-center gap-2 mb-0.5">
+                    <span className={`inline-block w-1.5 h-1.5 rounded-full shrink-0 ${PRIORITY_DOT[it.priority] || PRIORITY_DOT.normal}`} title={`priority: ${it.priority}`} />
+                    <span className="text-sm text-text font-medium truncate flex-1">
+                      {it.contact_name || it.contact_email || `contact #${it.contact_id}`}
+                    </span>
+                    <span className="text-[10px] uppercase text-text-dim">{it.channel}</span>
+                    <span className={`text-[10px] px-1.5 py-0.5 rounded ${STATUS_STYLES[it.status] || STATUS_STYLES.open}`}>{it.status}</span>
+                  </div>
                   {it.automated && <span className="text-[10px] px-1.5 py-0.5 rounded bg-border text-text-muted">automated</span>}
+                  {it.subject && <div className="text-xs text-text-muted truncate mt-1">{it.subject}</div>}
+                  {it.snippet && <div className="text-xs text-text-dim truncate">{it.snippet}</div>}
+                  <div className="text-[10px] text-text-dim mt-0.5">{formatTime(it.last_activity_at)}</div>
+                </li>
+              ))}
+            </ul>
+          )}
+        </aside>
+
+        <main className="min-h-0 overflow-auto p-4">
+          {!selected ? (
+            <div className="text-text-muted text-sm text-center mt-12">Select a conversation.</div>
+          ) : threadLoading ? (
+            <div className="text-text-muted text-sm text-center mt-12">Loading thread…</div>
+          ) : threadErr ? (
+            <div className="text-red text-xs">Error: {threadErr}</div>
+          ) : !selectedGroup || !threadConversation ? (
+            <div className="text-text-muted text-sm text-center mt-12">Thread not found.</div>
+          ) : (
+            <div className="space-y-3">
+              <header className="flex items-start justify-between gap-3 border-b border-border pb-3">
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2">
+                    <h2 className="text-lg text-text font-semibold truncate">
+                      {threadContact ? displayName(threadContact) : selected.contact_name || `contact #${selected.contact_id}`}
+                    </h2>
+                    <span className="text-[10px] uppercase text-text-dim">{threadConversation.channel}</span>
+                    <span className={`text-[10px] px-1.5 py-0.5 rounded ${STATUS_STYLES[threadConversation.status || "open"] || STATUS_STYLES.open}`}>
+                      {threadConversation.status || "open"}
+                    </span>
+                  </div>
+                  <p className="text-xs text-text-muted truncate">
+                    {threadConversation.subject || selected.snippet || "Conversation"}
+                  </p>
                 </div>
-                {it.subject && <div className="text-xs text-text-muted truncate">{it.subject}</div>}
-                {it.snippet && <div className="text-xs text-text-dim truncate">{it.snippet}</div>}
-                <div className="text-[10px] text-text-dim mt-0.5">{formatTime(it.last_activity_at)}</div>
-              </li>
-            ))}
-          </ul>
-        )}
+                <div className="flex items-center gap-2 shrink-0">
+                  {threadContact && lastReceived && (
+                    <button
+                      type="button"
+                      onClick={() => onReply(threadContact, lastReceived, threadConversation, reloadSelectedThread)}
+                      className="px-3 py-1 text-sm border border-accent text-accent rounded hover:bg-accent hover:text-bg"
+                    >Reply</button>
+                  )}
+                  <button
+                    type="button"
+                    onClick={() => loadThreadFor(selected)}
+                    className="px-2 py-1 text-xs border border-border rounded hover:bg-bg-input"
+                  >Refresh</button>
+                </div>
+              </header>
+              <ul>
+                <ActivityGroup
+                  group={selectedGroup}
+                  busy={statusBusy}
+                  onSetStatus={setThreadStatus}
+                  onReply={(act) => {
+                    if (threadContact && threadConversation) onReply(threadContact, act, threadConversation, reloadSelectedThread);
+                  }}
+                />
+              </ul>
+            </div>
+          )}
+        </main>
+
+        <aside className="min-h-0 border-l border-border overflow-auto p-4">
+          {!threadContact ? (
+            <div className="text-text-muted text-xs">No contact selected.</div>
+          ) : (
+            <div className="space-y-4">
+              <section>
+                <h3 className="text-xs uppercase tracking-wide text-text-dim mb-2">Contact</h3>
+                <div className="text-sm text-text font-medium truncate">{displayName(threadContact)}</div>
+                <div className="text-xs text-text-muted truncate">{secondaryLine(threadContact) || "—"}</div>
+                <button
+                  type="button"
+                  onClick={() => onOpenContact(Number(threadContact.id))}
+                  className="mt-3 text-xs px-2 py-1 border border-border rounded hover:bg-bg-input"
+                >Open full contact</button>
+              </section>
+              {threadContact.channels && threadContact.channels.length > 0 && (
+                <section>
+                  <h3 className="text-xs uppercase tracking-wide text-text-dim mb-2">Channels</h3>
+                  <ul className="space-y-1">
+                    {threadContact.channels.map((ch, i) => (
+                      <li key={`${ch.kind}-${ch.value}-${i}`} className="text-xs">
+                        <div className="text-[10px] uppercase text-text-dim">{ch.kind}{ch.is_primary ? " · primary" : ""}</div>
+                        <div className="text-text truncate">{ch.value}</div>
+                      </li>
+                    ))}
+                  </ul>
+                </section>
+              )}
+              {threadContact.tags && threadContact.tags.length > 0 && (
+                <section>
+                  <h3 className="text-xs uppercase tracking-wide text-text-dim mb-2">Tags</h3>
+                  <div className="flex flex-wrap gap-1">
+                    {threadContact.tags.map((t) => (
+                      <span key={t} className="text-[10px] px-1.5 py-0.5 rounded bg-border text-text">{t}</span>
+                    ))}
+                  </div>
+                </section>
+              )}
+              <section>
+                <h3 className="text-xs uppercase tracking-wide text-text-dim mb-2">Thread</h3>
+                <dl className="space-y-1 text-xs">
+                  <div className="flex justify-between gap-2"><dt className="text-text-dim">Started</dt><dd className="text-text text-right">{threadConversation ? formatTime(threadConversation.started_at) : "—"}</dd></div>
+                  <div className="flex justify-between gap-2"><dt className="text-text-dim">Last activity</dt><dd className="text-text text-right">{threadConversation ? formatTime(threadConversation.last_activity_at) : "—"}</dd></div>
+                  <div className="flex justify-between gap-2"><dt className="text-text-dim">Messages</dt><dd className="text-text">{threadActivities.length}</dd></div>
+                </dl>
+              </section>
+            </div>
+          )}
+        </aside>
       </div>
     </div>
   );

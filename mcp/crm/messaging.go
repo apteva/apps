@@ -256,6 +256,29 @@ func dbConversationReopenIfClosed(db *sql.DB, pid string, id int64) (bool, error
 	return n > 0, nil
 }
 
+// dbConversationMarkPendingAfterOutbound moves an actionable thread to
+// pending after we send a reply/message. That keeps the Inbox queue
+// focused on conversations that need us. Spam threads stay spam, and
+// already-pending threads do not emit a redundant status change.
+func dbConversationMarkPendingAfterOutbound(db *sql.DB, pid string, id int64) (*Conversation, bool, error) {
+	res, err := db.Exec(
+		`UPDATE contact_conversations
+		 SET status = 'pending', status_changed_at = ?
+		 WHERE project_id = ? AND id = ?
+		   AND COALESCE(status,'open') NOT IN ('pending', 'spam')`,
+		time.Now().UTC().Format(time.RFC3339), pid, id,
+	)
+	if err != nil {
+		return nil, false, err
+	}
+	n, _ := res.RowsAffected()
+	c, err := dbConversationGet(db, pid, id)
+	if err != nil {
+		return nil, n > 0, err
+	}
+	return c, n > 0, nil
+}
+
 func dbContactMarkSpam(db *sql.DB, pid string, contactID int64) error {
 	if _, err := db.Exec(
 		`UPDATE contacts
@@ -1144,6 +1167,17 @@ func (a *App) sendMessageImpl(ctx *sdk.AppCtx, args map[string]any, isTest bool)
 			{Role: "from", Address: from},
 			{Role: "to", Address: addr.Address, ContactID: cid},
 		})
+		if updated, changed, err := dbConversationMarkPendingAfterOutbound(ctx.AppDB(), pid, convoIDForLog); err != nil {
+			ctx.Logger().Warn("crm outbound pending status update failed", "conversation_id", convoIDForLog, "err", err)
+		} else if changed && updated != nil {
+			emitCRMEvent(ctx, pid, "conversation.status.changed", map[string]any{
+				"conversation_id": convoIDForLog,
+				"contact_id":      updated.ContactID,
+				"status":          updated.Status,
+				"priority":        updated.Priority,
+				"reason":          "outbound_message",
+			})
+		}
 	}
 	ctx.Emit("contact.activity.added", map[string]any{
 		"contact_id":      cid,

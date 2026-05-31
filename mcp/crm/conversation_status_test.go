@@ -42,7 +42,17 @@ func (p *crmRecordingPlatform) GetInstance(id int64) (*sdk.PlatformInstance, err
 func (p *crmRecordingPlatform) CallAppResult(appName, tool string, input map[string]any, out any) error {
 	p.calls = append(p.calls, crmCallAppCall{AppName: appName, Tool: tool, Input: input})
 	if out != nil {
-		b, _ := json.Marshal(map[string]any{"ok": true})
+		payload := map[string]any{"ok": true}
+		switch tool {
+		case "send_message":
+			payload = map[string]any{
+				"id":                  1000 + len(p.calls),
+				"provider_message_id": "msg-test",
+			}
+		case "suppression_check":
+			payload = map[string]any{"suppressed": false}
+		}
+		b, _ := json.Marshal(payload)
 		_ = json.Unmarshal(b, out)
 	}
 	return nil
@@ -118,6 +128,110 @@ func TestSetConversationStatus_FlipsStatusAndPriority(t *testing.T) {
 	}
 	if conv.Status != "pending" {
 		t.Errorf("priority-only change clobbered status to %q", conv.Status)
+	}
+}
+
+func TestOutboundReplyMovesConversationPending(t *testing.T) {
+	rec := tk.NewEmitRecorder()
+	ctx := newTestCtx(t, tk.WithPlatform(&crmRecordingPlatform{}), tk.WithEmitter(rec))
+	app := &App{}
+	c := mustCreate(t, ctx, map[string]any{
+		"first_name": "Alice",
+		"channels": []any{
+			map[string]any{"kind": "phone", "value": "+15551230000", "is_primary": true},
+		},
+	})
+	convoID := mkConversation(t, ctx, "test-proj", c.ID, "sms")
+
+	if _, err := app.toolReply(ctx, map[string]any{
+		"id":              c.ID,
+		"conversation_id": convoID,
+		"body":            "Thanks, we will check.",
+		"from":            "+15559990000",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := dbConversationGet(ctx.AppDB(), "test-proj", convoID)
+	if err != nil || got == nil {
+		t.Fatalf("get conversation: %v", err)
+	}
+	if got.Status != "pending" {
+		t.Fatalf("conversation status=%q, want pending", got.Status)
+	}
+	events := rec.EventsByTopic("conversation.status.changed")
+	if len(events) != 1 {
+		t.Fatalf("conversation.status.changed events=%d, want 1", len(events))
+	}
+	payload := events[0].Data.(map[string]any)
+	if payload["status"] != "pending" || payload["reason"] != "outbound_message" {
+		t.Fatalf("event payload=%#v", payload)
+	}
+}
+
+func TestOutboundReplyMovesClosedConversationPending(t *testing.T) {
+	ctx := newTestCtx(t, tk.WithPlatform(&crmRecordingPlatform{}))
+	app := &App{}
+	c := mustCreate(t, ctx, map[string]any{
+		"first_name": "Alice",
+		"channels": []any{
+			map[string]any{"kind": "phone", "value": "+15551230000", "is_primary": true},
+		},
+	})
+	convoID := mkConversation(t, ctx, "test-proj", c.ID, "sms")
+	if _, err := dbConversationSetStatus(ctx.AppDB(), "test-proj", convoID, "closed", ""); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := app.toolReply(ctx, map[string]any{
+		"id":              c.ID,
+		"conversation_id": convoID,
+		"body":            "Following up.",
+		"from":            "+15559990000",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := dbConversationGet(ctx.AppDB(), "test-proj", convoID)
+	if err != nil || got == nil {
+		t.Fatalf("get conversation: %v", err)
+	}
+	if got.Status != "pending" {
+		t.Fatalf("conversation status=%q, want pending", got.Status)
+	}
+}
+
+func TestOutboundReplyDoesNotReopenSpamConversation(t *testing.T) {
+	rec := tk.NewEmitRecorder()
+	ctx := newTestCtx(t, tk.WithPlatform(&crmRecordingPlatform{}), tk.WithEmitter(rec))
+	app := &App{}
+	c := mustCreate(t, ctx, map[string]any{
+		"first_name": "Alice",
+		"channels": []any{
+			map[string]any{"kind": "phone", "value": "+15551230000", "is_primary": true},
+		},
+	})
+	convoID := mkConversation(t, ctx, "test-proj", c.ID, "sms")
+	if _, err := dbConversationSetStatus(ctx.AppDB(), "test-proj", convoID, "spam", ""); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := app.toolReply(ctx, map[string]any{
+		"id":              c.ID,
+		"conversation_id": convoID,
+		"body":            "Manual reply.",
+		"from":            "+15559990000",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	got, err := dbConversationGet(ctx.AppDB(), "test-proj", convoID)
+	if err != nil || got == nil {
+		t.Fatalf("get conversation: %v", err)
+	}
+	if got.Status != "spam" {
+		t.Fatalf("conversation status=%q, want spam", got.Status)
+	}
+	if events := rec.EventsByTopic("conversation.status.changed"); len(events) != 0 {
+		t.Fatalf("conversation.status.changed events=%d, want 0", len(events))
 	}
 }
 
