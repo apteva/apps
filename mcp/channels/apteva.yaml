@@ -2,9 +2,9 @@ schema: apteva-app/v1
 
 name: channels
 display_name: Channels
-version: 0.3.0
+version: 0.3.1
 description: |
-  Agent-facing channel router with standalone dashboard chat and ntfy-compatible notification channels.
+  Agent-facing channel router with standalone dashboard chat, project channel management, and ntfy-compatible notifications.
   Agents reply through respond(channel="chat", ...); the app stores chat
   history, streams updates to the dashboard, exposes private ntfy topics,
   and forwards inbound user messages to the owning agent.

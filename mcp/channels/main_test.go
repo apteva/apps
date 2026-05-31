@@ -142,3 +142,22 @@ func TestNtfyPublishHTTP(t *testing.T) {
 		t.Fatalf("meta = %+v", meta)
 	}
 }
+
+func TestChannelsListProjectWithoutAgent(t *testing.T) {
+	st := newStore(testDB(t))
+	if _, err := st.SetNtfyTopic(42, "proj-1", "agent-42-test"); err != nil {
+		t.Fatalf("SetNtfyTopic: %v", err)
+	}
+	app := &App{store: st, hub: newHub()}
+	req := httptest.NewRequest(http.MethodGet, "/channels?project_id=proj-1", nil)
+	rec := httptest.NewRecorder()
+
+	app.handleChannels(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"id":"ntfy:agent-42-test"`) {
+		t.Fatalf("response missing ntfy channel: %s", rec.Body.String())
+	}
+}

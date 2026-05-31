@@ -26,9 +26,9 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: channels
 display_name: Channels
-version: 0.3.0
+version: 0.3.1
 description: |
-  Agent-facing channel router with standalone dashboard chat and ntfy-compatible notification channels.
+  Agent-facing channel router with standalone dashboard chat, project channel management, and ntfy-compatible notifications.
   Agents reply through respond(channel="chat", ...); the app stores chat
   history, streams updates to the dashboard, exposes private ntfy topics,
   and forwards inbound user messages to the owning agent.
@@ -244,18 +244,17 @@ func (a *App) handleChannels(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		agentID := queryInt64(r, "agent_id", "instance_id")
-		if agentID == 0 {
-			http.Error(w, "agent_id required", http.StatusBadRequest)
-			return
-		}
-		projectID := a.projectForAgent(agentID, projectFromRequest(r))
-		if _, err := a.store.EnsureDefaultChat(agentID, projectID); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
-		if _, err := a.store.EnsureDefaultNtfy(agentID, projectID, ""); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
+		projectID := projectFromRequest(r)
+		if agentID > 0 {
+			projectID = a.projectForAgent(agentID, projectID)
+			if _, err := a.store.EnsureDefaultChat(agentID, projectID); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			if _, err := a.store.EnsureDefaultNtfy(agentID, projectID, ""); err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
 		}
 		chats, err := a.store.ListChats(agentID, projectID)
 		if err != nil {
@@ -846,7 +845,8 @@ func (a *App) channelSummaries(chats []Chat) []map[string]any {
 
 func (a *App) channelSummary(ch Chat) map[string]any {
 	item := map[string]any{
-		"id":         ch.Channel,
+		"id":         fmt.Sprintf("%s:%d", ch.Channel, ch.AgentID),
+		"mcp_id":     ch.Channel,
 		"type":       ch.Channel,
 		"label":      ch.Title,
 		"agent_id":   ch.AgentID,
@@ -856,6 +856,7 @@ func (a *App) channelSummary(ch Chat) map[string]any {
 	}
 	if ch.Channel == "ntfy" {
 		item["id"] = "ntfy:" + ch.ThreadID
+		item["mcp_id"] = "ntfy:" + ch.ThreadID
 		item["topic"] = ch.ThreadID
 		item["subscribe_path"] = "/ntfy/" + ch.ThreadID
 		item["stream_json"] = "/ntfy/" + ch.ThreadID + "/json"
