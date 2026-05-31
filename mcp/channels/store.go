@@ -142,6 +142,26 @@ func (s *store) GetNtfyByTopic(topic string) (*Chat, error) {
 	return &c, nil
 }
 
+func (s *store) SetNtfyTopic(agentID int64, projectID string, topic string) (*Chat, error) {
+	if topic == "" {
+		topic = randomTopic(agentID)
+	}
+	chatID := defaultNtfyID(agentID)
+	_, err := s.db.Exec(
+		`INSERT INTO channels_chats (id, agent_id, project_id, title, channel, thread_id)
+		 VALUES (?, ?, ?, 'Ntfy', 'ntfy', ?)
+		 ON CONFLICT(id) DO UPDATE SET
+		   project_id = excluded.project_id,
+		   thread_id = excluded.thread_id,
+		   updated_at = CURRENT_TIMESTAMP`,
+		chatID, agentID, projectID, topic,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("set ntfy topic: %w", err)
+	}
+	return s.GetChat(chatID)
+}
+
 func (s *store) ListChats(agentID int64, projectID string) ([]Chat, error) {
 	var (
 		rows *sql.Rows

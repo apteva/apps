@@ -26,7 +26,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: channels
 display_name: Channels
-version: 0.2.0
+version: 0.3.0
 description: |
   Agent-facing channel router with standalone dashboard chat and ntfy-compatible notification channels.
   Agents reply through respond(channel="chat", ...); the app stores chat
@@ -50,6 +50,11 @@ provides:
       description: Send a status line to a channel. V1 writes chat status lines as system messages.
     - name: list_channels
       description: List channels currently reachable for the calling agent.
+  ui_panels:
+    - slot: project.page
+      label: Channels
+      icon: radio
+      entry: /ui/ChannelsPanel.mjs
   publishes:
     - name: chat.message
       description: Emitted whenever a chat message is inserted.
@@ -104,6 +109,7 @@ func (a *App) EventHandlers() []sdk.EventHandler { return nil }
 func (a *App) HTTPRoutes() []sdk.Route {
 	return []sdk.Route{
 		{Pattern: "/chats", Handler: a.handleChats},
+		{Pattern: "/channels", Handler: a.handleChannels},
 		{Pattern: "/messages", Handler: a.handleMessages},
 		{Pattern: "/stream", Handler: a.handleStream},
 		{Pattern: "/unread-summary", Handler: a.handleUnreadSummary},
@@ -229,6 +235,80 @@ func (a *App) handleChats(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, chat)
+	default:
+		http.Error(w, "GET or POST", http.StatusMethodNotAllowed)
+	}
+}
+
+func (a *App) handleChannels(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		agentID := queryInt64(r, "agent_id", "instance_id")
+		if agentID == 0 {
+			http.Error(w, "agent_id required", http.StatusBadRequest)
+			return
+		}
+		projectID := a.projectForAgent(agentID, projectFromRequest(r))
+		if _, err := a.store.EnsureDefaultChat(agentID, projectID); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if _, err := a.store.EnsureDefaultNtfy(agentID, projectID, ""); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		chats, err := a.store.ListChats(agentID, projectID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, map[string]any{"channels": a.channelSummaries(chats), "agent_id": agentID, "project_id": projectID})
+	case http.MethodPost:
+		var body struct {
+			AgentID    int64  `json:"agent_id"`
+			InstanceID int64  `json:"instance_id"`
+			ProjectID  string `json:"project_id"`
+			Type       string `json:"type"`
+			Topic      string `json:"topic"`
+			Regenerate bool   `json:"regenerate"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if body.AgentID == 0 {
+			body.AgentID = body.InstanceID
+		}
+		if body.AgentID == 0 {
+			http.Error(w, "agent_id required", http.StatusBadRequest)
+			return
+		}
+		if body.Type == "" {
+			body.Type = "ntfy"
+		}
+		if body.Type != "ntfy" {
+			http.Error(w, `type must be "ntfy"`, http.StatusBadRequest)
+			return
+		}
+		projectID := strings.TrimSpace(body.ProjectID)
+		if projectID == "" {
+			projectID = projectFromRequest(r)
+		}
+		projectID = a.projectForAgent(body.AgentID, projectID)
+		topic := strings.TrimSpace(body.Topic)
+		if topic != "" && !validTopic(topic) {
+			http.Error(w, "invalid topic", http.StatusBadRequest)
+			return
+		}
+		var ch *Chat
+		var err error
+		if body.Regenerate || topic != "" {
+			ch, err = a.store.SetNtfyTopic(body.AgentID, projectID, topic)
+		} else {
+			ch, err = a.store.EnsureDefaultNtfy(body.AgentID, projectID, "")
+		}
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, a.channelSummary(*ch))
 	default:
 		http.Error(w, "GET or POST", http.StatusMethodNotAllowed)
 	}
@@ -754,6 +834,37 @@ type ntfyEvent struct {
 	Priority string   `json:"priority,omitempty"`
 	Tags     []string `json:"tags,omitempty"`
 	Click    string   `json:"click,omitempty"`
+}
+
+func (a *App) channelSummaries(chats []Chat) []map[string]any {
+	out := make([]map[string]any, 0, len(chats))
+	for _, ch := range chats {
+		out = append(out, a.channelSummary(ch))
+	}
+	return out
+}
+
+func (a *App) channelSummary(ch Chat) map[string]any {
+	item := map[string]any{
+		"id":         ch.Channel,
+		"type":       ch.Channel,
+		"label":      ch.Title,
+		"agent_id":   ch.AgentID,
+		"project_id": ch.ProjectID,
+		"active":     a.hub.hasSubscribers(ch.ID),
+		"chat_id":    ch.ID,
+	}
+	if ch.Channel == "ntfy" {
+		item["id"] = "ntfy:" + ch.ThreadID
+		item["topic"] = ch.ThreadID
+		item["subscribe_path"] = "/ntfy/" + ch.ThreadID
+		item["stream_json"] = "/ntfy/" + ch.ThreadID + "/json"
+		item["stream_sse"] = "/ntfy/" + ch.ThreadID + "/sse"
+		item["capabilities"] = []string{"text", "title", "priority", "tags", "click"}
+		return item
+	}
+	item["capabilities"] = []string{"text", "status", "components"}
+	return item
 }
 
 func (a *App) authorizeChat(w http.ResponseWriter, r *http.Request) (string, *Chat, bool) {

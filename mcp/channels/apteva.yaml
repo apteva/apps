@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: channels
 display_name: Channels
-version: 0.2.0
+version: 0.3.0
 description: |
   Agent-facing channel router with standalone dashboard chat and ntfy-compatible notification channels.
   Agents reply through respond(channel="chat", ...); the app stores chat
@@ -32,6 +32,11 @@ provides:
       description: Send a status line to a channel. V1 writes chat status lines as system messages.
     - name: list_channels
       description: List channels currently reachable for the calling agent.
+  ui_panels:
+    - slot: project.page
+      label: Channels
+      icon: radio
+      entry: /ui/ChannelsPanel.mjs
   publishes:
     - name: chat.message
       description: Emitted whenever a chat message is inserted.
