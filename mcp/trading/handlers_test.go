@@ -33,7 +33,9 @@ func mustCreatePortfolio(t *testing.T, ctx *sdk.AppCtx, name string, classes []s
 		ProjectID: "test-proj", Name: name, AllowedClasses: classes,
 		StartingCash: 100_000,
 	})
-	if err != nil { t.Fatalf("create portfolio: %v", err) }
+	if err != nil {
+		t.Fatalf("create portfolio: %v", err)
+	}
 	return id
 }
 
@@ -43,7 +45,9 @@ func TestPortfolioList_EmptyByDefault(t *testing.T) {
 	ctx := newTestCtx(t)
 	app := &App{}
 	out, err := app.toolPortfolioList(ctx, map[string]any{})
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	pfs := out.(map[string]any)["portfolios"].([]map[string]any)
 	if len(pfs) != 0 {
 		t.Errorf("want 0 portfolios, got %d", len(pfs))
@@ -55,13 +59,69 @@ func TestPortfolioGet_AfterCreate(t *testing.T) {
 	id := mustCreatePortfolio(t, ctx, "Long-Term Equity", []string{"equity", "etf"})
 	app := &App{}
 	out, err := app.toolPortfolioGet(ctx, map[string]any{"portfolio_id": float64(id)})
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	p := out.(map[string]any)["portfolio"].(*Portfolio)
 	if p.Name != "Long-Term Equity" {
 		t.Errorf("name=%q", p.Name)
 	}
 	if p.Equity != 100_000 {
 		t.Errorf("equity=%v, want 100000 (cash baseline)", p.Equity)
+	}
+}
+
+func TestPortfolioBindAgent_UpdatesPortfolioAndManagerBinding(t *testing.T) {
+	ctx := newTestCtx(t)
+	id := mustCreatePortfolio(t, ctx, "Managed", []string{"equity"})
+
+	ref, err := dbBindPortfolioAgent(ctx.AppDB(), id, 42)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ref != "apteva-instance:42" {
+		t.Fatalf("agent ref = %q", ref)
+	}
+	pf, err := dbGetPortfolio(ctx.AppDB(), "test-proj", id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pf.AgentID != "apteva-instance:42" {
+		t.Fatalf("portfolio agent_id = %q", pf.AgentID)
+	}
+	var count int
+	if err := ctx.AppDB().QueryRow(
+		`SELECT COUNT(*) FROM portfolio_bindings WHERE portfolio_id = ? AND instance_id = ? AND role = 'manager'`,
+		id, 42,
+	).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("manager binding count = %d", count)
+	}
+
+	ref, err = dbBindPortfolioAgent(ctx.AppDB(), id, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ref != "" {
+		t.Fatalf("unbind ref = %q", ref)
+	}
+	pf, err = dbGetPortfolio(ctx.AppDB(), "test-proj", id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pf.AgentID != "" {
+		t.Fatalf("portfolio agent_id after unbind = %q", pf.AgentID)
+	}
+	if err := ctx.AppDB().QueryRow(
+		`SELECT COUNT(*) FROM portfolio_bindings WHERE portfolio_id = ? AND role = 'manager'`,
+		id,
+	).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("manager bindings after unbind = %d", count)
 	}
 }
 
@@ -224,7 +284,9 @@ func TestEngine_PolymarketYesBuy(t *testing.T) {
 	if out.(map[string]any)["status"] != "working" {
 		t.Fatalf("not working: %#v", out)
 	}
-	if err := markTick(nil, ctx); err != nil { t.Fatal(err) }
+	if err := markTick(nil, ctx); err != nil {
+		t.Fatal(err)
+	}
 	pos, _ := dbListPositions(ctx.AppDB(), id)
 	if len(pos) != 1 {
 		t.Fatalf("expected 1 poly position, got %d", len(pos))
@@ -260,7 +322,9 @@ func TestJournal_WriteThenRead(t *testing.T) {
 		"portfolio_id": float64(id), "kind": "thesis",
 		"body": "first thesis — testing journal round-trip.",
 	})
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	out, _ := (&App{}).toolJournalRead(ctx, map[string]any{
 		"portfolio_id": float64(id), "kind": "thesis",
 	})
@@ -302,7 +366,9 @@ func TestPortfolioPause_BlocksFurtherOrders(t *testing.T) {
 	_, err := app.toolPortfolioPause(ctx, map[string]any{
 		"portfolio_id": float64(id), "reason": "self-test pause",
 	})
-	if err != nil { t.Fatal(err) }
+	if err != nil {
+		t.Fatal(err)
+	}
 	out, _ := app.toolOrderPlace(ctx, map[string]any{
 		"portfolio_id": float64(id), "symbol": "AAPL",
 		"side": "buy", "type": "market", "qty": 1.0,

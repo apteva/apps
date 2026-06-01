@@ -943,7 +943,7 @@ export default function TradingPanel({ projectId, installId }: NativePanelProps)
   useEffect(() => { loadPortfolios(); }, [loadPortfolios]);
 
   useAppEvents("trading", projectId, (ev) => {
-    if (["portfolio.created", "portfolio.status.changed", "order.filled", "position.changed"].includes(ev.topic)) {
+    if (["portfolio.created", "portfolio.status.changed", "portfolio.agent.changed", "order.filled", "position.changed"].includes(ev.topic)) {
       loadPortfolios();
     }
   });
@@ -1019,7 +1019,7 @@ export default function TradingPanel({ projectId, installId }: NativePanelProps)
           <PositionsTab portfolio={selected} api={api} setError={setError} />
         )}
         {tab === "agents" && (
-          <AgentsTab portfolio={selected} api={api} projectId={projectId} setError={setError} />
+          <AgentsTab portfolio={selected} api={api} projectId={projectId} onChanged={loadPortfolios} setError={setError} />
         )}
         {tab === "brokers" && (
           <BrokersTab api={api} setError={setError} />
@@ -1869,10 +1869,11 @@ function PositionsTab({ portfolio, api, setError }: {
 
 // ─── Agents tab ───────────────────────────────────────────────────
 
-function AgentsTab({ portfolio, api, projectId, setError }: {
+function AgentsTab({ portfolio, api, projectId, onChanged, setError }: {
   portfolio: Portfolio | null;
   api: <T>(m: string, p: string, q?: Record<string, string>, b?: unknown) => Promise<T>;
   projectId: string;
+  onChanged: () => void;
   setError: (e: string | null) => void;
 }) {
   const [agents, setAgents] = useState<Agent[]>([]);
@@ -1881,9 +1882,16 @@ function AgentsTab({ portfolio, api, projectId, setError }: {
   const [states, setStates] = useState<Record<number, AgentLiveState>>({});
   const [activities, setActivities] = useState<AgentActivity[]>([]);
   const [quotes, setQuotes] = useState<Record<string, Mark>>({});
+  const [bindAgentId, setBindAgentId] = useState<string>("");
+  const [binding, setBinding] = useState(false);
   const seenRef = useRef<Set<string>>(new Set());
   const seenOrderRef = useRef<string[]>([]);
   const statesRef = useRef<Record<number, AgentLiveState>>({});
+
+  useEffect(() => {
+    const id = portfolioAgentID(portfolio);
+    setBindAgentId(id ? String(id) : "");
+  }, [portfolio?.id, portfolio?.agent_id]);
 
   useEffect(() => {
     let cancelled = false;
@@ -2130,9 +2138,63 @@ function AgentsTab({ portfolio, api, projectId, setError }: {
     });
   const liveBySymbol = (symbol: string) =>
     rows.filter((r) => r.state?.symbol?.toUpperCase() === symbol.toUpperCase());
+  const bindPortfolioAgent = async () => {
+    if (!portfolio) return;
+    setBinding(true);
+    try {
+      const agentID = bindAgentId ? Number(bindAgentId) : null;
+      await api("PATCH", `/portfolios/${portfolio.id}/agent`, undefined, { agent_id: agentID });
+      setError(null);
+      onChanged();
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBinding(false);
+    }
+  };
+  const selectedBindingAgent = bindAgentId ? agents.find((a) => a.id === Number(bindAgentId)) : null;
+  const selectedHasTradingMCP = bindAgentId ? tradingMCPAgentIds.has(Number(bindAgentId)) : false;
+  const bindingChanged = (portfolioBoundAgentID ? String(portfolioBoundAgentID) : "") !== bindAgentId;
 
   return (
     <>
+      <Section title="Portfolio agent">
+        <div className="flex flex-wrap items-center gap-2">
+          <select
+            value={bindAgentId}
+            onChange={(e) => setBindAgentId(e.target.value)}
+            className="text-xs px-2 py-1 bg-bg-input border border-border rounded text-text min-w-[220px]"
+          >
+            <option value="">Unbound</option>
+            {agents.map((agent) => (
+              <option key={agent.id} value={agent.id}>
+                {agent.name}{agentTradingMCPs[agent.id]?.length ? " (trading)" : ""}
+              </option>
+            ))}
+          </select>
+          <button
+            onClick={bindPortfolioAgent}
+            disabled={binding || !bindingChanged}
+            className="px-3 py-1 text-xs rounded bg-accent text-bg font-medium hover:opacity-90 disabled:opacity-50"
+          >
+            {binding ? "Saving" : bindAgentId ? "Bind" : "Unbind"}
+          </button>
+          {selectedBindingAgent && (
+            <span className="text-xs px-2 py-0.5 rounded bg-bg-input text-text-muted">
+              {selectedBindingAgent.status}
+            </span>
+          )}
+          {selectedHasTradingMCP && (
+            <span className="text-xs px-2 py-0.5 rounded bg-accent/10 text-accent border border-accent/30">
+              trading MCP
+            </span>
+          )}
+          {portfolioBoundAgentID && (
+            <span className="text-xs text-text-dim">current #{portfolioBoundAgentID}</span>
+          )}
+        </div>
+      </Section>
+
       <Section title={`Live watchlist · ${portfolio.name}`}>
         {(!portfolio.watchlist || portfolio.watchlist.length === 0) ? (
           <EmptyState title="No symbols tracked" hint="Watchlist is empty." />

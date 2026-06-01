@@ -10,6 +10,7 @@
 //   GET  /portfolios/{id}/positions
 //   GET  /portfolios/{id}/orders?status=…
 //   GET  /portfolios/{id}/journal?kind=…
+//   PATCH /portfolios/{id}/agent              — body { agent_id }
 //   GET  /quotes/{symbol}
 //   POST /portfolios/{id}/orders              — body { side, type, qty, … rationale }
 //   POST /portfolios/{id}/orders/{oid}/cancel
@@ -40,7 +41,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: trading
 display_name: Trading
-version: 0.4.12
+version: 0.4.13
 description: Trading desk for Apteva agents (paper + live via per-portfolio broker integration).
 author: Apteva
 scopes: [project, global]
@@ -208,8 +209,8 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	return nil
 }
 
-func (a *App) OnUnmount(*sdk.AppCtx) error { return nil }
-func (a *App) Channels() []sdk.ChannelFactory   { return nil }
+func (a *App) OnUnmount(*sdk.AppCtx) error       { return nil }
+func (a *App) Channels() []sdk.ChannelFactory    { return nil }
 func (a *App) EventHandlers() []sdk.EventHandler { return nil }
 
 // Workers — the paper-execution engine. The SDK supervises both;
@@ -222,7 +223,7 @@ func (a *App) Workers() []sdk.Worker {
 		}
 	}
 	return []sdk.Worker{
-		{Name: "mark_tick",  Schedule: tickEvery,    Run: markTick},
+		{Name: "mark_tick", Schedule: tickEvery, Run: markTick},
 		{Name: "alert_tick", Schedule: "@every 60s", Run: alertTick},
 	}
 }
@@ -256,12 +257,12 @@ func newProvider(name string) Provider {
 
 func (a *App) HTTPRoutes() []sdk.Route {
 	return []sdk.Route{
-		{Pattern: "/portfolios",   Handler: a.handleHTTPPortfoliosCollection},
-		{Pattern: "/portfolios/",  Handler: a.handleHTTPPortfolioItem},
-		{Pattern: "/quotes/",      Handler: a.handleHTTPQuote},
-		{Pattern: "/history/",     Handler: a.handleHTTPHistory},
-		{Pattern: "/universe",     Handler: a.handleHTTPUniverse},
-		{Pattern: "/brokers",      Handler: a.handleHTTPBrokers},
+		{Pattern: "/portfolios", Handler: a.handleHTTPPortfoliosCollection},
+		{Pattern: "/portfolios/", Handler: a.handleHTTPPortfolioItem},
+		{Pattern: "/quotes/", Handler: a.handleHTTPQuote},
+		{Pattern: "/history/", Handler: a.handleHTTPHistory},
+		{Pattern: "/universe", Handler: a.handleHTTPUniverse},
+		{Pattern: "/brokers", Handler: a.handleHTTPBrokers},
 		{Pattern: "/healthz/details", Handler: a.handleHTTPHealthDetails},
 	}
 }
@@ -292,16 +293,28 @@ func (a *App) handleHTTPPortfolioItem(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	sub := ""
-	if len(parts) > 1 { sub = parts[1] }
+	if len(parts) > 1 {
+		sub = parts[1]
+	}
 	subID := ""
-	if len(parts) > 2 { subID = parts[2] }
+	if len(parts) > 2 {
+		subID = parts[2]
+	}
 	action := ""
-	if len(parts) > 3 { action = parts[3] }
+	if len(parts) > 3 {
+		action = parts[3]
+	}
 
 	pid, err := resolveProjectFromRequest(r)
-	if err != nil { httpErr(w, http.StatusBadRequest, err.Error()); return }
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	pf, err := dbGetPortfolio(globalCtx.AppDB(), pid, id)
-	if err != nil { httpErr(w, http.StatusNotFound, fmt.Sprintf("portfolio %d not found", id)); return }
+	if err != nil {
+		httpErr(w, http.StatusNotFound, fmt.Sprintf("portfolio %d not found", id))
+		return
+	}
 
 	switch {
 	case sub == "" && r.Method == http.MethodGet:
@@ -310,13 +323,49 @@ func (a *App) handleHTTPPortfolioItem(w http.ResponseWriter, r *http.Request) {
 
 	case sub == "" && r.Method == http.MethodPatch:
 		// limited patch — status only (operator action, e.g. resume)
-		var body struct{ Status string `json:"status"` }
+		var body struct {
+			Status string `json:"status"`
+		}
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		if body.Status != "active" && body.Status != "paused" && body.Status != "halted" {
-			httpErr(w, http.StatusBadRequest, "status must be active|paused|halted"); return
+			httpErr(w, http.StatusBadRequest, "status must be active|paused|halted")
+			return
 		}
 		_ = dbSetPortfolioStatus(globalCtx.AppDB(), pf.ID, body.Status)
 		httpJSON(w, 200, map[string]any{"status": body.Status})
+
+	case sub == "agent" && r.Method == http.MethodPatch:
+		var body struct {
+			AgentID any `json:"agent_id"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		agentID, err := parseOptionalAgentID(body.AgentID)
+		if err != nil {
+			httpErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		if agentID > 0 && globalCtx != nil && globalCtx.PlatformAPI() != nil {
+			agent, err := globalCtx.PlatformAPI().GetInstance(agentID)
+			if err != nil {
+				httpErr(w, http.StatusBadRequest, fmt.Sprintf("agent %d not found", agentID))
+				return
+			}
+			if agent.ProjectID != "" && agent.ProjectID != pid {
+				httpErr(w, http.StatusBadRequest, "agent belongs to a different project")
+				return
+			}
+		}
+		agentRef, err := dbBindPortfolioAgent(globalCtx.AppDB(), pf.ID, agentID)
+		if err != nil {
+			httpErr(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		emit("portfolio.agent.changed", map[string]any{
+			"id": pf.ID, "agent_id": agentRef, "agent_instance_id": agentID, "project_id": pid,
+		})
+		httpJSON(w, 200, map[string]any{
+			"portfolio_id": pf.ID, "agent_id": agentRef, "agent_instance_id": agentID,
+		})
 
 	case sub == "positions" && r.Method == http.MethodGet:
 		pos, _ := dbListPositions(globalCtx.AppDB(), pf.ID)
@@ -342,11 +391,18 @@ func (a *App) handleHTTPPortfolioItem(w http.ResponseWriter, r *http.Request) {
 
 	case sub == "orders" && r.Method == http.MethodGet:
 		status := r.URL.Query().Get("status")
-		if status == "" { status = "all" }
+		if status == "" {
+			status = "all"
+		}
 		limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 		rows, err := dbListOrders(globalCtx.AppDB(), pf.ID, status, limit)
-		if err != nil { httpErr(w, 500, err.Error()); return }
-		if rows == nil { rows = []*Order{} }
+		if err != nil {
+			httpErr(w, 500, err.Error())
+			return
+		}
+		if rows == nil {
+			rows = []*Order{}
+		}
 		httpJSON(w, 200, map[string]any{"orders": rows})
 
 	case sub == "orders" && r.Method == http.MethodPost:
@@ -355,7 +411,8 @@ func (a *App) handleHTTPPortfolioItem(w http.ResponseWriter, r *http.Request) {
 		// path; we forward to the tool handler for one source of truth.
 		var body map[string]any
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			httpErr(w, 400, "invalid json"); return
+			httpErr(w, 400, "invalid json")
+			return
 		}
 		body["portfolio_id"] = float64(pf.ID)
 		// Project resolution from the request, not args (env wins for project scope).
@@ -363,7 +420,10 @@ func (a *App) handleHTTPPortfolioItem(w http.ResponseWriter, r *http.Request) {
 		body["_project_id"] = pid
 		body["source_override"] = "human"
 		out, err := a.toolOrderPlace(globalCtx, body)
-		if err != nil { httpErr(w, 400, err.Error()); return }
+		if err != nil {
+			httpErr(w, 400, err.Error())
+			return
+		}
 		httpJSON(w, 200, out)
 
 	case sub == "journal" && r.Method == http.MethodGet:
@@ -371,8 +431,13 @@ func (a *App) handleHTTPPortfolioItem(w http.ResponseWriter, r *http.Request) {
 		since := r.URL.Query().Get("since")
 		limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 		entries, err := dbReadJournal(globalCtx.AppDB(), pf.ID, kind, since, limit)
-		if err != nil { httpErr(w, 500, err.Error()); return }
-		if entries == nil { entries = []*JournalEntry{} }
+		if err != nil {
+			httpErr(w, 500, err.Error())
+			return
+		}
+		if entries == nil {
+			entries = []*JournalEntry{}
+		}
 		httpJSON(w, 200, map[string]any{"entries": entries})
 
 	// POST /portfolios/{id}/orders/{oid}/cancel — UI cancel button.
@@ -382,17 +447,25 @@ func (a *App) handleHTTPPortfolioItem(w http.ResponseWriter, r *http.Request) {
 		out, err := a.toolOrderCancel(globalCtx, map[string]any{
 			"_project_id": pid, "order_id": subID, "reason": reason,
 		})
-		if err != nil { httpErr(w, 400, err.Error()); return }
+		if err != nil {
+			httpErr(w, 400, err.Error())
+			return
+		}
 		httpJSON(w, 200, out)
 
 	// Watchlist — add via POST {symbol}, remove via DELETE ?symbol=X.
 	case sub == "watchlist" && r.Method == http.MethodPost:
-		var body struct{ Symbol string `json:"symbol"` }
+		var body struct {
+			Symbol string `json:"symbol"`
+		}
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		out, err := a.toolWatchlistAdd(globalCtx, map[string]any{
 			"_project_id": pid, "portfolio_id": float64(pf.ID), "symbol": body.Symbol,
 		})
-		if err != nil { httpErr(w, 400, err.Error()); return }
+		if err != nil {
+			httpErr(w, 400, err.Error())
+			return
+		}
 		httpJSON(w, 200, out)
 
 	case sub == "watchlist" && r.Method == http.MethodDelete:
@@ -400,7 +473,10 @@ func (a *App) handleHTTPPortfolioItem(w http.ResponseWriter, r *http.Request) {
 		out, err := a.toolWatchlistRemove(globalCtx, map[string]any{
 			"_project_id": pid, "portfolio_id": float64(pf.ID), "symbol": sym,
 		})
-		if err != nil { httpErr(w, 400, err.Error()); return }
+		if err != nil {
+			httpErr(w, 400, err.Error())
+			return
+		}
 		httpJSON(w, 200, out)
 
 	default:
@@ -413,17 +489,29 @@ func (a *App) handleHTTPPortfolioItem(w http.ResponseWriter, r *http.Request) {
 // panel's Brokers tab + portfolio_create's broker_slug picker don't
 // have to call MCP from the browser.
 func (a *App) handleHTTPBrokers(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet { httpErr(w, 405, "GET only"); return }
+	if r.Method != http.MethodGet {
+		httpErr(w, 405, "GET only")
+		return
+	}
 	out, err := a.toolBrokersList(globalCtx, map[string]any{})
-	if err != nil { httpErr(w, 500, err.Error()); return }
+	if err != nil {
+		httpErr(w, 500, err.Error())
+		return
+	}
 	httpJSON(w, 200, out)
 }
 
 func (a *App) httpListPortfolios(w http.ResponseWriter, r *http.Request) {
 	pid, err := resolveProjectFromRequest(r)
-	if err != nil { httpErr(w, 400, err.Error()); return }
+	if err != nil {
+		httpErr(w, 400, err.Error())
+		return
+	}
 	pfs, err := dbListPortfolios(globalCtx.AppDB(), pid)
-	if err != nil { httpErr(w, 500, err.Error()); return }
+	if err != nil {
+		httpErr(w, 500, err.Error())
+		return
+	}
 	out := make([]map[string]any, 0, len(pfs))
 	for _, p := range pfs {
 		snap, _ := snapshotPortfolio(globalCtx.AppDB(), p)
@@ -441,13 +529,18 @@ func (a *App) httpListPortfolios(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) httpCreatePortfolio(w http.ResponseWriter, r *http.Request) {
 	pid, err := resolveProjectFromRequest(r)
-	if err != nil { httpErr(w, 400, err.Error()); return }
+	if err != nil {
+		httpErr(w, 400, err.Error())
+		return
+	}
 	var body map[string]any
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		httpErr(w, 400, "invalid json"); return
+		httpErr(w, 400, "invalid json")
+		return
 	}
 	if name, _ := body["name"].(string); name == "" {
-		httpErr(w, 400, "name required"); return
+		httpErr(w, 400, "name required")
+		return
 	}
 	// Route through the MCP tool handler so HTTP + agent paths share
 	// the full pre-trade pipeline: broker validation for live mode,
@@ -457,16 +550,28 @@ func (a *App) httpCreatePortfolio(w http.ResponseWriter, r *http.Request) {
 	body["_project_id"] = pid
 	body["source_override"] = "human"
 	out, err := a.toolPortfolioCreate(globalCtx, body)
-	if err != nil { httpErr(w, 500, err.Error()); return }
+	if err != nil {
+		httpErr(w, 500, err.Error())
+		return
+	}
 	httpJSON(w, 201, out)
 }
 
 func (a *App) handleHTTPQuote(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet { httpErr(w, 405, "GET only"); return }
+	if r.Method != http.MethodGet {
+		httpErr(w, 405, "GET only")
+		return
+	}
 	symbol := strings.TrimPrefix(r.URL.Path, "/quotes/")
-	if symbol == "" { httpErr(w, 400, "symbol required"); return }
+	if symbol == "" {
+		httpErr(w, 400, "symbol required")
+		return
+	}
 	out, err := (&App{}).toolMarketQuote(globalCtx, map[string]any{"symbol": symbol})
-	if err != nil { httpErr(w, 404, err.Error()); return }
+	if err != nil {
+		httpErr(w, 404, err.Error())
+		return
+	}
 	httpJSON(w, 200, out)
 }
 
@@ -474,21 +579,38 @@ func (a *App) handleHTTPQuote(w http.ResponseWriter, r *http.Request) {
 // symbol. Wraps the market_history MCP tool. UI uses this for the Trade
 // tab's price chart and the Positions tab's sparklines.
 func (a *App) handleHTTPHistory(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet { httpErr(w, 405, "GET only"); return }
+	if r.Method != http.MethodGet {
+		httpErr(w, 405, "GET only")
+		return
+	}
 	symbol := strings.TrimPrefix(r.URL.Path, "/history/")
-	if symbol == "" { httpErr(w, 400, "symbol required"); return }
+	if symbol == "" {
+		httpErr(w, 400, "symbol required")
+		return
+	}
 	rng := r.URL.Query().Get("range")
-	if rng == "" { rng = "1D" }
+	if rng == "" {
+		rng = "1D"
+	}
 	out, err := (&App{}).toolMarketHistory(globalCtx, map[string]any{
 		"symbol": symbol, "range": rng,
 	})
-	if err != nil { httpErr(w, 404, err.Error()); return }
+	if err != nil {
+		httpErr(w, 404, err.Error())
+		return
+	}
 	httpJSON(w, 200, out)
 }
 
 func (a *App) handleHTTPUniverse(w http.ResponseWriter, r *http.Request) {
-	if r.Method != http.MethodGet { httpErr(w, 405, "GET only"); return }
-	if globalEngine == nil { httpErr(w, 503, "engine warming"); return }
+	if r.Method != http.MethodGet {
+		httpErr(w, 405, "GET only")
+		return
+	}
+	if globalEngine == nil {
+		httpErr(w, 503, "engine warming")
+		return
+	}
 	httpJSON(w, 200, map[string]any{"symbols": globalEngine.provider.Universe()})
 }
 
@@ -577,6 +699,40 @@ func int64Arg(args map[string]any, key string, def int64) int64 {
 		}
 	}
 	return def
+}
+
+func parseOptionalAgentID(v any) (int64, error) {
+	switch x := v.(type) {
+	case nil:
+		return 0, nil
+	case float64:
+		if x < 0 || x != float64(int64(x)) {
+			return 0, errors.New("agent_id must be a positive integer")
+		}
+		return int64(x), nil
+	case int:
+		if x < 0 {
+			return 0, errors.New("agent_id must be a positive integer")
+		}
+		return int64(x), nil
+	case int64:
+		if x < 0 {
+			return 0, errors.New("agent_id must be a positive integer")
+		}
+		return x, nil
+	case string:
+		s := strings.TrimSpace(x)
+		if s == "" {
+			return 0, nil
+		}
+		n, err := strconv.ParseInt(s, 10, 64)
+		if err != nil || n < 0 {
+			return 0, errors.New("agent_id must be a positive integer")
+		}
+		return n, nil
+	default:
+		return 0, errors.New("agent_id must be a positive integer")
+	}
 }
 
 func floatArg(args map[string]any, key string, def float64) float64 {

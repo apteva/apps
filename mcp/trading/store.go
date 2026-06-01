@@ -31,13 +31,13 @@ type Portfolio struct {
 	UpdatedAt      string   `json:"updated_at,omitempty"`
 
 	// Computed by snapshot — not stored.
-	Equity        float64 `json:"equity,omitempty"`
-	DayPnL        float64 `json:"day_pnl,omitempty"`
-	DayPnLPct     float64 `json:"day_pnl_pct,omitempty"`
-	OpenPnL       float64 `json:"open_pnl,omitempty"`
-	OpenPnLPct    float64 `json:"open_pnl_pct,omitempty"`
-	BuyingPower   float64 `json:"buying_power,omitempty"`
-	Watchlist     []string  `json:"watchlist,omitempty"`
+	Equity      float64  `json:"equity,omitempty"`
+	DayPnL      float64  `json:"day_pnl,omitempty"`
+	DayPnLPct   float64  `json:"day_pnl_pct,omitempty"`
+	OpenPnL     float64  `json:"open_pnl,omitempty"`
+	OpenPnLPct  float64  `json:"open_pnl_pct,omitempty"`
+	BuyingPower float64  `json:"buying_power,omitempty"`
+	Watchlist   []string `json:"watchlist,omitempty"`
 }
 
 type Position struct {
@@ -56,53 +56,53 @@ type Position struct {
 }
 
 type Order struct {
-	ID              string  `json:"id"`
-	PortfolioID     int64   `json:"portfolio_id"`
-	Symbol          string  `json:"symbol"`
-	AssetClass      string  `json:"asset_class"`
-	Side            string  `json:"side"`
-	Type            string  `json:"type"`
-	Qty             float64 `json:"qty"`
-	FilledQty       float64 `json:"filled_qty"`
-	AvgFillPrice    float64 `json:"avg_fill_price,omitempty"`
+	ID              string   `json:"id"`
+	PortfolioID     int64    `json:"portfolio_id"`
+	Symbol          string   `json:"symbol"`
+	AssetClass      string   `json:"asset_class"`
+	Side            string   `json:"side"`
+	Type            string   `json:"type"`
+	Qty             float64  `json:"qty"`
+	FilledQty       float64  `json:"filled_qty"`
+	AvgFillPrice    float64  `json:"avg_fill_price,omitempty"`
 	LimitPrice      *float64 `json:"limit_price,omitempty"`
 	StopPrice       *float64 `json:"stop_price,omitempty"`
-	TIF             string  `json:"tif"`
-	Status          string  `json:"status"`
-	Rationale       string  `json:"rationale"`
-	Source          string  `json:"source"`
-	RejectionCode   string  `json:"rejection_code,omitempty"`
-	RejectionDetail string  `json:"rejection_detail,omitempty"`
-	PlacedAt        string  `json:"placed_at"`
-	ResolvedAt      string  `json:"resolved_at,omitempty"`
+	TIF             string   `json:"tif"`
+	Status          string   `json:"status"`
+	Rationale       string   `json:"rationale"`
+	Source          string   `json:"source"`
+	RejectionCode   string   `json:"rejection_code,omitempty"`
+	RejectionDetail string   `json:"rejection_detail,omitempty"`
+	PlacedAt        string   `json:"placed_at"`
+	ResolvedAt      string   `json:"resolved_at,omitempty"`
 }
 
 type Fill struct {
-	ID         int64   `json:"id"`
-	OrderID    string  `json:"order_id"`
-	Qty        float64 `json:"qty"`
-	Price      float64 `json:"price"`
-	Fee        float64 `json:"fee"`
-	FilledAt   string  `json:"filled_at"`
+	ID       int64   `json:"id"`
+	OrderID  string  `json:"order_id"`
+	Qty      float64 `json:"qty"`
+	Price    float64 `json:"price"`
+	Fee      float64 `json:"fee"`
+	FilledAt string  `json:"filled_at"`
 }
 
 type JournalEntry struct {
-	ID          int64                  `json:"id"`
-	PortfolioID int64                  `json:"portfolio_id"`
-	Kind        string                 `json:"kind"`
-	Body        string                 `json:"body"`
-	Metadata    map[string]any         `json:"metadata,omitempty"`
-	CreatedAt   string                 `json:"created_at"`
+	ID          int64          `json:"id"`
+	PortfolioID int64          `json:"portfolio_id"`
+	Kind        string         `json:"kind"`
+	Body        string         `json:"body"`
+	Metadata    map[string]any `json:"metadata,omitempty"`
+	CreatedAt   string         `json:"created_at"`
 }
 
 type Mark struct {
-	Symbol     string  `json:"symbol"`
-	AssetClass string  `json:"asset_class"`
-	Price      float64 `json:"price"`
+	Symbol     string   `json:"symbol"`
+	AssetClass string   `json:"asset_class"`
+	Price      float64  `json:"price"`
 	NoPrice    *float64 `json:"no_price,omitempty"`
 	PrevClose  *float64 `json:"prev_close,omitempty"`
 	Volume24h  *float64 `json:"volume_24h,omitempty"`
-	MarkedAt   string  `json:"marked_at"`
+	MarkedAt   string   `json:"marked_at"`
 }
 
 type Alert struct {
@@ -232,6 +232,43 @@ func scanPortfolioRows(rows *sql.Rows) (*Portfolio, error) {
 func dbSetPortfolioStatus(db *sql.DB, id int64, status string) error {
 	_, err := db.Exec(`UPDATE portfolios SET status = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, status, id)
 	return err
+}
+
+func dbBindPortfolioAgent(db *sql.DB, portfolioID, agentID int64) (string, error) {
+	tx, err := db.Begin()
+	if err != nil {
+		return "", err
+	}
+	defer tx.Rollback()
+
+	if _, err := tx.Exec(`DELETE FROM portfolio_bindings WHERE portfolio_id = ? AND role = 'manager'`, portfolioID); err != nil {
+		return "", err
+	}
+
+	agentRef := ""
+	var agentArg any
+	if agentID > 0 {
+		agentRef = fmt.Sprintf("apteva-instance:%d", agentID)
+		agentArg = agentRef
+		if _, err := tx.Exec(`
+			INSERT INTO portfolio_bindings (portfolio_id, instance_id, role)
+			VALUES (?, ?, 'manager')
+			ON CONFLICT(portfolio_id, instance_id) DO UPDATE SET role = 'manager'`,
+			portfolioID, agentID); err != nil {
+			return "", err
+		}
+	}
+
+	if _, err := tx.Exec(`
+		UPDATE portfolios SET agent_id = ?, updated_at = CURRENT_TIMESTAMP
+		WHERE id = ?`,
+		agentArg, portfolioID); err != nil {
+		return "", err
+	}
+	if err := tx.Commit(); err != nil {
+		return "", err
+	}
+	return agentRef, nil
 }
 
 func dbAddCash(db *sql.DB, id int64, delta float64) error {
@@ -466,9 +503,17 @@ func scanOrder(row *sql.Row) (*Order, error) {
 		&o.PlacedAt, &resolvedAt); err != nil {
 		return nil, err
 	}
-	if lp.Valid { v := lp.Float64; o.LimitPrice = &v }
-	if sp.Valid { v := sp.Float64; o.StopPrice = &v }
-	if resolvedAt != "" { o.ResolvedAt = resolvedAt }
+	if lp.Valid {
+		v := lp.Float64
+		o.LimitPrice = &v
+	}
+	if sp.Valid {
+		v := sp.Float64
+		o.StopPrice = &v
+	}
+	if resolvedAt != "" {
+		o.ResolvedAt = resolvedAt
+	}
 	return &o, nil
 }
 
@@ -482,9 +527,17 @@ func scanOrderRows(rows *sql.Rows) (*Order, error) {
 		&o.PlacedAt, &resolvedAt); err != nil {
 		return nil, err
 	}
-	if lp.Valid { v := lp.Float64; o.LimitPrice = &v }
-	if sp.Valid { v := sp.Float64; o.StopPrice = &v }
-	if resolvedAt != "" { o.ResolvedAt = resolvedAt }
+	if lp.Valid {
+		v := lp.Float64
+		o.LimitPrice = &v
+	}
+	if sp.Valid {
+		v := sp.Float64
+		o.StopPrice = &v
+	}
+	if resolvedAt != "" {
+		o.ResolvedAt = resolvedAt
+	}
 	return &o, nil
 }
 
@@ -724,9 +777,18 @@ func dbGetMark(db *sql.DB, symbol string) (*Mark, error) {
 	if err := row.Scan(&m.Symbol, &m.AssetClass, &m.Price, &no, &pc, &vol, &m.MarkedAt); err != nil {
 		return nil, err
 	}
-	if no.Valid  { v := no.Float64;  m.NoPrice = &v }
-	if pc.Valid  { v := pc.Float64;  m.PrevClose = &v }
-	if vol.Valid { v := vol.Float64; m.Volume24h = &v }
+	if no.Valid {
+		v := no.Float64
+		m.NoPrice = &v
+	}
+	if pc.Valid {
+		v := pc.Float64
+		m.PrevClose = &v
+	}
+	if vol.Valid {
+		v := vol.Float64
+		m.Volume24h = &v
+	}
 	return &m, nil
 }
 
