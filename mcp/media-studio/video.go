@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
 	sdk "github.com/apteva/app-sdk"
@@ -132,11 +133,11 @@ func (a *App) handleAsyncQueueResponse(ctx *sdk.AppCtx, kind, role, providerSlug
 	storageFolder := strArg(args, "_storage_folder", "")
 	requestJSON, _ := json.Marshal(args)
 
-	// Cost: video has a quote endpoint (Venice); avatar providers bill
-	// per-minute with no per-render quote, so cost stays 0 there.
 	costUSD := 0.0
 	if kind == KindVideo {
 		costUSD = veniceVideoQuote(ctx, providerSlug, args)
+	} else if kind == KindAvatar {
+		costUSD = heygenAvatarQuote(providerSlug, args)
 	}
 
 	result, err := globalCtx.AppDB().Exec(
@@ -189,6 +190,67 @@ func (a *App) handleAsyncQueueResponse(ctx *sdk.AppCtx, kind, role, providerSlug
 			"storage_folder": storageFolder,
 		},
 	}
+}
+
+// heygenAvatarQuote estimates API-key billing for HeyGen Avatar IV/V
+// renders. HeyGen bills this path by output duration; before completion
+// we only have the script, so callers may pass options.estimated_duration_seconds
+// from the UI and we otherwise estimate speech at about 150 wpm.
+func heygenAvatarQuote(providerSlug string, args map[string]any) float64 {
+	if providerSlug != "heygen" {
+		return 0
+	}
+	opts, _ := args["options"].(map[string]any)
+	seconds := floatArg(opts, "estimated_duration_seconds", 0)
+	if seconds <= 0 {
+		seconds = estimateSpeechSeconds(strArg(args, "prompt", ""))
+	}
+	if seconds <= 0 {
+		return 0
+	}
+	avatarType := strArg(opts, "avatar_type", "photo_avatar")
+	resolution := strings.ToLower(strArg(opts, "resolution", "1080p"))
+	rate := 0.05
+	if avatarType == "studio_avatar" || avatarType == "digital_twin" {
+		rate = 0.0667
+	}
+	if resolution == "4k" {
+		if avatarType == "photo_avatar" {
+			rate = 0.0667
+		} else {
+			rate = 0.0833
+		}
+	}
+	return seconds * rate
+}
+
+func estimateSpeechSeconds(script string) float64 {
+	words := len(strings.Fields(script))
+	if words == 0 {
+		return 0
+	}
+	seconds := float64(words) / 2.5
+	if seconds < 5 {
+		return 5
+	}
+	return seconds
+}
+
+func floatArg(m map[string]any, key string, def float64) float64 {
+	if m == nil {
+		return def
+	}
+	switch v := m[key].(type) {
+	case float64:
+		return v
+	case float32:
+		return float64(v)
+	case int:
+		return float64(v)
+	case int64:
+		return float64(v)
+	}
+	return def
 }
 
 // veniceVideoQuote calls POST /video/quote with the same shape we'd

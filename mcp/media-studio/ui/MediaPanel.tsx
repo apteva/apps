@@ -145,7 +145,12 @@ interface AvatarEntry {
   id: string;
   name: string;
   thumbnail?: string;
+  thumbnail_type?: "image" | "video" | string;
   status?: string;
+  default_voice_id?: string;
+  supported_api_engines?: string[];
+  avatar_type?: string;
+  ownership?: string;
 }
 
 interface VoiceEntry {
@@ -310,6 +315,9 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
   // Avatar (talking-head) state — replica/avatar picker + selection.
   const [avatars, setAvatars] = useState<AvatarEntry[]>([]);
   const [selectedAvatar, setSelectedAvatar] = useState("");
+  const [avatarEngine, setAvatarEngine] = useState("avatar_v");
+  const [avatarResolution, setAvatarResolution] = useState("1080p");
+  const [avatarAspect, setAvatarAspect] = useState("16:9");
   // Voices — HeyGen needs an explicit voice_id (Tavus bakes voice into
   // the replica, so this stays empty there). Reuses the `voice` state.
   const [voices, setVoices] = useState<VoiceEntry[]>([]);
@@ -606,6 +614,22 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
   const currentModelList = activeKind === "image" && isEditMode ? editLiveModels : liveModels;
   const currentModel: LiveModel | undefined =
     currentModelList?.find((m) => m.id === currentModelId);
+  const activeGeneratingModel =
+    activeKind === "image"
+      ? (isEditMode ? editModel : imageModel)
+      : activeKind === "video"
+        ? videoModel
+        : activeKind === "audio_tts"
+          ? audioModel
+          : activeKind === "audio_sfx"
+            ? sfxModel
+            : activeKind === "music"
+              ? musicModel
+              : selectedAvatar;
+  const pendingVideoJobs =
+    activeKind === "video" || activeKind === "avatar"
+      ? videoJobs.filter((j) => j.status === "queued" || j.status === "polling")
+      : [];
   // Video reference-image is allowed for both standard (text-to-video)
   // and image-to-video models — required for the latter, optional
   // hint for the former (Venice's queue accepts image_url on most).
@@ -703,6 +727,17 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
         // prompt carries the spoken script; avatar = replica/avatar id.
         body.avatar = selectedAvatar;
         if (voice) body.voice = voice;
+        if (currentBinding?.slug === "heygen") {
+          const selected = avatars.find((x) => x.id === selectedAvatar);
+          const options: Record<string, unknown> = {
+            resolution: avatarResolution,
+            aspect: avatarAspect,
+            estimated_duration_seconds: estimateSpeechSeconds(prompt),
+          };
+          if (avatarEngine !== "auto") options.engine = { type: avatarEngine };
+          if (selected?.avatar_type) options.avatar_type = selected.avatar_type;
+          body.options = options;
+        }
       }
       const res = await fetch(`${API}/generate`, {
         method: "POST",
@@ -860,6 +895,13 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
             avatars={avatars}
             selectedAvatar={selectedAvatar}
             setSelectedAvatar={setSelectedAvatar}
+            avatarProvider={currentBinding?.slug || ""}
+            avatarEngine={avatarEngine}
+            setAvatarEngine={setAvatarEngine}
+            avatarResolution={avatarResolution}
+            setAvatarResolution={setAvatarResolution}
+            avatarAspect={avatarAspect}
+            setAvatarAspect={setAvatarAspect}
             voices={voices}
             storageBound={!!bindings?.storage?.bound}
             storageFolder={storageFolder}
@@ -868,12 +910,12 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
             folderSuggestions={folderSuggestions}
           />
 
-          {(activeKind === "video" || activeKind === "avatar") && videoJobs.length > 0 && (
+          {(activeKind === "video" || activeKind === "avatar") && videoJobs.some((j) => j.status === "failed") && (
             <VideoJobsBanner jobs={videoJobs} />
           )}
 
           <div className="flex-1 overflow-auto border border-border rounded">
-            {items.length === 0 && !generating ? (
+            {items.length === 0 && !generating && pendingVideoJobs.length === 0 ? (
               <div className="py-12 px-6 text-center text-text-muted text-sm">
                 {status || "No generations yet for this kind."}
               </div>
@@ -885,7 +927,8 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
                 onOpenLightbox={setLightbox}
                 generating={generating}
                 generatingPrompt={prompt}
-                generatingModel={isEditMode ? editModel : imageModel}
+                generatingModel={activeGeneratingModel}
+                pendingJobs={pendingVideoJobs}
               />
             )}
           </div>
@@ -1032,6 +1075,13 @@ interface ComposerProps {
   avatars: AvatarEntry[];
   selectedAvatar: string;
   setSelectedAvatar: (v: string) => void;
+  avatarProvider: string;
+  avatarEngine: string;
+  setAvatarEngine: (v: string) => void;
+  avatarResolution: string;
+  setAvatarResolution: (v: string) => void;
+  avatarAspect: string;
+  setAvatarAspect: (v: string) => void;
   voices: VoiceEntry[];
   storageBound: boolean;
   storageFolder: string;
@@ -1054,6 +1104,13 @@ function Composer(p: ComposerProps) {
           : p.kind === "audio_sfx"
             ? "A door creaking open"
             : "a cat in a hat";
+  const selectedAvatar = p.avatars.find((av) => av.id === p.selectedAvatar);
+  const avatarVBlocked =
+    p.kind === "avatar" &&
+    p.avatarProvider === "heygen" &&
+    p.avatarEngine === "avatar_v" &&
+    !!selectedAvatar &&
+    !avatarSupportsEngine(selectedAvatar, "avatar_v");
   return (
     <div className="flex items-end gap-3 flex-wrap">
       <div className="flex-1" style={{ minWidth: 240 }}>
@@ -1163,6 +1220,18 @@ function Composer(p: ComposerProps) {
           setSelected={p.setSelectedAvatar}
         />
       )}
+      {p.kind === "avatar" && p.avatarProvider === "heygen" && (
+        <HeyGenAvatarOptions
+          prompt={p.prompt}
+          selectedAvatar={selectedAvatar}
+          engine={p.avatarEngine}
+          setEngine={p.setAvatarEngine}
+          resolution={p.avatarResolution}
+          setResolution={p.setAvatarResolution}
+          aspect={p.avatarAspect}
+          setAspect={p.setAvatarAspect}
+        />
+      )}
       {p.kind === "avatar" && p.voices.length > 0 && (
         <VoiceSelect voice={p.voice} setVoice={p.setVoice} voices={p.voices} />
       )}
@@ -1179,8 +1248,9 @@ function Composer(p: ComposerProps) {
       )}
       <button
         onClick={p.generate}
-        disabled={!p.prompt.trim() || p.generating || p.disabled}
+        disabled={!p.prompt.trim() || p.generating || p.disabled || avatarVBlocked}
         className="px-3 py-1.5 text-sm bg-accent text-bg rounded font-bold disabled:opacity-50"
+        title={avatarVBlocked ? "Selected avatar does not advertise Avatar V support" : undefined}
       >
         {p.generating ? "…" : p.isEditMode ? "Edit" : p.kind === "avatar" ? "Generate avatar" : "Generate"}
       </button>
@@ -1188,9 +1258,9 @@ function Composer(p: ComposerProps) {
   );
 }
 
-// AvatarPicker — replica/avatar grid for the Avatar tab. Renders a
-// thumbnail (video preview poster) per replica + a label; click to
-// select. Falls back to a plain select when there are no thumbnails.
+// AvatarPicker — replica/avatar grid for the Avatar tab. Private
+// HeyGen looks are grouped first so custom avatars do not get buried
+// under the public library catalog.
 function AvatarPicker({
   avatars,
   selected,
@@ -1210,49 +1280,209 @@ function AvatarPicker({
       </div>
     );
   }
+  const sections = avatarSections(avatars);
   return (
     <div style={{ flexBasis: "100%" }}>
-      <label className="text-text-muted text-xs block mb-1">Avatar / replica</label>
-      <div className="flex gap-2 flex-wrap">
-        {avatars.map((av) => {
-          const isSel = av.id === selected;
-          return (
-            <button
-              key={av.id}
-              onClick={() => setSelected(av.id)}
-              title={`${av.name || av.id}${av.status ? ` (${av.status})` : ""}`}
-              className={
-                "border rounded overflow-hidden text-left " +
-                (isSel ? "border-accent" : "border-border hover:border-accent")
-              }
-              style={{ width: 96 }}
-            >
-              {av.thumbnail ? (
-                <video
-                  src={av.thumbnail}
-                  muted
-                  loop
-                  onMouseEnter={(e) => (e.currentTarget as HTMLVideoElement).play()}
-                  onMouseLeave={(e) => (e.currentTarget as HTMLVideoElement).pause()}
-                  style={{ width: 96, height: 96, objectFit: "cover", display: "block" }}
-                />
-              ) : (
-                <div
-                  className="flex items-center justify-center text-text-dim"
-                  style={{ width: 96, height: 96, background: "var(--apteva-bg-input, #222)", fontSize: 10 }}
-                >
-                  {av.name || av.id}
-                </div>
-              )}
-              <div className="text-text truncate px-1 py-0.5" style={{ fontSize: 10 }}>
-                {av.name || av.id}
-              </div>
-            </button>
-          );
-        })}
+      <label className="text-text-muted text-xs block mb-1">Avatar / replica ({avatars.length})</label>
+      <div className="flex flex-col gap-2" style={{ maxHeight: 324, overflow: "auto", paddingRight: 4 }}>
+        {sections.map((section) => (
+          <div key={section.key}>
+            <div className="text-text-dim mb-1" style={{ fontSize: 10 }}>
+              {section.label} ({section.items.length})
+            </div>
+            <div className="flex gap-2 flex-wrap">
+              {section.items.map((av) => (
+                <AvatarTile key={av.id} avatar={av} selected={av.id === selected} onSelect={() => setSelected(av.id)} />
+              ))}
+            </div>
+          </div>
+        ))}
       </div>
     </div>
   );
+}
+
+function AvatarTile({ avatar, selected, onSelect }: { avatar: AvatarEntry; selected: boolean; onSelect: () => void }) {
+  const titleParts = [
+    avatar.name || avatar.id,
+    avatar.status ? `(${avatar.status})` : "",
+    avatar.avatar_type ? avatar.avatar_type.replace(/_/g, " ") : "",
+  ].filter(Boolean);
+  return (
+    <button
+      onClick={onSelect}
+      title={titleParts.join(" ")}
+      className={
+        "border rounded overflow-hidden text-left bg-bg-card " +
+        (selected ? "border-accent" : "border-border hover:border-accent")
+      }
+      style={{ width: 96 }}
+    >
+      <AvatarThumb avatar={avatar} />
+      <div className="text-text truncate px-1 pt-0.5" style={{ fontSize: 10 }}>
+        {avatar.name || avatar.id}
+      </div>
+      <div className="text-text-dim truncate px-1 pb-0.5" style={{ fontSize: 9 }}>
+        {avatarTypeLabel(avatar)}
+      </div>
+    </button>
+  );
+}
+
+function AvatarThumb({ avatar }: { avatar: AvatarEntry }) {
+  if (!avatar.thumbnail) {
+    return (
+      <div
+        className="flex items-center justify-center text-text-dim"
+        style={{ width: 96, height: 96, background: "var(--apteva-bg-input, #222)", fontSize: 10 }}
+      >
+        {avatar.name || avatar.id}
+      </div>
+    );
+  }
+  if (avatar.thumbnail_type === "image" || looksLikeImageURL(avatar.thumbnail)) {
+    return (
+      <img
+        src={avatar.thumbnail}
+        alt=""
+        loading="lazy"
+        style={{ width: 96, height: 96, objectFit: "cover", display: "block" }}
+      />
+    );
+  }
+  return (
+    <video
+      src={avatar.thumbnail}
+      muted
+      loop
+      playsInline
+      onMouseEnter={(e) => (e.currentTarget as HTMLVideoElement).play()}
+      onMouseLeave={(e) => (e.currentTarget as HTMLVideoElement).pause()}
+      style={{ width: 96, height: 96, objectFit: "cover", display: "block" }}
+    />
+  );
+}
+
+function avatarSections(avatars: AvatarEntry[]) {
+  const isPrivate = (av: AvatarEntry) => av.ownership === "private";
+  const isPublic = (av: AvatarEntry) => av.ownership !== "private";
+  const sections = [
+    { key: "mine", label: "My avatars", items: avatars.filter(isPrivate) },
+    {
+      key: "photo",
+      label: "Photo avatars",
+      items: avatars.filter((av) => isPublic(av) && av.avatar_type === "photo_avatar"),
+    },
+    {
+      key: "studio",
+      label: "Studio avatars",
+      items: avatars.filter((av) => isPublic(av) && (av.avatar_type === "studio_avatar" || av.avatar_type === "digital_twin")),
+    },
+    {
+      key: "library",
+      label: "Library",
+      items: avatars.filter((av) => isPublic(av) && av.avatar_type !== "photo_avatar" && av.avatar_type !== "studio_avatar" && av.avatar_type !== "digital_twin"),
+    },
+  ];
+  return sections.filter((section) => section.items.length > 0);
+}
+
+function avatarTypeLabel(av: AvatarEntry) {
+  if (av.ownership === "private") return "mine";
+  if (!av.avatar_type) return av.ownership === "public" ? "library" : "";
+  return av.avatar_type.replace(/_/g, " ");
+}
+
+function looksLikeImageURL(url: string) {
+  const clean = url.split("?", 1)[0].toLowerCase();
+  return clean.endsWith(".png") || clean.endsWith(".jpg") || clean.endsWith(".jpeg") || clean.endsWith(".webp");
+}
+
+function avatarSupportsEngine(av: AvatarEntry, engine: string) {
+  const engines = av.supported_api_engines || [];
+  if (engines.length === 0) return engine !== "avatar_v";
+  return engines.includes(engine);
+}
+
+function HeyGenAvatarOptions({
+  prompt,
+  selectedAvatar,
+  engine,
+  setEngine,
+  resolution,
+  setResolution,
+  aspect,
+  setAspect,
+}: {
+  prompt: string;
+  selectedAvatar?: AvatarEntry;
+  engine: string;
+  setEngine: (v: string) => void;
+  resolution: string;
+  setResolution: (v: string) => void;
+  aspect: string;
+  setAspect: (v: string) => void;
+}) {
+  const cost = estimateHeyGenAvatarCost(prompt, selectedAvatar, resolution);
+  const blocked = engine === "avatar_v" && !!selectedAvatar && !avatarSupportsEngine(selectedAvatar, "avatar_v");
+  return (
+    <>
+      <div>
+        <label className="text-text-muted text-xs block">Engine</label>
+        <select
+          value={engine}
+          onChange={(e) => setEngine(e.target.value)}
+          className="bg-bg-input border border-border rounded px-2 py-1.5 text-sm"
+        >
+          <option value="avatar_v">Avatar V</option>
+          <option value="avatar_iv">Avatar IV</option>
+          <option value="auto">Auto</option>
+        </select>
+      </div>
+      <div>
+        <label className="text-text-muted text-xs block">Resolution</label>
+        <select
+          value={resolution}
+          onChange={(e) => setResolution(e.target.value)}
+          className="bg-bg-input border border-border rounded px-2 py-1.5 text-sm"
+        >
+          <option value="1080p">1080p</option>
+          <option value="720p">720p</option>
+          <option value="4k">4K</option>
+        </select>
+      </div>
+      <div>
+        <label className="text-text-muted text-xs block">Aspect</label>
+        <select
+          value={aspect}
+          onChange={(e) => setAspect(e.target.value)}
+          className="bg-bg-input border border-border rounded px-2 py-1.5 text-sm"
+        >
+          <option value="16:9">16:9</option>
+          <option value="9:16">9:16</option>
+        </select>
+      </div>
+      <div className="text-text-dim text-xs pb-1">
+        {blocked ? "Avatar V unavailable" : cost ? `est. ${formatCost(cost)} API` : "est. after script"}
+      </div>
+    </>
+  );
+}
+
+function estimateHeyGenAvatarCost(prompt: string, selectedAvatar: AvatarEntry | undefined, resolution: string) {
+  const seconds = estimateSpeechSeconds(prompt);
+  if (seconds <= 0) return 0;
+  const type = selectedAvatar?.avatar_type || "photo_avatar";
+  const is4k = resolution.toLowerCase() === "4k";
+  let rate = type === "studio_avatar" || type === "digital_twin" ? 0.0667 : 0.05;
+  if (is4k) rate = type === "photo_avatar" ? 0.0667 : 0.0833;
+  return seconds * rate;
+}
+
+function estimateSpeechSeconds(script: string) {
+  const words = script.trim().split(/\s+/).filter(Boolean).length;
+  if (words === 0) return 0;
+  return Math.max(5, words / 2.5);
 }
 
 function SafeModeToggle({
@@ -1877,6 +2107,7 @@ function Gallery({
   generating,
   generatingPrompt,
   generatingModel,
+  pendingJobs,
 }: {
   kind: Kind;
   items: Generation[];
@@ -1885,6 +2116,7 @@ function Gallery({
   generating: boolean;
   generatingPrompt: string;
   generatingModel: string;
+  pendingJobs: { id: number; queue_id: string; model: string; prompt: string; status: string; error: string }[];
 }) {
   if (kind === "image") {
     return (
@@ -1945,6 +2177,14 @@ function Gallery({
       {generating && (kind === "video" || kind === "avatar") && (
         <GeneratingCard prompt={generatingPrompt} model={generatingModel} />
       )}
+      {(kind === "video" || kind === "avatar") &&
+        pendingJobs.map((job) => (
+          <GeneratingCard
+            key={`job-${job.id}`}
+            prompt={job.prompt}
+            model={job.model ? `#${job.id} · ${job.model}` : `#${job.id}`}
+          />
+        ))}
       {items.map((g) => {
         const url = g.storage_urls?.[0] || g.local_cache_url || g.upstream_urls?.[0] || "";
         return (
@@ -2116,25 +2356,10 @@ function VideoJobsBanner({
 }: {
   jobs: { id: number; queue_id: string; model: string; prompt: string; status: string; error: string }[];
 }) {
-  const inFlight = jobs.filter((j) => j.status === "queued" || j.status === "polling");
   const failed = jobs.filter((j) => j.status === "failed");
-  if (inFlight.length === 0 && failed.length === 0) return null;
+  if (failed.length === 0) return null;
   return (
     <div className="flex flex-col gap-1 p-2 rounded border border-border bg-bg-card">
-      {inFlight.length > 0 && (
-        <div className="flex items-center gap-2 text-xs">
-          <span className="text-text">
-            <strong>{inFlight.length}</strong> video{inFlight.length === 1 ? "" : "s"} processing
-          </span>
-          <span className="text-text-dim">
-            {inFlight
-              .slice(0, 3)
-              .map((j) => `#${j.id} (${j.model})`)
-              .join(", ")}
-            {inFlight.length > 3 && `, +${inFlight.length - 3} more`}
-          </span>
-        </div>
-      )}
       {failed.map((j) => (
         <div key={j.id} className="flex items-start gap-2 text-xs">
           <span className="text-text" style={{ color: "var(--apteva-danger, #ef4444)" }}>

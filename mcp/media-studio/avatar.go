@@ -290,10 +290,12 @@ type avatarEntry struct {
 	ID                  string   `json:"id"`
 	Name                string   `json:"name"`
 	Thumbnail           string   `json:"thumbnail,omitempty"`
+	ThumbnailType       string   `json:"thumbnail_type,omitempty"`
 	Status              string   `json:"status,omitempty"`
 	DefaultVoiceID      string   `json:"default_voice_id,omitempty"`
 	SupportedAPIEngines []string `json:"supported_api_engines,omitempty"`
 	AvatarType          string   `json:"avatar_type,omitempty"`
+	Ownership           string   `json:"ownership,omitempty"`
 }
 
 // handleListAvatars → GET /avatars. Calls the bound avatar_provider's
@@ -352,55 +354,165 @@ func listAvatarsFor(ctx *sdk.AppCtx, bound *sdk.BoundIntegration) ([]avatarEntry
 				continue
 			}
 			out = append(out, avatarEntry{
-				ID:        r.ReplicaID,
-				Name:      r.ReplicaName,
-				Thumbnail: r.ThumbnailVideoURL,
-				Status:    r.Status,
+				ID:            r.ReplicaID,
+				Name:          r.ReplicaName,
+				Thumbnail:     r.ThumbnailVideoURL,
+				ThumbnailType: "video",
+				Status:        r.Status,
+				Ownership:     "private",
 			})
 		}
 		return out, nil
 	case "heygen":
-		res, err := ctx.PlatformAPI().ExecuteIntegrationTool(bound.ConnectionID, "list_avatar_looks",
-			map[string]any{"limit": 50})
+		return listHeyGenAvatarLooks(ctx, bound)
+	}
+	return nil, fmt.Errorf("unsupported avatar provider: %s", bound.AppSlug)
+}
+
+type heygenAvatarLook struct {
+	ID                  string   `json:"id"`
+	Name                string   `json:"name"`
+	PreviewImageURL     string   `json:"preview_image_url"`
+	PreviewVideoURL     string   `json:"preview_video_url"`
+	Status              string   `json:"status"`
+	DefaultVoiceID      string   `json:"default_voice_id"`
+	SupportedAPIEngines []string `json:"supported_api_engines"`
+	AvatarType          string   `json:"avatar_type"`
+	Ownership           string   `json:"ownership"`
+}
+
+func listHeyGenAvatarLooks(ctx *sdk.AppCtx, bound *sdk.BoundIntegration) ([]avatarEntry, error) {
+	out := []avatarEntry{}
+	seen := map[string]bool{}
+	for _, ownership := range []string{"private", "public"} {
+		items, err := fetchHeyGenAvatarLookPages(ctx, bound, ownership)
+		if err != nil {
+			items, err = fetchHeyGenAvatarLookPages(ctx, bound, "")
+			if err != nil {
+				return nil, err
+			}
+		}
+		for _, av := range items {
+			if av.ID == "" || seen[av.ID] {
+				continue
+			}
+			seen[av.ID] = true
+			if av.Ownership == "" {
+				av.Ownership = ownership
+			}
+			out = append(out, normalizeHeyGenAvatarLook(av))
+		}
+	}
+	return out, nil
+}
+
+func fetchHeyGenAvatarLookPages(ctx *sdk.AppCtx, bound *sdk.BoundIntegration, ownership string) ([]heygenAvatarLook, error) {
+	var out []heygenAvatarLook
+	token := ""
+	for page := 0; page < 3; page++ {
+		req := map[string]any{"limit": 50}
+		if ownership != "" {
+			req["ownership"] = ownership
+		}
+		if token != "" {
+			req["token"] = token
+		}
+		res, err := ctx.PlatformAPI().ExecuteIntegrationTool(bound.ConnectionID, "list_avatar_looks", req)
 		if err != nil {
 			return nil, err
 		}
 		if res == nil || !res.Success {
 			return nil, errors.New("heygen list_avatar_looks non-2xx")
 		}
-		var body struct {
-			Data []struct {
-				ID                  string   `json:"id"`
-				Name                string   `json:"name"`
-				PreviewImageURL     string   `json:"preview_image_url"`
-				PreviewVideoURL     string   `json:"preview_video_url"`
-				Status              string   `json:"status"`
-				DefaultVoiceID      string   `json:"default_voice_id"`
-				SupportedAPIEngines []string `json:"supported_api_engines"`
-				AvatarType          string   `json:"avatar_type"`
-			} `json:"data"`
-		}
-		if err := json.Unmarshal(res.Data, &body); err != nil {
+		items, next, err := parseHeyGenAvatarLookPage(res.Data)
+		if err != nil {
 			return nil, err
 		}
-		out := make([]avatarEntry, 0, len(body.Data))
-		for _, av := range body.Data {
-			if av.ID == "" {
-				continue
-			}
-			thumb := av.PreviewVideoURL
-			if thumb == "" {
-				thumb = av.PreviewImageURL
-			}
-			out = append(out, avatarEntry{
-				ID: av.ID, Name: av.Name, Thumbnail: thumb, Status: av.Status,
-				DefaultVoiceID: av.DefaultVoiceID, SupportedAPIEngines: av.SupportedAPIEngines,
-				AvatarType: av.AvatarType,
-			})
+		out = append(out, items...)
+		if next == "" {
+			break
 		}
-		return out, nil
+		token = next
 	}
-	return nil, fmt.Errorf("unsupported avatar provider: %s", bound.AppSlug)
+	return out, nil
+}
+
+func parseHeyGenAvatarLookPage(raw json.RawMessage) ([]heygenAvatarLook, string, error) {
+	var body struct {
+		Data       json.RawMessage `json:"data"`
+		Token      string          `json:"token"`
+		NextToken  string          `json:"next_token"`
+		Next       string          `json:"next"`
+		Pagination struct {
+			Token     string `json:"token"`
+			NextToken string `json:"next_token"`
+			Next      string `json:"next"`
+		} `json:"pagination"`
+	}
+	if err := json.Unmarshal(raw, &body); err != nil {
+		return nil, "", err
+	}
+	next := firstNonEmpty(body.NextToken, body.Token, body.Next, body.Pagination.NextToken, body.Pagination.Token, body.Pagination.Next)
+	var items []heygenAvatarLook
+	if len(body.Data) == 0 {
+		return items, next, nil
+	}
+	if err := json.Unmarshal(body.Data, &items); err == nil {
+		return items, next, nil
+	}
+	var wrapped struct {
+		Looks      []heygenAvatarLook `json:"looks"`
+		Avatars    []heygenAvatarLook `json:"avatars"`
+		Items      []heygenAvatarLook `json:"items"`
+		Token      string             `json:"token"`
+		NextToken  string             `json:"next_token"`
+		Pagination struct {
+			Token     string `json:"token"`
+			NextToken string `json:"next_token"`
+			Next      string `json:"next"`
+		} `json:"pagination"`
+	}
+	if err := json.Unmarshal(body.Data, &wrapped); err != nil {
+		return nil, "", err
+	}
+	if len(wrapped.Looks) > 0 {
+		items = wrapped.Looks
+	} else if len(wrapped.Avatars) > 0 {
+		items = wrapped.Avatars
+	} else {
+		items = wrapped.Items
+	}
+	next = firstNonEmpty(next, wrapped.NextToken, wrapped.Token, wrapped.Pagination.NextToken, wrapped.Pagination.Token, wrapped.Pagination.Next)
+	return items, next, nil
+}
+
+func normalizeHeyGenAvatarLook(av heygenAvatarLook) avatarEntry {
+	thumb := av.PreviewVideoURL
+	thumbType := "video"
+	if thumb == "" {
+		thumb = av.PreviewImageURL
+		thumbType = "image"
+	}
+	return avatarEntry{
+		ID:                  av.ID,
+		Name:                av.Name,
+		Thumbnail:           thumb,
+		ThumbnailType:       thumbType,
+		Status:              av.Status,
+		DefaultVoiceID:      av.DefaultVoiceID,
+		SupportedAPIEngines: av.SupportedAPIEngines,
+		AvatarType:          av.AvatarType,
+		Ownership:           av.Ownership,
+	}
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, v := range values {
+		if strings.TrimSpace(v) != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 // --- voices (avatar + audio providers) -----------------------------
