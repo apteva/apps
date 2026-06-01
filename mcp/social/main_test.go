@@ -461,6 +461,96 @@ func TestAccountDisconnect_KeepsConnectionWhenSiblingsExist(t *testing.T) {
 	}
 }
 
+func TestAccountCheck_TwitterProfileOK(t *testing.T) {
+	pf := newRecordingPlatform()
+	pf.executeResponses["get_me"] = &sdk.ExecuteResult{
+		Success: true,
+		Data:    json.RawMessage(`{"data":{"id":"u1","username":"me"}}`),
+	}
+	ctx := newSocialCtx(t, pf)
+	r, _ := ctx.AppDB().Exec(
+		`INSERT INTO social_accounts (project_id, platform, connection_id, display_name, status)
+		 VALUES ('test-proj', 'twitter', 42, '@me', 'active')`,
+	)
+	acctID, _ := r.LastInsertId()
+
+	app := &App{}
+	out, err := app.toolAccountCheck(ctx, map[string]any{"social_account_id": acctID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := out.(accountCheckResult)
+	if res.Status != "ok" {
+		t.Fatalf("status = %q, error=%q", res.Status, res.Error)
+	}
+	if len(pf.executeCalls) != 1 || pf.executeCalls[0].Tool != "get_me" {
+		t.Fatalf("calls = %+v", pf.executeCalls)
+	}
+	var status string
+	ctx.AppDB().QueryRow(`SELECT last_check_status FROM social_accounts WHERE id=?`, acctID).Scan(&status)
+	if status != "ok" {
+		t.Errorf("last_check_status = %q", status)
+	}
+}
+
+func TestAccountCheck_FacebookRefreshesPageToken(t *testing.T) {
+	pf := newRecordingPlatform()
+	pf.executeResponses["list_pages"] = &sdk.ExecuteResult{
+		Success: true,
+		Data:    json.RawMessage(`{"data":[{"id":"100","name":"My Page","access_token":"new-page-token"}]}`),
+	}
+	ctx := newSocialCtx(t, pf)
+	r, _ := ctx.AppDB().Exec(
+		`INSERT INTO social_accounts (project_id, platform, connection_id, external_account_id, display_name, status, page_credentials)
+		 VALUES ('test-proj', 'facebook', 42, '100', 'My Page', 'active', '{"access_token":"old"}')`,
+	)
+	acctID, _ := r.LastInsertId()
+
+	app := &App{}
+	out, err := app.toolAccountCheck(ctx, map[string]any{"social_account_id": acctID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := out.(accountCheckResult)
+	if res.Status != "ok" {
+		t.Fatalf("status = %q, error=%q", res.Status, res.Error)
+	}
+	var creds string
+	ctx.AppDB().QueryRow(`SELECT page_credentials FROM social_accounts WHERE id=?`, acctID).Scan(&creds)
+	if !strings.Contains(creds, "new-page-token") {
+		t.Errorf("page_credentials was not refreshed: %s", creds)
+	}
+}
+
+func TestAccountCheck_FacebookMissingPageFails(t *testing.T) {
+	pf := newRecordingPlatform()
+	pf.executeResponses["list_pages"] = &sdk.ExecuteResult{
+		Success: true,
+		Data:    json.RawMessage(`{"data":[{"id":"200","name":"Other Page","access_token":"token"}]}`),
+	}
+	ctx := newSocialCtx(t, pf)
+	r, _ := ctx.AppDB().Exec(
+		`INSERT INTO social_accounts (project_id, platform, connection_id, external_account_id, display_name, status)
+		 VALUES ('test-proj', 'facebook', 42, '100', 'My Page', 'active')`,
+	)
+	acctID, _ := r.LastInsertId()
+
+	app := &App{}
+	out, err := app.toolAccountCheck(ctx, map[string]any{"social_account_id": acctID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := out.(accountCheckResult)
+	if res.Status != "failed" || !strings.Contains(res.Error, "no longer accessible") {
+		t.Fatalf("unexpected result: %+v", res)
+	}
+	var status, lastErr string
+	ctx.AppDB().QueryRow(`SELECT last_check_status, last_check_error FROM social_accounts WHERE id=?`, acctID).Scan(&status, &lastErr)
+	if status != "failed" || !strings.Contains(lastErr, "no longer accessible") {
+		t.Errorf("persisted check = %q %q", status, lastErr)
+	}
+}
+
 // --- post_create + publish ---------------------------------------
 
 func TestPostCreate_FansOutAndPublishes(t *testing.T) {
@@ -611,6 +701,149 @@ func TestPostCreate_FacebookImageUsesPhotoToolAndStorageProject(t *testing.T) {
 				t.Errorf("%s _project_id = %v, want media-proj", c.Tool, c.Input["_project_id"])
 			}
 		}
+	}
+}
+
+func TestPostCreate_TwitterImageUploadsMediaID(t *testing.T) {
+	mediaSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/png")
+		_, _ = w.Write([]byte("png-bytes"))
+	}))
+	defer mediaSrv.Close()
+
+	pf := newRecordingPlatform()
+	pf.callAppResponses["storage:files_get"] = json.RawMessage(
+		`{"result":{"content":[{"type":"text","text":"{\"id\":296,\"content_type\":\"image/png\",\"size_bytes\":9}"}]}}`,
+	)
+	pf.callAppResponses["storage:files_get_url"] = json.RawMessage(
+		`{"result":{"content":[{"type":"text","text":"{\"url\":\"` + mediaSrv.URL + `/image.png\"}"}]}}`,
+	)
+	pf.executeResponses["upload_media"] = &sdk.ExecuteResult{
+		Success: true,
+		Data:    json.RawMessage(`{"data":{"id":"media123"}}`),
+	}
+	pf.executeResponses["post_tweet"] = &sdk.ExecuteResult{
+		Success: true,
+		Data:    json.RawMessage(`{"data":{"id":"tweet123","text":"hello image"}}`),
+	}
+	ctx := newSocialCtx(t, pf)
+	r, _ := ctx.AppDB().Exec(
+		`INSERT INTO social_accounts (project_id, platform, connection_id, display_name, status)
+		 VALUES ('test-proj', 'twitter', 42, '@me', 'active')`,
+	)
+	acctID, _ := r.LastInsertId()
+
+	app := &App{}
+	if _, err := app.toolPostCreate(ctx, map[string]any{
+		"body":               "hello image",
+		"social_account_ids": []any{acctID},
+		"media_storage_ids":  []any{int64(296)},
+		"media_project_id":   "media-proj",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	var sawUpload, sawPost bool
+	for _, c := range pf.executeCalls {
+		switch c.Tool {
+		case "upload_media":
+			sawUpload = true
+			if c.Input["media_category"] != "tweet_image" {
+				t.Errorf("media_category = %v", c.Input["media_category"])
+			}
+			if c.Input["media_type"] != "image/png" {
+				t.Errorf("media_type = %v", c.Input["media_type"])
+			}
+			if c.Input["media"] == "" {
+				t.Errorf("base64 media not set: %+v", c.Input)
+			}
+		case "post_tweet":
+			sawPost = true
+			media := c.Input["media"].(map[string]any)
+			ids := media["media_ids"].([]string)
+			if len(ids) != 1 || ids[0] != "media123" {
+				t.Errorf("media_ids = %+v", ids)
+			}
+		}
+	}
+	if !sawUpload || !sawPost {
+		t.Fatalf("expected upload_media and post_tweet calls, got %+v", pf.executeCalls)
+	}
+}
+
+func TestPostCreate_TwitterVideoUsesChunkedUpload(t *testing.T) {
+	videoBytes := []byte("video-bytes")
+	mediaSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "video/mp4")
+		_, _ = w.Write(videoBytes)
+	}))
+	defer mediaSrv.Close()
+
+	pf := newRecordingPlatform()
+	pf.callAppResponses["storage:files_get"] = json.RawMessage(
+		fmt.Sprintf(`{"result":{"content":[{"type":"text","text":"{\"id\":298,\"content_type\":\"video/mp4\",\"size_bytes\":%d}"}]}}`, len(videoBytes)),
+	)
+	pf.callAppResponses["storage:files_get_url"] = json.RawMessage(
+		`{"result":{"content":[{"type":"text","text":"{\"url\":\"` + mediaSrv.URL + `/video.mp4\"}"}]}}`,
+	)
+	pf.executeResponses["upload_init"] = &sdk.ExecuteResult{
+		Success: true,
+		Data:    json.RawMessage(`{"data":{"id":"media-video"}}`),
+	}
+	pf.executeResponses["upload_finalize"] = &sdk.ExecuteResult{
+		Success: true,
+		Data:    json.RawMessage(`{"data":{"id":"media-video","processing_info":{"state":"succeeded"}}}`),
+	}
+	pf.executeResponses["post_tweet"] = &sdk.ExecuteResult{
+		Success: true,
+		Data:    json.RawMessage(`{"data":{"id":"tweet-video","text":"hello video"}}`),
+	}
+	ctx := newSocialCtx(t, pf)
+	r, _ := ctx.AppDB().Exec(
+		`INSERT INTO social_accounts (project_id, platform, connection_id, display_name, status)
+		 VALUES ('test-proj', 'twitter', 42, '@me', 'active')`,
+	)
+	acctID, _ := r.LastInsertId()
+
+	app := &App{}
+	if _, err := app.toolPostCreate(ctx, map[string]any{
+		"body":               "hello video",
+		"social_account_ids": []any{acctID},
+		"media_storage_ids":  []any{int64(298)},
+		"media_project_id":   "media-proj",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	var sawInit, sawAppend, sawFinalize, sawPost bool
+	for _, c := range pf.executeCalls {
+		switch c.Tool {
+		case "upload_init":
+			sawInit = true
+			if c.Input["media_category"] != "tweet_video" {
+				t.Errorf("media_category = %v", c.Input["media_category"])
+			}
+			if c.Input["total_bytes"] != int64(len(videoBytes)) {
+				t.Errorf("total_bytes = %v", c.Input["total_bytes"])
+			}
+		case "upload_append":
+			sawAppend = true
+			if c.Input["media_id"] != "media-video" || c.Input["segment_index"] != 0 {
+				t.Errorf("append input = %+v", c.Input)
+			}
+		case "upload_finalize":
+			sawFinalize = true
+		case "post_tweet":
+			sawPost = true
+			media := c.Input["media"].(map[string]any)
+			ids := media["media_ids"].([]string)
+			if len(ids) != 1 || ids[0] != "media-video" {
+				t.Errorf("media_ids = %+v", ids)
+			}
+		}
+	}
+	if !sawInit || !sawAppend || !sawFinalize || !sawPost {
+		t.Fatalf("missing expected X video calls: %+v", pf.executeCalls)
 	}
 }
 
@@ -1422,6 +1655,10 @@ func TestInboxSyncFacebookComments(t *testing.T) {
 func TestInboxListGroupsThreadsByLatestActivity(t *testing.T) {
 	ctx := newSocialCtx(t, newRecordingPlatform())
 	base := time.Date(2026, 5, 27, 10, 0, 0, 0, time.UTC)
+	_, _ = ctx.AppDB().Exec(
+		`INSERT INTO social_accounts (id, project_id, platform, connection_id, display_name, status)
+		 VALUES (1, 'test-proj', 'facebook', 42, 'Page', 'active')`,
+	)
 	for _, row := range []inboxUpsertInput{
 		{
 			ProjectID:        "test-proj",

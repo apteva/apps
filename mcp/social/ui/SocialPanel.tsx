@@ -71,6 +71,10 @@ interface SocialAccount {
   status: string;
   created_at: string;
   profile_id?: number;
+  last_check_at?: string;
+  last_check_status?: "ok" | "failed" | "unsupported" | "";
+  last_check_error?: string;
+  last_check_details?: Record<string, unknown> | null;
 }
 
 interface PostTarget {
@@ -356,6 +360,9 @@ export default function SocialPanel({ projectId }: NativePanelProps) {
   // + profile CRUD + post lifecycle (reschedule/delete from agent).
   useAppEvents("social", projectId, (ev) => {
     if (ev.topic === "account.added" || ev.topic === "account.removed") {
+      loadAccounts();
+    }
+    if (ev.topic === "account.checked") {
       loadAccounts();
     }
     if (ev.topic === "post.created" || ev.topic === "post.completed" ||
@@ -962,6 +969,7 @@ function AccountCard({
 }: { account: SocialAccount; onChange: () => void; setStatus: (s: string) => void; projectId?: string | null }) {
   const [confirming, setConfirming] = useState(false);
   const [importing, setImporting] = useState(false);
+  const [checking, setChecking] = useState(false);
   const doRemove = async () => {
     try {
       await fetch(socialURL(`/accounts/${account.id}`, projectId), { method: "DELETE", credentials: "same-origin" });
@@ -1001,6 +1009,33 @@ function AccountCard({
       setImporting(false);
     }
   };
+  const doCheck = async () => {
+    setChecking(true);
+    setStatus(`Checking ${account.display_name}…`);
+    try {
+      const res = await fetch(socialURL(`/accounts/${account.id}/check`, projectId), {
+        method: "POST",
+        credentials: "same-origin",
+      });
+      if (!res.ok) throw new Error(await res.text());
+      const data = await res.json() as {
+        status: "ok" | "failed" | "unsupported";
+        error?: string;
+      };
+      if (data.status === "ok") {
+        setStatus(`${account.display_name} is working.`);
+      } else if (data.status === "unsupported") {
+        setStatus(`Check unsupported: ${data.error || account.platform}`);
+      } else {
+        setStatus(`Check failed: ${data.error || "unknown error"}`);
+      }
+      onChange();
+    } catch (e) {
+      setStatus("Check failed: " + (e as Error).message);
+    } finally {
+      setChecking(false);
+    }
+  };
   return (
     <>
       <div className="border border-border rounded p-3 flex items-center gap-3">
@@ -1013,8 +1048,19 @@ function AccountCard({
         )}
         <div className="flex-1 min-w-0">
           <div className="text-text text-sm truncate">{account.display_name}</div>
-          <div className="text-text-dim text-xs">{account.platform}</div>
+          <div className="flex items-center gap-2 text-xs">
+            <span className="text-text-dim">{account.platform}</span>
+            <HealthPill account={account} />
+          </div>
         </div>
+        <button
+          onClick={doCheck}
+          disabled={checking}
+          className="text-xs text-text-muted hover:text-text px-2 py-1 border border-border rounded disabled:opacity-50"
+          title="Check whether this account still works"
+        >
+          {checking ? "Checking…" : "Check"}
+        </button>
         {importSupported && (
           <button
             onClick={doImport}
@@ -1053,6 +1099,21 @@ function AccountCard({
       )}
     </>
   );
+}
+
+function HealthPill({ account }: { account: SocialAccount }) {
+  const status = account.last_check_status || "";
+  if (!status) {
+    return <span className="text-text-dim">never checked</span>;
+  }
+  const when = account.last_check_at ? new Date(account.last_check_at).toLocaleString() : "";
+  if (status === "ok") {
+    return <span className="text-success" title={when}>ok</span>;
+  }
+  if (status === "failed") {
+    return <span className="text-error" title={account.last_check_error || when}>failed</span>;
+  }
+  return <span className="text-text-dim" title={account.last_check_error || when}>unsupported</span>;
 }
 
 function AddAccountDialog({

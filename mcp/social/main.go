@@ -21,6 +21,7 @@ package main
 import (
 	"crypto/sha256"
 	"database/sql"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -40,7 +41,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: social
 display_name: Social
-version: 0.14.31
+version: 0.14.32
 description: |
   Schedule and publish posts to your social accounts (X, Facebook,
   Instagram, LinkedIn, TikTok, YouTube, Reddit, Pinterest, Threads).
@@ -81,6 +82,7 @@ provides:
     - { name: account_list_pending_pages, description: "List selectable pages/channels for a pending account." }
     - { name: account_finalize,           description: "Commit a pending account into the active list." }
     - { name: account_list,               description: "List connected social accounts." }
+    - { name: account_check,              description: "Check that connected social accounts still work." }
     - { name: account_disconnect,         description: "Revoke a social account." }
     - { name: post_create,                description: "Create + publish (or schedule) a post across accounts." }
     - { name: post_list,                  description: "List recent posts." }
@@ -262,7 +264,7 @@ var platforms = map[string]platformDef{
 		Platform:           "twitter",
 		IntegrationSlug:    "twitter-api",
 		DisplayName:        "X (Twitter)",
-		Strategy:           "single",
+		Strategy:           "twitter",
 		PostTool:           "post_tweet",
 		BodyField:          "text",
 		MediaType:          "any",
@@ -612,6 +614,19 @@ func (a *App) MCPTools() []sdk.Tool {
 				"status":   map[string]any{"type": "string"},
 			}, nil),
 			Handler: a.toolAccountList,
+		},
+		{
+			Name: "account_check",
+			Description: "Check that a connected social account still works by calling the cheapest authenticated read endpoint for its platform. " +
+				"For Facebook/Instagram, also verifies that the selected page/IG account is still accessible and refreshes the stored page token when available. " +
+				"Args: social_account_id OR all=true. Optional profile_id/profile filters when all=true.",
+			InputSchema: schemaObject(map[string]any{
+				"social_account_id": map[string]any{"type": "integer"},
+				"all":               map[string]any{"type": "boolean"},
+				"profile_id":        map[string]any{"type": "integer"},
+				"profile":           map[string]any{"type": "string"},
+			}, nil),
+			Handler: a.toolAccountCheck,
 		},
 		{
 			Name:        "account_disconnect",
@@ -1152,7 +1167,9 @@ func (a *App) toolAccountList(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		return mcpError(fmt.Sprintf("profile %q not found in this project", args["profile"])), nil
 	}
 	q := `SELECT id, platform, connection_id, COALESCE(external_account_id,''), display_name,
-	             COALESCE(avatar_url,''), status, created_at, COALESCE(profile_id,0)
+	             COALESCE(avatar_url,''), status, created_at, COALESCE(profile_id,0),
+	             COALESCE(last_check_at,''), COALESCE(last_check_status,''),
+	             COALESCE(last_check_error,''), COALESCE(last_check_details,'')
 	      FROM social_accounts WHERE project_id=?`
 	qArgs := []any{pid}
 	if platformFilter != "" {
@@ -1178,9 +1195,17 @@ func (a *App) toolAccountList(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		var (
 			id, connID, profID                                    int64
 			platform, externalID, name, avatar, status, createdAt string
+			checkAt, checkStatus, checkError, checkDetails        string
 		)
-		if err := rows.Scan(&id, &platform, &connID, &externalID, &name, &avatar, &status, &createdAt, &profID); err != nil {
+		if err := rows.Scan(&id, &platform, &connID, &externalID, &name, &avatar, &status, &createdAt, &profID, &checkAt, &checkStatus, &checkError, &checkDetails); err != nil {
 			continue
+		}
+		var details any
+		if checkDetails != "" {
+			var parsed map[string]any
+			if json.Unmarshal([]byte(checkDetails), &parsed) == nil {
+				details = parsed
+			}
 		}
 		out = append(out, map[string]any{
 			"id":                  id,
@@ -1192,9 +1217,192 @@ func (a *App) toolAccountList(ctx *sdk.AppCtx, args map[string]any) (any, error)
 			"status":              status,
 			"created_at":          createdAt,
 			"profile_id":          profID,
+			"last_check_at":       checkAt,
+			"last_check_status":   checkStatus,
+			"last_check_error":    checkError,
+			"last_check_details":  details,
 		})
 	}
 	return map[string]any{"accounts": out}, nil
+}
+
+// ─── account_check ────────────────────────────────────────────────
+
+type accountCheckResult struct {
+	AccountID   int64          `json:"account_id"`
+	Platform    string         `json:"platform"`
+	DisplayName string         `json:"display_name,omitempty"`
+	Status      string         `json:"status"` // ok | failed | unsupported
+	CheckedAt   string         `json:"checked_at"`
+	Error       string         `json:"error,omitempty"`
+	Details     map[string]any `json:"details,omitempty"`
+}
+
+func (a *App) toolAccountCheck(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid := projectIDForTool(ctx, args)
+	if boolArg(args, "all", false) {
+		profileID := resolveProfileArg(ctx, pid, args)
+		if profileID < 0 {
+			return mcpError(fmt.Sprintf("profile %q not found in this project", args["profile"])), nil
+		}
+		q := `SELECT id FROM social_accounts WHERE project_id=? AND status!='disconnected'`
+		qArgs := []any{pid}
+		if profileID > 0 {
+			q += " AND profile_id=?"
+			qArgs = append(qArgs, profileID)
+		}
+		q += " ORDER BY id DESC"
+		rows, err := ctx.AppDB().Query(q, qArgs...)
+		if err != nil {
+			return nil, err
+		}
+		defer rows.Close()
+		results := []accountCheckResult{}
+		for rows.Next() {
+			var id int64
+			if rows.Scan(&id) == nil {
+				results = append(results, a.checkAccount(ctx, pid, id))
+			}
+		}
+		return map[string]any{"checks": results, "count": len(results)}, nil
+	}
+	id := int64(intArg(args, "social_account_id", 0))
+	if id <= 0 {
+		id = int64(intArg(args, "id", 0))
+	}
+	if id <= 0 {
+		return nil, errors.New("social_account_id required unless all=true")
+	}
+	return a.checkAccount(ctx, pid, id), nil
+}
+
+func (a *App) checkAccount(ctx *sdk.AppCtx, pid string, accountID int64) accountCheckResult {
+	checkedAt := time.Now().UTC().Format(time.RFC3339)
+	var (
+		platform, externalID, displayName string
+		connID                            int64
+	)
+	err := ctx.AppDB().QueryRow(
+		`SELECT platform, connection_id, COALESCE(external_account_id,''), display_name
+		 FROM social_accounts WHERE id=? AND project_id=?`,
+		accountID, pid,
+	).Scan(&platform, &connID, &externalID, &displayName)
+	result := accountCheckResult{
+		AccountID:   accountID,
+		Platform:    platform,
+		DisplayName: displayName,
+		Status:      "failed",
+		CheckedAt:   checkedAt,
+		Details:     map[string]any{},
+	}
+	if err == sql.ErrNoRows {
+		result.Error = "account not found"
+		return result
+	}
+	if err != nil {
+		result.Error = err.Error()
+		return result
+	}
+
+	def, ok := platforms[platform]
+	if !ok {
+		result.Status = "unsupported"
+		result.Error = "unsupported platform"
+		a.persistAccountCheck(ctx, pid, result)
+		return result
+	}
+	result.Details["connection_id"] = connID
+	result.Details["external_account_id"] = externalID
+
+	if def.ListPagesTool != "" {
+		result = a.checkPageAccount(ctx, pid, def, result, connID, externalID)
+		a.persistAccountCheck(ctx, pid, result)
+		return result
+	}
+	if def.ProfileTool != "" {
+		input := map[string]any{}
+		for k, v := range def.ProfileToolArgs {
+			input[k] = v
+		}
+		out, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, def.ProfileTool, input)
+		if err != nil {
+			result.Error = err.Error()
+			a.persistAccountCheck(ctx, pid, result)
+			return result
+		}
+		if out == nil || !out.Success {
+			result.Error = upstreamError(out).Error()
+			a.persistAccountCheck(ctx, pid, result)
+			return result
+		}
+		result.Status = "ok"
+		result.Error = ""
+		result.Details["tool"] = def.ProfileTool
+		a.persistAccountCheck(ctx, pid, result)
+		return result
+	}
+
+	result.Status = "unsupported"
+	result.Error = "no health-check endpoint wired for this platform"
+	a.persistAccountCheck(ctx, pid, result)
+	return result
+}
+
+func (a *App) checkPageAccount(ctx *sdk.AppCtx, pid string, def platformDef, result accountCheckResult, connID int64, externalID string) accountCheckResult {
+	if externalID == "" {
+		result.Error = "account has no external_account_id"
+		return result
+	}
+	pages, err := a.fetchPages(ctx, connID, def)
+	if err != nil {
+		result.Error = err.Error()
+		return result
+	}
+	for _, p := range pages {
+		if p.ID != externalID {
+			continue
+		}
+		result.Status = "ok"
+		result.Error = ""
+		result.Details["tool"] = def.ListPagesTool
+		result.Details["destination_name"] = p.Name
+		result.Details["destination_id"] = p.ID
+		result.Details["destination_count"] = len(pages)
+		if p.AccessToken != "" && def.PageAccessTokenField != "" {
+			pageCreds, _ := json.Marshal(map[string]string{
+				def.PageAccessTokenField: p.AccessToken,
+			})
+			_, _ = ctx.AppDB().Exec(
+				`UPDATE social_accounts SET page_credentials=? WHERE id=? AND project_id=?`,
+				string(pageCreds), result.AccountID, pid,
+			)
+			result.Details["page_token_refreshed"] = true
+		}
+		return result
+	}
+	result.Error = fmt.Sprintf("%s %q is no longer accessible from this connection", def.DisplayName, externalID)
+	result.Details["tool"] = def.ListPagesTool
+	result.Details["destination_count"] = len(pages)
+	return result
+}
+
+func (a *App) persistAccountCheck(ctx *sdk.AppCtx, pid string, result accountCheckResult) {
+	details := result.Details
+	if len(details) == 0 {
+		details = nil
+	}
+	detailsJSON, _ := json.Marshal(details)
+	_, _ = ctx.AppDB().Exec(
+		`UPDATE social_accounts
+		    SET last_check_at=?, last_check_status=?, last_check_error=?, last_check_details=?
+		  WHERE id=? AND project_id=?`,
+		result.CheckedAt, result.Status, result.Error, string(detailsJSON), result.AccountID, pid,
+	)
+	ctx.Emit("account.checked", map[string]any{
+		"social_account_id": result.AccountID,
+		"platform":          result.Platform,
+		"status":            result.Status,
+	})
 }
 
 // ─── account_disconnect ──────────────────────────────────────────
@@ -1612,6 +1820,8 @@ func (a *App) publishPostTargets(ctx *sdk.AppCtx, postID int64) {
 // target row.
 func (a *App) runStrategy(ctx *sdk.AppCtx, def platformDef, j publishJob) (string, string, error) {
 	switch def.Strategy {
+	case "twitter":
+		return a.publishTwitter(ctx, def, j)
 	case "instagram_two_step":
 		return a.publishInstagram(ctx, def, j)
 	case "tiktok":
@@ -1692,6 +1902,360 @@ func (a *App) publishSingle(ctx *sdk.AppCtx, def platformDef, j publishJob) (str
 	ctx.Logger().Info("publishSingle: published",
 		"platform", def.Platform, "platform_post_id", id, "platform_url", url)
 	return id, url, nil
+}
+
+// publishTwitter uploads attached media through X's media API first,
+// then creates the post with media.media_ids. Text-only posts still use
+// the simple post_tweet path. X accepts up to 4 images, or one video/GIF.
+func (a *App) publishTwitter(ctx *sdk.AppCtx, def platformDef, j publishJob) (string, string, error) {
+	bodyField := def.BodyField
+	if bodyField == "" {
+		bodyField = "text"
+	}
+	input := map[string]any{bodyField: j.body}
+	if len(j.media) > 0 {
+		ids, err := a.uploadTwitterMedia(ctx, j.connID, j.media)
+		if err != nil {
+			return "", "", err
+		}
+		if len(ids) > 0 {
+			input["media"] = map[string]any{"media_ids": ids}
+		}
+	}
+	ctx.Logger().Info("publishTwitter: calling post_tweet",
+		"media_count", len(j.media), "has_media_ids", input["media"] != nil)
+	out, err := ctx.PlatformAPI().ExecuteIntegrationTool(j.connID, def.PostTool, input)
+	if err != nil {
+		return "", "", fmt.Errorf("post_tweet: %w", err)
+	}
+	if out == nil || !out.Success {
+		return "", "", upstreamError(out)
+	}
+	id, url := extractPostIdentity(def.Platform, out.Data)
+	ctx.Logger().Info("publishTwitter: published",
+		"platform_post_id", id, "platform_url", url)
+	return id, url, nil
+}
+
+func (a *App) uploadTwitterMedia(ctx *sdk.AppCtx, connID int64, media []mediaItem) ([]string, error) {
+	if len(media) == 0 {
+		return nil, nil
+	}
+	firstCat, err := twitterMediaCategory(media[0])
+	if err != nil {
+		return nil, err
+	}
+	items := media
+	if firstCat == "tweet_video" || firstCat == "tweet_gif" {
+		items = media[:1]
+		for _, m := range media[1:] {
+			cat, err := twitterMediaCategory(m)
+			if err != nil {
+				return nil, err
+			}
+			if cat != "tweet_image" {
+				continue
+			}
+			return nil, errors.New("x does not support mixing video/GIF media with images in the same post")
+		}
+	} else if len(items) > 4 {
+		items = items[:4]
+	}
+
+	ids := make([]string, 0, len(items))
+	for i, item := range items {
+		cat, err := twitterMediaCategory(item)
+		if err != nil {
+			return nil, err
+		}
+		if firstCat == "tweet_image" && cat != "tweet_image" {
+			return nil, errors.New("x does not support mixing images with video/GIF media in the same post")
+		}
+		var id string
+		if cat == "tweet_image" {
+			if item.Bytes > 5*1024*1024 {
+				return nil, fmt.Errorf("x image %d is too large: %d bytes (max 5 MB)", i+1, item.Bytes)
+			}
+			id, err = a.uploadTwitterMediaSimple(ctx, connID, item, cat)
+		} else {
+			id, err = a.uploadTwitterMediaChunked(ctx, connID, item, cat)
+		}
+		if err != nil {
+			return nil, fmt.Errorf("x media %d upload: %w", i+1, err)
+		}
+		ids = append(ids, id)
+	}
+	return ids, nil
+}
+
+func (a *App) uploadTwitterMediaSimple(ctx *sdk.AppCtx, connID int64, item mediaItem, category string) (string, error) {
+	const maxSimpleImage = int64(5 * 1024 * 1024)
+	body, err := readMediaURL(item.URL, maxSimpleImage+1)
+	if err != nil {
+		return "", err
+	}
+	if int64(len(body)) > maxSimpleImage {
+		return "", errors.New("x image is larger than 5 MB")
+	}
+	input := map[string]any{
+		"media":          base64.StdEncoding.EncodeToString(body),
+		"media_category": category,
+	}
+	if item.Mime != "" {
+		input["media_type"] = item.Mime
+	}
+	out, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "upload_media", input)
+	if err != nil {
+		return "", fmt.Errorf("upload_media: %w", err)
+	}
+	if out == nil || !out.Success {
+		return "", upstreamError(out)
+	}
+	upload := extractTwitterMediaUpload(out.Data)
+	if upload.ID == "" {
+		return "", fmt.Errorf("upload_media returned no media id: %s", string(out.Data))
+	}
+	if err := a.waitTwitterMediaReady(ctx, connID, upload); err != nil {
+		return "", err
+	}
+	return upload.ID, nil
+}
+
+func (a *App) uploadTwitterMediaChunked(ctx *sdk.AppCtx, connID int64, item mediaItem, category string) (string, error) {
+	if item.Bytes <= 0 {
+		return "", errors.New("chunked X media upload needs size_bytes from storage")
+	}
+	mime := item.Mime
+	if mime == "" {
+		if category == "tweet_video" {
+			mime = "video/mp4"
+		} else if category == "tweet_gif" {
+			mime = "image/gif"
+		} else {
+			mime = "image/jpeg"
+		}
+	}
+	initInput := map[string]any{
+		"total_bytes":    item.Bytes,
+		"media_type":     mime,
+		"media_category": category,
+	}
+	out, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "upload_init", initInput)
+	if err != nil {
+		return "", fmt.Errorf("upload_init: %w", err)
+	}
+	if out == nil || !out.Success {
+		return "", upstreamError(out)
+	}
+	upload := extractTwitterMediaUpload(out.Data)
+	if upload.ID == "" {
+		return "", fmt.Errorf("upload_init returned no media id: %s", string(out.Data))
+	}
+
+	getReq, err := http.NewRequest(http.MethodGet, item.URL, nil)
+	if err != nil {
+		return "", fmt.Errorf("build storage GET: %w", err)
+	}
+	getResp, err := http.DefaultClient.Do(getReq)
+	if err != nil {
+		return "", fmt.Errorf("fetch media bytes from storage: %w", err)
+	}
+	defer getResp.Body.Close()
+	if getResp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("fetch media: storage returned %d", getResp.StatusCode)
+	}
+
+	const chunkSize = int64(4 * 1024 * 1024)
+	totalChunks := int((item.Bytes + chunkSize - 1) / chunkSize)
+	if totalChunks > 1000 {
+		return "", fmt.Errorf("x media too large for chunked upload: %d chunks", totalChunks)
+	}
+	for i := 0; i < totalChunks; i++ {
+		want := chunkSize
+		if remaining := item.Bytes - int64(i)*chunkSize; remaining < want {
+			want = remaining
+		}
+		buf := make([]byte, int(want))
+		n, err := io.ReadFull(getResp.Body, buf)
+		if err != nil {
+			return "", fmt.Errorf("read chunk %d/%d from storage: %w", i+1, totalChunks, err)
+		}
+		if int64(n) != want {
+			return "", fmt.Errorf("read chunk %d/%d from storage: got %d bytes, want %d", i+1, totalChunks, n, want)
+		}
+		appendInput := map[string]any{
+			"media_id":      upload.ID,
+			"segment_index": i,
+			"media":         base64.StdEncoding.EncodeToString(buf),
+		}
+		ctx.Logger().Info("publishTwitter: append media chunk",
+			"chunk", fmt.Sprintf("%d/%d", i+1, totalChunks), "bytes", want)
+		appendOut, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "upload_append", appendInput)
+		if err != nil {
+			return "", fmt.Errorf("upload_append chunk %d/%d: %w", i+1, totalChunks, err)
+		}
+		if appendOut == nil || !appendOut.Success {
+			return "", upstreamError(appendOut)
+		}
+	}
+
+	finalOut, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "upload_finalize", map[string]any{
+		"media_id": upload.ID,
+	})
+	if err != nil {
+		return "", fmt.Errorf("upload_finalize: %w", err)
+	}
+	if finalOut == nil || !finalOut.Success {
+		return "", upstreamError(finalOut)
+	}
+	finalUpload := extractTwitterMediaUpload(finalOut.Data)
+	if finalUpload.ID == "" {
+		finalUpload.ID = upload.ID
+	}
+	if err := a.waitTwitterMediaReady(ctx, connID, finalUpload); err != nil {
+		return "", err
+	}
+	return finalUpload.ID, nil
+}
+
+func (a *App) waitTwitterMediaReady(ctx *sdk.AppCtx, connID int64, upload twitterMediaUpload) error {
+	if upload.ID == "" {
+		return errors.New("missing X media id")
+	}
+	originalID := upload.ID
+	state := upload.ProcessingInfo.State
+	if state == "" || state == "succeeded" {
+		return nil
+	}
+	deadline := time.Now().Add(5 * time.Minute)
+	for {
+		if state == "failed" {
+			return fmt.Errorf("x media processing failed: %s", upload.ProcessingInfo.ErrorMessage)
+		}
+		if state != "pending" && state != "in_progress" {
+			return fmt.Errorf("x media processing returned unknown state %q", state)
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("x media processing still %q after 5m", state)
+		}
+		wait := upload.ProcessingInfo.CheckAfterSecs
+		if wait <= 0 {
+			wait = 2
+		}
+		if wait > 15 {
+			wait = 15
+		}
+		time.Sleep(time.Duration(wait) * time.Second)
+		out, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "get_media_upload_status", map[string]any{
+			"media_id": upload.ID,
+		})
+		if err != nil {
+			return fmt.Errorf("get_media_upload_status: %w", err)
+		}
+		if out == nil || !out.Success {
+			return upstreamError(out)
+		}
+		upload = extractTwitterMediaUpload(out.Data)
+		if upload.ID == "" {
+			upload.ID = originalID
+		}
+		state = upload.ProcessingInfo.State
+		if state == "" || state == "succeeded" {
+			return nil
+		}
+	}
+}
+
+type twitterMediaUpload struct {
+	ID             string
+	ProcessingInfo struct {
+		State          string
+		CheckAfterSecs int
+		ErrorMessage   string
+	}
+}
+
+func extractTwitterMediaUpload(raw json.RawMessage) twitterMediaUpload {
+	var resp struct {
+		ID      string `json:"id"`
+		MediaID string `json:"media_id"`
+		Data    struct {
+			ID             string `json:"id"`
+			MediaID        string `json:"media_id"`
+			ProcessingInfo struct {
+				State          string         `json:"state"`
+				CheckAfterSecs int            `json:"check_after_secs"`
+				Error          map[string]any `json:"error"`
+			} `json:"processing_info"`
+		} `json:"data"`
+		ProcessingInfo struct {
+			State          string         `json:"state"`
+			CheckAfterSecs int            `json:"check_after_secs"`
+			Error          map[string]any `json:"error"`
+		} `json:"processing_info"`
+	}
+	_ = json.Unmarshal(raw, &resp)
+	var out twitterMediaUpload
+	out.ID = resp.Data.ID
+	if out.ID == "" {
+		out.ID = resp.Data.MediaID
+	}
+	if out.ID == "" {
+		out.ID = resp.ID
+	}
+	if out.ID == "" {
+		out.ID = resp.MediaID
+	}
+	pi := resp.Data.ProcessingInfo
+	if pi.State == "" {
+		pi = resp.ProcessingInfo
+	}
+	out.ProcessingInfo.State = pi.State
+	out.ProcessingInfo.CheckAfterSecs = pi.CheckAfterSecs
+	if pi.Error != nil {
+		if msg := toString(pi.Error["message"]); msg != "" {
+			out.ProcessingInfo.ErrorMessage = msg
+		} else if msg := toString(pi.Error["name"]); msg != "" {
+			out.ProcessingInfo.ErrorMessage = msg
+		} else {
+			b, _ := json.Marshal(pi.Error)
+			out.ProcessingInfo.ErrorMessage = string(b)
+		}
+	}
+	return out
+}
+
+func twitterMediaCategory(item mediaItem) (string, error) {
+	mime := strings.ToLower(item.Mime)
+	switch {
+	case strings.HasPrefix(mime, "video/"):
+		return "tweet_video", nil
+	case mime == "image/gif":
+		return "tweet_gif", nil
+	case strings.HasPrefix(mime, "image/"):
+		return "tweet_image", nil
+	default:
+		if mime == "" {
+			return "", errors.New("x media upload needs content_type from storage")
+		}
+		return "", fmt.Errorf("x does not support media type %q", item.Mime)
+	}
+}
+
+func readMediaURL(url string, limit int64) ([]byte, error) {
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return nil, fmt.Errorf("build storage GET: %w", err)
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("fetch media bytes from storage: %w", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("fetch media: storage returned %d", resp.StatusCode)
+	}
+	return io.ReadAll(io.LimitReader(resp.Body, limit))
 }
 
 // publishInstagram runs the two-step IG dance: create_media_container
@@ -4726,6 +5290,17 @@ func (a *App) handleAccountsItem(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		out := a.importAccountPosts(ctx, id, limit, strings.TrimSpace(r.URL.Query().Get("project_id")))
+		writeJSON(w, out)
+		return
+	}
+	if len(parts) == 2 && parts[1] == "check" && r.Method == http.MethodPost {
+		args := queryToolArgs(r)
+		args["social_account_id"] = id
+		out, err := a.toolAccountCheck(ctx, args)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
 		writeJSON(w, out)
 		return
 	}
