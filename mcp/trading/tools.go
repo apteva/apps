@@ -32,12 +32,12 @@ func (a *App) MCPTools() []sdk.Tool {
 
 		{Name: "brokers_list", Description: "List broker adapters registered in this build and their currently-bound connections. Use before portfolio_create with mode=live to pick a broker_slug.",
 			InputSchema: schemaObject(nil, nil),
-			Handler: a.toolBrokersList},
+			Handler:     a.toolBrokersList},
 
 		// ─── Reads ────────────────────────────────────────────────
 		{Name: "portfolio_list", Description: "List portfolios visible in this project.",
 			InputSchema: schemaObject(nil, nil),
-			Handler: a.toolPortfolioList},
+			Handler:     a.toolPortfolioList},
 
 		{Name: "portfolio_get", Description: "Snapshot of one portfolio (mandate, equity, cash, status, watchlist).",
 			InputSchema: schemaObject(map[string]any{
@@ -81,7 +81,7 @@ func (a *App) MCPTools() []sdk.Tool {
 
 		{Name: "market_source", Description: "Report the live data source per asset class — name (binance-public / polymarket-public / mock), last_ok_at, errors_60s, stale. Lets the agent self-report whether it's reasoning on real prices or the offline mock.",
 			InputSchema: schemaObject(nil, nil),
-			Handler: a.toolMarketSource},
+			Handler:     a.toolMarketSource},
 
 		{Name: "journal_read", Description: "Read recent journal entries for a portfolio.",
 			InputSchema: schemaObject(map[string]any{
@@ -154,6 +154,15 @@ func (a *App) MCPTools() []sdk.Tool {
 				"reason":       map[string]any{"type": "string"},
 			}, []string{"portfolio_id", "reason"}),
 			Handler: a.toolPortfolioPause},
+
+		{Name: "backtest_market_step", Description: "Internal runner tool: load replay prices into an isolated backtest environment.",
+			InputSchema: schemaObject(map[string]any{
+				"portfolio_id": map[string]any{"type": "integer"},
+				"run_id":       map[string]any{"type": "integer"},
+				"step":         map[string]any{"type": "integer"},
+				"prices":       map[string]any{"type": "array"},
+			}, []string{"portfolio_id", "step", "prices"}),
+			Handler: a.toolBacktestMarketStep},
 	}
 }
 
@@ -161,9 +170,13 @@ func (a *App) MCPTools() []sdk.Tool {
 
 func (a *App) toolPortfolioCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	pid, err := resolveProjectFromArgs(args)
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	name := strArg(args, "name")
-	if name == "" { return nil, errors.New("name required") }
+	if name == "" {
+		return nil, errors.New("name required")
+	}
 	mandate := strArg(args, "mandate")
 
 	mode := strings.ToLower(strings.TrimSpace(strArg(args, "mode")))
@@ -177,7 +190,9 @@ func (a *App) toolPortfolioCreate(ctx *sdk.AppCtx, args map[string]any) (any, er
 	classesAny, _ := args["allowed_classes"].([]any)
 	classes := make([]string, 0, len(classesAny))
 	for _, c := range classesAny {
-		if s, ok := c.(string); ok { classes = append(classes, s) }
+		if s, ok := c.(string); ok {
+			classes = append(classes, s)
+		}
 	}
 	if len(classes) == 0 {
 		if mode == "live" {
@@ -258,7 +273,9 @@ func (a *App) toolPortfolioCreate(ctx *sdk.AppCtx, args map[string]any) (any, er
 			AllowedClasses: classes, StartingCash: cash,
 			Mode: "live", BrokerSlug: brokerSlug,
 		})
-		if err != nil { return nil, err }
+		if err != nil {
+			return nil, err
+		}
 
 		// Seed positions from broker holdings. Symbols arrive in the
 		// adapter's canonical form (BTC-USD for binance, AAPL / BTC-USD
@@ -310,12 +327,12 @@ func (a *App) toolPortfolioCreate(ctx *sdk.AppCtx, args map[string]any) (any, er
 		if backfilled+openSynced > 0 {
 			body := fmt.Sprintf("Backfilled %d historical order(s) and %d open order(s) from %s.", backfilled, openSynced, brokerSlug)
 			if entryID, jerr := dbInsertJournal(ctx.AppDB(), pid, id, "note", body, map[string]any{
-				"source":              "broker_backfill",
-				"kind":                "history_backfill",
-				"broker_slug":         brokerSlug,
+				"source":               "broker_backfill",
+				"kind":                 "history_backfill",
+				"broker_slug":          brokerSlug,
 				"broker_connection_id": bb.ConnectionID,
-				"historical_orders":   backfilled,
-				"open_orders_synced":  openSynced,
+				"historical_orders":    backfilled,
+				"open_orders_synced":   openSynced,
 			}); jerr == nil {
 				emit("journal.appended", map[string]any{
 					"id": entryID, "portfolio_id": id, "kind": "note", "body": body,
@@ -353,7 +370,9 @@ func (a *App) toolPortfolioCreate(ctx *sdk.AppCtx, args map[string]any) (any, er
 		ProjectID: pid, Name: name, Mandate: mandate,
 		AllowedClasses: classes, StartingCash: cash, Mode: "paper",
 	})
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	emit("portfolio.created", map[string]any{
 		"id": id, "name": name, "mandate": mandate,
 		"allowed_classes": classes, "starting_cash": cash,
@@ -503,17 +522,17 @@ func importBrokerOrders(ctx *sdk.AppCtx, projectID string, portfolioID int64, bb
 		// this row, dbBrokerOrderIDFor would return "" and live
 		// cancel against an open-sync'd order would fall to local-only.
 		_, _ = dbInsertJournal(ctx.AppDB(), projectID, portfolioID, "rationale", rationale, map[string]any{
-			"order_id":              localID,
-			"symbol":                r.Symbol,
-			"side":                  r.Side,
-			"qty":                   r.Qty,
-			"type":                  r.Type,
-			"broker_slug":           bb.Adapter.Slug(),
-			"broker_connection_id":  bb.ConnectionID,
-			"broker_order_id":       r.BrokerOrderID,
-			"client_order_id":       r.ClientOrderID,
-			"source":                source,
-			"backfill_status":       r.BrokerStatus,
+			"order_id":             localID,
+			"symbol":               r.Symbol,
+			"side":                 r.Side,
+			"qty":                  r.Qty,
+			"type":                 r.Type,
+			"broker_slug":          bb.Adapter.Slug(),
+			"broker_connection_id": bb.ConnectionID,
+			"broker_order_id":      r.BrokerOrderID,
+			"client_order_id":      r.ClientOrderID,
+			"source":               source,
+			"backfill_status":      r.BrokerStatus,
 		})
 
 		wrote++
@@ -588,9 +607,13 @@ func (a *App) toolBrokersList(ctx *sdk.AppCtx, args map[string]any) (any, error)
 
 func (a *App) toolPortfolioList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	pid, err := resolveProjectFromArgs(args)
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	pfs, err := dbListPortfolios(ctx.AppDB(), pid)
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	out := make([]map[string]any, 0, len(pfs))
 	for _, p := range pfs {
 		snap, _ := snapshotPortfolio(ctx.AppDB(), p)
@@ -606,21 +629,31 @@ func (a *App) toolPortfolioList(ctx *sdk.AppCtx, args map[string]any) (any, erro
 
 func (a *App) toolPortfolioGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	pid, err := resolveProjectFromArgs(args)
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	id := int64Arg(args, "portfolio_id", 0)
-	if id == 0 { return nil, errors.New("portfolio_id required") }
+	if id == 0 {
+		return nil, errors.New("portfolio_id required")
+	}
 	p, err := dbGetPortfolio(ctx.AppDB(), pid, id)
-	if err != nil { return nil, fmt.Errorf("portfolio %d not found in project", id) }
+	if err != nil {
+		return nil, fmt.Errorf("portfolio %d not found in project", id)
+	}
 	snap, _ := snapshotPortfolio(ctx.AppDB(), p)
 	return map[string]any{"portfolio": snap}, nil
 }
 
 func (a *App) toolAccountSummary(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	pid, err := resolveProjectFromArgs(args)
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	id := int64Arg(args, "portfolio_id", 0)
 	p, err := dbGetPortfolio(ctx.AppDB(), pid, id)
-	if err != nil { return nil, fmt.Errorf("portfolio %d not found", id) }
+	if err != nil {
+		return nil, fmt.Errorf("portfolio %d not found", id)
+	}
 	snap, _ := snapshotPortfolio(ctx.AppDB(), p)
 	return map[string]any{
 		"equity": snap.Equity, "cash": snap.Cash, "buying_power": snap.BuyingPower,
@@ -632,10 +665,14 @@ func (a *App) toolAccountSummary(ctx *sdk.AppCtx, args map[string]any) (any, err
 
 func (a *App) toolPositionsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	pid, err := resolveProjectFromArgs(args)
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	id := int64Arg(args, "portfolio_id", 0)
 	p, err := dbGetPortfolio(ctx.AppDB(), pid, id)
-	if err != nil { return nil, fmt.Errorf("portfolio %d not found", id) }
+	if err != nil {
+		return nil, fmt.Errorf("portfolio %d not found", id)
+	}
 	snap, _ := snapshotPortfolio(ctx.AppDB(), p) // computes weights + marks
 	pos, _ := dbListPositions(ctx.AppDB(), id)
 	classFilter, _ := args["asset_class"].(string)
@@ -667,13 +704,19 @@ func (a *App) toolPositionsList(ctx *sdk.AppCtx, args map[string]any) (any, erro
 
 func (a *App) toolOrdersList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	_, err := resolveProjectFromArgs(args)
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	id := int64Arg(args, "portfolio_id", 0)
 	status, _ := args["status"].(string)
-	if status == "" { status = "working" }
+	if status == "" {
+		status = "working"
+	}
 	limit := intArg(args, "limit", 50)
 	rows, err := dbListOrders(ctx.AppDB(), id, status, limit)
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	if rows == nil {
 		rows = []*Order{}
 	}
@@ -682,14 +725,18 @@ func (a *App) toolOrdersList(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 
 func (a *App) toolMarketQuote(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	symbol, _ := args["symbol"].(string)
-	if symbol == "" { return nil, errors.New("symbol required") }
+	if symbol == "" {
+		return nil, errors.New("symbol required")
+	}
 	mark, err := dbGetMark(ctx.AppDB(), symbol)
 	if err != nil {
 		// Fall back to live provider if engine hasn't ticked yet.
 		if globalEngine != nil {
 			mark, err = globalEngine.provider.Quote(symbol)
 		}
-		if err != nil { return nil, err }
+		if err != nil {
+			return nil, err
+		}
 	}
 	out := map[string]any{
 		"symbol": mark.Symbol, "asset_class": mark.AssetClass,
@@ -697,7 +744,9 @@ func (a *App) toolMarketQuote(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	}
 	if mark.AssetClass == "polymarket" {
 		out["yes_price"] = mark.Price
-		if mark.NoPrice != nil { out["no_price"] = *mark.NoPrice }
+		if mark.NoPrice != nil {
+			out["no_price"] = *mark.NoPrice
+		}
 	} else {
 		out["price"] = mark.Price
 		if mark.PrevClose != nil {
@@ -705,17 +754,25 @@ func (a *App) toolMarketQuote(ctx *sdk.AppCtx, args map[string]any) (any, error)
 			out["change_pct_24h"] = (mark.Price/(*mark.PrevClose) - 1) * 100
 		}
 	}
-	if mark.Volume24h != nil { out["volume_24h"] = *mark.Volume24h }
+	if mark.Volume24h != nil {
+		out["volume_24h"] = *mark.Volume24h
+	}
 	return out, nil
 }
 
 func (a *App) toolMarketHistory(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	if globalEngine == nil { return nil, errors.New("engine not ready") }
+	if globalEngine == nil {
+		return nil, errors.New("engine not ready")
+	}
 	symbol, _ := args["symbol"].(string)
 	rng, _ := args["range"].(string)
-	if rng == "" { rng = "1D" }
+	if rng == "" {
+		rng = "1D"
+	}
 	bars, err := globalEngine.provider.Bars(symbol, rng)
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	return map[string]any{"symbol": symbol, "range": rng, "bars": bars}, nil
 }
 
@@ -732,14 +789,20 @@ func (a *App) toolMarketSource(ctx *sdk.AppCtx, args map[string]any) (any, error
 
 func (a *App) toolJournalRead(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	_, err := resolveProjectFromArgs(args)
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	id := int64Arg(args, "portfolio_id", 0)
 	kind, _ := args["kind"].(string)
 	since, _ := args["since"].(string)
 	limit := intArg(args, "limit", 50)
 	entries, err := dbReadJournal(ctx.AppDB(), id, kind, since, limit)
-	if err != nil { return nil, err }
-	if entries == nil { entries = []*JournalEntry{} }
+	if err != nil {
+		return nil, err
+	}
+	if entries == nil {
+		entries = []*JournalEntry{}
+	}
 	return map[string]any{"entries": entries}, nil
 }
 
@@ -749,10 +812,14 @@ const minRationaleLen = 30
 
 func (a *App) toolOrderPlace(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	pid, err := resolveProjectFromArgs(args)
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	id := int64Arg(args, "portfolio_id", 0)
 	pf, err := dbGetPortfolio(ctx.AppDB(), pid, id)
-	if err != nil { return nil, fmt.Errorf("portfolio %d not found", id) }
+	if err != nil {
+		return nil, fmt.Errorf("portfolio %d not found", id)
+	}
 
 	// Pre-trade pipeline. Each rejection returns a structured status —
 	// the agent should reason about it, not raise.
@@ -791,10 +858,16 @@ func (a *App) toolOrderPlace(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		}
 	}
 	tif, _ := args["tif"].(string)
-	if tif == "" { tif = "day" }
+	if tif == "" {
+		tif = "day"
+	}
 	var lp, sp *float64
-	if v := floatArg(args, "limit_price", 0); v > 0 { lp = &v }
-	if v := floatArg(args, "stop_price", 0); v > 0  { sp = &v }
+	if v := floatArg(args, "limit_price", 0); v > 0 {
+		lp = &v
+	}
+	if v := floatArg(args, "stop_price", 0); v > 0 {
+		sp = &v
+	}
 	if otype == "limit" && lp == nil {
 		return rejectStruct("invalid_args", "limit orders require limit_price"), nil
 	}
@@ -822,19 +895,19 @@ func (a *App) toolOrderPlace(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	// engine picks it up on the next tick; for live, we forward to the
 	// broker below and reflect the response inline.
 	o := &Order{
-		ID:           "o-" + strings.ReplaceAll(uuid.NewString(), "-", "")[:12],
-		PortfolioID:  pf.ID,
-		Symbol:       symbol,
-		AssetClass:   class,
-		Side:         side,
-		Type:         otype,
-		Qty:          qty,
-		LimitPrice:   lp,
-		StopPrice:    sp,
-		TIF:          tif,
-		Status:       "working",
-		Rationale:    rationale,
-		Source:       source,
+		ID:          "o-" + strings.ReplaceAll(uuid.NewString(), "-", "")[:12],
+		PortfolioID: pf.ID,
+		Symbol:      symbol,
+		AssetClass:  class,
+		Side:        side,
+		Type:        otype,
+		Qty:         qty,
+		LimitPrice:  lp,
+		StopPrice:   sp,
+		TIF:         tif,
+		Status:      "working",
+		Rationale:   rationale,
+		Source:      source,
 	}
 	if err := dbInsertOrder(ctx.AppDB(), o, pid); err != nil {
 		return nil, err
@@ -935,7 +1008,7 @@ func (a *App) toolOrderPlace(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 				"limit_price": o.LimitPrice, "stop_price": o.StopPrice,
 				"status": "working", "rationale": rationale, "mode": "live",
 				"broker_slug": adapter.Slug(),
-				"uncertain": true, "broker_call_code": code, "broker_call_detail": detail,
+				"uncertain":   true, "broker_call_code": code, "broker_call_detail": detail,
 			})
 			ctx.Logger().Warn("broker call uncertain — leaving order working for reconciler",
 				"order_id", o.ID, "broker", adapter.Slug(), "code", code, "detail", detail)
@@ -975,20 +1048,20 @@ func (a *App) toolOrderPlace(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		// emit order.placed before applying fills so subscribers see
 		// {placed, filled} in order rather than just a sudden FILLED.
 		emit("order.placed", map[string]any{
-			"order_id":         o.ID,
-			"portfolio_id":     pf.ID,
-			"symbol":           symbol,
-			"asset_class":      class,
-			"side":             side,
-			"type":             otype,
-			"qty":              qty,
-			"limit_price":      o.LimitPrice,
-			"stop_price":       o.StopPrice,
-			"status":           "working",
-			"rationale":        rationale,
-			"mode":             "live",
-			"broker_slug":      adapter.Slug(),
-			"broker_order_id":  br.BrokerOrderID,
+			"order_id":        o.ID,
+			"portfolio_id":    pf.ID,
+			"symbol":          symbol,
+			"asset_class":     class,
+			"side":            side,
+			"type":            otype,
+			"qty":             qty,
+			"limit_price":     o.LimitPrice,
+			"stop_price":      o.StopPrice,
+			"status":          "working",
+			"rationale":       rationale,
+			"mode":            "live",
+			"broker_slug":     adapter.Slug(),
+			"broker_order_id": br.BrokerOrderID,
 		})
 
 		// Apply any inline fills (e.g. Binance market orders return them
@@ -999,7 +1072,7 @@ func (a *App) toolOrderPlace(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		return map[string]any{
 			"order_id":        o.ID,
 			"broker_order_id": br.BrokerOrderID,
-			"status":          o.Status,        // updated by applyBrokerProgress
+			"status":          o.Status, // updated by applyBrokerProgress
 			"filled_qty":      o.FilledQty,
 			"avg_fill_price":  o.AvgFillPrice,
 		}, nil
@@ -1033,10 +1106,14 @@ func (a *App) toolOrderPlace(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 
 func (a *App) toolOrderCancel(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	pid, err := resolveProjectFromArgs(args)
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	id, _ := args["order_id"].(string)
 	reason, _ := args["reason"].(string)
-	if id == "" { return nil, errors.New("order_id required") }
+	if id == "" {
+		return nil, errors.New("order_id required")
+	}
 
 	// Look the order up first so we know whether it's a live order that
 	// needs a broker cancel before the local row flips.
@@ -1094,7 +1171,9 @@ func (a *App) toolOrderCancel(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	}
 
 	status, err := dbCancelOrder(ctx.AppDB(), pid, id, reason)
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	if status == "cancelled" {
 		emit("order.cancelled", map[string]any{"order_id": id, "reason": reason, "mode": pf.Mode})
 		return map[string]any{"status": "cancelled", "order_id": id}, nil
@@ -1104,7 +1183,9 @@ func (a *App) toolOrderCancel(ctx *sdk.AppCtx, args map[string]any) (any, error)
 
 func (a *App) toolJournalWrite(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	pid, err := resolveProjectFromArgs(args)
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	portfolioID := int64Arg(args, "portfolio_id", 0)
 	kind, _ := args["kind"].(string)
 	body, _ := args["body"].(string)
@@ -1113,7 +1194,9 @@ func (a *App) toolJournalWrite(ctx *sdk.AppCtx, args map[string]any) (any, error
 	}
 	meta, _ := args["metadata"].(map[string]any)
 	entryID, err := dbInsertJournal(ctx.AppDB(), pid, portfolioID, kind, body, meta)
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	emit("journal.appended", map[string]any{
 		"id": entryID, "portfolio_id": portfolioID, "kind": kind, "body": body, "metadata": meta,
 	})
@@ -1122,17 +1205,23 @@ func (a *App) toolJournalWrite(ctx *sdk.AppCtx, args map[string]any) (any, error
 
 func (a *App) toolWatchlistAdd(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	pid, err := resolveProjectFromArgs(args)
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	id := int64Arg(args, "portfolio_id", 0)
 	symbol, _ := args["symbol"].(string)
 	pf, err := dbGetPortfolio(ctx.AppDB(), pid, id)
-	if err != nil { return nil, fmt.Errorf("portfolio %d not found", id) }
+	if err != nil {
+		return nil, fmt.Errorf("portfolio %d not found", id)
+	}
 	class := inferAssetClass(symbol)
 	if !contains(pf.AllowedClasses, class) {
 		return nil, fmt.Errorf("asset class %q not in portfolio's allowed_classes", class)
 	}
 	added, err := dbWatchlistAdd(ctx.AppDB(), pid, id, symbol)
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	wl, _ := dbWatchlist(ctx.AppDB(), id)
 	if added {
 		emit("watchlist.changed", map[string]any{"portfolio_id": id, "watchlist": wl, "added": symbol})
@@ -1142,11 +1231,15 @@ func (a *App) toolWatchlistAdd(ctx *sdk.AppCtx, args map[string]any) (any, error
 
 func (a *App) toolWatchlistRemove(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	_, err := resolveProjectFromArgs(args)
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	id := int64Arg(args, "portfolio_id", 0)
 	symbol, _ := args["symbol"].(string)
 	removed, err := dbWatchlistRemove(ctx.AppDB(), id, symbol)
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	wl, _ := dbWatchlist(ctx.AppDB(), id)
 	if removed {
 		emit("watchlist.changed", map[string]any{"portfolio_id": id, "watchlist": wl, "removed": symbol})
@@ -1156,7 +1249,9 @@ func (a *App) toolWatchlistRemove(ctx *sdk.AppCtx, args map[string]any) (any, er
 
 func (a *App) toolAlertCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	pid, err := resolveProjectFromArgs(args)
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	a2 := &Alert{
 		PortfolioID: int64Arg(args, "portfolio_id", 0),
 		Symbol:      strArg(args, "symbol"),
@@ -1170,18 +1265,26 @@ func (a *App) toolAlertCreate(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		}
 	}
 	id, err := dbInsertAlert(ctx.AppDB(), pid, a2)
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	return map[string]any{"alert_id": id}, nil
 }
 
 func (a *App) toolPortfolioPause(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	pid, err := resolveProjectFromArgs(args)
-	if err != nil { return nil, err }
+	if err != nil {
+		return nil, err
+	}
 	id := int64Arg(args, "portfolio_id", 0)
 	reason := strArg(args, "reason")
-	if reason == "" { return nil, errors.New("reason required") }
+	if reason == "" {
+		return nil, errors.New("reason required")
+	}
 	pf, err := dbGetPortfolio(ctx.AppDB(), pid, id)
-	if err != nil { return nil, fmt.Errorf("portfolio %d not found", id) }
+	if err != nil {
+		return nil, fmt.Errorf("portfolio %d not found", id)
+	}
 	if err := dbSetPortfolioStatus(ctx.AppDB(), pf.ID, "paused"); err != nil {
 		return nil, err
 	}
@@ -1207,7 +1310,9 @@ func rejectStruct(code, detail string) map[string]any {
 
 func contains(xs []string, x string) bool {
 	for _, y := range xs {
-		if y == x { return true }
+		if y == x {
+			return true
+		}
 	}
 	return false
 }

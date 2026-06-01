@@ -117,6 +117,41 @@ type Alert struct {
 	FiredAt     string  `json:"fired_at,omitempty"`
 }
 
+type BacktestRun struct {
+	ID                     int64          `json:"id"`
+	ProjectID              string         `json:"project_id,omitempty"`
+	PortfolioID            int64          `json:"portfolio_id"`
+	SourceAgentID          int64          `json:"source_agent_id"`
+	EnvironmentID          string         `json:"environment_id,omitempty"`
+	EnvironmentAgentID     int64          `json:"environment_agent_id,omitempty"`
+	EnvironmentPortfolioID int64          `json:"environment_portfolio_id,omitempty"`
+	Name                   string         `json:"name"`
+	Status                 string         `json:"status"`
+	Symbols                []string       `json:"symbols"`
+	StartAt                string         `json:"start_at"`
+	EndAt                  string         `json:"end_at"`
+	Interval               string         `json:"interval"`
+	StartingCash           float64        `json:"starting_cash"`
+	FeeBps                 float64        `json:"fee_bps"`
+	SlippageBps            float64        `json:"slippage_bps"`
+	CurrentStep            int            `json:"current_step"`
+	TotalSteps             int            `json:"total_steps"`
+	Summary                map[string]any `json:"summary,omitempty"`
+	Error                  string         `json:"error,omitempty"`
+	CreatedAt              string         `json:"created_at"`
+	UpdatedAt              string         `json:"updated_at"`
+	CompletedAt            string         `json:"completed_at,omitempty"`
+}
+
+type BacktestEvent struct {
+	ID        int64          `json:"id"`
+	RunID     int64          `json:"run_id"`
+	Kind      string         `json:"kind"`
+	Message   string         `json:"message"`
+	Data      map[string]any `json:"data,omitempty"`
+	CreatedAt string         `json:"created_at"`
+}
+
 // ─── Portfolio ─────────────────────────────────────────────────────
 
 func dbCreatePortfolio(db *sql.DB, p *Portfolio) (int64, error) {
@@ -790,6 +825,186 @@ func dbGetMark(db *sql.DB, symbol string) (*Mark, error) {
 		m.Volume24h = &v
 	}
 	return &m, nil
+}
+
+// ─── Backtests ─────────────────────────────────────────────────────
+
+func dbCreateBacktestRun(db *sql.DB, run *BacktestRun) (int64, error) {
+	symbolsJSON, err := json.Marshal(run.Symbols)
+	if err != nil {
+		return 0, err
+	}
+	summaryJSON, _ := json.Marshal(run.Summary)
+	if len(summaryJSON) == 0 {
+		summaryJSON = []byte("{}")
+	}
+	status := strings.TrimSpace(run.Status)
+	if status == "" {
+		status = "queued"
+	}
+	res, err := db.Exec(`
+		INSERT INTO backtest_runs (
+			project_id, portfolio_id, source_agent_id, name, status, symbols,
+			start_at, end_at, interval, starting_cash, fee_bps, slippage_bps,
+			total_steps, summary_json
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		run.ProjectID, run.PortfolioID, run.SourceAgentID, run.Name, status, string(symbolsJSON),
+		run.StartAt, run.EndAt, run.Interval, run.StartingCash, run.FeeBps, run.SlippageBps,
+		run.TotalSteps, string(summaryJSON))
+	if err != nil {
+		return 0, err
+	}
+	return res.LastInsertId()
+}
+
+func dbGetBacktestRun(db *sql.DB, projectID string, id int64) (*BacktestRun, error) {
+	row := db.QueryRow(`
+		SELECT id, project_id, portfolio_id, source_agent_id,
+		       COALESCE(environment_id, ''), COALESCE(environment_agent_id, 0),
+		       COALESCE(environment_portfolio_id, 0), name, status, symbols,
+		       start_at, end_at, interval, starting_cash, fee_bps, slippage_bps,
+		       current_step, total_steps, summary_json, COALESCE(error, ''),
+		       created_at, updated_at, COALESCE(completed_at, '')
+		FROM backtest_runs WHERE id = ? AND project_id = ?`, id, projectID)
+	return scanBacktestRun(row)
+}
+
+func dbListBacktestRuns(db *sql.DB, projectID string, portfolioID int64) ([]*BacktestRun, error) {
+	rows, err := db.Query(`
+		SELECT id, project_id, portfolio_id, source_agent_id,
+		       COALESCE(environment_id, ''), COALESCE(environment_agent_id, 0),
+		       COALESCE(environment_portfolio_id, 0), name, status, symbols,
+		       start_at, end_at, interval, starting_cash, fee_bps, slippage_bps,
+		       current_step, total_steps, summary_json, COALESCE(error, ''),
+		       created_at, updated_at, COALESCE(completed_at, '')
+		FROM backtest_runs
+		WHERE project_id = ? AND (? = 0 OR portfolio_id = ?)
+		ORDER BY id DESC`, projectID, portfolioID, portfolioID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []*BacktestRun{}
+	for rows.Next() {
+		run, err := scanBacktestRunRows(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, run)
+	}
+	return out, rows.Err()
+}
+
+func scanBacktestRun(row *sql.Row) (*BacktestRun, error) {
+	var run BacktestRun
+	var symbolsJSON, summaryJSON string
+	if err := row.Scan(&run.ID, &run.ProjectID, &run.PortfolioID, &run.SourceAgentID,
+		&run.EnvironmentID, &run.EnvironmentAgentID, &run.EnvironmentPortfolioID,
+		&run.Name, &run.Status, &symbolsJSON, &run.StartAt, &run.EndAt, &run.Interval,
+		&run.StartingCash, &run.FeeBps, &run.SlippageBps, &run.CurrentStep, &run.TotalSteps,
+		&summaryJSON, &run.Error, &run.CreatedAt, &run.UpdatedAt, &run.CompletedAt); err != nil {
+		return nil, err
+	}
+	decodeBacktestJSON(&run, symbolsJSON, summaryJSON)
+	return &run, nil
+}
+
+func scanBacktestRunRows(rows *sql.Rows) (*BacktestRun, error) {
+	var run BacktestRun
+	var symbolsJSON, summaryJSON string
+	if err := rows.Scan(&run.ID, &run.ProjectID, &run.PortfolioID, &run.SourceAgentID,
+		&run.EnvironmentID, &run.EnvironmentAgentID, &run.EnvironmentPortfolioID,
+		&run.Name, &run.Status, &symbolsJSON, &run.StartAt, &run.EndAt, &run.Interval,
+		&run.StartingCash, &run.FeeBps, &run.SlippageBps, &run.CurrentStep, &run.TotalSteps,
+		&summaryJSON, &run.Error, &run.CreatedAt, &run.UpdatedAt, &run.CompletedAt); err != nil {
+		return nil, err
+	}
+	decodeBacktestJSON(&run, symbolsJSON, summaryJSON)
+	return &run, nil
+}
+
+func decodeBacktestJSON(run *BacktestRun, symbolsJSON, summaryJSON string) {
+	_ = json.Unmarshal([]byte(symbolsJSON), &run.Symbols)
+	if run.Symbols == nil {
+		run.Symbols = []string{}
+	}
+	_ = json.Unmarshal([]byte(summaryJSON), &run.Summary)
+	if run.Summary == nil {
+		run.Summary = map[string]any{}
+	}
+}
+
+func dbUpdateBacktestEnvironment(db *sql.DB, runID int64, environmentID string, environmentAgentID, environmentPortfolioID int64) error {
+	_, err := db.Exec(`
+		UPDATE backtest_runs
+		   SET environment_id = ?, environment_agent_id = ?, environment_portfolio_id = ?,
+		       status = 'running', updated_at = CURRENT_TIMESTAMP
+		 WHERE id = ?`, environmentID, environmentAgentID, environmentPortfolioID, runID)
+	return err
+}
+
+func dbSetBacktestStatus(db *sql.DB, runID int64, status, errText string) error {
+	completedExpr := "NULL"
+	if status == "completed" || status == "failed" || status == "cancelled" {
+		completedExpr = "CURRENT_TIMESTAMP"
+	}
+	_, err := db.Exec(fmt.Sprintf(`
+		UPDATE backtest_runs
+		   SET status = ?, error = NULLIF(?, ''), updated_at = CURRENT_TIMESTAMP, completed_at = %s
+		 WHERE id = ?`, completedExpr), status, errText, runID)
+	return err
+}
+
+func dbAdvanceBacktestStep(db *sql.DB, runID int64, step int, summary map[string]any, status string) error {
+	summaryJSON, _ := json.Marshal(summary)
+	completedExpr := "completed_at"
+	if status == "completed" {
+		completedExpr = "CURRENT_TIMESTAMP"
+	}
+	_, err := db.Exec(fmt.Sprintf(`
+		UPDATE backtest_runs
+		   SET current_step = ?, summary_json = ?, status = ?, updated_at = CURRENT_TIMESTAMP, completed_at = %s
+		 WHERE id = ?`, completedExpr), step, string(summaryJSON), status, runID)
+	return err
+}
+
+func dbInsertBacktestEvent(db *sql.DB, runID int64, kind, message string, data map[string]any) (int64, error) {
+	raw, _ := json.Marshal(data)
+	res, err := db.Exec(`
+		INSERT INTO backtest_events (run_id, kind, message, data)
+		VALUES (?, ?, ?, ?)`, runID, kind, message, string(raw))
+	if err != nil {
+		return 0, err
+	}
+	return res.LastInsertId()
+}
+
+func dbListBacktestEvents(db *sql.DB, runID int64, limit int) ([]*BacktestEvent, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 80
+	}
+	rows, err := db.Query(`
+		SELECT id, run_id, kind, message, data, created_at
+		FROM backtest_events WHERE run_id = ?
+		ORDER BY id DESC LIMIT ?`, runID, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []*BacktestEvent{}
+	for rows.Next() {
+		var ev BacktestEvent
+		var dataJSON string
+		if err := rows.Scan(&ev.ID, &ev.RunID, &ev.Kind, &ev.Message, &dataJSON, &ev.CreatedAt); err != nil {
+			return nil, err
+		}
+		_ = json.Unmarshal([]byte(dataJSON), &ev.Data)
+		if ev.Data == nil {
+			ev.Data = map[string]any{}
+		}
+		out = append(out, &ev)
+	}
+	return out, rows.Err()
 }
 
 // ─── Watchlist ─────────────────────────────────────────────────────

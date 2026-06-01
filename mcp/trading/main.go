@@ -11,6 +11,8 @@
 //   GET  /portfolios/{id}/orders?status=…
 //   GET  /portfolios/{id}/journal?kind=…
 //   PATCH /portfolios/{id}/agent              — body { agent_id }
+//   GET/POST /portfolios/{id}/backtests       — list/create agent backtests
+//   POST /backtests/{id}/start|step|cancel    — environment-backed replay controls
 //   GET  /quotes/{symbol}
 //   POST /portfolios/{id}/orders              — body { side, type, qty, … rationale }
 //   POST /portfolios/{id}/orders/{oid}/cancel
@@ -41,7 +43,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: trading
 display_name: Trading
-version: 0.4.13
+version: 0.4.14
 description: Trading desk for Apteva agents (paper + live via per-portfolio broker integration).
 author: Apteva
 scopes: [project, global]
@@ -52,6 +54,9 @@ requires:
     - net.egress
     - platform.connections.execute
     - platform.connections.read
+    - platform.environments.read
+    - platform.environments.call
+    - platform.environments.manage
   integrations:
     - role: broker
       kind: integration
@@ -119,6 +124,8 @@ provides:
       description: "Read journal entries for a portfolio."
     - name: portfolio_pause
       description: "Pause a portfolio (no new orders)."
+    - name: backtest_market_step
+      description: "Internal backtest runner tool: load replay prices into an isolated environment."
   ui_panels:
     - slot: project.page
       label: Trading
@@ -263,6 +270,8 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/history/", Handler: a.handleHTTPHistory},
 		{Pattern: "/universe", Handler: a.handleHTTPUniverse},
 		{Pattern: "/brokers", Handler: a.handleHTTPBrokers},
+		{Pattern: "/backtests", Handler: a.handleHTTPBacktests},
+		{Pattern: "/backtests/", Handler: a.handleHTTPBacktests},
 		{Pattern: "/healthz/details", Handler: a.handleHTTPHealthDetails},
 	}
 }
@@ -366,6 +375,10 @@ func (a *App) handleHTTPPortfolioItem(w http.ResponseWriter, r *http.Request) {
 		httpJSON(w, 200, map[string]any{
 			"portfolio_id": pf.ID, "agent_id": agentRef, "agent_instance_id": agentID,
 		})
+
+	case sub == "backtests":
+		snap, _ := snapshotPortfolio(globalCtx.AppDB(), pf)
+		a.handleHTTPPortfolioBacktests(w, r, snap, pid)
 
 	case sub == "positions" && r.Method == http.MethodGet:
 		pos, _ := dbListPositions(globalCtx.AppDB(), pf.ID)

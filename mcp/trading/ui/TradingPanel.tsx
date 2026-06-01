@@ -252,6 +252,37 @@ interface Bar {
   yes?: number;
 }
 interface HistoryResp { symbol: string; range: string; bars: Bar[] }
+interface BacktestRun {
+  id: number;
+  portfolio_id: number;
+  source_agent_id: number;
+  environment_id?: string;
+  environment_agent_id?: number;
+  environment_portfolio_id?: number;
+  name: string;
+  status: "queued" | "running" | "completed" | "failed" | "cancelled";
+  symbols: string[];
+  start_at: string;
+  end_at: string;
+  interval: string;
+  starting_cash: number;
+  fee_bps: number;
+  slippage_bps: number;
+  current_step: number;
+  total_steps: number;
+  summary?: { prices?: Array<{ symbol: string; price: number; asset_class?: string }> };
+  error?: string;
+  created_at: string;
+  updated_at: string;
+}
+interface BacktestEvent {
+  id: number;
+  run_id: number;
+  kind: string;
+  message: string;
+  data?: Record<string, unknown>;
+  created_at: string;
+}
 const CHART_RANGES = ["1D", "5D", "1M", "3M", "1Y", "ALL"] as const;
 type ChartRange = typeof CHART_RANGES[number];
 
@@ -902,7 +933,7 @@ function pnlClass(n: number | undefined): string {
 
 // ─── Main ──────────────────────────────────────────────────────────
 
-type TabId = "portfolios" | "trade" | "positions" | "agents" | "brokers" | "journal";
+type TabId = "portfolios" | "trade" | "positions" | "agents" | "backtests" | "brokers" | "journal";
 
 export default function TradingPanel({ projectId, installId }: NativePanelProps) {
   const [tab, setTab] = useState<TabId>("portfolios");
@@ -987,7 +1018,7 @@ export default function TradingPanel({ projectId, installId }: NativePanelProps)
       </header>
 
       <nav className="flex border-b border-border px-3 text-xs">
-        {(["portfolios","trade","positions","agents","brokers","journal"] as TabId[]).map((id) => {
+        {(["portfolios","trade","positions","agents","backtests","brokers","journal"] as TabId[]).map((id) => {
           const active = id === tab;
           return (
             <button
@@ -1020,6 +1051,9 @@ export default function TradingPanel({ projectId, installId }: NativePanelProps)
         )}
         {tab === "agents" && (
           <AgentsTab portfolio={selected} api={api} projectId={projectId} onChanged={loadPortfolios} setError={setError} />
+        )}
+        {tab === "backtests" && (
+          <BacktestsTab portfolio={selected} api={api} projectId={projectId} setError={setError} />
         )}
         {tab === "brokers" && (
           <BrokersTab api={api} setError={setError} />
@@ -1259,6 +1293,15 @@ function FieldLabel({ children }: { children: React.ReactNode }) {
   return <label className="block text-xs uppercase tracking-wide font-medium text-text-dim mb-1">{children}</label>;
 }
 const inputClass = "w-full text-sm px-2 py-1.5 bg-bg-input border border-border rounded text-text";
+
+function Metric({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="p-2 rounded bg-bg-input border border-border">
+      <FieldLabel>{label}</FieldLabel>
+      <div className="text-sm font-medium text-text tabular-nums">{value}</div>
+    </div>
+  );
+}
 
 // ─── Trade tab ────────────────────────────────────────────────────
 
@@ -2325,6 +2368,265 @@ function activityDotClass(a: AgentActivity): string {
   if (a.kind === "order") return "bg-green";
   if (a.kind === "market") return "bg-accent";
   return "bg-text-dim";
+}
+
+// ─── Backtests tab ────────────────────────────────────────────────
+
+function BacktestsTab({ portfolio, api, projectId, setError }: {
+  portfolio: Portfolio | null;
+  api: <T>(m: string, p: string, q?: Record<string, string>, b?: unknown) => Promise<T>;
+  projectId: string;
+  setError: (e: string | null) => void;
+}) {
+  const [runs, setRuns] = useState<BacktestRun[]>([]);
+  const [selectedRunId, setSelectedRunId] = useState<number | null>(null);
+  const [events, setEvents] = useState<BacktestEvent[]>([]);
+  const [busy, setBusy] = useState(false);
+  const [name, setName] = useState("");
+  const [symbols, setSymbols] = useState("");
+  const [startAt, setStartAt] = useState(defaultDate(-90));
+  const [endAt, setEndAt] = useState(defaultDate(0));
+  const [startingCash, setStartingCash] = useState("");
+  const [feeBps, setFeeBps] = useState("1");
+  const [slippageBps, setSlippageBps] = useState("5");
+
+  const load = useCallback(async () => {
+    if (!portfolio) return;
+    try {
+      const r = await api<{ backtests: BacktestRun[] }>("GET", `/portfolios/${portfolio.id}/backtests`);
+      const list = r.backtests || [];
+      setRuns(list);
+      setSelectedRunId((cur) => cur ?? list[0]?.id ?? null);
+      setError(null);
+    } catch (e) { setError((e as Error).message); }
+  }, [portfolio?.id, api, setError]);
+
+  const selectedRun = useMemo(
+    () => runs.find((r) => r.id === selectedRunId) || null,
+    [runs, selectedRunId],
+  );
+
+  const loadEvents = useCallback(async () => {
+    if (!selectedRun) {
+      setEvents([]);
+      return;
+    }
+    try {
+      const r = await api<{ events: BacktestEvent[] }>("GET", `/backtests/${selectedRun.id}/events`, { limit: "80" });
+      setEvents(r.events || []);
+    } catch (e) { setError((e as Error).message); }
+  }, [selectedRun?.id, api, setError]);
+
+  useEffect(() => { load(); }, [load]);
+  useEffect(() => { loadEvents(); }, [loadEvents]);
+  useAppEvents("trading", projectId, (ev) => {
+    if (ev.topic.startsWith("trading.backtest.")) {
+      load();
+      loadEvents();
+    }
+  });
+
+  useEffect(() => {
+    if (!portfolio) return;
+    setName(`${portfolio.name} replay`);
+    setSymbols((portfolio.watchlist || []).join(", "));
+    setStartingCash(String(Math.round(portfolio.starting_cash || portfolio.cash || 100000)));
+  }, [portfolio?.id]);
+
+  if (!portfolio) return <EmptyState title="Pick a portfolio" hint="No portfolio selected." />;
+
+  const create = async () => {
+    setBusy(true);
+    try {
+      const body = {
+        name,
+        symbols: symbols.split(",").map((s) => s.trim()).filter(Boolean),
+        start_at: startAt,
+        end_at: endAt,
+        interval: "1d",
+        starting_cash: Number(startingCash) || portfolio.starting_cash || portfolio.cash,
+        fee_bps: Number(feeBps) || 0,
+        slippage_bps: Number(slippageBps) || 0,
+      };
+      const r = await api<{ backtest: BacktestRun }>("POST", `/portfolios/${portfolio.id}/backtests`, undefined, body);
+      setSelectedRunId(r.backtest.id);
+      await load();
+    } catch (e) { setError((e as Error).message); }
+    finally { setBusy(false); }
+  };
+
+  const action = async (run: BacktestRun, op: "start" | "step" | "cancel") => {
+    setBusy(true);
+    try {
+      const r = await api<{ backtest?: BacktestRun; status?: string }>("POST", `/backtests/${run.id}/${op}`);
+      if (r.backtest) {
+        setRuns((prev) => prev.map((x) => x.id === r.backtest!.id ? r.backtest! : x));
+      }
+      await load();
+      await loadEvents();
+    } catch (e) { setError((e as Error).message); }
+    finally { setBusy(false); }
+  };
+
+  return (
+    <>
+      <Section title="New backtest">
+        <div className="grid gap-3" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(180px, 1fr))" }}>
+          <label className="text-xs">
+            <FieldLabel>Name</FieldLabel>
+            <input value={name} onChange={(e) => setName(e.target.value)} className={inputClass} />
+          </label>
+          <label className="text-xs">
+            <FieldLabel>Symbols</FieldLabel>
+            <input value={symbols} onChange={(e) => setSymbols(e.target.value)} className={inputClass} />
+          </label>
+          <label className="text-xs">
+            <FieldLabel>Start</FieldLabel>
+            <input type="date" value={startAt} onChange={(e) => setStartAt(e.target.value)} className={inputClass} />
+          </label>
+          <label className="text-xs">
+            <FieldLabel>End</FieldLabel>
+            <input type="date" value={endAt} onChange={(e) => setEndAt(e.target.value)} className={inputClass} />
+          </label>
+          <label className="text-xs">
+            <FieldLabel>Cash</FieldLabel>
+            <input value={startingCash} onChange={(e) => setStartingCash(e.target.value)} className={inputClass} inputMode="decimal" />
+          </label>
+          <label className="text-xs">
+            <FieldLabel>Fee bps</FieldLabel>
+            <input value={feeBps} onChange={(e) => setFeeBps(e.target.value)} className={inputClass} inputMode="decimal" />
+          </label>
+          <label className="text-xs">
+            <FieldLabel>Slippage bps</FieldLabel>
+            <input value={slippageBps} onChange={(e) => setSlippageBps(e.target.value)} className={inputClass} inputMode="decimal" />
+          </label>
+          <div className="flex items-end">
+            <button
+              onClick={create}
+              disabled={busy || !portfolioAgentID(portfolio)}
+              className="w-full px-3 py-1.5 text-xs rounded bg-accent text-bg font-medium hover:opacity-90 disabled:opacity-50"
+            >
+              Create
+            </button>
+          </div>
+        </div>
+        {!portfolioAgentID(portfolio) && (
+          <div className="mt-2 text-xs text-amber">Bind a portfolio agent before creating a backtest.</div>
+        )}
+      </Section>
+
+      <Section title="Runs">
+        {runs.length === 0 ? (
+          <EmptyState title="No backtests" hint="Create a run for this portfolio." />
+        ) : (
+          <div className="grid gap-3" style={{ gridTemplateColumns: "minmax(260px, 360px) minmax(0, 1fr)" }}>
+            <div className="border border-border rounded bg-bg-card overflow-hidden">
+              {runs.map((run) => (
+                <button
+                  key={run.id}
+                  onClick={() => setSelectedRunId(run.id)}
+                  className={`w-full text-left px-3 py-2 border-t first:border-t-0 border-border hover:bg-bg-hover ${selectedRunId === run.id ? "bg-bg-input" : ""}`}
+                >
+                  <div className="flex items-center gap-2">
+                    <span className="font-medium text-sm truncate">{run.name}</span>
+                    <BacktestStatus status={run.status} />
+                  </div>
+                  <div className="mt-1 text-xs text-text-dim">
+                    {run.start_at} to {run.end_at} · {run.current_step}/{run.total_steps}
+                  </div>
+                </button>
+              ))}
+            </div>
+            <div>
+              {selectedRun ? (
+                <BacktestRunDetail run={selectedRun} events={events} busy={busy} onAction={action} />
+              ) : (
+                <EmptyState title="Select a run" />
+              )}
+            </div>
+          </div>
+        )}
+      </Section>
+    </>
+  );
+}
+
+function BacktestRunDetail({ run, events, busy, onAction }: {
+  run: BacktestRun;
+  events: BacktestEvent[];
+  busy: boolean;
+  onAction: (run: BacktestRun, op: "start" | "step" | "cancel") => void;
+}) {
+  const pct = run.total_steps > 0 ? Math.min(100, Math.round((run.current_step / run.total_steps) * 100)) : 0;
+  const prices = run.summary?.prices || [];
+  return (
+    <div className="space-y-3">
+      <div className="p-3 border border-border rounded bg-bg-card">
+        <div className="flex flex-wrap items-center gap-2">
+          <strong className="text-sm">{run.name}</strong>
+          <BacktestStatus status={run.status} />
+          <span className="text-xs text-text-dim">agent #{run.source_agent_id}</span>
+          {run.environment_id && <span className="text-xs text-text-dim">env {run.environment_id}</span>}
+          <span className="flex-1" />
+          {run.status === "queued" || run.status === "failed" ? (
+            <button disabled={busy} onClick={() => onAction(run, "start")} className="px-2 py-1 text-xs rounded bg-accent text-bg font-medium disabled:opacity-50">Start</button>
+          ) : null}
+          {run.status === "running" && (
+            <>
+              <button disabled={busy} onClick={() => onAction(run, "step")} className="px-2 py-1 text-xs rounded bg-accent text-bg font-medium disabled:opacity-50">Step</button>
+              <button disabled={busy} onClick={() => onAction(run, "cancel")} className="px-2 py-1 text-xs rounded border border-border text-text-muted hover:bg-bg-hover disabled:opacity-50">Cancel</button>
+            </>
+          )}
+        </div>
+        <div className="mt-3 h-2 rounded bg-bg-input overflow-hidden">
+          <div className="h-full bg-accent" style={{ width: `${pct}%` }} />
+        </div>
+        <div className="mt-2 grid grid-cols-2 md:grid-cols-4 gap-2 text-xs">
+          <Metric label="Step" value={`${run.current_step}/${run.total_steps}`} />
+          <Metric label="Cash" value={money(run.starting_cash)} />
+          <Metric label="Fee" value={`${run.fee_bps} bps`} />
+          <Metric label="Slippage" value={`${run.slippage_bps} bps`} />
+        </div>
+        {prices.length > 0 && (
+          <div className="mt-3 flex flex-wrap gap-1">
+            {prices.map((p) => (
+              <span key={p.symbol} className="text-xs px-2 py-0.5 rounded bg-bg-input text-text-muted">
+                {p.symbol} {formatPrice(p.price, p.asset_class || inferAssetClass(p.symbol))}
+              </span>
+            ))}
+          </div>
+        )}
+        {run.error && <div className="mt-2 text-xs text-red">{run.error}</div>}
+      </div>
+      <div className="border border-border rounded bg-bg-card overflow-hidden">
+        {events.length === 0 ? (
+          <EmptyState title="No events" />
+        ) : events.map((ev) => (
+          <div key={ev.id} className="px-3 py-2 border-t first:border-t-0 border-border">
+            <div className="flex gap-2 text-xs">
+              <span className="font-semibold uppercase tracking-wide text-accent">{ev.kind}</span>
+              <span className="text-text-dim">{relTime(ev.created_at)}</span>
+            </div>
+            <div className="text-sm mt-0.5">{ev.message}</div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function BacktestStatus({ status }: { status: BacktestRun["status"] }) {
+  const cls = status === "running" ? "bg-amber/10 text-amber" :
+    status === "completed" ? "bg-green/10 text-green" :
+    status === "failed" || status === "cancelled" ? "bg-red/10 text-red" :
+    "bg-bg-input text-text-muted";
+  return <span className={`text-xs px-2 py-0.5 rounded uppercase font-semibold ${cls}`}>{status}</span>;
+}
+
+function defaultDate(offsetDays: number) {
+  const d = new Date();
+  d.setDate(d.getDate() + offsetDays);
+  return d.toISOString().slice(0, 10);
 }
 
 // ─── Brokers tab ──────────────────────────────────────────────────

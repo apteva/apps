@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: trading
 display_name: Trading
-version: 0.4.13
+version: 0.4.14
 description: |
   Trading desk for Apteva agents. Multi-portfolio, multi-asset (equity,
   etf, crypto, polymarket prediction markets). Each portfolio runs in
@@ -37,6 +37,9 @@ requires:
     - net.egress                   # public market-data endpoints (Binance, Polymarket gamma-api)
     - platform.connections.execute # broker calls (live mode)
     - platform.connections.read    # discover bound brokers per slug — see brokers_list, brokerFor()
+    - platform.environments.read   # list/read backtest environments
+    - platform.environments.call   # seed replay prices into an isolated trading app
+    - platform.environments.manage # create/spawn/snapshot/destroy backtest environments
   integrations:
     # Optional. Bind one or more brokers to enable mode=live on new
     # portfolios. Each portfolio names its broker at creation via
@@ -119,6 +122,8 @@ provides:
       description: "Read journal entries for a portfolio (recent or filtered by kind)."
     - name: portfolio_pause
       description: "Pause this portfolio (no new orders). Self-only — resume is human-only via REST."
+    - name: backtest_market_step
+      description: "Internal backtest runner tool: load replay prices into an isolated environment."
   # Same shape as crm + storage: a panel mounted in the dashboard's
   # project page slot. The rich desk SPA at /ui/desk/dist/ is also
   # served through the platform proxy at
