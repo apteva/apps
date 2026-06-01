@@ -153,6 +153,26 @@ interface AvatarEntry {
   ownership?: string;
 }
 
+interface AvatarCreateJob {
+  id: number;
+  provider: string;
+  source_type: "photo" | "prompt" | "video" | string;
+  name: string;
+  provider_avatar_id?: string;
+  provider_group_id?: string;
+  status: string;
+  error: string;
+  created_at: string;
+  updated_at: string;
+}
+
+interface AvatarCapabilities {
+  bound: boolean;
+  provider?: string;
+  source_types: string[];
+  notes?: string;
+}
+
 interface VoiceEntry {
   id: string;
   name: string;
@@ -318,6 +338,14 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
   const [avatarEngine, setAvatarEngine] = useState("avatar_v");
   const [avatarResolution, setAvatarResolution] = useState("1080p");
   const [avatarAspect, setAvatarAspect] = useState("16:9");
+  const [avatarCaps, setAvatarCaps] = useState<AvatarCapabilities | null>(null);
+  const [avatarCreateJobs, setAvatarCreateJobs] = useState<AvatarCreateJob[]>([]);
+  const [avatarCreateOpen, setAvatarCreateOpen] = useState(false);
+  const [avatarCreateName, setAvatarCreateName] = useState("");
+  const [avatarCreateSourceType, setAvatarCreateSourceType] = useState<"photo" | "prompt" | "video">("photo");
+  const [avatarCreateSource, setAvatarCreateSource] = useState("");
+  const [avatarCreatePrompt, setAvatarCreatePrompt] = useState("");
+  const [avatarCreating, setAvatarCreating] = useState(false);
   // Voices — HeyGen needs an explicit voice_id (Tavus bakes voice into
   // the replica, so this stays empty there). Reuses the `voice` state.
   const [voices, setVoices] = useState<VoiceEntry[]>([]);
@@ -391,6 +419,48 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
     }
   }, [projectId, activeKind]);
 
+  const loadAvatars = useCallback(async () => {
+    try {
+      const res = await fetch(`${API}/avatars`, { credentials: "same-origin" });
+      if (!res.ok) return;
+      const data = await res.json();
+      const list: AvatarEntry[] = Array.isArray(data.avatars) ? data.avatars : [];
+      setAvatars(list);
+      if (list.length > 0 && !list.some((x) => x.id === selectedAvatar)) {
+        setSelectedAvatar(list[0].id);
+      }
+    } catch {}
+  }, [selectedAvatar]);
+
+  const loadAvatarCreateJobs = useCallback(async () => {
+    try {
+      const res = await fetch(`${API}/avatar-create-jobs?project_id=${encodeURIComponent(projectId)}`, {
+        credentials: "same-origin",
+      });
+      if (!res.ok) return [];
+      const data = await res.json();
+      const jobs: AvatarCreateJob[] = Array.isArray(data.jobs) ? data.jobs : [];
+      setAvatarCreateJobs(jobs);
+      return jobs;
+    } catch {
+      return [];
+    }
+  }, [projectId]);
+
+  const loadAvatarCapabilities = useCallback(async () => {
+    try {
+      const res = await fetch(`${API}/avatar-capabilities`, { credentials: "same-origin" });
+      if (!res.ok) return;
+      const data = await res.json();
+      setAvatarCaps({
+        bound: !!data.bound,
+        provider: data.provider || "",
+        source_types: Array.isArray(data.source_types) ? data.source_types : [],
+        notes: data.notes || "",
+      });
+    } catch {}
+  }, []);
+
   useEffect(() => {
     loadBindings();
   }, [loadBindings]);
@@ -427,6 +497,14 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
       window.clearTimeout(timer);
     };
   }, [bindings?.storage?.bound, projectId, storageFolder]);
+
+  useEffect(() => {
+    const types = avatarCaps?.source_types || [];
+    if (types.length > 0 && !types.includes(avatarCreateSourceType)) {
+      const next = types.find((x) => x === "photo" || x === "prompt" || x === "video");
+      if (next) setAvatarCreateSourceType(next as "photo" | "prompt" | "video");
+    }
+  }, [avatarCaps, avatarCreateSourceType]);
 
   // Poll in-flight video jobs every 5s while the Videos tab is active.
   // 5s is finer than the sidecar's 15s worker tick so the user sees the
@@ -469,6 +547,30 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
     };
   }, [activeKind, projectId, loadGenerations]);
 
+  useEffect(() => {
+    if (activeKind !== "avatar") return;
+    let cancelled = false;
+    let prevInFlight = new Set<number>();
+    const load = async () => {
+      const jobs = await loadAvatarCreateJobs();
+      if (cancelled) return;
+      const nowInFlight = new Set<number>(
+        jobs.filter((j) => j.status === "queued" || j.status === "training").map((j) => j.id),
+      );
+      let transitioned = false;
+      for (const id of prevInFlight) if (!nowInFlight.has(id)) transitioned = true;
+      if (transitioned) loadAvatars();
+      prevInFlight = nowInFlight;
+    };
+    loadAvatarCapabilities();
+    load();
+    const t = window.setInterval(load, 5000);
+    return () => {
+      cancelled = true;
+      window.clearInterval(t);
+    };
+  }, [activeKind, loadAvatarCapabilities, loadAvatarCreateJobs, loadAvatars]);
+
   // Load the avatar/replica list and provider voice catalog when the
   // active path needs voice selection. Avatar reads avatar_provider;
   // audio_tts reads audio_provider (ElevenLabs).
@@ -476,17 +578,7 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
     if (activeKind !== "avatar" && activeKind !== "audio_tts") return;
     let cancelled = false;
     if (activeKind === "avatar") {
-      fetch(`${API}/avatars`, { credentials: "same-origin" })
-        .then((r) => (r.ok ? r.json() : null))
-        .then((data) => {
-          if (cancelled || !data) return;
-          const list: AvatarEntry[] = Array.isArray(data.avatars) ? data.avatars : [];
-          setAvatars(list);
-          if (list.length > 0 && !list.some((x) => x.id === selectedAvatar)) {
-            setSelectedAvatar(list[0].id);
-          }
-        })
-        .catch(() => {});
+      loadAvatars();
     }
     fetch(`${API}/voices?kind=${encodeURIComponent(activeKind)}`, { credentials: "same-origin" })
       .then((r) => (r.ok ? r.json() : null))
@@ -503,7 +595,7 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
     return () => {
       cancelled = true;
     };
-  }, [activeKind, bindings]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [activeKind, bindings, loadAvatars]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Live-load the model list whenever the active kind or the bound
   // provider for that kind changes. The sidecar caches per-(provider,
@@ -672,6 +764,65 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
       }
     }
   }, [currentModelId]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const createAvatar = async () => {
+    if (avatarCreating) return;
+    const name = avatarCreateName.trim();
+    if (!name) {
+      setStatus("Avatar name required.");
+      return;
+    }
+    if (avatarCreateSourceType === "photo" && !avatarCreateSource.trim()) {
+      setStatus("Photo avatar source required.");
+      return;
+    }
+    if (avatarCreateSourceType === "prompt" && !avatarCreatePrompt.trim()) {
+      setStatus("Prompt avatar text required.");
+      return;
+    }
+    setAvatarCreating(true);
+    setStatus("Creating avatar…");
+    try {
+      const body: Record<string, unknown> = {
+        project_id: projectId,
+        name,
+        source_type: avatarCreateSourceType,
+      };
+      if (avatarCreateSourceType === "photo") body.source_image = avatarCreateSource.trim();
+      if (avatarCreateSourceType === "prompt") body.prompt = avatarCreatePrompt.trim();
+      if (avatarCreateSourceType === "video") body.source_video = avatarCreateSource.trim();
+      const res = await fetch(`${API}/avatar-create`, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      const text = await res.text();
+      if (!res.ok) {
+        setStatus(`Error ${res.status}: ${text.slice(0, 300)}`);
+        return;
+      }
+      let result: { isError?: boolean; content?: { type: string; text?: string }[]; _meta?: { status?: string } } = {};
+      try {
+        result = JSON.parse(text);
+      } catch {}
+      if (result.isError) {
+        const msg = result.content?.find((c) => c.type === "text")?.text || "avatar creation failed";
+        setStatus(`Error: ${msg}`);
+        return;
+      }
+      setStatus(result._meta?.status === "completed" ? "Avatar created." : "Avatar creation started.");
+      setAvatarCreateName("");
+      setAvatarCreateSource("");
+      setAvatarCreatePrompt("");
+      await loadAvatarCreateJobs();
+      await loadAvatars();
+    } catch (e) {
+      setStatus("Error: " + (e as Error).message);
+    } finally {
+      setAvatarCreating(false);
+    }
+  };
 
   const generate = async () => {
     if (!prompt.trim() || generating) return;
@@ -912,6 +1063,20 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
             avatars={avatars}
             selectedAvatar={selectedAvatar}
             setSelectedAvatar={setSelectedAvatar}
+            avatarCaps={avatarCaps}
+            avatarCreateJobs={avatarCreateJobs}
+            avatarCreateOpen={avatarCreateOpen}
+            setAvatarCreateOpen={setAvatarCreateOpen}
+            avatarCreateName={avatarCreateName}
+            setAvatarCreateName={setAvatarCreateName}
+            avatarCreateSourceType={avatarCreateSourceType}
+            setAvatarCreateSourceType={setAvatarCreateSourceType}
+            avatarCreateSource={avatarCreateSource}
+            setAvatarCreateSource={setAvatarCreateSource}
+            avatarCreatePrompt={avatarCreatePrompt}
+            setAvatarCreatePrompt={setAvatarCreatePrompt}
+            avatarCreating={avatarCreating}
+            createAvatar={createAvatar}
             avatarProvider={currentBinding?.slug || ""}
             avatarEngine={avatarEngine}
             setAvatarEngine={setAvatarEngine}
@@ -1092,6 +1257,20 @@ interface ComposerProps {
   avatars: AvatarEntry[];
   selectedAvatar: string;
   setSelectedAvatar: (v: string) => void;
+  avatarCaps: AvatarCapabilities | null;
+  avatarCreateJobs: AvatarCreateJob[];
+  avatarCreateOpen: boolean;
+  setAvatarCreateOpen: (v: boolean) => void;
+  avatarCreateName: string;
+  setAvatarCreateName: (v: string) => void;
+  avatarCreateSourceType: "photo" | "prompt" | "video";
+  setAvatarCreateSourceType: (v: "photo" | "prompt" | "video") => void;
+  avatarCreateSource: string;
+  setAvatarCreateSource: (v: string) => void;
+  avatarCreatePrompt: string;
+  setAvatarCreatePrompt: (v: string) => void;
+  avatarCreating: boolean;
+  createAvatar: () => void;
   avatarProvider: string;
   avatarEngine: string;
   setAvatarEngine: (v: string) => void;
@@ -1231,6 +1410,25 @@ function Composer(p: ComposerProps) {
         </>
       )}
       {p.kind === "avatar" && (
+        <AvatarCreatePanel
+          provider={p.avatarProvider}
+          caps={p.avatarCaps}
+          jobs={p.avatarCreateJobs}
+          open={p.avatarCreateOpen}
+          setOpen={p.setAvatarCreateOpen}
+          name={p.avatarCreateName}
+          setName={p.setAvatarCreateName}
+          sourceType={p.avatarCreateSourceType}
+          setSourceType={p.setAvatarCreateSourceType}
+          source={p.avatarCreateSource}
+          setSource={p.setAvatarCreateSource}
+          prompt={p.avatarCreatePrompt}
+          setPrompt={p.setAvatarCreatePrompt}
+          creating={p.avatarCreating}
+          createAvatar={p.createAvatar}
+        />
+      )}
+      {p.kind === "avatar" && (
         <AvatarPicker
           avatars={p.avatars}
           selected={p.selectedAvatar}
@@ -1271,6 +1469,181 @@ function Composer(p: ComposerProps) {
       >
         {p.generating ? "…" : p.isEditMode ? "Edit" : p.kind === "avatar" ? "Generate avatar" : "Generate"}
       </button>
+    </div>
+  );
+}
+
+function AvatarCreatePanel({
+  provider,
+  caps,
+  jobs,
+  open,
+  setOpen,
+  name,
+  setName,
+  sourceType,
+  setSourceType,
+  source,
+  setSource,
+  prompt,
+  setPrompt,
+  creating,
+  createAvatar,
+}: {
+  provider: string;
+  caps: AvatarCapabilities | null;
+  jobs: AvatarCreateJob[];
+  open: boolean;
+  setOpen: (v: boolean) => void;
+  name: string;
+  setName: (v: string) => void;
+  sourceType: "photo" | "prompt" | "video";
+  setSourceType: (v: "photo" | "prompt" | "video") => void;
+  source: string;
+  setSource: (v: string) => void;
+  prompt: string;
+  setPrompt: (v: string) => void;
+  creating: boolean;
+  createAvatar: () => void;
+}) {
+  const sourceTypes = (caps?.source_types || ["photo"]).filter((x) => x === "photo" || x === "prompt" || x === "video") as Array<"photo" | "prompt" | "video">;
+  const shownTypes = sourceTypes.length > 0 ? sourceTypes : ["photo"];
+  const activeJobs = jobs.filter((j) => j.status === "queued" || j.status === "training");
+  const failedJobs = jobs.filter((j) => j.status === "failed");
+  const readFile = (file: File) => {
+    const reader = new FileReader();
+    reader.onload = () => setSource(String(reader.result || ""));
+    reader.readAsDataURL(file);
+  };
+  return (
+    <div style={{ flexBasis: "100%" }} className="border border-border rounded p-2 bg-bg-card">
+      <div className="flex items-center gap-2">
+        <button
+          onClick={() => setOpen(!open)}
+          className="text-xs px-2 py-1 border border-border rounded text-accent hover:border-accent"
+          disabled={!provider}
+        >
+          {open ? "Close avatar creator" : "Create avatar"}
+        </button>
+        {activeJobs.length > 0 && (
+          <span className="text-text-dim" style={{ fontSize: 10 }}>
+            {activeJobs.length} creating
+          </span>
+        )}
+        {failedJobs.length > 0 && (
+          <span style={{ fontSize: 10, color: "var(--apteva-danger, #ef4444)" }}>
+            {failedJobs.length} failed
+          </span>
+        )}
+      </div>
+      {open && (
+        <div className="flex items-end gap-2 flex-wrap mt-2">
+          <TextField label="Name" value={name} onChange={setName} placeholder="Avatar name" />
+          <div>
+            <label className="text-text-muted text-xs block">Source</label>
+            <select
+              value={sourceType}
+              onChange={(e) => setSourceType(e.target.value as "photo" | "prompt" | "video")}
+              className="bg-bg-input border border-border rounded px-2 py-1.5 text-sm"
+            >
+              {shownTypes.map((t) => (
+                <option key={t} value={t}>
+                  {t === "photo" ? "Photo" : t === "prompt" ? "Prompt" : "Video"}
+                </option>
+              ))}
+            </select>
+          </div>
+          {sourceType === "photo" && (
+            <>
+              <div className="flex-1" style={{ minWidth: 220 }}>
+                <label className="text-text-muted text-xs block">Photo</label>
+                <input
+                  type="text"
+                  value={source}
+                  onChange={(e) => setSource(e.target.value)}
+                  placeholder="storage:123 or https://..."
+                  className="w-full bg-bg-input border border-border rounded px-2 py-1.5 text-sm"
+                />
+              </div>
+              <label className="text-xs px-2 py-1.5 border border-border rounded text-text hover:border-accent cursor-pointer">
+                Upload
+                <input
+                  type="file"
+                  accept="image/*"
+                  onChange={(e) => {
+                    const file = e.target.files?.[0];
+                    if (file) readFile(file);
+                    e.currentTarget.value = "";
+                  }}
+                  style={{ display: "none" }}
+                />
+              </label>
+            </>
+          )}
+          {sourceType === "prompt" && (
+            <div className="flex-1" style={{ minWidth: 260 }}>
+              <label className="text-text-muted text-xs block">Prompt</label>
+              <input
+                type="text"
+                value={prompt}
+                onChange={(e) => setPrompt(e.target.value)}
+                className="w-full bg-bg-input border border-border rounded px-2 py-1.5 text-sm"
+              />
+            </div>
+          )}
+          {sourceType === "video" && (
+            <div className="flex-1" style={{ minWidth: 260 }}>
+              <label className="text-text-muted text-xs block">Video URL</label>
+              <input
+                type="text"
+                value={source}
+                onChange={(e) => setSource(e.target.value)}
+                placeholder="https://..."
+                className="w-full bg-bg-input border border-border rounded px-2 py-1.5 text-sm"
+              />
+            </div>
+          )}
+          <button
+            onClick={createAvatar}
+            disabled={creating || !name.trim() || ((sourceType === "photo" || sourceType === "video") && !source.trim()) || (sourceType === "prompt" && !prompt.trim())}
+            className="px-3 py-1.5 text-sm bg-accent text-bg rounded font-bold disabled:opacity-50"
+          >
+            {creating ? "…" : "Create"}
+          </button>
+        </div>
+      )}
+      {jobs.length > 0 && (
+        <div className="flex gap-2 flex-wrap mt-2">
+          {jobs.slice(0, 6).map((job) => (
+            <AvatarCreateJobPill key={job.id} job={job} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function AvatarCreateJobPill({ job }: { job: AvatarCreateJob }) {
+  const isFailed = job.status === "failed";
+  const isDone = job.status === "completed";
+  return (
+    <div
+      className="border rounded px-2 py-1 bg-bg-input"
+      style={{
+        borderColor: isFailed
+          ? "var(--apteva-danger, #ef4444)"
+          : isDone
+            ? "var(--apteva-accent, #4ade80)"
+            : "var(--apteva-border, #333)",
+        fontSize: 10,
+        maxWidth: 180,
+      }}
+      title={job.error || job.provider_avatar_id || job.name}
+    >
+      <span className="text-text truncate block">{job.name || `#${job.id}`}</span>
+      <span className="text-text-dim truncate block">
+        #{job.id} · {job.provider} · {job.status}
+      </span>
     </div>
   );
 }

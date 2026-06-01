@@ -1752,6 +1752,82 @@ func TestAvatarToolForSlug(t *testing.T) {
 	}
 }
 
+func TestBuildHeyGenAvatarCreateArgs_Photo(t *testing.T) {
+	got, err := buildHeyGenAvatarCreateArgs(map[string]any{
+		"name":         "Marcus",
+		"source_type":  "photo",
+		"source_image": "U09VUkNF",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got["type"] != "photo" || got["name"] != "Marcus" {
+		t.Fatalf("basic fields wrong: %+v", got)
+	}
+	file, ok := got["file"].(map[string]any)
+	if !ok || file["type"] != "base64" || file["data"] != "U09VUkNF" {
+		t.Fatalf("file field wrong: %+v", got["file"])
+	}
+}
+
+func TestNormalizeHeyGenAvatarCreateResponse(t *testing.T) {
+	got, err := normalizeAvatarCreateResponse("heygen", json.RawMessage(`{
+		"data": {
+			"avatar_item": {"id":"look-1","group_id":"group-1","status":"completed"}
+		}
+	}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.ProviderAvatarID != "look-1" || got.ProviderGroupID != "group-1" || got.Status != "completed" {
+		t.Fatalf("unexpected normalized result: %+v", got)
+	}
+}
+
+func TestToolMediaAvatarCreate_HeyGenPhotoQueuesJob(t *testing.T) {
+	pf := newRecordingPlatform()
+	pf.appSlug = "heygen"
+	pf.identity.Bindings = map[string]any{"avatar_provider": float64(56)}
+	pf.perAppCallResults = map[string]json.RawMessage{
+		"storage:files_get_content": json.RawMessage(
+			`{"result":{"content":[{"type":"text","text":"{\"content_base64\":\"U09VUkNF\"}"}]}}`,
+		),
+	}
+	pf.nextExecuteResult = &sdk.ExecuteResult{
+		Success: true, Status: 200,
+		Data: json.RawMessage(`{"data":{"avatar_item":{"id":"look-1","group_id":"group-1","status":"processing"}}}`),
+	}
+	ctx := newMediaStudioCtx(t, pf)
+	app := &App{}
+	out, err := app.toolMediaAvatarCreate(ctx, map[string]any{
+		"name":         "Marcus",
+		"source_type":  "photo",
+		"source_image": "storage:10",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := out.(map[string]any)
+	meta := res["_meta"].(map[string]any)
+	if meta["status"] != "training" || meta["provider_avatar_id"] != "look-1" {
+		t.Fatalf("unexpected meta: %+v", meta)
+	}
+	if len(pf.executeCalls) != 1 || pf.executeCalls[0].Tool != "create_avatar" {
+		t.Fatalf("expected create_avatar call, got %+v", pf.executeCalls)
+	}
+	file := pf.executeCalls[0].Input["file"].(map[string]any)
+	if file["data"] != "U09VUkNF" {
+		t.Fatalf("storage source not resolved into provider file: %+v", pf.executeCalls[0].Input)
+	}
+	var status, avatarID string
+	if err := ctx.AppDB().QueryRow(`SELECT status, provider_avatar_id FROM avatar_create_jobs WHERE name='Marcus'`).Scan(&status, &avatarID); err != nil {
+		t.Fatal(err)
+	}
+	if status != "training" || avatarID != "look-1" {
+		t.Fatalf("job row wrong: status=%s avatar_id=%s", status, avatarID)
+	}
+}
+
 func TestNormalizeAvatarResponse_HeyGen(t *testing.T) {
 	body := `{"error":null,"data":{"video_id":"hg-77"}}`
 	media, _, _, err := normalizeAvatarResponse("heygen", "avatar.generate", json.RawMessage(body))

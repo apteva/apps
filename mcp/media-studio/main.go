@@ -34,7 +34,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: media-studio
 display_name: Media Studio
-version: 0.10.11
+version: 0.10.12
 description: |
   Generate images, video, audio, music, and avatars via compatible
   providers. Optionally saves outputs to Storage, supports stable
@@ -100,6 +100,7 @@ provides:
     - prefix: /
   mcp_tools:
     - { name: media_generate, description: "Generate media (image/video/audio/music/avatar). Args: kind, prompt, model?, size?, duration?, voice?, aspect?, avatar?, storage_folder?, n?, options?, cache_key?, cache_policy?." }
+    - { name: media_avatar_create, description: "Create/train a reusable avatar from a photo or prompt. Args: name, source_type, source_image?/prompt?, options?." }
     - { name: media_history,  description: "List recent generations. Args: kind?, limit?, since?." }
     - { name: media_get,      description: "Fetch one generation by id. Args: id." }
   ui_panels:
@@ -152,6 +153,11 @@ func (a *App) Workers() []sdk.Worker {
 			Schedule: "@every 15s",
 			Run:      a.videoPollWorker,
 		},
+		{
+			Name:     "avatar-create-poll",
+			Schedule: "@every 20s",
+			Run:      a.avatarCreatePollWorker,
+		},
 	}
 }
 func (a *App) EventHandlers() []sdk.EventHandler { return nil }
@@ -165,6 +171,9 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/bindings", Handler: a.handleBindings},
 		{Pattern: "/models", Handler: a.handleListModels},
 		{Pattern: "/avatars", Handler: a.handleListAvatars},
+		{Pattern: "/avatar-capabilities", Handler: a.handleAvatarCapabilities},
+		{Pattern: "/avatar-create", Handler: a.handleAvatarCreate},
+		{Pattern: "/avatar-create-jobs", Handler: a.handleListAvatarCreateJobs},
 		{Pattern: "/voices", Handler: a.handleListVoices},
 		{Pattern: "/video-jobs", Handler: a.handleListVideoJobs},
 		{Pattern: "/storage-files", Handler: a.handleStorageFiles},
@@ -231,6 +240,42 @@ func (a *App) MCPTools() []sdk.Tool {
 				},
 			}, []string{"kind", "prompt"}),
 			Handler: a.toolMediaGenerate,
+		},
+		{
+			Name:        "media_avatar_create",
+			Description: "Create/train a reusable avatar through the bound avatar provider. Generic args: name (required), source_type (photo|prompt|video), source_image? (storage:N, URL, or base64 for photo), prompt? (for prompt avatars), source_video?/consent_video? (future video/digital-twin flows), options? (provider extras). Returns an async avatar_create job; refresh /avatars when it completes.",
+			InputSchema: schemaObject(map[string]any{
+				"name": map[string]any{
+					"type":        "string",
+					"description": "Display name for the avatar/replica.",
+				},
+				"source_type": map[string]any{
+					"type":        "string",
+					"enum":        []string{"photo", "prompt", "video"},
+					"description": "Avatar creation source type. Provider capabilities decide which values are usable.",
+				},
+				"source_image": map[string]any{
+					"type":        "string",
+					"description": "Photo source for source_type=photo. Accepts storage:N, HTTPS URL, data URL, or base64.",
+				},
+				"source_video": map[string]any{
+					"type":        "string",
+					"description": "Training video source for future video/digital-twin providers.",
+				},
+				"consent_video": map[string]any{
+					"type":        "string",
+					"description": "Consent video source for providers that require it.",
+				},
+				"prompt": map[string]any{
+					"type":        "string",
+					"description": "Text prompt for source_type=prompt.",
+				},
+				"options": map[string]any{
+					"type":        "object",
+					"description": "Provider-specific extras such as avatar_group_id, reference_images, voice_name, model_name, or auto_fix_training_image.",
+				},
+			}, []string{"name", "source_type"}),
+			Handler: a.toolMediaAvatarCreate,
 		},
 		{
 			Name:        "media_history",

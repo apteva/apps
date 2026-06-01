@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: media-studio
 display_name: Media Studio
-version: 0.10.11
+version: 0.10.12
 description: |
   Generate images, video, audio, music, and avatars via compatible
   providers. ElevenLabs powers audio TTS, sound effects, and music.
@@ -76,7 +76,7 @@ requires:
         avatar.generate: create_video
       required: false
       label: "Avatar / talking-head provider"
-      hint: "Bind Tavus (or HeyGen) to generate talking-head videos from a replica/avatar + script. Async — the job queues and the result lands via the media.generated event when ready."
+      hint: "Bind Tavus (or HeyGen) to generate talking-head videos from a replica/avatar + script, and create reusable avatars where the provider supports it. Async — generation and avatar creation jobs queue and update when ready."
 
     - role: storage
       kind: app
@@ -91,6 +91,7 @@ provides:
     - prefix: /
   mcp_tools:
     - { name: media_generate, description: "Generate media (image / video / audio / music / avatar). Args: kind (required: image|video|audio_tts|audio_sfx|music|avatar), prompt (required — for avatar this is the spoken script), model?, size?, duration?, voice?, aspect?, avatar? (replica/avatar id, avatar kind), source_image?, source_images?, n?, options?, cache_key?, cache_policy? ('reuse'|'refresh'). Video + avatar are async (queued; delivered via media.generated). Returns thumbnail + storage URL when storage is bound, else inline (small media) or expiring upstream URL." }
+    - { name: media_avatar_create, description: "Create/train a reusable avatar through the bound avatar provider. Generic args: name, source_type (photo|prompt|video), source_image?, source_video?, consent_video?, prompt?, options?. Returns an avatar_create job." }
     - { name: media_history,  description: "List recent generations for this project. Args: kind?, limit?, since?." }
     - { name: media_get,      description: "Fetch one generation for this project. Args: id." }
   ui_panels:
