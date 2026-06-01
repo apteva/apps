@@ -41,7 +41,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: social
 display_name: Social
-version: 0.14.33
+version: 0.14.34
 description: |
   Schedule and publish posts to your social accounts (X, Facebook,
   Instagram, LinkedIn, TikTok, YouTube, Reddit, Pinterest, Threads).
@@ -1138,6 +1138,12 @@ func (a *App) toolAccountFinalize(ctx *sdk.AppCtx, args map[string]any) (any, er
 	id, _ := res.LastInsertId()
 	_, _ = ctx.AppDB().Exec(`UPDATE pending_accounts SET status='finalized' WHERE id=?`, pendingID)
 
+	check := a.checkAccount(ctx, pid, id)
+	if check.Status != "ok" {
+		ctx.Logger().Warn("account_finalize: post-add account health check did not pass",
+			"social_account_id", id, "platform", def.Platform, "status", check.Status, "error", check.Error)
+	}
+
 	ctx.Emit("account.added", map[string]any{
 		"social_account_id": id,
 		"platform":          def.Platform,
@@ -1153,6 +1159,7 @@ func (a *App) toolAccountFinalize(ctx *sdk.AppCtx, args map[string]any) (any, er
 		"display_name":        displayName,
 		"avatar_url":          avatar,
 		"external_account_id": pageID,
+		"account_check":       check,
 	}, nil
 }
 

@@ -411,6 +411,13 @@ func TestAccountFinalize_FacebookHappyPath(t *testing.T) {
 	if r["external_account_id"] != "100" {
 		t.Errorf("external_account_id wrong: %+v", r)
 	}
+	check, ok := r["account_check"].(accountCheckResult)
+	if !ok {
+		t.Fatalf("account_check missing or wrong type: %+v", r["account_check"])
+	}
+	if check.Status != "ok" {
+		t.Fatalf("account_check status = %q, error=%q", check.Status, check.Error)
+	}
 	// Row exists in social_accounts.
 	var n int
 	ctx.AppDB().QueryRow(
@@ -418,6 +425,58 @@ func TestAccountFinalize_FacebookHappyPath(t *testing.T) {
 	).Scan(&n)
 	if n != 1 {
 		t.Errorf("social_accounts row missing: count=%d", n)
+	}
+	var status string
+	ctx.AppDB().QueryRow(
+		`SELECT last_check_status FROM social_accounts WHERE platform='facebook' AND external_account_id='100'`,
+	).Scan(&status)
+	if status != "ok" {
+		t.Errorf("last_check_status = %q", status)
+	}
+}
+
+func TestAccountFinalize_CheckFailureIsPersistedButDoesNotBlockAdd(t *testing.T) {
+	pf := newRecordingPlatform()
+	pf.executeSequences["list_pages"] = []*sdk.ExecuteResult{
+		{
+			Success: true,
+			Data: json.RawMessage(`{"data":[
+				{"id":"100","name":"My Restaurant","picture":{"data":{"url":"https://cdn/r.jpg"}}}
+			]}`),
+		},
+		{
+			Success: true,
+			Data:    json.RawMessage(`{"data":[{"id":"200","name":"Other Page"}]}`),
+		},
+	}
+	ctx := newSocialCtx(t, pf)
+	res, _ := ctx.AppDB().Exec(
+		`INSERT INTO pending_accounts (project_id, platform, integration_slug, connection_id, status, expires_at)
+		 VALUES ('test-proj', 'facebook', 'facebook-graph', 42, 'ready', datetime('now','+10 minutes'))`,
+	)
+	pendingID, _ := res.LastInsertId()
+	app := &App{}
+	out, err := app.toolAccountFinalize(ctx, map[string]any{
+		"pending_account_id": pendingID,
+		"page_id":            "100",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := out.(map[string]any)
+	check, ok := r["account_check"].(accountCheckResult)
+	if !ok {
+		t.Fatalf("account_check missing or wrong type: %+v", r["account_check"])
+	}
+	if check.Status != "failed" || !strings.Contains(check.Error, "no longer accessible") {
+		t.Fatalf("unexpected account_check: %+v", check)
+	}
+	var status, lastErr string
+	ctx.AppDB().QueryRow(
+		`SELECT last_check_status, last_check_error FROM social_accounts WHERE platform='facebook' AND external_account_id='100'`,
+	).Scan(&status, &lastErr)
+	if status != "failed" || !strings.Contains(lastErr, "no longer accessible") {
+		t.Errorf("persisted check = %q %q", status, lastErr)
 	}
 }
 
