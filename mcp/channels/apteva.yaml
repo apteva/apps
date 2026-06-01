@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: channels
 display_name: Channels
-version: 0.4.0
+version: 0.4.1
 description: |
   Agent-facing channel router with standalone dashboard chat, a visible inbox, project channel management, and ntfy-compatible notifications.
   Agents reply through respond(channel="chat", ...); the app stores chat
@@ -38,10 +38,18 @@ provides:
       icon: radio
       entry: /ui/ChannelsPanel.mjs
   publishes:
-    - name: chat.message
-      description: Emitted whenever a chat message is inserted.
-    - name: ntfy.message
-      description: Emitted whenever an ntfy topic message is inserted.
+    - name: channel.created
+      description: A channel was created.
+    - name: channel.updated
+      description: A channel was updated.
+    - name: conversation.updated
+      description: A conversation changed, usually because a message was inserted.
+    - name: conversation.seen
+      description: A conversation read cursor changed.
+    - name: message.created
+      description: A message was inserted in any channel conversation.
+    - name: message.deleted
+      description: Messages were deleted from a conversation.
 
 runtime:
   kind: source

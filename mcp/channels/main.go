@@ -26,7 +26,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: channels
 display_name: Channels
-version: 0.4.0
+version: 0.4.1
 description: |
   Agent-facing channel router with standalone dashboard chat, a visible inbox, project channel management, and ntfy-compatible notifications.
   Agents reply through respond(channel="chat", ...); the app stores chat
@@ -56,10 +56,18 @@ provides:
       icon: radio
       entry: /ui/ChannelsPanel.mjs
   publishes:
-    - name: chat.message
-      description: Emitted whenever a chat message is inserted.
-    - name: ntfy.message
-      description: Emitted whenever an ntfy topic message is inserted.
+    - name: channel.created
+      description: A channel was created.
+    - name: channel.updated
+      description: A channel was updated.
+    - name: conversation.updated
+      description: A conversation changed, usually because a message was inserted.
+    - name: conversation.seen
+      description: A conversation read cursor changed.
+    - name: message.created
+      description: A message was inserted in any channel conversation.
+    - name: message.deleted
+      description: Messages were deleted from a conversation.
 runtime:
   kind: source
   source:
@@ -291,11 +299,13 @@ func (a *App) handleChannels(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid topic", http.StatusBadRequest)
 			return
 		}
+		_, existingErr := a.store.GetNtfyByTopic(topic)
 		ch, err := a.store.UpsertNtfyChannel(body.AgentID, projectID, body.Name, topic)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
+		a.emitChannelChange(existingErr != nil, *ch)
 		writeJSON(w, a.channelSummary(*ch))
 	default:
 		http.Error(w, "GET or POST", http.StatusMethodNotAllowed)
@@ -320,7 +330,7 @@ func (a *App) handleMessages(w http.ResponseWriter, r *http.Request) {
 	case http.MethodPost:
 		a.postMessage(w, r)
 	case http.MethodDelete:
-		chatID, _, ok := a.authorizeChat(w, r)
+		chatID, chat, ok := a.authorizeChat(w, r)
 		if !ok {
 			return
 		}
@@ -329,6 +339,7 @@ func (a *App) handleMessages(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
+		a.emitMessageDeleted(*chat, n)
 		writeJSON(w, map[string]int64{"deleted": n})
 	default:
 		http.Error(w, "GET, POST or DELETE", http.StatusMethodNotAllowed)
@@ -457,7 +468,8 @@ func (a *App) handleSeen(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "chat_id required", http.StatusBadRequest)
 		return
 	}
-	if _, err := a.store.GetChat(body.ChatID); err != nil {
+	chat, err := a.store.GetChat(body.ChatID)
+	if err != nil {
 		http.Error(w, "chat not found", http.StatusNotFound)
 		return
 	}
@@ -466,6 +478,7 @@ func (a *App) handleSeen(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	a.emitConversationSeen(*chat, current)
 	writeJSON(w, map[string]int64{"last_seen_id": current})
 }
 
@@ -756,7 +769,7 @@ func (a *App) toolStatus(ctx context.Context, app *sdk.AppCtx, args map[string]a
 	if err != nil {
 		return nil, err
 	}
-	a.hub.publish(*m)
+	a.publish(*m)
 	return map[string]any{"status": "ok", "channel": "chat", "message_id": m.ID}, nil
 }
 
@@ -892,12 +905,126 @@ func (a *App) projectForAgent(agentID int64, fallback string) string {
 
 func (a *App) publish(m Message) {
 	a.hub.publish(m)
-	if globalCtx != nil {
-		eventName := "chat.message"
-		if chat, err := a.store.GetChat(m.ChatID); err == nil && chat.Channel == "ntfy" {
-			eventName = "ntfy.message"
-		}
-		globalCtx.Emit(eventName, m)
+	if globalCtx == nil {
+		return
+	}
+	chat, err := a.store.GetChat(m.ChatID)
+	if err != nil {
+		globalCtx.Emit("message.created", m)
+		return
+	}
+	globalCtx.Emit("message.created", messageCreatedPayload(*chat, m))
+	globalCtx.Emit("conversation.updated", conversationPayload(*chat))
+}
+
+func (a *App) emitChannelChange(created bool, ch Chat) {
+	if globalCtx == nil {
+		return
+	}
+	topic := "channel.updated"
+	if created {
+		topic = "channel.created"
+	}
+	globalCtx.Emit(topic, channelPayload(ch))
+}
+
+func (a *App) emitConversationSeen(ch Chat, lastSeenID int64) {
+	if globalCtx == nil {
+		return
+	}
+	payload := conversationPayload(ch)
+	payload["last_seen_id"] = lastSeenID
+	globalCtx.Emit("conversation.seen", payload)
+}
+
+func (a *App) emitMessageDeleted(ch Chat, deleted int64) {
+	if globalCtx == nil {
+		return
+	}
+	payload := conversationPayload(ch)
+	payload["deleted"] = deleted
+	globalCtx.Emit("message.deleted", payload)
+	globalCtx.Emit("conversation.updated", conversationPayload(ch))
+}
+
+func channelPayload(ch Chat) map[string]any {
+	return map[string]any{
+		"channel_id":       channelIdentifier(ch),
+		"channel_type":     ch.Channel,
+		"name":             ch.Title,
+		"project_id":       ch.ProjectID,
+		"visibility":       "project",
+		"inbound_enabled":  ch.AgentID > 0,
+		"default_agent_id": nullableAgentID(ch.AgentID),
+		"conversation_id":  ch.ID,
+		"topic":            channelTopic(ch),
+	}
+}
+
+func conversationPayload(ch Chat) map[string]any {
+	return map[string]any{
+		"conversation_id": ch.ID,
+		"channel_id":      channelIdentifier(ch),
+		"channel_type":    ch.Channel,
+		"project_id":      ch.ProjectID,
+		"agent_id":        nullableAgentID(ch.AgentID),
+		"title":           ch.Title,
+		"topic":           channelTopic(ch),
+		"updated_at":      ch.UpdatedAt,
+	}
+}
+
+func messageCreatedPayload(ch Chat, m Message) map[string]any {
+	return map[string]any{
+		"message_id":      m.ID,
+		"conversation_id": ch.ID,
+		"channel_id":      channelIdentifier(ch),
+		"channel_type":    ch.Channel,
+		"project_id":      ch.ProjectID,
+		"agent_id":        nullableAgentID(ch.AgentID),
+		"role":            m.Role,
+		"direction":       directionForRole(m.Role),
+		"text":            m.Content,
+		"status":          m.Status,
+		"thread_id":       m.ThreadID,
+		"created_at":      m.CreatedAt,
+		"topic":           channelTopic(ch),
+	}
+}
+
+func channelIdentifier(ch Chat) string {
+	switch ch.Channel {
+	case "ntfy":
+		return "ntfy:" + ch.ThreadID
+	case "chat":
+		return "chat"
+	default:
+		return ch.Channel
+	}
+}
+
+func channelTopic(ch Chat) string {
+	if ch.Channel == "ntfy" {
+		return ch.ThreadID
+	}
+	return ""
+}
+
+func nullableAgentID(agentID int64) any {
+	if agentID <= 0 {
+		return nil
+	}
+	return agentID
+}
+
+func directionForRole(role string) string {
+	switch role {
+	case "user":
+		return "inbound"
+	case "agent":
+		return "outbound"
+	default:
+		return "internal"
 	}
 }
 

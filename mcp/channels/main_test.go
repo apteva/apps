@@ -196,3 +196,17 @@ func TestChannelsListProjectWithoutAgent(t *testing.T) {
 		t.Fatalf("response missing ntfy channel: %s", rec.Body.String())
 	}
 }
+
+func TestGenericMessageEventPayload(t *testing.T) {
+	ch := Chat{ID: "ntfy-marco", AgentID: 0, ProjectID: "proj-1", Title: "Marco Phone", Channel: "ntfy", ThreadID: "marco"}
+	msg := Message{ID: 12, ChatID: ch.ID, Role: "agent", Content: "done", Status: "final"}
+
+	payload := messageCreatedPayload(ch, msg)
+
+	if payload["channel_id"] != "ntfy:marco" || payload["channel_type"] != "ntfy" {
+		t.Fatalf("channel payload fields = %+v", payload)
+	}
+	if payload["direction"] != "outbound" || payload["agent_id"] != nil {
+		t.Fatalf("generic payload fields = %+v", payload)
+	}
+}
