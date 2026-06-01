@@ -232,6 +232,17 @@ func (s *store) ListChats(agentID int64, projectID string) ([]Chat, error) {
 	return scanChats(rows)
 }
 
+func (s *store) DeleteChat(id string) (*Chat, error) {
+	ch, err := s.GetChat(id)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := s.db.Exec(`DELETE FROM channels_chats WHERE id = ?`, id); err != nil {
+		return nil, err
+	}
+	return ch, nil
+}
+
 func scanChats(rows *sql.Rows) ([]Chat, error) {
 	var out []Chat
 	for rows.Next() {

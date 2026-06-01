@@ -26,7 +26,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: channels
 display_name: Channels
-version: 0.4.1
+version: 0.4.2
 description: |
   Agent-facing channel router with standalone dashboard chat, a visible inbox, project channel management, and ntfy-compatible notifications.
   Agents reply through respond(channel="chat", ...); the app stores chat
@@ -60,10 +60,14 @@ provides:
       description: A channel was created.
     - name: channel.updated
       description: A channel was updated.
+    - name: channel.deleted
+      description: A channel was deleted.
     - name: conversation.updated
       description: A conversation changed, usually because a message was inserted.
     - name: conversation.seen
       description: A conversation read cursor changed.
+    - name: conversation.deleted
+      description: A conversation was deleted.
     - name: message.created
       description: A message was inserted in any channel conversation.
     - name: message.deleted
@@ -307,8 +311,20 @@ func (a *App) handleChannels(w http.ResponseWriter, r *http.Request) {
 		}
 		a.emitChannelChange(existingErr != nil, *ch)
 		writeJSON(w, a.channelSummary(*ch))
+	case http.MethodDelete:
+		ch, ok := a.channelFromDeleteRequest(w, r)
+		if !ok {
+			return
+		}
+		deleted, err := a.store.DeleteChat(ch.ID)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		a.emitChannelDeleted(*deleted)
+		writeJSON(w, map[string]any{"deleted": true, "channel": a.channelSummary(*deleted)})
 	default:
-		http.Error(w, "GET or POST", http.StatusMethodNotAllowed)
+		http.Error(w, "GET, POST or DELETE", http.StatusMethodNotAllowed)
 	}
 }
 
@@ -892,6 +908,43 @@ func (a *App) authorizeChat(w http.ResponseWriter, r *http.Request) (string, *Ch
 	return chatID, chat, true
 }
 
+func (a *App) channelFromDeleteRequest(w http.ResponseWriter, r *http.Request) (*Chat, bool) {
+	q := r.URL.Query()
+	if chatID := strings.TrimSpace(q.Get("chat_id")); chatID != "" {
+		ch, err := a.store.GetChat(chatID)
+		if err != nil {
+			http.Error(w, "channel not found", http.StatusNotFound)
+			return nil, false
+		}
+		return ch, true
+	}
+	channelID := strings.TrimSpace(q.Get("channel_id"))
+	if channelID == "" {
+		channelID = strings.TrimSpace(q.Get("id"))
+	}
+	if topic := ntfyTopicFromChannel(channelID); topic != "" {
+		ch, err := a.store.GetNtfyByTopic(topic)
+		if err != nil {
+			http.Error(w, "channel not found", http.StatusNotFound)
+			return nil, false
+		}
+		return ch, true
+	}
+	if strings.HasPrefix(channelID, "chat:") {
+		agentID := toInt64(strings.TrimPrefix(channelID, "chat:"))
+		if agentID > 0 {
+			ch, err := a.store.GetChat(defaultChatID(agentID))
+			if err != nil {
+				http.Error(w, "channel not found", http.StatusNotFound)
+				return nil, false
+			}
+			return ch, true
+		}
+	}
+	http.Error(w, "chat_id or channel_id required", http.StatusBadRequest)
+	return nil, false
+}
+
 func (a *App) projectForAgent(agentID int64, fallback string) string {
 	if globalCtx == nil || globalCtx.PlatformAPI() == nil || agentID == 0 {
 		return fallback
@@ -926,6 +979,15 @@ func (a *App) emitChannelChange(created bool, ch Chat) {
 		topic = "channel.created"
 	}
 	globalCtx.Emit(topic, channelPayload(ch))
+}
+
+func (a *App) emitChannelDeleted(ch Chat) {
+	if globalCtx == nil {
+		return
+	}
+	payload := channelPayload(ch)
+	globalCtx.Emit("channel.deleted", payload)
+	globalCtx.Emit("conversation.deleted", conversationPayload(ch))
 }
 
 func (a *App) emitConversationSeen(ch Chat, lastSeenID int64) {

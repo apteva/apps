@@ -2,6 +2,7 @@ package main
 
 import (
 	"database/sql"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -175,6 +176,25 @@ func TestChannelsCreateNtfyWithoutAgent(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), `"agent_id":0`) || !strings.Contains(rec.Body.String(), `"id":"ntfy:marco-phone"`) {
 		t.Fatalf("response = %s", rec.Body.String())
+	}
+}
+
+func TestChannelsDeleteByChannelID(t *testing.T) {
+	st := newStore(testDB(t))
+	if _, err := st.UpsertNtfyChannel(0, "proj-1", "Marco Phone", "marco-phone"); err != nil {
+		t.Fatalf("UpsertNtfyChannel: %v", err)
+	}
+	app := &App{store: st, hub: newHub()}
+	req := httptest.NewRequest(http.MethodDelete, "/channels?project_id=proj-1&channel_id=ntfy:marco-phone", nil)
+	rec := httptest.NewRecorder()
+
+	app.handleChannels(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if _, err := st.GetNtfyByTopic("marco-phone"); !errors.Is(err, errNotFound) {
+		t.Fatalf("GetNtfyByTopic err = %v, want errNotFound", err)
 	}
 }
 

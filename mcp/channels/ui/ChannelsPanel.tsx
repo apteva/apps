@@ -212,6 +212,21 @@ export default function ChannelsPanel({ projectId }: NativePanelProps) {
     if (res.ok) await loadConversations();
   }, [appURL, loadConversations, selected, testMessage, testTitle]);
 
+  const deleteChannel = useCallback(async () => {
+    if (!selected) return;
+    if (!window.confirm(`Delete ${selected.label || selected.id}?`)) return;
+    const res = await fetch(appURL(`/channels?channel_id=${encodeURIComponent(selected.id)}`), {
+      method: "DELETE",
+      credentials: "same-origin",
+    });
+    if (!res.ok) {
+      setStatus(`Delete failed: ${res.status}`);
+      return;
+    }
+    setStatus("Channel deleted");
+    await reload();
+  }, [appURL, reload, selected]);
+
   const selectedSubscribeURL = selected?.type === "ntfy" && selected.topic
     ? `${window.location.origin}${API}/ntfy/${selected.topic}`
     : "";
@@ -275,6 +290,7 @@ export default function ChannelsPanel({ projectId }: NativePanelProps) {
             testMessage={testMessage}
             setTestMessage={setTestMessage}
             onTest={testNtfy}
+            onDelete={deleteChannel}
           />
         )}
       </div>
@@ -391,6 +407,7 @@ function ChannelsView(props: {
   testMessage: string;
   setTestMessage: (v: string) => void;
   onTest: () => void;
+  onDelete: () => void;
 }) {
   return (
     <main className="grid min-h-0 flex-1 gap-4 lg:grid-cols-[360px_1fr]">
@@ -435,6 +452,7 @@ function ChannelsView(props: {
             testMessage={props.testMessage}
             setTestMessage={props.setTestMessage}
             onTest={props.onTest}
+            onDelete={props.onDelete}
           />
         ) : (
           <div className="p-5 text-sm text-text-dim">Select or create a channel.</div>
@@ -539,6 +557,7 @@ function ChannelDetail({
   testMessage,
   setTestMessage,
   onTest,
+  onDelete,
 }: {
   channel: Channel;
   subscribeURL: string;
@@ -548,6 +567,7 @@ function ChannelDetail({
   testMessage: string;
   setTestMessage: (v: string) => void;
   onTest: () => void;
+  onDelete: () => void;
 }) {
   return (
     <div className="space-y-5 p-5">
@@ -556,7 +576,10 @@ function ChannelDetail({
           <h2 className="text-base font-semibold">{channel.label || channel.type}</h2>
           <div className="mt-1 font-mono text-xs text-text-dim">{channel.mcp_id || channel.id}</div>
         </div>
-        <span className="rounded bg-bg px-2 py-1 text-xs uppercase text-text-dim">{channel.type}</span>
+        <div className="flex items-center gap-2">
+          <span className="rounded bg-bg px-2 py-1 text-xs uppercase text-text-dim">{channel.type}</span>
+          <button className="h-8 rounded-md border border-border px-3 text-sm text-error" onClick={onDelete}>Delete</button>
+        </div>
       </div>
 
       <div className="grid gap-3 md:grid-cols-2">
