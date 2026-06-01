@@ -213,6 +213,13 @@ interface Agent {
   mode?: string;
   project_id?: string;
 }
+interface MCPServerConfig {
+  name?: string;
+  transport?: string;
+  url?: string;
+  command?: string;
+  args?: string[];
+}
 interface AgentLiveState {
   agent_id: number;
   state: "idle" | "thinking" | "tool" | "error" | "thread" | "event";
@@ -367,6 +374,20 @@ function portfolioHasSymbol(portfolio: Portfolio | null, symbol?: string): boole
   if (!portfolio || !symbol) return false;
   const wanted = symbol.toUpperCase();
   return (portfolio.watchlist || []).some((s) => s.toUpperCase() === wanted);
+}
+
+function portfolioAgentID(portfolio: Portfolio | null): number | undefined {
+  const raw = compactText(portfolio?.agent_id);
+  if (!raw) return undefined;
+  const match = raw.match(/(\d+)$/);
+  const n = match ? Number(match[1]) : Number(raw);
+  return Number.isFinite(n) && n > 0 ? n : undefined;
+}
+
+function isTradingMCPServer(server: MCPServerConfig): boolean {
+  const name = compactText(server.name).toLowerCase();
+  const url = compactText(server.url).toLowerCase();
+  return name === "trading" || url.includes("/api/apps/trading/mcp");
 }
 
 function activityKindForTool(tool: string): AgentActivity["kind"] {
@@ -1855,6 +1876,8 @@ function AgentsTab({ portfolio, api, projectId, setError }: {
   setError: (e: string | null) => void;
 }) {
   const [agents, setAgents] = useState<Agent[]>([]);
+  const [agentTradingMCPs, setAgentTradingMCPs] = useState<Record<number, string[]>>({});
+  const [agentConfigLoading, setAgentConfigLoading] = useState(false);
   const [states, setStates] = useState<Record<number, AgentLiveState>>({});
   const [activities, setActivities] = useState<AgentActivity[]>([]);
   const [quotes, setQuotes] = useState<Record<string, Mark>>({});
@@ -1871,6 +1894,36 @@ function AgentsTab({ portfolio, api, projectId, setError }: {
       .catch((e) => { if (!cancelled) setError((e as Error).message); });
     return () => { cancelled = true; };
   }, [projectId, setError]);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (agents.length === 0) {
+      setAgentTradingMCPs({});
+      setAgentConfigLoading(false);
+      return () => { cancelled = true; };
+    }
+    setAgentConfigLoading(true);
+    Promise.all(agents.map(async (agent) => {
+      try {
+        const r = await fetch(`/api/agents/${agent.id}/config`, { credentials: "same-origin" });
+        if (!r.ok) return [agent.id, [] as string[]] as const;
+        const cfg = await r.json() as { mcp_servers?: MCPServerConfig[] };
+        const trading = (cfg.mcp_servers || [])
+          .filter(isTradingMCPServer)
+          .map((s) => compactText(s.name, "trading"));
+        return [agent.id, trading] as const;
+      } catch {
+        return [agent.id, [] as string[]] as const;
+      }
+    })).then((rows) => {
+      if (cancelled) return;
+      const next: Record<number, string[]> = {};
+      for (const [id, names] of rows) next[id] = names;
+      setAgentTradingMCPs(next);
+      setAgentConfigLoading(false);
+    });
+    return () => { cancelled = true; };
+  }, [agents]);
 
   useEffect(() => {
     if (!portfolio) return;
@@ -2051,12 +2104,24 @@ function AgentsTab({ portfolio, api, projectId, setError }: {
   if (!portfolio) return <EmptyState title="Pick a portfolio" hint="No portfolio selected." />;
 
   const agentName = (id: number) => agents.find((a) => a.id === id)?.name || `Agent #${id}`;
-  const activeAgentIds = new Set([
-    ...Object.keys(states).map(Number),
+  const portfolioBoundAgentID = portfolioAgentID(portfolio);
+  const tradingMCPAgentIds = new Set(
+    Object.entries(agentTradingMCPs)
+      .filter(([, names]) => names.length > 0)
+      .map(([id]) => Number(id)),
+  );
+  const portfolioEventAgentIds = new Set([
+    ...Object.values(states)
+      .filter((s) => !!s.trading_event_at && eventRelevantToPortfolio(portfolio, s.portfolio_id, s.symbol))
+      .map((s) => s.agent_id),
     ...activities.map((a) => a.agent_id),
   ]);
   const rows = agents
-    .filter((a) => activeAgentIds.has(a.id) || a.status === "running")
+    .filter((a) =>
+      tradingMCPAgentIds.has(a.id) ||
+      portfolioEventAgentIds.has(a.id) ||
+      portfolioBoundAgentID === a.id,
+    )
     .map((a) => ({ agent: a, state: states[a.id] }))
     .sort((a, b) => {
       const at = Date.parse(a.state?.last_event_at || "") || 0;
@@ -2107,12 +2172,20 @@ function AgentsTab({ portfolio, api, projectId, setError }: {
       </Section>
 
       <Section title="Agents working this portfolio">
-        {rows.length === 0 ? (
-          <EmptyState title="No live agent telemetry yet" hint="Waiting for project telemetry." />
+        {agentConfigLoading ? (
+          <EmptyState title="Checking agent bindings" hint="Reading agent MCP configuration." />
+        ) : rows.length === 0 ? (
+          <EmptyState title="No trading agents linked" hint="No matching trading MCP or portfolio telemetry." />
         ) : (
           <div className="grid gap-3" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))" }}>
             {rows.map(({ agent, state }) => (
-              <AgentLiveCard key={agent.id} agent={agent} state={state} />
+              <AgentLiveCard
+                key={agent.id}
+                agent={agent}
+                state={state}
+                hasTradingMCP={tradingMCPAgentIds.has(agent.id)}
+                portfolioBound={portfolioBoundAgentID === agent.id}
+              />
             ))}
           </div>
         )}
@@ -2149,9 +2222,14 @@ function AgentsTab({ portfolio, api, projectId, setError }: {
   );
 }
 
-function AgentLiveCard({ agent, state }: { agent: Agent; state?: AgentLiveState }) {
+function AgentLiveCard({ agent, state, hasTradingMCP, portfolioBound }: {
+  agent: Agent;
+  state?: AgentLiveState;
+  hasTradingMCP?: boolean;
+  portfolioBound?: boolean;
+}) {
   const live = state && Date.now() - (Date.parse(state.last_event_at || "") || 0) < 30_000;
-  const statusText = state?.label || (agent.status === "running" ? "Waiting" : agent.status);
+  const statusText = state?.label || (agent.status === "running" ? "Ready" : agent.status);
   return (
     <div className="p-3 bg-bg-card border border-border rounded">
       <div className="flex items-center gap-2 mb-2">
@@ -2161,6 +2239,8 @@ function AgentLiveCard({ agent, state }: { agent: Agent; state?: AgentLiveState 
       </div>
       <div className="text-sm text-text">{statusText}</div>
       <div className="mt-1 flex gap-1 flex-wrap">
+        {hasTradingMCP && <span className="text-xs px-2 py-0.5 rounded bg-accent/10 text-accent border border-accent/30">trading MCP</span>}
+        {portfolioBound && <span className="text-xs px-2 py-0.5 rounded bg-bg-input text-text-muted">portfolio linked</span>}
         {state?.symbol && <span className="text-xs px-2 py-0.5 rounded bg-bg-input text-text-muted">{state.symbol}</span>}
         {state?.tool && <span className="text-xs px-2 py-0.5 rounded bg-accent/10 text-accent border border-accent/30">{state.tool}</span>}
         {state?.thread_id && <span className="text-xs px-2 py-0.5 rounded bg-bg-input text-text-dim">{state.thread_id}</span>}
@@ -2171,7 +2251,7 @@ function AgentLiveCard({ agent, state }: { agent: Agent; state?: AgentLiveState 
         </div>
       )}
       {!state && (
-        <div className="mt-2 text-xs text-text-dim">Waiting for telemetry.</div>
+        <div className="mt-2 text-xs text-text-dim">No portfolio telemetry yet.</div>
       )}
     </div>
   );
