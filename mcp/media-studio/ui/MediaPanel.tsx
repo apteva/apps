@@ -765,9 +765,26 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
         _meta?: { status?: string; job_id?: number; cost_usd?: number };
       })._meta;
       if (meta?.status === "queued") {
+        const queuedPrompt = prompt;
         setPrompt("");
         const costStr = meta.cost_usd ? ` · est. ${formatCost(meta.cost_usd)}` : "";
-        setStatus(`Queued — job #${meta.job_id}${costStr}, polling for completion…`);
+        setStatus(`Generating…${costStr}`);
+        if (meta.job_id && (activeKind === "video" || activeKind === "avatar")) {
+          setVideoJobs((cur) => {
+            if (cur.some((j) => j.id === meta.job_id)) return cur;
+            return [
+              {
+                id: meta.job_id || 0,
+                queue_id: "",
+                model: activeGeneratingModel,
+                prompt: queuedPrompt,
+                status: "queued",
+                error: "",
+              },
+              ...cur,
+            ];
+          });
+        }
         return;
       }
       setPrompt("");
@@ -2126,6 +2143,8 @@ function Gallery({
           gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))",
           gap: 8,
           padding: 8,
+          alignItems: "start",
+          alignContent: "start",
         }}
       >
         {generating && (
@@ -2172,9 +2191,11 @@ function Gallery({
           : "repeat(auto-fill, minmax(280px, 1fr))",
         gap: 8,
         padding: 8,
+        alignItems: "start",
+        alignContent: "start",
       }}
     >
-      {generating && (kind === "video" || kind === "avatar") && (
+      {generating && (
         <GeneratingCard prompt={generatingPrompt} model={generatingModel} />
       )}
       {(kind === "video" || kind === "avatar") &&
@@ -2214,7 +2235,7 @@ function GeneratingCard({ prompt, model }: { prompt: string; model: string }) {
   return (
     <div
       className="border border-accent rounded overflow-hidden bg-bg-card flex flex-col items-center justify-center"
-      style={{ minHeight: 220 }}
+      style={{ minHeight: 220, alignSelf: "start" }}
     >
       <Spinner />
       <div className="mt-3 text-sm text-text">Generating…</div>
