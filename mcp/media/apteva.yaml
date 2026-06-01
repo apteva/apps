@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: media
 display_name: Media
-version: 0.13.28
+version: 0.13.29
 description: |
   Catalog + cheap derivations + parameterised renders for media files
   in storage. Probes uploads with ffprobe (duration, dimensions,
@@ -310,6 +310,10 @@ provides:
         file_id: string
         name: string                    # storage filename, e.g. "ballerina.MOV" — populated by upsertMedia at probe time
         folder: string                  # storage folder, e.g. "/clips/" — same shape storage uses
+        origin: string                  # storage_file | render_output
+        output_of_render_id: integer    # present when origin=render_output
+        render_operation: string        # present when origin=render_output
+        render_source_file_ids: array   # present when origin=render_output
         has_video: boolean
         has_audio: boolean
         is_image: boolean

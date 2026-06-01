@@ -51,6 +51,8 @@ package main
 //     media.indexed and read its status field.
 
 import (
+	"database/sql"
+	"encoding/json"
 	"strings"
 	"time"
 
@@ -214,10 +216,11 @@ func maybeEmitMediaCompleted(app *sdk.AppCtx, projectID, fileID string) {
 		return // another caller emitted first
 	}
 
-	app.EmitWithProject("media.completed", projectID, map[string]any{
+	payload := map[string]any{
 		"file_id":         fileID,
 		"name":            row.Name,
 		"folder":          row.Folder,
+		"origin":          "storage_file",
 		"has_video":       row.HasVideo,
 		"has_audio":       row.HasAudio,
 		"is_image":        row.IsImage,
@@ -232,5 +235,38 @@ func maybeEmitMediaCompleted(app *sdk.AppCtx, projectID, fileID string) {
 		// integration is bound; "unrated" otherwise. Subscribers can
 		// filter on this directly without a follow-up media_get.
 		"audience_rating": row.AudienceRating,
-	})
+	}
+	if origin, ok := renderOriginForOutput(db, projectID, fileID); ok {
+		for k, v := range origin {
+			payload[k] = v
+		}
+	}
+	app.EmitWithProject("media.completed", projectID, payload)
+}
+
+func renderOriginForOutput(db *sql.DB, projectID, fileID string) (map[string]any, bool) {
+	var (
+		renderID  int64
+		operation string
+		rawSource string
+	)
+	err := db.QueryRow(`
+		SELECT id, operation, source_file_ids
+		  FROM renders
+		 WHERE project_id = ? AND output_file_id = ?
+		 ORDER BY completed_at DESC, id DESC
+		 LIMIT 1`,
+		projectID, fileID,
+	).Scan(&renderID, &operation, &rawSource)
+	if err != nil {
+		return nil, false
+	}
+	sourceFileIDs := []string{}
+	_ = json.Unmarshal([]byte(rawSource), &sourceFileIDs)
+	return map[string]any{
+		"origin":                 "render_output",
+		"output_of_render_id":    renderID,
+		"render_operation":       operation,
+		"render_source_file_ids": sourceFileIDs,
+	}, true
 }
