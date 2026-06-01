@@ -22,15 +22,44 @@ interface Channel {
   capabilities?: string[];
 }
 
+interface Conversation {
+  id: string;
+  agent_id: number;
+  instance_id: number;
+  project_id: string;
+  title: string;
+  channel: string;
+  thread_id?: string;
+  updated_at: string;
+}
+
+interface Message {
+  id: number;
+  chat_id: string;
+  role: "user" | "agent" | "system";
+  content: string;
+  status: string;
+  created_at: string;
+}
+
 interface ChannelResponse {
   channels: Channel[];
   project_id: string;
 }
 
+type View = "inbox" | "channels";
+
 export default function ChannelsPanel({ projectId }: NativePanelProps) {
+  const [view, setView] = useState<View>("inbox");
+  const [status, setStatus] = useState("Loading");
+
+  const [conversations, setConversations] = useState<Conversation[]>([]);
+  const [selectedConversationId, setSelectedConversationId] = useState("");
+  const [messages, setMessages] = useState<Message[]>([]);
+  const [draft, setDraft] = useState("");
+
   const [channels, setChannels] = useState<Channel[]>([]);
   const [selectedId, setSelectedId] = useState("");
-  const [status, setStatus] = useState("Loading");
   const [creating, setCreating] = useState(false);
   const [name, setName] = useState("ntfy");
   const [agentId, setAgentId] = useState("");
@@ -44,10 +73,35 @@ export default function ChannelsPanel({ projectId }: NativePanelProps) {
     return `${API}${path}${sep}project_id=${encodeURIComponent(projectId || "")}`;
   }, [projectId]);
 
-  const load = useCallback(async () => {
+  const loadConversations = useCallback(async () => {
+    const res = await fetch(appURL("/chats"), { credentials: "same-origin" });
+    if (!res.ok) {
+      setStatus(`Inbox load failed: ${res.status}`);
+      return;
+    }
+    const rows = ((await res.json()) || []) as Conversation[];
+    setConversations(rows);
+    setSelectedConversationId((current) => current && rows.some((row) => row.id === current) ? current : rows[0]?.id || "");
+    setStatus(`${rows.length} conversations`);
+  }, [appURL]);
+
+  const loadMessages = useCallback(async (chatId: string) => {
+    if (!chatId) {
+      setMessages([]);
+      return;
+    }
+    const res = await fetch(appURL(`/messages?chat_id=${encodeURIComponent(chatId)}`), { credentials: "same-origin" });
+    if (!res.ok) {
+      setStatus(`Messages failed: ${res.status}`);
+      return;
+    }
+    setMessages(((await res.json()) || []) as Message[]);
+  }, [appURL]);
+
+  const loadChannels = useCallback(async () => {
     const res = await fetch(appURL("/channels"), { credentials: "same-origin" });
     if (!res.ok) {
-      setStatus(`Load failed: ${res.status}`);
+      setStatus(`Channels load failed: ${res.status}`);
       return;
     }
     const data = (await res.json()) as ChannelResponse;
@@ -57,9 +111,39 @@ export default function ChannelsPanel({ projectId }: NativePanelProps) {
     setStatus(`${rows.length} channels`);
   }, [appURL]);
 
+  const reload = useCallback(async () => {
+    await Promise.all([loadConversations(), loadChannels()]);
+  }, [loadChannels, loadConversations]);
+
   useEffect(() => {
-    load();
-  }, [load]);
+    reload();
+  }, [reload]);
+
+  const selectedConversation = useMemo(
+    () => conversations.find((row) => row.id === selectedConversationId) || conversations[0],
+    [conversations, selectedConversationId],
+  );
+
+  useEffect(() => {
+    if (!selectedConversation?.id) {
+      setMessages([]);
+      return;
+    }
+    loadMessages(selectedConversation.id);
+  }, [loadMessages, selectedConversation?.id]);
+
+  useEffect(() => {
+    if (!selectedConversation?.id) return;
+    const url = appURL(`/stream?chat_id=${encodeURIComponent(selectedConversation.id)}&since=0`);
+    const es = new EventSource(url, { withCredentials: true });
+    es.onmessage = (ev) => {
+      try {
+        const msg = JSON.parse(ev.data) as Message;
+        setMessages((prev) => prev.some((m) => m.id === msg.id) ? prev : [...prev, msg]);
+      } catch {}
+    };
+    return () => es.close();
+  }, [appURL, selectedConversation?.id]);
 
   const selected = useMemo(
     () => channels.find((ch) => ch.id === selectedId) || channels[0],
@@ -87,10 +171,27 @@ export default function ChannelsPanel({ projectId }: NativePanelProps) {
     const ch = (await res.json()) as Channel;
     setTopic(ch.topic || "");
     setCreating(false);
-    setStatus(regenerate ? "Topic regenerated" : "Channel saved");
-    await load();
+    setStatus(regenerate ? "Topic generated" : "Channel created");
+    await reload();
     setSelectedId(ch.id);
-  }, [agentId, appURL, inbound, load, name, projectId, topic]);
+    setView("channels");
+  }, [agentId, appURL, inbound, name, projectId, reload, topic]);
+
+  const sendChatMessage = useCallback(async () => {
+    if (!selectedConversation?.id || !draft.trim()) return;
+    const res = await fetch(appURL(`/messages?chat_id=${encodeURIComponent(selectedConversation.id)}`), {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ content: draft.trim() }),
+    });
+    if (!res.ok) {
+      setStatus(`Send failed: ${res.status}`);
+      return;
+    }
+    setDraft("");
+    await loadMessages(selectedConversation.id);
+  }, [appURL, draft, loadMessages, selectedConversation?.id]);
 
   const testNtfy = useCallback(async () => {
     if (!selected || selected.type !== "ntfy" || !selected.topic) {
@@ -108,7 +209,8 @@ export default function ChannelsPanel({ projectId }: NativePanelProps) {
       body: testMessage,
     });
     setStatus(res.ok ? "Test sent" : `Test failed: ${res.status}`);
-  }, [appURL, selected, testMessage, testTitle]);
+    if (res.ok) await loadConversations();
+  }, [appURL, loadConversations, selected, testMessage, testTitle]);
 
   const selectedSubscribeURL = selected?.type === "ntfy" && selected.topic
     ? `${window.location.origin}${API}/ntfy/${selected.topic}`
@@ -126,77 +228,219 @@ export default function ChannelsPanel({ projectId }: NativePanelProps) {
             <p className="mt-1 text-sm text-text-dim">{status}</p>
           </div>
           <div className="flex items-center gap-2">
-            <button className="h-9 rounded-md border border-border px-3 text-sm" onClick={load}>
-              Refresh
-            </button>
-            <button className="h-9 rounded-md bg-accent px-3 text-sm font-medium text-accent-contrast" onClick={() => setCreating(true)}>
+            <div className="flex h-9 rounded-md border border-border bg-surface p-1">
+              <button className={`rounded px-3 text-sm ${view === "inbox" ? "bg-bg" : "text-text-dim"}`} onClick={() => setView("inbox")}>Inbox</button>
+              <button className={`rounded px-3 text-sm ${view === "channels" ? "bg-bg" : "text-text-dim"}`} onClick={() => setView("channels")}>Channels</button>
+            </div>
+            <button className="h-9 rounded-md border border-border px-3 text-sm" onClick={reload}>Refresh</button>
+            <button className="h-9 rounded-md bg-accent px-3 text-sm font-medium text-accent-contrast" onClick={() => { setCreating(true); setView("channels"); }}>
               New Channel
             </button>
           </div>
         </header>
 
-        <main className="grid min-h-0 flex-1 gap-4 lg:grid-cols-[360px_1fr]">
-          <section className="min-h-0 overflow-hidden rounded-lg border border-border bg-surface">
-            <div className="border-b border-border px-4 py-3 text-sm font-medium">Project Channels</div>
-            <div className="max-h-full overflow-auto">
-              {channels.length === 0 ? (
-                <div className="p-5 text-sm text-text-dim">No channels yet.</div>
-              ) : channels.map((ch) => (
-                <button
-                  key={ch.id}
-                  className={`block w-full border-b border-border p-4 text-left last:border-b-0 ${selectedId === ch.id ? "bg-bg" : ""}`}
-                  onClick={() => setSelectedId(ch.id)}
-                >
-                  <div className="flex items-center justify-between gap-3">
-                    <div className="min-w-0">
-                      <div className="flex items-center gap-2">
-                        <span className="truncate font-medium">{ch.label || ch.type}</span>
-                        <span className="rounded bg-bg px-2 py-0.5 text-xs uppercase text-text-dim">{ch.type}</span>
-                      </div>
-                      <div className="mt-1 truncate font-mono text-xs text-text-dim">{ch.mcp_id || ch.id}</div>
-                    </div>
-                    <span className={ch.active ? "text-xs text-success" : "text-xs text-text-dim"}>
-                      {ch.active ? "active" : "idle"}
-                    </span>
-                  </div>
-                </button>
-              ))}
-            </div>
-          </section>
-
-          <section className="min-h-0 rounded-lg border border-border bg-surface">
-            {creating ? (
-              <CreateChannel
-                name={name}
-                setName={setName}
-                agentId={agentId}
-                setAgentId={setAgentId}
-                inbound={inbound}
-                setInbound={setInbound}
-                topic={topic}
-                setTopic={setTopic}
-                onCancel={() => setCreating(false)}
-                onSave={() => createNtfy(false)}
-                onGenerate={() => createNtfy(true)}
-              />
-            ) : selected ? (
-              <ChannelDetail
-                channel={selected}
-                subscribeURL={selectedSubscribeURL}
-                streamURL={selectedStreamURL}
-                testTitle={testTitle}
-                setTestTitle={setTestTitle}
-                testMessage={testMessage}
-                setTestMessage={setTestMessage}
-                onTest={testNtfy}
-              />
-            ) : (
-              <div className="p-5 text-sm text-text-dim">Select or create a channel.</div>
-            )}
-          </section>
-        </main>
+        {view === "inbox" ? (
+          <InboxView
+            conversations={conversations}
+            selectedId={selectedConversation?.id || ""}
+            onSelect={setSelectedConversationId}
+            messages={messages}
+            draft={draft}
+            setDraft={setDraft}
+            onSend={sendChatMessage}
+            selected={selectedConversation}
+          />
+        ) : (
+          <ChannelsView
+            channels={channels}
+            selectedId={selectedId}
+            onSelect={setSelectedId}
+            creating={creating}
+            selected={selected}
+            name={name}
+            setName={setName}
+            agentId={agentId}
+            setAgentId={setAgentId}
+            inbound={inbound}
+            setInbound={setInbound}
+            topic={topic}
+            setTopic={setTopic}
+            onCancel={() => setCreating(false)}
+            onSave={() => createNtfy(false)}
+            onGenerate={() => createNtfy(true)}
+            subscribeURL={selectedSubscribeURL}
+            streamURL={selectedStreamURL}
+            testTitle={testTitle}
+            setTestTitle={setTestTitle}
+            testMessage={testMessage}
+            setTestMessage={setTestMessage}
+            onTest={testNtfy}
+          />
+        )}
       </div>
     </div>
+  );
+}
+
+function InboxView({
+  conversations,
+  selectedId,
+  onSelect,
+  messages,
+  draft,
+  setDraft,
+  onSend,
+  selected,
+}: {
+  conversations: Conversation[];
+  selectedId: string;
+  onSelect: (id: string) => void;
+  messages: Message[];
+  draft: string;
+  setDraft: (v: string) => void;
+  onSend: () => void;
+  selected?: Conversation;
+}) {
+  const canSend = selected?.channel === "chat" && !!selected.agent_id;
+  return (
+    <main className="grid min-h-0 flex-1 gap-4 lg:grid-cols-[360px_1fr]">
+      <section className="min-h-0 overflow-hidden rounded-lg border border-border bg-surface">
+        <div className="border-b border-border px-4 py-3 text-sm font-medium">Conversations</div>
+        <div className="max-h-full overflow-auto">
+          {conversations.length === 0 ? (
+            <div className="p-5 text-sm text-text-dim">No conversations yet.</div>
+          ) : conversations.map((row) => (
+            <button
+              key={row.id}
+              className={`block w-full border-b border-border p-4 text-left last:border-b-0 ${selectedId === row.id ? "bg-bg" : ""}`}
+              onClick={() => onSelect(row.id)}
+            >
+              <div className="flex items-center justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2">
+                    <span className="truncate font-medium">{row.title || row.channel}</span>
+                    <span className="rounded bg-bg px-2 py-0.5 text-xs uppercase text-text-dim">{row.channel}</span>
+                  </div>
+                  <div className="mt-1 truncate font-mono text-xs text-text-dim">
+                    {row.channel === "ntfy" ? row.thread_id : `agent:${row.agent_id || "none"}`}
+                  </div>
+                </div>
+              </div>
+            </button>
+          ))}
+        </div>
+      </section>
+
+      <section className="flex min-h-0 flex-col rounded-lg border border-border bg-surface">
+        <div className="border-b border-border px-4 py-3">
+          <div className="text-sm font-medium">{selected?.title || "Conversation"}</div>
+          <div className="mt-1 font-mono text-xs text-text-dim">{selected?.id || ""}</div>
+        </div>
+        <div className="min-h-0 flex-1 space-y-3 overflow-auto p-4">
+          {messages.length === 0 ? (
+            <div className="text-sm text-text-dim">No messages.</div>
+          ) : messages.map((m) => (
+            <div key={m.id} className={`max-w-[80%] rounded-lg border border-border p-3 ${m.role === "agent" ? "ml-auto bg-bg" : "bg-surface"}`}>
+              <div className="mb-1 text-xs uppercase text-text-dim">{m.role}</div>
+              <div className="whitespace-pre-wrap text-sm">{m.content}</div>
+            </div>
+          ))}
+        </div>
+        <div className="border-t border-border p-3">
+          {canSend ? (
+            <div className="flex gap-2">
+              <input
+                className="h-10 min-w-0 flex-1 rounded-md border border-border bg-bg px-3 text-sm outline-none focus:border-accent"
+                value={draft}
+                onChange={(e) => setDraft(e.target.value)}
+                onKeyDown={(e) => { if (e.key === "Enter") onSend(); }}
+                placeholder="Message"
+              />
+              <button className="h-10 rounded-md bg-accent px-4 text-sm font-medium text-accent-contrast" onClick={onSend}>Send</button>
+            </div>
+          ) : (
+            <div className="text-sm text-text-dim">This conversation is read-only here.</div>
+          )}
+        </div>
+      </section>
+    </main>
+  );
+}
+
+function ChannelsView(props: {
+  channels: Channel[];
+  selectedId: string;
+  onSelect: (id: string) => void;
+  creating: boolean;
+  selected?: Channel;
+  name: string;
+  setName: (v: string) => void;
+  agentId: string;
+  setAgentId: (v: string) => void;
+  inbound: boolean;
+  setInbound: (v: boolean) => void;
+  topic: string;
+  setTopic: (v: string) => void;
+  onCancel: () => void;
+  onSave: () => void;
+  onGenerate: () => void;
+  subscribeURL: string;
+  streamURL: string;
+  testTitle: string;
+  setTestTitle: (v: string) => void;
+  testMessage: string;
+  setTestMessage: (v: string) => void;
+  onTest: () => void;
+}) {
+  return (
+    <main className="grid min-h-0 flex-1 gap-4 lg:grid-cols-[360px_1fr]">
+      <section className="min-h-0 overflow-hidden rounded-lg border border-border bg-surface">
+        <div className="border-b border-border px-4 py-3 text-sm font-medium">Project Channels</div>
+        <div className="max-h-full overflow-auto">
+          {props.channels.length === 0 ? (
+            <div className="p-5 text-sm text-text-dim">No channels yet.</div>
+          ) : props.channels.map((ch) => (
+            <button
+              key={ch.id}
+              className={`block w-full border-b border-border p-4 text-left last:border-b-0 ${props.selectedId === ch.id ? "bg-bg" : ""}`}
+              onClick={() => props.onSelect(ch.id)}
+            >
+              <div className="flex items-center justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="flex items-center gap-2">
+                    <span className="truncate font-medium">{ch.label || ch.type}</span>
+                    <span className="rounded bg-bg px-2 py-0.5 text-xs uppercase text-text-dim">{ch.type}</span>
+                  </div>
+                  <div className="mt-1 truncate font-mono text-xs text-text-dim">{ch.mcp_id || ch.id}</div>
+                </div>
+                <span className={ch.active ? "text-xs text-success" : "text-xs text-text-dim"}>
+                  {ch.active ? "active" : "idle"}
+                </span>
+              </div>
+            </button>
+          ))}
+        </div>
+      </section>
+
+      <section className="min-h-0 rounded-lg border border-border bg-surface">
+        {props.creating ? (
+          <CreateChannel {...props} />
+        ) : props.selected ? (
+          <ChannelDetail
+            channel={props.selected}
+            subscribeURL={props.subscribeURL}
+            streamURL={props.streamURL}
+            testTitle={props.testTitle}
+            setTestTitle={props.setTestTitle}
+            testMessage={props.testMessage}
+            setTestMessage={props.setTestMessage}
+            onTest={props.onTest}
+          />
+        ) : (
+          <div className="p-5 text-sm text-text-dim">Select or create a channel.</div>
+        )}
+      </section>
+    </main>
   );
 }
 
