@@ -54,7 +54,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: messaging
 display_name: Messaging
-version: 0.13.30
+version: 0.13.31
 description: |
   Send and receive messages across channels. v0.1 ships email via
   AWS SES.
@@ -337,7 +337,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "message_list",
-			Description: "List messages. Filters: direction? (in|out), channel?, status?, since? (RFC3339), address? (URI), limit? (default 50, max 200).",
+			Description: "List messages. Filters: direction? (in|out), channel?, status?, since? (RFC3339), address? (URI), limit? (default 50, max 200), offset? (default 0). Returns total for pagination.",
 			InputSchema: schemaObject(map[string]any{
 				"direction": map[string]any{"type": "string"},
 				"channel":   map[string]any{"type": "string"},
@@ -345,6 +345,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"since":     map[string]any{"type": "string"},
 				"address":   map[string]any{"type": "string"},
 				"limit":     map[string]any{"type": "integer"},
+				"offset":    map[string]any{"type": "integer"},
 			}, nil),
 			Handler: a.toolMessageList,
 		},
@@ -1623,6 +1624,7 @@ func (a *App) toolMessageList(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		Since:     strArg(args, "since"),
 		Address:   strArg(args, "address"),
 		Limit:     intArg(args, "limit", 50),
+		Offset:    intArg(args, "offset", 0),
 	}
 	if opts.Address != "" {
 		// Best-effort normalise; callers may pass mailto:foo@bar.com
@@ -1636,11 +1638,21 @@ func (a *App) toolMessageList(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	if opts.Limit <= 0 || opts.Limit > 200 {
 		opts.Limit = 50
 	}
-	out, err := dbMessageList(ctx.AppDB(), pid, opts)
+	if opts.Offset < 0 {
+		opts.Offset = 0
+	}
+	out, total, err := dbMessageListPage(ctx.AppDB(), pid, opts)
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"messages": out, "count": len(out)}, nil
+	return map[string]any{
+		"messages": out,
+		"count":    len(out),
+		"total":    total,
+		"limit":    opts.Limit,
+		"offset":   opts.Offset,
+		"has_more": opts.Offset+len(out) < total,
+	}, nil
 }
 
 // ─── inbound_redispatch ────────────────────────────────────────────
@@ -4590,19 +4602,31 @@ func (a *App) handleMessagesList(w http.ResponseWriter, r *http.Request) {
 	if limit <= 0 || limit > 200 {
 		limit = 50
 	}
-	out, err := dbMessageList(globalCtx.AppDB(), pid, messageListOpts{
+	offset, _ := strconv.Atoi(q.Get("offset"))
+	if offset < 0 {
+		offset = 0
+	}
+	out, total, err := dbMessageListPage(globalCtx.AppDB(), pid, messageListOpts{
 		Direction: q.Get("direction"),
 		Channel:   q.Get("channel"),
 		Status:    q.Get("status"),
 		Since:     q.Get("since"),
 		Address:   q.Get("address"),
 		Limit:     limit,
+		Offset:    offset,
 	})
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	httpJSON(w, map[string]any{"messages": out})
+	httpJSON(w, map[string]any{
+		"messages": out,
+		"count":    len(out),
+		"total":    total,
+		"limit":    limit,
+		"offset":   offset,
+		"has_more": offset+len(out) < total,
+	})
 }
 
 func (a *App) handleMessageItem(w http.ResponseWriter, r *http.Request) {
@@ -5347,10 +5371,15 @@ func whatsAppRecipientsOutsideSession(db *sql.DB, pid, from string, recipients [
 
 type messageListOpts struct {
 	Direction, Channel, Status, Since, Address string
-	Limit                                      int
+	Limit, Offset                              int
 }
 
 func dbMessageList(db *sql.DB, pid string, opts messageListOpts) ([]*Message, error) {
+	out, _, err := dbMessageListPage(db, pid, opts)
+	return out, err
+}
+
+func dbMessageListPage(db *sql.DB, pid string, opts messageListOpts) ([]*Message, int, error) {
 	where := []string{"project_id = ?"}
 	args := []any{pid}
 	if opts.Direction != "" {
@@ -5373,12 +5402,17 @@ func dbMessageList(db *sql.DB, pid string, opts messageListOpts) ([]*Message, er
 		where = append(where, "(from_addr = ? OR to_addrs LIKE ? OR cc_addrs LIKE ?)")
 		args = append(args, opts.Address, `%"`+opts.Address+`"%`, `%"`+opts.Address+`"%`)
 	}
+	whereSQL := strings.Join(where, " AND ")
+	var total int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE `+whereSQL, args...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
 	q := `SELECT id FROM messages WHERE ` + strings.Join(where, " AND ") +
-		` ORDER BY created_at DESC LIMIT ?`
-	args = append(args, opts.Limit)
+		` ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`
+	args = append(args, opts.Limit, opts.Offset)
 	rows, err := db.Query(q, args...)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	ids := []int64{}
 	for rows.Next() {
@@ -5395,7 +5429,7 @@ func dbMessageList(db *sql.DB, pid string, opts messageListOpts) ([]*Message, er
 			out = append(out, m)
 		}
 	}
-	return out, nil
+	return out, total, nil
 }
 
 func scanMessage(row *sql.Row) (*Message, error) {

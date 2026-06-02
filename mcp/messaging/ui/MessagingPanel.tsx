@@ -223,6 +223,20 @@ type Tab = "outbox" | "inbox" | "templates" | "routes" | "suppressions" | "sende
 type Notice = { kind: "error" | "info"; text: string };
 type Notify = (kind: Notice["kind"], text: string) => void;
 type ConfirmTone = "danger" | "default";
+interface MessageListResponse {
+  messages: MessageRow[];
+  count?: number;
+  total?: number;
+  limit?: number;
+  offset?: number;
+  has_more?: boolean;
+}
+interface MessagePageState {
+  limit: number;
+  offset: number;
+  total: number;
+  hasMore: boolean;
+}
 interface ConfirmDialogRequest {
   title: string;
   message: React.ReactNode;
@@ -232,6 +246,7 @@ interface ConfirmDialogRequest {
   onConfirm: () => void | Promise<void>;
 }
 type ConfirmFn = (request: ConfirmDialogRequest) => void;
+const MESSAGE_PAGE_SIZE = 100;
 interface ComposeDraft {
   key: number;
   channel: string;
@@ -251,6 +266,18 @@ export default function MessagingPanel({ projectId, installId }: NativePanelProp
 
   const [outbox, setOutbox] = useState<MessageRow[]>([]);
   const [inbox, setInbox] = useState<MessageRow[]>([]);
+  const [outboxPage, setOutboxPage] = useState<MessagePageState>({
+    limit: MESSAGE_PAGE_SIZE,
+    offset: 0,
+    total: 0,
+    hasMore: false,
+  });
+  const [inboxPage, setInboxPage] = useState<MessagePageState>({
+    limit: MESSAGE_PAGE_SIZE,
+    offset: 0,
+    total: 0,
+    hasMore: false,
+  });
   const [templates, setTemplates] = useState<TemplateRow[]>([]);
   const [routes, setRoutes] = useState<InboundRoute[]>([]);
   const [suppressions, setSuppressions] = useState<SuppressionRow[]>([]);
@@ -299,13 +326,31 @@ export default function MessagingPanel({ projectId, installId }: NativePanelProp
   }, [withParams]);
 
   const loadOutbox = useCallback(async () => {
-    const r = await api<{ messages: MessageRow[] }>("GET", "/messages", { direction: "out", limit: "100" });
+    const r = await api<MessageListResponse>("GET", "/messages", {
+      direction: "out",
+      limit: String(outboxPage.limit),
+      offset: String(outboxPage.offset),
+    });
     setOutbox(r.messages || []);
-  }, [api]);
+    setOutboxPage((p) => ({
+      ...p,
+      total: typeof r.total === "number" ? r.total : (r.messages || []).length,
+      hasMore: !!r.has_more,
+    }));
+  }, [api, outboxPage.limit, outboxPage.offset]);
   const loadInbox = useCallback(async () => {
-    const r = await api<{ messages: MessageRow[] }>("GET", "/messages", { direction: "in", limit: "100" });
+    const r = await api<MessageListResponse>("GET", "/messages", {
+      direction: "in",
+      limit: String(inboxPage.limit),
+      offset: String(inboxPage.offset),
+    });
     setInbox(r.messages || []);
-  }, [api]);
+    setInboxPage((p) => ({
+      ...p,
+      total: typeof r.total === "number" ? r.total : (r.messages || []).length,
+      hasMore: !!r.has_more,
+    }));
+  }, [api, inboxPage.limit, inboxPage.offset]);
   const loadTemplates = useCallback(async () => {
     const r = await api<{ templates: TemplateRow[] }>("POST", "/tools/call", {}, {
       tool: "template_list",
@@ -394,14 +439,27 @@ export default function MessagingPanel({ projectId, installId }: NativePanelProp
     } catch {}
   }, [loadMessageDetail]);
 
+  const pageOutbox = useCallback((delta: number) => {
+    setOutboxPage((p) => ({
+      ...p,
+      offset: Math.max(0, p.offset + delta * p.limit),
+    }));
+  }, []);
+  const pageInbox = useCallback((delta: number) => {
+    setInboxPage((p) => ({
+      ...p,
+      offset: Math.max(0, p.offset + delta * p.limit),
+    }));
+  }, []);
+
   const counts = useMemo(() => ({
-    outbox: outbox.length,
-    inbox: inbox.length,
+    outbox: outboxPage.total,
+    inbox: inboxPage.total,
     templates: templates.length,
     routes: routes.length,
     suppressions: suppressions.length,
     senders: senders.length,
-  }), [outbox, inbox, templates, routes, suppressions, senders]);
+  }), [outboxPage.total, inboxPage.total, templates, routes, suppressions, senders]);
 
   const verifiedSenders = useMemo(() => senders.filter((s) => s.verified), [senders]);
 
@@ -468,8 +526,24 @@ export default function MessagingPanel({ projectId, installId }: NativePanelProp
       <div className="flex-1 min-h-0 flex">
         {/* Main pane */}
         <div className="flex-1 min-w-0 overflow-auto">
-          {tab === "outbox" && <MessageList rows={outbox} onSelect={openMessage} selectedId={selected?.id} />}
-          {tab === "inbox" && <MessageList rows={inbox} onSelect={openMessage} selectedId={selected?.id} />}
+          {tab === "outbox" && (
+            <MessageList
+              rows={outbox}
+              page={outboxPage}
+              onPage={pageOutbox}
+              onSelect={openMessage}
+              selectedId={selected?.id}
+            />
+          )}
+          {tab === "inbox" && (
+            <MessageList
+              rows={inbox}
+              page={inboxPage}
+              onPage={pageInbox}
+              onSelect={openMessage}
+              selectedId={selected?.id}
+            />
+          )}
           {tab === "compose" && (
             <ComposeView
               api={api}
@@ -505,42 +579,84 @@ export default function MessagingPanel({ projectId, installId }: NativePanelProp
 
 // ─── Subviews ─────────────────────────────────────────────────────
 
-function MessageList({ rows, onSelect, selectedId }: { rows: MessageRow[]; onSelect: (m: MessageRow) => void; selectedId?: number }) {
-  if (rows.length === 0) {
-    return <div className="p-6 text-text-dim text-sm">No messages.</div>;
-  }
+function MessageList({
+  rows, page, onPage, onSelect, selectedId,
+}: {
+  rows: MessageRow[];
+  page: MessagePageState;
+  onPage: (delta: number) => void;
+  onSelect: (m: MessageRow) => void;
+  selectedId?: number;
+}) {
   return (
-    <table className="w-full text-sm">
-      <thead className="text-xs text-text-dim">
-        <tr className="border-b border-border">
-          <th className="text-left px-4 py-2">When</th>
-          <th className="text-left px-4 py-2">From / To</th>
-          <th className="text-left px-4 py-2">Subject</th>
-          <th className="text-left px-4 py-2">Status</th>
-        </tr>
-      </thead>
-      <tbody>
-        {rows.map((m) => {
-          const counterpart = m.direction === "out" ? m.to.join(", ") : m.from;
-          return (
-            <tr
-              key={m.id}
-              className={`border-b border-border cursor-pointer hover:bg-surface-2 ${selectedId === m.id ? "bg-surface-2" : ""}`}
-              onClick={() => onSelect(m)}
-            >
-              <td className="px-4 py-2 text-text-dim">{shortTime(m.last_event_at || m.created_at)}</td>
-              <td className="px-4 py-2 truncate max-w-[20rem]">{stripScheme(counterpart)}</td>
-              <td className="px-4 py-2 truncate max-w-[24rem]">{m.subject || <span className="text-text-dim">(no subject)</span>}</td>
-              <td className="px-4 py-2">
-                <div className="flex items-center gap-1 flex-wrap">
-                  <StatusPill status={m.direction === "in" ? (m.route_status || m.status) : m.status} />
-                </div>
-              </td>
+    <div>
+      <MessagePager page={page} rowCount={rows.length} onPage={onPage} />
+      {rows.length === 0 ? (
+        <div className="p-6 text-text-dim text-sm">No messages.</div>
+      ) : (
+        <table className="w-full text-sm">
+          <thead className="text-xs text-text-dim">
+            <tr className="border-b border-border">
+              <th className="text-left px-4 py-2">When</th>
+              <th className="text-left px-4 py-2">From / To</th>
+              <th className="text-left px-4 py-2">Subject</th>
+              <th className="text-left px-4 py-2">Status</th>
             </tr>
-          );
-        })}
-      </tbody>
-    </table>
+          </thead>
+          <tbody>
+            {rows.map((m) => {
+              const counterpart = m.direction === "out" ? m.to.join(", ") : m.from;
+              return (
+                <tr
+                  key={m.id}
+                  className={`border-b border-border cursor-pointer hover:bg-surface-2 ${selectedId === m.id ? "bg-surface-2" : ""}`}
+                  onClick={() => onSelect(m)}
+                >
+                  <td className="px-4 py-2 text-text-dim">{shortTime(m.last_event_at || m.created_at)}</td>
+                  <td className="px-4 py-2 truncate max-w-[20rem]">{stripScheme(counterpart)}</td>
+                  <td className="px-4 py-2 truncate max-w-[24rem]">{m.subject || <span className="text-text-dim">(no subject)</span>}</td>
+                  <td className="px-4 py-2">
+                    <div className="flex items-center gap-1 flex-wrap">
+                      <StatusPill status={m.direction === "in" ? (m.route_status || m.status) : m.status} />
+                    </div>
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      )}
+    </div>
+  );
+}
+
+function MessagePager({ page, rowCount, onPage }: { page: MessagePageState; rowCount: number; onPage: (delta: number) => void }) {
+  const from = page.total === 0 ? 0 : page.offset + 1;
+  const to = Math.min(page.offset + rowCount, page.total);
+  return (
+    <div className="px-4 py-2 border-b border-border flex items-center justify-between gap-3 text-xs text-text-dim">
+      <span>
+        Showing <span className="text-text">{from}-{to}</span> of <span className="text-text">{page.total}</span>
+      </span>
+      <div className="flex items-center gap-2">
+        <button
+          type="button"
+          className="px-2 py-1 rounded border border-border hover:bg-surface-2 disabled:opacity-50 disabled:hover:bg-transparent"
+          disabled={page.offset <= 0}
+          onClick={() => onPage(-1)}
+        >
+          Previous
+        </button>
+        <button
+          type="button"
+          className="px-2 py-1 rounded border border-border hover:bg-surface-2 disabled:opacity-50 disabled:hover:bg-transparent"
+          disabled={!page.hasMore}
+          onClick={() => onPage(1)}
+        >
+          Next
+        </button>
+      </div>
+    </div>
   );
 }
 

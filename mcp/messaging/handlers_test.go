@@ -313,6 +313,47 @@ func newTestCtx(t *testing.T, plat *stubPlatform, opts ...tk.Option) *sdk.AppCtx
 // fromAcme is a stable test sender to keep send_message calls terse.
 const fromAcme = "notifications@acme.com"
 
+func TestMessagesList_PaginatesAndReturnsTotal(t *testing.T) {
+	ctx := newTestCtx(t, nil)
+	app := &App{}
+	base := time.Date(2026, 6, 2, 8, 0, 0, 0, time.UTC)
+	for i := 1; i <= 5; i++ {
+		ts := base.Add(time.Duration(i) * time.Minute).Format(time.RFC3339)
+		if _, err := ctx.AppDB().Exec(
+			`INSERT INTO messages
+				(project_id, channel, direction, from_addr, to_addrs, subject, status, created_at)
+			 VALUES ('test-proj', 'email', 'in', ?, '["support@example.com"]', ?, 'received', ?)`,
+			fmt.Sprintf("sender%d@example.com", i), fmt.Sprintf("msg-%d", i), ts,
+		); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	r := httptest.NewRequest("GET", "/messages?project_id=test-proj&direction=in&limit=2&offset=2", nil)
+	w := httptest.NewRecorder()
+	app.handleMessagesList(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	var out struct {
+		Messages []Message `json:"messages"`
+		Count    int       `json:"count"`
+		Total    int       `json:"total"`
+		Limit    int       `json:"limit"`
+		Offset   int       `json:"offset"`
+		HasMore  bool      `json:"has_more"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+		t.Fatal(err)
+	}
+	if out.Count != 2 || out.Total != 5 || out.Limit != 2 || out.Offset != 2 || !out.HasMore {
+		t.Fatalf("page metadata wrong: %+v", out)
+	}
+	if len(out.Messages) != 2 || out.Messages[0].Subject != "msg-3" || out.Messages[1].Subject != "msg-2" {
+		t.Fatalf("page order wrong: %+v", out.Messages)
+	}
+}
+
 // ─── send_message ─────────────────────────────────────────────────
 
 func TestSendMessage_PersistsAndCallsProvider(t *testing.T) {
