@@ -294,8 +294,8 @@ function useAppEvents<T = unknown>(
 
 export default function SocialPanel({ projectId }: NativePanelProps) {
   const [tab, setTab] = useState<"accounts" | "posts" | "inbox" | "metrics">("posts");
-  const [accounts, setAccounts] = useState<SocialAccount[]>([]);
-  const [posts, setPosts] = useState<Post[]>([]);
+  const [allAccounts, setAllAccounts] = useState<SocialAccount[]>([]);
+  const [allPosts, setAllPosts] = useState<Post[]>([]);
   const [platforms, setPlatforms] = useState<PlatformInfo[]>([]);
   const [status, setStatus] = useState("");
   const [composeOpen, setComposeOpen] = useState(false);
@@ -310,6 +310,12 @@ export default function SocialPanel({ projectId }: NativePanelProps) {
   const [manageOpen, setManageOpen] = useState(false);
   const activeProfile = profiles.find((p) => p.id === activeProfileId) || null;
   const effectiveProfileId = activeProfile?.id ?? null;
+  const accounts = effectiveProfileId == null
+    ? allAccounts
+    : allAccounts.filter((a) => (a.profile_id || 0) === effectiveProfileId);
+  const posts = effectiveProfileId == null
+    ? allPosts
+    : allPosts.filter((p) => (p.profile_id || 0) === effectiveProfileId);
 
   useEffect(() => {
     setProfileStateProject(projectKey);
@@ -345,28 +351,28 @@ export default function SocialPanel({ projectId }: NativePanelProps) {
     }
   }, [projectId]);
 
-  // Profile-scoped fetches — when activeProfileId is set, the
-  // accounts/posts queries pass profile_id and the panel only sees
-  // that brand's rows. activeProfileId=null = project-wide.
+  // Project-scoped fetches. The panel filters locally by profile_id
+  // so switching profiles cannot be overwritten by an older network
+  // response from another profile/all-profiles request.
   const loadAccounts = useCallback(async () => {
     try {
-      const res = await fetch(socialURL("/accounts", projectId, { profile_id: effectiveProfileId ?? undefined }), { credentials: "same-origin" });
+      const res = await fetch(socialURL("/accounts", projectId), { credentials: "same-origin" });
       const data = await res.json();
-      setAccounts(data.accounts || []);
+      setAllAccounts(data.accounts || []);
     } catch (e) {
       setStatus("Load accounts: " + (e as Error).message);
     }
-  }, [effectiveProfileId, projectId]);
+  }, [projectId]);
 
   const loadPosts = useCallback(async () => {
     try {
-      const res = await fetch(socialURL("/posts", projectId, { profile_id: effectiveProfileId ?? undefined }), { credentials: "same-origin" });
+      const res = await fetch(socialURL("/posts", projectId), { credentials: "same-origin" });
       const data = await res.json();
-      setPosts(data.posts || []);
+      setAllPosts(data.posts || []);
     } catch (e) {
       setStatus("Load posts: " + (e as Error).message);
     }
-  }, [effectiveProfileId, projectId]);
+  }, [projectId]);
 
   const loadPlatforms = useCallback(async () => {
     try {
@@ -495,7 +501,7 @@ export default function SocialPanel({ projectId }: NativePanelProps) {
       {manageOpen && (
         <ProfileManageModal
           profiles={profiles}
-          accounts={accounts}
+          accounts={allAccounts}
           projectId={projectId}
           onClose={() => setManageOpen(false)}
           onChanged={() => { loadProfiles(); loadAccounts(); }}
