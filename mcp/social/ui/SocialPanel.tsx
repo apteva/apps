@@ -39,6 +39,20 @@ function socialURL(path: string, projectId?: string | null, extra?: Record<strin
   return `${API}${path}${qs ? `?${qs}` : ""}`;
 }
 
+function profileStorageKey(projectId?: string | null): string {
+  return `social.activeProfile.${projectId || "__global__"}`;
+}
+
+function readStoredProfileId(projectId?: string | null): number | null {
+  try {
+    const raw = localStorage.getItem(profileStorageKey(projectId));
+    const id = raw ? Number(raw) : 0;
+    return id > 0 ? id : null;
+  } catch {
+    return null;
+  }
+}
+
 function storageURL(path: string, projectId?: string | null): string {
   const params = new URLSearchParams();
   if (projectId) params.set("project_id", projectId);
@@ -289,30 +303,43 @@ export default function SocialPanel({ projectId }: NativePanelProps) {
   // Persists per-project so refreshing the page keeps the user's
   // last-selected brand context.
   const [profiles, setProfiles] = useState<Profile[]>([]);
-  const [activeProfileId, setActiveProfileId] = useState<number | null>(() => {
-    try {
-      const raw = localStorage.getItem(`social.activeProfile.${projectId || ""}`);
-      return raw ? Number(raw) || null : null;
-    } catch {
-      return null;
-    }
-  });
+  const projectKey = projectId || "";
+  const [profileStateProject, setProfileStateProject] = useState(projectKey);
+  const [profilesLoadedProject, setProfilesLoadedProject] = useState("");
+  const [activeProfileId, setActiveProfileId] = useState<number | null>(() => readStoredProfileId(projectId));
   const [manageOpen, setManageOpen] = useState(false);
+  const activeProfile = profiles.find((p) => p.id === activeProfileId) || null;
+  const effectiveProfileId = activeProfile?.id ?? null;
+
   useEffect(() => {
+    setProfileStateProject(projectKey);
+    setActiveProfileId(readStoredProfileId(projectId));
+  }, [projectId, projectKey]);
+
+  useEffect(() => {
+    if (profileStateProject !== projectKey) return;
     try {
       if (activeProfileId == null) {
-        localStorage.removeItem(`social.activeProfile.${projectId || ""}`);
+        localStorage.removeItem(profileStorageKey(projectId));
       } else {
-        localStorage.setItem(`social.activeProfile.${projectId || ""}`, String(activeProfileId));
+        localStorage.setItem(profileStorageKey(projectId), String(activeProfileId));
       }
     } catch {}
-  }, [activeProfileId, projectId]);
+  }, [activeProfileId, profileStateProject, projectId, projectKey]);
+
+  useEffect(() => {
+    if (profilesLoadedProject !== projectKey) return;
+    if (activeProfileId != null && !profiles.some((p) => p.id === activeProfileId)) {
+      setActiveProfileId(null);
+    }
+  }, [activeProfileId, profiles, profilesLoadedProject, projectKey]);
 
   const loadProfiles = useCallback(async () => {
     try {
       const res = await fetch(socialURL("/profiles", projectId), { credentials: "same-origin" });
       const data = await res.json();
       setProfiles(data.profiles || []);
+      setProfilesLoadedProject(projectId || "");
     } catch (e) {
       setStatus("Load profiles: " + (e as Error).message);
     }
@@ -323,23 +350,23 @@ export default function SocialPanel({ projectId }: NativePanelProps) {
   // that brand's rows. activeProfileId=null = project-wide.
   const loadAccounts = useCallback(async () => {
     try {
-      const res = await fetch(socialURL("/accounts", projectId, { profile_id: activeProfileId ?? undefined }), { credentials: "same-origin" });
+      const res = await fetch(socialURL("/accounts", projectId, { profile_id: effectiveProfileId ?? undefined }), { credentials: "same-origin" });
       const data = await res.json();
       setAccounts(data.accounts || []);
     } catch (e) {
       setStatus("Load accounts: " + (e as Error).message);
     }
-  }, [activeProfileId, projectId]);
+  }, [effectiveProfileId, projectId]);
 
   const loadPosts = useCallback(async () => {
     try {
-      const res = await fetch(socialURL("/posts", projectId, { profile_id: activeProfileId ?? undefined }), { credentials: "same-origin" });
+      const res = await fetch(socialURL("/posts", projectId, { profile_id: effectiveProfileId ?? undefined }), { credentials: "same-origin" });
       const data = await res.json();
       setPosts(data.posts || []);
     } catch (e) {
       setStatus("Load posts: " + (e as Error).message);
     }
-  }, [activeProfileId, projectId]);
+  }, [effectiveProfileId, projectId]);
 
   const loadPlatforms = useCallback(async () => {
     try {
@@ -397,14 +424,12 @@ export default function SocialPanel({ projectId }: NativePanelProps) {
     return () => window.removeEventListener("message", onMsg);
   }, []);
 
-  const activeProfile = profiles.find((p) => p.id === activeProfileId) || null;
-
   return (
     <div className="h-full flex flex-col">
       <header className="flex items-center gap-1 border-b border-border px-4 py-2">
         <ProfileSwitcher
           profiles={profiles}
-          activeId={activeProfileId}
+          activeId={effectiveProfileId}
           onSelect={setActiveProfileId}
           onManage={() => setManageOpen(true)}
         />
@@ -431,7 +456,7 @@ export default function SocialPanel({ projectId }: NativePanelProps) {
             platforms={platforms}
             oauthLanding={oauthLanding}
             projectId={projectId}
-            activeProfileId={activeProfileId}
+            activeProfileId={effectiveProfileId}
             onClearLanding={() => setOauthLanding(null)}
             onSetLanding={(pendingId, connId) =>
               setOauthLanding({ pendingId, connectionId: connId })
@@ -447,7 +472,7 @@ export default function SocialPanel({ projectId }: NativePanelProps) {
           <InboxView
             accounts={accounts}
             projectId={projectId}
-            activeProfileId={activeProfileId}
+            activeProfileId={effectiveProfileId}
             setStatus={setStatus}
           />
         )}
