@@ -193,6 +193,14 @@ func newSocialCtx(t *testing.T, pf sdk.PlatformClient) *sdk.AppCtx {
 	return ctx
 }
 
+func isMCPError(v any) bool {
+	m, ok := v.(map[string]any)
+	if !ok {
+		return false
+	}
+	return m["isError"] == true
+}
+
 // --- account_add ---------------------------------------------------
 
 func TestAccountAdd_HappyPath(t *testing.T) {
@@ -574,6 +582,115 @@ func TestAccountDisconnect_HidesFromDefaultListButKeepsHistory(t *testing.T) {
 	targets := posts[0]["targets"].([]map[string]any)
 	if len(targets) != 1 || targets[0]["display_name"] != "@old" {
 		t.Fatalf("historical target not preserved: %+v", targets)
+	}
+}
+
+func TestAccountDisconnect_HardDeleteRemovesLocalHistoryOnly(t *testing.T) {
+	pf := newRecordingPlatform()
+	ctx := newSocialCtx(t, pf)
+	r, _ := ctx.AppDB().Exec(
+		`INSERT INTO social_accounts (project_id, platform, connection_id, display_name, avatar_url, status)
+		 VALUES ('test-proj', 'twitter', 42, '@old', '', 'active')`,
+	)
+	oldID, _ := r.LastInsertId()
+	r, _ = ctx.AppDB().Exec(
+		`INSERT INTO social_accounts (project_id, platform, connection_id, display_name, avatar_url, status)
+		 VALUES ('test-proj', 'twitter', 42, '@kept', '', 'active')`,
+	)
+	keptID, _ := r.LastInsertId()
+	r, _ = ctx.AppDB().Exec(
+		`INSERT INTO posts (project_id, body, media_storage_ids, status)
+		 VALUES ('test-proj', 'old only', '[]', 'published')`,
+	)
+	oldOnlyPostID, _ := r.LastInsertId()
+	_, _ = ctx.AppDB().Exec(
+		`INSERT INTO post_targets (post_id, social_account_id, status, platform_post_id)
+		 VALUES (?, ?, 'published', 'old_1')`,
+		oldOnlyPostID, oldID,
+	)
+	r, _ = ctx.AppDB().Exec(
+		`INSERT INTO posts (project_id, body, media_storage_ids, status)
+		 VALUES ('test-proj', 'multi account', '[]', 'published')`,
+	)
+	multiPostID, _ := r.LastInsertId()
+	_, _ = ctx.AppDB().Exec(
+		`INSERT INTO post_targets (post_id, social_account_id, status, platform_post_id)
+		 VALUES (?, ?, 'published', 'old_2')`,
+		multiPostID, oldID,
+	)
+	_, _ = ctx.AppDB().Exec(
+		`INSERT INTO post_targets (post_id, social_account_id, status, platform_post_id)
+		 VALUES (?, ?, 'published', 'kept_1')`,
+		multiPostID, keptID,
+	)
+	_, _ = ctx.AppDB().Exec(
+		`INSERT INTO inbox_items (project_id, social_account_id, platform, kind, external_id, post_id, occurred_at)
+		 VALUES ('test-proj', ?, 'twitter', 'comment', 'c1', ?, CURRENT_TIMESTAMP)`,
+		oldID, oldOnlyPostID,
+	)
+	_, _ = ctx.AppDB().Exec(
+		`INSERT INTO inbox_cursors (social_account_id, kind, cursor)
+		 VALUES (?, 'comment', '')`,
+		oldID,
+	)
+
+	app := &App{}
+	out, err := app.toolAccountDisconnect(ctx, map[string]any{
+		"id":           oldID,
+		"hard_delete":  true,
+		"delete_posts": true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := out.(map[string]any)
+	if res["upstream_posts_untouched"] != true {
+		t.Fatalf("upstream flag missing: %+v", res)
+	}
+	var n int
+	ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM social_accounts WHERE id=?`, oldID).Scan(&n)
+	if n != 0 {
+		t.Fatalf("old account still present")
+	}
+	ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM posts WHERE id=?`, oldOnlyPostID).Scan(&n)
+	if n != 0 {
+		t.Fatalf("old-only post still present")
+	}
+	ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM posts WHERE id=?`, multiPostID).Scan(&n)
+	if n != 1 {
+		t.Fatalf("multi-account post was deleted")
+	}
+	ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM post_targets WHERE post_id=? AND social_account_id=?`, multiPostID, oldID).Scan(&n)
+	if n != 0 {
+		t.Fatalf("old account target still present on multi-account post")
+	}
+	ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM post_targets WHERE post_id=? AND social_account_id=?`, multiPostID, keptID).Scan(&n)
+	if n != 1 {
+		t.Fatalf("kept account target missing from multi-account post")
+	}
+	ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM inbox_items WHERE social_account_id=?`, oldID).Scan(&n)
+	if n != 0 {
+		t.Fatalf("old account inbox items still present")
+	}
+	if len(pf.disconnectCalls) != 0 {
+		t.Fatalf("shared connection should stay active, got disconnect calls %+v", pf.disconnectCalls)
+	}
+}
+
+func TestAccountDisconnect_HardDeleteRequiresPostsConfirmation(t *testing.T) {
+	ctx := newSocialCtx(t, newRecordingPlatform())
+	r, _ := ctx.AppDB().Exec(
+		`INSERT INTO social_accounts (project_id, platform, connection_id, display_name, status)
+		 VALUES ('test-proj', 'twitter', 42, '@old', 'active')`,
+	)
+	acctID, _ := r.LastInsertId()
+	app := &App{}
+	out, err := app.toolAccountDisconnect(ctx, map[string]any{"id": acctID, "hard_delete": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !isMCPError(out) {
+		t.Fatalf("expected mcp confirmation error, got %+v", out)
 	}
 }
 

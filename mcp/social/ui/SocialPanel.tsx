@@ -356,7 +356,8 @@ export default function SocialPanel({ projectId }: NativePanelProps) {
   // Live updates — account adds/removals + per-target publish events
   // + profile CRUD + post lifecycle (reschedule/delete from agent).
   useAppEvents("social", projectId, (ev) => {
-    if (ev.topic === "account.added" || ev.topic === "account.removed") {
+    if (ev.topic === "account.added" || ev.topic === "account.removed" ||
+        ev.topic === "account.disconnected" || ev.topic === "account.deleted") {
       loadAccounts();
     }
     if (ev.topic === "account.checked") {
@@ -967,11 +968,29 @@ function AccountCard({
   const [checking, setChecking] = useState(false);
   const doRemove = async () => {
     try {
-      await fetch(socialURL(`/accounts/${account.id}`, projectId), { method: "DELETE", credentials: "same-origin" });
+      const res = await fetch(socialURL(`/accounts/${account.id}`, projectId), { method: "DELETE", credentials: "same-origin" });
+      if (!res.ok) throw new Error(await res.text());
       setStatus("Disconnected.");
       onChange();
     } catch (e) {
       setStatus("Disconnect failed: " + (e as Error).message);
+    }
+  };
+  const doHardRemove = async () => {
+    try {
+      const res = await fetch(socialURL(`/accounts/${account.id}`, projectId, {
+        hard_delete: "true",
+        delete_posts: "true",
+      }), { method: "DELETE", credentials: "same-origin" });
+      if (!res.ok) throw new Error(await res.text());
+      const data = await res.json() as {
+        posts_deleted?: number;
+        post_targets_deleted?: number;
+      };
+      setStatus(`Hard deleted locally: ${data.posts_deleted || 0} post${data.posts_deleted === 1 ? "" : "s"}, ${data.post_targets_deleted || 0} target${data.post_targets_deleted === 1 ? "" : "s"}.`);
+      onChange();
+    } catch (e) {
+      setStatus("Hard delete failed: " + (e as Error).message);
     }
   };
   // Import is wired today only for Facebook accounts. Hide the button
@@ -1077,17 +1096,22 @@ function AccountCard({
       {confirming && (
         <ConfirmDialog
           title={`Disconnect ${account.display_name}?`}
-          body={
-            <>
-              The OAuth grant stays valid upstream — you can re-add this {account.platform} account
-              later without going through the auth dance again. Scheduled posts targeting this
-              account will fail to publish until reconnected.
-            </>
-          }
-          confirmLabel="Disconnect"
-          onClose={() => setConfirming(false)}
-          onConfirm={async () => {
-            await doRemove();
+	          body={
+	            <>
+	              Disconnect hides this account from posting while preserving local post history.
+	              Hard delete removes this account and its local history only; posts already published
+	              on social networks are not deleted.
+	            </>
+	          }
+	          confirmLabel="Disconnect"
+	          secondaryDangerLabel="Hard delete local history"
+	          onSecondaryDanger={async () => {
+	            await doHardRemove();
+	            setConfirming(false);
+	          }}
+	          onClose={() => setConfirming(false)}
+	          onConfirm={async () => {
+	            await doRemove();
             setConfirming(false);
           }}
         />
@@ -3256,20 +3280,22 @@ function DeleteConfirmDialog({
 
 function ConfirmDialog({
   title, body, confirmLabel = "Confirm", cancelLabel = "Cancel",
-  onConfirm, onClose,
+  secondaryDangerLabel, onSecondaryDanger, onConfirm, onClose,
 }: {
   title: string;
   body?: React.ReactNode;
   confirmLabel?: string;
   cancelLabel?: string;
+  secondaryDangerLabel?: string;
+  onSecondaryDanger?: () => void | Promise<void>;
   onConfirm: () => void | Promise<void>;
   onClose: () => void;
 }) {
   const [busy, setBusy] = useState(false);
-  const handleConfirm = async () => {
+  const run = async (fn: () => void | Promise<void>) => {
     setBusy(true);
     try {
-      await onConfirm();
+      await fn();
     } finally {
       setBusy(false);
     }
@@ -3292,19 +3318,29 @@ function ConfirmDialog({
           </button>
         </div>
         {body && <div className="text-text-dim text-sm">{body}</div>}
-        <div className="flex justify-end gap-2 pt-1">
-          <button
-            type="button"
-            onClick={onClose}
+	        <div className="flex justify-end gap-2 pt-1">
+	          {secondaryDangerLabel && onSecondaryDanger && (
+	            <button
+	              type="button"
+	              onClick={() => run(onSecondaryDanger)}
+	              disabled={busy}
+	              className="mr-auto px-3 py-1.5 text-sm border border-red text-red rounded hover:bg-red/10 disabled:opacity-50"
+	            >
+	              {busy ? "…" : secondaryDangerLabel}
+	            </button>
+	          )}
+	          <button
+	            type="button"
+	            onClick={onClose}
             disabled={busy}
             className="px-3 py-1.5 text-sm border border-border rounded hover:bg-bg-card disabled:opacity-50"
           >
             {cancelLabel}
           </button>
-          <button
-            type="button"
-            onClick={handleConfirm}
-            disabled={busy}
+	          <button
+	            type="button"
+	            onClick={() => run(onConfirm)}
+	            disabled={busy}
             className="px-3 py-1.5 text-sm bg-red text-bg rounded font-bold hover:opacity-90 disabled:opacity-50"
           >
             {busy ? "…" : confirmLabel}

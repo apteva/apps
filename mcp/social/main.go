@@ -41,7 +41,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: social
 display_name: Social
-version: 0.14.41
+version: 0.14.42
 description: |
   Schedule and publish posts to your social accounts (X, Facebook,
   Instagram, LinkedIn, TikTok, YouTube, Reddit, Pinterest, Threads).
@@ -83,7 +83,7 @@ provides:
     - { name: account_finalize,           description: "Commit a pending account into the active list." }
     - { name: account_list,               description: "List connected social accounts." }
     - { name: account_check,              description: "Check that connected social accounts still work." }
-    - { name: account_disconnect,         description: "Disconnect a social account while preserving post history." }
+    - { name: account_disconnect,         description: "Disconnect a social account while preserving post history, or hard-delete local history when explicitly requested." }
     - { name: post_create,                description: "Create + publish (or schedule) a post across accounts." }
     - { name: post_list,                  description: "List recent posts." }
     - { name: post_retry,                 description: "Re-attempt failed targets on a post." }
@@ -506,6 +506,11 @@ func queryToolArgs(r *http.Request) map[string]any {
 	if status := strings.TrimSpace(q.Get("status")); status != "" {
 		args["status"] = status
 	}
+	for _, key := range []string{"hard_delete", "delete_posts"} {
+		if value := strings.TrimSpace(q.Get(key)); value != "" {
+			args[key] = value
+		}
+	}
 	return args
 }
 
@@ -629,10 +634,13 @@ func (a *App) MCPTools() []sdk.Tool {
 			Handler: a.toolAccountCheck,
 		},
 		{
-			Name:        "account_disconnect",
-			Description: "Revoke a social account, deleting both the social_accounts row and the underlying connection. Args: id.",
+			Name: "account_disconnect",
+			Description: "Disconnect a social account. Default is a soft disconnect that preserves local post history. " +
+				"Pass hard_delete=true and delete_posts=true to remove this account row plus local-only history for this account; this never deletes upstream social-network posts. Args: id, hard_delete?, delete_posts?.",
 			InputSchema: schemaObject(map[string]any{
-				"id": map[string]any{"type": "integer"},
+				"id":           map[string]any{"type": "integer"},
+				"hard_delete":  map[string]any{"type": "boolean"},
+				"delete_posts": map[string]any{"type": "boolean"},
 			}, []string{"id"}),
 			Handler: a.toolAccountDisconnect,
 		},
@@ -1437,6 +1445,12 @@ func (a *App) toolAccountDisconnect(ctx *sdk.AppCtx, args map[string]any) (any, 
 	).Scan(&connID); err != nil {
 		return mcpError("account not found"), nil
 	}
+	if boolArg(args, "hard_delete", false) {
+		if !boolArg(args, "delete_posts", false) {
+			return mcpError("hard_delete requires delete_posts=true to confirm local history removal"), nil
+		}
+		return a.hardDeleteAccount(ctx, pid, id, connID)
+	}
 
 	// Preserve the social_accounts row so historical post_targets can
 	// still render the platform/name/avatar. Normal account_list calls
@@ -1461,6 +1475,146 @@ func (a *App) toolAccountDisconnect(ctx *sdk.AppCtx, args map[string]any) (any, 
 	}
 	ctx.Emit("account.disconnected", map[string]any{"social_account_id": id})
 	return map[string]any{"disconnected": id}, nil
+}
+
+func (a *App) hardDeleteAccount(ctx *sdk.AppCtx, pid string, id, connID int64) (any, error) {
+	postIDs := []int64{}
+	rows, err := ctx.AppDB().Query(
+		`SELECT DISTINCT p.id
+		   FROM posts p
+		   JOIN post_targets t ON t.post_id=p.id
+		  WHERE p.project_id=? AND t.social_account_id=?`,
+		pid, id,
+	)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var postID int64
+		if err := rows.Scan(&postID); err == nil {
+			postIDs = append(postIDs, postID)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	rows.Close()
+
+	tx, err := ctx.AppDB().Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	inboxRes, err := tx.Exec(`DELETE FROM inbox_items WHERE social_account_id=?`, id)
+	if err != nil {
+		return nil, fmt.Errorf("delete inbox items: %w", err)
+	}
+	cursorRes, err := tx.Exec(`DELETE FROM inbox_cursors WHERE social_account_id=?`, id)
+	if err != nil {
+		return nil, fmt.Errorf("delete inbox cursors: %w", err)
+	}
+	targetRes, err := tx.Exec(`DELETE FROM post_targets WHERE social_account_id=?`, id)
+	if err != nil {
+		return nil, fmt.Errorf("delete post targets: %w", err)
+	}
+
+	orphanPostIDs := []int64{}
+	if len(postIDs) > 0 {
+		args := int64SliceToAny(postIDs)
+		rows, err := tx.Query(
+			`SELECT p.id
+			   FROM posts p
+			  WHERE p.id IN (`+placeholders(len(postIDs))+`)
+			    AND p.project_id=?
+			    AND NOT EXISTS (SELECT 1 FROM post_targets t WHERE t.post_id=p.id)`,
+			append(args, pid)...,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("find orphan posts: %w", err)
+		}
+		for rows.Next() {
+			var postID int64
+			if err := rows.Scan(&postID); err == nil {
+				orphanPostIDs = append(orphanPostIDs, postID)
+			}
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, fmt.Errorf("scan orphan posts: %w", err)
+		}
+		rows.Close()
+	}
+
+	var postInboxDeleted int64
+	var postDeleted int64
+	if len(orphanPostIDs) > 0 {
+		args := int64SliceToAny(orphanPostIDs)
+		res, err := tx.Exec(
+			`DELETE FROM inbox_items WHERE post_id IN (`+placeholders(len(orphanPostIDs))+`)`,
+			args...,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("delete post inbox items: %w", err)
+		}
+		postInboxDeleted, _ = res.RowsAffected()
+		res, err = tx.Exec(
+			`DELETE FROM posts WHERE id IN (`+placeholders(len(orphanPostIDs))+`) AND project_id=?`,
+			append(args, pid)...,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("delete posts: %w", err)
+		}
+		postDeleted, _ = res.RowsAffected()
+	}
+
+	acctRes, err := tx.Exec(`DELETE FROM social_accounts WHERE id=? AND project_id=?`, id, pid)
+	if err != nil {
+		return nil, fmt.Errorf("delete account: %w", err)
+	}
+	accountsDeleted, _ := acctRes.RowsAffected()
+	if accountsDeleted == 0 {
+		return mcpError("account not found"), nil
+	}
+
+	var siblings int
+	_ = tx.QueryRow(
+		`SELECT COUNT(*) FROM social_accounts WHERE connection_id=? AND status!='disconnected'`,
+		connID,
+	).Scan(&siblings)
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+
+	connectionDisconnected := false
+	if siblings == 0 {
+		if err := ctx.PlatformAPI().DisconnectConnection(connID); err != nil {
+			ctx.Logger().Warn("DisconnectConnection failed", "conn", connID, "err", err)
+		} else {
+			connectionDisconnected = true
+		}
+	}
+	inboxDeleted, _ := inboxRes.RowsAffected()
+	cursorDeleted, _ := cursorRes.RowsAffected()
+	targetsDeleted, _ := targetRes.RowsAffected()
+	ctx.Emit("account.deleted", map[string]any{
+		"social_account_id": id,
+		"hard_delete":       true,
+		"posts_deleted":     postDeleted,
+		"targets_deleted":   targetsDeleted,
+	})
+	return map[string]any{
+		"deleted":                  id,
+		"hard_delete":              true,
+		"posts_deleted":            postDeleted,
+		"post_targets_deleted":     targetsDeleted,
+		"inbox_items_deleted":      inboxDeleted + postInboxDeleted,
+		"inbox_cursors_deleted":    cursorDeleted,
+		"connection_disconnected":  connectionDisconnected,
+		"upstream_posts_untouched": true,
+		"multi_account_posts_kept": len(postIDs) - int(postDeleted),
+	}, nil
 }
 
 // ─── post_create ──────────────────────────────────────────────────
