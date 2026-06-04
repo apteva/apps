@@ -41,7 +41,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: social
 display_name: Social
-version: 0.14.39
+version: 0.14.40
 description: |
   Schedule and publish posts to your social accounts (X, Facebook,
   Instagram, LinkedIn, TikTok, YouTube, Reddit, Pinterest, Threads).
@@ -1263,13 +1263,21 @@ func (a *App) toolAccountCheck(ctx *sdk.AppCtx, args map[string]any) (any, error
 		if err != nil {
 			return nil, err
 		}
-		defer rows.Close()
-		results := []accountCheckResult{}
+		ids := []int64{}
 		for rows.Next() {
 			var id int64
 			if rows.Scan(&id) == nil {
-				results = append(results, a.checkAccount(ctx, pid, id))
+				ids = append(ids, id)
 			}
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		rows.Close()
+		results := []accountCheckResult{}
+		for _, id := range ids {
+			results = append(results, a.checkAccount(ctx, pid, id))
 		}
 		return map[string]any{"checks": results, "count": len(results)}, nil
 	}
@@ -3161,29 +3169,39 @@ func (a *App) toolPostList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	out := []map[string]any{}
+	type listedPost struct {
+		id, profID                                                         int64
+		body, mediaJSON, mediaProjectID, schedAt, status, createdAt, pubAt string
+	}
+	posts := []listedPost{}
 	for rows.Next() {
-		var (
-			id, profID                                                         int64
-			body, mediaJSON, mediaProjectID, schedAt, status, createdAt, pubAt string
-		)
-		if err := rows.Scan(&id, &body, &mediaJSON, &mediaProjectID, &schedAt, &status, &createdAt, &pubAt, &profID); err != nil {
+		var p listedPost
+		if err := rows.Scan(&p.id, &p.body, &p.mediaJSON, &p.mediaProjectID, &p.schedAt, &p.status, &p.createdAt, &p.pubAt, &p.profID); err != nil {
 			continue
 		}
+		posts = append(posts, p)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	rows.Close()
+
+	out := []map[string]any{}
+	for _, p := range posts {
 		var mediaIDs []int64
-		_ = json.Unmarshal([]byte(mediaJSON), &mediaIDs)
-		targets := a.loadTargets(ctx, id)
+		_ = json.Unmarshal([]byte(p.mediaJSON), &mediaIDs)
+		targets := a.loadTargets(ctx, p.id)
 		out = append(out, map[string]any{
-			"id":                id,
-			"body":              body,
+			"id":                p.id,
+			"body":              p.body,
 			"media_storage_ids": mediaIDs,
-			"media_project_id":  mediaProjectID,
-			"profile_id":        profID,
-			"schedule_at":       schedAt,
-			"status":            status,
-			"created_at":        createdAt,
-			"published_at":      pubAt,
+			"media_project_id":  p.mediaProjectID,
+			"profile_id":        p.profID,
+			"schedule_at":       p.schedAt,
+			"status":            p.status,
+			"created_at":        p.createdAt,
+			"published_at":      p.pubAt,
 			"targets":           targets,
 		})
 	}
@@ -4119,7 +4137,6 @@ func (a *App) toolPostMetrics(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
 	var trs []metricsTarget
 	for rows.Next() {
 		var r metricsTarget
@@ -4135,6 +4152,11 @@ func (a *App) toolPostMetrics(ctx *sdk.AppCtx, args map[string]any) (any, error)
 			trs = append(trs, r)
 		}
 	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	rows.Close()
 	outcomes := make([]targetMetricsOutcome, 0, len(trs))
 	for _, r := range trs {
 		if r.Platform == "" || r.ConnID == 0 {
@@ -4767,7 +4789,6 @@ func (a *App) toolPostEdit(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
 	type editTarget struct {
 		TargetID, SocialAccountID, ConnID int64
 		Platform, ExtPostID, PageCreds    string
@@ -4792,6 +4813,11 @@ func (a *App) toolPostEdit(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 			trs = append(trs, r)
 		}
 	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	rows.Close()
 
 	outcomes := make([]targetEditOutcome, 0, len(trs))
 	for _, r := range trs {
@@ -5067,7 +5093,6 @@ func (a *App) deletePostUpstream(ctx *sdk.AppCtx, postID int64) []targetDeleteOu
 		ctx.Logger().Warn("deletePostUpstream: query targets", "post_id", postID, "err", err)
 		return nil
 	}
-	defer rows.Close()
 	type row struct {
 		targetID  int64
 		status    string
@@ -5083,6 +5108,12 @@ func (a *App) deletePostUpstream(ctx *sdk.AppCtx, postID int64) []targetDeleteOu
 			rs = append(rs, r)
 		}
 	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		ctx.Logger().Warn("deletePostUpstream: scan targets", "post_id", postID, "err", err)
+		return nil
+	}
+	rows.Close()
 	outcomes := make([]targetDeleteOutcome, 0, len(rs))
 	for _, r := range rs {
 		out := targetDeleteOutcome{TargetID: r.targetID, PlatformPostID: r.extPostID}
@@ -5150,11 +5181,23 @@ func (a *App) handleAccountsAPI(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx := requestCtx(r)
 	args := queryToolArgs(r)
+	started := time.Now()
+	ctx.Logger().Info("accounts.list: start",
+		"project_id", stringArgAny(args, "_project_id", "project_id"),
+		"profile_id", args["profile_id"],
+		"query", r.URL.RawQuery)
 	out, err := a.toolAccountList(ctx, args)
 	if err != nil {
+		ctx.Logger().Warn("accounts.list: failed",
+			"project_id", stringArgAny(args, "_project_id", "project_id"),
+			"err", err, "elapsed_ms", time.Since(started).Milliseconds())
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	ctx.Logger().Info("accounts.list: done",
+		"project_id", stringArgAny(args, "_project_id", "project_id"),
+		"count", listCount(out, "accounts"),
+		"elapsed_ms", time.Since(started).Milliseconds())
 	writeJSON(w, out)
 }
 
@@ -5329,11 +5372,24 @@ func (a *App) handlePostsAPI(w http.ResponseWriter, r *http.Request) {
 	ctx := requestCtx(r)
 	switch r.Method {
 	case http.MethodGet:
-		out, err := a.toolPostList(ctx, queryToolArgs(r))
+		args := queryToolArgs(r)
+		started := time.Now()
+		ctx.Logger().Info("posts.list: start",
+			"project_id", stringArgAny(args, "_project_id", "project_id"),
+			"profile_id", args["profile_id"],
+			"query", r.URL.RawQuery)
+		out, err := a.toolPostList(ctx, args)
 		if err != nil {
+			ctx.Logger().Warn("posts.list: failed",
+				"project_id", stringArgAny(args, "_project_id", "project_id"),
+				"err", err, "elapsed_ms", time.Since(started).Milliseconds())
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
+		ctx.Logger().Info("posts.list: done",
+			"project_id", stringArgAny(args, "_project_id", "project_id"),
+			"count", listCount(out, "posts"),
+			"elapsed_ms", time.Since(started).Milliseconds())
 		writeJSON(w, out)
 	case http.MethodPost:
 		// Decode into a generic map so we keep targets[] / profile_id /
@@ -5987,6 +6043,23 @@ func int64SliceToAny(in []int64) []any {
 func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+func listCount(v any, key string) int {
+	m, ok := v.(map[string]any)
+	if !ok {
+		return -1
+	}
+	switch rows := m[key].(type) {
+	case []any:
+		return len(rows)
+	case []map[string]any:
+		return len(rows)
+	case []Profile:
+		return len(rows)
+	default:
+		return -1
+	}
 }
 
 func mcpError(msg string) map[string]any {

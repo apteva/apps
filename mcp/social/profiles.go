@@ -489,11 +489,23 @@ func (a *App) handleProfilesCollection(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		ctx := requestCtx(r)
-		out, err := a.toolProfileList(ctx, queryToolArgs(r))
+		args := queryToolArgs(r)
+		started := time.Now()
+		ctx.Logger().Info("profiles.list: start",
+			"project_id", stringArgAny(args, "_project_id", "project_id"),
+			"query", r.URL.RawQuery)
+		out, err := a.toolProfileList(ctx, args)
 		if err != nil {
+			ctx.Logger().Warn("profiles.list: failed",
+				"project_id", stringArgAny(args, "_project_id", "project_id"),
+				"err", err, "elapsed_ms", time.Since(started).Milliseconds())
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
+		ctx.Logger().Info("profiles.list: done",
+			"project_id", stringArgAny(args, "_project_id", "project_id"),
+			"count", listCount(out, "profiles"),
+			"elapsed_ms", time.Since(started).Milliseconds())
 		writeJSON(w, out)
 	case http.MethodPost:
 		var body struct {

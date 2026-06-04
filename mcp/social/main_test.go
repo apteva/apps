@@ -671,6 +671,62 @@ func TestPostCreate_FansOutAndPublishes(t *testing.T) {
 	}
 }
 
+func TestPostList_LoadsTargetsWithoutDeadlock(t *testing.T) {
+	ctx := newSocialCtx(t, nil)
+	app := &App{}
+	r, err := ctx.AppDB().Exec(
+		`INSERT INTO social_accounts (project_id, platform, connection_id, display_name, avatar_url, status)
+		 VALUES ('test-proj', 'twitter', 42, '@me', '', 'active')`,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	acctID, _ := r.LastInsertId()
+	r, err = ctx.AppDB().Exec(
+		`INSERT INTO posts (project_id, body, media_storage_ids, status)
+		 VALUES ('test-proj', 'hello world', '[]', 'published')`,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	postID, _ := r.LastInsertId()
+	if _, err := ctx.AppDB().Exec(
+		`INSERT INTO post_targets (post_id, social_account_id, status, platform_post_id)
+		 VALUES (?, ?, 'published', '123')`,
+		postID, acctID,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		out, err := app.toolPostList(ctx, map[string]any{"_project_id": "test-proj"})
+		if err != nil {
+			done <- err
+			return
+		}
+		posts := out.(map[string]any)["posts"].([]map[string]any)
+		if len(posts) != 1 {
+			done <- fmt.Errorf("posts len = %d, want 1", len(posts))
+			return
+		}
+		targets := posts[0]["targets"].([]map[string]any)
+		if len(targets) != 1 {
+			done <- fmt.Errorf("targets len = %d, want 1", len(targets))
+			return
+		}
+		done <- nil
+	}()
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("toolPostList deadlocked while loading targets")
+	}
+}
+
 func TestPostCreate_FacebookUsesMessageAndPageId(t *testing.T) {
 	// Facebook's post_to_page expects {pageId, message}. Our adapter
 	// must remap from the social_accounts row's external_account_id
