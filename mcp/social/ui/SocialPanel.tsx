@@ -308,6 +308,8 @@ export default function SocialPanel({ projectId }: NativePanelProps) {
   const [profilesLoadedProject, setProfilesLoadedProject] = useState("");
   const [activeProfileId, setActiveProfileId] = useState<number | null>(() => readStoredProfileId(projectId));
   const [manageOpen, setManageOpen] = useState(false);
+  const accountsRequestSeq = useRef(0);
+  const postsRequestSeq = useRef(0);
   const activeProfile = profiles.find((p) => p.id === activeProfileId) || null;
   const effectiveProfileId = activeProfile?.id ?? null;
 
@@ -349,21 +351,29 @@ export default function SocialPanel({ projectId }: NativePanelProps) {
   // accounts/posts queries pass profile_id and the panel only sees
   // that brand's rows. activeProfileId=null = project-wide.
   const loadAccounts = useCallback(async () => {
+    const seq = ++accountsRequestSeq.current;
+    const requestedProfileId = effectiveProfileId;
     try {
-      const res = await fetch(socialURL("/accounts", projectId, { profile_id: effectiveProfileId ?? undefined }), { credentials: "same-origin" });
+      const res = await fetch(socialURL("/accounts", projectId, { profile_id: requestedProfileId ?? undefined }), { credentials: "same-origin" });
       const data = await res.json();
+      if (seq !== accountsRequestSeq.current) return;
       setAccounts(data.accounts || []);
     } catch (e) {
+      if (seq !== accountsRequestSeq.current) return;
       setStatus("Load accounts: " + (e as Error).message);
     }
   }, [effectiveProfileId, projectId]);
 
   const loadPosts = useCallback(async () => {
+    const seq = ++postsRequestSeq.current;
+    const requestedProfileId = effectiveProfileId;
     try {
-      const res = await fetch(socialURL("/posts", projectId, { profile_id: effectiveProfileId ?? undefined }), { credentials: "same-origin" });
+      const res = await fetch(socialURL("/posts", projectId, { profile_id: requestedProfileId ?? undefined }), { credentials: "same-origin" });
       const data = await res.json();
+      if (seq !== postsRequestSeq.current) return;
       setPosts(data.posts || []);
     } catch (e) {
+      if (seq !== postsRequestSeq.current) return;
       setStatus("Load posts: " + (e as Error).message);
     }
   }, [effectiveProfileId, projectId]);
