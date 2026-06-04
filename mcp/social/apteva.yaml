@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: social
 display_name: Social
-version: 0.14.40
+version: 0.14.41
 description: |
   Schedule and publish posts to your social media accounts: X (Twitter),
   Facebook Pages, Instagram Business, LinkedIn, TikTok, YouTube, Reddit,
@@ -61,7 +61,7 @@ provides:
     - { name: account_finalize,            description: "Commit a pending account into the active account list. For multi-page platforms, supply page_id." }
     - { name: account_list,                description: "List connected social accounts in this project." }
     - { name: account_check,               description: "Check that one or more connected social accounts still work; refreshes Meta page credentials when possible." }
-    - { name: account_disconnect,          description: "Revoke a social account (deletes underlying connection too)." }
+    - { name: account_disconnect,          description: "Disconnect a social account while preserving post history." }
     - { name: post_create,                 description: "Create + publish (or schedule) a post across N social_account_ids. Args: body, social_account_ids[], schedule_at?, media_storage_ids?." }
     - { name: post_list,                   description: "List recent posts with per-target status. Args: limit?, status?." }
     - { name: post_retry,                  description: "Re-attempt failed targets on a post. Args: post_id." }

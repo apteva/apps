@@ -497,6 +497,13 @@ func TestAccountDisconnect_LastSiblingDisconnectsConnection(t *testing.T) {
 	if len(pf.disconnectCalls) != 1 || pf.disconnectCalls[0] != 42 {
 		t.Errorf("expected DisconnectConnection(42), got %+v", pf.disconnectCalls)
 	}
+	var status string
+	if err := ctx.AppDB().QueryRow(`SELECT status FROM social_accounts WHERE id=?`, id).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status != "disconnected" {
+		t.Errorf("account status = %q, want disconnected", status)
+	}
 }
 
 func TestAccountDisconnect_KeepsConnectionWhenSiblingsExist(t *testing.T) {
@@ -517,6 +524,73 @@ func TestAccountDisconnect_KeepsConnectionWhenSiblingsExist(t *testing.T) {
 	}
 	if len(pf.disconnectCalls) != 0 {
 		t.Errorf("connection should not be disconnected when siblings exist; got %+v", pf.disconnectCalls)
+	}
+}
+
+func TestAccountDisconnect_HidesFromDefaultListButKeepsHistory(t *testing.T) {
+	ctx := newSocialCtx(t, newRecordingPlatform())
+	r, _ := ctx.AppDB().Exec(
+		`INSERT INTO social_accounts (project_id, platform, connection_id, display_name, avatar_url, status)
+		 VALUES ('test-proj', 'twitter', 42, '@old', '', 'active')`,
+	)
+	acctID, _ := r.LastInsertId()
+	r, _ = ctx.AppDB().Exec(
+		`INSERT INTO posts (project_id, body, media_storage_ids, status)
+		 VALUES ('test-proj', 'historical post', '[]', 'published')`,
+	)
+	postID, _ := r.LastInsertId()
+	_, _ = ctx.AppDB().Exec(
+		`INSERT INTO post_targets (post_id, social_account_id, status, platform_post_id)
+		 VALUES (?, ?, 'published', '123')`,
+		postID, acctID,
+	)
+
+	app := &App{}
+	if _, err := app.toolAccountDisconnect(ctx, map[string]any{"id": acctID}); err != nil {
+		t.Fatal(err)
+	}
+	listOut, err := app.toolAccountList(ctx, map[string]any{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := len(listOut.(map[string]any)["accounts"].([]map[string]any)); got != 0 {
+		t.Fatalf("default account list returned %d rows, want 0", got)
+	}
+	disconnectedOut, err := app.toolAccountList(ctx, map[string]any{"status": "disconnected"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := len(disconnectedOut.(map[string]any)["accounts"].([]map[string]any)); got != 1 {
+		t.Fatalf("disconnected account list returned %d rows, want 1", got)
+	}
+	postsOut, err := app.toolPostList(ctx, map[string]any{"_project_id": "test-proj"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	posts := postsOut.(map[string]any)["posts"].([]map[string]any)
+	if len(posts) != 1 {
+		t.Fatalf("posts len = %d, want 1", len(posts))
+	}
+	targets := posts[0]["targets"].([]map[string]any)
+	if len(targets) != 1 || targets[0]["display_name"] != "@old" {
+		t.Fatalf("historical target not preserved: %+v", targets)
+	}
+}
+
+func TestPostCreate_RejectsDisconnectedAccount(t *testing.T) {
+	ctx := newSocialCtx(t, nil)
+	r, _ := ctx.AppDB().Exec(
+		`INSERT INTO social_accounts (project_id, platform, connection_id, display_name, status)
+		 VALUES ('test-proj', 'twitter', 42, '@old', 'disconnected')`,
+	)
+	acctID, _ := r.LastInsertId()
+	app := &App{}
+	_, err := app.toolPostCreate(ctx, map[string]any{
+		"body":               "should not publish",
+		"social_account_ids": []any{acctID},
+	})
+	if err == nil || !strings.Contains(err.Error(), "disconnected") {
+		t.Fatalf("err = %v, want disconnected account rejection", err)
 	}
 }
 
@@ -1500,7 +1574,7 @@ func TestSchedule_DispatchesToJobsApp(t *testing.T) {
 	t.Setenv("APTEVA_PROJECT_ID", "")
 	r, _ := ctx.AppDB().Exec(
 		`INSERT INTO social_accounts (project_id, platform, connection_id, display_name, status)
-		 VALUES ('', 'twitter', 42, '@me', 'active')`,
+		 VALUES ('ui-proj', 'twitter', 42, '@me', 'active')`,
 	)
 	acctID, _ := r.LastInsertId()
 

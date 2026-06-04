@@ -41,7 +41,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: social
 display_name: Social
-version: 0.14.40
+version: 0.14.41
 description: |
   Schedule and publish posts to your social accounts (X, Facebook,
   Instagram, LinkedIn, TikTok, YouTube, Reddit, Pinterest, Threads).
@@ -83,7 +83,7 @@ provides:
     - { name: account_finalize,           description: "Commit a pending account into the active list." }
     - { name: account_list,               description: "List connected social accounts." }
     - { name: account_check,              description: "Check that connected social accounts still work." }
-    - { name: account_disconnect,         description: "Revoke a social account." }
+    - { name: account_disconnect,         description: "Disconnect a social account while preserving post history." }
     - { name: post_create,                description: "Create + publish (or schedule) a post across accounts." }
     - { name: post_list,                  description: "List recent posts." }
     - { name: post_retry,                 description: "Re-attempt failed targets on a post." }
@@ -1186,6 +1186,8 @@ func (a *App) toolAccountList(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	if statusFilter != "" {
 		q += " AND status=?"
 		qArgs = append(qArgs, statusFilter)
+	} else {
+		q += " AND status!='disconnected'"
 	}
 	if profileID > 0 {
 		q += " AND profile_id=?"
@@ -1436,27 +1438,29 @@ func (a *App) toolAccountDisconnect(ctx *sdk.AppCtx, args map[string]any) (any, 
 		return mcpError("account not found"), nil
 	}
 
-	// Delete the social_accounts row first so the panel reflects it
-	// immediately even if the platform-side disconnect lags. If any
-	// other social_accounts rows share this connection_id (multi-page
-	// FB grant), keep the connection alive.
-	if _, err := ctx.AppDB().Exec(`DELETE FROM social_accounts WHERE id=?`, id); err != nil {
+	// Preserve the social_accounts row so historical post_targets can
+	// still render the platform/name/avatar. Normal account_list calls
+	// hide disconnected rows by default.
+	if _, err := ctx.AppDB().Exec(
+		`UPDATE social_accounts SET status='disconnected' WHERE id=? AND project_id=?`,
+		id, pid,
+	); err != nil {
 		return nil, err
 	}
 	var siblings int
 	_ = ctx.AppDB().QueryRow(
-		`SELECT COUNT(*) FROM social_accounts WHERE connection_id=?`, connID,
+		`SELECT COUNT(*) FROM social_accounts WHERE connection_id=? AND status!='disconnected'`, connID,
 	).Scan(&siblings)
 	if siblings == 0 {
 		// Last reference — release the underlying OAuth connection.
 		if err := ctx.PlatformAPI().DisconnectConnection(connID); err != nil {
 			ctx.Logger().Warn("DisconnectConnection failed", "conn", connID, "err", err)
-			// non-fatal: the social_accounts row is gone; the orphan
-			// connection will be reaped on uninstall via cascade.
+			// non-fatal: the account is already hidden locally; the
+			// connection can be retried/reaped later.
 		}
 	}
-	ctx.Emit("account.removed", map[string]any{"social_account_id": id})
-	return map[string]any{"deleted": id}, nil
+	ctx.Emit("account.disconnected", map[string]any{"social_account_id": id})
+	return map[string]any{"disconnected": id}, nil
 }
 
 // ─── post_create ──────────────────────────────────────────────────
@@ -1583,6 +1587,18 @@ func (a *App) toolPostCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	pid := projectIDForTool(ctx, args)
 	if pid == "" {
 		return mcpError("project_id required for global Social install"), nil
+	}
+	for _, aid := range acctIDs {
+		var acctStatus string
+		if err := ctx.AppDB().QueryRow(
+			`SELECT status FROM social_accounts WHERE id=? AND project_id=?`,
+			aid, pid,
+		).Scan(&acctStatus); err != nil {
+			return nil, fmt.Errorf("social account %d not found in this project", aid)
+		}
+		if acctStatus == "disconnected" {
+			return nil, fmt.Errorf("social account %d is disconnected; reconnect it before posting", aid)
+		}
 	}
 	status := "publishing"
 	if scheduleAt != "" {
