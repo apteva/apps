@@ -39,20 +39,6 @@ function socialURL(path: string, projectId?: string | null, extra?: Record<strin
   return `${API}${path}${qs ? `?${qs}` : ""}`;
 }
 
-function profileStorageKey(projectId?: string | null): string {
-  return `social.activeProfile.${projectId || "__global__"}`;
-}
-
-function readStoredProfileId(projectId?: string | null): number | null {
-  try {
-    const raw = localStorage.getItem(profileStorageKey(projectId));
-    const id = raw ? Number(raw) : 0;
-    return id > 0 ? id : null;
-  } catch {
-    return null;
-  }
-}
-
 function storageURL(path: string, projectId?: string | null): string {
   const params = new URLSearchParams();
   if (projectId) params.set("project_id", projectId);
@@ -300,13 +286,8 @@ export default function SocialPanel({ projectId }: NativePanelProps) {
   const [status, setStatus] = useState("");
   const [composeOpen, setComposeOpen] = useState(false);
   // Profile filter — null = "All profiles" (project-wide view).
-  // Persists per-project so refreshing the page keeps the user's
-  // last-selected brand context.
   const [profiles, setProfiles] = useState<Profile[]>([]);
-  const projectKey = projectId || "";
-  const [profileStateProject, setProfileStateProject] = useState(projectKey);
-  const [profilesLoadedProject, setProfilesLoadedProject] = useState("");
-  const [activeProfileId, setActiveProfileId] = useState<number | null>(() => readStoredProfileId(projectId));
+  const [activeProfileId, setActiveProfileId] = useState<number | null>(null);
   const [manageOpen, setManageOpen] = useState(false);
   const activeProfile = profiles.find((p) => p.id === activeProfileId) || null;
   const effectiveProfileId = activeProfile?.id ?? null;
@@ -318,34 +299,17 @@ export default function SocialPanel({ projectId }: NativePanelProps) {
     : allPosts.filter((p) => (p.profile_id || 0) === effectiveProfileId);
 
   useEffect(() => {
-    setProfileStateProject(projectKey);
-    setActiveProfileId(readStoredProfileId(projectId));
-  }, [projectId, projectKey]);
-
-  useEffect(() => {
-    if (profileStateProject !== projectKey) return;
-    try {
-      if (activeProfileId == null) {
-        localStorage.removeItem(profileStorageKey(projectId));
-      } else {
-        localStorage.setItem(profileStorageKey(projectId), String(activeProfileId));
-      }
-    } catch {}
-  }, [activeProfileId, profileStateProject, projectId, projectKey]);
-
-  useEffect(() => {
-    if (profilesLoadedProject !== projectKey) return;
-    if (activeProfileId != null && !profiles.some((p) => p.id === activeProfileId)) {
-      setActiveProfileId(null);
-    }
-  }, [activeProfileId, profiles, profilesLoadedProject, projectKey]);
+    setActiveProfileId(null);
+    setProfiles([]);
+    setAllAccounts([]);
+    setAllPosts([]);
+  }, [projectId]);
 
   const loadProfiles = useCallback(async () => {
     try {
       const res = await fetch(socialURL("/profiles", projectId), { credentials: "same-origin" });
       const data = await res.json();
       setProfiles(data.profiles || []);
-      setProfilesLoadedProject(projectId || "");
     } catch (e) {
       setStatus("Load profiles: " + (e as Error).message);
     }
