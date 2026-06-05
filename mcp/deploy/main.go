@@ -41,7 +41,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: deploy
 display_name: Deploy
-version: 0.14.3
+version: 0.14.4
 description: Local-first builds and runtime supervision for Apteva projects.
 author: Apteva
 scopes: [project, global]
@@ -202,8 +202,9 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 
 	// Releases the DB still thinks are "live"/"starting" were spawned
 	// by a previous instance of this sidecar. Re-adopt the ones whose
-	// processes survived (the common case across an app upgrade); mark
-	// the rest stopped so the panel reflects reality.
+	// processes survived (the common case across an app upgrade);
+	// restart the rest from their saved build so host routes recover
+	// after a full platform restart.
 	if err := a.reconcileReleases(); err != nil {
 		ctx.Logger().Warn("release reconciliation failed", "err", err)
 	}
@@ -247,10 +248,11 @@ func (a *App) Workers() []sdk.Worker             { return nil }
 func (a *App) EventHandlers() []sdk.EventHandler { return nil }
 
 // reconcileReleases runs on boot. For every release the DB still
-// considers running, try to re-adopt the underlying process: if it
+// considers running, try to re-adopt the underlying process. If it
 // survived (an app upgrade left it running in its own process group),
-// pull it back into the registry so stop/destroy/route still work.
-// If the process is gone, mark the release stopped.
+// pull it back into the registry so stop/destroy/route still work. If
+// it is gone, mark the stale release stopped, drop its route, and
+// restart from the same saved build_id.
 func (a *App) reconcileReleases() error {
 	rows, err := dbListLiveReleases(globalCtx.AppDB())
 	if err != nil {
@@ -275,6 +277,7 @@ func (a *App) reconcileReleases() error {
 			// the orphan's death and pointed the domain at a port that
 			// another instance later bound.
 			a.cascadeUnregisterRoute(r.DeploymentID)
+			a.restartBootOrphan(r, adoptErr)
 			continue
 		}
 		a.registry.Put(rr)
@@ -291,6 +294,53 @@ func (a *App) reconcileReleases() error {
 		globalCtx.Logger().Info("re-adopted release", "release_id", r.ID, "pid", r.PID, "port", r.Port)
 	}
 	return nil
+}
+
+func (a *App) restartBootOrphan(r Release, adoptErr error) {
+	if globalCtx == nil || globalCtx.AppDB() == nil {
+		return
+	}
+	d, err := dbGetDeploymentByID(globalCtx.AppDB(), r.DeploymentID)
+	if err != nil || d == nil {
+		return
+	}
+	b, err := dbGetBuild(globalCtx.AppDB(), r.BuildID)
+	if err != nil || b == nil {
+		emit("deploy.boot_recovery_failed", map[string]any{
+			"deployment_id": r.DeploymentID, "release_id": r.ID,
+			"build_id": r.BuildID, "error": "saved build missing",
+		})
+		return
+	}
+	if b.Status != "succeeded" {
+		emit("deploy.boot_recovery_failed", map[string]any{
+			"deployment_id": r.DeploymentID, "release_id": r.ID,
+			"build_id": r.BuildID, "error": fmt.Sprintf("saved build status=%s", b.Status),
+		})
+		return
+	}
+	reason := ""
+	if adoptErr != nil {
+		reason = adoptErr.Error()
+	}
+	emit("deploy.boot_recovery_attempted", map[string]any{
+		"deployment_id": r.DeploymentID, "release_id": r.ID,
+		"build_id": r.BuildID, "reason": reason,
+	})
+	newRel, err := a.runRelease(d, b)
+	if err != nil {
+		_ = dbAppendReleaseEvent(globalCtx.AppDB(), r.ID, "boot_recovery_failed",
+			fmt.Sprintf(`{"error":%q}`, err.Error()))
+		emit("deploy.boot_recovery_failed", map[string]any{
+			"deployment_id": r.DeploymentID, "release_id": r.ID,
+			"build_id": r.BuildID, "error": err.Error(),
+		})
+		return
+	}
+	if newRel != nil {
+		_ = dbAppendReleaseEvent(globalCtx.AppDB(), newRel.ID, "boot_recovery_started",
+			fmt.Sprintf(`{"previous_release_id":%d}`, r.ID))
+	}
 }
 
 // ─── Routes ────────────────────────────────────────────────────────

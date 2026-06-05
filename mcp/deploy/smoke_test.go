@@ -3,6 +3,7 @@ package main
 import (
 	"archive/zip"
 	"database/sql"
+	"errors"
 	"io"
 	"net"
 	"net/http"
@@ -13,6 +14,7 @@ import (
 	"testing"
 	"time"
 
+	sdk "github.com/apteva/app-sdk"
 	_ "modernc.org/sqlite"
 )
 
@@ -235,6 +237,127 @@ func TestCodeFetcherStreamsHTTPExport(t *testing.T) {
 	if string(body) != "<h1>ok</h1>" {
 		t.Fatalf("unpacked body = %q", body)
 	}
+}
+
+func TestReconcileReleasesRestartsBootOrphanFromSavedBuild(t *testing.T) {
+	db := openSchemaDB(t)
+	defer db.Close()
+
+	d, err := dbCreateDeployment(db, "p1", CreateDeploymentInput{
+		Name: "site", SourceKind: "local", SourceRef: "/tmp/src", Framework: "static",
+		Domain: "site.example.com",
+	})
+	if err != nil {
+		t.Fatalf("create deployment: %v", err)
+	}
+	b, err := dbCreateBuild(db, d.ID, "static", "")
+	if err != nil {
+		t.Fatalf("create build: %v", err)
+	}
+	artifactDir := t.TempDir()
+	if err := dbUpdateBuild(db, b.ID, map[string]any{
+		"status": "succeeded", "artifact_path": artifactDir, "artifact_size": int64(12),
+	}); err != nil {
+		t.Fatalf("update build: %v", err)
+	}
+	b, _ = dbGetBuild(db, b.ID)
+	oldRel, err := dbCreateRelease(db, d.ID, b.ID)
+	if err != nil {
+		t.Fatalf("create release: %v", err)
+	}
+	if err := dbUpdateRelease(db, oldRel.ID, map[string]any{
+		"status": "live", "port": 7200, "pid": 99999, "started_at": nowUTC(),
+	}); err != nil {
+		t.Fatalf("mark old release live: %v", err)
+	}
+	if ok, err := dbAcquirePortLease(db, 7200, oldRel.ID); err != nil || !ok {
+		t.Fatalf("acquire old lease ok=%v err=%v", ok, err)
+	}
+	if err := dbSetCurrentRelease(db, d.ID, &oldRel.ID); err != nil {
+		t.Fatalf("set current: %v", err)
+	}
+
+	rt := &bootRecoveryRuntime{adoptErr: errors.New("process gone")}
+	app := &App{
+		dataDir:          t.TempDir(),
+		runtime:          rt,
+		registry:         NewSupervisorRegistry(),
+		portRangeStart:   7200,
+		portRangeEnd:     7205,
+		buildSem:         make(chan struct{}, 1),
+		autoRestartState: map[int64]autoRestartInfo{},
+	}
+	manifest := app.Manifest()
+	oldCtx := globalCtx
+	globalCtx = sdk.NewAppCtxForTest(&manifest, db, nil, nil, nil)
+	defer func() { globalCtx = oldCtx }()
+
+	if err := app.reconcileReleases(); err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	if rt.adoptCalls != 1 {
+		t.Fatalf("adopt calls = %d, want 1", rt.adoptCalls)
+	}
+	if len(rt.starts) != 1 {
+		t.Fatalf("starts = %d, want 1", len(rt.starts))
+	}
+	if rt.starts[0].ReleaseID == oldRel.ID {
+		t.Fatalf("boot recovery reused old release id")
+	}
+	if rt.starts[0].ArtifactDir != artifactDir {
+		t.Fatalf("artifact dir = %q, want %q", rt.starts[0].ArtifactDir, artifactDir)
+	}
+	if rt.starts[0].Framework != "static" {
+		t.Fatalf("framework = %q", rt.starts[0].Framework)
+	}
+	oldAfter, _ := dbGetRelease(db, oldRel.ID)
+	if oldAfter.Status != "stopped" {
+		t.Fatalf("old release status = %q, want stopped", oldAfter.Status)
+	}
+	rels, err := dbListReleases(db, d.ID, 10)
+	if err != nil {
+		t.Fatalf("list releases: %v", err)
+	}
+	if len(rels) != 2 {
+		t.Fatalf("release count = %d, want 2", len(rels))
+	}
+	newRel := rels[0]
+	if newRel.ID == oldRel.ID || newRel.BuildID != b.ID {
+		t.Fatalf("new release mismatch: %+v old=%d build=%d", newRel, oldRel.ID, b.ID)
+	}
+	if newRel.Status != "starting" || newRel.PID != 4242 || newRel.Port == 0 {
+		t.Fatalf("new release not started correctly: %+v", newRel)
+	}
+	if app.registry.Get(newRel.ID) == nil {
+		t.Fatalf("new release was not added to registry")
+	}
+}
+
+type bootRecoveryRuntime struct {
+	adoptErr   error
+	adoptCalls int
+	starts     []ReleaseSpec
+}
+
+func (r *bootRecoveryRuntime) Start(spec ReleaseSpec) (*RunningRelease, error) {
+	r.starts = append(r.starts, spec)
+	return &RunningRelease{
+		ReleaseID: spec.ReleaseID,
+		Port:      spec.Port,
+		PID:       4242,
+		stopCh:    make(chan struct{}),
+	}, nil
+}
+
+func (r *bootRecoveryRuntime) Stop(*RunningRelease) error { return nil }
+
+func (r *bootRecoveryRuntime) Adopt(int64, int, int) (*RunningRelease, error) {
+	r.adoptCalls++
+	return nil, r.adoptErr
+}
+
+func (r *bootRecoveryRuntime) LogPath(releaseID int64) string {
+	return filepath.Join(os.TempDir(), "release-"+itoa(int(releaseID))+".log")
 }
 
 func TestPublicPortRuntimeConfig(t *testing.T) {
