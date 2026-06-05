@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -40,10 +41,10 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: computer
 display_name: Computer
-version: 0.7.14
+version: 0.7.15
 description: |
-  Watch and steer browser sessions. v0.7.14 refreshes the panel from
-  AppBus session, action, context, and settings events.
+  Watch and steer browser sessions. v0.7.15 improves context discovery
+  so agents can list all contexts or use the app default provider.
 scopes: [project, global]
 requires:
   permissions:
@@ -68,15 +69,15 @@ provides:
     - prefix: /
   mcp_tools:
     - name: browser_session
-      description: "Open, resume, list, inspect, or close app-owned browser sessions. Args: action, session_id?, backend?, backend_session_id?, url?, context_id?, context_name?, auto_create_context?, persist?, timeout?, proxy?, proxy_country?, viewport?. For a reusable saved context, pass context_name with auto_create_context=true; omitted names are only a fallback and are auto-generated."
+      description: "Open, resume, list, inspect, or close app-owned browser sessions. Args: action, session_id?, backend?, backend_session_id?, url?, context_id?, context_name?, auto_create_context?, persist?, timeout?, proxy?, proxy_country?, viewport?. Prefer context_id from computer_context_list to reopen saved state; context_name works across backends when unique. For a reusable saved context, pass context_name with auto_create_context=true; omitted names are only a fallback and are auto-generated."
     - name: computer_use
       description: "Drive an app-owned browser session. Default workflow: call action=screenshot first; screenshots contain Set-of-Mark numeric badges on interactive elements. To click, use action=click with label=N from the latest screenshot. Prefer label over coordinate; use coordinate only for targets with no badge such as canvas or custom rendered widgets. After scrolling or navigation, take a fresh screenshot because labels are re-enumerated. Args: session_id, action, coordinate?, label?, text?, key?, direction?, amount?, duration?, annotate? (screenshot only, default true). Returns screenshot bytes for visual actions."
     - name: computer_context_create
       description: "Create or import an app-managed browser context. Args: name, backend?, provider_context_id?, persist_default?, metadata?, auto_create_provider?."
     - name: computer_context_list
-      description: "List app-managed browser contexts. Args: backend?."
+      description: "List app-managed browser contexts. Omit backend, or pass backend=all, to see every saved context across providers. Use backend=default/auto for the Computer app default provider. Only pass a concrete backend when the user explicitly wants that provider."
     - name: computer_context_get
-      description: "Fetch one browser context by id or backend+name."
+      description: "Fetch one browser context by id, by backend+name, or by unique name across all backends when backend is omitted."
     - name: computer_context_update
       description: "Update browser context metadata/defaults. Args: id, name?, provider_context_id?, persist_default?, metadata?."
     - name: computer_context_delete
@@ -403,6 +404,7 @@ func (a *App) MCPTools() []sdk.Tool {
 			Description: "Session lifecycle for app-owned browsers. Actions: open, resume, status, close, list. " +
 				"Open/resume args: backend? (local|browserbase|steel|browser-engine|service), url?, context_id?, persist?, " +
 				"context_name?, auto_create_context?, backend_session_id? (provider attach), timeout?, proxy?, proxy_country?, viewport?. " +
+				"Prefer context_id returned by computer_context_list to reopen saved browser state; context_name works across providers when unique. " +
 				"For a reusable saved context, pass context_name with auto_create_context=true; omitted names are only a fallback and are auto-generated. " +
 				"Returns {session_id, backend_session_id, backend, current_url, context_id, debug_url, width, height}.",
 			InputSchema: schemaObject(map[string]any{
@@ -468,15 +470,15 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "computer_context_list",
-			Description: "List app-managed browser contexts. Args: backend?.",
+			Description: "List app-managed browser contexts. Omit backend, or pass backend=all, to see every saved context across providers. Use backend=default/auto for the Computer app default provider. Only pass a concrete backend when the user explicitly wants that provider.",
 			InputSchema: schemaObject(map[string]any{
-				"backend": map[string]any{"type": "string", "enum": []string{"local", "browserbase", "steel", "browser-engine"}},
+				"backend": map[string]any{"type": "string", "enum": []string{"all", "default", "auto", "local", "browserbase", "steel", "browser-engine"}, "description": "Omit or use all to list all contexts. Use default/auto for the app default provider. Concrete providers filter and may hide contexts saved under another provider."},
 			}, nil),
 			Handler: a.toolContextList,
 		},
 		{
 			Name:        "computer_context_get",
-			Description: "Fetch one app-managed browser context by id, or by backend+name.",
+			Description: "Fetch one app-managed browser context by id, by backend+name, or by unique name across all backends when backend is omitted.",
 			InputSchema: schemaObject(map[string]any{
 				"id":      map[string]any{"type": "string"},
 				"backend": map[string]any{"type": "string", "enum": []string{"local", "browserbase", "steel", "browser-engine"}},
@@ -578,11 +580,33 @@ func (a *App) toolContextList(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	if db == nil {
 		return nil, fmt.Errorf("context catalog unavailable")
 	}
-	rows, err := dbListContexts(db, stringArg(args, "backend"))
+	requestedBackend := strings.TrimSpace(stringArg(args, "backend"))
+	backend, err := resolveContextListBackend(ctx, requestedBackend)
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"contexts": rows}, nil
+	rows, err := dbListContexts(db, backend)
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]any{
+		"contexts":          rows,
+		"backend":           firstNonEmpty(backend, "all"),
+		"requested_backend": requestedBackend,
+	}
+	if requestedBackend != "" && requestedBackend != "all" {
+		allRows, err := dbListContexts(db, "")
+		if err != nil {
+			return nil, err
+		}
+		out["available_backends"] = contextBackends(allRows)
+		out["total_contexts"] = len(allRows)
+		if len(rows) == 0 && len(allRows) > 0 {
+			out["other_contexts"] = allRows
+			out["hint"] = fmt.Sprintf("No contexts found for backend %q. Omit backend or pass backend=all to list all saved contexts.", backend)
+		}
+	}
+	return out, nil
 }
 
 func (a *App) toolContextGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -595,15 +619,32 @@ func (a *App) toolContextGet(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	if id := stringArg(args, "id"); id != "" {
 		rec, err = dbGetContext(db, id)
 	} else {
-		backend := stringArg(args, "backend")
-		if backend == "" {
-			backend = "local"
-		}
 		name := stringArg(args, "name")
 		if name == "" {
 			return nil, fmt.Errorf("id or name required")
 		}
-		rec, err = dbGetContextByName(db, backend, name)
+		backend := strings.TrimSpace(stringArg(args, "backend"))
+		if backend != "" {
+			rec, err = dbGetContextByName(db, backend, name)
+		} else {
+			matches, matchErr := dbGetContextsByName(db, name)
+			if matchErr != nil {
+				return nil, matchErr
+			}
+			switch len(matches) {
+			case 0:
+				err = errContextNotFound
+			case 1:
+				rec = matches[0]
+			default:
+				return map[string]any{
+					"found":     false,
+					"ambiguous": true,
+					"contexts":  matches,
+					"hint":      "Multiple contexts share this name. Pass context_id, or pass backend with name.",
+				}, nil
+			}
+		}
 	}
 	if err != nil {
 		if errors.Is(err, errContextNotFound) {
@@ -809,6 +850,7 @@ func (a *App) resolveSessionContext(ctx *sdk.AppCtx, backend string, args map[st
 	rawProviderID := firstNonEmpty(stringArg(args, "provider_context_id"), stringArg(args, "provider_context"))
 	contextIDArg := stringArg(args, "context_id")
 	contextName := strings.TrimSpace(stringArg(args, "context_name"))
+	explicitBackend := strings.TrimSpace(stringArg(args, "backend")) != ""
 	autoCreate := boolArgDefault(args, "auto_create_context", false)
 
 	db := appDB(ctx)
@@ -835,6 +877,19 @@ func (a *App) resolveSessionContext(ctx *sdk.AppCtx, backend string, args map[st
 		}
 		if err != nil {
 			rec = nil
+		}
+		if rec == nil && !explicitBackend {
+			matches, matchErr := dbGetContextsByName(db, contextName)
+			if matchErr != nil {
+				return out, fmt.Errorf("get context %q: %w", contextName, matchErr)
+			}
+			switch len(matches) {
+			case 1:
+				rec = matches[0]
+			case 0:
+			default:
+				return out, fmt.Errorf("context_name %q is ambiguous across backends; pass context_id or backend", contextName)
+			}
 		}
 	}
 	if rec == nil && rawProviderID != "" {
@@ -1353,6 +1408,43 @@ func settingsEventPayload(settings ComputerSettings) map[string]any {
 		"default_backend": settings.DefaultBackend,
 		"lock_backend":    settings.LockBackend,
 	}
+}
+
+func resolveContextListBackend(ctx *sdk.AppCtx, requested string) (string, error) {
+	requested = strings.TrimSpace(strings.ToLower(requested))
+	switch requested {
+	case "", "all", "*":
+		return "", nil
+	case "default", "auto":
+		settings, err := currentSettings(ctx)
+		if err != nil {
+			return "", err
+		}
+		if !isContextBackend(settings.DefaultBackend) {
+			return "", nil
+		}
+		return settings.DefaultBackend, nil
+	default:
+		backend := normalizeBackend(requested)
+		if !isContextBackend(backend) {
+			return "", fmt.Errorf("backend %q does not support managed contexts", requested)
+		}
+		return backend, nil
+	}
+}
+
+func contextBackends(rows []*ComputerContext) []string {
+	seen := map[string]bool{}
+	out := []string{}
+	for _, row := range rows {
+		if row == nil || row.Backend == "" || seen[row.Backend] {
+			continue
+		}
+		seen[row.Backend] = true
+		out = append(out, row.Backend)
+	}
+	sort.Strings(out)
+	return out
 }
 
 func newSessionID() string {

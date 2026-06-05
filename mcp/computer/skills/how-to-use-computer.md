@@ -66,8 +66,15 @@ Use app contexts when cookies/storage should survive across sessions.
 
 - Create or import with `computer_context_create(name, backend?,
   provider_context_id?, persist_default?)`.
+- List existing contexts with `computer_context_list()` without a `backend`
+  first. That returns all saved contexts across Local, Browserbase, Steel, and
+  Browser Engine. Use `backend=default` for the Computer app default provider,
+  or a concrete backend only when the user explicitly asks for it.
 - Reopen with `browser_session(action="open", context_name=..., backend=...)`
   or `browser_session(action="open", context_id=<app_context_id>)`.
+- Prefer reopening by `context_id` from `computer_context_list`; it avoids
+  guessing which provider owns the saved state. `context_name` works when the
+  name is unique across providers.
 - For a new saved context and immediate session, call
   `browser_session(action="open", context_name=..., auto_create_context=true,
   persist=true)`.

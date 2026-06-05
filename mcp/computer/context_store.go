@@ -92,6 +92,24 @@ func dbGetContextByName(db *sql.DB, backend, name string) (*ComputerContext, err
 	return c, err
 }
 
+func dbGetContextsByName(db *sql.DB, name string) ([]*ComputerContext, error) {
+	rows, err := db.Query(`SELECT `+contextCols+` FROM computer_contexts WHERE name = ? ORDER BY updated_at DESC`,
+		strings.TrimSpace(name))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*ComputerContext
+	for rows.Next() {
+		c, err := scanComputerContext(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	return out, rows.Err()
+}
+
 func dbGetContextByProviderID(db *sql.DB, backend, providerID string) (*ComputerContext, error) {
 	row := db.QueryRow(`SELECT `+contextCols+` FROM computer_contexts WHERE backend = ? AND provider_context_id = ?`,
 		normalizeBackend(backend), providerID)

@@ -353,6 +353,122 @@ func TestContextCatalogResolvesBrowserSessionContextName(t *testing.T) {
 	}
 }
 
+func TestContextListDefaultsAllAndReportsOtherBackends(t *testing.T) {
+	app := &App{reg: &registry{m: map[string]*session{}}}
+	ctx := tk.NewAppCtx(t, "apteva.yaml")
+	if ctx.AppDB() == nil {
+		t.Fatal("test context has no AppDB")
+	}
+
+	created, err := app.toolContextCreate(ctx, map[string]any{
+		"name":                 "patreon-login",
+		"backend":              "browserbase",
+		"provider_context_id":  "bb_ctx_123",
+		"auto_create_provider": false,
+	})
+	if err != nil {
+		t.Fatalf("context create: %v", err)
+	}
+	contextRow := created.(map[string]any)["context"].(*ComputerContext)
+
+	allOut, err := app.toolContextList(ctx, map[string]any{})
+	if err != nil {
+		t.Fatalf("context list all: %v", err)
+	}
+	allMap := allOut.(map[string]any)
+	allRows := allMap["contexts"].([]*ComputerContext)
+	if len(allRows) != 1 || allRows[0].Backend != "browserbase" {
+		t.Fatalf("list all contexts = %+v", allRows)
+	}
+	if allMap["backend"] != "all" {
+		t.Fatalf("list all backend marker = %v", allMap["backend"])
+	}
+
+	localOut, err := app.toolContextList(ctx, map[string]any{"backend": "local"})
+	if err != nil {
+		t.Fatalf("context list local: %v", err)
+	}
+	localMap := localOut.(map[string]any)
+	if got := len(localMap["contexts"].([]*ComputerContext)); got != 0 {
+		t.Fatalf("local contexts: want 0, got %d", got)
+	}
+	otherRows := localMap["other_contexts"].([]*ComputerContext)
+	if len(otherRows) != 1 || otherRows[0].ID != contextRow.ID {
+		t.Fatalf("other_contexts = %+v", otherRows)
+	}
+	if got := localMap["available_backends"].([]string); len(got) != 1 || got[0] != "browserbase" {
+		t.Fatalf("available_backends = %#v", got)
+	}
+
+	if _, err := app.toolSettingsUpdate(ctx, map[string]any{"default_backend": "browserbase"}); err != nil {
+		t.Fatalf("settings update: %v", err)
+	}
+	defaultOut, err := app.toolContextList(ctx, map[string]any{"backend": "default"})
+	if err != nil {
+		t.Fatalf("context list default: %v", err)
+	}
+	defaultRows := defaultOut.(map[string]any)["contexts"].([]*ComputerContext)
+	if len(defaultRows) != 1 || defaultRows[0].ID != contextRow.ID {
+		t.Fatalf("default contexts = %+v", defaultRows)
+	}
+}
+
+func TestContextGetAndOpenFindUniqueNameAcrossBackends(t *testing.T) {
+	prev := newBackend
+	t.Cleanup(func() { newBackend = prev })
+
+	var gotBackend string
+	fake := &fakeComp{
+		display: backends.DisplaySize{Width: 1024, Height: 768},
+		png:     []byte{0x89, 0x50, 0x4e, 0x47},
+		url:     "https://example.test",
+	}
+	newBackend = func(cfg backends.Config) (backends.Computer, error) {
+		gotBackend = cfg.Type
+		return fake, nil
+	}
+
+	app := &App{reg: &registry{m: map[string]*session{}}}
+	ctx := tk.NewAppCtx(t, "apteva.yaml")
+	created, err := app.toolContextCreate(ctx, map[string]any{
+		"name":                 "patreon-login",
+		"backend":              "browserbase",
+		"provider_context_id":  "bb_ctx_456",
+		"auto_create_provider": false,
+		"persist_default":      true,
+	})
+	if err != nil {
+		t.Fatalf("context create: %v", err)
+	}
+	contextRow := created.(map[string]any)["context"].(*ComputerContext)
+
+	got, err := app.toolContextGet(ctx, map[string]any{"name": "patreon-login"})
+	if err != nil {
+		t.Fatalf("context get by unique name: %v", err)
+	}
+	gotMap := got.(map[string]any)
+	if gotMap["found"] != true || gotMap["context"].(*ComputerContext).ID != contextRow.ID {
+		t.Fatalf("context get by unique name = %#v", gotMap)
+	}
+
+	openOut, err := app.toolBrowserSession(ctx, map[string]any{
+		"action":       "open",
+		"context_name": "patreon-login",
+	})
+	if err != nil {
+		t.Fatalf("browser_session open by cross-backend context_name: %v", err)
+	}
+	if gotBackend != "browserbase" {
+		t.Fatalf("newBackend type: want browserbase, got %q", gotBackend)
+	}
+	if openOut.(map[string]any)["app_context_id"] != contextRow.ID {
+		t.Fatalf("open output = %#v", openOut)
+	}
+	if fake.openContextID != "bb_ctx_456" {
+		t.Fatalf("OpenSession context id: want bb_ctx_456, got %q", fake.openContextID)
+	}
+}
+
 func TestBrowserScreenshotDefaultsClean(t *testing.T) {
 	prev := newBackend
 	t.Cleanup(func() { newBackend = prev })
