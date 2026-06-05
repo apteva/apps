@@ -301,6 +301,50 @@ func TestHTTPRoutesUseCanonicalToolHandlers(t *testing.T) {
 	}
 }
 
+func TestHTTPHandlersEmitIntoRequestProject(t *testing.T) {
+	prev := newBackend
+	t.Cleanup(func() { newBackend = prev })
+
+	fake := &fakeComp{
+		display: backends.DisplaySize{Width: 1200, Height: 700},
+		png:     []byte{0x89, 0x50, 0x4e, 0x47},
+		url:     "https://example.test/app",
+	}
+	newBackend = func(cfg backends.Config) (backends.Computer, error) {
+		return fake, nil
+	}
+
+	app := &App{reg: &registry{m: map[string]*session{}}}
+	rec := tk.NewEmitRecorder()
+	globalCtx = tk.NewAppCtx(t, "apteva.yaml", tk.WithEmitter(rec))
+	t.Cleanup(func() { globalCtx = nil })
+
+	openOut := postJSON(t, app.handleOpenSession, "/sessions?project_id=proj-live", map[string]any{
+		"action":  "open",
+		"backend": "local",
+		"url":     "https://example.test/app",
+	})
+	sessionID, _ := openOut["session_id"].(string)
+	if sessionID == "" {
+		t.Fatalf("open returned no session_id: %v", openOut)
+	}
+	assertLastEventProject(t, rec, "session.opened", "proj-live")
+
+	_ = postJSON(t, app.handleComputerUse, "/sessions/"+sessionID+"/use?project_id=proj-live", map[string]any{
+		"action": "type",
+		"text":   "hello",
+	})
+	assertLastEventProject(t, rec, "session.action", "proj-live")
+
+	req := httptest.NewRequest(http.MethodDelete, "/sessions/"+sessionID+"?project_id=proj-live", nil)
+	w := httptest.NewRecorder()
+	app.handleCloseSession(w, req)
+	if w.Code < 200 || w.Code >= 300 {
+		t.Fatalf("DELETE session: status=%d body=%s", w.Code, w.Body.String())
+	}
+	assertLastEventProject(t, rec, "session.closed", "proj-live")
+}
+
 func TestContextCatalogResolvesBrowserSessionContextName(t *testing.T) {
 	prev := newBackend
 	t.Cleanup(func() { newBackend = prev })
@@ -952,6 +996,17 @@ func lastEventData(t *testing.T, rec *tk.EmitRecorder, topic string) map[string]
 		t.Fatalf("event %q data type = %T, want map[string]any", topic, events[len(events)-1].Data)
 	}
 	return data
+}
+
+func assertLastEventProject(t *testing.T, rec *tk.EmitRecorder, topic, projectID string) {
+	t.Helper()
+	events := rec.EventsByTopic(topic)
+	if len(events) == 0 {
+		t.Fatalf("expected event %q, got events %#v", topic, rec.Events())
+	}
+	if got := events[len(events)-1].ProjectID; got != projectID {
+		t.Fatalf("%s project id: want %q, got %q", topic, projectID, got)
+	}
 }
 
 func postJSON(t *testing.T, handler http.HandlerFunc, path string, body any) map[string]any {

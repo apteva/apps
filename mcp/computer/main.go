@@ -41,10 +41,10 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: computer
 display_name: Computer
-version: 0.7.15
+version: 0.7.16
 description: |
-  Watch and steer browser sessions. v0.7.15 improves context discovery
-  so agents can list all contexts or use the app default provider.
+  Watch and steer browser sessions. v0.7.16 pins panel HTTP events
+  to the active project AppBus lane.
 scopes: [project, global]
 requires:
   permissions:
@@ -1838,11 +1838,29 @@ func schemaObject(props map[string]any, required []string) map[string]any {
 
 // ─── HTTP handlers ─────────────────────────────────────────────────
 
+func appCtxForRequest(r *http.Request, args map[string]any) *sdk.AppCtx {
+	ctx := globalCtx
+	if ctx == nil {
+		return nil
+	}
+	projectID := strings.TrimSpace(r.URL.Query().Get("project_id"))
+	if projectID == "" {
+		projectID = strings.TrimSpace(r.Header.Get("X-Apteva-Project-ID"))
+	}
+	if projectID == "" && args != nil {
+		projectID = firstNonEmpty(stringArg(args, "_project_id"), stringArg(args, "project_id"))
+	}
+	if projectID == "" {
+		return ctx
+	}
+	return ctx.WithProject(projectID)
+}
+
 func (a *App) handleContextsCollection(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		args := map[string]any{"backend": r.URL.Query().Get("backend")}
-		out, err := a.toolContextList(globalCtx, args)
+		out, err := a.toolContextList(appCtxForRequest(r, args), args)
 		if err != nil {
 			httpErr(w, http.StatusInternalServerError, err.Error())
 			return
@@ -1857,7 +1875,7 @@ func (a *App) handleContextsCollection(w http.ResponseWriter, r *http.Request) {
 		if body == nil {
 			body = map[string]any{}
 		}
-		out, err := a.toolContextCreate(globalCtx, body)
+		out, err := a.toolContextCreate(appCtxForRequest(r, body), body)
 		if err != nil {
 			httpErr(w, http.StatusInternalServerError, err.Error())
 			return
@@ -1876,7 +1894,8 @@ func (a *App) handleContextItem(w http.ResponseWriter, r *http.Request) {
 	}
 	switch r.Method {
 	case http.MethodGet:
-		out, err := a.toolContextGet(globalCtx, map[string]any{"id": id})
+		args := map[string]any{"id": id}
+		out, err := a.toolContextGet(appCtxForRequest(r, args), args)
 		if err != nil {
 			httpErr(w, http.StatusInternalServerError, err.Error())
 			return
@@ -1892,17 +1911,18 @@ func (a *App) handleContextItem(w http.ResponseWriter, r *http.Request) {
 			body = map[string]any{}
 		}
 		body["id"] = id
-		out, err := a.toolContextUpdate(globalCtx, body)
+		out, err := a.toolContextUpdate(appCtxForRequest(r, body), body)
 		if err != nil {
 			httpErr(w, http.StatusInternalServerError, err.Error())
 			return
 		}
 		writeJSON(w, out)
 	case http.MethodDelete:
-		out, err := a.toolContextDelete(globalCtx, map[string]any{
+		args := map[string]any{
 			"id":              id,
 			"delete_provider": r.URL.Query().Get("delete_provider"),
-		})
+		}
+		out, err := a.toolContextDelete(appCtxForRequest(r, args), args)
 		if err != nil {
 			httpErr(w, http.StatusInternalServerError, err.Error())
 			return
@@ -1916,7 +1936,7 @@ func (a *App) handleContextItem(w http.ResponseWriter, r *http.Request) {
 func (a *App) handleSettings(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		out, err := a.toolSettingsGet(globalCtx, nil)
+		out, err := a.toolSettingsGet(appCtxForRequest(r, nil), nil)
 		if err != nil {
 			httpErr(w, http.StatusInternalServerError, err.Error())
 			return
@@ -1931,7 +1951,7 @@ func (a *App) handleSettings(w http.ResponseWriter, r *http.Request) {
 		if body == nil {
 			body = map[string]any{}
 		}
-		out, err := a.toolSettingsUpdate(globalCtx, body)
+		out, err := a.toolSettingsUpdate(appCtxForRequest(r, body), body)
 		if err != nil {
 			httpErr(w, http.StatusInternalServerError, err.Error())
 			return
@@ -1959,7 +1979,7 @@ func (a *App) handleOpenSession(w http.ResponseWriter, r *http.Request) {
 	if stringArg(body, "action") == "" {
 		body["action"] = "open"
 	}
-	out, err := a.toolBrowserSession(globalCtx, body)
+	out, err := a.toolBrowserSession(appCtxForRequest(r, body), body)
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -1974,7 +1994,8 @@ func (a *App) handleCloseSession(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusBadRequest, "session id required")
 		return
 	}
-	out, err := a.toolBrowserClose(globalCtx, map[string]any{"session_id": id})
+	args := map[string]any{"session_id": id}
+	out, err := a.toolBrowserClose(appCtxForRequest(r, args), args)
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -1997,7 +2018,7 @@ func (a *App) handleComputerUse(w http.ResponseWriter, r *http.Request) {
 		body = map[string]any{}
 	}
 	body["session_id"] = id
-	out, err := a.toolComputerUse(globalCtx, body)
+	out, err := a.toolComputerUse(appCtxForRequest(r, body), body)
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return

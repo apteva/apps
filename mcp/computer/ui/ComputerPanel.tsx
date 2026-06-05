@@ -156,6 +156,15 @@ const backendOptions = [
   { value: "service", label: "Browser Service" },
 ] as const;
 
+function appURL(path: string, projectId?: string, extra?: Record<string, string | number | boolean | undefined>) {
+  const url = new URL(path, window.location.origin);
+  if (projectId) url.searchParams.set("project_id", projectId);
+  for (const [key, value] of Object.entries(extra ?? {})) {
+    if (value !== undefined && value !== "") url.searchParams.set(key, String(value));
+  }
+  return `${url.pathname}${url.search}`;
+}
+
 export default function ComputerPanel({ projectId }: NativePanelProps) {
   const [rows, setRows] = useState<SessionRow[]>([]);
   const [contexts, setContexts] = useState<ContextRow[]>([]);
@@ -170,9 +179,9 @@ export default function ComputerPanel({ projectId }: NativePanelProps) {
   const refresh = useCallback(async () => {
     try {
       const [sessionsRes, contextsRes, settingsRes] = await Promise.all([
-        fetch(SESSIONS_URL, { credentials: "include" }),
-        fetch(CONTEXTS_URL, { credentials: "include" }),
-        fetch(SETTINGS_URL, { credentials: "include" }),
+        fetch(appURL(SESSIONS_URL, projectId), { credentials: "include" }),
+        fetch(appURL(CONTEXTS_URL, projectId), { credentials: "include" }),
+        fetch(appURL(SETTINGS_URL, projectId), { credentials: "include" }),
       ]);
       if (!sessionsRes.ok) throw new Error(`sessions HTTP ${sessionsRes.status}`);
       if (!contextsRes.ok) throw new Error(`contexts HTTP ${contextsRes.status}`);
@@ -190,7 +199,7 @@ export default function ComputerPanel({ projectId }: NativePanelProps) {
     } catch (e: any) {
       setErr(String(e?.message ?? e));
     }
-  }, []);
+  }, [projectId]);
 
   useEffect(() => {
     void refresh();
@@ -228,7 +237,7 @@ export default function ComputerPanel({ projectId }: NativePanelProps) {
 
   const onClose = useCallback(
     async (id: string) => {
-      const r = await fetch(`${SESSIONS_URL}/${encodeURIComponent(id)}`, {
+      const r = await fetch(appURL(`${SESSIONS_URL}/${encodeURIComponent(id)}`, projectId), {
         method: "DELETE",
         credentials: "include",
       });
@@ -238,7 +247,7 @@ export default function ComputerPanel({ projectId }: NativePanelProps) {
       }
       void refresh();
     },
-    [refresh],
+    [projectId, refresh],
   );
 
   const sel = rows.find((r) => r.session_id === selected) ?? null;
@@ -247,7 +256,7 @@ export default function ComputerPanel({ projectId }: NativePanelProps) {
 
   const onDeleteContext = useCallback(
     async (id: string) => {
-      const r = await fetch(`${CONTEXTS_URL}/${encodeURIComponent(id)}`, {
+      const r = await fetch(appURL(`${CONTEXTS_URL}/${encodeURIComponent(id)}`, projectId), {
         method: "DELETE",
         credentials: "include",
       });
@@ -257,7 +266,7 @@ export default function ComputerPanel({ projectId }: NativePanelProps) {
       }
       void refresh();
     },
-    [refresh],
+    [projectId, refresh],
   );
 
   const updateSettings = useCallback(
@@ -265,7 +274,7 @@ export default function ComputerPanel({ projectId }: NativePanelProps) {
       const next = { ...settings, ...patch };
       setSettings(next);
       try {
-        const r = await fetch(SETTINGS_URL, {
+        const r = await fetch(appURL(SETTINGS_URL, projectId), {
           method: "PATCH",
           credentials: "include",
           headers: { "Content-Type": "application/json" },
@@ -280,7 +289,7 @@ export default function ComputerPanel({ projectId }: NativePanelProps) {
         void refresh();
       }
     },
-    [refresh, settings],
+    [projectId, refresh, settings],
   );
 
   return (
@@ -311,12 +320,19 @@ export default function ComputerPanel({ projectId }: NativePanelProps) {
         settings={settings}
         onUpdateSettings={updateSettings}
       />
-      <SessionDetail session={sel} onClose={setPendingClose} onRefresh={refresh} externalRefreshKey={eventPreviewTick} />
+      <SessionDetail
+        session={sel}
+        projectId={projectId}
+        onClose={setPendingClose}
+        onRefresh={refresh}
+        externalRefreshKey={eventPreviewTick}
+      />
       {showOpen && (
         <OpenSessionModal
           onClose={() => setShowOpen(false)}
           contexts={contexts}
           settings={settings}
+          projectId={projectId}
           onOpened={(newID) => {
             setShowOpen(false);
             setSelected(newID);
@@ -607,11 +623,13 @@ function BrowserListItem({
 
 function SessionDetail({
   session,
+  projectId,
   onClose,
   onRefresh,
   externalRefreshKey,
 }: {
   session: SessionRow | null;
+  projectId?: string;
   onClose: (id: string) => void;
   onRefresh: () => Promise<void>;
   externalRefreshKey: number;
@@ -663,7 +681,7 @@ function SessionDetail({
     setBusy(action);
     setErr(null);
     try {
-      const res = await fetch(`${SESSIONS_URL}/${encodeURIComponent(session.session_id)}/use`, {
+      const res = await fetch(appURL(`${SESSIONS_URL}/${encodeURIComponent(session.session_id)}/use`, projectId), {
         method: "POST",
         credentials: "include",
         headers: { "Content-Type": "application/json" },
@@ -717,6 +735,7 @@ function SessionDetail({
           ) : (
             <InteractivePreview
               session={session}
+              projectId={projectId}
               tick={tick}
               busy={Boolean(busy)}
               onClickPoint={(x, y) => sendCoordinate("click", x, y)}
@@ -853,18 +872,20 @@ function SessionDetail({
 
 function InteractivePreview({
   session,
+  projectId,
   tick,
   busy,
   onClickPoint,
 }: {
   session: SessionRow;
+  projectId?: string;
   tick: number;
   busy: boolean;
   onClickPoint: (x: number, y: number) => void;
 }) {
   const imgRef = useRef<HTMLImageElement | null>(null);
   const [stale, setStale] = useState(false);
-  const src = `${SESSIONS_URL}/${encodeURIComponent(session.session_id)}/screenshot?t=${tick}`;
+  const src = appURL(`${SESSIONS_URL}/${encodeURIComponent(session.session_id)}/screenshot`, projectId, { t: tick });
 
   useEffect(() => {
     setStale(false);
@@ -928,11 +949,13 @@ function OpenSessionModal({
   onClose,
   contexts,
   settings,
+  projectId,
   onOpened,
 }: {
   onClose: () => void;
   contexts: ContextRow[];
   settings: ComputerSettings;
+  projectId?: string;
   onOpened: (sessionID: string) => void;
 }) {
   const [mode, setMode] = useState<OpenMode>("open");
@@ -977,7 +1000,7 @@ function OpenSessionModal({
       if (height) viewport.height = Number(height);
       if (viewport.width || viewport.height) body.viewport = viewport;
 
-      const res = await fetch(SESSIONS_URL, {
+      const res = await fetch(appURL(SESSIONS_URL, projectId), {
         method: "POST",
         credentials: "include",
         headers: { "Content-Type": "application/json" },
