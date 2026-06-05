@@ -41,9 +41,9 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: computer
 display_name: Computer
-version: 0.7.22
+version: 0.7.23
 description: |
-  Watch and steer browser sessions. v0.7.22 improves date/time input.
+  Watch and steer browser sessions. v0.7.23 adds delete key buttons.
 scopes: [project, global]
 requires:
   permissions:

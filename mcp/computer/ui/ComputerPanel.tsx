@@ -850,7 +850,7 @@ function SessionDetail({
               Type
             </IconButton>
           </div>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr auto auto auto auto", gap: "8px" }}>
+          <div style={{ display: "grid", gridTemplateColumns: "1fr auto auto auto auto auto auto", gap: "8px" }}>
             <input
               value={keyText}
               onChange={(e) => setKeyText(e.target.value)}
@@ -860,6 +860,12 @@ function SessionDetail({
             />
             <IconButton disabled={!keyText || Boolean(busy)} onClick={() => sendUse("key", { key: keyText })} title="Send key">
               Key
+            </IconButton>
+            <IconButton disabled={Boolean(busy)} onClick={() => sendUse("key", { key: "Backspace" })} title="Backspace">
+              Backspace
+            </IconButton>
+            <IconButton disabled={Boolean(busy)} onClick={() => sendUse("key", { key: "Delete" })} title="Delete">
+              Delete
             </IconButton>
             <IconButton disabled={Boolean(busy)} onClick={() => sendUse("scroll", { direction: "up", amount: 550 })} title="Scroll up">
               Up
