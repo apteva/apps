@@ -7,8 +7,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"net/http"
+	"net/url"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -17,7 +20,12 @@ import (
 	sdk "github.com/apteva/app-sdk"
 )
 
-const backtestAutoStepDelay = 30 * time.Second
+const (
+	backtestAgentQuietWindow      = 5 * time.Second
+	backtestAgentMaxWait          = 90 * time.Second
+	backtestTelemetryPollInterval = 2 * time.Second
+	backtestTelemetryFallbackWait = 30 * time.Second
+)
 
 var (
 	backtestRunnerMu      sync.Mutex
@@ -312,11 +320,15 @@ func runBacktestToEnd(run *BacktestRun) (map[string]any, error) {
 	if run == nil {
 		return nil, errors.New("backtest run required")
 	}
+	waitBeforeFirstStep := false
+	waitSince := time.Now()
 	switch run.Status {
 	case "queued", "failed":
+		waitSince = time.Now()
 		if _, err := startBacktestRun(run); err != nil {
 			return nil, err
 		}
+		waitBeforeFirstStep = true
 	case "paused":
 		if err := dbSetBacktestStatus(globalCtx.AppDB(), run.ID, "running", ""); err != nil {
 			return nil, err
@@ -331,10 +343,14 @@ func runBacktestToEnd(run *BacktestRun) (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
-	started := startBacktestRunner(next)
+	started := startBacktestRunner(next, waitBeforeFirstStep, waitSince)
 	if started {
 		_, _ = dbInsertBacktestEvent(globalCtx.AppDB(), run.ID, "run", "Continuous run started", map[string]any{
-			"settle_seconds": int(backtestAutoStepDelay.Seconds()),
+			"mode":                  "agent_paced",
+			"quiet_seconds":         int(backtestAgentQuietWindow.Seconds()),
+			"max_wait_seconds":      int(backtestAgentMaxWait.Seconds()),
+			"wait_before_first":     waitBeforeFirstStep,
+			"fallback_wait_seconds": int(backtestTelemetryFallbackWait.Seconds()),
 		})
 		emitBacktest("trading.backtest.run", run.ID, map[string]any{"portfolio_id": run.PortfolioID})
 	}
@@ -358,7 +374,7 @@ func pauseBacktestRun(run *BacktestRun) (map[string]any, error) {
 	return map[string]any{"backtest": next, "status": "paused"}, nil
 }
 
-func startBacktestRunner(run *BacktestRun) bool {
+func startBacktestRunner(run *BacktestRun, waitBeforeFirstStep bool, waitSince time.Time) bool {
 	if run == nil || run.ID == 0 {
 		return false
 	}
@@ -372,7 +388,7 @@ func startBacktestRunner(run *BacktestRun) bool {
 	backtestRunnerCancels[run.ID] = worker
 	backtestRunnerMu.Unlock()
 
-	go func(projectID string, runID int64) {
+	go func(projectID string, runID int64, waitBeforeFirst bool, firstWaitSince time.Time) {
 		defer func() {
 			backtestRunnerMu.Lock()
 			if cur := backtestRunnerCancels[runID]; cur == worker {
@@ -380,8 +396,8 @@ func startBacktestRunner(run *BacktestRun) bool {
 			}
 			backtestRunnerMu.Unlock()
 		}()
-		backtestRunnerLoop(ctx, projectID, runID)
-	}(run.ProjectID, run.ID)
+		backtestRunnerLoop(ctx, projectID, runID, waitBeforeFirst, firstWaitSince)
+	}(run.ProjectID, run.ID, waitBeforeFirstStep, waitSince)
 	return true
 }
 
@@ -395,11 +411,17 @@ func stopBacktestRunner(runID int64) {
 	}
 }
 
-func backtestRunnerLoop(ctx context.Context, projectID string, runID int64) {
-	for {
-		if !waitBacktestSettle(ctx) {
+func backtestRunnerLoop(ctx context.Context, projectID string, runID int64, waitBeforeFirstStep bool, firstWaitSince time.Time) {
+	if waitBeforeFirstStep {
+		run, err := dbGetBacktestRun(globalCtx.AppDB(), projectID, runID)
+		if err != nil || run.Status != "running" {
 			return
 		}
+		if !waitBacktestAgentSettled(ctx, run, firstWaitSince) {
+			return
+		}
+	}
+	for {
 		run, err := dbGetBacktestRun(globalCtx.AppDB(), projectID, runID)
 		if err != nil {
 			return
@@ -413,17 +435,28 @@ func backtestRunnerLoop(ctx context.Context, projectID string, runID int64) {
 			emitBacktest("trading.backtest.completed", run.ID, map[string]any{"portfolio_id": run.PortfolioID})
 			return
 		}
+		stepStartedAt := time.Now()
 		if _, err := stepBacktestRun(run); err != nil {
 			_ = dbSetBacktestStatus(globalCtx.AppDB(), run.ID, "failed", err.Error())
 			_, _ = dbInsertBacktestEvent(globalCtx.AppDB(), run.ID, "error", err.Error(), nil)
 			emitBacktest("trading.backtest.failed", run.ID, map[string]any{"error": err.Error()})
 			return
 		}
+		next, err := dbGetBacktestRun(globalCtx.AppDB(), projectID, runID)
+		if err != nil {
+			return
+		}
+		if next.Status != "running" || next.CurrentStep >= next.TotalSteps {
+			continue
+		}
+		if !waitBacktestAgentSettled(ctx, next, stepStartedAt) {
+			return
+		}
 	}
 }
 
-func waitBacktestSettle(ctx context.Context) bool {
-	timer := time.NewTimer(backtestAutoStepDelay)
+func waitBacktestFallback(ctx context.Context) bool {
+	timer := time.NewTimer(backtestTelemetryFallbackWait)
 	defer timer.Stop()
 	select {
 	case <-ctx.Done():
@@ -431,6 +464,131 @@ func waitBacktestSettle(ctx context.Context) bool {
 	case <-timer.C:
 		return true
 	}
+}
+
+type backtestTelemetryEvent struct {
+	ID       string          `json:"id"`
+	AgentID  int64           `json:"instance_id"`
+	ThreadID string          `json:"thread_id"`
+	Type     string          `json:"type"`
+	Time     time.Time       `json:"time"`
+	Data     json.RawMessage `json:"data"`
+}
+
+func waitBacktestAgentSettled(ctx context.Context, run *BacktestRun, since time.Time) bool {
+	if run == nil || run.EnvironmentAgentID == 0 {
+		return waitBacktestFallback(ctx)
+	}
+	if since.IsZero() {
+		since = time.Now()
+	}
+
+	ticker := time.NewTicker(backtestTelemetryPollInterval)
+	defer ticker.Stop()
+	deadline := time.NewTimer(backtestAgentMaxWait)
+	defer deadline.Stop()
+
+	seenActivity := false
+	lastActivityAt := time.Time{}
+	failures := 0
+
+	check := func() (settled bool, telemetryOK bool) {
+		events, err := fetchBacktestTelemetry(ctx, run.EnvironmentAgentID, since, 120)
+		if err != nil {
+			return false, false
+		}
+		for _, ev := range events {
+			if ev.Time.Before(since) {
+				continue
+			}
+			seenActivity = true
+			if ev.Time.After(lastActivityAt) {
+				lastActivityAt = ev.Time
+			}
+		}
+		if !seenActivity {
+			return false, true
+		}
+		return time.Since(lastActivityAt) >= backtestAgentQuietWindow, true
+	}
+
+	for {
+		settled, ok := check()
+		if settled {
+			return true
+		}
+		if !ok {
+			failures++
+			if failures >= 3 {
+				return waitBacktestFallback(ctx)
+			}
+		} else {
+			failures = 0
+		}
+
+		select {
+		case <-ctx.Done():
+			return false
+		case <-deadline.C:
+			return true
+		case <-ticker.C:
+		}
+	}
+}
+
+func fetchBacktestTelemetry(ctx context.Context, agentID int64, since time.Time, limit int) ([]backtestTelemetryEvent, error) {
+	if agentID == 0 {
+		return nil, errors.New("agent_id required")
+	}
+	if limit <= 0 {
+		limit = 120
+	}
+	baseURL := strings.TrimRight(os.Getenv("APTEVA_GATEWAY_URL"), "/")
+	if baseURL == "" {
+		baseURL = "http://127.0.0.1:5280"
+	}
+	u, err := url.Parse(baseURL + "/api/telemetry")
+	if err != nil {
+		return nil, err
+	}
+	q := u.Query()
+	q.Set("agent_id", strconv.FormatInt(agentID, 10))
+	q.Set("limit", strconv.Itoa(limit))
+	if !since.IsZero() {
+		q.Set("since", since.UTC().Format(time.RFC3339))
+	}
+	u.RawQuery = q.Encode()
+
+	reqCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, u.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+	if token := strings.TrimSpace(os.Getenv("APTEVA_APP_TOKEN")); token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	if installID := strings.TrimSpace(os.Getenv("APTEVA_INSTALL_ID")); installID != "" {
+		req.Header.Set("X-Apteva-App-Install-ID", installID)
+	}
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode/100 != 2 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return nil, fmt.Errorf("telemetry http %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	var events []backtestTelemetryEvent
+	if err := json.NewDecoder(resp.Body).Decode(&events); err != nil {
+		return nil, err
+	}
+	if events == nil {
+		events = []backtestTelemetryEvent{}
+	}
+	return events, nil
 }
 
 func stepBacktestRun(run *BacktestRun) (map[string]any, error) {
