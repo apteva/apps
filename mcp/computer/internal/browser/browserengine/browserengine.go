@@ -19,6 +19,7 @@ import (
 	computer "github.com/apteva/apps/mcp/computer/internal/browser/api"
 	"github.com/apteva/apps/mcp/computer/internal/browser/keyinput"
 	"github.com/apteva/apps/mcp/computer/internal/browser/som"
+	"github.com/apteva/apps/mcp/computer/internal/browser/textinput"
 	"github.com/chromedp/cdproto/input"
 	"github.com/chromedp/cdproto/page"
 	"github.com/chromedp/cdproto/target"
@@ -753,12 +754,8 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 		return c.Screenshot()
 
 	case "type":
-		err := chromedp.Run(c.ctx, input.InsertText(action.Text))
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "[BROWSER_ENGINE] insertText failed (%v), falling back to KeyEvent\n", err)
-			if err := chromedp.Run(c.ctx, chromedp.KeyEvent(action.Text)); err != nil {
-				return nil, fmt.Errorf("type: %w", err)
-			}
+		if err := textinput.Type(c.ctx, action.Text, "[BROWSER_ENGINE]"); err != nil {
+			return nil, fmt.Errorf("type: %w", err)
 		}
 		time.Sleep(100 * time.Millisecond)
 		return c.Screenshot()

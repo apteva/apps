@@ -24,6 +24,7 @@ import (
 
 	computer "github.com/apteva/apps/mcp/computer/internal/browser/api"
 	"github.com/apteva/apps/mcp/computer/internal/browser/som"
+	"github.com/apteva/apps/mcp/computer/internal/browser/textinput"
 	"github.com/chromedp/cdproto/emulation"
 	"github.com/chromedp/cdproto/fetch"
 	"github.com/chromedp/cdproto/input"
@@ -770,24 +771,8 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 		return c.Screenshot()
 
 	case "type":
-		// Prefer Input.insertText — it pushes text through Chrome's
-		// input pipeline the same way a paste does, firing real
-		// `input`/`change` events. Works reliably on React/Vue
-		// controlled inputs and doesn't require pixel-perfect
-		// focus; Chrome inserts into the focused editable element
-		// even if the recent click landed on a parent container.
-		//
-		// Fallback: synthesized keystrokes via chromedp.KeyEvent.
-		// insertText requires an editable element to be focused; if
-		// the agent is trying to send text outside an input (e.g.
-		// search-as-you-type on a non-form page), KeyEvent still
-		// dispatches keys at the page level.
-		err := chromedp.Run(c.ctx, input.InsertText(action.Text))
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "[BROWSER] insertText failed (%v), falling back to KeyEvent\n", err)
-			if err := chromedp.Run(c.ctx, chromedp.KeyEvent(action.Text)); err != nil {
-				return nil, fmt.Errorf("type: %w", err)
-			}
+		if err := textinput.Type(c.ctx, action.Text, "[BROWSER]"); err != nil {
+			return nil, fmt.Errorf("type: %w", err)
 		}
 		time.Sleep(100 * time.Millisecond)
 		return c.Screenshot()

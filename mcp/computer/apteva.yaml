@@ -2,9 +2,9 @@ schema: apteva-app/v1
 
 name: computer
 display_name: Computer
-version: 0.7.21
+version: 0.7.22
 description: |
-  Watch and steer browser sessions. v0.7.21 fixes cloud shortcut keys.
+  Watch and steer browser sessions. v0.7.22 improves date/time input.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/computer
@@ -58,7 +58,8 @@ provides:
         use coordinate only for targets with no badge such as canvas or
         custom rendered widgets. Use action=key for browser/editor commands
         such as Tab, Backspace, Control+A, Control+Z; use action=type only
-        for literal text. After scrolling or navigation, take a
+        for literal text and full date/time values such as 2026-06-05 or
+        08:00 PM. After scrolling or navigation, take a
         fresh screenshot because labels are re-enumerated. Args:
         session_id, action, coordinate?, label?, text?, key?, direction?,
         amount?, duration?, annotate? (screenshot only, default true).
