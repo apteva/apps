@@ -283,6 +283,14 @@ interface BacktestEvent {
   data?: Record<string, unknown>;
   created_at: string;
 }
+interface BacktestLiveEvent {
+  id: string;
+  kind: AgentActivity["kind"];
+  summary: string;
+  detail?: string;
+  time: string;
+  status?: AgentActivity["status"];
+}
 const CHART_RANGES = ["1D", "5D", "1M", "3M", "1Y", "ALL"] as const;
 type ChartRange = typeof CHART_RANGES[number];
 
@@ -377,6 +385,11 @@ function toolBaseName(name: unknown): string {
   if (!raw) return "";
   const parts = raw.split(/__|[./:]/).filter(Boolean);
   return parts[parts.length - 1] || raw;
+}
+
+function tradingToolName(name: unknown): string {
+  const base = toolBaseName(name);
+  return base.startsWith("trading_") ? base.slice("trading_".length) : base;
 }
 
 function toolArgs(data: Record<string, any>): Record<string, any> {
@@ -2091,7 +2104,7 @@ function AgentsTab({ portfolio, api, projectId, onChanged, setError }: {
     }
     if (ev.type !== "tool.call" && ev.type !== "tool.result") return;
 
-    const tool = toolBaseName(data.name || data.tool);
+    const tool = tradingToolName(data.name || data.tool);
     if (!TRADING_TOOLS.has(tool)) return;
     const args = toolArgs(data);
     const result = ev.type === "tool.result" ? toolResult(data) : undefined;
@@ -2381,6 +2394,7 @@ function BacktestsTab({ portfolio, api, projectId, setError }: {
   const [runs, setRuns] = useState<BacktestRun[]>([]);
   const [selectedRunId, setSelectedRunId] = useState<number | null>(null);
   const [events, setEvents] = useState<BacktestEvent[]>([]);
+  const [liveEvents, setLiveEvents] = useState<BacktestLiveEvent[]>([]);
   const [busy, setBusy] = useState(false);
   const [name, setName] = useState("");
   const [symbolQuery, setSymbolQuery] = useState("");
@@ -2391,6 +2405,7 @@ function BacktestsTab({ portfolio, api, projectId, setError }: {
   const [startingCash, setStartingCash] = useState("");
   const [feeBps, setFeeBps] = useState("1");
   const [slippageBps, setSlippageBps] = useState("5");
+  const liveSeenRef = useRef<Set<string>>(new Set());
 
   const load = useCallback(async () => {
     if (!portfolio) return;
@@ -2407,6 +2422,7 @@ function BacktestsTab({ portfolio, api, projectId, setError }: {
     () => runs.find((r) => r.id === selectedRunId) || null,
     [runs, selectedRunId],
   );
+  const liveTelemetryProjectId = selectedRun?.environment_id || projectId;
 
   const loadEvents = useCallback(async () => {
     if (!selectedRun) {
@@ -2422,6 +2438,10 @@ function BacktestsTab({ portfolio, api, projectId, setError }: {
   useEffect(() => { load(); }, [load]);
   useEffect(() => { loadEvents(); }, [loadEvents]);
   useEffect(() => {
+    liveSeenRef.current = new Set();
+    setLiveEvents([]);
+  }, [selectedRun?.id]);
+  useEffect(() => {
     api<{ symbols: Mark[] }>("GET", "/universe")
       .then((r) => setUniverse(r.symbols || []))
       .catch(() => undefined);
@@ -2431,6 +2451,62 @@ function BacktestsTab({ portfolio, api, projectId, setError }: {
       load();
       loadEvents();
     }
+  });
+  useTelemetryEvents(liveTelemetryProjectId, (ev) => {
+    if (!selectedRun?.environment_agent_id || ev.instance_id !== selectedRun.environment_agent_id) return;
+    const data = ev.data || {};
+    const key = `telemetry:${ev.id || `${ev.instance_id}:${ev.thread_id}:${ev.type}:${ev.time}`}`;
+    if (liveSeenRef.current.has(key)) return;
+    liveSeenRef.current.add(key);
+
+    let item: BacktestLiveEvent | null = null;
+    if (ev.type === "event.received") {
+      item = {
+        id: key,
+        kind: "event",
+        summary: compactText(data.message || "Replay step received"),
+        time: ev.time,
+        status: "info",
+      };
+    } else if (ev.type === "llm.start") {
+      item = { id: key, kind: "thinking", summary: "Agent thinking", time: ev.time, status: "running" };
+    } else if (ev.type === "llm.done") {
+      const summary = compactText(data.message || data.summary, "Agent finished thinking");
+      item = { id: key, kind: "thinking", summary: summary.slice(0, 220), time: ev.time, status: "success" };
+    } else if (ev.type === "tool.call" || ev.type === "tool.result") {
+      const tool = tradingToolName(data.name || data.tool);
+      if (!TRADING_TOOLS.has(tool)) return;
+      const args = toolArgs(data);
+      const result = ev.type === "tool.result" ? toolResult(data) : undefined;
+      item = {
+        id: key,
+        kind: activityKindForTool(tool),
+        summary: summarizeTradingTool(tool, args, result),
+        detail: ev.type === "tool.call" ? "running" : durationLabel(data.duration_ms),
+        time: ev.time,
+        status: ev.type === "tool.call" ? "running" : (data.is_error ? "error" : "success"),
+      };
+    } else if (ev.type.includes("error")) {
+      item = {
+        id: key,
+        kind: "error",
+        summary: compactText(data.error || data.message || ev.type, ev.type),
+        time: ev.time,
+        status: "error",
+      };
+    }
+    if (!item) return;
+    setLiveEvents((prev) => [item!, ...prev.filter((x) => x.id !== item!.id)].slice(0, 80));
+  });
+  useAppEvents("trading", selectedRun?.environment_id || null, (ev) => {
+    if (!selectedRun?.environment_id || ev.project_id !== selectedRun.environment_id) return;
+    if (ev.topic === "tick") return;
+    const key = `app:${ev.seq}:${ev.topic}`;
+    if (liveSeenRef.current.has(key)) return;
+    liveSeenRef.current.add(key);
+    const item = summarizeBacktestAppEvent(key, ev.topic, (ev.data || {}) as Record<string, any>, ev.time);
+    if (!item) return;
+    setLiveEvents((prev) => [item, ...prev.filter((x) => x.id !== item.id)].slice(0, 80));
   });
 
   useEffect(() => {
@@ -2583,7 +2659,7 @@ function BacktestsTab({ portfolio, api, projectId, setError }: {
             </div>
             <div>
               {selectedRun ? (
-                <BacktestRunDetail run={selectedRun} events={events} busy={busy} onAction={action} />
+                <BacktestRunDetail run={selectedRun} events={events} liveEvents={liveEvents} busy={busy} onAction={action} />
               ) : (
                 <EmptyState title="Select a run" />
               )}
@@ -2595,9 +2671,10 @@ function BacktestsTab({ portfolio, api, projectId, setError }: {
   );
 }
 
-function BacktestRunDetail({ run, events, busy, onAction }: {
+function BacktestRunDetail({ run, events, liveEvents, busy, onAction }: {
   run: BacktestRun;
   events: BacktestEvent[];
+  liveEvents: BacktestLiveEvent[];
   busy: boolean;
   onAction: (run: BacktestRun, op: "start" | "step" | "cancel") => void;
 }) {
@@ -2643,6 +2720,29 @@ function BacktestRunDetail({ run, events, busy, onAction }: {
         {run.error && <div className="mt-2 text-xs text-red">{run.error}</div>}
       </div>
       <div className="border border-border rounded bg-bg-card overflow-hidden">
+        <div className="px-3 py-2 border-b border-border text-xs font-semibold uppercase tracking-wide text-text-dim">
+          Live agent activity
+        </div>
+        {liveEvents.length === 0 ? (
+          <EmptyState title="No live activity yet" />
+        ) : liveEvents.map((ev) => (
+          <div key={ev.id} className="px-3 py-2 border-t first:border-t-0 border-border flex gap-2">
+            <span className={`mt-1 w-2 h-2 rounded-full shrink-0 ${liveEventDotClass(ev)}`} />
+            <div className="min-w-0 flex-1">
+              <div className="flex gap-2 text-xs">
+                <span className="font-semibold uppercase tracking-wide text-accent">{ev.kind}</span>
+                <span className="text-text-dim">{relTime(ev.time)}</span>
+                {ev.detail && <span className="text-text-dim truncate">{ev.detail}</span>}
+              </div>
+              <div className="text-sm mt-0.5 break-words">{ev.summary}</div>
+            </div>
+          </div>
+        ))}
+      </div>
+      <div className="border border-border rounded bg-bg-card overflow-hidden">
+        <div className="px-3 py-2 border-b border-border text-xs font-semibold uppercase tracking-wide text-text-dim">
+          Backtest events
+        </div>
         {events.length === 0 ? (
           <EmptyState title="No events" />
         ) : events.map((ev) => (
@@ -2657,6 +2757,40 @@ function BacktestRunDetail({ run, events, busy, onAction }: {
       </div>
     </div>
   );
+}
+
+function summarizeBacktestAppEvent(id: string, topic: string, data: Record<string, any>, time: string): BacktestLiveEvent | null {
+  const symbol = compactText(data.symbol || data.order?.symbol || data.position?.symbol);
+  if (topic === "trading.backtest.market_step") {
+    return { id, kind: "market", summary: "Loaded replay market prices", time, status: "info" };
+  }
+  if (topic === "order.placed") {
+    const side = compactText(data.side || data.order?.side).toUpperCase();
+    const qty = compactText(data.qty || data.order?.qty);
+    return { id, kind: "order", summary: `Order placed ${[side, qty, symbol].filter(Boolean).join(" ")}`, time, status: "running" };
+  }
+  if (topic === "order.filled") {
+    const side = compactText(data.side || data.order?.side).toUpperCase();
+    const qty = compactText(data.qty || data.filled_qty || data.order?.qty);
+    const price = Number(data.avg_fill_price || data.price || data.order?.avg_fill_price);
+    const px = Number.isFinite(price) ? ` @ ${formatPrice(price, inferAssetClass(symbol))}` : "";
+    return { id, kind: "order", summary: `Order filled ${[side, qty, symbol].filter(Boolean).join(" ")}${px}`, time, status: "success" };
+  }
+  if (topic === "journal.appended") {
+    return { id, kind: "journal", summary: compactText(data.body || data.kind || "Journal entry added").slice(0, 220), time, status: "success" };
+  }
+  if (topic === "position.changed") {
+    return { id, kind: "risk", summary: `Position updated${symbol ? ` · ${symbol}` : ""}`, time, status: "success" };
+  }
+  return { id, kind: "event", summary: topic, time, status: "info" };
+}
+
+function liveEventDotClass(ev: BacktestLiveEvent): string {
+  if (ev.status === "error") return "bg-red";
+  if (ev.status === "running") return "bg-amber animate-pulse";
+  if (ev.kind === "order") return "bg-green";
+  if (ev.kind === "market") return "bg-accent";
+  return "bg-text-dim";
 }
 
 function BacktestStatus({ status }: { status: BacktestRun["status"] }) {
