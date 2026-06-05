@@ -145,6 +145,34 @@ func maybeUnwireHostname(ctx *sdk.AppCtx, hostname, projectID string) {
 	}
 }
 
+// reconcileRegisteredRoutes refreshes Routes with this sidecar's
+// current APTEVA_APP_PORT after a restart. Routes stores concrete
+// targets for proxy-mode Caddy/nginx, so a sidecar port change must be
+// pushed even when no redirect rule changed.
+func reconcileRegisteredRoutes(ctx *sdk.AppCtx) {
+	if ctx == nil || ctx.AppDB() == nil {
+		return
+	}
+	hosts, err := dbDistinctHostnames(ctx.AppDB(), "")
+	if err != nil {
+		ctx.Logger().Warn("redirects route reconcile list failed", "err", err.Error())
+		return
+	}
+	if len(hosts) == 0 {
+		return
+	}
+	var refreshed, failed int
+	for _, host := range hosts {
+		if err := registerRoute(ctx, host); err != nil {
+			failed++
+			ctx.Logger().Warn("redirects route reconcile failed", "host", host, "err", err.Error())
+			continue
+		}
+		refreshed++
+	}
+	ctx.Logger().Info("redirects routes reconciled", "refreshed", refreshed, "failed", failed, "target", sidecarTarget())
+}
+
 // ─── routes ───────────────────────────────────────────────────────
 
 func registerRoute(ctx *sdk.AppCtx, hostname string) error {
