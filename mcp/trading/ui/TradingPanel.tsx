@@ -74,6 +74,50 @@ function useAppEvents<T = unknown>(
   }, [app, projectId]);
 }
 
+function useDirectAppEvents<T = unknown>(
+  app: string,
+  projectId: string | undefined | null,
+  onEvent: (ev: AppEventEnvelope<T>) => void,
+) {
+  const handlerRef = useRef(onEvent);
+  handlerRef.current = onEvent;
+  useEffect(() => {
+    if (!app || !projectId) return;
+    let lastSeq = 0;
+    let es: EventSource | null = null;
+    let cancelled = false;
+    let reconnectTimer: number | null = null;
+    const connect = () => {
+      if (cancelled) return;
+      const url =
+        `/api/app-events/${encodeURIComponent(app)}` +
+        `?project_id=${encodeURIComponent(projectId)}` +
+        (lastSeq > 0 ? `&since=${lastSeq}` : "");
+      es = new EventSource(url, { withCredentials: true });
+      es.onmessage = (e) => {
+        try {
+          const ev = JSON.parse(e.data) as AppEventEnvelope<T>;
+          if (ev.seq <= lastSeq) return;
+          lastSeq = ev.seq;
+          handlerRef.current(ev);
+        } catch {}
+      };
+      es.onerror = () => {
+        if (es && es.readyState === EventSource.CLOSED) {
+          if (reconnectTimer) window.clearTimeout(reconnectTimer);
+          reconnectTimer = window.setTimeout(connect, 2000);
+        }
+      };
+    };
+    connect();
+    return () => {
+      cancelled = true;
+      if (reconnectTimer) window.clearTimeout(reconnectTimer);
+      if (es) es.close();
+    };
+  }, [app, projectId]);
+}
+
 // ─── Dashboard telemetry subscription ─────────────────────────────
 
 interface TelemetryEvent {
@@ -114,6 +158,26 @@ function useTelemetryEvents(
       if (es) es.close();
     };
   }, [projectId]);
+}
+
+function useEnvironmentAgentTelemetryEvents(
+  environmentId: string | undefined | null,
+  instanceId: number | undefined | null,
+  onEvent: (ev: TelemetryEvent) => void,
+) {
+  const handlerRef = useRef(onEvent);
+  handlerRef.current = onEvent;
+  useEffect(() => {
+    if (!environmentId || !instanceId) return;
+    const url =
+      `/api/environments/${encodeURIComponent(environmentId)}` +
+      `/agents/${encodeURIComponent(String(instanceId))}/events`;
+    const es = new EventSource(url, { withCredentials: true });
+    es.onmessage = (e) => {
+      try { handlerRef.current(JSON.parse(e.data) as TelemetryEvent); } catch {}
+    };
+    return () => es.close();
+  }, [environmentId, instanceId]);
 }
 
 // ─── Types ─────────────────────────────────────────────────────────
@@ -2422,7 +2486,8 @@ function BacktestsTab({ portfolio, api, projectId, setError }: {
     () => runs.find((r) => r.id === selectedRunId) || null,
     [runs, selectedRunId],
   );
-  const liveTelemetryProjectId = selectedRun?.environment_id || projectId;
+  const liveEnvironmentID = selectedRun?.environment_id || null;
+  const liveAgentID = selectedRun?.environment_agent_id || null;
 
   const loadEvents = useCallback(async () => {
     if (!selectedRun) {
@@ -2442,6 +2507,26 @@ function BacktestsTab({ portfolio, api, projectId, setError }: {
     setLiveEvents([]);
   }, [selectedRun?.id]);
   useEffect(() => {
+    if (!liveAgentID) return;
+    let cancelled = false;
+    fetch(`/api/telemetry?agent_id=${encodeURIComponent(String(liveAgentID))}&limit=80`, {
+      credentials: "include",
+    })
+      .then((r) => r.ok ? r.json() : Promise.reject(new Error(`telemetry backfill: ${r.status}`)))
+      .then((events: TelemetryEvent[]) => {
+        if (cancelled) return;
+        const items = (events || [])
+          .slice()
+          .reverse()
+          .map(summarizeBacktestTelemetryEvent)
+          .filter((item): item is BacktestLiveEvent => !!item);
+        if (items.length === 0) return;
+        setLiveEvents((prev) => mergeBacktestLiveEvents(prev, items, liveSeenRef.current));
+      })
+      .catch(() => undefined);
+    return () => { cancelled = true; };
+  }, [liveAgentID, selectedRun?.id]);
+  useEffect(() => {
     api<{ symbols: Mark[] }>("GET", "/universe")
       .then((r) => setUniverse(r.symbols || []))
       .catch(() => undefined);
@@ -2452,54 +2537,14 @@ function BacktestsTab({ portfolio, api, projectId, setError }: {
       loadEvents();
     }
   });
-  useTelemetryEvents(liveTelemetryProjectId, (ev) => {
-    if (!selectedRun?.environment_agent_id || ev.instance_id !== selectedRun.environment_agent_id) return;
-    const data = ev.data || {};
-    const key = `telemetry:${ev.id || `${ev.instance_id}:${ev.thread_id}:${ev.type}:${ev.time}`}`;
-    if (liveSeenRef.current.has(key)) return;
-    liveSeenRef.current.add(key);
-
-    let item: BacktestLiveEvent | null = null;
-    if (ev.type === "event.received") {
-      item = {
-        id: key,
-        kind: "event",
-        summary: compactText(data.message || "Replay step received"),
-        time: ev.time,
-        status: "info",
-      };
-    } else if (ev.type === "llm.start") {
-      item = { id: key, kind: "thinking", summary: "Agent thinking", time: ev.time, status: "running" };
-    } else if (ev.type === "llm.done") {
-      const summary = compactText(data.message || data.summary, "Agent finished thinking");
-      item = { id: key, kind: "thinking", summary: summary.slice(0, 220), time: ev.time, status: "success" };
-    } else if (ev.type === "tool.call" || ev.type === "tool.result") {
-      const tool = tradingToolName(data.name || data.tool);
-      if (!TRADING_TOOLS.has(tool)) return;
-      const args = toolArgs(data);
-      const result = ev.type === "tool.result" ? toolResult(data) : undefined;
-      item = {
-        id: key,
-        kind: activityKindForTool(tool),
-        summary: summarizeTradingTool(tool, args, result),
-        detail: ev.type === "tool.call" ? "running" : durationLabel(data.duration_ms),
-        time: ev.time,
-        status: ev.type === "tool.call" ? "running" : (data.is_error ? "error" : "success"),
-      };
-    } else if (ev.type.includes("error")) {
-      item = {
-        id: key,
-        kind: "error",
-        summary: compactText(data.error || data.message || ev.type, ev.type),
-        time: ev.time,
-        status: "error",
-      };
-    }
+  useEnvironmentAgentTelemetryEvents(liveEnvironmentID, liveAgentID, (ev) => {
+    if (!liveAgentID || ev.instance_id !== liveAgentID) return;
+    const item = summarizeBacktestTelemetryEvent(ev);
     if (!item) return;
-    setLiveEvents((prev) => [item!, ...prev.filter((x) => x.id !== item!.id)].slice(0, 80));
+    setLiveEvents((prev) => mergeBacktestLiveEvents(prev, [item], liveSeenRef.current));
   });
-  useAppEvents("trading", selectedRun?.environment_id || null, (ev) => {
-    if (!selectedRun?.environment_id || ev.project_id !== selectedRun.environment_id) return;
+  useDirectAppEvents("trading", liveEnvironmentID, (ev) => {
+    if (!liveEnvironmentID || ev.project_id !== liveEnvironmentID) return;
     if (ev.topic === "tick") return;
     const key = `app:${ev.seq}:${ev.topic}`;
     if (liveSeenRef.current.has(key)) return;
@@ -2757,6 +2802,65 @@ function BacktestRunDetail({ run, events, liveEvents, busy, onAction }: {
       </div>
     </div>
   );
+}
+
+function summarizeBacktestTelemetryEvent(ev: TelemetryEvent): BacktestLiveEvent | null {
+  const data = ev.data || {};
+  const key = `telemetry:${ev.id || `${ev.instance_id}:${ev.thread_id}:${ev.type}:${ev.time}`}`;
+  if (ev.type === "event.received") {
+    return {
+      id: key,
+      kind: "event",
+      summary: compactText(data.message || "Replay step received"),
+      time: ev.time,
+      status: "info",
+    };
+  }
+  if (ev.type === "llm.start") {
+    return { id: key, kind: "thinking", summary: "Agent thinking", time: ev.time, status: "running" };
+  }
+  if (ev.type === "llm.done") {
+    const summary = compactText(data.message || data.summary, "Agent finished thinking");
+    return { id: key, kind: "thinking", summary: summary.slice(0, 220), time: ev.time, status: "success" };
+  }
+  if (ev.type === "tool.call" || ev.type === "tool.result") {
+    const tool = tradingToolName(data.name || data.tool);
+    if (!TRADING_TOOLS.has(tool)) return null;
+    const args = toolArgs(data);
+    const result = ev.type === "tool.result" ? toolResult(data) : undefined;
+    return {
+      id: key,
+      kind: activityKindForTool(tool),
+      summary: summarizeTradingTool(tool, args, result),
+      detail: ev.type === "tool.call" ? "running" : durationLabel(data.duration_ms),
+      time: ev.time,
+      status: ev.type === "tool.call" ? "running" : (data.is_error ? "error" : "success"),
+    };
+  }
+  if (ev.type.includes("error")) {
+    return {
+      id: key,
+      kind: "error",
+      summary: compactText(data.error || data.message || ev.type, ev.type),
+      time: ev.time,
+      status: "error",
+    };
+  }
+  return null;
+}
+
+function mergeBacktestLiveEvents(
+  previous: BacktestLiveEvent[],
+  incoming: BacktestLiveEvent[],
+  seen: Set<string>,
+): BacktestLiveEvent[] {
+  let next = previous;
+  for (const item of incoming) {
+    if (seen.has(item.id)) continue;
+    seen.add(item.id);
+    next = [item, ...next.filter((x) => x.id !== item.id)];
+  }
+  return next.slice(0, 80);
 }
 
 function summarizeBacktestAppEvent(id: string, topic: string, data: Record<string, any>, time: string): BacktestLiveEvent | null {
