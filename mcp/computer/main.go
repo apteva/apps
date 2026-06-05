@@ -41,9 +41,9 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: computer
 display_name: Computer
-version: 0.7.19
+version: 0.7.20
 description: |
-  Watch and steer browser sessions. v0.7.19 shows session lifetimes.
+  Watch and steer browser sessions. v0.7.20 keeps idle reaper internal.
 scopes: [project, global]
 requires:
   permissions:
@@ -1116,7 +1116,6 @@ type sessionInfo struct {
 	KeepAlive         bool   `json:"keep_alive"`
 	TimeoutSeconds    int    `json:"timeout_seconds,omitempty"`
 	ProviderExpiresAt string `json:"provider_expires_at,omitempty"`
-	AppIdleExpiresAt  string `json:"app_idle_expires_at"`
 	CurrentURL        string `json:"current_url"`
 	DebugURL          string `json:"debug_url,omitempty"`
 	StreamURL         string `json:"stream_url,omitempty"`
@@ -1179,7 +1178,6 @@ func (a *App) sessionInfo(id string, s *session) sessionInfo {
 		KeepAlive:         s.keepAlive,
 		TimeoutSeconds:    s.timeout,
 		ProviderExpiresAt: providerExpiresAt,
-		AppIdleExpiresAt:  s.lastUsed.Add(idleTTL).UTC().Format(time.RFC3339),
 		CurrentURL:        currentURL(s.comp),
 		DebugURL:          debugURL(s.comp),
 		StreamURL:         streamURL(s.comp),
@@ -1203,7 +1201,6 @@ func (a *App) sessionOutput(id string, s *session) map[string]any {
 		"keep_alive":          info.KeepAlive,
 		"timeout_seconds":     info.TimeoutSeconds,
 		"provider_expires_at": info.ProviderExpiresAt,
-		"app_idle_expires_at": info.AppIdleExpiresAt,
 		"current_url":         info.CurrentURL,
 		"debug_url":           info.DebugURL,
 		"stream_url":          info.StreamURL,
@@ -1358,7 +1355,6 @@ func (a *App) sessionEventPayload(id string, s *session) map[string]any {
 		"keep_alive":          info.KeepAlive,
 		"timeout_seconds":     info.TimeoutSeconds,
 		"provider_expires_at": info.ProviderExpiresAt,
-		"app_idle_expires_at": info.AppIdleExpiresAt,
 		"current_url":         info.CurrentURL,
 		"width":               info.Width,
 		"height":              info.Height,
@@ -1413,7 +1409,6 @@ func reapedSessionEventPayload(row reapedSession) map[string]any {
 		"keep_alive":          row.KeepAlive,
 		"timeout_seconds":     row.TimeoutSeconds,
 		"provider_expires_at": providerExpiresAt(row.OpenedAt, row.TimeoutSeconds),
-		"app_idle_expires_at": row.LastUsedAt.Add(idleTTL).UTC().Format(time.RFC3339),
 		"current_url":         row.CurrentURL,
 		"width":               row.Width,
 		"height":              row.Height,

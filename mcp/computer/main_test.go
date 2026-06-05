@@ -725,8 +725,8 @@ func TestBrowserbaseOpenExposesAndForwardsLeaseControls(t *testing.T) {
 	if outMap["provider_expires_at"] == "" {
 		t.Fatalf("output provider_expires_at missing: %#v", outMap)
 	}
-	if outMap["app_idle_expires_at"] == "" {
-		t.Fatalf("output app_idle_expires_at missing: %#v", outMap)
+	if _, ok := outMap["app_idle_expires_at"]; ok {
+		t.Fatalf("output leaked internal app_idle_expires_at: %#v", outMap)
 	}
 
 	for _, toolName := range []string{"browser_session", "browser_open"} {

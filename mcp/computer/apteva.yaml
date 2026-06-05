@@ -2,9 +2,9 @@ schema: apteva-app/v1
 
 name: computer
 display_name: Computer
-version: 0.7.19
+version: 0.7.20
 description: |
-  Watch and steer browser sessions. v0.7.19 shows session lifetimes.
+  Watch and steer browser sessions. v0.7.20 keeps idle reaper internal.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/computer

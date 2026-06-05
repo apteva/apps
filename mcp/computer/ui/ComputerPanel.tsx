@@ -86,7 +86,6 @@ interface SessionRow {
   keep_alive?: boolean;
   timeout_seconds?: number;
   provider_expires_at?: string;
-  app_idle_expires_at?: string;
   current_url: string;
   debug_url?: string;
   stream_url?: string;
@@ -556,7 +555,6 @@ function BrowserListItem({
   const lastUsedAgo = relativeAge(row.last_used_at, now);
   const viewport = row.width && row.height ? `${row.width}x${row.height}` : "";
   const providerLife = providerLifetimeLabel(row, now);
-  const appIdleLife = relativeUntil(row.app_idle_expires_at, now);
   return (
     <li>
       <button
@@ -676,10 +674,6 @@ function BrowserListItem({
           <span title={row.provider_expires_at ? formatTime(row.provider_expires_at) : "Provider default timeout"}>
             {providerLife}
           </span>
-          <span>App idle</span>
-          <span title={row.app_idle_expires_at ? formatTime(row.app_idle_expires_at) : ""}>
-            {appIdleLife}
-          </span>
         </div>
       </button>
     </li>
@@ -774,7 +768,6 @@ function SessionDetail({
   const currentURL = session.current_url || "-";
   const viewport = `${session.width ?? 0} x ${session.height ?? 0}`;
   const providerLife = providerLifetimeLabel(session, now);
-  const appIdleLife = relativeUntil(session.app_idle_expires_at, now);
 
   return (
     <Card fullWidth className="h-full min-h-0 flex flex-col overflow-hidden">
@@ -931,7 +924,6 @@ function SessionDetail({
             { label: "Keep alive", value: session.keep_alive ? "yes" : "no" },
             { label: "Provider timeout", value: session.timeout_seconds ? formatDurationSeconds(session.timeout_seconds) : "provider default" },
             { label: "Provider expires", value: session.provider_expires_at ? `${providerLife} (${formatTime(session.provider_expires_at)})` : providerLife },
-            { label: "App idle close", value: session.app_idle_expires_at ? `${appIdleLife} (${formatTime(session.app_idle_expires_at)})` : appIdleLife },
             { label: "Current URL", value: currentURL },
             { label: "Viewport", value: viewport },
             { label: "Opened", value: formatTime(session.opened_at) },
