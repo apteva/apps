@@ -148,6 +148,65 @@ func TestComputerAppBrowserDateTimeTyping(t *testing.T) {
 	}
 }
 
+// TestComputerAppBrowserShortcutKeys verifies that browser/editor command
+// keys are dispatched as real key events instead of literal text. It defaults
+// to local and can also run against Browserbase because the fixture is a data:
+// URL and does not need localhost access.
+//
+//	RUN_COMPUTER_APP_BROWSER_TESTS=1 APTEVA_HEADLESS_BROWSER=1 go test -run TestComputerAppBrowserShortcutKeys -timeout 3m .
+//	RUN_COMPUTER_APP_BROWSER_TESTS=1 COMPUTER_APP_BROWSER_BACKEND=browserbase BROWSERBASE_API_KEY=... BROWSERBASE_PROJECT_ID=... go test -run TestComputerAppBrowserShortcutKeys -timeout 5m .
+func TestComputerAppBrowserShortcutKeys(t *testing.T) {
+	if os.Getenv("RUN_COMPUTER_APP_BROWSER_TESTS") == "" {
+		t.Skip("set RUN_COMPUTER_APP_BROWSER_TESTS=1 to run the real browser shortcut key test")
+	}
+	backend := strings.TrimSpace(os.Getenv("COMPUTER_APP_BROWSER_BACKEND"))
+	if backend == "" {
+		backend = "local"
+	}
+	if backend == "browserbase" && (os.Getenv("BROWSERBASE_API_KEY") == "" || os.Getenv("BROWSERBASE_PROJECT_ID") == "") {
+		t.Skip("COMPUTER_APP_BROWSER_BACKEND=browserbase requires BROWSERBASE_API_KEY and BROWSERBASE_PROJECT_ID")
+	}
+
+	sc := tk.SpawnSidecar(t, ".", tk.WithEnv("APTEVA_HEADLESS_BROWSER", "1"))
+	open := sc.MCP("browser_session", map[string]any{
+		"action":  "open",
+		"backend": backend,
+		"url":     shortcutKeysDataURL(),
+		"viewport": map[string]any{
+			"width":  900,
+			"height": 500,
+		},
+	})
+	sessionID, _ := open["session_id"].(string)
+	if sessionID == "" {
+		t.Fatalf("open returned no session_id: %v", open)
+	}
+	defer sc.MCP("browser_close", map[string]any{"session_id": sessionID})
+
+	_ = sc.MCP("computer_use", map[string]any{"session_id": sessionID, "action": "click", "coordinate": fcoord(260, 104)})
+	_ = sc.MCP("computer_use", map[string]any{"session_id": sessionID, "action": "key", "key": "Tab"})
+	_ = sc.MCP("computer_use", map[string]any{"session_id": sessionID, "action": "click", "coordinate": fcoord(260, 104)})
+	_ = sc.MCP("computer_use", map[string]any{"session_id": sessionID, "action": "key", "key": "Control+A"})
+	_ = sc.MCP("computer_use", map[string]any{"session_id": sessionID, "action": "type", "text": "X"})
+	_ = sc.MCP("computer_use", map[string]any{"session_id": sessionID, "action": "key", "key": "Backspace"})
+	_ = sc.MCP("computer_use", map[string]any{"session_id": sessionID, "action": "type", "text": "Z"})
+	_ = sc.MCP("computer_use", map[string]any{"session_id": sessionID, "action": "key", "key": "Control+Z"})
+
+	deadline := time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) {
+		out := sc.MCP("computer_use", map[string]any{
+			"session_id": sessionID,
+			"action":     "wait",
+			"duration":   250,
+		})
+		if strings.Contains(stringValue(out["current_url"]), "computer_key_test=pass") {
+			return
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
+	t.Fatal("shortcut key test did not reach pass URL")
+}
+
 func decodeScreenshot(t *testing.T, out map[string]any) []byte {
 	t.Helper()
 	b64, _ := out["screenshot_b64"].(string)
@@ -192,6 +251,40 @@ func stringValue(v any) string {
 		return s
 	}
 	return ""
+}
+
+func shortcutKeysDataURL() string {
+	html := `<!doctype html>
+<meta charset="utf-8">
+<title>Shortcut key test</title>
+<style>
+  body { font: 20px system-ui, sans-serif; margin: 0; }
+  label { position: absolute; left: 40px; width: 120px; height: 48px; line-height: 48px; }
+  input { position: absolute; left: 180px; width: 300px; font: inherit; padding: 8px; height: 48px; box-sizing: border-box; }
+  #a-label, #a { top: 80px; }
+  #b-label, #b { top: 160px; }
+</style>
+<label id="a-label" for="a">First</label><input id="a" value="alpha">
+<label id="b-label" for="b">Second</label><input id="b">
+<script>
+const state = {tab:false, selectAll:false, backspace:false, undo:false};
+const a = document.getElementById("a");
+const b = document.getElementById("b");
+b.addEventListener("focus", () => { state.tab = true; check(); });
+a.addEventListener("input", () => {
+  if (a.value === "X") state.selectAll = true;
+  if (state.selectAll && a.value === "") state.backspace = true;
+  if (state.backspace && a.value === "Z") state.typedZ = true;
+  if (state.typedZ && a.value === "") state.undo = true;
+  check();
+});
+function check() {
+  if (state.tab && state.selectAll && state.backspace && state.undo) {
+    location.href = "about:blank#computer_key_test=pass";
+  }
+}
+</script>`
+	return "data:text/html;charset=utf-8," + url.PathEscape(html)
 }
 
 func temporalInputsHTML() string {
