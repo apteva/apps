@@ -373,6 +373,14 @@ func (a *App) toolPortfolioCreate(ctx *sdk.AppCtx, args map[string]any) (any, er
 	if err != nil {
 		return nil, err
 	}
+	if strings.TrimSpace(strArg(args, "source_override")) == "backtest" {
+		if err := dbUpdatePortfolioConfig(ctx.AppDB(), id, map[string]any{
+			"source_override": "backtest",
+			"pricing_mode":    "backtest",
+		}); err != nil {
+			return nil, err
+		}
+	}
 	emit("portfolio.created", map[string]any{
 		"id": id, "name": name, "mandate": mandate,
 		"allowed_classes": classes, "starting_cash": cash,

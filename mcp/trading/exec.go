@@ -32,13 +32,13 @@ type engine struct {
 	platform sdk.PlatformClient
 
 	// Metrics surfaced via /healthz/details. Used by tests too.
-	mu                   sync.Mutex
-	lastTickAt           time.Time
-	ticks                int64
-	fillsThisRun         int64
-	lastWorkingSeen      int64
-	lastFillsThisTick    int64
-	lastMarksRefreshed   int64
+	mu                 sync.Mutex
+	lastTickAt         time.Time
+	ticks              int64
+	fillsThisRun       int64
+	lastWorkingSeen    int64
+	lastFillsThisTick  int64
+	lastMarksRefreshed int64
 
 	// significantMarkDeltas state — the last price emitted per symbol,
 	// so we send only meaningful changes on the `tick` event. Separate
@@ -64,10 +64,10 @@ func (e *engine) snapshotMetrics() map[string]any {
 var globalEngine *engine
 
 const (
-	slippageBps      = 1.0     // 1 bp default; sells fill below mark, buys above
-	feePerOrder      = 0.0     // paper — no fees in v0.1
-	defaultLossHalt  = -5.0    // %
-	priceTolerance   = 1e-9
+	slippageBps     = 1.0  // 1 bp default; sells fill below mark, buys above
+	feePerOrder     = 0.0  // paper — no fees in v0.1
+	defaultLossHalt = -5.0 // %
+	priceTolerance  = 1e-9
 )
 
 // markTick — runs every tick_seconds. Refreshes marks, then attempts
@@ -86,33 +86,36 @@ func markTick(ctx context.Context, app *sdk.AppCtx) error {
 	// and commit the rows that did succeed. This is the difference
 	// between "one weird symbol stalls the engine" and "engine
 	// ticks reliably regardless of provider hiccups".
-	marks := e.provider.Universe()
 	marksOK := 0
-	if tx, err := e.db.Begin(); err == nil {
-		for _, m := range marks {
-			if _, err := tx.Exec(`
-				INSERT INTO marks (symbol, asset_class, price, no_price, prev_close, volume_24h, marked_at)
-				VALUES (?, ?, ?, ?, ?, ?, ?)
-				ON CONFLICT(symbol) DO UPDATE SET
-					asset_class = excluded.asset_class,
-					price       = excluded.price,
-					no_price    = excluded.no_price,
-					prev_close  = excluded.prev_close,
-					volume_24h  = excluded.volume_24h,
-					marked_at   = excluded.marked_at`,
-				m.Symbol, m.AssetClass, m.Price, nullable(m.NoPrice), nullable(m.PrevClose),
-				nullable(m.Volume24h), m.MarkedAt); err != nil {
-				e.logger.Warn("upsert mark failed", "symbol", m.Symbol, "err", err)
-				continue
+	marks := []*Mark{}
+	if !dbHasBacktestPortfolio(e.db, projectIDFromEnvOnly()) {
+		marks = e.provider.Universe()
+		if tx, err := e.db.Begin(); err == nil {
+			for _, m := range marks {
+				if _, err := tx.Exec(`
+					INSERT INTO marks (symbol, asset_class, price, no_price, prev_close, volume_24h, marked_at)
+					VALUES (?, ?, ?, ?, ?, ?, ?)
+					ON CONFLICT(symbol) DO UPDATE SET
+						asset_class = excluded.asset_class,
+						price       = excluded.price,
+						no_price    = excluded.no_price,
+						prev_close  = excluded.prev_close,
+						volume_24h  = excluded.volume_24h,
+						marked_at   = excluded.marked_at`,
+					m.Symbol, m.AssetClass, m.Price, nullable(m.NoPrice), nullable(m.PrevClose),
+					nullable(m.Volume24h), m.MarkedAt); err != nil {
+					e.logger.Warn("upsert mark failed", "symbol", m.Symbol, "err", err)
+					continue
+				}
+				marksOK++
 			}
-			marksOK++
+			if err := tx.Commit(); err != nil {
+				e.logger.Warn("mark batch commit failed", "err", err)
+				marksOK = 0
+			}
+		} else {
+			e.logger.Warn("mark batch begin failed", "err", err)
 		}
-		if err := tx.Commit(); err != nil {
-			e.logger.Warn("mark batch commit failed", "err", err)
-			marksOK = 0
-		}
-	} else {
-		e.logger.Warn("mark batch begin failed", "err", err)
 	}
 
 	// 2. Working orders — dispatch per portfolio mode.
@@ -223,10 +226,10 @@ func markTick(ctx context.Context, app *sdk.AppCtx) error {
 	// heartbeat the UI uses to confirm liveness.
 	delta := significantMarkDeltas(e, marks)
 	emit("tick", map[string]any{
-		"n":              tickN,
-		"providers":      providerHealthSnapshot(),
-		"marks":          delta,
-		"working":        len(working),
+		"n":               tickN,
+		"providers":       providerHealthSnapshot(),
+		"marks":           delta,
+		"working":         len(working),
 		"fills_this_tick": fillsThisTick,
 	})
 	return nil
@@ -234,8 +237,10 @@ func markTick(ctx context.Context, app *sdk.AppCtx) error {
 
 // significantMarkDeltas filters the universe to symbols whose mark
 // moved enough to bother sending. Threshold per asset class:
-//   crypto/equity/etf — 0.1% relative move
-//   polymarket        — 0.5 cent (0.005) absolute move on YES
+//
+//	crypto/equity/etf — 0.1% relative move
+//	polymarket        — 0.5 cent (0.005) absolute move on YES
+//
 // On the very first tick (no last-emitted yet) we send everything so
 // fresh subscribers don't have to wait for movement.
 func significantMarkDeltas(e *engine, marks []*Mark) []*Mark {
@@ -361,9 +366,12 @@ func tryFill(e *engine, o *Order) error {
 		// Stop fires when mark crosses; turns into market.
 		ok := false
 		switch o.Side {
-		case "buy":  ok = mp >= *o.StopPrice
-		case "sell": ok = mp <= *o.StopPrice
-		default:     return nil // no stops on polymarket in v0.1
+		case "buy":
+			ok = mp >= *o.StopPrice
+		case "sell":
+			ok = mp <= *o.StopPrice
+		default:
+			return nil // no stops on polymarket in v0.1
 		}
 		if !ok {
 			return nil
@@ -410,20 +418,24 @@ func tryFill(e *engine, o *Order) error {
 		return err
 	}
 	if err := dbInsertFill(tx, pf.ProjectID, o.ID, pf.ID, o.Qty, fillPrice, feePerOrder); err != nil {
-		_ = tx.Rollback(); return err
+		_ = tx.Rollback()
+		return err
 	}
 	if err := dbMarkOrderFilled(tx, o.ID, o.Qty, fillPrice); err != nil {
-		_ = tx.Rollback(); return err
+		_ = tx.Rollback()
+		return err
 	}
 	if err := dbApplyFill(tx, pf.ID, pf.ProjectID, o, o.Qty, fillPrice); err != nil {
-		_ = tx.Rollback(); return err
+		_ = tx.Rollback()
+		return err
 	}
 	body := fmt.Sprintf("%s %s %v @ %s — %s",
 		strings.ToUpper(o.Symbol), strings.ToUpper(o.Side), o.Qty, formatPrice(fillPrice, o.AssetClass), o.ID)
 	if err := dbInsertJournalTx(tx, pf.ProjectID, pf.ID, "fill", body, map[string]any{
 		"order_id": o.ID, "qty": o.Qty, "price": fillPrice, "side": o.Side, "symbol": o.Symbol,
 	}); err != nil {
-		_ = tx.Rollback(); return err
+		_ = tx.Rollback()
+		return err
 	}
 	if err := tx.Commit(); err != nil {
 		return err
@@ -441,8 +453,8 @@ func tryFill(e *engine, o *Order) error {
 	if newPos, _ := dbGetPosition(e.db, pf.ID, o.Symbol, polyOutcome(o)); newPos != nil {
 		emit("position.changed", map[string]any{
 			"portfolio_id": pf.ID, "symbol": newPos.Symbol,
-			"asset_class":  newPos.AssetClass, "outcome": newPos.Outcome,
-			"qty":          newPos.Qty, "avg_cost": newPos.AvgCost,
+			"asset_class": newPos.AssetClass, "outcome": newPos.Outcome,
+			"qty": newPos.Qty, "avg_cost": newPos.AvgCost,
 			"realized_pnl": newPos.RealizedPnL,
 		})
 	} else {

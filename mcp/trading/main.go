@@ -43,7 +43,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: trading
 display_name: Trading
-version: 0.4.19
+version: 0.4.20
 description: Trading desk for Apteva agents (paper + live via per-portfolio broker integration).
 author: Apteva
 scopes: [project, global]
@@ -190,9 +190,12 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		platform: ctx.PlatformAPI(),
 	}
 
-	// Prime marks so the first market_quote call doesn't 404.
-	for _, m := range provider.Universe() {
-		_ = dbUpsertMark(ctx.AppDB(), m)
+	// Prime marks so the first market_quote call doesn't 404. Backtest
+	// environments must keep the replay marks loaded by backtest_market_step.
+	if !dbHasBacktestPortfolio(ctx.AppDB(), projectIDFromEnvOnly()) {
+		for _, m := range provider.Universe() {
+			_ = dbUpsertMark(ctx.AppDB(), m)
+		}
 	}
 
 	// Log which provider impl actually got wired so operators can

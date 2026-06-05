@@ -194,6 +194,56 @@ func dbCreatePortfolio(db *sql.DB, p *Portfolio) (int64, error) {
 	return res.LastInsertId()
 }
 
+func dbUpdatePortfolioConfig(db *sql.DB, id int64, updates map[string]any) error {
+	if len(updates) == 0 {
+		return nil
+	}
+	var raw string
+	if err := db.QueryRow(`SELECT config_json FROM portfolios WHERE id = ?`, id).Scan(&raw); err != nil {
+		return err
+	}
+	cfg := map[string]any{}
+	if strings.TrimSpace(raw) != "" {
+		_ = json.Unmarshal([]byte(raw), &cfg)
+	}
+	for k, v := range updates {
+		cfg[k] = v
+	}
+	next, err := json.Marshal(cfg)
+	if err != nil {
+		return err
+	}
+	_, err = db.Exec(`UPDATE portfolios SET config_json = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, string(next), id)
+	return err
+}
+
+func dbHasBacktestPortfolio(db *sql.DB, projectID string) bool {
+	rows, err := db.Query(`
+		SELECT config_json FROM portfolios
+		WHERE (? = '' OR project_id = ?) AND status != 'halted'`,
+		projectID, projectID)
+	if err != nil {
+		return false
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var raw string
+		if err := rows.Scan(&raw); err != nil {
+			continue
+		}
+		cfg := map[string]any{}
+		if err := json.Unmarshal([]byte(raw), &cfg); err != nil {
+			continue
+		}
+		if fmt.Sprint(cfg["source_override"]) == "backtest" ||
+			fmt.Sprint(cfg["pricing_mode"]) == "backtest" ||
+			fmt.Sprint(cfg["source"]) == "backtest" {
+			return true
+		}
+	}
+	return false
+}
+
 func dbGetPortfolio(db *sql.DB, projectID string, id int64) (*Portfolio, error) {
 	row := db.QueryRow(`
 		SELECT id, project_id, name, COALESCE(agent_id, ''), mandate, allowed_classes,

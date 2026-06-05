@@ -71,3 +71,40 @@ func TestBacktestSnapshots_UpsertAndMetrics(t *testing.T) {
 		t.Fatalf("max_drawdown_pct=%v, want about -2.45", metrics["max_drawdown_pct"])
 	}
 }
+
+func TestBacktestPerformance_RepricesPositionsFromReplayMarks(t *testing.T) {
+	positions := []*Position{{
+		Symbol:      "BTC-USD",
+		AssetClass:  "crypto",
+		Qty:         0.3,
+		AvgCost:     69319.25,
+		MarketPrice: 70000,
+		MarketValue: 21000,
+	}}
+	prices := []map[string]any{{"symbol": "BTC-USD", "price": 69263.7251, "asset_class": "crypto"}}
+
+	equity, openPnL, openPnLPct, realized, exposure := valueBacktestPositions(79220.88247, positions, prices)
+
+	wantMarketValue := 0.3 * 69263.7251
+	if math.Abs(positions[0].MarketPrice-69263.7251) > 0.0001 {
+		t.Fatalf("market price=%v, want replay price", positions[0].MarketPrice)
+	}
+	if math.Abs(positions[0].MarketValue-wantMarketValue) > 0.0001 {
+		t.Fatalf("market value=%v, want %v", positions[0].MarketValue, wantMarketValue)
+	}
+	if math.Abs(openPnL-(-16.65747)) > 0.0001 {
+		t.Fatalf("open pnl=%v, want replay-priced pnl", openPnL)
+	}
+	if math.Abs(equity-100000) > 0.0001 {
+		t.Fatalf("equity=%v, want 100000", equity)
+	}
+	if openPnLPct >= 0 {
+		t.Fatalf("open pnl pct=%v, want negative", openPnLPct)
+	}
+	if realized != 0 {
+		t.Fatalf("realized=%v, want 0", realized)
+	}
+	if exposure <= 0 {
+		t.Fatalf("exposure=%v, want positive", exposure)
+	}
+}

@@ -444,30 +444,78 @@ func fetchBacktestEnvironmentPerformance(run *BacktestRun) (*BacktestSnapshot, *
 	if acct.Cash == 0 {
 		acct.Cash = pfResp.Portfolio.Cash
 	}
-	exposure := 0.0
-	realized := 0.0
-	for _, p := range posResp.Positions {
-		exposure += math.Abs(p.MarketValue)
-		realized += p.RealizedPnL
+	if acct.BuyingPower == 0 {
+		acct.BuyingPower = acct.Cash
 	}
-	if acct.Equity > 0 {
-		exposure = exposure / acct.Equity * 100
+	prices := backtestSummaryPrices(run)
+	equity, openPnL, openPnLPct, realized, exposure := valueBacktestPositions(acct.Cash, posResp.Positions, prices)
+	if equity == 0 && acct.Equity > 0 {
+		equity = acct.Equity
+		openPnL = acct.OpenPnL
+		openPnLPct = acct.OpenPnLPct
 	}
 	snap := &BacktestSnapshot{
 		RunID:       run.ID,
 		Step:        run.CurrentStep,
-		Equity:      acct.Equity,
+		Equity:      equity,
 		Cash:        acct.Cash,
 		BuyingPower: acct.BuyingPower,
-		OpenPnL:     acct.OpenPnL,
-		OpenPnLPct:  acct.OpenPnLPct,
+		OpenPnL:     openPnL,
+		OpenPnLPct:  openPnLPct,
 		RealizedPnL: realized,
 		Exposure:    exposure,
 		Positions:   posResp.Positions,
 		Orders:      ordResp.Orders,
-		Prices:      backtestSummaryPrices(run),
+		Prices:      prices,
 	}
 	return snap, pfResp.Portfolio, posResp.Positions, ordResp.Orders, journalResp.Entries, nil
+}
+
+func valueBacktestPositions(cash float64, positions []*Position, prices []map[string]any) (equity, openPnL, openPnLPct, realizedPnL, exposure float64) {
+	priceBySymbol := map[string]float64{}
+	for _, row := range prices {
+		symbol := strings.ToUpper(strings.TrimSpace(fmt.Sprint(row["symbol"])))
+		price := anyFloat(row["price"])
+		if symbol != "" && price > 0 {
+			priceBySymbol[symbol] = price
+		}
+	}
+	grossMarketValue := 0.0
+	costBasis := 0.0
+	for _, p := range positions {
+		if p == nil {
+			continue
+		}
+		if price := priceBySymbol[strings.ToUpper(strings.TrimSpace(p.Symbol))]; price > 0 {
+			p.MarketPrice = price
+		}
+		if p.MarketPrice <= 0 {
+			p.MarketPrice = p.AvgCost
+		}
+		p.MarketValue = p.Qty * p.MarketPrice
+		p.UnrealizedPnL = (p.MarketPrice - p.AvgCost) * p.Qty
+		if p.AvgCost > 0 {
+			p.UnrealizedPnLPct = (p.MarketPrice/p.AvgCost - 1) * 100
+		}
+		grossMarketValue += p.MarketValue
+		openPnL += p.UnrealizedPnL
+		realizedPnL += p.RealizedPnL
+		exposure += math.Abs(p.MarketValue)
+		costBasis += math.Abs(p.Qty * p.AvgCost)
+	}
+	equity = cash + grossMarketValue
+	if costBasis > 0 {
+		openPnLPct = openPnL / costBasis * 100
+	}
+	if equity > 0 {
+		exposure = exposure / equity * 100
+		for _, p := range positions {
+			if p != nil {
+				p.WeightPct = p.MarketValue / equity * 100
+			}
+		}
+	}
+	return equity, openPnL, openPnLPct, realizedPnL, exposure
 }
 
 func backtestSeriesWithBaseline(run *BacktestRun, snapshots []*BacktestSnapshot) []*BacktestSnapshot {

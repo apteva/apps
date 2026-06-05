@@ -29,7 +29,9 @@ func TestEngine_ConcurrentOrderPlace(t *testing.T) {
 
 	// Tick a couple of times before placement so marks are warm and
 	// any market order will fill at the latest mark.
-	if err := markTick(nil, ctx); err != nil { t.Fatal(err) }
+	if err := markTick(nil, ctx); err != nil {
+		t.Fatal(err)
+	}
 
 	const N = 20
 	var wg sync.WaitGroup
@@ -90,7 +92,9 @@ func TestEngine_TickFills_Market(t *testing.T) {
 	if out.(map[string]any)["status"] != "working" {
 		t.Fatalf("place status: %v", out)
 	}
-	if err := markTick(nil, ctx); err != nil { t.Fatal(err) }
+	if err := markTick(nil, ctx); err != nil {
+		t.Fatal(err)
+	}
 
 	if globalEngine.lastFillsThisTick != 1 {
 		t.Errorf("metrics: lastFillsThisTick=%d, want 1", globalEngine.lastFillsThisTick)
@@ -101,6 +105,56 @@ func TestEngine_TickFills_Market(t *testing.T) {
 	filled, _ := dbListOrders(ctx.AppDB(), id, "filled", 10)
 	if len(filled) != 1 {
 		t.Errorf("expected 1 filled, got %d", len(filled))
+	}
+}
+
+func TestEngine_BacktestTickPreservesReplayMarkAndFills(t *testing.T) {
+	ctx := newTestCtx(t)
+	id := mustCreatePortfolio(t, ctx, "BacktestTick", []string{"crypto"})
+	if err := dbUpdatePortfolioConfig(ctx.AppDB(), id, map[string]any{
+		"source_override": "backtest",
+		"pricing_mode":    "backtest",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	replayPrice := 50000.0
+	if err := dbUpsertMark(ctx.AppDB(), &Mark{
+		Symbol:     "BTC-USD",
+		AssetClass: "crypto",
+		Price:      replayPrice,
+		MarkedAt:   "2026-01-01T00:00:00Z",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	app := &App{}
+
+	out, _ := app.toolOrderPlace(ctx, map[string]any{
+		"portfolio_id": float64(id),
+		"symbol":       "BTC-USD",
+		"side":         "buy",
+		"type":         "market",
+		"qty":          0.01,
+		"rationale":    "backtest replay orders fill at the replay mark.",
+	})
+	if out.(map[string]any)["status"] != "working" {
+		t.Fatalf("place status: %v", out)
+	}
+	if err := markTick(nil, ctx); err != nil {
+		t.Fatal(err)
+	}
+	mark, err := dbGetMark(ctx.AppDB(), "BTC-USD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mark.Price != replayPrice {
+		t.Fatalf("mark price=%v, want replay price %v", mark.Price, replayPrice)
+	}
+	if globalEngine.lastMarksRefreshed != 0 {
+		t.Fatalf("lastMarksRefreshed=%d, want 0 for replay tick", globalEngine.lastMarksRefreshed)
+	}
+	filled, _ := dbListOrders(ctx.AppDB(), id, "filled", 10)
+	if len(filled) != 1 {
+		t.Fatalf("filled orders=%d, want 1", len(filled))
 	}
 }
 
@@ -153,7 +207,9 @@ func TestEngine_TickLeavesLimit_NotCrossed(t *testing.T) {
 func TestEngine_TickMetricsRecorded(t *testing.T) {
 	ctx := newTestCtx(t)
 	t0 := globalEngine.lastTickAt
-	if err := markTick(nil, ctx); err != nil { t.Fatal(err) }
+	if err := markTick(nil, ctx); err != nil {
+		t.Fatal(err)
+	}
 	if !globalEngine.lastTickAt.After(t0) && globalEngine.ticks == 0 {
 		t.Errorf("lastTickAt did not advance")
 	}
@@ -272,11 +328,11 @@ func TestOrderPlace_AcceptsStringPortfolioID(t *testing.T) {
 	id := mustCreatePortfolio(t, ctx, "StringID", []string{"equity"})
 	app := &App{}
 	out, err := app.toolOrderPlace(ctx, map[string]any{
-		"portfolio_id": fmtIntString(id),                // STRING
+		"portfolio_id": fmtIntString(id), // STRING
 		"symbol":       "AAPL",
 		"side":         "buy",
 		"type":         "market",
-		"qty":          "1",                              // STRING
+		"qty":          "1", // STRING
 		"rationale":    "stringified args — proves opencode-go shape works for the trading tool surface.",
 	})
 	if err != nil {
@@ -292,7 +348,9 @@ func fmtIntString(n int64) string {
 	// Avoid pulling in strconv at the top of an _test.go that's
 	// already terse; this is fine for tests.
 	out := ""
-	if n == 0 { return "0" }
+	if n == 0 {
+		return "0"
+	}
 	for n > 0 {
 		out = string(rune('0'+(n%10))) + out
 		n /= 10
