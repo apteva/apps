@@ -8,6 +8,7 @@ package main
 import (
 	"errors"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -27,6 +28,8 @@ func (a *App) MCPTools() []sdk.Tool {
 				"starting_cash":   map[string]any{"type": "number"},
 				"mode":            map[string]any{"type": "string", "enum": []string{"paper", "live"}},
 				"broker_slug":     map[string]any{"type": "string"},
+				"fee_bps":         map[string]any{"type": "number"},
+				"slippage_bps":    map[string]any{"type": "number"},
 			}, []string{"name"}),
 			Handler: a.toolPortfolioCreate},
 
@@ -373,11 +376,19 @@ func (a *App) toolPortfolioCreate(ctx *sdk.AppCtx, args map[string]any) (any, er
 	if err != nil {
 		return nil, err
 	}
+	configUpdates := map[string]any{}
 	if strings.TrimSpace(strArg(args, "source_override")) == "backtest" {
-		if err := dbUpdatePortfolioConfig(ctx.AppDB(), id, map[string]any{
-			"source_override": "backtest",
-			"pricing_mode":    "backtest",
-		}); err != nil {
+		configUpdates["source_override"] = "backtest"
+		configUpdates["pricing_mode"] = "backtest"
+	}
+	if _, ok := args["fee_bps"]; ok {
+		configUpdates["fee_bps"] = math.Max(0, anyFloat(args["fee_bps"]))
+	}
+	if _, ok := args["slippage_bps"]; ok {
+		configUpdates["slippage_bps"] = math.Max(0, anyFloat(args["slippage_bps"]))
+	}
+	if len(configUpdates) > 0 {
+		if err := dbUpdatePortfolioConfig(ctx.AppDB(), id, configUpdates); err != nil {
 			return nil, err
 		}
 	}

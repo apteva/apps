@@ -9,6 +9,7 @@ package main
 // regression can't reappear silently.
 
 import (
+	"math"
 	"strings"
 	"sync"
 	"testing"
@@ -155,6 +156,72 @@ func TestEngine_BacktestTickPreservesReplayMarkAndFills(t *testing.T) {
 	filled, _ := dbListOrders(ctx.AppDB(), id, "filled", 10)
 	if len(filled) != 1 {
 		t.Fatalf("filled orders=%d, want 1", len(filled))
+	}
+}
+
+func TestEngine_BacktestExecutionSettingsApplySlippageAndFee(t *testing.T) {
+	ctx := newTestCtx(t)
+	id := mustCreatePortfolio(t, ctx, "BacktestCosts", []string{"crypto"})
+	if err := dbUpdatePortfolioConfig(ctx.AppDB(), id, map[string]any{
+		"source_override": "backtest",
+		"pricing_mode":    "backtest",
+		"fee_bps":         1.0,
+		"slippage_bps":    5.0,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	replayPrice := 69263.7251
+	qty := 0.36
+	if err := dbUpsertMark(ctx.AppDB(), &Mark{
+		Symbol:     "BTC-USD",
+		AssetClass: "crypto",
+		Price:      replayPrice,
+		MarkedAt:   "2026-01-01T00:00:00Z",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	app := &App{}
+	out, _ := app.toolOrderPlace(ctx, map[string]any{
+		"portfolio_id": float64(id),
+		"symbol":       "BTC-USD",
+		"side":         "buy",
+		"type":         "market",
+		"qty":          qty,
+		"rationale":    "backtest cost settings apply to fills.",
+	})
+	if out.(map[string]any)["status"] != "working" {
+		t.Fatalf("place status: %v", out)
+	}
+	if err := markTick(nil, ctx); err != nil {
+		t.Fatal(err)
+	}
+
+	wantFill := replayPrice * 1.0005
+	wantFee := qty * wantFill * 0.0001
+	wantCash := 100000 - qty*wantFill - wantFee
+	pf, err := dbGetPortfolio(ctx.AppDB(), "test-proj", id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if math.Abs(pf.Cash-wantCash) > 0.0001 {
+		t.Fatalf("cash=%v, want %v", pf.Cash, wantCash)
+	}
+	pos, err := dbGetPosition(ctx.AppDB(), id, "BTC-USD", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if math.Abs(pos.AvgCost-wantFill) > 0.0001 {
+		t.Fatalf("avg cost=%v, want %v", pos.AvgCost, wantFill)
+	}
+	var fillPrice, fee float64
+	if err := ctx.AppDB().QueryRow(`SELECT price, fee FROM fills WHERE portfolio_id = ?`, id).Scan(&fillPrice, &fee); err != nil {
+		t.Fatal(err)
+	}
+	if math.Abs(fillPrice-wantFill) > 0.0001 {
+		t.Fatalf("fill price=%v, want %v", fillPrice, wantFill)
+	}
+	if math.Abs(fee-wantFee) > 0.0001 {
+		t.Fatalf("fee=%v, want %v", fee, wantFee)
 	}
 }
 

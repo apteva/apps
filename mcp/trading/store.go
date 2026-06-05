@@ -117,6 +117,11 @@ type Alert struct {
 	FiredAt     string  `json:"fired_at,omitempty"`
 }
 
+type PortfolioExecutionSettings struct {
+	FeeBps      float64
+	SlippageBps float64
+}
+
 type BacktestRun struct {
 	ID                     int64          `json:"id"`
 	ProjectID              string         `json:"project_id,omitempty"`
@@ -215,6 +220,37 @@ func dbUpdatePortfolioConfig(db *sql.DB, id int64, updates map[string]any) error
 	}
 	_, err = db.Exec(`UPDATE portfolios SET config_json = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, string(next), id)
 	return err
+}
+
+func dbPortfolioConfig(db *sql.DB, id int64) (map[string]any, error) {
+	var raw string
+	if err := db.QueryRow(`SELECT config_json FROM portfolios WHERE id = ?`, id).Scan(&raw); err != nil {
+		return nil, err
+	}
+	cfg := map[string]any{}
+	if strings.TrimSpace(raw) != "" {
+		_ = json.Unmarshal([]byte(raw), &cfg)
+	}
+	return cfg, nil
+}
+
+func dbPortfolioExecutionSettings(db *sql.DB, id int64) PortfolioExecutionSettings {
+	cfg, err := dbPortfolioConfig(db, id)
+	if err != nil {
+		return PortfolioExecutionSettings{FeeBps: defaultFeeBps, SlippageBps: defaultSlippageBps}
+	}
+	fee := anyFloat(cfg["fee_bps"])
+	if fee < 0 {
+		fee = 0
+	}
+	slippage := anyFloat(cfg["slippage_bps"])
+	if slippage < 0 {
+		slippage = defaultSlippageBps
+	}
+	if _, ok := cfg["slippage_bps"]; !ok {
+		slippage = defaultSlippageBps
+	}
+	return PortfolioExecutionSettings{FeeBps: fee, SlippageBps: slippage}
 }
 
 func dbHasBacktestPortfolio(db *sql.DB, projectID string) bool {

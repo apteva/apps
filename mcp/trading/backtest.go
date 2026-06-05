@@ -235,6 +235,8 @@ func startBacktestRun(run *BacktestRun) (map[string]any, error) {
 		"starting_cash":   run.StartingCash,
 		"mode":            "paper",
 		"source_override": "backtest",
+		"fee_bps":         run.FeeBps,
+		"slippage_bps":    run.SlippageBps,
 	}, &created); err != nil {
 		_ = api.DestroyEnvironment(env.ID)
 		return nil, fmt.Errorf("seed environment portfolio: %w", err)

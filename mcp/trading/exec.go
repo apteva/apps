@@ -64,10 +64,10 @@ func (e *engine) snapshotMetrics() map[string]any {
 var globalEngine *engine
 
 const (
-	slippageBps     = 1.0  // 1 bp default; sells fill below mark, buys above
-	feePerOrder     = 0.0  // paper — no fees in v0.1
-	defaultLossHalt = -5.0 // %
-	priceTolerance  = 1e-9
+	defaultSlippageBps = 1.0  // 1 bp default; sells fill below mark, buys above
+	defaultFeeBps      = 0.0  // paper default unless a portfolio overrides it
+	defaultLossHalt    = -5.0 // %
+	priceTolerance     = 1e-9
 )
 
 // markTick — runs every tick_seconds. Refreshes marks, then attempts
@@ -336,11 +336,13 @@ func tryFill(e *engine, o *Order) error {
 		}
 	}
 
+	settings := dbPortfolioExecutionSettings(e.db, pf.ID)
+
 	// Decide fill price by order type.
 	var fillPrice float64
 	switch o.Type {
 	case "market":
-		fillPrice = applySlippage(mp, o.Side)
+		fillPrice = applySlippage(mp, o.Side, settings.SlippageBps)
 	case "limit":
 		if o.LimitPrice == nil {
 			return nil
@@ -376,14 +378,15 @@ func tryFill(e *engine, o *Order) error {
 		if !ok {
 			return nil
 		}
-		fillPrice = applySlippage(mp, o.Side)
+		fillPrice = applySlippage(mp, o.Side, settings.SlippageBps)
 	default:
 		return nil
 	}
+	fee := fillFee(o.Qty, fillPrice, settings.FeeBps)
 
 	// Validate post-trade against cash (buys) / position (sells).
 	if isBuySide(o.Side) {
-		needed := o.Qty * fillPrice
+		needed := o.Qty*fillPrice + fee
 		if pf.Cash < needed-1e-6 {
 			detail := fmt.Sprintf("need %.2f, have %.2f", needed, pf.Cash)
 			_ = dbRejectOrder(e.db, o.ID, "insufficient_cash", detail)
@@ -417,7 +420,7 @@ func tryFill(e *engine, o *Order) error {
 	if err != nil {
 		return err
 	}
-	if err := dbInsertFill(tx, pf.ProjectID, o.ID, pf.ID, o.Qty, fillPrice, feePerOrder); err != nil {
+	if err := dbInsertFill(tx, pf.ProjectID, o.ID, pf.ID, o.Qty, fillPrice, fee); err != nil {
 		_ = tx.Rollback()
 		return err
 	}
@@ -429,10 +432,18 @@ func tryFill(e *engine, o *Order) error {
 		_ = tx.Rollback()
 		return err
 	}
+	if fee > 0 {
+		if _, err := tx.Exec(`UPDATE portfolios SET cash = cash - ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, fee, pf.ID); err != nil {
+			_ = tx.Rollback()
+			return err
+		}
+	}
 	body := fmt.Sprintf("%s %s %v @ %s — %s",
 		strings.ToUpper(o.Symbol), strings.ToUpper(o.Side), o.Qty, formatPrice(fillPrice, o.AssetClass), o.ID)
 	if err := dbInsertJournalTx(tx, pf.ProjectID, pf.ID, "fill", body, map[string]any{
-		"order_id": o.ID, "qty": o.Qty, "price": fillPrice, "side": o.Side, "symbol": o.Symbol,
+		"order_id": o.ID, "qty": o.Qty, "price": fillPrice, "fee": fee,
+		"fee_bps": settings.FeeBps, "slippage_bps": settings.SlippageBps,
+		"side": o.Side, "symbol": o.Symbol,
 	}); err != nil {
 		_ = tx.Rollback()
 		return err
@@ -448,7 +459,7 @@ func tryFill(e *engine, o *Order) error {
 	// re-fetching the whole portfolio.
 	emit("order.filled", map[string]any{
 		"order_id": o.ID, "portfolio_id": pf.ID, "symbol": o.Symbol,
-		"side": o.Side, "qty": o.Qty, "price": fillPrice,
+		"side": o.Side, "qty": o.Qty, "price": fillPrice, "fee": fee,
 	})
 	if newPos, _ := dbGetPosition(e.db, pf.ID, o.Symbol, polyOutcome(o)); newPos != nil {
 		emit("position.changed", map[string]any{
@@ -481,8 +492,8 @@ func polyOutcome(o *Order) string {
 
 // applySlippage — sells fill below mark, buys above. The trader always
 // pays the spread.
-func applySlippage(mark float64, side string) float64 {
-	bp := slippageBps / 10_000.0
+func applySlippage(mark float64, side string, bps float64) float64 {
+	bp := bps / 10_000.0
 	switch side {
 	case "buy", "yes", "no":
 		return mark + mark*bp
@@ -490,6 +501,13 @@ func applySlippage(mark float64, side string) float64 {
 		return mark - mark*bp
 	}
 	return mark
+}
+
+func fillFee(qty, price, bps float64) float64 {
+	if qty <= 0 || price <= 0 || bps <= 0 {
+		return 0
+	}
+	return qty * price * bps / 10_000.0
 }
 
 func isBuySide(side string) bool {
