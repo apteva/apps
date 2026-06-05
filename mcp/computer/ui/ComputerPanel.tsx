@@ -172,6 +172,7 @@ export default function ComputerPanel({ projectId }: NativePanelProps) {
   const [err, setErr] = useState<string | null>(null);
   const [selected, setSelected] = useState<string | null>(null);
   const [eventPreviewTick, setEventPreviewTick] = useState(0);
+  const [nowTick, setNowTick] = useState(Date.now());
   const [showOpen, setShowOpen] = useState(false);
   const [pendingClose, setPendingClose] = useState<string | null>(null);
   const [pendingContextDelete, setPendingContextDelete] = useState<string | null>(null);
@@ -206,6 +207,11 @@ export default function ComputerPanel({ projectId }: NativePanelProps) {
     const t = setInterval(refresh, POLL_MS);
     return () => clearInterval(t);
   }, [refresh]);
+
+  useEffect(() => {
+    const t = setInterval(() => setNowTick(Date.now()), 60_000);
+    return () => clearInterval(t);
+  }, []);
 
   useAppEvents<ComputerEventData>("computer", projectId, (ev) => {
     switch (ev.topic) {
@@ -312,6 +318,7 @@ export default function ComputerPanel({ projectId }: NativePanelProps) {
         rows={rows}
         err={err}
         selected={selected}
+        now={nowTick}
         onSelect={setSelected}
         onClose={setPendingClose}
         onOpen={() => setShowOpen(true)}
@@ -374,6 +381,7 @@ function BrowsersList({
   rows,
   err,
   selected,
+  now,
   onSelect,
   onClose,
   onOpen,
@@ -385,6 +393,7 @@ function BrowsersList({
   rows: SessionRow[];
   err: string | null;
   selected: string | null;
+  now: number;
   onSelect: (id: string) => void;
   onClose: (id: string) => void;
   onOpen: () => void;
@@ -429,6 +438,7 @@ function BrowsersList({
               key={r.session_id}
               row={r}
               selected={r.session_id === selected}
+              now={now}
               onSelect={() => onSelect(r.session_id)}
               onClose={() => onClose(r.session_id)}
             />
@@ -525,15 +535,21 @@ function BrowsersList({
 function BrowserListItem({
   row,
   selected,
+  now,
   onSelect,
   onClose,
 }: {
   row: SessionRow;
   selected: boolean;
+  now: number;
   onSelect: () => void;
   onClose: () => void;
 }) {
   const host = hostFor(row.current_url);
+  const contextLabel = row.context_name || row.app_context_id || row.context_id || "";
+  const openedAgo = relativeAge(row.opened_at, now);
+  const lastUsedAgo = relativeAge(row.last_used_at, now);
+  const viewport = row.width && row.height ? `${row.width}x${row.height}` : "";
   return (
     <li>
       <button
@@ -546,7 +562,7 @@ function BrowserListItem({
             : "border-border text-text hover:bg-bg-subtle")
         }
         style={{
-          padding: "8px 10px",
+          padding: "9px 10px",
           borderRadius: "6px",
           cursor: "pointer",
           display: "block",
@@ -601,6 +617,7 @@ function BrowserListItem({
             display: "flex",
             gap: "6px",
             alignItems: "center",
+            minWidth: 0,
           }}
         >
           <span>{BACKEND_LABEL[row.backend] ?? row.backend}</span>
@@ -614,6 +631,37 @@ function BrowserListItem({
             }}
           >
             {row.session_id}
+          </span>
+        </div>
+        <div
+          className="text-text-muted"
+          style={{
+            marginTop: "6px",
+            display: "grid",
+            gridTemplateColumns: "auto 1fr",
+            columnGap: "8px",
+            rowGap: "2px",
+            fontSize: "11px",
+            lineHeight: 1.35,
+          }}
+        >
+          <span>Opened</span>
+          <span className="text-text" title={formatTime(row.opened_at)}>
+            {openedAgo}
+          </span>
+          <span>Context</span>
+          <span
+            className={contextLabel ? "text-text" : "text-text-muted"}
+            title={contextLabel || "No saved context"}
+            style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0 }}
+          >
+            {contextLabel || "none"}
+            {contextLabel && row.persist === false ? " (read-only)" : ""}
+          </span>
+          <span>Last used</span>
+          <span title={formatTime(row.last_used_at)}>
+            {lastUsedAgo}
+            {viewport ? ` | ${viewport}` : ""}
           </span>
         </div>
       </button>
@@ -1428,4 +1476,17 @@ function formatTime(iso: string): string {
   } catch {
     return iso;
   }
+}
+
+function relativeAge(iso: string, now: number): string {
+  const then = Date.parse(iso);
+  if (!Number.isFinite(then)) return "-";
+  const seconds = Math.max(0, Math.floor((now - then) / 1000));
+  if (seconds < 60) return "just now";
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ${minutes % 60}m ago`;
+  const days = Math.floor(hours / 24);
+  return `${days}d ${hours % 24}h ago`;
 }

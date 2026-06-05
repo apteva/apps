@@ -41,10 +41,10 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: computer
 display_name: Computer
-version: 0.7.16
+version: 0.7.17
 description: |
-  Watch and steer browser sessions. v0.7.16 pins panel HTTP events
-  to the active project AppBus lane.
+  Watch and steer browser sessions. v0.7.17 shows richer session
+  metadata in the panel.
 scopes: [project, global]
 requires:
   permissions:
