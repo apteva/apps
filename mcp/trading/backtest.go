@@ -88,6 +88,13 @@ func (a *App) handleHTTPBacktests(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		httpJSON(w, 200, map[string]any{"events": events})
+	case action == "performance" && r.Method == http.MethodGet:
+		perf, err := backtestPerformance(run)
+		if err != nil {
+			httpErr(w, 500, err.Error())
+			return
+		}
+		httpJSON(w, 200, map[string]any{"performance": perf})
 	default:
 		httpErr(w, 404, "no such backtest route")
 	}
@@ -319,7 +326,223 @@ func stepBacktestRun(run *BacktestRun) (map[string]any, error) {
 		emitBacktest("trading.backtest.completed", run.ID, map[string]any{"portfolio_id": run.PortfolioID})
 	}
 	next, _ := dbGetBacktestRun(globalCtx.AppDB(), run.ProjectID, run.ID)
+	_, _ = backtestPerformance(next)
 	return map[string]any{"backtest": next}, nil
+}
+
+type BacktestPerformance struct {
+	Current   *BacktestSnapshot   `json:"current,omitempty"`
+	Series    []*BacktestSnapshot `json:"series"`
+	Portfolio *Portfolio          `json:"portfolio,omitempty"`
+	Positions []*Position         `json:"positions"`
+	Orders    []*Order            `json:"orders"`
+	Entries   []*JournalEntry     `json:"entries"`
+	Metrics   map[string]float64  `json:"metrics"`
+	Error     string              `json:"error,omitempty"`
+}
+
+func backtestPerformance(run *BacktestRun) (*BacktestPerformance, error) {
+	if run == nil {
+		return nil, errors.New("backtest run required")
+	}
+	perf := &BacktestPerformance{
+		Series:    []*BacktestSnapshot{},
+		Positions: []*Position{},
+		Orders:    []*Order{},
+		Entries:   []*JournalEntry{},
+		Metrics:   map[string]float64{},
+	}
+
+	if run.EnvironmentID != "" && run.EnvironmentPortfolioID > 0 && globalCtx.PlatformAPI() != nil {
+		current, portfolio, positions, orders, entries, err := fetchBacktestEnvironmentPerformance(run)
+		if err != nil {
+			perf.Error = err.Error()
+		} else if current != nil {
+			perf.Current = current
+			perf.Portfolio = portfolio
+			perf.Positions = positions
+			perf.Orders = orders
+			perf.Entries = entries
+			_ = dbUpsertBacktestSnapshot(globalCtx.AppDB(), current)
+		}
+	}
+
+	series, err := dbListBacktestSnapshots(globalCtx.AppDB(), run.ID)
+	if err != nil {
+		return nil, err
+	}
+	perf.Series = backtestSeriesWithBaseline(run, series)
+	if perf.Current == nil && len(perf.Series) > 0 {
+		perf.Current = perf.Series[len(perf.Series)-1]
+	}
+	if perf.Positions == nil {
+		perf.Positions = []*Position{}
+	}
+	if perf.Orders == nil {
+		perf.Orders = []*Order{}
+	}
+	if perf.Entries == nil {
+		perf.Entries = []*JournalEntry{}
+	}
+	perf.Metrics = backtestPerformanceMetrics(run, perf.Series, perf.Current)
+	return perf, nil
+}
+
+func fetchBacktestEnvironmentPerformance(run *BacktestRun) (*BacktestSnapshot, *Portfolio, []*Position, []*Order, []*JournalEntry, error) {
+	api := globalCtx.PlatformAPI()
+	args := map[string]any{"_project_id": run.ProjectID, "portfolio_id": run.EnvironmentPortfolioID}
+
+	var pfResp struct {
+		Portfolio *Portfolio `json:"portfolio"`
+	}
+	if err := api.CallEnvironmentAppResult(run.EnvironmentID, "trading", "portfolio_get", args, &pfResp); err != nil {
+		return nil, nil, nil, nil, nil, fmt.Errorf("environment portfolio: %w", err)
+	}
+	var acct struct {
+		Equity      float64 `json:"equity"`
+		Cash        float64 `json:"cash"`
+		BuyingPower float64 `json:"buying_power"`
+		OpenPnL     float64 `json:"open_pnl"`
+		OpenPnLPct  float64 `json:"open_pnl_pct"`
+	}
+	if err := api.CallEnvironmentAppResult(run.EnvironmentID, "trading", "account_summary", args, &acct); err != nil {
+		return nil, nil, nil, nil, nil, fmt.Errorf("environment account: %w", err)
+	}
+	var posResp struct {
+		Positions []*Position `json:"positions"`
+	}
+	if err := api.CallEnvironmentAppResult(run.EnvironmentID, "trading", "positions_list", args, &posResp); err != nil {
+		return nil, nil, nil, nil, nil, fmt.Errorf("environment positions: %w", err)
+	}
+	var ordResp struct {
+		Orders []*Order `json:"orders"`
+	}
+	orderArgs := map[string]any{"_project_id": run.ProjectID, "portfolio_id": run.EnvironmentPortfolioID, "status": "all", "limit": 100}
+	if err := api.CallEnvironmentAppResult(run.EnvironmentID, "trading", "orders_list", orderArgs, &ordResp); err != nil {
+		return nil, nil, nil, nil, nil, fmt.Errorf("environment orders: %w", err)
+	}
+	var journalResp struct {
+		Entries []*JournalEntry `json:"entries"`
+	}
+	journalArgs := map[string]any{"_project_id": run.ProjectID, "portfolio_id": run.EnvironmentPortfolioID, "limit": 20}
+	_ = api.CallEnvironmentAppResult(run.EnvironmentID, "trading", "journal_read", journalArgs, &journalResp)
+	if posResp.Positions == nil {
+		posResp.Positions = []*Position{}
+	}
+	if ordResp.Orders == nil {
+		ordResp.Orders = []*Order{}
+	}
+	if journalResp.Entries == nil {
+		journalResp.Entries = []*JournalEntry{}
+	}
+	if pfResp.Portfolio == nil {
+		pfResp.Portfolio = &Portfolio{ID: run.EnvironmentPortfolioID}
+	}
+	if acct.Equity == 0 {
+		acct.Equity = pfResp.Portfolio.Equity
+	}
+	if acct.Cash == 0 {
+		acct.Cash = pfResp.Portfolio.Cash
+	}
+	exposure := 0.0
+	realized := 0.0
+	for _, p := range posResp.Positions {
+		exposure += math.Abs(p.MarketValue)
+		realized += p.RealizedPnL
+	}
+	if acct.Equity > 0 {
+		exposure = exposure / acct.Equity * 100
+	}
+	snap := &BacktestSnapshot{
+		RunID:       run.ID,
+		Step:        run.CurrentStep,
+		Equity:      acct.Equity,
+		Cash:        acct.Cash,
+		BuyingPower: acct.BuyingPower,
+		OpenPnL:     acct.OpenPnL,
+		OpenPnLPct:  acct.OpenPnLPct,
+		RealizedPnL: realized,
+		Exposure:    exposure,
+		Positions:   posResp.Positions,
+		Orders:      ordResp.Orders,
+		Prices:      backtestSummaryPrices(run),
+	}
+	return snap, pfResp.Portfolio, posResp.Positions, ordResp.Orders, journalResp.Entries, nil
+}
+
+func backtestSeriesWithBaseline(run *BacktestRun, snapshots []*BacktestSnapshot) []*BacktestSnapshot {
+	base := &BacktestSnapshot{
+		RunID:       run.ID,
+		Step:        0,
+		Equity:      run.StartingCash,
+		Cash:        run.StartingCash,
+		BuyingPower: run.StartingCash,
+		Prices:      []map[string]any{},
+		Positions:   []*Position{},
+		Orders:      []*Order{},
+	}
+	out := []*BacktestSnapshot{base}
+	for _, s := range snapshots {
+		if s.Step == 0 {
+			out[0] = s
+			continue
+		}
+		out = append(out, s)
+	}
+	return out
+}
+
+func backtestPerformanceMetrics(run *BacktestRun, series []*BacktestSnapshot, current *BacktestSnapshot) map[string]float64 {
+	metrics := map[string]float64{
+		"starting_cash": run.StartingCash,
+		"current_step":  float64(run.CurrentStep),
+		"total_steps":   float64(run.TotalSteps),
+	}
+	if current != nil {
+		metrics["equity"] = current.Equity
+		metrics["cash"] = current.Cash
+		metrics["buying_power"] = current.BuyingPower
+		metrics["open_pnl"] = current.OpenPnL
+		metrics["open_pnl_pct"] = current.OpenPnLPct
+		metrics["realized_pnl"] = current.RealizedPnL
+		metrics["exposure"] = current.Exposure
+		if run.StartingCash > 0 {
+			metrics["total_pnl"] = current.Equity - run.StartingCash
+			metrics["return_pct"] = (current.Equity/run.StartingCash - 1) * 100
+		}
+	}
+	peak := 0.0
+	maxDD := 0.0
+	for _, point := range series {
+		if point.Equity > peak {
+			peak = point.Equity
+		}
+		if peak > 0 {
+			dd := (point.Equity/peak - 1) * 100
+			if dd < maxDD {
+				maxDD = dd
+			}
+		}
+	}
+	metrics["max_drawdown_pct"] = maxDD
+	return metrics
+}
+
+func backtestSummaryPrices(run *BacktestRun) []map[string]any {
+	raw, ok := run.Summary["prices"].([]any)
+	if !ok {
+		if typed, ok := run.Summary["prices"].([]map[string]any); ok {
+			return typed
+		}
+		return []map[string]any{}
+	}
+	out := make([]map[string]any, 0, len(raw))
+	for _, item := range raw {
+		if row, ok := item.(map[string]any); ok {
+			out = append(out, row)
+		}
+	}
+	return out
 }
 
 func (a *App) toolBacktestMarketStep(ctx *sdk.AppCtx, args map[string]any) (any, error) {

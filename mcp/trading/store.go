@@ -152,6 +152,23 @@ type BacktestEvent struct {
 	CreatedAt string         `json:"created_at"`
 }
 
+type BacktestSnapshot struct {
+	RunID       int64            `json:"run_id"`
+	Step        int              `json:"step"`
+	Equity      float64          `json:"equity"`
+	Cash        float64          `json:"cash"`
+	BuyingPower float64          `json:"buying_power"`
+	OpenPnL     float64          `json:"open_pnl"`
+	OpenPnLPct  float64          `json:"open_pnl_pct"`
+	RealizedPnL float64          `json:"realized_pnl"`
+	Exposure    float64          `json:"exposure"`
+	Positions   []*Position      `json:"positions,omitempty"`
+	Orders      []*Order         `json:"orders,omitempty"`
+	Prices      []map[string]any `json:"prices,omitempty"`
+	CreatedAt   string           `json:"created_at,omitempty"`
+	UpdatedAt   string           `json:"updated_at,omitempty"`
+}
+
 // ─── Portfolio ─────────────────────────────────────────────────────
 
 func dbCreatePortfolio(db *sql.DB, p *Portfolio) (int64, error) {
@@ -1003,6 +1020,73 @@ func dbListBacktestEvents(db *sql.DB, runID int64, limit int) ([]*BacktestEvent,
 			ev.Data = map[string]any{}
 		}
 		out = append(out, &ev)
+	}
+	return out, rows.Err()
+}
+
+func dbUpsertBacktestSnapshot(db *sql.DB, s *BacktestSnapshot) error {
+	if s == nil {
+		return errors.New("snapshot required")
+	}
+	positionsJSON, _ := json.Marshal(s.Positions)
+	ordersJSON, _ := json.Marshal(s.Orders)
+	pricesJSON, _ := json.Marshal(s.Prices)
+	_, err := db.Exec(`
+		INSERT INTO backtest_snapshots (
+			run_id, step, equity, cash, buying_power, open_pnl, open_pnl_pct,
+			realized_pnl, exposure, positions_json, orders_json, prices_json
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(run_id, step) DO UPDATE SET
+			equity = excluded.equity,
+			cash = excluded.cash,
+			buying_power = excluded.buying_power,
+			open_pnl = excluded.open_pnl,
+			open_pnl_pct = excluded.open_pnl_pct,
+			realized_pnl = excluded.realized_pnl,
+			exposure = excluded.exposure,
+			positions_json = excluded.positions_json,
+			orders_json = excluded.orders_json,
+			prices_json = excluded.prices_json,
+			updated_at = CURRENT_TIMESTAMP`,
+		s.RunID, s.Step, s.Equity, s.Cash, s.BuyingPower, s.OpenPnL, s.OpenPnLPct,
+		s.RealizedPnL, s.Exposure, string(positionsJSON), string(ordersJSON), string(pricesJSON))
+	return err
+}
+
+func dbListBacktestSnapshots(db *sql.DB, runID int64) ([]*BacktestSnapshot, error) {
+	rows, err := db.Query(`
+		SELECT run_id, step, equity, cash, buying_power, open_pnl, open_pnl_pct,
+		       realized_pnl, exposure, positions_json, orders_json, prices_json,
+		       created_at, updated_at
+		FROM backtest_snapshots
+		WHERE run_id = ?
+		ORDER BY step ASC`, runID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []*BacktestSnapshot{}
+	for rows.Next() {
+		var s BacktestSnapshot
+		var positionsJSON, ordersJSON, pricesJSON string
+		if err := rows.Scan(&s.RunID, &s.Step, &s.Equity, &s.Cash, &s.BuyingPower,
+			&s.OpenPnL, &s.OpenPnLPct, &s.RealizedPnL, &s.Exposure,
+			&positionsJSON, &ordersJSON, &pricesJSON, &s.CreatedAt, &s.UpdatedAt); err != nil {
+			return nil, err
+		}
+		_ = json.Unmarshal([]byte(positionsJSON), &s.Positions)
+		_ = json.Unmarshal([]byte(ordersJSON), &s.Orders)
+		_ = json.Unmarshal([]byte(pricesJSON), &s.Prices)
+		if s.Positions == nil {
+			s.Positions = []*Position{}
+		}
+		if s.Orders == nil {
+			s.Orders = []*Order{}
+		}
+		if s.Prices == nil {
+			s.Prices = []map[string]any{}
+		}
+		out = append(out, &s)
 	}
 	return out, rows.Err()
 }

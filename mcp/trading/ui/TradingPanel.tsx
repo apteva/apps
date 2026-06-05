@@ -355,6 +355,27 @@ interface BacktestLiveEvent {
   time: string;
   status?: AgentActivity["status"];
 }
+interface BacktestPerformancePoint {
+  step: number;
+  equity: number;
+  cash: number;
+  buying_power?: number;
+  open_pnl?: number;
+  open_pnl_pct?: number;
+  realized_pnl?: number;
+  exposure?: number;
+  prices?: Array<{ symbol: string; price: number; asset_class?: string }>;
+}
+interface BacktestPerformance {
+  current?: BacktestPerformancePoint;
+  series: BacktestPerformancePoint[];
+  portfolio?: Portfolio;
+  positions: Position[];
+  orders: Order[];
+  entries?: JournalEntry[];
+  metrics: Record<string, number>;
+  error?: string;
+}
 const CHART_RANGES = ["1D", "5D", "1M", "3M", "1Y", "ALL"] as const;
 type ChartRange = typeof CHART_RANGES[number];
 
@@ -1371,11 +1392,17 @@ function FieldLabel({ children }: { children: React.ReactNode }) {
 }
 const inputClass = "w-full text-sm px-2 py-1.5 bg-bg-input border border-border rounded text-text";
 
-function Metric({ label, value }: { label: string; value: string }) {
+function Metric({ label, value, sub, colorClass }: {
+  label: string;
+  value: string;
+  sub?: string;
+  colorClass?: string;
+}) {
   return (
     <div className="p-2 rounded bg-bg-input border border-border">
       <FieldLabel>{label}</FieldLabel>
-      <div className="text-sm font-medium text-text tabular-nums">{value}</div>
+      <div className={`text-sm font-medium tabular-nums ${colorClass || "text-text"}`}>{value}</div>
+      {sub && <div className={`text-xs tabular-nums ${colorClass || "text-text-dim"}`}>{sub}</div>}
     </div>
   );
 }
@@ -2459,6 +2486,7 @@ function BacktestsTab({ portfolio, api, projectId, setError }: {
   const [selectedRunId, setSelectedRunId] = useState<number | null>(null);
   const [events, setEvents] = useState<BacktestEvent[]>([]);
   const [liveEvents, setLiveEvents] = useState<BacktestLiveEvent[]>([]);
+  const [performance, setPerformance] = useState<BacktestPerformance | null>(null);
   const [busy, setBusy] = useState(false);
   const [name, setName] = useState("");
   const [symbolQuery, setSymbolQuery] = useState("");
@@ -2499,12 +2527,33 @@ function BacktestsTab({ portfolio, api, projectId, setError }: {
       setEvents(r.events || []);
     } catch (e) { setError((e as Error).message); }
   }, [selectedRun?.id, api, setError]);
+  const loadPerformance = useCallback(async () => {
+    if (!selectedRun) {
+      setPerformance(null);
+      return;
+    }
+    if (!selectedRun.environment_id || !selectedRun.environment_portfolio_id) {
+      setPerformance(null);
+      return;
+    }
+    try {
+      const r = await api<{ performance: BacktestPerformance }>("GET", `/backtests/${selectedRun.id}/performance`);
+      setPerformance(r.performance || null);
+    } catch (e) { setError((e as Error).message); }
+  }, [selectedRun?.id, selectedRun?.environment_id, selectedRun?.environment_portfolio_id, api, setError]);
 
   useEffect(() => { load(); }, [load]);
   useEffect(() => { loadEvents(); }, [loadEvents]);
+  useEffect(() => { loadPerformance(); }, [loadPerformance]);
+  useEffect(() => {
+    if (selectedRun?.status !== "running") return;
+    const t = window.setInterval(loadPerformance, 5000);
+    return () => window.clearInterval(t);
+  }, [selectedRun?.status, loadPerformance]);
   useEffect(() => {
     liveSeenRef.current = new Set();
     setLiveEvents([]);
+    setPerformance(null);
   }, [selectedRun?.id]);
   useEffect(() => {
     if (!liveAgentID) return;
@@ -2552,6 +2601,9 @@ function BacktestsTab({ portfolio, api, projectId, setError }: {
     const item = summarizeBacktestAppEvent(key, ev.topic, (ev.data || {}) as Record<string, any>, ev.time);
     if (!item) return;
     setLiveEvents((prev) => [item, ...prev.filter((x) => x.id !== item.id)].slice(0, 80));
+    if (ev.topic === "order.filled" || ev.topic === "position.changed" || ev.topic === "trading.backtest.market_step") {
+      loadPerformance();
+    }
   });
 
   useEffect(() => {
@@ -2605,6 +2657,7 @@ function BacktestsTab({ portfolio, api, projectId, setError }: {
       }
       await load();
       await loadEvents();
+      await loadPerformance();
     } catch (e) { setError((e as Error).message); }
     finally { setBusy(false); }
   };
@@ -2704,7 +2757,7 @@ function BacktestsTab({ portfolio, api, projectId, setError }: {
             </div>
             <div>
               {selectedRun ? (
-                <BacktestRunDetail run={selectedRun} events={events} liveEvents={liveEvents} busy={busy} onAction={action} />
+                <BacktestRunDetail run={selectedRun} events={events} liveEvents={liveEvents} performance={performance} busy={busy} onAction={action} />
               ) : (
                 <EmptyState title="Select a run" />
               )}
@@ -2716,10 +2769,11 @@ function BacktestsTab({ portfolio, api, projectId, setError }: {
   );
 }
 
-function BacktestRunDetail({ run, events, liveEvents, busy, onAction }: {
+function BacktestRunDetail({ run, events, liveEvents, performance, busy, onAction }: {
   run: BacktestRun;
   events: BacktestEvent[];
   liveEvents: BacktestLiveEvent[];
+  performance: BacktestPerformance | null;
   busy: boolean;
   onAction: (run: BacktestRun, op: "start" | "step" | "cancel") => void;
 }) {
@@ -2764,6 +2818,7 @@ function BacktestRunDetail({ run, events, liveEvents, busy, onAction }: {
         )}
         {run.error && <div className="mt-2 text-xs text-red">{run.error}</div>}
       </div>
+      <BacktestPerformancePanel run={run} performance={performance} />
       <div className="border border-border rounded bg-bg-card overflow-hidden">
         <div className="px-3 py-2 border-b border-border text-xs font-semibold uppercase tracking-wide text-text-dim">
           Live agent activity
@@ -2800,6 +2855,155 @@ function BacktestRunDetail({ run, events, liveEvents, busy, onAction }: {
           </div>
         ))}
       </div>
+    </div>
+  );
+}
+
+function BacktestPerformancePanel({ run, performance }: {
+  run: BacktestRun;
+  performance: BacktestPerformance | null;
+}) {
+  if (!run.environment_id) {
+    return (
+      <div className="border border-border rounded bg-bg-card overflow-hidden">
+        <div className="px-3 py-2 border-b border-border text-xs font-semibold uppercase tracking-wide text-text-dim">
+          Performance
+        </div>
+        <EmptyState title="Start the run to see performance" />
+      </div>
+    );
+  }
+  const metrics = performance?.metrics || {};
+  const series = performance?.series || [];
+  const current = performance?.current;
+  const pnl = metrics.total_pnl;
+  const ret = metrics.return_pct;
+  const orders = performance?.orders || [];
+  const positions = performance?.positions || [];
+  return (
+    <div className="border border-border rounded bg-bg-card overflow-hidden">
+      <div className="px-3 py-2 border-b border-border flex items-center gap-2">
+        <div className="text-xs font-semibold uppercase tracking-wide text-text-dim">Performance</div>
+        <span className="flex-1" />
+        {performance?.error && <span className="text-xs text-amber truncate">{performance.error}</span>}
+      </div>
+      <div className="p-3">
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-2 text-xs">
+          <Metric label="Equity" value={formatUSD(metrics.equity ?? current?.equity ?? run.starting_cash)} />
+          <Metric label="P&L" value={formatUSD(pnl)} sub={formatPct(ret)} colorClass={pnlClass(pnl)} />
+          <Metric label="Cash" value={formatUSD(metrics.cash ?? current?.cash)} />
+          <Metric label="Max DD" value={formatPct(metrics.max_drawdown_pct)} colorClass={pnlClass(metrics.max_drawdown_pct)} />
+          <Metric label="Open P&L" value={formatUSD(metrics.open_pnl)} sub={formatPct(metrics.open_pnl_pct)} colorClass={pnlClass(metrics.open_pnl)} />
+          <Metric label="Exposure" value={formatPct(metrics.exposure)} />
+          <Metric label="Positions" value={String(positions.length)} />
+          <Metric label="Orders" value={String(orders.length)} />
+        </div>
+        <div className="mt-3">
+          <EquityCurve series={series} startingCash={run.starting_cash} />
+        </div>
+        <div className="mt-3 grid gap-3" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(260px, 1fr))" }}>
+          <BacktestPositionsMini positions={positions} />
+          <BacktestOrdersMini orders={orders} />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function EquityCurve({ series, startingCash }: {
+  series: BacktestPerformancePoint[];
+  startingCash: number;
+}) {
+  const points = series.length > 0 ? series : [{ step: 0, equity: startingCash, cash: startingCash }];
+  const width = 640;
+  const height = 180;
+  const padX = 16;
+  const padY = 14;
+  const values = points.map((p) => Number(p.equity) || 0);
+  const min = Math.min(...values, startingCash);
+  const max = Math.max(...values, startingCash);
+  const range = max - min || 1;
+  const maxStep = Math.max(1, ...points.map((p) => Number(p.step) || 0));
+  const x = (step: number) => padX + ((Number(step) || 0) / maxStep) * (width - padX * 2);
+  const y = (value: number) => padY + (height - padY * 2) * (1 - ((Number(value) || 0) - min) / range);
+  const pts = points.map((p) => [x(p.step), y(p.equity)] as [number, number]);
+  const d = pts.length > 1 ? catmullRomPath(pts) : "";
+  const baseY = y(startingCash);
+  const last = points[points.length - 1];
+  const up = (last?.equity || startingCash) >= startingCash;
+  return (
+    <div className="rounded border border-border bg-bg-input overflow-hidden">
+      <div className="px-3 py-2 flex items-center gap-2 text-xs border-b border-border">
+        <span className="font-semibold text-text">Equity curve</span>
+        <span className="text-text-dim">step {last?.step ?? 0}</span>
+        <span className={`ml-auto tabular-nums ${pnlClass((last?.equity || startingCash) - startingCash)}`}>
+          {formatUSD(last?.equity || startingCash)}
+        </span>
+      </div>
+      <svg viewBox={`0 0 ${width} ${height}`} className="block w-full h-44">
+        <line x1={padX} x2={width - padX} y1={baseY} y2={baseY} stroke="currentColor" className="text-border" strokeDasharray="4 4" />
+        {d && <path d={d} fill="none" stroke={up ? "#22c55e" : "#ef4444"} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />}
+        {pts.map(([px, py], i) => (
+          <circle key={i} cx={px} cy={py} r={i === pts.length - 1 ? 3 : 2} fill={up ? "#22c55e" : "#ef4444"} />
+        ))}
+        <text x={padX} y={height - 4} className="fill-current text-text-dim" style={{ fontSize: 10 }}>0</text>
+        <text x={width - padX - 36} y={height - 4} className="fill-current text-text-dim" style={{ fontSize: 10 }}>step {maxStep}</text>
+      </svg>
+    </div>
+  );
+}
+
+function BacktestPositionsMini({ positions }: { positions: Position[] }) {
+  return (
+    <div className="rounded border border-border bg-bg-input overflow-hidden">
+      <div className="px-3 py-2 border-b border-border text-xs font-semibold uppercase tracking-wide text-text-dim">Positions</div>
+      {positions.length === 0 ? (
+        <EmptyState title="No positions" />
+      ) : (
+        <div className="overflow-x-auto">
+          <table className="w-full text-xs">
+            <thead className="text-text-dim">
+              <tr><th className="text-left px-3 py-2">Symbol</th><th className="text-right px-3 py-2">Qty</th><th className="text-right px-3 py-2">Value</th><th className="text-right px-3 py-2">P&L</th></tr>
+            </thead>
+            <tbody>
+              {positions.slice(0, 6).map((p) => (
+                <tr key={`${p.symbol}:${p.outcome || ""}`} className="border-t border-border">
+                  <td className="px-3 py-2 font-medium">{p.symbol}</td>
+                  <td className="px-3 py-2 text-right tabular-nums">{formatQty(p.qty)}</td>
+                  <td className="px-3 py-2 text-right tabular-nums">{formatUSD(p.market_value)}</td>
+                  <td className={`px-3 py-2 text-right tabular-nums ${pnlClass(p.unrealized_pnl)}`}>{formatUSD(p.unrealized_pnl)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function BacktestOrdersMini({ orders }: { orders: Order[] }) {
+  return (
+    <div className="rounded border border-border bg-bg-input overflow-hidden">
+      <div className="px-3 py-2 border-b border-border text-xs font-semibold uppercase tracking-wide text-text-dim">Orders</div>
+      {orders.length === 0 ? (
+        <EmptyState title="No orders" />
+      ) : (
+        <div className="divide-y divide-border">
+          {orders.slice(0, 6).map((o) => (
+            <div key={o.id} className="px-3 py-2 text-xs">
+              <div className="flex items-center gap-2">
+                <span className={o.side === "buy" || o.side === "yes" ? "text-green font-semibold" : "text-red font-semibold"}>{o.side.toUpperCase()}</span>
+                <span className="font-medium">{formatQty(o.qty)} {o.symbol}</span>
+                <span className="ml-auto text-text-dim">{o.status}</span>
+              </div>
+              <div className="mt-0.5 text-text-dim truncate">
+                {o.avg_fill_price ? `avg ${formatPrice(o.avg_fill_price, o.asset_class)}` : o.type} · {relTime(o.resolved_at || o.placed_at)}
+              </div>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
