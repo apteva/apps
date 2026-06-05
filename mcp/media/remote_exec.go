@@ -267,11 +267,12 @@ func (e *remoteExecutor) buildScript(
 	b.WriteString("echo $$ > pid\n")
 	// Always-rm cleanup. Runs on any exit including non-zero/abort.
 	b.WriteString(`trap 'cd /tmp && rm -rf "$WORK"' EXIT` + "\n")
+	b.WriteString(`CURL_RETRY=(--retry 3 --retry-delay 1 --retry-max-time 120 --retry-connrefused --retry-all-errors)` + "\n")
 
 	// Download every source. Signed URLs are time-limited; curl --fail
 	// turns HTTP errors into non-zero exits so the script aborts.
 	for i, url := range signedURLs {
-		fmt.Fprintf(&b, "curl -sS --fail -L -o %s %s\n",
+		fmt.Fprintf(&b, "curl -sS \"${CURL_RETRY[@]}\" --fail -L -o %s %s\n",
 			shellQuote(srcPaths[i]), shellQuote(url))
 	}
 
@@ -331,7 +332,7 @@ func (e *remoteExecutor) buildScript(
 // to the returned signed S3 URL, then POST /files/<id>/finalize.
 // Multipart fallback: single POST to /files with the file as a part.
 const uploadScriptFragment = `INIT_BODY_FILE=$(mktemp)
-INIT_CODE=$(curl -sS -o "$INIT_BODY_FILE" -w "%{http_code}" \
+INIT_CODE=$(curl -sS "${CURL_RETRY[@]}" -o "$INIT_BODY_FILE" -w "%{http_code}" \
   -X POST \
   -H "Authorization: Bearer $STORAGE_TOKEN" \
   -H "Content-Type: application/json" \
@@ -351,8 +352,8 @@ if [ "$INIT_CODE" = "200" ]; then
   UPLOAD_ID=$(sed -n 's/.*"upload_id":[[:space:]]*"\([^"]*\)".*/\1/p' "$INIT_BODY_FILE")
   if [ -n "$UPLOAD_URL" ] && [ -n "$UPLOAD_ID" ]; then
     NEED_MULTIPART=0
-    curl -sS --fail -X PUT -H "Content-Type: $CT" --upload-file "$OUT" "$UPLOAD_URL"
-    FIN_BODY=$(curl -sS --fail -X POST \
+    curl -sS "${CURL_RETRY[@]}" --fail -o /dev/null -X PUT -H "Content-Type: $CT" --upload-file "$OUT" "$UPLOAD_URL"
+    FIN_BODY=$(curl -sS "${CURL_RETRY[@]}" --fail -X POST \
       -H "Authorization: Bearer $STORAGE_TOKEN" \
       -H "Content-Type: application/json" \
       -d "{\"sha256\":\"$SHA\"}" \
@@ -385,7 +386,7 @@ if [ "$INIT_CODE" = "200" ]; then
 fi
 rm -f "$INIT_BODY_FILE"
 if [ "$NEED_MULTIPART" = "1" ]; then
-  RESP=$(curl -sS --fail -X POST \
+  RESP=$(curl -sS "${CURL_RETRY[@]}" --fail -X POST \
     -H "Authorization: Bearer $STORAGE_TOKEN" \
     -F "folder=$FOLDER" \
     -F "visibility=private" \

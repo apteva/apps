@@ -134,7 +134,8 @@ func TestBuildScript_TrimShape(t *testing.T) {
 		"WORK='/tmp/apteva-render-55'",
 		"echo $$ > pid",
 		"trap 'cd /tmp && rm -rf",
-		"curl -sS --fail -L -o 'src-100.mp4' 'https://signed.example.com/file/100?sig=abc'",
+		`CURL_RETRY=(--retry 3 --retry-delay 1 --retry-max-time 120 --retry-connrefused --retry-all-errors)`,
+		`curl -sS "${CURL_RETRY[@]}" --fail -L -o 'src-100.mp4' 'https://signed.example.com/file/100?sig=abc'`,
 		"'/root/.apteva-render/ffmpeg-7.0.2/ffmpeg' '-y' '-i' 'src-100.mp4'",
 		`OUT='clip.mp4'`,
 		`SIZE=$(stat`,
@@ -148,7 +149,7 @@ func TestBuildScript_TrimShape(t *testing.T) {
 		// Presigned-PUT branch markers.
 		`"$STORAGE_BASE/files/init?project_id=$PROJECT_ID"`,
 		`if [ "$INIT_CODE" = "200" ]`,
-		`curl -sS --fail -X PUT -H "Content-Type: $CT" --upload-file "$OUT" "$UPLOAD_URL"`,
+		`curl -sS "${CURL_RETRY[@]}" --fail -o /dev/null -X PUT -H "Content-Type: $CT" --upload-file "$OUT" "$UPLOAD_URL"`,
 		`"$STORAGE_BASE/files/$UPLOAD_ID/finalize?project_id=$PROJECT_ID"`,
 		// Dedup-hit branch (storage already has these bytes).
 		`"was_existing"`,
