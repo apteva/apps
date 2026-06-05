@@ -2494,6 +2494,7 @@ function BacktestsTab({ portfolio, api, projectId, setError }: {
   const [universe, setUniverse] = useState<Mark[]>([]);
   const [startAt, setStartAt] = useState(defaultDate(-90));
   const [endAt, setEndAt] = useState(defaultDate(0));
+  const [interval, setBacktestInterval] = useState("1d");
   const [startingCash, setStartingCash] = useState("");
   const [feeBps, setFeeBps] = useState("1");
   const [slippageBps, setSlippageBps] = useState("5");
@@ -2612,9 +2613,12 @@ function BacktestsTab({ portfolio, api, projectId, setError }: {
     setSelectedSymbols(cleanSymbolList(portfolio.watchlist || []));
     setSymbolQuery("");
     setStartingCash(String(Math.round(portfolio.starting_cash || portfolio.cash || 100000)));
+    setBacktestInterval("1d");
   }, [portfolio?.id]);
 
   if (!portfolio) return <EmptyState title="Pick a portfolio" hint="No portfolio selected." />;
+
+  const estimatedSteps = estimateBacktestSteps(startAt, endAt, interval);
 
   const create = async () => {
     setBusy(true);
@@ -2624,7 +2628,7 @@ function BacktestsTab({ portfolio, api, projectId, setError }: {
         symbols: selectedSymbols,
         start_at: startAt,
         end_at: endAt,
-        interval: "1d",
+        interval,
         starting_cash: Number(startingCash) || portfolio.starting_cash || portfolio.cash,
         fee_bps: Number(feeBps) || 0,
         slippage_bps: Number(slippageBps) || 0,
@@ -2707,6 +2711,14 @@ function BacktestsTab({ portfolio, api, projectId, setError }: {
             <input type="date" value={endAt} onChange={(e) => setEndAt(e.target.value)} className={inputClass} />
           </label>
           <label className="text-xs">
+            <FieldLabel>Interval</FieldLabel>
+            <select value={interval} onChange={(e) => setBacktestInterval(e.target.value)} className={inputClass}>
+              {backtestIntervals.map((opt) => (
+                <option key={opt.value} value={opt.value}>{opt.label}</option>
+              ))}
+            </select>
+          </label>
+          <label className="text-xs">
             <FieldLabel>Cash</FieldLabel>
             <input value={startingCash} onChange={(e) => setStartingCash(e.target.value)} className={inputClass} inputMode="decimal" />
           </label>
@@ -2727,6 +2739,9 @@ function BacktestsTab({ portfolio, api, projectId, setError }: {
               Create
             </button>
           </div>
+        </div>
+        <div className="mt-2 text-xs text-text-dim">
+          Estimated replay steps: {estimatedSteps.toLocaleString()}
         </div>
         {!portfolioAgentID(portfolio) && (
           <div className="mt-2 text-xs text-amber">Bind a portfolio agent before creating a backtest.</div>
@@ -2750,7 +2765,7 @@ function BacktestsTab({ portfolio, api, projectId, setError }: {
                     <BacktestStatus status={run.status} />
                   </div>
                   <div className="mt-1 text-xs text-text-dim">
-                    {run.start_at} to {run.end_at} · {run.current_step}/{run.total_steps}
+                    {run.start_at} to {run.end_at} · {run.interval} · {run.current_step}/{run.total_steps}
                   </div>
                 </button>
               ))}
@@ -2811,8 +2826,9 @@ function BacktestRunDetail({ run, events, liveEvents, performance, busy, onActio
         <div className="mt-3 h-2 rounded bg-bg-input overflow-hidden">
           <div className="h-full bg-accent" style={{ width: `${pct}%` }} />
         </div>
-        <div className="mt-2 grid grid-cols-2 md:grid-cols-4 gap-2 text-xs">
+        <div className="mt-2 grid grid-cols-2 md:grid-cols-5 gap-2 text-xs">
           <Metric label="Step" value={`${run.current_step}/${run.total_steps}`} />
+          <Metric label="Interval" value={run.interval} />
           <Metric label="Cash" value={formatUSD(run.starting_cash)} />
           <Metric label="Fee" value={`${run.fee_bps} bps`} />
           <Metric label="Slippage" value={`${run.slippage_bps} bps`} />
@@ -3136,6 +3152,30 @@ function cleanSymbolList(symbols: string[]) {
     out.push(next);
   }
   return out;
+}
+
+const backtestIntervals = [
+  { value: "5m", label: "5 min" },
+  { value: "15m", label: "15 min" },
+  { value: "1h", label: "1 hour" },
+  { value: "4h", label: "4 hours" },
+  { value: "1d", label: "1 day" },
+  { value: "1w", label: "1 week" },
+];
+
+function estimateBacktestSteps(startAt: string, endAt: string, interval: string) {
+  const start = new Date(`${startAt}T00:00:00Z`).getTime();
+  const end = new Date(`${endAt}T00:00:00Z`).getTime();
+  if (!Number.isFinite(start) || !Number.isFinite(end) || end < start) return 0;
+  const days = Math.floor((end - start) / 86400000) + 1;
+  switch (interval) {
+    case "5m": return days * 78;
+    case "15m": return days * 26;
+    case "1h": return days * 7;
+    case "4h": return days * 2;
+    case "1w": return Math.ceil(days / 7);
+    default: return days;
+  }
 }
 
 // ─── Brokers tab ──────────────────────────────────────────────────

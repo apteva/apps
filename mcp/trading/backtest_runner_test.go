@@ -46,3 +46,44 @@ func TestWaitBacktestAgentSettled_UsesTelemetryQuietWindow(t *testing.T) {
 		t.Fatal("telemetry endpoint was not queried")
 	}
 }
+
+func TestBacktestIntervalEstimates(t *testing.T) {
+	start := time.Date(2026, 1, 5, 0, 0, 0, 0, time.UTC)
+	end := time.Date(2026, 1, 6, 0, 0, 0, 0, time.UTC)
+	cases := map[string]int{
+		"5m":  156,
+		"15m": 52,
+		"1h":  14,
+		"4h":  4,
+		"1d":  2,
+		"1w":  1,
+	}
+	for interval, want := range cases {
+		got := estimateBacktestSteps(start, end, interval)
+		if got != want {
+			t.Fatalf("estimateBacktestSteps(%s)=%d, want %d", interval, got, want)
+		}
+	}
+}
+
+func TestNormalizeBacktestInterval(t *testing.T) {
+	got, err := normalizeBacktestInterval("")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "1d" {
+		t.Fatalf("empty interval=%q, want 1d", got)
+	}
+	if _, err := normalizeBacktestInterval("30s"); err == nil {
+		t.Fatal("unsupported interval accepted")
+	}
+}
+
+func TestBacktestReplayTimeIntraday(t *testing.T) {
+	run := &BacktestRun{StartAt: "2026-01-05", Interval: "15m"}
+	got := backtestReplayTime(run, 27)
+	want := time.Date(2026, 1, 6, 9, 30, 0, 0, time.UTC)
+	if !got.Equal(want) {
+		t.Fatalf("replay time=%s, want %s", got, want)
+	}
+}

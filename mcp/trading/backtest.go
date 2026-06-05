@@ -190,8 +190,13 @@ func (a *App) handleHTTPPortfolioBacktests(w http.ResponseWriter, r *http.Reques
 		if len(symbols) == 0 {
 			symbols = []string{"SPY"}
 		}
+		interval, err := normalizeBacktestInterval(body.Interval)
+		if err != nil {
+			httpErr(w, 400, err.Error())
+			return
+		}
 		startAt, endAt := defaultBacktestRange(body.StartAt, body.EndAt)
-		steps := estimateBacktestSteps(startAt, endAt, body.Interval)
+		steps := estimateBacktestSteps(startAt, endAt, interval)
 		if steps <= 0 {
 			httpErr(w, 400, "date range must contain at least one step")
 			return
@@ -199,10 +204,6 @@ func (a *App) handleHTTPPortfolioBacktests(w http.ResponseWriter, r *http.Reques
 		name := strings.TrimSpace(body.Name)
 		if name == "" {
 			name = fmt.Sprintf("%s backtest", pf.Name)
-		}
-		interval := strings.TrimSpace(body.Interval)
-		if interval == "" {
-			interval = "1d"
 		}
 		startingCash := body.StartingCash
 		if startingCash <= 0 {
@@ -975,17 +976,20 @@ Always write a short journal note explaining the decision, including when you ch
 }
 
 func backtestStepPrompt(run *BacktestRun, step int, prices []map[string]any) string {
-	return fmt.Sprintf("Backtest replay step %d/%d for environment portfolio %d. Current prices: %v. Inspect the portfolio, decide whether to trade, and journal your rationale.",
-		step, run.TotalSteps, run.EnvironmentPortfolioID, prices)
+	replayAt := backtestReplayTime(run, step)
+	return fmt.Sprintf("Backtest replay step %d/%d for environment portfolio %d. Replay interval: %s. Replay time: %s. Current prices: %v. Inspect the portfolio, decide whether to trade, and journal your rationale.",
+		step, run.TotalSteps, run.EnvironmentPortfolioID, run.Interval, replayAt.Format(time.RFC3339), prices)
 }
 
 func backtestMarks(run *BacktestRun, step int) []map[string]any {
 	out := make([]map[string]any, 0, len(run.Symbols))
+	replayAt := backtestReplayTime(run, step)
 	for _, symbol := range run.Symbols {
 		cls := inferAssetClass(symbol)
 		base := backtestAnchor(symbol)
-		wave := math.Sin(float64(step+hashSymbol(symbol)%17)/4.0) * 0.018
-		trend := (float64((hashSymbol(symbol)%7)-3) * 0.0015) * float64(step)
+		intervalScale := backtestIntervalVolatilityScale(run.Interval)
+		wave := math.Sin(float64(step+hashSymbol(symbol)%17)/4.0) * 0.018 * intervalScale
+		trend := (float64((hashSymbol(symbol)%7)-3) * 0.0015) * float64(step) * intervalScale
 		price := base * (1 + wave + trend)
 		if cls == "polymarket" {
 			if price < 0.01 {
@@ -997,7 +1001,7 @@ func backtestMarks(run *BacktestRun, step int) []map[string]any {
 		}
 		prev := base
 		out = append(out, map[string]any{
-			"symbol": symbol, "asset_class": cls, "price": round4(price), "prev_close": prev,
+			"symbol": symbol, "asset_class": cls, "price": round4(price), "prev_close": prev, "time": replayAt.Format(time.RFC3339),
 		})
 	}
 	return out
@@ -1044,12 +1048,95 @@ func estimateBacktestSteps(start, end time.Time, interval string) int {
 	}
 	days := int(end.Sub(start).Hours()/24) + 1
 	switch strings.ToLower(strings.TrimSpace(interval)) {
-	case "1h":
-		return days * 6
+	case "5m", "15m", "1h", "4h":
+		return days * backtestStepsPerSession(interval)
 	case "1w":
 		return int(math.Ceil(float64(days) / 7))
 	default:
 		return days
+	}
+}
+
+func normalizeBacktestInterval(interval string) (string, error) {
+	v := strings.ToLower(strings.TrimSpace(interval))
+	if v == "" {
+		v = "1d"
+	}
+	switch v {
+	case "5m", "15m", "1h", "4h", "1d", "1w":
+		return v, nil
+	default:
+		return "", fmt.Errorf("unsupported backtest interval %q; use 5m, 15m, 1h, 4h, 1d, or 1w", interval)
+	}
+}
+
+func backtestStepsPerSession(interval string) int {
+	switch strings.ToLower(strings.TrimSpace(interval)) {
+	case "5m":
+		return 78 // 6.5h US-style regular session.
+	case "15m":
+		return 26
+	case "1h":
+		return 7
+	case "4h":
+		return 2
+	default:
+		return 1
+	}
+}
+
+func backtestReplayTime(run *BacktestRun, step int) time.Time {
+	start := parseDateOr(run.StartAt, time.Now().UTC())
+	if step < 1 {
+		step = 1
+	}
+	switch strings.ToLower(strings.TrimSpace(run.Interval)) {
+	case "5m", "15m", "1h", "4h":
+		sessionStep := step - 1
+		slots := backtestStepsPerSession(run.Interval)
+		if slots < 1 {
+			slots = 1
+		}
+		dayOffset := sessionStep / slots
+		slot := sessionStep % slots
+		sessionOpen := time.Date(start.Year(), start.Month(), start.Day(), 9, 30, 0, 0, time.UTC).AddDate(0, 0, dayOffset)
+		return sessionOpen.Add(time.Duration(slot) * backtestIntervalDuration(run.Interval))
+	case "1w":
+		return time.Date(start.Year(), start.Month(), start.Day(), 0, 0, 0, 0, time.UTC).AddDate(0, 0, (step-1)*7)
+	default:
+		return time.Date(start.Year(), start.Month(), start.Day(), 0, 0, 0, 0, time.UTC).AddDate(0, 0, step-1)
+	}
+}
+
+func backtestIntervalDuration(interval string) time.Duration {
+	switch strings.ToLower(strings.TrimSpace(interval)) {
+	case "5m":
+		return 5 * time.Minute
+	case "15m":
+		return 15 * time.Minute
+	case "1h":
+		return time.Hour
+	case "4h":
+		return 4 * time.Hour
+	case "1w":
+		return 7 * 24 * time.Hour
+	default:
+		return 24 * time.Hour
+	}
+}
+
+func backtestIntervalVolatilityScale(interval string) float64 {
+	switch strings.ToLower(strings.TrimSpace(interval)) {
+	case "5m":
+		return 0.12
+	case "15m":
+		return 0.2
+	case "1h":
+		return 0.45
+	case "4h":
+		return 0.75
+	default:
+		return 1
 	}
 }
 
