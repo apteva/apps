@@ -12,7 +12,7 @@
 //   GET  /portfolios/{id}/journal?kind=…
 //   PATCH /portfolios/{id}/agent              — body { agent_id }
 //   GET/POST /portfolios/{id}/backtests       — list/create agent backtests
-//   POST /backtests/{id}/start|step|cancel    — environment-backed replay controls
+//   POST /backtests/{id}/start|run|pause|step|cancel — environment-backed replay controls
 //   GET  /quotes/{symbol}
 //   POST /portfolios/{id}/orders              — body { side, type, qty, … rationale }
 //   POST /portfolios/{id}/orders/{oid}/cancel
@@ -43,7 +43,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: trading
 display_name: Trading
-version: 0.4.21
+version: 0.4.22
 description: Trading desk for Apteva agents (paper + live via per-portfolio broker integration).
 author: Apteva
 scopes: [project, global]

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"crypto/sha1"
 	"encoding/binary"
 	"encoding/json"
@@ -10,10 +11,22 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	sdk "github.com/apteva/app-sdk"
 )
+
+const backtestAutoStepDelay = 30 * time.Second
+
+var (
+	backtestRunnerMu      sync.Mutex
+	backtestRunnerCancels = map[int64]*backtestRunner{}
+)
+
+type backtestRunner struct {
+	cancel context.CancelFunc
+}
 
 func (a *App) handleHTTPBacktests(w http.ResponseWriter, r *http.Request) {
 	pid, err := resolveProjectFromRequest(r)
@@ -72,7 +85,25 @@ func (a *App) handleHTTPBacktests(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		httpJSON(w, 200, out)
+	case action == "run" && r.Method == http.MethodPost:
+		out, err := runBacktestToEnd(run)
+		if err != nil {
+			_ = dbSetBacktestStatus(globalCtx.AppDB(), run.ID, "failed", err.Error())
+			_, _ = dbInsertBacktestEvent(globalCtx.AppDB(), run.ID, "error", err.Error(), nil)
+			emitBacktest("trading.backtest.failed", run.ID, map[string]any{"error": err.Error()})
+			httpErr(w, 500, err.Error())
+			return
+		}
+		httpJSON(w, 200, out)
+	case action == "pause" && r.Method == http.MethodPost:
+		out, err := pauseBacktestRun(run)
+		if err != nil {
+			httpErr(w, 500, err.Error())
+			return
+		}
+		httpJSON(w, 200, out)
 	case action == "cancel" && r.Method == http.MethodPost:
+		stopBacktestRunner(run.ID)
 		if run.EnvironmentID != "" && globalCtx.PlatformAPI() != nil {
 			_ = globalCtx.PlatformAPI().DestroyEnvironment(run.EnvironmentID)
 		}
@@ -277,11 +308,136 @@ func startBacktestRun(run *BacktestRun) (map[string]any, error) {
 	return map[string]any{"backtest": next}, nil
 }
 
+func runBacktestToEnd(run *BacktestRun) (map[string]any, error) {
+	if run == nil {
+		return nil, errors.New("backtest run required")
+	}
+	switch run.Status {
+	case "queued", "failed":
+		if _, err := startBacktestRun(run); err != nil {
+			return nil, err
+		}
+	case "paused":
+		if err := dbSetBacktestStatus(globalCtx.AppDB(), run.ID, "running", ""); err != nil {
+			return nil, err
+		}
+		_, _ = dbInsertBacktestEvent(globalCtx.AppDB(), run.ID, "resumed", "Continuous run resumed", nil)
+		emitBacktest("trading.backtest.resumed", run.ID, map[string]any{"portfolio_id": run.PortfolioID})
+	case "running":
+	default:
+		return nil, fmt.Errorf("backtest is %s; cannot run", run.Status)
+	}
+	next, err := dbGetBacktestRun(globalCtx.AppDB(), run.ProjectID, run.ID)
+	if err != nil {
+		return nil, err
+	}
+	started := startBacktestRunner(next)
+	if started {
+		_, _ = dbInsertBacktestEvent(globalCtx.AppDB(), run.ID, "run", "Continuous run started", map[string]any{
+			"settle_seconds": int(backtestAutoStepDelay.Seconds()),
+		})
+		emitBacktest("trading.backtest.run", run.ID, map[string]any{"portfolio_id": run.PortfolioID})
+	}
+	next, _ = dbGetBacktestRun(globalCtx.AppDB(), run.ProjectID, run.ID)
+	return map[string]any{"backtest": next, "status": "running", "runner_started": started}, nil
+}
+
+func pauseBacktestRun(run *BacktestRun) (map[string]any, error) {
+	if run == nil {
+		return nil, errors.New("backtest run required")
+	}
+	stopBacktestRunner(run.ID)
+	if run.Status == "running" {
+		if err := dbSetBacktestStatus(globalCtx.AppDB(), run.ID, "paused", ""); err != nil {
+			return nil, err
+		}
+		_, _ = dbInsertBacktestEvent(globalCtx.AppDB(), run.ID, "paused", "Continuous run paused", nil)
+		emitBacktest("trading.backtest.paused", run.ID, map[string]any{"portfolio_id": run.PortfolioID})
+	}
+	next, _ := dbGetBacktestRun(globalCtx.AppDB(), run.ProjectID, run.ID)
+	return map[string]any{"backtest": next, "status": "paused"}, nil
+}
+
+func startBacktestRunner(run *BacktestRun) bool {
+	if run == nil || run.ID == 0 {
+		return false
+	}
+	backtestRunnerMu.Lock()
+	if _, ok := backtestRunnerCancels[run.ID]; ok {
+		backtestRunnerMu.Unlock()
+		return false
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	worker := &backtestRunner{cancel: cancel}
+	backtestRunnerCancels[run.ID] = worker
+	backtestRunnerMu.Unlock()
+
+	go func(projectID string, runID int64) {
+		defer func() {
+			backtestRunnerMu.Lock()
+			if cur := backtestRunnerCancels[runID]; cur == worker {
+				delete(backtestRunnerCancels, runID)
+			}
+			backtestRunnerMu.Unlock()
+		}()
+		backtestRunnerLoop(ctx, projectID, runID)
+	}(run.ProjectID, run.ID)
+	return true
+}
+
+func stopBacktestRunner(runID int64) {
+	backtestRunnerMu.Lock()
+	worker := backtestRunnerCancels[runID]
+	delete(backtestRunnerCancels, runID)
+	backtestRunnerMu.Unlock()
+	if worker != nil && worker.cancel != nil {
+		worker.cancel()
+	}
+}
+
+func backtestRunnerLoop(ctx context.Context, projectID string, runID int64) {
+	for {
+		if !waitBacktestSettle(ctx) {
+			return
+		}
+		run, err := dbGetBacktestRun(globalCtx.AppDB(), projectID, runID)
+		if err != nil {
+			return
+		}
+		if run.Status != "running" {
+			return
+		}
+		if run.CurrentStep >= run.TotalSteps {
+			_ = dbSetBacktestStatus(globalCtx.AppDB(), run.ID, "completed", "")
+			_, _ = dbInsertBacktestEvent(globalCtx.AppDB(), run.ID, "completed", "Backtest completed", run.Summary)
+			emitBacktest("trading.backtest.completed", run.ID, map[string]any{"portfolio_id": run.PortfolioID})
+			return
+		}
+		if _, err := stepBacktestRun(run); err != nil {
+			_ = dbSetBacktestStatus(globalCtx.AppDB(), run.ID, "failed", err.Error())
+			_, _ = dbInsertBacktestEvent(globalCtx.AppDB(), run.ID, "error", err.Error(), nil)
+			emitBacktest("trading.backtest.failed", run.ID, map[string]any{"error": err.Error()})
+			return
+		}
+	}
+}
+
+func waitBacktestSettle(ctx context.Context) bool {
+	timer := time.NewTimer(backtestAutoStepDelay)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
+	}
+}
+
 func stepBacktestRun(run *BacktestRun) (map[string]any, error) {
 	if run == nil {
 		return nil, errors.New("backtest run required")
 	}
-	if run.Status != "running" {
+	if run.Status != "running" && run.Status != "paused" {
 		return nil, fmt.Errorf("backtest is %s, not running", run.Status)
 	}
 	if run.EnvironmentID == "" || run.EnvironmentAgentID == 0 || run.EnvironmentPortfolioID == 0 {
@@ -307,7 +463,10 @@ func stepBacktestRun(run *BacktestRun) (map[string]any, error) {
 	if err := globalCtx.PlatformAPI().SendEvent(run.EnvironmentAgentID, prompt); err != nil {
 		return nil, fmt.Errorf("send environment agent event: %w", err)
 	}
-	status := "running"
+	status := run.Status
+	if status == "" {
+		status = "running"
+	}
 	if step >= run.TotalSteps {
 		status = "completed"
 	}

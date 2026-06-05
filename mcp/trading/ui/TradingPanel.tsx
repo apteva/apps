@@ -324,7 +324,7 @@ interface BacktestRun {
   environment_agent_id?: number;
   environment_portfolio_id?: number;
   name: string;
-  status: "queued" | "running" | "completed" | "failed" | "cancelled";
+  status: "queued" | "running" | "paused" | "completed" | "failed" | "cancelled";
   symbols: string[];
   start_at: string;
   end_at: string;
@@ -2648,7 +2648,7 @@ function BacktestsTab({ portfolio, api, projectId, setError }: {
     setSelectedSymbols((prev) => prev.filter((s) => s.toUpperCase() !== symbol.toUpperCase()));
   };
 
-  const action = async (run: BacktestRun, op: "start" | "step" | "cancel") => {
+  const action = async (run: BacktestRun, op: "start" | "run" | "pause" | "step" | "cancel") => {
     setBusy(true);
     try {
       const r = await api<{ backtest?: BacktestRun; status?: string }>("POST", `/backtests/${run.id}/${op}`);
@@ -2775,7 +2775,7 @@ function BacktestRunDetail({ run, events, liveEvents, performance, busy, onActio
   liveEvents: BacktestLiveEvent[];
   performance: BacktestPerformance | null;
   busy: boolean;
-  onAction: (run: BacktestRun, op: "start" | "step" | "cancel") => void;
+  onAction: (run: BacktestRun, op: "start" | "run" | "pause" | "step" | "cancel") => void;
 }) {
   const pct = run.total_steps > 0 ? Math.min(100, Math.round((run.current_step / run.total_steps) * 100)) : 0;
   const prices = run.summary?.prices || [];
@@ -2791,9 +2791,19 @@ function BacktestRunDetail({ run, events, liveEvents, performance, busy, onActio
           {run.status === "queued" || run.status === "failed" ? (
             <button disabled={busy} onClick={() => onAction(run, "start")} className="px-2 py-1 text-xs rounded bg-accent text-bg font-medium disabled:opacity-50">Start</button>
           ) : null}
+          {["queued", "failed", "running", "paused"].includes(run.status) && run.current_step < run.total_steps && (
+            <button disabled={busy} onClick={() => onAction(run, "run")} className="px-2 py-1 text-xs rounded bg-accent text-bg font-medium disabled:opacity-50">Run</button>
+          )}
           {run.status === "running" && (
             <>
-              <button disabled={busy} onClick={() => onAction(run, "step")} className="px-2 py-1 text-xs rounded bg-accent text-bg font-medium disabled:opacity-50">Step</button>
+              <button disabled={busy} onClick={() => onAction(run, "step")} className="px-2 py-1 text-xs rounded border border-border text-text-muted hover:bg-bg-hover disabled:opacity-50">Step</button>
+              <button disabled={busy} onClick={() => onAction(run, "pause")} className="px-2 py-1 text-xs rounded border border-border text-text-muted hover:bg-bg-hover disabled:opacity-50">Pause</button>
+              <button disabled={busy} onClick={() => onAction(run, "cancel")} className="px-2 py-1 text-xs rounded border border-border text-text-muted hover:bg-bg-hover disabled:opacity-50">Cancel</button>
+            </>
+          )}
+          {run.status === "paused" && (
+            <>
+              <button disabled={busy} onClick={() => onAction(run, "step")} className="px-2 py-1 text-xs rounded border border-border text-text-muted hover:bg-bg-hover disabled:opacity-50">Step</button>
               <button disabled={busy} onClick={() => onAction(run, "cancel")} className="px-2 py-1 text-xs rounded border border-border text-text-muted hover:bg-bg-hover disabled:opacity-50">Cancel</button>
             </>
           )}
@@ -3103,6 +3113,7 @@ function liveEventDotClass(ev: BacktestLiveEvent): string {
 
 function BacktestStatus({ status }: { status: BacktestRun["status"] }) {
   const cls = status === "running" ? "bg-amber/10 text-amber" :
+    status === "paused" ? "bg-blue-500/20 text-blue-400" :
     status === "completed" ? "bg-green/10 text-green" :
     status === "failed" || status === "cancelled" ? "bg-red/10 text-red" :
     "bg-bg-input text-text-muted";
