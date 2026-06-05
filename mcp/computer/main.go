@@ -41,9 +41,9 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: computer
 display_name: Computer
-version: 0.7.20
+version: 0.7.21
 description: |
-  Watch and steer browser sessions. v0.7.20 keeps idle reaper internal.
+  Watch and steer browser sessions. v0.7.21 fixes cloud shortcut keys.
 scopes: [project, global]
 requires:
   permissions:
@@ -70,7 +70,7 @@ provides:
     - name: browser_session
       description: "Open, resume, list, inspect, or close app-owned browser sessions. Args: action, session_id?, backend?, backend_session_id?, url?, context_id?, context_name?, auto_create_context?, persist?, timeout?, keep_alive?, proxy?, proxy_country?, viewport?. Browserbase honors timeout as max session lifetime and keep_alive=true to allow reconnect after disconnect. Prefer context_id from computer_context_list to reopen saved state; context_name works across backends when unique. For a reusable saved context, pass context_name with auto_create_context=true; omitted names are only a fallback and are auto-generated."
     - name: computer_use
-      description: "Drive an app-owned browser session. Default workflow: call action=screenshot first; screenshots contain Set-of-Mark numeric badges on interactive elements. To click, use action=click with label=N from the latest screenshot. Prefer label over coordinate; use coordinate only for targets with no badge such as canvas or custom rendered widgets. After scrolling or navigation, take a fresh screenshot because labels are re-enumerated. Args: session_id, action, coordinate?, label?, text?, key?, direction?, amount?, duration?, annotate? (screenshot only, default true). Returns screenshot bytes for visual actions."
+      description: "Drive an app-owned browser session. Default workflow: call action=screenshot first; screenshots contain Set-of-Mark numeric badges on interactive elements. To click, use action=click with label=N from the latest screenshot. Prefer label over coordinate; use coordinate only for targets with no badge such as canvas or custom rendered widgets. Use action=key for browser/editor commands such as Tab, Backspace, Control+A, Control+Z; use action=type only for literal text. After scrolling or navigation, take a fresh screenshot because labels are re-enumerated. Args: session_id, action, coordinate?, label?, text?, key?, direction?, amount?, duration?, annotate? (screenshot only, default true). Returns screenshot bytes for visual actions."
     - name: computer_context_create
       description: "Create or import an app-managed browser context. Args: name, backend?, provider_context_id?, persist_default?, metadata?, auto_create_provider?."
     - name: computer_context_list
@@ -444,6 +444,7 @@ func (a *App) MCPTools() []sdk.Tool {
 			Name: "computer_use",
 			Description: "Drive a browser session opened by browser_session. Default workflow: call action=screenshot first; screenshots contain Set-of-Mark numeric badges on interactive elements. " +
 				"To click, use action=click with label=N from the latest screenshot. Prefer label over coordinate; use coordinate only for targets with no badge such as canvas or custom rendered widgets. " +
+				"Use action=key for browser/editor commands such as Tab, Backspace, Control+A, Control+Z; use action=type only for literal text. " +
 				"After scrolling or navigation, take a fresh screenshot because labels are re-enumerated. Actions: screenshot, click, double_click, type, key, scroll, wait. " +
 				"Args: session_id, action, coordinate? (\"x,y\"), label? (Set-of-Mark label), text?, key?, direction?, amount?, duration?, annotate? (screenshot only, default true). " +
 				"Returns a binary screenshot envelope plus current_url, width, height.",
@@ -453,7 +454,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"coordinate": map[string]any{"type": "string"},
 				"label":      map[string]any{"type": "integer", "description": "Set-of-Mark target number shown as a colored badge in the latest screenshot. Prefer this over coordinate for click/double_click."},
 				"text":       map[string]any{"type": "string"},
-				"key":        map[string]any{"type": "string"},
+				"key":        map[string]any{"type": "string", "description": "For action=key. Browser/editor command key such as Enter, Tab, Backspace, Escape, ArrowUp, Control+A, Control+Z, Meta+A, or Shift+Tab. Do not use action=type for command keys."},
 				"direction":  map[string]any{"type": "string"},
 				"amount":     map[string]any{"type": "integer"},
 				"duration":   map[string]any{"type": "integer"},

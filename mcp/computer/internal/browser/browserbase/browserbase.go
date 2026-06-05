@@ -14,6 +14,7 @@ import (
 	"time"
 
 	computer "github.com/apteva/apps/mcp/computer/internal/browser/api"
+	"github.com/apteva/apps/mcp/computer/internal/browser/keyinput"
 	"github.com/apteva/apps/mcp/computer/internal/browser/som"
 	"github.com/chromedp/cdproto/input"
 	"github.com/chromedp/cdproto/page"
@@ -360,7 +361,7 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 		return c.Screenshot()
 
 	case "key":
-		if err := chromedp.Run(c.ctx, chromedp.KeyEvent(action.Key)); err != nil {
+		if err := keyinput.Dispatch(c.ctx, action.Key, "[BROWSERBASE]"); err != nil {
 			return nil, fmt.Errorf("key: %w", err)
 		}
 		time.Sleep(100 * time.Millisecond)

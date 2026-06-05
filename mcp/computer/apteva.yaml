@@ -2,9 +2,9 @@ schema: apteva-app/v1
 
 name: computer
 display_name: Computer
-version: 0.7.20
+version: 0.7.21
 description: |
-  Watch and steer browser sessions. v0.7.20 keeps idle reaper internal.
+  Watch and steer browser sessions. v0.7.21 fixes cloud shortcut keys.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/computer
@@ -56,7 +56,9 @@ provides:
         badges on interactive elements. To click, use action=click with
         label=N from the latest screenshot. Prefer label over coordinate;
         use coordinate only for targets with no badge such as canvas or
-        custom rendered widgets. After scrolling or navigation, take a
+        custom rendered widgets. Use action=key for browser/editor commands
+        such as Tab, Backspace, Control+A, Control+Z; use action=type only
+        for literal text. After scrolling or navigation, take a
         fresh screenshot because labels are re-enumerated. Args:
         session_id, action, coordinate?, label?, text?, key?, direction?,
         amount?, duration?, annotate? (screenshot only, default true).
