@@ -2627,7 +2627,7 @@ function BacktestRunDetail({ run, events, busy, onAction }: {
         </div>
         <div className="mt-2 grid grid-cols-2 md:grid-cols-4 gap-2 text-xs">
           <Metric label="Step" value={`${run.current_step}/${run.total_steps}`} />
-          <Metric label="Cash" value={money(run.starting_cash)} />
+          <Metric label="Cash" value={formatUSD(run.starting_cash)} />
           <Metric label="Fee" value={`${run.fee_bps} bps`} />
           <Metric label="Slippage" value={`${run.slippage_bps} bps`} />
         </div>
