@@ -2383,7 +2383,9 @@ function BacktestsTab({ portfolio, api, projectId, setError }: {
   const [events, setEvents] = useState<BacktestEvent[]>([]);
   const [busy, setBusy] = useState(false);
   const [name, setName] = useState("");
-  const [symbols, setSymbols] = useState("");
+  const [symbolQuery, setSymbolQuery] = useState("");
+  const [selectedSymbols, setSelectedSymbols] = useState<string[]>([]);
+  const [universe, setUniverse] = useState<Mark[]>([]);
   const [startAt, setStartAt] = useState(defaultDate(-90));
   const [endAt, setEndAt] = useState(defaultDate(0));
   const [startingCash, setStartingCash] = useState("");
@@ -2419,6 +2421,11 @@ function BacktestsTab({ portfolio, api, projectId, setError }: {
 
   useEffect(() => { load(); }, [load]);
   useEffect(() => { loadEvents(); }, [loadEvents]);
+  useEffect(() => {
+    api<{ symbols: Mark[] }>("GET", "/universe")
+      .then((r) => setUniverse(r.symbols || []))
+      .catch(() => undefined);
+  }, [api]);
   useAppEvents("trading", projectId, (ev) => {
     if (ev.topic.startsWith("trading.backtest.")) {
       load();
@@ -2429,7 +2436,8 @@ function BacktestsTab({ portfolio, api, projectId, setError }: {
   useEffect(() => {
     if (!portfolio) return;
     setName(`${portfolio.name} replay`);
-    setSymbols((portfolio.watchlist || []).join(", "));
+    setSelectedSymbols(cleanSymbolList(portfolio.watchlist || []));
+    setSymbolQuery("");
     setStartingCash(String(Math.round(portfolio.starting_cash || portfolio.cash || 100000)));
   }, [portfolio?.id]);
 
@@ -2440,7 +2448,7 @@ function BacktestsTab({ portfolio, api, projectId, setError }: {
     try {
       const body = {
         name,
-        symbols: symbols.split(",").map((s) => s.trim()).filter(Boolean),
+        symbols: selectedSymbols,
         start_at: startAt,
         end_at: endAt,
         interval: "1d",
@@ -2453,6 +2461,18 @@ function BacktestsTab({ portfolio, api, projectId, setError }: {
       await load();
     } catch (e) { setError((e as Error).message); }
     finally { setBusy(false); }
+  };
+
+  const addSymbol = (symbol: string) => {
+    const next = symbol.trim().toUpperCase();
+    if (!next) return;
+    setSelectedSymbols((prev) => prev.some((s) => s.toUpperCase() === next)
+      ? prev
+      : [...prev, next]);
+    setSymbolQuery("");
+  };
+  const removeSymbol = (symbol: string) => {
+    setSelectedSymbols((prev) => prev.filter((s) => s.toUpperCase() !== symbol.toUpperCase()));
   };
 
   const action = async (run: BacktestRun, op: "start" | "step" | "cancel") => {
@@ -2476,10 +2496,34 @@ function BacktestsTab({ portfolio, api, projectId, setError }: {
             <FieldLabel>Name</FieldLabel>
             <input value={name} onChange={(e) => setName(e.target.value)} className={inputClass} />
           </label>
-          <label className="text-xs">
+          <div className="text-xs md:col-span-2">
             <FieldLabel>Symbols</FieldLabel>
-            <input value={symbols} onChange={(e) => setSymbols(e.target.value)} className={inputClass} />
-          </label>
+            <SymbolSelect
+              value={symbolQuery}
+              onCommit={addSymbol}
+              universe={universe}
+              allowedClasses={portfolio.allowed_classes}
+            />
+            <div className="mt-2 flex flex-wrap gap-1 min-h-6">
+              {selectedSymbols.length === 0 ? (
+                <span className="text-xs text-text-dim">No symbols selected</span>
+              ) : selectedSymbols.map((sym) => {
+                const mark = universe.find((m) => m.symbol.toUpperCase() === sym.toUpperCase());
+                const cls = mark?.asset_class || inferAssetClass(sym);
+                return (
+                  <button
+                    key={sym}
+                    type="button"
+                    onClick={() => removeSymbol(sym)}
+                    className={`text-xs px-2 py-0.5 rounded-full border font-semibold inline-flex items-center gap-1 ${classBadgeClass(cls)}`}
+                    title={`Remove ${sym}`}
+                  >
+                    {sym} <Icon.X />
+                  </button>
+                );
+              })}
+            </div>
+          </div>
           <label className="text-xs">
             <FieldLabel>Start</FieldLabel>
             <input type="date" value={startAt} onChange={(e) => setStartAt(e.target.value)} className={inputClass} />
@@ -2503,7 +2547,7 @@ function BacktestsTab({ portfolio, api, projectId, setError }: {
           <div className="flex items-end">
             <button
               onClick={create}
-              disabled={busy || !portfolioAgentID(portfolio)}
+              disabled={busy || !portfolioAgentID(portfolio) || selectedSymbols.length === 0}
               className="w-full px-3 py-1.5 text-xs rounded bg-accent text-bg font-medium hover:opacity-90 disabled:opacity-50"
             >
               Create
@@ -2627,6 +2671,18 @@ function defaultDate(offsetDays: number) {
   const d = new Date();
   d.setDate(d.getDate() + offsetDays);
   return d.toISOString().slice(0, 10);
+}
+
+function cleanSymbolList(symbols: string[]) {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const symbol of symbols) {
+    const next = symbol.trim().toUpperCase();
+    if (!next || seen.has(next)) continue;
+    seen.add(next);
+    out.push(next);
+  }
+  return out;
 }
 
 // ─── Brokers tab ──────────────────────────────────────────────────
