@@ -41,10 +41,9 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: computer
 display_name: Computer
-version: 0.7.17
+version: 0.7.18
 description: |
-  Watch and steer browser sessions. v0.7.17 shows richer session
-  metadata in the panel.
+  Watch and steer browser sessions. v0.7.18 exposes Browserbase keep-alive.
 scopes: [project, global]
 requires:
   permissions:
@@ -69,7 +68,7 @@ provides:
     - prefix: /
   mcp_tools:
     - name: browser_session
-      description: "Open, resume, list, inspect, or close app-owned browser sessions. Args: action, session_id?, backend?, backend_session_id?, url?, context_id?, context_name?, auto_create_context?, persist?, timeout?, proxy?, proxy_country?, viewport?. Prefer context_id from computer_context_list to reopen saved state; context_name works across backends when unique. For a reusable saved context, pass context_name with auto_create_context=true; omitted names are only a fallback and are auto-generated."
+      description: "Open, resume, list, inspect, or close app-owned browser sessions. Args: action, session_id?, backend?, backend_session_id?, url?, context_id?, context_name?, auto_create_context?, persist?, timeout?, keep_alive?, proxy?, proxy_country?, viewport?. Browserbase honors timeout as max session lifetime and keep_alive=true to allow reconnect after disconnect. Prefer context_id from computer_context_list to reopen saved state; context_name works across backends when unique. For a reusable saved context, pass context_name with auto_create_context=true; omitted names are only a fallback and are auto-generated."
     - name: computer_use
       description: "Drive an app-owned browser session. Default workflow: call action=screenshot first; screenshots contain Set-of-Mark numeric badges on interactive elements. To click, use action=click with label=N from the latest screenshot. Prefer label over coordinate; use coordinate only for targets with no badge such as canvas or custom rendered widgets. After scrolling or navigation, take a fresh screenshot because labels are re-enumerated. Args: session_id, action, coordinate?, label?, text?, key?, direction?, amount?, duration?, annotate? (screenshot only, default true). Returns screenshot bytes for visual actions."
     - name: computer_context_create
@@ -403,7 +402,8 @@ func (a *App) MCPTools() []sdk.Tool {
 			Name: "browser_session",
 			Description: "Session lifecycle for app-owned browsers. Actions: open, resume, status, close, list. " +
 				"Open/resume args: backend? (local|browserbase|steel|browser-engine|service), url?, context_id?, persist?, " +
-				"context_name?, auto_create_context?, backend_session_id? (provider attach), timeout?, proxy?, proxy_country?, viewport?. " +
+				"context_name?, auto_create_context?, backend_session_id? (provider attach), timeout?, keep_alive?, proxy?, proxy_country?, viewport?. " +
+				"Browserbase honors timeout as max session lifetime and keep_alive=true to allow reconnect after disconnect. " +
 				"Prefer context_id returned by computer_context_list to reopen saved browser state; context_name works across providers when unique. " +
 				"For a reusable saved context, pass context_name with auto_create_context=true; omitted names are only a fallback and are auto-generated. " +
 				"Returns {session_id, backend_session_id, backend, current_url, context_id, debug_url, width, height}.",
@@ -420,7 +420,8 @@ func (a *App) MCPTools() []sdk.Tool {
 				},
 				"auto_create_context": map[string]any{"type": "boolean", "description": "Create an app-managed context if no context_id/name/provider_context_id matches. For reusable contexts, also pass context_name; omitted names are auto-generated fallback names."},
 				"persist":             map[string]any{"type": "boolean"},
-				"timeout":             map[string]any{"type": "integer"},
+				"timeout":             map[string]any{"type": "integer", "description": "Provider session max lifetime in seconds for cloud backends. Browserbase max is provider/plan bounded."},
+				"keep_alive":          map[string]any{"type": "boolean", "description": "Browserbase only: keep the provider session available after disconnect so it can be reattached until timeout or explicit close."},
 				"proxy":               map[string]any{"type": "boolean"},
 				"proxy_country":       map[string]any{"type": "string"},
 				"viewport": map[string]any{
@@ -510,7 +511,8 @@ func (a *App) MCPTools() []sdk.Tool {
 		{
 			Name: "browser_open",
 			Description: "Compatibility alias for browser_session(action=open). Args: backend? (local|browserbase|steel|browser-engine, default from Computer app settings), " +
-				"url? (navigate after open), context_name?, auto_create_context?, viewport? ({width:int, height:int}, default 1600x800). " +
+				"url? (navigate after open), context_name?, auto_create_context?, timeout?, keep_alive?, viewport? ({width:int, height:int}, default 1600x800). " +
+				"Browserbase honors timeout as max session lifetime and keep_alive=true to allow reconnect after disconnect. " +
 				"For a reusable saved context, pass context_name with auto_create_context=true; omitted names are only a fallback and are auto-generated. " +
 				"Returns {session_id, backend, current_url, width, height}. " +
 				"Session owned by this sidecar until browser_close or 30-minute idle reaper.",
@@ -524,7 +526,8 @@ func (a *App) MCPTools() []sdk.Tool {
 				},
 				"auto_create_context": map[string]any{"type": "boolean", "description": "Create an app-managed context if no context_id/name/provider_context_id matches. For reusable contexts, also pass context_name; omitted names are auto-generated fallback names."},
 				"persist":             map[string]any{"type": "boolean"},
-				"timeout":             map[string]any{"type": "integer"},
+				"timeout":             map[string]any{"type": "integer", "description": "Provider session max lifetime in seconds for cloud backends. Browserbase max is provider/plan bounded."},
+				"keep_alive":          map[string]any{"type": "boolean", "description": "Browserbase only: keep the provider session available after disconnect so it can be reattached until timeout or explicit close."},
 				"proxy":               map[string]any{"type": "boolean"},
 				"proxy_country":       map[string]any{"type": "string"},
 				"viewport": map[string]any{

@@ -677,6 +677,56 @@ func TestComputerSettingsLockOverridesExplicitBackend(t *testing.T) {
 	}
 }
 
+func TestBrowserbaseOpenExposesAndForwardsLeaseControls(t *testing.T) {
+	prev := newBackend
+	t.Cleanup(func() { newBackend = prev })
+
+	fake := &fakeComp{
+		display: backends.DisplaySize{Width: 1024, Height: 768},
+		png:     []byte{0x89, 0x50, 0x4e, 0x47},
+		url:     "https://example.test",
+	}
+	var gotCfg backends.Config
+	newBackend = func(cfg backends.Config) (backends.Computer, error) {
+		gotCfg = cfg
+		return fake, nil
+	}
+
+	app := &App{reg: &registry{m: map[string]*session{}}}
+	ctx := tk.NewAppCtx(t, "apteva.yaml")
+	if _, err := app.toolBrowserSession(ctx, map[string]any{
+		"action":     "open",
+		"backend":    "browserbase",
+		"timeout":    3600,
+		"keep_alive": true,
+	}); err != nil {
+		t.Fatalf("browser_session open: %v", err)
+	}
+	if gotCfg.Type != "browserbase" {
+		t.Fatalf("backend type: want browserbase, got %q", gotCfg.Type)
+	}
+	if !gotCfg.KeepAlive {
+		t.Fatal("browserbase keep_alive arg was not forwarded to backend config")
+	}
+	if gotCfg.Timeout != 3600 {
+		t.Fatalf("browserbase timeout config: want 3600, got %d", gotCfg.Timeout)
+	}
+	if fake.openTimeout != 3600 {
+		t.Fatalf("OpenSession timeout: want 3600, got %d", fake.openTimeout)
+	}
+
+	for _, toolName := range []string{"browser_session", "browser_open"} {
+		tool := findTool(t, app.MCPTools(), toolName)
+		props, ok := tool.InputSchema["properties"].(map[string]any)
+		if !ok {
+			t.Fatalf("%s schema has no properties map: %#v", toolName, tool.InputSchema)
+		}
+		if _, ok := props["keep_alive"]; !ok {
+			t.Fatalf("%s schema does not expose keep_alive", toolName)
+		}
+	}
+}
+
 func TestComputerUseDescriptionTeachesLabelWorkflow(t *testing.T) {
 	app := &App{}
 	var desc string
@@ -862,6 +912,7 @@ type fakeComp struct {
 	openSessionURL  string
 	openContextID   string
 	openPersist     bool
+	openTimeout     int
 	openProxy       *bool
 	lastAction      backends.Action
 	screenshotCalls int
@@ -912,6 +963,7 @@ func (f *fakeComp) OpenSession(opts backends.OpenOptions) error {
 	f.openSessionURL = opts.URL
 	f.openContextID = opts.ContextID
 	f.openPersist = opts.Persist
+	f.openTimeout = opts.Timeout
 	f.openProxy = opts.Proxy
 	return nil
 }
@@ -930,6 +982,17 @@ func toolNames(tools []sdk.MCPToolSpec) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+func findTool(t *testing.T, tools []sdk.Tool, name string) sdk.Tool {
+	t.Helper()
+	for _, tool := range tools {
+		if tool.Name == name {
+			return tool
+		}
+	}
+	t.Fatalf("tool %q not found", name)
+	return sdk.Tool{}
 }
 
 func eventNames(events []sdk.EventDecl) []string {

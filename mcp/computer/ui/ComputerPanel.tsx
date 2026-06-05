@@ -1015,6 +1015,7 @@ function OpenSessionModal({
   const [persist, setPersist] = useState(true);
   const [backendSessionID, setBackendSessionID] = useState("");
   const [timeout, setTimeoutValue] = useState("");
+  const [keepAlive, setKeepAlive] = useState(false);
   const [proxy, setProxy] = useState<ProxyMode>("");
   const [proxyCountry, setProxyCountry] = useState("");
   const [width, setWidth] = useState("1600");
@@ -1041,6 +1042,7 @@ function OpenSessionModal({
       if (mode === "resume" && backendSessionID) body.backend_session_id = backendSessionID;
       if (mode !== "resume") body.persist = persist;
       if (timeout) body.timeout = Number(timeout);
+      if (mode !== "resume" && keepAlive) body.keep_alive = true;
       if (proxy) body.proxy = proxy === "true";
       if (proxyCountry) body.proxy_country = proxyCountry.toUpperCase();
       const viewport: Record<string, number> = {};
@@ -1182,10 +1184,16 @@ function OpenSessionModal({
           </Field>
         </div>
         {mode !== "resume" && (
-          <label style={{ display: "flex", gap: "8px", alignItems: "center", marginTop: "10px", fontSize: "13px" }}>
-            <input type="checkbox" checked={persist} onChange={(e) => setPersist(e.target.checked)} />
-            Persist context changes
-          </label>
+          <div style={{ display: "grid", gap: "8px", marginTop: "10px", fontSize: "13px" }}>
+            <label style={{ display: "flex", gap: "8px", alignItems: "center" }}>
+              <input type="checkbox" checked={persist} onChange={(e) => setPersist(e.target.checked)} />
+              Persist context changes
+            </label>
+            <label style={{ display: "flex", gap: "8px", alignItems: "center" }}>
+              <input type="checkbox" checked={keepAlive} onChange={(e) => setKeepAlive(e.target.checked)} />
+              Keep Browserbase session alive after disconnect
+            </label>
+          </div>
         )}
         {err && <div style={{ marginTop: "10px", fontSize: "12px", color: "#dc2626" }}>{err}</div>}
         <div style={{ marginTop: "16px", display: "flex", justifyContent: "flex-end", gap: "8px" }}>

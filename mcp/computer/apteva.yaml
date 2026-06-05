@@ -2,10 +2,9 @@ schema: apteva-app/v1
 
 name: computer
 display_name: Computer
-version: 0.7.17
+version: 0.7.18
 description: |
-  Watch and steer browser sessions. v0.7.17 shows richer session
-  metadata in the panel.
+  Watch and steer browser sessions. v0.7.18 exposes Browserbase keep-alive.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/computer
@@ -43,11 +42,13 @@ provides:
         Open, resume, list, inspect, or close app-owned browser sessions.
         Args: action, session_id?, backend?, backend_session_id?, url?,
         context_id?, context_name?, auto_create_context?, persist?, timeout?,
-        proxy?, proxy_country?, viewport?. Prefer context_id returned by
-        computer_context_list to reopen saved browser state; context_name works
-        across providers when unique. For a reusable saved context, pass
-        context_name with auto_create_context=true; omitted names are only a
-        fallback and are auto-generated.
+        keep_alive?, proxy?, proxy_country?, viewport?. Browserbase honors
+        timeout as max session lifetime and keep_alive=true to allow reconnect
+        after disconnect. Prefer context_id returned by computer_context_list
+        to reopen saved browser state; context_name works across providers
+        when unique. For a reusable saved context, pass context_name with
+        auto_create_context=true; omitted names are only a fallback and are
+        auto-generated.
     - name: computer_use
       description: |
         Drive an app-owned browser session. Default workflow: call
@@ -85,7 +86,9 @@ provides:
         delete_provider?.
     - name: browser_open
       description: |
-        Compatibility alias for browser_session(action=open).
+        Compatibility alias for browser_session(action=open). Browserbase
+        honors timeout as max session lifetime and keep_alive=true to allow
+        reconnect after disconnect.
     - name: browser_list
       description: |
         Compatibility alias for browser_session(action=list).
