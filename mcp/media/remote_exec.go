@@ -150,6 +150,7 @@ func (e *remoteExecutor) Execute(ctx context.Context, app *sdk.AppCtx, row *Rend
 	}
 	signedURLs := make([]string, 0, len(row.SourceFileIDs))
 	sourceNames := make([]string, 0, len(row.SourceFileIDs))
+	sourceSizes := make([]int64, 0, len(row.SourceFileIDs))
 	for _, fidStr := range row.SourceFileIDs {
 		fid, parseErr := strconv.ParseInt(fidStr, 10, 64)
 		if parseErr != nil {
@@ -165,6 +166,7 @@ func (e *remoteExecutor) Execute(ctx context.Context, app *sdk.AppCtx, row *Rend
 		}
 		signedURLs = append(signedURLs, url)
 		sourceNames = append(sourceNames, sanitizeFilename(meta.Name))
+		sourceSizes = append(sourceSizes, meta.SizeBytes)
 	}
 
 	folder := row.OutputFolder
@@ -172,7 +174,7 @@ func (e *remoteExecutor) Execute(ctx context.Context, app *sdk.AppCtx, row *Rend
 		folder = e.outputFolder
 	}
 
-	script, err := e.buildScript(row, plan, paths.FFmpeg, signedURLs, sourceNames, folder, publicURL)
+	script, err := e.buildScript(row, plan, paths.FFmpeg, signedURLs, sourceNames, sourceSizes, folder, publicURL)
 	if err != nil {
 		return 0, fmt.Errorf("build remote script: %w", err)
 	}
@@ -240,10 +242,10 @@ func (e *remoteExecutor) Execute(ctx context.Context, app *sdk.AppCtx, row *Rend
 func (e *remoteExecutor) buildScript(
 	row *RenderRow, plan *opPlan,
 	ffmpegPath string,
-	signedURLs []string, sourceNames []string,
+	signedURLs []string, sourceNames []string, sourceSizes []int64,
 	folder string, publicURL string,
 ) (string, error) {
-	workDir := fmt.Sprintf("/tmp/apteva-render-%d", row.ID)
+	workDir := remoteRenderWorkDir(row.ID)
 
 	// Local-on-remote source paths. Match the local executor's
 	// "src-<fid>.<ext>" shape so debugging an ssh-in mirrors local.
@@ -261,12 +263,20 @@ func (e *remoteExecutor) buildScript(
 
 	var b strings.Builder
 	b.WriteString("set -euo pipefail\n")
+	fmt.Fprintf(&b, "WORK_ROOT=%s\n", shellQuote(remoteRenderRoot))
 	fmt.Fprintf(&b, "WORK=%s\n", shellQuote(workDir))
+	fmt.Fprintf(&b, "REQUIRED_BYTES=%d\n", remoteScratchRequiredBytes(sourceSizes))
+	b.WriteString(`mkdir -p "$WORK_ROOT"` + "\n")
+	b.WriteString(`AVAILABLE_BYTES=$(df -PB1 "$WORK_ROOT" | awk 'NR==2 {print $4}')` + "\n")
+	b.WriteString(`if [ "${AVAILABLE_BYTES:-0}" -lt "$REQUIRED_BYTES" ]; then` + "\n")
+	b.WriteString(`  echo "REMOTE_SCRATCH_FULL root=$WORK_ROOT available=${AVAILABLE_BYTES:-0} required=$REQUIRED_BYTES" >&2` + "\n")
+	b.WriteString(`  exit 1` + "\n")
+	b.WriteString(`fi` + "\n")
 	b.WriteString(`mkdir -p "$WORK"` + "\n")
 	b.WriteString(`cd "$WORK"` + "\n")
 	b.WriteString("echo $$ > pid\n")
 	// Always-rm cleanup. Runs on any exit including non-zero/abort.
-	b.WriteString(`trap 'cd /tmp && rm -rf "$WORK"' EXIT` + "\n")
+	b.WriteString(`trap 'cd "$WORK_ROOT" && rm -rf "$WORK"' EXIT` + "\n")
 	b.WriteString(`CURL_RETRY=(--retry 3 --retry-delay 1 --retry-max-time 120 --retry-connrefused --retry-all-errors)` + "\n")
 
 	// Download every source. Signed URLs are time-limited; curl --fail
@@ -440,6 +450,29 @@ func materialiseRemoteArgs(template, srcPaths []string) ([]string, error) {
 // Local to the script's $WORK directory.
 const remoteProgressFilename = "progress.log"
 
+// Remote renders download full source files before ffmpeg runs. Do not
+// use /tmp: many VPS images mount it as tmpfs, and a single large video
+// can nearly fill it. /var/tmp is on the persistent root filesystem on
+// ordinary Linux hosts and is therefore the right default for multi-GB
+// render scratch.
+const remoteRenderRoot = "/var/tmp/apteva-media-renders"
+
+const remoteRenderScratchHeadroomBytes int64 = 512 * 1024 * 1024
+
+func remoteRenderWorkDir(renderID int64) string {
+	return fmt.Sprintf("%s/render-%d", remoteRenderRoot, renderID)
+}
+
+func remoteScratchRequiredBytes(sourceSizes []int64) int64 {
+	required := remoteRenderScratchHeadroomBytes
+	for _, size := range sourceSizes {
+		if size > 0 {
+			required += size
+		}
+	}
+	return required
+}
+
 // ─── result parsing ────────────────────────────────────────────────
 
 type remoteRenderResult struct {
@@ -486,8 +519,8 @@ func pollRemoteProgress(ctx context.Context, done <-chan struct{}, app *sdk.AppC
 	defer ticker.Stop()
 	bumped := false
 	cmd := fmt.Sprintf(
-		`tail -n 5 /tmp/apteva-render-%d/progress.log 2>/dev/null | grep -F 'out_time_ms=' | head -1`,
-		renderID)
+		`tail -n 5 %s 2>/dev/null | grep -F 'out_time_ms=' | head -1`,
+		shellQuote(filepath.Join(remoteRenderWorkDir(renderID), remoteProgressFilename)))
 	for {
 		select {
 		case <-ctx.Done():
@@ -527,9 +560,9 @@ func registerRemoteKill(ctx context.Context, app *sdk.AppCtx, hostID, renderID i
 		<-ctx.Done()
 		log := app.Logger()
 		killCmd := fmt.Sprintf(
-			`PID=$(cat /tmp/apteva-render-%d/pid 2>/dev/null || true); `+
+			`PID=$(cat %s 2>/dev/null || true); `+
 				`if [ -n "$PID" ]; then kill -TERM "$PID" 2>/dev/null || true; fi`,
-			renderID)
+			shellQuote(filepath.Join(remoteRenderWorkDir(renderID), "pid")))
 		// Detached background; run with its own short timeout so a
 		// dead host doesn't pin this goroutine.
 		_, _, err := runRemote(context.Background(), app, hostID, killCmd, 10)

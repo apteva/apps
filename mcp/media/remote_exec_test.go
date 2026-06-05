@@ -122,18 +122,23 @@ func TestBuildScript_TrimShape(t *testing.T) {
 	}
 	signedURLs := []string{"https://signed.example.com/file/100?sig=abc"}
 	sourceNames := []string{"source.mp4"}
+	sourceSizes := []int64{123456}
 
 	script, err := e.buildScript(row, plan, "/root/.apteva-render/ffmpeg-7.0.2/ffmpeg",
-		signedURLs, sourceNames, "/renders/", "https://apt.example.com")
+		signedURLs, sourceNames, sourceSizes, "/renders/", "https://apt.example.com")
 	if err != nil {
 		t.Fatalf("buildScript: %v", err)
 	}
 
 	wantContains := []string{
 		"set -euo pipefail",
-		"WORK='/tmp/apteva-render-55'",
+		"WORK_ROOT='/var/tmp/apteva-media-renders'",
+		"WORK='/var/tmp/apteva-media-renders/render-55'",
+		"REQUIRED_BYTES=536994368",
+		`AVAILABLE_BYTES=$(df -PB1 "$WORK_ROOT" | awk 'NR==2 {print $4}')`,
+		`REMOTE_SCRATCH_FULL root=$WORK_ROOT`,
 		"echo $$ > pid",
-		"trap 'cd /tmp && rm -rf",
+		`trap 'cd "$WORK_ROOT" && rm -rf "$WORK"' EXIT`,
 		`CURL_RETRY=(--retry 3 --retry-delay 1 --retry-max-time 120 --retry-connrefused --retry-all-errors)`,
 		`curl -sS "${CURL_RETRY[@]}" --fail -L -o 'src-100.mp4' 'https://signed.example.com/file/100?sig=abc'`,
 		"'/root/.apteva-render/ffmpeg-7.0.2/ffmpeg' '-y' '-i' 'src-100.mp4'",
@@ -200,8 +205,9 @@ func TestBuildScript_ConcatWritesListFile(t *testing.T) {
 	}
 	urls := []string{"https://u/1?s=a", "https://u/2?s=b"}
 	names := []string{"a.mp4", "b.mp4"}
+	sizes := []int64{10, 20}
 
-	script, err := e.buildScript(row, plan, "ffmpeg", urls, names, "/r/", "https://x.example.com")
+	script, err := e.buildScript(row, plan, "ffmpeg", urls, names, sizes, "/r/", "https://x.example.com")
 	if err != nil {
 		t.Fatalf("buildScript: %v", err)
 	}
@@ -217,6 +223,14 @@ func TestBuildScript_ConcatWritesListFile(t *testing.T) {
 	}
 	if !strings.Contains(script, "__CONCAT_LIST_EOF__\n") {
 		t.Error("missing heredoc terminator")
+	}
+}
+
+func TestRemoteScratchRequiredBytes(t *testing.T) {
+	got := remoteScratchRequiredBytes([]int64{100, 200, 0, -1})
+	want := remoteRenderScratchHeadroomBytes + 300
+	if got != want {
+		t.Fatalf("remoteScratchRequiredBytes=%d want %d", got, want)
 	}
 }
 
