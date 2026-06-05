@@ -83,6 +83,10 @@ interface SessionRow {
   app_context_id?: string;
   context_name?: string;
   persist?: boolean;
+  keep_alive?: boolean;
+  timeout_seconds?: number;
+  provider_expires_at?: string;
+  app_idle_expires_at?: string;
   current_url: string;
   debug_url?: string;
   stream_url?: string;
@@ -330,6 +334,7 @@ export default function ComputerPanel({ projectId }: NativePanelProps) {
       <SessionDetail
         session={sel}
         projectId={projectId}
+        now={nowTick}
         onClose={setPendingClose}
         onRefresh={refresh}
         externalRefreshKey={eventPreviewTick}
@@ -550,6 +555,8 @@ function BrowserListItem({
   const openedAgo = relativeAge(row.opened_at, now);
   const lastUsedAgo = relativeAge(row.last_used_at, now);
   const viewport = row.width && row.height ? `${row.width}x${row.height}` : "";
+  const providerLife = providerLifetimeLabel(row, now);
+  const appIdleLife = relativeUntil(row.app_idle_expires_at, now);
   return (
     <li>
       <button
@@ -663,6 +670,16 @@ function BrowserListItem({
             {lastUsedAgo}
             {viewport ? ` | ${viewport}` : ""}
           </span>
+          <span>Keep alive</span>
+          <span className={row.keep_alive ? "text-text" : "text-text-muted"}>{row.keep_alive ? "yes" : "no"}</span>
+          <span>Provider</span>
+          <span title={row.provider_expires_at ? formatTime(row.provider_expires_at) : "Provider default timeout"}>
+            {providerLife}
+          </span>
+          <span>App idle</span>
+          <span title={row.app_idle_expires_at ? formatTime(row.app_idle_expires_at) : ""}>
+            {appIdleLife}
+          </span>
         </div>
       </button>
     </li>
@@ -672,12 +689,14 @@ function BrowserListItem({
 function SessionDetail({
   session,
   projectId,
+  now,
   onClose,
   onRefresh,
   externalRefreshKey,
 }: {
   session: SessionRow | null;
   projectId?: string;
+  now: number;
   onClose: (id: string) => void;
   onRefresh: () => Promise<void>;
   externalRefreshKey: number;
@@ -754,6 +773,8 @@ function SessionDetail({
   const host = hostFor(session.current_url);
   const currentURL = session.current_url || "-";
   const viewport = `${session.width ?? 0} x ${session.height ?? 0}`;
+  const providerLife = providerLifetimeLabel(session, now);
+  const appIdleLife = relativeUntil(session.app_idle_expires_at, now);
 
   return (
     <Card fullWidth className="h-full min-h-0 flex flex-col overflow-hidden">
@@ -907,6 +928,10 @@ function SessionDetail({
             { label: "App context", value: session.context_name || session.app_context_id || "-" },
             { label: "Provider context", value: session.context_id || "-" },
             { label: "Persist changes", value: session.persist ? "yes" : "no" },
+            { label: "Keep alive", value: session.keep_alive ? "yes" : "no" },
+            { label: "Provider timeout", value: session.timeout_seconds ? formatDurationSeconds(session.timeout_seconds) : "provider default" },
+            { label: "Provider expires", value: session.provider_expires_at ? `${providerLife} (${formatTime(session.provider_expires_at)})` : providerLife },
+            { label: "App idle close", value: session.app_idle_expires_at ? `${appIdleLife} (${formatTime(session.app_idle_expires_at)})` : appIdleLife },
             { label: "Current URL", value: currentURL },
             { label: "Viewport", value: viewport },
             { label: "Opened", value: formatTime(session.opened_at) },
@@ -1484,6 +1509,38 @@ function formatTime(iso: string): string {
   } catch {
     return iso;
   }
+}
+
+function providerLifetimeLabel(row: SessionRow, now: number): string {
+  if (row.provider_expires_at) return relativeUntil(row.provider_expires_at, now);
+  if (row.timeout_seconds) return formatDurationSeconds(row.timeout_seconds);
+  return row.backend === "browserbase" ? "provider default" : "not tracked";
+}
+
+function relativeUntil(iso: string | undefined, now: number): string {
+  if (!iso) return "-";
+  const then = Date.parse(iso);
+  if (!Number.isFinite(then)) return "-";
+  const seconds = Math.floor((then - now) / 1000);
+  if (seconds <= 0) return "expired";
+  if (seconds < 60) return `${seconds}s left`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m left`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ${minutes % 60}m left`;
+  const days = Math.floor(hours / 24);
+  return `${days}d ${hours % 24}h left`;
+}
+
+function formatDurationSeconds(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds <= 0) return "-";
+  if (seconds < 60) return `${seconds}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ${minutes % 60}m`;
+  const days = Math.floor(hours / 24);
+  return `${days}d ${hours % 24}h`;
 }
 
 function relativeAge(iso: string, now: number): string {

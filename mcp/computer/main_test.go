@@ -694,12 +694,13 @@ func TestBrowserbaseOpenExposesAndForwardsLeaseControls(t *testing.T) {
 
 	app := &App{reg: &registry{m: map[string]*session{}}}
 	ctx := tk.NewAppCtx(t, "apteva.yaml")
-	if _, err := app.toolBrowserSession(ctx, map[string]any{
+	out, err := app.toolBrowserSession(ctx, map[string]any{
 		"action":     "open",
 		"backend":    "browserbase",
 		"timeout":    3600,
 		"keep_alive": true,
-	}); err != nil {
+	})
+	if err != nil {
 		t.Fatalf("browser_session open: %v", err)
 	}
 	if gotCfg.Type != "browserbase" {
@@ -713,6 +714,19 @@ func TestBrowserbaseOpenExposesAndForwardsLeaseControls(t *testing.T) {
 	}
 	if fake.openTimeout != 3600 {
 		t.Fatalf("OpenSession timeout: want 3600, got %d", fake.openTimeout)
+	}
+	outMap := out.(map[string]any)
+	if outMap["keep_alive"] != true {
+		t.Fatalf("output keep_alive: want true, got %#v", outMap["keep_alive"])
+	}
+	if outMap["timeout_seconds"] != 3600 {
+		t.Fatalf("output timeout_seconds: want 3600, got %#v", outMap["timeout_seconds"])
+	}
+	if outMap["provider_expires_at"] == "" {
+		t.Fatalf("output provider_expires_at missing: %#v", outMap)
+	}
+	if outMap["app_idle_expires_at"] == "" {
+		t.Fatalf("output app_idle_expires_at missing: %#v", outMap)
 	}
 
 	for _, toolName := range []string{"browser_session", "browser_open"} {

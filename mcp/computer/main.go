@@ -41,9 +41,9 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: computer
 display_name: Computer
-version: 0.7.18
+version: 0.7.19
 description: |
-  Watch and steer browser sessions. v0.7.18 exposes Browserbase keep-alive.
+  Watch and steer browser sessions. v0.7.19 shows session lifetimes.
 scopes: [project, global]
 requires:
   permissions:
@@ -212,6 +212,8 @@ type session struct {
 	appContextID string
 	contextName  string
 	persist      bool
+	keepAlive    bool
+	timeout      int
 	openedAt     time.Time
 	lastUsed     time.Time
 }
@@ -224,6 +226,8 @@ type reapedSession struct {
 	AppContextID     string
 	ContextName      string
 	Persist          bool
+	KeepAlive        bool
+	TimeoutSeconds   int
 	CurrentURL       string
 	Width            int
 	Height           int
@@ -308,6 +312,8 @@ func (r *registry) reapIdleDetails(ttl time.Duration) []reapedSession {
 			AppContextID:     s.appContextID,
 			ContextName:      s.contextName,
 			Persist:          s.persist,
+			KeepAlive:        s.keepAlive,
+			TimeoutSeconds:   s.timeout,
 			CurrentURL:       currentURL(s.comp),
 			Width:            disp.Width,
 			Height:           disp.Height,
@@ -1056,6 +1062,8 @@ func (a *App) openBrowserSession(ctx *sdk.AppCtx, args map[string]any, resume bo
 		appContextID: rc.AppContextID,
 		contextName:  rc.ContextName,
 		persist:      rc.Persist,
+		keepAlive:    backend == "browserbase" && boolArgDefault(args, "keep_alive", false),
+		timeout:      intArg(args, "timeout"),
 		openedAt:     now,
 		lastUsed:     now,
 	}
@@ -1098,20 +1106,24 @@ func (a *App) resolveBackend(ctx *sdk.AppCtx, args map[string]any) (string, erro
 // reports. Kept tight: session_id + provenance + the URLs the
 // operator needs to identify or open the session.
 type sessionInfo struct {
-	SessionID        string `json:"session_id"`
-	BackendSessionID string `json:"backend_session_id,omitempty"`
-	Backend          string `json:"backend"`
-	ContextID        string `json:"context_id,omitempty"`
-	AppContextID     string `json:"app_context_id,omitempty"`
-	ContextName      string `json:"context_name,omitempty"`
-	Persist          bool   `json:"persist"`
-	CurrentURL       string `json:"current_url"`
-	DebugURL         string `json:"debug_url,omitempty"`
-	StreamURL        string `json:"stream_url,omitempty"`
-	Width            int    `json:"width"`
-	Height           int    `json:"height"`
-	OpenedAt         string `json:"opened_at"`
-	LastUsedAt       string `json:"last_used_at"`
+	SessionID         string `json:"session_id"`
+	BackendSessionID  string `json:"backend_session_id,omitempty"`
+	Backend           string `json:"backend"`
+	ContextID         string `json:"context_id,omitempty"`
+	AppContextID      string `json:"app_context_id,omitempty"`
+	ContextName       string `json:"context_name,omitempty"`
+	Persist           bool   `json:"persist"`
+	KeepAlive         bool   `json:"keep_alive"`
+	TimeoutSeconds    int    `json:"timeout_seconds,omitempty"`
+	ProviderExpiresAt string `json:"provider_expires_at,omitempty"`
+	AppIdleExpiresAt  string `json:"app_idle_expires_at"`
+	CurrentURL        string `json:"current_url"`
+	DebugURL          string `json:"debug_url,omitempty"`
+	StreamURL         string `json:"stream_url,omitempty"`
+	Width             int    `json:"width"`
+	Height            int    `json:"height"`
+	OpenedAt          string `json:"opened_at"`
+	LastUsedAt        string `json:"last_used_at"`
 }
 
 func (a *App) toolBrowserList(ctx *sdk.AppCtx, _ map[string]any) (any, error) {
@@ -1131,60 +1143,74 @@ func (a *App) listSessions() []sessionInfo {
 		appContextID string
 		contextName  string
 		persist      bool
+		keepAlive    bool
+		timeout      int
 		opened       time.Time
 		used         time.Time
 	}
 	a.reg.mu.Lock()
 	rows := make([]frozen, 0, len(a.reg.m))
 	for id, s := range a.reg.m {
-		rows = append(rows, frozen{id: id, comp: s.comp, backend: s.backend, appContextID: s.appContextID, contextName: s.contextName, persist: s.persist, opened: s.openedAt, used: s.lastUsed})
+		rows = append(rows, frozen{id: id, comp: s.comp, backend: s.backend, appContextID: s.appContextID, contextName: s.contextName, persist: s.persist, keepAlive: s.keepAlive, timeout: s.timeout, opened: s.openedAt, used: s.lastUsed})
 	}
 	a.reg.mu.Unlock()
 
 	out := make([]sessionInfo, 0, len(rows))
 	for _, r := range rows {
-		out = append(out, a.sessionInfo(r.id, &session{comp: r.comp, backend: r.backend, appContextID: r.appContextID, contextName: r.contextName, persist: r.persist, openedAt: r.opened, lastUsed: r.used}))
+		out = append(out, a.sessionInfo(r.id, &session{comp: r.comp, backend: r.backend, appContextID: r.appContextID, contextName: r.contextName, persist: r.persist, keepAlive: r.keepAlive, timeout: r.timeout, openedAt: r.opened, lastUsed: r.used}))
 	}
 	return out
 }
 
 func (a *App) sessionInfo(id string, s *session) sessionInfo {
 	disp := s.comp.DisplaySize()
+	providerExpiresAt := ""
+	if s.timeout > 0 {
+		providerExpiresAt = s.openedAt.Add(time.Duration(s.timeout) * time.Second).UTC().Format(time.RFC3339)
+	}
 	return sessionInfo{
-		SessionID:        id,
-		BackendSessionID: backendSessionID(s.comp),
-		Backend:          s.backend,
-		ContextID:        contextID(s.comp),
-		AppContextID:     s.appContextID,
-		ContextName:      s.contextName,
-		Persist:          s.persist,
-		CurrentURL:       currentURL(s.comp),
-		DebugURL:         debugURL(s.comp),
-		StreamURL:        streamURL(s.comp),
-		Width:            disp.Width,
-		Height:           disp.Height,
-		OpenedAt:         s.openedAt.UTC().Format(time.RFC3339),
-		LastUsedAt:       s.lastUsed.UTC().Format(time.RFC3339),
+		SessionID:         id,
+		BackendSessionID:  backendSessionID(s.comp),
+		Backend:           s.backend,
+		ContextID:         contextID(s.comp),
+		AppContextID:      s.appContextID,
+		ContextName:       s.contextName,
+		Persist:           s.persist,
+		KeepAlive:         s.keepAlive,
+		TimeoutSeconds:    s.timeout,
+		ProviderExpiresAt: providerExpiresAt,
+		AppIdleExpiresAt:  s.lastUsed.Add(idleTTL).UTC().Format(time.RFC3339),
+		CurrentURL:        currentURL(s.comp),
+		DebugURL:          debugURL(s.comp),
+		StreamURL:         streamURL(s.comp),
+		Width:             disp.Width,
+		Height:            disp.Height,
+		OpenedAt:          s.openedAt.UTC().Format(time.RFC3339),
+		LastUsedAt:        s.lastUsed.UTC().Format(time.RFC3339),
 	}
 }
 
 func (a *App) sessionOutput(id string, s *session) map[string]any {
 	info := a.sessionInfo(id, s)
 	return map[string]any{
-		"session_id":         info.SessionID,
-		"backend_session_id": info.BackendSessionID,
-		"backend":            info.Backend,
-		"context_id":         info.ContextID,
-		"app_context_id":     info.AppContextID,
-		"context_name":       info.ContextName,
-		"persist":            info.Persist,
-		"current_url":        info.CurrentURL,
-		"debug_url":          info.DebugURL,
-		"stream_url":         info.StreamURL,
-		"width":              info.Width,
-		"height":             info.Height,
-		"opened_at":          info.OpenedAt,
-		"last_used_at":       info.LastUsedAt,
+		"session_id":          info.SessionID,
+		"backend_session_id":  info.BackendSessionID,
+		"backend":             info.Backend,
+		"context_id":          info.ContextID,
+		"app_context_id":      info.AppContextID,
+		"context_name":        info.ContextName,
+		"persist":             info.Persist,
+		"keep_alive":          info.KeepAlive,
+		"timeout_seconds":     info.TimeoutSeconds,
+		"provider_expires_at": info.ProviderExpiresAt,
+		"app_idle_expires_at": info.AppIdleExpiresAt,
+		"current_url":         info.CurrentURL,
+		"debug_url":           info.DebugURL,
+		"stream_url":          info.StreamURL,
+		"width":               info.Width,
+		"height":              info.Height,
+		"opened_at":           info.OpenedAt,
+		"last_used_at":        info.LastUsedAt,
 	}
 }
 
@@ -1322,18 +1348,22 @@ func emitEvent(ctx *sdk.AppCtx, topic string, data map[string]any) {
 func (a *App) sessionEventPayload(id string, s *session) map[string]any {
 	info := a.sessionInfo(id, s)
 	return map[string]any{
-		"session_id":         info.SessionID,
-		"backend_session_id": info.BackendSessionID,
-		"backend":            info.Backend,
-		"context_id":         info.ContextID,
-		"app_context_id":     info.AppContextID,
-		"context_name":       info.ContextName,
-		"persist":            info.Persist,
-		"current_url":        info.CurrentURL,
-		"width":              info.Width,
-		"height":             info.Height,
-		"opened_at":          info.OpenedAt,
-		"last_used_at":       info.LastUsedAt,
+		"session_id":          info.SessionID,
+		"backend_session_id":  info.BackendSessionID,
+		"backend":             info.Backend,
+		"context_id":          info.ContextID,
+		"app_context_id":      info.AppContextID,
+		"context_name":        info.ContextName,
+		"persist":             info.Persist,
+		"keep_alive":          info.KeepAlive,
+		"timeout_seconds":     info.TimeoutSeconds,
+		"provider_expires_at": info.ProviderExpiresAt,
+		"app_idle_expires_at": info.AppIdleExpiresAt,
+		"current_url":         info.CurrentURL,
+		"width":               info.Width,
+		"height":              info.Height,
+		"opened_at":           info.OpenedAt,
+		"last_used_at":        info.LastUsedAt,
 	}
 }
 
@@ -1373,19 +1403,23 @@ func (a *App) sessionActionPayload(id string, s *session, act backends.Action, a
 
 func reapedSessionEventPayload(row reapedSession) map[string]any {
 	return map[string]any{
-		"session_id":         row.ID,
-		"backend_session_id": row.BackendSessionID,
-		"backend":            row.Backend,
-		"context_id":         row.ContextID,
-		"app_context_id":     row.AppContextID,
-		"context_name":       row.ContextName,
-		"persist":            row.Persist,
-		"current_url":        row.CurrentURL,
-		"width":              row.Width,
-		"height":             row.Height,
-		"opened_at":          row.OpenedAt.UTC().Format(time.RFC3339),
-		"last_used_at":       row.LastUsedAt.UTC().Format(time.RFC3339),
-		"idle_seconds":       int(row.Idle.Seconds()),
+		"session_id":          row.ID,
+		"backend_session_id":  row.BackendSessionID,
+		"backend":             row.Backend,
+		"context_id":          row.ContextID,
+		"app_context_id":      row.AppContextID,
+		"context_name":        row.ContextName,
+		"persist":             row.Persist,
+		"keep_alive":          row.KeepAlive,
+		"timeout_seconds":     row.TimeoutSeconds,
+		"provider_expires_at": providerExpiresAt(row.OpenedAt, row.TimeoutSeconds),
+		"app_idle_expires_at": row.LastUsedAt.Add(idleTTL).UTC().Format(time.RFC3339),
+		"current_url":         row.CurrentURL,
+		"width":               row.Width,
+		"height":              row.Height,
+		"opened_at":           row.OpenedAt.UTC().Format(time.RFC3339),
+		"last_used_at":        row.LastUsedAt.UTC().Format(time.RFC3339),
+		"idle_seconds":        int(row.Idle.Seconds()),
 	}
 }
 
@@ -1404,6 +1438,13 @@ func contextEventPayload(rec *ComputerContext) map[string]any {
 		"updated_at":          rec.UpdatedAt,
 		"last_used_at":        rec.LastUsedAt,
 	}
+}
+
+func providerExpiresAt(opened time.Time, timeoutSeconds int) string {
+	if timeoutSeconds <= 0 {
+		return ""
+	}
+	return opened.Add(time.Duration(timeoutSeconds) * time.Second).UTC().Format(time.RFC3339)
 }
 
 func settingsEventPayload(settings ComputerSettings) map[string]any {
