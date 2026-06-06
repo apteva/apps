@@ -22,7 +22,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: media
 display_name: Media
-version: 0.13.28
+version: 0.13.32
 description: |
   Catalog + derivations + renders + transcripts + auto-descriptions
   for media files in storage. Indexes uploads (probe, thumbnail,
@@ -662,7 +662,7 @@ func (a *App) toolGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		}
 		return nil, err
 	}
-	includeRawProbe, _ := args["include_raw_probe"].(bool)
+	includeRawProbe, _ := boolArg(args["include_raw_probe"])
 	rows := sanitizeMediaToolRows([]MediaRow{*m}, includeRawProbe)
 	enriched, _, eerr := enrichRows(context.Background(), pid, rows)
 	if eerr != nil {
@@ -1048,13 +1048,13 @@ func (a *App) toolSearch(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if v, ok := args["aspect"].(string); ok {
 		f.Aspect = normalizeAspect(v)
 	}
-	if v, ok := args["has_video"].(bool); ok {
+	if v, ok := boolArg(args["has_video"]); ok {
 		f.HasVideo = &v
 	}
-	if v, ok := args["has_audio"].(bool); ok {
+	if v, ok := boolArg(args["has_audio"]); ok {
 		f.HasAudio = &v
 	}
-	if v, ok := args["is_image"].(bool); ok {
+	if v, ok := boolArg(args["is_image"]); ok {
 		f.IsImage = &v
 	}
 	f.WidthMin = int(int64Arg(args["width_min"]))
@@ -1063,7 +1063,7 @@ func (a *App) toolSearch(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	f.AudioCodec, _ = args["audio_codec"].(string)
 	f.Folder, _ = args["folder"].(string)
 	f.Folder = normalizeFolderFilter(f.Folder)
-	if v, ok := args["recursive"].(bool); ok {
+	if v, ok := boolArg(args["recursive"]); ok {
 		f.Recursive = v
 	}
 	f.Limit = int(int64Arg(args["limit"]))
@@ -1075,7 +1075,7 @@ func (a *App) toolSearch(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	includeRawProbe, _ := args["include_raw_probe"].(bool)
+	includeRawProbe, _ := boolArg(args["include_raw_probe"])
 	rows = sanitizeMediaToolRows(rows, includeRawProbe)
 	enriched, _, eerr := enrichRows(context.Background(), pid, rows)
 	if eerr != nil {
@@ -1573,6 +1573,42 @@ func int64Arg(v any) int64 {
 		return n
 	}
 	return 0
+}
+
+func boolArg(v any) (bool, bool) {
+	switch x := v.(type) {
+	case bool:
+		return x, true
+	case string:
+		switch strings.ToLower(strings.TrimSpace(x)) {
+		case "true", "1", "yes", "y", "on":
+			return true, true
+		case "false", "0", "no", "n", "off":
+			return false, true
+		}
+	case float64:
+		if x == 1 {
+			return true, true
+		}
+		if x == 0 {
+			return false, true
+		}
+	case int:
+		if x == 1 {
+			return true, true
+		}
+		if x == 0 {
+			return false, true
+		}
+	case int64:
+		if x == 1 {
+			return true, true
+		}
+		if x == 0 {
+			return false, true
+		}
+	}
+	return false, false
 }
 
 // toolReindex flips one row (or all failed rows) back to pending so

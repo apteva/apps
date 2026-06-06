@@ -219,6 +219,55 @@ func TestSearchMedia_CanonicalMediaTypeAndAspect(t *testing.T) {
 	}
 }
 
+func TestToolSearchAcceptsStringScalars(t *testing.T) {
+	ctx := newTestCtx(t)
+	reel := sampleVideoProbe()
+	reel.Width = 1080
+	reel.Height = 1920
+	reel.DurationMs = 45_000
+	if err := upsertMedia(ctx.AppDB(), testProj, "reel", reel, "a", "/monika/october_2025/", "reel.mp4"); err != nil {
+		t.Fatal(err)
+	}
+	if err := upsertMedia(ctx.AppDB(), testProj, "image", sampleImageProbe(), "b", "/monika/october_2025/", "frame.png"); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := (&App{}).toolSearch(ctx, map[string]any{
+		"_project_id":       testProj,
+		"folder":            "/monika",
+		"recursive":         "true",
+		"media_type":        "video",
+		"aspect":            "portrait",
+		"duration_max_ms":   "60000",
+		"limit":             "10",
+		"offset":            "0",
+		"order_by":          "updated_at",
+		"include_raw_probe": "false",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := out.(map[string]any)
+	switch rows := m["media"].(type) {
+	case []MediaRow:
+		if len(rows) != 1 || rows[0].FileID != "reel" {
+			t.Fatalf("toolSearch string args returned %+v, want reel only", rows)
+		}
+		if rows[0].RawProbe != nil {
+			t.Fatalf("include_raw_probe=false should omit raw_probe, got %s", string(rows[0].RawProbe))
+		}
+	case []MediaResponseRow:
+		if len(rows) != 1 || rows[0].FileID != "reel" {
+			t.Fatalf("toolSearch string args returned %+v, want reel only", rows)
+		}
+		if rows[0].RawProbe != nil {
+			t.Fatalf("include_raw_probe=false should omit raw_probe, got %s", string(rows[0].RawProbe))
+		}
+	default:
+		t.Fatalf("media response = %#v, want media rows", m["media"])
+	}
+}
+
 func TestSearchMedia_ExcludesAudienceRating(t *testing.T) {
 	ctx := newTestCtx(t)
 	upsertMedia(ctx.AppDB(), testProj, "general", sampleVideoProbe(), "a", "", "")
