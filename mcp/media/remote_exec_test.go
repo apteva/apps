@@ -123,9 +123,10 @@ func TestBuildScript_TrimShape(t *testing.T) {
 	signedURLs := []string{"https://signed.example.com/file/100?sig=abc"}
 	sourceNames := []string{"source.mp4"}
 	sourceSizes := []int64{123456}
+	sourceSHA256s := []string{"0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"}
 
 	script, err := e.buildScript(row, plan, "/root/.apteva-render/ffmpeg-7.0.2/ffmpeg",
-		signedURLs, sourceNames, sourceSizes, "/renders/", "https://apt.example.com")
+		signedURLs, sourceNames, sourceSizes, sourceSHA256s, "/renders/", "https://apt.example.com")
 	if err != nil {
 		t.Fatalf("buildScript: %v", err)
 	}
@@ -133,14 +134,24 @@ func TestBuildScript_TrimShape(t *testing.T) {
 	wantContains := []string{
 		"set -euo pipefail",
 		"WORK_ROOT='/var/tmp/apteva-media-renders'",
+		"SOURCE_CACHE_ROOT='/var/tmp/apteva-media-cache/sources'",
+		"SOURCE_CACHE_MAX_BYTES=21474836480",
 		"WORK='/var/tmp/apteva-media-renders/render-55'",
-		"REQUIRED_BYTES=536994368",
+		"REQUIRED_BYTES=536870912",
 		`AVAILABLE_BYTES=$(df -PB1 "$WORK_ROOT" | awk 'NR==2 {print $4}')`,
 		`REMOTE_SCRATCH_FULL root=$WORK_ROOT`,
 		"echo $$ > pid",
 		`trap 'cd "$WORK_ROOT" && rm -rf "$WORK"' EXIT`,
 		`CURL_RETRY=(--retry 3 --retry-delay 1 --retry-max-time 120 --retry-connrefused --retry-all-errors)`,
-		`curl -sS "${CURL_RETRY[@]}" --fail -L -o 'src-100.mp4' 'https://signed.example.com/file/100?sig=abc'`,
+		`cache_valid()`,
+		`REMOTE_SOURCE_CACHE_HIT file_id=$fid`,
+		`REMOTE_SOURCE_CACHE_MISS file_id=$fid`,
+		`REMOTE_SOURCE_CACHE_INVALID file_id=$fid`,
+		`REMOTE_SOURCE_CACHE_PRUNE bytes=$victim_size`,
+		`REMOTE_SOURCE_CACHE_STALE_LOCK file_id=$fid`,
+		`REMOTE_SOURCE_CACHE_LOCK_TIMEOUT file_id=$fid`,
+		`curl -sS "${CURL_RETRY[@]}" --fail -L -o "$tmp" "$url"`,
+		`materialize_source '100' 'https://signed.example.com/file/100?sig=abc' 'src-100.mp4' 'file-100-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.mp4' 123456 '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'`,
 		"'/root/.apteva-render/ffmpeg-7.0.2/ffmpeg' '-y' '-i' 'src-100.mp4'",
 		`OUT='clip.mp4'`,
 		`SIZE=$(stat`,
@@ -206,8 +217,9 @@ func TestBuildScript_ConcatWritesListFile(t *testing.T) {
 	urls := []string{"https://u/1?s=a", "https://u/2?s=b"}
 	names := []string{"a.mp4", "b.mp4"}
 	sizes := []int64{10, 20}
+	shas := []string{"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}
 
-	script, err := e.buildScript(row, plan, "ffmpeg", urls, names, sizes, "/r/", "https://x.example.com")
+	script, err := e.buildScript(row, plan, "ffmpeg", urls, names, sizes, shas, "/r/", "https://x.example.com")
 	if err != nil {
 		t.Fatalf("buildScript: %v", err)
 	}
@@ -228,9 +240,23 @@ func TestBuildScript_ConcatWritesListFile(t *testing.T) {
 
 func TestRemoteScratchRequiredBytes(t *testing.T) {
 	got := remoteScratchRequiredBytes([]int64{100, 200, 0, -1})
-	want := remoteRenderScratchHeadroomBytes + 300
+	want := remoteRenderScratchHeadroomBytes
 	if got != want {
 		t.Fatalf("remoteScratchRequiredBytes=%d want %d", got, want)
+	}
+}
+
+func TestRemoteSourceCacheName(t *testing.T) {
+	got := remoteSourceCacheName("100", "source.mp4", "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef", 123)
+	want := "file-100-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.mp4"
+	if got != want {
+		t.Fatalf("remoteSourceCacheName with sha = %q want %q", got, want)
+	}
+
+	got = remoteSourceCacheName("101", "source.mov", "", 456)
+	want = "file-101-size-456.mov"
+	if got != want {
+		t.Fatalf("remoteSourceCacheName with size fallback = %q want %q", got, want)
 	}
 }
 
@@ -274,7 +300,7 @@ func TestRemoteFFmpegInstaller_CacheHit(t *testing.T) {
 
 func TestNewRemoteExecutor_DisabledWhenHostIDZero(t *testing.T) {
 	local := &localExecutor{outputFolder: "/r/"}
-	got, err := newRemoteExecutor(0, newRemoteFFmpegInstaller(), local)
+	got, err := newRemoteExecutor(0, newRemoteFFmpegInstaller(), local, remoteSourceCacheDefaultMaxBytes)
 	if err != nil {
 		t.Fatalf("expected nil error for host_id=0, got %v", err)
 	}

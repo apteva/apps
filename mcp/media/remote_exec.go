@@ -12,7 +12,8 @@ package main
 //     storage. The remote pulls the bytes itself; media's process
 //     never sees them.
 //  3. SSH a single bash script via instances.instance_run_command:
-//       - curl signed URLs → local files
+//       - reuse or curl signed URLs into the remote source cache, then
+//         hardlink/copy them into the per-render workdir
 //       - (concat only) write the demuxer list file
 //       - run ffmpeg with the same args local execution uses, but
 //         pointing at the downloaded local files
@@ -58,9 +59,10 @@ import (
 // renders. The installer cache is shared so concurrent first-renders
 // to the same host don't race each other on the install probe.
 type remoteExecutor struct {
-	hostID       int64
-	installer    *remoteFFmpegInstaller
-	outputFolder string
+	hostID              int64
+	installer           *remoteFFmpegInstaller
+	outputFolder        string
+	sourceCacheMaxBytes int64
 
 	// Outbound storage credentials. storageToken is per-install +
 	// process-stable (set by the SDK at boot), so caching it on the
@@ -89,7 +91,7 @@ func (e *remoteExecutor) Name() string { return "remote-instance" }
 // app.PlatformInfo() (SDK-side 60s cache so we don't hammer the
 // server), so public_url changes propagate within a minute without
 // a sidecar restart.
-func newRemoteExecutor(hostID int64, installer *remoteFFmpegInstaller, local *localExecutor) (*remoteExecutor, error) {
+func newRemoteExecutor(hostID int64, installer *remoteFFmpegInstaller, local *localExecutor, sourceCacheMaxBytes int64) (*remoteExecutor, error) {
 	if hostID <= 0 {
 		return nil, nil
 	}
@@ -101,11 +103,12 @@ func newRemoteExecutor(hostID int64, installer *remoteFFmpegInstaller, local *lo
 		return nil, errors.New("render_host_id is set but no outbound storage token in env (APTEVA_OUTBOUND_TOKEN / APTEVA_APP_TOKEN)")
 	}
 	return &remoteExecutor{
-		hostID:       hostID,
-		installer:    installer,
-		outputFolder: local.outputFolder,
-		storageToken: tok,
-		fallback:     local,
+		hostID:              hostID,
+		installer:           installer,
+		outputFolder:        local.outputFolder,
+		sourceCacheMaxBytes: sourceCacheMaxBytes,
+		storageToken:        tok,
+		fallback:            local,
 	}, nil
 }
 
@@ -151,6 +154,7 @@ func (e *remoteExecutor) Execute(ctx context.Context, app *sdk.AppCtx, row *Rend
 	signedURLs := make([]string, 0, len(row.SourceFileIDs))
 	sourceNames := make([]string, 0, len(row.SourceFileIDs))
 	sourceSizes := make([]int64, 0, len(row.SourceFileIDs))
+	sourceSHA256s := make([]string, 0, len(row.SourceFileIDs))
 	for _, fidStr := range row.SourceFileIDs {
 		fid, parseErr := strconv.ParseInt(fidStr, 10, 64)
 		if parseErr != nil {
@@ -167,6 +171,7 @@ func (e *remoteExecutor) Execute(ctx context.Context, app *sdk.AppCtx, row *Rend
 		signedURLs = append(signedURLs, url)
 		sourceNames = append(sourceNames, sanitizeFilename(meta.Name))
 		sourceSizes = append(sourceSizes, meta.SizeBytes)
+		sourceSHA256s = append(sourceSHA256s, strings.ToLower(strings.TrimSpace(meta.SHA256)))
 	}
 
 	folder := row.OutputFolder
@@ -174,7 +179,7 @@ func (e *remoteExecutor) Execute(ctx context.Context, app *sdk.AppCtx, row *Rend
 		folder = e.outputFolder
 	}
 
-	script, err := e.buildScript(row, plan, paths.FFmpeg, signedURLs, sourceNames, sourceSizes, folder, publicURL)
+	script, err := e.buildScript(row, plan, paths.FFmpeg, signedURLs, sourceNames, sourceSizes, sourceSHA256s, folder, publicURL)
 	if err != nil {
 		return 0, fmt.Errorf("build remote script: %w", err)
 	}
@@ -242,17 +247,23 @@ func (e *remoteExecutor) Execute(ctx context.Context, app *sdk.AppCtx, row *Rend
 func (e *remoteExecutor) buildScript(
 	row *RenderRow, plan *opPlan,
 	ffmpegPath string,
-	signedURLs []string, sourceNames []string, sourceSizes []int64,
+	signedURLs []string, sourceNames []string, sourceSizes []int64, sourceSHA256s []string,
 	folder string, publicURL string,
 ) (string, error) {
 	workDir := remoteRenderWorkDir(row.ID)
+	if len(sourceSHA256s) != len(signedURLs) {
+		return "", fmt.Errorf("source SHA count %d does not match URL count %d", len(sourceSHA256s), len(signedURLs))
+	}
 
 	// Local-on-remote source paths. Match the local executor's
 	// "src-<fid>.<ext>" shape so debugging an ssh-in mirrors local.
 	srcPaths := make([]string, 0, len(signedURLs))
+	cacheNames := make([]string, 0, len(signedURLs))
 	for i, fidStr := range row.SourceFileIDs {
+		sourceSHA256s[i] = strings.ToLower(strings.TrimSpace(sourceSHA256s[i]))
 		ext := filepath.Ext(sourceNames[i])
 		srcPaths = append(srcPaths, fmt.Sprintf("src-%s%s", fidStr, ext))
+		cacheNames = append(cacheNames, remoteSourceCacheName(fidStr, sourceNames[i], sourceSHA256s[i], sourceSizes[i]))
 	}
 
 	args, err := materialiseRemoteArgs(plan.Args, srcPaths)
@@ -261,12 +272,19 @@ func (e *remoteExecutor) buildScript(
 	}
 	args = append(args, plan.Filename)
 
+	sourceCacheMaxBytes := e.sourceCacheMaxBytes
+	if sourceCacheMaxBytes <= 0 {
+		sourceCacheMaxBytes = remoteSourceCacheDefaultMaxBytes
+	}
+
 	var b strings.Builder
 	b.WriteString("set -euo pipefail\n")
 	fmt.Fprintf(&b, "WORK_ROOT=%s\n", shellQuote(remoteRenderRoot))
+	fmt.Fprintf(&b, "SOURCE_CACHE_ROOT=%s\n", shellQuote(remoteSourceCacheRoot))
+	fmt.Fprintf(&b, "SOURCE_CACHE_MAX_BYTES=%d\n", sourceCacheMaxBytes)
 	fmt.Fprintf(&b, "WORK=%s\n", shellQuote(workDir))
 	fmt.Fprintf(&b, "REQUIRED_BYTES=%d\n", remoteScratchRequiredBytes(sourceSizes))
-	b.WriteString(`mkdir -p "$WORK_ROOT"` + "\n")
+	b.WriteString(`mkdir -p "$WORK_ROOT" "$SOURCE_CACHE_ROOT"` + "\n")
 	b.WriteString(`AVAILABLE_BYTES=$(df -PB1 "$WORK_ROOT" | awk 'NR==2 {print $4}')` + "\n")
 	b.WriteString(`if [ "${AVAILABLE_BYTES:-0}" -lt "$REQUIRED_BYTES" ]; then` + "\n")
 	b.WriteString(`  echo "REMOTE_SCRATCH_FULL root=$WORK_ROOT available=${AVAILABLE_BYTES:-0} required=$REQUIRED_BYTES" >&2` + "\n")
@@ -278,12 +296,15 @@ func (e *remoteExecutor) buildScript(
 	// Always-rm cleanup. Runs on any exit including non-zero/abort.
 	b.WriteString(`trap 'cd "$WORK_ROOT" && rm -rf "$WORK"' EXIT` + "\n")
 	b.WriteString(`CURL_RETRY=(--retry 3 --retry-delay 1 --retry-max-time 120 --retry-connrefused --retry-all-errors)` + "\n")
+	b.WriteString(remoteSourceCacheScriptFragment)
 
-	// Download every source. Signed URLs are time-limited; curl --fail
-	// turns HTTP errors into non-zero exits so the script aborts.
+	// Materialize every source through the persistent remote cache.
+	// Signed URLs are time-limited; curl --fail turns HTTP errors into
+	// non-zero exits so the script aborts.
 	for i, url := range signedURLs {
-		fmt.Fprintf(&b, "curl -sS \"${CURL_RETRY[@]}\" --fail -L -o %s %s\n",
-			shellQuote(srcPaths[i]), shellQuote(url))
+		fmt.Fprintf(&b, "materialize_source %s %s %s %s %d %s\n",
+			shellQuote(row.SourceFileIDs[i]), shellQuote(url), shellQuote(srcPaths[i]),
+			shellQuote(cacheNames[i]), sourceSizes[i], shellQuote(sourceSHA256s[i]))
 	}
 
 	// Concat list, written here from media's side rather than via the
@@ -411,6 +432,168 @@ if [ -z "$FILE_ID" ]; then
 fi
 `
 
+// remoteSourceCacheScriptFragment materializes render inputs through a
+// persistent cache on the remote host. Cache files are content-addressed
+// from storage metadata and are only adopted after validation.
+const remoteSourceCacheScriptFragment = `
+file_size_bytes() {
+  stat -c%s "$1" 2>/dev/null || stat -f%z "$1"
+}
+
+cache_used_bytes() {
+  bytes=$(du -sb "$SOURCE_CACHE_ROOT" 2>/dev/null | awk '{print $1}' || true)
+  if [ -z "$bytes" ]; then
+    kb=$(du -sk "$SOURCE_CACHE_ROOT" 2>/dev/null | awk '{print $1}' || true)
+    if [ -n "$kb" ]; then
+      bytes=$((kb * 1024))
+    fi
+  fi
+  echo "${bytes:-0}"
+}
+
+cache_valid() {
+  path="$1"
+  expected_size="$2"
+  expected_sha="$3"
+  [ -f "$path" ] || return 1
+  actual_size=$(file_size_bytes "$path" 2>/dev/null || echo 0)
+  if [ "$expected_size" -gt 0 ] && [ "$actual_size" != "$expected_size" ]; then
+    return 1
+  fi
+  if [ -n "$expected_sha" ]; then
+    actual_sha=$(sha256sum "$path" | awk '{print $1}')
+    if [ "$actual_sha" != "$expected_sha" ]; then
+      return 1
+    fi
+  fi
+  return 0
+}
+
+link_cached_source() {
+  cache="$1"
+  dest="$2"
+  rm -f "$dest"
+  ln "$cache" "$dest" 2>/dev/null || cp -f "$cache" "$dest"
+}
+
+prune_source_cache() {
+  incoming_size="$1"
+  if [ "$SOURCE_CACHE_MAX_BYTES" -le 0 ]; then
+    return 0
+  fi
+  used=$(cache_used_bytes)
+  used=${used:-0}
+  loops=0
+  while [ $((used + incoming_size)) -gt "$SOURCE_CACHE_MAX_BYTES" ]; do
+    victim=$(find "$SOURCE_CACHE_ROOT" -maxdepth 1 -type f ! -name '*.tmp.*' -printf '%T@ %p\n' 2>/dev/null | sort -n | awk 'NR==1{$1=""; sub(/^ /,""); print; exit}')
+    if [ -z "$victim" ]; then
+      break
+    fi
+    if [ -d "$victim.lock" ]; then
+      touch "$victim"
+      loops=$((loops + 1))
+      if [ "$loops" -gt 100 ]; then
+        break
+      fi
+      used=$(cache_used_bytes)
+      used=${used:-0}
+      continue
+    fi
+    victim_size=$(file_size_bytes "$victim" 2>/dev/null || echo 0)
+    rm -f -- "$victim"
+    echo "REMOTE_SOURCE_CACHE_PRUNE bytes=$victim_size path=$victim" >&2
+    used=$(cache_used_bytes)
+    used=${used:-0}
+  done
+}
+
+ensure_download_space() {
+  incoming_size="$1"
+  if [ "$incoming_size" -le 0 ]; then
+    return 0
+  fi
+  available=$(df -PB1 "$SOURCE_CACHE_ROOT" | awk 'NR==2 {print $4}')
+  required=$((incoming_size + 536870912))
+  if [ "${available:-0}" -lt "$required" ]; then
+    echo "REMOTE_SOURCE_CACHE_FULL root=$SOURCE_CACHE_ROOT available=${available:-0} required=$required" >&2
+    exit 1
+  fi
+}
+
+materialize_source() {
+  fid="$1"
+  url="$2"
+  dest="$3"
+  cache_name="$4"
+  expected_size="$5"
+  expected_sha="$6"
+  cache="$SOURCE_CACHE_ROOT/$cache_name"
+
+  if cache_valid "$cache" "$expected_size" "$expected_sha"; then
+    echo "REMOTE_SOURCE_CACHE_HIT file_id=$fid path=$cache" >&2
+    link_cached_source "$cache" "$dest"
+    return 0
+  fi
+  if [ -f "$cache" ]; then
+    echo "REMOTE_SOURCE_CACHE_INVALID file_id=$fid path=$cache" >&2
+    rm -f "$cache"
+  fi
+
+  lock="$cache.lock"
+  waited=0
+  while ! mkdir "$lock" 2>/dev/null; do
+    if cache_valid "$cache" "$expected_size" "$expected_sha"; then
+      echo "REMOTE_SOURCE_CACHE_HIT file_id=$fid path=$cache waited=$waited" >&2
+      link_cached_source "$cache" "$dest"
+      return 0
+    fi
+    if [ -f "$lock/pid" ]; then
+      holder_pid=$(cat "$lock/pid" 2>/dev/null || true)
+      if [ -n "$holder_pid" ] && ! kill -0 "$holder_pid" 2>/dev/null; then
+        echo "REMOTE_SOURCE_CACHE_STALE_LOCK file_id=$fid path=$cache pid=$holder_pid" >&2
+        rm -rf "$lock"
+        continue
+      fi
+    fi
+    if [ "$waited" -ge 120 ]; then
+      echo "REMOTE_SOURCE_CACHE_LOCK_TIMEOUT file_id=$fid path=$cache" >&2
+      exit 1
+    fi
+    sleep 1
+    waited=$((waited + 1))
+  done
+  echo "$$" > "$lock/pid"
+
+  if cache_valid "$cache" "$expected_size" "$expected_sha"; then
+    rm -rf "$lock"
+    echo "REMOTE_SOURCE_CACHE_HIT file_id=$fid path=$cache" >&2
+    link_cached_source "$cache" "$dest"
+    return 0
+  fi
+
+  prune_source_cache "$expected_size"
+  ensure_download_space "$expected_size"
+  tmp="$cache.tmp.$$"
+  rm -f "$tmp"
+  echo "REMOTE_SOURCE_CACHE_MISS file_id=$fid path=$cache" >&2
+  if ! curl -sS "${CURL_RETRY[@]}" --fail -L -o "$tmp" "$url"; then
+    rm -f "$tmp"
+    rm -rf "$lock"
+    exit 1
+  fi
+  if ! cache_valid "$tmp" "$expected_size" "$expected_sha"; then
+    actual_size=$(file_size_bytes "$tmp" 2>/dev/null || echo 0)
+    echo "REMOTE_SOURCE_CACHE_DOWNLOAD_INVALID file_id=$fid expected_size=$expected_size actual_size=$actual_size expected_sha=$expected_sha" >&2
+    rm -f "$tmp"
+    rm -rf "$lock"
+    exit 1
+  fi
+  mv -f "$tmp" "$cache"
+  rm -rf "$lock"
+  link_cached_source "$cache" "$dest"
+}
+`
+
 // materialiseRemoteArgs is the remote analogue of materialiseArgs in
 // renderexec.go. Two substitutions beyond the placeholder swap:
 //
@@ -457,20 +640,33 @@ const remoteProgressFilename = "progress.log"
 // render scratch.
 const remoteRenderRoot = "/var/tmp/apteva-media-renders"
 
+const remoteSourceCacheRoot = "/var/tmp/apteva-media-cache/sources"
+
 const remoteRenderScratchHeadroomBytes int64 = 512 * 1024 * 1024
+
+const remoteSourceCacheDefaultMaxBytes int64 = 20 * 1024 * 1024 * 1024
 
 func remoteRenderWorkDir(renderID int64) string {
 	return fmt.Sprintf("%s/render-%d", remoteRenderRoot, renderID)
 }
 
-func remoteScratchRequiredBytes(sourceSizes []int64) int64 {
-	required := remoteRenderScratchHeadroomBytes
-	for _, size := range sourceSizes {
-		if size > 0 {
-			required += size
+func remoteScratchRequiredBytes(_ []int64) int64 {
+	return remoteRenderScratchHeadroomBytes
+}
+
+var remoteCacheIdentityRE = regexp.MustCompile(`^[a-f0-9]{64}$`)
+
+func remoteSourceCacheName(fileID, sourceName, sha256 string, sizeBytes int64) string {
+	ext := filepath.Ext(sanitizeFilename(sourceName))
+	identity := strings.ToLower(strings.TrimSpace(sha256))
+	if !remoteCacheIdentityRE.MatchString(identity) {
+		if sizeBytes > 0 {
+			identity = fmt.Sprintf("size-%d", sizeBytes)
+		} else {
+			identity = "unknown"
 		}
 	}
-	return required
+	return fmt.Sprintf("file-%s-%s%s", fileID, identity, ext)
 }
 
 // ─── result parsing ────────────────────────────────────────────────

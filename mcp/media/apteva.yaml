@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: media
 display_name: Media
-version: 0.13.33
+version: 0.13.34
 description: |
   Catalog + cheap derivations + parameterised renders for media files
   in storage. Probes uploads with ffprobe (duration, dimensions,
@@ -489,6 +489,16 @@ config_schema:
 
       If the Instances app isn't installed the field collapses to a
       plain text input where you can type a host id manually.
+
+  - name: render_source_cache_max_bytes
+    type: text
+    default: "21474836480"
+    label: Remote source cache max bytes
+    description: |
+      Maximum persistent cache size for source files downloaded on the
+      remote render host. Defaults to 20 GiB. Cached sources are keyed
+      by storage file_id and sha256 so repeated reel renders reuse the
+      same remote bytes instead of downloading the source again.
 
   # Transcripts (new in v0.4)
   - name: transcribe_auto

@@ -116,11 +116,12 @@ func renderWorker(app *sdk.AppCtx, id int) {
 	var remote *remoteExecutor
 	if hostID > 0 {
 		var err error
-		remote, err = newRemoteExecutor(hostID, sharedRemoteInstaller(), local)
+		sourceCacheMaxBytes := parseConfigInt64Fallback(cfg.Get("render_source_cache_max_bytes"), remoteSourceCacheDefaultMaxBytes)
+		remote, err = newRemoteExecutor(hostID, sharedRemoteInstaller(), local, sourceCacheMaxBytes)
 		if err != nil {
 			log.Warn("render worker: remote backend disabled", "host_id", hostID, "err", err)
 		} else {
-			log.Info("render worker: remote backend enabled", "host_id", hostID)
+			log.Info("render worker: remote backend enabled", "host_id", hostID, "source_cache_max_bytes", sourceCacheMaxBytes)
 		}
 	}
 
@@ -215,22 +216,33 @@ func parseConfigIntFallback(s string, def int) int {
 	return n
 }
 
+func parseConfigInt64Fallback(s string, def int64) int64 {
+	if s == "" {
+		return def
+	}
+	n, err := strconv.ParseInt(strings.TrimSpace(s), 10, 64)
+	if err != nil || n <= 0 {
+		return def
+	}
+	return n
+}
+
 // resolveScratchRoot picks the scratch directory for ffmpeg renders.
 //
 // Resolution order:
 //
-//   1. Operator override via render_scratch_dir config — absolute path
-//      they explicitly set, used as-is.
-//   2. ctx.DataDir() — the per-install writable dir the platform
-//      provisions ("<persistentRoot>/<install_id>/" on local installs,
-//      a Docker volume in containerized deploys). This is the right
-//      default on a dev laptop AND a production Linux box; the SDK
-//      hands us the platform's chosen path so we don't have to guess.
-//   3. /data/renders — the legacy default, kept as a final fallback
-//      for older platforms that don't set APTEVA_DATA_DIR yet. The
-//      worker also catches any mkdir failure and falls back to
-//      os.TempDir() at runtime, so even a misconfigured install
-//      doesn't end up with a zero-worker render pool.
+//  1. Operator override via render_scratch_dir config — absolute path
+//     they explicitly set, used as-is.
+//  2. ctx.DataDir() — the per-install writable dir the platform
+//     provisions ("<persistentRoot>/<install_id>/" on local installs,
+//     a Docker volume in containerized deploys). This is the right
+//     default on a dev laptop AND a production Linux box; the SDK
+//     hands us the platform's chosen path so we don't have to guess.
+//  3. /data/renders — the legacy default, kept as a final fallback
+//     for older platforms that don't set APTEVA_DATA_DIR yet. The
+//     worker also catches any mkdir failure and falls back to
+//     os.TempDir() at runtime, so even a misconfigured install
+//     doesn't end up with a zero-worker render pool.
 func resolveScratchRoot(app *sdk.AppCtx, override string) string {
 	override = strings.TrimSpace(override)
 	if override != "" {
