@@ -22,7 +22,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: media
 display_name: Media
-version: 0.13.32
+version: 0.13.33
 description: |
   Catalog + derivations + renders + transcripts + auto-descriptions
   for media files in storage. Indexes uploads (probe, thumbnail,
@@ -196,7 +196,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	// Render pool runs alongside the indexer worker. Pool size is
 	// independent: the indexer is a single scheduled tick, the pool
 	// is N hot goroutines.
-	poolSize := readConfigInt("render_pool_size", 2)
+	poolSize := readConfigInt("render_pool_size", 4)
 	startRenderPool(ctx, poolSize)
 	// Auto-transcriber: separate goroutine, isolated from indexer +
 	// render pool. Skips itself if transcribe_auto=false; degrades
