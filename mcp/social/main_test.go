@@ -862,6 +862,39 @@ func TestPostCreate_FansOutAndPublishes(t *testing.T) {
 	}
 }
 
+func TestPostCreate_NormalizesMarkdownText(t *testing.T) {
+	pf := newRecordingPlatform()
+	ctx := newSocialCtx(t, pf)
+	r, _ := ctx.AppDB().Exec(
+		`INSERT INTO social_accounts (project_id, platform, connection_id, display_name, status)
+		 VALUES ('test-proj', 'twitter', 42, '@me', 'active')`,
+	)
+	acctID, _ := r.LastInsertId()
+
+	app := &App{}
+	out, err := app.toolPostCreate(ctx, map[string]any{
+		"body":               "## Launch\n\n**Big** update: [read more](https://example.com)\n- first thing\n`code`",
+		"social_account_ids": []any{acctID},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := out.(map[string]any)
+	if res["markdown_normalized"] != true {
+		t.Fatalf("markdown_normalized = %v, want true", res["markdown_normalized"])
+	}
+
+	want := "Launch\n\nBig update: read more: https://example.com\nfirst thing\ncode"
+	var stored string
+	ctx.AppDB().QueryRow(`SELECT body FROM posts WHERE id=?`, res["post_id"]).Scan(&stored)
+	if stored != want {
+		t.Fatalf("stored body = %q, want %q", stored, want)
+	}
+	if len(pf.executeCalls) == 0 || pf.executeCalls[0].Input["text"] != want {
+		t.Fatalf("post_tweet input = %+v, want text %q", pf.executeCalls, want)
+	}
+}
+
 func TestPostList_LoadsTargetsWithoutDeadlock(t *testing.T) {
 	ctx := newSocialCtx(t, nil)
 	app := &App{}

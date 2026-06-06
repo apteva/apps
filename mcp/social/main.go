@@ -30,6 +30,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strconv"
 	"strings"
 	"time"
@@ -41,7 +42,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: social
 display_name: Social
-version: 0.14.42
+version: 0.14.43
 description: |
   Schedule and publish posts to your social accounts (X, Facebook,
   Instagram, LinkedIn, TikTok, YouTube, Reddit, Pinterest, Threads).
@@ -647,6 +648,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		{
 			Name: "post_create",
 			Description: "Create a post and publish (or schedule) it to N social accounts. " +
+				"Use plain text only: do not use Markdown formatting such as **bold**, # headings, bullet lists, tables, code blocks, or [label](url) links. Social platforms receive raw text and may display Markdown literally. The app normalizes common Markdown before storing/publishing. " +
 				"Pass EITHER social_account_ids[] (simple multicast — every target uses the post body) " +
 				"OR targets[] (when you want per-target overrides). The two are mutually exclusive. " +
 				"Each target object: {social_account_id (required), body? (override text for this target), " +
@@ -656,12 +658,23 @@ func (a *App) MCPTools() []sdk.Tool {
 				"Body resolution per target: target.body if set, else post-level body. " +
 				"Args: body, schedule_at? (RFC3339; omit = post now), media_storage_ids? (file ids), media_project_id? (Storage project scope for those ids).",
 			InputSchema: schemaObject(map[string]any{
-				"body":               map[string]any{"type": "string"},
+				"body":               map[string]any{"type": "string", "description": "Plain text post body. Do not use Markdown; common Markdown is normalized before publishing."},
 				"social_account_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}},
 				"targets": map[string]any{
 					"type":        "array",
-					"description": "Per-target overrides. Each entry: {social_account_id (required), body?, plus platform-specific keys like title/visibility for YouTube}. Mutually exclusive with social_account_ids.",
-					"items":       map[string]any{"type": "object"},
+					"description": "Per-target overrides. Text fields must be plain text, not Markdown. Each entry: {social_account_id (required), body?, plus platform-specific keys like title/visibility for YouTube}. Mutually exclusive with social_account_ids.",
+					"items": map[string]any{
+						"type": "object",
+						"properties": map[string]any{
+							"social_account_id": map[string]any{"type": "integer"},
+							"body":              map[string]any{"type": "string", "description": "Plain text override body for this target. Do not use Markdown; common Markdown is normalized before publishing."},
+							"title":             map[string]any{"type": "string", "description": "YouTube plain text title. Do not use Markdown."},
+							"visibility":        map[string]any{"type": "string", "enum": []string{"public", "unlisted", "private"}},
+							"category":          map[string]any{"type": "string"},
+							"tags":              map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+						},
+						"required": []string{"social_account_id"},
+					},
 				},
 				"schedule_at":       map[string]any{"type": "string"},
 				"media_storage_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}},
@@ -727,16 +740,29 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name: "post_edit",
-			Description: "Edit an already-published post's body and/or per-target metadata. Updates the local post + fans out to each platform's edit verb where supported. " +
+			Description: "Edit an already-published post's body and/or per-target metadata. Use plain text only for body/title/description fields; do not use Markdown formatting such as **bold**, # headings, bullet lists, tables, code blocks, or [label](url) links. The app normalizes common Markdown before storing/sending edits. Updates the local post + fans out to each platform's edit verb where supported. " +
 				"Editable platforms today: Facebook (message), YouTube (title, description, tags, privacy, category). Twitter / TikTok / Instagram return status=unsupported — those platforms don't permit programmatic edits (or the catalog doesn't expose the verb yet). " +
 				"Args: post_id, body? (new post-level default body), targets? (per-target overrides keyed by social_account_id, same shape as post_create's targets — body, title, visibility, category, tags, etc.). At least one of body/targets must be set.",
 			InputSchema: schemaObject(map[string]any{
 				"post_id": map[string]any{"type": "integer"},
-				"body":    map[string]any{"type": "string"},
+				"body":    map[string]any{"type": "string", "description": "Plain text post body. Do not use Markdown; common Markdown is normalized before storing/sending the edit."},
 				"targets": map[string]any{
 					"type":        "array",
-					"description": "Optional per-target overrides. Each entry: {social_account_id (required), body?, plus platform-specific keys (title/visibility/category/tags for YouTube; just body/message for Facebook).}",
-					"items":       map[string]any{"type": "object"},
+					"description": "Optional per-target overrides. Text fields must be plain text, not Markdown. Each entry: {social_account_id (required), body?, plus platform-specific keys (title/visibility/category/tags for YouTube; just body/message for Facebook).}",
+					"items": map[string]any{
+						"type": "object",
+						"properties": map[string]any{
+							"social_account_id": map[string]any{"type": "integer"},
+							"body":              map[string]any{"type": "string", "description": "Plain text override body for this target. Do not use Markdown; common Markdown is normalized before storing/sending the edit."},
+							"message":           map[string]any{"type": "string", "description": "Facebook plain text message override. Do not use Markdown."},
+							"title":             map[string]any{"type": "string", "description": "YouTube plain text title. Do not use Markdown."},
+							"description":       map[string]any{"type": "string", "description": "YouTube plain text description. Do not use Markdown."},
+							"visibility":        map[string]any{"type": "string", "enum": []string{"public", "unlisted", "private"}},
+							"category":          map[string]any{"type": "string"},
+							"tags":              map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+						},
+						"required": []string{"social_account_id"},
+					},
 				},
 			}, []string{"post_id"}),
 			Handler: a.toolPostEdit,
@@ -1664,8 +1690,72 @@ type targetSpec struct {
 	Options         map[string]any // verbatim — body, title, visibility, etc.
 }
 
+var (
+	markdownLinkRE           = regexp.MustCompile(`!?\[([^\]]*)\]\(([^)\s]+(?:\s+[^)]*)?)\)`)
+	markdownHeadingRE        = regexp.MustCompile(`(?m)^\s{0,3}#{1,6}\s+`)
+	markdownBulletRE         = regexp.MustCompile(`(?m)^\s*[-*+]\s+`)
+	markdownOrderedBulletRE  = regexp.MustCompile(`(?m)^\s*\d+[.)]\s+`)
+	markdownQuoteRE          = regexp.MustCompile(`(?m)^\s*>\s?`)
+	markdownFenceRE          = regexp.MustCompile("(?m)^```.*$")
+	markdownTableSeparatorRE = regexp.MustCompile(`(?m)^\s*\|?[\s:=-]+\|[\s|:=-]*$`)
+	markdownBoldRE           = regexp.MustCompile(`(\*\*|__)([^*_]+)(\*\*|__)`)
+	markdownItalicRE         = regexp.MustCompile(`\*([^*\n]+)\*`)
+)
+
+func plainSocialText(input string) (string, bool) {
+	out := strings.ReplaceAll(input, "\r\n", "\n")
+	out = strings.ReplaceAll(out, "\r", "\n")
+	out = markdownLinkRE.ReplaceAllStringFunc(out, func(match string) string {
+		parts := markdownLinkRE.FindStringSubmatch(match)
+		if len(parts) < 3 {
+			return match
+		}
+		label := strings.TrimSpace(parts[1])
+		url := strings.TrimSpace(parts[2])
+		if label == "" || label == url {
+			return url
+		}
+		return label + ": " + url
+	})
+	out = markdownFenceRE.ReplaceAllString(out, "")
+	out = markdownHeadingRE.ReplaceAllString(out, "")
+	out = markdownBulletRE.ReplaceAllString(out, "")
+	out = markdownOrderedBulletRE.ReplaceAllString(out, "")
+	out = markdownQuoteRE.ReplaceAllString(out, "")
+	out = markdownTableSeparatorRE.ReplaceAllString(out, "")
+	out = markdownBoldRE.ReplaceAllString(out, "$2")
+	out = markdownItalicRE.ReplaceAllStringFunc(out, func(match string) string {
+		parts := markdownItalicRE.FindStringSubmatch(match)
+		if len(parts) >= 2 && parts[1] != "" {
+			return parts[1]
+		}
+		return match
+	})
+	out = strings.ReplaceAll(out, "`", "")
+	out = strings.ReplaceAll(out, "~~", "")
+	out = strings.TrimSpace(out)
+	return out, out != input
+}
+
+func normalizeSocialTextOptions(opts map[string]any) bool {
+	changed := false
+	for _, key := range []string{"body", "message", "description", "title"} {
+		value, ok := opts[key].(string)
+		if !ok {
+			continue
+		}
+		plain, didChange := plainSocialText(value)
+		if didChange {
+			opts[key] = plain
+			changed = true
+		}
+	}
+	return changed
+}
+
 func (a *App) toolPostCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	body, _ := args["body"].(string)
+	body, markdownNormalized := plainSocialText(body)
 	if strings.TrimSpace(body) == "" {
 		return nil, errors.New("body required")
 	}
@@ -1698,6 +1788,9 @@ func (a *App) toolPostCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 					continue
 				}
 				opts[k] = v
+			}
+			if normalizeSocialTextOptions(opts) {
+				markdownNormalized = true
 			}
 			targets = append(targets, targetSpec{SocialAccountID: id, Options: opts})
 		}
@@ -1853,9 +1946,10 @@ func (a *App) toolPostCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		"accounts": acctIDs,
 	})
 	return map[string]any{
-		"post_id": postID,
-		"status":  status,
-		"targets": len(acctIDs),
+		"post_id":             postID,
+		"status":              status,
+		"targets":             len(acctIDs),
+		"markdown_normalized": markdownNormalized,
 	}, nil
 }
 
@@ -4897,6 +4991,14 @@ func (a *App) toolPostEdit(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return mcpError("post_id required"), nil
 	}
 	newBody, hasBody := args["body"].(string)
+	markdownNormalized := false
+	if hasBody {
+		var changed bool
+		newBody, changed = plainSocialText(newBody)
+		if changed {
+			markdownNormalized = true
+		}
+	}
 	rawTargets, _ := args["targets"].([]any)
 	if !hasBody && len(rawTargets) == 0 {
 		return mcpError("nothing to edit — pass body and/or targets"), nil
@@ -4929,6 +5031,9 @@ func (a *App) toolPostEdit(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 				continue
 			}
 			opts[k] = v
+		}
+		if normalizeSocialTextOptions(opts) {
+			markdownNormalized = true
 		}
 		overrides[id] = opts
 	}
@@ -5055,10 +5160,11 @@ func (a *App) toolPostEdit(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	}
 
 	return map[string]any{
-		"post_id":      postID,
-		"updated_body": resolvedPostBody,
-		"prior_status": status,
-		"targets":      outcomes,
+		"post_id":             postID,
+		"updated_body":        resolvedPostBody,
+		"prior_status":        status,
+		"targets":             outcomes,
+		"markdown_normalized": markdownNormalized,
 	}, nil
 }
 
