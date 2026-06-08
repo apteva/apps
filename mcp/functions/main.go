@@ -9,6 +9,7 @@
 //
 // Triggers:
 //   - HTTP   — POST /fn/<name> (auto-routed, gateway-reachable).
+//   - URL    — /url/<name>/<token> (optional public Function URL).
 //   - Cron   — pair with the Jobs app: jobs_schedule with
 //     target={kind:http, app:"functions", path:"/fn/<name>"}.
 //   - Manual — functions_invoke MCP tool.
@@ -53,13 +54,14 @@ var examplesFS embed.FS
 const manifestYAML = `schema: apteva-app/v1
 name: functions
 display_name: Functions
-version: 1.4.1
+version: 1.5.0
 description: |
   Lambda-style serverless functions in node or Go. Each function is
   an immutable, built version served by a pool of warm worker
   processes; handlers reach sibling apps via context.call and
   integration connections via context.integration. Auto-routed HTTP
-  endpoint at /fn/<name>.
+  endpoint at /fn/<name>, plus optional public Function URLs at
+  /url/<name>/<token>.
 author: Apteva
 scopes: [project, global]
 requires:
@@ -161,6 +163,9 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		// becomes /api/apps/functions/fn/<name> through the gateway —
 		// that's the URL the Jobs app uses for cron-fired schedules.
 		{Pattern: "/fn/", Handler: a.handleHTTPInvokeByName},
+		// Optional public Function URL endpoint. The route is NoAuth
+		// because the per-function URL token is the external auth gate.
+		{Pattern: "/url/", Handler: a.handleHTTPInvokeByFunctionURL, NoAuth: true},
 		// Recent invocations across the project (dashboard).
 		{Pattern: "/invocations", Handler: a.handleHTTPInvocationsCollection},
 		// Built-in handler examples for the panel's "Load" picker.
@@ -172,7 +177,7 @@ func (a *App) MCPTools() []sdk.Tool {
 	return []sdk.Tool{
 		{
 			Name:        "functions_create",
-			Description: "Create a function and deploy v1. Args: name, runtime (node|go), source (inline handler — node: `export default async (event, context) => result`; go: `func Handle(event json.RawMessage, ctx *Context) (any, error)`) OR (repo_id+repo_path), package_json?, env?, timeout_ms?, max_memory_mb?.",
+			Description: "Create a function and deploy v1. Args: name, runtime (node|go), source (inline handler — node: `export default async (event, context) => result`; go: `func Handle(event json.RawMessage, ctx *Context) (any, error)`) OR (repo_id+repo_path), package_json?, env?, timeout_ms?, max_memory_mb?, function_url?.",
 			InputSchema: schemaObject(map[string]any{
 				"name":          map[string]any{"type": "string"},
 				"runtime":       map[string]any{"type": "string", "enum": []any{"node", "go"}},
@@ -184,12 +189,16 @@ func (a *App) MCPTools() []sdk.Tool {
 				"env":           map[string]any{"type": "object", "description": "String map merged into the worker env."},
 				"timeout_ms":    map[string]any{"type": "integer", "description": "Hard timeout per invocation. Default 30000, max 300000."},
 				"max_memory_mb": map[string]any{"type": "integer", "description": "Memory cap (MB). Default 256."},
+				"function_url": map[string]any{
+					"type":        "object",
+					"description": "Optional public URL config: enabled, allowed_methods, cors, rotate_token/token.",
+				},
 			}, []string{"name", "runtime"}),
 			Handler: a.toolCreate,
 		},
 		{
 			Name:        "functions_update",
-			Description: "Update a function's metadata: env, timeout_ms, max_memory_mb, status. Source / runtime changes go through functions_deploy. Args: id (or name) + the fields to change.",
+			Description: "Update a function's metadata: env, timeout_ms, max_memory_mb, status, function_url. Source / runtime changes go through functions_deploy. Args: id (or name) + the fields to change.",
 			InputSchema: schemaObject(map[string]any{
 				"id":            map[string]any{"type": "integer"},
 				"name":          map[string]any{"type": "string"},
@@ -197,6 +206,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"timeout_ms":    map[string]any{"type": "integer"},
 				"max_memory_mb": map[string]any{"type": "integer"},
 				"status":        map[string]any{"type": "string", "enum": []any{"active", "disabled"}},
+				"function_url":  map[string]any{"type": "object", "description": "Patch public URL config: enabled, allowed_methods, cors, rotate_token/token."},
 			}, nil),
 			Handler: a.toolUpdate,
 		},

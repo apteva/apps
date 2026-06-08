@@ -2,14 +2,15 @@ schema: apteva-app/v1
 
 name: functions
 display_name: Functions
-version: 1.4.1
+version: 1.5.0
 description: |
   Lambda-style serverless functions in node or Go. Each function is
   an immutable, built version served by a pool of warm worker
   processes; handlers reach sibling Apteva apps via context.call and
   integration connections (Pushover, Slack, Resend, ...) via
   context.integration. Auto-routed HTTP endpoint at /fn/<name>; pair
-  with the Jobs app for cron-fired schedules.
+  with the Jobs app for cron-fired schedules. Optional public Function
+  URLs are available at /url/<name>/<token>.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/functions
 tags: [functions, faas, serverless, scripts, agent]
@@ -37,9 +38,9 @@ provides:
     - prefix: /
   mcp_tools:
     - name: functions_create
-      description: "Create a function and deploy v1. Args: name, runtime (node), source (inline handler) OR (repo_id+repo_path), package_json?, env?, timeout_ms?, max_memory_mb?."
+      description: "Create a function and deploy v1. Args: name, runtime (node|go), source (inline handler) OR (repo_id+repo_path), package_json?, env?, timeout_ms?, max_memory_mb?, function_url?."
     - name: functions_update
-      description: "Update a function's metadata (env, timeout_ms, max_memory_mb, status). Source/runtime changes go through functions_deploy."
+      description: "Update a function's metadata (env, timeout_ms, max_memory_mb, status, function_url). Source/runtime changes go through functions_deploy."
     - name: functions_delete
       description: "Delete a function and all its versions + invocation rows."
     - name: functions_list

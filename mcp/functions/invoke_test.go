@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"os/exec"
 	"strings"
 	"testing"
@@ -71,6 +73,45 @@ func TestInvokeNodeHappyPath(t *testing.T) {
 	}
 	if res.InvocationID == 0 {
 		t.Error("InvocationID not recorded")
+	}
+}
+
+func TestFunctionURLInvoke(t *testing.T) {
+	requireBin(t, "node")
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID(testProj))
+	app := mountApp(t, ctx)
+
+	fn := createFn(t, app, ctx, map[string]any{
+		"name": "public",
+		"source": `export default async (event) => ({
+			statusCode: 202,
+			headers: {"x-test": "yes"},
+			body: JSON.stringify({method: event.method, body: event.body})
+		});`,
+		"function_url": map[string]any{
+			"enabled":         true,
+			"allowed_methods": []any{"POST"},
+		},
+	})
+	if fn.FunctionURL == nil || fn.FunctionURL.Token == "" {
+		t.Fatal("missing function URL token")
+	}
+
+	req := httptest.NewRequest(http.MethodPost,
+		"/url/public/"+fn.FunctionURL.Token+"?project_id="+testProj,
+		strings.NewReader(`{"hello":"world"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	app.handleHTTPInvokeByFunctionURL(rr, req)
+
+	if rr.Code != http.StatusAccepted {
+		t.Fatalf("status = %d, body=%s", rr.Code, rr.Body.String())
+	}
+	if rr.Header().Get("X-Test") != "yes" {
+		t.Fatalf("X-Test header = %q, want yes", rr.Header().Get("X-Test"))
+	}
+	if !strings.Contains(rr.Body.String(), `"method":"POST"`) || !strings.Contains(rr.Body.String(), `"hello":"world"`) {
+		t.Fatalf("body = %s", rr.Body.String())
 	}
 }
 

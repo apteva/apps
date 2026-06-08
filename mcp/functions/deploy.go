@@ -109,7 +109,17 @@ func deployFromArgs(ctx *sdk.AppCtx, pid string, fnID int64, args map[string]any
 	if sourceKind == "" {
 		return nil, nil, errors.New("deploy needs source (inline) or repo_id + repo_path")
 	}
-	ver, err := deployVersion(ctx, fn, sourceKind, source, repoID, repoPath, strArg(args, "package_json"))
+	// Carry forward the prior active version's package_json when the
+	// caller omits the field. An explicit "" still clears deps; a
+	// present value overrides. Without this, a source-only redeploy
+	// ships an empty node_modules and breaks at cold-start.
+	pkg := strArg(args, "package_json")
+	if _, present := args["package_json"]; !present && fn.ActiveVersionID != nil {
+		if prior, perr := dbGetVersion(dbFor(ctx), pid, *fn.ActiveVersionID); perr == nil && prior != nil {
+			pkg = prior.PackageJSON
+		}
+	}
+	ver, err := deployVersion(ctx, fn, sourceKind, source, repoID, repoPath, pkg)
 	if err != nil {
 		return nil, ver, err
 	}

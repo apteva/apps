@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/subtle"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -10,6 +11,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 
 	sdk "github.com/apteva/app-sdk"
 )
@@ -345,6 +347,58 @@ func (a *App) handleHTTPInvokeByID(w http.ResponseWriter, r *http.Request, id in
 	a.runAndWriteResponse(w, r, fn, event, "http")
 }
 
+// handleHTTPInvokeByFunctionURL powers the optional public
+// /url/<name>/<token> endpoint. It deliberately does not use the
+// platform bearer token: the per-function URL token is the auth gate
+// for external systems that cannot send Apteva credentials.
+func (a *App) handleHTTPInvokeByFunctionURL(w http.ResponseWriter, r *http.Request) {
+	pid, err := resolveProjectFromRequest(r)
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	rest := strings.TrimPrefix(r.URL.Path, "/url/")
+	parts := strings.SplitN(rest, "/", 2)
+	if len(parts) != 2 || parts[0] == "" || parts[1] == "" || strings.Contains(parts[0], "/") {
+		httpErr(w, http.StatusBadRequest, "function URL must be /url/<name>/<token>")
+		return
+	}
+	name, token := parts[0], parts[1]
+	fn, err := dbGetFunction(globalCtx.AppDB(), pid, 0, name)
+	if err != nil {
+		httpErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if fn == nil {
+		httpErr(w, http.StatusNotFound, "function not found")
+		return
+	}
+	cfg := fn.FunctionURL
+	if cfg == nil || !cfg.Enabled || cfg.Token == "" {
+		httpErr(w, http.StatusNotFound, "function URL not enabled")
+		return
+	}
+	if subtle.ConstantTimeCompare([]byte(token), []byte(cfg.Token)) != 1 {
+		httpErr(w, http.StatusUnauthorized, "invalid function URL token")
+		return
+	}
+	if cfg.CORS {
+		setFunctionURLCORS(w, cfg)
+		if r.Method == http.MethodOptions {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+	}
+	if !functionURLMethodAllowed(cfg, r.Method) {
+		w.Header().Set("Allow", strings.Join(cfg.AllowedMethods, ", "))
+		httpErr(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	raw, truncated := readRequestBody(r)
+	event := buildFunctionURLEvent(r, raw, truncated)
+	a.runAndWriteFunctionURLResponse(w, r, fn, event, cfg)
+}
+
 // runAndWriteResponse is the shared tail for both /fn/<name> and
 // /functions/<id>/invoke. Surfaces the function's stdout as the
 // HTTP response body when the run succeeds; on error / timeout
@@ -380,14 +434,60 @@ func (a *App) runAndWriteResponse(w http.ResponseWriter, r *http.Request, fn *Fu
 	_, _ = w.Write([]byte(res.Response))
 }
 
+func (a *App) runAndWriteFunctionURLResponse(w http.ResponseWriter, r *http.Request, fn *Function, event any, cfg *FunctionURLConfig) {
+	res, err := invokeFunction(globalCtx, r.Context(), fn, event, "function_url")
+	if err != nil {
+		httpErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if cfg != nil && cfg.CORS {
+		setFunctionURLCORS(w, cfg)
+	}
+	w.Header().Set("X-Apteva-Function-Invocation", strconv.FormatInt(res.InvocationID, 10))
+	w.Header().Set("X-Apteva-Function-Status", res.Status)
+	if res.Status != "ok" {
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusInternalServerError)
+		_ = json.NewEncoder(w).Encode(map[string]any{
+			"error":         res.Error,
+			"status":        res.Status,
+			"exit_code":     res.ExitCode,
+			"invocation_id": res.InvocationID,
+			"stderr":        res.Stderr,
+		})
+		return
+	}
+	if writeStructuredFunctionURLResponse(w, res.Response) {
+		return
+	}
+	if looksLikeJSON(res.Response) {
+		w.Header().Set("Content-Type", "application/json")
+	} else {
+		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	}
+	_, _ = w.Write([]byte(res.Response))
+}
+
 // decodeEventBody pulls the event payload from the request. JSON
 // bodies decode into a map/slice; non-JSON bodies surface as
 // {"raw":"<bytes>"} so the function can still inspect them. Empty
 // body becomes nil — JSON.parse of "null" is valid in every
 // runtime we support.
 func decodeEventBody(r *http.Request) any {
-	if r.Body == nil {
+	body, _ := readRequestBody(r)
+	if len(body) == 0 {
 		return nil
+	}
+	var parsed any
+	if err := json.Unmarshal(body, &parsed); err == nil {
+		return parsed
+	}
+	return map[string]any{"raw": string(body)}
+}
+
+func readRequestBody(r *http.Request) ([]byte, bool) {
+	if r.Body == nil {
+		return nil, false
 	}
 	defer r.Body.Close()
 	// Cap the read so a malicious caller can't OOM the sidecar with
@@ -396,17 +496,144 @@ func decodeEventBody(r *http.Request) any {
 	buf := make([]byte, maxBody+1)
 	n, _ := readAll(r.Body, buf)
 	if n == 0 {
-		return nil
+		return nil, false
 	}
-	if n > maxBody {
+	truncated := n > maxBody
+	if truncated {
 		n = maxBody
 	}
-	body := buf[:n]
-	var parsed any
-	if err := json.Unmarshal(body, &parsed); err == nil {
-		return parsed
+	return buf[:n], truncated
+}
+
+func buildFunctionURLEvent(r *http.Request, raw []byte, truncated bool) map[string]any {
+	event := map[string]any{
+		"trigger":        "function_url",
+		"method":         r.Method,
+		"path":           r.URL.Path,
+		"headers":        publicRequestHeaders(r.Header),
+		"query":          queryValuesMap(r.URL.Query()),
+		"raw_body":       string(raw),
+		"body_truncated": truncated,
+		"received_at":    time.Now().UTC().Format(time.RFC3339),
+		"remote_addr":    r.RemoteAddr,
 	}
-	return map[string]any{"raw": string(body)}
+	if len(raw) > 0 {
+		var parsed any
+		if err := json.Unmarshal(raw, &parsed); err == nil {
+			event["body"] = parsed
+		} else {
+			event["body"] = map[string]any{"raw": string(raw)}
+		}
+	}
+	return event
+}
+
+func publicRequestHeaders(h http.Header) map[string]string {
+	out := map[string]string{}
+	for k, vals := range h {
+		lower := strings.ToLower(k)
+		if lower == "authorization" || lower == "cookie" || lower == "set-cookie" {
+			continue
+		}
+		out[k] = strings.Join(vals, ", ")
+	}
+	return out
+}
+
+func queryValuesMap(v map[string][]string) map[string]any {
+	out := map[string]any{}
+	for k, vals := range v {
+		if len(vals) == 1 {
+			out[k] = vals[0]
+		} else {
+			out[k] = vals
+		}
+	}
+	return out
+}
+
+func functionURLMethodAllowed(cfg *FunctionURLConfig, method string) bool {
+	if cfg == nil {
+		return false
+	}
+	method = strings.ToUpper(method)
+	for _, allowed := range normalizeFunctionURLMethods(cfg.AllowedMethods) {
+		if allowed == method {
+			return true
+		}
+	}
+	return false
+}
+
+func setFunctionURLCORS(w http.ResponseWriter, cfg *FunctionURLConfig) {
+	w.Header().Set("Access-Control-Allow-Origin", "*")
+	w.Header().Set("Access-Control-Allow-Headers", "content-type, x-requested-with")
+	w.Header().Set("Access-Control-Allow-Methods", strings.Join(normalizeFunctionURLMethods(cfg.AllowedMethods), ", "))
+}
+
+func writeStructuredFunctionURLResponse(w http.ResponseWriter, s string) bool {
+	var obj map[string]any
+	if err := json.Unmarshal([]byte(strings.TrimSpace(s)), &obj); err != nil {
+		return false
+	}
+	rawStatus, ok := obj["statusCode"]
+	if !ok {
+		rawStatus, ok = obj["status_code"]
+	}
+	if !ok {
+		return false
+	}
+	status := intFromJSONNumber(rawStatus)
+	if status < 100 || status > 599 {
+		status = http.StatusOK
+	}
+	if headers, ok := obj["headers"].(map[string]any); ok {
+		for k, v := range headers {
+			if s, ok := v.(string); ok && k != "" {
+				w.Header().Set(k, s)
+			}
+		}
+	}
+	body := ""
+	if v, ok := obj["body"]; ok {
+		switch typed := v.(type) {
+		case string:
+			body = typed
+		default:
+			b, _ := json.Marshal(typed)
+			body = string(b)
+			if w.Header().Get("Content-Type") == "" {
+				w.Header().Set("Content-Type", "application/json")
+			}
+		}
+	}
+	if w.Header().Get("Content-Type") == "" {
+		if looksLikeJSON(body) {
+			w.Header().Set("Content-Type", "application/json")
+		} else {
+			w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+		}
+	}
+	w.WriteHeader(status)
+	_, _ = w.Write([]byte(body))
+	return true
+}
+
+func intFromJSONNumber(v any) int {
+	switch t := v.(type) {
+	case float64:
+		return int(t)
+	case int:
+		return t
+	case json.Number:
+		i, _ := t.Int64()
+		return int(i)
+	case string:
+		i, _ := strconv.Atoi(t)
+		return i
+	default:
+		return 0
+	}
 }
 
 // readAll fills buf from r until full or EOF. Returns bytes read.
@@ -697,6 +924,13 @@ func buildAndCreateFunction(ctx *sdk.AppCtx, pid string, args map[string]any) (*
 				fn.Env[k] = s
 			}
 		}
+	}
+	if _, has := args["function_url"]; has {
+		cfg, err := normalizeFunctionURLPatch(nil, args["function_url"])
+		if err != nil {
+			return nil, err
+		}
+		fn.FunctionURL = cfg
 	}
 	if fn.SourceKind == "" {
 		// Imply source_kind from the fields the caller supplied.

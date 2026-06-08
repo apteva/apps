@@ -100,7 +100,15 @@ interface FunctionRow {
   timeout_ms: number;
   max_memory_mb: number;
   status: Status;
+  function_url?: FunctionURLConfig;
   active_version_id?: number;
+}
+
+interface FunctionURLConfig {
+  enabled: boolean;
+  token?: string;
+  allowed_methods?: string[];
+  cors?: boolean;
 }
 
 interface Version {
@@ -201,6 +209,18 @@ function buildStatusTone(s: BuildStatus): string {
 }
 
 type ApiFn = <T,>(method: string, path: string, body?: unknown, extra?: Record<string, string>) => Promise<T>;
+
+const FUNCTION_URL_METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE"] as const;
+
+function functionURLMethods(cfg?: FunctionURLConfig): string[] {
+  return cfg?.allowed_methods?.length ? cfg.allowed_methods : ["POST"];
+}
+
+function functionURLPath(fn: FunctionRow, withParams: (extra?: Record<string, string>) => string): string {
+  const token = fn.function_url?.token;
+  if (!token) return "";
+  return `${API}/url/${encodeURIComponent(fn.name)}/${encodeURIComponent(token)}?${withParams()}`;
+}
 
 // handleCodeTab makes Tab insert two spaces in a code textarea
 // (instead of moving focus). Uses execCommand("insertText") when
@@ -505,11 +525,18 @@ function DetailDialog({
             <p className="text-text-dim text-xs mt-1 font-mono">
               POST /api/apps/functions/fn/{fn.name}
             </p>
+            {fn.function_url?.enabled && fn.function_url.token && (
+              <p className="text-text-dim text-xs mt-1 font-mono truncate">
+                URL {functionURLPath(fn, withParams)}
+              </p>
+            )}
           </div>
           <button onClick={onClose} className="text-text-muted hover:text-text text-xl leading-none">×</button>
         </header>
 
         {busy && <div className="text-red text-xs">{busy}</div>}
+
+        <FunctionURLSettings fn={fn} api={api} withParams={withParams} onChanged={onChanged} />
 
         <InvokeConsole fn={fn} withParams={withParams} onInvoked={onChanged} />
 
@@ -697,6 +724,141 @@ function InvocationDetail({ inv }: { inv: Invocation }) {
       )}
       {inv.error && <div className="text-red text-xs">error: {inv.error}</div>}
     </div>
+  );
+}
+
+// ─── Function URL settings ────────────────────────────────────────────
+
+function FunctionURLSettings({
+  fn, api, withParams, onChanged,
+}: {
+  fn: FunctionRow;
+  api: ApiFn;
+  withParams: (extra?: Record<string, string>) => string;
+  onChanged: () => void | Promise<void>;
+}) {
+  const cfg = fn.function_url;
+  const enabled = !!cfg?.enabled;
+  const methods = functionURLMethods(cfg);
+  const [saving, setSaving] = useState(false);
+  const [copyState, setCopyState] = useState("");
+  const [err, setErr] = useState("");
+  const url = functionURLPath(fn, withParams);
+
+  const patch = async (function_url: Record<string, unknown>) => {
+    setErr("");
+    setSaving(true);
+    try {
+      await api("PATCH", `/functions/${fn.id}`, { function_url });
+      await onChanged();
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const toggleMethod = (method: string) => {
+    const next = methods.includes(method)
+      ? methods.filter((m) => m !== method)
+      : [...methods, method];
+    patch({ allowed_methods: next.length ? next : ["POST"] });
+  };
+
+  const copy = async () => {
+    if (!url) return;
+    try {
+      await navigator.clipboard.writeText(url);
+      setCopyState("Copied");
+      window.setTimeout(() => setCopyState(""), 1500);
+    } catch {
+      setCopyState("Copy failed");
+    }
+  };
+
+  return (
+    <section className="border border-border rounded-lg p-3 bg-bg-input/20">
+      <div className="flex items-start gap-3">
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2 mb-1">
+            <h3 className="text-xs uppercase tracking-wide text-text-dim">Function URL</h3>
+            <span className={`text-[10px] px-1.5 py-0.5 rounded ${
+              enabled ? "bg-green/15 text-green" : "bg-border text-text-muted"
+            }`}>
+              {enabled ? "enabled" : "disabled"}
+            </span>
+          </div>
+          <p className="text-text-muted text-xs">
+            Public token-gated HTTP endpoint for external callers.
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={() => patch({ enabled: !enabled })}
+          disabled={saving}
+          className="px-3 py-1 text-sm border border-border text-text-muted rounded hover:bg-bg-input disabled:opacity-50"
+        >{enabled ? "Disable URL" : "Enable URL"}</button>
+      </div>
+
+      {enabled && (
+        <div className="mt-3 flex flex-col gap-3">
+          <div className="flex flex-col gap-1">
+            <label className={labelCls}>Endpoint</label>
+            <div className="flex gap-2">
+              <input
+                value={url}
+                readOnly
+                className={inputCls + " font-mono text-xs"}
+                onFocus={(e) => e.currentTarget.select()}
+              />
+              <button
+                type="button"
+                onClick={copy}
+                className="px-3 py-1 text-sm border border-border text-text-muted rounded hover:bg-bg-input"
+              >{copyState || "Copy"}</button>
+              <button
+                type="button"
+                onClick={() => patch({ rotate_token: true })}
+                disabled={saving}
+                className="px-3 py-1 text-sm border border-border text-text-muted rounded hover:bg-bg-input disabled:opacity-50"
+              >Rotate</button>
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 md:grid-cols-[1fr_auto] gap-3">
+            <div className="flex flex-col gap-1">
+              <label className={labelCls}>Allowed methods</label>
+              <div className="flex flex-wrap gap-1">
+                {FUNCTION_URL_METHODS.map((m) => (
+                  <button
+                    key={m}
+                    type="button"
+                    onClick={() => toggleMethod(m)}
+                    disabled={saving}
+                    className={`px-2 py-1 text-xs border rounded font-mono disabled:opacity-50 ${
+                      methods.includes(m)
+                        ? "border-accent text-accent bg-accent/10"
+                        : "border-border text-text-muted hover:bg-bg-input"
+                    }`}
+                  >{m}</button>
+                ))}
+              </div>
+            </div>
+            <label className="flex items-center gap-2 text-sm text-text-muted self-end">
+              <input
+                type="checkbox"
+                checked={!!cfg?.cors}
+                disabled={saving}
+                onChange={(e) => patch({ cors: e.target.checked })}
+              />
+              CORS
+            </label>
+          </div>
+
+          {err && <div className="text-red text-xs">{err}</div>}
+        </div>
+      )}
+    </section>
   );
 }
 

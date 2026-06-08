@@ -102,6 +102,43 @@ func TestVersionsList(t *testing.T) {
 	}
 }
 
+// TestRedeployCarriesPackageJSON: a source-only redeploy inherits the
+// prior active version's package_json (omitting the field is not the
+// same as clearing deps), while an explicit "" clears it.
+func TestRedeployCarriesPackageJSON(t *testing.T) {
+	requireBin(t, "node")
+	requireBin(t, "npm")
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID(testProj))
+	app := mountApp(t, ctx)
+
+	const pkg = `{"name":"carry","version":"1.0.0","dependencies":{}}`
+	createFn(t, app, ctx, map[string]any{
+		"name": "carry", "source": echoHandler, "package_json": pkg,
+	})
+
+	// v2: source only, no package_json key -> inherit prior.
+	out, err := app.toolDeploy(ctx, map[string]any{
+		"name": "carry", "source": `export default async () => 2;`,
+	})
+	if err != nil {
+		t.Fatalf("deploy v2: %v", err)
+	}
+	if v2 := out.(map[string]any)["version"].(*FunctionVersion); v2.PackageJSON != pkg {
+		t.Errorf("v2 package_json = %q, want carried-forward %q", v2.PackageJSON, pkg)
+	}
+
+	// v3: explicit empty string -> clear.
+	out, err = app.toolDeploy(ctx, map[string]any{
+		"name": "carry", "source": `export default async () => 3;`, "package_json": "",
+	})
+	if err != nil {
+		t.Fatalf("deploy v3: %v", err)
+	}
+	if v3 := out.(map[string]any)["version"].(*FunctionVersion); v3.PackageJSON != "" {
+		t.Errorf("v3 package_json = %q, want cleared", v3.PackageJSON)
+	}
+}
+
 // TestDeployWithPackageJSON: a function shipping a package.json gets
 // `npm install` run once at deploy, and then invokes normally. Uses
 // an empty dependency set so the install is offline + fast.

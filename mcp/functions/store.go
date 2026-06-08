@@ -1,8 +1,10 @@
 package main
 
 import (
+	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -15,22 +17,30 @@ import (
 // ─── Domain types ──────────────────────────────────────────────────
 
 type Function struct {
-	ID              int64             `json:"id"`
-	ProjectID       string            `json:"project_id,omitempty"`
-	Name            string            `json:"name"`
-	Runtime         string            `json:"runtime"`
-	SourceKind      string            `json:"source_kind"`
-	Source          string            `json:"source,omitempty"`
-	RepoID          *int64            `json:"repo_id,omitempty"`
-	RepoPath        string            `json:"repo_path,omitempty"`
-	SourceHash      string            `json:"source_hash"`
-	Env             map[string]string `json:"env,omitempty"`
-	TimeoutMS       int               `json:"timeout_ms"`
-	MaxMemoryMB     int               `json:"max_memory_mb"`
-	Status          string            `json:"status"`
-	ActiveVersionID *int64            `json:"active_version_id,omitempty"`
-	CreatedAt       string            `json:"created_at,omitempty"`
-	UpdatedAt       string            `json:"updated_at,omitempty"`
+	ID              int64              `json:"id"`
+	ProjectID       string             `json:"project_id,omitempty"`
+	Name            string             `json:"name"`
+	Runtime         string             `json:"runtime"`
+	SourceKind      string             `json:"source_kind"`
+	Source          string             `json:"source,omitempty"`
+	RepoID          *int64             `json:"repo_id,omitempty"`
+	RepoPath        string             `json:"repo_path,omitempty"`
+	SourceHash      string             `json:"source_hash"`
+	Env             map[string]string  `json:"env,omitempty"`
+	TimeoutMS       int                `json:"timeout_ms"`
+	MaxMemoryMB     int                `json:"max_memory_mb"`
+	Status          string             `json:"status"`
+	FunctionURL     *FunctionURLConfig `json:"function_url,omitempty"`
+	ActiveVersionID *int64             `json:"active_version_id,omitempty"`
+	CreatedAt       string             `json:"created_at,omitempty"`
+	UpdatedAt       string             `json:"updated_at,omitempty"`
+}
+
+type FunctionURLConfig struct {
+	Enabled        bool     `json:"enabled"`
+	Token          string   `json:"token,omitempty"`
+	AllowedMethods []string `json:"allowed_methods,omitempty"`
+	CORS           bool     `json:"cors,omitempty"`
 }
 
 // FunctionVersion is one immutable deploy of a function. Created by
@@ -47,7 +57,7 @@ type FunctionVersion struct {
 	RepoPath    string `json:"repo_path,omitempty"`
 	SourceHash  string `json:"source_hash"`
 	PackageJSON string `json:"package_json,omitempty"`
-	BuildStatus string `json:"build_status"`        // pending | building | ready | failed
+	BuildStatus string `json:"build_status"` // pending | building | ready | failed
 	BuildLog    string `json:"build_log,omitempty"`
 	BuildDir    string `json:"build_dir,omitempty"`
 	CreatedAt   string `json:"created_at,omitempty"`
@@ -95,6 +105,10 @@ const (
 	defaultMemoryMB = 256
 )
 
+var validFunctionURLMethods = map[string]bool{
+	"GET": true, "POST": true, "PUT": true, "PATCH": true, "DELETE": true, "OPTIONS": true,
+}
+
 // ─── Hash helper ───────────────────────────────────────────────────
 
 func hashSource(b []byte) string {
@@ -133,18 +147,22 @@ func dbCreateFunction(db *sql.DB, pid string, fn *Function) (*Function, error) {
 	if err != nil {
 		return nil, err
 	}
+	fnURLJSON, err := encodeFunctionURL(normalizeFunctionURLConfig(fn.FunctionURL, nil))
+	if err != nil {
+		return nil, err
+	}
 	now := time.Now().UTC().Format(time.RFC3339)
 
 	res, err := db.Exec(
 		`INSERT INTO functions (
 			project_id, name, runtime, source_kind, source, repo_id, repo_path,
 			source_hash, env_json, timeout_ms, max_memory_mb, status,
-			created_at, updated_at
-		 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)`,
+			function_url_json, created_at, updated_at
+		 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'active', ?, ?, ?)`,
 		pid, fn.Name, fn.Runtime, fn.SourceKind,
 		nullStr(fn.Source), nullableInt64Ptr(fn.RepoID), nullStr(fn.RepoPath),
 		fn.SourceHash, envJSON, fn.TimeoutMS, fn.MaxMemoryMB,
-		now, now)
+		fnURLJSON, now, now)
 	if err != nil {
 		return nil, err
 	}
@@ -222,6 +240,18 @@ func dbUpdateFunction(db *sql.DB, pid string, id int64, patch map[string]any, ne
 		}
 		sets = append(sets, "status = ?")
 		args = append(args, v)
+	}
+	if raw, has := patch["function_url"]; has {
+		next, err := normalizeFunctionURLPatch(cur.FunctionURL, raw)
+		if err != nil {
+			return nil, err
+		}
+		encoded, err := encodeFunctionURL(next)
+		if err != nil {
+			return nil, err
+		}
+		sets = append(sets, "function_url_json = ?")
+		args = append(args, encoded)
 	}
 	if newSourceHash != "" {
 		sets = append(sets, "source_hash = ?")
@@ -311,6 +341,7 @@ const fnColumns = `id, project_id, name, runtime, source_kind,
 		COALESCE(source,''), repo_id, COALESCE(repo_path,''),
 		source_hash, COALESCE(env_json,''),
 		timeout_ms, max_memory_mb, status,
+		COALESCE(function_url_json,''),
 		active_version_id, created_at, updated_at`
 
 type scanRow interface {
@@ -320,12 +351,13 @@ type scanRow interface {
 func scanFunction(row scanRow) (*Function, error) {
 	fn := &Function{}
 	var repoID, activeVer sql.NullInt64
-	var envJSON string
+	var envJSON, fnURLJSON string
 	err := row.Scan(
 		&fn.ID, &fn.ProjectID, &fn.Name, &fn.Runtime, &fn.SourceKind,
 		&fn.Source, &repoID, &fn.RepoPath,
 		&fn.SourceHash, &envJSON,
 		&fn.TimeoutMS, &fn.MaxMemoryMB, &fn.Status,
+		&fnURLJSON,
 		&activeVer, &fn.CreatedAt, &fn.UpdatedAt)
 	if err != nil {
 		return nil, err
@@ -340,6 +372,12 @@ func scanFunction(row scanRow) (*Function, error) {
 	}
 	if envJSON != "" {
 		_ = json.Unmarshal([]byte(envJSON), &fn.Env)
+	}
+	if fnURLJSON != "" {
+		var cfg FunctionURLConfig
+		if err := json.Unmarshal([]byte(fnURLJSON), &cfg); err == nil {
+			fn.FunctionURL = normalizeFunctionURLConfig(&cfg, nil)
+		}
 	}
 	return fn, nil
 }
@@ -581,4 +619,113 @@ func encodeEnv(env map[string]string) (sql.NullString, error) {
 		return sql.NullString{}, err
 	}
 	return sql.NullString{String: string(b), Valid: true}, nil
+}
+
+func encodeFunctionURL(cfg *FunctionURLConfig) (sql.NullString, error) {
+	if cfg == nil || (!cfg.Enabled && cfg.Token == "" && len(cfg.AllowedMethods) == 0 && !cfg.CORS) {
+		return sql.NullString{}, nil
+	}
+	b, err := json.Marshal(cfg)
+	if err != nil {
+		return sql.NullString{}, err
+	}
+	return sql.NullString{String: string(b), Valid: true}, nil
+}
+
+func normalizeFunctionURLConfig(cfg *FunctionURLConfig, fallback *FunctionURLConfig) *FunctionURLConfig {
+	if cfg == nil {
+		return fallback
+	}
+	out := *cfg
+	out.AllowedMethods = normalizeFunctionURLMethods(out.AllowedMethods)
+	if out.Enabled && out.Token == "" {
+		out.Token = generateFunctionURLToken()
+	}
+	return &out
+}
+
+func normalizeFunctionURLPatch(cur *FunctionURLConfig, raw any) (*FunctionURLConfig, error) {
+	if raw == nil {
+		return nil, nil
+	}
+	patch, ok := raw.(map[string]any)
+	if !ok {
+		return nil, errors.New("function_url must be an object")
+	}
+	next := &FunctionURLConfig{}
+	if cur != nil {
+		*next = *cur
+		next.AllowedMethods = append([]string(nil), cur.AllowedMethods...)
+	}
+	if v, has := patch["enabled"]; has {
+		b, ok := v.(bool)
+		if !ok {
+			return nil, errors.New("function_url.enabled must be boolean")
+		}
+		next.Enabled = b
+	}
+	if v, has := patch["token"]; has {
+		s, ok := v.(string)
+		if !ok {
+			return nil, errors.New("function_url.token must be string")
+		}
+		next.Token = strings.TrimSpace(s)
+	}
+	if v, has := patch["rotate_token"]; has {
+		b, ok := v.(bool)
+		if !ok {
+			return nil, errors.New("function_url.rotate_token must be boolean")
+		}
+		if b {
+			next.Token = generateFunctionURLToken()
+		}
+	}
+	if v, has := patch["allowed_methods"]; has {
+		arr, ok := v.([]any)
+		if !ok {
+			return nil, errors.New("function_url.allowed_methods must be an array")
+		}
+		methods := make([]string, 0, len(arr))
+		for _, item := range arr {
+			s, ok := item.(string)
+			if !ok {
+				return nil, errors.New("function_url.allowed_methods values must be strings")
+			}
+			methods = append(methods, s)
+		}
+		next.AllowedMethods = methods
+	}
+	if v, has := patch["cors"]; has {
+		b, ok := v.(bool)
+		if !ok {
+			return nil, errors.New("function_url.cors must be boolean")
+		}
+		next.CORS = b
+	}
+	return normalizeFunctionURLConfig(next, cur), nil
+}
+
+func normalizeFunctionURLMethods(in []string) []string {
+	seen := map[string]bool{}
+	out := []string{}
+	for _, m := range in {
+		m = strings.ToUpper(strings.TrimSpace(m))
+		if m == "" || !validFunctionURLMethods[m] || seen[m] {
+			continue
+		}
+		seen[m] = true
+		out = append(out, m)
+	}
+	if len(out) == 0 {
+		return []string{"POST"}
+	}
+	return out
+}
+
+func generateFunctionURLToken() string {
+	b := make([]byte, 24)
+	if _, err := rand.Read(b); err != nil {
+		return strings.ReplaceAll(time.Now().UTC().Format("20060102150405.000000000"), ".", "")
+	}
+	return strings.TrimRight(base64.RawURLEncoding.EncodeToString(b), "=")
 }

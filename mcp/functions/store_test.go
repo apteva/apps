@@ -124,6 +124,50 @@ func TestUpdateRehashesOnSourceChange(t *testing.T) {
 	}
 }
 
+func TestFunctionURLConfigRoundtrip(t *testing.T) {
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID(testProj))
+	db := ctx.AppDB()
+
+	fn, err := dbCreateFunction(db, testProj, &Function{
+		Name:       "public",
+		Runtime:    "node",
+		SourceKind: "inline",
+		Source:     "x",
+		SourceHash: "h",
+		FunctionURL: &FunctionURLConfig{
+			Enabled:        true,
+			AllowedMethods: []string{"post", "GET", "bad", "GET"},
+			CORS:           true,
+		},
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	if fn.FunctionURL == nil || !fn.FunctionURL.Enabled {
+		t.Fatalf("FunctionURL not saved: %#v", fn.FunctionURL)
+	}
+	if fn.FunctionURL.Token == "" {
+		t.Fatal("enabled FunctionURL did not generate token")
+	}
+	if got := fn.FunctionURL.AllowedMethods; len(got) != 2 || got[0] != "POST" || got[1] != "GET" {
+		t.Fatalf("AllowedMethods = %#v, want POST,GET", got)
+	}
+
+	oldToken := fn.FunctionURL.Token
+	updated, err := dbUpdateFunction(db, testProj, fn.ID, map[string]any{
+		"function_url": map[string]any{"rotate_token": true, "allowed_methods": []any{"DELETE"}},
+	}, "")
+	if err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	if updated.FunctionURL.Token == "" || updated.FunctionURL.Token == oldToken {
+		t.Fatal("rotate_token did not change token")
+	}
+	if got := updated.FunctionURL.AllowedMethods; len(got) != 1 || got[0] != "DELETE" {
+		t.Fatalf("AllowedMethods = %#v, want DELETE", got)
+	}
+}
+
 // TestInvocationsRoundtrip: insert an invocation, list it back, fetch
 // it singly. The most-recently-started should sort first.
 func TestInvocationsRoundtrip(t *testing.T) {
