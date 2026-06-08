@@ -54,7 +54,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: messaging
 display_name: Messaging
-version: 0.13.31
+version: 0.13.32
 description: |
   Send and receive messages across channels. v0.1 ships email via
   AWS SES.
@@ -428,9 +428,12 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "template_delete",
-			Description: "Delete a template by id (soft delete).",
-			InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}}, []string{"id"}),
-			Handler:     a.toolTemplateDelete,
+			Description: "Delete a template by id. Provider-linked Twilio templates are deleted upstream first unless local_only is true.",
+			InputSchema: schemaObject(map[string]any{
+				"id":         map[string]any{"type": "integer"},
+				"local_only": map[string]any{"type": "boolean"},
+			}, []string{"id"}),
+			Handler: a.toolTemplateDelete,
 		},
 		{
 			Name:        "suppression_list",
@@ -2245,14 +2248,73 @@ func (a *App) toolTemplateDelete(ctx *sdk.AppCtx, args map[string]any) (any, err
 		return nil, err
 	}
 	id := int64Arg(args, "id")
+	if id == 0 {
+		return nil, errors.New("id required")
+	}
+	t, err := dbTemplateGet(ctx.AppDB(), pid, id)
+	if err != nil {
+		return nil, err
+	}
+	if t == nil {
+		return nil, fmt.Errorf("template_id %d not found", id)
+	}
+
+	localOnly := boolArg(args, "local_only", false)
+	providerDeleted := false
+	providerAlreadyGone := false
+	if t.ProviderTemplateID != "" && !localOnly {
+		bound := ctx.IntegrationFor("phone_provider")
+		if bound == nil {
+			return nil, errors.New("no phone_provider bound — cannot delete provider-backed template; pass local_only=true to hide only the local row")
+		}
+		res, err := ctx.PlatformAPI().ExecuteIntegrationTool(bound.ConnectionID, "delete_content_template", map[string]any{
+			"ContentSid": t.ProviderTemplateID,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("delete provider template: %w", err)
+		}
+		if res == nil || !res.Success {
+			body := ""
+			if res != nil {
+				body = string(res.Data)
+			}
+			if providerTemplateDeleteAlreadyGone(res, body) {
+				providerAlreadyGone = true
+			} else {
+				return nil, fmt.Errorf("delete provider template: provider non-2xx: %s", truncate(body, 400))
+			}
+		} else {
+			providerDeleted = true
+		}
+	}
+
 	_, err = ctx.AppDB().Exec(
-		`UPDATE templates SET deleted_at = CURRENT_TIMESTAMP WHERE id = ? AND project_id = ?`,
+		`UPDATE templates SET deleted_at = CURRENT_TIMESTAMP, updated_at = CURRENT_TIMESTAMP WHERE id = ? AND project_id = ?`,
 		id, pid,
 	)
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"deleted": true}, nil
+	return map[string]any{
+		"deleted":               true,
+		"local_only":            localOnly,
+		"provider_deleted":      providerDeleted,
+		"provider_already_gone": providerAlreadyGone,
+		"provider_template_id":  t.ProviderTemplateID,
+	}, nil
+}
+
+func providerTemplateDeleteAlreadyGone(res *sdk.ExecuteResult, body string) bool {
+	if res != nil && res.Status == http.StatusNotFound {
+		return true
+	}
+	lower := strings.ToLower(body)
+	for _, marker := range []string{"20404", "not found", "does not exist", "was not found"} {
+		if strings.Contains(lower, marker) {
+			return true
+		}
+	}
+	return false
 }
 
 // renderTemplate is a tiny {{var}} substituter — no conditionals, no

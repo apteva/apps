@@ -2339,6 +2339,11 @@ function TemplatesView({ rows, api, reload, notify, confirmAction }: { rows: Tem
       message: (
         <>
           <div>Delete template <code>{tpl?.name || `#${id}`}</code>?</div>
+          {tpl?.provider_template_id ? (
+            <div className="mt-2 text-text-dim">
+              This template is linked to Twilio <code>{tpl.provider_template_id}</code>. Messaging will delete it from Twilio first, then hide the local row.
+            </div>
+          ) : null}
           <div className="mt-2 text-text-dim">Messages that reference this saved template will no longer be able to use it.</div>
         </>
       ),

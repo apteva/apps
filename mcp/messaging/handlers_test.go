@@ -2703,6 +2703,135 @@ func TestTemplatesImportHTTP_SelectedTwilioContent(t *testing.T) {
 	}
 }
 
+func TestTemplateDelete_DeletesTwilioContentThenSoftDeletesLocal(t *testing.T) {
+	plat := newPhoneStub(nil)
+	plat.replyByTool = map[string]*sdk.ExecuteResult{
+		"delete_content_template": {
+			Success: true,
+			Status:  http.StatusNoContent,
+			Data:    json.RawMessage(`{}`),
+		},
+	}
+	ctx := newTestCtx(t, plat)
+	app := &App{}
+
+	res, err := ctx.AppDB().Exec(
+		`INSERT INTO templates
+			(project_id, channel, name, body_text, vars_schema, provider_template_id, provider_status, var_style)
+		 VALUES ('test-proj', 'whatsapp', 'provider_delete', 'Hi {{1}}', '{}', 'HXdelete', 'draft', 'numbered')`,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, _ := res.LastInsertId()
+
+	out, err := app.toolTemplateDelete(ctx, map[string]any{"id": id})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.(map[string]any)["provider_deleted"] != true {
+		t.Fatalf("expected provider_deleted=true, got %+v", out)
+	}
+	var deleteCall *executeCall
+	for i := range plat.executeCalls {
+		if plat.executeCalls[i].Tool == "delete_content_template" {
+			deleteCall = &plat.executeCalls[i]
+			break
+		}
+	}
+	if deleteCall == nil {
+		t.Fatalf("delete_content_template was not called: %+v", plat.executeCalls)
+	}
+	if deleteCall.ConnID != 2 || deleteCall.Input["ContentSid"] != "HXdelete" {
+		t.Fatalf("unexpected delete call: %+v", deleteCall)
+	}
+	var deletedAt string
+	if err := ctx.AppDB().QueryRow(`SELECT COALESCE(deleted_at, '') FROM templates WHERE id = ?`, id).Scan(&deletedAt); err != nil {
+		t.Fatal(err)
+	}
+	if deletedAt == "" {
+		t.Fatal("template was not soft-deleted locally")
+	}
+}
+
+func TestTemplateDelete_TwilioFailureKeepsLocalRow(t *testing.T) {
+	plat := newPhoneStub(nil)
+	plat.replyByTool = map[string]*sdk.ExecuteResult{
+		"delete_content_template": {
+			Success: false,
+			Status:  http.StatusBadRequest,
+			Data:    json.RawMessage(`{"message":"cannot delete approved template"}`),
+		},
+	}
+	ctx := newTestCtx(t, plat)
+	app := &App{}
+
+	res, err := ctx.AppDB().Exec(
+		`INSERT INTO templates
+			(project_id, channel, name, body_text, vars_schema, provider_template_id, provider_status, var_style)
+		 VALUES ('test-proj', 'whatsapp', 'provider_delete_denied', 'Hi', '{}', 'HXlocked', 'approved', 'numbered')`,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, _ := res.LastInsertId()
+
+	_, err = app.toolTemplateDelete(ctx, map[string]any{"id": id})
+	if err == nil || !strings.Contains(err.Error(), "delete provider template") {
+		t.Fatalf("expected provider delete error, got %v", err)
+	}
+	var deletedAt string
+	if err := ctx.AppDB().QueryRow(`SELECT COALESCE(deleted_at, '') FROM templates WHERE id = ?`, id).Scan(&deletedAt); err != nil {
+		t.Fatal(err)
+	}
+	if deletedAt != "" {
+		t.Fatalf("template should remain visible after provider failure, deleted_at=%q", deletedAt)
+	}
+}
+
+func TestTemplateDelete_LocalOnlySkipsTwilioContentDelete(t *testing.T) {
+	plat := newPhoneStub(nil)
+	plat.replyByTool = map[string]*sdk.ExecuteResult{
+		"delete_content_template": {
+			Success: false,
+			Status:  http.StatusBadRequest,
+			Data:    json.RawMessage(`{"message":"should not be called"}`),
+		},
+	}
+	ctx := newTestCtx(t, plat)
+	app := &App{}
+
+	res, err := ctx.AppDB().Exec(
+		`INSERT INTO templates
+			(project_id, channel, name, body_text, vars_schema, provider_template_id, provider_status, var_style)
+		 VALUES ('test-proj', 'whatsapp', 'provider_local_only', 'Hi', '{}', 'HXlocal', 'approved', 'numbered')`,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, _ := res.LastInsertId()
+
+	out, err := app.toolTemplateDelete(ctx, map[string]any{"id": id, "local_only": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.(map[string]any)["local_only"] != true || out.(map[string]any)["provider_deleted"] != false {
+		t.Fatalf("unexpected delete result: %+v", out)
+	}
+	for _, call := range plat.executeCalls {
+		if call.Tool == "delete_content_template" {
+			t.Fatalf("delete_content_template should not be called for local_only: %+v", plat.executeCalls)
+		}
+	}
+	var deletedAt string
+	if err := ctx.AppDB().QueryRow(`SELECT COALESCE(deleted_at, '') FROM templates WHERE id = ?`, id).Scan(&deletedAt); err != nil {
+		t.Fatal(err)
+	}
+	if deletedAt == "" {
+		t.Fatal("template was not soft-deleted locally")
+	}
+}
+
 func TestTemplatesSyncProvider_NoOpForEmail(t *testing.T) {
 	plat := newPhoneStub(nil)
 	ctx := newTestCtx(t, plat)
