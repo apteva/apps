@@ -1,0 +1,79 @@
+schema: apteva-app/v1
+
+name: whatsapp-web
+display_name: WhatsApp Web
+version: 0.1.0
+description: |
+  WhatsApp linked-device provider for WhatsApp and WhatsApp Business app
+  accounts. Uses WhatsApp Web multi-device pairing, not the official
+  WhatsApp Business Platform API.
+author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/whatsapp-web
+tags: [whatsapp, messaging, whatsapp-web]
+
+scopes: [project, global]
+min_apteva_version: "0.10.0"
+
+requires:
+  permissions:
+    - db.write.app
+    - net.egress
+  integrations: []
+
+provides:
+  http_routes:
+    - prefix: /
+  mcp_tools:
+    - { name: whatsapp_web_connect,        description: "Start WhatsApp Web linked-device pairing. Returns status; scan the QR from the panel or /qr.png." }
+    - { name: whatsapp_web_status,         description: "Read connection, QR, and sender status." }
+    - { name: whatsapp_web_disconnect,     description: "Disconnect the current WhatsApp Web socket without deleting pairing state." }
+    - { name: whatsapp_web_logout,         description: "Log out/unpair the linked WhatsApp device and remove local session state." }
+    - { name: whatsapp_web_messages,       description: "List recent locally-observed WhatsApp Web messages. Args: limit?." }
+    - { name: list_whatsapp_senders,       description: "Provider-compatible sender list for Messaging. Returns the linked WhatsApp account when paired." }
+    - { name: send_whatsapp,               description: "Provider-compatible WhatsApp send. Args: To, Body, From?." }
+  ui_panels:
+    - slot: project.page
+      label: WhatsApp Web
+      icon: message-circle
+      entry: /ui/WhatsAppWebPanel.mjs
+  publishes:
+    - name: account.connected
+      description: A WhatsApp Web linked device connected.
+      payload:
+        phone: string
+        jid: string
+    - name: account.disconnected
+      description: The WhatsApp Web socket disconnected.
+      payload:
+        phone: string
+        jid: string
+    - name: message.received
+      description: A WhatsApp message was received.
+      payload:
+        from: string
+        to: string
+        body_text: string
+        message_id: string
+    - name: message.sent
+      description: A WhatsApp message was sent.
+      payload:
+        from: string
+        to: string
+        body_text: string
+        message_id: string
+
+runtime:
+  kind: source
+  source:
+    repo: github.com/apteva/apps
+    ref: main
+    entry: mcp/whatsapp-web
+  port: 8080
+  health_check: /health
+
+db:
+  driver: sqlite
+  path: /data/whatsapp-web.db
+  migrations: migrations/
+
+upgrade_policy: auto-patch
