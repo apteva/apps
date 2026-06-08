@@ -34,11 +34,17 @@ package main
 // cache on each remote.
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
+	"os"
 	"strings"
 	"sync"
+	"time"
 
 	sdk "github.com/apteva/app-sdk"
 )
@@ -381,7 +387,7 @@ func runRemote(ctx context.Context, app *sdk.AppCtx, hostID int64, cmd string, t
 		ExitCode int    `json:"exit_code"`
 		Err      string `json:"error"`
 	}
-	err := app.PlatformAPI().CallAppResult("instances", "instance_run_command", map[string]any{
+	err := callInstancesRunCommand(ctx, timeoutS, map[string]any{
 		"id":        hostID,
 		"cmd":       cmd,
 		"timeout_s": timeoutS,
@@ -393,4 +399,108 @@ func runRemote(ctx context.Context, app *sdk.AppCtx, hostID int64, cmd string, t
 		return resp.Output, resp.ExitCode, errors.New(resp.Err)
 	}
 	return resp.Output, resp.ExitCode, nil
+}
+
+func callInstancesRunCommand(ctx context.Context, timeoutS int, input map[string]any, out any) error {
+	base := strings.TrimRight(os.Getenv("APTEVA_GATEWAY_URL"), "/")
+	if base == "" {
+		base = "http://127.0.0.1:5280"
+	}
+	token := os.Getenv("APTEVA_APP_TOKEN")
+	if token == "" {
+		token = os.Getenv("APTEVA_OUTBOUND_TOKEN")
+	}
+	if timeoutS <= 0 {
+		timeoutS = 30
+	}
+	body, err := json.Marshal(map[string]any{
+		"tool":  "instance_run_command",
+		"input": input,
+	})
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, base+"/api/apps/callback/apps/instances/call", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	client := &http.Client{Timeout: time.Duration(timeoutS)*time.Second + 30*time.Second}
+	res, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer res.Body.Close()
+	raw, readErr := io.ReadAll(res.Body)
+	if res.StatusCode/100 != 2 {
+		if readErr != nil {
+			return fmt.Errorf("instances call: HTTP %d; additionally failed reading body: %w", res.StatusCode, readErr)
+		}
+		return fmt.Errorf("instances call: HTTP %d: %s", res.StatusCode, truncate(string(raw), 500))
+	}
+	if readErr != nil {
+		return readErr
+	}
+	return decodeRemoteMCPEnvelope(raw, "instances", "instance_run_command", out)
+}
+
+func decodeRemoteMCPEnvelope(raw []byte, appName, tool string, out any) error {
+	if out == nil {
+		return errors.New("decode remote MCP envelope: out is nil")
+	}
+	if len(raw) == 0 {
+		return fmt.Errorf("%s.%s: empty response", appName, tool)
+	}
+	var env struct {
+		Result json.RawMessage `json:"result"`
+		Error  *struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+		} `json:"error,omitempty"`
+	}
+	if err := json.Unmarshal(raw, &env); err != nil {
+		return json.Unmarshal(raw, out)
+	}
+	if env.Error != nil {
+		return fmt.Errorf("%s.%s: %s (code=%d)", appName, tool, env.Error.Message, env.Error.Code)
+	}
+	if len(env.Result) > 0 {
+		if handled, err := decodeRemoteMCPContent(env.Result, appName, tool, out); handled || err != nil {
+			return err
+		}
+	}
+	if handled, err := decodeRemoteMCPContent(raw, appName, tool, out); handled || err != nil {
+		return err
+	}
+	if err := json.Unmarshal(raw, out); err != nil {
+		return fmt.Errorf("%s.%s: response had no content array and direct decode failed: %w", appName, tool, err)
+	}
+	return nil
+}
+
+func decodeRemoteMCPContent(raw json.RawMessage, appName, tool string, out any) (bool, error) {
+	var result struct {
+		Content []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"content"`
+		IsError bool `json:"isError,omitempty"`
+	}
+	if err := json.Unmarshal(raw, &result); err != nil || len(result.Content) == 0 {
+		return false, nil
+	}
+	inner := result.Content[0].Text
+	if inner == "" {
+		return true, fmt.Errorf("%s.%s: empty content text", appName, tool)
+	}
+	if result.IsError {
+		return true, fmt.Errorf("%s.%s: tool returned error: %.200s", appName, tool, inner)
+	}
+	if err := json.Unmarshal([]byte(inner), out); err != nil {
+		return true, fmt.Errorf("%s.%s: decode inner JSON: %w (text: %.200s)", appName, tool, err, inner)
+	}
+	return true, nil
 }
