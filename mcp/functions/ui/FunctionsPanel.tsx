@@ -212,14 +212,29 @@ type ApiFn = <T,>(method: string, path: string, body?: unknown, extra?: Record<s
 
 const FUNCTION_URL_METHODS = ["GET", "POST", "PUT", "PATCH", "DELETE"] as const;
 
+interface ServerSettings {
+  public_url?: {
+    effective?: string;
+  };
+}
+
 function functionURLMethods(cfg?: FunctionURLConfig): string[] {
   return cfg?.allowed_methods?.length ? cfg.allowed_methods : ["POST"];
 }
 
-function functionURLPath(fn: FunctionRow, withParams: (extra?: Record<string, string>) => string): string {
+function externalBaseURL(publicBaseURL: string): string {
+  const base = publicBaseURL.trim() || window.location.origin;
+  return base.replace(/\/+$/, "");
+}
+
+function functionURLPath(
+  fn: FunctionRow,
+  withParams: (extra?: Record<string, string>) => string,
+  publicBaseURL: string,
+): string {
   const token = fn.function_url?.token;
   if (!token) return "";
-  return `${API}/url/${encodeURIComponent(fn.name)}/${encodeURIComponent(token)}?${withParams()}`;
+  return `${externalBaseURL(publicBaseURL)}${API}/url/${encodeURIComponent(fn.name)}/${encodeURIComponent(token)}?${withParams()}`;
 }
 
 // handleCodeTab makes Tab insert two spaces in a code textarea
@@ -254,6 +269,7 @@ export default function FunctionsPanel({ projectId, installId }: NativePanelProp
   const [invocations, setInvocations] = useState<Invocation[]>([]);
   const [error, setError] = useState("");
   const [creating, setCreating] = useState(false);
+  const [publicBaseURL, setPublicBaseURL] = useState("");
 
   const withParams = useCallback(
     (extra: Record<string, string> = {}) => {
@@ -311,6 +327,19 @@ export default function FunctionsPanel({ projectId, installId }: NativePanelProp
   );
 
   useEffect(() => { loadList(); }, [loadList]);
+
+  useEffect(() => {
+    let cancelled = false;
+    fetch("/api/settings/server", { credentials: "same-origin" })
+      .then((res) => (res.ok ? res.json() : null))
+      .then((data: ServerSettings | null) => {
+        if (!cancelled) setPublicBaseURL(data?.public_url?.effective || "");
+      })
+      .catch(() => {
+        if (!cancelled) setPublicBaseURL("");
+      });
+    return () => { cancelled = true; };
+  }, []);
 
   useAppEvents("functions", projectId, (ev) => {
     if (
@@ -440,6 +469,7 @@ export default function FunctionsPanel({ projectId, installId }: NativePanelProp
           onClose={closeDetail}
           onChanged={refreshDetail}
           withParams={withParams}
+          publicBaseURL={publicBaseURL}
         />
       )}
     </div>
@@ -449,7 +479,7 @@ export default function FunctionsPanel({ projectId, installId }: NativePanelProp
 // ─── Detail dialog ────────────────────────────────────────────────────
 
 function DetailDialog({
-  fn, versions, invocations, api, activeVersionNo, onClose, onChanged, withParams,
+  fn, versions, invocations, api, activeVersionNo, onClose, onChanged, withParams, publicBaseURL,
 }: {
   fn: FunctionRow;
   versions: Version[];
@@ -459,6 +489,7 @@ function DetailDialog({
   onClose: () => void;
   onChanged: () => void | Promise<void>;
   withParams: (extra?: Record<string, string>) => string;
+  publicBaseURL: string;
 }) {
   const [confirming, setConfirming] = useState(false);
   const [deleting, setDeleting] = useState(false);
@@ -527,7 +558,7 @@ function DetailDialog({
             </p>
             {fn.function_url?.enabled && fn.function_url.token && (
               <p className="text-text-dim text-xs mt-1 font-mono truncate">
-                URL {functionURLPath(fn, withParams)}
+                URL {functionURLPath(fn, withParams, publicBaseURL)}
               </p>
             )}
           </div>
@@ -536,7 +567,13 @@ function DetailDialog({
 
         {busy && <div className="text-red text-xs">{busy}</div>}
 
-        <FunctionURLSettings fn={fn} api={api} withParams={withParams} onChanged={onChanged} />
+        <FunctionURLSettings
+          fn={fn}
+          api={api}
+          withParams={withParams}
+          publicBaseURL={publicBaseURL}
+          onChanged={onChanged}
+        />
 
         <InvokeConsole fn={fn} withParams={withParams} onInvoked={onChanged} />
 
@@ -730,11 +767,12 @@ function InvocationDetail({ inv }: { inv: Invocation }) {
 // ─── Function URL settings ────────────────────────────────────────────
 
 function FunctionURLSettings({
-  fn, api, withParams, onChanged,
+  fn, api, withParams, publicBaseURL, onChanged,
 }: {
   fn: FunctionRow;
   api: ApiFn;
   withParams: (extra?: Record<string, string>) => string;
+  publicBaseURL: string;
   onChanged: () => void | Promise<void>;
 }) {
   const cfg = fn.function_url;
@@ -743,7 +781,7 @@ function FunctionURLSettings({
   const [saving, setSaving] = useState(false);
   const [copyState, setCopyState] = useState("");
   const [err, setErr] = useState("");
-  const url = functionURLPath(fn, withParams);
+  const url = functionURLPath(fn, withParams, publicBaseURL);
 
   const patch = async (function_url: Record<string, unknown>) => {
     setErr("");
