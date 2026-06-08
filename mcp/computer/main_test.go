@@ -677,7 +677,7 @@ func TestComputerSettingsLockOverridesExplicitBackend(t *testing.T) {
 	}
 }
 
-func TestBrowserbaseOpenExposesAndForwardsLeaseControls(t *testing.T) {
+func TestBrowserbaseOpenHidesAndDisablesKeepAlive(t *testing.T) {
 	prev := newBackend
 	t.Cleanup(func() { newBackend = prev })
 
@@ -706,8 +706,8 @@ func TestBrowserbaseOpenExposesAndForwardsLeaseControls(t *testing.T) {
 	if gotCfg.Type != "browserbase" {
 		t.Fatalf("backend type: want browserbase, got %q", gotCfg.Type)
 	}
-	if !gotCfg.KeepAlive {
-		t.Fatal("browserbase keep_alive arg was not forwarded to backend config")
+	if gotCfg.KeepAlive {
+		t.Fatal("browserbase keep_alive arg should be ignored and forced off")
 	}
 	if gotCfg.Timeout != 3600 {
 		t.Fatalf("browserbase timeout config: want 3600, got %d", gotCfg.Timeout)
@@ -716,8 +716,8 @@ func TestBrowserbaseOpenExposesAndForwardsLeaseControls(t *testing.T) {
 		t.Fatalf("OpenSession timeout: want 3600, got %d", fake.openTimeout)
 	}
 	outMap := out.(map[string]any)
-	if outMap["keep_alive"] != true {
-		t.Fatalf("output keep_alive: want true, got %#v", outMap["keep_alive"])
+	if _, ok := outMap["keep_alive"]; ok {
+		t.Fatalf("output leaked hidden keep_alive: %#v", outMap)
 	}
 	if outMap["timeout_seconds"] != 3600 {
 		t.Fatalf("output timeout_seconds: want 3600, got %#v", outMap["timeout_seconds"])
@@ -735,8 +735,8 @@ func TestBrowserbaseOpenExposesAndForwardsLeaseControls(t *testing.T) {
 		if !ok {
 			t.Fatalf("%s schema has no properties map: %#v", toolName, tool.InputSchema)
 		}
-		if _, ok := props["keep_alive"]; !ok {
-			t.Fatalf("%s schema does not expose keep_alive", toolName)
+		if _, ok := props["keep_alive"]; ok {
+			t.Fatalf("%s schema exposes hidden keep_alive", toolName)
 		}
 	}
 }

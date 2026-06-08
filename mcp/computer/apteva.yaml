@@ -2,9 +2,9 @@ schema: apteva-app/v1
 
 name: computer
 display_name: Computer
-version: 0.7.23
+version: 0.7.24
 description: |
-  Watch and steer browser sessions. v0.7.23 adds delete key buttons.
+  Watch and steer browser sessions. v0.7.24 hides keep-alive.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/computer
@@ -42,11 +42,10 @@ provides:
         Open, resume, list, inspect, or close app-owned browser sessions.
         Args: action, session_id?, backend?, backend_session_id?, url?,
         context_id?, context_name?, auto_create_context?, persist?, timeout?,
-        keep_alive?, proxy?, proxy_country?, viewport?. Browserbase honors
-        timeout as max session lifetime and keep_alive=true to allow reconnect
-        after disconnect. Prefer context_id returned by computer_context_list
-        to reopen saved browser state; context_name works across providers
-        when unique. For a reusable saved context, pass context_name with
+        proxy?, proxy_country?, viewport?. Browserbase honors timeout as max
+        session lifetime. Prefer context_id returned by computer_context_list
+        to reopen saved browser state; context_name works across providers when
+        unique. For a reusable saved context, pass context_name with
         auto_create_context=true; omitted names are only a fallback and are
         auto-generated.
     - name: computer_use
@@ -90,8 +89,7 @@ provides:
     - name: browser_open
       description: |
         Compatibility alias for browser_session(action=open). Browserbase
-        honors timeout as max session lifetime and keep_alive=true to allow
-        reconnect after disconnect.
+        honors timeout as max session lifetime.
     - name: browser_list
       description: |
         Compatibility alias for browser_session(action=list).

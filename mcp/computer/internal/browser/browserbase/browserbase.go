@@ -663,7 +663,7 @@ func (c *Computer) fetchSessionConnectURL(sessionID string) (string, error) {
 		return "", err
 	}
 	if result.Status != "" && result.Status != "RUNNING" {
-		return "", fmt.Errorf("session %s is %s, not RUNNING (was KeepAlive set?)", sessionID, result.Status)
+		return "", fmt.Errorf("session %s is %s, not RUNNING or attachable", sessionID, result.Status)
 	}
 	if result.ConnectURL == "" {
 		return "", fmt.Errorf("session %s has no connectUrl", sessionID)

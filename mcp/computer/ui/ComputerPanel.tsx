@@ -83,7 +83,6 @@ interface SessionRow {
   app_context_id?: string;
   context_name?: string;
   persist?: boolean;
-  keep_alive?: boolean;
   timeout_seconds?: number;
   provider_expires_at?: string;
   current_url: string;
@@ -668,8 +667,6 @@ function BrowserListItem({
             {lastUsedAgo}
             {viewport ? ` | ${viewport}` : ""}
           </span>
-          <span>Keep alive</span>
-          <span className={row.keep_alive ? "text-text" : "text-text-muted"}>{row.keep_alive ? "yes" : "no"}</span>
           <span>Provider</span>
           <span title={row.provider_expires_at ? formatTime(row.provider_expires_at) : "Provider default timeout"}>
             {providerLife}
@@ -927,7 +924,6 @@ function SessionDetail({
             { label: "App context", value: session.context_name || session.app_context_id || "-" },
             { label: "Provider context", value: session.context_id || "-" },
             { label: "Persist changes", value: session.persist ? "yes" : "no" },
-            { label: "Keep alive", value: session.keep_alive ? "yes" : "no" },
             { label: "Provider timeout", value: session.timeout_seconds ? formatDurationSeconds(session.timeout_seconds) : "provider default" },
             { label: "Provider expires", value: session.provider_expires_at ? `${providerLife} (${formatTime(session.provider_expires_at)})` : providerLife },
             { label: "Current URL", value: currentURL },
@@ -1038,7 +1034,6 @@ function OpenSessionModal({
   const [persist, setPersist] = useState(true);
   const [backendSessionID, setBackendSessionID] = useState("");
   const [timeout, setTimeoutValue] = useState("");
-  const [keepAlive, setKeepAlive] = useState(false);
   const [proxy, setProxy] = useState<ProxyMode>("");
   const [proxyCountry, setProxyCountry] = useState("");
   const [width, setWidth] = useState("1600");
@@ -1065,7 +1060,6 @@ function OpenSessionModal({
       if (mode === "resume" && backendSessionID) body.backend_session_id = backendSessionID;
       if (mode !== "resume") body.persist = persist;
       if (timeout) body.timeout = Number(timeout);
-      if (mode !== "resume" && keepAlive) body.keep_alive = true;
       if (proxy) body.proxy = proxy === "true";
       if (proxyCountry) body.proxy_country = proxyCountry.toUpperCase();
       const viewport: Record<string, number> = {};
@@ -1211,10 +1205,6 @@ function OpenSessionModal({
             <label style={{ display: "flex", gap: "8px", alignItems: "center" }}>
               <input type="checkbox" checked={persist} onChange={(e) => setPersist(e.target.checked)} />
               Persist context changes
-            </label>
-            <label style={{ display: "flex", gap: "8px", alignItems: "center" }}>
-              <input type="checkbox" checked={keepAlive} onChange={(e) => setKeepAlive(e.target.checked)} />
-              Keep Browserbase session alive after disconnect
             </label>
           </div>
         )}

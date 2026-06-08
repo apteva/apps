@@ -41,9 +41,9 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: computer
 display_name: Computer
-version: 0.7.23
+version: 0.7.24
 description: |
-  Watch and steer browser sessions. v0.7.23 adds delete key buttons.
+  Watch and steer browser sessions. v0.7.24 hides keep-alive.
 scopes: [project, global]
 requires:
   permissions:
@@ -68,7 +68,7 @@ provides:
     - prefix: /
   mcp_tools:
     - name: browser_session
-      description: "Open, resume, list, inspect, or close app-owned browser sessions. Args: action, session_id?, backend?, backend_session_id?, url?, context_id?, context_name?, auto_create_context?, persist?, timeout?, keep_alive?, proxy?, proxy_country?, viewport?. Browserbase honors timeout as max session lifetime and keep_alive=true to allow reconnect after disconnect. Prefer context_id from computer_context_list to reopen saved state; context_name works across backends when unique. For a reusable saved context, pass context_name with auto_create_context=true; omitted names are only a fallback and are auto-generated."
+      description: "Open, resume, list, inspect, or close app-owned browser sessions. Args: action, session_id?, backend?, backend_session_id?, url?, context_id?, context_name?, auto_create_context?, persist?, timeout?, proxy?, proxy_country?, viewport?. Browserbase honors timeout as max session lifetime. Prefer context_id from computer_context_list to reopen saved state; context_name works across backends when unique. For a reusable saved context, pass context_name with auto_create_context=true; omitted names are only a fallback and are auto-generated."
     - name: computer_use
       description: "Drive an app-owned browser session. Default workflow: call action=screenshot first; screenshots contain Set-of-Mark numeric badges on interactive elements. To click, use action=click with label=N from the latest screenshot. Prefer label over coordinate; use coordinate only for targets with no badge such as canvas or custom rendered widgets. Use action=key for browser/editor commands such as Tab, Backspace, Control+A, Control+Z; use action=type only for literal text and full date/time values such as 2026-06-05 or 08:00 PM. After scrolling or navigation, take a fresh screenshot because labels are re-enumerated. Args: session_id, action, coordinate?, label?, text?, key?, direction?, amount?, duration?, annotate? (screenshot only, default true). Returns screenshot bytes for visual actions."
     - name: computer_context_create
@@ -212,7 +212,6 @@ type session struct {
 	appContextID string
 	contextName  string
 	persist      bool
-	keepAlive    bool
 	timeout      int
 	openedAt     time.Time
 	lastUsed     time.Time
@@ -226,7 +225,6 @@ type reapedSession struct {
 	AppContextID     string
 	ContextName      string
 	Persist          bool
-	KeepAlive        bool
 	TimeoutSeconds   int
 	CurrentURL       string
 	Width            int
@@ -312,7 +310,6 @@ func (r *registry) reapIdleDetails(ttl time.Duration) []reapedSession {
 			AppContextID:     s.appContextID,
 			ContextName:      s.contextName,
 			Persist:          s.persist,
-			KeepAlive:        s.keepAlive,
 			TimeoutSeconds:   s.timeout,
 			CurrentURL:       currentURL(s.comp),
 			Width:            disp.Width,
@@ -408,8 +405,8 @@ func (a *App) MCPTools() []sdk.Tool {
 			Name: "browser_session",
 			Description: "Session lifecycle for app-owned browsers. Actions: open, resume, status, close, list. " +
 				"Open/resume args: backend? (local|browserbase|steel|browser-engine|service), url?, context_id?, persist?, " +
-				"context_name?, auto_create_context?, backend_session_id? (provider attach), timeout?, keep_alive?, proxy?, proxy_country?, viewport?. " +
-				"Browserbase honors timeout as max session lifetime and keep_alive=true to allow reconnect after disconnect. " +
+				"context_name?, auto_create_context?, backend_session_id? (provider attach), timeout?, proxy?, proxy_country?, viewport?. " +
+				"Browserbase honors timeout as max session lifetime. " +
 				"Prefer context_id returned by computer_context_list to reopen saved browser state; context_name works across providers when unique. " +
 				"For a reusable saved context, pass context_name with auto_create_context=true; omitted names are only a fallback and are auto-generated. " +
 				"Returns {session_id, backend_session_id, backend, current_url, context_id, debug_url, width, height}.",
@@ -427,7 +424,6 @@ func (a *App) MCPTools() []sdk.Tool {
 				"auto_create_context": map[string]any{"type": "boolean", "description": "Create an app-managed context if no context_id/name/provider_context_id matches. For reusable contexts, also pass context_name; omitted names are auto-generated fallback names."},
 				"persist":             map[string]any{"type": "boolean"},
 				"timeout":             map[string]any{"type": "integer", "description": "Provider session max lifetime in seconds for cloud backends. Browserbase max is provider/plan bounded."},
-				"keep_alive":          map[string]any{"type": "boolean", "description": "Browserbase only: keep the provider session available after disconnect so it can be reattached until timeout or explicit close."},
 				"proxy":               map[string]any{"type": "boolean"},
 				"proxy_country":       map[string]any{"type": "string"},
 				"viewport": map[string]any{
@@ -518,8 +514,8 @@ func (a *App) MCPTools() []sdk.Tool {
 		{
 			Name: "browser_open",
 			Description: "Compatibility alias for browser_session(action=open). Args: backend? (local|browserbase|steel|browser-engine, default from Computer app settings), " +
-				"url? (navigate after open), context_name?, auto_create_context?, timeout?, keep_alive?, viewport? ({width:int, height:int}, default 1600x800). " +
-				"Browserbase honors timeout as max session lifetime and keep_alive=true to allow reconnect after disconnect. " +
+				"url? (navigate after open), context_name?, auto_create_context?, timeout?, viewport? ({width:int, height:int}, default 1600x800). " +
+				"Browserbase honors timeout as max session lifetime. " +
 				"For a reusable saved context, pass context_name with auto_create_context=true; omitted names are only a fallback and are auto-generated. " +
 				"Returns {session_id, backend, current_url, width, height}. " +
 				"Session owned by this sidecar until browser_close or 30-minute idle reaper.",
@@ -534,7 +530,6 @@ func (a *App) MCPTools() []sdk.Tool {
 				"auto_create_context": map[string]any{"type": "boolean", "description": "Create an app-managed context if no context_id/name/provider_context_id matches. For reusable contexts, also pass context_name; omitted names are auto-generated fallback names."},
 				"persist":             map[string]any{"type": "boolean"},
 				"timeout":             map[string]any{"type": "integer", "description": "Provider session max lifetime in seconds for cloud backends. Browserbase max is provider/plan bounded."},
-				"keep_alive":          map[string]any{"type": "boolean", "description": "Browserbase only: keep the provider session available after disconnect so it can be reattached until timeout or explicit close."},
 				"proxy":               map[string]any{"type": "boolean"},
 				"proxy_country":       map[string]any{"type": "string"},
 				"viewport": map[string]any{
@@ -1063,7 +1058,6 @@ func (a *App) openBrowserSession(ctx *sdk.AppCtx, args map[string]any, resume bo
 		appContextID: rc.AppContextID,
 		contextName:  rc.ContextName,
 		persist:      rc.Persist,
-		keepAlive:    backend == "browserbase" && boolArgDefault(args, "keep_alive", false),
 		timeout:      intArg(args, "timeout"),
 		openedAt:     now,
 		lastUsed:     now,
@@ -1114,7 +1108,6 @@ type sessionInfo struct {
 	AppContextID      string `json:"app_context_id,omitempty"`
 	ContextName       string `json:"context_name,omitempty"`
 	Persist           bool   `json:"persist"`
-	KeepAlive         bool   `json:"keep_alive"`
 	TimeoutSeconds    int    `json:"timeout_seconds,omitempty"`
 	ProviderExpiresAt string `json:"provider_expires_at,omitempty"`
 	CurrentURL        string `json:"current_url"`
@@ -1143,7 +1136,6 @@ func (a *App) listSessions() []sessionInfo {
 		appContextID string
 		contextName  string
 		persist      bool
-		keepAlive    bool
 		timeout      int
 		opened       time.Time
 		used         time.Time
@@ -1151,13 +1143,13 @@ func (a *App) listSessions() []sessionInfo {
 	a.reg.mu.Lock()
 	rows := make([]frozen, 0, len(a.reg.m))
 	for id, s := range a.reg.m {
-		rows = append(rows, frozen{id: id, comp: s.comp, backend: s.backend, appContextID: s.appContextID, contextName: s.contextName, persist: s.persist, keepAlive: s.keepAlive, timeout: s.timeout, opened: s.openedAt, used: s.lastUsed})
+		rows = append(rows, frozen{id: id, comp: s.comp, backend: s.backend, appContextID: s.appContextID, contextName: s.contextName, persist: s.persist, timeout: s.timeout, opened: s.openedAt, used: s.lastUsed})
 	}
 	a.reg.mu.Unlock()
 
 	out := make([]sessionInfo, 0, len(rows))
 	for _, r := range rows {
-		out = append(out, a.sessionInfo(r.id, &session{comp: r.comp, backend: r.backend, appContextID: r.appContextID, contextName: r.contextName, persist: r.persist, keepAlive: r.keepAlive, timeout: r.timeout, openedAt: r.opened, lastUsed: r.used}))
+		out = append(out, a.sessionInfo(r.id, &session{comp: r.comp, backend: r.backend, appContextID: r.appContextID, contextName: r.contextName, persist: r.persist, timeout: r.timeout, openedAt: r.opened, lastUsed: r.used}))
 	}
 	return out
 }
@@ -1176,7 +1168,6 @@ func (a *App) sessionInfo(id string, s *session) sessionInfo {
 		AppContextID:      s.appContextID,
 		ContextName:       s.contextName,
 		Persist:           s.persist,
-		KeepAlive:         s.keepAlive,
 		TimeoutSeconds:    s.timeout,
 		ProviderExpiresAt: providerExpiresAt,
 		CurrentURL:        currentURL(s.comp),
@@ -1199,7 +1190,6 @@ func (a *App) sessionOutput(id string, s *session) map[string]any {
 		"app_context_id":      info.AppContextID,
 		"context_name":        info.ContextName,
 		"persist":             info.Persist,
-		"keep_alive":          info.KeepAlive,
 		"timeout_seconds":     info.TimeoutSeconds,
 		"provider_expires_at": info.ProviderExpiresAt,
 		"current_url":         info.CurrentURL,
@@ -1353,7 +1343,6 @@ func (a *App) sessionEventPayload(id string, s *session) map[string]any {
 		"app_context_id":      info.AppContextID,
 		"context_name":        info.ContextName,
 		"persist":             info.Persist,
-		"keep_alive":          info.KeepAlive,
 		"timeout_seconds":     info.TimeoutSeconds,
 		"provider_expires_at": info.ProviderExpiresAt,
 		"current_url":         info.CurrentURL,
@@ -1407,7 +1396,6 @@ func reapedSessionEventPayload(row reapedSession) map[string]any {
 		"app_context_id":      row.AppContextID,
 		"context_name":        row.ContextName,
 		"persist":             row.Persist,
-		"keep_alive":          row.KeepAlive,
 		"timeout_seconds":     row.TimeoutSeconds,
 		"provider_expires_at": providerExpiresAt(row.OpenedAt, row.TimeoutSeconds),
 		"current_url":         row.CurrentURL,
@@ -1634,7 +1622,7 @@ func backendConfig(ctx *sdk.AppCtx, args map[string]any, backend string, width, 
 		fields := integrationFields(ctx, "browserbase")
 		cfg.APIKey = firstNonEmpty(fields["api_key"], fields["BROWSERBASE_API_KEY"], os.Getenv("BROWSERBASE_API_KEY"))
 		cfg.ProjectID = firstNonEmpty(fields["project_id"], fields["BROWSERBASE_PROJECT_ID"], os.Getenv("BROWSERBASE_PROJECT_ID"))
-		cfg.KeepAlive = boolArgDefault(args, "keep_alive", false)
+		cfg.KeepAlive = false
 		cfg.Region = stringArg(args, "region")
 		cfg.Timeout = intArg(args, "timeout")
 		if boolArgDefault(args, "solve_captchas", false) {
