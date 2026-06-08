@@ -318,6 +318,7 @@ interface UIFilter {
 
 // Contacts list page size (matches the backend default limit).
 const CONTACTS_PAGE = 50;
+const INBOX_PAGE = 100;
 
 // Core columns the backend's buildFilterClause allow-lists.
 const CORE_FILTER_FIELDS: { key: string; label: string; type: string }[] = [
@@ -2297,6 +2298,7 @@ interface InboxItem {
   contact_id: number;
   contact_name?: string;
   contact_email?: string;
+  contact_phone?: string;
   channel: string;
   subject?: string;
   status: string;
@@ -2304,6 +2306,13 @@ interface InboxItem {
   last_activity_at: string;
   snippet?: string;
   automated?: boolean;
+}
+
+interface InboxResponse {
+  inbox?: InboxItem[];
+  count?: number;
+  total?: number;
+  offset?: number;
 }
 
 function inboxAddressOp(value: string): string {
@@ -2325,6 +2334,8 @@ function InboxTab({ api, projectId, lists, onOpenContact, onReply }: {
   onReply: (contact: Contact, activity: Activity, conversation: Conversation, afterSend: () => void | Promise<void>) => void;
 }) {
   const [items, setItems] = useState<InboxItem[] | null>(null);
+  const [total, setTotal] = useState(0);
+  const [loadingMore, setLoadingMore] = useState(false);
   const [selected, setSelected] = useState<InboxItem | null>(null);
   const [threadContact, setThreadContact] = useState<Contact | null>(null);
   const [threadConversation, setThreadConversation] = useState<Conversation | null>(null);
@@ -2339,9 +2350,14 @@ function InboxTab({ api, projectId, lists, onOpenContact, onReply }: {
   const [listFilter, setListFilter] = useState("");
   const [tagFilter, setTagFilter] = useState("");
   const [err, setErr] = useState<string | null>(null);
+  const itemsRef = useRef<InboxItem[]>([]);
+  const listLoadSeq = useRef(0);
+  const threadLoadSeq = useRef(0);
 
-  const load = useCallback(async () => {
+  const load = useCallback(async (offset = 0) => {
+    const seq = ++listLoadSeq.current;
     setErr(null);
+    if (offset > 0) setLoadingMore(true);
     try {
       const filters: { field: string; op: string; value: string | number }[] = [];
       if (channelFilter) filters.push({ field: "channel", op: "is", value: channelFilter });
@@ -2352,23 +2368,39 @@ function InboxTab({ api, projectId, lists, onOpenContact, onReply }: {
       if (listFilter) filters.push({ field: "list", op: "is", value: Number(listFilter) });
       const tag = tagFilter.trim();
       if (tag) filters.push({ field: "tag", op: "is", value: tag });
-      const params: Record<string, string> = { status: statusFilter };
+      const params: Record<string, string> = { status: statusFilter, limit: String(INBOX_PAGE) };
+      if (offset > 0) params.offset = String(offset);
       if (filters.length) params.filters = JSON.stringify(filters);
-      const r = await api<{ inbox?: InboxItem[] }>("GET", "/inbox", undefined, params);
+      const r = await api<InboxResponse>("GET", "/inbox", undefined, params);
+      if (seq !== listLoadSeq.current) return;
       const rows = r.inbox || [];
-      setItems(rows);
+      const nextRows = offset > 0 ? [...itemsRef.current, ...rows] : rows;
+      itemsRef.current = nextRows;
+      setItems(nextRows);
+      setTotal(typeof r.total === "number" ? r.total : nextRows.length);
       setSelected((cur) => {
         if (cur) {
-          const stillHere = rows.find((row) => String(row.id) === String(cur.id));
+          const stillHere = nextRows.find((row) => String(row.id) === String(cur.id));
           if (stillHere) return stillHere;
         }
-        return rows[0] || null;
+        return nextRows[0] || null;
       });
-    } catch (e) { setErr((e as Error).message); setItems([]); }
+    } catch (e) {
+      if (seq !== listLoadSeq.current) return;
+      setErr((e as Error).message);
+      if (offset === 0) {
+        itemsRef.current = [];
+        setItems([]);
+        setTotal(0);
+      }
+    } finally {
+      if (seq === listLoadSeq.current) setLoadingMore(false);
+    }
   }, [api, statusFilter, channelFilter, fromFilter, toFilter, listFilter, tagFilter]);
   useEffect(() => { load(); }, [load]);
 
   const loadThreadFor = useCallback(async (item: InboxItem) => {
+    const seq = ++threadLoadSeq.current;
     setThreadLoading(true);
     setThreadErr(null);
     try {
@@ -2376,21 +2408,24 @@ function InboxTab({ api, projectId, lists, onOpenContact, onReply }: {
         api<{ contact: Contact }>("GET", `/contacts/${item.contact_id}`),
         api<{ conversation?: Conversation; activities?: Activity[] }>("GET", `/contacts/${item.contact_id}/conversations/${item.id}`),
       ]);
+      if (seq !== threadLoadSeq.current) return;
       setThreadContact(contact.contact);
       setThreadConversation(convo.conversation || null);
       setThreadActivities(convo.activities || []);
     } catch (e) {
+      if (seq !== threadLoadSeq.current) return;
       setThreadErr((e as Error).message);
       setThreadContact(null);
       setThreadConversation(null);
       setThreadActivities([]);
     } finally {
-      setThreadLoading(false);
+      if (seq === threadLoadSeq.current) setThreadLoading(false);
     }
   }, [api]);
 
   useEffect(() => {
     if (!selected) {
+      threadLoadSeq.current++;
       setThreadContact(null);
       setThreadConversation(null);
       setThreadActivities([]);
@@ -2457,8 +2492,11 @@ function InboxTab({ api, projectId, lists, onOpenContact, onReply }: {
     <div className="h-full flex flex-col">
       <div className="p-3 border-b border-border space-y-2">
         <div className="flex items-center gap-2">
-          <h2 className="text-sm text-text font-medium flex-1">Inbox</h2>
-          <button type="button" onClick={load} className="text-xs px-2 py-1 border border-border rounded hover:bg-bg-input">Refresh</button>
+          <h2 className="text-sm text-text font-medium flex-1">
+            Inbox
+            {items && total > 0 && <span className="text-text-dim font-normal"> {items.length} of {total}</span>}
+          </h2>
+          <button type="button" onClick={() => load()} className="text-xs px-2 py-1 border border-border rounded hover:bg-bg-input">Refresh</button>
         </div>
         <div className="flex items-center gap-2 flex-wrap">
         <select
@@ -2507,7 +2545,10 @@ function InboxTab({ api, projectId, lists, onOpenContact, onReply }: {
           )}
         </div>
       </div>
-      <div className="flex-1 min-h-0 grid grid-cols-[minmax(320px,420px)_minmax(0,1fr)_280px]">
+      <div
+        className="flex-1 min-h-0 grid"
+        style={{ gridTemplateColumns: "minmax(320px, 420px) minmax(0, 1fr) 280px" }}
+      >
         <aside className="min-h-0 border-r border-border overflow-auto">
           {err && <div className="p-4 text-red text-xs">Error: {err}</div>}
           {items === null ? (
@@ -2525,7 +2566,7 @@ function InboxTab({ api, projectId, lists, onOpenContact, onReply }: {
                   <div className="flex items-center gap-2 mb-0.5">
                     <span className={`inline-block w-1.5 h-1.5 rounded-full shrink-0 ${PRIORITY_DOT[it.priority] || PRIORITY_DOT.normal}`} title={`priority: ${it.priority}`} />
                     <span className="text-sm text-text font-medium truncate flex-1">
-                      {it.contact_name || it.contact_email || `contact #${it.contact_id}`}
+                      {it.contact_name || it.contact_email || it.contact_phone || `contact #${it.contact_id}`}
                     </span>
                     <span className="text-[10px] uppercase text-text-dim">{it.channel}</span>
                     <span className={`text-[10px] px-1.5 py-0.5 rounded ${STATUS_STYLES[it.status] || STATUS_STYLES.open}`}>{it.status}</span>
@@ -2536,6 +2577,18 @@ function InboxTab({ api, projectId, lists, onOpenContact, onReply }: {
                   <div className="text-[10px] text-text-dim mt-0.5">{formatTime(it.last_activity_at)}</div>
                 </li>
               ))}
+              {items.length < total && (
+                <li>
+                  <button
+                    type="button"
+                    onClick={() => load(items.length)}
+                    disabled={loadingMore}
+                    className="w-full px-4 py-2 text-xs text-accent hover:bg-bg-input disabled:opacity-50"
+                  >
+                    {loadingMore ? "Loading..." : `Load ${Math.min(INBOX_PAGE, total - items.length)} more (${items.length} of ${total})`}
+                  </button>
+                </li>
+              )}
             </ul>
           )}
         </aside>

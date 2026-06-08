@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: crm
 display_name: CRM
-version: 0.8.15
+version: 0.8.16
 description: |
   Contacts store for Apteva agents and human teams. Multi-value channels
   (emails, phones, social), typed custom attributes with provenance,
@@ -80,7 +80,7 @@ provides:
     - name: contacts_set_conversation_status
       description: Set a conversation's workflow status (open/pending/closed/spam) and/or priority (low/normal/high/urgent). Spam marks the contact and best-effort adds a Messaging suppression for the sender or email domain.
     - name: conversations_inbox
-      description: Cross-contact triage queue — open conversations across all contacts, newest first; supports channel/from/to/list/tag filters.
+      description: Cross-contact triage queue — open conversations across all contacts, newest first; supports channel/from/to/list/tag filters and paging.
     # Inbound routing rules — recipient/sender match -> add to list / tag.
     - name: routing_rules_create
       description: Create an inbound routing rule (match recipient and/or sender -> add_to_list / add_tag).

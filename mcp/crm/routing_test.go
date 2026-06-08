@@ -4,6 +4,10 @@ package main
 // rule evaluation (recipient/sender -> add list/tag), and the inbox query.
 
 import (
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"testing"
 )
 
@@ -119,9 +123,12 @@ func TestInboxConversations(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	open, err := dbInboxConversations(db, "test-proj", "open", 50, nil)
+	open, total, err := dbInboxConversations(db, "test-proj", "open", 50, 0, nil)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if total != 1 {
+		t.Fatalf("inbox(open) total = %d, want 1", total)
 	}
 	if len(open) != 1 || open[0].ID != openID {
 		t.Fatalf("inbox(open) should return only the open convo, got %d", len(open))
@@ -130,9 +137,12 @@ func TestInboxConversations(t *testing.T) {
 		t.Errorf("inbox row should carry contact name, got %q", open[0].ContactName)
 	}
 
-	all, err := dbInboxConversations(db, "test-proj", "all", 50, nil)
+	all, total, err := dbInboxConversations(db, "test-proj", "all", 50, 0, nil)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if total != 2 {
+		t.Fatalf("inbox(all) total = %d, want 2", total)
 	}
 	if len(all) != 2 {
 		t.Fatalf("inbox(all) should return both, got %d", len(all))
@@ -212,5 +222,44 @@ func TestInboxConversations_Filters(t *testing.T) {
 		if len(rows) != 1 || rows[0].ID != tc.want {
 			t.Fatalf("%s: got %v rows, want conversation %d", tc.name, len(rows), tc.want)
 		}
+	}
+
+	globalCtx = ctx
+	rawFilters := `[{"field":"from","op":"domain","value":"acme.com"}]`
+	req := httptest.NewRequest(http.MethodGet, "/inbox?project_id=test-proj&status=all&filters="+url.QueryEscape(rawFilters), nil)
+	w := httptest.NewRecorder()
+	app.handleHTTPInbox(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("http filtered inbox status = %d body=%s", w.Code, w.Body.String())
+	}
+	var filtered struct {
+		Inbox []*inboxRow `json:"inbox"`
+		Total int         `json:"total"`
+		Count int         `json:"count"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &filtered); err != nil {
+		t.Fatal(err)
+	}
+	if filtered.Total != 1 || filtered.Count != 1 || len(filtered.Inbox) != 1 || filtered.Inbox[0].ID != acmeConv {
+		t.Fatalf("http filtered inbox = total %d count %d rows %d, want acme conversation %d", filtered.Total, filtered.Count, len(filtered.Inbox), acmeConv)
+	}
+
+	req = httptest.NewRequest(http.MethodGet, "/inbox?project_id=test-proj&status=all&limit=1&offset=1", nil)
+	w = httptest.NewRecorder()
+	app.handleHTTPInbox(w, req)
+	if w.Code != http.StatusOK {
+		t.Fatalf("http paged inbox status = %d body=%s", w.Code, w.Body.String())
+	}
+	var paged struct {
+		Inbox  []*inboxRow `json:"inbox"`
+		Total  int         `json:"total"`
+		Count  int         `json:"count"`
+		Offset int         `json:"offset"`
+	}
+	if err := json.Unmarshal(w.Body.Bytes(), &paged); err != nil {
+		t.Fatal(err)
+	}
+	if paged.Total != 3 || paged.Count != 1 || paged.Offset != 1 || len(paged.Inbox) != 1 {
+		t.Fatalf("http paged inbox = total %d count %d offset %d rows %d, want total 3 count 1 offset 1", paged.Total, paged.Count, paged.Offset, len(paged.Inbox))
 	}
 }

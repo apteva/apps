@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/mail"
+	"strconv"
 	"strings"
 	"time"
 
@@ -1772,6 +1773,7 @@ type inboxRow struct {
 	ContactID      int64  `json:"contact_id"`
 	ContactName    string `json:"contact_name,omitempty"`
 	ContactEmail   string `json:"contact_email,omitempty"`
+	ContactPhone   string `json:"contact_phone,omitempty"`
 	Channel        string `json:"channel"`
 	Subject        string `json:"subject,omitempty"`
 	Status         string `json:"status"`
@@ -1785,9 +1787,12 @@ type inboxRow struct {
 // triage queue. status="" defaults to 'open'; status="all" returns every
 // status. Each row carries the contact summary, a last-message snippet,
 // and whether the contact is tagged automated.
-func dbInboxConversations(db *sql.DB, pid, status string, limit int, filters []inboxFilter) ([]*inboxRow, error) {
+func dbInboxConversations(db *sql.DB, pid, status string, limit, offset int, filters []inboxFilter) ([]*inboxRow, int, error) {
 	if limit <= 0 || limit > 200 {
 		limit = 50
+	}
+	if offset < 0 {
+		offset = 0
 	}
 	where := "cc.project_id = ? AND c.deleted_at IS NULL"
 	args := []any{pid}
@@ -1802,15 +1807,26 @@ func dbInboxConversations(db *sql.DB, pid, status string, limit int, filters []i
 	}
 	filterWhere, filterArgs, err := buildInboxFilterWhere(filters)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	for _, clause := range filterWhere {
 		where += " AND " + clause
 	}
 	args = append(args, filterArgs...)
-	args = append(args, limit)
+	totalArgs := append([]any{}, args...)
+	var total int
+	if err := db.QueryRow(
+		`SELECT COUNT(*)
+		 FROM contact_conversations cc
+		 JOIN contacts c ON c.id = cc.contact_id AND c.project_id = cc.project_id
+		 WHERE `+where,
+		totalArgs...,
+	).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+	args = append(args, limit, offset)
 	rows, err := db.Query(
-		`SELECT cc.id, cc.contact_id, COALESCE(c.display_name,''), COALESCE(c.primary_email,''),
+		`SELECT cc.id, cc.contact_id, COALESCE(c.display_name,''), COALESCE(c.primary_email,''), COALESCE(c.primary_phone,''),
 				cc.channel, COALESCE(cc.subject,''), COALESCE(cc.status,'open'),
 				COALESCE(cc.priority,'normal'), cc.last_activity_at,
 				COALESCE((SELECT a.body FROM contact_activities a
@@ -1819,13 +1835,13 @@ func dbInboxConversations(db *sql.DB, pid, status string, limit int, filters []i
 				EXISTS (SELECT 1 FROM contact_tags t
 						WHERE t.contact_id = cc.contact_id AND t.tag_name = ?)
 		 FROM contact_conversations cc
-		 JOIN contacts c ON c.id = cc.contact_id
+		 JOIN contacts c ON c.id = cc.contact_id AND c.project_id = cc.project_id
 		 WHERE `+where+`
-		 ORDER BY cc.last_activity_at DESC LIMIT ?`,
+		 ORDER BY cc.last_activity_at DESC LIMIT ? OFFSET ?`,
 		append([]any{tagAutomated}, args...)...,
 	)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer rows.Close()
 	out := []*inboxRow{}
@@ -1833,15 +1849,15 @@ func dbInboxConversations(db *sql.DB, pid, status string, limit int, filters []i
 		r := &inboxRow{}
 		var autom int
 		if err := rows.Scan(&r.ID, &r.ContactID, &r.ContactName, &r.ContactEmail,
-			&r.Channel, &r.Subject, &r.Status, &r.Priority, &r.LastActivityAt,
+			&r.ContactPhone, &r.Channel, &r.Subject, &r.Status, &r.Priority, &r.LastActivityAt,
 			&r.Snippet, &autom); err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		r.Automated = autom != 0
 		r.Snippet = truncate(r.Snippet, 160)
 		out = append(out, r)
 	}
-	return out, rows.Err()
+	return out, total, rows.Err()
 }
 
 // toolInbox — cross-contact triage queue. Args: status? (open|all|…),
@@ -1853,15 +1869,16 @@ func (a *App) toolInbox(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	}
 	status := strArg(args, "status")
 	limit := intArg(args, "limit", 50)
+	offset := intArg(args, "offset", 0)
 	filters, err := inboxFiltersFromArgs(args)
 	if err != nil {
 		return nil, err
 	}
-	items, err := dbInboxConversations(ctx.AppDB(), pid, status, limit, filters)
+	items, total, err := dbInboxConversations(ctx.AppDB(), pid, status, limit, offset, filters)
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"inbox": items, "count": len(items)}, nil
+	return map[string]any{"inbox": items, "count": len(items), "total": total, "offset": offset}, nil
 }
 
 // ─── Routing rules ────────────────────────────────────────────────
@@ -2754,7 +2771,7 @@ func (a *App) handleHTTPSetConversationStatus(w http.ResponseWriter, r *http.Req
 	httpJSON(w, out)
 }
 
-// handleHTTPInbox — GET /inbox?status=&limit= → cross-contact triage queue.
+// handleHTTPInbox — GET /inbox?status=&limit=&offset=&filters= → cross-contact triage queue.
 func (a *App) handleHTTPInbox(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		httpErr(w, http.StatusMethodNotAllowed, "GET only")
@@ -2765,7 +2782,28 @@ func (a *App) handleHTTPInbox(w http.ResponseWriter, r *http.Request) {
 		args["status"] = s
 	}
 	if l := r.URL.Query().Get("limit"); l != "" {
-		args["limit"] = l
+		n, err := strconv.Atoi(l)
+		if err != nil {
+			httpErr(w, http.StatusBadRequest, "invalid limit")
+			return
+		}
+		args["limit"] = n
+	}
+	if o := r.URL.Query().Get("offset"); o != "" {
+		n, err := strconv.Atoi(o)
+		if err != nil {
+			httpErr(w, http.StatusBadRequest, "invalid offset")
+			return
+		}
+		args["offset"] = n
+	}
+	if raw := strings.TrimSpace(r.URL.Query().Get("filters")); raw != "" {
+		var filters []any
+		if err := json.Unmarshal([]byte(raw), &filters); err != nil {
+			httpErr(w, http.StatusBadRequest, "invalid filters JSON: "+err.Error())
+			return
+		}
+		args["filters"] = filters
 	}
 	if pid, _ := resolveProjectFromRequest(r); pid != "" {
 		args["_project_id"] = pid
