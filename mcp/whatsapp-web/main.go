@@ -41,6 +41,7 @@ description: |
   WhatsApp Business Platform API.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/whatsapp-web
+icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/whatsapp-web/icon.svg
 tags: [whatsapp, messaging, whatsapp-web]
 
 scopes: [project, global]
