@@ -24,7 +24,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: tables
 display_name: Tables
-version: 0.1.5
+version: 0.1.8
 description: Typed-row database for Apteva agents and human teams.
 author: Apteva
 scopes: [project, global]
@@ -47,6 +47,41 @@ provides:
     - { name: rows_search,      description: "Filtered list with typed predicates." }
     - { name: rows_count,       description: "Count rows matching a filter." }
     - { name: tables_query,     description: "Read-only SELECT escape hatch." }
+  publishes:
+    - name: table.created
+      description: A table was created.
+      payload:
+        id: integer
+        name: string
+        scope: string
+        columns: array
+    - name: table.altered
+      description: A table schema changed.
+      payload:
+        name: string
+        columns: array
+    - name: table.dropped
+      description: A table was dropped.
+      payload:
+        name: string
+    - name: row.inserted
+      description: Rows were inserted into a table.
+      payload:
+        table: string
+        ids: array
+        count: integer
+    - name: row.updated
+      description: Rows were updated in a table.
+      payload:
+        table: string
+        id: integer
+        count: integer
+    - name: row.deleted
+      description: Rows were deleted from a table.
+      payload:
+        table: string
+        id: integer
+        deleted: integer
 runtime:
   kind: source
   source:
