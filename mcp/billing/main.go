@@ -703,7 +703,7 @@ func (a *App) toolCustomersMerge(ctx *sdk.AppCtx, args map[string]any) (any, err
 		return nil, err
 	}
 	if ctx != nil {
-		ctx.Emit("customer.merged", map[string]any{
+		ctx.EmitWithProject("customer.merged", pid, map[string]any{
 			"winner_id": winner, "loser_id": loser,
 		})
 	}
@@ -1174,7 +1174,7 @@ func emitCustomer(ctx *sdk.AppCtx, topic string, c *Customer) {
 	if ctx == nil || c == nil {
 		return
 	}
-	ctx.Emit(topic, map[string]any{
+	ctx.EmitWithProject(topic, c.ProjectID, map[string]any{
 		"id":    c.ID,
 		"name":  c.Name,
 		"email": c.Email,
@@ -1185,7 +1185,7 @@ func emitInvoice(ctx *sdk.AppCtx, topic string, inv *Invoice) {
 	if ctx == nil || inv == nil {
 		return
 	}
-	ctx.Emit(topic, map[string]any{
+	ctx.EmitWithProject(topic, inv.ProjectID, map[string]any{
 		"id":          inv.ID,
 		"customer_id": inv.CustomerID,
 		"number":      inv.Number,
@@ -1354,7 +1354,7 @@ func (a *App) handleHTTPCustomerDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if ctx != nil {
-		ctx.Emit("customer.deleted", map[string]any{"id": id})
+		ctx.EmitWithProject("customer.deleted", pid, map[string]any{"id": id})
 	}
 	httpJSON(w, map[string]any{"deleted": true})
 }

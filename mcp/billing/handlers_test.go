@@ -7,6 +7,8 @@ package main
 // safety, and the v0.1.0 ⇄ stripe gate.
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 
@@ -24,6 +26,14 @@ func newTestCtx(t *testing.T, opts ...tk.Option) *sdk.AppCtx {
 	t.Helper()
 	full := append([]tk.Option{tk.WithProjectID("test-proj")}, opts...)
 	ctx := tk.NewAppCtx(t, "apteva.yaml", full...)
+	globalCtx = ctx
+	return ctx
+}
+
+func newGlobalTestCtx(t *testing.T, opts ...tk.Option) *sdk.AppCtx {
+	t.Helper()
+	t.Setenv("APTEVA_PROJECT_ID", "")
+	ctx := tk.NewAppCtx(t, "apteva.yaml", opts...)
 	globalCtx = ctx
 	return ctx
 }
@@ -109,6 +119,54 @@ func TestCustomerUpsertByEmail_CreatesThenDedupes(t *testing.T) {
 	}
 	if r2["customer"].(*Customer).ID != c1.ID {
 		t.Errorf("expected same id on dedupe")
+	}
+}
+
+func TestCustomerUpsertByEmail_EmitsProjectForGlobalInstall(t *testing.T) {
+	rec := tk.NewEmitRecorder()
+	ctx := newGlobalTestCtx(t, tk.WithEmitter(rec))
+	app := &App{}
+
+	if _, err := app.toolCustomersUpsertByEmail(ctx, map[string]any{
+		"_project_id": "prod-proj",
+		"email":       "global@acme.com",
+		"defaults": map[string]any{
+			"name": "Global Acme",
+		},
+	}); err != nil {
+		t.Fatalf("upsert: %v", err)
+	}
+	events := rec.EventsByTopic("customer.added")
+	if len(events) != 1 {
+		t.Fatalf("customer.added events = %d, want 1", len(events))
+	}
+	if events[0].ProjectID != "prod-proj" {
+		t.Fatalf("event project_id = %q, want prod-proj", events[0].ProjectID)
+	}
+}
+
+func TestHTTPCustomerUpsert_EmitsProjectForGlobalInstall(t *testing.T) {
+	rec := tk.NewEmitRecorder()
+	newGlobalTestCtx(t, tk.WithEmitter(rec))
+	app := &App{}
+
+	req := httptest.NewRequest(http.MethodPost, "/customers?project_id=prod-proj", strings.NewReader(`{
+		"email": "http-global@acme.com",
+		"name": "HTTP Global Acme"
+	}`))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	app.handleHTTPCustomerUpsert(rr, req)
+
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+	events := rec.EventsByTopic("customer.added")
+	if len(events) != 1 {
+		t.Fatalf("customer.added events = %d, want 1", len(events))
+	}
+	if events[0].ProjectID != "prod-proj" {
+		t.Fatalf("event project_id = %q, want prod-proj", events[0].ProjectID)
 	}
 }
 
