@@ -1,0 +1,118 @@
+schema: apteva-app/v1
+
+name: media-downloader
+display_name: Media Downloader
+version: 0.2.0
+description: |
+  Fresh v0.2 media download sidecar for Apteva. Wraps yt-dlp for public
+  and authenticated source downloads, stores completed files through the
+  storage app, and keeps sensitive YouTube cookie profiles encrypted in
+  the app database.
+
+author: Apteva
+icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/media-downloader/icon.svg
+tags: [media, video, youtube, download, yt-dlp]
+scopes: [project, global]
+min_apteva_version: "0.10.0"
+
+requires:
+  permissions:
+    - db.write.app
+    - net.egress
+    - platform.apps.call
+  apps:
+    - { name: storage, optional: false }
+  binaries:
+    - name: yt-dlp
+      executables: [yt-dlp]
+      required: true
+    - name: ffmpeg
+      executables: [ffmpeg, ffprobe]
+      required: false
+
+provides:
+  http_routes:
+    - prefix: /
+  mcp_tools:
+    - name: download_probe_url
+      description: Inspect a supported media URL with yt-dlp without downloading it.
+    - name: download_media
+      description: Start a yt-dlp download job and save the completed file into storage.
+    - name: download_status
+      description: Get current status, progress, output file id, and recent logs for one download job.
+    - name: download_list
+      description: List recent download jobs.
+    - name: download_cancel
+      description: Cancel a running download job.
+    - name: source_profile_create
+      description: Store an encrypted cookie/profile source for private or age-restricted downloads.
+    - name: source_profile_list
+      description: List source profiles without exposing their secret payloads.
+    - name: source_profile_validate
+      description: Validate a stored source profile against a URL using yt-dlp.
+    - name: source_profile_delete
+      description: Delete a source profile and prevent future use.
+
+runtime:
+  kind: source
+  source:
+    repo: github.com/apteva/apps
+    ref: main
+    entry: mcp/media-downloader
+  port: 8080
+  health_check: /health
+
+db:
+  driver: sqlite
+  path: /data/media-downloader.db
+  migrations: migrations/
+
+config_schema:
+  - name: ytdlp_path
+    type: text
+    default: ""
+    label: yt-dlp path
+    description: Optional absolute path to yt-dlp. Leave blank to resolve it from PATH or bundled binary dependencies.
+  - name: ffmpeg_path
+    type: text
+    default: ""
+    label: ffmpeg path
+    description: Optional absolute path to ffmpeg. yt-dlp uses this for format merges and audio extraction when available.
+  - name: max_download_mb
+    type: text
+    default: "512"
+    label: Max download size MB
+    description: Files larger than this are rejected before upload to storage.
+  - name: default_storage_folder
+    type: text
+    default: "/.downloads/media"
+    label: Default storage folder
+    description: Storage folder used when download_media does not pass folder.
+  - name: default_visibility
+    type: select
+    options: [private, signed, public]
+    default: private
+    label: Default storage visibility
+    description: Visibility applied to saved downloads unless overridden.
+  - name: shared_secret
+    type: secret
+    default: ""
+    label: Profile encryption secret
+    description: Secret used to encrypt cookie profiles. MEDIA_DOWNLOADER_SECRET or APTEVA_SECRET may also provide it.
+  - name: allow_plaintext_profiles
+    type: boolean
+    default: "false"
+    label: Allow plaintext profiles
+    description: Development escape hatch only. Keep false in production.
+  - name: allowed_domains
+    type: text
+    default: ""
+    label: Allowed domains
+    description: Optional comma-separated host suffix allowlist. Empty allows any public HTTP(S) host.
+  - name: blocked_domains
+    type: text
+    default: "localhost,127.0.0.1,::1"
+    label: Blocked domains
+    description: Comma-separated host suffix denylist applied before DNS/IP safety checks.
+
+upgrade_policy: auto-patch

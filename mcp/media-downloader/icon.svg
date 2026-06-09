@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-label="Media Downloader">
+  <rect width="256" height="256" rx="48" fill="#111827"/>
+  <path d="M62 76c0-15.5 12.5-28 28-28h76c15.5 0 28 12.5 28 28v54c0 15.5-12.5 28-28 28H90c-15.5 0-28-12.5-28-28V76Z" fill="#2563eb"/>
+  <path d="M112 82v44H92l36 38 36-38h-20V82h-32Z" fill="#f9fafb"/>
+  <path d="M75 184h106c7.2 0 13 5.8 13 13s-5.8 13-13 13H75c-7.2 0-13-5.8-13-13s5.8-13 13-13Z" fill="#22c55e"/>
+  <circle cx="88" cy="197" r="6" fill="#111827"/>
+  <circle cx="168" cy="197" r="6" fill="#111827"/>
+</svg>
