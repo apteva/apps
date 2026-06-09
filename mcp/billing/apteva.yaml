@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: billing
 display_name: Billing
-version: 0.8.1
+version: 0.8.3
 description: |
   Customers, invoices, and payments for Apteva agents and human teams.
   Per-invoice provider — local for internal/wire/cash records, stripe
@@ -127,6 +127,82 @@ provides:
             type: integer
       preview_props:
         preview: true
+  publishes:
+    - name: customer.added
+      description: A billing customer was created.
+      payload:
+        id: integer
+        name: string
+        email: string
+    - name: customer.updated
+      description: A billing customer's fields changed.
+      payload:
+        id: integer
+        name: string
+        email: string
+    - name: customer.merged
+      description: Two billing customers were merged and invoices/payments were reassigned to the winner.
+      payload:
+        winner_id: integer
+        loser_id: integer
+    - name: customer.deleted
+      description: A billing customer was deleted.
+      payload:
+        id: integer
+    - name: invoice.added
+      description: A billing invoice was created.
+      payload:
+        id: integer
+        customer_id: integer
+        number: string
+        status: string
+        total_cents: integer
+        currency: string
+    - name: invoice.updated
+      description: A billing invoice changed, including draft edits or line-item changes.
+      payload:
+        id: integer
+        customer_id: integer
+        number: string
+        status: string
+        total_cents: integer
+        currency: string
+    - name: invoice.finalized
+      description: A draft billing invoice was finalized and opened.
+      payload:
+        id: integer
+        customer_id: integer
+        number: string
+        status: string
+        total_cents: integer
+        currency: string
+    - name: invoice.voided
+      description: A billing invoice was voided.
+      payload:
+        id: integer
+        customer_id: integer
+        number: string
+        status: string
+        total_cents: integer
+        currency: string
+    - name: invoice.paid
+      description: A billing invoice received a payment event; listeners should inspect status for fully paid invoices.
+      payload:
+        id: integer
+        customer_id: integer
+        number: string
+        status: string
+        total_cents: integer
+        currency: string
+    - name: invoice.refunded
+      description: A Stripe refund was recorded against a billing invoice.
+      payload:
+        id: integer
+        customer_id: integer
+        number: string
+        status: string
+        total_cents: integer
+        currency: string
   skills:
     # Foundational "how this app thinks" skill loaded whenever the
     # agent touches billing. Lifecycle, picking provider at create

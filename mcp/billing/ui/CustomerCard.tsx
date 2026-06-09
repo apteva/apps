@@ -1,9 +1,26 @@
-// CustomerCard — billing's chat-attachment for a customer. Used when
-// the agent says "found Acme Corp — here's their billing snapshot"
-// or similar. Composes ui-kit primitives like InvoiceCard does.
+// CustomerCard - billing's chat-attachment for a customer. Used when
+// the agent surfaces a billing account snapshot in conversation.
 
 import { useEffect, useState } from "react";
-import { Card, CardHeader, DataList } from "@apteva/ui-kit";
+import {
+  Card,
+  CardHeader,
+  DataList,
+  StatusPill,
+  type CardVendor,
+} from "@apteva/ui-kit";
+
+const billingLogo = (
+  <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor" aria-hidden>
+    <path d="M6 2h12a1 1 0 0 1 1 1v18l-3-1.8-3 1.8-3-1.8-3 1.8-3-1.8V3a1 1 0 0 1 1-1zm3 6h6V6H9v2zm0 4h6v-2H9v2zm0 4h4v-2H9v2z" />
+  </svg>
+);
+
+const billingVendor: CardVendor = {
+  name: "Billing",
+  logo: billingLogo,
+  color: { light: "#047857", dark: "#6ee7b7" },
+};
 
 interface Customer {
   id: number;
@@ -21,9 +38,17 @@ interface Lifetime {
   outstanding_cents?: number;
 }
 
+interface OpenInvoice {
+  id: number;
+  number?: string;
+  status?: string;
+  total_cents?: number;
+  currency?: string;
+}
+
 interface ContextPayload {
   customer: Customer;
-  open_invoices?: Array<{ id: number }>;
+  open_invoices?: OpenInvoice[];
   lifetime?: Lifetime;
 }
 
@@ -38,14 +63,18 @@ const previewSample: ContextPayload = {
     id: 0,
     name: "Acme Corp",
     email: "ap@acme.example",
-    currency: "USD",
+    phone: "+34 600 000 000",
+    currency: "EUR",
   },
-  open_invoices: [{ id: 1 }, { id: 2 }],
+  open_invoices: [
+    { id: 41, number: "INV-2026-0041", status: "open", total_cents: 80000, currency: "EUR" },
+    { id: 42, number: "INV-2026-0042", status: "open", total_cents: 40000, currency: "EUR" },
+  ],
   lifetime: {
     invoice_count: 7,
     invoiced_cents: 540000,
-    paid_cents: 460000,
-    outstanding_cents: 80000,
+    paid_cents: 420000,
+    outstanding_cents: 120000,
   },
 };
 
@@ -54,6 +83,7 @@ function fmtMoney(cents: number, currency: string): string {
     return new Intl.NumberFormat(undefined, {
       style: "currency",
       currency: (currency || "USD").toUpperCase(),
+      currencyDisplay: "narrowSymbol",
     }).format(cents / 100);
   } catch {
     return `${(cents / 100).toFixed(2)} ${currency}`;
@@ -67,12 +97,6 @@ function useBillingEvents(
   useEffect(() => {
     if (!projectId) return;
 
-    // Bridge to the dashboard's shared (app, project) multiplexer
-    // when it's loaded. Without this, every Card mount opens its own
-    // EventSource — N cards in a chat thread = N connections, which
-    // blows past Chrome's per-origin HTTP/1.1 cap and freezes the
-    // dashboard. Falls back to a direct EventSource when running
-    // outside the dashboard (standalone preview, future surfaces).
     const bridge = (window as unknown as {
       __aptevaAppEvents?: {
         subscribe(
@@ -90,7 +114,9 @@ function useBillingEvents(
     es.onmessage = (e) => {
       try {
         onEvent(JSON.parse(e.data));
-      } catch {}
+      } catch {
+        /* ignore malformed frames */
+      }
     };
     return () => es.close();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -127,12 +153,14 @@ export default function CustomerCard({
           setMissing(false);
         }
       })
-      .catch(() => {});
+      .catch(() => {
+        /* keep stale data */
+      });
   };
 
   useEffect(refetch, [customer_id, projectId, preview]);
 
-  useBillingEvents(projectId, (ev) => {
+  useBillingEvents(preview ? undefined : projectId, (ev) => {
     if (
       ev.data &&
       typeof ev.data.id === "number" &&
@@ -141,7 +169,6 @@ export default function CustomerCard({
       refetch();
     }
     if (ev.topic === "invoice.paid" || ev.topic === "invoice.added") {
-      // Cheap re-fetch: the lifetime totals may have moved.
       refetch();
     }
   });
@@ -149,14 +176,22 @@ export default function CustomerCard({
   if (missing) {
     return (
       <Card>
-        <CardHeader title="Customer unavailable" subtitle={`#${customer_id}`} />
+        <CardHeader
+          vendor={billingVendor}
+          title={`Customer #${customer_id}`}
+          status={{ label: "missing", variant: "muted" }}
+        />
       </Card>
     );
   }
   if (!data) {
     return (
       <Card>
-        <CardHeader title="Loading customer…" subtitle={`#${customer_id}`} />
+        <CardHeader
+          vendor={billingVendor}
+          title={`Customer #${customer_id}`}
+          status={{ label: "loading", variant: "muted" }}
+        />
       </Card>
     );
   }
@@ -164,48 +199,86 @@ export default function CustomerCard({
   const c = data.customer;
   const currency = c.currency || "USD";
   const lt = data.lifetime || {};
-  const openCount = data.open_invoices?.length || 0;
-
-  const subtitle = (
-    <span className="flex items-center gap-2 text-text-muted">
-      <span>{c.email || "—"}</span>
-      {c.phone && <span>· {c.phone}</span>}
-    </span>
-  );
+  const openInvoices = data.open_invoices || [];
+  const openCount = openInvoices.length;
+  const outstanding = Number(lt.outstanding_cents || 0);
+  const subtitle = [c.email, c.phone].filter(Boolean).join(" - ");
 
   return (
     <Card>
       <CardHeader
+        vendor={billingVendor}
         title={c.name}
-        subtitle={subtitle}
-        right={
-          openCount > 0 ? (
-            <span className="text-[11px] px-1.5 py-0.5 rounded bg-accent/15 text-accent">
-              {openCount} open
-            </span>
-          ) : undefined
-        }
+        subtitle={subtitle || `Customer #${c.id}`}
+        status={{
+          label: openCount > 0 ? `${openCount} open` : "current",
+          variant: openCount > 0 ? "warn" : "live",
+        }}
       />
-      <DataList
-        items={[
-          {
-            label: "Invoiced",
-            value: fmtMoney(Number(lt.invoiced_cents || 0), currency),
-          },
-          {
-            label: "Paid",
-            value: fmtMoney(Number(lt.paid_cents || 0), currency),
-          },
-          {
-            label: "Outstanding",
-            value: fmtMoney(Number(lt.outstanding_cents || 0), currency),
-          },
-          {
-            label: "Invoices",
-            value: String(lt.invoice_count || 0),
-          },
-        ]}
-      />
+      <div className="px-4 py-3 border-b border-border bg-bg-input/40">
+        <div className="flex items-start justify-between gap-4">
+          <div className="min-w-0">
+            <div className="text-[11px] uppercase tracking-wide text-text-dim">
+              Outstanding
+            </div>
+            <div className="text-2xl font-semibold text-text leading-tight">
+              {fmtMoney(outstanding, currency)}
+            </div>
+          </div>
+          <div className="flex flex-col items-end gap-1.5">
+            <StatusPill variant={openCount > 0 ? "warn" : "success"}>
+              {openCount > 0 ? `${openCount} open` : "settled"}
+            </StatusPill>
+            <StatusPill variant="neutral">{currency.toUpperCase()}</StatusPill>
+          </div>
+        </div>
+        {openInvoices.length > 0 && (
+          <div className="mt-3 flex flex-wrap gap-1.5">
+            {openInvoices.slice(0, 3).map((inv) => (
+              <span
+                key={inv.id}
+                className="inline-flex items-center gap-1 rounded-md border border-border bg-bg-card px-2 py-1 text-[11px] text-text-muted"
+              >
+                <span className="font-medium text-text">
+                  {inv.number || `#${inv.id}`}
+                </span>
+                {typeof inv.total_cents === "number" && (
+                  <span>
+                    {fmtMoney(inv.total_cents, inv.currency || currency)}
+                  </span>
+                )}
+              </span>
+            ))}
+            {openInvoices.length > 3 && (
+              <span className="inline-flex items-center rounded-md border border-border bg-bg-card px-2 py-1 text-[11px] text-text-dim">
+                +{openInvoices.length - 3} more
+              </span>
+            )}
+          </div>
+        )}
+      </div>
+      <div className="px-4 py-3">
+        <DataList
+          items={[
+            {
+              label: "Invoiced",
+              value: fmtMoney(Number(lt.invoiced_cents || 0), currency),
+            },
+            {
+              label: "Paid",
+              value: fmtMoney(Number(lt.paid_cents || 0), currency),
+            },
+            {
+              label: "Invoices",
+              value: String(lt.invoice_count || 0),
+            },
+            {
+              label: "External ID",
+              value: c.external_id || "None",
+            },
+          ]}
+        />
+      </div>
     </Card>
   );
 }

@@ -1,15 +1,35 @@
-// InvoiceCard — billing's chat-attachment component. The agent
+// InvoiceCard - billing's chat-attachment component. The agent
 // emits respond(components=[{app:"billing", name:"invoice-card",
 // props:{invoice_id:N}}]) and the dashboard renders this under
-// the message bubble. Composes the same ui-kit primitives every
-// other chat card uses, so the look is consistent.
+// the message bubble.
 
 import { useEffect, useState } from "react";
-import { Card, CardHeader, DataList } from "@apteva/ui-kit";
+import {
+  Card,
+  CardHeader,
+  DataList,
+  StatusPill,
+  type CardVendor,
+  type StatusDotVariant,
+  type StatusPillVariant,
+} from "@apteva/ui-kit";
+
+const billingLogo = (
+  <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor" aria-hidden>
+    <path d="M6 2h12a1 1 0 0 1 1 1v18l-3-1.8-3 1.8-3-1.8-3 1.8-3-1.8V3a1 1 0 0 1 1-1zm3 6h6V6H9v2zm0 4h6v-2H9v2zm0 4h4v-2H9v2z" />
+  </svg>
+);
+
+const billingVendor: CardVendor = {
+  name: "Billing",
+  logo: billingLogo,
+  color: { light: "#047857", dark: "#6ee7b7" },
+};
 
 interface InvoiceMeta {
   id: number;
   customer_id: number;
+  customer_name?: string;
   number?: string;
   status: "draft" | "open" | "paid" | "void" | "uncollectible";
   provider: "local" | "stripe";
@@ -22,31 +42,38 @@ interface InvoiceMeta {
 
 interface Props {
   invoice_id: number;
-  /** Injected by the host — scopes the metadata fetch + event sub. */
   projectId?: string;
-  /** When true, render synthetic sample data — used by the
-   *  dashboard's app-detail preview before any real invoices exist. */
   preview?: boolean;
 }
 
 const previewSample: InvoiceMeta = {
   id: 0,
   customer_id: 0,
+  customer_name: "Acme Corp",
   number: "INV-2026-0042",
   status: "open",
-  provider: "local",
-  currency: "USD",
+  provider: "stripe",
+  currency: "EUR",
   total_cents: 120000,
-  amount_paid_cents: 0,
+  amount_paid_cents: 45000,
   due_date: new Date(Date.now() + 14 * 86400_000).toISOString(),
+  external_url: "https://checkout.stripe.com/example",
 };
 
-const STATUS_TONE: Record<InvoiceMeta["status"], string> = {
-  draft: "bg-border text-text-muted",
-  open: "bg-accent/15 text-accent",
-  paid: "bg-green-500/15 text-green-500",
-  void: "bg-text-dim/15 text-text-dim line-through",
-  uncollectible: "bg-yellow-500/15 text-yellow-500",
+const statusDot: Record<InvoiceMeta["status"], StatusDotVariant> = {
+  draft: "muted",
+  open: "active",
+  paid: "live",
+  void: "muted",
+  uncollectible: "warn",
+};
+
+const statusPill: Record<InvoiceMeta["status"], StatusPillVariant> = {
+  draft: "neutral",
+  open: "info",
+  paid: "success",
+  void: "neutral",
+  uncollectible: "warn",
 };
 
 function fmtMoney(cents: number, currency: string): string {
@@ -54,6 +81,7 @@ function fmtMoney(cents: number, currency: string): string {
     return new Intl.NumberFormat(undefined, {
       style: "currency",
       currency: (currency || "USD").toUpperCase(),
+      currencyDisplay: "narrowSymbol",
     }).format(cents / 100);
   } catch {
     return `${(cents / 100).toFixed(2)} ${currency}`;
@@ -69,7 +97,6 @@ function fmtDate(s?: string): string {
   }
 }
 
-// Inlined SSE subscription. See storage's FileCard for the rationale.
 function useBillingEvents(
   projectId: string | undefined,
   onEvent: (ev: { topic: string; data: { id?: number } }) => void,
@@ -77,12 +104,6 @@ function useBillingEvents(
   useEffect(() => {
     if (!projectId) return;
 
-    // Bridge to the dashboard's shared (app, project) multiplexer
-    // when it's loaded. Without this, every Card mount opens its own
-    // EventSource — N cards in a chat thread = N connections, which
-    // blows past Chrome's per-origin HTTP/1.1 cap and freezes the
-    // dashboard. Falls back to a direct EventSource when running
-    // outside the dashboard (standalone preview, future surfaces).
     const bridge = (window as unknown as {
       __aptevaAppEvents?: {
         subscribe(
@@ -136,13 +157,13 @@ export default function InvoiceCard({ invoice_id, projectId, preview }: Props) {
         }
       })
       .catch(() => {
-        /* show stale meta rather than blank — the card is for context */
+        /* show stale meta rather than blank */
       });
   };
 
   useEffect(refetch, [invoice_id, projectId, preview]);
 
-  useBillingEvents(projectId, (ev) => {
+  useBillingEvents(preview ? undefined : projectId, (ev) => {
     if (
       ev.data &&
       typeof ev.data.id === "number" &&
@@ -155,76 +176,77 @@ export default function InvoiceCard({ invoice_id, projectId, preview }: Props) {
   if (missing) {
     return (
       <Card>
-        <CardHeader title="Invoice unavailable" subtitle={`#${invoice_id}`} />
+        <CardHeader
+          vendor={billingVendor}
+          title={`Invoice #${invoice_id}`}
+          status={{ label: "missing", variant: "muted" }}
+        />
       </Card>
     );
   }
   if (!meta) {
     return (
       <Card>
-        <CardHeader title="Loading invoice…" subtitle={`#${invoice_id}`} />
+        <CardHeader
+          vendor={billingVendor}
+          title={`Invoice #${invoice_id}`}
+          status={{ label: "loading", variant: "muted" }}
+        />
       </Card>
     );
   }
 
-  const remaining = meta.total_cents - meta.amount_paid_cents;
+  const total = Number(meta.total_cents || 0);
+  const paid = Number(meta.amount_paid_cents || 0);
+  const outstanding = Math.max(0, total - paid);
   const title = meta.number || `Draft invoice #${meta.id}`;
-  const subtitle = (
-    <span className="flex items-center gap-2">
-      <span
-        className={`text-[10px] px-1.5 py-0.5 rounded ${
-          STATUS_TONE[meta.status]
-        }`}
-      >
-        {meta.status}
-      </span>
-      <span className="text-[10px] uppercase text-text-dim">{meta.provider}</span>
-      {meta.due_date && (
-        <span className="text-[11px] text-text-muted">
-          due {fmtDate(meta.due_date)}
-        </span>
-      )}
-    </span>
-  );
+  const customer = meta.customer_name || `Customer #${meta.customer_id}`;
 
   return (
     <Card>
       <CardHeader
+        vendor={billingVendor}
         title={title}
-        subtitle={subtitle}
-        right={
-          <div className="text-right">
-            <div className="text-sm text-text font-medium">
-              {fmtMoney(meta.total_cents, meta.currency)}
+        subtitle={customer}
+        status={{ label: meta.status, variant: statusDot[meta.status] }}
+        action={meta.external_url ? { label: "Open", href: meta.external_url } : undefined}
+      />
+      <div className="px-4 py-3 border-b border-border bg-bg-input/40">
+        <div className="flex items-start justify-between gap-4">
+          <div className="min-w-0">
+            <div className="text-[11px] uppercase tracking-wide text-text-dim">
+              Invoice total
             </div>
-            {meta.amount_paid_cents > 0 && meta.status !== "paid" && (
-              <div className="text-[11px] text-text-muted">
-                {fmtMoney(Math.max(0, remaining), meta.currency)} outstanding
-              </div>
-            )}
+            <div className="text-2xl font-semibold text-text leading-tight">
+              {fmtMoney(total, meta.currency)}
+            </div>
           </div>
-        }
-      />
-      <DataList
-        items={[
-          { label: "Customer", value: `#${meta.customer_id}` },
-          { label: "Currency", value: meta.currency },
-          {
-            label: "Paid",
-            value: fmtMoney(meta.amount_paid_cents, meta.currency),
-          },
-        ]}
-      />
-      {meta.external_url && (
-        <a
-          href={meta.external_url}
-          target="_blank"
-          rel="noopener noreferrer"
-          className="text-accent text-sm underline"
-        >
-          Open hosted invoice →
-        </a>
-      )}
+          <div className="flex flex-col items-end gap-1.5">
+            <StatusPill variant={statusPill[meta.status]}>{meta.status}</StatusPill>
+            <StatusPill variant={meta.provider === "stripe" ? "info" : "neutral"}>
+              {meta.provider}
+            </StatusPill>
+          </div>
+        </div>
+        {meta.status !== "paid" && meta.status !== "void" && (
+          <div className="mt-2 text-xs text-text-muted">
+            {fmtMoney(outstanding, meta.currency)} outstanding
+          </div>
+        )}
+      </div>
+      <div className="px-4 py-3">
+        <DataList
+          items={[
+            { label: "Paid", value: fmtMoney(paid, meta.currency) },
+            {
+              label: "Due",
+              value: meta.due_date ? fmtDate(meta.due_date) : "No due date",
+            },
+            { label: "Customer", value: customer },
+            { label: "Currency", value: meta.currency.toUpperCase() },
+          ]}
+        />
+      </div>
     </Card>
   );
 }
