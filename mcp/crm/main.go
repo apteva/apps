@@ -33,7 +33,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: crm
 display_name: CRM
-version: 0.8.16
+version: 0.8.17
 description: |
   Contacts store for Apteva agents and human teams. Multi-value channels,
   typed custom attributes with provenance, append-only activity log,
@@ -1060,13 +1060,37 @@ type Attribute struct {
 }
 
 type Activity struct {
-	ID             int64  `json:"id"`
-	ContactID      int64  `json:"contact_id"`
-	Kind           string `json:"kind"`
-	Body           string `json:"body"`
-	OccurredAt     string `json:"occurred_at"`
-	Source         string `json:"source,omitempty"`
-	ConversationID int64  `json:"conversation_id,omitempty"`
+	ID              int64          `json:"id"`
+	ContactID       int64          `json:"contact_id"`
+	Kind            string         `json:"kind"`
+	Body            string         `json:"body"`
+	OccurredAt      string         `json:"occurred_at"`
+	Source          string         `json:"source,omitempty"`
+	SourceDetail    string         `json:"-"`
+	ConversationID  int64          `json:"conversation_id,omitempty"`
+	MessageIDHeader string         `json:"message_id_header,omitempty"`
+	MessagingID     int64          `json:"messaging_id,omitempty"`
+	MessageStatus   *MessageStatus `json:"message_status,omitempty"`
+}
+
+type MessageStatus struct {
+	ID                int64                 `json:"id"`
+	Direction         string                `json:"direction,omitempty"`
+	Status            string                `json:"status"`
+	StatusReason      string                `json:"status_reason,omitempty"`
+	ProviderMessageID string                `json:"provider_message_id,omitempty"`
+	SentAt            string                `json:"sent_at,omitempty"`
+	ReceivedAt        string                `json:"received_at,omitempty"`
+	LastEventAt       string                `json:"last_event_at,omitempty"`
+	EventCounts       map[string]int        `json:"event_counts,omitempty"`
+	Events            []*MessageStatusEvent `json:"events,omitempty"`
+}
+
+type MessageStatusEvent struct {
+	Kind       string `json:"kind"`
+	Recipient  string `json:"recipient,omitempty"`
+	Reason     string `json:"reason,omitempty"`
+	OccurredAt string `json:"occurred_at,omitempty"`
 }
 
 // Activity kinds. Stored as TEXT (no SQL CHECK), so adding a new kind

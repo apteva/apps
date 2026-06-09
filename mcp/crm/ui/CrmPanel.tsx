@@ -117,6 +117,27 @@ interface Activity {
   source?: string;
   occurred_at: string;
   conversation_id?: number | string;
+  message_id_header?: string;
+  messaging_id?: number | string;
+  message_status?: MessageStatus;
+}
+interface MessageStatusEvent {
+  kind: string;
+  recipient?: string;
+  reason?: string;
+  occurred_at?: string;
+}
+interface MessageStatus {
+  id: number | string;
+  direction?: string;
+  status: string;
+  status_reason?: string;
+  provider_message_id?: string;
+  sent_at?: string;
+  received_at?: string;
+  last_event_at?: string;
+  event_counts?: Record<string, number>;
+  events?: MessageStatusEvent[];
 }
 interface Contact {
   id: string;
@@ -163,6 +184,18 @@ const PRIORITY_DOT: Record<string, string> = {
   normal: "bg-text-muted",
   high: "bg-yellow",
   urgent: "bg-red",
+};
+const MESSAGE_STATUS_STYLES: Record<string, string> = {
+  pending: "bg-border text-text-muted",
+  sent: "bg-accent/10 text-accent",
+  delivered: "bg-green/15 text-green",
+  opened: "bg-green/20 text-green",
+  received: "bg-accent/10 text-accent",
+  delivery_delayed: "bg-yellow/15 text-yellow",
+  bounced: "bg-red/15 text-red",
+  complained: "bg-red/15 text-red",
+  failed: "bg-red/15 text-red",
+  rejected: "bg-red/15 text-red",
 };
 interface InboundRoute {
   id: number;
@@ -1655,6 +1688,39 @@ function ConversationStatusControl({
   );
 }
 
+function messageStatusLabel(status: string): string {
+  switch (status) {
+    case "delivery_delayed": return "delayed";
+    case "opened": return "opened";
+    default: return status || "unknown";
+  }
+}
+
+function messageStatusTitle(status: MessageStatus): string {
+  const lines = [`Messaging status: ${messageStatusLabel(status.status)}`];
+  if (status.status_reason) lines.push(status.status_reason);
+  if (status.last_event_at) lines.push(`last event: ${formatTime(status.last_event_at)}`);
+  if (status.provider_message_id) lines.push(`provider: ${status.provider_message_id}`);
+  if (status.events && status.events.length > 0) {
+    const latest = status.events[status.events.length - 1];
+    const detail = [latest.kind, latest.recipient, latest.reason].filter(Boolean).join(" · ");
+    lines.push(`latest: ${detail}${latest.occurred_at ? ` · ${formatTime(latest.occurred_at)}` : ""}`);
+  }
+  return lines.join("\n");
+}
+
+function MessageStatusPill({ status }: { status: MessageStatus }) {
+  const cls = MESSAGE_STATUS_STYLES[status.status] || "bg-border text-text-muted";
+  return (
+    <span
+      className={`text-[10px] px-1.5 py-0.5 rounded ${cls}`}
+      title={messageStatusTitle(status)}
+    >
+      {messageStatusLabel(status.status)}
+    </span>
+  );
+}
+
 function ActivityRow({ activity, onReply, compact }: { activity: Activity; onReply: (a: Activity) => void; compact?: boolean }) {
   const isFailed = FAILED_KINDS.has(activity.kind);
   const isReceived = RECEIVED_KINDS.has(activity.kind);
@@ -1665,6 +1731,7 @@ function ActivityRow({ activity, onReply, compact }: { activity: Activity; onRep
         <span className={`text-[10px] px-1.5 py-0.5 rounded ${isFailed ? "bg-red/15 text-red" : "bg-accent/10 text-accent"}`}>
           {activity.kind}
         </span>
+        {activity.message_status && <MessageStatusPill status={activity.message_status} />}
         <span>{formatTime(activity.occurred_at)}{activity.source ? ` · ${activity.source}` : ""}</span>
         {isReceived && (
           <button
@@ -2449,6 +2516,22 @@ function InboxTab({ api, projectId, lists, onOpenContact, onReply }: {
     ) {
       load();
       if (selected) loadThreadFor(selected);
+    }
+  });
+
+  useAppEvents("messaging", projectId, (ev) => {
+    if (!ev.topic.startsWith("message.")) return;
+    const data = (ev.data || {}) as { id?: number | string; message_id?: number | string };
+    const rawMessageId = data.message_id ?? data.id;
+    const messageId = rawMessageId == null ? "" : String(rawMessageId);
+    const isVisibleThreadMessage = messageId
+      ? threadActivities.some((a) =>
+          String(a.messaging_id || "") === messageId ||
+          String(a.message_status?.id || "") === messageId
+        )
+      : true;
+    if (selected && isVisibleThreadMessage) {
+      loadThreadFor(selected);
     }
   });
 

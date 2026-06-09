@@ -51,11 +51,77 @@ func (p *crmRecordingPlatform) CallAppResult(appName, tool string, input map[str
 			}
 		case "suppression_check":
 			payload = map[string]any{"suppressed": false}
+		case "message_get":
+			id := int64FromAny(input["id"])
+			payload = map[string]any{
+				"found": true,
+				"message": map[string]any{
+					"id":                  id,
+					"direction":           "out",
+					"status":              "delivered",
+					"provider_message_id": "provider-123",
+					"last_event_at":       "2026-06-09T10:00:00Z",
+					"event_counts":        map[string]any{"delivered": 1},
+				},
+				"events": []map[string]any{{
+					"kind":        "delivered",
+					"recipient":   "person@example.test",
+					"occurred_at": "2026-06-09T10:00:00Z",
+				}},
+			}
 		}
 		b, _ := json.Marshal(payload)
 		_ = json.Unmarshal(b, out)
 	}
 	return nil
+}
+
+func TestGetConversation_EnrichesMessageStatusFromMessaging(t *testing.T) {
+	pf := &crmRecordingPlatform{}
+	ctx := newTestCtx(t, tk.WithPlatform(pf))
+	app := &App{}
+	c := mustCreate(t, ctx, map[string]any{
+		"primary_email": "person@example.test",
+	})
+	convoID := mkConversation(t, ctx, "test-proj", c.ID, "email")
+	if _, err := ctx.AppDB().Exec(
+		`INSERT INTO contact_activities
+			(project_id, contact_id, kind, body, occurred_at, source,
+			 source_detail, conversation_id, message_id_header)
+		 VALUES (?, ?, 'email_sent', 'hello', ?, 'messaging', ?, ?, ?)`,
+		"test-proj", c.ID, "2026-06-09T09:00:00Z",
+		`{"messaging_id":123,"provider_message_id":"provider-123"}`,
+		convoID, "provider-123",
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := app.toolGetConversation(ctx, map[string]any{
+		"conversation_id": convoID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	activities := out.(map[string]any)["activities"].([]*Activity)
+	if len(activities) != 1 {
+		t.Fatalf("activities=%d, want 1", len(activities))
+	}
+	act := activities[0]
+	if act.MessagingID != 123 {
+		t.Fatalf("messaging_id=%d, want fallback id 123 from source_detail", act.MessagingID)
+	}
+	if act.MessageStatus == nil {
+		t.Fatal("message_status missing")
+	}
+	if act.MessageStatus.Status != "delivered" || act.MessageStatus.ProviderMessageID != "provider-123" {
+		t.Fatalf("message_status=%#v", act.MessageStatus)
+	}
+	if len(act.MessageStatus.Events) != 1 || act.MessageStatus.Events[0].Kind != "delivered" {
+		t.Fatalf("events=%#v", act.MessageStatus.Events)
+	}
+	if len(pf.calls) != 1 || pf.calls[0].Tool != "message_get" || pf.calls[0].Input["id"] != int64(123) {
+		t.Fatalf("platform calls=%#v", pf.calls)
+	}
 }
 
 // mkConversation inserts a conversation directly (the normal creators

@@ -326,7 +326,8 @@ func dbContactIsSpam(db *sql.DB, pid string, contactID int64) (bool, error) {
 func dbConversationActivities(db *sql.DB, pid string, conversationID int64) ([]*Activity, error) {
 	rows, err := db.Query(
 		`SELECT id, contact_id, kind, body, occurred_at, COALESCE(source,''),
-				COALESCE(conversation_id, 0)
+				COALESCE(source_detail, ''), COALESCE(conversation_id, 0),
+				COALESCE(message_id_header, ''), COALESCE(messaging_id, 0)
 		 FROM contact_activities
 		 WHERE project_id = ? AND conversation_id = ?
 		 ORDER BY occurred_at ASC, id ASC`,
@@ -339,11 +340,109 @@ func dbConversationActivities(db *sql.DB, pid string, conversationID int64) ([]*
 	out := []*Activity{}
 	for rows.Next() {
 		a := &Activity{}
-		if err := rows.Scan(&a.ID, &a.ContactID, &a.Kind, &a.Body, &a.OccurredAt, &a.Source, &a.ConversationID); err == nil {
+		if err := rows.Scan(&a.ID, &a.ContactID, &a.Kind, &a.Body, &a.OccurredAt, &a.Source,
+			&a.SourceDetail, &a.ConversationID, &a.MessageIDHeader, &a.MessagingID); err == nil {
+			if a.MessagingID == 0 {
+				a.MessagingID = messagingIDFromSourceDetail(a.SourceDetail)
+			}
 			out = append(out, a)
 		}
 	}
 	return out, nil
+}
+
+func messagingIDFromSourceDetail(raw string) int64 {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return 0
+	}
+	var m map[string]any
+	if err := json.Unmarshal([]byte(raw), &m); err != nil {
+		return 0
+	}
+	return int64FromAny(m["messaging_id"])
+}
+
+type messagingMessageGetResponse struct {
+	Found   bool                    `json:"found"`
+	Message *messagingMessageForCRM `json:"message"`
+	Events  []*messagingEventForCRM `json:"events"`
+}
+
+type messagingMessageForCRM struct {
+	ID                int64          `json:"id"`
+	Direction         string         `json:"direction"`
+	Status            string         `json:"status"`
+	StatusReason      string         `json:"status_reason"`
+	ProviderMessageID string         `json:"provider_message_id"`
+	SentAt            string         `json:"sent_at"`
+	ReceivedAt        string         `json:"received_at"`
+	LastEventAt       string         `json:"last_event_at"`
+	EventCounts       map[string]int `json:"event_counts"`
+}
+
+type messagingEventForCRM struct {
+	Kind       string `json:"kind"`
+	Recipient  string `json:"recipient"`
+	Reason     string `json:"reason"`
+	OccurredAt string `json:"occurred_at"`
+}
+
+func enrichActivitiesWithMessagingStatus(ctx *sdk.AppCtx, pid string, activities []*Activity) {
+	if ctx == nil || messagingBound(ctx) == nil || len(activities) == 0 {
+		return
+	}
+	ids := []int64{}
+	seen := map[int64]bool{}
+	for _, a := range activities {
+		if a == nil || a.MessagingID == 0 || seen[a.MessagingID] {
+			continue
+		}
+		seen[a.MessagingID] = true
+		ids = append(ids, a.MessagingID)
+	}
+	if len(ids) == 0 {
+		return
+	}
+	statuses := map[int64]*MessageStatus{}
+	for _, id := range ids {
+		var out messagingMessageGetResponse
+		err := callMessagingTool(ctx, "message_get", map[string]any{
+			"_project_id": pid,
+			"id":          id,
+		}, &out)
+		if err != nil || !out.Found || out.Message == nil {
+			continue
+		}
+		ms := &MessageStatus{
+			ID:                out.Message.ID,
+			Direction:         out.Message.Direction,
+			Status:            out.Message.Status,
+			StatusReason:      out.Message.StatusReason,
+			ProviderMessageID: out.Message.ProviderMessageID,
+			SentAt:            out.Message.SentAt,
+			ReceivedAt:        out.Message.ReceivedAt,
+			LastEventAt:       out.Message.LastEventAt,
+			EventCounts:       out.Message.EventCounts,
+		}
+		for _, ev := range out.Events {
+			if ev == nil {
+				continue
+			}
+			ms.Events = append(ms.Events, &MessageStatusEvent{
+				Kind:       ev.Kind,
+				Recipient:  ev.Recipient,
+				Reason:     ev.Reason,
+				OccurredAt: ev.OccurredAt,
+			})
+		}
+		statuses[id] = ms
+	}
+	for _, a := range activities {
+		if a != nil && a.MessagingID != 0 {
+			a.MessageStatus = statuses[a.MessagingID]
+		}
+	}
 }
 
 // ─── Atomic activity insert with conversation linkage ──────────────
@@ -1159,6 +1258,7 @@ func (a *App) sendMessageImpl(ctx *sdk.AppCtx, args map[string]any, isTest bool)
 		},
 		ConversationID:  convoIDForLog,
 		MessageIDHeader: providerMsgID,
+		MessagingID:     msgID,
 	})
 	if err != nil {
 		return nil, err
@@ -1454,6 +1554,7 @@ func (a *App) toolGetConversation(ctx *sdk.AppCtx, args map[string]any) (any, er
 	if err != nil {
 		return nil, err
 	}
+	enrichActivitiesWithMessagingStatus(ctx, pid, activities)
 	return map[string]any{
 		"conversation": convo,
 		"activities":   activities,
