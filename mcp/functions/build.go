@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -74,12 +75,49 @@ func runBuildCmd(dir, label, bin string, args ...string) error {
 	defer cancel()
 	cmd := exec.CommandContext(ctx, resolved, args...)
 	cmd.Dir = dir
+	cmd.Env = buildCmdEnv(dir)
 	out := newCapBuffer(16 * 1024)
 	cmd.Stdout, cmd.Stderr = out, out
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("%s failed: %v\n%s", label, err, out.String())
 	}
 	return nil
+}
+
+func buildCmdEnv(dir string) []string {
+	env := os.Environ()
+	hasHome := false
+	hasXDGCache := false
+	hasGoCache := false
+	for _, kv := range env {
+		key, _, ok := strings.Cut(kv, "=")
+		if !ok {
+			key = kv
+		}
+		switch key {
+		case "HOME":
+			hasHome = true
+		case "XDG_CACHE_HOME":
+			hasXDGCache = true
+		case "GOCACHE":
+			hasGoCache = true
+		}
+	}
+
+	cacheRoot := filepath.Join(dir, ".cache")
+	goCache := filepath.Join(cacheRoot, "go-build")
+	_ = os.MkdirAll(goCache, 0o700)
+
+	if !hasHome {
+		env = append(env, "HOME="+dir)
+	}
+	if !hasXDGCache {
+		env = append(env, "XDG_CACHE_HOME="+cacheRoot)
+	}
+	if !hasGoCache {
+		env = append(env, "GOCACHE="+goCache)
+	}
+	return env
 }
 
 func runNpmInstall(dir string) error {
