@@ -278,6 +278,7 @@ export default function FleetPanel({ projectId, installId }: NativePanelProps) {
   const [showAttachDomain, setShowAttachDomain] = useState<Tenant | null>(null);
   const [showUpdate, setShowUpdate] = useState<Tenant | null>(null);
   const [showMigrate, setShowMigrate] = useState<Tenant | null>(null);
+  const [showClone, setShowClone] = useState<Tenant | null>(null);
   // Held in panel state because both fleet endpoints return sensitive
   // material the operator gets to see once and copy — same pattern as
   // the post-create credentialsReveal.
@@ -440,6 +441,7 @@ export default function FleetPanel({ projectId, installId }: NativePanelProps) {
         onOpenAttachDomain={(t) => setShowAttachDomain(t)}
         onOpenUpdate={(t) => setShowUpdate(t)}
         onOpenMigrate={(t) => setShowMigrate(t)}
+        onOpenClone={(t) => setShowClone(t)}
         onRevealAPIKey={setRevealedAPIKey}
         onResetPassword={setResetPassword}
         onAfterAction={async (after) => {
@@ -567,6 +569,29 @@ export default function FleetPanel({ projectId, installId }: NativePanelProps) {
               await refreshList({ quiet: true });
               if (selectedId) await refreshDetail(selectedId);
               setShowMigrate(null);
+              return { ok: true };
+            } catch (e) {
+              return { ok: false, error: (e as Error).message };
+            }
+          }}
+        />
+      )}
+      {showClone && (
+        <CloneTenantDialog
+          tenant={showClone}
+          onClose={() => setShowClone(null)}
+          onSubmit={async ({ slug, owner_email, port, start }) => {
+            try {
+              const r = await callTool<{ tenant_id: string }>("tenant_clone", {
+                source_tenant_id: showClone.id,
+                slug,
+                ...(owner_email ? { owner_email } : {}),
+                ...(port ? { port } : {}),
+                start,
+              });
+              await refreshList({ quiet: true });
+              if (r.tenant_id) setSelectedId(r.tenant_id);
+              setShowClone(null);
               return { ok: true };
             } catch (e) {
               return { ok: false, error: (e as Error).message };
@@ -767,6 +792,7 @@ function TenantDetail({
   onOpenAttachDomain,
   onOpenUpdate,
   onOpenMigrate,
+  onOpenClone,
   onRevealAPIKey,
   onResetPassword,
   onAfterAction,
@@ -780,6 +806,7 @@ function TenantDetail({
   onOpenAttachDomain: (t: Tenant) => void;
   onOpenUpdate: (t: Tenant) => void;
   onOpenMigrate: (t: Tenant) => void;
+  onOpenClone: (t: Tenant) => void;
   onRevealAPIKey: (r: { slug: string; base_url: string; api_key: string }) => void;
   onResetPassword: (r: { slug: string; base_url: string; admin_email: string; admin_password: string }) => void;
   onAfterAction: (after?: "deselect") => Promise<void>;
@@ -835,6 +862,7 @@ function TenantDetail({
     !isSetupPending &&
     !!meta?.host_provider_available &&
     (meta?.instances?.length ?? 0) > 0;
+  const canClone = isLocal && onParentHost;
 
   return (
     <Card className="h-full">
@@ -913,6 +941,12 @@ function TenantDetail({
           <ActionButton
             label="Move to instance…"
             onClick={() => onOpenMigrate(tenant)}
+          />
+        )}
+        {canClone && (
+          <ActionButton
+            label="Clone…"
+            onClick={() => onOpenClone(tenant)}
           />
         )}
         <span className="flex-1" />
@@ -1532,6 +1566,104 @@ function CreateTenantDialog({
               owner_email: email,
               ...(hosted ? { instance_id: runOn } : {}),
               ...(hosted && port.trim() ? { port: Number(port) } : {}),
+            });
+            setBusy(false);
+            if (!r.ok) setErr(r.error || "failed");
+          }}
+        />
+      </DialogActions>
+    </DialogFrame>
+  );
+}
+
+function CloneTenantDialog({
+  tenant,
+  onClose,
+  onSubmit,
+}: {
+  tenant: Tenant;
+  onClose: () => void;
+  onSubmit: (v: {
+    slug: string;
+    owner_email?: string;
+    port?: number;
+    start: boolean;
+  }) => Promise<{ ok: boolean; error?: string }>;
+}) {
+  const [slug, setSlug] = useState(`${tenant.slug}-copy`);
+  const [email, setEmail] = useState(tenant.owner_email);
+  const [port, setPort] = useState("");
+  const [start, setStart] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  return (
+    <DialogFrame title={`Clone ${tenant.slug}`} onClose={onClose}>
+      <p className="text-xs text-text-dim mb-3">
+        Creates a new local tenant from the current data dir. The source
+        tenant is not stopped, restarted, or changed. Domains are not
+        copied to the clone.
+      </p>
+      <Label text="New slug">
+        <input
+          type="text"
+          value={slug}
+          onChange={(e) => setSlug(e.target.value)}
+          placeholder="acme-copy"
+          className="w-full px-2 py-1.5 text-sm rounded-md border border-border bg-bg-card text-text"
+          autoFocus
+        />
+      </Label>
+      <Label text="Owner email">
+        <input
+          type="email"
+          value={email}
+          onChange={(e) => setEmail(e.target.value)}
+          placeholder={tenant.owner_email}
+          className="w-full px-2 py-1.5 text-sm rounded-md border border-border bg-bg-card text-text"
+        />
+      </Label>
+      <Label text="Port (optional)">
+        <input
+          type="number"
+          value={port}
+          onChange={(e) => setPort(e.target.value)}
+          placeholder="auto"
+          className="w-full px-2 py-1.5 text-sm rounded-md border border-border bg-bg-card text-text font-mono"
+        />
+      </Label>
+      <label className="flex items-center gap-2 text-xs text-text">
+        <input
+          type="checkbox"
+          checked={start}
+          onChange={(e) => setStart(e.target.checked)}
+          className="h-3.5 w-3.5"
+        />
+        Start clone after copy
+      </label>
+      {tenant.domain && (
+        <div className="text-xs text-text-dim font-mono">
+          Domain stays on source: {tenant.domain}
+        </div>
+      )}
+      {err && <p className="text-xs text-error mt-2">{err}</p>}
+      <DialogActions>
+        <ActionButton label="Cancel" onClick={onClose} />
+        <ActionButton
+          label={busy ? "Cloning…" : "Clone"}
+          busy={busy}
+          onClick={async () => {
+            if (!slug.trim()) {
+              setErr("slug is required");
+              return;
+            }
+            setBusy(true);
+            setErr(null);
+            const r = await onSubmit({
+              slug: slug.trim(),
+              ...(email.trim() && email.trim() !== tenant.owner_email ? { owner_email: email.trim() } : {}),
+              ...(port.trim() ? { port: Number(port) } : {}),
+              start,
             });
             setBusy(false);
             if (!r.ok) setErr(r.error || "failed");

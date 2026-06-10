@@ -17,7 +17,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: fleet
 display_name: Fleet
-version: 0.8.5
+version: 0.8.6
 description: Control plane for a local fleet of apteva tenants.
 author: Apteva
 scopes: [project, global]
@@ -63,6 +63,8 @@ provides:
   mcp_tools:
     - name: tenant_create
       description: Spawn a new local apteva tenant.
+    - name: tenant_clone
+      description: Clone a local Fleet tenant into a new tenant without stopping or modifying the source.
     - name: tenant_attach_key
       description: Finish admin-driven setup by attaching the tenant's api_key.
     - name: tenant_connect
@@ -255,6 +257,22 @@ func (a *App) MCPTools() []sdk.Tool {
 				"required": []string{"slug", "owner_email"},
 			},
 			Handler: a.toolCreate,
+		},
+		{
+			Name:        "tenant_clone",
+			Description: "Clone a Fleet-managed local tenant into a new local tenant without stopping or modifying the source. Copies the source data dir to a new slug/config dir, creates a new Fleet row, clears public domain links on the clone, and optionally starts the clone on a new port. Hosted VPS and connected-remote tenants are refused for now. Args: source_tenant_id (required), slug (required), owner_email? (defaults to source), port? (optional new local port), start? (default true).",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"source_tenant_id": map[string]any{"type": "string"},
+					"slug":             map[string]any{"type": "string"},
+					"owner_email":      map[string]any{"type": "string"},
+					"port":             map[string]any{"type": "integer"},
+					"start":            map[string]any{"type": "boolean"},
+				},
+				"required": []string{"source_tenant_id", "slug"},
+			},
+			Handler: a.toolClone,
 		},
 		{
 			Name:        "tenant_attach_key",
