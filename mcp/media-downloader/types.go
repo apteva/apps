@@ -58,6 +58,7 @@ type downloadRequest struct {
 	StorageVisibility string
 	AudioFormat       string
 	FFmpegLocation    string
+	YoutubePlayer     string
 	NoPlaylist        bool
 	Tags              []string
 }

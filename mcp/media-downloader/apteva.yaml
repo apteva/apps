@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: media-downloader
 display_name: Media Downloader
-version: 0.2.1
+version: 0.2.2
 description: |
   Fresh v0.2 media download sidecar for Apteva. Wraps yt-dlp for public
   and authenticated source downloads, stores completed files through the
@@ -83,6 +83,11 @@ config_schema:
     default: ""
     label: ffmpeg path
     description: Optional absolute path to ffmpeg. yt-dlp uses this for format merges and audio extraction when available.
+  - name: youtube_player_client
+    type: text
+    default: "android"
+    label: YouTube player client
+    description: yt-dlp YouTube client selection. android avoids current web-client SABR/403 failures for many public videos. Set empty to let yt-dlp choose.
   - name: max_download_mb
     type: text
     default: "512"

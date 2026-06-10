@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -87,6 +88,9 @@ func buildDownloadArgs(req downloadRequest, jobDir, cookieFile string) []string 
 	if strings.TrimSpace(req.FFmpegLocation) != "" {
 		args = append(args, "--ffmpeg-location", strings.TrimSpace(req.FFmpegLocation))
 	}
+	if strings.TrimSpace(req.YoutubePlayer) != "" && isYouTubeURL(req.URL) {
+		args = append(args, "--extractor-args", "youtube:player_client="+strings.TrimSpace(req.YoutubePlayer))
+	}
 	if req.Mode == "audio" {
 		format := strings.TrimSpace(req.AudioFormat)
 		if format == "" {
@@ -98,6 +102,15 @@ func buildDownloadArgs(req downloadRequest, jobDir, cookieFile string) []string 
 	}
 	args = append(args, req.URL)
 	return args
+}
+
+func isYouTubeURL(rawURL string) bool {
+	u, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil {
+		return false
+	}
+	host := strings.ToLower(strings.Trim(u.Hostname(), "."))
+	return host == "youtube.com" || strings.HasSuffix(host, ".youtube.com") || host == "youtu.be"
 }
 
 func formatSelector(req downloadRequest) string {

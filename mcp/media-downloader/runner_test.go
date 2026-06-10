@@ -14,13 +14,27 @@ func TestBuildDownloadArgsPrivateAudio(t *testing.T) {
 		AudioFormat:    "m4a",
 		NoPlaylist:     true,
 		FFmpegLocation: "/usr/bin/ffmpeg",
+		YoutubePlayer:  "android",
 	}
 	args := buildDownloadArgs(req, "/tmp/job", "/tmp/cookies.txt")
 	got := stringsJoin(args)
-	for _, want := range []string{"--cookies /tmp/cookies.txt", "--ffmpeg-location /usr/bin/ffmpeg", "-x --audio-format m4a", "--no-playlist"} {
+	for _, want := range []string{"--cookies /tmp/cookies.txt", "--ffmpeg-location /usr/bin/ffmpeg", "--extractor-args youtube:player_client=android", "-x --audio-format m4a", "--no-playlist"} {
 		if !containsArgSequence(got, want) {
 			t.Fatalf("args missing %q: %v", want, args)
 		}
+	}
+}
+
+func TestBuildDownloadArgsSkipsYouTubeArgsForOtherHosts(t *testing.T) {
+	req := downloadRequest{
+		URL:           "https://vimeo.com/123",
+		Mode:          "video",
+		Quality:       "720p",
+		YoutubePlayer: "android",
+	}
+	args := buildDownloadArgs(req, "/tmp/job", "")
+	if strings.Contains(stringsJoin(args), "youtube:player_client") {
+		t.Fatalf("non-YouTube args should not include youtube extractor args: %v", args)
 	}
 }
 

@@ -209,6 +209,7 @@ func (a *App) toolDownload(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		StorageVisibility: visibility,
 		AudioFormat:       strArg(args, "audio_format"),
 		FFmpegLocation:    a.ffmpegPath,
+		YoutubePlayer:     configString(ctx, "youtube_player_client", "android"),
 		NoPlaylist:        boolArg(args, "no_playlist", true),
 		Tags:              stringSliceArg(args, "tags"),
 	}
