@@ -2,13 +2,14 @@ schema: apteva-app/v1
 
 name: media-downloader
 display_name: Media Downloader
-version: 0.2.5
+version: 0.2.6
 description: |
   Fresh v0.2 media download sidecar for Apteva. Wraps yt-dlp for public
   and authenticated source downloads, stores completed files through the
   storage app, and keeps sensitive YouTube cookie profiles encrypted in
-  the app database. v0.2.5 streams large completed files into Storage
-  with multipart HTTP uploads instead of oversized base64 JSON callbacks.
+  the app database. v0.2.6 lets authenticated YouTube downloads use
+  yt-dlp's cookie-capable clients instead of forcing Android, while
+  keeping Android as the anonymous public-video fallback.
 
 author: Apteva
 icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/media-downloader/icon.svg
@@ -88,7 +89,7 @@ config_schema:
     type: text
     default: "android"
     label: YouTube player client
-    description: yt-dlp YouTube client selection. android avoids current web-client SABR/403 failures for many public videos. Set empty to let yt-dlp choose.
+    description: yt-dlp YouTube client selection for downloads without a source profile. android avoids current web-client SABR/403 failures for many public videos; authenticated cookie-profile downloads let yt-dlp choose a cookie-capable client.
   - name: max_download_mb
     type: text
     default: "512"

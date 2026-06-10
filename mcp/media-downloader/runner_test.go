@@ -18,10 +18,26 @@ func TestBuildDownloadArgsPrivateAudio(t *testing.T) {
 	}
 	args := buildDownloadArgs(req, "/tmp/job", "/tmp/cookies.txt")
 	got := stringsJoin(args)
-	for _, want := range []string{"--cookies /tmp/cookies.txt", "--ffmpeg-location /usr/bin/ffmpeg", "--extractor-args youtube:player_client=android", "-x --audio-format m4a", "--no-playlist"} {
+	for _, want := range []string{"--cookies /tmp/cookies.txt", "--ffmpeg-location /usr/bin/ffmpeg", "-x --audio-format m4a", "--no-playlist"} {
 		if !containsArgSequence(got, want) {
 			t.Fatalf("args missing %q: %v", want, args)
 		}
+	}
+	if strings.Contains(got, "youtube:player_client=android") {
+		t.Fatalf("authenticated YouTube downloads should let yt-dlp choose a cookie-capable client: %v", args)
+	}
+}
+
+func TestBuildDownloadArgsUsesConfiguredYouTubeClientWithoutCookies(t *testing.T) {
+	req := downloadRequest{
+		URL:           "https://www.youtube.com/watch?v=abc",
+		Mode:          "video",
+		Quality:       "best",
+		YoutubePlayer: "android",
+	}
+	args := buildDownloadArgs(req, "/tmp/job", "")
+	if !containsArgSequence(stringsJoin(args), "--extractor-args youtube:player_client=android") {
+		t.Fatalf("anonymous YouTube downloads should keep configured player client: %v", args)
 	}
 }
 

@@ -88,7 +88,7 @@ func buildDownloadArgs(req downloadRequest, jobDir, cookieFile string) []string 
 	if strings.TrimSpace(req.FFmpegLocation) != "" {
 		args = append(args, "--ffmpeg-location", strings.TrimSpace(req.FFmpegLocation))
 	}
-	if strings.TrimSpace(req.YoutubePlayer) != "" && isYouTubeURL(req.URL) {
+	if cookieFile == "" && strings.TrimSpace(req.YoutubePlayer) != "" && isYouTubeURL(req.URL) {
 		args = append(args, "--extractor-args", "youtube:player_client="+strings.TrimSpace(req.YoutubePlayer))
 	}
 	if req.Mode == "audio" {
