@@ -1,4 +1,4 @@
-// ComposerPanel v0.3.6 - timeline editor with storage and Media Studio AI assets.
+// ComposerPanel v0.3.7 - timeline editor with storage and Media Studio AI assets.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
@@ -131,6 +131,13 @@ interface StorageFile {
 type Tab = "timeline" | "json";
 type AssetPickerTarget = { kind: "clip"; clipId: string } | { kind: "audio"; clipId: string } | { kind: "soundtrack" };
 type ClipEditorTarget = { kind: "visual"; id: string } | { kind: "audio"; id: string };
+
+interface DraftExample {
+  id: string;
+  name: string;
+  description: string;
+  draft: DraftState;
+}
 
 const DEFAULT_DRAFT: DraftState = {
   name: "",
@@ -487,6 +494,116 @@ function defaultAI(kind: MediaKind, aspect: Aspect): AIAsset {
   };
 }
 
+function exampleAI(kind: MediaKind, prompt: string, aspect: Aspect, duration?: number): AIAsset {
+  const ai = defaultAI(kind, aspect);
+  ai.prompt = prompt;
+  if (duration) {
+    ai.duration = duration;
+    ai.estimated_duration_seconds = duration;
+  }
+  return withDurationEstimate(ai);
+}
+
+function composerExamples(): DraftExample[] {
+  const voiceOne = "Welcome to this quick generated audio example.";
+  const voiceTwo = "This second generated voice starts after a deliberate pause.";
+  const voiceOneLength = estimateSpeechSeconds(voiceOne);
+  const voiceTwoLength = estimateSpeechSeconds(voiceTwo);
+  return [
+    {
+      id: "ai-voice-gap",
+      name: "AI voice, silence, AI voice",
+      description: "MP3 with two TTS clips and a 5 second gap.",
+      draft: {
+        ...cloneDefault(),
+        name: "AI voice with silence gap",
+        clips: [],
+        audioClips: [
+          {
+            id: "voice-1",
+            asset: { type: "audio", src: "" },
+            start: 0,
+            length: voiceOneLength,
+            duration_mode: "fit_generated",
+            estimated_length: voiceOneLength,
+            volume: 1,
+            ai: exampleAI("audio_tts", voiceOne, "16:9", voiceOneLength),
+          },
+          {
+            id: "voice-2",
+            asset: { type: "audio", src: "" },
+            start: voiceOneLength + 5,
+            length: voiceTwoLength,
+            duration_mode: "fit_generated",
+            estimated_length: voiceTwoLength,
+            volume: 1,
+            ai: exampleAI("audio_tts", voiceTwo, "16:9", voiceTwoLength),
+          },
+        ],
+        soundtrack: null,
+        output: { format: "mp3", resolution: "hd", aspect: "16:9", fps: 30 },
+      },
+    },
+    {
+      id: "ai-image-music",
+      name: "AI image with AI music",
+      description: "Short MP4 using generated image and background music.",
+      draft: {
+        ...cloneDefault(),
+        name: "AI image with music",
+        clips: [
+          {
+            id: "hero-image",
+            asset: { type: "image", src: "" },
+            start: 0,
+            length: 8,
+            duration_mode: "fixed_trim_pad",
+            ai: exampleAI("image", "A clean cinematic product hero image on a modern studio desk", "16:9"),
+            text: { body: "Product launch", position: "bottom", font_size: 36, color: "#ffffff" },
+          },
+        ],
+        audioClips: [
+          {
+            id: "music-bed",
+            asset: { type: "audio", src: "" },
+            start: 0,
+            length: 8,
+            duration_mode: "fixed_trim_pad",
+            estimated_length: 8,
+            volume: 0.65,
+            ai: exampleAI("music", "Minimal optimistic electronic background music for a product reveal", "16:9", 8),
+          },
+        ],
+        soundtrack: null,
+        output: { format: "mp4", resolution: "hd", aspect: "16:9", fps: 30 },
+      },
+    },
+    {
+      id: "avatar-explainer",
+      name: "AI avatar explainer",
+      description: "Talking-head avatar clip that fits generated duration.",
+      draft: {
+        ...cloneDefault(),
+        name: "AI avatar explainer",
+        clips: [
+          {
+            id: "avatar-1",
+            asset: { type: "video", src: "" },
+            start: 0,
+            length: 7,
+            duration_mode: "fit_generated",
+            estimated_length: 7,
+            ai: exampleAI("avatar", "Hi, this is an example avatar video generated from a short script.", "16:9", 7),
+          },
+        ],
+        audioClips: [],
+        soundtrack: null,
+        output: { format: "mp4", resolution: "hd", aspect: "16:9", fps: 30 },
+      },
+    },
+  ];
+}
+
 function withDurationEstimate(ai: AIAsset): AIAsset {
   const estimate = estimateForAI(ai);
   if (estimate <= 0) return ai;
@@ -563,6 +680,7 @@ export default function ComposerPanel({ projectId }: NativePanelProps) {
   const [aiBusy, setAIBusy] = useState("");
 
   const selected = selectedId != null ? compositions.find((c) => c.id === selectedId) || null : null;
+  const examples = useMemo(() => composerExamples(), []);
   const clips = useMemo(() => normalizeClips(draft.clips), [draft.clips]);
   const audioClips = useMemo(() => normalizeAudioClips(draft.audioClips), [draft.audioClips]);
   const totalDuration = useMemo(() => Math.max(durationOf(clips), durationOfAudio(audioClips)), [clips, audioClips]);
@@ -877,6 +995,19 @@ export default function ComposerPanel({ projectId }: NativePanelProps) {
     await load();
   };
 
+  const loadExample = (example: DraftExample) => {
+    const next = JSON.parse(JSON.stringify(example.draft)) as DraftState;
+    const normalized = { ...next, clips: normalizeClips(next.clips), audioClips: normalizeAudioClips(next.audioClips) };
+    setSelectedId(null);
+    setDraft(normalized);
+    setSelectedClipId(normalized.clips[0]?.id || "");
+    setPlayhead(0);
+    setTab("timeline");
+    setJsonEdit(editJSONFromDraft(normalized));
+    setJsonOutput(outputJSONFromDraft(normalized));
+    setStatus(`Loaded example: ${example.name}. Save it to create a composition.`);
+  };
+
   const openPicker = (target: AssetPickerTarget) => {
     setPickerTarget(target);
     setStorageLoading(true);
@@ -1101,9 +1232,11 @@ export default function ComposerPanel({ projectId }: NativePanelProps) {
       <div className="flex-1 min-h-0 flex">
         <Sidebar
           compositions={compositions}
+          examples={examples}
           selectedId={selectedId}
           onSelect={setSelectedId}
           onNew={() => setSelectedId(null)}
+          onLoadExample={loadExample}
         />
 
         <main className="flex-1 min-w-0 flex flex-col">
@@ -1259,14 +1392,18 @@ function TabButton({ active, onClick, children }: { active: boolean; onClick: ()
 
 function Sidebar({
   compositions,
+  examples,
   selectedId,
   onSelect,
   onNew,
+  onLoadExample,
 }: {
   compositions: Composition[];
+  examples: DraftExample[];
   selectedId: number | null;
   onSelect: (id: number) => void;
   onNew: () => void;
+  onLoadExample: (example: DraftExample) => void;
 }) {
   return (
     <aside className="w-72 shrink-0 border-r border-border bg-bg-card flex flex-col">
@@ -1277,6 +1414,24 @@ function Sidebar({
         </button>
       </header>
       <div className="flex-1 overflow-auto">
+        {examples.length > 0 && (
+          <section className="border-b border-border">
+            <div className="px-3 py-2 text-[10px] uppercase tracking-wide text-text-dim">Examples</div>
+            <div className="px-2 pb-2 space-y-1">
+              {examples.map((example) => (
+                <button
+                  key={example.id}
+                  type="button"
+                  onClick={() => onLoadExample(example)}
+                  className="w-full text-left px-2 py-2 rounded border border-border hover:bg-bg-input"
+                >
+                  <span className="block text-xs text-text font-medium truncate">{example.name}</span>
+                  <span className="block text-[11px] text-text-dim leading-snug mt-0.5">{example.description}</span>
+                </button>
+              ))}
+            </div>
+          </section>
+        )}
         {compositions.length === 0 && <div className="p-3 text-text-dim text-xs">No compositions.</div>}
         {compositions.map((c) => {
           const isSel = c.id === selectedId;
