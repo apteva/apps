@@ -2,12 +2,15 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
 	"embed"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"mime"
 	"net/http"
 	"os"
@@ -324,33 +327,75 @@ func (a *App) uploadOutput(ctx *sdk.AppCtx, id string, req downloadRequest, path
 	if maxBytes > 0 && st.Size() > maxBytes {
 		return fmt.Errorf("output is %d bytes, over max_download_mb", st.Size())
 	}
-	body, err := os.ReadFile(path)
-	if err != nil {
-		return err
-	}
 	name := filepath.Base(path)
 	ctype := mime.TypeByExtension(filepath.Ext(name))
 	if ctype == "" {
 		ctype = "application/octet-stream"
 	}
 	tags := append([]string{"media-downloader", req.Mode}, req.Tags...)
-	args := map[string]any{
-		"name":           name,
-		"folder":         req.StorageFolder,
-		"content_type":   ctype,
-		"content_base64": base64.StdEncoding.EncodeToString(body),
-		"tags":           tags,
-		"visibility":     req.StorageVisibility,
-		"source":         "media-downloader",
+	var got storageUploadResult
+	if st.Size() > inlineUploadLimitBytes {
+		got, err = uploadFileMultipart(context.Background(), req.ProjectID, path, name, ctype, req.StorageFolder, req.StorageVisibility, tags)
+	} else {
+		got, err = uploadFileInline(ctx, req.ProjectID, path, name, ctype, req.StorageFolder, req.StorageVisibility, tags)
 	}
-	var got struct {
-		ID  int64  `json:"id"`
-		URL string `json:"url"`
-	}
-	if err := ctx.PlatformAPI().CallAppResult("storage", "files_upload", storageArgs(req.ProjectID, args), &got); err != nil {
-		return fmt.Errorf("storage.files_upload: %w", err)
+	if err != nil {
+		return err
 	}
 	return completeDownload(context.Background(), ctx.AppDB(), id, name, st.Size(), got.ID, got.URL)
+}
+
+const inlineUploadLimitBytes = 32 * 1024 * 1024
+
+type storageUploadResult struct {
+	ID  int64  `json:"id"`
+	URL string `json:"url"`
+}
+
+func uploadFileInline(ctx *sdk.AppCtx, projectID, path, name, contentType, folder, visibility string, tags []string) (storageUploadResult, error) {
+	body, err := os.ReadFile(path)
+	if err != nil {
+		return storageUploadResult{}, err
+	}
+	args := map[string]any{
+		"name":           name,
+		"folder":         folder,
+		"content_type":   contentType,
+		"content_base64": base64.StdEncoding.EncodeToString(body),
+		"tags":           tags,
+		"visibility":     visibility,
+		"source":         "media-downloader",
+	}
+	var got storageUploadResult
+	if err := ctx.PlatformAPI().CallAppResult("storage", "files_upload", storageArgs(projectID, args), &got); err != nil {
+		return storageUploadResult{}, fmt.Errorf("storage.files_upload: %w", err)
+	}
+	return got, nil
+}
+
+func uploadFileMultipart(ctx context.Context, projectID, path, name, contentType, folder, visibility string, tags []string) (storageUploadResult, error) {
+	client := newStorageHTTPClient()
+	if client.base == "" {
+		return storageUploadResult{}, errors.New("APTEVA_GATEWAY_URL not set; cannot stream large file to storage")
+	}
+	if client.token == "" {
+		return storageUploadResult{}, errors.New("APTEVA_APP_TOKEN not set; cannot authenticate storage upload")
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return storageUploadResult{}, err
+	}
+	defer f.Close()
+	h := sha256.New()
+	size, err := io.Copy(h, f)
+	if err != nil {
+		return storageUploadResult{}, fmt.Errorf("hash output: %w", err)
+	}
+	sha := hex.EncodeToString(h.Sum(nil))
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return storageUploadResult{}, err
+	}
+	return client.uploadMultipart(ctx, projectID, f, name, contentType, folder, visibility, tags, size, sha)
 }
 
 func (a *App) fail(ctx *sdk.AppCtx, projectID, id string, err error) {
