@@ -27,7 +27,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: composer
 display_name: Composer
-version: 0.3.5
+version: 0.3.6
 description: |
   Multi-clip video compositions with a structured timeline panel,
   universal generated-asset clip editing, first-class AI avatar clips,
@@ -46,7 +46,7 @@ requires:
   apps:
     - { name: storage, version: ">=0.9.0" }
     - { name: instances, version: ">=0.2.0", optional: true }
-    - { name: media-studio, version: ">=0.10.0", optional: true }
+    - { name: media-studio, version: ">=0.10.14", optional: true }
   integrations:
     - role: render_executor
       kind: integration

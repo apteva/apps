@@ -171,6 +171,7 @@ func (a *App) toolMediaGenerate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	if strings.TrimSpace(prompt) == "" {
 		return nil, errors.New("prompt required")
 	}
+	estimatedSeconds := estimatedDurationSeconds(kind, args)
 	pid := projectScope(ctx)
 	cacheKey := strings.TrimSpace(strArg(args, "cache_key", ""))
 	cachePolicy := strings.TrimSpace(strArg(args, "cache_policy", "reuse"))
@@ -285,10 +286,12 @@ func (a *App) toolMediaGenerate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	upstreamURLs := make([]string, 0, len(media))
 	var firstThumbB64 string
 	var totalDurationMs int64
+	var totalActualSeconds float64
 
 	for i, item := range media {
 		upstreamURLs = append(upstreamURLs, item.UpstreamURL)
 		totalDurationMs += item.DurationMs
+		totalActualSeconds += mediaActualDurationSeconds(item)
 
 		body, err := mediaBytes(item)
 		if err != nil {
@@ -317,21 +320,23 @@ func (a *App) toolMediaGenerate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	extraJSON := encodeExtras(kind, args)
 	costUSD := computeGenerationCost(ctx, bound, kind, capability, model, args)
 	genID := a.dbInsertGeneration(generationRecord{
-		ProjectID:    pid,
-		Kind:         kind,
-		Prompt:       prompt,
-		Revised:      revisedPrompt,
-		Provider:     bound.AppSlug,
-		Model:        model,
-		Size:         size,
-		DurationMs:   totalDurationMs,
-		StorageIDs:   storageIDs,
-		UpstreamURLs: upstreamURLs,
-		ThumbnailB64: firstThumbB64,
-		ExtraJSON:    extraJSON,
-		Count:        len(media),
-		CostUSD:      costUSD,
-		CacheKey:     cacheKey,
+		ProjectID:                pid,
+		Kind:                     kind,
+		Prompt:                   prompt,
+		Revised:                  revisedPrompt,
+		Provider:                 bound.AppSlug,
+		Model:                    model,
+		Size:                     size,
+		DurationMs:               totalDurationMs,
+		StorageIDs:               storageIDs,
+		UpstreamURLs:             upstreamURLs,
+		ThumbnailB64:             firstThumbB64,
+		ExtraJSON:                extraJSON,
+		Count:                    len(media),
+		CostUSD:                  costUSD,
+		CacheKey:                 cacheKey,
+		EstimatedDurationSeconds: estimatedSeconds,
+		ActualDurationSeconds:    totalActualSeconds,
 	})
 
 	// When storage is unbound, persist the full first-item bytes to
@@ -350,20 +355,22 @@ func (a *App) toolMediaGenerate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	})
 
 	return buildMCPResult(buildResultArgs{
-		Kind:          kind,
-		Prompt:        prompt,
-		Revised:       revisedPrompt,
-		Model:         model,
-		Provider:      bound.AppSlug,
-		ProjectID:     pid,
-		StorageIDs:    storageIDs,
-		UpstreamURLs:  upstreamURLs,
-		FirstThumbB64: firstThumbB64,
-		Count:         len(media),
-		MimeType:      media[0].MimeType,
-		CostUSD:       costUSD,
-		GenerationID:  genID,
-		StorageFolder: storageFolder,
+		Kind:                     kind,
+		Prompt:                   prompt,
+		Revised:                  revisedPrompt,
+		Model:                    model,
+		Provider:                 bound.AppSlug,
+		ProjectID:                pid,
+		StorageIDs:               storageIDs,
+		UpstreamURLs:             upstreamURLs,
+		FirstThumbB64:            firstThumbB64,
+		Count:                    len(media),
+		MimeType:                 media[0].MimeType,
+		CostUSD:                  costUSD,
+		GenerationID:             genID,
+		StorageFolder:            storageFolder,
+		EstimatedDurationSeconds: estimatedSeconds,
+		ActualDurationSeconds:    totalActualSeconds,
 	}), nil
 }
 
@@ -376,6 +383,8 @@ func cachedGenerationResult(row map[string]any) map[string]any {
 	model := strAny(row["model"])
 	provider := strAny(row["provider"])
 	costUSD := floatAny(row["cost_usd"])
+	estimatedSeconds := floatAny(row["estimated_duration_seconds"])
+	actualSeconds := floatAny(row["actual_duration_seconds"])
 	count := int(int64Any(row["count"]))
 	if count <= 0 {
 		count = 1
@@ -401,37 +410,39 @@ func cachedGenerationResult(row map[string]any) map[string]any {
 	return map[string]any{
 		"content": content,
 		"_meta": map[string]any{
-			"kind":           kind,
-			"prompt":         prompt,
-			"revised_prompt": strAny(row["revised_prompt"]),
-			"model":          model,
-			"provider":       provider,
-			"storage_ids":    storageIDs,
-			"storage_urls":   storageURLs,
-			"upstream_urls":  upstreamURLs,
-			"cost_usd":       costUSD,
-			"count":          count,
-			"generation_id":  int64Any(row["id"]),
-			"cache_hit":      true,
-			"cache_key":      strAny(row["cache_key"]),
+			"kind":                       kind,
+			"prompt":                     prompt,
+			"revised_prompt":             strAny(row["revised_prompt"]),
+			"model":                      model,
+			"provider":                   provider,
+			"storage_ids":                storageIDs,
+			"storage_urls":               storageURLs,
+			"upstream_urls":              upstreamURLs,
+			"cost_usd":                   costUSD,
+			"count":                      count,
+			"generation_id":              int64Any(row["id"]),
+			"cache_hit":                  true,
+			"cache_key":                  strAny(row["cache_key"]),
+			"estimated_duration_seconds": estimatedSeconds,
+			"actual_duration_seconds":    actualSeconds,
 		},
 	}
 }
 
 func queryPendingJobByCacheKey(ctx *sdk.AppCtx, pid, kind, cacheKey string) (map[string]any, bool) {
 	var (
-		id                     int64
-		queueID, model, prompt string
-		costUSD                float64
+		id                        int64
+		queueID, model, prompt    string
+		costUSD, estimatedSeconds float64
 	)
 	err := ctx.AppDB().QueryRow(
-		`SELECT id, queue_id, model, prompt, cost_usd
+		`SELECT id, queue_id, model, prompt, cost_usd, estimated_duration_seconds
 		 FROM video_jobs
 		 WHERE project_id = ? AND kind = ? AND cache_key = ?
 		   AND status IN ('queued', 'polling')
 		 ORDER BY id DESC LIMIT 1`,
 		pid, kind, cacheKey,
-	).Scan(&id, &queueID, &model, &prompt, &costUSD)
+	).Scan(&id, &queueID, &model, &prompt, &costUSD, &estimatedSeconds)
 	if err != nil {
 		return nil, false
 	}
@@ -441,15 +452,16 @@ func queryPendingJobByCacheKey(ctx *sdk.AppCtx, pid, kind, cacheKey string) (map
 			"text": kind + " generation already queued as job #" + strconvFormatInt(id) + ".",
 		}},
 		"_meta": map[string]any{
-			"kind":      kind,
-			"status":    "queued",
-			"job_id":    id,
-			"queue_id":  queueID,
-			"model":     model,
-			"prompt":    prompt,
-			"cost_usd":  costUSD,
-			"cache_hit": true,
-			"cache_key": cacheKey,
+			"kind":                       kind,
+			"status":                     "queued",
+			"job_id":                     id,
+			"queue_id":                   queueID,
+			"model":                      model,
+			"prompt":                     prompt,
+			"cost_usd":                   costUSD,
+			"cache_hit":                  true,
+			"cache_key":                  cacheKey,
+			"estimated_duration_seconds": estimatedSeconds,
 		},
 	}, true
 }

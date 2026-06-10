@@ -155,6 +155,9 @@ func TestToolMediaGenerate_ElevenLabsTTS_WithStorage(t *testing.T) {
 	if meta["kind"] != "audio_tts" || meta["provider"] != "elevenlabs" {
 		t.Fatalf("unexpected meta: %+v", meta)
 	}
+	if got := meta["estimated_duration_seconds"].(float64); got < 5 {
+		t.Fatalf("estimated duration = %v, want at least 5s", got)
+	}
 }
 
 func TestToolMediaGenerate_ElevenLabsSFX_UsesGenerateSFX(t *testing.T) {

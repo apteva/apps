@@ -188,7 +188,8 @@ func buildLocalFFmpegArgs(edit *Edit, output Output, inputs []string, soundtrack
 		// the requested clip length. Image clips are already length-pinned
 		// via -t on input.
 		if clipAssetType(c, "visual") != "image" {
-			fmt.Fprintf(&filter, ",trim=duration=%s,setpts=PTS-STARTPTS", trimFloat(clipDuration(c)))
+			d := trimFloat(clipDuration(c))
+			fmt.Fprintf(&filter, ",tpad=stop_mode=clone:stop_duration=%s,trim=duration=%s,setpts=PTS-STARTPTS", d, d)
 		}
 		// Optional fade in/out within the clip.
 		if c.Transition != nil {
@@ -212,7 +213,7 @@ func buildLocalFFmpegArgs(edit *Edit, output Output, inputs []string, soundtrack
 			// stream count matches.
 			fmt.Fprintf(&filter, "anullsrc=channel_layout=stereo:sample_rate=44100,atrim=duration=%s[a%d];", trimFloat(clipDuration(c)), i)
 		} else {
-			fmt.Fprintf(&filter, "[%d:a]atrim=duration=%s,asetpts=PTS-STARTPTS[a%d];", i, trimFloat(clipDuration(c)), i)
+			fmt.Fprintf(&filter, "[%d:a]apad,atrim=duration=%s,asetpts=PTS-STARTPTS[a%d];", i, trimFloat(clipDuration(c)), i)
 		}
 	}
 
@@ -231,7 +232,7 @@ func buildLocalFFmpegArgs(edit *Edit, output Output, inputs []string, soundtrack
 			delayMS = 0
 		}
 		fmt.Fprintf(&filter,
-			"[%d:a]atrim=duration=%s,asetpts=PTS-STARTPTS,adelay=%d|%d,volume=%g[ta%d];",
+			"[%d:a]apad,atrim=duration=%s,asetpts=PTS-STARTPTS,adelay=%d|%d,volume=%g[ta%d];",
 			inputIdx, trimFloat(clipDuration(c)), delayMS, delayMS, clipVolume(c), i,
 		)
 		mixLabels = append(mixLabels, fmt.Sprintf("[ta%d]", i))
@@ -288,7 +289,7 @@ func buildLocalAudioFFmpegArgs(edit *Edit, output Output, inputs []string, sound
 			delayMS = 0
 		}
 		fmt.Fprintf(&filter,
-			"[%d:a]atrim=duration=%s,asetpts=PTS-STARTPTS,adelay=%d|%d,volume=%g[ta%d];",
+			"[%d:a]apad,atrim=duration=%s,asetpts=PTS-STARTPTS,adelay=%d|%d,volume=%g[ta%d];",
 			i, trimFloat(clipDuration(c)), delayMS, delayMS, clipVolume(c), i,
 		)
 		mixLabels = append(mixLabels, fmt.Sprintf("[ta%d]", i))

@@ -302,7 +302,11 @@ func (a *App) toolCompositionRender(ctx *sdk.AppCtx, args map[string]any) (any, 
 		return nil, err
 	}
 	if len(mat.Pending) > 0 {
-		return nil, errors.New("AI assets are still generating: " + strings.Join(mat.Pending, "; "))
+		return map[string]any{
+			"status":  "waiting_ai",
+			"pending": mat.Pending,
+			"message": "AI assets are still generating: " + strings.Join(mat.Pending, "; "),
+		}, nil
 	}
 
 	exec, err := chooseExecutor(ctx, executorOverride)

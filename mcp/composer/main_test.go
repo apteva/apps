@@ -228,6 +228,43 @@ func TestValidateEdit_AcceptsGeneratedAudioAsset(t *testing.T) {
 	}
 }
 
+func TestValidateEdit_AcceptsAIPlaceholderWithEstimate(t *testing.T) {
+	e, err := parseEditJSON(`{"timeline":{"tracks":[
+		{"type":"audio","clips":[{"asset":{"type":"audio","src":""},"start":0,
+			"ai":{"media_kind":"audio_tts","prompt":"Hello there","estimated_duration_seconds":5}}]}
+	]}}`)
+	if err != nil {
+		t.Fatalf("AI placeholder with estimate should validate: %v", err)
+	}
+	c := e.Timeline.Tracks[0].Clips[0]
+	if c.DurationMode != "fit_generated" {
+		t.Fatalf("duration mode = %q, want fit_generated", c.DurationMode)
+	}
+	if c.Length != 5 || c.EstimatedLength != 5 {
+		t.Fatalf("length metadata = length %v estimated %v, want 5/5", c.Length, c.EstimatedLength)
+	}
+}
+
+func TestSyncClipDurationFromAI_FitGeneratedUpdatesLength(t *testing.T) {
+	c := Clip{
+		Asset:        Asset{Type: "audio", Src: "storage:1"},
+		Length:       5,
+		DurationMode: "fit_generated",
+		AI: &AIAsset{
+			MediaKind:                "audio_tts",
+			Prompt:                   "hello",
+			ActualDurationSeconds:    7.25,
+			EstimatedDurationSeconds: 5,
+		},
+	}
+	if !syncClipDurationFromAI(&c) {
+		t.Fatal("expected duration sync to report a change")
+	}
+	if c.Length != 7.25 || c.ActualLength != 7.25 || c.EstimatedLength != 5 {
+		t.Fatalf("clip duration metadata = %+v", c)
+	}
+}
+
 func TestValidateEditOutput_AudioOnlyRequiresAudioFormat(t *testing.T) {
 	e, err := parseEditJSON(`{"timeline":{"tracks":[
 		{"type":"audio","clips":[{"asset":{"src":"https://a.mp3","type":"audio"},"start":0,"length":2}]}
@@ -257,6 +294,9 @@ func TestBuildLocalAudioFFmpegArgs_MP3WithSilenceGap(t *testing.T) {
 	}
 	if !strings.Contains(cmd, "adelay=5000|5000") {
 		t.Errorf("second clip start should create a silence gap: %s", cmd)
+	}
+	if !strings.Contains(cmd, "apad,atrim=duration=2") {
+		t.Errorf("audio clip should trim/pad to its slot: %s", cmd)
 	}
 	if !strings.Contains(cmd, "libmp3lame") || !strings.Contains(cmd, "-map [aout]") {
 		t.Errorf("mp3 audio mapping/codec missing: %s", cmd)

@@ -3,20 +3,22 @@ package main
 import "fmt"
 
 type buildResultArgs struct {
-	Kind          string
-	Prompt        string
-	Revised       string
-	Model         string
-	Provider      string
-	ProjectID     string
-	StorageIDs    []int64
-	UpstreamURLs  []string
-	FirstThumbB64 string
-	Count         int
-	MimeType      string
-	CostUSD       float64
-	GenerationID  int64
-	StorageFolder string
+	Kind                     string
+	Prompt                   string
+	Revised                  string
+	Model                    string
+	Provider                 string
+	ProjectID                string
+	StorageIDs               []int64
+	UpstreamURLs             []string
+	FirstThumbB64            string
+	Count                    int
+	MimeType                 string
+	CostUSD                  float64
+	GenerationID             int64
+	StorageFolder            string
+	EstimatedDurationSeconds float64
+	ActualDurationSeconds    float64
 }
 
 // buildMCPResult shapes the MCP content blocks per kind. Image kind
@@ -51,6 +53,12 @@ func buildMCPResult(a buildResultArgs) map[string]any {
 	}
 	if a.CostUSD > 0 {
 		summary += fmt.Sprintf("\nCost: $%.4f", a.CostUSD)
+	}
+	if a.EstimatedDurationSeconds > 0 {
+		summary += fmt.Sprintf("\nEstimated duration: %.1fs", a.EstimatedDurationSeconds)
+	}
+	if a.ActualDurationSeconds > 0 {
+		summary += fmt.Sprintf("\nActual duration: %.1fs", a.ActualDurationSeconds)
 	}
 	if hasStorage {
 		summary += "\nSaved to storage:"
@@ -90,17 +98,19 @@ func buildMCPResult(a buildResultArgs) map[string]any {
 	}
 
 	meta := map[string]any{
-		"kind":           a.Kind,
-		"prompt":         a.Prompt,
-		"revised_prompt": a.Revised,
-		"model":          a.Model,
-		"provider":       a.Provider,
-		"storage_ids":    a.StorageIDs,
-		"storage_urls":   storageURLs,
-		"upstream_urls":  a.UpstreamURLs,
-		"cost_usd":       a.CostUSD,
-		"generation_id":  a.GenerationID,
-		"storage_folder": a.StorageFolder,
+		"kind":                       a.Kind,
+		"prompt":                     a.Prompt,
+		"revised_prompt":             a.Revised,
+		"model":                      a.Model,
+		"provider":                   a.Provider,
+		"storage_ids":                a.StorageIDs,
+		"storage_urls":               storageURLs,
+		"upstream_urls":              a.UpstreamURLs,
+		"cost_usd":                   a.CostUSD,
+		"generation_id":              a.GenerationID,
+		"storage_folder":             a.StorageFolder,
+		"estimated_duration_seconds": a.EstimatedDurationSeconds,
+		"actual_duration_seconds":    a.ActualDurationSeconds,
 	}
 	return map[string]any{
 		"content": content,

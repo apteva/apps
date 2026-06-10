@@ -37,15 +37,18 @@ type Track struct {
 }
 
 type Clip struct {
-	UID        string      `json:"uid,omitempty"`
-	Asset      Asset       `json:"asset"`
-	Start      float64     `json:"start"`  // seconds from composition start
-	Length     float64     `json:"length"` // seconds
-	Duration   float64     `json:"duration,omitempty"`
-	Volume     float64     `json:"volume,omitempty"`
-	Transition *Transition `json:"transition,omitempty"`
-	Text       *TextOver   `json:"text,omitempty"`
-	AI         *AIAsset    `json:"ai,omitempty"`
+	UID             string      `json:"uid,omitempty"`
+	Asset           Asset       `json:"asset"`
+	Start           float64     `json:"start"`  // seconds from composition start
+	Length          float64     `json:"length"` // seconds
+	Duration        float64     `json:"duration,omitempty"`
+	DurationMode    string      `json:"duration_mode,omitempty"` // fixed_trim_pad | fit_generated
+	EstimatedLength float64     `json:"estimated_length,omitempty"`
+	ActualLength    float64     `json:"actual_length,omitempty"`
+	Volume          float64     `json:"volume,omitempty"`
+	Transition      *Transition `json:"transition,omitempty"`
+	Text            *TextOver   `json:"text,omitempty"`
+	AI              *AIAsset    `json:"ai,omitempty"`
 }
 
 type Asset struct {
@@ -57,22 +60,24 @@ type Asset struct {
 }
 
 type AIAsset struct {
-	MediaKind    string         `json:"media_kind"` // image | video | audio_tts | audio_sfx | music | avatar
-	Prompt       string         `json:"prompt"`
-	Model        string         `json:"model,omitempty"`
-	Duration     int            `json:"duration,omitempty"`
-	Aspect       string         `json:"aspect,omitempty"`
-	Voice        string         `json:"voice,omitempty"`
-	Avatar       string         `json:"avatar,omitempty"`
-	SourceImage  string         `json:"source_image,omitempty"`
-	Options      map[string]any `json:"options,omitempty"`
-	CacheKey     string         `json:"cache_key,omitempty"`
-	CachePolicy  string         `json:"cache_policy,omitempty"`
-	Status       string         `json:"status,omitempty"` // draft | generating | ready | failed
-	GenerationID int64          `json:"generation_id,omitempty"`
-	StorageID    int64          `json:"storage_id,omitempty"`
-	JobID        int64          `json:"job_id,omitempty"`
-	Error        string         `json:"error,omitempty"`
+	MediaKind                string         `json:"media_kind"` // image | video | audio_tts | audio_sfx | music | avatar
+	Prompt                   string         `json:"prompt"`
+	Model                    string         `json:"model,omitempty"`
+	Duration                 int            `json:"duration,omitempty"`
+	Aspect                   string         `json:"aspect,omitempty"`
+	Voice                    string         `json:"voice,omitempty"`
+	Avatar                   string         `json:"avatar,omitempty"`
+	SourceImage              string         `json:"source_image,omitempty"`
+	Options                  map[string]any `json:"options,omitempty"`
+	CacheKey                 string         `json:"cache_key,omitempty"`
+	CachePolicy              string         `json:"cache_policy,omitempty"`
+	Status                   string         `json:"status,omitempty"` // draft | generating | ready | failed
+	GenerationID             int64          `json:"generation_id,omitempty"`
+	StorageID                int64          `json:"storage_id,omitempty"`
+	JobID                    int64          `json:"job_id,omitempty"`
+	EstimatedDurationSeconds float64        `json:"estimated_duration_seconds,omitempty"`
+	ActualDurationSeconds    float64        `json:"actual_duration_seconds,omitempty"`
+	Error                    string         `json:"error,omitempty"`
 }
 
 type Transition struct {
@@ -114,6 +119,7 @@ func validateEdit(e *Edit) error {
 			if c.Length <= 0 && c.Duration > 0 {
 				c.Length = c.Duration
 			}
+			normalizeClipDurationMetadata(c)
 		}
 		tt := trackKind(*track)
 		if tt == "visual" {
@@ -347,6 +353,20 @@ func clipDuration(c Clip) float64 {
 	if c.Length > 0 {
 		return c.Length
 	}
+	if c.ActualLength > 0 {
+		return c.ActualLength
+	}
+	if c.EstimatedLength > 0 {
+		return c.EstimatedLength
+	}
+	if c.AI != nil {
+		if c.AI.ActualDurationSeconds > 0 {
+			return c.AI.ActualDurationSeconds
+		}
+		if c.AI.EstimatedDurationSeconds > 0 {
+			return c.AI.EstimatedDurationSeconds
+		}
+	}
 	return c.Duration
 }
 
@@ -362,6 +382,39 @@ func normalizeGeneratedAsset(c *Clip) {
 		return
 	}
 	c.AI = generatedAssetAI(c.Asset)
+}
+
+func normalizeClipDurationMetadata(c *Clip) {
+	if c == nil {
+		return
+	}
+	if c.AI == nil {
+		return
+	}
+	if c.DurationMode == "" {
+		c.DurationMode = defaultDurationMode(c.AI.MediaKind)
+	}
+	if c.EstimatedLength <= 0 && c.AI.EstimatedDurationSeconds > 0 {
+		c.EstimatedLength = c.AI.EstimatedDurationSeconds
+	}
+	if c.ActualLength <= 0 && c.AI.ActualDurationSeconds > 0 {
+		c.ActualLength = c.AI.ActualDurationSeconds
+	}
+	if c.Length <= 0 && c.EstimatedLength > 0 {
+		c.Length = c.EstimatedLength
+	}
+	if c.Length <= 0 && c.AI.Duration > 0 {
+		c.Length = float64(c.AI.Duration)
+	}
+}
+
+func defaultDurationMode(kind string) string {
+	switch strings.ToLower(strings.TrimSpace(kind)) {
+	case "audio_tts", "avatar":
+		return "fit_generated"
+	default:
+		return "fixed_trim_pad"
+	}
 }
 
 func generatedAssetAI(a Asset) *AIAsset {

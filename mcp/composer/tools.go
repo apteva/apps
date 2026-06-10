@@ -64,7 +64,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "composition_render",
-			Description: "Submit a composition for rendering. Args: id, executor? ('local'|'remote' — overrides the auto ladder). Local executors return {status:'complete'}; SaaS executors (v0.2+) return {status:'queued', render_id}.",
+			Description: "Submit a composition for rendering. Args: id, executor? ('local'|'remote' — overrides the auto ladder). If missing AI assets queue at Media Studio, returns {status:'waiting_ai', pending}. Local executors return {status:'complete'}.",
 			InputSchema: schemaObject(map[string]any{
 				"id":       map[string]any{"type": "integer"},
 				"executor": map[string]any{"type": "string", "enum": []string{"local", "remote"}},

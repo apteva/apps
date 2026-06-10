@@ -32,24 +32,25 @@ const (
 )
 
 type pendingJob struct {
-	ID             int64
-	Kind           string
-	Role           string
-	ProjectID      string
-	QueueID        string
-	Provider       string
-	Model          string
-	Prompt         string
-	SourceImageRef string
-	CacheKey       string
-	RequestJSON    string
-	Attempts       int
+	ID                       int64
+	Kind                     string
+	Role                     string
+	ProjectID                string
+	QueueID                  string
+	Provider                 string
+	Model                    string
+	Prompt                   string
+	SourceImageRef           string
+	CacheKey                 string
+	RequestJSON              string
+	EstimatedDurationSeconds float64
+	Attempts                 int
 }
 
 func (a *App) videoPollWorker(ctx context.Context, app *sdk.AppCtx) error {
 	rows, err := app.AppDB().Query(
 		`SELECT id, kind, role, project_id, queue_id, provider, model, prompt,
-		        source_image_ref, cache_key, request_json, attempts
+		        source_image_ref, cache_key, request_json, estimated_duration_seconds, attempts
 		 FROM video_jobs
 		 WHERE status IN ('queued', 'polling')
 		 ORDER BY id ASC`,
@@ -61,7 +62,8 @@ func (a *App) videoPollWorker(ctx context.Context, app *sdk.AppCtx) error {
 	for rows.Next() {
 		var p pendingJob
 		if err := rows.Scan(&p.ID, &p.Kind, &p.Role, &p.ProjectID, &p.QueueID,
-			&p.Provider, &p.Model, &p.Prompt, &p.SourceImageRef, &p.CacheKey, &p.RequestJSON, &p.Attempts); err != nil {
+			&p.Provider, &p.Model, &p.Prompt, &p.SourceImageRef, &p.CacheKey,
+			&p.RequestJSON, &p.EstimatedDurationSeconds, &p.Attempts); err != nil {
 			continue
 		}
 		jobs = append(jobs, p)
@@ -293,6 +295,7 @@ func (a *App) finalizeJob(app *sdk.AppCtx, p pendingJob, base64Bytes, mime strin
 		ext = "mp4"
 	}
 	media := generatedMedia{B64: base64Bytes, MimeType: mime, Ext: ext}
+	actualSeconds := base64ActualDurationSeconds(base64Bytes, mime, ext)
 
 	storageDir := "videos"
 	capability := "video.generate"
@@ -335,17 +338,19 @@ func (a *App) finalizeJob(app *sdk.AppCtx, p pendingJob, base64Bytes, mime strin
 	app.AppDB().QueryRow(`SELECT cost_usd FROM video_jobs WHERE id=?`, p.ID).Scan(&costUSD)
 
 	generationID := a.dbInsertGeneration(generationRecord{
-		ProjectID:    p.ProjectID,
-		Kind:         p.Kind,
-		Prompt:       p.Prompt,
-		Provider:     p.Provider,
-		Model:        p.Model,
-		StorageIDs:   storageIDs,
-		UpstreamURLs: []string{},
-		ExtraJSON:    string(extraJSON),
-		Count:        1,
-		CostUSD:      costUSD,
-		CacheKey:     p.CacheKey,
+		ProjectID:                p.ProjectID,
+		Kind:                     p.Kind,
+		Prompt:                   p.Prompt,
+		Provider:                 p.Provider,
+		Model:                    p.Model,
+		StorageIDs:               storageIDs,
+		UpstreamURLs:             []string{},
+		ExtraJSON:                string(extraJSON),
+		Count:                    1,
+		CostUSD:                  costUSD,
+		CacheKey:                 p.CacheKey,
+		EstimatedDurationSeconds: p.EstimatedDurationSeconds,
+		ActualDurationSeconds:    actualSeconds,
 	})
 	if storage == nil && generationID > 0 {
 		if err := writeLocalCache(generationID, base64Bytes, ext); err != nil {
@@ -357,14 +362,16 @@ func (a *App) finalizeJob(app *sdk.AppCtx, p pendingJob, base64Bytes, mime strin
 	if len(storageIDs) > 0 {
 		storageID = storageIDs[0]
 	}
-	videoJobMarkComplete(app, p.ID, storageID, generationID)
+	videoJobMarkComplete(app, p.ID, storageID, generationID, actualSeconds)
 
 	app.EmitWithProject("media.generated", p.ProjectID, map[string]any{
-		"kind":           p.Kind,
-		"job_id":         p.ID,
-		"queue_id":       p.QueueID,
-		"model":          p.Model,
-		"prompt":         p.Prompt,
-		"storage_folder": storageFolder,
+		"kind":                       p.Kind,
+		"job_id":                     p.ID,
+		"queue_id":                   p.QueueID,
+		"model":                      p.Model,
+		"prompt":                     p.Prompt,
+		"storage_folder":             storageFolder,
+		"estimated_duration_seconds": p.EstimatedDurationSeconds,
+		"actual_duration_seconds":    actualSeconds,
 	})
 }

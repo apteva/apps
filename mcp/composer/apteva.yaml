@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: composer
 display_name: Composer
-version: 0.3.5
+version: 0.3.6
 description: |
   Multi-clip video composition. Stitch generated or uploaded assets
   into a single video — one visual track, timed audio tracks, optional
@@ -57,7 +57,7 @@ requires:
       optional: true
       reason: when render_host_id config > 0, renders SSH-execute on that instance (auto-installs ffmpeg on first use)
     - name: media-studio
-      version: ">=0.10.0"
+      version: ">=0.10.14"
       optional: true
       reason: panel can browse generations and materialize AI clip/soundtrack sources
   integrations:
@@ -80,7 +80,7 @@ provides:
     - { name: composition_get,    description: "Fetch one composition with its latest render row. Args: id." }
     - { name: composition_list,   description: "List compositions for this project. Args: limit? (default 50)." }
     - { name: composition_delete, description: "Delete a composition (cascades renders). Args: id." }
-    - { name: composition_render, description: "Submit a composition for rendering. Args: id, executor? ('local'|'remote' — overrides the auto ladder). Returns {render_id, status, …}." }
+    - { name: composition_render, description: "Submit a composition for rendering. Args: id, executor? ('local'|'remote' — overrides the auto ladder). Returns {status:'waiting_ai'} while async AI assets generate, otherwise render result." }
     - { name: render_status,      description: "Poll one render row. Args: render_id." }
     - { name: asset_inspect,      description: "Probe an asset via ffprobe. Args: src (storage:N | https://… | mediastudio:N). Returns {kind, duration, dimensions, codec, fps}." }
   ui_panels:

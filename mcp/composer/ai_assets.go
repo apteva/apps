@@ -44,6 +44,9 @@ func materializeAIAssets(ctx *sdk.AppCtx, edit *Edit, compositionID int64, proje
 				out.Pending = append(out.Pending, pending)
 				continue
 			}
+			if syncClipDurationFromAI(clip) {
+				out.Changed = true
+			}
 			if clip.AI.StorageID > 0 {
 				nextSrc := fmt.Sprintf("storage:%d", clip.AI.StorageID)
 				if clip.Asset.Src != nextSrc {
@@ -135,6 +138,16 @@ func materializeOneAIAsset(ctx *sdk.AppCtx, ai *AIAsset, label, projectID string
 	if len(ai.Options) > 0 {
 		args["options"] = ai.Options
 	}
+	if ai.EstimatedDurationSeconds > 0 {
+		opts, _ := args["options"].(map[string]any)
+		if opts == nil {
+			opts = map[string]any{}
+		}
+		if _, ok := opts["estimated_duration_seconds"]; !ok {
+			opts["estimated_duration_seconds"] = ai.EstimatedDurationSeconds
+		}
+		args["options"] = opts
+	}
 	var got map[string]any
 	if err := ctx.PlatformAPI().CallAppResult("media-studio", "media_generate", args, &got); err != nil {
 		ai.Status = "failed"
@@ -150,11 +163,20 @@ func materializeOneAIAsset(ctx *sdk.AppCtx, ai *AIAsset, label, projectID string
 	if status, _ := meta["status"].(string); status == "queued" || status == "polling" {
 		ai.Status = "generating"
 		ai.JobID = number(meta["job_id"])
+		if v := floatNumber(meta["estimated_duration_seconds"]); v > 0 {
+			ai.EstimatedDurationSeconds = v
+		}
 		ai.Error = ""
 		return true, fmt.Sprintf("%s queued as media-studio job #%d", label, ai.JobID), nil
 	}
 	if id := number(meta["generation_id"]); id > 0 {
 		ai.GenerationID = id
+	}
+	if v := floatNumber(meta["estimated_duration_seconds"]); v > 0 {
+		ai.EstimatedDurationSeconds = v
+	}
+	if v := floatNumber(meta["actual_duration_seconds"]); v > 0 {
+		ai.ActualDurationSeconds = v
 	}
 	if ids := numberSlice(meta["storage_ids"]); len(ids) > 0 {
 		ai.StorageID = ids[0]
@@ -165,6 +187,34 @@ func materializeOneAIAsset(ctx *sdk.AppCtx, ai *AIAsset, label, projectID string
 	ai.Status = "failed"
 	ai.Error = "Media Studio returned no storage id; bind Storage to Media Studio for Composer AI assets"
 	return true, "", errors.New(label + ": Media Studio returned no storage id")
+}
+
+func syncClipDurationFromAI(c *Clip) bool {
+	if c == nil || c.AI == nil {
+		return false
+	}
+	changed := false
+	if c.EstimatedLength <= 0 && c.AI.EstimatedDurationSeconds > 0 {
+		c.EstimatedLength = c.AI.EstimatedDurationSeconds
+		changed = true
+	}
+	if c.ActualLength <= 0 && c.AI.ActualDurationSeconds > 0 {
+		c.ActualLength = c.AI.ActualDurationSeconds
+		changed = true
+	}
+	if c.DurationMode == "" {
+		c.DurationMode = defaultDurationMode(c.AI.MediaKind)
+		changed = true
+	}
+	if c.DurationMode == "fit_generated" && c.AI.ActualDurationSeconds > 0 && c.Length != c.AI.ActualDurationSeconds {
+		c.Length = c.AI.ActualDurationSeconds
+		changed = true
+	}
+	if c.Length <= 0 && c.EstimatedLength > 0 {
+		c.Length = c.EstimatedLength
+		changed = true
+	}
+	return changed
 }
 
 func aiCacheKey(ai *AIAsset) string {
@@ -211,6 +261,23 @@ func number(v any) int64 {
 	case json.Number:
 		i, _ := n.Int64()
 		return i
+	}
+	return 0
+}
+
+func floatNumber(v any) float64 {
+	switch n := v.(type) {
+	case float64:
+		return n
+	case float32:
+		return float64(n)
+	case int:
+		return float64(n)
+	case int64:
+		return float64(n)
+	case json.Number:
+		f, _ := n.Float64()
+		return f
 	}
 	return 0
 }

@@ -1,4 +1,4 @@
-// ComposerPanel v0.3.5 - timeline editor with storage and Media Studio AI assets.
+// ComposerPanel v0.3.6 - timeline editor with storage and Media Studio AI assets.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
@@ -50,6 +50,7 @@ type AssetType = "video" | "image";
 type MediaKind = "image" | "video" | "audio_tts" | "audio_sfx" | "music" | "avatar";
 type OutputFormat = "mp4" | "mp3" | "wav" | "m4a" | "aac";
 type Aspect = "16:9" | "9:16" | "1:1" | "4:3";
+type DurationMode = "fixed_trim_pad" | "fit_generated";
 
 interface AIAsset {
   media_kind: MediaKind;
@@ -67,6 +68,8 @@ interface AIAsset {
   generation_id?: number;
   storage_id?: number;
   job_id?: number;
+  estimated_duration_seconds?: number;
+  actual_duration_seconds?: number;
   error?: string;
 }
 
@@ -75,6 +78,9 @@ interface ClipDraft {
   asset: { type: AssetType; src: string };
   start: number;
   length: number;
+  duration_mode?: DurationMode;
+  estimated_length?: number;
+  actual_length?: number;
   transition?: { in?: string; out?: string };
   text?: { body: string; position?: "top" | "center" | "bottom"; font_size?: number; color?: string };
   ai?: AIAsset;
@@ -85,6 +91,9 @@ interface AudioClipDraft {
   asset: { type: "audio"; src: string };
   start: number;
   length: number;
+  duration_mode?: DurationMode;
+  estimated_length?: number;
+  actual_length?: number;
   volume: number;
   ai?: AIAsset;
 }
@@ -156,6 +165,41 @@ function formatTime(seconds: number): string {
   return `${m}:${String(s).padStart(2, "0")}`;
 }
 
+function estimateSpeechSeconds(script: string): number {
+  const words = script.trim().split(/\s+/).filter(Boolean).length;
+  if (!words) return 0;
+  return Math.max(5, Number((words / 2.5).toFixed(1)));
+}
+
+function defaultDurationMode(kind: MediaKind | undefined): DurationMode {
+  return kind === "audio_tts" || kind === "avatar" ? "fit_generated" : "fixed_trim_pad";
+}
+
+function estimateForAI(ai: AIAsset | undefined): number {
+  if (!ai) return 0;
+  if (ai.actual_duration_seconds && ai.actual_duration_seconds > 0) return ai.actual_duration_seconds;
+  if (ai.estimated_duration_seconds && ai.estimated_duration_seconds > 0) return ai.estimated_duration_seconds;
+  if (ai.media_kind === "audio_tts" || ai.media_kind === "avatar") return estimateSpeechSeconds(ai.prompt);
+  return ai.duration || 0;
+}
+
+function applyAIDuration<T extends { length: number; duration_mode?: DurationMode; estimated_length?: number; actual_length?: number; ai?: AIAsset }>(clip: T): T {
+  if (!clip.ai) return clip;
+  const estimated = estimateForAI(clip.ai);
+  const actual = clip.ai.actual_duration_seconds || clip.actual_length || 0;
+  const mode = clip.duration_mode || defaultDurationMode(clip.ai.media_kind);
+  const length = mode === "fit_generated"
+    ? Math.max(0.1, actual || estimated || clip.length)
+    : Math.max(0.1, clip.length || estimated || clip.ai.duration || 1);
+  return {
+    ...clip,
+    duration_mode: mode,
+    estimated_length: clip.estimated_length || estimated || undefined,
+    actual_length: clip.actual_length || actual || undefined,
+    length,
+  };
+}
+
 function isAudioFormat(format: string | undefined): boolean {
   return ["mp3", "wav", "m4a", "aac"].includes(String(format || "").toLowerCase());
 }
@@ -175,33 +219,37 @@ function durationOfDraft(draft: DraftState): number {
 function normalizeClips(clips: ClipDraft[]): ClipDraft[] {
   let t = 0;
   return clips.map((clip, i) => {
-    const length = Math.max(0.1, Number(clip.length) || 1);
+    const conformed = applyAIDuration(clip);
+    const length = Math.max(0.1, Number(conformed.length) || 1);
     const next = {
-      ...clip,
-        id: clip.id || `clip-${i + 1}-${Date.now()}`,
+      ...conformed,
+      id: clip.id || `clip-${i + 1}-${Date.now()}`,
       start: Number(t.toFixed(3)),
       length,
-        asset: {
-          type: clip.asset?.type === "image" ? "image" : "video",
-          src: clip.asset?.src || "",
-        },
-        ai: clip.ai,
-      };
+      asset: {
+        type: clip.asset?.type === "image" ? "image" : "video",
+        src: clip.asset?.src || "",
+      },
+      ai: clip.ai,
+    };
     t += length;
     return next;
   });
 }
 
 function normalizeAudioClips(clips: AudioClipDraft[]): AudioClipDraft[] {
-  return clips.map((clip, i) => ({
-    ...clip,
-    id: clip.id || `audio-${i + 1}-${Date.now()}`,
-    start: Math.max(0, Number(clip.start) || 0),
-    length: Math.max(0.1, Number(clip.length) || 1),
-    volume: Math.max(0, Math.min(1, Number(clip.volume) || 1)),
-    asset: { type: "audio", src: clip.asset?.src || "" },
-    ai: clip.ai,
-  }));
+  return clips.map((clip, i) => {
+    const conformed = applyAIDuration(clip);
+    return {
+      ...conformed,
+      id: clip.id || `audio-${i + 1}-${Date.now()}`,
+      start: Math.max(0, Number(clip.start) || 0),
+      length: Math.max(0.1, Number(conformed.length) || 1),
+      volume: Math.max(0, Math.min(1, Number(clip.volume) || 1)),
+      asset: { type: "audio", src: clip.asset?.src || "" },
+      ai: clip.ai,
+    };
+  });
 }
 
 function prettyJSON(raw: string, fallback: string): string {
@@ -250,6 +298,9 @@ function parseComposition(c: Composition | null): DraftState {
         },
         start: Number(clip.start) || 0,
         length: Number(clip.length) || 1,
+        duration_mode: clip.duration_mode || defaultDurationMode(clip.ai?.media_kind),
+        estimated_length: Number(clip.estimated_length || clip.ai?.estimated_duration_seconds || 0) || undefined,
+        actual_length: Number(clip.actual_length || clip.ai?.actual_duration_seconds || 0) || undefined,
         transition: {
           in: clip.transition?.in || "none",
           out: clip.transition?.out || "none",
@@ -270,6 +321,9 @@ function parseComposition(c: Composition | null): DraftState {
         asset: { type: "audio", src: String(clip.asset?.src || "") },
         start: Number(clip.start) || 0,
         length: Number(clip.length ?? clip.duration) || 1,
+        duration_mode: clip.duration_mode || defaultDurationMode(clip.ai?.media_kind),
+        estimated_length: Number(clip.estimated_length || clip.ai?.estimated_duration_seconds || 0) || undefined,
+        actual_length: Number(clip.actual_length || clip.ai?.actual_duration_seconds || 0) || undefined,
         volume: Number(clip.volume) || 1,
         ai: clip.ai,
       })));
@@ -309,6 +363,9 @@ function draftToBody(draft: DraftState): Record<string, unknown> {
       length: clip.length,
     };
     if (clip.ai) out.ai = clip.ai;
+    if (clip.duration_mode) out.duration_mode = clip.duration_mode;
+    if (clip.estimated_length) out.estimated_length = clip.estimated_length;
+    if (clip.actual_length) out.actual_length = clip.actual_length;
     if ((clip.transition?.in && clip.transition.in !== "none") || (clip.transition?.out && clip.transition.out !== "none")) {
       out.transition = {
         in: clip.transition?.in || "none",
@@ -334,6 +391,9 @@ function draftToBody(draft: DraftState): Record<string, unknown> {
       volume: Math.max(0, Math.min(1, Number(clip.volume) || 1)),
     };
     if (clip.ai) out.ai = clip.ai;
+    if (clip.duration_mode) out.duration_mode = clip.duration_mode;
+    if (clip.estimated_length) out.estimated_length = clip.estimated_length;
+    if (clip.actual_length) out.actual_length = clip.actual_length;
     return out;
   });
   const tracks: any[] = [];
@@ -427,6 +487,12 @@ function defaultAI(kind: MediaKind, aspect: Aspect): AIAsset {
   };
 }
 
+function withDurationEstimate(ai: AIAsset): AIAsset {
+  const estimate = estimateForAI(ai);
+  if (estimate <= 0) return ai;
+  return { ...ai, estimated_duration_seconds: ai.estimated_duration_seconds || estimate };
+}
+
 function cacheKeyForAI(ai: AIAsset): string {
   const stable = JSON.stringify({
     media_kind: ai.media_kind,
@@ -456,6 +522,21 @@ function storageIDFromMeta(meta: any): number {
 function generationIDFromMeta(meta: any): number {
   const n = Number(meta?.generation_id || 0);
   return Number.isFinite(n) ? n : 0;
+}
+
+function aiFromMeta(ai: AIAsset, meta: any, cacheKey: string): AIAsset {
+  const estimated = Number(meta?.estimated_duration_seconds || ai.estimated_duration_seconds || 0) || undefined;
+  const actual = Number(meta?.actual_duration_seconds || ai.actual_duration_seconds || 0) || undefined;
+  return {
+    ...ai,
+    cache_key: cacheKey,
+    status: "ready",
+    storage_id: storageIDFromMeta(meta),
+    generation_id: generationIDFromMeta(meta),
+    estimated_duration_seconds: estimated,
+    actual_duration_seconds: actual,
+    error: "",
+  };
 }
 
 export default function ComposerPanel({ projectId }: NativePanelProps) {
@@ -602,6 +683,7 @@ export default function ComposerPanel({ projectId }: NativePanelProps) {
           asset: { type: kind === "image" ? "image" : "video", src: "" },
           start: durationOf(cur.clips),
           length: kind === "image" ? 4 : 6,
+          duration_mode: defaultDurationMode(kind),
           transition: { in: "none", out: "none" },
           ai: defaultAI(kind, cur.output.aspect),
         },
@@ -671,6 +753,7 @@ export default function ComposerPanel({ projectId }: NativePanelProps) {
           asset: { type: "audio", src: "" },
           start: durationOfDraft(cur),
           length: withAI ? 30 : 8,
+          duration_mode: withAI ? defaultDurationMode(aiKind) : undefined,
           volume: 1,
           ai: withAI ? defaultAI(aiKind, cur.output.aspect) : undefined,
         },
@@ -770,6 +853,12 @@ export default function ComposerPanel({ projectId }: NativePanelProps) {
         return;
       }
       const result = JSON.parse(text);
+      if (result.status === "waiting_ai") {
+        const pending = Array.isArray(result.pending) ? result.pending.join("; ") : result.message || "";
+        setStatus(`AI assets started. ${pending} Render again when they are ready.`);
+        await load();
+        return;
+      }
       const costStr = result.cost_usd ? ` (${formatCost(result.cost_usd)})` : "";
       setStatus(`Render ${result.status}${costStr} via ${result.executor} in ${(result.duration_ms / 1000).toFixed(1)}s`);
       await load();
@@ -828,20 +917,25 @@ export default function ComposerPanel({ projectId }: NativePanelProps) {
   };
 
   const callMediaStudioGenerate = async (ai: AIAsset) => {
-    const cache_key = ai.cache_key || cacheKeyForAI(ai);
+    const nextAI = withDurationEstimate(ai);
+    const cache_key = nextAI.cache_key || cacheKeyForAI(nextAI);
     const body: Record<string, unknown> = {
-      kind: ai.media_kind,
-      prompt: ai.prompt,
+      kind: nextAI.media_kind,
+      prompt: nextAI.prompt,
       cache_key,
-      cache_policy: ai.cache_policy || "reuse",
+      cache_policy: nextAI.cache_policy || "reuse",
     };
-    if (ai.model) body.model = ai.model;
-    if (ai.duration) body.duration = ai.duration;
-    if (ai.aspect) body.aspect = ai.aspect;
-    if (ai.voice) body.voice = ai.voice;
-    if (ai.avatar) body.avatar = ai.avatar;
-    if (ai.source_image) body.source_image = ai.source_image;
-    if (ai.options && Object.keys(ai.options).length > 0) body.options = ai.options;
+    if (nextAI.model) body.model = nextAI.model;
+    if (nextAI.duration) body.duration = nextAI.duration;
+    if (nextAI.aspect) body.aspect = nextAI.aspect;
+    if (nextAI.voice) body.voice = nextAI.voice;
+    if (nextAI.avatar) body.avatar = nextAI.avatar;
+    if (nextAI.source_image) body.source_image = nextAI.source_image;
+    const options = { ...(nextAI.options || {}) };
+    if (nextAI.estimated_duration_seconds && !options.estimated_duration_seconds) {
+      options.estimated_duration_seconds = nextAI.estimated_duration_seconds;
+    }
+    if (Object.keys(options).length > 0) body.options = options;
     const res = await fetch(`/api/apps/media-studio/generate?project_id=${encodeURIComponent(projectId)}`, {
       method: "POST",
       credentials: "same-origin",
@@ -865,22 +959,27 @@ export default function ComposerPanel({ projectId }: NativePanelProps) {
     try {
       const { meta, cache_key } = await callMediaStudioGenerate(clip.ai);
       if (meta.status === "queued" || meta.status === "polling") {
-        updateClip(clip.id, { ai: { ...clip.ai, cache_key, status: "generating", job_id: Number(meta.job_id || 0), error: "" } });
+        const estimated = Number(meta.estimated_duration_seconds || clip.ai.estimated_duration_seconds || estimateForAI(clip.ai) || 0) || undefined;
+        updateClip(clip.id, {
+          duration_mode: clip.duration_mode || defaultDurationMode(clip.ai.media_kind),
+          estimated_length: estimated,
+          ai: { ...clip.ai, cache_key, estimated_duration_seconds: estimated, status: "generating", job_id: Number(meta.job_id || 0), error: "" },
+        });
         setStatus(`AI clip queued as job #${meta.job_id}.`);
         return;
       }
       const storageId = storageIDFromMeta(meta);
       if (!storageId) throw new Error("Media Studio returned no storage id. Make sure Storage is linked to Media Studio.");
+      const nextAI = aiFromMeta(clip.ai, meta, cache_key);
       updateClip(clip.id, {
         asset: { type: clip.ai.media_kind === "image" ? "image" : "video", src: `storage:${storageId}` },
-        ai: {
-          ...clip.ai,
-          cache_key,
-          status: "ready",
-          storage_id: storageId,
-          generation_id: generationIDFromMeta(meta),
-          error: "",
-        },
+        ai: nextAI,
+        duration_mode: clip.duration_mode || defaultDurationMode(clip.ai.media_kind),
+        estimated_length: nextAI.estimated_duration_seconds || clip.estimated_length,
+        actual_length: nextAI.actual_duration_seconds || clip.actual_length,
+        length: (clip.duration_mode || defaultDurationMode(clip.ai.media_kind)) === "fit_generated"
+          ? (nextAI.actual_duration_seconds || nextAI.estimated_duration_seconds || clip.length)
+          : clip.length,
       });
       setStatus(`AI clip ready as storage:${storageId}.`);
     } catch (e) {
@@ -904,12 +1003,13 @@ export default function ComposerPanel({ projectId }: NativePanelProps) {
       const { meta, cache_key } = await callMediaStudioGenerate(ai);
       const storageId = storageIDFromMeta(meta);
       if (!storageId) throw new Error("Media Studio returned no storage id. Make sure Storage is linked to Media Studio.");
+      const nextAI = aiFromMeta(ai, meta, cache_key);
       updateDraft((cur) => ({
         ...cur,
         soundtrack: {
           src: `storage:${storageId}`,
           volume: cur.soundtrack?.volume ?? 1,
-          ai: { ...ai, cache_key, status: "ready", storage_id: storageId, generation_id: generationIDFromMeta(meta), error: "" },
+          ai: nextAI,
         },
       }));
       setStatus(`AI soundtrack ready as storage:${storageId}.`);
@@ -935,15 +1035,27 @@ export default function ComposerPanel({ projectId }: NativePanelProps) {
     try {
       const { meta, cache_key } = await callMediaStudioGenerate(clip.ai);
       if (meta.status === "queued" || meta.status === "polling") {
-        updateAudioClip(clip.id, { ai: { ...clip.ai, cache_key, status: "generating", job_id: Number(meta.job_id || 0), error: "" } });
+        const estimated = Number(meta.estimated_duration_seconds || clip.ai.estimated_duration_seconds || estimateForAI(clip.ai) || 0) || undefined;
+        updateAudioClip(clip.id, {
+          duration_mode: clip.duration_mode || defaultDurationMode(clip.ai.media_kind),
+          estimated_length: estimated,
+          ai: { ...clip.ai, cache_key, estimated_duration_seconds: estimated, status: "generating", job_id: Number(meta.job_id || 0), error: "" },
+        });
         setStatus(`AI audio queued as job #${meta.job_id}.`);
         return;
       }
       const storageId = storageIDFromMeta(meta);
       if (!storageId) throw new Error("Media Studio returned no storage id. Make sure Storage is linked to Media Studio.");
+      const nextAI = aiFromMeta(clip.ai, meta, cache_key);
       updateAudioClip(clip.id, {
         asset: { type: "audio", src: `storage:${storageId}` },
-        ai: { ...clip.ai, cache_key, status: "ready", storage_id: storageId, generation_id: generationIDFromMeta(meta), error: "" },
+        ai: nextAI,
+        duration_mode: clip.duration_mode || defaultDurationMode(clip.ai.media_kind),
+        estimated_length: nextAI.estimated_duration_seconds || clip.estimated_length,
+        actual_length: nextAI.actual_duration_seconds || clip.actual_length,
+        length: (clip.duration_mode || defaultDurationMode(clip.ai.media_kind)) === "fit_generated"
+          ? (nextAI.actual_duration_seconds || nextAI.estimated_duration_seconds || clip.length)
+          : clip.length,
       });
       setStatus(`AI audio ready as storage:${storageId}.`);
     } catch (e) {
@@ -1469,6 +1581,14 @@ function ClipEditorModal({
               <Field label="Length">
                 <input type="number" min={0.1} step={0.1} value={visualClip.length} onChange={(e) => onVisualClip(visualClip.id, { length: Number(e.target.value) })} className={field} />
               </Field>
+              {visualClip.ai && (
+                <Field label="Duration mode">
+                  <select value={visualClip.duration_mode || defaultDurationMode(visualClip.ai.media_kind)} onChange={(e) => onVisualClip(visualClip.id, { duration_mode: e.target.value as DurationMode })} className={field}>
+                    <option value="fit_generated">Fit generated</option>
+                    <option value="fixed_trim_pad">Keep slot</option>
+                  </select>
+                </Field>
+              )}
             </div>
             <Field label="Source">
               <div className="flex gap-2">
@@ -1485,9 +1605,9 @@ function ClipEditorModal({
             </Field>
             {!visualClip.ai && (
               <div className="grid grid-cols-3 gap-2">
-                <button type="button" onClick={() => onVisualClip(visualClip.id, { asset: { ...visualClip.asset, type: "image" }, ai: defaultAI("image", aspect) })} className="text-xs px-2 py-1.5 border border-border rounded hover:bg-bg-input">Generate image</button>
-                <button type="button" onClick={() => onVisualClip(visualClip.id, { asset: { ...visualClip.asset, type: "video" }, ai: defaultAI("video", aspect) })} className="text-xs px-2 py-1.5 border border-border rounded hover:bg-bg-input">Generate video</button>
-                <button type="button" onClick={() => onVisualClip(visualClip.id, { asset: { ...visualClip.asset, type: "video" }, ai: defaultAI("avatar", aspect) })} className="text-xs px-2 py-1.5 border border-border rounded hover:bg-bg-input">Generate avatar</button>
+                <button type="button" onClick={() => onVisualClip(visualClip.id, { asset: { ...visualClip.asset, type: "image" }, duration_mode: defaultDurationMode("image"), ai: defaultAI("image", aspect) })} className="text-xs px-2 py-1.5 border border-border rounded hover:bg-bg-input">Generate image</button>
+                <button type="button" onClick={() => onVisualClip(visualClip.id, { asset: { ...visualClip.asset, type: "video" }, duration_mode: defaultDurationMode("video"), ai: defaultAI("video", aspect) })} className="text-xs px-2 py-1.5 border border-border rounded hover:bg-bg-input">Generate video</button>
+                <button type="button" onClick={() => onVisualClip(visualClip.id, { asset: { ...visualClip.asset, type: "video" }, duration_mode: defaultDurationMode("avatar"), ai: defaultAI("avatar", aspect) })} className="text-xs px-2 py-1.5 border border-border rounded hover:bg-bg-input">Generate avatar</button>
               </div>
             )}
             {visualClip.ai && (
@@ -1496,11 +1616,17 @@ function ClipEditorModal({
                 ai={visualClip.ai}
                 allowedKinds={["image", "video", "avatar"]}
                 busy={aiBusy === visualClip.id}
-                onChange={(ai) => onVisualClip(visualClip.id, {
-                  ai,
-                  length: ai.duration || visualClip.length,
-                  asset: { ...visualClip.asset, type: ai.media_kind === "image" ? "image" : "video" },
-                })}
+                onChange={(ai) => {
+                  const mode = visualClip.duration_mode || defaultDurationMode(ai.media_kind);
+                  const estimate = estimateForAI(ai);
+                  onVisualClip(visualClip.id, {
+                    ai,
+                    duration_mode: mode,
+                    estimated_length: estimate || visualClip.estimated_length,
+                    length: mode === "fit_generated" ? (estimate || visualClip.length) : visualClip.length,
+                    asset: { ...visualClip.asset, type: ai.media_kind === "image" ? "image" : "video" },
+                  });
+                }}
                 onGenerate={() => onGenerateVisual(visualClip)}
                 onClear={() => onVisualClip(visualClip.id, { ai: undefined })}
               />
@@ -1543,12 +1669,20 @@ function ClipEditorModal({
               <Field label="Volume">
                 <input type="number" min={0} max={1} step={0.05} value={audioClip.volume} onChange={(e) => onAudioClip(audioClip.id, { volume: Number(e.target.value) })} className={field} />
               </Field>
+              {audioClip.ai && (
+                <Field label="Duration mode">
+                  <select value={audioClip.duration_mode || defaultDurationMode(audioClip.ai.media_kind)} onChange={(e) => onAudioClip(audioClip.id, { duration_mode: e.target.value as DurationMode })} className={field}>
+                    <option value="fit_generated">Fit generated</option>
+                    <option value="fixed_trim_pad">Keep slot</option>
+                  </select>
+                </Field>
+              )}
             </div>
             {!audioClip.ai && (
               <div className="grid grid-cols-3 gap-2">
-                <button type="button" onClick={() => onAudioClip(audioClip.id, { ai: defaultAI("music", aspect) })} className="text-xs px-2 py-1.5 border border-border rounded hover:bg-bg-input">Generate music</button>
-                <button type="button" onClick={() => onAudioClip(audioClip.id, { ai: defaultAI("audio_tts", aspect) })} className="text-xs px-2 py-1.5 border border-border rounded hover:bg-bg-input">Generate TTS</button>
-                <button type="button" onClick={() => onAudioClip(audioClip.id, { ai: defaultAI("audio_sfx", aspect) })} className="text-xs px-2 py-1.5 border border-border rounded hover:bg-bg-input">Generate SFX</button>
+                <button type="button" onClick={() => onAudioClip(audioClip.id, { duration_mode: defaultDurationMode("music"), ai: defaultAI("music", aspect) })} className="text-xs px-2 py-1.5 border border-border rounded hover:bg-bg-input">Generate music</button>
+                <button type="button" onClick={() => onAudioClip(audioClip.id, { duration_mode: defaultDurationMode("audio_tts"), ai: defaultAI("audio_tts", aspect) })} className="text-xs px-2 py-1.5 border border-border rounded hover:bg-bg-input">Generate TTS</button>
+                <button type="button" onClick={() => onAudioClip(audioClip.id, { duration_mode: defaultDurationMode("audio_sfx"), ai: defaultAI("audio_sfx", aspect) })} className="text-xs px-2 py-1.5 border border-border rounded hover:bg-bg-input">Generate SFX</button>
               </div>
             )}
             {audioClip.ai && (
@@ -1557,7 +1691,16 @@ function ClipEditorModal({
                 ai={audioClip.ai}
                 allowedKinds={["music", "audio_tts", "audio_sfx"]}
                 busy={aiBusy === audioClip.id}
-                onChange={(ai) => onAudioClip(audioClip.id, { ai, length: ai.duration || audioClip.length })}
+                onChange={(ai) => {
+                  const mode = audioClip.duration_mode || defaultDurationMode(ai.media_kind);
+                  const estimate = estimateForAI(ai);
+                  onAudioClip(audioClip.id, {
+                    ai,
+                    duration_mode: mode,
+                    estimated_length: estimate || audioClip.estimated_length,
+                    length: mode === "fit_generated" ? (estimate || audioClip.length) : audioClip.length,
+                  });
+                }}
                 onGenerate={() => onGenerateAudio(audioClip)}
                 onClear={() => onAudioClip(audioClip.id, { ai: undefined })}
               />
@@ -1792,11 +1935,19 @@ function Inspector({
                     <Field label="Volume">
                       <input type="number" min={0} max={1} step={0.05} value={audio.volume} onChange={(e) => onAudioClip(audio.id, { volume: Number(e.target.value) })} className={field} />
                     </Field>
+                    {audio.ai && (
+                      <Field label="Duration mode">
+                        <select value={audio.duration_mode || defaultDurationMode(audio.ai.media_kind)} onChange={(e) => onAudioClip(audio.id, { duration_mode: e.target.value as DurationMode })} className={field}>
+                          <option value="fit_generated">Fit generated</option>
+                          <option value="fixed_trim_pad">Keep slot</option>
+                        </select>
+                      </Field>
+                    )}
                   </div>
                   {!audio.ai && (
                     <button
                       type="button"
-                      onClick={() => onAudioClip(audio.id, { ai: defaultAI("music", draft.output.aspect) })}
+                      onClick={() => onAudioClip(audio.id, { duration_mode: defaultDurationMode("music"), ai: defaultAI("music", draft.output.aspect) })}
                       className="w-full text-xs px-2 py-1.5 border border-border rounded hover:bg-bg-input"
                     >
                       Add AI source
@@ -1808,7 +1959,16 @@ function Inspector({
                       ai={audio.ai}
                       allowedKinds={["music", "audio_tts", "audio_sfx"]}
                       busy={aiBusy === audio.id}
-                      onChange={(ai) => onAudioClip(audio.id, { ai, length: ai.duration || audio.length })}
+                      onChange={(ai) => {
+                        const mode = audio.duration_mode || defaultDurationMode(ai.media_kind);
+                        const estimate = estimateForAI(ai);
+                        onAudioClip(audio.id, {
+                          ai,
+                          duration_mode: mode,
+                          estimated_length: estimate || audio.estimated_length,
+                          length: mode === "fit_generated" ? (estimate || audio.length) : audio.length,
+                        });
+                      }}
                       onGenerate={() => onGenerateAudioClipAI(audio)}
                       onClear={() => onAudioClip(audio.id, { ai: undefined })}
                     />
@@ -1856,7 +2016,10 @@ function Inspector({
             </Field>
             <button
               type="button"
-              onClick={() => onClip(clip.id, { ai: clip.ai || defaultAI(clip.asset.type === "image" ? "image" : "video", draft.output.aspect) })}
+              onClick={() => {
+                const kind = clip.asset.type === "image" ? "image" : "video";
+                onClip(clip.id, { duration_mode: defaultDurationMode(kind), ai: clip.ai || defaultAI(kind, draft.output.aspect) });
+              }}
               className="w-full text-xs px-2 py-1.5 border border-border rounded hover:bg-bg-input"
             >
               Add AI source
@@ -1867,7 +2030,17 @@ function Inspector({
                 ai={clip.ai}
                 allowedKinds={["video", "image", "avatar"]}
                 busy={aiBusy === clip.id}
-                onChange={(ai) => onClip(clip.id, { ai })}
+                onChange={(ai) => {
+                  const mode = clip.duration_mode || defaultDurationMode(ai.media_kind);
+                  const estimate = estimateForAI(ai);
+                  onClip(clip.id, {
+                    ai,
+                    duration_mode: mode,
+                    estimated_length: estimate || clip.estimated_length,
+                    length: mode === "fit_generated" ? (estimate || clip.length) : clip.length,
+                    asset: { ...clip.asset, type: ai.media_kind === "image" ? "image" : "video" },
+                  });
+                }}
                 onGenerate={() => onGenerateClipAI(clip)}
                 onClear={() => onClip(clip.id, { ai: undefined })}
               />
@@ -1882,6 +2055,14 @@ function Inspector({
               <Field label="Length">
                 <input type="number" min={0.1} step={0.1} value={clip.length} onChange={(e) => onClip(clip.id, { length: Number(e.target.value) })} className={field} />
               </Field>
+              {clip.ai && (
+                <Field label="Duration mode">
+                  <select value={clip.duration_mode || defaultDurationMode(clip.ai.media_kind)} onChange={(e) => onClip(clip.id, { duration_mode: e.target.value as DurationMode })} className={field}>
+                    <option value="fit_generated">Fit generated</option>
+                    <option value="fixed_trim_pad">Keep slot</option>
+                  </select>
+                </Field>
+              )}
               <Field label="Transition in">
                 <select value={clip.transition?.in || "none"} onChange={(e) => onClip(clip.id, { transition: { ...clip.transition, in: e.target.value } })} className={field}>
                   <option value="none">None</option>
@@ -1963,7 +2144,10 @@ function AIAssetEditor({
   onClear: () => void;
 }) {
   const field = "bg-bg-input border border-border rounded px-2 py-1.5 text-sm w-full";
-  const update = (patch: Partial<AIAsset>) => onChange({ ...ai, ...patch, status: patch.status || ai.status || "draft" });
+  const update = (patch: Partial<AIAsset>) => {
+    const next = { ...ai, ...patch, status: patch.status || ai.status || "draft" };
+    onChange(withDurationEstimate(next));
+  };
   const [models, setModels] = useState<{ id: string; name?: string }[]>([]);
   const [voices, setVoices] = useState<{ id: string; name?: string; language?: string }[]>([]);
   const [avatars, setAvatars] = useState<{ id: string; name?: string }[]>([]);
@@ -2013,8 +2197,8 @@ function AIAssetEditor({
       <div className="grid grid-cols-2 gap-2">
         <Field label="Kind">
           <select
-            value={ai.media_kind}
-            onChange={(e) => update({ media_kind: e.target.value as MediaKind })}
+          value={ai.media_kind}
+            onChange={(e) => update({ media_kind: e.target.value as MediaKind, estimated_duration_seconds: undefined, actual_duration_seconds: undefined })}
             className={field}
           >
             {allowedKinds.map((kind) => <option key={kind} value={kind}>{kind}</option>)}
@@ -2025,8 +2209,8 @@ function AIAssetEditor({
             type="number"
             min={1}
             step={1}
-            value={ai.duration || ""}
-            onChange={(e) => update({ duration: Number(e.target.value) || undefined })}
+          value={ai.duration || ""}
+            onChange={(e) => update({ duration: Number(e.target.value) || undefined, estimated_duration_seconds: Number(e.target.value) || undefined })}
             className={field}
             disabled={ai.media_kind === "image"}
           />
@@ -2035,7 +2219,7 @@ function AIAssetEditor({
       <Field label={ai.media_kind === "audio_tts" || ai.media_kind === "avatar" ? "Script" : "Prompt"}>
         <textarea
           value={ai.prompt}
-          onChange={(e) => update({ prompt: e.target.value })}
+          onChange={(e) => update({ prompt: e.target.value, estimated_duration_seconds: undefined, actual_duration_seconds: undefined })}
           className={`${field} resize-y`}
           rows={3}
           placeholder={ai.media_kind === "music" ? "minimal upbeat electronic background music" : "Describe the asset to generate"}
@@ -2110,6 +2294,11 @@ function AIAssetEditor({
       )}
       {ai.error && <div className="text-xs text-red whitespace-pre-wrap">{ai.error}</div>}
       {ai.storage_id && <div className="text-xs text-text-dim">storage:{ai.storage_id}</div>}
+      {(ai.estimated_duration_seconds || ai.actual_duration_seconds) && (
+        <div className="text-xs text-text-dim">
+          {ai.actual_duration_seconds ? `actual ${ai.actual_duration_seconds.toFixed(1)}s` : `estimated ${ai.estimated_duration_seconds?.toFixed(1)}s`}
+        </div>
+      )}
       {ai.job_id && ai.status === "generating" && <div className="text-xs text-text-dim">media-studio job #{ai.job_id}</div>}
       <button
         type="button"
@@ -2117,8 +2306,9 @@ function AIAssetEditor({
         disabled={busy || !ai.prompt.trim()}
         className="w-full text-sm px-3 py-1.5 border border-accent text-accent rounded hover:bg-accent hover:text-bg disabled:opacity-50"
       >
-        {busy ? "Generating..." : "Generate in place"}
+        {busy ? "Generating..." : "Generate now"}
       </button>
+      <div className="text-[11px] text-text-dim">Saved draft AI clips generate automatically when the composition is rendered.</div>
     </div>
   );
 }

@@ -14,21 +14,23 @@ import (
 // keeps the argument list at one column rather than fifteen positional
 // fields.
 type generationRecord struct {
-	ProjectID    string
-	Kind         string
-	Prompt       string
-	Revised      string
-	Provider     string
-	Model        string
-	Size         string
-	DurationMs   int64
-	StorageIDs   []int64
-	UpstreamURLs []string
-	ThumbnailB64 string
-	ExtraJSON    string
-	Count        int
-	CostUSD      float64
-	CacheKey     string
+	ProjectID                string
+	Kind                     string
+	Prompt                   string
+	Revised                  string
+	Provider                 string
+	Model                    string
+	Size                     string
+	DurationMs               int64
+	StorageIDs               []int64
+	UpstreamURLs             []string
+	ThumbnailB64             string
+	ExtraJSON                string
+	Count                    int
+	CostUSD                  float64
+	CacheKey                 string
+	EstimatedDurationSeconds float64
+	ActualDurationSeconds    float64
 }
 
 func (a *App) dbInsertGeneration(r generationRecord) int64 {
@@ -44,11 +46,13 @@ func (a *App) dbInsertGeneration(r generationRecord) int64 {
 		`INSERT INTO generations
 			(project_id, kind, prompt, revised_prompt, provider, model,
 			 size, duration_ms, storage_ids, upstream_urls, thumbnail_b64,
-			 extra_json, count, cost_usd, cache_key)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			 extra_json, count, cost_usd, cache_key, estimated_duration_seconds,
+			 actual_duration_seconds)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		r.ProjectID, r.Kind, r.Prompt, r.Revised, r.Provider, r.Model,
 		r.Size, r.DurationMs, string(sj), string(uj), r.ThumbnailB64,
-		r.ExtraJSON, r.Count, r.CostUSD, r.CacheKey,
+		r.ExtraJSON, r.Count, r.CostUSD, r.CacheKey, r.EstimatedDurationSeconds,
+		r.ActualDurationSeconds,
 	)
 	if err != nil {
 		globalCtx.Logger().Warn("dbInsertGeneration failed", "err", err)
@@ -89,7 +93,8 @@ func queryHistory(ctx *sdk.AppCtx, pid, kindFilter string, limit int) (map[strin
 	rows, err := ctx.AppDB().Query(
 		`SELECT id, kind, prompt, revised_prompt, provider, model, size,
 		        duration_ms, storage_ids, upstream_urls, thumbnail_b64,
-		        extra_json, count, cost_usd, cache_key, created_at
+		        extra_json, count, cost_usd, cache_key, estimated_duration_seconds,
+		        actual_duration_seconds, created_at
 		 FROM generations
 		 WHERE project_id = ? AND (? = '' OR kind = ?)
 		 ORDER BY id DESC LIMIT ?`,
@@ -107,16 +112,17 @@ func queryHistory(ctx *sdk.AppCtx, pid, kindFilter string, limit int) (map[strin
 			kind, prompt, revised, provider, model, size          string
 			storageIDsJSON, upstreamURLsJSON, thumbB64, extraJSON string
 			cacheKey, createdAt                                   string
-			costUSD                                               float64
+			costUSD, estimatedDuration, actualDuration            float64
 		)
 		if err := rows.Scan(&id, &kind, &prompt, &revised, &provider, &model, &size,
 			&durationMs, &storageIDsJSON, &upstreamURLsJSON, &thumbB64,
-			&extraJSON, &count, &costUSD, &cacheKey, &createdAt); err != nil {
+			&extraJSON, &count, &costUSD, &cacheKey, &estimatedDuration,
+			&actualDuration, &createdAt); err != nil {
 			continue
 		}
 		out = append(out, generationMap(pid, id, count, durationMs, kind, prompt, revised,
 			provider, model, size, storageIDsJSON, upstreamURLsJSON, thumbB64,
-			extraJSON, cacheKey, createdAt, costUSD))
+			extraJSON, cacheKey, createdAt, costUSD, estimatedDuration, actualDuration))
 	}
 	return map[string]any{"generations": out}, nil
 }
@@ -127,24 +133,26 @@ func queryGenerationByID(ctx *sdk.AppCtx, pid string, id int64) (map[string]any,
 		kind, prompt, revised, provider, model, size          string
 		storageIDsJSON, upstreamURLsJSON, thumbB64, extraJSON string
 		cacheKey, createdAt                                   string
-		costUSD                                               float64
+		costUSD, estimatedDuration, actualDuration            float64
 	)
 	err := ctx.AppDB().QueryRow(
 		`SELECT kind, prompt, revised_prompt, provider, model, size,
 		        duration_ms, storage_ids, upstream_urls, thumbnail_b64,
-		        extra_json, count, cost_usd, cache_key, created_at
+		        extra_json, count, cost_usd, cache_key, estimated_duration_seconds,
+		        actual_duration_seconds, created_at
 		 FROM generations
 		 WHERE project_id = ? AND id = ?`,
 		pid, id,
 	).Scan(&kind, &prompt, &revised, &provider, &model, &size,
 		&durationMs, &storageIDsJSON, &upstreamURLsJSON, &thumbB64,
-		&extraJSON, &count, &costUSD, &cacheKey, &createdAt)
+		&extraJSON, &count, &costUSD, &cacheKey, &estimatedDuration,
+		&actualDuration, &createdAt)
 	if err != nil {
 		return nil, err
 	}
 	return generationMap(pid, id, count, durationMs, kind, prompt, revised,
 		provider, model, size, storageIDsJSON, upstreamURLsJSON, thumbB64,
-		extraJSON, cacheKey, createdAt, costUSD), nil
+		extraJSON, cacheKey, createdAt, costUSD, estimatedDuration, actualDuration), nil
 }
 
 func queryGenerationByCacheKey(ctx *sdk.AppCtx, pid, kind, cacheKey string) (map[string]any, error) {
@@ -164,7 +172,7 @@ func queryGenerationByCacheKey(ctx *sdk.AppCtx, pid, kind, cacheKey string) (map
 	return queryGenerationByID(ctx, pid, id)
 }
 
-func generationMap(pid string, id, count, durationMs int64, kind, prompt, revised, provider, model, size, storageIDsJSON, upstreamURLsJSON, thumbB64, extraJSON, cacheKey, createdAt string, costUSD float64) map[string]any {
+func generationMap(pid string, id, count, durationMs int64, kind, prompt, revised, provider, model, size, storageIDsJSON, upstreamURLsJSON, thumbB64, extraJSON, cacheKey, createdAt string, costUSD, estimatedDuration, actualDuration float64) map[string]any {
 	var storageIDs []int64
 	_ = json.Unmarshal([]byte(storageIDsJSON), &storageIDs)
 	var upstreamURLs []string
@@ -178,24 +186,26 @@ func generationMap(pid string, id, count, durationMs int64, kind, prompt, revise
 		localURL = localCacheURL(id)
 	}
 	return map[string]any{
-		"id":              id,
-		"kind":            kind,
-		"prompt":          prompt,
-		"revised_prompt":  revised,
-		"provider":        provider,
-		"model":           model,
-		"size":            size,
-		"duration_ms":     durationMs,
-		"storage_ids":     storageIDs,
-		"storage_urls":    storageURLs,
-		"upstream_urls":   upstreamURLs,
-		"thumbnail_b64":   thumbB64,
-		"local_cache_url": localURL,
-		"extra_json":      extraJSON,
-		"cache_key":       cacheKey,
-		"count":           count,
-		"cost_usd":        costUSD,
-		"created_at":      createdAt,
+		"id":                         id,
+		"kind":                       kind,
+		"prompt":                     prompt,
+		"revised_prompt":             revised,
+		"provider":                   provider,
+		"model":                      model,
+		"size":                       size,
+		"duration_ms":                durationMs,
+		"estimated_duration_seconds": estimatedDuration,
+		"actual_duration_seconds":    actualDuration,
+		"storage_ids":                storageIDs,
+		"storage_urls":               storageURLs,
+		"upstream_urls":              upstreamURLs,
+		"thumbnail_b64":              thumbB64,
+		"local_cache_url":            localURL,
+		"extra_json":                 extraJSON,
+		"cache_key":                  cacheKey,
+		"count":                      count,
+		"cost_usd":                   costUSD,
+		"created_at":                 createdAt,
 	}
 }
 

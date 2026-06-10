@@ -131,6 +131,7 @@ func (a *App) handleAsyncQueueResponse(ctx *sdk.AppCtx, kind, role, providerSlug
 	sourceRef := strArg(args, "_source_image_ref", "")
 	cacheKey := strArg(args, "cache_key", "")
 	storageFolder := strArg(args, "_storage_folder", "")
+	estimatedSeconds := estimatedDurationSeconds(kind, args)
 	requestJSON, _ := json.Marshal(args)
 
 	costUSD := 0.0
@@ -143,9 +144,9 @@ func (a *App) handleAsyncQueueResponse(ctx *sdk.AppCtx, kind, role, providerSlug
 	result, err := globalCtx.AppDB().Exec(
 		`INSERT INTO video_jobs
 			(project_id, kind, role, queue_id, provider, model, prompt,
-			 source_image_ref, request_json, status, cost_usd, cache_key)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?)`,
-		pid, kind, role, queueID, providerSlug, model, prompt, sourceRef, string(requestJSON), costUSD, cacheKey,
+			 source_image_ref, request_json, status, cost_usd, cache_key, estimated_duration_seconds)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?)`,
+		pid, kind, role, queueID, providerSlug, model, prompt, sourceRef, string(requestJSON), costUSD, cacheKey, estimatedSeconds,
 	)
 	if err != nil {
 		ctx.Logger().Warn("video_jobs insert failed", "err", err)
@@ -179,15 +180,16 @@ func (a *App) handleAsyncQueueResponse(ctx *sdk.AppCtx, kind, role, providerSlug
 			{"type": "text", "text": summary},
 		},
 		"_meta": map[string]any{
-			"kind":           kind,
-			"status":         "queued",
-			"job_id":         jobID,
-			"queue_id":       queueID,
-			"model":          model,
-			"provider":       providerSlug,
-			"cost_usd":       costUSD,
-			"cache_key":      cacheKey,
-			"storage_folder": storageFolder,
+			"kind":                       kind,
+			"status":                     "queued",
+			"job_id":                     jobID,
+			"queue_id":                   queueID,
+			"model":                      model,
+			"provider":                   providerSlug,
+			"cost_usd":                   costUSD,
+			"cache_key":                  cacheKey,
+			"storage_folder":             storageFolder,
+			"estimated_duration_seconds": estimatedSeconds,
 		},
 	}
 }
@@ -325,7 +327,8 @@ func (a *App) handleListVideoJobs(w http.ResponseWriter, r *http.Request) {
 	}
 	statusFilter := r.URL.Query().Get("status")
 	q := `SELECT id, queue_id, provider, model, prompt, status, error,
-	             result_storage_id, generation_id, attempts, cost_usd, created_at, updated_at
+	             result_storage_id, generation_id, attempts, cost_usd,
+	             estimated_duration_seconds, actual_duration_seconds, created_at, updated_at
 	      FROM video_jobs
 	      WHERE project_id = ?`
 	args := []any{pid}
@@ -351,27 +354,29 @@ func (a *App) handleListVideoJobs(w http.ResponseWriter, r *http.Request) {
 			id, storageID, generationID, attempts            int64
 			queueID, provider, model, prompt, status, errMsg string
 			createdAt, updatedAt                             string
-			costUSD                                          float64
+			costUSD, estimatedDuration, actualDuration       float64
 		)
 		if err := rows.Scan(&id, &queueID, &provider, &model, &prompt,
 			&status, &errMsg, &storageID, &generationID, &attempts,
-			&costUSD, &createdAt, &updatedAt); err != nil {
+			&costUSD, &estimatedDuration, &actualDuration, &createdAt, &updatedAt); err != nil {
 			continue
 		}
 		out = append(out, map[string]any{
-			"id":                id,
-			"queue_id":          queueID,
-			"provider":          provider,
-			"model":             model,
-			"prompt":            prompt,
-			"status":            status,
-			"error":             errMsg,
-			"result_storage_id": storageID,
-			"generation_id":     generationID,
-			"attempts":          attempts,
-			"cost_usd":          costUSD,
-			"created_at":        createdAt,
-			"updated_at":        updatedAt,
+			"id":                         id,
+			"queue_id":                   queueID,
+			"provider":                   provider,
+			"model":                      model,
+			"prompt":                     prompt,
+			"status":                     status,
+			"error":                      errMsg,
+			"result_storage_id":          storageID,
+			"generation_id":              generationID,
+			"attempts":                   attempts,
+			"cost_usd":                   costUSD,
+			"estimated_duration_seconds": estimatedDuration,
+			"actual_duration_seconds":    actualDuration,
+			"created_at":                 createdAt,
+			"updated_at":                 updatedAt,
 		})
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -379,13 +384,13 @@ func (a *App) handleListVideoJobs(w http.ResponseWriter, r *http.Request) {
 }
 
 // videoJobMarkComplete records the storage handoff + generations row id.
-func videoJobMarkComplete(ctx *sdk.AppCtx, jobID, storageID, generationID int64) {
+func videoJobMarkComplete(ctx *sdk.AppCtx, jobID, storageID, generationID int64, actualDuration float64) {
 	_, err := ctx.AppDB().Exec(
 		`UPDATE video_jobs
 		 SET status='complete', result_storage_id=?, generation_id=?,
-		     last_poll_at=?, updated_at=?
+		     actual_duration_seconds=?, last_poll_at=?, updated_at=?
 		 WHERE id=?`,
-		storageID, generationID, time.Now(), time.Now(), jobID,
+		storageID, generationID, actualDuration, time.Now(), time.Now(), jobID,
 	)
 	if err != nil {
 		ctx.Logger().Warn("video_jobs complete update failed", "id", jobID, "err", err)
