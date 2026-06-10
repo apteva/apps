@@ -27,13 +27,14 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: composer
 display_name: Composer
-version: 0.3.4
+version: 0.3.5
 description: |
   Multi-clip video compositions with a structured timeline panel,
-  universal generated-asset clip editing, timed AI audio clips,
-  audio-only renders, and AI-backed clip/soundtrack sources generated
-  through Media Studio. Renders locally via ffmpeg, on a render host
-  via instances, or against a bound render_executor integration.
+  universal generated-asset clip editing, first-class AI avatar clips,
+  timed AI audio clips, audio-only renders, and AI-backed clip/soundtrack
+  sources generated through Media Studio. Renders locally via ffmpeg,
+  on a render host via instances, or against a bound render_executor
+  integration.
 author: Apteva
 scopes: [project, global]
 requires:

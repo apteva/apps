@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: composer
 display_name: Composer
-version: 0.3.4
+version: 0.3.5
 description: |
   Multi-clip video composition. Stitch generated or uploaded assets
   into a single video — one visual track, timed audio tracks, optional
@@ -10,6 +10,10 @@ description: |
   default, on a render host via instances when render_host_id is
   set, or against a SaaS render backend (Shotstack et al) when one
   is bound to the render_executor role.
+
+  v0.3.5 promotes AI avatar clips to the same panel workflow as
+  generated image/video/audio clips, including timeline quick-add and
+  modal editing/generation.
 
   v0.3.4 makes the panel timeline universal: visual and audio rows
   share generated-asset creation, and timeline clips open a modal for

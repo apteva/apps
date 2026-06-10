@@ -1,4 +1,4 @@
-// ComposerPanel v0.3.4 - timeline editor with storage and Media Studio AI assets.
+// ComposerPanel v0.3.5 - timeline editor with storage and Media Studio AI assets.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
@@ -1320,6 +1320,7 @@ function Timeline({
         <h2 className="text-xs uppercase tracking-wide text-text-dim flex-1">Timeline</h2>
         <button onClick={() => onAddAIVisual("image")} className="text-xs px-2 py-1 border border-border rounded hover:bg-bg-input">AI image</button>
         <button onClick={() => onAddAIVisual("video")} className="text-xs px-2 py-1 border border-border rounded hover:bg-bg-input">AI video</button>
+        <button onClick={() => onAddAIVisual("avatar")} className="text-xs px-2 py-1 border border-border rounded hover:bg-bg-input">AI avatar</button>
         <button onClick={onAddAIAudio} className="text-xs px-2 py-1 border border-border rounded hover:bg-bg-input">AI audio</button>
         <button onClick={onBrowse} className="text-xs px-2 py-1 border border-accent text-accent rounded hover:bg-accent hover:text-bg">Browse storage</button>
         <button onClick={onAdd} className="text-xs px-2 py-1 border border-border rounded hover:bg-bg-input">Add empty clip</button>
@@ -1331,6 +1332,7 @@ function Timeline({
             <div className="mt-3 flex items-center justify-center gap-2 flex-wrap">
               <button type="button" onClick={() => onAddAIVisual("image")} className="px-3 py-1.5 text-sm border border-border rounded hover:bg-bg-input">AI image</button>
               <button type="button" onClick={() => onAddAIVisual("video")} className="px-3 py-1.5 text-sm border border-border rounded hover:bg-bg-input">AI video</button>
+              <button type="button" onClick={() => onAddAIVisual("avatar")} className="px-3 py-1.5 text-sm border border-border rounded hover:bg-bg-input">AI avatar</button>
               <button type="button" onClick={onAddAIAudio} className="px-3 py-1.5 text-sm border border-border rounded hover:bg-bg-input">AI audio</button>
               <button type="button" onClick={onBrowse} className="px-3 py-1.5 text-sm border border-accent text-accent rounded hover:bg-accent hover:text-bg">Browse storage</button>
             </div>
@@ -1726,12 +1728,15 @@ function Inspector({
               />
             </Field>
           )}
-          <div className="grid grid-cols-3 gap-2">
+          <div className="grid grid-cols-2 gap-2">
             <button type="button" onClick={() => onAddAIVisualClip("image")} className="text-xs px-2 py-1.5 border border-border rounded hover:bg-bg-input">
               AI image
             </button>
             <button type="button" onClick={() => onAddAIVisualClip("video")} className="text-xs px-2 py-1.5 border border-border rounded hover:bg-bg-input">
               AI video
+            </button>
+            <button type="button" onClick={() => onAddAIVisualClip("avatar")} className="text-xs px-2 py-1.5 border border-border rounded hover:bg-bg-input">
+              AI avatar
             </button>
             <button type="button" onClick={() => onAddAudioClip("music")} className="text-xs px-2 py-1.5 border border-border rounded hover:bg-bg-input">
               AI audio
