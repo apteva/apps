@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
-import { Fragment, jsx, jsxs } from "react/jsx-runtime";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { jsx, jsxs } from "react/jsx-runtime";
 
 const API = "/api/apps/media-downloader";
 
@@ -78,12 +78,58 @@ function Button({ tone = "default", className = "", ...props }) {
   });
 }
 
+function useAppEvents(app, projectId, onEvent) {
+  const handlerRef = useRef(onEvent);
+  handlerRef.current = onEvent;
+  useEffect(() => {
+    if (!app || !projectId) return;
+    const handler = (ev) => handlerRef.current(ev);
+    const bridge = window.__aptevaAppEvents;
+    if (bridge) {
+      return bridge.subscribe(app, projectId, handler);
+    }
+    let lastSeq = 0;
+    let es = null;
+    let cancelled = false;
+    let reconnectTimer = null;
+    const connect = () => {
+      if (cancelled) return;
+      const url =
+        `/api/app-events/${encodeURIComponent(app)}` +
+        `?project_id=${encodeURIComponent(projectId)}` +
+        (lastSeq > 0 ? `&since=${lastSeq}` : "");
+      es = new EventSource(url, { withCredentials: true });
+      es.onmessage = (e) => {
+        try {
+          const ev = JSON.parse(e.data);
+          if (ev.seq <= lastSeq) return;
+          lastSeq = ev.seq;
+          handlerRef.current(ev);
+        } catch {}
+      };
+      es.onerror = () => {
+        if (es && es.readyState === EventSource.CLOSED) {
+          if (reconnectTimer) window.clearTimeout(reconnectTimer);
+          reconnectTimer = window.setTimeout(connect, 2000);
+        }
+      };
+    };
+    connect();
+    return () => {
+      cancelled = true;
+      if (reconnectTimer) window.clearTimeout(reconnectTimer);
+      if (es) es.close();
+    };
+  }, [app, projectId]);
+}
+
 export default function MediaDownloaderPanel({ projectId }) {
   const [tab, setTab] = useState("downloads");
   const [jobs, setJobs] = useState([]);
   const [profiles, setProfiles] = useState([]);
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
+  const refreshTimer = useRef(null);
 
   const refresh = useCallback(async () => {
     setBusy(true);
@@ -104,9 +150,19 @@ export default function MediaDownloaderPanel({ projectId }) {
 
   useEffect(() => {
     refresh();
-    const t = window.setInterval(refresh, 3000);
+    const t = window.setInterval(refresh, 30000);
     return () => window.clearInterval(t);
   }, [refresh]);
+
+  useAppEvents("media-downloader", projectId, (ev) => {
+    if (!ev.topic.startsWith("download.") && !ev.topic.startsWith("profile.")) return;
+    if (refreshTimer.current) window.clearTimeout(refreshTimer.current);
+    refreshTimer.current = window.setTimeout(refresh, ev.topic === "download.progress" ? 250 : 0);
+  });
+
+  useEffect(() => () => {
+    if (refreshTimer.current) window.clearTimeout(refreshTimer.current);
+  }, []);
 
   return jsxs("div", {
     className: "h-full flex flex-col bg-bg text-text",

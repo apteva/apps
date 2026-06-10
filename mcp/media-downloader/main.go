@@ -217,6 +217,7 @@ func (a *App) toolDownload(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err := insertDownload(context.Background(), ctx.AppDB(), j); err != nil {
 		return nil, err
 	}
+	a.emitDownloadJob(ctx, "download.created", j)
 	runCtx, cancel := context.WithCancel(context.Background())
 	a.mu.Lock()
 	a.cancels[id] = cancel
@@ -234,32 +235,38 @@ func (a *App) runDownload(runCtx context.Context, ctx *sdk.AppCtx, id string, re
 	}()
 	_ = setDownloadRunning(context.Background(), db, id)
 	appendLog(context.Background(), db, id, "info", "download started")
+	a.emitDownload(ctx, "download.started", req.ProjectID, map[string]any{"id": id, "status": statusRunning})
 
 	jobDir := filepath.Join(a.dataDir, "jobs", id)
 	if err := os.MkdirAll(jobDir, 0700); err != nil {
-		a.fail(id, err)
+		a.fail(ctx, req.ProjectID, id, err)
 		return
 	}
 	var cookieFile string
 	if req.SourceProfileID != "" {
 		payload, err := a.profilePayload(context.Background(), ctx, req.ProjectID, req.SourceProfileID)
 		if err != nil {
-			a.fail(id, err)
+			a.fail(ctx, req.ProjectID, id, err)
 			return
 		}
 		cookieFile, err = writeCookieFile(jobDir, payload)
 		if err != nil {
-			a.fail(id, err)
+			a.fail(ctx, req.ProjectID, id, err)
 			return
 		}
 	}
 
 	printed := make([]string, 0, 4)
 	var lastErr string
+	lastProgress := -1.0
 	err := a.runner.Run(runCtx, a.ytdlpPath, buildDownloadArgs(req, jobDir, cookieFile), func(line string) {
 		line = trimLogLine(line)
 		if p, ok := parseProgressLine(line); ok {
 			_ = updateDownloadProgress(context.Background(), db, id, p)
+			if p == 100 || lastProgress < 0 || p-lastProgress >= 1 {
+				lastProgress = p
+				a.emitDownload(ctx, "download.progress", req.ProjectID, map[string]any{"id": id, "status": statusRunning, "progress": p})
+			}
 		}
 		if strings.HasPrefix(line, "/") || strings.HasPrefix(line, jobDir) {
 			printed = append(printed, line)
@@ -278,18 +285,24 @@ func (a *App) runDownload(runCtx context.Context, ctx *sdk.AppCtx, id string, re
 			lastErr = err.Error()
 		}
 		_ = failDownload(context.Background(), db, id, status, lastErr)
+		a.emitDownload(ctx, "download."+status, req.ProjectID, map[string]any{"id": id, "status": status, "error": lastErr})
 		return
 	}
 	output, err := findOutputFile(jobDir, printed)
 	if err != nil {
-		a.fail(id, err)
+		a.fail(ctx, req.ProjectID, id, err)
 		return
 	}
 	if err := a.uploadOutput(ctx, id, req, output); err != nil {
-		a.fail(id, err)
+		a.fail(ctx, req.ProjectID, id, err)
 		return
 	}
 	appendLog(context.Background(), db, id, "info", "download completed")
+	if job, err := getDownload(context.Background(), db, req.ProjectID, id); err == nil {
+		a.emitDownloadJob(ctx, "download.completed", job)
+	} else {
+		a.emitDownload(ctx, "download.completed", req.ProjectID, map[string]any{"id": id, "status": statusCompleted})
+	}
 }
 
 func (a *App) uploadOutput(ctx *sdk.AppCtx, id string, req downloadRequest, path string) error {
@@ -330,13 +343,14 @@ func (a *App) uploadOutput(ctx *sdk.AppCtx, id string, req downloadRequest, path
 	return completeDownload(context.Background(), ctx.AppDB(), id, name, st.Size(), got.ID, got.URL)
 }
 
-func (a *App) fail(id string, err error) {
+func (a *App) fail(ctx *sdk.AppCtx, projectID, id string, err error) {
 	msg := "unknown error"
 	if err != nil {
 		msg = err.Error()
 	}
 	appendLog(context.Background(), a.ctx.AppDB(), id, "error", msg)
 	_ = failDownload(context.Background(), a.ctx.AppDB(), id, statusFailed, msg)
+	a.emitDownload(ctx, "download.failed", projectID, map[string]any{"id": id, "status": statusFailed, "error": msg})
 }
 
 func (a *App) toolStatus(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -369,6 +383,7 @@ func (a *App) toolCancel(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	}
 	cancel()
 	appendLog(context.Background(), ctx.AppDB(), id, "info", "cancel requested")
+	a.emitDownload(ctx, "download.cancel_requested", projectScope(ctx, args), map[string]any{"id": id})
 	return map[string]any{"canceled": true}, nil
 }
 
@@ -403,9 +418,11 @@ func (a *App) toolProfileCreate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	}
 	public := p.sourceProfile
 	public.Status = "active"
+	a.emitProfile(ctx, "profile.created", public)
 	if testURL := strArg(args, "test_url"); testURL != "" {
 		if err := a.guard(ctx, args, testURL); err != nil {
 			_ = markProfileValidated(context.Background(), ctx.AppDB(), id, p.ProjectID, err.Error())
+			a.emitProfile(ctx, "profile.validated", sourceProfile{ID: id, ProjectID: p.ProjectID, Name: name, Provider: provider, AuthType: authType, Status: "active", LastError: err.Error()})
 			return map[string]any{"profile": public, "validated": false, "validation_error": err.Error()}, nil
 		}
 		if err := a.validateProfileAgainstURL(ctx, p.ProjectID, id, testURL); err != nil {
@@ -450,14 +467,77 @@ func (a *App) validateProfileAgainstURL(ctx *sdk.AppCtx, projectID, profileID, r
 		lastErr = err.Error()
 	}
 	_ = markProfileValidated(context.Background(), ctx.AppDB(), profileID, projectID, lastErr)
+	payload := map[string]any{"id": profileID, "valid": err == nil}
+	if lastErr != "" {
+		payload["error"] = lastErr
+	}
+	a.emitProfileData(ctx, "profile.validated", projectID, payload)
 	return err
 }
 
 func (a *App) toolProfileDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	if err := deleteProfile(context.Background(), ctx.AppDB(), strArg(args, "profile_id"), projectScope(ctx, args)); err != nil {
+	projectID := projectScope(ctx, args)
+	profileID := strArg(args, "profile_id")
+	if err := deleteProfile(context.Background(), ctx.AppDB(), profileID, projectID); err != nil {
 		return nil, err
 	}
+	a.emitProfileData(ctx, "profile.deleted", projectID, map[string]any{"id": profileID})
 	return map[string]any{"deleted": true}, nil
+}
+
+func (a *App) emitDownloadJob(ctx *sdk.AppCtx, topic string, job downloadJob) {
+	a.emitDownload(ctx, topic, job.ProjectID, map[string]any{
+		"id":              job.ID,
+		"status":          job.Status,
+		"progress":        job.Progress,
+		"url":             job.URL,
+		"title":           job.Title,
+		"mode":            job.Mode,
+		"quality":         job.Quality,
+		"storage_file_id": job.StorageFileID,
+		"storage_url":     job.StorageURL,
+		"error":           job.Error,
+	})
+}
+
+func (a *App) emitDownload(ctx *sdk.AppCtx, topic, projectID string, data map[string]any) {
+	if ctx == nil {
+		ctx = a.ctx
+	}
+	if ctx == nil {
+		return
+	}
+	if projectID != "" {
+		ctx.EmitWithProject(topic, projectID, data)
+		return
+	}
+	ctx.Emit(topic, data)
+}
+
+func (a *App) emitProfile(ctx *sdk.AppCtx, topic string, p sourceProfile) {
+	a.emitProfileData(ctx, topic, p.ProjectID, map[string]any{
+		"id":                p.ID,
+		"name":              p.Name,
+		"provider":          p.Provider,
+		"auth_type":         p.AuthType,
+		"status":            p.Status,
+		"last_validated_at": p.LastValidatedAt,
+		"last_error":        p.LastError,
+	})
+}
+
+func (a *App) emitProfileData(ctx *sdk.AppCtx, topic, projectID string, data map[string]any) {
+	if ctx == nil {
+		ctx = a.ctx
+	}
+	if ctx == nil {
+		return
+	}
+	if projectID != "" {
+		ctx.EmitWithProject(topic, projectID, data)
+		return
+	}
+	ctx.Emit(topic, data)
 }
 
 func (a *App) profilePayload(ctx context.Context, app *sdk.AppCtx, projectID, id string) (profilePayload, error) {
