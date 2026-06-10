@@ -2,14 +2,15 @@ schema: apteva-app/v1
 
 name: media-downloader
 display_name: Media Downloader
-version: 0.2.7
+version: 0.2.8
 description: |
   Fresh v0.2 media download sidecar for Apteva. Wraps yt-dlp for public
   and authenticated source downloads, stores completed files through the
   storage app, and keeps sensitive YouTube and Patreon cookie profiles
-  encrypted in the app database. v0.2.7 adds Patreon source profiles,
-  provider-specific cookie validation, and cookie-file import in the
-  project panel.
+  encrypted in the app database. v0.2.8 uses audio-first format
+  selection for MP3/audio jobs so age-restricted videos without
+  audio-only formats fall back to a small muxed stream instead of a
+  large HLS video stream.
 
 author: Apteva
 icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/media-downloader/icon.svg

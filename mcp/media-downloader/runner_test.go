@@ -18,7 +18,7 @@ func TestBuildDownloadArgsPrivateAudio(t *testing.T) {
 	}
 	args := buildDownloadArgs(req, "/tmp/job", "/tmp/cookies.txt")
 	got := stringsJoin(args)
-	for _, want := range []string{"--cookies /tmp/cookies.txt", "--ffmpeg-location /usr/bin/ffmpeg", "-x --audio-format m4a", "--no-playlist"} {
+	for _, want := range []string{"--cookies /tmp/cookies.txt", "--ffmpeg-location /usr/bin/ffmpeg", "-f ba/b[acodec!=none][height<=360]/b[acodec!=none]/b", "-x --audio-format m4a", "--no-playlist"} {
 		if !containsArgSequence(got, want) {
 			t.Fatalf("args missing %q: %v", want, args)
 		}
@@ -51,6 +51,18 @@ func TestBuildDownloadArgsSkipsYouTubeArgsForOtherHosts(t *testing.T) {
 	args := buildDownloadArgs(req, "/tmp/job", "")
 	if strings.Contains(stringsJoin(args), "youtube:player_client") {
 		t.Fatalf("non-YouTube args should not include youtube extractor args: %v", args)
+	}
+}
+
+func TestAudioFormatSelector(t *testing.T) {
+	if got := audioFormatSelector(downloadRequest{Quality: "best"}); got != "ba/b[acodec!=none][height<=360]/b[acodec!=none]/b" {
+		t.Fatalf("audio best selector = %q", got)
+	}
+	if got := audioFormatSelector(downloadRequest{Quality: "720p"}); got != "ba/b[acodec!=none][height<=720]/b[acodec!=none]/b" {
+		t.Fatalf("audio 720p selector = %q", got)
+	}
+	if got := audioFormatSelector(downloadRequest{FormatID: "18", Quality: "best"}); got != "18" {
+		t.Fatalf("audio format_id should win, got %q", got)
 	}
 }
 

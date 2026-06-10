@@ -92,6 +92,9 @@ func buildDownloadArgs(req downloadRequest, jobDir, cookieFile string) []string 
 		args = append(args, "--extractor-args", "youtube:player_client="+strings.TrimSpace(req.YoutubePlayer))
 	}
 	if req.Mode == "audio" {
+		if selector := audioFormatSelector(req); selector != "" {
+			args = append(args, "-f", selector)
+		}
 		format := strings.TrimSpace(req.AudioFormat)
 		if format == "" {
 			format = "mp3"
@@ -102,6 +105,28 @@ func buildDownloadArgs(req downloadRequest, jobDir, cookieFile string) []string 
 	}
 	args = append(args, req.URL)
 	return args
+}
+
+func audioFormatSelector(req downloadRequest) string {
+	if strings.TrimSpace(req.FormatID) != "" {
+		return strings.TrimSpace(req.FormatID)
+	}
+	switch strings.ToLower(strings.TrimSpace(req.Quality)) {
+	case "", "best":
+		return "ba/b[acodec!=none][height<=360]/b[acodec!=none]/b"
+	case "1080p":
+		return "ba/b[acodec!=none][height<=1080]/b[acodec!=none]/b"
+	case "720p":
+		return "ba/b[acodec!=none][height<=720]/b[acodec!=none]/b"
+	case "480p":
+		return "ba/b[acodec!=none][height<=480]/b[acodec!=none]/b"
+	case "360p":
+		return "ba/b[acodec!=none][height<=360]/b[acodec!=none]/b"
+	case "worst":
+		return "wa/w[acodec!=none]/worst[acodec!=none]/w"
+	default:
+		return strings.TrimSpace(req.Quality)
+	}
 }
 
 func isYouTubeURL(rawURL string) bool {
