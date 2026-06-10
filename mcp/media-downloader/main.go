@@ -172,7 +172,7 @@ func (a *App) toolProbe(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return nil, err
 	}
 	defer cleanup()
-	meta, err := probeMedia(context.Background(), a.runner, a.ytdlpPath, rawURL, tmp)
+	meta, err := probeMedia(context.Background(), a.runner, a.ytdlpPath, rawURL, tmp, parseExtraArgs(configString(ctx, "ytdlp_extra_args", "")))
 	if err != nil {
 		return nil, err
 	}
@@ -223,6 +223,7 @@ func (a *App) toolDownload(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		AudioFormat:       strArg(args, "audio_format"),
 		FFmpegLocation:    a.ffmpegPath,
 		YoutubePlayer:     configString(ctx, "youtube_player_client", "android"),
+		YTDLPExtraArgs:    parseExtraArgs(configString(ctx, "ytdlp_extra_args", "")),
 		NoPlaylist:        boolArg(args, "no_playlist", true),
 		Tags:              stringSliceArg(args, "tags"),
 	}
@@ -516,7 +517,7 @@ func (a *App) validateProfileAgainstURL(ctx *sdk.AppCtx, projectID, profileID, r
 		return err
 	}
 	defer cleanup()
-	_, err = probeMedia(context.Background(), a.runner, a.ytdlpPath, rawURL, tmp)
+	_, err = probeMedia(context.Background(), a.runner, a.ytdlpPath, rawURL, tmp, parseExtraArgs(configString(ctx, "ytdlp_extra_args", "")))
 	lastErr := ""
 	if err != nil {
 		lastErr = err.Error()

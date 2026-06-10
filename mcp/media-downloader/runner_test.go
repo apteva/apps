@@ -15,10 +15,11 @@ func TestBuildDownloadArgsPrivateAudio(t *testing.T) {
 		NoPlaylist:     true,
 		FFmpegLocation: "/usr/bin/ffmpeg",
 		YoutubePlayer:  "android",
+		YTDLPExtraArgs: []string{"--js-runtimes", "node:/usr/bin/node"},
 	}
 	args := buildDownloadArgs(req, "/tmp/job", "/tmp/cookies.txt")
 	got := stringsJoin(args)
-	for _, want := range []string{"--cookies /tmp/cookies.txt", "--ffmpeg-location /usr/bin/ffmpeg", "-f ba/b[acodec!=none][height<=360]/b[acodec!=none]/b", "-x --audio-format m4a", "--no-playlist"} {
+	for _, want := range []string{"--js-runtimes node:/usr/bin/node", "--cookies /tmp/cookies.txt", "--ffmpeg-location /usr/bin/ffmpeg", "-f ba/b[acodec!=none][height<=360]/b[acodec!=none]/b", "-x --audio-format m4a", "--no-playlist"} {
 		if !containsArgSequence(got, want) {
 			t.Fatalf("args missing %q: %v", want, args)
 		}
@@ -51,6 +52,24 @@ func TestBuildDownloadArgsSkipsYouTubeArgsForOtherHosts(t *testing.T) {
 	args := buildDownloadArgs(req, "/tmp/job", "")
 	if strings.Contains(stringsJoin(args), "youtube:player_client") {
 		t.Fatalf("non-YouTube args should not include youtube extractor args: %v", args)
+	}
+}
+
+func TestBuildProbeArgsIncludesExtraArgs(t *testing.T) {
+	args := buildProbeArgs("https://www.youtube.com/watch?v=abc", "/tmp/cookies.txt", []string{"--js-runtimes", "node:/usr/bin/node"})
+	got := stringsJoin(args)
+	for _, want := range []string{"--dump-single-json", "--js-runtimes node:/usr/bin/node", "--cookies /tmp/cookies.txt"} {
+		if !containsArgSequence(got, want) {
+			t.Fatalf("probe args missing %q: %v", want, args)
+		}
+	}
+}
+
+func TestParseExtraArgs(t *testing.T) {
+	got := parseExtraArgs("  --js-runtimes node:/usr/bin/node   --remote-components ejs:github ")
+	want := []string{"--js-runtimes", "node:/usr/bin/node", "--remote-components", "ejs:github"}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("parse extra args = %#v, want %#v", got, want)
 	}
 }
 

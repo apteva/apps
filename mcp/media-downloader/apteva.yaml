@@ -2,15 +2,14 @@ schema: apteva-app/v1
 
 name: media-downloader
 display_name: Media Downloader
-version: 0.2.8
+version: 0.2.9
 description: |
   Fresh v0.2 media download sidecar for Apteva. Wraps yt-dlp for public
   and authenticated source downloads, stores completed files through the
   storage app, and keeps sensitive YouTube and Patreon cookie profiles
-  encrypted in the app database. v0.2.8 uses audio-first format
-  selection for MP3/audio jobs so age-restricted videos without
-  audio-only formats fall back to a small muxed stream instead of a
-  large HLS video stream.
+  encrypted in the app database. v0.2.9 adds configurable extra yt-dlp
+  arguments so installs can enable JavaScript challenge solving, for
+  example --js-runtimes node:/path/to/node.
 
 author: Apteva
 icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/media-downloader/icon.svg
@@ -31,6 +30,9 @@ requires:
       required: true
     - name: ffmpeg
       executables: [ffmpeg, ffprobe]
+      required: false
+    - name: node
+      executables: [node]
       required: false
 
 provides:
@@ -86,6 +88,11 @@ config_schema:
     default: ""
     label: ffmpeg path
     description: Optional absolute path to ffmpeg. yt-dlp uses this for format merges and audio extraction when available.
+  - name: ytdlp_extra_args
+    type: text
+    default: ""
+    label: yt-dlp extra args
+    description: Optional whitespace-separated args passed to every yt-dlp call. Useful for YouTube challenge solving, for example --js-runtimes node:/opt/homebrew/bin/node.
   - name: youtube_player_client
     type: text
     default: "android"

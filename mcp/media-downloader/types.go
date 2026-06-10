@@ -61,6 +61,7 @@ type downloadRequest struct {
 	AudioFormat       string
 	FFmpegLocation    string
 	YoutubePlayer     string
+	YTDLPExtraArgs    []string
 	NoPlaylist        bool
 	Tags              []string
 }

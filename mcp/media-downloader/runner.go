@@ -61,8 +61,9 @@ func scanPipe(wg *sync.WaitGroup, r io.Reader, fn func(string)) {
 	}
 }
 
-func buildProbeArgs(rawURL, cookieFile string) []string {
+func buildProbeArgs(rawURL, cookieFile string, extraArgs []string) []string {
 	args := []string{"--dump-single-json", "--no-playlist", "--no-warnings"}
+	args = append(args, extraArgs...)
 	if cookieFile != "" {
 		args = append(args, "--cookies", cookieFile)
 	}
@@ -79,6 +80,7 @@ func buildDownloadArgs(req downloadRequest, jobDir, cookieFile string) []string 
 		"-P", jobDir,
 		"-o", "%(title).200B-%(id)s.%(ext)s",
 	}
+	args = append(args, req.YTDLPExtraArgs...)
 	if req.NoPlaylist {
 		args = append(args, "--no-playlist")
 	}
@@ -182,10 +184,14 @@ func parseProgressLine(line string) (float64, bool) {
 	return float64(whole), true
 }
 
-func probeMedia(ctx context.Context, runner commandRunner, ytdlpPath, rawURL, cookieFile string) (map[string]any, error) {
+func parseExtraArgs(raw string) []string {
+	return strings.Fields(strings.TrimSpace(raw))
+}
+
+func probeMedia(ctx context.Context, runner commandRunner, ytdlpPath, rawURL, cookieFile string, extraArgs []string) (map[string]any, error) {
 	var stdout strings.Builder
 	var stderr strings.Builder
-	err := runner.Run(ctx, ytdlpPath, buildProbeArgs(rawURL, cookieFile), func(line string) {
+	err := runner.Run(ctx, ytdlpPath, buildProbeArgs(rawURL, cookieFile, extraArgs), func(line string) {
 		stdout.WriteString(line)
 		stdout.WriteByte('\n')
 	}, func(line string) {
