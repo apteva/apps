@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: fleet
 display_name: Fleet
-version: 0.8.6
+version: 0.8.7
 description: |
   Control plane for a fleet of client apteva instances. Spawns every
   tenant as a local apteva process on the parent host with admin-
@@ -76,7 +76,7 @@ provides:
     - name: tenant_create
       description: "Spawn a new apteva tenant. Default (instance_id=0): local process on the parent host under ~/.apteva-fleet/<slug>/. Pass instance_id>0 (Instances app row id) to host on a remote VPS instead — fleet drives spawn/stop/install over SSH via the Instances integration. Pinned to npm apteva@latest by default; override with apteva_version. Args: slug, owner_email, instance_id? (default 0), port? (hosted), apteva_version? (default latest), apteva_bin? (local override)."
     - name: tenant_clone
-      description: "Clone a Fleet-managed local tenant into a new local tenant without stopping or modifying the source. Copies the source data dir to a new slug/config dir, creates a new Fleet row, clears public domain links on the clone, and optionally starts the clone on a new port. Hosted VPS and connected-remote tenants are refused for now. Args: source_tenant_id, slug, owner_email?, port?, start? (default true)."
+      description: "Clone a Fleet-managed tenant into a new tenant without stopping or modifying the source. Copies the source data dir to a new slug/config dir, creates a new Fleet row, clears public domain links on the clone, and optionally starts the clone on local or an Instances VPS. Args: source_tenant_id, slug, owner_email?, instance_id? (default source host; 0 = local parent, >0 = Instances VPS), port?, start? (default true)."
     - name: tenant_attach_key
       description: "Finish admin-driven setup by attaching the tenant's api_key (created via the tenant dashboard after admin registration). Flips status to active. Args: tenant_id, api_key."
     - name: tenant_connect
@@ -110,7 +110,7 @@ provides:
     - name: tenant_domain_record_delete
       description: "Proxy a DNS delete for a tenant-owned inherited domain. Intended for the tenant Domains facade. Args: tenant_id, domain, name, type."
     - name: tenant_migrate
-      description: "Move a local tenant onto a remote instance (VPS managed by the Instances app). Cold migration: stop local, tar + upload + extract the data dir, boot apteva-server on the instance against the moved DB, re-point the route, remove the local copy. Brief downtime; auto-rollback restarts the local process on failure. local→instance only. Args: tenant_id, instance_id (>0), port?."
+      description: "Move a Fleet-managed tenant between the local parent host and Instances VPS hosts. Cold migration: stop source, archive + transfer + extract the data dir, boot apteva-server on the target against the moved DB, re-point the route, remove the source copy after target health. Brief downtime; auto-rollback restarts the source on failure before commit. Args: tenant_id, instance_id (0 = local parent, >0 = Instances row id), port?."
     - name: tenant_update
       description: "Per-tenant apteva version update. Installs the requested version into a fleet-owned npm prefix at ~/.apteva-fleet/versions/<v>/, records target_version, stops the running tenant, respawns with the new binary. Other tenants are unaffected. Local-only. Args: tenant_id, version? (empty → npm latest)."
     - name: tenant_check_updates

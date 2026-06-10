@@ -18,6 +18,7 @@ import (
 //   POST   /api/instances/<id>/upgrade       {size, upgrade_disk?, wait?}
 //   POST   /api/instances/<id>/run           {cmd, timeout_s?}
 //   POST   /api/instances/<id>/upload        {path, content_b64}
+//   POST   /api/instances/<id>/download      {path}
 //   POST   /api/instances/<id>/wait-ready    {timeout_s?}
 //   GET    /api/instances/<id>/metrics       last vitals snapshot
 
@@ -103,6 +104,8 @@ func (a *App) handleInstanceItem(w http.ResponseWriter, r *http.Request) {
 		a.httpRun(w, r, id)
 	case "upload":
 		a.httpUpload(w, r, id)
+	case "download":
+		a.httpDownload(w, r, id)
 	case "wait-ready":
 		a.httpWaitReady(w, r, id)
 	case "metrics":
@@ -321,6 +324,45 @@ func (a *App) httpUpload(w http.ResponseWriter, r *http.Request, id int64) {
 		return
 	}
 	httpJSON(w, map[string]any{"id": id, "path": body.Path, "bytes_written": n})
+}
+
+func (a *App) httpDownload(w http.ResponseWriter, r *http.Request, id int64) {
+	if r.Method != http.MethodPost {
+		httpErr(w, http.StatusMethodNotAllowed, "POST")
+		return
+	}
+	var body struct {
+		Path string `json:"path"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		httpErr(w, http.StatusBadRequest, "invalid json")
+		return
+	}
+	if body.Path == "" {
+		httpErr(w, http.StatusBadRequest, "path required")
+		return
+	}
+	inst, err := dbGetInstance(globalCtx.AppDB(), id)
+	if err != nil {
+		httpErr(w, http.StatusNotFound, "instance not found")
+		return
+	}
+	var contentB64 string
+	var n int
+	if inst.IsLocal() {
+		contentB64, n, err = downloadLocal(globalCtx, body.Path)
+	} else {
+		if inst.Status != "ready" {
+			httpErr(w, http.StatusConflict, "instance not ready")
+			return
+		}
+		contentB64, n, err = downloadSSH(inst, body.Path)
+	}
+	if err != nil {
+		httpErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	httpJSON(w, map[string]any{"id": id, "path": body.Path, "content_b64": contentB64, "bytes": n})
 }
 
 func (a *App) httpWaitReady(w http.ResponseWriter, r *http.Request, id int64) {

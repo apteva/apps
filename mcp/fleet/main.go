@@ -17,7 +17,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: fleet
 display_name: Fleet
-version: 0.8.6
+version: 0.8.7
 description: Control plane for a local fleet of apteva tenants.
 author: Apteva
 scopes: [project, global]
@@ -64,7 +64,7 @@ provides:
     - name: tenant_create
       description: Spawn a new local apteva tenant.
     - name: tenant_clone
-      description: Clone a local Fleet tenant into a new tenant without stopping or modifying the source.
+      description: Clone a Fleet tenant to local or an Instances host without stopping or modifying the source.
     - name: tenant_attach_key
       description: Finish admin-driven setup by attaching the tenant's api_key.
     - name: tenant_connect
@@ -98,7 +98,7 @@ provides:
     - name: tenant_domain_record_delete
       description: Proxy a DNS delete for a tenant inherited domain.
     - name: tenant_migrate
-      description: Move a local tenant onto a remote instance (VPS) — cold transfer of the data dir, re-spawn there, re-point the route.
+      description: Move a Fleet tenant between local and Instances hosts — cold transfer of the data dir, re-spawn there, re-point the route.
     - name: tenant_update
       description: Update a tenant's apteva version. Installs the requested version into a fleet-owned npm prefix, then respawns.
     - name: tenant_check_updates
@@ -260,13 +260,14 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "tenant_clone",
-			Description: "Clone a Fleet-managed local tenant into a new local tenant without stopping or modifying the source. Copies the source data dir to a new slug/config dir, creates a new Fleet row, clears public domain links on the clone, and optionally starts the clone on a new port. Hosted VPS and connected-remote tenants are refused for now. Args: source_tenant_id (required), slug (required), owner_email? (defaults to source), port? (optional new local port), start? (default true).",
+			Description: "Clone a Fleet-managed tenant into a new tenant without stopping or modifying the source. Copies the source data dir to a new slug/config dir, creates a new Fleet row, clears public domain links on the clone, and optionally starts the clone on local or an Instances VPS. Args: source_tenant_id (required), slug (required), owner_email? (defaults to source), instance_id? (default source host; 0 = local parent, >0 = Instances VPS), port?, start? (default true).",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
 					"source_tenant_id": map[string]any{"type": "string"},
 					"slug":             map[string]any{"type": "string"},
 					"owner_email":      map[string]any{"type": "string"},
+					"instance_id":      map[string]any{"type": "integer"},
 					"port":             map[string]any{"type": "integer"},
 					"start":            map[string]any{"type": "boolean"},
 				},
@@ -470,7 +471,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "tenant_migrate",
-			Description: "Move a LOCAL tenant onto a remote instance (VPS managed by the Instances app). Cold migration: stops the local apteva-server, tars its data dir, uploads + extracts on the instance, boots apteva-server there against the moved DB (admin + api_key travel with the data), re-points the route, and removes the local copy. The tenant is briefly down during the transfer. On any failure the local process is restarted from the preserved data dir. Only local→instance for now. Args: tenant_id (required), instance_id (required, an Instances row id > 0), port? (hosted port; default 7100 + tenant-count-on-instance).",
+			Description: "Move a Fleet-managed tenant between the local parent host and Instances VPS hosts. Cold migration: stops the source apteva-server, archives its data dir, transfers + extracts on the target host, boots apteva-server there against the moved DB (admin + api_key travel with the data), re-points the route, and removes the source copy after target health. On failure before commit, the source is restarted and the row remains unchanged. Args: tenant_id (required), instance_id (required; 0 = local parent, >0 = Instances row id), port? (target port; auto if omitted).",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{

@@ -7,6 +7,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	tk "github.com/apteva/app-sdk/testkit"
 )
 
 func TestRunLocal_Output(t *testing.T) {
@@ -84,5 +86,33 @@ func TestUploadLocal_WriteRoundTrip(t *testing.T) {
 	}
 	if string(read) != string(body) {
 		t.Errorf("round-trip = %q, want %q", read, body)
+	}
+}
+
+func TestDownloadLocal_ReadRoundTrip(t *testing.T) {
+	tmp := t.TempDir()
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithEnv("APTEVA_DATA_DIR", tmp))
+	root := filepath.Join(tmp, "local-files")
+	if err := os.MkdirAll(root, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	body := []byte("download me")
+	path := filepath.Join(root, "artifact.tgz")
+	if err := os.WriteFile(path, body, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gotB64, n, err := downloadLocal(ctx, "artifact.tgz")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != len(body) {
+		t.Fatalf("bytes = %d, want %d", n, len(body))
+	}
+	got, err := base64.StdEncoding.DecodeString(gotB64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != string(body) {
+		t.Errorf("download round-trip = %q, want %q", got, body)
 	}
 }

@@ -73,8 +73,8 @@ func dialSSH(inst *Instance, timeout time.Duration) (*ssh.Client, error) {
 		return nil, errors.New("instance has no public IP")
 	}
 	cfg := &ssh.ClientConfig{
-		User:            user,
-		Auth:            []ssh.AuthMethod{ssh.PublicKeys(signer)},
+		User: user,
+		Auth: []ssh.AuthMethod{ssh.PublicKeys(signer)},
 		// First-time-trust on host keys. Pinning on first connection
 		// is a v0.2 polish — for v0.1 we accept whatever the VPS
 		// presents at provisioning time. The keypair itself is the
@@ -374,6 +374,46 @@ func uploadSSHOnce(client *ssh.Client, path, contentB64 string, decodedBody []by
 		return 0, fmt.Errorf("remote write failed: %w", err)
 	}
 	return len(decodedBody), nil
+}
+
+func downloadSSH(inst *Instance, path string) (contentB64 string, bytesRead int, err error) {
+	client, fresh, err := globalSSHPool.get(inst)
+	if err != nil {
+		return "", 0, fmt.Errorf("ssh dial: %w", err)
+	}
+	body, runErr := downloadSSHOnce(client, path)
+	if runErr != nil && !fresh && isSSHConnError(runErr) {
+		globalSSHPool.drop(inst.ID, client)
+		client, _, err = globalSSHPool.get(inst)
+		if err != nil {
+			return "", 0, fmt.Errorf("ssh redial after stale connection: %w", err)
+		}
+		body, runErr = downloadSSHOnce(client, path)
+	}
+	if runErr != nil {
+		return "", 0, runErr
+	}
+	return base64.StdEncoding.EncodeToString(body), len(body), nil
+}
+
+func downloadSSHOnce(client *ssh.Client, path string) ([]byte, error) {
+	session, err := client.NewSession()
+	if err != nil {
+		return nil, err
+	}
+	defer session.Close()
+	var stdout bytes.Buffer
+	var stderr bytes.Buffer
+	session.Stdout = &stdout
+	session.Stderr = &stderr
+	if err := session.Run(fmt.Sprintf(`cat %q`, path)); err != nil {
+		msg := strings.TrimSpace(stderr.String())
+		if msg != "" {
+			return nil, fmt.Errorf("remote read failed: %w: %s", err, msg)
+		}
+		return nil, fmt.Errorf("remote read failed: %w", err)
+	}
+	return stdout.Bytes(), nil
 }
 
 // probeSSHReady polls TCP-connect + SSH handshake until success or

@@ -81,6 +81,16 @@ func (a *App) MCPTools() []sdk.Tool {
 			Handler: a.toolUploadFile,
 		},
 		{
+			Name: "instance_download_file",
+			Description: "Read file content from the instance. Local: filesystem read under ctx.DataDir/local-files (path-allowlisted). " +
+				"Remote: SSH read. Returns content_b64 and byte count. Args: id, path.",
+			InputSchema: schemaObject(map[string]any{
+				"id":   map[string]any{"type": "integer"},
+				"path": map[string]any{"type": "string"},
+			}, []string{"id", "path"}),
+			Handler: a.toolDownloadFile,
+		},
+		{
 			Name: "instance_wait_ready",
 			Description: "Poll the instance until SSH is reachable. Already 'ready' instances return immediately. " +
 				"Args: id, timeout_s? (default 300).",
@@ -267,6 +277,32 @@ func (a *App) toolUploadFile(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		return nil, err
 	}
 	return map[string]any{"id": id, "path": path, "bytes_written": n}, nil
+}
+
+func (a *App) toolDownloadFile(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	id := int64Arg(args, "id")
+	path := strArg(args, "path")
+	if path == "" {
+		return nil, errors.New("path required")
+	}
+	inst, err := dbGetInstance(ctx.AppDB(), id)
+	if err != nil {
+		return nil, err
+	}
+	var contentB64 string
+	var n int
+	if inst.IsLocal() {
+		contentB64, n, err = downloadLocal(ctx, path)
+	} else {
+		if inst.Status != "ready" {
+			return nil, fmt.Errorf("instance not ready (status=%s)", inst.Status)
+		}
+		contentB64, n, err = downloadSSH(inst, path)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"id": id, "path": path, "content_b64": contentB64, "bytes": n}, nil
 }
 
 func (a *App) toolWaitReady(ctx *sdk.AppCtx, args map[string]any) (any, error) {

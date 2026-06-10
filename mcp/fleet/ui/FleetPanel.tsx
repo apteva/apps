@@ -579,13 +579,15 @@ export default function FleetPanel({ projectId, installId }: NativePanelProps) {
       {showClone && (
         <CloneTenantDialog
           tenant={showClone}
+          meta={meta}
           onClose={() => setShowClone(null)}
-          onSubmit={async ({ slug, owner_email, port, start }) => {
+          onSubmit={async ({ slug, owner_email, instance_id, port, start }) => {
             try {
               const r = await callTool<{ tenant_id: string }>("tenant_clone", {
                 source_tenant_id: showClone.id,
                 slug,
                 ...(owner_email ? { owner_email } : {}),
+                instance_id,
                 ...(port ? { port } : {}),
                 start,
               });
@@ -856,13 +858,8 @@ function TenantDetail({
   // Host placement: instance_id 0/undefined = parent host; >0 = a VPS.
   const onParentHost = (tenant.instance_id ?? 0) === 0;
   const hostInstance = meta?.instances?.find((i) => i.id === tenant.instance_id);
-  const canMigrate =
-    isLocal &&
-    onParentHost &&
-    !isSetupPending &&
-    !!meta?.host_provider_available &&
-    (meta?.instances?.length ?? 0) > 0;
-  const canClone = isLocal && onParentHost;
+  const canMigrate = isLocal && !isSetupPending;
+  const canClone = isLocal;
 
   return (
     <Card className="h-full">
@@ -939,7 +936,7 @@ function TenantDetail({
         )}
         {canMigrate && (
           <ActionButton
-            label="Move to instance…"
+            label="Move…"
             onClick={() => onOpenMigrate(tenant)}
           />
         )}
@@ -1454,6 +1451,22 @@ function CredentialRow({
   );
 }
 
+function hostPickerOptions(meta: MetaResp | null, currentID: number) {
+  const out = [
+    { id: 0, name: "Local server", public_ipv4: "", status: "ready" },
+    ...(meta?.instances ?? []),
+  ];
+  if (currentID > 0 && !out.some((i) => i.id === currentID)) {
+    out.push({
+      id: currentID,
+      name: `Instance ${currentID}`,
+      public_ipv4: "",
+      status: "ready",
+    });
+  }
+  return out;
+}
+
 function CreateTenantDialog({
   onClose,
   onSubmit,
@@ -1578,31 +1591,40 @@ function CreateTenantDialog({
 
 function CloneTenantDialog({
   tenant,
+  meta,
   onClose,
   onSubmit,
 }: {
   tenant: Tenant;
+  meta: MetaResp | null;
   onClose: () => void;
   onSubmit: (v: {
     slug: string;
     owner_email?: string;
+    instance_id: number;
     port?: number;
     start: boolean;
   }) => Promise<{ ok: boolean; error?: string }>;
 }) {
   const [slug, setSlug] = useState(`${tenant.slug}-copy`);
   const [email, setEmail] = useState(tenant.owner_email);
+  const hostOptions = useMemo(
+    () => hostPickerOptions(meta, tenant.instance_id ?? 0),
+    [meta, tenant.instance_id],
+  );
+  const [instanceID, setInstanceID] = useState(tenant.instance_id ?? 0);
   const [port, setPort] = useState("");
   const [start, setStart] = useState(true);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
+  const target = hostOptions.find((i) => i.id === instanceID);
 
   return (
     <DialogFrame title={`Clone ${tenant.slug}`} onClose={onClose}>
       <p className="text-xs text-text-dim mb-3">
-        Creates a new local tenant from the current data dir. The source
-        tenant is not stopped, restarted, or changed. Domains are not
-        copied to the clone.
+        Creates a new tenant from the current data dir. The source tenant
+        is not stopped, restarted, or changed. Domains are not copied to
+        the clone.
       </p>
       <Label text="New slug">
         <input
@@ -1622,6 +1644,20 @@ function CloneTenantDialog({
           placeholder={tenant.owner_email}
           className="w-full px-2 py-1.5 text-sm rounded-md border border-border bg-bg-card text-text"
         />
+      </Label>
+      <Label text="Target host">
+        <select
+          value={instanceID}
+          onChange={(e) => setInstanceID(Number(e.target.value))}
+          className="w-full px-2 py-1.5 text-sm rounded-md border border-border bg-bg-card text-text"
+        >
+          {hostOptions.map((i) => (
+            <option key={i.id} value={i.id}>
+              {i.id === 0 ? "Local server" : `${i.name} — ${i.public_ipv4}`}
+              {i.status !== "ready" ? ` (${i.status})` : ""}
+            </option>
+          ))}
+        </select>
       </Label>
       <Label text="Port (optional)">
         <input
@@ -1646,6 +1682,11 @@ function CloneTenantDialog({
           Domain stays on source: {tenant.domain}
         </div>
       )}
+      {target && (
+        <div className="text-xs text-text-dim font-mono">
+          Clone target: {target.id === 0 ? "local server" : `${target.name} (${target.public_ipv4})`}
+        </div>
+      )}
       {err && <p className="text-xs text-error mt-2">{err}</p>}
       <DialogActions>
         <ActionButton label="Cancel" onClick={onClose} />
@@ -1662,6 +1703,7 @@ function CloneTenantDialog({
             const r = await onSubmit({
               slug: slug.trim(),
               ...(email.trim() && email.trim() !== tenant.owner_email ? { owner_email: email.trim() } : {}),
+              instance_id: instanceID,
               ...(port.trim() ? { port: Number(port) } : {}),
               start,
             });
@@ -1676,10 +1718,9 @@ function CloneTenantDialog({
 
 // ─── Move-tenant dialog ─────────────────────────────────────────────
 //
-// Migrates a LOCAL tenant onto a remote instance. Cold move — the
-// tenant is briefly down while fleet stops it, transfers the data dir,
-// and boots it on the VPS. The dialog makes the downtime + the
-// one-direction limitation explicit before the operator commits.
+// Migrates a Fleet-managed tenant between local and Instances hosts.
+// Cold move — the tenant is briefly down while fleet stops it,
+// transfers the data dir, starts the target, and re-points routes.
 
 function MoveTenantDialog({
   tenant,
@@ -1692,60 +1733,57 @@ function MoveTenantDialog({
   onClose: () => void;
   onSubmit: (args: { instance_id: number; port?: number }) => Promise<{ ok: boolean; error?: string }>;
 }) {
-  const instances = meta.instances ?? [];
-  const [instanceID, setInstanceID] = useState(instances[0]?.id ?? 0);
+  const currentID = tenant.instance_id ?? 0;
+  const hostOptions = hostPickerOptions(meta, currentID);
+  const defaultTarget = hostOptions.find((i) => i.id !== currentID)?.id ?? currentID;
+  const [instanceID, setInstanceID] = useState(defaultTarget);
   const [port, setPort] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
-  const target = instances.find((i) => i.id === instanceID);
-  const noInstances = instances.length === 0;
+  const target = hostOptions.find((i) => i.id === instanceID);
+  const sameHost = instanceID === currentID;
 
   return (
-    <DialogFrame title={`Move ${tenant.slug} to an instance`} onClose={onClose}>
+    <DialogFrame title={`Move ${tenant.slug}`} onClose={onClose}>
       <p className="text-xs text-text-dim mb-3">
-        Relocates this tenant from the parent host onto a remote VPS:
-        fleet stops the local process, copies its data dir over, boots
-        apteva-server on the instance, and re-points the route. The
-        tenant is briefly <span className="text-text">down</span> during
-        the transfer. If anything fails, the local process is restarted
-        automatically.
+        Relocates this tenant to another host. Fleet stops the source,
+        transfers its data dir, starts the target, and re-points routes.
+        The tenant is briefly <span className="text-text">down</span>.
+        If anything fails before commit, the source is restarted.
       </p>
-      {noInstances ? (
-        <p className="text-xs text-text-dim">
-          No ready instances. Provision one in the Instances app first.
+      <Label text="Target host">
+        <select
+          value={instanceID}
+          onChange={(e) => setInstanceID(Number(e.target.value))}
+          className="w-full px-2 py-1.5 text-sm rounded-md border border-border bg-bg-card text-text"
+        >
+          {hostOptions.map((i) => (
+            <option key={i.id} value={i.id}>
+              {i.id === 0 ? "Local server" : `${i.name} — ${i.public_ipv4}`}
+              {i.status !== "ready" ? ` (${i.status})` : ""}
+            </option>
+          ))}
+        </select>
+      </Label>
+      <Label text="Port (optional)">
+        <input
+          type="number"
+          value={port}
+          onChange={(e) => setPort(e.target.value)}
+          placeholder={instanceID === 0 ? "auto" : "auto (7100 + tenants on this instance)"}
+          className="w-full px-2 py-1.5 text-sm rounded-md border border-border bg-bg-card text-text font-mono"
+        />
+      </Label>
+      {target && (
+        <div className="text-xs text-text-dim font-mono">
+          {tenant.base_url} → {target.id === 0 ? "local server" : `${target.name} (${target.public_ipv4})`}
+        </div>
+      )}
+      {sameHost && !port.trim() && (
+        <p className="text-xs text-warn mt-2">
+          Pick a different host or specify a new port.
         </p>
-      ) : (
-        <>
-          <Label text="Target instance">
-            <select
-              value={instanceID}
-              onChange={(e) => setInstanceID(Number(e.target.value))}
-              className="w-full px-2 py-1.5 text-sm rounded-md border border-border bg-bg-card text-text"
-            >
-              {instances.map((i) => (
-                <option key={i.id} value={i.id}>
-                  {i.name} — {i.public_ipv4}
-                  {i.status !== "ready" ? ` (${i.status})` : ""}
-                </option>
-              ))}
-            </select>
-          </Label>
-          <Label text="Port (optional)">
-            <input
-              type="number"
-              value={port}
-              onChange={(e) => setPort(e.target.value)}
-              placeholder="auto (7100 + tenants on this instance)"
-              className="w-full px-2 py-1.5 text-sm rounded-md border border-border bg-bg-card text-text font-mono"
-            />
-          </Label>
-          {target && (
-            <div className="text-xs text-text-dim font-mono">
-              {tenant.base_url} → {target.name} ({target.public_ipv4})
-            </div>
-          )}
-        </>
       )}
       {err && <p className="text-xs text-error mt-2">{err}</p>}
       <DialogActions>
@@ -1754,8 +1792,8 @@ function MoveTenantDialog({
           label={busy ? "Moving…" : "Move"}
           busy={busy}
           onClick={async () => {
-            if (!instanceID) {
-              setErr("pick a target instance");
+            if (sameHost && !port.trim()) {
+              setErr("pick a different host or specify a new port");
               return;
             }
             setBusy(true);

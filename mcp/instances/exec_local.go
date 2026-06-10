@@ -83,6 +83,19 @@ func uploadLocal(ctx *sdk.AppCtx, path string, contentB64 string) (bytesWritten 
 	return len(body), nil
 }
 
+func downloadLocal(ctx *sdk.AppCtx, path string) (contentB64 string, bytesRead int, err error) {
+	root := localFilesRoot(ctx)
+	cleaned, err := resolveLocalPath(root, path)
+	if err != nil {
+		return "", 0, err
+	}
+	body, err := os.ReadFile(cleaned)
+	if err != nil {
+		return "", 0, err
+	}
+	return base64.StdEncoding.EncodeToString(body), len(body), nil
+}
+
 // resolveLocalPath joins the requested path under root, then verifies
 // the absolute result still sits under root. Catches both literal
 // "../" and symlink-target tricks (after Abs() resolves the link).

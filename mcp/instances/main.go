@@ -6,6 +6,7 @@
 //
 // The MCP surface is uniform across local and remote: instance_create,
 // instance_destroy, instance_run_command, instance_upload_file,
+// instance_download_file,
 // instance_metrics — same shape, the implementation switches on
 // provider='local' vs the SSH-based remote path.
 //
@@ -39,7 +40,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: instances
 display_name: Instances
-version: 0.4.12
+version: 0.4.13
 description: |
   Compute-host inventory for Apteva. Manages local machine + VPS
   instances through a generic provider binding. Compatible provider
@@ -76,6 +77,7 @@ provides:
     - { name: instance_upgrade,      description: "In-place resize of a remote instance where the provider adapter supports it. Hetzner is implemented today. Args: id, size, upgrade_disk?, wait?." }
     - { name: instance_run_command,  description: "Execute a shell command. Local: exec; remote: SSH. Args: id, cmd, timeout_s?." }
     - { name: instance_upload_file,  description: "Write a file. Local: filesystem (path-allowlisted); remote: SCP. Args: id, path, content_b64." }
+    - { name: instance_download_file, description: "Read a file. Local: filesystem (path-allowlisted); remote: SSH cat. Args: id, path." }
     - { name: instance_wait_ready,   description: "Poll the instance until SSH is reachable. Args: id, timeout_s?." }
     - { name: instance_metrics,      description: "CPU / memory / disk / network / load / uptime. Args: id." }
     - { name: instance_list_server_types, description: "Live list of active, non-deprecated VPS server types (sizes) from the bound provider — name, cores, memory_gb, disk_gb, price, available_in. Use to discover valid sizes for instance_create. Args: provider? (default: bound provider)." }

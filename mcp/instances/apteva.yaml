@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: instances
 display_name: Instances
-version: 0.4.12
+version: 0.4.13
 description: |
   Compute-host inventory + lifecycle for Apteva. The local Apteva
   machine is always available as a built-in instance (id 0); remote
@@ -16,8 +16,8 @@ description: |
   SSHRuntime, Backup off-host targets, Containers, future Database
   / MQTT / game-server apps. Consumers bind Instances as a
   kind=app integration and call instance_run_command /
-  instance_upload_file / instance_metrics with a host_id, instead
-  of binding a VPS provider directly.
+  instance_upload_file / instance_download_file / instance_metrics
+  with a host_id, instead of binding a VPS provider directly.
 
   Note: "instance" here = compute machine (AWS-style). Apteva-core's
   existing "instance" concept (a thinking loop per project) is a
@@ -69,6 +69,8 @@ provides:
       description: Execute a shell command (local exec or remote SSH). Output capped at 1 MB.
     - name: instance_upload_file
       description: Write file content (local filesystem or remote SCP-equivalent over SSH).
+    - name: instance_download_file
+      description: Read file content (local filesystem or remote SSH) as base64.
     - name: instance_wait_ready
       description: Poll the instance until SSH is reachable.
     - name: instance_metrics
