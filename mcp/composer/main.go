@@ -27,7 +27,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: composer
 display_name: Composer
-version: 0.3.2
+version: 0.3.3
 description: |
   Multi-clip video compositions with a structured timeline panel,
   Storage browsing, timed audio tracks, audio-only renders, and

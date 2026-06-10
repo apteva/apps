@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: media-downloader
 display_name: Media Downloader
-version: 0.2.9
+version: 0.2.10
 description: |
   Fresh v0.2 media download sidecar for Apteva. Wraps yt-dlp for public
   and authenticated source downloads, stores completed files through the

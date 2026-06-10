@@ -27,7 +27,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: calendar
 display_name: Calendar
-version: 0.1.0
+version: 0.3.5
 description: Self-contained calendar with multiple calendars and recurrence.
 author: Apteva
 scopes: [project, global]
