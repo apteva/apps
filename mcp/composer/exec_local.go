@@ -50,15 +50,25 @@ func (e *localFFmpegExecutor) Render(
 		}
 	}()
 
-	track := edit.Timeline.Tracks[0]
-
 	// Resolve every clip's asset to a URL. ffmpeg accepts https:// inputs
 	// natively (movflags+frag work); no need to download first.
-	inputs := make([]string, 0, len(track.Clips)+1)
-	for i, c := range track.Clips {
+	visual := primaryVisualTrack(edit)
+	if visual == nil {
+		return Result{}, fmt.Errorf("no visual track")
+	}
+	audioClips := audioTimelineClips(edit)
+	inputs := make([]string, 0, len(visual.Clips)+len(audioClips)+1)
+	for i, c := range visual.Clips {
 		url, err := resolveAssetURL(app, c.Asset.Src)
 		if err != nil {
-			return Result{}, fmt.Errorf("clip[%d]: resolve %q: %w", i, c.Asset.Src, err)
+			return Result{}, fmt.Errorf("visual clip[%d]: resolve %q: %w", i, c.Asset.Src, err)
+		}
+		inputs = append(inputs, url)
+	}
+	for i, c := range audioClips {
+		url, err := resolveAssetURL(app, c.Asset.Src)
+		if err != nil {
+			return Result{}, fmt.Errorf("audio clip[%d]: resolve %q: %w", i, c.Asset.Src, err)
 		}
 		inputs = append(inputs, url)
 	}
@@ -108,17 +118,22 @@ func (e *localFFmpegExecutor) Render(
 // debugging via shellEcho.
 func buildLocalFFmpegArgs(edit *Edit, output Output, inputs []string, soundtrackIdx int, outFile string) []string {
 	w, h := resolutionWH(output.Resolution, output.Aspect)
-	track := edit.Timeline.Tracks[0]
+	track := primaryVisualTrack(edit)
+	if track == nil {
+		track = &Track{}
+	}
+	audioClips := audioTimelineClips(edit)
+	visualCount := len(track.Clips)
 
 	args := []string{"-y", "-loglevel", "error"}
 
 	// One -i per input.
 	for i, src := range inputs {
 		// Images need -loop 1 + -t to behave as fixed-length stills.
-		if i < len(track.Clips) && track.Clips[i].Asset.Type == "image" {
+		if i < visualCount && clipAssetType(track.Clips[i], "visual") == "image" {
 			args = append(args,
 				"-loop", "1",
-				"-t", trimFloat(track.Clips[i].Length),
+				"-t", trimFloat(clipDuration(track.Clips[i])),
 				"-i", src,
 			)
 			continue
@@ -139,8 +154,8 @@ func buildLocalFFmpegArgs(edit *Edit, output Output, inputs []string, soundtrack
 		// Trim length — important for video clips that are longer than
 		// the requested clip length. Image clips are already length-pinned
 		// via -t on input.
-		if c.Asset.Type != "image" {
-			fmt.Fprintf(&filter, ",trim=duration=%s,setpts=PTS-STARTPTS", trimFloat(c.Length))
+		if clipAssetType(c, "visual") != "image" {
+			fmt.Fprintf(&filter, ",trim=duration=%s,setpts=PTS-STARTPTS", trimFloat(clipDuration(c)))
 		}
 		// Optional fade in/out within the clip.
 		if c.Transition != nil {
@@ -148,7 +163,7 @@ func buildLocalFFmpegArgs(edit *Edit, output Output, inputs []string, soundtrack
 				filter.WriteString(",fade=t=in:st=0:d=0.3")
 			}
 			if c.Transition.Out == "fade" {
-				fmt.Fprintf(&filter, ",fade=t=out:st=%s:d=0.3", trimFloat(c.Length-0.3))
+				fmt.Fprintf(&filter, ",fade=t=out:st=%s:d=0.3", trimFloat(clipDuration(c)-0.3))
 			}
 		}
 		// Optional text overlay (drawtext).
@@ -159,12 +174,12 @@ func buildLocalFFmpegArgs(edit *Edit, output Output, inputs []string, soundtrack
 		fmt.Fprintf(&filter, "[v%d];", i)
 
 		// Per-clip audio: trim or silence-pad to clip length.
-		if c.Asset.Type == "image" {
+		if clipAssetType(c, "visual") == "image" {
 			// Synthesize silent audio for image clips so concat audio
 			// stream count matches.
-			fmt.Fprintf(&filter, "anullsrc=channel_layout=stereo:sample_rate=44100,atrim=duration=%s[a%d];", trimFloat(c.Length), i)
+			fmt.Fprintf(&filter, "anullsrc=channel_layout=stereo:sample_rate=44100,atrim=duration=%s[a%d];", trimFloat(clipDuration(c)), i)
 		} else {
-			fmt.Fprintf(&filter, "[%d:a]atrim=duration=%s,asetpts=PTS-STARTPTS[a%d];", i, trimFloat(c.Length), i)
+			fmt.Fprintf(&filter, "[%d:a]atrim=duration=%s,asetpts=PTS-STARTPTS[a%d];", i, trimFloat(clipDuration(c)), i)
 		}
 	}
 
@@ -175,20 +190,40 @@ func buildLocalFFmpegArgs(edit *Edit, output Output, inputs []string, soundtrack
 	}
 	fmt.Fprintf(&filter, "concat=n=%d:v=1:a=1[vcat][acat];", n)
 
-	// Soundtrack overlay
+	mixLabels := []string{"[acat]"}
+	for i, c := range audioClips {
+		inputIdx := visualCount + i
+		delayMS := int(c.Start * 1000)
+		if delayMS < 0 {
+			delayMS = 0
+		}
+		fmt.Fprintf(&filter,
+			"[%d:a]atrim=duration=%s,asetpts=PTS-STARTPTS,adelay=%d|%d,volume=%g[ta%d];",
+			inputIdx, trimFloat(clipDuration(c)), delayMS, delayMS, clipVolume(c), i,
+		)
+		mixLabels = append(mixLabels, fmt.Sprintf("[ta%d]", i))
+	}
+
 	if soundtrackIdx >= 0 {
 		vol := 1.0
 		if v := edit.Timeline.Soundtrack.Volume; v > 0 {
 			vol = v
 		}
 		fmt.Fprintf(&filter,
-			"[%d:a]volume=%g,atrim=duration=%s[snd];[acat][snd]amix=inputs=2:duration=longest:normalize=0[aout]",
+			"[%d:a]volume=%g,atrim=duration=%s[snd];",
 			soundtrackIdx, vol, trimFloat(editDurationSeconds(edit)),
 		)
-		filter.WriteString(";[vcat]null[vout]")
-	} else {
-		filter.WriteString("[vcat]null[vout];[acat]anull[aout]")
+		mixLabels = append(mixLabels, "[snd]")
 	}
+	if len(mixLabels) > 1 {
+		for _, label := range mixLabels {
+			filter.WriteString(label)
+		}
+		fmt.Fprintf(&filter, "amix=inputs=%d:duration=longest:normalize=0[aout];", len(mixLabels))
+	} else {
+		filter.WriteString("[acat]anull[aout];")
+	}
+	filter.WriteString("[vcat]null[vout]")
 
 	args = append(args,
 		"-filter_complex", filter.String(),

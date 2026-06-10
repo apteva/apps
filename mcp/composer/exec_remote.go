@@ -50,12 +50,23 @@ func (e *remoteFFmpegExecutor) Render(
 
 	// Resolve every input to a URL the remote can fetch. storage:N →
 	// signed URL via storage.files_get_url; https:// pass-through.
-	track := edit.Timeline.Tracks[0]
-	urls := make([]string, 0, len(track.Clips)+1)
+	track := primaryVisualTrack(edit)
+	if track == nil {
+		return Result{}, fmt.Errorf("no visual track")
+	}
+	audioClips := audioTimelineClips(edit)
+	urls := make([]string, 0, len(track.Clips)+len(audioClips)+1)
 	for i, c := range track.Clips {
 		url, err := resolveAssetURL(app, c.Asset.Src)
 		if err != nil {
-			return Result{}, fmt.Errorf("clip[%d]: resolve %q: %w", i, c.Asset.Src, err)
+			return Result{}, fmt.Errorf("visual clip[%d]: resolve %q: %w", i, c.Asset.Src, err)
+		}
+		urls = append(urls, url)
+	}
+	for i, c := range audioClips {
+		url, err := resolveAssetURL(app, c.Asset.Src)
+		if err != nil {
+			return Result{}, fmt.Errorf("audio clip[%d]: resolve %q: %w", i, c.Asset.Src, err)
 		}
 		urls = append(urls, url)
 	}
@@ -72,7 +83,7 @@ func (e *remoteFFmpegExecutor) Render(
 	// from the curl outputs by referring to ./in0, ./in1, … below.
 	soundtrackIdx := -1
 	if edit.Timeline.Soundtrack != nil {
-		soundtrackIdx = len(track.Clips)
+		soundtrackIdx = len(track.Clips) + len(audioClips)
 	}
 	localPaths := make([]string, len(urls))
 	for i := range urls {

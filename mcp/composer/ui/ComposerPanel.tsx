@@ -1,4 +1,4 @@
-// ComposerPanel v0.3.0 - timeline editor with storage and Media Studio AI assets.
+// ComposerPanel v0.3.1 - timeline editor with storage and Media Studio AI assets.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
@@ -167,6 +167,22 @@ function normalizeClips(clips: ClipDraft[]): ClipDraft[] {
   });
 }
 
+function prettyJSON(raw: string, fallback: string): string {
+  try {
+    return JSON.stringify(JSON.parse(raw || "{}"), null, 2);
+  } catch {
+    return fallback;
+  }
+}
+
+function visualTrack(tracks: any[]): any | null {
+  if (!Array.isArray(tracks)) return null;
+  return tracks.find((track) => {
+    const kind = String(track?.type || "visual").toLowerCase();
+    return kind !== "audio" && kind !== "sound" && kind !== "music" && kind !== "voice" && kind !== "sfx";
+  }) || null;
+}
+
 function parseComposition(c: Composition | null): DraftState {
   if (!c) return cloneDefault();
   const draft = cloneDefault();
@@ -175,7 +191,8 @@ function parseComposition(c: Composition | null): DraftState {
     const edit = JSON.parse(c.edit_json || "{}");
     const timeline = edit.timeline || {};
     draft.background = timeline.background || draft.background;
-    const clips = Array.isArray(timeline.tracks?.[0]?.clips) ? timeline.tracks[0].clips : [];
+    const track = visualTrack(timeline.tracks || []);
+    const clips = Array.isArray(track?.clips) ? track.clips : [];
     if (clips.length) {
       draft.clips = normalizeClips(clips.map((clip: any, i: number) => ({
         id: String(clip.uid || `clip-${i + 1}`),
@@ -263,6 +280,19 @@ function draftToBody(draft: DraftState): Record<string, unknown> {
     };
   }
   return body;
+}
+
+function bodyFromEditorJSON(name: string, editText: string, outputText: string): Record<string, unknown> {
+  const edit = JSON.parse(editText || "{}");
+  const output = JSON.parse(outputText || "{}");
+  const timeline = edit.timeline || {};
+  return {
+    name,
+    tracks: Array.isArray(timeline.tracks) ? timeline.tracks : [],
+    soundtrack: timeline.soundtrack,
+    background: timeline.background,
+    output,
+  };
 }
 
 function editJSONFromDraft(draft: DraftState): string {
@@ -410,14 +440,9 @@ export default function ComposerPanel({ projectId }: NativePanelProps) {
     setDraft(next);
     setSelectedClipId(next.clips[0]?.id || "");
     setPlayhead(0);
-    setJsonEdit(editJSONFromDraft(next));
-    setJsonOutput(outputJSONFromDraft(next));
+    setJsonEdit(selected ? prettyJSON(selected.edit_json, editJSONFromDraft(next)) : editJSONFromDraft(next));
+    setJsonOutput(selected ? prettyJSON(selected.output_json, outputJSONFromDraft(next)) : outputJSONFromDraft(next));
   }, [selectedId, selected?.edit_json, selected?.output_json]);
-
-  useEffect(() => {
-    setJsonEdit(editJSONFromDraft(draft));
-    setJsonOutput(outputJSONFromDraft(draft));
-  }, [draft]);
 
   useEffect(() => {
     if (!playing) return;
@@ -458,7 +483,10 @@ export default function ComposerPanel({ projectId }: NativePanelProps) {
   const updateDraft = (fn: (draft: DraftState) => DraftState) => {
     setDraft((cur) => {
       const next = fn(cur);
-      return { ...next, clips: normalizeClips(next.clips) };
+      const normalized = { ...next, clips: normalizeClips(next.clips) };
+      setJsonEdit(editJSONFromDraft(normalized));
+      setJsonOutput(outputJSONFromDraft(normalized));
+      return normalized;
     });
   };
 
@@ -529,11 +557,15 @@ export default function ComposerPanel({ projectId }: NativePanelProps) {
   const save = async () => {
     setStatus("Saving...");
     try {
-      if (draft.clips.length === 0) {
+      if (tab !== "json" && draft.clips.length === 0) {
         setStatus("Add at least one clip before saving.");
         return;
       }
-      const body = draftToBody(draft);
+      const body = tab === "json" ? bodyFromEditorJSON(draft.name, jsonEdit, jsonOutput) : draftToBody(draft);
+      if (!Array.isArray((body as any).tracks) || (body as any).tracks.length === 0) {
+        setStatus("Add at least one track before saving.");
+        return;
+      }
       const url = selectedId == null ? `${API}/composition/new` : `${API}/composition/${selectedId}`;
       const method = selectedId == null ? "POST" : "PUT";
       const res = await fetch(url, {
@@ -569,7 +601,12 @@ export default function ComposerPanel({ projectId }: NativePanelProps) {
         created_at: "",
         updated_at: "",
       };
-      setDraft(parseComposition(c));
+      const next = parseComposition(c);
+      setDraft(next);
+      setSelectedClipId(next.clips[0]?.id || "");
+      setPlayhead(0);
+      setJsonEdit(JSON.stringify(edit, null, 2));
+      setJsonOutput(JSON.stringify(output, null, 2));
       setStatus("JSON applied.");
     } catch (e) {
       setStatus("JSON error: " + (e as Error).message);

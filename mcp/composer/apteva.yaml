@@ -2,14 +2,17 @@ schema: apteva-app/v1
 
 name: composer
 display_name: Composer
-version: 0.3.0
+version: 0.3.1
 description: |
   Multi-clip video composition. Stitch generated or uploaded assets
-  into a single video — clips on a track, optional soundtrack, text
-  overlays. Render runs locally via the sidecar's bundled ffmpeg by
+  into a single video — one visual track, timed audio tracks, optional
+  soundtrack, and text overlays. Render runs locally via the sidecar's bundled ffmpeg by
   default, on a render host via instances when render_host_id is
   set, or against a SaaS render backend (Shotstack et al) when one
   is bound to the render_executor role.
+
+  v0.3.1 adds generic timed audio tracks and generated asset shorthand
+  for Media Studio-backed clips, music, voice, and sound effects.
 
   v0.3.0 adds AI-backed clip and soundtrack sources. Composer stores
   the generation intent on the timeline, calls Media Studio to
@@ -56,7 +59,7 @@ provides:
   http_routes:
     - prefix: /
   mcp_tools:
-    - { name: composition_create, description: "Create a composition. Args: name?, tracks (array of {clips:[…]}), clips may include ai generation specs, soundtrack? ({src, volume?, ai?}), output ({format, resolution, aspect, fps})." }
+    - { name: composition_create, description: "Create a composition. Args: name?, tracks (array of {type?: visual|audio, clips:[…]}), clips may include ai generation specs or asset.type=generated, soundtrack? ({src, volume?, ai?}), output ({format, resolution, aspect, fps})." }
     - { name: composition_update, description: "Patch a composition. Args: id, patch (subset of {name, tracks, soundtrack, output})." }
     - { name: composition_get,    description: "Fetch one composition with its latest render row. Args: id." }
     - { name: composition_list,   description: "List compositions for this project. Args: limit? (default 50)." }

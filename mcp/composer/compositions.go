@@ -7,15 +7,12 @@ import (
 	"strings"
 )
 
-// Canonical Edit JSON (Shotstack-shape subset). v0.1 supports:
-//   - One video track of N clips
-//   - Optional soundtrack (single audio file with volume)
-//   - Per-clip text overlay (single line, position + font size)
-//   - Per-clip transition: "none" | "fade" (cut otherwise)
-//
-// Validator rejects shapes that would silently misrender (multi-track,
-// keyframes, unknown asset types, etc.) so the executor can assume a
-// known shape.
+// Canonical Edit JSON. The renderer supports one visual track and any
+// number of timed audio tracks. Visual clips are concatenated in track
+// order; audio clips use their start offsets and are mixed over the
+// visual track audio. The schema intentionally stays close to SaaS
+// render APIs (Shotstack/Creatomate-style tracks and clips) while
+// keeping unsupported features explicit in validation.
 
 type Edit struct {
 	Timeline Timeline `json:"timeline"`
@@ -34,6 +31,8 @@ type Soundtrack struct {
 }
 
 type Track struct {
+	ID    string `json:"id,omitempty"`
+	Type  string `json:"type,omitempty"` // visual|video|audio
 	Clips []Clip `json:"clips"`
 }
 
@@ -42,14 +41,19 @@ type Clip struct {
 	Asset      Asset       `json:"asset"`
 	Start      float64     `json:"start"`  // seconds from composition start
 	Length     float64     `json:"length"` // seconds
+	Duration   float64     `json:"duration,omitempty"`
+	Volume     float64     `json:"volume,omitempty"`
 	Transition *Transition `json:"transition,omitempty"`
 	Text       *TextOver   `json:"text,omitempty"`
 	AI         *AIAsset    `json:"ai,omitempty"`
 }
 
 type Asset struct {
-	Type string `json:"type"` // "video" | "image" | "audio"
-	Src  string `json:"src"`  // storage:N | https://… | mediastudio:N
+	Type     string         `json:"type"` // video|image|audio|generated
+	Src      string         `json:"src"`  // storage:N | https://… | mediastudio:N
+	Provider string         `json:"provider,omitempty"`
+	Kind     string         `json:"kind,omitempty"`
+	Request  map[string]any `json:"request,omitempty"`
 }
 
 type AIAsset struct {
@@ -98,41 +102,77 @@ func validateEdit(e *Edit) error {
 	if len(e.Timeline.Tracks) == 0 {
 		return errors.New("at least one track required")
 	}
-	if len(e.Timeline.Tracks) > 1 {
-		return errors.New("v0.1 supports a single video track (got " + fmt.Sprint(len(e.Timeline.Tracks)) + ")")
+	visualTracks := 0
+	for ti := range e.Timeline.Tracks {
+		track := &e.Timeline.Tracks[ti]
+		if len(track.Clips) == 0 {
+			return fmt.Errorf("track[%d]: must have at least one clip", ti)
+		}
+		for i := range track.Clips {
+			c := &track.Clips[i]
+			normalizeGeneratedAsset(c)
+			if c.Length <= 0 && c.Duration > 0 {
+				c.Length = c.Duration
+			}
+		}
+		tt := trackKind(*track)
+		if tt == "visual" {
+			visualTracks++
+			if visualTracks > 1 {
+				return errors.New("composer currently renders one visual track plus optional audio tracks")
+			}
+		} else if tt != "audio" {
+			return fmt.Errorf("track[%d]: unsupported track.type %q (use visual or audio)", ti, track.Type)
+		}
+		for i := range track.Clips {
+			c := &track.Clips[i]
+			if c.Asset.Src == "" && c.AI == nil {
+				return fmt.Errorf("track[%d].clip[%d]: asset.src required", ti, i)
+			}
+			at := clipAssetType(*c, tt)
+			if at == "" {
+				at = "video"
+			}
+			if at != "video" && at != "image" && at != "audio" {
+				return fmt.Errorf("track[%d].clip[%d]: unsupported asset.type %q", ti, i, c.Asset.Type)
+			}
+			if tt == "visual" && at == "audio" {
+				return fmt.Errorf("track[%d].clip[%d]: audio assets belong on audio tracks", ti, i)
+			}
+			if tt == "audio" && at != "audio" {
+				return fmt.Errorf("track[%d].clip[%d]: audio tracks require audio assets", ti, i)
+			}
+			if clipDuration(*c) <= 0 {
+				return fmt.Errorf("track[%d].clip[%d]: length must be > 0", ti, i)
+			}
+			if c.Volume < 0 || c.Volume > 1 {
+				return fmt.Errorf("track[%d].clip[%d]: volume must be 0..1", ti, i)
+			}
+			if tt == "audio" && c.Text != nil {
+				return fmt.Errorf("track[%d].clip[%d]: text overlays are only supported on visual clips", ti, i)
+			}
+			if c.Transition != nil {
+				if tt == "audio" {
+					return fmt.Errorf("track[%d].clip[%d]: transitions are only supported on visual clips", ti, i)
+				}
+				if c.Transition.In != "" && c.Transition.In != "none" && c.Transition.In != "fade" {
+					return fmt.Errorf("track[%d].clip[%d]: transition.in must be 'none' or 'fade' (got %q)", ti, i, c.Transition.In)
+				}
+				if c.Transition.Out != "" && c.Transition.Out != "none" && c.Transition.Out != "fade" {
+					return fmt.Errorf("track[%d].clip[%d]: transition.out must be 'none' or 'fade' (got %q)", ti, i, c.Transition.Out)
+				}
+			}
+			if c.Text != nil {
+				switch c.Text.Position {
+				case "", "top", "center", "bottom":
+				default:
+					return fmt.Errorf("track[%d].clip[%d]: text.position must be top|center|bottom", ti, i)
+				}
+			}
+		}
 	}
-	track := e.Timeline.Tracks[0]
-	if len(track.Clips) == 0 {
-		return errors.New("track must have at least one clip")
-	}
-	for i, c := range track.Clips {
-		if c.Asset.Src == "" && c.AI == nil {
-			return fmt.Errorf("clip[%d]: asset.src required", i)
-		}
-		switch c.Asset.Type {
-		case "video", "image", "":
-			// "" defaults to "video"; image needs a length
-		default:
-			return fmt.Errorf("clip[%d]: unsupported asset.type %q (v0.1 accepts video|image)", i, c.Asset.Type)
-		}
-		if c.Length <= 0 {
-			return fmt.Errorf("clip[%d]: length must be > 0", i)
-		}
-		if c.Transition != nil {
-			if c.Transition.In != "" && c.Transition.In != "none" && c.Transition.In != "fade" {
-				return fmt.Errorf("clip[%d]: transition.in must be 'none' or 'fade' (got %q)", i, c.Transition.In)
-			}
-			if c.Transition.Out != "" && c.Transition.Out != "none" && c.Transition.Out != "fade" {
-				return fmt.Errorf("clip[%d]: transition.out must be 'none' or 'fade' (got %q)", i, c.Transition.Out)
-			}
-		}
-		if c.Text != nil {
-			switch c.Text.Position {
-			case "", "top", "center", "bottom":
-			default:
-				return fmt.Errorf("clip[%d]: text.position must be top|center|bottom", i)
-			}
-		}
+	if visualTracks == 0 {
+		return errors.New("at least one visual track required")
 	}
 	if s := e.Timeline.Soundtrack; s != nil {
 		if s.Src == "" && s.AI == nil {
@@ -192,17 +232,146 @@ func resolutionWH(resolution, aspect string) (w, h int) {
 	return
 }
 
-// editDurationSeconds totals the clip lengths on the single track,
-// ignoring overlap (we don't do overlapping clips in v0.1).
+// editDurationSeconds returns the visible composition duration. The
+// visual track duration is concatenated; timed audio tracks can extend it.
 func editDurationSeconds(e *Edit) float64 {
 	if e == nil || len(e.Timeline.Tracks) == 0 {
 		return 0
 	}
 	var d float64
-	for _, c := range e.Timeline.Tracks[0].Clips {
-		d += c.Length
+	if vt := primaryVisualTrack(e); vt != nil {
+		for _, c := range vt.Clips {
+			d += clipDuration(c)
+		}
+	}
+	for _, c := range audioTimelineClips(e) {
+		if end := c.Start + clipDuration(c); end > d {
+			d = end
+		}
 	}
 	return d
+}
+
+func primaryVisualTrack(e *Edit) *Track {
+	if e == nil {
+		return nil
+	}
+	for i := range e.Timeline.Tracks {
+		if trackKind(e.Timeline.Tracks[i]) == "visual" {
+			return &e.Timeline.Tracks[i]
+		}
+	}
+	return nil
+}
+
+func audioTimelineClips(e *Edit) []Clip {
+	if e == nil {
+		return nil
+	}
+	var out []Clip
+	for _, t := range e.Timeline.Tracks {
+		if trackKind(t) != "audio" {
+			continue
+		}
+		out = append(out, t.Clips...)
+	}
+	return out
+}
+
+func trackKind(t Track) string {
+	switch strings.ToLower(strings.TrimSpace(t.Type)) {
+	case "", "visual", "video":
+		if t.Type == "" {
+			allAudio := len(t.Clips) > 0
+			for _, c := range t.Clips {
+				if clipAssetType(c, "") != "audio" {
+					allAudio = false
+					break
+				}
+			}
+			if allAudio {
+				return "audio"
+			}
+		}
+		return "visual"
+	case "audio", "sound", "music", "voice", "sfx":
+		return "audio"
+	default:
+		return strings.ToLower(strings.TrimSpace(t.Type))
+	}
+}
+
+func clipAssetType(c Clip, trackType string) string {
+	switch strings.ToLower(strings.TrimSpace(c.Asset.Type)) {
+	case "", "generated":
+		if c.AI != nil {
+			return assetTypeForAI(c.AI.MediaKind)
+		}
+		if trackType == "audio" {
+			return "audio"
+		}
+		return "video"
+	default:
+		return strings.ToLower(strings.TrimSpace(c.Asset.Type))
+	}
+}
+
+func clipDuration(c Clip) float64 {
+	if c.Length > 0 {
+		return c.Length
+	}
+	return c.Duration
+}
+
+func clipVolume(c Clip) float64 {
+	if c.Volume > 0 {
+		return c.Volume
+	}
+	return 1
+}
+
+func normalizeGeneratedAsset(c *Clip) {
+	if c == nil || strings.ToLower(strings.TrimSpace(c.Asset.Type)) != "generated" || c.AI != nil {
+		return
+	}
+	c.AI = generatedAssetAI(c.Asset)
+}
+
+func generatedAssetAI(a Asset) *AIAsset {
+	if strings.TrimSpace(a.Provider) != "" && strings.ToLower(strings.TrimSpace(a.Provider)) != "media-studio" {
+		return nil
+	}
+	req := map[string]any{}
+	for k, v := range a.Request {
+		req[k] = v
+	}
+	if req["media_kind"] == nil {
+		if kind, _ := req["kind"].(string); kind != "" {
+			req["media_kind"] = kind
+		} else if a.Kind != "" {
+			req["media_kind"] = a.Kind
+		}
+	}
+	b, _ := json.Marshal(req)
+	var ai AIAsset
+	if err := json.Unmarshal(b, &ai); err != nil {
+		return nil
+	}
+	if ai.MediaKind == "" {
+		return nil
+	}
+	return &ai
+}
+
+func assetTypeForAI(kind string) string {
+	switch strings.ToLower(strings.TrimSpace(kind)) {
+	case "image":
+		return "image"
+	case "audio_tts", "audio_sfx", "music", "audio":
+		return "audio"
+	default:
+		return "video"
+	}
 }
 
 // parseEditJSON unmarshals + validates. Returns the cleaned struct.

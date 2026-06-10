@@ -22,9 +22,10 @@ func materializeAIAssets(ctx *sdk.AppCtx, edit *Edit, compositionID int64, proje
 	if edit == nil {
 		return out, nil
 	}
-	if len(edit.Timeline.Tracks) > 0 {
-		for i := range edit.Timeline.Tracks[0].Clips {
-			clip := &edit.Timeline.Tracks[0].Clips[i]
+	for ti := range edit.Timeline.Tracks {
+		for i := range edit.Timeline.Tracks[ti].Clips {
+			clip := &edit.Timeline.Tracks[ti].Clips[i]
+			normalizeGeneratedAsset(clip)
 			if clip.UID == "" {
 				clip.UID = fmt.Sprintf("clip-%d", i+1)
 				out.Changed = true
@@ -47,6 +48,11 @@ func materializeAIAssets(ctx *sdk.AppCtx, edit *Edit, compositionID int64, proje
 				nextSrc := fmt.Sprintf("storage:%d", clip.AI.StorageID)
 				if clip.Asset.Src != nextSrc {
 					clip.Asset.Src = nextSrc
+					out.Changed = true
+				}
+				nextType := assetTypeForAI(clip.AI.MediaKind)
+				if nextType != "" && clip.Asset.Type != nextType {
+					clip.Asset.Type = nextType
 					out.Changed = true
 				}
 			}

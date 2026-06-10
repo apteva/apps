@@ -21,14 +21,24 @@ func TestValidateEdit_MinimalOK(t *testing.T) {
 	}
 }
 
-func TestValidateEdit_RejectsMultiTrack(t *testing.T) {
+func TestValidateEdit_AcceptsAudioTrack(t *testing.T) {
 	body := `{"timeline":{"tracks":[
-		{"clips":[{"asset":{"type":"video","src":"storage:1"},"start":0,"length":1}]},
-		{"clips":[{"asset":{"type":"video","src":"storage:2"},"start":0,"length":1}]}
+		{"type":"visual","clips":[{"asset":{"type":"video","src":"storage:1"},"start":0,"length":3}]},
+		{"type":"audio","clips":[{"asset":{"type":"audio","src":"storage:2"},"start":1,"length":1.5,"volume":0.4}]}
+	]}}`
+	if _, err := parseEditJSON(body); err != nil {
+		t.Fatalf("expected audio track to validate, got %v", err)
+	}
+}
+
+func TestValidateEdit_RejectsSecondVisualTrack(t *testing.T) {
+	body := `{"timeline":{"tracks":[
+		{"type":"visual","clips":[{"asset":{"type":"video","src":"storage:1"},"start":0,"length":1}]},
+		{"type":"visual","clips":[{"asset":{"type":"video","src":"storage:2"},"start":0,"length":1}]}
 	]}}`
 	_, err := parseEditJSON(body)
-	if err == nil || !strings.Contains(err.Error(), "single video track") {
-		t.Fatalf("want multi-track rejection, got %v", err)
+	if err == nil || !strings.Contains(err.Error(), "one visual track") {
+		t.Fatalf("want second visual track rejection, got %v", err)
 	}
 }
 
@@ -182,6 +192,39 @@ func TestBuildLocalFFmpegArgs_SoundtrackMix(t *testing.T) {
 	}
 	if !strings.Contains(cmd, "amix=inputs=2") {
 		t.Errorf("expected amix when soundtrack set: %s", cmd)
+	}
+}
+
+func TestBuildLocalFFmpegArgs_AudioTrackMix(t *testing.T) {
+	e, _ := parseEditJSON(`{"timeline":{"tracks":[
+		{"type":"visual","clips":[{"asset":{"src":"https://v","type":"video"},"start":0,"length":4}]},
+		{"type":"audio","clips":[{"asset":{"src":"https://sfx","type":"audio"},"start":1,"length":2,"volume":0.25}]}
+	]}}`)
+	args := buildLocalFFmpegArgs(e, defaultOutput(), []string{"https://v", "https://sfx"}, -1, "out.mp4")
+	cmd := strings.Join(args, " ")
+	if !strings.Contains(cmd, "adelay=1000|1000") {
+		t.Errorf("audio track start should become delay: %s", cmd)
+	}
+	if !strings.Contains(cmd, "volume=0.25") {
+		t.Errorf("audio clip volume should be applied: %s", cmd)
+	}
+	if !strings.Contains(cmd, "amix=inputs=2") {
+		t.Errorf("visual audio and audio track should be mixed: %s", cmd)
+	}
+}
+
+func TestValidateEdit_AcceptsGeneratedAudioAsset(t *testing.T) {
+	body := `{"timeline":{"tracks":[
+		{"type":"visual","clips":[{"asset":{"type":"video","src":"storage:1"},"start":0,"length":4}]},
+		{"clips":[{"asset":{"type":"generated","provider":"media-studio","kind":"music","request":{"prompt":"minimal beat","duration":4}},"start":0,"length":4}]}
+	]}}`
+	e, err := parseEditJSON(body)
+	if err != nil {
+		t.Fatalf("expected generated audio asset to validate, got %v", err)
+	}
+	ai := e.Timeline.Tracks[1].Clips[0].AI
+	if ai == nil || ai.MediaKind != "music" || ai.Prompt != "minimal beat" {
+		t.Fatalf("generated asset did not normalize to AI metadata: %+v", ai)
 	}
 }
 
