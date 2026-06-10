@@ -2,18 +2,18 @@ schema: apteva-app/v1
 
 name: media-downloader
 display_name: Media Downloader
-version: 0.2.6
+version: 0.2.7
 description: |
   Fresh v0.2 media download sidecar for Apteva. Wraps yt-dlp for public
   and authenticated source downloads, stores completed files through the
-  storage app, and keeps sensitive YouTube cookie profiles encrypted in
-  the app database. v0.2.6 lets authenticated YouTube downloads use
-  yt-dlp's cookie-capable clients instead of forcing Android, while
-  keeping Android as the anonymous public-video fallback.
+  storage app, and keeps sensitive YouTube and Patreon cookie profiles
+  encrypted in the app database. v0.2.7 adds Patreon source profiles,
+  provider-specific cookie validation, and cookie-file import in the
+  project panel.
 
 author: Apteva
 icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/media-downloader/icon.svg
-tags: [media, video, youtube, download, yt-dlp]
+tags: [media, video, audio, youtube, patreon, download, yt-dlp]
 scopes: [project, global]
 min_apteva_version: "0.10.0"
 
@@ -52,7 +52,7 @@ provides:
     - name: download_cancel
       description: Cancel a running download job.
     - name: source_profile_create
-      description: Store an encrypted cookie/profile source for private or age-restricted downloads.
+      description: Store an encrypted YouTube or Patreon cookie/profile source for private, age-restricted, or member-only downloads.
     - name: source_profile_list
       description: List source profiles without exposing their secret payloads.
     - name: source_profile_validate

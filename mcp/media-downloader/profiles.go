@@ -21,6 +21,11 @@ const (
 	plainPrefix     = "plain:"
 )
 
+var sourceProfileProviders = map[string][]string{
+	"youtube": {"youtube.com", "google.com"},
+	"patreon": {"patreon.com"},
+}
+
 func profileSecret(ctx *sdk.AppCtx) string {
 	if v := strings.TrimSpace(os.Getenv("MEDIA_DOWNLOADER_SECRET")); v != "" {
 		return v
@@ -115,8 +120,9 @@ func validateCookieProfile(provider, authType string, payload profilePayload) er
 	if authType == "" {
 		authType = "cookies_netscape"
 	}
-	if provider != "youtube" {
-		return fmt.Errorf("provider %q is not supported in v0.2", provider)
+	domains, ok := sourceProfileProviders[provider]
+	if !ok {
+		return fmt.Errorf("provider %q is not supported; supported providers: youtube, patreon", provider)
 	}
 	if authType != "cookies_netscape" {
 		return fmt.Errorf("auth_type %q is not supported in v0.2", authType)
@@ -128,8 +134,11 @@ func validateCookieProfile(provider, authType string, payload profilePayload) er
 	foundCookie := false
 	foundRelevantDomain := false
 	for _, line := range strings.Split(cookies, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") {
+		line = strings.TrimRight(line, "\r")
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		if strings.HasPrefix(line, "#") && !strings.HasPrefix(line, "#HttpOnly_") {
 			continue
 		}
 		parts := strings.Split(line, "\t")
@@ -137,8 +146,9 @@ func validateCookieProfile(provider, authType string, payload profilePayload) er
 			return errors.New("cookies_netscape must use Netscape cookie format with 7 tab-separated fields")
 		}
 		foundCookie = true
-		domain := strings.ToLower(parts[0])
-		if strings.Contains(domain, "youtube.com") || strings.Contains(domain, "google.com") {
+		domain := strings.TrimPrefix(strings.ToLower(parts[0]), "#httponly_")
+		domain = strings.TrimPrefix(domain, ".")
+		if matchesDomain(domain, domains) {
 			foundRelevantDomain = true
 		}
 	}
@@ -146,7 +156,7 @@ func validateCookieProfile(provider, authType string, payload profilePayload) er
 		return errors.New("cookies_netscape contains no cookie rows")
 	}
 	if !foundRelevantDomain {
-		return errors.New("YouTube profiles must include youtube.com or google.com cookies")
+		return fmt.Errorf("%s profiles must include cookies for %s", provider, strings.Join(domains, " or "))
 	}
 	return nil
 }

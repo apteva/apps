@@ -33,6 +33,15 @@ function fmtBytes(n) {
   return `${v.toFixed(i === 0 ? 0 : 1)} ${units[i]}`;
 }
 
+const PROFILE_PROVIDER_OPTIONS = [
+  { value: "youtube", label: "YouTube", cookiePlaceholder: ".youtube.com\tTRUE\t/\tTRUE\t1893456000\tSID\t...", namePlaceholder: "YouTube account", testPlaceholder: "https://www.youtube.com/watch?v=..." },
+  { value: "patreon", label: "Patreon", cookiePlaceholder: ".patreon.com\tTRUE\t/\tTRUE\t1893456000\tsession_id\t...", namePlaceholder: "Patreon account", testPlaceholder: "https://www.patreon.com/posts/..." },
+];
+
+function profileProviderMeta(provider) {
+  return PROFILE_PROVIDER_OPTIONS.find((p) => p.value === provider) || PROFILE_PROVIDER_OPTIONS[0];
+}
+
 function statusClass(status) {
   if (status === "completed") return "text-success";
   if (status === "failed") return "text-error";
@@ -309,14 +318,23 @@ function JobRow({ job, onCancel }) {
 }
 
 function ProfilesTab({ profiles, projectId, onRefresh, setMessage }) {
-  const [form, setForm] = useState({ name: "", test_url: "", cookies_netscape: "" });
+  const [form, setForm] = useState({ name: "", provider: "youtube", test_url: "", cookies_netscape: "" });
+  const providerMeta = profileProviderMeta(form.provider);
   const update = (key, value) => setForm((f) => ({ ...f, [key]: value }));
+  const importCookies = async (file) => {
+    if (!file) return;
+    try {
+      update("cookies_netscape", await file.text());
+    } catch (err) {
+      setMessage(err.message || "Failed to read cookies file");
+    }
+  };
   const submit = async (e) => {
     e.preventDefault();
     if (!form.name.trim() || !form.cookies_netscape.trim()) return;
     try {
       await request("/profiles", { method: "POST", body: JSON.stringify(form) }, projectId);
-      setForm({ name: "", test_url: "", cookies_netscape: "" });
+      setForm({ name: "", provider: form.provider, test_url: "", cookies_netscape: "" });
       await onRefresh();
     } catch (err) {
       setMessage(err.message);
@@ -342,8 +360,24 @@ function ProfilesTab({ profiles, projectId, onRefresh, setMessage }) {
           jsxs("div", {
             className: "grid gap-3 md:grid-cols-2",
             children: [
-              jsx(Field, { label: "Name", children: jsx(Input, { value: form.name, onChange: (e) => update("name", e.target.value), placeholder: "YouTube account" }) }),
-              jsx(Field, { label: "Test URL", children: jsx(Input, { value: form.test_url, onChange: (e) => update("test_url", e.target.value), placeholder: "Optional" }) }),
+              jsx(Field, { label: "Name", children: jsx(Input, { value: form.name, onChange: (e) => update("name", e.target.value), placeholder: providerMeta.namePlaceholder }) }),
+              jsx(Field, {
+                label: "Provider",
+                children: jsx(Select, {
+                  value: form.provider,
+                  onChange: (e) => update("provider", e.target.value),
+                  children: PROFILE_PROVIDER_OPTIONS.map((option) => jsx("option", { value: option.value, children: option.label }, option.value)),
+                }),
+              }),
+              jsx(Field, { label: "Test URL", children: jsx(Input, { value: form.test_url, onChange: (e) => update("test_url", e.target.value), placeholder: providerMeta.testPlaceholder }) }),
+              jsx(Field, {
+                label: "Import cookies.txt",
+                children: jsx(Input, {
+                  type: "file",
+                  accept: ".txt,text/plain",
+                  onChange: (e) => importCookies(e.target.files && e.target.files[0]),
+                }),
+              }),
             ],
           }),
           jsx(Field, {
@@ -352,7 +386,7 @@ function ProfilesTab({ profiles, projectId, onRefresh, setMessage }) {
               value: form.cookies_netscape,
               onChange: (e) => update("cookies_netscape", e.target.value),
               className: "bg-bg-input border border-border rounded px-2 py-1.5 text-sm text-text font-mono min-h-32",
-              placeholder: ".youtube.com\tTRUE\t/\tTRUE\t1893456000\tSID\t...",
+              placeholder: providerMeta.cookiePlaceholder,
             }),
           }),
           jsx("div", { className: "flex justify-end", children: jsx(Button, { tone: "primary", disabled: !form.name.trim() || !form.cookies_netscape.trim(), children: "Save Profile" }) }),

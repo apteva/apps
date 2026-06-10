@@ -16,6 +16,23 @@ func TestValidateCookieProfile(t *testing.T) {
 	}
 }
 
+func TestValidateCookieProfileSupportsPatreon(t *testing.T) {
+	cookies := ".patreon.com\tTRUE\t/\tTRUE\t1893456000\tsession_id\tsecret\n"
+	if err := validateCookieProfile("patreon", "cookies_netscape", profilePayload{CookiesNetscape: cookies}); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateCookieProfile("patreon", "cookies_netscape", profilePayload{CookiesNetscape: ".youtube.com\tTRUE\t/\tTRUE\t1893456000\tSID\tsecret\n"}); err == nil {
+		t.Fatal("expected Patreon profile without Patreon cookies to fail")
+	}
+}
+
+func TestValidateCookieProfileAcceptsHttpOnlyRows(t *testing.T) {
+	cookies := "#HttpOnly_.patreon.com\tTRUE\t/\tTRUE\t1893456000\tsession_id\tsecret\n"
+	if err := validateCookieProfile("patreon", "cookies_netscape", profilePayload{CookiesNetscape: cookies}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestEncryptDecryptPayloadRoundTrip(t *testing.T) {
 	t.Setenv("MEDIA_DOWNLOADER_SECRET", "test-secret")
 	payload := profilePayload{CookiesNetscape: ".youtube.com\tTRUE\t/\tTRUE\t1893456000\tSID\tsecret\n"}
