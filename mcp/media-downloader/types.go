@@ -1,5 +1,7 @@
 package main
 
+import "context"
+
 type downloadJob struct {
 	ID                string  `json:"id"`
 	ProjectID         string  `json:"project_id,omitempty"`
@@ -61,4 +63,9 @@ type downloadRequest struct {
 	YoutubePlayer     string
 	NoPlaylist        bool
 	Tags              []string
+}
+
+type runningDownload struct {
+	cancel    context.CancelFunc
+	projectID string
 }

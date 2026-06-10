@@ -174,6 +174,41 @@ func appendLog(ctx context.Context, db *sql.DB, id, level, message string) {
 	_, _ = db.ExecContext(ctx, `INSERT INTO download_logs(download_id, level, message, created_at) VALUES (?, ?, ?, ?)`, id, level, message, nowRFC3339())
 }
 
+func interruptActiveDownloads(ctx context.Context, db *sql.DB, reason string) ([]downloadJob, error) {
+	rows, err := db.QueryContext(ctx, `
+SELECT id, project_id, url, status, progress, COALESCE(title,''), COALESCE(extractor,''), mode, quality, COALESCE(format_id,''), COALESCE(source_profile_id,''), storage_folder, storage_visibility,
+       COALESCE(storage_file_id,0), COALESCE(storage_url,''), COALESCE(output_name,''), output_bytes, COALESCE(error,''), created_at, COALESCE(started_at,''), COALESCE(completed_at,''), updated_at
+FROM downloads
+WHERE status IN (?, ?)`, statusQueued, statusRunning)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var jobs []downloadJob
+	for rows.Next() {
+		var j downloadJob
+		if err := rows.Scan(&j.ID, &j.ProjectID, &j.URL, &j.Status, &j.Progress, &j.Title, &j.Extractor, &j.Mode, &j.Quality, &j.FormatID, &j.SourceProfileID, &j.StorageFolder, &j.StorageVisibility, &j.StorageFileID, &j.StorageURL, &j.OutputName, &j.OutputBytes, &j.Error, &j.CreatedAt, &j.StartedAt, &j.CompletedAt, &j.UpdatedAt); err != nil {
+			return nil, err
+		}
+		j.Status = statusFailed
+		j.Error = reason
+		j.CompletedAt = nowRFC3339()
+		j.UpdatedAt = j.CompletedAt
+		jobs = append(jobs, j)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for _, job := range jobs {
+		appendLog(ctx, db, job.ID, "error", reason)
+		if err := failDownload(ctx, db, job.ID, statusFailed, reason); err != nil {
+			return nil, err
+		}
+	}
+	return jobs, nil
+}
+
 func recentLogs(ctx context.Context, db *sql.DB, id string, limit int) ([]map[string]any, error) {
 	if limit <= 0 || limit > 100 {
 		limit = 25

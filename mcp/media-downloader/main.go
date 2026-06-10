@@ -31,7 +31,7 @@ type App struct {
 	runner     commandRunner
 
 	mu      sync.Mutex
-	cancels map[string]context.CancelFunc
+	cancels map[string]runningDownload
 }
 
 func (a *App) Manifest() sdk.Manifest {
@@ -52,7 +52,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	}
 	a.ctx = ctx
 	a.runner = osCommandRunner{}
-	a.cancels = make(map[string]context.CancelFunc)
+	a.cancels = make(map[string]runningDownload)
 	a.dataDir = ctx.DataDir()
 	if a.dataDir == "" {
 		return errors.New("media-downloader requires APTEVA_DATA_DIR or DB_PATH")
@@ -75,6 +75,13 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 			a.ffmpegPath = p
 		}
 	}
+	interrupted, err := interruptActiveDownloads(context.Background(), ctx.AppDB(), "interrupted by app restart; start a new download")
+	if err != nil {
+		return err
+	}
+	for _, job := range interrupted {
+		a.emitDownloadJob(ctx.WithProject(job.ProjectID), "download.failed", job)
+	}
 	ctx.Logger().Info("media-downloader mounted", "ytdlp_path", a.ytdlpPath, "ffmpeg_path", a.ffmpegPath)
 	return nil
 }
@@ -82,8 +89,11 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 func (a *App) OnUnmount(*sdk.AppCtx) error {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	for _, cancel := range a.cancels {
-		cancel()
+	for id, running := range a.cancels {
+		running.cancel()
+		appendLog(context.Background(), a.ctx.AppDB(), id, "info", "download canceled by app shutdown")
+		_ = failDownload(context.Background(), a.ctx.AppDB(), id, statusCanceled, "download canceled by app shutdown")
+		a.emitDownload(a.ctx, "download.canceled", running.projectID, map[string]any{"id": id, "status": statusCanceled, "error": "download canceled by app shutdown"})
 	}
 	return nil
 }
@@ -220,7 +230,7 @@ func (a *App) toolDownload(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	a.emitDownloadJob(ctx, "download.created", j)
 	runCtx, cancel := context.WithCancel(context.Background())
 	a.mu.Lock()
-	a.cancels[id] = cancel
+	a.cancels[id] = runningDownload{cancel: cancel, projectID: projectID}
 	a.mu.Unlock()
 	go a.runDownload(runCtx, ctx.WithProject(projectID), id, req)
 	return map[string]any{"job": j}, nil
@@ -376,12 +386,12 @@ func (a *App) toolList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 func (a *App) toolCancel(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	id := strArg(args, "job_id")
 	a.mu.Lock()
-	cancel := a.cancels[id]
+	running := a.cancels[id]
 	a.mu.Unlock()
-	if cancel == nil {
+	if running.cancel == nil {
 		return map[string]any{"canceled": false, "reason": "job is not running"}, nil
 	}
-	cancel()
+	running.cancel()
 	appendLog(context.Background(), ctx.AppDB(), id, "info", "cancel requested")
 	a.emitDownload(ctx, "download.cancel_requested", projectScope(ctx, args), map[string]any{"id": id})
 	return map[string]any{"canceled": true}, nil
