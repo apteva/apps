@@ -1,4 +1,4 @@
-// ComposerPanel v0.3.2 - timeline editor with storage and Media Studio AI assets.
+// ComposerPanel v0.3.3 - timeline editor with storage and Media Studio AI assets.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
@@ -80,6 +80,15 @@ interface ClipDraft {
   ai?: AIAsset;
 }
 
+interface AudioClipDraft {
+  id: string;
+  asset: { type: "audio"; src: string };
+  start: number;
+  length: number;
+  volume: number;
+  ai?: AIAsset;
+}
+
 interface OutputDraft {
   format: OutputFormat;
   resolution: "sd" | "hd" | "fullhd" | "4k";
@@ -90,6 +99,7 @@ interface OutputDraft {
 interface DraftState {
   name: string;
   clips: ClipDraft[];
+  audioClips: AudioClipDraft[];
   soundtrack: { src: string; volume: number; ai?: AIAsset } | null;
   background: string;
   output: OutputDraft;
@@ -110,12 +120,13 @@ interface StorageFile {
 }
 
 type Tab = "timeline" | "json";
-type AssetPickerTarget = { kind: "clip"; clipId: string } | { kind: "soundtrack" };
+type AssetPickerTarget = { kind: "clip"; clipId: string } | { kind: "audio"; clipId: string } | { kind: "soundtrack" };
 
 const DEFAULT_DRAFT: DraftState = {
   name: "",
   background: "#000000",
   clips: [],
+  audioClips: [],
   soundtrack: null,
   output: { format: "mp4", resolution: "hd", aspect: "16:9", fps: 30 },
 };
@@ -152,6 +163,14 @@ function durationOf(clips: ClipDraft[]): number {
   return clips.reduce((sum, c) => sum + Math.max(0.1, Number(c.length) || 0), 0);
 }
 
+function durationOfAudio(clips: AudioClipDraft[]): number {
+  return clips.reduce((max, c) => Math.max(max, Math.max(0, Number(c.start) || 0) + Math.max(0.1, Number(c.length) || 0)), 0);
+}
+
+function durationOfDraft(draft: DraftState): number {
+  return Math.max(durationOf(draft.clips), durationOfAudio(draft.audioClips));
+}
+
 function normalizeClips(clips: ClipDraft[]): ClipDraft[] {
   let t = 0;
   return clips.map((clip, i) => {
@@ -172,6 +191,18 @@ function normalizeClips(clips: ClipDraft[]): ClipDraft[] {
   });
 }
 
+function normalizeAudioClips(clips: AudioClipDraft[]): AudioClipDraft[] {
+  return clips.map((clip, i) => ({
+    ...clip,
+    id: clip.id || `audio-${i + 1}-${Date.now()}`,
+    start: Math.max(0, Number(clip.start) || 0),
+    length: Math.max(0.1, Number(clip.length) || 1),
+    volume: Math.max(0, Math.min(1, Number(clip.volume) || 1)),
+    asset: { type: "audio", src: clip.asset?.src || "" },
+    ai: clip.ai,
+  }));
+}
+
 function prettyJSON(raw: string, fallback: string): string {
   try {
     return JSON.stringify(JSON.parse(raw || "{}"), null, 2);
@@ -186,6 +217,17 @@ function visualTrack(tracks: any[]): any | null {
     const kind = String(track?.type || "visual").toLowerCase();
     return kind !== "audio" && kind !== "sound" && kind !== "music" && kind !== "voice" && kind !== "sfx";
   }) || null;
+}
+
+function audioTracks(tracks: any[]): any[] {
+  if (!Array.isArray(tracks)) return [];
+  return tracks.filter((track) => {
+    const kind = String(track?.type || "").toLowerCase();
+    if (kind === "audio" || kind === "sound" || kind === "music" || kind === "voice" || kind === "sfx") return true;
+    if (kind) return false;
+    const clips = Array.isArray(track?.clips) ? track.clips : [];
+    return clips.length > 0 && clips.every((clip: any) => clip?.asset?.type === "audio" || ["music", "audio_tts", "audio_sfx"].includes(clip?.ai?.media_kind));
+  });
 }
 
 function parseComposition(c: Composition | null): DraftState {
@@ -217,6 +259,17 @@ function parseComposition(c: Composition | null): DraftState {
           font_size: Number(clip.text.font_size) || 32,
           color: clip.text.color || "#ffffff",
         } : undefined,
+        ai: clip.ai,
+      })));
+    }
+    const audio = audioTracks(timeline.tracks || []).flatMap((track: any) => Array.isArray(track?.clips) ? track.clips : []);
+    if (audio.length) {
+      draft.audioClips = normalizeAudioClips(audio.map((clip: any, i: number) => ({
+        id: String(clip.uid || `audio-${i + 1}`),
+        asset: { type: "audio", src: String(clip.asset?.src || "") },
+        start: Number(clip.start) || 0,
+        length: Number(clip.length ?? clip.duration) || 1,
+        volume: Number(clip.volume) || 1,
         ai: clip.ai,
       })));
     }
@@ -271,9 +324,23 @@ function draftToBody(draft: DraftState): Record<string, unknown> {
     }
     return out;
   });
+  const audioClips = normalizeAudioClips(draft.audioClips).map((clip) => {
+    const out: any = {
+      uid: clip.id,
+      asset: { type: "audio", src: clip.asset.src.trim() },
+      start: clip.start,
+      length: clip.length,
+      volume: Math.max(0, Math.min(1, Number(clip.volume) || 1)),
+    };
+    if (clip.ai) out.ai = clip.ai;
+    return out;
+  });
+  const tracks: any[] = [];
+  if (clips.length) tracks.push({ type: "visual", clips });
+  if (audioClips.length) tracks.push({ type: "audio", clips: audioClips });
   const body: Record<string, unknown> = {
     name: draft.name,
-    tracks: [{ clips }],
+    tracks,
     background: draft.background || "#000000",
     output: draft.output,
   };
@@ -414,7 +481,8 @@ export default function ComposerPanel({ projectId }: NativePanelProps) {
 
   const selected = selectedId != null ? compositions.find((c) => c.id === selectedId) || null : null;
   const clips = useMemo(() => normalizeClips(draft.clips), [draft.clips]);
-  const totalDuration = useMemo(() => durationOf(clips), [clips]);
+  const audioClips = useMemo(() => normalizeAudioClips(draft.audioClips), [draft.audioClips]);
+  const totalDuration = useMemo(() => Math.max(durationOf(clips), durationOfAudio(audioClips)), [clips, audioClips]);
   const activeClip = useMemo(() => activeClipAt(clips, playhead), [clips, playhead]);
   const selectedClip = clips.find((clip) => clip.id === selectedClipId) || clips[0] || null;
 
@@ -467,6 +535,7 @@ export default function ComposerPanel({ projectId }: NativePanelProps) {
   useEffect(() => {
     const sources = Array.from(new Set([
       ...clips.map((clip) => clip.asset.src.trim()).filter(Boolean),
+      ...audioClips.map((clip) => clip.asset.src.trim()).filter(Boolean),
       draft.soundtrack?.src?.trim() || "",
     ].filter(Boolean)));
     for (const src of sources) {
@@ -483,12 +552,12 @@ export default function ComposerPanel({ projectId }: NativePanelProps) {
         })
         .catch(() => {});
     }
-  }, [clips, draft.soundtrack?.src, resolved]);
+  }, [clips, audioClips, draft.soundtrack?.src, resolved]);
 
   const updateDraft = (fn: (draft: DraftState) => DraftState) => {
     setDraft((cur) => {
       const next = fn(cur);
-      const normalized = { ...next, clips: normalizeClips(next.clips) };
+      const normalized = { ...next, clips: normalizeClips(next.clips), audioClips: normalizeAudioClips(next.audioClips) };
       setJsonEdit(editJSONFromDraft(normalized));
       setJsonOutput(outputJSONFromDraft(normalized));
       return normalized;
@@ -559,10 +628,40 @@ export default function ComposerPanel({ projectId }: NativePanelProps) {
     });
   };
 
+  const updateAudioClip = (id: string, patch: Partial<AudioClipDraft>) => {
+    updateDraft((cur) => ({
+      ...cur,
+      audioClips: cur.audioClips.map((clip) => clip.id === id ? { ...clip, ...patch } : clip),
+    }));
+  };
+
+  const addAudioClip = (ai = true) => {
+    const id = `audio-${Date.now()}`;
+    updateDraft((cur) => ({
+      ...cur,
+      audioClips: [
+        ...cur.audioClips,
+        {
+          id,
+          asset: { type: "audio", src: "" },
+          start: durationOfDraft(cur),
+          length: ai ? 30 : 8,
+          volume: 1,
+          ai: ai ? defaultAI("music", cur.output.aspect) : undefined,
+        },
+      ],
+      output: cur.clips.length === 0 ? { ...cur.output, format: isAudioFormat(cur.output.format) ? cur.output.format : "mp3" } : cur.output,
+    }));
+  };
+
+  const deleteAudioClip = (id: string) => {
+    updateDraft((cur) => ({ ...cur, audioClips: cur.audioClips.filter((clip) => clip.id !== id) }));
+  };
+
   const save = async () => {
     setStatus("Saving...");
     try {
-      if (tab !== "json" && draft.clips.length === 0) {
+      if (tab !== "json" && draft.clips.length === 0 && draft.audioClips.length === 0) {
         setStatus("Add at least one clip before saving.");
         return;
       }
@@ -619,7 +718,7 @@ export default function ComposerPanel({ projectId }: NativePanelProps) {
   };
 
   const render = async () => {
-    if (selectedId == null && tab !== "json" && draft.clips.length === 0) {
+    if (selectedId == null && tab !== "json" && draft.clips.length === 0 && draft.audioClips.length === 0) {
       setStatus("Add at least one clip before rendering.");
       return;
     }
@@ -684,6 +783,11 @@ export default function ComposerPanel({ projectId }: NativePanelProps) {
     if (!pickerTarget) return;
     if (pickerTarget.kind === "soundtrack") {
       updateDraft((cur) => ({ ...cur, soundtrack: { src: `storage:${file.id}`, volume: cur.soundtrack?.volume ?? 1 } }));
+      setPickerTarget(null);
+      return;
+    }
+    if (pickerTarget.kind === "audio") {
+      updateAudioClip(pickerTarget.clipId, { asset: { type: "audio", src: `storage:${file.id}` } });
       setPickerTarget(null);
       return;
     }
@@ -794,6 +898,36 @@ export default function ComposerPanel({ projectId }: NativePanelProps) {
     }
   };
 
+  const generateAudioClipAI = async (clip: AudioClipDraft) => {
+    if (!clip.ai) return;
+    if (!clip.ai.prompt.trim()) {
+      setStatus("AI prompt required.");
+      return;
+    }
+    setAIBusy(clip.id);
+    setStatus("Generating AI audio...");
+    try {
+      const { meta, cache_key } = await callMediaStudioGenerate(clip.ai);
+      if (meta.status === "queued" || meta.status === "polling") {
+        updateAudioClip(clip.id, { ai: { ...clip.ai, cache_key, status: "generating", job_id: Number(meta.job_id || 0), error: "" } });
+        setStatus(`AI audio queued as job #${meta.job_id}.`);
+        return;
+      }
+      const storageId = storageIDFromMeta(meta);
+      if (!storageId) throw new Error("Media Studio returned no storage id. Make sure Storage is linked to Media Studio.");
+      updateAudioClip(clip.id, {
+        asset: { type: "audio", src: `storage:${storageId}` },
+        ai: { ...clip.ai, cache_key, status: "ready", storage_id: storageId, generation_id: generationIDFromMeta(meta), error: "" },
+      });
+      setStatus(`AI audio ready as storage:${storageId}.`);
+    } catch (e) {
+      updateAudioClip(clip.id, { ai: { ...clip.ai, status: "failed", error: (e as Error).message } });
+      setStatus("AI generation failed: " + (e as Error).message);
+    } finally {
+      setAIBusy("");
+    }
+  };
+
   return (
     <div className="h-full flex flex-col bg-bg text-text">
       <header className="border-b border-border px-4 py-2 flex items-center gap-3">
@@ -873,14 +1007,19 @@ export default function ComposerPanel({ projectId }: NativePanelProps) {
                 clip={selectedClip}
                 onDraft={updateDraft}
                 onClip={updateClip}
+                onAudioClip={updateAudioClip}
                 onDelete={deleteClip}
+                onDeleteAudio={deleteAudioClip}
                 onMove={moveClip}
                 onDeleteComposition={deleteSelected}
                 canDeleteComposition={selectedId != null}
                 onBrowseClip={(clipId) => openPicker({ kind: "clip", clipId })}
+                onBrowseAudio={(clipId) => openPicker({ kind: "audio", clipId })}
                 onBrowseSoundtrack={() => openPicker({ kind: "soundtrack" })}
                 onAddClip={addClip}
+                onAddAudioClip={addAudioClip}
                 onGenerateClipAI={generateClipAI}
+                onGenerateAudioClipAI={generateAudioClipAI}
                 onGenerateSoundtrackAI={generateSoundtrackAI}
                 aiBusy={aiBusy}
               />
@@ -1173,14 +1312,19 @@ function Inspector({
   clip,
   onDraft,
   onClip,
+  onAudioClip,
   onDelete,
+  onDeleteAudio,
   onMove,
   onDeleteComposition,
   canDeleteComposition,
   onBrowseClip,
+  onBrowseAudio,
   onBrowseSoundtrack,
   onAddClip,
+  onAddAudioClip,
   onGenerateClipAI,
+  onGenerateAudioClipAI,
   onGenerateSoundtrackAI,
   aiBusy,
 }: {
@@ -1188,14 +1332,19 @@ function Inspector({
   clip: ClipDraft | null;
   onDraft: (fn: (draft: DraftState) => DraftState) => void;
   onClip: (id: string, patch: Partial<ClipDraft>) => void;
+  onAudioClip: (id: string, patch: Partial<AudioClipDraft>) => void;
   onDelete: (id: string) => void;
+  onDeleteAudio: (id: string) => void;
   onMove: (id: string, dir: -1 | 1) => void;
   onDeleteComposition: () => void;
   canDeleteComposition: boolean;
   onBrowseClip: (clipId: string) => void;
+  onBrowseAudio: (clipId: string) => void;
   onBrowseSoundtrack: () => void;
   onAddClip: () => void;
+  onAddAudioClip: (ai?: boolean) => void;
   onGenerateClipAI: (clip: ClipDraft) => void;
+  onGenerateAudioClipAI: (clip: AudioClipDraft) => void;
   onGenerateSoundtrackAI: () => void;
   aiBusy: string;
 }) {
@@ -1212,6 +1361,15 @@ function Inspector({
             className={field}
           />
           <div className="grid grid-cols-2 gap-2">
+            <Field label="Format">
+              <select value={draft.output.format} onChange={(e) => onDraft((cur) => ({ ...cur, output: { ...cur.output, format: e.target.value as OutputFormat } }))} className={field}>
+                <option value="mp4">MP4 video</option>
+                <option value="mp3">MP3 audio</option>
+                <option value="wav">WAV audio</option>
+                <option value="m4a">M4A audio</option>
+                <option value="aac">AAC audio</option>
+              </select>
+            </Field>
             <Field label="Aspect">
               <select value={draft.output.aspect} onChange={(e) => onDraft((cur) => ({ ...cur, output: { ...cur.output, aspect: e.target.value as Aspect } }))} className={field}>
                 <option value="16:9">16:9</option>
@@ -1301,6 +1459,81 @@ function Inspector({
                 style={{ accentColor: "var(--apteva-accent, #4ade80)" }}
               />
             </Field>
+          )}
+        </section>
+
+        <section className="space-y-2">
+          <div className="flex items-center gap-2">
+            <h2 className="text-xs uppercase tracking-wide text-text-dim flex-1">Audio clips</h2>
+            <button type="button" onClick={() => onAddAudioClip(true)} className="text-xs px-2 py-1 border border-accent text-accent rounded hover:bg-accent hover:text-bg">
+              AI audio
+            </button>
+            <button type="button" onClick={() => onAddAudioClip(false)} className="text-xs px-2 py-1 border border-border rounded hover:bg-bg-input">
+              Empty
+            </button>
+          </div>
+          {draft.audioClips.length === 0 ? (
+            <div className="border border-dashed border-border rounded p-3 text-sm text-text-muted">
+              No timed audio clips.
+            </div>
+          ) : (
+            <div className="space-y-3">
+              {draft.audioClips.map((audio) => (
+                <div key={audio.id} className="border border-border rounded p-3 space-y-2 bg-bg">
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs text-text-dim flex-1 truncate">{audio.asset.src || (audio.ai ? `AI ${audio.ai.media_kind}` : "empty audio")}</span>
+                    {audio.ai?.status && <span className="text-[10px] px-1.5 py-0.5 rounded bg-border text-text-muted">{audio.ai.status}</span>}
+                    <button type="button" onClick={() => onDeleteAudio(audio.id)} className="text-xs px-2 py-1 border border-red/50 text-red rounded hover:bg-red/10">
+                      Delete
+                    </button>
+                  </div>
+                  <Field label="Source">
+                    <div className="flex gap-2">
+                      <input
+                        value={audio.asset.src}
+                        onChange={(e) => onAudioClip(audio.id, { asset: { type: "audio", src: e.target.value } })}
+                        placeholder="storage:1 or https://..."
+                        className={field}
+                      />
+                      <button type="button" onClick={() => onBrowseAudio(audio.id)} className="px-2 py-1.5 text-xs border border-border rounded hover:bg-bg-input">
+                        Browse
+                      </button>
+                    </div>
+                  </Field>
+                  <div className="grid grid-cols-3 gap-2">
+                    <Field label="Start">
+                      <input type="number" min={0} step={0.1} value={audio.start} onChange={(e) => onAudioClip(audio.id, { start: Number(e.target.value) })} className={field} />
+                    </Field>
+                    <Field label="Length">
+                      <input type="number" min={0.1} step={0.1} value={audio.length} onChange={(e) => onAudioClip(audio.id, { length: Number(e.target.value) })} className={field} />
+                    </Field>
+                    <Field label="Volume">
+                      <input type="number" min={0} max={1} step={0.05} value={audio.volume} onChange={(e) => onAudioClip(audio.id, { volume: Number(e.target.value) })} className={field} />
+                    </Field>
+                  </div>
+                  {!audio.ai && (
+                    <button
+                      type="button"
+                      onClick={() => onAudioClip(audio.id, { ai: defaultAI("music", draft.output.aspect) })}
+                      className="w-full text-xs px-2 py-1.5 border border-border rounded hover:bg-bg-input"
+                    >
+                      Add AI source
+                    </button>
+                  )}
+                  {audio.ai && (
+                    <AIAssetEditor
+                      title="AI audio"
+                      ai={audio.ai}
+                      allowedKinds={["music", "audio_tts", "audio_sfx"]}
+                      busy={aiBusy === audio.id}
+                      onChange={(ai) => onAudioClip(audio.id, { ai, length: ai.duration || audio.length })}
+                      onGenerate={() => onGenerateAudioClipAI(audio)}
+                      onClear={() => onAudioClip(audio.id, { ai: undefined })}
+                    />
+                  )}
+                </div>
+              ))}
+            </div>
           )}
         </section>
 
@@ -1677,6 +1910,7 @@ function StoragePicker({
   const mediaFiles = files.filter((file) => {
     const kind = storageFileKind(file);
     if (target === "soundtrack") return kind === "audio" || kind === "video";
+    if (target === "audio") return kind === "audio";
     return kind === "video" || kind === "image";
   });
   return (

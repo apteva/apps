@@ -30,7 +30,7 @@ display_name: Composer
 version: 0.3.3
 description: |
   Multi-clip video compositions with a structured timeline panel,
-  Storage browsing, timed audio tracks, audio-only renders, and
+  Storage browsing, timed AI audio clips, audio-only renders, and
   AI-backed clip/soundtrack sources generated through Media Studio.
   Renders locally via ffmpeg, on a render host via instances, or
   against a bound render_executor integration.

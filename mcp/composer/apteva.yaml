@@ -11,6 +11,10 @@ description: |
   set, or against a SaaS render backend (Shotstack et al) when one
   is bound to the render_executor role.
 
+  v0.3.3 adds first-class panel controls for timed AI audio clips:
+  prompt entry, model/voice controls, Storage browse, generate-in-place,
+  and render from the same Composer view.
+
   v0.3.2 adds audio-only compositions and mp3/wav/m4a/aac render
   outputs, including timed silence gaps between audio clips.
 
