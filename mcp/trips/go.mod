@@ -3,7 +3,7 @@ module github.com/apteva/apps/mcp/trips
 go 1.25.0
 
 require (
-	github.com/apteva/app-sdk v0.28.0
+	github.com/apteva/app-sdk v0.34.0
 	modernc.org/sqlite v1.50.0
 )
 

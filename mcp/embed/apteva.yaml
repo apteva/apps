@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: embed
 display_name: Embed
-version: 0.1.2
+version: 0.1.3
 description: |
   Create shareable viewer links and oEmbed-compatible responses for
   storage-backed files and media. Embed keeps publishing concerns out

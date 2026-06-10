@@ -1787,6 +1787,120 @@ func TestSchedule_DispatchesToJobsApp(t *testing.T) {
 	}
 }
 
+func TestSchedule_DedupesIdenticalScheduledPost(t *testing.T) {
+	pf := newRecordingPlatform()
+	pf.identity.Bindings = map[string]any{"jobs": float64(101)}
+	pf.callAppResponses["jobs:jobs_schedule"] = json.RawMessage(`{"job":{"id":100}}`)
+	ctx := newSocialCtx(t, pf)
+	r, _ := ctx.AppDB().Exec(
+		`INSERT INTO social_accounts (project_id, platform, connection_id, display_name, status)
+		 VALUES ('test-proj', 'twitter', 42, '@me', 'active')`,
+	)
+	acctID, _ := r.LastInsertId()
+
+	app := &App{}
+	args := map[string]any{
+		"body":               "later",
+		"social_account_ids": []any{acctID},
+		"media_storage_ids":  []any{float64(11)},
+		"schedule_at":        "2026-05-01T10:00:00Z",
+	}
+	first, err := app.toolPostCreate(ctx, args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	second, err := app.toolPostCreate(ctx, args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstID := first.(map[string]any)["post_id"].(int64)
+	secondRes := second.(map[string]any)
+	if secondRes["post_id"].(int64) != firstID {
+		t.Fatalf("second create made post %v, want existing %d", secondRes["post_id"], firstID)
+	}
+	if secondRes["deduped"] != true {
+		t.Fatalf("second create should report deduped, got %+v", secondRes)
+	}
+	var postCount int
+	if err := ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM posts`).Scan(&postCount); err != nil {
+		t.Fatal(err)
+	}
+	if postCount != 1 {
+		t.Fatalf("posts=%d, want 1", postCount)
+	}
+	schedules := 0
+	for _, c := range pf.callAppCalls {
+		if c.AppName == "jobs" && c.Tool == "jobs_schedule" {
+			schedules++
+		}
+	}
+	if schedules != 1 {
+		t.Fatalf("jobs_schedule calls=%d, want 1; calls=%+v", schedules, pf.callAppCalls)
+	}
+}
+
+func TestSchedule_FailureMarksTargetAndDuplicateRetriesSamePost(t *testing.T) {
+	pf := newRecordingPlatform()
+	pf.identity.Bindings = map[string]any{"jobs": float64(101)}
+	pf.callAppResponses["jobs:jobs_schedule"] = json.RawMessage(`not-json`)
+	ctx := newSocialCtx(t, pf)
+	r, _ := ctx.AppDB().Exec(
+		`INSERT INTO social_accounts (project_id, platform, connection_id, display_name, status)
+		 VALUES ('test-proj', 'twitter', 42, '@me', 'active')`,
+	)
+	acctID, _ := r.LastInsertId()
+
+	app := &App{}
+	args := map[string]any{
+		"body":               "later",
+		"social_account_ids": []any{acctID},
+		"schedule_at":        "2026-05-01T10:00:00Z",
+	}
+	out, err := app.toolPostCreate(ctx, args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.(map[string]any)["isError"] != true {
+		t.Fatalf("expected scheduling error, got %+v", out)
+	}
+	var postID int64
+	var postStatus, targetStatus, lastErr string
+	var attempts int
+	if err := ctx.AppDB().QueryRow(`SELECT id, status FROM posts`).Scan(&postID, &postStatus); err != nil {
+		t.Fatal(err)
+	}
+	if err := ctx.AppDB().QueryRow(
+		`SELECT status, COALESCE(last_error,''), attempts FROM post_targets WHERE post_id=?`,
+		postID,
+	).Scan(&targetStatus, &lastErr, &attempts); err != nil {
+		t.Fatal(err)
+	}
+	if postStatus != "failed" || targetStatus != "failed" || attempts != 0 || !strings.Contains(lastErr, "scheduling failed") {
+		t.Fatalf("post=%q target=%q attempts=%d err=%q; want failed/failed/0 scheduling error", postStatus, targetStatus, attempts, lastErr)
+	}
+
+	pf.callAppResponses["jobs:jobs_schedule"] = json.RawMessage(`{"job":{"id":200}}`)
+	retry, err := app.toolPostCreate(ctx, args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := retry.(map[string]any)
+	if res["post_id"].(int64) != postID {
+		t.Fatalf("retry created post %v, want existing %d", res["post_id"], postID)
+	}
+	if res["retried_scheduling"] != true {
+		t.Fatalf("retry should report scheduling retry, got %+v", res)
+	}
+	var count, jobID int
+	var retriedPostStatus, retriedTargetStatus, retriedErr string
+	_ = ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM posts`).Scan(&count)
+	_ = ctx.AppDB().QueryRow(`SELECT status, job_id FROM posts WHERE id=?`, postID).Scan(&retriedPostStatus, &jobID)
+	_ = ctx.AppDB().QueryRow(`SELECT status, COALESCE(last_error,'') FROM post_targets WHERE post_id=?`, postID).Scan(&retriedTargetStatus, &retriedErr)
+	if count != 1 || retriedPostStatus != "scheduled" || jobID != 200 || retriedTargetStatus != "pending" || retriedErr != "" {
+		t.Fatalf("count=%d post=%q job=%d target=%q err=%q; want same scheduled post with pending target", count, retriedPostStatus, jobID, retriedTargetStatus, retriedErr)
+	}
+}
+
 func TestSchedule_FailsWhenJobsUnbound(t *testing.T) {
 	pf := newRecordingPlatform()
 	// No jobs binding.

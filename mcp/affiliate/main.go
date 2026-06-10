@@ -23,7 +23,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: affiliate
 display_name: Affiliate
-version: 0.1.5
+version: 0.1.6
 description: Publisher-side affiliate manager.
 author: Apteva
 scopes: [project, global]

@@ -31,6 +31,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -42,7 +43,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: social
 display_name: Social
-version: 0.14.43
+version: 0.14.44
 description: |
   Schedule and publish posts to your social accounts (X, Facebook,
   Instagram, LinkedIn, TikTok, YouTube, Reddit, Pinterest, Threads).
@@ -85,9 +86,9 @@ provides:
     - { name: account_list,               description: "List connected social accounts." }
     - { name: account_check,              description: "Check that connected social accounts still work." }
     - { name: account_disconnect,         description: "Disconnect a social account while preserving post history, or hard-delete local history when explicitly requested." }
-    - { name: post_create,                description: "Create + publish (or schedule) a post across accounts." }
+    - { name: post_create,                description: "Create + publish (or schedule) a post across accounts. Scheduled creates are idempotent; retry failed scheduling via post_retry." }
     - { name: post_list,                  description: "List recent posts." }
-    - { name: post_retry,                 description: "Re-attempt failed targets on a post." }
+    - { name: post_retry,                 description: "Re-attempt a failed post. Failed scheduled posts retry job creation on the same post." }
     - { name: inbox_list,                 description: "List inbox items (comments, DMs, mentions, reviews) from connected accounts." }
     - { name: inbox_get,                  description: "Fetch one inbox item, optionally with the surrounding thread." }
     - { name: inbox_mark_read,            description: "Mark inbox items read (local-only)." }
@@ -656,6 +657,8 @@ func (a *App) MCPTools() []sdk.Tool {
 				"Today: youtube accepts {title, body, visibility (public|unlisted|private), category, tags[]}. " +
 				"Other platforms (twitter, facebook, instagram, linkedin, tiktok) accept just {body}. " +
 				"Body resolution per target: target.body if set, else post-level body. " +
+				"Scheduled creates are idempotent: if the same profile/account/media/body/options/time already exists, the existing post is returned or its failed scheduling is retried instead of creating a duplicate. " +
+				"If scheduling fails, retry that existing post with post_retry; do not create a second post with the same args. " +
 				"Args: body, schedule_at? (RFC3339; omit = post now), media_storage_ids? (file ids), media_project_id? (Storage project scope for those ids).",
 			InputSchema: schemaObject(map[string]any{
 				"body":               map[string]any{"type": "string", "description": "Plain text post body. Do not use Markdown; common Markdown is normalized before publishing."},
@@ -693,7 +696,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "post_retry",
-			Description: "Re-attempt every failed target on a post (resets attempts to 0 and re-publishes). Args: post_id.",
+			Description: "Re-attempt a failed post. For failed scheduled posts where no job was created, this retries scheduling the same post. Otherwise it resets failed publish targets and re-publishes. Args: post_id.",
 			InputSchema: schemaObject(map[string]any{
 				"post_id": map[string]any{"type": "integer"},
 			}, []string{"post_id"}),
@@ -1818,6 +1821,14 @@ func (a *App) toolPostCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		acctIDs[i] = t.SocialAccountID
 	}
 	scheduleAt, _ := args["schedule_at"].(string)
+	scheduleAt = strings.TrimSpace(scheduleAt)
+	if scheduleAt != "" {
+		normalized, err := normaliseScheduleAt(scheduleAt)
+		if err != nil {
+			return mcpError(fmt.Sprintf("invalid schedule_at %q: %v", scheduleAt, err)), nil
+		}
+		scheduleAt = normalized
+	}
 	mediaIDsRaw, _ := args["media_storage_ids"].([]any)
 	mediaIDs := []int64{}
 	for _, v := range mediaIDsRaw {
@@ -1886,6 +1897,24 @@ func (a *App) toolPostCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 			return nil, errors.New("selected accounts span multiple profiles — pass profile_id explicitly or split into per-profile post_create calls")
 		}
 	}
+	if scheduleAt != "" {
+		if existing, err := a.findDuplicateScheduledPost(ctx, pid, profileID, body, string(mediaJSON), mediaProjectID, scheduleAt, targets); err != nil {
+			return nil, err
+		} else if existing != nil {
+			if existing.Status == "failed" && existing.JobID == 0 {
+				return a.retryFailedSchedule(ctx, pid, existing.ID, scheduleAt)
+			}
+			return map[string]any{
+				"post_id":              existing.ID,
+				"status":               existing.Status,
+				"job_id":               existing.JobID,
+				"targets":              existing.Targets,
+				"deduped":              true,
+				"reused_existing_post": true,
+				"markdown_normalized":  markdownNormalized,
+			}, nil
+		}
+	}
 	res, err := ctx.AppDB().Exec(
 		`INSERT INTO posts (project_id, body, media_storage_ids, media_project_id, schedule_at, status, profile_id)
 		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
@@ -1925,7 +1954,7 @@ func (a *App) toolPostCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		jobID, err := a.scheduleJob(ctx, postID, scheduleAt)
 		if err != nil {
 			ctx.Logger().Warn("schedule via jobs failed", "post", postID, "err", err)
-			_, _ = ctx.AppDB().Exec(`UPDATE posts SET status='failed' WHERE id=?`, postID)
+			a.markScheduleFailed(ctx, postID, err)
 			return mcpError("scheduling failed (is the jobs app bound?): " + err.Error()), nil
 		}
 		// Persist the jobs.id so post_reschedule + post_delete can
@@ -1950,6 +1979,183 @@ func (a *App) toolPostCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		"status":              status,
 		"targets":             len(acctIDs),
 		"markdown_normalized": markdownNormalized,
+	}, nil
+}
+
+type duplicatePost struct {
+	ID      int64
+	Status  string
+	JobID   int64
+	Targets int
+}
+
+func (a *App) findDuplicateScheduledPost(ctx *sdk.AppCtx, pid string, profileID int64, body, mediaJSON, mediaProjectID, scheduleAt string, targets []targetSpec) (*duplicatePost, error) {
+	wantSig := canonicalTargetSignature(targets)
+	rows, err := ctx.AppDB().Query(
+		`SELECT p.id, p.status, COALESCE(p.job_id,0), COUNT(t.id)
+		   FROM posts p
+		   JOIN post_targets t ON t.post_id=p.id
+		  WHERE p.project_id=?
+		    AND COALESCE(p.profile_id,0)=?
+		    AND p.body=?
+		    AND COALESCE(p.media_storage_ids,'[]')=?
+		    AND COALESCE(p.media_project_id,'')=?
+		    AND COALESCE(p.schedule_at,'')=?
+		    AND p.status IN ('scheduled','publishing','published','partial','failed')
+		  GROUP BY p.id, p.status, p.job_id
+		  ORDER BY p.id ASC`,
+		pid, profileID, body, mediaJSON, mediaProjectID, scheduleAt,
+	)
+	if err != nil {
+		return nil, err
+	}
+	candidates := []duplicatePost{}
+	for rows.Next() {
+		var dup duplicatePost
+		if err := rows.Scan(&dup.ID, &dup.Status, &dup.JobID, &dup.Targets); err != nil {
+			continue
+		}
+		candidates = append(candidates, dup)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for _, dup := range candidates {
+		gotSig, err := a.targetSignatureForPost(ctx, dup.ID)
+		if err != nil {
+			return nil, err
+		}
+		if gotSig == wantSig {
+			return &dup, nil
+		}
+	}
+	return nil, nil
+}
+
+func (a *App) targetSignatureForPost(ctx *sdk.AppCtx, postID int64) (string, error) {
+	rows, err := ctx.AppDB().Query(
+		`SELECT social_account_id, COALESCE(options,'')
+		   FROM post_targets
+		  WHERE post_id=?
+		  ORDER BY social_account_id ASC, id ASC`,
+		postID,
+	)
+	if err != nil {
+		return "", err
+	}
+	defer rows.Close()
+	type sigTarget struct {
+		ID      int64  `json:"id"`
+		Options string `json:"options"`
+	}
+	out := []sigTarget{}
+	for rows.Next() {
+		var id int64
+		var raw string
+		if err := rows.Scan(&id, &raw); err != nil {
+			continue
+		}
+		out = append(out, sigTarget{ID: id, Options: canonicalOptionsJSONRaw(raw)})
+	}
+	b, _ := json.Marshal(out)
+	return string(b), nil
+}
+
+func canonicalTargetSignature(targets []targetSpec) string {
+	type sigTarget struct {
+		ID      int64  `json:"id"`
+		Options string `json:"options"`
+	}
+	out := make([]sigTarget, 0, len(targets))
+	for _, target := range targets {
+		out = append(out, sigTarget{
+			ID:      target.SocialAccountID,
+			Options: canonicalOptionsJSON(target.Options),
+		})
+	}
+	sort.Slice(out, func(i, j int) bool {
+		if out[i].ID == out[j].ID {
+			return out[i].Options < out[j].Options
+		}
+		return out[i].ID < out[j].ID
+	})
+	b, _ := json.Marshal(out)
+	return string(b)
+}
+
+func canonicalOptionsJSON(opts map[string]any) string {
+	if len(opts) == 0 {
+		return "{}"
+	}
+	b, err := json.Marshal(opts)
+	if err != nil {
+		return "{}"
+	}
+	return string(b)
+}
+
+func canonicalOptionsJSONRaw(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "{}"
+	}
+	var opts map[string]any
+	if err := json.Unmarshal([]byte(raw), &opts); err != nil {
+		return raw
+	}
+	return canonicalOptionsJSON(opts)
+}
+
+func (a *App) markScheduleFailed(ctx *sdk.AppCtx, postID int64, cause error) {
+	msg := "scheduling failed"
+	if cause != nil {
+		msg += ": " + cause.Error()
+	}
+	_, _ = ctx.AppDB().Exec(
+		`UPDATE posts SET status='failed', job_id=0 WHERE id=?`,
+		postID,
+	)
+	_, _ = ctx.AppDB().Exec(
+		`UPDATE post_targets
+		    SET status='failed', last_error=?
+		  WHERE post_id=? AND status IN ('pending','failed') AND attempts=0`,
+		msg, postID,
+	)
+	ctx.Emit("post.schedule_failed", map[string]any{
+		"post_id": postID,
+		"error":   msg,
+	})
+}
+
+func (a *App) retryFailedSchedule(ctx *sdk.AppCtx, pid string, postID int64, scheduleAt string) (any, error) {
+	jobID, err := a.scheduleJob(ctx, postID, scheduleAt)
+	if err != nil {
+		a.markScheduleFailed(ctx, postID, err)
+		return mcpError("scheduling retry failed: " + err.Error()), nil
+	}
+	rfc, _ := normaliseScheduleAt(scheduleAt)
+	_, _ = ctx.AppDB().Exec(
+		`UPDATE posts SET status='scheduled', schedule_at=?, job_id=?, published_at=NULL WHERE id=? AND project_id=?`,
+		rfc, jobID, postID, pid,
+	)
+	_, _ = ctx.AppDB().Exec(
+		`UPDATE post_targets
+		    SET status='pending', last_error=NULL
+		  WHERE post_id=? AND status='failed' AND attempts=0`,
+		postID,
+	)
+	ctx.Emit("post.rescheduled", map[string]any{
+		"post_id": postID,
+		"job_id":  jobID,
+		"run_at":  rfc,
+	})
+	return map[string]any{
+		"post_id":              postID,
+		"status":               "scheduled",
+		"job_id":               jobID,
+		"retried_scheduling":   true,
+		"reused_existing_post": true,
 	}, nil
 }
 
@@ -2075,23 +2281,41 @@ func (a *App) publishPostTargets(ctx *sdk.AppCtx, postID int64) {
 		successes++
 	}
 
-	// Roll up post status.
-	finalStatus := "published"
-	if failures > 0 && successes == 0 {
-		finalStatus = "failed"
-	} else if failures > 0 {
-		finalStatus = "partial"
-	}
-	_, _ = ctx.AppDB().Exec(
-		`UPDATE posts SET status=?, published_at=CURRENT_TIMESTAMP WHERE id=?`,
-		finalStatus, postID,
-	)
+	finalStatus := a.rollupPostStatus(ctx, postID)
 	ctx.Emit("post.completed", map[string]any{
 		"post_id":  postID,
 		"status":   finalStatus,
 		"success":  successes,
 		"failures": failures,
 	})
+}
+
+func (a *App) rollupPostStatus(ctx *sdk.AppCtx, postID int64) string {
+	var total, published, failed int
+	_ = ctx.AppDB().QueryRow(
+		`SELECT COUNT(*),
+		        SUM(CASE WHEN status='published' THEN 1 ELSE 0 END),
+		        SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END)
+		   FROM post_targets WHERE post_id=?`,
+		postID,
+	).Scan(&total, &published, &failed)
+	finalStatus := "publishing"
+	if total == 0 {
+		finalStatus = "failed"
+	} else if published == total {
+		finalStatus = "published"
+		_, _ = ctx.AppDB().Exec(
+			`UPDATE posts SET status=?, published_at=CURRENT_TIMESTAMP WHERE id=?`,
+			finalStatus, postID,
+		)
+		return finalStatus
+	} else if failed > 0 && published == 0 {
+		finalStatus = "failed"
+	} else if failed > 0 {
+		finalStatus = "partial"
+	}
+	_, _ = ctx.AppDB().Exec(`UPDATE posts SET status=? WHERE id=?`, finalStatus, postID)
+	return finalStatus
 }
 
 // runStrategy dispatches to the platform's publish flow. Returns the
@@ -3520,6 +3744,18 @@ func (a *App) toolPostRetry(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return nil, errors.New("post_id required")
 	}
 	pid := projectIDForTool(ctx, args)
+	var postStatus, scheduleAt string
+	var jobID int64
+	if err := ctx.AppDB().QueryRow(
+		`SELECT status, COALESCE(schedule_at,''), COALESCE(job_id,0)
+		   FROM posts WHERE id=? AND project_id=?`,
+		postID, pid,
+	).Scan(&postStatus, &scheduleAt, &jobID); err != nil {
+		return mcpError("post not found"), nil
+	}
+	if postStatus == "failed" && strings.TrimSpace(scheduleAt) != "" && jobID == 0 {
+		return a.retryFailedSchedule(ctx, pid, postID, scheduleAt)
+	}
 	res, err := ctx.AppDB().Exec(
 		`UPDATE post_targets
 		    SET status='pending', last_error=NULL
@@ -3572,9 +3808,7 @@ func (a *App) toolPostReschedule(ctx *sdk.AppCtx, args map[string]any) (any, err
 
 	newJobID, err := a.scheduleJob(ctx, postID, scheduleAt)
 	if err != nil {
-		_, _ = ctx.AppDB().Exec(
-			`UPDATE posts SET status='failed', job_id=0 WHERE id=?`, postID,
-		)
+		a.markScheduleFailed(ctx, postID, err)
 		return mcpError("reschedule failed: " + err.Error()), nil
 	}
 	rfc, _ := normaliseScheduleAt(scheduleAt)

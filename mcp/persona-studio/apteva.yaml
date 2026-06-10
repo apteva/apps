@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: persona-studio
 display_name: Persona Studio
-version: 0.1.14
+version: 0.1.15
 description: |
   Virtual influencer and reusable persona workspace. Persona Studio owns
   consistent identities, reference sets, reusable items/products, style
