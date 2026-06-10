@@ -228,6 +228,55 @@ func TestValidateEdit_AcceptsGeneratedAudioAsset(t *testing.T) {
 	}
 }
 
+func TestValidateEditOutput_AudioOnlyRequiresAudioFormat(t *testing.T) {
+	e, err := parseEditJSON(`{"timeline":{"tracks":[
+		{"type":"audio","clips":[{"asset":{"src":"https://a.mp3","type":"audio"},"start":0,"length":2}]}
+	]}}`)
+	if err != nil {
+		t.Fatalf("audio-only edit should parse: %v", err)
+	}
+	if err := validateEditOutput(e, Output{Format: "mp4"}); err == nil || !strings.Contains(err.Error(), "audio-only") {
+		t.Fatalf("want audio-only format rejection, got %v", err)
+	}
+	if err := validateEditOutput(e, Output{Format: "mp3"}); err != nil {
+		t.Fatalf("mp3 should be valid for audio-only edit: %v", err)
+	}
+}
+
+func TestBuildLocalAudioFFmpegArgs_MP3WithSilenceGap(t *testing.T) {
+	e, _ := parseEditJSON(`{"timeline":{"tracks":[
+		{"type":"audio","clips":[
+			{"asset":{"src":"https://a.mp3","type":"audio"},"start":0,"length":2},
+			{"asset":{"src":"https://b.mp3","type":"audio"},"start":5,"length":3}
+		]}
+	]}}`)
+	args := buildLocalAudioFFmpegArgs(e, Output{Format: "mp3"}, []string{"https://a.mp3", "https://b.mp3"}, -1, "out.mp3")
+	cmd := strings.Join(args, " ")
+	if strings.Contains(cmd, "[vout]") || strings.Contains(cmd, "libx264") {
+		t.Errorf("audio-only render should not map or encode video: %s", cmd)
+	}
+	if !strings.Contains(cmd, "adelay=5000|5000") {
+		t.Errorf("second clip start should create a silence gap: %s", cmd)
+	}
+	if !strings.Contains(cmd, "libmp3lame") || !strings.Contains(cmd, "-map [aout]") {
+		t.Errorf("mp3 audio mapping/codec missing: %s", cmd)
+	}
+}
+
+func TestRenderContentType(t *testing.T) {
+	cases := map[string]string{
+		"mp3": "audio/mpeg",
+		"wav": "audio/wav",
+		"m4a": "audio/mp4",
+		"mp4": "video/mp4",
+	}
+	for format, want := range cases {
+		if got := renderContentType(format); got != want {
+			t.Errorf("renderContentType(%q) = %q, want %q", format, got, want)
+		}
+	}
+}
+
 // --- editFromArgs round-trip -------------------------------------
 
 func TestEditFromArgs_ReconstructsTimeline(t *testing.T) {

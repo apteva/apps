@@ -88,7 +88,7 @@ type TextOver struct {
 }
 
 type Output struct {
-	Format     string `json:"format"`     // "mp4" (only v0.1)
+	Format     string `json:"format"`     // mp4|mp3|wav|m4a|aac
 	Resolution string `json:"resolution"` // "sd" | "hd" | "fullhd" | "4k"
 	Aspect     string `json:"aspect"`     // "16:9" | "9:16" | "1:1" | "4:3"
 	FPS        int    `json:"fps"`        // 24 | 30 | 60
@@ -171,8 +171,8 @@ func validateEdit(e *Edit) error {
 			}
 		}
 	}
-	if visualTracks == 0 {
-		return errors.New("at least one visual track required")
+	if visualTracks == 0 && len(audioTimelineClips(e)) == 0 {
+		return errors.New("at least one visual or audio track required")
 	}
 	if s := e.Timeline.Soundtrack; s != nil {
 		if s.Src == "" && s.AI == nil {
@@ -204,6 +204,33 @@ func validateOutput(o *Output) {
 	if o.FPS == 0 {
 		o.FPS = 30
 	}
+}
+
+func isAudioOutput(o Output) bool {
+	switch strings.ToLower(strings.TrimSpace(o.Format)) {
+	case "mp3", "wav", "m4a", "aac":
+		return true
+	default:
+		return false
+	}
+}
+
+func hasVisualTrack(e *Edit) bool {
+	return primaryVisualTrack(e) != nil
+}
+
+func validateEditOutput(e *Edit, o Output) error {
+	if err := validateEdit(e); err != nil {
+		return err
+	}
+	hasVisual := hasVisualTrack(e)
+	if !hasVisual && !isAudioOutput(o) {
+		return errors.New("audio-only compositions require output.format mp3, wav, m4a, or aac")
+	}
+	if hasVisual && isAudioOutput(o) {
+		return errors.New("audio output currently requires an audio-only composition")
+	}
+	return nil
 }
 
 // resolutionWH maps the canonical name to pixel dimensions for the

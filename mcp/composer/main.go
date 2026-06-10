@@ -27,13 +27,13 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: composer
 display_name: Composer
-version: 0.3.1
+version: 0.3.2
 description: |
   Multi-clip video compositions with a structured timeline panel,
-  Storage browsing, timed audio tracks, and AI-backed clip/soundtrack
-  sources generated through Media Studio. Renders locally via ffmpeg,
-  on a render host via instances, or against a bound render_executor
-  integration.
+  Storage browsing, timed audio tracks, audio-only renders, and
+  AI-backed clip/soundtrack sources generated through Media Studio.
+  Renders locally via ffmpeg, on a render host via instances, or
+  against a bound render_executor integration.
 author: Apteva
 scopes: [project, global]
 requires:

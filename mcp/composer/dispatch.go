@@ -33,6 +33,9 @@ func (a *App) toolCompositionCreate(ctx *sdk.AppCtx, args map[string]any) (any, 
 		return nil, err
 	}
 	output := outputFromArgs(args)
+	if err := validateEditOutput(edit, output); err != nil {
+		return nil, err
+	}
 	editJSON, _ := json.Marshal(edit)
 	outputJSON, _ := json.Marshal(output)
 	pid := projectScope(ctx)
@@ -117,6 +120,9 @@ func (a *App) toolCompositionUpdate(ctx *sdk.AppCtx, args map[string]any) (any, 
 			output.FPS = v
 		}
 		validateOutput(&output)
+	}
+	if err := validateEditOutput(edit, output); err != nil {
+		return nil, err
 	}
 
 	newEditJSON, _ := json.Marshal(edit)
@@ -287,6 +293,9 @@ func (a *App) toolCompositionRender(ctx *sdk.AppCtx, args map[string]any) (any, 
 	var output Output
 	_ = json.Unmarshal([]byte(row["output_json"].(string)), &output)
 	validateOutput(&output)
+	if err := validateEditOutput(edit, output); err != nil {
+		return nil, err
+	}
 	pid := row["project_id"].(string)
 	mat, err := materializeAIAssets(ctx.WithProject(pid), edit, id, pid)
 	if err != nil {
@@ -386,7 +395,7 @@ func saveRenderOutput(ctx *sdk.AppCtx, path, format, projectID string, compID in
 		"name":           name,
 		"content_base64": base64Encode(bytes),
 		"folder":         "/.composer/",
-		"content_type":   "video/" + format,
+		"content_type":   renderContentType(format),
 		"tags":           []string{"composer", "render"},
 		"_project_id":    projectID,
 	}, &got)
@@ -395,6 +404,23 @@ func saveRenderOutput(ctx *sdk.AppCtx, path, format, projectID string, compID in
 		return 0
 	}
 	return got.ID
+}
+
+func renderContentType(format string) string {
+	switch strings.ToLower(strings.TrimSpace(format)) {
+	case "mp3":
+		return "audio/mpeg"
+	case "wav":
+		return "audio/wav"
+	case "m4a":
+		return "audio/mp4"
+	case "aac":
+		return "audio/aac"
+	case "mp4":
+		return "video/mp4"
+	default:
+		return "application/octet-stream"
+	}
 }
 
 // base64Encode is a tiny wrapper so we don't sprinkle stdlib imports.

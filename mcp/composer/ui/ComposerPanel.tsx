@@ -1,4 +1,4 @@
-// ComposerPanel v0.3.1 - timeline editor with storage and Media Studio AI assets.
+// ComposerPanel v0.3.2 - timeline editor with storage and Media Studio AI assets.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
@@ -48,6 +48,7 @@ interface Bindings {
 
 type AssetType = "video" | "image";
 type MediaKind = "image" | "video" | "audio_tts" | "audio_sfx" | "music" | "avatar";
+type OutputFormat = "mp4" | "mp3" | "wav" | "m4a" | "aac";
 type Aspect = "16:9" | "9:16" | "1:1" | "4:3";
 
 interface AIAsset {
@@ -80,7 +81,7 @@ interface ClipDraft {
 }
 
 interface OutputDraft {
-  format: "mp4";
+  format: OutputFormat;
   resolution: "sd" | "hd" | "fullhd" | "4k";
   aspect: Aspect;
   fps: 24 | 30 | 60;
@@ -141,6 +142,10 @@ function formatTime(seconds: number): string {
   const m = Math.floor(safe / 60);
   const s = Math.floor(safe % 60);
   return `${m}:${String(s).padStart(2, "0")}`;
+}
+
+function isAudioFormat(format: string | undefined): boolean {
+  return ["mp3", "wav", "m4a", "aac"].includes(String(format || "").toLowerCase());
 }
 
 function durationOf(clips: ClipDraft[]): number {
@@ -232,7 +237,7 @@ function parseComposition(c: Composition | null): DraftState {
   try {
     const output = JSON.parse(c.output_json || "{}");
     draft.output = {
-      format: "mp4",
+      format: ["mp4", "mp3", "wav", "m4a", "aac"].includes(output.format) ? output.format : "mp4",
       resolution: ["sd", "hd", "fullhd", "4k"].includes(output.resolution) ? output.resolution : "hd",
       aspect: ["16:9", "9:16", "1:1", "4:3"].includes(output.aspect) ? output.aspect : "16:9",
       fps: [24, 30, 60].includes(output.fps) ? output.fps : 30,
@@ -614,7 +619,7 @@ export default function ComposerPanel({ projectId }: NativePanelProps) {
   };
 
   const render = async () => {
-    if (draft.clips.length === 0) {
+    if (selectedId == null && tab !== "json" && draft.clips.length === 0) {
       setStatus("Add at least one clip before rendering.");
       return;
     }
@@ -861,7 +866,7 @@ export default function ComposerPanel({ projectId }: NativePanelProps) {
                   onAdd={addClip}
                   onBrowse={() => openPicker(clips.length ? { kind: "clip", clipId: clips[0].id } : { kind: "clip", clipId: "" })}
                 />
-                <RenderPreview render={selected?.latest_render || null} onOpen={setLightbox} />
+                <RenderPreview render={selected?.latest_render || null} outputFormat={draft.output.format} onOpen={setLightbox} />
               </section>
               <Inspector
                 draft={draft}
@@ -894,7 +899,7 @@ export default function ComposerPanel({ projectId }: NativePanelProps) {
         </main>
       </div>
 
-      {lightbox && <Lightbox render={lightbox} onClose={() => setLightbox(null)} />}
+      {lightbox && <Lightbox render={lightbox} outputFormat={draft.output.format} onClose={() => setLightbox(null)} />}
       {pickerTarget && (
         <StoragePicker
           files={storageFiles}
@@ -1716,9 +1721,10 @@ function StoragePicker({
   );
 }
 
-function RenderPreview({ render, onOpen }: { render: RenderRow | null; onOpen: (r: RenderRow) => void }) {
+function RenderPreview({ render, outputFormat, onOpen }: { render: RenderRow | null; outputFormat: string; onOpen: (r: RenderRow) => void }) {
   if (!render) return null;
   const url = renderSrc(render);
+  const audio = isAudioFormat(outputFormat);
   if (render.status !== "complete") {
     return (
       <div className="p-3 border border-border rounded bg-bg-card text-xs">
@@ -1738,14 +1744,19 @@ function RenderPreview({ render, onOpen }: { render: RenderRow | null; onOpen: (
         {formatCost(render.cost_usd) && <span className="text-accent">{formatCost(render.cost_usd)}</span>}
       </header>
       <button type="button" onClick={() => onOpen(render)} className="block w-full text-left">
-        {url ? <video controls src={url} className="w-full" /> : <div className="py-12 text-center text-text-muted text-xs">no source</div>}
+        {url ? (
+          audio
+            ? <div className="p-3"><audio controls src={url} className="w-full" /></div>
+            : <video controls src={url} className="w-full" />
+        ) : <div className="py-12 text-center text-text-muted text-xs">no source</div>}
       </button>
     </section>
   );
 }
 
-function Lightbox({ render, onClose }: { render: RenderRow; onClose: () => void }) {
+function Lightbox({ render, outputFormat, onClose }: { render: RenderRow; outputFormat: string; onClose: () => void }) {
   const url = renderSrc(render);
+  const audio = isAudioFormat(outputFormat);
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") onClose();
@@ -1760,7 +1771,10 @@ function Lightbox({ render, onClose }: { render: RenderRow; onClose: () => void 
       style={{ zIndex: 9999 }}
     >
       <div onClick={(e) => e.stopPropagation()} className="flex flex-col items-center gap-3">
-        {url && <video controls autoPlay src={url} style={{ maxWidth: "92vw", maxHeight: "82vh" }} />}
+        {url && (audio
+          ? <audio controls autoPlay src={url} style={{ width: "min(720px, 92vw)" }} />
+          : <video controls autoPlay src={url} style={{ maxWidth: "92vw", maxHeight: "82vh" }} />
+        )}
         <div className="text-text-dim text-xs">render #{render.id} - {render.executor} - {(render.duration_ms / 1000).toFixed(1)}s</div>
         {url && (
           <a href={url} target="_blank" rel="noopener" className="text-xs px-3 py-1.5 border border-border rounded text-text">

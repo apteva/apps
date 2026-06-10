@@ -41,22 +41,47 @@ func (e *localFFmpegExecutor) Render(
 	if err != nil {
 		return Result{}, fmt.Errorf("scratch dir: %w", err)
 	}
+	var renderErr error
 	// Keep on failure for post-mortem; clean on success below.
 	defer func() {
-		if err == nil {
+		if renderErr == nil {
 			_ = os.RemoveAll(scratch)
 		} else {
-			app.Logger().Warn("kept scratch dir for post-mortem", "path", scratch, "err", err)
+			app.Logger().Warn("kept scratch dir for post-mortem", "path", scratch, "err", renderErr)
 		}
 	}()
 
+	visual := primaryVisualTrack(edit)
+	audioClips := audioTimelineClips(edit)
+	if visual == nil {
+		inputs := make([]string, 0, len(audioClips)+1)
+		for i, c := range audioClips {
+			url, err := resolveAssetURL(app, c.Asset.Src)
+			if err != nil {
+				return Result{}, fmt.Errorf("audio clip[%d]: resolve %q: %w", i, c.Asset.Src, err)
+			}
+			inputs = append(inputs, url)
+		}
+		soundtrackIdx := -1
+		if s := edit.Timeline.Soundtrack; s != nil {
+			url, err := resolveAssetURL(app, s.Src)
+			if err != nil {
+				return Result{}, fmt.Errorf("soundtrack resolve %q: %w", s.Src, err)
+			}
+			soundtrackIdx = len(inputs)
+			inputs = append(inputs, url)
+		}
+		outFile := filepath.Join(scratch, "out."+output.Format)
+		args := buildLocalAudioFFmpegArgs(edit, output, inputs, soundtrackIdx, outFile)
+		result, runErr := runLocalFFmpeg(ctx, app, start, scratch, len(inputs), outFile, args)
+		if runErr != nil {
+			renderErr = runErr
+		}
+		return result, runErr
+	}
+
 	// Resolve every clip's asset to a URL. ffmpeg accepts https:// inputs
 	// natively (movflags+frag work); no need to download first.
-	visual := primaryVisualTrack(edit)
-	if visual == nil {
-		return Result{}, fmt.Errorf("no visual track")
-	}
-	audioClips := audioTimelineClips(edit)
 	inputs := make([]string, 0, len(visual.Clips)+len(audioClips)+1)
 	for i, c := range visual.Clips {
 		url, err := resolveAssetURL(app, c.Asset.Src)
@@ -85,12 +110,20 @@ func (e *localFFmpegExecutor) Render(
 	outFile := filepath.Join(scratch, "out."+output.Format)
 	args := buildLocalFFmpegArgs(edit, output, inputs, soundtrackIdx, outFile)
 
-	app.Logger().Info("local ffmpeg render", "scratch", scratch, "inputs", len(inputs), "out", outFile)
+	result, runErr := runLocalFFmpeg(ctx, app, start, scratch, len(inputs), outFile, args)
+	if runErr != nil {
+		renderErr = runErr
+	}
+	return result, runErr
+}
+
+func runLocalFFmpeg(ctx context.Context, app *sdk.AppCtx, start time.Time, scratch string, inputCount int, outFile string, args []string) (Result, error) {
+	app.Logger().Info("local ffmpeg render", "scratch", scratch, "inputs", inputCount, "out", outFile)
 
 	cmd := exec.CommandContext(ctx, ffmpegPath(), args...)
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
-	if err = cmd.Run(); err != nil {
+	if err := cmd.Run(); err != nil {
 		return Result{FFmpegCommand: shellEcho(ffmpegPath(), args)}, fmt.Errorf("ffmpeg failed: %w\nstderr (last 1KB):\n%s",
 			err, truncTail(stderr.String(), 1024))
 	}
@@ -238,6 +271,71 @@ func buildLocalFFmpegArgs(edit *Edit, output Output, inputs []string, soundtrack
 		outFile,
 	)
 	return args
+}
+
+func buildLocalAudioFFmpegArgs(edit *Edit, output Output, inputs []string, soundtrackIdx int, outFile string) []string {
+	audioClips := audioTimelineClips(edit)
+	args := []string{"-y", "-loglevel", "error"}
+	for _, src := range inputs {
+		args = append(args, "-i", src)
+	}
+
+	var filter strings.Builder
+	mixLabels := make([]string, 0, len(audioClips)+1)
+	for i, c := range audioClips {
+		delayMS := int(c.Start * 1000)
+		if delayMS < 0 {
+			delayMS = 0
+		}
+		fmt.Fprintf(&filter,
+			"[%d:a]atrim=duration=%s,asetpts=PTS-STARTPTS,adelay=%d|%d,volume=%g[ta%d];",
+			i, trimFloat(clipDuration(c)), delayMS, delayMS, clipVolume(c), i,
+		)
+		mixLabels = append(mixLabels, fmt.Sprintf("[ta%d]", i))
+	}
+	if soundtrackIdx >= 0 {
+		vol := 1.0
+		if v := edit.Timeline.Soundtrack.Volume; v > 0 {
+			vol = v
+		}
+		fmt.Fprintf(&filter,
+			"[%d:a]volume=%g,atrim=duration=%s[snd];",
+			soundtrackIdx, vol, trimFloat(editDurationSeconds(edit)),
+		)
+		mixLabels = append(mixLabels, "[snd]")
+	}
+	if len(mixLabels) == 0 {
+		filter.WriteString("anullsrc=channel_layout=stereo:sample_rate=44100,atrim=duration=0.1[aout]")
+	} else if len(mixLabels) == 1 {
+		fmt.Fprintf(&filter, "%sanull[aout]", mixLabels[0])
+	} else {
+		for _, label := range mixLabels {
+			filter.WriteString(label)
+		}
+		fmt.Fprintf(&filter, "amix=inputs=%d:duration=longest:normalize=0[aout]", len(mixLabels))
+	}
+
+	args = append(args,
+		"-filter_complex", filter.String(),
+		"-map", "[aout]",
+		"-vn",
+	)
+	args = append(args, audioCodecArgs(output)...)
+	args = append(args, outFile)
+	return args
+}
+
+func audioCodecArgs(output Output) []string {
+	switch strings.ToLower(strings.TrimSpace(output.Format)) {
+	case "mp3":
+		return []string{"-c:a", "libmp3lame", "-b:a", "192k"}
+	case "wav":
+		return []string{"-c:a", "pcm_s16le"}
+	case "m4a", "aac":
+		return []string{"-c:a", "aac", "-b:a", "192k"}
+	default:
+		return []string{"-c:a", "aac", "-b:a", "192k"}
+	}
 }
 
 // buildDrawText returns a drawtext filter string for a single text

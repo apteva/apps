@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: composer
 display_name: Composer
-version: 0.3.1
+version: 0.3.2
 description: |
   Multi-clip video composition. Stitch generated or uploaded assets
   into a single video — one visual track, timed audio tracks, optional
@@ -10,6 +10,9 @@ description: |
   default, on a render host via instances when render_host_id is
   set, or against a SaaS render backend (Shotstack et al) when one
   is bound to the render_executor role.
+
+  v0.3.2 adds audio-only compositions and mp3/wav/m4a/aac render
+  outputs, including timed silence gaps between audio clips.
 
   v0.3.1 adds generic timed audio tracks and generated asset shorthand
   for Media Studio-backed clips, music, voice, and sound effects.
@@ -59,7 +62,7 @@ provides:
   http_routes:
     - prefix: /
   mcp_tools:
-    - { name: composition_create, description: "Create a composition. Args: name?, tracks (array of {type?: visual|audio, clips:[…]}), clips may include ai generation specs or asset.type=generated, soundtrack? ({src, volume?, ai?}), output ({format, resolution, aspect, fps})." }
+    - { name: composition_create, description: "Create a composition. Args: name?, tracks (array of {type?: visual|audio, clips:[…]}), clips may include ai generation specs or asset.type=generated, soundtrack? ({src, volume?, ai?}), output ({format: mp4|mp3|wav|m4a|aac, resolution, aspect, fps})." }
     - { name: composition_update, description: "Patch a composition. Args: id, patch (subset of {name, tracks, soundtrack, output})." }
     - { name: composition_get,    description: "Fetch one composition with its latest render row. Args: id." }
     - { name: composition_list,   description: "List compositions for this project. Args: limit? (default 50)." }
