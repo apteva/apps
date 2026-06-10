@@ -15,6 +15,7 @@ import (
 //   POST   /api/instances                    create  {name, provider?, region?, size?, image?}
 //   GET    /api/instances/<id>               one
 //   DELETE /api/instances/<id>               destroy (local refused)
+//   POST   /api/instances/<id>/upgrade       {size, upgrade_disk?, wait?}
 //   POST   /api/instances/<id>/run           {cmd, timeout_s?}
 //   POST   /api/instances/<id>/upload        {path, content_b64}
 //   POST   /api/instances/<id>/wait-ready    {timeout_s?}
@@ -106,6 +107,8 @@ func (a *App) handleInstanceItem(w http.ResponseWriter, r *http.Request) {
 		a.httpWaitReady(w, r, id)
 	case "metrics":
 		a.httpMetrics(w, r, id)
+	case "upgrade":
+		a.httpUpgrade(w, r, id)
 	default:
 		httpErr(w, http.StatusNotFound, "no such resource")
 	}
@@ -157,29 +160,17 @@ func (a *App) httpCreate(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusBadRequest, "name required")
 		return
 	}
-	if body.Provider == "" {
-		body.Provider = "hetzner"
-	}
-	if body.Provider == "local" {
-		httpErr(w, http.StatusBadRequest, ErrLocalInstanceImmutable.Error())
-		return
-	}
 	in := CreateInstanceInput{
 		Name: body.Name, Provider: body.Provider,
 		Region: body.Region, Size: body.Size, Image: body.Image,
 		TagsJSON: body.TagsJSON,
 	}
-	switch body.Provider {
-	case "hetzner":
-		inst, err := hetznerProvision(ctx, in)
-		if err != nil {
-			httpErr(w, http.StatusBadGateway, err.Error())
-			return
-		}
-		httpJSON(w, map[string]any{"instance": inst.stripSecrets()})
-	default:
-		httpErr(w, http.StatusBadRequest, "unsupported provider")
+	inst, err := provisionInstance(ctx, in)
+	if err != nil {
+		httpProviderErr(w, err)
+		return
 	}
+	httpJSON(w, map[string]any{"instance": inst.stripSecrets()})
 }
 
 func (a *App) httpDestroy(w http.ResponseWriter, r *http.Request, id int64) {
@@ -193,12 +184,9 @@ func (a *App) httpDestroy(w http.ResponseWriter, r *http.Request, id int64) {
 		httpErr(w, http.StatusNotFound, "instance not found")
 		return
 	}
-	switch inst.Provider {
-	case "hetzner":
-		if err := hetznerDestroy(ctx, inst); err != nil {
-			httpErr(w, http.StatusBadGateway, err.Error())
-			return
-		}
+	if err := destroyProviderInstance(ctx, inst); err != nil {
+		httpProviderErr(w, err)
+		return
 	}
 	if err := deleteInstanceAndEmit(ctx, inst); err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
@@ -206,6 +194,54 @@ func (a *App) httpDestroy(w http.ResponseWriter, r *http.Request, id int64) {
 	}
 	globalSSHPool.evict(id)
 	httpJSON(w, map[string]any{"destroyed": true, "id": id})
+}
+
+func (a *App) httpUpgrade(w http.ResponseWriter, r *http.Request, id int64) {
+	if r.Method != http.MethodPost {
+		httpErr(w, http.StatusMethodNotAllowed, "POST")
+		return
+	}
+	ctx := appCtxForRequest(r)
+	var body struct {
+		Size        string `json:"size"`
+		UpgradeDisk bool   `json:"upgrade_disk"`
+		Wait        *bool  `json:"wait"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		httpErr(w, http.StatusBadRequest, "invalid json: "+err.Error())
+		return
+	}
+	wait := true
+	if body.Wait != nil {
+		wait = *body.Wait
+	}
+	inst, err := dbGetInstance(ctx.AppDB(), id)
+	if err != nil {
+		httpErr(w, http.StatusNotFound, "instance not found")
+		return
+	}
+	res, err := upgradeProviderInstance(ctx, inst, UpgradeInstanceInput{
+		Size:        body.Size,
+		UpgradeDisk: body.UpgradeDisk,
+		Wait:        wait,
+	})
+	if err != nil {
+		httpProviderErr(w, err)
+		return
+	}
+	httpJSON(w, res)
+}
+
+func httpProviderErr(w http.ResponseWriter, err error) {
+	msg := err.Error()
+	status := http.StatusBadGateway
+	if errors.Is(err, ErrLocalInstanceImmutable) ||
+		strings.Contains(msg, "not a compatible Instances VPS provider") ||
+		strings.Contains(msg, "requested but this Instances install is bound to") ||
+		strings.Contains(msg, "adapter is not implemented yet") {
+		status = http.StatusBadRequest
+	}
+	httpErr(w, status, msg)
 }
 
 func (a *App) httpRun(w http.ResponseWriter, r *http.Request, id int64) {

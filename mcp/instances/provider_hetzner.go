@@ -11,9 +11,12 @@ package main
 // alignment is a separate concern from this app's release.
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
+	"strconv"
 	"strings"
 	"time"
 
@@ -39,7 +42,7 @@ func hetznerProvision(ctx *sdk.AppCtx, in CreateInstanceInput) (*Instance, error
 		return nil, errors.New("no VPS provider bound — install the Hetzner integration and bind it to the 'provider' role on this install")
 	}
 	if bound.AppSlug != "" && bound.AppSlug != "hetzner" {
-		return nil, fmt.Errorf("v0.1 only supports provider=hetzner; bound slug is %q", bound.AppSlug)
+		return nil, fmt.Errorf("hetzner adapter requires provider=hetzner; bound slug is %q", bound.AppSlug)
 	}
 
 	privKey, pubKey, err := generateSSHKeypair()
@@ -53,7 +56,7 @@ func hetznerProvision(ctx *sdk.AppCtx, in CreateInstanceInput) (*Instance, error
 		in.Image = "ubuntu-24.04"
 	}
 	if in.Size == "" {
-		in.Size = "cx22" // smallest current Hetzner shared-CPU tier
+		in.Size = "cpx22" // smallest current Hetzner shared-CPU tier in the default fsn1 region
 	}
 	if in.Region == "" {
 		in.Region = "fsn1"
@@ -210,7 +213,7 @@ func hetznerDestroy(ctx *sdk.AppCtx, inst *Instance) error {
 		// upstream id was recorded.
 		return nil
 	}
-	args := map[string]any{"id": inst.ProviderID}
+	args := map[string]any{"id": normalizeHetznerID(inst.ProviderID)}
 	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(bound.ConnectionID, "server_delete", args)
 	if err != nil {
 		return fmt.Errorf("hetzner.server_delete: %w", err)
@@ -223,6 +226,320 @@ func hetznerDestroy(ctx *sdk.AppCtx, inst *Instance) error {
 		return fmt.Errorf("hetzner.server_delete returned: %s", upstreamErrorString(res))
 	}
 	return nil
+}
+
+type UpgradeInstanceInput struct {
+	Size        string
+	UpgradeDisk bool
+	Wait        bool
+}
+
+type UpgradeInstanceResult struct {
+	InstanceID  int64  `json:"instance_id"`
+	Provider    string `json:"provider"`
+	OldSize     string `json:"old_size"`
+	NewSize     string `json:"new_size"`
+	Status      string `json:"status"`
+	UpgradeDisk bool   `json:"upgrade_disk"`
+}
+
+// hetznerUpgrade changes an existing server's type in-place. It does
+// not reinstall or migrate workloads; the same upstream server id,
+// IPs, disk, and SSH key remain in place. Hetzner requires the server
+// to be powered off before change_type, so this is an outage path.
+func hetznerUpgrade(ctx *sdk.AppCtx, inst *Instance, in UpgradeInstanceInput) (*UpgradeInstanceResult, error) {
+	if inst == nil {
+		return nil, ErrInstanceNotFound
+	}
+	if inst.IsLocal() {
+		return nil, ErrLocalInstanceImmutable
+	}
+	if inst.Provider != "hetzner" {
+		return nil, fmt.Errorf("provider %q does not support in-place upgrade", inst.Provider)
+	}
+	if inst.ProviderID == "" {
+		return nil, errors.New("instance has no provider_id")
+	}
+	if inst.Status != "ready" {
+		return nil, fmt.Errorf("instance must be ready to upgrade (status=%s)", inst.Status)
+	}
+	if strings.TrimSpace(in.Size) == "" {
+		return nil, errors.New("size required")
+	}
+	in.Size = strings.TrimSpace(in.Size)
+	if in.Size == inst.Size {
+		return nil, fmt.Errorf("instance is already size %q", inst.Size)
+	}
+	targetType, err := validateHetznerUpgradeTarget(ctx, inst, in.Size)
+	if err != nil {
+		return nil, err
+	}
+
+	bound := ctx.IntegrationFor("provider")
+	if bound == nil || bound.ConnectionID == 0 {
+		return nil, errors.New("no VPS provider bound")
+	}
+	if bound.AppSlug != "" && bound.AppSlug != "hetzner" {
+		return nil, fmt.Errorf("bound provider slug is %q, want hetzner", bound.AppSlug)
+	}
+
+	oldSize := inst.Size
+	if _, err := updateInstanceAndEmit(ctx, inst.ID, map[string]any{
+		"status":        "upgrading",
+		"error_message": "",
+	}); err != nil {
+		return nil, err
+	}
+	globalSSHPool.evict(inst.ID)
+	clearMetricsCache(inst.ID)
+
+	fail := func(format string, args ...any) (*UpgradeInstanceResult, error) {
+		msg := fmt.Sprintf(format, args...)
+		_, _ = updateInstanceAndEmit(ctx, inst.ID, map[string]any{
+			"status":        "error",
+			"error_message": msg,
+		})
+		return nil, errors.New(msg)
+	}
+
+	providerID := normalizeHetznerID(inst.ProviderID)
+	shutdownErr := hetznerRunAction(ctx, bound.ConnectionID, "server_shutdown", map[string]any{"id": providerID}, 90*time.Second, true)
+	if shutdownErr == nil {
+		shutdownErr = waitHetznerServerStatus(ctx, bound.ConnectionID, providerID, "off", 90*time.Second)
+	}
+	if shutdownErr != nil {
+		if err := hetznerRunAction(ctx, bound.ConnectionID, "server_poweroff", map[string]any{"id": providerID}, 90*time.Second, true); err != nil {
+			return fail("hetzner shutdown/poweroff before upgrade: %v", err)
+		}
+		if err := waitHetznerServerStatus(ctx, bound.ConnectionID, providerID, "off", 90*time.Second); err != nil {
+			return fail("hetzner wait for offline before upgrade: %v", err)
+		}
+	}
+
+	if err := hetznerRunAction(ctx, bound.ConnectionID, "server_change_type", map[string]any{
+		"id":           providerID,
+		"server_type":  in.Size,
+		"upgrade_disk": in.UpgradeDisk,
+	}, 5*time.Minute, true); err != nil {
+		_ = hetznerRunAction(ctx, bound.ConnectionID, "server_poweron", map[string]any{"id": providerID}, 90*time.Second, false)
+		return fail("hetzner change_type: %v", err)
+	}
+
+	if err := hetznerRunAction(ctx, bound.ConnectionID, "server_poweron", map[string]any{"id": providerID}, 90*time.Second, true); err != nil {
+		return fail("hetzner poweron after upgrade: %v", err)
+	}
+	if in.Wait {
+		fresh, err := dbGetInstance(ctx.AppDB(), inst.ID)
+		if err != nil {
+			return nil, err
+		}
+		if err := probeSSHReady(fresh, 5*time.Minute); err != nil {
+			return fail("ssh probe after upgrade: %v", err)
+		}
+	}
+
+	after, err := updateInstanceAndEmit(ctx, inst.ID, map[string]any{
+		"status":             "ready",
+		"size":               in.Size,
+		"monthly_cost_cents": priceEURToCents(targetType.MonthlyPriceEUR),
+		"error_message":      "",
+		"ready_at":           nowUTC(),
+	})
+	if err != nil {
+		return nil, err
+	}
+	clearMetricsCache(inst.ID)
+	emitInstanceUpgraded(ctx, inst, after, in.UpgradeDisk)
+	return &UpgradeInstanceResult{
+		InstanceID:  inst.ID,
+		Provider:    inst.Provider,
+		OldSize:     oldSize,
+		NewSize:     in.Size,
+		Status:      after.Status,
+		UpgradeDisk: in.UpgradeDisk,
+	}, nil
+}
+
+func validateHetznerUpgradeTarget(ctx *sdk.AppCtx, inst *Instance, size string) (*ServerType, error) {
+	types, err := hetznerListServerTypes(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, t := range types {
+		if t.Name != size {
+			continue
+		}
+		if t.Deprecated {
+			return nil, fmt.Errorf("server type %q is deprecated", size)
+		}
+		if inst.Region != "" && len(t.AvailableIn) > 0 && !containsString(t.AvailableIn, inst.Region) {
+			return nil, fmt.Errorf("server type %q is not available in region %q", size, inst.Region)
+		}
+		return &t, nil
+	}
+	return nil, fmt.Errorf("server type %q not found in live Hetzner catalog", size)
+}
+
+func hetznerRunAction(ctx *sdk.AppCtx, connectionID int64, tool string, args map[string]any, timeout time.Duration, wait bool) error {
+	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connectionID, tool, args)
+	if err != nil {
+		return fmt.Errorf("%s: %w", tool, err)
+	}
+	if res == nil || !res.Success {
+		return fmt.Errorf("%s returned: %s", tool, upstreamErrorString(res))
+	}
+	if !wait {
+		return nil
+	}
+	actionID := parseHetznerActionID(res.Data)
+	if actionID == 0 {
+		return nil
+	}
+	return waitHetznerAction(ctx, connectionID, actionID, timeout)
+}
+
+func waitHetznerAction(ctx *sdk.AppCtx, connectionID int64, actionID int64, timeout time.Duration) error {
+	if timeout <= 0 {
+		timeout = 2 * time.Minute
+	}
+	deadline := time.Now().Add(timeout)
+	for {
+		res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connectionID, "action_get", map[string]any{"id": actionID})
+		if err != nil {
+			return fmt.Errorf("action_get %d: %w", actionID, err)
+		}
+		if res == nil || !res.Success {
+			return fmt.Errorf("action_get %d returned: %s", actionID, upstreamErrorString(res))
+		}
+		status, actionErr := parseHetznerActionStatus(res.Data)
+		switch status {
+		case "success":
+			return nil
+		case "error":
+			if actionErr != "" {
+				return fmt.Errorf("action %d failed: %s", actionID, actionErr)
+			}
+			return fmt.Errorf("action %d failed", actionID)
+		case "", "running":
+			// keep polling
+		default:
+			if status != "running" {
+				return fmt.Errorf("action %d unexpected status %q", actionID, status)
+			}
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("action %d timed out after %s", actionID, timeout)
+		}
+		time.Sleep(2 * time.Second)
+	}
+}
+
+func waitHetznerServerStatus(ctx *sdk.AppCtx, connectionID int64, providerID string, want string, timeout time.Duration) error {
+	if timeout <= 0 {
+		timeout = 90 * time.Second
+	}
+	deadline := time.Now().Add(timeout)
+	for {
+		res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connectionID, "server_get", map[string]any{"id": providerID})
+		if err != nil {
+			return fmt.Errorf("server_get %s: %w", providerID, err)
+		}
+		if res == nil || !res.Success {
+			return fmt.Errorf("server_get %s returned: %s", providerID, upstreamErrorString(res))
+		}
+		status, err := parseHetznerServerStatus(res.Data)
+		if err != nil {
+			return err
+		}
+		if status == want {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("server %s status is %q, want %q", providerID, status, want)
+		}
+		time.Sleep(2 * time.Second)
+	}
+}
+
+func parseHetznerServerStatus(data json.RawMessage) (string, error) {
+	var v struct {
+		Server struct {
+			Status string `json:"status"`
+		} `json:"server"`
+	}
+	if err := json.Unmarshal(data, &v); err != nil {
+		return "", fmt.Errorf("decode server status: %w", err)
+	}
+	if v.Server.Status == "" {
+		return "", errors.New("server_get response missing server.status")
+	}
+	return v.Server.Status, nil
+}
+
+func parseHetznerActionID(data json.RawMessage) int64 {
+	var v struct {
+		Action struct {
+			ID any `json:"id"`
+		} `json:"action"`
+	}
+	if err := json.Unmarshal(data, &v); err != nil {
+		return 0
+	}
+	return anyToInt64(v.Action.ID)
+}
+
+func parseHetznerActionStatus(data json.RawMessage) (status string, actionErr string) {
+	var v struct {
+		Action struct {
+			Status string `json:"status"`
+			Error  any    `json:"error"`
+		} `json:"action"`
+	}
+	if err := json.Unmarshal(data, &v); err != nil {
+		return "", err.Error()
+	}
+	if v.Action.Error == nil {
+		return v.Action.Status, ""
+	}
+	if b, err := json.Marshal(v.Action.Error); err == nil {
+		return v.Action.Status, string(b)
+	}
+	return v.Action.Status, fmt.Sprint(v.Action.Error)
+}
+
+func anyToInt64(v any) int64 {
+	switch n := v.(type) {
+	case float64:
+		return int64(n)
+	case int:
+		return int64(n)
+	case int64:
+		return n
+	case json.Number:
+		i, _ := n.Int64()
+		return i
+	case string:
+		i, _ := strconv.ParseInt(n, 10, 64)
+		return i
+	default:
+		return 0
+	}
+}
+
+func containsString(xs []string, want string) bool {
+	for _, x := range xs {
+		if x == want {
+			return true
+		}
+	}
+	return false
+}
+
+func priceEURToCents(v float64) int {
+	if v <= 0 {
+		return 0
+	}
+	return int(math.Round(v * 100))
 }
 
 // buildCloudInit builds a #cloud-config userdata string that seeds
@@ -284,11 +601,13 @@ func parseHetznerCreateResponse(data json.RawMessage) (id, ipv4, ipv6 string) {
 			} `json:"public_net"`
 		} `json:"server"`
 	}
-	if err := json.Unmarshal(data, &v); err != nil {
+	dec := json.NewDecoder(bytes.NewReader(data))
+	dec.UseNumber()
+	if err := dec.Decode(&v); err != nil {
 		return "", "", ""
 	}
 	if v.Server.ID != nil {
-		id = fmt.Sprintf("%v", v.Server.ID)
+		id = hetznerIDString(v.Server.ID)
 	}
 	ipv4 = v.Server.PublicNet.IPv4.IP
 	ipv6 = v.Server.PublicNet.IPv6.IP
@@ -299,13 +618,52 @@ func parseHetznerCreateResponse(data json.RawMessage) (id, ipv4, ipv6 string) {
 			IP  string `json:"ipv4"`
 			IP6 string `json:"ipv6"`
 		}
-		if err := json.Unmarshal(data, &flat); err == nil && flat.ID != nil {
-			id = fmt.Sprintf("%v", flat.ID)
+		dec := json.NewDecoder(bytes.NewReader(data))
+		dec.UseNumber()
+		if err := dec.Decode(&flat); err == nil && flat.ID != nil {
+			id = hetznerIDString(flat.ID)
 			ipv4 = flat.IP
 			ipv6 = flat.IP6
 		}
 	}
 	return id, ipv4, ipv6
+}
+
+func hetznerIDString(v any) string {
+	switch x := v.(type) {
+	case nil:
+		return ""
+	case json.Number:
+		if i, err := x.Int64(); err == nil {
+			return strconv.FormatInt(i, 10)
+		}
+		return normalizeHetznerID(x.String())
+	case string:
+		return normalizeHetznerID(x)
+	case float64:
+		if isIntegralHetznerIDFloat(x) {
+			return strconv.FormatInt(int64(x), 10)
+		}
+	}
+	return normalizeHetznerID(fmt.Sprintf("%v", v))
+}
+
+func normalizeHetznerID(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return ""
+	}
+	if strings.ContainsAny(s, ".eE") {
+		if f, err := strconv.ParseFloat(s, 64); err == nil && isIntegralHetznerIDFloat(f) {
+			return strconv.FormatInt(int64(f), 10)
+		}
+	}
+	return s
+}
+
+func isIntegralHetznerIDFloat(f float64) bool {
+	const maxInt64AsFloat = float64(int64(^uint64(0) >> 1))
+	return !math.IsNaN(f) && !math.IsInf(f, 0) && f == math.Trunc(f) && f >= 0 && f <= maxInt64AsFloat
 }
 
 // upstreamErrorString / upstreamStatus extract a useful error string

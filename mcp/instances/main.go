@@ -1,4 +1,4 @@
-// Apteva Instances v0.1.0 — compute-host inventory + lifecycle.
+// Apteva Instances — compute-host inventory + lifecycle.
 //
 // Provisions and manages the machines that workloads run on. The
 // local Apteva machine is always available as a built-in instance
@@ -39,12 +39,14 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: instances
 display_name: Instances
-version: 0.4.11
+version: 0.4.12
 description: |
   Compute-host inventory for Apteva. Manages local machine + VPS
-  instances (Hetzner in v0.1; DO/Vultr/AWS in later releases).
-  Foundation layer consumed by Live Link, Deploy, Backup, Containers
-  via cross-app calls.
+  instances through a generic provider binding. Compatible provider
+  integrations: Hetzner Cloud, DigitalOcean, Vultr, AWS EC2,
+  Scaleway, Huawei Cloud, Linode, and OVHcloud. Foundation layer
+  consumed by Live Link, Deploy, Backup, Containers via cross-app
+  calls.
 author: Apteva
 scopes: [global]
 requires:
@@ -56,27 +58,29 @@ requires:
     - role: provider
       kind: integration
       required: false
-      compatible_slugs: [hetzner]
+      compatible_slugs: [hetzner, digitalocean, vultr, aws-ec2, scaleway, huawei-cloud, linode, ovhcloud]
       label: VPS provider
       hint: |
         Optional — local instance always available. Bind a VPS integration
-        (Hetzner Cloud) to provision remote instances. Future v0.2 adds
-        DigitalOcean / Vultr / AWS EC2 to compatible_slugs.
+        to provision remote instances through the generic Instances interface.
+        Hetzner is the first complete adapter; other compatible provider
+        bindings fail clearly until their adapters are implemented.
 provides:
   http_routes:
     - prefix: /
   mcp_tools:
-    - { name: instance_create,       description: "Provision a new instance via the bound VPS provider. Args: name, provider?, region?, size?, image?, tags?." }
+    - { name: instance_create,       description: "Provision a new instance via the bound VPS provider. Compatible bindings include Hetzner, DigitalOcean, Vultr, AWS EC2, Scaleway, Huawei Cloud, Linode, and OVHcloud; Hetzner provisioning is implemented today. Args: name, provider?, region?, size?, image?, tags?." }
     - { name: instance_get,          description: "Fetch one instance by id." }
     - { name: instance_list,         description: "List instances. Args: provider? (filter), status? (filter)." }
     - { name: instance_destroy,      description: "Terminate the instance (refused for local id 0). Args: id." }
+    - { name: instance_upgrade,      description: "In-place resize of a remote instance where the provider adapter supports it. Hetzner is implemented today. Args: id, size, upgrade_disk?, wait?." }
     - { name: instance_run_command,  description: "Execute a shell command. Local: exec; remote: SSH. Args: id, cmd, timeout_s?." }
     - { name: instance_upload_file,  description: "Write a file. Local: filesystem (path-allowlisted); remote: SCP. Args: id, path, content_b64." }
     - { name: instance_wait_ready,   description: "Poll the instance until SSH is reachable. Args: id, timeout_s?." }
     - { name: instance_metrics,      description: "CPU / memory / disk / network / load / uptime. Args: id." }
-    - { name: instance_list_server_types, description: "Live list of VPS server types (sizes) from the bound provider — name, cores, memory_gb, disk_gb, price, deprecation. Use to discover valid sizes for instance_create. Args: provider? (default 'hetzner')." }
-    - { name: instance_list_locations,    description: "Live list of VPS regions from the bound provider — name, city, country, network_zone. Args: provider? (default 'hetzner')." }
-    - { name: instance_list_images,       description: "Live list of bootable OS images from the bound provider (system images only). Args: provider? (default 'hetzner')." }
+    - { name: instance_list_server_types, description: "Live list of active, non-deprecated VPS server types (sizes) from the bound provider — name, cores, memory_gb, disk_gb, price, available_in. Use to discover valid sizes for instance_create. Args: provider? (default: bound provider)." }
+    - { name: instance_list_locations,    description: "Live list of VPS regions from the bound provider — name, city, country, network_zone. Args: provider? (default: bound provider)." }
+    - { name: instance_list_images,       description: "Live list of bootable OS images from the bound provider (system images only). Args: provider? (default: bound provider)." }
   publishes:
     - name: instance.created
       description: A new instance row was created in Instances.
@@ -105,6 +109,24 @@ provides:
         public_ipv4: string
         public_ipv6: string
         ready_at: string
+    - name: instance.upgrading
+      description: An instance entered an in-place server type upgrade.
+      payload:
+        id: integer
+        name: string
+        provider: string
+        status: string
+        size: string
+    - name: instance.upgraded
+      description: An instance completed an in-place server type upgrade.
+      payload:
+        id: integer
+        name: string
+        provider: string
+        status: string
+        old_size: string
+        new_size: string
+        upgrade_disk: boolean
     - name: instance.error
       description: An instance entered an error state.
       payload:
@@ -195,7 +217,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/api/instances/", Handler: a.handleInstanceItem},
 		// Live provider catalog. Sister surface to the MCP tools so the
 		// panel doesn't need an MCP client; ?provider= defaults to
-		// hetzner. Returns the same shape as the MCP tools wrap.
+		// the bound provider. Returns the same shape as the MCP tools wrap.
 		{Pattern: "/api/instances-server-types", Handler: a.handleListServerTypes},
 		{Pattern: "/api/instances-locations", Handler: a.handleListLocations},
 		{Pattern: "/api/instances-images", Handler: a.handleListImages},

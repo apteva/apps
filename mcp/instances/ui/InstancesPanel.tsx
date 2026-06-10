@@ -37,7 +37,7 @@ interface Instance {
 
 interface MetricsWire {
   timestamp: string;
-  cpu: { total_pct: number };
+  cpu: { total_pct: number; cores?: number };
   mem: { used_bytes: number; total_bytes: number; available_bytes: number };
   disk: Array<{ mount: string; used_bytes: number; total_bytes: number; used_pct: number }>;
   load: { l1: number; l5: number; l15: number };
@@ -49,7 +49,7 @@ const API = "/api/apps/instances/api";
 
 function statusColor(s: string): string {
   if (s === "ready") return "text-green";
-  if (s === "provisioning" || s === "pending") return "text-blue";
+  if (s === "provisioning" || s === "pending" || s === "upgrading") return "text-blue";
   if (s === "error") return "text-red";
   return "text-text-dim";
 }
@@ -89,15 +89,21 @@ function pctColor(pct: number): string {
   return "#16a34a";                 // green-600
 }
 
-// Load average threshold heuristic. We don't have a reliable
-// per-instance "cores" field (the size is just a name like cx22),
-// so the bands are deliberately conservative: l1>2 amber, l1>4 red.
-// Wrong on a 16-core box; correct enough on the Hetzner shared
-// types most operators provision.
-function loadColor(l1: number): string {
+function loadColor(l1: number, cores?: number): string {
+  if (cores && cores > 0) {
+    const ratio = l1 / cores;
+    if (ratio >= 1) return "#dc2626";
+    if (ratio >= 0.7) return "#f59e0b";
+    return "#16a34a";
+  }
   if (l1 >= 4) return "#dc2626";
   if (l1 >= 2) return "#f59e0b";
   return "#16a34a";
+}
+
+function formatCPUDetail(cpu: MetricsWire["cpu"]): string {
+  const pct = `${cpu.total_pct.toFixed(1)}%`;
+  return cpu.cores && cpu.cores > 0 ? `${pct} · ${cpu.cores} vCPU` : pct;
 }
 
 function formatPriceEUR(cents: number): string {
@@ -286,6 +292,7 @@ export default function InstancesPanel({ projectId, installId }: NativePanelProp
   const [busy, setBusy] = useState(false);
   const [showCreate, setShowCreate] = useState(false);
   const [pendingDestroy, setPendingDestroy] = useState<Instance | null>(null);
+  const [pendingUpgrade, setPendingUpgrade] = useState<Instance | null>(null);
 
   const withParams = useCallback(
     () =>
@@ -335,6 +342,25 @@ export default function InstancesPanel({ projectId, installId }: NativePanelProp
     }
   };
 
+  const upgrade = async (inst: Instance, size: string, upgradeDisk: boolean) => {
+    setBusy(true);
+    try {
+      const r = await fetch(`${API}/instances/${inst.id}/upgrade?${withParams()}`, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ size, upgrade_disk: upgradeDisk, wait: true }),
+      });
+      if (!r.ok) throw new Error(`${r.status}: ${await r.text().catch(() => "")}`);
+      setPendingUpgrade(null);
+      await load();
+    } catch (e) {
+      setError("Upgrade failed: " + (e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
   // Cost rollup: sum of monthly cost across remote (non-local)
   // instances. Local is free by construction; including it would just
   // confuse the number.
@@ -348,7 +374,7 @@ export default function InstancesPanel({ projectId, installId }: NativePanelProp
       <header className="px-4 py-3 border-b border-border flex items-baseline gap-3">
         <h1 className="text-text font-semibold">Instances</h1>
         <span className="text-xs text-text-muted flex-1">
-          Host inventory — local + remote (Hetzner v0.1).
+          Host inventory — local + remote through a bound VPS provider.
         </span>
         {remoteCount > 0 && (
           <span
@@ -392,6 +418,7 @@ export default function InstancesPanel({ projectId, installId }: NativePanelProp
               inst={inst}
               withParams={withParams}
               busy={busy}
+              onUpgrade={() => setPendingUpgrade(inst)}
               onDestroy={() => setPendingDestroy(inst)}
             />
           ))
@@ -404,6 +431,16 @@ export default function InstancesPanel({ projectId, installId }: NativePanelProp
           busy={busy}
           onCancel={() => setPendingDestroy(null)}
           onConfirm={() => destroy(pendingDestroy)}
+        />
+      )}
+
+      {pendingUpgrade && (
+        <UpgradeDialog
+          inst={pendingUpgrade}
+          busy={busy}
+          withParams={withParams}
+          onCancel={() => setPendingUpgrade(null)}
+          onConfirm={(size, upgradeDisk) => upgrade(pendingUpgrade, size, upgradeDisk)}
         />
       )}
 
@@ -507,6 +544,181 @@ function DestroyConfirmDialog({
   );
 }
 
+function UpgradeDialog({
+  inst, busy, withParams, onCancel, onConfirm,
+}: {
+  inst: Instance;
+  busy: boolean;
+  withParams: () => string;
+  onCancel: () => void;
+  onConfirm: (size: string, upgradeDisk: boolean) => void;
+}) {
+  const [serverTypes, setServerTypes] = useState<ServerTypeWire[]>([]);
+  const [size, setSize] = useState("");
+  const [upgradeDisk, setUpgradeDisk] = useState(false);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape" && !busy) onCancel();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [busy, onCancel]);
+
+  useEffect(() => {
+    (async () => {
+      setLoading(true);
+      setError(null);
+      try {
+        const qs = new URLSearchParams(withParams());
+        qs.set("provider", inst.provider);
+        const r = await fetch(`${API}/instances-server-types?${qs.toString()}`, { credentials: "same-origin" });
+        if (!r.ok) throw new Error(`${r.status}: ${await r.text().catch(() => "")}`);
+        const j = await r.json();
+        const allTypes = ((j.server_types || []) as ServerTypeWire[])
+          .filter((t) => !t.deprecated)
+          .filter((t) => !inst.region || !t.available_in?.length || t.available_in.includes(inst.region))
+          .sort((a, b) => (a.monthly_price_eur ?? 0) - (b.monthly_price_eur ?? 0));
+        const current = allTypes.find((t) => t.name === inst.size);
+        const types = allTypes.filter((t) => t.name !== inst.size);
+        const upgrades = current
+          ? types.filter((t) =>
+              (t.monthly_price_eur ?? 0) >= (current.monthly_price_eur ?? 0) &&
+              (t.cores > current.cores || t.memory_gb > current.memory_gb || t.disk_gb > current.disk_gb)
+            )
+          : types;
+        setServerTypes(upgrades);
+        if (upgrades.length) setSize(upgrades[0].name);
+      } catch (e) {
+        setError((e as Error).message);
+      } finally {
+        setLoading(false);
+      }
+    })();
+  }, [inst.region, inst.size, withParams]);
+
+  const selected = serverTypes.find((t) => t.name === size);
+  const formatEUR = (n?: number) => n ? `€${n.toFixed(2)}/mo` : "—";
+  const typeLabel = (t: ServerTypeWire) => {
+    const specs = [
+      t.cores ? `${t.cores} ${t.cpu_type === "dedicated" ? "dedicated vCPU" : "vCPU"}` : "",
+      t.memory_gb ? `${t.memory_gb} GB RAM` : "",
+      t.disk_gb ? `${t.disk_gb} GB disk` : "",
+    ].filter(Boolean).join(", ");
+    return `${t.name} · ${formatEUR(t.monthly_price_eur)}${specs ? ` · ${specs}` : ""}`;
+  };
+
+  return (
+    <div
+      className="fixed inset-0 z-40 flex items-center justify-center bg-black/60"
+      style={{ padding: 24 }}
+      onClick={() => { if (!busy) onCancel(); }}
+      role="presentation"
+    >
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="upgrade-instance-title"
+        onClick={(e) => e.stopPropagation()}
+        className="bg-bg border border-blue/40 rounded shadow-xl overflow-hidden"
+        style={{ width: "min(520px, 100%)" }}
+      >
+        <div
+          className="px-5 py-4 space-y-1"
+          style={{ borderBottom: `1px solid ${SUBTLE_BORDER}` }}
+        >
+          <h2 id="upgrade-instance-title" className="text-text font-semibold">
+            Upgrade instance
+          </h2>
+          <p className="text-xs text-text-muted">
+            In-place resize through the {inst.provider} adapter. The server is shut down, resized, powered on, then checked over SSH.
+          </p>
+        </div>
+
+        <div className="p-5 space-y-4">
+          <div className="grid grid-cols-2 gap-3 text-xs">
+            <div
+              className="rounded p-3"
+              style={{ backgroundColor: SUB_CARD_BG, border: `1px solid ${SUBTLE_BORDER}` }}
+            >
+              <div className="text-text-dim uppercase text-[10px] tracking-wider mb-1">Current</div>
+              <div className="text-text font-mono">{inst.size || "unknown"}</div>
+              <div className="text-text-dim mt-1">{inst.region || "region unknown"}</div>
+            </div>
+            <div
+              className="rounded p-3"
+              style={{ backgroundColor: SUB_CARD_BG, border: `1px solid ${SUBTLE_BORDER}` }}
+            >
+              <div className="text-text-dim uppercase text-[10px] tracking-wider mb-1">Target</div>
+              <div className="text-text font-mono">{selected?.name || "—"}</div>
+              <div className="text-text-dim mt-1">{formatEUR(selected?.monthly_price_eur)}</div>
+            </div>
+          </div>
+
+          {error ? (
+            <div className="text-xs text-red">{error}</div>
+          ) : loading ? (
+            <div className="text-xs text-text-muted">Loading server types…</div>
+          ) : serverTypes.length === 0 ? (
+            <div className="text-xs text-text-muted">No upgrade target is available for this region.</div>
+          ) : (
+            <div className="space-y-3">
+              <div>
+                <label className="text-xs text-text-muted block mb-1">Target size</label>
+                <select
+                  value={size}
+                  onChange={(e) => setSize(e.target.value)}
+                  disabled={busy}
+                  className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm disabled:opacity-50"
+                >
+                  {serverTypes.map((t) => (
+                    <option key={t.name} value={t.name}>{typeLabel(t)}</option>
+                  ))}
+                </select>
+              </div>
+
+              <label className="flex items-start gap-2 text-xs text-text-muted">
+                <input
+                  type="checkbox"
+                  checked={upgradeDisk}
+                  onChange={(e) => setUpgradeDisk(e.target.checked)}
+                  disabled={busy}
+                  className="mt-0.5"
+                />
+                <span>
+                  <span className="text-text">Expand disk</span>
+                  <span className="block text-text-dim">Off by default. Disk expansion usually cannot be undone.</span>
+                </span>
+              </label>
+            </div>
+          )}
+
+          <div className="flex justify-end gap-2">
+            <button
+              type="button"
+              onClick={onCancel}
+              disabled={busy}
+              className="px-3 py-1.5 text-sm rounded border border-border text-text-muted hover:text-text disabled:opacity-50"
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              onClick={() => onConfirm(size, upgradeDisk)}
+              disabled={busy || loading || !!error || !size}
+              className="px-3 py-1.5 text-sm rounded bg-blue text-white hover:bg-blue/90 disabled:opacity-50"
+            >
+              {busy ? "Upgrading…" : "Upgrade"}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // MetricsSample is a single tick captured for the in-memory history.
 // We don't persist anything; the panel session is the entire window.
 // Caps at HISTORY_MAX entries so memory stays bounded if someone
@@ -521,11 +733,12 @@ const HISTORY_MAX = 360;          // 10s polling × 360 = 1 hour
 const STALE_THRESHOLD_MS = 30000; // 30s without a successful poll → "stale"
 
 function InstanceCard({
-  inst, withParams, busy, onDestroy,
+  inst, withParams, busy, onUpgrade, onDestroy,
 }: {
   inst: Instance;
   withParams: () => string;
   busy: boolean;
+  onUpgrade: () => void;
   onDestroy: () => void;
 }) {
   const [metrics, setMetrics] = useState<MetricsWire | null>(null);
@@ -625,12 +838,20 @@ function InstanceCard({
           {inst.status}
         </span>
         {!isLocal && (
-          <button
-            type="button"
-            onClick={onDestroy}
-            disabled={busy}
-            className="px-2 py-0.5 text-[11px] border border-red/60 text-red rounded hover:bg-red hover:text-white disabled:opacity-50"
-          >Destroy</button>
+          <>
+            <button
+              type="button"
+              onClick={onUpgrade}
+              disabled={busy || inst.status !== "ready"}
+              className="px-2 py-0.5 text-[11px] border border-blue/60 text-blue rounded hover:bg-blue hover:text-white disabled:opacity-50"
+            >Upgrade</button>
+            <button
+              type="button"
+              onClick={onDestroy}
+              disabled={busy}
+              className="px-2 py-0.5 text-[11px] border border-red/60 text-red rounded hover:bg-red hover:text-white disabled:opacity-50"
+            >Destroy</button>
+          </>
         )}
       </div>
 
@@ -659,7 +880,7 @@ function InstanceCard({
                 <div className="flex-1 min-w-0">
                   <ProgressBar
                     label="CPU"
-                    sublabel={`${metrics.cpu.total_pct.toFixed(1)}%`}
+                    sublabel={formatCPUDetail(metrics.cpu)}
                     pct={metrics.cpu.total_pct}
                   />
                 </div>
@@ -698,8 +919,12 @@ function InstanceCard({
               <StatChip label="Load (1m)">
                 <span
                   className="font-mono"
-                  style={{ color: loadColor(metrics.load.l1) }}
-                  title={`1/5/15 min: ${metrics.load.l1.toFixed(2)} / ${metrics.load.l5.toFixed(2)} / ${metrics.load.l15.toFixed(2)}`}
+                  style={{ color: loadColor(metrics.load.l1, metrics.cpu.cores) }}
+                  title={
+                    metrics.cpu.cores && metrics.cpu.cores > 0
+                      ? `1/5/15 min: ${metrics.load.l1.toFixed(2)} / ${metrics.load.l5.toFixed(2)} / ${metrics.load.l15.toFixed(2)} · ${((metrics.load.l1 / metrics.cpu.cores) * 100).toFixed(0)}% of ${metrics.cpu.cores} vCPU capacity`
+                      : `1/5/15 min: ${metrics.load.l1.toFixed(2)} / ${metrics.load.l5.toFixed(2)} / ${metrics.load.l15.toFixed(2)}`
+                  }
                 >
                   {metrics.load.l1.toFixed(2)}
                 </span>
@@ -912,7 +1137,7 @@ function CreateDialog({
         method: "POST",
         credentials: "same-origin",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: name.trim(), provider: "hetzner", size, region, image }),
+        body: JSON.stringify({ name: name.trim(), size, region, image }),
       });
       if (!r.ok) throw new Error(`${r.status}: ${await r.text().catch(() => "")}`);
       onCreated();
@@ -967,15 +1192,15 @@ function CreateDialog({
       >
         <h2 className="text-text font-semibold">Provision a new instance</h2>
         {catalogError ? (
-          <p className="text-xs text-red-500">
-            Couldn't load provider catalog: {catalogError}. Bind a Hetzner connection on this
-            install (Integrations → Add → Hetzner Cloud), then reopen this dialog.
+          <p className="text-xs text-amber">
+            Couldn't load the bound provider catalog: {catalogError}. Enter provider-specific
+            size, region, and image values manually; the backend will use the provider bound to this install.
           </p>
         ) : catalogLoading ? (
-          <p className="text-xs text-text-muted">Loading server types, regions, and images from Hetzner…</p>
+          <p className="text-xs text-text-muted">Loading server types, regions, and images from the bound provider…</p>
         ) : (
           <p className="text-xs text-text-muted">
-            Live from Hetzner: {serverTypes.length} types · {locations.length} regions · {images.length} images.
+            Live from bound provider: {serverTypes.length} types · {locations.length} regions · {images.length} images.
           </p>
         )}
         <div>
@@ -992,46 +1217,76 @@ function CreateDialog({
         <div className="space-y-2">
           <div>
             <label className="text-xs text-text-muted block mb-1">Size</label>
-            <select
-              value={size}
-              onChange={(e) => setSize(e.target.value)}
-              disabled={catalogLoading || !!catalogError}
-              className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm disabled:opacity-50"
-            >
-              {serverTypes.length === 0 && <option value="">—</option>}
-              {serverTypes.map((t) => (
-                <option key={t.name} value={t.name}>{sizeLabel(t)}</option>
-              ))}
-            </select>
+            {catalogError ? (
+              <input
+                type="text"
+                value={size}
+                onChange={(e) => setSize(e.target.value)}
+                placeholder="provider size"
+                className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm font-mono"
+              />
+            ) : (
+              <select
+                value={size}
+                onChange={(e) => setSize(e.target.value)}
+                disabled={catalogLoading}
+                className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm disabled:opacity-50"
+              >
+                {serverTypes.length === 0 && <option value="">—</option>}
+                {serverTypes.map((t) => (
+                  <option key={t.name} value={t.name}>{sizeLabel(t)}</option>
+                ))}
+              </select>
+            )}
           </div>
           <div className="grid grid-cols-2 gap-2">
             <div>
               <label className="text-xs text-text-muted block mb-1">Region</label>
-              <select
-                value={region}
-                onChange={(e) => setRegion(e.target.value)}
-                disabled={catalogLoading || !!catalogError}
-                className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm disabled:opacity-50"
-              >
-                {locations.length === 0 && <option value="">—</option>}
-                {locations.map((l) => (
-                  <option key={l.name} value={l.name}>{locLabel(l)}</option>
-                ))}
-              </select>
+              {catalogError ? (
+                <input
+                  type="text"
+                  value={region}
+                  onChange={(e) => setRegion(e.target.value)}
+                  placeholder="provider region"
+                  className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm font-mono"
+                />
+              ) : (
+                <select
+                  value={region}
+                  onChange={(e) => setRegion(e.target.value)}
+                  disabled={catalogLoading}
+                  className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm disabled:opacity-50"
+                >
+                  {locations.length === 0 && <option value="">—</option>}
+                  {locations.map((l) => (
+                    <option key={l.name} value={l.name}>{locLabel(l)}</option>
+                  ))}
+                </select>
+              )}
             </div>
             <div>
               <label className="text-xs text-text-muted block mb-1">Image</label>
-              <select
-                value={image}
-                onChange={(e) => setImage(e.target.value)}
-                disabled={catalogLoading || !!catalogError}
-                className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm disabled:opacity-50"
-              >
-                {images.length === 0 && <option value="">—</option>}
-                {images.map((i) => (
-                  <option key={i.name} value={i.name}>{imageLabel(i)}</option>
-                ))}
-              </select>
+              {catalogError ? (
+                <input
+                  type="text"
+                  value={image}
+                  onChange={(e) => setImage(e.target.value)}
+                  placeholder="provider image"
+                  className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm font-mono"
+                />
+              ) : (
+                <select
+                  value={image}
+                  onChange={(e) => setImage(e.target.value)}
+                  disabled={catalogLoading}
+                  className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm disabled:opacity-50"
+                >
+                  {images.length === 0 && <option value="">—</option>}
+                  {images.map((i) => (
+                    <option key={i.name} value={i.name}>{imageLabel(i)}</option>
+                  ))}
+                </select>
+              )}
             </div>
           </div>
         </div>
@@ -1044,7 +1299,7 @@ function CreateDialog({
           >Cancel</button>
           <button
             type="submit"
-            disabled={busy || !name.trim() || catalogLoading || !!catalogError || !size || !region}
+            disabled={busy || !name.trim() || catalogLoading || !size || !region}
             className="px-3 py-1.5 text-sm rounded bg-blue text-white hover:bg-blue/90 disabled:opacity-50"
           >{busy ? "Provisioning…" : "Provision"}</button>
         </div>

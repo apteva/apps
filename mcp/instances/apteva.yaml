@@ -2,12 +2,14 @@ schema: apteva-app/v1
 
 name: instances
 display_name: Instances
-version: 0.4.11
+version: 0.4.12
 description: |
   Compute-host inventory + lifecycle for Apteva. The local Apteva
   machine is always available as a built-in instance (id 0); remote
-  instances are provisioned via VPS providers (Hetzner Cloud in
-  v0.1; DO/Vultr/AWS in later releases).
+  instances are provisioned through a generic VPS provider binding.
+  The install can bind Hetzner Cloud, DigitalOcean, Vultr, AWS EC2,
+  Scaleway, Huawei Cloud, Linode, or OVHcloud; provider-specific
+  adapters normalize into the same Instances contract.
 
   Foundation layer for higher-level apps that run workloads
   somewhere — Live Link's self-vps tunnel, Deploy's planned
@@ -40,25 +42,29 @@ requires:
     - role: provider
       kind: integration
       required: false
-      compatible_slugs: [hetzner]
+      compatible_slugs: [hetzner, digitalocean, vultr, aws-ec2, scaleway, huawei-cloud, linode, ovhcloud]
       label: VPS provider
       hint: |
-        Optional — local instance always available. Bind a Hetzner
-        Cloud connection to provision remote instances (v0.1.0).
-        DigitalOcean / Vultr / AWS EC2 land in v0.2.
+        Optional — local instance always available. Bind a VPS
+        integration to provision remote instances through the generic
+        Instances interface. Hetzner is the first complete adapter;
+        the other compatible provider integrations are exposed here
+        and fail clearly until their provider adapters are implemented.
 
 provides:
   http_routes:
     - prefix: /
   mcp_tools:
     - name: instance_create
-      description: Provision a new instance via the bound VPS provider. v0.1 supports provider=hetzner.
+      description: Provision a new instance via the bound VPS provider. Compatible bindings include Hetzner, DigitalOcean, Vultr, AWS EC2, Scaleway, Huawei Cloud, Linode, and OVHcloud; Hetzner provisioning is implemented today.
     - name: instance_get
       description: Fetch one instance by id (0 for local).
     - name: instance_list
       description: List instances, optionally filtered by provider or status.
     - name: instance_destroy
       description: Terminate the upstream resource and remove the row. Refused for local (id 0).
+    - name: instance_upgrade
+      description: In-place resize of a remote instance where the provider adapter supports it. Hetzner is implemented today.
     - name: instance_run_command
       description: Execute a shell command (local exec or remote SSH). Output capped at 1 MB.
     - name: instance_upload_file
@@ -70,18 +76,18 @@ provides:
     - name: instance_list_server_types
       description: |
         Live list of VPS server types (sizes) from the bound provider, pulled from upstream at call time.
-        Returns name + cores + memory_gb + disk_gb + monthly_price_eur + hourly_price_eur + deprecated + available_in.
-        Discovery surface for instance_create's `size` arg — Hetzner deprecates types over time, so hardcoded
-        defaults age out. Args: provider? (default 'hetzner').
+        Returns active, non-deprecated types only: name + cores + memory_gb + disk_gb + monthly_price_eur
+        + hourly_price_eur + available_in. Discovery surface for instance_create's `size` arg. Args:
+        provider? (default: bound provider).
     - name: instance_list_locations
       description: |
         Live list of VPS regions from the bound provider. Returns name + city + country + network_zone.
-        Discovery surface for instance_create's `region` arg. Args: provider? (default 'hetzner').
+        Discovery surface for instance_create's `region` arg. Args: provider? (default: bound provider).
     - name: instance_list_images
       description: |
         Live list of bootable OS images from the bound provider (system images only — snapshots/backups/apps excluded).
         Returns name + os_flavor + os_version + architecture. Discovery surface for instance_create's `image` arg.
-        Args: provider? (default 'hetzner').
+        Args: provider? (default: bound provider).
   publishes:
     - name: instance.created
       description: A new instance row was created in Instances.
@@ -110,6 +116,24 @@ provides:
         public_ipv4: string
         public_ipv6: string
         ready_at: string
+    - name: instance.upgrading
+      description: An instance entered an in-place server type upgrade.
+      payload:
+        id: integer
+        name: string
+        provider: string
+        status: string
+        size: string
+    - name: instance.upgraded
+      description: An instance completed an in-place server type upgrade.
+      payload:
+        id: integer
+        name: string
+        provider: string
+        status: string
+        old_size: string
+        new_size: string
+        upgrade_disk: boolean
     - name: instance.error
       description: An instance entered an error state.
       payload:

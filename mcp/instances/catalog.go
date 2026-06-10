@@ -7,16 +7,14 @@ package main
 // (Singapore, US-East), and rolls forward OS images monthly. Anything
 // we baked into a select-options list would be stale within months.
 //
-// Shape is provider-agnostic so DO/Vultr/AWS slot in later: the
-// returned rows carry name + display + capacity + price fields that
-// every IaaS exposes in some form. Hetzner's own shape lands as the
-// source of truth for v0.3; future providers will normalize into
-// this same envelope.
+// Shape is provider-agnostic: the returned rows carry name + display
+// + capacity + price fields that every IaaS exposes in some form.
+// Hetzner's own shape lands as the first implemented adapter; future
+// provider adapters normalize into this same envelope.
 //
-// No caching for v0.3 — Hetzner has generous rate limits and the
-// panel only calls these on dialog-open. If/when a worker starts
-// hammering them we can add a 5-min in-memory cache without
-// changing the call sites.
+// No caching for now — the panel only calls these on dialog-open.
+// If/when a worker starts hammering them we can add a 5-min
+// in-memory cache without changing the call sites.
 
 import (
 	"encoding/json"
@@ -31,16 +29,16 @@ import (
 // ServerType is the per-call shape returned to MCP + HTTP callers.
 // Fields that don't apply to a given provider stay zero.
 type ServerType struct {
-	Name           string         `json:"name"`
-	Description    string         `json:"description,omitempty"`
-	Cores          int            `json:"cores"`
-	MemoryGB       float64        `json:"memory_gb"`
-	DiskGB         int            `json:"disk_gb"`
-	CPUType        string         `json:"cpu_type,omitempty"`     // shared | dedicated
-	Architecture   string         `json:"architecture,omitempty"` // x86 | arm
-	Deprecated     bool           `json:"deprecated,omitempty"`
-	MonthlyPriceEUR float64       `json:"monthly_price_eur,omitempty"`
-	HourlyPriceEUR  float64       `json:"hourly_price_eur,omitempty"`
+	Name            string  `json:"name"`
+	Description     string  `json:"description,omitempty"`
+	Cores           int     `json:"cores"`
+	MemoryGB        float64 `json:"memory_gb"`
+	DiskGB          int     `json:"disk_gb"`
+	CPUType         string  `json:"cpu_type,omitempty"`     // shared | dedicated
+	Architecture    string  `json:"architecture,omitempty"` // x86 | arm
+	Deprecated      bool    `json:"deprecated,omitempty"`
+	MonthlyPriceEUR float64 `json:"monthly_price_eur,omitempty"`
+	HourlyPriceEUR  float64 `json:"hourly_price_eur,omitempty"`
 	// AvailableIn lists location names where this type can be
 	// provisioned. Hetzner ships some types only in newer regions.
 	AvailableIn []string `json:"available_in,omitempty"`
@@ -70,29 +68,41 @@ type Image struct {
 // ─── entry points ──────────────────────────────────────────────────
 
 func listServerTypes(ctx *sdk.AppCtx, provider string) ([]ServerType, error) {
-	switch normalizeProvider(provider) {
+	resolved, err := resolveInstanceProvider(ctx, provider)
+	if err != nil {
+		return nil, err
+	}
+	switch resolved {
 	case "hetzner":
 		return hetznerListServerTypes(ctx)
 	default:
-		return nil, fmt.Errorf("provider %q not supported (v0.3 ships only 'hetzner')", provider)
+		return nil, providerAdapterUnavailable(resolved, "server type catalog")
 	}
 }
 
 func listLocations(ctx *sdk.AppCtx, provider string) ([]Location, error) {
-	switch normalizeProvider(provider) {
+	resolved, err := resolveInstanceProvider(ctx, provider)
+	if err != nil {
+		return nil, err
+	}
+	switch resolved {
 	case "hetzner":
 		return hetznerListLocations(ctx)
 	default:
-		return nil, fmt.Errorf("provider %q not supported (v0.3 ships only 'hetzner')", provider)
+		return nil, providerAdapterUnavailable(resolved, "location catalog")
 	}
 }
 
 func listImages(ctx *sdk.AppCtx, provider string) ([]Image, error) {
-	switch normalizeProvider(provider) {
+	resolved, err := resolveInstanceProvider(ctx, provider)
+	if err != nil {
+		return nil, err
+	}
+	switch resolved {
 	case "hetzner":
 		return hetznerListImages(ctx)
 	default:
-		return nil, fmt.Errorf("provider %q not supported (v0.3 ships only 'hetzner')", provider)
+		return nil, providerAdapterUnavailable(resolved, "image catalog")
 	}
 }
 
@@ -114,7 +124,21 @@ func hetznerListServerTypes(ctx *sdk.AppCtx) ([]ServerType, error) {
 	if res == nil || !res.Success {
 		return nil, fmt.Errorf("server_types_list: %s", upstreamErrorString(res))
 	}
-	return parseHetznerServerTypes(res.Data)
+	types, err := parseHetznerServerTypes(res.Data)
+	if err != nil {
+		return nil, err
+	}
+	return activeServerTypes(types), nil
+}
+
+func activeServerTypes(types []ServerType) []ServerType {
+	out := make([]ServerType, 0, len(types))
+	for _, t := range types {
+		if !t.Deprecated {
+			out = append(out, t)
+		}
+	}
+	return out
 }
 
 func hetznerListLocations(ctx *sdk.AppCtx) ([]Location, error) {
@@ -182,6 +206,10 @@ func parseHetznerServerTypes(data json.RawMessage) ([]ServerType, error) {
 					Gross string `json:"gross"`
 				} `json:"price_hourly"`
 			} `json:"prices"`
+			Locations []struct {
+				Name      string `json:"name"`
+				Available bool   `json:"available"`
+			} `json:"locations"`
 		} `json:"server_types"`
 	}
 	if err := json.Unmarshal(data, &v); err != nil {
@@ -199,9 +227,19 @@ func parseHetznerServerTypes(data json.RawMessage) ([]ServerType, error) {
 			Architecture: st.Architecture,
 			Deprecated:   st.Deprecated,
 		}
-		row.AvailableIn = make([]string, 0, len(st.Prices))
+		row.AvailableIn = make([]string, 0, len(st.Locations))
+		for _, loc := range st.Locations {
+			if loc.Available {
+				row.AvailableIn = append(row.AvailableIn, loc.Name)
+			}
+		}
+		if len(row.AvailableIn) == 0 && len(st.Locations) == 0 {
+			row.AvailableIn = make([]string, 0, len(st.Prices))
+			for _, p := range st.Prices {
+				row.AvailableIn = append(row.AvailableIn, p.Location)
+			}
+		}
 		for i, p := range st.Prices {
-			row.AvailableIn = append(row.AvailableIn, p.Location)
 			if i == 0 {
 				row.MonthlyPriceEUR = parseHetznerPriceString(p.PriceMonthly.Gross)
 				row.HourlyPriceEUR = parseHetznerPriceString(p.PriceHourly.Gross)
@@ -271,17 +309,6 @@ func parseHetznerImages(data json.RawMessage) ([]Image, error) {
 }
 
 // ─── helpers ───────────────────────────────────────────────────────
-
-// normalizeProvider lowercases + defaults empty to the only v0.3
-// provider. Future providers add cases in the listX entry points.
-func normalizeProvider(p string) string {
-	switch p {
-	case "":
-		return "hetzner"
-	default:
-		return p
-	}
-}
 
 // parseHetznerPriceString turns Hetzner's stringy decimal price
 // ("3.7900000000" or "0.0063") into a float64. Unparseable values

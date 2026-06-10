@@ -35,19 +35,20 @@ import (
 )
 
 type Metrics struct {
-	Timestamp string         `json:"timestamp"`
-	CPU       CPUMetrics     `json:"cpu"`
-	Mem       MemMetrics     `json:"mem"`
-	Disk      []DiskMetrics  `json:"disk"`
-	Net       []NetMetrics   `json:"net"`
-	Load      LoadMetrics    `json:"load"`
-	UptimeSec uint64         `json:"uptime_s"`
-	ProcCount int            `json:"process_count"`
+	Timestamp string        `json:"timestamp"`
+	CPU       CPUMetrics    `json:"cpu"`
+	Mem       MemMetrics    `json:"mem"`
+	Disk      []DiskMetrics `json:"disk"`
+	Net       []NetMetrics  `json:"net"`
+	Load      LoadMetrics   `json:"load"`
+	UptimeSec uint64        `json:"uptime_s"`
+	ProcCount int           `json:"process_count"`
 }
 
 type CPUMetrics struct {
-	TotalPct  float64   `json:"total_pct"`
-	PerCore   []float64 `json:"per_core,omitempty"`
+	TotalPct float64   `json:"total_pct"`
+	PerCore  []float64 `json:"per_core,omitempty"`
+	Cores    int       `json:"cores,omitempty"`
 }
 
 type MemMetrics struct {
@@ -58,16 +59,16 @@ type MemMetrics struct {
 }
 
 type DiskMetrics struct {
-	Mount       string  `json:"mount"`
-	UsedBytes   uint64  `json:"used_bytes"`
-	TotalBytes  uint64  `json:"total_bytes"`
-	UsedPct     float64 `json:"used_pct"`
+	Mount      string  `json:"mount"`
+	UsedBytes  uint64  `json:"used_bytes"`
+	TotalBytes uint64  `json:"total_bytes"`
+	UsedPct    float64 `json:"used_pct"`
 }
 
 type NetMetrics struct {
-	Iface    string `json:"iface"`
-	RxBytes  uint64 `json:"rx_bytes"`
-	TxBytes  uint64 `json:"tx_bytes"`
+	Iface   string `json:"iface"`
+	RxBytes uint64 `json:"rx_bytes"`
+	TxBytes uint64 `json:"tx_bytes"`
 }
 
 type LoadMetrics struct {
@@ -79,8 +80,8 @@ type LoadMetrics struct {
 // ─── Cache ────────────────────────────────────────────────────────
 
 type metricsCacheEntry struct {
-	at     time.Time
-	value  *Metrics
+	at    time.Time
+	value *Metrics
 }
 
 var (
@@ -89,6 +90,12 @@ var (
 )
 
 const metricsTTL = 5 * time.Second
+
+func clearMetricsCache(id int64) {
+	metricsMu.Lock()
+	delete(metricsCache, id)
+	metricsMu.Unlock()
+}
 
 // collectMetrics returns vitals for an instance. Cached 5s. Routes
 // to local (gopsutil) or remote (SSH-and-parse) based on provider.
@@ -125,11 +132,12 @@ func collectMetrics(inst *Instance) (*Metrics, error) {
 func collectLocalMetrics() (*Metrics, error) {
 	m := &Metrics{Timestamp: nowUTC()}
 
-	// CPU. PerCore is a 1s sample; we use that for both per-core and
+	// CPU. PerCore is a short interval sample; we use that for both per-core and
 	// total to avoid a second sample call.
-	per, err := cpu.Percent(0, true)
+	per, err := cpu.Percent(250*time.Millisecond, true)
 	if err == nil {
 		m.CPU.PerCore = per
+		m.CPU.Cores = len(per)
 		var sum float64
 		for _, p := range per {
 			sum += p
@@ -137,6 +145,8 @@ func collectLocalMetrics() (*Metrics, error) {
 		if len(per) > 0 {
 			m.CPU.TotalPct = sum / float64(len(per))
 		}
+	} else if cores, err := cpu.Counts(true); err == nil {
+		m.CPU.Cores = cores
 	}
 
 	if v, err := mem.VirtualMemory(); err == nil {
@@ -193,7 +203,16 @@ func collectLocalMetrics() (*Metrics, error) {
 const remoteVitalsScript = `
 set -e
 TS=$(date -u +%Y-%m-%dT%H:%M:%SZ)
-CPU_TOTAL=$(awk '/^cpu /{u=$2+$3+$4; t=u+$5; if (NR==1) print 100*u/t}' /proc/stat)
+read CPU_IDLE_1 CPU_TOTAL_1 <<EOF
+$(awk '/^cpu /{idle=$5+$6; total=0; for(i=2;i<=NF;i++) total+=$i; print idle, total; exit}' /proc/stat)
+EOF
+sleep 0.25
+read CPU_IDLE_2 CPU_TOTAL_2 <<EOF
+$(awk '/^cpu /{idle=$5+$6; total=0; for(i=2;i<=NF;i++) total+=$i; print idle, total; exit}' /proc/stat)
+EOF
+CPU_CORES=$(grep -cE '^processor[[:space:]]*:' /proc/cpuinfo 2>/dev/null || true)
+if [ -z "$CPU_CORES" ] || [ "$CPU_CORES" -le 0 ]; then CPU_CORES=1; fi
+CPU_TOTAL=$(awk -v i1="$CPU_IDLE_1" -v t1="$CPU_TOTAL_1" -v i2="$CPU_IDLE_2" -v t2="$CPU_TOTAL_2" 'BEGIN {dt=t2-t1; di=i2-i1; if (dt <= 0) print 0; else printf "%.1f", 100*(dt-di)/dt}')
 MEM=$(awk '
   /^MemTotal:/  {t=$2}
   /^MemAvailable:/ {a=$2}
@@ -221,7 +240,7 @@ EOF
 read l1 l5 l15 <<EOF
 $LOAD
 EOF
-printf '{"timestamp":"%s","cpu":{"total_pct":%s},"mem":{"used_bytes":%s,"total_bytes":%s,"available_bytes":%s,"swap_used_bytes":%s},"disk":[%s],"net":[%s],"load":{"l1":%s,"l5":%s,"l15":%s},"uptime_s":%s,"process_count":%s}\n' "$TS" "$CPU_TOTAL" "$used" "$total" "$avail" "$swap" "$DISK" "$NET" "$l1" "$l5" "$l15" "$UPTIME" "$PROCS"
+printf '{"timestamp":"%s","cpu":{"total_pct":%s,"cores":%s},"mem":{"used_bytes":%s,"total_bytes":%s,"available_bytes":%s,"swap_used_bytes":%s},"disk":[%s],"net":[%s],"load":{"l1":%s,"l5":%s,"l15":%s},"uptime_s":%s,"process_count":%s}\n' "$TS" "$CPU_TOTAL" "$CPU_CORES" "$used" "$total" "$avail" "$swap" "$DISK" "$NET" "$l1" "$l5" "$l15" "$UPTIME" "$PROCS"
 `
 
 func collectRemoteMetrics(inst *Instance) (*Metrics, error) {

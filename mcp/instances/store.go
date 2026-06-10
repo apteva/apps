@@ -11,17 +11,17 @@ import (
 // consumer (Live Link, Deploy, Backup, future Containers) sees this
 // shape via `instance_get` / `instance_list`.
 type Instance struct {
-	ID               int64  `json:"id"`
-	Name             string `json:"name"`
-	Provider         string `json:"provider"`           // 'local' | 'hetzner' | future
-	ProviderID       string `json:"provider_id,omitempty"`
-	PublicIPv4       string `json:"public_ipv4,omitempty"`
-	PublicIPv6       string `json:"public_ipv6,omitempty"`
-	Status           string `json:"status"`             // pending|provisioning|ready|error|destroyed
-	Region           string `json:"region,omitempty"`
-	Size             string `json:"size,omitempty"`
-	Image            string `json:"image,omitempty"`
-	SSHUser          string `json:"ssh_user,omitempty"`
+	ID         int64  `json:"id"`
+	Name       string `json:"name"`
+	Provider   string `json:"provider"` // 'local' | 'hetzner' | future
+	ProviderID string `json:"provider_id,omitempty"`
+	PublicIPv4 string `json:"public_ipv4,omitempty"`
+	PublicIPv6 string `json:"public_ipv6,omitempty"`
+	Status     string `json:"status"` // pending|provisioning|upgrading|ready|error|destroyed
+	Region     string `json:"region,omitempty"`
+	Size       string `json:"size,omitempty"`
+	Image      string `json:"image,omitempty"`
+	SSHUser    string `json:"ssh_user,omitempty"`
 	// SSH keys are kept server-side only — never returned to MCP /
 	// REST callers. Cleared in API responses by stripSecrets().
 	SSHPrivateKey    string `json:"-"`

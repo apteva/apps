@@ -13,6 +13,8 @@ const (
 	instanceReadyTopic        = "instance.ready"
 	instanceErrorTopic        = "instance.error"
 	instanceDestroyedTopic    = "instance.destroyed"
+	instanceUpgradingTopic    = "instance.upgrading"
+	instanceUpgradedTopic     = "instance.upgraded"
 )
 
 func appCtxForRequest(r *http.Request) *sdk.AppCtx {
@@ -37,6 +39,8 @@ func emitInstanceStatus(ctx *sdk.AppCtx, inst *Instance) {
 	switch inst.Status {
 	case "provisioning":
 		emitInstanceEvent(ctx, instanceProvisioningTopic, inst)
+	case "upgrading":
+		emitInstanceEvent(ctx, instanceUpgradingTopic, inst)
 	case "ready":
 		emitInstanceEvent(ctx, instanceReadyTopic, inst)
 	case "error":
@@ -56,11 +60,31 @@ func emitInstanceDestroyed(ctx *sdk.AppCtx, inst *Instance) {
 	emitInstanceEvent(ctx, instanceDestroyedTopic, &c)
 }
 
+func emitInstanceUpgraded(ctx *sdk.AppCtx, before, after *Instance, upgradeDisk bool) {
+	if ctx == nil || after == nil {
+		return
+	}
+	payload := instanceEventPayload(after)
+	if before != nil {
+		payload["old_size"] = before.Size
+	}
+	payload["new_size"] = after.Size
+	payload["upgrade_disk"] = upgradeDisk
+	emitInstanceEventMap(ctx, instanceUpgradedTopic, payload)
+}
+
 func emitInstanceEvent(ctx *sdk.AppCtx, topic string, inst *Instance) {
 	if ctx == nil || inst == nil {
 		return
 	}
 	ctx.Emit(topic, instanceEventPayload(inst))
+}
+
+func emitInstanceEventMap(ctx *sdk.AppCtx, topic string, payload map[string]any) {
+	if ctx == nil {
+		return
+	}
+	ctx.Emit(topic, payload)
 }
 
 func instanceEventPayload(inst *Instance) map[string]any {

@@ -12,8 +12,8 @@ func (a *App) MCPTools() []sdk.Tool {
 	return []sdk.Tool{
 		{
 			Name: "instance_create",
-			Description: "Provision a new instance via the bound VPS provider. v0.1 supports provider=hetzner. " +
-				"Args: name (req), provider? (default 'hetzner' if not 'local'), region?, size?, image?, tags_json?. " +
+			Description: "Provision a new instance via the bound VPS provider. Compatible provider bindings: hetzner, digitalocean, vultr, aws-ec2, scaleway, huawei-cloud, linode, ovhcloud. " +
+				"Implemented provisioning adapter today: hetzner. Args: name (req), provider? (defaults to the bound provider), region?, size?, image?, tags_json?. " +
 				"Local instance (id 0) is auto-seeded; passing provider=local is refused.",
 			InputSchema: schemaObject(map[string]any{
 				"name":      map[string]any{"type": "string"},
@@ -33,7 +33,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "instance_list",
-			Description: "List instances. Optional filters: provider ('local'|'hetzner'), status.",
+			Description: "List instances. Optional filters: provider, status.",
 			InputSchema: schemaObject(map[string]any{
 				"provider": map[string]any{"type": "string"},
 				"status":   map[string]any{"type": "string"},
@@ -45,6 +45,18 @@ func (a *App) MCPTools() []sdk.Tool {
 			Description: "Terminate the upstream resource and remove the row. Refused for local (id 0). Idempotent.",
 			InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}}, []string{"id"}),
 			Handler:     a.toolDestroy,
+		},
+		{
+			Name: "instance_upgrade",
+			Description: "Change a remote instance to another server type in-place where the provider adapter supports it. Hetzner is implemented today. This shuts the server down, " +
+				"changes server_type, powers it back on, and waits for SSH by default. Args: id, size, upgrade_disk? (default false), wait? (default true).",
+			InputSchema: schemaObject(map[string]any{
+				"id":           map[string]any{"type": "integer"},
+				"size":         map[string]any{"type": "string"},
+				"upgrade_disk": map[string]any{"type": "boolean"},
+				"wait":         map[string]any{"type": "boolean"},
+			}, []string{"id", "size"}),
+			Handler: a.toolUpgrade,
 		},
 		{
 			Name: "instance_run_command",
@@ -87,9 +99,9 @@ func (a *App) MCPTools() []sdk.Tool {
 		{
 			Name: "instance_list_server_types",
 			Description: "List the VPS server types (sizes) available from the bound provider, live from the upstream API. " +
-				"Returns name + cores + memory_gb + disk_gb + monthly/hourly price + deprecation flag + available_in (locations). " +
-				"Use this to discover valid `size` values for instance_create instead of hardcoding — Hetzner deprecates types over time. " +
-				"Args: provider? (default 'hetzner').",
+				"Returns active, non-deprecated types only: name + cores + memory_gb + disk_gb + monthly/hourly price + available_in (locations). " +
+				"Use this to discover valid `size` values for instance_create instead of hardcoding. " +
+				"Args: provider? (default: bound provider).",
 			InputSchema: schemaObject(map[string]any{"provider": map[string]any{"type": "string"}}, nil),
 			Handler:     a.toolListServerTypes,
 		},
@@ -97,7 +109,7 @@ func (a *App) MCPTools() []sdk.Tool {
 			Name: "instance_list_locations",
 			Description: "List the VPS regions available from the bound provider, live from upstream. " +
 				"Returns name + city + country + network_zone for each. " +
-				"Use to discover valid `region` values for instance_create. Args: provider? (default 'hetzner').",
+				"Use to discover valid `region` values for instance_create. Args: provider? (default: bound provider).",
 			InputSchema: schemaObject(map[string]any{"provider": map[string]any{"type": "string"}}, nil),
 			Handler:     a.toolListLocations,
 		},
@@ -105,7 +117,7 @@ func (a *App) MCPTools() []sdk.Tool {
 			Name: "instance_list_images",
 			Description: "List OS images available from the bound provider, live from upstream (system images only — snapshots/backups/apps excluded). " +
 				"Returns name + os_flavor + os_version + architecture. " +
-				"Use to discover valid `image` values for instance_create. Args: provider? (default 'hetzner').",
+				"Use to discover valid `image` values for instance_create. Args: provider? (default: bound provider).",
 			InputSchema: schemaObject(map[string]any{"provider": map[string]any{"type": "string"}}, nil),
 			Handler:     a.toolListImages,
 		},
@@ -120,12 +132,6 @@ func (a *App) toolCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return nil, errors.New("name required")
 	}
 	provider := strArg(args, "provider")
-	if provider == "" {
-		provider = "hetzner"
-	}
-	if provider == "local" {
-		return nil, ErrLocalInstanceImmutable
-	}
 	in := CreateInstanceInput{
 		Name:     name,
 		Provider: provider,
@@ -134,16 +140,11 @@ func (a *App) toolCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		Image:    strArg(args, "image"),
 		TagsJSON: strArg(args, "tags_json"),
 	}
-	switch provider {
-	case "hetzner":
-		inst, err := hetznerProvision(ctx, in)
-		if err != nil {
-			return nil, err
-		}
-		return map[string]any{"instance": inst.stripSecrets()}, nil
-	default:
-		return nil, fmt.Errorf("provider %q not supported in v0.1 (only 'hetzner')", provider)
+	inst, err := provisionInstance(ctx, in)
+	if err != nil {
+		return nil, err
 	}
+	return map[string]any{"instance": inst.stripSecrets()}, nil
 }
 
 func (a *App) toolGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -178,11 +179,8 @@ func (a *App) toolDestroy(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	switch inst.Provider {
-	case "hetzner":
-		if err := hetznerDestroy(ctx, inst); err != nil {
-			return nil, err
-		}
+	if err := destroyProviderInstance(ctx, inst); err != nil {
+		return nil, err
 	}
 	if err := deleteInstanceAndEmit(ctx, inst); err != nil {
 		return nil, err
@@ -192,6 +190,25 @@ func (a *App) toolDestroy(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	// (e.g. instance was destroyed before any command ran).
 	globalSSHPool.evict(id)
 	return map[string]any{"destroyed": true, "id": id}, nil
+}
+
+func (a *App) toolUpgrade(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	id := int64Arg(args, "id")
+	size := strArg(args, "size")
+	wait := boolArg(args, "wait", true)
+	inst, err := dbGetInstance(ctx.AppDB(), id)
+	if err != nil {
+		return nil, err
+	}
+	res, err := upgradeProviderInstance(ctx, inst, UpgradeInstanceInput{
+		Size:        size,
+		UpgradeDisk: boolArg(args, "upgrade_disk", false),
+		Wait:        wait,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return res, nil
 }
 
 func (a *App) toolRunCommand(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -343,6 +360,15 @@ func int64Arg(args map[string]any, key string) int64 {
 		}
 	}
 	return 0
+}
+
+func boolArg(args map[string]any, key string, def bool) bool {
+	if v, ok := args[key]; ok {
+		if b, ok := v.(bool); ok {
+			return b
+		}
+	}
+	return def
 }
 
 func schemaObject(props map[string]any, required []string) map[string]any {
