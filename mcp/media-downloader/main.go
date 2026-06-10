@@ -95,8 +95,12 @@ func (a *App) Workers() []sdk.Worker             { return nil }
 func (a *App) HTTPRoutes() []sdk.Route {
 	return []sdk.Route{
 		{Method: http.MethodGet, Pattern: "/jobs", Handler: a.httpJobs},
+		{Method: http.MethodPost, Pattern: "/jobs", Handler: a.httpCreateJob},
 		{Method: http.MethodGet, Pattern: "/jobs/", Handler: a.httpJob},
+		{Method: http.MethodPost, Pattern: "/jobs/", Handler: a.httpJobAction},
 		{Method: http.MethodGet, Pattern: "/profiles", Handler: a.httpProfiles},
+		{Method: http.MethodPost, Pattern: "/profiles", Handler: a.httpCreateProfile},
+		{Method: http.MethodDelete, Pattern: "/profiles/", Handler: a.httpDeleteProfile},
 	}
 }
 
@@ -535,6 +539,31 @@ func (a *App) httpJob(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"job": j, "logs": logs}, err)
 }
 
+func (a *App) httpCreateJob(w http.ResponseWriter, r *http.Request) {
+	args, err := readJSONArgs(r)
+	if err != nil {
+		writeJSON(w, nil, err)
+		return
+	}
+	withHTTPProject(r, args)
+	out, err := a.toolDownload(a.ctx.WithProject(strArg(args, "_project_id")), args)
+	writeJSON(w, out, err)
+}
+
+func (a *App) httpJobAction(w http.ResponseWriter, r *http.Request) {
+	path := strings.TrimPrefix(r.URL.Path, "/jobs/")
+	if !strings.HasSuffix(path, "/cancel") {
+		writeJSON(w, nil, errNotFound)
+		return
+	}
+	id := strings.TrimSuffix(path, "/cancel")
+	id = strings.TrimSuffix(id, "/")
+	args := map[string]any{"job_id": id}
+	withHTTPProject(r, args)
+	out, err := a.toolCancel(a.ctx.WithProject(strArg(args, "_project_id")), args)
+	writeJSON(w, out, err)
+}
+
 func (a *App) httpProfiles(w http.ResponseWriter, r *http.Request) {
 	projectID := r.URL.Query().Get("project_id")
 	if projectID == "" && a.ctx != nil {
@@ -542,6 +571,50 @@ func (a *App) httpProfiles(w http.ResponseWriter, r *http.Request) {
 	}
 	profiles, err := listProfiles(r.Context(), a.ctx.AppDB(), projectID)
 	writeJSON(w, map[string]any{"profiles": profiles}, err)
+}
+
+func (a *App) httpCreateProfile(w http.ResponseWriter, r *http.Request) {
+	args, err := readJSONArgs(r)
+	if err != nil {
+		writeJSON(w, nil, err)
+		return
+	}
+	withHTTPProject(r, args)
+	out, err := a.toolProfileCreate(a.ctx.WithProject(strArg(args, "_project_id")), args)
+	writeJSON(w, out, err)
+}
+
+func (a *App) httpDeleteProfile(w http.ResponseWriter, r *http.Request) {
+	id := strings.TrimPrefix(r.URL.Path, "/profiles/")
+	id = strings.TrimSuffix(id, "/")
+	args := map[string]any{"profile_id": id}
+	withHTTPProject(r, args)
+	out, err := a.toolProfileDelete(a.ctx.WithProject(strArg(args, "_project_id")), args)
+	writeJSON(w, out, err)
+}
+
+func readJSONArgs(r *http.Request) (map[string]any, error) {
+	defer r.Body.Close()
+	var args map[string]any
+	if err := json.NewDecoder(r.Body).Decode(&args); err != nil {
+		return nil, err
+	}
+	if args == nil {
+		args = map[string]any{}
+	}
+	return args, nil
+}
+
+func withHTTPProject(r *http.Request, args map[string]any) {
+	if args == nil {
+		return
+	}
+	if _, ok := args["_project_id"]; ok {
+		return
+	}
+	if p := strings.TrimSpace(r.URL.Query().Get("project_id")); p != "" {
+		args["_project_id"] = p
+	}
 }
 
 func writeJSON(w http.ResponseWriter, body any, err error) {

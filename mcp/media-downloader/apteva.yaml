@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: media-downloader
 display_name: Media Downloader
-version: 0.2.0
+version: 0.2.1
 description: |
   Fresh v0.2 media download sidecar for Apteva. Wraps yt-dlp for public
   and authenticated source downloads, stores completed files through the
@@ -33,6 +33,11 @@ requires:
 provides:
   http_routes:
     - prefix: /
+  ui_panels:
+    - slot: project.page
+      label: Downloads
+      icon: download
+      entry: /ui/MediaDownloaderPanel.mjs
   mcp_tools:
     - name: download_probe_url
       description: Inspect a supported media URL with yt-dlp without downloading it.
