@@ -1,4 +1,4 @@
-// ComposerPanel v0.3.3 - timeline editor with storage and Media Studio AI assets.
+// ComposerPanel v0.3.4 - timeline editor with storage and Media Studio AI assets.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
@@ -121,6 +121,7 @@ interface StorageFile {
 
 type Tab = "timeline" | "json";
 type AssetPickerTarget = { kind: "clip"; clipId: string } | { kind: "audio"; clipId: string } | { kind: "soundtrack" };
+type ClipEditorTarget = { kind: "visual"; id: string } | { kind: "audio"; id: string };
 
 const DEFAULT_DRAFT: DraftState = {
   name: "",
@@ -474,6 +475,7 @@ export default function ComposerPanel({ projectId }: NativePanelProps) {
   const [jsonEdit, setJsonEdit] = useState("");
   const [jsonOutput, setJsonOutput] = useState("");
   const [pickerTarget, setPickerTarget] = useState<AssetPickerTarget | null>(null);
+  const [clipEditor, setClipEditor] = useState<ClipEditorTarget | null>(null);
   const [storageFiles, setStorageFiles] = useState<StorageFile[]>([]);
   const [storageLoading, setStorageLoading] = useState(false);
   const [storageError, setStorageError] = useState("");
@@ -589,6 +591,27 @@ export default function ComposerPanel({ projectId }: NativePanelProps) {
     setSelectedClipId(id);
   };
 
+  const addAIVisualClip = (kind: "image" | "video" | "avatar") => {
+    const id = `clip-${Date.now()}`;
+    updateDraft((cur) => ({
+      ...cur,
+      clips: [
+        ...cur.clips,
+        {
+          id,
+          asset: { type: kind === "image" ? "image" : "video", src: "" },
+          start: durationOf(cur.clips),
+          length: kind === "image" ? 4 : 6,
+          transition: { in: "none", out: "none" },
+          ai: defaultAI(kind, cur.output.aspect),
+        },
+      ],
+      output: { ...cur.output, format: "mp4" },
+    }));
+    setSelectedClipId(id);
+    setClipEditor({ kind: "visual", id });
+  };
+
   const addClipFromFile = (file: StorageFile) => {
     const id = `clip-${Date.now()}`;
     const type = assetTypeFromFile(file);
@@ -635,8 +658,10 @@ export default function ComposerPanel({ projectId }: NativePanelProps) {
     }));
   };
 
-  const addAudioClip = (ai = true) => {
+  const addAudioClip = (ai: boolean | MediaKind = true) => {
     const id = `audio-${Date.now()}`;
+    const aiKind: MediaKind = typeof ai === "string" ? ai : "music";
+    const withAI = Boolean(ai);
     updateDraft((cur) => ({
       ...cur,
       audioClips: [
@@ -645,13 +670,14 @@ export default function ComposerPanel({ projectId }: NativePanelProps) {
           id,
           asset: { type: "audio", src: "" },
           start: durationOfDraft(cur),
-          length: ai ? 30 : 8,
+          length: withAI ? 30 : 8,
           volume: 1,
-          ai: ai ? defaultAI("music", cur.output.aspect) : undefined,
+          ai: withAI ? defaultAI(aiKind, cur.output.aspect) : undefined,
         },
       ],
       output: cur.clips.length === 0 ? { ...cur.output, format: isAudioFormat(cur.output.format) ? cur.output.format : "mp3" } : cur.output,
     }));
+    setClipEditor({ kind: "audio", id });
   };
 
   const deleteAudioClip = (id: string) => {
@@ -934,7 +960,7 @@ export default function ComposerPanel({ projectId }: NativePanelProps) {
         <div className="min-w-0 flex-1">
           <div className="text-sm font-medium truncate">{draft.name || selected?.name || "Untitled composition"}</div>
           <div className="text-xs text-text-dim flex items-center gap-2">
-            <span>{clips.length} clips</span>
+            <span>{clips.length + audioClips.length} clips</span>
             <span>{formatTime(totalDuration)}</span>
             <span>{draft.output.aspect}</span>
             <span>{draft.output.resolution}</span>
@@ -992,12 +1018,17 @@ export default function ComposerPanel({ projectId }: NativePanelProps) {
                 />
                 <Timeline
                   clips={clips}
+                  audioClips={audioClips}
                   selectedClipId={selectedClipId}
                   playhead={playhead}
                   duration={totalDuration}
                   onSelect={setSelectedClipId}
+                  onEditVisual={(id) => setClipEditor({ kind: "visual", id })}
+                  onEditAudio={(id) => setClipEditor({ kind: "audio", id })}
                   onSeek={setPlayhead}
                   onAdd={addClip}
+                  onAddAIVisual={addAIVisualClip}
+                  onAddAIAudio={() => addAudioClip("music")}
                   onBrowse={() => openPicker(clips.length ? { kind: "clip", clipId: clips[0].id } : { kind: "clip", clipId: "" })}
                 />
                 <RenderPreview render={selected?.latest_render || null} outputFormat={draft.output.format} onOpen={setLightbox} />
@@ -1018,6 +1049,7 @@ export default function ComposerPanel({ projectId }: NativePanelProps) {
                 onBrowseSoundtrack={() => openPicker({ kind: "soundtrack" })}
                 onAddClip={addClip}
                 onAddAudioClip={addAudioClip}
+                onAddAIVisualClip={addAIVisualClip}
                 onGenerateClipAI={generateClipAI}
                 onGenerateAudioClipAI={generateAudioClipAI}
                 onGenerateSoundtrackAI={generateSoundtrackAI}
@@ -1039,6 +1071,30 @@ export default function ComposerPanel({ projectId }: NativePanelProps) {
       </div>
 
       {lightbox && <Lightbox render={lightbox} outputFormat={draft.output.format} onClose={() => setLightbox(null)} />}
+      {clipEditor && (
+        <ClipEditorModal
+          target={clipEditor}
+          visualClip={clipEditor.kind === "visual" ? clips.find((clip) => clip.id === clipEditor.id) || null : null}
+          audioClip={clipEditor.kind === "audio" ? audioClips.find((clip) => clip.id === clipEditor.id) || null : null}
+          aspect={draft.output.aspect}
+          aiBusy={aiBusy}
+          onClose={() => setClipEditor(null)}
+          onVisualClip={updateClip}
+          onAudioClip={updateAudioClip}
+          onBrowseVisual={(id) => openPicker({ kind: "clip", clipId: id })}
+          onBrowseAudio={(id) => openPicker({ kind: "audio", clipId: id })}
+          onGenerateVisual={generateClipAI}
+          onGenerateAudio={generateAudioClipAI}
+          onDeleteVisual={(id) => {
+            deleteClip(id);
+            setClipEditor(null);
+          }}
+          onDeleteAudio={(id) => {
+            deleteAudioClip(id);
+            setClipEditor(null);
+          }}
+        />
+      )}
       {pickerTarget && (
         <StoragePicker
           files={storageFiles}
@@ -1230,37 +1286,53 @@ function PreviewStage({
 
 function Timeline({
   clips,
+  audioClips,
   selectedClipId,
   playhead,
   duration,
   onSelect,
+  onEditVisual,
+  onEditAudio,
   onSeek,
   onAdd,
+  onAddAIVisual,
+  onAddAIAudio,
   onBrowse,
 }: {
   clips: ClipDraft[];
+  audioClips: AudioClipDraft[];
   selectedClipId: string;
   playhead: number;
   duration: number;
   onSelect: (id: string) => void;
+  onEditVisual: (id: string) => void;
+  onEditAudio: (id: string) => void;
   onSeek: (t: number) => void;
   onAdd: () => void;
+  onAddAIVisual: (kind: "image" | "video" | "avatar") => void;
+  onAddAIAudio: () => void;
   onBrowse: () => void;
 }) {
+  const hasAny = clips.length > 0 || audioClips.length > 0;
   return (
     <section className="border border-border rounded bg-bg-card overflow-hidden">
-      <header className="px-3 py-2 border-b border-border flex items-center gap-2">
+      <header className="px-3 py-2 border-b border-border flex items-center gap-2 flex-wrap">
         <h2 className="text-xs uppercase tracking-wide text-text-dim flex-1">Timeline</h2>
+        <button onClick={() => onAddAIVisual("image")} className="text-xs px-2 py-1 border border-border rounded hover:bg-bg-input">AI image</button>
+        <button onClick={() => onAddAIVisual("video")} className="text-xs px-2 py-1 border border-border rounded hover:bg-bg-input">AI video</button>
+        <button onClick={onAddAIAudio} className="text-xs px-2 py-1 border border-border rounded hover:bg-bg-input">AI audio</button>
         <button onClick={onBrowse} className="text-xs px-2 py-1 border border-accent text-accent rounded hover:bg-accent hover:text-bg">Browse storage</button>
         <button onClick={onAdd} className="text-xs px-2 py-1 border border-border rounded hover:bg-bg-input">Add empty clip</button>
       </header>
       <div className="p-3">
-        {clips.length === 0 ? (
+        {!hasAny ? (
           <div className="border border-dashed border-border rounded bg-bg px-4 py-8 text-center">
-            <div className="text-text-muted text-sm">Start with a file from Storage or add a blank clip.</div>
-            <div className="mt-3 flex items-center justify-center gap-2">
+            <div className="text-text-muted text-sm">Start with generated media, a file from Storage, or a blank clip.</div>
+            <div className="mt-3 flex items-center justify-center gap-2 flex-wrap">
+              <button type="button" onClick={() => onAddAIVisual("image")} className="px-3 py-1.5 text-sm border border-border rounded hover:bg-bg-input">AI image</button>
+              <button type="button" onClick={() => onAddAIVisual("video")} className="px-3 py-1.5 text-sm border border-border rounded hover:bg-bg-input">AI video</button>
+              <button type="button" onClick={onAddAIAudio} className="px-3 py-1.5 text-sm border border-border rounded hover:bg-bg-input">AI audio</button>
               <button type="button" onClick={onBrowse} className="px-3 py-1.5 text-sm border border-accent text-accent rounded hover:bg-accent hover:text-bg">Browse storage</button>
-              <button type="button" onClick={onAdd} className="px-3 py-1.5 text-sm border border-border rounded hover:bg-bg-input">Add empty clip</button>
             </div>
           </div>
         ) : (
@@ -1270,13 +1342,14 @@ function Timeline({
               const rect = e.currentTarget.getBoundingClientRect();
               onSeek(((e.clientX - rect.left) / rect.width) * duration);
             }}
-            className="relative w-full h-32 border border-border rounded bg-bg text-left overflow-hidden"
+            className="relative w-full min-h-48 border border-border rounded bg-bg text-left overflow-hidden"
           >
             <div
               className="absolute top-0 bottom-0 w-px bg-accent"
               style={{ left: `${duration ? Math.min(100, (playhead / duration) * 100) : 0}%` }}
             />
-            <div className="absolute inset-x-3 top-10 h-16 flex">
+            <div className="absolute left-3 top-3 text-[10px] uppercase tracking-wide text-text-dim">Visual</div>
+            <div className="absolute inset-x-3 top-8 h-16 flex">
               {clips.map((clip) => {
                 const width = duration ? (clip.length / duration) * 100 : 100;
                 const selected = clip.id === selectedClipId;
@@ -1290,6 +1363,7 @@ function Timeline({
                       e.stopPropagation();
                       onSelect(clip.id);
                       onSeek(clip.start);
+                      onEditVisual(clip.id);
                     }}
                     className={`h-16 min-w-24 border text-xs flex flex-col justify-center px-2 overflow-hidden ${selected ? "border-accent bg-accent/10" : "border-border bg-bg-input hover:border-accent"}`}
                     style={{ width: `${Math.max(10, width)}%` }}
@@ -1300,10 +1374,200 @@ function Timeline({
                 );
               })}
             </div>
+            <div className="absolute left-3 top-28 text-[10px] uppercase tracking-wide text-text-dim">Audio</div>
+            <div className="absolute inset-x-3 top-32 h-16">
+              {audioClips.map((clip) => {
+                const left = duration ? (clip.start / duration) * 100 : 0;
+                const width = duration ? (clip.length / duration) * 100 : 100;
+                return (
+                  <div
+                    key={clip.id}
+                    role="button"
+                    tabIndex={0}
+                    title={clip.asset.src || "empty audio"}
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      onSeek(clip.start);
+                      onEditAudio(clip.id);
+                    }}
+                    className="absolute h-16 min-w-24 border border-border bg-bg-input hover:border-accent text-xs flex flex-col justify-center px-2 overflow-hidden"
+                    style={{ left: `${Math.max(0, left)}%`, width: `${Math.max(10, width)}%` }}
+                  >
+                    <span className="block text-text truncate leading-5">{clip.asset.src || (clip.ai ? `AI ${clip.ai.media_kind}` : "empty audio")}</span>
+                    <span className="block text-text-dim truncate leading-5">{clip.ai?.status || "audio"} - {clip.length.toFixed(1)}s @ {clip.start.toFixed(1)}s</span>
+                  </div>
+                );
+              })}
+            </div>
           </button>
         )}
       </div>
     </section>
+  );
+}
+
+function ClipEditorModal({
+  target,
+  visualClip,
+  audioClip,
+  aspect,
+  aiBusy,
+  onClose,
+  onVisualClip,
+  onAudioClip,
+  onBrowseVisual,
+  onBrowseAudio,
+  onGenerateVisual,
+  onGenerateAudio,
+  onDeleteVisual,
+  onDeleteAudio,
+}: {
+  target: ClipEditorTarget;
+  visualClip: ClipDraft | null;
+  audioClip: AudioClipDraft | null;
+  aspect: Aspect;
+  aiBusy: string;
+  onClose: () => void;
+  onVisualClip: (id: string, patch: Partial<ClipDraft>) => void;
+  onAudioClip: (id: string, patch: Partial<AudioClipDraft>) => void;
+  onBrowseVisual: (id: string) => void;
+  onBrowseAudio: (id: string) => void;
+  onGenerateVisual: (clip: ClipDraft) => void;
+  onGenerateAudio: (clip: AudioClipDraft) => void;
+  onDeleteVisual: (id: string) => void;
+  onDeleteAudio: (id: string) => void;
+}) {
+  const field = "bg-bg-input border border-border rounded px-2 py-1.5 text-sm w-full";
+  const missing = target.kind === "visual" ? !visualClip : !audioClip;
+  return (
+    <div className="fixed inset-0 bg-black/70 flex items-center justify-center p-6" style={{ zIndex: 9997 }} onClick={onClose}>
+      <div className="bg-bg border border-border rounded shadow-xl w-full max-w-2xl max-h-[88vh] overflow-auto" onClick={(e) => e.stopPropagation()}>
+        <header className="px-4 py-3 border-b border-border flex items-center gap-2">
+          <div className="min-w-0 flex-1">
+            <div className="text-sm text-text font-medium">{target.kind === "visual" ? "Edit visual clip" : "Edit audio clip"}</div>
+            <div className="text-xs text-text-dim">Storage, URL, or Media Studio generated source</div>
+          </div>
+          <button type="button" onClick={onClose} className="text-text-dim hover:text-text px-2 text-lg leading-none">x</button>
+        </header>
+        {missing ? (
+          <div className="p-4 text-sm text-text-muted">Clip not found.</div>
+        ) : target.kind === "visual" && visualClip ? (
+          <div className="p-4 space-y-4">
+            <div className="grid grid-cols-2 gap-2">
+              <Field label="Type">
+                <select
+                  value={visualClip.asset.type}
+                  onChange={(e) => onVisualClip(visualClip.id, { asset: { ...visualClip.asset, type: e.target.value as AssetType } })}
+                  className={field}
+                >
+                  <option value="video">Video</option>
+                  <option value="image">Image</option>
+                </select>
+              </Field>
+              <Field label="Length">
+                <input type="number" min={0.1} step={0.1} value={visualClip.length} onChange={(e) => onVisualClip(visualClip.id, { length: Number(e.target.value) })} className={field} />
+              </Field>
+            </div>
+            <Field label="Source">
+              <div className="flex gap-2">
+                <input
+                  value={visualClip.asset.src}
+                  onChange={(e) => onVisualClip(visualClip.id, { asset: { ...visualClip.asset, src: e.target.value } })}
+                  placeholder="storage:1, mediastudio:4, or https://..."
+                  className={field}
+                />
+                <button type="button" onClick={() => onBrowseVisual(visualClip.id)} className="px-2 py-1.5 text-xs border border-border rounded hover:bg-bg-input">
+                  Browse
+                </button>
+              </div>
+            </Field>
+            {!visualClip.ai && (
+              <div className="grid grid-cols-3 gap-2">
+                <button type="button" onClick={() => onVisualClip(visualClip.id, { asset: { ...visualClip.asset, type: "image" }, ai: defaultAI("image", aspect) })} className="text-xs px-2 py-1.5 border border-border rounded hover:bg-bg-input">Generate image</button>
+                <button type="button" onClick={() => onVisualClip(visualClip.id, { asset: { ...visualClip.asset, type: "video" }, ai: defaultAI("video", aspect) })} className="text-xs px-2 py-1.5 border border-border rounded hover:bg-bg-input">Generate video</button>
+                <button type="button" onClick={() => onVisualClip(visualClip.id, { asset: { ...visualClip.asset, type: "video" }, ai: defaultAI("avatar", aspect) })} className="text-xs px-2 py-1.5 border border-border rounded hover:bg-bg-input">Generate avatar</button>
+              </div>
+            )}
+            {visualClip.ai && (
+              <AIAssetEditor
+                title="AI source"
+                ai={visualClip.ai}
+                allowedKinds={["image", "video", "avatar"]}
+                busy={aiBusy === visualClip.id}
+                onChange={(ai) => onVisualClip(visualClip.id, {
+                  ai,
+                  length: ai.duration || visualClip.length,
+                  asset: { ...visualClip.asset, type: ai.media_kind === "image" ? "image" : "video" },
+                })}
+                onGenerate={() => onGenerateVisual(visualClip)}
+                onClear={() => onVisualClip(visualClip.id, { ai: undefined })}
+              />
+            )}
+            <Field label="Text overlay">
+              <textarea
+                value={visualClip.text?.body || ""}
+                onChange={(e) => onVisualClip(visualClip.id, { text: e.target.value ? { ...(visualClip.text || {}), body: e.target.value, position: visualClip.text?.position || "bottom" } : undefined })}
+                className={`${field} resize-y`}
+                rows={3}
+              />
+            </Field>
+            <div className="flex justify-between gap-2">
+              <button type="button" onClick={() => onDeleteVisual(visualClip.id)} className="text-sm px-3 py-1.5 border border-red/50 text-red rounded hover:bg-red/10">Delete clip</button>
+              <button type="button" onClick={onClose} className="text-sm px-3 py-1.5 border border-border rounded hover:bg-bg-input">Done</button>
+            </div>
+          </div>
+        ) : audioClip ? (
+          <div className="p-4 space-y-4">
+            <Field label="Source">
+              <div className="flex gap-2">
+                <input
+                  value={audioClip.asset.src}
+                  onChange={(e) => onAudioClip(audioClip.id, { asset: { type: "audio", src: e.target.value } })}
+                  placeholder="storage:1 or https://..."
+                  className={field}
+                />
+                <button type="button" onClick={() => onBrowseAudio(audioClip.id)} className="px-2 py-1.5 text-xs border border-border rounded hover:bg-bg-input">
+                  Browse
+                </button>
+              </div>
+            </Field>
+            <div className="grid grid-cols-3 gap-2">
+              <Field label="Start">
+                <input type="number" min={0} step={0.1} value={audioClip.start} onChange={(e) => onAudioClip(audioClip.id, { start: Number(e.target.value) })} className={field} />
+              </Field>
+              <Field label="Length">
+                <input type="number" min={0.1} step={0.1} value={audioClip.length} onChange={(e) => onAudioClip(audioClip.id, { length: Number(e.target.value) })} className={field} />
+              </Field>
+              <Field label="Volume">
+                <input type="number" min={0} max={1} step={0.05} value={audioClip.volume} onChange={(e) => onAudioClip(audioClip.id, { volume: Number(e.target.value) })} className={field} />
+              </Field>
+            </div>
+            {!audioClip.ai && (
+              <div className="grid grid-cols-3 gap-2">
+                <button type="button" onClick={() => onAudioClip(audioClip.id, { ai: defaultAI("music", aspect) })} className="text-xs px-2 py-1.5 border border-border rounded hover:bg-bg-input">Generate music</button>
+                <button type="button" onClick={() => onAudioClip(audioClip.id, { ai: defaultAI("audio_tts", aspect) })} className="text-xs px-2 py-1.5 border border-border rounded hover:bg-bg-input">Generate TTS</button>
+                <button type="button" onClick={() => onAudioClip(audioClip.id, { ai: defaultAI("audio_sfx", aspect) })} className="text-xs px-2 py-1.5 border border-border rounded hover:bg-bg-input">Generate SFX</button>
+              </div>
+            )}
+            {audioClip.ai && (
+              <AIAssetEditor
+                title="AI audio"
+                ai={audioClip.ai}
+                allowedKinds={["music", "audio_tts", "audio_sfx"]}
+                busy={aiBusy === audioClip.id}
+                onChange={(ai) => onAudioClip(audioClip.id, { ai, length: ai.duration || audioClip.length })}
+                onGenerate={() => onGenerateAudio(audioClip)}
+                onClear={() => onAudioClip(audioClip.id, { ai: undefined })}
+              />
+            )}
+            <div className="flex justify-between gap-2">
+              <button type="button" onClick={() => onDeleteAudio(audioClip.id)} className="text-sm px-3 py-1.5 border border-red/50 text-red rounded hover:bg-red/10">Delete clip</button>
+              <button type="button" onClick={onClose} className="text-sm px-3 py-1.5 border border-border rounded hover:bg-bg-input">Done</button>
+            </div>
+          </div>
+        ) : null}
+      </div>
+    </div>
   );
 }
 
@@ -1323,6 +1587,7 @@ function Inspector({
   onBrowseSoundtrack,
   onAddClip,
   onAddAudioClip,
+  onAddAIVisualClip,
   onGenerateClipAI,
   onGenerateAudioClipAI,
   onGenerateSoundtrackAI,
@@ -1342,7 +1607,8 @@ function Inspector({
   onBrowseAudio: (clipId: string) => void;
   onBrowseSoundtrack: () => void;
   onAddClip: () => void;
-  onAddAudioClip: (ai?: boolean) => void;
+  onAddAudioClip: (ai?: boolean | MediaKind) => void;
+  onAddAIVisualClip: (kind: "image" | "video" | "avatar") => void;
   onGenerateClipAI: (clip: ClipDraft) => void;
   onGenerateAudioClipAI: (clip: AudioClipDraft) => void;
   onGenerateSoundtrackAI: () => void;
@@ -1460,6 +1726,17 @@ function Inspector({
               />
             </Field>
           )}
+          <div className="grid grid-cols-3 gap-2">
+            <button type="button" onClick={() => onAddAIVisualClip("image")} className="text-xs px-2 py-1.5 border border-border rounded hover:bg-bg-input">
+              AI image
+            </button>
+            <button type="button" onClick={() => onAddAIVisualClip("video")} className="text-xs px-2 py-1.5 border border-border rounded hover:bg-bg-input">
+              AI video
+            </button>
+            <button type="button" onClick={() => onAddAudioClip("music")} className="text-xs px-2 py-1.5 border border-border rounded hover:bg-bg-input">
+              AI audio
+            </button>
+          </div>
         </section>
 
         <section className="space-y-2">
