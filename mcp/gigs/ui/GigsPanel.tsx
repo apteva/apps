@@ -468,7 +468,9 @@ function GigDetail({ gig, projectId, onChange }: { gig: Gig; projectId: string; 
               projectId={projectId}
               busy={busy}
               onCancel={() => setAssigning(false)}
-              onAssign={(workerId) => doAction("assign", { worker_id: workerId, mode: "direct" }).then(() => setAssigning(false))}
+              onAssign={(workerId, notifyWorker) =>
+                doAction("assign", { worker_id: workerId, mode: "direct", notify_worker: notifyWorker }).then(() => setAssigning(false))
+              }
             />
           ) : (
             <button onClick={() => setAssigning(true)} className="px-3 py-2 text-sm border border-border rounded">
@@ -716,6 +718,7 @@ function NewGigForm({
   const [title, setTitle] = useState("");
   const [varsText, setVarsText] = useState("{}");
   const [workerId, setWorkerId] = useState("");
+  const [notifyWorker, setNotifyWorker] = useState(false);
   const [deadlineLocal, setDeadlineLocal] = useState("");
   const [priority, setPriority] = useState("");
   const [selectedInstructionIds, setSelectedInstructionIds] = useState<number[]>([]);
@@ -750,6 +753,7 @@ function NewGigForm({
         deadline_at: deadlineLocal ? new Date(deadlineLocal).toISOString() : undefined,
         priority: priority || undefined,
         worker_id: workerId ? Number(workerId) : undefined,
+        notify_worker: workerId ? notifyWorker : undefined,
       };
       if (mode === "template") {
         if (!templateId) throw new Error("Select a published template");
@@ -822,6 +826,17 @@ function NewGigForm({
           <option value="urgent">Urgent</option>
         </select>
       </div>
+      {workerId && (
+        <label className="inline-flex items-center gap-2 text-sm text-text-muted">
+          <input
+            type="checkbox"
+            checked={notifyWorker}
+            onChange={(e) => setNotifyWorker(e.target.checked)}
+            className="h-4 w-4 rounded border-border"
+          />
+          Notify selected worker now
+        </label>
+      )}
 
       <textarea
         value={varsText}
@@ -838,17 +853,27 @@ function NewGigForm({
 
 function AssignGigForm({
   projectId, busy, onAssign, onCancel,
-}: { projectId: string; busy: boolean; onAssign: (workerId: number) => Promise<void>; onCancel: () => void }) {
+}: { projectId: string; busy: boolean; onAssign: (workerId: number, notifyWorker: boolean) => Promise<void>; onCancel: () => void }) {
   const [workerId, setWorkerId] = useState("");
+  const [notifyWorker, setNotifyWorker] = useState(false);
   return (
     <form
       onSubmit={(e) => {
         e.preventDefault();
-        if (workerId) onAssign(Number(workerId));
+        if (workerId) onAssign(Number(workerId), notifyWorker);
       }}
       className="p-3 border border-border rounded bg-bg-subtle space-y-2"
     >
       <WorkerSelect projectId={projectId} value={workerId} onChange={setWorkerId} />
+      <label className="inline-flex items-center gap-2 text-sm text-text-muted">
+        <input
+          type="checkbox"
+          checked={notifyWorker}
+          onChange={(e) => setNotifyWorker(e.target.checked)}
+          className="h-4 w-4 rounded border-border"
+        />
+        Notify worker now
+      </label>
       <div className="flex gap-2">
         <button disabled={busy || !workerId} className="px-3 py-1 text-sm bg-sky-600 text-white rounded disabled:opacity-50">Assign</button>
         <button type="button" onClick={onCancel} className="px-3 py-1 text-sm border border-border rounded">Cancel</button>

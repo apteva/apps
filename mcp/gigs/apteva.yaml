@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: gigs
 display_name: Gigs
-version: 0.1.14
+version: 0.1.15
 description: |
   Agents delegate atomic work to human workers (CRM contacts) by
   composing reusable multi-modal instructions. Templates are saved
@@ -101,13 +101,13 @@ provides:
       description: Render title + each instruction with sample variables. No gig created.
     # ─── Gigs ────────────────────────────────────────────────────────
     - name: gigs_create_from_template
-      description: Primary dispatch path. Template slug/id + vars + optional worker_id. Returns the gig + assignment.
+      description: Primary dispatch path. Template slug/id + vars + optional worker_id and notify_worker=false. Returns the gig + assignment.
     - name: gigs_create_from_instructions
-      description: Ad-hoc dispatch — list of instruction refs + vars, no template required.
+      description: Ad-hoc dispatch — list of instruction refs + vars, no template required. Optional worker_id and notify_worker=false.
     - name: gigs_create
-      description: Fully inline composition (raw instruction bodies, no library refs). Escape hatch.
+      description: Fully inline composition (raw instruction bodies, no library refs). Optional worker_id and notify_worker=false.
     - name: gigs_assign
-      description: Assign or re-assign an open gig (mode= direct|broadcast|first-come).
+      description: Assign or re-assign an open gig (mode= direct|broadcast|first-come, notify_worker=false).
     - name: gigs_status
       description: Pre-flight read — gig + composition + assignments + submission.
     - name: gigs_list_open

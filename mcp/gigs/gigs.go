@@ -79,12 +79,13 @@ func (a *App) gigTools() []sdk.Tool {
 	return []sdk.Tool{
 		{
 			Name:        "gigs_create_from_template",
-			Description: "Primary dispatch path. Resolves the template's current active version, validates vars, renders the composition, snapshots it onto the gig, and (optionally) assigns to a worker who is notified via crm.contacts_send_message. Args: template_id OR template_slug, vars (object), worker_id?, deadline_at? (RFC3339), priority?, budget_cents?. Returns {gig, assignment?}.",
+			Description: "Primary dispatch path. Resolves the template's current active version, validates vars, renders the composition, snapshots it onto the gig, and optionally assigns to a worker. Args: template_id OR template_slug, vars (object), worker_id?, notify_worker? (default false), deadline_at? (RFC3339), priority?, budget_cents?. Returns {gig, assignment?}.",
 			InputSchema: schemaObject(map[string]any{
 				"template_id":   map[string]any{"type": "integer"},
 				"template_slug": map[string]any{"type": "string"},
 				"vars":          map[string]any{"type": "object"},
 				"worker_id":     map[string]any{"type": "integer"},
+				"notify_worker": map[string]any{"type": "boolean"},
 				"deadline_at":   map[string]any{"type": "string"},
 				"priority":      map[string]any{"type": "string"},
 				"budget_cents":  map[string]any{"type": "integer"},
@@ -93,37 +94,40 @@ func (a *App) gigTools() []sdk.Tool {
 		},
 		{
 			Name:        "gigs_create_from_instructions",
-			Description: "Ad-hoc dispatch — pass instruction refs directly (no template). Args: title, instructions ([{instruction_id, instruction_version_id?, result_key?, overrides?}]), vars?, worker_id?, deadline_at?, priority?. Returns {gig, assignment?}.",
+			Description: "Ad-hoc dispatch — pass instruction refs directly (no template). Args: title, instructions ([{instruction_id, instruction_version_id?, result_key?, overrides?}]), vars?, worker_id?, notify_worker? (default false), deadline_at?, priority?. Returns {gig, assignment?}.",
 			InputSchema: schemaObject(map[string]any{
-				"title":        map[string]any{"type": "string"},
-				"instructions": map[string]any{"type": "array"},
-				"vars":         map[string]any{"type": "object"},
-				"worker_id":    map[string]any{"type": "integer"},
-				"deadline_at":  map[string]any{"type": "string"},
-				"priority":     map[string]any{"type": "string"},
+				"title":         map[string]any{"type": "string"},
+				"instructions":  map[string]any{"type": "array"},
+				"vars":          map[string]any{"type": "object"},
+				"worker_id":     map[string]any{"type": "integer"},
+				"notify_worker": map[string]any{"type": "boolean"},
+				"deadline_at":   map[string]any{"type": "string"},
+				"priority":      map[string]any{"type": "string"},
 			}, []string{"title", "instructions"}),
 			Handler: a.toolGigsCreateFromInstructions,
 		},
 		{
 			Name:        "gigs_create",
-			Description: "Fully inline gig (raw instruction bodies, no library references). Escape hatch for agent-generated one-offs. Args: title, instructions ([{kind, body, result_key?}]), vars?, worker_id?, deadline_at?, priority?. Returns {gig, assignment?}.",
+			Description: "Fully inline gig (raw instruction bodies, no library references). Escape hatch for agent-generated one-offs. Args: title, instructions ([{kind, body, result_key?}]), vars?, worker_id?, notify_worker? (default false), deadline_at?, priority?. Returns {gig, assignment?}.",
 			InputSchema: schemaObject(map[string]any{
-				"title":        map[string]any{"type": "string"},
-				"instructions": map[string]any{"type": "array"},
-				"vars":         map[string]any{"type": "object"},
-				"worker_id":    map[string]any{"type": "integer"},
-				"deadline_at":  map[string]any{"type": "string"},
-				"priority":     map[string]any{"type": "string"},
+				"title":         map[string]any{"type": "string"},
+				"instructions":  map[string]any{"type": "array"},
+				"vars":          map[string]any{"type": "object"},
+				"worker_id":     map[string]any{"type": "integer"},
+				"notify_worker": map[string]any{"type": "boolean"},
+				"deadline_at":   map[string]any{"type": "string"},
+				"priority":      map[string]any{"type": "string"},
 			}, []string{"title", "instructions"}),
 			Handler: a.toolGigsCreateInline,
 		},
 		{
 			Name:        "gigs_assign",
-			Description: "Assign or re-assign an open gig. Args: gig_id, worker_id, mode? (direct|broadcast|first-come; default direct). Returns {assignment}.",
+			Description: "Assign or re-assign an open gig. Args: gig_id, worker_id, mode? (direct|broadcast|first-come; default direct), notify_worker? (default false). Returns {assignment}.",
 			InputSchema: schemaObject(map[string]any{
-				"gig_id":    map[string]any{"type": "integer"},
-				"worker_id": map[string]any{"type": "integer"},
-				"mode":      map[string]any{"type": "string"},
+				"gig_id":        map[string]any{"type": "integer"},
+				"worker_id":     map[string]any{"type": "integer"},
+				"mode":          map[string]any{"type": "string"},
+				"notify_worker": map[string]any{"type": "boolean"},
 			}, []string{"gig_id", "worker_id"}),
 			Handler: a.toolGigsAssign,
 		},
@@ -265,6 +269,7 @@ func (a *App) toolGigsCreateFromTemplate(ctx *sdk.AppCtx, args map[string]any) (
 		Priority:           strArg(args, "priority"),
 		BudgetCents:        int64Arg(args, "budget_cents"),
 		WorkerID:           int64Arg(args, "worker_id"),
+		NotifyWorker:       boolArg(args, "notify_worker", false),
 		DefaultDeadlineHrs: tplv.DefaultDeadlineHours,
 	})
 	if err != nil {
@@ -350,14 +355,15 @@ func (a *App) toolGigsCreateFromInstructions(ctx *sdk.AppCtx, args map[string]an
 	derived := deriveFromComposition(rendered)
 	title = interpolate(title, vars)
 	g, ass, err := createGig(ctx, pid, createOpts{
-		Title:       title,
-		Vars:        vars,
-		Rendered:    rendered,
-		Derived:     derived,
-		DeadlineAt:  strArg(args, "deadline_at"),
-		Priority:    strArg(args, "priority"),
-		BudgetCents: int64Arg(args, "budget_cents"),
-		WorkerID:    int64Arg(args, "worker_id"),
+		Title:        title,
+		Vars:         vars,
+		Rendered:     rendered,
+		Derived:      derived,
+		DeadlineAt:   strArg(args, "deadline_at"),
+		Priority:     strArg(args, "priority"),
+		BudgetCents:  int64Arg(args, "budget_cents"),
+		WorkerID:     int64Arg(args, "worker_id"),
+		NotifyWorker: boolArg(args, "notify_worker", false),
 	})
 	if err != nil {
 		return nil, err
@@ -409,14 +415,15 @@ func (a *App) toolGigsCreateInline(ctx *sdk.AppCtx, args map[string]any) (any, e
 	derived := deriveFromComposition(rendered)
 	title = interpolate(title, vars)
 	g, ass, err := createGig(ctx, pid, createOpts{
-		Title:       title,
-		Vars:        vars,
-		Rendered:    rendered,
-		Derived:     derived,
-		DeadlineAt:  strArg(args, "deadline_at"),
-		Priority:    strArg(args, "priority"),
-		BudgetCents: int64Arg(args, "budget_cents"),
-		WorkerID:    int64Arg(args, "worker_id"),
+		Title:        title,
+		Vars:         vars,
+		Rendered:     rendered,
+		Derived:      derived,
+		DeadlineAt:   strArg(args, "deadline_at"),
+		Priority:     strArg(args, "priority"),
+		BudgetCents:  int64Arg(args, "budget_cents"),
+		WorkerID:     int64Arg(args, "worker_id"),
+		NotifyWorker: boolArg(args, "notify_worker", false),
 	})
 	if err != nil {
 		return nil, err
@@ -428,8 +435,8 @@ func (a *App) toolGigsCreateInline(ctx *sdk.AppCtx, args map[string]any) (any, e
 	return out, nil
 }
 
-// createGig is the shared write path: insert the snapshot rows, mint
-// an assignment if a worker was named, and notify via CRM.
+// createGig is the shared write path: insert the snapshot rows and mint
+// an assignment if a worker was named.
 type createOpts struct {
 	TemplateVersionID  int64
 	Title              string
@@ -440,6 +447,7 @@ type createOpts struct {
 	Priority           string
 	BudgetCents        int64
 	WorkerID           int64
+	NotifyWorker       bool
 	DefaultDeadlineHrs int
 }
 
@@ -523,7 +531,7 @@ func createGig(ctx *sdk.AppCtx, pid string, o createOpts) (*gig, *gigAssignmentV
 	if o.WorkerID == 0 {
 		return g, nil, nil
 	}
-	ass, err := assignGig(ctx, pid, gigID, o.WorkerID, "direct")
+	ass, err := assignGig(ctx, pid, gigID, o.WorkerID, "direct", o.NotifyWorker)
 	if err != nil {
 		// The gig is created; assignment failure is reported but
 		// non-fatal — the operator can re-assign.
@@ -532,9 +540,9 @@ func createGig(ctx *sdk.AppCtx, pid string, o createOpts) (*gig, *gigAssignmentV
 	return g, ass, nil
 }
 
-// assignGig writes an assignment + notifies via CRM. Returns the
+// assignGig writes an assignment and optionally notifies via CRM. Returns the
 // hydrated view so the caller can surface the magic URL.
-func assignGig(ctx *sdk.AppCtx, pid string, gigID, workerID int64, mode string) (*gigAssignmentView, error) {
+func assignGig(ctx *sdk.AppCtx, pid string, gigID, workerID int64, mode string, notifyWorker bool) (*gigAssignmentView, error) {
 	wk, err := getWorker(ctx.AppDB(), pid, workerID)
 	if err != nil {
 		return nil, err
@@ -568,20 +576,21 @@ func assignGig(ctx *sdk.AppCtx, pid string, gigID, workerID int64, mode string) 
 		return nil, err
 	}
 
-	// Notify via CRM. Body includes the magic-link URL.
-	g, _ := loadGig(ctx, pid, gigID)
 	workerURL := buildWorkerURL(ctx, token)
-	body := fmt.Sprintf("%s\n\nOpen: %s", g.Title, workerURL)
-	subject := g.Title
-	convoID, sendErr := crmSendMessage(ctx, pid, wk.ContactID, body, wk.DefaultChannel, subject)
-	if sendErr != nil {
-		ctx.Logger().Warn("crm send failed", "err", sendErr.Error(), "gig_id", gigID)
-	}
-	if convoID > 0 {
-		_, _ = ctx.AppDB().Exec(
-			`UPDATE gig_assignments SET crm_conversation_id=? WHERE id=?`,
-			convoID, assignID,
-		)
+	if notifyWorker {
+		g, _ := loadGig(ctx, pid, gigID)
+		body := fmt.Sprintf("%s\n\nOpen: %s", g.Title, workerURL)
+		subject := g.Title
+		convoID, sendErr := crmSendMessage(ctx, pid, wk.ContactID, body, wk.DefaultChannel, subject)
+		if sendErr != nil {
+			ctx.Logger().Warn("crm send failed", "err", sendErr.Error(), "gig_id", gigID)
+		}
+		if convoID > 0 {
+			_, _ = ctx.AppDB().Exec(
+				`UPDATE gig_assignments SET crm_conversation_id=? WHERE id=?`,
+				convoID, assignID,
+			)
+		}
 	}
 	_, _ = ctx.AppDB().Exec(
 		`INSERT INTO gig_events (project_id, gig_id, kind, actor, body)
@@ -594,6 +603,7 @@ func assignGig(ctx *sdk.AppCtx, pid string, gigID, workerID int64, mode string) 
 		"worker_id":     workerID,
 		"mode":          mode,
 		"worker_url":    workerURL,
+		"notify_worker": notifyWorker,
 	})
 
 	view, _ := loadAssignmentView(ctx, pid, assignID)
@@ -632,7 +642,8 @@ func (a *App) toolGigsAssign(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	if mode == "" {
 		mode = "direct"
 	}
-	view, err := assignGig(ctx, pid, gid, wid, mode)
+	notifyWorker := boolArg(args, "notify_worker", false)
+	view, err := assignGig(ctx, pid, gid, wid, mode, notifyWorker)
 	if err != nil {
 		return nil, err
 	}
@@ -1264,10 +1275,11 @@ func (a *App) handleHTTPGigItem(w http.ResponseWriter, r *http.Request) {
 			var body map[string]any
 			_ = httpDecode(r, &body)
 			out, err := a.toolGigsAssign(ctx, map[string]any{
-				"_project_id": pid,
-				"gig_id":      id,
-				"worker_id":   body["worker_id"],
-				"mode":        strOf(body["mode"]),
+				"_project_id":   pid,
+				"gig_id":        id,
+				"worker_id":     body["worker_id"],
+				"mode":          strOf(body["mode"]),
+				"notify_worker": body["notify_worker"],
 			})
 			if err != nil {
 				httpErr(w, http.StatusBadRequest, err.Error())
