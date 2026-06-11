@@ -172,13 +172,15 @@ func computeSmartCrop(
 	if srcY+ch > row.Height {
 		srcY = row.Height - ch
 	}
+	rawSrcX := srcX
 	srcX, srcY = stabilizeNarrowSmartCrop(srcX, srcY, row.Width, row.Height, cw, ch)
-	if subjectX, ok := subjectAwareNarrowSmartCropX(thumb, srcX, row.Width, row.Height, cw, ch, tCropW); ok {
+	if subjectX, ok := subjectAwareNarrowSmartCropX(thumb, rawSrcX, srcX, row.Width, row.Height, cw, ch, tCropW); ok {
 		app.Logger().Info("smartcrop subject correction applied",
 			"file_id", sourceFileID,
 			"derivation_kind", cropSource.Kind,
 			"derivation_file_id", cropSource.StorageFileID,
 			"derivation_position_ms", cropSource.PositionMs,
+			"crop_x_raw", rawSrcX,
 			"crop_x_before", srcX,
 			"crop_x_after", subjectX)
 		srcX = subjectX
@@ -261,7 +263,7 @@ func stabilizeNarrowSmartCrop(srcX, srcY, srcW, srcH, cropW, cropH int) (int, in
 // second-stage correction: it moves the crop when the best subject window
 // is materially better than the current saliency window, otherwise the
 // original smartcrop result stands.
-func subjectAwareNarrowSmartCropX(img image.Image, srcX, srcW, srcH, cropW, cropH, thumbCropW int) (int, bool) {
+func subjectAwareNarrowSmartCropX(img image.Image, rawSrcX, srcX, srcW, srcH, cropW, cropH, thumbCropW int) (int, bool) {
 	if img == nil || srcW <= 0 || srcH <= 0 || cropW <= 0 || cropH <= 0 || thumbCropW <= 0 || srcW <= cropW {
 		return srcX, false
 	}
@@ -331,7 +333,11 @@ func subjectAwareNarrowSmartCropX(img image.Image, srcX, srcW, srcH, cropW, crop
 	}
 
 	x := int(math.Round(float64(bestX) * float64(srcW) / float64(tW)))
-	return clampInt(roundEven(x), 0, srcW-cropW), true
+	x = clampInt(roundEven(x), 0, srcW-cropW)
+	if absInt(x-rawSrcX) > cropW/4 {
+		return srcX, false
+	}
+	return x, true
 }
 
 func subjectColumnWeights(img image.Image) []float64 {

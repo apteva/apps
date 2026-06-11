@@ -93,7 +93,7 @@ func TestSubjectAwareNarrowSmartCropX_PullsTowardWarmSubject(t *testing.T) {
 		}
 	}
 
-	x, ok := subjectAwareNarrowSmartCropX(img, 412, 1920, 1080, 606, 1080, 100)
+	x, ok := subjectAwareNarrowSmartCropX(img, 78, 412, 1920, 1080, 606, 1080, 100)
 	if !ok {
 		t.Fatal("expected subject-aware correction")
 	}
@@ -109,8 +109,29 @@ func TestSubjectAwareNarrowSmartCropX_NoSubjectNoOp(t *testing.T) {
 			img.Set(x, y, color.RGBA{R: uint8(40 + x%80), G: uint8(60 + y%90), B: 170, A: 255})
 		}
 	}
-	if x, ok := subjectAwareNarrowSmartCropX(img, 412, 1920, 1080, 606, 1080, 100); ok || x != 412 {
+	if x, ok := subjectAwareNarrowSmartCropX(img, 78, 412, 1920, 1080, 606, 1080, 100); ok || x != 412 {
 		t.Fatalf("no warm subject should not override, got x=%d ok=%v", x, ok)
+	}
+}
+
+func TestSubjectAwareNarrowSmartCropX_DoesNotPullAwayFromRawSmartCrop(t *testing.T) {
+	img := image.NewRGBA(image.Rect(0, 0, 320, 180))
+	for y := 0; y < 180; y++ {
+		for x := 0; x < 320; x++ {
+			img.Set(x, y, color.RGBA{R: 150, G: 140, B: 124, A: 255})
+		}
+	}
+	// Artwork-like warm region on the left.
+	for y := 15; y < 165; y++ {
+		for x := 24; x < 92; x++ {
+			img.Set(x, y, color.RGBA{R: 204, G: 136, B: 104, A: 255})
+		}
+	}
+	// Actual raw smartcrop landed much farther right. The subject
+	// correction must not jump across the frame to the artwork-like
+	// warm region.
+	if x, ok := subjectAwareNarrowSmartCropX(img, 384, 526, 1920, 1080, 606, 1080, 100); ok || x != 526 {
+		t.Fatalf("distant warm region should not override raw smartcrop, got x=%d ok=%v", x, ok)
 	}
 }
 
