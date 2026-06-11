@@ -281,6 +281,125 @@ function kindIcon(kind: string): string {
   return "clipboard";
 }
 
+function cx(...parts: Array<string | false | null | undefined>): string {
+  return parts.filter(Boolean).join(" ");
+}
+
+type ButtonTone = "primary" | "secondary" | "danger" | "success" | "ghost";
+type ButtonSize = "xs" | "sm" | "md";
+
+function Button({
+  tone = "secondary",
+  size = "sm",
+  className,
+  children,
+  ...props
+}: React.ButtonHTMLAttributes<HTMLButtonElement> & {
+  tone?: ButtonTone;
+  size?: ButtonSize;
+}) {
+  const tones: Record<ButtonTone, string> = {
+    primary: "bg-sky-600 text-white border-sky-600 hover:bg-sky-500 hover:border-sky-500",
+    secondary: "bg-bg border-border text-text hover:bg-bg-subtle hover:border-text-muted/40",
+    danger: "bg-rose-600 text-white border-rose-600 hover:bg-rose-500 hover:border-rose-500",
+    success: "bg-emerald-600 text-white border-emerald-600 hover:bg-emerald-500 hover:border-emerald-500",
+    ghost: "bg-transparent border-transparent text-text-muted hover:text-text hover:bg-bg-subtle",
+  };
+  const sizes: Record<ButtonSize, string> = {
+    xs: "px-2 py-1 text-xs",
+    sm: "px-3 py-1.5 text-sm",
+    md: "px-4 py-2 text-sm",
+  };
+  return (
+    <button
+      {...props}
+      className={cx(
+        "inline-flex items-center justify-center gap-1.5 rounded border font-medium transition-colors",
+        "focus:outline-none focus:ring-2 focus:ring-sky-500/40 disabled:opacity-50 disabled:cursor-not-allowed",
+        tones[tone],
+        sizes[size],
+        className,
+      )}
+    >
+      {children}
+    </button>
+  );
+}
+
+function Field({
+  as = "input",
+  className,
+  ...props
+}: (
+  React.InputHTMLAttributes<HTMLInputElement> |
+  React.SelectHTMLAttributes<HTMLSelectElement> |
+  React.TextareaHTMLAttributes<HTMLTextAreaElement>
+) & { as?: "input" | "select" | "textarea" }) {
+  const cls = cx(
+    "w-full rounded border border-border bg-bg px-3 py-2 text-sm text-text",
+    "placeholder:text-text-muted focus:outline-none focus:ring-2 focus:ring-sky-500/30 focus:border-sky-500/60",
+    "disabled:opacity-60 disabled:cursor-not-allowed",
+    className,
+  );
+  if (as === "select") return <select {...(props as React.SelectHTMLAttributes<HTMLSelectElement>)} className={cls} />;
+  if (as === "textarea") return <textarea {...(props as React.TextareaHTMLAttributes<HTMLTextAreaElement>)} className={cls} />;
+  return <input {...(props as React.InputHTMLAttributes<HTMLInputElement>)} className={cls} />;
+}
+
+function Panel({
+  children,
+  className,
+}: { children: React.ReactNode; className?: string }) {
+  return (
+    <section className={cx("rounded border border-border bg-bg-subtle", className)}>
+      {children}
+    </section>
+  );
+}
+
+function SectionHeading({
+  title,
+  action,
+  className,
+}: { title: string; action?: React.ReactNode; className?: string }) {
+  return (
+    <div className={cx("flex items-center justify-between gap-3", className)}>
+      <h2 className="text-lg font-semibold text-text">{title}</h2>
+      {action}
+    </div>
+  );
+}
+
+function Segmented<T extends string>({
+  value,
+  options,
+  onChange,
+}: {
+  value: T;
+  options: Array<{ value: T; label: string }>;
+  onChange: (value: T) => void;
+}) {
+  return (
+    <div className="inline-flex rounded border border-border bg-bg p-0.5 text-sm">
+      {options.map((option) => (
+        <button
+          key={option.value}
+          type="button"
+          onClick={() => onChange(option.value)}
+          className={cx(
+            "px-3 py-1.5 rounded transition-colors",
+            value === option.value
+              ? "bg-sky-600 text-white"
+              : "text-text-muted hover:text-text hover:bg-bg-subtle",
+          )}
+        >
+          {option.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 function contactName(c: CrmContact): string {
   return c.display_name || c.primary_email || c.primary_phone || `Contact #${c.id}`;
 }
@@ -297,17 +416,17 @@ export default function GigsPanel(props: NativePanelProps) {
   const { projectId } = props;
   const [tab, setTab] = useState<Tab>("queue");
   return (
-    <div className="flex flex-col h-full">
-      <nav className="flex gap-1 border-b border-border px-3 pt-3">
+    <div className="flex flex-col h-full bg-bg text-text">
+      <nav className="flex gap-1 border-b border-border px-4 pt-4">
         {(["queue","templates","instructions","workers"] as Tab[]).map((t) => (
           <button
             key={t}
             onClick={() => setTab(t)}
             className={
-              "px-3 py-2 text-sm capitalize rounded-t " +
+              "px-4 py-2 text-sm font-medium capitalize rounded-t border transition-colors " +
               (tab === t
-                ? "bg-bg text-text border border-border border-b-bg"
-                : "text-text-muted hover:text-text")
+                ? "bg-bg-subtle text-text border-border border-b-bg-subtle"
+                : "border-transparent text-text-muted hover:text-text hover:bg-bg-subtle")
             }
           >
             {t}
@@ -344,19 +463,20 @@ function QueueTab({ projectId }: { projectId: string }) {
   useEffect(() => { reload(); }, [reload]);
 
   return (
-    <div className="grid grid-cols-[minmax(280px,360px)_1fr] h-full">
-      <aside className="border-r border-border overflow-auto">
-        <div className="sticky top-0 z-10 bg-bg border-b border-border p-3 space-y-2">
+    <div className="grid grid-cols-[minmax(300px,380px)_1fr] h-full">
+      <aside className="border-r border-border overflow-auto bg-bg">
+        <div className="sticky top-0 z-10 bg-bg border-b border-border p-4 space-y-3">
           <div className="flex items-center justify-between gap-2">
-            <h2 className="text-sm font-semibold">Gigs</h2>
-            <button
+            <h2 className="text-sm font-semibold text-text">Gigs</h2>
+            <Button
               onClick={() => { setAdding(true); setSelected(null); }}
-              className="flex items-center gap-1 px-2 py-1 text-sm border border-border rounded"
+              tone="primary"
+              size="sm"
             >
               <Icon name="plus" /> New gig
-            </button>
+            </Button>
           </div>
-          <select value={status} onChange={(e) => setStatus(e.target.value)} className="w-full text-sm border border-border rounded px-2 py-1 bg-bg">
+          <Field as="select" value={status} onChange={(e) => setStatus(e.target.value)}>
             <option value="open,offered,accepted,submitted">Active + submitted</option>
             <option value="open">Open</option>
             <option value="offered,accepted">Assigned</option>
@@ -364,17 +484,17 @@ function QueueTab({ projectId }: { projectId: string }) {
             <option value="reviewed">Reviewed</option>
             <option value="rejected,cancelled,expired">Closed without acceptance</option>
             <option value="open,offered,accepted,submitted,reviewed,rejected,cancelled,expired">All</option>
-          </select>
+          </Field>
         </div>
-        {err && <div className="m-3 p-2 text-rose-600 text-sm">{err}</div>}
+        {err && <div className="m-3 p-3 rounded border border-rose-500/30 bg-rose-500/10 text-rose-600 text-sm">{err}</div>}
         {gigs?.length === 0 && <div className="p-6 text-text-muted text-sm">No gigs in this view.</div>}
         {gigs?.map((g) => (
           <button
             key={g.id}
             onClick={() => { setSelected(g); setAdding(false); }}
             className={
-              "w-full text-left px-3 py-3 border-b border-border hover:bg-bg-subtle " +
-              (selected?.id === g.id ? "bg-bg-subtle" : "")
+              "w-full text-left px-4 py-3 border-b border-border transition-colors " +
+              (selected?.id === g.id ? "bg-sky-500/10 border-l-4 border-l-sky-500" : "hover:bg-bg-subtle border-l-4 border-l-transparent")
             }
           >
             <div className="text-sm truncate">{g.title}</div>
@@ -387,7 +507,7 @@ function QueueTab({ projectId }: { projectId: string }) {
           </button>
         ))}
       </aside>
-      <section className="p-4 overflow-auto">
+      <section className="p-5 overflow-auto">
         {adding ? (
           <NewGigForm
             projectId={projectId}
@@ -399,7 +519,7 @@ function QueueTab({ projectId }: { projectId: string }) {
             onCancel={() => setAdding(false)}
           />
         ) : selected ? <GigDetail gig={selected} projectId={projectId} onChange={reload} /> : (
-          <div className="text-text-muted text-sm">Pick a gig.</div>
+          <Panel className="p-6 text-sm text-text-muted">Pick a gig.</Panel>
         )}
       </section>
     </div>
@@ -426,43 +546,53 @@ function GigDetail({ gig, projectId, onChange }: { gig: Gig; projectId: string; 
   };
 
   return (
-    <div>
-      <h2 className="text-lg font-semibold">{g.title}</h2>
-      <div className="flex items-center gap-2 mt-1 text-sm text-text-muted">
-        <Pill tone={gigPillTone(g.status)}>{g.status}</Pill>
-        {g.deadline_at && <span>due {formatDate(g.deadline_at)}</span>}
-      </div>
-
-      <h3 className="mt-6 text-sm font-semibold text-text-muted uppercase tracking-wide">Composition</h3>
-      <div className="mt-2 border border-border rounded divide-y divide-border">
-        {(g.composition || []).map((c, i) => (
-          <div key={i} className="p-3 text-sm flex gap-3 items-start">
-            <span className="text-text-muted mt-0.5"><Icon name={kindIcon(c.instruction_kind)} /></span>
-            <div className="flex-1 min-w-0">
-              <div className="text-xs text-text-muted">{c.instruction_kind}{c.result_key ? ` → ${c.result_key}` : ""}</div>
-              <div className="truncate">{summariseBody(c.instruction_kind, c.rendered_body)}</div>
+    <div className="space-y-5">
+      <Panel className="p-4">
+        <div className="flex items-start justify-between gap-3">
+          <div>
+            <h2 className="text-xl font-semibold text-text">{g.title}</h2>
+            <div className="flex items-center gap-2 mt-2 text-sm text-text-muted">
+              <Pill tone={gigPillTone(g.status)}>{g.status}</Pill>
+              {g.deadline_at && <span>due {formatDate(g.deadline_at)}</span>}
             </div>
           </div>
-        ))}
+        </div>
+      </Panel>
+
+      <div>
+        <h3 className="text-sm font-semibold text-text-muted uppercase tracking-wide">Composition</h3>
+        <Panel className="mt-2 divide-y divide-border overflow-hidden">
+          {(g.composition || []).map((c, i) => (
+            <div key={i} className="p-3 text-sm flex gap-3 items-start">
+              <span className="text-sky-600 mt-0.5"><Icon name={kindIcon(c.instruction_kind)} /></span>
+              <div className="flex-1 min-w-0">
+                <div className="text-xs text-text-muted">{c.instruction_kind}{c.result_key ? ` -> ${c.result_key}` : ""}</div>
+                <div className="truncate text-text">{summariseBody(c.instruction_kind, c.rendered_body)}</div>
+              </div>
+            </div>
+          ))}
+        </Panel>
       </div>
 
-      <h3 className="mt-6 text-sm font-semibold text-text-muted uppercase tracking-wide">Assignments</h3>
-      <div className="mt-2 border border-border rounded divide-y divide-border">
-        {(g.assignments || []).length === 0 && <div className="p-3 text-text-muted text-sm">Unassigned.</div>}
-        {(g.assignments || []).map((a) => (
-          <div key={a.id} className="p-3 text-sm flex items-center justify-between gap-3">
-            <div>
-              Worker #{a.worker_id} <Pill tone={a.status === "submitted" ? "info" : "default"}>{a.status}</Pill>
-              {a.submitted_at && <span className="ml-2 text-xs text-text-muted">submitted {formatDate(a.submitted_at)}</span>}
+      <div>
+        <h3 className="text-sm font-semibold text-text-muted uppercase tracking-wide">Assignments</h3>
+        <Panel className="mt-2 divide-y divide-border overflow-hidden">
+          {(g.assignments || []).length === 0 && <div className="p-3 text-text-muted text-sm">Unassigned.</div>}
+          {(g.assignments || []).map((a) => (
+            <div key={a.id} className="p-3 text-sm flex items-center justify-between gap-3">
+              <div>
+                Worker #{a.worker_id} <Pill tone={a.status === "submitted" ? "info" : "default"}>{a.status}</Pill>
+                {a.submitted_at && <span className="ml-2 text-xs text-text-muted">submitted {formatDate(a.submitted_at)}</span>}
+              </div>
+              {a.worker_url && (
+                <a className="text-sky-600 text-xs underline" target="_blank" rel="noreferrer" href={a.worker_url}>worker link</a>
+              )}
             </div>
-            {a.worker_url && (
-              <a className="text-sky-600 text-xs underline" target="_blank" rel="noreferrer" href={a.worker_url}>worker link</a>
-            )}
-          </div>
-        ))}
+          ))}
+        </Panel>
       </div>
       {(g.status === "open" || g.status === "offered") && (
-        <div className="mt-3">
+        <div>
           {assigning ? (
             <AssignGigForm
               projectId={projectId}
@@ -473,21 +603,21 @@ function GigDetail({ gig, projectId, onChange }: { gig: Gig; projectId: string; 
               }
             />
           ) : (
-            <button onClick={() => setAssigning(true)} className="px-3 py-2 text-sm border border-border rounded">
+            <Button onClick={() => setAssigning(true)} tone="secondary" size="md">
               Assign worker
-            </button>
+            </Button>
           )}
         </div>
       )}
 
       <SubmissionReview gig={g} projectId={projectId} busy={busy} onAction={doAction} />
 
-      <div className="mt-6 flex gap-2">
+      <div className="flex gap-2">
         {(g.status === "open" || g.status === "offered" || g.status === "accepted") && (
-          <button disabled={busy} onClick={() => {
+          <Button disabled={busy} tone="danger" size="md" onClick={() => {
             const reason = prompt("Cancel reason:") || "";
             doAction("cancel", { reason });
-          }} className="px-3 py-2 text-sm border border-border rounded text-rose-600">Cancel</button>
+          }}>Cancel</Button>
         )}
       </div>
     </div>
@@ -541,7 +671,7 @@ function SubmissionReview({
   if (!submission && !gig.result && gig.status !== "submitted") return null;
 
   return (
-    <section className="mt-6 border border-border rounded overflow-hidden">
+    <Panel className="overflow-hidden">
       <div className="p-3 bg-bg-subtle border-b border-border flex flex-wrap items-center justify-between gap-2">
         <div>
           <h3 className="text-sm font-semibold text-text-muted uppercase tracking-wide">
@@ -568,7 +698,7 @@ function SubmissionReview({
           {responses.length > 0 && (
             <div>
               <h4 className="text-xs font-semibold text-text-muted uppercase tracking-wide">Instruction responses</h4>
-              <div className="mt-2 divide-y divide-border border border-border rounded">
+              <Panel className="mt-2 divide-y divide-border overflow-hidden bg-bg">
                 {responses.map((response, index) => (
                   <div key={response.key || `${response.step || index}-${index}`} className="p-3 text-sm space-y-2">
                     <div className="flex items-center justify-between gap-2">
@@ -599,7 +729,7 @@ function SubmissionReview({
                     )}
                   </div>
                 ))}
-              </div>
+              </Panel>
             </div>
           )}
 
@@ -618,14 +748,14 @@ function SubmissionReview({
           {extraEntries.length > 0 && (
             <div>
               <h4 className="text-xs font-semibold text-text-muted uppercase tracking-wide">Result fields</h4>
-              <div className="mt-2 border border-border rounded divide-y divide-border">
+              <Panel className="mt-2 divide-y divide-border overflow-hidden bg-bg">
                 {extraEntries.map(([key, value]) => (
                   <div key={key} className="p-3 grid grid-cols-1 md:grid-cols-[160px_1fr] gap-2 text-sm">
                     <div className="text-text-muted">{key}</div>
                     <div className="min-w-0">{renderPayloadValue(value, files, projectId)}</div>
                   </div>
                 ))}
-              </div>
+              </Panel>
             </div>
           )}
 
@@ -635,38 +765,40 @@ function SubmissionReview({
 
           {gig.status === "submitted" && (
             <div className="pt-3 border-t border-border space-y-3">
-              <textarea
+              <Field
+                as="textarea"
                 value={acceptNotes}
                 onChange={(e) => setAcceptNotes(e.target.value)}
                 rows={2}
-                className="w-full px-2 py-1 text-sm border border-border rounded bg-bg"
                 placeholder="Acceptance notes for CRM timeline"
               />
               <div className="flex flex-wrap gap-2">
-                <button
+                <Button
                   disabled={busy}
                   onClick={() => onAction("accept", { notes: acceptNotes })}
-                  className="px-3 py-2 text-sm bg-emerald-600 text-white rounded disabled:opacity-50"
+                  tone="success"
+                  size="md"
                 >
                   Accept submission
-                </button>
-                <input
+                </Button>
+                <Field
                   value={rejectReason}
                   onChange={(e) => setRejectReason(e.target.value)}
                   placeholder="Rejection reason"
-                  className="min-w-[220px] flex-1 px-2 py-1 text-sm border border-border rounded bg-bg"
+                  className="min-w-[220px] flex-1"
                 />
                 <label className="flex items-center gap-2 text-sm text-text-muted">
                   <input type="checkbox" checked={reopen} onChange={(e) => setReopen(e.target.checked)} />
                   Reopen gig
                 </label>
-                <button
+                <Button
                   disabled={busy || !rejectReason.trim()}
                   onClick={() => onAction("reject", { reason: rejectReason.trim(), reopen })}
-                  className="px-3 py-2 text-sm border border-border rounded text-rose-600 disabled:opacity-50"
+                  tone="danger"
+                  size="md"
                 >
                   Reject submission
-                </button>
+                </Button>
               </div>
             </div>
           )}
@@ -676,7 +808,7 @@ function SubmissionReview({
           This gig is marked submitted, but the latest submission was not returned by the backend.
         </div>
       )}
-    </section>
+    </Panel>
   );
 }
 
@@ -690,14 +822,14 @@ function SubmissionFileLink({
   projectId: string;
 }) {
   if (!id) {
-    return <span className="px-2 py-1 text-xs border border-border rounded text-text-muted">{label || "File"}</span>;
+    return <span className="px-2 py-1 text-xs border border-border rounded bg-bg text-text-muted">{label || "File"}</span>;
   }
   const href = meta?.url || `/api/apps/storage/files/${id}/content?project_id=${encodeURIComponent(projectId)}`;
   const name = label || meta?.name || `File #${id}`;
   const detail = meta ? [meta.content_type, formatBytes(meta.size_bytes)].filter(Boolean).join(" · ") : mime || `Storage #${id}`;
   return (
     <a
-      className="inline-flex flex-col px-2 py-1 text-xs border border-border rounded hover:bg-bg-subtle"
+      className="inline-flex flex-col px-2 py-1 text-xs border border-border rounded bg-bg hover:bg-bg-subtle"
       href={href}
       target="_blank"
       rel="noreferrer"
@@ -777,22 +909,27 @@ function NewGigForm({
   };
 
   return (
+    <Panel className="p-4">
     <form onSubmit={submit} className="space-y-4">
       <div className="flex items-center justify-between gap-3">
         <h2 className="text-lg font-semibold">Create gig</h2>
-        <button type="button" onClick={onCancel} className="px-3 py-1 text-sm border border-border rounded">Cancel</button>
+        <Button type="button" onClick={onCancel} tone="ghost">Cancel</Button>
       </div>
-      <div className="inline-flex rounded border border-border overflow-hidden text-sm">
-        <button type="button" onClick={() => setMode("template")} className={"px-3 py-1 " + (mode === "template" ? "bg-sky-600 text-white" : "bg-bg text-text-muted")}>From template</button>
-        <button type="button" onClick={() => setMode("instructions")} className={"px-3 py-1 border-l border-border " + (mode === "instructions" ? "bg-sky-600 text-white" : "bg-bg text-text-muted")}>From instructions</button>
-      </div>
+      <Segmented
+        value={mode}
+        onChange={setMode}
+        options={[
+          { value: "template", label: "From template" },
+          { value: "instructions", label: "From instructions" },
+        ]}
+      />
 
       {mode === "template" ? (
         <div className="space-y-2">
-          <select value={templateId} onChange={(e) => setTemplateId(e.target.value)} className="w-full px-2 py-1 text-sm border border-border rounded bg-bg" required>
+          <Field as="select" value={templateId} onChange={(e) => setTemplateId(e.target.value)} required>
             <option value="">Select published template</option>
             {templates.map((t) => <option key={t.id} value={t.id}>{t.name} /{t.slug}</option>)}
-          </select>
+          </Field>
           {selectedTemplate?.current_version?.derived?.variables?.length ? (
             <div className="text-xs text-text-muted">
               Vars expected: {selectedTemplate.current_version.derived.variables.map((v) => v.name).join(", ")}
@@ -801,7 +938,7 @@ function NewGigForm({
         </div>
       ) : (
         <div className="space-y-3">
-          <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Gig title" className="w-full px-2 py-1 text-sm border border-border rounded bg-bg" required={mode === "instructions"} />
+          <Field value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Gig title" required={mode === "instructions"} />
           <InstructionOrderEditor
             instructions={instructions}
             selectedIds={selectedInstructionIds}
@@ -817,14 +954,14 @@ function NewGigForm({
 
       <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
         <WorkerSelect projectId={projectId} value={workerId} onChange={setWorkerId} allowEmpty />
-        <input type="datetime-local" value={deadlineLocal} onChange={(e) => setDeadlineLocal(e.target.value)} className="px-2 py-1 text-sm border border-border rounded bg-bg" />
-        <select value={priority} onChange={(e) => setPriority(e.target.value)} className="px-2 py-1 text-sm border border-border rounded bg-bg">
+        <Field type="datetime-local" value={deadlineLocal} onChange={(e) => setDeadlineLocal(e.target.value)} />
+        <Field as="select" value={priority} onChange={(e) => setPriority(e.target.value)}>
           <option value="">Priority</option>
           <option value="low">Low</option>
           <option value="normal">Normal</option>
           <option value="high">High</option>
           <option value="urgent">Urgent</option>
-        </select>
+        </Field>
       </div>
       {workerId && (
         <label className="inline-flex items-center gap-2 text-sm text-text-muted">
@@ -838,16 +975,18 @@ function NewGigForm({
         </label>
       )}
 
-      <textarea
+      <Field
+        as="textarea"
         value={varsText}
         onChange={(e) => setVarsText(e.target.value)}
         rows={5}
-        className="w-full px-2 py-1 text-sm font-mono border border-border rounded bg-bg"
+        className="font-mono"
         placeholder='{"customer_name":"Acme"}'
       />
       {err && <div className="text-rose-600 text-xs">{err}</div>}
-      <button disabled={busy} className="px-3 py-2 text-sm bg-sky-600 text-white rounded disabled:opacity-50">Create gig</button>
+      <Button disabled={busy} tone="primary" size="md">Create gig</Button>
     </form>
+    </Panel>
   );
 }
 
@@ -862,7 +1001,7 @@ function AssignGigForm({
         e.preventDefault();
         if (workerId) onAssign(Number(workerId), notifyWorker);
       }}
-      className="p-3 border border-border rounded bg-bg-subtle space-y-2"
+      className="p-3 border border-border rounded bg-bg-subtle space-y-3"
     >
       <WorkerSelect projectId={projectId} value={workerId} onChange={setWorkerId} />
       <label className="inline-flex items-center gap-2 text-sm text-text-muted">
@@ -875,8 +1014,8 @@ function AssignGigForm({
         Notify worker now
       </label>
       <div className="flex gap-2">
-        <button disabled={busy || !workerId} className="px-3 py-1 text-sm bg-sky-600 text-white rounded disabled:opacity-50">Assign</button>
-        <button type="button" onClick={onCancel} className="px-3 py-1 text-sm border border-border rounded">Cancel</button>
+        <Button disabled={busy || !workerId} tone="primary">Assign</Button>
+        <Button type="button" onClick={onCancel} tone="ghost">Cancel</Button>
       </div>
     </form>
   );
@@ -892,7 +1031,7 @@ function WorkerSelect({
       .catch(() => setWorkers([]));
   }, [projectId]);
   return (
-    <select value={value} onChange={(e) => onChange(e.target.value)} className="px-2 py-1 text-sm border border-border rounded bg-bg">
+    <Field as="select" value={value} onChange={(e) => onChange(e.target.value)}>
       {allowEmpty && <option value="">No worker yet</option>}
       {!allowEmpty && <option value="">Select worker</option>}
       {workers.map((w) => (
@@ -900,7 +1039,7 @@ function WorkerSelect({
           {w.contact ? contactName(w.contact) : `Worker #${w.id}`}{w.open_assignments != null ? ` (${w.open_assignments} open)` : ""}
         </option>
       ))}
-    </select>
+    </Field>
   );
 }
 
@@ -924,42 +1063,41 @@ function InstructionOrderEditor({
   return (
     <div className="space-y-2">
       <div className="grid grid-cols-[1fr_auto] gap-2">
-        <select value={pickId} onChange={(e) => setPickId(e.target.value)} className="px-2 py-1 text-sm border border-border rounded bg-bg">
+        <Field as="select" value={pickId} onChange={(e) => setPickId(e.target.value)}>
           <option value="">Add instruction</option>
           {available.map((i) => (
             <option key={i.id} value={i.id}>{i.name} /{i.slug} · {i.kind}</option>
           ))}
-        </select>
-        <button
+        </Field>
+        <Button
           type="button"
           disabled={!pickId}
           onClick={() => {
             onChange([...selectedIds, Number(pickId)]);
             setPickId("");
           }}
-          className="px-3 py-1 text-sm border border-border rounded disabled:opacity-50"
         >
           Add
-        </button>
+        </Button>
       </div>
-      <div className="border border-border rounded divide-y divide-border bg-bg">
+      <Panel className="divide-y divide-border overflow-hidden bg-bg">
         {selected.length === 0 && <div className="p-3 text-xs text-text-muted">No instructions selected.</div>}
         {selected.map((i, index) => (
           <div key={`${i.id}-${index}`} className="p-2 flex items-start gap-2 text-sm">
-            <span className="text-text-muted mt-0.5">{index + 1}</span>
-            <span className="text-text-muted mt-0.5"><Icon name={kindIcon(i.kind)} /></span>
+            <span className="mt-0.5 inline-flex h-5 min-w-5 items-center justify-center rounded bg-sky-600 text-white text-xs">{index + 1}</span>
+            <span className="text-sky-600 mt-0.5"><Icon name={kindIcon(i.kind)} /></span>
             <div className="flex-1 min-w-0">
               <div className="truncate">{i.name}</div>
               <div className="text-xs text-text-muted truncate">/{i.slug} · {i.kind}</div>
             </div>
             <div className="flex gap-1">
-              <button type="button" onClick={() => move(index, -1)} disabled={index === 0} className="px-2 py-1 text-xs border border-border rounded disabled:opacity-50">Up</button>
-              <button type="button" onClick={() => move(index, 1)} disabled={index === selected.length - 1} className="px-2 py-1 text-xs border border-border rounded disabled:opacity-50">Down</button>
-              <button type="button" onClick={() => onChange(selectedIds.filter((_, i2) => i2 !== index))} className="px-2 py-1 text-xs border border-border rounded text-rose-600">Remove</button>
+              <Button type="button" onClick={() => move(index, -1)} disabled={index === 0} size="xs">Up</Button>
+              <Button type="button" onClick={() => move(index, 1)} disabled={index === selected.length - 1} size="xs">Down</Button>
+              <Button type="button" onClick={() => onChange(selectedIds.filter((_, i2) => i2 !== index))} tone="danger" size="xs">Remove</Button>
             </div>
           </div>
         ))}
-      </div>
+      </Panel>
     </div>
   );
 }
@@ -1109,13 +1247,15 @@ function TemplatesTab({ projectId }: { projectId: string }) {
   useEffect(() => { reload(); }, [reload]);
 
   return (
-    <div className="p-4 space-y-3">
-      <div className="flex items-center justify-between">
-        <h2 className="text-lg font-semibold">Templates</h2>
-        <button onClick={() => setAdding(true)} className="flex items-center gap-1 px-2 py-1 text-sm border border-border rounded">
+    <div className="p-5 space-y-4">
+      <SectionHeading
+        title="Templates"
+        action={(
+        <Button onClick={() => setAdding(true)} tone="primary">
           <Icon name="plus" /> New
-        </button>
-      </div>
+        </Button>
+        )}
+      />
       {adding && <NewTemplateForm projectId={projectId} onDone={() => { setAdding(false); reload(); }} />}
       {selected && (
         <TemplateComposer
@@ -1128,7 +1268,7 @@ function TemplatesTab({ projectId }: { projectId: string }) {
       )}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
         {items?.map((t) => (
-          <div key={t.id} className="border border-border rounded p-3 bg-bg-subtle">
+          <Panel key={t.id} className="p-3">
             <div className="flex items-center justify-between">
               <div className="font-medium text-sm">{t.name}</div>
               {t.current_version && (
@@ -1158,17 +1298,18 @@ function TemplatesTab({ projectId }: { projectId: string }) {
               </div>
             )}
             <div className="mt-3 flex gap-2">
-              <button onClick={() => setSelected(t)} className="px-2 py-1 text-xs border border-border rounded">Manage instructions</button>
+              <Button onClick={() => setSelected(t)} size="xs">Manage instructions</Button>
             {t.current_version?.status === "draft" && (
-              <button
+              <Button
                 onClick={() => api(`/templates/${t.id}/publish`, projectId, { method: "POST" }).then(reload)}
-                className="px-2 py-1 text-xs border border-border rounded"
+                tone="primary"
+                size="xs"
               >
                 Publish v{t.current_version.version}
-              </button>
+              </Button>
             )}
             </div>
-          </div>
+          </Panel>
         ))}
       </div>
     </div>
@@ -1211,29 +1352,28 @@ function TemplateComposer({
   };
 
   return (
-    <div className="p-3 border border-border rounded bg-bg-subtle space-y-3">
+    <Panel className="p-3 space-y-3">
       <div className="flex items-start justify-between gap-3">
         <div>
           <h3 className="text-sm font-semibold">{template.name}</h3>
           <div className="text-xs text-text-muted">/{template.slug} · v{template.current_version?.version || 1} · {template.current_version?.status || "draft"}</div>
         </div>
-        <button onClick={onClose} className="px-2 py-1 text-xs border border-border rounded">Close</button>
+        <Button onClick={onClose} tone="ghost" size="xs">Close</Button>
       </div>
       <InstructionOrderEditor instructions={instructions} selectedIds={selectedIds} onChange={setSelectedIds} />
       {err && <div className="text-rose-600 text-xs">{err}</div>}
       <div className="flex gap-2">
-        <button disabled={busy} onClick={save} className="px-3 py-1 text-sm bg-sky-600 text-white rounded disabled:opacity-50">Save composition</button>
+        <Button disabled={busy} onClick={save} tone="primary">Save composition</Button>
         {template.current_version?.status === "draft" && (
-          <button
+          <Button
             disabled={busy}
             onClick={() => api(`/templates/${template.id}/publish`, projectId, { method: "POST" }).then(onDone)}
-            className="px-3 py-1 text-sm border border-border rounded"
           >
             Publish
-          </button>
+          </Button>
         )}
       </div>
-    </div>
+    </Panel>
   );
 }
 
@@ -1253,9 +1393,9 @@ function NewTemplateForm({ projectId, onDone }: { projectId: string; onDone: () 
       }}
       className="p-3 border border-border rounded space-y-2 bg-bg-subtle"
     >
-      <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Template name" className="w-full px-2 py-1 text-sm border border-border rounded bg-bg" required />
-      <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Title with {{vars}}" className="w-full px-2 py-1 text-sm border border-border rounded bg-bg" required />
-      <button disabled={busy} className="px-3 py-1 text-sm border border-border rounded">Create draft</button>
+      <Field value={name} onChange={(e) => setName(e.target.value)} placeholder="Template name" required />
+      <Field value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Title with {{vars}}" required />
+      <Button disabled={busy} tone="primary">Create draft</Button>
     </form>
   );
 }
@@ -1288,19 +1428,21 @@ function InstructionsTab({ projectId }: { projectId: string }) {
   }, [items]);
 
   return (
-    <div className="p-4 space-y-4">
-      <div className="flex items-center justify-between">
-        <h2 className="text-lg font-semibold">Instruction library</h2>
+    <div className="p-5 space-y-4">
+      <SectionHeading
+        title="Instruction library"
+        action={(
         <div className="flex items-center gap-2">
-          <select value={kind} onChange={(e) => setKind(e.target.value)} className="text-sm border border-border rounded px-2 py-1 bg-bg">
+          <Field as="select" value={kind} onChange={(e) => setKind(e.target.value)} className="w-auto min-w-[140px] py-1.5">
             <option value="">All kinds</option>
             {ALL_KINDS.map((k) => <option key={k} value={k}>{k}</option>)}
-          </select>
-          <button onClick={() => { setAdding(true); setEditing(null); }} className="flex items-center gap-1 px-2 py-1 text-sm border border-border rounded">
+          </Field>
+          <Button onClick={() => { setAdding(true); setEditing(null); }} tone="primary">
             <Icon name="plus" /> New
-          </button>
+          </Button>
         </div>
-      </div>
+        )}
+      />
       {adding && <NewInstructionForm projectId={projectId} onDone={() => { setAdding(false); reload(); }} onCancel={() => setAdding(false)} />}
       {editing && (
         <NewInstructionForm
@@ -1310,14 +1452,14 @@ function InstructionsTab({ projectId }: { projectId: string }) {
           onCancel={() => setEditing(null)}
         />
       )}
-      {items?.length === 0 && <div className="p-4 border border-border rounded text-sm text-text-muted">No instructions yet.</div>}
+      {items?.length === 0 && <Panel className="p-4 text-sm text-text-muted">No instructions yet.</Panel>}
       {Object.entries(groups).map(([fam, list]) => (
         <div key={fam}>
           <h3 className="text-xs uppercase tracking-wide text-text-muted mb-2">{fam}</h3>
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-2">
             {list.map((i) => (
-              <div key={i.id} className="border border-border rounded p-2 bg-bg-subtle flex items-start gap-2">
-                <span className="text-text-muted mt-0.5"><Icon name={kindIcon(i.kind)} /></span>
+              <Panel key={i.id} className="p-3 flex items-start gap-2">
+                <span className="text-sky-600 mt-0.5"><Icon name={kindIcon(i.kind)} /></span>
                 <div className="min-w-0">
                   <div className="text-sm truncate">{i.name}</div>
                   <div className="text-xs text-text-muted truncate">/{i.slug} · {i.kind}</div>
@@ -1335,25 +1477,26 @@ function InstructionsTab({ projectId }: { projectId: string }) {
                   )}
                   <div className="mt-2 flex flex-wrap gap-1">
                     {ALL_KINDS.includes(i.kind) && (
-                      <button
+                      <Button
                         type="button"
                         onClick={() => { setAdding(false); setEditing(i); }}
-                        className="px-2 py-1 text-xs border border-border rounded"
+                        size="xs"
                       >
                         Edit
-                      </button>
+                      </Button>
                     )}
                     {i.current_version?.status === "draft" && (
-                      <button
+                      <Button
                         onClick={() => api(`/instructions/${i.id}/publish`, projectId, { method: "POST" }).then(reload)}
-                        className="px-2 py-1 text-xs border border-border rounded"
+                        tone="primary"
+                        size="xs"
                       >
                         Publish
-                      </button>
+                      </Button>
                     )}
                   </div>
                 </div>
-              </div>
+              </Panel>
             ))}
           </div>
         </div>
@@ -1410,36 +1553,37 @@ function NewInstructionForm({
   };
 
   return (
-    <form onSubmit={submit} className="p-3 border border-border rounded space-y-2 bg-bg-subtle">
+    <Panel className="p-4">
+    <form onSubmit={submit} className="space-y-3">
       <div className="flex items-center justify-between gap-3">
         <h3 className="text-sm font-semibold">{editMode ? "Edit instruction draft" : "Create instruction"}</h3>
         {editMode && <Pill>Current v{instruction?.current_version?.version}</Pill>}
       </div>
       <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
-        <input value={name} onChange={(e) => setName(e.target.value)} disabled={editMode} placeholder="Instruction name" required className="px-2 py-1 text-sm border border-border rounded bg-bg disabled:opacity-60" />
-        <select value={kind} onChange={(e) => setKind(e.target.value)} disabled={editMode} className="px-2 py-1 text-sm border border-border rounded bg-bg disabled:opacity-60">
+        <Field value={name} onChange={(e) => setName(e.target.value)} disabled={editMode} placeholder="Instruction name" required />
+        <Field as="select" value={kind} onChange={(e) => setKind(e.target.value)} disabled={editMode}>
           {ALL_KINDS.map((k) => <option key={k} value={k}>{k}</option>)}
-        </select>
-        <input value={slug} onChange={(e) => setSlug(e.target.value)} disabled={editMode} placeholder="Slug (optional)" className="px-2 py-1 text-sm border border-border rounded bg-bg disabled:opacity-60" />
+        </Field>
+        <Field value={slug} onChange={(e) => setSlug(e.target.value)} disabled={editMode} placeholder="Slug (optional)" />
       </div>
 
-      <textarea
+      <Field
+        as="textarea"
         value={text}
         onChange={(e) => setText(e.target.value)}
         placeholder={kind === "text" ? "Instruction text" : "Text shown with this media"}
         rows={4}
         required
-        className="w-full px-2 py-1 text-sm border border-border rounded bg-bg"
       />
-      <select
+      <Field
+        as="select"
         value={responseMode}
         onChange={(e) => setResponseMode(e.target.value as "none" | "optional" | "required")}
-        className="w-full px-2 py-1 text-sm border border-border rounded bg-bg"
       >
         <option value="none">No worker response</option>
         <option value="optional">Optional notes/files response</option>
         <option value="required">Required notes/files response</option>
-      </select>
+      </Field>
 
       {(kind === "audio" || kind === "video") && (
         <StorageFilePicker
@@ -1452,10 +1596,11 @@ function NewInstructionForm({
 
       {err && <div className="text-rose-600 text-xs">{err}</div>}
       <div className="flex gap-2">
-        <button disabled={busy || ((kind === "audio" || kind === "video") && !selectedFile)} className="px-3 py-1 text-sm bg-sky-600 text-white rounded disabled:opacity-50">{editMode ? "Save draft" : "Create draft"}</button>
-        <button type="button" onClick={onCancel} className="px-3 py-1 text-sm border border-border rounded">Cancel</button>
+        <Button disabled={busy || ((kind === "audio" || kind === "video") && !selectedFile)} tone="primary">{editMode ? "Save draft" : "Create draft"}</Button>
+        <Button type="button" onClick={onCancel} tone="ghost">Cancel</Button>
       </div>
     </form>
+    </Panel>
   );
 }
 
@@ -1534,15 +1679,15 @@ function StorageFilePicker({
   return (
     <div className="space-y-2">
       <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
-        <input value={query} onChange={(e) => setQuery(e.target.value)} placeholder={`Search ${kind} files`} className="px-2 py-1 text-sm border border-border rounded bg-bg" />
-        <input value={folder} onChange={(e) => setFolder(e.target.value)} placeholder="Current folder, e.g. /recordings/" className="px-2 py-1 text-sm border border-border rounded bg-bg" />
+        <Field value={query} onChange={(e) => setQuery(e.target.value)} placeholder={`Search ${kind} files`} />
+        <Field value={folder} onChange={(e) => setFolder(e.target.value)} placeholder="Current folder, e.g. /recordings/" />
       </div>
       <div className="flex flex-wrap items-center gap-2 text-xs">
-        <button type="button" onClick={() => setFolder("")} className="px-2 py-1 border border-border rounded">Root</button>
-        <button type="button" disabled={!folder} onClick={() => setFolder(parentFolder)} className="px-2 py-1 border border-border rounded disabled:opacity-50">Up</button>
+        <Button type="button" onClick={() => setFolder("")} size="xs">Root</Button>
+        <Button type="button" disabled={!folder} onClick={() => setFolder(parentFolder)} size="xs">Up</Button>
         <span className="text-text-muted truncate">/{folder.replace(/^\/|\/$/g, "")}</span>
       </div>
-      <div className="border border-border rounded bg-bg p-2">
+      <Panel className="bg-bg p-2">
         {folderBusy && <div className="text-xs text-text-muted">Loading folders…</div>}
         {!folderBusy && folders.length === 0 && <div className="text-xs text-text-muted">No child folders.</div>}
         {!folderBusy && folders.length > 0 && (
@@ -1552,7 +1697,7 @@ function StorageFilePicker({
                 type="button"
                 key={f.path}
                 onClick={() => setFolder(f.path)}
-                className="p-2 text-left border border-border rounded hover:bg-bg-subtle"
+                className="p-2 text-left border border-border rounded bg-bg hover:bg-bg-subtle transition-colors"
               >
                 <div className="text-sm truncate">{f.name}</div>
                 <div className="text-xs text-text-muted">{f.file_count || 0} files · {formatBytes(f.size_bytes || 0)}</div>
@@ -1560,17 +1705,17 @@ function StorageFilePicker({
             ))}
           </div>
         )}
-      </div>
+      </Panel>
       {selected && (
         <div className="flex items-center justify-between gap-3 p-2 border border-sky-500/30 rounded bg-sky-500/10">
           <div className="min-w-0">
             <div className="text-sm truncate">{selected.name}</div>
             <div className="text-xs text-text-muted truncate">{selected.folder} · {formatBytes(selected.size_bytes || 0)}</div>
           </div>
-          <button type="button" onClick={() => onSelect(null)} className="text-xs px-2 py-1 border border-border rounded">Clear</button>
+          <Button type="button" onClick={() => onSelect(null)} size="xs">Clear</Button>
         </div>
       )}
-      <div className="border border-border rounded divide-y divide-border bg-bg max-h-56 overflow-auto">
+      <Panel className="divide-y divide-border bg-bg max-h-56 overflow-auto">
         {busy && <div className="p-2 text-xs text-text-muted">Loading files…</div>}
         {!busy && err && <div className="p-2 text-xs text-rose-600">{err}</div>}
         {!busy && !err && files.length === 0 && <div className="p-2 text-xs text-text-muted">No {kind} files found.</div>}
@@ -1585,7 +1730,7 @@ function StorageFilePicker({
             <div className="text-xs text-text-muted truncate">{file.folder} · {file.content_type || "unknown"} · {formatBytes(file.size_bytes || 0)}</div>
           </button>
         ))}
-      </div>
+      </Panel>
     </div>
   );
 }
@@ -1681,13 +1826,15 @@ function WorkersTab({ projectId }: { projectId: string }) {
   useEffect(() => { reload(); }, [reload]);
 
   return (
-    <div className="p-4 space-y-3">
-      <div className="flex items-center justify-between">
-        <h2 className="text-lg font-semibold">Workers</h2>
-        <button onClick={() => setAdding(true)} className="flex items-center gap-1 px-2 py-1 text-sm border border-border rounded">
+    <div className="p-5 space-y-4">
+      <SectionHeading
+        title="Workers"
+        action={(
+        <Button onClick={() => setAdding(true)} tone="primary">
           <Icon name="plus" /> Add worker
-        </button>
-      </div>
+        </Button>
+        )}
+      />
       {adding && (
         <NewWorkerForm
           projectId={projectId}
@@ -1697,11 +1844,11 @@ function WorkersTab({ projectId }: { projectId: string }) {
           onCancel={() => setAdding(false)}
         />
       )}
-      <div className="border border-border rounded divide-y divide-border">
+      <Panel className="divide-y divide-border overflow-hidden">
         {items?.length === 0 && <div className="p-4 text-text-muted text-sm">No workers yet.</div>}
         {items?.map((wk) => (
           <div key={wk.id} className="p-3 flex items-start gap-3">
-            <span className="text-text-muted mt-1"><Icon name="user" /></span>
+            <span className="text-sky-600 mt-1"><Icon name="user" /></span>
             <div className="flex-1 min-w-0">
               <div className="text-sm font-medium">{wk.contact ? contactName(wk.contact) : `Worker #${wk.id}`}</div>
               <div className="text-xs text-text-muted">
@@ -1722,7 +1869,7 @@ function WorkersTab({ projectId }: { projectId: string }) {
             </div>
           </div>
         ))}
-      </div>
+      </Panel>
     </div>
   );
 }
@@ -1816,34 +1963,25 @@ function NewWorkerForm({
         } catch (e2) { setErr((e2 as Error).message); }
         finally { setBusy(false); }
       }}
-      className="p-3 border border-border rounded space-y-2 bg-bg-subtle"
+      className="p-4 border border-border rounded space-y-3 bg-bg-subtle"
     >
-      <div className="inline-flex rounded border border-border overflow-hidden text-sm">
-        <button
-          type="button"
-          onClick={() => { setMode("crm"); setErr(null); }}
-          className={"px-3 py-1 " + (mode === "crm" ? "bg-sky-600 text-white" : "bg-bg text-text-muted")}
-        >
-          From CRM
-        </button>
-        <button
-          type="button"
-          onClick={() => { setMode("new"); setErr(null); }}
-          className={"px-3 py-1 border-l border-border " + (mode === "new" ? "bg-sky-600 text-white" : "bg-bg text-text-muted")}
-        >
-          New contact
-        </button>
-      </div>
+      <Segmented
+        value={mode}
+        onChange={(next) => { setMode(next); setErr(null); }}
+        options={[
+          { value: "crm", label: "From CRM" },
+          { value: "new", label: "New contact" },
+        ]}
+      />
 
       {mode === "crm" ? (
         <div className="space-y-2">
-          <input
+          <Field
             value={crmQuery}
             onChange={(e) => setCrmQuery(e.target.value)}
             placeholder="Search CRM contacts"
-            className="w-full px-2 py-1 text-sm border border-border rounded bg-bg"
           />
-          <div className="border border-border rounded divide-y divide-border bg-bg max-h-52 overflow-auto">
+          <Panel className="divide-y divide-border bg-bg max-h-52 overflow-auto">
             {crmBusy && <div className="p-2 text-xs text-text-muted">Searching…</div>}
             {!crmBusy && crmErr && <div className="p-2 text-xs text-rose-600">{crmErr}</div>}
             {!crmBusy && !crmErr && crmResults.length === 0 && (
@@ -1872,31 +2010,31 @@ function NewWorkerForm({
                 </button>
               );
             })}
-          </div>
+          </Panel>
         </div>
       ) : (
         <>
-          <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Display name" required={mode === "new"} className="w-full px-2 py-1 text-sm border border-border rounded bg-bg" />
+          <Field value={name} onChange={(e) => setName(e.target.value)} placeholder="Display name" required={mode === "new"} />
           <div className="grid grid-cols-2 gap-2">
-            <input value={email} onChange={(e) => setEmail(e.target.value)} placeholder="Email" type="email" className="px-2 py-1 text-sm border border-border rounded bg-bg" />
-            <input value={phone} onChange={(e) => setPhone(e.target.value)} placeholder="Phone (E.164)" className="px-2 py-1 text-sm border border-border rounded bg-bg" />
+            <Field value={email} onChange={(e) => setEmail(e.target.value)} placeholder="Email" type="email" />
+            <Field value={phone} onChange={(e) => setPhone(e.target.value)} placeholder="Phone (E.164)" />
           </div>
-          <input value={company} onChange={(e) => setCompany(e.target.value)} placeholder="Company (optional)" className="w-full px-2 py-1 text-sm border border-border rounded bg-bg" />
+          <Field value={company} onChange={(e) => setCompany(e.target.value)} placeholder="Company (optional)" />
         </>
       )}
 
-      <select value={channel} onChange={(e) => setChannel(e.target.value)} className="px-2 py-1 text-sm border border-border rounded bg-bg">
+      <Field as="select" value={channel} onChange={(e) => setChannel(e.target.value)}>
         <option value="">Default channel — let CRM pick</option>
         <option value="email">Email</option>
         <option value="sms">SMS</option>
         <option value="whatsapp">WhatsApp</option>
-      </select>
-      <textarea
+      </Field>
+      <Field
+        as="textarea"
         value={notes}
         onChange={(e) => setNotes(e.target.value)}
         placeholder="Notes (optional)"
         rows={2}
-        className="w-full px-2 py-1 text-sm border border-border rounded bg-bg"
       />
       {skills.length > 0 && (
         <div>
@@ -1920,8 +2058,8 @@ function NewWorkerForm({
       )}
       {err && <div className="text-rose-600 text-xs">{err}</div>}
       <div className="flex gap-2">
-        <button disabled={busy || (mode === "crm" && !selectedContact)} className="px-3 py-1 text-sm bg-sky-600 text-white rounded disabled:opacity-50">Add worker</button>
-        <button type="button" onClick={onCancel} className="px-3 py-1 text-sm border border-border rounded">Cancel</button>
+        <Button disabled={busy || (mode === "crm" && !selectedContact)} tone="primary">Add worker</Button>
+        <Button type="button" onClick={onCancel} tone="ghost">Cancel</Button>
       </div>
     </form>
   );
