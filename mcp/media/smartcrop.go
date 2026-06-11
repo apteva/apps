@@ -185,6 +185,16 @@ func computeSmartCrop(
 			"crop_x_after", subjectX)
 		srcX = subjectX
 	}
+	if motionX, ok := motionAwareNarrowSmartCropX(ctx, app, sc, projectID, sourceFileID, row.Derivations, cropSource, thumb, srcX, row.Width, row.Height, cw, ch, tCropW); ok {
+		app.Logger().Info("smartcrop motion correction applied",
+			"file_id", sourceFileID,
+			"derivation_kind", cropSource.Kind,
+			"derivation_file_id", cropSource.StorageFileID,
+			"derivation_position_ms", cropSource.PositionMs,
+			"crop_x_before", srcX,
+			"crop_x_after", motionX)
+		srcX = motionX
+	}
 	app.Logger().Info("smartcrop resolved",
 		"file_id", sourceFileID,
 		"derivation_kind", cropSource.Kind,
@@ -376,6 +386,182 @@ func subjectColumnWeights(img image.Image) []float64 {
 		}
 	}
 	return cols
+}
+
+func motionAwareNarrowSmartCropX(
+	ctx context.Context,
+	app *sdk.AppCtx,
+	sc *storageClient,
+	projectID, sourceFileID string,
+	derivs []DerivationRow,
+	cropSource DerivationRow,
+	img image.Image,
+	srcX, srcW, srcH, cropW, cropH, thumbCropW int,
+) (int, bool) {
+	if img == nil || cropSource.Kind != "keyframe" ||
+		srcW <= 0 || srcH <= 0 || cropW <= 0 || cropH <= 0 ||
+		thumbCropW <= 0 || srcW <= cropW ||
+		float64(srcW)/float64(cropW) < 1.8 {
+		return srcX, false
+	}
+	prev, next := neighboringKeyframes(derivs, cropSource.PositionMs)
+	neighbors := make([]image.Image, 0, 2)
+	for _, d := range []DerivationRow{prev, next} {
+		if d.StorageFileID == "" {
+			continue
+		}
+		neighbor, err := downloadAndDecodeImage(ctx, sc, projectID, d.StorageFileID)
+		if err != nil {
+			if app != nil {
+				app.Logger().Info("smartcrop motion neighbor unavailable",
+					"file_id", sourceFileID,
+					"neighbor_file_id", d.StorageFileID,
+					"neighbor_position_ms", d.PositionMs,
+					"err", err.Error())
+			}
+			continue
+		}
+		neighbors = append(neighbors, neighbor)
+	}
+	if len(neighbors) == 0 {
+		return srcX, false
+	}
+	return motionAwareNarrowSmartCropXFromImages(img, neighbors, srcX, srcW, cropW, thumbCropW)
+}
+
+func motionAwareNarrowSmartCropXFromImages(img image.Image, neighbors []image.Image, srcX, srcW, cropW, thumbCropW int) (int, bool) {
+	bounds := img.Bounds()
+	tW := bounds.Dx()
+	tH := bounds.Dy()
+	if tW <= 0 || tH <= 0 || thumbCropW <= 0 || thumbCropW >= tW || srcW <= cropW {
+		return srcX, false
+	}
+	usable := make([]image.Image, 0, len(neighbors))
+	for _, n := range neighbors {
+		if n == nil {
+			continue
+		}
+		nb := n.Bounds()
+		if nb.Dx() == tW && nb.Dy() == tH {
+			usable = append(usable, n)
+		}
+	}
+	if len(usable) == 0 {
+		return srcX, false
+	}
+
+	cols := make([]float64, tW)
+	for y := 0; y < tH; y++ {
+		yWeight := 1.0
+		if y < tH*10/100 {
+			yWeight = 0.2
+		} else if y > tH*95/100 {
+			yWeight = 0.7
+		}
+		for x := 0; x < tW; x++ {
+			r, g, b := rgb8(img.At(bounds.Min.X+x, bounds.Min.Y+y))
+			var maxDiff float64
+			for _, n := range usable {
+				nb := n.Bounds()
+				nr, ng, nbv := rgb8(n.At(nb.Min.X+x, nb.Min.Y+y))
+				diff := float64(absInt(r-nr)+absInt(g-ng)+absInt(b-nbv)) / 3.0
+				if diff > maxDiff {
+					maxDiff = diff
+				}
+			}
+			weight := (maxDiff - 12.0) / 40.0
+			if weight <= 0 {
+				continue
+			}
+			if weight > 1 {
+				weight = 1
+			}
+			cols[x] += weight * yWeight
+		}
+	}
+	smooth := smoothColumns(cols, 9)
+	bestX, bestScore, currentScore, total, ok := bestColumnWindow(smooth, thumbCropW, srcX, srcW)
+	if !ok {
+		return srcX, false
+	}
+	// Use motion only when it is strong and concentrated. Uniform
+	// whole-frame motion usually means camera movement or exposure
+	// flicker, not a subject we should chase.
+	if total < float64(tW*tH)*0.02 || bestScore < total*0.38 || bestScore < currentScore*1.03 {
+		return srcX, false
+	}
+	x := int(math.Round(float64(bestX) * float64(srcW) / float64(tW)))
+	return clampInt(roundEven(x), 0, srcW-cropW), true
+}
+
+func neighboringKeyframes(derivs []DerivationRow, positionMs int64) (DerivationRow, DerivationRow) {
+	var prev DerivationRow
+	var next DerivationRow
+	for _, d := range derivs {
+		if d.Kind != "keyframe" || d.Status != "ok" || d.StorageFileID == "" || d.PositionMs == positionMs {
+			continue
+		}
+		if d.PositionMs < positionMs && (prev.StorageFileID == "" || d.PositionMs > prev.PositionMs) {
+			prev = d
+		}
+		if d.PositionMs > positionMs && (next.StorageFileID == "" || d.PositionMs < next.PositionMs) {
+			next = d
+		}
+	}
+	return prev, next
+}
+
+func smoothColumns(cols []float64, width int) []float64 {
+	if width <= 1 {
+		out := make([]float64, len(cols))
+		copy(out, cols)
+		return out
+	}
+	radius := width / 2
+	out := make([]float64, len(cols))
+	for i := range cols {
+		var sum float64
+		var n int
+		for j := i - radius; j <= i+radius; j++ {
+			if j < 0 || j >= len(cols) {
+				continue
+			}
+			sum += cols[j]
+			n++
+		}
+		if n > 0 {
+			out[i] = sum / float64(n)
+		}
+	}
+	return out
+}
+
+func bestColumnWindow(cols []float64, windowW, srcX, srcW int) (bestX int, bestScore, currentScore, total float64, ok bool) {
+	windowN := len(cols) - windowW + 1
+	if windowN <= 0 || srcW <= 0 {
+		return 0, 0, 0, 0, false
+	}
+	for _, v := range cols {
+		total += v
+	}
+	var running float64
+	for i := 0; i < windowW; i++ {
+		running += cols[i]
+	}
+	bestScore = running
+	scores := make([]float64, windowN)
+	scores[0] = running
+	for x := 1; x < windowN; x++ {
+		running += cols[x+windowW-1] - cols[x-1]
+		scores[x] = running
+		if running > bestScore {
+			bestScore = running
+			bestX = x
+		}
+	}
+	currentX := int(math.Round(float64(srcX) * float64(len(cols)) / float64(srcW)))
+	currentX = clampInt(currentX, 0, windowN-1)
+	return bestX, bestScore, scores[currentX], total, true
 }
 
 func rgb8(c color.Color) (int, int, int) {

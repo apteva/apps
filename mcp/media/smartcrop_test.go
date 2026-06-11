@@ -135,6 +135,57 @@ func TestSubjectAwareNarrowSmartCropX_DoesNotPullAwayFromRawSmartCrop(t *testing
 	}
 }
 
+func TestMotionAwareNarrowSmartCropXFromImages_PrefersMovingSubject(t *testing.T) {
+	cur := image.NewRGBA(image.Rect(0, 0, 320, 180))
+	neighbor := image.NewRGBA(image.Rect(0, 0, 320, 180))
+	for y := 0; y < 180; y++ {
+		for x := 0; x < 320; x++ {
+			bg := color.RGBA{R: 150, G: 140, B: 124, A: 255}
+			cur.Set(x, y, bg)
+			neighbor.Set(x, y, bg)
+		}
+	}
+	// Static distracting artwork on the left exists in both frames.
+	for y := 15; y < 165; y++ {
+		for x := 35; x < 95; x++ {
+			c := color.RGBA{R: 235, G: 225, B: 210, A: 255}
+			if (x+y)%7 < 3 {
+				c = color.RGBA{R: 50, G: 45, B: 42, A: 255}
+			}
+			cur.Set(x, y, c)
+			neighbor.Set(x, y, c)
+		}
+	}
+	// Moving person-like foreground on the right appears only in cur.
+	for y := 20; y < 176; y++ {
+		for x := 205; x < 280; x++ {
+			cur.Set(x, y, color.RGBA{R: 225, G: 220, B: 208, A: 255})
+		}
+	}
+
+	x, ok := motionAwareNarrowSmartCropXFromImages(cur, []image.Image{neighbor}, 180, 1920, 606, 100)
+	if !ok {
+		t.Fatal("expected motion correction")
+	}
+	if x < 900 {
+		t.Fatalf("expected crop to move toward right-side moving subject, got x=%d", x)
+	}
+}
+
+func TestMotionAwareNarrowSmartCropXFromImages_GlobalMotionNoOp(t *testing.T) {
+	cur := image.NewRGBA(image.Rect(0, 0, 320, 180))
+	neighbor := image.NewRGBA(image.Rect(0, 0, 320, 180))
+	for y := 0; y < 180; y++ {
+		for x := 0; x < 320; x++ {
+			cur.Set(x, y, color.RGBA{R: 180, G: 180, B: 180, A: 255})
+			neighbor.Set(x, y, color.RGBA{R: 80, G: 80, B: 80, A: 255})
+		}
+	}
+	if x, ok := motionAwareNarrowSmartCropXFromImages(cur, []image.Image{neighbor}, 526, 1920, 606, 100); ok || x != 526 {
+		t.Fatalf("global motion should not override, got x=%d ok=%v", x, ok)
+	}
+}
+
 func TestPickSmartCropDerivation(t *testing.T) {
 	target := func(focusMs int64, preferKeyframe bool) smartCropTarget {
 		return smartCropTarget{FocusMs: focusMs, PreferKeyframe: preferKeyframe}
