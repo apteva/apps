@@ -30,6 +30,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"image"
+	"image/color"
 	_ "image/gif" // accept GIFs in case a future thumbnail derivation switches format
 	"image/jpeg"
 	_ "image/png" // accept PNGs (waveform falls back here for audio-only sources)
@@ -172,6 +173,25 @@ func computeSmartCrop(
 		srcY = row.Height - ch
 	}
 	srcX, srcY = stabilizeNarrowSmartCrop(srcX, srcY, row.Width, row.Height, cw, ch)
+	if subjectX, ok := subjectAwareNarrowSmartCropX(thumb, srcX, row.Width, row.Height, cw, ch, tCropW); ok {
+		app.Logger().Info("smartcrop subject correction applied",
+			"file_id", sourceFileID,
+			"derivation_kind", cropSource.Kind,
+			"derivation_file_id", cropSource.StorageFileID,
+			"derivation_position_ms", cropSource.PositionMs,
+			"crop_x_before", srcX,
+			"crop_x_after", subjectX)
+		srcX = subjectX
+	}
+	app.Logger().Info("smartcrop resolved",
+		"file_id", sourceFileID,
+		"derivation_kind", cropSource.Kind,
+		"derivation_file_id", cropSource.StorageFileID,
+		"derivation_position_ms", cropSource.PositionMs,
+		"crop_w", cw,
+		"crop_h", ch,
+		"crop_x", roundEven(srcX),
+		"crop_y", roundEven(srcY))
 	return &cropWindow{
 		W: cw, H: ch,
 		X: roundEven(srcX),
@@ -232,6 +252,168 @@ func stabilizeNarrowSmartCrop(srcX, srcY, srcW, srcH, cropW, cropH int) (int, in
 	}
 	x := int(math.Round(float64(srcX)*(1-weight) + float64(centerX)*weight))
 	return clampInt(roundEven(x), 0, maxX), clampInt(roundEven(srcY), 0, srcH-cropH)
+}
+
+// subjectAwareNarrowSmartCropX corrects very narrow portrait crops when
+// generic edge saliency picks room texture/artwork over a visible human
+// subject. It uses a cheap skin/warm-subject column score on the same
+// cached frame smartcrop already decoded. This is intentionally only a
+// second-stage correction: it moves the crop when the best subject window
+// is materially better than the current saliency window, otherwise the
+// original smartcrop result stands.
+func subjectAwareNarrowSmartCropX(img image.Image, srcX, srcW, srcH, cropW, cropH, thumbCropW int) (int, bool) {
+	if img == nil || srcW <= 0 || srcH <= 0 || cropW <= 0 || cropH <= 0 || thumbCropW <= 0 || srcW <= cropW {
+		return srcX, false
+	}
+	if float64(srcW)/float64(cropW) < 1.8 {
+		return srcX, false
+	}
+	bounds := img.Bounds()
+	tW := bounds.Dx()
+	tH := bounds.Dy()
+	if tW <= 0 || tH <= 0 || thumbCropW >= tW {
+		return srcX, false
+	}
+
+	cols := subjectColumnWeights(img)
+	if len(cols) != tW {
+		return srcX, false
+	}
+	smooth := make([]float64, len(cols))
+	for i := range cols {
+		var sum float64
+		var n int
+		for j := i - 4; j <= i+4; j++ {
+			if j < 0 || j >= len(cols) {
+				continue
+			}
+			sum += cols[j]
+			n++
+		}
+		if n > 0 {
+			smooth[i] = sum / float64(n)
+		}
+	}
+
+	windowN := tW - thumbCropW + 1
+	if windowN <= 0 {
+		return srcX, false
+	}
+	scores := make([]float64, windowN)
+	var running float64
+	for i := 0; i < thumbCropW; i++ {
+		running += smooth[i]
+	}
+	scores[0] = running
+	bestX := 0
+	bestScore := running
+	for x := 1; x < windowN; x++ {
+		running += smooth[x+thumbCropW-1] - smooth[x-1]
+		scores[x] = running
+		if running > bestScore {
+			bestScore = running
+			bestX = x
+		}
+	}
+
+	currentThumbX := int(math.Round(float64(srcX) * float64(tW) / float64(srcW)))
+	currentThumbX = clampInt(currentThumbX, 0, windowN-1)
+	currentScore := scores[currentThumbX]
+	total := 0.0
+	for _, v := range smooth {
+		total += v
+	}
+	if total < float64(tW*tH)*0.015 {
+		return srcX, false
+	}
+	if bestScore < currentScore*1.08 || bestScore < total*0.18 {
+		return srcX, false
+	}
+
+	x := int(math.Round(float64(bestX) * float64(srcW) / float64(tW)))
+	return clampInt(roundEven(x), 0, srcW-cropW), true
+}
+
+func subjectColumnWeights(img image.Image) []float64 {
+	bounds := img.Bounds()
+	w := bounds.Dx()
+	h := bounds.Dy()
+	cols := make([]float64, w)
+	for y := 0; y < h; y++ {
+		yWeight := 1.0
+		if y < h*8/100 {
+			yWeight = 0.4
+		} else if y > h*98/100 {
+			yWeight = 0.5
+		}
+		for x := 0; x < w; x++ {
+			r, g, b := rgb8(img.At(bounds.Min.X+x, bounds.Min.Y+y))
+			weight := warmSubjectPixelWeight(r, g, b)
+			if weight == 0 {
+				continue
+			}
+			gray := gray8(r, g, b)
+			var grad int
+			if x > 0 {
+				lr, lg, lb := rgb8(img.At(bounds.Min.X+x-1, bounds.Min.Y+y))
+				grad += absInt(gray - gray8(lr, lg, lb))
+			}
+			if y > 0 {
+				ur, ug, ub := rgb8(img.At(bounds.Min.X+x, bounds.Min.Y+y-1))
+				grad += absInt(gray - gray8(ur, ug, ub))
+			}
+			edge := float64(grad) / 32.0
+			if edge > 2 {
+				edge = 2
+			}
+			cols[x] += weight * (0.25 + edge) * yWeight
+		}
+	}
+	return cols
+}
+
+func rgb8(c color.Color) (int, int, int) {
+	r, g, b, _ := c.RGBA()
+	return int(r >> 8), int(g >> 8), int(b >> 8)
+}
+
+func gray8(r, g, b int) int {
+	return (299*r + 587*g + 114*b) / 1000
+}
+
+func warmSubjectPixelWeight(r, g, b int) float64 {
+	maxC := maxInt(r, maxInt(g, b))
+	minC := minInt(r, minInt(g, b))
+	if maxC <= 0 {
+		return 0
+	}
+	sat := float64(maxC-minC) / float64(maxC)
+	cb := 128.0 - 0.168736*float64(r) - 0.331264*float64(g) + 0.5*float64(b)
+	cr := 128.0 + 0.5*float64(r) - 0.418688*float64(g) - 0.081312*float64(b)
+	if r <= 55 || g <= 30 || b <= 20 ||
+		float64(r) <= float64(g)*1.03 ||
+		float64(r) <= float64(b)*1.12 ||
+		maxC-minC <= 12 ||
+		cb < 75 || cb > 135 ||
+		cr < 128 || cr > 185 ||
+		sat <= 0.12 {
+		return 0
+	}
+	return (0.2 + sat*2.0)
+}
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+func minInt(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 func clampInt(v, minV, maxV int) int {

@@ -22,7 +22,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: media
 display_name: Media
-version: 0.13.37
+version: 0.13.38
 description: |
   Catalog + derivations + renders + transcripts + auto-descriptions
   for media files in storage. Indexes uploads (probe, thumbnail,
@@ -490,14 +490,14 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "media_extract_frame",
-			Description: "Save a single frame at a specific timestamp as PNG. Args: file_id, at_ms (int), width (int, optional). For reframed crops (e.g. square thumbnail from a 16:9 source) pass target_ratio (\"1:1\", \"9:16\", \"4:5\", …) and optionally output_width (default 1080) + crop_mode (\"smart\" default = subject-aware via cached thumbnail saliency; \"center\" = geometric center). Without target_ratio, the frame keeps the source aspect (scaled to width if set).",
+			Description: "Save a single frame at a specific timestamp as PNG. Args: file_id, at_ms (int), width (int, optional). For reframed crops (e.g. square thumbnail from a 16:9 source) pass target_ratio (\"1:1\", \"9:16\", \"4:5\", …) and optionally output_width (default 1080) + crop_mode (\"smart\" default = subject-aware via the nearest cached keyframe for timed operations; \"center\" = geometric center). Without target_ratio, the frame keeps the source aspect (scaled to width if set).",
 			InputSchema: schemaObject(map[string]any{
 				"file_id":       map[string]any{"type": "string"},
 				"at_ms":         map[string]any{"type": "integer"},
 				"width":         map[string]any{"type": "integer", "description": "Output width when target_ratio is NOT set (pure scale, keeps aspect)."},
 				"target_ratio":  map[string]any{"type": "string", "description": "When set, crop + scale to this aspect ratio (\"W:H\"). E.g. \"1:1\", \"9:16\", \"4:5\"."},
 				"output_width":  map[string]any{"type": "integer", "description": "Output width when target_ratio is set. Default 1080; height derives from ratio."},
-				"crop_mode":     map[string]any{"type": "string", "description": "\"smart\" (default) for subject-aware crop via the source's cached thumbnail saliency, or \"center\" for geometric center. Smart falls back to center when the thumbnail isn't ready."},
+				"crop_mode":     map[string]any{"type": "string", "description": "\"smart\" (default) for subject-aware crop via the nearest cached keyframe for timed operations, or \"center\" for geometric center. Smart falls back to thumbnail/center when keyframes are not ready."},
 				"output_name":   map[string]any{"type": "string"},
 				"output_folder": map[string]any{"type": "string"},
 			}, []string{"file_id", "at_ms"}),
@@ -523,7 +523,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"end_ms":        map[string]any{"type": "integer", "description": "Clip end, milliseconds from start of source. Must be > start_ms."},
 				"target_ratio":  map[string]any{"type": "string", "description": "Output aspect ratio as 'W:H'. Default '9:16'. Common: '9:16' (vertical reels), '1:1' (square), '4:5' (Instagram portrait), '16:9' (passthrough crop)."},
 				"output_width":  map[string]any{"type": "integer", "description": "Output width in pixels. Default 1080. Height auto-derives from target_ratio (rounded to even for codec compatibility)."},
-				"crop_mode":     map[string]any{"type": "string", "description": "\"smart\" (default) keeps the most interesting subject of the source in frame using saliency on the cached thumbnail; \"center\" uses a geometric center crop. Smart falls back to center when the source has no thumbnail derivation yet."},
+				"crop_mode":     map[string]any{"type": "string", "description": "\"smart\" (default) keeps the most interesting subject in frame using the nearest cached keyframe for the reel/frame; \"center\" uses a geometric center crop. Smart falls back to thumbnail/center when keyframes are not ready."},
 				"output_name":   map[string]any{"type": "string", "description": "Optional output filename. Extension auto-corrected to .mp4."},
 				"output_folder": map[string]any{"type": "string", "description": "Optional storage folder for the rendered output. Defaults to install's render_output_folder (typically /renders/)."},
 			}, []string{"file_id", "start_ms", "end_ms"}),

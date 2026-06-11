@@ -2,6 +2,8 @@ package main
 
 import (
 	"encoding/json"
+	"image"
+	"image/color"
 	"strings"
 	"testing"
 )
@@ -62,6 +64,53 @@ func TestStabilizeNarrowSmartCrop_WiderCropNoOp(t *testing.T) {
 	x, y := stabilizeNarrowSmartCrop(80, 0, 1280, 720, 960, 720)
 	if x != 80 || y != 0 {
 		t.Fatalf("wide crop should be unchanged, got (%d,%d)", x, y)
+	}
+}
+
+func TestSubjectAwareNarrowSmartCropX_PullsTowardWarmSubject(t *testing.T) {
+	img := image.NewRGBA(image.Rect(0, 0, 320, 180))
+	for y := 0; y < 180; y++ {
+		for x := 0; x < 320; x++ {
+			img.Set(x, y, color.RGBA{R: 156, G: 144, B: 126, A: 255})
+		}
+	}
+	// Distracting high-contrast window/artwork near the middle-right.
+	for y := 12; y < 176; y++ {
+		for x := 150; x < 230; x++ {
+			if (x+y)%9 < 4 {
+				img.Set(x, y, color.RGBA{R: 238, G: 244, B: 247, A: 255})
+			} else {
+				img.Set(x, y, color.RGBA{R: 62, G: 72, B: 82, A: 255})
+			}
+		}
+	}
+	// Warm subject on the left, shaped like a head/torso/legs cluster.
+	for y := 72; y < 162; y++ {
+		for x := 24; x < 86; x++ {
+			if (x-55)*(x-55)+(y-92)*(y-92) < 24*24 || (x > 34 && x < 78 && y > 98) {
+				img.Set(x, y, color.RGBA{R: 204, G: 136, B: 104, A: 255})
+			}
+		}
+	}
+
+	x, ok := subjectAwareNarrowSmartCropX(img, 412, 1920, 1080, 606, 1080, 100)
+	if !ok {
+		t.Fatal("expected subject-aware correction")
+	}
+	if x > 180 {
+		t.Fatalf("expected crop to move toward left subject, got x=%d", x)
+	}
+}
+
+func TestSubjectAwareNarrowSmartCropX_NoSubjectNoOp(t *testing.T) {
+	img := image.NewRGBA(image.Rect(0, 0, 320, 180))
+	for y := 0; y < 180; y++ {
+		for x := 0; x < 320; x++ {
+			img.Set(x, y, color.RGBA{R: uint8(40 + x%80), G: uint8(60 + y%90), B: 170, A: 255})
+		}
+	}
+	if x, ok := subjectAwareNarrowSmartCropX(img, 412, 1920, 1080, 606, 1080, 100); ok || x != 412 {
+		t.Fatalf("no warm subject should not override, got x=%d ok=%v", x, ok)
 	}
 }
 
