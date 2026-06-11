@@ -1,7 +1,7 @@
 // TripsPanel — plan + budget trips end-to-end. Calendar mirrored.
 //
 // Two screens:
-//   List view   — cards for each trip, "+ New trip" CTA
+//   List view   — chronological trip timeline, "+ New trip" CTA
 //   Detail view — selected trip with Overview / Itinerary / Budget / Todos tabs
 //
 // All money is stored as integer minor units server-side; the UI uses
@@ -274,6 +274,7 @@ interface TripDashboard {
 }
 
 type Tab = "overview" | "itinerary" | "deals" | "budget" | "todos";
+type TripListTab = "upcoming" | "past" | "ideas";
 
 // ─── App event subscription (inlined, mirrors finance pattern) ───
 
@@ -389,6 +390,22 @@ function hasDateRange(start?: string, end?: string): boolean {
 
 function isTripIdea(trip: Trip): boolean {
   return trip.status === "idea" || !hasDateRange(trip.start_at, trip.end_at);
+}
+
+function tripStartMs(trip: Trip): number {
+  const t = new Date(trip.start_at).getTime();
+  return Number.isFinite(t) ? t : Number.MAX_SAFE_INTEGER;
+}
+
+function tripEndMs(trip: Trip): number {
+  const t = new Date(trip.end_at).getTime();
+  return Number.isFinite(t) ? t : 0;
+}
+
+function isPastTrip(trip: Trip): boolean {
+  if (isTripIdea(trip)) return false;
+  if (trip.status === "done" || trip.status === "cancelled") return true;
+  return tripEndMs(trip) < Date.now();
 }
 
 function tripDateLabel(trip: Trip): string {
@@ -597,6 +614,7 @@ function TripsPanelInner({ projectId }: NativePanelProps) {
   const [trips, setTrips] = useState<Trip[]>([]);
   const [settings, setSettings] = useState<Settings | null>(null);
   const [mainTab, setMainTab] = useState<"trips" | "deals">("trips");
+  const [tripListTab, setTripListTab] = useState<TripListTab>("upcoming");
   const [selectedID, setSelectedID] = useState<number | null>(null);
   const [showNew, setShowNew] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
@@ -691,12 +709,12 @@ function TripsPanelInner({ projectId }: NativePanelProps) {
             trips.length === 0 ? (
               <EmptyState message="No trips yet. Click 'New trip' to plan one." />
             ) : (
-              <>
-                <OverallBudgetBar trips={trips} />
-                <div className="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
-                  {trips.map(t => <TripCard key={t.id} trip={t} onOpen={() => setSelectedID(t.id)} />)}
-                </div>
-              </>
+              <TripTimelineList
+                trips={trips}
+                activeTab={tripListTab}
+                onTabChange={setTripListTab}
+                onOpen={setSelectedID}
+              />
             )
           )}
         </div>
@@ -717,70 +735,144 @@ function TripsPanelInner({ projectId }: NativePanelProps) {
 
 // ─── List view ───────────────────────────────────────────────────
 
-function TripCard({ trip, onOpen }: { trip: Trip; onOpen: () => void }) {
-  const days = daysUntil(trip.start_at, trip.end_at);
-  const toneClass =
-    days.tone === "active" ? "bg-success/20 text-success"
-    : days.tone === "future" ? "bg-accent/20 text-accent"
-    : "bg-bg-hover text-text-muted";
+function TripTimelineList({
+  trips,
+  activeTab,
+  onTabChange,
+  onOpen,
+}: {
+  trips: Trip[];
+  activeTab: TripListTab;
+  onTabChange: (tab: TripListTab) => void;
+  onOpen: (id: number) => void;
+}) {
+  const buckets = useMemo(() => {
+    const upcoming = trips
+      .filter(t => !isTripIdea(t) && !isPastTrip(t))
+      .sort((a, b) => tripStartMs(a) - tripStartMs(b));
+    const past = trips
+      .filter(t => !isTripIdea(t) && isPastTrip(t))
+      .sort((a, b) => tripEndMs(b) - tripEndMs(a));
+    const ideas = trips
+      .filter(isTripIdea)
+      .sort((a, b) => b.id - a.id);
+    return { upcoming, past, ideas };
+  }, [trips]);
 
-  const idea = isTripIdea(trip);
+  const tabs: { id: TripListTab; label: string; count: number }[] = [
+    { id: "upcoming", label: "Upcoming", count: buckets.upcoming.length },
+    { id: "past", label: "Past", count: buckets.past.length },
+    { id: "ideas", label: "Ideas", count: buckets.ideas.length },
+  ];
+  const visible = buckets[activeTab];
+  const empty: Record<TripListTab, string> = {
+    upcoming: "No upcoming trips yet.",
+    past: "No past trips yet.",
+    ideas: "No trip ideas yet.",
+  };
+
+  return (
+    <section className="flex min-h-0 flex-col rounded-lg border border-border bg-bg-card">
+      <div className="flex flex-col gap-3 border-b border-border px-4 py-3 md:flex-row md:items-center md:justify-between">
+        <div>
+          <div className="text-sm font-semibold">Trips timeline</div>
+        </div>
+        <div className="flex overflow-hidden rounded-md border border-border text-sm">
+          {tabs.map(tab => (
+            <button
+              key={tab.id}
+              type="button"
+              onClick={() => onTabChange(tab.id)}
+              className={`px-3 py-1.5 ${activeTab === tab.id ? "bg-accent text-bg" : "hover:bg-bg-hover"}`}
+            >
+              {tab.label} <span className={activeTab === tab.id ? "text-bg/70" : "text-text-dim"}>{tab.count}</span>
+            </button>
+          ))}
+        </div>
+      </div>
+      <div className="min-h-0 flex-1 overflow-auto">
+        {visible.length === 0 ? (
+          <EmptyState message={empty[activeTab]} />
+        ) : (
+          <div className="divide-y divide-border">
+            {visible.map(trip => (
+              <TripTimelineRow
+                key={trip.id}
+                trip={trip}
+                mode={activeTab}
+                onOpen={() => onOpen(trip.id)}
+              />
+            ))}
+          </div>
+        )}
+      </div>
+    </section>
+  );
+}
+
+function TripTimelineRow({ trip, mode, onOpen }: { trip: Trip; mode: TripListTab; onOpen: () => void }) {
+  const days = daysUntil(trip.start_at, trip.end_at);
   const planned = trip.total_planned ?? 0;
   const actual = trip.total_actual ?? 0;
   const estimate = planned > 0 ? planned : (trip.total_budget ?? 0);
-  // Bar fill = actual / planned, clamped to 100%. Over-budget swaps
-  // green for red and overflows visually (still capped to 100% width
-  // so cards stay comparable).
-  const target = planned > 0 ? planned : actual;
-  const pct = target > 0 ? Math.min(100, (actual / target) * 100) : 0;
   const over = planned > 0 && actual > planned;
-  const barColor = over ? "bg-error" : actual === 0 ? "bg-bg-hover" : "bg-success";
-  const hasAnyMoney = planned > 0 || actual > 0 || (trip.total_budget ?? 0) > 0;
+  const idea = mode === "ideas";
+  const statusTone =
+    trip.status === "done" ? "bg-success/15 text-success"
+    : trip.status === "cancelled" ? "bg-error/15 text-error"
+    : idea ? "bg-accent/15 text-accent"
+    : days.tone === "active" ? "bg-success/15 text-success"
+    : "bg-bg-hover text-text-muted";
 
   return (
     <button
+      type="button"
       onClick={onOpen}
-      className="flex flex-col overflow-hidden rounded-lg border border-border bg-bg-card text-left transition hover:border-border-strong hover:shadow-sm"
+      className="grid w-full grid-cols-[5rem_minmax(0,1fr)] gap-3 px-4 py-3 text-left transition hover:bg-bg-hover md:grid-cols-[7rem_minmax(0,1fr)_12rem]"
     >
-      <div className="h-1.5" style={{ background: trip.color }} />
-      <div className="flex-1 p-4">
-        <div className="mb-1 flex items-center justify-between">
-          <span className={`rounded-full px-2 py-0.5 text-xs ${toneClass}`}>{days.label}</span>
+      <div className="flex items-start gap-3">
+        <span className="mt-1 h-10 w-1 rounded-full" style={{ background: trip.color }} />
+        <div className="min-w-0">
+          <div className="text-xs font-medium uppercase tracking-wide text-text-muted">
+            {idea ? "Idea" : fmtDateShort(trip.start_at)}
+          </div>
+          {!idea && (
+            <div className="mt-1 text-xs text-text-dim">
+              {fmtDateShort(trip.end_at)}
+            </div>
+          )}
+        </div>
+      </div>
+
+      <div className="min-w-0">
+        <div className="flex min-w-0 flex-wrap items-center gap-2">
+          <h3 className="truncate text-base font-semibold text-text">{trip.name}</h3>
+          <span className={`rounded-full px-2 py-0.5 text-xs ${statusTone}`}>{idea ? "Idea" : days.label}</span>
           <span className="text-xs text-text-muted">{STATUS_LABEL[trip.status]}</span>
         </div>
-        <h3 className="text-base font-semibold">{trip.name}</h3>
-        <p className="text-xs text-text-muted">
-          {tripShortDateLabel(trip)}
-        </p>
+        <div className="mt-1 text-sm text-text-muted">
+          {idea ? (trip.notes || "No dates set") : tripDateLabel(trip)}
+        </div>
+      </div>
 
-        {hasAnyMoney && idea && (
-          <div className="mt-3">
-            <div className="flex items-center justify-between text-xs">
-              <span className="text-text-muted">Estimate</span>
+      <div className="col-span-2 flex items-center justify-between gap-3 text-sm md:col-span-1 md:block md:text-right">
+        {idea ? (
+          estimate > 0 ? (
+            <>
+              <span className="text-xs uppercase tracking-wide text-text-muted md:block">Estimate</span>
               <span className="tabular-nums text-text">{fmtMoney(estimate, trip.home_currency)}</span>
-            </div>
-            {actual > 0 && (
-              <div className="mt-1 flex items-center justify-between text-xs">
-                <span className="text-text-muted">Spent</span>
-                <span className="tabular-nums text-text-dim">{fmtMoney(actual, trip.home_currency)}</span>
-              </div>
-            )}
-          </div>
-        )}
-
-        {hasAnyMoney && !idea && (
-          <div className="mt-3">
-            <div className="flex items-center justify-between text-xs">
-              <span className="text-text-muted">Actual</span>
-              <span className={`tabular-nums ${over ? "text-error" : "text-text"}`}>
-                {fmtMoney(actual, trip.home_currency)}
-                {planned > 0 && <span className="text-text-dim"> / {fmtMoney(planned, trip.home_currency)}</span>}
-              </span>
-            </div>
-            <div className="mt-1 h-1 w-full overflow-hidden rounded-full bg-bg-hover">
-              <div className={`h-full ${barColor}`} style={{ width: `${pct}%` }} />
-            </div>
-          </div>
+            </>
+          ) : (
+            <span className="text-text-dim">No estimate</span>
+          )
+        ) : (
+          <>
+            <span className="text-xs uppercase tracking-wide text-text-muted md:block">Actual</span>
+            <span className={`tabular-nums ${over ? "text-error" : "text-text"}`}>
+              {fmtMoney(actual, trip.home_currency)}
+              {planned > 0 && <span className="text-text-dim"> / {fmtMoney(planned, trip.home_currency)}</span>}
+            </span>
+          </>
         )}
       </div>
     </button>
