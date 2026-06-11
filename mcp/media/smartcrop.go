@@ -74,8 +74,7 @@ func computeSmartCrop(
 	projectID, sourceFileID string,
 	targetW, targetH int,
 	mode string,
-	focusMs int64,
-	preferKeyframe bool,
+	target smartCropTarget,
 ) (*cropWindow, error) {
 	if targetW <= 0 || targetH <= 0 {
 		return nil, fmt.Errorf("invalid target ratio %d:%d", targetW, targetH)
@@ -116,7 +115,7 @@ func computeSmartCrop(
 	// renders. If keyframes are missing, fall back to the canonical
 	// thumbnail rather than failing the render (the next re-render
 	// after the indexer catches up will re-evaluate).
-	cropSource := pickSmartCropDerivation(row.Derivations, focusMs, preferKeyframe)
+	cropSource := pickSmartCropDerivation(row.Derivations, target)
 	if cropSource.StorageFileID == "" {
 		app.Logger().Info("smartcrop fallback to center: no usable frame derivation yet",
 			"file_id", sourceFileID)
@@ -256,26 +255,17 @@ func absInt(v int) int {
 }
 
 // pickSmartCropDerivation returns the best cached image to feed to
-// the saliency analyzer. Timed operations prefer the nearest ok
-// keyframe to the requested timestamp, then fall back to thumbnail.
-// Audio-only sources fall back to waveform as a second-best saliency
-// input (waveforms still have edges + saturation that smartcrop can
-// score).
-func pickSmartCropDerivation(derivs []DerivationRow, focusMs int64, preferKeyframe bool) DerivationRow {
-	if preferKeyframe {
-		var best DerivationRow
-		var bestDist int64
-		for _, d := range derivs {
-			if d.Kind != "keyframe" || d.Status != "ok" || d.StorageFileID == "" {
-				continue
-			}
-			dist := absInt64(d.PositionMs - focusMs)
-			if best.StorageFileID == "" || dist < bestDist || (dist == bestDist && d.PositionMs < best.PositionMs) {
-				best = d
-				bestDist = dist
-			}
+// the saliency analyzer. Timed operations prefer an ok keyframe in
+// the requested clip range, then the nearest ok keyframe to the
+// focus timestamp, then fall back to thumbnail. Audio-only sources
+// fall back to waveform as a second-best saliency input (waveforms
+// still have edges + saturation that smartcrop can score).
+func pickSmartCropDerivation(derivs []DerivationRow, target smartCropTarget) DerivationRow {
+	if target.PreferKeyframe {
+		if best := bestKeyframeDerivation(derivs, target, true); best.StorageFileID != "" {
+			return best
 		}
-		if best.StorageFileID != "" {
+		if best := bestKeyframeDerivation(derivs, target, false); best.StorageFileID != "" {
 			return best
 		}
 	}
@@ -290,6 +280,49 @@ func pickSmartCropDerivation(derivs []DerivationRow, focusMs int64, preferKeyfra
 		}
 	}
 	return DerivationRow{}
+}
+
+func bestKeyframeDerivation(derivs []DerivationRow, target smartCropTarget, requireInRange bool) DerivationRow {
+	var best DerivationRow
+	var bestDist int64
+	for _, d := range derivs {
+		if d.Kind != "keyframe" || d.Status != "ok" || d.StorageFileID == "" {
+			continue
+		}
+		if requireInRange && target.HasRange() && (d.PositionMs < target.StartMs || d.PositionMs > target.EndMs) {
+			continue
+		}
+		dist := absInt64(d.PositionMs - target.FocusMs)
+		if best.StorageFileID == "" || dist < bestDist || (dist == bestDist && d.PositionMs < best.PositionMs) {
+			best = d
+			bestDist = dist
+		}
+	}
+	return best
+}
+
+type smartCropTarget struct {
+	FocusMs        int64
+	StartMs        int64
+	EndMs          int64
+	PreferKeyframe bool
+}
+
+func (t smartCropTarget) HasRange() bool {
+	return t.EndMs > t.StartMs
+}
+
+func (t smartCropTarget) Normalized() smartCropTarget {
+	if t.FocusMs < 0 {
+		t.FocusMs = 0
+	}
+	if t.StartMs < 0 {
+		t.StartMs = 0
+	}
+	if t.EndMs < 0 {
+		t.EndMs = 0
+	}
+	return t
 }
 
 func absInt64(v int64) int64 {
@@ -413,8 +446,8 @@ func preprocessSmartCrop(
 	if mode != "smart" && mode != "center" {
 		return params
 	}
-	focusMs, preferKeyframe := smartCropFocus(op, parsed)
-	win, err := computeSmartCrop(ctx, app, sc, projectID, sources[0], rw, rh, mode, focusMs, preferKeyframe)
+	target := smartCropFocus(op, parsed)
+	win, err := computeSmartCrop(ctx, app, sc, projectID, sources[0], rw, rh, mode, target)
 	if err != nil {
 		// Symbolic filter is fine — log + skip.
 		app.Logger().Info("smartcrop preprocess skipped",
@@ -435,14 +468,31 @@ func preprocessSmartCrop(
 	return out
 }
 
-func smartCropFocus(op string, parsed map[string]any) (int64, bool) {
+func smartCropFocus(op string, parsed map[string]any) smartCropTarget {
 	switch op {
 	case "extract_reel":
-		return int64FromJSONValue(parsed["start_ms"]), true
+		startMs := int64FromJSONValue(parsed["start_ms"])
+		endMs := int64FromJSONValue(parsed["end_ms"])
+		focusMs := startMs
+		if endMs > startMs {
+			focusMs = startMs + (endMs-startMs)/2
+		}
+		return smartCropTarget{
+			FocusMs:        focusMs,
+			StartMs:        startMs,
+			EndMs:          endMs,
+			PreferKeyframe: true,
+		}.Normalized()
 	case "extract_frame":
-		return int64FromJSONValue(parsed["at_ms"]), true
+		atMs := int64FromJSONValue(parsed["at_ms"])
+		return smartCropTarget{
+			FocusMs:        atMs,
+			StartMs:        atMs,
+			EndMs:          atMs,
+			PreferKeyframe: true,
+		}.Normalized()
 	default:
-		return 0, false
+		return smartCropTarget{}
 	}
 }
 

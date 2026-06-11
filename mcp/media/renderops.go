@@ -326,7 +326,8 @@ func planExtractFrame(sources []string, raw json.RawMessage, outputName string) 
 				rw, rh, rw, rh, rw, rh, rh, rw,
 			)
 		}
-		args = append(args, "-vf", cropExpr+","+fmt.Sprintf("scale=%d:-2", outW))
+		outputWidth, outputHeight := ratioOutputDimensions(outW, rw, rh)
+		args = append(args, "-vf", cropExpr+","+fmt.Sprintf("scale=%d:%d,setsar=1", outputWidth, outputHeight))
 	} else if p.Width > 0 {
 		args = append(args, "-vf", fmt.Sprintf("scale=%d:-2", p.Width))
 	}
@@ -423,7 +424,7 @@ func planExtractReel(sources []string, raw json.RawMessage, outputName string) (
 			rw, rh, rw, rh, rw, rh, rh, rw,
 		)
 	}
-	outputWidth, outputHeight := reelOutputDimensions(p.OutputWidth, rw, rh)
+	outputWidth, outputHeight := ratioOutputDimensions(p.OutputWidth, rw, rh)
 	scaleExpr := fmt.Sprintf("scale=%d:%d,setsar=1", outputWidth, outputHeight)
 	seekStartMs := p.StartMs - extractReelSeekPrerollMs
 	if seekStartMs < 0 {
@@ -447,7 +448,7 @@ func planExtractReel(sources []string, raw json.RawMessage, outputName string) (
 	return &opPlan{Filename: name, ContentType: ct, Args: args}, nil
 }
 
-func reelOutputDimensions(width, ratioW, ratioH int) (int, int) {
+func ratioOutputDimensions(width, ratioW, ratioH int) (int, int) {
 	w := roundEven(width)
 	if w <= 0 {
 		w = 1080

@@ -22,7 +22,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: media
 display_name: Media
-version: 0.13.36
+version: 0.13.37
 description: |
   Catalog + derivations + renders + transcripts + auto-descriptions
   for media files in storage. Indexes uploads (probe, thumbnail,
@@ -1943,6 +1943,7 @@ func (a *App) handleSmartCropPreview(w http.ResponseWriter, r *http.Request) {
 		TargetRatio string `json:"target_ratio"`
 		CropMode    string `json:"crop_mode"`
 		StartMs     int64  `json:"start_ms"`
+		EndMs       int64  `json:"end_ms"`
 		AtMs        int64  `json:"at_ms"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -1979,12 +1980,17 @@ func (a *App) handleSmartCropPreview(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusNotFound)
 		return
 	}
-	focusMs := body.StartMs
-	preferKeyframe := op == "extract_reel" || op == "extract_frame"
+	target := smartCropTarget{FocusMs: body.StartMs, StartMs: body.StartMs, EndMs: body.EndMs}
+	target.PreferKeyframe = op == "extract_reel" || op == "extract_frame"
 	if op == "extract_frame" {
-		focusMs = body.AtMs
+		target.FocusMs = body.AtMs
+		target.StartMs = body.AtMs
+		target.EndMs = body.AtMs
+	} else if op == "extract_reel" && body.EndMs > body.StartMs {
+		target.FocusMs = body.StartMs + (body.EndMs-body.StartMs)/2
 	}
-	win, err := computeSmartCrop(r.Context(), globalCtx, newStorageClient(), pid, body.FileID, rw, rh, mode, focusMs, preferKeyframe)
+	target = target.Normalized()
+	win, err := computeSmartCrop(r.Context(), globalCtx, newStorageClient(), pid, body.FileID, rw, rh, mode, target)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -2001,7 +2007,7 @@ func (a *App) handleSmartCropPreview(w http.ResponseWriter, r *http.Request) {
 		"mode":          mode,
 	}
 	if mode == "smart" {
-		if d := pickSmartCropDerivation(row.Derivations, focusMs, preferKeyframe); d.StorageFileID != "" {
+		if d := pickSmartCropDerivation(row.Derivations, target); d.StorageFileID != "" {
 			out["derivation"] = map[string]any{
 				"kind":            d.Kind,
 				"storage_file_id": d.StorageFileID,

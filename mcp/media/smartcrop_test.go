@@ -66,8 +66,11 @@ func TestStabilizeNarrowSmartCrop_WiderCropNoOp(t *testing.T) {
 }
 
 func TestPickSmartCropDerivation(t *testing.T) {
+	target := func(focusMs int64, preferKeyframe bool) smartCropTarget {
+		return smartCropTarget{FocusMs: focusMs, PreferKeyframe: preferKeyframe}
+	}
 	// Empty list → empty string (caller falls back to center).
-	if got := pickSmartCropDerivation(nil, 0, true); got.StorageFileID != "" {
+	if got := pickSmartCropDerivation(nil, target(0, true)); got.StorageFileID != "" {
 		t.Errorf("nil derivations: got %q, want \"\"", got.StorageFileID)
 	}
 	// Timed renders prefer the nearest keyframe to the requested timestamp.
@@ -78,11 +81,11 @@ func TestPickSmartCropDerivation(t *testing.T) {
 		{Kind: "waveform", Status: "ok", StorageFileID: "11"},
 		{Kind: "thumbnail", Status: "ok", StorageFileID: "22"},
 	}
-	if got := pickSmartCropDerivation(derivs, 40_000, true); got.StorageFileID != "20" {
+	if got := pickSmartCropDerivation(derivs, target(40_000, true)); got.StorageFileID != "20" {
 		t.Errorf("nearest keyframe: got %q, want \"20\"", got.StorageFileID)
 	}
 	// If keyframes are not preferred, thumbnail wins over waveform.
-	if got := pickSmartCropDerivation(derivs, 40_000, false); got.StorageFileID != "22" {
+	if got := pickSmartCropDerivation(derivs, target(40_000, false)); got.StorageFileID != "22" {
 		t.Errorf("thumbnail+waveform: got %q, want \"22\"", got.StorageFileID)
 	}
 	// Pending keyframes/thumbnails are rejected; falls through to waveform.
@@ -91,7 +94,7 @@ func TestPickSmartCropDerivation(t *testing.T) {
 		{Kind: "thumbnail", Status: "pending", StorageFileID: "33"},
 		{Kind: "waveform", Status: "ok", StorageFileID: "44"},
 	}
-	if got := pickSmartCropDerivation(derivs, 30_000, true); got.StorageFileID != "44" {
+	if got := pickSmartCropDerivation(derivs, target(30_000, true)); got.StorageFileID != "44" {
 		t.Errorf("pending keyframe/thumbnail + ok waveform: got %q, want \"44\"", got.StorageFileID)
 	}
 	// Both failed → "" (caller must fall back to center).
@@ -100,7 +103,7 @@ func TestPickSmartCropDerivation(t *testing.T) {
 		{Kind: "thumbnail", Status: "failed", StorageFileID: "55"},
 		{Kind: "waveform", Status: "failed", StorageFileID: "66"},
 	}
-	if got := pickSmartCropDerivation(derivs, 30_000, true); got.StorageFileID != "" {
+	if got := pickSmartCropDerivation(derivs, target(30_000, true)); got.StorageFileID != "" {
 		t.Errorf("all failed: got %q, want \"\"", got.StorageFileID)
 	}
 }
@@ -110,20 +113,45 @@ func TestPickSmartCropDerivation_TieChoosesEarlierKeyframe(t *testing.T) {
 		{Kind: "keyframe", Status: "ok", StorageFileID: "later", PositionMs: 50_000},
 		{Kind: "keyframe", Status: "ok", StorageFileID: "earlier", PositionMs: 30_000},
 	}
-	if got := pickSmartCropDerivation(derivs, 40_000, true); got.StorageFileID != "earlier" {
+	if got := pickSmartCropDerivation(derivs, smartCropTarget{FocusMs: 40_000, PreferKeyframe: true}); got.StorageFileID != "earlier" {
 		t.Errorf("tie should choose earlier keyframe: got %q", got.StorageFileID)
 	}
 }
 
+func TestPickSmartCropDerivation_ReelRangePrefersInsideClip(t *testing.T) {
+	derivs := []DerivationRow{
+		{Kind: "keyframe", Status: "ok", StorageFileID: "outside-nearer", PositionMs: 35_000},
+		{Kind: "keyframe", Status: "ok", StorageFileID: "inside", PositionMs: 52_000},
+		{Kind: "keyframe", Status: "ok", StorageFileID: "outside-later", PositionMs: 70_000},
+		{Kind: "thumbnail", Status: "ok", StorageFileID: "thumb"},
+	}
+	target := smartCropTarget{FocusMs: 40_000, StartMs: 50_000, EndMs: 60_000, PreferKeyframe: true}
+	if got := pickSmartCropDerivation(derivs, target); got.StorageFileID != "inside" {
+		t.Errorf("range should prefer in-clip keyframe: got %q, want inside", got.StorageFileID)
+	}
+}
+
+func TestPickSmartCropDerivation_ReelRangeFallsBackToNearestKeyframe(t *testing.T) {
+	derivs := []DerivationRow{
+		{Kind: "keyframe", Status: "ok", StorageFileID: "before", PositionMs: 31_000},
+		{Kind: "keyframe", Status: "ok", StorageFileID: "after", PositionMs: 61_000},
+		{Kind: "thumbnail", Status: "ok", StorageFileID: "thumb"},
+	}
+	target := smartCropTarget{FocusMs: 40_000, StartMs: 40_000, EndMs: 50_000, PreferKeyframe: true}
+	if got := pickSmartCropDerivation(derivs, target); got.StorageFileID != "before" {
+		t.Errorf("missing in-clip keyframe should use nearest keyframe before thumbnail: got %q", got.StorageFileID)
+	}
+}
+
 func TestSmartCropFocus(t *testing.T) {
-	if got, prefer := smartCropFocus("extract_reel", map[string]any{"start_ms": float64(12_345)}); got != 12_345 || !prefer {
-		t.Errorf("extract_reel focus = (%d,%v), want (12345,true)", got, prefer)
+	if got := smartCropFocus("extract_reel", map[string]any{"start_ms": float64(12_000), "end_ms": float64(18_000)}); got.FocusMs != 15_000 || got.StartMs != 12_000 || got.EndMs != 18_000 || !got.PreferKeyframe {
+		t.Errorf("extract_reel focus = %+v, want focus=15000 range=12000..18000 prefer=true", got)
 	}
-	if got, prefer := smartCropFocus("extract_frame", map[string]any{"at_ms": float64(6_789)}); got != 6_789 || !prefer {
-		t.Errorf("extract_frame focus = (%d,%v), want (6789,true)", got, prefer)
+	if got := smartCropFocus("extract_frame", map[string]any{"at_ms": float64(6_789)}); got.FocusMs != 6_789 || got.StartMs != 6_789 || got.EndMs != 6_789 || !got.PreferKeyframe {
+		t.Errorf("extract_frame focus = %+v, want point focus at 6789 prefer=true", got)
 	}
-	if got, prefer := smartCropFocus("crop", map[string]any{}); got != 0 || prefer {
-		t.Errorf("crop focus = (%d,%v), want (0,false)", got, prefer)
+	if got := smartCropFocus("crop", map[string]any{}); got.FocusMs != 0 || got.PreferKeyframe {
+		t.Errorf("crop focus = %+v, want zero target", got)
 	}
 }
 
@@ -217,8 +245,23 @@ func TestPlanExtractFrame_TargetRatioAndExplicitCoords(t *testing.T) {
 		t.Fatalf("planExtractFrame: %v", err)
 	}
 	got := strings.Join(plan.Args, " ")
-	if !strings.Contains(got, "crop=1080:1080:420:0,scale=800:-2") {
+	if !strings.Contains(got, "crop=1080:1080:420:0,scale=800:800,setsar=1") {
 		t.Errorf("expected explicit crop+scale in args, got: %s", got)
+	}
+}
+
+func TestPlanExtractFrame_PortraitRatioUsesExactOutputDimensions(t *testing.T) {
+	params := []byte(`{
+		"at_ms": 397000, "target_ratio": "9:16", "output_width": 1080,
+		"crop_w": 606, "crop_h": 1080, "crop_x": 222, "crop_y": 0
+	}`)
+	plan, err := planExtractFrame([]string{"20"}, json.RawMessage(params), "")
+	if err != nil {
+		t.Fatalf("planExtractFrame: %v", err)
+	}
+	got := strings.Join(plan.Args, " ")
+	if !strings.Contains(got, "crop=606:1080:222:0,scale=1080:1920,setsar=1") {
+		t.Errorf("expected exact portrait output dimensions, got: %s", got)
 	}
 }
 
