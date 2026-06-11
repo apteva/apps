@@ -1,4 +1,4 @@
-# Gigs (v0.1.15)
+# Gigs (v0.1.16)
 
 Agents delegate atomic work to human workers (CRM contacts) by composing
 reusable multi-modal instructions. Templates are saved instruction sets;
@@ -17,6 +17,10 @@ worker submits.
 The dashboard supports the same core workflow: create instructions, build
 template compositions, dispatch gigs from templates or selected instructions,
 assign workers, and review submitted results.
+
+Text, audio, and video instructions are read-only by default. Set
+`body.response_mode` to `optional` or `required` when a worker should add
+notes/files for that step; otherwise the worker page only shows the instruction.
 
 `result_schema`, `media_manifest`, `checklist`, and `variables` are
 **derived** from the composition — never hand-authored.

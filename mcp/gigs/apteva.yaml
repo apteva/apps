@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: gigs
 display_name: Gigs
-version: 0.1.15
+version: 0.1.16
 description: |
   Agents delegate atomic work to human workers (CRM contacts) by
   composing reusable multi-modal instructions. Templates are saved
@@ -63,13 +63,13 @@ provides:
       description: List all skills in the project.
     # ─── Instruction library ─────────────────────────────────────────
     - name: instructions_create
-      description: Create a new instruction (text/audio/video/image/document/link/script/warning/example/checklist_item/confirmation/timer_hint/input_*). Returns the head row + v1.
+      description: Create a new instruction (text/audio/video/image/document/link/script/warning/example/checklist_item/confirmation/timer_hint/input_*). Text/audio/video can set body.response_mode=none|optional|required. Returns the head row + v1.
     - name: instructions_list
       description: Filter the library by kind or search.
     - name: instructions_get
       description: Instruction + current version + derived result_field schema fragment.
     - name: instructions_update
-      description: Forks a new version (previous versions remain queryable).
+      description: Forks a new version (previous versions remain queryable). Text/audio/video can set body.response_mode=none|optional|required.
     - name: instructions_publish
       description: Move the current draft version to active.
     - name: instructions_archive

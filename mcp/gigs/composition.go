@@ -77,6 +77,9 @@ func validateBody(kind string, body map[string]any) error {
 	if !knownKinds[kind] {
 		return fmt.Errorf("unknown kind %q", kind)
 	}
+	if mode := strOf(body["response_mode"]); mode != "" && mode != "none" && mode != "optional" && mode != "required" {
+		return fmt.Errorf("kind %q has invalid body.response_mode %q", kind, mode)
+	}
 	req := func(field string) error {
 		if _, ok := body[field]; !ok {
 			return fmt.Errorf("kind %q requires body.%s", kind, field)
@@ -184,9 +187,9 @@ func deriveResultField(kind string, body map[string]any) map[string]any {
 		return map[string]any{
 			"type": "object",
 			"properties": map[string]any{
-				"lat":         map[string]any{"type": "number"},
-				"lng":         map[string]any{"type": "number"},
-				"accuracy_m":  map[string]any{"type": "number"},
+				"lat":        map[string]any{"type": "number"},
+				"lng":        map[string]any{"type": "number"},
+				"accuracy_m": map[string]any{"type": "number"},
 			},
 			"required": []string{"lat", "lng"},
 		}
@@ -248,13 +251,13 @@ func defaultResultKey(kind, slug string) string {
 // compositionItem is one row in a composition, post-resolution from
 // the DB join. Used by templates and by the gigs dispatcher.
 type compositionItem struct {
-	SortOrder              int            `json:"sort_order"`
-	InstructionID          int64          `json:"instruction_id"`
-	InstructionVersionID   int64          `json:"instruction_version_id"`
-	Kind                   string         `json:"kind"`
-	Body                   map[string]any `json:"body"`              // version body_json, post-overrides
-	DeclaredVariables      []string       `json:"declared_variables"`
-	ResultKey              string         `json:"result_key,omitempty"`
+	SortOrder            int            `json:"sort_order"`
+	InstructionID        int64          `json:"instruction_id"`
+	InstructionVersionID int64          `json:"instruction_version_id"`
+	Kind                 string         `json:"kind"`
+	Body                 map[string]any `json:"body"` // version body_json, post-overrides
+	DeclaredVariables    []string       `json:"declared_variables"`
+	ResultKey            string         `json:"result_key,omitempty"`
 }
 
 // derivedComposition is what an agent sees when reading a template
@@ -331,7 +334,7 @@ func deriveFromComposition(items []compositionItem) derivedComposition {
 
 	sort.Strings(required)
 	return derivedComposition{
-		ResultSchema: schemaObject(props, required),
+		ResultSchema:  schemaObject(props, required),
 		MediaManifest: media,
 		Checklist:     checklist,
 		Variables:     vars,

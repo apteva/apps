@@ -45,7 +45,7 @@ func (a *App) instructionTools() []sdk.Tool {
 	return []sdk.Tool{
 		{
 			Name:        "instructions_create",
-			Description: "Create a new instruction (kind + body). Media kinds reference a storage_file_id (uploaded separately via storage.files_upload). The first version is created in draft status — publish it before use. Args: name, kind (text|audio|video|image|document|link|script|warning|example|checklist_item|confirmation|timer_hint|input_*), body (object, shape depends on kind), slug? (auto-derived from name), default_result_key?. Returns {instruction}.",
+			Description: "Create a new instruction (kind + body). Media kinds reference a storage_file_id (uploaded separately via storage.files_upload). For read-only text/audio/video, body.response_mode may be none|optional|required and defaults to none. The first version is created in draft status — publish it before use. Args: name, kind (text|audio|video|image|document|link|script|warning|example|checklist_item|confirmation|timer_hint|input_*), body (object, shape depends on kind), slug? (auto-derived from name), default_result_key?. Returns {instruction}.",
 			InputSchema: schemaObject(map[string]any{
 				"name":               map[string]any{"type": "string"},
 				"kind":               map[string]any{"type": "string"},
@@ -77,7 +77,7 @@ func (a *App) instructionTools() []sdk.Tool {
 		},
 		{
 			Name:        "instructions_update",
-			Description: "Fork a new version. The previous version stays queryable; templates that pinned it keep working. Args: id, body, default_result_key?. Returns {instruction, new_version}.",
+			Description: "Fork a new version. The previous version stays queryable; templates that pinned it keep working. For read-only text/audio/video, body.response_mode may be none|optional|required and defaults to none. Args: id, body, default_result_key?. Returns {instruction, new_version}.",
 			InputSchema: schemaObject(map[string]any{
 				"id":                 map[string]any{"type": "integer"},
 				"body":               map[string]any{"type": "object"},

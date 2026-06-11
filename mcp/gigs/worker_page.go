@@ -211,9 +211,7 @@ func workerPageHTML(token string) string {
           "<span class='pill'>Deadline: " + escapeHTML(formatDeadline(gig.deadline_at)) + "</span>" +
           "<span class='pill'>" + (gig.composition || []).length + " instruction" + ((gig.composition || []).length === 1 ? "" : "s") + "</span>" +
         "</div>" +
-	        "<div class='summary'>" + (gig.assignment_status === "submitted"
-	          ? "Your submission is saved. You can still adjust notes or upload replacement files, then submit again."
-	          : "Review each numbered instruction. Add notes and upload files for any step, then submit once at the bottom.") + "</div>";
+	        "<div class='summary'>" + escapeHTML(summaryText()) + "</div>";
       shell.appendChild(hero);
 
       const title = document.createElement("div");
@@ -231,7 +229,7 @@ func workerPageHTML(token string) string {
 
       const bar = document.createElement("div");
       bar.className = "submit-bar";
-	      bar.innerHTML = '<div class="row"><span class="status" id="status">' + (gig.assignment_status === "submitted" ? "Submission saved. Edit anything and resubmit when ready." : "Add notes or files if needed.") + '</span><button class="primary" id="submit">' + (gig.assignment_status === "submitted" ? "Update submission" : "Submit work") + '</button></div>';
+	      bar.innerHTML = '<div class="row"><span class="status" id="status">' + escapeHTML(initialStatusText()) + '</span><button class="primary" id="submit">' + escapeHTML(submitButtonLabel()) + '</button></div>';
       document.body.appendChild(bar);
       document.getElementById("submit").addEventListener("click", submit);
     }
@@ -312,8 +310,8 @@ func workerPageHTML(token string) string {
             wrap.appendChild(mut("Unknown instruction kind: " + it.instruction_kind));
           }
       }
-      card.appendChild(wrap);
-      card.appendChild(renderResponseBox(it, index, key));
+	      card.appendChild(wrap);
+	      if (responseMode(it) !== "none") card.appendChild(renderResponseBox(it, index, key));
       return card;
     }
 
@@ -343,11 +341,12 @@ func workerPageHTML(token string) string {
       return div;
     }
 
-    function renderResponseBox(it, index, key) {
-      const box = document.createElement("section");
-      box.className = "response";
-      box.innerHTML =
-        "<div class='response-title'>Response for step " + (index + 1) + "</div>" +
+	    function renderResponseBox(it, index, key) {
+	      const mode = responseMode(it);
+	      const box = document.createElement("section");
+	      box.className = "response";
+	      box.innerHTML =
+	        "<div class='response-title'>" + (mode === "required" ? "Required response" : "Optional response") + " for step " + (index + 1) + "</div>" +
         "<div class='response-grid'>" +
           "<textarea data-note placeholder='Notes for this instruction'></textarea>" +
           "<div class='file-row'><input data-files type='file' multiple /><div class='previews' data-previews></div><ul class='uploaded'></ul></div>" +
@@ -569,8 +568,13 @@ func workerPageHTML(token string) string {
 	      return j.storage_file_id;
 	    }
 
-    async function submit() {
-      const payload = Object.assign({}, result);
+	    async function submit() {
+	      const missing = firstMissingRequiredResponse();
+	      if (missing) {
+	        setStatus("Add notes or a file for required response step " + missing + ".");
+	        return;
+	      }
+	      const payload = Object.assign({}, result);
       const instructionPayload = Object.values(instructionResponses)
         .filter(r => r.note || (r.files && r.files.length))
         .map(r => ({
@@ -603,11 +607,11 @@ func workerPageHTML(token string) string {
 	        setStatus("Submit failed: " + j.error);
 	        return;
 	      }
-	      gig.assignment_status = "submitted";
-	      button.disabled = false;
-	      button.textContent = "Update submission";
-	      setStatus("Submission saved. You can keep editing and submit again.");
-	    }
+		      gig.assignment_status = "submitted";
+		      button.disabled = false;
+		      button.textContent = submitButtonLabel();
+		      setStatus(hasWorkInputs() ? "Submission saved. You can keep editing and submit again." : "Completion saved.");
+		    }
 
     function updateStatus() {
       const responses = Object.values(instructionResponses).length;
@@ -615,7 +619,7 @@ func workerPageHTML(token string) string {
       const parts = [];
       if (responses) parts.push(responses + " step response" + (responses === 1 ? "" : "s"));
       if (files) parts.push(files + " file" + (files === 1 ? "" : "s"));
-      setStatus(parts.length ? parts.join(", ") + " ready." : "Add notes or files if needed.");
+	      setStatus(parts.length ? parts.join(", ") + " ready." : initialStatusText());
     }
 	    function setStatus(s) {
 	      const el = document.getElementById("status");
@@ -643,11 +647,59 @@ func workerPageHTML(token string) string {
 	        });
 	      });
 	    }
-    function instructionKey(it, index) { return String(it.result_key || "step_" + (index + 1)); }
-    function kindLabel(kind) { return String(kind || "").replace(/^input_/, "input: ").replace(/_/g, " "); }
-    function instructionTitle(it, body, index) {
-      return body.label || body.caption || body.display || body.title || body.text || kindLabel(it.instruction_kind) || ("Instruction " + (index + 1));
-    }
+	    function instructionKey(it, index) { return String(it.result_key || "step_" + (index + 1)); }
+	    function kindLabel(kind) { return String(kind || "").replace(/^input_/, "input: ").replace(/_/g, " "); }
+	    function instructionTitle(it, body, index) {
+	      return it.instruction_name || body.label || body.caption || body.display || body.title || body.text || kindLabel(it.instruction_kind) || ("Instruction " + (index + 1));
+	    }
+	    function responseMode(it) {
+	      const body = it.rendered_body || {};
+	      const mode = String(body.response_mode || "").toLowerCase();
+	      if (mode === "optional" || mode === "required") return mode;
+	      return "none";
+	    }
+	    function hasResponseBoxes() {
+	      return (gig.composition || []).some(it => responseMode(it) !== "none");
+	    }
+	    function hasStructuredFields() {
+	      return (gig.composition || []).some(it => {
+	        const kind = String(it.instruction_kind || "");
+	        return kind.startsWith("input_") || kind === "checklist_item" || kind === "confirmation";
+	      });
+	    }
+	    function hasWorkInputs() {
+	      return hasStructuredFields() || hasResponseBoxes();
+	    }
+	    function submitButtonLabel() {
+	      if (gig.assignment_status === "submitted") return hasWorkInputs() ? "Update submission" : "Update completion";
+	      return hasWorkInputs() ? "Submit work" : "Mark complete";
+	    }
+	    function initialStatusText() {
+	      if (gig.assignment_status === "submitted") {
+	        return hasWorkInputs() ? "Submission saved. Edit anything and resubmit when ready." : "Completion saved.";
+	      }
+	      return hasWorkInputs() ? "Add the requested responses, then submit." : "Review the instructions, then mark complete.";
+	    }
+	    function summaryText() {
+	      if (gig.assignment_status === "submitted") {
+	        return hasWorkInputs()
+	          ? "Your submission is saved. You can still adjust notes or upload replacement files, then submit again."
+	          : "This gig has been marked complete. You can update completion if needed.";
+	      }
+	      return hasWorkInputs()
+	        ? "Review each numbered instruction. Add the requested responses, then submit once at the bottom."
+	        : "Review each numbered instruction, then mark the gig complete at the bottom.";
+	    }
+	    function firstMissingRequiredResponse() {
+	      const items = gig.composition || [];
+	      for (let i = 0; i < items.length; i++) {
+	        const it = items[i];
+	        if (responseMode(it) !== "required") continue;
+	        const entry = instructionResponses[instructionKey(it, i)];
+	        if (!entry || (!String(entry.note || "").trim() && (!entry.files || entry.files.length === 0))) return i + 1;
+	      }
+	      return 0;
+	    }
 	    function formatDeadline(s) {
       if (!s) return "No deadline";
       const d = new Date(s);
@@ -808,13 +860,14 @@ func jsString(s string) string {
 // ─── API: gig JSON, submit, upload ──────────────────────────────────
 
 type workerGigPayload struct {
-	GigID            int64            `json:"gig_id"`
-	Title            string           `json:"title"`
-	DeadlineAt       string           `json:"deadline_at,omitempty"`
-	AssignmentStatus string           `json:"assignment_status"`
-	ProjectID        string           `json:"project_id"`
-	Composition      []map[string]any `json:"composition"`
-	Submission       *submission      `json:"submission,omitempty"`
+	GigID              int64            `json:"gig_id"`
+	Title              string           `json:"title"`
+	DeadlineAt         string           `json:"deadline_at,omitempty"`
+	AssignmentStatus   string           `json:"assignment_status"`
+	ProjectID          string           `json:"project_id"`
+	Composition        []map[string]any `json:"composition"`
+	RequiredResultKeys []string         `json:"required_result_keys,omitempty"`
+	Submission         *submission      `json:"submission,omitempty"`
 }
 
 func (a *App) handleWorkerGigJSON(w http.ResponseWriter, _ *http.Request, token string) {
@@ -841,6 +894,7 @@ func (a *App) handleWorkerGigJSON(w http.ResponseWriter, _ *http.Request, token 
 		m := map[string]any{
 			"sort_order":       it.SortOrder,
 			"instruction_kind": it.InstructionKind,
+			"instruction_name": it.InstructionName,
 			"rendered_body":    it.RenderedBody,
 			"result_key":       it.ResultKey,
 		}
@@ -864,13 +918,14 @@ func (a *App) handleWorkerGigJSON(w http.ResponseWriter, _ *http.Request, token 
 
 	httpJSON(w, map[string]any{
 		"gig": workerGigPayload{
-			GigID:            g.ID,
-			Title:            g.Title,
-			DeadlineAt:       g.DeadlineAt,
-			AssignmentStatus: status,
-			ProjectID:        pid,
-			Composition:      rendered,
-			Submission:       submission,
+			GigID:              g.ID,
+			Title:              g.Title,
+			DeadlineAt:         g.DeadlineAt,
+			AssignmentStatus:   status,
+			ProjectID:          pid,
+			Composition:        rendered,
+			RequiredResultKeys: requiredResultKeys(g.DerivedResultSchema),
+			Submission:         submission,
 		},
 	})
 }
@@ -1207,9 +1262,7 @@ func validateSubmission(db *sql.DB, gigID int64, payload map[string]any) error {
 	if err := parseJSON(schemaJSON, &schema); err != nil {
 		return err
 	}
-	requiredAny, _ := schema["required"].([]any)
-	for _, r := range requiredAny {
-		key := strOf(r)
+	for _, key := range requiredResultKeys(schema) {
 		if key == "" {
 			continue
 		}
@@ -1223,7 +1276,73 @@ func validateSubmission(db *sql.DB, gigID int64, payload map[string]any) error {
 			return fmt.Errorf("field %q cannot be empty", key)
 		}
 	}
+	if err := validateRequiredInstructionResponses(db, gigID, payload); err != nil {
+		return err
+	}
 	return nil
+}
+
+func requiredResultKeys(schema map[string]any) []string {
+	requiredAny, _ := schema["required"].([]any)
+	out := make([]string, 0, len(requiredAny))
+	for _, r := range requiredAny {
+		if key := strOf(r); key != "" {
+			out = append(out, key)
+		}
+	}
+	return out
+}
+
+func validateRequiredInstructionResponses(db *sql.DB, gigID int64, payload map[string]any) error {
+	responses := map[string]bool{}
+	if raw, ok := payload["instruction_responses"].([]any); ok {
+		for _, item := range raw {
+			m, _ := item.(map[string]any)
+			key := strOf(m["key"])
+			if key == "" {
+				continue
+			}
+			hasNote := strings.TrimSpace(strOf(m["note"])) != ""
+			hasFile := false
+			if files, ok := m["files"].([]any); ok && len(files) > 0 {
+				hasFile = true
+			}
+			responses[key] = hasNote || hasFile
+		}
+	}
+
+	rows, err := db.Query(
+		`SELECT sort_order, COALESCE(result_key, ''), rendered_body_json
+		   FROM gig_instructions
+		  WHERE gig_id=?
+		  ORDER BY sort_order`,
+		gigID,
+	)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var sortOrder int
+		var resultKey, bodyJSON string
+		if err := rows.Scan(&sortOrder, &resultKey, &bodyJSON); err != nil {
+			return err
+		}
+		body := map[string]any{}
+		_ = parseJSON(bodyJSON, &body)
+		if !strings.EqualFold(strOf(body["response_mode"]), "required") {
+			continue
+		}
+		key := resultKey
+		if key == "" {
+			key = fmt.Sprintf("step_%d", sortOrder+1)
+		}
+		if !responses[key] {
+			return fmt.Errorf("missing required response for step %d", sortOrder+1)
+		}
+	}
+	return rows.Err()
 }
 
 // ─── Token lookup ───────────────────────────────────────────────────

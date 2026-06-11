@@ -1077,11 +1077,12 @@ function formatBytes(bytes?: number): string {
 }
 
 function summariseBody(kind: string, body: Record<string, unknown>): string {
-  if (kind === "text") return String(body.markdown || "").slice(0, 80);
+  const response = body.response_mode && body.response_mode !== "none" ? ` · response: ${String(body.response_mode)}` : "";
+  if (kind === "text") return String(body.markdown || "").slice(0, 80) + response;
   if (kind === "warning" || kind === "checklist_item" || kind === "confirmation") return String(body.text || "");
   if (kind === "link") return String(body.label || body.url || "");
   if (kind === "audio" || kind === "video" || kind === "image" || kind === "document")
-    return body.caption ? String(body.caption) : `[${kind}]`;
+    return (body.caption ? String(body.caption) : `[${kind}]`) + response;
   if (kind.startsWith("input_")) return String(body.label || "");
   return "";
 }
@@ -1265,6 +1266,7 @@ function InstructionsTab({ projectId }: { projectId: string }) {
   const [items, setItems] = useState<Instruction[] | null>(null);
   const [kind, setKind] = useState<string>("");
   const [adding, setAdding] = useState(false);
+  const [editing, setEditing] = useState<Instruction | null>(null);
 
   const reload = useCallback(() => {
     const k = kind ? `&kind=${encodeURIComponent(kind)}` : "";
@@ -1294,12 +1296,20 @@ function InstructionsTab({ projectId }: { projectId: string }) {
             <option value="">All kinds</option>
             {ALL_KINDS.map((k) => <option key={k} value={k}>{k}</option>)}
           </select>
-          <button onClick={() => setAdding(true)} className="flex items-center gap-1 px-2 py-1 text-sm border border-border rounded">
+          <button onClick={() => { setAdding(true); setEditing(null); }} className="flex items-center gap-1 px-2 py-1 text-sm border border-border rounded">
             <Icon name="plus" /> New
           </button>
         </div>
       </div>
       {adding && <NewInstructionForm projectId={projectId} onDone={() => { setAdding(false); reload(); }} onCancel={() => setAdding(false)} />}
+      {editing && (
+        <NewInstructionForm
+          projectId={projectId}
+          instruction={editing}
+          onDone={() => { setEditing(null); reload(); }}
+          onCancel={() => setEditing(null)}
+        />
+      )}
       {items?.length === 0 && <div className="p-4 border border-border rounded text-sm text-text-muted">No instructions yet.</div>}
       {Object.entries(groups).map(([fam, list]) => (
         <div key={fam}>
@@ -1323,14 +1333,25 @@ function InstructionsTab({ projectId }: { projectId: string }) {
                       {summariseBody(i.kind, i.current_version.body)}
                     </div>
                   )}
-                  {i.current_version?.status === "draft" && (
-                    <button
-                      onClick={() => api(`/instructions/${i.id}/publish`, projectId, { method: "POST" }).then(reload)}
-                      className="mt-2 px-2 py-1 text-xs border border-border rounded"
-                    >
-                      Publish
-                    </button>
-                  )}
+                  <div className="mt-2 flex flex-wrap gap-1">
+                    {ALL_KINDS.includes(i.kind) && (
+                      <button
+                        type="button"
+                        onClick={() => { setAdding(false); setEditing(i); }}
+                        className="px-2 py-1 text-xs border border-border rounded"
+                      >
+                        Edit
+                      </button>
+                    )}
+                    {i.current_version?.status === "draft" && (
+                      <button
+                        onClick={() => api(`/instructions/${i.id}/publish`, projectId, { method: "POST" }).then(reload)}
+                        className="px-2 py-1 text-xs border border-border rounded"
+                      >
+                        Publish
+                      </button>
+                    )}
+                  </div>
                 </div>
               </div>
             ))}
@@ -1342,34 +1363,44 @@ function InstructionsTab({ projectId }: { projectId: string }) {
 }
 
 function NewInstructionForm({
-  projectId, onDone, onCancel,
-}: { projectId: string; onDone: () => void; onCancel: () => void }) {
-  const [name, setName] = useState("");
-  const [kind, setKind] = useState("text");
-  const [slug, setSlug] = useState("");
-  const [text, setText] = useState("");
-  const [selectedFile, setSelectedFile] = useState<StorageFile | null>(null);
+  projectId, instruction, onDone, onCancel,
+}: { projectId: string; instruction?: Instruction; onDone: () => void; onCancel: () => void }) {
+  const initialBody = instruction?.current_version?.body || {};
+  const editMode = Boolean(instruction);
+  const [name, setName] = useState(instruction?.name || "");
+  const [kind, setKind] = useState(instruction?.kind || "text");
+  const [slug, setSlug] = useState(instruction?.slug || "");
+  const [text, setText] = useState(instructionTextFromBody(instruction?.kind || "text", initialBody));
+  const [responseMode, setResponseMode] = useState<"none" | "optional" | "required">(responseModeFromBody(initialBody));
+  const [selectedFile, setSelectedFile] = useState<StorageFile | null>(storageFileFromBody(instruction?.kind || "text", initialBody));
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
   useEffect(() => {
-    setSelectedFile(null);
-  }, [kind]);
+    if (!editMode) setSelectedFile(null);
+  }, [editMode, kind]);
 
   const submit = async (e: React.FormEvent) => {
     e.preventDefault();
     setBusy(true); setErr(null);
     try {
-      const body = buildInstructionBody(kind, text, selectedFile);
-      await api("/instructions", projectId, {
-        method: "POST",
-        body: JSON.stringify({
-          name,
-          kind,
-          body,
-          slug: slug || undefined,
-        }),
-      });
+      const body = buildInstructionBody(kind, text, selectedFile, responseMode);
+      if (instruction) {
+        await api(`/instructions/${instruction.id}`, projectId, {
+          method: "PATCH",
+          body: JSON.stringify({ body }),
+        });
+      } else {
+        await api("/instructions", projectId, {
+          method: "POST",
+          body: JSON.stringify({
+            name,
+            kind,
+            body,
+            slug: slug || undefined,
+          }),
+        });
+      }
       onDone();
     } catch (e2) {
       setErr((e2 as Error).message);
@@ -1380,12 +1411,16 @@ function NewInstructionForm({
 
   return (
     <form onSubmit={submit} className="p-3 border border-border rounded space-y-2 bg-bg-subtle">
+      <div className="flex items-center justify-between gap-3">
+        <h3 className="text-sm font-semibold">{editMode ? "Edit instruction draft" : "Create instruction"}</h3>
+        {editMode && <Pill>Current v{instruction?.current_version?.version}</Pill>}
+      </div>
       <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
-        <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Instruction name" required className="px-2 py-1 text-sm border border-border rounded bg-bg" />
-        <select value={kind} onChange={(e) => setKind(e.target.value)} className="px-2 py-1 text-sm border border-border rounded bg-bg">
+        <input value={name} onChange={(e) => setName(e.target.value)} disabled={editMode} placeholder="Instruction name" required className="px-2 py-1 text-sm border border-border rounded bg-bg disabled:opacity-60" />
+        <select value={kind} onChange={(e) => setKind(e.target.value)} disabled={editMode} className="px-2 py-1 text-sm border border-border rounded bg-bg disabled:opacity-60">
           {ALL_KINDS.map((k) => <option key={k} value={k}>{k}</option>)}
         </select>
-        <input value={slug} onChange={(e) => setSlug(e.target.value)} placeholder="Slug (optional)" className="px-2 py-1 text-sm border border-border rounded bg-bg" />
+        <input value={slug} onChange={(e) => setSlug(e.target.value)} disabled={editMode} placeholder="Slug (optional)" className="px-2 py-1 text-sm border border-border rounded bg-bg disabled:opacity-60" />
       </div>
 
       <textarea
@@ -1396,6 +1431,15 @@ function NewInstructionForm({
         required
         className="w-full px-2 py-1 text-sm border border-border rounded bg-bg"
       />
+      <select
+        value={responseMode}
+        onChange={(e) => setResponseMode(e.target.value as "none" | "optional" | "required")}
+        className="w-full px-2 py-1 text-sm border border-border rounded bg-bg"
+      >
+        <option value="none">No worker response</option>
+        <option value="optional">Optional notes/files response</option>
+        <option value="required">Required notes/files response</option>
+      </select>
 
       {(kind === "audio" || kind === "video") && (
         <StorageFilePicker
@@ -1408,7 +1452,7 @@ function NewInstructionForm({
 
       {err && <div className="text-rose-600 text-xs">{err}</div>}
       <div className="flex gap-2">
-        <button disabled={busy || ((kind === "audio" || kind === "video") && !selectedFile)} className="px-3 py-1 text-sm bg-sky-600 text-white rounded disabled:opacity-50">Create draft</button>
+        <button disabled={busy || ((kind === "audio" || kind === "video") && !selectedFile)} className="px-3 py-1 text-sm bg-sky-600 text-white rounded disabled:opacity-50">{editMode ? "Save draft" : "Create draft"}</button>
         <button type="button" onClick={onCancel} className="px-3 py-1 text-sm border border-border rounded">Cancel</button>
       </div>
     </form>
@@ -1546,11 +1590,41 @@ function StorageFilePicker({
   );
 }
 
-function buildInstructionBody(kind: string, text: string, selectedFile: StorageFile | null): Record<string, unknown> {
-  if (kind === "text") return { markdown: text };
+function instructionTextFromBody(kind: string, body: Record<string, unknown>): string {
+  if (kind === "text") return String(body.markdown || "");
+  return String(body.caption || body.transcript || "");
+}
+
+function responseModeFromBody(body: Record<string, unknown>): "none" | "optional" | "required" {
+  const mode = String(body.response_mode || "none");
+  if (mode === "optional" || mode === "required") return mode;
+  return "none";
+}
+
+function storageFileFromBody(kind: string, body: Record<string, unknown>): StorageFile | null {
+  if (kind !== "audio" && kind !== "video") return null;
+  const id = Number(body.storage_file_id || 0);
+  if (!id) return null;
+  return {
+    id,
+    name: `Storage file #${id}`,
+    folder: "",
+    content_type: `${kind}/`,
+  };
+}
+
+function buildInstructionBody(
+  kind: string,
+  text: string,
+  selectedFile: StorageFile | null,
+  responseMode: "none" | "optional" | "required",
+): Record<string, unknown> {
+  const response = responseMode === "none" ? {} : { response_mode: responseMode };
+  if (kind === "text") return { markdown: text, ...response };
   return {
     storage_file_id: selectedFile?.id,
     caption: text,
+    ...response,
   };
 }
 

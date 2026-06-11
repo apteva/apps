@@ -44,6 +44,7 @@ type gigInstructionRow struct {
 	ID                         int64          `json:"id"`
 	SortOrder                  int            `json:"sort_order"`
 	InstructionKind            string         `json:"instruction_kind"`
+	InstructionName            string         `json:"instruction_name,omitempty"`
 	RenderedBody               map[string]any `json:"rendered_body"`
 	ResultKey                  string         `json:"result_key,omitempty"`
 	SourceInstructionID        int64          `json:"source_instruction_id,omitempty"`
@@ -1005,9 +1006,12 @@ func loadGig(ctx *sdk.AppCtx, pid string, id int64) (*gig, error) {
 	_ = parseJSON(result.String, &g.Result)
 	// Composition.
 	rows, err := db.Query(
-		`SELECT id, sort_order, instruction_kind, rendered_body_json, result_key,
-		        source_instruction_id, source_instruction_version_id
-		 FROM gig_instructions WHERE gig_id=? ORDER BY sort_order`,
+		`SELECT gi.id, gi.sort_order, gi.instruction_kind, gi.rendered_body_json, gi.result_key,
+		        gi.source_instruction_id, gi.source_instruction_version_id, COALESCE(i.name, '')
+		   FROM gig_instructions gi
+		   LEFT JOIN instructions i ON i.id = gi.source_instruction_id
+		  WHERE gi.gig_id=?
+		  ORDER BY gi.sort_order`,
 		id,
 	)
 	if err == nil {
@@ -1016,7 +1020,7 @@ func loadGig(ctx *sdk.AppCtx, pid string, id int64) (*gig, error) {
 			var rk sql.NullString
 			var sid, svid sql.NullInt64
 			var bodyJSON string
-			if err := rows.Scan(&row.ID, &row.SortOrder, &row.InstructionKind, &bodyJSON, &rk, &sid, &svid); err != nil {
+			if err := rows.Scan(&row.ID, &row.SortOrder, &row.InstructionKind, &bodyJSON, &rk, &sid, &svid, &row.InstructionName); err != nil {
 				return nil, err
 			}
 			_ = parseJSON(bodyJSON, &row.RenderedBody)
