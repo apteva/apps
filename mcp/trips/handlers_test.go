@@ -1049,7 +1049,7 @@ func TestUnit_SearchAirports_UsesDuffelAndFilters(t *testing.T) {
 }
 
 func TestUnit_ScanFlightPrices_CapsMatrixAndRecords(t *testing.T) {
-	ctx, fake := newCtx(t)
+	ctx, fake, rec := newCtxWithEmitter(t)
 	app := &App{}
 	_, _ = app.toolSettingsSet(ctx, map[string]any{
 		"duffel_connection_id": float64(11),
@@ -1098,6 +1098,10 @@ func TestUnit_ScanFlightPrices_CapsMatrixAndRecords(t *testing.T) {
 	if len(obs) != 3 {
 		t.Fatalf("want 3 observations, got %d", len(obs))
 	}
+	priceEvents := rec.EventsByTopic("price_observations.created")
+	if len(priceEvents) != 1 {
+		t.Fatalf("want one aggregate price observation event, got %d", len(priceEvents))
+	}
 }
 
 func TestUnit_AvailableConnections_FiltersByProvider(t *testing.T) {
@@ -1126,14 +1130,149 @@ func TestManifest_Valid(t *testing.T) {
 	if m.Name != "trips" {
 		t.Errorf("manifest name=%q", m.Name)
 	}
+	if len(m.Provides.Publishes) < 25 {
+		t.Errorf("expected published app-bus topics declared, got %d", len(m.Provides.Publishes))
+	}
 	if len(app.MCPTools()) < 20 {
 		t.Errorf("expected ≥20 tools, got %d", len(app.MCPTools()))
+	}
+}
+
+func TestUnit_AppBusEvents_CoverMutations(t *testing.T) {
+	ctx, _, rec := newCtxWithEmitter(t)
+	app := &App{}
+
+	tripAny, err := app.toolTripsCreate(ctx, map[string]any{
+		"name":          "Event trip",
+		"sync_calendar": false,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	trip := tripAny.(Trip)
+	if _, err := app.toolTripsUpdate(ctx, map[string]any{"id": float64(trip.ID), "notes": "updated"}); err != nil {
+		t.Fatal(err)
+	}
+
+	destAAny, err := app.toolDestinationsAdd(ctx, map[string]any{"trip_id": float64(trip.ID), "place_name": "Paris"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	destA := destAAny.(Destination)
+	destBAny, err := app.toolDestinationsAdd(ctx, map[string]any{"trip_id": float64(trip.ID), "place_name": "Lyon"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	destB := destBAny.(Destination)
+	if _, err := app.toolDestinationsUpdate(ctx, map[string]any{"id": float64(destA.ID), "notes": "stay longer"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.toolDestinationsReorder(ctx, map[string]any{"trip_id": float64(trip.ID), "order": []any{float64(destB.ID), float64(destA.ID)}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.toolDestinationsDelete(ctx, map[string]any{"id": float64(destB.ID)}); err != nil {
+		t.Fatal(err)
+	}
+
+	legAny, err := app.toolTransportLegsAdd(ctx, map[string]any{"trip_id": float64(trip.ID), "kind": "car"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	leg := legAny.(TransportLeg)
+	if _, err := app.toolTransportLegsUpdate(ctx, map[string]any{"id": float64(leg.ID), "provider": "Rental"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.toolTransportLegsMarkBooked(ctx, map[string]any{"id": float64(leg.ID), "cost_actual": float64(1234)}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.toolTransportLegsDelete(ctx, map[string]any{"id": float64(leg.ID)}); err != nil {
+		t.Fatal(err)
+	}
+
+	accAny, err := app.toolAccommodationsAdd(ctx, map[string]any{"trip_id": float64(trip.ID), "name": "Hotel"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	acc := accAny.(Accommodation)
+	if _, err := app.toolAccommodationsUpdate(ctx, map[string]any{"id": float64(acc.ID), "notes": "quiet room"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.toolAccommodationsMarkBooked(ctx, map[string]any{"id": float64(acc.ID), "cost_actual": float64(5000)}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.toolAccommodationsDelete(ctx, map[string]any{"id": float64(acc.ID)}); err != nil {
+		t.Fatal(err)
+	}
+
+	actAny, err := app.toolActivitiesAdd(ctx, map[string]any{"trip_id": float64(trip.ID), "name": "Museum"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	act := actAny.(Activity)
+	if _, err := app.toolActivitiesUpdate(ctx, map[string]any{"id": float64(act.ID), "notes": "morning"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.toolActivitiesMarkBooked(ctx, map[string]any{"id": float64(act.ID), "cost_actual": float64(1500)}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.toolActivitiesDelete(ctx, map[string]any{"id": float64(act.ID)}); err != nil {
+		t.Fatal(err)
+	}
+
+	todoAny, err := app.toolTodosAdd(ctx, map[string]any{"trip_id": float64(trip.ID), "label": "Pack"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	todo := todoAny.(Todo)
+	if _, err := app.toolTodosToggle(ctx, map[string]any{"id": float64(todo.ID)}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.toolTodosDelete(ctx, map[string]any{"id": float64(todo.ID)}); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := app.toolBudgetSet(ctx, map[string]any{"trip_id": float64(trip.ID), "category": "transport", "amount": float64(10000)}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.toolBudgetSet(ctx, map[string]any{"trip_id": float64(trip.ID), "category": "transport", "amount": float64(0)}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.toolSettingsSet(ctx, map[string]any{"home_airport": "BCN"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.toolTripsDelete(ctx, map[string]any{"id": float64(trip.ID)}); err != nil {
+		t.Fatal(err)
+	}
+
+	want := []string{
+		"trip.created", "trip.updated", "trip.deleted",
+		"destination.created", "destination.added", "destination.updated", "destination.deleted", "destination.reordered",
+		"transport.created", "transport.added", "transport.updated", "transport.deleted", "transport.booked",
+		"accommodation.created", "accommodation.added", "accommodation.updated", "accommodation.deleted", "accommodation.booked",
+		"activity.created", "activity.added", "activity.updated", "activity.deleted", "activity.booked",
+		"todo.created", "todo.updated", "todo.deleted",
+		"budget.updated", "settings.updated",
+	}
+	got := map[string]bool{}
+	for _, ev := range rec.Events() {
+		got[ev.Topic] = true
+	}
+	for _, topic := range want {
+		if !got[topic] {
+			t.Errorf("missing emitted topic %s", topic)
+		}
 	}
 }
 
 // ─── helpers ─────────────────────────────────────────────────────
 
 func newCtx(t *testing.T) (*sdk.AppCtx, *fakeCalendar) {
+	t.Helper()
+	ctx, fake, _ := newCtxWithEmitter(t)
+	return ctx, fake
+}
+
+func newCtxWithEmitter(t *testing.T) (*sdk.AppCtx, *fakeCalendar, *tk.EmitRecorder) {
 	t.Helper()
 	rec := tk.NewEmitRecorder()
 	fake := newFakeCalendar()
@@ -1143,7 +1282,7 @@ func newCtx(t *testing.T) (*sdk.AppCtx, *fakeCalendar) {
 		tk.WithPlatform(fake),
 	)
 	globalCtx = ctx
-	return ctx, fake
+	return ctx, fake, rec
 }
 
 func newHTTPServer(t *testing.T) *httptest.Server {

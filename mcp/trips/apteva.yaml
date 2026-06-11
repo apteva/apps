@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: trips
 display_name: Trips
-version: 0.8.2
+version: 0.8.3
 description: |
   Plan trips end-to-end: destinations, transport, accommodation,
   activities, packing, budget. Calendar-synced — each trip owns a
@@ -95,6 +95,37 @@ provides:
       label: Trips
       icon: map
       entry: /ui/TripsPanel.mjs
+
+  publishes:
+    - { name: trip.created, description: "A trip or trip idea was created." }
+    - { name: trip.updated, description: "A trip's details, dates, status, sync, archive state, or budget changed." }
+    - { name: trip.deleted, description: "A trip was deleted." }
+    - { name: destination.created, description: "A destination was added to a trip." }
+    - { name: destination.added, description: "Compatibility alias for destination.created." }
+    - { name: destination.updated, description: "A destination was updated." }
+    - { name: destination.deleted, description: "A destination was deleted." }
+    - { name: destination.reordered, description: "A trip's destinations were reordered." }
+    - { name: transport.created, description: "A transport leg or route idea was added." }
+    - { name: transport.added, description: "Compatibility alias for transport.created." }
+    - { name: transport.updated, description: "A transport leg was updated." }
+    - { name: transport.deleted, description: "A transport leg was deleted." }
+    - { name: transport.booked, description: "A transport leg was marked booked." }
+    - { name: accommodation.created, description: "An accommodation or stay idea was added." }
+    - { name: accommodation.added, description: "Compatibility alias for accommodation.created." }
+    - { name: accommodation.updated, description: "An accommodation was updated." }
+    - { name: accommodation.deleted, description: "An accommodation was deleted." }
+    - { name: accommodation.booked, description: "An accommodation was marked booked." }
+    - { name: activity.created, description: "An activity was added." }
+    - { name: activity.added, description: "Compatibility alias for activity.created." }
+    - { name: activity.updated, description: "An activity was updated." }
+    - { name: activity.deleted, description: "An activity was deleted." }
+    - { name: activity.booked, description: "An activity was marked booked." }
+    - { name: todo.created, description: "A trip todo was added." }
+    - { name: todo.updated, description: "A trip todo was toggled or updated." }
+    - { name: todo.deleted, description: "A trip todo was deleted." }
+    - { name: budget.updated, description: "A trip budget cap was set or cleared." }
+    - { name: settings.updated, description: "Trips project settings were updated." }
+    - { name: price_observations.created, description: "Flight price observations were persisted from Duffel search." }
 
 runtime:
   kind: source

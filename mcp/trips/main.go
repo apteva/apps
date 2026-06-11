@@ -761,7 +761,7 @@ func (a *App) toolTripsCreate(ctx *sdk.AppCtx, args map[string]any) (any, error)
 			mirrorTripEvent(ctx, &newTrip)
 		}
 	}
-	ctx.Emit("trip.created", map[string]any{"trip_id": id, "name": name})
+	emitTripEvent(ctx, "trip.created", id, "", 0, map[string]any{"name": name})
 	return readTrip(ctx, id)
 }
 
@@ -910,7 +910,7 @@ func (a *App) toolTripsUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		updateEventTitlesForTrip(ctx, updated)
 	}
 
-	ctx.Emit("trip.updated", map[string]any{"trip_id": id})
+	emitTripEvent(ctx, "trip.updated", id, "", 0, nil)
 	return updated, nil
 }
 
@@ -928,7 +928,7 @@ func (a *App) toolTripsDelete(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	if _, err := ctx.AppDB().Exec(`DELETE FROM trips WHERE id=?`, id); err != nil {
 		return nil, err
 	}
-	ctx.Emit("trip.deleted", map[string]any{"trip_id": id})
+	emitTripEvent(ctx, "trip.deleted", id, "", 0, nil)
 	return map[string]any{"deleted": id}, nil
 }
 
@@ -1024,7 +1024,8 @@ func (a *App) toolDestinationsAdd(ctx *sdk.AppCtx, args map[string]any) (any, er
 	// Calendar mirror: all-day block for the destination's stay.
 	_ = ensureSharedCalendar(ctx, &trip)
 	mirrorDestinationEvent(ctx, trip, &dest)
-	ctx.Emit("destination.added", map[string]any{"trip_id": tripID, "destination_id": id})
+	emitTripEvent(ctx, "destination.created", tripID, "destination", id, nil)
+	emitLegacyAdded(ctx, "destination.added", map[string]any{"trip_id": tripID, "destination_id": id})
 	return dest, nil
 }
 
@@ -1087,6 +1088,7 @@ func (a *App) toolDestinationsUpdate(ctx *sdk.AppCtx, args map[string]any) (any,
 	if trip, err := readTrip(ctx, dest.TripID); err == nil {
 		mirrorDestinationEvent(ctx, trip, &dest)
 	}
+	emitTripEvent(ctx, "destination.updated", dest.TripID, "destination", id, nil)
 	return dest, nil
 }
 
@@ -1095,13 +1097,18 @@ func (a *App) toolDestinationsDelete(ctx *sdk.AppCtx, args map[string]any) (any,
 	if id == 0 {
 		return nil, errors.New("id required")
 	}
+	dest, err := readDestination(ctx, id)
+	if err != nil {
+		return nil, err
+	}
 	// Drop the linked calendar block first (best-effort).
-	if dest, err := readDestination(ctx, id); err == nil && dest.CalendarEventID != nil {
+	if dest.CalendarEventID != nil {
 		_ = callDeleteEvent(ctx, *dest.CalendarEventID)
 	}
 	if _, err := ctx.AppDB().Exec(`DELETE FROM destinations WHERE id=?`, id); err != nil {
 		return nil, err
 	}
+	emitTripEvent(ctx, "destination.deleted", dest.TripID, "destination", id, nil)
 	return map[string]any{"deleted": id}, nil
 }
 
@@ -1131,6 +1138,7 @@ func (a *App) toolDestinationsReorder(ctx *sdk.AppCtx, args map[string]any) (any
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
+	emitTripEvent(ctx, "destination.reordered", tripID, "destination", 0, map[string]any{"count": len(order)})
 	return map[string]any{"reordered": len(order)}, nil
 }
 
@@ -1245,7 +1253,8 @@ func (a *App) toolTransportLegsAdd(ctx *sdk.AppCtx, args map[string]any) (any, e
 			ctx.Logger().Warn("transport calendar mirror failed", "err", err)
 		}
 	}
-	ctx.Emit("transport.added", map[string]any{"trip_id": tripID, "leg_id": id})
+	emitTripEvent(ctx, "transport.created", tripID, "transport", id, nil)
+	emitLegacyAdded(ctx, "transport.added", map[string]any{"trip_id": tripID, "leg_id": id})
 	return leg, nil
 }
 
@@ -1324,6 +1333,7 @@ func (a *App) toolTransportLegsUpdate(ctx *sdk.AppCtx, args map[string]any) (any
 			}
 		}
 	}
+	emitTripEvent(ctx, "transport.updated", leg.TripID, "transport", id, nil)
 	return leg, nil
 }
 
@@ -1342,6 +1352,7 @@ func (a *App) toolTransportLegsDelete(ctx *sdk.AppCtx, args map[string]any) (any
 	if _, err := ctx.AppDB().Exec(`DELETE FROM transport_legs WHERE id=?`, id); err != nil {
 		return nil, err
 	}
+	emitTripEvent(ctx, "transport.deleted", leg.TripID, "transport", id, nil)
 	return map[string]any{"deleted": id}, nil
 }
 
@@ -1367,7 +1378,12 @@ func (a *App) toolTransportLegsMarkBooked(ctx *sdk.AppCtx, args map[string]any) 
 	); err != nil {
 		return nil, err
 	}
-	return readTransport(ctx, id)
+	leg, err := readTransport(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	emitTripEvent(ctx, "transport.booked", leg.TripID, "transport", id, nil)
+	return leg, nil
 }
 
 func readTransport(ctx *sdk.AppCtx, id int64) (TransportLeg, error) {
@@ -1599,7 +1615,8 @@ func (a *App) toolAccommodationsAdd(ctx *sdk.AppCtx, args map[string]any) (any, 
 			ctx.Logger().Warn("accommodation calendar mirror failed", "err", err)
 		}
 	}
-	ctx.Emit("accommodation.added", map[string]any{"trip_id": tripID, "accommodation_id": id})
+	emitTripEvent(ctx, "accommodation.created", tripID, "accommodation", id, nil)
+	emitLegacyAdded(ctx, "accommodation.added", map[string]any{"trip_id": tripID, "accommodation_id": id})
 	return acc, nil
 }
 
@@ -1677,6 +1694,7 @@ func (a *App) toolAccommodationsUpdate(ctx *sdk.AppCtx, args map[string]any) (an
 			}
 		}
 	}
+	emitTripEvent(ctx, "accommodation.updated", acc.TripID, "accommodation", id, nil)
 	return acc, nil
 }
 
@@ -1695,6 +1713,7 @@ func (a *App) toolAccommodationsDelete(ctx *sdk.AppCtx, args map[string]any) (an
 	if _, err := ctx.AppDB().Exec(`DELETE FROM accommodations WHERE id=?`, id); err != nil {
 		return nil, err
 	}
+	emitTripEvent(ctx, "accommodation.deleted", acc.TripID, "accommodation", id, nil)
 	return map[string]any{"deleted": id}, nil
 }
 
@@ -1720,7 +1739,12 @@ func (a *App) toolAccommodationsMarkBooked(ctx *sdk.AppCtx, args map[string]any)
 	); err != nil {
 		return nil, err
 	}
-	return readAccommodation(ctx, id)
+	acc, err := readAccommodation(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	emitTripEvent(ctx, "accommodation.booked", acc.TripID, "accommodation", id, nil)
+	return acc, nil
 }
 
 func readAccommodation(ctx *sdk.AppCtx, id int64) (Accommodation, error) {
@@ -1839,7 +1863,8 @@ func (a *App) toolActivitiesAdd(ctx *sdk.AppCtx, args map[string]any) (any, erro
 			act.CalendarEventID = &evtID
 		}
 	}
-	ctx.Emit("activity.added", map[string]any{"trip_id": tripID, "activity_id": id})
+	emitTripEvent(ctx, "activity.created", tripID, "activity", id, nil)
+	emitLegacyAdded(ctx, "activity.added", map[string]any{"trip_id": tripID, "activity_id": id})
 	return act, nil
 }
 
@@ -1911,6 +1936,7 @@ func (a *App) toolActivitiesUpdate(ctx *sdk.AppCtx, args map[string]any) (any, e
 			act.CalendarEventID = nil
 		}
 	}
+	emitTripEvent(ctx, "activity.updated", act.TripID, "activity", id, nil)
 	return act, nil
 }
 
@@ -1929,6 +1955,7 @@ func (a *App) toolActivitiesDelete(ctx *sdk.AppCtx, args map[string]any) (any, e
 	if _, err := ctx.AppDB().Exec(`DELETE FROM activities WHERE id=?`, id); err != nil {
 		return nil, err
 	}
+	emitTripEvent(ctx, "activity.deleted", act.TripID, "activity", id, nil)
 	return map[string]any{"deleted": id}, nil
 }
 
@@ -1950,7 +1977,12 @@ func (a *App) toolActivitiesMarkBooked(ctx *sdk.AppCtx, args map[string]any) (an
 	); err != nil {
 		return nil, err
 	}
-	return readActivity(ctx, id)
+	act, err := readActivity(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	emitTripEvent(ctx, "activity.booked", act.TripID, "activity", id, nil)
+	return act, nil
 }
 
 func readActivity(ctx *sdk.AppCtx, id int64) (Activity, error) {
@@ -2057,7 +2089,12 @@ func (a *App) toolTodosAdd(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return nil, err
 	}
 	id, _ := res.LastInsertId()
-	return readTodo(ctx, id)
+	todo, err := readTodo(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	emitTripEvent(ctx, "todo.created", tripID, "todo", id, nil)
+	return todo, nil
 }
 
 func (a *App) toolTodosToggle(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -2080,7 +2117,12 @@ func (a *App) toolTodosToggle(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	); err != nil {
 		return nil, err
 	}
-	return readTodo(ctx, id)
+	todo, err := readTodo(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	emitTripEvent(ctx, "todo.updated", todo.TripID, "todo", id, map[string]any{"done": todo.Done})
+	return todo, nil
 }
 
 func (a *App) toolTodosDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -2088,9 +2130,14 @@ func (a *App) toolTodosDelete(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	if id == 0 {
 		return nil, errors.New("id required")
 	}
+	todo, err := readTodo(ctx, id)
+	if err != nil {
+		return nil, err
+	}
 	if _, err := ctx.AppDB().Exec(`DELETE FROM todos WHERE id=?`, id); err != nil {
 		return nil, err
 	}
+	emitTripEvent(ctx, "todo.deleted", todo.TripID, "todo", id, nil)
 	return map[string]any{"deleted": id}, nil
 }
 
@@ -2147,6 +2194,7 @@ func (a *App) toolBudgetSet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		); err != nil {
 			return nil, err
 		}
+		emitTripEvent(ctx, "budget.updated", tripID, "budget", 0, map[string]any{"category": category, "amount": int64(0), "cleared": true})
 		return map[string]any{"cleared": true}, nil
 	}
 	// Upsert via INSERT OR REPLACE since (trip_id, category) is UNIQUE
@@ -2163,6 +2211,7 @@ func (a *App) toolBudgetSet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		`SELECT id, trip_id, category, amount, notes FROM trip_budgets WHERE trip_id=? AND category=?`,
 		tripID, category,
 	).Scan(&b.ID, &b.TripID, &b.Category, &b.Amount, &b.Notes)
+	emitTripEvent(ctx, "budget.updated", tripID, "budget", 0, map[string]any{"category": category, "amount": amount, "cleared": false})
 	return b, nil
 }
 
@@ -3001,7 +3050,15 @@ func (a *App) toolSettingsSet(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	); err != nil {
 		return nil, err
 	}
-	return loadSettings(ctx)
+	settings, err := loadSettings(ctx)
+	if err != nil {
+		return nil, err
+	}
+	ctx.Emit("settings.updated", map[string]any{
+		"action":     "updated",
+		"project_id": pid,
+	})
+	return settings, nil
 }
 
 // ─── Connections (read-only proxy of the platform list) ─────────
@@ -3455,16 +3512,34 @@ func (a *App) toolSearchFlights(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	out := normalizeFlightsResponse(res.Data)
 	tripID := int64(intArg(args, "trip_id", 0))
 	if offers, ok := out["offers"].([]FlightOffer); ok {
-		recordFlightPriceObservations(ctx, tripID, key, input, offers)
+		inserted := recordFlightPriceObservations(ctx, tripID, key, input, offers)
+		if inserted > 0 {
+			if suppress, _ := args["_suppress_price_event"].(bool); !suppress {
+				extra := map[string]any{"kind": "flight", "provider": "duffel", "count": inserted, "origin": from, "destination": to}
+				if tripID > 0 {
+					emitTripEvent(ctx, "price_observations.created", tripID, "price_observation", 0, extra)
+				} else {
+					ctx.Emit("price_observations.created", map[string]any{
+						"action":      "created",
+						"entity":      "price_observation",
+						"kind":        "flight",
+						"provider":    "duffel",
+						"count":       inserted,
+						"origin":      from,
+						"destination": to,
+					})
+				}
+			}
+		}
 	}
 	// Duffel offers expire fast — 10-minute cache is plenty.
 	cacheSet(ctx, key, out, 10*time.Minute)
 	return out, nil
 }
 
-func recordFlightPriceObservations(ctx *sdk.AppCtx, tripID int64, signature string, input map[string]any, offers []FlightOffer) {
+func recordFlightPriceObservations(ctx *sdk.AppCtx, tripID int64, signature string, input map[string]any, offers []FlightOffer) int {
 	if len(offers) == 0 {
-		return
+		return 0
 	}
 	data, _ := input["data"].(map[string]any)
 	slices, _ := data["slices"].([]map[string]any)
@@ -3485,6 +3560,7 @@ func recordFlightPriceObservations(ctx *sdk.AppCtx, tripID int64, signature stri
 	observedAt := time.Now().UTC()
 	liveUntil := observedAt.Add(10 * time.Minute).Format(time.RFC3339)
 	project := projectID()
+	inserted := 0
 
 	for _, offer := range offers {
 		if offer.TotalAmountCents <= 0 || offer.Currency == "" {
@@ -3513,7 +3589,7 @@ func recordFlightPriceObservations(ctx *sdk.AppCtx, tripID int64, signature stri
 		if tripID > 0 {
 			trip = tripID
 		}
-		_, _ = ctx.AppDB().Exec(
+		if _, err := ctx.AppDB().Exec(
 			`INSERT INTO travel_price_observations
 			 (project_id, trip_id, kind, provider, search_signature, origin_code, destination_code,
 			  depart_date, return_date, party_size, cabin_or_class, provider_name, item_name,
@@ -3523,8 +3599,11 @@ func recordFlightPriceObservations(ctx *sdk.AppCtx, tripID int64, signature stri
 			project, trip, signature, o, d, departDate, returnDate, partySize, cc,
 			offer.Carrier, itemName, offer.Stops, offer.Duration, offer.TotalAmountCents,
 			offer.Currency, observedAt.Format(time.RFC3339), liveUntil, offer.OfferID, string(meta),
-		)
+		); err == nil {
+			inserted++
+		}
 	}
+	return inserted
 }
 
 func (a *App) toolPriceObservations(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -3735,6 +3814,7 @@ func (a *App) toolScanFlightPrices(ctx *sdk.AppCtx, args map[string]any) (any, e
 	}
 	results := []scanResult{}
 	searches := 0
+	insertedObservations := 0
 	for d := fromDate; !d.After(toDate) && searches < maxSearches; d = d.AddDate(0, 0, 1) {
 		for _, dest := range cleanDestinations {
 			for _, length := range cleanLengths {
@@ -3747,11 +3827,12 @@ func (a *App) toolScanFlightPrices(ctx *sdk.AppCtx, args map[string]any) (any, e
 					returnDate = d.AddDate(0, 0, length).Format("2006-01-02")
 				}
 				callArgs := map[string]any{
-					"from":        origin,
-					"to":          dest,
-					"depart_date": depart,
-					"passengers":  float64(passengers),
-					"cabin":       cabin,
+					"from":                  origin,
+					"to":                    dest,
+					"depart_date":           depart,
+					"passengers":            float64(passengers),
+					"cabin":                 cabin,
+					"_suppress_price_event": true,
 				}
 				if returnDate != "" {
 					callArgs["return_date"] = returnDate
@@ -3770,6 +3851,9 @@ func (a *App) toolScanFlightPrices(ctx *sdk.AppCtx, args map[string]any) (any, e
 					}
 					if offers, ok := m["offers"].([]FlightOffer); ok {
 						row.Offers = len(offers)
+						if !row.Cached {
+							insertedObservations += len(offers)
+						}
 					}
 				}
 				results = append(results, row)
@@ -3778,6 +3862,17 @@ func (a *App) toolScanFlightPrices(ctx *sdk.AppCtx, args map[string]any) (any, e
 				}
 			}
 		}
+	}
+	if insertedObservations > 0 {
+		ctx.Emit("price_observations.created", map[string]any{
+			"action":   "created",
+			"entity":   "price_observation",
+			"kind":     "flight",
+			"provider": "duffel",
+			"count":    insertedObservations,
+			"origin":   origin,
+			"searched": searches,
+		})
 	}
 	obs, _ := a.toolPriceObservations(ctx, map[string]any{"kind": "flight", "origin": origin, "since_days": float64(180), "limit": float64(500)})
 	return map[string]any{
@@ -4492,6 +4587,34 @@ func writeOrErr(w http.ResponseWriter, v any, err error) {
 }
 
 func projectID() string { return os.Getenv("APTEVA_PROJECT_ID") }
+
+func emitTripEvent(ctx *sdk.AppCtx, topic string, tripID int64, entity string, entityID int64, extra map[string]any) {
+	payload := map[string]any{
+		"trip_id": tripID,
+		"action":  eventAction(topic),
+	}
+	if entity != "" {
+		payload["entity"] = entity
+	}
+	if entityID > 0 {
+		payload["entity_id"] = entityID
+	}
+	for k, v := range extra {
+		payload[k] = v
+	}
+	ctx.Emit(topic, payload)
+}
+
+func emitLegacyAdded(ctx *sdk.AppCtx, topic string, payload map[string]any) {
+	ctx.Emit(topic, payload)
+}
+
+func eventAction(topic string) string {
+	if i := strings.LastIndex(topic, "."); i >= 0 && i < len(topic)-1 {
+		return topic[i+1:]
+	}
+	return topic
+}
 
 func schemaObject(props map[string]any, required []string) map[string]any {
 	s := map[string]any{"type": "object", "properties": props}
