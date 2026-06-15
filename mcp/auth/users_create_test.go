@@ -6,6 +6,11 @@ package main
 // asked, so an agent can provision N imported addresses silently.
 
 import (
+	"bytes"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strconv"
 	"testing"
 )
 
@@ -107,5 +112,83 @@ func TestUsersCreate_DuplicateEmailErrors(t *testing.T) {
 	}
 	if _, err := app.toolUsersCreate(ctx, args); err == nil {
 		t.Error("duplicate email should error")
+	}
+}
+
+func TestUsersSetPasswordTool_ChangesLoginPassword(t *testing.T) {
+	ctx, clientID := newAuthCtx(t)
+	app := &App{}
+
+	out, err := app.toolUsersCreate(ctx, map[string]any{
+		"organization_slug": "default",
+		"email":             "reset-tool@example.com",
+		"password":          "old-password",
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	user := out.(map[string]any)["user"].(*User)
+
+	if _, err := app.toolUsersSetPassword(ctx, map[string]any{
+		"organization_slug": "default",
+		"user_id":           user.ID,
+		"password":          "new-password",
+	}); err != nil {
+		t.Fatalf("set password: %v", err)
+	}
+
+	rec := callJSON(app.handleLogin, "POST", "/login", map[string]any{
+		"email":     "reset-tool@example.com",
+		"password":  "old-password",
+		"client_id": clientID,
+	})
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("old password expected 401, got %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	rec = callJSON(app.handleLogin, "POST", "/login", map[string]any{
+		"email":     "reset-tool@example.com",
+		"password":  "new-password",
+		"client_id": clientID,
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("new password expected 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestAdminUsersSetPasswordRoute(t *testing.T) {
+	ctx, clientID := newAuthCtx(t)
+	app := &App{}
+
+	out, err := app.toolUsersCreate(ctx, map[string]any{
+		"organization_slug": "default",
+		"email":             "reset-route@example.com",
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	user := out.(map[string]any)["user"].(*User)
+
+	var buf bytes.Buffer
+	_ = json.NewEncoder(&buf).Encode(map[string]any{
+		"password":        "route-password",
+		"revoke_sessions": true,
+	})
+	req := httptest.NewRequest("POST", "/admin/users/"+strconv.FormatInt(user.ID, 10)+"/set_password?organization_slug=default", &buf)
+	req.Header.Set("Content-Type", "application/json")
+	req.SetPathValue("id", strconv.FormatInt(user.ID, 10))
+	rec := httptest.NewRecorder()
+	app.handleAdminUsersSetPassword(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("set password route expected 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	login := callJSON(app.handleLogin, "POST", "/login", map[string]any{
+		"email":     "reset-route@example.com",
+		"password":  "route-password",
+		"client_id": clientID,
+	})
+	if login.Code != http.StatusOK {
+		t.Fatalf("login with route password expected 200, got %d body=%s", login.Code, login.Body.String())
 	}
 }

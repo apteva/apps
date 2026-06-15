@@ -8,12 +8,13 @@
 // Clients / Settings panels.
 //
 // Files in this package:
-//   main.go    — App, manifest, OnMount, route + tool wiring, helpers
-//   types.go   — domain types and JSON shapes
-//   db.go      — SQL access (no business logic)
-//   crypto.go  — argon2id, sha256 token hashing, EdDSA JWT sign/verify
-//   handlers.go— HTTP handlers (signup/login/refresh/logout/me/jwks)
-//   tools.go   — MCP tool handlers
+//
+//	main.go    — App, manifest, OnMount, route + tool wiring, helpers
+//	types.go   — domain types and JSON shapes
+//	db.go      — SQL access (no business logic)
+//	crypto.go  — argon2id, sha256 token hashing, EdDSA JWT sign/verify
+//	handlers.go— HTTP handlers (signup/login/refresh/logout/me/jwks)
+//	tools.go   — MCP tool handlers
 package main
 
 import (
@@ -43,7 +44,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: auth
 display_name: Auth
-version: 0.6.0
+version: 0.6.1
 description: |
   Identity layer for Apteva-deployed SaaS, partitioned by Organization
   (row-level multi-tenancy a la Auth0/Clerk/Stytch B2B). One install
@@ -90,6 +91,8 @@ provides:
       description: Re-enable a disabled user (requires org).
     - name: auth_users_revoke_sessions
       description: Force-logout one user (requires org).
+    - name: auth_users_set_password
+      description: Set a new password for one user (requires org).
     - name: auth_audit_search
       description: Filter the audit log; org-scoped or project-wide.
     - name: auth_stats
@@ -163,10 +166,10 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	return nil
 }
 
-func (a *App) OnUnmount(*sdk.AppCtx) error          { return nil }
-func (a *App) Channels() []sdk.ChannelFactory       { return nil }
-func (a *App) Workers() []sdk.Worker                { return nil }
-func (a *App) EventHandlers() []sdk.EventHandler    { return nil }
+func (a *App) OnUnmount(*sdk.AppCtx) error       { return nil }
+func (a *App) Channels() []sdk.ChannelFactory    { return nil }
+func (a *App) Workers() []sdk.Worker             { return nil }
+func (a *App) EventHandlers() []sdk.EventHandler { return nil }
 
 // ─── HTTP routes ──────────────────────────────────────────────────────
 //
@@ -208,6 +211,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Method: "POST", Pattern: "/admin/users/{id}/enable", Handler: a.handleAdminUsersEnable},
 		{Method: "POST", Pattern: "/admin/users/{id}/revoke_sessions", Handler: a.handleAdminUsersRevokeSessions},
 		{Method: "POST", Pattern: "/admin/users/{id}/send_password_reset", Handler: a.handleAdminUsersSendPasswordReset},
+		{Method: "POST", Pattern: "/admin/users/{id}/set_password", Handler: a.handleAdminUsersSetPassword},
 		{Method: "GET", Pattern: "/admin/clients", Handler: a.handleAdminClientsList},
 		{Method: "POST", Pattern: "/admin/clients", Handler: a.handleAdminClientsCreate},
 		{Method: "POST", Pattern: "/admin/clients/{client_id}/rotate", Handler: a.handleAdminClientsRotate},
@@ -338,6 +342,16 @@ func (a *App) MCPTools() []sdk.Tool {
 				"user_id": map[string]any{"type": "integer"},
 			}), []string{"user_id"}),
 			Handler: a.toolUsersRevokeSessions,
+		},
+		{
+			Name:        "auth_users_set_password",
+			Description: "Set a new password for a user. Requires organization_id/slug. Validates the configured password policy. Args: user_id, password, revoke_sessions (default true).",
+			InputSchema: schemaObject(merge(map[string]any{
+				"user_id":         map[string]any{"type": "integer"},
+				"password":        map[string]any{"type": "string"},
+				"revoke_sessions": map[string]any{"type": "boolean"},
+			}), []string{"user_id", "password"}),
+			Handler: a.toolUsersSetPassword,
 		},
 		{
 			Name:        "auth_users_disable",

@@ -239,6 +239,28 @@ func (a *App) toolUsersRevokeSessions(ctx *sdk.AppCtx, args map[string]any) (any
 	return map[string]any{"revoked_count": n}, nil
 }
 
+func (a *App) toolUsersSetPassword(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	org, err := orgFromArgs(ctx, pid, args)
+	if err != nil {
+		return nil, err
+	}
+	uid, ok := intReq(args, "user_id")
+	if !ok {
+		return nil, errors.New("user_id required")
+	}
+	password := stringArg(args, "password", "")
+	revokeSessions := boolArg(args, "revoke_sessions", true)
+	revoked, _, err := a.setUserPassword(ctx, pid, org.ID, uid, password, revokeSessions, "", "agent")
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"ok": true, "revoked_sessions": revoked}, nil
+}
+
 func (a *App) toolUsersDisable(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	pid, err := resolveProjectFromArgs(args)
 	if err != nil {

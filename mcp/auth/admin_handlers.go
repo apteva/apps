@@ -412,6 +412,70 @@ func (a *App) handleAdminUsersSendPasswordReset(w http.ResponseWriter, r *http.R
 	httpJSON(w, map[string]any{"ok": true})
 }
 
+func (a *App) handleAdminUsersSetPassword(w http.ResponseWriter, r *http.Request) {
+	org, pid, ok := adminOrgInner(w, r, true)
+	if !ok {
+		return
+	}
+	ctx := getAppCtx(r)
+	uid, err := pathInt64(r, "id")
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	var body struct {
+		Password       string `json:"password"`
+		RevokeSessions *bool  `json:"revoke_sessions"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		httpErr(w, http.StatusBadRequest, "invalid json")
+		return
+	}
+	revokeSessions := true
+	if body.RevokeSessions != nil {
+		revokeSessions = *body.RevokeSessions
+	}
+	revoked, code, err := a.setUserPassword(ctx, pid, org.ID, uid, body.Password, revokeSessions, r.RemoteAddr, r.UserAgent())
+	if err != nil {
+		httpErr(w, code, err.Error())
+		return
+	}
+	httpJSON(w, map[string]any{"ok": true, "revoked_sessions": revoked})
+}
+
+func (a *App) setUserPassword(ctx *sdk.AppCtx, pid string, orgID, uid int64, password string, revokeSessions bool, ip, ua string) (int64, int, error) {
+	password = strings.TrimSpace(password)
+	if password == "" {
+		return 0, http.StatusBadRequest, errors.New("password required")
+	}
+	if _, err := dbGetUserByID(ctx.AppDB(), pid, orgID, uid); err != nil {
+		return 0, http.StatusNotFound, errors.New("user not found")
+	}
+	if reason := validatePassword(password,
+		cfgInt(ctx, "password_min_length", 8),
+		cfgInt(ctx, "password_classes_required", 0)); reason != "" {
+		return 0, http.StatusBadRequest, errors.New(reason)
+	}
+	pwHash, err := hashPassword(password)
+	if err != nil {
+		return 0, http.StatusInternalServerError, err
+	}
+	if err := dbSetUserPassword(ctx.AppDB(), pid, orgID, uid, pwHash); err != nil {
+		return 0, http.StatusInternalServerError, err
+	}
+	var revoked int64
+	if revokeSessions {
+		n, err := dbRevokeAllUserSessions(ctx.AppDB(), pid, orgID, uid)
+		if err != nil {
+			return 0, http.StatusInternalServerError, err
+		}
+		revoked = n
+	}
+	dbAudit(ctx.AppDB(), pid, orgID, &uid, "", "password_set_admin", ip, ua,
+		map[string]any{"revoked_sessions": revoked})
+	return revoked, http.StatusOK, nil
+}
+
 func (a *App) handleAdminUsersGetContext(w http.ResponseWriter, r *http.Request) {
 	org, pid, ok := adminOrgInner(w, r, true)
 	if !ok {

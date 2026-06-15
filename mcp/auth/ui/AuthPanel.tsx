@@ -1080,6 +1080,7 @@ function UserDrawer({ userId, orgSlug, projectId, onClose, onChanged, setStatus 
   const [busy, setBusy] = useState(false);
   const [editingName, setEditingName] = useState(false);
   const [nameDraft, setNameDraft] = useState("");
+  const [passwordOpen, setPasswordOpen] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -1179,6 +1180,11 @@ function UserDrawer({ userId, orgSlug, projectId, onClose, onChanged, setStatus 
             className="px-3 py-1 text-sm border border-border rounded text-text hover:bg-bg-card disabled:opacity-50"
             title="Issues a fresh reset token; link is emailed (when messaging is installed) or written to the audit log."
           >Send password reset</button>
+          <button
+            onClick={() => setPasswordOpen(true)}
+            disabled={busy}
+            className="px-3 py-1 text-sm border border-border rounded text-text hover:bg-bg-card disabled:opacity-50"
+          >Set password</button>
           {!u.email_verified_at && (
             <button
               onClick={() => act("", { email_verified: true }, "PATCH")}
@@ -1274,7 +1280,110 @@ function UserDrawer({ userId, orgSlug, projectId, onClose, onChanged, setStatus 
           )}
         </section>
       </div>
+      {passwordOpen && (
+        <SetPasswordModal
+          user={u}
+          orgSlug={orgSlug}
+          onClose={() => setPasswordOpen(false)}
+          onSaved={() => {
+            setPasswordOpen(false);
+            load();
+            onChanged();
+          }}
+          setStatus={setStatus}
+        />
+      )}
     </aside>
+  );
+}
+
+function SetPasswordModal({ user, orgSlug, onClose, onSaved, setStatus }: {
+  user: User;
+  orgSlug: string;
+  onClose: () => void;
+  onSaved: () => void;
+  setStatus: (s: string) => void;
+}) {
+  const [password, setPassword] = useState("");
+  const [confirm, setConfirm] = useState("");
+  const [revokeSessions, setRevokeSessions] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setErr("");
+    if (!password) {
+      setErr("Password required");
+      return;
+    }
+    if (password !== confirm) {
+      setErr("Passwords do not match");
+      return;
+    }
+    setBusy(true);
+    try {
+      const r = await fetch(`${API}/admin/users/${user.id}/set_password${orgQS(orgSlug)}`, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ password, revoke_sessions: revokeSessions }),
+      });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) throw new Error(data.error || `set password failed (${r.status})`);
+      onSaved();
+    } catch (e2) {
+      setErr((e2 as Error).message);
+      setStatus(`set password: ${(e2 as Error).message}`);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <Modal onClose={onClose} title="Set password">
+      <form onSubmit={submit} className="space-y-3">
+        <div className="text-text-dim text-sm">
+          Set a new password for <span className="text-text">{user.email}</span>.
+        </div>
+        <Field label="New password" hint="Default policy: at least 8 characters. Tighten via install settings.">
+          <input
+            type="text"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            autoFocus
+            required
+            minLength={8}
+            className="w-full bg-bg-input border border-border rounded px-2 py-1.5 text-sm text-text font-mono"
+          />
+        </Field>
+        <Field label="Confirm password">
+          <input
+            type="text"
+            value={confirm}
+            onChange={(e) => setConfirm(e.target.value)}
+            required
+            minLength={8}
+            className="w-full bg-bg-input border border-border rounded px-2 py-1.5 text-sm text-text font-mono"
+          />
+        </Field>
+        <label className="flex items-center gap-2 text-sm text-text">
+          <input type="checkbox" checked={revokeSessions} onChange={(e) => setRevokeSessions(e.target.checked)} />
+          Revoke active sessions
+        </label>
+        <FormError message={err} />
+        <div className="flex justify-end gap-2 pt-2">
+          <button type="button" onClick={onClose} className="px-3 py-1.5 text-sm text-text-muted hover:text-text">
+            Cancel
+          </button>
+          <button
+            type="submit"
+            disabled={busy || !password || password !== confirm}
+            className="px-3 py-1.5 text-sm bg-accent text-bg rounded font-medium disabled:opacity-50"
+          >{busy ? "Saving..." : "Set password"}</button>
+        </div>
+      </form>
+    </Modal>
   );
 }
 
