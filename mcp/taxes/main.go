@@ -2,6 +2,7 @@ package main
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -16,7 +17,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: taxes
 display_name: Taxes
-version: 1.0.0
+version: 1.0.1
 description: Business tax profiles, estimates, statutory obligations, social contributions, filings, and payment tracking.
 author: Apteva
 scopes: [project, global]
@@ -107,7 +108,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	if err := seedTaxRules(ctx.AppDB()); err != nil {
 		return err
 	}
-	ctx.Logger().Info("taxes mounted", "version", "1.0.0", "scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
+	ctx.Logger().Info("taxes mounted", "version", "1.0.1", "scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
 	return nil
 }
 
@@ -118,12 +119,66 @@ func (a *App) EventHandlers() []sdk.EventHandler { return nil }
 
 func (a *App) HTTPRoutes() []sdk.Route {
 	return []sdk.Route{
+		{Pattern: "/tools/", Handler: a.handleToolHTTP},
 		{Pattern: "/profiles", Handler: a.handleProfiles},
 		{Pattern: "/rules", Handler: a.handleRules},
 		{Pattern: "/periods", Handler: a.handlePeriods},
 		{Pattern: "/obligations", Handler: a.handleObligations},
 		{Pattern: "/documents", Handler: a.handleDocuments},
 	}
+}
+
+func (a *App) handleToolHTTP(w http.ResponseWriter, r *http.Request) {
+	if globalCtx == nil {
+		httpErr(w, http.StatusServiceUnavailable, "app not mounted")
+		return
+	}
+	name := strings.Trim(strings.TrimPrefix(r.URL.Path, "/tools/"), "/")
+	if name == "" {
+		if r.Method != http.MethodGet {
+			httpErr(w, http.StatusMethodNotAllowed, "method not allowed")
+			return
+		}
+		tools := []map[string]any{}
+		for _, tool := range a.MCPTools() {
+			tools = append(tools, map[string]any{
+				"name":         tool.Name,
+				"description":  tool.Description,
+				"input_schema": tool.InputSchema,
+			})
+		}
+		writeJSON(w, map[string]any{"tools": tools})
+		return
+	}
+	if r.Method != http.MethodPost {
+		httpErr(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	args := map[string]any{}
+	if r.Body != nil {
+		if err := json.NewDecoder(r.Body).Decode(&args); err != nil && err.Error() != "EOF" {
+			httpErr(w, http.StatusBadRequest, "invalid json body: "+err.Error())
+			return
+		}
+	}
+	for k, vals := range r.URL.Query() {
+		if len(vals) > 0 {
+			args[k] = vals[0]
+		}
+	}
+	for _, tool := range a.MCPTools() {
+		if tool.Name != name {
+			continue
+		}
+		out, err := tool.Handler(globalCtx, args)
+		if err != nil {
+			httpErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		writeJSON(w, out)
+		return
+	}
+	httpErr(w, http.StatusNotFound, "unknown tool: "+name)
 }
 
 func (a *App) MCPTools() []sdk.Tool {
