@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-label="Fetch">
+  <rect width="256" height="256" rx="56" fill="#111827"/>
+  <path d="M54 132h104" fill="none" stroke="#38bdf8" stroke-width="20" stroke-linecap="round"/>
+  <path d="M132 82l58 50-58 50" fill="none" stroke="#38bdf8" stroke-width="20" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M62 180h92" fill="none" stroke="#22c55e" stroke-width="14" stroke-linecap="round" opacity=".95"/>
+  <circle cx="71" cy="76" r="14" fill="#f59e0b"/>
+</svg>

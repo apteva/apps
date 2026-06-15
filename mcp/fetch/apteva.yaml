@@ -1,0 +1,75 @@
+schema: apteva-app/v1
+
+name: fetch
+display_name: Fetch
+version: 0.1.0
+description: |
+  Controlled HTTP client for agents and operators. Agents get one MCP
+  tool for GET/POST/PUT/PATCH/DELETE-style HTTP requests with timeouts,
+  size caps, redirect limits, header redaction, and private-network
+  blocking. The dashboard panel provides saved requests, environments,
+  and redacted execution history.
+
+author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/fetch
+icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/fetch/icon.svg
+tags: [http, api, fetch, productivity]
+
+scopes: [project, global]
+min_apteva_version: "0.10.0"
+
+requires:
+  permissions:
+    - db.write.app
+    - net.egress
+
+provides:
+  http_routes:
+    - prefix: /
+  mcp_tools:
+    - name: fetch_request
+      description: "Send one controlled HTTP request. Args: method, url, headers?, query?, body?, environment_id?, variables?, timeout_ms?, follow_redirects?, max_response_bytes?, save_history?."
+  ui_panels:
+    - slot: project.page
+      label: Fetch
+      icon: send
+      entry: /ui/FetchPanel.mjs
+
+runtime:
+  kind: source
+  source:
+    repo: github.com/apteva/apps
+    ref: main
+    entry: mcp/fetch
+  port: 8080
+  health_check: /health
+
+db:
+  driver: sqlite
+  path: /data/fetch.db
+  migrations: migrations/
+
+config_schema:
+  - name: allowed_hosts
+    type: text
+    label: Allowed hosts
+    description: Optional comma-separated host allowlist. Supports exact hosts and leading-dot suffixes like .example.com.
+  - name: blocked_hosts
+    type: text
+    label: Blocked hosts
+    description: Optional comma-separated host denylist. Supports exact hosts and leading-dot suffixes like .example.com.
+  - name: allow_private_networks
+    type: bool
+    default: false
+    label: Allow private networks
+    description: Off by default to reduce SSRF risk. When false, loopback, private, link-local, multicast, and metadata IPs are blocked.
+  - name: default_timeout_ms
+    type: number
+    default: 15000
+    label: Default timeout (ms)
+  - name: max_response_bytes
+    type: number
+    default: 1048576
+    label: Max response bytes
+
+upgrade_policy: auto-patch
