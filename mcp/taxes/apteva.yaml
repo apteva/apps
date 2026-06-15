@@ -1,0 +1,101 @@
+schema: apteva-app/v1
+
+name: taxes
+display_name: Taxes
+version: 1.0.0
+description: |
+  Business tax profiles, estimates, statutory obligations, social
+  contributions, filings, and payment tracking. Reads income from
+  billing, expenses/payments from bills, and keeps tax calculations
+  auditable by profile, rule version, and source period.
+
+author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/taxes
+icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/taxes/icon.svg
+tags: [taxes, finance, vat, corporate-tax, social-security]
+
+scopes: [project, global]
+min_apteva_version: "0.10.0"
+
+requires:
+  permissions:
+    - db.write.app
+    - platform.apps.call
+  apps:
+    - name: billing
+      optional: true
+      reason: Provides sales invoices, output tax, and payments for estimates.
+    - name: bills
+      optional: true
+      reason: Provides vendor bills, input tax, expense payments, and tax payable records.
+
+provides:
+  http_routes:
+    - prefix: /
+  mcp_tools:
+    - { name: tax_profiles_create, description: "Create a business tax profile such as ES_AUTONOMO, ES_SL, FR_SAS, or FR_SARL." }
+    - { name: tax_profiles_update, description: "Update a tax profile's structure, filing cadence, VAT settings, fiscal year, or config." }
+    - { name: tax_profiles_get, description: "Fetch one tax profile." }
+    - { name: tax_profiles_list, description: "List tax profiles in this project." }
+    - { name: tax_rules_list, description: "List active tax rule versions by country, structure, year, and tax type." }
+    - { name: tax_rules_get, description: "Fetch one tax rule by id or key." }
+    - { name: tax_periods_open, description: "Open a filing/calculation period for VAT, income tax, corporate tax, social security, or all." }
+    - { name: tax_periods_list, description: "List tax periods with profile, type, date, and status filters." }
+    - { name: tax_periods_get, description: "Fetch one tax period." }
+    - { name: tax_periods_close, description: "Close a tax period after review or filing." }
+    - { name: tax_estimate_vat, description: "Estimate VAT/IVA/TVA payable or refundable for a profile and period." }
+    - { name: tax_estimate_income_tax, description: "Estimate personal/business income tax, including autonomo-style profiles." }
+    - { name: tax_estimate_corporate_tax, description: "Estimate corporate income tax for company profiles such as ES_SL or FR_SAS." }
+    - { name: tax_estimate_social_contributions, description: "Estimate statutory social security/social contribution obligations." }
+    - { name: tax_estimate_all, description: "Run the relevant tax estimates for a profile and period and return one overview." }
+    - { name: tax_obligations_create, description: "Create a tax/statutory obligation manually." }
+    - { name: tax_obligations_update, description: "Update amount, due date, status, notes, or metadata for an obligation." }
+    - { name: tax_obligations_list, description: "List tax obligations by profile, period, type, status, due date, or authority." }
+    - { name: tax_obligations_get, description: "Fetch one tax obligation." }
+    - { name: tax_obligations_mark_filed, description: "Mark an obligation as filed with optional filing reference/date." }
+    - { name: tax_obligations_mark_waived, description: "Mark an obligation as waived/cancelled with a reason." }
+    - { name: tax_payments_record, description: "Record a payment against a tax obligation." }
+    - { name: tax_payments_list, description: "List payments against tax obligations." }
+    - { name: tax_payments_link_bill, description: "Link an existing bills bill/payment to a tax obligation." }
+    - { name: tax_payments_create_bill, description: "Create a payable bill in the bills app for a tax authority obligation." }
+    - { name: tax_adjustments_create, description: "Add a manual tax adjustment such as non-deductible expense, credit, private-use correction, penalty, or rounding." }
+    - { name: tax_adjustments_list, description: "List manual tax adjustments by profile, period, type, or status." }
+    - { name: tax_adjustments_delete, description: "Delete a draft/manual adjustment." }
+    - { name: tax_report_generate, description: "Generate an auditable tax report for a profile and period." }
+    - { name: tax_documents_list, description: "List generated tax reports, filings, receipts, and linked storage documents." }
+    - { name: tax_documents_get, description: "Fetch one generated tax document record." }
+    - { name: tax_sync_from_billing, description: "Pull sales invoice/payment summary from the billing app for a profile and period." }
+    - { name: tax_sync_from_bills, description: "Pull vendor bill/payment summary from the bills app for a profile and period." }
+    - { name: tax_sync_all, description: "Refresh both billing and bills source summaries for a profile and period." }
+  ui_panels:
+    - slot: project.page
+      label: Taxes
+      icon: receipt
+      entry: /ui/TaxesPanel.mjs
+  skills:
+    - name: how-to-use-taxes
+      command: /taxes
+      body_file: skills/how-to-use-taxes.md
+      description: |
+        Tax profile, estimate, obligation, filing, and statutory payment
+        workflow. Load when users ask about VAT/IVA/TVA, corporate tax,
+        autonomo, SL, SAS, SARL, social security, or tax payments.
+      metadata:
+        category: finance
+        icon: receipt
+
+runtime:
+  kind: source
+  source:
+    repo: github.com/apteva/apps
+    ref: main
+    entry: mcp/taxes
+  port: 8080
+  health_check: /health
+
+db:
+  driver: sqlite
+  path: /data/taxes.db
+  migrations: migrations/
+
+upgrade_policy: auto-patch

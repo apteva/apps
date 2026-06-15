@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-label="Taxes">
+  <rect width="256" height="256" rx="48" fill="#102033"/>
+  <path d="M72 44h86l34 34v134H72z" fill="#f8fafc"/>
+  <path d="M158 44v36h34" fill="#cbd5e1"/>
+  <path d="M95 104h66M95 132h66M95 160h38" stroke="#102033" stroke-width="12" stroke-linecap="round"/>
+  <circle cx="176" cy="172" r="34" fill="#14b8a6"/>
+  <path d="M161 172h30M176 157v30" stroke="#052e2b" stroke-width="10" stroke-linecap="round"/>
+</svg>

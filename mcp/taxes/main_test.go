@@ -1,0 +1,162 @@
+package main
+
+import (
+	"database/sql"
+	"os"
+	"testing"
+
+	sdk "github.com/apteva/app-sdk"
+	_ "modernc.org/sqlite"
+)
+
+func TestEmbeddedManifestTools(t *testing.T) {
+	app := &App{}
+	m := app.Manifest()
+	if m.Name != "taxes" {
+		t.Fatalf("manifest.Name=%q, want taxes", m.Name)
+	}
+	declared := map[string]bool{}
+	for _, tool := range m.Provides.MCPTools {
+		declared[tool.Name] = true
+	}
+	implemented := map[string]bool{}
+	for _, tool := range app.MCPTools() {
+		implemented[tool.Name] = true
+		if tool.Description == "" {
+			t.Fatalf("tool %q missing description", tool.Name)
+		}
+		if tool.InputSchema["type"] != "object" {
+			t.Fatalf("tool %q schema type=%v, want object", tool.Name, tool.InputSchema["type"])
+		}
+	}
+	for name := range declared {
+		if !implemented[name] {
+			t.Fatalf("manifest declares %q but handler missing", name)
+		}
+	}
+	if len(implemented) != 34 {
+		t.Fatalf("implemented tools=%d, want 34", len(implemented))
+	}
+}
+
+func TestExternalManifestParses(t *testing.T) {
+	raw, err := os.ReadFile("apteva.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, err := sdk.ParseManifest(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.Name != "taxes" {
+		t.Fatalf("external manifest name=%q", m.Name)
+	}
+}
+
+func TestVATCalculationFormula(t *testing.T) {
+	db := openTestDB(t)
+	if err := seedTaxRules(db); err != nil {
+		t.Fatal(err)
+	}
+	rule, err := findRule(db, "ES", "ES_SL", "vat", 2026)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := calculateOutputs("vat", rule, map[string]any{
+		"revenue_cents":    int64(1000000),
+		"expenses_cents":   int64(200000),
+		"output_tax_cents": int64(0),
+		"input_tax_cents":  int64(0),
+	}, "2026-04-01", "2026-06-30")
+	if out["estimated_payable_cents"].(int64) != 168000 {
+		t.Fatalf("payable=%v, want 168000", out["estimated_payable_cents"])
+	}
+}
+
+func TestInsertEstimatedObligation(t *testing.T) {
+	db := openTestDB(t)
+	profile := Profile{
+		ProjectID: "p1",
+		ID:        1,
+		Name:      "Spanish SL",
+		Country:   "ES",
+		Structure: "ES_SL",
+		Currency:  "EUR",
+	}
+	_, err := db.Exec(`INSERT INTO tax_profiles (id,project_id,name,country,structure,currency) VALUES (?,?,?,?,?,?)`,
+		profile.ID, profile.ProjectID, profile.Name, profile.Country, profile.Structure, profile.Currency)
+	if err != nil {
+		t.Fatal(err)
+	}
+	obligation, err := insertObligation(db, profile, 0, 0, "vat", "Q2 IVA", 168000, "EUR", "2026-07-20", "Agencia Tributaria", "estimated", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if obligation.AmountCents != 168000 {
+		t.Fatalf("amount=%d, want 168000", obligation.AmountCents)
+	}
+	got, err := getObligation(db, "p1", obligation.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Authority != "Agencia Tributaria" {
+		t.Fatalf("authority=%q", got.Authority)
+	}
+}
+
+func TestSeedRulesIncludesSpainAndFrance(t *testing.T) {
+	db := openTestDB(t)
+	if err := seedTaxRules(db); err != nil {
+		t.Fatal(err)
+	}
+	rules, err := listRules(db, map[string]any{
+		"year": 2026,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	seen := map[string]bool{}
+	for _, r := range rules {
+		seen[r.Country+"/"+r.Structure+"/"+r.TaxType] = true
+	}
+	for _, want := range []string{"ES/ES_AUTONOMO/social_contributions", "ES/ES_SL/corporate_tax", "FR/FR_SAS/vat"} {
+		if !seen[want] {
+			t.Fatalf("missing rule %s", want)
+		}
+	}
+}
+
+func TestSocialContributionEstimate(t *testing.T) {
+	db := openTestDB(t)
+	if err := seedTaxRules(db); err != nil {
+		t.Fatal(err)
+	}
+	rule, err := findRule(db, "ES", "ES_AUTONOMO", "social_contributions", 2026)
+	if err != nil {
+		t.Fatal(err)
+	}
+	out := calculateOutputs("social_contributions", rule, map[string]any{
+		"social_contribution_cents": int64(35000),
+		"months":                    int64(3),
+	}, "2026-01-01", "2026-03-31")
+	if out["estimated_payable_cents"].(int64) != 105000 {
+		t.Fatalf("payable=%v, want 105000", out["estimated_payable_cents"])
+	}
+}
+
+func openTestDB(t *testing.T) *sql.DB {
+	t.Helper()
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { db.Close() })
+	raw, err := os.ReadFile("migrations/001_init.sql")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(string(raw)); err != nil {
+		t.Fatal(err)
+	}
+	return db
+}
