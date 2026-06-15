@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: taxes
 display_name: Taxes
-version: 1.0.1
+version: 1.0.2
 description: |
   Business tax profiles, estimates, statutory obligations, social
   contributions, filings, and payment tracking. Reads income from
@@ -40,6 +40,7 @@ provides:
     - { name: tax_rules_list, description: "List active tax rule versions by country, structure, year, and tax type." }
     - { name: tax_rules_get, description: "Fetch one tax rule by id or key." }
     - { name: tax_periods_open, description: "Open a filing/calculation period for VAT, income tax, corporate tax, social security, or all." }
+    - { name: tax_periods_generate, description: "Generate the standard current-year periods inferred from a tax profile's country, structure, and filing cadence." }
     - { name: tax_periods_list, description: "List tax periods with profile, type, date, and status filters." }
     - { name: tax_periods_get, description: "Fetch one tax period." }
     - { name: tax_periods_close, description: "Close a tax period after review or filing." }

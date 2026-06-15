@@ -149,6 +149,175 @@ func getPeriod(db *sql.DB, projectID string, id int64) (map[string]any, error) {
 	return items[0], nil
 }
 
+type inferredPeriod struct {
+	TaxType     string
+	PeriodStart string
+	PeriodEnd   string
+	DueDate     string
+}
+
+func generatePeriodsForProfile(db *sql.DB, profile Profile, year int) ([]map[string]any, error) {
+	inferred := inferPeriods(profile, year)
+	out := []map[string]any{}
+	for _, p := range inferred {
+		if _, err := db.Exec(`INSERT INTO tax_periods
+			(project_id,profile_id,tax_type,period_start,period_end,due_date,metadata_json)
+			VALUES (?,?,?,?,?,?,?)
+			ON CONFLICT(project_id, profile_id, tax_type, period_start, period_end)
+			DO UPDATE SET due_date=excluded.due_date, updated_at=CURRENT_TIMESTAMP`,
+			profile.ProjectID, profile.ID, p.TaxType, p.PeriodStart, p.PeriodEnd, p.DueDate,
+			mustJSON(map[string]any{"generated": true, "source": "tax_profile"})); err != nil {
+			return nil, err
+		}
+	}
+	rows, err := db.Query(`SELECT id,project_id,profile_id,tax_type,period_start,period_end,due_date,status,filed_at,filing_ref,metadata_json
+		FROM tax_periods
+		WHERE project_id=? AND profile_id=? AND period_start>=? AND period_end<=?
+		ORDER BY period_start, tax_type`, profile.ProjectID, profile.ID, fmt.Sprintf("%04d-01-01", year), fmt.Sprintf("%04d-12-31", year))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out, err = scanRows(rows)
+	return out, err
+}
+
+func inferPeriods(profile Profile, year int) []inferredPeriod {
+	taxTypes := inferredTaxTypes(profile)
+	out := []inferredPeriod{}
+	for _, taxType := range taxTypes {
+		switch taxType {
+		case "social_contributions":
+			out = append(out, monthlyPeriods(year, taxType, profile.Country)...)
+		case "income_tax":
+			if profile.Country == "ES" && profile.Structure == "ES_AUTONOMO" {
+				out = append(out, quarterlyPeriods(year, taxType, profile.Country)...)
+			} else {
+				out = append(out, annualPeriod(year, taxType, profile.Country))
+			}
+		case "corporate_tax":
+			out = append(out, annualPeriod(year, taxType, profile.Country))
+		case "vat":
+			switch strings.ToLower(profile.FilingCadence) {
+			case "monthly":
+				out = append(out, monthlyPeriods(year, taxType, profile.Country)...)
+			case "annual":
+				out = append(out, annualPeriod(year, taxType, profile.Country))
+			default:
+				out = append(out, quarterlyPeriods(year, taxType, profile.Country)...)
+			}
+		}
+	}
+	return out
+}
+
+func inferredTaxTypes(profile Profile) []string {
+	switch profile.Structure {
+	case "ES_AUTONOMO":
+		return []string{"vat", "income_tax", "social_contributions"}
+	case "ES_SL":
+		return []string{"vat", "corporate_tax"}
+	case "FR_SAS", "FR_SASU", "FR_SARL":
+		return []string{"vat", "corporate_tax"}
+	case "FR_EURL":
+		return []string{"vat", "income_tax"}
+	default:
+		return []string{"vat"}
+	}
+}
+
+func quarterlyPeriods(year int, taxType, country string) []inferredPeriod {
+	quarters := [][2]string{{"01-01", "03-31"}, {"04-01", "06-30"}, {"07-01", "09-30"}, {"10-01", "12-31"}}
+	out := []inferredPeriod{}
+	for i, q := range quarters {
+		out = append(out, inferredPeriod{
+			TaxType:     taxType,
+			PeriodStart: fmt.Sprintf("%04d-%s", year, q[0]),
+			PeriodEnd:   fmt.Sprintf("%04d-%s", year, q[1]),
+			DueDate:     dueDateFor(country, taxType, year, i+1, "quarterly"),
+		})
+	}
+	return out
+}
+
+func monthlyPeriods(year int, taxType, country string) []inferredPeriod {
+	out := []inferredPeriod{}
+	for month := 1; month <= 12; month++ {
+		start := time.Date(year, time.Month(month), 1, 0, 0, 0, 0, time.UTC)
+		end := start.AddDate(0, 1, -1)
+		out = append(out, inferredPeriod{
+			TaxType:     taxType,
+			PeriodStart: start.Format("2006-01-02"),
+			PeriodEnd:   end.Format("2006-01-02"),
+			DueDate:     dueDateFor(country, taxType, year, month, "monthly"),
+		})
+	}
+	return out
+}
+
+func annualPeriod(year int, taxType, country string) inferredPeriod {
+	return inferredPeriod{
+		TaxType:     taxType,
+		PeriodStart: fmt.Sprintf("%04d-01-01", year),
+		PeriodEnd:   fmt.Sprintf("%04d-12-31", year),
+		DueDate:     dueDateFor(country, taxType, year, 0, "annual"),
+	}
+}
+
+func dueDateFor(country, taxType string, year, ordinal int, cadence string) string {
+	switch country {
+	case "ES":
+		if taxType == "corporate_tax" {
+			return fmt.Sprintf("%04d-07-25", year+1)
+		}
+		if cadence == "monthly" {
+			month := ordinal + 1
+			dueYear := year
+			if month == 13 {
+				month = 1
+				dueYear = year + 1
+			}
+			return fmt.Sprintf("%04d-%02d-20", dueYear, month)
+		}
+		if cadence == "quarterly" {
+			due := []string{
+				fmt.Sprintf("%04d-04-20", year),
+				fmt.Sprintf("%04d-07-20", year),
+				fmt.Sprintf("%04d-10-20", year),
+				fmt.Sprintf("%04d-01-20", year+1),
+			}
+			if ordinal >= 1 && ordinal <= len(due) {
+				return due[ordinal-1]
+			}
+		}
+	case "FR":
+		if taxType == "corporate_tax" {
+			return fmt.Sprintf("%04d-05-15", year+1)
+		}
+		if cadence == "monthly" {
+			month := ordinal + 1
+			dueYear := year
+			if month == 13 {
+				month = 1
+				dueYear = year + 1
+			}
+			return fmt.Sprintf("%04d-%02d-24", dueYear, month)
+		}
+		if cadence == "quarterly" {
+			due := []string{
+				fmt.Sprintf("%04d-04-24", year),
+				fmt.Sprintf("%04d-07-24", year),
+				fmt.Sprintf("%04d-10-24", year),
+				fmt.Sprintf("%04d-01-24", year+1),
+			}
+			if ordinal >= 1 && ordinal <= len(due) {
+				return due[ordinal-1]
+			}
+		}
+	}
+	return ""
+}
+
 func calculateOutputs(taxType string, rule Rule, inputs map[string]any, start, end string) map[string]any {
 	revenue := int64FromAny(inputs["revenue_cents"])
 	expenses := int64FromAny(inputs["expenses_cents"])

@@ -17,7 +17,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: taxes
 display_name: Taxes
-version: 1.0.1
+version: 1.0.2
 description: Business tax profiles, estimates, statutory obligations, social contributions, filings, and payment tracking.
 author: Apteva
 scopes: [project, global]
@@ -41,6 +41,7 @@ provides:
     - { name: tax_rules_list, description: "List active tax rule versions." }
     - { name: tax_rules_get, description: "Fetch one tax rule." }
     - { name: tax_periods_open, description: "Open a filing/calculation period." }
+    - { name: tax_periods_generate, description: "Generate standard periods inferred from a tax profile." }
     - { name: tax_periods_list, description: "List tax periods." }
     - { name: tax_periods_get, description: "Fetch one tax period." }
     - { name: tax_periods_close, description: "Close a tax period." }
@@ -108,7 +109,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	if err := seedTaxRules(ctx.AppDB()); err != nil {
 		return err
 	}
-	ctx.Logger().Info("taxes mounted", "version", "1.0.1", "scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
+	ctx.Logger().Info("taxes mounted", "version", "1.0.2", "scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
 	return nil
 }
 
@@ -190,6 +191,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "tax_rules_list", Description: "List tax rules. Args: country?, structure?, tax_type?, year?, active?.", InputSchema: schemaObject(ruleFilterProps(), nil), Handler: a.toolRulesList},
 		{Name: "tax_rules_get", Description: "Fetch a tax rule by id, or by country+structure+tax_type+year.", InputSchema: schemaObject(withID(ruleFilterProps()), nil), Handler: a.toolRulesGet},
 		{Name: "tax_periods_open", Description: "Open a tax period. Args: profile_id, tax_type, period_start, period_end, due_date?, metadata?.", InputSchema: schemaObject(periodProps(), []string{"profile_id", "tax_type", "period_start", "period_end"}), Handler: a.toolPeriodsOpen},
+		{Name: "tax_periods_generate", Description: "Generate standard periods inferred from a profile's country, structure, and filing cadence. Args: profile_id, year? (default current year).", InputSchema: schemaObject(map[string]any{"profile_id": intSchema(), "year": intSchema()}, []string{"profile_id"}), Handler: a.toolPeriodsGenerate},
 		{Name: "tax_periods_list", Description: "List tax periods. Args: profile_id?, tax_type?, status?, period_start?, period_end?.", InputSchema: schemaObject(map[string]any{"profile_id": intSchema(), "tax_type": strSchema(), "status": strSchema(), "period_start": strSchema(), "period_end": strSchema()}, nil), Handler: a.toolPeriodsList},
 		{Name: "tax_periods_get", Description: "Fetch one tax period by id.", InputSchema: schemaObject(map[string]any{"id": intSchema()}, []string{"id"}), Handler: a.toolPeriodsGet},
 		{Name: "tax_periods_close", Description: "Close a period. Args: id, status? (default closed), filed_at?, filing_ref?.", InputSchema: schemaObject(map[string]any{"id": intSchema(), "status": strSchema(), "filed_at": strSchema(), "filing_ref": strSchema()}, []string{"id"}), Handler: a.toolPeriodsClose},
@@ -363,7 +365,15 @@ func (a *App) toolProfilesCreate(ctx *sdk.AppCtx, args map[string]any) (any, err
 	}
 	p.ID, _ = res.LastInsertId()
 	audit(ctx.AppDB(), p.ProjectID, "tax_profile", p.ID, "created", p.Name, nil)
-	return map[string]any{"profile": p}, nil
+	out := map[string]any{"profile": p}
+	if boolArg(args, "auto_open_periods", true) {
+		generated, err := generatePeriodsForProfile(ctx.AppDB(), p, intArg(args, "year", currentYear()))
+		if err != nil {
+			return nil, err
+		}
+		out["periods"] = generated
+	}
+	return out, nil
 }
 
 func (a *App) toolProfilesUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -518,6 +528,20 @@ func (a *App) toolPeriodsOpen(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	audit(ctx.AppDB(), profile.ProjectID, "tax_period", id, "opened", taxType, nil)
 	period, err := getPeriod(ctx.AppDB(), profile.ProjectID, id)
 	return map[string]any{"period": period}, err
+}
+
+func (a *App) toolPeriodsGenerate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	profile, err := getProfile(ctx.AppDB(), projectID(ctx, args), int64Arg(args, "profile_id", 0))
+	if err != nil {
+		return nil, err
+	}
+	year := intArg(args, "year", currentYear())
+	periods, err := generatePeriodsForProfile(ctx.AppDB(), profile, year)
+	if err != nil {
+		return nil, err
+	}
+	audit(ctx.AppDB(), profile.ProjectID, "tax_profile", profile.ID, "periods_generated", fmt.Sprintf("%d", year), map[string]any{"count": len(periods)})
+	return map[string]any{"profile": profile, "year": year, "periods": periods}, nil
 }
 
 func (a *App) toolPeriodsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {

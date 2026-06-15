@@ -194,7 +194,7 @@ export default function TaxesPanel() {
   const [tools, setTools] = useState([]);
   const [result, setResult] = useState(null);
 
-  const [profileForm, setProfileForm] = useState({ id: "", name: "", country: "ES", structure: "ES_AUTONOMO", region: "", fiscal_year_start: "01-01", fiscal_year_end: "12-31", vat_registered: true, filing_cadence: "quarterly", accounting_basis: "accrual", currency: "EUR" });
+  const [profileForm, setProfileForm] = useState({ id: "", name: "", country: "ES", structure: "ES_AUTONOMO", region: "", fiscal_year_start: "01-01", fiscal_year_end: "12-31", vat_registered: true, filing_cadence: "quarterly", accounting_basis: "accrual", currency: "EUR", auto_open_periods: true });
   const [periodForm, setPeriodForm] = useState({ id: "", profile_id: "", tax_type: "vat", period_start: yearStart(), period_end: yearEnd(), due_date: "" });
   const [estimateForm, setEstimateForm] = useState({ profile_id: "", period_id: "", tax_type: "all", period_start: yearStart(), period_end: yearEnd(), due_date: "", revenue: "", expenses: "", output_tax: "", input_tax: "", taxable_profit: "", social_contribution: "", months: "", sync_sources: false, create_obligation: true });
   const [obligationForm, setObligationForm] = useState({ id: "", profile_id: "", period_id: "", tax_type: "vat", title: "", amount: "", currency: "EUR", due_date: "", authority: "", status: "estimated" });
@@ -292,11 +292,12 @@ export default function TaxesPanel() {
       filing_cadence: profile.filing_cadence || "quarterly",
       accounting_basis: profile.accounting_basis || "accrual",
       currency: profile.currency || "EUR",
+      auto_open_periods: false,
     });
   }
 
   function profilePayload() {
-    return compact({ ...profileForm, id: profileForm.id ? Number(profileForm.id) : undefined, vat_registered: profileForm.vat_registered });
+    return compact({ ...profileForm, id: profileForm.id ? Number(profileForm.id) : undefined, vat_registered: profileForm.vat_registered, auto_open_periods: profileForm.auto_open_periods });
   }
 
   function estimatePayload() {
@@ -360,7 +361,7 @@ export default function TaxesPanel() {
 
   function renderProfiles() {
     return jsxs("div", { className: "grid gap-4", style: { gridTemplateColumns: "360px minmax(0, 1fr)" }, children: [
-      jsx(Panel, { title: profileForm.id ? "Edit profile" : "Create profile", actions: jsx(Button, { onClick: () => setProfileForm({ id: "", name: "", country: "ES", structure: "ES_AUTONOMO", region: "", fiscal_year_start: "01-01", fiscal_year_end: "12-31", vat_registered: true, filing_cadence: "quarterly", accounting_basis: "accrual", currency: "EUR" }), children: "New" }), children:
+      jsx(Panel, { title: profileForm.id ? "Edit profile" : "Create profile", actions: jsx(Button, { onClick: () => setProfileForm({ id: "", name: "", country: "ES", structure: "ES_AUTONOMO", region: "", fiscal_year_start: "01-01", fiscal_year_end: "12-31", vat_registered: true, filing_cadence: "quarterly", accounting_basis: "accrual", currency: "EUR", auto_open_periods: true }), children: "New" }), children:
         jsxs("div", { className: "flex flex-col gap-3", children: [
           jsx(TextInput, { label: "Name", value: profileForm.name, onChange: (v) => setProfileForm({ ...profileForm, name: v }) }),
           jsxs("div", { className: "grid grid-cols-2 gap-2", children: [
@@ -380,7 +381,11 @@ export default function TaxesPanel() {
             jsx(TextInput, { label: "Fiscal year end", value: profileForm.fiscal_year_end, onChange: (v) => setProfileForm({ ...profileForm, fiscal_year_end: v }) }),
           ] }),
           jsx(CheckInput, { label: "VAT registered", checked: profileForm.vat_registered, onChange: (v) => setProfileForm({ ...profileForm, vat_registered: v }) }),
-          jsx(Button, { tone: "primary", disabled: !profileForm.name, onClick: () => run(profileForm.id ? "tax_profiles_update" : "tax_profiles_create", profilePayload()), children: profileForm.id ? "Save profile" : "Create profile" }),
+          !profileForm.id && jsx(CheckInput, { label: "Auto-open standard periods", checked: profileForm.auto_open_periods, onChange: (v) => setProfileForm({ ...profileForm, auto_open_periods: v }) }),
+          jsxs("div", { className: "flex flex-wrap gap-2", children: [
+            jsx(Button, { tone: "primary", disabled: !profileForm.name, onClick: () => run(profileForm.id ? "tax_profiles_update" : "tax_profiles_create", profilePayload()), children: profileForm.id ? "Save profile" : "Create profile" }),
+            jsx(Button, { disabled: !profileForm.id, onClick: () => run("tax_periods_generate", { profile_id: Number(profileForm.id), year: new Date().getFullYear() }), children: "Generate periods" }),
+          ] }),
         ] }),
       }),
       jsx(Panel, { title: "Profiles", children: jsx(Table, { columns: [{ key: "name", label: "Name" }, { key: "country", label: "Country" }, { key: "structure", label: "Structure" }, { key: "filing_cadence", label: "Cadence" }, { key: "currency", label: "Currency" }], rows: profiles, onSelect: selectProfile, selectedId: Number(profileForm.id) }) }),
@@ -403,7 +408,8 @@ export default function TaxesPanel() {
           jsx(TextInput, { label: "End", type: "date", value: periodForm.period_end, onChange: (v) => setPeriodForm({ ...periodForm, period_end: v }) }),
         ] }),
         jsx(TextInput, { label: "Due date", type: "date", value: periodForm.due_date, onChange: (v) => setPeriodForm({ ...periodForm, due_date: v }) }),
-        jsx(Button, { tone: "primary", disabled: !periodForm.profile_id, onClick: () => run("tax_periods_open", { ...periodForm, profile_id: Number(periodForm.profile_id) }), children: "Open period" }),
+        jsx(Button, { tone: "primary", disabled: !periodForm.profile_id, onClick: () => run("tax_periods_open", { ...periodForm, profile_id: Number(periodForm.profile_id) }), children: "Open custom period" }),
+        jsx(Button, { disabled: !periodForm.profile_id, onClick: () => run("tax_periods_generate", { profile_id: Number(periodForm.profile_id), year: new Date().getFullYear() }), children: "Generate standard periods" }),
         jsx(Button, { disabled: !periodForm.id, onClick: () => run("tax_periods_close", { id: Number(periodForm.id), status: "closed" }), children: "Close selected" }),
       ] }) }),
       jsx(Panel, { title: "Periods", children: jsx(Table, { columns: [{ key: "tax_type", label: "Tax type" }, { key: "period_start", label: "Start" }, { key: "period_end", label: "End" }, { key: "due_date", label: "Due" }, { key: "status", label: "Status", render: (p) => jsx("span", { className: statusClass(p.status), children: p.status }) }], rows: periods, onSelect: (p) => setPeriodForm({ ...periodForm, id: String(p.id), profile_id: String(p.profile_id), tax_type: p.tax_type, period_start: p.period_start, period_end: p.period_end, due_date: p.due_date || "" }), selectedId: Number(periodForm.id) }) }),
@@ -599,4 +605,3 @@ export default function TaxesPanel() {
     jsx("main", { className: "flex-1 overflow-auto p-4", children: body() }),
   ] });
 }
-

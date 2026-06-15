@@ -34,8 +34,8 @@ func TestEmbeddedManifestTools(t *testing.T) {
 			t.Fatalf("manifest declares %q but handler missing", name)
 		}
 	}
-	if len(implemented) != 34 {
-		t.Fatalf("implemented tools=%d, want 34", len(implemented))
+	if len(implemented) != 35 {
+		t.Fatalf("implemented tools=%d, want 35", len(implemented))
 	}
 }
 
@@ -123,6 +123,40 @@ func TestSeedRulesIncludesSpainAndFrance(t *testing.T) {
 		if !seen[want] {
 			t.Fatalf("missing rule %s", want)
 		}
+	}
+}
+
+func TestInferPeriodsForSpanishAutonomo(t *testing.T) {
+	db := openTestDB(t)
+	profile := Profile{
+		ID:            1,
+		ProjectID:     "p1",
+		Name:          "Autonomo",
+		Country:       "ES",
+		Structure:     "ES_AUTONOMO",
+		FilingCadence: "quarterly",
+		Currency:      "EUR",
+	}
+	if _, err := db.Exec(`INSERT INTO tax_profiles (id,project_id,name,country,structure,filing_cadence,currency) VALUES (?,?,?,?,?,?,?)`,
+		profile.ID, profile.ProjectID, profile.Name, profile.Country, profile.Structure, profile.FilingCadence, profile.Currency); err != nil {
+		t.Fatal(err)
+	}
+	periods, err := generatePeriodsForProfile(db, profile, 2026)
+	if err != nil {
+		t.Fatal(err)
+	}
+	counts := map[string]int{}
+	for _, period := range periods {
+		counts[period["tax_type"].(string)]++
+	}
+	if counts["vat"] != 4 {
+		t.Fatalf("vat periods=%d, want 4", counts["vat"])
+	}
+	if counts["income_tax"] != 4 {
+		t.Fatalf("income_tax periods=%d, want 4", counts["income_tax"])
+	}
+	if counts["social_contributions"] != 12 {
+		t.Fatalf("social periods=%d, want 12", counts["social_contributions"])
 	}
 }
 
