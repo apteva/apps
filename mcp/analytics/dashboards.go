@@ -396,6 +396,13 @@ func evaluateWidget(db *sql.DB, projectID string, w DashboardWidget) (map[string
 	limit := intConfig(w.Config, "limit", 10)
 	switch w.Type {
 	case "stat":
+		if valueKey := stringConfig(w.Config, "value", ""); valueKey != "" {
+			sum, count, err := sumScalarForWidget(db, f, valueKey)
+			if err != nil {
+				return nil, err
+			}
+			return map[string]any{"type": w.Type, "value": sum, "count": count, "metric": "sum", "field": valueKey}, nil
+		}
 		var (
 			n   int64
 			err error
@@ -410,7 +417,7 @@ func evaluateWidget(db *sql.DB, projectID string, w DashboardWidget) (map[string
 		}
 		return map[string]any{"type": w.Type, "value": n}, nil
 	case "timeseries":
-		rows, err := seriesForWidget(db, f, stringConfig(w.Config, "interval", "minute"))
+		rows, err := seriesForWidget(db, f, stringConfig(w.Config, "interval", "minute"), stringConfig(w.Config, "value", ""))
 		if err != nil {
 			return nil, err
 		}
@@ -450,7 +457,7 @@ func filterFromWidget(projectID string, cfg map[string]any) Filter {
 	return f
 }
 
-func seriesForWidget(db *sql.DB, f Filter, interval string) ([]map[string]any, error) {
+func seriesForWidget(db *sql.DB, f Filter, interval, valueKey string) ([]map[string]any, error) {
 	where, args := f.buildWhere()
 	expr := "strftime('%Y-%m-%dT%H:%M:00Z', ts / 1000, 'unixepoch')"
 	switch interval {
@@ -459,9 +466,26 @@ func seriesForWidget(db *sql.DB, f Filter, interval string) ([]map[string]any, e
 	case "day":
 		expr = "strftime('%Y-%m-%d', ts / 1000, 'unixepoch')"
 	}
-	q := "SELECT " + expr + " AS bucket, COUNT(*) AS count FROM events"
+	valueExpr := ""
+	if valueKey != "" {
+		var ok bool
+		valueExpr, ok = valueExtract(valueKey)
+		if !ok {
+			return nil, fmt.Errorf("value must be a numeric event field or props.X")
+		}
+	}
+	q := "SELECT " + expr + " AS bucket, COUNT(*) AS count"
+	if valueExpr != "" {
+		q += ", SUM(CAST(" + valueExpr + " AS REAL)) AS value"
+	}
+	q += " FROM events"
 	if where != "" {
 		q += " WHERE " + where
+		if valueExpr != "" {
+			q += " AND " + valueExpr + " IS NOT NULL"
+		}
+	} else if valueExpr != "" {
+		q += " WHERE " + valueExpr + " IS NOT NULL"
 	}
 	q += " GROUP BY bucket ORDER BY bucket"
 	rows, err := db.Query(q, args...)
@@ -473,12 +497,44 @@ func seriesForWidget(db *sql.DB, f Filter, interval string) ([]map[string]any, e
 	for rows.Next() {
 		var bucket string
 		var count int64
-		if err := rows.Scan(&bucket, &count); err != nil {
-			return nil, err
+		if valueExpr != "" {
+			var value sql.NullFloat64
+			if err := rows.Scan(&bucket, &count, &value); err != nil {
+				return nil, err
+			}
+			row := map[string]any{"bucket": bucket, "count": count, "value": 0.0}
+			if value.Valid {
+				row["value"] = value.Float64
+			}
+			out = append(out, row)
+		} else {
+			if err := rows.Scan(&bucket, &count); err != nil {
+				return nil, err
+			}
+			out = append(out, map[string]any{"bucket": bucket, "count": count})
 		}
-		out = append(out, map[string]any{"bucket": bucket, "count": count})
 	}
 	return out, rows.Err()
+}
+
+func sumScalarForWidget(db *sql.DB, f Filter, valueKey string) (float64, int64, error) {
+	expr, ok := valueExtract(valueKey)
+	if !ok {
+		return 0, 0, fmt.Errorf("value must be a numeric event field or props.X")
+	}
+	where, args := f.buildWhere()
+	q := "SELECT COALESCE(SUM(CAST(" + expr + " AS REAL)), 0), COUNT(*) FROM events"
+	if where != "" {
+		q += " WHERE " + where + " AND " + expr + " IS NOT NULL"
+	} else {
+		q += " WHERE " + expr + " IS NOT NULL"
+	}
+	var sum float64
+	var count int64
+	if err := db.QueryRow(q, args...).Scan(&sum, &count); err != nil {
+		return 0, 0, err
+	}
+	return sum, count, nil
 }
 
 func distinctCount(db *sql.DB, f Filter, by string) (int64, error) {

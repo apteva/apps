@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: analytics
 display_name: Analytics
-version: 0.8.1
+version: 0.8.2
 description: |
   Generic event analytics for Apteva apps. Other apps call
   analytics_track to record typed events; analytics_query / count /
@@ -43,6 +43,10 @@ description: |
 
   v0.8.1 fixes a Catalog load deadlock with the SDK's single SQLite
   connection runtime.
+
+  v0.8.2 lets dashboard stat and timeseries widgets sum numeric event
+  fields, so aggregate observations such as Patreon daily post views
+  can chart total views per day instead of observation row counts.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/analytics

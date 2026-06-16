@@ -119,6 +119,7 @@ interface Summary {
 interface SeriesPoint {
   day: string;
   count: number;
+  value?: number;
 }
 
 interface TopRow {
@@ -287,7 +288,7 @@ function BarSeries({ data }: { data: SeriesPoint[] }) {
   if (!data.length) return <Empty label="No events in this window." />;
   const W = 600;
   const H = 120;
-  const max = Math.max(...data.map((d) => d.count), 1);
+  const max = Math.max(...data.map((d) => d.value ?? d.count), 1);
   const bw = W / data.length;
   return (
     <svg
@@ -297,7 +298,8 @@ function BarSeries({ data }: { data: SeriesPoint[] }) {
       preserveAspectRatio="none"
     >
       {data.map((d, i) => {
-        const h = Math.max(1, (d.count / max) * (H - 2));
+        const v = d.value ?? d.count;
+        const h = Math.max(1, (v / max) * (H - 2));
         return (
           <rect
             key={d.day}
@@ -307,7 +309,7 @@ function BarSeries({ data }: { data: SeriesPoint[] }) {
             height={h}
             fill="currentColor"
           >
-            <title>{`${d.day}: ${fmt(d.count)}`}</title>
+            <title>{`${d.day}: ${fmt(v)}`}</title>
           </rect>
         );
       })}
@@ -833,7 +835,7 @@ function WidgetView({ widget, data }: { widget: DashboardWidget; data: any }) {
       {fmt(data.value ?? 0)}
     </div>
   ) : widget.type === "timeseries" ? (
-    <BarSeries data={(data.series ?? []).map((p: any) => ({ day: p.bucket, count: p.count }))} />
+    <BarSeries data={(data.series ?? []).map((p: any) => ({ day: p.bucket, count: p.count, value: p.value }))} />
   ) : widget.type === "feed" ? (
     <EventFeed rows={data.events ?? []} />
   ) : (

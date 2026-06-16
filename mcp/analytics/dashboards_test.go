@@ -65,3 +65,45 @@ func TestWebsiteTrafficTemplateEvaluatesActiveSessions(t *testing.T) {
 		t.Fatalf("active sessions = %v, want 2", got["value"])
 	}
 }
+
+func TestTimeseriesWidgetCanSumNumericProperty(t *testing.T) {
+	db := testDashboardDB(t)
+	events := []struct {
+		ts    int64
+		props string
+	}{
+		{time.Date(2026, 6, 15, 8, 0, 0, 0, time.UTC).UnixMilli(), `{"views":10,"post_id":"a"}`},
+		{time.Date(2026, 6, 15, 12, 0, 0, 0, time.UTC).UnixMilli(), `{"views":15,"post_id":"b"}`},
+		{time.Date(2026, 6, 16, 8, 0, 0, 0, time.UTC).UnixMilli(), `{"views":7,"post_id":"a"}`},
+	}
+	for _, ev := range events {
+		if _, err := insertEvent(db, EventInsert{
+			TS:        ev.ts,
+			App:       "patreon",
+			Topic:     "post_views_daily_observed",
+			ProjectID: "p1",
+			Source:    "api",
+			Props:     ev.props,
+		}); err != nil {
+			t.Fatalf("insert event: %v", err)
+		}
+	}
+	got, err := evaluateWidget(db, "p1", DashboardWidget{
+		Type:   "timeseries",
+		Title:  "Daily Views",
+		Config: map[string]any{"app": "patreon", "topic": "post_views_daily_observed", "window": "all", "interval": "day", "value": "props.views"},
+	})
+	if err != nil {
+		t.Fatalf("evaluate widget: %v", err)
+	}
+	series := got["series"].([]map[string]any)
+	if len(series) != 2 {
+		t.Fatalf("series len = %d, want 2: %#v", len(series), series)
+	}
+	if series[0]["bucket"] != "2026-06-15" || series[0]["count"] != int64(2) || series[0]["value"] != 25.0 {
+		t.Fatalf("first bucket = %#v, want 2026-06-15 count 2 value 25", series[0])
+	}
+	if series[1]["bucket"] != "2026-06-16" || series[1]["count"] != int64(1) || series[1]["value"] != 7.0 {
+		t.Fatalf("second bucket = %#v, want 2026-06-16 count 1 value 7", series[1])
+	}
+}
