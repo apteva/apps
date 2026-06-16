@@ -17,8 +17,11 @@ interface Channel {
   chat_id: string;
   topic?: string;
   subscribe_path?: string;
+  subscribe_url?: string;
   stream_json?: string;
   stream_sse?: string;
+  stream_json_url?: string;
+  stream_sse_url?: string;
   capabilities?: string[];
 }
 
@@ -228,10 +231,10 @@ export default function ChannelsPanel({ projectId }: NativePanelProps) {
   }, [appURL, reload, selected]);
 
   const selectedSubscribeURL = selected?.type === "ntfy" && selected.topic
-    ? `${window.location.origin}${API}/ntfy/${selected.topic}`
+    ? selected.subscribe_url || `${API}/ntfy/${selected.topic}`
     : "";
   const selectedStreamURL = selected?.type === "ntfy" && selected.topic
-    ? `${window.location.origin}${API}/ntfy/${selected.topic}/json`
+    ? selected.stream_json_url || `${API}/ntfy/${selected.topic}/json`
     : "";
 
   return (

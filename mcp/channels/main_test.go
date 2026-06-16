@@ -234,6 +234,9 @@ func TestChannelsCreateNtfyWithoutAgent(t *testing.T) {
 	if !strings.Contains(rec.Body.String(), `"agent_id":0`) || !strings.Contains(rec.Body.String(), `"id":"ntfy:marco-phone"`) {
 		t.Fatalf("response = %s", rec.Body.String())
 	}
+	if !strings.Contains(rec.Body.String(), `"subscribe_url":"/api/apps/channels/ntfy/marco-phone"`) {
+		t.Fatalf("response missing subscribe_url: %s", rec.Body.String())
+	}
 }
 
 func TestChannelsDeleteByChannelID(t *testing.T) {
@@ -271,6 +274,9 @@ func TestChannelsListProjectWithoutAgent(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), `"id":"ntfy:agent-42-test"`) {
 		t.Fatalf("response missing ntfy channel: %s", rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"subscribe_url":"/api/apps/channels/ntfy/agent-42-test"`) {
+		t.Fatalf("response missing ntfy subscribe_url: %s", rec.Body.String())
 	}
 	if !strings.Contains(rec.Body.String(), `"id":"chat"`) {
 		t.Fatalf("response missing chat channel: %s", rec.Body.String())

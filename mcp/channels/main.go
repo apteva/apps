@@ -26,7 +26,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: channels
 display_name: Channels
-version: 0.5.2
+version: 0.5.3
 description: |
   Agent-facing channel router with standalone dashboard chat, a visible inbox, project channel management, and ntfy-compatible notifications.
   Agents reply through respond(channel="chat", ...); the app stores chat
@@ -602,6 +602,7 @@ func (a *App) handleNtfy(w http.ResponseWriter, r *http.Request) {
 				"subscribe_sse":  "/ntfy/" + topic + "/sse",
 				"agent_id":       chat.AgentID,
 				"project_id":     chat.ProjectID,
+				"urls":           a.ntfyURLFields(topic),
 			})
 		default:
 			http.Error(w, "not found", http.StatusNotFound)
@@ -895,6 +896,9 @@ func (a *App) channelRecordSummary(ch ChannelRecord) map[string]any {
 		item["subscribe_path"] = "/ntfy/" + ch.Topic
 		item["stream_json"] = "/ntfy/" + ch.Topic + "/json"
 		item["stream_sse"] = "/ntfy/" + ch.Topic + "/sse"
+		for k, v := range a.ntfyURLFields(ch.Topic) {
+			item[k] = v
+		}
 		item["capabilities"] = []string{"text", "title", "priority", "tags", "click"}
 		return item
 	}
@@ -921,6 +925,9 @@ func (a *App) channelSummary(ch Chat) map[string]any {
 		item["subscribe_path"] = "/ntfy/" + ch.ThreadID
 		item["stream_json"] = "/ntfy/" + ch.ThreadID + "/json"
 		item["stream_sse"] = "/ntfy/" + ch.ThreadID + "/sse"
+		for k, v := range a.ntfyURLFields(ch.ThreadID) {
+			item[k] = v
+		}
 		item["capabilities"] = []string{"text", "title", "priority", "tags", "click"}
 		return item
 	}
@@ -1104,6 +1111,27 @@ func channelTopic(ch Chat) string {
 		return ch.ThreadID
 	}
 	return ""
+}
+
+func (a *App) ntfyURLFields(topic string) map[string]any {
+	root := "/api/apps/channels/ntfy/" + topic
+	out := map[string]any{
+		"subscribe_url":   root,
+		"stream_json_url": root + "/json",
+		"stream_sse_url":  root + "/sse",
+	}
+	if globalCtx == nil {
+		return out
+	}
+	info, err := globalCtx.PlatformInfo()
+	if err != nil || info == nil || strings.TrimSpace(info.PublicURL) == "" {
+		return out
+	}
+	base := strings.TrimRight(strings.TrimSpace(info.PublicURL), "/")
+	out["subscribe_url"] = base + root
+	out["stream_json_url"] = base + root + "/json"
+	out["stream_sse_url"] = base + root + "/sse"
+	return out
 }
 
 func nullableAgentID(agentID int64) any {
