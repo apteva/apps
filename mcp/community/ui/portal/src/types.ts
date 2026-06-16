@@ -1,0 +1,211 @@
+export type SpaceKind = "feed" | "forum" | "chat" | "course";
+export type SpaceVisibility = "public" | "members";
+
+export interface Community {
+  id: string;
+  project_id: string;
+  slug: string;
+  name: string;
+  description: string;
+  created_at: string;
+  archived_at?: string;
+}
+
+export interface Member {
+  id: string;
+  community_id: string;
+  contact_id?: string;
+  handle: string;
+  display_name: string;
+  bio: string;
+  status: string;
+  joined_at: string;
+  last_seen_at?: string;
+}
+
+export interface Space {
+  id: string;
+  community_id: string;
+  slug: string;
+  name: string;
+  kind: SpaceKind;
+  visibility: SpaceVisibility;
+  sort_order: number;
+  created_at: string;
+  archived_at?: string;
+}
+
+export interface Thread {
+  id: string;
+  community_id: string;
+  space_id: string;
+  author_id: string;
+  title: string;
+  pinned: boolean;
+  locked: boolean;
+  created_at: string;
+  last_post_at: string;
+  post_count: number;
+}
+
+export interface ReactionSummary {
+  emoji: string;
+  count: number;
+  by: string[];
+}
+
+export interface Post {
+  id: string;
+  community_id: string;
+  thread_id: string;
+  author_id: string;
+  body: string;
+  reply_to_id?: string;
+  removed_at?: string;
+  created_at: string;
+  edited_at?: string;
+  reactions?: ReactionSummary[];
+}
+
+export interface Section {
+  id: string;
+  space_id: string;
+  title: string;
+  position: number;
+  created_at: string;
+}
+
+export interface LessonProgress {
+  lesson_id: string;
+  member_id: string;
+  status: "in_progress" | "complete";
+  completed_at?: string;
+  last_position_seconds?: number;
+  updated_at: string;
+}
+
+export interface Lesson {
+  id: string;
+  community_id: string;
+  section_id: string;
+  title: string;
+  body: string;
+  video_storage_key?: string;
+  video_duration_seconds?: number;
+  position: number;
+  published_at?: string;
+  created_at: string;
+  updated_at: string;
+  progress?: LessonProgress;
+}
+
+export interface CourseDetails {
+  space_id: string;
+  summary: string;
+  description: string;
+  instructor_member_id?: string;
+  instructor_name: string;
+  level: string;
+  tags: string[];
+  price_cents: number;
+  currency: string;
+  prerequisites: string[];
+  outcomes: string[];
+  cover_storage_file_id?: string;
+  updated_at?: string;
+}
+
+export interface LessonResource {
+  id: string;
+  lesson_id: string;
+  storage_file_id: string;
+  name: string;
+  kind: string;
+  content_type: string;
+  size_bytes?: number;
+  position: number;
+  created_at: string;
+}
+
+export interface Quiz {
+  id: string;
+  lesson_id: string;
+  title: string;
+  questions: unknown;
+  passing_score: number;
+  position: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface Assignment {
+  id: string;
+  lesson_id: string;
+  title: string;
+  instructions: string;
+  due_after_days?: number;
+  attachment_storage_file_id?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface LessonComment {
+  id: string;
+  lesson_id: string;
+  member_id: string;
+  body: string;
+  created_at: string;
+}
+
+export interface CourseCertificate {
+  space_id: string;
+  enabled: boolean;
+  title: string;
+  body: string;
+  template_storage_file_id?: string;
+  issue_on_completion: boolean;
+  updated_at?: string;
+}
+
+export interface DripSchedule {
+  id: string;
+  space_id: string;
+  lesson_id: string;
+  release_at?: string;
+  release_after_days?: number;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface EnrollmentRule {
+  space_id: string;
+  access_mode: "free" | "paid" | "invite" | "manual";
+  requires_approval: boolean;
+  max_enrollments?: number;
+  starts_at?: string;
+  ends_at?: string;
+  updated_at?: string;
+}
+
+export interface CourseEnrollment {
+  space_id: string;
+  member_id: string;
+  status: "pending" | "active" | "rejected" | "cancelled" | "completed";
+  enrolled_at: string;
+  completed_at?: string;
+}
+
+export interface CourseAnalytics {
+  space_id: string;
+  sections: number;
+  lessons: number;
+  published_lessons: number;
+  resources: number;
+  quizzes: number;
+  assignments: number;
+  comments: number;
+  active_enrollments: number;
+  progress_rows: number;
+  completed_progress_rows: number;
+  progress_completion_percent: number;
+}

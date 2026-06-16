@@ -1,6 +1,8 @@
 package main
 
 import (
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -332,6 +334,42 @@ func TestDMs_SendAndList_EmitsDMReceived(t *testing.T) {
 	}
 }
 
+func TestDMsGetThread_RequiresParticipantCaller(t *testing.T) {
+	ctx, _ := newTestCtx(t)
+	c := mustCreateCommunity(t, ctx, "main", "Main")
+	a := mustCreateMember(t, ctx, c.ID, "alice")
+	b := mustCreateMember(t, ctx, c.ID, "bob")
+	outsider := mustCreateMember(t, ctx, c.ID, "carol")
+	th, _ := toolDMsOpen(ctx, map[string]any{"participants": []any{a.ID, b.ID}})
+	threadID := th.(DMThread).ID
+	if _, err := toolDMsSend(ctx, map[string]any{
+		"dm_thread_id": threadID,
+		"author_id":    a.ID,
+		"body":         "secret",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := toolDMsGetThread(ctx, map[string]any{"id": threadID}); err == nil {
+		t.Fatalf("missing caller_member_id should fail")
+	}
+	if _, err := toolDMsGetThread(ctx, map[string]any{
+		"id":               threadID,
+		"caller_member_id": outsider.ID,
+	}); err == nil {
+		t.Fatalf("non-participant dm read should fail")
+	}
+	out, err := toolDMsGetThread(ctx, map[string]any{
+		"id":               threadID,
+		"caller_member_id": b.ID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out.(DMThreadView).Messages) != 1 {
+		t.Fatalf("participant should see one message")
+	}
+}
+
 func TestDMs_RejectsCrossCommunity(t *testing.T) {
 	ctx, _ := newTestCtx(t)
 	c1 := mustCreateCommunity(t, ctx, "one", "One")
@@ -360,5 +398,113 @@ func TestSpacesAddMember_RejectsCrossCommunity(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatalf("cross-community add should fail")
+	}
+}
+
+func TestHTTPWriteRoutesRejected(t *testing.T) {
+	newTestCtx(t)
+	app := &App{}
+	for _, tc := range []struct {
+		name    string
+		handler http.HandlerFunc
+		path    string
+	}{
+		{"communities", app.httpCommunities, "/communities"},
+		{"members", app.httpMembers, "/members"},
+	} {
+		req := httptest.NewRequest(http.MethodPost, tc.path, strings.NewReader(`{}`))
+		rec := httptest.NewRecorder()
+		tc.handler(rec, req)
+		if rec.Code != http.StatusMethodNotAllowed {
+			t.Fatalf("%s POST status = %d, want 405", tc.name, rec.Code)
+		}
+	}
+}
+
+func TestProjectScopedIDsAreRejected(t *testing.T) {
+	ctx, _ := newTestCtx(t)
+	db := ctx.AppDB()
+	foreignID := "c_foreign"
+	if _, err := db.Exec(
+		`INSERT INTO communities (id, project_id, slug, name, description)
+		 VALUES (?, ?, ?, ?, ?)`,
+		foreignID, "other-proj", "foreign", "Foreign", "",
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := toolCommunitiesGet(ctx, map[string]any{"id": foreignID}); err == nil {
+		t.Fatalf("get by foreign project id should fail")
+	}
+	if _, err := toolCommunitiesUpdate(ctx, map[string]any{
+		"id": foreignID, "name": "Taken",
+	}); err == nil {
+		t.Fatalf("update by foreign project id should fail")
+	}
+	if _, err := toolMembersCreate(ctx, map[string]any{
+		"community_id": foreignID,
+		"handle":       "mallory",
+	}); err == nil {
+		t.Fatalf("member create in foreign project community should fail")
+	}
+}
+
+func TestArchivedCommunityAndSpaceBlockWrites(t *testing.T) {
+	ctx, _ := newTestCtx(t)
+	c := mustCreateCommunity(t, ctx, "main", "Main")
+	m := mustCreateMember(t, ctx, c.ID, "alice")
+	s := mustCreateSpace(t, ctx, c.ID, "general", "feed")
+	tOut, _ := toolThreadsCreate(ctx, map[string]any{
+		"space_id": s.ID, "author_id": m.ID, "body": "before archive",
+	})
+	threadID := tOut.(map[string]any)["thread"].(Thread).ID
+	if _, err := toolSpacesArchive(ctx, map[string]any{"id": s.ID}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := toolThreadsCreate(ctx, map[string]any{
+		"space_id": s.ID, "author_id": m.ID, "body": "after archive",
+	}); err == nil {
+		t.Fatalf("thread create in archived space should fail")
+	}
+	if _, err := toolPostsCreate(ctx, map[string]any{
+		"thread_id": threadID, "author_id": m.ID, "body": "after archive",
+	}); err == nil {
+		t.Fatalf("post create in archived space should fail")
+	}
+
+	c2 := mustCreateCommunity(t, ctx, "second", "Second")
+	m2 := mustCreateMember(t, ctx, c2.ID, "bob")
+	s2 := mustCreateSpace(t, ctx, c2.ID, "general", "feed")
+	if _, err := toolCommunitiesArchive(ctx, map[string]any{"id": c2.ID}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := toolThreadsCreate(ctx, map[string]any{
+		"space_id": s2.ID, "author_id": m2.ID, "body": "after archive",
+	}); err == nil {
+		t.Fatalf("thread create in archived community should fail")
+	}
+}
+
+func TestPostsCreate_RejectsReplyToDifferentThread(t *testing.T) {
+	ctx, _ := newTestCtx(t)
+	c := mustCreateCommunity(t, ctx, "main", "Main")
+	alice := mustCreateMember(t, ctx, c.ID, "alice")
+	s := mustCreateSpace(t, ctx, c.ID, "general", "forum")
+	aOut, _ := toolThreadsCreate(ctx, map[string]any{
+		"space_id": s.ID, "author_id": alice.ID, "body": "thread a",
+	})
+	threadA := aOut.(map[string]any)["thread"].(Thread).ID
+	aPosts, _ := toolPostsList(ctx, map[string]any{"thread_id": threadA})
+	parentID := aPosts.(map[string]any)["posts"].([]Post)[0].ID
+	bOut, _ := toolThreadsCreate(ctx, map[string]any{
+		"space_id": s.ID, "author_id": alice.ID, "body": "thread b",
+	})
+	threadB := bOut.(map[string]any)["thread"].(Thread).ID
+	if _, err := toolPostsCreate(ctx, map[string]any{
+		"thread_id":   threadB,
+		"author_id":   alice.ID,
+		"body":        "bad reply",
+		"reply_to_id": parentID,
+	}); err == nil {
+		t.Fatalf("cross-thread reply should fail")
 	}
 }

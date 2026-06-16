@@ -303,6 +303,100 @@ func TestLessonComments_PostAndList(t *testing.T) {
 	}
 }
 
+func TestCourseBuilder_MetadataAndAccess(t *testing.T) {
+	ctx, _, memberID, courseID, _, _, _ := setupCourse(t)
+	out, err := toolCoursesUpdateDetails(ctx, map[string]any{
+		"space_id":              courseID,
+		"summary":               "Fast start",
+		"description":           "Full curriculum",
+		"instructor_member_id":  memberID,
+		"instructor_name":       "Alice",
+		"level":                 "beginner",
+		"tags":                  []any{"ops", "launch"},
+		"price_cents":           9900,
+		"currency":              "eur",
+		"prerequisites":         []any{"Account"},
+		"outcomes":              []any{"Ship"},
+		"cover_storage_file_id": "123",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	d := out.(CourseDetails)
+	if d.Summary != "Fast start" || d.Currency != "EUR" || len(d.Tags) != 2 || d.CoverStorageFileID == nil {
+		t.Fatalf("details not saved: %+v", d)
+	}
+	rule, err := toolEnrollmentRulesSet(ctx, map[string]any{
+		"space_id":          courseID,
+		"access_mode":       "paid",
+		"requires_approval": true,
+		"max_enrollments":   10,
+		"starts_at":         "2026-07-01T00:00:00Z",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !rule.(EnrollmentRule).RequiresApproval || rule.(EnrollmentRule).AccessMode != "paid" {
+		t.Fatalf("rule not saved: %+v", rule)
+	}
+	enroll, err := toolCourseEnroll(ctx, map[string]any{"space_id": courseID, "member_id": memberID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if enroll.(CourseEnrollment).Status != "pending" {
+		t.Fatalf("approval rule should force pending: %+v", enroll)
+	}
+}
+
+func TestCourseBuilder_LessonAdjunctsAndAnalytics(t *testing.T) {
+	ctx, _, memberID, courseID, sectionID, lessonAID, _ := setupCourse(t)
+	if _, err := toolLessonResourcesAdd(ctx, map[string]any{
+		"lesson_id": lessonAID, "storage_file_id": "456", "name": "worksheet.pdf", "kind": "pdf",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := toolQuizzesCreate(ctx, map[string]any{
+		"lesson_id": lessonAID, "title": "Check", "questions": []any{map[string]any{"prompt": "Ready?"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := toolAssignmentsCreate(ctx, map[string]any{
+		"lesson_id": lessonAID, "title": "Submit plan", "attachment_storage_file_id": "789",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := toolCertificatesConfigure(ctx, map[string]any{
+		"space_id": courseID, "enabled": true, "title": "Completion", "template_storage_file_id": "321",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := toolDripScheduleSet(ctx, map[string]any{
+		"lesson_id": lessonAID, "release_after_days": 3,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := toolCourseEnroll(ctx, map[string]any{"space_id": courseID, "member_id": memberID}); err != nil {
+		t.Fatal(err)
+	}
+	a, err := toolCourseAnalytics(ctx, map[string]any{"space_id": courseID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := a.(map[string]any)
+	if m["resources"].(int64) != 1 || m["quizzes"].(int64) != 1 || m["assignments"].(int64) != 1 || m["active_enrollments"].(int64) != 1 {
+		t.Fatalf("analytics wrong: %+v", m)
+	}
+	if _, err := toolSectionsUpdate(ctx, map[string]any{"id": sectionID, "title": "Renamed"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := toolLessonsDelete(ctx, map[string]any{"id": lessonAID}); err != nil {
+		t.Fatal(err)
+	}
+	if _, _, err := ensureLessonVisible(ctx, ctx.AppDB(), lessonAID); err == nil {
+		t.Fatal("lesson should be deleted")
+	}
+}
+
 // ─── patch tools (0.1.x) ─────────────────────────────────────────
 
 func TestCommunitiesUpdate_AndArchive(t *testing.T) {

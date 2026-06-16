@@ -32,12 +32,15 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: community
 display_name: Community
-version: 0.2.2
+version: 0.4.0
 description: |
   Circle/Skool-shaped community platform. Multiple communities per install,
   spaces (feed/forum/chat/course), members, threads, posts, reactions,
-  in-app DMs, and courses (sections + lessons + progress). Panel updates
-  live via the platform event bus.
+  in-app DMs, and full courses (metadata, sections, lessons, resources,
+  quizzes, assignments, certificates, drip, enrollments, and progress). Ships both an
+  operator dashboard panel and a client-facing React portal at
+  /api/apps/community/ui/portal/dist/index.html. Portal calls use
+  @apteva/web-sdk for app HTTP, MCP tools, Auth app hooks, and live events.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/community
 icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/community/icon.svg
@@ -46,6 +49,10 @@ scopes: [project, global]
 min_apteva_version: "0.10.0"
 requires:
   permissions: [db.write.app, platform.apps.call]
+  apps:
+    - name: auth
+      optional: true
+      reason: Client-facing portal can call Auth public signup/login. A later server pass should map Auth users to Community members and enforce member identity on portal routes.
   integrations:
     - role: storage
       kind: app
@@ -93,19 +100,44 @@ provides:
     - { name: dms_mark_read,       description: "Mark a member's read cursor in a DM thread up to now." }
     - { name: dms_unread_count,    description: "Total unread DM messages for a member across all threads." }
     - { name: courses_create,      description: "Create a course (sugar for spaces_create with kind=course)." }
+    - { name: courses_get_details, description: "Fetch course metadata, enrollment rules, and certificate settings." }
+    - { name: courses_update_details, description: "Update course description, cover image, summary, instructor, level, tags, pricing, prerequisites, and outcomes." }
     - { name: sections_create,     description: "Create a section inside a course." }
     - { name: sections_list,       description: "List sections of a course." }
+    - { name: sections_update,     description: "Update a course section." }
+    - { name: sections_delete,     description: "Delete a course section and its lessons." }
     - { name: sections_reorder,    description: "Reorder sections within a course." }
     - { name: lessons_create,      description: "Create a lesson inside a section." }
     - { name: lessons_update,      description: "Update a lesson's title or body." }
+    - { name: lessons_delete,      description: "Delete a lesson." }
     - { name: lessons_publish,     description: "Set or clear a lesson's published_at timestamp." }
     - { name: lessons_reorder,     description: "Reorder lessons within a section." }
     - { name: lessons_list,        description: "List lessons in a course." }
     - { name: lessons_get,         description: "Fetch one lesson with full body + caller progress." }
     - { name: lessons_attach_video, description: "Attach a storage file as the lesson's video." }
+    - { name: lesson_resources_add, description: "Attach a storage-backed resource to a lesson." }
+    - { name: lesson_resources_list, description: "List storage-backed resources for a lesson." }
+    - { name: lesson_resources_delete, description: "Unlink a lesson resource." }
+    - { name: quizzes_create,      description: "Create a lesson quiz." }
+    - { name: quizzes_update,      description: "Update a lesson quiz." }
+    - { name: quizzes_list,        description: "List quizzes for a lesson." }
+    - { name: quizzes_delete,      description: "Delete a quiz." }
+    - { name: assignments_create,  description: "Create a lesson assignment." }
+    - { name: assignments_update,  description: "Update a lesson assignment." }
+    - { name: assignments_list,    description: "List assignments for a lesson." }
+    - { name: assignments_delete,  description: "Delete an assignment." }
+    - { name: certificates_get,    description: "Fetch course certificate settings." }
+    - { name: certificates_configure, description: "Configure course certificates backed by optional storage templates." }
+    - { name: drip_schedule_set,   description: "Set a lesson drip schedule." }
+    - { name: drip_schedule_list,  description: "List course drip schedules." }
+    - { name: enrollment_rules_get, description: "Fetch course enrollment rules." }
+    - { name: enrollment_rules_set, description: "Set course enrollment rules." }
+    - { name: course_enroll,       description: "Enroll a member in a course." }
+    - { name: course_enrollments_list, description: "List course enrollments." }
     - { name: lessons_mark_complete, description: "Mark a lesson complete (or in_progress) for a member." }
     - { name: lessons_progress,    description: "Get one member's progress across a course." }
     - { name: course_progress,     description: "Funnel across all members per lesson." }
+    - { name: course_analytics,    description: "Course builder analytics summary." }
     - { name: lesson_comments_post, description: "Post a comment on a lesson." }
     - { name: lesson_comments_list, description: "List comments on a lesson, oldest first." }
   ui_panels:
@@ -113,6 +145,8 @@ provides:
       label: Community
       icon: users
       entry: /ui/CommunityPanel.mjs
+  # Client-facing portal SPA:
+  # /api/apps/community/ui/portal/dist/index.html
 runtime:
   kind: source
   source:
@@ -300,21 +334,78 @@ func dbHandle() *sql.DB {
 // ensureCommunityVisible returns nil when the community exists and isn't
 // archived. Used by every cross-table tool to fail fast with a clean
 // error instead of a downstream FK violation.
-func ensureCommunityVisible(db *sql.DB, communityID string) error {
+func ensureCommunityVisible(ctx *sdk.AppCtx, db *sql.DB, communityID string) error {
+	var projectID string
 	var arch sql.NullString
 	err := db.QueryRow(
-		`SELECT archived_at FROM communities WHERE id = ?`, communityID,
-	).Scan(&arch)
+		`SELECT project_id, archived_at FROM communities WHERE id = ?`, communityID,
+	).Scan(&projectID, &arch)
 	if errors.Is(err, sql.ErrNoRows) {
 		return fmt.Errorf("community %q not found", communityID)
 	}
 	if err != nil {
 		return err
 	}
+	if err := ensureProjectScope(ctx, communityID, projectID); err != nil {
+		return err
+	}
 	if arch.Valid {
 		return fmt.Errorf("community %q is archived", communityID)
 	}
 	return nil
+}
+
+func ensureProjectScope(ctx *sdk.AppCtx, communityID, rowProjectID string) error {
+	projectID := scopeProject(ctx)
+	if projectID != "" && rowProjectID != projectID {
+		return fmt.Errorf("community %q not found", communityID)
+	}
+	return nil
+}
+
+func ensureCommunityReadable(ctx *sdk.AppCtx, c Community) error {
+	return ensureProjectScope(ctx, c.ID, c.ProjectID)
+}
+
+func ensureSpaceVisible(ctx *sdk.AppCtx, db *sql.DB, spaceID string) (Space, error) {
+	s, err := loadSpace(db, spaceID)
+	if err != nil {
+		return s, err
+	}
+	if err := ensureCommunityVisible(ctx, db, s.CommunityID); err != nil {
+		return s, err
+	}
+	if s.ArchivedAt != nil {
+		return s, fmt.Errorf("space %q is archived", spaceID)
+	}
+	return s, nil
+}
+
+func ensureThreadWritable(ctx *sdk.AppCtx, db *sql.DB, threadID string) (Thread, Space, error) {
+	t, err := loadThread(db, threadID)
+	if err != nil {
+		return t, Space{}, err
+	}
+	s, err := ensureSpaceVisible(ctx, db, t.SpaceID)
+	if err != nil {
+		return t, s, err
+	}
+	if t.Locked {
+		return t, s, errors.New("thread is locked")
+	}
+	return t, s, nil
+}
+
+func ensureThreadInVisibleSpace(ctx *sdk.AppCtx, db *sql.DB, threadID string) (Thread, Space, error) {
+	t, err := loadThread(db, threadID)
+	if err != nil {
+		return t, Space{}, err
+	}
+	s, err := ensureSpaceVisible(ctx, db, t.SpaceID)
+	if err != nil {
+		return t, s, err
+	}
+	return t, s, nil
 }
 
 // ─── main ────────────────────────────────────────────────────────

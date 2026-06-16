@@ -9,7 +9,6 @@ package main
 
 import (
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -85,7 +84,7 @@ func toolCommunitiesUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return nil, err
 	}
 	db := ctx.AppDB()
-	if err := ensureCommunityVisible(db, id); err != nil {
+	if err := ensureCommunityVisible(ctx, db, id); err != nil {
 		return nil, err
 	}
 	sets := []string{}
@@ -124,7 +123,7 @@ func toolCommunitiesArchive(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return nil, err
 	}
 	db := ctx.AppDB()
-	if err := ensureCommunityVisible(db, id); err != nil {
+	if err := ensureCommunityVisible(ctx, db, id); err != nil {
 		return nil, err
 	}
 	if _, err := db.Exec(
@@ -223,6 +222,9 @@ func toolCommunitiesGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := ensureCommunityReadable(ctx, c); err != nil {
+		return nil, err
+	}
 	return c, nil
 }
 
@@ -267,29 +269,16 @@ func loadCommunityBySlug(db *sql.DB, projectID, slug string) (Community, error) 
 // ─── HTTP ────────────────────────────────────────────────────────
 
 func (a *App) httpCommunities(w http.ResponseWriter, r *http.Request) {
-	switch r.Method {
-	case http.MethodGet:
-		out, err := toolCommunitiesList(globalCtx, map[string]any{
-			"include_archived": r.URL.Query().Get("include_archived") == "true",
-		})
-		if err != nil {
-			writeErr(w, 500, err.Error())
-			return
-		}
-		writeJSON(w, out)
-	case http.MethodPost:
-		var body map[string]any
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			writeErr(w, 400, "invalid json body")
-			return
-		}
-		out, err := toolCommunitiesCreate(globalCtx, body)
-		if err != nil {
-			writeErr(w, 400, err.Error())
-			return
-		}
-		writeJSON(w, out)
-	default:
+	if r.Method != http.MethodGet {
 		writeErr(w, 405, "method not allowed")
+		return
 	}
+	out, err := toolCommunitiesList(globalCtx, map[string]any{
+		"include_archived": r.URL.Query().Get("include_archived") == "true",
+	})
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, out)
 }

@@ -47,15 +47,15 @@ type Thread struct {
 }
 
 type Post struct {
-	ID          string  `json:"id"`
-	CommunityID string  `json:"community_id"`
-	ThreadID    string  `json:"thread_id"`
-	AuthorID    string  `json:"author_id"`
-	Body        string  `json:"body"`
-	ReplyToID   *string `json:"reply_to_id,omitempty"`
-	RemovedAt   *string `json:"removed_at,omitempty"`
-	CreatedAt   string  `json:"created_at"`
-	EditedAt    *string `json:"edited_at,omitempty"`
+	ID          string            `json:"id"`
+	CommunityID string            `json:"community_id"`
+	ThreadID    string            `json:"thread_id"`
+	AuthorID    string            `json:"author_id"`
+	Body        string            `json:"body"`
+	ReplyToID   *string           `json:"reply_to_id,omitempty"`
+	RemovedAt   *string           `json:"removed_at,omitempty"`
+	CreatedAt   string            `json:"created_at"`
+	EditedAt    *string           `json:"edited_at,omitempty"`
 	Reactions   []ReactionSummary `json:"reactions,omitempty"`
 }
 
@@ -171,7 +171,7 @@ func toolSpacesUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return nil, err
 	}
 	db := ctx.AppDB()
-	cur, err := loadSpace(db, id)
+	cur, err := ensureSpaceVisible(ctx, db, id)
 	if err != nil {
 		return nil, err
 	}
@@ -201,7 +201,7 @@ func toolSpacesUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	); err != nil {
 		return nil, err
 	}
-	s, err := loadSpace(db, id)
+	s, err := ensureSpaceVisible(ctx, db, id)
 	if err != nil {
 		return nil, err
 	}
@@ -241,6 +241,9 @@ func toolThreadsPin(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	}
 	pinned, _ := args["pinned"].(bool)
 	db := ctx.AppDB()
+	if _, _, err := ensureThreadInVisibleSpace(ctx, db, id); err != nil {
+		return nil, err
+	}
 	var v int
 	if pinned {
 		v = 1
@@ -268,6 +271,9 @@ func toolThreadsLock(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	}
 	locked, _ := args["locked"].(bool)
 	db := ctx.AppDB()
+	if _, _, err := ensureThreadInVisibleSpace(ctx, db, id); err != nil {
+		return nil, err
+	}
 	var v int
 	if locked {
 		v = 1
@@ -384,7 +390,7 @@ func toolSpacesCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return nil, fmt.Errorf("visibility %q invalid: must be public|members", vis)
 	}
 	db := ctx.AppDB()
-	if err := ensureCommunityVisible(db, communityID); err != nil {
+	if err := ensureCommunityVisible(ctx, db, communityID); err != nil {
 		return nil, err
 	}
 	id := newID("s")
@@ -412,6 +418,9 @@ func toolSpacesCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 func toolSpacesList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	communityID, err := mustStr(args, "community_id")
 	if err != nil {
+		return nil, err
+	}
+	if err := ensureCommunityVisible(ctx, ctx.AppDB(), communityID); err != nil {
 		return nil, err
 	}
 	includeArchived, _ := args["include_archived"].(bool)
@@ -452,22 +461,20 @@ func toolSpacesAddMember(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return nil, fmt.Errorf("role %q invalid: must be member|moderator", role)
 	}
 	db := ctx.AppDB()
-	// Verify space + member belong to the same community to avoid the
-	// quiet foot-gun of cross-community membership.
-	var spaceCommunity, memberCommunity string
-	if err := db.QueryRow(`SELECT community_id FROM spaces WHERE id = ?`, spaceID).Scan(&spaceCommunity); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil, fmt.Errorf("space %q not found", spaceID)
-		}
+	s, err := ensureSpaceVisible(ctx, db, spaceID)
+	if err != nil {
 		return nil, err
 	}
+	// Verify space + member belong to the same community to avoid the
+	// quiet foot-gun of cross-community membership.
+	var memberCommunity string
 	if err := db.QueryRow(`SELECT community_id FROM members WHERE id = ?`, memberID).Scan(&memberCommunity); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, fmt.Errorf("member %q not found", memberID)
 		}
 		return nil, err
 	}
-	if spaceCommunity != memberCommunity {
+	if s.CommunityID != memberCommunity {
 		return nil, errors.New("member and space belong to different communities")
 	}
 	// Idempotent: upsert on conflict.
@@ -480,7 +487,7 @@ func toolSpacesAddMember(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return nil, fmt.Errorf("add member: %w", err)
 	}
 	emit(ctx, "space.member_added", map[string]any{
-		"community_id": spaceCommunity,
+		"community_id": s.CommunityID,
 		"space_id":     spaceID,
 		"member_id":    memberID,
 		"role":         role,
@@ -502,15 +509,11 @@ func toolThreadsCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	title := strArg(args, "title", "")
 	body := strArg(args, "body", "")
 	db := ctx.AppDB()
-	// Resolve community_id from the space (denormalisation source).
-	var communityID string
-	if err := db.QueryRow(`SELECT community_id FROM spaces WHERE id = ?`, spaceID).Scan(&communityID); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil, fmt.Errorf("space %q not found", spaceID)
-		}
+	s, err := ensureSpaceVisible(ctx, db, spaceID)
+	if err != nil {
 		return nil, err
 	}
-	if err := verifyMember(db, communityID, authorID); err != nil {
+	if err := verifyMember(db, s.CommunityID, authorID); err != nil {
 		return nil, err
 	}
 	threadID := newID("t")
@@ -521,13 +524,13 @@ func toolThreadsCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	defer tx.Rollback()
 	if _, err := tx.Exec(
 		`INSERT INTO threads (id, community_id, space_id, author_id, title, post_count) VALUES (?, ?, ?, ?, ?, 0)`,
-		threadID, communityID, spaceID, authorID, title,
+		threadID, s.CommunityID, spaceID, authorID, title,
 	); err != nil {
 		return nil, fmt.Errorf("create thread: %w", err)
 	}
 	var post *Post
 	if strings.TrimSpace(body) != "" {
-		p, err := insertPostTx(tx, communityID, threadID, authorID, body, "")
+		p, err := insertPostTx(tx, s.CommunityID, threadID, authorID, body, "")
 		if err != nil {
 			return nil, err
 		}
@@ -568,6 +571,9 @@ func toolThreadsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if v, ok := intArg(args, "limit"); ok && v > 0 {
 		limit = int(v)
 	}
+	if _, err := ensureSpaceVisible(ctx, ctx.AppDB(), spaceID); err != nil {
+		return nil, err
+	}
 	rows, err := ctx.AppDB().Query(
 		`SELECT `+threadCols+` FROM threads WHERE space_id = ?
 		 ORDER BY pinned DESC, last_post_at DESC LIMIT ?`,
@@ -605,26 +611,24 @@ func toolPostsCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	}
 	replyTo := strArg(args, "reply_to_id", "")
 	db := ctx.AppDB()
-	var communityID string
-	var locked int
-	if err := db.QueryRow(`SELECT community_id, locked FROM threads WHERE id = ?`, threadID).Scan(&communityID, &locked); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil, fmt.Errorf("thread %q not found", threadID)
+	t, _, err := ensureThreadWritable(ctx, db, threadID)
+	if err != nil {
+		return nil, err
+	}
+	if err := verifyMember(db, t.CommunityID, authorID); err != nil {
+		return nil, err
+	}
+	if replyTo != "" {
+		if err := verifyReplyTarget(db, threadID, replyTo); err != nil {
+			return nil, err
 		}
-		return nil, err
-	}
-	if locked == 1 {
-		return nil, errors.New("thread is locked")
-	}
-	if err := verifyMember(db, communityID, authorID); err != nil {
-		return nil, err
 	}
 	tx, err := db.Begin()
 	if err != nil {
 		return nil, err
 	}
 	defer tx.Rollback()
-	p, err := insertPostTx(tx, communityID, threadID, authorID, body, replyTo)
+	p, err := insertPostTx(tx, t.CommunityID, threadID, authorID, body, replyTo)
 	if err != nil {
 		return nil, err
 	}
@@ -656,6 +660,9 @@ func toolPostsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		q += ` AND removed_at IS NULL`
 	}
 	q += ` ORDER BY created_at LIMIT ?`
+	if _, _, err := ensureThreadInVisibleSpace(ctx, ctx.AppDB(), threadID); err != nil {
+		return nil, err
+	}
 	rows, err := ctx.AppDB().Query(q, threadID, limit)
 	if err != nil {
 		return nil, err
@@ -711,6 +718,9 @@ func toolPostsEdit(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if removed.Valid {
 		return nil, errors.New("post is removed")
 	}
+	if _, _, err := ensureThreadInVisibleSpace(ctx, db, threadID); err != nil {
+		return nil, err
+	}
 	if author != caller {
 		return nil, errors.New("only the author can edit this post")
 	}
@@ -755,6 +765,9 @@ func toolPostsReact(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, fmt.Errorf("post %q not found", postID)
 		}
+		return nil, err
+	}
+	if _, _, err := ensureThreadInVisibleSpace(ctx, db, threadID); err != nil {
 		return nil, err
 	}
 	if err := verifyMember(db, communityID, memberID); err != nil {
@@ -811,6 +824,9 @@ func toolPostsRemove(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, fmt.Errorf("post %q not found", id)
 		}
+		return nil, err
+	}
+	if _, _, err := ensureThreadInVisibleSpace(ctx, db, threadID); err != nil {
 		return nil, err
 	}
 	if author != caller {
@@ -987,6 +1003,27 @@ func loadPost(db *sql.DB, id string) (Post, error) {
 		return p, fmt.Errorf("post %q not found", id)
 	}
 	return p, err
+}
+
+func verifyReplyTarget(db *sql.DB, threadID, replyToID string) error {
+	var parentThread string
+	var removed sql.NullString
+	err := db.QueryRow(
+		`SELECT thread_id, removed_at FROM posts WHERE id = ?`, replyToID,
+	).Scan(&parentThread, &removed)
+	if errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("reply_to_id %q not found", replyToID)
+	}
+	if err != nil {
+		return err
+	}
+	if parentThread != threadID {
+		return errors.New("reply_to_id must belong to the same thread")
+	}
+	if removed.Valid {
+		return errors.New("cannot reply to a removed post")
+	}
+	return nil
 }
 
 func verifyMember(db *sql.DB, communityID, memberID string) error {

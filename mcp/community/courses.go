@@ -73,14 +73,14 @@ type LessonComment struct {
 type CourseProgressBucket struct {
 	LessonID  string `json:"lesson_id"`
 	Title     string `json:"title"`
-	Started   int    `json:"started"`    // in_progress + complete
+	Started   int    `json:"started"` // in_progress + complete
 	Completed int    `json:"completed"`
 }
 
 // ─── Tools ───────────────────────────────────────────────────────
 
 func coursesTools() []sdk.Tool {
-	return []sdk.Tool{
+	tools := []sdk.Tool{
 		// Course creation is sugar over spaces_create with kind=course.
 		{
 			Name:        "courses_create",
@@ -173,9 +173,9 @@ func coursesTools() []sdk.Tool {
 			Name:        "lessons_list",
 			Description: "List lessons of a course. Args: space_id (required), include_drafts? (default false), member_id? (when set, each lesson gets a `progress` field for that member).",
 			InputSchema: schemaObject(map[string]any{
-				"space_id":        map[string]any{"type": "string"},
-				"include_drafts":  map[string]any{"type": "boolean"},
-				"member_id":       map[string]any{"type": "string"},
+				"space_id":       map[string]any{"type": "string"},
+				"include_drafts": map[string]any{"type": "boolean"},
+				"member_id":      map[string]any{"type": "string"},
 			}, []string{"space_id"}),
 			Handler: toolLessonsList,
 		},
@@ -189,7 +189,7 @@ func coursesTools() []sdk.Tool {
 			Handler: toolLessonsGet,
 		},
 		{
-			Name: "lessons_attach_video",
+			Name:        "lessons_attach_video",
 			Description: "Attach a storage app file as the lesson's video. The caller uploads the file to storage first (recommended folder /.community/lessons/) and passes the returned file id here. If the ffmpeg app is bound and duration_seconds is omitted, community calls ffmpeg_probe to fill it in. Args: id (required), storage_key (required), duration_seconds?.",
 			InputSchema: schemaObject(map[string]any{
 				"id":               map[string]any{"type": "string"},
@@ -204,10 +204,10 @@ func coursesTools() []sdk.Tool {
 			Name:        "lessons_mark_complete",
 			Description: "Mark a lesson complete (or in_progress with last_position_seconds). Args: lesson_id (required), member_id (required), status? (in_progress|complete; default 'complete'), last_position_seconds?.",
 			InputSchema: schemaObject(map[string]any{
-				"lesson_id":              map[string]any{"type": "string"},
-				"member_id":              map[string]any{"type": "string"},
-				"status":                 map[string]any{"type": "string"},
-				"last_position_seconds":  map[string]any{"type": "integer"},
+				"lesson_id":             map[string]any{"type": "string"},
+				"member_id":             map[string]any{"type": "string"},
+				"status":                map[string]any{"type": "string"},
+				"last_position_seconds": map[string]any{"type": "integer"},
 			}, []string{"lesson_id", "member_id"}),
 			Handler: toolLessonsMarkComplete,
 		},
@@ -250,6 +250,7 @@ func coursesTools() []sdk.Tool {
 			Handler: toolLessonCommentsList,
 		},
 	}
+	return append(tools, courseBuilderTools()...)
 }
 
 // ─── courses_create (sugar) ──────────────────────────────────────
@@ -279,7 +280,7 @@ func toolSectionsCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return nil, err
 	}
 	db := ctx.AppDB()
-	if err := requireCourseSpace(db, spaceID); err != nil {
+	if err := requireCourseSpace(ctx, db, spaceID); err != nil {
 		return nil, err
 	}
 	pos := int64(0)
@@ -321,6 +322,9 @@ func toolSectionsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := requireCourseSpace(ctx, ctx.AppDB(), spaceID); err != nil {
+		return nil, err
+	}
 	rows, err := ctx.AppDB().Query(
 		`SELECT id, space_id, title, position, created_at FROM sections
 		 WHERE space_id = ? ORDER BY position, created_at`,
@@ -359,6 +363,9 @@ func toolSectionsReorder(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		order[i] = s
 	}
 	db := ctx.AppDB()
+	if err := requireCourseSpace(ctx, db, spaceID); err != nil {
+		return nil, err
+	}
 	tx, err := db.Begin()
 	if err != nil {
 		return nil, err
@@ -404,13 +411,16 @@ func toolLessonsCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	// Resolve community_id via the section's space.
 	var spaceID, communityID string
 	if err := db.QueryRow(
-		`SELECT s.id, sp.community_id FROM sections s
+		`SELECT s.space_id, sp.community_id FROM sections s
 		 JOIN spaces sp ON sp.id = s.space_id
 		 WHERE s.id = ?`, sectionID,
 	).Scan(&spaceID, &communityID); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
 			return nil, fmt.Errorf("section %q not found", sectionID)
 		}
+		return nil, err
+	}
+	if err := requireCourseSpace(ctx, db, spaceID); err != nil {
 		return nil, err
 	}
 	pos := int64(0)
@@ -452,7 +462,7 @@ func toolLessonsUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return nil, err
 	}
 	db := ctx.AppDB()
-	cur, err := loadLesson(db, id)
+	cur, _, err := ensureLessonVisible(ctx, db, id)
 	if err != nil {
 		return nil, err
 	}
@@ -495,7 +505,7 @@ func toolLessonsPublish(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	}
 	publish, _ := args["published"].(bool)
 	db := ctx.AppDB()
-	cur, err := loadLesson(db, id)
+	cur, _, err := ensureLessonVisible(ctx, db, id)
 	if err != nil {
 		return nil, err
 	}
@@ -542,6 +552,16 @@ func toolLessonsReorder(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		order[i] = s
 	}
 	db := ctx.AppDB()
+	var spaceID string
+	if err := db.QueryRow(`SELECT space_id FROM sections WHERE id = ?`, sectionID).Scan(&spaceID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, fmt.Errorf("section %q not found", sectionID)
+		}
+		return nil, err
+	}
+	if err := requireCourseSpace(ctx, db, spaceID); err != nil {
+		return nil, err
+	}
 	tx, err := db.Begin()
 	if err != nil {
 		return nil, err
@@ -574,6 +594,9 @@ func toolLessonsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	}
 	includeDrafts, _ := args["include_drafts"].(bool)
 	memberID := strArg(args, "member_id", "")
+	if err := requireCourseSpace(ctx, ctx.AppDB(), spaceID); err != nil {
+		return nil, err
+	}
 	q := `SELECT ` + lessonCols + `
 	      FROM lessons l
 	      JOIN sections s ON s.id = l.section_id
@@ -616,7 +639,7 @@ func toolLessonsGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	}
 	memberID := strArg(args, "member_id", "")
 	db := ctx.AppDB()
-	l, err := loadLesson(db, id)
+	l, _, err := ensureLessonVisible(ctx, db, id)
 	if err != nil {
 		return nil, err
 	}
@@ -649,7 +672,7 @@ func toolLessonsAttachVideo(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		duration = v
 	}
 	db := ctx.AppDB()
-	cur, err := loadLesson(db, id)
+	cur, _, err := ensureLessonVisible(ctx, db, id)
 	if err != nil {
 		return nil, err
 	}
@@ -759,13 +782,11 @@ func toolLessonsMarkComplete(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	db := ctx.AppDB()
 	// Verify lesson and member belong to the same community.
 	var communityID, memberCommunity string
-	if err := db.QueryRow(`SELECT community_id FROM lessons WHERE id = ?`, lessonID).
-		Scan(&communityID); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil, fmt.Errorf("lesson %q not found", lessonID)
-		}
+	lesson, _, err := ensureLessonVisible(ctx, db, lessonID)
+	if err != nil {
 		return nil, err
 	}
+	communityID = lesson.CommunityID
 	if err := db.QueryRow(`SELECT community_id FROM members WHERE id = ?`, memberID).
 		Scan(&memberCommunity); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -836,6 +857,9 @@ func toolLessonsProgress(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return nil, err
 	}
 	db := ctx.AppDB()
+	if err := requireCourseSpace(ctx, db, spaceID); err != nil {
+		return nil, err
+	}
 	// All published lessons in the course.
 	rows, err := db.Query(
 		`SELECT l.id, l.title, COALESCE(lp.status, 'not_started') AS status,
@@ -899,6 +923,9 @@ func toolCourseProgress(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	if err := requireCourseSpace(ctx, ctx.AppDB(), spaceID); err != nil {
+		return nil, err
+	}
 	rows, err := ctx.AppDB().Query(
 		`SELECT l.id, l.title,
 		        COUNT(CASE WHEN lp.status IN ('in_progress','complete') THEN 1 END) AS started,
@@ -942,14 +969,11 @@ func toolLessonCommentsPost(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return nil, err
 	}
 	db := ctx.AppDB()
-	var communityID string
-	if err := db.QueryRow(`SELECT community_id FROM lessons WHERE id = ?`, lessonID).
-		Scan(&communityID); err != nil {
-		if errors.Is(err, sql.ErrNoRows) {
-			return nil, fmt.Errorf("lesson %q not found", lessonID)
-		}
+	lesson, _, err := ensureLessonVisible(ctx, db, lessonID)
+	if err != nil {
 		return nil, err
 	}
+	communityID := lesson.CommunityID
 	if err := verifyMember(db, communityID, memberID); err != nil {
 		return nil, err
 	}
@@ -982,6 +1006,9 @@ func toolLessonCommentsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	limit := 200
 	if v, ok := intArg(args, "limit"); ok && v > 0 {
 		limit = int(v)
+	}
+	if _, _, err := ensureLessonVisible(ctx, ctx.AppDB(), lessonID); err != nil {
+		return nil, err
 	}
 	rows, err := ctx.AppDB().Query(
 		`SELECT id, lesson_id, member_id, body, created_at FROM lesson_comments
@@ -1148,19 +1175,36 @@ func lookupCommunityForSpace(db *sql.DB, spaceID string) (string, error) {
 
 // requireCourseSpace fails fast when the caller hands us a non-course
 // space — sections only exist under kind=course.
-func requireCourseSpace(db *sql.DB, spaceID string) error {
-	var kind string
-	err := db.QueryRow(`SELECT kind FROM spaces WHERE id = ?`, spaceID).Scan(&kind)
-	if errors.Is(err, sql.ErrNoRows) {
-		return fmt.Errorf("space %q not found", spaceID)
-	}
+func requireCourseSpace(ctx *sdk.AppCtx, db *sql.DB, spaceID string) error {
+	s, err := ensureSpaceVisible(ctx, db, spaceID)
 	if err != nil {
 		return err
 	}
-	if kind != "course" {
-		return fmt.Errorf("space %q is %s, not course", spaceID, kind)
+	if s.Kind != "course" {
+		return fmt.Errorf("space %q is %s, not course", spaceID, s.Kind)
 	}
 	return nil
+}
+
+func ensureLessonVisible(ctx *sdk.AppCtx, db *sql.DB, lessonID string) (Lesson, string, error) {
+	l, err := loadLesson(db, lessonID)
+	if err != nil {
+		return l, "", err
+	}
+	var spaceID string
+	err = db.QueryRow(
+		`SELECT s.space_id FROM sections s WHERE s.id = ?`, l.SectionID,
+	).Scan(&spaceID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return l, "", fmt.Errorf("section %q not found", l.SectionID)
+	}
+	if err != nil {
+		return l, "", err
+	}
+	if err := requireCourseSpace(ctx, db, spaceID); err != nil {
+		return l, "", err
+	}
+	return l, spaceID, nil
 }
 
 // ─── HTTP ────────────────────────────────────────────────────────

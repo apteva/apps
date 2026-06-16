@@ -77,11 +77,12 @@ func dmsTools() []sdk.Tool {
 		},
 		{
 			Name:        "dms_get_thread",
-			Description: "Fetch a DM thread by id with its messages (oldest first). Args: id (required), limit? (default 200).",
+			Description: "Fetch a DM thread by id with its messages (oldest first). Args: id (required), caller_member_id (required), limit? (default 200).",
 			InputSchema: schemaObject(map[string]any{
-				"id":    map[string]any{"type": "string"},
-				"limit": map[string]any{"type": "integer"},
-			}, []string{"id"}),
+				"id":               map[string]any{"type": "string"},
+				"caller_member_id": map[string]any{"type": "string"},
+				"limit":            map[string]any{"type": "integer"},
+			}, []string{"id", "caller_member_id"}),
 			Handler: toolDMsGetThread,
 		},
 		{
@@ -114,6 +115,13 @@ func toolDMsMarkRead(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return nil, err
 	}
 	db := ctx.AppDB()
+	t, err := loadDMThread(db, threadID)
+	if err != nil {
+		return nil, err
+	}
+	if err := ensureCommunityVisible(ctx, db, t.CommunityID); err != nil {
+		return nil, err
+	}
 	res, err := db.Exec(
 		`UPDATE dm_participants SET last_read_at = CURRENT_TIMESTAMP
 		 WHERE dm_thread_id = ? AND member_id = ?`,
@@ -136,6 +144,13 @@ func toolDMsMarkRead(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 func toolDMsUnreadCount(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	memberID, err := mustStr(args, "member_id")
 	if err != nil {
+		return nil, err
+	}
+	m, err := loadMember(ctx.AppDB(), memberID)
+	if err != nil {
+		return nil, err
+	}
+	if err := ensureCommunityVisible(ctx, ctx.AppDB(), m.CommunityID); err != nil {
 		return nil, err
 	}
 	var total int
@@ -182,6 +197,9 @@ func toolDMsOpen(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	// All participants must exist in the same community.
 	communityID, err := commonCommunity(db, parts)
 	if err != nil {
+		return nil, err
+	}
+	if err := ensureCommunityVisible(ctx, db, communityID); err != nil {
 		return nil, err
 	}
 	// Find an existing thread whose participant set matches exactly.
@@ -244,6 +262,9 @@ func toolDMsSend(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		}
 		return nil, err
 	}
+	if err := ensureCommunityVisible(ctx, db, communityID); err != nil {
+		return nil, err
+	}
 	msgID := newID("dmm")
 	tx, err := db.Begin()
 	if err != nil {
@@ -283,6 +304,13 @@ func toolDMsSend(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 func toolDMsListThreads(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	memberID, err := mustStr(args, "member_id")
 	if err != nil {
+		return nil, err
+	}
+	m, err := loadMember(ctx.AppDB(), memberID)
+	if err != nil {
+		return nil, err
+	}
+	if err := ensureCommunityVisible(ctx, ctx.AppDB(), m.CommunityID); err != nil {
 		return nil, err
 	}
 	limit := 50
@@ -347,6 +375,10 @@ func toolDMsGetThread(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	callerID, err := mustStr(args, "caller_member_id")
+	if err != nil {
+		return nil, err
+	}
 	limit := 200
 	if v, ok := intArg(args, "limit"); ok && v > 0 {
 		limit = int(v)
@@ -354,6 +386,12 @@ func toolDMsGetThread(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	db := ctx.AppDB()
 	t, err := loadDMThread(db, id)
 	if err != nil {
+		return nil, err
+	}
+	if err := ensureCommunityVisible(ctx, db, t.CommunityID); err != nil {
+		return nil, err
+	}
+	if err := verifyDMParticipant(db, id, callerID); err != nil {
 		return nil, err
 	}
 	rows, err := db.Query(
@@ -433,6 +471,18 @@ func findDMThreadByParticipants(db *sql.DB, communityID string, sortedParts []st
 		return id, true, nil
 	}
 	return "", false, nil
+}
+
+func verifyDMParticipant(db *sql.DB, threadID, memberID string) error {
+	var exists int
+	err := db.QueryRow(
+		`SELECT 1 FROM dm_participants WHERE dm_thread_id = ? AND member_id = ?`,
+		threadID, memberID,
+	).Scan(&exists)
+	if errors.Is(err, sql.ErrNoRows) {
+		return errors.New("member is not a participant in this dm thread")
+	}
+	return err
 }
 
 func loadDMThread(db *sql.DB, id string) (DMThread, error) {

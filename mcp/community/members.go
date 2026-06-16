@@ -10,7 +10,6 @@ package main
 
 import (
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -21,15 +20,15 @@ import (
 )
 
 type Member struct {
-	ID           string  `json:"id"`
-	CommunityID  string  `json:"community_id"`
-	ContactID    *string `json:"contact_id,omitempty"`
-	Handle       string  `json:"handle"`
-	DisplayName  string  `json:"display_name"`
-	Bio          string  `json:"bio"`
-	Status       string  `json:"status"`
-	JoinedAt     string  `json:"joined_at"`
-	LastSeenAt   *string `json:"last_seen_at,omitempty"`
+	ID          string  `json:"id"`
+	CommunityID string  `json:"community_id"`
+	ContactID   *string `json:"contact_id,omitempty"`
+	Handle      string  `json:"handle"`
+	DisplayName string  `json:"display_name"`
+	Bio         string  `json:"bio"`
+	Status      string  `json:"status"`
+	JoinedAt    string  `json:"joined_at"`
+	LastSeenAt  *string `json:"last_seen_at,omitempty"`
 }
 
 func membersTools() []sdk.Tool {
@@ -91,6 +90,9 @@ func toolMembersUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	db := ctx.AppDB()
 	cur, err := loadMember(db, id)
 	if err != nil {
+		return nil, err
+	}
+	if err := ensureCommunityVisible(ctx, db, cur.CommunityID); err != nil {
 		return nil, err
 	}
 	sets := []string{}
@@ -169,7 +171,7 @@ func toolMembersCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	contactID := strArg(args, "contact_id", "")
 
 	db := ctx.AppDB()
-	if err := ensureCommunityVisible(db, communityID); err != nil {
+	if err := ensureCommunityVisible(ctx, db, communityID); err != nil {
 		return nil, err
 	}
 	id := newID("m")
@@ -200,6 +202,9 @@ func toolMembersCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 func toolMembersList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	communityID, err := mustStr(args, "community_id")
 	if err != nil {
+		return nil, err
+	}
+	if err := ensureCommunityVisible(ctx, ctx.AppDB(), communityID); err != nil {
 		return nil, err
 	}
 	status := strArg(args, "status", "active")
@@ -234,9 +239,19 @@ func toolMembersGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	handle := strArg(args, "handle", "")
 	db := ctx.AppDB()
 	if id != "" {
-		return loadMember(db, id)
+		m, err := loadMember(db, id)
+		if err != nil {
+			return nil, err
+		}
+		if err := ensureCommunityVisible(ctx, db, m.CommunityID); err != nil {
+			return nil, err
+		}
+		return m, nil
 	}
 	if communityID != "" && handle != "" {
+		if err := ensureCommunityVisible(ctx, db, communityID); err != nil {
+			return nil, err
+		}
 		return loadMemberByHandle(db, communityID, handle)
 	}
 	return nil, errors.New("id or (community_id + handle) required")
@@ -287,35 +302,22 @@ func loadMemberByHandle(db *sql.DB, communityID, handle string) (Member, error) 
 // ─── HTTP ────────────────────────────────────────────────────────
 
 func (a *App) httpMembers(w http.ResponseWriter, r *http.Request) {
-	switch r.Method {
-	case http.MethodGet:
-		communityID := r.URL.Query().Get("community_id")
-		if communityID == "" {
-			writeErr(w, 400, "community_id required")
-			return
-		}
-		out, err := toolMembersList(globalCtx, map[string]any{
-			"community_id": communityID,
-			"status":       r.URL.Query().Get("status"),
-		})
-		if err != nil {
-			writeErr(w, 500, err.Error())
-			return
-		}
-		writeJSON(w, out)
-	case http.MethodPost:
-		var body map[string]any
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-			writeErr(w, 400, "invalid json body")
-			return
-		}
-		out, err := toolMembersCreate(globalCtx, body)
-		if err != nil {
-			writeErr(w, 400, err.Error())
-			return
-		}
-		writeJSON(w, out)
-	default:
+	if r.Method != http.MethodGet {
 		writeErr(w, 405, "method not allowed")
+		return
 	}
+	communityID := r.URL.Query().Get("community_id")
+	if communityID == "" {
+		writeErr(w, 400, "community_id required")
+		return
+	}
+	out, err := toolMembersList(globalCtx, map[string]any{
+		"community_id": communityID,
+		"status":       r.URL.Query().Get("status"),
+	})
+	if err != nil {
+		writeErr(w, 500, err.Error())
+		return
+	}
+	writeJSON(w, out)
 }
