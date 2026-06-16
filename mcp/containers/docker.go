@@ -181,11 +181,15 @@ func docker(ctx context.Context, args ...string) (string, error) {
 		}
 		log.Printf("[containers] docker error args=%s duration=%s err=%q stderr=%q ctx_err=%v",
 			redactDockerArgs(args), time.Since(start).Round(time.Millisecond), err.Error(), msg, ctx.Err())
-		return out.String(), fmt.Errorf("docker %s: %s", strings.Join(args, " "), msg)
+		return out.String(), formatDockerError(args, msg)
 	}
 	log.Printf("[containers] docker ok args=%s duration=%s stdout_bytes=%d",
 		redactDockerArgs(args), time.Since(start).Round(time.Millisecond), out.Len())
 	return out.String(), nil
+}
+
+func formatDockerError(args []string, msg string) error {
+	return fmt.Errorf("docker %s: %s", redactDockerArgs(args), msg)
 }
 
 func redactDockerArgs(args []string) string {

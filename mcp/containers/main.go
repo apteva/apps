@@ -296,9 +296,10 @@ func (a *App) stopWorkload(ctx context.Context, db *sql.DB, id string) (*Workloa
 		return nil, err
 	}
 	if err := a.backend.Stop(ctx, w.ContainerName); err != nil {
+		_ = updateWorkload(db, id, map[string]any{"status": StatusError, "health_status": "error", "last_error": err.Error(), "updated_at": nowUTC()})
 		return nil, err
 	}
-	_ = updateWorkload(db, id, map[string]any{"status": StatusStopped, "desired_status": StatusStopped, "health_status": "stopped", "updated_at": nowUTC()})
+	_ = updateWorkload(db, id, map[string]any{"status": StatusStopped, "desired_status": StatusStopped, "health_status": "stopped", "last_error": "", "updated_at": nowUTC()})
 	_ = recordEvent(db, id, "stopped", "tool", map[string]any{})
 	return getWorkload(db, id)
 }
@@ -309,6 +310,7 @@ func (a *App) restartWorkload(ctx context.Context, db *sql.DB, id string) (*Work
 		return nil, err
 	}
 	if err := a.backend.Restart(ctx, w.ContainerName); err != nil {
+		_ = updateWorkload(db, id, map[string]any{"status": StatusError, "health_status": "error", "last_error": err.Error(), "updated_at": nowUTC()})
 		return nil, err
 	}
 	_ = updateWorkload(db, id, map[string]any{"status": StatusRunning, "desired_status": StatusRunning, "last_error": "", "updated_at": nowUTC()})
@@ -322,12 +324,25 @@ func (a *App) destroyWorkload(ctx context.Context, db *sql.DB, id string, delete
 	if err != nil {
 		return err
 	}
-	_ = a.backend.Remove(ctx, w.ContainerName, true)
-	_ = a.backend.RemoveNetwork(ctx, w.NetworkName)
+	var cleanupErrs []error
+	if err := a.backend.Remove(ctx, w.ContainerName, true); err != nil && !isDockerMissingResourceError(err, "container") {
+		cleanupErrs = append(cleanupErrs, err)
+	}
+	if err := a.backend.RemoveNetwork(ctx, w.NetworkName); err != nil && !isDockerMissingResourceError(err, "network") {
+		cleanupErrs = append(cleanupErrs, err)
+	}
 	if deleteVolumes {
 		for _, v := range w.Volumes {
-			_ = a.backend.RemoveVolume(ctx, v.DockerVolumeName)
+			if err := a.backend.RemoveVolume(ctx, v.DockerVolumeName); err != nil && !isDockerMissingResourceError(err, "volume") {
+				cleanupErrs = append(cleanupErrs, err)
+			}
 		}
+	}
+	if len(cleanupErrs) > 0 {
+		err := errors.Join(cleanupErrs...)
+		_ = updateWorkload(db, id, map[string]any{"status": StatusError, "health_status": "error", "last_error": err.Error(), "updated_at": nowUTC()})
+		_ = recordEvent(db, id, "destroy_failed", "tool", map[string]any{"error": err.Error()})
+		return err
 	}
 	return deleteWorkloadRows(db, id)
 }
@@ -339,7 +354,7 @@ func (a *App) probeWorkload(ctx context.Context, db *sql.DB, id string) error {
 	}
 	state, err := a.backend.Inspect(ctx, w.ContainerName)
 	if err != nil {
-		_ = updateWorkload(db, id, map[string]any{"status": StatusError, "health_status": "error", "last_error": err.Error(), "updated_at": nowUTC()})
+		_ = updateWorkload(db, id, map[string]any{"status": StatusError, "health_status": "error", "last_health_at": nowUTC(), "last_error": err.Error(), "updated_at": nowUTC()})
 		return err
 	}
 	status := StatusStopped
@@ -381,7 +396,7 @@ func (a *App) pollHealth(ctx context.Context, db *sql.DB) error {
 		return err
 	}
 	for _, w := range rows {
-		if w.Status == StatusDestroyed || w.Status == StatusError {
+		if w.Status == StatusDestroyed {
 			continue
 		}
 		if ctx.Err() != nil {
@@ -401,6 +416,23 @@ func requireWorkload(db *sql.DB, id string) (*Workload, error) {
 		return nil, fmt.Errorf("workload %q not found", id)
 	}
 	return w, nil
+}
+
+func isDockerMissingResourceError(err error, resource string) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	switch resource {
+	case "container":
+		return strings.Contains(msg, "no such container")
+	case "network":
+		return strings.Contains(msg, "no such network")
+	case "volume":
+		return strings.Contains(msg, "no such volume")
+	default:
+		return false
+	}
 }
 
 func updateHostProbe(db *sql.DB, ok bool, errMsg string) error {

@@ -30,7 +30,7 @@ CREATE TABLE IF NOT EXISTS containers_blueprints (
 
 CREATE TABLE IF NOT EXISTS containers_workloads (
   id TEXT PRIMARY KEY,
-  name TEXT NOT NULL UNIQUE,
+  name TEXT NOT NULL,
   blueprint_slug TEXT NOT NULL DEFAULT '',
   host_id INTEGER NOT NULL DEFAULT 0,
   instance_id INTEGER NOT NULL DEFAULT 0,
@@ -57,6 +57,10 @@ CREATE TABLE IF NOT EXISTS containers_workloads (
 
 CREATE INDEX IF NOT EXISTS idx_containers_workloads_status
   ON containers_workloads(status, health_status);
+
+CREATE UNIQUE INDEX IF NOT EXISTS idx_containers_workloads_active_name
+  ON containers_workloads(name)
+  WHERE status != 'destroyed';
 
 CREATE TABLE IF NOT EXISTS containers_volumes (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
