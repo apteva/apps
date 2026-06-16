@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"testing"
 	"time"
 )
@@ -108,6 +109,44 @@ func TestEventSpecValidatesNestedProperties(t *testing.T) {
 	})
 	if err != nil {
 		t.Fatalf("insert nested event: %v", err)
+	}
+}
+
+func TestListEventSpecsDoesNotDeadlockWithSingleSQLiteConnection(t *testing.T) {
+	db := testDashboardDB(t)
+	db.SetMaxOpenConns(1)
+	_, err := upsertEventSpec(db, EventSpec{
+		ProjectID:      "p1",
+		App:            "patreon",
+		Topic:          "post_views_daily_observed",
+		Status:         "active",
+		ValidationMode: "warn",
+		Properties: []EventPropertySpec{
+			{Key: "props.post_id", Type: "string", Required: true},
+			{Key: "props.views", Type: "number", Required: true},
+		},
+	}, true)
+	if err != nil {
+		t.Fatalf("upsert spec: %v", err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		specs, err := listEventSpecs(db, specFilter{ProjectID: "p1"})
+		if err == nil && (len(specs) != 1 || len(specs[0].Properties) != 2) {
+			err = fmt.Errorf("specs = %#v, want one spec with two properties", specs)
+		}
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		_ = db.Close()
+		t.Fatal("listEventSpecs deadlocked with MaxOpenConns(1)")
 	}
 }
 

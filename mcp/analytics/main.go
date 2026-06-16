@@ -19,7 +19,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: analytics
 display_name: Analytics
-version: 0.8.0
+version: 0.8.1
 description: |
   Generic event analytics for Apteva apps. Other apps call
   analytics_track to record typed events; analytics_query / count /
@@ -34,6 +34,8 @@ description: |
   saved dashboards with stat, timeseries, top, breakdown, and feed widgets.
   v0.8 adds an event catalog: specs, typed properties, validation,
   spec-driven auto upsert / rollup policies, and analytics_sum.
+  v0.8.1 fixes a Catalog load deadlock with the SDK's single SQLite
+  connection runtime.
 author: Apteva
 tags: [analytics, events, observability]
 scopes: [global]

@@ -323,21 +323,30 @@ func listEventSpecs(db *sql.DB, f specFilter) ([]EventSpec, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
 	var out []EventSpec
 	for rows.Next() {
 		var spec EventSpec
 		if err := scanEventSpec(rows, &spec); err != nil {
+			rows.Close()
 			return nil, err
 		}
-		props, err := listEventPropertySpecs(db, spec.ID)
+		out = append(out, spec)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	for i := range out {
+		props, err := listEventPropertySpecs(db, out[i].ID)
 		if err != nil {
 			return nil, err
 		}
-		spec.Properties = props
-		out = append(out, spec)
+		out[i].Properties = props
 	}
-	return out, rows.Err()
+	return out, nil
 }
 
 func getEventSpecByID(db *sql.DB, id int64) (*EventSpec, error) {
