@@ -26,7 +26,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: channels
 display_name: Channels
-version: 0.5.3
+version: 0.5.4
 description: |
   Agent-facing channel router with standalone dashboard chat, a visible inbox, project channel management, and ntfy-compatible notifications.
   Agents reply through respond(channel="chat", ...); the app stores chat
@@ -1115,7 +1115,9 @@ func channelTopic(ch Chat) string {
 
 func (a *App) ntfyURLFields(topic string) map[string]any {
 	root := "/api/apps/channels/ntfy/" + topic
+	serverRoot := "/api/apps/channels/ntfy"
 	out := map[string]any{
+		"server_url":      serverRoot,
 		"subscribe_url":   root,
 		"stream_json_url": root + "/json",
 		"stream_sse_url":  root + "/sse",
@@ -1128,6 +1130,7 @@ func (a *App) ntfyURLFields(topic string) map[string]any {
 		return out
 	}
 	base := strings.TrimRight(strings.TrimSpace(info.PublicURL), "/")
+	out["server_url"] = base + serverRoot
 	out["subscribe_url"] = base + root
 	out["stream_json_url"] = base + root + "/json"
 	out["stream_sse_url"] = base + root + "/sse"

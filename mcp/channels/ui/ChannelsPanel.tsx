@@ -17,6 +17,7 @@ interface Channel {
   chat_id: string;
   topic?: string;
   subscribe_path?: string;
+  server_url?: string;
   subscribe_url?: string;
   stream_json?: string;
   stream_sse?: string;
@@ -233,6 +234,9 @@ export default function ChannelsPanel({ projectId }: NativePanelProps) {
   const selectedSubscribeURL = selected?.type === "ntfy" && selected.topic
     ? selected.subscribe_url || `${API}/ntfy/${selected.topic}`
     : "";
+  const selectedServerURL = selected?.type === "ntfy" && selected.topic
+    ? selected.server_url || selectedSubscribeURL.slice(0, -(selected.topic.length + 1))
+    : "";
   const selectedStreamURL = selected?.type === "ntfy" && selected.topic
     ? selected.stream_json_url || `${API}/ntfy/${selected.topic}/json`
     : "";
@@ -287,6 +291,7 @@ export default function ChannelsPanel({ projectId }: NativePanelProps) {
             onSave={() => createNtfy(false)}
             onGenerate={() => createNtfy(true)}
             subscribeURL={selectedSubscribeURL}
+            serverURL={selectedServerURL}
             streamURL={selectedStreamURL}
             testTitle={testTitle}
             setTestTitle={setTestTitle}
@@ -404,6 +409,7 @@ function ChannelsView(props: {
   onSave: () => void;
   onGenerate: () => void;
   subscribeURL: string;
+  serverURL: string;
   streamURL: string;
   testTitle: string;
   setTestTitle: (v: string) => void;
@@ -449,6 +455,7 @@ function ChannelsView(props: {
           <ChannelDetail
             channel={props.selected}
             subscribeURL={props.subscribeURL}
+            serverURL={props.serverURL}
             streamURL={props.streamURL}
             testTitle={props.testTitle}
             setTestTitle={props.setTestTitle}
@@ -554,6 +561,7 @@ function CreateChannel({
 function ChannelDetail({
   channel,
   subscribeURL,
+  serverURL,
   streamURL,
   testTitle,
   setTestTitle,
@@ -564,6 +572,7 @@ function ChannelDetail({
 }: {
   channel: Channel;
   subscribeURL: string;
+  serverURL: string;
   streamURL: string;
   testTitle: string;
   setTestTitle: (v: string) => void;
@@ -590,6 +599,8 @@ function ChannelDetail({
       <div className="grid gap-3 md:grid-cols-2">
         <ReadOnly label="Inbound Agent" value={channel.agent_id ? String(channel.agent_id) : "None"} />
         <ReadOnly label="Project" value={channel.project_id || ""} />
+        {channel.type === "ntfy" && <ReadOnly label="Server URL" value={serverURL} />}
+        {channel.type === "ntfy" && <ReadOnly label="Topic" value={channel.topic || ""} />}
         {channel.type === "ntfy" && <ReadOnly label="Subscribe URL" value={subscribeURL} />}
         {channel.type === "ntfy" && <ReadOnly label="JSON Stream" value={streamURL} />}
       </div>
