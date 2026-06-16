@@ -578,7 +578,9 @@ function ChannelDetail({
         </div>
         <div className="flex items-center gap-2">
           <span className="rounded bg-bg px-2 py-1 text-xs uppercase text-text-dim">{channel.type}</span>
-          <button className="h-8 rounded-md border border-border px-3 text-sm text-error" onClick={onDelete}>Delete</button>
+          {channel.type !== "chat" && (
+            <button className="h-8 rounded-md border border-border px-3 text-sm text-error" onClick={onDelete}>Delete</button>
+          )}
         </div>
       </div>
 

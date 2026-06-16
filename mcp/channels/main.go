@@ -26,7 +26,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: channels
 display_name: Channels
-version: 0.5.0
+version: 0.5.1
 description: |
   Agent-facing channel router with standalone dashboard chat, a visible inbox, project channel management, and ntfy-compatible notifications.
   Agents reply through respond(channel="chat", ...); the app stores chat
@@ -259,12 +259,18 @@ func (a *App) handleChannels(w http.ResponseWriter, r *http.Request) {
 		projectID := projectFromRequest(r)
 		if agentID > 0 {
 			projectID = a.projectForAgent(agentID, projectID)
+		}
+		if _, err := a.store.EnsureProjectChatChannel(projectID); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if agentID > 0 {
 			if _, err := a.store.EnsureDefaultChat(agentID, projectID); err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
 		}
-		chats, err := a.store.ListChats(agentID, projectID)
+		chats, err := a.store.ListChannelsForAgent(agentID, projectID)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -287,8 +293,8 @@ func (a *App) handleChannels(w http.ResponseWriter, r *http.Request) {
 		if body.Type == "" {
 			body.Type = "ntfy"
 		}
-		if body.Type != "ntfy" {
-			http.Error(w, `type must be "ntfy"`, http.StatusBadRequest)
+		if body.Type != "ntfy" && body.Type != "chat" {
+			http.Error(w, `type must be "chat" or "ntfy"`, http.StatusBadRequest)
 			return
 		}
 		projectID := strings.TrimSpace(body.ProjectID)
@@ -297,6 +303,15 @@ func (a *App) handleChannels(w http.ResponseWriter, r *http.Request) {
 		}
 		if body.AgentID > 0 {
 			projectID = a.projectForAgent(body.AgentID, projectID)
+		}
+		if body.Type == "chat" {
+			ch, err := a.store.EnsureProjectChatChannel(projectID)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			writeJSON(w, a.channelRecordSummary(*ch))
+			return
 		}
 		topic := strings.TrimSpace(body.Topic)
 		if topic != "" && !validTopic(topic) {
@@ -802,21 +817,13 @@ func (a *App) toolListChannels(ctx context.Context, app *sdk.AppCtx, args map[st
 	if err != nil {
 		return nil, err
 	}
-	channels := []map[string]any{
-		{
-			"id":           "chat",
-			"type":         "chat",
-			"label":        "Dashboard chat",
-			"active":       a.hub.hasSubscribers(defaultChatID(agentID)),
-			"capabilities": []string{"text", "status", "components"},
-		},
-	}
-	seen := map[string]bool{"chat": true}
+	channels := []map[string]any{}
+	seen := map[string]bool{}
 	for _, row := range rows {
-		if row.Channel == "chat" {
-			continue
-		}
 		summary := a.channelSummary(row)
+		if row.Channel == "chat" {
+			summary["active"] = a.hub.hasSubscribers(defaultChatID(agentID, projectID))
+		}
 		id, _ := summary["id"].(string)
 		if seen[id] {
 			continue
@@ -825,7 +832,7 @@ func (a *App) toolListChannels(ctx context.Context, app *sdk.AppCtx, args map[st
 		channels = append(channels, summary)
 	}
 	var activeIDs []string
-	if a.hub.hasSubscribers(defaultChatID(agentID)) {
+	if a.hub.hasSubscribers(defaultChatID(agentID, projectID)) {
 		activeIDs = append(activeIDs, "chat")
 	}
 	for _, row := range rows {
@@ -869,15 +876,42 @@ func (a *App) channelSummaries(chats []Chat) []map[string]any {
 	return out
 }
 
+func (a *App) channelRecordSummary(ch ChannelRecord) map[string]any {
+	item := map[string]any{
+		"id":         ch.Type,
+		"mcp_id":     ch.Type,
+		"type":       ch.Type,
+		"label":      ch.Name,
+		"agent_id":   ch.DefaultAgentID,
+		"project_id": ch.ProjectID,
+		"active":     false,
+		"channel_id": ch.ID,
+		"chat_id":    "",
+	}
+	if ch.Type == "ntfy" {
+		item["id"] = "ntfy:" + ch.Topic
+		item["mcp_id"] = "ntfy:" + ch.Topic
+		item["topic"] = ch.Topic
+		item["subscribe_path"] = "/ntfy/" + ch.Topic
+		item["stream_json"] = "/ntfy/" + ch.Topic + "/json"
+		item["stream_sse"] = "/ntfy/" + ch.Topic + "/sse"
+		item["capabilities"] = []string{"text", "title", "priority", "tags", "click"}
+		return item
+	}
+	item["capabilities"] = []string{"text", "status", "components"}
+	return item
+}
+
 func (a *App) channelSummary(ch Chat) map[string]any {
 	item := map[string]any{
-		"id":         fmt.Sprintf("%s:%d", ch.Channel, ch.AgentID),
+		"id":         channelIdentifier(ch),
 		"mcp_id":     ch.Channel,
 		"type":       ch.Channel,
 		"label":      ch.Title,
 		"agent_id":   ch.AgentID,
 		"project_id": ch.ProjectID,
 		"active":     a.hub.hasSubscribers(ch.ID),
+		"channel_id": ch.ChannelID,
 		"chat_id":    ch.ID,
 	}
 	if ch.Channel == "ntfy" {
@@ -933,7 +967,7 @@ func (a *App) channelFromDeleteRequest(w http.ResponseWriter, r *http.Request) (
 	if strings.HasPrefix(channelID, "chat:") {
 		agentID := toInt64(strings.TrimPrefix(channelID, "chat:"))
 		if agentID > 0 {
-			ch, err := a.store.GetChat(defaultChatID(agentID))
+			ch, err := a.store.GetChat(defaultChatID(agentID, projectFromRequest(r)))
 			if err != nil {
 				http.Error(w, "channel not found", http.StatusNotFound)
 				return nil, false

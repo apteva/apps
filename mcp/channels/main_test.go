@@ -57,7 +57,7 @@ func TestStoreChatMessageLifecycle(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EnsureDefaultChat: %v", err)
 	}
-	if chat.ID != "default-42" || chat.ProjectID != "proj-1" {
+	if chat.ID != "chat:proj-1:agent:42" || chat.ChannelID != "chat:proj-1" || chat.ProjectID != "proj-1" {
 		t.Fatalf("chat = %+v", chat)
 	}
 
@@ -93,6 +93,24 @@ func TestStoreChatMessageLifecycle(t *testing.T) {
 	}
 	if seen != agentMsg.ID {
 		t.Fatalf("seen = %d, want clamp to %d", seen, agentMsg.ID)
+	}
+}
+
+func TestProjectChatChannelExistsWithoutConversation(t *testing.T) {
+	st := newStore(testDB(t))
+	ch, err := st.EnsureProjectChatChannel("proj-1")
+	if err != nil {
+		t.Fatalf("EnsureProjectChatChannel: %v", err)
+	}
+	if ch.ID != "chat:proj-1" || ch.Type != "chat" || ch.DefaultAgentID != 0 {
+		t.Fatalf("chat channel = %+v", ch)
+	}
+	rows, err := st.ListChannelsForAgent(42, "proj-1")
+	if err != nil {
+		t.Fatalf("ListChannelsForAgent: %v", err)
+	}
+	if len(rows) != 1 || rows[0].ID != "chat:proj-1" || rows[0].Channel != "chat" {
+		t.Fatalf("rows = %+v, want project chat channel", rows)
 	}
 }
 
@@ -253,6 +271,9 @@ func TestChannelsListProjectWithoutAgent(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), `"id":"ntfy:agent-42-test"`) {
 		t.Fatalf("response missing ntfy channel: %s", rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"id":"chat"`) {
+		t.Fatalf("response missing chat channel: %s", rec.Body.String())
 	}
 }
 

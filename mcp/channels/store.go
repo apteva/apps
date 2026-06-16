@@ -30,6 +30,18 @@ type Chat struct {
 	UpdatedAt  time.Time `json:"updated_at"`
 }
 
+type ChannelRecord struct {
+	ID             string    `json:"id"`
+	ProjectID      string    `json:"project_id"`
+	Type           string    `json:"type"`
+	Name           string    `json:"name"`
+	Status         string    `json:"status"`
+	DefaultAgentID int64     `json:"default_agent_id"`
+	Topic          string    `json:"topic,omitempty"`
+	CreatedAt      time.Time `json:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
+}
+
 type Message struct {
 	ID         int64           `json:"id"`
 	ChatID     string          `json:"chat_id"`
@@ -67,12 +79,18 @@ func newStore(db *sql.DB) *store {
 	return &store{db: db}
 }
 
-func defaultChatID(agentID int64) string {
-	return fmt.Sprintf("default-%d", agentID)
+func defaultChatID(agentID int64, projectID string) string {
+	if projectID == "" {
+		return fmt.Sprintf("chat:agent:%d", agentID)
+	}
+	return fmt.Sprintf("chat:%s:agent:%d", projectID, agentID)
 }
 
-func defaultChatChannelID(agentID int64) string {
-	return fmt.Sprintf("chat-default-%d", agentID)
+func projectChatChannelID(projectID string) string {
+	if projectID == "" {
+		return "chat:global"
+	}
+	return "chat:" + projectID
 }
 
 func defaultNtfyID(agentID int64) string {
@@ -80,15 +98,23 @@ func defaultNtfyID(agentID int64) string {
 }
 
 func (s *store) EnsureDefaultChat(agentID int64, projectID string) (*Chat, error) {
-	conversationID := defaultChatID(agentID)
-	channelID := defaultChatChannelID(agentID)
-	if err := s.upsertChannel(channelID, projectID, "chat", "Chat", "active", agentID, nil); err != nil {
-		return nil, fmt.Errorf("ensure default chat channel: %w", err)
+	conversationID := defaultChatID(agentID, projectID)
+	ch, err := s.EnsureProjectChatChannel(projectID)
+	if err != nil {
+		return nil, err
 	}
-	if err := s.upsertConversation(conversationID, channelID, projectID, agentID, "Chat", ""); err != nil {
+	if err := s.upsertConversation(conversationID, ch.ID, projectID, agentID, "Chat", ""); err != nil {
 		return nil, fmt.Errorf("ensure default chat conversation: %w", err)
 	}
 	return s.GetChat(conversationID)
+}
+
+func (s *store) EnsureProjectChatChannel(projectID string) (*ChannelRecord, error) {
+	id := projectChatChannelID(projectID)
+	if err := s.upsertChannel(id, projectID, "chat", "Dashboard Chat", "active", 0, nil); err != nil {
+		return nil, fmt.Errorf("ensure project chat channel: %w", err)
+	}
+	return s.GetChannel(id)
 }
 
 func (s *store) EnsureDefaultNtfy(agentID int64, projectID string, topic string) (*Chat, error) {
@@ -100,6 +126,25 @@ func (s *store) EnsureDefaultNtfy(agentID int64, projectID string, topic string)
 		topic = randomTopic(agentID)
 	}
 	return s.upsertNtfy(conversationID, projectID, agentID, "Ntfy", topic)
+}
+
+func (s *store) GetChannel(id string) (*ChannelRecord, error) {
+	var ch ChannelRecord
+	err := s.db.QueryRow(
+		`SELECT id, project_id, type, name, status, default_agent_id,
+		        COALESCE(json_extract(config_json, '$.topic'), ''),
+		        created_at, updated_at
+		   FROM channels
+		  WHERE id = ?`,
+		id,
+	).Scan(&ch.ID, &ch.ProjectID, &ch.Type, &ch.Name, &ch.Status, &ch.DefaultAgentID, &ch.Topic, &ch.CreatedAt, &ch.UpdatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, errNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &ch, nil
 }
 
 func (s *store) GetChat(id string) (*Chat, error) {
@@ -230,22 +275,55 @@ func (s *store) upsertConversation(id, channelID, projectID string, agentID int6
 }
 
 func (s *store) ListChannelsForAgent(agentID int64, projectID string) ([]Chat, error) {
-	rows, err := s.db.Query(
-		`SELECT v.id, v.channel_id, v.agent_id, v.project_id, v.title,
-		        ch.type, v.external_thread_id, v.created_at, v.updated_at
-		   FROM conversations v
-		   JOIN channels ch ON ch.id = v.channel_id
-		  WHERE v.project_id = ?
-		    AND ch.status = 'active'
-		    AND (ch.default_agent_id = 0 OR ch.default_agent_id = ? OR v.agent_id = ?)
-		  ORDER BY ch.type ASC, v.updated_at DESC`,
-		projectID, agentID, agentID,
-	)
+	channels, err := s.ListChannelRecordsForAgent(agentID, projectID)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]Chat, 0, len(channels))
+	for _, ch := range channels {
+		out = append(out, Chat{
+			ID:         ch.ID,
+			ChannelID:  ch.ID,
+			AgentID:    ch.DefaultAgentID,
+			InstanceID: ch.DefaultAgentID,
+			ProjectID:  ch.ProjectID,
+			Title:      ch.Name,
+			Channel:    ch.Type,
+			ThreadID:   ch.Topic,
+			CreatedAt:  ch.CreatedAt,
+			UpdatedAt:  ch.UpdatedAt,
+		})
+	}
+	return out, nil
+}
+
+func (s *store) ListChannelRecordsForAgent(agentID int64, projectID string) ([]ChannelRecord, error) {
+	query := `SELECT id, project_id, type, name, status, default_agent_id,
+	                 COALESCE(json_extract(config_json, '$.topic'), ''),
+	                 created_at, updated_at
+	            FROM channels
+	           WHERE project_id = ?
+	             AND status = 'active'`
+	args := []any{projectID}
+	if agentID > 0 {
+		query += ` AND (default_agent_id = 0 OR default_agent_id = ?)`
+		args = append(args, agentID)
+	}
+	query += ` ORDER BY type ASC, updated_at DESC`
+	rows, err := s.db.Query(query, args...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	return scanChats(rows)
+	var out []ChannelRecord
+	for rows.Next() {
+		var ch ChannelRecord
+		if err := rows.Scan(&ch.ID, &ch.ProjectID, &ch.Type, &ch.Name, &ch.Status, &ch.DefaultAgentID, &ch.Topic, &ch.CreatedAt, &ch.UpdatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, ch)
+	}
+	return out, rows.Err()
 }
 
 func (s *store) ListChats(agentID int64, projectID string) ([]Chat, error) {
