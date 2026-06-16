@@ -236,7 +236,7 @@ export default function ChannelsPanel({ projectId }: NativePanelProps) {
 
   return (
     <div className="h-full min-h-0 bg-bg text-text">
-      <div className="mx-auto flex h-full max-w-6xl flex-col gap-4 p-5">
+      <div className="flex h-full w-full flex-col gap-4 p-5">
         <header className="flex flex-wrap items-center justify-between gap-3 border-b border-border pb-4">
           <div>
             <h1 className="text-xl font-semibold">Channels</h1>
