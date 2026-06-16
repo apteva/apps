@@ -26,7 +26,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: channels
 display_name: Channels
-version: 0.4.3
+version: 0.5.0
 description: |
   Agent-facing channel router with standalone dashboard chat, a visible inbox, project channel management, and ntfy-compatible notifications.
   Agents reply through respond(channel="chat", ...); the app stores chat
@@ -34,7 +34,7 @@ description: |
   and forwards inbound user messages to the owning agent.
 author: Apteva
 icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/channels/icon.svg
-scopes: [project, global]
+scopes: [global]
 requires:
   permissions:
     - db.write.app
@@ -196,7 +196,7 @@ func (a *App) MCPTools() []sdk.Tool {
 
 func respondDescription() string {
 	return "Send a message to a user on a channel. Text in your thoughts is invisible; only this tool delivers messages.\n\n" +
-		"V1 standalone Channels app supports the dashboard chat channel. Use channel=\"chat\" when the incoming event is tagged [chat].\n" +
+		"Standalone Channels supports dashboard chat and ntfy channel ids returned by list_channels. Use channel=\"chat\" when the incoming event is tagged [chat].\n" +
 		"The call is accepted only while the chat stream is connected. If rejected as unavailable, no user is currently reachable on chat.\n" +
 		"The final response before going idle must include the actual outcome, not just an acknowledgement."
 }

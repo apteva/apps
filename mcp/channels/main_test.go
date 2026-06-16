@@ -132,6 +132,45 @@ func TestProjectNtfyCanBeCreatedWithoutAgent(t *testing.T) {
 	}
 }
 
+func TestStoreSeparatesChannelsConversationsAndMessages(t *testing.T) {
+	db := testDB(t)
+	st := newStore(db)
+	ch, err := st.UpsertNtfyChannel(0, "proj-1", "Marco Phone", "marco-phone")
+	if err != nil {
+		t.Fatalf("UpsertNtfyChannel: %v", err)
+	}
+	if ch.ChannelID == "" {
+		t.Fatalf("channel/conversation ids not populated: %+v", ch)
+	}
+	if _, err := st.Append(ch.ID, "agent", "hello", nil, "", "final", nil); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+
+	var channelRows, conversationRows, messageRows int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM channels`).Scan(&channelRows); err != nil {
+		t.Fatalf("count channels: %v", err)
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM conversations`).Scan(&conversationRows); err != nil {
+		t.Fatalf("count conversations: %v", err)
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM messages`).Scan(&messageRows); err != nil {
+		t.Fatalf("count messages: %v", err)
+	}
+	if channelRows != 1 || conversationRows != 1 || messageRows != 1 {
+		t.Fatalf("counts channels=%d conversations=%d messages=%d", channelRows, conversationRows, messageRows)
+	}
+
+	if _, err := st.DeleteChat(ch.ID); err != nil {
+		t.Fatalf("DeleteChat: %v", err)
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM messages`).Scan(&messageRows); err != nil {
+		t.Fatalf("count messages after delete: %v", err)
+	}
+	if messageRows != 0 {
+		t.Fatalf("messageRows after channel delete = %d, want 0", messageRows)
+	}
+}
+
 func TestNtfyPublishHTTP(t *testing.T) {
 	st := newStore(testDB(t))
 	ch, err := st.EnsureDefaultNtfy(42, "proj-1", "agent-42-test")
