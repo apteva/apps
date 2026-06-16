@@ -39,6 +39,28 @@ function socialURL(path: string, projectId?: string | null, extra?: Record<strin
   return `${API}${path}${qs ? `?${qs}` : ""}`;
 }
 
+function waitForOAuthPopupResult(popup: Window | null, onDone: (ok: boolean) => void) {
+  let settled = false;
+  let poll: number | null = null;
+  const finish = (ok: boolean) => {
+    if (settled) return;
+    settled = true;
+    window.removeEventListener("message", onMsg);
+    if (poll !== null) window.clearInterval(poll);
+    onDone(ok);
+  };
+  const onMsg = (ev: MessageEvent) => {
+    if (ev.origin !== window.location.origin) return;
+    if (ev.data?.type !== "apteva-oauth-result") return;
+    finish(ev.data.ok !== false);
+  };
+  window.addEventListener("message", onMsg);
+  poll = window.setInterval(() => {
+    if (popup?.closed) finish(false);
+  }, 800);
+  window.setTimeout(() => finish(false), 10 * 60 * 1000);
+}
+
 function storageURL(path: string, projectId?: string | null): string {
   const params = new URLSearchParams();
   if (projectId) params.set("project_id", projectId);
@@ -966,6 +988,7 @@ function AccountCard({
   const [confirming, setConfirming] = useState(false);
   const [importing, setImporting] = useState(false);
   const [checking, setChecking] = useState(false);
+  const [reauthing, setReauthing] = useState(false);
   const doRemove = async () => {
     try {
       const res = await fetch(socialURL(`/accounts/${account.id}`, projectId), { method: "DELETE", credentials: "same-origin" });
@@ -1050,6 +1073,56 @@ function AccountCard({
       setChecking(false);
     }
   };
+  const doReauth = () => {
+    if (!account.connection_id) {
+      setStatus("Reconnect failed: account has no linked connection.");
+      return;
+    }
+    const popup = window.open("about:blank", `social_reauth_${account.id}`, "width=600,height=700");
+    if (!popup) {
+      setStatus("Popup blocked. Allow pop-ups for this site and try again.");
+      return;
+    }
+    setReauthing(true);
+    setStatus(`Starting reconnect for ${account.display_name}…`);
+    (async () => {
+      const fail = (msg: string) => {
+        setStatus(msg);
+        setReauthing(false);
+        try { popup.close(); } catch {}
+      };
+      try {
+        const res = await fetch(`/api/connections/${account.connection_id}/oauth/reauth`, {
+          method: "POST",
+          credentials: "same-origin",
+          headers: { "Content-Type": "application/json" },
+          body: "{}",
+        });
+        if (!res.ok) {
+          fail(`Reconnect failed (HTTP ${res.status}): ${await res.text()}`);
+          return;
+        }
+        const data = await res.json() as { redirect_url?: string };
+        if (!data.redirect_url) {
+          fail("Reconnect failed: server did not return an OAuth URL.");
+          return;
+        }
+        popup.location.href = data.redirect_url;
+        waitForOAuthPopupResult(popup, async (ok) => {
+          if (!ok) {
+            setStatus("Reconnect did not complete.");
+            setReauthing(false);
+            return;
+          }
+          setStatus(`Reconnect complete. Refreshing ${account.display_name}…`);
+          setReauthing(false);
+          await doCheck();
+        });
+      } catch (e) {
+        fail("Reconnect failed: " + (e as Error).message);
+      }
+    })();
+  };
   return (
     <>
       <div className="border border-border rounded p-3 flex items-center gap-3">
@@ -1074,6 +1147,14 @@ function AccountCard({
           title="Check whether this account still works"
         >
           {checking ? "Checking…" : "Check"}
+        </button>
+        <button
+          onClick={doReauth}
+          disabled={reauthing || checking}
+          className="text-xs text-text-muted hover:text-text px-2 py-1 border border-border rounded disabled:opacity-50"
+          title="Reconnect OAuth and update the linked tokens for this account"
+        >
+          {reauthing ? "Reconnecting…" : "Reconnect"}
         </button>
         {importSupported && (
           <button
