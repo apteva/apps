@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: analytics
 display_name: Analytics
-version: 0.7.1
+version: 0.8.0
 description: |
   Generic event analytics for Apteva apps. Other apps call
   analytics_track to record typed events; analytics_query / count /
@@ -35,6 +35,11 @@ description: |
   breakdown, and feed widgets. The first built-in template is Website
   Traffic for live page views, active sessions, top pages, devices,
   and recent activity.
+
+  v0.8 adds an event catalog / tracking plan: event specs, typed
+  property specs, validation modes, violation reporting, spec-driven
+  auto upsert / rollup policies, and analytics_sum for summing numeric
+  event properties.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/analytics
@@ -70,6 +75,33 @@ provides:
       requires: events.read
     - name: analytics_topics
       description: List distinct (app, topic) pairs seen. Args app?. Returns [{app, topic, last_ts, count}].
+      requires: events.read
+    - name: analytics_sum
+      description: Sum a numeric event field/path. Args value (required, e.g. props.views), app?, topic?, project_id?, since?, until?, where?, group_by?, limit?. Returns aggregate buckets with sum/count.
+      requires: events.read
+    - name: analytics_event_specs_list
+      description: List event specs with their property specs. Args project_id?, app?, status?.
+      requires: events.read
+    - name: analytics_event_spec_get
+      description: Get one event spec by id or by project_id/app/topic.
+      requires: events.read
+    - name: analytics_event_spec_upsert
+      description: Create or update an event spec and optionally replace its properties and ingest policy.
+      requires: events.write
+    - name: analytics_event_spec_delete
+      description: Delete an event spec by id.
+      requires: events.write
+    - name: analytics_event_property_upsert
+      description: Add or update one property spec for an event spec.
+      requires: events.write
+    - name: analytics_event_property_delete
+      description: Delete one property spec from an event spec.
+      requires: events.write
+    - name: analytics_event_validate
+      description: Validate a sample event against the event catalog without storing it.
+      requires: events.read
+    - name: analytics_event_violations
+      description: List recent event spec validation violations.
       requires: events.read
   ui_panels:
     - slot: project.page

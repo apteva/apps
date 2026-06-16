@@ -51,15 +51,21 @@ func (a *App) toolTrack(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		propsJSON = string(b)
 	}
 
+	projectID := stringArg(args, "project_id")
+	if projectID == "" {
+		projectID = ctx.CurrentProject()
+	}
+
 	id, err := insertEvent(ctx.AppDB(), EventInsert{
 		TS:        ts,
 		App:       app,
 		Topic:     event,
-		ProjectID: stringArg(args, "project_id"),
+		ProjectID: projectID,
 		InstallID: int64Arg(args, "install_id"),
 		UserID:    stringArg(args, "user_id"),
 		SessionID: stringArg(args, "session_id"),
 		Source:    "track",
+		UpsertKey: stringArg(args, "upsert_key"),
 		Props:     propsJSON,
 	})
 	if err != nil {
@@ -71,11 +77,7 @@ func (a *App) toolTrack(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	// of the data (its project_id), not the dispatch ctx — fall back to
 	// the calling context when the caller didn't supply one. Fire-and-
 	// forget; a missed fanout is recovered by the dashboard reconnecting.
-	pid := stringArg(args, "project_id")
-	if pid == "" {
-		pid = ctx.CurrentProject()
-	}
-	ctx.EmitWithProject("event.recorded", pid, map[string]any{
+	ctx.EmitWithProject("event.recorded", projectID, map[string]any{
 		"id": id, "app": app, "topic": event, "ts": ts,
 	})
 
@@ -136,6 +138,131 @@ func (a *App) toolTopics(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return nil, err
 	}
 	return map[string]any{"topics": rows}, nil
+}
+
+func (a *App) toolSum(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	value := stringArg(args, "value")
+	if value == "" {
+		return nil, errors.New("value required (e.g. \"props.views\")")
+	}
+	var groupBy []string
+	if raw, ok := args["group_by"]; ok && raw != nil {
+		keys, err := stringSlice(raw)
+		if err != nil {
+			return nil, fmt.Errorf("group_by: %w", err)
+		}
+		groupBy = keys
+	}
+	rows, err := sumByValue(ctx.AppDB(), filterFromArgs(args), value, groupBy, intArg(args, "limit"))
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"buckets": rows, "value": value}, nil
+}
+
+func (a *App) toolEventSpecsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	specs, err := listEventSpecs(ctx.AppDB(), specFilter{
+		ProjectID: stringArg(args, "project_id"),
+		App:       stringArg(args, "app"),
+		Status:    stringArg(args, "status"),
+	})
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"specs": specs}, nil
+}
+
+func (a *App) toolEventSpecGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if id := int64Arg(args, "id"); id > 0 {
+		spec, err := getEventSpecByID(ctx.AppDB(), id)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"spec": spec}, nil
+	}
+	spec, err := getEventSpec(ctx.AppDB(), stringArg(args, "project_id"), stringArg(args, "app"), stringArg(args, "topic"))
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"spec": spec}, nil
+}
+
+func (a *App) toolEventSpecUpsert(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	spec, err := specFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	if spec.ProjectID == "" {
+		spec.ProjectID = ctx.CurrentProject()
+	}
+	saved, err := upsertEventSpec(ctx.AppDB(), spec, true)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"spec": saved}, nil
+}
+
+func (a *App) toolEventSpecDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	id := int64Arg(args, "id")
+	if id <= 0 {
+		return nil, errors.New("id required")
+	}
+	_, err := ctx.AppDB().Exec(`DELETE FROM event_specs WHERE id=?`, id)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"ok": true}, nil
+}
+
+func (a *App) toolEventPropertyUpsert(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	prop, err := propertyFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	if err := upsertEventPropertySpec(ctx.AppDB(), prop); err != nil {
+		return nil, err
+	}
+	spec, err := getEventSpecByID(ctx.AppDB(), prop.EventSpecID)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"spec": spec}, nil
+}
+
+func (a *App) toolEventPropertyDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	specID := int64Arg(args, "event_spec_id")
+	key := stringArg(args, "key")
+	if specID <= 0 || key == "" {
+		return nil, errors.New("event_spec_id and key required")
+	}
+	_, err := ctx.AppDB().Exec(`DELETE FROM event_property_specs WHERE event_spec_id=? AND key=?`, specID, key)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"ok": true}, nil
+}
+
+func (a *App) toolEventValidate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	ev, err := eventInsertFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	if ev.ProjectID == "" {
+		ev.ProjectID = ctx.CurrentProject()
+	}
+	out, err := validateEventAgainstSpecs(ctx.AppDB(), ev)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"valid": len(out.Violations) == 0, "reject": out.Reject, "violations": out.Violations, "ingest": previewEventIngest(ctx.AppDB(), ev)}, nil
+}
+
+func (a *App) toolEventViolations(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	rows, err := listEventSpecViolations(ctx.AppDB(), filterFromArgs(args), intArg(args, "limit"))
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"violations": rows}, nil
 }
 
 // ─── arg helpers ──────────────────────────────────────────────────
@@ -203,4 +330,151 @@ func stringSlice(v any) ([]string, error) {
 		out = append(out, s)
 	}
 	return out, nil
+}
+
+func specFromArgs(args map[string]any) (EventSpec, error) {
+	spec := EventSpec{
+		ID:             int64Arg(args, "id"),
+		ProjectID:      stringArg(args, "project_id"),
+		App:            stringArg(args, "app"),
+		Topic:          stringArg(args, "topic"),
+		Kind:           stringArg(args, "kind"),
+		DisplayName:    stringArg(args, "display_name"),
+		Description:    stringArg(args, "description"),
+		Category:       stringArg(args, "category"),
+		Status:         stringArg(args, "status"),
+		ValidationMode: stringArg(args, "validation_mode"),
+		IngestMode:     stringArg(args, "ingest_mode"),
+		CreatedBy:      stringArg(args, "created_by"),
+	}
+	if spec.Topic == "" {
+		spec.Topic = stringArg(args, "event")
+	}
+	if raw, ok := args["properties"]; ok && raw != nil {
+		props, err := propertySlice(raw)
+		if err != nil {
+			return spec, err
+		}
+		spec.Properties = props
+	}
+	if raw, ok := args["upsert_policy"]; ok && raw != nil {
+		policy, err := ingestPolicyFromAny(raw)
+		if err != nil {
+			return spec, fmt.Errorf("upsert_policy: %w", err)
+		}
+		spec.UpsertPolicy = policy
+	}
+	if raw, ok := args["rollup_policy"]; ok && raw != nil {
+		policy, err := ingestPolicyFromAny(raw)
+		if err != nil {
+			return spec, fmt.Errorf("rollup_policy: %w", err)
+		}
+		spec.RollupPolicy = policy
+	}
+	return spec, nil
+}
+
+func ingestPolicyFromAny(raw any) (*EventIngestPolicy, error) {
+	b, err := json.Marshal(raw)
+	if err != nil {
+		return nil, err
+	}
+	var policy EventIngestPolicy
+	if err := json.Unmarshal(b, &policy); err != nil {
+		return nil, err
+	}
+	normalizeIngestPolicy(&policy)
+	return &policy, nil
+}
+
+func propertySlice(v any) ([]EventPropertySpec, error) {
+	arr, ok := v.([]any)
+	if !ok {
+		return nil, fmt.Errorf("properties expected array, got %T", v)
+	}
+	out := make([]EventPropertySpec, 0, len(arr))
+	for i, item := range arr {
+		m, ok := item.(map[string]any)
+		if !ok {
+			return nil, fmt.Errorf("properties[%d] expected object, got %T", i, item)
+		}
+		prop, err := propertyFromArgs(m)
+		if err != nil {
+			return nil, fmt.Errorf("properties[%d]: %w", i, err)
+		}
+		out = append(out, prop)
+	}
+	return out, nil
+}
+
+func propertyFromArgs(args map[string]any) (EventPropertySpec, error) {
+	prop := EventPropertySpec{
+		ID:                int64Arg(args, "id"),
+		EventSpecID:       int64Arg(args, "event_spec_id"),
+		Key:               stringArg(args, "key"),
+		Type:              stringArg(args, "type"),
+		Required:          boolArg(args, "required"),
+		Description:       stringArg(args, "description"),
+		PIIClassification: stringArg(args, "pii_classification"),
+		ExampleValue:      stringArg(args, "example_value"),
+	}
+	if raw, ok := args["enum_values"]; ok && raw != nil {
+		vals, err := stringSlice(raw)
+		if err != nil {
+			return prop, fmt.Errorf("enum_values: %w", err)
+		}
+		prop.EnumValues = vals
+	}
+	return prop, nil
+}
+
+func eventInsertFromArgs(args map[string]any) (EventInsert, error) {
+	propsJSON := "{}"
+	if raw, ok := args["props"]; ok && raw != nil {
+		b, err := json.Marshal(raw)
+		if err != nil {
+			return EventInsert{}, err
+		}
+		if len(b) > 0 && b[0] != '{' {
+			b, _ = json.Marshal(map[string]any{"value": raw})
+		}
+		propsJSON = string(b)
+	}
+	topic := stringArg(args, "topic")
+	if topic == "" {
+		topic = stringArg(args, "event")
+	}
+	app := stringArg(args, "app")
+	if app == "" {
+		app = "_explicit"
+	}
+	return EventInsert{
+		TS:        int64Arg(args, "ts"),
+		App:       app,
+		Topic:     topic,
+		ProjectID: stringArg(args, "project_id"),
+		UserID:    stringArg(args, "user_id"),
+		SessionID: stringArg(args, "session_id"),
+		UpsertKey: stringArg(args, "upsert_key"),
+		Source:    stringArg(args, "source"),
+		Props:     propsJSON,
+	}, nil
+}
+
+func boolArg(args map[string]any, name string) bool {
+	v, ok := args[name]
+	if !ok || v == nil {
+		return false
+	}
+	switch x := v.(type) {
+	case bool:
+		return x
+	case string:
+		return x == "true" || x == "1"
+	case float64:
+		return x != 0
+	case int:
+		return x != 0
+	}
+	return false
 }

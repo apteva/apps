@@ -15,7 +15,7 @@ func testDashboardDB(t *testing.T) *sql.DB {
 		t.Fatalf("open sqlite: %v", err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	for _, name := range []string{"001_init.sql", "004_dashboards.sql"} {
+	for _, name := range []string{"001_init.sql", "004_dashboards.sql", "005_event_specs.sql"} {
 		b, err := os.ReadFile(filepath.Join("migrations", name))
 		if err != nil {
 			t.Fatalf("read migration %s: %v", name, err)

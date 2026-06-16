@@ -159,6 +159,54 @@ interface Dashboard {
   widgets?: DashboardWidget[];
 }
 
+interface EventPropertySpec {
+  key: string;
+  type: string;
+  required?: boolean;
+  description?: string;
+  enum_values?: string[];
+  pii_classification?: string;
+  example_value?: string;
+}
+
+interface EventIngestPolicy {
+  target_topic?: string;
+  bucket?: "none" | "hour" | "day" | "week" | "month";
+  timezone?: string;
+  operation?: "replace" | "increment" | "sum" | "min" | "max";
+  value?: unknown;
+  value_key?: string;
+  output_property?: string;
+  dimensions?: string[];
+}
+
+interface EventSpec {
+  id?: number;
+  project_id: string;
+  app: string;
+  topic: string;
+  kind: "occurrence" | "aggregate_observation";
+  display_name: string;
+  description: string;
+  category: string;
+  status: "draft" | "active" | "deprecated" | "blocked";
+  validation_mode: "observe" | "warn" | "reject";
+  ingest_mode?: "raw" | "upsert" | "raw_plus_rollup";
+  upsert_policy?: EventIngestPolicy;
+  rollup_policy?: EventIngestPolicy;
+  properties: EventPropertySpec[];
+}
+
+interface EventViolation {
+  id: number;
+  app: string;
+  topic: string;
+  violation_type: string;
+  message: string;
+  property_key?: string;
+  seen_at: number;
+}
+
 const WINDOWS = [
   { key: "24h", label: "24h", ms: 24 * 3600e3 },
   { key: "7d", label: "7d", ms: 7 * 24 * 3600e3 },
@@ -996,8 +1044,388 @@ function DashboardsTab({ projectId }: { projectId: string }) {
   );
 }
 
+const DEFAULT_SPEC: EventSpec = {
+  project_id: "",
+  app: "patreon",
+  topic: "post_views_daily_observed",
+  kind: "aggregate_observation",
+  display_name: "Post Views Daily Observed",
+  description: "Imported daily post view count.",
+  category: "content",
+  status: "active",
+  validation_mode: "warn",
+  ingest_mode: "upsert",
+  upsert_policy: {
+    bucket: "day",
+    timezone: "UTC",
+    operation: "replace",
+    value: "props.views",
+    output_property: "views",
+    dimensions: ["props.post_id"],
+  },
+  properties: [
+    { key: "props.creator_id", type: "string", required: true, pii_classification: "identifier" },
+    { key: "props.post_id", type: "string", required: true, pii_classification: "identifier" },
+    { key: "props.date", type: "string", required: true, example_value: "2026-06-16" },
+    { key: "props.views", type: "number", required: true, example_value: "150" },
+    { key: "upsert_key", type: "string", required: true },
+  ],
+};
+
+const PATREON_TEMPLATE: EventSpec[] = [
+  {
+    project_id: "",
+    app: "patreon",
+    topic: "post_view",
+    kind: "occurrence",
+    display_name: "Post View",
+    description: "One post view occurred.",
+    category: "content",
+    status: "active",
+    validation_mode: "warn",
+    ingest_mode: "raw_plus_rollup",
+    rollup_policy: {
+      target_topic: "post_view_daily_rollup",
+      bucket: "day",
+      timezone: "UTC",
+      operation: "increment",
+      value: 1,
+      output_property: "views",
+      dimensions: ["props.post_id"],
+    },
+    properties: [
+      { key: "props.creator_id", type: "string", required: true, pii_classification: "identifier" },
+      { key: "props.post_id", type: "string", required: true, pii_classification: "identifier" },
+      { key: "props.post_type", type: "string", enum_values: ["text", "image", "video", "audio"] },
+      { key: "session_id", type: "string", required: true },
+    ],
+  },
+  DEFAULT_SPEC,
+  {
+    project_id: "",
+    app: "patreon",
+    topic: "active_members_daily_observed",
+    kind: "aggregate_observation",
+    display_name: "Active Members Daily Observed",
+    description: "Imported active member count.",
+    category: "membership",
+    status: "active",
+    validation_mode: "warn",
+    ingest_mode: "upsert",
+    upsert_policy: {
+      bucket: "day",
+      timezone: "UTC",
+      operation: "replace",
+      value: "props.members",
+      output_property: "members",
+      dimensions: ["props.creator_id"],
+    },
+    properties: [
+      { key: "props.creator_id", type: "string", required: true, pii_classification: "identifier" },
+      { key: "props.date", type: "string", required: true, example_value: "2026-06-16" },
+      { key: "props.members", type: "number", required: true, example_value: "842" },
+      { key: "upsert_key", type: "string", required: true },
+    ],
+  },
+];
+
+function CatalogTab({ projectId }: { projectId: string }) {
+  const [specs, setSpecs] = useState<EventSpec[]>([]);
+  const [selected, setSelected] = useState<EventSpec | null>(null);
+  const [propsText, setPropsText] = useState("[]");
+  const [upsertPolicyText, setUpsertPolicyText] = useState("{}");
+  const [rollupPolicyText, setRollupPolicyText] = useState("{}");
+  const [sampleText, setSampleText] = useState(`{
+  "props": {
+    "creator_id": "creator_42",
+    "post_id": "post_999",
+    "date": "2026-06-16",
+    "views": 150
+  }
+}`);
+  const [validation, setValidation] = useState("");
+  const [violations, setViolations] = useState<EventViolation[]>([]);
+  const [status, setStatus] = useState("");
+
+  const load = useCallback(async () => {
+    const r = await fetch(`${API}/event-specs?project_id=${encodeURIComponent(projectId)}`, {
+      credentials: "same-origin",
+    });
+    if (!r.ok) {
+      setStatus(`specs ${r.status}`);
+      return;
+    }
+    const rows = (await r.json()).specs ?? [];
+    setSpecs(rows);
+    if (!selected && rows[0]) {
+      setSelected(rows[0]);
+      setPropsText(JSON.stringify(rows[0].properties ?? [], null, 2));
+      setUpsertPolicyText(JSON.stringify(rows[0].upsert_policy ?? {}, null, 2));
+      setRollupPolicyText(JSON.stringify(rows[0].rollup_policy ?? {}, null, 2));
+    }
+  }, [projectId, selected]);
+
+  const loadViolations = useCallback(async () => {
+    const r = await fetch(`${API}/event-spec-violations?project_id=${encodeURIComponent(projectId)}&limit=20`, {
+      credentials: "same-origin",
+    });
+    if (r.ok) setViolations((await r.json()).violations ?? []);
+  }, [projectId]);
+
+  useEffect(() => {
+    load();
+    loadViolations();
+  }, [load, loadViolations]);
+
+  const selectSpec = (spec: EventSpec) => {
+    setSelected(spec);
+    setPropsText(JSON.stringify(spec.properties ?? [], null, 2));
+    setUpsertPolicyText(JSON.stringify(spec.upsert_policy ?? {}, null, 2));
+    setRollupPolicyText(JSON.stringify(spec.rollup_policy ?? {}, null, 2));
+    setValidation("");
+  };
+
+  const newSpec = () => {
+    const spec = { ...DEFAULT_SPEC, project_id: projectId, id: undefined };
+    setSelected(spec);
+    setPropsText(JSON.stringify(spec.properties, null, 2));
+    setUpsertPolicyText(JSON.stringify(spec.upsert_policy ?? {}, null, 2));
+    setRollupPolicyText(JSON.stringify(spec.rollup_policy ?? {}, null, 2));
+  };
+
+  const save = async () => {
+    if (!selected) return;
+    let properties: EventPropertySpec[];
+    try {
+      properties = JSON.parse(propsText);
+    } catch (e) {
+      setStatus("properties json: " + (e as Error).message);
+      return;
+    }
+    let upsertPolicy: EventIngestPolicy | undefined;
+    let rollupPolicy: EventIngestPolicy | undefined;
+    try {
+      const parsed = JSON.parse(upsertPolicyText || "{}");
+      upsertPolicy = Object.keys(parsed).length ? parsed : undefined;
+    } catch (e) {
+      setStatus("upsert policy json: " + (e as Error).message);
+      return;
+    }
+    try {
+      const parsed = JSON.parse(rollupPolicyText || "{}");
+      rollupPolicy = Object.keys(parsed).length ? parsed : undefined;
+    } catch (e) {
+      setStatus("rollup policy json: " + (e as Error).message);
+      return;
+    }
+    const body = { ...selected, project_id: projectId, properties, upsert_policy: upsertPolicy, rollup_policy: rollupPolicy };
+    const url = selected.id ? `${API}/event-specs/${selected.id}` : `${API}/event-specs`;
+    const r = await fetch(url, {
+      method: selected.id ? "PUT" : "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!r.ok) {
+      setStatus(await r.text());
+      return;
+    }
+    const saved = await r.json();
+    setSelected(saved);
+    setPropsText(JSON.stringify(saved.properties ?? [], null, 2));
+    setUpsertPolicyText(JSON.stringify(saved.upsert_policy ?? {}, null, 2));
+    setRollupPolicyText(JSON.stringify(saved.rollup_policy ?? {}, null, 2));
+    setStatus("saved");
+    await load();
+  };
+
+  const installPatreon = async () => {
+    setStatus("creating…");
+    for (const spec of PATREON_TEMPLATE) {
+      const r = await fetch(`${API}/event-specs`, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ...spec, project_id: projectId }),
+      });
+      if (!r.ok) {
+        setStatus(await r.text());
+        return;
+      }
+    }
+    setStatus("template created");
+    setSelected(null);
+    await load();
+  };
+
+  const validate = async () => {
+    if (!selected) return;
+    let sample: any;
+    try {
+      sample = JSON.parse(sampleText);
+    } catch (e) {
+      setValidation("sample json: " + (e as Error).message);
+      return;
+    }
+    const r = await fetch(`${API}/event-specs/validate`, {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        app: selected.app,
+        topic: selected.topic,
+        project_id: projectId,
+        ...sample,
+      }),
+    });
+    setValidation(r.ok ? JSON.stringify(await r.json(), null, 2) : await r.text());
+  };
+
+  return (
+    <div className="flex-1 min-h-0 flex">
+      <aside className="border-r border-border p-3 flex flex-col gap-2" style={{ width: "250px" }}>
+        <div className="flex items-center gap-2">
+          <button onClick={newSpec} className="px-2 py-1 text-xs rounded border border-border text-text-muted hover:text-text">
+            New
+          </button>
+          <button onClick={installPatreon} className="px-2 py-1 text-xs rounded border border-accent text-accent">
+            Patreon
+          </button>
+        </div>
+        <div className="text-text-dim text-xs uppercase mt-2">Sources</div>
+        <div className="flex flex-col gap-1 overflow-auto">
+          {specs.map((spec) => (
+            <button
+              key={spec.id}
+              onClick={() => selectSpec(spec)}
+              className={
+                "text-left px-2 py-1.5 text-xs rounded border " +
+                (selected?.id === spec.id
+                  ? "border-accent text-accent"
+                  : "border-border text-text-muted hover:text-text")
+              }
+              >
+                <div className="truncate text-text">{spec.app}.{spec.topic}</div>
+                <div className="text-text-dim truncate">{spec.kind} · {spec.ingest_mode ?? "raw"} · {spec.validation_mode}</div>
+              </button>
+          ))}
+        </div>
+      </aside>
+      <main className="flex-1 overflow-auto p-4 flex flex-col gap-4">
+        {!selected ? (
+          <section className="border border-border rounded p-6">
+            <div className="text-text font-medium">Event Catalog</div>
+          </section>
+        ) : (
+          <>
+            <section className="border border-border rounded p-4 grid gap-3" style={{ gridTemplateColumns: "repeat(2, minmax(0, 1fr))" }}>
+              <input value={selected.app} onChange={(e) => setSelected({ ...selected, app: e.target.value })} placeholder="source" className="bg-bg-input border border-border rounded px-2 py-1.5 text-sm" />
+              <input value={selected.topic} onChange={(e) => setSelected({ ...selected, topic: e.target.value })} placeholder="event" className="bg-bg-input border border-border rounded px-2 py-1.5 text-sm" />
+              <input value={selected.display_name} onChange={(e) => setSelected({ ...selected, display_name: e.target.value })} placeholder="display name" className="bg-bg-input border border-border rounded px-2 py-1.5 text-sm" />
+              <input value={selected.category} onChange={(e) => setSelected({ ...selected, category: e.target.value })} placeholder="category" className="bg-bg-input border border-border rounded px-2 py-1.5 text-sm" />
+              <select value={selected.kind} onChange={(e) => setSelected({ ...selected, kind: e.target.value as EventSpec["kind"] })} className="bg-bg-input border border-border rounded px-2 py-1.5 text-sm">
+                <option value="occurrence">Occurrence</option>
+                <option value="aggregate_observation">Aggregate observation</option>
+              </select>
+              <select value={selected.validation_mode} onChange={(e) => setSelected({ ...selected, validation_mode: e.target.value as EventSpec["validation_mode"] })} className="bg-bg-input border border-border rounded px-2 py-1.5 text-sm">
+                <option value="observe">Observe</option>
+                <option value="warn">Warn</option>
+                <option value="reject">Reject</option>
+              </select>
+              <select value={selected.ingest_mode ?? "raw"} onChange={(e) => setSelected({ ...selected, ingest_mode: e.target.value as EventSpec["ingest_mode"] })} className="bg-bg-input border border-border rounded px-2 py-1.5 text-sm">
+                <option value="raw">Raw</option>
+                <option value="upsert">Auto upsert</option>
+                <option value="raw_plus_rollup">Raw + rollup</option>
+              </select>
+              <select value={selected.status} onChange={(e) => setSelected({ ...selected, status: e.target.value as EventSpec["status"] })} className="bg-bg-input border border-border rounded px-2 py-1.5 text-sm">
+                <option value="draft">Draft</option>
+                <option value="active">Active</option>
+                <option value="deprecated">Deprecated</option>
+                <option value="blocked">Blocked</option>
+              </select>
+              <button onClick={save} className="px-3 py-1.5 text-sm bg-accent text-bg rounded font-bold">
+                Save
+              </button>
+              <textarea value={selected.description} onChange={(e) => setSelected({ ...selected, description: e.target.value })} placeholder="description" className="col-span-2 bg-bg-input border border-border rounded px-2 py-1.5 text-sm" />
+            </section>
+
+            <section className="border border-border rounded p-4 grid gap-3" style={{ gridTemplateColumns: "1fr 1fr" }}>
+              <div className="flex flex-col gap-2">
+                <div className="text-text-dim text-xs uppercase">Upsert Policy</div>
+                <textarea
+                  value={upsertPolicyText}
+                  onChange={(e) => setUpsertPolicyText(e.target.value)}
+                  spellCheck={false}
+                  className="bg-bg-input border border-border rounded p-2 text-xs"
+                  style={{ minHeight: "160px", fontFamily: "monospace" }}
+                />
+              </div>
+              <div className="flex flex-col gap-2">
+                <div className="text-text-dim text-xs uppercase">Rollup Policy</div>
+                <textarea
+                  value={rollupPolicyText}
+                  onChange={(e) => setRollupPolicyText(e.target.value)}
+                  spellCheck={false}
+                  className="bg-bg-input border border-border rounded p-2 text-xs"
+                  style={{ minHeight: "160px", fontFamily: "monospace" }}
+                />
+              </div>
+            </section>
+
+            <section className="border border-border rounded p-4 flex flex-col gap-2">
+              <div className="text-text-dim text-xs uppercase">Properties</div>
+              <textarea
+                value={propsText}
+                onChange={(e) => setPropsText(e.target.value)}
+                spellCheck={false}
+                className="bg-bg-input border border-border rounded p-2 text-xs"
+                style={{ minHeight: "190px", fontFamily: "monospace" }}
+              />
+            </section>
+
+            <section className="border border-border rounded p-4 grid gap-3" style={{ gridTemplateColumns: "1fr 1fr" }}>
+              <div className="flex flex-col gap-2">
+                <div className="text-text-dim text-xs uppercase">Validate Sample</div>
+                <textarea
+                  value={sampleText}
+                  onChange={(e) => setSampleText(e.target.value)}
+                  spellCheck={false}
+                  className="bg-bg-input border border-border rounded p-2 text-xs"
+                  style={{ minHeight: "160px", fontFamily: "monospace" }}
+                />
+                <button onClick={validate} className="px-3 py-1.5 text-sm border border-border rounded text-text-muted hover:text-text">
+                  Validate
+                </button>
+              </div>
+              <pre className="bg-bg-input border border-border rounded p-2 text-xs overflow-auto" style={{ minHeight: "205px" }}>
+                {validation || status}
+              </pre>
+            </section>
+
+            <section className="border border-border rounded p-4 flex flex-col gap-2">
+              <div className="text-text-dim text-xs uppercase">Recent Violations</div>
+              {violations.length ? (
+                violations.map((v) => (
+                  <div key={v.id} className="border-t border-border py-1.5 text-xs flex items-center gap-2">
+                    <span className="text-text-dim" style={{ width: "64px" }}>{relTime(v.seen_at)}</span>
+                    <span className="text-text-muted">{v.app}.{v.topic}</span>
+                    <span className="text-error">{v.violation_type}</span>
+                    <span className="text-text-dim truncate">{v.property_key || ""} {v.message}</span>
+                  </div>
+                ))
+              ) : (
+                <Empty label="No validation violations." />
+              )}
+            </section>
+          </>
+        )}
+      </main>
+    </div>
+  );
+}
+
 export default function AnalyticsPanel({ projectId }: NativePanelProps) {
-  const [view, setView] = useState<"overview" | "tracking" | "capture" | "dashboards">("overview");
+  const [view, setView] = useState<"overview" | "dashboards" | "catalog" | "tracking" | "capture">("overview");
   const [windowKey, setWindowKey] = useState("7d");
   const [byKey, setByKey] = useState("props.platform");
   const [appF, setAppF] = useState("");
@@ -1133,7 +1561,7 @@ export default function AnalyticsPanel({ projectId }: NativePanelProps) {
           Analytics
         </div>
         <div className="flex items-center gap-1 ml-2">
-          {(["overview", "dashboards", "tracking", "capture"] as const).map((v) => (
+          {(["overview", "dashboards", "catalog", "tracking", "capture"] as const).map((v) => (
             <button
               key={v}
               onClick={() => setView(v)}
@@ -1148,9 +1576,11 @@ export default function AnalyticsPanel({ projectId }: NativePanelProps) {
                 ? "Overview"
                 : v === "dashboards"
                   ? "Dashboards"
-                  : v === "tracking"
-                    ? "Tracking"
-                    : "Capture"}
+                  : v === "catalog"
+                    ? "Catalog"
+                    : v === "tracking"
+                      ? "Tracking"
+                      : "Capture"}
             </button>
           ))}
         </div>
@@ -1196,6 +1626,8 @@ export default function AnalyticsPanel({ projectId }: NativePanelProps) {
         <CaptureTab projectId={projectId} />
       ) : view === "dashboards" ? (
         <DashboardsTab projectId={projectId} />
+      ) : view === "catalog" ? (
+        <CatalogTab projectId={projectId} />
       ) : (
       <>
       <div className="flex items-center gap-2 flex-wrap border-b border-border px-4 py-2">

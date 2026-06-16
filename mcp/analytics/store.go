@@ -23,6 +23,7 @@ type EventRow struct {
 	UserID    string          `json:"user_id,omitempty"`
 	SessionID string          `json:"session_id,omitempty"`
 	Source    string          `json:"source"`
+	UpsertKey string          `json:"upsert_key,omitempty"`
 	Props     json.RawMessage `json:"props"`
 }
 
@@ -37,26 +38,74 @@ type EventInsert struct {
 	UserID    string
 	SessionID string
 	Source    string // "auto" | "track"
+	UpsertKey string
 	Props     string // JSON-encoded; "" → "{}"
 }
 
 func insertEvent(db *sql.DB, ev EventInsert) (int64, error) {
+	return insertEventWithPolicy(db, ev)
+}
+
+func insertEventRaw(db *sql.DB, ev EventInsert, validate bool) (int64, error) {
 	if ev.Props == "" {
 		ev.Props = "{}"
 	}
+	var validation validationOutcome
+	if validate {
+		var err error
+		validation, err = validateEventInsert(db, ev)
+		if err != nil {
+			return 0, err
+		}
+	}
+	if ev.UpsertKey != "" {
+		_, err := db.Exec(`
+			INSERT INTO events (ts, app, topic, project_id, install_id, user_id, session_id, source, upsert_key, props)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT(project_id, app, topic, upsert_key) WHERE upsert_key IS NOT NULL
+			DO UPDATE SET
+				ts = excluded.ts,
+				install_id = excluded.install_id,
+				user_id = excluded.user_id,
+				session_id = excluded.session_id,
+				source = excluded.source,
+				props = excluded.props
+		`,
+			ev.TS, ev.App, ev.Topic,
+			ev.ProjectID, nullInt(ev.InstallID),
+			nullStr(ev.UserID), nullStr(ev.SessionID),
+			ev.Source, ev.UpsertKey, ev.Props,
+		)
+		if err != nil {
+			return 0, err
+		}
+		var id int64
+		err = db.QueryRow(
+			`SELECT id FROM events WHERE project_id=? AND app=? AND topic=? AND upsert_key=?`,
+			ev.ProjectID, ev.App, ev.Topic, ev.UpsertKey,
+		).Scan(&id)
+		if err == nil {
+			recordEventSpecViolations(db, id, validation.Violations)
+		}
+		return id, err
+	}
 	res, err := db.Exec(`
-		INSERT INTO events (ts, app, topic, project_id, install_id, user_id, session_id, source, props)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO events (ts, app, topic, project_id, install_id, user_id, session_id, source, upsert_key, props)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`,
 		ev.TS, ev.App, ev.Topic,
 		nullStr(ev.ProjectID), nullInt(ev.InstallID),
 		nullStr(ev.UserID), nullStr(ev.SessionID),
-		ev.Source, ev.Props,
+		ev.Source, nullStr(ev.UpsertKey), ev.Props,
 	)
 	if err != nil {
 		return 0, err
 	}
-	return res.LastInsertId()
+	id, err := res.LastInsertId()
+	if err == nil {
+		recordEventSpecViolations(db, id, validation.Violations)
+	}
+	return id, err
 }
 
 // Filter is the shared filter shape across query / count / top.
@@ -147,7 +196,7 @@ func queryRows(db *sql.DB, f Filter, limit int) ([]EventRow, error) {
 	if limit > 1000 {
 		limit = 1000
 	}
-	q := `SELECT id, ts, app, topic, project_id, install_id, user_id, session_id, source, props
+	q := `SELECT id, ts, app, topic, project_id, install_id, user_id, session_id, source, upsert_key, props
 	      FROM events`
 	if where != "" {
 		q += " WHERE " + where
@@ -166,14 +215,16 @@ func queryRows(db *sql.DB, f Filter, limit int) ([]EventRow, error) {
 		var r EventRow
 		var pid, uid, sid sql.NullString
 		var iid sql.NullInt64
+		var upsertKey sql.NullString
 		var props string
-		if err := rows.Scan(&r.ID, &r.TS, &r.App, &r.Topic, &pid, &iid, &uid, &sid, &r.Source, &props); err != nil {
+		if err := rows.Scan(&r.ID, &r.TS, &r.App, &r.Topic, &pid, &iid, &uid, &sid, &r.Source, &upsertKey, &props); err != nil {
 			return nil, err
 		}
 		r.ProjectID = pid.String
 		r.UserID = uid.String
 		r.SessionID = sid.String
 		r.InstallID = iid.Int64
+		r.UpsertKey = upsertKey.String
 		r.Props = json.RawMessage(props)
 		out = append(out, r)
 	}
@@ -315,6 +366,102 @@ func topByPropsKey(db *sql.DB, f Filter, by string, limit int) ([]map[string]any
 		out = append(out, row)
 	}
 	return out, rows.Err()
+}
+
+// sumByValue sums a numeric column/path over matching events. With
+// groupBy keys, returns one bucket per dimension combination; otherwise
+// returns a single bucket with only sum/count. Intended for aggregate-
+// observation events such as "post_views_daily_observed" where the
+// value lives in props.views.
+func sumByValue(db *sql.DB, f Filter, valueKey string, groupBy []string, limit int) ([]map[string]any, error) {
+	valueExpr, ok := valueExtract(valueKey)
+	if !ok {
+		return nil, fmt.Errorf("value must be a numeric column or props.X, got %q", valueKey)
+	}
+	if limit <= 0 {
+		limit = 100
+	}
+	if limit > 1000 {
+		limit = 1000
+	}
+
+	var selectExprs []string
+	var groupExprs []string
+	var labels []string
+	for _, gb := range groupBy {
+		switch gb {
+		case "app", "topic", "project_id", "source", "user_id", "session_id", "upsert_key":
+			selectExprs = append(selectExprs, gb)
+			groupExprs = append(groupExprs, gb)
+			labels = append(labels, gb)
+		default:
+			expr, ok := propsExtract(gb)
+			if !ok {
+				return nil, fmt.Errorf("group_by key %q must be a column or props.X", gb)
+			}
+			selectExprs = append(selectExprs, expr)
+			groupExprs = append(groupExprs, expr)
+			labels = append(labels, gb)
+		}
+	}
+
+	where, args := f.buildWhere()
+	selectSQL := ""
+	if len(selectExprs) > 0 {
+		selectSQL = strings.Join(selectExprs, ", ") + ", "
+	}
+	q := "SELECT " + selectSQL + "SUM(CAST(" + valueExpr + " AS REAL)) AS sum, COUNT(*) AS count FROM events"
+	if where != "" {
+		q += " WHERE " + where + " AND " + valueExpr + " IS NOT NULL"
+	} else {
+		q += " WHERE " + valueExpr + " IS NOT NULL"
+	}
+	if len(groupExprs) > 0 {
+		q += " GROUP BY " + strings.Join(groupExprs, ", ") + " ORDER BY sum DESC LIMIT ?"
+		args = append(args, limit)
+	}
+
+	rows, err := db.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []map[string]any
+	for rows.Next() {
+		vals := make([]any, len(labels)+2)
+		for i := range labels {
+			var s sql.NullString
+			vals[i] = &s
+		}
+		var sum sql.NullFloat64
+		var count int64
+		vals[len(labels)] = &sum
+		vals[len(labels)+1] = &count
+		if err := rows.Scan(vals...); err != nil {
+			return nil, err
+		}
+		row := map[string]any{"sum": sum.Float64, "count": count}
+		for i, label := range labels {
+			ns := vals[i].(*sql.NullString)
+			if ns.Valid {
+				row[label] = ns.String
+			} else {
+				row[label] = nil
+			}
+		}
+		out = append(out, row)
+	}
+	return out, rows.Err()
+}
+
+func valueExtract(key string) (string, bool) {
+	switch key {
+	case "ts", "install_id":
+		return key, true
+	default:
+		return propsExtract(key)
+	}
 }
 
 // listTopics returns one row per (app, topic) seen, with last_ts and
