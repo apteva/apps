@@ -1126,16 +1126,26 @@ func validateStorageFile(ctx *sdk.AppCtx, id string) error {
 	if err != nil || n <= 0 {
 		return fmt.Errorf("storage file id %q must be a numeric storage.files id", id)
 	}
-	var out struct {
-		Found bool `json:"found"`
+	args := map[string]any{"id": n}
+	if pid := scopeProject(ctx); pid != "" {
+		args["project_id"] = pid
 	}
-	if err := ctx.PlatformAPI().CallAppResult("storage", "files_get", map[string]any{"id": n}, &out); err != nil {
+	var out struct {
+		ID    int64 `json:"id"`
+		Found bool  `json:"found"`
+		File  any   `json:"file"`
+	}
+	if err := ctx.PlatformAPI().CallAppResult("storage", "files_get", args, &out); err != nil {
 		return fmt.Errorf("storage.files_get(%s): %w", id, err)
 	}
-	if !out.Found {
+	if !storageFileLookupFound(out.ID, out.Found, out.File) {
 		return fmt.Errorf("storage file %q not found", id)
 	}
 	return nil
+}
+
+func storageFileLookupFound(id int64, found bool, file any) bool {
+	return id != 0 || found || file != nil
 }
 
 func storageFileArg(args map[string]any, key string) (string, bool) {

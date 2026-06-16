@@ -397,6 +397,21 @@ func TestCourseBuilder_LessonAdjunctsAndAnalytics(t *testing.T) {
 	}
 }
 
+func TestStorageFileLookupFound_AcceptsStorageResponseShapes(t *testing.T) {
+	if !storageFileLookupFound(123, false, nil) {
+		t.Fatal("direct storage file object with id should count as found")
+	}
+	if !storageFileLookupFound(0, true, nil) {
+		t.Fatal("wrapped {found:true} response should count as found")
+	}
+	if !storageFileLookupFound(0, false, map[string]any{"id": 123}) {
+		t.Fatal("wrapped {file:{...}} response should count as found")
+	}
+	if storageFileLookupFound(0, false, nil) {
+		t.Fatal("empty lookup response should not count as found")
+	}
+}
+
 // ─── patch tools (0.1.x) ─────────────────────────────────────────
 
 func TestCommunitiesUpdate_AndArchive(t *testing.T) {
