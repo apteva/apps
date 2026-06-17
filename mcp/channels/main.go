@@ -9,6 +9,7 @@ package main
 import (
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -23,10 +24,12 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+var ntfyHTTPClient = &http.Client{Timeout: 10 * time.Second}
+
 const manifestYAML = `schema: apteva-app/v1
 name: channels
 display_name: Channels
-version: 0.5.6
+version: 0.5.7
 description: |
   Agent-facing channel router with standalone dashboard chat, a visible inbox, project channel management, and ntfy-compatible notifications.
   Agents reply through respond(channel="chat", ...); the app stores chat
@@ -88,6 +91,16 @@ db:
   driver: sqlite
   path: /data/channels.db
   migrations: migrations/
+config_schema:
+  - name: ntfy_ios_upstream_url
+    label: ntfy iOS upstream URL
+    type: text
+    default: https://ntfy.sh
+    description: APNS-connected ntfy server used only for iOS poll_request wake-ups. Set to off to disable.
+  - name: ntfy_ios_upstream_access_token
+    label: ntfy iOS upstream access token
+    type: password
+    description: Optional bearer token for the upstream ntfy server if rate limits require it.
 upgrade_policy: auto-patch
 `
 
@@ -656,6 +669,7 @@ func (a *App) publishInboundNtfy(w http.ResponseWriter, topic, message string, m
 		return
 	}
 	a.publish(*m)
+	a.publishNtfyIOSPollRequest(topic, *m)
 	if chat.AgentID > 0 && globalCtx != nil && globalCtx.PlatformAPI() != nil {
 		ev := fmt.Sprintf("[ntfy:%s] %s", topic, message)
 		if meta.Title != "" {
@@ -685,6 +699,15 @@ func (a *App) streamNtfy(w http.ResponseWriter, r *http.Request, topic, format s
 		w.Header().Set("Content-Type", "text/event-stream")
 	case "raw":
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	}
+	if id := queryInt64(r, "id"); id > 0 {
+		m, err := a.store.GetMessage(id)
+		if err != nil || m.ChatID != chat.ID {
+			http.Error(w, "message not found", http.StatusNotFound)
+			return
+		}
+		writeJSON(w, ntfyEventFromMessage(topic, *m))
+		return
 	}
 	if r.URL.Query().Get("poll") == "1" {
 		since := queryInt64(r, "since")
@@ -773,6 +796,7 @@ func (a *App) toolRespond(ctx context.Context, app *sdk.AppCtx, args map[string]
 			return nil, err
 		}
 		a.publish(*m)
+		a.publishNtfyIOSPollRequest(topic, *m)
 		return map[string]any{"status": "published", "channel": "ntfy", "channel_id": "ntfy:" + topic, "topic": topic, "message_id": m.ID}, nil
 	}
 	if channel != "chat" {
@@ -1155,6 +1179,74 @@ func (a *App) ntfyURLFields(topic string) map[string]any {
 	out["stream_json_url"] = base + root + "/json"
 	out["stream_sse_url"] = base + root + "/sse"
 	return out
+}
+
+func (a *App) publishNtfyIOSPollRequest(topic string, m Message) {
+	upstream := ntfyIOSUpstreamURL()
+	topicURL := a.ntfyPublicTopicURL(topic)
+	if upstream == "" || topicURL == "" || m.ID <= 0 {
+		return
+	}
+	go func() {
+		if err := sendNtfyIOSPollRequest(upstream, ntfyIOSUpstreamToken(), topicURL, m.ID); err != nil && globalCtx != nil {
+			globalCtx.Logger().Warn("ntfy ios upstream poll request failed", "topic", topic, "message_id", m.ID, "err", err)
+		}
+	}()
+}
+
+func (a *App) ntfyPublicTopicURL(topic string) string {
+	fields := a.ntfyURLFields(topic)
+	raw, _ := fields["subscribe_url"].(string)
+	raw = strings.TrimSpace(raw)
+	if strings.HasPrefix(raw, "https://") || strings.HasPrefix(raw, "http://") {
+		return raw
+	}
+	return ""
+}
+
+func ntfyIOSUpstreamURL() string {
+	upstream := "https://ntfy.sh"
+	if globalCtx != nil && globalCtx.Config() != nil {
+		if v := strings.TrimSpace(globalCtx.Config().Get("ntfy_ios_upstream_url")); v != "" {
+			upstream = v
+		}
+	}
+	switch strings.ToLower(strings.TrimSpace(upstream)) {
+	case "", "off", "false", "disabled", "none":
+		return ""
+	default:
+		return strings.TrimRight(strings.TrimSpace(upstream), "/")
+	}
+}
+
+func ntfyIOSUpstreamToken() string {
+	if globalCtx == nil || globalCtx.Config() == nil {
+		return ""
+	}
+	return strings.TrimSpace(globalCtx.Config().Get("ntfy_ios_upstream_access_token"))
+}
+
+func sendNtfyIOSPollRequest(upstream, token, topicURL string, messageID int64) error {
+	sum := sha256.Sum256([]byte(strings.TrimSpace(topicURL)))
+	upstreamTopic := fmt.Sprintf("%x", sum[:])
+	req, err := http.NewRequest(http.MethodPost, strings.TrimRight(upstream, "/")+"/"+upstreamTopic, strings.NewReader("New message"))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("X-Poll-ID", strconv.FormatInt(messageID, 10))
+	if token = strings.TrimSpace(token); token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	resp, err := ntfyHTTPClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return fmt.Errorf("upstream returned %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	return nil
 }
 
 func nullableAgentID(agentID int64) any {

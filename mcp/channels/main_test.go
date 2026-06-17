@@ -3,11 +3,13 @@ package main
 import (
 	"database/sql"
 	"errors"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -273,6 +275,70 @@ func TestNtfyPollHTTPReturnsBackfillAndCloses(t *testing.T) {
 	}
 	if strings.Contains(body, `"event":"open"`) {
 		t.Fatalf("poll response should not include stream open event: %s", body)
+	}
+}
+
+func TestNtfyPollHTTPByIDReturnsSingleMessage(t *testing.T) {
+	st := newStore(testDB(t))
+	ch, err := st.EnsureDefaultNtfy(42, "proj-1", "agent-42-test")
+	if err != nil {
+		t.Fatalf("EnsureDefaultNtfy: %v", err)
+	}
+	first, err := st.Append(ch.ID, "agent", "old", nil, "", "final", nil)
+	if err != nil {
+		t.Fatalf("Append first: %v", err)
+	}
+	second, err := st.Append(ch.ID, "agent", "wake me", nil, "", "final", []ChatComponent{
+		{App: "channels", Name: "ntfy", Props: map[string]any{"title": "Wake"}},
+	})
+	if err != nil {
+		t.Fatalf("Append second: %v", err)
+	}
+	app := &App{store: st, hub: newHub()}
+	req := httptest.NewRequest(http.MethodGet, "/ntfy/agent-42-test/json?poll=1&id="+strconv.FormatInt(second.ID, 10), nil)
+	rec := httptest.NewRecorder()
+
+	app.handleNtfy(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if strings.Contains(body, `"id":"`+strconv.FormatInt(first.ID, 10)+`"`) {
+		t.Fatalf("poll by id returned unrelated message: %s", body)
+	}
+	if !strings.Contains(body, `"id":"`+strconv.FormatInt(second.ID, 10)+`"`) || !strings.Contains(body, `"message":"wake me"`) {
+		t.Fatalf("poll by id response = %s", body)
+	}
+}
+
+func TestSendNtfyIOSPollRequest(t *testing.T) {
+	var gotPath, gotPollID, gotBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotPollID = r.Header.Get("X-Poll-ID")
+		raw, _ := io.ReadAll(r.Body)
+		gotBody = string(raw)
+		writeJSON(w, map[string]any{"event": "poll_request"})
+	}))
+	defer srv.Close()
+	oldClient := ntfyHTTPClient
+	ntfyHTTPClient = srv.Client()
+	t.Cleanup(func() { ntfyHTTPClient = oldClient })
+
+	topicURL := "https://example.com/api/apps/channels/ntfy/channel-test"
+	if err := sendNtfyIOSPollRequest(srv.URL, "tok-123", topicURL, 99); err != nil {
+		t.Fatalf("sendNtfyIOSPollRequest: %v", err)
+	}
+
+	if gotPollID != "99" {
+		t.Fatalf("X-Poll-ID = %q", gotPollID)
+	}
+	if gotBody != "New message" {
+		t.Fatalf("body = %q", gotBody)
+	}
+	if gotPath != "/3b74b05672d4aa68f37061f43517efe89e4567390a122a391c028fb53e52c617" {
+		t.Fatalf("path = %q", gotPath)
 	}
 }
 
