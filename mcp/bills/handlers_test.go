@@ -510,6 +510,62 @@ func TestBillsSearch_FiltersByStatusAndVendor(t *testing.T) {
 	}
 }
 
+func TestBillsSearch_OrdersByVendorInvoiceDateDescending(t *testing.T) {
+	ctx := newTestCtx(t)
+	app := &App{}
+	v := mustVendor(t, ctx, "ap@acme.com", "Acme")
+
+	for _, tc := range []struct {
+		invoice string
+		date    string
+	}{
+		{invoice: "OLD", date: "2026-01-10"},
+		{invoice: "NEW", date: "2026-03-10"},
+		{invoice: "MID", date: "2026-02-10"},
+		{invoice: "NO-DATE"},
+	} {
+		args := map[string]any{
+			"vendor_id":             v.ID,
+			"vendor_invoice_number": tc.invoice,
+			"line_items":            []any{line("service", 1, 100, 0)},
+		}
+		if tc.date != "" {
+			args["vendor_invoice_date"] = tc.date
+		}
+		if _, err := app.toolBillsCreate(ctx, args); err != nil {
+			t.Fatalf("create %s: %v", tc.invoice, err)
+		}
+	}
+
+	old, err := lookupBill(ctx.AppDB(), "test-proj", map[string]any{
+		"vendor_id":             v.ID,
+		"vendor_invoice_number": "OLD",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.toolBillsUpdate(ctx, map[string]any{
+		"id":    old.ID,
+		"patch": map[string]any{"notes": "updated after newer bills exist"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := app.toolBillsSearch(ctx, map[string]any{"vendor_id": v.ID, "limit": 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bills := out.(map[string]any)["bills"].([]*Bill)
+	got := make([]string, 0, len(bills))
+	for _, b := range bills {
+		got = append(got, b.VendorInvoiceNumber)
+	}
+	want := []string{"NEW", "MID", "OLD", "NO-DATE"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("order = %v, want %v", got, want)
+	}
+}
+
 // ─── Render PDF ─────────────────────────────────────────────────────
 
 func TestBillsRenderPDF_ReturnsBase64(t *testing.T) {

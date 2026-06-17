@@ -45,7 +45,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: bills
 display_name: Bills
-version: 0.1.20
+version: 0.1.21
 description: |
   Vendors, bills, and outbound payments. The AP mirror of billing.
 author: Apteva
@@ -113,7 +113,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	}
 
 	ctx.Logger().Info("bills mounted",
-		"version", "0.1.20",
+		"version", "0.1.21",
 		"scope_project_id", os.Getenv("APTEVA_PROJECT_ID"),
 		"ocr_provider", configString(ctx, "ocr_provider", "(disabled)"))
 	return nil
@@ -2819,7 +2819,11 @@ func dbBillSearch(db *sql.DB, pid string, f billFilters) ([]*Bill, error) {
 		 FROM bills
 		 LEFT JOIN vendors ON vendors.id = bills.vendor_id
 		 WHERE `+strings.Join(where, " AND ")+`
-		 ORDER BY bills.updated_at DESC
+		 ORDER BY
+		        CASE WHEN NULLIF(bills.vendor_invoice_date, '') IS NULL THEN 1 ELSE 0 END,
+		        bills.vendor_invoice_date DESC,
+		        bills.created_at DESC,
+		        bills.id DESC
 		 LIMIT ? OFFSET ?`, args...)
 	if err != nil {
 		return nil, err

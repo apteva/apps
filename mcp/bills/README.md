@@ -1,8 +1,16 @@
-# Bills (v0.1.9)
+# Bills (v0.1.21)
 
 Vendors, bills, and bill payments for Apteva agents and human teams.
 The accounts-payable mirror of the `billing` app — money OUT instead
 of money in.
+
+## What's in v0.1.21
+
+The bills list now sorts by the vendor invoice date, newest first,
+instead of by the last updated timestamp. This keeps recently edited
+older bills from jumping above newer bills in the panel. Bills without
+an invoice date stay after dated bills, with stable created-at/id
+fallback ordering.
 
 ## What's in v0.1.9
 

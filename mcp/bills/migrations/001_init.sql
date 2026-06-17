@@ -118,6 +118,8 @@ CREATE TABLE bills (
 CREATE INDEX ix_bills_proj     ON bills(project_id, deleted_at);
 CREATE INDEX ix_bills_vendor   ON bills(vendor_id, status);
 CREATE INDEX ix_bills_status   ON bills(project_id, status, updated_at DESC);
+CREATE INDEX ix_bills_invoice_date ON bills(project_id, vendor_invoice_date DESC, created_at DESC, id DESC)
+  WHERE deleted_at IS NULL;
 CREATE INDEX ix_bills_due      ON bills(project_id, due_date) WHERE status IN ('approved', 'scheduled');
 CREATE INDEX ix_bills_provider ON bills(project_id, provider, status);
 CREATE INDEX ix_bills_ext      ON bills(external_id);
