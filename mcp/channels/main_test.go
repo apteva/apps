@@ -46,6 +46,15 @@ func TestManifestParses(t *testing.T) {
 	if len(m.Provides.MCPTools) != 3 {
 		t.Fatalf("MCP tools = %d, want 3", len(m.Provides.MCPTools))
 	}
+	noAuth := map[string]bool{}
+	for _, route := range m.Provides.HTTPRoutes {
+		if route.NoAuth {
+			noAuth[route.Prefix] = true
+		}
+	}
+	if !noAuth["/ntfy"] || !noAuth["/ntfy/"] {
+		t.Fatalf("manifest must expose ntfy routes as no_auth, got %+v", m.Provides.HTTPRoutes)
+	}
 	if m.DB == nil {
 		t.Fatal("manifest missing db block")
 	}

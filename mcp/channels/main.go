@@ -26,7 +26,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: channels
 display_name: Channels
-version: 0.5.4
+version: 0.5.5
 description: |
   Agent-facing channel router with standalone dashboard chat, a visible inbox, project channel management, and ntfy-compatible notifications.
   Agents reply through respond(channel="chat", ...); the app stores chat
@@ -43,6 +43,10 @@ requires:
 provides:
   http_routes:
     - prefix: /
+    - prefix: /ntfy
+      no_auth: true
+    - prefix: /ntfy/
+      no_auth: true
   mcp_tools:
     - name: respond
       description: Send a user-visible reply to a channel. Supports channel="chat" and ntfy channel ids from list_channels.
