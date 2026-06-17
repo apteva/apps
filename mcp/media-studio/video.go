@@ -195,6 +195,7 @@ func (a *App) handleAsyncQueueResponse(ctx *sdk.AppCtx, kind, role, providerSlug
 			"queue_id":                   queueID,
 			"model":                      model,
 			"provider":                   providerSlug,
+			"generation_id":              draftID,
 			"cost_usd":                   costUSD,
 			"cache_key":                  cacheKey,
 			"storage_folder":             storageFolder,

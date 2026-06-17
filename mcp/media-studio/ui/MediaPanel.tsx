@@ -116,6 +116,7 @@ interface GenerationEstimate {
 interface VideoJob {
   id: number;
   queue_id: string;
+  generation_id?: number;
   provider?: string;
   model: string;
   prompt: string;
@@ -1021,7 +1022,7 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
       // Async kinds (video today) return _meta.status === "queued".
       // Tell the user the bytes will arrive later via the event/poll loop.
       const meta = (result as unknown as {
-        _meta?: { status?: string; job_id?: number; cost_usd?: number };
+        _meta?: { status?: string; job_id?: number; generation_id?: number; cost_usd?: number };
       })._meta;
       if (meta?.status === "draft") {
         setPrompt("");
@@ -1046,6 +1047,7 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
                 prompt: queuedPrompt,
                 status: "queued",
                 error: "",
+                generation_id: meta.generation_id || 0,
                 cost_usd: meta.cost_usd || 0,
               },
               ...cur,
@@ -1084,7 +1086,7 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
         setStatus(`Error ${res.status}: ${text.slice(0, 300)}`);
         return;
       }
-      let result: { isError?: boolean; content?: { type: string; text?: string }[]; _meta?: { status?: string; job_id?: number; cost_usd?: number } } = {};
+      let result: { isError?: boolean; content?: { type: string; text?: string }[]; _meta?: { status?: string; job_id?: number; generation_id?: number; cost_usd?: number } } = {};
       try {
         result = JSON.parse(text);
       } catch {}
@@ -1108,6 +1110,7 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
                 prompt: g.prompt,
                 status: "queued",
                 error: "",
+                generation_id: meta.generation_id || g.id,
                 cost_usd: meta.cost_usd || g.cost_usd || 0,
               },
               ...cur,
@@ -1562,7 +1565,7 @@ function Composer(p: ComposerProps) {
                 : undefined
             }
           />
-          <VideoSoundToggle
+          <VideoAudioSelect
             value={p.videoNoSound}
             onChange={p.setVideoNoSound}
             configurable={p.currentModel?.audio_configurable}
@@ -2129,7 +2132,7 @@ function SafeModeToggle({
   );
 }
 
-function VideoSoundToggle({
+function VideoAudioSelect({
   value,
   onChange,
   configurable,
@@ -2139,22 +2142,22 @@ function VideoSoundToggle({
   configurable?: boolean;
 }) {
   return (
-    <label
-      className="flex items-center gap-1.5 text-xs text-text-muted cursor-pointer select-none"
-      title={
-        configurable === false
-          ? "This model does not advertise configurable audio; silent output may already be its default."
-          : "When on, sends audio=false to Venice video models that support generated audio."
-      }
-    >
-      <input
-        type="checkbox"
-        checked={value}
-        onChange={(e) => onChange(e.target.checked)}
-        style={{ accentColor: "var(--apteva-accent, #4ade80)" }}
-      />
-      No sound
-    </label>
+    <div>
+      <label className="text-text-muted text-xs block">Audio</label>
+      <select
+        value={value ? "silent" : "default"}
+        onChange={(e) => onChange(e.target.value === "silent")}
+        className="bg-bg-input border border-border rounded px-2 py-1.5 text-sm"
+        title={
+          configurable === false
+            ? "This model does not advertise configurable audio; silent output may already be its default."
+            : "No sound sends audio=false to Venice video models that support generated audio."
+        }
+      >
+        <option value="default">Default</option>
+        <option value="silent">No sound</option>
+      </select>
+    </div>
   );
 }
 
@@ -2849,30 +2852,52 @@ function Gallery({
             costUSD={job.cost_usd || 0}
           />
         ))}
-      {items.map((g) => {
-        const url = g.storage_urls?.[0] || g.local_cache_url || g.upstream_urls?.[0] || "";
-        const draft = g.status === "draft";
-        return (
-          <div
-            key={g.id}
-            className="border border-border rounded overflow-hidden bg-bg-card"
-            onClick={() => onSelect(g)}
-          >
-            {draft ? (
-              <DraftPreview generation={g} busy={generatingDraftId === g.id} onGenerate={onGenerateDraft} />
-            ) : url ? (
-              kind === "video" || kind === "avatar" ? (
-                <video controls src={url} className="w-full" />
-              ) : (
-                <audio controls src={url} className="w-full" />
-              )
-            ) : (
-              <div className="bg-bg-input py-6 text-center text-text-muted text-xs">no source</div>
-            )}
-            <CardMeta g={g} />
-          </div>
+      {(() => {
+        const pendingGenerationIds = new Set(
+          pendingJobs
+            .map((job) => job.generation_id || 0)
+            .filter((id) => id > 0),
         );
-      })}
+        return items.map((g) => {
+          const url = g.storage_urls?.[0] || g.local_cache_url || g.upstream_urls?.[0] || "";
+          const asyncPending =
+            (kind === "video" || kind === "avatar") &&
+            (g.status === "queued" || g.status === "generating") &&
+            !url;
+          if (asyncPending && pendingGenerationIds.has(g.id)) return null;
+          if (asyncPending) {
+            return (
+              <GeneratingCard
+                key={g.id}
+                prompt={g.prompt}
+                model={g.model ? `#${g.id} · ${g.model}` : `#${g.id}`}
+                costUSD={g.cost_usd || 0}
+              />
+            );
+          }
+          const draft = g.status === "draft";
+          return (
+            <div
+              key={g.id}
+              className="border border-border rounded overflow-hidden bg-bg-card"
+              onClick={() => onSelect(g)}
+            >
+              {draft ? (
+                <DraftPreview generation={g} busy={generatingDraftId === g.id} onGenerate={onGenerateDraft} />
+              ) : url ? (
+                kind === "video" || kind === "avatar" ? (
+                  <video controls src={url} className="w-full" />
+                ) : (
+                  <audio controls src={url} className="w-full" />
+                )
+              ) : (
+                <div className="bg-bg-input py-6 text-center text-text-muted text-xs">no source</div>
+              )}
+              <CardMeta g={g} />
+            </div>
+          );
+        });
+      })()}
     </div>
   );
 }
