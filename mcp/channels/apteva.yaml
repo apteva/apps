@@ -2,12 +2,12 @@ schema: apteva-app/v1
 
 name: channels
 display_name: Channels
-version: 0.5.7
+version: 0.5.8
 description: |
-  Agent-facing channel router with standalone dashboard chat, a visible inbox, project channel management, and ntfy-compatible notifications.
+  Agent-facing channel router with standalone dashboard chat, a visible inbox, project channel management, and ntfy.sh notifications.
   Agents reply through respond(channel="chat", ...); the app stores chat
-  history, streams updates to the dashboard, exposes private ntfy topics,
-  and forwards inbound user messages to the owning agent.
+  history, streams updates to the dashboard, delivers ntfy notifications
+  through the configured provider, and forwards inbound user messages to the owning agent.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/channels
 icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/channels/icon.svg
@@ -83,14 +83,14 @@ db:
   migrations: migrations/
 
 config_schema:
-  - name: ntfy_ios_upstream_url
-    label: ntfy iOS upstream URL
+  - name: ntfy_provider_url
+    label: ntfy provider URL
     type: text
     default: https://ntfy.sh
-    description: APNS-connected ntfy server used only for iOS poll_request wake-ups. Set to off to disable.
-  - name: ntfy_ios_upstream_access_token
-    label: ntfy iOS upstream access token
+    description: ntfy server used for notification delivery. Use https://ntfy.sh for native iOS notifications.
+  - name: ntfy_provider_access_token
+    label: ntfy provider access token
     type: password
-    description: Optional bearer token for the upstream ntfy server if rate limits require it.
+    description: Optional bearer token for the configured ntfy provider.
 
 upgrade_policy: auto-patch

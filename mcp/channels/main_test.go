@@ -206,6 +206,26 @@ func TestNtfyPublishHTTP(t *testing.T) {
 	if err != nil {
 		t.Fatalf("EnsureDefaultNtfy: %v", err)
 	}
+	var gotPath, gotTitle, gotTags, gotBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		gotTitle = r.Header.Get("Title")
+		gotTags = r.Header.Get("Tags")
+		raw, _ := io.ReadAll(r.Body)
+		gotBody = string(raw)
+		writeJSON(w, map[string]any{"id": "provider-message"})
+	}))
+	defer srv.Close()
+	oldClient := ntfyHTTPClient
+	ntfyHTTPClient = srv.Client()
+	t.Cleanup(func() { ntfyHTTPClient = oldClient })
+	oldProvider := defaultNtfyProvider
+	defaultNtfyProvider = srv.URL
+	t.Cleanup(func() { defaultNtfyProvider = oldProvider })
+	oldCtx := globalCtx
+	globalCtx = nil
+	t.Cleanup(func() { globalCtx = oldCtx })
+
 	app := &App{store: st, hub: newHub()}
 	req := httptest.NewRequest(http.MethodPost, "/ntfy/agent-42-test", strings.NewReader("hello phone"))
 	req.Header.Set("Title", "Test")
@@ -227,6 +247,9 @@ func TestNtfyPublishHTTP(t *testing.T) {
 	meta := ntfyMetaFromMessage(rows[0])
 	if meta.Title != "Test" || len(meta.Tags) != 2 {
 		t.Fatalf("meta = %+v", meta)
+	}
+	if gotPath != "/agent-42-test" || gotTitle != "Test" || gotTags != "white_check_mark,agent" || gotBody != "hello phone" {
+		t.Fatalf("provider request path=%q title=%q tags=%q body=%q", gotPath, gotTitle, gotTags, gotBody)
 	}
 }
 
@@ -357,11 +380,14 @@ func TestChannelsCreateNtfyWithoutAgent(t *testing.T) {
 	if !strings.Contains(rec.Body.String(), `"agent_id":0`) || !strings.Contains(rec.Body.String(), `"id":"ntfy:marco-phone"`) {
 		t.Fatalf("response = %s", rec.Body.String())
 	}
-	if !strings.Contains(rec.Body.String(), `"subscribe_url":"/api/apps/channels/ntfy/marco-phone"`) {
+	if !strings.Contains(rec.Body.String(), `"subscribe_url":"https://ntfy.sh/marco-phone"`) {
 		t.Fatalf("response missing subscribe_url: %s", rec.Body.String())
 	}
-	if !strings.Contains(rec.Body.String(), `"server_url":"/api/apps/channels/ntfy"`) {
+	if !strings.Contains(rec.Body.String(), `"server_url":"https://ntfy.sh"`) {
 		t.Fatalf("response missing server_url: %s", rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"local_subscribe_url":"/api/apps/channels/ntfy/marco-phone"`) {
+		t.Fatalf("response missing local_subscribe_url: %s", rec.Body.String())
 	}
 }
 
@@ -401,11 +427,14 @@ func TestChannelsListProjectWithoutAgent(t *testing.T) {
 	if !strings.Contains(rec.Body.String(), `"id":"ntfy:agent-42-test"`) {
 		t.Fatalf("response missing ntfy channel: %s", rec.Body.String())
 	}
-	if !strings.Contains(rec.Body.String(), `"subscribe_url":"/api/apps/channels/ntfy/agent-42-test"`) {
+	if !strings.Contains(rec.Body.String(), `"subscribe_url":"https://ntfy.sh/agent-42-test"`) {
 		t.Fatalf("response missing ntfy subscribe_url: %s", rec.Body.String())
 	}
-	if !strings.Contains(rec.Body.String(), `"server_url":"/api/apps/channels/ntfy"`) {
+	if !strings.Contains(rec.Body.String(), `"server_url":"https://ntfy.sh"`) {
 		t.Fatalf("response missing ntfy server_url: %s", rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"local_subscribe_url":"/api/apps/channels/ntfy/agent-42-test"`) {
+		t.Fatalf("response missing ntfy local_subscribe_url: %s", rec.Body.String())
 	}
 	if !strings.Contains(rec.Body.String(), `"id":"chat"`) {
 		t.Fatalf("response missing chat channel: %s", rec.Body.String())

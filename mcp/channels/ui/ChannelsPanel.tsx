@@ -19,10 +19,13 @@ interface Channel {
   subscribe_path?: string;
   server_url?: string;
   subscribe_url?: string;
+  provider_url?: string;
+  provider_topic_url?: string;
   stream_json?: string;
   stream_sse?: string;
   stream_json_url?: string;
   stream_sse_url?: string;
+  local_stream_json_url?: string;
   capabilities?: string[];
 }
 
@@ -232,13 +235,13 @@ export default function ChannelsPanel({ projectId }: NativePanelProps) {
   }, [appURL, reload, selected]);
 
   const selectedSubscribeURL = selected?.type === "ntfy" && selected.topic
-    ? selected.subscribe_url || `${API}/ntfy/${selected.topic}`
+    ? selected.provider_topic_url || selected.subscribe_url || `https://ntfy.sh/${selected.topic}`
     : "";
   const selectedServerURL = selected?.type === "ntfy" && selected.topic
-    ? selected.server_url || selectedSubscribeURL.slice(0, -(selected.topic.length + 1))
+    ? selected.provider_url || selected.server_url || "https://ntfy.sh"
     : "";
   const selectedStreamURL = selected?.type === "ntfy" && selected.topic
-    ? selected.stream_json_url || `${API}/ntfy/${selected.topic}/json`
+    ? selected.local_stream_json_url || selected.stream_json_url || `${API}/ntfy/${selected.topic}/json`
     : "";
 
   return (
@@ -601,8 +604,8 @@ function ChannelDetail({
         <ReadOnly label="Project" value={channel.project_id || ""} />
         {channel.type === "ntfy" && <ReadOnly label="Server URL" value={serverURL} />}
         {channel.type === "ntfy" && <ReadOnly label="Topic" value={channel.topic || ""} />}
-        {channel.type === "ntfy" && <ReadOnly label="Subscribe URL" value={subscribeURL} />}
-        {channel.type === "ntfy" && <ReadOnly label="JSON Stream" value={streamURL} />}
+        {channel.type === "ntfy" && <ReadOnly label="Topic URL" value={subscribeURL} />}
+        {channel.type === "ntfy" && <ReadOnly label="Local JSON Stream" value={streamURL} />}
       </div>
 
       <div className="flex flex-wrap gap-1">

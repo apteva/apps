@@ -24,17 +24,20 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-var ntfyHTTPClient = &http.Client{Timeout: 10 * time.Second}
+var (
+	ntfyHTTPClient      = &http.Client{Timeout: 10 * time.Second}
+	defaultNtfyProvider = "https://ntfy.sh"
+)
 
 const manifestYAML = `schema: apteva-app/v1
 name: channels
 display_name: Channels
-version: 0.5.7
+version: 0.5.8
 description: |
-  Agent-facing channel router with standalone dashboard chat, a visible inbox, project channel management, and ntfy-compatible notifications.
+  Agent-facing channel router with standalone dashboard chat, a visible inbox, project channel management, and ntfy.sh notifications.
   Agents reply through respond(channel="chat", ...); the app stores chat
-  history, streams updates to the dashboard, exposes private ntfy topics,
-  and forwards inbound user messages to the owning agent.
+  history, streams updates to the dashboard, delivers ntfy notifications
+  through the configured provider, and forwards inbound user messages to the owning agent.
 author: Apteva
 icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/channels/icon.svg
 scopes: [global]
@@ -92,15 +95,15 @@ db:
   path: /data/channels.db
   migrations: migrations/
 config_schema:
-  - name: ntfy_ios_upstream_url
-    label: ntfy iOS upstream URL
+  - name: ntfy_provider_url
+    label: ntfy provider URL
     type: text
     default: https://ntfy.sh
-    description: APNS-connected ntfy server used only for iOS poll_request wake-ups. Set to off to disable.
-  - name: ntfy_ios_upstream_access_token
-    label: ntfy iOS upstream access token
+    description: ntfy server used for notification delivery. Use https://ntfy.sh for native iOS notifications.
+  - name: ntfy_provider_access_token
+    label: ntfy provider access token
     type: password
-    description: Optional bearer token for the upstream ntfy server if rate limits require it.
+    description: Optional bearer token for the configured ntfy provider.
 upgrade_policy: auto-patch
 `
 
@@ -669,7 +672,10 @@ func (a *App) publishInboundNtfy(w http.ResponseWriter, topic, message string, m
 		return
 	}
 	a.publish(*m)
-	a.publishNtfyIOSPollRequest(topic, *m)
+	if err := a.sendNtfyProvider(topic, meta, message); err != nil {
+		http.Error(w, "ntfy provider delivery failed: "+err.Error(), http.StatusBadGateway)
+		return
+	}
 	if chat.AgentID > 0 && globalCtx != nil && globalCtx.PlatformAPI() != nil {
 		ev := fmt.Sprintf("[ntfy:%s] %s", topic, message)
 		if meta.Title != "" {
@@ -796,8 +802,11 @@ func (a *App) toolRespond(ctx context.Context, app *sdk.AppCtx, args map[string]
 			return nil, err
 		}
 		a.publish(*m)
-		a.publishNtfyIOSPollRequest(topic, *m)
-		return map[string]any{"status": "published", "channel": "ntfy", "channel_id": "ntfy:" + topic, "topic": topic, "message_id": m.ID}, nil
+		meta := ntfyMetaFromArgs(args)
+		if err := a.sendNtfyProvider(topic, meta, text); err != nil {
+			return nil, fmt.Errorf("ntfy provider delivery failed after saving message %d: %w", m.ID, err)
+		}
+		return map[string]any{"status": "delivered", "channel": "ntfy", "channel_id": "ntfy:" + topic, "topic": topic, "message_id": m.ID, "provider_url": ntfyProviderURL()}, nil
 	}
 	if channel != "chat" {
 		return nil, fmt.Errorf("channel %q is not available; use channel=\"chat\" or an ntfy channel id from list_channels", channel)
@@ -1160,11 +1169,24 @@ func channelTopic(ch Chat) string {
 func (a *App) ntfyURLFields(topic string) map[string]any {
 	root := "/api/apps/channels/ntfy/" + topic
 	serverRoot := "/api/apps/channels/ntfy"
+	provider := ntfyProviderURL()
+	providerTopicURL := ""
+	if provider != "" {
+		providerTopicURL = provider + "/" + topic
+	}
 	out := map[string]any{
-		"server_url":      serverRoot,
-		"subscribe_url":   root,
-		"stream_json_url": root + "/json",
-		"stream_sse_url":  root + "/sse",
+		"server_url":                provider,
+		"subscribe_url":             providerTopicURL,
+		"provider_url":              provider,
+		"provider_topic_url":        providerTopicURL,
+		"local_server_url":          serverRoot,
+		"local_subscribe_url":       root,
+		"local_stream_json_url":     root + "/json",
+		"local_stream_sse_url":      root + "/sse",
+		"stream_json_url":           root + "/json",
+		"stream_sse_url":            root + "/sse",
+		"delivery_provider":         "ntfy",
+		"delivery_provider_default": provider == "https://ntfy.sh",
 	}
 	if globalCtx == nil {
 		return out
@@ -1174,24 +1196,17 @@ func (a *App) ntfyURLFields(topic string) map[string]any {
 		return out
 	}
 	base := strings.TrimRight(strings.TrimSpace(info.PublicURL), "/")
-	out["server_url"] = base + serverRoot
-	out["subscribe_url"] = base + root
+	out["local_server_url"] = base + serverRoot
+	out["local_subscribe_url"] = base + root
 	out["stream_json_url"] = base + root + "/json"
 	out["stream_sse_url"] = base + root + "/sse"
+	out["local_stream_json_url"] = base + root + "/json"
+	out["local_stream_sse_url"] = base + root + "/sse"
 	return out
 }
 
-func (a *App) publishNtfyIOSPollRequest(topic string, m Message) {
-	upstream := ntfyIOSUpstreamURL()
-	topicURL := a.ntfyPublicTopicURL(topic)
-	if upstream == "" || topicURL == "" || m.ID <= 0 {
-		return
-	}
-	go func() {
-		if err := sendNtfyIOSPollRequest(upstream, ntfyIOSUpstreamToken(), topicURL, m.ID); err != nil && globalCtx != nil {
-			globalCtx.Logger().Warn("ntfy ios upstream poll request failed", "topic", topic, "message_id", m.ID, "err", err)
-		}
-	}()
+func (a *App) sendNtfyProvider(topic string, meta ntfyMeta, message string) error {
+	return sendNtfyProvider(ntfyProviderURL(), ntfyProviderToken(), topic, meta, message)
 }
 
 func (a *App) ntfyPublicTopicURL(topic string) string {
@@ -1204,26 +1219,66 @@ func (a *App) ntfyPublicTopicURL(topic string) string {
 	return ""
 }
 
-func ntfyIOSUpstreamURL() string {
-	upstream := "https://ntfy.sh"
+func ntfyProviderURL() string {
+	provider := defaultNtfyProvider
 	if globalCtx != nil && globalCtx.Config() != nil {
-		if v := strings.TrimSpace(globalCtx.Config().Get("ntfy_ios_upstream_url")); v != "" {
-			upstream = v
+		if v := strings.TrimSpace(globalCtx.Config().Get("ntfy_provider_url")); v != "" {
+			provider = v
 		}
 	}
-	switch strings.ToLower(strings.TrimSpace(upstream)) {
+	switch strings.ToLower(strings.TrimSpace(provider)) {
 	case "", "off", "false", "disabled", "none":
 		return ""
 	default:
-		return strings.TrimRight(strings.TrimSpace(upstream), "/")
+		return strings.TrimRight(strings.TrimSpace(provider), "/")
 	}
 }
 
-func ntfyIOSUpstreamToken() string {
+func ntfyProviderToken() string {
 	if globalCtx == nil || globalCtx.Config() == nil {
 		return ""
 	}
-	return strings.TrimSpace(globalCtx.Config().Get("ntfy_ios_upstream_access_token"))
+	return strings.TrimSpace(globalCtx.Config().Get("ntfy_provider_access_token"))
+}
+
+func sendNtfyProvider(provider, token, topic string, meta ntfyMeta, message string) error {
+	provider = strings.TrimRight(strings.TrimSpace(provider), "/")
+	if provider == "" {
+		return errors.New("ntfy provider disabled")
+	}
+	if !validTopic(topic) {
+		return errors.New("invalid topic")
+	}
+	req, err := http.NewRequest(http.MethodPost, provider+"/"+topic, strings.NewReader(message))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "text/plain; charset=utf-8")
+	if meta.Title = strings.TrimSpace(meta.Title); meta.Title != "" {
+		req.Header.Set("Title", meta.Title)
+	}
+	if meta.Priority = priorityString(meta.Priority); meta.Priority != "" {
+		req.Header.Set("Priority", meta.Priority)
+	}
+	if tags := cleanTags(meta.Tags); len(tags) > 0 {
+		req.Header.Set("Tags", strings.Join(tags, ","))
+	}
+	if meta.Click = strings.TrimSpace(meta.Click); meta.Click != "" {
+		req.Header.Set("Click", meta.Click)
+	}
+	if token = strings.TrimSpace(token); token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	resp, err := ntfyHTTPClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
+		return fmt.Errorf("provider returned %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	return nil
 }
 
 func sendNtfyIOSPollRequest(upstream, token, topicURL string, messageID int64) error {
