@@ -154,7 +154,11 @@ func TestBuildScript_TrimShape(t *testing.T) {
 		`materialize_source '100' 'https://signed.example.com/file/100?sig=abc' 'src-100.mp4' 'file-100-0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef.mp4' 123456 '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'`,
 		"'/root/.apteva-render/ffmpeg-7.0.2/ffmpeg' '-y' '-i' 'src-100.mp4'",
 		`OUT='clip.mp4'`,
-		`SIZE=$(stat`,
+		`file_size_bytes()`,
+		`stat -c '%s' "$1"`,
+		`stat -f '%z' "$1"`,
+		`wc -c < "$1"`,
+		`SIZE=$(file_size_bytes "$OUT")`,
 		`SHA=$(sha256sum`,
 		`export STORAGE_TOKEN='tok-xyz'`,
 		`export STORAGE_BASE='https://apt.example.com/api/apps/storage'`,
@@ -178,6 +182,9 @@ func TestBuildScript_TrimShape(t *testing.T) {
 		if !strings.Contains(script, w) {
 			t.Errorf("script missing %q\n--- script ---\n%s", w, script)
 		}
+	}
+	if strings.Contains(script, "stat -f%z") {
+		t.Errorf("script still contains unsupported BSD stat form: %s", script)
 	}
 }
 

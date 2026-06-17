@@ -769,9 +769,10 @@ func (b *imageBuffer) reset() { b.pos = 0 }
 // then sees explicit numbers and emits a literal `crop=W:H:X:Y`
 // filter instead of the symbolic `iw/ih`-based expression.
 //
-// No-op for operations that don't support cropping (trim, concat,
-// audio_extract, …). "crop_mode: center" still runs this pre-pass so
-// the planner receives explicit, display-space crop coordinates.
+// No-op for operations that don't support target-ratio cropping
+// (trim, concat, audio_extract, …) or malformed params. "crop_mode:
+// center" still runs this pre-pass so the planner receives explicit,
+// display-space crop coordinates.
 
 // preprocessSmartCrop returns the (possibly rewritten) params bytes.
 // Original bytes are returned unchanged on any error or no-op path —
@@ -784,7 +785,7 @@ func preprocessSmartCrop(
 	sources []string,
 	params []byte,
 ) []byte {
-	if op != "extract_reel" && op != "extract_frame" {
+	if op != "extract_reel" && op != "extract_frame" && op != "crop" {
 		return params
 	}
 	if len(sources) != 1 {
@@ -801,7 +802,7 @@ func preprocessSmartCrop(
 	}
 	tr, _ := parsed["target_ratio"].(string)
 	if strings.TrimSpace(tr) == "" {
-		// extract_frame defaults to no crop; extract_reel defaults to 9:16.
+		// extract_frame and crop default to no crop; extract_reel defaults to 9:16.
 		if op == "extract_reel" {
 			tr = "9:16"
 		} else {

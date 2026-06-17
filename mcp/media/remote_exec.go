@@ -328,7 +328,7 @@ func (e *remoteExecutor) buildScript(
 
 	// Stat + hash output before upload.
 	fmt.Fprintf(&b, "OUT=%s\n", shellQuote(plan.Filename))
-	b.WriteString(`SIZE=$(stat -c%s "$OUT" 2>/dev/null || stat -f%z "$OUT")` + "\n")
+	b.WriteString(`SIZE=$(file_size_bytes "$OUT")` + "\n")
 	b.WriteString(`SHA=$(sha256sum "$OUT" | awk '{print $1}')` + "\n")
 
 	// Upload. We try storage's presigned-PUT protocol first (works
@@ -437,7 +437,7 @@ fi
 // from storage metadata and are only adopted after validation.
 const remoteSourceCacheScriptFragment = `
 file_size_bytes() {
-  stat -c%s "$1" 2>/dev/null || stat -f%z "$1"
+  stat -c '%s' "$1" 2>/dev/null || stat -f '%z' "$1" 2>/dev/null || wc -c < "$1"
 }
 
 cache_used_bytes() {

@@ -22,7 +22,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: media
 display_name: Media
-version: 0.13.40
+version: 0.13.41
 description: |
   Catalog + derivations + renders + transcripts + auto-descriptions
   for media files in storage. Indexes uploads (probe, thumbnail,
@@ -117,7 +117,7 @@ provides:
     - { name: media_resize,          description: "Scale a video/image to new dimensions. Returns render_id." }
     - { name: media_transcode,       description: "Re-encode to a new container/codec. Returns render_id." }
     - { name: media_concat,          description: "Join multiple sources end-to-end. Returns render_id." }
-    - { name: media_crop,            description: "Crop a video or image to a rectangular region. Returns render_id." }
+    - { name: media_crop,            description: "Crop or smart-reframe an existing video/image. Exact mode: file_id, x, y, width, height. Smart image/video reframe mode: file_id, target_ratio (e.g. 9:16), crop_mode? (smart|center), output_width?. Returns render_id." }
     - { name: media_extract_frame,   description: "Save a single frame at a specific timestamp as PNG. Returns render_id." }
     - { name: media_audio_extract,   description: "Strip audio from a video into a standalone file. Returns render_id." }
     - { name: media_extract_reel,    description: "Trim + reframe to a target aspect ratio in one ffmpeg pass. Replaces media_trim → media_crop → media_resize for vertical-reel workflows. Args - file_id, start_ms, end_ms, target_ratio? (default 9:16), output_width? (default 1080)." }
@@ -476,17 +476,20 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "media_crop",
-			Description: "Crop a video or image. Args: file_id, x, y, width, height (all int, in pixels).",
+			Description: "Crop or smart-reframe an existing video/image. Exact mode: file_id, x, y, width, height (pixels). Smart reframe mode: file_id, target_ratio (e.g. '9:16', '1:1', '4:5'), crop_mode? ('smart' default uses the same cached-thumbnail/keyframe saliency as extract_frame/extract_reel; 'center' uses geometric center), output_width? (optional scale width; omitted preserves crop size). Use this for still images; use media_extract_frame when selecting a video timestamp.",
 			InputSchema: schemaObject(map[string]any{
 				"file_id":       map[string]any{"type": "string"},
-				"x":             map[string]any{"type": "integer"},
-				"y":             map[string]any{"type": "integer"},
-				"width":         map[string]any{"type": "integer"},
-				"height":        map[string]any{"type": "integer"},
+				"x":             map[string]any{"type": "integer", "description": "Exact crop left offset in pixels. Used with y, width, and height when target_ratio is not set."},
+				"y":             map[string]any{"type": "integer", "description": "Exact crop top offset in pixels. Used with x, width, and height when target_ratio is not set."},
+				"width":         map[string]any{"type": "integer", "description": "Exact crop width in pixels. Required for exact mode; optional fallback when target_ratio is set."},
+				"height":        map[string]any{"type": "integer", "description": "Exact crop height in pixels. Required for exact mode; optional fallback when target_ratio is set."},
+				"target_ratio":  map[string]any{"type": "string", "description": "When set, crop/reframe to this aspect ratio ('W:H'), e.g. '9:16', '1:1', '4:5'. Enables smart/center mode for existing images and full video clips."},
+				"output_width":  map[string]any{"type": "integer", "description": "Optional scale width after target_ratio crop. Omit to preserve the computed crop dimensions."},
+				"crop_mode":     map[string]any{"type": "string", "description": "'smart' (default) for subject-aware crop via the source's cached thumbnail/keyframe saliency, or 'center' for geometric center. Smart falls back to center when derivations are unavailable."},
 				"output_name":   map[string]any{"type": "string"},
 				"output_folder": map[string]any{"type": "string"},
-			}, []string{"file_id", "x", "y", "width", "height"}),
-			Handler: a.toolSubmitRender("crop", []string{"x", "y", "width", "height"}, []string{"file_id"}),
+			}, []string{"file_id"}),
+			Handler: a.toolSubmitRender("crop", []string{"x", "y", "width", "height", "target_ratio", "output_width", "crop_mode"}, []string{"file_id"}),
 		},
 		{
 			Name:        "media_extract_frame",

@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: media
 display_name: Media
-version: 0.13.40
+version: 0.13.41
 description: |
   Catalog + cheap derivations + parameterised renders for media files
   in storage. Probes uploads with ffprobe (duration, dimensions,
@@ -134,7 +134,7 @@ provides:
     - name: media_concat
       description: Join multiple sources end-to-end. Args — file_ids[], output_name. Inputs must share codec/format.
     - name: media_crop
-      description: Crop a video or image to a rectangular region. Args — file_id, x, y, width, height.
+      description: Crop or smart-reframe an existing video/image. Exact mode args — file_id, x, y, width, height. Smart reframe mode args — file_id, target_ratio (e.g. "9:16"), crop_mode? ("smart" default | "center"), output_width?. Use this for still images; use media_extract_frame when selecting a video timestamp.
     - name: media_extract_frame
       description: Save a single frame from a video at a specific timestamp as PNG. Distinct from media_get_thumbnail (parameterised, multi-output). Args — file_id, at_ms, width?.
     - name: media_audio_extract

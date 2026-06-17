@@ -305,13 +305,18 @@ func TestPreprocessSmartCrop_NoOpPaths(t *testing.T) {
 	got = preprocessSmartCrop(nil, nil, nil, "p", "extract_frame", []string{"20"}, params)
 	mustEqual(t, got, params, "extract_frame-no-ratio")
 
-	// 5. Malformed ratio — passthrough (planner will error out
+	// 5. crop without target_ratio — passthrough (exact rectangle crop).
+	params = []byte(`{"x":10,"y":20,"width":100,"height":200}`)
+	got = preprocessSmartCrop(nil, nil, nil, "p", "crop", []string{"20"}, params)
+	mustEqual(t, got, params, "crop-no-ratio")
+
+	// 6. Malformed ratio — passthrough (planner will error out
 	// itself, no point pre-computing for an invalid value).
 	params = []byte(`{"start_ms":0,"end_ms":1000,"target_ratio":"junk"}`)
 	got = preprocessSmartCrop(nil, nil, nil, "p", "extract_reel", []string{"20"}, params)
 	mustEqual(t, got, params, "malformed-ratio")
 
-	// 6. crop_mode not in {smart, center} — passthrough (treat as unsupported).
+	// 7. crop_mode not in {smart, center} — passthrough (treat as unsupported).
 	params = []byte(`{"start_ms":0,"end_ms":1000,"target_ratio":"9:16","crop_mode":"face-detect"}`)
 	got = preprocessSmartCrop(nil, nil, nil, "p", "extract_reel", []string{"20"}, params)
 	mustEqual(t, got, params, "unknown-crop-mode")

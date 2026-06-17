@@ -113,6 +113,61 @@ func TestPlanCrop_Argv(t *testing.T) {
 	}
 }
 
+func TestPlanCrop_TargetRatioUsesExplicitSmartCrop(t *testing.T) {
+	plan, err := buildPlan("crop", []string{"42"},
+		raw(t, map[string]any{
+			"target_ratio": "9:16",
+			"output_width": 1080,
+			"crop_w":       606,
+			"crop_h":       1080,
+			"crop_x":       657,
+			"crop_y":       0,
+		}), "", ".jpg")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := strings.Join(plan.Args, " ")
+	if !strings.Contains(got, "crop=606:1080:657:0,scale=1080:1920,setsar=1") {
+		t.Errorf("expected explicit smart crop+scale, got: %s", got)
+	}
+	if !argPair(plan.Args, "-frames:v", "1") {
+		t.Errorf("image smart crop must still render a single frame: %v", plan.Args)
+	}
+}
+
+func TestPlanCrop_TargetRatioWithoutOutputWidthPreservesCropSize(t *testing.T) {
+	plan, err := buildPlan("crop", []string{"42"},
+		raw(t, map[string]any{
+			"target_ratio": "9:16",
+			"crop_w":       606,
+			"crop_h":       1080,
+			"crop_x":       657,
+			"crop_y":       0,
+		}), "", ".png")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := strings.Join(plan.Args, " ")
+	if !strings.Contains(got, "crop=606:1080:657:0") {
+		t.Errorf("expected explicit smart crop, got: %s", got)
+	}
+	if strings.Contains(got, "scale=") {
+		t.Errorf("media_crop should not scale unless output_width is set, got: %s", got)
+	}
+}
+
+func TestPlanCrop_TargetRatioFallsBackToSymbolicCenter(t *testing.T) {
+	plan, err := buildPlan("crop", []string{"42"},
+		raw(t, map[string]any{"target_ratio": "9:16"}), "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := strings.Join(plan.Args, " ")
+	if !strings.Contains(got, "if(gt(iw/ih") {
+		t.Errorf("expected symbolic center crop fallback, got: %s", got)
+	}
+}
+
 func TestPlanExtractFrame_Defaults(t *testing.T) {
 	plan, err := buildPlan("extract_frame", []string{"42"},
 		raw(t, map[string]any{"at_ms": 2500}), "", "")
