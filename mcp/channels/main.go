@@ -26,7 +26,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: channels
 display_name: Channels
-version: 0.5.5
+version: 0.5.6
 description: |
   Agent-facing channel router with standalone dashboard chat, a visible inbox, project channel management, and ntfy-compatible notifications.
   Agents reply through respond(channel="chat", ...); the app stores chat
@@ -593,6 +593,12 @@ func (a *App) handleNtfy(w http.ResponseWriter, r *http.Request) {
 		switch suffix {
 		case "json", "sse", "raw":
 			a.streamNtfy(w, r, topic, suffix)
+		case "auth":
+			if _, err := a.store.GetNtfyByTopic(topic); err != nil {
+				http.Error(w, "topic not found", http.StatusNotFound)
+				return
+			}
+			writeJSON(w, map[string]any{"success": true})
 		case "":
 			chat, err := a.store.GetNtfyByTopic(topic)
 			if err != nil {
@@ -672,11 +678,6 @@ func (a *App) streamNtfy(w http.ResponseWriter, r *http.Request, topic, format s
 		http.Error(w, "topic not found", http.StatusNotFound)
 		return
 	}
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
-		return
-	}
 	switch format {
 	case "json":
 		w.Header().Set("Content-Type", "application/x-ndjson")
@@ -684,6 +685,21 @@ func (a *App) streamNtfy(w http.ResponseWriter, r *http.Request, topic, format s
 		w.Header().Set("Content-Type", "text/event-stream")
 	case "raw":
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
+	}
+	if r.URL.Query().Get("poll") == "1" {
+		since := queryInt64(r, "since")
+		backfill, err := a.store.ListMessages(chat.ID, since, 1000)
+		if err == nil {
+			for _, m := range backfill {
+				writeNtfyEvent(w, format, ntfyEventFromMessage(topic, m))
+			}
+		}
+		return
+	}
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming unsupported", http.StatusInternalServerError)
+		return
 	}
 	w.Header().Set("Cache-Control", "no-cache")
 	w.Header().Set("Connection", "keep-alive")

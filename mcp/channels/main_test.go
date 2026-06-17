@@ -228,6 +228,54 @@ func TestNtfyPublishHTTP(t *testing.T) {
 	}
 }
 
+func TestNtfyAuthCheckHTTP(t *testing.T) {
+	st := newStore(testDB(t))
+	if _, err := st.EnsureDefaultNtfy(42, "proj-1", "agent-42-test"); err != nil {
+		t.Fatalf("EnsureDefaultNtfy: %v", err)
+	}
+	app := &App{store: st, hub: newHub()}
+	req := httptest.NewRequest(http.MethodGet, "/ntfy/agent-42-test/auth", nil)
+	rec := httptest.NewRecorder()
+
+	app.handleNtfy(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"success":true`) {
+		t.Fatalf("auth response = %s", rec.Body.String())
+	}
+}
+
+func TestNtfyPollHTTPReturnsBackfillAndCloses(t *testing.T) {
+	st := newStore(testDB(t))
+	ch, err := st.EnsureDefaultNtfy(42, "proj-1", "agent-42-test")
+	if err != nil {
+		t.Fatalf("EnsureDefaultNtfy: %v", err)
+	}
+	if _, err := st.Append(ch.ID, "agent", "hello phone", nil, "", "final", []ChatComponent{
+		{App: "channels", Name: "ntfy", Props: map[string]any{"title": "Test"}},
+	}); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+	app := &App{store: st, hub: newHub()}
+	req := httptest.NewRequest(http.MethodGet, "/ntfy/agent-42-test/json?poll=1&since=all", nil)
+	rec := httptest.NewRecorder()
+
+	app.handleNtfy(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	body := rec.Body.String()
+	if !strings.Contains(body, `"event":"message"`) || !strings.Contains(body, `"message":"hello phone"`) {
+		t.Fatalf("poll response = %s", body)
+	}
+	if strings.Contains(body, `"event":"open"`) {
+		t.Fatalf("poll response should not include stream open event: %s", body)
+	}
+}
+
 func TestChannelsCreateNtfyWithoutAgent(t *testing.T) {
 	st := newStore(testDB(t))
 	app := &App{store: st, hub: newHub()}
