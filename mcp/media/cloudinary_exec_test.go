@@ -136,6 +136,28 @@ func TestBuildCloudinaryChain_Crop(t *testing.T) {
 	}
 }
 
+func TestBuildCloudinaryChain_Crop_TargetRatioExplicitSmartCrop(t *testing.T) {
+	chain, err := buildCloudinaryChain("crop",
+		json.RawMessage(`{"target_ratio":"9:16","output_width":1080,"crop_w":606,"crop_h":1080,"crop_x":657,"crop_y":0}`), "out.mp4")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if chain != "c_crop,w_606,h_1080,x_657,y_0/c_scale,w_1080,h_1920,f_mp4" {
+		t.Errorf("got %q", chain)
+	}
+}
+
+func TestBuildCloudinaryChain_Crop_TargetRatioCenterFallback(t *testing.T) {
+	chain, err := buildCloudinaryChain("crop",
+		json.RawMessage(`{"target_ratio":"9:16"}`), "out.mp4")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if chain != "c_fill,ar_9:16,f_mp4" {
+		t.Errorf("got %q", chain)
+	}
+}
+
 func TestBuildCloudinaryChain_Crop_RejectsNegative(t *testing.T) {
 	if _, err := buildCloudinaryChain("crop",
 		json.RawMessage(`{"x":-1,"y":0,"width":10,"height":10}`), ""); err == nil {

@@ -82,13 +82,14 @@ func (e *cloudinaryExecutor) Execute(ctx context.Context, app *sdk.AppCtx, row *
 		return 0, fmt.Errorf("source file_id %q not numeric", row.SourceFileIDs[0])
 	}
 
+	sc := newStorageClient()
+	row.Params = preprocessSmartCrop(ctx, app, sc, row.ProjectID, row.Operation, row.SourceFileIDs, row.Params)
+
 	// Build the eager transformation chain.
 	chain, err := buildCloudinaryChain(row.Operation, row.Params, row.OutputName)
 	if err != nil {
 		return 0, fmt.Errorf("cloudinary chain: %w", err)
 	}
-
-	sc := newStorageClient()
 
 	// Reuse the local plan helpers for output filename + content type
 	// so storage uploads from either backend look identical to panels.
@@ -257,13 +258,33 @@ func buildCldCrop(raw json.RawMessage, outputName string) (string, error) {
 	if err := json.Unmarshal(raw, &p); err != nil {
 		return "", fmt.Errorf("crop params: %w", err)
 	}
-	if p.Width <= 0 || p.Height <= 0 {
-		return "", errors.New("crop: width and height must be > 0")
-	}
 	if p.X < 0 || p.Y < 0 {
 		return "", errors.New("crop: x and y must be >= 0")
 	}
-	step := fmt.Sprintf("c_crop,w_%d,h_%d,x_%d,y_%d", p.Width, p.Height, p.X, p.Y)
+	var step string
+	if strings.TrimSpace(p.TargetRatio) != "" {
+		rw, rh, err := parseAspectRatio(p.TargetRatio)
+		if err != nil {
+			return "", fmt.Errorf("crop: %w", err)
+		}
+		switch {
+		case p.CropW > 0 && p.CropH > 0:
+			step = fmt.Sprintf("c_crop,w_%d,h_%d,x_%d,y_%d", p.CropW, p.CropH, p.CropX, p.CropY)
+		case p.Width > 0 && p.Height > 0:
+			step = fmt.Sprintf("c_crop,w_%d,h_%d,x_%d,y_%d", p.Width, p.Height, p.X, p.Y)
+		default:
+			step = fmt.Sprintf("c_fill,ar_%d:%d", rw, rh)
+		}
+		if p.OutputWidth > 0 {
+			outputWidth, outputHeight := ratioOutputDimensions(p.OutputWidth, rw, rh)
+			step += fmt.Sprintf("/c_scale,w_%d,h_%d", outputWidth, outputHeight)
+		}
+	} else {
+		if p.Width <= 0 || p.Height <= 0 {
+			return "", errors.New("crop: width and height must be > 0 unless target_ratio is set")
+		}
+		step = fmt.Sprintf("c_crop,w_%d,h_%d,x_%d,y_%d", p.Width, p.Height, p.X, p.Y)
+	}
 	return appendCldFormat(step, outputName, "mp4"), nil
 }
 
