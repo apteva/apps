@@ -321,6 +321,7 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
   const [imageFormat, setImageFormat] = useState("png");
   const [duration, setDuration] = useState(5); // video/audio/music
   const [aspect, setAspect] = useState("16:9");
+  const [videoNoSound, setVideoNoSound] = useState(false);
   const [voice, setVoice] = useState("");
   // Video model picker — live-loaded from /models?kind=video.
   // Auto-snaps to the first listed model when the dropdown lands.
@@ -860,6 +861,9 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
         if (videoModel) body.model = videoModel;
         body.duration = duration;
         body.aspect = aspect;
+        if (videoNoSound) {
+          body.options = { audio: false };
+        }
         // Image-to-video: pass the reference image through the same
         // source_image arg the dispatcher uses for image.edit.
         if (showVideoRefInput && sourceImages[0]?.value) {
@@ -1058,6 +1062,8 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
             setDuration={setDuration}
             aspect={aspect}
             setAspect={setAspect}
+            videoNoSound={videoNoSound}
+            setVideoNoSound={setVideoNoSound}
             voice={voice}
             setVoice={setVoice}
             avatars={avatars}
@@ -1252,6 +1258,8 @@ interface ComposerProps {
   setDuration: (v: number) => void;
   aspect: string;
   setAspect: (v: string) => void;
+  videoNoSound: boolean;
+  setVideoNoSound: (v: boolean) => void;
   voice: string;
   setVoice: (v: string) => void;
   avatars: AvatarEntry[];
@@ -1369,6 +1377,11 @@ function Composer(p: ComposerProps) {
                 ? "Inherited from source image"
                 : undefined
             }
+          />
+          <VideoSoundToggle
+            value={p.videoNoSound}
+            onChange={p.setVideoNoSound}
+            configurable={p.currentModel?.audio_configurable}
           />
         </>
       )}
@@ -1894,6 +1907,35 @@ function SafeModeToggle({
         style={{ accentColor: "var(--apteva-accent, #4ade80)" }}
       />
       Safe mode
+    </label>
+  );
+}
+
+function VideoSoundToggle({
+  value,
+  onChange,
+  configurable,
+}: {
+  value: boolean;
+  onChange: (v: boolean) => void;
+  configurable?: boolean;
+}) {
+  return (
+    <label
+      className="flex items-center gap-1.5 text-xs text-text-muted cursor-pointer select-none"
+      title={
+        configurable === false
+          ? "This model does not advertise configurable audio; silent output may already be its default."
+          : "When on, sends audio=false to Venice video models that support generated audio."
+      }
+    >
+      <input
+        type="checkbox"
+        checked={value}
+        onChange={(e) => onChange(e.target.checked)}
+        style={{ accentColor: "var(--apteva-accent, #4ade80)" }}
+      />
+      No sound
     </label>
   );
 }
