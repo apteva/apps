@@ -1605,6 +1605,41 @@ func TestToolMediaGenerate_Video_VeniceQueue(t *testing.T) {
 	}
 }
 
+func TestToolMediaEstimate_Video_VeniceQuote(t *testing.T) {
+	pf := newRecordingPlatform()
+	pf.appSlug = "venice-ai"
+	pf.identity.Bindings["video_provider"] = float64(77)
+	pf.nextExecuteResult = &sdk.ExecuteResult{
+		Success: true, Status: 200,
+		Data: json.RawMessage(`{"data":{"quote":{"usd":0.42}}}`),
+	}
+	ctx := newMediaStudioCtx(t, pf)
+	app := &App{}
+	out, err := app.toolMediaEstimate(ctx, map[string]any{
+		"kind":     "video",
+		"model":    "kling-2",
+		"duration": 10,
+		"aspect":   "16:9",
+		"options":  map[string]any{"audio": false},
+	})
+	if err != nil {
+		t.Fatalf("toolMediaEstimate: %v", err)
+	}
+	meta := out.(map[string]any)["_meta"].(generationEstimate)
+	if !meta.Available || meta.CostUSD != 0.42 || meta.Source != "provider_quote" {
+		t.Fatalf("estimate meta = %+v", meta)
+	}
+	if len(pf.executeCalls) != 1 || pf.executeCalls[0].Tool != "quote_video" {
+		t.Fatalf("expected quote_video call, got %+v", pf.executeCalls)
+	}
+	if got := pf.executeCalls[0].Input["duration"]; got != "10s" {
+		t.Fatalf("quote duration = %v, want 10s", got)
+	}
+	if got := pf.executeCalls[0].Input["audio"]; got != false {
+		t.Fatalf("quote audio = %v, want false", got)
+	}
+}
+
 func TestVideoPollWorker_StillProcessing_BumpsAttempts(t *testing.T) {
 	pf := newRecordingPlatform()
 	pf.appSlug = "venice-ai"

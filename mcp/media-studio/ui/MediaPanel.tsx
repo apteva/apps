@@ -102,6 +102,29 @@ interface Generation {
   created_at: string;
 }
 
+interface GenerationEstimate {
+  kind: Kind;
+  provider?: string;
+  model?: string;
+  capability?: string;
+  cost_usd: number;
+  available: boolean;
+  source: string;
+  estimated_duration_seconds?: number;
+}
+
+interface VideoJob {
+  id: number;
+  queue_id: string;
+  provider?: string;
+  model: string;
+  prompt: string;
+  status: string;
+  error: string;
+  cost_usd?: number;
+  estimated_duration_seconds?: number;
+}
+
 // LiveModel mirrors the sidecar's modelEntry JSON. Constraints arrays
 // are empty when the model doesn't pre-enumerate options (e.g.
 // pixel-sized image models that accept arbitrary WxH).
@@ -370,9 +393,9 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
   // In-flight video jobs (queued / polling). Shown as a small badge
   // above the video gallery so the user knows something is cooking
   // between submit and the eventual media.generated event.
-  const [videoJobs, setVideoJobs] = useState<
-    { id: number; queue_id: string; model: string; prompt: string; status: string; error: string }[]
-  >([]);
+  const [videoJobs, setVideoJobs] = useState<VideoJob[]>([]);
+  const [estimate, setEstimate] = useState<GenerationEstimate | null>(null);
+  const [estimateLoading, setEstimateLoading] = useState(false);
   const [storageFolders, setStorageFolders] = useState<Record<Kind, string>>({
     image: "",
     video: "",
@@ -897,6 +920,71 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
     return body;
   };
 
+  useEffect(() => {
+    if (!prompt.trim() || !isBound) {
+      setEstimate(null);
+      setEstimateLoading(false);
+      return;
+    }
+    const body = buildGenerationBody();
+    if (!body) {
+      setEstimate(null);
+      setEstimateLoading(false);
+      return;
+    }
+    let cancelled = false;
+    setEstimateLoading(true);
+    const timer = window.setTimeout(() => {
+      fetch(`${API}/estimate?project_id=${encodeURIComponent(projectId)}`, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      })
+        .then((res) => (res.ok ? res.json() : null))
+        .then((data) => {
+          if (cancelled) return;
+          setEstimate(data || null);
+        })
+        .catch(() => {
+          if (!cancelled) setEstimate(null);
+        })
+        .finally(() => {
+          if (!cancelled) setEstimateLoading(false);
+        });
+    }, 350);
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [
+    projectId,
+    prompt,
+    isBound,
+    activeKind,
+    isEditMode,
+    imageModel,
+    editModel,
+    imageSize,
+    imageQuality,
+    imageFormat,
+    safeMode,
+    videoModel,
+    duration,
+    aspect,
+    videoNoSound,
+    audioModel,
+    sfxModel,
+    musicModel,
+    voice,
+    selectedAvatar,
+    avatarEngine,
+    avatarResolution,
+    avatarAspect,
+    storageFolder,
+    sourceImages,
+  ]);
+
   const submitGeneration = async (mode: "generate" | "draft") => {
     if (!prompt.trim() || generating || creatingDraft) return;
     if (mode === "generate") {
@@ -937,7 +1025,8 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
       })._meta;
       if (meta?.status === "draft") {
         setPrompt("");
-        setStatus("Draft saved.");
+        const costStr = meta.cost_usd ? ` · est. ${formatCost(meta.cost_usd)}` : "";
+        setStatus(`Draft saved.${costStr}`);
         loadGenerations();
         return;
       }
@@ -957,6 +1046,7 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
                 prompt: queuedPrompt,
                 status: "queued",
                 error: "",
+                cost_usd: meta.cost_usd || 0,
               },
               ...cur,
             ];
@@ -1007,6 +1097,23 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
       if (meta?.status === "queued") {
         const costStr = meta.cost_usd ? ` · est. ${formatCost(meta.cost_usd)}` : "";
         setStatus(`Generating…${costStr}`);
+        if (meta.job_id && (g.kind === "video" || g.kind === "avatar")) {
+          setVideoJobs((cur) => {
+            if (cur.some((j) => j.id === meta.job_id)) return cur;
+            return [
+              {
+                id: meta.job_id || 0,
+                queue_id: "",
+                model: g.model,
+                prompt: g.prompt,
+                status: "queued",
+                error: "",
+                cost_usd: meta.cost_usd || g.cost_usd || 0,
+              },
+              ...cur,
+            ];
+          });
+        }
       } else {
         setStatus("Done.");
       }
@@ -1164,6 +1271,8 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
             setStorageFolder={setStorageFolder}
             storageFolderDefault={defaultOutputFolder(activeKind)}
             folderSuggestions={folderSuggestions}
+            estimate={estimate}
+            estimateLoading={estimateLoading}
           />
 
           {(activeKind === "video" || activeKind === "avatar") && videoJobs.some((j) => j.status === "failed") && (
@@ -1185,6 +1294,7 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
                   generating={generating}
                   generatingPrompt={prompt}
                   generatingModel={activeGeneratingModel}
+                  generatingCostUSD={estimate?.cost_usd || 0}
                   pendingJobs={pendingVideoJobs}
                   generatingDraftId={generatingDraftId}
                 />
@@ -1364,6 +1474,8 @@ interface ComposerProps {
   setStorageFolder: (v: string) => void;
   storageFolderDefault: string;
   folderSuggestions: string[];
+  estimate: GenerationEstimate | null;
+  estimateLoading: boolean;
 }
 
 function Composer(p: ComposerProps) {
@@ -1546,6 +1658,7 @@ function Composer(p: ComposerProps) {
           suggestions={p.folderSuggestions}
         />
       )}
+      <EstimateBadge estimate={p.estimate} loading={p.estimateLoading} />
       <button
         onClick={p.generate}
         disabled={!p.prompt.trim() || p.generating || p.creatingDraft || p.disabled || avatarVBlocked}
@@ -1561,6 +1674,32 @@ function Composer(p: ComposerProps) {
       >
         {p.creatingDraft ? "Saving…" : "Create draft"}
       </button>
+    </div>
+  );
+}
+
+function EstimateBadge({
+  estimate,
+  loading,
+}: {
+  estimate: GenerationEstimate | null;
+  loading: boolean;
+}) {
+  const cost = formatCost(estimate?.cost_usd || 0);
+  const label = loading
+    ? "estimating"
+    : cost
+      ? `est. ${cost}`
+      : estimate && !estimate.available
+        ? "cost unavailable"
+        : "";
+  if (!label) return null;
+  return (
+    <div
+      className="px-2 py-1 rounded border border-border bg-bg-card text-xs text-text-muted"
+      title={estimate?.source || "estimate"}
+    >
+      {label}
     </div>
   );
 }
@@ -2619,6 +2758,7 @@ function Gallery({
   generating,
   generatingPrompt,
   generatingModel,
+  generatingCostUSD,
   pendingJobs,
   generatingDraftId,
 }: {
@@ -2630,7 +2770,8 @@ function Gallery({
   generating: boolean;
   generatingPrompt: string;
   generatingModel: string;
-  pendingJobs: { id: number; queue_id: string; model: string; prompt: string; status: string; error: string }[];
+  generatingCostUSD: number;
+  pendingJobs: VideoJob[];
   generatingDraftId: number | null;
 }) {
   if (kind === "image") {
@@ -2646,7 +2787,7 @@ function Gallery({
         }}
       >
         {generating && (
-          <GeneratingCard prompt={generatingPrompt} model={generatingModel} />
+          <GeneratingCard prompt={generatingPrompt} model={generatingModel} costUSD={generatingCostUSD} />
         )}
         {items.map((g) => {
           const src = imageSrc(g);
@@ -2697,7 +2838,7 @@ function Gallery({
       }}
     >
       {generating && (
-        <GeneratingCard prompt={generatingPrompt} model={generatingModel} />
+        <GeneratingCard prompt={generatingPrompt} model={generatingModel} costUSD={generatingCostUSD} />
       )}
       {(kind === "video" || kind === "avatar") &&
         pendingJobs.map((job) => (
@@ -2705,6 +2846,7 @@ function Gallery({
             key={`job-${job.id}`}
             prompt={job.prompt}
             model={job.model ? `#${job.id} · ${job.model}` : `#${job.id}`}
+            costUSD={job.cost_usd || 0}
           />
         ))}
       {items.map((g) => {
@@ -2744,12 +2886,14 @@ function DraftPreview({
   busy: boolean;
   onGenerate: (g: Generation) => void;
 }) {
+  const cost = formatCost(generation.cost_usd);
   return (
     <div className="bg-bg-input flex flex-col items-center justify-center text-center px-4 py-8" style={{ minHeight: 160 }}>
       <div className="text-xs uppercase text-text-dim">Draft</div>
       <div className="mt-2 text-sm text-text" style={{ maxWidth: 280 }}>
         {generation.prompt.length > 90 ? generation.prompt.slice(0, 87) + "…" : generation.prompt}
       </div>
+      {cost && <div className="mt-2 text-accent" style={{ fontSize: 10 }}>est. {cost}</div>}
       <button
         type="button"
         disabled={busy}
@@ -2765,7 +2909,8 @@ function DraftPreview({
   );
 }
 
-function GeneratingCard({ prompt, model }: { prompt: string; model: string }) {
+function GeneratingCard({ prompt, model, costUSD = 0 }: { prompt: string; model: string; costUSD?: number }) {
+  const cost = formatCost(costUSD);
   return (
     <div
       className="border border-accent rounded overflow-hidden bg-bg-card flex flex-col items-center justify-center"
@@ -2779,6 +2924,7 @@ function GeneratingCard({ prompt, model }: { prompt: string; model: string }) {
         </div>
       )}
       {model && <div className="mt-1 text-text-dim" style={{ fontSize: 10 }}>{model}</div>}
+      {cost && <div className="mt-1 text-accent" style={{ fontSize: 10 }}>est. {cost}</div>}
     </div>
   );
 }
@@ -2915,7 +3061,7 @@ function DetailAside({
 function VideoJobsBanner({
   jobs,
 }: {
-  jobs: { id: number; queue_id: string; model: string; prompt: string; status: string; error: string }[];
+  jobs: VideoJob[];
 }) {
   const failed = jobs.filter((j) => j.status === "failed");
   if (failed.length === 0) return null;

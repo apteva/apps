@@ -34,7 +34,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: media-studio
 display_name: Media Studio
-version: 0.10.14
+version: 0.10.17
 description: |
   Generate images, video, audio, music, and avatars via compatible
   providers. Optionally saves outputs to Storage, supports stable
@@ -100,6 +100,7 @@ provides:
     - prefix: /
   mcp_tools:
     - { name: media_generate, description: "Generate media (image/video/audio/music/avatar). Args: kind, prompt, model?, size?, duration?, voice?, aspect?, avatar?, storage_folder?, n?, options?, cache_key?, cache_policy?." }
+    - { name: media_estimate, description: "Estimate generation cost without creating media. Args match media_generate." }
     - { name: media_avatar_create, description: "Create/train a reusable avatar from a photo or prompt. Args: name, source_type, source_image?/prompt?, options?." }
     - { name: media_history,  description: "List recent generations. Args: kind?, limit?, since?." }
     - { name: media_get,      description: "Fetch one generation by id. Args: id." }
@@ -168,6 +169,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 	return []sdk.Route{
 		{Pattern: "/generations", Handler: a.handleListGenerations},
 		{Pattern: "/generate", Handler: a.handleGenerate},
+		{Pattern: "/estimate", Handler: a.handleEstimate},
 		{Pattern: "/bindings", Handler: a.handleBindings},
 		{Pattern: "/models", Handler: a.handleListModels},
 		{Pattern: "/avatars", Handler: a.handleListAvatars},
@@ -258,6 +260,28 @@ func (a *App) MCPTools() []sdk.Tool {
 				},
 			}, []string{"kind", "prompt"}),
 			Handler: a.toolMediaGenerate,
+		},
+		{
+			Name:        "media_estimate",
+			Description: "Estimate media generation cost without creating media. Args match media_generate: kind, prompt?, model?, size?, duration?, voice?, aspect?, avatar?, source_image?, source_images?, n?, options?. Returns cost_usd when the bound provider exposes pricing or Media Studio can derive it.",
+			InputSchema: schemaObject(map[string]any{
+				"kind":         map[string]any{"type": "string", "enum": []string{"image", "video", "audio_tts", "audio_sfx", "music", "avatar"}},
+				"prompt":       map[string]any{"type": "string"},
+				"model":        map[string]any{"type": "string"},
+				"size":         map[string]any{"type": "string"},
+				"duration":     map[string]any{"type": "integer"},
+				"voice":        map[string]any{"type": "string"},
+				"aspect":       map[string]any{"type": "string"},
+				"avatar":       map[string]any{"type": "string"},
+				"source_image": map[string]any{"type": "string"},
+				"source_images": map[string]any{
+					"type":  "array",
+					"items": map[string]any{"type": "string"},
+				},
+				"n":       map[string]any{"type": "integer", "default": 1, "minimum": 1, "maximum": 10},
+				"options": map[string]any{"type": "object"},
+			}, []string{"kind"}),
+			Handler: a.toolMediaEstimate,
 		},
 		{
 			Name:        "media_avatar_create",

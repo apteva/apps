@@ -424,6 +424,10 @@ func (a *App) createDraftGeneration(ctx *sdk.AppCtx, args map[string]any, kind, 
 	if bound := ctx.IntegrationFor(h.Role); bound != nil {
 		provider = bound.AppSlug
 	}
+	costUSD := 0.0
+	if estimate, err := a.estimateGeneration(ctx, args); err == nil && estimate.Available {
+		costUSD = estimate.CostUSD
+	}
 	model := strArg(args, "model", "")
 	extraJSON := encodeExtras(kind, args)
 	requestJSON := generationRequestJSON(args)
@@ -439,6 +443,7 @@ func (a *App) createDraftGeneration(ctx *sdk.AppCtx, args map[string]any, kind, 
 		UpstreamURLs:             []string{},
 		ExtraJSON:                extraJSON,
 		Count:                    1,
+		CostUSD:                  costUSD,
 		CacheKey:                 strings.TrimSpace(strArg(args, "cache_key", "")),
 		EstimatedDurationSeconds: estimatedSeconds,
 		Status:                   "draft",
@@ -455,6 +460,7 @@ func (a *App) createDraftGeneration(ctx *sdk.AppCtx, args map[string]any, kind, 
 			"generation_id":              id,
 			"model":                      model,
 			"provider":                   provider,
+			"cost_usd":                   costUSD,
 			"cache_key":                  strings.TrimSpace(strArg(args, "cache_key", "")),
 			"estimated_duration_seconds": estimatedSeconds,
 		},

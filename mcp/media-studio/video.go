@@ -279,7 +279,7 @@ func veniceVideoQuote(ctx *sdk.AppCtx, providerSlug string, args map[string]any)
 	// aspect_ratio, resolution, upscale_factor, audio optional.
 	quoteArgs := map[string]any{
 		"model":    strArg(args, "model", ""),
-		"duration": strArg(args, "duration", "5s"),
+		"duration": videoDurationArg(args),
 	}
 	if v := strArg(args, "aspect", ""); v != "" {
 		quoteArgs["aspect_ratio"] = v
@@ -295,13 +295,17 @@ func veniceVideoQuote(ctx *sdk.AppCtx, providerSlug string, args map[string]any)
 	if err != nil || res == nil || !res.Success {
 		return 0
 	}
-	var body struct {
-		Quote float64 `json:"quote"`
+	return estimateCostFromRaw(res.Data)
+}
+
+func videoDurationArg(args map[string]any) string {
+	if duration := strArg(args, "duration", ""); duration != "" {
+		return duration
 	}
-	if err := json.Unmarshal(res.Data, &body); err != nil {
-		return 0
+	if d := intArg(args, "duration", 0); d > 0 {
+		return fmt.Sprintf("%ds", d)
 	}
-	return body.Quote
+	return "5s"
 }
 
 // videoJobUpdateStatus updates a job row's status/error fields.
