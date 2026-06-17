@@ -345,6 +345,13 @@ func subjectAwareNarrowSmartCropX(img image.Image, rawSrcX, srcX, srcW, srcH, cr
 	x := int(math.Round(float64(bestX) * float64(srcW) / float64(tW)))
 	x = clampInt(roundEven(x), 0, srcW-cropW)
 	if absInt(x-rawSrcX) > cropW/4 {
+		maxX := srcW - cropW
+		edgeGuard := cropW / 4
+		rawNearEdge := rawSrcX <= edgeGuard || rawSrcX >= maxX-edgeGuard
+		if rawNearEdge {
+			centerX := clampInt(roundEven(maxX/2), 0, maxX)
+			return centerX, true
+		}
 		return srcX, false
 	}
 	return x, true

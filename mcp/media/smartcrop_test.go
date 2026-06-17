@@ -135,6 +135,33 @@ func TestSubjectAwareNarrowSmartCropX_DoesNotPullAwayFromRawSmartCrop(t *testing
 	}
 }
 
+func TestSubjectAwareNarrowSmartCropX_EdgeSmartCropFallsBackToCenter(t *testing.T) {
+	img := image.NewRGBA(image.Rect(0, 0, 320, 174))
+	for y := 0; y < 174; y++ {
+		for x := 0; x < 320; x++ {
+			img.Set(x, y, color.RGBA{R: 86, G: 92, B: 104, A: 255})
+		}
+	}
+	// Foreground subject is far from the raw left-edge smartcrop.
+	// A full jump to the subject maximum would crop too far right, so
+	// the safer recovery is the geometric center.
+	for y := 20; y < 166; y++ {
+		for x := 175; x < 300; x++ {
+			if (x-226)*(x-226)+(y-70)*(y-70) < 34*34 || (x > 170 && x < 285 && y > 75) {
+				img.Set(x, y, color.RGBA{R: 218, G: 150, B: 112, A: 255})
+			}
+		}
+	}
+
+	x, ok := subjectAwareNarrowSmartCropX(img, 0, 98, 1408, 768, 614, 768, 138)
+	if !ok {
+		t.Fatal("expected edge smartcrop recovery")
+	}
+	if x != 396 {
+		t.Fatalf("expected center recovery x=396, got x=%d", x)
+	}
+}
+
 func TestMotionAwareNarrowSmartCropXFromImages_PrefersMovingSubject(t *testing.T) {
 	cur := image.NewRGBA(image.Rect(0, 0, 320, 180))
 	neighbor := image.NewRGBA(image.Rect(0, 0, 320, 180))
