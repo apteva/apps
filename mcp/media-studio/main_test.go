@@ -477,6 +477,92 @@ func TestToolMediaGenerate_Image_CustomStorageFolder(t *testing.T) {
 	}
 }
 
+func TestToolMediaGenerate_Image_DraftDoesNotCallProvider(t *testing.T) {
+	pf := newRecordingPlatform()
+	ctx := newMediaStudioCtx(t, pf)
+	app := &App{}
+
+	out, err := app.toolMediaGenerate(ctx, map[string]any{
+		"kind":   "image",
+		"prompt": "launch campaign concept",
+		"model":  "gpt-image-2",
+		"mode":   "draft",
+	})
+	if err != nil {
+		t.Fatalf("toolMediaGenerate: %v", err)
+	}
+	meta := out.(map[string]any)["_meta"].(map[string]any)
+	if meta["status"] != "draft" {
+		t.Fatalf("status = %v, want draft", meta["status"])
+	}
+	if len(pf.executeCalls) != 0 {
+		t.Fatalf("draft should not call provider, got %+v", pf.executeCalls)
+	}
+	id := meta["generation_id"].(int64)
+	var status, requestJSON string
+	if err := ctx.AppDB().QueryRow(`SELECT status, request_json FROM generations WHERE id=?`, id).Scan(&status, &requestJSON); err != nil {
+		t.Fatal(err)
+	}
+	if status != "draft" {
+		t.Fatalf("db status = %q, want draft", status)
+	}
+	if !strings.Contains(requestJSON, "launch campaign concept") {
+		t.Fatalf("request_json did not preserve prompt: %s", requestJSON)
+	}
+}
+
+func TestToolMediaGenerate_Image_GenerateDraftUpdatesSameRow(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/png")
+		_, _ = w.Write(fakePNG())
+	}))
+	defer upstream.Close()
+
+	pf := newRecordingPlatform()
+	pf.nextExecuteResult = &sdk.ExecuteResult{
+		Success: true,
+		Status:  200,
+		Data:    json.RawMessage(fmt.Sprintf(`{"data":[{"url":"%s/img.png"}]}`, upstream.URL)),
+	}
+	pf.nextCallResult = json.RawMessage(
+		`{"result":{"content":[{"type":"text","text":"{\"id\":9876}"}]}}`,
+	)
+	ctx := newMediaStudioCtx(t, pf)
+	app := &App{}
+
+	draftOut, err := app.toolMediaGenerate(ctx, map[string]any{
+		"kind":   "image",
+		"prompt": "generate this later",
+		"model":  "gpt-image-2",
+		"mode":   "draft",
+	})
+	if err != nil {
+		t.Fatalf("draft: %v", err)
+	}
+	draftID := draftOut.(map[string]any)["_meta"].(map[string]any)["generation_id"].(int64)
+
+	out, err := app.toolMediaGenerate(ctx, map[string]any{"generation_id": draftID})
+	if err != nil {
+		t.Fatalf("generate draft: %v", err)
+	}
+	meta := out.(map[string]any)["_meta"].(map[string]any)
+	if meta["generation_id"] != draftID {
+		t.Fatalf("generation_id = %v, want existing draft id %d", meta["generation_id"], draftID)
+	}
+	var count int
+	ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM generations`).Scan(&count)
+	if count != 1 {
+		t.Fatalf("expected draft row to be updated in place, got %d rows", count)
+	}
+	var status, storageIDs string
+	if err := ctx.AppDB().QueryRow(`SELECT status, storage_ids FROM generations WHERE id=?`, draftID).Scan(&status, &storageIDs); err != nil {
+		t.Fatal(err)
+	}
+	if status != "ready" || !strings.Contains(storageIDs, "9876") {
+		t.Fatalf("row not completed in place: status=%q storage_ids=%s", status, storageIDs)
+	}
+}
+
 func TestNormalizeStorageFolderRejectsParentTraversal(t *testing.T) {
 	if got, err := normalizeStorageFolder("campaigns/launch"); err != nil || got != "/campaigns/launch/" {
 		t.Fatalf("normalize = %q, %v", got, err)

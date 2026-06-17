@@ -97,6 +97,8 @@ interface Generation {
   local_cache_url?: string;
   count: number;
   cost_usd: number;
+  status?: "draft" | "generating" | "queued" | "ready" | "failed" | string;
+  request_json?: string;
   created_at: string;
 }
 
@@ -310,6 +312,8 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
   const [bindings, setBindings] = useState<BindingsStatus | null>(null);
   const [status, setStatus] = useState("");
   const [generating, setGenerating] = useState(false);
+  const [creatingDraft, setCreatingDraft] = useState(false);
+  const [generatingDraftId, setGeneratingDraftId] = useState<number | null>(null);
   const [selected, setSelected] = useState<Generation | null>(null);
   const [lightbox, setLightbox] = useState<Generation | null>(null);
 
@@ -825,75 +829,87 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
     }
   };
 
-  const generate = async () => {
-    if (!prompt.trim() || generating) return;
-    setGenerating(true);
-    setStatus("Generating…");
-    try {
-      const body: Record<string, unknown> = {
-        kind: activeKind,
-        prompt,
-        project_id: projectId,
-      };
-      if (storageFolder.trim()) body.storage_folder = storageFolder.trim();
-      if (activeKind === "image") {
-        if (isEditMode) {
-          if (sourceImages.length > editSourceLimit) {
-            setStatus(`Error: ${editModel} supports at most ${editSourceLimit} source image${editSourceLimit === 1 ? "" : "s"}.`);
-            return;
-          }
-          body.model = editModel;
-          if (sourceImages.length === 1) {
-            body.source_image = sourceImages[0].value;
-          } else {
-            body.source_images = sourceImages.map((x) => x.value);
-          }
-          body.options = { output_format: imageFormat, safe_mode: safeMode };
-        } else {
-          body.model = imageModel;
-          body.size = imageSize;
-          const options: Record<string, unknown> = { safe_mode: safeMode };
-          if (imageModel !== "dall-e-2") options.quality = imageQuality;
-          if (isGptImage(imageModel)) options.output_format = imageFormat;
-          body.options = options;
+  const buildGenerationBody = (): Record<string, unknown> | null => {
+    const body: Record<string, unknown> = {
+      kind: activeKind,
+      prompt,
+      project_id: projectId,
+    };
+    if (storageFolder.trim()) body.storage_folder = storageFolder.trim();
+    if (activeKind === "image") {
+      if (isEditMode) {
+        if (sourceImages.length > editSourceLimit) {
+          setStatus(`Error: ${editModel} supports at most ${editSourceLimit} source image${editSourceLimit === 1 ? "" : "s"}.`);
+          return null;
         }
-      } else if (activeKind === "video") {
-        if (videoModel) body.model = videoModel;
-        body.duration = duration;
-        body.aspect = aspect;
-        if (videoNoSound) {
-          body.options = { audio: false };
-        }
-        // Image-to-video: pass the reference image through the same
-        // source_image arg the dispatcher uses for image.edit.
-        if (showVideoRefInput && sourceImages[0]?.value) {
+        body.model = editModel;
+        if (sourceImages.length === 1) {
           body.source_image = sourceImages[0].value;
+        } else {
+          body.source_images = sourceImages.map((x) => x.value);
         }
-      } else if (activeKind === "audio_tts") {
-        if (audioModel) body.model = audioModel;
-        if (voice) body.voice = voice;
-      } else if (activeKind === "audio_sfx") {
-        if (sfxModel) body.model = sfxModel;
-        body.duration = duration;
-      } else if (activeKind === "music") {
-        if (musicModel) body.model = musicModel;
-        body.duration = duration;
-      } else if (activeKind === "avatar") {
-        // prompt carries the spoken script; avatar = replica/avatar id.
-        body.avatar = selectedAvatar;
-        if (voice) body.voice = voice;
-        if (currentBinding?.slug === "heygen") {
-          const selected = avatars.find((x) => x.id === selectedAvatar);
-          const options: Record<string, unknown> = {
-            resolution: avatarResolution,
-            aspect: avatarAspect,
-            estimated_duration_seconds: estimateSpeechSeconds(prompt),
-          };
-          if (avatarEngine !== "auto") options.engine = { type: avatarEngine };
-          if (selected?.avatar_type) options.avatar_type = selected.avatar_type;
-          body.options = options;
-        }
+        body.options = { output_format: imageFormat, safe_mode: safeMode };
+      } else {
+        body.model = imageModel;
+        body.size = imageSize;
+        const options: Record<string, unknown> = { safe_mode: safeMode };
+        if (imageModel !== "dall-e-2") options.quality = imageQuality;
+        if (isGptImage(imageModel)) options.output_format = imageFormat;
+        body.options = options;
       }
+    } else if (activeKind === "video") {
+      if (videoModel) body.model = videoModel;
+      body.duration = duration;
+      body.aspect = aspect;
+      if (videoNoSound) {
+        body.options = { audio: false };
+      }
+      // Image-to-video: pass the reference image through the same
+      // source_image arg the dispatcher uses for image.edit.
+      if (showVideoRefInput && sourceImages[0]?.value) {
+        body.source_image = sourceImages[0].value;
+      }
+    } else if (activeKind === "audio_tts") {
+      if (audioModel) body.model = audioModel;
+      if (voice) body.voice = voice;
+    } else if (activeKind === "audio_sfx") {
+      if (sfxModel) body.model = sfxModel;
+      body.duration = duration;
+    } else if (activeKind === "music") {
+      if (musicModel) body.model = musicModel;
+      body.duration = duration;
+    } else if (activeKind === "avatar") {
+      // prompt carries the spoken script; avatar = replica/avatar id.
+      body.avatar = selectedAvatar;
+      if (voice) body.voice = voice;
+      if (currentBinding?.slug === "heygen") {
+        const selected = avatars.find((x) => x.id === selectedAvatar);
+        const options: Record<string, unknown> = {
+          resolution: avatarResolution,
+          aspect: avatarAspect,
+          estimated_duration_seconds: estimateSpeechSeconds(prompt),
+        };
+        if (avatarEngine !== "auto") options.engine = { type: avatarEngine };
+        if (selected?.avatar_type) options.avatar_type = selected.avatar_type;
+        body.options = options;
+      }
+    }
+    return body;
+  };
+
+  const submitGeneration = async (mode: "generate" | "draft") => {
+    if (!prompt.trim() || generating || creatingDraft) return;
+    if (mode === "generate") {
+      setGenerating(true);
+      setStatus("Generating…");
+    } else {
+      setCreatingDraft(true);
+      setStatus("Saving draft…");
+    }
+    try {
+      const body = buildGenerationBody();
+      if (!body) return;
+      if (mode === "draft") body.mode = "draft";
       const res = await fetch(`${API}/generate`, {
         method: "POST",
         credentials: "same-origin",
@@ -919,6 +935,12 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
       const meta = (result as unknown as {
         _meta?: { status?: string; job_id?: number; cost_usd?: number };
       })._meta;
+      if (meta?.status === "draft") {
+        setPrompt("");
+        setStatus("Draft saved.");
+        loadGenerations();
+        return;
+      }
       if (meta?.status === "queued") {
         const queuedPrompt = prompt;
         setPrompt("");
@@ -949,6 +971,50 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
       setStatus("Error: " + (e as Error).message);
     } finally {
       setGenerating(false);
+      setCreatingDraft(false);
+    }
+  };
+
+  const generate = () => submitGeneration("generate");
+  const createDraft = () => submitGeneration("draft");
+
+  const generateDraft = async (g: Generation) => {
+    if (generatingDraftId || g.status !== "draft") return;
+    setGeneratingDraftId(g.id);
+    setStatus("Generating draft…");
+    try {
+      const res = await fetch(`${API}/generate`, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ generation_id: g.id, project_id: projectId }),
+      });
+      const text = await res.text();
+      if (!res.ok) {
+        setStatus(`Error ${res.status}: ${text.slice(0, 300)}`);
+        return;
+      }
+      let result: { isError?: boolean; content?: { type: string; text?: string }[]; _meta?: { status?: string; job_id?: number; cost_usd?: number } } = {};
+      try {
+        result = JSON.parse(text);
+      } catch {}
+      if (result.isError) {
+        const msg = result.content?.find((c) => c.type === "text")?.text || "generation failed";
+        setStatus(`Error: ${msg}`);
+        return;
+      }
+      const meta = result._meta;
+      if (meta?.status === "queued") {
+        const costStr = meta.cost_usd ? ` · est. ${formatCost(meta.cost_usd)}` : "";
+        setStatus(`Generating…${costStr}`);
+      } else {
+        setStatus("Done.");
+      }
+      loadGenerations();
+    } catch (e) {
+      setStatus("Error: " + (e as Error).message);
+    } finally {
+      setGeneratingDraftId(null);
     }
   };
 
@@ -1030,7 +1096,9 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
             prompt={prompt}
             setPrompt={setPrompt}
             generate={generate}
+            createDraft={createDraft}
             generating={generating}
+            creatingDraft={creatingDraft}
             disabled={!isBound}
             isEditMode={isEditMode}
             liveModels={liveModels}
@@ -1111,13 +1179,15 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
               <Gallery
                 kind={activeKind}
                 items={items}
-                onSelect={setSelected}
-                onOpenLightbox={setLightbox}
-                generating={generating}
-                generatingPrompt={prompt}
-                generatingModel={activeGeneratingModel}
-                pendingJobs={pendingVideoJobs}
-              />
+                  onSelect={setSelected}
+                  onOpenLightbox={setLightbox}
+                  onGenerateDraft={generateDraft}
+                  generating={generating}
+                  generatingPrompt={prompt}
+                  generatingModel={activeGeneratingModel}
+                  pendingJobs={pendingVideoJobs}
+                  generatingDraftId={generatingDraftId}
+                />
             )}
           </div>
           <div className="text-xs text-text-dim">{status}</div>
@@ -1226,7 +1296,9 @@ interface ComposerProps {
   prompt: string;
   setPrompt: (v: string) => void;
   generate: () => void;
+  createDraft: () => void;
   generating: boolean;
+  creatingDraft: boolean;
   disabled: boolean;
   isEditMode: boolean;
   liveModels: { id: string; label: string }[] | null;
@@ -1476,11 +1548,18 @@ function Composer(p: ComposerProps) {
       )}
       <button
         onClick={p.generate}
-        disabled={!p.prompt.trim() || p.generating || p.disabled || avatarVBlocked}
+        disabled={!p.prompt.trim() || p.generating || p.creatingDraft || p.disabled || avatarVBlocked}
         className="px-3 py-1.5 text-sm bg-accent text-bg rounded font-bold disabled:opacity-50"
         title={avatarVBlocked ? "Selected avatar does not advertise Avatar V support" : undefined}
       >
         {p.generating ? "…" : p.isEditMode ? "Edit" : p.kind === "avatar" ? "Generate avatar" : "Generate"}
+      </button>
+      <button
+        onClick={p.createDraft}
+        disabled={!p.prompt.trim() || p.generating || p.creatingDraft}
+        className="px-3 py-1.5 text-sm border border-border rounded text-text-muted hover:text-text hover:border-accent disabled:opacity-50"
+      >
+        {p.creatingDraft ? "Saving…" : "Create draft"}
       </button>
     </div>
   );
@@ -2536,19 +2615,23 @@ function Gallery({
   items,
   onSelect,
   onOpenLightbox,
+  onGenerateDraft,
   generating,
   generatingPrompt,
   generatingModel,
   pendingJobs,
+  generatingDraftId,
 }: {
   kind: Kind;
   items: Generation[];
   onSelect: (g: Generation) => void;
   onOpenLightbox: (g: Generation) => void;
+  onGenerateDraft: (g: Generation) => void;
   generating: boolean;
   generatingPrompt: string;
   generatingModel: string;
   pendingJobs: { id: number; queue_id: string; model: string; prompt: string; status: string; error: string }[];
+  generatingDraftId: number | null;
 }) {
   if (kind === "image") {
     return (
@@ -2567,12 +2650,15 @@ function Gallery({
         )}
         {items.map((g) => {
           const src = imageSrc(g);
+          const draft = g.status === "draft";
           return (
             <div
               key={g.id}
               className="border border-border rounded overflow-hidden hover:border-accent transition-colors"
             >
-              {src ? (
+              {draft ? (
+                <DraftPreview generation={g} busy={generatingDraftId === g.id} onGenerate={onGenerateDraft} />
+              ) : src ? (
                 <button
                   onClick={() => onOpenLightbox(g)}
                   className="block w-full"
@@ -2623,13 +2709,16 @@ function Gallery({
         ))}
       {items.map((g) => {
         const url = g.storage_urls?.[0] || g.local_cache_url || g.upstream_urls?.[0] || "";
+        const draft = g.status === "draft";
         return (
           <div
             key={g.id}
             className="border border-border rounded overflow-hidden bg-bg-card"
             onClick={() => onSelect(g)}
           >
-            {url ? (
+            {draft ? (
+              <DraftPreview generation={g} busy={generatingDraftId === g.id} onGenerate={onGenerateDraft} />
+            ) : url ? (
               kind === "video" || kind === "avatar" ? (
                 <video controls src={url} className="w-full" />
               ) : (
@@ -2642,6 +2731,36 @@ function Gallery({
           </div>
         );
       })}
+    </div>
+  );
+}
+
+function DraftPreview({
+  generation,
+  busy,
+  onGenerate,
+}: {
+  generation: Generation;
+  busy: boolean;
+  onGenerate: (g: Generation) => void;
+}) {
+  return (
+    <div className="bg-bg-input flex flex-col items-center justify-center text-center px-4 py-8" style={{ minHeight: 160 }}>
+      <div className="text-xs uppercase text-text-dim">Draft</div>
+      <div className="mt-2 text-sm text-text" style={{ maxWidth: 280 }}>
+        {generation.prompt.length > 90 ? generation.prompt.slice(0, 87) + "…" : generation.prompt}
+      </div>
+      <button
+        type="button"
+        disabled={busy}
+        onClick={(e) => {
+          e.stopPropagation();
+          onGenerate(generation);
+        }}
+        className="mt-4 px-3 py-1.5 text-xs bg-accent text-bg rounded font-bold disabled:opacity-50"
+      >
+        {busy ? "Generating…" : "Generate"}
+      </button>
     </div>
   );
 }
@@ -2686,9 +2805,13 @@ function Spinner() {
 
 function CardMeta({ g }: { g: Generation }) {
   const cost = formatCost(g.cost_usd);
+  const status = g.status && g.status !== "ready" ? g.status : "";
   return (
     <div className="p-2">
-      <div className="text-text text-xs truncate">{g.prompt}</div>
+      <div className="text-text text-xs truncate flex items-center gap-1.5">
+        {status && <span className="text-[10px] px-1.5 py-0.5 rounded bg-border text-text-muted uppercase">{status}</span>}
+        <span className="truncate">{g.prompt}</span>
+      </div>
       <div className="text-text-dim mt-0.5 flex items-center gap-1.5" style={{ fontSize: 10 }}>
         <span>{g.provider}</span>
         <span>·</span>
@@ -2748,6 +2871,7 @@ function DetailAside({
         )}
         <dl className="px-4 py-3 text-xs flex flex-col gap-2">
           <Row label="Kind" value={selected.kind} />
+          {selected.status && <Row label="Status" value={selected.status} />}
           <Row label="Provider" value={selected.provider} />
           <Row label="Model" value={selected.model || "—"} />
           {selected.size && <Row label="Size" value={selected.size} />}
@@ -2760,6 +2884,7 @@ function DetailAside({
           )}
           <Row label="Created" value={new Date(selected.created_at).toLocaleString()} />
           {selected.revised_prompt && <Row label="Revised" value={selected.revised_prompt} />}
+          {selected.request_json && <Row label="Request" value={selected.request_json} />}
           {selected.storage_ids.length > 0 && (
             <Row
               label="Storage IDs"

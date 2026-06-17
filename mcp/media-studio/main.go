@@ -191,7 +191,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"Args: kind (required: image|video|audio_tts|audio_sfx|music|avatar), prompt (required — " +
 				"for avatar this is the spoken script), model?, size? (image), duration? (video/audio/music, seconds), " +
 				"voice? (audio_tts / avatar voice override), aspect? (video), avatar? (replica/avatar id, avatar kind), " +
-				"source_image? or source_images? (image edit / image-to-video references), n?, options? (provider-specific extras). Video + avatar are async (queued; delivered via the " +
+				"source_image? or source_images? (image edit / image-to-video references), mode? ('generate'|'draft'), draft_id?/generation_id? to generate a saved draft, n?, options? (provider-specific extras). Video + avatar are async (queued; delivered via the " +
 				"media.generated event). Returns MCP content blocks: image (thumbnail base64 for image kind only " +
 				"when no storage), text (summary), resource (fetchable URL per storage_id).",
 			InputSchema: schemaObject(map[string]any{
@@ -233,6 +233,24 @@ func (a *App) MCPTools() []sdk.Tool {
 					"enum":        []string{"reuse", "refresh"},
 					"default":     "reuse",
 					"description": "reuse checks completed/pending rows by cache_key; refresh bypasses cache.",
+				},
+				"mode": map[string]any{
+					"type":        "string",
+					"enum":        []string{"generate", "draft"},
+					"default":     "generate",
+					"description": "draft stores the generation request as an idea without calling the provider. generate is the default.",
+				},
+				"defer": map[string]any{
+					"type":        "boolean",
+					"description": "Alias for mode=draft.",
+				},
+				"draft_id": map[string]any{
+					"type":        "integer",
+					"description": "Generate a previously saved draft generation row.",
+				},
+				"generation_id": map[string]any{
+					"type":        "integer",
+					"description": "Alias for draft_id when the referenced generation row is a draft.",
 				},
 				"options": map[string]any{
 					"type":        "object",
@@ -368,6 +386,21 @@ func int64Arg(m map[string]any, key string, def int64) int64 {
 		return int64(v)
 	case int64:
 		return v
+	}
+	return def
+}
+
+func boolArg(m map[string]any, key string, def bool) bool {
+	switch v := m[key].(type) {
+	case bool:
+		return v
+	case string:
+		switch strings.ToLower(strings.TrimSpace(v)) {
+		case "true", "1", "yes", "y", "on":
+			return true
+		case "false", "0", "no", "n", "off":
+			return false
+		}
 	}
 	return def
 }

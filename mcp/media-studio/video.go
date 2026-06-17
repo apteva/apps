@@ -132,7 +132,12 @@ func (a *App) handleAsyncQueueResponse(ctx *sdk.AppCtx, kind, role, providerSlug
 	cacheKey := strArg(args, "cache_key", "")
 	storageFolder := strArg(args, "_storage_folder", "")
 	estimatedSeconds := estimatedDurationSeconds(kind, args)
-	requestJSON, _ := json.Marshal(args)
+	requestJSON := strArg(args, "_request_json", "")
+	if requestJSON == "" {
+		b, _ := json.Marshal(args)
+		requestJSON = string(b)
+	}
+	draftID := int64Arg(args, "_draft_generation_id", 0)
 
 	costUSD := 0.0
 	if kind == KindVideo {
@@ -144,15 +149,19 @@ func (a *App) handleAsyncQueueResponse(ctx *sdk.AppCtx, kind, role, providerSlug
 	result, err := globalCtx.AppDB().Exec(
 		`INSERT INTO video_jobs
 			(project_id, kind, role, queue_id, provider, model, prompt,
-			 source_image_ref, request_json, status, cost_usd, cache_key, estimated_duration_seconds)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?)`,
-		pid, kind, role, queueID, providerSlug, model, prompt, sourceRef, string(requestJSON), costUSD, cacheKey, estimatedSeconds,
+			 source_image_ref, request_json, status, cost_usd, cache_key, estimated_duration_seconds, generation_id)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?)`,
+		pid, kind, role, queueID, providerSlug, model, prompt, sourceRef, requestJSON, costUSD, cacheKey, estimatedSeconds, draftID,
 	)
 	if err != nil {
 		ctx.Logger().Warn("video_jobs insert failed", "err", err)
+		updateGenerationStatus(ctx, pid, draftID, "failed")
 		return mcpError(kind + " queued at provider but local tracking row failed: " + err.Error())
 	}
 	jobID, _ := result.LastInsertId()
+	if draftID > 0 {
+		updateGenerationStatus(ctx, pid, draftID, "queued")
+	}
 
 	ctx.Emit(kind+".queued", map[string]any{
 		"job_id":   jobID,

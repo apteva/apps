@@ -159,6 +159,14 @@ var handlers = map[string]kindHandler{
 // the MCP result per kind.
 func (a *App) toolMediaGenerate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	ctx = withProjectScope(ctx, args)
+	if draftID := draftIDArg(args); draftID > 0 {
+		loaded, err := loadDraftRequest(ctx, args, draftID)
+		if err != nil {
+			return mcpError("draft: " + err.Error()), nil
+		}
+		args = loaded
+		ctx = withProjectScope(ctx, args)
+	}
 	kind := strArg(args, "kind", "")
 	if kind == "" {
 		return nil, errors.New("kind required")
@@ -173,9 +181,12 @@ func (a *App) toolMediaGenerate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	}
 	estimatedSeconds := estimatedDurationSeconds(kind, args)
 	pid := projectScope(ctx)
+	if wantsDraft(args) {
+		return a.createDraftGeneration(ctx, args, kind, prompt, estimatedSeconds), nil
+	}
 	cacheKey := strings.TrimSpace(strArg(args, "cache_key", ""))
 	cachePolicy := strings.TrimSpace(strArg(args, "cache_policy", "reuse"))
-	if cacheKey != "" && cachePolicy != "refresh" {
+	if cacheKey != "" && cachePolicy != "refresh" && int64Arg(args, "_draft_generation_id", 0) == 0 {
 		if row, err := queryGenerationByCacheKey(ctx, pid, kind, cacheKey); err == nil {
 			return cachedGenerationResult(row), nil
 		}
@@ -188,6 +199,7 @@ func (a *App) toolMediaGenerate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	if bound == nil {
 		return mcpError("no " + h.Role + " bound — pick one in app settings"), nil
 	}
+	draftID := int64Arg(args, "_draft_generation_id", 0)
 	capability := h.ResolveCapability(args)
 	tool := bound.ToolFor(capability)
 	// Per-slug tool override — for kinds where compatible providers name
@@ -205,6 +217,7 @@ func (a *App) toolMediaGenerate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 		return mcpError("storage_folder: " + err.Error()), nil
 	}
 	args["_storage_folder"] = storageFolder
+	requestJSON := generationRequestJSON(args)
 
 	// Source images — resolve "storage:N" / URL / base64 into the
 	// bytes-or-URL values the per-provider builder will pass through.
@@ -243,9 +256,11 @@ func (a *App) toolMediaGenerate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	if err != nil {
 		return mcpError("build args: " + err.Error()), nil
 	}
+	updateGenerationStatus(ctx, pid, draftID, "generating")
 
 	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(bound.ConnectionID, tool, providerArgs)
 	if err != nil {
+		updateGenerationStatus(ctx, pid, draftID, "failed")
 		return mcpError("provider call failed: " + err.Error()), nil
 	}
 	if res == nil || !res.Success {
@@ -253,14 +268,17 @@ func (a *App) toolMediaGenerate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 		if res != nil {
 			body = string(res.Data)
 		}
+		updateGenerationStatus(ctx, pid, draftID, "failed")
 		return mcpError("provider returned non-2xx: " + body), nil
 	}
 
 	media, revisedPrompt, normalizedModel, err := h.Normalize(bound.AppSlug, capability, res.Data)
 	if err != nil {
+		updateGenerationStatus(ctx, pid, draftID, "failed")
 		return mcpError("provider response parse: " + err.Error()), nil
 	}
 	if len(media) == 0 {
+		updateGenerationStatus(ctx, pid, draftID, "failed")
 		return mcpError("provider returned zero items"), nil
 	}
 
@@ -273,6 +291,8 @@ func (a *App) toolMediaGenerate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 		if modelEcho == "" {
 			modelEcho = strArg(args, "model", "")
 		}
+		args["_draft_generation_id"] = draftID
+		args["_request_json"] = requestJSON
 		return a.handleAsyncQueueResponse(ctx, kind, h.Role, bound.AppSlug, args, queueID, modelEcho), nil
 	}
 
@@ -319,7 +339,7 @@ func (a *App) toolMediaGenerate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	size := strArg(args, "size", "")
 	extraJSON := encodeExtras(kind, args)
 	costUSD := computeGenerationCost(ctx, bound, kind, capability, model, args)
-	genID := a.dbInsertGeneration(generationRecord{
+	record := generationRecord{
 		ProjectID:                pid,
 		Kind:                     kind,
 		Prompt:                   prompt,
@@ -337,7 +357,18 @@ func (a *App) toolMediaGenerate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 		CacheKey:                 cacheKey,
 		EstimatedDurationSeconds: estimatedSeconds,
 		ActualDurationSeconds:    totalActualSeconds,
-	})
+		Status:                   "ready",
+		RequestJSON:              requestJSON,
+	}
+	var genID int64
+	if draftID > 0 {
+		if a.dbUpdateGeneration(record, draftID) {
+			genID = draftID
+		}
+	}
+	if genID == 0 {
+		genID = a.dbInsertGeneration(record)
+	}
 
 	// When storage is unbound, persist the full first-item bytes to
 	// the sidecar's local cache so the panel can render them at native
@@ -372,6 +403,122 @@ func (a *App) toolMediaGenerate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 		EstimatedDurationSeconds: estimatedSeconds,
 		ActualDurationSeconds:    totalActualSeconds,
 	}), nil
+}
+
+func wantsDraft(args map[string]any) bool {
+	mode := strings.ToLower(strings.TrimSpace(strArg(args, "mode", "")))
+	return mode == "draft" || mode == "defer" || boolArg(args, "defer", false)
+}
+
+func draftIDArg(args map[string]any) int64 {
+	if id := int64Arg(args, "draft_id", 0); id > 0 {
+		return id
+	}
+	return int64Arg(args, "generation_id", 0)
+}
+
+func (a *App) createDraftGeneration(ctx *sdk.AppCtx, args map[string]any, kind, prompt string, estimatedSeconds float64) map[string]any {
+	pid := projectScope(ctx)
+	h := handlers[kind]
+	provider := ""
+	if bound := ctx.IntegrationFor(h.Role); bound != nil {
+		provider = bound.AppSlug
+	}
+	model := strArg(args, "model", "")
+	extraJSON := encodeExtras(kind, args)
+	requestJSON := generationRequestJSON(args)
+	id := a.dbInsertGeneration(generationRecord{
+		ProjectID:                pid,
+		Kind:                     kind,
+		Prompt:                   prompt,
+		Provider:                 provider,
+		Model:                    model,
+		Size:                     strArg(args, "size", ""),
+		DurationMs:               int64(estimatedSeconds * 1000),
+		StorageIDs:               []int64{},
+		UpstreamURLs:             []string{},
+		ExtraJSON:                extraJSON,
+		Count:                    1,
+		CacheKey:                 strings.TrimSpace(strArg(args, "cache_key", "")),
+		EstimatedDurationSeconds: estimatedSeconds,
+		Status:                   "draft",
+		RequestJSON:              requestJSON,
+	})
+	return map[string]any{
+		"content": []map[string]any{{
+			"type": "text",
+			"text": "Saved draft " + kind + " generation #" + strconvFormatInt(id) + ".",
+		}},
+		"_meta": map[string]any{
+			"kind":                       kind,
+			"status":                     "draft",
+			"generation_id":              id,
+			"model":                      model,
+			"provider":                   provider,
+			"cache_key":                  strings.TrimSpace(strArg(args, "cache_key", "")),
+			"estimated_duration_seconds": estimatedSeconds,
+		},
+	}
+}
+
+func loadDraftRequest(ctx *sdk.AppCtx, args map[string]any, draftID int64) (map[string]any, error) {
+	row, err := queryGenerationByID(ctx, projectScope(ctx), draftID)
+	if err != nil {
+		return nil, err
+	}
+	status := strAny(row["status"])
+	if status == "ready" {
+		return nil, errors.New("generation is already ready")
+	}
+	if status == "queued" || status == "generating" {
+		return nil, errors.New("generation is already " + status)
+	}
+	reqJSON := strAny(row["request_json"])
+	req := map[string]any{}
+	if reqJSON != "" {
+		_ = json.Unmarshal([]byte(reqJSON), &req)
+	}
+	if len(req) == 0 {
+		req["kind"] = row["kind"]
+		req["prompt"] = row["prompt"]
+		req["model"] = row["model"]
+	}
+	for k, v := range args {
+		if k == "draft_id" || k == "generation_id" {
+			continue
+		}
+		req[k] = v
+	}
+	req["project_id"] = projectScope(ctx)
+	req["_project_id"] = projectScope(ctx)
+	req["_draft_generation_id"] = draftID
+	delete(req, "mode")
+	delete(req, "defer")
+	return req, nil
+}
+
+func generationRequestJSON(args map[string]any) string {
+	req := map[string]any{}
+	for k, v := range args {
+		if strings.HasPrefix(k, "_") {
+			continue
+		}
+		switch k {
+		case "mode", "defer", "draft_id", "generation_id":
+			continue
+		}
+		req[k] = v
+	}
+	if _, ok := req["project_id"]; !ok {
+		if v := strArg(args, "_project_id", ""); v != "" {
+			req["project_id"] = v
+		}
+	}
+	b, err := json.Marshal(req)
+	if err != nil {
+		return "{}"
+	}
+	return string(b)
 }
 
 func cachedGenerationResult(row map[string]any) map[string]any {
@@ -685,11 +832,12 @@ func (a *App) handleGenerate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid json: "+err.Error(), http.StatusBadRequest)
 		return
 	}
-	if _, ok := body["kind"]; !ok {
+	hasDraftID := draftIDArg(body) > 0
+	if _, ok := body["kind"]; !ok && !hasDraftID {
 		http.Error(w, "kind required", http.StatusBadRequest)
 		return
 	}
-	if strings.TrimSpace(strArg(body, "prompt", "")) == "" {
+	if strings.TrimSpace(strArg(body, "prompt", "")) == "" && !hasDraftID {
 		http.Error(w, "prompt required", http.StatusBadRequest)
 		return
 	}

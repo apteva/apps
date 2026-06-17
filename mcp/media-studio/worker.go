@@ -44,13 +44,14 @@ type pendingJob struct {
 	CacheKey                 string
 	RequestJSON              string
 	EstimatedDurationSeconds float64
+	GenerationID             int64
 	Attempts                 int
 }
 
 func (a *App) videoPollWorker(ctx context.Context, app *sdk.AppCtx) error {
 	rows, err := app.AppDB().Query(
 		`SELECT id, kind, role, project_id, queue_id, provider, model, prompt,
-		        source_image_ref, cache_key, request_json, estimated_duration_seconds, attempts
+		        source_image_ref, cache_key, request_json, estimated_duration_seconds, generation_id, attempts
 		 FROM video_jobs
 		 WHERE status IN ('queued', 'polling')
 		 ORDER BY id ASC`,
@@ -63,7 +64,7 @@ func (a *App) videoPollWorker(ctx context.Context, app *sdk.AppCtx) error {
 		var p pendingJob
 		if err := rows.Scan(&p.ID, &p.Kind, &p.Role, &p.ProjectID, &p.QueueID,
 			&p.Provider, &p.Model, &p.Prompt, &p.SourceImageRef, &p.CacheKey,
-			&p.RequestJSON, &p.EstimatedDurationSeconds, &p.Attempts); err != nil {
+			&p.RequestJSON, &p.EstimatedDurationSeconds, &p.GenerationID, &p.Attempts); err != nil {
 			continue
 		}
 		jobs = append(jobs, p)
@@ -277,6 +278,7 @@ func bumpPolling(app *sdk.AppCtx, jobID int64, attempts int) {
 
 func failJob(app *sdk.AppCtx, p pendingJob, errMsg string) {
 	videoJobUpdateStatus(app, p.ID, "failed", errMsg)
+	updateGenerationStatus(app, p.ProjectID, p.GenerationID, "failed")
 	app.EmitWithProject("media.failed", p.ProjectID, map[string]any{
 		"kind": p.Kind, "job_id": p.ID, "queue_id": p.QueueID, "error": errMsg,
 	})
@@ -337,7 +339,7 @@ func (a *App) finalizeJob(app *sdk.AppCtx, p pendingJob, base64Bytes, mime strin
 	var costUSD float64
 	app.AppDB().QueryRow(`SELECT cost_usd FROM video_jobs WHERE id=?`, p.ID).Scan(&costUSD)
 
-	generationID := a.dbInsertGeneration(generationRecord{
+	record := generationRecord{
 		ProjectID:                p.ProjectID,
 		Kind:                     p.Kind,
 		Prompt:                   p.Prompt,
@@ -351,7 +353,18 @@ func (a *App) finalizeJob(app *sdk.AppCtx, p pendingJob, base64Bytes, mime strin
 		CacheKey:                 p.CacheKey,
 		EstimatedDurationSeconds: p.EstimatedDurationSeconds,
 		ActualDurationSeconds:    actualSeconds,
-	})
+		Status:                   "ready",
+		RequestJSON:              p.RequestJSON,
+	}
+	generationID := p.GenerationID
+	if generationID > 0 {
+		if !a.dbUpdateGeneration(record, generationID) {
+			generationID = 0
+		}
+	}
+	if generationID == 0 {
+		generationID = a.dbInsertGeneration(record)
+	}
 	if storage == nil && generationID > 0 {
 		if err := writeLocalCache(generationID, base64Bytes, ext); err != nil {
 			app.Logger().Warn("writeLocalCache failed", "gen_id", generationID, "err", err)

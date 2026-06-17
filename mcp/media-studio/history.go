@@ -31,6 +31,8 @@ type generationRecord struct {
 	CacheKey                 string
 	EstimatedDurationSeconds float64
 	ActualDurationSeconds    float64
+	Status                   string
+	RequestJSON              string
 }
 
 func (a *App) dbInsertGeneration(r generationRecord) int64 {
@@ -42,17 +44,23 @@ func (a *App) dbInsertGeneration(r generationRecord) int64 {
 	if r.ExtraJSON == "" {
 		r.ExtraJSON = "{}"
 	}
+	if r.Status == "" {
+		r.Status = "ready"
+	}
+	if r.RequestJSON == "" {
+		r.RequestJSON = "{}"
+	}
 	res, err := globalCtx.AppDB().Exec(
 		`INSERT INTO generations
 			(project_id, kind, prompt, revised_prompt, provider, model,
 			 size, duration_ms, storage_ids, upstream_urls, thumbnail_b64,
 			 extra_json, count, cost_usd, cache_key, estimated_duration_seconds,
-			 actual_duration_seconds)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			 actual_duration_seconds, status, request_json)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		r.ProjectID, r.Kind, r.Prompt, r.Revised, r.Provider, r.Model,
 		r.Size, r.DurationMs, string(sj), string(uj), r.ThumbnailB64,
 		r.ExtraJSON, r.Count, r.CostUSD, r.CacheKey, r.EstimatedDurationSeconds,
-		r.ActualDurationSeconds,
+		r.ActualDurationSeconds, r.Status, r.RequestJSON,
 	)
 	if err != nil {
 		globalCtx.Logger().Warn("dbInsertGeneration failed", "err", err)
@@ -60,6 +68,54 @@ func (a *App) dbInsertGeneration(r generationRecord) int64 {
 	}
 	id, _ := res.LastInsertId()
 	return id
+}
+
+func (a *App) dbUpdateGeneration(r generationRecord, id int64) bool {
+	if globalCtx == nil || id == 0 {
+		return false
+	}
+	sj, _ := json.Marshal(r.StorageIDs)
+	uj, _ := json.Marshal(r.UpstreamURLs)
+	if r.ExtraJSON == "" {
+		r.ExtraJSON = "{}"
+	}
+	if r.Status == "" {
+		r.Status = "ready"
+	}
+	if r.RequestJSON == "" {
+		r.RequestJSON = "{}"
+	}
+	_, err := globalCtx.AppDB().Exec(
+		`UPDATE generations
+		 SET kind=?, prompt=?, revised_prompt=?, provider=?, model=?, size=?,
+		     duration_ms=?, storage_ids=?, upstream_urls=?, thumbnail_b64=?,
+		     extra_json=?, count=?, cost_usd=?, cache_key=?,
+		     estimated_duration_seconds=?, actual_duration_seconds=?,
+		     status=?, request_json=?
+		 WHERE id=? AND project_id=?`,
+		r.Kind, r.Prompt, r.Revised, r.Provider, r.Model, r.Size,
+		r.DurationMs, string(sj), string(uj), r.ThumbnailB64,
+		r.ExtraJSON, r.Count, r.CostUSD, r.CacheKey,
+		r.EstimatedDurationSeconds, r.ActualDurationSeconds,
+		r.Status, r.RequestJSON, id, r.ProjectID,
+	)
+	if err != nil {
+		globalCtx.Logger().Warn("dbUpdateGeneration failed", "id", id, "err", err)
+		return false
+	}
+	return true
+}
+
+func updateGenerationStatus(ctx *sdk.AppCtx, pid string, id int64, status string) {
+	if id == 0 {
+		return
+	}
+	if _, err := ctx.AppDB().Exec(
+		`UPDATE generations SET status=? WHERE id=? AND project_id=?`,
+		status, id, pid,
+	); err != nil {
+		ctx.Logger().Warn("generation status update failed", "id", id, "status", status, "err", err)
+	}
 }
 
 // toolMediaHistory is the MCP read tool — kind-aware, paginated.
@@ -94,7 +150,7 @@ func queryHistory(ctx *sdk.AppCtx, pid, kindFilter string, limit int) (map[strin
 		`SELECT id, kind, prompt, revised_prompt, provider, model, size,
 		        duration_ms, storage_ids, upstream_urls, thumbnail_b64,
 		        extra_json, count, cost_usd, cache_key, estimated_duration_seconds,
-		        actual_duration_seconds, created_at
+		        actual_duration_seconds, status, request_json, created_at
 		 FROM generations
 		 WHERE project_id = ? AND (? = '' OR kind = ?)
 		 ORDER BY id DESC LIMIT ?`,
@@ -111,18 +167,18 @@ func queryHistory(ctx *sdk.AppCtx, pid, kindFilter string, limit int) (map[strin
 			id, count, durationMs                                 int64
 			kind, prompt, revised, provider, model, size          string
 			storageIDsJSON, upstreamURLsJSON, thumbB64, extraJSON string
-			cacheKey, createdAt                                   string
+			cacheKey, status, requestJSON, createdAt              string
 			costUSD, estimatedDuration, actualDuration            float64
 		)
 		if err := rows.Scan(&id, &kind, &prompt, &revised, &provider, &model, &size,
 			&durationMs, &storageIDsJSON, &upstreamURLsJSON, &thumbB64,
 			&extraJSON, &count, &costUSD, &cacheKey, &estimatedDuration,
-			&actualDuration, &createdAt); err != nil {
+			&actualDuration, &status, &requestJSON, &createdAt); err != nil {
 			continue
 		}
 		out = append(out, generationMap(pid, id, count, durationMs, kind, prompt, revised,
 			provider, model, size, storageIDsJSON, upstreamURLsJSON, thumbB64,
-			extraJSON, cacheKey, createdAt, costUSD, estimatedDuration, actualDuration))
+			extraJSON, cacheKey, status, requestJSON, createdAt, costUSD, estimatedDuration, actualDuration))
 	}
 	return map[string]any{"generations": out}, nil
 }
@@ -132,27 +188,27 @@ func queryGenerationByID(ctx *sdk.AppCtx, pid string, id int64) (map[string]any,
 		count, durationMs                                     int64
 		kind, prompt, revised, provider, model, size          string
 		storageIDsJSON, upstreamURLsJSON, thumbB64, extraJSON string
-		cacheKey, createdAt                                   string
+		cacheKey, status, requestJSON, createdAt              string
 		costUSD, estimatedDuration, actualDuration            float64
 	)
 	err := ctx.AppDB().QueryRow(
 		`SELECT kind, prompt, revised_prompt, provider, model, size,
 		        duration_ms, storage_ids, upstream_urls, thumbnail_b64,
 		        extra_json, count, cost_usd, cache_key, estimated_duration_seconds,
-		        actual_duration_seconds, created_at
+		        actual_duration_seconds, status, request_json, created_at
 		 FROM generations
 		 WHERE project_id = ? AND id = ?`,
 		pid, id,
 	).Scan(&kind, &prompt, &revised, &provider, &model, &size,
 		&durationMs, &storageIDsJSON, &upstreamURLsJSON, &thumbB64,
 		&extraJSON, &count, &costUSD, &cacheKey, &estimatedDuration,
-		&actualDuration, &createdAt)
+		&actualDuration, &status, &requestJSON, &createdAt)
 	if err != nil {
 		return nil, err
 	}
 	return generationMap(pid, id, count, durationMs, kind, prompt, revised,
 		provider, model, size, storageIDsJSON, upstreamURLsJSON, thumbB64,
-		extraJSON, cacheKey, createdAt, costUSD, estimatedDuration, actualDuration), nil
+		extraJSON, cacheKey, status, requestJSON, createdAt, costUSD, estimatedDuration, actualDuration), nil
 }
 
 func queryGenerationByCacheKey(ctx *sdk.AppCtx, pid, kind, cacheKey string) (map[string]any, error) {
@@ -163,6 +219,7 @@ func queryGenerationByCacheKey(ctx *sdk.AppCtx, pid, kind, cacheKey string) (map
 	err := ctx.AppDB().QueryRow(
 		`SELECT id FROM generations
 		 WHERE project_id = ? AND kind = ? AND cache_key = ?
+		   AND status = 'ready'
 		 ORDER BY id DESC LIMIT 1`,
 		pid, kind, cacheKey,
 	).Scan(&id)
@@ -172,7 +229,7 @@ func queryGenerationByCacheKey(ctx *sdk.AppCtx, pid, kind, cacheKey string) (map
 	return queryGenerationByID(ctx, pid, id)
 }
 
-func generationMap(pid string, id, count, durationMs int64, kind, prompt, revised, provider, model, size, storageIDsJSON, upstreamURLsJSON, thumbB64, extraJSON, cacheKey, createdAt string, costUSD, estimatedDuration, actualDuration float64) map[string]any {
+func generationMap(pid string, id, count, durationMs int64, kind, prompt, revised, provider, model, size, storageIDsJSON, upstreamURLsJSON, thumbB64, extraJSON, cacheKey, status, requestJSON, createdAt string, costUSD, estimatedDuration, actualDuration float64) map[string]any {
 	var storageIDs []int64
 	_ = json.Unmarshal([]byte(storageIDsJSON), &storageIDs)
 	var upstreamURLs []string
@@ -203,6 +260,8 @@ func generationMap(pid string, id, count, durationMs int64, kind, prompt, revise
 		"local_cache_url":            localURL,
 		"extra_json":                 extraJSON,
 		"cache_key":                  cacheKey,
+		"status":                     status,
+		"request_json":               requestJSON,
 		"count":                      count,
 		"cost_usd":                   costUSD,
 		"created_at":                 createdAt,
