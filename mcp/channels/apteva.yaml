@@ -2,12 +2,12 @@ schema: apteva-app/v1
 
 name: channels
 display_name: Channels
-version: 0.5.8
+version: 0.6.0
 description: |
-  Agent-facing channel router with standalone dashboard chat, a visible inbox, project channel management, and ntfy.sh notifications.
+  Agent-facing channel router with standalone dashboard chat, a visible inbox, project channel management, ntfy.sh notifications, and Telegram channels.
   Agents reply through respond(channel="chat", ...); the app stores chat
-  history, streams updates to the dashboard, delivers ntfy notifications
-  through the configured provider, and forwards inbound user messages to the owning agent.
+  history, streams updates to the dashboard, delivers provider-backed
+  notifications, and forwards inbound user messages/actions to agents.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/channels
 icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/channels/icon.svg
@@ -21,6 +21,16 @@ requires:
     - db.write.app
     - platform.instances.read
     - platform.instances.write
+    - platform.connections.read
+    - platform.connections.read_credentials
+  integrations:
+    - role: telegram_bot
+      kind: integration
+      compatible_slugs: [telegram, telegram-bot]
+      capabilities: []
+      required: false
+      label: "Telegram bot (optional)"
+      hint: "Bind a Telegram bot connection if available, or paste a BotFather token directly when creating a Telegram channel."
 
 provides:
   http_routes:
@@ -29,9 +39,11 @@ provides:
       no_auth: true
     - prefix: /ntfy/
       no_auth: true
+    - prefix: /telegram-webhook/
+      no_auth: true
   mcp_tools:
     - name: respond
-      description: Send a user-visible reply to a channel. Supports channel="chat" and ntfy channel ids from list_channels.
+      description: Send a user-visible reply to a channel. Supports channel="chat", ntfy channel ids, and Telegram channel ids from list_channels.
     - name: status
       description: Send a status line to a channel. V1 writes chat status lines as system messages.
     - name: list_channels

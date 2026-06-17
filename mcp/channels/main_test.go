@@ -2,6 +2,7 @@ package main
 
 import (
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"io"
 	"net/http"
@@ -388,6 +389,140 @@ func TestChannelsCreateNtfyWithoutAgent(t *testing.T) {
 	}
 	if !strings.Contains(rec.Body.String(), `"local_subscribe_url":"/api/apps/channels/ntfy/marco-phone"`) {
 		t.Fatalf("response missing local_subscribe_url: %s", rec.Body.String())
+	}
+}
+
+func TestChannelsCreateTelegramWithoutAgent(t *testing.T) {
+	st := newStore(testDB(t))
+	app := &App{store: st, hub: newHub()}
+	req := httptest.NewRequest(http.MethodPost, "/channels?project_id=proj-1", strings.NewReader(`{"type":"telegram","name":"Ops Telegram","topic":"ops-telegram","chat_id":"-100123","bot_token":"tok-123","parse_mode":"HTML"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	app.handleChannels(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"id":"telegram:ops-telegram"`) {
+		t.Fatalf("response missing telegram channel: %s", rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"telegram_chat_id":"-100123"`) {
+		t.Fatalf("response missing telegram chat id: %s", rec.Body.String())
+	}
+	cfg, err := st.GetTelegramConfigByTopic("ops-telegram")
+	if err != nil {
+		t.Fatalf("GetTelegramConfigByTopic: %v", err)
+	}
+	if cfg.ChatID != "-100123" || cfg.BotToken != "tok-123" || cfg.ParseMode != "HTML" {
+		t.Fatalf("telegram cfg = %+v", cfg)
+	}
+}
+
+func TestTelegramSendMessageBuildsInlineKeyboard(t *testing.T) {
+	var gotPath string
+	var got map[string]any
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotPath = r.URL.Path
+		if err := json.NewDecoder(r.Body).Decode(&got); err != nil {
+			t.Fatalf("decode body: %v", err)
+		}
+		writeJSON(w, map[string]any{"ok": true})
+	}))
+	defer srv.Close()
+	oldClient := telegramHTTPClient
+	oldBase := telegramAPIBase
+	telegramHTTPClient = srv.Client()
+	telegramAPIBase = srv.URL
+	t.Cleanup(func() {
+		telegramHTTPClient = oldClient
+		telegramAPIBase = oldBase
+	})
+
+	err := telegramSendMessage("tok-123", "-100123", "Decision?", "", 77, []ChannelAction{
+		{Type: "callback", Label: "Approve", Value: "approve"},
+		{Type: "callback", Label: "Reject", Value: "reject"},
+		{Type: "url", Label: "Open", URL: "https://example.com"},
+	})
+	if err != nil {
+		t.Fatalf("telegramSendMessage: %v", err)
+	}
+	if gotPath != "/bottok-123/sendMessage" {
+		t.Fatalf("path = %q", gotPath)
+	}
+	if got["chat_id"] != "-100123" || got["text"] != "Decision?" {
+		t.Fatalf("payload = %+v", got)
+	}
+	rm, ok := got["reply_markup"].(map[string]any)
+	if !ok {
+		t.Fatalf("reply_markup missing: %+v", got)
+	}
+	rows, ok := rm["inline_keyboard"].([]any)
+	if !ok || len(rows) != 1 {
+		t.Fatalf("inline_keyboard = %+v", rm["inline_keyboard"])
+	}
+	buttons, ok := rows[0].([]any)
+	if !ok || len(buttons) != 3 {
+		t.Fatalf("buttons = %+v", rows[0])
+	}
+	first, _ := buttons[0].(map[string]any)
+	second, _ := buttons[1].(map[string]any)
+	third, _ := buttons[2].(map[string]any)
+	if first["callback_data"] != "act:77:0" || second["callback_data"] != "act:77:1" || third["url"] != "https://example.com" {
+		t.Fatalf("buttons = %+v", buttons)
+	}
+}
+
+func TestTelegramWebhookCallbackStoresAction(t *testing.T) {
+	st := newStore(testDB(t))
+	ch, err := st.UpsertTelegramChannel(42, "proj-1", "Ops Telegram", TelegramConfig{Topic: "ops-telegram", ChatID: "-100123", BotToken: "tok-123"})
+	if err != nil {
+		t.Fatalf("UpsertTelegramChannel: %v", err)
+	}
+	msg, err := st.Append(ch.ID, "agent", "Approve deployment?", nil, "", "final", telegramComponents([]ChannelAction{
+		{Type: "callback", Label: "Approve", Value: "approve_deploy"},
+		{Type: "callback", Label: "Reject", Value: "reject_deploy"},
+	}, 42, "Deploy"))
+	if err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+	var answerPath string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		answerPath = r.URL.Path
+		writeJSON(w, map[string]any{"ok": true})
+	}))
+	defer srv.Close()
+	oldClient := telegramHTTPClient
+	oldBase := telegramAPIBase
+	telegramHTTPClient = srv.Client()
+	telegramAPIBase = srv.URL
+	t.Cleanup(func() {
+		telegramHTTPClient = oldClient
+		telegramAPIBase = oldBase
+	})
+	oldCtx := globalCtx
+	globalCtx = nil
+	t.Cleanup(func() { globalCtx = oldCtx })
+
+	app := &App{store: st, hub: newHub()}
+	body := `{"callback_query":{"id":"cb-1","data":"act:` + strconv.FormatInt(msg.ID, 10) + `:1","from":{"id":7,"username":"marco"}}}`
+	req := httptest.NewRequest(http.MethodPost, "/telegram-webhook/ops-telegram", strings.NewReader(body))
+	rec := httptest.NewRecorder()
+
+	app.handleTelegramWebhook(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d body=%s", rec.Code, rec.Body.String())
+	}
+	rows, err := st.ListMessages(ch.ID, 0, 10)
+	if err != nil {
+		t.Fatalf("ListMessages: %v", err)
+	}
+	if len(rows) != 2 || !strings.Contains(rows[1].Content, "Reject") || !strings.Contains(rows[1].Content, "reject_deploy") {
+		t.Fatalf("rows = %+v", rows)
+	}
+	if answerPath != "/bottok-123/answerCallbackQuery" {
+		t.Fatalf("answer callback path = %q", answerPath)
 	}
 }
 

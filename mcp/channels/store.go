@@ -42,6 +42,14 @@ type ChannelRecord struct {
 	UpdatedAt      time.Time `json:"updated_at"`
 }
 
+type TelegramConfig struct {
+	Topic        string `json:"topic"`
+	ChatID       string `json:"chat_id"`
+	BotToken     string `json:"bot_token,omitempty"`
+	ConnectionID int64  `json:"connection_id,omitempty"`
+	ParseMode    string `json:"parse_mode,omitempty"`
+}
+
 type Message struct {
 	ID         int64           `json:"id"`
 	ChatID     string          `json:"chat_id"`
@@ -168,17 +176,25 @@ func (s *store) GetChat(id string) (*Chat, error) {
 }
 
 func (s *store) GetNtfyByTopic(topic string) (*Chat, error) {
+	return s.getChatByTypeTopic("ntfy", topic)
+}
+
+func (s *store) GetTelegramByTopic(topic string) (*Chat, error) {
+	return s.getChatByTypeTopic("telegram", topic)
+}
+
+func (s *store) getChatByTypeTopic(typ, topic string) (*Chat, error) {
 	var c Chat
 	err := s.db.QueryRow(
 		`SELECT v.id, v.channel_id, v.agent_id, v.project_id, v.title,
 		        ch.type, v.external_thread_id, v.created_at, v.updated_at
 		   FROM conversations v
 		   JOIN channels ch ON ch.id = v.channel_id
-		  WHERE ch.type = 'ntfy'
+		  WHERE ch.type = ?
 		    AND json_extract(ch.config_json, '$.topic') = ?
 		  ORDER BY v.created_at ASC
 		  LIMIT 1`,
-		topic,
+		typ, topic,
 	).Scan(&c.ID, &c.ChannelID, &c.AgentID, &c.ProjectID, &c.Title, &c.Channel, &c.ThreadID, &c.CreatedAt, &c.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, errNotFound
@@ -188,6 +204,32 @@ func (s *store) GetNtfyByTopic(topic string) (*Chat, error) {
 	}
 	c.InstanceID = c.AgentID
 	return &c, nil
+}
+
+func (s *store) GetTelegramConfigByTopic(topic string) (TelegramConfig, error) {
+	var raw string
+	err := s.db.QueryRow(
+		`SELECT config_json FROM channels
+		  WHERE type = 'telegram'
+		    AND json_extract(config_json, '$.topic') = ?
+		  LIMIT 1`,
+		topic,
+	).Scan(&raw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return TelegramConfig{}, errNotFound
+	}
+	if err != nil {
+		return TelegramConfig{}, err
+	}
+	var cfg TelegramConfig
+	if err := json.Unmarshal([]byte(raw), &cfg); err != nil {
+		return TelegramConfig{}, err
+	}
+	cfg.Topic = strings.TrimSpace(cfg.Topic)
+	cfg.ChatID = strings.TrimSpace(cfg.ChatID)
+	cfg.BotToken = strings.TrimSpace(cfg.BotToken)
+	cfg.ParseMode = strings.TrimSpace(cfg.ParseMode)
+	return cfg, nil
 }
 
 func (s *store) SetNtfyTopic(agentID int64, projectID string, topic string) (*Chat, error) {
@@ -211,6 +253,54 @@ func (s *store) UpsertNtfyChannel(agentID int64, projectID, title, topic string)
 		conversationID = existing.ID
 	}
 	return s.upsertNtfy(conversationID, projectID, agentID, title, topic)
+}
+
+func (s *store) UpsertTelegramChannel(agentID int64, projectID, title string, cfg TelegramConfig) (*Chat, error) {
+	cfg.Topic = strings.TrimSpace(cfg.Topic)
+	if cfg.Topic == "" {
+		cfg.Topic = randomTopic(agentID)
+	}
+	cfg.ChatID = strings.TrimSpace(cfg.ChatID)
+	cfg.BotToken = strings.TrimSpace(cfg.BotToken)
+	cfg.ParseMode = strings.TrimSpace(cfg.ParseMode)
+	title = strings.TrimSpace(title)
+	if title == "" {
+		title = "Telegram"
+	}
+	conversationID := "telegram-" + cfg.Topic
+	if existing, err := s.GetTelegramByTopic(cfg.Topic); err == nil {
+		conversationID = existing.ID
+	}
+	return s.upsertTelegram(conversationID, projectID, agentID, title, cfg)
+}
+
+func (s *store) upsertTelegram(conversationID, projectID string, agentID int64, title string, cfg TelegramConfig) (*Chat, error) {
+	channelID := conversationID
+	if existing, err := s.GetChat(conversationID); err == nil && existing.ChannelID != "" {
+		channelID = existing.ChannelID
+	}
+	if byTopic, err := s.GetTelegramByTopic(cfg.Topic); err == nil && byTopic.ChannelID != "" {
+		channelID = byTopic.ChannelID
+		conversationID = byTopic.ID
+	}
+	config := map[string]any{
+		"topic":      cfg.Topic,
+		"chat_id":    cfg.ChatID,
+		"parse_mode": cfg.ParseMode,
+	}
+	if cfg.BotToken != "" {
+		config["bot_token"] = cfg.BotToken
+	}
+	if cfg.ConnectionID > 0 {
+		config["connection_id"] = cfg.ConnectionID
+	}
+	if err := s.upsertChannel(channelID, projectID, "telegram", title, "active", agentID, config); err != nil {
+		return nil, fmt.Errorf("upsert telegram channel: %w", err)
+	}
+	if err := s.upsertConversation(conversationID, channelID, projectID, agentID, title, cfg.Topic); err != nil {
+		return nil, fmt.Errorf("upsert telegram conversation: %w", err)
+	}
+	return s.GetChat(conversationID)
 }
 
 func (s *store) upsertNtfy(conversationID, projectID string, agentID int64, title, topic string) (*Chat, error) {

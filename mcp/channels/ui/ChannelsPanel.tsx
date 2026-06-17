@@ -21,6 +21,10 @@ interface Channel {
   subscribe_url?: string;
   provider_url?: string;
   provider_topic_url?: string;
+  telegram_chat_id?: string;
+  connection_id?: number;
+  parse_mode?: string;
+  webhook_url?: string;
   stream_json?: string;
   stream_sse?: string;
   stream_json_url?: string;
@@ -55,6 +59,7 @@ interface ChannelResponse {
 }
 
 type View = "inbox" | "channels";
+type ChannelType = "ntfy" | "telegram";
 
 export default function ChannelsPanel({ projectId }: NativePanelProps) {
   const [view, setView] = useState<View>("inbox");
@@ -68,10 +73,14 @@ export default function ChannelsPanel({ projectId }: NativePanelProps) {
   const [channels, setChannels] = useState<Channel[]>([]);
   const [selectedId, setSelectedId] = useState("");
   const [creating, setCreating] = useState(false);
+  const [channelType, setChannelType] = useState<ChannelType>("ntfy");
   const [name, setName] = useState("ntfy");
   const [agentId, setAgentId] = useState("");
   const [inbound, setInbound] = useState(false);
   const [topic, setTopic] = useState("");
+  const [telegramChatId, setTelegramChatId] = useState("");
+  const [telegramBotToken, setTelegramBotToken] = useState("");
+  const [telegramParseMode, setTelegramParseMode] = useState("");
   const [testTitle, setTestTitle] = useState("Apteva");
   const [testMessage, setTestMessage] = useState("Test notification from Channels");
 
@@ -157,7 +166,15 @@ export default function ChannelsPanel({ projectId }: NativePanelProps) {
     [channels, selectedId],
   );
 
-  const createNtfy = useCallback(async (regenerate = false) => {
+  const createChannel = useCallback(async (regenerate = false) => {
+    if (channelType === "telegram" && !telegramChatId.trim()) {
+      setStatus("Telegram chat id required");
+      return;
+    }
+    if (channelType === "telegram" && !telegramBotToken.trim()) {
+      setStatus("Telegram bot token required");
+      return;
+    }
     const res = await fetch(appURL("/channels"), {
       method: "POST",
       credentials: "same-origin",
@@ -165,10 +182,13 @@ export default function ChannelsPanel({ projectId }: NativePanelProps) {
       body: JSON.stringify({
         agent_id: inbound && agentId.trim() ? Number(agentId) : 0,
         project_id: projectId,
-        name: name.trim() || "ntfy",
-        type: "ntfy",
+        name: name.trim() || (channelType === "telegram" ? "Telegram" : "ntfy"),
+        type: channelType,
         topic: regenerate ? "" : topic.trim(),
         regenerate,
+        chat_id: channelType === "telegram" ? telegramChatId.trim() : undefined,
+        bot_token: channelType === "telegram" ? telegramBotToken.trim() : undefined,
+        parse_mode: channelType === "telegram" ? telegramParseMode.trim() : undefined,
       }),
     });
     if (!res.ok) {
@@ -177,12 +197,13 @@ export default function ChannelsPanel({ projectId }: NativePanelProps) {
     }
     const ch = (await res.json()) as Channel;
     setTopic(ch.topic || "");
+    if (channelType === "telegram") setTelegramBotToken("");
     setCreating(false);
     setStatus(regenerate ? "Topic generated" : "Channel created");
     await reload();
     setSelectedId(ch.id);
     setView("channels");
-  }, [agentId, appURL, inbound, name, projectId, reload, topic]);
+  }, [agentId, appURL, channelType, inbound, name, projectId, reload, telegramBotToken, telegramChatId, telegramParseMode, topic]);
 
   const sendChatMessage = useCallback(async () => {
     if (!selectedConversation?.id || !draft.trim()) return;
@@ -200,24 +221,56 @@ export default function ChannelsPanel({ projectId }: NativePanelProps) {
     await loadMessages(selectedConversation.id);
   }, [appURL, draft, loadMessages, selectedConversation?.id]);
 
-  const testNtfy = useCallback(async () => {
-    if (!selected || selected.type !== "ntfy" || !selected.topic) {
-      setStatus("Select an ntfy channel");
+  const testChannel = useCallback(async () => {
+    if (!selected || !selected.topic) {
+      setStatus("Select a channel");
       return;
     }
-    const res = await fetch(appURL(`/ntfy/${encodeURIComponent(selected.topic)}`), {
-      method: "POST",
-      credentials: "same-origin",
-      headers: {
-        "Content-Type": "text/plain",
-        "Title": testTitle,
-        "Tags": "bell",
-      },
-      body: testMessage,
-    });
+    let res: Response;
+    if (selected.type === "telegram") {
+      res = await fetch(appURL("/telegram/test"), {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          topic: selected.topic,
+          title: testTitle,
+          message: testMessage,
+          actions: [
+            { type: "callback", label: "Approve", value: "approve_test" },
+            { type: "callback", label: "Reject", value: "reject_test" },
+          ],
+        }),
+      });
+    } else {
+      res = await fetch(appURL(`/ntfy/${encodeURIComponent(selected.topic)}`), {
+        method: "POST",
+        credentials: "same-origin",
+        headers: {
+          "Content-Type": "text/plain",
+          "Title": testTitle,
+          "Tags": "bell",
+        },
+        body: testMessage,
+      });
+    }
     setStatus(res.ok ? "Test sent" : `Test failed: ${res.status}`);
     if (res.ok) await loadConversations();
   }, [appURL, loadConversations, selected, testMessage, testTitle]);
+
+  const registerTelegramWebhook = useCallback(async () => {
+    if (!selected || selected.type !== "telegram" || !selected.topic) {
+      setStatus("Select a Telegram channel");
+      return;
+    }
+    const res = await fetch(appURL("/telegram/register-webhook"), {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ topic: selected.topic }),
+    });
+    setStatus(res.ok ? "Telegram webhook registered" : `Webhook failed: ${res.status}`);
+  }, [appURL, selected]);
 
   const deleteChannel = useCallback(async () => {
     if (!selected) return;
@@ -282,6 +335,11 @@ export default function ChannelsPanel({ projectId }: NativePanelProps) {
             onSelect={setSelectedId}
             creating={creating}
             selected={selected}
+            channelType={channelType}
+            setChannelType={(v) => {
+              setChannelType(v);
+              setName((current) => current === "ntfy" || current === "Telegram" ? (v === "telegram" ? "Telegram" : "ntfy") : current);
+            }}
             name={name}
             setName={setName}
             agentId={agentId}
@@ -290,9 +348,15 @@ export default function ChannelsPanel({ projectId }: NativePanelProps) {
             setInbound={setInbound}
             topic={topic}
             setTopic={setTopic}
+            telegramChatId={telegramChatId}
+            setTelegramChatId={setTelegramChatId}
+            telegramBotToken={telegramBotToken}
+            setTelegramBotToken={setTelegramBotToken}
+            telegramParseMode={telegramParseMode}
+            setTelegramParseMode={setTelegramParseMode}
             onCancel={() => setCreating(false)}
-            onSave={() => createNtfy(false)}
-            onGenerate={() => createNtfy(true)}
+            onSave={() => createChannel(false)}
+            onGenerate={() => createChannel(true)}
             subscribeURL={selectedSubscribeURL}
             serverURL={selectedServerURL}
             streamURL={selectedStreamURL}
@@ -300,7 +364,8 @@ export default function ChannelsPanel({ projectId }: NativePanelProps) {
             setTestTitle={setTestTitle}
             testMessage={testMessage}
             setTestMessage={setTestMessage}
-            onTest={testNtfy}
+            onTest={testChannel}
+            onRegisterTelegramWebhook={registerTelegramWebhook}
             onDelete={deleteChannel}
           />
         )}
@@ -349,7 +414,7 @@ function InboxView({
                     <span className="rounded bg-bg px-2 py-0.5 text-xs uppercase text-text-dim">{row.channel}</span>
                   </div>
                   <div className="mt-1 truncate font-mono text-xs text-text-dim">
-                    {row.channel === "ntfy" ? row.thread_id : `agent:${row.agent_id || "none"}`}
+                    {row.channel === "ntfy" || row.channel === "telegram" ? row.thread_id : `agent:${row.agent_id || "none"}`}
                   </div>
                 </div>
               </div>
@@ -400,6 +465,8 @@ function ChannelsView(props: {
   onSelect: (id: string) => void;
   creating: boolean;
   selected?: Channel;
+  channelType: ChannelType;
+  setChannelType: (v: ChannelType) => void;
   name: string;
   setName: (v: string) => void;
   agentId: string;
@@ -408,6 +475,12 @@ function ChannelsView(props: {
   setInbound: (v: boolean) => void;
   topic: string;
   setTopic: (v: string) => void;
+  telegramChatId: string;
+  setTelegramChatId: (v: string) => void;
+  telegramBotToken: string;
+  setTelegramBotToken: (v: string) => void;
+  telegramParseMode: string;
+  setTelegramParseMode: (v: string) => void;
   onCancel: () => void;
   onSave: () => void;
   onGenerate: () => void;
@@ -419,6 +492,7 @@ function ChannelsView(props: {
   testMessage: string;
   setTestMessage: (v: string) => void;
   onTest: () => void;
+  onRegisterTelegramWebhook: () => void;
   onDelete: () => void;
 }) {
   return (
@@ -465,6 +539,7 @@ function ChannelsView(props: {
             testMessage={props.testMessage}
             setTestMessage={props.setTestMessage}
             onTest={props.onTest}
+            onRegisterTelegramWebhook={props.onRegisterTelegramWebhook}
             onDelete={props.onDelete}
           />
         ) : (
@@ -476,6 +551,8 @@ function ChannelsView(props: {
 }
 
 function CreateChannel({
+  channelType,
+  setChannelType,
   name,
   setName,
   agentId,
@@ -484,10 +561,18 @@ function CreateChannel({
   setInbound,
   topic,
   setTopic,
+  telegramChatId,
+  setTelegramChatId,
+  telegramBotToken,
+  setTelegramBotToken,
+  telegramParseMode,
+  setTelegramParseMode,
   onCancel,
   onSave,
   onGenerate,
 }: {
+  channelType: ChannelType;
+  setChannelType: (v: ChannelType) => void;
   name: string;
   setName: (v: string) => void;
   agentId: string;
@@ -496,6 +581,12 @@ function CreateChannel({
   setInbound: (v: boolean) => void;
   topic: string;
   setTopic: (v: string) => void;
+  telegramChatId: string;
+  setTelegramChatId: (v: string) => void;
+  telegramBotToken: string;
+  setTelegramBotToken: (v: string) => void;
+  telegramParseMode: string;
+  setTelegramParseMode: (v: string) => void;
   onCancel: () => void;
   onSave: () => void;
   onGenerate: () => void;
@@ -518,11 +609,27 @@ function CreateChannel({
         </label>
         <label className="block text-sm">
           <span className="mb-1 block text-text-dim">Type</span>
-          <select className="h-9 w-full rounded-md border border-border bg-bg px-3 text-sm outline-none">
-            <option>ntfy</option>
+          <select
+            className="h-9 w-full rounded-md border border-border bg-bg px-3 text-sm outline-none"
+            value={channelType}
+            onChange={(e) => setChannelType(e.target.value as ChannelType)}
+          >
+            <option value="ntfy">ntfy</option>
+            <option value="telegram">Telegram</option>
           </select>
         </label>
       </div>
+      {channelType === "telegram" && (
+        <div className="rounded-md border border-border bg-bg p-3 text-sm">
+          <div className="font-medium">Telegram setup</div>
+          <ol className="mt-2 list-decimal space-y-1 pl-5 text-text-dim">
+            <li>Create a bot with BotFather and paste the bot token below.</li>
+            <li>Add the bot to your Telegram group, or open a direct chat with it.</li>
+            <li>Send any message to the bot/group, then open <code className="font-mono">https://api.telegram.org/botTOKEN/getUpdates</code> and copy the chat id.</li>
+            <li>Create the channel, then select it and register the webhook.</li>
+          </ol>
+        </div>
+      )}
       <label className="flex items-center gap-2 text-sm">
         <input
           type="checkbox"
@@ -553,6 +660,41 @@ function CreateChannel({
           placeholder="Generated if blank"
         />
       </label>
+      {channelType === "telegram" && (
+        <div className="grid gap-3 sm:grid-cols-2">
+          <label className="block text-sm">
+            <span className="mb-1 block text-text-dim">Bot token</span>
+            <input
+              className="h-9 w-full rounded-md border border-border bg-bg px-3 font-mono text-xs outline-none focus:border-accent"
+              value={telegramBotToken}
+              onChange={(e) => setTelegramBotToken(e.target.value)}
+              placeholder="123456:ABC..."
+              type="password"
+            />
+          </label>
+          <label className="block text-sm">
+            <span className="mb-1 block text-text-dim">Telegram chat id</span>
+            <input
+              className="h-9 w-full rounded-md border border-border bg-bg px-3 font-mono text-sm outline-none focus:border-accent"
+              value={telegramChatId}
+              onChange={(e) => setTelegramChatId(e.target.value)}
+              placeholder="-1001234567890"
+            />
+          </label>
+          <label className="block text-sm">
+            <span className="mb-1 block text-text-dim">Parse mode</span>
+            <select
+              className="h-9 w-full rounded-md border border-border bg-bg px-3 text-sm outline-none"
+              value={telegramParseMode}
+              onChange={(e) => setTelegramParseMode(e.target.value)}
+            >
+              <option value="">None</option>
+              <option value="MarkdownV2">MarkdownV2</option>
+              <option value="HTML">HTML</option>
+            </select>
+          </label>
+        </div>
+      )}
       <div className="flex flex-wrap gap-2">
         <button className="h-9 rounded-md bg-accent px-3 text-sm font-medium text-accent-contrast" onClick={onSave}>Create</button>
         <button className="h-9 rounded-md border border-border px-3 text-sm" onClick={onGenerate}>Generate Topic</button>
@@ -571,6 +713,7 @@ function ChannelDetail({
   testMessage,
   setTestMessage,
   onTest,
+  onRegisterTelegramWebhook,
   onDelete,
 }: {
   channel: Channel;
@@ -582,6 +725,7 @@ function ChannelDetail({
   testMessage: string;
   setTestMessage: (v: string) => void;
   onTest: () => void;
+  onRegisterTelegramWebhook: () => void;
   onDelete: () => void;
 }) {
   return (
@@ -606,6 +750,10 @@ function ChannelDetail({
         {channel.type === "ntfy" && <ReadOnly label="Topic" value={channel.topic || ""} />}
         {channel.type === "ntfy" && <ReadOnly label="Topic URL" value={subscribeURL} />}
         {channel.type === "ntfy" && <ReadOnly label="Local JSON Stream" value={streamURL} />}
+        {channel.type === "telegram" && <ReadOnly label="Topic" value={channel.topic || ""} />}
+        {channel.type === "telegram" && <ReadOnly label="Telegram Chat ID" value={channel.telegram_chat_id || ""} />}
+        {channel.type === "telegram" && <ReadOnly label="Webhook URL" value={channel.webhook_url || ""} />}
+        {channel.type === "telegram" && <ReadOnly label="Parse Mode" value={channel.parse_mode || "None"} />}
       </div>
 
       <div className="flex flex-wrap gap-1">
@@ -631,6 +779,37 @@ function ChannelDetail({
               placeholder="Message"
             />
             <button className="h-9 rounded-md border border-border px-3 text-sm" onClick={onTest}>Send</button>
+          </div>
+        </div>
+      )}
+      {channel.type === "telegram" && (
+        <div className="space-y-4 border-t border-border pt-4">
+          <div className="rounded-md border border-border bg-bg p-3 text-sm">
+            <div className="font-medium">Telegram configuration</div>
+            <ol className="mt-2 list-decimal space-y-1 pl-5 text-text-dim">
+              <li>In Telegram, send a message to the bot or the group where the bot was added.</li>
+              <li>Use BotFather token + <code className="font-mono">getUpdates</code> to confirm the chat id matches this channel.</li>
+              <li>Register the webhook after the channel is created so inbound messages and button taps return here.</li>
+              <li>Agents send with <code className="font-mono">{`respond(channel="${channel.mcp_id || channel.id}", text="...")`}</code>.</li>
+            </ol>
+          </div>
+          <div className="flex flex-wrap gap-2">
+            <button className="h-9 rounded-md border border-border px-3 text-sm" onClick={onRegisterTelegramWebhook}>Register Webhook</button>
+            <button className="h-9 rounded-md border border-border px-3 text-sm" onClick={onTest}>Send Approve/Reject Test</button>
+          </div>
+          <div className="grid gap-2 md:grid-cols-[220px_1fr]">
+            <input
+              className="h-9 rounded-md border border-border bg-bg px-3 text-sm outline-none focus:border-accent"
+              value={testTitle}
+              onChange={(e) => setTestTitle(e.target.value)}
+              placeholder="Title"
+            />
+            <input
+              className="h-9 rounded-md border border-border bg-bg px-3 text-sm outline-none focus:border-accent"
+              value={testMessage}
+              onChange={(e) => setTestMessage(e.target.value)}
+              placeholder="Message"
+            />
           </div>
         </div>
       )}

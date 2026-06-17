@@ -7,6 +7,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -26,18 +27,20 @@ import (
 
 var (
 	ntfyHTTPClient      = &http.Client{Timeout: 10 * time.Second}
+	telegramHTTPClient  = &http.Client{Timeout: 10 * time.Second}
 	defaultNtfyProvider = "https://ntfy.sh"
+	telegramAPIBase     = "https://api.telegram.org"
 )
 
 const manifestYAML = `schema: apteva-app/v1
 name: channels
 display_name: Channels
-version: 0.5.8
+version: 0.6.0
 description: |
-  Agent-facing channel router with standalone dashboard chat, a visible inbox, project channel management, and ntfy.sh notifications.
+  Agent-facing channel router with standalone dashboard chat, a visible inbox, project channel management, ntfy.sh notifications, and Telegram channels.
   Agents reply through respond(channel="chat", ...); the app stores chat
-  history, streams updates to the dashboard, delivers ntfy notifications
-  through the configured provider, and forwards inbound user messages to the owning agent.
+  history, streams updates to the dashboard, delivers provider-backed
+  notifications, and forwards inbound user messages/actions to agents.
 author: Apteva
 icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/channels/icon.svg
 scopes: [global]
@@ -46,6 +49,16 @@ requires:
     - db.write.app
     - platform.instances.read
     - platform.instances.write
+    - platform.connections.read
+    - platform.connections.read_credentials
+  integrations:
+    - role: telegram_bot
+      kind: integration
+      compatible_slugs: [telegram, telegram-bot]
+      capabilities: []
+      required: false
+      label: "Telegram bot (optional)"
+      hint: "Bind a Telegram bot connection if available, or paste a BotFather token directly when creating a Telegram channel."
 provides:
   http_routes:
     - prefix: /
@@ -53,9 +66,11 @@ provides:
       no_auth: true
     - prefix: /ntfy/
       no_auth: true
+    - prefix: /telegram-webhook/
+      no_auth: true
   mcp_tools:
     - name: respond
-      description: Send a user-visible reply to a channel. Supports channel="chat" and ntfy channel ids from list_channels.
+      description: Send a user-visible reply to a channel. Supports channel="chat", ntfy channel ids, and Telegram channel ids from list_channels.
     - name: status
       description: Send a status line to a channel. V1 writes chat status lines as system messages.
     - name: list_channels
@@ -147,6 +162,9 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/unread-summary", Handler: a.handleUnreadSummary},
 		{Pattern: "/seen", Handler: a.handleSeen},
 		{Pattern: "/presence", Handler: a.handlePresence},
+		{Pattern: "/telegram", Handler: a.handleTelegram},
+		{Pattern: "/telegram/", Handler: a.handleTelegram},
+		{Pattern: "/telegram-webhook/", Handler: a.handleTelegramWebhook, NoAuth: true},
 		{Pattern: "/ntfy", Handler: a.handleNtfyRoot, NoAuth: true},
 		{Pattern: "/ntfy/", Handler: a.handleNtfy, NoAuth: true},
 	}
@@ -162,12 +180,28 @@ func (a *App) MCPTools() []sdk.Tool {
 				"type":     "object",
 				"required": []string{"channel", "text"},
 				"properties": map[string]any{
-					"channel":   map[string]any{"type": "string", "description": `Target channel. Use "chat" or an ntfy channel id from list_channels, e.g. "ntfy:<topic>".`},
-					"text":      map[string]any{"type": "string", "description": "Message to deliver to the user."},
-					"title":     map[string]any{"type": "string", "description": "Optional ntfy notification title."},
-					"priority":  map[string]any{"description": "Optional ntfy priority: min, low, default, high, urgent, or 1-5."},
-					"tags":      map[string]any{"type": "array", "description": "Optional ntfy tags.", "items": map[string]any{"type": "string"}},
-					"click":     map[string]any{"type": "string", "description": "Optional ntfy click URL."},
+					"channel":  map[string]any{"type": "string", "description": `Target channel. Use "chat" or a channel id from list_channels, e.g. "ntfy:<topic>" or "telegram:<topic>".`},
+					"text":     map[string]any{"type": "string", "description": "Message to deliver to the user."},
+					"title":    map[string]any{"type": "string", "description": "Optional notification title."},
+					"priority": map[string]any{"description": "Optional ntfy priority: min, low, default, high, urgent, or 1-5."},
+					"tags":     map[string]any{"type": "array", "description": "Optional ntfy tags.", "items": map[string]any{"type": "string"}},
+					"click":    map[string]any{"type": "string", "description": "Optional ntfy click URL."},
+					"actions": map[string]any{
+						"type":        "array",
+						"description": `Optional buttons/actions. Telegram supports type="callback" and type="url"; ntfy supports view/http/copy when mapped later.`,
+						"items": map[string]any{
+							"type":     "object",
+							"required": []string{"label", "type"},
+							"properties": map[string]any{
+								"type":   map[string]any{"type": "string", "enum": []string{"callback", "url", "view", "http", "copy"}},
+								"label":  map[string]any{"type": "string"},
+								"value":  map[string]any{"type": "string", "description": "Opaque callback value sent back to the agent."},
+								"url":    map[string]any{"type": "string"},
+								"method": map[string]any{"type": "string"},
+								"body":   map[string]any{"type": "string"},
+							},
+						},
+					},
 					"agent_id":  map[string]any{"type": "integer", "description": "Optional fallback when caller metadata is unavailable."},
 					"thread_id": map[string]any{"type": "string", "description": "Optional source thread id."},
 					"components": map[string]any{
@@ -216,7 +250,7 @@ func (a *App) MCPTools() []sdk.Tool {
 
 func respondDescription() string {
 	return "Send a message to a user on a channel. Text in your thoughts is invisible; only this tool delivers messages.\n\n" +
-		"Standalone Channels supports dashboard chat and ntfy channel ids returned by list_channels. Use channel=\"chat\" when the incoming event is tagged [chat].\n" +
+		"Standalone Channels supports dashboard chat, ntfy channel ids, and Telegram channel ids returned by list_channels. Use channel=\"chat\" when the incoming event is tagged [chat].\n" +
 		"The call is accepted only while the chat stream is connected. If rejected as unavailable, no user is currently reachable on chat.\n" +
 		"The final response before going idle must include the actual outcome, not just an acknowledgement."
 }
@@ -298,13 +332,17 @@ func (a *App) handleChannels(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, map[string]any{"channels": a.channelSummaries(chats), "agent_id": agentID, "project_id": projectID})
 	case http.MethodPost:
 		var body struct {
-			AgentID    int64  `json:"agent_id"`
-			InstanceID int64  `json:"instance_id"`
-			ProjectID  string `json:"project_id"`
-			Name       string `json:"name"`
-			Type       string `json:"type"`
-			Topic      string `json:"topic"`
-			Regenerate bool   `json:"regenerate"`
+			AgentID      int64  `json:"agent_id"`
+			InstanceID   int64  `json:"instance_id"`
+			ProjectID    string `json:"project_id"`
+			Name         string `json:"name"`
+			Type         string `json:"type"`
+			Topic        string `json:"topic"`
+			Regenerate   bool   `json:"regenerate"`
+			ChatID       string `json:"chat_id"`
+			BotToken     string `json:"bot_token"`
+			ConnectionID int64  `json:"connection_id"`
+			ParseMode    string `json:"parse_mode"`
 		}
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		if body.AgentID == 0 {
@@ -313,8 +351,8 @@ func (a *App) handleChannels(w http.ResponseWriter, r *http.Request) {
 		if body.Type == "" {
 			body.Type = "ntfy"
 		}
-		if body.Type != "ntfy" && body.Type != "chat" {
-			http.Error(w, `type must be "chat" or "ntfy"`, http.StatusBadRequest)
+		if body.Type != "ntfy" && body.Type != "chat" && body.Type != "telegram" {
+			http.Error(w, `type must be "chat", "ntfy", or "telegram"`, http.StatusBadRequest)
 			return
 		}
 		projectID := strings.TrimSpace(body.ProjectID)
@@ -336,6 +374,31 @@ func (a *App) handleChannels(w http.ResponseWriter, r *http.Request) {
 		topic := strings.TrimSpace(body.Topic)
 		if topic != "" && !validTopic(topic) {
 			http.Error(w, "invalid topic", http.StatusBadRequest)
+			return
+		}
+		if body.Type == "telegram" {
+			if strings.TrimSpace(body.ChatID) == "" {
+				http.Error(w, "telegram chat_id required", http.StatusBadRequest)
+				return
+			}
+			if strings.TrimSpace(body.BotToken) == "" && body.ConnectionID == 0 {
+				http.Error(w, "telegram bot_token or connection_id required", http.StatusBadRequest)
+				return
+			}
+			_, existingErr := a.store.GetTelegramByTopic(topic)
+			ch, err := a.store.UpsertTelegramChannel(body.AgentID, projectID, body.Name, TelegramConfig{
+				Topic:        topic,
+				ChatID:       body.ChatID,
+				BotToken:     body.BotToken,
+				ConnectionID: body.ConnectionID,
+				ParseMode:    body.ParseMode,
+			})
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			a.emitChannelChange(existingErr != nil, *ch)
+			writeJSON(w, a.channelSummary(*ch))
 			return
 		}
 		_, existingErr := a.store.GetNtfyByTopic(topic)
@@ -773,6 +836,119 @@ func (a *App) streamNtfy(w http.ResponseWriter, r *http.Request, topic, format s
 	}
 }
 
+func (a *App) handleTelegram(w http.ResponseWriter, r *http.Request) {
+	rest := strings.Trim(strings.TrimPrefix(r.URL.Path, "/telegram"), "/")
+	switch {
+	case r.Method == http.MethodGet && rest == "connections":
+		a.handleTelegramConnections(w, r)
+	case r.Method == http.MethodPost && rest == "test":
+		var body struct {
+			Topic   string          `json:"topic"`
+			Title   string          `json:"title"`
+			Message string          `json:"message"`
+			Actions []ChannelAction `json:"actions"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		topic := strings.TrimSpace(body.Topic)
+		message := strings.TrimSpace(body.Message)
+		if !validTopic(topic) || message == "" {
+			http.Error(w, "topic and message required", http.StatusBadRequest)
+			return
+		}
+		chat, err := a.store.GetTelegramByTopic(topic)
+		if err != nil {
+			http.Error(w, "telegram channel not found", http.StatusNotFound)
+			return
+		}
+		outText := message
+		if strings.TrimSpace(body.Title) != "" {
+			outText = strings.TrimSpace(body.Title) + "\n" + message
+		}
+		m, err := a.store.Append(chat.ID, "agent", message, nil, "", "final", telegramComponents(body.Actions, 0, body.Title))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		a.publish(*m)
+		if err := a.sendTelegram(topic, outText, m.ID, body.Actions); err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+		writeJSON(w, map[string]any{"status": "sent", "message_id": m.ID})
+	case r.Method == http.MethodPost && rest == "register-webhook":
+		var body struct {
+			Topic string `json:"topic"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		topic := strings.TrimSpace(body.Topic)
+		if !validTopic(topic) {
+			http.Error(w, "valid topic required", http.StatusBadRequest)
+			return
+		}
+		url, _ := a.telegramURLFields(topic)["webhook_url"].(string)
+		if !strings.HasPrefix(url, "https://") {
+			http.Error(w, "public https URL required for Telegram webhook", http.StatusBadRequest)
+			return
+		}
+		cfg, err := a.store.GetTelegramConfigByTopic(topic)
+		if err != nil {
+			http.Error(w, "telegram channel not found", http.StatusNotFound)
+			return
+		}
+		token, err := a.telegramBotToken(cfg)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+		if err := telegramSetWebhook(token, url); err != nil {
+			http.Error(w, err.Error(), http.StatusBadGateway)
+			return
+		}
+		writeJSON(w, map[string]any{"status": "registered", "webhook_url": url})
+	default:
+		http.Error(w, "not found", http.StatusNotFound)
+	}
+}
+
+func (a *App) handleTelegramConnections(w http.ResponseWriter, r *http.Request) {
+	type conn struct {
+		ID      int64  `json:"id"`
+		AppSlug string `json:"app_slug"`
+		Name    string `json:"name"`
+		Status  string `json:"status"`
+	}
+	out := []conn{}
+	if globalCtx != nil && globalCtx.PlatformAPI() != nil {
+		for _, slug := range []string{"telegram", "telegram-bot"} {
+			rows, err := globalCtx.PlatformAPI().ListConnections(sdk.ConnectionFilter{ProjectID: projectFromRequest(r), AppSlug: slug})
+			if err != nil {
+				continue
+			}
+			for _, c := range rows {
+				out = append(out, conn{ID: c.ID, AppSlug: c.AppSlug, Name: c.Name, Status: c.Status})
+			}
+		}
+	}
+	writeJSON(w, map[string]any{"connections": out})
+}
+
+func (a *App) handleTelegramWebhook(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST only", http.StatusMethodNotAllowed)
+		return
+	}
+	topic := strings.Trim(strings.TrimPrefix(r.URL.Path, "/telegram-webhook/"), "/")
+	if !validTopic(topic) {
+		http.Error(w, "invalid topic", http.StatusBadRequest)
+		return
+	}
+	if err := a.processTelegramUpdate(topic, r.Body); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true})
+}
+
 // --- MCP handlers ----------------------------------------------------------
 
 func (a *App) toolRespond(ctx context.Context, app *sdk.AppCtx, args map[string]any) (any, error) {
@@ -808,8 +984,36 @@ func (a *App) toolRespond(ctx context.Context, app *sdk.AppCtx, args map[string]
 		}
 		return map[string]any{"status": "delivered", "channel": "ntfy", "channel_id": "ntfy:" + topic, "topic": topic, "message_id": m.ID, "provider_url": ntfyProviderURL()}, nil
 	}
+	if topic := telegramTopicFromChannel(channel); topic != "" {
+		chat, err := a.store.GetTelegramByTopic(topic)
+		if err != nil {
+			return nil, fmt.Errorf("telegram channel %q not found", channel)
+		}
+		projectID := a.projectForAgent(agentID, app.CurrentProject())
+		if chat.ProjectID != "" && projectID != "" && chat.ProjectID != projectID {
+			return nil, fmt.Errorf("telegram channel %q is not available in this project", channel)
+		}
+		if chat.AgentID != 0 && chat.AgentID != agentID {
+			return nil, fmt.Errorf("telegram channel %q is not available for agent %d", channel, agentID)
+		}
+		title := strArg(args, "title")
+		outText := text
+		if title != "" {
+			outText = title + "\n" + text
+		}
+		actions := actionsFromAny(args["actions"])
+		m, err := a.store.Append(chat.ID, "agent", text, nil, strArg(args, "thread_id"), "final", telegramComponents(actions, agentID, title))
+		if err != nil {
+			return nil, err
+		}
+		a.publish(*m)
+		if err := a.sendTelegram(topic, outText, m.ID, actions); err != nil {
+			return nil, fmt.Errorf("telegram delivery failed after saving message %d: %w", m.ID, err)
+		}
+		return map[string]any{"status": "delivered", "channel": "telegram", "channel_id": "telegram:" + topic, "topic": topic, "message_id": m.ID}, nil
+	}
 	if channel != "chat" {
-		return nil, fmt.Errorf("channel %q is not available; use channel=\"chat\" or an ntfy channel id from list_channels", channel)
+		return nil, fmt.Errorf("channel %q is not available; use channel=\"chat\" or a channel id from list_channels", channel)
 	}
 	projectID := app.CurrentProject()
 	projectID = a.projectForAgent(agentID, projectID)
@@ -922,6 +1126,50 @@ type ntfyEvent struct {
 	Click    string   `json:"click,omitempty"`
 }
 
+type ChannelAction struct {
+	Type   string `json:"type"`
+	Label  string `json:"label"`
+	Value  string `json:"value,omitempty"`
+	URL    string `json:"url,omitempty"`
+	Method string `json:"method,omitempty"`
+	Body   string `json:"body,omitempty"`
+}
+
+type telegramAPIResponse struct {
+	OK          bool   `json:"ok"`
+	Description string `json:"description"`
+}
+
+type telegramUpdate struct {
+	Message       *telegramMessage       `json:"message"`
+	CallbackQuery *telegramCallbackQuery `json:"callback_query"`
+}
+
+type telegramMessage struct {
+	MessageID int64        `json:"message_id"`
+	Text      string       `json:"text"`
+	From      telegramUser `json:"from"`
+	Chat      telegramChat `json:"chat"`
+}
+
+type telegramCallbackQuery struct {
+	ID      string           `json:"id"`
+	Data    string           `json:"data"`
+	From    telegramUser     `json:"from"`
+	Message *telegramMessage `json:"message"`
+}
+
+type telegramUser struct {
+	ID        int64  `json:"id"`
+	Username  string `json:"username"`
+	FirstName string `json:"first_name"`
+	LastName  string `json:"last_name"`
+}
+
+type telegramChat struct {
+	ID int64 `json:"id"`
+}
+
 func (a *App) channelSummaries(chats []Chat) []map[string]any {
 	out := make([]map[string]any, 0, len(chats))
 	for _, ch := range chats {
@@ -955,6 +1203,21 @@ func (a *App) channelRecordSummary(ch ChannelRecord) map[string]any {
 		item["capabilities"] = []string{"text", "title", "priority", "tags", "click"}
 		return item
 	}
+	if ch.Type == "telegram" {
+		item["id"] = "telegram:" + ch.Topic
+		item["mcp_id"] = "telegram:" + ch.Topic
+		item["topic"] = ch.Topic
+		if cfg, err := a.store.GetTelegramConfigByTopic(ch.Topic); err == nil {
+			item["telegram_chat_id"] = cfg.ChatID
+			item["connection_id"] = cfg.ConnectionID
+			item["parse_mode"] = cfg.ParseMode
+		}
+		for k, v := range a.telegramURLFields(ch.Topic) {
+			item[k] = v
+		}
+		item["capabilities"] = []string{"text", "buttons", "links", "callback_actions"}
+		return item
+	}
 	item["capabilities"] = []string{"text", "status", "components"}
 	return item
 }
@@ -982,6 +1245,21 @@ func (a *App) channelSummary(ch Chat) map[string]any {
 			item[k] = v
 		}
 		item["capabilities"] = []string{"text", "title", "priority", "tags", "click"}
+		return item
+	}
+	if ch.Channel == "telegram" {
+		item["id"] = "telegram:" + ch.ThreadID
+		item["mcp_id"] = "telegram:" + ch.ThreadID
+		item["topic"] = ch.ThreadID
+		if cfg, err := a.store.GetTelegramConfigByTopic(ch.ThreadID); err == nil {
+			item["telegram_chat_id"] = cfg.ChatID
+			item["connection_id"] = cfg.ConnectionID
+			item["parse_mode"] = cfg.ParseMode
+		}
+		for k, v := range a.telegramURLFields(ch.ThreadID) {
+			item[k] = v
+		}
+		item["capabilities"] = []string{"text", "buttons", "links", "callback_actions"}
 		return item
 	}
 	item["capabilities"] = []string{"text", "status", "components"}
@@ -1018,6 +1296,14 @@ func (a *App) channelFromDeleteRequest(w http.ResponseWriter, r *http.Request) (
 	}
 	if topic := ntfyTopicFromChannel(channelID); topic != "" {
 		ch, err := a.store.GetNtfyByTopic(topic)
+		if err != nil {
+			http.Error(w, "channel not found", http.StatusNotFound)
+			return nil, false
+		}
+		return ch, true
+	}
+	if topic := telegramTopicFromChannel(channelID); topic != "" {
+		ch, err := a.store.GetTelegramByTopic(topic)
 		if err != nil {
 			http.Error(w, "channel not found", http.StatusNotFound)
 			return nil, false
@@ -1152,6 +1438,8 @@ func channelIdentifier(ch Chat) string {
 	switch ch.Channel {
 	case "ntfy":
 		return "ntfy:" + ch.ThreadID
+	case "telegram":
+		return "telegram:" + ch.ThreadID
 	case "chat":
 		return "chat"
 	default:
@@ -1160,10 +1448,24 @@ func channelIdentifier(ch Chat) string {
 }
 
 func channelTopic(ch Chat) string {
-	if ch.Channel == "ntfy" {
+	if ch.Channel == "ntfy" || ch.Channel == "telegram" {
 		return ch.ThreadID
 	}
 	return ""
+}
+
+func (a *App) telegramURLFields(topic string) map[string]any {
+	path := "/api/apps/channels/telegram-webhook/" + topic
+	out := map[string]any{"webhook_url": path}
+	if globalCtx == nil {
+		return out
+	}
+	info, err := globalCtx.PlatformInfo()
+	if err != nil || info == nil || strings.TrimSpace(info.PublicURL) == "" {
+		return out
+	}
+	out["webhook_url"] = strings.TrimRight(strings.TrimSpace(info.PublicURL), "/") + path
+	return out
 }
 
 func (a *App) ntfyURLFields(topic string) map[string]any {
@@ -1340,6 +1642,285 @@ func normalizeChannel(channel string) string {
 	return channel
 }
 
+func (a *App) sendTelegram(topic, message string, messageID int64, actions []ChannelAction) error {
+	cfg, err := a.store.GetTelegramConfigByTopic(topic)
+	if err != nil {
+		return err
+	}
+	token, err := a.telegramBotToken(cfg)
+	if err != nil {
+		return err
+	}
+	return telegramSendMessage(token, cfg.ChatID, message, cfg.ParseMode, messageID, actions)
+}
+
+func (a *App) telegramBotToken(cfg TelegramConfig) (string, error) {
+	if token := strings.TrimSpace(cfg.BotToken); token != "" {
+		return token, nil
+	}
+	if cfg.ConnectionID <= 0 {
+		return "", errors.New("telegram bot token is not configured")
+	}
+	if globalCtx == nil || globalCtx.PlatformAPI() == nil {
+		return "", errors.New("telegram connection credentials are unavailable")
+	}
+	creds, err := globalCtx.PlatformAPI().GetConnectionCredentials(cfg.ConnectionID)
+	if err != nil {
+		return "", err
+	}
+	for _, key := range []string{"bot_token", "telegram_bot_token", "token", "api_token", "access_token"} {
+		if token := strings.TrimSpace(creds.Fields[key]); token != "" {
+			return token, nil
+		}
+	}
+	return "", errors.New("telegram connection has no bot_token credential")
+}
+
+func telegramSendMessage(token, chatID, text, parseMode string, messageID int64, actions []ChannelAction) error {
+	token = strings.TrimSpace(token)
+	chatID = strings.TrimSpace(chatID)
+	text = strings.TrimSpace(text)
+	if token == "" {
+		return errors.New("telegram bot token required")
+	}
+	if chatID == "" {
+		return errors.New("telegram chat_id required")
+	}
+	if text == "" {
+		return errors.New("telegram message required")
+	}
+	body := map[string]any{
+		"chat_id": chatID,
+		"text":    text,
+	}
+	if parseMode = strings.TrimSpace(parseMode); parseMode != "" {
+		body["parse_mode"] = parseMode
+	}
+	if keyboard := telegramInlineKeyboard(messageID, actions); len(keyboard) > 0 {
+		body["reply_markup"] = map[string]any{"inline_keyboard": keyboard}
+	}
+	return telegramPost(token, "sendMessage", body)
+}
+
+func telegramSetWebhook(token, webhookURL string) error {
+	webhookURL = strings.TrimSpace(webhookURL)
+	if webhookURL == "" {
+		return errors.New("telegram webhook_url required")
+	}
+	return telegramPost(token, "setWebhook", map[string]any{"url": webhookURL})
+}
+
+func telegramAnswerCallback(token, callbackID, text string) error {
+	callbackID = strings.TrimSpace(callbackID)
+	if callbackID == "" {
+		return nil
+	}
+	body := map[string]any{"callback_query_id": callbackID}
+	if text = strings.TrimSpace(text); text != "" {
+		body["text"] = text
+	}
+	return telegramPost(token, "answerCallbackQuery", body)
+}
+
+func telegramPost(token, method string, payload map[string]any) error {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return errors.New("telegram bot token required")
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	endpoint := strings.TrimRight(telegramAPIBase, "/") + "/bot" + token + "/" + method
+	req, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(raw))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	resp, err := telegramHTTPClient.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	limited, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
+	var api telegramAPIResponse
+	_ = json.Unmarshal(limited, &api)
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("telegram returned %d: %s", resp.StatusCode, strings.TrimSpace(string(limited)))
+	}
+	if !api.OK {
+		if api.Description != "" {
+			return errors.New(api.Description)
+		}
+		return errors.New("telegram returned ok=false")
+	}
+	return nil
+}
+
+func telegramInlineKeyboard(messageID int64, actions []ChannelAction) [][]map[string]string {
+	actions = cleanActions(actions)
+	if len(actions) == 0 {
+		return nil
+	}
+	row := make([]map[string]string, 0, len(actions))
+	for i, action := range actions {
+		switch action.Type {
+		case "url", "view":
+			if action.URL == "" {
+				continue
+			}
+			row = append(row, map[string]string{"text": action.Label, "url": action.URL})
+		case "callback":
+			if messageID <= 0 {
+				continue
+			}
+			row = append(row, map[string]string{"text": action.Label, "callback_data": fmt.Sprintf("act:%d:%d", messageID, i)})
+		}
+	}
+	if len(row) == 0 {
+		return nil
+	}
+	return [][]map[string]string{row}
+}
+
+func (a *App) processTelegramUpdate(topic string, r io.Reader) error {
+	chat, err := a.store.GetTelegramByTopic(topic)
+	if err != nil {
+		return fmt.Errorf("telegram channel not found")
+	}
+	var update telegramUpdate
+	if err := json.NewDecoder(r).Decode(&update); err != nil {
+		return fmt.Errorf("invalid telegram update: %w", err)
+	}
+	switch {
+	case update.CallbackQuery != nil:
+		return a.processTelegramCallback(topic, *chat, *update.CallbackQuery)
+	case update.Message != nil:
+		return a.processTelegramMessage(topic, *chat, *update.Message)
+	default:
+		return nil
+	}
+}
+
+func (a *App) processTelegramMessage(topic string, chat Chat, msg telegramMessage) error {
+	text := strings.TrimSpace(msg.Text)
+	if text == "" {
+		return nil
+	}
+	m, err := a.store.Append(chat.ID, "user", text, nil, "", "final", []ChatComponent{{App: "channels", Name: "telegram_message", Props: map[string]any{
+		"telegram_user_id": msg.From.ID,
+		"username":         msg.From.Username,
+		"first_name":       msg.From.FirstName,
+		"last_name":        msg.From.LastName,
+		"telegram_chat_id": msg.Chat.ID,
+		"telegram_message": msg.MessageID,
+	}}})
+	if err != nil {
+		return err
+	}
+	a.publish(*m)
+	if chat.AgentID > 0 && globalCtx != nil && globalCtx.PlatformAPI() != nil {
+		ev := fmt.Sprintf("[telegram:%s] %s", topic, text)
+		if err := globalCtx.PlatformAPI().SendEvent(chat.AgentID, ev); err != nil {
+			notice := fmt.Sprintf("(could not reach agent; Telegram message is saved. err: %v)", err)
+			if sm, sErr := a.store.Append(chat.ID, "system", notice, nil, "", "final", nil); sErr == nil {
+				a.publish(*sm)
+			}
+		}
+	}
+	return nil
+}
+
+func (a *App) processTelegramCallback(topic string, chat Chat, cb telegramCallbackQuery) error {
+	messageID, actionIndex, ok := parseTelegramCallbackData(cb.Data)
+	if !ok {
+		return nil
+	}
+	original, err := a.store.GetMessage(messageID)
+	if err != nil {
+		return err
+	}
+	actions, originalAgentID, _ := telegramActionsFromMessage(*original)
+	if actionIndex < 0 || actionIndex >= len(actions) {
+		return nil
+	}
+	action := actions[actionIndex]
+	content := "Telegram action: " + action.Label
+	if action.Value != "" {
+		content += "\n" + action.Value
+	}
+	m, err := a.store.Append(chat.ID, "user", content, nil, "", "final", []ChatComponent{{App: "channels", Name: "telegram_callback", Props: map[string]any{
+		"telegram_user_id":    cb.From.ID,
+		"username":            cb.From.Username,
+		"first_name":          cb.From.FirstName,
+		"last_name":           cb.From.LastName,
+		"original_message_id": original.ID,
+		"action":              action,
+	}}})
+	if err != nil {
+		return err
+	}
+	a.publish(*m)
+	if token, err := a.telegramBotTokenFromTopic(topic); err == nil {
+		_ = telegramAnswerCallback(token, cb.ID, "Received "+action.Label)
+	}
+	targetAgentID := originalAgentID
+	if targetAgentID == 0 {
+		targetAgentID = chat.AgentID
+	}
+	if targetAgentID > 0 && globalCtx != nil && globalCtx.PlatformAPI() != nil {
+		ev := fmt.Sprintf("[telegram:%s action]\nUser tapped: %s", topic, action.Label)
+		if action.Value != "" {
+			ev += "\nAction value: " + action.Value
+		}
+		if original.Content != "" {
+			ev += "\nOriginal message: " + original.Content
+		}
+		if err := globalCtx.PlatformAPI().SendEvent(targetAgentID, ev); err != nil {
+			notice := fmt.Sprintf("(could not reach agent; Telegram action is saved. err: %v)", err)
+			if sm, sErr := a.store.Append(chat.ID, "system", notice, nil, "", "final", nil); sErr == nil {
+				a.publish(*sm)
+			}
+		}
+	}
+	return nil
+}
+
+func (a *App) telegramBotTokenFromTopic(topic string) (string, error) {
+	cfg, err := a.store.GetTelegramConfigByTopic(topic)
+	if err != nil {
+		return "", err
+	}
+	return a.telegramBotToken(cfg)
+}
+
+func parseTelegramCallbackData(data string) (int64, int, bool) {
+	parts := strings.Split(strings.TrimSpace(data), ":")
+	if len(parts) != 3 || parts[0] != "act" {
+		return 0, 0, false
+	}
+	messageID, err := strconv.ParseInt(parts[1], 10, 64)
+	if err != nil || messageID <= 0 {
+		return 0, 0, false
+	}
+	idx, err := strconv.Atoi(parts[2])
+	if err != nil || idx < 0 {
+		return 0, 0, false
+	}
+	return messageID, idx, true
+}
+
+func telegramTopicFromChannel(channel string) string {
+	channel = strings.TrimSpace(channel)
+	if strings.HasPrefix(channel, "telegram:") {
+		topic := strings.TrimPrefix(channel, "telegram:")
+		if validTopic(topic) {
+			return topic
+		}
+	}
+	return ""
+}
+
 func ntfyTopicFromChannel(channel string) string {
 	channel = strings.TrimSpace(channel)
 	if strings.HasPrefix(channel, "ntfy:") {
@@ -1394,6 +1975,90 @@ func ntfyMetaFromArgs(args map[string]any) ntfyMeta {
 		Tags:     tagsFromAny(args["tags"]),
 		Click:    strArg(args, "click"),
 	}
+}
+
+func actionsFromAny(v any) []ChannelAction {
+	switch x := v.(type) {
+	case nil:
+		return nil
+	case []ChannelAction:
+		return cleanActions(x)
+	case []any:
+		out := make([]ChannelAction, 0, len(x))
+		for _, item := range x {
+			switch obj := item.(type) {
+			case ChannelAction:
+				out = append(out, obj)
+			case map[string]any:
+				out = append(out, ChannelAction{
+					Type:   stringFromProp(obj, "type"),
+					Label:  stringFromProp(obj, "label"),
+					Value:  stringFromProp(obj, "value"),
+					URL:    stringFromProp(obj, "url"),
+					Method: stringFromProp(obj, "method"),
+					Body:   stringFromProp(obj, "body"),
+				})
+			}
+		}
+		return cleanActions(out)
+	default:
+		return nil
+	}
+}
+
+func cleanActions(actions []ChannelAction) []ChannelAction {
+	out := make([]ChannelAction, 0, len(actions))
+	for _, action := range actions {
+		action.Type = strings.ToLower(strings.TrimSpace(action.Type))
+		action.Label = strings.TrimSpace(action.Label)
+		action.Value = strings.TrimSpace(action.Value)
+		action.URL = strings.TrimSpace(action.URL)
+		action.Method = strings.ToUpper(strings.TrimSpace(action.Method))
+		action.Body = strings.TrimSpace(action.Body)
+		if action.Type == "" {
+			action.Type = "callback"
+		}
+		if action.Type == "view" {
+			action.Type = "url"
+		}
+		if action.Label == "" {
+			continue
+		}
+		switch action.Type {
+		case "callback":
+			out = append(out, action)
+		case "url":
+			if action.URL != "" {
+				out = append(out, action)
+			}
+		case "http", "copy":
+			out = append(out, action)
+		}
+	}
+	return out
+}
+
+func telegramComponents(actions []ChannelAction, agentID int64, title string) []ChatComponent {
+	actions = cleanActions(actions)
+	title = strings.TrimSpace(title)
+	if len(actions) == 0 && agentID == 0 && title == "" {
+		return nil
+	}
+	return []ChatComponent{{App: "channels", Name: "telegram", Props: map[string]any{
+		"actions":  actions,
+		"agent_id": agentID,
+		"title":    title,
+	}}}
+}
+
+func telegramActionsFromMessage(m Message) ([]ChannelAction, int64, string) {
+	for _, c := range m.Components {
+		if c.App != "channels" || c.Name != "telegram" {
+			continue
+		}
+		return actionsFromAny(c.Props["actions"]), int64FromProp(c.Props, "agent_id"), stringFromProp(c.Props, "title")
+	}
+	return nil, 0, ""
 }
 
 func ntfyComponents(meta ntfyMeta) []ChatComponent {
@@ -1570,6 +2235,13 @@ func stringFromProp(props map[string]any, key string) string {
 		return strings.TrimSpace(s)
 	}
 	return ""
+}
+
+func int64FromProp(props map[string]any, key string) int64 {
+	if props == nil {
+		return 0
+	}
+	return toInt64(props[key])
 }
 
 func splitTags(raw string) []string {
