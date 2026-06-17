@@ -716,6 +716,84 @@ func TestToolMediaHistory_KindFilter(t *testing.T) {
 	}
 }
 
+func TestMediaDelete_RemovesGenerationStorageAndJob(t *testing.T) {
+	pf := newRecordingPlatform()
+	ctx := newMediaStudioCtx(t, pf)
+	app := &App{}
+	id := app.dbInsertGeneration(generationRecord{
+		ProjectID:  "test-proj",
+		Kind:       "video",
+		Prompt:     "delete me",
+		Provider:   "venice-ai",
+		Model:      "veo3.1-fast-text-to-video",
+		StorageIDs: []int64{123, 456},
+		Count:      1,
+	})
+	if id == 0 {
+		t.Fatal("insert generation returned id=0")
+	}
+	if _, err := ctx.AppDB().Exec(
+		`INSERT INTO video_jobs
+			(project_id, queue_id, provider, model, prompt, status, generation_id)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		"test-proj", "q-delete", "venice-ai", "veo3.1-fast-text-to-video", "delete me", "complete", id,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := app.deleteGeneration(ctx, map[string]any{"id": id})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !out["deleted"].(bool) {
+		t.Fatalf("deleted flag false: %+v", out)
+	}
+	if len(pf.callAppCalls) != 2 {
+		t.Fatalf("expected 2 storage delete calls, got %+v", pf.callAppCalls)
+	}
+	for i, want := range []int64{123, 456} {
+		got := pf.callAppCalls[i]
+		if got.AppName != "storage" || got.Tool != "files_delete" {
+			t.Fatalf("storage call %d = %+v", i, got)
+		}
+		if got.Input["id"] != want || got.Input["keep_record"] != false {
+			t.Fatalf("storage call %d input = %+v", i, got.Input)
+		}
+		if got.Input["_project_id"] != "test-proj" {
+			t.Fatalf("storage call %d _project_id = %v", i, got.Input["_project_id"])
+		}
+	}
+	var count int
+	ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM generations WHERE id=?`, id).Scan(&count)
+	if count != 0 {
+		t.Fatalf("generation row still exists")
+	}
+	ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM video_jobs WHERE generation_id=?`, id).Scan(&count)
+	if count != 0 {
+		t.Fatalf("video job row still exists")
+	}
+}
+
+func TestMediaDelete_CanKeepStorageFiles(t *testing.T) {
+	pf := newRecordingPlatform()
+	ctx := newMediaStudioCtx(t, pf)
+	app := &App{}
+	id := app.dbInsertGeneration(generationRecord{
+		ProjectID:  "test-proj",
+		Kind:       "image",
+		Prompt:     "draft",
+		Provider:   "openai-api",
+		StorageIDs: []int64{789},
+		Count:      1,
+	})
+	if _, err := app.deleteGeneration(ctx, map[string]any{"id": id, "delete_storage": false}); err != nil {
+		t.Fatal(err)
+	}
+	if len(pf.callAppCalls) != 0 {
+		t.Fatalf("delete_storage=false should not call storage, got %+v", pf.callAppCalls)
+	}
+}
+
 // --- buildProviderArgs ---------------------------------------------
 
 func TestBuildProviderArgs_GPTImage2(t *testing.T) {

@@ -24,6 +24,7 @@ import (
 	_ "image/png"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
@@ -34,13 +35,13 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: media-studio
 display_name: Media Studio
-version: 0.10.18
+version: 0.10.19
 description: |
   Generate images, video, audio, music, and avatars via compatible
   providers. Optionally saves outputs to Storage, supports stable
   cache keys for app-to-app generation reuse, and can use OpenAI Codex
-  as a subscription-backed image provider. v0.10.8 adds storage_folder
-  output targeting with Storage-backed folder suggestions.
+  as a subscription-backed image provider. v0.10.19 adds media_delete
+  with default Storage cleanup.
 author: Apteva
 scopes: [project, global]
 requires:
@@ -92,7 +93,7 @@ requires:
     - role: storage
       kind: app
       compatible_app_names: [storage]
-      capabilities: [files.write]
+      capabilities: [files.write, files.delete]
       required: false
       label: "Storage (optional)"
 provides:
@@ -101,6 +102,7 @@ provides:
   mcp_tools:
     - { name: media_generate, description: "Generate media (image/video/audio/music/avatar). Args: kind, prompt, model?, size?, duration?, voice?, aspect?, avatar?, storage_folder?, n?, options?, cache_key?, cache_policy?." }
     - { name: media_estimate, description: "Estimate generation cost without creating media. Args match media_generate." }
+    - { name: media_delete, description: "Delete a media generation and, by default, its linked Storage files. Args: id, delete_storage?." }
     - { name: media_avatar_create, description: "Create/train a reusable avatar from a photo or prompt. Args: name, source_type, source_image?/prompt?, options?." }
     - { name: media_history,  description: "List recent generations. Args: kind?, limit?, since?." }
     - { name: media_get,      description: "Fetch one generation by id. Args: id." }
@@ -170,6 +172,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/generations", Handler: a.handleListGenerations},
 		{Pattern: "/generate", Handler: a.handleGenerate},
 		{Pattern: "/estimate", Handler: a.handleEstimate},
+		{Pattern: "/delete", Handler: a.handleDeleteGeneration},
 		{Pattern: "/bindings", Handler: a.handleBindings},
 		{Pattern: "/models", Handler: a.handleListModels},
 		{Pattern: "/avatars", Handler: a.handleListAvatars},
@@ -282,6 +285,22 @@ func (a *App) MCPTools() []sdk.Tool {
 				"options": map[string]any{"type": "object"},
 			}, []string{"kind"}),
 			Handler: a.toolMediaEstimate,
+		},
+		{
+			Name:        "media_delete",
+			Description: "Delete one media generation for this project. By default this also deletes linked Storage files, related async job rows, and local sidecar cache files. Args: id (required), delete_storage? (default true; set false to keep files in Storage).",
+			InputSchema: schemaObject(map[string]any{
+				"id": map[string]any{
+					"type":        "integer",
+					"description": "Generation id to delete.",
+				},
+				"delete_storage": map[string]any{
+					"type":        "boolean",
+					"default":     true,
+					"description": "Also delete files referenced by storage_ids. Defaults to true.",
+				},
+			}, []string{"id"}),
+			Handler: a.toolMediaDelete,
 		},
 		{
 			Name:        "media_avatar_create",
@@ -410,6 +429,10 @@ func int64Arg(m map[string]any, key string, def int64) int64 {
 		return int64(v)
 	case int64:
 		return v
+	case string:
+		if n, err := strconv.ParseInt(strings.TrimSpace(v), 10, 64); err == nil {
+			return n
+		}
 	}
 	return def
 }

@@ -338,6 +338,7 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
   const [generating, setGenerating] = useState(false);
   const [creatingDraft, setCreatingDraft] = useState(false);
   const [generatingDraftId, setGeneratingDraftId] = useState<number | null>(null);
+  const [deletingId, setDeletingId] = useState<number | null>(null);
   const [selected, setSelected] = useState<Generation | null>(null);
   const [lightbox, setLightbox] = useState<Generation | null>(null);
 
@@ -1128,6 +1129,39 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
     }
   };
 
+  const deleteGeneration = async (g: Generation) => {
+    if (deletingId) return;
+    const storageCount = g.storage_ids?.length || 0;
+    const label = storageCount > 0
+      ? `Delete this generation and ${storageCount} linked Storage file${storageCount === 1 ? "" : "s"}?`
+      : "Delete this generation?";
+    if (!window.confirm(label)) return;
+    setDeletingId(g.id);
+    setStatus("Deleting…");
+    try {
+      const res = await fetch(`${API}/delete?project_id=${encodeURIComponent(projectId)}`, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ id: g.id, delete_storage: true }),
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok || data.error) {
+        setStatus(`Delete failed: ${data.error || res.status}`);
+        return;
+      }
+      setItems((cur) => cur.filter((x) => x.id !== g.id));
+      setSelected((cur) => (cur?.id === g.id ? null : cur));
+      setLightbox((cur) => (cur?.id === g.id ? null : cur));
+      setVideoJobs((cur) => cur.filter((x) => x.generation_id !== g.id));
+      setStatus("Deleted.");
+    } catch (e) {
+      setStatus("Delete failed: " + (e as Error).message);
+    } finally {
+      setDeletingId(null);
+    }
+  };
+
   return (
     <div className="h-full flex flex-col">
       {/* Kind tabs */}
@@ -1310,6 +1344,8 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
           <DetailAside
             selected={selected}
             onClose={() => setSelected(null)}
+            deleting={deletingId === selected.id}
+            onDelete={() => deleteGeneration(selected)}
             onUseAsReference={
               selected.kind === "image" && selected.storage_ids.length > 0
                 ? () => {
@@ -3003,10 +3039,14 @@ function CardMeta({ g }: { g: Generation }) {
 function DetailAside({
   selected,
   onClose,
+  deleting,
+  onDelete,
   onUseAsReference,
 }: {
   selected: Generation;
   onClose: () => void;
+  deleting: boolean;
+  onDelete: () => void;
   onUseAsReference?: () => void;
 }) {
   const url = selected.storage_urls?.[0] || selected.upstream_urls?.[0] || "";
@@ -3026,6 +3066,14 @@ function DetailAside({
             Use as reference
           </button>
         )}
+        <button
+          onClick={onDelete}
+          disabled={deleting}
+          className="text-xs px-2 py-1 border border-border rounded text-text-muted hover:text-text hover:border-accent disabled:opacity-50"
+          title="Delete this generation and linked Storage files"
+        >
+          {deleting ? "Deleting…" : "Delete"}
+        </button>
         <button
           onClick={onClose}
           className="text-text-muted hover:text-text leading-none px-1"

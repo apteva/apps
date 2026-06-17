@@ -90,6 +90,20 @@ func localCachePath(genID int64) (string, bool) {
 	return matches[0], true
 }
 
+func deleteLocalCache(genID int64) error {
+	dir, err := cacheDir()
+	if err != nil {
+		return err
+	}
+	matches, _ := filepath.Glob(filepath.Join(dir, strconv.FormatInt(genID, 10)+".*"))
+	for _, path := range matches {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	}
+	return nil
+}
+
 // HTTP /cache/<id> — serves the cached bytes for one generation.
 // Pattern is registered as "/cache/" (trailing slash) so net/http's
 // mux routes everything under it here.
