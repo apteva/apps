@@ -1,4 +1,4 @@
-// ComposerPanel v0.3.7 - timeline editor with storage and Media Studio AI assets.
+// ComposerPanel v0.3.8 - timeline editor with storage and Media Studio AI assets.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
@@ -881,6 +881,18 @@ export default function ComposerPanel({ projectId }: NativePanelProps) {
     setClipEditor({ kind: "audio", id });
   };
 
+  const addAISoundtrack = () => {
+    updateDraft((cur) => ({
+      ...cur,
+      soundtrack: {
+        src: cur.soundtrack?.src || "",
+        volume: cur.soundtrack?.volume ?? 0.7,
+        ai: cur.soundtrack?.ai || defaultAI("music", cur.output.aspect),
+      },
+    }));
+    setStatus("AI music soundtrack added. Enter a prompt in the soundtrack panel, then generate now or render.");
+  };
+
   const deleteAudioClip = (id: string) => {
     updateDraft((cur) => ({ ...cur, audioClips: cur.audioClips.filter((clip) => clip.id !== id) }));
   };
@@ -1274,6 +1286,7 @@ export default function ComposerPanel({ projectId }: NativePanelProps) {
                   onAdd={addClip}
                   onAddAIVisual={addAIVisualClip}
                   onAddAIAudio={() => addAudioClip("music")}
+                  onAddAISoundtrack={addAISoundtrack}
                   onBrowse={() => openPicker(clips.length ? { kind: "clip", clipId: clips[0].id } : { kind: "clip", clipId: "" })}
                 />
                 <RenderPreview render={selected?.latest_render || null} outputFormat={draft.output.format} onOpen={setLightbox} />
@@ -1294,6 +1307,7 @@ export default function ComposerPanel({ projectId }: NativePanelProps) {
                 onBrowseSoundtrack={() => openPicker({ kind: "soundtrack" })}
                 onAddClip={addClip}
                 onAddAudioClip={addAudioClip}
+                onAddAISoundtrack={addAISoundtrack}
                 onAddAIVisualClip={addAIVisualClip}
                 onGenerateClipAI={generateClipAI}
                 onGenerateAudioClipAI={generateAudioClipAI}
@@ -1564,6 +1578,7 @@ function Timeline({
   onAdd,
   onAddAIVisual,
   onAddAIAudio,
+  onAddAISoundtrack,
   onBrowse,
 }: {
   clips: ClipDraft[];
@@ -1578,6 +1593,7 @@ function Timeline({
   onAdd: () => void;
   onAddAIVisual: (kind: "image" | "video" | "avatar") => void;
   onAddAIAudio: () => void;
+  onAddAISoundtrack: () => void;
   onBrowse: () => void;
 }) {
   const hasAny = clips.length > 0 || audioClips.length > 0;
@@ -1588,7 +1604,8 @@ function Timeline({
         <button onClick={() => onAddAIVisual("image")} className="text-xs px-2 py-1 border border-border rounded hover:bg-bg-input">AI image</button>
         <button onClick={() => onAddAIVisual("video")} className="text-xs px-2 py-1 border border-border rounded hover:bg-bg-input">AI video</button>
         <button onClick={() => onAddAIVisual("avatar")} className="text-xs px-2 py-1 border border-border rounded hover:bg-bg-input">AI avatar</button>
-        <button onClick={onAddAIAudio} className="text-xs px-2 py-1 border border-border rounded hover:bg-bg-input">AI audio</button>
+        <button onClick={onAddAISoundtrack} className="text-xs px-2 py-1 border border-border rounded hover:bg-bg-input">AI music</button>
+        <button onClick={onAddAIAudio} className="text-xs px-2 py-1 border border-border rounded hover:bg-bg-input">Timed AI audio</button>
         <button onClick={onBrowse} className="text-xs px-2 py-1 border border-accent text-accent rounded hover:bg-accent hover:text-bg">Browse storage</button>
         <button onClick={onAdd} className="text-xs px-2 py-1 border border-border rounded hover:bg-bg-input">Add empty clip</button>
       </header>
@@ -1600,7 +1617,8 @@ function Timeline({
               <button type="button" onClick={() => onAddAIVisual("image")} className="px-3 py-1.5 text-sm border border-border rounded hover:bg-bg-input">AI image</button>
               <button type="button" onClick={() => onAddAIVisual("video")} className="px-3 py-1.5 text-sm border border-border rounded hover:bg-bg-input">AI video</button>
               <button type="button" onClick={() => onAddAIVisual("avatar")} className="px-3 py-1.5 text-sm border border-border rounded hover:bg-bg-input">AI avatar</button>
-              <button type="button" onClick={onAddAIAudio} className="px-3 py-1.5 text-sm border border-border rounded hover:bg-bg-input">AI audio</button>
+              <button type="button" onClick={onAddAISoundtrack} className="px-3 py-1.5 text-sm border border-border rounded hover:bg-bg-input">AI music</button>
+              <button type="button" onClick={onAddAIAudio} className="px-3 py-1.5 text-sm border border-border rounded hover:bg-bg-input">Timed AI audio</button>
               <button type="button" onClick={onBrowse} className="px-3 py-1.5 text-sm border border-accent text-accent rounded hover:bg-accent hover:text-bg">Browse storage</button>
             </div>
           </div>
@@ -1887,6 +1905,7 @@ function Inspector({
   onBrowseSoundtrack,
   onAddClip,
   onAddAudioClip,
+  onAddAISoundtrack,
   onAddAIVisualClip,
   onGenerateClipAI,
   onGenerateAudioClipAI,
@@ -1908,6 +1927,7 @@ function Inspector({
   onBrowseSoundtrack: () => void;
   onAddClip: () => void;
   onAddAudioClip: (ai?: boolean | MediaKind) => void;
+  onAddAISoundtrack: () => void;
   onAddAIVisualClip: (kind: "image" | "video" | "avatar") => void;
   onGenerateClipAI: (clip: ClipDraft) => void;
   onGenerateAudioClipAI: (clip: AudioClipDraft) => void;
@@ -1983,17 +2003,10 @@ function Inspector({
           </Field>
           <button
             type="button"
-            onClick={() => onDraft((cur) => ({
-              ...cur,
-              soundtrack: {
-                src: cur.soundtrack?.src || "",
-                volume: cur.soundtrack?.volume ?? 1,
-                ai: cur.soundtrack?.ai || defaultAI("music", cur.output.aspect),
-              },
-            }))}
+            onClick={onAddAISoundtrack}
             className="w-full text-xs px-2 py-1.5 border border-border rounded hover:bg-bg-input"
           >
-            Add AI soundtrack
+            Add AI music soundtrack
           </button>
           {draft.soundtrack?.ai && (
             <AIAssetEditor
@@ -2036,8 +2049,11 @@ function Inspector({
             <button type="button" onClick={() => onAddAIVisualClip("avatar")} className="text-xs px-2 py-1.5 border border-border rounded hover:bg-bg-input">
               AI avatar
             </button>
+            <button type="button" onClick={onAddAISoundtrack} className="text-xs px-2 py-1.5 border border-border rounded hover:bg-bg-input">
+              AI music
+            </button>
             <button type="button" onClick={() => onAddAudioClip("music")} className="text-xs px-2 py-1.5 border border-border rounded hover:bg-bg-input">
-              AI audio
+              Timed AI audio
             </button>
           </div>
         </section>
