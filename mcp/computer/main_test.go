@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -235,6 +236,106 @@ func TestBrowserSessionComputerUseClose(t *testing.T) {
 	// screenshot after close — error, not panic
 	if _, err := app.toolComputerUse(ctx, map[string]any{"session_id": sessionID, "action": "screenshot"}); err == nil {
 		t.Errorf("screenshot after close: want error, got nil")
+	}
+}
+
+func TestComputerUseAutoFollowsSingleNewTab(t *testing.T) {
+	prev := newBackend
+	t.Cleanup(func() { newBackend = prev })
+
+	newTab := backends.TabInfo{ID: "tab_detail", URL: "https://example.com/models/42", Title: "Model detail"}
+	fake := &fakeComp{
+		display:       backends.DisplaySize{Width: 1024, Height: 768},
+		png:           []byte{0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a},
+		url:           "https://example.com/results",
+		activeTabID:   "tab_results",
+		tabs:          []backends.TabInfo{{ID: "tab_results", URL: "https://example.com/results", Title: "Results"}},
+		addTabOnClick: &newTab,
+	}
+	newBackend = func(cfg backends.Config) (backends.Computer, error) { return fake, nil }
+
+	app := &App{reg: &registry{m: map[string]*session{}}}
+	ctx := tk.NewAppCtx(t, "apteva.yaml")
+	openOut, err := app.toolBrowserSession(ctx, map[string]any{"action": "open", "backend": "local"})
+	if err != nil {
+		t.Fatalf("browser_session open: %v", err)
+	}
+	sessionID := openOut.(map[string]any)["session_id"].(string)
+
+	out, err := app.toolComputerUse(ctx, map[string]any{
+		"session_id": sessionID,
+		"action":     "click",
+		"coordinate": "10,10",
+	})
+	if err != nil {
+		t.Fatalf("computer_use click: %v", err)
+	}
+	m := out.(map[string]any)
+	if got := m["current_url"]; got != newTab.URL {
+		t.Fatalf("current_url after new tab click: want %s, got %v", newTab.URL, got)
+	}
+	if got := m["active_tab_id"]; got != newTab.ID {
+		t.Fatalf("active_tab_id: want %s, got %v", newTab.ID, got)
+	}
+	if got := m["switched_tab"]; got != true {
+		t.Fatalf("switched_tab: want true, got %v", got)
+	}
+	if len(fake.switchCalls) != 1 || fake.switchCalls[0] != newTab.ID {
+		t.Fatalf("switch calls: want [%s], got %v", newTab.ID, fake.switchCalls)
+	}
+	if fake.screenshotCalls != 1 {
+		t.Fatalf("auto-follow should rescreenshot switched tab once, got %d calls", fake.screenshotCalls)
+	}
+}
+
+func TestBrowserSessionTabActions(t *testing.T) {
+	prev := newBackend
+	t.Cleanup(func() { newBackend = prev })
+
+	fake := &fakeComp{
+		display:     backends.DisplaySize{Width: 1024, Height: 768},
+		png:         []byte{0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a},
+		activeTabID: "tab_a",
+		tabs: []backends.TabInfo{
+			{ID: "tab_a", URL: "https://example.com/a", Title: "A"},
+			{ID: "tab_b", URL: "https://example.com/b", Title: "B"},
+		},
+	}
+	newBackend = func(cfg backends.Config) (backends.Computer, error) { return fake, nil }
+
+	app := &App{reg: &registry{m: map[string]*session{}}}
+	ctx := tk.NewAppCtx(t, "apteva.yaml")
+	openOut, err := app.toolBrowserSession(ctx, map[string]any{"action": "open", "backend": "local"})
+	if err != nil {
+		t.Fatalf("browser_session open: %v", err)
+	}
+	sessionID := openOut.(map[string]any)["session_id"].(string)
+
+	tabsOut, err := app.toolBrowserSession(ctx, map[string]any{"action": "tabs", "session_id": sessionID})
+	if err != nil {
+		t.Fatalf("browser_session tabs: %v", err)
+	}
+	if got := tabsOut.(map[string]any)["tab_count"]; got != 2 {
+		t.Fatalf("tab_count: want 2, got %v", got)
+	}
+
+	switchOut, err := app.toolBrowserSession(ctx, map[string]any{"action": "switch_tab", "session_id": sessionID, "tab_id": "tab_b"})
+	if err != nil {
+		t.Fatalf("browser_session switch_tab: %v", err)
+	}
+	if got := switchOut.(map[string]any)["active_tab_id"]; got != "tab_b" {
+		t.Fatalf("active_tab_id after switch: want tab_b, got %v", got)
+	}
+
+	closeOut, err := app.toolBrowserSession(ctx, map[string]any{"action": "close_tab", "session_id": sessionID, "tab_id": "tab_a"})
+	if err != nil {
+		t.Fatalf("browser_session close_tab: %v", err)
+	}
+	if got := closeOut.(map[string]any)["tab_count"]; got != 1 {
+		t.Fatalf("tab_count after close: want 1, got %v", got)
+	}
+	if len(fake.closeTabCalls) != 1 || fake.closeTabCalls[0] != "tab_a" {
+		t.Fatalf("close tab calls: want [tab_a], got %v", fake.closeTabCalls)
 	}
 }
 
@@ -932,12 +1033,25 @@ type fakeComp struct {
 	screenshotCalls int
 	annotateCalls   []bool
 	closeCalls      int
+	tabs            []backends.TabInfo
+	activeTabID     string
+	switchCalls     []string
+	closeTabCalls   []string
+	addTabOnClick   *backends.TabInfo
 	mu              sync.Mutex // for the unlikely concurrent test
 }
 
 func (f *fakeComp) Execute(action backends.Action) ([]byte, error) {
 	f.mu.Lock()
 	f.lastAction = action
+	if (action.Type == "click" || action.Type == "double_click") && f.addTabOnClick != nil {
+		tab := *f.addTabOnClick
+		if tab.ID == "" {
+			tab.ID = "tab_new"
+		}
+		f.tabs = append(f.tabs, tab)
+		f.addTabOnClick = nil
+	}
 	f.mu.Unlock()
 	return f.png, nil
 }
@@ -973,6 +1087,55 @@ func (f *fakeComp) Close() error {
 	return nil
 }
 
+func (f *fakeComp) ListTabs() ([]backends.TabInfo, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]backends.TabInfo, len(f.tabs))
+	copy(out, f.tabs)
+	for i := range out {
+		out[i].Active = out[i].ID != "" && out[i].ID == f.activeTabID
+	}
+	return out, nil
+}
+
+func (f *fakeComp) ActiveTabID() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.activeTabID
+}
+
+func (f *fakeComp) SwitchTab(tabID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for i := range f.tabs {
+		if f.tabs[i].ID == tabID {
+			f.activeTabID = tabID
+			f.switchCalls = append(f.switchCalls, tabID)
+			return nil
+		}
+	}
+	return fmt.Errorf("tab %s not found", tabID)
+}
+
+func (f *fakeComp) CloseTab(tabID string) error {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if len(f.tabs) <= 1 {
+		return fmt.Errorf("cannot close last tab")
+	}
+	for i := range f.tabs {
+		if f.tabs[i].ID == tabID {
+			f.tabs = append(f.tabs[:i], f.tabs[i+1:]...)
+			f.closeTabCalls = append(f.closeTabCalls, tabID)
+			if f.activeTabID == tabID && len(f.tabs) > 0 {
+				f.activeTabID = f.tabs[0].ID
+			}
+			return nil
+		}
+	}
+	return fmt.Errorf("tab %s not found", tabID)
+}
+
 func (f *fakeComp) OpenSession(opts backends.OpenOptions) error {
 	f.openSessionURL = opts.URL
 	f.openContextID = opts.ContextID
@@ -985,7 +1148,16 @@ func (f *fakeComp) OpenSession(opts backends.OpenOptions) error {
 // SessionInfo interface
 func (f *fakeComp) SessionType() string { return "fake" }
 func (f *fakeComp) SessionID() string   { return "" }
-func (f *fakeComp) CurrentURL() string  { return f.url }
+func (f *fakeComp) CurrentURL() string {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	for _, tab := range f.tabs {
+		if tab.ID == f.activeTabID && tab.URL != "" {
+			return tab.URL
+		}
+	}
+	return f.url
+}
 
 // ─── helpers ───────────────────────────────────────────────────────
 

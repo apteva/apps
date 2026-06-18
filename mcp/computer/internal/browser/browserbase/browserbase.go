@@ -14,6 +14,7 @@ import (
 	"time"
 
 	computer "github.com/apteva/apps/mcp/computer/internal/browser/api"
+	"github.com/apteva/apps/mcp/computer/internal/browser/cdptabs"
 	"github.com/apteva/apps/mcp/computer/internal/browser/keyinput"
 	"github.com/apteva/apps/mcp/computer/internal/browser/som"
 	"github.com/apteva/apps/mcp/computer/internal/browser/textinput"
@@ -68,6 +69,7 @@ type Computer struct {
 	contextPersist bool
 	debugURL       string
 	display        computer.DisplaySize
+	allocCtx       context.Context
 	ctx            context.Context
 	cancel         context.CancelFunc
 	allocCancel    context.CancelFunc
@@ -593,6 +595,7 @@ func (c *Computer) establishCDP(connectURL string) error {
 		return err
 	}
 	c.allocCancel = allocCancel
+	c.allocCtx = allocCtx
 	c.ctx = ctx
 	c.cancel = cancel
 	return nil
@@ -609,7 +612,49 @@ func (c *Computer) releaseCDP() {
 		c.allocCancel()
 		c.allocCancel = nil
 	}
+	c.allocCtx = nil
 	c.ctx = nil
+}
+
+func (c *Computer) ListTabs() ([]computer.TabInfo, error) {
+	return cdptabs.List(c.ctx)
+}
+
+func (c *Computer) ActiveTabID() string {
+	return cdptabs.ActiveID(c.ctx)
+}
+
+func (c *Computer) SwitchTab(tabID string) error {
+	if tabID == c.ActiveTabID() {
+		return nil
+	}
+	ctx, cancel, err := cdptabs.Switch(c.ctx, tabID)
+	if err != nil {
+		return err
+	}
+	c.ctx = ctx
+	c.cancel = cancel
+	return nil
+}
+
+func (c *Computer) CloseTab(tabID string) error {
+	tabs, err := c.ListTabs()
+	if err != nil {
+		return err
+	}
+	if len(tabs) <= 1 {
+		return fmt.Errorf("cannot close last tab; close the browser session instead")
+	}
+	if tabID == c.ActiveTabID() {
+		next := cdptabs.PickFallback(tabs, tabID)
+		if next == "" {
+			return fmt.Errorf("cannot close active tab without a fallback tab")
+		}
+		if err := c.SwitchTab(next); err != nil {
+			return fmt.Errorf("switch fallback tab: %w", err)
+		}
+	}
+	return cdptabs.Close(c.ctx, tabID)
 }
 
 // navigate is a small CDP nav wrapper used by OpenSession after a
@@ -679,6 +724,10 @@ func (c *Computer) Close() error {
 	if c.allocCancel != nil {
 		c.allocCancel()
 	}
+	c.allocCtx = nil
+	c.ctx = nil
+	c.cancel = nil
+	c.allocCancel = nil
 	c.sessionID = ""
 	c.contextID = ""
 	c.contextPersist = false

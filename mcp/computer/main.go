@@ -41,9 +41,9 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: computer
 display_name: Computer
-version: 0.7.25
+version: 0.7.26
 description: |
-  Watch and steer browser sessions. v0.7.25 fixes scroll amount scaling.
+  Watch and steer browser sessions. v0.7.26 adds tab-aware sessions.
 scopes: [project, global]
 requires:
   permissions:
@@ -68,9 +68,9 @@ provides:
     - prefix: /
   mcp_tools:
     - name: browser_session
-      description: "Open, resume, list, inspect, or close app-owned browser sessions. Args: action, session_id?, backend?, backend_session_id?, url?, context_id?, context_name?, auto_create_context?, persist?, timeout?, proxy?, proxy_country?, viewport?. Browserbase honors timeout as max session lifetime. Prefer context_id from computer_context_list to reopen saved state; context_name works across backends when unique. For a reusable saved context, pass context_name with auto_create_context=true; omitted names are only a fallback and are auto-generated."
+      description: "Open, resume, list, inspect, close, or switch tabs in app-owned browser sessions. Args: action, session_id?, tab_id?, backend?, backend_session_id?, url?, context_id?, context_name?, auto_create_context?, persist?, timeout?, proxy?, proxy_country?, viewport?. Tab actions: tabs, switch_tab, close_tab. Browserbase honors timeout as max session lifetime. Prefer context_id from computer_context_list to reopen saved state; context_name works across backends when unique. For a reusable saved context, pass context_name with auto_create_context=true; omitted names are only a fallback and are auto-generated."
     - name: computer_use
-      description: "Drive an app-owned browser session. Default workflow: call action=screenshot first; screenshots contain Set-of-Mark numeric badges on interactive elements. To click, use action=click with label=N from the latest screenshot. Prefer label over coordinate; use coordinate only for targets with no badge such as canvas or custom rendered widgets. Use action=key for browser/editor commands such as Tab, Backspace, Control+A, Control+Z; use action=type only for literal text and full date/time values such as 2026-06-05 or 08:00 PM. For action=scroll, amount is CSS pixels; use 200-500 for a small viewport move and omit amount for the 300px default. After scrolling or navigation, take a fresh screenshot because labels are re-enumerated. Args: session_id, action, coordinate?, label?, text?, key?, direction?, amount?, duration?, annotate? (screenshot only, default true). Returns screenshot bytes for visual actions."
+      description: "Drive an app-owned browser session. Default workflow: call action=screenshot first; screenshots contain Set-of-Mark numeric badges on interactive elements. To click, use action=click with label=N from the latest screenshot. Prefer label over coordinate; use coordinate only for targets with no badge such as canvas or custom rendered widgets. If a click opens exactly one new tab, Computer automatically follows it and reports switched_tab=true. Use browser_session(action=tabs|switch_tab|close_tab) for explicit tab control. Use action=key for browser/editor commands such as Tab, Backspace, Control+A, Control+Z; use action=type only for literal text and full date/time values such as 2026-06-05 or 08:00 PM. For action=scroll, amount is CSS pixels; use 200-500 for a small viewport move and omit amount for the 300px default. After scrolling, tab switching, or navigation, take a fresh screenshot because labels are re-enumerated. Args: session_id, action, tab_id?, coordinate?, label?, text?, key?, direction?, amount?, duration?, annotate? (screenshot only, default true). Returns screenshot bytes for visual actions."
     - name: computer_context_create
       description: "Create or import an app-managed browser context. Args: name, backend?, provider_context_id?, persist_default?, metadata?, auto_create_provider?."
     - name: computer_context_list
@@ -391,6 +391,9 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Method: http.MethodGet, Pattern: "/sessions", Handler: a.handleListSessions},
 		{Method: http.MethodPost, Pattern: "/sessions", Handler: a.handleOpenSession},
 		{Method: http.MethodDelete, Pattern: "/sessions/{id}", Handler: a.handleCloseSession},
+		{Method: http.MethodGet, Pattern: "/sessions/{id}/tabs", Handler: a.handleSessionTabs},
+		{Method: http.MethodPost, Pattern: "/sessions/{id}/tabs/{tab_id}/switch", Handler: a.handleSwitchTab},
+		{Method: http.MethodDelete, Pattern: "/sessions/{id}/tabs/{tab_id}", Handler: a.handleCloseTab},
 		{Method: http.MethodPost, Pattern: "/sessions/{id}/use", Handler: a.handleComputerUse},
 		// /sessions/{id}/screenshot returns the raw PNG inline (not the
 		// base64-wrapped MCP-tool shape) so the panel's <img src> can
@@ -403,16 +406,18 @@ func (a *App) MCPTools() []sdk.Tool {
 	return []sdk.Tool{
 		{
 			Name: "browser_session",
-			Description: "Session lifecycle for app-owned browsers. Actions: open, resume, status, close, list. " +
+			Description: "Session lifecycle and tab control for app-owned browsers. Actions: open, resume, status, close, list, tabs, switch_tab, close_tab. " +
 				"Open/resume args: backend? (local|browserbase|steel|browser-engine|service), url?, context_id?, persist?, " +
 				"context_name?, auto_create_context?, backend_session_id? (provider attach), timeout?, proxy?, proxy_country?, viewport?. " +
+				"Tab args: session_id, tab_id? for switch_tab/close_tab. " +
 				"Browserbase honors timeout as max session lifetime. " +
 				"Prefer context_id returned by computer_context_list to reopen saved browser state; context_name works across providers when unique. " +
 				"For a reusable saved context, pass context_name with auto_create_context=true; omitted names are only a fallback and are auto-generated. " +
-				"Returns {session_id, backend_session_id, backend, current_url, context_id, debug_url, width, height}.",
+				"Returns {session_id, backend_session_id, backend, current_url, active_tab_id, tabs, context_id, debug_url, width, height}.",
 			InputSchema: schemaObject(map[string]any{
-				"action":             map[string]any{"type": "string", "enum": []string{"open", "resume", "status", "close", "list"}},
+				"action":             map[string]any{"type": "string", "enum": []string{"open", "resume", "status", "close", "list", "tabs", "switch_tab", "close_tab"}},
 				"session_id":         map[string]any{"type": "string", "description": "App session id for status/close; for resume, accepted as provider session id when backend_session_id is omitted."},
+				"tab_id":             map[string]any{"type": "string", "description": "Browser tab/page target id for switch_tab or close_tab."},
 				"backend_session_id": map[string]any{"type": "string", "description": "Provider session id to attach/resume for Browserbase or Browser Engine."},
 				"backend":            map[string]any{"type": "string", "enum": []string{"local", "browserbase", "steel", "browser-engine", "service"}},
 				"url":                map[string]any{"type": "string"},
@@ -440,14 +445,16 @@ func (a *App) MCPTools() []sdk.Tool {
 			Name: "computer_use",
 			Description: "Drive a browser session opened by browser_session. Default workflow: call action=screenshot first; screenshots contain Set-of-Mark numeric badges on interactive elements. " +
 				"To click, use action=click with label=N from the latest screenshot. Prefer label over coordinate; use coordinate only for targets with no badge such as canvas or custom rendered widgets. " +
+				"If a click opens exactly one new tab, Computer automatically follows it and reports switched_tab=true. Use browser_session(action=tabs|switch_tab|close_tab) for explicit tab control. " +
 				"Use action=key for browser/editor commands such as Tab, Backspace, Control+A, Control+Z; use action=type only for literal text and full date/time values such as 2026-06-05 or 08:00 PM. " +
 				"For action=scroll, amount is CSS pixels; use 200-500 for a small viewport move and omit amount for the 300px default. " +
-				"After scrolling or navigation, take a fresh screenshot because labels are re-enumerated. Actions: screenshot, click, double_click, type, key, scroll, wait. " +
-				"Args: session_id, action, coordinate? (\"x,y\"), label? (Set-of-Mark label), text?, key?, direction?, amount?, duration?, annotate? (screenshot only, default true). " +
-				"Returns a binary screenshot envelope plus current_url, width, height.",
+				"After scrolling, tab switching, or navigation, take a fresh screenshot because labels are re-enumerated. Actions: screenshot, click, double_click, type, key, scroll, wait. " +
+				"Args: session_id, action, tab_id?, coordinate? (\"x,y\"), label? (Set-of-Mark label), text?, key?, direction?, amount?, duration?, annotate? (screenshot only, default true). " +
+				"Returns a binary screenshot envelope plus current_url, active_tab_id, tabs, width, height.",
 			InputSchema: schemaObject(map[string]any{
 				"session_id": map[string]any{"type": "string"},
 				"action":     map[string]any{"type": "string", "enum": []string{"screenshot", "click", "double_click", "type", "key", "scroll", "wait"}},
+				"tab_id":     map[string]any{"type": "string", "description": "Optional active tab/page target to switch to before running the action."},
 				"coordinate": map[string]any{"type": "string"},
 				"label":      map[string]any{"type": "integer", "description": "Set-of-Mark target number shown as a colored badge in the latest screenshot. Prefer this over coordinate for click/double_click."},
 				"text":       map[string]any{"type": "string", "description": "For action=type. Literal text. When focused on native date/time inputs, full values like 2026-06-05, 08:00 PM, or 2026-06-05 08:00 PM are normalized into the control value."},
@@ -826,11 +833,88 @@ func (a *App) toolBrowserSession(ctx *sdk.AppCtx, args map[string]any) (any, err
 			return nil, fmt.Errorf("session %s not found", id)
 		}
 		return a.sessionOutput(id, sess), nil
+	case "tabs":
+		return a.toolBrowserTabs(ctx, args)
+	case "switch_tab":
+		return a.toolBrowserSwitchTab(ctx, args)
+	case "close_tab":
+		return a.toolBrowserCloseTab(ctx, args)
 	case "close":
 		return a.toolBrowserClose(ctx, args)
 	default:
 		return nil, fmt.Errorf("unknown browser_session action %q", action)
 	}
+}
+
+func (a *App) sessionTabController(args map[string]any) (string, *session, backends.TabController, error) {
+	id := stringArg(args, "session_id")
+	if id == "" {
+		return "", nil, nil, fmt.Errorf("session_id required")
+	}
+	sess, ok := a.reg.get(id)
+	if !ok {
+		return "", nil, nil, fmt.Errorf("session %s not found", id)
+	}
+	tc, ok := sess.comp.(backends.TabController)
+	if !ok {
+		return "", nil, nil, fmt.Errorf("backend %q does not support tabs", sess.backend)
+	}
+	return id, sess, tc, nil
+}
+
+func (a *App) toolBrowserTabs(_ *sdk.AppCtx, args map[string]any) (any, error) {
+	id, _, tc, err := a.sessionTabController(args)
+	if err != nil {
+		return nil, err
+	}
+	tabs, err := tc.ListTabs()
+	if err != nil {
+		return nil, fmt.Errorf("tabs: %w", err)
+	}
+	return map[string]any{
+		"session_id":    id,
+		"active_tab_id": tc.ActiveTabID(),
+		"tabs":          tabs,
+		"tab_count":     len(tabs),
+	}, nil
+}
+
+func (a *App) toolBrowserSwitchTab(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	id, sess, tc, err := a.sessionTabController(args)
+	if err != nil {
+		return nil, err
+	}
+	tabID := stringArg(args, "tab_id")
+	if tabID == "" {
+		return nil, fmt.Errorf("tab_id required")
+	}
+	if err := tc.SwitchTab(tabID); err != nil {
+		return nil, fmt.Errorf("switch_tab: %w", err)
+	}
+	payload := a.sessionEventPayload(id, sess)
+	payload["action"] = "switch_tab"
+	payload["tab_id"] = tabID
+	emitEvent(ctx, "session.action", payload)
+	return a.sessionOutput(id, sess), nil
+}
+
+func (a *App) toolBrowserCloseTab(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	id, sess, tc, err := a.sessionTabController(args)
+	if err != nil {
+		return nil, err
+	}
+	tabID := stringArg(args, "tab_id")
+	if tabID == "" {
+		return nil, fmt.Errorf("tab_id required")
+	}
+	if err := tc.CloseTab(tabID); err != nil {
+		return nil, fmt.Errorf("close_tab: %w", err)
+	}
+	payload := a.sessionEventPayload(id, sess)
+	payload["action"] = "close_tab"
+	payload["tab_id"] = tabID
+	emitEvent(ctx, "session.action", payload)
+	return a.sessionOutput(id, sess), nil
 }
 
 func (a *App) toolBrowserOpen(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -1102,22 +1186,25 @@ func (a *App) resolveBackend(ctx *sdk.AppCtx, args map[string]any) (string, erro
 // reports. Kept tight: session_id + provenance + the URLs the
 // operator needs to identify or open the session.
 type sessionInfo struct {
-	SessionID         string `json:"session_id"`
-	BackendSessionID  string `json:"backend_session_id,omitempty"`
-	Backend           string `json:"backend"`
-	ContextID         string `json:"context_id,omitempty"`
-	AppContextID      string `json:"app_context_id,omitempty"`
-	ContextName       string `json:"context_name,omitempty"`
-	Persist           bool   `json:"persist"`
-	TimeoutSeconds    int    `json:"timeout_seconds,omitempty"`
-	ProviderExpiresAt string `json:"provider_expires_at,omitempty"`
-	CurrentURL        string `json:"current_url"`
-	DebugURL          string `json:"debug_url,omitempty"`
-	StreamURL         string `json:"stream_url,omitempty"`
-	Width             int    `json:"width"`
-	Height            int    `json:"height"`
-	OpenedAt          string `json:"opened_at"`
-	LastUsedAt        string `json:"last_used_at"`
+	SessionID         string             `json:"session_id"`
+	BackendSessionID  string             `json:"backend_session_id,omitempty"`
+	Backend           string             `json:"backend"`
+	ContextID         string             `json:"context_id,omitempty"`
+	AppContextID      string             `json:"app_context_id,omitempty"`
+	ContextName       string             `json:"context_name,omitempty"`
+	Persist           bool               `json:"persist"`
+	TimeoutSeconds    int                `json:"timeout_seconds,omitempty"`
+	ProviderExpiresAt string             `json:"provider_expires_at,omitempty"`
+	CurrentURL        string             `json:"current_url"`
+	DebugURL          string             `json:"debug_url,omitempty"`
+	StreamURL         string             `json:"stream_url,omitempty"`
+	ActiveTabID       string             `json:"active_tab_id,omitempty"`
+	Tabs              []backends.TabInfo `json:"tabs,omitempty"`
+	TabCount          int                `json:"tab_count,omitempty"`
+	Width             int                `json:"width"`
+	Height            int                `json:"height"`
+	OpenedAt          string             `json:"opened_at"`
+	LastUsedAt        string             `json:"last_used_at"`
 }
 
 func (a *App) toolBrowserList(ctx *sdk.AppCtx, _ map[string]any) (any, error) {
@@ -1161,6 +1248,7 @@ func (a *App) sessionInfo(id string, s *session) sessionInfo {
 	if s.timeout > 0 {
 		providerExpiresAt = s.openedAt.Add(time.Duration(s.timeout) * time.Second).UTC().Format(time.RFC3339)
 	}
+	tabs := tabsFor(s.comp)
 	return sessionInfo{
 		SessionID:         id,
 		BackendSessionID:  backendSessionID(s.comp),
@@ -1174,6 +1262,9 @@ func (a *App) sessionInfo(id string, s *session) sessionInfo {
 		CurrentURL:        currentURL(s.comp),
 		DebugURL:          debugURL(s.comp),
 		StreamURL:         streamURL(s.comp),
+		ActiveTabID:       activeTabID(s.comp),
+		Tabs:              tabs,
+		TabCount:          len(tabs),
 		Width:             disp.Width,
 		Height:            disp.Height,
 		OpenedAt:          s.openedAt.UTC().Format(time.RFC3339),
@@ -1196,6 +1287,9 @@ func (a *App) sessionOutput(id string, s *session) map[string]any {
 		"current_url":         info.CurrentURL,
 		"debug_url":           info.DebugURL,
 		"stream_url":          info.StreamURL,
+		"active_tab_id":       info.ActiveTabID,
+		"tabs":                info.Tabs,
+		"tab_count":           info.TabCount,
 		"width":               info.Width,
 		"height":              info.Height,
 		"opened_at":           info.OpenedAt,
@@ -1243,6 +1337,15 @@ func (a *App) toolComputerUse(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	if !ok {
 		return nil, fmt.Errorf("session %s not found (may have been reaped or never opened by this sidecar)", id)
 	}
+	if tabID := stringArg(args, "tab_id"); tabID != "" {
+		tc, ok := sess.comp.(backends.TabController)
+		if !ok {
+			return nil, fmt.Errorf("backend %q does not support tabs", sess.backend)
+		}
+		if err := tc.SwitchTab(tabID); err != nil {
+			return nil, fmt.Errorf("switch tab %s: %w", tabID, err)
+		}
+	}
 
 	act := backends.Action{
 		Type:      action,
@@ -1255,6 +1358,10 @@ func (a *App) toolComputerUse(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	}
 	act.X, act.Y = coordinateArg(args)
 
+	beforeTabs := []backends.TabInfo(nil)
+	if action == "click" || action == "double_click" {
+		beforeTabs = tabsFor(sess.comp)
+	}
 	var shot []byte
 	var err error
 	if action == "screenshot" {
@@ -1265,19 +1372,39 @@ func (a *App) toolComputerUse(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	if err != nil {
 		return nil, fmt.Errorf("%s: %w", action, err)
 	}
+	tabEvent := tabFollowResult{}
+	if len(beforeTabs) > 0 && (action == "click" || action == "double_click") {
+		tabEvent = autoFollowNewTab(sess.comp, beforeTabs)
+		if tabEvent.Switched {
+			if reshot, serr := screenshotWithOptions(sess.comp, annotateArg(args, true)); serr == nil {
+				shot = reshot
+			} else if ctx != nil {
+				ctx.Logger().Warn("new tab screenshot failed", "session_id", id, "err", serr.Error())
+			}
+		}
+	}
 	disp := sess.comp.DisplaySize()
 	mime := imageMIME(shot)
-	emitEvent(ctx, "session.action", a.sessionActionPayload(id, sess, act, args))
-	return map[string]any{
+	payload := a.sessionActionPayload(id, sess, act, args)
+	mergeTabFollowPayload(payload, tabEvent)
+	emitEvent(ctx, "session.action", payload)
+	out := map[string]any{
 		"text":           fmt.Sprintf("Success: %s action completed. Screenshot attached.", action),
 		"screenshot":     binaryEnvelope(shot, mime),
 		"screenshot_b64": base64.StdEncoding.EncodeToString(shot),
 		"mime_type":      mime,
 		"session_id":     id,
 		"current_url":    currentURL(sess.comp),
+		"active_tab_id":  activeTabID(sess.comp),
+		"tabs":           tabsFor(sess.comp),
 		"width":          disp.Width,
 		"height":         disp.Height,
-	}, nil
+	}
+	if tabs, _ := out["tabs"].([]backends.TabInfo); len(tabs) > 0 {
+		out["tab_count"] = len(tabs)
+	}
+	mergeTabFollowPayload(out, tabEvent)
+	return out, nil
 }
 
 func (a *App) toolBrowserClose(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -1297,6 +1424,58 @@ func (a *App) toolBrowserClose(ctx *sdk.AppCtx, args map[string]any) (any, error
 	}
 	emitEvent(ctx, "session.closed", payload)
 	return map[string]any{"closed": true}, nil
+}
+
+type tabFollowResult struct {
+	Switched bool
+	NewTabs  []backends.TabInfo
+}
+
+func autoFollowNewTab(comp backends.Computer, before []backends.TabInfo) tabFollowResult {
+	tc, ok := comp.(backends.TabController)
+	if !ok {
+		return tabFollowResult{}
+	}
+	after, err := tc.ListTabs()
+	if err != nil {
+		return tabFollowResult{}
+	}
+	newTabs := newTabsSince(before, after)
+	result := tabFollowResult{NewTabs: newTabs}
+	if len(newTabs) != 1 {
+		return result
+	}
+	if err := tc.SwitchTab(newTabs[0].ID); err != nil {
+		return result
+	}
+	result.Switched = true
+	return result
+}
+
+func newTabsSince(before, after []backends.TabInfo) []backends.TabInfo {
+	seen := map[string]bool{}
+	for _, tab := range before {
+		if tab.ID != "" {
+			seen[tab.ID] = true
+		}
+	}
+	out := make([]backends.TabInfo, 0)
+	for _, tab := range after {
+		if tab.ID == "" || seen[tab.ID] {
+			continue
+		}
+		out = append(out, tab)
+	}
+	return out
+}
+
+func mergeTabFollowPayload(payload map[string]any, result tabFollowResult) {
+	if len(result.NewTabs) > 0 {
+		payload["new_tabs"] = result.NewTabs
+	}
+	if result.Switched {
+		payload["switched_tab"] = true
+	}
 }
 
 // ─── Background reaper ─────────────────────────────────────────────
@@ -1347,6 +1526,9 @@ func (a *App) sessionEventPayload(id string, s *session) map[string]any {
 		"timeout_seconds":     info.TimeoutSeconds,
 		"provider_expires_at": info.ProviderExpiresAt,
 		"current_url":         info.CurrentURL,
+		"active_tab_id":       info.ActiveTabID,
+		"tabs":                info.Tabs,
+		"tab_count":           info.TabCount,
 		"width":               info.Width,
 		"height":              info.Height,
 		"opened_at":           info.OpenedAt,
@@ -1715,6 +1897,25 @@ func streamURL(c backends.Computer) string {
 	return ""
 }
 
+func tabsFor(c backends.Computer) []backends.TabInfo {
+	tc, ok := c.(backends.TabController)
+	if !ok {
+		return nil
+	}
+	tabs, err := tc.ListTabs()
+	if err != nil {
+		return nil
+	}
+	return tabs
+}
+
+func activeTabID(c backends.Computer) string {
+	if tc, ok := c.(backends.TabController); ok {
+		return tc.ActiveTabID()
+	}
+	return ""
+}
+
 func stringArg(args map[string]any, k string) string {
 	if v, ok := args[k].(string); ok {
 		return v
@@ -2032,6 +2233,51 @@ func (a *App) handleCloseSession(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, out)
 }
 
+func (a *App) handleSessionTabs(w http.ResponseWriter, r *http.Request) {
+	id := pathSessionID(r.URL.Path, "/tabs")
+	if id == "" {
+		httpErr(w, http.StatusBadRequest, "session id required")
+		return
+	}
+	args := map[string]any{"action": "tabs", "session_id": id}
+	out, err := a.toolBrowserSession(appCtxForRequest(r, args), args)
+	if err != nil {
+		httpErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, out)
+}
+
+func (a *App) handleSwitchTab(w http.ResponseWriter, r *http.Request) {
+	id, tabID := pathSessionTabID(r.URL.Path, "/switch")
+	if id == "" || tabID == "" {
+		httpErr(w, http.StatusBadRequest, "session id and tab id required")
+		return
+	}
+	args := map[string]any{"action": "switch_tab", "session_id": id, "tab_id": tabID}
+	out, err := a.toolBrowserSession(appCtxForRequest(r, args), args)
+	if err != nil {
+		httpErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, out)
+}
+
+func (a *App) handleCloseTab(w http.ResponseWriter, r *http.Request) {
+	id, tabID := pathSessionTabID(r.URL.Path, "")
+	if id == "" || tabID == "" {
+		httpErr(w, http.StatusBadRequest, "session id and tab id required")
+		return
+	}
+	args := map[string]any{"action": "close_tab", "session_id": id, "tab_id": tabID}
+	out, err := a.toolBrowserSession(appCtxForRequest(r, args), args)
+	if err != nil {
+		httpErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, out)
+}
+
 func (a *App) handleComputerUse(w http.ResponseWriter, r *http.Request) {
 	id := pathSessionID(r.URL.Path, "/use")
 	if id == "" {
@@ -2095,6 +2341,16 @@ func pathSessionID(path, suffix string) string {
 	rest := strings.TrimPrefix(path, "/sessions/")
 	rest = strings.TrimSuffix(rest, suffix)
 	return strings.Trim(rest, "/")
+}
+
+func pathSessionTabID(path, suffix string) (string, string) {
+	rest := strings.TrimPrefix(path, "/sessions/")
+	rest = strings.TrimSuffix(rest, suffix)
+	parts := strings.Split(strings.Trim(rest, "/"), "/")
+	if len(parts) != 3 || parts[1] != "tabs" {
+		return "", ""
+	}
+	return parts[0], parts[2]
 }
 
 func pathContextID(path string) string {

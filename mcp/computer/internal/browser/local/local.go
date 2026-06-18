@@ -23,6 +23,7 @@ import (
 	"time"
 
 	computer "github.com/apteva/apps/mcp/computer/internal/browser/api"
+	"github.com/apteva/apps/mcp/computer/internal/browser/cdptabs"
 	"github.com/apteva/apps/mcp/computer/internal/browser/som"
 	"github.com/apteva/apps/mcp/computer/internal/browser/textinput"
 	"github.com/chromedp/cdproto/emulation"
@@ -51,6 +52,7 @@ type Options struct {
 type Computer struct {
 	display     computer.DisplaySize
 	opts        Options
+	allocCtx    context.Context
 	ctx         context.Context
 	cancel      context.CancelFunc
 	allocCancel context.CancelFunc
@@ -503,6 +505,7 @@ func (c *Computer) launch(useProxy bool, contextID string) error {
 
 	c.ctx = ctx
 	c.cancel = cancel
+	c.allocCtx = allocCtx
 	c.allocCancel = allocCancel
 	c.proxyActive = useProxy
 	c.activeContextID = contextID
@@ -578,7 +581,7 @@ func (c *Computer) relaunchIfProxyChanged(want *bool) error {
 	// Graceful teardown before relaunch so any in-flight cookie
 	// writes flush to disk (matters when c.activeContextID is set).
 	c.gracefulTeardownForRelaunch()
-	c.ctx, c.cancel, c.allocCancel = nil, nil, nil
+	c.ctx, c.cancel, c.allocCtx, c.allocCancel = nil, nil, nil, nil
 	c.debugURL = ""
 	// Preserve the active context across the proxy-driven relaunch —
 	// otherwise toggling proxy mid-conversation would silently drop
@@ -603,7 +606,7 @@ func (c *Computer) relaunchIfContextChanged(want string) error {
 	// loses cookies still in Chrome's write journal, defeating the
 	// whole point of persistent contexts.
 	c.gracefulTeardownForRelaunch()
-	c.ctx, c.cancel, c.allocCancel = nil, nil, nil
+	c.ctx, c.cancel, c.allocCtx, c.allocCancel = nil, nil, nil, nil
 	c.debugURL = ""
 	return c.launch(c.proxyActive, want)
 }
@@ -1329,6 +1332,7 @@ func (c *Computer) Close() error {
 	if c.allocCancel != nil {
 		c.allocCancel()
 	}
+	c.allocCtx = nil
 	return nil
 }
 
@@ -1345,4 +1349,46 @@ func (c *Computer) gracefulTeardownForRelaunch() {
 	if c.allocCancel != nil {
 		c.allocCancel()
 	}
+	c.allocCtx = nil
+}
+
+func (c *Computer) ListTabs() ([]computer.TabInfo, error) {
+	return cdptabs.List(c.ctx)
+}
+
+func (c *Computer) ActiveTabID() string {
+	return cdptabs.ActiveID(c.ctx)
+}
+
+func (c *Computer) SwitchTab(tabID string) error {
+	if tabID == c.ActiveTabID() {
+		return nil
+	}
+	ctx, cancel, err := cdptabs.Switch(c.ctx, tabID)
+	if err != nil {
+		return err
+	}
+	c.ctx = ctx
+	c.cancel = cancel
+	return nil
+}
+
+func (c *Computer) CloseTab(tabID string) error {
+	tabs, err := c.ListTabs()
+	if err != nil {
+		return err
+	}
+	if len(tabs) <= 1 {
+		return fmt.Errorf("cannot close last tab; close the browser session instead")
+	}
+	if tabID == c.ActiveTabID() {
+		next := cdptabs.PickFallback(tabs, tabID)
+		if next == "" {
+			return fmt.Errorf("cannot close active tab without a fallback tab")
+		}
+		if err := c.SwitchTab(next); err != nil {
+			return fmt.Errorf("switch fallback tab: %w", err)
+		}
+	}
+	return cdptabs.Close(c.ctx, tabID)
 }

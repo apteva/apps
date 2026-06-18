@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"encoding/base64"
+	"encoding/json"
 	"image"
 	_ "image/jpeg"
 	_ "image/png"
@@ -207,6 +208,66 @@ func TestComputerAppBrowserShortcutKeys(t *testing.T) {
 	t.Fatal("shortcut key test did not reach pass URL")
 }
 
+// TestComputerAppBrowserNewTabAutoFollow verifies that a normal target=_blank
+// click opens a real tab and Computer follows it when exactly one new tab is
+// created. It defaults to local and can also run against Browserbase.
+//
+//	RUN_COMPUTER_APP_BROWSER_TESTS=1 APTEVA_HEADLESS_BROWSER=1 go test -run TestComputerAppBrowserNewTabAutoFollow -timeout 3m .
+//	RUN_COMPUTER_APP_BROWSER_TESTS=1 COMPUTER_APP_BROWSER_BACKEND=browserbase BROWSERBASE_API_KEY=... BROWSERBASE_PROJECT_ID=... go test -run TestComputerAppBrowserNewTabAutoFollow -timeout 5m .
+func TestComputerAppBrowserNewTabAutoFollow(t *testing.T) {
+	if os.Getenv("RUN_COMPUTER_APP_BROWSER_TESTS") == "" {
+		t.Skip("set RUN_COMPUTER_APP_BROWSER_TESTS=1 to run the real browser new-tab test")
+	}
+	backend := strings.TrimSpace(os.Getenv("COMPUTER_APP_BROWSER_BACKEND"))
+	if backend == "" {
+		backend = "local"
+	}
+	if backend == "browserbase" && (os.Getenv("BROWSERBASE_API_KEY") == "" || os.Getenv("BROWSERBASE_PROJECT_ID") == "") {
+		t.Skip("COMPUTER_APP_BROWSER_BACKEND=browserbase requires BROWSERBASE_API_KEY and BROWSERBASE_PROJECT_ID")
+	}
+
+	sc := tk.SpawnSidecar(t, ".", tk.WithEnv("APTEVA_HEADLESS_BROWSER", "1"))
+	open := sc.MCP("browser_session", map[string]any{
+		"action":  "open",
+		"backend": backend,
+		"url":     newTabFixtureDataURL(),
+		"viewport": map[string]any{
+			"width":  900,
+			"height": 500,
+		},
+	})
+	sessionID, _ := open["session_id"].(string)
+	if sessionID == "" {
+		t.Fatalf("open returned no session_id: %v", open)
+	}
+	defer sc.MCP("browser_close", map[string]any{"session_id": sessionID})
+
+	out := sc.MCP("computer_use", map[string]any{
+		"session_id": sessionID,
+		"action":     "click",
+		"coordinate": fcoord(110, 92),
+	})
+	deadline := time.Now().Add(20 * time.Second)
+	for time.Now().Before(deadline) {
+		if strings.Contains(stringValue(out["current_url"]), "computer-tab-test") {
+			if out["switched_tab"] != true {
+				t.Fatalf("expected switched_tab=true after target blank click, got %v", out)
+			}
+			if n, ok := numericValue(out["tab_count"]); !ok || n < 2 {
+				t.Fatalf("expected at least 2 tabs after target blank click, got %v", out["tab_count"])
+			}
+			return
+		}
+		time.Sleep(500 * time.Millisecond)
+		out = sc.MCP("computer_use", map[string]any{
+			"session_id": sessionID,
+			"action":     "wait",
+			"duration":   500,
+		})
+	}
+	t.Fatalf("new-tab click did not auto-follow to target page; last out=%v", out)
+}
+
 func decodeScreenshot(t *testing.T, out map[string]any) []byte {
 	t.Helper()
 	b64, _ := out["screenshot_b64"].(string)
@@ -314,6 +375,34 @@ for (const input of document.querySelectorAll("input")) {
 }
 sync();
 </script>`
+}
+
+func newTabFixtureDataURL() string {
+	html := `<!doctype html>
+<meta charset="utf-8">
+<title>New tab test</title>
+<style>
+  body { font: 20px system-ui, sans-serif; margin: 0; padding: 64px; }
+  a { display: inline-block; padding: 14px 18px; border: 1px solid #333; border-radius: 4px; color: #111; }
+</style>
+<a target="_blank" href="https://example.com/#computer-tab-test">Open model detail</a>`
+	return "data:text/html;charset=utf-8," + url.PathEscape(html)
+}
+
+func numericValue(v any) (float64, bool) {
+	switch n := v.(type) {
+	case int:
+		return float64(n), true
+	case int64:
+		return float64(n), true
+	case float64:
+		return n, true
+	case json.Number:
+		f, err := n.Float64()
+		return f, err == nil
+	default:
+		return 0, false
+	}
 }
 
 func fcoord(x, y int) string {

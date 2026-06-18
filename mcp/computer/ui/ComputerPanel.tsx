@@ -88,10 +88,21 @@ interface SessionRow {
   current_url: string;
   debug_url?: string;
   stream_url?: string;
+  active_tab_id?: string;
+  tabs?: BrowserTab[];
+  tab_count?: number;
   opened_at: string;
   last_used_at: string;
   width?: number;
   height?: number;
+}
+
+interface BrowserTab {
+  tab_id: string;
+  url: string;
+  title?: string;
+  active?: boolean;
+  opener_tab_id?: string;
 }
 
 interface ListResponse {
@@ -666,6 +677,7 @@ function BrowserListItem({
           <span title={formatTime(row.last_used_at)}>
             {lastUsedAgo}
             {viewport ? ` | ${viewport}` : ""}
+            {row.tab_count && row.tab_count > 1 ? ` | ${row.tab_count} tabs` : ""}
           </span>
           <span>Provider</span>
           <span title={row.provider_expires_at ? formatTime(row.provider_expires_at) : "Provider default timeout"}>
@@ -674,6 +686,86 @@ function BrowserListItem({
         </div>
       </button>
     </li>
+  );
+}
+
+function TabStrip({
+  session,
+  busy,
+  onSwitch,
+  onClose,
+}: {
+  session: SessionRow;
+  busy: boolean;
+  onSwitch: (tabID: string) => Promise<void>;
+  onClose: (tabID: string) => Promise<void>;
+}) {
+  const tabs = session.tabs ?? [];
+  if (tabs.length <= 1) {
+    return null;
+  }
+  const activeID = session.active_tab_id || tabs.find((t) => t.active)?.tab_id || "";
+  return (
+    <div className="border border-border bg-bg-subtle" style={{ borderRadius: "6px", padding: "6px", overflowX: "auto" }}>
+      <div style={{ display: "flex", gap: "6px", minWidth: "max-content" }}>
+        {tabs.map((tab) => {
+          const active = tab.tab_id === activeID || tab.active;
+          const label = tab.title || hostFor(tab.url) || "Untitled";
+          return (
+            <div
+              key={tab.tab_id}
+              className={active ? "border border-accent bg-bg text-text" : "border border-border bg-bg text-text-muted"}
+              style={{
+                display: "inline-flex",
+                alignItems: "center",
+                gap: "6px",
+                maxWidth: "220px",
+                padding: "5px 7px",
+                borderRadius: "6px",
+                fontSize: "12px",
+              }}
+              title={tab.url || tab.tab_id}
+            >
+              <button
+                type="button"
+                disabled={busy || active}
+                onClick={() => onSwitch(tab.tab_id)}
+                className={active ? "text-text" : "text-text-muted hover:text-text"}
+                style={{
+                  border: 0,
+                  background: "transparent",
+                  padding: 0,
+                  cursor: busy || active ? "default" : "pointer",
+                  overflow: "hidden",
+                  textOverflow: "ellipsis",
+                  whiteSpace: "nowrap",
+                  maxWidth: "170px",
+                  fontWeight: active ? 600 : 500,
+                }}
+              >
+                {label}
+              </button>
+              <button
+                type="button"
+                disabled={busy || tabs.length <= 1}
+                onClick={() => onClose(tab.tab_id)}
+                title="Close tab"
+                className="text-text-muted hover:text-text"
+                style={{
+                  border: 0,
+                  background: "transparent",
+                  padding: "1px",
+                  cursor: busy || tabs.length <= 1 ? "not-allowed" : "pointer",
+                  display: "inline-flex",
+                }}
+              >
+                <XIcon />
+              </button>
+            </div>
+          );
+        })}
+      </div>
+    </div>
   );
 }
 
@@ -778,10 +870,51 @@ function SessionDetail({
           minHeight: 0,
           padding: "0 16px 16px",
           display: "grid",
-          gridTemplateRows: "minmax(360px, 1fr) auto auto auto",
+          gridTemplateRows: "auto minmax(360px, 1fr) auto auto auto",
           gap: "12px",
         }}
       >
+        <TabStrip
+          session={session}
+          busy={Boolean(busy)}
+          onSwitch={async (tabID) => {
+            setBusy("switch_tab");
+            setErr(null);
+            try {
+              const res = await fetch(appURL(`${SESSIONS_URL}/${encodeURIComponent(session.session_id)}/tabs/${encodeURIComponent(tabID)}/switch`, projectId), {
+                method: "POST",
+                credentials: "include",
+              });
+              const j = await res.json();
+              if (!res.ok || j.error) throw new Error(j.error ?? `HTTP ${res.status}`);
+              setTick((n) => n + 1);
+              await onRefresh();
+            } catch (e: any) {
+              setErr(String(e?.message ?? e));
+            } finally {
+              setBusy(null);
+            }
+          }}
+          onClose={async (tabID) => {
+            setBusy("close_tab");
+            setErr(null);
+            try {
+              const res = await fetch(appURL(`${SESSIONS_URL}/${encodeURIComponent(session.session_id)}/tabs/${encodeURIComponent(tabID)}`, projectId), {
+                method: "DELETE",
+                credentials: "include",
+              });
+              const j = await res.json();
+              if (!res.ok || j.error) throw new Error(j.error ?? `HTTP ${res.status}`);
+              setTick((n) => n + 1);
+              await onRefresh();
+            } catch (e: any) {
+              setErr(String(e?.message ?? e));
+            } finally {
+              setBusy(null);
+            }
+          }}
+        />
+
         <div style={{ minHeight: 0 }}>
           {session.stream_url && embedLive ? (
             <div className="border border-border bg-bg-subtle" style={browserViewportStyle}>

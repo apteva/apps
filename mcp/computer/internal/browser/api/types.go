@@ -100,6 +100,24 @@ type Computer interface {
 	Close() error
 }
 
+// TabInfo describes one browser page target inside a provider session.
+type TabInfo struct {
+	ID       string `json:"tab_id"`
+	URL      string `json:"url"`
+	Title    string `json:"title,omitempty"`
+	Active   bool   `json:"active"`
+	OpenerID string `json:"opener_tab_id,omitempty"`
+}
+
+// TabController is implemented by CDP-backed providers that can expose and
+// switch between multiple page targets within one browser session.
+type TabController interface {
+	ListTabs() ([]TabInfo, error)
+	ActiveTabID() string
+	SwitchTab(tabID string) error
+	CloseTab(tabID string) error
+}
+
 // ScreenshotWithOptions is implemented by backends that support clean
 // screenshots without Set-of-Mark annotation on a per-call basis.
 type ScreenshotWithOptions interface {
