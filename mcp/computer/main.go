@@ -41,9 +41,9 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: computer
 display_name: Computer
-version: 0.7.26
+version: 0.7.27
 description: |
-  Watch and steer browser sessions. v0.7.26 adds tab-aware sessions.
+  Watch and steer browser sessions. v0.7.27 fixes tab close.
 scopes: [project, global]
 requires:
   permissions:

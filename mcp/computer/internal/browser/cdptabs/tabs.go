@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	computer "github.com/apteva/apps/mcp/computer/internal/browser/api"
+	"github.com/chromedp/cdproto/cdp"
 	"github.com/chromedp/cdproto/target"
 	"github.com/chromedp/chromedp"
 )
@@ -75,9 +76,12 @@ func Close(ctx context.Context, tabID string) error {
 	if strings.TrimSpace(tabID) == "" {
 		return fmt.Errorf("tab_id required")
 	}
-	return chromedp.Run(ctx, chromedp.ActionFunc(func(ctx context.Context) error {
-		return target.CloseTarget(target.ID(tabID)).Do(ctx)
-	}))
+	c := chromedp.FromContext(ctx)
+	if c == nil || c.Browser == nil {
+		return fmt.Errorf("no browser connection")
+	}
+	browserCtx := cdp.WithExecutor(ctx, c.Browser)
+	return target.CloseTarget(target.ID(tabID)).Do(browserCtx)
 }
 
 // PickFallback returns the first non-active page tab, preferring real web

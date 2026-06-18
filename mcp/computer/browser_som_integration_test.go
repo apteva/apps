@@ -268,6 +268,66 @@ func TestComputerAppBrowserNewTabAutoFollow(t *testing.T) {
 	t.Fatalf("new-tab click did not auto-follow to target page; last out=%v", out)
 }
 
+// TestComputerAppBrowserCloseTab verifies the close_tab action can close a
+// page target without hitting chromedp's page-target CloseTarget guard.
+//
+//	RUN_COMPUTER_APP_BROWSER_TESTS=1 APTEVA_HEADLESS_BROWSER=1 go test -run TestComputerAppBrowserCloseTab -timeout 3m .
+func TestComputerAppBrowserCloseTab(t *testing.T) {
+	if os.Getenv("RUN_COMPUTER_APP_BROWSER_TESTS") == "" {
+		t.Skip("set RUN_COMPUTER_APP_BROWSER_TESTS=1 to run the real browser close-tab test")
+	}
+	backend := strings.TrimSpace(os.Getenv("COMPUTER_APP_BROWSER_BACKEND"))
+	if backend == "" {
+		backend = "local"
+	}
+	if backend == "browserbase" && (os.Getenv("BROWSERBASE_API_KEY") == "" || os.Getenv("BROWSERBASE_PROJECT_ID") == "") {
+		t.Skip("COMPUTER_APP_BROWSER_BACKEND=browserbase requires BROWSERBASE_API_KEY and BROWSERBASE_PROJECT_ID")
+	}
+
+	sc := tk.SpawnSidecar(t, ".", tk.WithEnv("APTEVA_HEADLESS_BROWSER", "1"))
+	open := sc.MCP("browser_session", map[string]any{
+		"action":  "open",
+		"backend": backend,
+		"url":     newTabFixtureDataURL(),
+		"viewport": map[string]any{
+			"width":  900,
+			"height": 500,
+		},
+	})
+	sessionID, _ := open["session_id"].(string)
+	if sessionID == "" {
+		t.Fatalf("open returned no session_id: %v", open)
+	}
+	defer sc.MCP("browser_close", map[string]any{"session_id": sessionID})
+
+	clickOut := sc.MCP("computer_use", map[string]any{
+		"session_id": sessionID,
+		"action":     "click",
+		"coordinate": fcoord(110, 92),
+	})
+	newTabs, _ := clickOut["new_tabs"].([]any)
+	if len(newTabs) != 1 {
+		t.Fatalf("expected one new tab, got %v", clickOut["new_tabs"])
+	}
+	newTab, _ := newTabs[0].(map[string]any)
+	newTabID := stringValue(newTab["tab_id"])
+	if newTabID == "" {
+		t.Fatalf("new tab has no tab_id: %v", newTab)
+	}
+
+	closeOut := sc.MCP("browser_session", map[string]any{
+		"action":     "close_tab",
+		"session_id": sessionID,
+		"tab_id":     newTabID,
+	})
+	if got, ok := numericValue(closeOut["tab_count"]); !ok || got != 1 {
+		t.Fatalf("after close_tab want tab_count=1, got %v (out=%v)", closeOut["tab_count"], closeOut)
+	}
+	if got := stringValue(closeOut["active_tab_id"]); got == "" || got == newTabID {
+		t.Fatalf("close_tab left active tab on closed tab id %q: %v", newTabID, closeOut)
+	}
+}
+
 func decodeScreenshot(t *testing.T, out map[string]any) []byte {
 	t.Helper()
 	b64, _ := out["screenshot_b64"].(string)
