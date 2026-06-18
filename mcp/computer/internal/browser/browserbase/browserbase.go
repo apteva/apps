@@ -26,6 +26,12 @@ import (
 // apiBase is the Browserbase REST API root. Override for staging via env.
 const apiBase = "https://api.browserbase.com/v1"
 
+const (
+	screenshotCaptureAttempts   = 2
+	screenshotCaptureTimeout    = 5 * time.Second
+	screenshotCaptureRetryDelay = 750 * time.Millisecond
+)
+
 // Options extends what New accepts beyond apiKey/projectID/display. All
 // fields are optional. They correspond 1:1 to the POST /v1/sessions payload
 // documented at https://docs.browserbase.com/reference/api/create-a-session.
@@ -430,20 +436,7 @@ func (c *Computer) ScreenshotWithOptions(options computer.ScreenshotOptions) ([]
 	// coordinates) or sent to the LLM at page dimensions that don't
 	// match the viewport the agent clicks into. page.CaptureScreenshot
 	// returns exactly the visible area at the configured resolution.
-	var buf []byte
-	err := chromedp.Run(c.ctx,
-		chromedp.ActionFunc(func(ctx context.Context) error {
-			b, err := page.CaptureScreenshot().
-				WithFormat(page.CaptureScreenshotFormatJpeg).
-				WithQuality(90).
-				Do(ctx)
-			if err != nil {
-				return err
-			}
-			buf = b
-			return nil
-		}),
-	)
+	buf, err := c.captureScreenshot()
 	if err != nil {
 		return nil, fmt.Errorf("screenshot: %w", err)
 	}
@@ -478,6 +471,40 @@ func (c *Computer) ScreenshotWithOptions(options computer.ScreenshotOptions) ([]
 		return annotated, nil
 	}
 	return buf, nil
+}
+
+func (c *Computer) captureScreenshot() ([]byte, error) {
+	var lastErr error
+	for attempt := 1; attempt <= screenshotCaptureAttempts; attempt++ {
+		if attempt > 1 {
+			time.Sleep(screenshotCaptureRetryDelay)
+		}
+		ctx, cancel := context.WithTimeout(c.ctx, screenshotCaptureTimeout)
+		var buf []byte
+		err := chromedp.Run(ctx,
+			chromedp.ActionFunc(func(ctx context.Context) error {
+				b, err := page.CaptureScreenshot().
+					WithFormat(page.CaptureScreenshotFormatJpeg).
+					WithQuality(90).
+					Do(ctx)
+				if err != nil {
+					return err
+				}
+				buf = b
+				return nil
+			}),
+		)
+		cancel()
+		if err == nil {
+			if attempt > 1 {
+				fmt.Fprintf(os.Stderr, "[BROWSERBASE] screenshot capture succeeded on retry %d\n", attempt)
+			}
+			return buf, nil
+		}
+		lastErr = err
+		fmt.Fprintf(os.Stderr, "[BROWSERBASE] screenshot capture attempt %d/%d failed: %v\n", attempt, screenshotCaptureAttempts, err)
+	}
+	return nil, lastErr
 }
 
 // resolveLabel mirrors local.resolveLabel.

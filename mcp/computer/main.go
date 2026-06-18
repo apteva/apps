@@ -41,9 +41,9 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: computer
 display_name: Computer
-version: 0.7.28
+version: 0.7.29
 description: |
-  Watch and steer browser sessions. v0.7.28 clarifies tab switching.
+  Watch and steer browser sessions. v0.7.29 bounds Browserbase screenshots.
 scopes: [project, global]
 requires:
   permissions:
