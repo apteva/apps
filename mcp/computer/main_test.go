@@ -854,7 +854,15 @@ func TestComputerUseDescriptionTeachesLabelWorkflow(t *testing.T) {
 	if desc == "" {
 		t.Fatal("computer_use tool missing")
 	}
-	for _, want := range []string{"action=screenshot first", "Set-of-Mark", "label=N", "Prefer label over coordinate"} {
+	for _, want := range []string{
+		"action=screenshot first",
+		"Set-of-Mark",
+		"label=N",
+		"Prefer label over coordinate",
+		"browser_session(action=tabs)",
+		"browser_session(action=switch_tab",
+		"Do not use Ctrl+Tab",
+	} {
 		if !strings.Contains(desc, want) {
 			t.Errorf("computer_use description missing %q:\n%s", want, desc)
 		}
@@ -872,6 +880,9 @@ func TestComputerUseDescriptionTeachesLabelWorkflow(t *testing.T) {
 		if tool.Name == "computer_use" {
 			if !strings.Contains(tool.Description, "label=N") {
 				t.Fatalf("manifest computer_use description does not teach label workflow:\n%s", tool.Description)
+			}
+			if !strings.Contains(tool.Description, "browser_session(action=tabs)") || !strings.Contains(tool.Description, "Do not use Ctrl+Tab") {
+				t.Fatalf("manifest computer_use description does not teach explicit tab switching:\n%s", tool.Description)
 			}
 			return
 		}

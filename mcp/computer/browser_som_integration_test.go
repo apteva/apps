@@ -268,6 +268,96 @@ func TestComputerAppBrowserNewTabAutoFollow(t *testing.T) {
 	t.Fatalf("new-tab click did not auto-follow to target page; last out=%v", out)
 }
 
+// TestComputerAppBrowserSwitchTab verifies the public MCP tab workflow agents
+// should use: list tabs, switch by tab_id, then take a fresh screenshot.
+//
+//	RUN_COMPUTER_APP_BROWSER_TESTS=1 APTEVA_HEADLESS_BROWSER=1 go test -run TestComputerAppBrowserSwitchTab -timeout 3m .
+//	RUN_COMPUTER_APP_BROWSER_TESTS=1 COMPUTER_APP_BROWSER_BACKEND=browserbase BROWSERBASE_API_KEY=... BROWSERBASE_PROJECT_ID=... go test -run TestComputerAppBrowserSwitchTab -timeout 5m .
+func TestComputerAppBrowserSwitchTab(t *testing.T) {
+	if os.Getenv("RUN_COMPUTER_APP_BROWSER_TESTS") == "" {
+		t.Skip("set RUN_COMPUTER_APP_BROWSER_TESTS=1 to run the real browser switch-tab test")
+	}
+	backend := strings.TrimSpace(os.Getenv("COMPUTER_APP_BROWSER_BACKEND"))
+	if backend == "" {
+		backend = "local"
+	}
+	if backend == "browserbase" && (os.Getenv("BROWSERBASE_API_KEY") == "" || os.Getenv("BROWSERBASE_PROJECT_ID") == "") {
+		t.Skip("COMPUTER_APP_BROWSER_BACKEND=browserbase requires BROWSERBASE_API_KEY and BROWSERBASE_PROJECT_ID")
+	}
+
+	sc := tk.SpawnSidecar(t, ".", tk.WithEnv("APTEVA_HEADLESS_BROWSER", "1"))
+	open := sc.MCP("browser_session", map[string]any{
+		"action":  "open",
+		"backend": backend,
+		"url":     newTabFixtureDataURL(),
+		"viewport": map[string]any{
+			"width":  900,
+			"height": 500,
+		},
+	})
+	sessionID, _ := open["session_id"].(string)
+	if sessionID == "" {
+		t.Fatalf("open returned no session_id: %v", open)
+	}
+	defer sc.MCP("browser_close", map[string]any{"session_id": sessionID})
+
+	clickOut := sc.MCP("computer_use", map[string]any{
+		"session_id": sessionID,
+		"action":     "click",
+		"coordinate": fcoord(110, 92),
+	})
+	newTabs, _ := clickOut["new_tabs"].([]any)
+	if len(newTabs) != 1 {
+		t.Fatalf("expected one new tab, got %v", clickOut["new_tabs"])
+	}
+	newTab, _ := newTabs[0].(map[string]any)
+	newTabID := stringValue(newTab["tab_id"])
+	if newTabID == "" {
+		t.Fatalf("new tab has no tab_id: %v", newTab)
+	}
+
+	tabsOut := sc.MCP("browser_session", map[string]any{
+		"action":     "tabs",
+		"session_id": sessionID,
+	})
+	originalTabID := tabIDWithURLPrefix(t, tabsOut, "data:text/html")
+	if originalTabID == "" {
+		t.Fatalf("could not find original data tab: %v", tabsOut)
+	}
+
+	backOut := sc.MCP("browser_session", map[string]any{
+		"action":     "switch_tab",
+		"session_id": sessionID,
+		"tab_id":     originalTabID,
+	})
+	if got := stringValue(backOut["active_tab_id"]); got != originalTabID {
+		t.Fatalf("switch_tab back active_tab_id: want %q, got %q (out=%v)", originalTabID, got, backOut)
+	}
+	if got := stringValue(backOut["current_url"]); !strings.HasPrefix(got, "data:text/html") {
+		t.Fatalf("switch_tab back current_url: want original data URL, got %q (out=%v)", got, backOut)
+	}
+
+	shotOut := sc.MCP("computer_use", map[string]any{
+		"session_id": sessionID,
+		"action":     "screenshot",
+	})
+	if got := stringValue(shotOut["active_tab_id"]); got != originalTabID {
+		t.Fatalf("screenshot after switch should stay on original tab %q, got %q (out=%v)", originalTabID, got, shotOut)
+	}
+
+	forwardOut := sc.MCP("browser_session", map[string]any{
+		"action":     "switch_tab",
+		"session_id": sessionID,
+		"tab_id":     newTabID,
+	})
+	if got := stringValue(forwardOut["active_tab_id"]); got != newTabID {
+		t.Fatalf("switch_tab forward active_tab_id: want %q, got %q (out=%v)", newTabID, got, forwardOut)
+	}
+	if got := stringValue(forwardOut["current_url"]); !strings.Contains(got, "computer-tab-test") {
+		t.Fatalf("switch_tab forward current_url: want target page, got %q (out=%v)", got, forwardOut)
+	}
+}
+
 // TestComputerAppBrowserCloseTab verifies the close_tab action can close a
 // page target without hitting chromedp's page-target CloseTarget guard.
 //
@@ -370,6 +460,18 @@ func hasBadgeLikePixels(t *testing.T, raw []byte) bool {
 func stringValue(v any) string {
 	if s, ok := v.(string); ok {
 		return s
+	}
+	return ""
+}
+
+func tabIDWithURLPrefix(t *testing.T, out map[string]any, prefix string) string {
+	t.Helper()
+	tabs, _ := out["tabs"].([]any)
+	for _, raw := range tabs {
+		tab, _ := raw.(map[string]any)
+		if strings.HasPrefix(stringValue(tab["url"]), prefix) {
+			return stringValue(tab["tab_id"])
+		}
 	}
 	return ""
 }

@@ -2,9 +2,9 @@ schema: apteva-app/v1
 
 name: computer
 display_name: Computer
-version: 0.7.27
+version: 0.7.28
 description: |
-  Watch and steer browser sessions. v0.7.27 fixes tab close.
+  Watch and steer browser sessions. v0.7.28 clarifies tab switching.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/computer
@@ -43,8 +43,11 @@ provides:
         sessions. Args: action, session_id?, tab_id?, backend?,
         backend_session_id?, url?, context_id?, context_name?,
         auto_create_context?, persist?, timeout?, proxy?, proxy_country?,
-        viewport?. Tab actions: tabs, switch_tab, close_tab. Browserbase
-        honors timeout as max session lifetime. Prefer context_id returned by computer_context_list
+        viewport?. For tab control, call browser_session(action=tabs) to list
+        open tabs, then browser_session(action=switch_tab, tab_id=...) or
+        browser_session(action=close_tab, tab_id=...). Do not use keyboard
+        shortcuts such as Ctrl+Tab, Ctrl+PageDown, or Ctrl+1-9 to switch
+        browser tabs. Browserbase honors timeout as max session lifetime. Prefer context_id returned by computer_context_list
         to reopen saved browser state; context_name works across providers when
         unique. For a reusable saved context, pass context_name with
         auto_create_context=true; omitted names are only a fallback and are
@@ -58,8 +61,10 @@ provides:
         use coordinate only for targets with no badge such as canvas or
         custom rendered widgets. If a click opens exactly one new tab,
         Computer automatically follows it and reports switched_tab=true.
-        Use browser_session(action=tabs|switch_tab|close_tab) for explicit
-        tab control. Use action=key for browser/editor commands
+        For explicit tab control, call browser_session(action=tabs) to list
+        tabs, then browser_session(action=switch_tab, tab_id=...) or
+        browser_session(action=close_tab, tab_id=...). Do not use Ctrl+Tab,
+        Ctrl+PageDown, or Ctrl+1-9 for browser tab switching. Use action=key for page/editor commands
         such as Tab, Backspace, Control+A, Control+Z; use action=type only
         for literal text and full date/time values such as 2026-06-05 or
         08:00 PM. For action=scroll, amount is CSS pixels; use 200-500
