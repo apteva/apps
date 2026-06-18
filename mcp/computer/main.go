@@ -41,9 +41,9 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: computer
 display_name: Computer
-version: 0.7.24
+version: 0.7.25
 description: |
-  Watch and steer browser sessions. v0.7.24 hides keep-alive.
+  Watch and steer browser sessions. v0.7.25 fixes scroll amount scaling.
 scopes: [project, global]
 requires:
   permissions:
@@ -70,7 +70,7 @@ provides:
     - name: browser_session
       description: "Open, resume, list, inspect, or close app-owned browser sessions. Args: action, session_id?, backend?, backend_session_id?, url?, context_id?, context_name?, auto_create_context?, persist?, timeout?, proxy?, proxy_country?, viewport?. Browserbase honors timeout as max session lifetime. Prefer context_id from computer_context_list to reopen saved state; context_name works across backends when unique. For a reusable saved context, pass context_name with auto_create_context=true; omitted names are only a fallback and are auto-generated."
     - name: computer_use
-      description: "Drive an app-owned browser session. Default workflow: call action=screenshot first; screenshots contain Set-of-Mark numeric badges on interactive elements. To click, use action=click with label=N from the latest screenshot. Prefer label over coordinate; use coordinate only for targets with no badge such as canvas or custom rendered widgets. Use action=key for browser/editor commands such as Tab, Backspace, Control+A, Control+Z; use action=type only for literal text and full date/time values such as 2026-06-05 or 08:00 PM. After scrolling or navigation, take a fresh screenshot because labels are re-enumerated. Args: session_id, action, coordinate?, label?, text?, key?, direction?, amount?, duration?, annotate? (screenshot only, default true). Returns screenshot bytes for visual actions."
+      description: "Drive an app-owned browser session. Default workflow: call action=screenshot first; screenshots contain Set-of-Mark numeric badges on interactive elements. To click, use action=click with label=N from the latest screenshot. Prefer label over coordinate; use coordinate only for targets with no badge such as canvas or custom rendered widgets. Use action=key for browser/editor commands such as Tab, Backspace, Control+A, Control+Z; use action=type only for literal text and full date/time values such as 2026-06-05 or 08:00 PM. For action=scroll, amount is CSS pixels; use 200-500 for a small viewport move and omit amount for the 300px default. After scrolling or navigation, take a fresh screenshot because labels are re-enumerated. Args: session_id, action, coordinate?, label?, text?, key?, direction?, amount?, duration?, annotate? (screenshot only, default true). Returns screenshot bytes for visual actions."
     - name: computer_context_create
       description: "Create or import an app-managed browser context. Args: name, backend?, provider_context_id?, persist_default?, metadata?, auto_create_provider?."
     - name: computer_context_list
@@ -441,6 +441,7 @@ func (a *App) MCPTools() []sdk.Tool {
 			Description: "Drive a browser session opened by browser_session. Default workflow: call action=screenshot first; screenshots contain Set-of-Mark numeric badges on interactive elements. " +
 				"To click, use action=click with label=N from the latest screenshot. Prefer label over coordinate; use coordinate only for targets with no badge such as canvas or custom rendered widgets. " +
 				"Use action=key for browser/editor commands such as Tab, Backspace, Control+A, Control+Z; use action=type only for literal text and full date/time values such as 2026-06-05 or 08:00 PM. " +
+				"For action=scroll, amount is CSS pixels; use 200-500 for a small viewport move and omit amount for the 300px default. " +
 				"After scrolling or navigation, take a fresh screenshot because labels are re-enumerated. Actions: screenshot, click, double_click, type, key, scroll, wait. " +
 				"Args: session_id, action, coordinate? (\"x,y\"), label? (Set-of-Mark label), text?, key?, direction?, amount?, duration?, annotate? (screenshot only, default true). " +
 				"Returns a binary screenshot envelope plus current_url, width, height.",
@@ -451,8 +452,8 @@ func (a *App) MCPTools() []sdk.Tool {
 				"label":      map[string]any{"type": "integer", "description": "Set-of-Mark target number shown as a colored badge in the latest screenshot. Prefer this over coordinate for click/double_click."},
 				"text":       map[string]any{"type": "string", "description": "For action=type. Literal text. When focused on native date/time inputs, full values like 2026-06-05, 08:00 PM, or 2026-06-05 08:00 PM are normalized into the control value."},
 				"key":        map[string]any{"type": "string", "description": "For action=key. Browser/editor command key such as Enter, Tab, Backspace, Escape, ArrowUp, Control+A, Control+Z, Meta+A, or Shift+Tab. Do not use action=type for command keys."},
-				"direction":  map[string]any{"type": "string"},
-				"amount":     map[string]any{"type": "integer"},
+				"direction":  map[string]any{"type": "string", "enum": []string{"up", "down", "left", "right"}, "description": "For action=scroll."},
+				"amount":     map[string]any{"type": "integer", "description": "For action=scroll. CSS pixels, not wheel ticks. Defaults to 300 when omitted; use 200-500 for a small viewport move."},
 				"duration":   map[string]any{"type": "integer"},
 				"annotate":   map[string]any{"type": "boolean", "description": "For action=screenshot, include Set-of-Mark labels in the returned image. Defaults true for computer_use so agent click flow remains label-based."},
 				"som":        map[string]any{"type": "boolean", "description": "Alias for annotate."},

@@ -816,25 +816,9 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 // Falls back to window.scrollBy on error (e.g. CDP not available), so
 // the call never silently drops.
 func (c *Computer) scroll(a computer.Action) error {
-	amount := a.Amount
-	if amount <= 0 {
-		amount = 3
-	}
-	// 100 px per unit matches the old JS behavior. Chrome's default
-	// wheel tick is ~100 px, so amount=3 = ~3 ticks ≈ one "flick".
-	const step = 100
-	var dx, dy float64
-	switch strings.ToLower(a.Direction) {
-	case "up":
-		dy = float64(-step * amount)
-	case "down":
-		dy = float64(step * amount)
-	case "left":
-		dx = float64(-step * amount)
-	case "right":
-		dx = float64(step * amount)
-	default:
-		return fmt.Errorf("unknown scroll direction %q (want up/down/left/right)", a.Direction)
+	dx, dy, err := computer.ScrollDelta(a.Direction, a.Amount)
+	if err != nil {
+		return err
 	}
 
 	// Default target: center of the viewport. Callers that know what
@@ -845,7 +829,7 @@ func (c *Computer) scroll(a computer.Action) error {
 		y = float64(c.display.Height) / 2
 	}
 
-	err := chromedp.Run(c.ctx,
+	err = chromedp.Run(c.ctx,
 		input.DispatchMouseEvent(input.MouseWheel, x, y).
 			WithDeltaX(dx).WithDeltaY(dy),
 	)

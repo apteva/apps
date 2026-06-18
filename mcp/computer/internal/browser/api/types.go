@@ -3,6 +3,11 @@
 // Implementations live under this app in internal/browser subpackages.
 package api
 
+import (
+	"fmt"
+	"strings"
+)
+
 // Action represents a normalized computer use action.
 type Action struct {
 	Type      string `json:"type"`                // "click", "double_click", "type", "key", "scroll", "screenshot", "navigate", "wait"
@@ -11,7 +16,7 @@ type Action struct {
 	Text      string `json:"text,omitempty"`      // for "type" action
 	Key       string `json:"key,omitempty"`       // for "key" action (e.g. "Enter", "Escape")
 	Direction string `json:"direction,omitempty"` // for "scroll": "up", "down", "left", "right"
-	Amount    int    `json:"amount,omitempty"`    // scroll amount
+	Amount    int    `json:"amount,omitempty"`    // for "scroll": CSS pixels; defaults to 300
 	URL       string `json:"url,omitempty"`       // for "navigate"
 	Duration  int    `json:"duration,omitempty"`  // for "wait" (milliseconds)
 	// Label: Set-of-Mark target. When non-zero, click/double_click
@@ -19,6 +24,29 @@ type Action struct {
 	// most recent screenshot. Takes precedence over X/Y when set.
 	// Implementations that don't support SoM fall back to X/Y.
 	Label int `json:"label,omitempty"`
+}
+
+// ScrollDelta converts a scroll action into CDP wheel deltas. Amount is
+// intentionally CSS pixels, not wheel ticks: MCP callers commonly pass values
+// like 80, 240, or 500 expecting viewport-distance scrolling.
+func ScrollDelta(direction string, amount int) (float64, float64, error) {
+	if amount <= 0 {
+		amount = 300
+	}
+	var dx, dy float64
+	switch strings.ToLower(direction) {
+	case "up":
+		dy = float64(-amount)
+	case "down":
+		dy = float64(amount)
+	case "left":
+		dx = float64(-amount)
+	case "right":
+		dx = float64(amount)
+	default:
+		return 0, 0, fmt.Errorf("unknown scroll direction %q (want up/down/left/right)", direction)
+	}
+	return dx, dy, nil
 }
 
 // DisplaySize holds screen dimensions.

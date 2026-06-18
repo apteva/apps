@@ -385,23 +385,9 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 // SPAs) where `window.scrollBy` is a no-op; wheel events scroll the
 // element under the cursor and fire wheel handlers like a human.
 func (c *Computer) scroll(a computer.Action) error {
-	amount := a.Amount
-	if amount <= 0 {
-		amount = 3
-	}
-	const step = 100
-	var dx, dy float64
-	switch strings.ToLower(a.Direction) {
-	case "up":
-		dy = float64(-step * amount)
-	case "down":
-		dy = float64(step * amount)
-	case "left":
-		dx = float64(-step * amount)
-	case "right":
-		dx = float64(step * amount)
-	default:
-		return fmt.Errorf("unknown scroll direction %q", a.Direction)
+	dx, dy, err := computer.ScrollDelta(a.Direction, a.Amount)
+	if err != nil {
+		return err
 	}
 
 	x, y := float64(a.X), float64(a.Y)
@@ -410,7 +396,7 @@ func (c *Computer) scroll(a computer.Action) error {
 		y = float64(c.display.Height) / 2
 	}
 
-	err := chromedp.Run(c.ctx,
+	err = chromedp.Run(c.ctx,
 		input.DispatchMouseEvent(input.MouseWheel, x, y).
 			WithDeltaX(dx).WithDeltaY(dy),
 	)
