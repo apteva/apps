@@ -1,4 +1,4 @@
-// ComposerPanel v0.3.8 - timeline editor with storage and Media Studio AI assets.
+// ComposerPanel v0.3.10 - timeline editor with storage and Media Studio AI assets.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
@@ -50,7 +50,7 @@ type AssetType = "video" | "image";
 type MediaKind = "image" | "video" | "audio_tts" | "audio_sfx" | "music" | "avatar";
 type OutputFormat = "mp4" | "mp3" | "wav" | "m4a" | "aac";
 type Aspect = "16:9" | "9:16" | "1:1" | "4:3";
-type DurationMode = "fixed_trim_pad" | "fit_generated";
+type DurationMode = "fixed_trim_pad" | "fit_generated" | "fit_generated_keep_start" | "fit_generated_reflow";
 
 interface AIAsset {
   media_kind: MediaKind;
@@ -70,7 +70,27 @@ interface AIAsset {
   job_id?: number;
   estimated_duration_seconds?: number;
   actual_duration_seconds?: number;
+  audio_analysis?: {
+    duration_seconds?: number;
+    peak_db?: number;
+    rms_db?: number;
+    sample_rate?: number;
+    channels?: number;
+    codec?: string;
+  };
+  peak_db?: number;
+  rms_db?: number;
   error?: string;
+}
+
+interface AudioFX {
+  gain_db?: number;
+  normalize?: boolean;
+  loudness_target?: number;
+  peak_limit_db?: number;
+  fade_in_seconds?: number;
+  fade_out_seconds?: number;
+  trim_silence?: boolean;
 }
 
 interface ClipDraft {
@@ -88,13 +108,16 @@ interface ClipDraft {
 
 interface AudioClipDraft {
   id: string;
-  asset: { type: "audio"; src: string };
+  asset: { type: "audio" | "silence"; src: string };
   start: number;
   length: number;
   duration_mode?: DurationMode;
   estimated_length?: number;
   actual_length?: number;
   volume: number;
+  after_clip_id?: string;
+  gap_seconds?: number;
+  audio?: AudioFX;
   ai?: AIAsset;
 }
 
@@ -179,7 +202,9 @@ function estimateSpeechSeconds(script: string): number {
 }
 
 function defaultDurationMode(kind: MediaKind | undefined): DurationMode {
-  return kind === "audio_tts" || kind === "avatar" ? "fit_generated" : "fixed_trim_pad";
+  if (kind === "audio_tts") return "fit_generated_reflow";
+  if (kind === "avatar") return "fit_generated_keep_start";
+  return "fixed_trim_pad";
 }
 
 function estimateForAI(ai: AIAsset | undefined): number {
@@ -195,7 +220,7 @@ function applyAIDuration<T extends { length: number; duration_mode?: DurationMod
   const estimated = estimateForAI(clip.ai);
   const actual = clip.ai.actual_duration_seconds || clip.actual_length || 0;
   const mode = clip.duration_mode || defaultDurationMode(clip.ai.media_kind);
-  const length = mode === "fit_generated"
+  const length = fitsGenerated(mode)
     ? Math.max(0.1, actual || estimated || clip.length)
     : Math.max(0.1, clip.length || estimated || clip.ai.duration || 1);
   return {
@@ -247,13 +272,17 @@ function normalizeClips(clips: ClipDraft[]): ClipDraft[] {
 function normalizeAudioClips(clips: AudioClipDraft[]): AudioClipDraft[] {
   return clips.map((clip, i) => {
     const conformed = applyAIDuration(clip);
+    const silence = clip.asset?.type === "silence";
     return {
       ...conformed,
       id: clip.id || `audio-${i + 1}-${Date.now()}`,
       start: Math.max(0, Number(clip.start) || 0),
       length: Math.max(0.1, Number(conformed.length) || 1),
       volume: Math.max(0, Math.min(1, Number(clip.volume) || 1)),
-      asset: { type: "audio", src: clip.asset?.src || "" },
+      after_clip_id: clip.after_clip_id || undefined,
+      gap_seconds: Math.max(0, Number(clip.gap_seconds) || 0) || undefined,
+      audio: clip.audio,
+      asset: { type: silence ? "silence" : "audio", src: silence ? "" : (clip.asset?.src || "") },
       ai: clip.ai,
     };
   });
@@ -325,13 +354,16 @@ function parseComposition(c: Composition | null): DraftState {
     if (audio.length) {
       draft.audioClips = normalizeAudioClips(audio.map((clip: any, i: number) => ({
         id: String(clip.uid || `audio-${i + 1}`),
-        asset: { type: "audio", src: String(clip.asset?.src || "") },
+        asset: { type: clip.asset?.type === "silence" ? "silence" : "audio", src: String(clip.asset?.src || "") },
         start: Number(clip.start) || 0,
         length: Number(clip.length ?? clip.duration) || 1,
         duration_mode: clip.duration_mode || defaultDurationMode(clip.ai?.media_kind),
         estimated_length: Number(clip.estimated_length || clip.ai?.estimated_duration_seconds || 0) || undefined,
         actual_length: Number(clip.actual_length || clip.ai?.actual_duration_seconds || 0) || undefined,
         volume: Number(clip.volume) || 1,
+        after_clip_id: clip.after_clip_id,
+        gap_seconds: Number(clip.gap_seconds || 0) || undefined,
+        audio: clip.audio,
         ai: clip.ai,
       })));
     }
@@ -392,7 +424,7 @@ function draftToBody(draft: DraftState): Record<string, unknown> {
   const audioClips = normalizeAudioClips(draft.audioClips).map((clip) => {
     const out: any = {
       uid: clip.id,
-      asset: { type: "audio", src: clip.asset.src.trim() },
+      asset: { type: clip.asset.type, src: clip.asset.type === "silence" ? "" : clip.asset.src.trim() },
       start: clip.start,
       length: clip.length,
       volume: Math.max(0, Math.min(1, Number(clip.volume) || 1)),
@@ -401,6 +433,9 @@ function draftToBody(draft: DraftState): Record<string, unknown> {
     if (clip.duration_mode) out.duration_mode = clip.duration_mode;
     if (clip.estimated_length) out.estimated_length = clip.estimated_length;
     if (clip.actual_length) out.actual_length = clip.actual_length;
+    if (clip.after_clip_id) out.after_clip_id = clip.after_clip_id;
+    if (clip.gap_seconds) out.gap_seconds = clip.gap_seconds;
+    if (clip.audio) out.audio = clip.audio;
     return out;
   });
   const tracks: any[] = [];
@@ -524,7 +559,7 @@ function composerExamples(): DraftExample[] {
             asset: { type: "audio", src: "" },
             start: 0,
             length: voiceOneLength,
-            duration_mode: "fit_generated",
+            duration_mode: "fit_generated_reflow",
             estimated_length: voiceOneLength,
             volume: 1,
             ai: exampleAI("audio_tts", voiceOne, "16:9", voiceOneLength),
@@ -534,7 +569,7 @@ function composerExamples(): DraftExample[] {
             asset: { type: "audio", src: "" },
             start: voiceOneLength + 5,
             length: voiceTwoLength,
-            duration_mode: "fit_generated",
+            duration_mode: "fit_generated_reflow",
             estimated_length: voiceTwoLength,
             volume: 1,
             ai: exampleAI("audio_tts", voiceTwo, "16:9", voiceTwoLength),
@@ -591,7 +626,7 @@ function composerExamples(): DraftExample[] {
             asset: { type: "video", src: "" },
             start: 0,
             length: 7,
-            duration_mode: "fit_generated",
+            duration_mode: "fit_generated_keep_start",
             estimated_length: 7,
             ai: exampleAI("avatar", "Hi, this is an example avatar video generated from a short script.", "16:9", 7),
           },
@@ -644,6 +679,7 @@ function generationIDFromMeta(meta: any): number {
 function aiFromMeta(ai: AIAsset, meta: any, cacheKey: string): AIAsset {
   const estimated = Number(meta?.estimated_duration_seconds || ai.estimated_duration_seconds || 0) || undefined;
   const actual = Number(meta?.actual_duration_seconds || ai.actual_duration_seconds || 0) || undefined;
+  const analysis = meta?.audio_analysis || ai.audio_analysis;
   return {
     ...ai,
     cache_key: cacheKey,
@@ -652,8 +688,15 @@ function aiFromMeta(ai: AIAsset, meta: any, cacheKey: string): AIAsset {
     generation_id: generationIDFromMeta(meta),
     estimated_duration_seconds: estimated,
     actual_duration_seconds: actual,
+    audio_analysis: analysis,
+    peak_db: Number(meta?.peak_db || ai.peak_db || analysis?.peak_db || 0) || undefined,
+    rms_db: Number(meta?.rms_db || ai.rms_db || analysis?.rms_db || 0) || undefined,
     error: "",
   };
+}
+
+function fitsGenerated(mode: DurationMode | undefined): boolean {
+  return mode === "fit_generated" || mode === "fit_generated_keep_start" || mode === "fit_generated_reflow";
 }
 
 export default function ComposerPanel({ projectId }: NativePanelProps) {
@@ -874,6 +917,25 @@ export default function ComposerPanel({ projectId }: NativePanelProps) {
           duration_mode: withAI ? defaultDurationMode(aiKind) : undefined,
           volume: 1,
           ai: withAI ? defaultAI(aiKind, cur.output.aspect) : undefined,
+        },
+      ],
+      output: cur.clips.length === 0 ? { ...cur.output, format: isAudioFormat(cur.output.format) ? cur.output.format : "mp3" } : cur.output,
+    }));
+    setClipEditor({ kind: "audio", id });
+  };
+
+  const addSilenceClip = () => {
+    const id = `silence-${Date.now()}`;
+    updateDraft((cur) => ({
+      ...cur,
+      audioClips: [
+        ...cur.audioClips,
+        {
+          id,
+          asset: { type: "silence", src: "" },
+          start: durationOfDraft(cur),
+          length: 5,
+          volume: 1,
         },
       ],
       output: cur.clips.length === 0 ? { ...cur.output, format: isAudioFormat(cur.output.format) ? cur.output.format : "mp3" } : cur.output,
@@ -1120,7 +1182,7 @@ export default function ComposerPanel({ projectId }: NativePanelProps) {
         duration_mode: clip.duration_mode || defaultDurationMode(clip.ai.media_kind),
         estimated_length: nextAI.estimated_duration_seconds || clip.estimated_length,
         actual_length: nextAI.actual_duration_seconds || clip.actual_length,
-        length: (clip.duration_mode || defaultDurationMode(clip.ai.media_kind)) === "fit_generated"
+        length: fitsGenerated(clip.duration_mode || defaultDurationMode(clip.ai.media_kind))
           ? (nextAI.actual_duration_seconds || nextAI.estimated_duration_seconds || clip.length)
           : clip.length,
       });
@@ -1196,7 +1258,7 @@ export default function ComposerPanel({ projectId }: NativePanelProps) {
         duration_mode: clip.duration_mode || defaultDurationMode(clip.ai.media_kind),
         estimated_length: nextAI.estimated_duration_seconds || clip.estimated_length,
         actual_length: nextAI.actual_duration_seconds || clip.actual_length,
-        length: (clip.duration_mode || defaultDurationMode(clip.ai.media_kind)) === "fit_generated"
+        length: fitsGenerated(clip.duration_mode || defaultDurationMode(clip.ai.media_kind))
           ? (nextAI.actual_duration_seconds || nextAI.estimated_duration_seconds || clip.length)
           : clip.length,
       });
@@ -1286,6 +1348,7 @@ export default function ComposerPanel({ projectId }: NativePanelProps) {
                   onAdd={addClip}
                   onAddAIVisual={addAIVisualClip}
                   onAddAIAudio={() => addAudioClip("music")}
+                  onAddSilence={addSilenceClip}
                   onAddAISoundtrack={addAISoundtrack}
                   onBrowse={() => openPicker(clips.length ? { kind: "clip", clipId: clips[0].id } : { kind: "clip", clipId: "" })}
                 />
@@ -1307,6 +1370,7 @@ export default function ComposerPanel({ projectId }: NativePanelProps) {
                 onBrowseSoundtrack={() => openPicker({ kind: "soundtrack" })}
                 onAddClip={addClip}
                 onAddAudioClip={addAudioClip}
+                onAddSilenceClip={addSilenceClip}
                 onAddAISoundtrack={addAISoundtrack}
                 onAddAIVisualClip={addAIVisualClip}
                 onGenerateClipAI={generateClipAI}
@@ -1578,6 +1642,7 @@ function Timeline({
   onAdd,
   onAddAIVisual,
   onAddAIAudio,
+  onAddSilence,
   onAddAISoundtrack,
   onBrowse,
 }: {
@@ -1593,6 +1658,7 @@ function Timeline({
   onAdd: () => void;
   onAddAIVisual: (kind: "image" | "video" | "avatar") => void;
   onAddAIAudio: () => void;
+  onAddSilence: () => void;
   onAddAISoundtrack: () => void;
   onBrowse: () => void;
 }) {
@@ -1606,6 +1672,7 @@ function Timeline({
         <button onClick={() => onAddAIVisual("avatar")} className="text-xs px-2 py-1 border border-border rounded hover:bg-bg-input">AI avatar</button>
         <button onClick={onAddAISoundtrack} className="text-xs px-2 py-1 border border-border rounded hover:bg-bg-input">AI music</button>
         <button onClick={onAddAIAudio} className="text-xs px-2 py-1 border border-border rounded hover:bg-bg-input">Timed AI audio</button>
+        <button onClick={onAddSilence} className="text-xs px-2 py-1 border border-border rounded hover:bg-bg-input">Silence</button>
         <button onClick={onBrowse} className="text-xs px-2 py-1 border border-accent text-accent rounded hover:bg-accent hover:text-bg">Browse storage</button>
         <button onClick={onAdd} className="text-xs px-2 py-1 border border-border rounded hover:bg-bg-input">Add empty clip</button>
       </header>
@@ -1619,6 +1686,7 @@ function Timeline({
               <button type="button" onClick={() => onAddAIVisual("avatar")} className="px-3 py-1.5 text-sm border border-border rounded hover:bg-bg-input">AI avatar</button>
               <button type="button" onClick={onAddAISoundtrack} className="px-3 py-1.5 text-sm border border-border rounded hover:bg-bg-input">AI music</button>
               <button type="button" onClick={onAddAIAudio} className="px-3 py-1.5 text-sm border border-border rounded hover:bg-bg-input">Timed AI audio</button>
+              <button type="button" onClick={onAddSilence} className="px-3 py-1.5 text-sm border border-border rounded hover:bg-bg-input">Silence</button>
               <button type="button" onClick={onBrowse} className="px-3 py-1.5 text-sm border border-accent text-accent rounded hover:bg-accent hover:text-bg">Browse storage</button>
             </div>
           </div>
@@ -1757,6 +1825,8 @@ function ClipEditorModal({
               {visualClip.ai && (
                 <Field label="Duration mode">
                   <select value={visualClip.duration_mode || defaultDurationMode(visualClip.ai.media_kind)} onChange={(e) => onVisualClip(visualClip.id, { duration_mode: e.target.value as DurationMode })} className={field}>
+                    <option value="fit_generated_reflow">Fit + reflow</option>
+                    <option value="fit_generated_keep_start">Fit, keep start</option>
                     <option value="fit_generated">Fit generated</option>
                     <option value="fixed_trim_pad">Keep slot</option>
                   </select>
@@ -1796,7 +1866,7 @@ function ClipEditorModal({
                     ai,
                     duration_mode: mode,
                     estimated_length: estimate || visualClip.estimated_length,
-                    length: mode === "fit_generated" ? (estimate || visualClip.length) : visualClip.length,
+                    length: fitsGenerated(mode) ? (estimate || visualClip.length) : visualClip.length,
                     asset: { ...visualClip.asset, type: ai.media_kind === "image" ? "image" : "video" },
                   });
                 }}
@@ -1819,20 +1889,28 @@ function ClipEditorModal({
           </div>
         ) : audioClip ? (
           <div className="p-4 space-y-4">
-            <Field label="Source">
-              <div className="flex gap-2">
-                <input
-                  value={audioClip.asset.src}
-                  onChange={(e) => onAudioClip(audioClip.id, { asset: { type: "audio", src: e.target.value } })}
-                  placeholder="storage:1 or https://..."
-                  className={field}
-                />
-                <button type="button" onClick={() => onBrowseAudio(audioClip.id)} className="px-2 py-1.5 text-xs border border-border rounded hover:bg-bg-input">
-                  Browse
-                </button>
-              </div>
-            </Field>
+            {audioClip.asset.type !== "silence" && (
+              <Field label="Source">
+                <div className="flex gap-2">
+                  <input
+                    value={audioClip.asset.src}
+                    onChange={(e) => onAudioClip(audioClip.id, { asset: { type: "audio", src: e.target.value } })}
+                    placeholder="storage:1 or https://..."
+                    className={field}
+                  />
+                  <button type="button" onClick={() => onBrowseAudio(audioClip.id)} className="px-2 py-1.5 text-xs border border-border rounded hover:bg-bg-input">
+                    Browse
+                  </button>
+                </div>
+              </Field>
+            )}
             <div className="grid grid-cols-3 gap-2">
+              <Field label="Type">
+                <select value={audioClip.asset.type} onChange={(e) => onAudioClip(audioClip.id, { asset: { type: e.target.value as "audio" | "silence", src: e.target.value === "silence" ? "" : audioClip.asset.src } })} className={field}>
+                  <option value="audio">Audio</option>
+                  <option value="silence">Silence</option>
+                </select>
+              </Field>
               <Field label="Start">
                 <input type="number" min={0} step={0.1} value={audioClip.start} onChange={(e) => onAudioClip(audioClip.id, { start: Number(e.target.value) })} className={field} />
               </Field>
@@ -1845,13 +1923,18 @@ function ClipEditorModal({
               {audioClip.ai && (
                 <Field label="Duration mode">
                   <select value={audioClip.duration_mode || defaultDurationMode(audioClip.ai.media_kind)} onChange={(e) => onAudioClip(audioClip.id, { duration_mode: e.target.value as DurationMode })} className={field}>
+                    <option value="fit_generated_reflow">Fit + reflow</option>
+                    <option value="fit_generated_keep_start">Fit, keep start</option>
                     <option value="fit_generated">Fit generated</option>
                     <option value="fixed_trim_pad">Keep slot</option>
                   </select>
                 </Field>
               )}
             </div>
-            {!audioClip.ai && (
+            {audioClip.asset.type !== "silence" && (
+              <AudioProcessingEditor clip={audioClip} onChange={(patch) => onAudioClip(audioClip.id, patch)} />
+            )}
+            {audioClip.asset.type !== "silence" && !audioClip.ai && (
               <div className="grid grid-cols-3 gap-2">
                 <button type="button" onClick={() => onAudioClip(audioClip.id, { duration_mode: defaultDurationMode("music"), ai: defaultAI("music", aspect) })} className="text-xs px-2 py-1.5 border border-border rounded hover:bg-bg-input">Generate music</button>
                 <button type="button" onClick={() => onAudioClip(audioClip.id, { duration_mode: defaultDurationMode("audio_tts"), ai: defaultAI("audio_tts", aspect) })} className="text-xs px-2 py-1.5 border border-border rounded hover:bg-bg-input">Generate TTS</button>
@@ -1871,7 +1954,7 @@ function ClipEditorModal({
                     ai,
                     duration_mode: mode,
                     estimated_length: estimate || audioClip.estimated_length,
-                    length: mode === "fit_generated" ? (estimate || audioClip.length) : audioClip.length,
+                    length: fitsGenerated(mode) ? (estimate || audioClip.length) : audioClip.length,
                   });
                 }}
                 onGenerate={() => onGenerateAudio(audioClip)}
@@ -1905,6 +1988,7 @@ function Inspector({
   onBrowseSoundtrack,
   onAddClip,
   onAddAudioClip,
+  onAddSilenceClip,
   onAddAISoundtrack,
   onAddAIVisualClip,
   onGenerateClipAI,
@@ -1927,6 +2011,7 @@ function Inspector({
   onBrowseSoundtrack: () => void;
   onAddClip: () => void;
   onAddAudioClip: (ai?: boolean | MediaKind) => void;
+  onAddSilenceClip: () => void;
   onAddAISoundtrack: () => void;
   onAddAIVisualClip: (kind: "image" | "video" | "avatar") => void;
   onGenerateClipAI: (clip: ClipDraft) => void;
@@ -2055,6 +2140,9 @@ function Inspector({
             <button type="button" onClick={() => onAddAudioClip("music")} className="text-xs px-2 py-1.5 border border-border rounded hover:bg-bg-input">
               Timed AI audio
             </button>
+            <button type="button" onClick={onAddSilenceClip} className="text-xs px-2 py-1.5 border border-border rounded hover:bg-bg-input">
+              Silence
+            </button>
           </div>
         </section>
 
@@ -2067,6 +2155,9 @@ function Inspector({
             <button type="button" onClick={() => onAddAudioClip(false)} className="text-xs px-2 py-1 border border-border rounded hover:bg-bg-input">
               Empty
             </button>
+            <button type="button" onClick={onAddSilenceClip} className="text-xs px-2 py-1 border border-border rounded hover:bg-bg-input">
+              Silence
+            </button>
           </div>
           {draft.audioClips.length === 0 ? (
             <div className="border border-dashed border-border rounded p-3 text-sm text-text-muted">
@@ -2077,26 +2168,34 @@ function Inspector({
               {draft.audioClips.map((audio) => (
                 <div key={audio.id} className="border border-border rounded p-3 space-y-2 bg-bg">
                   <div className="flex items-center gap-2">
-                    <span className="text-xs text-text-dim flex-1 truncate">{audio.asset.src || (audio.ai ? `AI ${audio.ai.media_kind}` : "empty audio")}</span>
+                    <span className="text-xs text-text-dim flex-1 truncate">{audio.asset.type === "silence" ? "silence" : audio.asset.src || (audio.ai ? `AI ${audio.ai.media_kind}` : "empty audio")}</span>
                     {audio.ai?.status && <span className="text-[10px] px-1.5 py-0.5 rounded bg-border text-text-muted">{audio.ai.status}</span>}
                     <button type="button" onClick={() => onDeleteAudio(audio.id)} className="text-xs px-2 py-1 border border-red/50 text-red rounded hover:bg-red/10">
                       Delete
                     </button>
                   </div>
-                  <Field label="Source">
-                    <div className="flex gap-2">
-                      <input
-                        value={audio.asset.src}
-                        onChange={(e) => onAudioClip(audio.id, { asset: { type: "audio", src: e.target.value } })}
-                        placeholder="storage:1 or https://..."
-                        className={field}
-                      />
-                      <button type="button" onClick={() => onBrowseAudio(audio.id)} className="px-2 py-1.5 text-xs border border-border rounded hover:bg-bg-input">
-                        Browse
-                      </button>
-                    </div>
-                  </Field>
+                  {audio.asset.type !== "silence" && (
+                    <Field label="Source">
+                      <div className="flex gap-2">
+                        <input
+                          value={audio.asset.src}
+                          onChange={(e) => onAudioClip(audio.id, { asset: { type: "audio", src: e.target.value } })}
+                          placeholder="storage:1 or https://..."
+                          className={field}
+                        />
+                        <button type="button" onClick={() => onBrowseAudio(audio.id)} className="px-2 py-1.5 text-xs border border-border rounded hover:bg-bg-input">
+                          Browse
+                        </button>
+                      </div>
+                    </Field>
+                  )}
                   <div className="grid grid-cols-3 gap-2">
+                    <Field label="Type">
+                      <select value={audio.asset.type} onChange={(e) => onAudioClip(audio.id, { asset: { type: e.target.value as "audio" | "silence", src: e.target.value === "silence" ? "" : audio.asset.src } })} className={field}>
+                        <option value="audio">Audio</option>
+                        <option value="silence">Silence</option>
+                      </select>
+                    </Field>
                     <Field label="Start">
                       <input type="number" min={0} step={0.1} value={audio.start} onChange={(e) => onAudioClip(audio.id, { start: Number(e.target.value) })} className={field} />
                     </Field>
@@ -2109,13 +2208,15 @@ function Inspector({
                     {audio.ai && (
                       <Field label="Duration mode">
                         <select value={audio.duration_mode || defaultDurationMode(audio.ai.media_kind)} onChange={(e) => onAudioClip(audio.id, { duration_mode: e.target.value as DurationMode })} className={field}>
+                          <option value="fit_generated_reflow">Fit + reflow</option>
+                          <option value="fit_generated_keep_start">Fit, keep start</option>
                           <option value="fit_generated">Fit generated</option>
                           <option value="fixed_trim_pad">Keep slot</option>
                         </select>
                       </Field>
                     )}
                   </div>
-                  {!audio.ai && (
+                  {audio.asset.type !== "silence" && !audio.ai && (
                     <button
                       type="button"
                       onClick={() => onAudioClip(audio.id, { duration_mode: defaultDurationMode("music"), ai: defaultAI("music", draft.output.aspect) })}
@@ -2123,6 +2224,9 @@ function Inspector({
                     >
                       Add AI source
                     </button>
+                  )}
+                  {audio.asset.type !== "silence" && (
+                    <AudioProcessingEditor clip={audio} onChange={(patch) => onAudioClip(audio.id, patch)} />
                   )}
                   {audio.ai && (
                     <AIAssetEditor
@@ -2137,7 +2241,7 @@ function Inspector({
                           ai,
                           duration_mode: mode,
                           estimated_length: estimate || audio.estimated_length,
-                          length: mode === "fit_generated" ? (estimate || audio.length) : audio.length,
+                          length: fitsGenerated(mode) ? (estimate || audio.length) : audio.length,
                         });
                       }}
                       onGenerate={() => onGenerateAudioClipAI(audio)}
@@ -2208,7 +2312,7 @@ function Inspector({
                     ai,
                     duration_mode: mode,
                     estimated_length: estimate || clip.estimated_length,
-                    length: mode === "fit_generated" ? (estimate || clip.length) : clip.length,
+                    length: fitsGenerated(mode) ? (estimate || clip.length) : clip.length,
                     asset: { ...clip.asset, type: ai.media_kind === "image" ? "image" : "video" },
                   });
                 }}
@@ -2229,6 +2333,8 @@ function Inspector({
               {clip.ai && (
                 <Field label="Duration mode">
                   <select value={clip.duration_mode || defaultDurationMode(clip.ai.media_kind)} onChange={(e) => onClip(clip.id, { duration_mode: e.target.value as DurationMode })} className={field}>
+                    <option value="fit_generated_reflow">Fit + reflow</option>
+                    <option value="fit_generated_keep_start">Fit, keep start</option>
                     <option value="fit_generated">Fit generated</option>
                     <option value="fixed_trim_pad">Keep slot</option>
                   </select>
@@ -2294,6 +2400,51 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
       <span className="text-text-muted text-xs block mb-1">{label}</span>
       {children}
     </label>
+  );
+}
+
+function AudioProcessingEditor({
+  clip,
+  onChange,
+}: {
+  clip: AudioClipDraft;
+  onChange: (patch: Partial<AudioClipDraft>) => void;
+}) {
+  const field = "bg-bg-input border border-border rounded px-2 py-1.5 text-sm w-full";
+  const fx = clip.audio || {};
+  const updateFX = (patch: Partial<AudioFX>) => onChange({ audio: { ...fx, ...patch } });
+  return (
+    <div className="border border-border rounded p-2 space-y-2">
+      <div className="text-[10px] uppercase tracking-wide text-text-dim">Audio processing</div>
+      <div className="grid grid-cols-3 gap-2">
+        <Field label="Gain dB">
+          <input type="number" min={-60} max={24} step={0.5} value={fx.gain_db ?? 0} onChange={(e) => updateFX({ gain_db: Number(e.target.value) || undefined })} className={field} />
+        </Field>
+        <Field label="Fade in">
+          <input type="number" min={0} step={0.1} value={fx.fade_in_seconds ?? 0} onChange={(e) => updateFX({ fade_in_seconds: Number(e.target.value) || undefined })} className={field} />
+        </Field>
+        <Field label="Fade out">
+          <input type="number" min={0} step={0.1} value={fx.fade_out_seconds ?? 0} onChange={(e) => updateFX({ fade_out_seconds: Number(e.target.value) || undefined })} className={field} />
+        </Field>
+      </div>
+      <div className="grid grid-cols-2 gap-2">
+        <label className="flex items-center gap-2 text-xs text-text-muted">
+          <input type="checkbox" checked={!!fx.normalize} onChange={(e) => updateFX({ normalize: e.target.checked || undefined })} />
+          Normalize
+        </label>
+        <label className="flex items-center gap-2 text-xs text-text-muted">
+          <input type="checkbox" checked={!!fx.trim_silence} onChange={(e) => updateFX({ trim_silence: e.target.checked || undefined })} />
+          Trim silence
+        </label>
+      </div>
+      {clip.ai?.audio_analysis && (
+        <div className="text-[11px] text-text-dim">
+          actual {clip.ai.audio_analysis.duration_seconds?.toFixed(1)}s
+          {clip.ai.audio_analysis.peak_db ? ` · peak ${clip.ai.audio_analysis.peak_db.toFixed(1)} dB` : ""}
+          {clip.ai.audio_analysis.rms_db ? ` · rms ${clip.ai.audio_analysis.rms_db.toFixed(1)} dB` : ""}
+        </div>
+      )}
+    </div>
   );
 }
 

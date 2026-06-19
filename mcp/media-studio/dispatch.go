@@ -310,8 +310,20 @@ func (a *App) toolMediaGenerate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 
 	for i, item := range media {
 		upstreamURLs = append(upstreamURLs, item.UpstreamURL)
+		if item.Analysis == nil {
+			item.Analysis = analyzeGeneratedAudio(item)
+			media[i].Analysis = item.Analysis
+		}
+		if item.Analysis != nil && item.DurationMs <= 0 && item.Analysis.DurationSeconds > 0 {
+			item.DurationMs = int64(item.Analysis.DurationSeconds * 1000)
+			media[i].DurationMs = item.DurationMs
+		}
 		totalDurationMs += item.DurationMs
-		totalActualSeconds += mediaActualDurationSeconds(item)
+		if item.Analysis != nil && item.Analysis.DurationSeconds > 0 {
+			totalActualSeconds += item.Analysis.DurationSeconds
+		} else {
+			totalActualSeconds += mediaActualDurationSeconds(item)
+		}
 
 		body, err := mediaBytes(item)
 		if err != nil {
@@ -338,6 +350,7 @@ func (a *App) toolMediaGenerate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 
 	size := strArg(args, "size", "")
 	extraJSON := encodeExtras(kind, args)
+	extraJSON = addMediaAnalysisExtras(extraJSON, media)
 	costUSD := computeGenerationCost(ctx, bound, kind, capability, model, args)
 	record := generationRecord{
 		ProjectID:                pid,
@@ -402,6 +415,7 @@ func (a *App) toolMediaGenerate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 		StorageFolder:            storageFolder,
 		EstimatedDurationSeconds: estimatedSeconds,
 		ActualDurationSeconds:    totalActualSeconds,
+		AudioAnalysis:            firstAudioAnalysis(media),
 	}), nil
 }
 
@@ -692,6 +706,41 @@ func encodeExtras(kind string, args map[string]any) string {
 		return "{}"
 	}
 	return string(b)
+}
+
+func addMediaAnalysisExtras(extraJSON string, media []generatedMedia) string {
+	first := firstAudioAnalysis(media)
+	if first == nil {
+		return extraJSON
+	}
+	extras := map[string]any{}
+	if strings.TrimSpace(extraJSON) != "" {
+		_ = json.Unmarshal([]byte(extraJSON), &extras)
+	}
+	if extras == nil {
+		extras = map[string]any{}
+	}
+	extras["audio_analysis"] = first
+	if first.PeakDB != 0 {
+		extras["peak_db"] = first.PeakDB
+	}
+	if first.RMSDB != 0 {
+		extras["rms_db"] = first.RMSDB
+	}
+	b, err := json.Marshal(extras)
+	if err != nil {
+		return extraJSON
+	}
+	return string(b)
+}
+
+func firstAudioAnalysis(media []generatedMedia) *AudioAnalysis {
+	for _, m := range media {
+		if m.Analysis != nil {
+			return m.Analysis
+		}
+	}
+	return nil
 }
 
 // computeGenerationCost looks up Venice's per-model rate (cached or

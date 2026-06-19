@@ -48,6 +48,9 @@ func (e *localFFmpegExecutor) Render(
 	if visual == nil {
 		inputs := make([]string, 0, len(audioClips)+1)
 		for i, c := range audioClips {
+			if clipAssetType(c, "audio") == "silence" {
+				continue
+			}
 			url, err := resolveAssetURL(app, c.Asset.Src)
 			if err != nil {
 				cleanup()
@@ -88,6 +91,9 @@ func (e *localFFmpegExecutor) Render(
 		inputs = append(inputs, url)
 	}
 	for i, c := range audioClips {
+		if clipAssetType(c, "audio") == "silence" {
+			continue
+		}
 		url, err := resolveAssetURL(app, c.Asset.Src)
 		if err != nil {
 			cleanup()
@@ -226,16 +232,19 @@ func buildLocalFFmpegArgs(edit *Edit, output Output, inputs []string, soundtrack
 	fmt.Fprintf(&filter, "concat=n=%d:v=1:a=1[vcat][acat];", n)
 
 	mixLabels := []string{"[acat]"}
+	audioInputCursor := visualCount
 	for i, c := range audioClips {
-		inputIdx := visualCount + i
 		delayMS := int(c.Start * 1000)
 		if delayMS < 0 {
 			delayMS = 0
 		}
-		fmt.Fprintf(&filter,
-			"[%d:a]apad,atrim=duration=%s,asetpts=PTS-STARTPTS,adelay=%d|%d,volume=%g[ta%d];",
-			inputIdx, trimFloat(clipDuration(c)), delayMS, delayMS, clipVolume(c), i,
-		)
+		if clipAssetType(c, "audio") == "silence" {
+			fmt.Fprintf(&filter, "anullsrc=channel_layout=stereo:sample_rate=44100,atrim=duration=%s,adelay=%d|%d[ta%d];",
+				trimFloat(clipDuration(c)), delayMS, delayMS, i)
+		} else {
+			writeTimedAudioFilter(&filter, audioInputCursor, c, delayMS, fmt.Sprintf("ta%d", i))
+			audioInputCursor++
+		}
 		mixLabels = append(mixLabels, fmt.Sprintf("[ta%d]", i))
 	}
 
@@ -284,15 +293,19 @@ func buildLocalAudioFFmpegArgs(edit *Edit, output Output, inputs []string, sound
 
 	var filter strings.Builder
 	mixLabels := make([]string, 0, len(audioClips)+1)
+	inputCursor := 0
 	for i, c := range audioClips {
 		delayMS := int(c.Start * 1000)
 		if delayMS < 0 {
 			delayMS = 0
 		}
-		fmt.Fprintf(&filter,
-			"[%d:a]apad,atrim=duration=%s,asetpts=PTS-STARTPTS,adelay=%d|%d,volume=%g[ta%d];",
-			i, trimFloat(clipDuration(c)), delayMS, delayMS, clipVolume(c), i,
-		)
+		if clipAssetType(c, "audio") == "silence" {
+			fmt.Fprintf(&filter, "anullsrc=channel_layout=stereo:sample_rate=44100,atrim=duration=%s,adelay=%d|%d[ta%d];",
+				trimFloat(clipDuration(c)), delayMS, delayMS, i)
+		} else {
+			writeTimedAudioFilter(&filter, inputCursor, c, delayMS, fmt.Sprintf("ta%d", i))
+			inputCursor++
+		}
 		mixLabels = append(mixLabels, fmt.Sprintf("[ta%d]", i))
 	}
 	if soundtrackIdx >= 0 {
@@ -325,6 +338,42 @@ func buildLocalAudioFFmpegArgs(edit *Edit, output Output, inputs []string, sound
 	args = append(args, audioCodecArgs(output)...)
 	args = append(args, outFile)
 	return args
+}
+
+func writeTimedAudioFilter(filter *strings.Builder, inputIdx int, c Clip, delayMS int, label string) {
+	chain := []string{}
+	if c.Audio != nil && c.Audio.TrimSilence {
+		chain = append(chain, "silenceremove=start_periods=1:start_threshold=-50dB:start_silence=0.05")
+	}
+	chain = append(chain, "apad", "atrim=duration="+trimFloat(clipDuration(c)), "asetpts=PTS-STARTPTS")
+	if c.Audio != nil {
+		if c.Audio.GainDB != 0 {
+			chain = append(chain, "volume="+trimFloat(c.Audio.GainDB)+"dB")
+		}
+		if c.Audio.Normalize {
+			i := c.Audio.LoudnessTarget
+			if i == 0 {
+				i = -18
+			}
+			tp := c.Audio.PeakLimitDB
+			if tp == 0 {
+				tp = -3
+			}
+			chain = append(chain, fmt.Sprintf("loudnorm=I=%s:TP=%s:LRA=11", trimFloat(i), trimFloat(tp)))
+		}
+		if c.Audio.FadeInSeconds > 0 {
+			chain = append(chain, "afade=t=in:st=0:d="+trimFloat(c.Audio.FadeInSeconds))
+		}
+		if c.Audio.FadeOutSeconds > 0 {
+			st := clipDuration(c) - c.Audio.FadeOutSeconds
+			if st < 0 {
+				st = 0
+			}
+			chain = append(chain, "afade=t=out:st="+trimFloat(st)+":d="+trimFloat(c.Audio.FadeOutSeconds))
+		}
+	}
+	chain = append(chain, fmt.Sprintf("adelay=%d|%d", delayMS, delayMS), "volume="+trimFloat(clipVolume(c)))
+	fmt.Fprintf(filter, "[%d:a]%s[%s];", inputIdx, strings.Join(chain, ","), label)
 }
 
 func audioCodecArgs(output Output) []string {

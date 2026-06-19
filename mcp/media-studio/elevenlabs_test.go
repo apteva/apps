@@ -155,8 +155,8 @@ func TestToolMediaGenerate_ElevenLabsTTS_WithStorage(t *testing.T) {
 	if meta["kind"] != "audio_tts" || meta["provider"] != "elevenlabs" {
 		t.Fatalf("unexpected meta: %+v", meta)
 	}
-	if got := meta["estimated_duration_seconds"].(float64); got < 5 {
-		t.Fatalf("estimated duration = %v, want at least 5s", got)
+	if got := meta["estimated_duration_seconds"].(float64); got < 1 {
+		t.Fatalf("estimated duration = %v, want a non-zero speech estimate", got)
 	}
 }
 
@@ -216,6 +216,34 @@ func TestToolMediaGenerate_ElevenLabsMusic_UsesGenerateMusic(t *testing.T) {
 	}
 	if pf.executeCalls[0].Input["music_length_ms"] != 30000 {
 		t.Fatalf("duration not mapped: %+v", pf.executeCalls[0].Input)
+	}
+}
+
+func TestEstimatedDurationSeconds_TTSPunctuationAndSpeed(t *testing.T) {
+	slow := estimatedDurationSeconds("audio_tts", map[string]any{
+		"prompt": "Breathe in. Hold.\nNow breathe out, slowly.",
+		"options": map[string]any{
+			"voice_settings": map[string]any{"speed": 0.5},
+		},
+	})
+	fast := estimatedDurationSeconds("audio_tts", map[string]any{
+		"prompt": "Breathe in. Hold.\nNow breathe out, slowly.",
+		"options": map[string]any{
+			"voice_settings": map[string]any{"speed": 2.0},
+		},
+	})
+	if slow <= fast {
+		t.Fatalf("slow estimate %v should be greater than fast estimate %v", slow, fast)
+	}
+	if fast <= 0 {
+		t.Fatalf("fast estimate should still be positive, got %v", fast)
+	}
+}
+
+func TestParseVolumeDetect(t *testing.T) {
+	peak, rms := parseVolumeDetect("[Parsed_volumedetect_0] mean_volume: -22.4 dB\n[Parsed_volumedetect_0] max_volume: -3.1 dB")
+	if peak != -3.1 || rms != -22.4 {
+		t.Fatalf("peak/rms = %v/%v", peak, rms)
 	}
 }
 

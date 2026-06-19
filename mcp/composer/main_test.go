@@ -242,11 +242,33 @@ func TestValidateEdit_AcceptsAIPlaceholderWithEstimate(t *testing.T) {
 		t.Fatalf("AI placeholder with estimate should validate: %v", err)
 	}
 	c := e.Timeline.Tracks[0].Clips[0]
-	if c.DurationMode != "fit_generated" {
-		t.Fatalf("duration mode = %q, want fit_generated", c.DurationMode)
+	if c.DurationMode != "fit_generated_reflow" {
+		t.Fatalf("duration mode = %q, want fit_generated_reflow", c.DurationMode)
 	}
 	if c.Length != 5 || c.EstimatedLength != 5 {
 		t.Fatalf("length metadata = length %v estimated %v, want 5/5", c.Length, c.EstimatedLength)
+	}
+}
+
+func TestResolveRelativeClipStarts_UsesActualGeneratedDuration(t *testing.T) {
+	e, err := parseEditJSON(`{"timeline":{"tracks":[
+		{"type":"audio","clips":[
+			{"uid":"voice-1","asset":{"type":"audio","src":"storage:1"},"start":0,"length":5,"duration_mode":"fit_generated_reflow",
+				"ai":{"media_kind":"audio_tts","prompt":"first","actual_duration_seconds":7}},
+			{"uid":"voice-2","asset":{"type":"audio","src":"storage:2"},"start":10,"length":3,"after_clip_id":"voice-1","gap_seconds":5}
+		]}
+	]}}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !syncClipDurationFromAI(&e.Timeline.Tracks[0].Clips[0]) {
+		t.Fatal("expected first clip duration to sync")
+	}
+	if !resolveRelativeClipStarts(e) {
+		t.Fatal("expected relative start to change")
+	}
+	if got := e.Timeline.Tracks[0].Clips[1].Start; got != 12 {
+		t.Fatalf("second clip start = %v, want 12", got)
 	}
 }
 
@@ -305,6 +327,41 @@ func TestBuildLocalAudioFFmpegArgs_MP3WithSilenceGap(t *testing.T) {
 	}
 	if !strings.Contains(cmd, "libmp3lame") || !strings.Contains(cmd, "-map [aout]") {
 		t.Errorf("mp3 audio mapping/codec missing: %s", cmd)
+	}
+}
+
+func TestValidateEdit_AcceptsExplicitSilenceClip(t *testing.T) {
+	e, err := parseEditJSON(`{"timeline":{"tracks":[
+		{"type":"audio","clips":[
+			{"uid":"silence-1","asset":{"type":"silence"},"start":2,"length":5}
+		]}
+	]}}`)
+	if err != nil {
+		t.Fatalf("silence clip should validate: %v", err)
+	}
+	if got := editDurationSeconds(e); got != 7 {
+		t.Fatalf("duration = %v, want 7", got)
+	}
+}
+
+func TestBuildLocalAudioFFmpegArgs_SilenceAndAudioFX(t *testing.T) {
+	e, _ := parseEditJSON(`{"timeline":{"tracks":[
+		{"type":"audio","clips":[
+			{"asset":{"src":"https://a.mp3","type":"audio"},"start":0,"length":2,"audio":{"gain_db":6,"normalize":true,"fade_in_seconds":0.2,"fade_out_seconds":0.3}},
+			{"asset":{"type":"silence"},"start":2,"length":5},
+			{"asset":{"src":"https://b.mp3","type":"audio"},"start":7,"length":3}
+		]}
+	]}}`)
+	args := buildLocalAudioFFmpegArgs(e, Output{Format: "mp3"}, []string{"https://a.mp3", "https://b.mp3"}, -1, "out.mp3")
+	cmd := strings.Join(args, " ")
+	if !strings.Contains(cmd, "anullsrc=channel_layout=stereo") || !strings.Contains(cmd, "atrim=duration=5") {
+		t.Fatalf("silence clip should synthesize silence: %s", cmd)
+	}
+	if !strings.Contains(cmd, "volume=6dB") || !strings.Contains(cmd, "loudnorm=I=-18:TP=-3") {
+		t.Fatalf("audio processing filters missing: %s", cmd)
+	}
+	if strings.Count(cmd, " -i ") != 2 {
+		t.Fatalf("silence clip should not add an input: %s", cmd)
 	}
 }
 

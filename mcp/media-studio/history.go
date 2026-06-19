@@ -242,7 +242,7 @@ func generationMap(pid string, id, count, durationMs int64, kind, prompt, revise
 	if len(storageIDs) == 0 {
 		localURL = localCacheURL(id)
 	}
-	return map[string]any{
+	out := map[string]any{
 		"id":                         id,
 		"kind":                       kind,
 		"prompt":                     prompt,
@@ -266,6 +266,19 @@ func generationMap(pid string, id, count, durationMs int64, kind, prompt, revise
 		"cost_usd":                   costUSD,
 		"created_at":                 createdAt,
 	}
+	var extras map[string]any
+	if err := json.Unmarshal([]byte(extraJSON), &extras); err == nil && len(extras) > 0 {
+		if v, ok := extras["audio_analysis"]; ok {
+			out["audio_analysis"] = v
+		}
+		if v, ok := extras["peak_db"]; ok {
+			out["peak_db"] = v
+		}
+		if v, ok := extras["rms_db"]; ok {
+			out["rms_db"] = v
+		}
+	}
+	return out
 }
 
 // ─── HTTP /generations — panel gallery ─────────────────────────────

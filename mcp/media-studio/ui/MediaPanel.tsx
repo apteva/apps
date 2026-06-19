@@ -97,6 +97,16 @@ interface Generation {
   local_cache_url?: string;
   count: number;
   cost_usd: number;
+  audio_analysis?: {
+    duration_seconds?: number;
+    peak_db?: number;
+    rms_db?: number;
+    sample_rate?: number;
+    channels?: number;
+    codec?: string;
+  };
+  peak_db?: number;
+  rms_db?: number;
   status?: "draft" | "generating" | "queued" | "ready" | "failed" | string;
   request_json?: string;
   created_at: string;
@@ -3100,6 +3110,17 @@ function DetailAside({
           <Row label="Count" value={String(selected.count)} />
           {formatCost(selected.cost_usd) && (
             <Row label="Cost" value={formatCost(selected.cost_usd)} />
+          )}
+          {selected.audio_analysis && (
+            <Row
+              label="Audio"
+              value={[
+                selected.audio_analysis.duration_seconds ? `${selected.audio_analysis.duration_seconds.toFixed(1)}s` : "",
+                selected.audio_analysis.peak_db ? `peak ${selected.audio_analysis.peak_db.toFixed(1)} dB` : "",
+                selected.audio_analysis.rms_db ? `rms ${selected.audio_analysis.rms_db.toFixed(1)} dB` : "",
+                selected.audio_analysis.codec || "",
+              ].filter(Boolean).join(" · ")}
+            />
           )}
           <Row label="Created" value={new Date(selected.created_at).toLocaleString()} />
           {selected.revised_prompt && <Row label="Revised" value={selected.revised_prompt} />}

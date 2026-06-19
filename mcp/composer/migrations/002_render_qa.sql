@@ -1,0 +1,1 @@
+ALTER TABLE renders ADD COLUMN qa_json TEXT NOT NULL DEFAULT '{}';

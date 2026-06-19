@@ -42,10 +42,13 @@ type Clip struct {
 	Start           float64     `json:"start"`  // seconds from composition start
 	Length          float64     `json:"length"` // seconds
 	Duration        float64     `json:"duration,omitempty"`
-	DurationMode    string      `json:"duration_mode,omitempty"` // fixed_trim_pad | fit_generated
+	DurationMode    string      `json:"duration_mode,omitempty"` // fixed_trim_pad | fit_generated | fit_generated_keep_start | fit_generated_reflow
 	EstimatedLength float64     `json:"estimated_length,omitempty"`
 	ActualLength    float64     `json:"actual_length,omitempty"`
 	Volume          float64     `json:"volume,omitempty"`
+	AfterClipID     string      `json:"after_clip_id,omitempty"`
+	GapSeconds      float64     `json:"gap_seconds,omitempty"`
+	Audio           *AudioFX    `json:"audio,omitempty"`
 	Transition      *Transition `json:"transition,omitempty"`
 	Text            *TextOver   `json:"text,omitempty"`
 	AI              *AIAsset    `json:"ai,omitempty"`
@@ -77,7 +80,29 @@ type AIAsset struct {
 	JobID                    int64          `json:"job_id,omitempty"`
 	EstimatedDurationSeconds float64        `json:"estimated_duration_seconds,omitempty"`
 	ActualDurationSeconds    float64        `json:"actual_duration_seconds,omitempty"`
+	AudioAnalysis            *AudioAnalysis `json:"audio_analysis,omitempty"`
+	PeakDB                   float64        `json:"peak_db,omitempty"`
+	RMSDB                    float64        `json:"rms_db,omitempty"`
 	Error                    string         `json:"error,omitempty"`
+}
+
+type AudioFX struct {
+	GainDB         float64 `json:"gain_db,omitempty"`
+	Normalize      bool    `json:"normalize,omitempty"`
+	LoudnessTarget float64 `json:"loudness_target,omitempty"`
+	PeakLimitDB    float64 `json:"peak_limit_db,omitempty"`
+	FadeInSeconds  float64 `json:"fade_in_seconds,omitempty"`
+	FadeOutSeconds float64 `json:"fade_out_seconds,omitempty"`
+	TrimSilence    bool    `json:"trim_silence,omitempty"`
+}
+
+type AudioAnalysis struct {
+	DurationSeconds float64 `json:"duration_seconds,omitempty"`
+	PeakDB          float64 `json:"peak_db,omitempty"`
+	RMSDB           float64 `json:"rms_db,omitempty"`
+	SampleRate      int     `json:"sample_rate,omitempty"`
+	Channels        int     `json:"channels,omitempty"`
+	Codec           string  `json:"codec,omitempty"`
 }
 
 type Transition struct {
@@ -132,20 +157,23 @@ func validateEdit(e *Edit) error {
 		}
 		for i := range track.Clips {
 			c := &track.Clips[i]
-			if c.Asset.Src == "" && c.AI == nil {
+			at := clipAssetType(*c, tt)
+			if c.Asset.Src == "" && c.AI == nil && at != "silence" {
 				return fmt.Errorf("track[%d].clip[%d]: asset.src required", ti, i)
 			}
-			at := clipAssetType(*c, tt)
 			if at == "" {
 				at = "video"
 			}
-			if at != "video" && at != "image" && at != "audio" {
+			if at != "video" && at != "image" && at != "audio" && at != "silence" {
 				return fmt.Errorf("track[%d].clip[%d]: unsupported asset.type %q", ti, i, c.Asset.Type)
 			}
 			if tt == "visual" && at == "audio" {
 				return fmt.Errorf("track[%d].clip[%d]: audio assets belong on audio tracks", ti, i)
 			}
-			if tt == "audio" && at != "audio" {
+			if tt == "visual" && at == "silence" {
+				return fmt.Errorf("track[%d].clip[%d]: silence clips belong on audio tracks", ti, i)
+			}
+			if tt == "audio" && at != "audio" && at != "silence" {
 				return fmt.Errorf("track[%d].clip[%d]: audio tracks require audio assets", ti, i)
 			}
 			if clipDuration(*c) <= 0 {
@@ -153,6 +181,12 @@ func validateEdit(e *Edit) error {
 			}
 			if c.Volume < 0 || c.Volume > 1 {
 				return fmt.Errorf("track[%d].clip[%d]: volume must be 0..1", ti, i)
+			}
+			if c.GapSeconds < 0 {
+				return fmt.Errorf("track[%d].clip[%d]: gap_seconds must be >= 0", ti, i)
+			}
+			if err := validateAudioFX(c.Audio); err != nil {
+				return fmt.Errorf("track[%d].clip[%d]: %w", ti, i, err)
 			}
 			if tt == "audio" && c.Text != nil {
 				return fmt.Errorf("track[%d].clip[%d]: text overlays are only supported on visual clips", ti, i)
@@ -187,6 +221,25 @@ func validateEdit(e *Edit) error {
 		if s.Volume < 0 || s.Volume > 1 {
 			return errors.New("soundtrack.volume must be 0..1")
 		}
+	}
+	return nil
+}
+
+func validateAudioFX(fx *AudioFX) error {
+	if fx == nil {
+		return nil
+	}
+	if fx.FadeInSeconds < 0 || fx.FadeOutSeconds < 0 {
+		return errors.New("audio fade durations must be >= 0")
+	}
+	if fx.LoudnessTarget != 0 && (fx.LoudnessTarget > -5 || fx.LoudnessTarget < -40) {
+		return errors.New("audio loudness_target must be between -40 and -5 LUFS")
+	}
+	if fx.PeakLimitDB != 0 && (fx.PeakLimitDB > 0 || fx.PeakLimitDB < -20) {
+		return errors.New("audio peak_limit_db must be between -20 and 0 dB")
+	}
+	if fx.GainDB > 24 || fx.GainDB < -60 {
+		return errors.New("audio gain_db must be between -60 and 24")
 	}
 	return nil
 }
@@ -317,7 +370,8 @@ func trackKind(t Track) string {
 		if t.Type == "" {
 			allAudio := len(t.Clips) > 0
 			for _, c := range t.Clips {
-				if clipAssetType(c, "") != "audio" {
+				at := clipAssetType(c, "")
+				if at != "audio" && at != "silence" {
 					allAudio = false
 					break
 				}
@@ -344,6 +398,8 @@ func clipAssetType(c Clip, trackType string) string {
 			return "audio"
 		}
 		return "video"
+	case "silence", "blank", "gap":
+		return "silence"
 	default:
 		return strings.ToLower(strings.TrimSpace(c.Asset.Type))
 	}
@@ -410,8 +466,10 @@ func normalizeClipDurationMetadata(c *Clip) {
 
 func defaultDurationMode(kind string) string {
 	switch strings.ToLower(strings.TrimSpace(kind)) {
-	case "audio_tts", "avatar":
-		return "fit_generated"
+	case "audio_tts":
+		return "fit_generated_reflow"
+	case "avatar":
+		return "fit_generated_keep_start"
 	default:
 		return "fixed_trim_pad"
 	}

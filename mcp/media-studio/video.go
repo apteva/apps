@@ -215,7 +215,7 @@ func heygenAvatarQuote(providerSlug string, args map[string]any) float64 {
 	opts, _ := args["options"].(map[string]any)
 	seconds := floatArg(opts, "estimated_duration_seconds", 0)
 	if seconds <= 0 {
-		seconds = estimateSpeechSeconds(strArg(args, "prompt", ""))
+		seconds = estimateSpeechSecondsWithArgs(strArg(args, "prompt", ""), args)
 	}
 	if seconds <= 0 {
 		return 0
@@ -234,18 +234,6 @@ func heygenAvatarQuote(providerSlug string, args map[string]any) float64 {
 		}
 	}
 	return seconds * rate
-}
-
-func estimateSpeechSeconds(script string) float64 {
-	words := len(strings.Fields(script))
-	if words == 0 {
-		return 0
-	}
-	seconds := float64(words) / 2.5
-	if seconds < 5 {
-		return 5
-	}
-	return seconds
 }
 
 func floatArg(m map[string]any, key string, def float64) float64 {

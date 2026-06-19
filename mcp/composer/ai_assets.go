@@ -79,6 +79,9 @@ func materializeAIAssets(ctx *sdk.AppCtx, edit *Edit, compositionID int64, proje
 			}
 		}
 	}
+	if resolveRelativeClipStarts(edit) {
+		out.Changed = true
+	}
 	if out.Changed {
 		b, _ := json.Marshal(edit)
 		_, _ = ctx.AppDB().Exec(
@@ -87,6 +90,39 @@ func materializeAIAssets(ctx *sdk.AppCtx, edit *Edit, compositionID int64, proje
 		)
 	}
 	return out, nil
+}
+
+func resolveRelativeClipStarts(edit *Edit) bool {
+	if edit == nil {
+		return false
+	}
+	changed := false
+	for ti := range edit.Timeline.Tracks {
+		track := &edit.Timeline.Tracks[ti]
+		byID := map[string]*Clip{}
+		for i := range track.Clips {
+			if track.Clips[i].UID != "" {
+				byID[track.Clips[i].UID] = &track.Clips[i]
+			}
+		}
+		var prev *Clip
+		for i := range track.Clips {
+			clip := &track.Clips[i]
+			target := prev
+			if clip.AfterClipID != "" {
+				target = byID[clip.AfterClipID]
+			}
+			if target != nil && (clip.AfterClipID != "" || clip.GapSeconds > 0 || durationModeReflows(target.DurationMode)) {
+				nextStart := target.Start + clipDuration(*target) + clip.GapSeconds
+				if trimFloat(nextStart) != trimFloat(clip.Start) {
+					clip.Start = nextStart
+					changed = true
+				}
+			}
+			prev = clip
+		}
+	}
+	return changed
 }
 
 func materializeOneAIAsset(ctx *sdk.AppCtx, ai *AIAsset, label, projectID string) (bool, string, error) {
@@ -178,6 +214,21 @@ func materializeOneAIAsset(ctx *sdk.AppCtx, ai *AIAsset, label, projectID string
 	if v := floatNumber(meta["actual_duration_seconds"]); v > 0 {
 		ai.ActualDurationSeconds = v
 	}
+	if a := audioAnalysisFromMeta(meta["audio_analysis"]); a != nil {
+		ai.AudioAnalysis = a
+	}
+	if v := floatNumber(meta["peak_db"]); v != 0 {
+		ai.PeakDB = v
+		if ai.AudioAnalysis != nil {
+			ai.AudioAnalysis.PeakDB = v
+		}
+	}
+	if v := floatNumber(meta["rms_db"]); v != 0 {
+		ai.RMSDB = v
+		if ai.AudioAnalysis != nil {
+			ai.AudioAnalysis.RMSDB = v
+		}
+	}
 	if ids := numberSlice(meta["storage_ids"]); len(ids) > 0 {
 		ai.StorageID = ids[0]
 		ai.Status = "ready"
@@ -206,7 +257,7 @@ func syncClipDurationFromAI(c *Clip) bool {
 		c.DurationMode = defaultDurationMode(c.AI.MediaKind)
 		changed = true
 	}
-	if c.DurationMode == "fit_generated" && c.AI.ActualDurationSeconds > 0 && c.Length != c.AI.ActualDurationSeconds {
+	if durationModeFitsGenerated(c.DurationMode) && c.AI.ActualDurationSeconds > 0 && c.Length != c.AI.ActualDurationSeconds {
 		c.Length = c.AI.ActualDurationSeconds
 		changed = true
 	}
@@ -215,6 +266,19 @@ func syncClipDurationFromAI(c *Clip) bool {
 		changed = true
 	}
 	return changed
+}
+
+func durationModeFitsGenerated(mode string) bool {
+	switch strings.ToLower(strings.TrimSpace(mode)) {
+	case "fit_generated", "fit_generated_keep_start", "fit_generated_reflow":
+		return true
+	default:
+		return false
+	}
+}
+
+func durationModeReflows(mode string) bool {
+	return strings.ToLower(strings.TrimSpace(mode)) == "fit_generated_reflow"
 }
 
 func aiCacheKey(ai *AIAsset) string {
@@ -296,4 +360,22 @@ func numberSlice(v any) []int64 {
 		return out
 	}
 	return nil
+}
+
+func audioAnalysisFromMeta(v any) *AudioAnalysis {
+	m, _ := v.(map[string]any)
+	if m == nil {
+		return nil
+	}
+	a := &AudioAnalysis{
+		DurationSeconds: floatNumber(m["duration_seconds"]),
+		PeakDB:          floatNumber(m["peak_db"]),
+		RMSDB:           floatNumber(m["rms_db"]),
+		SampleRate:      int(floatNumber(m["sample_rate"])),
+		Channels:        int(floatNumber(m["channels"])),
+	}
+	if codec, _ := m["codec"].(string); codec != "" {
+		a.Codec = codec
+	}
+	return a
 }

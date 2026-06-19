@@ -36,6 +36,7 @@ func (a *App) toolCompositionCreate(ctx *sdk.AppCtx, args map[string]any) (any, 
 	if err := validateEditOutput(edit, output); err != nil {
 		return nil, err
 	}
+	resolveRelativeClipStarts(edit)
 	editJSON, _ := json.Marshal(edit)
 	outputJSON, _ := json.Marshal(output)
 	pid := projectScope(ctx)
@@ -124,6 +125,7 @@ func (a *App) toolCompositionUpdate(ctx *sdk.AppCtx, args map[string]any) (any, 
 	if err := validateEditOutput(edit, output); err != nil {
 		return nil, err
 	}
+	resolveRelativeClipStarts(edit)
 
 	newEditJSON, _ := json.Marshal(edit)
 	newOutputJSON, _ := json.Marshal(output)
@@ -238,15 +240,15 @@ func loadComposition(ctx *sdk.AppCtx, id int64) (map[string]any, error) {
 
 func loadLatestRender(ctx *sdk.AppCtx, compID int64) map[string]any {
 	var (
-		id, storageID, durMS, attempts int64
-		executor, status, errMsg       string
-		costUSD                        float64
-		createdAt, updatedAt           string
+		id, storageID, durMS, attempts   int64
+		executor, status, errMsg, qaJSON string
+		costUSD                          float64
+		createdAt, updatedAt             string
 	)
 	err := ctx.AppDB().QueryRow(
-		`SELECT id, executor, status, storage_id, duration_ms, cost_usd, error, attempts, created_at, updated_at
+		`SELECT id, executor, status, storage_id, duration_ms, cost_usd, error, attempts, created_at, updated_at, qa_json
 		 FROM renders WHERE composition_id=? ORDER BY id DESC LIMIT 1`, compID,
-	).Scan(&id, &executor, &status, &storageID, &durMS, &costUSD, &errMsg, &attempts, &createdAt, &updatedAt)
+	).Scan(&id, &executor, &status, &storageID, &durMS, &costUSD, &errMsg, &attempts, &createdAt, &updatedAt, &qaJSON)
 	if err != nil {
 		return nil
 	}
@@ -261,6 +263,7 @@ func loadLatestRender(ctx *sdk.AppCtx, compID int64) map[string]any {
 		"attempts":    attempts,
 		"created_at":  createdAt,
 		"updated_at":  updatedAt,
+		"qa":          decodeRenderQA(qaJSON),
 	}
 	if storageID > 0 {
 		row["storage_url"] = "/api/apps/storage/files/" + strconv.FormatInt(storageID, 10) + "/content"
@@ -346,7 +349,9 @@ func (a *App) toolCompositionRender(ctx *sdk.AppCtx, args map[string]any) (any, 
 	// Sync executors deliver bytes via LocalPath. Persist to storage
 	// (when bound) or local cache (when not).
 	var storageID int64
+	qa := RenderQA{Warnings: timelineWarnings(edit)}
 	if result.Sync && result.LocalPath != "" && !strings.HasPrefix(result.LocalPath, "storage://") {
+		qa = analyzeRender(result.LocalPath, edit)
 		storageID = saveRenderOutput(ctx, result.LocalPath, output.Format, pid, id)
 		if storageID == 0 {
 			if cacheErr := writeLocalCacheFromPath(renderID, result.LocalPath, output.Format); cacheErr != nil {
@@ -358,9 +363,9 @@ func (a *App) toolCompositionRender(ctx *sdk.AppCtx, args map[string]any) (any, 
 	ctx.AppDB().Exec(
 		`UPDATE renders
 		 SET status='complete', storage_id=?, duration_ms=?, cost_usd=?,
-		     ffmpeg_command=?, updated_at=CURRENT_TIMESTAMP
+		     ffmpeg_command=?, qa_json=?, updated_at=CURRENT_TIMESTAMP
 		 WHERE id=?`,
-		storageID, result.DurationMS, result.CostUSD, result.FFmpegCommand, renderID,
+		storageID, result.DurationMS, result.CostUSD, result.FFmpegCommand, encodeRenderQA(qa), renderID,
 	)
 
 	ctx.EmitWithProject("composition.rendered", pid, map[string]any{
@@ -369,6 +374,7 @@ func (a *App) toolCompositionRender(ctx *sdk.AppCtx, args map[string]any) (any, 
 		"executor":       exec.Name(),
 		"storage_id":     storageID,
 		"duration_ms":    result.DurationMS,
+		"qa":             qa,
 	})
 
 	return map[string]any{
@@ -378,6 +384,7 @@ func (a *App) toolCompositionRender(ctx *sdk.AppCtx, args map[string]any) (any, 
 		"executor":    exec.Name(),
 		"duration_ms": result.DurationMS,
 		"cost_usd":    result.CostUSD,
+		"qa":          qa,
 	}, nil
 }
 
@@ -444,14 +451,14 @@ func (a *App) toolRenderStatus(ctx *sdk.AppCtx, args map[string]any) (any, error
 	}
 	var (
 		compID, storageID, durMS, attempts int64
-		executor, status, errMsg           string
+		executor, status, errMsg, qaJSON   string
 		costUSD                            float64
 		createdAt, updatedAt               string
 	)
 	err := ctx.AppDB().QueryRow(
-		`SELECT composition_id, executor, status, storage_id, duration_ms, cost_usd, error, attempts, created_at, updated_at
+		`SELECT composition_id, executor, status, storage_id, duration_ms, cost_usd, error, attempts, created_at, updated_at, qa_json
 		 FROM renders WHERE id=?`, id,
-	).Scan(&compID, &executor, &status, &storageID, &durMS, &costUSD, &errMsg, &attempts, &createdAt, &updatedAt)
+	).Scan(&compID, &executor, &status, &storageID, &durMS, &costUSD, &errMsg, &attempts, &createdAt, &updatedAt, &qaJSON)
 	if err != nil {
 		return nil, fmt.Errorf("not found: %w", err)
 	}
@@ -467,6 +474,7 @@ func (a *App) toolRenderStatus(ctx *sdk.AppCtx, args map[string]any) (any, error
 		"attempts":       attempts,
 		"created_at":     createdAt,
 		"updated_at":     updatedAt,
+		"qa":             decodeRenderQA(qaJSON),
 	}, nil
 }
 
