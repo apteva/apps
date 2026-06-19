@@ -30,6 +30,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	tk "github.com/apteva/app-sdk/testkit"
 )
 
 func TestHTTPUpload_JSONBodyHonoursQueryStringProjectID(t *testing.T) {
@@ -138,5 +140,42 @@ func TestHTTPUpload_MultipartPersistsSourceAndCommaTags(t *testing.T) {
 	}
 	if len(wantTags) != 0 {
 		t.Fatalf("tags = %#v, missing %#v", got.Tags, wantTags)
+	}
+}
+
+func TestHTTPUpload_RejectsMultipartOverMaxWithoutTruncating(t *testing.T) {
+	ctx := newTestCtx(t, tk.WithConfig(map[string]string{"max_upload_size_mb": "1"}))
+	app := &App{}
+
+	var body bytes.Buffer
+	mw := multipart.NewWriter(&body)
+	_ = mw.WriteField("folder", "/renders/")
+	_ = mw.WriteField("source", "media-render")
+	_ = mw.WriteField("tags", "render")
+	part, err := mw.CreateFormFile("file", "too-big.mov")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := part.Write(bytes.Repeat([]byte("x"), 1024*1024+1)); err != nil {
+		t.Fatal(err)
+	}
+	if err := mw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/files?project_id=test-proj", &body)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	rec := httptest.NewRecorder()
+	app.httpUpload(rec, req)
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+
+	var count int
+	if err := ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM files`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("oversized upload inserted %d file rows", count)
 	}
 }

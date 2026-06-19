@@ -193,12 +193,10 @@ func (e *remoteExecutor) Execute(ctx context.Context, app *sdk.AppCtx, row *Rend
 	registerRemoteKill(ctx, app, e.hostID, row.ID)
 
 	// Live progress: poll the remote progress.log every few seconds
-	// while ffmpeg runs. Bump the row to 50 % on first activity —
-	// same coarse-but-useful signal the local executor surfaces via
-	// the -progress pipe:1 stream. Stops when Execute returns.
+	// while ffmpeg runs. Stops when Execute returns.
 	progressDone := make(chan struct{})
 	defer close(progressDone)
-	go pollRemoteProgress(ctx, progressDone, app, e.hostID, row.ID, row.ProjectID)
+	go pollRemoteProgress(ctx, progressDone, app, e.hostID, row.ID, row.ProjectID, expectedProgressDurationMs(app.AppDB(), row))
 
 	// timeout_s on the run-command call gets the row's wall-clock cap
 	// minus a small safety margin (the install-time pre-flight already
@@ -334,9 +332,10 @@ func (e *remoteExecutor) buildScript(
 	// Upload. We try storage's presigned-PUT protocol first (works
 	// on S3-backed installs — bytes go remote→S3 directly, never
 	// proxying through the storage container). On disk-backed
-	// installs storage returns 501; we fall back to a single
-	// multipart POST through storage. Both paths write FILE_ID for
-	// the closing marker line.
+	// installs storage returns 501; we fall back to storage's
+	// chunked /uploads protocol. Very old storage installs still get
+	// one final single-shot multipart attempt, which now fails loudly
+	// when the configured upload cap would truncate the file.
 	//
 	// Env vars carry the inputs so they don't appear in `ps` output
 	// and so the inline JSON / curl args stay readable.
@@ -361,7 +360,8 @@ func (e *remoteExecutor) buildScript(
 //
 // Presigned path: POST /files/init with name+size+sha256, PUT bytes
 // to the returned signed S3 URL, then POST /files/<id>/finalize.
-// Multipart fallback: single POST to /files with the file as a part.
+// Chunked fallback: POST /uploads, PUT fixed-size parts, complete
+// with sha256. Last resort: single POST /files for old storage.
 const uploadScriptFragment = `INIT_BODY_FILE=$(mktemp)
 INIT_CODE=$(curl -sS "${CURL_RETRY[@]}" -o "$INIT_BODY_FILE" -w "%{http_code}" \
   -X POST \
@@ -416,6 +416,58 @@ if [ "$INIT_CODE" = "200" ]; then
   fi
 fi
 rm -f "$INIT_BODY_FILE"
+if [ "$NEED_MULTIPART" = "1" ]; then
+  UPLOADS_INIT_FILE=$(mktemp)
+  UPLOADS_INIT_CODE=$(curl -sS "${CURL_RETRY[@]}" -o "$UPLOADS_INIT_FILE" -w "%{http_code}" \
+    -X POST \
+    -H "Authorization: Bearer $STORAGE_TOKEN" \
+    -H "Content-Type: application/json" \
+    -d "{\"filename\":\"$NAME\",\"folder\":\"$FOLDER\",\"content_type\":\"$CT\",\"size\":$SIZE,\"sha256\":\"$SHA\",\"visibility\":\"private\",\"source\":\"media-render\",\"tags\":[\"render\"]}" \
+    "$STORAGE_BASE/uploads?project_id=$PROJECT_ID" || echo 000)
+  if [ "$UPLOADS_INIT_CODE" = "200" ]; then
+    if grep -q '"was_existing"[[:space:]]*:[[:space:]]*true' "$UPLOADS_INIT_FILE"; then
+      FILE_ID=$(sed -n 's/.*"file":[[:space:]]*{[[:space:]]*"id":[[:space:]]*\([0-9]*\).*/\1/p' "$UPLOADS_INIT_FILE")
+      if [ -n "$FILE_ID" ]; then
+        NEED_MULTIPART=0
+      else
+        echo "STORAGE_UPLOADS_DEDUP_NO_ID body[0:200]=$(head -c 200 "$UPLOADS_INIT_FILE" | tr '\n\r\t' '   ')" >&2
+      fi
+    else
+      CHUNK_UPLOAD_ID=$(sed -n 's/.*"upload_id":[[:space:]]*"\([^"]*\)".*/\1/p' "$UPLOADS_INIT_FILE")
+      PART_SIZE=$(sed -n 's/.*"part_size":[[:space:]]*\([0-9]*\).*/\1/p' "$UPLOADS_INIT_FILE")
+      if [ -n "$CHUNK_UPLOAD_ID" ]; then
+        NEED_MULTIPART=0
+        PART_SIZE=${PART_SIZE:-5242880}
+        PART_FILE=$(mktemp)
+        OFFSET=0
+        PART=1
+        while [ "$OFFSET" -lt "$SIZE" ]; do
+          dd if="$OUT" of="$PART_FILE" bs="$PART_SIZE" skip="$OFFSET" count="$PART_SIZE" iflag=skip_bytes,count_bytes status=none
+          curl -sS "${CURL_RETRY[@]}" --fail -o /dev/null -X PUT \
+            -H "Content-Type: application/octet-stream" \
+            --data-binary "@$PART_FILE" \
+            "$STORAGE_BASE/uploads/$CHUNK_UPLOAD_ID/parts/$PART?project_id=$PROJECT_ID"
+          OFFSET=$((OFFSET + PART_SIZE))
+          PART=$((PART + 1))
+        done
+        rm -f "$PART_FILE"
+        COMPLETE_BODY=$(curl -sS "${CURL_RETRY[@]}" --fail -X POST \
+          -H "Authorization: Bearer $STORAGE_TOKEN" \
+          -H "Content-Type: application/json" \
+          -d "{\"sha256\":\"$SHA\"}" \
+          "$STORAGE_BASE/uploads/$CHUNK_UPLOAD_ID/complete?project_id=$PROJECT_ID")
+        FILE_ID=$(echo "$COMPLETE_BODY" | sed -n 's/.*"file":[[:space:]]*{[[:space:]]*"id":[[:space:]]*\([0-9]*\).*/\1/p' | head -1)
+        if [ -z "$FILE_ID" ]; then
+          echo "STORAGE_UPLOADS_COMPLETE_NO_ID body[0:200]=$(printf '%s' "$COMPLETE_BODY" | head -c 200 | tr '\n\r\t' '   ')" >&2
+          exit 1
+        fi
+      else
+        echo "STORAGE_UPLOADS_INIT_UNPARSEABLE code=$UPLOADS_INIT_CODE body[0:200]=$(head -c 200 "$UPLOADS_INIT_FILE" | tr '\n\r\t' '   ')" >&2
+      fi
+    fi
+  fi
+  rm -f "$UPLOADS_INIT_FILE"
+fi
 if [ "$NEED_MULTIPART" = "1" ]; then
   RESP=$(curl -sS "${CURL_RETRY[@]}" --fail -X POST \
     -H "Authorization: Bearer $STORAGE_TOKEN" \
@@ -701,21 +753,17 @@ func parseAptevaResult(stdout string) (*remoteRenderResult, error) {
 
 // pollRemoteProgress tails progress.log on the remote until either
 // the per-render done channel closes (Execute returned) or ctx
-// cancels. On the first sighting of `out_time_ms=` (ffmpeg is
-// actively encoding) it bumps the row's progress_pct to 50. We
-// don't compute a finer-grained percentage because the local
-// executor doesn't either — without an ffprobe-derived total
-// duration the percentage would be a lie. 100 % gets written by
-// runOneRender on terminal status.
+// cancels. When duration is known it emits real 1..99 % progress;
+// otherwise it falls back to the legacy 50 % "ffmpeg is alive" bump.
 //
 // Poll interval is intentionally coarse (5s). Faster would burn
 // SSH connections on every render with no user-visible benefit.
-func pollRemoteProgress(ctx context.Context, done <-chan struct{}, app *sdk.AppCtx, hostID, renderID int64, projectID string) {
+func pollRemoteProgress(ctx context.Context, done <-chan struct{}, app *sdk.AppCtx, hostID, renderID int64, projectID string, expectedDurationMs int64) {
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
-	bumped := false
+	lastPct := 0
 	cmd := fmt.Sprintf(
-		`tail -n 5 %s 2>/dev/null | grep -F 'out_time_ms=' | head -1`,
+		`tail -n 20 %s 2>/dev/null | grep -F 'out_time_ms=' | tail -1`,
 		shellQuote(filepath.Join(remoteRenderWorkDir(renderID), remoteProgressFilename)))
 	for {
 		select {
@@ -724,9 +772,6 @@ func pollRemoteProgress(ctx context.Context, done <-chan struct{}, app *sdk.AppC
 		case <-done:
 			return
 		case <-ticker.C:
-			if bumped {
-				continue
-			}
 			out, _, err := runRemote(context.Background(), app, hostID, cmd, 8)
 			if err != nil {
 				// Network blips, partial install, etc. Don't spam logs —
@@ -737,11 +782,15 @@ func pollRemoteProgress(ctx context.Context, done <-chan struct{}, app *sdk.AppC
 			if !strings.Contains(out, "out_time_ms=") {
 				continue
 			}
-			if updErr := renderUpdateProgress(app.AppDB(), renderID, 50); updErr != nil {
+			pct := progressPctFromOutTimeLine(strings.TrimSpace(out), expectedDurationMs)
+			if pct <= lastPct {
+				continue
+			}
+			if updErr := renderUpdateProgress(app.AppDB(), renderID, pct); updErr != nil {
 				app.Logger().Warn("remote progress bump failed", "id", renderID, "err", updErr)
 			}
-			emitRenderProgress(app, renderID, projectID, 50)
-			bumped = true
+			emitRenderProgress(app, renderID, projectID, pct)
+			lastPct = pct
 		}
 	}
 }

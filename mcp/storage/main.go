@@ -1408,9 +1408,15 @@ func (a *App) httpUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer file.Close()
-	body, err := io.ReadAll(io.LimitReader(file, maxUploadBytes(ctx)))
+	maxBytes := maxUploadBytes(ctx)
+	body, err := io.ReadAll(io.LimitReader(file, maxBytes+1))
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if int64(len(body)) > maxBytes {
+		httpErr(w, http.StatusRequestEntityTooLarge,
+			fmt.Sprintf("upload exceeds max_upload_size_mb (%d bytes > %d)", len(body), maxBytes))
 		return
 	}
 	in := uploadInput{

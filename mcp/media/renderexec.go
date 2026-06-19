@@ -15,6 +15,7 @@ import (
 	"bufio"
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -178,7 +179,7 @@ func (e *localExecutor) Execute(ctx context.Context, app *sdk.AppCtx, row *Rende
 	if err := cmd.Start(); err != nil {
 		return 0, fmt.Errorf("ffmpeg start: %w", err)
 	}
-	go forwardProgress(stdout, db, row.ID, app, row.ProjectID)
+	go forwardProgress(stdout, db, row.ID, app, row.ProjectID, expectedProgressDurationMs(db, row))
 	if err := cmd.Wait(); err != nil {
 		// Cancellation/timeout get the raw context error — the
 		// orchestrator distinguishes them via ctx.Err().
@@ -192,11 +193,6 @@ func (e *localExecutor) Execute(ctx context.Context, app *sdk.AppCtx, row *Rende
 		return 0, fmt.Errorf("ffmpeg: %s", msg)
 	}
 
-	out, err := os.Open(outputPath)
-	if err != nil {
-		return 0, fmt.Errorf("open output: %w", err)
-	}
-	defer out.Close()
 	// Per-render output folder takes precedence over the install
 	// default. Renders submitted before this column existed (or
 	// without an explicit folder) fall back to e.outputFolder.
@@ -204,7 +200,7 @@ func (e *localExecutor) Execute(ctx context.Context, app *sdk.AppCtx, row *Rende
 	if folder == "" {
 		folder = e.outputFolder
 	}
-	uploaded, err := sc.UploadRender(ctx, row.ProjectID, folder, plan.Filename, plan.ContentType, out)
+	uploaded, err := sc.UploadRenderFile(ctx, row.ProjectID, folder, plan.Filename, plan.ContentType, outputPath)
 	if err != nil {
 		return 0, fmt.Errorf("upload: %w", err)
 	}
@@ -212,21 +208,90 @@ func (e *localExecutor) Execute(ctx context.Context, app *sdk.AppCtx, row *Rende
 }
 
 // forwardProgress reads ffmpeg's -progress pipe:1 stream. Each chunk
-// is a series of key=value lines ending with progress=...; we don't
-// have total duration without an extra ffprobe call here, so v0.2's
-// behaviour is preserved: bump to 50 on first activity, jump to 100
-// on done (via renderMarkOk).
-func forwardProgress(r io.ReadCloser, db *sql.DB, id int64, app *sdk.AppCtx, projectID string) {
+// is a series of key=value lines ending with progress=.... When the
+// expected output duration is known, convert ffmpeg's out_time_ms
+// (microseconds despite the field name) into 1..99 %. When it is not
+// known, preserve the old coarse 50 % "ffmpeg is alive" bump.
+func forwardProgress(r io.ReadCloser, db *sql.DB, id int64, app *sdk.AppCtx, projectID string, expectedDurationMs int64) {
 	defer r.Close()
 	scanner := bufio.NewScanner(r)
-	bumped := false
+	lastPct := 0
 	for scanner.Scan() {
-		if !bumped && strings.HasPrefix(scanner.Text(), "out_time_ms=") {
-			_ = renderUpdateProgress(db, id, 50)
-			emitRenderProgress(app, id, projectID, 50)
-			bumped = true
+		line := scanner.Text()
+		if !strings.HasPrefix(line, "out_time_ms=") {
+			continue
+		}
+		pct := progressPctFromOutTimeLine(line, expectedDurationMs)
+		if pct <= 0 {
+			continue
+		}
+		if pct > lastPct {
+			_ = renderUpdateProgress(db, id, pct)
+			emitRenderProgress(app, id, projectID, pct)
+			lastPct = pct
 		}
 	}
+}
+
+func progressPctFromOutTimeLine(line string, expectedDurationMs int64) int {
+	if !strings.HasPrefix(line, "out_time_ms=") {
+		return 0
+	}
+	if expectedDurationMs <= 0 {
+		return 50
+	}
+	outUS, err := strconv.ParseInt(strings.TrimSpace(strings.TrimPrefix(line, "out_time_ms=")), 10, 64)
+	if err != nil || outUS <= 0 {
+		return 0
+	}
+	pct := int((outUS * 100) / (expectedDurationMs * 1000))
+	if pct < 1 {
+		return 1
+	}
+	if pct > 99 {
+		return 99
+	}
+	return pct
+}
+
+func expectedProgressDurationMs(db *sql.DB, row *RenderRow) int64 {
+	if row == nil {
+		return 0
+	}
+	if row.Operation == "trim" || row.Operation == "extract_reel" {
+		var p struct {
+			StartMs int64 `json:"start_ms"`
+			EndMs   int64 `json:"end_ms"`
+		}
+		if err := json.Unmarshal(row.Params, &p); err == nil && p.EndMs > p.StartMs {
+			return p.EndMs - p.StartMs
+		}
+	}
+	if row.Operation == "concat" {
+		var total int64
+		for _, id := range row.SourceFileIDs {
+			total += lookupMediaDurationMs(db, row.ProjectID, id)
+		}
+		return total
+	}
+	if len(row.SourceFileIDs) == 0 {
+		return 0
+	}
+	return lookupMediaDurationMs(db, row.ProjectID, row.SourceFileIDs[0])
+}
+
+func lookupMediaDurationMs(db *sql.DB, projectID, fileID string) int64 {
+	if db == nil || projectID == "" || fileID == "" {
+		return 0
+	}
+	var duration sql.NullInt64
+	if err := db.QueryRow(
+		`SELECT duration_ms FROM media WHERE project_id = ? AND file_id = ?`,
+		projectID, fileID,
+	).Scan(&duration); err != nil {
+		return 0
+	}
+	return duration.Int64
 }
 
 // materialiseArgs replaces placeholder tokens with real paths. For

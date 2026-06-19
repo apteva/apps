@@ -9,7 +9,9 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -23,6 +25,8 @@ import (
 	"strings"
 	"time"
 )
+
+const defaultStorageUploadPartSize int64 = 5 * 1024 * 1024
 
 type storageClient struct {
 	base       string
@@ -44,7 +48,7 @@ func newStorageClient() *storageClient {
 	return &storageClient{
 		base:       os.Getenv("APTEVA_GATEWAY_URL"),
 		token:      tok,
-		httpClient: &http.Client{Timeout: 60 * time.Second},
+		httpClient: &http.Client{Timeout: 30 * time.Minute},
 	}
 }
 
@@ -387,6 +391,184 @@ func (c *storageClient) UploadDerivation(ctx context.Context, projectID, name, f
 // render output (separate from indexer-created derivations) so the
 // catalog can tell them apart and panels can filter accordingly.
 func (c *storageClient) UploadRender(ctx context.Context, projectID, folder, filename, contentType string, r io.Reader) (int64, error) {
+	tmp, err := os.CreateTemp("", "apteva-media-render-upload-*")
+	if err != nil {
+		return 0, fmt.Errorf("create upload temp: %w", err)
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+	if _, err := io.Copy(tmp, r); err != nil {
+		tmp.Close()
+		return 0, fmt.Errorf("spool render output: %w", err)
+	}
+	if err := tmp.Close(); err != nil {
+		return 0, fmt.Errorf("close upload temp: %w", err)
+	}
+	return c.UploadRenderFile(ctx, projectID, folder, filename, contentType, tmpPath)
+}
+
+// UploadRenderFile pushes a finished render output back to storage via
+// storage's resumable /uploads protocol. That path validates declared
+// size + sha256 before creating the final storage row, so media cannot
+// mark a render ok after a truncated single-shot upload.
+func (c *storageClient) UploadRenderFile(ctx context.Context, projectID, folder, filename, contentType, path string) (int64, error) {
+	info, err := os.Stat(path)
+	if err != nil {
+		return 0, fmt.Errorf("stat render output: %w", err)
+	}
+	if info.Size() <= 0 {
+		return 0, errors.New("render output is empty")
+	}
+	sha, err := sha256File(path)
+	if err != nil {
+		return 0, err
+	}
+	file, err := c.uploadFileChunked(ctx, projectID, folder, filename, contentType, path, info.Size(), sha)
+	if err != nil {
+		return 0, err
+	}
+	if file.ID == 0 {
+		return 0, errors.New("storage returned id=0 for render upload")
+	}
+	if file.SizeBytes != info.Size() {
+		return 0, fmt.Errorf("storage render upload size mismatch: local=%d stored=%d file_id=%d",
+			info.Size(), file.SizeBytes, file.ID)
+	}
+	if !strings.EqualFold(file.SHA256, sha) {
+		return 0, fmt.Errorf("storage render upload sha mismatch: local=%s stored=%s file_id=%d",
+			sha, file.SHA256, file.ID)
+	}
+	return file.ID, nil
+}
+
+func (c *storageClient) uploadFileChunked(ctx context.Context, projectID, folder, filename, contentType, path string, size int64, sha string) (*StorageFile, error) {
+	q := url.Values{}
+	if projectID != "" {
+		q.Set("project_id", projectID)
+	}
+	initBody := map[string]any{
+		"filename":     filename,
+		"size":         size,
+		"content_type": contentType,
+		"folder":       folder,
+		"visibility":   "private",
+		"source":       "media-render",
+		"tags":         []string{"render"},
+		"sha256":       sha,
+	}
+	respBody, err := c.do(ctx, http.MethodPost, "/uploads?"+q.Encode(), initBody, "application/json")
+	if err != nil {
+		return nil, fmt.Errorf("init upload: %w", err)
+	}
+	var initResp struct {
+		UploadID    string       `json:"upload_id"`
+		PartSize    int64        `json:"part_size"`
+		MaxParts    int          `json:"max_parts"`
+		WasExisting bool         `json:"was_existing"`
+		File        *StorageFile `json:"file"`
+	}
+	if err := json.Unmarshal(respBody, &initResp); err != nil {
+		return nil, fmt.Errorf("parse upload init: %w (body=%s)", err, string(respBody))
+	}
+	if initResp.WasExisting && initResp.File != nil {
+		return initResp.File, nil
+	}
+	if initResp.UploadID == "" {
+		return nil, fmt.Errorf("storage upload init returned no upload_id (body=%s)", string(respBody))
+	}
+	uploadID := initResp.UploadID
+	defer func() {
+		if err != nil {
+			_ = c.abortUpload(context.Background(), projectID, uploadID)
+		}
+	}()
+
+	partSize := initResp.PartSize
+	if partSize <= 0 {
+		partSize = defaultStorageUploadPartSize
+	}
+	totalParts := int((size + partSize - 1) / partSize)
+	if initResp.MaxParts > 0 && totalParts > initResp.MaxParts {
+		err = fmt.Errorf("render output too large for storage upload: needs %d parts, max %d", totalParts, initResp.MaxParts)
+		return nil, err
+	}
+
+	f, openErr := os.Open(path)
+	if openErr != nil {
+		err = fmt.Errorf("open render output: %w", openErr)
+		return nil, err
+	}
+	defer f.Close()
+	buf := make([]byte, int(partSize))
+	for part := 1; ; part++ {
+		n, readErr := io.ReadFull(f, buf)
+		if readErr == io.EOF {
+			break
+		}
+		if readErr == io.ErrUnexpectedEOF {
+			readErr = nil
+		}
+		if readErr != nil {
+			err = fmt.Errorf("read render output part %d: %w", part, readErr)
+			return nil, err
+		}
+		if n == 0 {
+			break
+		}
+		if _, err = c.do(ctx, http.MethodPut,
+			fmt.Sprintf("/uploads/%s/parts/%d?%s", url.PathEscape(uploadID), part, q.Encode()),
+			nil, "application/octet-stream", withBody(buf[:n])); err != nil {
+			err = fmt.Errorf("upload part %d/%d: %w", part, totalParts, err)
+			return nil, err
+		}
+		if n < len(buf) {
+			break
+		}
+	}
+
+	respBody, err = c.do(ctx, http.MethodPost,
+		fmt.Sprintf("/uploads/%s/complete?%s", url.PathEscape(uploadID), q.Encode()),
+		map[string]any{"sha256": sha}, "application/json")
+	if err != nil {
+		return nil, fmt.Errorf("complete upload: %w", err)
+	}
+	var completeResp struct {
+		File        *StorageFile `json:"file"`
+		WasExisting bool         `json:"was_existing"`
+	}
+	if err = json.Unmarshal(respBody, &completeResp); err != nil {
+		return nil, fmt.Errorf("parse upload complete: %w (body=%s)", err, string(respBody))
+	}
+	if completeResp.File == nil || completeResp.File.ID == 0 {
+		return nil, fmt.Errorf("storage upload complete returned no file (body=%s)", string(respBody))
+	}
+	return completeResp.File, nil
+}
+
+func (c *storageClient) abortUpload(ctx context.Context, projectID, uploadID string) error {
+	q := url.Values{}
+	if projectID != "" {
+		q.Set("project_id", projectID)
+	}
+	_, err := c.do(ctx, http.MethodDelete,
+		fmt.Sprintf("/uploads/%s?%s", url.PathEscape(uploadID), q.Encode()), nil, "")
+	return err
+}
+
+func sha256File(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", fmt.Errorf("open for sha256: %w", err)
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", fmt.Errorf("hash render output: %w", err)
+	}
+	return hex.EncodeToString(h.Sum(nil)), nil
+}
+
+func (c *storageClient) uploadRenderSingleShot(ctx context.Context, projectID, folder, filename, contentType string, r io.Reader) (int64, error) {
 	var buf bytes.Buffer
 	mw := multipart.NewWriter(&buf)
 	if err := mw.WriteField("folder", folder); err != nil {
