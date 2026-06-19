@@ -223,6 +223,76 @@ func TestPlanAudioExtract_RejectsUnknownFormat(t *testing.T) {
 	}
 }
 
+func TestPlanAudioFilter_NormalizeVideoCopiesVideo(t *testing.T) {
+	plan, err := buildPlan("audio_filter", []string{"42"},
+		raw(t, map[string]any{"mode": "normalize"}), "", ".mp4")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !argPair(plan.Args, "-c:v", "copy") {
+		t.Errorf("audio_filter video output should copy video: %v", plan.Args)
+	}
+	if !argPair(plan.Args, "-c:a", "aac") {
+		t.Errorf("audio_filter video output should encode audio as aac: %v", plan.Args)
+	}
+	if !contains(plan.Args, "loudnorm=I=-16:TP=-1.5:LRA=11") {
+		t.Errorf("missing loudnorm filter: %v", plan.Args)
+	}
+	if plan.ContentType != "video/mp4" {
+		t.Errorf("content type=%q want video/mp4", plan.ContentType)
+	}
+}
+
+func TestPlanAudioFilter_SpeechCleanAudioOnly(t *testing.T) {
+	plan, err := buildPlan("audio_filter", []string{"42"},
+		raw(t, map[string]any{"mode": "speech_clean", "target_lufs": -18}), "", ".mp3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasSuffix(plan.Filename, ".mp3") {
+		t.Errorf("filename=%q want .mp3", plan.Filename)
+	}
+	if !contains(plan.Args, "-vn") {
+		t.Errorf("audio-only filter should drop video: %v", plan.Args)
+	}
+	if !argPair(plan.Args, "-c:a", "libmp3lame") {
+		t.Errorf("mp3 output should use libmp3lame: %v", plan.Args)
+	}
+	filter := strings.Join(plan.Args, " ")
+	for _, want := range []string{"highpass=f=80", "lowpass=f=8000", "acompressor=", "loudnorm=I=-18"} {
+		if !strings.Contains(filter, want) {
+			t.Errorf("filter missing %q: %v", want, plan.Args)
+		}
+	}
+}
+
+func TestPlanAudioFilter_VolumeAndMute(t *testing.T) {
+	volume, err := buildPlan("audio_filter", []string{"42"},
+		raw(t, map[string]any{"mode": "volume", "gain_db": 3}), "", ".m4a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !contains(volume.Args, "volume=3dB") {
+		t.Errorf("volume filter missing: %v", volume.Args)
+	}
+	mute, err := buildPlan("audio_filter", []string{"42"},
+		raw(t, map[string]any{"mode": "mute"}), "", ".m4a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !contains(mute.Args, "volume=0") {
+		t.Errorf("mute filter missing: %v", mute.Args)
+	}
+}
+
+func TestPlanAudioFilter_RejectsUnknownMode(t *testing.T) {
+	_, err := buildPlan("audio_filter", []string{"42"},
+		raw(t, map[string]any{"mode": "denoise"}), "", ".mp4")
+	if err == nil {
+		t.Error("expected error for unsupported mode")
+	}
+}
+
 func TestPlanConcat_RequiresMultipleSources(t *testing.T) {
 	_, err := buildPlan("concat", []string{"42"}, raw(t, map[string]any{}), "out.mp4", "")
 	if err == nil {

@@ -58,6 +58,8 @@ func buildPlan(op string, sources []string, params json.RawMessage, outputName, 
 		return planExtractReel(sources, params, outputName)
 	case "audio_extract":
 		return planAudioExtract(sources, params, outputName)
+	case "audio_filter":
+		return planAudioFilter(sources, params, outputName, sourceExt)
 	default:
 		return nil, fmt.Errorf("unknown operation: %s", op)
 	}
@@ -543,12 +545,140 @@ func planAudioExtract(sources []string, raw json.RawMessage, outputName string) 
 	return &opPlan{Filename: name, ContentType: ct, Args: args}, nil
 }
 
+// ─── audio_filter ──────────────────────────────────────────────────
+//
+// Applies audio-only filters to either audio files or videos with
+// audio. Video outputs copy the video stream untouched and re-encode
+// only the filtered audio stream.
+
+type audioFilterParams struct {
+	Mode       string  `json:"mode"`                  // normalize|speech_clean|volume|mute
+	TargetLUFS float64 `json:"target_lufs,omitempty"` // default -16 for normalize/speech_clean
+	GainDB     float64 `json:"gain_db,omitempty"`     // used by volume mode
+}
+
+func planAudioFilter(sources []string, raw json.RawMessage, outputName, sourceExt string) (*opPlan, error) {
+	if len(sources) != 1 {
+		return nil, errors.New("audio_filter takes exactly one source file_id")
+	}
+	var p audioFilterParams
+	if err := json.Unmarshal(raw, &p); err != nil {
+		return nil, fmt.Errorf("audio_filter params: %w", err)
+	}
+	af, err := audioFilterChain(p)
+	if err != nil {
+		return nil, err
+	}
+	name, ct, audioOnly := audioFilterOutput(outputName, sources[0], sourceExt)
+	codec, err := audioFilterCodecForOutput(path.Ext(name), audioOnly)
+	if err != nil {
+		return nil, err
+	}
+	if audioOnly {
+		args := []string{
+			"-y",
+			"-loglevel", "error",
+			"-progress", "pipe:1",
+			"-i", "{input}",
+			"-vn",
+			"-map", "0:a:0",
+			"-af", af,
+			"-c:a", codec,
+		}
+		return &opPlan{Filename: name, ContentType: ct, Args: args}, nil
+	} else {
+		args := []string{
+			"-y",
+			"-loglevel", "error",
+			"-progress", "pipe:1",
+			"-i", "{input}",
+			"-map", "0:v?",
+			"-map", "0:a:0",
+			"-c:v", "copy",
+			"-af", af,
+			"-c:a", codec,
+		}
+		return &opPlan{Filename: name, ContentType: ct, Args: args}, nil
+	}
+}
+
+func audioFilterChain(p audioFilterParams) (string, error) {
+	mode := strings.ToLower(strings.TrimSpace(p.Mode))
+	if mode == "" {
+		mode = "normalize"
+	}
+	target := p.TargetLUFS
+	if target == 0 {
+		target = -16
+	}
+	loudnorm := fmt.Sprintf("loudnorm=I=%s:TP=-1.5:LRA=11", ffmpegFloat(target))
+	switch mode {
+	case "normalize":
+		return loudnorm, nil
+	case "speech_clean":
+		return "highpass=f=80,lowpass=f=8000,acompressor=threshold=-18dB:ratio=3:attack=5:release=100," + loudnorm, nil
+	case "volume":
+		return fmt.Sprintf("volume=%sdB", ffmpegFloat(p.GainDB)), nil
+	case "mute":
+		return "volume=0", nil
+	default:
+		return "", fmt.Errorf("audio_filter: unsupported mode %q (normalize|speech_clean|volume|mute)", p.Mode)
+	}
+}
+
+func audioFilterOutput(outputName, sourceFileID, sourceExt string) (name, contentType string, audioOnly bool) {
+	ext := strings.ToLower(path.Ext(outputName))
+	if ext == "" {
+		ext = strings.ToLower(sourceExt)
+	}
+	if ext == "" {
+		ext = ".mp4"
+	}
+	audioOnly = isAudioExt(ext)
+	if strings.TrimSpace(outputName) != "" {
+		if path.Ext(outputName) == "" {
+			outputName += ext
+		}
+		return outputName, contentTypeForName(outputName), audioOnly
+	}
+	name, ct := defaultOutputName("", sourceFileID, "audio-filter", ext)
+	return name, ct, audioOnly
+}
+
+func audioFilterCodecForOutput(ext string, audioOnly bool) (string, error) {
+	ext = strings.ToLower(ext)
+	if audioOnly {
+		switch ext {
+		case ".mp3":
+			return "libmp3lame", nil
+		case ".wav":
+			return "pcm_s16le", nil
+		case ".m4a", ".mp4":
+			return "aac", nil
+		case ".opus":
+			return "libopus", nil
+		case ".flac":
+			return "flac", nil
+		default:
+			return "", fmt.Errorf("audio_filter: unsupported audio output extension %q (mp3|wav|m4a|opus|flac)", ext)
+		}
+	}
+	if ext == ".webm" {
+		return "libopus", nil
+	}
+	return "aac", nil
+}
+
 // ─── helpers ────────────────────────────────────────────────────────
 
 func msToSeconds(ms int64) string {
 	// ffmpeg accepts decimal seconds. Use 3-digit precision so we can
 	// trim at millisecond granularity without floating-point drift.
 	return fmt.Sprintf("%d.%03d", ms/1000, ms%1000)
+}
+
+func ffmpegFloat(v float64) string {
+	return strconv.FormatFloat(v, 'f', -1, 64)
 }
 
 // defaultOutputName picks an output basename. Priority: explicit
@@ -659,6 +789,14 @@ func extFromContentType(ct string) string {
 func isImageExt(ext string) bool {
 	switch strings.ToLower(ext) {
 	case ".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp", ".tif", ".tiff", ".heic", ".heif":
+		return true
+	}
+	return false
+}
+
+func isAudioExt(ext string) bool {
+	switch strings.ToLower(ext) {
+	case ".mp3", ".wav", ".m4a", ".opus", ".flac":
 		return true
 	}
 	return false

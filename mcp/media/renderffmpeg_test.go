@@ -305,6 +305,31 @@ func TestFFmpeg_AudioExtract_MP3(t *testing.T) {
 	}
 }
 
+func TestFFmpeg_AudioFilter_NormalizeVideo(t *testing.T) {
+	skipIfNoFFmpeg(t)
+	dir := t.TempDir()
+	src := generateSampleVideo(t, dir)
+
+	out := runOpAgainstFile(t, "audio_filter", []string{src},
+		map[string]any{"mode": "normalize", "target_lufs": -16},
+		"", dir)
+
+	if !strings.HasSuffix(out, ".mp4") {
+		t.Errorf("expected .mp4 output, got %s", out)
+	}
+	r := probe(t, out)
+	if _, err := r.videoStream(); err != nil {
+		t.Fatalf("no video stream after audio_filter: %v", err)
+	}
+	a, err := r.audioStream()
+	if err != nil {
+		t.Fatalf("no audio stream after audio_filter: %v", err)
+	}
+	if a.CodecName != "aac" {
+		t.Errorf("audio codec=%q want aac", a.CodecName)
+	}
+}
+
 func TestFFmpeg_Concat(t *testing.T) {
 	skipIfNoFFmpeg(t)
 	dir := t.TempDir()

@@ -25,9 +25,10 @@ package main
 //   - eager strings are slash-separated transformation steps within a
 //     chain, pipe-separated across chains. We only ever produce one
 //     chain (one output per render), so no pipes here.
-//   - Concat + audio_extract aren't modelled cleanly by eager (concat
-//     needs splice overlays; audio_extract is technically `f_mp3` on
-//     a video resource but the semantics get fiddly). selectExecutor
+//   - Concat + audio_extract + audio_filter aren't modelled cleanly
+//     by eager (concat needs splice overlays; audio_extract is
+//     technically `f_mp3` on a video resource but the semantics get
+//     fiddly; audio_filter needs ffmpeg audio filters). selectExecutor
 //     filters those ops out before we get here — they fall back to
 //     local ffmpeg. That's a feature: the cloud backend is opt-in
 //     for the cases it's good at.

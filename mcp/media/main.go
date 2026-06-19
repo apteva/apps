@@ -22,12 +22,12 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: media
 display_name: Media
-version: 0.13.44
+version: 0.13.47
 description: |
   Catalog + derivations + renders + transcripts + auto-descriptions
   for media files in storage. Indexes uploads (probe, thumbnail,
   waveform), runs on-demand edits (trim/resize/transcode/concat/
-  crop/extract_frame/audio_extract) via local ffmpeg by default or
+  crop/extract_frame/audio_extract/audio_filter) via local ffmpeg by default or
   Cloudinary when bound, auto-transcribes audio + video via Deepgram,
   and auto-generates descriptions via OpenCode Go, OpenAI API, or
   OpenAI Codex when integrations are bound. Outputs all flow
@@ -82,7 +82,7 @@ requires:
         image.transform: upload
       required: false
       label: "Cloud render backend"
-      hint: "Optional. Connect Cloudinary to offload trim/resize/transcode/crop/extract_frame to the cloud — useful on Pi-class hosts. Without it (the default), renders run on local ffmpeg. concat + audio_extract always stay local."
+      hint: "Optional. Connect Cloudinary to offload trim/resize/transcode/crop/extract_frame to the cloud — useful on Pi-class hosts. Without it (the default), renders run on local ffmpeg. concat + audio_extract + audio_filter always stay local."
   binaries:
     - name: ffmpeg
       version: "7.0.2"
@@ -120,6 +120,7 @@ provides:
     - { name: media_crop,            description: "Crop or smart-reframe an existing video/image. Exact mode: file_id, x, y, width, height. Smart image/video reframe mode: file_id, target_ratio (e.g. 9:16), crop_mode? (smart|center), output_width?. Returns render_id." }
     - { name: media_extract_frame,   description: "Save a single frame at a specific timestamp as PNG. Returns render_id." }
     - { name: media_audio_extract,   description: "Strip audio from a video into a standalone file. Returns render_id." }
+    - { name: media_audio_filter,    description: "Normalize, clean, adjust, or mute audio in an audio/video source. For video outputs, copies video and only re-encodes audio. Returns render_id." }
     - { name: media_extract_reel,    description: "Trim + reframe to a target aspect ratio in one ffmpeg pass. Replaces media_trim → media_crop → media_resize for vertical-reel workflows. Args - file_id, start_ms, end_ms, target_ratio? (default 9:16), output_width? (default 1080)." }
     - { name: media_get_render,      description: "Status of one render — progress + output_file_id when ready." }
     - { name: media_list_renders,    description: "List renders filtered by status / operation." }
@@ -516,6 +517,19 @@ func (a *App) MCPTools() []sdk.Tool {
 				"output_folder": map[string]any{"type": "string"},
 			}, []string{"file_id", "format"}),
 			Handler: a.toolSubmitRender("audio_extract", []string{"format"}, []string{"file_id"}),
+		},
+		{
+			Name:        "media_audio_filter",
+			Description: "Modify audio in an audio or video file. For videos, copies the video stream unchanged and only filters/re-encodes audio. Args: file_id, mode ('normalize' default | 'speech_clean' | 'volume' | 'mute'), target_lufs (optional, default -16 for normalize/speech_clean), gain_db (for volume), output_name?, output_folder?. Audio-only inputs keep their audio container; video inputs keep their video container unless output_name has an audio extension.",
+			InputSchema: schemaObject(map[string]any{
+				"file_id":       map[string]any{"type": "string"},
+				"mode":          map[string]any{"type": "string", "description": "'normalize' (default), 'speech_clean', 'volume', or 'mute'."},
+				"target_lufs":   map[string]any{"type": "number", "description": "Target integrated loudness for normalize/speech_clean. Default -16."},
+				"gain_db":       map[string]any{"type": "number", "description": "Gain in dB for mode='volume', e.g. 3 or -2."},
+				"output_name":   map[string]any{"type": "string"},
+				"output_folder": map[string]any{"type": "string"},
+			}, []string{"file_id"}),
+			Handler: a.toolSubmitRender("audio_filter", []string{"mode", "target_lufs", "gain_db"}, []string{"file_id"}),
 		},
 		{
 			Name:        "media_extract_reel",

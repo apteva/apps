@@ -48,7 +48,7 @@ type renderExecutor interface {
 //     don't have to bind anything.
 //  2. selectExecutor's last-resort return is always &localExecutor{}.
 //  3. The Cloudinary backend declines ops it can't handle (currently
-//     concat + audio_extract); the orchestrator retries on local.
+//     concat + audio_extract + audio_filter); the orchestrator retries on local.
 //
 // Precedence when multiple backends are configured:
 //
@@ -77,7 +77,7 @@ func selectExecutor(app *sdk.AppCtx, fallback *localExecutor, remote *remoteExec
 	case "cloudinary":
 		exec := &cloudinaryExecutor{bound: bound, fallback: fallback}
 		// Per-op compatibility: ops the cloud backend doesn't model
-		// well (concat, audio_extract) deliberately stay local. The
+		// well (concat, audio_extract, audio_filter) deliberately stay local. The
 		// operator gets the cloud benefit for the common cases —
 		// trim/resize/transcode/crop/extract_frame — without a
 		// surprise failure on the long-tail ones.
