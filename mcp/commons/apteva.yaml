@@ -1,0 +1,81 @@
+schema: apteva-app/v1
+
+name: commons
+display_name: Commons
+version: 0.1.0
+description: |
+  User-owned public social node for the open web. Commons hosts local
+  profiles, posts, follows, blocks, ActivityPub/WebFinger endpoints,
+  and signed outbound federation delivery from an Apteva-controlled
+  domain.
+author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/commons
+icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/commons/icon.svg
+tags: [social, federation, activitypub, fediverse, community]
+
+scopes: [project, global]
+min_apteva_version: "0.10.0"
+
+requires:
+  permissions:
+    - db.write.app
+    - net.egress
+
+provides:
+  http_routes:
+    - prefix: /
+  mcp_tools:
+    - name: commons_profile_upsert
+      description: Create or update a local public Commons profile.
+    - name: commons_post_create
+      description: Publish a local public post and queue federation delivery to followers.
+    - name: commons_timeline_read
+      description: Read recent local posts for one profile or all profiles.
+    - name: commons_follow_add
+      description: Add a remote follower inbox manually.
+    - name: commons_block_add
+      description: Block a remote actor or domain.
+    - name: commons_export
+      description: Export profiles, posts, follows, and blocks as JSON.
+  ui_panels:
+    - slot: project.page
+      label: Commons
+      icon: network
+      entry: /ui/CommonsPanel.mjs
+
+runtime:
+  kind: source
+  source:
+    repo: github.com/apteva/apps
+    ref: main
+    entry: mcp/commons
+  port: 8080
+  health_check: /health
+  resources:
+    cpu: 0.05
+    memory: 96
+    cpu_limit: 1
+    memory_limit: 256
+  storage:
+    - name: data
+      mount_path: /data
+  env:
+    APTEVA_GATEWAY_URL: { from: platform }
+    APTEVA_APP_TOKEN:   { from: platform }
+    APTEVA_INSTALL_ID:  { from: platform }
+    APTEVA_PROJECT_ID:  { from: platform }
+    APTEVA_APP_CONFIG:  { from: platform }
+
+db:
+  driver: sqlite
+  path: /data/commons.db
+  migrations: migrations/
+
+config_schema:
+  - name: default_domain
+    label: Default public domain
+    type: text
+    required: false
+    description: Optional domain used when profiles are created from MCP tools instead of an HTTP request.
+
+upgrade_policy: auto-patch
