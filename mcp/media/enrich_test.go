@@ -35,6 +35,21 @@ func newFakeStorage(t *testing.T, files []StorageFile) (*fakeStorage, func()) {
 			http.Error(w, "unexpected path "+r.URL.Path, 404)
 			return
 		}
+		if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/url") {
+			parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+			if len(parts) >= 5 {
+				if id, ok := parseInt64Local(parts[len(parts)-2]); ok {
+					if _, exists := fs.files[id]; exists {
+						_ = json.NewEncoder(w).Encode(map[string]any{
+							"url": "https://agents.example.com/api/apps/storage/files/" + parts[len(parts)-2] + "/content?sig=test&exp=9999999999",
+						})
+						return
+					}
+				}
+			}
+			http.Error(w, "not found", 404)
+			return
+		}
 		ids := r.URL.Query().Get("ids")
 		out := []StorageFile{}
 		if ids != "" {
@@ -60,6 +75,7 @@ func newFakeStorage(t *testing.T, files []StorageFile) (*fakeStorage, func()) {
 	}))
 	t.Setenv("APTEVA_GATEWAY_URL", srv.URL)
 	t.Setenv("APTEVA_OUTBOUND_TOKEN", "dev-1")
+	t.Setenv("APTEVA_PUBLIC_URL", "https://agents.example.com")
 	return fs, srv.Close
 }
 
@@ -118,14 +134,15 @@ func TestSearch_EnrichesURLsAndMetadata(t *testing.T) {
 	}
 }
 
-// media_get on a single file enriches the same way.
+// media_get on a single file enriches metadata but upgrades url to a
+// fresh signed/presigned fetch URL for external consumers.
 func TestGet_EnrichesURL(t *testing.T) {
 	ctx := newTestCtx(t)
 	if err := upsertMedia(ctx.AppDB(), testProj, "7", sampleVideoProbe(), "abc", "", ""); err != nil {
 		t.Fatal(err)
 	}
 	_, cleanup := newFakeStorage(t, []StorageFile{
-		{ID: 7, Name: "x.mp4", Visibility: "public",
+		{ID: 7, Name: "x.mp4", Visibility: "private",
 			URL: "https://agents.example.com/api/apps/storage/files/7/content"},
 	})
 	defer cleanup()
@@ -140,8 +157,8 @@ func TestGet_EnrichesURL(t *testing.T) {
 		t.Fatal("not found")
 	}
 	row := r["media"].(MediaResponseRow)
-	if row.URL == "" {
-		t.Fatal("URL not populated")
+	if !strings.Contains(row.URL, "sig=test") {
+		t.Fatalf("URL was not upgraded to signed fetch URL: %q", row.URL)
 	}
 }
 

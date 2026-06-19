@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: media
 display_name: Media
-version: 0.13.43
+version: 0.13.44
 description: |
   Catalog + cheap derivations + parameterised renders for media files
   in storage. Probes uploads with ffprobe (duration, dimensions,
@@ -106,7 +106,7 @@ provides:
   mcp_tools:
     # Catalog (existing)
     - name: media_get
-      description: Fetch one media record by storage file_id (probe + derivation pointers).
+      description: Fetch one media record by storage file_id (probe + derivation pointers). The returned url is a fresh public/signed fetch URL suitable for third-party ingestion such as Bunny Stream fetch uploads.
     - name: media_search
       description: Filter by folder, canonical media_type (image|video|audio), aspect (portrait|landscape|square|reel|wide), duration bucket or duration_min_ms/duration_max_ms, audience_rating or exclude_audience_rating, dimensions, and codec. Returns rows with absolute storage URLs. Args include folder (e.g. "/clips/"), recursive, limit, and offset.
     - name: media_list_folders

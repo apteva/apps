@@ -22,7 +22,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: media
 display_name: Media
-version: 0.13.43
+version: 0.13.44
 description: |
   Catalog + derivations + renders + transcripts + auto-descriptions
   for media files in storage. Indexes uploads (probe, thumbnail,
@@ -104,7 +104,7 @@ provides:
   http_routes:
     - prefix: /
   mcp_tools:
-    - { name: media_get,             description: "Fetch one media record by storage file_id." }
+    - { name: media_get,             description: "Fetch one media record by storage file_id. The returned url is a fresh public/signed fetch URL suitable for third-party ingestion such as Bunny Stream fetch uploads." }
     - { name: media_search,          description: "Filter by folder / canonical media_type / aspect / duration / dimensions / codec." }
     - { name: media_list_folders,    description: "List immediate child folders of parent that contain media." }
     - { name: media_create_folder,   description: "Create an empty folder in storage that media files can later land in. Idempotent. Args - path." }
@@ -319,7 +319,7 @@ func (a *App) MCPTools() []sdk.Tool {
 	return []sdk.Tool{
 		{
 			Name:        "media_get",
-			Description: "Fetch one media record by storage file_id. Returns display-space width/height/orientation + derivation pointers. Raw ffprobe JSON and renderer-only rotation metadata are hidden unless include_raw_probe=true.",
+			Description: "Fetch one media record by storage file_id. Returns display-space width/height/orientation + derivation pointers. The returned media.url is a fresh public/signed fetch URL suitable for third-party ingestion such as Bunny Stream fetch uploads. Raw ffprobe JSON and renderer-only rotation metadata are hidden unless include_raw_probe=true.",
 			InputSchema: schemaObject(map[string]any{
 				"file_id":           map[string]any{"type": "string"},
 				"include_raw_probe": map[string]any{"type": "boolean"},
@@ -673,7 +673,62 @@ func (a *App) toolGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		// flag so agents can tell it apart from a deleted file.
 		return map[string]any{"found": true, "media": &rows[0], "storage_unavailable": true}, nil
 	}
-	return map[string]any{"found": true, "media": enriched[0]}, nil
+	row := enriched[0]
+	if signed, err := signedFetchURLForMedia(ctx, pid, fid, row.Visibility, row.URL); err == nil && signed != "" {
+		row.URL = signed
+	} else if row.Visibility != "public" {
+		// Avoid returning a private canonical URL that looks usable
+		// to third-party services. The rest of the probe metadata is
+		// still valuable, and the flag tells agents to retry later.
+		row.URL = ""
+		return map[string]any{"found": true, "media": row, "storage_unavailable": true}, nil
+	}
+	return map[string]any{"found": true, "media": row}, nil
+}
+
+const mediaGetSignedURLTTLSeconds = 24 * 60 * 60
+
+// signedFetchURLForMedia returns a URL that can be handed to an
+// external fetcher such as Bunny Stream. Public files can use their
+// canonical URL. Private/signed files ask storage to mint a fresh
+// signed/presigned URL via the bound app; tests and older platforms
+// fall back to the HTTP helper.
+func signedFetchURLForMedia(ctx *sdk.AppCtx, projectID, fileID, visibility, canonicalURL string) (string, error) {
+	if visibility == "public" && canonicalURL != "" {
+		return canonicalURL, nil
+	}
+	id, err := strconv.ParseInt(fileID, 10, 64)
+	if err != nil || id <= 0 {
+		return "", fmt.Errorf("invalid file_id %q", fileID)
+	}
+	args := map[string]any{
+		"_project_id": projectID,
+		"id":          id,
+		"ttl_seconds": mediaGetSignedURLTTLSeconds,
+	}
+	if ctx != nil && ctx.PlatformAPI() != nil {
+		var out struct {
+			URL string `json:"url"`
+		}
+		if err := ctx.PlatformAPI().CallAppResult("storage", "files_get_url", args, &out); err == nil && out.URL != "" {
+			return absolutizeStorageFetchURL(ctx, out.URL), nil
+		}
+	}
+	return newStorageClient().GetSignedURL(context.Background(), projectID, id, mediaGetSignedURLTTLSeconds)
+}
+
+func absolutizeStorageFetchURL(ctx *sdk.AppCtx, u string) string {
+	if !strings.HasPrefix(u, "/") {
+		return u
+	}
+	publicURL, err := resolvePublicURL(ctx)
+	if err != nil {
+		return u
+	}
+	if strings.HasPrefix(u, "/api/apps/storage/") {
+		return publicURL + u
+	}
+	return publicURL + "/api/apps/storage" + u
 }
 
 // toolSetDescription writes prose columns on the media row. Partial
