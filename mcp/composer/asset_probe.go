@@ -11,7 +11,7 @@ import (
 )
 
 func probeAssetDurationSeconds(app *sdk.AppCtx, src string) float64 {
-	url, err := resolveAssetURL(app, src)
+	url, err := resolveAssetLocal(app, src)
 	if err != nil {
 		return 0
 	}

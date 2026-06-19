@@ -308,6 +308,26 @@ printf '6.75\n'
 	}
 }
 
+func TestStorageLocalPathForKey_FindsSiblingStorageBlob(t *testing.T) {
+	root := t.TempDir()
+	appData := filepath.Join(root, "apps", "composer", "data", "60")
+	storageBlob := filepath.Join(root, "apps", "storage", "data", "6", "storage-blobs", "ab", "asset.mp3")
+	if err := os.MkdirAll(filepath.Dir(storageBlob), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(storageBlob, []byte("mp3"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := storageLocalPathForKey(appData, "asset.mp3")
+	if err != nil {
+		t.Fatalf("storage local path: %v", err)
+	}
+	if got != storageBlob {
+		t.Fatalf("path = %q, want %q", got, storageBlob)
+	}
+}
+
 func TestAIKindHasMediaDuration(t *testing.T) {
 	for _, kind := range []string{"audio_tts", "audio_sfx", "music", "video", "avatar"} {
 		if !aiKindHasMediaDuration(kind) {

@@ -51,7 +51,7 @@ func (e *localFFmpegExecutor) Render(
 			if clipAssetType(c, "audio") == "silence" {
 				continue
 			}
-			url, err := resolveAssetURL(app, c.Asset.Src)
+			url, err := resolveAssetLocal(app, c.Asset.Src)
 			if err != nil {
 				cleanup()
 				return Result{}, fmt.Errorf("audio clip[%d]: resolve %q: %w", i, c.Asset.Src, err)
@@ -60,7 +60,7 @@ func (e *localFFmpegExecutor) Render(
 		}
 		soundtrackIdx := -1
 		if s := edit.Timeline.Soundtrack; s != nil {
-			url, err := resolveAssetURL(app, s.Src)
+			url, err := resolveAssetLocal(app, s.Src)
 			if err != nil {
 				cleanup()
 				return Result{}, fmt.Errorf("soundtrack resolve %q: %w", s.Src, err)
@@ -83,7 +83,7 @@ func (e *localFFmpegExecutor) Render(
 	// natively (movflags+frag work); no need to download first.
 	inputs := make([]string, 0, len(visual.Clips)+len(audioClips)+1)
 	for i, c := range visual.Clips {
-		url, err := resolveAssetURL(app, c.Asset.Src)
+		url, err := resolveAssetLocal(app, c.Asset.Src)
 		if err != nil {
 			cleanup()
 			return Result{}, fmt.Errorf("visual clip[%d]: resolve %q: %w", i, c.Asset.Src, err)
@@ -94,7 +94,7 @@ func (e *localFFmpegExecutor) Render(
 		if clipAssetType(c, "audio") == "silence" {
 			continue
 		}
-		url, err := resolveAssetURL(app, c.Asset.Src)
+		url, err := resolveAssetLocal(app, c.Asset.Src)
 		if err != nil {
 			cleanup()
 			return Result{}, fmt.Errorf("audio clip[%d]: resolve %q: %w", i, c.Asset.Src, err)
@@ -103,7 +103,7 @@ func (e *localFFmpegExecutor) Render(
 	}
 	var soundtrackIdx int = -1
 	if s := edit.Timeline.Soundtrack; s != nil {
-		url, err := resolveAssetURL(app, s.Src)
+		url, err := resolveAssetLocal(app, s.Src)
 		if err != nil {
 			cleanup()
 			return Result{}, fmt.Errorf("soundtrack resolve %q: %w", s.Src, err)
