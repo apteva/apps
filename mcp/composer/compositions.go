@@ -145,6 +145,7 @@ func validateEdit(e *Edit) error {
 				c.Length = c.Duration
 			}
 			normalizeClipDurationMetadata(c)
+			defaultGeneratedAudioFX(c)
 		}
 		tt := trackKind(*track)
 		if tt == "visual" {
@@ -461,6 +462,21 @@ func normalizeClipDurationMetadata(c *Clip) {
 	}
 	if c.Length <= 0 && c.AI.Duration > 0 {
 		c.Length = float64(c.AI.Duration)
+	}
+}
+
+func defaultGeneratedAudioFX(c *Clip) {
+	if c == nil || c.AI == nil || c.Audio != nil {
+		return
+	}
+	if strings.ToLower(strings.TrimSpace(c.AI.MediaKind)) != "audio_sfx" {
+		return
+	}
+	c.Audio = &AudioFX{
+		Normalize:      true,
+		LoudnessTarget: -16,
+		PeakLimitDB:    -2,
+		TrimSilence:    true,
 	}
 }
 

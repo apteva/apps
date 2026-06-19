@@ -392,6 +392,34 @@ func TestBuildLocalAudioFFmpegArgs_SilenceAndAudioFX(t *testing.T) {
 	}
 }
 
+func TestValidateEdit_DefaultsGeneratedSFXNormalization(t *testing.T) {
+	e, err := parseEditJSON(`{"timeline":{"tracks":[
+		{"type":"audio","clips":[
+			{"asset":{"src":"https://snap.mp3","type":"audio"},"start":0,"length":1,
+				"ai":{"media_kind":"audio_sfx","prompt":"single finger snap"}}
+		]}
+	]}}`)
+	if err != nil {
+		t.Fatalf("generated sfx should validate: %v", err)
+	}
+	clip := e.Timeline.Tracks[0].Clips[0]
+	if clip.Audio == nil {
+		t.Fatal("generated sfx should default audio processing")
+	}
+	if !clip.Audio.Normalize || !clip.Audio.TrimSilence {
+		t.Fatalf("generated sfx audio defaults = %+v, want normalize and trim", clip.Audio)
+	}
+	if clip.Audio.LoudnessTarget != -16 || clip.Audio.PeakLimitDB != -2 {
+		t.Fatalf("generated sfx loudness defaults = %+v, want -16 LUFS / -2 dBTP", clip.Audio)
+	}
+
+	args := buildLocalAudioFFmpegArgs(e, Output{Format: "mp3"}, []string{"https://snap.mp3"}, -1, "out.mp3")
+	cmd := strings.Join(args, " ")
+	if !strings.Contains(cmd, "silenceremove=") || !strings.Contains(cmd, "loudnorm=I=-16:TP=-2") {
+		t.Fatalf("generated sfx normalization filters missing: %s", cmd)
+	}
+}
+
 func TestLocalExecutorKeepsOutputUntilCleanup(t *testing.T) {
 	dir := t.TempDir()
 	ffmpeg := filepath.Join(dir, "fake-ffmpeg")

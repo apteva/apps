@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: composer
 display_name: Composer
-version: 0.3.11
+version: 0.3.12
 description: |
   Multi-clip video composition. Stitch generated or uploaded assets
   into a single video — one visual track, timed audio tracks, optional
@@ -10,6 +10,10 @@ description: |
   default, on a render host via instances when render_host_id is
   set, or against a SaaS render backend (Shotstack et al) when one
   is bound to the render_executor role.
+
+  v0.3.12 applies default trim and loudness normalization to generated
+  sound-effect clips, so quiet AI SFX assets remain audible in audio-only
+  and mixed renders without manual JSON audio settings.
 
   v0.3.11 probes generated Storage assets in Composer for actual
   audio/video/avatar duration before fit/reflow timing, keeping Media
