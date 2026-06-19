@@ -41,15 +41,7 @@ func (e *localFFmpegExecutor) Render(
 	if err != nil {
 		return Result{}, fmt.Errorf("scratch dir: %w", err)
 	}
-	var renderErr error
-	// Keep on failure for post-mortem; clean on success below.
-	defer func() {
-		if renderErr == nil {
-			_ = os.RemoveAll(scratch)
-		} else {
-			app.Logger().Warn("kept scratch dir for post-mortem", "path", scratch, "err", renderErr)
-		}
-	}()
+	cleanup := func() { _ = os.RemoveAll(scratch) }
 
 	visual := primaryVisualTrack(edit)
 	audioClips := audioTimelineClips(edit)
@@ -58,6 +50,7 @@ func (e *localFFmpegExecutor) Render(
 		for i, c := range audioClips {
 			url, err := resolveAssetURL(app, c.Asset.Src)
 			if err != nil {
+				cleanup()
 				return Result{}, fmt.Errorf("audio clip[%d]: resolve %q: %w", i, c.Asset.Src, err)
 			}
 			inputs = append(inputs, url)
@@ -66,6 +59,7 @@ func (e *localFFmpegExecutor) Render(
 		if s := edit.Timeline.Soundtrack; s != nil {
 			url, err := resolveAssetURL(app, s.Src)
 			if err != nil {
+				cleanup()
 				return Result{}, fmt.Errorf("soundtrack resolve %q: %w", s.Src, err)
 			}
 			soundtrackIdx = len(inputs)
@@ -75,7 +69,9 @@ func (e *localFFmpegExecutor) Render(
 		args := buildLocalAudioFFmpegArgs(edit, output, inputs, soundtrackIdx, outFile)
 		result, runErr := runLocalFFmpeg(ctx, app, start, scratch, len(inputs), outFile, args)
 		if runErr != nil {
-			renderErr = runErr
+			app.Logger().Warn("kept scratch dir for post-mortem", "path", scratch, "err", runErr)
+		} else {
+			result.Cleanup = cleanup
 		}
 		return result, runErr
 	}
@@ -86,6 +82,7 @@ func (e *localFFmpegExecutor) Render(
 	for i, c := range visual.Clips {
 		url, err := resolveAssetURL(app, c.Asset.Src)
 		if err != nil {
+			cleanup()
 			return Result{}, fmt.Errorf("visual clip[%d]: resolve %q: %w", i, c.Asset.Src, err)
 		}
 		inputs = append(inputs, url)
@@ -93,6 +90,7 @@ func (e *localFFmpegExecutor) Render(
 	for i, c := range audioClips {
 		url, err := resolveAssetURL(app, c.Asset.Src)
 		if err != nil {
+			cleanup()
 			return Result{}, fmt.Errorf("audio clip[%d]: resolve %q: %w", i, c.Asset.Src, err)
 		}
 		inputs = append(inputs, url)
@@ -101,6 +99,7 @@ func (e *localFFmpegExecutor) Render(
 	if s := edit.Timeline.Soundtrack; s != nil {
 		url, err := resolveAssetURL(app, s.Src)
 		if err != nil {
+			cleanup()
 			return Result{}, fmt.Errorf("soundtrack resolve %q: %w", s.Src, err)
 		}
 		soundtrackIdx = len(inputs)
@@ -112,7 +111,9 @@ func (e *localFFmpegExecutor) Render(
 
 	result, runErr := runLocalFFmpeg(ctx, app, start, scratch, len(inputs), outFile, args)
 	if runErr != nil {
-		renderErr = runErr
+		app.Logger().Warn("kept scratch dir for post-mortem", "path", scratch, "err", runErr)
+	} else {
+		result.Cleanup = cleanup
 	}
 	return result, runErr
 }

@@ -7,9 +7,14 @@ package main
 // are what's worth pinning.
 
 import (
+	"context"
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
+
+	tk "github.com/apteva/app-sdk/testkit"
 )
 
 // --- validator ----------------------------------------------------
@@ -300,6 +305,47 @@ func TestBuildLocalAudioFFmpegArgs_MP3WithSilenceGap(t *testing.T) {
 	}
 	if !strings.Contains(cmd, "libmp3lame") || !strings.Contains(cmd, "-map [aout]") {
 		t.Errorf("mp3 audio mapping/codec missing: %s", cmd)
+	}
+}
+
+func TestLocalExecutorKeepsOutputUntilCleanup(t *testing.T) {
+	dir := t.TempDir()
+	ffmpeg := filepath.Join(dir, "fake-ffmpeg")
+	if err := os.WriteFile(ffmpeg, []byte(`#!/bin/sh
+out=""
+for arg in "$@"; do
+  out="$arg"
+done
+printf 'rendered' > "$out"
+`), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("FFMPEG_PATH", ffmpeg)
+
+	edit, err := parseEditJSON(`{"timeline":{"tracks":[
+		{"type":"audio","clips":[{"asset":{"src":"https://example.test/a.mp3","type":"audio"},"start":0,"length":2}]}
+	]}}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	ctx := tk.NewAppCtx(t, "apteva.yaml")
+	result, err := (&localFFmpegExecutor{}).Render(context.Background(), ctx, edit, Output{Format: "mp3"}, "test-project")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.LocalPath == "" {
+		t.Fatal("expected local render path")
+	}
+	if _, err := os.Stat(result.LocalPath); err != nil {
+		t.Fatalf("render output should still exist for dispatch persistence: %v", err)
+	}
+	if result.Cleanup == nil {
+		t.Fatal("expected cleanup callback")
+	}
+	result.Cleanup()
+	if _, err := os.Stat(result.LocalPath); !os.IsNotExist(err) {
+		t.Fatalf("cleanup should remove render output, got %v", err)
 	}
 }
 

@@ -339,6 +339,9 @@ func (a *App) toolCompositionRender(ctx *sdk.AppCtx, args map[string]any) (any, 
 		})
 		return nil, err
 	}
+	if result.Cleanup != nil {
+		defer result.Cleanup()
+	}
 
 	// Sync executors deliver bytes via LocalPath. Persist to storage
 	// (when bound) or local cache (when not).

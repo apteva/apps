@@ -25,6 +25,7 @@ type Executor interface {
 type Result struct {
 	Sync             bool
 	LocalPath        string // sync executors: path to the rendered file on the sidecar's disk
+	Cleanup          func() // sync executors: remove temporary render artifacts after LocalPath is persisted
 	ProviderRenderID string // async executors: handle for the worker to poll
 	DurationMS       int64  // wall-clock render time (when known)
 	CostUSD          float64

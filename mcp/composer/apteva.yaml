@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: composer
 display_name: Composer
-version: 0.3.8
+version: 0.3.9
 description: |
   Multi-clip video composition. Stitch generated or uploaded assets
   into a single video — one visual track, timed audio tracks, optional
@@ -10,6 +10,10 @@ description: |
   default, on a render host via instances when render_host_id is
   set, or against a SaaS render backend (Shotstack et al) when one
   is bound to the render_executor role.
+
+  v0.3.9 keeps local ffmpeg render outputs available until Composer
+  has uploaded them to Storage or moved them into the fallback cache,
+  fixing complete render rows with no downloadable output.
 
   v0.3.8 makes AI-generated background music a first-class quick-add
   path in the timeline and inspector, matching AI image/video/avatar
