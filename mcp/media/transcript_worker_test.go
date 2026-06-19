@@ -67,9 +67,9 @@ func (s *stubPlatform) GetConnection(id int64) (*sdk.PlatformConnection, error) 
 func (s *stubPlatform) ListConnections(_ sdk.ConnectionFilter) ([]sdk.PlatformConnection, error) {
 	return nil, nil
 }
-func (s *stubPlatform) GetInstance(int64) (*sdk.PlatformInstance, error)  { return nil, nil }
-func (s *stubPlatform) SendEvent(int64, string) error                     { return nil }
-func (s *stubPlatform) SendToChannel(string, string, string) error        { return nil }
+func (s *stubPlatform) GetInstance(int64) (*sdk.PlatformInstance, error) { return nil, nil }
+func (s *stubPlatform) SendEvent(int64, string) error                    { return nil }
+func (s *stubPlatform) SendToChannel(string, string, string) error       { return nil }
 func (s *stubPlatform) ExecuteIntegrationTool(connID int64, tool string, input map[string]any) (*sdk.ExecuteResult, error) {
 	s.mu.Lock()
 	s.ExecuteCalls = append(s.ExecuteCalls, executeCall{ConnID: connID, Tool: tool, Input: input})
@@ -83,7 +83,7 @@ func (s *stubPlatform) CallAppResult(string, string, map[string]any, any) error 
 func (s *stubPlatform) StartOAuth(sdk.OAuthStartRequest) (*sdk.OAuthStartResult, error) {
 	return nil, nil
 }
-func (s *stubPlatform) DisconnectConnection(int64) error                   { return nil }
+func (s *stubPlatform) DisconnectConnection(int64) error                        { return nil }
 func (s *stubPlatform) ListOwnedConnections() ([]sdk.PlatformConnection, error) { return nil, nil }
 
 // GetGrants — added for app-sdk v0.3 PlatformClient. Tests don't
@@ -127,8 +127,32 @@ func mockStorageURL(t *testing.T) *httptest.Server {
 		// Match POST /api/apps/storage/files/{id}/url
 		if r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/api/apps/storage/files/") &&
 			strings.HasSuffix(r.URL.Path, "/url") {
+			parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+			id := "42"
+			if len(parts) >= 5 {
+				id = parts[len(parts)-2]
+			}
 			w.Header().Set("Content-Type", "application/json")
-			fmt.Fprintf(w, `{"url":"/files/42/content?sig=stub&exp=999","expires_at":999}`)
+			fmt.Fprintf(w, `{"url":"/files/%s/content?sig=stub&exp=999","expires_at":999}`, id)
+			return
+		}
+		if r.Method == http.MethodGet && r.URL.Path == "/api/apps/storage/files" {
+			ids := strings.Split(r.URL.Query().Get("ids"), ",")
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"files":[`)
+			first := true
+			for _, id := range ids {
+				id = strings.TrimSpace(id)
+				if id == "" {
+					continue
+				}
+				if !first {
+					fmt.Fprint(w, ",")
+				}
+				first = false
+				fmt.Fprintf(w, `{"id":%s,"name":"cached-%s.mp3","folder":"/.media/transcript-audio/","content_type":"audio/mpeg","sha256":"proxy-sha"}`, id, id)
+			}
+			fmt.Fprint(w, `]}`)
 			return
 		}
 		// MCP fallback for files_get_url
@@ -238,7 +262,7 @@ func TestTranscriberSweep_BoundHappyPath_PersistsTranscript(t *testing.T) {
 		}`),
 	}
 	ctx := newTestCtxWithPlatform(t, stub)
-	upsertMedia(ctx.AppDB(), testProj, "1", sampleAVProbe(3000), "sha", "", "")
+	upsertMedia(ctx.AppDB(), testProj, "1", sampleAudioProbe(), "sha", "", "")
 
 	transcriberSweep(ctx)
 
@@ -289,6 +313,53 @@ func TestTranscriberSweep_BoundHappyPath_PersistsTranscript(t *testing.T) {
 	}
 }
 
+func TestTranscriberSweep_VideoUsesCachedTranscriptAudioProxy(t *testing.T) {
+	stub := boundDeepgram()
+	stub.executeResp = &sdk.ExecuteResult{Success: true, Status: 200,
+		Data: json.RawMessage(`{"results":{"channels":[{"alternatives":[{"transcript":"cached proxy"}]}]}}`)}
+	ctx := newTestCtxWithPlatform(t, stub)
+
+	const sourceSHA = "bb558ae932c58b2d7aadfe4a83b9663d58d8b5f680c8979c32afc2818ad03670"
+	if err := upsertMedia(ctx.AppDB(), testProj, "1", sampleAVProbe(3000), sourceSHA, "", "source.mov"); err != nil {
+		t.Fatal(err)
+	}
+	if err := upsertDerivation(ctx.AppDB(), testProj, "1", transcriptAudioKind(sourceSHA), 9001, 0, 0, 0); err != nil {
+		t.Fatal(err)
+	}
+
+	transcriberSweep(ctx)
+
+	if len(stub.ExecuteCalls) != 1 {
+		t.Fatalf("expected 1 ExecuteIntegrationTool call, got %d", len(stub.ExecuteCalls))
+	}
+	url, _ := stub.ExecuteCalls[0].Input["url"].(string)
+	if !strings.Contains(url, "/files/9001/content") {
+		t.Fatalf("Deepgram should receive cached transcript-audio URL, got %q", url)
+	}
+
+	row, err := getMedia(ctx.AppDB(), testProj, "1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, d := range row.Derivations {
+		if isTranscriptAudioKind(d.Kind) {
+			t.Fatalf("internal transcript audio derivation leaked through getMedia: %+v", d)
+		}
+	}
+	results, err := searchMedia(ctx.AppDB(), testProj, SearchFilters{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("search returned %d rows, want 1", len(results))
+	}
+	for _, d := range results[0].Derivations {
+		if isTranscriptAudioKind(d.Kind) {
+			t.Fatalf("internal transcript audio derivation leaked through search: %+v", d)
+		}
+	}
+}
+
 func TestTranscriberSweep_DeepgramNon2xx_MarkedFailed(t *testing.T) {
 	// Deepgram returns non-2xx → row marked failed with the body
 	// truncated into the error.
@@ -298,7 +369,7 @@ func TestTranscriberSweep_DeepgramNon2xx_MarkedFailed(t *testing.T) {
 		Data: json.RawMessage(`{"error":"unauthorized"}`),
 	}
 	ctx := newTestCtxWithPlatform(t, stub)
-	upsertMedia(ctx.AppDB(), testProj, "1", sampleAVProbe(3000), "sha", "", "")
+	upsertMedia(ctx.AppDB(), testProj, "1", sampleAudioProbe(), "sha", "", "")
 
 	transcriberSweep(ctx)
 
@@ -316,7 +387,7 @@ func TestTranscriberSweep_DeepgramNetworkError_MarkedFailed(t *testing.T) {
 	stub := boundDeepgram()
 	stub.executeErr = errors.New("connection reset by peer")
 	ctx := newTestCtxWithPlatform(t, stub)
-	upsertMedia(ctx.AppDB(), testProj, "1", sampleAVProbe(3000), "sha", "", "")
+	upsertMedia(ctx.AppDB(), testProj, "1", sampleAudioProbe(), "sha", "", "")
 
 	transcriberSweep(ctx)
 
@@ -338,7 +409,7 @@ func TestTranscriberSweep_MalformedDeepgramResponse_MarkedFailed(t *testing.T) {
 		Data: json.RawMessage(`{"unexpected":"shape"}`),
 	}
 	ctx := newTestCtxWithPlatform(t, stub)
-	upsertMedia(ctx.AppDB(), testProj, "1", sampleAVProbe(3000), "sha", "", "")
+	upsertMedia(ctx.AppDB(), testProj, "1", sampleAudioProbe(), "sha", "", "")
 
 	transcriberSweep(ctx)
 
@@ -389,7 +460,7 @@ func TestTranscriberSweep_DiarizeFlagPropagates(t *testing.T) {
 	)
 	globalCtx = ctx
 
-	upsertMedia(ctx.AppDB(), testProj, "1", sampleAVProbe(3000), "sha", "", "")
+	upsertMedia(ctx.AppDB(), testProj, "1", sampleAudioProbe(), "sha", "", "")
 	transcriberSweep(ctx)
 
 	if len(stub.ExecuteCalls) != 1 {

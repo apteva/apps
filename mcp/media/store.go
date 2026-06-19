@@ -676,7 +676,9 @@ func getMedia(db *sql.DB, projectID, fileID string) (*MediaRow, error) {
 	if err != nil {
 		return nil, err
 	}
-	m.Derivations, _ = listDerivations(db, projectID, fileID)
+	if derivs, derr := listDerivations(db, projectID, fileID); derr == nil {
+		m.Derivations = visibleDerivations(derivs)
+	}
 	return m, nil
 }
 
@@ -957,7 +959,7 @@ func searchMedia(db *sql.DB, projectID string, f SearchFilters) ([]MediaRow, err
 	derivByFile, err := listDerivationsByFiles(db, projectID, ids)
 	if err == nil {
 		for i := range out {
-			out[i].Derivations = derivByFile[out[i].FileID]
+			out[i].Derivations = visibleDerivations(derivByFile[out[i].FileID])
 		}
 	}
 	return out, nil

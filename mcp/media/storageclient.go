@@ -171,14 +171,14 @@ func (c *storageClient) GetFile(ctx context.Context, projectID string, id int64)
 //
 // Two URL shapes come back from storage's HTTP endpoint:
 //
-//   1. S3-backed storage: a full presigned S3 URL on the bucket's
-//      provider domain (Hetzner Object Storage / R2 / AWS / B2). No
-//      prefix needed.
+//  1. S3-backed storage: a full presigned S3 URL on the bucket's
+//     provider domain (Hetzner Object Storage / R2 / AWS / B2). No
+//     prefix needed.
 //
-//   2. Disk-backed storage: a path-only URL (e.g.
-//      "/files/42/content?sig=...&exp=..."). We prepend the
-//      platform's public host so it's a real https:// URL the remote
-//      side can curl.
+//  2. Disk-backed storage: a path-only URL (e.g.
+//     "/files/42/content?sig=...&exp=..."). We prepend the
+//     platform's public host so it's a real https:// URL the remote
+//     side can curl.
 //
 // Pre-v0.12.6 this read `os.Getenv("APTEVA_PUBLIC_URL")` directly,
 // which captures the tunnel URL at sidecar SPAWN time. When ngrok
@@ -470,6 +470,14 @@ func escapeQuotes(s string) string {
 // base64-encode in memory. Storage accepts multipart on POST /files
 // (FormData with "file" + "folder").
 func (c *storageClient) UploadDerivationMultipart(ctx context.Context, projectID, folder, filename, contentType string, r io.Reader) (int64, error) {
+	return c.UploadInternalFile(ctx, projectID, folder, filename, contentType, r, "", "")
+}
+
+// UploadInternalFile pushes a media-owned byproduct into storage.
+// Used for derivations and the hidden transcript-audio proxy. The
+// file remains private and lives under a hidden folder, so the media
+// catalog will not index it as user content.
+func (c *storageClient) UploadInternalFile(ctx context.Context, projectID, folder, filename, contentType string, r io.Reader, source, tags string) (int64, error) {
 	var buf bytes.Buffer
 	mw := multipart.NewWriter(&buf)
 	if err := mw.WriteField("folder", folder); err != nil {
@@ -477,6 +485,16 @@ func (c *storageClient) UploadDerivationMultipart(ctx context.Context, projectID
 	}
 	if err := mw.WriteField("visibility", "private"); err != nil {
 		return 0, err
+	}
+	if source != "" {
+		if err := mw.WriteField("source", source); err != nil {
+			return 0, err
+		}
+	}
+	if tags != "" {
+		if err := mw.WriteField("tags", tags); err != nil {
+			return 0, err
+		}
 	}
 	if err := writeFilePartWithType(mw, filename, contentType, r); err != nil {
 		return 0, err

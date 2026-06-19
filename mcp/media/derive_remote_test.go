@@ -22,13 +22,34 @@ func TestBuildRemoteIndexScript_HasSmartThumbnailLoop(t *testing.T) {
 		PublicURL: "https://example", StorageToken: "t", ProjectID: "p",
 	})
 	for _, marker := range []string{
-		"luma_of()",                           // helper defined
-		`signalstats\.YAVG`,                   // ffmpeg luma probe (sed-escaped period in source)
-		"thumbnail=30,scale=$THUMB_WIDTH:-2",  // smart-frame filter, not just scale
-		"0.05 0.15 0.30 0.50 0.75",            // percentage-based seek schedule
-		"export THUMB_SEEK=",                  // first attempt = user-configured seek
-		`'BEGIN{exit !(l >= 25)}'`,            // 25/255 luma threshold (matches local path)
-		`|| continue`,                         // failure on one seek doesn't abort
+		"luma_of()",                          // helper defined
+		`signalstats\.YAVG`,                  // ffmpeg luma probe (sed-escaped period in source)
+		"thumbnail=30,scale=$THUMB_WIDTH:-2", // smart-frame filter, not just scale
+		"0.05 0.15 0.30 0.50 0.75",           // percentage-based seek schedule
+		"export THUMB_SEEK=",                 // first attempt = user-configured seek
+		`'BEGIN{exit !(l >= 25)}'`,           // 25/255 luma threshold (matches local path)
+		`|| continue`,                        // failure on one seek doesn't abort
+	} {
+		if !strings.Contains(s, marker) {
+			t.Errorf("generated script missing marker %q\nfull script:\n%s", marker, s)
+		}
+	}
+}
+
+func TestBuildRemoteTranscriptAudioScript_NormalizesAndUploadsHiddenProxy(t *testing.T) {
+	s := buildRemoteTranscriptAudioScript(remoteTranscriptAudioScriptInputs{
+		FFmpeg: "/u/bin/ffmpeg", SignedURL: "https://example/source.mov",
+		FileID: "3362", PublicURL: "https://example", StorageToken: "t", ProjectID: "p",
+	})
+	for _, marker := range []string{
+		"-vn -map 0:a:0",
+		"-ac 1 -ar 16000",
+		"loudnorm=I=-16:TP=-1.5:LRA=11,highpass=f=80,lowpass=f=8000",
+		"-c:a libmp3lame -b:a 64k",
+		"-F \"folder=/.media/transcript-audio/\"",
+		"-F \"source=media-transcript-audio\"",
+		"-F \"tags=internal,transcript-audio\"",
+		"APTEVA_TRANSCRIPT_AUDIO:",
 	} {
 		if !strings.Contains(s, marker) {
 			t.Errorf("generated script missing marker %q\nfull script:\n%s", marker, s)

@@ -23,7 +23,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"strconv"
 	"strings"
 	"time"
 
@@ -247,20 +246,18 @@ func runOneTranscription(app *sdk.AppCtx, bound *sdk.BoundIntegration, row *Tran
 		return
 	}
 
-	// Mint a signed URL Deepgram can fetch directly.
+	// Mint a signed URL Deepgram can fetch directly. For video
+	// sources this first prepares/reuses a hidden, normalized audio
+	// proxy so Deepgram never has to fetch/decode multi-GB video
+	// containers.
 	ctx, cancel := context.WithTimeout(context.Background(),
 		time.Duration(parseConfigIntFallback(cfg.Get("transcribe_timeout_seconds"), 600))*time.Second)
 	defer cancel()
 
 	sc := newStorageClient()
-	fileID, err := strconv.ParseInt(row.FileID, 10, 64)
+	signedURL, err := signedURLForDeepgram(ctx, app, sc, media)
 	if err != nil {
-		_ = transcriptMarkFailed(db, row.FileID, "file_id not numeric: "+err.Error())
-		return
-	}
-	signedURL, err := sc.GetSignedURL(ctx, row.ProjectID, fileID, 30*60) // 30-min TTL — long enough for Deepgram
-	if err != nil {
-		_ = transcriptMarkFailed(db, row.FileID, "signed URL: "+err.Error())
+		_ = transcriptMarkFailed(db, row.FileID, "prepare transcript audio: "+err.Error())
 		return
 	}
 
