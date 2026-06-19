@@ -1,10 +1,7 @@
 package main
 
 import (
-	"encoding/base64"
 	"math"
-	"os"
-	"os/exec"
 	"strconv"
 	"strings"
 	"time"
@@ -112,65 +109,5 @@ func mediaActualDurationSeconds(m generatedMedia) float64 {
 	if m.DurationMs > 0 {
 		return float64(m.DurationMs) / 1000
 	}
-	if !durationMime(m.MimeType) {
-		return 0
-	}
-	b, err := mediaBytes(m)
-	if err != nil {
-		return 0
-	}
-	return probeDurationSeconds(b, m.Ext)
-}
-
-func base64ActualDurationSeconds(base64Bytes, mime, ext string) float64 {
-	if base64Bytes == "" || !durationMime(mime) {
-		return 0
-	}
-	b, err := base64.StdEncoding.DecodeString(base64Bytes)
-	if err != nil {
-		return 0
-	}
-	return probeDurationSeconds(b, ext)
-}
-
-func durationMime(mime string) bool {
-	mime = strings.ToLower(strings.TrimSpace(mime))
-	return strings.HasPrefix(mime, "audio/") || strings.HasPrefix(mime, "video/")
-}
-
-func probeDurationSeconds(bytes []byte, ext string) float64 {
-	if len(bytes) == 0 {
-		return 0
-	}
-	if strings.TrimSpace(ext) == "" {
-		ext = "bin"
-	}
-	f, err := os.CreateTemp("", "media-studio-probe-*."+strings.TrimPrefix(ext, "."))
-	if err != nil {
-		return 0
-	}
-	path := f.Name()
-	defer os.Remove(path)
-	if _, err := f.Write(bytes); err != nil {
-		f.Close()
-		return 0
-	}
-	if err := f.Close(); err != nil {
-		return 0
-	}
-	cmd := exec.Command("ffprobe",
-		"-v", "error",
-		"-show_entries", "format=duration",
-		"-of", "default=noprint_wrappers=1:nokey=1",
-		path,
-	)
-	out, err := cmd.Output()
-	if err != nil {
-		return 0
-	}
-	v, err := strconv.ParseFloat(strings.TrimSpace(string(out)), 64)
-	if err != nil || v <= 0 {
-		return 0
-	}
-	return v
+	return 0
 }

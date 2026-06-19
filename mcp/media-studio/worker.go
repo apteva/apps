@@ -297,7 +297,7 @@ func (a *App) finalizeJob(app *sdk.AppCtx, p pendingJob, base64Bytes, mime strin
 		ext = "mp4"
 	}
 	media := generatedMedia{B64: base64Bytes, MimeType: mime, Ext: ext}
-	actualSeconds := base64ActualDurationSeconds(base64Bytes, mime, ext)
+	actualSeconds := 0.0
 
 	storageDir := "videos"
 	capability := "video.generate"

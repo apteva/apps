@@ -25,7 +25,6 @@ type generatedMedia struct {
 	MimeType    string // image/png, image/jpeg, video/mp4, audio/mpeg, …
 	Ext         string // png, jpeg, mp4, mp3, wav, webp
 	DurationMs  int64  // video / audio / music only
-	Analysis    *AudioAnalysis
 }
 
 // mediaBytes returns the raw bytes for a generated item regardless of

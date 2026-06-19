@@ -44,9 +44,6 @@ func materializeAIAssets(ctx *sdk.AppCtx, edit *Edit, compositionID int64, proje
 				out.Pending = append(out.Pending, pending)
 				continue
 			}
-			if syncClipDurationFromAI(clip) {
-				out.Changed = true
-			}
 			if clip.AI.StorageID > 0 {
 				nextSrc := fmt.Sprintf("storage:%d", clip.AI.StorageID)
 				if clip.Asset.Src != nextSrc {
@@ -58,6 +55,19 @@ func materializeAIAssets(ctx *sdk.AppCtx, edit *Edit, compositionID int64, proje
 					clip.Asset.Type = nextType
 					out.Changed = true
 				}
+			}
+			if clip.AI.StorageID > 0 && clip.AI.ActualDurationSeconds <= 0 && aiKindHasMediaDuration(clip.AI.MediaKind) {
+				if d := probeAssetDurationSeconds(ctx, clip.Asset.Src); d > 0 {
+					clip.AI.ActualDurationSeconds = d
+					if clip.AI.AudioAnalysis == nil {
+						clip.AI.AudioAnalysis = &AudioAnalysis{}
+					}
+					clip.AI.AudioAnalysis.DurationSeconds = d
+					out.Changed = true
+				}
+			}
+			if syncClipDurationFromAI(clip) {
+				out.Changed = true
 			}
 		}
 	}
@@ -76,6 +86,16 @@ func materializeAIAssets(ctx *sdk.AppCtx, edit *Edit, compositionID int64, proje
 			if s.Src != nextSrc {
 				s.Src = nextSrc
 				out.Changed = true
+			}
+			if s.AI.ActualDurationSeconds <= 0 && aiKindHasMediaDuration(s.AI.MediaKind) {
+				if d := probeAssetDurationSeconds(ctx, s.Src); d > 0 {
+					s.AI.ActualDurationSeconds = d
+					if s.AI.AudioAnalysis == nil {
+						s.AI.AudioAnalysis = &AudioAnalysis{}
+					}
+					s.AI.AudioAnalysis.DurationSeconds = d
+					out.Changed = true
+				}
 			}
 		}
 	}
@@ -279,6 +299,15 @@ func durationModeFitsGenerated(mode string) bool {
 
 func durationModeReflows(mode string) bool {
 	return strings.ToLower(strings.TrimSpace(mode)) == "fit_generated_reflow"
+}
+
+func aiKindHasMediaDuration(kind string) bool {
+	switch strings.ToLower(strings.TrimSpace(kind)) {
+	case "audio_tts", "audio_sfx", "music", "video", "avatar":
+		return true
+	default:
+		return false
+	}
 }
 
 func aiCacheKey(ai *AIAsset) string {

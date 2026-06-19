@@ -19,7 +19,6 @@ type buildResultArgs struct {
 	StorageFolder            string
 	EstimatedDurationSeconds float64
 	ActualDurationSeconds    float64
-	AudioAnalysis            *AudioAnalysis
 }
 
 // buildMCPResult shapes the MCP content blocks per kind. Image kind
@@ -60,14 +59,6 @@ func buildMCPResult(a buildResultArgs) map[string]any {
 	}
 	if a.ActualDurationSeconds > 0 {
 		summary += fmt.Sprintf("\nActual duration: %.1fs", a.ActualDurationSeconds)
-	}
-	if a.AudioAnalysis != nil {
-		if a.AudioAnalysis.PeakDB != 0 {
-			summary += fmt.Sprintf("\nPeak: %.1f dB", a.AudioAnalysis.PeakDB)
-		}
-		if a.AudioAnalysis.RMSDB != 0 {
-			summary += fmt.Sprintf("\nRMS: %.1f dB", a.AudioAnalysis.RMSDB)
-		}
 	}
 	if hasStorage {
 		summary += "\nSaved to storage:"
@@ -120,15 +111,6 @@ func buildMCPResult(a buildResultArgs) map[string]any {
 		"storage_folder":             a.StorageFolder,
 		"estimated_duration_seconds": a.EstimatedDurationSeconds,
 		"actual_duration_seconds":    a.ActualDurationSeconds,
-	}
-	if a.AudioAnalysis != nil {
-		meta["audio_analysis"] = a.AudioAnalysis
-		if a.AudioAnalysis.PeakDB != 0 {
-			meta["peak_db"] = a.AudioAnalysis.PeakDB
-		}
-		if a.AudioAnalysis.RMSDB != 0 {
-			meta["rms_db"] = a.AudioAnalysis.RMSDB
-		}
 	}
 	return map[string]any{
 		"content": content,

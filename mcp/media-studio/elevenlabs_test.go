@@ -240,13 +240,6 @@ func TestEstimatedDurationSeconds_TTSPunctuationAndSpeed(t *testing.T) {
 	}
 }
 
-func TestParseVolumeDetect(t *testing.T) {
-	peak, rms := parseVolumeDetect("[Parsed_volumedetect_0] mean_volume: -22.4 dB\n[Parsed_volumedetect_0] max_volume: -3.1 dB")
-	if peak != -3.1 || rms != -22.4 {
-		t.Fatalf("peak/rms = %v/%v", peak, rms)
-	}
-}
-
 func TestParseElevenLabsModelList(t *testing.T) {
 	raw := json.RawMessage(`[
 		{"model_id":"eleven_flash_v2_5","name":"Flash","can_do_text_to_speech":true},

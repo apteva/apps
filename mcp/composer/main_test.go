@@ -292,6 +292,33 @@ func TestSyncClipDurationFromAI_FitGeneratedUpdatesLength(t *testing.T) {
 	}
 }
 
+func TestProbeAssetDurationSeconds_UsesFFProbe(t *testing.T) {
+	dir := t.TempDir()
+	ffprobe := filepath.Join(dir, "fake-ffprobe")
+	if err := os.WriteFile(ffprobe, []byte(`#!/bin/sh
+printf '6.75\n'
+`), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("FFPROBE_PATH", ffprobe)
+
+	ctx := tk.NewAppCtx(t, "apteva.yaml")
+	if got := probeAssetDurationSeconds(ctx, "https://example.test/audio.mp3"); got != 6.75 {
+		t.Fatalf("duration = %v, want 6.75", got)
+	}
+}
+
+func TestAIKindHasMediaDuration(t *testing.T) {
+	for _, kind := range []string{"audio_tts", "audio_sfx", "music", "video", "avatar"} {
+		if !aiKindHasMediaDuration(kind) {
+			t.Fatalf("%s should have media duration", kind)
+		}
+	}
+	if aiKindHasMediaDuration("image") {
+		t.Fatal("image should not be probed for duration")
+	}
+}
+
 func TestValidateEditOutput_AudioOnlyRequiresAudioFormat(t *testing.T) {
 	e, err := parseEditJSON(`{"timeline":{"tracks":[
 		{"type":"audio","clips":[{"asset":{"src":"https://a.mp3","type":"audio"},"start":0,"length":2}]}

@@ -2,14 +2,15 @@ schema: apteva-app/v1
 
 name: media-studio
 display_name: Media Studio
-version: 0.10.20
+version: 0.10.21
 description: |
   Generate images, video, audio, music, and avatars via compatible
   providers. ElevenLabs powers audio TTS, sound effects, and music.
   Optionally saves outputs to the Storage app for permanent, shareable
   references. v0.10.19 adds media_delete plus a panel Delete action that
   removes generation rows, related async job rows, local cache files, and
-  linked Storage files by default.
+  linked Storage files by default. v0.10.21 keeps Media Studio free of
+  local media probing and leaves exact duration analysis to Composer.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/media-studio
