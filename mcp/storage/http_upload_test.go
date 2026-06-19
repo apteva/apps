@@ -26,6 +26,7 @@ package main
 import (
 	"bytes"
 	"encoding/json"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -87,5 +88,55 @@ func TestHTTPUpload_JSONBodyRejectedWithoutQueryProject(t *testing.T) {
 	app.httpUpload(rec, req)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("expected 400 without project_id in query, got %d", rec.Code)
+	}
+}
+
+func TestHTTPUpload_MultipartPersistsSourceAndCommaTags(t *testing.T) {
+	ctx := newTestCtx(t)
+	app := &App{}
+
+	var body bytes.Buffer
+	mw := multipart.NewWriter(&body)
+	_ = mw.WriteField("folder", "/.media/transcript-audio/")
+	_ = mw.WriteField("visibility", "private")
+	_ = mw.WriteField("source", "media-transcript-audio")
+	_ = mw.WriteField("tags", "internal,transcript-audio")
+	part, err := mw.CreateFormFile("file", "3453.mp3")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := part.Write([]byte("fake mp3 bytes")); err != nil {
+		t.Fatal(err)
+	}
+	if err := mw.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	req := httptest.NewRequest(http.MethodPost, "/files?project_id=test-proj", &body)
+	req.Header.Set("Content-Type", mw.FormDataContentType())
+	rec := httptest.NewRecorder()
+	app.httpUpload(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("expected 200, got %d: %s", rec.Code, rec.Body.String())
+	}
+
+	var resp map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v", err)
+	}
+	id := int64(resp["id"].(float64))
+	got, err := dbGetByID(ctx.AppDB(), "test-proj", id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Source != "media-transcript-audio" {
+		t.Fatalf("source = %q, want media-transcript-audio", got.Source)
+	}
+	wantTags := map[string]bool{"internal": true, "transcript-audio": true}
+	for _, tag := range got.Tags {
+		delete(wantTags, tag)
+	}
+	if len(wantTags) != 0 {
+		t.Fatalf("tags = %#v, missing %#v", got.Tags, wantTags)
 	}
 }

@@ -1417,13 +1417,11 @@ func (a *App) httpUpload(w http.ResponseWriter, r *http.Request) {
 		Name:        normaliseFilename(header.Filename),
 		Folder:      normaliseFolder(r.FormValue("folder")),
 		ContentType: header.Header.Get("Content-Type"),
-		Source:      "human",
+		Source:      ifEmpty(strings.TrimSpace(r.FormValue("source")), "human"),
 		Visibility:  effectiveVisibility(ctx, r.FormValue("visibility")),
 	}
 	if t := r.FormValue("tags"); t != "" {
-		var tags []string
-		_ = json.Unmarshal([]byte(t), &tags)
-		in.Tags = tags
+		in.Tags = parseUploadTags(t)
 	}
 	f, existed, err := saveBytes(ctx, pid, in, body)
 	if err != nil {
@@ -2311,6 +2309,34 @@ func callerLabel() string {
 }
 
 // ─── tiny utilities ────────────────────────────────────────────────
+
+func parseUploadTags(raw string) []string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	var tags []string
+	if strings.HasPrefix(raw, "[") {
+		if err := json.Unmarshal([]byte(raw), &tags); err == nil {
+			return cleanTags(tags)
+		}
+	}
+	return cleanTags(strings.Split(raw, ","))
+}
+
+func cleanTags(in []string) []string {
+	out := make([]string, 0, len(in))
+	seen := map[string]bool{}
+	for _, tag := range in {
+		tag = strings.TrimSpace(tag)
+		if tag == "" || seen[tag] {
+			continue
+		}
+		seen[tag] = true
+		out = append(out, tag)
+	}
+	return out
+}
 
 func intArg(args map[string]any, key string, def int) int {
 	switch v := args[key].(type) {
