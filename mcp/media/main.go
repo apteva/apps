@@ -22,7 +22,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: media
 display_name: Media
-version: 0.13.49
+version: 0.13.50
 description: |
   Catalog + derivations + renders + transcripts + auto-descriptions
   for media files in storage. Indexes uploads (probe, thumbnail,
@@ -109,6 +109,7 @@ provides:
     - { name: media_list_folders,    description: "List immediate child folders of parent that contain media." }
     - { name: media_create_folder,   description: "Create an empty folder in storage that media files can later land in. Idempotent. Args - path." }
     - { name: media_move,            description: "Move and/or rename a media file in storage. Media's row auto-updates via the file.updated event handler. Args - file_id, folder?, name?." }
+    - { name: media_delete,          description: "Delete a media file and its backing storage file. Hard-deletes storage plus media's catalog data and derivations. Args - file_id." }
     - { name: media_get_thumbnail,   description: "Get the thumbnail derivation pointer (storage file_id) — generates if missing." }
     - { name: media_get_waveform,    description: "Get the waveform derivation pointer (audio only)." }
     - { name: media_reindex,         description: "Force a re-probe + re-derive — for one file_id or all failed rows." }
@@ -391,6 +392,14 @@ func (a *App) MCPTools() []sdk.Tool {
 				"name":    map[string]any{"type": "string"},
 			}, []string{"file_id"}),
 			Handler: a.toolMove,
+		},
+		{
+			Name:        "media_delete",
+			Description: "Delete a media file and its backing storage file. This is destructive: the storage row/blob is hard-deleted, then media removes its catalog row, transcript, thumbnails, waveform, and keyframes. Args: file_id (string).",
+			InputSchema: schemaObject(map[string]any{
+				"file_id": map[string]any{"type": "string"},
+			}, []string{"file_id"}),
+			Handler: a.toolDelete,
 		},
 		{
 			Name:        "media_get_thumbnail",
@@ -1262,6 +1271,51 @@ func (a *App) toolMove(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	// updated id/folder/name plus an absolute URL the agent might
 	// want to surface in chat.
 	return out, nil
+}
+
+// toolDelete hard-deletes the source storage file and immediately
+// removes media-owned catalog data. Storage also emits file.deleted,
+// so the storage event subscriber may run the same cascade later; the
+// cascade is intentionally idempotent.
+func (a *App) toolDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	fid, _ := args["file_id"].(string)
+	fid = strings.TrimSpace(fid)
+	if fid == "" {
+		return nil, errors.New("file_id required")
+	}
+	idNum, perr := strconv.ParseInt(fid, 10, 64)
+	if perr != nil || idNum <= 0 {
+		return nil, fmt.Errorf("file_id %q must be numeric", fid)
+	}
+	m, err := getMedia(ctx.AppDB(), pid, fid)
+	if err != nil {
+		if notFound(err) {
+			return map[string]any{"found": false, "deleted": false, "file_id": fid}, nil
+		}
+		return nil, err
+	}
+	sc := newStorageClient()
+	deleteCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+	if err := sc.DeleteFile(deleteCtx, pid, idNum); err != nil {
+		return nil, fmt.Errorf("storage.files_delete: %w", err)
+	}
+	if err := cascadeDeleteOne(ctx, sc, ctx.AppDB(), pid, fid); err != nil {
+		return nil, err
+	}
+	ctx.EmitWithProject("media.deleted", pid, map[string]any{"file_id": fid})
+	return map[string]any{
+		"found":           true,
+		"deleted":         true,
+		"file_id":         fid,
+		"name":            m.Name,
+		"folder":          m.Folder,
+		"storage_deleted": true,
+	}, nil
 }
 
 // toolGetDerivation closes over the derivation kind so the same body
