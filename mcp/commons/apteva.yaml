@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: commons
 display_name: Commons
-version: 0.1.0
+version: 0.1.1
 description: |
   User-owned public social node for the open web. Commons hosts local
   profiles, posts, follows, blocks, ActivityPub/WebFinger endpoints,
@@ -20,6 +20,8 @@ requires:
   permissions:
     - db.write.app
     - net.egress
+    - platform.ingress.read
+    - platform.ingress.write
 
 provides:
   http_routes:
@@ -37,6 +39,10 @@ provides:
       description: Block a remote actor or domain.
     - name: commons_export
       description: Export profiles, posts, follows, and blocks as JSON.
+    - name: commons_domain_expose
+      description: Expose Commons on a public hostname through server-native ingress.
+    - name: commons_domain_unexpose
+      description: Remove a Commons public hostname from server-native ingress.
   ui_panels:
     - slot: project.page
       label: Commons

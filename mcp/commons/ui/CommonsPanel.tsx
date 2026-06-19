@@ -42,7 +42,19 @@ interface ExportData {
   blocks: unknown[];
 }
 
-type Tab = "timeline" | "profiles" | "moderation" | "export";
+interface IngressRoute {
+  id: number;
+  hostname: string;
+  target: string;
+  project_id: string;
+  owner_kind: string;
+  tls_mode: string;
+  status: string;
+  created_at: string;
+  updated_at: string;
+}
+
+type Tab = "timeline" | "profiles" | "domain" | "moderation" | "export";
 
 async function api<T>(path: string, options?: RequestInit): Promise<T> {
   const res = await fetch(`${API}${path}`, {
@@ -75,10 +87,11 @@ function handleOf(p: Profile): string {
   return `@${p.username}@${host}`;
 }
 
-export default function CommonsPanel(_: NativePanelProps) {
+export default function CommonsPanel({ projectId }: NativePanelProps) {
   const [tab, setTab] = useState<Tab>("timeline");
   const [profiles, setProfiles] = useState<Profile[]>([]);
   const [posts, setPosts] = useState<Post[]>([]);
+  const [routes, setRoutes] = useState<IngressRoute[]>([]);
   const [selectedUser, setSelectedUser] = useState("");
   const [status, setStatus] = useState("");
   const [busy, setBusy] = useState(false);
@@ -100,6 +113,7 @@ export default function CommonsPanel(_: NativePanelProps) {
     kind: "domain",
     reason: "",
   });
+  const [domainDraft, setDomainDraft] = useState("");
   const [exportData, setExportData] = useState<ExportData | null>(null);
 
   const activeProfile = useMemo(
@@ -116,6 +130,12 @@ export default function CommonsPanel(_: NativePanelProps) {
       ]);
       setProfiles(nextProfiles);
       setPosts(nextPosts);
+      try {
+        const ingress = await api<{ routes: IngressRoute[] }>("/ingress");
+        setRoutes(ingress.routes || []);
+      } catch {
+        setRoutes([]);
+      }
       if (!selectedUser && nextProfiles[0]) setSelectedUser(nextProfiles[0].username);
       setStatus(`updated ${new Date().toLocaleTimeString()}`);
     } catch (e) {
@@ -141,6 +161,41 @@ export default function CommonsPanel(_: NativePanelProps) {
       setProfileDraft({ username: "", domain: "", display_name: "", summary: "" });
       await load();
       setStatus(`profile ${handleOf(p)} saved`);
+    } catch (e) {
+      setStatus((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const exposeDomain = async () => {
+    if (!domainDraft.trim()) return;
+    setBusy(true);
+    try {
+      const result = await api<{ route: IngressRoute }>("/ingress", {
+        method: "POST",
+        body: JSON.stringify({ hostname: domainDraft.trim(), project_id: projectId }),
+      });
+      setDomainDraft("");
+      await load();
+      setStatus(`exposed ${result.route.hostname}`);
+    } catch (e) {
+      setStatus((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const removeDomain = async (hostname: string) => {
+    if (!confirm(`Remove public hostname ${hostname}?`)) return;
+    setBusy(true);
+    try {
+      await api("/ingress", {
+        method: "DELETE",
+        body: JSON.stringify({ hostname }),
+      });
+      await load();
+      setStatus(`removed ${hostname}`);
     } catch (e) {
       setStatus((e as Error).message);
     } finally {
@@ -250,7 +305,7 @@ export default function CommonsPanel(_: NativePanelProps) {
       </header>
 
       <div className="border-b border-border px-4 py-2 flex gap-2">
-        {(["timeline", "profiles", "moderation", "export"] as Tab[]).map((t) => (
+        {(["timeline", "profiles", "domain", "moderation", "export"] as Tab[]).map((t) => (
           <button
             key={t}
             type="button"
@@ -371,6 +426,61 @@ export default function CommonsPanel(_: NativePanelProps) {
                           WebFinger
                         </a>
                       </div>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </section>
+          </div>
+        )}
+
+        {tab === "domain" && (
+          <div className="grid grid-cols-1 xl:grid-cols-[minmax(320px,420px)_1fr] gap-4">
+            <section className="border border-border rounded p-3 flex flex-col gap-3">
+              <div className="text-sm font-medium">Expose Public Hostname</div>
+              <input
+                value={domainDraft}
+                onChange={(e) => setDomainDraft(e.target.value)}
+                placeholder="social.example.com"
+                className="bg-bg-input border border-border rounded px-3 py-2 text-sm"
+              />
+              <button
+                type="button"
+                onClick={exposeDomain}
+                disabled={busy || !domainDraft.trim()}
+                className="px-3 py-1 text-sm border border-accent text-accent rounded hover:bg-accent hover:text-bg disabled:opacity-50"
+              >
+                Expose Commons
+              </button>
+              <div className="text-xs text-text-dim leading-5">
+                Point DNS for the hostname at this Apteva server first. The server-native ingress layer routes the hostname to this Commons install and manages HTTP-01 TLS when the hostname reaches the server.
+              </div>
+            </section>
+
+            <section className="border border-border rounded">
+              <div className="px-3 py-2 border-b border-border text-sm font-medium">Public Hostnames</div>
+              {routes.length === 0 ? (
+                <div className="p-6 text-sm text-text-muted">No Commons hostnames exposed.</div>
+              ) : (
+                <ul className="divide-y divide-border">
+                  {routes.map((r) => (
+                    <li key={r.id || r.hostname} className="p-3 flex items-center gap-3">
+                      <div className="min-w-0 flex-1">
+                        <a className="text-accent truncate block" href={`https://${r.hostname}`} target="_blank" rel="noreferrer">
+                          {r.hostname}
+                        </a>
+                        <div className="text-xs text-text-dim truncate">
+                          {r.target} · {r.status} · TLS {r.tls_mode}
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => removeDomain(r.hostname)}
+                        disabled={busy}
+                        className="px-2 py-1 text-xs border border-red text-red rounded hover:bg-red hover:text-bg disabled:opacity-50"
+                      >
+                        Remove
+                      </button>
                     </li>
                   ))}
                 </ul>

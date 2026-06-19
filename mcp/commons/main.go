@@ -31,7 +31,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: commons
 display_name: Commons
-version: 0.1.0
+version: 0.1.1
 description: User-owned public social node for the open web.
 author: Apteva
 scopes: [project, global]
@@ -39,6 +39,8 @@ requires:
   permissions:
     - db.write.app
     - net.egress
+    - platform.ingress.read
+    - platform.ingress.write
 provides:
   http_routes:
     - prefix: /
@@ -49,6 +51,8 @@ provides:
     - { name: commons_follow_add, description: "Add a remote follower inbox manually." }
     - { name: commons_block_add, description: "Block a remote actor or domain." }
     - { name: commons_export, description: "Export profiles, posts, follows, and blocks as JSON." }
+    - { name: commons_domain_expose, description: "Expose Commons on a public hostname through server-native ingress." }
+    - { name: commons_domain_unexpose, description: "Remove a Commons public hostname from server-native ingress." }
   ui_panels:
     - slot: project.page
       label: Commons
@@ -199,6 +203,24 @@ func (a *App) MCPTools() []sdk.Tool {
 				"username": map[string]any{"type": "string"},
 			}, nil),
 			Handler: a.toolExport,
+		},
+		{
+			Name:        "commons_domain_expose",
+			Description: "Expose this Commons install on a public hostname through Apteva server-native ingress. Args: hostname, project_id optional, allow_http optional.",
+			InputSchema: objectSchema(map[string]any{
+				"hostname":   map[string]any{"type": "string"},
+				"project_id": map[string]any{"type": "string"},
+				"allow_http": map[string]any{"type": "boolean"},
+			}, []string{"hostname"}),
+			Handler: a.toolDomainExpose,
+		},
+		{
+			Name:        "commons_domain_unexpose",
+			Description: "Remove a Commons public hostname from Apteva server-native ingress. Args: hostname.",
+			InputSchema: objectSchema(map[string]any{
+				"hostname": map[string]any{"type": "string"},
+			}, []string{"hostname"}),
+			Handler: a.toolDomainUnexpose,
 		},
 	}
 }
@@ -463,6 +485,25 @@ func (a *App) handleAPI(w http.ResponseWriter, r *http.Request) {
 	case path == "export" && r.Method == http.MethodGet:
 		result, err := exportData(globalCtx.AppDB(), r.URL.Query().Get("username"))
 		respond(w, result, err)
+	case path == "ingress" && r.Method == http.MethodGet:
+		routes, err := globalCtx.PlatformAPI().ListIngressRoutes()
+		respond(w, map[string]any{"routes": routes}, err)
+	case path == "ingress" && r.Method == http.MethodPost:
+		var body struct {
+			Hostname  string `json:"hostname"`
+			ProjectID string `json:"project_id"`
+			AllowHTTP bool   `json:"allow_http"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		route, err := exposeCommonsIngress(globalCtx, body.Hostname, body.ProjectID, body.AllowHTTP)
+		respond(w, map[string]any{"route": route}, err)
+	case path == "ingress" && r.Method == http.MethodDelete:
+		var body struct {
+			Hostname string `json:"hostname"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		err := unexposeCommonsIngress(globalCtx, body.Hostname)
+		respond(w, map[string]any{"status": "removed", "hostname": body.Hostname}, err)
 	default:
 		http.NotFound(w, r)
 	}
@@ -497,6 +538,47 @@ func (a *App) toolBlockAdd(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 
 func (a *App) toolExport(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	return exportData(ctx.AppDB(), stringArg(args, "username"))
+}
+
+func (a *App) toolDomainExpose(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	return exposeCommonsIngress(ctx, stringArg(args, "hostname"), stringArg(args, "project_id"), boolArg(args, "allow_http"))
+}
+
+func (a *App) toolDomainUnexpose(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if err := unexposeCommonsIngress(ctx, stringArg(args, "hostname")); err != nil {
+		return nil, err
+	}
+	return map[string]any{"status": "removed", "hostname": stringArg(args, "hostname")}, nil
+}
+
+func exposeCommonsIngress(ctx *sdk.AppCtx, hostname, projectID string, allowHTTP bool) (*sdk.IngressRoute, error) {
+	hostname = strings.TrimSpace(hostname)
+	if hostname == "" {
+		return nil, errors.New("hostname required")
+	}
+	if projectID == "" && ctx != nil {
+		projectID = ctx.CurrentProject()
+	}
+	target := "app://commons"
+	if projectID != "" {
+		target += "?project_id=" + url.QueryEscape(projectID)
+	}
+	return ctx.PlatformAPI().ExposeIngress(sdk.IngressExposeRequest{
+		Hostname:  hostname,
+		Target:    target,
+		ProjectID: projectID,
+		OwnerKind: "commons",
+		AllowHTTP: allowHTTP,
+		TLSMode:   "auto",
+	})
+}
+
+func unexposeCommonsIngress(ctx *sdk.AppCtx, hostname string) error {
+	hostname = strings.TrimSpace(hostname)
+	if hostname == "" {
+		return errors.New("hostname required")
+	}
+	return ctx.PlatformAPI().UnexposeIngress(hostname)
 }
 
 // --- DB and federation logic ------------------------------------------------
@@ -1034,6 +1116,11 @@ func intArg(args map[string]any, key string, def int) int {
 		return intFromString(v, def)
 	}
 	return def
+}
+
+func boolArg(args map[string]any, key string) bool {
+	v, _ := args[key].(bool)
+	return v
 }
 
 func intFromString(s string, def int) int {
