@@ -975,7 +975,7 @@ function DetailDrawer({
 // stays compact. Operators wanting a specific name can rename after
 // the fact via storage.
 
-type OpName = "trim" | "resize" | "transcode" | "crop" | "extract_frame" | "audio_extract" | "extract_reel";
+type OpName = "trim" | "resize" | "transcode" | "crop" | "extract_frame" | "audio_extract" | "audio_filter" | "extract_reel";
 
 interface OpDef {
   name: OpName;
@@ -990,6 +990,7 @@ const ALL_OPS: OpDef[] = [
   { name: "crop",          label: "Crop",           needs: (r) => r.has_video || r.is_image },
   { name: "extract_frame", label: "Extract frame",  needs: (r) => r.has_video && !r.is_image },
   { name: "audio_extract", label: "Audio only",     needs: (r) => r.has_video && r.has_audio },
+  { name: "audio_filter",  label: "Audio filter",   needs: (r) => (r.has_video || r.has_audio) && !r.is_image && r.has_audio },
   { name: "extract_reel",  label: "9:16 reel",      needs: (r) => r.has_video && !r.is_image },
 ];
 
@@ -2066,6 +2067,21 @@ function OperationSummary({ op, row, fields }: { op: OpName; row: MediaRow; fiel
       </div>
     );
   }
+  if (op === "audio_filter") {
+    const mode = fields.mode || "normalize";
+    const target =
+      mode === "volume"
+        ? `${numField(fields, "gain_db", 0)} dB`
+        : mode === "mute"
+          ? "silent"
+          : `${numField(fields, "target_lufs", -16)} LUFS`;
+    return (
+      <div className="grid grid-cols-2 gap-2 text-xs">
+        <Metric label="Mode" value={mode} />
+        <Metric label="Target" value={target} />
+      </div>
+    );
+  }
   return (
     <div className="grid grid-cols-2 gap-2 text-xs">
       <Metric label="Source" value={row.has_video ? "video" : row.has_audio ? "audio" : "file"} />
@@ -2343,6 +2359,12 @@ function opFieldDefs(op: OpName): FieldDef[] {
       return [
         { key: "format", label: "Format", type: "select", options: ["mp3", "wav", "m4a", "opus"] },
       ];
+    case "audio_filter":
+      return [
+        { key: "mode",        label: "Mode",        type: "select", options: ["normalize", "speech_clean", "volume", "mute"] },
+        { key: "target_lufs", label: "Target LUFS", type: "number", placeholder: "-16", hint: "Used by normalize and speech_clean." },
+        { key: "gain_db",     label: "Gain (dB)",   type: "number", placeholder: "3", hint: "Used by volume mode." },
+      ];
     case "extract_reel":
       return [
         { key: "start_ms",     label: "Start (ms)",       type: "number", placeholder: "0" },
@@ -2373,6 +2395,10 @@ function defaultFields(op: OpName, row: MediaRow): Record<string, string> {
       break;
     case "audio_extract":
       out.format = "mp3";
+      break;
+    case "audio_filter":
+      out.mode = "normalize";
+      out.target_lufs = "-16";
       break;
     case "extract_reel":
       out.start_ms = "0";
