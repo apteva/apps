@@ -362,6 +362,7 @@ export default function MediaPanel({ projectId, installId }: NativePanelProps) {
     switch (ev.topic) {
       case "media.indexed":
       case "media.transcribed":
+      case "media.deleted":
         load();
         return;
     }
@@ -441,6 +442,45 @@ export default function MediaPanel({ projectId, installId }: NativePanelProps) {
       setSelected((prev) => (prev && prev.file_id === fileId ? { ...prev, ...fields } : prev));
     },
     [withMediaParams],
+  );
+
+  const deleteMedia = useCallback(
+    async (fileId: string) => {
+      const res = await fetch(`${API}/mcp?${withMediaParams()}`, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "tools/call",
+          params: {
+            name: "media_delete",
+            arguments: { file_id: fileId },
+          },
+        }),
+      });
+      const payload = await res.json().catch(() => null) as null | {
+        error?: { message?: string };
+        result?: {
+          isError?: boolean;
+          content?: Array<{ text?: string }>;
+        };
+      };
+      if (!res.ok) {
+        throw new Error(payload?.error?.message || `HTTP ${res.status}`);
+      }
+      if (payload?.error) {
+        throw new Error(payload.error.message || "media_delete failed");
+      }
+      if (payload?.result?.isError) {
+        throw new Error(payload.result.content?.[0]?.text || "media_delete failed");
+      }
+      setRows((prev) => prev.filter((r) => r.file_id !== fileId));
+      setSelected((prev) => (prev?.file_id === fileId ? null : prev));
+      setTimeout(() => load(), 250);
+    },
+    [withMediaParams, load],
   );
 
   const renderTile = (r: MediaRow) => {
@@ -751,6 +791,7 @@ export default function MediaPanel({ projectId, installId }: NativePanelProps) {
           folderSuggestions={folderSuggestions}
           onClose={() => setSelected(null)}
           onReindex={() => handleReindex(selected.file_id)}
+          onDelete={() => deleteMedia(selected.file_id)}
           onSaveDescription={(fields) => saveDescription(selected.file_id, fields)}
           onTranscribe={(force) => queueTranscribe(selected.file_id, force)}
           previewBase={`${STORAGE}/files`}
@@ -770,6 +811,7 @@ function DetailDrawer({
   folderSuggestions,
   onClose,
   onReindex,
+  onDelete,
   onSaveDescription,
   onTranscribe,
   previewBase,
@@ -783,6 +825,7 @@ function DetailDrawer({
   folderSuggestions: string[];
   onClose: () => void;
   onReindex: () => void;
+  onDelete: () => Promise<void>;
   onSaveDescription: (fields: { title?: string; description?: string; alt_text?: string }) => Promise<void>;
   onTranscribe: (force: boolean) => Promise<void>;
   previewBase: string;
@@ -792,6 +835,19 @@ function DetailDrawer({
 }) {
   const thumb = row.derivations?.find((d) => d.kind === "thumbnail");
   const wave = row.derivations?.find((d) => d.kind === "waveform");
+  const [confirmDelete, setConfirmDelete] = useState(false);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState("");
+  const handleDelete = async () => {
+    setDeleting(true);
+    setDeleteError("");
+    try {
+      await onDelete();
+    } catch (e) {
+      setDeleteError((e as Error).message || String(e));
+      setDeleting(false);
+    }
+  };
   return (
     <div className="fixed inset-0 z-30 flex" onClick={onClose}>
       <div className="flex-1 bg-black/50" />
@@ -941,13 +997,55 @@ function DetailDrawer({
               {JSON.stringify(row.raw_probe, null, 2)}
             </pre>
           </details>
-          <button
-            type="button"
-            onClick={onReindex}
-            className="px-3 py-1 text-sm border border-accent text-accent rounded hover:bg-accent hover:text-bg"
-          >
-            Re-index
-          </button>
+          {confirmDelete ? (
+            <div className="border border-red/50 bg-red-500/10 rounded p-3 space-y-3">
+              <div>
+                <div className="text-sm font-medium text-red">Delete this media file?</div>
+                <div className="text-xs text-text-muted mt-1">
+                  This removes the storage file, indexed metadata, transcripts, and generated media derivatives.
+                </div>
+              </div>
+              {deleteError ? <div className="text-xs text-red">{deleteError}</div> : null}
+              <div className="flex items-center gap-2 flex-wrap">
+                <button
+                  type="button"
+                  onClick={handleDelete}
+                  disabled={deleting}
+                  className="px-3 py-1 text-sm border border-red text-red rounded hover:bg-red hover:text-bg disabled:opacity-50"
+                >
+                  {deleting ? "Deleting..." : "Delete permanently"}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setConfirmDelete(false);
+                    setDeleteError("");
+                  }}
+                  disabled={deleting}
+                  className="px-3 py-1 text-sm border border-border rounded hover:bg-bg-input disabled:opacity-50"
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          ) : (
+            <div className="flex items-center gap-2 flex-wrap">
+              <button
+                type="button"
+                onClick={onReindex}
+                className="px-3 py-1 text-sm border border-accent text-accent rounded hover:bg-accent hover:text-bg"
+              >
+                Re-index
+              </button>
+              <button
+                type="button"
+                onClick={() => setConfirmDelete(true)}
+                className="px-3 py-1 text-sm border border-red text-red rounded hover:bg-red hover:text-bg"
+              >
+                Delete
+              </button>
+            </div>
+          )}
         </div>
       </aside>
     </div>
