@@ -1,4 +1,4 @@
-// ComposerPanel v0.3.16 - timeline editor with storage and Media Studio AI assets.
+// ComposerPanel v0.3.17 - timeline editor with storage and Media Studio AI assets.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
@@ -717,6 +717,7 @@ export default function ComposerPanel({ projectId }: NativePanelProps) {
   const [lightbox, setLightbox] = useState<RenderRow | null>(null);
   const [tab, setTab] = useState<Tab>("timeline");
   const [playhead, setPlayhead] = useState(0);
+  const [timelineZoom, setTimelineZoom] = useState(1);
   const [playing, setPlaying] = useState(false);
   const [resolved, setResolved] = useState<Record<string, ResolvedAsset>>({});
   const [jsonEdit, setJsonEdit] = useState("");
@@ -1348,6 +1349,8 @@ export default function ComposerPanel({ projectId }: NativePanelProps) {
                   selectedClipId={selectedClipId}
                   playhead={playhead}
                   duration={totalDuration}
+                  zoom={timelineZoom}
+                  onZoom={setTimelineZoom}
                   onSelect={setSelectedClipId}
                   onEditVisual={(id) => setClipEditor({ kind: "visual", id })}
                   onEditAudio={(id) => setClipEditor({ kind: "audio", id })}
@@ -1648,12 +1651,49 @@ function PreviewStage({
   );
 }
 
+function shortPrompt(prompt: string | undefined, fallback: string): string {
+  const text = (prompt || "").trim();
+  if (!text) return fallback;
+  return text.length > 46 ? text.slice(0, 43) + "..." : text;
+}
+
+function aiKindLabel(kind: string | undefined): string {
+  switch (kind) {
+    case "audio_tts": return "AI voice";
+    case "audio_sfx": return "AI SFX";
+    case "music": return "AI music";
+    case "avatar": return "AI avatar";
+    case "image": return "AI image";
+    case "video": return "AI video";
+    default: return "AI";
+  }
+}
+
+function visualClipLabel(clip: ClipDraft): string {
+  if (clip.ai) return `${aiKindLabel(clip.ai.media_kind)} - ${shortPrompt(clip.ai.prompt, clip.asset.src || "draft")}`;
+  return clip.asset.src || "empty source";
+}
+
+function audioClipLabel(clip: AudioClipDraft): string {
+  if (clip.asset.type === "silence") return "Silence";
+  if (clip.ai) return `${aiKindLabel(clip.ai.media_kind)} - ${shortPrompt(clip.ai.prompt, clip.asset.src || "draft")}`;
+  return clip.asset.src || "empty audio";
+}
+
+function audioClipSubtitle(clip: AudioClipDraft): string {
+  const status = clip.ai?.status || clip.asset.type;
+  const storage = clip.ai?.storage_id ? `storage:${clip.ai.storage_id}` : clip.asset.src;
+  return `${status}${storage ? ` - ${storage}` : ""} - ${clip.length.toFixed(1)}s @ ${clip.start.toFixed(1)}s`;
+}
+
 function Timeline({
   clips,
   audioClips,
   selectedClipId,
   playhead,
   duration,
+  zoom,
+  onZoom,
   onSelect,
   onEditVisual,
   onEditAudio,
@@ -1670,6 +1710,8 @@ function Timeline({
   selectedClipId: string;
   playhead: number;
   duration: number;
+  zoom: number;
+  onZoom: (zoom: number) => void;
   onSelect: (id: string) => void;
   onEditVisual: (id: string) => void;
   onEditAudio: (id: string) => void;
@@ -1686,10 +1728,25 @@ function Timeline({
   const timelineHeight = hasVisual ? 192 : 128;
   const audioLabelTop = hasVisual ? 112 : 12;
   const audioTrackTop = hasVisual ? 128 : 32;
+  const zoomedWidth = `${Math.max(1, zoom) * 100}%`;
+  const sortedAudio = [...audioClips].sort((a, b) => a.start - b.start);
+  const gaps: { start: number; length: number }[] = [];
+  let audioCursor = 0;
+  for (const clip of sortedAudio) {
+    if (clip.start - audioCursor > 0.05) {
+      gaps.push({ start: audioCursor, length: clip.start - audioCursor });
+    }
+    audioCursor = Math.max(audioCursor, clip.start + clip.length);
+  }
   return (
     <section className="border border-border rounded bg-bg-card overflow-hidden">
       <header className="px-3 py-2 border-b border-border flex items-center gap-2 flex-wrap">
         <h2 className="text-xs uppercase tracking-wide text-text-dim flex-1">Timeline</h2>
+        <div className="flex items-center gap-1 mr-2">
+          <button type="button" onClick={() => onZoom(Math.max(1, Number((zoom / 1.5).toFixed(2))))} className="text-xs px-2 py-1 border border-border rounded hover:bg-bg-input" title="Zoom out">-</button>
+          <button type="button" onClick={() => onZoom(1)} className="text-xs px-2 py-1 border border-border rounded hover:bg-bg-input" title="Fit timeline">Fit</button>
+          <button type="button" onClick={() => onZoom(Math.min(12, Number((zoom * 1.5).toFixed(2))))} className="text-xs px-2 py-1 border border-border rounded hover:bg-bg-input" title="Zoom in">+</button>
+        </div>
         <button onClick={() => onAddAIVisual("image")} className="text-xs px-2 py-1 border border-border rounded hover:bg-bg-input">AI image</button>
         <button onClick={() => onAddAIVisual("video")} className="text-xs px-2 py-1 border border-border rounded hover:bg-bg-input">AI video</button>
         <button onClick={() => onAddAIVisual("avatar")} className="text-xs px-2 py-1 border border-border rounded hover:bg-bg-input">AI avatar</button>
@@ -1714,77 +1771,94 @@ function Timeline({
             </div>
           </div>
         ) : (
-          <button
-            type="button"
-            onClick={(e) => {
-              const rect = e.currentTarget.getBoundingClientRect();
-              onSeek(((e.clientX - rect.left) / rect.width) * duration);
-            }}
-            className="relative w-full border border-border rounded bg-bg text-left overflow-hidden"
-            style={{ minHeight: timelineHeight }}
-          >
-            <div
-              className="absolute top-0 bottom-0 w-px bg-accent"
-              style={{ left: `${duration ? Math.min(100, (playhead / duration) * 100) : 0}%` }}
-            />
-            {hasVisual && (
-              <>
-                <div className="absolute left-3 top-3 text-[10px] uppercase tracking-wide text-text-dim">Visual</div>
-                <div className="absolute inset-x-3 top-8 h-16 flex">
-                  {clips.map((clip) => {
-                    const width = duration ? (clip.length / duration) * 100 : 100;
-                    const selected = clip.id === selectedClipId;
-                    return (
-                      <div
-                        key={clip.id}
-                        role="button"
-                        tabIndex={0}
-                        title={clip.asset.src || "empty source"}
-                        onClick={(e) => {
-                          e.stopPropagation();
-                          onSelect(clip.id);
-                          onSeek(clip.start);
-                          onEditVisual(clip.id);
-                        }}
-                        className={`h-16 border text-xs flex flex-col justify-center px-2 overflow-hidden ${selected ? "border-accent bg-accent/10" : "border-border bg-bg-input hover:border-accent"}`}
-                        style={{ width: `${Math.max(10, width)}%`, minWidth: 96 }}
-                      >
-                        <span className="block text-text truncate leading-5">{clip.asset.src || (clip.ai ? `AI ${clip.ai.media_kind}` : "empty source")}</span>
-                        <span className="block text-text-dim truncate leading-5">{clip.ai?.status || clip.asset.type} - {clip.length.toFixed(1)}s</span>
-                      </div>
-                    );
-                  })}
-                </div>
-              </>
-            )}
-            <div className="absolute left-3 text-[10px] uppercase tracking-wide text-text-dim" style={{ top: audioLabelTop }}>Audio</div>
-            <div className="absolute inset-x-3 h-16" style={{ top: audioTrackTop }}>
-              {audioClips.map((clip) => {
-                const left = duration ? (clip.start / duration) * 100 : 0;
-                const width = duration ? (clip.length / duration) * 100 : 100;
-                const selected = clip.id === selectedClipId;
-                return (
-                  <div
-                    key={clip.id}
-                    role="button"
-                    tabIndex={0}
-                    title={clip.asset.src || "empty audio"}
-                    onClick={(e) => {
-                      e.stopPropagation();
-                      onSelect(clip.id);
-                      onSeek(clip.start);
-                      onEditAudio(clip.id);
-                    }}
-                    className={`absolute h-16 border text-xs flex flex-col justify-center px-2 overflow-hidden ${selected ? "border-accent bg-accent/10" : "border-border bg-bg-input hover:border-accent"}`}
-                    style={{ left: `${Math.max(0, left)}%`, width: `${Math.max(6, width)}%`, minWidth: 96 }}
-                  >
-                    <span className="block text-text truncate leading-5">{clip.asset.type === "silence" ? "Silence" : (clip.asset.src || (clip.ai ? `AI ${clip.ai.media_kind}` : "empty audio"))}</span>
-                    <span className="block text-text-dim truncate leading-5">{clip.ai?.status || clip.asset.type} - {clip.length.toFixed(1)}s @ {clip.start.toFixed(1)}s</span>
+          <div className="overflow-x-auto">
+            <button
+              type="button"
+              onClick={(e) => {
+                const rect = e.currentTarget.getBoundingClientRect();
+                onSeek(((e.clientX - rect.left) / rect.width) * duration);
+              }}
+              className="relative border border-border rounded bg-bg text-left overflow-hidden"
+              style={{ minHeight: timelineHeight, width: zoomedWidth, minWidth: "100%" }}
+            >
+              <div
+                className="absolute top-0 bottom-0 w-px bg-accent"
+                style={{ left: `${duration ? Math.min(100, (playhead / duration) * 100) : 0}%` }}
+              />
+              {hasVisual && (
+                <>
+                  <div className="absolute left-3 top-3 text-[10px] uppercase tracking-wide text-text-dim">Visual</div>
+                  <div className="absolute inset-x-3 top-8 h-16 flex">
+                    {clips.map((clip) => {
+                      const width = duration ? (clip.length / duration) * 100 : 100;
+                      const selected = clip.id === selectedClipId;
+                      return (
+                        <div
+                          key={clip.id}
+                          role="button"
+                          tabIndex={0}
+                          title={clip.ai?.prompt || clip.asset.src || "empty source"}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            onSelect(clip.id);
+                            onSeek(clip.start);
+                            onEditVisual(clip.id);
+                          }}
+                          className={`h-16 border text-xs flex flex-col justify-center px-2 overflow-hidden ${selected ? "border-accent bg-accent/10" : "border-border bg-bg-input hover:border-accent"}`}
+                          style={{ width: `${Math.max(2, width)}%`, minWidth: zoom > 1 ? 96 : 64 }}
+                        >
+                          <span className="block text-text truncate leading-5">{visualClipLabel(clip)}</span>
+                          <span className="block text-text-dim truncate leading-5">{clip.ai?.status || clip.asset.type} - {clip.length.toFixed(1)}s</span>
+                        </div>
+                      );
+                    })}
                   </div>
-                );
-              })}
-            </div>
-          </button>
+                </>
+              )}
+              <div className="absolute left-3 text-[10px] uppercase tracking-wide text-text-dim" style={{ top: audioLabelTop }}>Audio</div>
+              <div className="absolute inset-x-3 h-16" style={{ top: audioTrackTop }}>
+                {gaps.map((gap, index) => {
+                  const left = duration ? (gap.start / duration) * 100 : 0;
+                  const width = duration ? (gap.length / duration) * 100 : 100;
+                  return (
+                    <div
+                      key={`gap-${index}-${gap.start}`}
+                      className="absolute h-16 border border-dashed border-border text-xs flex flex-col justify-center px-2 overflow-hidden bg-bg-card text-text-dim"
+                      style={{ left: `${Math.max(0, left)}%`, width: `${Math.max(0.5, width)}%`, minWidth: zoom > 2 ? 56 : 16 }}
+                      title={`Implicit silence from ${gap.start.toFixed(1)}s for ${gap.length.toFixed(1)}s`}
+                    >
+                      <span className="block truncate leading-5">Gap</span>
+                      <span className="block truncate leading-5">{gap.length.toFixed(1)}s</span>
+                    </div>
+                  );
+                })}
+                {audioClips.map((clip) => {
+                  const left = duration ? (clip.start / duration) * 100 : 0;
+                  const width = duration ? (clip.length / duration) * 100 : 100;
+                  const selected = clip.id === selectedClipId;
+                  return (
+                    <div
+                      key={clip.id}
+                      role="button"
+                      tabIndex={0}
+                      title={clip.ai?.prompt || clip.asset.src || "empty audio"}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onSelect(clip.id);
+                        onSeek(clip.start);
+                        onEditAudio(clip.id);
+                      }}
+                      className={`absolute h-16 border text-xs flex flex-col justify-center px-2 overflow-hidden ${selected ? "border-accent bg-accent/10" : "border-border bg-bg-input hover:border-accent"}`}
+                      style={{ left: `${Math.max(0, left)}%`, width: `${Math.max(0.5, width)}%`, minWidth: zoom > 1 ? 96 : 64 }}
+                    >
+                      <span className="block text-text truncate leading-5">{audioClipLabel(clip)}</span>
+                      <span className="block text-text-dim truncate leading-5">{audioClipSubtitle(clip)}</span>
+                    </div>
+                  );
+                })}
+              </div>
+            </button>
+          </div>
         )}
       </div>
     </section>

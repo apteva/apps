@@ -167,6 +167,10 @@ func (a *App) toolCompositionGet(ctx *sdk.AppCtx, args map[string]any) (any, err
 	if err != nil {
 		return nil, err
 	}
+	if editJSON, _ := row["edit_json"].(string); editJSON != "" {
+		projectID, _ := row["project_id"].(string)
+		row["edit_json"] = enrichEditJSONFromMediaStudio(ctx, editJSON, projectID)
+	}
 	row["latest_render"] = loadLatestRender(ctx, id)
 	return row, nil
 }
@@ -211,8 +215,19 @@ func (a *App) toolCompositionList(ctx *sdk.AppCtx, args map[string]any) (any, er
 	if err := rows.Close(); err != nil {
 		return nil, err
 	}
+	var history map[int64]*mediaHistoryRow
+	for _, item := range out {
+		editJSON, _ := item["edit_json"].(string)
+		if editJSONNeedsAIEnrichment(editJSON) {
+			history, _ = mediaHistoryByStorageID(ctx, pid)
+			break
+		}
+	}
 	for _, item := range out {
 		id, _ := item["id"].(int64)
+		if editJSON, _ := item["edit_json"].(string); editJSON != "" {
+			item["edit_json"] = enrichEditJSONWithMediaHistory(editJSON, history)
+		}
 		item["latest_render"] = loadLatestRender(ctx, id)
 	}
 	return map[string]any{"compositions": out}, nil
