@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: composer
 display_name: Composer
-version: 0.3.19
+version: 0.3.20
 description: |
   Multi-clip video composition. Stitch generated or uploaded assets
   into a single video — one visual track, timed audio tracks, optional
@@ -113,7 +113,7 @@ provides:
     - { name: composition_render, description: "Submit a composition for rendering. Args: id, executor? ('local'|'remote' — overrides the auto ladder). Returns {status:'waiting_ai'} while async AI assets generate, otherwise render result." }
     - { name: render_status,      description: "Poll one render row. Args: render_id." }
     - { name: asset_inspect,      description: "Probe an asset via ffprobe. Args: src (storage:N | https://… | mediastudio:N). Returns {kind, duration, dimensions, codec, fps}." }
-    - { name: asset_search,       description: "Search reusable Storage assets for composition. Args: q?, kind?, tags?, folder?, recursive?, limit?, inspect?. Returns composition-ready src values like storage:N." }
+    - { name: asset_search,       description: "Search reusable Storage assets for composition. Args: q?, kind?, tags?, folder?, recursive?, limit?, inspect?, include_generated?. Excludes generated/system assets by default and returns composition-ready src values like storage:N." }
   ui_panels:
     - slot: project.page
       label: Composer

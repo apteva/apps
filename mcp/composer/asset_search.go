@@ -34,6 +34,7 @@ func (a *App) toolAssetSearch(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	q := strings.ToLower(strings.TrimSpace(strArg(args, "q", "")))
 	tags := cleanStringList(strArrayArg(args, "tags"))
 	inspect := boolArg(args, "inspect", false)
+	includeGenerated := boolArg(args, "include_generated", false)
 
 	var got struct {
 		Files []storageListFile `json:"files"`
@@ -54,6 +55,9 @@ func (a *App) toolAssetSearch(ctx *sdk.AppCtx, args map[string]any) (any, error)
 
 	assets := []map[string]any{}
 	for _, file := range got.Files {
+		if !includeGenerated && generatedOrSystemAsset(file) {
+			continue
+		}
 		if !assetMatchesSearch(file, q, kind, tags) {
 			continue
 		}
@@ -108,6 +112,24 @@ func assetMatchesSearch(file storageListFile, q, kind string, tags []string) boo
 		}
 	}
 	return true
+}
+
+func generatedOrSystemAsset(file storageListFile) bool {
+	folder := strings.ToLower(strings.TrimSpace(file.Folder))
+	source := strings.ToLower(strings.TrimSpace(file.Source))
+	if strings.HasPrefix(folder, "/.generated/") || strings.HasPrefix(folder, "/.media/") {
+		return true
+	}
+	if source == "generated" || source == "media-derivation" {
+		return true
+	}
+	for _, tag := range file.Tags {
+		switch strings.ToLower(strings.TrimSpace(tag)) {
+		case "ai", "generated", "render", "derivation":
+			return true
+		}
+	}
+	return false
 }
 
 func kindFromStorageFile(file storageListFile) string {

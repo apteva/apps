@@ -130,6 +130,19 @@ func TestAssetSearchMatching(t *testing.T) {
 	if got := kindFromStorageFile(file); got != "audio" {
 		t.Fatalf("kind = %q, want audio", got)
 	}
+	if generatedOrSystemAsset(file) {
+		t.Fatal("reusable composer SFX should not be treated as generated/system")
+	}
+	generated := storageListFile{
+		Name:        "voice.mp3",
+		Folder:      "/.generated/audio/",
+		ContentType: "audio/mpeg",
+		Source:      "generated",
+		Tags:        []string{"ai", "generated", "elevenlabs"},
+	}
+	if !generatedOrSystemAsset(generated) {
+		t.Fatal("generated media should be hidden from reusable asset search by default")
+	}
 }
 
 // --- duration sum ------------------------------------------------
