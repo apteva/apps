@@ -27,16 +27,17 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: composer
 display_name: Composer
-version: 0.3.14
+version: 0.3.15
 description: |
   Multi-clip video compositions with a structured timeline panel,
   universal generated-asset clip editing, first-class AI avatar clips,
   AI music soundtrack quick-add, timed AI audio clips, audio-only renders,
   and AI-backed clip/soundtrack sources generated through Media Studio.
-  Composer lists compositions by active project without blocking on render
-  metadata, probes generated Storage assets itself for actual duration,
-  reads local Storage blobs directly for local ffmpeg renders when available,
-  and keeps signed URLs for remote renderers.
+  Composer shows audio-only edits as audio timelines, lists compositions by
+  active project without blocking on render metadata, probes generated
+  Storage assets itself for actual duration, reads local Storage blobs
+  directly for local ffmpeg renders when available, and keeps signed URLs
+  for remote renderers.
   Renders locally via ffmpeg, on a render host via instances, or against a
   bound render_executor integration.
 author: Apteva
