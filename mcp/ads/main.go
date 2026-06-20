@@ -1,11 +1,9 @@
 // ads v0.1 — unified control plane for paid advertising.
 //
 // Architecture:
-//   - One platform supported in v1: Meta (Facebook + Instagram), via the
-//     facebook-ads integration. Other platforms (google, twitter) are
-//     declared in the static `platforms` registry below — adding them is
-//     "add a row + ensure the integration exposes the named tools" with
-//     no other code change.
+//   - Platform-specific API shapes live behind adapters. The public MCP
+//     surface stays generic while each adapter speaks native upstream
+//     semantics (Meta Graph direct tools, Google Ads GAQL + mutate ops).
 //   - Accounts are added at runtime via PlatformAPI.StartOAuth, which
 //     returns an authorize URL the panel/agent hands the user. After the
 //     dance, the platform 302s back to /accounts/oauth_done; we look up
@@ -39,7 +37,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: ads
 display_name: Ads
-version: 0.1.3
+version: 0.1.4
 scopes: [project, global]
 requires:
   permissions:
@@ -73,9 +71,9 @@ runtime:
 upgrade_policy: auto-patch
 `
 
-// platformDef captures the per-network mapping from our unified MCP
-// tool surface to the integration's tool names. v1 ships with Meta;
-// adding google or twitter is "fill in another row".
+// platformDef captures per-network metadata. Behavior lives in the
+// platformAdapter implementations below so platform-specific API
+// semantics do not leak through every MCP handler.
 type platformDef struct {
 	Platform        string
 	IntegrationSlug string
@@ -164,6 +162,56 @@ var platforms = map[string]platformDef{
 		AudienceCreateLookalikeTool: "audience_create_lookalike",
 		AccountIDInputField:         "adAccountId",
 	},
+	"google": {
+		Platform:                 "google",
+		IntegrationSlug:          "google-ads",
+		DisplayName:              "Google Ads",
+		NativeIDFormat:           "<customer_id without hyphens>",
+		ListAccountsTool:         "list_accounts",
+		AccountIDInputField:      "customer_id",
+		CampaignCreateTool:       "campaign_mutate",
+		CampaignListTool:         "search",
+		CampaignUpdateTool:       "campaign_mutate",
+		CampaignDeleteTool:       "campaign_mutate",
+		AdSetCreateTool:          "ad_group_mutate",
+		AdSetListTool:            "search",
+		AdSetUpdateTool:          "ad_group_mutate",
+		AdSetDeleteTool:          "ad_group_mutate",
+		AdCreateTool:             "ad_mutate",
+		AdListTool:               "search",
+		AdUpdateTool:             "ad_mutate",
+		AdDeleteTool:             "ad_mutate",
+		CreativeCreateTool:       "asset_mutate",
+		CreativeListTool:         "search",
+		AudienceListTool:         "search",
+		AudienceCreateCustomTool: "user_list_mutate",
+	},
+}
+
+type platformAdapter interface {
+	ListAccounts(a *App, ctx *sdk.AppCtx, row *pendingRow, def *platformDef) ([]map[string]any, error)
+	CampaignCreate(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error)
+	CampaignList(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error)
+	CampaignUpdate(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error)
+	CampaignDelete(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error)
+	AdSetCreate(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error)
+	AdSetList(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error)
+	AdSetUpdate(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error)
+	AdSetDelete(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error)
+	AdCreate(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error)
+	AdList(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error)
+	AdUpdate(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error)
+	AdDelete(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error)
+	CreativeUpload(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error)
+	CreativeList(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error)
+	AudienceList(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error)
+	AudienceCreateCustom(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error)
+	AudienceCreateLookalike(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error)
+}
+
+var platformAdapters = map[string]platformAdapter{
+	"meta":   metaAdapter{},
+	"google": googleAdapter{},
 }
 
 var globalCtx *sdk.AppCtx
@@ -283,7 +331,7 @@ func (a *App) MCPTools() []sdk.Tool {
 			Name: "account_add",
 			Description: "Begin connecting an ads account. Returns authorize_url + pending_account_id; visit the URL to authorize. " +
 				"After OAuth completes, call account_list_pending_pages to pick a specific ad account, then account_finalize. " +
-				"Args: platform (meta), force_new? (default false; force a fresh OAuth dance even when an existing connection is available).",
+				"Args: platform (meta|google), force_new? (default false; force a fresh OAuth dance even when an existing connection is available).",
 			InputSchema: schemaObject(map[string]any{
 				"platform":  map[string]any{"type": "string", "enum": platformKeys()},
 				"force_new": map[string]any{"type": "boolean"},
@@ -710,37 +758,13 @@ func (a *App) toolAccountListPendingPages(ctx *sdk.AppCtx, args map[string]any) 
 		return mcpError("no account-list tool wired for " + row.platform), nil
 	}
 
-	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(row.connectionID, def.ListAccountsTool, map[string]any{})
+	adapter, ok := platformAdapters[row.platform]
+	if !ok {
+		return mcpError("no adapter wired for " + row.platform), nil
+	}
+	accounts, err := adapter.ListAccounts(a, ctx, row, &def)
 	if err != nil {
 		return mcpError("list accounts failed: " + err.Error()), nil
-	}
-	if res == nil || !res.Success {
-		body := ""
-		if res != nil {
-			body = string(res.Data)
-		}
-		return mcpError("upstream non-2xx: " + body), nil
-	}
-
-	// Meta returns {data:[...], paging:{...}}; fall back to raw array.
-	var envelope struct {
-		Data []map[string]any `json:"data"`
-	}
-	var rows []map[string]any
-	if json.Unmarshal(res.Data, &envelope) == nil && envelope.Data != nil {
-		rows = envelope.Data
-	} else if err := json.Unmarshal(res.Data, &rows); err != nil {
-		return mcpError("parse account-list response: " + err.Error()), nil
-	}
-
-	accounts := make([]map[string]any, 0, len(rows))
-	for _, r := range rows {
-		accounts = append(accounts, map[string]any{
-			"id":       toString(walkPath(r, def.AccountListIDField)),
-			"name":     toString(walkPath(r, def.AccountListNameField)),
-			"currency": toString(walkPath(r, def.AccountListCurrencyField)),
-			"timezone": toString(walkPath(r, def.AccountListTimezoneField)),
-		})
 	}
 	return map[string]any{
 		"pages":           accounts, // keyed "pages" to match social's panel-side contract
@@ -775,27 +799,17 @@ func (a *App) toolAccountFinalize(ctx *sdk.AppCtx, args map[string]any) (any, er
 	currency := ""
 	timezone := ""
 
-	// Verify the picked id is actually one this user can manage by
-	// re-fetching the upstream list. Cheap insurance against typos.
-	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(row.connectionID, def.ListAccountsTool, map[string]any{})
+	adapter, ok := platformAdapters[row.platform]
+	if !ok {
+		return mcpError("no adapter wired for " + row.platform), nil
+	}
+	rows, err := adapter.ListAccounts(a, ctx, row, &def)
 	if err != nil {
 		return mcpError("verify ad-account: " + err.Error()), nil
 	}
-	if res == nil || !res.Success {
-		return mcpError("verify ad-account: upstream non-2xx"), nil
-	}
-	var envelope struct {
-		Data []map[string]any `json:"data"`
-	}
-	var rows []map[string]any
-	if json.Unmarshal(res.Data, &envelope) == nil && envelope.Data != nil {
-		rows = envelope.Data
-	} else if err := json.Unmarshal(res.Data, &rows); err != nil {
-		return mcpError("parse account-list: " + err.Error()), nil
-	}
 	var matched map[string]any
 	for _, r := range rows {
-		if toString(walkPath(r, def.AccountListIDField)) == pageID {
+		if toString(r["id"]) == pageID {
 			matched = r
 			break
 		}
@@ -804,13 +818,13 @@ func (a *App) toolAccountFinalize(ctx *sdk.AppCtx, args map[string]any) (any, er
 		return mcpError("page_id not in the user's accessible ad accounts — re-call account_list_pending_pages"), nil
 	}
 	if displayName == "" {
-		displayName = toString(walkPath(matched, def.AccountListNameField))
+		displayName = toString(matched["name"])
 	}
 	if displayName == "" {
 		displayName = pageID
 	}
-	currency = toString(walkPath(matched, def.AccountListCurrencyField))
-	timezone = toString(walkPath(matched, def.AccountListTimezoneField))
+	currency = toString(matched["currency"])
+	timezone = toString(matched["timezone"])
 
 	pid := projectScope(ctx, args)
 	insertRes, err := ctx.AppDB().Exec(
@@ -1071,7 +1085,7 @@ type adsPlatformOption struct {
 
 var adsPlatformOptions = []adsPlatformOption{
 	{Platform: "meta", DisplayName: "Meta Ads (Facebook + Instagram)", IntegrationSlug: "facebook-ads", Supported: true},
-	{Platform: "google", DisplayName: "Google Ads", IntegrationSlug: "google-ads", Supported: false, Unavailable: "Google Ads connection detected, but the Ads control plane is not wired for Google campaigns yet."},
+	{Platform: "google", DisplayName: "Google Ads", IntegrationSlug: "google-ads", Supported: true},
 }
 
 func (a *App) handlePlatforms(w http.ResponseWriter, r *http.Request) {
@@ -1158,6 +1172,9 @@ func (a *App) resolveAdAccount(ctx *sdk.AppCtx, args map[string]any) (*adAccount
 	if !ok {
 		return nil, nil, mcpError("unsupported platform " + acct.Platform)
 	}
+	if _, ok := platformAdapters[acct.Platform]; !ok {
+		return nil, nil, mcpError("no adapter wired for " + acct.Platform)
+	}
 	return &acct, &def, nil
 }
 
@@ -1218,26 +1235,118 @@ func (a *App) toolCampaignCreate(ctx *sdk.AppCtx, args map[string]any) (any, err
 	if errOut != nil {
 		return errOut, nil
 	}
+	return platformAdapters[acct.Platform].CampaignCreate(a, ctx, acct, def, args)
+}
+
+func (a *App) toolCampaignList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	acct, def, errOut := a.resolveAdAccount(ctx, args)
+	if errOut != nil {
+		return errOut, nil
+	}
+	return platformAdapters[acct.Platform].CampaignList(a, ctx, acct, def, args)
+}
+
+func (a *App) toolCampaignUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	acct, def, errOut := a.resolveAdAccount(ctx, args)
+	if errOut != nil {
+		return errOut, nil
+	}
+	return platformAdapters[acct.Platform].CampaignUpdate(a, ctx, acct, def, args)
+}
+
+func (a *App) toolCampaignPause(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	args["status"] = "PAUSED"
+	return a.toolCampaignUpdate(ctx, args)
+}
+
+func (a *App) toolCampaignResume(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	args["status"] = "ACTIVE"
+	return a.toolCampaignUpdate(ctx, args)
+}
+
+func (a *App) toolCampaignDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	acct, def, errOut := a.resolveAdAccount(ctx, args)
+	if errOut != nil {
+		return errOut, nil
+	}
+	return platformAdapters[acct.Platform].CampaignDelete(a, ctx, acct, def, args)
+}
+
+// ─── Ad set tools ───────────────────────────────────────────────────
+
+var metaOptimizationGoal = map[string]string{
+	"link_clicks":        "LINK_CLICKS",
+	"conversions":        "OFFSITE_CONVERSIONS",
+	"leads":              "LEAD_GENERATION",
+	"reach":              "REACH",
+	"impressions":        "IMPRESSIONS",
+	"page_likes":         "PAGE_LIKES",
+	"post_engagement":    "POST_ENGAGEMENT",
+	"thruplay":           "THRUPLAY",
+	"app_installs":       "APP_INSTALLS",
+	"value":              "VALUE",
+	"landing_page_views": "LANDING_PAGE_VIEWS",
+}
+
+var metaBillingEvent = map[string]string{
+	"impressions": "IMPRESSIONS",
+	"link_clicks": "LINK_CLICKS",
+	"thruplay":    "THRUPLAY",
+}
+
+type metaAdapter struct{}
+
+func (metaAdapter) ListAccounts(a *App, ctx *sdk.AppCtx, row *pendingRow, def *platformDef) ([]map[string]any, error) {
+	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(row.connectionID, def.ListAccountsTool, map[string]any{})
+	if err != nil {
+		return nil, err
+	}
+	if res == nil || !res.Success {
+		body := ""
+		if res != nil {
+			body = string(res.Data)
+		}
+		return nil, fmt.Errorf("upstream non-2xx: %s", body)
+	}
+	var envelope struct {
+		Data []map[string]any `json:"data"`
+	}
+	var rows []map[string]any
+	if json.Unmarshal(res.Data, &envelope) == nil && envelope.Data != nil {
+		rows = envelope.Data
+	} else if err := json.Unmarshal(res.Data, &rows); err != nil {
+		return nil, fmt.Errorf("parse account-list response: %w", err)
+	}
+	accounts := make([]map[string]any, 0, len(rows))
+	for _, r := range rows {
+		accounts = append(accounts, map[string]any{
+			"id":       toString(walkPath(r, def.AccountListIDField)),
+			"name":     toString(walkPath(r, def.AccountListNameField)),
+			"currency": toString(walkPath(r, def.AccountListCurrencyField)),
+			"timezone": toString(walkPath(r, def.AccountListTimezoneField)),
+		})
+	}
+	return accounts, nil
+}
+
+func (metaAdapter) CampaignCreate(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error) {
 	name, _ := args["name"].(string)
 	objective, _ := args["objective"].(string)
 	if name == "" || objective == "" {
 		return mcpError("name and objective required"), nil
 	}
+	mapped, ok := metaCampaignObjective[objective]
+	if !ok {
+		return mcpError("unsupported objective for meta: " + objective), nil
+	}
 	input := map[string]any{
 		def.AccountIDInputField: acct.NativeAccountID,
 		"name":                  name,
+		"objective":             mapped,
 	}
-	if acct.Platform == "meta" {
-		mapped, ok := metaCampaignObjective[objective]
-		if !ok {
-			return mcpError("unsupported objective for meta: " + objective), nil
-		}
-		input["objective"] = mapped
-		// Meta requires special_ad_categories; pass [] when caller didn't.
-		opts, _ := args["platform_options"].(map[string]any)
-		if _, hasSAC := opts["special_ad_categories"]; !hasSAC {
-			input["special_ad_categories"] = []any{}
-		}
+	opts, _ := args["platform_options"].(map[string]any)
+	if _, hasSAC := opts["special_ad_categories"]; !hasSAC {
+		input["special_ad_categories"] = []any{}
 	}
 	if status, ok := args["status"].(string); ok && status != "" {
 		input["status"] = status
@@ -1265,11 +1374,7 @@ func (a *App) toolCampaignCreate(ctx *sdk.AppCtx, args map[string]any) (any, err
 	return a.execOrErr(ctx, acct, def.CampaignCreateTool, input)
 }
 
-func (a *App) toolCampaignList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	acct, def, errOut := a.resolveAdAccount(ctx, args)
-	if errOut != nil {
-		return errOut, nil
-	}
+func (metaAdapter) CampaignList(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error) {
 	input := map[string]any{def.AccountIDInputField: acct.NativeAccountID}
 	if v := intArg(args, "limit", 0); v > 0 {
 		input["limit"] = v
@@ -1278,17 +1383,12 @@ func (a *App) toolCampaignList(ctx *sdk.AppCtx, args map[string]any) (any, error
 		input["after"] = v
 	}
 	if v, _ := args["status"].(string); v != "" {
-		// Meta supports filtering by effective_status array.
 		input["filtering"] = fmt.Sprintf(`[{"field":"effective_status","operator":"IN","value":["%s"]}]`, v)
 	}
 	return a.execOrErr(ctx, acct, def.CampaignListTool, input)
 }
 
-func (a *App) toolCampaignUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	acct, def, errOut := a.resolveAdAccount(ctx, args)
-	if errOut != nil {
-		return errOut, nil
-	}
+func (metaAdapter) CampaignUpdate(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error) {
 	cid, _ := args["campaign_id"].(string)
 	if cid == "" {
 		return mcpError("campaign_id required"), nil
@@ -1315,27 +1415,13 @@ func (a *App) toolCampaignUpdate(ctx *sdk.AppCtx, args map[string]any) (any, err
 		input["start_time"] = v
 	}
 	if v, _ := args["end_time"].(string); v != "" {
-		input["stop_time"] = v // Meta calls it stop_time on update
+		input["stop_time"] = v
 	}
 	mergeOptions(input, args)
 	return a.execOrErr(ctx, acct, def.CampaignUpdateTool, input)
 }
 
-func (a *App) toolCampaignPause(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	args["status"] = "PAUSED"
-	return a.toolCampaignUpdate(ctx, args)
-}
-
-func (a *App) toolCampaignResume(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	args["status"] = "ACTIVE"
-	return a.toolCampaignUpdate(ctx, args)
-}
-
-func (a *App) toolCampaignDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	acct, def, errOut := a.resolveAdAccount(ctx, args)
-	if errOut != nil {
-		return errOut, nil
-	}
+func (metaAdapter) CampaignDelete(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error) {
 	cid, _ := args["campaign_id"].(string)
 	if cid == "" {
 		return mcpError("campaign_id required"), nil
@@ -1343,33 +1429,7 @@ func (a *App) toolCampaignDelete(ctx *sdk.AppCtx, args map[string]any) (any, err
 	return a.execOrErr(ctx, acct, def.CampaignDeleteTool, map[string]any{"campaignId": cid})
 }
 
-// ─── Ad set tools ───────────────────────────────────────────────────
-
-var metaOptimizationGoal = map[string]string{
-	"link_clicks":        "LINK_CLICKS",
-	"conversions":        "OFFSITE_CONVERSIONS",
-	"leads":              "LEAD_GENERATION",
-	"reach":              "REACH",
-	"impressions":        "IMPRESSIONS",
-	"page_likes":         "PAGE_LIKES",
-	"post_engagement":    "POST_ENGAGEMENT",
-	"thruplay":           "THRUPLAY",
-	"app_installs":       "APP_INSTALLS",
-	"value":              "VALUE",
-	"landing_page_views": "LANDING_PAGE_VIEWS",
-}
-
-var metaBillingEvent = map[string]string{
-	"impressions": "IMPRESSIONS",
-	"link_clicks": "LINK_CLICKS",
-	"thruplay":    "THRUPLAY",
-}
-
-func (a *App) toolAdSetCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	acct, def, errOut := a.resolveAdAccount(ctx, args)
-	if errOut != nil {
-		return errOut, nil
-	}
+func (metaAdapter) AdSetCreate(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error) {
 	name, _ := args["name"].(string)
 	cid, _ := args["campaign_id"].(string)
 	og, _ := args["optimization_goal"].(string)
@@ -1385,13 +1445,12 @@ func (a *App) toolAdSetCreate(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	if be == "" {
 		be = "impressions"
 	}
-	mappedBE := metaBillingEvent[be]
 	input := map[string]any{
 		def.AccountIDInputField: acct.NativeAccountID,
 		"campaign_id":           cid,
 		"name":                  name,
 		"optimization_goal":     mappedOG,
-		"billing_event":         mappedBE,
+		"billing_event":         metaBillingEvent[be],
 		"targeting":             targeting,
 	}
 	if v := intArg(args, "daily_budget_cents", 0); v > 0 {
@@ -1435,11 +1494,7 @@ func (a *App) toolAdSetCreate(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	return a.execOrErr(ctx, acct, def.AdSetCreateTool, input)
 }
 
-func (a *App) toolAdSetList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	acct, def, errOut := a.resolveAdAccount(ctx, args)
-	if errOut != nil {
-		return errOut, nil
-	}
+func (metaAdapter) AdSetList(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error) {
 	input := map[string]any{def.AccountIDInputField: acct.NativeAccountID}
 	if cid, _ := args["campaign_id"].(string); cid != "" {
 		input["campaign_id"] = cid
@@ -1453,11 +1508,7 @@ func (a *App) toolAdSetList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	return a.execOrErr(ctx, acct, def.AdSetListTool, input)
 }
 
-func (a *App) toolAdSetUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	acct, def, errOut := a.resolveAdAccount(ctx, args)
-	if errOut != nil {
-		return errOut, nil
-	}
+func (metaAdapter) AdSetUpdate(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error) {
 	asid, _ := args["adset_id"].(string)
 	if asid == "" {
 		return mcpError("adset_id required"), nil
@@ -1485,11 +1536,7 @@ func (a *App) toolAdSetUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	return a.execOrErr(ctx, acct, def.AdSetUpdateTool, input)
 }
 
-func (a *App) toolAdSetDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	acct, def, errOut := a.resolveAdAccount(ctx, args)
-	if errOut != nil {
-		return errOut, nil
-	}
+func (metaAdapter) AdSetDelete(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error) {
 	asid, _ := args["adset_id"].(string)
 	if asid == "" {
 		return mcpError("adset_id required"), nil
@@ -1497,13 +1544,7 @@ func (a *App) toolAdSetDelete(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	return a.execOrErr(ctx, acct, def.AdSetDeleteTool, map[string]any{"adsetId": asid})
 }
 
-// ─── Ad tools ───────────────────────────────────────────────────────
-
-func (a *App) toolAdCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	acct, def, errOut := a.resolveAdAccount(ctx, args)
-	if errOut != nil {
-		return errOut, nil
-	}
+func (metaAdapter) AdCreate(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error) {
 	asid, _ := args["adset_id"].(string)
 	name, _ := args["name"].(string)
 	cr, _ := args["creative_id"].(string)
@@ -1525,11 +1566,7 @@ func (a *App) toolAdCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	return a.execOrErr(ctx, acct, def.AdCreateTool, input)
 }
 
-func (a *App) toolAdList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	acct, def, errOut := a.resolveAdAccount(ctx, args)
-	if errOut != nil {
-		return errOut, nil
-	}
+func (metaAdapter) AdList(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error) {
 	input := map[string]any{def.AccountIDInputField: acct.NativeAccountID}
 	if v, _ := args["adset_id"].(string); v != "" {
 		input["adset_id"] = v
@@ -1543,11 +1580,7 @@ func (a *App) toolAdList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	return a.execOrErr(ctx, acct, def.AdListTool, input)
 }
 
-func (a *App) toolAdUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	acct, def, errOut := a.resolveAdAccount(ctx, args)
-	if errOut != nil {
-		return errOut, nil
-	}
+func (metaAdapter) AdUpdate(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error) {
 	adID, _ := args["ad_id"].(string)
 	if adID == "" {
 		return mcpError("ad_id required"), nil
@@ -1566,11 +1599,7 @@ func (a *App) toolAdUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	return a.execOrErr(ctx, acct, def.AdUpdateTool, input)
 }
 
-func (a *App) toolAdDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	acct, def, errOut := a.resolveAdAccount(ctx, args)
-	if errOut != nil {
-		return errOut, nil
-	}
+func (metaAdapter) AdDelete(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error) {
 	adID, _ := args["ad_id"].(string)
 	if adID == "" {
 		return mcpError("ad_id required"), nil
@@ -1578,13 +1607,7 @@ func (a *App) toolAdDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	return a.execOrErr(ctx, acct, def.AdDeleteTool, map[string]any{"adId": adID})
 }
 
-// ─── Creative tools ────────────────────────────────────────────────
-
-func (a *App) toolCreativeUpload(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	acct, def, errOut := a.resolveAdAccount(ctx, args)
-	if errOut != nil {
-		return errOut, nil
-	}
+func (metaAdapter) CreativeUpload(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error) {
 	kind, _ := args["kind"].(string)
 	if kind != "image" && kind != "video" {
 		return mcpError("kind must be image or video"), nil
@@ -1594,15 +1617,10 @@ func (a *App) toolCreativeUpload(ctx *sdk.AppCtx, args map[string]any) (any, err
 	if storageID == 0 && sourceURL == "" {
 		return mcpError("either storage_id or source_url is required"), nil
 	}
-
 	input := map[string]any{def.AccountIDInputField: acct.NativeAccountID}
 	if name, _ := args["name"].(string); name != "" {
 		input["name"] = name
 	}
-
-	// Resolve bytes via the storage app when storage_id was given.
-	// CallAppResult unwraps the MCP envelope and decodes the storage
-	// app's return shape directly.
 	if storageID > 0 {
 		var fetched struct {
 			ID       int64  `json:"id"`
@@ -1616,21 +1634,12 @@ func (a *App) toolCreativeUpload(ctx *sdk.AppCtx, args map[string]any) (any, err
 		if fetched.URL == "" {
 			return mcpError("storage returned no URL for file id"), nil
 		}
-		// Forward to Meta as a public URL — the integration's
-		// upload-by-URL path is the simple variant. For larger / private
-		// files an operator can layer a signed-URL provider in front;
-		// out of scope for v1.
 		sourceURL = fetched.URL
 	}
-
 	tool := def.CreativeUploadImageTool
 	if kind == "video" {
 		tool = def.CreativeUploadVideoTool
 	}
-	// Meta's upload tools accept different field names for image vs
-	// video. v1 sends `url` for image (matches creative_upload_image)
-	// and `file_url` for video (matches creative_upload_video). Caller
-	// can override via platform_options if needed.
 	if kind == "image" {
 		input["url"] = sourceURL
 	} else {
@@ -1640,11 +1649,7 @@ func (a *App) toolCreativeUpload(ctx *sdk.AppCtx, args map[string]any) (any, err
 	return a.execOrErr(ctx, acct, tool, input)
 }
 
-func (a *App) toolCreativeList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	acct, def, errOut := a.resolveAdAccount(ctx, args)
-	if errOut != nil {
-		return errOut, nil
-	}
+func (metaAdapter) CreativeList(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error) {
 	input := map[string]any{def.AccountIDInputField: acct.NativeAccountID}
 	if v := intArg(args, "limit", 0); v > 0 {
 		input["limit"] = v
@@ -1655,13 +1660,7 @@ func (a *App) toolCreativeList(ctx *sdk.AppCtx, args map[string]any) (any, error
 	return a.execOrErr(ctx, acct, def.CreativeListTool, input)
 }
 
-// ─── Audience tools ────────────────────────────────────────────────
-
-func (a *App) toolAudienceList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	acct, def, errOut := a.resolveAdAccount(ctx, args)
-	if errOut != nil {
-		return errOut, nil
-	}
+func (metaAdapter) AudienceList(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error) {
 	input := map[string]any{def.AccountIDInputField: acct.NativeAccountID}
 	if v := intArg(args, "limit", 0); v > 0 {
 		input["limit"] = v
@@ -1672,19 +1671,12 @@ func (a *App) toolAudienceList(ctx *sdk.AppCtx, args map[string]any) (any, error
 	return a.execOrErr(ctx, acct, def.AudienceListTool, input)
 }
 
-func (a *App) toolAudienceCreateCustom(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	acct, def, errOut := a.resolveAdAccount(ctx, args)
-	if errOut != nil {
-		return errOut, nil
-	}
+func (metaAdapter) AudienceCreateCustom(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error) {
 	name, _ := args["name"].(string)
 	if name == "" {
 		return mcpError("name required"), nil
 	}
-	input := map[string]any{
-		def.AccountIDInputField: acct.NativeAccountID,
-		"name":                  name,
-	}
+	input := map[string]any{def.AccountIDInputField: acct.NativeAccountID, "name": name}
 	if v, _ := args["description"].(string); v != "" {
 		input["description"] = v
 	}
@@ -1695,11 +1687,7 @@ func (a *App) toolAudienceCreateCustom(ctx *sdk.AppCtx, args map[string]any) (an
 	return a.execOrErr(ctx, acct, def.AudienceCreateCustomTool, input)
 }
 
-func (a *App) toolAudienceCreateLookalike(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	acct, def, errOut := a.resolveAdAccount(ctx, args)
-	if errOut != nil {
-		return errOut, nil
-	}
+func (metaAdapter) AudienceCreateLookalike(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error) {
 	name, _ := args["name"].(string)
 	src, _ := args["source_audience_id"].(string)
 	country, _ := args["country"].(string)
@@ -1719,6 +1707,501 @@ func (a *App) toolAudienceCreateLookalike(ctx *sdk.AppCtx, args map[string]any) 
 	return a.execOrErr(ctx, acct, def.AudienceCreateLookalikeTool, input)
 }
 
+type googleAdapter struct{}
+
+func (googleAdapter) ListAccounts(a *App, ctx *sdk.AppCtx, row *pendingRow, def *platformDef) ([]map[string]any, error) {
+	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(row.connectionID, def.ListAccountsTool, map[string]any{})
+	if err != nil {
+		return nil, err
+	}
+	if res == nil || !res.Success {
+		body := ""
+		if res != nil {
+			body = string(res.Data)
+		}
+		return nil, fmt.Errorf("upstream non-2xx: %s", body)
+	}
+	var payload struct {
+		ResourceNames []string `json:"resourceNames"`
+	}
+	if err := json.Unmarshal(res.Data, &payload); err != nil {
+		return nil, fmt.Errorf("parse accessible customers: %w", err)
+	}
+	accounts := make([]map[string]any, 0, len(payload.ResourceNames))
+	for _, rn := range payload.ResourceNames {
+		customerID := googleCustomerID(rn)
+		if customerID == "" {
+			continue
+		}
+		account := map[string]any{"id": customerID, "name": customerID}
+		enriched, err := googleFetchCustomer(ctx, row.connectionID, customerID)
+		if err == nil {
+			for k, v := range enriched {
+				if toString(v) != "" {
+					account[k] = v
+				}
+			}
+		}
+		accounts = append(accounts, account)
+	}
+	return accounts, nil
+}
+
+func (googleAdapter) CampaignList(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error) {
+	query := `SELECT campaign.id, campaign.name, campaign.status, campaign.advertising_channel_type, campaign_budget.amount_micros, campaign_budget.resource_name FROM campaign`
+	if status, _ := args["status"].(string); status != "" {
+		query += " WHERE campaign.status = " + googleCampaignStatus(status)
+	}
+	if limit := intArg(args, "limit", 0); limit > 0 {
+		query += fmt.Sprintf(" LIMIT %d", limit)
+	}
+	input := map[string]any{"customer_id": acct.NativeAccountID, "query": query}
+	if pageToken, _ := args["after"].(string); pageToken != "" {
+		input["page_token"] = pageToken
+	}
+	parsed, errOut := a.execIntegrationTool(ctx, acct, def.CampaignListTool, input)
+	if errOut != nil {
+		return errOut, nil
+	}
+	return map[string]any{"data": normalizeGoogleCampaigns(parsed)}, nil
+}
+
+func (googleAdapter) CampaignCreate(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error) {
+	name, _ := args["name"].(string)
+	if name == "" {
+		return mcpError("name required"), nil
+	}
+	budgetMicros := googleBudgetMicros(args)
+	opts, _ := args["platform_options"].(map[string]any)
+	if budgetMicros == "" && opts["campaignBudget"] == nil && opts["campaign_budget"] == nil {
+		return mcpError("google campaign_create requires daily_budget_cents/lifetime_budget_cents or platform_options.campaignBudget"), nil
+	}
+
+	var budget any
+	budgetResource := toString(opts["campaignBudget"])
+	if budgetResource == "" {
+		budgetResource = toString(opts["campaign_budget"])
+	}
+	if budgetResource == "" {
+		budgetCreate := map[string]any{
+			"name":           name + " Budget",
+			"amountMicros":   budgetMicros,
+			"deliveryMethod": "STANDARD",
+		}
+		if custom, ok := opts["budget"].(map[string]any); ok {
+			for k, v := range custom {
+				budgetCreate[k] = v
+			}
+		}
+		var err error
+		budget, err = a.execOrErr(ctx, acct, "budget_mutate", map[string]any{
+			"customer_id": acct.NativeAccountID,
+			"operations":  []any{map[string]any{"create": budgetCreate}},
+		})
+		if err != nil {
+			return nil, err
+		}
+		budgetResource = firstResourceName(budget)
+		if budgetResource == "" {
+			return mcpError("google budget_mutate returned no resourceName"), nil
+		}
+	}
+
+	campaign := map[string]any{
+		"name":                   name,
+		"status":                 googleCampaignStatus(stringArgAny(args, "status")),
+		"advertisingChannelType": "SEARCH",
+		"campaignBudget":         budgetResource,
+	}
+	if v, _ := args["start_time"].(string); v != "" {
+		campaign["startDate"] = googleDate(v)
+	}
+	if v, _ := args["end_time"].(string); v != "" {
+		campaign["endDate"] = googleDate(v)
+	}
+	if custom, ok := opts["campaign"].(map[string]any); ok {
+		for k, v := range custom {
+			campaign[k] = v
+		}
+	}
+	mergeOptions(campaign, args)
+	delete(campaign, "budget")
+	delete(campaign, "campaign")
+	delete(campaign, "campaign_budget")
+	out, err := a.execOrErr(ctx, acct, def.CampaignCreateTool, map[string]any{
+		"customer_id": acct.NativeAccountID,
+		"operations":  []any{map[string]any{"create": campaign}},
+	})
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"budget": budget, "campaign": out}, nil
+}
+
+func (googleAdapter) CampaignUpdate(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error) {
+	cid, _ := args["campaign_id"].(string)
+	if cid == "" {
+		return mcpError("campaign_id required"), nil
+	}
+	update := map[string]any{"resourceName": googleCampaignResource(acct.NativeAccountID, cid)}
+	fields := []string{}
+	if v, _ := args["name"].(string); v != "" {
+		update["name"] = v
+		fields = append(fields, "name")
+	}
+	if v, _ := args["status"].(string); v != "" {
+		update["status"] = googleCampaignStatus(v)
+		fields = append(fields, "status")
+	}
+	if v, _ := args["start_time"].(string); v != "" {
+		update["startDate"] = googleDate(v)
+		fields = append(fields, "start_date")
+	}
+	if v, _ := args["end_time"].(string); v != "" {
+		update["endDate"] = googleDate(v)
+		fields = append(fields, "end_date")
+	}
+	opts, _ := args["platform_options"].(map[string]any)
+	if custom, ok := opts["campaign"].(map[string]any); ok {
+		for k, v := range custom {
+			if k == "resourceName" {
+				continue
+			}
+			update[k] = v
+			fields = append(fields, googleMaskField(k))
+		}
+	}
+	if len(fields) == 0 {
+		return mcpError("no google campaign fields to update"), nil
+	}
+	return a.execOrErr(ctx, acct, def.CampaignUpdateTool, map[string]any{
+		"customer_id": acct.NativeAccountID,
+		"operations": []any{map[string]any{
+			"update":     update,
+			"updateMask": strings.Join(fields, ","),
+		}},
+	})
+}
+
+func (googleAdapter) CampaignDelete(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error) {
+	cid, _ := args["campaign_id"].(string)
+	if cid == "" {
+		return mcpError("campaign_id required"), nil
+	}
+	return a.execOrErr(ctx, acct, def.CampaignDeleteTool, map[string]any{
+		"customer_id": acct.NativeAccountID,
+		"operations":  []any{map[string]any{"remove": googleCampaignResource(acct.NativeAccountID, cid)}},
+	})
+}
+
+func (googleAdapter) AdSetList(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error) {
+	query := `SELECT ad_group.id, ad_group.name, ad_group.status, campaign.id FROM ad_group`
+	if cid, _ := args["campaign_id"].(string); cid != "" {
+		query += " WHERE campaign.id = " + cid
+	}
+	if limit := intArg(args, "limit", 0); limit > 0 {
+		query += fmt.Sprintf(" LIMIT %d", limit)
+	}
+	parsed, errOut := a.execIntegrationTool(ctx, acct, def.AdSetListTool, map[string]any{"customer_id": acct.NativeAccountID, "query": query})
+	if errOut != nil {
+		return errOut, nil
+	}
+	return map[string]any{"data": normalizeGoogleAdGroups(parsed)}, nil
+}
+
+func (googleAdapter) AdSetCreate(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error) {
+	name, _ := args["name"].(string)
+	cid, _ := args["campaign_id"].(string)
+	if name == "" || cid == "" {
+		return mcpError("name and campaign_id required"), nil
+	}
+	adGroup := map[string]any{
+		"name":     name,
+		"campaign": googleCampaignResource(acct.NativeAccountID, cid),
+		"status":   googleCampaignStatus(stringArgAny(args, "status")),
+	}
+	if bid := intArg(args, "bid_amount_cents", 0); bid > 0 {
+		adGroup["cpcBidMicros"] = strconv.Itoa(bid * 10000)
+	}
+	if opts, _ := args["platform_options"].(map[string]any); opts != nil {
+		if custom, ok := opts["ad_group"].(map[string]any); ok {
+			for k, v := range custom {
+				adGroup[k] = v
+			}
+		}
+	}
+	return a.execOrErr(ctx, acct, def.AdSetCreateTool, map[string]any{
+		"customer_id": acct.NativeAccountID,
+		"operations":  []any{map[string]any{"create": adGroup}},
+	})
+}
+
+func (googleAdapter) AdSetUpdate(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error) {
+	asid, _ := args["adset_id"].(string)
+	if asid == "" {
+		return mcpError("adset_id required"), nil
+	}
+	update := map[string]any{"resourceName": googleAdGroupResource(acct.NativeAccountID, asid)}
+	fields := []string{}
+	if v, _ := args["name"].(string); v != "" {
+		update["name"] = v
+		fields = append(fields, "name")
+	}
+	if v, _ := args["status"].(string); v != "" {
+		update["status"] = googleCampaignStatus(v)
+		fields = append(fields, "status")
+	}
+	if bid := intArg(args, "bid_amount_cents", 0); bid > 0 {
+		update["cpcBidMicros"] = strconv.Itoa(bid * 10000)
+		fields = append(fields, "cpc_bid_micros")
+	}
+	if len(fields) == 0 {
+		return mcpError("no google ad group fields to update"), nil
+	}
+	return a.execOrErr(ctx, acct, def.AdSetUpdateTool, map[string]any{
+		"customer_id": acct.NativeAccountID,
+		"operations":  []any{map[string]any{"update": update, "updateMask": strings.Join(fields, ",")}},
+	})
+}
+
+func (googleAdapter) AdSetDelete(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error) {
+	asid, _ := args["adset_id"].(string)
+	if asid == "" {
+		return mcpError("adset_id required"), nil
+	}
+	return a.execOrErr(ctx, acct, def.AdSetDeleteTool, map[string]any{
+		"customer_id": acct.NativeAccountID,
+		"operations":  []any{map[string]any{"remove": googleAdGroupResource(acct.NativeAccountID, asid)}},
+	})
+}
+
+func (googleAdapter) AdList(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error) {
+	query := `SELECT ad_group_ad.resource_name, ad_group_ad.ad.id, ad_group_ad.status, ad_group.id, campaign.id FROM ad_group_ad`
+	if asid, _ := args["adset_id"].(string); asid != "" {
+		query += " WHERE ad_group.id = " + asid
+	}
+	if limit := intArg(args, "limit", 0); limit > 0 {
+		query += fmt.Sprintf(" LIMIT %d", limit)
+	}
+	parsed, errOut := a.execIntegrationTool(ctx, acct, def.AdListTool, map[string]any{"customer_id": acct.NativeAccountID, "query": query})
+	if errOut != nil {
+		return errOut, nil
+	}
+	return map[string]any{"data": normalizeGoogleAds(parsed)}, nil
+}
+
+func (googleAdapter) AdCreate(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error) {
+	opts, _ := args["platform_options"].(map[string]any)
+	if ops, ok := opts["operations"].([]any); ok && len(ops) > 0 {
+		return a.execOrErr(ctx, acct, def.AdCreateTool, map[string]any{"customer_id": acct.NativeAccountID, "operations": ops})
+	}
+	ad, _ := opts["ad"].(map[string]any)
+	asid, _ := args["adset_id"].(string)
+	if asid == "" || len(ad) == 0 {
+		return mcpError("google ad_create requires adset_id and platform_options.ad, or platform_options.operations"), nil
+	}
+	create := map[string]any{
+		"adGroup": googleAdGroupResource(acct.NativeAccountID, asid),
+		"status":  googleCampaignStatus(stringArgAny(args, "status")),
+		"ad":      ad,
+	}
+	return a.execOrErr(ctx, acct, def.AdCreateTool, map[string]any{
+		"customer_id": acct.NativeAccountID,
+		"operations":  []any{map[string]any{"create": create}},
+	})
+}
+
+func (googleAdapter) AdUpdate(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error) {
+	opts, _ := args["platform_options"].(map[string]any)
+	if ops, ok := opts["operations"].([]any); ok && len(ops) > 0 {
+		return a.execOrErr(ctx, acct, def.AdUpdateTool, map[string]any{"customer_id": acct.NativeAccountID, "operations": ops})
+	}
+	return mcpError("google ad_update requires platform_options.operations with native adGroupAds mutate operations"), nil
+}
+
+func (googleAdapter) AdDelete(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error) {
+	adID, _ := args["ad_id"].(string)
+	if adID == "" {
+		return mcpError("ad_id required"), nil
+	}
+	resource := adID
+	if !strings.HasPrefix(resource, "customers/") {
+		asid, _ := args["adset_id"].(string)
+		if asid == "" {
+			return mcpError("google ad_delete requires adset_id unless ad_id is a full resourceName"), nil
+		}
+		resource = fmt.Sprintf("customers/%s/adGroupAds/%s~%s", acct.NativeAccountID, asid, adID)
+	}
+	return a.execOrErr(ctx, acct, def.AdDeleteTool, map[string]any{
+		"customer_id": acct.NativeAccountID,
+		"operations":  []any{map[string]any{"remove": resource}},
+	})
+}
+
+func (googleAdapter) CreativeUpload(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error) {
+	opts, _ := args["platform_options"].(map[string]any)
+	asset, _ := opts["asset"].(map[string]any)
+	if len(asset) == 0 {
+		return mcpError("google creative_upload requires platform_options.asset with a native Google Ads asset create payload"), nil
+	}
+	if name, _ := args["name"].(string); name != "" {
+		asset["name"] = name
+	}
+	return a.execOrErr(ctx, acct, def.CreativeCreateTool, map[string]any{
+		"customer_id": acct.NativeAccountID,
+		"operations":  []any{map[string]any{"create": asset}},
+	})
+}
+
+func (googleAdapter) CreativeList(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error) {
+	query := `SELECT asset.id, asset.name, asset.type, asset.resource_name FROM asset`
+	if limit := intArg(args, "limit", 0); limit > 0 {
+		query += fmt.Sprintf(" LIMIT %d", limit)
+	}
+	return a.execOrErr(ctx, acct, def.CreativeListTool, map[string]any{"customer_id": acct.NativeAccountID, "query": query})
+}
+
+func (googleAdapter) AudienceList(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error) {
+	query := `SELECT user_list.id, user_list.name, user_list.type, user_list.size_for_display, user_list.size_for_search FROM user_list`
+	if limit := intArg(args, "limit", 0); limit > 0 {
+		query += fmt.Sprintf(" LIMIT %d", limit)
+	}
+	return a.execOrErr(ctx, acct, def.AudienceListTool, map[string]any{"customer_id": acct.NativeAccountID, "query": query})
+}
+
+func (googleAdapter) AudienceCreateCustom(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error) {
+	opts, _ := args["platform_options"].(map[string]any)
+	userList, _ := opts["user_list"].(map[string]any)
+	name, _ := args["name"].(string)
+	if len(userList) == 0 {
+		userList = map[string]any{}
+	}
+	if name != "" {
+		userList["name"] = name
+	}
+	if len(userList) == 0 {
+		return mcpError("google audience_create_custom requires name or platform_options.user_list"), nil
+	}
+	return a.execOrErr(ctx, acct, def.AudienceCreateCustomTool, map[string]any{
+		"customer_id": acct.NativeAccountID,
+		"operations":  []any{map[string]any{"create": userList}},
+	})
+}
+
+func (googleAdapter) AudienceCreateLookalike(a *App, ctx *sdk.AppCtx, acct *adAccount, def *platformDef, args map[string]any) (any, error) {
+	return mcpError("google audience_create_lookalike is not exposed as a generic operation; use audience_create_custom with platform_options.user_list"), nil
+}
+
+func (a *App) toolAdSetCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	acct, def, errOut := a.resolveAdAccount(ctx, args)
+	if errOut != nil {
+		return errOut, nil
+	}
+	return platformAdapters[acct.Platform].AdSetCreate(a, ctx, acct, def, args)
+}
+
+func (a *App) toolAdSetList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	acct, def, errOut := a.resolveAdAccount(ctx, args)
+	if errOut != nil {
+		return errOut, nil
+	}
+	return platformAdapters[acct.Platform].AdSetList(a, ctx, acct, def, args)
+}
+
+func (a *App) toolAdSetUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	acct, def, errOut := a.resolveAdAccount(ctx, args)
+	if errOut != nil {
+		return errOut, nil
+	}
+	return platformAdapters[acct.Platform].AdSetUpdate(a, ctx, acct, def, args)
+}
+
+func (a *App) toolAdSetDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	acct, def, errOut := a.resolveAdAccount(ctx, args)
+	if errOut != nil {
+		return errOut, nil
+	}
+	return platformAdapters[acct.Platform].AdSetDelete(a, ctx, acct, def, args)
+}
+
+// ─── Ad tools ───────────────────────────────────────────────────────
+
+func (a *App) toolAdCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	acct, def, errOut := a.resolveAdAccount(ctx, args)
+	if errOut != nil {
+		return errOut, nil
+	}
+	return platformAdapters[acct.Platform].AdCreate(a, ctx, acct, def, args)
+}
+
+func (a *App) toolAdList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	acct, def, errOut := a.resolveAdAccount(ctx, args)
+	if errOut != nil {
+		return errOut, nil
+	}
+	return platformAdapters[acct.Platform].AdList(a, ctx, acct, def, args)
+}
+
+func (a *App) toolAdUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	acct, def, errOut := a.resolveAdAccount(ctx, args)
+	if errOut != nil {
+		return errOut, nil
+	}
+	return platformAdapters[acct.Platform].AdUpdate(a, ctx, acct, def, args)
+}
+
+func (a *App) toolAdDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	acct, def, errOut := a.resolveAdAccount(ctx, args)
+	if errOut != nil {
+		return errOut, nil
+	}
+	return platformAdapters[acct.Platform].AdDelete(a, ctx, acct, def, args)
+}
+
+// ─── Creative tools ────────────────────────────────────────────────
+
+func (a *App) toolCreativeUpload(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	acct, def, errOut := a.resolveAdAccount(ctx, args)
+	if errOut != nil {
+		return errOut, nil
+	}
+	return platformAdapters[acct.Platform].CreativeUpload(a, ctx, acct, def, args)
+}
+
+func (a *App) toolCreativeList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	acct, def, errOut := a.resolveAdAccount(ctx, args)
+	if errOut != nil {
+		return errOut, nil
+	}
+	return platformAdapters[acct.Platform].CreativeList(a, ctx, acct, def, args)
+}
+
+// ─── Audience tools ────────────────────────────────────────────────
+
+func (a *App) toolAudienceList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	acct, def, errOut := a.resolveAdAccount(ctx, args)
+	if errOut != nil {
+		return errOut, nil
+	}
+	return platformAdapters[acct.Platform].AudienceList(a, ctx, acct, def, args)
+}
+
+func (a *App) toolAudienceCreateCustom(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	acct, def, errOut := a.resolveAdAccount(ctx, args)
+	if errOut != nil {
+		return errOut, nil
+	}
+	return platformAdapters[acct.Platform].AudienceCreateCustom(a, ctx, acct, def, args)
+}
+
+func (a *App) toolAudienceCreateLookalike(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	acct, def, errOut := a.resolveAdAccount(ctx, args)
+	if errOut != nil {
+		return errOut, nil
+	}
+	return platformAdapters[acct.Platform].AudienceCreateLookalike(a, ctx, acct, def, args)
+}
+
 // ─── Helpers ───────────────────────────────────────────────────────
 
 // execOrErr wraps execIntegrationTool to fit the MCP-tool return contract.
@@ -1728,6 +2211,279 @@ func (a *App) execOrErr(ctx *sdk.AppCtx, acct *adAccount, tool string, input map
 		return errOut, nil
 	}
 	return parsed, nil
+}
+
+func googleFetchCustomer(ctx *sdk.AppCtx, connID int64, customerID string) (map[string]any, error) {
+	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "search", map[string]any{
+		"customer_id": customerID,
+		"query":       "SELECT customer.id, customer.descriptive_name, customer.currency_code, customer.time_zone FROM customer LIMIT 1",
+	})
+	if err != nil {
+		return nil, err
+	}
+	if res == nil || !res.Success {
+		return nil, errors.New("customer detail lookup failed")
+	}
+	var parsed any
+	if err := json.Unmarshal(res.Data, &parsed); err != nil {
+		return nil, err
+	}
+	rows := resultRows(parsed)
+	if len(rows) == 0 {
+		return map[string]any{"id": customerID, "name": customerID}, nil
+	}
+	customer := mapAt(rows[0], "customer")
+	name := firstString(customer, "descriptiveName", "descriptive_name", "name")
+	if name == "" {
+		name = customerID
+	}
+	return map[string]any{
+		"id":       customerID,
+		"name":     name,
+		"currency": firstString(customer, "currencyCode", "currency_code"),
+		"timezone": firstString(customer, "timeZone", "time_zone"),
+	}, nil
+}
+
+func googleCustomerID(resourceName string) string {
+	s := strings.TrimSpace(resourceName)
+	s = strings.TrimPrefix(s, "customers/")
+	s = strings.ReplaceAll(s, "-", "")
+	return s
+}
+
+func googleCampaignStatus(status string) string {
+	switch strings.ToUpper(strings.TrimSpace(status)) {
+	case "", "PAUSED":
+		return "PAUSED"
+	case "ACTIVE", "ENABLED":
+		return "ENABLED"
+	default:
+		return strings.ToUpper(strings.TrimSpace(status))
+	}
+}
+
+func googleDisplayStatus(status string) string {
+	switch strings.ToUpper(strings.TrimSpace(status)) {
+	case "ENABLED":
+		return "ACTIVE"
+	default:
+		return strings.ToUpper(strings.TrimSpace(status))
+	}
+}
+
+func googleBudgetMicros(args map[string]any) string {
+	if cents := intArg(args, "daily_budget_cents", 0); cents > 0 {
+		return strconv.Itoa(cents * 10000)
+	}
+	if cents := intArg(args, "lifetime_budget_cents", 0); cents > 0 {
+		return strconv.Itoa(cents * 10000)
+	}
+	return ""
+}
+
+func googleDate(v string) string {
+	s := strings.TrimSpace(v)
+	if len(s) >= 10 {
+		return s[:10]
+	}
+	return s
+}
+
+func googleCampaignResource(customerID, campaignID string) string {
+	if strings.HasPrefix(campaignID, "customers/") {
+		return campaignID
+	}
+	return fmt.Sprintf("customers/%s/campaigns/%s", customerID, campaignID)
+}
+
+func googleAdGroupResource(customerID, adGroupID string) string {
+	if strings.HasPrefix(adGroupID, "customers/") {
+		return adGroupID
+	}
+	return fmt.Sprintf("customers/%s/adGroups/%s", customerID, adGroupID)
+}
+
+func googleMaskField(field string) string {
+	var out []rune
+	for i, r := range field {
+		if i > 0 && r >= 'A' && r <= 'Z' {
+			out = append(out, '_', r+'a'-'A')
+		} else {
+			out = append(out, r)
+		}
+	}
+	return strings.ToLower(string(out))
+}
+
+func firstResourceName(v any) string {
+	for _, row := range resultRows(v) {
+		if rn := firstString(row, "resourceName", "resource_name"); rn != "" {
+			return rn
+		}
+	}
+	if m := asMap(v); m != nil {
+		if rn := firstString(m, "resourceName", "resource_name"); rn != "" {
+			return rn
+		}
+	}
+	return ""
+}
+
+func normalizeGoogleCampaigns(v any) []map[string]any {
+	rows := resultRows(v)
+	out := make([]map[string]any, 0, len(rows))
+	for _, row := range rows {
+		campaign := mapAt(row, "campaign")
+		budget := mapAt(row, "campaignBudget")
+		if len(budget) == 0 {
+			budget = mapAt(row, "campaign_budget")
+		}
+		id := firstString(campaign, "id")
+		if id == "" {
+			continue
+		}
+		item := map[string]any{
+			"id":        id,
+			"name":      firstString(campaign, "name"),
+			"status":    googleDisplayStatus(firstString(campaign, "status")),
+			"objective": firstString(campaign, "advertisingChannelType", "advertising_channel_type"),
+		}
+		if rn := firstString(campaign, "resourceName", "resource_name"); rn != "" {
+			item["resource_name"] = rn
+		}
+		if brn := firstString(budget, "resourceName", "resource_name"); brn != "" {
+			item["budget_resource_name"] = brn
+		}
+		if micros := int64ArgAny(firstString(budget, "amountMicros", "amount_micros"), budget["amountMicros"], budget["amount_micros"]); micros > 0 {
+			item["daily_budget"] = strconv.FormatInt(micros/10000, 10)
+		}
+		out = append(out, item)
+	}
+	return out
+}
+
+func normalizeGoogleAdGroups(v any) []map[string]any {
+	rows := resultRows(v)
+	out := make([]map[string]any, 0, len(rows))
+	for _, row := range rows {
+		adGroup := mapAt(row, "adGroup")
+		if len(adGroup) == 0 {
+			adGroup = mapAt(row, "ad_group")
+		}
+		campaign := mapAt(row, "campaign")
+		id := firstString(adGroup, "id")
+		if id == "" {
+			continue
+		}
+		out = append(out, map[string]any{
+			"id":          id,
+			"name":        firstString(adGroup, "name"),
+			"status":      googleDisplayStatus(firstString(adGroup, "status")),
+			"campaign_id": firstString(campaign, "id"),
+		})
+	}
+	return out
+}
+
+func normalizeGoogleAds(v any) []map[string]any {
+	rows := resultRows(v)
+	out := make([]map[string]any, 0, len(rows))
+	for _, row := range rows {
+		adGroupAd := mapAt(row, "adGroupAd")
+		if len(adGroupAd) == 0 {
+			adGroupAd = mapAt(row, "ad_group_ad")
+		}
+		ad := mapAt(adGroupAd, "ad")
+		adGroup := mapAt(row, "adGroup")
+		if len(adGroup) == 0 {
+			adGroup = mapAt(row, "ad_group")
+		}
+		id := firstString(ad, "id")
+		if id == "" {
+			id = firstString(adGroupAd, "resourceName", "resource_name")
+		}
+		if id == "" {
+			continue
+		}
+		out = append(out, map[string]any{
+			"id":        id,
+			"name":      firstString(ad, "name"),
+			"status":    googleDisplayStatus(firstString(adGroupAd, "status")),
+			"adset_id":  firstString(adGroup, "id"),
+			"native_id": firstString(adGroupAd, "resourceName", "resource_name"),
+		})
+	}
+	return out
+}
+
+func resultRows(v any) []map[string]any {
+	m := asMap(v)
+	if m == nil {
+		return nil
+	}
+	raw, ok := m["results"]
+	if !ok {
+		raw = m["data"]
+	}
+	items, ok := raw.([]any)
+	if !ok {
+		return nil
+	}
+	out := make([]map[string]any, 0, len(items))
+	for _, item := range items {
+		if row := asMap(item); row != nil {
+			out = append(out, row)
+		}
+	}
+	return out
+}
+
+func mapAt(m map[string]any, key string) map[string]any {
+	if m == nil {
+		return nil
+	}
+	if v := asMap(m[key]); v != nil {
+		return v
+	}
+	return nil
+}
+
+func asMap(v any) map[string]any {
+	if m, ok := v.(map[string]any); ok {
+		return m
+	}
+	return nil
+}
+
+func firstString(m map[string]any, keys ...string) string {
+	if m == nil {
+		return ""
+	}
+	for _, key := range keys {
+		if s := toString(m[key]); s != "" {
+			return s
+		}
+	}
+	return ""
+}
+
+func int64ArgAny(vals ...any) int64 {
+	for _, v := range vals {
+		switch n := v.(type) {
+		case int64:
+			return n
+		case int:
+			return int64(n)
+		case float64:
+			return int64(n)
+		case string:
+			if n, err := strconv.ParseInt(strings.TrimSpace(n), 10, 64); err == nil {
+				return n
+			}
+		}
+	}
+	return 0
 }
 
 type pendingRow struct {

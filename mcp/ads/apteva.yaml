@@ -2,18 +2,18 @@ schema: apteva-app/v1
 
 name: ads
 display_name: Ads
-version: 0.1.3
+version: 0.1.4
 description: |
   Manage paid advertising across networks behind one MCP surface.
-  v0.1 supports Meta Ads (Facebook + Instagram) — campaigns, ad sets,
-  ads, creatives, audiences. Connect ad accounts at runtime via the
-  Add Account flow; the underlying integrations system handles OAuth
-  and token refresh. Reporting is intentionally not in v1; this is a
-  control plane only.
+  v0.1 supports Meta Ads (Facebook + Instagram) and Google Ads. Meta
+  uses direct Graph API tools; Google Ads uses customer account picking,
+  GAQL reads, and mutate operations behind the same generic MCP tools.
+  Connect ad accounts at runtime via the Add Account flow; the underlying
+  integrations system handles OAuth and token refresh.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/ads
-tags: [advertising, ads, marketing, campaigns, meta, facebook, instagram]
+tags: [advertising, ads, marketing, campaigns, meta, facebook, instagram, google]
 
 scopes: [project, global]
 min_apteva_version: "0.10.0"
@@ -33,7 +33,7 @@ requires:
       capabilities: [files.read]
       required: false
       label: "Storage (optional)"
-      hint: "Used by creative_upload to fetch image/video bytes from a stored file id and forward them to Meta. Without storage, upload directly by URL via the platform_options escape hatch."
+      hint: "Used by creative_upload to fetch image/video bytes from a stored file id and forward them to supported platforms. Without storage, use platform_options for native asset payloads."
 
 provides:
   http_routes:
@@ -41,7 +41,7 @@ provides:
   mcp_tools:
     - { name: account_add,                 description: "Begin OAuth for an ads platform. Returns authorize_url + pending_account_id." }
     - { name: account_list_pending_pages,  description: "After OAuth completes, list selectable ad accounts on the connected platform." }
-    - { name: account_finalize,            description: "Commit a pending ad account into the active list. Supply page_id (the platform ad account id, e.g. act_12345)." }
+    - { name: account_finalize,            description: "Commit a pending ad account into the active list. Supply page_id (for Meta act_12345; for Google the customer id without hyphens)." }
     - { name: account_list,                description: "List connected ad accounts in this project." }
     - { name: account_disconnect,          description: "Remove a connected ad account; releases the underlying connection when the last reference goes." }
     - { name: campaign_create,             description: "Create a campaign on the bound ad account." }

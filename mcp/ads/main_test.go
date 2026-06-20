@@ -24,6 +24,7 @@ type recordingPlatform struct {
 	disconnectCalls  []int64
 	nextStartOAuth   *sdk.OAuthStartResult
 	nextStartErr     error
+	listConnections  []sdk.PlatformConnection
 	executeResponses map[string]*sdk.ExecuteResult
 	callAppResponses map[string]json.RawMessage
 	identity         *sdk.InstallIdentity
@@ -57,7 +58,20 @@ func (p *recordingPlatform) GetConnection(id int64) (*sdk.PlatformConnection, er
 	return &sdk.PlatformConnection{ID: id, AppSlug: "facebook-ads", ProjectID: "test-proj"}, nil
 }
 func (p *recordingPlatform) ListConnections(filter sdk.ConnectionFilter) ([]sdk.PlatformConnection, error) {
-	return nil, nil
+	if len(p.listConnections) == 0 {
+		return nil, nil
+	}
+	out := []sdk.PlatformConnection{}
+	for _, c := range p.listConnections {
+		if filter.ProjectID != "" && c.ProjectID != filter.ProjectID {
+			continue
+		}
+		if filter.AppSlug != "" && c.AppSlug != filter.AppSlug {
+			continue
+		}
+		out = append(out, c)
+	}
+	return out, nil
 }
 func (p *recordingPlatform) GetInstance(id int64) (*sdk.PlatformInstance, error) {
 	return nil, errors.New("not implemented")
@@ -184,6 +198,27 @@ func TestAccountAdd_StartsOAuth(t *testing.T) {
 	}
 }
 
+func TestAccountAdd_StartsGoogleOAuth(t *testing.T) {
+	pf := newRecordingPlatform()
+	ctx := newAdsCtx(t, pf)
+	app := &App{}
+
+	out, err := app.toolAccountAdd(ctx, map[string]any{"platform": "google", "force_new": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := out.(map[string]any)
+	if res["authorize_url"] != "https://example.com/authorize?state=abc" {
+		t.Fatalf("unexpected authorize_url: %v", res["authorize_url"])
+	}
+	if len(pf.startOAuthCalls) != 1 {
+		t.Fatalf("expected 1 StartOAuth call, got %d", len(pf.startOAuthCalls))
+	}
+	if pf.startOAuthCalls[0].IntegrationSlug != "google-ads" {
+		t.Fatalf("wrong slug: %s", pf.startOAuthCalls[0].IntegrationSlug)
+	}
+}
+
 func TestAccountAdd_RejectsUnknownPlatform(t *testing.T) {
 	pf := newRecordingPlatform()
 	ctx := newAdsCtx(t, pf)
@@ -279,6 +314,47 @@ func TestAccountFinalize_RejectsUnknownAdAccount(t *testing.T) {
 	rmap := out.(map[string]any)
 	if rmap["isError"] != true {
 		t.Fatalf("expected isError, got %#v", rmap)
+	}
+}
+
+func TestGoogleAccountFinalize_WritesCustomerAccount(t *testing.T) {
+	pf := newRecordingPlatform()
+	pf.executeResponses["list_accounts"] = &sdk.ExecuteResult{
+		Success: true, Status: 200,
+		Data: json.RawMessage(`{"resourceNames":["customers/1234567890"]}`),
+	}
+	pf.executeResponses["search"] = &sdk.ExecuteResult{
+		Success: true, Status: 200,
+		Data: json.RawMessage(`{"results":[{"customer":{"id":"1234567890","descriptiveName":"Google Store","currencyCode":"USD","timeZone":"America/New_York"}}]}`),
+	}
+	ctx := newAdsCtx(t, pf)
+	app := &App{}
+
+	res, err := ctx.AppDB().Exec(
+		`INSERT INTO pending_accounts (project_id, platform, integration_slug, connection_id, status, expires_at)
+		 VALUES ('test-proj','google','google-ads',8,'ready',datetime('now','+1 hour'))`,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid, _ := res.LastInsertId()
+
+	out, err := app.toolAccountFinalize(ctx, map[string]any{
+		"pending_account_id": pid,
+		"page_id":            "1234567890",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rmap := out.(map[string]any)
+	if rmap["display_name"] != "Google Store" {
+		t.Fatalf("display_name = %v", rmap["display_name"])
+	}
+	if rmap["native_account_id"] != "1234567890" {
+		t.Fatalf("native_account_id = %v", rmap["native_account_id"])
+	}
+	if rmap["platform"] != "google" {
+		t.Fatalf("platform = %v", rmap["platform"])
 	}
 }
 
@@ -427,6 +503,77 @@ func TestCampaignPause_SetsStatusPaused(t *testing.T) {
 	call := pf.executeCalls[0]
 	if call.Tool != "campaign_update" || call.Input["status"] != "PAUSED" {
 		t.Fatalf("expected campaign_update with PAUSED, got tool=%s status=%v", call.Tool, call.Input["status"])
+	}
+}
+
+func TestGoogleCampaignList_NormalizesGAQLRows(t *testing.T) {
+	pf := newRecordingPlatform()
+	pf.executeResponses["search"] = &sdk.ExecuteResult{
+		Success: true, Status: 200,
+		Data: json.RawMessage(`{"results":[{"campaign":{"id":"987","name":"Search Brand","status":"ENABLED","advertisingChannelType":"SEARCH","resourceName":"customers/123/campaigns/987"},"campaignBudget":{"amountMicros":"25000000","resourceName":"customers/123/campaignBudgets/55"}}]}`),
+	}
+	ctx := newAdsCtx(t, pf)
+	app := &App{}
+
+	res, _ := ctx.AppDB().Exec(
+		`INSERT INTO ad_accounts (project_id, platform, connection_id, native_account_id, display_name)
+		 VALUES ('test-proj','google',8,'123','Google')`,
+	)
+	acctID, _ := res.LastInsertId()
+
+	out, err := app.toolCampaignList(ctx, map[string]any{"ad_account_id": acctID, "limit": 50})
+	if err != nil {
+		t.Fatal(err)
+	}
+	data := out.(map[string]any)["data"].([]map[string]any)
+	if len(data) != 1 {
+		t.Fatalf("expected 1 campaign, got %#v", data)
+	}
+	if data[0]["id"] != "987" || data[0]["status"] != "ACTIVE" || data[0]["daily_budget"] != "2500" {
+		t.Fatalf("campaign not normalized: %#v", data[0])
+	}
+}
+
+func TestGoogleCampaignCreate_CreatesBudgetThenCampaign(t *testing.T) {
+	pf := newRecordingPlatform()
+	pf.executeResponses["budget_mutate"] = &sdk.ExecuteResult{
+		Success: true, Status: 200,
+		Data: json.RawMessage(`{"results":[{"resourceName":"customers/123/campaignBudgets/55"}]}`),
+	}
+	pf.executeResponses["campaign_mutate"] = &sdk.ExecuteResult{
+		Success: true, Status: 200,
+		Data: json.RawMessage(`{"results":[{"resourceName":"customers/123/campaigns/987"}]}`),
+	}
+	ctx := newAdsCtx(t, pf)
+	app := &App{}
+
+	res, _ := ctx.AppDB().Exec(
+		`INSERT INTO ad_accounts (project_id, platform, connection_id, native_account_id, display_name)
+		 VALUES ('test-proj','google',8,'123','Google')`,
+	)
+	acctID, _ := res.LastInsertId()
+
+	if _, err := app.toolCampaignCreate(ctx, map[string]any{
+		"ad_account_id":      acctID,
+		"name":               "Search Brand",
+		"objective":          "traffic",
+		"daily_budget_cents": 2500,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(pf.executeCalls) != 2 {
+		t.Fatalf("expected budget + campaign mutate calls, got %#v", pf.executeCalls)
+	}
+	if pf.executeCalls[0].Tool != "budget_mutate" || pf.executeCalls[1].Tool != "campaign_mutate" {
+		t.Fatalf("wrong tools: %#v", pf.executeCalls)
+	}
+	ops := pf.executeCalls[1].Input["operations"].([]any)
+	create := ops[0].(map[string]any)["create"].(map[string]any)
+	if create["campaignBudget"] != "customers/123/campaignBudgets/55" {
+		t.Fatalf("campaignBudget not wired: %#v", create)
+	}
+	if create["status"] != "PAUSED" {
+		t.Fatalf("default status not PAUSED: %#v", create)
 	}
 }
 

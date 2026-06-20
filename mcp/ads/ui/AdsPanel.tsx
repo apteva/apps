@@ -1,4 +1,4 @@
-// AdsPanel — minimal v0.1 surface.
+// AdsPanel — minimal generic ads surface.
 //
 // What this panel does:
 //   - Lists connected ad accounts.
@@ -194,7 +194,7 @@ export default function AdsPanel(props: NativePanelProps) {
     setLoading(true);
     try {
       const r = await callTool("campaign_list", { ad_account_id: acct.id, limit: 50 });
-      // facebook-ads returns {data:[...]}; surface that shape directly
+      // Adapters normalize campaign lists to {data:[...]} when needed.
       setCampaigns(r.data || r.campaigns || []);
     } catch (e: any) {
       setError(e.message);
