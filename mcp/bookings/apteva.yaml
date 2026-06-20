@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: bookings
 display_name: Bookings
-version: 0.1.0
+version: 0.1.1
 description: |
   Calendly-style booking links for human and AI-agent meetings. Booking
   types define availability, duration, intake fields, routing target,

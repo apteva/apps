@@ -17,7 +17,6 @@ interface BookingType {
   location_value: string;
   target_kind: "human" | "ai_agent" | "either" | "team";
   calendar_ids: number[];
-  agent_instance_id: string;
   calls_enabled: boolean;
   crm_enabled: boolean;
   active: boolean;
@@ -47,6 +46,13 @@ interface Slot {
   end: string;
 }
 
+interface Calendar {
+  id: number;
+  name: string;
+  color: string;
+  enabled: boolean;
+}
+
 interface AvailabilityRules {
   minimum_notice_minutes?: number;
   booking_horizon_days?: number;
@@ -63,8 +69,7 @@ type DraftType = {
   target_kind: BookingType["target_kind"];
   location_kind: BookingType["location_kind"];
   location_value: string;
-  calendar_ids: string;
-  agent_instance_id: string;
+  calendar_ids: number[];
   calls_enabled: boolean;
   crm_enabled: boolean;
   minimum_notice_minutes: number;
@@ -83,8 +88,7 @@ const emptyDraft: DraftType = {
   target_kind: "human",
   location_kind: "calls",
   location_value: "",
-  calendar_ids: "",
-  agent_instance_id: "",
+  calendar_ids: [],
   calls_enabled: true,
   crm_enabled: true,
   minimum_notice_minutes: 120,
@@ -98,6 +102,7 @@ const emptyDraft: DraftType = {
 export default function BookingsPanel({ projectId }: NativePanelProps) {
   const [types, setTypes] = useState<BookingType[]>([]);
   const [bookings, setBookings] = useState<Booking[]>([]);
+  const [calendars, setCalendars] = useState<Calendar[]>([]);
   const [selectedId, setSelectedId] = useState(0);
   const [draft, setDraft] = useState<DraftType>(emptyDraft);
   const [editingId, setEditingId] = useState(0);
@@ -117,15 +122,34 @@ export default function BookingsPanel({ projectId }: NativePanelProps) {
   }, [projectId]);
 
   const api = useCallback(async <T,>(method: string, path: string, body?: unknown): Promise<T> => {
-    const res = await fetch(withProject(path), {
-      method,
-      credentials: "same-origin",
-      headers: body ? { "Content-Type": "application/json" } : undefined,
-      body: body ? JSON.stringify(body) : undefined,
-    });
-    if (!res.ok) throw new Error(await res.text());
-    return await res.json();
+    const controller = new AbortController();
+    const timeout = window.setTimeout(() => controller.abort(), 15000);
+    try {
+      const res = await fetch(withProject(path), {
+        method,
+        credentials: "same-origin",
+        headers: body ? { "Content-Type": "application/json" } : undefined,
+        body: body ? JSON.stringify(body) : undefined,
+        signal: controller.signal,
+      });
+      if (!res.ok) throw new Error(await res.text());
+      return await res.json();
+    } catch (e) {
+      if ((e as Error).name === "AbortError") throw new Error("Request timed out");
+      throw e;
+    } finally {
+      window.clearTimeout(timeout);
+    }
   }, [withProject]);
+
+  const loadCalendars = useCallback(async () => {
+    try {
+      const data = await api<{ calendars: Calendar[] }>("GET", "/calendars");
+      setCalendars(data.calendars ?? []);
+    } catch (e) {
+      setStatus("Load calendars: " + (e as Error).message);
+    }
+  }, [api]);
 
   const load = useCallback(async () => {
     try {
@@ -143,6 +167,7 @@ export default function BookingsPanel({ projectId }: NativePanelProps) {
   }, [api, selectedId]);
 
   useEffect(() => { load(); }, [load]);
+  useEffect(() => { loadCalendars(); }, [loadCalendars]);
 
   useEffect(() => {
     if (!selected) return;
@@ -275,7 +300,7 @@ export default function BookingsPanel({ projectId }: NativePanelProps) {
         <main className="min-w-0 overflow-y-auto">
           <div className="p-4 grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_380px] gap-5">
             <section className="space-y-4">
-              <Editor draft={draft} setDraft={setDraft} />
+              <Editor draft={draft} setDraft={setDraft} calendars={calendars} />
               <div className="flex flex-wrap gap-2">
                 <button type="button" onClick={saveType} disabled={busy || !draft.title.trim()} className="px-3 py-1.5 text-xs bg-accent text-bg rounded disabled:opacity-50">
                   {editingId ? "Save" : "Create"}
@@ -381,8 +406,22 @@ export default function BookingsPanel({ projectId }: NativePanelProps) {
   );
 }
 
-function Editor({ draft, setDraft }: { draft: DraftType; setDraft: (fn: DraftType | ((d: DraftType) => DraftType)) => void }) {
+function Editor({
+  draft,
+  setDraft,
+  calendars,
+}: {
+  draft: DraftType;
+  setDraft: (fn: DraftType | ((d: DraftType) => DraftType)) => void;
+  calendars: Calendar[];
+}) {
   const update = (patch: Partial<DraftType>) => setDraft((d) => ({ ...d, ...patch }));
+  const toggleCalendar = (id: number) => {
+    const next = draft.calendar_ids.includes(id)
+      ? draft.calendar_ids.filter((x) => x !== id)
+      : [...draft.calendar_ids, id];
+    update({ calendar_ids: next });
+  };
   return (
     <PanelSection title="Booking Type">
       <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
@@ -395,9 +434,6 @@ function Editor({ draft, setDraft }: { draft: DraftType; setDraft: (fn: DraftTyp
         <Field label="Duration">
           <input type="number" min={5} step={5} value={draft.duration_minutes} onChange={(e) => update({ duration_minutes: parseInt(e.target.value) || 30 })} className="input" />
         </Field>
-        <Field label="Calendars">
-          <input value={draft.calendar_ids} onChange={(e) => update({ calendar_ids: e.target.value })} placeholder="1, 2, 3" className="input" />
-        </Field>
         <Field label="Target">
           <select value={draft.target_kind} onChange={(e) => update({ target_kind: e.target.value as DraftType["target_kind"] })} className="input">
             <option value="human">human</option>
@@ -405,9 +441,6 @@ function Editor({ draft, setDraft }: { draft: DraftType; setDraft: (fn: DraftTyp
             <option value="either">either</option>
             <option value="team">team</option>
           </select>
-        </Field>
-        <Field label="Agent ID">
-          <input value={draft.agent_instance_id} onChange={(e) => update({ agent_instance_id: e.target.value })} className="input" />
         </Field>
         <Field label="Location">
           <select value={draft.location_kind} onChange={(e) => update({ location_kind: e.target.value as DraftType["location_kind"], calls_enabled: e.target.value === "calls" })} className="input">
@@ -447,6 +480,23 @@ function Editor({ draft, setDraft }: { draft: DraftType; setDraft: (fn: DraftTyp
           Link CRM contact
         </label>
       </div>
+      <Field label="Calendars">
+        {calendars.length === 0 ? (
+          <div className="border border-border rounded p-3 text-xs text-text-muted">No calendars loaded yet. Bookings will use its own Bookings calendar if none are selected.</div>
+        ) : (
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+            {calendars.map((calendar) => (
+              <label key={calendar.id} className="flex items-center gap-2 rounded border border-border px-2 py-1.5 text-sm">
+                <input type="checkbox" checked={draft.calendar_ids.includes(calendar.id)} onChange={() => toggleCalendar(calendar.id)} />
+                <span className="h-2.5 w-2.5 rounded-full" style={{ backgroundColor: calendar.color || "#3b82f6" }} />
+                <span className="truncate">{calendar.name}</span>
+                {!calendar.enabled && <span className="ml-auto text-[10px] text-text-dim">disabled</span>}
+              </label>
+            ))}
+          </div>
+        )}
+        <div className="mt-1 text-[11px] text-text-dim">No selection means Bookings creates and uses a shared Bookings calendar.</div>
+      </Field>
       <Field label="Description">
         <textarea value={draft.description} onChange={(e) => update({ description: e.target.value })} rows={3} className="input" />
       </Field>
@@ -465,8 +515,7 @@ function typeToDraft(type: BookingType): DraftType {
     target_kind: type.target_kind || "human",
     location_kind: type.location_kind || "calls",
     location_value: type.location_value || "",
-    calendar_ids: (type.calendar_ids || []).join(", "),
-    agent_instance_id: type.agent_instance_id || "",
+    calendar_ids: type.calendar_ids || [],
     calls_enabled: Boolean(type.calls_enabled),
     crm_enabled: Boolean(type.crm_enabled),
     minimum_notice_minutes: rules.minimum_notice_minutes ?? 120,
@@ -491,8 +540,7 @@ function draftToPayload(draft: DraftType) {
     target_kind: draft.target_kind,
     location_kind: draft.location_kind,
     location_value: draft.location_value,
-    calendar_ids: draft.calendar_ids.split(",").map((s) => parseInt(s.trim(), 10)).filter(Boolean),
-    agent_instance_id: draft.agent_instance_id,
+    calendar_ids: draft.calendar_ids,
     calls_enabled: draft.calls_enabled,
     crm_enabled: draft.crm_enabled,
     availability_rules: {

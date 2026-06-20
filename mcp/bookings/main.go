@@ -25,7 +25,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: bookings
 display_name: Bookings
-version: 0.1.0
+version: 0.1.1
 description: Calendly-style booking links for human and AI-agent meetings.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/bookings
@@ -135,6 +135,7 @@ func (a *App) EventHandlers() []sdk.EventHandler { return nil }
 
 func (a *App) HTTPRoutes() []sdk.Route {
 	return []sdk.Route{
+		{Pattern: "/calendars", Handler: a.handleCalendars},
 		{Pattern: "/booking-types", Handler: a.handleBookingTypes},
 		{Pattern: "/booking-types/", Handler: a.handleBookingTypeItem},
 		{Pattern: "/bookings", Handler: a.handleBookings},
@@ -152,9 +153,9 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "booking_types_get", Description: "Fetch a booking type by id or slug. Args: id? or slug?.", InputSchema: schemaObject(map[string]any{
 			"id": map[string]any{"type": "integer"}, "slug": map[string]any{"type": "string"},
 		}, nil), Handler: a.toolBookingTypesGet},
-		{Name: "booking_types_create", Description: "Create a booking type. Args: title, duration_minutes?, slug?, description?, calendar_ids?, target_kind?, agent_instance_id?, location_kind?, location_value?, calls_enabled?, crm_enabled?, availability_rules?, intake_schema?.", InputSchema: schemaObject(map[string]any{
+		{Name: "booking_types_create", Description: "Create a booking type. Args: title, duration_minutes?, slug?, description?, calendar_ids?, target_kind?, location_kind?, location_value?, calls_enabled?, crm_enabled?, availability_rules?, intake_schema?.", InputSchema: schemaObject(map[string]any{
 			"title": map[string]any{"type": "string"}, "duration_minutes": map[string]any{"type": "integer"}, "slug": map[string]any{"type": "string"}, "description": map[string]any{"type": "string"},
-			"calendar_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}}, "target_kind": map[string]any{"type": "string"}, "agent_instance_id": map[string]any{"type": "string"},
+			"calendar_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}}, "target_kind": map[string]any{"type": "string"},
 			"location_kind": map[string]any{"type": "string"}, "location_value": map[string]any{"type": "string"}, "calls_enabled": map[string]any{"type": "boolean"}, "crm_enabled": map[string]any{"type": "boolean"},
 			"availability_rules": map[string]any{"type": "object"}, "intake_schema": map[string]any{"type": "array"},
 		}, []string{"title"}), Handler: a.toolBookingTypesCreate},
@@ -343,7 +344,7 @@ func (a *App) toolBookingTypesCreate(ctx *sdk.AppCtx, args map[string]any) (any,
 		    availability_rules, intake_schema, confirmation_policy)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?)`,
 		pid, slug, title, strArg(args, "description"), duration, strArgDefault(args, "timezone", "UTC"),
-		locationKind, strArg(args, "location_value"), targetKind, string(calIDs), strArg(args, "agent_instance_id"),
+		locationKind, strArg(args, "location_value"), targetKind, string(calIDs), "",
 		boolToInt(boolArg(args, "calls_enabled", locationKind == "calls")), boolToInt(boolArg(args, "crm_enabled", true)),
 		availability, intake, policy,
 	)
@@ -382,7 +383,7 @@ func (a *App) toolBookingTypesUpdate(ctx *sdk.AppCtx, args map[string]any) (any,
 		sets = append(sets, col+"=?")
 		vals = append(vals, val)
 	}
-	for _, key := range []string{"title", "description", "timezone", "location_value", "agent_instance_id"} {
+	for _, key := range []string{"title", "description", "timezone", "location_value"} {
 		if _, ok := args[key]; ok {
 			add(key, strArg(args, key))
 		}
@@ -1050,6 +1051,28 @@ func calendarDescription(ctx *sdk.AppCtx, bt *BookingType, b *Booking) string {
 
 // ─── HTTP handlers ────────────────────────────────────────────────
 
+func (a *App) handleCalendars(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		httpErr(w, http.StatusMethodNotAllowed, "GET")
+		return
+	}
+	pid, err := resolveProjectFromRequest(r)
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if globalCtx.PlatformAPI() == nil {
+		httpErr(w, http.StatusBadRequest, "calendar app call requires PlatformAPI")
+		return
+	}
+	var out map[string]any
+	if err := globalCtx.WithProject(pid).PlatformAPI().CallAppResult("calendar", "calendars_list", map[string]any{}, &out); err != nil {
+		httpErr(w, http.StatusBadRequest, "calendar.calendars_list: "+err.Error())
+		return
+	}
+	writeToolOut(w, out, nil)
+}
+
 func (a *App) handleBookingTypes(w http.ResponseWriter, r *http.Request) {
 	args, err := argsFromRequest(r)
 	if err != nil {
@@ -1532,8 +1555,8 @@ func defaultAvailabilityJSON() string {
 }
 
 func publicBase(ctx *sdk.AppCtx) string {
-	if ctx != nil && ctx.PlatformAPI() != nil {
-		if info, err := ctx.PlatformAPI().WhoAmI(); err == nil && info != nil && strings.TrimSpace(info.PublicURL) != "" {
+	if ctx != nil {
+		if info, err := ctx.PlatformInfo(); err == nil && info != nil && strings.TrimSpace(info.PublicURL) != "" {
 			return strings.TrimRight(info.PublicURL, "/") + "/api/apps/bookings"
 		}
 	}
