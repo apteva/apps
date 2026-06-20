@@ -129,7 +129,7 @@ func (a *App) handleTwilioMediaStream(w http.ResponseWriter, r *http.Request) {
 	go func() {
 		defer cancel()
 		for {
-			data, op, err := wsutil.ReadServerData(tw)
+			data, op, err := wsutil.ReadClientData(tw)
 			if err != nil {
 				return
 			}

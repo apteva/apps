@@ -2,12 +2,12 @@ schema: apteva-app/v1
 
 name: telephony
 display_name: Telephony
-version: 0.1.1
+version: 0.1.2
 description: |
-  Place outbound voice calls via Twilio. Each call runs as a realtime
+  Place outbound voice calls via programmable carriers. Each call runs as a realtime
   sub-thread in core that the agent controls via send/done — the same
-  shape as text workers, with carrier audio bridged through Twilio
-  Media Streams. Audio I/O stays in this sidecar; conversation state
+  shape as text workers, with carrier audio bridged through a provider
+  media stream. Audio I/O stays in this sidecar; conversation state
   lives in the realtime thread; tool decisions stay with the parent
   agent.
 
@@ -22,13 +22,13 @@ min_apteva_version: "0.11.0"
 requires:
   permissions:
     - db.write.app
-    - platform.connections.execute        # invoke Twilio API
-    - platform.connections.read_credentials  # read carrier phone_number to fill make_call's From=
+    - platform.connections.execute        # invoke carrier API
+    - platform.connections.read_credentials  # read carrier phone_number to fill From=
     - platform.realtime.spawn             # open realtime threads in core
   integrations:
     - role: carrier
       kind: integration
-      compatible_slugs: [twilio]
+      compatible_slugs: [twilio, telnyx, plivo, signalwire, vonage]
       capabilities: [voice.place, voice.update]
       tools:
         voice.place:  make_call
@@ -39,8 +39,8 @@ requires:
         - call.completed
         - call.failed
       required: true
-      label: "Twilio carrier"
-      hint: "Provide a Twilio connection with a voice-capable phone number. The number's From= value is read from the connection's phone_number field."
+      label: "Voice carrier"
+      hint: "Provide a Twilio, Telnyx, Plivo, SignalWire, or Vonage connection with a voice-capable phone number. The From= value is read from the connection's phone_number field."
 
 provides:
   http_routes:

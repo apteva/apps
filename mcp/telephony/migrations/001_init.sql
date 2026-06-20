@@ -1,7 +1,7 @@
 CREATE TABLE IF NOT EXISTS calls (
     id              TEXT PRIMARY KEY,
     thread_id       TEXT NOT NULL UNIQUE,
-    carrier_sid     TEXT,                       -- Twilio CallSid; nullable until make_call returns
+    carrier_sid     TEXT,                       -- Provider call id; nullable until make_call returns
     to_number       TEXT NOT NULL,
     from_number     TEXT NOT NULL,
     directive       TEXT NOT NULL,

@@ -1,17 +1,18 @@
-// Telephony v0.1 — outbound voice calls via Twilio, bridged to apteva
+// Telephony v0.1 — outbound voice calls bridged to apteva
 // realtime threads.
 //
 // Architecture:
 //   - Manifest declares one integration dep: carrier (required,
-//     kind=integration, compatible_slugs=[twilio]).
+//     kind=integration, compatible_slugs=[twilio, telnyx, plivo,
+//     signalwire, vonage]).
 //   - Agent invokes telephony_place_call(to, directive). The app:
-//     1. Reads the Twilio connection's phone_number (From=).
+//     1. Reads the carrier connection's phone_number (From=).
 //     2. Spawns a realtime thread in core via SDK
 //     (platform.realtime.spawn), getting back an audio bridge URL.
-//     3. Calls Twilio make_call with inline TwiML pointing
-//     <Connect><Stream/> at this app's /media/twilio/{call_id}.
-//   - When Twilio dials the callee and opens its Media Streams WS to
-//     our /media endpoint, bridge_twilio.go transcodes μ-law↔PCM16
+//     3. Calls the carrier API with a media stream pointing at this
+//     app's provider-specific /media/{carrier}/{call_id}.
+//   - When the carrier dials the callee and opens its media WS to our
+//     /media endpoint, the bridge transcodes/resamples carrier audio
 //     and pipes frames to/from core's audio WS.
 //   - Status callbacks (/webhook/status/{call_id}) update DB rows and
 //     kill the realtime thread on terminal carrier states.
@@ -40,9 +41,9 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: telephony
 display_name: Telephony
-version: 0.1.1
+version: 0.1.2
 description: |
-  Place outbound voice calls via Twilio. Each call runs as a realtime
+  Place outbound voice calls via programmable carriers. Each call runs as a realtime
   sub-thread in core; carrier audio is bridged through this sidecar.
 author: Apteva
 icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/telephony/icon.svg
@@ -57,7 +58,7 @@ requires:
   integrations:
     - role: carrier
       kind: integration
-      compatible_slugs: [twilio]
+      compatible_slugs: [twilio, telnyx, plivo, signalwire, vonage]
       capabilities: [voice.place, voice.update]
       tools:
         voice.place:  make_call
@@ -68,7 +69,7 @@ requires:
         - call.completed
         - call.failed
       required: true
-      label: "Twilio carrier"
+      label: "Voice carrier"
 provides:
   http_routes:
     - prefix: /
@@ -128,9 +129,15 @@ func (a *App) EventHandlers() []sdk.EventHandler { return nil }
 
 func (a *App) HTTPRoutes() []sdk.Route {
 	return []sdk.Route{
-		// Twilio Media Streams WS — opened by Twilio when the call connects.
+		// Carrier media stream WS — opened by the carrier when the call connects.
 		{Pattern: "/media/twilio/", Handler: a.handleTwilioMediaStream},
-		// Twilio status callbacks (initiated, ringing, in-progress, completed, ...).
+		{Pattern: "/media/signalwire/", Handler: a.handleSignalWireMediaStream},
+		{Pattern: "/media/telnyx/", Handler: a.handleTelnyxMediaStream},
+		{Pattern: "/media/plivo/", Handler: a.handlePlivoMediaStream},
+		{Pattern: "/media/vonage/", Handler: a.handleVonageMediaStream},
+		// Plivo fetches XML call control from an answer_url.
+		{Pattern: "/xml/plivo/", Handler: a.handlePlivoXML},
+		// Carrier status callbacks (initiated, ringing, in-progress, completed, ...).
 		{Pattern: "/webhook/status/", Handler: a.handleStatusCallback},
 		// Panel data endpoint — lists active + recent calls.
 		{Pattern: "/calls", Handler: a.handleListCalls},
@@ -145,7 +152,7 @@ func (a *App) MCPTools() []sdk.Tool {
 	return []sdk.Tool{
 		{
 			Name: "telephony_place_call",
-			Description: "Place an outbound voice call via Twilio. The conversation runs in a realtime sub-thread you can reach via send(id=<thread_id>, text=...) for live guidance. The thread escalates via send(id='main', ...) and reports completion via [thread:<thread_id> done]. " +
+			Description: "Place an outbound voice call via the bound carrier. The conversation runs in a realtime sub-thread you can reach via send(id=<thread_id>, text=...) for live guidance. The thread escalates via send(id='main', ...) and reports completion via [thread:<thread_id> done]. " +
 				"Args: to (E.164 phone number, required), directive (system instructions for the call, required), voice? (alloy/echo/fable/onyx/nova/shimmer, default alloy), timeout_sec? (ring timeout, default 30). " +
 				"Returns: { call_id, thread_id }. Use send/done events to monitor — do not poll telephony_active_calls in a tight loop.",
 			InputSchema: schemaObject(map[string]any{
@@ -161,7 +168,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "telephony_hangup",
-			Description: "End an active call. Args: call_id (required). Updates Twilio to mark the call completed and kills the underlying realtime thread.",
+			Description: "End an active call. Args: call_id (required). Hangs up the carrier call and kills the underlying realtime thread.",
 			InputSchema: schemaObject(map[string]any{
 				"call_id": map[string]any{"type": "string", "description": "Call id returned by telephony_place_call."},
 			}, []string{"call_id"}),
@@ -206,10 +213,10 @@ func (a *App) toolPlaceCall(callerCtx context.Context, ctx *sdk.AppCtx, args map
 
 	bound := ctx.IntegrationFor("carrier")
 	if bound == nil {
-		return mcpError("no carrier bound — pick Twilio in app settings"), nil
+		return mcpError("no carrier bound — pick Twilio, Telnyx, Plivo, SignalWire, or Vonage in app settings"), nil
 	}
 
-	// Read the Twilio connection's phone_number for the From= field.
+	// Read the carrier connection's phone_number for the From= field.
 	// The credentials endpoint is permission-gated server-side; the
 	// manifest declares platform.connections.read_credentials.
 	creds, err := ctx.PlatformAPI().GetConnectionCredentials(bound.ConnectionID)
@@ -225,7 +232,7 @@ func (a *App) toolPlaceCall(callerCtx context.Context, ctx *sdk.AppCtx, args map
 	threadID := "tel-" + callID
 
 	// 1. Spawn the realtime thread in core. The audio bridge URL it
-	//    returns is what Twilio's Media Stream will (indirectly) feed.
+	//    returns is what the carrier media stream will feed.
 	rt, err := ctx.PlatformAPI().SpawnRealtimeThread(sdk.RealtimeSpawnRequest{
 		AgentID:   agentID,
 		ThreadID:  threadID,
@@ -240,60 +247,50 @@ func (a *App) toolPlaceCall(callerCtx context.Context, ctx *sdk.AppCtx, args map
 		return mcpError("realtime spawn returned no audio bridge URL"), nil
 	}
 
-	// 2. Build inline TwiML that opens a Media Stream pointed at this
-	//    app's /media/twilio/{call_id}. The status callback URL on
-	//    the same app receives initiated/ringing/completed pings.
-	streamURL := a.publicWSStreamURL(callID)
-	twiml := fmt.Sprintf(`<Response><Connect><Stream url="%s"/></Connect></Response>`, streamURL)
-	statusCB := a.publicAppURL() + "/webhook/status/" + callID
-
-	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(
-		bound.ConnectionID,
-		bound.ToolFor("voice.place"),
-		map[string]any{
-			"To":             to,
-			"From":           from,
-			"Twiml":          twiml,
-			"StatusCallback": statusCB,
-			"Timeout":        timeout,
-		},
-	)
-	if err != nil || res == nil || !res.Success {
+	carrier, err := a.carrierFor(bound, creds.Slug, creds.Fields)
+	if err != nil {
 		_ = ctx.PlatformAPI().KillThread(threadID)
-		body := ""
-		if res != nil {
-			body = string(res.Data)
-		}
-		if err != nil {
-			body = err.Error() + " " + body
-		}
-		return mcpError("twilio make_call failed: " + body), nil
+		return mcpError(err.Error()), nil
 	}
 
-	// Extract Twilio CallSid from the response. Best-effort — the call
-	// is already placed; missing SID means we can't hang up via the
-	// app, but the call itself proceeds.
-	var twResp struct {
-		SID string `json:"sid"`
-	}
-	_ = json.Unmarshal(res.Data, &twResp)
-
-	// 3. Persist mapping. Connect the Twilio Media Stream handler
-	//    (when Twilio dials in) with the audio bridge URL on core.
+	// Persist before placing the carrier call: Telnyx/Plivo/Vonage can
+	// connect their media WebSocket immediately after the API accepts
+	// the call, so the bridge route must already be able to resolve
+	// callID -> audio_bridge_url.
 	if err := a.db().insertCall(callRow{
-		ID:             callID,
-		ThreadID:       threadID,
-		CarrierSID:     twResp.SID,
-		ToNumber:       to,
-		FromNumber:     from,
-		Directive:      directive,
-		Voice:          voice,
-		AudioBridgeURL: rt.AudioBridgeURL,
-		Status:         "initiated",
-		PlacedAt:       time.Now().UTC().Format(time.RFC3339),
-		ProjectID:      currentProject(ctx),
+		ID:                  callID,
+		ThreadID:            threadID,
+		CarrierSlug:         carrier.Slug(),
+		CarrierConnectionID: bound.ConnectionID,
+		ToNumber:            to,
+		FromNumber:          from,
+		Directive:           directive,
+		Voice:               voice,
+		AudioBridgeURL:      rt.AudioBridgeURL,
+		Status:              "initiated",
+		PlacedAt:            time.Now().UTC().Format(time.RFC3339),
+		ProjectID:           currentProject(ctx),
 	}); err != nil {
-		ctx.Logger().Warn("persist call failed (proceeding)", "err", err)
+		_ = ctx.PlatformAPI().KillThread(threadID)
+		return mcpError("persist call before carrier placement: " + err.Error()), nil
+	}
+
+	placed, err := carrier.Place(ctx, carrierPlaceRequest{
+		CallID:         callID,
+		To:             to,
+		From:           from,
+		TimeoutSec:     timeout,
+		AudioBridgeURL: rt.AudioBridgeURL,
+	})
+	if err != nil {
+		_ = a.db().updateStatus(callID, "failed", err.Error())
+		_ = ctx.PlatformAPI().KillThread(threadID)
+		return mcpError(err.Error()), nil
+	}
+	if placed != nil && placed.CarrierSID != "" {
+		if err := a.db().updateCarrierSID(callID, placed.CarrierSID); err != nil {
+			ctx.Logger().Warn("persist carrier call id failed (proceeding)", "err", err)
+		}
 	}
 
 	return map[string]any{
@@ -332,16 +329,11 @@ func (a *App) hangupCall(ctx *sdk.AppCtx, callID string) string {
 		return "no carrier bound"
 	}
 	if row.CarrierSID != "" {
-		_, err := ctx.PlatformAPI().ExecuteIntegrationTool(
-			bound.ConnectionID,
-			bound.ToolFor("voice.update"),
-			map[string]any{
-				"CallSid": row.CarrierSID,
-				"Status":  "completed",
-			},
-		)
+		carrier, err := a.carrierForRow(ctx, bound, row)
 		if err != nil {
-			ctx.Logger().Warn("twilio update_call hangup failed (still killing thread)", "err", err)
+			ctx.Logger().Warn("resolve carrier hangup adapter failed (still killing thread)", "err", err)
+		} else if err := carrier.Hangup(ctx, row); err != nil {
+			ctx.Logger().Warn("carrier hangup failed (still killing thread)", "err", err)
 		}
 	}
 	if err := ctx.PlatformAPI().KillThread(row.ThreadID); err != nil {
@@ -364,6 +356,7 @@ func (a *App) toolActiveCalls(ctx *sdk.AppCtx, _ map[string]any) (any, error) {
 		out = append(out, map[string]any{
 			"call_id":   r.ID,
 			"thread_id": r.ThreadID,
+			"carrier":   r.CarrierSlug,
 			"to":        r.ToNumber,
 			"status":    r.Status,
 			"placed_at": r.PlacedAt,
@@ -382,12 +375,9 @@ func (a *App) handleStatusCallback(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "missing call_id", http.StatusBadRequest)
 		return
 	}
-	status := r.FormValue("CallStatus")
-	if status == "" {
-		status = r.URL.Query().Get("CallStatus")
-	}
+	status, errMsg := callbackStatus(r)
 	if status != "" {
-		_ = a.db().updateStatus(callID, status, r.FormValue("ErrorMessage"))
+		_ = a.db().updateStatus(callID, status, errMsg)
 	}
 	switch status {
 	case "completed", "failed", "no-answer", "busy", "canceled":
@@ -462,16 +452,15 @@ func (a *App) publicAppURL() string {
 	return base + "/api/apps/telephony"
 }
 
-// publicWSStreamURL builds the wss:// URL Twilio dials for Media
-// Streams. Twilio requires wss (TLS); a public_url over plain http
-// won't work with a real Twilio account but is fine for local mock
-// testing.
-func (a *App) publicWSStreamURL(callID string) string {
+// publicWSStreamURL builds the wss:// URL a carrier dials for Media
+// Streams. Real carriers require wss (TLS); a public_url over plain
+// http is only useful for local mock testing.
+func (a *App) publicWSStreamURL(provider, callID string) string {
 	base := a.publicAppURL()
 	if strings.HasPrefix(base, "https://") {
-		return "wss://" + strings.TrimPrefix(base, "https://") + "/media/twilio/" + callID
+		return "wss://" + strings.TrimPrefix(base, "https://") + "/media/" + provider + "/" + callID
 	}
-	return "ws://" + strings.TrimPrefix(base, "http://") + "/media/twilio/" + callID
+	return "ws://" + strings.TrimPrefix(base, "http://") + "/media/" + provider + "/" + callID
 }
 
 func currentProject(ctx *sdk.AppCtx) string {
@@ -495,6 +484,70 @@ func callDuration(r callRow) string {
 func writeJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+func callbackStatus(r *http.Request) (string, string) {
+	status := firstNonEmpty(
+		r.FormValue("CallStatus"),
+		r.FormValue("Status"),
+		r.FormValue("status"),
+		r.FormValue("Event"),
+		r.FormValue("event"),
+		r.URL.Query().Get("CallStatus"),
+		r.URL.Query().Get("Status"),
+		r.URL.Query().Get("status"),
+	)
+	errMsg := firstNonEmpty(r.FormValue("ErrorMessage"), r.FormValue("error"), r.FormValue("StatusReason"))
+	if status == "" && strings.Contains(r.Header.Get("Content-Type"), "json") {
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err == nil {
+			status = firstString(body, "CallStatus", "Status", "status", "Event", "event")
+			errMsg = firstNonEmpty(errMsg, firstString(body, "ErrorMessage", "error", "reason", "StatusReason"))
+		}
+	}
+	return normalizeCallStatus(status), errMsg
+}
+
+func normalizeCallStatus(status string) string {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "answered", "in-progress", "in_progress", "started", "ringing":
+		if strings.EqualFold(status, "started") {
+			return "in-progress"
+		}
+		return strings.ToLower(strings.TrimSpace(status))
+	case "completed", "complete", "disconnected", "stopped":
+		return "completed"
+	case "cancelled":
+		return "canceled"
+	case "unanswered", "no_answer":
+		return "no-answer"
+	case "timeout", "timed_out":
+		return "no-answer"
+	case "rejected":
+		return "failed"
+	case "busy", "failed", "canceled", "no-answer":
+		return strings.ToLower(strings.TrimSpace(status))
+	default:
+		return strings.ToLower(strings.TrimSpace(status))
+	}
+}
+
+func firstString(m map[string]any, keys ...string) string {
+	for _, key := range keys {
+		if v, ok := m[key].(string); ok && v != "" {
+			return v
+		}
+	}
+	return ""
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, v := range values {
+		if strings.TrimSpace(v) != "" {
+			return strings.TrimSpace(v)
+		}
+	}
+	return ""
 }
 
 func mcpError(msg string) map[string]any {
@@ -546,43 +599,49 @@ func randomU24() uint32 {
 // ─── DB layer ──────────────────────────────────────────────────────
 
 type callRow struct {
-	ID             string
-	ThreadID       string
-	CarrierSID     string
-	ToNumber       string
-	FromNumber     string
-	Directive      string
-	Voice          string
-	AudioBridgeURL string
-	Status         string
-	PlacedAt       string
-	AnsweredAt     string
-	EndedAt        string
-	ProjectID      string
-	ErrorMessage   string
+	ID                  string
+	ThreadID            string
+	CarrierSID          string
+	CarrierSlug         string
+	CarrierConnectionID int64
+	ToNumber            string
+	FromNumber          string
+	Directive           string
+	Voice               string
+	AudioBridgeURL      string
+	Status              string
+	PlacedAt            string
+	AnsweredAt          string
+	EndedAt             string
+	ProjectID           string
+	ErrorMessage        string
 }
 
 type callsDB struct{ db *sql.DB }
 
 func (c *callsDB) insertCall(r callRow) error {
 	_, err := c.db.Exec(`INSERT INTO calls
-        (id, thread_id, carrier_sid, to_number, from_number, directive, voice,
-         audio_bridge_url, status, placed_at, project_id)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		r.ID, r.ThreadID, r.CarrierSID, r.ToNumber, r.FromNumber, r.Directive, r.Voice,
-		r.AudioBridgeURL, r.Status, r.PlacedAt, r.ProjectID,
+        (id, thread_id, carrier_sid, carrier_slug, carrier_connection_id,
+         to_number, from_number, directive, voice, audio_bridge_url, status,
+         placed_at, project_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		r.ID, r.ThreadID, r.CarrierSID, r.CarrierSlug, r.CarrierConnectionID,
+		r.ToNumber, r.FromNumber, r.Directive, r.Voice, r.AudioBridgeURL,
+		r.Status, r.PlacedAt, r.ProjectID,
 	)
 	return err
 }
 
 func (c *callsDB) findCall(id string) (*callRow, error) {
 	row := c.db.QueryRow(`SELECT id, thread_id, COALESCE(carrier_sid,''),
+        COALESCE(carrier_slug,'twilio'), COALESCE(carrier_connection_id,0),
         to_number, from_number, directive, voice, audio_bridge_url, status,
         placed_at, COALESCE(answered_at,''), COALESCE(ended_at,''),
         project_id, COALESCE(error_message,'')
         FROM calls WHERE id = ?`, id)
 	var r callRow
 	if err := row.Scan(&r.ID, &r.ThreadID, &r.CarrierSID,
+		&r.CarrierSlug, &r.CarrierConnectionID,
 		&r.ToNumber, &r.FromNumber, &r.Directive, &r.Voice, &r.AudioBridgeURL, &r.Status,
 		&r.PlacedAt, &r.AnsweredAt, &r.EndedAt, &r.ProjectID, &r.ErrorMessage); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -606,6 +665,11 @@ func (c *callsDB) findByThreadID(threadID string) (*callRow, error) {
 		return nil, err
 	}
 	return c.findCall(id)
+}
+
+func (c *callsDB) updateCarrierSID(id, carrierSID string) error {
+	_, err := c.db.Exec(`UPDATE calls SET carrier_sid = ? WHERE id = ?`, carrierSID, id)
+	return err
 }
 
 func (c *callsDB) updateStatus(id, status, errMsg string) error {
@@ -632,6 +696,7 @@ func (c *callsDB) recent(project string, limit int) ([]callRow, error) {
 
 func (c *callsDB) listWhere(where string, argv ...any) ([]callRow, error) {
 	rows, err := c.db.Query(`SELECT id, thread_id, COALESCE(carrier_sid,''),
+        COALESCE(carrier_slug,'twilio'), COALESCE(carrier_connection_id,0),
         to_number, from_number, directive, voice, audio_bridge_url, status,
         placed_at, COALESCE(answered_at,''), COALESCE(ended_at,''),
         project_id, COALESCE(error_message,'')
@@ -644,6 +709,7 @@ func (c *callsDB) listWhere(where string, argv ...any) ([]callRow, error) {
 	for rows.Next() {
 		var r callRow
 		if err := rows.Scan(&r.ID, &r.ThreadID, &r.CarrierSID,
+			&r.CarrierSlug, &r.CarrierConnectionID,
 			&r.ToNumber, &r.FromNumber, &r.Directive, &r.Voice, &r.AudioBridgeURL, &r.Status,
 			&r.PlacedAt, &r.AnsweredAt, &r.EndedAt, &r.ProjectID, &r.ErrorMessage); err != nil {
 			return nil, err
