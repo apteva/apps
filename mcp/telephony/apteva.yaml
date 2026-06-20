@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: telephony
 display_name: Telephony
-version: 0.1.0
+version: 0.1.1
 description: |
   Place outbound voice calls via Twilio. Each call runs as a realtime
   sub-thread in core that the agent controls via send/done — the same
@@ -13,6 +13,7 @@ description: |
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/telephony
+icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/telephony/icon.svg
 tags: [voice, telephony, communication]
 
 scopes: [project, global]

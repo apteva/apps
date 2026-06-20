@@ -5,11 +5,11 @@
 //   - Manifest declares one integration dep: carrier (required,
 //     kind=integration, compatible_slugs=[twilio]).
 //   - Agent invokes telephony_place_call(to, directive). The app:
-//       1. Reads the Twilio connection's phone_number (From=).
-//       2. Spawns a realtime thread in core via SDK
-//          (platform.realtime.spawn), getting back an audio bridge URL.
-//       3. Calls Twilio make_call with inline TwiML pointing
-//          <Connect><Stream/> at this app's /media/twilio/{call_id}.
+//     1. Reads the Twilio connection's phone_number (From=).
+//     2. Spawns a realtime thread in core via SDK
+//     (platform.realtime.spawn), getting back an audio bridge URL.
+//     3. Calls Twilio make_call with inline TwiML pointing
+//     <Connect><Stream/> at this app's /media/twilio/{call_id}.
 //   - When Twilio dials the callee and opens its Media Streams WS to
 //     our /media endpoint, bridge_twilio.go transcodes μ-law↔PCM16
 //     and pipes frames to/from core's audio WS.
@@ -40,11 +40,12 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: telephony
 display_name: Telephony
-version: 0.1.0
+version: 0.1.1
 description: |
   Place outbound voice calls via Twilio. Each call runs as a realtime
   sub-thread in core; carrier audio is bridged through this sidecar.
 author: Apteva
+icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/telephony/icon.svg
 scopes: [project, global]
 min_apteva_version: "0.11.0"
 requires:
@@ -133,6 +134,8 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/webhook/status/", Handler: a.handleStatusCallback},
 		// Panel data endpoint — lists active + recent calls.
 		{Pattern: "/calls", Handler: a.handleListCalls},
+		// Panel action endpoint.
+		{Pattern: "/calls/", Handler: a.handleCallAction},
 	}
 }
 
@@ -311,14 +314,22 @@ func (a *App) toolHangup(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if callID == "" {
 		return mcpError("call_id required"), nil
 	}
+	if msg := a.hangupCall(ctx, callID); msg != "" {
+		return mcpError(msg), nil
+	}
+
+	return "ok", nil
+}
+
+func (a *App) hangupCall(ctx *sdk.AppCtx, callID string) string {
 	row, err := a.db().findCall(callID)
 	if err != nil || row == nil {
-		return mcpError("unknown call_id"), nil
+		return "unknown call_id"
 	}
 
 	bound := ctx.IntegrationFor("carrier")
 	if bound == nil {
-		return mcpError("no carrier bound"), nil
+		return "no carrier bound"
 	}
 	if row.CarrierSID != "" {
 		_, err := ctx.PlatformAPI().ExecuteIntegrationTool(
@@ -338,7 +349,7 @@ func (a *App) toolHangup(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	}
 	_ = a.db().updateStatus(callID, "completed", "")
 
-	return "ok", nil
+	return ""
 }
 
 // ─── telephony_active_calls ────────────────────────────────────────
@@ -396,6 +407,28 @@ func (a *App) handleListCalls(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, map[string]any{"calls": rows})
+}
+
+func (a *App) handleCallAction(w http.ResponseWriter, r *http.Request) {
+	parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
+	if len(parts) != 3 || parts[0] != "calls" || parts[2] != "hangup" {
+		http.NotFound(w, r)
+		return
+	}
+	if r.Method != http.MethodPost {
+		w.Header().Set("Allow", http.MethodPost)
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if globalCtx == nil {
+		http.Error(w, "app context unavailable", http.StatusServiceUnavailable)
+		return
+	}
+	if msg := a.hangupCall(globalCtx, parts[1]); msg != "" {
+		http.Error(w, msg, http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, map[string]any{"ok": true})
 }
 
 // ─── helpers ───────────────────────────────────────────────────────
