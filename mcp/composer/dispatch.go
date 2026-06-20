@@ -25,6 +25,16 @@ func projectScope(ctx *sdk.AppCtx) string {
 	return strings.TrimSpace(os.Getenv("APTEVA_PROJECT_ID"))
 }
 
+func projectScopeFromArgs(ctx *sdk.AppCtx, args map[string]any) string {
+	if pid := strings.TrimSpace(strArg(args, "project_id", "")); pid != "" {
+		return pid
+	}
+	if pid := strings.TrimSpace(strArg(args, "_project_id", "")); pid != "" {
+		return pid
+	}
+	return projectScope(ctx)
+}
+
 // --- composition CRUD ---------------------------------------------
 
 func (a *App) toolCompositionCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -39,7 +49,7 @@ func (a *App) toolCompositionCreate(ctx *sdk.AppCtx, args map[string]any) (any, 
 	resolveRelativeClipStarts(edit)
 	editJSON, _ := json.Marshal(edit)
 	outputJSON, _ := json.Marshal(output)
-	pid := projectScope(ctx)
+	pid := projectScopeFromArgs(ctx, args)
 	dur := editDurationSeconds(edit)
 	name := strArg(args, "name", "")
 
@@ -162,7 +172,7 @@ func (a *App) toolCompositionGet(ctx *sdk.AppCtx, args map[string]any) (any, err
 }
 
 func (a *App) toolCompositionList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	pid := projectScope(ctx)
+	pid := projectScopeFromArgs(ctx, args)
 	limit := intArg(args, "limit", 50)
 	if limit > 200 {
 		limit = 200
@@ -174,7 +184,6 @@ func (a *App) toolCompositionList(ctx *sdk.AppCtx, args map[string]any) (any, er
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
 	out := []map[string]any{}
 	for rows.Next() {
 		var (
@@ -194,8 +203,17 @@ func (a *App) toolCompositionList(ctx *sdk.AppCtx, args map[string]any) (any, er
 			"duration_seconds": dur,
 			"created_at":       createdAt,
 			"updated_at":       updatedAt,
-			"latest_render":    loadLatestRender(ctx, id),
 		})
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	for _, item := range out {
+		id, _ := item["id"].(int64)
+		item["latest_render"] = loadLatestRender(ctx, id)
 	}
 	return map[string]any{"compositions": out}, nil
 }
@@ -556,7 +574,7 @@ func (a *App) handleStorageAssets(w http.ResponseWriter, r *http.Request) {
 		"folder":      folder,
 		"recursive":   recursive,
 		"limit":       limit,
-		"_project_id": projectScope(globalCtx),
+		"_project_id": projectScopeFromArgs(globalCtx, map[string]any{"project_id": r.URL.Query().Get("project_id")}),
 	}
 	var got map[string]any
 	if err := globalCtx.PlatformAPI().CallAppResult("storage", "files_list", args, &got); err != nil {
@@ -591,7 +609,10 @@ func (a *App) handleListCompositions(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "app not mounted", http.StatusServiceUnavailable)
 		return
 	}
-	out, err := a.toolCompositionList(globalCtx, map[string]any{"limit": 200})
+	out, err := a.toolCompositionList(globalCtx, map[string]any{
+		"limit":      200,
+		"project_id": r.URL.Query().Get("project_id"),
+	})
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -611,6 +632,9 @@ func (a *App) handleCompositionByID(w http.ResponseWriter, r *http.Request) {
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
+		}
+		if body["project_id"] == nil {
+			body["project_id"] = r.URL.Query().Get("project_id")
 		}
 		out, err := a.toolCompositionCreate(globalCtx, body)
 		if err != nil {
@@ -712,10 +736,11 @@ func (a *App) handleBindings(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "app not mounted", http.StatusServiceUnavailable)
 		return
 	}
+	pid := projectScopeFromArgs(globalCtx, map[string]any{"project_id": r.URL.Query().Get("project_id")})
 	out := map[string]any{
-		"storage_bound":     appToolAvailable(globalCtx, "storage", "files_list", map[string]any{"limit": 1, "_project_id": projectScope(globalCtx)}),
+		"storage_bound":     appToolAvailable(globalCtx, "storage", "files_list", map[string]any{"limit": 1, "_project_id": pid}),
 		"instances_bound":   globalCtx.IntegrationFor("instances") != nil,
-		"mediastudio_bound": appToolAvailable(globalCtx, "media-studio", "media_history", map[string]any{"limit": 1, "_project_id": projectScope(globalCtx)}),
+		"mediastudio_bound": appToolAvailable(globalCtx, "media-studio", "media_history", map[string]any{"limit": 1, "_project_id": pid}),
 		"render_host_id":    renderHostID(),
 		"ffmpeg_path":       ffmpegPath(),
 	}

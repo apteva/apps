@@ -1,4 +1,4 @@
-// ComposerPanel v0.3.11 - timeline editor with storage and Media Studio AI assets.
+// ComposerPanel v0.3.14 - timeline editor with storage and Media Studio AI assets.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
@@ -10,6 +10,12 @@ interface NativePanelProps {
 }
 
 const API = "/api/apps/composer";
+
+function withProject(path: string, projectId: string): string {
+  if (!projectId) return path;
+  const sep = path.includes("?") ? "&" : "?";
+  return `${path}${sep}project_id=${encodeURIComponent(projectId)}`;
+}
 
 interface Composition {
   id: number;
@@ -732,7 +738,7 @@ export default function ComposerPanel({ projectId }: NativePanelProps) {
 
   const load = useCallback(async () => {
     try {
-      const res = await fetch(`${API}/compositions`, { credentials: "same-origin" });
+      const res = await fetch(withProject(`${API}/compositions`, projectId), { credentials: "same-origin" });
       if (!res.ok) {
         setStatus(`Error: ${res.status}`);
         return;
@@ -742,11 +748,11 @@ export default function ComposerPanel({ projectId }: NativePanelProps) {
     } catch (e) {
       setStatus("Error: " + (e as Error).message);
     }
-  }, []);
+  }, [projectId]);
 
   useEffect(() => {
     load();
-    fetch(`${API}/bindings`, { credentials: "same-origin" })
+    fetch(withProject(`${API}/bindings`, projectId), { credentials: "same-origin" })
       .then((r) => (r.ok ? r.json() : null))
       .then((d) => d && setBindings(d))
       .catch(() => {});
@@ -788,7 +794,7 @@ export default function ComposerPanel({ projectId }: NativePanelProps) {
         setResolved((prev) => ({ ...prev, [src]: { src, url: src, kind: src.match(/\.(png|jpe?g|webp|gif)(\?|$)/i) ? "image" : "video" } }));
         continue;
       }
-      fetch(`${API}/assets/resolve?src=${encodeURIComponent(src)}`, { credentials: "same-origin" })
+      fetch(withProject(`${API}/assets/resolve?src=${encodeURIComponent(src)}`, projectId), { credentials: "same-origin" })
         .then((r) => (r.ok ? r.json() : null))
         .then((asset) => {
           if (!asset?.url) return;
@@ -796,7 +802,7 @@ export default function ComposerPanel({ projectId }: NativePanelProps) {
         })
         .catch(() => {});
     }
-  }, [clips, audioClips, draft.soundtrack?.src, resolved]);
+  }, [clips, audioClips, draft.soundtrack?.src, resolved, projectId]);
 
   const updateDraft = (fn: (draft: DraftState) => DraftState) => {
     setDraft((cur) => {
@@ -971,7 +977,7 @@ export default function ComposerPanel({ projectId }: NativePanelProps) {
         setStatus("Add at least one track before saving.");
         return;
       }
-      const url = selectedId == null ? `${API}/composition/new` : `${API}/composition/${selectedId}`;
+      const url = withProject(selectedId == null ? `${API}/composition/new` : `${API}/composition/${selectedId}`, projectId);
       const method = selectedId == null ? "POST" : "PUT";
       const res = await fetch(url, {
         method,
@@ -1033,7 +1039,7 @@ export default function ComposerPanel({ projectId }: NativePanelProps) {
     try {
       const body: Record<string, unknown> = { id: selectedId };
       if (executor !== "auto") body.executor = executor;
-      const res = await fetch(`${API}/render`, {
+      const res = await fetch(withProject(`${API}/render`, projectId), {
         method: "POST",
         credentials: "same-origin",
         headers: { "Content-Type": "application/json" },
@@ -1064,7 +1070,7 @@ export default function ComposerPanel({ projectId }: NativePanelProps) {
   const deleteSelected = async () => {
     if (selectedId == null) return;
     if (!confirm(`Delete composition #${selectedId}?`)) return;
-    await fetch(`${API}/composition/${selectedId}`, { method: "DELETE", credentials: "same-origin" });
+    await fetch(withProject(`${API}/composition/${selectedId}`, projectId), { method: "DELETE", credentials: "same-origin" });
     setSelectedId(null);
     await load();
   };
@@ -1086,7 +1092,7 @@ export default function ComposerPanel({ projectId }: NativePanelProps) {
     setPickerTarget(target);
     setStorageLoading(true);
     setStorageError("");
-    fetch(`${API}/assets/storage?folder=/&recursive=true&limit=200`, { credentials: "same-origin" })
+    fetch(withProject(`${API}/assets/storage?folder=/&recursive=true&limit=200`, projectId), { credentials: "same-origin" })
       .then(async (res) => {
         if (!res.ok) throw new Error(`${res.status}: ${await res.text().catch(() => "")}`);
         return res.json();
