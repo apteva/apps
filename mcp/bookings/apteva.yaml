@@ -1,0 +1,116 @@
+schema: apteva-app/v1
+
+name: bookings
+display_name: Bookings
+version: 0.1.0
+description: |
+  Calendly-style booking links for human and AI-agent meetings. Booking
+  types define availability, duration, intake fields, routing target,
+  and meeting location. Bookings reads free slots from Calendar, creates
+  the booked Calendar event, optionally creates a Calls room, and can
+  attach invitees and booking activity to CRM.
+
+author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/bookings
+icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/bookings/icon.svg
+tags: [bookings, scheduling, calendar, meetings, agents]
+
+scopes: [project, global]
+min_apteva_version: "0.10.0"
+
+requires:
+  permissions:
+    - db.write.app
+    - platform.apps.call
+  integrations:
+    - role: calendar
+      kind: app
+      compatible_app_names: [calendar]
+      capabilities: [calendar.read, calendar.write]
+      required: true
+      label: "Calendar"
+      hint: "Bookings reads availability and writes confirmed meetings to Calendar."
+    - role: calls
+      kind: app
+      compatible_app_names: [calls]
+      capabilities: [calls.room]
+      required: false
+      label: "Calls"
+      hint: "When enabled on a booking type, Bookings creates a Calls room and guest/host join links."
+    - role: crm
+      kind: app
+      compatible_app_names: [crm]
+      capabilities: [contact.read, contact.write]
+      required: false
+      label: "CRM"
+      hint: "When enabled on a booking type, invitees are upserted as contacts and booking activity is logged."
+    - role: jobs
+      kind: app
+      compatible_app_names: [jobs]
+      capabilities: [jobs.schedule]
+      required: false
+      label: "Jobs"
+      hint: "Reserved for reminders and follow-up automation."
+    - role: messaging
+      kind: app
+      compatible_app_names: [messaging]
+      capabilities: [message.send]
+      required: false
+      label: "Messaging"
+      hint: "Reserved for confirmations, reminders, and follow-ups."
+
+provides:
+  http_routes:
+    - prefix: /
+  mcp_tools:
+    - name: booking_types_list
+      description: List active booking types in the project.
+    - name: booking_types_get
+      description: Fetch one booking type by id or slug.
+    - name: booking_types_create
+      description: Create a booking type. Defines duration, calendars, target, Calls/CRM behavior, availability rules, and intake schema.
+    - name: booking_types_update
+      description: Patch a booking type.
+    - name: booking_types_archive
+      description: Archive a booking type.
+    - name: bookings_find_slots
+      description: Find slots for a booking type by applying its rules over Calendar availability.
+    - name: bookings_create
+      description: Create a booking and mirror it into Calendar; optionally creates Calls room and CRM contact/activity.
+    - name: bookings_get
+      description: Fetch one booking.
+    - name: bookings_list
+      description: List bookings by status, booking type, or time window.
+    - name: bookings_reschedule
+      description: Reschedule a booking and update the linked Calendar event.
+    - name: bookings_cancel
+      description: Cancel a booking and delete the linked Calendar event.
+    - name: bookings_mark_completed
+      description: Mark a booking completed.
+    - name: bookings_mark_no_show
+      description: Mark a booking no-show.
+    - name: bookings_public_link
+      description: Return the public booking link for a booking type.
+    - name: bookings_prepare_agent_context
+      description: Return booking, booking type, optional CRM context, and Calls details for an AI agent.
+  ui_panels:
+    - slot: project.page
+      label: Bookings
+      icon: calendar-plus
+      entry: /ui/BookingsPanel.mjs
+
+runtime:
+  kind: source
+  source:
+    repo: github.com/apteva/apps
+    ref: main
+    entry: mcp/bookings
+  port: 8080
+  health_check: /health
+
+db:
+  driver: sqlite
+  path: /data/bookings.db
+  migrations: migrations/
+
+upgrade_policy: auto-patch
