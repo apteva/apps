@@ -109,6 +109,29 @@ func TestValidateEdit_RejectsSoundtrackBadVolume(t *testing.T) {
 	}
 }
 
+func TestAssetSearchMatching(t *testing.T) {
+	file := storageListFile{
+		ID:          185,
+		Name:        "sfx-hands10.mp3",
+		Folder:      "/.composer/sfx/",
+		ContentType: "audio/mpeg",
+		Source:      "human",
+		Tags:        []string{"composer", "sfx", "snap", "fiftysounds"},
+	}
+	if !assetMatchesSearch(file, "snap", "audio", []string{"sfx"}) {
+		t.Fatal("expected snap SFX audio asset to match")
+	}
+	if assetMatchesSearch(file, "", "image", nil) {
+		t.Fatal("audio asset should not match image kind")
+	}
+	if assetMatchesSearch(file, "", "audio", []string{"ambience"}) {
+		t.Fatal("missing tag should not match")
+	}
+	if got := kindFromStorageFile(file); got != "audio" {
+		t.Fatalf("kind = %q, want audio", got)
+	}
+}
+
 // --- duration sum ------------------------------------------------
 
 func TestEditDuration_Sum(t *testing.T) {

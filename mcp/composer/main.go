@@ -27,7 +27,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: composer
 display_name: Composer
-version: 0.3.18
+version: 0.3.19
 description: |
   Multi-clip video compositions with a structured timeline panel,
   universal generated-asset clip editing, first-class AI avatar clips,
@@ -72,6 +72,7 @@ provides:
     - { name: composition_render }
     - { name: render_status }
     - { name: asset_inspect }
+    - { name: asset_search }
   ui_panels:
     - slot: project.page
       label: Composer
@@ -186,6 +187,28 @@ func int64Arg(m map[string]any, key string, def int64) int64 {
 		return v
 	}
 	return def
+}
+
+func boolArg(m map[string]any, key string, def bool) bool {
+	if v, ok := m[key].(bool); ok {
+		return v
+	}
+	return def
+}
+
+func strArrayArg(m map[string]any, key string) []string {
+	out := []string{}
+	switch arr := m[key].(type) {
+	case []any:
+		for _, v := range arr {
+			if s, ok := v.(string); ok {
+				out = append(out, s)
+			}
+		}
+	case []string:
+		out = append(out, arr...)
+	}
+	return out
 }
 
 // quiet "imported and not used"

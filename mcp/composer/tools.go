@@ -87,6 +87,20 @@ func (a *App) MCPTools() []sdk.Tool {
 			}, []string{"src"}),
 			Handler: a.toolAssetInspect,
 		},
+		{
+			Name:        "asset_search",
+			Description: "Search reusable Storage assets for composition. Args: q?, kind? ('audio'|'image'|'video'), tags? ([]), folder? (default '/'), recursive? (default true), limit? (default 50), inspect? (probe duration/codec). Returns assets with composition-ready src values like storage:N.",
+			InputSchema: schemaObject(map[string]any{
+				"q":         map[string]any{"type": "string"},
+				"kind":      map[string]any{"type": "string", "enum": []string{"audio", "image", "video"}},
+				"tags":      map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+				"folder":    map[string]any{"type": "string", "default": "/"},
+				"recursive": map[string]any{"type": "boolean", "default": true},
+				"limit":     map[string]any{"type": "integer", "default": 50},
+				"inspect":   map[string]any{"type": "boolean", "default": false},
+			}, nil),
+			Handler: a.toolAssetSearch,
+		},
 	}
 }
 
