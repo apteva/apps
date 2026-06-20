@@ -1,4 +1,4 @@
-// ComposerPanel v0.3.15 - timeline editor with storage and Media Studio AI assets.
+// ComposerPanel v0.3.16 - timeline editor with storage and Media Studio AI assets.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
@@ -1683,9 +1683,9 @@ function Timeline({
 }) {
   const hasAny = clips.length > 0 || audioClips.length > 0;
   const hasVisual = clips.length > 0;
-  const timelineHeight = hasVisual ? "min-h-48" : "min-h-32";
-  const audioLabelTop = hasVisual ? "top-28" : "top-3";
-  const audioTrackTop = hasVisual ? "top-32" : "top-8";
+  const timelineHeight = hasVisual ? 192 : 128;
+  const audioLabelTop = hasVisual ? 112 : 12;
+  const audioTrackTop = hasVisual ? 128 : 32;
   return (
     <section className="border border-border rounded bg-bg-card overflow-hidden">
       <header className="px-3 py-2 border-b border-border flex items-center gap-2 flex-wrap">
@@ -1720,7 +1720,8 @@ function Timeline({
               const rect = e.currentTarget.getBoundingClientRect();
               onSeek(((e.clientX - rect.left) / rect.width) * duration);
             }}
-            className={`relative w-full ${timelineHeight} border border-border rounded bg-bg text-left overflow-hidden`}
+            className="relative w-full border border-border rounded bg-bg text-left overflow-hidden"
+            style={{ minHeight: timelineHeight }}
           >
             <div
               className="absolute top-0 bottom-0 w-px bg-accent"
@@ -1745,8 +1746,8 @@ function Timeline({
                           onSeek(clip.start);
                           onEditVisual(clip.id);
                         }}
-                        className={`h-16 min-w-24 border text-xs flex flex-col justify-center px-2 overflow-hidden ${selected ? "border-accent bg-accent/10" : "border-border bg-bg-input hover:border-accent"}`}
-                        style={{ width: `${Math.max(10, width)}%` }}
+                        className={`h-16 border text-xs flex flex-col justify-center px-2 overflow-hidden ${selected ? "border-accent bg-accent/10" : "border-border bg-bg-input hover:border-accent"}`}
+                        style={{ width: `${Math.max(10, width)}%`, minWidth: 96 }}
                       >
                         <span className="block text-text truncate leading-5">{clip.asset.src || (clip.ai ? `AI ${clip.ai.media_kind}` : "empty source")}</span>
                         <span className="block text-text-dim truncate leading-5">{clip.ai?.status || clip.asset.type} - {clip.length.toFixed(1)}s</span>
@@ -1756,8 +1757,8 @@ function Timeline({
                 </div>
               </>
             )}
-            <div className={`absolute left-3 ${audioLabelTop} text-[10px] uppercase tracking-wide text-text-dim`}>Audio</div>
-            <div className={`absolute inset-x-3 ${audioTrackTop} h-16`}>
+            <div className="absolute left-3 text-[10px] uppercase tracking-wide text-text-dim" style={{ top: audioLabelTop }}>Audio</div>
+            <div className="absolute inset-x-3 h-16" style={{ top: audioTrackTop }}>
               {audioClips.map((clip) => {
                 const left = duration ? (clip.start / duration) * 100 : 0;
                 const width = duration ? (clip.length / duration) * 100 : 100;
@@ -1774,8 +1775,8 @@ function Timeline({
                       onSeek(clip.start);
                       onEditAudio(clip.id);
                     }}
-                    className={`absolute h-16 min-w-24 border text-xs flex flex-col justify-center px-2 overflow-hidden ${selected ? "border-accent bg-accent/10" : "border-border bg-bg-input hover:border-accent"}`}
-                    style={{ left: `${Math.max(0, left)}%`, width: `${Math.max(10, width)}%` }}
+                    className={`absolute h-16 border text-xs flex flex-col justify-center px-2 overflow-hidden ${selected ? "border-accent bg-accent/10" : "border-border bg-bg-input hover:border-accent"}`}
+                    style={{ left: `${Math.max(0, left)}%`, width: `${Math.max(6, width)}%`, minWidth: 96 }}
                   >
                     <span className="block text-text truncate leading-5">{clip.asset.type === "silence" ? "Silence" : (clip.asset.src || (clip.ai ? `AI ${clip.ai.media_kind}` : "empty audio"))}</span>
                     <span className="block text-text-dim truncate leading-5">{clip.ai?.status || clip.asset.type} - {clip.length.toFixed(1)}s @ {clip.start.toFixed(1)}s</span>
