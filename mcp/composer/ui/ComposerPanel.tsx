@@ -1,4 +1,4 @@
-// ComposerPanel v0.3.17 - timeline editor with storage and Media Studio AI assets.
+// ComposerPanel v0.3.18 - timeline editor with storage and Media Studio AI assets.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
@@ -155,6 +155,21 @@ interface StorageFile {
   folder?: string;
   content_type?: string;
   size_bytes?: number;
+}
+
+interface MediaHistoryGeneration {
+  id: number;
+  kind: string;
+  prompt: string;
+  model?: string;
+  duration_ms?: number;
+  storage_ids?: number[];
+  cache_key?: string;
+  status?: string;
+  extra_json?: string;
+  request_json?: string;
+  estimated_duration_seconds?: number;
+  actual_duration_seconds?: number;
 }
 
 type Tab = "timeline" | "json";
@@ -701,6 +716,118 @@ function aiFromMeta(ai: AIAsset, meta: any, cacheKey: string): AIAsset {
   };
 }
 
+function parseJSONRecord(raw: string | undefined): Record<string, any> {
+  if (!raw) return {};
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function storageIDFromSrc(src: string | undefined): number {
+  const match = String(src || "").trim().match(/^storage:(\d+)$/);
+  return match ? Number(match[1]) : 0;
+}
+
+function aiFromGeneration(g: MediaHistoryGeneration, storageId: number): AIAsset {
+  const extra = parseJSONRecord(g.extra_json);
+  const req = parseJSONRecord(g.request_json);
+  const opts = req.options && typeof req.options === "object" && !Array.isArray(req.options) ? req.options as Record<string, any> : {};
+  const kind = (g.kind || "audio_tts") as MediaKind;
+  const status = g.status === "complete" || g.status === "completed" ? "ready" : (g.status || "ready");
+  return {
+    media_kind: kind,
+    prompt: g.prompt || String(req.prompt || ""),
+    model: g.model || String(req.model || "") || undefined,
+    duration: Number(req.duration || Math.round((g.duration_ms || 0) / 1000)) || undefined,
+    aspect: String(extra.aspect || req.aspect || "") || undefined,
+    voice: String(extra.voice || req.voice || "") || undefined,
+    avatar: String(extra.avatar || req.avatar || "") || undefined,
+    source_image: String(extra.source_image_ref || req.source_image || "") || undefined,
+    options: Object.keys(opts).length ? opts : undefined,
+    cache_key: g.cache_key || undefined,
+    cache_policy: "reuse",
+    status: status as AIAsset["status"],
+    generation_id: Number(g.id) || undefined,
+    storage_id: storageId,
+    estimated_duration_seconds: Number(g.estimated_duration_seconds || 0) || undefined,
+    actual_duration_seconds: Number(g.actual_duration_seconds || 0) || undefined,
+    error: "",
+  };
+}
+
+function compositionNeedsAIEnrichment(c: Composition): boolean {
+  try {
+    const timeline = JSON.parse(c.edit_json || "{}").timeline || {};
+    for (const track of timeline.tracks || []) {
+      for (const clip of track.clips || []) {
+        if (!clip.ai && storageIDFromSrc(clip.asset?.src) > 0) return true;
+      }
+    }
+    if (timeline.soundtrack && !timeline.soundtrack.ai && storageIDFromSrc(timeline.soundtrack.src) > 0) return true;
+  } catch {}
+  return false;
+}
+
+function enrichEditJSONWithGenerations(editJSON: string, byStorage: Map<number, MediaHistoryGeneration>): string {
+  if (!byStorage.size) return editJSON;
+  try {
+    const edit = JSON.parse(editJSON || "{}");
+    const timeline = edit.timeline || {};
+    let changed = false;
+    for (const track of timeline.tracks || []) {
+      for (const clip of track.clips || []) {
+        if (clip.ai) continue;
+        const storageId = storageIDFromSrc(clip.asset?.src);
+        const gen = byStorage.get(storageId);
+        if (!gen) continue;
+        clip.ai = aiFromGeneration(gen, storageId);
+        clip.duration_mode = clip.duration_mode || defaultDurationMode(clip.ai.media_kind);
+        clip.estimated_length = clip.estimated_length || clip.ai.estimated_duration_seconds;
+        clip.actual_length = clip.actual_length || clip.ai.actual_duration_seconds;
+        changed = true;
+      }
+    }
+    if (timeline.soundtrack && !timeline.soundtrack.ai) {
+      const storageId = storageIDFromSrc(timeline.soundtrack.src);
+      const gen = byStorage.get(storageId);
+      if (gen) {
+        timeline.soundtrack.ai = aiFromGeneration(gen, storageId);
+        changed = true;
+      }
+    }
+    return changed ? JSON.stringify(edit) : editJSON;
+  } catch {
+    return editJSON;
+  }
+}
+
+async function enrichCompositionsWithMediaStudio(projectId: string, rows: Composition[]): Promise<Composition[]> {
+  if (!projectId || !rows.some(compositionNeedsAIEnrichment)) return rows;
+  try {
+    const url = `/api/apps/media-studio/generations?project_id=${encodeURIComponent(projectId)}&limit=200`;
+    const res = await fetch(url, { credentials: "same-origin" });
+    if (!res.ok) return rows;
+    const data = await res.json();
+    const generations: MediaHistoryGeneration[] = Array.isArray(data?.generations) ? data.generations : [];
+    const byStorage = new Map<number, MediaHistoryGeneration>();
+    for (const gen of generations) {
+      for (const id of gen.storage_ids || []) {
+        if (id > 0) byStorage.set(id, gen);
+      }
+    }
+    if (!byStorage.size) return rows;
+    return rows.map((row) => ({
+      ...row,
+      edit_json: enrichEditJSONWithGenerations(row.edit_json, byStorage),
+    }));
+  } catch {
+    return rows;
+  }
+}
+
 function fitsGenerated(mode: DurationMode | undefined): boolean {
   return mode === "fit_generated" || mode === "fit_generated_keep_start" || mode === "fit_generated_reflow";
 }
@@ -745,7 +872,8 @@ export default function ComposerPanel({ projectId }: NativePanelProps) {
         return;
       }
       const data = await res.json();
-      setCompositions(data.compositions || []);
+      const rows = await enrichCompositionsWithMediaStudio(projectId, data.compositions || []);
+      setCompositions(rows);
     } catch (e) {
       setStatus("Error: " + (e as Error).message);
     }
@@ -947,6 +1075,27 @@ export default function ComposerPanel({ projectId }: NativePanelProps) {
       ],
       output: cur.clips.length === 0 ? { ...cur.output, format: isAudioFormat(cur.output.format) ? cur.output.format : "mp3" } : cur.output,
     }));
+    setClipEditor({ kind: "audio", id });
+  };
+
+  const editGapAsSilence = (start: number, length: number) => {
+    const id = `silence-${Date.now()}`;
+    updateDraft((cur) => ({
+      ...cur,
+      audioClips: [
+        ...cur.audioClips,
+        {
+          id,
+          asset: { type: "silence", src: "" },
+          start: Number(start.toFixed(3)),
+          length: Math.max(0.1, Number(length.toFixed(3))),
+          volume: 1,
+        },
+      ],
+      output: cur.clips.length === 0 ? { ...cur.output, format: isAudioFormat(cur.output.format) ? cur.output.format : "mp3" } : cur.output,
+    }));
+    setSelectedClipId(id);
+    setPlayhead(start);
     setClipEditor({ kind: "audio", id });
   };
 
@@ -1352,9 +1501,10 @@ export default function ComposerPanel({ projectId }: NativePanelProps) {
                   zoom={timelineZoom}
                   onZoom={setTimelineZoom}
                   onSelect={setSelectedClipId}
-                  onEditVisual={(id) => setClipEditor({ kind: "visual", id })}
-                  onEditAudio={(id) => setClipEditor({ kind: "audio", id })}
-                  onSeek={setPlayhead}
+  onEditVisual={(id) => setClipEditor({ kind: "visual", id })}
+  onEditAudio={(id) => setClipEditor({ kind: "audio", id })}
+  onEditGap={(start, length) => editGapAsSilence(start, length)}
+  onSeek={setPlayhead}
                   onAdd={addClip}
                   onAddAIVisual={addAIVisualClip}
                   onAddAIAudio={() => addAudioClip("music")}
@@ -1697,6 +1847,7 @@ function Timeline({
   onSelect,
   onEditVisual,
   onEditAudio,
+  onEditGap,
   onSeek,
   onAdd,
   onAddAIVisual,
@@ -1715,6 +1866,7 @@ function Timeline({
   onSelect: (id: string) => void;
   onEditVisual: (id: string) => void;
   onEditAudio: (id: string) => void;
+  onEditGap: (start: number, length: number) => void;
   onSeek: (t: number) => void;
   onAdd: () => void;
   onAddAIVisual: (kind: "image" | "video" | "avatar") => void;
@@ -1823,7 +1975,14 @@ function Timeline({
                   return (
                     <div
                       key={`gap-${index}-${gap.start}`}
-                      className="absolute h-16 border border-dashed border-border text-xs flex flex-col justify-center px-2 overflow-hidden bg-bg-card text-text-dim"
+                      role="button"
+                      tabIndex={0}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onSeek(gap.start);
+                        onEditGap(gap.start, gap.length);
+                      }}
+                      className="absolute h-16 border border-dashed border-border text-xs flex flex-col justify-center px-2 overflow-hidden bg-bg-card text-text-dim hover:border-accent hover:text-text cursor-pointer"
                       style={{ left: `${Math.max(0, left)}%`, width: `${Math.max(0.5, width)}%`, minWidth: zoom > 2 ? 56 : 16 }}
                       title={`Implicit silence from ${gap.start.toFixed(1)}s for ${gap.length.toFixed(1)}s`}
                     >
