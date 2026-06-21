@@ -63,6 +63,17 @@ type ScreenshotOptions struct {
 	Annotate bool
 }
 
+// ScreenshotRecoveryInfo describes a provider-specific screenshot fallback.
+// Empty means the screenshot came from the normal capture path.
+type ScreenshotRecoveryInfo struct {
+	Recovered     bool   `json:"recovered"`
+	Strategy      string `json:"strategy"`
+	PreviousTabID string `json:"previous_tab_id,omitempty"`
+	ActiveTabID   string `json:"active_tab_id,omitempty"`
+	URL           string `json:"url,omitempty"`
+	Cause         string `json:"cause,omitempty"`
+}
+
 // Context binds a session to a persistent state bundle (cookies,
 // localStorage, IndexedDB, ServiceWorkers, Cache) that survives across
 // sessions. Per-provider mapping:
@@ -100,6 +111,14 @@ type Computer interface {
 	Close() error
 }
 
+// ActionOnlyExecutor is implemented by backends that can dispatch an action
+// without immediately capturing a screenshot. This is useful for providers
+// where post-action capture can be flaky on some SPA transitions, while
+// preserving Computer.Execute's historical action+screenshot contract.
+type ActionOnlyExecutor interface {
+	ExecuteAction(action Action) error
+}
+
 // TabInfo describes one browser page target inside a provider session.
 type TabInfo struct {
 	ID       string `json:"tab_id"`
@@ -122,6 +141,12 @@ type TabController interface {
 // screenshots without Set-of-Mark annotation on a per-call basis.
 type ScreenshotWithOptions interface {
 	ScreenshotWithOptions(options ScreenshotOptions) ([]byte, error)
+}
+
+// ScreenshotRecoveryReporter is implemented by backends that can report
+// whether the most recent screenshot used a provider-specific fallback.
+type ScreenshotRecoveryReporter interface {
+	LastScreenshotRecovery() *ScreenshotRecoveryInfo
 }
 
 // OpenOptions describes a session-open intent: which url to land on,

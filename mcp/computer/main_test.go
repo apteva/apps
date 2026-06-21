@@ -288,6 +288,155 @@ func TestComputerUseAutoFollowsSingleNewTab(t *testing.T) {
 	}
 }
 
+func TestComputerUseBrowserbaseReturnsPostActionScreenshotByDefault(t *testing.T) {
+	prev := newBackend
+	t.Cleanup(func() { newBackend = prev })
+
+	fake := &fakeComp{
+		display: backends.DisplaySize{Width: 1024, Height: 768},
+		png:     []byte{0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a},
+		url:     "https://example.com",
+	}
+	newBackend = func(cfg backends.Config) (backends.Computer, error) { return fake, nil }
+
+	app := &App{reg: &registry{m: map[string]*session{}}}
+	ctx := tk.NewAppCtx(t, "apteva.yaml")
+	openOut, err := app.toolBrowserSession(ctx, map[string]any{"action": "open", "backend": "browserbase"})
+	if err != nil {
+		t.Fatalf("browser_session open: %v", err)
+	}
+	sessionID := openOut.(map[string]any)["session_id"].(string)
+
+	out, err := app.toolComputerUse(ctx, map[string]any{
+		"session_id": sessionID,
+		"action":     "click",
+		"coordinate": "10,10",
+	})
+	if err != nil {
+		t.Fatalf("computer_use click: %v", err)
+	}
+	m := out.(map[string]any)
+	if _, ok := m["screenshot_b64"]; !ok {
+		t.Fatalf("screenshot_b64 should be present by default: %v", m)
+	}
+	if len(fake.actionOnlyCalls) != 0 {
+		t.Fatalf("action-only should not be used by default: %+v", fake.actionOnlyCalls)
+	}
+	if fake.lastAction.Type != "click" {
+		t.Fatalf("execute action: want click, got %+v", fake.lastAction)
+	}
+}
+
+func TestComputerUseBrowserbaseActionOnlyOptInSkipsPostScreenshot(t *testing.T) {
+	t.Setenv("APTEVA_BROWSERBASE_SPLIT_ACTION_SCREENSHOT", "1")
+	prev := newBackend
+	t.Cleanup(func() { newBackend = prev })
+
+	fake := &fakeComp{
+		display: backends.DisplaySize{Width: 1024, Height: 768},
+		png:     []byte{0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a},
+		url:     "https://example.com",
+	}
+	newBackend = func(cfg backends.Config) (backends.Computer, error) { return fake, nil }
+
+	app := &App{reg: &registry{m: map[string]*session{}}}
+	ctx := tk.NewAppCtx(t, "apteva.yaml")
+	openOut, err := app.toolBrowserSession(ctx, map[string]any{"action": "open", "backend": "browserbase"})
+	if err != nil {
+		t.Fatalf("browser_session open: %v", err)
+	}
+	sessionID := openOut.(map[string]any)["session_id"].(string)
+
+	out, err := app.toolComputerUse(ctx, map[string]any{
+		"session_id": sessionID,
+		"action":     "click",
+		"coordinate": "10,10",
+	})
+	if err != nil {
+		t.Fatalf("computer_use click: %v", err)
+	}
+	m := out.(map[string]any)
+	if got := m["screenshot_available"]; got != false {
+		t.Fatalf("screenshot_available: want false, got %v", got)
+	}
+	if _, ok := m["screenshot_b64"]; ok {
+		t.Fatalf("screenshot_b64 should be omitted when screenshot is skipped: %v", m)
+	}
+	if got := m["post_action_screenshot"]; got != "skipped" {
+		t.Fatalf("post_action_screenshot: want skipped, got %v", got)
+	}
+	if len(fake.actionOnlyCalls) != 1 || fake.actionOnlyCalls[0].Type != "click" {
+		t.Fatalf("action-only calls: want one click, got %+v", fake.actionOnlyCalls)
+	}
+
+	waitOut, err := app.toolComputerUse(ctx, map[string]any{
+		"session_id": sessionID,
+		"action":     "wait",
+		"duration":   25,
+	})
+	if err != nil {
+		t.Fatalf("computer_use wait: %v", err)
+	}
+	if got := waitOut.(map[string]any)["screenshot_available"]; got != false {
+		t.Fatalf("wait screenshot_available: want false, got %v", got)
+	}
+	if len(fake.actionOnlyCalls) != 2 || fake.actionOnlyCalls[1].Type != "wait" {
+		t.Fatalf("action-only calls after wait: %+v", fake.actionOnlyCalls)
+	}
+}
+
+func TestComputerUseReportsScreenshotRecoveryMetadata(t *testing.T) {
+	prev := newBackend
+	t.Cleanup(func() { newBackend = prev })
+
+	fake := &fakeComp{
+		display: backends.DisplaySize{Width: 1024, Height: 768},
+		png:     []byte{0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a},
+		url:     "https://example.com/contact",
+		lastRecovery: &backends.ScreenshotRecoveryInfo{
+			Recovered:     true,
+			Strategy:      "fresh_target_same_url",
+			PreviousTabID: "tab_old",
+			ActiveTabID:   "tab_new",
+			URL:           "https://example.com/contact",
+			Cause:         "context deadline exceeded",
+		},
+	}
+	newBackend = func(cfg backends.Config) (backends.Computer, error) { return fake, nil }
+
+	app := &App{reg: &registry{m: map[string]*session{}}}
+	ctx := tk.NewAppCtx(t, "apteva.yaml")
+	openOut, err := app.toolBrowserSession(ctx, map[string]any{"action": "open", "backend": "browserbase"})
+	if err != nil {
+		t.Fatalf("browser_session open: %v", err)
+	}
+	sessionID := openOut.(map[string]any)["session_id"].(string)
+
+	out, err := app.toolComputerUse(ctx, map[string]any{
+		"session_id": sessionID,
+		"action":     "screenshot",
+	})
+	if err != nil {
+		t.Fatalf("computer_use screenshot: %v", err)
+	}
+	m := out.(map[string]any)
+	if got := m["screenshot_recovered"]; got != true {
+		t.Fatalf("screenshot_recovered: want true, got %v", got)
+	}
+	if got := m["screenshot_recovery"]; got != "fresh_target_same_url" {
+		t.Fatalf("screenshot_recovery: want fresh_target_same_url, got %v", got)
+	}
+	if got := m["screenshot_recovery_previous_tab_id"]; got != "tab_old" {
+		t.Fatalf("previous tab: want tab_old, got %v", got)
+	}
+	if got := m["screenshot_recovery_active_tab_id"]; got != "tab_new" {
+		t.Fatalf("active tab: want tab_new, got %v", got)
+	}
+	if got := m["screenshot_recovery_cause"]; got != "context deadline exceeded" {
+		t.Fatalf("cause: want timeout, got %v", got)
+	}
+}
+
 func TestBrowserSessionTabActions(t *testing.T) {
 	prev := newBackend
 	t.Cleanup(func() { newBackend = prev })
@@ -1049,6 +1198,8 @@ type fakeComp struct {
 	switchCalls     []string
 	closeTabCalls   []string
 	addTabOnClick   *backends.TabInfo
+	actionOnlyCalls []backends.Action
+	lastRecovery    *backends.ScreenshotRecoveryInfo
 	mu              sync.Mutex // for the unlikely concurrent test
 }
 
@@ -1067,6 +1218,22 @@ func (f *fakeComp) Execute(action backends.Action) ([]byte, error) {
 	return f.png, nil
 }
 
+func (f *fakeComp) ExecuteAction(action backends.Action) error {
+	f.mu.Lock()
+	f.lastAction = action
+	f.actionOnlyCalls = append(f.actionOnlyCalls, action)
+	if (action.Type == "click" || action.Type == "double_click") && f.addTabOnClick != nil {
+		tab := *f.addTabOnClick
+		if tab.ID == "" {
+			tab.ID = "tab_new"
+		}
+		f.tabs = append(f.tabs, tab)
+		f.addTabOnClick = nil
+	}
+	f.mu.Unlock()
+	return nil
+}
+
 func (f *fakeComp) Screenshot() ([]byte, error) {
 	return f.ScreenshotWithOptions(backends.ScreenshotOptions{Annotate: true})
 }
@@ -1077,6 +1244,16 @@ func (f *fakeComp) ScreenshotWithOptions(options backends.ScreenshotOptions) ([]
 	f.annotateCalls = append(f.annotateCalls, options.Annotate)
 	f.mu.Unlock()
 	return f.png, nil
+}
+
+func (f *fakeComp) LastScreenshotRecovery() *backends.ScreenshotRecoveryInfo {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.lastRecovery == nil {
+		return nil
+	}
+	cp := *f.lastRecovery
+	return &cp
 }
 
 func (f *fakeComp) lastScreenshotAnnotate() *bool {

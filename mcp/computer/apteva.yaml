@@ -2,9 +2,9 @@ schema: apteva-app/v1
 
 name: computer
 display_name: Computer
-version: 0.7.29
+version: 0.7.30
 description: |
-  Watch and steer browser sessions. v0.7.29 bounds Browserbase screenshots.
+  Watch and steer browser sessions. v0.7.30 recovers Browserbase screenshots after target capture failure.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/computer
@@ -51,7 +51,12 @@ provides:
         to reopen saved browser state; context_name works across providers when
         unique. For a reusable saved context, pass context_name with
         auto_create_context=true; omitted names are only a fallback and are
-        auto-generated.
+        auto-generated. Sessions consume local or cloud resources. When the
+        browser work is complete and the user did not explicitly ask to keep
+        the browser open, close it with browser_session(action=close,
+        session_id=...). Closing is especially important for Browserbase/Steel
+        sessions and persisted contexts because it releases provider resources
+        and lets context state flush cleanly.
     - name: computer_use
       description: |
         Drive an app-owned browser session. Default workflow: call
@@ -110,7 +115,9 @@ provides:
         annotate? (default false; set true for Set-of-Mark labels).
     - name: browser_close
       description: |
-        Compatibility alias for browser_session(action=close).
+        Close a session opened by this app and release browser/provider
+        resources. Use this when finished unless the user explicitly wants the
+        session left open. Compatibility alias for browser_session(action=close).
 
   ui_panels:
     - slot: project.page

@@ -18,8 +18,10 @@ import (
 	"github.com/apteva/apps/mcp/computer/internal/browser/keyinput"
 	"github.com/apteva/apps/mcp/computer/internal/browser/som"
 	"github.com/apteva/apps/mcp/computer/internal/browser/textinput"
+	"github.com/chromedp/cdproto/cdp"
 	"github.com/chromedp/cdproto/input"
 	"github.com/chromedp/cdproto/page"
+	"github.com/chromedp/cdproto/target"
 	"github.com/chromedp/chromedp"
 )
 
@@ -31,6 +33,8 @@ const (
 	screenshotCaptureTimeout    = 5 * time.Second
 	screenshotCaptureRetryDelay = 750 * time.Millisecond
 )
+
+const screenshotRecoveryFreshTarget = "fresh_target_same_url"
 
 // Options extends what New accepts beyond apiKey/projectID/display. All
 // fields are optional. They correspond 1:1 to the POST /v1/sessions payload
@@ -84,6 +88,9 @@ type Computer struct {
 	// SoM: same wiring as local.Computer. See local.go for rationale.
 	labelMu    sync.RWMutex
 	lastLabels map[int]som.Element
+
+	recoveryMu            sync.Mutex
+	lastScreenshotRecover *computer.ScreenshotRecoveryInfo
 }
 
 // New constructs a Browserbase-backed Computer. NO session is created
@@ -313,45 +320,15 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 		return c.Screenshot()
 
 	case "click":
-		// SoM: label=N takes precedence over x,y.
-		x, y := action.X, action.Y
-		if action.Label != 0 {
-			if e, ok := c.resolveLabel(action.Label); ok {
-				x, y = e.Center()
-			}
-		}
-		if err := c.dispatchClick(x, y, 1); err != nil {
+		if err := c.executeClick(action, 1, true); err != nil {
 			return nil, fmt.Errorf("click: %w", err)
 		}
-		// Explicit focus at the click point — same rationale as the
-		// local package: CDP mouse events don't reliably move DOM
-		// focus to form inputs, so later type/insertText can no-op
-		// silently. Best-effort; errors ignored so plain clicks on
-		// non-focusable elements still succeed.
-		focusJS := fmt.Sprintf(`(function(){
-			var el = document.elementFromPoint(%d, %d);
-			if (el && typeof el.focus === 'function') { el.focus(); return el.tagName; }
-			return null;
-		})()`, x, y)
-		var focusedTag string
-		_ = chromedp.Run(c.ctx, chromedp.Evaluate(focusJS, &focusedTag))
-		if focusedTag != "" {
-			fmt.Fprintf(os.Stderr, "[BROWSERBASE] click focused <%s>\n", strings.ToLower(focusedTag))
-		}
-		time.Sleep(200 * time.Millisecond)
 		return c.Screenshot()
 
 	case "double_click":
-		x, y := action.X, action.Y
-		if action.Label != 0 {
-			if e, ok := c.resolveLabel(action.Label); ok {
-				x, y = e.Center()
-			}
-		}
-		if err := c.dispatchClick(x, y, 2); err != nil {
+		if err := c.executeClick(action, 2, false); err != nil {
 			return nil, fmt.Errorf("double_click: %w", err)
 		}
-		time.Sleep(200 * time.Millisecond)
 		return c.Screenshot()
 
 	case "type":
@@ -388,6 +365,33 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 	}
 }
 
+func (c *Computer) ExecuteAction(action computer.Action) error {
+	if c.ctx == nil {
+		return fmt.Errorf("browserbase: no active session — call browser_session open first")
+	}
+	switch action.Type {
+	case "click":
+		if err := c.executeClick(action, 1, true); err != nil {
+			return fmt.Errorf("click: %w", err)
+		}
+		return nil
+	case "double_click":
+		if err := c.executeClick(action, 2, false); err != nil {
+			return fmt.Errorf("double_click: %w", err)
+		}
+		return nil
+	case "wait":
+		dur := action.Duration
+		if dur <= 0 {
+			dur = 1000
+		}
+		time.Sleep(time.Duration(dur) * time.Millisecond)
+		return nil
+	default:
+		return fmt.Errorf("browserbase action-only unsupported for %s", action.Type)
+	}
+}
+
 // scroll dispatches a real CDP mouseWheel event at (x, y). Browserbase
 // pages frequently have nested scroll containers (SaaS dashboards,
 // SPAs) where `window.scrollBy` is a no-op; wheel events scroll the
@@ -416,6 +420,37 @@ func (c *Computer) scroll(a computer.Action) error {
 	return chromedp.Run(c.ctx, chromedp.Evaluate(js, nil))
 }
 
+func (c *Computer) executeClick(action computer.Action, clickCount int, focusAfter bool) error {
+	x, y := action.X, action.Y
+	if action.Label != 0 {
+		if e, ok := c.resolveLabel(action.Label); ok {
+			x, y = e.Center()
+		}
+	}
+	if err := c.dispatchClick(x, y, clickCount); err != nil {
+		return err
+	}
+	if focusAfter {
+		// Explicit focus at the click point — same rationale as the
+		// local package: CDP mouse events don't reliably move DOM
+		// focus to form inputs, so later type/insertText can no-op
+		// silently. Best-effort; errors ignored so plain clicks on
+		// non-focusable elements still succeed.
+		focusJS := fmt.Sprintf(`(function(){
+			var el = document.elementFromPoint(%d, %d);
+			if (el && typeof el.focus === 'function') { el.focus(); return el.tagName; }
+			return null;
+		})()`, x, y)
+		var focusedTag string
+		_ = chromedp.Run(c.ctx, chromedp.Evaluate(focusJS, &focusedTag))
+		if focusedTag != "" {
+			fmt.Fprintf(os.Stderr, "[BROWSERBASE] click focused <%s>\n", strings.ToLower(focusedTag))
+		}
+	}
+	time.Sleep(200 * time.Millisecond)
+	return nil
+}
+
 func (c *Computer) dispatchClick(x, y, clickCount int) error {
 	return chromedp.Run(c.ctx,
 		chromedp.MouseClickXY(float64(x), float64(y), chromedp.ClickCount(clickCount)),
@@ -430,6 +465,7 @@ func (c *Computer) ScreenshotWithOptions(options computer.ScreenshotOptions) ([]
 	if c.ctx == nil {
 		return nil, fmt.Errorf("browserbase: no active session — call browser_session open first")
 	}
+	c.setLastScreenshotRecovery(nil)
 	// Viewport-only screenshot. See local.go for the full rationale:
 	// FullScreenshot returns the entire scrollable page, which then
 	// either gets aspect-squashed to viewport (silently distorting
@@ -438,7 +474,12 @@ func (c *Computer) ScreenshotWithOptions(options computer.ScreenshotOptions) ([]
 	// returns exactly the visible area at the configured resolution.
 	buf, err := c.captureScreenshot()
 	if err != nil {
-		return nil, fmt.Errorf("screenshot: %w", err)
+		recovered, info, rerr := c.recoverScreenshotWithFreshTarget(err)
+		if rerr != nil {
+			return nil, fmt.Errorf("screenshot: %w", err)
+		}
+		c.setLastScreenshotRecovery(info)
+		buf = recovered
 	}
 
 	// SoM annotation — same pipeline as local.Screenshot. Any failure
@@ -471,6 +512,92 @@ func (c *Computer) ScreenshotWithOptions(options computer.ScreenshotOptions) ([]
 		return annotated, nil
 	}
 	return buf, nil
+}
+
+func (c *Computer) LastScreenshotRecovery() *computer.ScreenshotRecoveryInfo {
+	c.recoveryMu.Lock()
+	defer c.recoveryMu.Unlock()
+	if c.lastScreenshotRecover == nil {
+		return nil
+	}
+	cp := *c.lastScreenshotRecover
+	return &cp
+}
+
+func (c *Computer) setLastScreenshotRecovery(info *computer.ScreenshotRecoveryInfo) {
+	c.recoveryMu.Lock()
+	defer c.recoveryMu.Unlock()
+	if info == nil {
+		c.lastScreenshotRecover = nil
+		return
+	}
+	cp := *info
+	c.lastScreenshotRecover = &cp
+}
+
+func (c *Computer) recoverScreenshotWithFreshTarget(cause error) ([]byte, *computer.ScreenshotRecoveryInfo, error) {
+	if screenshotRecoveryDisabled() {
+		return nil, nil, fmt.Errorf("browserbase screenshot recovery disabled")
+	}
+	if c.ctx == nil {
+		return nil, nil, fmt.Errorf("browserbase: no active session")
+	}
+	currentURL := c.CurrentURL()
+	if !strings.HasPrefix(currentURL, "http://") && !strings.HasPrefix(currentURL, "https://") {
+		return nil, nil, fmt.Errorf("browserbase screenshot recovery unsupported URL %q", currentURL)
+	}
+	previousTabID := c.ActiveTabID()
+	cc := chromedp.FromContext(c.ctx)
+	if cc == nil || cc.Browser == nil {
+		return nil, nil, fmt.Errorf("browserbase screenshot recovery: no browser connection")
+	}
+	browserCtx := cdp.WithExecutor(c.ctx, cc.Browser)
+
+	var newTargetID target.ID
+	err := chromedp.Run(c.ctx, chromedp.ActionFunc(func(context.Context) error {
+		var createErr error
+		newTargetID, createErr = target.CreateTarget(currentURL).Do(browserCtx)
+		return createErr
+	}))
+	if err != nil {
+		return nil, nil, fmt.Errorf("browserbase screenshot recovery create target: %w", err)
+	}
+	if err := c.SwitchTab(string(newTargetID)); err != nil {
+		return nil, nil, fmt.Errorf("browserbase screenshot recovery switch target: %w", err)
+	}
+	waitCtx, cancel := context.WithTimeout(c.ctx, 5*time.Second)
+	_ = chromedp.Run(waitCtx, chromedp.WaitReady("body", chromedp.ByQuery))
+	cancel()
+	time.Sleep(500 * time.Millisecond)
+	buf, err := c.captureScreenshot()
+	if err != nil {
+		if previousTabID != "" {
+			_ = c.SwitchTab(previousTabID)
+		}
+		return nil, nil, fmt.Errorf("browserbase screenshot recovery capture: %w", err)
+	}
+	info := &computer.ScreenshotRecoveryInfo{
+		Recovered:     true,
+		Strategy:      screenshotRecoveryFreshTarget,
+		PreviousTabID: previousTabID,
+		ActiveTabID:   string(newTargetID),
+		URL:           currentURL,
+	}
+	if cause != nil {
+		info.Cause = cause.Error()
+	}
+	fmt.Fprintf(os.Stderr, "[BROWSERBASE] screenshot recovered via %s previous_tab=%s active_tab=%s url=%s cause=%v\n",
+		info.Strategy, info.PreviousTabID, info.ActiveTabID, info.URL, cause)
+	return buf, info, nil
+}
+
+func screenshotRecoveryDisabled() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("APTEVA_BROWSERBASE_SCREENSHOT_RECOVERY"))) {
+	case "0", "false", "off", "disabled", "none":
+		return true
+	default:
+		return false
+	}
 }
 
 func (c *Computer) captureScreenshot() ([]byte, error) {

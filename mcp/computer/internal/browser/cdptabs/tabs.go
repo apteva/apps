@@ -47,7 +47,32 @@ func List(ctx context.Context) ([]computer.TabInfo, error) {
 			OpenerID: string(info.OpenerID),
 		})
 	}
-	return out, nil
+	return hideInactiveBlankPlaceholders(out), nil
+}
+
+func hideInactiveBlankPlaceholders(tabs []computer.TabInfo) []computer.TabInfo {
+	hasContent := false
+	for _, tab := range tabs {
+		if !isBlankPlaceholder(tab) {
+			hasContent = true
+			break
+		}
+	}
+	if !hasContent {
+		return tabs
+	}
+	out := tabs[:0]
+	for _, tab := range tabs {
+		if isBlankPlaceholder(tab) && !tab.Active {
+			continue
+		}
+		out = append(out, tab)
+	}
+	return out
+}
+
+func isBlankPlaceholder(tab computer.TabInfo) bool {
+	return strings.EqualFold(strings.TrimSpace(tab.URL), "about:blank")
 }
 
 // Switch binds a new chromedp page context to tabID using an existing browser

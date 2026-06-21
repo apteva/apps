@@ -58,6 +58,20 @@ Default `live-view` to `mode: "thumb"` (polled image). `mode: "live"`
 is the full screencast — only when the view IS the message; multiple
 live tiles in one transcript get expensive.
 
+## Session cleanup
+
+Treat browser sessions like resources you open and close.
+
+- If you open a browser session for a task, close it when the task is done.
+- Close after the final screenshot, final data extraction, or successful
+  form/action completion.
+- Use `browser_session(action="close", session_id=...)`.
+- Do not close when the user explicitly asked to keep the browser open, when
+  waiting for human input in the live page, or when the next immediate step
+  still needs the same session.
+- For persisted contexts, closing is the clean handoff point for saving
+  provider/browser state.
+
 ## Web-browsing patterns
 
 ## Persistent contexts

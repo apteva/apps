@@ -41,9 +41,9 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: computer
 display_name: Computer
-version: 0.7.29
+version: 0.7.30
 description: |
-  Watch and steer browser sessions. v0.7.29 bounds Browserbase screenshots.
+  Watch and steer browser sessions. v0.7.30 recovers Browserbase screenshots after target capture failure.
 scopes: [project, global]
 requires:
   permissions:
@@ -68,7 +68,7 @@ provides:
     - prefix: /
   mcp_tools:
     - name: browser_session
-      description: "Open, resume, list, inspect, close, or switch tabs in app-owned browser sessions. Args: action, session_id?, tab_id?, backend?, backend_session_id?, url?, context_id?, context_name?, auto_create_context?, persist?, timeout?, proxy?, proxy_country?, viewport?. For tab control, call browser_session(action=tabs) to list open tabs, then browser_session(action=switch_tab, tab_id=...) or browser_session(action=close_tab, tab_id=...). Do not use keyboard shortcuts such as Ctrl+Tab, Ctrl+PageDown, or Ctrl+1-9 to switch browser tabs. Browserbase honors timeout as max session lifetime. Prefer context_id from computer_context_list to reopen saved state; context_name works across backends when unique. For a reusable saved context, pass context_name with auto_create_context=true; omitted names are only a fallback and are auto-generated."
+      description: "Open, resume, list, inspect, close, or switch tabs in app-owned browser sessions. Args: action, session_id?, tab_id?, backend?, backend_session_id?, url?, context_id?, context_name?, auto_create_context?, persist?, timeout?, proxy?, proxy_country?, viewport?. For tab control, call browser_session(action=tabs) to list open tabs, then browser_session(action=switch_tab, tab_id=...) or browser_session(action=close_tab, tab_id=...). Do not use keyboard shortcuts such as Ctrl+Tab, Ctrl+PageDown, or Ctrl+1-9 to switch browser tabs. Browserbase honors timeout as max session lifetime. Prefer context_id from computer_context_list to reopen saved state; context_name works across backends when unique. For a reusable saved context, pass context_name with auto_create_context=true; omitted names are only a fallback and are auto-generated. Sessions consume local or cloud resources. When browser work is complete and the user did not explicitly ask to keep the browser open, close it with browser_session(action=close, session_id=...). Closing is especially important for Browserbase/Steel sessions and persisted contexts because it releases provider resources and lets context state flush cleanly."
     - name: computer_use
       description: "Drive an app-owned browser session. Default workflow: call action=screenshot first; screenshots contain Set-of-Mark numeric badges on interactive elements. To click, use action=click with label=N from the latest screenshot. Prefer label over coordinate; use coordinate only for targets with no badge such as canvas or custom rendered widgets. If a click opens exactly one new tab, Computer automatically follows it and reports switched_tab=true. For explicit tab control, call browser_session(action=tabs) to list tabs, then browser_session(action=switch_tab, tab_id=...) or browser_session(action=close_tab, tab_id=...); do not use Ctrl+Tab, Ctrl+PageDown, or Ctrl+1-9 for browser tab switching. Use action=key for page/editor commands such as Tab, Backspace, Control+A, Control+Z; use action=type only for literal text and full date/time values such as 2026-06-05 or 08:00 PM. For action=scroll, amount is CSS pixels; use 200-500 for a small viewport move and omit amount for the 300px default. After scrolling, tab switching, or navigation, take a fresh screenshot because labels are re-enumerated. Args: session_id, action, tab_id?, coordinate?, label?, text?, key?, direction?, amount?, duration?, annotate? (screenshot only, default true). Returns screenshot bytes for visual actions."
     - name: computer_context_create
@@ -88,7 +88,7 @@ provides:
     - name: browser_screenshot
       description: "Capture a clean PNG of the session viewport. Args: session_id, annotate? (default false; set true for Set-of-Mark labels)."
     - name: browser_close
-      description: "Compatibility alias for browser_session(action=close)."
+      description: "Close a session opened by this app and release browser/provider resources. Use this when finished unless the user explicitly wants the session left open. Compatibility alias for browser_session(action=close)."
   ui_panels:
     - slot: project.page
       label: Browsers
@@ -414,6 +414,8 @@ func (a *App) MCPTools() []sdk.Tool {
 				"Browserbase honors timeout as max session lifetime. " +
 				"Prefer context_id returned by computer_context_list to reopen saved browser state; context_name works across providers when unique. " +
 				"For a reusable saved context, pass context_name with auto_create_context=true; omitted names are only a fallback and are auto-generated. " +
+				"Sessions consume local or cloud resources. When browser work is complete and the user did not explicitly ask to keep the browser open, close it with browser_session(action=close, session_id=...). " +
+				"Closing is especially important for Browserbase/Steel sessions and persisted contexts because it releases provider resources and lets context state flush cleanly. " +
 				"Returns {session_id, backend_session_id, backend, current_url, active_tab_id, tabs, context_id, debug_url, width, height}.",
 			InputSchema: schemaObject(map[string]any{
 				"action":             map[string]any{"type": "string", "enum": []string{"open", "resume", "status", "close", "list", "tabs", "switch_tab", "close_tab"}},
@@ -570,7 +572,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "browser_close",
-			Description: "Close a session opened by this app. Args: session_id. Idempotent — unknown ids return {closed:false}.",
+			Description: "Close a session opened by this app and release browser/provider resources. Use this when finished unless the user explicitly wants the session left open. Args: session_id. Idempotent — unknown ids return {closed:false}.",
 			InputSchema: schemaObject(map[string]any{
 				"session_id": map[string]any{"type": "string"},
 			}, []string{"session_id"}),
@@ -1365,8 +1367,12 @@ func (a *App) toolComputerUse(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	}
 	var shot []byte
 	var err error
+	screenshotSkipped := false
 	if action == "screenshot" {
 		shot, err = screenshotWithOptions(sess.comp, annotateArg(args, true))
+	} else if shouldSkipPostActionScreenshot(sess, action) {
+		err = sess.comp.(backends.ActionOnlyExecutor).ExecuteAction(act)
+		screenshotSkipped = true
 	} else {
 		shot, err = sess.comp.Execute(act)
 	}
@@ -1376,7 +1382,7 @@ func (a *App) toolComputerUse(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	tabEvent := tabFollowResult{}
 	if len(beforeTabs) > 0 && (action == "click" || action == "double_click") {
 		tabEvent = autoFollowNewTab(sess.comp, beforeTabs)
-		if tabEvent.Switched {
+		if tabEvent.Switched && !screenshotSkipped {
 			if reshot, serr := screenshotWithOptions(sess.comp, annotateArg(args, true)); serr == nil {
 				shot = reshot
 			} else if ctx != nil {
@@ -1385,27 +1391,57 @@ func (a *App) toolComputerUse(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		}
 	}
 	disp := sess.comp.DisplaySize()
-	mime := imageMIME(shot)
 	payload := a.sessionActionPayload(id, sess, act, args)
+	if screenshotSkipped {
+		payload["screenshot_available"] = false
+		payload["post_action_screenshot"] = "skipped"
+	}
+	recovery := screenshotRecoveryFor(sess.comp)
+	mergeScreenshotRecoveryPayload(payload, recovery)
 	mergeTabFollowPayload(payload, tabEvent)
 	emitEvent(ctx, "session.action", payload)
 	out := map[string]any{
-		"text":           fmt.Sprintf("Success: %s action completed. Screenshot attached.", action),
-		"screenshot":     binaryEnvelope(shot, mime),
-		"screenshot_b64": base64.StdEncoding.EncodeToString(shot),
-		"mime_type":      mime,
-		"session_id":     id,
-		"current_url":    currentURL(sess.comp),
-		"active_tab_id":  activeTabID(sess.comp),
-		"tabs":           tabsFor(sess.comp),
-		"width":          disp.Width,
-		"height":         disp.Height,
+		"session_id":    id,
+		"current_url":   currentURL(sess.comp),
+		"active_tab_id": activeTabID(sess.comp),
+		"tabs":          tabsFor(sess.comp),
+		"width":         disp.Width,
+		"height":        disp.Height,
+	}
+	if screenshotSkipped {
+		out["text"] = fmt.Sprintf("Success: %s action dispatched. Call action=wait if needed, then action=screenshot for the visual state.", action)
+		out["screenshot_available"] = false
+		out["post_action_screenshot"] = "skipped"
+		out["next_step"] = "Call computer_use(action=wait, duration=1000), then computer_use(action=screenshot)."
+	} else {
+		mime := imageMIME(shot)
+		out["text"] = fmt.Sprintf("Success: %s action completed. Screenshot attached.", action)
+		out["screenshot"] = binaryEnvelope(shot, mime)
+		out["screenshot_b64"] = base64.StdEncoding.EncodeToString(shot)
+		out["mime_type"] = mime
 	}
 	if tabs, _ := out["tabs"].([]backends.TabInfo); len(tabs) > 0 {
 		out["tab_count"] = len(tabs)
 	}
+	mergeScreenshotRecoveryPayload(out, recovery)
 	mergeTabFollowPayload(out, tabEvent)
 	return out, nil
+}
+
+func shouldSkipPostActionScreenshot(sess *session, action string) bool {
+	if sess == nil || sess.backend != "browserbase" {
+		return false
+	}
+	if os.Getenv("APTEVA_BROWSERBASE_SPLIT_ACTION_SCREENSHOT") != "1" {
+		return false
+	}
+	switch action {
+	case "click", "double_click", "wait":
+	default:
+		return false
+	}
+	_, ok := sess.comp.(backends.ActionOnlyExecutor)
+	return ok
 }
 
 func (a *App) toolBrowserClose(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -1476,6 +1512,34 @@ func mergeTabFollowPayload(payload map[string]any, result tabFollowResult) {
 	}
 	if result.Switched {
 		payload["switched_tab"] = true
+	}
+}
+
+func screenshotRecoveryFor(comp backends.Computer) *backends.ScreenshotRecoveryInfo {
+	reporter, ok := comp.(backends.ScreenshotRecoveryReporter)
+	if !ok {
+		return nil
+	}
+	return reporter.LastScreenshotRecovery()
+}
+
+func mergeScreenshotRecoveryPayload(payload map[string]any, info *backends.ScreenshotRecoveryInfo) {
+	if info == nil || !info.Recovered {
+		return
+	}
+	payload["screenshot_recovered"] = true
+	payload["screenshot_recovery"] = info.Strategy
+	if info.PreviousTabID != "" {
+		payload["screenshot_recovery_previous_tab_id"] = info.PreviousTabID
+	}
+	if info.ActiveTabID != "" {
+		payload["screenshot_recovery_active_tab_id"] = info.ActiveTabID
+	}
+	if info.URL != "" {
+		payload["screenshot_recovery_url"] = info.URL
+	}
+	if info.Cause != "" {
+		payload["screenshot_recovery_cause"] = info.Cause
 	}
 }
 
