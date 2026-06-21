@@ -193,6 +193,25 @@ type dfsKeywordVolumeItem struct {
 	} `json:"monthly_searches"`
 }
 
+func decodeKeywordVolumeItem(rowRaw []byte, keyword string) (dfsKeywordVolumeItem, error) {
+	var item dfsKeywordVolumeItem
+	var wrapped struct {
+		Items []dfsKeywordVolumeItem `json:"items"`
+	}
+	if err := json.Unmarshal(rowRaw, &wrapped); err != nil {
+		return item, fmt.Errorf("parse keyword_search_volume: %w", err)
+	}
+	if len(wrapped.Items) > 0 {
+		item = wrapped.Items[0]
+	} else if err := json.Unmarshal(rowRaw, &item); err != nil {
+		return item, fmt.Errorf("parse keyword_search_volume item: %w", err)
+	}
+	if item.Keyword == "" && item.SearchVolume == nil && item.CPC == nil && len(item.MonthlySearches) == 0 {
+		return item, fmt.Errorf("keyword_search_volume: zero items for %q", keyword)
+	}
+	return item, nil
+}
+
 func refreshKeywordViaDataForSEO(ctx *sdk.AppCtx, k *Keyword, loc *SEOLocation) (any, error) {
 	_, connID, err := boundProvider(ctx)
 	if err != nil {
@@ -212,17 +231,14 @@ func refreshKeywordViaDataForSEO(ctx *sdk.AppCtx, k *Keyword, loc *SEOLocation) 
 	if rowRaw == nil {
 		return nil, fmt.Errorf("dataforseo: zero rows for keyword %q", k.Text)
 	}
-	// search_volume returns: { items: [<dfsKeywordVolumeItem>, …] }
-	var parsed struct {
-		Items []dfsKeywordVolumeItem `json:"items"`
+	// Google Ads search_volume returns task.result as keyword rows directly:
+	// { result: [{ keyword, search_volume, monthly_searches, ... }] }.
+	// Older fixtures and some DataForSEO endpoints use { items: [...] }, so
+	// accept both shapes.
+	item, err := decodeKeywordVolumeItem(rowRaw, k.Text)
+	if err != nil {
+		return nil, err
 	}
-	if err := json.Unmarshal(rowRaw, &parsed); err != nil {
-		return nil, fmt.Errorf("parse keyword_search_volume: %w", err)
-	}
-	if len(parsed.Items) == 0 {
-		return nil, fmt.Errorf("keyword_search_volume: zero items for %q", k.Text)
-	}
-	item := parsed.Items[0]
 	now := time.Now().Unix()
 	tx, err := ctx.AppDB().Begin()
 	if err != nil {

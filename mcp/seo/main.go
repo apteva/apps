@@ -33,7 +33,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: seo
 display_name: SEO
-version: 0.3.1
+version: 0.3.2
 description: Generic SEO research workbench — locale-aware domains, keywords, rankings, backlinks behind one pluggable provider integration.
 author: Apteva
 scopes: [project, global]
@@ -306,11 +306,6 @@ type KeywordMetrics struct {
 // ─── Scope ───────────────────────────────────────────────────────
 
 func projectScope(ctxs ...*sdk.AppCtx) string {
-	if len(ctxs) > 0 && ctxs[0] != nil {
-		if pid := strings.TrimSpace(ctxs[0].CurrentProject()); pid != "" {
-			return pid
-		}
-	}
 	return strings.TrimSpace(os.Getenv("APTEVA_PROJECT_ID")) // '' = global
 }
 
