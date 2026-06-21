@@ -1,4 +1,4 @@
-// ComposerPanel v0.3.21 - timeline editor with storage and Media Studio AI assets.
+// ComposerPanel v0.3.22 - timeline editor with storage and Media Studio AI assets.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
@@ -1881,6 +1881,7 @@ function Timeline({
   const audioLabelTop = hasVisual ? 112 : 12;
   const audioTrackTop = hasVisual ? 128 : 32;
   const zoomedWidth = `${Math.max(1, zoom) * 100}%`;
+  const editingWidth = `${Math.round(960 * Math.max(1, zoom))}px`;
   const sortedAudio = [...audioClips].sort((a, b) => a.start - b.start);
   const gaps: { start: number; length: number }[] = [];
   let audioCursor = 0;
@@ -1931,7 +1932,7 @@ function Timeline({
                 onSeek(((e.clientX - rect.left) / rect.width) * duration);
               }}
               className="relative block border border-border rounded bg-bg text-left overflow-hidden cursor-crosshair"
-              style={{ minHeight: timelineHeight, width: zoomedWidth, minWidth: "100%" }}
+              style={{ minHeight: timelineHeight, width: zoomedWidth, minWidth: editingWidth }}
             >
               <div
                 className="absolute top-0 bottom-0 w-px bg-accent"
@@ -2284,7 +2285,7 @@ function Inspector({
 }) {
   const field = "bg-bg-input border border-border rounded px-2 py-1.5 text-sm w-full";
   return (
-    <aside className="w-80 shrink-0 border-l border-border bg-bg-card overflow-auto">
+    <aside className="w-72 2xl:w-80 shrink-0 border-l border-border bg-bg-card overflow-auto">
       <div className="p-4 space-y-5">
         <section className="space-y-2">
           <h2 className="text-xs uppercase tracking-wide text-text-dim">Composition</h2>
