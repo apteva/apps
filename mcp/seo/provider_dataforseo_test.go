@@ -5,6 +5,23 @@ import (
 	"testing"
 )
 
+func TestDomainRankOverviewInput_OmitsLanguageCode(t *testing.T) {
+	locationCode := int64(2840)
+	input := domainRankOverviewInput(&Domain{Host: "marcoschwartz.com"}, &SEOLocation{
+		LocationCode: &locationCode,
+		LanguageCode: "en",
+	})
+	if got := input["target"]; got != "marcoschwartz.com" {
+		t.Fatalf("target = %v, want marcoschwartz.com", got)
+	}
+	if got := input["location_code"]; got != locationCode {
+		t.Fatalf("location_code = %v, want %d", got, locationCode)
+	}
+	if _, ok := input["language_code"]; ok {
+		t.Fatal("domain_rank_overview input must not include language_code")
+	}
+}
+
 func TestDecodeKeywordVolumeItem_DirectResultRow(t *testing.T) {
 	raw := json.RawMessage(`{
 		"keyword": "seo",

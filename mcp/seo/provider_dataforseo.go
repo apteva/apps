@@ -125,11 +125,7 @@ func refreshDomainViaDataForSEO(ctx *sdk.AppCtx, d *Domain, loc *SEOLocation) (a
 	if loc == nil || loc.LocationCode == nil {
 		return nil, fmt.Errorf("dataforseo refresh requires a location with location_code")
 	}
-	rowRaw, taskRaw, err := callDfs(ctx, connID, "domain_rank_overview", map[string]any{
-		"target":        d.Host,
-		"location_code": *loc.LocationCode,
-		"language_code": strings.ToLower(loc.LanguageCode),
-	})
+	rowRaw, taskRaw, err := callDfs(ctx, connID, "domain_rank_overview", domainRankOverviewInput(d, loc))
 	if err != nil {
 		return nil, err
 	}
@@ -178,6 +174,14 @@ func refreshDomainViaDataForSEO(ctx *sdk.AppCtx, d *Domain, loc *SEOLocation) (a
 		"page_rows":     rankingSummary.PageRows,
 		"rankings_note": rankingSummary.Note,
 	}, nil
+}
+
+func domainRankOverviewInput(d *Domain, loc *SEOLocation) map[string]any {
+	input := map[string]any{"target": d.Host}
+	if loc != nil && loc.LocationCode != nil {
+		input["location_code"] = *loc.LocationCode
+	}
+	return input
 }
 
 type dfsRankedKeywordsResult struct {
