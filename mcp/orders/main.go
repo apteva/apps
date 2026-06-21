@@ -192,7 +192,7 @@ func (a *App) MCPTools() []sdk.Tool {
 	return []sdk.Tool{
 		{
 			Name:        "orders_create",
-			Description: "Create a durable physical order. Args: source, source_ref, customer, addresses, totals, items, metadata.",
+			Description: "Create a NEW durable physical order when no order id exists yet. Use this for paid invoice-to-fulfillment handoffs. Args: source, source_ref, invoice_id, customer_email, customer_name, addresses, totals, payment_status, order_status, fulfillment_status, items, metadata.",
 			InputSchema: schemaObject(map[string]any{
 				"source":              map[string]any{"type": "string"},
 				"source_ref":          map[string]any{"type": "string"},
@@ -264,7 +264,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "orders_update_status",
-			Description: "Update order_status, payment_status, or fulfillment_status. Args: id, order_status, payment_status, fulfillment_status, actor, note.",
+			Description: "Update an EXISTING order only. Requires id from orders_create, orders_get, or orders_search; do not use this to create a new order. Args: id, order_status, payment_status, fulfillment_status, actor, note.",
 			InputSchema: schemaObject(map[string]any{
 				"id":                 map[string]any{"type": "integer"},
 				"order_status":       map[string]any{"type": "string"},
@@ -990,8 +990,8 @@ type OrderEvent struct {
 // DB.
 
 func dbOrderCreate(ctx *sdk.AppCtx, pid string, args map[string]any, eventAction string) (*Order, error) {
-	itemsRaw, ok := args["items"].([]any)
-	if !ok || len(itemsRaw) == 0 {
+	itemsRaw := arrayArg(args, "items")
+	if len(itemsRaw) == 0 {
 		return nil, errors.New("items required")
 	}
 	items := normalizeItems(itemsRaw, strArg(args, "currency"))
@@ -2000,6 +2000,28 @@ func int64Arg(m map[string]any, key string) int64 {
 		return n
 	}
 	return 0
+}
+
+func arrayArg(m map[string]any, key string) []any {
+	if m == nil {
+		return nil
+	}
+	switch v := m[key].(type) {
+	case []any:
+		return v
+	case string:
+		s := strings.TrimSpace(v)
+		if s == "" {
+			return nil
+		}
+		var out []any
+		dec := json.NewDecoder(strings.NewReader(s))
+		dec.UseNumber()
+		if err := dec.Decode(&out); err == nil {
+			return out
+		}
+	}
+	return nil
 }
 
 func int64FromMap(m map[string]any, keys ...string) int64 {
