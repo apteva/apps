@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: seo
 display_name: SEO
-version: 0.2.0
+version: 0.3.0
 description: |
   Generic SEO research workbench. Track domains, keywords, rankings,
   and backlinks; pull metrics from any provider behind one pluggable
@@ -17,12 +17,12 @@ description: |
         exposed as MCP — paid actions stay human/UI-triggered, the
         agent only reads cached rows and surfaces last_refreshed_at
         as a staleness signal.
-  v0.3 (planned): scheduled refresh via the jobs app, plus pages
-        CRUD + ranked_keywords for auto-discovery.
+  v0.3: locale-aware tracking, DataForSEO location sync, and an
+        operator panel for interactive seeding and paid refreshes.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/seo
-icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/seo/icon.png
+icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/seo/icon.svg
 tags: [seo, marketing, keywords, rankings, backlinks]
 
 scopes: [project, global]
@@ -57,13 +57,14 @@ provides:
   http_routes:
     - prefix: /
   mcp_tools:
+    - { name: locations_list, description: "List active SEO provider locations. Args: provider?, search_engine?, country_iso?, language_code?, q?, limit?. Sync locations from the SEO panel first." }
     # ── domain CRUD (v0.1) ──────────────────────────────────────────
-    - { name: domains_add,    description: "Add a domain (hostname) to track. Args: host (required), label?." }
+    - { name: domains_add,    description: "Add a domain (hostname) to track. Args: host (required), label?, location_id? or country_iso+language_code? for the default locale." }
     - { name: domains_list,   description: "List tracked domains in this scope." }
     - { name: domains_get,    description: "Read one domain plus its latest metrics snapshot. Args: id." }
     - { name: domains_remove, description: "Remove a domain. Cascades to its pages, metrics, rankings, backlinks. Args: id." }
     # ── keyword CRUD (v0.1) ─────────────────────────────────────────
-    - { name: keywords_add,    description: "Add a keyword to track. Args: text (required), country_iso? (default 'US'), language_iso? (default 'en')." }
+    - { name: keywords_add,    description: "Add a keyword to track. Args: text (required), location_id or country_iso+language_code. No implicit locale fallback is applied." }
     - { name: keywords_list,   description: "List keywords in this scope. Args: country_iso?, limit? (default 200)." }
     - { name: keywords_get,    description: "Read one keyword plus its latest metrics snapshot. Args: id." }
     - { name: keywords_remove, description: "Remove a keyword. Cascades to its metrics, volume history, rankings. Args: id." }

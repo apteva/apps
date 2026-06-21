@@ -99,9 +99,9 @@ type dfsDomainRankResult struct {
 		LocationCode int    `json:"location_code"`
 		Metrics      struct {
 			Organic struct {
-				Count                  int64   `json:"count"`
-				ETV                    float64 `json:"etv"`
-				EstimatedPaidTraffic   float64 `json:"estimated_paid_traffic_cost"`
+				Count                int64   `json:"count"`
+				ETV                  float64 `json:"etv"`
+				EstimatedPaidTraffic float64 `json:"estimated_paid_traffic_cost"`
 			} `json:"organic"`
 			Paid struct {
 				Count int64   `json:"count"`
@@ -114,15 +114,18 @@ type dfsDomainRankResult struct {
 	} `json:"items"`
 }
 
-func refreshDomainViaDataForSEO(ctx *sdk.AppCtx, d *Domain) (any, error) {
+func refreshDomainViaDataForSEO(ctx *sdk.AppCtx, d *Domain, loc *SEOLocation) (any, error) {
 	_, connID, err := boundProvider(ctx)
 	if err != nil {
 		return nil, err
 	}
+	if loc == nil || loc.LocationCode == nil {
+		return nil, fmt.Errorf("dataforseo refresh requires a location with location_code")
+	}
 	rowRaw, taskRaw, err := callDfs(ctx, connID, "domain_rank_overview", map[string]any{
 		"target":        d.Host,
-		"location_code": 2840, // US — TODO v0.3 honour per-domain locale
-		"language_code": "en",
+		"location_code": *loc.LocationCode,
+		"language_code": strings.ToLower(loc.LanguageCode),
 	})
 	if err != nil {
 		return nil, err
@@ -141,10 +144,10 @@ func refreshDomainViaDataForSEO(ctx *sdk.AppCtx, d *Domain) (any, error) {
 	now := time.Now().Unix()
 	res, err := ctx.AppDB().Exec(
 		`INSERT INTO domain_metrics
-		    (domain_id, provider, ts, country_iso, organic_traffic,
+		    (domain_id, location_id, provider, ts, country_iso, organic_traffic,
 		     organic_keywords, paid_traffic, paid_keywords, raw_json)
-		 VALUES (?, 'dataforseo', ?, 'US', ?, ?, ?, ?, ?)`,
-		d.ID, now,
+		 VALUES (?, ?, 'dataforseo', ?, ?, ?, ?, ?, ?, ?)`,
+		d.ID, loc.ID, now, loc.CountryISO,
 		int64(m.Organic.ETV), m.Organic.Count,
 		int64(m.Paid.ETV), m.Paid.Count,
 		string(taskRaw),
@@ -154,14 +157,15 @@ func refreshDomainViaDataForSEO(ctx *sdk.AppCtx, d *Domain) (any, error) {
 	}
 	id, _ := res.LastInsertId()
 	return map[string]any{
-		"domain_id":     d.ID,
-		"snapshot_id":   id,
-		"provider":      "dataforseo",
-		"fetched_at":    now,
-		"organic_kw":    m.Organic.Count,
-		"organic_etv":   int64(m.Organic.ETV),
-		"paid_kw":       m.Paid.Count,
-		"paid_etv":      int64(m.Paid.ETV),
+		"domain_id":   d.ID,
+		"location_id": loc.ID,
+		"snapshot_id": id,
+		"provider":    "dataforseo",
+		"fetched_at":  now,
+		"organic_kw":  m.Organic.Count,
+		"organic_etv": int64(m.Organic.ETV),
+		"paid_kw":     m.Paid.Count,
+		"paid_etv":    int64(m.Paid.ETV),
 	}, nil
 }
 
@@ -172,31 +176,33 @@ func refreshDomainViaDataForSEO(ctx *sdk.AppCtx, d *Domain) (any, error) {
 // keyword per call; the monthly_searches array is the inline history
 // we unfold into keyword_volume_history.
 type dfsKeywordVolumeItem struct {
-	Keyword         string `json:"keyword"`
-	LocationCode    int    `json:"location_code"`
-	LanguageCode    string `json:"language_code"`
-	SearchVolume    *int64 `json:"search_volume"`
-	CompetitionIdx  *int64 `json:"competition_index"`
-	CPC             *float64 `json:"cpc"`
-	LowTopOfPageBid *float64 `json:"low_top_of_page_bid"`
+	Keyword          string   `json:"keyword"`
+	LocationCode     int      `json:"location_code"`
+	LanguageCode     string   `json:"language_code"`
+	SearchVolume     *int64   `json:"search_volume"`
+	CompetitionIdx   *int64   `json:"competition_index"`
+	CPC              *float64 `json:"cpc"`
+	LowTopOfPageBid  *float64 `json:"low_top_of_page_bid"`
 	HighTopOfPageBid *float64 `json:"high_top_of_page_bid"`
-	MonthlySearches []struct {
+	MonthlySearches  []struct {
 		Year   int   `json:"year"`
 		Month  int   `json:"month"`
 		Volume int64 `json:"search_volume"`
 	} `json:"monthly_searches"`
 }
 
-func refreshKeywordViaDataForSEO(ctx *sdk.AppCtx, k *Keyword) (any, error) {
+func refreshKeywordViaDataForSEO(ctx *sdk.AppCtx, k *Keyword, loc *SEOLocation) (any, error) {
 	_, connID, err := boundProvider(ctx)
 	if err != nil {
 		return nil, err
 	}
-	loc := dfsLocationCode(k.CountryISO) // US=2840 etc.
+	if loc == nil || loc.LocationCode == nil {
+		return nil, fmt.Errorf("dataforseo refresh requires a location with location_code")
+	}
 	rowRaw, taskRaw, err := callDfs(ctx, connID, "keyword_search_volume", map[string]any{
 		"keywords":      []string{k.Text},
-		"location_code": loc,
-		"language_code": strings.ToLower(k.LanguageISO),
+		"location_code": *loc.LocationCode,
+		"language_code": strings.ToLower(loc.LanguageCode),
 	})
 	if err != nil {
 		return nil, err
@@ -224,9 +230,9 @@ func refreshKeywordViaDataForSEO(ctx *sdk.AppCtx, k *Keyword) (any, error) {
 
 	res, err := tx.Exec(
 		`INSERT INTO keyword_metrics
-		   (keyword_id, provider, ts, volume, cpc_usd, raw_json)
-		 VALUES (?, 'dataforseo', ?, ?, ?, ?)`,
-		k.ID, now, item.SearchVolume, item.CPC, string(taskRaw),
+		   (keyword_id, location_id, provider, ts, volume, cpc_usd, raw_json)
+		 VALUES (?, ?, 'dataforseo', ?, ?, ?, ?)`,
+		k.ID, loc.ID, now, item.SearchVolume, item.CPC, string(taskRaw),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("insert keyword_metrics: %w", err)
@@ -234,7 +240,7 @@ func refreshKeywordViaDataForSEO(ctx *sdk.AppCtx, k *Keyword) (any, error) {
 	snapID, _ := res.LastInsertId()
 
 	// Unfold monthly_searches → keyword_volume_history. Upsert on the
-	// (keyword_id, provider, year, month) UNIQUE so re-refreshing
+	// (keyword_id, location_id, provider, year, month) UNIQUE so re-refreshing
 	// doesn't duplicate. ON CONFLICT updates volume to the freshest
 	// figure DataForSEO reports for that month.
 	for _, mo := range item.MonthlySearches {
@@ -243,11 +249,11 @@ func refreshKeywordViaDataForSEO(ctx *sdk.AppCtx, k *Keyword) (any, error) {
 		}
 		if _, err := tx.Exec(
 			`INSERT INTO keyword_volume_history
-			   (keyword_id, provider, year, month, volume)
-			 VALUES (?, 'dataforseo', ?, ?, ?)
-			 ON CONFLICT(keyword_id, provider, year, month)
+			   (keyword_id, location_id, provider, year, month, volume)
+			 VALUES (?, ?, 'dataforseo', ?, ?, ?)
+			 ON CONFLICT(keyword_id, location_id, provider, year, month)
 			 DO UPDATE SET volume = excluded.volume`,
-			k.ID, mo.Year, mo.Month, mo.Volume,
+			k.ID, loc.ID, mo.Year, mo.Month, mo.Volume,
 		); err != nil {
 			return nil, fmt.Errorf("upsert volume history (%d-%02d): %w", mo.Year, mo.Month, err)
 		}
@@ -257,6 +263,7 @@ func refreshKeywordViaDataForSEO(ctx *sdk.AppCtx, k *Keyword) (any, error) {
 	}
 	return map[string]any{
 		"keyword_id":   k.ID,
+		"location_id":  loc.ID,
 		"snapshot_id":  snapID,
 		"provider":     "dataforseo",
 		"fetched_at":   now,
@@ -268,15 +275,15 @@ func refreshKeywordViaDataForSEO(ctx *sdk.AppCtx, k *Keyword) (any, error) {
 // ─── Backlinks list ──────────────────────────────────────────────
 
 type dfsBacklinkItem struct {
-	URLFrom         string  `json:"url_from"`
-	URLTo           string  `json:"url_to"`
-	Anchor          string  `json:"anchor"`
-	Dofollow        bool    `json:"dofollow"`
-	Attributes      []string `json:"attributes"`
-	IsLost          bool    `json:"is_lost"`
-	DomainFromRank  *int64  `json:"domain_from_rank"`
-	FirstSeen       string  `json:"first_seen"`
-	LastSeen        string  `json:"last_seen"`
+	URLFrom        string   `json:"url_from"`
+	URLTo          string   `json:"url_to"`
+	Anchor         string   `json:"anchor"`
+	Dofollow       bool     `json:"dofollow"`
+	Attributes     []string `json:"attributes"`
+	IsLost         bool     `json:"is_lost"`
+	DomainFromRank *int64   `json:"domain_from_rank"`
+	FirstSeen      string   `json:"first_seen"`
+	LastSeen       string   `json:"last_seen"`
 }
 
 func refreshBacklinksViaDataForSEO(ctx *sdk.AppCtx, d *Domain) (any, error) {
@@ -285,9 +292,9 @@ func refreshBacklinksViaDataForSEO(ctx *sdk.AppCtx, d *Domain) (any, error) {
 		return nil, err
 	}
 	rowRaw, _, err := callDfs(ctx, connID, "backlinks_list", map[string]any{
-		"target": d.Host,
-		"mode":   "as_is",
-		"limit":  100, // v0.2 cap; v0.3 paginates
+		"target":                d.Host,
+		"mode":                  "as_is",
+		"limit":                 100, // v0.2 cap; v0.3 paginates
 		"backlinks_status_type": "all",
 	})
 	if err != nil {
@@ -354,42 +361,211 @@ func refreshBacklinksViaDataForSEO(ctx *sdk.AppCtx, d *Domain) (any, error) {
 
 // ─── Helpers ─────────────────────────────────────────────────────
 
-// dfsLocationCode maps 2-letter ISO → DataForSEO's integer
-// location_code. Coverage: the top markets only; everything else
-// falls back to US (2840). v0.3 should hydrate this from
-// /v3/dataforseo_labs/locations_and_languages on first call and
-// cache, so we don't need to compile-in a 200-row table.
-func dfsLocationCode(iso string) int {
-	switch strings.ToUpper(iso) {
-	case "US":
-		return 2840
-	case "GB", "UK":
-		return 2826
-	case "CA":
-		return 2124
-	case "AU":
-		return 2036
-	case "DE":
-		return 2276
-	case "FR":
-		return 2250
-	case "ES":
-		return 2724
-	case "IT":
-		return 2380
-	case "BR":
-		return 2076
-	case "IN":
-		return 2356
-	case "JP":
-		return 2392
-	case "MX":
-		return 2484
-	case "NL":
-		return 2528
-	default:
-		return 2840
+func syncLocations(ctx *sdk.AppCtx) (any, error) {
+	slug, _, err := boundProvider(ctx)
+	if err != nil {
+		return nil, err
 	}
+	switch slug {
+	case "dataforseo":
+		return syncDataForSEOLocations(ctx)
+	default:
+		return nil, fmt.Errorf("provider %q does not support location sync yet", slug)
+	}
+}
+
+func syncDataForSEOLocations(ctx *sdk.AppCtx) (any, error) {
+	_, connID, err := boundProvider(ctx)
+	if err != nil {
+		return nil, err
+	}
+	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "locations_and_languages", map[string]any{})
+	if err != nil {
+		return nil, fmt.Errorf("dataforseo: ExecuteIntegrationTool(locations_and_languages): %w", err)
+	}
+	if !res.Success || res.Status >= 400 {
+		return nil, fmt.Errorf("dataforseo: locations_and_languages returned HTTP %d", res.Status)
+	}
+	var env dfsEnvelope
+	if err := json.Unmarshal(res.Data, &env); err != nil {
+		return nil, fmt.Errorf("dataforseo: parse locations envelope: %w", err)
+	}
+	if env.StatusCode != 20000 {
+		return nil, fmt.Errorf("dataforseo: locations status %d: %s", env.StatusCode, env.StatusMsg)
+	}
+	if len(env.Tasks) == 0 {
+		return nil, fmt.Errorf("dataforseo: locations returned zero tasks")
+	}
+	now := time.Now().Unix()
+	tx, err := ctx.AppDB().Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	upserts := 0
+	skipped := 0
+	for _, task := range env.Tasks {
+		if task.StatusCode != 20000 {
+			return nil, fmt.Errorf("dataforseo: locations task status %d: %s", task.StatusCode, task.StatusMsg)
+		}
+		for _, raw := range task.Result {
+			n, s, err := upsertDfsLocationRaw(tx, raw, now)
+			if err != nil {
+				return nil, err
+			}
+			upserts += n
+			skipped += s
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return map[string]any{
+		"provider":      "dataforseo",
+		"rows_upserted": upserts,
+		"rows_skipped":  skipped,
+		"synced_at":     now,
+	}, nil
+}
+
+func upsertDfsLocationRaw(tx *sql.Tx, raw json.RawMessage, syncedAt int64) (upserts int, skipped int, err error) {
+	var arr []json.RawMessage
+	if err := json.Unmarshal(raw, &arr); err == nil && arr != nil {
+		for _, item := range arr {
+			n, s, err := upsertDfsLocationRaw(tx, item, syncedAt)
+			if err != nil {
+				return upserts, skipped, err
+			}
+			upserts += n
+			skipped += s
+		}
+		return upserts, skipped, nil
+	}
+	var obj map[string]any
+	if err := json.Unmarshal(raw, &obj); err != nil {
+		return 0, 0, fmt.Errorf("parse dataforseo location row: %w", err)
+	}
+	if xs, ok := obj["items"].([]any); ok {
+		for _, x := range xs {
+			itemRaw, _ := json.Marshal(x)
+			n, s, err := upsertDfsLocationRaw(tx, itemRaw, syncedAt)
+			if err != nil {
+				return upserts, skipped, err
+			}
+			upserts += n
+			skipped += s
+		}
+		return upserts, skipped, nil
+	}
+	locCode, hasCode := numberField(obj, "location_code")
+	locName := firstString(obj, "location_name", "location")
+	country := strings.ToUpper(firstString(obj, "country_iso_code", "country_iso", "country_code"))
+	langCode := strings.ToLower(firstString(obj, "language_code"))
+	langName := firstString(obj, "language_name")
+	if !hasCode || locName == "" || langCode == "" {
+		return 0, 1, nil
+	}
+	sources := dfsLocationSources(obj)
+	if len(sources) == 0 {
+		sources = []string{"google"}
+	}
+	rawText := string(raw)
+	for _, source := range sources {
+		if source == "" {
+			continue
+		}
+		var countryArg any
+		if country != "" {
+			countryArg = country
+		}
+		_, err := tx.Exec(
+			`INSERT INTO seo_locations
+			   (provider, search_engine, location_code, location_name, country_iso,
+			    language_code, language_name, is_active, raw_json, synced_at)
+			 VALUES ('dataforseo', ?, ?, ?, ?, ?, ?, 1, ?, ?)
+			 ON CONFLICT(provider, search_engine, location_code, language_code)
+			 DO UPDATE SET
+			    location_name = excluded.location_name,
+			    country_iso = excluded.country_iso,
+			    language_name = excluded.language_name,
+			    is_active = 1,
+			    raw_json = excluded.raw_json,
+			    synced_at = excluded.synced_at`,
+			source, locCode, locName, countryArg, langCode, langName, rawText, syncedAt)
+		if err != nil {
+			return upserts, skipped, fmt.Errorf("upsert dataforseo location: %w", err)
+		}
+		upserts++
+	}
+	return upserts, skipped, nil
+}
+
+func dfsLocationSources(obj map[string]any) []string {
+	out := []string{}
+	add := func(s string) {
+		s = strings.ToLower(strings.TrimSpace(s))
+		if s == "" {
+			return
+		}
+		for _, existing := range out {
+			if existing == s {
+				return
+			}
+		}
+		out = append(out, s)
+	}
+	add(firstString(obj, "source", "search_engine", "se"))
+	if xs, ok := obj["available_sources"].([]any); ok {
+		for _, x := range xs {
+			switch v := x.(type) {
+			case string:
+				add(v)
+			case map[string]any:
+				add(firstString(v, "source", "search_engine", "se"))
+			}
+		}
+	}
+	if xs, ok := obj["sources"].([]any); ok {
+		for _, x := range xs {
+			if s, ok := x.(string); ok {
+				add(s)
+			}
+		}
+	}
+	return out
+}
+
+func firstString(obj map[string]any, keys ...string) string {
+	for _, key := range keys {
+		if v, ok := obj[key]; ok {
+			switch x := v.(type) {
+			case string:
+				if strings.TrimSpace(x) != "" {
+					return strings.TrimSpace(x)
+				}
+			}
+		}
+	}
+	return ""
+}
+
+func numberField(obj map[string]any, key string) (int64, bool) {
+	v, ok := obj[key]
+	if !ok {
+		return 0, false
+	}
+	switch x := v.(type) {
+	case float64:
+		return int64(x), true
+	case int64:
+		return x, true
+	case int:
+		return int64(x), true
+	case json.Number:
+		n, err := x.Int64()
+		return n, err == nil
+	}
+	return 0, false
 }
 
 // parseDfsTime parses DataForSEO's "YYYY-MM-DD HH:MM:SS +00:00"

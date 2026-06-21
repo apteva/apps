@@ -20,11 +20,31 @@
 -- project the install belongs to (or '' for global scope). Children
 -- (pages, *_metrics, rankings, backlinks) inherit scope via FK.
 
+CREATE TABLE IF NOT EXISTS seo_locations (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    provider        TEXT    NOT NULL,                  -- 'dataforseo' | 'ahrefs' | 'moz'
+    search_engine   TEXT    NOT NULL DEFAULT 'google', -- google | bing | amazon | youtube | ...
+    location_code   INTEGER,                           -- provider-specific numeric id when available
+    location_name   TEXT    NOT NULL,
+    country_iso     TEXT,                              -- 2-letter ISO when provider exposes it
+    language_code   TEXT    NOT NULL,                  -- provider language code, e.g. 'en'
+    language_name   TEXT    NOT NULL DEFAULT '',
+    is_active       INTEGER NOT NULL DEFAULT 1,
+    raw_json        TEXT    NOT NULL DEFAULT '{}',
+    synced_at       INTEGER,                           -- unix seconds
+    created_at      TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    UNIQUE(provider, search_engine, location_code, language_code)
+);
+
+CREATE INDEX IF NOT EXISTS idx_seo_locations_lookup
+    ON seo_locations(provider, search_engine, country_iso, language_code, is_active);
+
 CREATE TABLE IF NOT EXISTS domains (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     project_id  TEXT    NOT NULL,
     host        TEXT    NOT NULL,                       -- normalised: lowercase, no scheme, no trailing slash
     label       TEXT    NOT NULL DEFAULT '',
+    default_location_id INTEGER REFERENCES seo_locations(id),
     created_at  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
     UNIQUE(project_id, host)
 );
@@ -45,6 +65,7 @@ CREATE INDEX IF NOT EXISTS idx_pages_domain ON pages(domain_id);
 CREATE TABLE IF NOT EXISTS domain_metrics (
     id                       INTEGER PRIMARY KEY AUTOINCREMENT,
     domain_id                INTEGER NOT NULL REFERENCES domains(id) ON DELETE CASCADE,
+    location_id              INTEGER NOT NULL REFERENCES seo_locations(id),
     provider                 TEXT    NOT NULL,          -- 'ahrefs' | 'dataforseo' | 'moz' | 'manual' | 'stub'
     ts                       INTEGER NOT NULL,          -- unix seconds
     country_iso              TEXT,                      -- 2-letter ISO; NULL = global (Moz)
@@ -59,11 +80,12 @@ CREATE TABLE IF NOT EXISTS domain_metrics (
     raw_json                 TEXT    NOT NULL DEFAULT '{}'
 );
 
-CREATE INDEX IF NOT EXISTS idx_domain_metrics_lookup ON domain_metrics(domain_id, provider, ts DESC);
+CREATE INDEX IF NOT EXISTS idx_domain_metrics_lookup ON domain_metrics(domain_id, provider, location_id, ts DESC);
 
 CREATE TABLE IF NOT EXISTS page_metrics (
     id                       INTEGER PRIMARY KEY AUTOINCREMENT,
     page_id                  INTEGER NOT NULL REFERENCES pages(id) ON DELETE CASCADE,
+    location_id              INTEGER NOT NULL REFERENCES seo_locations(id),
     provider                 TEXT    NOT NULL,
     ts                       INTEGER NOT NULL,
     country_iso              TEXT,
@@ -75,16 +97,17 @@ CREATE TABLE IF NOT EXISTS page_metrics (
     raw_json                 TEXT    NOT NULL DEFAULT '{}'
 );
 
-CREATE INDEX IF NOT EXISTS idx_page_metrics_lookup ON page_metrics(page_id, provider, ts DESC);
+CREATE INDEX IF NOT EXISTS idx_page_metrics_lookup ON page_metrics(page_id, provider, location_id, ts DESC);
 
 CREATE TABLE IF NOT EXISTS keywords (
     id            INTEGER PRIMARY KEY AUTOINCREMENT,
     project_id    TEXT    NOT NULL,
     text          TEXT    NOT NULL,                     -- normalised: trimmed, lowercased
-    country_iso   TEXT    NOT NULL DEFAULT 'US',        -- 2-letter ISO
-    language_iso  TEXT    NOT NULL DEFAULT 'en',        -- ISO 639-1
+    location_id   INTEGER NOT NULL REFERENCES seo_locations(id),
+    country_iso   TEXT    NOT NULL,                     -- denormalised from seo_locations for fast filtering
+    language_iso  TEXT    NOT NULL,                     -- denormalised from seo_locations for fast filtering
     created_at    TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-    UNIQUE(project_id, text, country_iso, language_iso)
+    UNIQUE(project_id, text, location_id)
 );
 
 CREATE INDEX IF NOT EXISTS idx_keywords_scope ON keywords(project_id);
@@ -92,6 +115,7 @@ CREATE INDEX IF NOT EXISTS idx_keywords_scope ON keywords(project_id);
 CREATE TABLE IF NOT EXISTS keyword_metrics (
     id                INTEGER PRIMARY KEY AUTOINCREMENT,
     keyword_id        INTEGER NOT NULL REFERENCES keywords(id) ON DELETE CASCADE,
+    location_id       INTEGER NOT NULL REFERENCES seo_locations(id),
     provider          TEXT    NOT NULL,
     ts                INTEGER NOT NULL,
     volume            INTEGER,                          -- monthly searches
@@ -104,7 +128,7 @@ CREATE TABLE IF NOT EXISTS keyword_metrics (
     raw_json          TEXT    NOT NULL DEFAULT '{}'
 );
 
-CREATE INDEX IF NOT EXISTS idx_keyword_metrics_lookup ON keyword_metrics(keyword_id, provider, ts DESC);
+CREATE INDEX IF NOT EXISTS idx_keyword_metrics_lookup ON keyword_metrics(keyword_id, provider, location_id, ts DESC);
 
 -- Monthly volume series. All three providers expose ~24 months
 -- inline on every keyword fetch — denormalising into snapshot rows
@@ -112,20 +136,22 @@ CREATE INDEX IF NOT EXISTS idx_keyword_metrics_lookup ON keyword_metrics(keyword
 CREATE TABLE IF NOT EXISTS keyword_volume_history (
     id          INTEGER PRIMARY KEY AUTOINCREMENT,
     keyword_id  INTEGER NOT NULL REFERENCES keywords(id) ON DELETE CASCADE,
+    location_id INTEGER NOT NULL REFERENCES seo_locations(id),
     provider    TEXT    NOT NULL,
     year        INTEGER NOT NULL,
     month       INTEGER NOT NULL CHECK(month BETWEEN 1 AND 12),
     volume      INTEGER NOT NULL,
-    UNIQUE(keyword_id, provider, year, month)
+    UNIQUE(keyword_id, location_id, provider, year, month)
 );
 
 CREATE INDEX IF NOT EXISTS idx_keyword_volume_history_lookup
-    ON keyword_volume_history(keyword_id, year DESC, month DESC);
+    ON keyword_volume_history(keyword_id, location_id, year DESC, month DESC);
 
 CREATE TABLE IF NOT EXISTS rankings (
     id                  INTEGER PRIMARY KEY AUTOINCREMENT,
     domain_id           INTEGER NOT NULL REFERENCES domains(id)  ON DELETE CASCADE,
     keyword_id          INTEGER NOT NULL REFERENCES keywords(id) ON DELETE CASCADE,
+    location_id         INTEGER NOT NULL REFERENCES seo_locations(id),
     provider            TEXT    NOT NULL,
     ts                  INTEGER NOT NULL,
     rank                INTEGER,                        -- 1..100; NULL if outside tracked range
@@ -135,8 +161,8 @@ CREATE TABLE IF NOT EXISTS rankings (
     serp_features_json  TEXT    NOT NULL DEFAULT '[]'
 );
 
-CREATE INDEX IF NOT EXISTS idx_rankings_domain_kw_ts ON rankings(domain_id, keyword_id, ts DESC);
-CREATE INDEX IF NOT EXISTS idx_rankings_kw_ts        ON rankings(keyword_id, ts DESC);
+CREATE INDEX IF NOT EXISTS idx_rankings_domain_kw_ts ON rankings(domain_id, keyword_id, location_id, ts DESC);
+CREATE INDEX IF NOT EXISTS idx_rankings_kw_ts        ON rankings(keyword_id, location_id, ts DESC);
 
 CREATE TABLE IF NOT EXISTS backlinks (
     id                INTEGER PRIMARY KEY AUTOINCREMENT,

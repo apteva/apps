@@ -1,16 +1,16 @@
 // Apteva SEO app — generic SEO research workbench.
 //
 // v0.1 surface:
-//   * domains: hostname identity, project-scoped, dedup'd via UNIQUE
+//   - domains: hostname identity, project-scoped, dedup'd via UNIQUE
 //     (project_id, host) where host is normalised (lowercase, no
 //     scheme, no leading 'www.', no path).
-//   * keywords: (text, country_iso, language_iso) identity, also
+//   - keywords: (text, country_iso, language_iso) identity, also
 //     project-scoped. Text is normalised (trimmed, lowercased).
 //
-// Pages, rankings, backlinks, panel UI, and a stub seo_data_provider
-// land in v0.2; scheduled refresh via the jobs app lands in v0.3.
+// v0.3 adds locale-aware tracking and UI/HTTP-driven refreshes; scheduled
+// refresh remains a future jobs-app extension.
 //
-// project_id comes from APTEVA_PROJECT_ID at runtime; '' = global
+// project_id comes from APTEVA_PROJECT_ID at runtime; ” = global
 // scope. Children (pages, *_metrics, rankings, backlinks) inherit
 // scope via FK rather than carrying their own column.
 package main
@@ -33,8 +33,8 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: seo
 display_name: SEO
-version: 0.2.0
-description: Generic SEO research workbench — domains, keywords, rankings, backlinks behind one pluggable provider integration.
+version: 0.3.0
+description: Generic SEO research workbench — locale-aware domains, keywords, rankings, backlinks behind one pluggable provider integration.
 author: Apteva
 scopes: [project, global]
 requires:
@@ -51,11 +51,12 @@ provides:
   http_routes:
     - prefix: /
   mcp_tools:
-    - { name: domains_add,    description: "Add a domain (hostname) to track." }
+    - { name: locations_list, description: "List active SEO provider locations." }
+    - { name: domains_add,    description: "Add a domain (hostname) to track; accepts location_id or country_iso+language_code for the default locale." }
     - { name: domains_list,   description: "List tracked domains in this scope." }
     - { name: domains_get,    description: "Read one domain plus latest metrics." }
     - { name: domains_remove, description: "Remove a domain (cascades to children)." }
-    - { name: keywords_add,    description: "Add a keyword (text + country + language) to track." }
+    - { name: keywords_add,    description: "Add a keyword to track; requires location_id or country_iso+language_code." }
     - { name: keywords_list,   description: "List keywords in this scope." }
     - { name: keywords_get,    description: "Read one keyword plus latest metrics." }
     - { name: keywords_remove, description: "Remove a keyword (cascades to children)." }
@@ -127,6 +128,9 @@ func (a *App) HTTPRoutes() []sdk.Route {
 	return []sdk.Route{
 		{Pattern: "/domains/", Handler: a.handleDomainsItem},
 		{Pattern: "/keywords/", Handler: a.handleKeywordsItem},
+		{Pattern: "/locations", Handler: a.handleLocationsList},
+		{Pattern: "/locations/sync", Handler: a.handleLocationsSync},
+		{Pattern: "/tools/call", Handler: a.handleToolsCall},
 	}
 }
 
@@ -135,10 +139,14 @@ func (a *App) HTTPRoutes() []sdk.Route {
 func (a *App) MCPTools() []sdk.Tool {
 	return []sdk.Tool{
 		{Name: "domains_add",
-			Description: "Add a domain (hostname) to track. Host is normalised: lowercased, scheme stripped, leading 'www.' stripped, no trailing slash. Args: host (required), label?.",
+			Description: "Add a domain (hostname) to track. Host is normalised. Args: host (required), label?, location_id? or country_iso+language_code? to set a default locale.",
 			InputSchema: schemaObject(map[string]any{
-				"host":  map[string]any{"type": "string"},
-				"label": map[string]any{"type": "string"},
+				"host":          map[string]any{"type": "string"},
+				"label":         map[string]any{"type": "string"},
+				"location_id":   map[string]any{"type": "integer"},
+				"country_iso":   map[string]any{"type": "string"},
+				"language_code": map[string]any{"type": "string"},
+				"search_engine": map[string]any{"type": "string"},
 			}, []string{"host"}),
 			Handler: a.toolDomainsAdd},
 		{Name: "domains_list",
@@ -155,11 +163,14 @@ func (a *App) MCPTools() []sdk.Tool {
 			Handler:     a.toolDomainsRemove},
 
 		{Name: "keywords_add",
-			Description: "Add a keyword to track. Args: text (required), country_iso? (default 'US'), language_iso? (default 'en'). Identity = (text, country_iso, language_iso); duplicates upsert.",
+			Description: "Add a keyword to track. Args: text (required), location_id or country_iso+language_code. No implicit default locale is applied.",
 			InputSchema: schemaObject(map[string]any{
-				"text":         map[string]any{"type": "string"},
-				"country_iso":  map[string]any{"type": "string"},
-				"language_iso": map[string]any{"type": "string"},
+				"text":          map[string]any{"type": "string"},
+				"location_id":   map[string]any{"type": "integer"},
+				"country_iso":   map[string]any{"type": "string"},
+				"language_iso":  map[string]any{"type": "string"},
+				"language_code": map[string]any{"type": "string"},
+				"search_engine": map[string]any{"type": "string"},
 			}, []string{"text"}),
 			Handler: a.toolKeywordsAdd},
 		{Name: "keywords_list",
@@ -210,62 +221,106 @@ func (a *App) MCPTools() []sdk.Tool {
 				"keyword_id": map[string]any{"type": "integer"},
 			}, []string{"keyword_id"}),
 			Handler: a.toolKeywordVolumeHistory},
+		{Name: "locations_list",
+			Description: "List active SEO provider locations. Args: provider?, search_engine?, country_iso?, language_code?, q?, limit?. Sync locations from the UI/HTTP route first.",
+			InputSchema: schemaObject(map[string]any{
+				"provider":      map[string]any{"type": "string"},
+				"search_engine": map[string]any{"type": "string"},
+				"country_iso":   map[string]any{"type": "string"},
+				"language_code": map[string]any{"type": "string"},
+				"language_iso":  map[string]any{"type": "string"},
+				"q":             map[string]any{"type": "string"},
+				"limit":         map[string]any{"type": "integer"},
+			}, nil),
+			Handler: a.toolLocationsList},
 	}
 }
 
 // ─── Models ──────────────────────────────────────────────────────
 
 type Domain struct {
-	ID        int64  `json:"id"`
-	ProjectID string `json:"project_id"`
-	Host      string `json:"host"`
-	Label     string `json:"label,omitempty"`
-	CreatedAt string `json:"created_at"`
+	ID                int64  `json:"id"`
+	ProjectID         string `json:"project_id"`
+	Host              string `json:"host"`
+	Label             string `json:"label,omitempty"`
+	DefaultLocationID *int64 `json:"default_location_id,omitempty"`
+	CreatedAt         string `json:"created_at"`
 }
 
 type Keyword struct {
 	ID          int64  `json:"id"`
 	ProjectID   string `json:"project_id"`
 	Text        string `json:"text"`
+	LocationID  int64  `json:"location_id"`
 	CountryISO  string `json:"country_iso"`
 	LanguageISO string `json:"language_iso"`
 	CreatedAt   string `json:"created_at"`
 }
 
+type SEOLocation struct {
+	ID           int64   `json:"id"`
+	Provider     string  `json:"provider"`
+	SearchEngine string  `json:"search_engine"`
+	LocationCode *int64  `json:"location_code,omitempty"`
+	LocationName string  `json:"location_name"`
+	CountryISO   *string `json:"country_iso,omitempty"`
+	LanguageCode string  `json:"language_code"`
+	LanguageName string  `json:"language_name,omitempty"`
+	IsActive     int64   `json:"is_active"`
+	SyncedAt     *int64  `json:"synced_at,omitempty"`
+	CreatedAt    string  `json:"created_at"`
+}
+
 type DomainMetrics struct {
-	ID                     int64    `json:"id"`
-	DomainID               int64    `json:"domain_id"`
-	Provider               string   `json:"provider"`
-	TS                     int64    `json:"ts"`
-	CountryISO             *string  `json:"country_iso,omitempty"`
-	AuthorityScore         *int64   `json:"authority_score,omitempty"`
-	SpamScore              *float64 `json:"spam_score,omitempty"`
-	OrganicTraffic         *int64   `json:"organic_traffic,omitempty"`
-	OrganicKeywords        *int64   `json:"organic_keywords,omitempty"`
-	PaidTraffic            *int64   `json:"paid_traffic,omitempty"`
-	PaidKeywords           *int64   `json:"paid_keywords,omitempty"`
-	BacklinksCount         *int64   `json:"backlinks_count,omitempty"`
-	ReferringDomainsCount  *int64   `json:"referring_domains_count,omitempty"`
+	ID                    int64    `json:"id"`
+	DomainID              int64    `json:"domain_id"`
+	LocationID            int64    `json:"location_id"`
+	Provider              string   `json:"provider"`
+	TS                    int64    `json:"ts"`
+	CountryISO            *string  `json:"country_iso,omitempty"`
+	AuthorityScore        *int64   `json:"authority_score,omitempty"`
+	SpamScore             *float64 `json:"spam_score,omitempty"`
+	OrganicTraffic        *int64   `json:"organic_traffic,omitempty"`
+	OrganicKeywords       *int64   `json:"organic_keywords,omitempty"`
+	PaidTraffic           *int64   `json:"paid_traffic,omitempty"`
+	PaidKeywords          *int64   `json:"paid_keywords,omitempty"`
+	BacklinksCount        *int64   `json:"backlinks_count,omitempty"`
+	ReferringDomainsCount *int64   `json:"referring_domains_count,omitempty"`
 }
 
 type KeywordMetrics struct {
-	ID            int64    `json:"id"`
-	KeywordID     int64    `json:"keyword_id"`
-	Provider      string   `json:"provider"`
-	TS            int64    `json:"ts"`
-	Volume        *int64   `json:"volume,omitempty"`
-	Difficulty    *int64   `json:"difficulty,omitempty"`
-	CPCUSD        *float64 `json:"cpc_usd,omitempty"`
-	Clicks        *int64   `json:"clicks,omitempty"`
-	OrganicCTR    *float64 `json:"organic_ctr,omitempty"`
-	IntentJSON    string   `json:"intent_json"`
-	SerpFeatJSON  string   `json:"serp_features_json"`
+	ID           int64    `json:"id"`
+	KeywordID    int64    `json:"keyword_id"`
+	LocationID   int64    `json:"location_id"`
+	Provider     string   `json:"provider"`
+	TS           int64    `json:"ts"`
+	Volume       *int64   `json:"volume,omitempty"`
+	Difficulty   *int64   `json:"difficulty,omitempty"`
+	CPCUSD       *float64 `json:"cpc_usd,omitempty"`
+	Clicks       *int64   `json:"clicks,omitempty"`
+	OrganicCTR   *float64 `json:"organic_ctr,omitempty"`
+	IntentJSON   string   `json:"intent_json"`
+	SerpFeatJSON string   `json:"serp_features_json"`
 }
 
 // ─── Scope ───────────────────────────────────────────────────────
 
-func projectScope() string {
-	return os.Getenv("APTEVA_PROJECT_ID") // '' = global
+func projectScope(ctxs ...*sdk.AppCtx) string {
+	if len(ctxs) > 0 && ctxs[0] != nil {
+		if pid := strings.TrimSpace(ctxs[0].CurrentProject()); pid != "" {
+			return pid
+		}
+	}
+	return strings.TrimSpace(os.Getenv("APTEVA_PROJECT_ID")) // '' = global
+}
+
+func projectScopeFromArgs(ctx *sdk.AppCtx, args map[string]any) string {
+	if args != nil {
+		if pid := strings.TrimSpace(strArg(args, "_project_id", "")); pid != "" {
+			return pid
+		}
+	}
+	return projectScope(ctx)
 }
 
 // ─── Normalisation ───────────────────────────────────────────────
@@ -305,24 +360,158 @@ func normaliseKeyword(raw string) string {
 
 // ─── DB helpers ──────────────────────────────────────────────────
 
+func scanLocation(s interface{ Scan(...any) error }) (*SEOLocation, error) {
+	var l SEOLocation
+	var code sql.NullInt64
+	var country sql.NullString
+	var synced sql.NullInt64
+	err := s.Scan(&l.ID, &l.Provider, &l.SearchEngine, &code, &l.LocationName,
+		&country, &l.LanguageCode, &l.LanguageName, &l.IsActive, &synced, &l.CreatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if code.Valid {
+		l.LocationCode = &code.Int64
+	}
+	if country.Valid {
+		l.CountryISO = &country.String
+	}
+	if synced.Valid {
+		l.SyncedAt = &synced.Int64
+	}
+	return &l, nil
+}
+
+const locationSelectCols = `id, provider, search_engine, location_code, location_name,
+       country_iso, language_code, language_name, is_active, synced_at, created_at`
+
+func getLocation(db *sql.DB, id int64) (*SEOLocation, error) {
+	if id == 0 {
+		return nil, errors.New("location_id required")
+	}
+	l, err := scanLocation(db.QueryRow(
+		`SELECT `+locationSelectCols+` FROM seo_locations WHERE id = ?`, id))
+	if err != nil {
+		return nil, err
+	}
+	if l == nil {
+		return nil, fmt.Errorf("location %d not found; sync provider locations first", id)
+	}
+	if l.IsActive == 0 {
+		return nil, fmt.Errorf("location %d is inactive", id)
+	}
+	return l, nil
+}
+
+func resolveLocationFromArgs(db *sql.DB, args map[string]any, defaultID *int64) (*SEOLocation, error) {
+	if id := toInt64(args["location_id"]); id != 0 {
+		return getLocation(db, id)
+	}
+	if defaultID != nil && *defaultID != 0 {
+		return getLocation(db, *defaultID)
+	}
+	provider := strings.ToLower(strings.TrimSpace(strArg(args, "provider", "dataforseo")))
+	searchEngine := strings.ToLower(strings.TrimSpace(strArg(args, "search_engine", "google")))
+	country := strings.ToUpper(strings.TrimSpace(strArg(args, "country_iso", "")))
+	lang := strings.ToLower(strings.TrimSpace(strArg(args, "language_code", strArg(args, "language_iso", ""))))
+	if country == "" || lang == "" {
+		return nil, errors.New("location_id or country_iso + language_code are required; sync provider locations first")
+	}
+	l, err := scanLocation(db.QueryRow(
+		`SELECT `+locationSelectCols+`
+		   FROM seo_locations
+		  WHERE provider = ? AND search_engine = ? AND country_iso = ?
+		    AND language_code = ? AND is_active = 1
+		  ORDER BY CASE WHEN location_name = country_iso THEN 0 ELSE 1 END, location_name
+		  LIMIT 1`,
+		provider, searchEngine, country, lang))
+	if err != nil {
+		return nil, err
+	}
+	if l == nil {
+		return nil, fmt.Errorf("no active %s/%s location for %s/%s; sync locations before creating or refreshing SEO data", provider, searchEngine, country, lang)
+	}
+	return l, nil
+}
+
+func listLocations(db *sql.DB, args map[string]any) ([]SEOLocation, error) {
+	provider := strings.ToLower(strings.TrimSpace(strArg(args, "provider", "")))
+	searchEngine := strings.ToLower(strings.TrimSpace(strArg(args, "search_engine", "")))
+	country := strings.ToUpper(strings.TrimSpace(strArg(args, "country_iso", "")))
+	lang := strings.ToLower(strings.TrimSpace(strArg(args, "language_code", strArg(args, "language_iso", ""))))
+	q := strings.ToLower(strings.TrimSpace(strArg(args, "q", "")))
+	limit := int(toInt64(args["limit"]))
+	if limit <= 0 || limit > 500 {
+		limit = 200
+	}
+	sqlText := `SELECT ` + locationSelectCols + ` FROM seo_locations WHERE is_active = 1`
+	qargs := []any{}
+	if provider != "" {
+		sqlText += ` AND provider = ?`
+		qargs = append(qargs, provider)
+	}
+	if searchEngine != "" {
+		sqlText += ` AND search_engine = ?`
+		qargs = append(qargs, searchEngine)
+	}
+	if country != "" {
+		sqlText += ` AND country_iso = ?`
+		qargs = append(qargs, country)
+	}
+	if lang != "" {
+		sqlText += ` AND language_code = ?`
+		qargs = append(qargs, lang)
+	}
+	if q != "" {
+		sqlText += ` AND (lower(location_name) LIKE ? OR lower(language_name) LIKE ? OR lower(language_code) LIKE ?)`
+		like := "%" + q + "%"
+		qargs = append(qargs, like, like, like)
+	}
+	sqlText += ` ORDER BY provider, search_engine, location_name, language_code LIMIT ?`
+	qargs = append(qargs, limit)
+	rows, err := db.Query(sqlText, qargs...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []SEOLocation{}
+	for rows.Next() {
+		l, err := scanLocation(rows)
+		if err != nil {
+			return nil, err
+		}
+		if l != nil {
+			out = append(out, *l)
+		}
+	}
+	return out, rows.Err()
+}
+
 func getDomain(db *sql.DB, pid string, id int64) (*Domain, error) {
 	var d Domain
+	var defaultLoc sql.NullInt64
 	err := db.QueryRow(
-		`SELECT id, project_id, host, label, created_at
+		`SELECT id, project_id, host, label, default_location_id, created_at
 		   FROM domains WHERE id = ? AND project_id = ?`, id, pid,
-	).Scan(&d.ID, &d.ProjectID, &d.Host, &d.Label, &d.CreatedAt)
+	).Scan(&d.ID, &d.ProjectID, &d.Host, &d.Label, &defaultLoc, &d.CreatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("domain %d not found", id)
 	}
 	if err != nil {
 		return nil, err
 	}
+	if defaultLoc.Valid {
+		d.DefaultLocationID = &defaultLoc.Int64
+	}
 	return &d, nil
 }
 
 func listDomains(db *sql.DB, pid string) ([]Domain, error) {
 	rows, err := db.Query(
-		`SELECT id, project_id, host, label, created_at
+		`SELECT id, project_id, host, label, default_location_id, created_at
 		   FROM domains WHERE project_id = ? ORDER BY host`, pid)
 	if err != nil {
 		return nil, err
@@ -331,8 +520,12 @@ func listDomains(db *sql.DB, pid string) ([]Domain, error) {
 	out := []Domain{}
 	for rows.Next() {
 		var d Domain
-		if err := rows.Scan(&d.ID, &d.ProjectID, &d.Host, &d.Label, &d.CreatedAt); err != nil {
+		var defaultLoc sql.NullInt64
+		if err := rows.Scan(&d.ID, &d.ProjectID, &d.Host, &d.Label, &defaultLoc, &d.CreatedAt); err != nil {
 			return nil, err
+		}
+		if defaultLoc.Valid {
+			d.DefaultLocationID = &defaultLoc.Int64
 		}
 		out = append(out, d)
 	}
@@ -343,14 +536,14 @@ func listDomains(db *sql.DB, pid string) ([]Domain, error) {
 // any provider for the given domain. Nil + no error if there are none.
 func latestDomainMetrics(db *sql.DB, domainID int64) (*DomainMetrics, error) {
 	row := db.QueryRow(
-		`SELECT id, domain_id, provider, ts, country_iso,
+		`SELECT id, domain_id, location_id, provider, ts, country_iso,
 		        authority_score, spam_score, organic_traffic,
 		        organic_keywords, paid_traffic, paid_keywords,
 		        backlinks_count, referring_domains_count
 		   FROM domain_metrics WHERE domain_id = ?
 		   ORDER BY ts DESC LIMIT 1`, domainID)
 	var m DomainMetrics
-	err := row.Scan(&m.ID, &m.DomainID, &m.Provider, &m.TS, &m.CountryISO,
+	err := row.Scan(&m.ID, &m.DomainID, &m.LocationID, &m.Provider, &m.TS, &m.CountryISO,
 		&m.AuthorityScore, &m.SpamScore, &m.OrganicTraffic,
 		&m.OrganicKeywords, &m.PaidTraffic, &m.PaidKeywords,
 		&m.BacklinksCount, &m.ReferringDomainsCount)
@@ -366,9 +559,9 @@ func latestDomainMetrics(db *sql.DB, domainID int64) (*DomainMetrics, error) {
 func getKeyword(db *sql.DB, pid string, id int64) (*Keyword, error) {
 	var k Keyword
 	err := db.QueryRow(
-		`SELECT id, project_id, text, country_iso, language_iso, created_at
+		`SELECT id, project_id, text, location_id, country_iso, language_iso, created_at
 		   FROM keywords WHERE id = ? AND project_id = ?`, id, pid,
-	).Scan(&k.ID, &k.ProjectID, &k.Text, &k.CountryISO, &k.LanguageISO, &k.CreatedAt)
+	).Scan(&k.ID, &k.ProjectID, &k.Text, &k.LocationID, &k.CountryISO, &k.LanguageISO, &k.CreatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, fmt.Errorf("keyword %d not found", id)
 	}
@@ -388,12 +581,12 @@ func listKeywords(db *sql.DB, pid, countryISO string, limit int) ([]Keyword, err
 	)
 	if countryISO == "" {
 		rows, err = db.Query(
-			`SELECT id, project_id, text, country_iso, language_iso, created_at
+			`SELECT id, project_id, text, location_id, country_iso, language_iso, created_at
 			   FROM keywords WHERE project_id = ?
 			   ORDER BY text LIMIT ?`, pid, limit)
 	} else {
 		rows, err = db.Query(
-			`SELECT id, project_id, text, country_iso, language_iso, created_at
+			`SELECT id, project_id, text, location_id, country_iso, language_iso, created_at
 			   FROM keywords WHERE project_id = ? AND country_iso = ?
 			   ORDER BY text LIMIT ?`, pid, strings.ToUpper(countryISO), limit)
 	}
@@ -404,7 +597,7 @@ func listKeywords(db *sql.DB, pid, countryISO string, limit int) ([]Keyword, err
 	out := []Keyword{}
 	for rows.Next() {
 		var k Keyword
-		if err := rows.Scan(&k.ID, &k.ProjectID, &k.Text, &k.CountryISO, &k.LanguageISO, &k.CreatedAt); err != nil {
+		if err := rows.Scan(&k.ID, &k.ProjectID, &k.Text, &k.LocationID, &k.CountryISO, &k.LanguageISO, &k.CreatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, k)
@@ -414,12 +607,12 @@ func listKeywords(db *sql.DB, pid, countryISO string, limit int) ([]Keyword, err
 
 func latestKeywordMetrics(db *sql.DB, keywordID int64) (*KeywordMetrics, error) {
 	row := db.QueryRow(
-		`SELECT id, keyword_id, provider, ts, volume, difficulty,
+		`SELECT id, keyword_id, location_id, provider, ts, volume, difficulty,
 		        cpc_usd, clicks, organic_ctr, intent_json, serp_features_json
 		   FROM keyword_metrics WHERE keyword_id = ?
 		   ORDER BY ts DESC LIMIT 1`, keywordID)
 	var m KeywordMetrics
-	err := row.Scan(&m.ID, &m.KeywordID, &m.Provider, &m.TS,
+	err := row.Scan(&m.ID, &m.KeywordID, &m.LocationID, &m.Provider, &m.TS,
 		&m.Volume, &m.Difficulty, &m.CPCUSD, &m.Clicks, &m.OrganicCTR,
 		&m.IntentJSON, &m.SerpFeatJSON)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -439,13 +632,22 @@ func (a *App) toolDomainsAdd(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		return nil, errors.New("host required (e.g. 'nike.com' or 'https://www.nike.com')")
 	}
 	label := strings.TrimSpace(strArg(args, "label", ""))
-	pid := projectScope()
+	pid := projectScopeFromArgs(ctx, args)
 	db := ctx.AppDB()
+	var locID any
+	if hasLocationArgs(args) {
+		loc, err := resolveLocationFromArgs(db, args, nil)
+		if err != nil {
+			return nil, err
+		}
+		locID = loc.ID
+	}
 	res, err := db.Exec(
-		`INSERT INTO domains (project_id, host, label) VALUES (?, ?, ?)
-		   ON CONFLICT(project_id, host) DO UPDATE SET label = excluded.label
-		   WHERE excluded.label != ''`,
-		pid, host, label)
+		`INSERT INTO domains (project_id, host, label, default_location_id) VALUES (?, ?, ?, ?)
+		   ON CONFLICT(project_id, host) DO UPDATE SET
+		     label = CASE WHEN excluded.label != '' THEN excluded.label ELSE domains.label END,
+		     default_location_id = COALESCE(excluded.default_location_id, domains.default_location_id)`,
+		pid, host, label, locID)
 	if err != nil {
 		return nil, fmt.Errorf("insert domain: %w", err)
 	}
@@ -458,8 +660,8 @@ func (a *App) toolDomainsAdd(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	return getDomain(db, pid, id)
 }
 
-func (a *App) toolDomainsList(ctx *sdk.AppCtx, _ map[string]any) (any, error) {
-	return listDomains(ctx.AppDB(), projectScope())
+func (a *App) toolDomainsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	return listDomains(ctx.AppDB(), projectScopeFromArgs(ctx, args))
 }
 
 func (a *App) toolDomainsGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -467,7 +669,7 @@ func (a *App) toolDomainsGet(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	if id == 0 {
 		return nil, errors.New("id required")
 	}
-	d, err := getDomain(ctx.AppDB(), projectScope(), id)
+	d, err := getDomain(ctx.AppDB(), projectScopeFromArgs(ctx, args), id)
 	if err != nil {
 		return nil, err
 	}
@@ -483,7 +685,7 @@ func (a *App) toolDomainsRemove(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	if id == 0 {
 		return nil, errors.New("id required")
 	}
-	pid := projectScope()
+	pid := projectScopeFromArgs(ctx, args)
 	if _, err := getDomain(ctx.AppDB(), pid, id); err != nil {
 		return nil, err
 	}
@@ -498,15 +700,25 @@ func (a *App) toolKeywordsAdd(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	if text == "" {
 		return nil, errors.New("text required")
 	}
-	country := strings.ToUpper(strArg(args, "country_iso", "US"))
-	lang := strings.ToLower(strArg(args, "language_iso", "en"))
-	pid := projectScope()
+	pid := projectScopeFromArgs(ctx, args)
 	db := ctx.AppDB()
+	loc, err := resolveLocationFromArgs(db, args, nil)
+	if err != nil {
+		return nil, err
+	}
+	country := ""
+	if loc.CountryISO != nil {
+		country = strings.ToUpper(*loc.CountryISO)
+	}
+	if country == "" {
+		return nil, fmt.Errorf("location %d has no country_iso; choose a country-scoped location for keyword metrics", loc.ID)
+	}
+	lang := strings.ToLower(loc.LanguageCode)
 	res, err := db.Exec(
-		`INSERT INTO keywords (project_id, text, country_iso, language_iso)
-		   VALUES (?, ?, ?, ?)
-		   ON CONFLICT(project_id, text, country_iso, language_iso) DO NOTHING`,
-		pid, text, country, lang)
+		`INSERT INTO keywords (project_id, text, location_id, country_iso, language_iso)
+		   VALUES (?, ?, ?, ?, ?)
+		   ON CONFLICT(project_id, text, location_id) DO NOTHING`,
+		pid, text, loc.ID, country, lang)
 	if err != nil {
 		return nil, fmt.Errorf("insert keyword: %w", err)
 	}
@@ -514,8 +726,8 @@ func (a *App) toolKeywordsAdd(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	if id == 0 {
 		row := db.QueryRow(
 			`SELECT id FROM keywords
-			   WHERE project_id = ? AND text = ? AND country_iso = ? AND language_iso = ?`,
-			pid, text, country, lang)
+			   WHERE project_id = ? AND text = ? AND location_id = ?`,
+			pid, text, loc.ID)
 		_ = row.Scan(&id)
 	}
 	return getKeyword(db, pid, id)
@@ -524,7 +736,7 @@ func (a *App) toolKeywordsAdd(ctx *sdk.AppCtx, args map[string]any) (any, error)
 func (a *App) toolKeywordsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	limit := int(toInt64(args["limit"]))
 	country := strArg(args, "country_iso", "")
-	return listKeywords(ctx.AppDB(), projectScope(), country, limit)
+	return listKeywords(ctx.AppDB(), projectScopeFromArgs(ctx, args), country, limit)
 }
 
 func (a *App) toolKeywordsGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -532,7 +744,7 @@ func (a *App) toolKeywordsGet(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	if id == 0 {
 		return nil, errors.New("id required")
 	}
-	k, err := getKeyword(ctx.AppDB(), projectScope(), id)
+	k, err := getKeyword(ctx.AppDB(), projectScopeFromArgs(ctx, args), id)
 	if err != nil {
 		return nil, err
 	}
@@ -548,7 +760,7 @@ func (a *App) toolKeywordsRemove(ctx *sdk.AppCtx, args map[string]any) (any, err
 	if id == 0 {
 		return nil, errors.New("id required")
 	}
-	pid := projectScope()
+	pid := projectScopeFromArgs(ctx, args)
 	if _, err := getKeyword(ctx.AppDB(), pid, id); err != nil {
 		return nil, err
 	}
@@ -561,39 +773,41 @@ func (a *App) toolKeywordsRemove(ctx *sdk.AppCtx, args map[string]any) (any, err
 // ─── Read-only tool handlers (v0.2) ─────────────────────────────
 
 type Ranking struct {
-	ID                int64  `json:"id"`
-	DomainID          int64  `json:"domain_id"`
-	KeywordID         int64  `json:"keyword_id"`
-	Provider          string `json:"provider"`
-	TS                int64  `json:"ts"`
-	Rank              *int64 `json:"rank,omitempty"`
-	RankURL           string `json:"rank_url,omitempty"`
-	Device            string `json:"device"`
-	SerpFeaturesJSON  string `json:"serp_features_json"`
+	ID               int64  `json:"id"`
+	DomainID         int64  `json:"domain_id"`
+	KeywordID        int64  `json:"keyword_id"`
+	LocationID       int64  `json:"location_id"`
+	Provider         string `json:"provider"`
+	TS               int64  `json:"ts"`
+	Rank             *int64 `json:"rank,omitempty"`
+	RankURL          string `json:"rank_url,omitempty"`
+	Device           string `json:"device"`
+	SerpFeaturesJSON string `json:"serp_features_json"`
 }
 
 type Backlink struct {
-	ID              int64   `json:"id"`
-	DomainID        int64   `json:"domain_id"`
-	Provider        string  `json:"provider"`
-	SourceURL       string  `json:"source_url"`
-	DestURL         string  `json:"dest_url"`
-	Anchor          string  `json:"anchor"`
-	IsDofollow      *int64  `json:"is_dofollow,omitempty"`
-	IsNofollow      *int64  `json:"is_nofollow,omitempty"`
-	IsUGC           *int64  `json:"is_ugc,omitempty"`
-	IsSponsored     *int64  `json:"is_sponsored,omitempty"`
-	SourceAuthority *int64  `json:"source_authority,omitempty"`
-	FirstSeen       *int64  `json:"first_seen,omitempty"`
-	LastSeen        *int64  `json:"last_seen,omitempty"`
-	IsLost          int64   `json:"is_lost"`
+	ID              int64  `json:"id"`
+	DomainID        int64  `json:"domain_id"`
+	Provider        string `json:"provider"`
+	SourceURL       string `json:"source_url"`
+	DestURL         string `json:"dest_url"`
+	Anchor          string `json:"anchor"`
+	IsDofollow      *int64 `json:"is_dofollow,omitempty"`
+	IsNofollow      *int64 `json:"is_nofollow,omitempty"`
+	IsUGC           *int64 `json:"is_ugc,omitempty"`
+	IsSponsored     *int64 `json:"is_sponsored,omitempty"`
+	SourceAuthority *int64 `json:"source_authority,omitempty"`
+	FirstSeen       *int64 `json:"first_seen,omitempty"`
+	LastSeen        *int64 `json:"last_seen,omitempty"`
+	IsLost          int64  `json:"is_lost"`
 }
 
 type VolumeHistoryRow struct {
-	Provider string `json:"provider"`
-	Year     int    `json:"year"`
-	Month    int    `json:"month"`
-	Volume   int64  `json:"volume"`
+	Provider   string `json:"provider"`
+	LocationID int64  `json:"location_id"`
+	Year       int    `json:"year"`
+	Month      int    `json:"month"`
+	Volume     int64  `json:"volume"`
 }
 
 func (a *App) toolRankingsForDomain(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -601,7 +815,7 @@ func (a *App) toolRankingsForDomain(ctx *sdk.AppCtx, args map[string]any) (any, 
 	if id == 0 {
 		return nil, errors.New("domain_id required")
 	}
-	if _, err := getDomain(ctx.AppDB(), projectScope(), id); err != nil {
+	if _, err := getDomain(ctx.AppDB(), projectScopeFromArgs(ctx, args), id); err != nil {
 		return nil, err
 	}
 	since := toInt64(args["since"])
@@ -610,7 +824,7 @@ func (a *App) toolRankingsForDomain(ctx *sdk.AppCtx, args map[string]any) (any, 
 		limit = 200
 	}
 	rows, err := ctx.AppDB().Query(
-		`SELECT id, domain_id, keyword_id, provider, ts, rank, rank_url,
+		`SELECT id, domain_id, keyword_id, location_id, provider, ts, rank, rank_url,
 		        device, serp_features_json
 		   FROM rankings
 		   WHERE domain_id = ? AND ts >= ?
@@ -626,7 +840,7 @@ func (a *App) toolRankingsForKeyword(ctx *sdk.AppCtx, args map[string]any) (any,
 	if id == 0 {
 		return nil, errors.New("keyword_id required")
 	}
-	if _, err := getKeyword(ctx.AppDB(), projectScope(), id); err != nil {
+	if _, err := getKeyword(ctx.AppDB(), projectScopeFromArgs(ctx, args), id); err != nil {
 		return nil, err
 	}
 	since := toInt64(args["since"])
@@ -635,7 +849,7 @@ func (a *App) toolRankingsForKeyword(ctx *sdk.AppCtx, args map[string]any) (any,
 		limit = 200
 	}
 	rows, err := ctx.AppDB().Query(
-		`SELECT id, domain_id, keyword_id, provider, ts, rank, rank_url,
+		`SELECT id, domain_id, keyword_id, location_id, provider, ts, rank, rank_url,
 		        device, serp_features_json
 		   FROM rankings
 		   WHERE keyword_id = ? AND ts >= ?
@@ -651,7 +865,7 @@ func scanRankings(rows *sql.Rows) ([]Ranking, error) {
 	out := []Ranking{}
 	for rows.Next() {
 		var r Ranking
-		if err := rows.Scan(&r.ID, &r.DomainID, &r.KeywordID, &r.Provider, &r.TS,
+		if err := rows.Scan(&r.ID, &r.DomainID, &r.KeywordID, &r.LocationID, &r.Provider, &r.TS,
 			&r.Rank, &r.RankURL, &r.Device, &r.SerpFeaturesJSON); err != nil {
 			return nil, err
 		}
@@ -665,7 +879,7 @@ func (a *App) toolBacklinksList(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	if id == 0 {
 		return nil, errors.New("domain_id required")
 	}
-	if _, err := getDomain(ctx.AppDB(), projectScope(), id); err != nil {
+	if _, err := getDomain(ctx.AppDB(), projectScopeFromArgs(ctx, args), id); err != nil {
 		return nil, err
 	}
 	limit := int(toInt64(args["limit"]))
@@ -710,11 +924,11 @@ func (a *App) toolKeywordVolumeHistory(ctx *sdk.AppCtx, args map[string]any) (an
 	if id == 0 {
 		return nil, errors.New("keyword_id required")
 	}
-	if _, err := getKeyword(ctx.AppDB(), projectScope(), id); err != nil {
+	if _, err := getKeyword(ctx.AppDB(), projectScopeFromArgs(ctx, args), id); err != nil {
 		return nil, err
 	}
 	rows, err := ctx.AppDB().Query(
-		`SELECT provider, year, month, volume
+		`SELECT provider, location_id, year, month, volume
 		   FROM keyword_volume_history
 		   WHERE keyword_id = ?
 		   ORDER BY year DESC, month DESC`, id)
@@ -725,12 +939,83 @@ func (a *App) toolKeywordVolumeHistory(ctx *sdk.AppCtx, args map[string]any) (an
 	out := []VolumeHistoryRow{}
 	for rows.Next() {
 		var v VolumeHistoryRow
-		if err := rows.Scan(&v.Provider, &v.Year, &v.Month, &v.Volume); err != nil {
+		if err := rows.Scan(&v.Provider, &v.LocationID, &v.Year, &v.Month, &v.Volume); err != nil {
 			return nil, err
 		}
 		out = append(out, v)
 	}
 	return out, rows.Err()
+}
+
+func (a *App) toolLocationsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	return listLocations(ctx.AppDB(), args)
+}
+
+// ─── HTTP panel helpers ──────────────────────────────────────────
+
+func (a *App) handleLocationsList(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	args := map[string]any{}
+	for _, k := range []string{"provider", "search_engine", "country_iso", "language_code", "language_iso", "q", "limit"} {
+		if v := strings.TrimSpace(r.URL.Query().Get(k)); v != "" {
+			if k == "limit" {
+				if n, err := strconv.ParseInt(v, 10, 64); err == nil {
+					args[k] = n
+				}
+			} else {
+				args[k] = v
+			}
+		}
+	}
+	out, err := listLocations(mustCtx(r).AppDB(), args)
+	writeJSONOrErr(w, map[string]any{"locations": out}, err)
+}
+
+func (a *App) handleLocationsSync(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	out, err := syncLocations(mustCtx(r))
+	writeJSONOrErr(w, out, err)
+}
+
+func (a *App) handleToolsCall(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	var body struct {
+		Tool string         `json:"tool"`
+		Args map[string]any `json:"args"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "invalid JSON: "+err.Error(), http.StatusBadRequest)
+		return
+	}
+	if body.Tool == "" {
+		http.Error(w, "tool required", http.StatusBadRequest)
+		return
+	}
+	if body.Args == nil {
+		body.Args = map[string]any{}
+	}
+	if _, ok := body.Args["_project_id"]; !ok {
+		if pid := strings.TrimSpace(r.URL.Query().Get("project_id")); pid != "" {
+			body.Args["_project_id"] = pid
+		}
+	}
+	for _, t := range a.MCPTools() {
+		if t.Name == body.Tool {
+			out, err := t.Handler(mustCtx(r), body.Args)
+			writeJSONOrErr(w, out, err)
+			return
+		}
+	}
+	http.Error(w, "unknown tool: "+body.Tool, http.StatusNotFound)
 }
 
 // ─── HTTP refresh dispatchers (NOT exposed as MCP) ───────────────
@@ -761,12 +1046,13 @@ func (a *App) handleDomainsItem(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	ctx := mustCtx(r)
+	args := locationArgsFromQuery(r)
 	switch {
 	case len(parts) == 2 && parts[1] == "refresh":
-		out, err := refreshDomain(ctx, id)
+		out, err := refreshDomain(ctx, id, args)
 		writeJSONOrErr(w, out, err)
 	case len(parts) == 3 && parts[1] == "backlinks" && parts[2] == "refresh":
-		out, err := refreshBacklinks(ctx, id)
+		out, err := refreshBacklinks(ctx, id, args)
 		writeJSONOrErr(w, out, err)
 	default:
 		http.Error(w, "unknown subroute", http.StatusNotFound)
@@ -789,8 +1075,27 @@ func (a *App) handleKeywordsItem(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid keyword id", http.StatusBadRequest)
 		return
 	}
-	out, err := refreshKeyword(mustCtx(r), id)
+	out, err := refreshKeyword(mustCtx(r), id, locationArgsFromQuery(r))
 	writeJSONOrErr(w, out, err)
+}
+
+func locationArgsFromQuery(r *http.Request) map[string]any {
+	args := map[string]any{}
+	q := r.URL.Query()
+	if v := strings.TrimSpace(q.Get("location_id")); v != "" {
+		if id, err := strconv.ParseInt(v, 10, 64); err == nil {
+			args["location_id"] = id
+		}
+	}
+	for _, k := range []string{"country_iso", "language_code", "language_iso", "search_engine", "provider"} {
+		if v := strings.TrimSpace(q.Get(k)); v != "" {
+			args[k] = v
+		}
+	}
+	if pid := strings.TrimSpace(q.Get("project_id")); pid != "" {
+		args["_project_id"] = pid
+	}
+	return args
 }
 
 func writeJSONOrErr(w http.ResponseWriter, payload any, err error) {
@@ -835,8 +1140,13 @@ func boundProvider(ctx *sdk.AppCtx) (slug string, connID int64, err error) {
 // integration runner; provider-shape mapping lives in the per-slug
 // normaliser file.
 
-func refreshDomain(ctx *sdk.AppCtx, domainID int64) (any, error) {
-	d, err := getDomain(ctx.AppDB(), projectScope(), domainID)
+func refreshDomain(ctx *sdk.AppCtx, domainID int64, args map[string]any) (any, error) {
+	pid := projectScopeFromArgs(ctx, args)
+	d, err := getDomain(ctx.AppDB(), pid, domainID)
+	if err != nil {
+		return nil, err
+	}
+	loc, err := resolveLocationFromArgs(ctx.AppDB(), args, d.DefaultLocationID)
 	if err != nil {
 		return nil, err
 	}
@@ -846,14 +1156,19 @@ func refreshDomain(ctx *sdk.AppCtx, domainID int64) (any, error) {
 	}
 	switch slug {
 	case "dataforseo":
-		return refreshDomainViaDataForSEO(ctx, d)
+		return refreshDomainViaDataForSEO(ctx, d, loc)
 	default:
 		return nil, fmt.Errorf("provider %q not yet wired (v0.2 supports dataforseo only)", slug)
 	}
 }
 
-func refreshKeyword(ctx *sdk.AppCtx, keywordID int64) (any, error) {
-	k, err := getKeyword(ctx.AppDB(), projectScope(), keywordID)
+func refreshKeyword(ctx *sdk.AppCtx, keywordID int64, args map[string]any) (any, error) {
+	pid := projectScopeFromArgs(ctx, args)
+	k, err := getKeyword(ctx.AppDB(), pid, keywordID)
+	if err != nil {
+		return nil, err
+	}
+	loc, err := resolveLocationFromArgs(ctx.AppDB(), args, &k.LocationID)
 	if err != nil {
 		return nil, err
 	}
@@ -863,14 +1178,15 @@ func refreshKeyword(ctx *sdk.AppCtx, keywordID int64) (any, error) {
 	}
 	switch slug {
 	case "dataforseo":
-		return refreshKeywordViaDataForSEO(ctx, k)
+		return refreshKeywordViaDataForSEO(ctx, k, loc)
 	default:
 		return nil, fmt.Errorf("provider %q not yet wired (v0.2 supports dataforseo only)", slug)
 	}
 }
 
-func refreshBacklinks(ctx *sdk.AppCtx, domainID int64) (any, error) {
-	d, err := getDomain(ctx.AppDB(), projectScope(), domainID)
+func refreshBacklinks(ctx *sdk.AppCtx, domainID int64, args map[string]any) (any, error) {
+	pid := projectScopeFromArgs(ctx, args)
+	d, err := getDomain(ctx.AppDB(), pid, domainID)
 	if err != nil {
 		return nil, err
 	}
@@ -923,6 +1239,18 @@ func boolArg(args map[string]any, key string, def bool) bool {
 		return v
 	}
 	return def
+}
+
+func hasLocationArgs(args map[string]any) bool {
+	if toInt64(args["location_id"]) != 0 {
+		return true
+	}
+	for _, key := range []string{"country_iso", "language_code", "language_iso"} {
+		if strings.TrimSpace(strArg(args, key, "")) != "" {
+			return true
+		}
+	}
+	return false
 }
 
 func boolToInt(b bool) int64 {
