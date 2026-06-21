@@ -43,7 +43,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: social
 display_name: Social
-version: 0.14.45
+version: 0.14.46
 description: |
   Schedule and publish posts to your social accounts (X, Facebook,
   Instagram, LinkedIn, TikTok, YouTube, Reddit, Pinterest, Threads).
@@ -195,6 +195,22 @@ type platformDef struct {
 	VideoPostTool      string
 	VideoMediaURLField string
 	VideoBodyField     string // overrides BodyField when posting a video
+	// ThumbnailURLField — optional input field for platforms that can
+	// receive a custom thumbnail/cover URL during create (Facebook
+	// videos: "thumb", Instagram Reels: "coverUrl"). YouTube is
+	// different: it requires a second post-upload call, configured by
+	// ThumbnailTool below.
+	ThumbnailURLField string
+	// ThumbnailFrameField — optional input field for platforms that
+	// accept a video timestamp instead of a separate image asset
+	// (Instagram: thumbOffset, TikTok: video_cover_timestamp_ms).
+	ThumbnailFrameField string
+	// ThumbnailTool/BinaryField/IDField — post-publish thumbnail step
+	// for platforms such as YouTube where thumbnails.set needs the
+	// platform-side video id and binary image bytes.
+	ThumbnailTool        string
+	ThumbnailBinaryField string
+	ThumbnailIDField     string
 	// ProfileTool — integration tool that returns the authorising
 	// user's own identity (used to seed display_name/avatar for
 	// platforms without page-selection). Empty = use a default label.
@@ -251,7 +267,7 @@ type inboxCaps struct {
 type optionField struct {
 	Name    string   `json:"name"`
 	Label   string   `json:"label"`
-	Type    string   `json:"type"` // "text" | "textarea" | "select" | "tags"
+	Type    string   `json:"type"` // "text" | "textarea" | "select" | "tags" | "media" | "number"
 	Options []string `json:"options,omitempty"`
 	Help    string   `json:"help,omitempty"`
 }
@@ -320,6 +336,11 @@ var platforms = map[string]platformDef{
 		VideoPostTool:      "post_video",
 		VideoMediaURLField: "file_url",
 		VideoBodyField:     "description",
+		ThumbnailURLField:  "thumb",
+		OptionFields: []optionField{
+			{Name: "thumbnail_storage_id", Type: "media", Label: "Video thumbnail",
+				Help: "Optional image from Storage used as the custom thumbnail for Facebook video posts."},
+		},
 		// Graph DELETE /{pageId}_{postId} — the platform_post_id we
 		// stored from post_to_page is already in that exact form. The
 		// page-level access_token is forwarded via PostTokenInputField
@@ -378,6 +399,14 @@ var platforms = map[string]platformDef{
 		// account, not the user-level token).
 		PageAccessTokenField: "access_token",
 		PostTokenInputField:  "access_token",
+		ThumbnailURLField:    "coverUrl",
+		ThumbnailFrameField:  "thumbOffset",
+		OptionFields: []optionField{
+			{Name: "thumbnail_storage_id", Type: "media", Label: "Reel cover",
+				Help: "Optional image from Storage used as the cover for Instagram video/Reel posts."},
+			{Name: "thumbnail_frame_ms", Type: "number", Label: "Cover frame (ms)",
+				Help: "Optional video timestamp used as the cover frame when no cover image is selected."},
+		},
 		Inbox: inboxCaps{
 			CommentsRead:   true,
 			CommentsWrite:  true,
@@ -416,6 +445,11 @@ var platforms = map[string]platformDef{
 		// no default applied by the executor, so we must pass it.
 		ProfileToolArgs: map[string]any{
 			"fields": "open_id,display_name,avatar_url",
+		},
+		ThumbnailFrameField: "video_cover_timestamp_ms",
+		OptionFields: []optionField{
+			{Name: "thumbnail_frame_ms", Type: "number", Label: "Cover frame (ms)",
+				Help: "Optional video timestamp used as TikTok's cover frame."},
 		},
 		// TikTok exposes a "publish comment" verb but no read API for
 		// comments on others' content — leaving Comments* false until
@@ -458,8 +492,11 @@ var platforms = map[string]platformDef{
 		// strategy returning an error, no published platform_post_id
 		// is recorded for YouTube targets, so this branch stays dormant
 		// until upload lands — no harm in pre-wiring it.
-		DeleteTool:    "delete_video",
-		DeleteIDField: "id",
+		DeleteTool:           "delete_video",
+		DeleteIDField:        "id",
+		ThumbnailTool:        "set_thumbnail",
+		ThumbnailBinaryField: "image",
+		ThumbnailIDField:     "videoId",
 		// publishYoutube reads these keys from posts.platform_options.youtube
 		// at publish time. `body` overrides the post-level body when
 		// populating snippet.description; `title` is required upstream
@@ -474,6 +511,8 @@ var platforms = map[string]platformDef{
 				Help:    "Defaults to public if blank."},
 			{Name: "category", Type: "text", Label: "Category ID",
 				Help: "YouTube numeric category id (e.g. 22 = People & Blogs, 27 = Education). Optional."},
+			{Name: "thumbnail_storage_id", Type: "media", Label: "Thumbnail",
+				Help: "Optional image from Storage. YouTube applies it after the video upload returns a video id."},
 		},
 		Inbox: inboxCaps{
 			CommentsRead:   true,
@@ -654,8 +693,8 @@ func (a *App) MCPTools() []sdk.Tool {
 				"OR targets[] (when you want per-target overrides). The two are mutually exclusive. " +
 				"Each target object: {social_account_id (required), body? (override text for this target), " +
 				"plus platform-specific keys for the target's platform}. " +
-				"Today: youtube accepts {title, body, visibility (public|unlisted|private), category, tags[]}. " +
-				"Other platforms (twitter, facebook, instagram, linkedin, tiktok) accept just {body}. " +
+				"Today: youtube accepts {title, body, visibility (public|unlisted|private), category, tags[], thumbnail_storage_id}. " +
+				"Facebook accepts {body, thumbnail_storage_id} for video posts; Instagram accepts {body, thumbnail_storage_id, thumbnail_frame_ms} for Reels; TikTok accepts {body, thumbnail_frame_ms}. " +
 				"Body resolution per target: target.body if set, else post-level body. " +
 				"Scheduled creates are idempotent: if the same profile/account/media/body/options/time already exists, the existing post is returned or its failed scheduling is retried instead of creating a duplicate. " +
 				"If scheduling fails, retry that existing post with post_retry; do not create a second post with the same args. " +
@@ -665,7 +704,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"social_account_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}},
 				"targets": map[string]any{
 					"type":        "array",
-					"description": "Per-target overrides. Text fields must be plain text, not Markdown. Each entry: {social_account_id (required), body?, plus platform-specific keys like title/visibility for YouTube}. Mutually exclusive with social_account_ids.",
+					"description": "Per-target overrides. Text fields must be plain text, not Markdown. Each entry: {social_account_id (required), body?, plus platform-specific keys like title/visibility/thumbnail_storage_id for YouTube}. Mutually exclusive with social_account_ids.",
 					"items": map[string]any{
 						"type": "object",
 						"properties": map[string]any{
@@ -675,6 +714,14 @@ func (a *App) MCPTools() []sdk.Tool {
 							"visibility":        map[string]any{"type": "string", "enum": []string{"public", "unlisted", "private"}},
 							"category":          map[string]any{"type": "string"},
 							"tags":              map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+							"thumbnail_storage_id": map[string]any{
+								"type":        "integer",
+								"description": "Storage image file id for a custom thumbnail/cover. YouTube applies it after upload; Facebook/Instagram pass it as a video thumbnail/cover URL.",
+							},
+							"thumbnail_frame_ms": map[string]any{
+								"type":        "integer",
+								"description": "Video timestamp in milliseconds for platforms that support cover-frame selection, currently Instagram/TikTok.",
+							},
 						},
 						"required": []string{"social_account_id"},
 					},
@@ -744,14 +791,14 @@ func (a *App) MCPTools() []sdk.Tool {
 		{
 			Name: "post_edit",
 			Description: "Edit an already-published post's body and/or per-target metadata. Use plain text only for body/title/description fields; do not use Markdown formatting such as **bold**, # headings, bullet lists, tables, code blocks, or [label](url) links. The app normalizes common Markdown before storing/sending edits. Updates the local post + fans out to each platform's edit verb where supported. " +
-				"Editable platforms today: Facebook (message), YouTube (title, description, tags, privacy, category). Twitter / TikTok / Instagram return status=unsupported — those platforms don't permit programmatic edits (or the catalog doesn't expose the verb yet). " +
-				"Args: post_id, body? (new post-level default body), targets? (per-target overrides keyed by social_account_id, same shape as post_create's targets — body, title, visibility, category, tags, etc.). At least one of body/targets must be set.",
+				"Editable platforms today: Facebook (message), YouTube (title, description, tags, privacy, category, thumbnail_storage_id). YouTube thumbnail-only edits are allowed; pass targets:[{social_account_id, thumbnail_storage_id}]. Twitter / TikTok / Instagram return status=unsupported — those platforms don't permit programmatic edits (or the catalog doesn't expose the verb yet). " +
+				"Args: post_id, body? (new post-level default body), targets? (per-target overrides keyed by social_account_id, same shape as post_create's targets — body, title, visibility, category, tags, thumbnail_storage_id, etc.). At least one of body/targets must be set.",
 			InputSchema: schemaObject(map[string]any{
 				"post_id": map[string]any{"type": "integer"},
 				"body":    map[string]any{"type": "string", "description": "Plain text post body. Do not use Markdown; common Markdown is normalized before storing/sending the edit."},
 				"targets": map[string]any{
 					"type":        "array",
-					"description": "Optional per-target overrides. Text fields must be plain text, not Markdown. Each entry: {social_account_id (required), body?, plus platform-specific keys (title/visibility/category/tags for YouTube; just body/message for Facebook).}",
+					"description": "Optional per-target overrides. Text fields must be plain text, not Markdown. Each entry: {social_account_id (required), body?, plus platform-specific keys (title/visibility/category/tags/thumbnail_storage_id for YouTube; body/message for Facebook).}",
 					"items": map[string]any{
 						"type": "object",
 						"properties": map[string]any{
@@ -763,6 +810,10 @@ func (a *App) MCPTools() []sdk.Tool {
 							"visibility":        map[string]any{"type": "string", "enum": []string{"public", "unlisted", "private"}},
 							"category":          map[string]any{"type": "string"},
 							"tags":              map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+							"thumbnail_storage_id": map[string]any{
+								"type":        "integer",
+								"description": "Storage image file id to apply as the YouTube custom thumbnail.",
+							},
 						},
 						"required": []string{"social_account_id"},
 					},
@@ -2167,6 +2218,7 @@ type publishJob struct {
 	platform, extID  string
 	body             string      // already resolved: target.options["body"] || post.body
 	media            []mediaItem // resolved (URL + MIME) so strategies can branch image/video
+	mediaProjectID   string      // Storage project scope for attached media + thumbnail defaults
 	// options — verbatim per-target overrides decoded from
 	// post_targets.options. Strategies pick out whatever keys their
 	// platform cares about (publishYoutube reads title/visibility/…).
@@ -2230,6 +2282,7 @@ func (a *App) publishPostTargets(ctx *sdk.AppCtx, postID int64) {
 			}
 		}
 		j.media = media
+		j.mediaProjectID = mediaProjectID
 		jobs = append(jobs, j)
 	}
 	rows.Close()
@@ -2375,6 +2428,15 @@ func (a *App) publishSingle(ctx *sdk.AppCtx, def platformDef, j publishJob) (str
 	}
 	if mediaField != "" && len(j.media) > 0 {
 		input[mediaField] = j.media[0].URL
+	}
+	if isVideo && def.ThumbnailURLField != "" {
+		thumb, err := a.resolveThumbnailOption(ctx, j.options, j.mediaProjectID)
+		if err != nil {
+			return "", "", err
+		}
+		if thumb != nil {
+			input[def.ThumbnailURLField] = thumb.URL
+		}
 	}
 	// Inject per-destination credentials (Facebook page access token,
 	// etc.). The integration tool's input_schema declares the field
@@ -2790,6 +2852,13 @@ func (a *App) publishInstagram(ctx *sdk.AppCtx, def platformDef, j publishJob) (
 		containerInput["video_url"] = first.URL
 		containerInput["media_type"] = "REELS"
 		containerInput["sync"] = true
+		if thumb, err := a.resolveThumbnailOption(ctx, j.options, j.mediaProjectID); err != nil {
+			return "", "", err
+		} else if thumb != nil && def.ThumbnailURLField != "" {
+			containerInput[def.ThumbnailURLField] = thumb.URL
+		} else if ms, ok := numericOption(j.options, "thumbnail_frame_ms"); ok && def.ThumbnailFrameField != "" {
+			containerInput[def.ThumbnailFrameField] = ms
+		}
 	} else {
 		containerInput["image_url"] = first.URL
 		containerInput["media_type"] = "IMAGE"
@@ -2908,6 +2977,15 @@ func (a *App) publishYoutube(ctx *sdk.AppCtx, def platformDef, j publishJob) (st
 	if !first.IsVideo() {
 		return "", "", errors.New("youtube only accepts video files")
 	}
+	thumbnail, err := a.resolveThumbnailOption(ctx, j.options, j.mediaProjectID)
+	if err != nil {
+		return "", "", err
+	}
+	if thumbnail != nil {
+		if err := validateYouTubeThumbnail(*thumbnail); err != nil {
+			return "", "", err
+		}
+	}
 
 	// Step 1: init the upload session.
 	//
@@ -3025,6 +3103,16 @@ func (a *App) publishYoutube(ctx *sdk.AppCtx, def platformDef, j publishJob) (st
 		return "", "", fmt.Errorf("upload PUT returned no video id: %s", string(body))
 	}
 	url := "https://www.youtube.com/watch?v=" + resource.ID
+	if thumbnail != nil {
+		if err := a.setBinaryThumbnail(ctx, def, j.connID, resource.ID, *thumbnail); err != nil {
+			// The video is already uploaded at this point. Do not return
+			// an error that would make post_retry upload a duplicate video;
+			// surface this in logs so the user can edit the post and retry
+			// only the thumbnail later.
+			ctx.Logger().Warn("publishYoutube: thumbnail set failed",
+				"video_id", resource.ID, "thumbnail_id", thumbnail.ID, "err", err)
+		}
+	}
 	ctx.Logger().Info("publishYoutube: upload complete",
 		"video_id", resource.ID)
 	return resource.ID, url, nil
@@ -3201,11 +3289,15 @@ func (a *App) publishTikTok(ctx *sdk.AppCtx, def platformDef, j publishJob) (str
 	// Step 1: init upload via the integration to get upload_url +
 	// publish_id. The integration handles auth + URL building; we just
 	// pass the post_info / source_info shapes TikTok expects.
+	postInfo := map[string]any{
+		"title":         j.body,
+		"privacy_level": "PUBLIC_TO_EVERYONE", // sensible default; future: per-target override
+	}
+	if ms, ok := numericOption(j.options, "thumbnail_frame_ms"); ok && def.ThumbnailFrameField != "" {
+		postInfo[def.ThumbnailFrameField] = ms
+	}
 	initInput := map[string]any{
-		"post_info": map[string]any{
-			"title":         j.body,
-			"privacy_level": "PUBLIC_TO_EVERYONE", // sensible default; future: per-target override
-		},
+		"post_info": postInfo,
 		"source_info": map[string]any{
 			"source":            "FILE_UPLOAD",
 			"video_size":        first.Bytes,
@@ -3379,6 +3471,7 @@ func (a *App) loadPostMedia(ctx *sdk.AppCtx, postID int64) ([]int64, string) {
 // return size_bytes (older storage versions); strategies that need
 // it should error out clearly rather than guess.
 type mediaItem struct {
+	ID    int64
 	URL   string
 	Mime  string
 	Bytes int64
@@ -3386,6 +3479,9 @@ type mediaItem struct {
 
 // IsVideo reports whether this is a video MIME type.
 func (m mediaItem) IsVideo() bool { return strings.HasPrefix(m.Mime, "video/") }
+
+// IsImage reports whether this is an image MIME type.
+func (m mediaItem) IsImage() bool { return strings.HasPrefix(m.Mime, "image/") }
 
 // resolveMedia turns storage file ids into absolute, publicly fetchable
 // URLs paired with the file's content_type. Calls storage.files_get
@@ -3459,9 +3555,129 @@ func (a *App) resolveMedia(ctx *sdk.AppCtx, ids []int64, projectID string) ([]me
 		}
 		ctx.Logger().Info("resolveMedia: item",
 			"id", id, "mime", mime, "is_video", strings.HasPrefix(mime, "video/"))
-		out = append(out, mediaItem{URL: fullURL, Mime: mime, Bytes: size})
+		out = append(out, mediaItem{ID: id, URL: fullURL, Mime: mime, Bytes: size})
 	}
 	return out, nil
+}
+
+const youtubeThumbnailMaxBytes int64 = 2 * 1024 * 1024
+
+func thumbnailStorageID(opts map[string]any) int64 {
+	if opts == nil {
+		return 0
+	}
+	return toInt64Loose(opts["thumbnail_storage_id"])
+}
+
+func numericOption(opts map[string]any, key string) (int64, bool) {
+	if opts == nil {
+		return 0, false
+	}
+	n := toInt64Loose(opts[key])
+	return n, n > 0
+}
+
+func (a *App) resolveThumbnailOption(ctx *sdk.AppCtx, opts map[string]any, defaultProjectID string) (*mediaItem, error) {
+	id := thumbnailStorageID(opts)
+	if id <= 0 {
+		return nil, nil
+	}
+	projectID := strOption(opts, "thumbnail_project_id")
+	if projectID == "" {
+		projectID = strings.TrimSpace(defaultProjectID)
+	}
+	if projectID == "" {
+		projectID = strings.TrimSpace(ctx.CurrentProject())
+	}
+	items, err := a.resolveMedia(ctx, []int64{id}, projectID)
+	if err != nil {
+		return nil, err
+	}
+	if len(items) == 0 {
+		return nil, fmt.Errorf("thumbnail_storage_id %d resolved no file", id)
+	}
+	if !items[0].IsImage() {
+		return nil, fmt.Errorf("thumbnail_storage_id %d is %q, expected an image", id, items[0].Mime)
+	}
+	return &items[0], nil
+}
+
+func validateYouTubeThumbnail(m mediaItem) error {
+	if m.Bytes > youtubeThumbnailMaxBytes {
+		return fmt.Errorf("youtube thumbnail too large: %d bytes (max 2 MB)", m.Bytes)
+	}
+	switch m.Mime {
+	case "", "image/jpeg", "image/jpg", "image/png", "application/octet-stream":
+		return nil
+	default:
+		return fmt.Errorf("youtube thumbnail must be JPEG or PNG, got %q", m.Mime)
+	}
+}
+
+func fetchBinaryEnvelope(url, mime string, limit int64) (map[string]any, error) {
+	req, err := http.NewRequest(http.MethodGet, url, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("fetch thumbnail: storage returned %d", resp.StatusCode)
+	}
+	body, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(body)) > limit {
+		return nil, fmt.Errorf("thumbnail exceeds %d bytes", limit)
+	}
+	if mime == "" {
+		mime = "image/jpeg"
+	}
+	return map[string]any{
+		"_binary":  true,
+		"base64":   base64.StdEncoding.EncodeToString(body),
+		"mimeType": mime,
+	}, nil
+}
+
+func (a *App) setBinaryThumbnail(ctx *sdk.AppCtx, def platformDef, connID int64, platformPostID string, thumb mediaItem) error {
+	if def.ThumbnailTool == "" {
+		return errors.New("platform has no thumbnail tool")
+	}
+	if platformPostID == "" {
+		return errors.New("platform post id required to set thumbnail")
+	}
+	if err := validateYouTubeThumbnail(thumb); err != nil {
+		return err
+	}
+	binaryField := def.ThumbnailBinaryField
+	if binaryField == "" {
+		binaryField = "image"
+	}
+	idField := def.ThumbnailIDField
+	if idField == "" {
+		idField = "videoId"
+	}
+	envelope, err := fetchBinaryEnvelope(thumb.URL, thumb.Mime, youtubeThumbnailMaxBytes)
+	if err != nil {
+		return err
+	}
+	input := map[string]any{
+		idField:     platformPostID,
+		binaryField: envelope,
+	}
+	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, def.ThumbnailTool, input)
+	if err != nil {
+		return err
+	}
+	if res == nil || !res.Success {
+		return upstreamError(res)
+	}
+	return nil
 }
 
 // extractContainerID pulls the IG containerId from create_media_container.
@@ -5289,9 +5505,10 @@ func (a *App) toolPostEdit(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	rows, err := ctx.AppDB().Query(
 		`SELECT t.id, t.social_account_id, COALESCE(t.platform_post_id,''),
 		        a.platform, a.connection_id, COALESCE(a.page_credentials,''),
-		        COALESCE(t.options,'')
+		        COALESCE(t.options,''), COALESCE(p.media_project_id,'')
 		 FROM post_targets t
 		 LEFT JOIN social_accounts a ON a.id=t.social_account_id
+		 LEFT JOIN posts p ON p.id=t.post_id
 		 WHERE t.post_id=?`,
 		postID,
 	)
@@ -5301,15 +5518,16 @@ func (a *App) toolPostEdit(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	type editTarget struct {
 		TargetID, SocialAccountID, ConnID int64
 		Platform, ExtPostID, PageCreds    string
+		MediaProjectID                    string
 		ExistingOptions                   map[string]any
 	}
 	var trs []editTarget
 	for rows.Next() {
 		var r editTarget
-		var optsRaw string
+		var optsRaw, mediaProjectID string
 		var connID sql.NullInt64
 		var platform sql.NullString
-		if err := rows.Scan(&r.TargetID, &r.SocialAccountID, &r.ExtPostID, &platform, &connID, &r.PageCreds, &optsRaw); err == nil {
+		if err := rows.Scan(&r.TargetID, &r.SocialAccountID, &r.ExtPostID, &platform, &connID, &r.PageCreds, &optsRaw, &mediaProjectID); err == nil {
 			if platform.Valid {
 				r.Platform = platform.String
 			}
@@ -5319,6 +5537,7 @@ func (a *App) toolPostEdit(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 			if optsRaw != "" {
 				_ = json.Unmarshal([]byte(optsRaw), &r.ExistingOptions)
 			}
+			r.MediaProjectID = strings.TrimSpace(mediaProjectID)
 			trs = append(trs, r)
 		}
 	}
@@ -5382,7 +5601,7 @@ func (a *App) toolPostEdit(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		case "facebook":
 			out = a.editFacebookPost(ctx, out, r.ConnID, r.PageCreds, eff)
 		case "youtube":
-			out = a.editYoutubePost(ctx, out, r.ConnID, eff)
+			out = a.editYoutubePost(ctx, out, r.ConnID, eff, r.MediaProjectID)
 		case "twitter", "tiktok", "instagram":
 			out.Status = "unsupported"
 			out.Reason = platformEditReason(r.Platform)
@@ -5454,50 +5673,74 @@ func (a *App) editFacebookPost(ctx *sdk.AppCtx, out targetEditOutcome, connID in
 // defaults, so we pass through what we have. Body becomes description;
 // title comes from eff.title (or first line of body if missing — since
 // title is required by the upstream resource).
-func (a *App) editYoutubePost(ctx *sdk.AppCtx, out targetEditOutcome, connID int64, eff map[string]any) targetEditOutcome {
+func (a *App) editYoutubePost(ctx *sdk.AppCtx, out targetEditOutcome, connID int64, eff map[string]any, mediaProjectID string) targetEditOutcome {
+	def := platforms["youtube"]
+	thumbnail, err := a.resolveThumbnailOption(ctx, eff, mediaProjectID)
+	if err != nil {
+		out.Status, out.Error = "failed", err.Error()
+		return out
+	}
 	title := strOption(eff, "title")
 	body, _ := eff["body"].(string)
 	if title == "" {
 		title = firstChars(strings.TrimSpace(body), 80)
 	}
-	if title == "" {
+	metadataRequested := strings.TrimSpace(title) != "" ||
+		strings.TrimSpace(body) != "" ||
+		strOption(eff, "category") != "" ||
+		strOption(eff, "visibility") != "" ||
+		len(anySliceOption(eff, "tags")) > 0
+	if !metadataRequested && thumbnail == nil {
 		out.Status = "skipped"
-		out.Reason = "youtube edit needs a title or non-empty body — neither provided"
+		out.Reason = "youtube edit needs metadata or thumbnail_storage_id"
 		return out
 	}
-	snippet := map[string]any{"title": title}
-	if body != "" {
-		snippet["description"] = body
-	}
-	if cat := strOption(eff, "category"); cat != "" {
-		snippet["categoryId"] = cat
-	}
-	if tags, ok := eff["tags"].([]any); ok && len(tags) > 0 {
-		ts := make([]string, 0, len(tags))
-		for _, t := range tags {
-			if s, ok := t.(string); ok && s != "" {
-				ts = append(ts, s)
+	if metadataRequested {
+		if title == "" {
+			out.Status = "skipped"
+			out.Reason = "youtube metadata edit needs a title or non-empty body"
+			return out
+		}
+		snippet := map[string]any{"title": title}
+		if body != "" {
+			snippet["description"] = body
+		}
+		if cat := strOption(eff, "category"); cat != "" {
+			snippet["categoryId"] = cat
+		}
+		if tags := anySliceOption(eff, "tags"); len(tags) > 0 {
+			ts := make([]string, 0, len(tags))
+			for _, t := range tags {
+				if s, ok := t.(string); ok && s != "" {
+					ts = append(ts, s)
+				}
+			}
+			if len(ts) > 0 {
+				snippet["tags"] = ts
 			}
 		}
-		if len(ts) > 0 {
-			snippet["tags"] = ts
+		input := map[string]any{
+			"id":      out.PlatformPostID,
+			"snippet": snippet,
+		}
+		if vis := strOption(eff, "visibility"); vis != "" {
+			input["status"] = map[string]any{"privacyStatus": vis}
+		}
+		res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "update_video", input)
+		if err != nil {
+			out.Status, out.Error = "failed", err.Error()
+			return out
+		}
+		if res == nil || !res.Success {
+			out.Status, out.Error = "failed", upstreamError(res).Error()
+			return out
 		}
 	}
-	input := map[string]any{
-		"id":      out.PlatformPostID,
-		"snippet": snippet,
-	}
-	if vis := strOption(eff, "visibility"); vis != "" {
-		input["status"] = map[string]any{"privacyStatus": vis}
-	}
-	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "update_video", input)
-	if err != nil {
-		out.Status, out.Error = "failed", err.Error()
-		return out
-	}
-	if res == nil || !res.Success {
-		out.Status, out.Error = "failed", upstreamError(res).Error()
-		return out
+	if thumbnail != nil {
+		if err := a.setBinaryThumbnail(ctx, def, connID, out.PlatformPostID, *thumbnail); err != nil {
+			out.Status, out.Error = "failed", err.Error()
+			return out
+		}
 	}
 	out.Status = "ok"
 	return out
@@ -6522,6 +6765,16 @@ func strOption(opts map[string]any, key string) string {
 		return strings.TrimSpace(s)
 	}
 	return ""
+}
+
+func anySliceOption(opts map[string]any, key string) []any {
+	if opts == nil {
+		return nil
+	}
+	if out, ok := opts[key].([]any); ok {
+		return out
+	}
+	return nil
 }
 
 // firstChars returns up to n characters of s — used to derive a

@@ -197,7 +197,7 @@ interface PlatformInfo {
 interface OptionField {
   name: string;
   label: string;
-  type: "text" | "textarea" | "select" | "tags";
+  type: "text" | "textarea" | "select" | "tags" | "media" | "number";
   options?: string[];
   help?: string;
 }
@@ -1536,18 +1536,100 @@ function PagePicker({
 // just reflects what the server says without hard-coding any
 // platform's schema in the panel.
 function OptionFieldInput({
-  field, value, onChange,
+  field, value, onChange, projectId,
 }: {
   field: OptionField;
   value: any;
   onChange: (v: any) => void;
+  projectId?: string | null;
 }) {
+  const [showPicker, setShowPicker] = useState(false);
   const labelEl = (
     <div className="flex items-baseline gap-2">
       <label className="text-xs uppercase tracking-wide text-text-dim">{field.label}</label>
       {field.help && <span className="text-text-dim text-[10px]">{field.help}</span>}
     </div>
   );
+
+  if (field.type === "media") {
+    const numericValue = typeof value === "number" ? value : Number(value || 0);
+    const fileId = Number.isFinite(numericValue) && numericValue > 0 ? numericValue : null;
+    return (
+      <div className="flex flex-col gap-2">
+        {labelEl}
+        <div className="flex items-center gap-3">
+          <div className="border border-border rounded bg-bg-input overflow-hidden" style={{ width: 84, height: 54 }}>
+            {fileId ? (
+              <img
+                src={storageURL(`/files/${fileId}/content`, projectId)}
+                alt=""
+                className="w-full h-full object-cover"
+                loading="lazy"
+              />
+            ) : (
+              <div className="w-full h-full grid place-items-center text-[10px] text-text-dim">No image</div>
+            )}
+          </div>
+          <div className="flex flex-col gap-1 min-w-0">
+            <div className="text-xs text-text-dim truncate">
+              {fileId ? `Storage file #${fileId}` : "Optional thumbnail image"}
+            </div>
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={() => setShowPicker(true)}
+                className="px-2 py-1 text-xs border border-border rounded text-accent hover:border-accent"
+              >
+                Browse
+              </button>
+              {fileId && (
+                <button
+                  type="button"
+                  onClick={() => onChange("")}
+                  className="px-2 py-1 text-xs text-text-dim hover:text-text"
+                >
+                  Clear
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+        {showPicker && (
+          <StoragePickerDialog
+            title={`Pick ${field.label.toLowerCase()}`}
+            excludeIds={new Set(fileId ? [fileId] : [])}
+            projectId={projectId}
+            initialKind="image"
+            lockedKind="image"
+            single
+            onClose={() => setShowPicker(false)}
+            onPick={(picked) => {
+              const first = picked[0];
+              if (first) onChange(first.id);
+              setShowPicker(false);
+            }}
+          />
+        )}
+      </div>
+    );
+  }
+
+  if (field.type === "number") {
+    const textValue = value == null ? "" : String(value);
+    return (
+      <div className="flex flex-col gap-1">
+        {labelEl}
+        <input
+          type="number"
+          min={0}
+          step={1}
+          value={textValue}
+          onChange={(e) => onChange(e.target.value.trim() === "" ? "" : Number(e.target.value))}
+          className="bg-bg-input border border-border rounded px-2 py-1.5 text-sm"
+        />
+      </div>
+    );
+  }
 
   if (field.type === "select") {
     return (
@@ -2030,6 +2112,7 @@ function ComposeDialog({
                           key={f.name}
                           field={f}
                           value={accountOptions[a.id]?.[f.name]}
+                          projectId={projectId}
                           onChange={(v) => setAccountOption(a.id, f.name, v)}
                         />
                       ))}
@@ -2308,12 +2391,16 @@ function lengthMatches(row: MediaLibraryRow, length: LengthFilter): boolean {
 }
 
 function StoragePickerDialog({
-  excludeIds, projectId, onClose, onPick,
+  excludeIds, projectId, onClose, onPick, initialKind = "all", lockedKind, single = false, title = "Pick media",
 }: {
   excludeIds: Set<number>;
   projectId?: string | null;
   onClose: () => void;
   onPick: (files: StorageFile[]) => void;
+  initialKind?: PickerKind;
+  lockedKind?: PickerKind;
+  single?: boolean;
+  title?: string;
 }) {
   const [tab, setTab] = useState<PickerTab>("media");
   const [mediaRows, setMediaRows] = useState<MediaLibraryRow[]>([]);
@@ -2323,7 +2410,7 @@ function StoragePickerDialog({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [q, setQ] = useState("");
-  const [kind, setKind] = useState<PickerKind>("all");
+  const [kind, setKind] = useState<PickerKind>(lockedKind || initialKind);
   const [rating, setRating] = useState<RatingFilter>("all");
   const [length, setLength] = useState<LengthFilter>("all");
   const [aspect, setAspect] = useState<AspectFilter>("all");
@@ -2436,6 +2523,7 @@ function StoragePickerDialog({
 
   const toggle = (id: number) => {
     setPicked((s) => {
+      if (single) return s.has(id) ? new Set() : new Set([id]);
       const n = new Set(s);
       if (n.has(id)) n.delete(id);
       else n.add(id);
@@ -2478,7 +2566,7 @@ function StoragePickerDialog({
         style={{ width: "min(720px, 92vw)", maxHeight: "85vh" }}
       >
         <div className="flex items-center justify-between px-4 py-3 border-b border-border">
-          <div className="text-sm font-bold text-text">Pick media</div>
+          <div className="text-sm font-bold text-text">{title}</div>
           <button
             type="button"
             onClick={onClose}
@@ -2521,15 +2609,21 @@ function StoragePickerDialog({
             onChange={(e) => setQ(e.target.value)}
             className="flex-1 bg-bg-input border border-border rounded px-3 py-1.5 text-sm"
           />
-          <select
-            value={kind}
-            onChange={(e) => setKind(e.target.value as "all" | "image" | "video")}
-            className="bg-bg-input border border-border rounded px-2 py-1.5 text-sm"
-          >
-            <option value="all">All media</option>
-            <option value="image">Images</option>
-            <option value="video">Videos</option>
-          </select>
+          {lockedKind ? (
+            <div className="bg-bg-input border border-border rounded px-2 py-1.5 text-sm text-text-dim">
+              {lockedKind === "image" ? "Images" : lockedKind === "video" ? "Videos" : "All media"}
+            </div>
+          ) : (
+            <select
+              value={kind}
+              onChange={(e) => setKind(e.target.value as "all" | "image" | "video")}
+              className="bg-bg-input border border-border rounded px-2 py-1.5 text-sm"
+            >
+              <option value="all">All media</option>
+              <option value="image">Images</option>
+              <option value="video">Videos</option>
+            </select>
+          )}
           </div>
           {tab === "media" && (
             <div className="flex flex-wrap items-center gap-2">
@@ -3613,6 +3707,17 @@ function EditPostDialog({
                             <option value="private">private</option>
                           </select>
                         </div>
+                        <OptionFieldInput
+                          field={{
+                            name: "thumbnail_storage_id",
+                            label: "Thumbnail",
+                            type: "media",
+                            help: "Pick a Storage image to apply to the existing YouTube video.",
+                          }}
+                          value={targetOptions[t.social_account_id]?.thumbnail_storage_id}
+                          projectId={projectId}
+                          onChange={(v) => setOpt(t.social_account_id, "thumbnail_storage_id", v)}
+                        />
                       </div>
                     )}
                   </div>
