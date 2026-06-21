@@ -270,10 +270,15 @@ func refreshRankedKeywordsViaDataForSEO(ctx *sdk.AppCtx, connID int64, d *Domain
 		if _, err := tx.Exec(
 			`INSERT INTO rankings
 			   (domain_id, keyword_id, location_id, provider, ts, rank, rank_url, device, serp_features_json)
-			 VALUES (?, ?, ?, 'dataforseo', ?, ?, ?, 'desktop', ?)`,
+			 VALUES (?, ?, ?, 'dataforseo', ?, ?, ?, 'desktop', ?)
+			 ON CONFLICT(domain_id, keyword_id, location_id, provider, rank_url, device)
+			 DO UPDATE SET
+			    ts = excluded.ts,
+			    rank = excluded.rank,
+			    serp_features_json = excluded.serp_features_json`,
 			d.ID, keywordID, loc.ID, now, rank, rankURL, string(raw),
 		); err != nil {
-			return rankedKeywordRefreshSummary{}, fmt.Errorf("insert ranking for %q: %w", keywordText, err)
+			return rankedKeywordRefreshSummary{}, fmt.Errorf("upsert ranking for %q: %w", keywordText, err)
 		}
 		summary.RankingRows++
 	}

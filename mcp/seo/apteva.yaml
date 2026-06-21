@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: seo
 display_name: SEO
-version: 0.3.4
+version: 0.3.5
 description: |
   Generic SEO research workbench. Track domains, keywords, rankings,
   and backlinks; pull metrics from any provider behind one pluggable
@@ -24,6 +24,8 @@ description: |
   v0.3.3: adds a domain page/ranking drill-down in the panel.
   v0.3.4: persists DataForSEO ranked keywords into pages and rankings
         during domain refresh.
+  v0.3.5: makes ranking refresh idempotent so the same page/keyword
+        is updated instead of duplicated.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/seo

@@ -33,7 +33,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: seo
 display_name: SEO
-version: 0.3.4
+version: 0.3.5
 description: Generic SEO research workbench — locale-aware domains, keywords, rankings, backlinks behind one pluggable provider integration.
 author: Apteva
 scopes: [project, global]
@@ -819,11 +819,21 @@ func (a *App) toolRankingsForDomain(ctx *sdk.AppCtx, args map[string]any) (any, 
 		limit = 200
 	}
 	rows, err := ctx.AppDB().Query(
-		`SELECT id, domain_id, keyword_id, location_id, provider, ts, rank, rank_url,
-		        device, serp_features_json
-		   FROM rankings
-		   WHERE domain_id = ? AND ts >= ?
-		   ORDER BY ts DESC LIMIT ?`, id, since, limit)
+		`WITH current_rankings AS (
+		    SELECT id, domain_id, keyword_id, location_id, provider, ts, rank, rank_url,
+		           device, serp_features_json,
+		           ROW_NUMBER() OVER (
+		             PARTITION BY domain_id, keyword_id, location_id, provider, rank_url, device
+		             ORDER BY ts DESC, id DESC
+		           ) AS rn
+		      FROM rankings
+		     WHERE domain_id = ? AND ts >= ?
+		  )
+		  SELECT id, domain_id, keyword_id, location_id, provider, ts, rank, rank_url,
+		         device, serp_features_json
+		    FROM current_rankings
+		   WHERE rn = 1
+		   ORDER BY ts DESC, rank ASC LIMIT ?`, id, since, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -844,11 +854,21 @@ func (a *App) toolRankingsForKeyword(ctx *sdk.AppCtx, args map[string]any) (any,
 		limit = 200
 	}
 	rows, err := ctx.AppDB().Query(
-		`SELECT id, domain_id, keyword_id, location_id, provider, ts, rank, rank_url,
-		        device, serp_features_json
-		   FROM rankings
-		   WHERE keyword_id = ? AND ts >= ?
-		   ORDER BY ts DESC LIMIT ?`, id, since, limit)
+		`WITH current_rankings AS (
+		    SELECT id, domain_id, keyword_id, location_id, provider, ts, rank, rank_url,
+		           device, serp_features_json,
+		           ROW_NUMBER() OVER (
+		             PARTITION BY domain_id, keyword_id, location_id, provider, rank_url, device
+		             ORDER BY ts DESC, id DESC
+		           ) AS rn
+		      FROM rankings
+		     WHERE keyword_id = ? AND ts >= ?
+		  )
+		  SELECT id, domain_id, keyword_id, location_id, provider, ts, rank, rank_url,
+		         device, serp_features_json
+		    FROM current_rankings
+		   WHERE rn = 1
+		   ORDER BY ts DESC, rank ASC LIMIT ?`, id, since, limit)
 	if err != nil {
 		return nil, err
 	}
