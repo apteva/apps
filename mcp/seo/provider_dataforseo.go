@@ -32,6 +32,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"strings"
 	"time"
 
@@ -158,17 +159,208 @@ func refreshDomainViaDataForSEO(ctx *sdk.AppCtx, d *Domain, loc *SEOLocation) (a
 		return nil, fmt.Errorf("insert domain_metrics: %w", err)
 	}
 	id, _ := res.LastInsertId()
+	rankingSummary, err := refreshRankedKeywordsViaDataForSEO(ctx, connID, d, loc)
+	if err != nil {
+		return nil, err
+	}
 	return map[string]any{
-		"domain_id":   d.ID,
-		"location_id": loc.ID,
-		"snapshot_id": id,
-		"provider":    "dataforseo",
-		"fetched_at":  now,
-		"organic_kw":  m.Organic.Count,
-		"organic_etv": int64(m.Organic.ETV),
-		"paid_kw":     m.Paid.Count,
-		"paid_etv":    int64(m.Paid.ETV),
+		"domain_id":     d.ID,
+		"location_id":   loc.ID,
+		"snapshot_id":   id,
+		"provider":      "dataforseo",
+		"fetched_at":    now,
+		"organic_kw":    m.Organic.Count,
+		"organic_etv":   int64(m.Organic.ETV),
+		"paid_kw":       m.Paid.Count,
+		"paid_etv":      int64(m.Paid.ETV),
+		"ranking_rows":  rankingSummary.RankingRows,
+		"keyword_rows":  rankingSummary.KeywordRows,
+		"page_rows":     rankingSummary.PageRows,
+		"rankings_note": rankingSummary.Note,
 	}, nil
+}
+
+type dfsRankedKeywordsResult struct {
+	Items []dfsRankedKeywordItem `json:"items"`
+}
+
+type dfsRankedKeywordItem struct {
+	KeywordData struct {
+		Keyword           string   `json:"keyword"`
+		SearchVolume      *int64   `json:"search_volume"`
+		Competition       *float64 `json:"competition"`
+		CompetitionIndex  *int64   `json:"competition_index"`
+		CPC               *float64 `json:"cpc"`
+		KeywordDifficulty *int64   `json:"keyword_difficulty"`
+	} `json:"keyword_data"`
+	RankedSERPElement struct {
+		SEType       string   `json:"se_type"`
+		RankGroup    *int64   `json:"rank_group"`
+		RankAbsolute *int64   `json:"rank_absolute"`
+		Position     *int64   `json:"position"`
+		ETV          *float64 `json:"etv"`
+		SerpItem     struct {
+			Type  string `json:"type"`
+			Rank  *int64 `json:"rank_group"`
+			URL   string `json:"url"`
+			Title string `json:"title"`
+		} `json:"serp_item"`
+	} `json:"ranked_serp_element"`
+}
+
+type rankedKeywordRefreshSummary struct {
+	RankingRows int    `json:"ranking_rows"`
+	KeywordRows int    `json:"keyword_rows"`
+	PageRows    int    `json:"page_rows"`
+	Note        string `json:"note,omitempty"`
+}
+
+func refreshRankedKeywordsViaDataForSEO(ctx *sdk.AppCtx, connID int64, d *Domain, loc *SEOLocation) (rankedKeywordRefreshSummary, error) {
+	if loc == nil || loc.LocationCode == nil {
+		return rankedKeywordRefreshSummary{}, fmt.Errorf("dataforseo ranked keywords refresh requires a location with location_code")
+	}
+	rowRaw, _, err := callDfs(ctx, connID, "ranked_keywords", map[string]any{
+		"target":        d.Host,
+		"location_code": *loc.LocationCode,
+		"language_code": strings.ToLower(loc.LanguageCode),
+		"limit":         100,
+		"offset":        0,
+	})
+	if err != nil {
+		return rankedKeywordRefreshSummary{}, err
+	}
+	if rowRaw == nil {
+		return rankedKeywordRefreshSummary{Note: "ranked_keywords returned no rows"}, nil
+	}
+	var parsed dfsRankedKeywordsResult
+	if err := json.Unmarshal(rowRaw, &parsed); err != nil {
+		return rankedKeywordRefreshSummary{}, fmt.Errorf("parse ranked_keywords: %w", err)
+	}
+	if len(parsed.Items) == 0 {
+		return rankedKeywordRefreshSummary{Note: "ranked_keywords returned zero items"}, nil
+	}
+	now := time.Now().Unix()
+	tx, err := ctx.AppDB().Begin()
+	if err != nil {
+		return rankedKeywordRefreshSummary{}, err
+	}
+	defer tx.Rollback()
+
+	summary := rankedKeywordRefreshSummary{}
+	for _, item := range parsed.Items {
+		keywordText := normaliseKeyword(item.KeywordData.Keyword)
+		rankURL := strings.TrimSpace(item.RankedSERPElement.SerpItem.URL)
+		if keywordText == "" || rankURL == "" {
+			continue
+		}
+		keywordID, createdKeyword, err := upsertRankedKeyword(tx, d.ProjectID, keywordText, loc, item.KeywordData.SearchVolume, item.KeywordData.KeywordDifficulty, item.KeywordData.CPC, item)
+		if err != nil {
+			return rankedKeywordRefreshSummary{}, err
+		}
+		if createdKeyword {
+			summary.KeywordRows++
+		}
+		if createdPage, err := upsertPageForRankURL(tx, d.ID, rankURL, item.RankedSERPElement.SerpItem.Title); err != nil {
+			return rankedKeywordRefreshSummary{}, err
+		} else if createdPage {
+			summary.PageRows++
+		}
+		rank := firstInt64Ptr(item.RankedSERPElement.RankGroup, item.RankedSERPElement.Position, item.RankedSERPElement.RankAbsolute, item.RankedSERPElement.SerpItem.Rank)
+		raw, _ := json.Marshal(item)
+		if _, err := tx.Exec(
+			`INSERT INTO rankings
+			   (domain_id, keyword_id, location_id, provider, ts, rank, rank_url, device, serp_features_json)
+			 VALUES (?, ?, ?, 'dataforseo', ?, ?, ?, 'desktop', ?)`,
+			d.ID, keywordID, loc.ID, now, rank, rankURL, string(raw),
+		); err != nil {
+			return rankedKeywordRefreshSummary{}, fmt.Errorf("insert ranking for %q: %w", keywordText, err)
+		}
+		summary.RankingRows++
+	}
+	if err := tx.Commit(); err != nil {
+		return rankedKeywordRefreshSummary{}, err
+	}
+	return summary, nil
+}
+
+func upsertRankedKeyword(tx *sql.Tx, projectID, text string, loc *SEOLocation, volume *int64, difficulty *int64, cpc *float64, raw any) (id int64, created bool, err error) {
+	country := ""
+	if loc.CountryISO != nil {
+		country = strings.ToUpper(*loc.CountryISO)
+	}
+	res, err := tx.Exec(
+		`INSERT INTO keywords (project_id, text, location_id, country_iso, language_iso)
+		   VALUES (?, ?, ?, ?, ?)
+		   ON CONFLICT(project_id, text, location_id) DO NOTHING`,
+		projectID, text, loc.ID, country, strings.ToLower(loc.LanguageCode))
+	if err != nil {
+		return 0, false, fmt.Errorf("upsert ranked keyword %q: %w", text, err)
+	}
+	if n, _ := res.RowsAffected(); n > 0 {
+		created = true
+	}
+	if err := tx.QueryRow(
+		`SELECT id FROM keywords WHERE project_id = ? AND text = ? AND location_id = ?`,
+		projectID, text, loc.ID,
+	).Scan(&id); err != nil {
+		return 0, false, fmt.Errorf("lookup ranked keyword %q: %w", text, err)
+	}
+	rawText, _ := json.Marshal(raw)
+	if _, err := tx.Exec(
+		`INSERT INTO keyword_metrics
+		   (keyword_id, location_id, provider, ts, volume, difficulty, cpc_usd, raw_json)
+		 VALUES (?, ?, 'dataforseo', ?, ?, ?, ?, ?)`,
+		id, loc.ID, time.Now().Unix(), volume, difficulty, cpc, string(rawText),
+	); err != nil {
+		return 0, false, fmt.Errorf("insert ranked keyword metrics for %q: %w", text, err)
+	}
+	return id, created, nil
+}
+
+func upsertPageForRankURL(tx *sql.Tx, domainID int64, rawURL string, title string) (bool, error) {
+	path := pagePathFromURL(rawURL)
+	if path == "" {
+		return false, nil
+	}
+	res, err := tx.Exec(
+		`INSERT INTO pages (domain_id, path, label)
+		   VALUES (?, ?, ?)
+		   ON CONFLICT(domain_id, path) DO UPDATE SET
+		     label = CASE WHEN excluded.label != '' THEN excluded.label ELSE pages.label END`,
+		domainID, path, strings.TrimSpace(title))
+	if err != nil {
+		return false, fmt.Errorf("upsert page %q: %w", path, err)
+	}
+	n, _ := res.RowsAffected()
+	return n > 0, nil
+}
+
+func pagePathFromURL(raw string) string {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return ""
+	}
+	u, err := url.Parse(s)
+	if err != nil {
+		return ""
+	}
+	path := u.EscapedPath()
+	if path == "" {
+		path = "/"
+	}
+	if u.RawQuery != "" {
+		path += "?" + u.RawQuery
+	}
+	return path
+}
+
+func firstInt64Ptr(xs ...*int64) *int64 {
+	for _, x := range xs {
+		if x != nil {
+			return x
+		}
+	}
+	return nil
 }
 
 // ─── Keyword search-volume + monthly history ─────────────────────

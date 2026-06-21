@@ -567,7 +567,7 @@ function DomainsView(props: {
                 <div className="text-sm text-text-dim">{localeLabel(selectedLoc)}</div>
               </div>
               <div className="flex gap-2">
-                <button className={buttonCls} disabled={props.busy} onClick={() => props.onRefresh(props.selected!)}>Refresh Metrics</button>
+                <button className={buttonCls} disabled={props.busy} onClick={() => props.onRefresh(props.selected!)}>Refresh Metrics + Rankings</button>
                 <button className={buttonCls} disabled={props.busy} onClick={() => props.onRefresh(props.selected!, true)}>Refresh Links</button>
                 <button className={buttonCls} disabled={props.busy} onClick={() => props.onRemove(props.selected!.id)}>Remove</button>
               </div>
