@@ -58,7 +58,9 @@ type dfsTask struct {
 // returns the first task's first result row as raw JSON, plus the
 // whole task[0] payload for raw_json archival.
 func callDfs(ctx *sdk.AppCtx, connID int64, tool string, input map[string]any) (resultRow []byte, taskRaw []byte, err error) {
-	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, tool, input)
+	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, tool, map[string]any{
+		"tasks": []map[string]any{input},
+	})
 	if err != nil {
 		return nil, nil, fmt.Errorf("dataforseo: ExecuteIntegrationTool(%s): %w", tool, err)
 	}

@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.3.1
+
+- Fixed DataForSEO live refresh calls by sending a top-level task array through
+  the integration runner.
+- DataForSEO catalog now uses Basic auth derived from login/password and marks
+  the SEO app's paid live endpoints as task-array bodies.
+
 ## 0.3.0
 
 - Added first-class SEO locations with explicit provider, search engine,
