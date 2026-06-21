@@ -62,6 +62,27 @@ interface KeywordMetrics {
   cpc_usd?: number;
 }
 
+interface Ranking {
+  id: number;
+  domain_id: number;
+  keyword_id: number;
+  location_id: number;
+  provider: string;
+  ts: number;
+  rank?: number;
+  rank_url?: string;
+  device: string;
+  serp_features_json: string;
+}
+
+interface PageRankingSummary {
+  url: string;
+  keywordIds: number[];
+  bestRank?: number;
+  latestTs?: number;
+  rows: Ranking[];
+}
+
 type View = "seed" | "domains" | "keywords" | "locations";
 
 const API = "/api/apps/seo";
@@ -88,6 +109,60 @@ function localeLabel(l?: SEOLocation): string {
   return `${l.location_name} - ${code} - ${l.search_engine}`;
 }
 
+function cleanURL(raw?: string): string {
+  const value = (raw || "").trim();
+  if (!value) return "";
+  try {
+    const url = new URL(value);
+    url.hash = "";
+    return url.toString().replace(/\/$/, "");
+  } catch {
+    return value.replace(/\/$/, "");
+  }
+}
+
+function pagePath(raw?: string): string {
+  const value = cleanURL(raw);
+  if (!value) return "-";
+  try {
+    const url = new URL(value);
+    return `${url.pathname || "/"}${url.search || ""}`;
+  } catch {
+    return value;
+  }
+}
+
+function hostFromURL(raw?: string): string {
+  try {
+    return new URL(raw || "").host;
+  } catch {
+    return "";
+  }
+}
+
+function pageSummaries(rankings: Ranking[]): PageRankingSummary[] {
+  const map = new Map<string, PageRankingSummary>();
+  for (const row of rankings) {
+    const url = cleanURL(row.rank_url);
+    if (!url) continue;
+    const existing =
+      map.get(url) ||
+      ({
+        url,
+        keywordIds: [],
+        rows: [],
+      } satisfies PageRankingSummary);
+    existing.rows.push(row);
+    if (!existing.keywordIds.includes(row.keyword_id)) existing.keywordIds.push(row.keyword_id);
+    if (row.rank !== undefined && row.rank !== null) {
+      existing.bestRank = existing.bestRank === undefined ? row.rank : Math.min(existing.bestRank, row.rank);
+    }
+    existing.latestTs = existing.latestTs === undefined ? row.ts : Math.max(existing.latestTs, row.ts);
+    map.set(url, existing);
+  }
+  return Array.from(map.values()).sort((a, b) => (a.bestRank || 9999) - (b.bestRank || 9999));
+}
+
 export default function SeoPanel({ projectId, installId }: NativePanelProps) {
   const [view, setView] = useState<View>("seed");
   const [locations, setLocations] = useState<SEOLocation[]>([]);
@@ -97,6 +172,9 @@ export default function SeoPanel({ projectId, installId }: NativePanelProps) {
   const [selectedKeyword, setSelectedKeyword] = useState<Keyword | null>(null);
   const [domainMetrics, setDomainMetrics] = useState<DomainMetrics | null>(null);
   const [keywordMetrics, setKeywordMetrics] = useState<KeywordMetrics | null>(null);
+  const [domainRankings, setDomainRankings] = useState<Ranking[]>([]);
+  const [selectedRankURL, setSelectedRankURL] = useState<string | null>(null);
+  const [pageSerpRows, setPageSerpRows] = useState<Ranking[]>([]);
   const [activity, setActivity] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState("");
@@ -166,12 +244,44 @@ export default function SeoPanel({ projectId, installId }: NativePanelProps) {
   useEffect(() => {
     if (!selectedDomain) {
       setDomainMetrics(null);
+      setDomainRankings([]);
+      setSelectedRankURL(null);
       return;
     }
     callTool<{ domain: Domain; metrics: DomainMetrics | null }>("domains_get", { id: selectedDomain.id })
       .then((r) => setDomainMetrics(r.metrics || null))
       .catch((e) => setErr((e as Error).message));
+    callTool<Ranking[]>("rankings_for_domain", { domain_id: selectedDomain.id, limit: 500 })
+      .then((rows) => {
+        setDomainRankings(rows || []);
+        setSelectedRankURL(null);
+      })
+      .catch((e) => setErr((e as Error).message));
   }, [callTool, selectedDomain]);
+
+  useEffect(() => {
+    if (!selectedRankURL && domainRankings.length > 0) {
+      const first = pageSummaries(domainRankings)[0];
+      if (first) setSelectedRankURL(first.url);
+    }
+  }, [domainRankings, selectedRankURL]);
+
+  useEffect(() => {
+    if (!selectedRankURL) {
+      setPageSerpRows([]);
+      return;
+    }
+    const ids = Array.from(
+      new Set(domainRankings.filter((r) => cleanURL(r.rank_url) === selectedRankURL).map((r) => r.keyword_id)),
+    );
+    if (ids.length === 0) {
+      setPageSerpRows([]);
+      return;
+    }
+    Promise.all(ids.map((id) => callTool<Ranking[]>("rankings_for_keyword", { keyword_id: id, limit: 100 })))
+      .then((groups) => setPageSerpRows(groups.flat()))
+      .catch((e) => setErr((e as Error).message));
+  }, [callTool, domainRankings, selectedRankURL]);
 
   useEffect(() => {
     if (!selectedKeyword) {
@@ -333,6 +443,12 @@ export default function SeoPanel({ projectId, installId }: NativePanelProps) {
           locations={locations}
           selected={selectedDomain}
           metrics={domainMetrics}
+          rankings={domainRankings}
+          pageSerpRows={pageSerpRows}
+          selectedRankURL={selectedRankURL}
+          onSelectRankURL={setSelectedRankURL}
+          keywords={keywords}
+          allDomains={domains}
           onSelect={setSelectedDomain}
           onAdd={async (host, label, locationId) => {
             const d = await callTool<Domain>("domains_add", { host, label, location_id: locationId });
@@ -382,9 +498,15 @@ export default function SeoPanel({ projectId, installId }: NativePanelProps) {
 
 function DomainsView(props: {
   domains: Domain[];
+  allDomains: Domain[];
+  keywords: Keyword[];
   locations: SEOLocation[];
   selected: Domain | null;
   metrics: DomainMetrics | null;
+  rankings: Ranking[];
+  pageSerpRows: Ranking[];
+  selectedRankURL: string | null;
+  onSelectRankURL(url: string): void;
   onSelect(d: Domain): void;
   onAdd(host: string, label: string, locationId?: number): Promise<void>;
   onRemove(id: number): Promise<void>;
@@ -398,6 +520,8 @@ function DomainsView(props: {
   const selectedLoc = props.selected?.default_location_id
     ? props.locationById.get(props.selected.default_location_id)
     : undefined;
+  const keywordById = useMemo(() => new Map(props.keywords.map((k) => [k.id, k])), [props.keywords]);
+  const domainById = useMemo(() => new Map(props.allDomains.map((d) => [d.id, d])), [props.allDomains]);
   return (
     <div className="flex-1 min-h-0 flex">
       <div className="w-80 border-r border-border flex flex-col min-h-0">
@@ -459,10 +583,121 @@ function DomainsView(props: {
               ]}
             />
             <div className="text-xs text-text-dim">Last refresh: {date(props.metrics?.ts)}</div>
+            <RankingExplorer
+              rankings={props.rankings}
+              selectedURL={props.selectedRankURL}
+              pageSerpRows={props.pageSerpRows}
+              onSelectURL={props.onSelectRankURL}
+              keywordById={keywordById}
+              domainById={domainById}
+            />
           </div>
         ) : (
           <div className="text-sm text-text-dim">No domain selected.</div>
         )}
+      </div>
+    </div>
+  );
+}
+
+function RankingExplorer(props: {
+  rankings: Ranking[];
+  selectedURL: string | null;
+  pageSerpRows: Ranking[];
+  onSelectURL(url: string): void;
+  keywordById: Map<number, Keyword>;
+  domainById: Map<number, Domain>;
+}) {
+  const pages = useMemo(() => pageSummaries(props.rankings), [props.rankings]);
+  const selected = pages.find((p) => p.url === props.selectedURL) || pages[0];
+  const selectedKeywordIds = new Set(selected?.keywordIds || []);
+  const selectedRows = selected?.rows || [];
+  const competingRows = props.pageSerpRows
+    .filter((r) => selectedKeywordIds.has(r.keyword_id))
+    .sort((a, b) => (a.keyword_id - b.keyword_id) || ((a.rank || 9999) - (b.rank || 9999)));
+
+  if (pages.length === 0) {
+    return (
+      <div className="border border-dashed border-border rounded p-5 text-sm text-text-dim">
+        No cached rankings for this domain yet. Once ranked keyword or SERP data is ingested, ranked pages will appear here.
+      </div>
+    );
+  }
+
+  return (
+    <div className="border border-border rounded overflow-hidden">
+      <div className="px-4 py-3 border-b border-border flex items-center justify-between gap-3">
+        <div>
+          <h3 className="text-sm font-semibold">Ranked Pages</h3>
+          <div className="text-xs text-text-dim">{pages.length} page{pages.length === 1 ? "" : "s"} with cached rankings</div>
+        </div>
+        {selected && <div className="text-xs text-text-dim">Updated {date(selected.latestTs)}</div>}
+      </div>
+      <div className="grid grid-cols-1 xl:grid-cols-[360px_minmax(0,1fr)] min-h-[360px]">
+        <div className="border-r border-border overflow-auto max-h-[520px]">
+          {pages.map((page) => (
+            <button
+              key={page.url}
+              type="button"
+              onClick={() => props.onSelectURL(page.url)}
+              className={`w-full text-left px-4 py-3 border-b border-border hover:bg-surface-2 ${selected?.url === page.url ? "bg-surface-2" : ""}`}
+            >
+              <div className="text-sm font-medium truncate">{pagePath(page.url)}</div>
+              <div className="text-xs text-text-dim mt-1 flex items-center gap-3">
+                <span>{page.keywordIds.length} keyword{page.keywordIds.length === 1 ? "" : "s"}</span>
+                <span>best #{page.bestRank || "-"}</span>
+              </div>
+            </button>
+          ))}
+        </div>
+        <div className="min-w-0 overflow-auto max-h-[520px]">
+          {selected && (
+            <div>
+              <div className="px-4 py-3 border-b border-border">
+                <div className="text-sm font-medium truncate">{selected.url}</div>
+                <div className="text-xs text-text-dim mt-1">Click a page on the left to compare its keyword positions.</div>
+              </div>
+              <table className="w-full text-sm">
+                <thead className="sticky top-0 bg-bg border-b border-border text-text-dim">
+                  <tr>
+                    <th className="text-left font-medium px-4 py-2 w-20">Rank</th>
+                    <th className="text-left font-medium px-3 py-2">Keyword</th>
+                    <th className="text-left font-medium px-3 py-2">Page</th>
+                    <th className="text-left font-medium px-3 py-2">SERP URLs</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {selectedRows.map((row) => {
+                    const keyword = props.keywordById.get(row.keyword_id)?.text || `Keyword #${row.keyword_id}`;
+                    const serpRows = competingRows.filter((r) => r.keyword_id === row.keyword_id).slice(0, 8);
+                    return (
+                      <tr key={row.id} className="border-b border-border/70 align-top">
+                        <td className="px-4 py-3 font-medium tabular-nums">#{row.rank || "-"}</td>
+                        <td className="px-3 py-3 min-w-44">{keyword}</td>
+                        <td className="px-3 py-3 text-text-dim max-w-xs truncate">{pagePath(row.rank_url || selected.url)}</td>
+                        <td className="px-3 py-3 min-w-80">
+                          {serpRows.length === 0 ? (
+                            <span className="text-text-dim">No keyword SERP rows cached.</span>
+                          ) : (
+                            <div className="space-y-1">
+                              {serpRows.map((r) => (
+                                <div key={r.id} className={r.rank_url === row.rank_url ? "text-text" : "text-text-dim"}>
+                                  <span className="tabular-nums">#{r.rank || "-"}</span>{" "}
+                                  <span>{props.domainById.get(r.domain_id)?.host || hostFromURL(r.rank_url) || `Domain #${r.domain_id}`}</span>{" "}
+                                  <span className="truncate inline-block max-w-[360px] align-bottom">{pagePath(r.rank_url)}</span>
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
       </div>
     </div>
   );
