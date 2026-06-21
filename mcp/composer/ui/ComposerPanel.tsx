@@ -1,4 +1,4 @@
-// ComposerPanel v0.3.22 - timeline editor with storage and Media Studio AI assets.
+// ComposerPanel v0.3.23 - timeline editor with storage and Media Studio AI assets.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
@@ -1880,8 +1880,10 @@ function Timeline({
   const timelineHeight = hasVisual ? 192 : 128;
   const audioLabelTop = hasVisual ? 112 : 12;
   const audioTrackTop = hasVisual ? 128 : 32;
-  const zoomedWidth = `${Math.max(1, zoom) * 100}%`;
-  const editingWidth = `${Math.round(960 * Math.max(1, zoom))}px`;
+  const laneInset = 12;
+  const laneWidth = Math.max(936, Math.ceil(Math.max(duration, 1) * 12 * Math.max(1, zoom)));
+  const timelineWidth = laneWidth + laneInset * 2;
+  const pxPerSecond = laneWidth / Math.max(duration, 1);
   const sortedAudio = [...audioClips].sort((a, b) => a.start - b.start);
   const gaps: { start: number; length: number }[] = [];
   let audioCursor = 0;
@@ -1924,26 +1926,27 @@ function Timeline({
             </div>
           </div>
         ) : (
-          <div className="overflow-x-auto">
+          <div style={{ overflowX: "auto" }}>
             <div
               role="presentation"
               onClick={(e) => {
                 const rect = e.currentTarget.getBoundingClientRect();
-                onSeek(((e.clientX - rect.left) / rect.width) * duration);
+                const x = Math.max(0, e.clientX - rect.left - laneInset);
+                onSeek(Math.min(duration, x / pxPerSecond));
               }}
-              className="relative block border border-border rounded bg-bg text-left overflow-hidden cursor-crosshair"
-              style={{ minHeight: timelineHeight, width: zoomedWidth, minWidth: editingWidth }}
+              className="border border-border rounded bg-bg"
+              style={{ position: "relative", display: "block", minHeight: timelineHeight, width: timelineWidth, minWidth: timelineWidth, overflow: "hidden", cursor: "crosshair" }}
             >
               <div
-                className="absolute top-0 bottom-0 w-px bg-accent"
-                style={{ left: `${duration ? Math.min(100, (playhead / duration) * 100) : 0}%` }}
+                className="bg-accent"
+                style={{ position: "absolute", top: 0, bottom: 0, left: laneInset + Math.min(laneWidth, Math.max(0, playhead) * pxPerSecond), width: 1 }}
               />
               {hasVisual && (
                 <>
-                  <div className="absolute left-3 top-3 text-[10px] uppercase tracking-wide text-text-dim">Visual</div>
-                  <div className="absolute inset-x-3 top-8 h-16 flex">
+                  <div className="text-[10px] uppercase tracking-wide text-text-dim" style={{ position: "absolute", left: laneInset, top: 12 }}>Visual</div>
+                  <div style={{ position: "absolute", left: laneInset, top: 32, width: laneWidth, height: 64, display: "flex" }}>
                     {clips.map((clip) => {
-                      const width = duration ? (clip.length / duration) * 100 : 100;
+                      const width = Math.max(64, clip.length * pxPerSecond);
                       const selected = clip.id === selectedClipId;
                       return (
                         <div
@@ -1957,8 +1960,8 @@ function Timeline({
                             onSeek(clip.start);
                             onEditVisual(clip.id);
                           }}
-                          className={`h-16 border text-xs flex flex-col justify-center px-2 overflow-hidden ${selected ? "border-accent bg-accent/10" : "border-border bg-bg-input hover:border-accent"}`}
-                          style={{ width: `${Math.max(2, width)}%`, minWidth: zoom > 1 ? 96 : 64 }}
+                          className={`border text-xs ${selected ? "border-accent bg-accent/10" : "border-border bg-bg-input hover:border-accent"}`}
+                          style={{ width, minWidth: width, height: 64, display: "flex", flexDirection: "column", justifyContent: "center", padding: "0 8px", overflow: "hidden" }}
                         >
                           <span className="block text-text truncate leading-5">{visualClipLabel(clip)}</span>
                           <span className="block text-text-dim truncate leading-5">{clip.ai?.status || clip.asset.type} - {clip.length.toFixed(1)}s</span>
@@ -1968,11 +1971,11 @@ function Timeline({
                   </div>
                 </>
               )}
-              <div className="absolute left-3 text-[10px] uppercase tracking-wide text-text-dim" style={{ top: audioLabelTop }}>Audio</div>
-              <div className="absolute inset-x-3 h-16" style={{ top: audioTrackTop }}>
+              <div className="text-[10px] uppercase tracking-wide text-text-dim" style={{ position: "absolute", left: laneInset, top: audioLabelTop }}>Audio</div>
+              <div style={{ position: "absolute", left: laneInset, top: audioTrackTop, width: laneWidth, height: 64 }}>
                 {gaps.map((gap, index) => {
-                  const left = duration ? (gap.start / duration) * 100 : 0;
-                  const width = duration ? (gap.length / duration) * 100 : 100;
+                  const left = Math.max(0, gap.start * pxPerSecond);
+                  const width = Math.max(16, gap.length * pxPerSecond);
                   return (
                     <div
                       key={`gap-${index}-${gap.start}`}
@@ -1983,8 +1986,8 @@ function Timeline({
                         onSeek(gap.start);
                         onEditGap(gap.start, gap.length);
                       }}
-                      className="absolute h-16 border border-dashed border-border text-xs flex flex-col justify-center px-2 overflow-hidden bg-bg-card text-text-dim hover:border-accent hover:text-text cursor-pointer"
-                      style={{ left: `${Math.max(0, left)}%`, width: `${Math.max(0.5, width)}%`, minWidth: zoom > 2 ? 56 : 16 }}
+                      className="border border-dashed border-border text-xs bg-bg-card text-text-dim hover:border-accent hover:text-text"
+                      style={{ position: "absolute", left, top: 0, width, minWidth: width, height: 64, display: "flex", flexDirection: "column", justifyContent: "center", padding: "0 8px", overflow: "hidden", cursor: "pointer" }}
                       title={`Implicit silence from ${gap.start.toFixed(1)}s for ${gap.length.toFixed(1)}s`}
                     >
                       <span className="block truncate leading-5">Gap</span>
@@ -1993,8 +1996,8 @@ function Timeline({
                   );
                 })}
                 {audioClips.map((clip) => {
-                  const left = duration ? (clip.start / duration) * 100 : 0;
-                  const width = duration ? (clip.length / duration) * 100 : 100;
+                  const left = Math.max(0, clip.start * pxPerSecond);
+                  const width = Math.max(64, clip.length * pxPerSecond);
                   const selected = clip.id === selectedClipId;
                   return (
                     <div
@@ -2008,8 +2011,8 @@ function Timeline({
                         onSeek(clip.start);
                         onEditAudio(clip.id);
                       }}
-                      className={`absolute h-16 border text-xs flex flex-col justify-center px-2 overflow-hidden ${selected ? "border-accent bg-accent/10" : "border-border bg-bg-input hover:border-accent"}`}
-                      style={{ left: `${Math.max(0, left)}%`, width: `${Math.max(0.5, width)}%`, minWidth: zoom > 1 ? 96 : 64 }}
+                      className={`border text-xs ${selected ? "border-accent bg-accent/10" : "border-border bg-bg-input hover:border-accent"}`}
+                      style={{ position: "absolute", left, top: 0, width, minWidth: width, height: 64, display: "flex", flexDirection: "column", justifyContent: "center", padding: "0 8px", overflow: "hidden" }}
                     >
                       <span className="block text-text truncate leading-5">{audioClipLabel(clip)}</span>
                       <span className="block text-text-dim truncate leading-5">{audioClipSubtitle(clip)}</span>
