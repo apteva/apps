@@ -27,7 +27,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: composer
 display_name: Composer
-version: 0.3.20
+version: 0.3.21
 description: |
   Multi-clip video compositions with a structured timeline panel,
   universal generated-asset clip editing, first-class AI avatar clips,
@@ -37,7 +37,8 @@ description: |
   compositions by active project without blocking on render metadata, probes
   generated Storage assets itself for actual duration, reads local Storage
   blobs directly for local ffmpeg renders when available, and keeps signed
-  URLs for remote renderers.
+  URLs for remote renderers. The panel uses valid block-level timeline
+  markup so short clips and silence clips render consistently.
   Renders locally via ffmpeg, on a render host via instances, or against a
   bound render_executor integration.
 author: Apteva

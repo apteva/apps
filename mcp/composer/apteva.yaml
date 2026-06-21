@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: composer
 display_name: Composer
-version: 0.3.20
+version: 0.3.21
 description: |
   Multi-clip video composition. Stitch generated or uploaded assets
   into a single video — one visual track, timed audio tracks, optional
@@ -10,6 +10,10 @@ description: |
   default, on a render host via instances when render_host_id is
   set, or against a SaaS render backend (Shotstack et al) when one
   is bound to the render_executor role.
+
+  v0.3.21 fixes the timeline surface markup so audio-only clips,
+  silence clips, and short assets render across the full timeline
+  instead of collapsing in browsers that repair nested buttons.
 
   v0.3.16 fixes audio-only timeline lane sizing so timed audio clips
   remain visible regardless of generated CSS class coverage.

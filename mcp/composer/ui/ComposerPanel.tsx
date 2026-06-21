@@ -1,4 +1,4 @@
-// ComposerPanel v0.3.18 - timeline editor with storage and Media Studio AI assets.
+// ComposerPanel v0.3.21 - timeline editor with storage and Media Studio AI assets.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
@@ -1924,13 +1924,13 @@ function Timeline({
           </div>
         ) : (
           <div className="overflow-x-auto">
-            <button
-              type="button"
+            <div
+              role="presentation"
               onClick={(e) => {
                 const rect = e.currentTarget.getBoundingClientRect();
                 onSeek(((e.clientX - rect.left) / rect.width) * duration);
               }}
-              className="relative border border-border rounded bg-bg text-left overflow-hidden"
+              className="relative block border border-border rounded bg-bg text-left overflow-hidden cursor-crosshair"
               style={{ minHeight: timelineHeight, width: zoomedWidth, minWidth: "100%" }}
             >
               <div
@@ -2016,7 +2016,7 @@ function Timeline({
                   );
                 })}
               </div>
-            </button>
+            </div>
           </div>
         )}
       </div>
