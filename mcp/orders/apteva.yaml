@@ -1,0 +1,143 @@
+schema: apteva-app/v1
+
+name: orders
+display_name: Orders
+version: 0.1.0
+description: |
+  Physical commerce order ledger. Orders sits after checkout/billing
+  and before warehouse fulfillment: it records durable order state,
+  line items, fulfillment submissions, shipment tracking, returns, and
+  an append-only event log.
+
+  Catalog owns products/prices, Checkout owns buyer sessions, Billing
+  owns invoices/payments, and Orders owns physical delivery operations.
+
+author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/orders
+icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/orders/icon.svg
+tags: [orders, fulfillment, ecommerce, commerce, shipping, inventory]
+
+scopes: [project, global]
+min_apteva_version: "0.11.0"
+
+requires:
+  permissions:
+    - db.write.app
+    - platform.apps.call
+    - platform.connections.read_credentials
+  apps:
+    - name: catalog
+      optional: false
+    - name: billing
+      optional: true
+    - name: checkout
+      optional: true
+  integrations:
+    - role: fulfillment_provider
+      kind: integration
+      compatible_slugs: [huboo, hive-fulfillment, byrd]
+      capabilities: [orders.create, shipments.track, returns.create]
+      tools:
+        huboo.orders.create: orders_create
+        huboo.tracking.get: order_tracking_get
+        hive.orders.create: orders_create
+        hive.shipments.list: shipments_list
+        byrd.shipments.create: shipments_create
+        byrd.tracking.get: shipment_tracking_get
+      required: false
+      label: "Fulfillment provider"
+      hint: "Bind Huboo, Hive Fulfillment, or byrd to submit paid orders to a warehouse and sync tracking."
+    - role: sales_channel
+      kind: integration
+      compatible_slugs: [shopify, woocommerce, bigcommerce, etsy, square]
+      capabilities: [orders.read, products.read]
+      required: false
+      label: "Sales channel"
+      hint: "Bind a storefront or marketplace when importing external orders into Apteva."
+
+provides:
+  http_routes:
+    - prefix: /
+  mcp_tools:
+    - name: orders_create
+      description: Create a durable physical order with line items and shipping/customer snapshots.
+    - name: orders_create_from_checkout
+      description: Create an order from a Checkout session and its linked invoice/cart data.
+    - name: orders_import_from_channel
+      description: Import an order from an external sales channel payload.
+    - name: orders_get
+      description: Fetch one order with items, fulfillments, shipments, returns, and events.
+    - name: orders_search
+      description: Search orders by status, fulfillment_status, source, q, date range, and limit.
+    - name: orders_update_status
+      description: Update order, payment, or fulfillment status with an audit event.
+    - name: orders_cancel
+      description: Cancel an order that has not reached a terminal fulfillment state.
+    - name: fulfillments_create
+      description: Submit or record a fulfillment attempt for an order.
+    - name: fulfillments_sync
+      description: Refresh one fulfillment's provider status and raw payload.
+    - name: shipments_list
+      description: List shipments for an order.
+    - name: shipments_sync_tracking
+      description: Refresh shipment tracking from the fulfillment provider when possible.
+    - name: returns_create
+      description: Create a return record for an order.
+    - name: returns_get
+      description: Fetch one return record.
+    - name: order_events_list
+      description: List the append-only event log for an order.
+  ui_panels:
+    - slot: project.page
+      label: Orders
+      icon: package
+      entry: /ui/OrdersPanel.mjs
+  skills:
+    - name: how-to-use-orders
+      command: /orders
+      body_file: skills/how-to-use-orders.md
+      description: |
+        Orders' mental model and status conventions. Load when working
+        with physical orders, fulfillment, shipping, tracking, returns,
+        or marketplace order imports.
+      metadata:
+        category: commerce
+
+runtime:
+  kind: source
+  source:
+    repo: github.com/apteva/apps
+    ref: main
+    entry: mcp/orders
+  port: 8080
+  health_check: /health
+
+db:
+  driver: sqlite
+  path: /data/orders.db
+  migrations: migrations/
+
+config_schema:
+  - name: default_currency
+    type: text
+    default: "USD"
+    label: Default currency
+    description: ISO 4217 code used for imported orders that do not specify currency.
+  - name: order_number_format
+    type: text
+    default: "ORD-{yyyy}-{seq:04}"
+    label: Order number format
+    description: "Tokens: {yyyy}, {yy}, {mm}, {dd}, {seq}. Minted when an order is created."
+  - name: order_seq_start
+    type: text
+    default: "1001"
+    label: First order number
+    description: First sequence value used by {seq} each year.
+  - name: auto_submit_fulfillment
+    type: select
+    options: ["false", "true"]
+    default: "false"
+    label: Auto-submit fulfillment
+    description: Keep false for v0.1. Human review should happen before a warehouse fulfillment is submitted.
+
+upgrade_policy: auto-patch

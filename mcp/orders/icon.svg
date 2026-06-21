@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-label="Orders">
+  <rect width="256" height="256" rx="56" fill="#0f172a"/>
+  <path d="M64 80 128 44l64 36-64 36-64-36Z" fill="#38bdf8"/>
+  <path d="M64 100v76l64 36v-76L64 100Z" fill="#0284c7"/>
+  <path d="M192 100v76l-64 36v-76l64-36Z" fill="#0ea5e9"/>
+  <path d="M96 62l64 36" stroke="#e0f2fe" stroke-width="10" stroke-linecap="round" opacity=".9"/>
+</svg>

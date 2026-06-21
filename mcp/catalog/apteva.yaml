@@ -32,11 +32,11 @@ provides:
     - name: catalog_products_list
       description: List products. Filter by type, archived, q (search), limit.
     - name: catalog_products_create
-      description: Create a product. Args — name (req), type (req: one_time|recurring|service), slug, description, category, color, tax_category, metadata.
+      description: "Create a product. Args — name (req), type (req: one_time|recurring|service), slug, description, category, color, tax_category, metadata."
     - name: catalog_products_get
       description: Fetch one product by id or slug.
     - name: catalog_products_update
-      description: Partial-patch a product. Args — id, patch (any subset of editable fields).
+      description: "Partial-patch a product. Args — id, patch (any subset of editable fields)."
     - name: catalog_products_archive
       description: Soft-delete a product. Existing invoice/subscription references continue resolving; the picker hides it from new uses.
     - name: catalog_products_search
@@ -44,11 +44,11 @@ provides:
     - name: catalog_prices_list
       description: List prices. Filter by product_id, active, archived, limit.
     - name: catalog_prices_create
-      description: Create a price under a product. Args — product_id, unit_amount_cents, currency (req), nickname, interval, interval_count, trial_days, tax_inclusive, metadata.
+      description: "Create a price under a product. Args — product_id, unit_amount_cents, currency (req), nickname, interval, interval_count, trial_days, tax_inclusive, metadata."
     - name: catalog_prices_get
       description: Fetch one price.
     - name: catalog_prices_update
-      description: Patch a price — limited fields only (nickname, active, metadata, tax_inclusive). Amount/currency/interval changes are rejected; create a new price and archive the old one.
+      description: "Patch a price — limited fields only (nickname, active, metadata, tax_inclusive). Amount/currency/interval changes are rejected; create a new price and archive the old one."
     - name: catalog_prices_archive
       description: Soft-delete a price. Existing references keep resolving.
   ui_panels:
