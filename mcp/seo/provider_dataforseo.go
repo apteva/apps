@@ -240,6 +240,7 @@ func refreshRankedKeywordsViaDataForSEO(ctx *sdk.AppCtx, connID int64, d *Domain
 		return rankedKeywordRefreshSummary{Note: "ranked_keywords returned zero items"}, nil
 	}
 	now := time.Now().Unix()
+	observedDate := time.Unix(now, 0).UTC().Format("2006-01-02")
 	tx, err := ctx.AppDB().Begin()
 	if err != nil {
 		return rankedKeywordRefreshSummary{}, err
@@ -269,14 +270,14 @@ func refreshRankedKeywordsViaDataForSEO(ctx *sdk.AppCtx, connID int64, d *Domain
 		raw, _ := json.Marshal(item)
 		if _, err := tx.Exec(
 			`INSERT INTO rankings
-			   (domain_id, keyword_id, location_id, provider, ts, rank, rank_url, device, serp_features_json)
-			 VALUES (?, ?, ?, 'dataforseo', ?, ?, ?, 'desktop', ?)
-			 ON CONFLICT(domain_id, keyword_id, location_id, provider, rank_url, device)
+			   (domain_id, keyword_id, location_id, provider, ts, observed_date, rank, rank_url, device, serp_features_json)
+			 VALUES (?, ?, ?, 'dataforseo', ?, ?, ?, ?, 'desktop', ?)
+			 ON CONFLICT(domain_id, keyword_id, location_id, provider, rank_url, device, observed_date)
 			 DO UPDATE SET
 			    ts = excluded.ts,
 			    rank = excluded.rank,
 			    serp_features_json = excluded.serp_features_json`,
-			d.ID, keywordID, loc.ID, now, rank, rankURL, string(raw),
+			d.ID, keywordID, loc.ID, now, observedDate, rank, rankURL, string(raw),
 		); err != nil {
 			return rankedKeywordRefreshSummary{}, fmt.Errorf("upsert ranking for %q: %w", keywordText, err)
 		}

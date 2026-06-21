@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: seo
 display_name: SEO
-version: 0.3.5
+version: 0.3.6
 description: |
   Generic SEO research workbench. Track domains, keywords, rankings,
   and backlinks; pull metrics from any provider behind one pluggable
@@ -26,6 +26,8 @@ description: |
         during domain refresh.
   v0.3.5: makes ranking refresh idempotent so the same page/keyword
         is updated instead of duplicated.
+  v0.3.6: keeps ranking history in the rankings table with one
+        observation per page/keyword/day.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/seo
@@ -79,8 +81,8 @@ provides:
     # Refresh tools are deliberately NOT exposed as MCP. The agent
     # reads cached rows here and uses last_refreshed_at to flag
     # staleness; the human triggers refresh via the panel.
-    - { name: rankings_for_domain,   description: "List a domain's ranking history (cached). Args: domain_id (required), since? (unix), limit? (default 200)." }
-    - { name: rankings_for_keyword,  description: "List which tracked domains rank for a keyword (cached). Args: keyword_id (required), since? (unix), limit? (default 200)." }
+    - { name: rankings_for_domain,   description: "List a domain's current rankings by default, or daily observations with history=true. Args: domain_id (required), since? (unix), limit? (default 200), history?." }
+    - { name: rankings_for_keyword,  description: "List current tracked-domain rankings for a keyword by default, or daily observations with history=true. Args: keyword_id (required), since? (unix), limit? (default 200), history?." }
     - { name: backlinks_list,        description: "List backlinks pointing at a domain (cached). Args: domain_id (required), lost? (bool, default false), dofollow? (bool, optional filter), limit? (default 200)." }
     - { name: keyword_volume_history, description: "Monthly search-volume series for a keyword (cached). Args: keyword_id (required)." }
   ui_panels:

@@ -33,7 +33,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: seo
 display_name: SEO
-version: 0.3.5
+version: 0.3.6
 description: Generic SEO research workbench — locale-aware domains, keywords, rankings, backlinks behind one pluggable provider integration.
 author: Apteva
 scopes: [project, global]
@@ -60,8 +60,8 @@ provides:
     - { name: keywords_list,   description: "List keywords in this scope." }
     - { name: keywords_get,    description: "Read one keyword plus latest metrics." }
     - { name: keywords_remove, description: "Remove a keyword (cascades to children)." }
-    - { name: rankings_for_domain,    description: "Cached rankings history for a domain." }
-    - { name: rankings_for_keyword,   description: "Cached rankings of a keyword across tracked domains." }
+    - { name: rankings_for_domain,    description: "Cached current rankings for a domain; pass history=true for daily observations." }
+    - { name: rankings_for_keyword,   description: "Cached current rankings for a keyword; pass history=true for daily observations." }
     - { name: backlinks_list,         description: "Cached backlinks pointing at a domain." }
     - { name: keyword_volume_history, description: "Monthly search-volume series (cached)." }
   ui_panels:
@@ -191,19 +191,21 @@ func (a *App) MCPTools() []sdk.Tool {
 
 		// ── read-only views (v0.2) ──────────────────────────────
 		{Name: "rankings_for_domain",
-			Description: "List a domain's ranking history (cached; no provider call). Args: domain_id (required), since? (unix seconds), limit? (default 200).",
+			Description: "List a domain's current rankings by default, or daily ranking observations with history=true. Args: domain_id (required), since? (unix seconds), limit? (default 200), history? (default false).",
 			InputSchema: schemaObject(map[string]any{
 				"domain_id": map[string]any{"type": "integer"},
 				"since":     map[string]any{"type": "integer"},
 				"limit":     map[string]any{"type": "integer"},
+				"history":   map[string]any{"type": "boolean"},
 			}, []string{"domain_id"}),
 			Handler: a.toolRankingsForDomain},
 		{Name: "rankings_for_keyword",
-			Description: "List which tracked domains rank for a keyword (cached). Args: keyword_id (required), since? (unix seconds), limit? (default 200).",
+			Description: "List current tracked-domain rankings for a keyword by default, or daily observations with history=true. Args: keyword_id (required), since? (unix seconds), limit? (default 200), history? (default false).",
 			InputSchema: schemaObject(map[string]any{
 				"keyword_id": map[string]any{"type": "integer"},
 				"since":      map[string]any{"type": "integer"},
 				"limit":      map[string]any{"type": "integer"},
+				"history":    map[string]any{"type": "boolean"},
 			}, []string{"keyword_id"}),
 			Handler: a.toolRankingsForKeyword},
 		{Name: "backlinks_list",
@@ -774,6 +776,7 @@ type Ranking struct {
 	LocationID       int64  `json:"location_id"`
 	Provider         string `json:"provider"`
 	TS               int64  `json:"ts"`
+	ObservedDate     string `json:"observed_date,omitempty"`
 	Rank             *int64 `json:"rank,omitempty"`
 	RankURL          string `json:"rank_url,omitempty"`
 	Device           string `json:"device"`
@@ -818,9 +821,19 @@ func (a *App) toolRankingsForDomain(ctx *sdk.AppCtx, args map[string]any) (any, 
 	if limit <= 0 {
 		limit = 200
 	}
-	rows, err := ctx.AppDB().Query(
-		`WITH current_rankings AS (
-		    SELECT id, domain_id, keyword_id, location_id, provider, ts, rank, rank_url,
+	var rows *sql.Rows
+	var err error
+	if boolArg(args, "history", false) {
+		rows, err = ctx.AppDB().Query(
+			`SELECT id, domain_id, keyword_id, location_id, provider, ts, observed_date,
+			        rank, rank_url, device, serp_features_json
+			   FROM rankings
+			   WHERE domain_id = ? AND ts >= ?
+			   ORDER BY ts DESC, rank ASC LIMIT ?`, id, since, limit)
+	} else {
+		rows, err = ctx.AppDB().Query(
+			`WITH current_rankings AS (
+		    SELECT id, domain_id, keyword_id, location_id, provider, ts, observed_date, rank, rank_url,
 		           device, serp_features_json,
 		           ROW_NUMBER() OVER (
 		             PARTITION BY domain_id, keyword_id, location_id, provider, rank_url, device
@@ -829,11 +842,12 @@ func (a *App) toolRankingsForDomain(ctx *sdk.AppCtx, args map[string]any) (any, 
 		      FROM rankings
 		     WHERE domain_id = ? AND ts >= ?
 		  )
-		  SELECT id, domain_id, keyword_id, location_id, provider, ts, rank, rank_url,
+		  SELECT id, domain_id, keyword_id, location_id, provider, ts, observed_date, rank, rank_url,
 		         device, serp_features_json
 		    FROM current_rankings
 		   WHERE rn = 1
 		   ORDER BY ts DESC, rank ASC LIMIT ?`, id, since, limit)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -853,9 +867,19 @@ func (a *App) toolRankingsForKeyword(ctx *sdk.AppCtx, args map[string]any) (any,
 	if limit <= 0 {
 		limit = 200
 	}
-	rows, err := ctx.AppDB().Query(
-		`WITH current_rankings AS (
-		    SELECT id, domain_id, keyword_id, location_id, provider, ts, rank, rank_url,
+	var rows *sql.Rows
+	var err error
+	if boolArg(args, "history", false) {
+		rows, err = ctx.AppDB().Query(
+			`SELECT id, domain_id, keyword_id, location_id, provider, ts, observed_date,
+			        rank, rank_url, device, serp_features_json
+			   FROM rankings
+			   WHERE keyword_id = ? AND ts >= ?
+			   ORDER BY ts DESC, rank ASC LIMIT ?`, id, since, limit)
+	} else {
+		rows, err = ctx.AppDB().Query(
+			`WITH current_rankings AS (
+		    SELECT id, domain_id, keyword_id, location_id, provider, ts, observed_date, rank, rank_url,
 		           device, serp_features_json,
 		           ROW_NUMBER() OVER (
 		             PARTITION BY domain_id, keyword_id, location_id, provider, rank_url, device
@@ -864,11 +888,12 @@ func (a *App) toolRankingsForKeyword(ctx *sdk.AppCtx, args map[string]any) (any,
 		      FROM rankings
 		     WHERE keyword_id = ? AND ts >= ?
 		  )
-		  SELECT id, domain_id, keyword_id, location_id, provider, ts, rank, rank_url,
+		  SELECT id, domain_id, keyword_id, location_id, provider, ts, observed_date, rank, rank_url,
 		         device, serp_features_json
 		    FROM current_rankings
 		   WHERE rn = 1
 		   ORDER BY ts DESC, rank ASC LIMIT ?`, id, since, limit)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -880,9 +905,13 @@ func scanRankings(rows *sql.Rows) ([]Ranking, error) {
 	out := []Ranking{}
 	for rows.Next() {
 		var r Ranking
+		var observed sql.NullString
 		if err := rows.Scan(&r.ID, &r.DomainID, &r.KeywordID, &r.LocationID, &r.Provider, &r.TS,
-			&r.Rank, &r.RankURL, &r.Device, &r.SerpFeaturesJSON); err != nil {
+			&observed, &r.Rank, &r.RankURL, &r.Device, &r.SerpFeaturesJSON); err != nil {
 			return nil, err
+		}
+		if observed.Valid {
+			r.ObservedDate = observed.String
 		}
 		out = append(out, r)
 	}
