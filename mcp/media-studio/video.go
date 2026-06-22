@@ -297,6 +297,58 @@ func videoDurationArg(args map[string]any) string {
 	return "5s"
 }
 
+func normalizeVeniceVideoDurationForModel(ctx *sdk.AppCtx, args map[string]any, capability string) {
+	requested := durationArgSeconds(args)
+	if requested <= 0 {
+		return
+	}
+	model := strings.TrimSpace(strArg(args, "model", ""))
+	if model == "" {
+		return
+	}
+	models, err := loadModelsForCapability(ctx, KindVideo, capability)
+	if err != nil || len(models) == 0 {
+		return
+	}
+	for _, entry := range models {
+		if entry.ID != model {
+			continue
+		}
+		if snapped := snapDurationToSupported(requested, entry.Durations); snapped > 0 {
+			args["duration"] = fmt.Sprintf("%ds", snapped)
+		}
+		return
+	}
+}
+
+func snapDurationToSupported(requested float64, supported []string) int {
+	if requested <= 0 || len(supported) == 0 {
+		return 0
+	}
+	bestAtOrAbove := 0
+	largest := 0
+	for _, raw := range supported {
+		seconds := int(durationStringSeconds(raw))
+		if seconds <= 0 {
+			continue
+		}
+		if seconds > largest {
+			largest = seconds
+		}
+		if float64(seconds)+0.001 >= requested && (bestAtOrAbove == 0 || seconds < bestAtOrAbove) {
+			bestAtOrAbove = seconds
+		}
+	}
+	if bestAtOrAbove > 0 {
+		return bestAtOrAbove
+	}
+	return largest
+}
+
+func durationStringSeconds(raw string) float64 {
+	return durationArgSeconds(map[string]any{"duration": raw})
+}
+
 // videoJobUpdateStatus updates a job row's status/error fields.
 // Idempotent — no-op when the new status matches the current one.
 func videoJobUpdateStatus(ctx *sdk.AppCtx, jobID int64, status, errMsg string) {

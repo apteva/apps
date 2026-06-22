@@ -217,6 +217,10 @@ func (a *App) toolMediaGenerate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 		return mcpError("storage_folder: " + err.Error()), nil
 	}
 	args["_storage_folder"] = storageFolder
+	if kind == KindVideo && bound.AppSlug == "venice-ai" {
+		normalizeVeniceVideoDurationForModel(ctx, args, capability)
+		estimatedSeconds = estimatedDurationSeconds(kind, args)
+	}
 	requestJSON := generationRequestJSON(args)
 
 	// Source images — resolve "storage:N" / URL / base64 into the

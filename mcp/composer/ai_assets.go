@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 
@@ -32,6 +33,9 @@ func materializeAIAssets(ctx *sdk.AppCtx, edit *Edit, compositionID int64, proje
 			}
 			if clip.AI == nil {
 				continue
+			}
+			if prepareAIVideoDurationForTiming(edit, clip) {
+				out.Changed = true
 			}
 			changed, pending, err := materializeOneAIAsset(ctx, clip.AI, "clip "+clip.UID, projectID)
 			if err != nil {
@@ -348,6 +352,76 @@ func refreshSoundtrackActualDuration(ctx *sdk.AppCtx, s *Soundtrack) bool {
 		changed = true
 	}
 	return changed
+}
+
+func prepareAIVideoDurationForTiming(edit *Edit, c *Clip) bool {
+	if edit == nil || c == nil || c.AI == nil {
+		return false
+	}
+	if strings.ToLower(strings.TrimSpace(c.AI.MediaKind)) != "video" || c.Timing == nil {
+		return false
+	}
+	mode := strings.ToLower(strings.TrimSpace(c.Timing.Mode))
+	if mode != "fit_source" && mode != "fit_group" && mode != "fit_timeline" {
+		return false
+	}
+	target := targetDurationForTiming(edit, c)
+	if target <= 0 {
+		return false
+	}
+	desired := desiredVideoGenerationSeconds(target)
+	if desired <= 0 || c.AI.Duration >= desired {
+		return false
+	}
+	c.AI.Duration = desired
+	c.AI.EstimatedDurationSeconds = float64(desired)
+	c.AI.CacheKey = ""
+	c.AI.StorageID = 0
+	c.AI.GenerationID = 0
+	c.AI.JobID = 0
+	c.AI.Status = "draft"
+	c.AI.ActualDurationSeconds = 0
+	c.AI.AudioAnalysis = nil
+	c.AI.Error = ""
+	return true
+}
+
+func targetDurationForTiming(edit *Edit, c *Clip) float64 {
+	if c == nil || c.Timing == nil {
+		return 0
+	}
+	timing := c.Timing
+	mode := strings.ToLower(strings.TrimSpace(timing.Mode))
+	var base float64
+	switch mode {
+	case "fit_source":
+		base = sourceDuration(edit, c, timing.Source)
+	case "fit_group":
+		base = groupDuration(edit, c)
+	case "fit_timeline":
+		base = editDurationSeconds(edit)
+	default:
+		return 0
+	}
+	if base <= 0 {
+		return 0
+	}
+	next := base + timing.PaddingAfter
+	if timing.MinLength > 0 && next < timing.MinLength {
+		next = timing.MinLength
+	}
+	if timing.MaxLength > 0 && next > timing.MaxLength {
+		next = timing.MaxLength
+	}
+	return next
+}
+
+func desiredVideoGenerationSeconds(target float64) int {
+	if target <= 0 {
+		return 0
+	}
+	handle := math.Max(1, target*0.15)
+	return int(math.Ceil(target + handle))
 }
 
 func clipHasProbeableDuration(c Clip) bool {

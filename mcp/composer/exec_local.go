@@ -187,9 +187,6 @@ func buildLocalFFmpegArgsWithAudioInfo(edit *Edit, output Output, inputs []strin
 		if i == soundtrackIdx && soundtrackLoops(edit.Timeline.Soundtrack) {
 			args = append(args, "-stream_loop", "-1")
 		}
-		if i < visualCount && clipAssetType(track.Clips[i], "visual") != "image" && visualClipLoopsForSlot(track.Clips[i]) {
-			args = append(args, "-stream_loop", "-1")
-		}
 		args = append(args, "-i", src)
 	}
 
@@ -208,7 +205,7 @@ func buildLocalFFmpegArgsWithAudioInfo(edit *Edit, output Output, inputs []strin
 		// via -t on input.
 		if clipAssetType(c, "visual") != "image" {
 			d := trimFloat(clipDuration(c))
-			if visualClipClonePadsForSlot(c) {
+			if visualClipPadsForSlot(c) {
 				fmt.Fprintf(&filter, ",tpad=stop_mode=clone:stop_duration=%s", d)
 			}
 			fmt.Fprintf(&filter, ",trim=duration=%s,setpts=PTS-STARTPTS", d)
@@ -463,30 +460,10 @@ func soundtrackLoops(s *Soundtrack) bool {
 	}
 }
 
-func visualClipLoopsForSlot(c Clip) bool {
-	if clipAssetType(c, "visual") == "image" {
-		return false
-	}
+func visualClipPadsForSlot(c Clip) bool {
 	behavior, mode := visualClipTiming(c)
 	switch behavior {
-	case "loop", "trim_or_loop":
-		return true
-	case "pad", "trim", "stretch", "regenerate":
-		return false
-	}
-	switch mode {
-	case "fit_source", "fit_group", "fit_timeline":
-		source := visualClipSourceDuration(c)
-		return source > 0 && source+0.01 < clipDuration(c)
-	default:
-		return false
-	}
-}
-
-func visualClipClonePadsForSlot(c Clip) bool {
-	behavior, mode := visualClipTiming(c)
-	switch behavior {
-	case "loop", "trim_or_loop", "trim", "stretch", "regenerate":
+	case "trim", "trim_or_loop", "loop", "stretch", "regenerate":
 		return false
 	case "pad":
 		return true

@@ -211,21 +211,21 @@ func TestBuildLocalFFmpegArgs_ImageClipUsesLoop(t *testing.T) {
 	}
 }
 
-func TestBuildLocalFFmpegArgs_FitSourceVideoLoopsInsteadOfClonePadding(t *testing.T) {
+func TestBuildLocalFFmpegArgs_FitSourceVideoDoesNotLoopOrClonePad(t *testing.T) {
 	e, _ := parseEditJSON(`{"timeline":{"tracks":[{"clips":[
 		{"asset":{"src":"https://v","type":"video"},"start":0,"length":8,"actual_length":3,
 		 "timing":{"mode":"fit_source","source":"track:audio"}}
 	]}]}}`)
 	args := buildLocalFFmpegArgs(e, defaultOutput(), []string{"https://v"}, -1, "out.mp4")
 	cmd := strings.Join(args, " ")
-	if !strings.Contains(cmd, "-stream_loop -1 -i https://v") {
-		t.Fatalf("short matched video should loop input instead of freezing: %s", cmd)
+	if strings.Contains(cmd, "-stream_loop -1 -i https://v") {
+		t.Fatalf("matched video should not loop input: %s", cmd)
 	}
 	if strings.Contains(cmd, "tpad=stop_mode=clone") {
-		t.Fatalf("short matched video should not clone-pad the final frame: %s", cmd)
+		t.Fatalf("matched video should not clone-pad the final frame unless explicitly requested: %s", cmd)
 	}
 	if !strings.Contains(cmd, "trim=duration=8") {
-		t.Fatalf("looped video should still trim exactly to the target slot: %s", cmd)
+		t.Fatalf("video should trim exactly to the target slot: %s", cmd)
 	}
 }
 
@@ -463,6 +463,32 @@ func TestApplyClipTiming_FitSourceTrackAudioBySection(t *testing.T) {
 	got := e.Timeline.Tracks[0].Clips[0].Length
 	if !sameTime(got, 8.55) {
 		t.Fatalf("visual length = %v, want audio length plus padding", got)
+	}
+}
+
+func TestPrepareAIVideoDurationForTiming_UsesAudioMatchedHandle(t *testing.T) {
+	e, err := parseEditJSON(`{"timeline":{"tracks":[
+		{"type":"visual","clips":[
+			{"uid":"video-1","section_id":"intro","asset":{"type":"video","src":"storage:1"},"start":0,"length":3,
+				"timing":{"mode":"fit_source","source":"track:audio","padding_after":0.35},
+				"ai":{"media_kind":"video","prompt":"recipe shot","duration":3,"status":"ready","storage_id":12,"generation_id":34,"cache_key":"composer:old","actual_duration_seconds":3}}
+		]},
+		{"type":"audio","clips":[
+			{"uid":"voice-1","section_id":"intro","asset":{"type":"audio","src":"storage:2"},"start":0,"length":8.2}
+		]}
+	]}}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clip := &e.Timeline.Tracks[0].Clips[0]
+	if !prepareAIVideoDurationForTiming(e, clip) {
+		t.Fatal("expected AI video duration to be prepared")
+	}
+	if clip.AI.Duration != 10 {
+		t.Fatalf("video duration = %d, want 10", clip.AI.Duration)
+	}
+	if clip.AI.Status != "draft" || clip.AI.StorageID != 0 || clip.AI.GenerationID != 0 || clip.AI.CacheKey != "" {
+		t.Fatalf("AI video generated state was not reset: %+v", clip.AI)
 	}
 }
 

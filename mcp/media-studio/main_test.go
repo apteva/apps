@@ -39,6 +39,7 @@ type recordingPlatform struct {
 	callAppCalls      []callAppCall
 	nextExecuteResult *sdk.ExecuteResult
 	nextExecuteErr    error
+	perExecuteResults map[string]*sdk.ExecuteResult
 	nextCallResult    json.RawMessage
 	nextCallErr       error
 	identity          *sdk.InstallIdentity
@@ -105,9 +106,13 @@ func (p *recordingPlatform) GetGrants(int64) (*sdk.GrantsResponse, error) {
 func (p *recordingPlatform) ExecuteIntegrationTool(connID int64, tool string, input map[string]any) (*sdk.ExecuteResult, error) {
 	p.mu.Lock()
 	p.executeCalls = append(p.executeCalls, executeCall{ConnID: connID, Tool: tool, Input: input})
+	keyed := p.perExecuteResults[tool]
 	p.mu.Unlock()
 	if p.nextExecuteErr != nil {
 		return nil, p.nextExecuteErr
+	}
+	if keyed != nil {
+		return keyed, nil
 	}
 	return p.nextExecuteResult, nil
 }
@@ -1004,6 +1009,19 @@ func TestMediaBytes_NoSource(t *testing.T) {
 	}
 }
 
+func TestSnapDurationToSupported_ChoosesNextSupportedDuration(t *testing.T) {
+	supported := []string{"3s", "5s", "8s", "10s", "15s"}
+	if got := snapDurationToSupported(8.55, supported); got != 10 {
+		t.Fatalf("duration = %d, want 10", got)
+	}
+	if got := snapDurationToSupported(3, supported); got != 3 {
+		t.Fatalf("exact duration = %d, want 3", got)
+	}
+	if got := snapDurationToSupported(16, supported); got != 15 {
+		t.Fatalf("overflow duration = %d, want largest supported 15", got)
+	}
+}
+
 // --- gpt-image-* b64 storage upload --------------------------------
 
 func TestToolMediaGenerate_GPTImage_B64_StorageUpload(t *testing.T) {
@@ -1761,9 +1779,15 @@ func TestToolMediaGenerate_Video_VeniceQueue(t *testing.T) {
 	pf := newRecordingPlatform()
 	pf.appSlug = "venice-ai"
 	pf.identity.Bindings["video_provider"] = float64(77)
-	pf.nextExecuteResult = &sdk.ExecuteResult{
-		Success: true, Status: 200,
-		Data: json.RawMessage(`{"model":"kling-2","queue_id":"q-abc-123"}`),
+	pf.perExecuteResults = map[string]*sdk.ExecuteResult{
+		"list_models": {
+			Success: true, Status: 200,
+			Data: json.RawMessage(`{"data":[{"id":"kling-2","model_spec":{"constraints":{"model_type":"text-to-video","durations":["3s","5s","8s","10s"]}}}]}`),
+		},
+		"queue_video": {
+			Success: true, Status: 200,
+			Data: json.RawMessage(`{"model":"kling-2","queue_id":"q-abc-123"}`),
+		},
 	}
 	ctx := newMediaStudioCtx(t, pf)
 	app := &App{}
@@ -1771,7 +1795,7 @@ func TestToolMediaGenerate_Video_VeniceQueue(t *testing.T) {
 		"kind":     "video",
 		"prompt":   "a cat walking through a sunlit garden",
 		"model":    "kling-2",
-		"duration": "5s",
+		"duration": "9s",
 	})
 	if err != nil {
 		t.Fatalf("toolMediaGenerate: %v", err)
@@ -1781,11 +1805,14 @@ func TestToolMediaGenerate_Video_VeniceQueue(t *testing.T) {
 	if meta["status"] != "queued" || meta["queue_id"] != "q-abc-123" {
 		t.Errorf("expected queued meta, got %+v", meta)
 	}
-	if pf.executeCalls[0].Tool != "queue_video" {
-		t.Errorf("provider tool = %q, want queue_video", pf.executeCalls[0].Tool)
+	if len(pf.executeCalls) != 3 ||
+		pf.executeCalls[0].Tool != "list_models" ||
+		pf.executeCalls[1].Tool != "queue_video" ||
+		pf.executeCalls[2].Tool != "quote_video" {
+		t.Fatalf("provider calls = %+v, want list_models, queue_video, quote_video", pf.executeCalls)
 	}
-	if pf.executeCalls[0].Input["duration"] != "5s" {
-		t.Errorf("duration not forwarded: %+v", pf.executeCalls[0].Input)
+	if pf.executeCalls[1].Input["duration"] != "10s" {
+		t.Errorf("duration not normalized: %+v", pf.executeCalls[1].Input)
 	}
 
 	// video_jobs row landed in 'queued' state.
