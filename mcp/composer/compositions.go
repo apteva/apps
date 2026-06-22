@@ -66,6 +66,7 @@ type AIAsset struct {
 	MediaKind                string         `json:"media_kind"` // image | video | audio_tts | audio_sfx | music | avatar
 	Prompt                   string         `json:"prompt"`
 	Model                    string         `json:"model,omitempty"`
+	Size                     string         `json:"size,omitempty"`
 	Duration                 int            `json:"duration,omitempty"`
 	Aspect                   string         `json:"aspect,omitempty"`
 	Voice                    string         `json:"voice,omitempty"`

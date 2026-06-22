@@ -1,4 +1,4 @@
-// ComposerPanel v0.3.23 - timeline editor with storage and Media Studio AI assets.
+// ComposerPanel v0.3.24 - timeline editor with storage and Media Studio AI assets.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
@@ -62,6 +62,7 @@ interface AIAsset {
   media_kind: MediaKind;
   prompt: string;
   model?: string;
+  size?: string;
   duration?: number;
   aspect?: string;
   voice?: string;
@@ -162,6 +163,7 @@ interface MediaHistoryGeneration {
   kind: string;
   prompt: string;
   model?: string;
+  size?: string;
   duration_ms?: number;
   storage_ids?: number[];
   cache_key?: string;
@@ -543,11 +545,25 @@ function defaultAI(kind: MediaKind, aspect: Aspect): AIAsset {
   return {
     media_kind: kind,
     prompt: "",
+    size: kind === "image" ? imageSizeForAspect(aspect) : undefined,
     duration: kind === "image" ? undefined : kind === "music" ? 30 : 5,
     aspect: kind === "video" || kind === "avatar" ? aspect : undefined,
     cache_policy: "reuse",
     status: "draft",
   };
+}
+
+function imageSizeForAspect(aspect: Aspect): string {
+  switch (aspect) {
+    case "9:16":
+      return "720x1280";
+    case "1:1":
+      return "1024x1024";
+    case "4:3":
+      return "1024x768";
+    default:
+      return "1280x720";
+  }
 }
 
 function exampleAI(kind: MediaKind, prompt: string, aspect: Aspect, duration?: number): AIAsset {
@@ -671,6 +687,7 @@ function cacheKeyForAI(ai: AIAsset): string {
     media_kind: ai.media_kind,
     prompt: ai.prompt,
     model: ai.model || "",
+    size: ai.size || "",
     duration: ai.duration || 0,
     aspect: ai.aspect || "",
     voice: ai.voice || "",
@@ -741,6 +758,7 @@ function aiFromGeneration(g: MediaHistoryGeneration, storageId: number): AIAsset
     media_kind: kind,
     prompt: g.prompt || String(req.prompt || ""),
     model: g.model || String(req.model || "") || undefined,
+    size: g.size || String(req.size || "") || undefined,
     duration: Number(req.duration || Math.round((g.duration_ms || 0) / 1000)) || undefined,
     aspect: String(extra.aspect || req.aspect || "") || undefined,
     voice: String(extra.voice || req.voice || "") || undefined,
@@ -1287,6 +1305,7 @@ export default function ComposerPanel({ projectId }: NativePanelProps) {
       cache_policy: nextAI.cache_policy || "reuse",
     };
     if (nextAI.model) body.model = nextAI.model;
+    if (nextAI.size) body.size = nextAI.size;
     if (nextAI.duration) body.duration = nextAI.duration;
     if (nextAI.aspect) body.aspect = nextAI.aspect;
     if (nextAI.voice) body.voice = nextAI.voice;
@@ -2733,8 +2752,35 @@ function AIAssetEditor({
   onClear: () => void;
 }) {
   const field = "bg-bg-input border border-border rounded px-2 py-1.5 text-sm w-full";
+  const generationInputKeys = new Set([
+    "media_kind",
+    "prompt",
+    "model",
+    "size",
+    "duration",
+    "aspect",
+    "voice",
+    "avatar",
+    "source_image",
+    "options",
+  ]);
   const update = (patch: Partial<AIAsset>) => {
-    const next = { ...ai, ...patch, status: patch.status || ai.status || "draft" };
+    const changesGenerationInput = Object.keys(patch).some((key) => generationInputKeys.has(key));
+    const resetGeneratedState = changesGenerationInput && patch.status === undefined;
+    const next = {
+      ...ai,
+      ...patch,
+      status: resetGeneratedState ? "draft" : patch.status || ai.status || "draft",
+      cache_key: resetGeneratedState ? undefined : ai.cache_key,
+      storage_id: resetGeneratedState ? undefined : ai.storage_id,
+      generation_id: resetGeneratedState ? undefined : ai.generation_id,
+      job_id: resetGeneratedState ? undefined : ai.job_id,
+      actual_duration_seconds: resetGeneratedState ? undefined : ai.actual_duration_seconds,
+      audio_analysis: resetGeneratedState ? undefined : ai.audio_analysis,
+      peak_db: resetGeneratedState ? undefined : ai.peak_db,
+      rms_db: resetGeneratedState ? undefined : ai.rms_db,
+      error: resetGeneratedState ? "" : ai.error,
+    };
     onChange(withDurationEstimate(next));
   };
   const [models, setModels] = useState<{ id: string; name?: string }[]>([]);
@@ -2787,7 +2833,15 @@ function AIAssetEditor({
         <Field label="Kind">
           <select
           value={ai.media_kind}
-            onChange={(e) => update({ media_kind: e.target.value as MediaKind, estimated_duration_seconds: undefined, actual_duration_seconds: undefined })}
+            onChange={(e) => {
+              const mediaKind = e.target.value as MediaKind;
+              update({
+                media_kind: mediaKind,
+                size: mediaKind === "image" ? ai.size || "1024x1024" : undefined,
+                estimated_duration_seconds: undefined,
+                actual_duration_seconds: undefined,
+              });
+            }}
             className={field}
           >
             {allowedKinds.map((kind) => <option key={kind} value={kind}>{kind}</option>)}
@@ -2825,6 +2879,16 @@ function AIAssetEditor({
             <input value={ai.model || ""} onChange={(e) => update({ model: e.target.value })} placeholder="auto" className={field} />
           )}
         </Field>
+        {ai.media_kind === "image" && (
+          <Field label="Size">
+            <input
+              value={ai.size || ""}
+              onChange={(e) => update({ size: e.target.value })}
+              placeholder="1024x1024"
+              className={field}
+            />
+          </Field>
+        )}
         <Field label="Aspect">
           <input
             value={ai.aspect || ""}

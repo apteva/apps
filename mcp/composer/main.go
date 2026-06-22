@@ -27,7 +27,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: composer
 display_name: Composer
-version: 0.3.23
+version: 0.3.24
 description: |
   Multi-clip video compositions with a structured timeline panel,
   universal generated-asset clip editing, first-class AI avatar clips,
@@ -40,7 +40,9 @@ description: |
   URLs for remote renderers. The panel uses valid block-level timeline
   markup plus explicit inline pixel layout for lanes, clips, gaps, and the
   playhead so short clips and silence clips render consistently even in
-  narrow app frames and production host CSS.
+  narrow app frames and production host CSS. AI image clips carry explicit
+  size metadata so portrait/landscape stills are generated at the intended
+  composition aspect through Media Studio.
   Renders locally via ffmpeg, on a render host via instances, or against a
   bound render_executor integration.
 author: Apteva

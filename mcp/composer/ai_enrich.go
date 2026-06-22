@@ -13,6 +13,7 @@ type mediaHistoryRow struct {
 	Kind                     string   `json:"kind"`
 	Prompt                   string   `json:"prompt"`
 	Model                    string   `json:"model"`
+	Size                     string   `json:"size"`
 	DurationMS               int64    `json:"duration_ms"`
 	StorageIDs               []int64  `json:"storage_ids"`
 	CacheKey                 string   `json:"cache_key"`
@@ -184,6 +185,11 @@ func aiFromMediaHistory(row mediaHistoryRow, storageID int64) *AIAsset {
 		if model, _ := req["model"].(string); model != "" {
 			ai.Model = model
 		}
+	}
+	if size, _ := req["size"].(string); size != "" {
+		ai.Size = size
+	} else if row.Size != "" {
+		ai.Size = row.Size
 	}
 	if voice, _ := extra["voice"].(string); voice != "" {
 		ai.Voice = voice

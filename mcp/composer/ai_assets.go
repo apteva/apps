@@ -154,8 +154,16 @@ func materializeOneAIAsset(ctx *sdk.AppCtx, ai *AIAsset, label, projectID string
 		ai.CachePolicy = "reuse"
 		changed = true
 	}
+	expectedCacheKey := aiCacheKey(ai)
 	if ai.CacheKey == "" {
-		ai.CacheKey = aiCacheKey(ai)
+		ai.CacheKey = expectedCacheKey
+		changed = true
+	} else if strings.HasPrefix(ai.CacheKey, "composer:") && ai.CacheKey != expectedCacheKey {
+		ai.CacheKey = expectedCacheKey
+		ai.StorageID = 0
+		ai.GenerationID = 0
+		ai.JobID = 0
+		ai.Status = "draft"
 		changed = true
 	}
 	if ai.StorageID > 0 && ai.Status == "ready" {
@@ -175,6 +183,9 @@ func materializeOneAIAsset(ctx *sdk.AppCtx, ai *AIAsset, label, projectID string
 	}
 	if ai.Model != "" {
 		args["model"] = ai.Model
+	}
+	if ai.Size != "" {
+		args["size"] = ai.Size
 	}
 	if ai.Duration > 0 {
 		args["duration"] = ai.Duration
@@ -315,6 +326,7 @@ func aiCacheKey(ai *AIAsset) string {
 		"media_kind":   ai.MediaKind,
 		"prompt":       ai.Prompt,
 		"model":        ai.Model,
+		"size":         ai.Size,
 		"duration":     ai.Duration,
 		"aspect":       ai.Aspect,
 		"voice":        ai.Voice,

@@ -88,6 +88,24 @@ func TestValidateEdit_AcceptsAIClipWithoutMaterializedSource(t *testing.T) {
 	}
 }
 
+func TestValidateEdit_PreservesAIImageSize(t *testing.T) {
+	body := `{"timeline":{"tracks":[{"clips":[{
+		"uid":"clip-ai-image",
+		"asset":{"type":"image","src":""},
+		"ai":{"media_kind":"image","prompt":"portrait recipe still","model":"flux-2-pro","size":"720x1280"},
+		"start":0,
+		"length":5
+	}]}]}}`
+	e, err := parseEditJSON(body)
+	if err != nil {
+		t.Fatalf("expected AI image clip to validate, got %v", err)
+	}
+	ai := e.Timeline.Tracks[0].Clips[0].AI
+	if ai == nil || ai.Size != "720x1280" {
+		t.Fatalf("AI image size did not survive parse: %+v", ai)
+	}
+}
+
 func TestValidateEdit_AcceptsSoundtrack(t *testing.T) {
 	body := `{"timeline":{
 		"soundtrack":{"src":"storage:99","volume":0.5},
@@ -325,6 +343,38 @@ func TestSyncClipDurationFromAI_FitGeneratedUpdatesLength(t *testing.T) {
 	}
 	if c.Length != 7.25 || c.ActualLength != 7.25 || c.EstimatedLength != 5 {
 		t.Fatalf("clip duration metadata = %+v", c)
+	}
+}
+
+func TestAICacheKey_IncludesImageSize(t *testing.T) {
+	base := &AIAsset{MediaKind: "image", Prompt: "portrait recipe still", Model: "flux-2-pro", Size: "720x1280"}
+	other := *base
+	other.Size = "1280x720"
+	if aiCacheKey(base) == aiCacheKey(&other) {
+		t.Fatal("cache key should change when AI image size changes")
+	}
+}
+
+func TestEnrichEditJSONWithMediaHistory_RestoresImageSize(t *testing.T) {
+	edit := `{"timeline":{"tracks":[{"type":"visual","clips":[{"asset":{"type":"image","src":"storage:42"},"start":0,"length":5}]}]}}`
+	out := enrichEditJSONWithMediaHistory(edit, map[int64]*mediaHistoryRow{
+		42: {
+			ID:         7,
+			Kind:       "image",
+			Prompt:     "portrait recipe still",
+			Model:      "flux-2-pro",
+			Size:       "720x1280",
+			StorageIDs: []int64{42},
+			Status:     "complete",
+		},
+	})
+	var got Edit
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatal(err)
+	}
+	ai := got.Timeline.Tracks[0].Clips[0].AI
+	if ai == nil || ai.Size != "720x1280" {
+		t.Fatalf("expected enriched AI size, got %+v", ai)
 	}
 }
 

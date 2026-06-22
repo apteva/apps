@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: composer
 display_name: Composer
-version: 0.3.23
+version: 0.3.24
 description: |
   Multi-clip video composition. Stitch generated or uploaded assets
   into a single video — one visual track, timed audio tracks, optional
@@ -10,6 +10,11 @@ description: |
   default, on a render host via instances when render_host_id is
   set, or against a SaaS render backend (Shotstack et al) when one
   is bound to the render_executor role.
+
+  v0.3.24 adds first-class AI image size metadata in Composer, passing
+  portrait and landscape dimensions through to Media Studio so generated
+  stills match the composition aspect instead of defaulting to provider
+  dimensions.
 
   v0.3.23 renders timeline clips, gaps, lanes, and the playhead with
   explicit inline pixel layout so host CSS cannot collapse audio-only
