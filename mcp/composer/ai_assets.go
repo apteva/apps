@@ -209,17 +209,7 @@ func materializeOneAIAsset(ctx *sdk.AppCtx, ai *AIAsset, label, projectID string
 	if ai.SourceImage != "" {
 		args["source_image"] = ai.SourceImage
 	}
-	if len(ai.Options) > 0 {
-		args["options"] = ai.Options
-	}
-	if ai.EstimatedDurationSeconds > 0 {
-		opts, _ := args["options"].(map[string]any)
-		if opts == nil {
-			opts = map[string]any{}
-		}
-		if _, ok := opts["estimated_duration_seconds"]; !ok {
-			opts["estimated_duration_seconds"] = ai.EstimatedDurationSeconds
-		}
+	if opts := mediaGenerateOptions(ai); len(opts) > 0 {
 		args["options"] = opts
 	}
 	var got map[string]any
@@ -552,27 +542,69 @@ func aiCacheKey(ai *AIAsset) string {
 		"voice":        ai.Voice,
 		"avatar":       ai.Avatar,
 		"source_image": ai.SourceImage,
-		"options":      sortedMap(ai.Options),
+		"options":      sortedStableOptions(ai.Options),
 	}
 	b, _ := json.Marshal(stable)
 	sum := sha256.Sum256(b)
 	return "composer:" + hex.EncodeToString(sum[:16])
 }
 
-func sortedMap(in map[string]any) map[string]any {
+func mediaGenerateOptions(ai *AIAsset) map[string]any {
+	if ai == nil {
+		return nil
+	}
+	opts := cloneOptions(ai.Options)
+	if ai.EstimatedDurationSeconds > 0 {
+		if opts == nil {
+			opts = map[string]any{}
+		}
+		if _, ok := opts["estimated_duration_seconds"]; !ok {
+			opts["estimated_duration_seconds"] = ai.EstimatedDurationSeconds
+		}
+	}
+	return opts
+}
+
+func sortedStableOptions(in map[string]any) map[string]any {
 	if len(in) == 0 {
 		return nil
 	}
 	keys := make([]string, 0, len(in))
 	for k := range in {
+		if isInternalAIOption(k) {
+			continue
+		}
 		keys = append(keys, k)
 	}
+	if len(keys) == 0 {
+		return nil
+	}
 	sort.Strings(keys)
-	out := make(map[string]any, len(in))
+	out := make(map[string]any, len(keys))
 	for _, k := range keys {
 		out[k] = in[k]
 	}
 	return out
+}
+
+func cloneOptions(in map[string]any) map[string]any {
+	if len(in) == 0 {
+		return nil
+	}
+	out := make(map[string]any, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
+}
+
+func isInternalAIOption(key string) bool {
+	switch strings.ToLower(strings.TrimSpace(key)) {
+	case "estimated_duration_seconds":
+		return true
+	default:
+		return false
+	}
 }
 
 func number(v any) int64 {

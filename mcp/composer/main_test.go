@@ -465,6 +465,43 @@ func TestAICacheKey_IncludesImageSize(t *testing.T) {
 	}
 }
 
+func TestAICacheKey_IgnoresInternalEstimatedDurationOption(t *testing.T) {
+	base := &AIAsset{
+		MediaKind: "video",
+		Prompt:    "quick recipe prep shot",
+		Model:     "pixverse-c1-text-to-video",
+		Duration:  3,
+		Aspect:    "16:9",
+		Options: map[string]any{
+			"no_sound": true,
+		},
+	}
+	other := *base
+	other.Options = map[string]any{
+		"estimated_duration_seconds": 3,
+		"no_sound":                   true,
+	}
+	if aiCacheKey(base) != aiCacheKey(&other) {
+		t.Fatal("internal estimated duration option should not change AI cache key")
+	}
+}
+
+func TestMediaGenerateOptions_DoesNotMutateAIOptions(t *testing.T) {
+	ai := &AIAsset{
+		EstimatedDurationSeconds: 3,
+		Options: map[string]any{
+			"no_sound": true,
+		},
+	}
+	opts := mediaGenerateOptions(ai)
+	if _, ok := opts["estimated_duration_seconds"]; !ok {
+		t.Fatal("expected media generate options to include estimated duration hint")
+	}
+	if _, ok := ai.Options["estimated_duration_seconds"]; ok {
+		t.Fatal("media generate options must not mutate stored AI options")
+	}
+}
+
 func TestEnrichEditJSONWithMediaHistory_RestoresImageSize(t *testing.T) {
 	edit := `{"timeline":{"tracks":[{"type":"visual","clips":[{"asset":{"type":"image","src":"storage:42"},"start":0,"length":5}]}]}}`
 	out := enrichEditJSONWithMediaHistory(edit, map[int64]*mediaHistoryRow{
