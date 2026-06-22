@@ -178,6 +178,9 @@ func buildLocalFFmpegArgs(edit *Edit, output Output, inputs []string, soundtrack
 			)
 			continue
 		}
+		if i == soundtrackIdx && soundtrackLoops(edit.Timeline.Soundtrack) {
+			args = append(args, "-stream_loop", "-1")
+		}
 		args = append(args, "-i", src)
 	}
 
@@ -287,7 +290,10 @@ func buildLocalFFmpegArgs(edit *Edit, output Output, inputs []string, soundtrack
 func buildLocalAudioFFmpegArgs(edit *Edit, output Output, inputs []string, soundtrackIdx int, outFile string) []string {
 	audioClips := audioTimelineClips(edit)
 	args := []string{"-y", "-loglevel", "error"}
-	for _, src := range inputs {
+	for i, src := range inputs {
+		if i == soundtrackIdx && soundtrackLoops(edit.Timeline.Soundtrack) {
+			args = append(args, "-stream_loop", "-1")
+		}
 		args = append(args, "-i", src)
 	}
 
@@ -374,6 +380,21 @@ func writeTimedAudioFilter(filter *strings.Builder, inputIdx int, c Clip, delayM
 	}
 	chain = append(chain, fmt.Sprintf("adelay=%d|%d", delayMS, delayMS), "volume="+trimFloat(clipVolume(c)))
 	fmt.Fprintf(filter, "[%d:a]%s[%s];", inputIdx, strings.Join(chain, ","), label)
+}
+
+func soundtrackLoops(s *Soundtrack) bool {
+	if s == nil {
+		return false
+	}
+	if s.Timing == nil {
+		return true
+	}
+	switch strings.ToLower(strings.TrimSpace(s.Timing.Behavior)) {
+	case "", "trim_or_loop", "loop":
+		return true
+	default:
+		return false
+	}
 }
 
 func audioCodecArgs(output Output) []string {

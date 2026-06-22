@@ -246,6 +246,9 @@ func TestBuildLocalFFmpegArgs_SoundtrackMix(t *testing.T) {
 	}}`)
 	args := buildLocalFFmpegArgs(e, defaultOutput(), []string{"https://a", "https://s"}, 1, "out.mp4")
 	cmd := strings.Join(args, " ")
+	if !strings.Contains(cmd, "-stream_loop -1 -i https://s") {
+		t.Errorf("soundtrack should loop as a bed input: %s", cmd)
+	}
 	if !strings.Contains(cmd, "volume=0.5") {
 		t.Errorf("soundtrack volume should be applied: %s", cmd)
 	}
@@ -343,6 +346,73 @@ func TestSyncClipDurationFromAI_FitGeneratedUpdatesLength(t *testing.T) {
 	}
 	if c.Length != 7.25 || c.ActualLength != 7.25 || c.EstimatedLength != 5 {
 		t.Fatalf("clip duration metadata = %+v", c)
+	}
+}
+
+func TestSyncClipDurationFromAI_RefreshesStaleActualLength(t *testing.T) {
+	c := Clip{
+		Asset:           Asset{Type: "audio", Src: "storage:1"},
+		Length:          5,
+		ActualLength:    5,
+		EstimatedLength: 5,
+		DurationMode:    "fit_generated_reflow",
+		AI: &AIAsset{
+			MediaKind:                "audio_tts",
+			Prompt:                   "hello",
+			ActualDurationSeconds:    9.4,
+			EstimatedDurationSeconds: 5,
+		},
+	}
+	if !syncClipDurationFromAI(&c) {
+		t.Fatal("expected stale duration metadata to update")
+	}
+	if c.Length != 9.4 || c.ActualLength != 9.4 {
+		t.Fatalf("clip duration metadata = %+v, want real generated duration", c)
+	}
+}
+
+func TestApplyClipTiming_FitSourceTrackAudioBySection(t *testing.T) {
+	e, err := parseEditJSON(`{"timeline":{"tracks":[
+		{"type":"visual","clips":[
+			{"uid":"image-1","section_id":"intro","asset":{"type":"image","src":"storage:1"},"start":0,"length":4,
+				"timing":{"mode":"fit_source","source":"track:audio","padding_after":0.35}}
+		]},
+		{"type":"audio","clips":[
+			{"uid":"voice-1","section_id":"intro","asset":{"type":"audio","src":"storage:2"},"start":0,"length":8.2}
+		]}
+	]}}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !applyTimelineTiming(e) {
+		t.Fatal("expected timing to update visual clip")
+	}
+	got := e.Timeline.Tracks[0].Clips[0].Length
+	if !sameTime(got, 8.55) {
+		t.Fatalf("visual length = %v, want audio length plus padding", got)
+	}
+}
+
+func TestResolveRelativeClipStarts_UsesTimingReflow(t *testing.T) {
+	e, err := parseEditJSON(`{"timeline":{"tracks":[
+		{"type":"audio","clips":[
+			{"uid":"voice-1","asset":{"type":"audio","src":"storage:1"},"start":0,"length":5,
+				"timing":{"mode":"fit_generated","reflow":"following"},
+				"ai":{"media_kind":"audio_tts","prompt":"first","actual_duration_seconds":7}},
+			{"uid":"voice-2","asset":{"type":"audio","src":"storage:2"},"start":5,"length":3}
+		]}
+	]}}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !applyTimelineTiming(e) {
+		t.Fatal("expected timing to update first clip")
+	}
+	if !resolveRelativeClipStarts(e) {
+		t.Fatal("expected timing reflow to move following clip")
+	}
+	if got := e.Timeline.Tracks[0].Clips[1].Start; got != 7 {
+		t.Fatalf("second clip start = %v, want 7", got)
 	}
 }
 

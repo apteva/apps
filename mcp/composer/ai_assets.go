@@ -56,17 +56,13 @@ func materializeAIAssets(ctx *sdk.AppCtx, edit *Edit, compositionID int64, proje
 					out.Changed = true
 				}
 			}
-			if clip.AI.StorageID > 0 && clip.AI.ActualDurationSeconds <= 0 && aiKindHasMediaDuration(clip.AI.MediaKind) {
-				if d := probeAssetDurationSeconds(ctx, clip.Asset.Src); d > 0 {
-					clip.AI.ActualDurationSeconds = d
-					if clip.AI.AudioAnalysis == nil {
-						clip.AI.AudioAnalysis = &AudioAnalysis{}
-					}
-					clip.AI.AudioAnalysis.DurationSeconds = d
-					out.Changed = true
-				}
+			if refreshClipActualDuration(ctx, clip) {
+				out.Changed = true
 			}
 			if syncClipDurationFromAI(clip) {
+				out.Changed = true
+			}
+			if applyClipTiming(edit, clip) {
 				out.Changed = true
 			}
 		}
@@ -87,17 +83,13 @@ func materializeAIAssets(ctx *sdk.AppCtx, edit *Edit, compositionID int64, proje
 				s.Src = nextSrc
 				out.Changed = true
 			}
-			if s.AI.ActualDurationSeconds <= 0 && aiKindHasMediaDuration(s.AI.MediaKind) {
-				if d := probeAssetDurationSeconds(ctx, s.Src); d > 0 {
-					s.AI.ActualDurationSeconds = d
-					if s.AI.AudioAnalysis == nil {
-						s.AI.AudioAnalysis = &AudioAnalysis{}
-					}
-					s.AI.AudioAnalysis.DurationSeconds = d
-					out.Changed = true
-				}
+			if refreshSoundtrackActualDuration(ctx, s) {
+				out.Changed = true
 			}
 		}
+	}
+	if applyTimelineTiming(edit) {
+		out.Changed = true
 	}
 	if resolveRelativeClipStarts(edit) {
 		out.Changed = true
@@ -110,6 +102,21 @@ func materializeAIAssets(ctx *sdk.AppCtx, edit *Edit, compositionID int64, proje
 		)
 	}
 	return out, nil
+}
+
+func applyTimelineTiming(edit *Edit) bool {
+	if edit == nil {
+		return false
+	}
+	changed := false
+	for ti := range edit.Timeline.Tracks {
+		for i := range edit.Timeline.Tracks[ti].Clips {
+			if applyClipTiming(edit, &edit.Timeline.Tracks[ti].Clips[i]) {
+				changed = true
+			}
+		}
+	}
+	return changed
 }
 
 func resolveRelativeClipStarts(edit *Edit) bool {
@@ -132,7 +139,7 @@ func resolveRelativeClipStarts(edit *Edit) bool {
 			if clip.AfterClipID != "" {
 				target = byID[clip.AfterClipID]
 			}
-			if target != nil && (clip.AfterClipID != "" || clip.GapSeconds > 0 || durationModeReflows(target.DurationMode)) {
+			if target != nil && (clip.AfterClipID != "" || clip.GapSeconds > 0 || durationModeReflows(target.DurationMode) || timingReflows(target.Timing)) {
 				nextStart := target.Start + clipDuration(*target) + clip.GapSeconds
 				if trimFloat(nextStart) != trimFloat(clip.Start) {
 					clip.Start = nextStart
@@ -280,7 +287,7 @@ func syncClipDurationFromAI(c *Clip) bool {
 		c.EstimatedLength = c.AI.EstimatedDurationSeconds
 		changed = true
 	}
-	if c.ActualLength <= 0 && c.AI.ActualDurationSeconds > 0 {
+	if c.AI.ActualDurationSeconds > 0 && !sameTime(c.ActualLength, c.AI.ActualDurationSeconds) {
 		c.ActualLength = c.AI.ActualDurationSeconds
 		changed = true
 	}
@@ -288,7 +295,7 @@ func syncClipDurationFromAI(c *Clip) bool {
 		c.DurationMode = defaultDurationMode(c.AI.MediaKind)
 		changed = true
 	}
-	if durationModeFitsGenerated(c.DurationMode) && c.AI.ActualDurationSeconds > 0 && c.Length != c.AI.ActualDurationSeconds {
+	if durationModeFitsGenerated(c.DurationMode) && c.AI.ActualDurationSeconds > 0 && !sameTime(c.Length, c.AI.ActualDurationSeconds) {
 		c.Length = c.AI.ActualDurationSeconds
 		changed = true
 	}
@@ -297,6 +304,207 @@ func syncClipDurationFromAI(c *Clip) bool {
 		changed = true
 	}
 	return changed
+}
+
+func refreshClipActualDuration(ctx *sdk.AppCtx, c *Clip) bool {
+	if c == nil || !clipHasProbeableDuration(*c) || strings.TrimSpace(c.Asset.Src) == "" {
+		return false
+	}
+	d := probeAssetDurationSeconds(ctx, c.Asset.Src)
+	if d <= 0 {
+		return false
+	}
+	changed := false
+	if !sameTime(c.ActualLength, d) {
+		c.ActualLength = d
+		changed = true
+	}
+	if c.AI != nil && aiKindHasMediaDuration(c.AI.MediaKind) {
+		if !sameTime(c.AI.ActualDurationSeconds, d) {
+			c.AI.ActualDurationSeconds = d
+			changed = true
+		}
+		if c.AI.AudioAnalysis == nil {
+			c.AI.AudioAnalysis = &AudioAnalysis{}
+			changed = true
+		}
+		if !sameTime(c.AI.AudioAnalysis.DurationSeconds, d) {
+			c.AI.AudioAnalysis.DurationSeconds = d
+			changed = true
+		}
+	}
+	return changed
+}
+
+func refreshSoundtrackActualDuration(ctx *sdk.AppCtx, s *Soundtrack) bool {
+	if s == nil || strings.TrimSpace(s.Src) == "" || s.AI == nil || !aiKindHasMediaDuration(s.AI.MediaKind) {
+		return false
+	}
+	d := probeAssetDurationSeconds(ctx, s.Src)
+	if d <= 0 {
+		return false
+	}
+	changed := false
+	if !sameTime(s.AI.ActualDurationSeconds, d) {
+		s.AI.ActualDurationSeconds = d
+		changed = true
+	}
+	if s.AI.AudioAnalysis == nil {
+		s.AI.AudioAnalysis = &AudioAnalysis{}
+		changed = true
+	}
+	if !sameTime(s.AI.AudioAnalysis.DurationSeconds, d) {
+		s.AI.AudioAnalysis.DurationSeconds = d
+		changed = true
+	}
+	return changed
+}
+
+func clipHasProbeableDuration(c Clip) bool {
+	at := strings.ToLower(strings.TrimSpace(c.Asset.Type))
+	if at == "audio" || at == "video" {
+		return true
+	}
+	if c.AI != nil && aiKindHasMediaDuration(c.AI.MediaKind) {
+		return true
+	}
+	if c.Timing != nil && strings.TrimSpace(c.Timing.Mode) != "" {
+		return true
+	}
+	return false
+}
+
+func applyClipTiming(edit *Edit, c *Clip) bool {
+	if c == nil || c.Timing == nil {
+		return false
+	}
+	timing := c.Timing
+	mode := strings.ToLower(strings.TrimSpace(timing.Mode))
+	if mode == "" || mode == "fixed" {
+		return false
+	}
+	var base float64
+	switch mode {
+	case "fit_generated":
+		base = c.ActualLength
+		if base <= 0 && c.AI != nil {
+			base = c.AI.ActualDurationSeconds
+		}
+		if base <= 0 {
+			base = c.EstimatedLength
+		}
+	case "fit_source":
+		base = sourceDuration(edit, c, timing.Source)
+	case "fit_group":
+		base = groupDuration(edit, c)
+	case "fit_timeline":
+		base = editDurationSeconds(edit)
+	default:
+		return false
+	}
+	if base <= 0 {
+		return false
+	}
+	next := base + timing.PaddingAfter
+	if timing.MinLength > 0 && next < timing.MinLength {
+		next = timing.MinLength
+	}
+	if timing.MaxLength > 0 && next > timing.MaxLength {
+		next = timing.MaxLength
+	}
+	if next <= 0 || sameTime(c.Length, next) {
+		return false
+	}
+	c.Length = next
+	return true
+}
+
+func sourceDuration(edit *Edit, current *Clip, source string) float64 {
+	source = strings.TrimSpace(source)
+	sourceKind := strings.ToLower(source)
+	if edit == nil || current == nil {
+		return 0
+	}
+	if sourceKind == "" || sourceKind == "self" {
+		return current.ActualLength
+	}
+	if sourceKind == "section" || sourceKind == "group" {
+		return groupDuration(edit, current)
+	}
+	if strings.HasPrefix(sourceKind, "clip:") || strings.HasPrefix(sourceKind, "audio:") {
+		uid := strings.TrimSpace(source[strings.IndexByte(source, ':')+1:])
+		if c := findClipByUID(edit, uid); c != nil {
+			return clipDuration(*c)
+		}
+	}
+	if sourceKind == "track:audio" {
+		for ti := range edit.Timeline.Tracks {
+			track := &edit.Timeline.Tracks[ti]
+			if trackKind(*track) != "audio" {
+				continue
+			}
+			for i := range track.Clips {
+				if track.Clips[i].SectionID != "" && track.Clips[i].SectionID == current.SectionID {
+					return clipDuration(track.Clips[i])
+				}
+				if track.Clips[i].GroupID != "" && track.Clips[i].GroupID == current.GroupID {
+					return clipDuration(track.Clips[i])
+				}
+			}
+		}
+	}
+	return 0
+}
+
+func groupDuration(edit *Edit, current *Clip) float64 {
+	if edit == nil || current == nil {
+		return 0
+	}
+	sectionID := strings.TrimSpace(current.SectionID)
+	groupID := strings.TrimSpace(current.GroupID)
+	if sectionID == "" && groupID == "" {
+		return 0
+	}
+	var max float64
+	for ti := range edit.Timeline.Tracks {
+		for i := range edit.Timeline.Tracks[ti].Clips {
+			c := edit.Timeline.Tracks[ti].Clips[i]
+			if sectionID != "" && c.SectionID == sectionID {
+				max = maxFloat(max, clipDuration(c))
+			} else if groupID != "" && c.GroupID == groupID {
+				max = maxFloat(max, clipDuration(c))
+			}
+		}
+	}
+	return max
+}
+
+func findClipByUID(edit *Edit, uid string) *Clip {
+	if edit == nil || uid == "" {
+		return nil
+	}
+	for ti := range edit.Timeline.Tracks {
+		for i := range edit.Timeline.Tracks[ti].Clips {
+			if edit.Timeline.Tracks[ti].Clips[i].UID == uid {
+				return &edit.Timeline.Tracks[ti].Clips[i]
+			}
+		}
+	}
+	return nil
+}
+
+func sameTime(a, b float64) bool {
+	if a > b {
+		return a-b < 0.01
+	}
+	return b-a < 0.01
+}
+
+func maxFloat(a, b float64) float64 {
+	if a > b {
+		return a
+	}
+	return b
 }
 
 func durationModeFitsGenerated(mode string) bool {
@@ -310,6 +518,18 @@ func durationModeFitsGenerated(mode string) bool {
 
 func durationModeReflows(mode string) bool {
 	return strings.ToLower(strings.TrimSpace(mode)) == "fit_generated_reflow"
+}
+
+func timingReflows(t *Timing) bool {
+	if t == nil {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(t.Reflow)) {
+	case "following", "track", "linked_group", "composition":
+		return true
+	default:
+		return false
+	}
 }
 
 func aiKindHasMediaDuration(kind string) bool {

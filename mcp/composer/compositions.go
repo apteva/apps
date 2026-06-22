@@ -27,6 +27,7 @@ type Timeline struct {
 type Soundtrack struct {
 	Src    string   `json:"src"`              // storage:N | https://… | mediastudio:N
 	Volume float64  `json:"volume,omitempty"` // 0..1, default 1.0
+	Timing *Timing  `json:"timing,omitempty"`
 	AI     *AIAsset `json:"ai,omitempty"`
 }
 
@@ -38,6 +39,8 @@ type Track struct {
 
 type Clip struct {
 	UID             string      `json:"uid,omitempty"`
+	SectionID       string      `json:"section_id,omitempty"`
+	GroupID         string      `json:"group_id,omitempty"`
 	Asset           Asset       `json:"asset"`
 	Start           float64     `json:"start"`  // seconds from composition start
 	Length          float64     `json:"length"` // seconds
@@ -48,10 +51,22 @@ type Clip struct {
 	Volume          float64     `json:"volume,omitempty"`
 	AfterClipID     string      `json:"after_clip_id,omitempty"`
 	GapSeconds      float64     `json:"gap_seconds,omitempty"`
+	Timing          *Timing     `json:"timing,omitempty"`
 	Audio           *AudioFX    `json:"audio,omitempty"`
 	Transition      *Transition `json:"transition,omitempty"`
 	Text            *TextOver   `json:"text,omitempty"`
 	AI              *AIAsset    `json:"ai,omitempty"`
+}
+
+type Timing struct {
+	Mode         string  `json:"mode,omitempty"`          // fixed|fit_generated|fit_source|fit_group|fit_timeline
+	Source       string  `json:"source,omitempty"`        // clip:<uid>|audio:<uid>|track:audio|section|group
+	PaddingAfter float64 `json:"padding_after,omitempty"` // seconds added after the fitted source
+	MinLength    float64 `json:"min_length,omitempty"`
+	MaxLength    float64 `json:"max_length,omitempty"`
+	Reflow       string  `json:"reflow,omitempty"`   // none|following|track|linked_group|composition
+	Behavior     string  `json:"behavior,omitempty"` // trim|pad|trim_or_loop|loop|stretch|regenerate
+	FadeOut      float64 `json:"fade_out,omitempty"`
 }
 
 type Asset struct {
@@ -187,6 +202,9 @@ func validateEdit(e *Edit) error {
 			if c.GapSeconds < 0 {
 				return fmt.Errorf("track[%d].clip[%d]: gap_seconds must be >= 0", ti, i)
 			}
+			if err := validateTiming(c.Timing); err != nil {
+				return fmt.Errorf("track[%d].clip[%d]: %w", ti, i, err)
+			}
 			if err := validateAudioFX(c.Audio); err != nil {
 				return fmt.Errorf("track[%d].clip[%d]: %w", ti, i, err)
 			}
@@ -223,6 +241,43 @@ func validateEdit(e *Edit) error {
 		if s.Volume < 0 || s.Volume > 1 {
 			return errors.New("soundtrack.volume must be 0..1")
 		}
+		if err := validateTiming(s.Timing); err != nil {
+			return fmt.Errorf("soundtrack: %w", err)
+		}
+	}
+	return nil
+}
+
+func validateTiming(t *Timing) error {
+	if t == nil {
+		return nil
+	}
+	switch strings.ToLower(strings.TrimSpace(t.Mode)) {
+	case "", "fixed", "fit_generated", "fit_source", "fit_group", "fit_timeline":
+	default:
+		return fmt.Errorf("timing.mode must be fixed|fit_generated|fit_source|fit_group|fit_timeline (got %q)", t.Mode)
+	}
+	if t.PaddingAfter < 0 {
+		return errors.New("timing.padding_after must be >= 0")
+	}
+	if t.MinLength < 0 || t.MaxLength < 0 {
+		return errors.New("timing min/max length must be >= 0")
+	}
+	if t.MaxLength > 0 && t.MinLength > t.MaxLength {
+		return errors.New("timing.min_length must be <= timing.max_length")
+	}
+	switch strings.ToLower(strings.TrimSpace(t.Reflow)) {
+	case "", "none", "following", "track", "linked_group", "composition":
+	default:
+		return fmt.Errorf("timing.reflow must be none|following|track|linked_group|composition (got %q)", t.Reflow)
+	}
+	switch strings.ToLower(strings.TrimSpace(t.Behavior)) {
+	case "", "trim", "pad", "trim_or_loop", "loop", "stretch", "regenerate":
+	default:
+		return fmt.Errorf("timing.behavior must be trim|pad|trim_or_loop|loop|stretch|regenerate (got %q)", t.Behavior)
+	}
+	if t.FadeOut < 0 {
+		return errors.New("timing.fade_out must be >= 0")
 	}
 	return nil
 }

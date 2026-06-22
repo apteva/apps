@@ -1,4 +1,4 @@
-// ComposerPanel v0.3.24 - timeline editor with storage and Media Studio AI assets.
+// ComposerPanel v0.3.25 - timeline editor with storage and Media Studio AI assets.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
@@ -58,6 +58,17 @@ type OutputFormat = "mp4" | "mp3" | "wav" | "m4a" | "aac";
 type Aspect = "16:9" | "9:16" | "1:1" | "4:3";
 type DurationMode = "fixed_trim_pad" | "fit_generated" | "fit_generated_keep_start" | "fit_generated_reflow";
 
+interface Timing {
+  mode?: "fixed" | "fit_generated" | "fit_source" | "fit_group" | "fit_timeline";
+  source?: string;
+  padding_after?: number;
+  min_length?: number;
+  max_length?: number;
+  reflow?: "none" | "following" | "track" | "linked_group" | "composition";
+  behavior?: "trim" | "pad" | "trim_or_loop" | "loop" | "stretch" | "regenerate";
+  fade_out?: number;
+}
+
 interface AIAsset {
   media_kind: MediaKind;
   prompt: string;
@@ -102,12 +113,15 @@ interface AudioFX {
 
 interface ClipDraft {
   id: string;
+  section_id?: string;
+  group_id?: string;
   asset: { type: AssetType; src: string };
   start: number;
   length: number;
   duration_mode?: DurationMode;
   estimated_length?: number;
   actual_length?: number;
+  timing?: Timing;
   transition?: { in?: string; out?: string };
   text?: { body: string; position?: "top" | "center" | "bottom"; font_size?: number; color?: string };
   ai?: AIAsset;
@@ -115,6 +129,8 @@ interface ClipDraft {
 
 interface AudioClipDraft {
   id: string;
+  section_id?: string;
+  group_id?: string;
   asset: { type: "audio" | "silence"; src: string };
   start: number;
   length: number;
@@ -124,6 +140,7 @@ interface AudioClipDraft {
   volume: number;
   after_clip_id?: string;
   gap_seconds?: number;
+  timing?: Timing;
   audio?: AudioFX;
   ai?: AIAsset;
 }
@@ -139,7 +156,7 @@ interface DraftState {
   name: string;
   clips: ClipDraft[];
   audioClips: AudioClipDraft[];
-  soundtrack: { src: string; volume: number; ai?: AIAsset } | null;
+  soundtrack: { src: string; volume: number; timing?: Timing; ai?: AIAsset } | null;
   background: string;
   output: OutputDraft;
 }
@@ -351,6 +368,8 @@ function parseComposition(c: Composition | null): DraftState {
     if (clips.length) {
       draft.clips = normalizeClips(clips.map((clip: any, i: number) => ({
         id: String(clip.uid || `clip-${i + 1}`),
+        section_id: clip.section_id,
+        group_id: clip.group_id,
         asset: {
           type: clip.asset?.type === "image" ? "image" : "video",
           src: String(clip.asset?.src || ""),
@@ -360,6 +379,7 @@ function parseComposition(c: Composition | null): DraftState {
         duration_mode: clip.duration_mode || defaultDurationMode(clip.ai?.media_kind),
         estimated_length: Number(clip.estimated_length || clip.ai?.estimated_duration_seconds || 0) || undefined,
         actual_length: Number(clip.actual_length || clip.ai?.actual_duration_seconds || 0) || undefined,
+        timing: clip.timing,
         transition: {
           in: clip.transition?.in || "none",
           out: clip.transition?.out || "none",
@@ -377,6 +397,8 @@ function parseComposition(c: Composition | null): DraftState {
     if (audio.length) {
       draft.audioClips = normalizeAudioClips(audio.map((clip: any, i: number) => ({
         id: String(clip.uid || `audio-${i + 1}`),
+        section_id: clip.section_id,
+        group_id: clip.group_id,
         asset: { type: clip.asset?.type === "silence" ? "silence" : "audio", src: String(clip.asset?.src || "") },
         start: Number(clip.start) || 0,
         length: Number(clip.length ?? clip.duration) || 1,
@@ -386,6 +408,7 @@ function parseComposition(c: Composition | null): DraftState {
         volume: Number(clip.volume) || 1,
         after_clip_id: clip.after_clip_id,
         gap_seconds: Number(clip.gap_seconds || 0) || undefined,
+        timing: clip.timing,
         audio: clip.audio,
         ai: clip.ai,
       })));
@@ -394,12 +417,14 @@ function parseComposition(c: Composition | null): DraftState {
       draft.soundtrack = {
         src: String(timeline.soundtrack.src),
         volume: Number(timeline.soundtrack.volume) || 1,
+        timing: timeline.soundtrack.timing,
         ai: timeline.soundtrack.ai,
       };
     } else if (timeline.soundtrack?.ai) {
       draft.soundtrack = {
         src: String(timeline.soundtrack.src || ""),
         volume: Number(timeline.soundtrack.volume) || 1,
+        timing: timeline.soundtrack.timing,
         ai: timeline.soundtrack.ai,
       };
     }
@@ -424,10 +449,13 @@ function draftToBody(draft: DraftState): Record<string, unknown> {
       start: clip.start,
       length: clip.length,
     };
+    if (clip.section_id) out.section_id = clip.section_id;
+    if (clip.group_id) out.group_id = clip.group_id;
     if (clip.ai) out.ai = clip.ai;
     if (clip.duration_mode) out.duration_mode = clip.duration_mode;
     if (clip.estimated_length) out.estimated_length = clip.estimated_length;
     if (clip.actual_length) out.actual_length = clip.actual_length;
+    if (clip.timing) out.timing = clip.timing;
     if ((clip.transition?.in && clip.transition.in !== "none") || (clip.transition?.out && clip.transition.out !== "none")) {
       out.transition = {
         in: clip.transition?.in || "none",
@@ -452,12 +480,15 @@ function draftToBody(draft: DraftState): Record<string, unknown> {
       length: clip.length,
       volume: Math.max(0, Math.min(1, Number(clip.volume) || 1)),
     };
+    if (clip.section_id) out.section_id = clip.section_id;
+    if (clip.group_id) out.group_id = clip.group_id;
     if (clip.ai) out.ai = clip.ai;
     if (clip.duration_mode) out.duration_mode = clip.duration_mode;
     if (clip.estimated_length) out.estimated_length = clip.estimated_length;
     if (clip.actual_length) out.actual_length = clip.actual_length;
     if (clip.after_clip_id) out.after_clip_id = clip.after_clip_id;
     if (clip.gap_seconds) out.gap_seconds = clip.gap_seconds;
+    if (clip.timing) out.timing = clip.timing;
     if (clip.audio) out.audio = clip.audio;
     return out;
   });
@@ -474,6 +505,7 @@ function draftToBody(draft: DraftState): Record<string, unknown> {
     body.soundtrack = {
       src: draft.soundtrack.src.trim(),
       volume: Math.max(0, Math.min(1, Number(draft.soundtrack.volume) || 1)),
+      timing: draft.soundtrack.timing,
       ai: draft.soundtrack.ai,
     };
   }
