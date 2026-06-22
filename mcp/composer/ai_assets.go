@@ -369,6 +369,9 @@ func prepareAIVideoDurationForTiming(edit *Edit, c *Clip) bool {
 	if target <= 0 {
 		return false
 	}
+	if c.ActualLength >= target || c.AI.ActualDurationSeconds >= target {
+		return false
+	}
 	desired := desiredVideoGenerationSeconds(target)
 	if desired <= 0 || c.AI.Duration >= desired {
 		return false

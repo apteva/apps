@@ -492,6 +492,29 @@ func TestPrepareAIVideoDurationForTiming_UsesAudioMatchedHandle(t *testing.T) {
 	}
 }
 
+func TestPrepareAIVideoDurationForTiming_KeepsReadyVideoWhenActualCoversTarget(t *testing.T) {
+	e, err := parseEditJSON(`{"timeline":{"tracks":[
+		{"type":"visual","clips":[
+			{"uid":"video-1","section_id":"intro","asset":{"type":"video","src":"storage:1"},"start":0,"length":7.9,"actual_length":10.04,
+				"timing":{"mode":"fit_source","source":"track:audio","padding_after":0.35},
+				"ai":{"media_kind":"video","prompt":"recipe shot","duration":9,"status":"ready","storage_id":12,"generation_id":34,"cache_key":"composer:ready","actual_duration_seconds":10.04}}
+		]},
+		{"type":"audio","clips":[
+			{"uid":"voice-1","section_id":"intro","asset":{"type":"audio","src":"storage:2"},"start":0,"length":7.9}
+		]}
+	]}}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clip := &e.Timeline.Tracks[0].Clips[0]
+	if prepareAIVideoDurationForTiming(e, clip) {
+		t.Fatal("ready video with enough actual source duration should not be regenerated")
+	}
+	if clip.AI.StorageID != 12 || clip.AI.Status != "ready" {
+		t.Fatalf("ready AI video state changed unexpectedly: %+v", clip.AI)
+	}
+}
+
 func TestResolveRelativeClipStarts_UsesTimingReflow(t *testing.T) {
 	e, err := parseEditJSON(`{"timeline":{"tracks":[
 		{"type":"audio","clips":[
