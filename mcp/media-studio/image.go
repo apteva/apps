@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"strings"
 )
 
@@ -182,12 +183,42 @@ func ensureGeminiResponseFormat(out map[string]any) map[string]any {
 
 func aspectFromSize(size string) string {
 	switch size {
-	case "1024x1536", "1080x1920", "9:16":
+	case "720x1280", "1024x1536", "1080x1920", "9:16":
 		return "9:16"
-	case "1536x1024", "1920x1080", "16:9":
+	case "1280x720", "1536x1024", "1920x1080", "16:9":
 		return "16:9"
 	case "1024x1024", "1:1":
 		return "1:1"
+	}
+	w, h, ok := parseWxH(size)
+	if !ok {
+		return ""
+	}
+	ratio := float64(w) / float64(h)
+	candidates := []struct {
+		aspect string
+		ratio  float64
+	}{
+		{"1:1", 1},
+		{"3:2", 3.0 / 2.0},
+		{"16:9", 16.0 / 9.0},
+		{"21:9", 21.0 / 9.0},
+		{"9:16", 9.0 / 16.0},
+		{"2:3", 2.0 / 3.0},
+		{"3:4", 3.0 / 4.0},
+		{"4:5", 4.0 / 5.0},
+		{"4:3", 4.0 / 3.0},
+	}
+	best := ""
+	bestDelta := math.MaxFloat64
+	for _, c := range candidates {
+		if d := math.Abs(ratio - c.ratio); d < bestDelta {
+			best = c.aspect
+			bestDelta = d
+		}
+	}
+	if bestDelta <= 0.02 {
+		return best
 	}
 	return ""
 }
@@ -293,10 +324,19 @@ func buildVeniceImageArgs(args map[string]any) map[string]any {
 	// size "WxH" → width + height. Pixel-sized Venice models honour these;
 	// aspect-ratio models (nano-banana, qwen-image-2) ignore them and use
 	// aspect_ratio / resolution from options instead.
-	w, h, ok := parseWxH(strArg(args, "size", ""))
+	size := strArg(args, "size", "")
+	w, h, ok := parseWxH(size)
 	if ok {
 		out["width"] = w
 		out["height"] = h
+	}
+	if aspect := strArg(args, "aspect", ""); aspect != "" {
+		out["aspect_ratio"] = aspect
+	} else if aspect := aspectFromSize(size); aspect != "" {
+		out["aspect_ratio"] = aspect
+	}
+	if res := strArg(args, "resolution", ""); res != "" && validVeniceTierResolution(res) {
+		out["resolution"] = res
 	}
 
 	// options.* — pass through everything the catalog supports.
@@ -308,11 +348,26 @@ func buildVeniceImageArgs(args map[string]any) map[string]any {
 		}
 		for _, k := range passThrough {
 			if v, exists := opts[k]; exists {
+				if k == "resolution" && !validVeniceTierResolution(v) {
+					continue
+				}
 				out[k] = v
 			}
 		}
+		if v, exists := opts["output_format"]; exists {
+			out["format"] = v
+		}
 	}
 	return out
+}
+
+func validVeniceTierResolution(v any) bool {
+	s := strings.TrimSpace(fmt.Sprint(v))
+	if s == "" {
+		return false
+	}
+	_, _, isPixel := parseWxH(s)
+	return !isPixel
 }
 
 func parseWxH(s string) (int, int, bool) {

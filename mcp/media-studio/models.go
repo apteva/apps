@@ -23,11 +23,16 @@ const modelCacheTTL = 10 * time.Minute
 type modelEntry struct {
 	ID    string `json:"id"`
 	Label string `json:"label"`
+	// SizeModes tells callers how to express output shape for this model:
+	// "pixel" for WxH size, "aspect" for aspect_ratio, and
+	// "resolution" for provider tiers such as 1K/2K/4K.
+	SizeModes []string `json:"size_modes,omitempty"`
 	// Constraints parsed from Venice's model_spec.constraints —
 	// surfaced so the panel can render real dropdowns instead of
 	// free-form inputs. All optional; empty arrays mean "no
 	// preset values, use a text input".
 	ModelType            string   `json:"model_type,omitempty"`
+	PixelSizes           []string `json:"pixel_sizes,omitempty"`
 	AspectRatios         []string `json:"aspect_ratios,omitempty"`
 	DefaultAspectRatio   string   `json:"default_aspect_ratio,omitempty"`
 	Resolutions          []string `json:"resolutions,omitempty"`
@@ -117,8 +122,11 @@ func loadModelsForCapability(ctx *sdk.AppCtx, kind, capability string) ([]modelE
 			return []modelEntry{}, nil
 		}
 		return []modelEntry{{
-			ID:    "gpt-5.5",
-			Label: "GPT-5.5 (Codex image generation)",
+			ID:                 "gpt-5.5",
+			Label:              "GPT-5.5 (Codex image generation)",
+			SizeModes:          []string{"pixel"},
+			PixelSizes:         []string{"1024x1024", "1024x1536", "1536x1024"},
+			DefaultAspectRatio: "1:1",
 		}}, nil
 	}
 	cacheKind := kind
@@ -201,7 +209,7 @@ func parseModelList(providerSlug, kind string, raw json.RawMessage, connID int64
 			// — pricing lookup reads from here.
 			specCache[specCacheKey{ConnectionID: connID, VeniceType: veniceType, ModelID: head.ID}] = mRaw
 			specCacheAt[specCacheKey{ConnectionID: connID, VeniceType: veniceType, ModelID: head.ID}] = now
-			out = append(out, buildModelEntryFromVeniceSpec(head.ID, mRaw))
+			out = append(out, buildModelEntryFromVeniceSpec(head.ID, mRaw, veniceType))
 		}
 		modelCacheMu.Unlock()
 		return out
@@ -225,6 +233,8 @@ func parseModelList(providerSlug, kind string, raw json.RawMessage, connID int64
 			entry := modelEntry{ID: m.ID, Label: m.ID}
 			if kind == KindImage {
 				id := strings.ToLower(m.ID)
+				entry.SizeModes = []string{"pixel"}
+				entry.PixelSizes = openAIImagePixelSizes(id)
 				switch {
 				case strings.HasPrefix(id, "gpt-image"):
 					entry.SupportsImageEdit = true
@@ -277,6 +287,7 @@ func parseGeminiModelList(kind string, raw json.RawMessage) []modelEntry {
 		out = append(out, modelEntry{
 			ID:                 id,
 			Label:              label,
+			SizeModes:          []string{"aspect", "resolution"},
 			AspectRatios:       []string{"1:1", "9:16", "16:9", "3:4", "4:3"},
 			DefaultAspectRatio: "1:1",
 			SupportsImageEdit:  true,
@@ -313,6 +324,7 @@ func geminiDefaultImageModels() []modelEntry {
 		{
 			ID:                 "gemini-2.5-flash-image",
 			Label:              "Gemini 2.5 Flash Image",
+			SizeModes:          []string{"aspect"},
 			AspectRatios:       []string{"1:1", "9:16", "16:9", "3:4", "4:3"},
 			DefaultAspectRatio: "1:1",
 			SupportsImageEdit:  true,
@@ -322,6 +334,7 @@ func geminiDefaultImageModels() []modelEntry {
 		{
 			ID:                 "gemini-3-pro-image-preview",
 			Label:              "Gemini 3 Pro Image Preview",
+			SizeModes:          []string{"aspect", "resolution"},
 			AspectRatios:       []string{"1:1", "9:16", "16:9", "3:4", "4:3"},
 			DefaultAspectRatio: "1:1",
 			Resolutions:        []string{"1K", "2K", "4K"},
@@ -444,7 +457,7 @@ func elevenLabsDefaultModels(kind string) []modelEntry {
 // defaultAspectRatio; video + inpaint use snake_case like
 // aspect_ratios / model_type / durations), so we accept both via
 // json struct tags and pick whichever has values.
-func buildModelEntryFromVeniceSpec(id string, raw json.RawMessage) modelEntry {
+func buildModelEntryFromVeniceSpec(id string, raw json.RawMessage, veniceType string) modelEntry {
 	var spec struct {
 		ModelSpec struct {
 			Constraints struct {
@@ -514,7 +527,7 @@ func buildModelEntryFromVeniceSpec(id string, raw json.RawMessage) modelEntry {
 	supportsImg2Vid := c.ModelType == "image-to-video"
 	supportsEdit := isVeniceEditModel(id)
 
-	return modelEntry{
+	entry := modelEntry{
 		ID:                   id,
 		Label:                id, // panel re-styles labels with price/model type
 		ModelType:            c.ModelType,
@@ -531,6 +544,47 @@ func buildModelEntryFromVeniceSpec(id string, raw json.RawMessage) modelEntry {
 		StepsMax:             c.Steps.Max,
 		PromptCharLimit:      c.PromptCharLimit,
 		PriceUSD:             price,
+	}
+	if veniceType == "image" {
+		entry.SizeModes = imageSizeModes(entry)
+	}
+	return entry
+}
+
+func imageSizeModes(entry modelEntry) []string {
+	out := []string{}
+	if len(entry.PixelSizes) > 0 {
+		out = append(out, "pixel")
+	}
+	if len(entry.AspectRatios) > 0 {
+		out = append(out, "aspect")
+	}
+	if len(entry.Resolutions) > 0 {
+		out = append(out, "resolution")
+	}
+	// Venice pixel-sized image models publish no pixel-size enum; they
+	// accept width/height directly. Keep that visible to UIs and agents.
+	if len(out) == 0 {
+		out = append(out, "pixel")
+	}
+	return out
+}
+
+func openAIImagePixelSizes(id string) []string {
+	switch id {
+	case "gpt-image-2":
+		return []string{"1024x1024", "1024x1536", "1536x1024", "2048x2048", "3840x2160"}
+	case "gpt-image-1.5", "gpt-image-1", "gpt-image-1-mini":
+		return []string{"1024x1024", "1024x1536", "1536x1024"}
+	case "dall-e-3":
+		return []string{"1024x1024", "1792x1024", "1024x1792"}
+	case "dall-e-2":
+		return []string{"256x256", "512x512", "1024x1024"}
+	default:
+		if strings.HasPrefix(id, "gpt-image") {
+			return []string{"1024x1024", "1024x1536", "1536x1024"}
+		}
+		return nil
 	}
 }
 

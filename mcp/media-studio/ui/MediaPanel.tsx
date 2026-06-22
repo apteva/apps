@@ -132,7 +132,9 @@ interface VideoJob {
 interface LiveModel {
   id: string;
   label: string;
+  size_modes?: string[];
   model_type?: string;
+  pixel_sizes?: string[];
   aspect_ratios?: string[];
   default_aspect_ratio?: string;
   resolutions?: string[];
@@ -256,6 +258,15 @@ function isGptImage(m: ImageModel) {
   return m.startsWith("gpt-image");
 }
 
+function modelLabel(m: LiveModel): string {
+  const bits = [m.label || m.id];
+  if (m.model_type === "image-to-video") bits.push("img→vid");
+  if (m.size_modes && m.size_modes.length > 0) bits.push(m.size_modes.join("+"));
+  const price = formatCost(m.price_usd || 0);
+  if (price) bits.push(price);
+  return bits.join(" · ");
+}
+
 // Edit-capable models (Venice). Used when the user supplies a reference
 // image — the manifest's image.edit capability routes to /image/edit
 // which only accepts these. Default firered-image-edit per Venice docs.
@@ -346,6 +357,7 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
   const [prompt, setPrompt] = useState("");
   const [imageModel, setImageModel] = useState<ImageModel>("gpt-image-2");
   const [imageSize, setImageSize] = useState("1024x1024");
+  const [imageResolution, setImageResolution] = useState("1K");
   const [imageQuality, setImageQuality] = useState("auto");
   const [imageFormat, setImageFormat] = useState("png");
   const [duration, setDuration] = useState(5); // video/audio/music
@@ -410,16 +422,6 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
   const storageFolder = storageFolders[activeKind] || "";
   const setStorageFolder = (v: string) =>
     setStorageFolders((cur) => ({ ...cur, [activeKind]: v }));
-
-  useEffect(() => {
-    const allowed = IMAGE_SIZES[imageModel] || ["1024x1024"];
-    if (!allowed.includes(imageSize)) setImageSize(allowed[0]);
-    if (isGptImage(imageModel)) {
-      if (!GPT_IMAGE_QUALITIES.includes(imageQuality)) setImageQuality("auto");
-    } else if (imageModel === "dall-e-3") {
-      if (!DALLE3_QUALITIES.includes(imageQuality)) setImageQuality("standard");
-    }
-  }, [imageModel, imageSize, imageQuality]);
 
   const loadBindings = useCallback(async () => {
     try {
@@ -781,6 +783,29 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
   // first listed option.
   useEffect(() => {
     if (!currentModel) return;
+    if (activeKind === "image" && !isEditMode) {
+      const pixelSizes = currentModel.pixel_sizes && currentModel.pixel_sizes.length > 0
+        ? currentModel.pixel_sizes
+        : IMAGE_SIZES[imageModel] || [];
+      if (pixelSizes.length > 0 && !pixelSizes.includes(imageSize)) {
+        setImageSize(pixelSizes[0]);
+      }
+      if (currentModel.resolutions && currentModel.resolutions.length > 0
+          && !currentModel.resolutions.includes(imageResolution)) {
+        setImageResolution(currentModel.default_resolution || currentModel.resolutions[0]);
+      }
+      if (currentModel.aspect_ratios && currentModel.aspect_ratios.length > 0
+          && !currentModel.aspect_ratios.includes(aspect)) {
+        setAspect(currentModel.default_aspect_ratio || currentModel.aspect_ratios[0]);
+      }
+      if (!liveProvider || liveProvider === "openai-api") {
+        if (isGptImage(imageModel) && !GPT_IMAGE_QUALITIES.includes(imageQuality)) {
+          setImageQuality("auto");
+        } else if (imageModel === "dall-e-3" && !DALLE3_QUALITIES.includes(imageQuality)) {
+          setImageQuality("standard");
+        }
+      }
+    }
     if (currentModel.aspect_ratios && currentModel.aspect_ratios.length > 0
         && !currentModel.aspect_ratios.includes(aspect)) {
       setAspect(currentModel.default_aspect_ratio || currentModel.aspect_ratios[0]);
@@ -793,7 +818,7 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
         if (!isNaN(n)) setDuration(n);
       }
     }
-  }, [currentModelId]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [currentModelId, activeKind, isEditMode]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const createAvatar = async () => {
     if (avatarCreating) return;
@@ -876,10 +901,19 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
         body.options = { output_format: imageFormat, safe_mode: safeMode };
       } else {
         body.model = imageModel;
-        body.size = imageSize;
+        const wantsAspect = !!currentModel?.aspect_ratios?.length;
+        const wantsResolution = !!currentModel?.resolutions?.length;
+        const wantsPixelSize = !wantsAspect || !!currentModel?.pixel_sizes?.length;
+        if (wantsPixelSize) body.size = imageSize;
+        if (wantsAspect) body.aspect = aspect;
+        if (wantsResolution) body.resolution = imageResolution;
         const options: Record<string, unknown> = { safe_mode: safeMode };
-        if (imageModel !== "dall-e-2") options.quality = imageQuality;
-        if (isGptImage(imageModel)) options.output_format = imageFormat;
+        if (!liveProvider || liveProvider === "openai-api") {
+          if (imageModel !== "dall-e-2") options.quality = imageQuality;
+          if (isGptImage(imageModel)) options.output_format = imageFormat;
+        } else if (liveProvider === "venice-ai") {
+          options.format = imageFormat;
+        }
         body.options = options;
       }
     } else if (activeKind === "video") {
@@ -968,6 +1002,7 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
     imageModel,
     editModel,
     imageSize,
+    imageResolution,
     imageQuality,
     imageFormat,
     safeMode,
@@ -1251,6 +1286,8 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
             setImageModel={setImageModel}
             imageSize={imageSize}
             setImageSize={setImageSize}
+            imageResolution={imageResolution}
+            setImageResolution={setImageResolution}
             imageQuality={imageQuality}
             setImageQuality={setImageQuality}
             imageFormat={imageFormat}
@@ -1450,12 +1487,14 @@ interface ComposerProps {
   creatingDraft: boolean;
   disabled: boolean;
   isEditMode: boolean;
-  liveModels: { id: string; label: string }[] | null;
+  liveModels: LiveModel[] | null;
   liveProvider: string;
   imageModel: ImageModel;
   setImageModel: (v: ImageModel) => void;
   imageSize: string;
   setImageSize: (v: string) => void;
+  imageResolution: string;
+  setImageResolution: (v: string) => void;
   imageQuality: string;
   setImageQuality: (v: string) => void;
   imageFormat: string;
@@ -1570,12 +1609,17 @@ function Composer(p: ComposerProps) {
           setModel={p.setImageModel}
           size={p.imageSize}
           setSize={p.setImageSize}
+          imageResolution={p.imageResolution}
+          setImageResolution={p.setImageResolution}
           quality={p.imageQuality}
           setQuality={p.setImageQuality}
           format={p.imageFormat}
           setFormat={p.setImageFormat}
           liveModels={p.liveModels}
           liveProvider={p.liveProvider}
+          currentModel={p.currentModel}
+          aspect={p.aspect}
+          setAspect={p.setAspect}
         />
       )}
       {p.kind === "video" && (
@@ -2411,27 +2455,47 @@ function ImageOptions({
   setModel,
   size,
   setSize,
+  imageResolution,
+  setImageResolution,
   quality,
   setQuality,
   format,
   setFormat,
   liveModels,
   liveProvider,
+  currentModel,
+  aspect,
+  setAspect,
 }: {
   model: ImageModel;
   setModel: (v: ImageModel) => void;
   size: string;
   setSize: (v: string) => void;
+  imageResolution: string;
+  setImageResolution: (v: string) => void;
   quality: string;
   setQuality: (v: string) => void;
   format: string;
   setFormat: (v: string) => void;
-  liveModels: { id: string; label: string }[] | null;
+  liveModels: LiveModel[] | null;
   liveProvider: string;
+  currentModel?: LiveModel;
+  aspect: string;
+  setAspect: (v: string) => void;
 }) {
   // Live list wins when present. Otherwise fall back to the
   // OpenAI-flavour hardcoded matrix (so dropdown is never empty).
   const usingLive = liveModels && liveModels.length > 0;
+  const pixelSizes = currentModel?.pixel_sizes && currentModel.pixel_sizes.length > 0
+    ? currentModel.pixel_sizes
+    : usingLive
+      ? []
+      : IMAGE_SIZES[model] || ["1024x1024"];
+  const showPixelSize = !usingLive || !currentModel?.aspect_ratios?.length || !!currentModel?.pixel_sizes?.length;
+  const showAspect = !!currentModel?.aspect_ratios?.length;
+  const showResolution = !!currentModel?.resolutions?.length;
+  const showOpenAIQuality = !usingLive || liveProvider === "openai-api";
+  const showFormat = !usingLive || liveProvider === "openai-api" || liveProvider === "venice-ai";
   return (
     <>
       <div>
@@ -2451,7 +2515,7 @@ function ImageOptions({
           {usingLive
             ? liveModels!.map((m) => (
                 <option key={m.id} value={m.id}>
-                  {m.label}
+                  {modelLabel(m)}
                 </option>
               ))
             : IMAGE_MODELS.map((m) => (
@@ -2461,21 +2525,41 @@ function ImageOptions({
               ))}
         </select>
       </div>
-      <div>
-        <label className="text-text-muted text-xs block">Size</label>
-        <select
-          value={size}
-          onChange={(e) => setSize(e.target.value)}
-          className="bg-bg-input border border-border rounded px-2 py-1.5 text-sm"
-        >
-          {(IMAGE_SIZES[model] || ["1024x1024"]).map((s) => (
-            <option key={s} value={s}>
-              {s}
-            </option>
-          ))}
-        </select>
-      </div>
-      {model !== "dall-e-2" && (
+      {showPixelSize && (
+        pixelSizes.length > 0 ? (
+          <div>
+            <label className="text-text-muted text-xs block">Size</label>
+            <select
+              value={size}
+              onChange={(e) => setSize(e.target.value)}
+              className="bg-bg-input border border-border rounded px-2 py-1.5 text-sm"
+            >
+              {pixelSizes.map((s) => (
+                <option key={s} value={s}>
+                  {s}
+                </option>
+              ))}
+            </select>
+          </div>
+        ) : (
+          <TextField label="Size" value={size} onChange={setSize} placeholder="720x1280" />
+        )
+      )}
+      {showAspect && (
+        <ConstrainedAspect
+          aspects={currentModel?.aspect_ratios}
+          value={aspect}
+          onChange={setAspect}
+        />
+      )}
+      {showResolution && (
+        <ConstrainedResolution
+          resolutions={currentModel?.resolutions}
+          value={imageResolution}
+          onChange={setImageResolution}
+        />
+      )}
+      {showOpenAIQuality && model !== "dall-e-2" && (
         <div>
           <label className="text-text-muted text-xs block">Quality</label>
           <select
@@ -2491,7 +2575,7 @@ function ImageOptions({
           </select>
         </div>
       )}
-      {isGptImage(model) && (
+      {showFormat && (
         <div>
           <label className="text-text-muted text-xs block">Format</label>
           <select
@@ -2665,6 +2749,36 @@ function ConstrainedAspect({
         {aspects.map((a) => (
           <option key={a} value={a}>
             {a}
+          </option>
+        ))}
+      </select>
+    </div>
+  );
+}
+
+function ConstrainedResolution({
+  resolutions,
+  value,
+  onChange,
+}: {
+  resolutions: string[] | undefined;
+  value: string;
+  onChange: (v: string) => void;
+}) {
+  if (!resolutions || resolutions.length === 0) {
+    return <TextField label="Resolution" value={value} onChange={onChange} />;
+  }
+  return (
+    <div>
+      <label className="text-text-muted text-xs block">Resolution</label>
+      <select
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        className="bg-bg-input border border-border rounded px-2 py-1.5 text-sm"
+      >
+        {resolutions.map((r) => (
+          <option key={r} value={r}>
+            {r}
           </option>
         ))}
       </select>

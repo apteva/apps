@@ -842,6 +842,70 @@ func TestBuildProviderArgs_DallE2_StripsAllExtras(t *testing.T) {
 	}
 }
 
+func TestBuildVeniceImageArgs_DerivesAspectFromGenericSize(t *testing.T) {
+	got, err := buildImageArgs(map[string]any{
+		"model":  "flux-2-pro",
+		"prompt": "portrait pasta still",
+		"size":   "720x1280",
+	}, "venice-ai", "image.generate")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got["width"] != 720 || got["height"] != 1280 {
+		t.Fatalf("pixel width/height not preserved: %+v", got)
+	}
+	if got["aspect_ratio"] != "9:16" {
+		t.Fatalf("aspect_ratio = %v, want 9:16: %+v", got["aspect_ratio"], got)
+	}
+}
+
+func TestBuildVeniceImageArgs_GenericAspectAndResolution(t *testing.T) {
+	got, err := buildImageArgs(map[string]any{
+		"model":      "gpt-image-2",
+		"prompt":     "portrait pasta still",
+		"aspect":     "9:16",
+		"resolution": "2K",
+		"options": map[string]any{
+			"output_format": "jpeg",
+			"resolution":    "1024x1536",
+		},
+	}, "venice-ai", "image.generate")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got["aspect_ratio"] != "9:16" || got["resolution"] != "2K" {
+		t.Fatalf("generic aspect/resolution not translated: %+v", got)
+	}
+	if got["format"] != "jpeg" {
+		t.Fatalf("output_format should map to Venice format: %+v", got)
+	}
+}
+
+func TestBuildModelEntryFromVeniceSpec_SurfaceImageConstraints(t *testing.T) {
+	raw := json.RawMessage(`{
+		"id":"flux-2-pro",
+		"model_spec":{
+			"constraints":{
+				"aspectRatios":["1:1","9:16"],
+				"defaultAspectRatio":"1:1",
+				"steps":{"default":20,"max":50},
+				"promptCharacterLimit":3000
+			},
+			"pricing":{"generation":{"usd":0.04}}
+		}
+	}`)
+	got := buildModelEntryFromVeniceSpec("flux-2-pro", raw, "image")
+	if strings.Join(got.SizeModes, ",") != "aspect" {
+		t.Fatalf("size modes = %+v, want aspect", got.SizeModes)
+	}
+	if len(got.AspectRatios) != 2 || got.AspectRatios[1] != "9:16" || got.DefaultAspectRatio != "1:1" {
+		t.Fatalf("aspect constraints not surfaced: %+v", got)
+	}
+	if got.PriceUSD != 0.04 {
+		t.Fatalf("price = %v, want 0.04", got.PriceUSD)
+	}
+}
+
 func TestBuildOpenAICodexImageArgs(t *testing.T) {
 	args, err := buildImageArgs(map[string]any{
 		"prompt": "draw a door",
