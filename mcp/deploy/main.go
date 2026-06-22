@@ -41,7 +41,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: deploy
 display_name: Deploy
-version: 0.14.4
+version: 0.14.5
 description: Local-first builds and runtime supervision for Apteva projects.
 author: Apteva
 scopes: [project, global]
@@ -49,6 +49,7 @@ requires:
   permissions:
     - db.write.app
     - platform.apps.call
+    - platform.ingress.write
   integrations:
     - role: code
       kind: app
@@ -62,18 +63,6 @@ requires:
       compatible_app_names: [domains]
       label: Domains app
       hint: Install the Domains app to attach a custom domain to a deployment.
-    - role: certs
-      kind: app
-      required: false
-      compatible_app_names: [certs]
-      label: Certs app
-      hint: Install the Certs app to auto-issue Let's Encrypt certs on attach.
-    - role: routes
-      kind: app
-      required: false
-      compatible_app_names: [routes]
-      label: Routes app
-      hint: Install the Routes app to publish deployments at public hostnames via the platform's host router.
 provides:
   http_routes:
     - prefix: /
@@ -894,18 +883,12 @@ func (a *App) cascadeUnregisterRoute(deploymentID int64) {
 // isn't "deploy" — or whose owner_install_id is some other
 // install's — are not touched.
 func (a *App) sweepPhantomRoutes(ctx *sdk.AppCtx) int {
-	if ctx == nil || !a.routesAvailable(ctx) {
+	if ctx == nil || ctx.PlatformAPI() == nil {
 		return 0
 	}
-	var resp struct {
-		Routes []struct {
-			Hostname       string `json:"hostname"`
-			OwnerInstallID int64  `json:"owner_install_id"`
-			OwnerKind      string `json:"owner_kind"`
-		} `json:"routes"`
-	}
 	myID := myInstallID()
-	if err := callRoutesTool(ctx, "routes_list", map[string]any{"owner_install_id": myID}, &resp); err != nil {
+	routes, err := ctx.PlatformAPI().ListIngressRoutes()
+	if err != nil {
 		return 0
 	}
 	// Live set: deployments under this install whose domain is set AND
@@ -928,17 +911,14 @@ func (a *App) sweepPhantomRoutes(ctx *sdk.AppCtx) int {
 		}
 	}
 	dropped := 0
-	for _, r := range resp.Routes {
+	for _, r := range routes {
 		if r.OwnerInstallID != myID || r.OwnerKind != "deploy" {
 			continue
 		}
 		if liveDomains[r.Hostname] {
 			continue
 		}
-		if err := callRoutesTool(ctx, "routes_unregister", map[string]any{
-			"hostname":         r.Hostname,
-			"owner_install_id": myID,
-		}, nil); err != nil {
+		if err := ctx.PlatformAPI().UnexposeIngress(r.Hostname); err != nil {
 			continue
 		}
 		emit("deploy.route.phantom_dropped", map[string]any{"hostname": r.Hostname})

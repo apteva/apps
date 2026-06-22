@@ -268,11 +268,11 @@ type attachDomainResult struct {
 	Apex        string `json:"apex"`
 	Type        string `json:"type"`
 	Target      string `json:"target"`
-	DNSStatus   string `json:"dns_status"`  // ok | error | skipped
+	DNSStatus   string `json:"dns_status"` // ok | error | skipped
 	DNSError    string `json:"dns_error,omitempty"`
 	RouteStatus string `json:"route_status"` // ok | skipped | error
 	RouteError  string `json:"route_error,omitempty"`
-	CertStatus  string `json:"cert_status"`  // ok | skipped | error
+	CertStatus  string `json:"cert_status"` // ok | skipped | error
 	CertError   string `json:"cert_error,omitempty"`
 }
 
@@ -362,35 +362,19 @@ func (a *App) attachDomain(ctx *sdk.AppCtx, d *Deployment, spec attachDomainSpec
 		"dns_status": res.DNSStatus,
 	})
 
-	// Fire-and-forget cert issuance when the Certs app is installed.
-	// Issuance is async on the certs side too — the panel polls
-	// cert status via /api/_meta and renders the badge.
-	if a.certsAvailable(ctx) {
-		if err := callCertsTool(ctx, d.ProjectID, "cert_issue", map[string]any{"fqdn": fqdn}, nil); err != nil {
-			res.CertStatus = "error"
-			res.CertError = err.Error()
-			emit("deploy.domain.cert_kickoff_failed", map[string]any{
-				"deployment_id": d.ID, "fqdn": fqdn, "error": err.Error(),
-			})
-		} else {
-			res.CertStatus = "ok"
-		}
-	} else {
-		res.CertStatus = "skipped"
-	}
+	// Server-native ingress owns cert issuance for exact hostnames.
+	// Legacy Certs remains optional for old installs but is no longer
+	// required for new deploy domain links.
+	res.CertStatus = "platform"
 
-	// Register the route with the Routes app regardless of DNS state —
-	// the Caddy block is what actually serves traffic, and apteva.ai-
-	// style setups often have DNS provisioned out-of-band anyway. The
-	// route only registers if a release is live (registerRouteForDeployment
-	// gates on rel.Status == "live").
+	// Register the hostname with platform ingress regardless of DNS
+	// state. The route only registers if a release is live
+	// (registerRouteForDeployment gates on rel.Status == "live").
 	fresh, _ := dbGetDeployment(globalCtx.AppDB(), d.ProjectID, d.ID)
 	if fresh == nil {
 		fresh = d
 	}
-	if !a.routesAvailable(ctx) {
-		res.RouteStatus = "skipped"
-	} else if fresh.CurrentReleaseID == nil {
+	if fresh.CurrentReleaseID == nil {
 		res.RouteStatus = "skipped" // No live release; registers on next deploy_release.
 	} else {
 		registerRouteForDeployment(ctx, a, fresh)
@@ -398,7 +382,6 @@ func (a *App) attachDomain(ctx *sdk.AppCtx, d *Deployment, spec attachDomainSpec
 	}
 	return res, nil
 }
-
 
 // detachDomain best-effort deletes the DNS record (if we know what we
 // wrote) and clears the deployment's domain link. The DB clear runs
@@ -430,13 +413,8 @@ func (a *App) detachDomain(ctx *sdk.AppCtx, d *Deployment) error {
 	if err := dbSetDeploymentDomain(globalCtx.AppDB(), d.ID, "", "", ""); err != nil {
 		return err
 	}
-	if a.certsAvailable(ctx) && d.Domain != "" {
-		_ = callCertsTool(ctx, d.ProjectID, "cert_revoke", map[string]any{"fqdn": d.Domain}, nil)
-	}
 	// Drop the route entry so apteva-server stops proxying to a
-	// deployment the user just severed from its domain. No-op when
-	// Routes isn't installed; the platform host router falls through
-	// to its existing path-based routing.
+	// deployment the user just severed from its domain.
 	unregisterRouteForDeployment(ctx, a, d.Domain)
 	emit("deploy.domain.detached", map[string]any{
 		"deployment_id": d.ID, "fqdn": d.Domain,
@@ -618,10 +596,10 @@ func myInstallID() int64 {
 }
 
 // registerRouteForDeployment publishes a deployment's current release
-// port at its attached domain. Idempotent — calling again with the
-// same args updates the route in place. Skipped (no error) when
-// Routes isn't installed or when there's no live release to point
-// at; callers can rely on this being safe to fan out from anywhere.
+// port at its attached domain through server-native ingress.
+// Idempotent — calling again with the same args updates the route in
+// place. Skipped (no error) when there's no live release to point at;
+// callers can rely on this being safe to fan out from anywhere.
 //
 // Defense-in-depth gate: even though promoteToLive only calls us
 // after pidOwnsPort succeeds, we re-verify here. Any caller (e.g.
@@ -632,7 +610,7 @@ func registerRouteForDeployment(ctx *sdk.AppCtx, app *App, d *Deployment) {
 	if d == nil || d.Domain == "" {
 		return
 	}
-	if app == nil || !app.routesAvailable(ctx) {
+	if app == nil || ctx == nil || ctx.PlatformAPI() == nil {
 		return
 	}
 	if d.CurrentReleaseID == nil {
@@ -657,13 +635,13 @@ func registerRouteForDeployment(ctx *sdk.AppCtx, app *App, d *Deployment) {
 		return
 	}
 	target := fmt.Sprintf("http://127.0.0.1:%d", rel.Port)
-	if err := callRoutesTool(ctx, "routes_register", map[string]any{
-		"hostname":         d.Domain,
-		"target":           target,
-		"owner_install_id": myInstallID(),
-		"owner_kind":       "deploy",
-		"cert_fqdn":        d.Domain,
-	}, nil); err != nil {
+	if _, err := ctx.PlatformAPI().ExposeIngress(sdk.IngressExposeRequest{
+		Hostname:  d.Domain,
+		Target:    target,
+		OwnerKind: "deploy",
+		CertFQDN:  d.Domain,
+		ProjectID: d.ProjectID,
+	}); err != nil {
 		emit("deploy.route.register_failed", map[string]any{
 			"deployment_id": d.ID, "fqdn": d.Domain, "error": err.Error(),
 		})
@@ -675,20 +653,16 @@ func registerRouteForDeployment(ctx *sdk.AppCtx, app *App, d *Deployment) {
 }
 
 // unregisterRouteForDeployment is the cleanup half — called from
-// detachDomain and from deploy_destroy. Safe when Routes isn't
-// installed; safe when no route was ever registered (the routes app
-// returns removed: false).
+// detachDomain and from deploy_destroy. Safe when no route was ever
+// registered.
 func unregisterRouteForDeployment(ctx *sdk.AppCtx, app *App, fqdn string) {
 	if fqdn == "" {
 		return
 	}
-	if app == nil || !app.routesAvailable(ctx) {
+	if app == nil || ctx == nil || ctx.PlatformAPI() == nil {
 		return
 	}
-	_ = callRoutesTool(ctx, "routes_unregister", map[string]any{
-		"hostname":         fqdn,
-		"owner_install_id": myInstallID(),
-	}, nil)
+	_ = ctx.PlatformAPI().UnexposeIngress(fqdn)
 }
 
 // currentReleasePort returns the live port for a deployment, or 0

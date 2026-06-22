@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: deploy
 display_name: Deploy
-version: 0.14.4
+version: 0.14.5
 description: |
   Local-first builds and runtime supervision for Apteva projects.
   Takes a code repo (from the Code app, a local path, or a git URL),
@@ -26,6 +26,7 @@ requires:
   permissions:
     - db.write.app
     - platform.apps.call
+    - platform.ingress.write
   integrations:
     - role: code
       kind: app
@@ -39,18 +40,6 @@ requires:
       compatible_app_names: [domains]
       label: Domains app
       hint: Install the Domains app to attach a custom domain to a deployment. Without it, the `domain` field on a deployment is free-text and no DNS is written.
-    - role: certs
-      kind: app
-      required: false
-      compatible_app_names: [certs]
-      label: Certs app
-      hint: Install the Certs app to auto-issue (and renew) Let's Encrypt certs when a domain is attached. Optional — the deploy/domain link works without it; you'll just have HTTP-only custom domains.
-    - role: routes
-      kind: app
-      required: false
-      compatible_app_names: [routes]
-      label: Routes app
-      hint: Install the Routes app to publish deployments at public hostnames via the platform's host router. attach_domain registers (fqdn → release-port); release rebuilds refresh it; detach removes it. Optional — without Routes, custom domains land DNS records but apteva-server doesn't proxy public traffic to the loopback port.
 
 provides:
   http_routes:
