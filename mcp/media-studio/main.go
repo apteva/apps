@@ -35,14 +35,15 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: media-studio
 display_name: Media Studio
-version: 0.10.22
+version: 0.10.23
 description: |
   Generate images, video, audio, music, and avatars via compatible
   providers. Optionally saves outputs to Storage, supports stable
   cache keys for app-to-app generation reuse, and can use OpenAI Codex
   as a subscription-backed image provider. v0.10.19 adds media_delete
-  with default Storage cleanup. v0.10.22 exposes image model constraints
-  and translates generic size/aspect intent for Venice image models.
+  with default Storage cleanup. v0.10.23 exposes image model constraints
+  and robustly normalizes generic size/aspect/resolution intent for
+  Venice image models.
 author: Apteva
 scopes: [project, global]
 requires:

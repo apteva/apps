@@ -881,6 +881,55 @@ func TestBuildVeniceImageArgs_GenericAspectAndResolution(t *testing.T) {
 	}
 }
 
+func TestBuildVeniceImageArgs_NormalizesAgentShapeMistakes(t *testing.T) {
+	got, err := buildImageArgs(map[string]any{
+		"model":      "flux-2-pro",
+		"prompt":     "portrait pasta still",
+		"resolution": "720x1280",
+	}, "venice-ai", "image.generate")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got["width"] != 720 || got["height"] != 1280 || got["aspect_ratio"] != "9:16" {
+		t.Fatalf("pixel-looking resolution should normalize to pixels+aspect: %+v", got)
+	}
+	if _, ok := got["resolution"]; ok {
+		t.Fatalf("pixel-looking resolution must not be sent as Venice tier: %+v", got)
+	}
+
+	got, err = buildImageArgs(map[string]any{
+		"model":  "flux-2-pro",
+		"prompt": "portrait pasta still",
+		"size":   "9:16",
+	}, "venice-ai", "image.generate")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got["aspect_ratio"] != "9:16" {
+		t.Fatalf("aspect-looking size should normalize to aspect_ratio: %+v", got)
+	}
+	if _, ok := got["width"]; ok {
+		t.Fatalf("aspect-looking size must not create pixel width: %+v", got)
+	}
+
+	got, err = buildImageArgs(map[string]any{
+		"model":  "gpt-image-2",
+		"prompt": "portrait pasta still",
+		"options": map[string]any{
+			"resolution": "9:16",
+		},
+	}, "venice-ai", "image.generate")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got["aspect_ratio"] != "9:16" {
+		t.Fatalf("aspect-looking options.resolution should normalize to aspect_ratio: %+v", got)
+	}
+	if _, ok := got["resolution"]; ok {
+		t.Fatalf("aspect-looking options.resolution must not be sent as Venice tier: %+v", got)
+	}
+}
+
 func TestBuildModelEntryFromVeniceSpec_SurfaceImageConstraints(t *testing.T) {
 	raw := json.RawMessage(`{
 		"id":"flux-2-pro",

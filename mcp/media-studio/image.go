@@ -321,36 +321,17 @@ func buildVeniceImageArgs(args map[string]any) map[string]any {
 		"safe_mode": false,
 	}
 
-	// size "WxH" → width + height. Pixel-sized Venice models honour these;
-	// aspect-ratio models (nano-banana, qwen-image-2) ignore them and use
-	// aspect_ratio / resolution from options instead.
-	size := strArg(args, "size", "")
-	w, h, ok := parseWxH(size)
-	if ok {
-		out["width"] = w
-		out["height"] = h
-	}
-	if aspect := strArg(args, "aspect", ""); aspect != "" {
-		out["aspect_ratio"] = aspect
-	} else if aspect := aspectFromSize(size); aspect != "" {
-		out["aspect_ratio"] = aspect
-	}
-	if res := strArg(args, "resolution", ""); res != "" && validVeniceTierResolution(res) {
-		out["resolution"] = res
-	}
+	normalizeVeniceImageShape(args, out)
 
 	// options.* — pass through everything the catalog supports.
 	if opts, ok := args["options"].(map[string]any); ok {
 		passThrough := []string{
 			"negative_prompt", "format", "cfg_scale", "steps", "seed",
 			"style_preset", "safe_mode", "hide_watermark", "lora_strength",
-			"aspect_ratio", "resolution", "embed_exif_metadata",
+			"embed_exif_metadata",
 		}
 		for _, k := range passThrough {
 			if v, exists := opts[k]; exists {
-				if k == "resolution" && !validVeniceTierResolution(v) {
-					continue
-				}
 				out[k] = v
 			}
 		}
@@ -361,13 +342,79 @@ func buildVeniceImageArgs(args map[string]any) map[string]any {
 	return out
 }
 
+func normalizeVeniceImageShape(args map[string]any, out map[string]any) {
+	shape := veniceImageShape{}
+	applyVeniceShapeValue(&shape, strArg(args, "size", ""), "size")
+	applyVeniceShapeValue(&shape, strArg(args, "resolution", ""), "resolution")
+	applyVeniceShapeValue(&shape, strArg(args, "aspect", ""), "aspect")
+	if opts, ok := args["options"].(map[string]any); ok {
+		applyVeniceShapeValue(&shape, strArg(opts, "size", ""), "size")
+		applyVeniceShapeValue(&shape, strArg(opts, "resolution", ""), "resolution")
+		applyVeniceShapeValue(&shape, strArg(opts, "aspect", ""), "aspect")
+		applyVeniceShapeValue(&shape, strArg(opts, "aspect_ratio", ""), "aspect")
+	}
+	if shape.hasPixels {
+		out["width"] = shape.width
+		out["height"] = shape.height
+	}
+	if shape.aspect != "" {
+		out["aspect_ratio"] = shape.aspect
+	}
+	if shape.resolution != "" {
+		out["resolution"] = shape.resolution
+	}
+}
+
+type veniceImageShape struct {
+	width          int
+	height         int
+	hasPixels      bool
+	aspect         string
+	aspectExplicit bool
+	resolution     string
+}
+
+func applyVeniceShapeValue(shape *veniceImageShape, raw, role string) {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return
+	}
+	if w, h, ok := parseWxH(s); ok {
+		shape.width = w
+		shape.height = h
+		shape.hasPixels = true
+		if !shape.aspectExplicit {
+			if aspect := aspectFromSize(s); aspect != "" {
+				shape.aspect = aspect
+			}
+		}
+		return
+	}
+	if isAspectRatioValue(s) {
+		shape.aspect = s
+		shape.aspectExplicit = true
+		return
+	}
+	if role == "resolution" && validVeniceTierResolution(s) {
+		shape.resolution = s
+	}
+}
+
 func validVeniceTierResolution(v any) bool {
 	s := strings.TrimSpace(fmt.Sprint(v))
 	if s == "" {
 		return false
 	}
 	_, _, isPixel := parseWxH(s)
-	return !isPixel
+	return !isPixel && !isAspectRatioValue(s)
+}
+
+func isAspectRatioValue(s string) bool {
+	var w, h int
+	if _, err := fmt.Sscanf(strings.TrimSpace(s), "%d:%d", &w, &h); err != nil {
+		return false
+	}
+	return w > 0 && h > 0
 }
 
 func parseWxH(s string) (int, int, bool) {
