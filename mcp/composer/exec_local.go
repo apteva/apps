@@ -187,6 +187,9 @@ func buildLocalFFmpegArgsWithAudioInfo(edit *Edit, output Output, inputs []strin
 		if i == soundtrackIdx && soundtrackLoops(edit.Timeline.Soundtrack) {
 			args = append(args, "-stream_loop", "-1")
 		}
+		if i < visualCount && clipAssetType(track.Clips[i], "visual") != "image" && visualClipLoopsForSlot(track.Clips[i]) {
+			args = append(args, "-stream_loop", "-1")
+		}
 		args = append(args, "-i", src)
 	}
 
@@ -205,7 +208,10 @@ func buildLocalFFmpegArgsWithAudioInfo(edit *Edit, output Output, inputs []strin
 		// via -t on input.
 		if clipAssetType(c, "visual") != "image" {
 			d := trimFloat(clipDuration(c))
-			fmt.Fprintf(&filter, ",tpad=stop_mode=clone:stop_duration=%s,trim=duration=%s,setpts=PTS-STARTPTS", d, d)
+			if visualClipClonePadsForSlot(c) {
+				fmt.Fprintf(&filter, ",tpad=stop_mode=clone:stop_duration=%s", d)
+			}
+			fmt.Fprintf(&filter, ",trim=duration=%s,setpts=PTS-STARTPTS", d)
 		}
 		// Optional fade in/out within the clip.
 		if c.Transition != nil {
@@ -455,6 +461,69 @@ func soundtrackLoops(s *Soundtrack) bool {
 	default:
 		return false
 	}
+}
+
+func visualClipLoopsForSlot(c Clip) bool {
+	if clipAssetType(c, "visual") == "image" {
+		return false
+	}
+	behavior, mode := visualClipTiming(c)
+	switch behavior {
+	case "loop", "trim_or_loop":
+		return true
+	case "pad", "trim", "stretch", "regenerate":
+		return false
+	}
+	switch mode {
+	case "fit_source", "fit_group", "fit_timeline":
+		source := visualClipSourceDuration(c)
+		return source > 0 && source+0.01 < clipDuration(c)
+	default:
+		return false
+	}
+}
+
+func visualClipClonePadsForSlot(c Clip) bool {
+	behavior, mode := visualClipTiming(c)
+	switch behavior {
+	case "loop", "trim_or_loop", "trim", "stretch", "regenerate":
+		return false
+	case "pad":
+		return true
+	}
+	switch mode {
+	case "fit_source", "fit_group", "fit_timeline":
+		source := visualClipSourceDuration(c)
+		return source <= 0 || source+0.01 >= clipDuration(c)
+	default:
+		return true
+	}
+}
+
+func visualClipTiming(c Clip) (behavior, mode string) {
+	if c.Timing == nil {
+		return "", ""
+	}
+	return strings.ToLower(strings.TrimSpace(c.Timing.Behavior)), strings.ToLower(strings.TrimSpace(c.Timing.Mode))
+}
+
+func visualClipSourceDuration(c Clip) float64 {
+	if c.ActualLength > 0 {
+		return c.ActualLength
+	}
+	if c.AI == nil {
+		return 0
+	}
+	if c.AI.ActualDurationSeconds > 0 {
+		return c.AI.ActualDurationSeconds
+	}
+	if c.AI.EstimatedDurationSeconds > 0 {
+		return c.AI.EstimatedDurationSeconds
+	}
+	if c.AI.Duration > 0 {
+		return float64(c.AI.Duration)
+	}
+	return 0
 }
 
 func audioCodecArgs(output Output) []string {

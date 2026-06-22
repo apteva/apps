@@ -211,6 +211,39 @@ func TestBuildLocalFFmpegArgs_ImageClipUsesLoop(t *testing.T) {
 	}
 }
 
+func TestBuildLocalFFmpegArgs_FitSourceVideoLoopsInsteadOfClonePadding(t *testing.T) {
+	e, _ := parseEditJSON(`{"timeline":{"tracks":[{"clips":[
+		{"asset":{"src":"https://v","type":"video"},"start":0,"length":8,"actual_length":3,
+		 "timing":{"mode":"fit_source","source":"track:audio"}}
+	]}]}}`)
+	args := buildLocalFFmpegArgs(e, defaultOutput(), []string{"https://v"}, -1, "out.mp4")
+	cmd := strings.Join(args, " ")
+	if !strings.Contains(cmd, "-stream_loop -1 -i https://v") {
+		t.Fatalf("short matched video should loop input instead of freezing: %s", cmd)
+	}
+	if strings.Contains(cmd, "tpad=stop_mode=clone") {
+		t.Fatalf("short matched video should not clone-pad the final frame: %s", cmd)
+	}
+	if !strings.Contains(cmd, "trim=duration=8") {
+		t.Fatalf("looped video should still trim exactly to the target slot: %s", cmd)
+	}
+}
+
+func TestBuildLocalFFmpegArgs_ExplicitPadKeepsClonePadding(t *testing.T) {
+	e, _ := parseEditJSON(`{"timeline":{"tracks":[{"clips":[
+		{"asset":{"src":"https://v","type":"video"},"start":0,"length":8,"actual_length":3,
+		 "timing":{"mode":"fit_source","source":"track:audio","behavior":"pad"}}
+	]}]}}`)
+	args := buildLocalFFmpegArgs(e, defaultOutput(), []string{"https://v"}, -1, "out.mp4")
+	cmd := strings.Join(args, " ")
+	if strings.Contains(cmd, "-stream_loop -1 -i https://v") {
+		t.Fatalf("explicit pad should not loop input: %s", cmd)
+	}
+	if !strings.Contains(cmd, "tpad=stop_mode=clone") {
+		t.Fatalf("explicit pad should clone-pad the final frame: %s", cmd)
+	}
+}
+
 func TestBuildLocalFFmpegArgs_FadeTransition(t *testing.T) {
 	e, _ := parseEditJSON(`{"timeline":{"tracks":[{"clips":[
 		{"asset":{"src":"https://a","type":"video"},"start":0,"length":3,"transition":{"in":"fade","out":"fade"}}
