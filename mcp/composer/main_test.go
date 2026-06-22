@@ -561,6 +561,23 @@ func TestMediaGenerateOptions_DoesNotMutateAIOptions(t *testing.T) {
 	}
 }
 
+func TestMediaGenerateOptions_OverridesStaleInternalEstimate(t *testing.T) {
+	ai := &AIAsset{
+		EstimatedDurationSeconds: 10,
+		Options: map[string]any{
+			"estimated_duration_seconds": 3,
+			"no_sound":                   true,
+		},
+	}
+	opts := mediaGenerateOptions(ai)
+	if got := opts["estimated_duration_seconds"]; got != float64(10) {
+		t.Fatalf("estimated duration option = %v, want 10", got)
+	}
+	if got := ai.Options["estimated_duration_seconds"]; got != 3 {
+		t.Fatalf("stored AI options mutated = %v, want original 3", got)
+	}
+}
+
 func TestEnrichEditJSONWithMediaHistory_RestoresImageSize(t *testing.T) {
 	edit := `{"timeline":{"tracks":[{"type":"visual","clips":[{"asset":{"type":"image","src":"storage:42"},"start":0,"length":5}]}]}}`
 	out := enrichEditJSONWithMediaHistory(edit, map[int64]*mediaHistoryRow{

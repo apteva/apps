@@ -1,4 +1,4 @@
-// ComposerPanel v0.3.29 - timeline editor with storage and Media Studio AI assets.
+// ComposerPanel v0.3.30 - timeline editor with storage and Media Studio AI assets.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 

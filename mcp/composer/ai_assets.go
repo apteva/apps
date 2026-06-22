@@ -632,9 +632,7 @@ func mediaGenerateOptions(ai *AIAsset) map[string]any {
 		if opts == nil {
 			opts = map[string]any{}
 		}
-		if _, ok := opts["estimated_duration_seconds"]; !ok {
-			opts["estimated_duration_seconds"] = ai.EstimatedDurationSeconds
-		}
+		opts["estimated_duration_seconds"] = ai.EstimatedDurationSeconds
 	}
 	return opts
 }
