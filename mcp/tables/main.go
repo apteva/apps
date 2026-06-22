@@ -24,7 +24,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: tables
 display_name: Tables
-version: 0.1.8
+version: 0.1.9
 description: Typed-row database for Apteva agents and human teams.
 author: Apteva
 scopes: [project, global]
@@ -41,11 +41,13 @@ provides:
     - { name: tables_alter,     description: "Add/rename/drop columns." }
     - { name: tables_drop,      description: "Delete a table and its rows." }
     - { name: rows_insert,      description: "Insert one or many rows; atomic." }
+    - { name: rows_upsert,      description: "Insert or update rows by key; atomic." }
     - { name: rows_get,         description: "Fetch one row by id." }
     - { name: rows_update,      description: "Patch fields on a row." }
     - { name: rows_delete,      description: "Delete by id, or by filter + confirm." }
     - { name: rows_search,      description: "Filtered list with typed predicates." }
     - { name: rows_count,       description: "Count rows matching a filter." }
+    - { name: rows_aggregate,   description: "Single-table grouped aggregations." }
     - { name: tables_query,     description: "Read-only SELECT escape hatch." }
   publishes:
     - name: table.created
@@ -154,6 +156,38 @@ func (a *App) MCPTools() []sdk.Tool {
 			"required": []string{"col", "op"},
 		},
 	}
+	groupBySchema := map[string]any{
+		"type": "array",
+		"items": map[string]any{
+			"oneOf": []any{
+				map[string]any{"type": "string"},
+				map[string]any{
+					"type": "object",
+					"properties": map[string]any{
+						"col":    map[string]any{"type": "string"},
+						"bucket": map[string]any{"type": "string", "enum": []string{"day", "week", "month", "year"}},
+						"name":   map[string]any{"type": "string"},
+					},
+					"required": []string{"col"},
+				},
+			},
+		},
+	}
+	metricSchema := map[string]any{
+		"type": "array",
+		"items": map[string]any{
+			"type": "object",
+			"properties": map[string]any{
+				"name":        map[string]any{"type": "string"},
+				"op":          map[string]any{"type": "string", "enum": []string{"count", "sum", "avg", "min", "max", "avg_ratio"}},
+				"col":         map[string]any{"type": "string"},
+				"distinct":    map[string]any{"type": "boolean"},
+				"numerator":   map[string]any{"type": "string"},
+				"denominator": map[string]any{"type": "string"},
+			},
+			"required": []string{"name", "op"},
+		},
+	}
 	return []sdk.Tool{
 		{
 			Name:        "tables_create",
@@ -205,6 +239,16 @@ func (a *App) MCPTools() []sdk.Tool {
 				"rows":  map[string]any{"type": "array", "items": map[string]any{"type": "object"}},
 			}, []string{"table", "rows"}),
 			Handler: a.toolRowsInsert,
+		},
+		{
+			Name:        "rows_upsert",
+			Description: "Insert or update rows by a caller-supplied key. Args: table, key (array of column names), rows (array of objects). Existing rows matching the key are patched; missing rows are inserted. Returns {ids, inserted, updated}.",
+			InputSchema: schemaObject(map[string]any{
+				"table": map[string]any{"type": "string"},
+				"key":   map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+				"rows":  map[string]any{"type": "array", "items": map[string]any{"type": "object"}},
+			}, []string{"table", "key", "rows"}),
+			Handler: a.toolRowsUpsert,
 		},
 		{
 			Name:        "rows_get",
@@ -259,6 +303,19 @@ func (a *App) MCPTools() []sdk.Tool {
 				"where": whereSchema,
 			}, []string{"table"}),
 			Handler: a.toolRowsCount,
+		},
+		{
+			Name:        "rows_aggregate",
+			Description: "Single-table grouped aggregations. Args: table, where?, group_by? (column names or {col, bucket: day|week|month|year, name?}), metrics ([{name, op, col?, distinct?, numerator?, denominator?}]), order_by?, limit?. Ops: count, sum, avg, min, max, avg_ratio. Returns {rows, truncated}.",
+			InputSchema: schemaObject(map[string]any{
+				"table":    map[string]any{"type": "string"},
+				"where":    whereSchema,
+				"group_by": groupBySchema,
+				"metrics":  metricSchema,
+				"order_by": map[string]any{"type": "string"},
+				"limit":    map[string]any{"type": "integer"},
+			}, []string{"table", "metrics"}),
+			Handler: a.toolRowsAggregate,
 		},
 		{
 			Name:        "tables_query",

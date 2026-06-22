@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: tables
 display_name: Tables
-version: 0.1.8
+version: 0.1.9
 description: |
   Typed-row database for Apteva agents and human teams. The row-shaped
   sibling to the storage app: define typed tables, insert rows, query
@@ -40,6 +40,8 @@ provides:
       description: 'Delete a table and all its rows. Args: name, confirm. Idempotent only when confirm=true.'
     - name: rows_insert
       description: 'Insert one or many rows. Args: table, rows (array of objects keyed by column name). Atomic — first failing row aborts the whole call. Returns {ids, inserted}.'
+    - name: rows_upsert
+      description: 'Insert or update rows by a caller-supplied key. Args: table, key (array of column names), rows. Existing rows matching the key are patched; missing rows are inserted. Returns {ids, inserted, updated}.'
     - name: rows_get
       description: 'Fetch one row by id. Args: table, id, hydrate_files? (resolve file_id columns to signed URLs via the storage app). Returns {row, found}.'
     - name: rows_update
@@ -50,6 +52,8 @@ provides:
       description: 'Filter, sort, paginate. Args: table, where? (array of {col, op, value}), order_by?, limit?, offset?. Ops: eq, neq, lt, lte, gt, gte, contains, in, between, is_null, is_not_null. Returns {rows, total}.'
     - name: rows_count
       description: 'Count rows matching a filter. Args: table, where?. Returns {count}.'
+    - name: rows_aggregate
+      description: 'Single-table grouped aggregations. Args: table, where?, group_by? (column names or {col, bucket: day|week|month|year, name?}), metrics ([{name, op, col?, distinct?, numerator?, denominator?}]), order_by?, limit?. Ops: count, sum, avg, min, max, avg_ratio. Returns {rows, truncated}.'
     - name: tables_query
       description: 'Read-only SELECT escape hatch. Args: sql, params? (array of bound values). Refused on any non-SELECT keyword; row + bytes caps enforced. Returns {columns, rows, truncated}.'
   ui_panels:
@@ -135,5 +139,85 @@ config_schema:
     default: "2000"
     label: Max tables_query duration (ms)
     description: tables_query timeout. The query is cancelled and an error returned if it runs longer.
+
+imports:
+  sources:
+    - id: airtable_whole_connection
+      label: Airtable connection
+      description: Import every base and table visible to an Airtable connection into Tables.
+      kind: integration
+      integration: airtable
+      scope: whole_connection
+
+      discover:
+        bases:
+          tool: list_bases
+          result_path: bases
+          pagination:
+            cursor_arg: offset
+            cursor_result_path: offset
+        tables:
+          tool: get_base_schema
+          args:
+            base_id: "${base.id}"
+          result_path: tables
+
+      read:
+        records:
+          tool: list_records
+          args:
+            base_id: "${base.id}"
+            table_id: "${table.id}"
+            pageSize: 100
+          result_path: records
+          pagination:
+            cursor_arg: offset
+            cursor_result_path: offset
+
+      record:
+        id_path: id
+        created_at_path: createdTime
+        fields_path: fields
+
+      create:
+        strategy: table_per_source_table
+        table_name: "airtable_${base.name}_${table.name}"
+
+      schema:
+        mode: infer_from_source_schema
+        field_source: get_base_schema
+        include_source_metadata: true
+        metadata_columns:
+          - name: source_connection_id
+            type: text
+          - name: source_base_id
+            type: text
+          - name: source_base_name
+            type: text
+          - name: source_table_id
+            type: text
+          - name: source_table_name
+            type: text
+          - name: source_record_id
+            type: text
+          - name: source_synced_at
+            type: datetime
+          - name: source_deleted
+            type: bool
+          - name: source_hash
+            type: text
+
+      write:
+        tool: rows_upsert
+        key:
+          - source_connection_id
+          - source_base_id
+          - source_table_id
+          - source_record_id
+
+      sync:
+        default_mode: upsert
+        default_schedule: 15m
+        deletes: soft_delete
 
 upgrade_policy: auto-patch

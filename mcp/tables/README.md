@@ -5,10 +5,10 @@ sibling to the `storage` app.
 
 ## Surfaces
 
-- **12 MCP tools** — `tables_create`, `tables_list`, `tables_describe`,
+- **14 MCP tools** — `tables_create`, `tables_list`, `tables_describe`,
   `tables_alter`, `tables_drop`, `rows_insert`, `rows_get`,
-  `rows_update`, `rows_delete`, `rows_search`, `rows_count`,
-  `tables_query`
+  `rows_upsert`, `rows_update`, `rows_delete`, `rows_search`,
+  `rows_count`, `rows_aggregate`, `tables_query`
 - **Strict typed columns** — `text`, `number`, `bool`, `datetime`,
   `json`, `file_id` (FK into the `storage` app)
 - **Read-only SQL escape hatch** — `tables_query` accepts SELECT or

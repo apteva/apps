@@ -166,6 +166,43 @@ func TestRowsInsert_RejectsReservedKey(t *testing.T) {
 	}
 }
 
+func TestRowsUpsert_InsertsThenUpdatesByKey(t *testing.T) {
+	ctx := newTestCtx(t)
+	app := &App{}
+	booksTable(t, app, ctx)
+
+	first := mustCall(t, app, ctx, "rows_upsert", map[string]any{
+		"table": "books",
+		"key":   []any{"title"},
+		"rows": []any{
+			map[string]any{"title": "Dune", "author": "Frank Herbert", "rating": 4.0},
+		},
+	})
+	if first["inserted"].(int) != 1 || first["updated"].(int) != 0 {
+		t.Fatalf("first upsert counts = %+v", first)
+	}
+
+	second := mustCall(t, app, ctx, "rows_upsert", map[string]any{
+		"table": "books",
+		"key":   []any{"title"},
+		"rows": []any{
+			map[string]any{"title": "Dune", "author": "Frank Herbert", "rating": 5.0},
+		},
+	})
+	if second["inserted"].(int) != 0 || second["updated"].(int) != 1 {
+		t.Fatalf("second upsert counts = %+v", second)
+	}
+	count := mustCall(t, app, ctx, "rows_count", map[string]any{"table": "books"})
+	if count["count"].(int64) != 1 {
+		t.Fatalf("expected 1 row after repeated upsert, got %v", count["count"])
+	}
+	out := mustCall(t, app, ctx, "rows_search", map[string]any{"table": "books"})
+	rows := out["rows"].([]map[string]any)
+	if rows[0]["rating"].(float64) != 5.0 {
+		t.Fatalf("rating not updated: %+v", rows[0])
+	}
+}
+
 func TestRowsSearch_TypedPredicates(t *testing.T) {
 	ctx := newTestCtx(t)
 	app := &App{}
@@ -222,6 +259,120 @@ func TestRowsSearch_TypedPredicates(t *testing.T) {
 	})
 	if out["total"].(int64) != 2 {
 		t.Errorf("started_at between Apr: total=%v", out["total"])
+	}
+}
+
+func TestRowsAggregate_GroupedMetricsAndBuckets(t *testing.T) {
+	ctx := newTestCtx(t)
+	app := &App{}
+	booksTable(t, app, ctx)
+	mustCall(t, app, ctx, "rows_insert", map[string]any{
+		"table": "books",
+		"rows": []any{
+			map[string]any{"title": "Three-Body Problem", "author": "Liu Cixin", "rating": 5.0, "finished": true, "started_at": "2026-04-12T09:00:00Z"},
+			map[string]any{"title": "Project Hail Mary", "author": "Andy Weir", "rating": 4.5, "finished": false, "started_at": "2026-04-28T18:30:00Z"},
+			map[string]any{"title": "The Martian", "author": "Andy Weir", "rating": 4.0, "finished": true, "started_at": "2026-03-01T12:00:00Z"},
+		},
+	})
+
+	out := mustCall(t, app, ctx, "rows_aggregate", map[string]any{
+		"table":    "books",
+		"group_by": []any{"author"},
+		"metrics": []any{
+			map[string]any{"name": "total", "op": "count"},
+			map[string]any{"name": "avg_rating", "op": "avg", "col": "rating"},
+		},
+		"order_by": "total desc",
+	})
+	rows := out["rows"].([]map[string]any)
+	if len(rows) != 2 {
+		t.Fatalf("expected 2 groups, got %d: %+v", len(rows), rows)
+	}
+	if rows[0]["author"] != "Andy Weir" || rows[0]["total"].(int64) != 2 {
+		t.Fatalf("first group = %+v", rows[0])
+	}
+	if rows[0]["avg_rating"].(float64) != 4.25 {
+		t.Fatalf("avg_rating = %v", rows[0]["avg_rating"])
+	}
+
+	monthly := mustCall(t, app, ctx, "rows_aggregate", map[string]any{
+		"table": "books",
+		"group_by": []any{
+			map[string]any{"col": "started_at", "bucket": "month", "name": "month"},
+		},
+		"metrics":  []any{map[string]any{"name": "total", "op": "count"}},
+		"order_by": "month asc",
+	})
+	months := monthly["rows"].([]map[string]any)
+	if len(months) != 2 {
+		t.Fatalf("expected 2 months, got %+v", months)
+	}
+	if months[0]["month"] != "2026-03" || months[0]["total"].(int64) != 1 {
+		t.Fatalf("first month = %+v", months[0])
+	}
+}
+
+func TestRowsAggregate_AvgRatio(t *testing.T) {
+	ctx := newTestCtx(t)
+	app := &App{}
+	mustCall(t, app, ctx, "tables_create", map[string]any{
+		"name": "scores",
+		"columns": []any{
+			map[string]any{"name": "centre", "type": "text"},
+			map[string]any{"name": "score_total", "type": "number"},
+			map[string]any{"name": "score_max", "type": "number"},
+		},
+	})
+	mustCall(t, app, ctx, "rows_insert", map[string]any{
+		"table": "scores",
+		"rows": []any{
+			map[string]any{"centre": "paris", "score_total": 8.0, "score_max": 10.0},
+			map[string]any{"centre": "paris", "score_total": 6.0, "score_max": 10.0},
+			map[string]any{"centre": "lyon", "score_total": 3.0, "score_max": 0.0},
+		},
+	})
+
+	out := mustCall(t, app, ctx, "rows_aggregate", map[string]any{
+		"table":    "scores",
+		"group_by": []any{"centre"},
+		"metrics": []any{
+			map[string]any{"name": "avg_score", "op": "avg_ratio", "numerator": "score_total", "denominator": "score_max"},
+		},
+		"order_by": "centre asc",
+	})
+	rows := out["rows"].([]map[string]any)
+	if rows[0]["centre"] != "lyon" || rows[0]["avg_score"] != nil {
+		t.Fatalf("expected lyon zero denominator to aggregate as null, got %+v", rows[0])
+	}
+	if rows[1]["centre"] != "paris" || rows[1]["avg_score"].(float64) != 0.7 {
+		t.Fatalf("expected paris avg_score 0.7, got %+v", rows[1])
+	}
+}
+
+func TestRowsAggregate_RejectsUnsafeInputs(t *testing.T) {
+	ctx := newTestCtx(t)
+	app := &App{}
+	booksTable(t, app, ctx)
+
+	_, err := callTool(app, ctx, "rows_aggregate", map[string]any{
+		"table": "books",
+		"metrics": []any{
+			map[string]any{"name": "avg_rating", "op": "avg", "col": "author"},
+		},
+	})
+	if err == nil {
+		t.Fatal("expected avg over text column to fail")
+	}
+
+	_, err = callTool(app, ctx, "rows_aggregate", map[string]any{
+		"table": "books",
+		"group_by": []any{
+			map[string]any{"col": "title", "bucket": "month"},
+		},
+		"metrics": []any{map[string]any{"name": "total", "op": "count"}},
+	})
+	if err == nil {
+		t.Fatal("expected date bucket over text column to fail")
 	}
 }
 

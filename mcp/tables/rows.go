@@ -118,6 +118,209 @@ func (a *App) toolRowsInsert(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	return map[string]any{"ids": ids, "inserted": len(ids)}, nil
 }
 
+// ─── rows_upsert ────────────────────────────────────────────────────
+
+func (a *App) toolRowsUpsert(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	tableName := strArg(args, "table")
+	if err := validateIdentifier("table", tableName); err != nil {
+		return nil, err
+	}
+	rawKey := sliceArg(args, "key")
+	if len(rawKey) == 0 {
+		return nil, errf("key is required and must be non-empty")
+	}
+	keyCols := make([]string, 0, len(rawKey))
+	seenKey := map[string]bool{}
+	for i, v := range rawKey {
+		name, ok := v.(string)
+		if !ok {
+			return nil, errf("key[%d]: must be a column name string", i)
+		}
+		if reservedColumns[name] {
+			return nil, errf("key[%d]: %q is reserved and cannot be used as an upsert key", i, name)
+		}
+		if err := validateIdentifier("key column", name); err != nil {
+			return nil, fmt.Errorf("key[%d]: %w", i, err)
+		}
+		if seenKey[name] {
+			return nil, errf("key[%d]: duplicate column %q", i, name)
+		}
+		seenKey[name] = true
+		keyCols = append(keyCols, name)
+	}
+	rawRows := sliceArg(args, "rows")
+	if len(rawRows) == 0 {
+		return nil, errf("rows is required and must be non-empty")
+	}
+	t, err := loadTable(ctx.AppDB(), pid, tableName)
+	if err != nil {
+		return nil, err
+	}
+	colByName := map[string]Column{}
+	for _, col := range t.Columns {
+		colByName[col.Name] = col
+	}
+	for _, name := range keyCols {
+		if _, ok := colByName[name]; !ok {
+			return nil, errf("key column %q does not exist", name)
+		}
+	}
+
+	type preparedRow struct {
+		obj     map[string]any
+		keyVals []any
+	}
+	prepared := make([]preparedRow, len(rawRows))
+	for i, r := range rawRows {
+		obj, ok := r.(map[string]any)
+		if !ok {
+			return nil, errf("rows[%d]: must be an object", i)
+		}
+		for k := range obj {
+			if reservedColumns[k] {
+				return nil, errf("rows[%d]: %q is reserved and managed automatically", i, k)
+			}
+			if _, ok := colByName[k]; !ok {
+				return nil, errf("rows[%d]: unknown column %q", i, k)
+			}
+		}
+		keyVals := make([]any, 0, len(keyCols))
+		for _, key := range keyCols {
+			v, present := obj[key]
+			if !present || v == nil {
+				return nil, errf("rows[%d]: key column %q is required", i, key)
+			}
+			coerced, err := coerceForStorage(colByName[key], v)
+			if err != nil {
+				return nil, errf("rows[%d] key %q: %v", i, key, err)
+			}
+			keyVals = append(keyVals, coerced)
+		}
+		prepared[i] = preparedRow{obj: obj, keyVals: keyVals}
+	}
+
+	tx, err := ctx.AppDB().Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+
+	var whereParts []string
+	for _, key := range keyCols {
+		whereParts = append(whereParts, quote(key)+" = ?")
+	}
+	where := strings.Join(whereParts, " AND ")
+	ids := make([]int64, 0, len(prepared))
+	inserted, updated := 0, 0
+
+	for i, row := range prepared {
+		var existingID int64
+		err := tx.QueryRow(
+			fmt.Sprintf("SELECT id FROM %s WHERE %s ORDER BY id LIMIT 1", quote(t.PhysicalName), where),
+			row.keyVals...,
+		).Scan(&existingID)
+		if err != nil && err != sql.ErrNoRows {
+			return nil, errf("rows[%d]: lookup failed: %v", i, err)
+		}
+		if err == nil {
+			setCols := make([]string, 0, len(row.obj)+1)
+			vals := make([]any, 0, len(row.obj)+1)
+			for _, col := range t.Columns {
+				v, present := row.obj[col.Name]
+				if !present {
+					continue
+				}
+				coerced, err := coerceForStorage(col, v)
+				if err != nil {
+					return nil, errf("rows[%d]: %v", i, err)
+				}
+				setCols = append(setCols, quote(col.Name)+" = ?")
+				vals = append(vals, coerced)
+			}
+			if len(setCols) > 0 {
+				setCols = append(setCols, `"updated_at" = CURRENT_TIMESTAMP`)
+				vals = append(vals, existingID)
+				stmt := fmt.Sprintf("UPDATE %s SET %s WHERE id = ?", quote(t.PhysicalName), strings.Join(setCols, ", "))
+				if _, err := tx.Exec(stmt, vals...); err != nil {
+					return nil, errf("rows[%d]: update failed: %v", i, err)
+				}
+			}
+			ids = append(ids, existingID)
+			updated++
+			continue
+		}
+
+		if cap := maxRowsPerTable(ctx); cap > 0 && t.RowCount+int64(inserted+1) > cap {
+			return nil, errf("would exceed max_rows_per_table (%d): table %q has %d rows, inserting at least %d",
+				cap, tableName, t.RowCount, inserted+1)
+		}
+		usedCols := make([]string, 0, len(t.Columns))
+		usedVals := make([]any, 0, len(t.Columns))
+		for _, col := range t.Columns {
+			v, present := row.obj[col.Name]
+			if !present {
+				if col.Default != nil {
+					v = col.Default
+					present = true
+				} else if !col.Nullable {
+					return nil, errf("rows[%d]: column %q is required", i, col.Name)
+				} else {
+					continue
+				}
+			}
+			coerced, err := coerceForStorage(col, v)
+			if err != nil {
+				return nil, errf("rows[%d]: %v", i, err)
+			}
+			usedCols = append(usedCols, col.Name)
+			usedVals = append(usedVals, coerced)
+		}
+		var sqlText string
+		if len(usedCols) == 0 {
+			sqlText = fmt.Sprintf("INSERT INTO %s DEFAULT VALUES", quote(t.PhysicalName))
+		} else {
+			placeholders := strings.Repeat("?,", len(usedVals))
+			placeholders = placeholders[:len(placeholders)-1]
+			cols := make([]string, len(usedCols))
+			for j, n := range usedCols {
+				cols[j] = quote(n)
+			}
+			sqlText = fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s)",
+				quote(t.PhysicalName), strings.Join(cols, ", "), placeholders)
+		}
+		res, err := tx.Exec(sqlText, usedVals...)
+		if err != nil {
+			return nil, errf("rows[%d]: insert failed: %v", i, err)
+		}
+		id, err := res.LastInsertId()
+		if err != nil {
+			return nil, err
+		}
+		ids = append(ids, id)
+		inserted++
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	if inserted > 0 {
+		emit(ctx, topicRowInserted, map[string]any{
+			"table": tableName,
+			"count": inserted,
+		})
+	}
+	if updated > 0 {
+		emit(ctx, topicRowUpdated, map[string]any{
+			"table": tableName,
+			"count": updated,
+		})
+	}
+	return map[string]any{"ids": ids, "inserted": inserted, "updated": updated}, nil
+}
+
 // ─── rows_get ──────────────────────────────────────────────────────
 
 func (a *App) toolRowsGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -381,6 +584,92 @@ func (a *App) toolRowsCount(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return nil, err
 	}
 	return map[string]any{"count": n}, nil
+}
+
+// ─── rows_aggregate ────────────────────────────────────────────────
+
+func (a *App) toolRowsAggregate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	tableName := strArg(args, "table")
+	if err := validateIdentifier("table", tableName); err != nil {
+		return nil, err
+	}
+	t, err := loadTable(ctx.AppDB(), pid, tableName)
+	if err != nil {
+		return nil, err
+	}
+	clause, vals, err := buildWhere(t, sliceArg(args, "where"))
+	if err != nil {
+		return nil, err
+	}
+	groups, err := buildAggregateGroups(t, sliceArg(args, "group_by"))
+	if err != nil {
+		return nil, err
+	}
+	metrics, err := buildAggregateMetrics(t, sliceArg(args, "metrics"))
+	if err != nil {
+		return nil, err
+	}
+	if err := ensureUniqueAggregateOutputs(groups, metrics); err != nil {
+		return nil, err
+	}
+	selectParts := make([]string, 0, len(groups)+len(metrics))
+	for _, g := range groups {
+		selectParts = append(selectParts, g.SelectExpr)
+	}
+	for _, m := range metrics {
+		selectParts = append(selectParts, m.SelectExpr)
+	}
+	if len(selectParts) == 0 {
+		return nil, errf("at least one metric is required")
+	}
+
+	stmt := "SELECT " + strings.Join(selectParts, ", ") + " FROM " + quote(t.PhysicalName)
+	if clause != "" {
+		stmt += " " + clause
+	}
+	if len(groups) > 0 {
+		groupParts := make([]string, 0, len(groups))
+		for _, g := range groups {
+			groupParts = append(groupParts, g.GroupExpr)
+		}
+		stmt += " GROUP BY " + strings.Join(groupParts, ", ")
+	}
+	orderBy, err := buildAggregateOrderBy(groups, metrics, strArg(args, "order_by"))
+	if err != nil {
+		return nil, err
+	}
+	if orderBy != "" {
+		stmt += " " + orderBy
+	}
+
+	limit := intArg(args, "limit", maxQueryRows(ctx))
+	if limit <= 0 {
+		limit = maxQueryRows(ctx)
+	}
+	if max := maxQueryRows(ctx); limit > max {
+		limit = max
+	}
+	stmt += fmt.Sprintf(" LIMIT %d", limit+1)
+
+	rows, err := ctx.AppDB().Query(stmt, vals...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out, err := scanAggregateRows(rows)
+	if err != nil {
+		return nil, err
+	}
+	truncated := false
+	if len(out) > limit {
+		truncated = true
+		out = out[:limit]
+	}
+	return map[string]any{"rows": out, "truncated": truncated}, nil
 }
 
 // ─── shared row machinery ──────────────────────────────────────────
@@ -662,6 +951,251 @@ func buildWhere(t *Table, raw []any) (string, []any, error) {
 		}
 	}
 	return "WHERE " + strings.Join(clauses, " AND "), args, nil
+}
+
+type aggregateGroup struct {
+	Name       string
+	SelectExpr string
+	GroupExpr  string
+}
+
+type aggregateMetric struct {
+	Name       string
+	SelectExpr string
+}
+
+func buildAggregateGroups(t *Table, raw []any) ([]aggregateGroup, error) {
+	groups := make([]aggregateGroup, 0, len(raw))
+	seen := map[string]bool{}
+	for i, item := range raw {
+		var colName, bucket, alias string
+		switch v := item.(type) {
+		case string:
+			colName = v
+		case map[string]any:
+			colName = strArg(v, "col")
+			bucket = strArg(v, "bucket")
+			alias = strArg(v, "name")
+		default:
+			return nil, errf("group_by[%d]: must be a column name or object", i)
+		}
+		col, err := aggregateColumn(t, colName)
+		if err != nil {
+			return nil, errf("group_by[%d]: %w", i, err)
+		}
+		expr := quote(col.Name)
+		if bucket != "" {
+			if col.Type != "datetime" {
+				return nil, errf("group_by[%d]: bucket requires datetime column, got %s", i, col.Type)
+			}
+			expr, err = bucketExpr(col.Name, bucket)
+			if err != nil {
+				return nil, errf("group_by[%d]: %w", i, err)
+			}
+			if alias == "" {
+				alias = col.Name + "_" + bucket
+			}
+		}
+		if alias == "" {
+			alias = col.Name
+		}
+		if err := validateIdentifier("group alias", alias); err != nil {
+			return nil, errf("group_by[%d]: %w", i, err)
+		}
+		if seen[alias] {
+			return nil, errf("group_by[%d]: duplicate output name %q", i, alias)
+		}
+		seen[alias] = true
+		groups = append(groups, aggregateGroup{
+			Name:       alias,
+			SelectExpr: expr + " AS " + quote(alias),
+			GroupExpr:  expr,
+		})
+	}
+	return groups, nil
+}
+
+func buildAggregateMetrics(t *Table, raw []any) ([]aggregateMetric, error) {
+	if len(raw) == 0 {
+		return nil, errf("metrics is required and must be non-empty")
+	}
+	metrics := make([]aggregateMetric, 0, len(raw))
+	seen := map[string]bool{}
+	for i, item := range raw {
+		obj, ok := item.(map[string]any)
+		if !ok {
+			return nil, errf("metrics[%d]: must be an object", i)
+		}
+		name := strArg(obj, "name")
+		if err := validateIdentifier("metric name", name); err != nil {
+			return nil, errf("metrics[%d]: %w", i, err)
+		}
+		if seen[name] {
+			return nil, errf("metrics[%d]: duplicate output name %q", i, name)
+		}
+		seen[name] = true
+		op := strArg(obj, "op")
+		var expr string
+		switch op {
+		case "count":
+			colName := strArg(obj, "col")
+			if colName == "" {
+				expr = "COUNT(*)"
+			} else {
+				col, err := aggregateColumn(t, colName)
+				if err != nil {
+					return nil, errf("metrics[%d]: %w", i, err)
+				}
+				if boolArg(obj, "distinct") {
+					expr = "COUNT(DISTINCT " + quote(col.Name) + ")"
+				} else {
+					expr = "COUNT(" + quote(col.Name) + ")"
+				}
+			}
+		case "sum", "avg":
+			col, err := aggregateColumn(t, strArg(obj, "col"))
+			if err != nil {
+				return nil, errf("metrics[%d]: %w", i, err)
+			}
+			if col.Type != "number" {
+				return nil, errf("metrics[%d]: op %s requires number column, got %s", i, op, col.Type)
+			}
+			expr = strings.ToUpper(op) + "(" + quote(col.Name) + ")"
+		case "min", "max":
+			col, err := aggregateColumn(t, strArg(obj, "col"))
+			if err != nil {
+				return nil, errf("metrics[%d]: %w", i, err)
+			}
+			expr = strings.ToUpper(op) + "(" + quote(col.Name) + ")"
+		case "avg_ratio":
+			num, err := aggregateColumn(t, strArg(obj, "numerator"))
+			if err != nil {
+				return nil, errf("metrics[%d]: numerator: %w", i, err)
+			}
+			den, err := aggregateColumn(t, strArg(obj, "denominator"))
+			if err != nil {
+				return nil, errf("metrics[%d]: denominator: %w", i, err)
+			}
+			if num.Type != "number" || den.Type != "number" {
+				return nil, errf("metrics[%d]: avg_ratio requires number numerator and denominator", i)
+			}
+			expr = "AVG(CASE WHEN " + quote(den.Name) + " IS NOT NULL AND " + quote(den.Name) + " != 0 THEN " + quote(num.Name) + " / " + quote(den.Name) + " END)"
+		default:
+			return nil, errf("metrics[%d]: unknown op %q", i, op)
+		}
+		metrics = append(metrics, aggregateMetric{
+			Name:       name,
+			SelectExpr: expr + " AS " + quote(name),
+		})
+	}
+	return metrics, nil
+}
+
+func ensureUniqueAggregateOutputs(groups []aggregateGroup, metrics []aggregateMetric) error {
+	seen := map[string]bool{}
+	for _, g := range groups {
+		seen[g.Name] = true
+	}
+	for _, m := range metrics {
+		if seen[m.Name] {
+			return errf("duplicate aggregate output name %q", m.Name)
+		}
+		seen[m.Name] = true
+	}
+	return nil
+}
+
+func aggregateColumn(t *Table, name string) (Column, error) {
+	switch name {
+	case "id":
+		return Column{Name: "id", Type: "number"}, nil
+	case "created_at":
+		return Column{Name: "created_at", Type: "datetime"}, nil
+	case "updated_at":
+		return Column{Name: "updated_at", Type: "datetime"}, nil
+	}
+	if err := validateIdentifier("column", name); err != nil {
+		return Column{}, err
+	}
+	for _, c := range t.Columns {
+		if c.Name == name {
+			return c, nil
+		}
+	}
+	return Column{}, errf("unknown column %q", name)
+}
+
+func bucketExpr(col, bucket string) (string, error) {
+	q := quote(col)
+	switch bucket {
+	case "day":
+		return "strftime('%Y-%m-%d', " + q + ")", nil
+	case "week":
+		return "strftime('%Y-W%W', " + q + ")", nil
+	case "month":
+		return "strftime('%Y-%m', " + q + ")", nil
+	case "year":
+		return "strftime('%Y', " + q + ")", nil
+	}
+	return "", errf("bucket must be day, week, month, or year, got %q", bucket)
+}
+
+func buildAggregateOrderBy(groups []aggregateGroup, metrics []aggregateMetric, raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", nil
+	}
+	parts := strings.Fields(raw)
+	if len(parts) == 0 || len(parts) > 2 {
+		return "", errf("order_by must be 'name' or 'name asc|desc'")
+	}
+	name := parts[0]
+	allowed := map[string]bool{}
+	for _, g := range groups {
+		allowed[g.Name] = true
+	}
+	for _, m := range metrics {
+		allowed[m.Name] = true
+	}
+	if !allowed[name] {
+		return "", errf("order_by: unknown aggregate output %q", name)
+	}
+	dir := "ASC"
+	if len(parts) == 2 {
+		switch strings.ToLower(parts[1]) {
+		case "asc":
+			dir = "ASC"
+		case "desc":
+			dir = "DESC"
+		default:
+			return "", errf("order_by direction must be asc or desc, got %q", parts[1])
+		}
+	}
+	return "ORDER BY " + quote(name) + " " + dir, nil
+}
+
+func scanAggregateRows(rows *sql.Rows) ([]map[string]any, error) {
+	out := []map[string]any{}
+	cols, err := rows.Columns()
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		dest := make([]any, len(cols))
+		ptrs := make([]any, len(cols))
+		for i := range dest {
+			ptrs[i] = &dest[i]
+		}
+		if err := rows.Scan(ptrs...); err != nil {
+			return nil, err
+		}
+		row := map[string]any{}
+		for i, c := range cols {
+			row[c] = normaliseScanValue(dest[i])
+		}
+		out = append(out, row)
+	}
+	return out, rows.Err()
 }
 
 func sqlOp(op string) string {
