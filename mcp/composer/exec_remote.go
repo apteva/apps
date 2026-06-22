@@ -99,7 +99,7 @@ func (e *remoteFFmpegExecutor) Render(
 	if track == nil {
 		args = buildLocalAudioFFmpegArgs(edit, output, localPaths, soundtrackIdx, "./out."+output.Format)
 	} else {
-		args = buildLocalFFmpegArgs(edit, output, localPaths, soundtrackIdx, "./out."+output.Format)
+		args = buildLocalFFmpegArgsWithAudioInfo(edit, output, localPaths, soundtrackIdx, "./out."+output.Format, remoteVisualAudioDefaults(track))
 	}
 	cmd := shellEcho(ffmpegPath(), args)
 
@@ -123,6 +123,17 @@ func (e *remoteFFmpegExecutor) Render(
 		DurationMS:    time.Since(start).Milliseconds(),
 		FFmpegCommand: cmd,
 	}, nil
+}
+
+func remoteVisualAudioDefaults(track *Track) []bool {
+	if track == nil {
+		return nil
+	}
+	out := make([]bool, len(track.Clips))
+	for i, c := range track.Clips {
+		out[i] = clipAssetType(c, "visual") == "video" && visualClipMayUseSourceAudio(c)
+	}
+	return out
 }
 
 // remotePreflight checks the instances app is reachable and the host

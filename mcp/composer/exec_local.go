@@ -82,12 +82,14 @@ func (e *localFFmpegExecutor) Render(
 	// Resolve every clip's asset to a URL. ffmpeg accepts https:// inputs
 	// natively (movflags+frag work); no need to download first.
 	inputs := make([]string, 0, len(visual.Clips)+len(audioClips)+1)
+	visualHasAudio := make([]bool, len(visual.Clips))
 	for i, c := range visual.Clips {
 		url, err := resolveAssetLocal(app, c.Asset.Src)
 		if err != nil {
 			cleanup()
 			return Result{}, fmt.Errorf("visual clip[%d]: resolve %q: %w", i, c.Asset.Src, err)
 		}
+		visualHasAudio[i] = visualClipMayUseSourceAudio(c) && probeMediaHasAudio(url)
 		inputs = append(inputs, url)
 	}
 	for i, c := range audioClips {
@@ -113,7 +115,7 @@ func (e *localFFmpegExecutor) Render(
 	}
 
 	outFile := filepath.Join(scratch, "out."+output.Format)
-	args := buildLocalFFmpegArgs(edit, output, inputs, soundtrackIdx, outFile)
+	args := buildLocalFFmpegArgsWithAudioInfo(edit, output, inputs, soundtrackIdx, outFile, visualHasAudio)
 
 	result, runErr := runLocalFFmpeg(ctx, app, start, scratch, len(inputs), outFile, args)
 	if runErr != nil {
@@ -157,6 +159,10 @@ func runLocalFFmpeg(ctx context.Context, app *sdk.AppCtx, start time.Time, scrat
 // Returns the args list; the caller logs the assembled command for
 // debugging via shellEcho.
 func buildLocalFFmpegArgs(edit *Edit, output Output, inputs []string, soundtrackIdx int, outFile string) []string {
+	return buildLocalFFmpegArgsWithAudioInfo(edit, output, inputs, soundtrackIdx, outFile, nil)
+}
+
+func buildLocalFFmpegArgsWithAudioInfo(edit *Edit, output Output, inputs []string, soundtrackIdx int, outFile string, visualHasAudio []bool) []string {
 	w, h := resolutionWH(output.Resolution, output.Aspect)
 	track := primaryVisualTrack(edit)
 	if track == nil {
@@ -218,9 +224,9 @@ func buildLocalFFmpegArgs(edit *Edit, output Output, inputs []string, soundtrack
 		fmt.Fprintf(&filter, "[v%d];", i)
 
 		// Per-clip audio: trim or silence-pad to clip length.
-		if clipAssetType(c, "visual") == "image" {
-			// Synthesize silent audio for image clips so concat audio
-			// stream count matches.
+		if !visualClipUsesSourceAudio(c, visualHasAudioAt(visualHasAudio, i, c)) {
+			// Synthesize silent audio for image clips, muted clips, and
+			// no-audio videos so concat audio stream count matches.
 			fmt.Fprintf(&filter, "anullsrc=channel_layout=stereo:sample_rate=44100,atrim=duration=%s[a%d];", trimFloat(clipDuration(c)), i)
 		} else {
 			fmt.Fprintf(&filter, "[%d:a]apad,atrim=duration=%s,asetpts=PTS-STARTPTS[a%d];", i, trimFloat(clipDuration(c)), i)
@@ -285,6 +291,60 @@ func buildLocalFFmpegArgs(edit *Edit, output Output, inputs []string, soundtrack
 		outFile,
 	)
 	return args
+}
+
+func visualHasAudioAt(values []bool, i int, c Clip) bool {
+	if i >= 0 && i < len(values) {
+		return values[i]
+	}
+	return clipAssetType(c, "visual") == "video"
+}
+
+func visualClipUsesSourceAudio(c Clip, hasAudio bool) bool {
+	if !hasAudio || clipAssetType(c, "visual") != "video" {
+		return false
+	}
+	return visualClipMayUseSourceAudio(c)
+}
+
+func visualClipMayUseSourceAudio(c Clip) bool {
+	switch strings.ToLower(strings.TrimSpace(c.SourceAudio)) {
+	case "mute":
+		return false
+	case "keep":
+		return true
+	}
+	if c.AI != nil && boolOption(c.AI.Options, "no_sound") {
+		return false
+	}
+	return true
+}
+
+func boolOption(options map[string]any, key string) bool {
+	if options == nil {
+		return false
+	}
+	v, ok := options[key]
+	if !ok {
+		return false
+	}
+	switch x := v.(type) {
+	case bool:
+		return x
+	case string:
+		switch strings.ToLower(strings.TrimSpace(x)) {
+		case "1", "true", "yes", "on":
+			return true
+		default:
+			return false
+		}
+	case float64:
+		return x != 0
+	case int:
+		return x != 0
+	default:
+		return false
+	}
 }
 
 func buildLocalAudioFFmpegArgs(edit *Edit, output Output, inputs []string, soundtrackIdx int, outFile string) []string {

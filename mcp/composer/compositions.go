@@ -49,6 +49,7 @@ type Clip struct {
 	EstimatedLength float64     `json:"estimated_length,omitempty"`
 	ActualLength    float64     `json:"actual_length,omitempty"`
 	Volume          float64     `json:"volume,omitempty"`
+	SourceAudio     string      `json:"source_audio,omitempty"` // auto|keep|mute
 	AfterClipID     string      `json:"after_clip_id,omitempty"`
 	GapSeconds      float64     `json:"gap_seconds,omitempty"`
 	Timing          *Timing     `json:"timing,omitempty"`
@@ -198,6 +199,11 @@ func validateEdit(e *Edit) error {
 			}
 			if c.Volume < 0 || c.Volume > 1 {
 				return fmt.Errorf("track[%d].clip[%d]: volume must be 0..1", ti, i)
+			}
+			switch strings.ToLower(strings.TrimSpace(c.SourceAudio)) {
+			case "", "auto", "keep", "mute":
+			default:
+				return fmt.Errorf("track[%d].clip[%d]: source_audio must be auto|keep|mute", ti, i)
 			}
 			if c.GapSeconds < 0 {
 				return fmt.Errorf("track[%d].clip[%d]: gap_seconds must be >= 0", ti, i)

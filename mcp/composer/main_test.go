@@ -225,6 +225,46 @@ func TestBuildLocalFFmpegArgs_FadeTransition(t *testing.T) {
 	}
 }
 
+func TestBuildLocalFFmpegArgs_SilentVideoFallback(t *testing.T) {
+	e, _ := parseEditJSON(`{"timeline":{"tracks":[{"clips":[
+		{"asset":{"src":"https://silent.mp4","type":"video"},"start":0,"length":3}
+	]}]}}`)
+	args := buildLocalFFmpegArgsWithAudioInfo(e, defaultOutput(), []string{"https://silent.mp4"}, -1, "out.mp4", []bool{false})
+	cmd := strings.Join(args, " ")
+	if strings.Contains(cmd, "[0:a]") {
+		t.Fatalf("no-audio video should not reference missing audio stream: %s", cmd)
+	}
+	if !strings.Contains(cmd, "anullsrc=channel_layout=stereo") || !strings.Contains(cmd, "atrim=duration=3") {
+		t.Fatalf("no-audio video should synthesize silent audio: %s", cmd)
+	}
+}
+
+func TestBuildLocalFFmpegArgs_MutesNoSoundAIVideo(t *testing.T) {
+	e, _ := parseEditJSON(`{"timeline":{"tracks":[{"clips":[
+		{"asset":{"src":"https://video.mp4","type":"video"},"start":0,"length":3,
+		 "ai":{"media_kind":"video","prompt":"silent clip","options":{"no_sound":true}}}
+	]}]}}`)
+	args := buildLocalFFmpegArgsWithAudioInfo(e, defaultOutput(), []string{"https://video.mp4"}, -1, "out.mp4", []bool{true})
+	cmd := strings.Join(args, " ")
+	if strings.Contains(cmd, "[0:a]") {
+		t.Fatalf("no_sound AI video should ignore source audio: %s", cmd)
+	}
+	if !strings.Contains(cmd, "anullsrc=channel_layout=stereo") {
+		t.Fatalf("no_sound AI video should synthesize silent audio: %s", cmd)
+	}
+}
+
+func TestBuildLocalFFmpegArgs_KeepsVideoAudioWhenPresent(t *testing.T) {
+	e, _ := parseEditJSON(`{"timeline":{"tracks":[{"clips":[
+		{"asset":{"src":"https://video.mp4","type":"video"},"start":0,"length":3,"source_audio":"keep"}
+	]}]}}`)
+	args := buildLocalFFmpegArgsWithAudioInfo(e, defaultOutput(), []string{"https://video.mp4"}, -1, "out.mp4", []bool{true})
+	cmd := strings.Join(args, " ")
+	if !strings.Contains(cmd, "[0:a]apad,atrim=duration=3") {
+		t.Fatalf("video with source audio should keep source audio: %s", cmd)
+	}
+}
+
 func TestBuildLocalFFmpegArgs_TextOverlay(t *testing.T) {
 	e, _ := parseEditJSON(`{"timeline":{"tracks":[{"clips":[
 		{"asset":{"src":"https://a","type":"video"},"start":0,"length":3,"text":{"body":"Hello: world","position":"top","font_size":40}}

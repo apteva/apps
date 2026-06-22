@@ -19,7 +19,7 @@ func (a *App) MCPTools() []sdk.Tool {
 	return []sdk.Tool{
 		{
 			Name:        "composition_create",
-			Description: "Create a composition. Args: name?, tracks (array of {type?: visual|audio, clips:[{uid?,asset:{type,src,provider?,kind?,request?},ai?,start,length|duration,volume?,transition?,text?}]}), soundtrack? ({src,volume?,ai?}), output? ({format: mp4|mp3|wav|m4a|aac,resolution,aspect,fps}). Supports one visual track plus timed audio tracks, or audio-only tracks for audio formats. Returns {id, duration_seconds}.",
+			Description: "Create a composition. Args: name?, tracks (array of {type?: visual|audio, clips:[{uid?,asset:{type,src,provider?,kind?,request?},ai?,start,length|duration,volume?,source_audio?:auto|keep|mute,transition?,text?}]}), soundtrack? ({src,volume?,ai?}), output? ({format: mp4|mp3|wav|m4a|aac,resolution,aspect,fps}). Supports one visual track plus timed audio tracks, or audio-only tracks for audio formats. Returns {id, duration_seconds}.",
 			InputSchema: schemaObject(map[string]any{
 				"name":       map[string]any{"type": "string"},
 				"tracks":     map[string]any{"type": "array"},

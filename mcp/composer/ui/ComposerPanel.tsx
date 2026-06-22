@@ -1,4 +1,4 @@
-// ComposerPanel v0.3.25 - timeline editor with storage and Media Studio AI assets.
+// ComposerPanel v0.3.26 - timeline editor with storage and Media Studio AI assets.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
@@ -118,6 +118,7 @@ interface ClipDraft {
   asset: { type: AssetType; src: string };
   start: number;
   length: number;
+  source_audio?: "auto" | "keep" | "mute";
   duration_mode?: DurationMode;
   estimated_length?: number;
   actual_length?: number;
@@ -376,6 +377,7 @@ function parseComposition(c: Composition | null): DraftState {
         },
         start: Number(clip.start) || 0,
         length: Number(clip.length) || 1,
+        source_audio: clip.source_audio,
         duration_mode: clip.duration_mode || defaultDurationMode(clip.ai?.media_kind),
         estimated_length: Number(clip.estimated_length || clip.ai?.estimated_duration_seconds || 0) || undefined,
         actual_length: Number(clip.actual_length || clip.ai?.actual_duration_seconds || 0) || undefined,
@@ -451,6 +453,7 @@ function draftToBody(draft: DraftState): Record<string, unknown> {
     };
     if (clip.section_id) out.section_id = clip.section_id;
     if (clip.group_id) out.group_id = clip.group_id;
+    if (clip.source_audio) out.source_audio = clip.source_audio;
     if (clip.ai) out.ai = clip.ai;
     if (clip.duration_mode) out.duration_mode = clip.duration_mode;
     if (clip.estimated_length) out.estimated_length = clip.estimated_length;
@@ -2140,6 +2143,15 @@ function ClipEditorModal({
               <Field label="Length">
                 <input type="number" min={0.1} step={0.1} value={visualClip.length} onChange={(e) => onVisualClip(visualClip.id, { length: Number(e.target.value) })} className={field} />
               </Field>
+              {visualClip.asset.type === "video" && (
+                <Field label="Source audio">
+                  <select value={visualClip.source_audio || "auto"} onChange={(e) => onVisualClip(visualClip.id, { source_audio: e.target.value as ClipDraft["source_audio"] })} className={field}>
+                    <option value="auto">Auto</option>
+                    <option value="keep">Keep</option>
+                    <option value="mute">Mute</option>
+                  </select>
+                </Field>
+              )}
               {visualClip.ai && (
                 <Field label="Duration mode">
                   <select value={visualClip.duration_mode || defaultDurationMode(visualClip.ai.media_kind)} onChange={(e) => onVisualClip(visualClip.id, { duration_mode: e.target.value as DurationMode })} className={field}>
