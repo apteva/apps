@@ -425,12 +425,14 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
 
   const loadBindings = useCallback(async () => {
     try {
-      const res = await fetch(`${API}/bindings`, { credentials: "same-origin" });
+      const res = await fetch(`${API}/bindings?project_id=${encodeURIComponent(projectId)}`, {
+        credentials: "same-origin",
+      });
       if (!res.ok) return;
       const data = (await res.json()) as BindingsStatus;
       setBindings(data);
     } catch {}
-  }, []);
+  }, [projectId]);
 
   const loadGenerations = useCallback(async () => {
     try {
@@ -453,7 +455,9 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
 
   const loadAvatars = useCallback(async () => {
     try {
-      const res = await fetch(`${API}/avatars`, { credentials: "same-origin" });
+      const res = await fetch(`${API}/avatars?project_id=${encodeURIComponent(projectId)}`, {
+        credentials: "same-origin",
+      });
       if (!res.ok) return;
       const data = await res.json();
       const list: AvatarEntry[] = Array.isArray(data.avatars) ? data.avatars : [];
@@ -462,7 +466,7 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
         setSelectedAvatar(list[0].id);
       }
     } catch {}
-  }, [selectedAvatar]);
+  }, [projectId, selectedAvatar]);
 
   const loadAvatarCreateJobs = useCallback(async () => {
     try {
@@ -481,7 +485,10 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
 
   const loadAvatarCapabilities = useCallback(async () => {
     try {
-      const res = await fetch(`${API}/avatar-capabilities`, { credentials: "same-origin" });
+      const res = await fetch(
+        `${API}/avatar-capabilities?project_id=${encodeURIComponent(projectId)}`,
+        { credentials: "same-origin" },
+      );
       if (!res.ok) return;
       const data = await res.json();
       setAvatarCaps({
@@ -491,7 +498,7 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
         notes: data.notes || "",
       });
     } catch {}
-  }, []);
+  }, [projectId]);
 
   useEffect(() => {
     loadBindings();
@@ -612,7 +619,10 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
     if (activeKind === "avatar") {
       loadAvatars();
     }
-    fetch(`${API}/voices?kind=${encodeURIComponent(activeKind)}`, { credentials: "same-origin" })
+    fetch(
+      `${API}/voices?project_id=${encodeURIComponent(projectId)}&kind=${encodeURIComponent(activeKind)}`,
+      { credentials: "same-origin" },
+    )
       .then((r) => (r.ok ? r.json() : null))
       .then((data) => {
         if (cancelled || !data) return;
@@ -627,7 +637,7 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
     return () => {
       cancelled = true;
     };
-  }, [activeKind, bindings, loadAvatars]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [activeKind, bindings, loadAvatars, projectId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Live-load the model list whenever the active kind or the bound
   // provider for that kind changes. The sidecar caches per-(provider,
@@ -641,7 +651,10 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
       return;
     }
     let cancelled = false;
-    fetch(`${API}/models?kind=${activeKind}`, { credentials: "same-origin" })
+    fetch(
+      `${API}/models?project_id=${encodeURIComponent(projectId)}&kind=${encodeURIComponent(activeKind)}`,
+      { credentials: "same-origin" },
+    )
       .then((r) => r.ok ? r.json() : null)
       .then((data) => {
         if (cancelled || !data) return;
@@ -685,7 +698,10 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
         if (!cancelled) setLiveModels(null);
       });
     if (activeKind === "image") {
-      fetch(`${API}/models?kind=image&capability=image.edit`, { credentials: "same-origin" })
+      fetch(
+        `${API}/models?project_id=${encodeURIComponent(projectId)}&kind=image&capability=image.edit`,
+        { credentials: "same-origin" },
+      )
         .then((r) => r.ok ? r.json() : null)
         .then((data) => {
           if (cancelled || !data) return;
@@ -704,7 +720,7 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
     return () => {
       cancelled = true;
     };
-  }, [activeKind, bindings]);
+  }, [activeKind, bindings, projectId]);
 
   // Live refresh — dispatcher fires media.generated on every success.
   // Refresh when the event's kind matches the current tab; otherwise
