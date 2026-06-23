@@ -47,16 +47,17 @@ requires:
       hint: |
         Optional — local instance always available. Bind a VPS
         integration to provision remote instances through the generic
-        Instances interface. Hetzner is the first complete adapter;
-        the other compatible provider integrations are exposed here
-        and fail clearly until their provider adapters are implemented.
+        Instances interface. Hetzner and DigitalOcean have provisioning
+        and catalog adapters; the other compatible provider integrations
+        are exposed here and fail clearly until their provider adapters
+        are implemented.
 
 provides:
   http_routes:
     - prefix: /
   mcp_tools:
     - name: instance_create
-      description: Provision a new instance via the bound VPS provider. Compatible bindings include Hetzner, DigitalOcean, Vultr, AWS EC2, Scaleway, Huawei Cloud, Linode, and OVHcloud; Hetzner provisioning is implemented today.
+      description: Provision a new instance via the bound VPS provider. Compatible bindings include Hetzner, DigitalOcean, Vultr, AWS EC2, Scaleway, Huawei Cloud, Linode, and OVHcloud; Hetzner and DigitalOcean provisioning are implemented today.
     - name: instance_get
       description: Fetch one instance by id (0 for local).
     - name: instance_list

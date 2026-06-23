@@ -64,13 +64,14 @@ requires:
       hint: |
         Optional — local instance always available. Bind a VPS integration
         to provision remote instances through the generic Instances interface.
-        Hetzner is the first complete adapter; other compatible provider
-        bindings fail clearly until their adapters are implemented.
+        Hetzner and DigitalOcean have provisioning and catalog adapters;
+        other compatible provider bindings fail clearly until their adapters
+        are implemented.
 provides:
   http_routes:
     - prefix: /
   mcp_tools:
-    - { name: instance_create,       description: "Provision a new instance via the bound VPS provider. Compatible bindings include Hetzner, DigitalOcean, Vultr, AWS EC2, Scaleway, Huawei Cloud, Linode, and OVHcloud; Hetzner provisioning is implemented today. Args: name, provider?, region?, size?, image?, tags?." }
+    - { name: instance_create,       description: "Provision a new instance via the bound VPS provider. Compatible bindings include Hetzner, DigitalOcean, Vultr, AWS EC2, Scaleway, Huawei Cloud, Linode, and OVHcloud; Hetzner and DigitalOcean provisioning are implemented today. Args: name, provider?, region?, size?, image?, tags?." }
     - { name: instance_get,          description: "Fetch one instance by id." }
     - { name: instance_list,         description: "List instances. Args: provider? (filter), status? (filter)." }
     - { name: instance_destroy,      description: "Terminate the instance (refused for local id 0). Args: id." }
@@ -200,6 +201,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	// because destroy must only target an upstream id recorded from
 	// the original create response.
 	go reconcileHetznerProvisioning(ctx)
+	go reconcileDigitalOceanProvisioning(ctx)
 
 	return nil
 }

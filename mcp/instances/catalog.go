@@ -39,6 +39,8 @@ type ServerType struct {
 	Deprecated      bool    `json:"deprecated,omitempty"`
 	MonthlyPriceEUR float64 `json:"monthly_price_eur,omitempty"`
 	HourlyPriceEUR  float64 `json:"hourly_price_eur,omitempty"`
+	MonthlyPriceUSD float64 `json:"monthly_price_usd,omitempty"`
+	HourlyPriceUSD  float64 `json:"hourly_price_usd,omitempty"`
 	// AvailableIn lists location names where this type can be
 	// provisioned. Hetzner ships some types only in newer regions.
 	AvailableIn []string `json:"available_in,omitempty"`
@@ -75,6 +77,8 @@ func listServerTypes(ctx *sdk.AppCtx, provider string) ([]ServerType, error) {
 	switch resolved {
 	case "hetzner":
 		return hetznerListServerTypes(ctx)
+	case "digitalocean":
+		return digitalOceanListServerTypes(ctx)
 	default:
 		return nil, providerAdapterUnavailable(resolved, "server type catalog")
 	}
@@ -88,6 +92,8 @@ func listLocations(ctx *sdk.AppCtx, provider string) ([]Location, error) {
 	switch resolved {
 	case "hetzner":
 		return hetznerListLocations(ctx)
+	case "digitalocean":
+		return digitalOceanListLocations(ctx)
 	default:
 		return nil, providerAdapterUnavailable(resolved, "location catalog")
 	}
@@ -101,6 +107,8 @@ func listImages(ctx *sdk.AppCtx, provider string) ([]Image, error) {
 	switch resolved {
 	case "hetzner":
 		return hetznerListImages(ctx)
+	case "digitalocean":
+		return digitalOceanListImages(ctx)
 	default:
 		return nil, providerAdapterUnavailable(resolved, "image catalog")
 	}

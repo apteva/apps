@@ -580,12 +580,12 @@ function UpgradeDialog({
         const allTypes = ((j.server_types || []) as ServerTypeWire[])
           .filter((t) => !t.deprecated)
           .filter((t) => !inst.region || !t.available_in?.length || t.available_in.includes(inst.region))
-          .sort((a, b) => (a.monthly_price_eur ?? 0) - (b.monthly_price_eur ?? 0));
+          .sort((a, b) => catalogMonthlyPrice(a) - catalogMonthlyPrice(b));
         const current = allTypes.find((t) => t.name === inst.size);
         const types = allTypes.filter((t) => t.name !== inst.size);
         const upgrades = current
           ? types.filter((t) =>
-              (t.monthly_price_eur ?? 0) >= (current.monthly_price_eur ?? 0) &&
+              catalogMonthlyPrice(t) >= catalogMonthlyPrice(current) &&
               (t.cores > current.cores || t.memory_gb > current.memory_gb || t.disk_gb > current.disk_gb)
             )
           : types;
@@ -600,14 +600,13 @@ function UpgradeDialog({
   }, [inst.region, inst.size, withParams]);
 
   const selected = serverTypes.find((t) => t.name === size);
-  const formatEUR = (n?: number) => n ? `€${n.toFixed(2)}/mo` : "—";
   const typeLabel = (t: ServerTypeWire) => {
     const specs = [
       t.cores ? `${t.cores} ${t.cpu_type === "dedicated" ? "dedicated vCPU" : "vCPU"}` : "",
       t.memory_gb ? `${t.memory_gb} GB RAM` : "",
       t.disk_gb ? `${t.disk_gb} GB disk` : "",
     ].filter(Boolean).join(", ");
-    return `${t.name} · ${formatEUR(t.monthly_price_eur)}${specs ? ` · ${specs}` : ""}`;
+    return `${t.name} · ${formatCatalogMonthlyPrice(t) || "—"}${specs ? ` · ${specs}` : ""}`;
   };
 
   return (
@@ -653,7 +652,7 @@ function UpgradeDialog({
             >
               <div className="text-text-dim uppercase text-[10px] tracking-wider mb-1">Target</div>
               <div className="text-text font-mono">{selected?.name || "—"}</div>
-              <div className="text-text-dim mt-1">{formatEUR(selected?.monthly_price_eur)}</div>
+              <div className="text-text-dim mt-1">{selected ? (formatCatalogMonthlyPrice(selected) || "—") : "—"}</div>
             </div>
           </div>
 
@@ -1031,6 +1030,8 @@ interface ServerTypeWire {
   deprecated?: boolean;
   monthly_price_eur?: number;
   hourly_price_eur?: number;
+  monthly_price_usd?: number;
+  hourly_price_usd?: number;
   available_in?: string[];
 }
 
@@ -1048,6 +1049,17 @@ interface ImageWire {
   os_flavor?: string;
   os_version?: string;
   architecture?: string;
+}
+
+function catalogMonthlyPrice(t?: ServerTypeWire): number {
+  return t?.monthly_price_eur ?? t?.monthly_price_usd ?? 0;
+}
+
+function formatCatalogMonthlyPrice(t?: ServerTypeWire): string {
+  if (!t) return "";
+  if (t.monthly_price_eur) return `€${t.monthly_price_eur.toFixed(2)}/mo`;
+  if (t.monthly_price_usd) return `$${t.monthly_price_usd.toFixed(2)}/mo`;
+  return "";
 }
 
 function CreateDialog({
@@ -1105,7 +1117,7 @@ function CreateDialog({
         }
         // Stable, predictable orderings. Price for sizes (cheapest
         // first), alphabetical for locations + images.
-        types.sort((a, b) => (a.monthly_price_eur ?? 0) - (b.monthly_price_eur ?? 0));
+        types.sort((a, b) => catalogMonthlyPrice(a) - catalogMonthlyPrice(b));
         locs.sort((a, b) => a.name.localeCompare(b.name));
         imgs.sort((a, b) => a.name.localeCompare(b.name));
         setServerTypes(types);
@@ -1157,7 +1169,7 @@ function CreateDialog({
     if (t.disk_gb) parts.push(`${t.disk_gb} GB disk`);
     if (t.architecture && t.architecture !== "x86") parts.push(t.architecture.toUpperCase());
     const specs = parts.join(", ");
-    const price = t.monthly_price_eur ? `€${t.monthly_price_eur.toFixed(2)}/mo` : "";
+    const price = formatCatalogMonthlyPrice(t);
     return [t.name, price && `(${price}`, specs && (price ? `, ${specs})` : `(${specs})`)]
       .filter(Boolean)
       .join(" ");
