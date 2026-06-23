@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: podcast
 display_name: Podcast
-version: 0.1.4
+version: 0.1.5
 description: |
   Podcast hosting + management for Apteva. Owns shows, episodes, and
   the RSS feed; serves the public feed XML and an IAB-style download
@@ -57,12 +57,12 @@ provides:
   http_routes:
     - prefix: /
   mcp_tools:
-    - { name: show_create,      description: "Create a podcast show. Args: title (req), description? , author? , owner_email? , language? (default 'en'), category? (iTunes category), explicit? (default false), link? (website URL), podcast_type? ('episodic'|'serial', default 'episodic'), image_file_id? (storage file id for cover art), hostname? (custom feed host), slug? (feed URL slug; derived from title when omitted), project_id? (scope=global)." }
+    - { name: show_create,      description: "Create a podcast show. Args: title (req), description? , author? , owner_email? , language? (default 'en'), category? (iTunes category), explicit? (default false), link? (website URL), podcast_type? ('episodic'|'serial', default 'episodic'), image_file_id? (storage file id for cover art), hostname? (custom feed host), slug? (feed URL slug; derived from title when omitted), podcast_guid? (stable show GUID; generated when omitted), project_id? (scope=global)." }
     - { name: show_update,      description: "Update a show by id. Same arg shape as show_create; only provided fields change." }
     - { name: show_get,         description: "Fetch one show by id, including its feed URL. Args: id." }
     - { name: show_list,        description: "List shows. Args: project_id?, limit? (default 100), offset? (default 0)." }
     - { name: show_delete,      description: "Delete a show and all its episodes. Args: id." }
-    - { name: episode_create,   description: "Create an episode (status starts 'draft'). Args: show_id (req), title (req), description? (show notes HTML), season_number? , episode_number? , episode_type? ('full'|'trailer'|'bonus', default 'full'), audio_file_id? (storage file id), image_file_id? , guid? (stable id; generated when omitted)." }
+    - { name: episode_create,   description: "Create an episode (status starts 'draft'). Args: show_id (req), title (req), description? (show notes HTML), season_number? , episode_number? , episode_type? ('full'|'trailer'|'bonus', default 'full'), audio_file_id? (storage file id), image_file_id? , transcript_file_id? , guid? (stable id; generated when omitted)." }
     - { name: episode_update,   description: "Update an episode by id. Same arg shape as episode_create; only provided fields change." }
     - { name: episode_get,      description: "Fetch one episode by id. Args: id." }
     - { name: episode_list,     description: "List episodes. Args: show_id? (filter), status? ('draft'|'scheduled'|'published'), limit? (default 100), offset? (default 0)." }

@@ -34,6 +34,7 @@ type Show struct {
 	ImageFileID string `json:"image_file_id"`
 	Copyright   string `json:"copyright"`
 	Hostname    string `json:"hostname"`
+	PodcastGUID string `json:"podcast_guid"`
 	ProjectID   string `json:"project_id"`
 	CreatedAt   string `json:"created_at"`
 	UpdatedAt   string `json:"updated_at"`
@@ -68,14 +69,14 @@ type Episode struct {
 
 const showCols = `id, slug, title, description, author, owner_email, language,
 	category, explicit, link, podcast_type, image_file_id, copyright,
-	hostname, project_id, created_at, updated_at`
+	hostname, podcast_guid, project_id, created_at, updated_at`
 
 func scanShow(row interface{ Scan(...any) error }) (*Show, error) {
 	var s Show
 	err := row.Scan(&s.ID, &s.Slug, &s.Title, &s.Description, &s.Author,
 		&s.OwnerEmail, &s.Language, &s.Category, &s.Explicit, &s.Link,
 		&s.PodcastType, &s.ImageFileID, &s.Copyright, &s.Hostname,
-		&s.ProjectID, &s.CreatedAt, &s.UpdatedAt)
+		&s.PodcastGUID, &s.ProjectID, &s.CreatedAt, &s.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, errNotFound
 	}
@@ -102,15 +103,19 @@ func dbInsertShow(db *sql.DB, args map[string]any, projectID string) (*Show, err
 	if podcastType == "" {
 		podcastType = "episodic"
 	}
+	podcastGUID := strings.TrimSpace(strArg(args, "podcast_guid"))
+	if podcastGUID == "" {
+		podcastGUID = uuid.NewString()
+	}
 	res, err := db.Exec(`INSERT INTO shows
-		(slug, title, description, author, owner_email, language, category,
-		 explicit, link, podcast_type, image_file_id, copyright, hostname, project_id)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
+			(slug, title, description, author, owner_email, language, category,
+			 explicit, link, podcast_type, image_file_id, copyright, hostname, podcast_guid, project_id)
+			VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`,
 		slug, title, strArg(args, "description"), strArg(args, "author"),
 		strArg(args, "owner_email"), language, strArg(args, "category"),
 		boolArg(args, "explicit"), strArg(args, "link"), podcastType,
 		strArg(args, "image_file_id"), strArg(args, "copyright"),
-		strings.TrimSpace(strArg(args, "hostname")), projectID)
+		strings.TrimSpace(strArg(args, "hostname")), podcastGUID, projectID)
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE") {
 			return nil, fmt.Errorf("a show with slug %q already exists in this scope", slug)
@@ -141,6 +146,7 @@ func dbUpdateShow(db *sql.DB, id int64, args map[string]any) (*Show, error) {
 	str("copyright", "copyright")
 	str("slug", "slug")
 	str("hostname", "hostname")
+	str("podcast_guid", "podcast_guid")
 	if _, ok := args["explicit"]; ok {
 		sets = append(sets, "explicit=?")
 		vals = append(vals, boolArg(args, "explicit"))
@@ -269,12 +275,13 @@ func dbInsertEpisode(db *sql.DB, args map[string]any) (*Episode, error) {
 		epType = "full"
 	}
 	res, err := db.Exec(`INSERT INTO episodes
-		(show_id, guid, title, description, season_number, episode_number,
-		 episode_type, audio_file_id, image_file_id)
-		VALUES (?,?,?,?,?,?,?,?,?)`,
+			(show_id, guid, title, description, season_number, episode_number,
+			 episode_type, audio_file_id, image_file_id, transcript_file_id)
+			VALUES (?,?,?,?,?,?,?,?,?,?)`,
 		showID, guid, title, strArg(args, "description"),
 		nullableInt(args, "season_number"), nullableInt(args, "episode_number"),
-		epType, strArg(args, "audio_file_id"), strArg(args, "image_file_id"))
+		epType, strArg(args, "audio_file_id"), strArg(args, "image_file_id"),
+		strArg(args, "transcript_file_id"))
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE") {
 			return nil, fmt.Errorf("an episode with guid %q already exists", guid)
@@ -297,6 +304,7 @@ func dbUpdateEpisode(db *sql.DB, id int64, args map[string]any) (*Episode, error
 	str("description", "description")
 	str("episode_type", "episode_type")
 	str("image_file_id", "image_file_id")
+	str("transcript_file_id", "transcript_file_id")
 	for _, key := range []string{"season_number", "episode_number"} {
 		if _, ok := args[key]; ok {
 			sets = append(sets, key+"=?")

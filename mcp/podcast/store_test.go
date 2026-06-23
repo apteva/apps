@@ -5,6 +5,7 @@ import (
 	"encoding/xml"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -25,12 +26,19 @@ func freshDB(t *testing.T) *sql.DB {
 	db.SetMaxOpenConns(1)
 	t.Cleanup(func() { db.Close() })
 	wd, _ := os.Getwd()
-	schema, err := os.ReadFile(filepath.Join(wd, "migrations", "001_init.sql"))
+	matches, err := filepath.Glob(filepath.Join(wd, "migrations", "*.sql"))
 	if err != nil {
-		t.Fatalf("read schema: %v", err)
+		t.Fatalf("list migrations: %v", err)
 	}
-	if _, err := db.Exec(string(schema)); err != nil {
-		t.Fatalf("apply schema: %v", err)
+	sort.Strings(matches)
+	for _, name := range matches {
+		schema, err := os.ReadFile(name)
+		if err != nil {
+			t.Fatalf("read migration %s: %v", name, err)
+		}
+		if _, err := db.Exec(string(schema)); err != nil {
+			t.Fatalf("apply migration %s: %v", name, err)
+		}
 	}
 	return db
 }
@@ -214,13 +222,19 @@ func TestRenderFeed(t *testing.T) {
 	wants := []string{
 		`<rss version="2.0"`,
 		`xmlns:itunes=`,
+		`xmlns:atom=`,
+		`xmlns:podcast=`,
 		`<title>Render Test</title>`,
+		`<atom:link href="https://feeds.example.com/feed/render-test.xml" rel="self" type="application/rss+xml"></atom:link>`,
 		`<itunes:author>Marco</itunes:author>`,
 		`<itunes:email>marco@example.com</itunes:email>`,
+		`<podcast:locked owner="marco@example.com">no</podcast:locked>`,
+		`<podcast:guid>` + show.PodcastGUID + `</podcast:guid>`,
 		// Enclosure points at this sidecar's tracking redirect, not the raw CDN URL.
-		`/e/` + ep.GUID + `"`,
+		`/e/` + ep.GUID + `/first-episode.mp3"`,
 		`length="5500000"`,
 		`<itunes:duration>1200</itunes:duration>`,
+		`<itunes:explicit>false</itunes:explicit>`,
 		`<guid isPermaLink="false">` + ep.GUID + `</guid>`,
 	}
 	for _, w := range wants {

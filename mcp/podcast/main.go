@@ -1,4 +1,4 @@
-// Apteva Podcast v0.1.4 — podcast hosting + management.
+// Apteva Podcast v0.1.5 — podcast hosting + management.
 //
 // This app owns shows, episodes and the RSS feed. It does NOT own
 // audio bytes (storage), audio probing/transcripts (media), download
@@ -11,8 +11,9 @@
 //	/api/shows[/...]      panel + agent REST mirror      (auth)
 //	/api/episodes[/...]   panel + agent REST mirror      (auth)
 //	/feed/{slug}.xml      public RSS 2.0 + iTunes feed   (NoAuth)
-//	/e/{guid}             download tracking redirect     (NoAuth)
+//	/e/{guid}/{file}      download tracking redirect     (NoAuth)
 //	/art/{kind}/{id}      cover-art passthrough          (NoAuth)
+//	/transcript/episode/{id} transcript passthrough      (NoAuth)
 //
 // File map:
 //
@@ -45,7 +46,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: podcast
 display_name: Podcast
-version: 0.1.4
+version: 0.1.5
 description: |
   Podcast hosting + management for Apteva. Owns shows, episodes and the
   RSS feed; composes storage (audio), media (probe + transcripts),
@@ -185,13 +186,16 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		// Public RSS feed — podcast clients carry no APTEVA_APP_TOKEN.
 		{Pattern: "/feed/", Handler: a.handlePublicFeed, NoAuth: true},
 
-		// Public download tracking redirect: log the hit, 302 to the
-		// storage enclosure URL. Reachable by every podcast player.
+		// Public download tracking redirect: log the hit, then redirect
+		// to the storage enclosure URL. Reachable by every podcast player.
 		{Pattern: "/e/", Handler: a.handleDownloadRedirect, NoAuth: true},
 
 		// Public cover-art passthrough: resolves a storage file id to
 		// a URL so <itunes:image> can carry an absolute href.
 		{Pattern: "/art/", Handler: a.handleArt, NoAuth: true},
+
+		// Public transcript passthrough for <podcast:transcript>.
+		{Pattern: "/transcript/", Handler: a.handleTranscript, NoAuth: true},
 	}
 }
 
@@ -206,13 +210,13 @@ func (a *App) MCPTools() []sdk.Tool {
 		// ── shows ──
 		{
 			Name:        "show_create",
-			Description: "Create a podcast show. Args: title (req), description?, author?, owner_email?, language? (default 'en'), category?, explicit? (default false), link?, podcast_type? ('episodic'|'serial'), image_file_id?, hostname?, slug?, project_id? (scope=global).",
+			Description: "Create a podcast show. Args: title (req), description?, author?, owner_email?, language? (default 'en'), category?, explicit? (default false), link?, podcast_type? ('episodic'|'serial'), image_file_id?, hostname?, slug?, podcast_guid?, project_id? (scope=global).",
 			InputSchema: schemaObject(map[string]any{
 				"title": str, "description": str, "author": str,
 				"owner_email": str, "language": str, "category": str,
 				"explicit": boolean, "link": str, "podcast_type": str,
 				"image_file_id": str, "hostname": str, "slug": str,
-				"project_id": str,
+				"podcast_guid": str, "project_id": str,
 			}, []string{"title"}),
 			Handler: a.toolShowCreate,
 		},
@@ -224,7 +228,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"author": str, "owner_email": str, "language": str,
 				"category": str, "explicit": boolean, "link": str,
 				"podcast_type": str, "image_file_id": str,
-				"hostname": str, "slug": str,
+				"hostname": str, "slug": str, "podcast_guid": str,
 			}, []string{"id"}),
 			Handler: a.toolShowUpdate,
 		},
@@ -252,12 +256,12 @@ func (a *App) MCPTools() []sdk.Tool {
 		// ── episodes ──
 		{
 			Name:        "episode_create",
-			Description: "Create an episode (status starts 'draft'). Args: show_id (req), title (req), description? (show notes HTML), season_number?, episode_number?, episode_type? ('full'|'trailer'|'bonus', default 'full'), audio_file_id?, image_file_id?, guid?.",
+			Description: "Create an episode (status starts 'draft'). Args: show_id (req), title (req), description? (show notes HTML), season_number?, episode_number?, episode_type? ('full'|'trailer'|'bonus', default 'full'), audio_file_id?, image_file_id?, transcript_file_id?, guid?.",
 			InputSchema: schemaObject(map[string]any{
 				"show_id": integer, "title": str, "description": str,
 				"season_number": integer, "episode_number": integer,
 				"episode_type": str, "audio_file_id": str,
-				"image_file_id": str, "guid": str,
+				"image_file_id": str, "transcript_file_id": str, "guid": str,
 			}, []string{"show_id", "title"}),
 			Handler: a.toolEpisodeCreate,
 		},
@@ -267,7 +271,7 @@ func (a *App) MCPTools() []sdk.Tool {
 			InputSchema: schemaObject(map[string]any{
 				"id": integer, "title": str, "description": str,
 				"season_number": integer, "episode_number": integer,
-				"episode_type": str, "image_file_id": str,
+				"episode_type": str, "image_file_id": str, "transcript_file_id": str,
 			}, []string{"id"}),
 			Handler: a.toolEpisodeUpdate,
 		},

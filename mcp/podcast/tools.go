@@ -268,6 +268,11 @@ func (a *App) toolFeedValidate(ctx *sdk.AppCtx, args map[string]any) (any, error
 	}
 	if show.Description == "" {
 		issues = append(issues, "show: missing description")
+	} else if len([]rune(plainText(show.Description))) < 50 {
+		issues = append(issues, "show: description is short — aim for at least 50 characters for Apple search/summary")
+	}
+	if show.PodcastGUID == "" {
+		issues = append(issues, "show: missing podcast_guid (<podcast:guid>)")
 	}
 	eps, err := dbListEpisodes(ctx.AppDB(), show.ID, "", 500, 0)
 	if err != nil {
@@ -289,6 +294,9 @@ func (a *App) toolFeedValidate(ctx *sdk.AppCtx, args map[string]any) (any, error
 		}
 		if ep.DurationSeconds == 0 {
 			issues = append(issues, label+": duration unknown — media may not have probed the file yet")
+		}
+		if ep.Description != "" && len([]rune(plainText(ep.Description))) < 20 {
+			issues = append(issues, label+": description is very short")
 		}
 	}
 	if published == 0 {

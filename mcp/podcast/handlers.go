@@ -5,14 +5,16 @@ package main
 //   /api/shows[/...], /api/episodes[/...]  — panel + agent REST mirror,
 //       token-gated, JSON in/out. Shares store + integration logic
 //       with the MCP tools.
-//   /feed/{slug}.xml, /e/{guid}, /art/...  — public (NoAuth): podcast
-//       clients, browsers and directory crawlers carry no token.
+//   /feed/{slug}.xml, /e/{guid}/file.mp3, /art/..., /transcript/...
+//       — public (NoAuth): podcast clients, browsers and directories
+//       carry no token.
 
 import (
 	"database/sql"
 	"encoding/json"
 	"errors"
 	"net/http"
+	neturl "net/url"
 	"strconv"
 	"strings"
 	"sync"
@@ -266,10 +268,10 @@ func (a *App) handlePublicFeed(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(body)
 }
 
-// ─── /e/{guid} — download tracking redirect ────────────────────────
+// ─── /e/{guid}/{file} — download tracking redirect ─────────────────
 
 func (a *App) handleDownloadRedirect(w http.ResponseWriter, r *http.Request) {
-	guid := strings.TrimPrefix(r.URL.Path, "/e/")
+	guid := episodeGUIDFromDownloadPath(r.URL.Path)
 	if guid == "" {
 		httpErr(w, http.StatusNotFound, "episode not found")
 		return
@@ -297,14 +299,14 @@ func (a *App) handleDownloadRedirect(w http.ResponseWriter, r *http.Request) {
 			trackDownload(globalCtx, show, ep, r)
 		}
 	}
-	http.Redirect(w, r, ep.AudioURL, http.StatusFound)
+	http.Redirect(w, r, ep.AudioURL, http.StatusTemporaryRedirect)
 }
 
 // ─── /art/{show|episode}/{id} — cover art passthrough ──────────────
 //
 // The feed's <itunes:image> needs an absolute, stable URL. Episodes
 // and shows store a storage file id, not a URL, so this route resolves
-// the id to a storage URL at request time and 302s to it.
+// the id to a storage URL at request time and redirects to it.
 
 func (a *App) handleArt(w http.ResponseWriter, r *http.Request) {
 	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/art/"), "/")
@@ -346,27 +348,47 @@ func (a *App) handleArt(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusNotFound, "no artwork")
 		return
 	}
-	numericID, err := strconv.ParseInt(fileID, 10, 64)
+	fileURL, err := resolveStorageFileURL(fileID, projectID)
 	if err != nil {
-		httpErr(w, http.StatusInternalServerError, "artwork file id is not numeric")
-		return
-	}
-	var sres struct {
-		Found bool `json:"found"`
-		File  *struct {
-			URL string `json:"url"`
-		} `json:"file"`
-	}
-	args := map[string]any{"id": numericID}
-	if projectID != "" {
-		args["_project_id"] = projectID
-	}
-	if err := globalCtx.PlatformAPI().CallAppResult("storage", "files_get",
-		args, &sres); err != nil || !sres.Found || sres.File == nil {
 		httpErr(w, http.StatusBadGateway, "could not resolve artwork from storage")
 		return
 	}
-	http.Redirect(w, r, sres.File.URL, http.StatusFound)
+	http.Redirect(w, r, fileURL, http.StatusTemporaryRedirect)
+}
+
+// ─── /transcript/episode/{id} — transcript passthrough ──────────────
+
+func (a *App) handleTranscript(w http.ResponseWriter, r *http.Request) {
+	parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/transcript/"), "/")
+	if len(parts) != 2 || parts[0] != "episode" {
+		httpErr(w, http.StatusNotFound, "not found")
+		return
+	}
+	id, err := strconv.ParseInt(parts[1], 10, 64)
+	if err != nil {
+		httpErr(w, http.StatusNotFound, "not found")
+		return
+	}
+	ep, err := dbGetEpisode(globalCtx.AppDB(), id)
+	if err != nil {
+		httpNotFoundOr500(w, err)
+		return
+	}
+	if ep.TranscriptFileID == "" {
+		httpErr(w, http.StatusNotFound, "no transcript")
+		return
+	}
+	show, err := dbGetShow(globalCtx.AppDB(), ep.ShowID)
+	if err != nil {
+		httpNotFoundOr500(w, err)
+		return
+	}
+	fileURL, err := resolveStorageFileURL(ep.TranscriptFileID, show.ProjectID)
+	if err != nil {
+		httpErr(w, http.StatusBadGateway, "could not resolve transcript from storage")
+		return
+	}
+	http.Redirect(w, r, fileURL, http.StatusTemporaryRedirect)
 }
 
 // ─── download dedupe ───────────────────────────────────────────────
@@ -479,6 +501,44 @@ func requestHostname(r *http.Request) string {
 		host = host[:i]
 	}
 	return strings.ToLower(strings.TrimSuffix(host, "."))
+}
+
+func episodeGUIDFromDownloadPath(rawPath string) string {
+	rest := strings.Trim(strings.TrimPrefix(rawPath, "/e/"), "/")
+	if rest == "" {
+		return ""
+	}
+	if i := strings.IndexByte(rest, '/'); i >= 0 {
+		rest = rest[:i]
+	}
+	guid, err := neturl.PathUnescape(rest)
+	if err != nil {
+		return rest
+	}
+	return guid
+}
+
+func resolveStorageFileURL(fileID, projectID string) (string, error) {
+	numericID, err := strconv.ParseInt(fileID, 10, 64)
+	if err != nil {
+		return "", errors.New("storage file id is not numeric")
+	}
+	args := map[string]any{"id": numericID}
+	if projectID != "" {
+		args["_project_id"] = projectID
+	}
+	var raw json.RawMessage
+	if err := globalCtx.PlatformAPI().CallAppResult("storage", "files_get", args, &raw); err != nil {
+		return "", err
+	}
+	file, err := decodeStorageFileProbe(raw)
+	if err != nil {
+		return "", err
+	}
+	if file == nil || file.URL == "" {
+		return "", errors.New("storage file not found")
+	}
+	return file.URL, nil
 }
 
 // clientIP extracts the originating IP, honouring the proxy header
