@@ -2,12 +2,17 @@ schema: apteva-app/v1
 
 name: persona-studio
 display_name: Persona Studio
-version: 0.1.15
+version: 0.1.16
 description: |
   Virtual influencer and reusable persona workspace. Persona Studio owns
   consistent identities, reference sets, reusable items/products, style
   profiles, campaigns, generated assets, and Composer handoffs while Media
   Studio remains the provider-neutral generator.
+
+  v0.1.16 adds generic persona-owned Composer compositions with source
+  JSON, persona-resolved AI JSON, list/get/render/duplicate tools, a
+  Compositions UI panel, and project-scoped Media Studio model, voice,
+  and avatar catalog lookups.
 
   v0.1.14 adds a Media Identity UI for persona voice and avatar
   defaults, loads available voice/avatar catalogs from Media Studio when
@@ -80,7 +85,15 @@ provides:
     - name: persona_create_clip_plan
       description: Create a structured clip plan from a campaign or brief.
     - name: persona_create_composition
-      description: Create a Composer composition from selected persona assets or a clip plan.
+      description: Create a persona-owned Composer composition from generic tracks, soundtrack, background, output, selected persona assets, or a clip plan.
+    - name: persona_composition_list
+      description: List Composer compositions owned by a persona.
+    - name: persona_composition_get
+      description: Fetch one persona-owned composition with source and persona-resolved Composer JSON.
+    - name: persona_render_composition
+      description: Render a persona-owned Composer composition.
+    - name: persona_duplicate_composition
+      description: Duplicate a persona-owned composition for the same or another persona.
   ui_panels:
     - slot: project.page
       label: Personas

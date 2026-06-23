@@ -113,6 +113,70 @@ func TestGenerationCacheKeyChangesWithStorageFolder(t *testing.T) {
 	}
 }
 
+func TestResolvePersonaCompositionPlanInjectsDefaults(t *testing.T) {
+	ctx := newPersonaCtx(t)
+	app := &App{}
+	p := mustPersona(t, app, ctx)
+	if _, err := app.toolPersonaUpdate(ctx, map[string]any{
+		"id": p.ID,
+		"patch": map[string]any{
+			"default_voice_id":  "voice_local",
+			"default_avatar_id": "avatar_local",
+		},
+	}); err != nil {
+		t.Fatalf("update defaults: %v", err)
+	}
+	if _, err := app.toolReferenceAdd(ctx, map[string]any{
+		"persona_id":      p.ID,
+		"storage_file_id": 42,
+		"kind":            "face",
+	}); err != nil {
+		t.Fatalf("add reference: %v", err)
+	}
+	source := map[string]any{
+		"output": map[string]any{"format": "mp3"},
+		"tracks": []any{
+			map[string]any{"type": "audio", "clips": []any{
+				map[string]any{"asset": map[string]any{"type": "audio", "src": ""}, "start": float64(0), "length": float64(5), "ai": map[string]any{"media_kind": "audio_tts", "prompt": "Say hello."}},
+			}},
+			map[string]any{"type": "visual", "clips": []any{
+				map[string]any{"asset": map[string]any{"type": "image", "src": ""}, "start": float64(0), "length": float64(5), "ai": map[string]any{"media_kind": "image", "prompt": "Portrait."}},
+			}},
+		},
+	}
+	resolved, err := resolvePersonaCompositionPlan(ctx, "test-proj", p.ID, source)
+	if err != nil {
+		t.Fatalf("resolve: %v", err)
+	}
+	tracks := resolved["tracks"].([]any)
+	audioClip := tracks[0].(map[string]any)["clips"].([]any)[0].(map[string]any)
+	audioAI := audioClip["ai"].(map[string]any)
+	if audioAI["voice"] != "voice_local" {
+		t.Fatalf("voice default not injected: %#v", audioAI)
+	}
+	if !strings.Contains(audioAI["prompt"].(string), "Mira Vale") || !strings.Contains(audioAI["prompt"].(string), "Say hello.") {
+		t.Fatalf("audio prompt not persona-resolved: %s", audioAI["prompt"])
+	}
+	visualClip := tracks[1].(map[string]any)["clips"].([]any)[0].(map[string]any)
+	visualAI := visualClip["ai"].(map[string]any)
+	if visualAI["source_image"] != "storage:42" {
+		t.Fatalf("source image not injected: %#v", visualAI)
+	}
+}
+
+func TestBuildComposerTracksSeparatesAudioAndVisualAssets(t *testing.T) {
+	tracks := buildComposerTracks([]Asset{
+		{ID: 1, StorageFileID: 10, AssetType: "image", Prompt: "cover"},
+		{ID: 2, StorageFileID: 11, AssetType: "audio_tts", Prompt: "voice"},
+	}, 10000)
+	if len(tracks) != 2 {
+		t.Fatalf("expected visual and audio tracks, got %#v", tracks)
+	}
+	if tracks[0]["type"] != "visual" || tracks[1]["type"] != "audio" {
+		t.Fatalf("unexpected track order/types: %#v", tracks)
+	}
+}
+
 func TestDefaultImageSourceRefsUsesSourceImagesArrayForOneReference(t *testing.T) {
 	refs := []Reference{{ID: 1, StorageFileID: 42, Kind: "face", Active: true}}
 	got := defaultImageSourceRefs(refs, nil, map[string]any{"model": "firered-image-edit"})

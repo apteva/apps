@@ -66,6 +66,8 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/generate", Handler: a.handleGenerate},
 		{Pattern: "/clip-plan", Handler: a.handleClipPlan},
 		{Pattern: "/composition", Handler: a.handleComposition},
+		{Pattern: "/compositions", Handler: a.handleCompositions},
+		{Pattern: "/compositions/", Handler: a.handleCompositionByID},
 		{Pattern: "/storage-files", Handler: a.handleStorageFiles},
 	}
 }
@@ -87,7 +89,11 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "persona_generate_pack", Description: "Generate a starter pack. Args: persona_id, campaign_id?, prompts? object, use_cache?.", InputSchema: schemaObject(map[string]any{"persona_id": sInteger(), "campaign_id": sInteger(), "prompts": sObject(), "use_cache": sBool()}, []string{"persona_id"}), Handler: a.toolGeneratePack},
 		{Name: "persona_campaign_create", Description: "Create a campaign. Args: persona_id, name, brief?, platforms?, content_pillars?, status?.", InputSchema: schemaObject(map[string]any{"persona_id": sInteger(), "name": sString(), "brief": sString(), "platforms": sArray("string"), "content_pillars": sArray("string"), "status": sString()}, []string{"persona_id", "name"}), Handler: a.toolCampaignCreate},
 		{Name: "persona_create_clip_plan", Description: "Create a structured clip plan. Args: persona_id, brief, campaign_id?, asset_ids?, aspect?, duration_ms?.", InputSchema: schemaObject(map[string]any{"persona_id": sInteger(), "brief": sString(), "campaign_id": sInteger(), "asset_ids": sArray("integer"), "aspect": sString(), "duration_ms": sInteger()}, []string{"persona_id", "brief"}), Handler: a.toolCreateClipPlan},
-		{Name: "persona_create_composition", Description: "Create a Composer composition from asset ids or a clip plan. Args: persona_id, title?, campaign_id?, asset_ids?, plan?, aspect?, duration_ms?.", InputSchema: schemaObject(map[string]any{"persona_id": sInteger(), "title": sString(), "campaign_id": sInteger(), "asset_ids": sArray("integer"), "plan": sObject(), "aspect": sString(), "duration_ms": sInteger()}, []string{"persona_id"}), Handler: a.toolCreateComposition},
+		{Name: "persona_create_composition", Description: "Create a Composer composition owned by a persona. Args: persona_id, title?, campaign_id?, tracks?, soundtrack?, background?, output?, render?, executor?, asset_ids?, plan?, aspect?, duration_ms?. AI clips are resolved with persona identity, default voice/avatar, references, and items.", InputSchema: schemaObject(map[string]any{"persona_id": sInteger(), "title": sString(), "campaign_id": sInteger(), "tracks": map[string]any{"type": "array"}, "soundtrack": sObject(), "background": sString(), "output": sObject(), "render": sBool(), "executor": sString(), "asset_ids": sArray("integer"), "plan": sObject(), "aspect": sString(), "duration_ms": sInteger()}, []string{"persona_id"}), Handler: a.toolCreateComposition},
+		{Name: "persona_composition_list", Description: "List Composer compositions owned by a persona. Args: persona_id, limit?.", InputSchema: schemaObject(map[string]any{"persona_id": sInteger(), "limit": sInteger()}, []string{"persona_id"}), Handler: a.toolCompositionList},
+		{Name: "persona_composition_get", Description: "Fetch one persona-owned composition with source and resolved Composer JSON. Args: id.", InputSchema: schemaObject(map[string]any{"id": sInteger()}, []string{"id"}), Handler: a.toolCompositionGet},
+		{Name: "persona_render_composition", Description: "Render a persona-owned Composer composition. Args: id, executor? ('local'|'remote').", InputSchema: schemaObject(map[string]any{"id": sInteger(), "executor": sString()}, []string{"id"}), Handler: a.toolRenderComposition},
+		{Name: "persona_duplicate_composition", Description: "Duplicate a persona-owned composition for the same or another persona, resolving its AI clips with the target persona. Args: id, target_persona_id?, title?, campaign_id?, render?, executor?.", InputSchema: schemaObject(map[string]any{"id": sInteger(), "target_persona_id": sInteger(), "title": sString(), "campaign_id": sInteger(), "render": sBool(), "executor": sString()}, []string{"id"}), Handler: a.toolDuplicateComposition},
 	}
 }
 
@@ -181,6 +187,30 @@ type Asset struct {
 	Error             string          `json:"error"`
 	CreatedAt         string          `json:"created_at"`
 	UpdatedAt         string          `json:"updated_at"`
+}
+
+type PersonaComposition struct {
+	ID                    int64           `json:"id"`
+	ProjectID             string          `json:"project_id"`
+	PersonaID             int64           `json:"persona_id"`
+	CampaignID            int64           `json:"campaign_id,omitempty"`
+	ComposerCompositionID int64           `json:"composer_composition_id,omitempty"`
+	StorageFileID         int64           `json:"storage_file_id,omitempty"`
+	LatestRenderID        int64           `json:"latest_render_id,omitempty"`
+	SourceCompositionID   int64           `json:"source_composition_id,omitempty"`
+	Title                 string          `json:"title"`
+	Aspect                string          `json:"aspect"`
+	DurationMS            int             `json:"duration_ms"`
+	Status                string          `json:"status"`
+	RenderStatus          string          `json:"render_status,omitempty"`
+	RenderError           string          `json:"render_error,omitempty"`
+	VariantGroupID        string          `json:"variant_group_id,omitempty"`
+	Plan                  json.RawMessage `json:"plan"`
+	SourcePlan            json.RawMessage `json:"source_plan"`
+	ResolvedPlan          json.RawMessage `json:"resolved_plan"`
+	Output                json.RawMessage `json:"output"`
+	CreatedAt             string          `json:"created_at"`
+	UpdatedAt             string          `json:"updated_at"`
 }
 
 // HTTP handlers
@@ -409,6 +439,10 @@ func (a *App) handleComposition(w http.ResponseWriter, r *http.Request) {
 	if !ok {
 		return
 	}
+	if r.Method != http.MethodPost {
+		httpErr(w, 405, "method not allowed")
+		return
+	}
 	var args map[string]any
 	if err := readJSON(r, &args); err != nil {
 		httpErr(w, 400, err.Error())
@@ -417,6 +451,75 @@ func (a *App) handleComposition(w http.ResponseWriter, r *http.Request) {
 	args["_project_id"] = pid
 	v, err := a.toolCreateComposition(ctx, args)
 	writeOrErr(w, v, err)
+}
+
+func (a *App) handleCompositions(w http.ResponseWriter, r *http.Request) {
+	ctx, pid, ok := requestCtx(w, r)
+	if !ok {
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		personaID := int64Query(r, "persona_id", 0)
+		out, err := listPersonaCompositions(ctx.AppDB(), pid, personaID, intQuery(r, "limit", 50))
+		writeOrErr(w, map[string]any{"compositions": out}, err)
+	case http.MethodPost:
+		var args map[string]any
+		if err := readJSON(r, &args); err != nil {
+			httpErr(w, 400, err.Error())
+			return
+		}
+		args["_project_id"] = pid
+		v, err := a.toolCreateComposition(ctx, args)
+		writeOrErr(w, v, err)
+	default:
+		httpErr(w, 405, "method not allowed")
+	}
+}
+
+func (a *App) handleCompositionByID(w http.ResponseWriter, r *http.Request) {
+	ctx, pid, ok := requestCtx(w, r)
+	if !ok {
+		return
+	}
+	id, err := idFromPath(r.URL.Path, "/compositions/")
+	if err != nil {
+		httpErr(w, 400, err.Error())
+		return
+	}
+	rest := strings.Trim(strings.TrimPrefix(r.URL.Path, "/compositions/"), "/")
+	parts := strings.Split(rest, "/")
+	action := ""
+	if len(parts) > 1 {
+		action = parts[1]
+	}
+	switch {
+	case r.Method == http.MethodGet && action == "":
+		v, err := getPersonaComposition(ctx.AppDB(), pid, id)
+		writeOrErr(w, map[string]any{"composition": v}, err)
+	case r.Method == http.MethodPost && action == "render":
+		var args map[string]any
+		_ = readJSON(r, &args)
+		if args == nil {
+			args = map[string]any{}
+		}
+		args["_project_id"] = pid
+		args["id"] = id
+		v, err := a.toolRenderComposition(ctx, args)
+		writeOrErr(w, v, err)
+	case r.Method == http.MethodPost && action == "duplicate":
+		var args map[string]any
+		_ = readJSON(r, &args)
+		if args == nil {
+			args = map[string]any{}
+		}
+		args["_project_id"] = pid
+		args["id"] = id
+		v, err := a.toolDuplicateComposition(ctx, args)
+		writeOrErr(w, v, err)
+	default:
+		httpErr(w, 405, "method not allowed")
+	}
 }
 
 func (a *App) handleStorageFiles(w http.ResponseWriter, r *http.Request) {
@@ -944,20 +1047,34 @@ func (a *App) toolCreateComposition(ctx *sdk.AppCtx, args map[string]any) (any, 
 	if title == "" {
 		title = "Persona clip"
 	}
-	aspect := strArg(args, "aspect")
+	durationMS := intArg(args, "duration_ms", 20000)
+	sourcePlan, err := sourceCompositionPlan(ctx.AppDB(), pid, personaID, args, durationMS)
+	if err != nil {
+		return nil, err
+	}
+	resolvedPlan, err := resolvePersonaCompositionPlan(ctx, pid, personaID, sourcePlan)
+	if err != nil {
+		return nil, err
+	}
+	output := mapFromPlan(resolvedPlan, "output")
+	aspect := cleanString(output["aspect"])
+	if aspect == "" {
+		aspect = strArg(args, "aspect")
+	}
 	if aspect == "" {
 		aspect = "9:16"
 	}
-	durationMS := intArg(args, "duration_ms", 20000)
-	plan := mapArg(args, "plan")
-	assetIDs := int64SliceArg(args, "asset_ids")
-	assets, _ := listAssetsByIDs(ctx.AppDB(), pid, assetIDs)
-	tracks := buildComposerTracks(assets, durationMS)
 	call := map[string]any{
 		"name":        title,
-		"tracks":      tracks,
-		"output":      map[string]any{"format": "mp4", "aspect": aspect, "fps": 30},
+		"tracks":      resolvedPlan["tracks"],
+		"output":      output,
 		"_project_id": pid,
+	}
+	if v, ok := resolvedPlan["soundtrack"]; ok {
+		call["soundtrack"] = v
+	}
+	if v, ok := resolvedPlan["background"]; ok {
+		call["background"] = v
 	}
 	var compOut map[string]any
 	err = ctx.WithProject(pid).PlatformAPI().CallAppResult("composer", "composition_create", call, &compOut)
@@ -965,22 +1082,401 @@ func (a *App) toolCreateComposition(ctx *sdk.AppCtx, args map[string]any) (any, 
 	status := "draft"
 	if err != nil {
 		status = "failed"
-		plan["composer_error"] = err.Error()
+		resolvedPlan["composer_error"] = err.Error()
 	}
 	res, insertErr := ctx.AppDB().Exec(
-		`INSERT INTO persona_compositions (project_id, persona_id, campaign_id, composer_composition_id, title, aspect, duration_ms, plan_json, status)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		pid, personaID, nullableInt64(int64Arg(args, "campaign_id")), nullableInt64(composerID), title, aspect, durationMS, mustJSON(plan, "{}"), status,
+		`INSERT INTO persona_compositions
+		 (project_id, persona_id, campaign_id, composer_composition_id, title, aspect, duration_ms,
+		  plan_json, source_plan_json, resolved_plan_json, output_json, status, source_composition_id, variant_group_id)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		pid, personaID, nullableInt64(int64Arg(args, "campaign_id")), nullableInt64(composerID), title, aspect,
+		int(durationSecondsFromPlan(resolvedPlan)*1000), mustJSON(sourcePlan, "{}"), mustJSON(sourcePlan, "{}"),
+		mustJSON(resolvedPlan, "{}"), mustJSON(output, "{}"), status, nullableInt64(int64Arg(args, "source_composition_id")),
+		strArg(args, "variant_group_id"),
 	)
 	if insertErr != nil {
 		return nil, insertErr
 	}
 	id, _ := res.LastInsertId()
-	out := map[string]any{"id": id, "persona_id": personaID, "composer_composition_id": composerID, "status": status, "composition": compOut}
+	row, _ := getPersonaComposition(ctx.AppDB(), pid, id)
+	out := map[string]any{"id": id, "persona_id": personaID, "composer_composition_id": composerID, "status": status, "composition": compOut, "persona_composition": row}
 	if err != nil {
 		out["error"] = err.Error()
+		return map[string]any{"composition": out}, nil
 	}
+	if boolArg(args, "render") {
+		renderOut, renderErr := a.renderPersonaComposition(ctx.WithProject(pid), pid, id, strArg(args, "executor"))
+		out["render"] = renderOut
+		if renderErr != nil {
+			out["render_error"] = renderErr.Error()
+		}
+	}
+	row, _ = getPersonaComposition(ctx.AppDB(), pid, id)
+	out["persona_composition"] = row
 	return map[string]any{"composition": out}, nil
+}
+
+func (a *App) toolCompositionList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, personaID, err := projectPersona(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := listPersonaCompositions(ctx.AppDB(), pid, personaID, intArg(args, "limit", 50))
+	return map[string]any{"compositions": rows}, err
+}
+
+func (a *App) toolCompositionGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := projectFromArgs(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	row, err := getPersonaComposition(ctx.AppDB(), pid, int64Arg(args, "id"))
+	return map[string]any{"composition": row}, err
+}
+
+func (a *App) toolRenderComposition(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := projectFromArgs(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	id := int64Arg(args, "id")
+	if id == 0 {
+		return nil, errors.New("id required")
+	}
+	out, err := a.renderPersonaComposition(ctx.WithProject(pid), pid, id, strArg(args, "executor"))
+	if err != nil {
+		return nil, err
+	}
+	row, _ := getPersonaComposition(ctx.AppDB(), pid, id)
+	return map[string]any{"render": out, "composition": row}, nil
+}
+
+func (a *App) toolDuplicateComposition(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := projectFromArgs(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	source, err := getPersonaComposition(ctx.AppDB(), pid, int64Arg(args, "id"))
+	if err != nil {
+		return nil, err
+	}
+	targetPersonaID := int64Arg(args, "target_persona_id")
+	if targetPersonaID == 0 {
+		targetPersonaID = source.PersonaID
+	}
+	title := strArg(args, "title")
+	if title == "" {
+		title = source.Title + " copy"
+	}
+	sourcePlan := jsonObject(source.SourcePlan)
+	dupArgs := map[string]any{
+		"_project_id":           pid,
+		"persona_id":            targetPersonaID,
+		"title":                 title,
+		"campaign_id":           int64Arg(args, "campaign_id"),
+		"tracks":                sourcePlan["tracks"],
+		"soundtrack":            sourcePlan["soundtrack"],
+		"background":            sourcePlan["background"],
+		"output":                sourcePlan["output"],
+		"render":                boolArg(args, "render"),
+		"executor":              strArg(args, "executor"),
+		"source_composition_id": source.ID,
+		"variant_group_id":      fallback(source.VariantGroupID, fmt.Sprintf("persona-composition:%d", source.ID)),
+	}
+	return a.toolCreateComposition(ctx.WithProject(pid), dupArgs)
+}
+
+func (a *App) renderPersonaComposition(ctx *sdk.AppCtx, pid string, id int64, executor string) (map[string]any, error) {
+	row, err := getPersonaComposition(ctx.AppDB(), pid, id)
+	if err != nil {
+		return nil, err
+	}
+	if row.ComposerCompositionID == 0 {
+		return nil, errors.New("composer_composition_id missing")
+	}
+	call := map[string]any{"id": row.ComposerCompositionID, "_project_id": pid}
+	if executor != "" {
+		call["executor"] = executor
+	}
+	var out map[string]any
+	err = ctx.WithProject(pid).PlatformAPI().CallAppResult("composer", "composition_render", call, &out)
+	renderID := int64FromMap(out, "render_id")
+	storageID := int64FromMap(out, "storage_id")
+	renderStatus := strFromMap(out, "status")
+	if renderStatus == "" && err == nil {
+		renderStatus = "complete"
+	}
+	status := "rendering"
+	errMsg := ""
+	if err != nil {
+		status = "failed"
+		renderStatus = "failed"
+		errMsg = err.Error()
+	} else if renderStatus == "complete" {
+		status = "complete"
+	} else if renderStatus == "waiting_ai" {
+		status = "waiting_ai"
+	} else if renderStatus != "" {
+		status = renderStatus
+	}
+	_, _ = ctx.AppDB().Exec(
+		`UPDATE persona_compositions
+		 SET latest_render_id=?, storage_file_id=COALESCE(NULLIF(?,0), storage_file_id),
+		     render_status=?, render_error=?, status=?, updated_at=CURRENT_TIMESTAMP
+		 WHERE id=? AND project_id=?`,
+		nullableInt64(renderID), storageID, renderStatus, errMsg, status, id, pid,
+	)
+	if err != nil {
+		return out, err
+	}
+	return out, nil
+}
+
+func sourceCompositionPlan(db *sql.DB, pid string, personaID int64, args map[string]any, durationMS int) (map[string]any, error) {
+	source := map[string]any{}
+	if plan := mapArg(args, "plan"); len(plan) > 0 {
+		source = jsonMapClone(plan)
+	}
+	if v, ok := args["tracks"]; ok && v != nil {
+		source["tracks"] = v
+	}
+	if v, ok := args["soundtrack"]; ok && v != nil {
+		source["soundtrack"] = v
+	}
+	if v, ok := args["background"]; ok && v != nil {
+		source["background"] = v
+	}
+	if v, ok := args["output"]; ok && v != nil {
+		source["output"] = v
+	}
+	if _, ok := source["tracks"]; !ok {
+		assets, err := listAssetsByIDs(db, pid, int64SliceArg(args, "asset_ids"))
+		if err != nil {
+			return nil, err
+		}
+		source["tracks"] = buildComposerTracks(assets, durationMS)
+	}
+	if _, ok := source["output"]; !ok {
+		aspect := strArg(args, "aspect")
+		if aspect == "" {
+			aspect = "9:16"
+		}
+		format := "mp4"
+		if compositionLooksAudioOnly(source["tracks"]) {
+			format = "mp3"
+		}
+		source["output"] = map[string]any{"format": format, "aspect": aspect, "fps": 30}
+	}
+	if _, ok := source["tracks"]; !ok {
+		return nil, errors.New("tracks required")
+	}
+	_ = personaID
+	return jsonMapClone(source), nil
+}
+
+func resolvePersonaCompositionPlan(ctx *sdk.AppCtx, pid string, personaID int64, source map[string]any) (map[string]any, error) {
+	persona, err := getPersona(ctx.AppDB(), pid, personaID)
+	if err != nil {
+		return nil, err
+	}
+	resolved := jsonMapClone(source)
+	defaultRefs, _ := listReferences(ctx.AppDB(), pid, personaID, "", true)
+	defaultItems, _ := listItems(ctx.AppDB(), pid, personaID, "", true)
+	tracks, _ := resolved["tracks"].([]any)
+	for _, rawTrack := range tracks {
+		track, ok := rawTrack.(map[string]any)
+		if !ok {
+			continue
+		}
+		trackType := cleanString(track["type"])
+		clips, _ := track["clips"].([]any)
+		for _, rawClip := range clips {
+			clip, ok := rawClip.(map[string]any)
+			if !ok {
+				continue
+			}
+			ai, _ := clip["ai"].(map[string]any)
+			if ai == nil {
+				continue
+			}
+			kind := aiMediaKind(ai, clip, trackType)
+			if kind == "" {
+				continue
+			}
+			style, _ := selectStyleProfile(ctx.AppDB(), pid, personaID, int64Arg(ai, "style_profile_id"), kind)
+			refs := defaultRefs
+			if kinds := stringSliceArg(ai, "reference_kinds"); len(kinds) > 0 {
+				refs, _ = listReferencesForKinds(ctx.AppDB(), pid, personaID, kinds)
+			}
+			items := defaultItems
+			if ids := int64SliceArg(ai, "item_ids"); len(ids) > 0 {
+				items, _ = listItemsByIDs(ctx.AppDB(), pid, personaID, ids)
+			}
+			prompt := strArg(ai, "prompt")
+			if prompt == "" {
+				prompt = cleanString(clip["text"])
+			}
+			if prompt != "" {
+				ai["prompt"] = buildResolvedPrompt(persona, style, refs, items, prompt, kind)
+				ai["persona_prompt"] = prompt
+			}
+			ai["media_kind"] = kind
+			if strArg(ai, "cache_policy") == "" {
+				ai["cache_policy"] = "reuse"
+			}
+			if strArg(ai, "status") == "" {
+				ai["status"] = "draft"
+			}
+			if kind == "audio_tts" && strArg(ai, "voice") == "" && persona.DefaultVoiceID != "" {
+				ai["voice"] = persona.DefaultVoiceID
+			}
+			if kind == "avatar" && strArg(ai, "avatar") == "" && persona.DefaultAvatarID != "" {
+				ai["avatar"] = persona.DefaultAvatarID
+			}
+			if (kind == "image" || kind == "video" || kind == "avatar") && strArg(ai, "source_image") == "" {
+				if ref := firstVisualSourceRef(refs, items); ref != "" {
+					ai["source_image"] = ref
+				}
+			}
+		}
+	}
+	return resolved, nil
+}
+
+func aiMediaKind(ai, clip map[string]any, trackType string) string {
+	kind := strArg(ai, "media_kind")
+	if kind != "" {
+		return normalizeCompositionAIKind(kind)
+	}
+	if asset, _ := clip["asset"].(map[string]any); asset != nil {
+		if t := strArg(asset, "type"); t != "" {
+			if t == "audio" && trackType == "audio" {
+				return "audio_tts"
+			}
+			return normalizeCompositionAIKind(t)
+		}
+	}
+	switch strings.ToLower(strings.TrimSpace(trackType)) {
+	case "audio":
+		return "audio_tts"
+	case "visual", "video":
+		return "image"
+	default:
+		return ""
+	}
+}
+
+func firstVisualSourceRef(refs []Reference, items []Item) string {
+	for _, ref := range refs {
+		if ref.StorageFileID == 0 || strings.EqualFold(ref.Kind, "voice") || strings.EqualFold(ref.Kind, "avatar") {
+			continue
+		}
+		return fmt.Sprintf("storage:%d", ref.StorageFileID)
+	}
+	for _, item := range items {
+		for _, id := range item.StorageFileIDs {
+			if id > 0 {
+				return fmt.Sprintf("storage:%d", id)
+			}
+		}
+	}
+	return ""
+}
+
+func jsonMapClone(in map[string]any) map[string]any {
+	out := map[string]any{}
+	b, err := json.Marshal(in)
+	if err != nil {
+		return cloneMap(in)
+	}
+	if err := json.Unmarshal(b, &out); err != nil {
+		return cloneMap(in)
+	}
+	return out
+}
+
+func mapFromPlan(plan map[string]any, key string) map[string]any {
+	if m, ok := plan[key].(map[string]any); ok {
+		return m
+	}
+	return map[string]any{}
+}
+
+func durationSecondsFromPlan(plan map[string]any) float64 {
+	maxEnd := 0.0
+	tracks, _ := plan["tracks"].([]any)
+	for _, rawTrack := range tracks {
+		track, _ := rawTrack.(map[string]any)
+		clips, _ := track["clips"].([]any)
+		for _, rawClip := range clips {
+			clip, _ := rawClip.(map[string]any)
+			start := floatArg(clip, "start", 0)
+			length := floatArg(clip, "length", 0)
+			if length == 0 {
+				length = floatArg(clip, "duration", 0)
+			}
+			if end := start + length; end > maxEnd {
+				maxEnd = end
+			}
+		}
+	}
+	return maxEnd
+}
+
+func compositionLooksAudioOnly(tracks any) bool {
+	xs, ok := tracks.([]any)
+	if !ok {
+		return false
+	}
+	hasAudio := false
+	for _, rawTrack := range xs {
+		track, _ := rawTrack.(map[string]any)
+		t := strings.ToLower(cleanString(track["type"]))
+		if t == "visual" || t == "video" {
+			return false
+		}
+		if t == "audio" {
+			hasAudio = true
+		}
+		for _, rawClip := range anySlice(track["clips"]) {
+			clip, _ := rawClip.(map[string]any)
+			asset, _ := clip["asset"].(map[string]any)
+			kind := normalizeCompositionAIKind(strArg(asset, "type"))
+			if kind == "image" || kind == "video" || kind == "avatar" {
+				return false
+			}
+			if kind == "audio" || kind == "audio_tts" || kind == "audio_sfx" || kind == "music" {
+				hasAudio = true
+			}
+		}
+	}
+	return hasAudio
+}
+
+func anySlice(v any) []any {
+	if xs, ok := v.([]any); ok {
+		return xs
+	}
+	return nil
+}
+
+func normalizeCompositionAIKind(v string) string {
+	switch strings.ToLower(strings.TrimSpace(v)) {
+	case "image":
+		return "image"
+	case "video":
+		return "video"
+	case "avatar":
+		return "avatar"
+	case "music":
+		return "music"
+	case "audio_sfx", "sfx", "sound":
+		return "audio_sfx"
+	case "audio_tts", "tts", "voice", "audio":
+		return "audio_tts"
+	default:
+		return ""
+	}
 }
 
 // Database helpers
@@ -1046,7 +1542,66 @@ func (a *App) personaBundle(ctx *sdk.AppCtx, pid string, id int64) (map[string]a
 	items, _ := listItems(ctx.AppDB(), pid, id, "", true)
 	campaigns, _ := listCampaigns(ctx.AppDB(), pid, id)
 	assets, _ := listAssets(ctx.AppDB(), pid, id, 30)
-	return map[string]any{"persona": p, "style_profiles": styles, "references": refs, "items": items, "campaigns": campaigns, "assets": assets}, nil
+	compositions, _ := listPersonaCompositions(ctx.AppDB(), pid, id, 30)
+	return map[string]any{"persona": p, "style_profiles": styles, "references": refs, "items": items, "campaigns": campaigns, "assets": assets, "compositions": compositions}, nil
+}
+
+func getPersonaComposition(db *sql.DB, pid string, id int64) (*PersonaComposition, error) {
+	rows, err := listPersonaCompositionsWhere(db, `project_id=? AND id=?`, 1, pid, id)
+	if err != nil || len(rows) == 0 {
+		if err != nil {
+			return nil, err
+		}
+		return nil, sql.ErrNoRows
+	}
+	return &rows[0], nil
+}
+
+func listPersonaCompositions(db *sql.DB, pid string, personaID int64, limit int) ([]PersonaComposition, error) {
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	where := `project_id=?`
+	vals := []any{pid}
+	if personaID > 0 {
+		where += ` AND persona_id=?`
+		vals = append(vals, personaID)
+	}
+	where += ` ORDER BY updated_at DESC, id DESC`
+	return listPersonaCompositionsWhere(db, where, limit, vals...)
+}
+
+func listPersonaCompositionsWhere(db *sql.DB, where string, limit int, vals ...any) ([]PersonaComposition, error) {
+	q := `SELECT id, project_id, persona_id, COALESCE(campaign_id,0), COALESCE(composer_composition_id,0),
+	             COALESCE(storage_file_id,0), COALESCE(latest_render_id,0), COALESCE(source_composition_id,0),
+	             title, aspect, duration_ms, plan_json, source_plan_json, resolved_plan_json, output_json,
+	             status, render_status, render_error, variant_group_id, created_at, updated_at
+	      FROM persona_compositions WHERE ` + where
+	if limit > 0 {
+		q += ` LIMIT ?`
+		vals = append(vals, limit)
+	}
+	rows, err := db.Query(q, vals...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []PersonaComposition{}
+	for rows.Next() {
+		var pc PersonaComposition
+		var plan, source, resolved, output string
+		if err := rows.Scan(&pc.ID, &pc.ProjectID, &pc.PersonaID, &pc.CampaignID, &pc.ComposerCompositionID,
+			&pc.StorageFileID, &pc.LatestRenderID, &pc.SourceCompositionID, &pc.Title, &pc.Aspect, &pc.DurationMS,
+			&plan, &source, &resolved, &output, &pc.Status, &pc.RenderStatus, &pc.RenderError, &pc.VariantGroupID,
+			&pc.CreatedAt, &pc.UpdatedAt); err == nil {
+			pc.Plan = rawJSON(plan, "{}")
+			pc.SourcePlan = rawJSON(firstNonEmpty(source, plan), "{}")
+			pc.ResolvedPlan = rawJSON(firstNonEmpty(resolved, plan), "{}")
+			pc.Output = rawJSON(firstNonEmpty(output, "{}"), "{}")
+			out = append(out, pc)
+		}
+	}
+	return out, rows.Err()
 }
 
 func ensureDefaultStyles(db *sql.DB, pid string, personaID int64) error {
@@ -1528,25 +2083,48 @@ func buildComposerTracks(assets []Asset, durationMS int) []map[string]any {
 		durationMS = 20000
 	}
 	if len(assets) == 0 {
-		return []map[string]any{{"clips": []map[string]any{}}}
+		return []map[string]any{{"type": "visual", "clips": []map[string]any{}}}
 	}
 	clipLen := durationMS / len(assets)
 	if clipLen <= 0 {
 		clipLen = durationMS
 	}
-	clips := []map[string]any{}
+	visualClips := []map[string]any{}
+	audioClips := []map[string]any{}
+	visualIndex := 0
+	audioStart := 0.0
 	for i, asset := range assets {
 		if asset.StorageFileID == 0 {
 			continue
 		}
-		clips = append(clips, map[string]any{
+		kind := mediaKind(asset.AssetType)
+		clip := map[string]any{
 			"asset":  map[string]any{"type": mediaKind(asset.AssetType), "src": fmt.Sprintf("storage:%d", asset.StorageFileID)},
-			"start":  float64(i*clipLen) / 1000,
 			"length": float64(clipLen) / 1000,
 			"text":   clipText(asset.Prompt),
-		})
+		}
+		if kind == "audio" {
+			clip["start"] = audioStart
+			audioStart += float64(clipLen) / 1000
+			audioClips = append(audioClips, clip)
+			continue
+		}
+		clip["start"] = float64(visualIndex*clipLen) / 1000
+		visualIndex++
+		_ = i
+		visualClips = append(visualClips, clip)
 	}
-	return []map[string]any{{"clips": clips}}
+	tracks := []map[string]any{}
+	if len(visualClips) > 0 {
+		tracks = append(tracks, map[string]any{"type": "visual", "clips": visualClips})
+	}
+	if len(audioClips) > 0 {
+		tracks = append(tracks, map[string]any{"type": "audio", "clips": audioClips})
+	}
+	if len(tracks) == 0 {
+		tracks = append(tracks, map[string]any{"type": "visual", "clips": []map[string]any{}})
+	}
+	return tracks
 }
 
 func buildVoiceoverDraft(p *Persona, brief string, durationMS int) string {
@@ -2062,6 +2640,15 @@ func fallback(v, def string) string {
 		return def
 	}
 	return v
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, v := range values {
+		if strings.TrimSpace(v) != "" {
+			return v
+		}
+	}
+	return ""
 }
 
 func main() { sdk.Run(&App{}) }

@@ -15,6 +15,27 @@ const IMAGE_FORMAT_PRESETS = [
 const VIDEO_ASPECTS = ["9:16", "16:9", "1:1", "4:3"];
 const IMAGE_QUALITIES = ["auto", "low", "medium", "high"];
 const OUTPUT_FORMATS = ["png", "jpeg", "webp"];
+const DEFAULT_COMPOSITION_JSON = `{
+  "output": { "format": "mp3" },
+  "tracks": [
+    {
+      "type": "audio",
+      "clips": [
+        {
+          "uid": "intro",
+          "asset": { "type": "audio", "src": "" },
+          "start": 0,
+          "length": 8,
+          "duration_mode": "fit_generated_reflow",
+          "ai": {
+            "media_kind": "audio_tts",
+            "prompt": "Write the persona script here."
+          }
+        }
+      ]
+    }
+  ]
+}`;
 
 export default function PersonaPanel({ projectId }) {
   const [personas, setPersonas] = useState([]);
@@ -57,6 +78,11 @@ export default function PersonaPanel({ projectId }) {
   const [voiceOptions, setVoiceOptions] = useState([]);
   const [avatarOptions, setAvatarOptions] = useState([]);
   const [mediaIdentity, setMediaIdentity] = useState({ voice: "", avatar: "" });
+  const [compositionDraft, setCompositionDraft] = useState({
+    title: "",
+    json: DEFAULT_COMPOSITION_JSON,
+    render: false,
+  });
 
   const qs = useMemo(() => `project_id=${encodeURIComponent(projectId || "")}`, [projectId]);
   const persona = bundle?.persona;
@@ -65,6 +91,7 @@ export default function PersonaPanel({ projectId }) {
   const voiceRefs = refs.filter((r) => r.kind === "voice");
   const avatarRefs = refs.filter((r) => r.kind === "avatar");
   const assets = bundle?.assets || [];
+  const compositions = bundle?.compositions || [];
   const selectedItems = useMemo(
     () => items.filter((it) => generation.item_ids.includes(it.id)),
     [items, generation.item_ids]
@@ -139,7 +166,7 @@ export default function PersonaPanel({ projectId }) {
   useEffect(() => {
     if (!projectId || !generation.asset_type) return;
     let cancelled = false;
-    const params = new URLSearchParams({ kind: generation.asset_type });
+    const params = new URLSearchParams({ project_id: projectId, kind: generation.asset_type });
     if (generation.asset_type === "image" && requiresImageEditModel) {
       params.set("capability", "image.edit");
     }
@@ -178,7 +205,8 @@ export default function PersonaPanel({ projectId }) {
   useEffect(() => {
     if (!projectId) return;
     let cancelled = false;
-    fetch(`${MEDIA_API}/voices?kind=audio_tts`, { credentials: "same-origin" })
+    const voiceParams = new URLSearchParams({ project_id: projectId, kind: "audio_tts" });
+    fetch(`${MEDIA_API}/voices?${voiceParams.toString()}`, { credentials: "same-origin" })
       .then((res) => (res.ok ? res.json() : null))
       .then((data) => {
         if (!cancelled) setVoiceOptions(Array.isArray(data?.voices) ? data.voices : []);
@@ -186,7 +214,8 @@ export default function PersonaPanel({ projectId }) {
       .catch(() => {
         if (!cancelled) setVoiceOptions([]);
       });
-    fetch(`${MEDIA_API}/avatars`, { credentials: "same-origin" })
+    const avatarParams = new URLSearchParams({ project_id: projectId });
+    fetch(`${MEDIA_API}/avatars?${avatarParams.toString()}`, { credentials: "same-origin" })
       .then((res) => (res.ok ? res.json() : null))
       .then((data) => {
         if (!cancelled) setAvatarOptions(Array.isArray(data?.avatars) ? data.avatars : []);
@@ -361,6 +390,53 @@ export default function PersonaPanel({ projectId }) {
       });
       setStatus(res.cached ? "Returned cached asset" : "Generated asset");
       setGeneration((g) => ({ ...g, prompt: "" }));
+      loadBundle();
+    } catch (e) {
+      setStatus(e.message);
+    }
+  }
+
+  async function createComposition(e) {
+    e.preventDefault();
+    if (!selectedId) return;
+    try {
+      const parsed = JSON.parse(compositionDraft.json || "{}");
+      setStatus("Creating composition...");
+      await post(`${API}/compositions?${qs}`, {
+        persona_id: selectedId,
+        title: compositionDraft.title.trim() || "Persona composition",
+        render: compositionDraft.render,
+        ...parsed,
+      });
+      setStatus(compositionDraft.render ? "Composition created and render requested" : "Composition created");
+      loadBundle();
+    } catch (e) {
+      setStatus(e.message);
+    }
+  }
+
+  async function renderComposition(row) {
+    if (!row?.id) return;
+    try {
+      setStatus("Rendering composition...");
+      const res = await post(`${API}/compositions/${row.id}/render?${qs}`, {});
+      const statusText = res?.render?.status || res?.composition?.status || "submitted";
+      setStatus(`Render ${statusText}`);
+      loadBundle();
+    } catch (e) {
+      setStatus(e.message);
+    }
+  }
+
+  async function duplicateComposition(row) {
+    if (!row?.id || !selectedId) return;
+    try {
+      setStatus("Duplicating composition...");
+      await post(`${API}/compositions/${row.id}/duplicate?${qs}`, {
+        target_persona_id: selectedId,
+        title: `${row.title || "Persona composition"} copy`,
+      });
+      setStatus("Composition duplicated");
       loadBundle();
     } catch (e) {
       setStatus(e.message);
@@ -689,6 +765,74 @@ export default function PersonaPanel({ projectId }) {
                 ),
                 h("textarea", { value: generation.prompt, onChange: (e) => setGeneration({ ...generation, prompt: e.target.value }), placeholder: "Prompt for this persona...", className: `${fieldClass()} min-h-[86px]` }),
                 h("button", { className: buttonClass(), disabled: !generation.prompt.trim() }, "Generate")
+              )),
+              panel("Compositions", h("div", { className: "grid gap-3" },
+                h("form", { onSubmit: createComposition, className: "grid gap-2" },
+                  h("div", { className: "text-xs text-text-muted" }, "Creates a Composer composition owned by this persona. AI clips are resolved with the persona identity and default voice/avatar before Composer receives them."),
+                  h("input", {
+                    value: compositionDraft.title,
+                    onChange: (e) => setCompositionDraft({ ...compositionDraft, title: e.target.value }),
+                    placeholder: "Composition title",
+                    className: fieldClass(),
+                  }),
+                  h("textarea", {
+                    value: compositionDraft.json,
+                    onChange: (e) => setCompositionDraft({ ...compositionDraft, json: e.target.value }),
+                    spellCheck: false,
+                    className: `${fieldClass()} min-h-[210px] font-mono text-xs`,
+                    title: "Composer-compatible JSON: tracks, soundtrack, background, and output",
+                  }),
+                  h("label", { className: "inline-flex items-center gap-2 text-sm text-text-muted" },
+                    h("input", {
+                      type: "checkbox",
+                      checked: compositionDraft.render,
+                      onChange: (e) => setCompositionDraft({ ...compositionDraft, render: e.target.checked }),
+                    }),
+                    "Render after create"
+                  ),
+                  h("button", { className: buttonClass(), disabled: !compositionDraft.json.trim() }, "Create composition")
+                ),
+                compositions.length === 0
+                  ? empty("No persona compositions yet.")
+                  : h("div", { className: "grid gap-2" },
+                    compositions.map((c) => h("div", { key: c.id, className: "border border-border rounded p-3 grid gap-2" },
+                      h("div", { className: "flex items-start gap-2" },
+                        h("span", { className: "min-w-0 flex-1" },
+                          h("span", { className: "block text-sm font-medium truncate" }, c.title || `Composition ${c.id}`),
+                          h("span", { className: "block text-xs text-text-dim truncate" },
+                            [
+                              `persona:${c.persona_id}`,
+                              c.composer_composition_id ? `composer:${c.composer_composition_id}` : "",
+                              c.latest_render_id ? `render:${c.latest_render_id}` : "",
+                              c.status,
+                            ].filter(Boolean).join(" · ")
+                          )
+                        ),
+                        c.storage_file_id
+                          ? h("a", {
+                            href: `/api/apps/storage/files/${c.storage_file_id}/content`,
+                            target: "_blank",
+                            rel: "noopener",
+                            className: "text-xs text-accent hover:underline shrink-0",
+                          }, `storage:${c.storage_file_id}`)
+                          : null
+                      ),
+                      c.render_error ? h("div", { className: "text-xs text-red-400 line-clamp-2" }, c.render_error) : null,
+                      h("div", { className: "flex flex-wrap gap-2" },
+                        h("button", {
+                          type: "button",
+                          onClick: () => renderComposition(c),
+                          className: secondaryButtonClass(),
+                          disabled: !c.composer_composition_id,
+                        }, "Render"),
+                        h("button", {
+                          type: "button",
+                          onClick: () => duplicateComposition(c),
+                          className: secondaryButtonClass(),
+                        }, "Duplicate")
+                      )
+                    ))
+                  )
               )),
               panel("Recent Assets", h("div", { className: "grid gap-2" },
                 assets.length === 0 ? empty("No generated assets yet.") : assets.map((a) =>
