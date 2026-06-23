@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: composer
 display_name: Composer
-version: 0.3.33
+version: 0.3.34
 description: |
   Multi-clip video composition. Stitch generated or uploaded assets
   into a single video — one visual track, timed audio tracks, optional
@@ -10,6 +10,11 @@ description: |
   default, on a render host via instances when render_host_id is
   set, or against a SaaS render backend (Shotstack et al) when one
   is bound to the render_executor role.
+
+  v0.3.34 makes remote renders portable across Linux and macOS-style
+  checksum tools by preferring sha256sum with a shasum fallback, and
+  scopes Composer's Media Studio model, voice, and avatar lookups to
+  the active project.
 
   v0.3.24 adds first-class AI image size metadata in Composer, passing
   portrait and landscape dimensions through to Media Studio so generated

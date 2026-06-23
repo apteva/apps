@@ -200,7 +200,14 @@ func remoteRenderScript(urls []string, ffmpegCmd, format, projectID, publicURL, 
 	b.WriteString(ffmpegCmd)
 	b.WriteByte('\n')
 	fmt.Fprintf(&b, "BYTES=$(stat -c %%s ./out.%s 2>/dev/null || stat -f %%z ./out.%s)\n", format, format)
-	b.WriteString("SHA=$(shasum -a 256 ./out.* | awk '{print $1}')\n")
+	b.WriteString("if command -v sha256sum >/dev/null 2>&1; then\n")
+	b.WriteString("  SHA=$(sha256sum ./out.* | awk '{print $1}')\n")
+	b.WriteString("elif command -v shasum >/dev/null 2>&1; then\n")
+	b.WriteString("  SHA=$(shasum -a 256 ./out.* | awk '{print $1}')\n")
+	b.WriteString("else\n")
+	b.WriteString("  echo \"missing sha256sum/shasum on remote render host\" >&2\n")
+	b.WriteString("  exit 127\n")
+	b.WriteString("fi\n")
 	uploadURL := strings.TrimRight(publicURL, "/") + "/api/apps/storage/files"
 	if projectID != "" {
 		uploadURL += "?project_id=" + url.QueryEscape(projectID)

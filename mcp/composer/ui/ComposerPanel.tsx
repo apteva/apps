@@ -1,4 +1,4 @@
-// ComposerPanel v0.3.33 - timeline editor with storage and Media Studio AI assets.
+// ComposerPanel v0.3.34 - timeline editor with storage and Media Studio AI assets.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
@@ -1583,6 +1583,7 @@ export default function ComposerPanel({ projectId, installId }: NativePanelProps
                 <RenderPreview render={selected?.latest_render || null} outputFormat={draft.output.format} onOpen={setLightbox} />
               </section>
               <Inspector
+                projectId={projectId}
                 draft={draft}
                 clip={selectedClip}
                 onDraft={updateDraft}
@@ -1624,6 +1625,7 @@ export default function ComposerPanel({ projectId, installId }: NativePanelProps
       {lightbox && <Lightbox render={lightbox} outputFormat={draft.output.format} onClose={() => setLightbox(null)} />}
       {clipEditor && (
         <ClipEditorModal
+          projectId={projectId}
           target={clipEditor}
           visualClip={clipEditor.kind === "visual" ? clips.find((clip) => clip.id === clipEditor.id) || null : null}
           audioClip={clipEditor.kind === "audio" ? audioClips.find((clip) => clip.id === clipEditor.id) || null : null}
@@ -2170,6 +2172,7 @@ function Timeline({
 }
 
 function ClipEditorModal({
+  projectId,
   target,
   visualClip,
   audioClip,
@@ -2185,6 +2188,7 @@ function ClipEditorModal({
   onDeleteVisual,
   onDeleteAudio,
 }: {
+  projectId: string;
   target: ClipEditorTarget;
   visualClip: ClipDraft | null;
   audioClip: AudioClipDraft | null;
@@ -2272,6 +2276,7 @@ function ClipEditorModal({
             )}
             {visualClip.ai && (
               <AIAssetEditor
+                projectId={projectId}
                 title="AI source"
                 ai={visualClip.ai}
                 allowedKinds={["image", "video", "avatar"]}
@@ -2360,6 +2365,7 @@ function ClipEditorModal({
             )}
             {audioClip.ai && (
               <AIAssetEditor
+                projectId={projectId}
                 title="AI audio"
                 ai={audioClip.ai}
                 allowedKinds={["music", "audio_tts", "audio_sfx"]}
@@ -2390,6 +2396,7 @@ function ClipEditorModal({
 }
 
 function Inspector({
+  projectId,
   draft,
   clip,
   onDraft,
@@ -2413,6 +2420,7 @@ function Inspector({
   onGenerateSoundtrackAI,
   aiBusy,
 }: {
+  projectId: string;
   draft: DraftState;
   clip: ClipDraft | null;
   onDraft: (fn: (draft: DraftState) => DraftState) => void;
@@ -2512,6 +2520,7 @@ function Inspector({
           </button>
           {draft.soundtrack?.ai && (
             <AIAssetEditor
+              projectId={projectId}
               title="AI soundtrack"
               ai={draft.soundtrack.ai}
               allowedKinds={["music", "audio_tts", "audio_sfx"]}
@@ -2647,6 +2656,7 @@ function Inspector({
                   )}
                   {audio.ai && (
                     <AIAssetEditor
+                      projectId={projectId}
                       title="AI audio"
                       ai={audio.ai}
                       allowedKinds={["music", "audio_tts", "audio_sfx"]}
@@ -2718,6 +2728,7 @@ function Inspector({
             </button>
             {clip.ai && (
               <AIAssetEditor
+                projectId={projectId}
                 title="AI source"
                 ai={clip.ai}
                 allowedKinds={["video", "image", "avatar"]}
@@ -2866,6 +2877,7 @@ function AudioProcessingEditor({
 }
 
 function AIAssetEditor({
+  projectId,
   title,
   ai,
   allowedKinds,
@@ -2874,6 +2886,7 @@ function AIAssetEditor({
   onGenerate,
   onClear,
 }: {
+  projectId: string;
   title: string;
   ai: AIAsset;
   allowedKinds: MediaKind[];
@@ -2920,14 +2933,14 @@ function AIAssetEditor({
 
   useEffect(() => {
     let cancelled = false;
-    fetch(`/api/apps/media-studio/models?kind=${encodeURIComponent(ai.media_kind)}`, { credentials: "same-origin" })
+    fetch(withProject(`/api/apps/media-studio/models?kind=${encodeURIComponent(ai.media_kind)}`, projectId), { credentials: "same-origin" })
       .then((r) => (r.ok ? r.json() : null))
       .then((data) => {
         if (!cancelled) setModels(Array.isArray(data?.models) ? data.models : []);
       })
       .catch(() => !cancelled && setModels([]));
     if (ai.media_kind === "audio_tts" || ai.media_kind === "avatar") {
-      fetch(`/api/apps/media-studio/voices?kind=${encodeURIComponent(ai.media_kind)}`, { credentials: "same-origin" })
+      fetch(withProject(`/api/apps/media-studio/voices?kind=${encodeURIComponent(ai.media_kind)}`, projectId), { credentials: "same-origin" })
         .then((r) => (r.ok ? r.json() : null))
         .then((data) => {
           if (!cancelled) setVoices(Array.isArray(data?.voices) ? data.voices : []);
@@ -2937,7 +2950,7 @@ function AIAssetEditor({
       setVoices([]);
     }
     if (ai.media_kind === "avatar") {
-      fetch(`/api/apps/media-studio/avatars`, { credentials: "same-origin" })
+      fetch(withProject(`/api/apps/media-studio/avatars`, projectId), { credentials: "same-origin" })
         .then((r) => (r.ok ? r.json() : null))
         .then((data) => {
           if (!cancelled) setAvatars(Array.isArray(data?.avatars) ? data.avatars : []);
@@ -2949,7 +2962,7 @@ function AIAssetEditor({
     return () => {
       cancelled = true;
     };
-  }, [ai.media_kind]);
+  }, [ai.media_kind, projectId]);
 
   return (
     <div className="border border-border rounded p-3 space-y-2 bg-bg">
