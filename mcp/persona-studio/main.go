@@ -1317,7 +1317,11 @@ func resolvePersonaCompositionPlan(ctx *sdk.AppCtx, pid string, personaID int64,
 				prompt = cleanString(clip["text"])
 			}
 			if prompt != "" {
-				ai["prompt"] = buildResolvedPrompt(persona, style, refs, items, prompt, kind)
+				if compositionKindUsesLiteralScript(kind) {
+					ai["prompt"] = prompt
+				} else {
+					ai["prompt"] = buildResolvedPrompt(persona, style, refs, items, prompt, kind)
+				}
 				ai["persona_prompt"] = prompt
 			}
 			ai["media_kind"] = kind
@@ -1476,6 +1480,15 @@ func normalizeCompositionAIKind(v string) string {
 		return "audio_tts"
 	default:
 		return ""
+	}
+}
+
+func compositionKindUsesLiteralScript(kind string) bool {
+	switch strings.ToLower(strings.TrimSpace(kind)) {
+	case "audio_tts", "avatar":
+		return true
+	default:
+		return false
 	}
 }
 

@@ -154,13 +154,16 @@ func TestResolvePersonaCompositionPlanInjectsDefaults(t *testing.T) {
 	if audioAI["voice"] != "voice_local" {
 		t.Fatalf("voice default not injected: %#v", audioAI)
 	}
-	if !strings.Contains(audioAI["prompt"].(string), "Mira Vale") || !strings.Contains(audioAI["prompt"].(string), "Say hello.") {
-		t.Fatalf("audio prompt not persona-resolved: %s", audioAI["prompt"])
+	if audioAI["prompt"] != "Say hello." {
+		t.Fatalf("audio script should stay literal, got: %s", audioAI["prompt"])
 	}
 	visualClip := tracks[1].(map[string]any)["clips"].([]any)[0].(map[string]any)
 	visualAI := visualClip["ai"].(map[string]any)
 	if visualAI["source_image"] != "storage:42" {
 		t.Fatalf("source image not injected: %#v", visualAI)
+	}
+	if !strings.Contains(visualAI["prompt"].(string), "Mira Vale") || !strings.Contains(visualAI["prompt"].(string), "Portrait.") {
+		t.Fatalf("visual prompt should be persona-resolved: %s", visualAI["prompt"])
 	}
 }
 
