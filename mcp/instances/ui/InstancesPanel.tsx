@@ -1083,6 +1083,7 @@ function CreateDialog({
   const [serverTypes, setServerTypes] = useState<ServerTypeWire[]>([]);
   const [locations, setLocations] = useState<LocationWire[]>([]);
   const [images, setImages] = useState<ImageWire[]>([]);
+  const [catalogProvider, setCatalogProvider] = useState("");
   const [catalogLoading, setCatalogLoading] = useState(true);
   const [catalogError, setCatalogError] = useState<string | null>(null);
 
@@ -1103,6 +1104,7 @@ function CreateDialog({
         const stJson = await stRes.json();
         const locJson = await locRes.json();
         const imgJson = await imgRes.json();
+        setCatalogProvider(stJson.provider || locJson.provider || imgJson.provider || "");
         // Hide deprecated server types from the default view —
         // they still come back in the API for completeness but
         // operators shouldn't pick them for a new server.
@@ -1212,7 +1214,7 @@ function CreateDialog({
           <p className="text-xs text-text-muted">Loading server types, regions, and images from the bound provider…</p>
         ) : (
           <p className="text-xs text-text-muted">
-            Live from bound provider: {serverTypes.length} types · {locations.length} regions · {images.length} images.
+            Live from {catalogProvider || "bound provider"}: {serverTypes.length} types · {locations.length} regions · {images.length} images.
           </p>
         )}
         <div>

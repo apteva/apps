@@ -63,7 +63,6 @@ func digitalOceanListImages(ctx *sdk.AppCtx) ([]Image, error) {
 	}
 	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(bound.ConnectionID, "list_images", map[string]any{
 		"type":     "distribution",
-		"public":   true,
 		"per_page": 200,
 	})
 	if err != nil {
