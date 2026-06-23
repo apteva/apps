@@ -17,7 +17,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: fleet
 display_name: Fleet
-version: 0.8.7
+version: 0.8.8
 description: Control plane for a local fleet of apteva tenants.
 author: Apteva
 scopes: [project, global]
@@ -26,6 +26,8 @@ requires:
     - db.write.app
     - net.egress
     - platform.apps.call
+    - platform.connections.execute
+    - platform.ingress.write
   integrations:
     - role: domains
       kind: app
@@ -33,18 +35,6 @@ requires:
       compatible_app_names: [domains]
       label: Domains app
       hint: Install the Domains app to attach custom hostnames to tenants.
-    - role: certs
-      kind: app
-      required: false
-      compatible_app_names: [certs]
-      label: Certs app
-      hint: Install the Certs app to auto-issue Let's Encrypt certs on attach.
-    - role: routes
-      kind: app
-      required: false
-      compatible_app_names: [routes]
-      label: Routes app
-      hint: Install the Routes app to publish tenants at public hostnames via the parent's reverse proxy.
     - role: host_provider
       kind: app
       required: false
@@ -84,9 +74,9 @@ provides:
     - name: tenant_run_remote
       description: Proxy an MCP tool call to a tenant.
     - name: tenant_attach_domain
-      description: Attach a public hostname to a tenant. Managed DNS uses Domains/Certs/Routes; client-managed DNS skips Certs-app issuance and relies on the parent edge proxy for automatic HTTPS.
+      description: Attach a public hostname to a tenant via Domains DNS and server-native ingress.
     - name: tenant_detach_domain
-      description: Clear a tenant's domain link (DNS delete, cert revoke, route unregister).
+      description: Clear a tenant's domain link.
     - name: tenant_domain_grant
       description: Delegate a base domain to a tenant for tenant-local apps.
     - name: tenant_domain_list
@@ -97,6 +87,12 @@ provides:
       description: Proxy a DNS upsert for a tenant inherited domain.
     - name: tenant_domain_record_delete
       description: Proxy a DNS delete for a tenant inherited domain.
+    - name: tenant_provider_grant
+      description: Expose a parent integration connection inside a tenant as a tenant-local virtual connection.
+    - name: tenant_provider_grant_list
+      description: List delegated provider/integration grants.
+    - name: tenant_provider_grant_revoke
+      description: Revoke a delegated provider/integration grant.
     - name: tenant_migrate
       description: Move a Fleet tenant between local and Instances hosts — cold transfer of the data dir, re-spawn there, re-point the route.
     - name: tenant_update
@@ -382,7 +378,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "tenant_attach_domain",
-			Description: "Attach a public hostname to a tenant. Two modes: (1) manage_dns=true (default) — Domains app writes the DNS record, Certs app uses its configured challenge flow, Routes app proxies; needs the apex registered in the Domains catalog. (2) manage_dns=false — client already pointed DNS at this machine; Fleet skips registrar and Certs-app issuance, then Routes proxies and the parent edge proxy handles automatic HTTPS. Idempotent; partial-failure tolerant. Args: tenant_id, fqdn, manage_dns? (default true), target? (DNS-mode only; defaults to fleet's public_host), type? (DNS-mode only; A or CNAME; inferred from target), ttl?.",
+			Description: "Attach a public hostname to a tenant. Two modes: (1) manage_dns=true (default) — Domains app writes the DNS record, then Fleet registers server-native ingress/cert intent; needs the apex registered in the Domains catalog. (2) manage_dns=false — client already pointed DNS at this machine; Fleet skips registrar writes and only registers ingress. Idempotent; partial-failure tolerant. Args: tenant_id, fqdn, manage_dns? (default true), target? (DNS-mode only; defaults to fleet's public_host), type? (DNS-mode only; A or CNAME; inferred from target), ttl?.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -399,7 +395,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "tenant_domain_grant",
-			Description: "Delegate a base domain to a tenant for tenant-local apps. Fleet writes the base + wildcard DNS records, kicks off base + wildcard cert issuance, and registers parent routes to the tenant server. Args: tenant_id, domain, target?, type? (A|CNAME), ttl?.",
+			Description: "Delegate a base domain to a tenant for tenant-local apps. Fleet writes the base + wildcard DNS records and registers parent ingress to the tenant server. Args: tenant_id, domain, target?, type? (A|CNAME), ttl?.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -426,7 +422,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "tenant_domain_revoke",
-			Description: "Revoke a Fleet domain grant: unregister parent routes, revoke certs, delete DNS records, and remove the grant. Args: tenant_id, domain.",
+			Description: "Revoke a Fleet domain grant: unregister parent ingress, delete DNS records, and remove the grant. Args: tenant_id, domain.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -470,6 +466,53 @@ func (a *App) MCPTools() []sdk.Tool {
 			Handler: a.toolDomainRecordDelete,
 		},
 		{
+			Name:        "tenant_provider_grant",
+			Description: "Expose a parent integration connection inside a tenant as a tenant-local virtual connection. Generic provider delegation with optional tenant app binding and constraints. Args: tenant_id, project_id, app_slug, parent_connection_id, grant_id?, name?, tenant_install_id?, tenant_role?, allowed_tools?, allowed_domains?, allowed_from?, metadata?.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"tenant_id":            map[string]any{"type": "string"},
+					"project_id":           map[string]any{"type": "string"},
+					"app_slug":             map[string]any{"type": "string"},
+					"parent_connection_id": map[string]any{"type": "integer"},
+					"grant_id":             map[string]any{"type": "string"},
+					"name":                 map[string]any{"type": "string"},
+					"tenant_install_id":    map[string]any{"type": "integer"},
+					"tenant_role":          map[string]any{"type": "string"},
+					"allowed_tools":        map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+					"allowed_domains":      map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+					"allowed_from":         map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+					"metadata":             map[string]any{"type": "object"},
+				},
+				"required": []string{"tenant_id", "project_id", "app_slug", "parent_connection_id"},
+			},
+			Handler: a.toolProviderGrant,
+		},
+		{
+			Name:        "tenant_provider_grant_list",
+			Description: "List delegated provider/integration grants. Args: tenant_id? (optional filter).",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"tenant_id": map[string]any{"type": "string"},
+				},
+			},
+			Handler: a.toolProviderGrantList,
+		},
+		{
+			Name:        "tenant_provider_grant_revoke",
+			Description: "Revoke a delegated provider/integration grant, unbind the tenant app role when known, and delete the tenant virtual connection. Args: tenant_id, grant_id.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"tenant_id": map[string]any{"type": "string"},
+					"grant_id":  map[string]any{"type": "string"},
+				},
+				"required": []string{"tenant_id", "grant_id"},
+			},
+			Handler: a.toolProviderGrantRevoke,
+		},
+		{
 			Name:        "tenant_migrate",
 			Description: "Move a Fleet-managed tenant between the local parent host and Instances VPS hosts. Cold migration: stops the source apteva-server, archives its data dir, transfers + extracts on the target host, boots apteva-server there against the moved DB (admin + api_key travel with the data), re-points the route, and removes the source copy after target health. On failure before commit, the source is restarted and the row remains unchanged. Args: tenant_id (required), instance_id (required; 0 = local parent, >0 = Instances row id), port? (target port; auto if omitted).",
 			InputSchema: map[string]any{
@@ -485,7 +528,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "tenant_detach_domain",
-			Description: "Clear a tenant's domain link: best-effort DNS record delete (via Domains app), cert revoke (Certs app), route unregister (Routes app), and local clear. Local clear runs even on remote failure. Args: tenant_id.",
+			Description: "Clear a tenant's domain link: best-effort DNS record delete when Fleet owns the record, server-native ingress unregister, and local clear. Local clear runs even on remote failure. Args: tenant_id.",
 			InputSchema: idOnlySchema(),
 			Handler:     a.toolDetachDomain,
 		},

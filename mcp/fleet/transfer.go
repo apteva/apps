@@ -86,12 +86,12 @@ func (a *App) stopTenantOnHost(ctx *sdk.AppCtx, t *Tenant, port int) {
 	a.procMu.Unlock()
 }
 
-func (a *App) startTenantOnHost(ctx *sdk.AppCtx, h fleetHost, slug, dir, version string, port int, prevStatus string) (baseURL, newStatus string, err error) {
+func (a *App) startTenantOnHost(ctx *sdk.AppCtx, h fleetHost, tenantID, slug, dir, version string, port int, prevStatus string) (baseURL, newStatus string, err error) {
 	newStatus = statusAfterRestart(prevStatus)
 	if h.IsLocal() {
 		spawnCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		defer cancel()
-		_, proc, err := a.spawnTenant(spawnCtx, slug, dir, tenantAptevaBin(version), port, false)
+		_, proc, err := a.spawnTenant(spawnCtx, tenantID, slug, dir, tenantAptevaBin(version), port, false)
 		if err != nil {
 			return "", "", err
 		}

@@ -73,6 +73,36 @@ func TestManifestsAgree_VersionAndScopes(t *testing.T) {
 	}
 }
 
+func TestManifestUsesServerNativeIngress(t *testing.T) {
+	manifests := map[string]sdk.Manifest{"embedded": (&App{}).Manifest()}
+	b, err := os.ReadFile("apteva.yaml")
+	if err != nil {
+		t.Fatalf("read apteva.yaml: %v", err)
+	}
+	disk, err := sdk.ParseManifest(b)
+	if err != nil {
+		t.Fatalf("parse apteva.yaml: %v", err)
+	}
+	manifests["disk"] = *disk
+
+	for label, m := range manifests {
+		hasIngress := false
+		for _, p := range m.Requires.Permissions {
+			if string(p) == "platform.ingress.write" {
+				hasIngress = true
+			}
+		}
+		if !hasIngress {
+			t.Errorf("%s manifest missing platform.ingress.write", label)
+		}
+		for _, dep := range m.Requires.Integrations {
+			if dep.Role == "certs" || dep.Role == "routes" {
+				t.Errorf("%s manifest still requires legacy %q integration", label, dep.Role)
+			}
+		}
+	}
+}
+
 func TestMCPTools_DeclaredMatchHandlers(t *testing.T) {
 	// Every tool the manifest declares must have a matching handler,
 	// and every handler must be declared. Mismatch = the dashboard

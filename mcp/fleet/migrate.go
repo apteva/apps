@@ -74,7 +74,7 @@ func (a *App) toolMigrate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	rollback := func(stage string, cause error) (any, error) {
 		_ = a.store.recordEvent(t.ID, "migrate_failed", "user",
 			map[string]any{"stage": stage, "error": cause.Error()})
-		if baseURL, status, rerr := a.startTenantOnHost(ctx, sourceHost, t.Slug, sourceDir, version, sourcePort, prevStatus); rerr == nil {
+		if baseURL, status, rerr := a.startTenantOnHost(ctx, sourceHost, t.ID, t.Slug, sourceDir, version, sourcePort, prevStatus); rerr == nil {
 			_ = a.store.setStatus(t.ID, status, "user")
 			_ = a.store.recordEvent(t.ID, "migrate_rolled_back", "user",
 				map[string]any{"base_url": baseURL, "port": sourcePort, "instance_id": t.InstanceID})
@@ -86,7 +86,7 @@ func (a *App) toolMigrate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return nil, fmt.Errorf("migrate %s: %w (source tenant restart attempted)", stage, cause)
 	}
 	if t.InstanceID == targetID {
-		baseURL, newStatus, err := a.startTenantOnHost(ctx, sourceHost, t.Slug, sourceDir, version, targetPort, prevStatus)
+		baseURL, newStatus, err := a.startTenantOnHost(ctx, sourceHost, t.ID, t.Slug, sourceDir, version, targetPort, prevStatus)
 		if err != nil {
 			return rollback("restart on new port", err)
 		}
@@ -131,7 +131,7 @@ func (a *App) toolMigrate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		}
 	}
 	targetStarted := false
-	baseURL, newStatus, err := a.startTenantOnHost(ctx, targetHost, t.Slug, targetDir, version, targetPort, prevStatus)
+	baseURL, newStatus, err := a.startTenantOnHost(ctx, targetHost, t.ID, t.Slug, targetDir, version, targetPort, prevStatus)
 	if err != nil {
 		a.removeTenantData(ctx, targetHost, t.Slug, targetDir)
 		return rollback("target start", err)

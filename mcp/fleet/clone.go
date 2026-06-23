@@ -138,7 +138,7 @@ func (a *App) toolClone(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 			"domains_copied":   false,
 		}, nil
 	}
-	baseURL, newStatus, err := a.startTenantOnHost(ctx, targetHost, slug, targetDir, tenantVersion(source), port, source.Status)
+	baseURL, newStatus, err := a.startTenantOnHost(ctx, targetHost, clone.ID, slug, targetDir, tenantVersion(source), port, source.Status)
 	if err != nil {
 		_ = a.store.setStatus(clone.ID, StatusFailed, "user")
 		_ = a.store.recordEvent(clone.ID, "clone_start_failed", "user", map[string]any{"error": err.Error()})
