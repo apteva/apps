@@ -163,15 +163,22 @@ func remotePreflight(app *sdk.AppCtx, hostID int64) error {
 		return errors.New("nil app ctx")
 	}
 	var probe struct {
-		ID int64 `json:"id"`
+		ID       int64 `json:"id"`
+		Instance *struct {
+			ID int64 `json:"id"`
+		} `json:"instance"`
 	}
 	err := app.PlatformAPI().CallAppResult("instances", "instance_get",
 		map[string]any{"id": hostID}, &probe)
 	if err != nil {
 		return fmt.Errorf("instance_get failed (is instances bound?): %w", err)
 	}
-	if probe.ID != hostID {
-		return fmt.Errorf("instances returned id=%d, want %d", probe.ID, hostID)
+	gotID := probe.ID
+	if gotID == 0 && probe.Instance != nil {
+		gotID = probe.Instance.ID
+	}
+	if gotID != hostID {
+		return fmt.Errorf("instances returned id=%d, want %d", gotID, hostID)
 	}
 	return nil
 }

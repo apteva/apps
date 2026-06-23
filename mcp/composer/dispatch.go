@@ -758,7 +758,7 @@ func (a *App) handleBindings(w http.ResponseWriter, r *http.Request) {
 	pid := projectScopeFromArgs(globalCtx, map[string]any{"project_id": r.URL.Query().Get("project_id")})
 	out := map[string]any{
 		"storage_bound":     appToolAvailable(globalCtx, "storage", "files_list", map[string]any{"limit": 1, "_project_id": pid}),
-		"instances_bound":   globalCtx.IntegrationFor("instances") != nil,
+		"instances_bound":   appToolAvailable(globalCtx, "instances", "instance_get", map[string]any{"id": 0, "_project_id": pid}),
 		"mediastudio_bound": appToolAvailable(globalCtx, "media-studio", "media_history", map[string]any{"limit": 1, "_project_id": pid}),
 		"render_host_id":    renderHostID(globalCtx),
 		"ffmpeg_path":       ffmpegPath(),
