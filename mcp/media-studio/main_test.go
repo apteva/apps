@@ -2165,6 +2165,59 @@ func TestToolMediaAvatarCreate_HeyGenPhotoQueuesJob(t *testing.T) {
 	if status != "training" || avatarID != "look-1" {
 		t.Fatalf("job row wrong: status=%s avatar_id=%s", status, avatarID)
 	}
+	var kind, providerIdentityID string
+	if err := ctx.AppDB().QueryRow(`SELECT kind, provider_identity_id FROM media_identities WHERE name='Marcus'`).Scan(&kind, &providerIdentityID); err != nil {
+		t.Fatal(err)
+	}
+	if kind != "avatar" || providerIdentityID != "look-1" {
+		t.Fatalf("identity row wrong: kind=%s provider_identity_id=%s", kind, providerIdentityID)
+	}
+}
+
+func TestToolMediaVoiceCreate_ElevenLabsDesignCreatesIdentity(t *testing.T) {
+	pf := newRecordingPlatform()
+	pf.appSlug = "elevenlabs"
+	pf.identity.Bindings = map[string]any{"audio_provider": float64(61)}
+	pf.perExecuteResults = map[string]*sdk.ExecuteResult{
+		"design_voice": {
+			Success: true, Status: 200,
+			Data: json.RawMessage(`{"previews":[{"generated_voice_id":"gen-1","audio_base_64":"U0FNUExF","media_type":"audio/mpeg","duration_secs":4.2,"language":"en"}],"text":"This is a sufficiently long preview text for the designed voice."}`),
+		},
+		"create_voice_from_preview": {
+			Success: true, Status: 200,
+			Data: json.RawMessage(`{"voice_id":"voice-1","name":"Calm Guide","category":"generated","preview_url":"https://example.test/preview.mp3","labels":{"gender":"female"}}`),
+		},
+	}
+	ctx := newMediaStudioCtx(t, pf)
+	app := &App{}
+	out, err := app.toolMediaVoiceCreate(ctx, map[string]any{
+		"name":        "Calm Guide",
+		"source_type": "prompt",
+		"prompt":      "A calm, warm, slow female hypnosis narrator voice with intimate studio quality.",
+		"options": map[string]any{
+			"auto_generate_text": true,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	meta := out.(map[string]any)["_meta"].(map[string]any)
+	if meta["provider_identity_id"] != "voice-1" || meta["status"] != "ready" {
+		t.Fatalf("unexpected meta: %+v", meta)
+	}
+	if len(pf.executeCalls) != 2 || pf.executeCalls[0].Tool != "design_voice" || pf.executeCalls[1].Tool != "create_voice_from_preview" {
+		t.Fatalf("unexpected provider calls: %+v", pf.executeCalls)
+	}
+	if pf.executeCalls[1].Input["generated_voice_id"] != "gen-1" {
+		t.Fatalf("create call did not save selected preview: %+v", pf.executeCalls[1].Input)
+	}
+	var kind, provider, providerIdentityID, providerJobID string
+	if err := ctx.AppDB().QueryRow(`SELECT kind, provider, provider_identity_id, provider_job_id FROM media_identities WHERE name='Calm Guide'`).Scan(&kind, &provider, &providerIdentityID, &providerJobID); err != nil {
+		t.Fatal(err)
+	}
+	if kind != "voice" || provider != "elevenlabs" || providerIdentityID != "voice-1" || providerJobID != "gen-1" {
+		t.Fatalf("identity row wrong: kind=%s provider=%s identity=%s job=%s", kind, provider, providerIdentityID, providerJobID)
+	}
 }
 
 func TestNormalizeAvatarResponse_HeyGen(t *testing.T) {

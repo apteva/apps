@@ -123,7 +123,7 @@ func (a *App) toolMediaAvatarCreate(ctx *sdk.AppCtx, args map[string]any) (any, 
 	if normalized.Status == "" {
 		normalized.Status = "training"
 	}
-	jobID, err := insertAvatarCreateJob(ctx, avatarCreateJob{
+	job := avatarCreateJob{
 		ProjectID:        pid,
 		Provider:         bound.AppSlug,
 		SourceType:       sourceType,
@@ -135,9 +135,14 @@ func (a *App) toolMediaAvatarCreate(ctx *sdk.AppCtx, args map[string]any) (any, 
 		ConsentRef:       consentRef,
 		Status:           normalized.Status,
 		Error:            normalized.Error,
-	}, sanitizedAvatarCreateJSON(args))
+	}
+	jobID, err := insertAvatarCreateJob(ctx, job, sanitizedAvatarCreateJSON(args))
 	if err != nil {
 		return mcpError("avatar created at provider but local tracking row failed: " + err.Error()), nil
+	}
+	job.ID = jobID
+	if _, err := upsertMediaIdentityFromAvatarJob(ctx, job); err != nil {
+		ctx.Logger().Warn("avatar identity upsert failed", "job_id", jobID, "err", err)
 	}
 	eventTopic := "avatar.create_queued"
 	if normalized.Status == "completed" {
@@ -524,6 +529,11 @@ func (a *App) pollOneAvatarCreateJob(app *sdk.AppCtx, bound *sdk.BoundIntegratio
 	j.ProviderJobID = firstNonEmpty(result.ProviderJobID, j.ProviderJobID)
 	j.ProviderAvatarID = firstNonEmpty(result.ProviderAvatarID, j.ProviderAvatarID)
 	j.ProviderGroupID = firstNonEmpty(result.ProviderGroupID, j.ProviderGroupID)
+	j.Status = status
+	j.Error = result.Error
+	if _, err := upsertMediaIdentityFromAvatarJob(app, j); err != nil {
+		app.Logger().Warn("avatar identity poll upsert failed", "job_id", j.ID, "err", err)
+	}
 	avatarCreateJobUpdate(app, j, status, result.Error, attempts)
 	if status == "completed" {
 		app.EmitWithProject("avatar.created", j.ProjectID, map[string]any{

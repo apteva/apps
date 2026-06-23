@@ -35,14 +35,14 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: media-studio
 display_name: Media Studio
-version: 0.10.25
+version: 0.10.26
 description: |
   Generate images, video, audio, music, and avatars via compatible
   providers. Optionally saves outputs to Storage, supports stable
   cache keys for app-to-app generation reuse, and can use OpenAI Codex
-  as a subscription-backed image provider. v0.10.25 makes the panel's
-  provider, model, voice, and avatar lookups project-scoped so project
-  installs do not fall back to global bindings.
+  as a subscription-backed image provider. v0.10.26 adds generic
+  reusable media identities for voices and avatars, including
+  ElevenLabs Voice Design creation through the audio provider.
 author: Apteva
 scopes: [project, global]
 requires:
@@ -71,10 +71,11 @@ requires:
     - role: audio_provider
       kind: integration
       compatible_slugs: [elevenlabs]
-      capabilities: [audio.tts, audio.sfx]
+      capabilities: [audio.tts, audio.sfx, voice.create]
       tools:
         audio.tts: text_to_speech
         audio.sfx: generate_sfx
+        voice.create: design_voice
       required: false
       label: "Audio provider"
     - role: music_provider
@@ -104,7 +105,13 @@ provides:
     - { name: media_generate, description: "Generate media (image/video/audio/music/avatar). Args: kind, prompt, model?, size?, duration?, voice?, aspect?, avatar?, storage_folder?, n?, options?, cache_key?, cache_policy?." }
     - { name: media_estimate, description: "Estimate generation cost without creating media. Args match media_generate." }
     - { name: media_delete, description: "Delete a media generation and, by default, its linked Storage files. Args: id, delete_storage?." }
+    - { name: media_identity_create, description: "Create a reusable provider-side identity such as a voice or avatar. Args: kind (voice|avatar), name, source_type (prompt|audio|photo|video), prompt?/voice_description?, source_image?, source_video?, options?." }
+    - { name: media_identity_list, description: "List Media Studio tracked reusable identities. Args: kind? (voice|avatar), limit?." }
+    - { name: media_identity_get, description: "Fetch one tracked reusable identity by id." }
+    - { name: media_voice_create, description: "Alias for media_identity_create with kind=voice. Supports ElevenLabs prompt-based Voice Design now; audio cloning requires multipart executor support." }
+    - { name: media_voice_list, description: "List tracked voice identities and, when bound, provider voice catalog entries." }
     - { name: media_avatar_create, description: "Create/train a reusable avatar from a photo or prompt. Args: name, source_type, source_image?/prompt?, options?." }
+    - { name: media_avatar_list, description: "List tracked avatar identities and provider avatar catalog entries." }
     - { name: media_history,  description: "List recent generations. Args: kind?, limit?, since?." }
     - { name: media_get,      description: "Fetch one generation by id. Args: id." }
   ui_panels:
@@ -177,6 +184,8 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/bindings", Handler: a.handleBindings},
 		{Pattern: "/models", Handler: a.handleListModels},
 		{Pattern: "/avatars", Handler: a.handleListAvatars},
+		{Pattern: "/identities", Handler: a.handleListIdentities},
+		{Pattern: "/identity-create", Handler: a.handleIdentityCreate},
 		{Pattern: "/avatar-capabilities", Handler: a.handleAvatarCapabilities},
 		{Pattern: "/avatar-create", Handler: a.handleAvatarCreate},
 		{Pattern: "/avatar-create-jobs", Handler: a.handleListAvatarCreateJobs},
@@ -304,6 +313,72 @@ func (a *App) MCPTools() []sdk.Tool {
 			Handler: a.toolMediaDelete,
 		},
 		{
+			Name:        "media_identity_create",
+			Description: "Create a reusable provider-side identity such as a voice or avatar. Args: kind (voice|avatar), name, source_type (voice: prompt|audio; avatar: photo|prompt|video), prompt?/voice_description?, generated_voice_id?, preview_index?, source_image?, source_video?, consent_video?, labels?, options?. Voice prompt creation uses ElevenLabs Voice Design when audio_provider is ElevenLabs.",
+			InputSchema: schemaObject(map[string]any{
+				"kind":              map[string]any{"type": "string", "enum": []string{"voice", "avatar"}},
+				"name":              map[string]any{"type": "string"},
+				"source_type":       map[string]any{"type": "string", "enum": []string{"prompt", "audio", "photo", "video"}},
+				"prompt":            map[string]any{"type": "string"},
+				"voice_description": map[string]any{"type": "string"},
+				"generated_voice_id": map[string]any{
+					"type":        "string",
+					"description": "Optional ElevenLabs generated_voice_id from a previous design/remix preview; skips preview generation and saves this preview.",
+				},
+				"preview_index": map[string]any{
+					"type":        "integer",
+					"default":     0,
+					"description": "Which generated preview to save when the provider returns multiple candidates.",
+				},
+				"source_image":  map[string]any{"type": "string"},
+				"source_video":  map[string]any{"type": "string"},
+				"consent_video": map[string]any{"type": "string"},
+				"labels":        map[string]any{"type": "object"},
+				"options":       map[string]any{"type": "object"},
+			}, []string{"kind", "name", "source_type"}),
+			Handler: a.toolMediaIdentityCreate,
+		},
+		{
+			Name:        "media_identity_list",
+			Description: "List Media Studio tracked reusable identities. Args: kind? (voice|avatar), limit? (default 100, max 200).",
+			InputSchema: schemaObject(map[string]any{
+				"kind":  map[string]any{"type": "string", "enum": []string{"voice", "avatar"}},
+				"limit": map[string]any{"type": "integer", "default": 100},
+			}, nil),
+			Handler: a.toolMediaIdentityList,
+		},
+		{
+			Name:        "media_identity_get",
+			Description: "Fetch one Media Studio tracked reusable identity by id. Args: id.",
+			InputSchema: schemaObject(map[string]any{
+				"id": map[string]any{"type": "integer"},
+			}, []string{"id"}),
+			Handler: a.toolMediaIdentityGet,
+		},
+		{
+			Name:        "media_voice_create",
+			Description: "Create a reusable voice identity. Alias for media_identity_create with kind=voice. Supports ElevenLabs prompt-based Voice Design now; source_type=audio cloning is declared in the provider catalog but waits for multipart executor support.",
+			InputSchema: schemaObject(map[string]any{
+				"name":               map[string]any{"type": "string"},
+				"source_type":        map[string]any{"type": "string", "enum": []string{"prompt", "audio"}},
+				"prompt":             map[string]any{"type": "string"},
+				"voice_description":  map[string]any{"type": "string"},
+				"generated_voice_id": map[string]any{"type": "string"},
+				"preview_index":      map[string]any{"type": "integer", "default": 0},
+				"labels":             map[string]any{"type": "object"},
+				"options":            map[string]any{"type": "object"},
+			}, []string{"name", "source_type"}),
+			Handler: a.toolMediaVoiceCreate,
+		},
+		{
+			Name:        "media_voice_list",
+			Description: "List tracked voice identities and, when an audio provider is bound, provider voice catalog entries. Args: limit?.",
+			InputSchema: schemaObject(map[string]any{
+				"limit": map[string]any{"type": "integer", "default": 100},
+			}, nil),
+			Handler: a.toolMediaVoiceList,
+		},
+		{
 			Name:        "media_avatar_create",
 			Description: "Create/train a reusable avatar through the bound avatar provider. Generic args: name (required), source_type (photo|prompt|video), source_image? (storage:N, URL, or base64 for photo), prompt? (for prompt avatars), source_video?/consent_video? (future video/digital-twin flows), options? (provider extras). Returns an async avatar_create job; refresh /avatars when it completes.",
 			InputSchema: schemaObject(map[string]any{
@@ -338,6 +413,14 @@ func (a *App) MCPTools() []sdk.Tool {
 				},
 			}, []string{"name", "source_type"}),
 			Handler: a.toolMediaAvatarCreate,
+		},
+		{
+			Name:        "media_avatar_list",
+			Description: "List tracked avatar identities and, when an avatar provider is bound, provider avatar catalog entries. Args: limit?.",
+			InputSchema: schemaObject(map[string]any{
+				"limit": map[string]any{"type": "integer", "default": 100},
+			}, nil),
+			Handler: a.toolMediaAvatarList,
 		},
 		{
 			Name:        "media_history",
