@@ -106,9 +106,23 @@ function formatCPUDetail(cpu: MetricsWire["cpu"]): string {
   return cpu.cores && cpu.cores > 0 ? `${pct} · ${cpu.cores} vCPU` : pct;
 }
 
-function formatPriceEUR(cents: number): string {
+function providerCurrencySymbol(provider?: string): string {
+  return provider === "digitalocean" ? "$" : "€";
+}
+
+function formatProviderPrice(cents: number, provider?: string): string {
   if (!cents) return "";
-  return `€${(cents / 100).toFixed(2)}`;
+  return `${providerCurrencySymbol(provider)}${(cents / 100).toFixed(2)}`;
+}
+
+function formatRemoteTotal(instances: InstanceWire[]): string {
+  const priced = instances.filter((i) => i.provider !== "local" && i.monthly_cost_cents > 0);
+  if (priced.length === 0) return "";
+  const providers = new Set(priced.map((i) => i.provider));
+  const total = priced.reduce((s, i) => s + (i.monthly_cost_cents || 0), 0);
+  return providers.size === 1
+    ? formatProviderPrice(total, priced[0]?.provider)
+    : `${(total / 100).toFixed(2)}`;
 }
 
 // ─── Visuals ──────────────────────────────────────────────────────
@@ -364,10 +378,9 @@ export default function InstancesPanel({ projectId, installId }: NativePanelProp
   // Cost rollup: sum of monthly cost across remote (non-local)
   // instances. Local is free by construction; including it would just
   // confuse the number.
-  const remoteCount = (instances || []).filter((i) => i.provider !== "local").length;
-  const monthlyEUR = (instances || [])
-    .filter((i) => i.provider !== "local")
-    .reduce((s, i) => s + (i.monthly_cost_cents || 0), 0);
+  const remoteInstances = (instances || []).filter((i) => i.provider !== "local");
+  const remoteCount = remoteInstances.length;
+  const monthlyTotal = formatRemoteTotal(remoteInstances);
 
   return (
     <div className="h-full flex flex-col">
@@ -381,9 +394,9 @@ export default function InstancesPanel({ projectId, installId }: NativePanelProp
             className="text-xs text-text-muted px-2 py-0.5 rounded bg-bg-input/40 border border-border/40"
             title="Sum of monthly cost across non-local instances (0 when the catalog hasn't priced them yet)"
           >
-            {monthlyEUR > 0 ? (
+            {monthlyTotal ? (
               <>
-                <span className="font-mono text-text">{formatPriceEUR(monthlyEUR)}</span>
+                <span className="font-mono text-text">{monthlyTotal}</span>
                 <span className="text-text-dim">/mo</span>
                 <span className="text-text-dim mx-1">·</span>
               </>
@@ -823,7 +836,7 @@ function InstanceCard({
             className="text-[11px] text-text-muted font-mono ml-2"
             title="Monthly cost from the provider catalog"
           >
-            {formatPriceEUR(inst.monthly_cost_cents)}/mo
+            {formatProviderPrice(inst.monthly_cost_cents, inst.provider)}/mo
           </span>
         )}
         <span className="flex-1" />
