@@ -318,6 +318,7 @@ func (a *App) handleArt(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var fileID string
+	var projectID string
 	switch parts[0] {
 	case "show":
 		s, err := dbGetShow(globalCtx.AppDB(), id)
@@ -326,6 +327,7 @@ func (a *App) handleArt(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		fileID = s.ImageFileID
+		projectID = s.ProjectID
 	case "episode":
 		e, err := dbGetEpisode(globalCtx.AppDB(), id)
 		if err != nil {
@@ -333,6 +335,9 @@ func (a *App) handleArt(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		fileID = e.ImageFileID
+		if s, err := dbGetShow(globalCtx.AppDB(), e.ShowID); err == nil {
+			projectID = s.ProjectID
+		}
 	default:
 		httpErr(w, http.StatusNotFound, "not found")
 		return
@@ -352,8 +357,12 @@ func (a *App) handleArt(w http.ResponseWriter, r *http.Request) {
 			URL string `json:"url"`
 		} `json:"file"`
 	}
+	args := map[string]any{"id": numericID}
+	if projectID != "" {
+		args["_project_id"] = projectID
+	}
 	if err := globalCtx.PlatformAPI().CallAppResult("storage", "files_get",
-		map[string]any{"id": numericID}, &sres); err != nil || !sres.Found || sres.File == nil {
+		args, &sres); err != nil || !sres.Found || sres.File == nil {
 		httpErr(w, http.StatusBadGateway, "could not resolve artwork from storage")
 		return
 	}

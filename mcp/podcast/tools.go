@@ -147,7 +147,11 @@ func (a *App) toolEpisodeSetAudio(ctx *sdk.AppCtx, args map[string]any) (any, er
 		return nil, err
 	}
 	fileID := strArg(args, "audio_file_id")
-	probe, err := probeAudio(ctx, fileID)
+	show, err := dbGetShow(ctx.AppDB(), ep.ShowID)
+	if err != nil {
+		return nil, err
+	}
+	probe, err := probeAudio(ctx, fileID, show.ProjectID)
 	if err != nil {
 		return nil, err
 	}

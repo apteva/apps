@@ -1,4 +1,4 @@
-// Apteva Podcast v0.1.1 — podcast hosting + management.
+// Apteva Podcast v0.1.2 — podcast hosting + management.
 //
 // This app owns shows, episodes and the RSS feed. It does NOT own
 // audio bytes (storage), audio probing/transcripts (media), download
@@ -45,7 +45,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: podcast
 display_name: Podcast
-version: 0.1.1
+version: 0.1.2
 description: |
   Podcast hosting + management for Apteva. Owns shows, episodes and the
   RSS feed; composes storage (audio), media (probe + transcripts),

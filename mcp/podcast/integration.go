@@ -44,7 +44,7 @@ type audioProbe struct {
 // a freshly uploaded file may not have a duration yet — that's a
 // warning, not an error; feed_validate surfaces it and the caller can
 // re-run episode_set_audio.
-func probeAudio(ctx *sdk.AppCtx, fileID string) (*audioProbe, error) {
+func probeAudio(ctx *sdk.AppCtx, fileID, projectID string) (*audioProbe, error) {
 	fileID = strings.TrimSpace(fileID)
 	if fileID == "" {
 		return nil, errors.New("audio_file_id required")
@@ -64,8 +64,12 @@ func probeAudio(ctx *sdk.AppCtx, fileID string) (*audioProbe, error) {
 			Visibility  string `json:"visibility"`
 		} `json:"file"`
 	}
+	storageArgs := map[string]any{"id": numericID}
+	if strings.TrimSpace(projectID) != "" {
+		storageArgs["_project_id"] = projectID
+	}
 	if err := ctx.PlatformAPI().CallAppResult("storage", "files_get",
-		map[string]any{"id": numericID}, &sres); err != nil {
+		storageArgs, &sres); err != nil {
 		return nil, fmt.Errorf("storage.files_get: %w", err)
 	}
 	if !sres.Found || sres.File == nil {
@@ -95,8 +99,12 @@ func probeAudio(ctx *sdk.AppCtx, fileID string) (*audioProbe, error) {
 			HasAudio   bool  `json:"has_audio"`
 		} `json:"media"`
 	}
+	mediaArgs := map[string]any{"file_id": fileID}
+	if strings.TrimSpace(projectID) != "" {
+		mediaArgs["_project_id"] = projectID
+	}
 	if err := ctx.PlatformAPI().CallAppResult("media", "media_get",
-		map[string]any{"file_id": fileID}, &mres); err != nil {
+		mediaArgs, &mres); err != nil {
 		probe.Warning = strings.TrimSpace(probe.Warning + " media.media_get failed: " + err.Error() + " — duration unknown")
 		return probe, nil
 	}
@@ -300,17 +308,37 @@ func resolveManagedApex(ctx *sdk.AppCtx, projectID, hostname string) (domain, na
 // ─── env-derived addressing ────────────────────────────────────────
 
 func sidecarTarget() string {
-	port := os.Getenv("APTEVA_PORT")
+	port := os.Getenv("APTEVA_APP_PORT")
+	if port == "" {
+		port = os.Getenv("APTEVA_PORT")
+	}
 	if port == "" {
 		port = "8080"
 	}
 	return "http://127.0.0.1:" + port
 }
 
+// platformPublicOrigin is the public origin of the apteva-server this
+// sidecar runs behind, without a trailing slash.
+func platformPublicOrigin() string {
+	for _, key := range []string{"APTEVA_PUBLIC_URL", "PUBLIC_URL"} {
+		if v := normalizeOrigin(os.Getenv(key)); v != "" {
+			return v
+		}
+	}
+	if h := platformPublicHost(); h != "" {
+		return "https://" + h
+	}
+	return ""
+}
+
 // platformPublicHost is the public host of the apteva-server this
-// sidecar runs behind — used for path-based feed URLs.
+// sidecar runs behind — used for path-based feed URLs and DNS targets.
 func platformPublicHost() string {
 	if v := strings.TrimSpace(os.Getenv("APTEVA_PUBLIC_HOST")); v != "" {
+		return normalizeHost(v)
+	}
+	if v := strings.TrimSpace(os.Getenv("APTEVA_PUBLIC_URL")); v != "" {
 		return normalizeHost(v)
 	}
 	if v := strings.TrimSpace(os.Getenv("PUBLIC_URL")); v != "" {
@@ -360,4 +388,24 @@ func normalizeHost(raw string) string {
 		raw = raw[:i]
 	}
 	return strings.ToLower(strings.TrimSuffix(raw, "."))
+}
+
+func normalizeOrigin(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	u, err := url.Parse(raw)
+	if err == nil && u.Host != "" {
+		scheme := u.Scheme
+		if scheme == "" {
+			scheme = "https"
+		}
+		return strings.TrimRight(scheme+"://"+u.Host, "/")
+	}
+	host := normalizeHost(raw)
+	if host == "" {
+		return ""
+	}
+	return "https://" + host
 }

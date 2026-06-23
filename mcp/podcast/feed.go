@@ -21,16 +21,16 @@ import (
 // feedBaseURL is the public origin a show is served from. With a
 // custom hostname (claimed via server-native ingress), that hostname is
 // the origin. Otherwise apteva-server reverse-proxies this sidecar under
-// /apps/podcast on the platform's public host.
+// /api/apps/podcast on the platform's public origin.
 func feedBaseURL(show *Show) string {
 	if h := strings.TrimSpace(show.Hostname); h != "" {
 		return "https://" + h
 	}
-	host := platformPublicHost()
-	if host == "" {
-		host = "localhost:8080"
+	origin := platformPublicOrigin()
+	if origin == "" {
+		origin = "http://localhost:5280"
 	}
-	return "https://" + host + "/apps/podcast"
+	return origin + "/api/apps/podcast"
 }
 
 func feedURL(show *Show) string {

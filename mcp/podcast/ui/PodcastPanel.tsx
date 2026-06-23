@@ -346,7 +346,7 @@ function FeedLink({ show }: { show: Show }) {
   const path = `/feed/${show.slug}.xml`;
   const url = show.hostname
     ? `https://${show.hostname}${path}`
-    : `${typeof window !== "undefined" ? window.location.origin : ""}/apps/podcast${path}`;
+    : `${typeof window !== "undefined" ? window.location.origin : ""}/api/apps/podcast${path}`;
   return (
     <div className="mt-2 flex items-center gap-2 text-xs">
       <span className="text-text-muted">RSS feed</span>

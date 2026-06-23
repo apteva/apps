@@ -268,11 +268,15 @@ func TestEpisodeSetAudio_ProbesStorageAndMedia(t *testing.T) {
 	// Both hard deps must have been consulted, with the file id passed through.
 	if c := pf.callsTo("storage", "files_get"); len(c) != 1 {
 		t.Fatalf("storage.files_get called %d times, want 1", len(c))
+	} else if c[0].Input["_project_id"] != "test-proj" {
+		t.Errorf("storage.files_get _project_id = %v, want test-proj", c[0].Input["_project_id"])
 	}
 	if c := pf.callsTo("media", "media_get"); len(c) != 1 {
 		t.Fatalf("media.media_get called %d times, want 1", len(c))
 	} else if c[0].Input["file_id"] != "42" {
 		t.Errorf("media.media_get file_id = %v, want 42", c[0].Input["file_id"])
+	} else if c[0].Input["_project_id"] != "test-proj" {
+		t.Errorf("media.media_get _project_id = %v, want test-proj", c[0].Input["_project_id"])
 	}
 }
 
@@ -434,6 +438,25 @@ func TestFeedRequest_CustomHostnameResolvesShow(t *testing.T) {
 	}
 	if got.ID != show.ID {
 		t.Fatalf("resolved show id = %d, want %d", got.ID, show.ID)
+	}
+}
+
+func TestFeedURL_NoHostnameUsesAppProxyPath(t *testing.T) {
+	t.Setenv("APTEVA_PUBLIC_HOST", "")
+	t.Setenv("APTEVA_PUBLIC_URL", "http://127.0.0.1:5280")
+	t.Setenv("PUBLIC_URL", "")
+	show := &Show{Slug: "local-show"}
+	want := "http://127.0.0.1:5280/api/apps/podcast/feed/local-show.xml"
+	if got := feedURL(show); got != want {
+		t.Fatalf("feedURL = %q, want %q", got, want)
+	}
+}
+
+func TestSidecarTargetUsesSDKAppPort(t *testing.T) {
+	t.Setenv("APTEVA_APP_PORT", "56255")
+	t.Setenv("APTEVA_PORT", "8080")
+	if got := sidecarTarget(); got != "http://127.0.0.1:56255" {
+		t.Fatalf("sidecarTarget = %q", got)
 	}
 }
 
