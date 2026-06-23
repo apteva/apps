@@ -198,7 +198,7 @@ func (a *App) restartTenantAfterBackup(ctx *sdk.AppCtx, t *Tenant) error {
 	}
 	spawnCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	_, proc, err := a.spawnTenant(spawnCtx, t.Slug, t.ConfigDir, tenantAptevaBin(t.TargetVersion), port, false)
+	_, proc, err := a.spawnTenant(spawnCtx, t.ID, t.Slug, t.ConfigDir, tenantAptevaBin(t.TargetVersion), port, false)
 	if err != nil {
 		return err
 	}

@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: fleet
 display_name: Fleet
-version: 0.8.7
+version: 0.8.8
 description: |
   Control plane for a fleet of client apteva instances. Spawns every
   tenant as a local apteva process on the parent host with admin-
@@ -10,11 +10,10 @@ description: |
   tenant_create; the operator finishes admin registration in the
   browser; tenant_attach_key completes the link.
 
-  v0.3 adds optional domain orchestration (Domains + Certs + Routes
-  integrations) so each tenant can be reached at a public hostname
-  via the parent's reverse proxy, plus auto-respawn for tenants that
-  don't survive a parent restart, plus per-tenant apteva version
-  management via tenant_update.
+  Fleet can attach tenant hostnames through the parent server-native
+  ingress/cert manager, delegate tenant-owned DNS zones through the
+  Domains app, and share parent integration connections into tenants
+  as constrained provider grants.
 
   Each tenant is a fully independent apteva install: own DB, own
   users, own dashboard. The parent goes away → tenants are auto-
@@ -34,6 +33,8 @@ requires:
     - db.write.app
     - net.egress
     - platform.apps.call
+    - platform.connections.execute
+    - platform.ingress.write
   integrations:
     - role: domains
       kind: app
@@ -41,18 +42,6 @@ requires:
       compatible_app_names: [domains]
       label: Domains app
       hint: Install the Domains app to attach custom hostnames to tenants.
-    - role: certs
-      kind: app
-      required: false
-      compatible_app_names: [certs]
-      label: Certs app
-      hint: Install the Certs app to auto-issue Let's Encrypt certs on attach.
-    - role: routes
-      kind: app
-      required: false
-      compatible_app_names: [routes]
-      label: Routes app
-      hint: Install the Routes app (in proxy mode) to publish tenants at public hostnames via the parent's reverse proxy.
     - role: host_provider
       kind: app
       required: false
@@ -96,19 +85,25 @@ provides:
     - name: tenant_run_remote
       description: "Proxy an MCP tool call to a tenant's gateway using its api_key. Args: tenant_id, app, tool, input."
     - name: tenant_attach_domain
-      description: "Attach a public hostname to a tenant. Orchestrates Domains + Certs + Routes for manage_dns=true. For manage_dns=false, Fleet assumes the client already pointed DNS at this machine, skips Certs-app issuance, registers the route, and lets the parent edge proxy handle automatic HTTPS. Idempotent; partial-failure tolerant. Args: tenant_id, fqdn, manage_dns? (default true), target?, type?, ttl?."
+      description: "Attach a public hostname to a tenant. Managed DNS writes the record through Domains; routing and exact-host certs are registered through server-native ingress. For manage_dns=false, Fleet assumes the client already pointed DNS at this machine and only registers ingress. Args: tenant_id, fqdn, manage_dns? (default true), target?, type?, ttl?."
     - name: tenant_detach_domain
-      description: "Clear a tenant's domain link — DNS delete, cert revoke, route unregister, local clear. Local clear runs even on remote failure. Args: tenant_id."
+      description: "Clear a tenant's domain link — DNS delete when Fleet owns the record, ingress unregister, local clear. Local clear runs even on remote failure. Args: tenant_id."
     - name: tenant_domain_grant
-      description: "Delegate a base domain to a tenant for tenant-local apps. Fleet writes base + wildcard DNS, kicks off certs, and registers parent routes to the tenant server. Args: tenant_id, domain, target?, type? (A|CNAME), ttl?."
+      description: "Delegate a base domain to a tenant for tenant-local apps. Fleet writes base + wildcard DNS and registers parent ingress to the tenant server. Args: tenant_id, domain, target?, type? (A|CNAME), ttl?."
     - name: tenant_domain_list
       description: "List Fleet domain grants. Args: tenant_id? (optional filter)."
     - name: tenant_domain_revoke
-      description: "Revoke a Fleet domain grant: unregister parent routes, revoke certs, delete DNS records, and remove the grant. Args: tenant_id, domain."
+      description: "Revoke a Fleet domain grant: unregister parent ingress, delete DNS records, and remove the grant. Args: tenant_id, domain."
     - name: tenant_domain_record_set
       description: "Proxy a DNS upsert for a tenant-owned inherited domain. Intended for the tenant Domains facade. Args: tenant_id, domain, name, type, value, ttl?."
     - name: tenant_domain_record_delete
       description: "Proxy a DNS delete for a tenant-owned inherited domain. Intended for the tenant Domains facade. Args: tenant_id, domain, name, type."
+    - name: tenant_provider_grant
+      description: "Expose a parent integration connection inside a tenant as a tenant-local virtual connection. Generic provider delegation with optional tenant app binding and constraints. Args: tenant_id, project_id, app_slug, parent_connection_id, grant_id?, name?, tenant_install_id?, tenant_role?, allowed_tools?, allowed_domains?, allowed_from?, metadata?."
+    - name: tenant_provider_grant_list
+      description: "List delegated provider/integration grants. Args: tenant_id? (optional filter)."
+    - name: tenant_provider_grant_revoke
+      description: "Revoke a delegated provider/integration grant, unbind the tenant app role when known, and delete the tenant virtual connection. Args: tenant_id, grant_id."
     - name: tenant_migrate
       description: "Move a Fleet-managed tenant between the local parent host and Instances VPS hosts. Cold migration: stop source, archive + transfer + extract the data dir, boot apteva-server on the target against the moved DB, re-point the route, remove the source copy after target health. Brief downtime; auto-rollback restarts the source on failure before commit. Args: tenant_id, instance_id (0 = local parent, >0 = Instances row id), port?."
     - name: tenant_update

@@ -156,7 +156,7 @@ func (a *App) toolCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	// disk). Boot timeout = tenant marked failed + data dir removed.
 	spawnCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	setupToken, proc, err := a.spawnTenant(spawnCtx, slug, configDir, spawnBin, port, true /* freshSetup */)
+	setupToken, proc, err := a.spawnTenant(spawnCtx, t.ID, slug, configDir, spawnBin, port, true /* freshSetup */)
 	if err != nil {
 		_ = a.store.setStatus(t.ID, StatusFailed, "user")
 		_ = a.store.recordEvent(t.ID, "spawn_failed", "user", map[string]any{"error": err.Error()})
@@ -467,7 +467,7 @@ func (a *App) toolStart(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	_ = a.store.setStatus(t.ID, StatusStarting, "user")
 	spawnCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	_, proc, err := a.spawnTenant(spawnCtx, t.Slug, t.ConfigDir, tenantAptevaBin(t.TargetVersion), port, false /* freshSetup */)
+	_, proc, err := a.spawnTenant(spawnCtx, t.ID, t.Slug, t.ConfigDir, tenantAptevaBin(t.TargetVersion), port, false /* freshSetup */)
 	if err != nil {
 		_ = a.store.setStatus(t.ID, StatusFailed, "user")
 		return nil, err

@@ -44,7 +44,7 @@ type tenantProc struct {
 // For respawn paths (tenant_start, pass freshSetup=false) we don't
 // look for a token — the tenant already has a users table from its
 // first boot, registration is locked.
-func (a *App) spawnTenant(ctx context.Context, slug, configDir, aptevaBin string, port int, freshSetup bool) (setupToken string, proc *tenantProc, err error) {
+func (a *App) spawnTenant(ctx context.Context, tenantID, slug, configDir, aptevaBin string, port int, freshSetup bool) (setupToken string, proc *tenantProc, err error) {
 	if err := os.MkdirAll(configDir, 0o700); err != nil {
 		return "", nil, fmt.Errorf("mkdir configDir: %w", err)
 	}
@@ -54,11 +54,7 @@ func (a *App) spawnTenant(ctx context.Context, slug, configDir, aptevaBin string
 	}
 	cmd := buildSpawnCmd(slug, bin,
 		[]string{"--data-dir", configDir, "--port", strconv.Itoa(port), "--no-browser"})
-	cmd.Env = append(os.Environ(),
-		"APTEVA_HOME="+configDir,
-		"PORT="+strconv.Itoa(port),
-		"QUIET=1",
-	)
+	cmd.Env = tenantSpawnEnv(configDir, port, tenantID)
 	// New process group: child survives if fleet itself restarts.
 	// (Setpgid is also set redundantly inside buildSpawnCmd; harmless.)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -111,6 +107,53 @@ func (a *App) spawnTenant(ctx context.Context, slug, configDir, aptevaBin string
 		return token, proc, nil
 	}
 	return "", proc, nil
+}
+
+func tenantSpawnEnv(configDir string, port int, tenantID string) []string {
+	deployStart, deployEnd, codeStart, codeEnd := tenantAppPortRanges(port)
+	env := append([]string{}, os.Environ()...)
+	env = setEnv(env, "APTEVA_HOME", configDir)
+	env = setEnv(env, "PORT", strconv.Itoa(port))
+	env = setEnv(env, "QUIET", "1")
+	env = setEnv(env, "APTEVA_INGRESS_ENABLED", "0")
+	env = setEnv(env, "APTEVA_HTTP_LISTEN_ADDR", "")
+	env = setEnv(env, "APTEVA_HTTPS_LISTEN_ADDR", "")
+	env = setEnv(env, "DEPLOY_RELEASE_PORT_RANGE_START", strconv.Itoa(deployStart))
+	env = setEnv(env, "DEPLOY_RELEASE_PORT_RANGE_END", strconv.Itoa(deployEnd))
+	env = setEnv(env, "CODE_DEV_PORT_RANGE_START", strconv.Itoa(codeStart))
+	env = setEnv(env, "CODE_DEV_PORT_RANGE_END", strconv.Itoa(codeEnd))
+	if fleetPort := strings.TrimSpace(os.Getenv("APTEVA_APP_PORT")); fleetPort != "" {
+		env = setEnv(env, "APTEVA_DELEGATED_DNS_FLEET_URL", "http://127.0.0.1:"+fleetPort)
+	}
+	if token := strings.TrimSpace(os.Getenv("APTEVA_APP_TOKEN")); token != "" {
+		env = setEnv(env, "APTEVA_DELEGATED_DNS_TOKEN", token)
+	}
+	if projectID := strings.TrimSpace(os.Getenv("APTEVA_PROJECT_ID")); projectID != "" {
+		env = setEnv(env, "APTEVA_DELEGATED_DNS_PROJECT_ID", projectID)
+	}
+	if tenantID = strings.TrimSpace(tenantID); tenantID != "" {
+		env = setEnv(env, "APTEVA_DELEGATED_DNS_TENANT_ID", tenantID)
+	}
+	return env
+}
+
+func tenantAppPortRanges(port int) (deployStart, deployEnd, codeStart, codeEnd int) {
+	base := port + 1000
+	if base < 1024 || base+999 > 65535 {
+		base = 20000 + (port%30)*1000
+	}
+	return base, base + 899, base + 900, base + 999
+}
+
+func setEnv(env []string, key, value string) []string {
+	prefix := key + "="
+	for i, kv := range env {
+		if strings.HasPrefix(kv, prefix) {
+			env[i] = prefix + value
+			return env
+		}
+	}
+	return append(env, prefix+value)
 }
 
 // setupTokenRe matches the canonical apteva setup token shape that
@@ -347,12 +390,12 @@ func waitForReady(ctx context.Context, port int, timeout time.Duration) error {
 
 // resolveAptevaBin finds the apteva CLI binary in this order:
 //
-//	1. explicit arg from tenant_create
-//	2. FLEET_APTEVA_BIN env
-//	3. `apteva` on $PATH (sidecar PATH may not include the npm install dir)
-//	4. $HOME/.apteva/bin/apteva   — canonical npm-shim location
-//	5. /usr/local/bin/apteva       — common Homebrew / manual install location
-//	6. /opt/homebrew/bin/apteva    — Apple Silicon Homebrew default
+//  1. explicit arg from tenant_create
+//  2. FLEET_APTEVA_BIN env
+//  3. `apteva` on $PATH (sidecar PATH may not include the npm install dir)
+//  4. $HOME/.apteva/bin/apteva   — canonical npm-shim location
+//  5. /usr/local/bin/apteva       — common Homebrew / manual install location
+//  6. /opt/homebrew/bin/apteva    — Apple Silicon Homebrew default
 //
 // The sidecar process inherits PATH from apteva-server's launcher, which
 // in practice often skips the user's npm bin dir. Adding well-known
@@ -509,7 +552,7 @@ func (a *App) tryRespawn(ctx context.Context, t *Tenant) {
 	_ = a.store.bumpRespawn(t.ID)
 	// Use the pinned version if set, else default-resolve. An empty
 	// path falls back transparently inside resolveAptevaBin.
-	_, proc, err := a.spawnTenant(ctx, t.Slug, t.ConfigDir, tenantAptevaBin(t.TargetVersion), port, false)
+	_, proc, err := a.spawnTenant(ctx, t.ID, t.Slug, t.ConfigDir, tenantAptevaBin(t.TargetVersion), port, false)
 	if err != nil {
 		_ = a.store.recordEvent(t.ID, "auto_respawn_failed", "worker:auto_respawn",
 			map[string]any{"error": err.Error()})

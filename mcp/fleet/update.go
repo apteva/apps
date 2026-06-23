@@ -325,7 +325,7 @@ func (a *App) toolUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err := a.stopTenantBy(t.Slug, port, 10*time.Second); err != nil {
 		return nil, fmt.Errorf("stop tenant: %w", err)
 	}
-	_, proc, spawnErr := a.spawnTenant(context.Background(), t.Slug, t.ConfigDir, bin, port, false)
+	_, proc, spawnErr := a.spawnTenant(context.Background(), t.ID, t.Slug, t.ConfigDir, bin, port, false)
 	if spawnErr != nil {
 		_ = a.store.recordEvent(t.ID, "update_failed", "tool:tenant_update",
 			map[string]any{"version": requested, "stage": "spawn", "error": spawnErr.Error()})
@@ -370,8 +370,8 @@ func (a *App) toolCheckUpdates(ctx *sdk.AppCtx, args map[string]any) (any, error
 		})
 	}
 	return map[string]any{
-		"latest":          latest,
-		"tenants_behind":  drift,
-		"checked_at":      time.Now().UTC(),
+		"latest":         latest,
+		"tenants_behind": drift,
+		"checked_at":     time.Now().UTC(),
 	}, nil
 }

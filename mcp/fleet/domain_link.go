@@ -13,15 +13,9 @@ import (
 	sdk "github.com/apteva/app-sdk"
 )
 
-// Per-tenant domain attach/detach via the optional Domains/Certs/Routes
-// apps. Ported from apps/mcp/deploy/domain_link.go with Tenant in place
-// of Deployment and the route target derived from the tenant's
+// Per-tenant domain attach/detach via optional Domains DNS and
+// server-native ingress. Tenant targets are derived from the tenant's
 // apteva-server port (stored in BaseURL).
-//
-// Boundary with the parent's routes app: fleet writes routes on the
-// PARENT's routes table (the parent owns Caddy). Each tenant should
-// keep its own routes app in hostrouter mode — see the consolidated
-// proposal in CLAUDE.md for the wildcard-per-tenant follow-up.
 
 // ─── envelope helpers ─────────────────────────────────────────────
 
@@ -152,9 +146,9 @@ type attachDomainSpec struct {
 	// ManageDNS=true (default): the Domains app writes/owns the DNS
 	// record for fqdn. Used when the apex sits in our Domains catalog.
 	// ManageDNS=false: client already pointed fqdn at our parent
-	// machine; fleet skips both the registrar write and Certs-app
-	// issuance. The parent edge proxy owns automatic HTTPS for this
-	// hostname, while Fleet only registers the route.
+	// machine; fleet skips the DNS write and only registers server
+	// ingress. The parent apteva-server owns automatic HTTPS for this
+	// hostname.
 	ManageDNS bool
 }
 
@@ -272,15 +266,13 @@ func (a *App) writeDomainRecord(ctx *sdk.AppCtx, projectID, fqdn, target, rtype 
 
 // ─── attach orchestration ─────────────────────────────────────────
 
-// attachDomain runs the attach orchestration: optional
-// domain_records_set → optional cert_issue (managed DNS only,
-// fire-and-forget) → routes_register. Persists
-// (domain, record_id, attached_at) on the tenant. Idempotent on
-// re-attach: domains 0.2.3 upserts, certs treats existing live cert
-// as a no-op, routes_register replaces same-owner routes in place.
+// attachDomain runs the orchestration: optional domain_records_set,
+// then platform ingress expose. Persists (domain, record_id,
+// attached_at) on the tenant. Idempotent on re-attach: domains
+// upserts and platform ingress replaces same-owner routes in place.
 //
 // projectID is the operator's project — we run cross-app calls with
-// it so global-scoped Domains/Certs (the prod default) resolve their
+// it so global-scoped Domains (the prod default) resolve their
 // per-project data correctly.
 func (a *App) attachDomain(ctx *sdk.AppCtx, projectID string, t *Tenant, spec attachDomainSpec) error {
 	fqdn := strings.ToLower(strings.TrimSpace(strings.TrimSuffix(spec.FQDN, ".")))
@@ -336,8 +328,8 @@ func (a *App) attachDomain(ctx *sdk.AppCtx, projectID string, t *Tenant, spec at
 	} else {
 		// Client-managed DNS: we don't touch the registrar. We just
 		// trust the operator that fqdn resolves to this machine and
-		// continue with route registration. detach() keys off
-		// record_id == "" to skip registrar and Certs-app cleanup.
+		// continue with ingress registration. detach() keys off
+		// record_id == "" to skip the corresponding DNS cleanup.
 		_ = a.store.recordEvent(t.ID, "domain.attached", "tool:attach_domain", map[string]any{
 			"fqdn": fqdn, "manage_dns": false,
 		})
@@ -347,31 +339,14 @@ func (a *App) attachDomain(ctx *sdk.AppCtx, projectID string, t *Tenant, spec at
 		return err
 	}
 
-	// Fire-and-forget cert issuance for managed DNS only; async on the
-	// certs side. Client-managed DNS relies on the parent edge proxy's
-	// automatic HTTPS instead of creating a second, competing Certs-app
-	// ACME flow for the same hostname.
-	if shouldIssueTenantCert(spec) && a.certsAvailable(ctx) {
-		if cErr := callCertsTool(ctx, projectID, "cert_issue", map[string]any{"fqdn": fqdn}, nil); cErr != nil {
-			_ = a.store.recordEvent(t.ID, "domain.cert_kickoff_failed", "tool:attach_domain", map[string]any{
-				"fqdn": fqdn, "error": cErr.Error(),
-			})
-		}
-	}
-
-	// Register the route so the parent's routes app (in proxy mode)
-	// renders a Caddy block proxying public traffic for fqdn to the
-	// tenant's apteva-server port. No-op when routes isn't bound.
+	// Register the hostname through server-native ingress. Certs for
+	// exact hostnames are owned by apteva-server once DNS points here.
 	a.registerRouteForTenant(ctx, t.ID, fqdn)
 	return nil
 }
 
-func shouldIssueTenantCert(spec attachDomainSpec) bool {
-	return spec.ManageDNS
-}
-
-// detachDomain best-effort deletes the DNS record, revokes the cert,
-// unregisters the route, and clears the tenant's domain link. The
+// detachDomain best-effort deletes the DNS record, unregisters the
+// route, and clears the tenant's domain link. The
 // local clear runs even on remote-side failures — a dangling registrar
 // record is operator-recoverable via the Domains panel; a dangling
 // tenant row pointing at a domain that doesn't resolve is worse.
@@ -396,9 +371,6 @@ func (a *App) detachDomain(ctx *sdk.AppCtx, projectID string, t *Tenant) error {
 				"domain": apex, "name": subArg, "type": rtype,
 			}, nil)
 		}
-	}
-	if t.DomainRecordID != "" && a.certsAvailable(ctx) && t.Domain != "" {
-		_ = callCertsTool(ctx, projectID, "cert_revoke", map[string]any{"fqdn": t.Domain}, nil)
 	}
 	a.unregisterRouteForTenant(ctx, t.Domain)
 	if err := a.store.clearDomain(t.ID); err != nil {
@@ -655,10 +627,10 @@ func (a *App) proxyTenantDomainRecordDelete(ctx *sdk.AppCtx, projectID string, t
 // ─── route integration ────────────────────────────────────────────
 
 // registerRouteForTenant publishes (fqdn → tenant apteva-server port)
-// in the parent's routes table. Idempotent — replaces an existing
-// route from the same owner. No-op when routes isn't bound.
+// through server-native ingress. Idempotent — replaces an existing
+// route from the same owner.
 func (a *App) registerRouteForTenant(ctx *sdk.AppCtx, tenantID, fqdn string) {
-	if fqdn == "" || !a.routesAvailable(ctx) {
+	if fqdn == "" || ctx == nil || ctx.PlatformAPI() == nil {
 		return
 	}
 	t, _, err := a.store.get(tenantID)
@@ -669,7 +641,7 @@ func (a *App) registerRouteForTenant(ctx *sdk.AppCtx, tenantID, fqdn string) {
 }
 
 func (a *App) registerRouteForTenantHost(ctx *sdk.AppCtx, t *Tenant, hostname, certFQDN, actor string) {
-	if t == nil || hostname == "" || !a.routesAvailable(ctx) {
+	if t == nil || hostname == "" || ctx == nil || ctx.PlatformAPI() == nil {
 		return
 	}
 	port, _ := portFromBaseURL(t.BaseURL)
@@ -686,13 +658,12 @@ func (a *App) registerRouteForTenantHost(ctx *sdk.AppCtx, t *Tenant, hostname, c
 	if t.IsHosted() {
 		target = t.BaseURL // already http://<vps-ip>:<port>
 	}
-	if err := callRoutesTool(ctx, "routes_register", map[string]any{
-		"hostname":         hostname,
-		"target":           target,
-		"owner_install_id": myInstallID(),
-		"owner_kind":       "fleet",
-		"cert_fqdn":        certFQDN,
-	}, nil); err != nil {
+	if _, err := ctx.PlatformAPI().ExposeIngress(sdk.IngressExposeRequest{
+		Hostname:  hostname,
+		Target:    target,
+		OwnerKind: "fleet",
+		CertFQDN:  certFQDN,
+	}); err != nil {
 		_ = a.store.recordEvent(t.ID, "route.register_failed", actor,
 			map[string]any{"fqdn": hostname, "error": err.Error()})
 		return
@@ -701,16 +672,13 @@ func (a *App) registerRouteForTenantHost(ctx *sdk.AppCtx, t *Tenant, hostname, c
 		map[string]any{"fqdn": hostname, "port": port})
 }
 
-// unregisterRouteForTenant — cleanup half. Safe when routes isn't
-// bound or the route was never registered.
+// unregisterRouteForTenant — cleanup half. Safe when the route was
+// never registered.
 func (a *App) unregisterRouteForTenant(ctx *sdk.AppCtx, fqdn string) {
-	if fqdn == "" || !a.routesAvailable(ctx) {
+	if fqdn == "" || ctx == nil || ctx.PlatformAPI() == nil {
 		return
 	}
-	_ = callRoutesTool(ctx, "routes_unregister", map[string]any{
-		"hostname":         fqdn,
-		"owner_install_id": myInstallID(),
-	}, nil)
+	_ = ctx.PlatformAPI().UnexposeIngress(fqdn)
 }
 
 // myInstallID reads APTEVA_INSTALL_ID — the platform injects it at

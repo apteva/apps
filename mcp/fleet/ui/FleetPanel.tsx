@@ -168,9 +168,8 @@ interface InstanceOption {
 }
 
 // Fleet's /api/_meta response. The panel calls this once per refresh
-// so it knows whether the optional Domains/Certs/Routes integrations
-// are bound, what apexes are picker-eligible, and the cert state for
-// every tenant FQDN. Also returns the npm latest apteva version for
+// so it knows whether optional DNS/domain helpers are bound, what
+// apexes are picker-eligible, and the npm latest apteva version for
 // the version-drift indicator.
 interface MetaResp {
   domains_available: boolean;
@@ -1720,7 +1719,7 @@ function CloneTenantDialog({
 //
 // Migrates a Fleet-managed tenant between local and Instances hosts.
 // Cold move — the tenant is briefly down while fleet stops it,
-// transfers the data dir, starts the target, and re-points routes.
+// transfers the data dir, starts the target, and re-points ingress.
 
 function MoveTenantDialog({
   tenant,
@@ -1748,7 +1747,7 @@ function MoveTenantDialog({
     <DialogFrame title={`Move ${tenant.slug}`} onClose={onClose}>
       <p className="text-xs text-text-dim mb-3">
         Relocates this tenant to another host. Fleet stops the source,
-        transfers its data dir, starts the target, and re-points routes.
+        transfers its data dir, starts the target, and re-points ingress.
         The tenant is briefly <span className="text-text">down</span>.
         If anything fails before commit, the source is restarted.
       </p>
@@ -1961,15 +1960,13 @@ function DomainBlock({
   onAttach: () => void;
   onDetach: () => void;
 }) {
-  const hasIntegrations =
-    !!meta && (meta.domains_available || meta.certs_available || meta.routes_available);
-  // No integration AND no domain attached → render a quiet hint so the
-  // pane doesn't go silent on what's actually a configurable feature.
-  if (!tenant.domain && !hasIntegrations) {
+  // Metadata not loaded yet → render a quiet hint so the pane doesn't
+  // go silent while the attach affordance initializes.
+  if (!tenant.domain && !meta) {
     return (
       <div className="px-4 py-2 border-b border-border text-[11px] text-text-dim">
         <span className="font-medium">Public hostname</span> ·{" "}
-        Install + bind the Domains / Certs / Routes apps to attach custom hostnames.
+        Loading hostname controls…
       </div>
     );
   }
@@ -2014,13 +2011,10 @@ function DomainBlock({
         </span>
       )}
       {clientManagedDNS && (
-        <StatusPill variant="success">edge HTTPS</StatusPill>
+        <StatusPill variant="success">server ingress</StatusPill>
       )}
       {!cert && tenant.domain && !clientManagedDNS && (
-        <StatusPill variant="neutral">no cert</StatusPill>
-      )}
-      {meta?.routes_available && (
-        <StatusPill variant="info">routed</StatusPill>
+        <StatusPill variant="info">server ingress</StatusPill>
       )}
       <span className="flex-1" />
       <ActionButton
@@ -2116,8 +2110,8 @@ function AttachDomainDialog({
   //   "managed"  — apex is in our Domains catalog; Domains app writes
   //                the DNS record. Original 0.6.x behavior.
   //   "external" — client already pointed their DNS at this machine;
-  //                we skip registrar + Certs-app issuance and only
-  //                register the route. The parent edge proxy handles HTTPS.
+  //                we skip registrar writes and only register server
+  //                ingress. The parent apteva-server handles HTTPS.
   type Mode = "managed" | "external";
   const noDomains = meta.domains.length === 0;
   const [mode, setMode] = useState<Mode>(noDomains ? "external" : "managed");
@@ -2140,7 +2134,7 @@ function AttachDomainDialog({
 
   const helpText =
     mode === "external"
-      ? `The client already pointed DNS at this machine (${meta.public_host || "the parent host"}). Fleet skips DNS and Certs-app issuance; Routes proxies to the tenant and the parent edge proxy handles HTTPS.`
+      ? `The client already pointed DNS at this machine (${meta.public_host || "the parent host"}). Fleet skips DNS writes and registers server ingress; the parent apteva-server handles HTTPS.`
       : noDomains
         ? "No domains registered in the Domains app yet. Add one there first, or switch to “Client-managed DNS”."
         : "Pick the apex you've registered with the Domains app, then a subdomain (leave empty to attach the apex itself). target defaults to the parent host's public IP.";

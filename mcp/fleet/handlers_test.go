@@ -247,15 +247,6 @@ func TestDomainGrantHelpers(t *testing.T) {
 	}
 }
 
-func TestShouldIssueTenantCert_ManagedDNSOnly(t *testing.T) {
-	if !shouldIssueTenantCert(attachDomainSpec{ManageDNS: true}) {
-		t.Fatal("managed DNS should issue through the Certs app")
-	}
-	if shouldIssueTenantCert(attachDomainSpec{ManageDNS: false}) {
-		t.Fatal("client-managed DNS should rely on edge HTTPS, not Certs-app issuance")
-	}
-}
-
 func TestSlugDataDir_Validation(t *testing.T) {
 	cases := []struct {
 		slug    string

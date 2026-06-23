@@ -87,6 +87,28 @@ type DomainGrant struct {
 	UpdatedAt        time.Time `json:"updated_at"`
 }
 
+// ProviderGrant exposes a parent integration connection as a
+// tenant-local virtual connection. Apps in the tenant see a normal
+// connection id; the tenant server proxies allowed calls back to the
+// controller.
+type ProviderGrant struct {
+	ID                 int64     `json:"id"`
+	TenantID           string    `json:"tenant_id"`
+	GrantID            string    `json:"grant_id"`
+	AppSlug            string    `json:"app_slug"`
+	ParentConnectionID int64     `json:"parent_connection_id"`
+	TenantConnectionID int64     `json:"tenant_connection_id"`
+	TenantInstallID    int64     `json:"tenant_install_id,omitempty"`
+	TenantRole         string    `json:"tenant_role,omitempty"`
+	Status             string    `json:"status"`
+	AllowedTools       []string  `json:"allowed_tools,omitempty"`
+	AllowedDomains     []string  `json:"allowed_domains,omitempty"`
+	AllowedFrom        []string  `json:"allowed_from,omitempty"`
+	Metadata           any       `json:"metadata,omitempty"`
+	CreatedAt          time.Time `json:"created_at"`
+	UpdatedAt          time.Time `json:"updated_at"`
+}
+
 type Event struct {
 	ID        int64     `json:"id"`
 	TenantID  string    `json:"tenant_id"`
