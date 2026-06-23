@@ -2,12 +2,16 @@ schema: apteva-app/v1
 
 name: persona-studio
 display_name: Persona Studio
-version: 0.1.17
+version: 0.1.18
 description: |
   Virtual influencer and reusable persona workspace. Persona Studio owns
   consistent identities, reference sets, reusable items/products, style
   profiles, campaigns, generated assets, and Composer handoffs while Media
   Studio remains the provider-neutral generator.
+
+  v0.1.18 previews persona composition renders inline in the
+  Compositions panel, with audio, video, and image viewers selected
+  from the composition output format.
 
   v0.1.17 keeps Composer audio_tts and avatar AI prompts as literal
   scripts while still injecting persona voice/avatar defaults and

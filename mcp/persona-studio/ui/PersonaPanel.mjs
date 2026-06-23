@@ -818,6 +818,7 @@ export default function PersonaPanel({ projectId }) {
                           : null
                       ),
                       c.render_error ? h("div", { className: "text-xs text-red-400 line-clamp-2" }, c.render_error) : null,
+                      h(CompositionRenderPreview, { composition: c }),
                       h("div", { className: "flex flex-wrap gap-2" },
                         h("button", {
                           type: "button",
@@ -1186,6 +1187,60 @@ function AssetStoragePreview({ asset }) {
   return h("div", { className: "mt-3" },
     h(StoragePreviewCard, { id, title: `storage:${id}`, meta: asset.prompt || asset.asset_type })
   );
+}
+
+function CompositionRenderPreview({ composition }) {
+  const id = Number(composition?.storage_file_id || 0);
+  if (!id || !Number.isFinite(id)) return null;
+  const src = `/api/apps/storage/files/${id}/content`;
+  const output = parseJSONObject(composition?.output);
+  const format = String(output?.format || "").toLowerCase();
+  if (["mp3", "wav", "m4a", "aac", "flac", "ogg"].includes(format) || !format) {
+    return h("audio", {
+      src,
+      controls: true,
+      preload: "metadata",
+      className: "mt-1 block w-full",
+    });
+  }
+  if (format === "mp4" || format === "webm" || format === "mov") {
+    return h("video", {
+      src,
+      controls: true,
+      preload: "metadata",
+      className: "mt-1 block w-full max-h-72 rounded border border-border bg-black",
+    });
+  }
+  if (format === "png" || format === "jpg" || format === "jpeg" || format === "webp") {
+    return h("a", {
+      href: src,
+      target: "_blank",
+      rel: "noopener",
+      className: "mt-1 block rounded border border-border bg-bg-input overflow-hidden",
+      title: `Open storage:${id}`,
+    },
+      h("img", {
+        src,
+        alt: composition.title || `storage:${id}`,
+        loading: "lazy",
+        className: "block w-full max-h-72 object-contain bg-black",
+      })
+    );
+  }
+  return h("div", { className: "mt-1" },
+    h(StoragePreviewCard, { id, title: `storage:${id}`, meta: composition.title || "composition render" })
+  );
+}
+
+function parseJSONObject(value) {
+  if (!value) return {};
+  if (typeof value === "object" && !Array.isArray(value)) return value;
+  try {
+    const parsed = JSON.parse(String(value));
+    return parsed && typeof parsed === "object" && !Array.isArray(parsed) ? parsed : {};
+  } catch {
+    return {};
+  }
 }
 
 function StoragePicker({ files, loading, error, query, target, onQuery, onSearch, onClose, onChoose }) {
