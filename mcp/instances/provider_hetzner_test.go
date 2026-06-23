@@ -2,11 +2,30 @@ package main
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 
 	sdk "github.com/apteva/app-sdk"
 	tk "github.com/apteva/app-sdk/testkit"
 )
+
+func TestBuildCloudInitClearsRootPasswordExpiry(t *testing.T) {
+	pubKey := "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAITest apteva-test"
+	userData := buildCloudInit(pubKey)
+
+	for _, want := range []string{
+		"#cloud-config",
+		"ssh_authorized_keys:",
+		"      - " + pubKey,
+		"chpasswd:",
+		"  expire: false",
+		"chage -d $(date +%Y-%m-%d) -M 99999 -E -1 root",
+	} {
+		if !strings.Contains(userData, want) {
+			t.Fatalf("cloud-init missing %q:\n%s", want, userData)
+		}
+	}
+}
 
 func TestParseHetznerCreateResponse_PreservesNumericID(t *testing.T) {
 	id, ipv4, ipv6 := parseHetznerCreateResponse(json.RawMessage(`{

@@ -553,12 +553,11 @@ func priceEURToCents(v float64) int {
 // enforces it on key-based non-interactive SSH: every command exits 1
 // before running with "WARNING: Your password has expired. Password
 // change required but no TTY available." So we explicitly tell cloud-
-// init NOT to expire passwords, plus a defensive `chage` runcmd in
-// case the image already did so before cloud-init reads chpasswd.
-// Both belt + suspenders because `chpasswd: expire: false` only takes
-// effect if cloud-init runs before whatever image-bake step set the
-// expiry — observed inconsistent across Hetzner's ubuntu-22.04 vs
-// ubuntu-24.04 builds.
+// init NOT to expire passwords, plus defensive `chage` commands in
+// case the image already did so before cloud-init reads chpasswd. We
+// must reset both the expiry date and the "last changed" date: changing
+// only max/expiry leaves a `chage -d 0 root` account blocked by PAM.
+// This was observed on both Hetzner and DigitalOcean Ubuntu images.
 func buildCloudInit(pubKey string) string {
 	return strings.Join([]string{
 		"#cloud-config",
@@ -571,7 +570,7 @@ func buildCloudInit(pubKey string) string {
 		"chpasswd:",
 		"  expire: false",
 		"runcmd:",
-		"  - chage -M 99999 -E -1 root",
+		"  - chage -d $(date +%Y-%m-%d) -M 99999 -E -1 root",
 	}, "\n") + "\n"
 }
 

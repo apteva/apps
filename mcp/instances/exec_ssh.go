@@ -416,19 +416,30 @@ func downloadSSHOnce(client *ssh.Client, path string) ([]byte, error) {
 	return stdout.Bytes(), nil
 }
 
-// probeSSHReady polls TCP-connect + SSH handshake until success or
-// timeout. Used after VPS provisioning so callers can wait until the
-// machine actually accepts our key. Returns nil on success.
+// probeSSHReady polls TCP-connect + SSH handshake + a tiny remote
+// command until success or timeout. The command check matters because
+// some VPS images accept key auth while PAM still blocks non-
+// interactive sessions with "password expired"; those hosts are not
+// actually ready for instance_run_command or metrics.
 func probeSSHReady(inst *Instance, timeout time.Duration) error {
 	deadline := time.Now().Add(timeout)
 	var lastErr error
 	for time.Now().Before(deadline) {
 		client, err := dialSSH(inst, 5*time.Second)
 		if err == nil {
+			out, exit, runErr := runSSHOnce(client, "true", 5*time.Second)
 			_ = client.Close()
-			return nil
+			if runErr == nil && exit == 0 {
+				return nil
+			}
+			if runErr != nil {
+				lastErr = fmt.Errorf("ssh command probe failed: %w: %s", runErr, strings.TrimSpace(out))
+			} else {
+				lastErr = fmt.Errorf("ssh command probe exited %d: %s", exit, strings.TrimSpace(out))
+			}
+		} else {
+			lastErr = err
 		}
-		lastErr = err
 		time.Sleep(3 * time.Second)
 	}
 	if lastErr == nil {
