@@ -1,8 +1,9 @@
 package main
 
 // Tier 1 — every MCP tool handler exercised against an in-memory
-// SQLite via testkit's NewAppCtx. The cross-app dependency wiring
-// (storage + media probe, routes/domains hostname claim, analytics)
+// SQLite via testkit's NewAppCtx. The cross-app/platform dependency
+// wiring (storage + media probe, ingress hostname claim, Domains DNS,
+// analytics)
 // runs against a recording PlatformClient stub so the tier-degradation
 // behaviour is pinned: hard deps must succeed, soft deps must fail
 // quietly. Fast — whole suite well under a second, runs every commit.
@@ -10,6 +11,7 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
@@ -22,10 +24,10 @@ import (
 // ─── recording PlatformClient stub ─────────────────────────────────
 //
 // Embeds testkit.BasePlatformClient so new PlatformClient methods
-// don't break this file. Only CallApp/CallAppResult are overridden —
-// that's the whole surface integration.go touches. Fixtures are fed
-// pre-unwrapped (no JSON-RPC envelope), so CallAppResult is a single
-// json.Unmarshal — see CLAUDE.md's note on stub envelope handling.
+// don't break this file. CallApp/CallAppResult cover app-to-app calls;
+// ExposeIngress/UnexposeIngress cover server-native hostname wiring.
+// Fixtures are fed pre-unwrapped (no JSON-RPC envelope), so
+// CallAppResult is a single json.Unmarshal.
 
 type callRecord struct {
 	App, Tool string
@@ -38,6 +40,9 @@ type recordingPlatform struct {
 	calls     []callRecord
 	responses map[string]json.RawMessage // "app/tool" -> inner JSON
 	errs      map[string]error           // "app/tool" -> forced error
+	exposes   []sdk.IngressExposeRequest
+	exposeErr error
+	unexposes []string
 }
 
 var _ sdk.PlatformClient = (*recordingPlatform)(nil)
@@ -59,6 +64,18 @@ func (p *recordingPlatform) on(app, tool, innerJSON string) *recordingPlatform {
 // uninstalled / unreachable dependency.
 func (p *recordingPlatform) fail(app, tool string, err error) *recordingPlatform {
 	p.errs[app+"/"+tool] = err
+	return p
+}
+
+func (p *recordingPlatform) failExposeIngress(err error) *recordingPlatform {
+	p.exposeErr = err
+	return p
+}
+
+func (p *recordingPlatform) withDomain(domain string) *recordingPlatform {
+	p.on("domains", "domain_list", `{"domains":[{"name":"`+domain+`"}]}`)
+	p.on("domains", "domain_records_set", `{"ok":true}`)
+	p.on("domains", "domain_records_delete", `{"ok":true}`)
 	return p
 }
 
@@ -94,6 +111,36 @@ func (p *recordingPlatform) callsTo(app, tool string) []callRecord {
 		}
 	}
 	return out
+}
+
+func (p *recordingPlatform) ExposeIngress(req sdk.IngressExposeRequest) (*sdk.IngressRoute, error) {
+	p.mu.Lock()
+	p.exposes = append(p.exposes, req)
+	p.mu.Unlock()
+	if p.exposeErr != nil {
+		return nil, p.exposeErr
+	}
+	return &sdk.IngressRoute{
+		Hostname:  req.Hostname,
+		Target:    req.Target,
+		ProjectID: req.ProjectID,
+		OwnerKind: req.OwnerKind,
+		CertFQDN:  req.CertFQDN,
+		Status:    "active",
+	}, nil
+}
+
+func (p *recordingPlatform) UnexposeIngress(hostname string) error {
+	p.mu.Lock()
+	p.unexposes = append(p.unexposes, hostname)
+	p.mu.Unlock()
+	return nil
+}
+
+func (p *recordingPlatform) exposeCalls() []sdk.IngressExposeRequest {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return append([]sdk.IngressExposeRequest(nil), p.exposes...)
 }
 
 // ─── fixtures ──────────────────────────────────────────────────────
@@ -285,11 +332,11 @@ func TestEpisodeSetAudio_StorageMissing_IsHardError(t *testing.T) {
 	}
 }
 
-// ─── soft dependencies: routes + domains hostname wiring ───────────
+// ─── platform ingress hostname wiring ──────────────────────────────
 
-func TestShowCreate_WithHostname_WiresRoutes(t *testing.T) {
-	pf := newRecordingPlatform() // domains/domain_get returns nil -> CNAME skipped silently
-	ctx := newTestCtx(t, tk.WithPlatform(pf), tk.WithEnv("APTEVA_INSTALL_ID", "5"))
+func TestShowCreate_WithHostname_ExposesIngress(t *testing.T) {
+	pf := newRecordingPlatform().withDomain("test.com")
+	ctx := newTestCtx(t, tk.WithPlatform(pf), tk.WithEnv("APTEVA_PUBLIC_HOST", "agents.example.com"))
 
 	out, err := (&App{}).toolShowCreate(ctx, map[string]any{
 		"title": "Hosted Show", "hostname": "feeds.test.com",
@@ -300,23 +347,42 @@ func TestShowCreate_WithHostname_WiresRoutes(t *testing.T) {
 	if w := out.(map[string]any)["warning"].(string); w != "" {
 		t.Errorf("clean wiring should have no warning, got %q", w)
 	}
-	calls := pf.callsTo("routes", "routes_register")
+	calls := pf.exposeCalls()
 	if len(calls) != 1 {
-		t.Fatalf("routes.routes_register called %d times, want 1", len(calls))
+		t.Fatalf("ExposeIngress called %d times, want 1", len(calls))
 	}
-	if calls[0].Input["hostname"] != "feeds.test.com" {
-		t.Errorf("routes_register hostname = %v", calls[0].Input["hostname"])
+	if calls[0].Hostname != "feeds.test.com" {
+		t.Errorf("ExposeIngress hostname = %v", calls[0].Hostname)
 	}
-	if tgt, _ := calls[0].Input["target"].(string); !strings.HasPrefix(tgt, "http://127.0.0.1") {
-		t.Errorf("routes_register target = %q, want loopback", tgt)
+	if !strings.HasPrefix(calls[0].Target, "http://127.0.0.1") {
+		t.Errorf("ExposeIngress target = %q, want loopback", calls[0].Target)
+	}
+	if calls[0].OwnerKind != "podcast" {
+		t.Errorf("ExposeIngress owner_kind = %q, want podcast", calls[0].OwnerKind)
+	}
+	if calls[0].CertFQDN != "feeds.test.com" {
+		t.Errorf("ExposeIngress cert_fqdn = %q, want feeds.test.com", calls[0].CertFQDN)
+	}
+	if calls[0].ProjectID != "test-proj" {
+		t.Errorf("ExposeIngress project_id = %q, want test-proj", calls[0].ProjectID)
+	}
+	dns := pf.callsTo("domains", "domain_records_set")
+	if len(dns) != 1 {
+		t.Fatalf("domains.domain_records_set called %d times, want 1", len(dns))
+	}
+	if dns[0].Input["domain"] != "test.com" || dns[0].Input["name"] != "feeds" || dns[0].Input["type"] != "CNAME" || dns[0].Input["value"] != "agents.example.com" {
+		t.Errorf("domains.domain_records_set = %+v, want feeds.test.com CNAME agents.example.com", dns[0].Input)
+	}
+	if dns[0].Input["_project_id"] != "test-proj" {
+		t.Errorf("domains.domain_records_set _project_id = %q, want test-proj", dns[0].Input["_project_id"])
 	}
 }
 
 func TestShowCreate_HostnameWiringFails_ShowStillCreated(t *testing.T) {
-	// routes is a soft dependency: a wiring failure surfaces as a
+	// Ingress is soft at write time: a wiring failure surfaces as a
 	// warning but must NOT roll back the show write.
-	pf := newRecordingPlatform().fail("routes", "routes_register", errors.New("routes unreachable"))
-	ctx := newTestCtx(t, tk.WithPlatform(pf), tk.WithEnv("APTEVA_INSTALL_ID", "5"))
+	pf := newRecordingPlatform().withDomain("test.com").failExposeIngress(errors.New("ingress unreachable"))
+	ctx := newTestCtx(t, tk.WithPlatform(pf), tk.WithEnv("APTEVA_PUBLIC_HOST", "agents.example.com"))
 	app := &App{}
 
 	out, err := app.toolShowCreate(ctx, map[string]any{
@@ -326,13 +392,48 @@ func TestShowCreate_HostnameWiringFails_ShowStillCreated(t *testing.T) {
 		t.Fatalf("show_create should not fail on wiring error: %v", err)
 	}
 	res := out.(map[string]any)
-	if w := res["warning"].(string); !strings.Contains(w, "routes:") {
-		t.Errorf("expected a routes wiring warning, got %q", w)
+	if w := res["warning"].(string); !strings.Contains(w, "ingress:") {
+		t.Errorf("expected an ingress wiring warning, got %q", w)
 	}
 	// The show is persisted regardless.
 	show := res["show"].(*Show)
 	if _, err := app.toolShowGet(ctx, map[string]any{"id": float64(show.ID)}); err != nil {
 		t.Errorf("show should still be readable after wiring failure: %v", err)
+	}
+}
+
+func TestShowCreate_DomainsMissingWarnsButIngressStillCreated(t *testing.T) {
+	pf := newRecordingPlatform()
+	ctx := newTestCtx(t, tk.WithPlatform(pf), tk.WithEnv("APTEVA_PUBLIC_HOST", "agents.example.com"))
+
+	out, err := (&App{}).toolShowCreate(ctx, map[string]any{
+		"title": "Hosted Show", "hostname": "feeds.test.com",
+	})
+	if err != nil {
+		t.Fatalf("show_create should not fail on DNS warning: %v", err)
+	}
+	if w := out.(map[string]any)["warning"].(string); !strings.Contains(w, "domains:") {
+		t.Errorf("expected a domains warning, got %q", w)
+	}
+	if len(pf.exposeCalls()) != 1 {
+		t.Fatalf("ExposeIngress should still be called")
+	}
+}
+
+func TestFeedRequest_CustomHostnameResolvesShow(t *testing.T) {
+	ctx := newTestCtx(t, tk.WithPlatform(newRecordingPlatform().withDomain("test.com")), tk.WithEnv("APTEVA_PUBLIC_HOST", "agents.example.com"))
+	show := mustShow(t, ctx, map[string]any{
+		"title": "Hosted Show", "hostname": "feeds.test.com",
+	})
+
+	req := httptest.NewRequest("GET", "https://feeds.test.com/feed/"+show.Slug+".xml", nil)
+	req.Host = "feeds.test.com"
+	got, err := dbGetShowForFeedRequest(ctx.AppDB(), show.Slug, req)
+	if err != nil {
+		t.Fatalf("resolve feed show: %v", err)
+	}
+	if got.ID != show.ID {
+		t.Fatalf("resolved show id = %d, want %d", got.ID, show.ID)
 	}
 }
 

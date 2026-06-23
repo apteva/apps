@@ -1,14 +1,16 @@
 package main
 
 // integration.go — every cross-app call lives here. The podcast app
-// owns shows/episodes/feeds; bytes, probing, analytics, ingress and
-// DNS belong to sibling apps reached via ctx.PlatformAPI().
+// owns shows/episodes/feeds; bytes, probing and analytics belong to
+// sibling apps reached via ctx.PlatformAPI(). Public hostname ingress
+// and TLS certificates are server-native platform callbacks. DNS
+// remains a Domains app concern, matching deploy/fleet.
 //
 //   storage   (required) — files_get: byte length, mime, enclosure URL
 //   media     (required) — media_get: exact duration
 //   analytics (optional) — analytics_track: per-download events
-//   routes    (optional) — routes_register: claim a feed hostname
-//   domains   (optional) — domain_records_set: CNAME the hostname
+//   ingress   (platform) — ExposeIngress: claim a feed hostname + cert
+//   domains   (optional) — domain_records_set/delete: DNS records
 //
 // Cross-app calls use CallAppResult so the SDK strips the MCP envelope
 // and unmarshals the inner JSON directly.
@@ -16,7 +18,9 @@ package main
 import (
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -133,31 +137,31 @@ func trackDownload(ctx *sdk.AppCtx, show *Show, ep *Episode, r *http.Request) {
 	}
 }
 
-// ─── routes + domains: custom feed hostname wiring ─────────────────
+// ─── platform ingress: custom feed hostname wiring ─────────────────
 
-// wireHostname claims the hostname for this sidecar with routes, and
-// upserts a CNAME via domains when the hostname is known there. Returns
-// a human-readable warning (or "" on full success); wiring failures
-// never roll back the show write — the panel surfaces the warning and
-// the operator can retry.
-func wireHostname(ctx *sdk.AppCtx, hostname string) string {
-	hostname = strings.TrimSpace(hostname)
-	if hostname == "" {
+// wireHostname claims the show's feed hostname for this sidecar through
+// server-native ingress, then writes DNS through the optional Domains
+// app. The server owns host routing and certificate allowance; Domains
+// points the hostname at the platform host when bound. Wiring
+// failures never roll back the show write — the panel surfaces the
+// warning and the operator can retry by saving the feed domain again.
+func wireHostname(ctx *sdk.AppCtx, show *Show) string {
+	if show == nil || strings.TrimSpace(show.Hostname) == "" {
 		return ""
 	}
 	var warnings []string
-	if err := registerRoute(ctx, hostname); err != nil {
-		warnings = append(warnings, "routes: "+err.Error())
+	if err := exposeFeedIngress(ctx, show); err != nil {
+		warnings = append(warnings, "ingress: "+err.Error())
 	}
-	if err := maybeUpsertCNAME(ctx, hostname); err != nil {
+	if err := upsertFeedDNSViaDomains(ctx, show); err != nil {
 		warnings = append(warnings, "domains: "+err.Error())
 	}
 	return strings.Join(warnings, "; ")
 }
 
-// maybeUnwireHostname unregisters the route when no remaining show in
-// the same project uses the hostname. DNS is never deleted — a CNAME
-// may be shared.
+// maybeUnwireHostname unregisters the ingress route and best-effort
+// removes DNS when no remaining show in the same project uses the
+// hostname.
 func maybeUnwireHostname(ctx *sdk.AppCtx, hostname, projectID string) {
 	hostname = strings.TrimSpace(hostname)
 	if hostname == "" {
@@ -173,94 +177,127 @@ func maybeUnwireHostname(ctx *sdk.AppCtx, hostname, projectID string) {
 	if n > 0 {
 		return
 	}
-	if err := unregisterRoute(ctx, hostname); err != nil {
+	if err := unexposeFeedIngress(ctx, hostname); err != nil {
 		ctx.Logger().Info("maybeUnwireHostname unregister", "host", hostname, "err", err.Error())
 	}
+	if err := deleteFeedDNSViaDomains(ctx, hostname, projectID); err != nil {
+		ctx.Logger().Info("maybeUnwireHostname dns delete", "host", hostname, "err", err.Error())
+	}
 }
 
-func registerRoute(ctx *sdk.AppCtx, hostname string) error {
+func exposeFeedIngress(ctx *sdk.AppCtx, show *Show) error {
 	if ctx == nil || ctx.PlatformAPI() == nil {
 		return errors.New("platform api unavailable")
 	}
-	installID := myInstallID()
-	if installID == 0 {
-		return errors.New("APTEVA_INSTALL_ID unset; cannot register route")
+	hostname := strings.TrimSpace(show.Hostname)
+	if hostname == "" {
+		return errors.New("hostname required")
 	}
-	var resp struct {
-		Action string `json:"action"`
-	}
-	return ctx.PlatformAPI().CallAppResult("routes", "routes_register", map[string]any{
-		"hostname":         hostname,
-		"target":           sidecarTarget(),
-		"owner_install_id": installID,
-		"owner_kind":       "podcast",
-	}, &resp)
+	_, err := ctx.PlatformAPI().ExposeIngress(sdk.IngressExposeRequest{
+		Hostname:  hostname,
+		Target:    sidecarTarget(),
+		ProjectID: show.ProjectID,
+		OwnerKind: "podcast",
+		CertFQDN:  hostname,
+	})
+	return err
 }
 
-func unregisterRoute(ctx *sdk.AppCtx, hostname string) error {
+func unexposeFeedIngress(ctx *sdk.AppCtx, hostname string) error {
 	if ctx == nil || ctx.PlatformAPI() == nil {
 		return errors.New("platform api unavailable")
 	}
-	installID := myInstallID()
-	if installID == 0 {
-		return errors.New("APTEVA_INSTALL_ID unset; cannot unregister route")
-	}
-	var resp struct {
-		Removed bool `json:"removed"`
-	}
-	return ctx.PlatformAPI().CallAppResult("routes", "routes_unregister", map[string]any{
-		"hostname":         hostname,
-		"owner_install_id": installID,
-	}, &resp)
+	return ctx.PlatformAPI().UnexposeIngress(hostname)
 }
 
-// maybeUpsertCNAME points the hostname at the platform when domains
-// manages its apex. Skips silently when domains isn't installed or
-// doesn't know the apex — the operator manages DNS elsewhere.
-func maybeUpsertCNAME(ctx *sdk.AppCtx, hostname string) error {
+func upsertFeedDNSViaDomains(ctx *sdk.AppCtx, show *Show) error {
 	if ctx == nil || ctx.PlatformAPI() == nil {
-		return nil
+		return errors.New("platform api unavailable")
 	}
-	apex := apexOf(hostname)
-	sub := strings.TrimSuffix(strings.TrimSuffix(hostname, apex), ".")
-	if sub == "" {
-		sub = "@"
-	}
-	var probe struct {
-		Domain map[string]any `json:"domain"`
-	}
-	if err := ctx.PlatformAPI().CallAppResult("domains", "domain_get",
-		map[string]any{"name": apex}, &probe); err != nil {
-		ctx.Logger().Info("domain_get probe failed (skipping CNAME)", "host", hostname, "err", err.Error())
-		return nil
-	}
-	if probe.Domain == nil {
-		return nil
-	}
-	target := platformPublicHost()
+	target := platformDNSHost(ctx)
 	if target == "" {
-		return errors.New("APTEVA_PUBLIC_HOST unset; can't pick a CNAME target")
+		return errors.New("platform public host unavailable; set APTEVA_PUBLIC_HOST/PUBLIC_URL or platform public_url")
 	}
-	var setResp struct {
-		Record any `json:"record"`
+	domain, name, err := resolveManagedApex(ctx, show.ProjectID, show.Hostname)
+	if err != nil {
+		return err
 	}
-	if err := ctx.PlatformAPI().CallAppResult("domains", "domain_records_set", map[string]any{
-		"domain": apex,
-		"name":   sub,
-		"type":   "CNAME",
-		"value":  target,
-	}, &setResp); err != nil {
-		return fmt.Errorf("domain_records_set: %w", err)
+	rtype := "CNAME"
+	if net.ParseIP(target) != nil {
+		rtype = "A"
 	}
-	return nil
+	if rtype == "CNAME" && name == "@" {
+		return errors.New("apex CNAME is not supported; use a subdomain or point the apex manually with an A/ALIAS record")
+	}
+	var out map[string]any
+	return ctx.PlatformAPI().CallAppResult("domains", "domain_records_set", map[string]any{
+		"_project_id": show.ProjectID,
+		"domain":      domain,
+		"name":        name,
+		"type":        rtype,
+		"value":       target,
+		"ttl":         600,
+	}, &out)
+}
+
+func deleteFeedDNSViaDomains(ctx *sdk.AppCtx, hostname, projectID string) error {
+	if ctx == nil || ctx.PlatformAPI() == nil {
+		return errors.New("platform api unavailable")
+	}
+	domain, name, err := resolveManagedApex(ctx, projectID, hostname)
+	if err != nil {
+		return err
+	}
+	rtype := "CNAME"
+	if target := platformDNSHost(ctx); net.ParseIP(target) != nil {
+		rtype = "A"
+	}
+	var out map[string]any
+	return ctx.PlatformAPI().CallAppResult("domains", "domain_records_delete", map[string]any{
+		"_project_id": projectID,
+		"domain":      domain,
+		"name":        name,
+		"type":        rtype,
+	}, &out)
+}
+
+func resolveManagedApex(ctx *sdk.AppCtx, projectID, hostname string) (domain, name string, err error) {
+	host := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(hostname), "."))
+	if host == "" {
+		return "", "", errors.New("hostname required")
+	}
+	var resp struct {
+		Domains []struct {
+			Name string `json:"name"`
+		} `json:"domains"`
+	}
+	if err := ctx.PlatformAPI().CallAppResult("domains", "domain_list", map[string]any{
+		"_project_id": projectID,
+	}, &resp); err != nil {
+		return "", "", fmt.Errorf("domains.domain_list: %w", err)
+	}
+	var best string
+	for _, domain := range resp.Domains {
+		d := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(domain.Name), "."))
+		if d == "" {
+			continue
+		}
+		if host == d || strings.HasSuffix(host, "."+d) {
+			if len(d) > len(best) {
+				best = d
+			}
+		}
+	}
+	if best == "" {
+		return "", "", fmt.Errorf("no managed domain matches %q; add the apex in Domains or point DNS at %q manually", host, platformDNSHost(ctx))
+	}
+	if host == best {
+		return best, "@", nil
+	}
+	return best, strings.TrimSuffix(host[:len(host)-len(best)], "."), nil
 }
 
 // ─── env-derived addressing ────────────────────────────────────────
-
-func myInstallID() int64 {
-	n, _ := strconv.ParseInt(os.Getenv("APTEVA_INSTALL_ID"), 10, 64)
-	return n
-}
 
 func sidecarTarget() string {
 	port := os.Getenv("APTEVA_PORT")
@@ -271,26 +308,56 @@ func sidecarTarget() string {
 }
 
 // platformPublicHost is the public host of the apteva-server this
-// sidecar runs behind — the CNAME target and the path-based feed host.
+// sidecar runs behind — used for path-based feed URLs.
 func platformPublicHost() string {
 	if v := strings.TrimSpace(os.Getenv("APTEVA_PUBLIC_HOST")); v != "" {
-		return v
+		return normalizeHost(v)
 	}
 	if v := strings.TrimSpace(os.Getenv("PUBLIC_URL")); v != "" {
-		v = strings.TrimPrefix(v, "https://")
-		v = strings.TrimPrefix(v, "http://")
-		return strings.TrimSuffix(v, "/")
+		return normalizeHost(v)
 	}
 	return ""
 }
 
-// apexOf is a naive "last two labels" registrable-apex guess — good
-// enough to pick which domain to query. Real PSL handling lives in the
-// domains app; multi-label TLDs (.co.uk) should be wired from the panel.
-func apexOf(hostname string) string {
-	parts := strings.Split(hostname, ".")
-	if len(parts) < 2 {
-		return hostname
+func platformDNSHost(ctx *sdk.AppCtx) string {
+	if h := platformPublicHost(); h != "" {
+		return h
 	}
-	return parts[len(parts)-2] + "." + parts[len(parts)-1]
+	if ctx == nil || ctx.PlatformAPI() == nil {
+		return ""
+	}
+	info, err := ctx.PlatformAPI().PlatformInfo()
+	if err != nil || info == nil {
+		return ""
+	}
+	u, err := url.Parse(strings.TrimSpace(info.PublicURL))
+	if err != nil {
+		return ""
+	}
+	host := u.Host
+	if host == "" {
+		host = u.Path
+	}
+	if i := strings.LastIndexByte(host, ':'); i > 0 {
+		host = host[:i]
+	}
+	return strings.ToLower(strings.TrimSuffix(host, "."))
+}
+
+func normalizeHost(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	u, err := url.Parse(raw)
+	if err == nil && u.Host != "" {
+		raw = u.Host
+	}
+	raw = strings.TrimPrefix(raw, "https://")
+	raw = strings.TrimPrefix(raw, "http://")
+	raw = strings.TrimSuffix(raw, "/")
+	if i := strings.LastIndexByte(raw, ':'); i > 0 {
+		raw = raw[:i]
+	}
+	return strings.ToLower(strings.TrimSuffix(raw, "."))
 }

@@ -19,8 +19,8 @@ import (
 // ─── URL helpers ───────────────────────────────────────────────────
 
 // feedBaseURL is the public origin a show is served from. With a
-// custom hostname (claimed via routes), that hostname is the origin.
-// Otherwise apteva-server reverse-proxies this sidecar under
+// custom hostname (claimed via server-native ingress), that hostname is
+// the origin. Otherwise apteva-server reverse-proxies this sidecar under
 // /apps/podcast on the platform's public host.
 func feedBaseURL(show *Show) string {
 	if h := strings.TrimSpace(show.Hostname); h != "" {

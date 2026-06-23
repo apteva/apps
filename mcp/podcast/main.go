@@ -1,9 +1,10 @@
-// Apteva Podcast v0.1.0 — podcast hosting + management.
+// Apteva Podcast v0.1.1 — podcast hosting + management.
 //
 // This app owns shows, episodes and the RSS feed. It does NOT own
 // audio bytes (storage), audio probing/transcripts (media), download
-// analytics (analytics), ingress (routes) or DNS (domains) — each of
-// those is a sibling app reached via ctx.PlatformAPI().CallAppResult.
+// analytics (analytics), public hostname ingress/TLS (server-native
+// platform callbacks), or DNS records (Domains app) — each external
+// concern is reached through the SDK platform API.
 //
 // HTTP surface:
 //
@@ -20,7 +21,7 @@
 //	tools.go        MCP tool handlers + arg helpers
 //	handlers.go     HTTP handlers + download dedupe
 //	feed.go         RSS rendering + feed URL helpers + feed cache
-//	integration.go  cross-app calls: storage, media, analytics, routes, domains
+//	integration.go  cross-app/platform calls: storage, media, analytics, ingress, domains DNS
 package main
 
 import (
@@ -44,23 +45,29 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: podcast
 display_name: Podcast
-version: 0.1.0
+version: 0.1.1
 description: |
   Podcast hosting + management for Apteva. Owns shows, episodes and the
   RSS feed; composes storage (audio), media (probe + transcripts),
-  analytics (downloads), routes + domains (custom feed hostname).
+  analytics (downloads), server-native ingress/TLS, and optional Domains DNS.
 author: Apteva
 scopes: [project, global]
 requires:
   permissions:
     - db.write.app
     - platform.apps.call
+    - platform.ingress.write
+  integrations:
+    - role: domains
+      kind: app
+      required: false
+      compatible_app_names: [domains]
+      label: Domains app
+      hint: "Optional. Bind Domains to let Podcast write feed DNS records."
   apps:
     - { name: storage,   reason: "Audio hosting" }
     - { name: media,     reason: "Audio probe + transcripts" }
     - { name: analytics, optional: true, reason: "Download analytics" }
-    - { name: routes,    optional: true, reason: "Custom feed hostname" }
-    - { name: domains,   optional: true, reason: "DNS auto-config" }
 provides:
   http_routes:
     - prefix: /

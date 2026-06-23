@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: podcast
 display_name: Podcast
-version: 0.1.0
+version: 0.1.1
 description: |
   Podcast hosting + management for Apteva. Owns shows, episodes, and
   the RSS feed; serves the public feed XML and an IAB-style download
@@ -20,17 +20,13 @@ description: |
     - analytics (optional) — every download/play hit is forwarded via
                 analytics_track; the panel reads analytics_query/top.
                 Soft dependency: track calls fail silently if absent.
-    - routes    (optional) — claims a custom feed hostname so inbound
-                HTTP for feeds.example.com lands on this sidecar.
-                Without it, the feed is served path-based under the
-                platform host.
-    - domains   (optional) — when the feed hostname is Apteva-managed,
-                upserts a CNAME pointing at the platform. Same pattern
-                the redirects app uses.
+    - platform ingress + Domains app — platform ingress claims the
+                feed hostname and cert; the optional Domains app writes
+                DNS records when the hostname is under a managed domain.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/podcast
-icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/podcast/icon.png
+icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/podcast/icon.svg
 tags: [podcast, rss, audio, hosting, media]
 
 scopes: [project, global]
@@ -40,6 +36,14 @@ requires:
   permissions:
     - db.write.app
     - platform.apps.call
+    - platform.ingress.write
+  integrations:
+    - role: domains
+      kind: app
+      required: false
+      compatible_app_names: [domains]
+      label: Domains app
+      hint: "Optional. Bind Domains to let Podcast write feed DNS records. Without it, ingress/cert is registered and DNS can be pointed manually."
   apps:
     - name: storage
       reason: "Audio hosting — stores the episode audio files and serves the public enclosure URLs with range-request support."
@@ -48,12 +52,6 @@ requires:
     - name: analytics
       optional: true
       reason: "Download analytics — forwards every download/play hit via analytics_track and powers the stats panel. Skip to run without listener metrics."
-    - name: routes
-      optional: true
-      reason: "Custom feed hostname — claims feeds.example.com on apteva-server's ingress map. Without it the feed is served path-based under the platform host."
-    - name: domains
-      optional: true
-      reason: "DNS auto-config — when the feed hostname is in domains, upserts a CNAME so DNS points at the platform. Skip to manage DNS elsewhere."
 
 provides:
   http_routes:

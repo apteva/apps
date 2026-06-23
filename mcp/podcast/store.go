@@ -168,6 +168,10 @@ func dbGetShowBySlug(db *sql.DB, slug, projectID string) (*Show, error) {
 	return scanShow(db.QueryRow("SELECT "+showCols+" FROM shows WHERE slug=? AND project_id=?", slug, projectID))
 }
 
+func dbGetShowBySlugAndHostname(db *sql.DB, slug, hostname string) (*Show, error) {
+	return scanShow(db.QueryRow("SELECT "+showCols+" FROM shows WHERE slug=? AND hostname=?", slug, hostname))
+}
+
 func dbListShows(db *sql.DB, projectID string, limit, offset int) ([]Show, error) {
 	if limit <= 0 || limit > 500 {
 		limit = 100

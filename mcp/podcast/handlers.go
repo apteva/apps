@@ -9,6 +9,7 @@ package main
 //       clients, browsers and directory crawlers carry no token.
 
 import (
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -23,7 +24,7 @@ import (
 func (a *App) handleShowsCollection(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		shows, err := dbListShows(globalCtx.AppDB(), httpProject(), 100, 0)
+		shows, err := dbListShows(globalCtx.AppDB(), httpProject(r), 100, 0)
 		if err != nil {
 			httpErr(w, http.StatusInternalServerError, err.Error())
 			return
@@ -35,12 +36,12 @@ func (a *App) handleShowsCollection(w http.ResponseWriter, r *http.Request) {
 			httpErr(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		show, err := dbInsertShow(globalCtx.AppDB(), args, httpProject())
+		show, err := dbInsertShow(globalCtx.AppDB(), args, httpProject(r))
 		if err != nil {
 			httpErr(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		warning := wireHostname(globalCtx, show.Hostname)
+		warning := wireHostname(globalCtx, show)
 		w.WriteHeader(http.StatusCreated)
 		httpJSON(w, map[string]any{"show": show, "feed_url": feedURL(show), "warning": warning})
 	default:
@@ -239,7 +240,7 @@ func (a *App) handlePublicFeed(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusNotFound, "feed not found")
 		return
 	}
-	show, err := dbGetShowBySlug(globalCtx.AppDB(), slug, httpProject())
+	show, err := dbGetShowForFeedRequest(globalCtx.AppDB(), slug, r)
 	if err != nil {
 		httpNotFoundOr500(w, err)
 		return
@@ -431,8 +432,44 @@ func httpNotFoundOr500(w http.ResponseWriter, err error) {
 
 // httpProject is the owning project for panel/public HTTP requests —
 // the platform-injected APTEVA_PROJECT_ID, or "" for install scope.
-func httpProject() string {
+func httpProject(r *http.Request) string {
+	if r != nil {
+		if v := strings.TrimSpace(r.URL.Query().Get("project_id")); v != "" {
+			return v
+		}
+	}
 	return projectFromArgs(nil)
+}
+
+func dbGetShowForFeedRequest(db *sql.DB, slug string, r *http.Request) (*Show, error) {
+	host := requestHostname(r)
+	if host != "" && host != platformPublicHost() {
+		show, err := dbGetShowBySlugAndHostname(db, slug, host)
+		if err == nil {
+			return show, nil
+		}
+		if !errors.Is(err, errNotFound) {
+			return nil, err
+		}
+	}
+	return dbGetShowBySlug(db, slug, httpProject(r))
+}
+
+func requestHostname(r *http.Request) string {
+	if r == nil {
+		return ""
+	}
+	host := strings.TrimSpace(r.Host)
+	if forwarded := strings.TrimSpace(r.Header.Get("X-Forwarded-Host")); forwarded != "" {
+		host = forwarded
+	}
+	if i := strings.IndexByte(host, ','); i > 0 {
+		host = strings.TrimSpace(host[:i])
+	}
+	if i := strings.LastIndexByte(host, ':'); i > 0 {
+		host = host[:i]
+	}
+	return strings.ToLower(strings.TrimSuffix(host, "."))
 }
 
 // clientIP extracts the originating IP, honouring the proxy header

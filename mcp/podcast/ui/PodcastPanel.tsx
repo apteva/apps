@@ -6,10 +6,9 @@
 // audio (a storage file id, probed via the media app), publish /
 // unpublish, schedule, delete.
 //
-// The panel only talks to this app's REST surface; cross-app wiring
-// (storage probe, routes/domains hostname claim, analytics) happens
-// server-side and surfaces here as the `warning` string the create /
-// audio endpoints return.
+// The panel only talks to this app's REST surface; cross-app and
+// platform wiring happens server-side and surfaces here as the
+// `warning` string the endpoints return.
 
 import { useCallback, useEffect, useMemo, useState } from "react";
 
@@ -163,6 +162,10 @@ export default function PodcastPanel({ projectId, installId }: NativePanelProps)
               params={params}
               setError={setError}
               setWarning={setWarning}
+              onShowUpdated={(warn) => {
+                setWarning(warn || "");
+                loadShows();
+              }}
               onShowDeleted={() => {
                 setSelectedId(null);
                 loadShows();
@@ -184,16 +187,19 @@ function ShowDetail({
   params,
   setError,
   setWarning,
+  onShowUpdated,
   onShowDeleted,
 }: {
   show: Show;
   params: string;
   setError: (s: string) => void;
   setWarning: (s: string) => void;
+  onShowUpdated: (warning: string) => void;
   onShowDeleted: () => void;
 }) {
   const [episodes, setEpisodes] = useState<Episode[] | null>(null);
   const [validation, setValidation] = useState<ValidateResult | null>(null);
+  const [hostname, setHostname] = useState(show.hostname || "");
   const [busy, setBusy] = useState(false);
 
   const loadEpisodes = useCallback(async () => {
@@ -213,8 +219,9 @@ function ShowDetail({
 
   useEffect(() => {
     setValidation(null);
+    setHostname(show.hostname || "");
     loadEpisodes();
-  }, [loadEpisodes]);
+  }, [loadEpisodes, show.hostname]);
 
   const validate = async () => {
     try {
@@ -240,6 +247,25 @@ function ShowDetail({
       onShowDeleted();
     } catch (e) {
       setError("Delete failed: " + (e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const saveHostname = async () => {
+    setBusy(true);
+    try {
+      const r = await fetch(`${API}/shows/${show.id}?${params}`, {
+        method: "PATCH",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ hostname: hostname.trim() }),
+      });
+      if (!r.ok) throw new Error(`${r.status}: ${await r.text().catch(() => "")}`);
+      const j = (await r.json().catch(() => ({}))) as { warning?: string };
+      onShowUpdated(j.warning || "");
+    } catch (e) {
+      setError("Save feed domain failed: " + (e as Error).message);
     } finally {
       setBusy(false);
     }
@@ -273,7 +299,27 @@ function ShowDetail({
             Delete show
           </button>
         </div>
-        <FeedLink slug={show.slug} />
+        <FeedLink show={show} />
+        <div className="mt-3 flex items-end gap-2 max-w-xl">
+          <div className="flex-1">
+            <label className="text-[11px] text-text-muted block mb-1">Feed domain</label>
+            <input
+              type="text"
+              value={hostname}
+              onChange={(e) => setHostname(e.target.value)}
+              placeholder="feeds.example.com"
+              className="w-full bg-bg-input border border-border rounded px-2 py-1 text-xs font-mono"
+            />
+          </div>
+          <button
+            type="button"
+            onClick={saveHostname}
+            disabled={busy || hostname.trim() === (show.hostname || "")}
+            className="px-3 py-1 text-xs border border-border rounded hover:bg-bg-input disabled:opacity-50"
+          >
+            Save domain
+          </button>
+        </div>
         {validation && <ValidationBlock result={validation} />}
       </div>
 
@@ -295,19 +341,20 @@ function ShowDetail({
   );
 }
 
-function FeedLink({ slug }: { slug: string }) {
+function FeedLink({ show }: { show: Show }) {
   const [copied, setCopied] = useState(false);
-  // The absolute feed URL depends on the platform host; the relative
-  // path is always /feed/{slug}.xml on this app's origin.
-  const path = `/feed/${slug}.xml`;
+  const path = `/feed/${show.slug}.xml`;
+  const url = show.hostname
+    ? `https://${show.hostname}${path}`
+    : `${typeof window !== "undefined" ? window.location.origin : ""}/apps/podcast${path}`;
   return (
     <div className="mt-2 flex items-center gap-2 text-xs">
       <span className="text-text-muted">RSS feed</span>
-      <code className="text-accent font-mono">{path}</code>
+      <code className="text-accent font-mono break-all">{url}</code>
       <button
         type="button"
         onClick={() => {
-          navigator.clipboard?.writeText(path);
+          navigator.clipboard?.writeText(url);
           setCopied(true);
           setTimeout(() => setCopied(false), 1500);
         }}

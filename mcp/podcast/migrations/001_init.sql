@@ -7,9 +7,9 @@
 -- counts are a best-effort local counter — per-event analytics are
 -- forwarded to the analytics app when it's installed.
 --
--- Ingress wiring (custom feed hostname) doesn't live here: shows.hostname
--- is claimed via routes.routes_register and DNS-wired via domains, the
--- same composition pattern the redirects app uses.
+-- Domain wiring (custom feed hostname) doesn't live here:
+-- shows.hostname is claimed through server-native platform ingress and
+-- DNS records are written through the optional Domains app when bound.
 
 CREATE TABLE shows (
   id             INTEGER PRIMARY KEY AUTOINCREMENT,

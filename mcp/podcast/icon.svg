@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-labelledby="title desc">
+  <title id="title">Podcast</title>
+  <desc id="desc">Microphone with broadcast rings</desc>
+  <rect width="256" height="256" rx="56" fill="#111827"/>
+  <path d="M128 36c-21 0-38 17-38 38v52c0 21 17 38 38 38s38-17 38-38V74c0-21-17-38-38-38z" fill="#f8fafc"/>
+  <path d="M64 112v15c0 35 29 64 64 64s64-29 64-64v-15" fill="none" stroke="#38bdf8" stroke-width="16" stroke-linecap="round"/>
+  <path d="M128 191v29" stroke="#f8fafc" stroke-width="16" stroke-linecap="round"/>
+  <path d="M96 220h64" stroke="#f8fafc" stroke-width="16" stroke-linecap="round"/>
+  <path d="M48 75a100 100 0 0 0-18 82" fill="none" stroke="#22c55e" stroke-width="12" stroke-linecap="round"/>
+  <path d="M208 75a100 100 0 0 1 18 82" fill="none" stroke="#22c55e" stroke-width="12" stroke-linecap="round"/>
+  <path d="M71 91a70 70 0 0 0-10 51" fill="none" stroke="#38bdf8" stroke-width="10" stroke-linecap="round"/>
+  <path d="M185 91a70 70 0 0 1 10 51" fill="none" stroke="#38bdf8" stroke-width="10" stroke-linecap="round"/>
+</svg>

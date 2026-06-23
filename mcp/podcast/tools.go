@@ -19,7 +19,7 @@ func (a *App) toolShowCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	if err != nil {
 		return nil, err
 	}
-	warning := wireHostname(ctx, show.Hostname)
+	warning := wireHostname(ctx, show)
 	return map[string]any{"show": show, "feed_url": feedURL(show), "warning": warning}, nil
 }
 
@@ -39,7 +39,7 @@ func (a *App) toolShowUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	bustFeed(show.ID)
 	var warning string
 	if _, ok := args["hostname"]; ok && show.Hostname != before.Hostname {
-		warning = wireHostname(ctx, show.Hostname)
+		warning = wireHostname(ctx, show)
 		if before.Hostname != "" {
 			maybeUnwireHostname(ctx, before.Hostname, show.ProjectID)
 		}
@@ -367,6 +367,12 @@ func nullableInt(args map[string]any, key string) any {
 // _project_id arg (global-scope installs pass it per call).
 func projectFromArgs(args map[string]any) string {
 	if v := os.Getenv("APTEVA_PROJECT_ID"); v != "" {
+		return v
+	}
+	if args == nil {
+		return ""
+	}
+	if v, ok := args["project_id"].(string); ok {
 		return v
 	}
 	if v, ok := args["_project_id"].(string); ok {
