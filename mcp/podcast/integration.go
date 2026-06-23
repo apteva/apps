@@ -16,6 +16,7 @@ package main
 // and unmarshals the inner JSON directly.
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -38,6 +39,13 @@ type audioProbe struct {
 	Warning         string // non-fatal: e.g. media hasn't probed duration yet
 }
 
+type storageFileProbe struct {
+	SizeBytes   int64  `json:"size_bytes"`
+	ContentType string `json:"content_type"`
+	URL         string `json:"url"`
+	Visibility  string `json:"visibility"`
+}
+
 // probeAudio resolves a storage file id into the facts the RSS
 // enclosure needs: byte length + mime + a public URL from storage, and
 // exact duration from media. media's indexer probes asynchronously, so
@@ -55,32 +63,28 @@ func probeAudio(ctx *sdk.AppCtx, fileID, projectID string) (*audioProbe, error) 
 	}
 
 	// storage.files_get — byte length, mime, canonical URL, visibility.
-	var sres struct {
-		Found bool `json:"found"`
-		File  *struct {
-			SizeBytes   int64  `json:"size_bytes"`
-			ContentType string `json:"content_type"`
-			URL         string `json:"url"`
-			Visibility  string `json:"visibility"`
-		} `json:"file"`
-	}
 	storageArgs := map[string]any{"id": numericID}
 	if strings.TrimSpace(projectID) != "" {
 		storageArgs["_project_id"] = projectID
 	}
+	var rawStorage json.RawMessage
 	if err := ctx.PlatformAPI().CallAppResult("storage", "files_get",
-		storageArgs, &sres); err != nil {
+		storageArgs, &rawStorage); err != nil {
 		return nil, fmt.Errorf("storage.files_get: %w", err)
 	}
-	if !sres.Found || sres.File == nil {
+	file, err := decodeStorageFileProbe(rawStorage)
+	if err != nil {
+		return nil, fmt.Errorf("storage.files_get: %w", err)
+	}
+	if file == nil {
 		return nil, fmt.Errorf("storage file %d not found", numericID)
 	}
 
 	probe := &audioProbe{
-		URL:        sres.File.URL,
-		Bytes:      sres.File.SizeBytes,
-		MimeType:   sres.File.ContentType,
-		Visibility: sres.File.Visibility,
+		URL:        file.URL,
+		Bytes:      file.SizeBytes,
+		MimeType:   file.ContentType,
+		Visibility: file.Visibility,
 	}
 	if probe.MimeType == "" {
 		probe.MimeType = "audio/mpeg"
@@ -117,6 +121,30 @@ func probeAudio(ctx *sdk.AppCtx, fileID, projectID string) (*audioProbe, error) 
 		probe.DurationSeconds = mres.Media.DurationMs / 1000
 	}
 	return probe, nil
+}
+
+func decodeStorageFileProbe(raw json.RawMessage) (*storageFileProbe, error) {
+	if len(raw) == 0 || string(raw) == "null" {
+		return nil, nil
+	}
+	var wrapped struct {
+		Found bool              `json:"found"`
+		File  *storageFileProbe `json:"file"`
+	}
+	if err := json.Unmarshal(raw, &wrapped); err == nil && wrapped.File != nil {
+		if !wrapped.Found {
+			return nil, nil
+		}
+		return wrapped.File, nil
+	}
+	var file storageFileProbe
+	if err := json.Unmarshal(raw, &file); err != nil {
+		return nil, err
+	}
+	if file.URL == "" && file.SizeBytes == 0 && file.ContentType == "" {
+		return nil, nil
+	}
+	return &file, nil
 }
 
 // trackDownload forwards an IAB-style download event to the analytics

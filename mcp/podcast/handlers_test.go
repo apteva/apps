@@ -305,6 +305,26 @@ func TestEpisodeSetAudio_MediaNotProbedYet_Warns(t *testing.T) {
 	}
 }
 
+func TestEpisodeSetAudio_AcceptsBareStorageFileResponse(t *testing.T) {
+	pf := newRecordingPlatform().
+		on("storage", "files_get", `{"id":42,"project_id":"test-proj","size_bytes":5500000,"content_type":"audio/mpeg","url":"https://cdn.example.com/ep.mp3","visibility":"public"}`).
+		on("media", "media_get", `{"found":false}`)
+	ctx := newTestCtx(t, tk.WithPlatform(pf))
+	show := mustShow(t, ctx, map[string]any{"title": "Show"})
+	ep := mustEpisode(t, ctx, map[string]any{"show_id": float64(show.ID), "title": "Ep"})
+
+	out, err := (&App{}).toolEpisodeSetAudio(ctx, map[string]any{
+		"id": float64(ep.ID), "audio_file_id": "42",
+	})
+	if err != nil {
+		t.Fatalf("set_audio should accept storage's current bare file shape: %v", err)
+	}
+	got := out.(map[string]any)["episode"].(*Episode)
+	if got.AudioBytes != 5_500_000 || got.AudioURL != "https://cdn.example.com/ep.mp3" {
+		t.Errorf("bare storage file response not cached onto episode: %+v", got)
+	}
+}
+
 func TestEpisodeSetAudio_NonPublicStorage_Warns(t *testing.T) {
 	pf := newRecordingPlatform().
 		on("storage", "files_get", `{"found":true,"file":{"size_bytes":900,"content_type":"audio/mpeg","url":"https://cdn/x.mp3","visibility":"private"}}`).
