@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: composer
 display_name: Composer
-version: 0.3.31
+version: 0.3.32
 description: |
   Multi-clip video composition. Stitch generated or uploaded assets
   into a single video — one visual track, timed audio tracks, optional
@@ -150,5 +150,32 @@ db:
   driver: sqlite
   path: /data/composer.db
   migrations: migrations/
+
+config_schema:
+  - name: render_host_id
+    type: select_from_app
+    app: instances
+    discovery:
+      route: /api/instances
+      response_path: instances
+      value_field: id
+      label_field: name
+    fallback: text
+    default: "0"
+    label: Remote render host
+    description: |
+      Pick a host from the Instances app inventory to offload Composer
+      ffmpeg renders. 0 means local sidecar rendering. Remote renders
+      download signed input URLs on the selected host and upload the
+      finished composition back to Storage.
+  - name: ffmpeg_path
+    type: text
+    default: "ffmpeg"
+    label: ffmpeg binary
+    description: PATH lookup by default for local renders. Remote renders bootstrap a static ffmpeg on the selected host when needed.
+  - name: ffprobe_path
+    type: text
+    default: "ffprobe"
+    label: ffprobe binary
 
 upgrade_policy: auto-patch

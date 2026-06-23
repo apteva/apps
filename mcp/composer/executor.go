@@ -35,7 +35,7 @@ type Result struct {
 // selectExecutor walks the precedence ladder:
 //
 //  1. render_executor integration bound → SaaS path (stub in v0.1)
-//  2. RENDER_HOST_ID env > 0 → remote ffmpeg via instances
+//  2. render_host_id config / RENDER_HOST_ID env > 0 → remote ffmpeg via instances
 //  3. otherwise → local ffmpeg
 //
 // Callers can override via composition_render(executor: "local"|"remote")
@@ -47,7 +47,7 @@ func selectExecutor(ctx *sdk.AppCtx) Executor {
 		ctx.Logger().Warn("render_executor bound but SaaS executors not wired in v0.1; falling back",
 			"slug", bound.AppSlug)
 	}
-	if id := renderHostID(); id > 0 {
+	if id := renderHostID(ctx); id > 0 {
 		return &remoteFFmpegExecutor{hostID: id}
 	}
 	return &localFFmpegExecutor{}
@@ -62,10 +62,11 @@ func chooseExecutor(ctx *sdk.AppCtx, override string) (Executor, error) {
 	case "local":
 		return &localFFmpegExecutor{}, nil
 	case "remote":
-		if renderHostID() == 0 {
-			return nil, errors.New("executor=remote but RENDER_HOST_ID install-config is unset")
+		hostID := renderHostID(ctx)
+		if hostID == 0 {
+			return nil, errors.New("executor=remote but render_host_id config is unset")
 		}
-		return &remoteFFmpegExecutor{hostID: renderHostID()}, nil
+		return &remoteFFmpegExecutor{hostID: hostID}, nil
 	}
 	return nil, errors.New("unknown executor: " + override)
 }

@@ -19,6 +19,7 @@ import (
 	"errors"
 	"os"
 	"strconv"
+	"strings"
 
 	sdk "github.com/apteva/app-sdk"
 	_ "modernc.org/sqlite"
@@ -27,7 +28,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: composer
 display_name: Composer
-version: 0.3.31
+version: 0.3.32
 description: |
   Multi-clip video compositions with a structured timeline panel,
   universal generated-asset clip editing, first-class AI avatar clips,
@@ -95,6 +96,33 @@ db:
   driver: sqlite
   path: /data/composer.db
   migrations: migrations/
+config_schema:
+  - name: render_host_id
+    type: select_from_app
+    app: instances
+    discovery:
+      route: /api/instances
+      response_path: instances
+      value_field: id
+      label_field: name
+    fallback: text
+    default: "0"
+    label: Remote render host
+    description: |
+      Pick a host from the Instances app inventory to offload Composer
+      ffmpeg renders. 0 means local sidecar rendering. Remote renders
+      download signed input URLs on the selected host and upload the
+      finished composition back to Storage.
+  - name: ffmpeg_path
+    type: text
+    default: "ffmpeg"
+    label: ffmpeg binary
+    description: PATH lookup by default for local renders. Remote renders
+      bootstrap a static ffmpeg on the selected host when needed.
+  - name: ffprobe_path
+    type: text
+    default: "ffprobe"
+    label: ffprobe binary
 upgrade_policy: auto-patch
 `
 
@@ -117,7 +145,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	globalCtx = ctx
 	ctx.Logger().Info("composer mounted",
 		"ffmpeg_path", ffmpegPath(),
-		"render_host_id", renderHostID(),
+		"render_host_id", renderHostID(ctx),
 	)
 	return nil
 }
@@ -135,6 +163,11 @@ func main() { sdk.Run(&App{}) }
 // "ffmpeg" — relies on $PATH containing the bundled binary in
 // containerized deploys and the system one in local dev.
 func ffmpegPath() string {
+	if globalCtx != nil {
+		if v := strings.TrimSpace(globalCtx.Config().Get("ffmpeg_path")); v != "" {
+			return v
+		}
+	}
 	if v := os.Getenv("FFMPEG_PATH"); v != "" {
 		return v
 	}
@@ -143,6 +176,11 @@ func ffmpegPath() string {
 
 // ffprobePath mirrors ffmpegPath for the probe utility.
 func ffprobePath() string {
+	if globalCtx != nil {
+		if v := strings.TrimSpace(globalCtx.Config().Get("ffprobe_path")); v != "" {
+			return v
+		}
+	}
 	if v := os.Getenv("FFPROBE_PATH"); v != "" {
 		return v
 	}
@@ -152,8 +190,14 @@ func ffprobePath() string {
 // renderHostID reads the optional install-config field. When > 0,
 // renders SSH-execute on that instance via the `instances` app
 // instead of running locally.
-func renderHostID() int64 {
-	v := os.Getenv("RENDER_HOST_ID")
+func renderHostID(ctx *sdk.AppCtx) int64 {
+	v := ""
+	if ctx != nil {
+		v = strings.TrimSpace(ctx.Config().Get("render_host_id"))
+	}
+	if v == "" {
+		v = strings.TrimSpace(os.Getenv("RENDER_HOST_ID"))
+	}
 	if v == "" {
 		return 0
 	}

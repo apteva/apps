@@ -383,7 +383,11 @@ func (a *App) toolCompositionRender(ctx *sdk.AppCtx, args map[string]any) (any, 
 	// (when bound) or local cache (when not).
 	var storageID int64
 	qa := RenderQA{Warnings: timelineWarnings(edit)}
-	if result.Sync && result.LocalPath != "" && !strings.HasPrefix(result.LocalPath, "storage://") {
+	if result.Sync && strings.HasPrefix(result.LocalPath, "storage://files/") {
+		if id, err := strconv.ParseInt(strings.TrimPrefix(result.LocalPath, "storage://files/"), 10, 64); err == nil && id > 0 {
+			storageID = id
+		}
+	} else if result.Sync && result.LocalPath != "" {
 		qa = analyzeRender(result.LocalPath, edit)
 		storageID = saveRenderOutput(ctx, result.LocalPath, output.Format, pid, id)
 		if storageID == 0 {
@@ -756,7 +760,7 @@ func (a *App) handleBindings(w http.ResponseWriter, r *http.Request) {
 		"storage_bound":     appToolAvailable(globalCtx, "storage", "files_list", map[string]any{"limit": 1, "_project_id": pid}),
 		"instances_bound":   globalCtx.IntegrationFor("instances") != nil,
 		"mediastudio_bound": appToolAvailable(globalCtx, "media-studio", "media_history", map[string]any{"limit": 1, "_project_id": pid}),
-		"render_host_id":    renderHostID(),
+		"render_host_id":    renderHostID(globalCtx),
 		"ffmpeg_path":       ffmpegPath(),
 	}
 	if bound := globalCtx.IntegrationFor("render_executor"); bound != nil {

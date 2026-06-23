@@ -1,9 +1,15 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
+	"net/http"
+	"net/url"
+	"os"
 	"strings"
 	"time"
 
@@ -23,10 +29,9 @@ import (
 //     output back to storage's /files endpoint and echoes a result
 //     marker the sidecar parses.
 //
-// v0.1 is best-effort — the install probe + storage upload paths from
-// media's remote executor aren't fully ported. When called and
-// something's missing, returns a clear error rather than silently
-// falling back; the caller can re-run with executor=local.
+// Remote renders return a Storage file id directly. We do not stream
+// the result through the Composer sidecar; the selected host uploads
+// the finished file to Storage with Composer's outbound token.
 type remoteFFmpegExecutor struct {
 	hostID int64
 }
@@ -65,12 +70,17 @@ func (e *remoteFFmpegExecutor) Render(
 	} else {
 		urls = make([]string, 0, len(audioClips)+1)
 	}
+	remoteAudioCount := 0
 	for i, c := range audioClips {
+		if clipAssetType(c, "audio") == "silence" {
+			continue
+		}
 		url, err := resolveAssetURL(app, c.Asset.Src)
 		if err != nil {
 			return Result{}, fmt.Errorf("audio clip[%d]: resolve %q: %w", i, c.Asset.Src, err)
 		}
 		urls = append(urls, url)
+		remoteAudioCount++
 	}
 	if s := edit.Timeline.Soundtrack; s != nil {
 		url, err := resolveAssetURL(app, s.Src)
@@ -86,9 +96,9 @@ func (e *remoteFFmpegExecutor) Render(
 	soundtrackIdx := -1
 	if edit.Timeline.Soundtrack != nil {
 		if track != nil {
-			soundtrackIdx = len(track.Clips) + len(audioClips)
+			soundtrackIdx = len(track.Clips) + remoteAudioCount
 		} else {
-			soundtrackIdx = len(audioClips)
+			soundtrackIdx = remoteAudioCount
 		}
 	}
 	localPaths := make([]string, len(urls))
@@ -101,13 +111,22 @@ func (e *remoteFFmpegExecutor) Render(
 	} else {
 		args = buildLocalFFmpegArgsWithAudioInfo(edit, output, localPaths, soundtrackIdx, "./out."+output.Format, remoteVisualAudioDefaults(track))
 	}
-	cmd := shellEcho(ffmpegPath(), args)
+	cmd := shellEcho("ffmpeg", args)
 
-	script := remoteRenderScript(urls, cmd, output.Format, projectID)
+	publicURL, err := resolveComposerPublicURL(app)
+	if err != nil {
+		return Result{FFmpegCommand: cmd}, err
+	}
+	token := outboundToken()
+	if token == "" {
+		return Result{FFmpegCommand: cmd}, errors.New("remote render requires APTEVA_OUTBOUND_TOKEN or APTEVA_APP_TOKEN for Storage upload")
+	}
+	filename := fmt.Sprintf("composition-remote-%d.%s", time.Now().UnixNano(), output.Format)
+	script := remoteRenderScript(urls, cmd, output.Format, projectID, publicURL, token, filename, renderContentType(output.Format))
 
 	app.Logger().Info("remote ffmpeg render", "host_id", e.hostID, "inputs", len(urls), "format", output.Format)
 
-	res, err := remoteRunScript(app, e.hostID, script)
+	res, err := remoteRunScript(ctx, e.hostID, script)
 	if err != nil {
 		return Result{FFmpegCommand: cmd}, fmt.Errorf("remote exec: %w", err)
 	}
@@ -137,9 +156,8 @@ func remoteVisualAudioDefaults(track *Track) []bool {
 }
 
 // remotePreflight checks the instances app is reachable and the host
-// exists. Full ffmpeg-install probe lives in media's
-// remote_ffmpeg_install.go — for v0.1 we trust the operator set up
-// the host and let the script's ffmpeg invocation fail loudly if not.
+// exists. We trust the selected host has ffmpeg on PATH; operator
+// feedback is the remote command's ffmpeg error if not.
 func remotePreflight(app *sdk.AppCtx, hostID int64) error {
 	if app == nil {
 		return errors.New("nil app ctx")
@@ -162,16 +180,13 @@ func remotePreflight(app *sdk.AppCtx, hostID int64) error {
 // Convention: input URLs become ./in0, ./in1, … in the working dir,
 // the ffmpeg command is appended verbatim, and the output is
 // echoed back as APTEVA_RESULT:{...} for the parser.
-//
-// v0.1 stops at echoing — it does NOT upload to storage from the
-// remote because that path needs media's outbound-bearer-token
-// dance. Operator-mode follow-up.
-func remoteRenderScript(urls []string, ffmpegCmd, format, projectID string) string {
+func remoteRenderScript(urls []string, ffmpegCmd, format, projectID, publicURL, token, filename, contentType string) string {
 	var b strings.Builder
 	b.WriteString("set -eu -o pipefail\n")
 	b.WriteString("WORKDIR=$(mktemp -d)\n")
 	b.WriteString("trap 'rm -rf \"$WORKDIR\"' EXIT\n")
 	b.WriteString("cd \"$WORKDIR\"\n")
+	b.WriteString(remoteFFmpegBootstrapScript())
 	for i, u := range urls {
 		fmt.Fprintf(&b, "curl -fsSL --retry 3 -o ./in%d %q\n", i, u)
 	}
@@ -179,34 +194,70 @@ func remoteRenderScript(urls []string, ffmpegCmd, format, projectID string) stri
 	b.WriteByte('\n')
 	fmt.Fprintf(&b, "BYTES=$(stat -c %%s ./out.%s 2>/dev/null || stat -f %%z ./out.%s)\n", format, format)
 	b.WriteString("SHA=$(shasum -a 256 ./out.* | awk '{print $1}')\n")
-	// v0.1: emit a marker so the caller knows we got the bytes.
-	// Upload-back-to-storage is a follow-up.
-	b.WriteString(`echo "APTEVA_RESULT:{\"bytes\":${BYTES},\"sha256\":\"${SHA}\",\"format\":\"` + format + `\"}"` + "\n")
+	uploadURL := strings.TrimRight(publicURL, "/") + "/api/apps/storage/files"
+	if projectID != "" {
+		uploadURL += "?project_id=" + url.QueryEscape(projectID)
+	}
+	fmt.Fprintf(&b, "UPLOAD_URL=%q\n", uploadURL)
+	fmt.Fprintf(&b, "UPLOAD_TOKEN=%q\n", token)
+	fmt.Fprintf(&b, "UPLOAD_RESP=$(curl -fsS --retry 3 -X POST \"$UPLOAD_URL\" -H \"Authorization: Bearer $UPLOAD_TOKEN\" -F folder=/.composer/ -F visibility=private -F source=composer-render -F tags=composer -F tags=render -F file=@./out.%s\\;filename=%s\\;type=%s)\n", format, shellFormValue(filename), shellFormValue(contentType))
+	b.WriteString("STORAGE_ID=$(printf '%s' \"$UPLOAD_RESP\" | sed -n 's/.*\"id\"[[:space:]]*:[[:space:]]*\\([0-9][0-9]*\\).*/\\1/p' | head -1)\n")
+	b.WriteString("test -n \"$STORAGE_ID\"\n")
+	b.WriteString(`echo "APTEVA_RESULT:{\"storage_id\":${STORAGE_ID},\"bytes\":${BYTES},\"sha256\":\"${SHA}\",\"format\":\"` + format + `\"}"` + "\n")
 	return b.String()
+}
+
+func remoteFFmpegBootstrapScript() string {
+	return `if ! command -v ffmpeg >/dev/null 2>&1; then
+  INSTALL_DIR="$HOME/.apteva-render/ffmpeg-btbn-n7.1"
+  if [ ! -x "$INSTALL_DIR/bin/ffmpeg" ]; then
+    ARCH="$(uname -m)"
+    case "$ARCH" in
+      x86_64|amd64) FFMPEG_URL="https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n7.1-latest-linux64-gpl-7.1.tar.xz" ;;
+      aarch64|arm64) FFMPEG_URL="https://github.com/BtbN/FFmpeg-Builds/releases/download/latest/ffmpeg-n7.1-latest-linuxarm64-gpl-7.1.tar.xz" ;;
+      *) echo "unsupported remote architecture: $ARCH" >&2; exit 127 ;;
+    esac
+    mkdir -p "$INSTALL_DIR"
+    curl -fsSL --retry 3 "$FFMPEG_URL" -o ./ffmpeg.tar.xz
+    tar -xJf ./ffmpeg.tar.xz -C "$INSTALL_DIR" --strip-components=1
+  fi
+  export PATH="$INSTALL_DIR/bin:$PATH"
+fi
+`
 }
 
 // remoteRunScript SSHes via instances.instance_run_command. Returns
 // the combined stdout/stderr.
-func remoteRunScript(app *sdk.AppCtx, hostID int64, script string) (string, error) {
+func remoteRunScript(ctx context.Context, hostID int64, script string) (string, error) {
 	var out struct {
+		Output   string `json:"output"`
 		Stdout   string `json:"stdout"`
 		Stderr   string `json:"stderr"`
 		ExitCode int    `json:"exit_code"`
+		Err      string `json:"error"`
 	}
-	err := app.PlatformAPI().CallAppResult("instances", "instance_run_command",
-		map[string]any{"id": hostID, "command": script, "timeout_seconds": 600}, &out)
-	if err != nil {
-		return out.Stdout + out.Stderr, err
+	if err := callComposerInstancesRunCommand(ctx, 1800, map[string]any{
+		"id":        hostID,
+		"cmd":       script,
+		"timeout_s": 1800,
+	}, &out); err != nil {
+		return out.Output + out.Stdout + out.Stderr, err
+	}
+	combined := out.Output
+	if combined == "" {
+		combined = out.Stdout + "\n" + out.Stderr
+	}
+	if out.Err != "" {
+		return combined, errors.New(out.Err)
 	}
 	if out.ExitCode != 0 {
-		return out.Stdout + "\n" + out.Stderr, fmt.Errorf("remote exit_code=%d", out.ExitCode)
+		return combined, fmt.Errorf("remote exit_code=%d", out.ExitCode)
 	}
-	return out.Stdout, nil
+	return combined, nil
 }
 
 // parseRemoteResult pulls the JSON object after the APTEVA_RESULT:
-// marker line. Returns the storage id when present (v0.1 has none —
-// just the bytes count, so we return 0 and the caller logs).
+// marker line.
 func parseRemoteResult(s string) (int64, error) {
 	idx := strings.Index(s, "APTEVA_RESULT:")
 	if idx < 0 {
@@ -217,9 +268,138 @@ func parseRemoteResult(s string) (int64, error) {
 	if end > 0 {
 		tail = tail[:end]
 	}
-	// v0.1: we don't actually return a storage id from the remote path —
-	// the bash script only computes the bytes. Parse just to verify the
-	// shape; full upload-back-to-storage lands in the next iteration.
-	_ = tail
-	return 0, errors.New("v0.1 remote executor doesn't push bytes back to storage yet — use executor=local")
+	var got struct {
+		StorageID int64 `json:"storage_id"`
+	}
+	if err := json.Unmarshal([]byte(strings.TrimSpace(tail)), &got); err != nil {
+		return 0, err
+	}
+	if got.StorageID <= 0 {
+		return 0, errors.New("remote result did not include storage_id")
+	}
+	return got.StorageID, nil
+}
+
+func shellFormValue(s string) string {
+	return strings.ReplaceAll(s, `"`, "")
+}
+
+func outboundToken() string {
+	if v := strings.TrimSpace(os.Getenv("APTEVA_OUTBOUND_TOKEN")); v != "" {
+		return v
+	}
+	return strings.TrimSpace(os.Getenv("APTEVA_APP_TOKEN"))
+}
+
+func resolveComposerPublicURL(app *sdk.AppCtx) (string, error) {
+	if app != nil {
+		if info, err := app.PlatformInfo(); err == nil && info != nil && info.PublicURL != "" {
+			return strings.TrimRight(info.PublicURL, "/"), nil
+		}
+	}
+	if v := strings.TrimRight(strings.TrimSpace(os.Getenv("APTEVA_PUBLIC_URL")), "/"); v != "" {
+		return v, nil
+	}
+	return "", errors.New("APTEVA_PUBLIC_URL not set in platform settings or env")
+}
+
+func callComposerInstancesRunCommand(ctx context.Context, timeoutS int, input map[string]any, out any) error {
+	base := strings.TrimRight(os.Getenv("APTEVA_GATEWAY_URL"), "/")
+	if base == "" {
+		base = "http://127.0.0.1:5280"
+	}
+	token := outboundToken()
+	if timeoutS <= 0 {
+		timeoutS = 30
+	}
+	body, err := json.Marshal(map[string]any{
+		"tool":  "instance_run_command",
+		"input": input,
+	})
+	if err != nil {
+		return err
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, base+"/api/apps/callback/apps/instances/call", bytes.NewReader(body))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	client := &http.Client{Timeout: time.Duration(timeoutS)*time.Second + 30*time.Second}
+	res, err := client.Do(req)
+	if err != nil {
+		return err
+	}
+	defer res.Body.Close()
+	raw, readErr := io.ReadAll(res.Body)
+	if res.StatusCode/100 != 2 {
+		if readErr != nil {
+			return fmt.Errorf("instances call: HTTP %d; additionally failed reading body: %w", res.StatusCode, readErr)
+		}
+		return fmt.Errorf("instances call: HTTP %d: %s", res.StatusCode, truncTail(string(raw), 500))
+	}
+	if readErr != nil {
+		return readErr
+	}
+	return decodeComposerMCPEnvelope(raw, "instances", "instance_run_command", out)
+}
+
+func decodeComposerMCPEnvelope(raw []byte, appName, tool string, out any) error {
+	if out == nil {
+		return errors.New("decode remote MCP envelope: out is nil")
+	}
+	if len(raw) == 0 {
+		return fmt.Errorf("%s.%s: empty response", appName, tool)
+	}
+	var env struct {
+		Result json.RawMessage `json:"result"`
+		Error  *struct {
+			Code    int    `json:"code"`
+			Message string `json:"message"`
+		} `json:"error,omitempty"`
+	}
+	if err := json.Unmarshal(raw, &env); err != nil {
+		return json.Unmarshal(raw, out)
+	}
+	if env.Error != nil {
+		return fmt.Errorf("%s.%s: %s (code=%d)", appName, tool, env.Error.Message, env.Error.Code)
+	}
+	if len(env.Result) > 0 {
+		if handled, err := decodeComposerMCPContent(env.Result, appName, tool, out); handled || err != nil {
+			return err
+		}
+	}
+	if handled, err := decodeComposerMCPContent(raw, appName, tool, out); handled || err != nil {
+		return err
+	}
+	if err := json.Unmarshal(raw, out); err != nil {
+		return fmt.Errorf("%s.%s: response had no content array and direct decode failed: %w", appName, tool, err)
+	}
+	return nil
+}
+
+func decodeComposerMCPContent(raw json.RawMessage, appName, tool string, out any) (bool, error) {
+	var result struct {
+		Content []struct {
+			Type string `json:"type"`
+			Text string `json:"text"`
+		} `json:"content"`
+		IsError bool `json:"isError,omitempty"`
+	}
+	if err := json.Unmarshal(raw, &result); err != nil || len(result.Content) == 0 {
+		return false, nil
+	}
+	inner := result.Content[0].Text
+	if inner == "" {
+		return true, fmt.Errorf("%s.%s: empty content text", appName, tool)
+	}
+	if result.IsError {
+		return true, fmt.Errorf("%s.%s: tool returned error: %.200s", appName, tool, inner)
+	}
+	if err := json.Unmarshal([]byte(inner), out); err != nil {
+		return true, fmt.Errorf("%s.%s: decode inner JSON: %w (text: %.200s)", appName, tool, err, inner)
+	}
+	return true, nil
 }

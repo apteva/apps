@@ -1,4 +1,4 @@
-// ComposerPanel v0.3.31 - timeline editor with storage and Media Studio AI assets.
+// ComposerPanel v0.3.32 - timeline editor with storage and Media Studio AI assets.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
@@ -50,6 +50,12 @@ interface Bindings {
   render_host_id: number;
   ffmpeg_path: string;
   render_executor?: string;
+}
+
+interface InstanceHost {
+  id: number;
+  name?: string;
+  status?: string;
 }
 
 type AssetType = "video" | "image";
@@ -885,7 +891,7 @@ function fitsGenerated(mode: DurationMode | undefined): boolean {
   return mode === "fit_generated" || mode === "fit_generated_keep_start" || mode === "fit_generated_reflow";
 }
 
-export default function ComposerPanel({ projectId }: NativePanelProps) {
+export default function ComposerPanel({ projectId, installId }: NativePanelProps) {
   const [compositions, setCompositions] = useState<Composition[]>([]);
   const [bindings, setBindings] = useState<Bindings | null>(null);
   const [selectedId, setSelectedId] = useState<number | null>(null);
@@ -932,13 +938,21 @@ export default function ComposerPanel({ projectId }: NativePanelProps) {
     }
   }, [projectId]);
 
+  const loadBindings = useCallback(async () => {
+    try {
+      const res = await fetch(withProject(`${API}/bindings`, projectId), { credentials: "same-origin" });
+      if (!res.ok) return;
+      const data = await res.json();
+      setBindings(data);
+    } catch {
+      // Bindings are advisory; rendering still surfaces backend errors.
+    }
+  }, [projectId]);
+
   useEffect(() => {
     load();
-    fetch(withProject(`${API}/bindings`, projectId), { credentials: "same-origin" })
-      .then((r) => (r.ok ? r.json() : null))
-      .then((d) => d && setBindings(d))
-      .catch(() => {});
-  }, [load]);
+    loadBindings();
+  }, [load, loadBindings]);
 
   useEffect(() => {
     const next = parseComposition(selected);
@@ -1493,7 +1507,7 @@ export default function ComposerPanel({ projectId }: NativePanelProps) {
             <span>{draft.output.resolution}</span>
           </div>
         </div>
-        <BindingStrip bindings={bindings} />
+        <BindingStrip bindings={bindings} installId={installId} onChanged={loadBindings} setStatus={setStatus} />
         <select
           value={executor}
           onChange={(e) => setExecutor(e.target.value as "auto" | "local" | "remote")}
@@ -1646,18 +1660,91 @@ export default function ComposerPanel({ projectId }: NativePanelProps) {
   );
 }
 
-function BindingStrip({ bindings }: { bindings: Bindings | null }) {
+function BindingStrip({
+  bindings,
+  installId,
+  onChanged,
+  setStatus,
+}: {
+  bindings: Bindings | null;
+  installId: number;
+  onChanged: () => void;
+  setStatus: (message: string) => void;
+}) {
+  const [hosts, setHosts] = useState<InstanceHost[]>([]);
+  const [saving, setSaving] = useState(false);
+  useEffect(() => {
+    if (!bindings?.instances_bound) {
+      setHosts([]);
+      return;
+    }
+    let cancelled = false;
+    fetch("/api/apps/instances/api/instances", { credentials: "same-origin" })
+      .then((r) => (r.ok ? r.json() : null))
+      .then((data) => {
+        if (!cancelled) setHosts(Array.isArray(data?.instances) ? data.instances : []);
+      })
+      .catch(() => {
+        if (!cancelled) setHosts([]);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [bindings?.instances_bound]);
+
   if (!bindings) return null;
   const renderMode = bindings.render_executor
     ? bindings.render_executor
     : bindings.render_host_id > 0
       ? `host #${bindings.render_host_id}`
       : "local ffmpeg";
+  const saveHost = async (hostId: string) => {
+    if (!installId) {
+      setStatus("Cannot save render host: install id missing.");
+      return;
+    }
+    setSaving(true);
+    try {
+      const res = await fetch(`/api/apps/installs/${installId}/config`, {
+        method: "PUT",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ config: { render_host_id: hostId } }),
+      });
+      const text = await res.text();
+      if (!res.ok) throw new Error(`${res.status}: ${text.slice(0, 300)}`);
+      setStatus(Number(hostId) > 0 ? `Remote render host set to #${hostId}.` : "Composer renders set to local ffmpeg.");
+      onChanged();
+    } catch (e) {
+      setStatus("Render host save failed: " + (e as Error).message);
+    } finally {
+      setSaving(false);
+    }
+  };
   return (
     <div className="hidden lg:flex items-center gap-2 text-xs text-text-dim">
       <Pill label={renderMode} active />
       <Pill label="storage" active={bindings.storage_bound} />
       <Pill label="media studio" active={bindings.mediastudio_bound} />
+      {bindings.instances_bound && (
+        <select
+          value={String(bindings.render_host_id || 0)}
+          onChange={(e) => saveHost(e.target.value)}
+          disabled={saving}
+          title="Remote render host"
+          className="bg-bg-input border border-border rounded px-2 py-1 text-xs text-text disabled:opacity-50"
+        >
+          <option value="0">local</option>
+          {hosts.map((host) => (
+            <option key={host.id} value={host.id}>
+              {host.name || `host #${host.id}`}{host.status ? ` (${host.status})` : ""}
+            </option>
+          ))}
+          {bindings.render_host_id > 0 && !hosts.some((host) => host.id === bindings.render_host_id) && (
+            <option value={bindings.render_host_id}>host #{bindings.render_host_id}</option>
+          )}
+        </select>
+      )}
     </div>
   );
 }
