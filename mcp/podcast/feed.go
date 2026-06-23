@@ -236,15 +236,18 @@ func firstNonEmpty(vals ...string) string {
 	return ""
 }
 
-// rfc822 converts a sqlite CURRENT_TIMESTAMP string ("2006-01-02
-// 15:04:05", UTC) into the RFC1123Z pubDate format podcast clients
-// expect. Falls back to the raw string if it doesn't parse.
-func rfc822(sqliteTS string) string {
-	t, err := time.Parse("2006-01-02 15:04:05", strings.TrimSpace(sqliteTS))
-	if err != nil {
-		return sqliteTS
+// rfc822 converts DB timestamp strings into the RFC1123Z pubDate
+// format podcast clients expect. SQLite stores "2006-01-02 15:04:05",
+// while some drivers scan the same value back as RFC3339.
+func rfc822(raw string) string {
+	raw = strings.TrimSpace(raw)
+	for _, layout := range []string{"2006-01-02 15:04:05", time.RFC3339, time.RFC3339Nano} {
+		t, err := time.Parse(layout, raw)
+		if err == nil {
+			return t.UTC().Format(time.RFC1123Z)
+		}
 	}
-	return t.UTC().Format(time.RFC1123Z)
+	return raw
 }
 
 // plainText strips HTML tags for the plain <description> element;

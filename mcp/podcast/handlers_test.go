@@ -480,6 +480,15 @@ func TestSidecarTargetUsesSDKAppPort(t *testing.T) {
 	}
 }
 
+func TestRFC822AcceptsSQLiteAndRFC3339Inputs(t *testing.T) {
+	want := "Tue, 23 Jun 2026 13:30:18 +0000"
+	for _, in := range []string{"2026-06-23 13:30:18", "2026-06-23T13:30:18Z"} {
+		if got := rfc822(in); got != want {
+			t.Fatalf("rfc822(%q) = %q, want %q", in, got, want)
+		}
+	}
+}
+
 // ─── episode lifecycle ─────────────────────────────────────────────
 
 func TestEpisodePublishLifecycle(t *testing.T) {
