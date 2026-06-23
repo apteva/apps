@@ -1,0 +1,87 @@
+schema: apteva-app/v1
+
+name: books
+display_name: Books
+version: 0.1.0
+description: |
+  Structured long-form manuscript workspace for Apteva. Create books,
+  organize chapters and sections, write in markdown, keep notes, track
+  revisions, and export manuscripts.
+
+author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/books
+tags: [books, writing, manuscripts, authors]
+
+scopes: [project, global]
+min_apteva_version: "0.11.0"
+
+requires:
+  permissions:
+    - db.write.app
+    - platform.apps.call
+  apps:
+    - name: storage
+      optional: true
+      reason: Store exported manuscript files.
+
+provides:
+  http_routes:
+    - prefix: /
+  mcp_tools:
+    - name: books_create
+      description: Create a book project.
+    - name: books_list
+      description: List book projects.
+    - name: books_get
+      description: Fetch one book with metadata and optional manuscript tree.
+    - name: books_update
+      description: Update book metadata and status.
+    - name: books_archive
+      description: Archive a book.
+    - name: book_nodes_create
+      description: Create a manuscript node such as a part, chapter, section, front matter, back matter, or appendix.
+    - name: book_nodes_list
+      description: List manuscript nodes for a book as an ordered tree.
+    - name: book_nodes_get
+      description: Fetch one manuscript node with body content.
+    - name: book_nodes_update
+      description: Update a node's title, body, status, summary, or target word count.
+    - name: book_nodes_move
+      description: Move a node to a new parent or position.
+    - name: book_nodes_delete
+      description: Delete a manuscript node.
+    - name: book_notes_create
+      description: Create a note attached to a book or manuscript node.
+    - name: book_notes_list
+      description: List notes for a book or node.
+    - name: book_notes_update
+      description: Update a note.
+    - name: book_notes_delete
+      description: Delete a note.
+    - name: book_revisions_list
+      description: List revisions for a manuscript node.
+    - name: book_revision_restore
+      description: Restore a previous node revision.
+    - name: books_export
+      description: Export a book manuscript as markdown, optionally storing it in Storage.
+  ui_panels:
+    - slot: project.page
+      label: Books
+      icon: book-open
+      entry: /ui/BooksPanel.mjs
+
+runtime:
+  kind: source
+  source:
+    repo: github.com/apteva/apps
+    ref: main
+    entry: mcp/books
+  port: 8080
+  health_check: /health
+
+db:
+  driver: sqlite
+  path: /data/books.db
+  migrations: migrations/
+
+upgrade_policy: auto-patch
