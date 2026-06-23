@@ -11,6 +11,8 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"io"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
@@ -486,6 +488,106 @@ func TestRFC822AcceptsSQLiteAndRFC3339Inputs(t *testing.T) {
 		if got := rfc822(in); got != want {
 			t.Fatalf("rfc822(%q) = %q, want %q", in, got, want)
 		}
+	}
+}
+
+func TestDownloadProxy_ForwardsRangeAndStreamsPartialContent(t *testing.T) {
+	var gotMethod, gotRange, gotIfNoneMatch string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotMethod = r.Method
+		gotRange = r.Header.Get("Range")
+		gotIfNoneMatch = r.Header.Get("If-None-Match")
+		w.Header().Set("Accept-Ranges", "bytes")
+		w.Header().Set("Content-Type", "audio/mpeg")
+		w.Header().Set("Content-Range", "bytes 0-1/4")
+		w.Header().Set("Content-Length", "2")
+		w.Header().Set("ETag", `"audio-etag"`)
+		w.WriteHeader(http.StatusPartialContent)
+		_, _ = w.Write([]byte("ab"))
+	}))
+	defer upstream.Close()
+
+	ctx := newTestCtx(t)
+	globalCtx = ctx
+	t.Cleanup(func() { globalCtx = nil })
+	show := mustShow(t, ctx, map[string]any{"title": "Proxy Show"})
+	ep := mustEpisode(t, ctx, map[string]any{"show_id": float64(show.ID), "title": "Proxy Episode"})
+	if err := dbSetEpisodeAudio(ctx.AppDB(), ep.ID, "1", upstream.URL+"/audio.mp3", 4, 2, "audio/mpeg"); err != nil {
+		t.Fatalf("attach audio: %v", err)
+	}
+	ep, _ = dbGetEpisode(ctx.AppDB(), ep.ID)
+
+	req := httptest.NewRequest(http.MethodGet, "/e/"+ep.GUID+"/proxy-episode.mp3", nil)
+	req.Header.Set("Range", "bytes=0-1")
+	req.Header.Set("If-None-Match", `"audio-etag"`)
+	req.Header.Set("User-Agent", "podcast-test")
+	rec := httptest.NewRecorder()
+
+	(&App{}).handleDownloadRedirect(rec, req)
+	resp := rec.Result()
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+
+	if resp.StatusCode != http.StatusPartialContent {
+		t.Fatalf("status = %d, want 206; body=%q", resp.StatusCode, string(body))
+	}
+	if string(body) != "ab" {
+		t.Fatalf("body = %q, want ab", string(body))
+	}
+	if gotMethod != http.MethodGet || gotRange != "bytes=0-1" || gotIfNoneMatch != `"audio-etag"` {
+		t.Fatalf("upstream request method/range/etag = %q/%q/%q", gotMethod, gotRange, gotIfNoneMatch)
+	}
+	if resp.Header.Get("Accept-Ranges") != "bytes" {
+		t.Fatalf("Accept-Ranges = %q", resp.Header.Get("Accept-Ranges"))
+	}
+	if resp.Header.Get("Content-Range") != "bytes 0-1/4" {
+		t.Fatalf("Content-Range = %q", resp.Header.Get("Content-Range"))
+	}
+	updated, _ := dbGetEpisode(ctx.AppDB(), ep.ID)
+	if updated.Downloads != 1 {
+		t.Fatalf("downloads = %d, want 1", updated.Downloads)
+	}
+}
+
+func TestDownloadProxy_HeadHasNoBody(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodHead {
+			t.Fatalf("upstream method = %s, want HEAD", r.Method)
+		}
+		w.Header().Set("Accept-Ranges", "bytes")
+		w.Header().Set("Content-Type", "audio/mpeg")
+		w.Header().Set("Content-Range", "bytes 0-1/4")
+		w.Header().Set("Content-Length", "2")
+		w.WriteHeader(http.StatusPartialContent)
+	}))
+	defer upstream.Close()
+
+	ctx := newTestCtx(t)
+	globalCtx = ctx
+	t.Cleanup(func() { globalCtx = nil })
+	show := mustShow(t, ctx, map[string]any{"title": "Head Show"})
+	ep := mustEpisode(t, ctx, map[string]any{"show_id": float64(show.ID), "title": "Head Episode"})
+	if err := dbSetEpisodeAudio(ctx.AppDB(), ep.ID, "1", upstream.URL+"/audio.mp3", 4, 2, "audio/mpeg"); err != nil {
+		t.Fatalf("attach audio: %v", err)
+	}
+	ep, _ = dbGetEpisode(ctx.AppDB(), ep.ID)
+
+	req := httptest.NewRequest(http.MethodHead, "/e/"+ep.GUID+"/head-episode.mp3", nil)
+	req.Header.Set("Range", "bytes=0-1")
+	rec := httptest.NewRecorder()
+	(&App{}).handleDownloadRedirect(rec, req)
+	resp := rec.Result()
+	defer resp.Body.Close()
+	body, _ := io.ReadAll(resp.Body)
+
+	if resp.StatusCode != http.StatusPartialContent {
+		t.Fatalf("status = %d, want 206", resp.StatusCode)
+	}
+	if len(body) != 0 {
+		t.Fatalf("HEAD body length = %d, want 0", len(body))
+	}
+	if resp.Header.Get("Accept-Ranges") != "bytes" || resp.Header.Get("Content-Range") != "bytes 0-1/4" {
+		t.Fatalf("range headers missing: %v", resp.Header)
 	}
 }
 

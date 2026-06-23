@@ -1,4 +1,4 @@
-// Apteva Podcast v0.1.5 — podcast hosting + management.
+// Apteva Podcast v0.1.6 — podcast hosting + management.
 //
 // This app owns shows, episodes and the RSS feed. It does NOT own
 // audio bytes (storage), audio probing/transcripts (media), download
@@ -11,7 +11,7 @@
 //	/api/shows[/...]      panel + agent REST mirror      (auth)
 //	/api/episodes[/...]   panel + agent REST mirror      (auth)
 //	/feed/{slug}.xml      public RSS 2.0 + iTunes feed   (NoAuth)
-//	/e/{guid}/{file}      download tracking redirect     (NoAuth)
+//	/e/{guid}/{file}      download tracking proxy        (NoAuth)
 //	/art/{kind}/{id}      cover-art passthrough          (NoAuth)
 //	/transcript/episode/{id} transcript passthrough      (NoAuth)
 //
@@ -46,7 +46,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: podcast
 display_name: Podcast
-version: 0.1.5
+version: 0.1.6
 description: |
   Podcast hosting + management for Apteva. Owns shows, episodes and the
   RSS feed; composes storage (audio), media (probe + transcripts),
@@ -186,8 +186,8 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		// Public RSS feed — podcast clients carry no APTEVA_APP_TOKEN.
 		{Pattern: "/feed/", Handler: a.handlePublicFeed, NoAuth: true},
 
-		// Public download tracking redirect: log the hit, then redirect
-		// to the storage enclosure URL. Reachable by every podcast player.
+		// Public download tracking proxy: log the hit, then stream the
+		// storage enclosure with Range support.
 		{Pattern: "/e/", Handler: a.handleDownloadRedirect, NoAuth: true},
 
 		// Public cover-art passthrough: resolves a storage file id to

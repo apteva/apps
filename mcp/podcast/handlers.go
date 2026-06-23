@@ -13,6 +13,7 @@ import (
 	"database/sql"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	neturl "net/url"
 	"strconv"
@@ -268,9 +269,13 @@ func (a *App) handlePublicFeed(w http.ResponseWriter, r *http.Request) {
 	_, _ = w.Write(body)
 }
 
-// ─── /e/{guid}/{file} — download tracking redirect ─────────────────
+// ─── /e/{guid}/{file} — download tracking proxy ────────────────────
 
 func (a *App) handleDownloadRedirect(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		httpErr(w, http.StatusMethodNotAllowed, "GET or HEAD")
+		return
+	}
 	guid := episodeGUIDFromDownloadPath(r.URL.Path)
 	if guid == "" {
 		httpErr(w, http.StatusNotFound, "episode not found")
@@ -299,7 +304,46 @@ func (a *App) handleDownloadRedirect(w http.ResponseWriter, r *http.Request) {
 			trackDownload(globalCtx, show, ep, r)
 		}
 	}
-	http.Redirect(w, r, ep.AudioURL, http.StatusTemporaryRedirect)
+	proxyEpisodeAudio(w, r, ep.AudioURL)
+}
+
+func proxyEpisodeAudio(w http.ResponseWriter, r *http.Request, upstreamURL string) {
+	req, err := http.NewRequestWithContext(r.Context(), r.Method, upstreamURL, nil)
+	if err != nil {
+		httpErr(w, http.StatusBadGateway, "invalid upstream audio URL")
+		return
+	}
+	for _, name := range forwardedAudioRequestHeaders {
+		if v := r.Header.Values(name); len(v) > 0 {
+			for _, item := range v {
+				req.Header.Add(name, item)
+			}
+		}
+	}
+	req.Header.Set("Accept-Encoding", "identity")
+	if r.UserAgent() != "" {
+		req.Header.Set("User-Agent", r.UserAgent())
+	}
+
+	resp, err := audioProxyClient.Do(req)
+	if err != nil {
+		httpErr(w, http.StatusBadGateway, "audio upstream: "+err.Error())
+		return
+	}
+	defer resp.Body.Close()
+
+	for _, name := range forwardedAudioResponseHeaders {
+		if v := resp.Header.Values(name); len(v) > 0 {
+			for _, item := range v {
+				w.Header().Add(name, item)
+			}
+		}
+	}
+	w.WriteHeader(resp.StatusCode)
+	if r.Method == http.MethodHead {
+		return
+	}
+	_, _ = io.Copy(w, resp.Body)
 }
 
 // ─── /art/{show|episode}/{id} — cover art passthrough ──────────────
@@ -400,6 +444,32 @@ type dedupeCache struct {
 }
 
 var downloadDedupe = &dedupeCache{seen: map[string]time.Time{}}
+
+var audioProxyClient = &http.Client{
+	Transport: &http.Transport{DisableCompression: true},
+	Timeout:   30 * time.Minute,
+}
+
+var forwardedAudioRequestHeaders = []string{
+	"Range",
+	"If-Range",
+	"If-Match",
+	"If-None-Match",
+	"If-Modified-Since",
+	"If-Unmodified-Since",
+	"Accept",
+}
+
+var forwardedAudioResponseHeaders = []string{
+	"Accept-Ranges",
+	"Cache-Control",
+	"Content-Disposition",
+	"Content-Length",
+	"Content-Range",
+	"Content-Type",
+	"ETag",
+	"Last-Modified",
+}
 
 // seenRecently reports whether key was seen inside window, and records
 // this sighting. Expired entries are swept lazily once per window.

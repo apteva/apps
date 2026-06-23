@@ -4,10 +4,9 @@ package main
 // helpers that decide where a show's feed and enclosures live.
 //
 // Enclosure URLs deliberately point at this sidecar's /e/{guid}/{file}
-// tracking redirect rather than the storage URL directly — that's how
-// download counts get collected. The redirect preserves method/headers
-// so HEAD and Range probes can continue to the real
-// storage URL (Episode.AudioURL).
+// tracking proxy rather than the storage URL directly — that's how
+// download counts get collected while validators still see Range support
+// on the enclosure URL itself.
 
 import (
 	"encoding/xml"

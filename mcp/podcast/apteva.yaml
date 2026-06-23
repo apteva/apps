@@ -2,18 +2,18 @@ schema: apteva-app/v1
 
 name: podcast
 display_name: Podcast
-version: 0.1.5
+version: 0.1.6
 description: |
   Podcast hosting + management for Apteva. Owns shows, episodes, and
   the RSS feed; serves the public feed XML and an IAB-style download
-  tracking redirect from its own sidecar. Audio bytes live in storage;
+  tracking proxy from its own sidecar. Audio bytes live in storage;
   duration/byte-length probing and transcription run through media.
 
   Composes on top of existing apps:
     - storage   (required) — hosts the audio files. Apple needs range
-                requests, ETag and Cache-Control on the enclosure URL,
-                plus a public visibility tier — storage already does
-                all of that, and bytes never proxy through this sidecar.
+                requests, ETag and Cache-Control. Podcast streams the
+                public enclosure URL so feed validators see Range support
+                directly on the tracked enclosure URL.
     - media     (required) — probes each uploaded audio file for exact
                 duration + byte length (RSS correctness), normalises
                 source uploads to MP3, and supplies transcripts.
