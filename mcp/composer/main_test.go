@@ -525,6 +525,29 @@ func TestPrepareAIVideoDurationForTiming_UsesAudioMatchedHandle(t *testing.T) {
 	}
 }
 
+func TestPrepareAIVideoDurationForTiming_LoopKeepsReadyShortVideo(t *testing.T) {
+	e, err := parseEditJSON(`{"timeline":{"tracks":[
+		{"type":"visual","clips":[
+			{"uid":"video-1","section_id":"intro","asset":{"type":"video","src":"storage:1"},"start":0,"length":3,
+				"timing":{"mode":"fit_source","source":"track:audio","behavior":"loop"},
+				"ai":{"media_kind":"video","prompt":"spiral","duration":3,"status":"ready","storage_id":12,"generation_id":34,"cache_key":"composer:ready","actual_duration_seconds":3}}
+		]},
+		{"type":"audio","clips":[
+			{"uid":"voice-1","section_id":"intro","asset":{"type":"audio","src":"storage:2"},"start":0,"length":60}
+		]}
+	]}}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	clip := &e.Timeline.Tracks[0].Clips[0]
+	if prepareAIVideoDurationForTiming(e, clip) {
+		t.Fatal("looped ready video should not be regenerated")
+	}
+	if clip.AI.Duration != 3 || clip.AI.Status != "ready" || clip.AI.StorageID != 12 || clip.AI.GenerationID != 34 || clip.AI.CacheKey != "composer:ready" {
+		t.Fatalf("looped ready AI video state changed unexpectedly: %+v", clip.AI)
+	}
+}
+
 func TestPrepareAIVideoDurationForTiming_KeepsReadyVideoWhenActualCoversTarget(t *testing.T) {
 	e, err := parseEditJSON(`{"timeline":{"tracks":[
 		{"type":"visual","clips":[

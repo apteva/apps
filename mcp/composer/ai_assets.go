@@ -555,6 +555,10 @@ func prepareAIVideoDurationForTiming(edit *Edit, c *Clip) bool {
 	if strings.ToLower(strings.TrimSpace(c.AI.MediaKind)) != "video" || c.Timing == nil {
 		return false
 	}
+	behavior := strings.ToLower(strings.TrimSpace(c.Timing.Behavior))
+	if behavior == "loop" || behavior == "trim_or_loop" {
+		return false
+	}
 	mode := strings.ToLower(strings.TrimSpace(c.Timing.Mode))
 	if mode != "fit_source" && mode != "fit_group" && mode != "fit_timeline" {
 		return false
