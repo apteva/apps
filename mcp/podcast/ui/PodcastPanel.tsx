@@ -274,51 +274,56 @@ function ShowDetail({
   return (
     <div className="flex flex-col">
       <div className="px-4 py-3 border-b border-border">
-        <div className="flex items-baseline gap-3">
-          <h2 className="text-text font-semibold">{show.title}</h2>
-          {show.explicit && (
-            <span className="text-[10px] px-1 py-0.5 border border-border rounded text-text-muted">
-              explicit
-            </span>
-          )}
-          <span className="text-[11px] text-text-dim">{show.podcast_type}</span>
-          <div className="flex-1" />
-          <button
-            type="button"
-            onClick={validate}
-            className="px-2 py-0.5 text-xs border border-border rounded hover:bg-bg-input"
-          >
-            Validate feed
-          </button>
-          <button
-            type="button"
-            onClick={deleteShow}
-            disabled={busy}
-            className="px-2 py-0.5 text-xs border border-border rounded text-red/80 hover:text-red disabled:opacity-50"
-          >
-            Delete show
-          </button>
-        </div>
-        <FeedLink show={show} />
-        <div className="mt-3 flex items-end gap-2 max-w-xl">
-          <div className="flex-1">
-            <label className="text-[11px] text-text-muted block mb-1">Feed domain</label>
-            <input
-              type="text"
-              value={hostname}
-              onChange={(e) => setHostname(e.target.value)}
-              placeholder="feeds.example.com"
-              className="w-full bg-bg-input border border-border rounded px-2 py-1 text-xs font-mono"
-            />
+        <div className="flex flex-col gap-3 sm:flex-row sm:items-start">
+          <div className="min-w-0 flex-1">
+            <div className="flex flex-wrap items-baseline gap-3">
+              <h2 className="text-text font-semibold">{show.title}</h2>
+              {show.explicit && (
+                <span className="text-[10px] px-1 py-0.5 border border-border rounded text-text-muted">
+                  explicit
+                </span>
+              )}
+              <span className="text-[11px] text-text-dim">{show.podcast_type}</span>
+              <div className="flex-1" />
+              <button
+                type="button"
+                onClick={validate}
+                className="px-2 py-0.5 text-xs border border-border rounded hover:bg-bg-input"
+              >
+                Validate feed
+              </button>
+              <button
+                type="button"
+                onClick={deleteShow}
+                disabled={busy}
+                className="px-2 py-0.5 text-xs border border-border rounded text-red/80 hover:text-red disabled:opacity-50"
+              >
+                Delete show
+              </button>
+            </div>
+            <FeedLink show={show} />
+            <div className="mt-3 flex items-end gap-2 max-w-xl">
+              <div className="flex-1">
+                <label className="text-[11px] text-text-muted block mb-1">Feed domain</label>
+                <input
+                  type="text"
+                  value={hostname}
+                  onChange={(e) => setHostname(e.target.value)}
+                  placeholder="feeds.example.com"
+                  className="w-full bg-bg-input border border-border rounded px-2 py-1 text-xs font-mono"
+                />
+              </div>
+              <button
+                type="button"
+                onClick={saveHostname}
+                disabled={busy || hostname.trim() === (show.hostname || "")}
+                className="px-3 py-1 text-xs border border-border rounded hover:bg-bg-input disabled:opacity-50"
+              >
+                Save domain
+              </button>
+            </div>
           </div>
-          <button
-            type="button"
-            onClick={saveHostname}
-            disabled={busy || hostname.trim() === (show.hostname || "")}
-            className="px-3 py-1 text-xs border border-border rounded hover:bg-bg-input disabled:opacity-50"
-          >
-            Save domain
-          </button>
+          <ShowCover show={show} params={params} />
         </div>
         {validation && <ValidationBlock result={validation} />}
       </div>
@@ -337,6 +342,35 @@ function ShowDetail({
         setError={setError}
         onAdded={loadEpisodes}
       />
+    </div>
+  );
+}
+
+function ShowCover({ show, params }: { show: Show; params: string }) {
+  const [failed, setFailed] = useState(false);
+  const hasCover = Boolean(show.image_file_id) && !failed;
+  return (
+    <div className="w-28 shrink-0 sm:w-32">
+      <div className="aspect-square overflow-hidden rounded border border-border bg-bg-input">
+        {hasCover ? (
+          <img
+            src={`/api/apps/podcast/art/show/${show.id}?${params}`}
+            alt={`${show.title} cover art`}
+            className="h-full w-full object-cover"
+            loading="lazy"
+            onError={() => setFailed(true)}
+          />
+        ) : (
+          <div className="flex h-full w-full items-center justify-center px-2 text-center text-[11px] text-text-dim">
+            No cover art
+          </div>
+        )}
+      </div>
+      {show.image_file_id && (
+        <div className="mt-1 truncate text-right text-[10px] text-text-dim">
+          file {show.image_file_id}
+        </div>
+      )}
     </div>
   );
 }
