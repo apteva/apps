@@ -1,4 +1,4 @@
-// ComposerPanel v0.3.36 - timeline editor with storage and Media Studio AI assets.
+// ComposerPanel v0.3.39 - timeline editor with storage and Media Studio AI assets.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
@@ -2198,6 +2198,82 @@ function Timeline({
   );
 }
 
+function TimingEditor({
+  timing,
+  defaultSource,
+  onChange,
+}: {
+  timing?: Timing;
+  defaultSource: string;
+  onChange: (timing?: Timing) => void;
+}) {
+  const field = "bg-bg-input border border-border rounded px-2 py-1.5 text-sm w-full";
+  const nextTiming = timing || {};
+  const update = (patch: Partial<Timing>) => onChange({ ...nextTiming, ...patch });
+  return (
+    <div className="border border-border rounded p-2 space-y-2">
+      <div className="flex items-center gap-2">
+        <span className="text-[10px] uppercase tracking-wide text-text-dim flex-1">Timing</span>
+        <button type="button" onClick={() => onChange(undefined)} className="text-xs px-2 py-1 border border-border rounded hover:bg-bg-input">
+          Clear
+        </button>
+      </div>
+      <div className="grid grid-cols-3 gap-2">
+        <Field label="Mode">
+          <select value={nextTiming.mode || "fixed"} onChange={(e) => update({ mode: e.target.value as Timing["mode"] })} className={field}>
+            <option value="fixed">Fixed</option>
+            <option value="fit_source">Fit source</option>
+            <option value="fit_group">Fit group</option>
+            <option value="fit_timeline">Fit timeline</option>
+            <option value="fit_generated">Fit generated</option>
+          </select>
+        </Field>
+        <Field label="Source">
+          <input
+            value={nextTiming.source || defaultSource}
+            onChange={(e) => update({ source: e.target.value })}
+            placeholder={defaultSource}
+            className={field}
+          />
+        </Field>
+        <Field label="Behavior">
+          <select value={nextTiming.behavior || ""} onChange={(e) => update({ behavior: (e.target.value || undefined) as Timing["behavior"] })} className={field}>
+            <option value="">Default</option>
+            <option value="trim">Trim</option>
+            <option value="pad">Pad</option>
+            <option value="loop">Loop</option>
+            <option value="trim_or_loop">Trim or loop</option>
+            <option value="stretch">Stretch</option>
+            <option value="regenerate">Regenerate</option>
+          </select>
+        </Field>
+        <Field label="Reflow">
+          <select value={nextTiming.reflow || "following"} onChange={(e) => update({ reflow: e.target.value as Timing["reflow"] })} className={field}>
+            <option value="none">None</option>
+            <option value="following">Following</option>
+            <option value="track">Track</option>
+            <option value="linked_group">Linked group</option>
+            <option value="composition">Composition</option>
+          </select>
+        </Field>
+        <Field label="Padding after">
+          <input type="number" min={0} step={0.1} value={nextTiming.padding_after ?? 0} onChange={(e) => update({ padding_after: Number(e.target.value) || undefined })} className={field} />
+        </Field>
+        <Field label="Max length">
+          <input type="number" min={0} step={0.1} value={nextTiming.max_length ?? 0} onChange={(e) => update({ max_length: Number(e.target.value) || undefined })} className={field} />
+        </Field>
+      </div>
+      <button
+        type="button"
+        onClick={() => onChange({ mode: "fit_source", source: defaultSource, behavior: "loop", reflow: "following" })}
+        className="text-xs px-2 py-1.5 border border-border rounded hover:bg-bg-input"
+      >
+        Fit source with loop
+      </button>
+    </div>
+  );
+}
+
 function ClipEditorModal({
   projectId,
   target,
@@ -2294,6 +2370,11 @@ function ClipEditorModal({
                 </button>
               </div>
             </Field>
+            <TimingEditor
+              timing={visualClip.timing}
+              defaultSource="track:audio"
+              onChange={(timing) => onVisualClip(visualClip.id, { timing })}
+            />
             {!visualClip.ai && (
               <div className="grid grid-cols-3 gap-2">
                 <button type="button" onClick={() => onVisualClip(visualClip.id, { asset: { ...visualClip.asset, type: "image" }, duration_mode: defaultDurationMode("image"), ai: defaultAI("image", aspect) })} className="text-xs px-2 py-1.5 border border-border rounded hover:bg-bg-input">Generate image</button>
@@ -2380,6 +2461,11 @@ function ClipEditorModal({
                 </Field>
               )}
             </div>
+            <TimingEditor
+              timing={audioClip.timing}
+              defaultSource="self"
+              onChange={(timing) => onAudioClip(audioClip.id, { timing })}
+            />
             {audioClip.asset.type !== "silence" && (
               <AudioProcessingEditor clip={audioClip} onChange={(patch) => onAudioClip(audioClip.id, patch)} />
             )}

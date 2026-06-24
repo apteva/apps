@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: composer
 display_name: Composer
-version: 0.3.38
+version: 0.3.39
 description: |
   Multi-clip video composition. Stitch generated or uploaded assets
   into a single video — one visual track, timed audio tracks, optional
@@ -10,6 +10,10 @@ description: |
   default, on a render host via instances when render_host_id is
   set, or against a SaaS render backend (Shotstack et al) when one
   is bound to the render_executor role.
+
+  v0.3.39 adds explicit visual video loop timing, so short generated
+  visual clips can repeat to fill matched audio slots without clone-padding.
+  The clip editor also exposes timing mode, source, reflow, and behavior.
 
   v0.3.38 stores ElevenLabs provider request IDs on generated TTS
   clips and automatically chains previous/next request IDs between

@@ -184,6 +184,9 @@ func buildLocalFFmpegArgsWithAudioInfo(edit *Edit, output Output, inputs []strin
 			)
 			continue
 		}
+		if i < visualCount && visualClipLoopsForSlot(track.Clips[i]) {
+			args = append(args, "-stream_loop", "-1")
+		}
 		if i == soundtrackIdx && soundtrackLoops(edit.Timeline.Soundtrack) {
 			args = append(args, "-stream_loop", "-1")
 		}
@@ -475,6 +478,14 @@ func visualClipPadsForSlot(c Clip) bool {
 	default:
 		return true
 	}
+}
+
+func visualClipLoopsForSlot(c Clip) bool {
+	if clipAssetType(c, "visual") != "video" {
+		return false
+	}
+	behavior, _ := visualClipTiming(c)
+	return behavior == "loop" || behavior == "trim_or_loop"
 }
 
 func visualClipTiming(c Clip) (behavior, mode string) {

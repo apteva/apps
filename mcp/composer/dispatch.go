@@ -46,6 +46,7 @@ func (a *App) toolCompositionCreate(ctx *sdk.AppCtx, args map[string]any) (any, 
 	if err := validateEditOutput(edit, output); err != nil {
 		return nil, err
 	}
+	applyTimelineTiming(edit)
 	resolveRelativeClipStarts(edit)
 	editJSON, _ := json.Marshal(edit)
 	outputJSON, _ := json.Marshal(output)
@@ -135,6 +136,7 @@ func (a *App) toolCompositionUpdate(ctx *sdk.AppCtx, args map[string]any) (any, 
 	if err := validateEditOutput(edit, output); err != nil {
 		return nil, err
 	}
+	applyTimelineTiming(edit)
 	resolveRelativeClipStarts(edit)
 
 	newEditJSON, _ := json.Marshal(edit)

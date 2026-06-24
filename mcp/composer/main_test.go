@@ -229,6 +229,39 @@ func TestBuildLocalFFmpegArgs_FitSourceVideoDoesNotLoopOrClonePad(t *testing.T) 
 	}
 }
 
+func TestBuildLocalFFmpegArgs_LoopedVisualVideoUsesStreamLoop(t *testing.T) {
+	e, _ := parseEditJSON(`{"timeline":{"tracks":[{"clips":[
+		{"asset":{"src":"https://spiral.mp4","type":"video"},"start":0,"length":12,"actual_length":3,
+		 "timing":{"mode":"fit_source","source":"track:audio","behavior":"loop"}}
+	]}]}}`)
+	args := buildLocalFFmpegArgs(e, defaultOutput(), []string{"https://spiral.mp4"}, -1, "out.mp4")
+	cmd := strings.Join(args, " ")
+	if !strings.Contains(cmd, "-stream_loop -1 -i https://spiral.mp4") {
+		t.Fatalf("looped visual video should loop input: %s", cmd)
+	}
+	if strings.Contains(cmd, "tpad=stop_mode=clone") {
+		t.Fatalf("looped visual video should not clone-pad: %s", cmd)
+	}
+	if !strings.Contains(cmd, "trim=duration=12") {
+		t.Fatalf("looped visual video should trim repeated input to target slot: %s", cmd)
+	}
+}
+
+func TestBuildLocalFFmpegArgs_TrimOrLoopVisualVideoUsesStreamLoop(t *testing.T) {
+	e, _ := parseEditJSON(`{"timeline":{"tracks":[{"clips":[
+		{"asset":{"src":"https://spiral.mp4","type":"video"},"start":0,"length":12,"actual_length":3,
+		 "timing":{"mode":"fit_source","source":"track:audio","behavior":"trim_or_loop"}}
+	]}]}}`)
+	args := buildLocalFFmpegArgs(e, defaultOutput(), []string{"https://spiral.mp4"}, -1, "out.mp4")
+	cmd := strings.Join(args, " ")
+	if !strings.Contains(cmd, "-stream_loop -1 -i https://spiral.mp4") {
+		t.Fatalf("trim_or_loop visual video should loop input so short sources fill the slot: %s", cmd)
+	}
+	if strings.Contains(cmd, "tpad=stop_mode=clone") {
+		t.Fatalf("trim_or_loop visual video should not clone-pad: %s", cmd)
+	}
+}
+
 func TestBuildLocalFFmpegArgs_ExplicitPadKeepsClonePadding(t *testing.T) {
 	e, _ := parseEditJSON(`{"timeline":{"tracks":[{"clips":[
 		{"asset":{"src":"https://v","type":"video"},"start":0,"length":8,"actual_length":3,
