@@ -45,6 +45,7 @@ func (a *App) handleShowsCollection(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		warning := wireHostname(globalCtx, show)
+		emitShowEvent(globalCtx, "show.created", show)
 		w.WriteHeader(http.StatusCreated)
 		httpJSON(w, map[string]any{"show": show, "feed_url": feedURL(show), "warning": warning})
 	default:
@@ -134,6 +135,7 @@ func (a *App) handleEpisodesCollection(w http.ResponseWriter, r *http.Request) {
 			httpErr(w, http.StatusBadRequest, err.Error())
 			return
 		}
+		emitEpisodeEvent(globalCtx, "episode.created", ep)
 		w.WriteHeader(http.StatusCreated)
 		httpJSON(w, map[string]any{"episode": ep})
 	default:

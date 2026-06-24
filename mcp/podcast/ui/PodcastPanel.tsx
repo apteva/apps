@@ -10,12 +10,75 @@
 // platform wiring happens server-side and surfaces here as the
 // `warning` string the endpoints return.
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 interface NativePanelProps {
   appName: string;
   installId: number;
   projectId: string;
+}
+
+interface AppEventEnvelope<T = unknown> {
+  seq: number;
+  topic: string;
+  data?: T;
+}
+
+function useAppEvents<T = unknown>(
+  app: string,
+  projectId: string,
+  onEvent: (ev: AppEventEnvelope<T>) => void,
+) {
+  const handlerRef = useRef(onEvent);
+  handlerRef.current = onEvent;
+
+  useEffect(() => {
+    if (!app || !projectId) return;
+    const handler = (ev: AppEventEnvelope<T>) => handlerRef.current(ev);
+    const shared = (window as typeof window & {
+      __aptevaAppEvents?: {
+        subscribe: (
+          app: string,
+          projectId: string,
+          fn: (ev: AppEventEnvelope<T>) => void,
+        ) => () => void;
+      };
+    }).__aptevaAppEvents;
+    if (shared) return shared.subscribe(app, projectId, handler);
+
+    let since = 0;
+    let es: EventSource | null = null;
+    let stopped = false;
+    let retry: number | null = null;
+    const connect = () => {
+      if (stopped) return;
+      const url =
+        `/api/app-events/${encodeURIComponent(app)}` +
+        `?project_id=${encodeURIComponent(projectId)}` +
+        (since > 0 ? `&since=${since}` : "");
+      es = new EventSource(url, { withCredentials: true });
+      es.onmessage = (e) => {
+        try {
+          const ev = JSON.parse(e.data) as AppEventEnvelope<T>;
+          if (ev.seq <= since) return;
+          since = ev.seq;
+          handler(ev);
+        } catch {}
+      };
+      es.onerror = () => {
+        if (es && es.readyState === EventSource.CLOSED) {
+          if (retry) window.clearTimeout(retry);
+          retry = window.setTimeout(connect, 2000);
+        }
+      };
+    };
+    connect();
+    return () => {
+      stopped = true;
+      if (retry) window.clearTimeout(retry);
+      if (es) es.close();
+    };
+  }, [app, projectId]);
 }
 
 interface Show {
@@ -71,6 +134,7 @@ export default function PodcastPanel({ projectId, installId }: NativePanelProps)
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [error, setError] = useState("");
   const [warning, setWarning] = useState("");
+  const [eventTick, setEventTick] = useState(0);
 
   const params = useMemo(
     () => new URLSearchParams({ project_id: projectId, install_id: String(installId) }).toString(),
@@ -95,6 +159,24 @@ export default function PodcastPanel({ projectId, installId }: NativePanelProps)
   useEffect(() => {
     loadShows();
   }, [loadShows]);
+
+  useAppEvents("podcast", projectId, (ev) => {
+    switch (ev.topic) {
+      case "show.created":
+      case "show.updated":
+      case "show.deleted":
+      case "episode.created":
+      case "episode.updated":
+      case "episode.deleted":
+      case "episode.audio.attached":
+      case "episode.published":
+      case "episode.unpublished":
+      case "episode.scheduled":
+        loadShows();
+        setEventTick((n) => n + 1);
+        break;
+    }
+  });
 
   const selected = shows?.find((s) => s.id === selectedId) ?? null;
 
@@ -160,6 +242,7 @@ export default function PodcastPanel({ projectId, installId }: NativePanelProps)
               key={selected.id}
               show={selected}
               params={params}
+              eventTick={eventTick}
               setError={setError}
               setWarning={setWarning}
               onShowUpdated={(warn) => {
@@ -185,6 +268,7 @@ export default function PodcastPanel({ projectId, installId }: NativePanelProps)
 function ShowDetail({
   show,
   params,
+  eventTick,
   setError,
   setWarning,
   onShowUpdated,
@@ -192,6 +276,7 @@ function ShowDetail({
 }: {
   show: Show;
   params: string;
+  eventTick: number;
   setError: (s: string) => void;
   setWarning: (s: string) => void;
   onShowUpdated: (warning: string) => void;
@@ -222,6 +307,10 @@ function ShowDetail({
     setHostname(show.hostname || "");
     loadEpisodes();
   }, [loadEpisodes, show.hostname]);
+
+  useEffect(() => {
+    if (eventTick > 0) loadEpisodes();
+  }, [eventTick, loadEpisodes]);
 
   const validate = async () => {
     try {

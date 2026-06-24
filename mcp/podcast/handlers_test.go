@@ -171,6 +171,38 @@ func mustEpisode(t *testing.T, ctx *sdk.AppCtx, args map[string]any) *Episode {
 	return out.(map[string]any)["episode"].(*Episode)
 }
 
+func TestLifecycleEventsUseProjectScope(t *testing.T) {
+	rec := tk.NewEmitRecorder()
+	ctx := newTestCtx(t, tk.WithEmitter(rec))
+
+	show := mustShow(t, ctx, map[string]any{"title": "Event Show"})
+	ep := mustEpisode(t, ctx, map[string]any{"show_id": float64(show.ID), "title": "Event Episode"})
+
+	showEvents := rec.EventsByTopic("show.created")
+	if len(showEvents) != 1 {
+		t.Fatalf("show.created events = %d, want 1", len(showEvents))
+	}
+	if showEvents[0].ProjectID != "test-proj" {
+		t.Fatalf("show.created project = %q, want test-proj", showEvents[0].ProjectID)
+	}
+	showPayload := showEvents[0].Data.(map[string]any)
+	if showPayload["id"] != show.ID || showPayload["slug"] != show.Slug {
+		t.Fatalf("show.created payload = %#v", showPayload)
+	}
+
+	episodeEvents := rec.EventsByTopic("episode.created")
+	if len(episodeEvents) != 1 {
+		t.Fatalf("episode.created events = %d, want 1", len(episodeEvents))
+	}
+	if episodeEvents[0].ProjectID != "test-proj" {
+		t.Fatalf("episode.created project = %q, want test-proj", episodeEvents[0].ProjectID)
+	}
+	episodePayload := episodeEvents[0].Data.(map[string]any)
+	if episodePayload["id"] != ep.ID || episodePayload["show_id"] != show.ID || episodePayload["project_id"] != "test-proj" {
+		t.Fatalf("episode.created payload = %#v", episodePayload)
+	}
+}
+
 // ─── show + episode CRUD ───────────────────────────────────────────
 
 func TestToolShowCRUD(t *testing.T) {

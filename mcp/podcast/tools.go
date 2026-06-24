@@ -20,6 +20,7 @@ func (a *App) toolShowCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		return nil, err
 	}
 	warning := wireHostname(ctx, show)
+	emitShowEvent(ctx, "show.created", show)
 	return map[string]any{"show": show, "feed_url": feedURL(show), "warning": warning}, nil
 }
 
@@ -44,6 +45,7 @@ func (a *App) toolShowUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 			maybeUnwireHostname(ctx, before.Hostname, show.ProjectID)
 		}
 	}
+	emitShowEvent(ctx, "show.updated", show)
 	return map[string]any{"show": show, "feed_url": feedURL(show), "warning": warning}, nil
 }
 
@@ -78,6 +80,7 @@ func (a *App) toolShowDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	}
 	bustFeed(id)
 	maybeUnwireHostname(ctx, show.Hostname, show.ProjectID)
+	emitShowEvent(ctx, "show.deleted", show)
 	return map[string]any{"removed": true}, nil
 }
 
@@ -88,6 +91,7 @@ func (a *App) toolEpisodeCreate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	if err != nil {
 		return nil, err
 	}
+	emitEpisodeEvent(ctx, "episode.created", ep)
 	return map[string]any{"episode": ep}, nil
 }
 
@@ -101,6 +105,7 @@ func (a *App) toolEpisodeUpdate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 		return nil, err
 	}
 	bustFeed(ep.ShowID)
+	emitEpisodeEvent(ctx, "episode.updated", ep)
 	return map[string]any{"episode": ep}, nil
 }
 
@@ -134,6 +139,7 @@ func (a *App) toolEpisodeDelete(ctx *sdk.AppCtx, args map[string]any) (any, erro
 		return nil, err
 	}
 	bustFeed(ep.ShowID)
+	emitEpisodeEvent(ctx, "episode.deleted", ep)
 	return map[string]any{"removed": true}, nil
 }
 
@@ -164,6 +170,7 @@ func (a *App) toolEpisodeSetAudio(ctx *sdk.AppCtx, args map[string]any) (any, er
 	if err != nil {
 		return nil, err
 	}
+	emitEpisodeEvent(ctx, "episode.audio.attached", updated)
 	return map[string]any{"episode": updated, "warning": probe.Warning}, nil
 }
 
@@ -189,6 +196,7 @@ func (a *App) toolEpisodePublish(ctx *sdk.AppCtx, args map[string]any) (any, err
 	if updated.DurationSeconds == 0 {
 		warning = "published, but duration is unknown — re-run episode_set_audio once media has probed the file so <itunes:duration> is set"
 	}
+	emitEpisodeEvent(ctx, "episode.published", updated)
 	return map[string]any{"episode": updated, "warning": warning}, nil
 }
 
@@ -206,6 +214,7 @@ func (a *App) toolEpisodeUnpublish(ctx *sdk.AppCtx, args map[string]any) (any, e
 	}
 	bustFeed(ep.ShowID)
 	updated, _ := dbGetEpisode(ctx.AppDB(), id)
+	emitEpisodeEvent(ctx, "episode.unpublished", updated)
 	return map[string]any{"episode": updated}, nil
 }
 
@@ -235,6 +244,7 @@ func (a *App) toolEpisodeSchedule(ctx *sdk.AppCtx, args map[string]any) (any, er
 	}
 	bustFeed(ep.ShowID)
 	updated, _ := dbGetEpisode(ctx.AppDB(), id)
+	emitEpisodeEvent(ctx, "episode.scheduled", updated)
 	return map[string]any{"episode": updated}, nil
 }
 

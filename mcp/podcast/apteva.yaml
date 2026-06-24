@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: podcast
 display_name: Podcast
-version: 0.1.7
+version: 0.1.8
 description: |
   Podcast hosting + management for Apteva. Owns shows, episodes, and
   the RSS feed; serves the public feed XML and an IAB-style download
@@ -75,6 +75,136 @@ provides:
     - { name: feed_validate,    description: "Dry-run feed health check: reports episodes missing audio, missing duration, missing cover art, and other directory-rejection risks. Args: show_id." }
   ui_panels:
     - { slot: project.page, label: "Podcast", icon: mic, entry: /ui/PodcastPanel.mjs }
+  publishes:
+    - name: show.created
+      description: A podcast show was created.
+      payload:
+        id: integer
+        slug: string
+        title: string
+        project_id: string
+        hostname: string
+    - name: show.updated
+      description: A podcast show's metadata changed.
+      payload:
+        id: integer
+        slug: string
+        title: string
+        project_id: string
+        hostname: string
+    - name: show.deleted
+      description: A podcast show was deleted.
+      payload:
+        id: integer
+        slug: string
+        title: string
+        project_id: string
+        hostname: string
+    - name: episode.created
+      description: A podcast episode was created.
+      payload:
+        id: integer
+        show_id: integer
+        guid: string
+        title: string
+        status: string
+        project_id: string
+        audio_file_id: string
+        audio_bytes: integer
+        duration_seconds: integer
+        mime_type: string
+        publish_at: string|null
+        published_at: string|null
+    - name: episode.updated
+      description: A podcast episode's metadata changed.
+      payload:
+        id: integer
+        show_id: integer
+        guid: string
+        title: string
+        status: string
+        project_id: string
+        audio_file_id: string
+        audio_bytes: integer
+        duration_seconds: integer
+        mime_type: string
+        publish_at: string|null
+        published_at: string|null
+    - name: episode.deleted
+      description: A podcast episode was deleted.
+      payload:
+        id: integer
+        show_id: integer
+        guid: string
+        title: string
+        status: string
+        project_id: string
+        audio_file_id: string
+        audio_bytes: integer
+        duration_seconds: integer
+        mime_type: string
+        publish_at: string|null
+        published_at: string|null
+    - name: episode.audio.attached
+      description: A podcast episode's audio file was attached or replaced.
+      payload:
+        id: integer
+        show_id: integer
+        guid: string
+        title: string
+        status: string
+        project_id: string
+        audio_file_id: string
+        audio_bytes: integer
+        duration_seconds: integer
+        mime_type: string
+        publish_at: string|null
+        published_at: string|null
+    - name: episode.published
+      description: A podcast episode was published.
+      payload:
+        id: integer
+        show_id: integer
+        guid: string
+        title: string
+        status: string
+        project_id: string
+        audio_file_id: string
+        audio_bytes: integer
+        duration_seconds: integer
+        mime_type: string
+        publish_at: string|null
+        published_at: string|null
+    - name: episode.unpublished
+      description: A podcast episode was moved back to draft.
+      payload:
+        id: integer
+        show_id: integer
+        guid: string
+        title: string
+        status: string
+        project_id: string
+        audio_file_id: string
+        audio_bytes: integer
+        duration_seconds: integer
+        mime_type: string
+        publish_at: string|null
+        published_at: string|null
+    - name: episode.scheduled
+      description: A podcast episode was scheduled for future publication.
+      payload:
+        id: integer
+        show_id: integer
+        guid: string
+        title: string
+        status: string
+        project_id: string
+        audio_file_id: string
+        audio_bytes: integer
+        duration_seconds: integer
+        mime_type: string
+        publish_at: string|null
+        published_at: string|null
 
 runtime:
   kind: source

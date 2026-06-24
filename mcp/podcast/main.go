@@ -1,4 +1,4 @@
-// Apteva Podcast v0.1.6 — podcast hosting + management.
+// Apteva Podcast v0.1.8 — podcast hosting + management.
 //
 // This app owns shows, episodes and the RSS feed. It does NOT own
 // audio bytes (storage), audio probing/transcripts (media), download
@@ -46,7 +46,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: podcast
 display_name: Podcast
-version: 0.1.6
+version: 0.1.8
 description: |
   Podcast hosting + management for Apteva. Owns shows, episodes and the
   RSS feed; composes storage (audio), media (probe + transcripts),
@@ -91,6 +91,17 @@ provides:
     - { name: feed_validate,     description: "Dry-run feed health check." }
   ui_panels:
     - { slot: project.page, label: "Podcast", icon: mic, entry: /ui/PodcastPanel.mjs }
+  publishes:
+    - { name: show.created, description: "A podcast show was created." }
+    - { name: show.updated, description: "A podcast show's metadata changed." }
+    - { name: show.deleted, description: "A podcast show was deleted." }
+    - { name: episode.created, description: "A podcast episode was created." }
+    - { name: episode.updated, description: "A podcast episode's metadata changed." }
+    - { name: episode.deleted, description: "A podcast episode was deleted." }
+    - { name: episode.audio.attached, description: "A podcast episode's audio file was attached or replaced." }
+    - { name: episode.published, description: "A podcast episode was published." }
+    - { name: episode.unpublished, description: "A podcast episode was moved back to draft." }
+    - { name: episode.scheduled, description: "A podcast episode was scheduled for future publication." }
 runtime:
   kind: source
   source:
