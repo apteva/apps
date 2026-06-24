@@ -1,4 +1,4 @@
-// ComposerPanel v0.3.34 - timeline editor with storage and Media Studio AI assets.
+// ComposerPanel v0.3.35 - timeline editor with storage and Media Studio AI assets.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
@@ -589,8 +589,34 @@ function defaultAI(kind: MediaKind, aspect: Aspect): AIAsset {
     size: kind === "image" ? imageSizeForAspect(aspect) : undefined,
     duration: kind === "image" ? undefined : kind === "music" ? 30 : 5,
     aspect: kind === "video" || kind === "avatar" ? aspect : undefined,
+    options: defaultOptionsForAI(kind),
     cache_policy: "reuse",
     status: "draft",
+  };
+}
+
+function defaultOptionsForAI(kind: MediaKind): Record<string, unknown> | undefined {
+  if (kind !== "audio_tts") return undefined;
+  return {
+    voice_settings: {
+      stability: 0.75,
+      similarity_boost: 0.9,
+      style: 0,
+      use_speaker_boost: true,
+    },
+  };
+}
+
+function withDefaultAIOptions(ai: AIAsset): AIAsset {
+  if (ai.media_kind !== "audio_tts") return ai;
+  const options = ai.options || {};
+  if (options.voice_settings) return ai;
+  return {
+    ...ai,
+    options: {
+      ...options,
+      ...defaultOptionsForAI("audio_tts"),
+    },
   };
 }
 
@@ -718,6 +744,7 @@ function composerExamples(): DraftExample[] {
 }
 
 function withDurationEstimate(ai: AIAsset): AIAsset {
+  ai = withDefaultAIOptions(ai);
   const estimate = estimateForAI(ai);
   if (estimate <= 0) return ai;
   return { ...ai, estimated_duration_seconds: ai.estimated_duration_seconds || estimate };

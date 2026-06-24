@@ -601,6 +601,51 @@ func TestMediaGenerateOptions_OverridesStaleInternalEstimate(t *testing.T) {
 	}
 }
 
+func TestValidateEdit_DefaultsTTSVoiceSettings(t *testing.T) {
+	edit := `{"timeline":{"tracks":[{"type":"audio","clips":[{"uid":"voice","asset":{"type":"audio","src":""},"start":0,"length":5,"ai":{"media_kind":"audio_tts","prompt":"Hello there"}}]}]}}`
+	got, err := parseEditJSON(edit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings, _ := got.Timeline.Tracks[0].Clips[0].AI.Options["voice_settings"].(map[string]any)
+	if settings == nil {
+		t.Fatalf("voice_settings missing: %+v", got.Timeline.Tracks[0].Clips[0].AI.Options)
+	}
+	if settings["stability"] != 0.75 {
+		t.Fatalf("stability = %v, want 0.75", settings["stability"])
+	}
+	if settings["similarity_boost"] != 0.9 {
+		t.Fatalf("similarity_boost = %v, want 0.9", settings["similarity_boost"])
+	}
+	if settings["style"] != 0 {
+		t.Fatalf("style = %v, want 0", settings["style"])
+	}
+	if settings["use_speaker_boost"] != true {
+		t.Fatalf("use_speaker_boost = %v, want true", settings["use_speaker_boost"])
+	}
+}
+
+func TestValidateEdit_PreservesExplicitTTSVoiceSettings(t *testing.T) {
+	edit := `{"timeline":{"tracks":[{"type":"audio","clips":[{"uid":"voice","asset":{"type":"audio","src":""},"start":0,"length":5,"ai":{"media_kind":"audio_tts","prompt":"Hello there","options":{"voice_settings":{"stability":0.4,"similarity_boost":0.7,"style":0.2,"use_speaker_boost":false}}}}]}]}}`
+	got, err := parseEditJSON(edit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	settings, _ := got.Timeline.Tracks[0].Clips[0].AI.Options["voice_settings"].(map[string]any)
+	if settings == nil {
+		t.Fatal("voice_settings missing")
+	}
+	if settings["stability"] != 0.4 {
+		t.Fatalf("stability = %v, want explicit 0.4", settings["stability"])
+	}
+	if settings["style"] != 0.2 {
+		t.Fatalf("style = %v, want explicit 0.2", settings["style"])
+	}
+	if settings["use_speaker_boost"] != false {
+		t.Fatalf("use_speaker_boost = %v, want explicit false", settings["use_speaker_boost"])
+	}
+}
+
 func TestEnrichEditJSONWithMediaHistory_RestoresImageSize(t *testing.T) {
 	edit := `{"timeline":{"tracks":[{"type":"visual","clips":[{"asset":{"type":"image","src":"storage:42"},"start":0,"length":5}]}]}}`
 	out := enrichEditJSONWithMediaHistory(edit, map[int64]*mediaHistoryRow{

@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: composer
 display_name: Composer
-version: 0.3.34
+version: 0.3.35
 description: |
   Multi-clip video composition. Stitch generated or uploaded assets
   into a single video — one visual track, timed audio tracks, optional
@@ -10,6 +10,10 @@ description: |
   default, on a render host via instances when render_host_id is
   set, or against a SaaS render backend (Shotstack et al) when one
   is bound to the render_executor role.
+
+  v0.3.35 gives new ElevenLabs AI voice clips conservative cloned-voice
+  defaults (higher stability/similarity, style 0) while preserving explicit
+  per-clip voice settings.
 
   v0.3.34 makes remote renders portable across Linux and macOS-style
   checksum tools by preferring sha256sum with a shasum fallback, and

@@ -510,6 +510,7 @@ func normalizeClipDurationMetadata(c *Clip) {
 	if c.AI == nil {
 		return
 	}
+	applyDefaultAIOptions(c.AI)
 	if c.DurationMode == "" {
 		c.DurationMode = defaultDurationMode(c.AI.MediaKind)
 	}
@@ -553,6 +554,30 @@ func defaultDurationMode(kind string) string {
 	}
 }
 
+func applyDefaultAIOptions(ai *AIAsset) {
+	if ai == nil {
+		return
+	}
+	if strings.ToLower(strings.TrimSpace(ai.MediaKind)) != "audio_tts" {
+		return
+	}
+	if ai.Options == nil {
+		ai.Options = map[string]any{}
+	}
+	if _, ok := ai.Options["voice_settings"]; !ok {
+		ai.Options["voice_settings"] = defaultTTSVoiceSettings()
+	}
+}
+
+func defaultTTSVoiceSettings() map[string]any {
+	return map[string]any{
+		"stability":         0.75,
+		"similarity_boost":  0.9,
+		"style":             0,
+		"use_speaker_boost": true,
+	}
+}
+
 func generatedAssetAI(a Asset) *AIAsset {
 	if strings.TrimSpace(a.Provider) != "" && strings.ToLower(strings.TrimSpace(a.Provider)) != "media-studio" {
 		return nil
@@ -576,6 +601,7 @@ func generatedAssetAI(a Asset) *AIAsset {
 	if ai.MediaKind == "" {
 		return nil
 	}
+	applyDefaultAIOptions(&ai)
 	return &ai
 }
 
