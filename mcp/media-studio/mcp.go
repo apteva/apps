@@ -16,6 +16,7 @@ type buildResultArgs struct {
 	MimeType                 string
 	CostUSD                  float64
 	GenerationID             int64
+	ProviderRequestID        string
 	StorageFolder            string
 	EstimatedDurationSeconds float64
 	ActualDurationSeconds    float64
@@ -108,6 +109,7 @@ func buildMCPResult(a buildResultArgs) map[string]any {
 		"upstream_urls":              a.UpstreamURLs,
 		"cost_usd":                   a.CostUSD,
 		"generation_id":              a.GenerationID,
+		"provider_request_id":        a.ProviderRequestID,
 		"storage_folder":             a.StorageFolder,
 		"estimated_duration_seconds": a.EstimatedDurationSeconds,
 		"actual_duration_seconds":    a.ActualDurationSeconds,

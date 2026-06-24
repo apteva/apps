@@ -43,8 +43,9 @@ func buildElevenLabsTTSArgs(args map[string]any) (map[string]any, error) {
 		passThrough := []string{
 			"model_id", "language_code", "voice_settings",
 			"pronunciation_dictionary_locators", "seed", "previous_text",
-			"next_text", "apply_text_normalization", "output_format",
-			"optimize_streaming_latency", "enable_logging",
+			"next_text", "previous_request_ids", "next_request_ids",
+			"apply_text_normalization", "output_format", "optimize_streaming_latency",
+			"enable_logging",
 		}
 		for _, k := range passThrough {
 			if v, exists := opts[k]; exists {

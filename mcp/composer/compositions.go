@@ -93,6 +93,7 @@ type AIAsset struct {
 	CachePolicy              string         `json:"cache_policy,omitempty"`
 	Status                   string         `json:"status,omitempty"` // draft | generating | ready | failed
 	GenerationID             int64          `json:"generation_id,omitempty"`
+	ProviderRequestID        string         `json:"provider_request_id,omitempty"`
 	StorageID                int64          `json:"storage_id,omitempty"`
 	JobID                    int64          `json:"job_id,omitempty"`
 	EstimatedDurationSeconds float64        `json:"estimated_duration_seconds,omitempty"`

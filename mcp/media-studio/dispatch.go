@@ -285,6 +285,7 @@ func (a *App) toolMediaGenerate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 		updateGenerationStatus(ctx, pid, draftID, "failed")
 		return mcpError("provider returned zero items"), nil
 	}
+	providerRequestID := providerRequestIDFromHeaders(res.Headers)
 
 	// Async kinds (video, avatar) return a job handle, not bytes.
 	// Short-circuit the sync save pipeline — the worker (worker.go)
@@ -342,6 +343,9 @@ func (a *App) toolMediaGenerate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 
 	size := strArg(args, "size", "")
 	extraJSON := encodeExtras(kind, args)
+	if providerRequestID != "" {
+		extraJSON = addExtraJSONField(extraJSON, "provider_request_id", providerRequestID)
+	}
 	costUSD := computeGenerationCost(ctx, bound, kind, capability, model, args)
 	record := generationRecord{
 		ProjectID:                pid,
@@ -403,6 +407,7 @@ func (a *App) toolMediaGenerate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 		MimeType:                 media[0].MimeType,
 		CostUSD:                  costUSD,
 		GenerationID:             genID,
+		ProviderRequestID:        providerRequestID,
 		StorageFolder:            storageFolder,
 		EstimatedDurationSeconds: estimatedSeconds,
 		ActualDurationSeconds:    totalActualSeconds,
@@ -542,6 +547,7 @@ func cachedGenerationResult(row map[string]any) map[string]any {
 	costUSD := floatAny(row["cost_usd"])
 	estimatedSeconds := floatAny(row["estimated_duration_seconds"])
 	actualSeconds := floatAny(row["actual_duration_seconds"])
+	providerRequestID := providerRequestIDFromExtraJSON(strAny(row["extra_json"]))
 	count := int(int64Any(row["count"]))
 	if count <= 0 {
 		count = 1
@@ -578,6 +584,7 @@ func cachedGenerationResult(row map[string]any) map[string]any {
 			"cost_usd":                   costUSD,
 			"count":                      count,
 			"generation_id":              int64Any(row["id"]),
+			"provider_request_id":        providerRequestID,
 			"cache_hit":                  true,
 			"cache_key":                  strAny(row["cache_key"]),
 			"estimated_duration_seconds": estimatedSeconds,
@@ -696,6 +703,50 @@ func encodeExtras(kind string, args map[string]any) string {
 		return "{}"
 	}
 	return string(b)
+}
+
+func addExtraJSONField(raw, key string, value any) string {
+	if strings.TrimSpace(key) == "" || value == nil {
+		return raw
+	}
+	extras := map[string]any{}
+	if strings.TrimSpace(raw) != "" {
+		_ = json.Unmarshal([]byte(raw), &extras)
+	}
+	if extras == nil {
+		extras = map[string]any{}
+	}
+	extras[key] = value
+	b, err := json.Marshal(extras)
+	if err != nil {
+		if raw == "" {
+			return "{}"
+		}
+		return raw
+	}
+	return string(b)
+}
+
+func providerRequestIDFromHeaders(headers map[string]string) string {
+	for k, v := range headers {
+		if strings.EqualFold(k, "request-id") || strings.EqualFold(k, "x-request-id") {
+			if s := strings.TrimSpace(v); s != "" {
+				return s
+			}
+		}
+	}
+	return ""
+}
+
+func providerRequestIDFromExtraJSON(raw string) string {
+	if strings.TrimSpace(raw) == "" {
+		return ""
+	}
+	var extras map[string]any
+	if err := json.Unmarshal([]byte(raw), &extras); err != nil {
+		return ""
+	}
+	return strings.TrimSpace(strAny(extras["provider_request_id"]))
 }
 
 // computeGenerationCost looks up Venice's per-model rate (cached or

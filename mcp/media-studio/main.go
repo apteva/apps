@@ -35,14 +35,14 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: media-studio
 display_name: Media Studio
-version: 0.10.26
+version: 0.10.27
 description: |
   Generate images, video, audio, music, and avatars via compatible
   providers. Optionally saves outputs to Storage, supports stable
   cache keys for app-to-app generation reuse, and can use OpenAI Codex
-  as a subscription-backed image provider. v0.10.26 adds generic
-  reusable media identities for voices and avatars, including
-  ElevenLabs Voice Design creation through the audio provider.
+  as a subscription-backed image provider. v0.10.27 exposes ElevenLabs
+  request-id continuity fields and returns provider request IDs for
+  generated TTS clips.
 author: Apteva
 scopes: [project, global]
 requires:

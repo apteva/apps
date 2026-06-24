@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: composer
 display_name: Composer
-version: 0.3.37
+version: 0.3.38
 description: |
   Multi-clip video composition. Stitch generated or uploaded assets
   into a single video — one visual track, timed audio tracks, optional
@@ -10,6 +10,10 @@ description: |
   default, on a render host via instances when render_host_id is
   set, or against a SaaS render backend (Shotstack et al) when one
   is bound to the render_executor role.
+
+  v0.3.38 stores ElevenLabs provider request IDs on generated TTS
+  clips and automatically chains previous/next request IDs between
+  compatible timeline voice clips when Media Studio returns them.
 
   v0.3.37 keeps ElevenLabs continuity context for supported TTS models
   while skipping it for eleven_v3, which currently rejects previous_text

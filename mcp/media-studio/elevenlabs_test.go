@@ -14,8 +14,10 @@ func TestBuildElevenLabsTTSArgs(t *testing.T) {
 		"voice":  "voice-123",
 		"model":  "eleven_flash_v2_5",
 		"options": map[string]any{
-			"output_format":  "mp3_44100_128",
-			"voice_settings": map[string]any{"stability": 0.7},
+			"output_format":        "mp3_44100_128",
+			"previous_request_ids": []any{"req-prev"},
+			"next_request_ids":     []any{"req-next"},
+			"voice_settings":       map[string]any{"stability": 0.7},
 		},
 	}, "elevenlabs", "audio.tts")
 	if err != nil {
@@ -26,6 +28,12 @@ func TestBuildElevenLabsTTSArgs(t *testing.T) {
 	}
 	if got["output_format"] != "mp3_44100_128" {
 		t.Fatalf("output_format not passed through: %+v", got)
+	}
+	if ids, _ := got["previous_request_ids"].([]any); len(ids) != 1 || ids[0] != "req-prev" {
+		t.Fatalf("previous_request_ids not passed through: %+v", got)
+	}
+	if ids, _ := got["next_request_ids"].([]any); len(ids) != 1 || ids[0] != "req-next" {
+		t.Fatalf("next_request_ids not passed through: %+v", got)
 	}
 	if _, ok := got["voice_settings"].(map[string]any); !ok {
 		t.Fatalf("voice_settings missing: %+v", got)
@@ -123,6 +131,7 @@ func TestToolMediaGenerate_ElevenLabsTTS_WithStorage(t *testing.T) {
 		Success: true,
 		Status:  200,
 		Data:    json.RawMessage(`{"_binary":true,"base64":"aGVsbG8=","mimeType":"audio/mpeg","size":5}`),
+		Headers: map[string]string{"request-id": "el-req-123"},
 	}
 	pf.nextCallResult = json.RawMessage(
 		`{"result":{"content":[{"type":"text","text":"{\"id\":5678,\"url\":\"/files/5678\"}"}]}}`,
@@ -155,8 +164,18 @@ func TestToolMediaGenerate_ElevenLabsTTS_WithStorage(t *testing.T) {
 	if meta["kind"] != "audio_tts" || meta["provider"] != "elevenlabs" {
 		t.Fatalf("unexpected meta: %+v", meta)
 	}
+	if meta["provider_request_id"] != "el-req-123" {
+		t.Fatalf("provider_request_id = %v, want el-req-123", meta["provider_request_id"])
+	}
 	if got := meta["estimated_duration_seconds"].(float64); got < 1 {
 		t.Fatalf("estimated duration = %v, want a non-zero speech estimate", got)
+	}
+	var extraJSON string
+	if err := ctx.AppDB().QueryRow(`SELECT extra_json FROM generations LIMIT 1`).Scan(&extraJSON); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(extraJSON, "el-req-123") {
+		t.Fatalf("extra_json missing provider request id: %s", extraJSON)
 	}
 }
 

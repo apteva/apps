@@ -2,13 +2,16 @@ schema: apteva-app/v1
 
 name: media-studio
 display_name: Media Studio
-version: 0.10.26
+version: 0.10.27
 description: |
   Generate images, video, audio, music, and avatars via compatible
   providers. ElevenLabs powers audio TTS, sound effects, and music.
   Optionally saves outputs to the Storage app for permanent, shareable
-  references. v0.10.26 adds generic reusable media identities for
-  voices and avatars, including ElevenLabs Voice Design creation.
+  references. v0.10.27 exposes ElevenLabs request-id continuity
+  fields and returns provider request IDs for generated TTS clips.
+
+  v0.10.26 adds generic reusable media identities for voices and
+  avatars, including ElevenLabs Voice Design creation.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/media-studio

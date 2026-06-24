@@ -246,6 +246,9 @@ func materializeOneAIAsset(ctx *sdk.AppCtx, ai *AIAsset, label, projectID string
 	if id := number(meta["generation_id"]); id > 0 {
 		ai.GenerationID = id
 	}
+	if requestID := strings.TrimSpace(strFromAny(meta["provider_request_id"])); requestID != "" {
+		ai.ProviderRequestID = requestID
+	}
 	if v := floatNumber(meta["estimated_duration_seconds"]); v > 0 {
 		ai.EstimatedDurationSeconds = v
 	}
@@ -290,14 +293,24 @@ func ttsContinuityOptions(track *Track, clipIndex int) map[string]any {
 		return nil
 	}
 	out := map[string]any{}
-	if !hasAIOption(current.AI, "previous_text") {
+	if !hasAIOption(current.AI, "previous_request_ids") {
+		if ids := neighboringCompatibleTTSRequestIDs(track, clipIndex, -1); len(ids) > 0 {
+			out["previous_request_ids"] = ids
+		}
+	}
+	if _, hasRequestIDs := out["previous_request_ids"]; !hasRequestIDs && !hasAIOption(current.AI, "previous_text") {
 		if prev := neighboringCompatibleTTS(track, clipIndex, -1); prev != nil {
 			if text := strings.TrimSpace(prev.AI.Prompt); text != "" {
 				out["previous_text"] = text
 			}
 		}
 	}
-	if !hasAIOption(current.AI, "next_text") {
+	if !hasAIOption(current.AI, "next_request_ids") {
+		if ids := neighboringCompatibleTTSRequestIDs(track, clipIndex, 1); len(ids) > 0 {
+			out["next_request_ids"] = ids
+		}
+	}
+	if _, hasRequestIDs := out["next_request_ids"]; !hasRequestIDs && !hasAIOption(current.AI, "next_text") {
 		if next := neighboringCompatibleTTS(track, clipIndex, 1); next != nil {
 			if text := strings.TrimSpace(next.AI.Prompt); text != "" {
 				out["next_text"] = text
@@ -308,6 +321,35 @@ func ttsContinuityOptions(track *Track, clipIndex int) map[string]any {
 		return nil
 	}
 	return out
+}
+
+func neighboringCompatibleTTSRequestIDs(track *Track, clipIndex, direction int) []string {
+	if track == nil || direction == 0 {
+		return nil
+	}
+	current := &track.Clips[clipIndex]
+	ids := []string{}
+	for i := clipIndex + direction; i >= 0 && i < len(track.Clips); i += direction {
+		candidate := &track.Clips[i]
+		if !isAudioTTS(candidate.AI) {
+			continue
+		}
+		if !compatibleTTSContext(current.AI, candidate.AI) {
+			break
+		}
+		if id := strings.TrimSpace(candidate.AI.ProviderRequestID); id != "" {
+			ids = append(ids, id)
+			if len(ids) == 3 {
+				break
+			}
+		}
+	}
+	if direction < 0 {
+		for i, j := 0, len(ids)-1; i < j; i, j = i+1, j-1 {
+			ids[i], ids[j] = ids[j], ids[i]
+		}
+	}
+	return ids
 }
 
 func neighboringCompatibleTTS(track *Track, clipIndex, direction int) *Clip {

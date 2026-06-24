@@ -667,6 +667,34 @@ func TestTTSContinuityOptions_UsesNeighboringSameVoiceText(t *testing.T) {
 	}
 }
 
+func TestTTSContinuityOptions_PrefersRequestIDs(t *testing.T) {
+	edit := `{"timeline":{"tracks":[{"type":"audio","clips":[
+		{"uid":"a","asset":{"type":"audio","src":""},"start":0,"length":5,"ai":{"media_kind":"audio_tts","prompt":"First part.","voice":"voice-1","model":"eleven_multilingual_v2","provider_request_id":"req-a"}},
+		{"uid":"gap","asset":{"type":"silence","src":""},"start":5,"length":1},
+		{"uid":"b","asset":{"type":"audio","src":""},"start":6,"length":5,"ai":{"media_kind":"audio_tts","prompt":"Second part.","voice":"voice-1","model":"eleven_multilingual_v2"}},
+		{"uid":"c","asset":{"type":"audio","src":""},"start":11,"length":5,"ai":{"media_kind":"audio_tts","prompt":"Third part.","voice":"voice-1","model":"eleven_multilingual_v2","provider_request_id":"req-c"}}
+	]}]}}`
+	got, err := parseEditJSON(edit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	opts := ttsContinuityOptions(&got.Timeline.Tracks[0], 2)
+	prev, _ := opts["previous_request_ids"].([]string)
+	next, _ := opts["next_request_ids"].([]string)
+	if len(prev) != 1 || prev[0] != "req-a" {
+		t.Fatalf("previous_request_ids = %+v, want req-a", prev)
+	}
+	if len(next) != 1 || next[0] != "req-c" {
+		t.Fatalf("next_request_ids = %+v, want req-c", next)
+	}
+	if _, ok := opts["previous_text"]; ok {
+		t.Fatalf("previous_text should be omitted when request IDs are available: %+v", opts)
+	}
+	if _, ok := opts["next_text"]; ok {
+		t.Fatalf("next_text should be omitted when request IDs are available: %+v", opts)
+	}
+}
+
 func TestTTSContinuityOptions_StopsAtDifferentVoice(t *testing.T) {
 	edit := `{"timeline":{"tracks":[{"type":"audio","clips":[
 		{"uid":"a","asset":{"type":"audio","src":""},"start":0,"length":5,"ai":{"media_kind":"audio_tts","prompt":"First part.","voice":"voice-1","model":"eleven_multilingual_v2"}},
