@@ -410,6 +410,7 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
   const [voiceCreateOpen, setVoiceCreateOpen] = useState(false);
   const [voiceCreateName, setVoiceCreateName] = useState("");
   const [voiceCreateDescription, setVoiceCreateDescription] = useState("");
+  const [voiceCreateModel, setVoiceCreateModel] = useState("eleven_ttv_v3");
   const [voiceCreatePreviewText, setVoiceCreatePreviewText] = useState("");
   const [voiceCreateEnhance, setVoiceCreateEnhance] = useState(true);
   const [voiceCreating, setVoiceCreating] = useState(false);
@@ -944,6 +945,7 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
     setStatus("Creating voice…");
     try {
       const options: Record<string, unknown> = {
+        model_id: voiceCreateModel,
         auto_generate_text: !voiceCreatePreviewText.trim(),
         should_enhance: voiceCreateEnhance,
         quality: 0.9,
@@ -1474,6 +1476,8 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
             setVoiceCreateName={setVoiceCreateName}
             voiceCreateDescription={voiceCreateDescription}
             setVoiceCreateDescription={setVoiceCreateDescription}
+            voiceCreateModel={voiceCreateModel}
+            setVoiceCreateModel={setVoiceCreateModel}
             voiceCreatePreviewText={voiceCreatePreviewText}
             setVoiceCreatePreviewText={setVoiceCreatePreviewText}
             voiceCreateEnhance={voiceCreateEnhance}
@@ -1695,6 +1699,8 @@ interface ComposerProps {
   setVoiceCreateName: (v: string) => void;
   voiceCreateDescription: string;
   setVoiceCreateDescription: (v: string) => void;
+  voiceCreateModel: string;
+  setVoiceCreateModel: (v: string) => void;
   voiceCreatePreviewText: string;
   setVoiceCreatePreviewText: (v: string) => void;
   voiceCreateEnhance: boolean;
@@ -1818,6 +1824,8 @@ function Composer(p: ComposerProps) {
             setName={p.setVoiceCreateName}
             description={p.voiceCreateDescription}
             setDescription={p.setVoiceCreateDescription}
+            model={p.voiceCreateModel}
+            setModel={p.setVoiceCreateModel}
             previewText={p.voiceCreatePreviewText}
             setPreviewText={p.setVoiceCreatePreviewText}
             enhance={p.voiceCreateEnhance}
@@ -1969,6 +1977,8 @@ function VoiceCreatePanel({
   setName,
   description,
   setDescription,
+  model,
+  setModel,
   previewText,
   setPreviewText,
   enhance,
@@ -1986,6 +1996,8 @@ function VoiceCreatePanel({
   setName: (v: string) => void;
   description: string;
   setDescription: (v: string) => void;
+  model: string;
+  setModel: (v: string) => void;
   previewText: string;
   setPreviewText: (v: string) => void;
   enhance: boolean;
@@ -2041,6 +2053,17 @@ function VoiceCreatePanel({
         <div className="mt-2 flex flex-col gap-2">
           <div className="flex items-end gap-2 flex-wrap">
             <TextField label="Name" value={name} onChange={setName} placeholder="Hypno Mistress" />
+            <div>
+              <label className="text-text-muted text-xs block">Design model</label>
+              <select
+                value={model}
+                onChange={(e) => setModel(e.target.value)}
+                className="bg-bg-input border border-border rounded px-2 py-1.5 text-sm"
+              >
+                <option value="eleven_ttv_v3">Eleven v3</option>
+                <option value="eleven_multilingual_ttv_v2">Multilingual v2</option>
+              </select>
+            </div>
             <label className="flex items-center gap-1.5 text-xs text-text-muted cursor-pointer select-none pb-2">
               <input
                 type="checkbox"

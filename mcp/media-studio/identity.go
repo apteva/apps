@@ -195,13 +195,13 @@ func (a *App) createVoiceIdentity(ctx *sdk.AppCtx, pid string, args map[string]a
 
 func buildElevenLabsDesignVoiceArgs(args map[string]any, description string) map[string]any {
 	out := map[string]any{"voice_description": description}
-	for _, k := range []string{"text", "auto_generate_text", "loudness", "quality", "seed", "guidance_scale", "should_enhance", "output_format"} {
+	for _, k := range []string{"model_id", "text", "auto_generate_text", "loudness", "quality", "seed", "guidance_scale", "should_enhance", "output_format"} {
 		if v, ok := args[k]; ok {
 			out[k] = v
 		}
 	}
 	if opts, ok := args["options"].(map[string]any); ok {
-		for _, k := range []string{"text", "auto_generate_text", "loudness", "quality", "seed", "guidance_scale", "should_enhance", "output_format"} {
+		for _, k := range []string{"model_id", "text", "auto_generate_text", "loudness", "quality", "seed", "guidance_scale", "should_enhance", "output_format"} {
 			if v, exists := opts[k]; exists {
 				out[k] = v
 			}

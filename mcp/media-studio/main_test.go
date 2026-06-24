@@ -2196,6 +2196,7 @@ func TestToolMediaVoiceCreate_ElevenLabsDesignCreatesIdentity(t *testing.T) {
 		"prompt":      "A calm, warm, slow female hypnosis narrator voice with intimate studio quality.",
 		"options": map[string]any{
 			"auto_generate_text": true,
+			"model_id":           "eleven_ttv_v3",
 		},
 	})
 	if err != nil {
@@ -2207,6 +2208,9 @@ func TestToolMediaVoiceCreate_ElevenLabsDesignCreatesIdentity(t *testing.T) {
 	}
 	if len(pf.executeCalls) != 2 || pf.executeCalls[0].Tool != "design_voice" || pf.executeCalls[1].Tool != "create_voice_from_preview" {
 		t.Fatalf("unexpected provider calls: %+v", pf.executeCalls)
+	}
+	if pf.executeCalls[0].Input["model_id"] != "eleven_ttv_v3" {
+		t.Fatalf("design call did not forward model_id: %+v", pf.executeCalls[0].Input)
 	}
 	if pf.executeCalls[1].Input["generated_voice_id"] != "gen-1" {
 		t.Fatalf("create call did not save selected preview: %+v", pf.executeCalls[1].Input)

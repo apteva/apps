@@ -35,13 +35,15 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: media-studio
 display_name: Media Studio
-version: 0.10.29
+version: 0.10.30
 description: |
   Generate images, video, audio, music, and avatars via compatible
   providers. Optionally saves outputs to Storage, supports stable
   cache keys for app-to-app generation reuse, and can use OpenAI Codex
-  as a subscription-backed image provider. v0.10.29 adds UI controls
-  for ElevenLabs Voice Design voice creation on the Audio/TTS tab.
+  as a subscription-backed image provider. v0.10.30 lets voice
+  creation choose the ElevenLabs Voice Design model, defaulting to
+  eleven_ttv_v3. v0.10.29 adds UI controls for ElevenLabs Voice Design
+  voice creation on the Audio/TTS tab.
   v0.10.28 accepts common ElevenLabs request-id response header
   variants for TTS continuity.
 author: Apteva
@@ -315,13 +317,19 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "media_identity_create",
-			Description: "Create a reusable provider-side identity such as a voice or avatar. Args: kind (voice|avatar), name, source_type (voice: prompt|audio; avatar: photo|prompt|video), prompt?/voice_description?, generated_voice_id?, preview_index?, source_image?, source_video?, consent_video?, labels?, options?. Voice prompt creation uses ElevenLabs Voice Design when audio_provider is ElevenLabs.",
+			Description: "Create a reusable provider-side identity such as a voice or avatar. Args: kind (voice|avatar), name, source_type (voice: prompt|audio; avatar: photo|prompt|video), prompt?/voice_description?, model_id? (ElevenLabs Voice Design: eleven_ttv_v3|eleven_multilingual_ttv_v2), generated_voice_id?, preview_index?, source_image?, source_video?, consent_video?, labels?, options?. Voice prompt creation uses ElevenLabs Voice Design when audio_provider is ElevenLabs.",
 			InputSchema: schemaObject(map[string]any{
 				"kind":              map[string]any{"type": "string", "enum": []string{"voice", "avatar"}},
 				"name":              map[string]any{"type": "string"},
 				"source_type":       map[string]any{"type": "string", "enum": []string{"prompt", "audio", "photo", "video"}},
 				"prompt":            map[string]any{"type": "string"},
 				"voice_description": map[string]any{"type": "string"},
+				"model_id": map[string]any{
+					"type":        "string",
+					"enum":        []string{"eleven_ttv_v3", "eleven_multilingual_ttv_v2"},
+					"default":     "eleven_ttv_v3",
+					"description": "ElevenLabs Voice Design model for prompt-created voices.",
+				},
 				"generated_voice_id": map[string]any{
 					"type":        "string",
 					"description": "Optional ElevenLabs generated_voice_id from a previous design/remix preview; skips preview generation and saves this preview.",
@@ -358,12 +366,18 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "media_voice_create",
-			Description: "Create a reusable voice identity. Alias for media_identity_create with kind=voice. Supports ElevenLabs prompt-based Voice Design now; source_type=audio cloning is declared in the provider catalog but waits for multipart executor support.",
+			Description: "Create a reusable voice identity. Alias for media_identity_create with kind=voice. Supports ElevenLabs prompt-based Voice Design now, including model_id eleven_ttv_v3 or eleven_multilingual_ttv_v2; source_type=audio cloning is declared in the provider catalog but waits for multipart executor support.",
 			InputSchema: schemaObject(map[string]any{
-				"name":               map[string]any{"type": "string"},
-				"source_type":        map[string]any{"type": "string", "enum": []string{"prompt", "audio"}},
-				"prompt":             map[string]any{"type": "string"},
-				"voice_description":  map[string]any{"type": "string"},
+				"name":              map[string]any{"type": "string"},
+				"source_type":       map[string]any{"type": "string", "enum": []string{"prompt", "audio"}},
+				"prompt":            map[string]any{"type": "string"},
+				"voice_description": map[string]any{"type": "string"},
+				"model_id": map[string]any{
+					"type":        "string",
+					"enum":        []string{"eleven_ttv_v3", "eleven_multilingual_ttv_v2"},
+					"default":     "eleven_ttv_v3",
+					"description": "ElevenLabs Voice Design model for prompt-created voices.",
+				},
 				"generated_voice_id": map[string]any{"type": "string"},
 				"preview_index":      map[string]any{"type": "integer", "default": 0},
 				"labels":             map[string]any{"type": "object"},
