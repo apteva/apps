@@ -183,6 +183,9 @@ func (a *App) toolCompositionList(ctx *sdk.AppCtx, args map[string]any) (any, er
 	if limit > 200 {
 		limit = 200
 	}
+	if boolArg(args, "summary", false) {
+		return a.toolCompositionListSummary(ctx, pid, limit)
+	}
 	rows, err := ctx.AppDB().Query(
 		`SELECT id, name, edit_json, output_json, duration_seconds, created_at, updated_at
 		 FROM compositions WHERE project_id=? ORDER BY id DESC LIMIT ?`, pid, limit,
@@ -233,6 +236,64 @@ func (a *App) toolCompositionList(ctx *sdk.AppCtx, args map[string]any) (any, er
 		item["latest_render"] = loadLatestRender(ctx, id)
 	}
 	return map[string]any{"compositions": out}, nil
+}
+
+func (a *App) toolCompositionListSummary(ctx *sdk.AppCtx, pid string, limit int) (any, error) {
+	rows, err := ctx.AppDB().Query(
+		`SELECT
+		     c.id,
+		     c.name,
+		     c.duration_seconds,
+		     c.created_at,
+		     c.updated_at,
+		     COALESCE((
+		       SELECT r.id FROM renders r
+		       WHERE r.composition_id = c.id
+		       ORDER BY r.id DESC LIMIT 1
+		     ), 0) AS latest_render_id,
+		     COALESCE((
+		       SELECT r.status FROM renders r
+		       WHERE r.composition_id = c.id
+		       ORDER BY r.id DESC LIMIT 1
+		     ), '') AS latest_render_status
+		   FROM compositions c
+		   WHERE c.project_id=?
+		   ORDER BY c.id DESC LIMIT ?`, pid, limit,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []map[string]any{}
+	for rows.Next() {
+		var (
+			id, latestRenderID         int64
+			name, createdAt, updatedAt string
+			latestRenderStatus         string
+			dur                        float64
+		)
+		if err := rows.Scan(&id, &name, &dur, &createdAt, &updatedAt, &latestRenderID, &latestRenderStatus); err != nil {
+			continue
+		}
+		item := map[string]any{
+			"id":               id,
+			"name":             name,
+			"duration_seconds": dur,
+			"created_at":       createdAt,
+			"updated_at":       updatedAt,
+		}
+		if latestRenderID > 0 {
+			item["latest_render"] = map[string]any{
+				"id":     latestRenderID,
+				"status": latestRenderStatus,
+			}
+		}
+		out = append(out, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return map[string]any{"compositions": out, "summary": true}, nil
 }
 
 func (a *App) toolCompositionDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -630,9 +691,16 @@ func (a *App) handleListCompositions(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "app not mounted", http.StatusServiceUnavailable)
 		return
 	}
+	limit := 200
+	if raw := strings.TrimSpace(r.URL.Query().Get("limit")); raw != "" {
+		if n, err := strconv.Atoi(raw); err == nil && n > 0 {
+			limit = n
+		}
+	}
 	out, err := a.toolCompositionList(globalCtx, map[string]any{
-		"limit":      200,
+		"limit":      limit,
 		"project_id": r.URL.Query().Get("project_id"),
+		"summary":    r.URL.Query().Get("summary") == "1" || r.URL.Query().Get("summary") == "true",
 	})
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)

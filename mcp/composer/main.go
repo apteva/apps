@@ -28,7 +28,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: composer
 display_name: Composer
-version: 0.3.41
+version: 0.3.42
 description: |
   Multi-clip video compositions with a structured timeline panel,
   universal generated-asset clip editing, first-class AI avatar clips,
@@ -47,6 +47,9 @@ description: |
   to conservative cloned-voice settings unless a clip overrides them, and
   sequential clips sharing a voice/model get ElevenLabs request-id continuity
   when Media Studio returns provider request IDs, falling back to text context.
+  The panel lists compositions with lightweight summaries and loads full
+  timeline/render details only when a composition is selected, so projects with
+  many saved compositions stay responsive.
   Renders locally via ffmpeg, on a render host via instances, or against a
   bound render_executor integration.
 author: Apteva

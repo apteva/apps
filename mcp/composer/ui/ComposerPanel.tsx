@@ -1,4 +1,4 @@
-// ComposerPanel v0.3.39 - timeline editor with storage and Media Studio AI assets.
+// ComposerPanel v0.3.42 - timeline editor with lazy composition details.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
@@ -20,8 +20,8 @@ function withProject(path: string, projectId: string): string {
 interface Composition {
   id: number;
   name: string;
-  edit_json: string;
-  output_json: string;
+  edit_json?: string;
+  output_json?: string;
   duration_seconds: number;
   created_at: string;
   updated_at: string;
@@ -929,6 +929,8 @@ function fitsGenerated(mode: DurationMode | undefined): boolean {
 
 export default function ComposerPanel({ projectId, installId }: NativePanelProps) {
   const [compositions, setCompositions] = useState<Composition[]>([]);
+  const [selectedDetail, setSelectedDetail] = useState<Composition | null>(null);
+  const [detailLoading, setDetailLoading] = useState(false);
   const [bindings, setBindings] = useState<Bindings | null>(null);
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [draft, setDraft] = useState<DraftState>(() => cloneDefault());
@@ -951,7 +953,9 @@ export default function ComposerPanel({ projectId, installId }: NativePanelProps
   const [storageError, setStorageError] = useState("");
   const [aiBusy, setAIBusy] = useState("");
 
-  const selected = selectedId != null ? compositions.find((c) => c.id === selectedId) || null : null;
+  const selectedSummary = selectedId != null ? compositions.find((c) => c.id === selectedId) || null : null;
+  const selected = selectedId != null && selectedDetail?.id === selectedId ? selectedDetail : selectedSummary;
+  const selectedFull = selectedId != null && selectedDetail?.id === selectedId ? selectedDetail : null;
   const examples = useMemo(() => composerExamples(), []);
   const clips = useMemo(() => normalizeClips(draft.clips), [draft.clips]);
   const audioClips = useMemo(() => normalizeAudioClips(draft.audioClips), [draft.audioClips]);
@@ -961,16 +965,35 @@ export default function ComposerPanel({ projectId, installId }: NativePanelProps
 
   const load = useCallback(async () => {
     try {
-      const res = await fetch(withProject(`${API}/compositions`, projectId), { credentials: "same-origin" });
+      const res = await fetch(withProject(`${API}/compositions?summary=1&limit=100`, projectId), { credentials: "same-origin" });
       if (!res.ok) {
         setStatus(`Error: ${res.status}`);
         return;
       }
       const data = await res.json();
-      const rows = await enrichCompositionsWithMediaStudio(projectId, data.compositions || []);
-      setCompositions(rows);
+      setCompositions(data.compositions || []);
     } catch (e) {
       setStatus("Error: " + (e as Error).message);
+    }
+  }, [projectId]);
+
+  const loadCompositionDetail = useCallback(async (id: number) => {
+    setDetailLoading(true);
+    try {
+      const res = await fetch(withProject(`${API}/composition/${id}`, projectId), { credentials: "same-origin" });
+      if (!res.ok) {
+        setStatus(`Error loading composition #${id}: ${res.status}`);
+        return;
+      }
+      const row = await res.json();
+      const [enriched] = await enrichCompositionsWithMediaStudio(projectId, [row]);
+      const detail = enriched || row;
+      setSelectedDetail(detail);
+      setCompositions((prev) => prev.map((c) => (c.id === detail.id ? { ...c, ...detail } : c)));
+    } catch (e) {
+      setStatus("Error: " + (e as Error).message);
+    } finally {
+      setDetailLoading(false);
     }
   }, [projectId]);
 
@@ -986,18 +1009,31 @@ export default function ComposerPanel({ projectId, installId }: NativePanelProps
   }, [projectId]);
 
   useEffect(() => {
+    setSelectedDetail(null);
+    setSelectedId(null);
     load();
     loadBindings();
-  }, [load, loadBindings]);
+  }, [load, loadBindings, projectId]);
 
   useEffect(() => {
-    const next = parseComposition(selected);
+    if (selectedId == null) {
+      setSelectedDetail(null);
+      return;
+    }
+    if (selectedDetail?.id !== selectedId) {
+      loadCompositionDetail(selectedId);
+    }
+  }, [selectedId, selectedDetail?.id, loadCompositionDetail]);
+
+  useEffect(() => {
+    if (selectedId != null && !selectedFull) return;
+    const next = parseComposition(selectedFull);
     setDraft(next);
     setSelectedClipId(next.clips[0]?.id || "");
     setPlayhead(0);
-    setJsonEdit(selected ? prettyJSON(selected.edit_json, editJSONFromDraft(next)) : editJSONFromDraft(next));
-    setJsonOutput(selected ? prettyJSON(selected.output_json, outputJSONFromDraft(next)) : outputJSONFromDraft(next));
-  }, [selectedId, selected?.edit_json, selected?.output_json]);
+    setJsonEdit(selectedFull ? prettyJSON(selectedFull.edit_json || "", editJSONFromDraft(next)) : editJSONFromDraft(next));
+    setJsonOutput(selectedFull ? prettyJSON(selectedFull.output_json || "", outputJSONFromDraft(next)) : outputJSONFromDraft(next));
+  }, [selectedId, selectedFull?.edit_json, selectedFull?.output_json]);
 
   useEffect(() => {
     if (!playing) return;
@@ -1246,7 +1282,9 @@ export default function ComposerPanel({ projectId, installId }: NativePanelProps
       const result = JSON.parse(text || "{}") as { id?: number };
       setStatus("Saved.");
       await load();
+      const id = result.id || selectedId || 0;
       if (result.id) setSelectedId(result.id);
+      if (id > 0) await loadCompositionDetail(id);
     } catch (e) {
       setStatus("Error: " + (e as Error).message);
     }
@@ -1308,11 +1346,13 @@ export default function ComposerPanel({ projectId, installId }: NativePanelProps
         const pending = Array.isArray(result.pending) ? result.pending.join("; ") : result.message || "";
         setStatus(`AI assets started. ${pending} Render again when they are ready.`);
         await load();
+        if (selectedId) await loadCompositionDetail(selectedId);
         return;
       }
       const costStr = result.cost_usd ? ` (${formatCost(result.cost_usd)})` : "";
       setStatus(`Render ${result.status}${costStr} via ${result.executor} in ${(result.duration_ms / 1000).toFixed(1)}s`);
       await load();
+      if (selectedId) await loadCompositionDetail(selectedId);
     } catch (e) {
       setStatus("Error: " + (e as Error).message);
     } finally {
@@ -1578,6 +1618,11 @@ export default function ComposerPanel({ projectId, installId }: NativePanelProps
             <TabButton active={tab === "timeline"} onClick={() => setTab("timeline")}>Timeline</TabButton>
             <TabButton active={tab === "json"} onClick={() => setTab("json")}>JSON</TabButton>
           </nav>
+          {detailLoading && selectedId != null && (
+            <div className="px-4 py-2 border-b border-border text-xs text-text-dim">
+              Loading composition #{selectedId}...
+            </div>
+          )}
 
           {tab === "timeline" ? (
             <div className="flex-1 min-h-0 flex">
@@ -1616,7 +1661,7 @@ export default function ComposerPanel({ projectId, installId }: NativePanelProps
                   onAddAISoundtrack={addAISoundtrack}
                   onBrowse={() => openPicker(clips.length ? { kind: "clip", clipId: clips[0].id } : { kind: "clip", clipId: "" })}
                 />
-                <RenderPreview render={selected?.latest_render || null} outputFormat={draft.output.format} aspect={draft.output.aspect} onOpen={setLightbox} />
+                <RenderPreview render={selectedFull?.latest_render || null} outputFormat={draft.output.format} aspect={draft.output.aspect} onOpen={setLightbox} />
               </section>
               <Inspector
                 projectId={projectId}

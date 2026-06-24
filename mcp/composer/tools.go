@@ -48,9 +48,10 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "composition_list",
-			Description: "List compositions for this project. Args: limit? (default 50).",
+			Description: "List compositions for this project. Args: limit? (default 50), summary? (true returns lightweight rows without full edit/output JSON).",
 			InputSchema: schemaObject(map[string]any{
-				"limit": map[string]any{"type": "integer", "default": 50},
+				"limit":   map[string]any{"type": "integer", "default": 50},
+				"summary": map[string]any{"type": "boolean", "default": false},
 			}, nil),
 			Handler: a.toolCompositionList,
 		},
