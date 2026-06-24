@@ -683,6 +683,22 @@ func TestTTSContinuityOptions_StopsAtDifferentVoice(t *testing.T) {
 	}
 }
 
+func TestTTSContinuityOptions_SkipsElevenV3(t *testing.T) {
+	edit := `{"timeline":{"tracks":[{"type":"audio","clips":[
+		{"uid":"a","asset":{"type":"audio","src":""},"start":0,"length":5,"ai":{"media_kind":"audio_tts","prompt":"First part.","voice":"voice-1","model":"eleven_v3"}},
+		{"uid":"b","asset":{"type":"audio","src":""},"start":5,"length":5,"ai":{"media_kind":"audio_tts","prompt":"Second part.","voice":"voice-1","model":"eleven_v3"}},
+		{"uid":"c","asset":{"type":"audio","src":""},"start":10,"length":5,"ai":{"media_kind":"audio_tts","prompt":"Third part.","voice":"voice-1","model":"eleven_v3"}}
+	]}]}}`
+	got, err := parseEditJSON(edit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	opts := ttsContinuityOptions(&got.Timeline.Tracks[0], 1)
+	if len(opts) != 0 {
+		t.Fatalf("eleven_v3 should not receive continuity context: %+v", opts)
+	}
+}
+
 func TestMediaGenerateOptions_AddsContinuityWithoutMutatingClipOptions(t *testing.T) {
 	ai := &AIAsset{
 		MediaKind: "audio_tts",
@@ -706,6 +722,18 @@ func TestAICacheKey_IncludesContinuityContext(t *testing.T) {
 	b := aiCacheKeyWithOptions(ai, map[string]any{"previous_text": "Different before."})
 	if a == b {
 		t.Fatal("cache key should change when TTS continuity context changes")
+	}
+}
+
+func TestMCPErrorText(t *testing.T) {
+	got := map[string]any{
+		"isError": true,
+		"content": []any{
+			map[string]any{"type": "text", "text": "provider returned non-2xx: unsupported model"},
+		},
+	}
+	if text := mcpErrorText(got); text != "provider returned non-2xx: unsupported model" {
+		t.Fatalf("unexpected error text: %q", text)
 	}
 }
 

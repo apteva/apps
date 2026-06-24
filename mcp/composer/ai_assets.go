@@ -227,6 +227,10 @@ func materializeOneAIAsset(ctx *sdk.AppCtx, ai *AIAsset, label, projectID string
 	meta, _ := got["_meta"].(map[string]any)
 	if meta == nil {
 		ai.Status = "failed"
+		if msg := mcpErrorText(got); msg != "" {
+			ai.Error = msg
+			return true, "", fmt.Errorf("%s: media-studio generate failed: %s", label, msg)
+		}
 		ai.Error = "media-studio returned no _meta"
 		return true, "", errors.New(label + ": media-studio returned no _meta")
 	}
@@ -282,6 +286,9 @@ func ttsContinuityOptions(track *Track, clipIndex int) map[string]any {
 	if !isAudioTTS(current.AI) {
 		return nil
 	}
+	if !ttsModelSupportsContinuity(current.AI) {
+		return nil
+	}
 	out := map[string]any{}
 	if !hasAIOption(current.AI, "previous_text") {
 		if prev := neighboringCompatibleTTS(track, clipIndex, -1); prev != nil {
@@ -329,6 +336,9 @@ func compatibleTTSContext(a, b *AIAsset) bool {
 	if !isAudioTTS(a) || !isAudioTTS(b) {
 		return false
 	}
+	if !ttsModelSupportsContinuity(a) || !ttsModelSupportsContinuity(b) {
+		return false
+	}
 	if strings.TrimSpace(a.Voice) != strings.TrimSpace(b.Voice) {
 		return false
 	}
@@ -349,6 +359,41 @@ func effectiveTTSModelID(ai *AIAsset) string {
 		return modelID
 	}
 	return strings.TrimSpace(ai.Model)
+}
+
+func ttsModelSupportsContinuity(ai *AIAsset) bool {
+	model := strings.ToLower(strings.TrimSpace(effectiveTTSModelID(ai)))
+	switch model {
+	case "eleven_v3":
+		return false
+	}
+	return true
+}
+
+func mcpErrorText(got map[string]any) string {
+	if len(got) == 0 {
+		return ""
+	}
+	if isErr, _ := got["isError"].(bool); !isErr {
+		return ""
+	}
+	items, _ := got["content"].([]any)
+	parts := make([]string, 0, len(items))
+	for _, item := range items {
+		m, _ := item.(map[string]any)
+		if strings.TrimSpace(strFromAny(m["type"])) != "text" {
+			continue
+		}
+		if text := strings.TrimSpace(strFromAny(m["text"])); text != "" {
+			parts = append(parts, text)
+		}
+	}
+	return strings.Join(parts, "\n")
+}
+
+func strFromAny(v any) string {
+	s, _ := v.(string)
+	return s
 }
 
 func optionString(opts map[string]any, key string) string {
