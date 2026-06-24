@@ -239,6 +239,152 @@ func TestBrowserSessionComputerUseClose(t *testing.T) {
 	}
 }
 
+func TestBrowserSessionResumeWithLiveAppSessionIDReturnsStatus(t *testing.T) {
+	prev := newBackend
+	t.Cleanup(func() { newBackend = prev })
+
+	fake := &fakeComp{
+		display: backends.DisplaySize{Width: 1024, Height: 768},
+		url:     "https://example.com",
+	}
+	newBackend = func(cfg backends.Config) (backends.Computer, error) { return fake, nil }
+
+	app := &App{reg: &registry{m: map[string]*session{}}}
+	ctx := tk.NewAppCtx(t, "apteva.yaml")
+	openOut, err := app.toolBrowserSession(ctx, map[string]any{"action": "open", "backend": "browserbase"})
+	if err != nil {
+		t.Fatalf("browser_session open: %v", err)
+	}
+	sessionID := openOut.(map[string]any)["session_id"].(string)
+
+	resumeOut, err := app.toolBrowserSession(ctx, map[string]any{
+		"action":     "resume",
+		"backend":    "browserbase",
+		"session_id": sessionID,
+	})
+	if err != nil {
+		t.Fatalf("resume live app session: %v", err)
+	}
+	if got := resumeOut.(map[string]any)["session_id"]; got != sessionID {
+		t.Fatalf("resume returned session_id=%v, want %s", got, sessionID)
+	}
+	if fake.openSessionID != "" {
+		t.Fatalf("resume with live app session called provider attach with %q", fake.openSessionID)
+	}
+}
+
+func TestBrowserSessionResumeWithStaleAppSessionIDIsClearError(t *testing.T) {
+	prev := newBackend
+	t.Cleanup(func() { newBackend = prev })
+	called := false
+	newBackend = func(cfg backends.Config) (backends.Computer, error) {
+		called = true
+		return &fakeComp{}, nil
+	}
+
+	app := &App{reg: &registry{m: map[string]*session{}}}
+	ctx := tk.NewAppCtx(t, "apteva.yaml")
+	_, err := app.toolBrowserSession(ctx, map[string]any{
+		"action":     "resume",
+		"backend":    "browserbase",
+		"session_id": "br_d911d6d7aa06cc5a",
+	})
+	if err == nil || !strings.Contains(err.Error(), "session_not_active") {
+		t.Fatalf("resume stale app session: want session_not_active, got %v", err)
+	}
+	if called {
+		t.Fatalf("resume stale app session should not instantiate provider backend")
+	}
+}
+
+func TestBrowserSessionResumeRequiresExplicitBackendSessionID(t *testing.T) {
+	prev := newBackend
+	t.Cleanup(func() { newBackend = prev })
+	called := false
+	newBackend = func(cfg backends.Config) (backends.Computer, error) {
+		called = true
+		return &fakeComp{}, nil
+	}
+
+	app := &App{reg: &registry{m: map[string]*session{}}}
+	ctx := tk.NewAppCtx(t, "apteva.yaml")
+	_, err := app.toolBrowserSession(ctx, map[string]any{
+		"action":  "resume",
+		"backend": "browserbase",
+	})
+	if err == nil || !strings.Contains(err.Error(), "backend_session_id required") {
+		t.Fatalf("resume without ids: want backend_session_id required, got %v", err)
+	}
+	if called {
+		t.Fatalf("resume without ids should not instantiate provider backend")
+	}
+}
+
+func TestBrowserSessionResumeWithBackendSessionIDAttachesProvider(t *testing.T) {
+	prev := newBackend
+	t.Cleanup(func() { newBackend = prev })
+
+	fake := &fakeComp{display: backends.DisplaySize{Width: 1024, Height: 768}, url: "https://example.com"}
+	newBackend = func(cfg backends.Config) (backends.Computer, error) { return fake, nil }
+
+	app := &App{reg: &registry{m: map[string]*session{}}}
+	ctx := tk.NewAppCtx(t, "apteva.yaml")
+	out, err := app.toolBrowserSession(ctx, map[string]any{
+		"action":             "resume",
+		"backend":            "browserbase",
+		"backend_session_id": "1733196a-6c7b-480e-b8d2-e9fdaa47bc85",
+	})
+	if err != nil {
+		t.Fatalf("resume provider session: %v", err)
+	}
+	if fake.openSessionID != "1733196a-6c7b-480e-b8d2-e9fdaa47bc85" {
+		t.Fatalf("provider attach id: got %q", fake.openSessionID)
+	}
+	if out.(map[string]any)["session_id"] == "" {
+		t.Fatalf("resume provider session returned no app session: %v", out)
+	}
+}
+
+func TestBrowserSessionResumeProviderExpiredError(t *testing.T) {
+	prev := newBackend
+	t.Cleanup(func() { newBackend = prev })
+
+	fake := &fakeComp{openErr: fmt.Errorf("browserbase: lookup session bad: HTTP 400: Invalid Session ID")}
+	newBackend = func(cfg backends.Config) (backends.Computer, error) { return fake, nil }
+
+	app := &App{reg: &registry{m: map[string]*session{}}}
+	ctx := tk.NewAppCtx(t, "apteva.yaml")
+	_, err := app.toolBrowserSession(ctx, map[string]any{
+		"action":             "resume",
+		"backend":            "browserbase",
+		"backend_session_id": "bad",
+	})
+	if err == nil || !strings.Contains(err.Error(), "provider_session_expired") {
+		t.Fatalf("resume invalid provider session: want provider_session_expired, got %v", err)
+	}
+}
+
+func TestValidateBackendConfiguredReportsFastErrors(t *testing.T) {
+	cases := []struct {
+		name string
+		cfg  backends.Config
+		want string
+	}{
+		{name: "browserbase", cfg: backends.Config{Type: "browserbase"}, want: "backend_not_configured: browserbase api_key"},
+		{name: "steel", cfg: backends.Config{Type: "steel"}, want: "backend_not_configured: steel api_key"},
+		{name: "browser-engine", cfg: backends.Config{Type: "browser-engine"}, want: "backend_not_configured: browser-engine api_key"},
+		{name: "service", cfg: backends.Config{Type: "service"}, want: "backend_not_configured: service backend_url"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			err := validateBackendConfigured(tc.cfg)
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("validateBackendConfigured: want %q, got %v", tc.want, err)
+			}
+		})
+	}
+}
+
 func TestComputerUseAutoFollowsSingleNewTab(t *testing.T) {
 	prev := newBackend
 	t.Cleanup(func() { newBackend = prev })
@@ -1185,10 +1331,12 @@ type fakeComp struct {
 	png             []byte
 	url             string
 	openSessionURL  string
+	openSessionID   string
 	openContextID   string
 	openPersist     bool
 	openTimeout     int
 	openProxy       *bool
+	openErr         error
 	lastAction      backends.Action
 	screenshotCalls int
 	annotateCalls   []bool
@@ -1326,16 +1474,17 @@ func (f *fakeComp) CloseTab(tabID string) error {
 
 func (f *fakeComp) OpenSession(opts backends.OpenOptions) error {
 	f.openSessionURL = opts.URL
+	f.openSessionID = opts.SessionID
 	f.openContextID = opts.ContextID
 	f.openPersist = opts.Persist
 	f.openTimeout = opts.Timeout
 	f.openProxy = opts.Proxy
-	return nil
+	return f.openErr
 }
 
 // SessionInfo interface
 func (f *fakeComp) SessionType() string { return "fake" }
-func (f *fakeComp) SessionID() string   { return "" }
+func (f *fakeComp) SessionID() string   { return f.openSessionID }
 func (f *fakeComp) CurrentURL() string {
 	f.mu.Lock()
 	defer f.mu.Unlock()

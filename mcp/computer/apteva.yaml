@@ -2,9 +2,9 @@ schema: apteva-app/v1
 
 name: computer
 display_name: Computer
-version: 0.7.30
+version: 0.7.31
 description: |
-  Watch and steer browser sessions. v0.7.30 recovers Browserbase screenshots after target capture failure.
+  Watch and steer browser sessions. v0.7.31 clarifies session identity and resume behavior.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/computer
@@ -43,7 +43,11 @@ provides:
         sessions. Args: action, session_id?, tab_id?, backend?,
         backend_session_id?, url?, context_id?, context_name?,
         auto_create_context?, persist?, timeout?, proxy?, proxy_country?,
-        viewport?. For tab control, call browser_session(action=tabs) to list
+        viewport?. session_id is the app-owned live br_* handle for
+        status/close/computer_use only. To continue later, open a new session
+        with context_id or context_name. Use backend_session_id only for an
+        explicit provider-level attach. For tab control, call
+        browser_session(action=tabs) to list
         open tabs, then browser_session(action=switch_tab, tab_id=...) or
         browser_session(action=close_tab, tab_id=...). Do not use keyboard
         shortcuts such as Ctrl+Tab, Ctrl+PageDown, or Ctrl+1-9 to switch

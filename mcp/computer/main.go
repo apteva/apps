@@ -21,6 +21,9 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"os/exec"
+	"reflect"
+	"runtime"
 	"sort"
 	"strconv"
 	"strings"
@@ -41,9 +44,9 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: computer
 display_name: Computer
-version: 0.7.30
+version: 0.7.31
 description: |
-  Watch and steer browser sessions. v0.7.30 recovers Browserbase screenshots after target capture failure.
+  Watch and steer browser sessions. v0.7.31 clarifies session identity and resume behavior.
 scopes: [project, global]
 requires:
   permissions:
@@ -68,7 +71,7 @@ provides:
     - prefix: /
   mcp_tools:
     - name: browser_session
-      description: "Open, resume, list, inspect, close, or switch tabs in app-owned browser sessions. Args: action, session_id?, tab_id?, backend?, backend_session_id?, url?, context_id?, context_name?, auto_create_context?, persist?, timeout?, proxy?, proxy_country?, viewport?. For tab control, call browser_session(action=tabs) to list open tabs, then browser_session(action=switch_tab, tab_id=...) or browser_session(action=close_tab, tab_id=...). Do not use keyboard shortcuts such as Ctrl+Tab, Ctrl+PageDown, or Ctrl+1-9 to switch browser tabs. Browserbase honors timeout as max session lifetime. Prefer context_id from computer_context_list to reopen saved state; context_name works across backends when unique. For a reusable saved context, pass context_name with auto_create_context=true; omitted names are only a fallback and are auto-generated. Sessions consume local or cloud resources. When browser work is complete and the user did not explicitly ask to keep the browser open, close it with browser_session(action=close, session_id=...). Closing is especially important for Browserbase/Steel sessions and persisted contexts because it releases provider resources and lets context state flush cleanly."
+      description: "Open, resume, list, inspect, close, or switch tabs in app-owned browser sessions. Args: action, session_id?, tab_id?, backend?, backend_session_id?, url?, context_id?, context_name?, auto_create_context?, persist?, timeout?, proxy?, proxy_country?, viewport?. session_id is the app-owned live br_* handle for status/close/computer_use only. To continue later, open a new session with context_id or context_name. Use backend_session_id only for an explicit provider-level attach. For tab control, call browser_session(action=tabs) to list open tabs, then browser_session(action=switch_tab, tab_id=...) or browser_session(action=close_tab, tab_id=...). Do not use keyboard shortcuts such as Ctrl+Tab, Ctrl+PageDown, or Ctrl+1-9 to switch browser tabs. Browserbase honors timeout as max session lifetime. Prefer context_id from computer_context_list to reopen saved state; context_name works across backends when unique. For a reusable saved context, pass context_name with auto_create_context=true; omitted names are only a fallback and are auto-generated. Sessions consume local or cloud resources. When browser work is complete and the user did not explicitly ask to keep the browser open, close it with browser_session(action=close, session_id=...). Closing is especially important for Browserbase/Steel sessions and persisted contexts because it releases provider resources and lets context state flush cleanly."
     - name: computer_use
       description: "Drive an app-owned browser session. Default workflow: call action=screenshot first; screenshots contain Set-of-Mark numeric badges on interactive elements. To click, use action=click with label=N from the latest screenshot. Prefer label over coordinate; use coordinate only for targets with no badge such as canvas or custom rendered widgets. If a click opens exactly one new tab, Computer automatically follows it and reports switched_tab=true. For explicit tab control, call browser_session(action=tabs) to list tabs, then browser_session(action=switch_tab, tab_id=...) or browser_session(action=close_tab, tab_id=...); do not use Ctrl+Tab, Ctrl+PageDown, or Ctrl+1-9 for browser tab switching. Use action=key for page/editor commands such as Tab, Backspace, Control+A, Control+Z; use action=type only for literal text and full date/time values such as 2026-06-05 or 08:00 PM. For action=scroll, amount is CSS pixels; use 200-500 for a small viewport move and omit amount for the 300px default. After scrolling, tab switching, or navigation, take a fresh screenshot because labels are re-enumerated. Args: session_id, action, tab_id?, coordinate?, label?, text?, key?, direction?, amount?, duration?, annotate? (screenshot only, default true). Returns screenshot bytes for visual actions."
     - name: computer_context_create
@@ -409,6 +412,9 @@ func (a *App) MCPTools() []sdk.Tool {
 			Description: "Session lifecycle and tab control for app-owned browsers. Actions: open, resume, status, close, list, tabs, switch_tab, close_tab. " +
 				"Open/resume args: backend? (local|browserbase|steel|browser-engine|service), url?, context_id?, persist?, " +
 				"context_name?, auto_create_context?, backend_session_id? (provider attach), timeout?, proxy?, proxy_country?, viewport?. " +
+				"session_id is the app-owned live br_* handle for status/close/computer_use, not a durable resume id. " +
+				"To continue work after a session is gone, open a new session with context_id or context_name. " +
+				"Use backend_session_id only for an explicit short-lived provider attach. " +
 				"For tab control, call action=tabs first, then action=switch_tab with tab_id or action=close_tab with tab_id. " +
 				"Do not use keyboard shortcuts such as Ctrl+Tab, Ctrl+PageDown, or Ctrl+1-9 to switch browser tabs. " +
 				"Browserbase honors timeout as max session lifetime. " +
@@ -419,9 +425,9 @@ func (a *App) MCPTools() []sdk.Tool {
 				"Returns {session_id, backend_session_id, backend, current_url, active_tab_id, tabs, context_id, debug_url, width, height}.",
 			InputSchema: schemaObject(map[string]any{
 				"action":             map[string]any{"type": "string", "enum": []string{"open", "resume", "status", "close", "list", "tabs", "switch_tab", "close_tab"}},
-				"session_id":         map[string]any{"type": "string", "description": "App session id for status/close; for resume, accepted as provider session id when backend_session_id is omitted."},
+				"session_id":         map[string]any{"type": "string", "description": "App-owned live br_* session id for status/close/computer_use. Not durable; do not use it to attach to Browserbase after the app session is gone."},
 				"tab_id":             map[string]any{"type": "string", "description": "Browser tab/page target id for switch_tab or close_tab."},
-				"backend_session_id": map[string]any{"type": "string", "description": "Provider session id to attach/resume for Browserbase or Browser Engine."},
+				"backend_session_id": map[string]any{"type": "string", "description": "Explicit provider session id to attach/resume for Browserbase or Browser Engine. Short-lived; prefer context_id/context_name for durable continuation."},
 				"backend":            map[string]any{"type": "string", "enum": []string{"local", "browserbase", "steel", "browser-engine", "service"}},
 				"url":                map[string]any{"type": "string"},
 				"context_id":         map[string]any{"type": "string", "description": "App context id preferred; legacy raw provider context ids still work."},
@@ -823,6 +829,13 @@ func (a *App) toolBrowserSession(ctx *sdk.AppCtx, args map[string]any) (any, err
 	case "open":
 		return a.openBrowserSession(ctx, args, false)
 	case "resume":
+		if id := strings.TrimSpace(stringArg(args, "session_id")); id != "" {
+			sess, ok := a.reg.get(id)
+			if !ok {
+				return nil, fmt.Errorf("session_not_active: app session %s is no longer active; open a new browser session with context_id or context_name instead of resuming session_id", id)
+			}
+			return a.sessionOutput(id, sess), nil
+		}
 		return a.openBrowserSession(ctx, args, true)
 	case "list":
 		return map[string]any{"sessions": a.listSessions()}, nil
@@ -1075,7 +1088,20 @@ func (a *App) openBrowserSession(ctx *sdk.AppCtx, args map[string]any, resume bo
 		backend = rc.Backend
 	}
 
+	backendSessionID := firstNonEmpty(
+		stringArg(args, "backend_session_id"),
+		stringArg(args, "provider_session_id"),
+	)
+	if resume && backendSessionID == "" {
+		return nil, fmt.Errorf("backend_session_id required for provider attach; to continue saved browser state, call browser_session(action=\"open\", context_id=...) or context_name=...")
+	}
+
 	cfg := backendConfig(ctx, args, backend, width, height)
+	if usingProductionBackendFactory() {
+		if err := validateBackendConfigured(cfg); err != nil {
+			return nil, err
+		}
+	}
 	comp, err := newBackend(cfg)
 	if err != nil {
 		return nil, fmt.Errorf("backend %q open failed: %w", backend, err)
@@ -1084,17 +1110,6 @@ func (a *App) openBrowserSession(ctx *sdk.AppCtx, args map[string]any, resume bo
 		return nil, fmt.Errorf("backend %q unknown", backend)
 	}
 
-	backendSessionID := firstNonEmpty(
-		stringArg(args, "backend_session_id"),
-		stringArg(args, "provider_session_id"),
-	)
-	if resume && backendSessionID == "" {
-		// Compatibility with the old browser_session(resume,
-		// session_id=provider-session) convention. Once the app
-		// returns its own session_id, that id is used for status/close
-		// and computer_use.
-		backendSessionID = stringArg(args, "session_id")
-	}
 	openOpts := backends.OpenOptions{
 		URL:           stringArg(args, "url"),
 		ContextID:     rc.ProviderContextID,
@@ -1108,6 +1123,9 @@ func (a *App) openBrowserSession(ctx *sdk.AppCtx, args map[string]any, resume bo
 	if opener, ok := comp.(backends.SessionOpener); ok {
 		if err := opener.OpenSession(openOpts); err != nil {
 			_ = comp.Close()
+			if resume && backendSessionID != "" {
+				return nil, providerAttachError(backend, backendSessionID, err)
+			}
 			return nil, fmt.Errorf("OpenSession: %w", err)
 		}
 	} else {
@@ -1902,6 +1920,81 @@ func backendConfig(ctx *sdk.AppCtx, args map[string]any, backend string, width, 
 		cfg.URL = firstNonEmpty(stringArg(args, "backend_url"), os.Getenv("APTEVA_BROWSER_SERVICE_URL"))
 	}
 	return cfg
+}
+
+func usingProductionBackendFactory() bool {
+	return reflect.ValueOf(newBackend).Pointer() == reflect.ValueOf(backends.New).Pointer()
+}
+
+func validateBackendConfigured(cfg backends.Config) error {
+	switch cfg.Type {
+	case "browserbase":
+		if strings.TrimSpace(cfg.APIKey) == "" {
+			return fmt.Errorf("backend_not_configured: browserbase api_key is required")
+		}
+	case "steel":
+		if strings.TrimSpace(cfg.APIKey) == "" {
+			return fmt.Errorf("backend_not_configured: steel api_key is required")
+		}
+	case "browser-engine":
+		if strings.TrimSpace(cfg.APIKey) == "" {
+			return fmt.Errorf("backend_not_configured: browser-engine api_key is required")
+		}
+	case "service":
+		if strings.TrimSpace(cfg.URL) == "" {
+			return fmt.Errorf("backend_not_configured: service backend_url is required")
+		}
+	case "local":
+		if err := validateLocalChromeConfigured(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func validateLocalChromeConfigured() error {
+	if chromeBin := strings.TrimSpace(os.Getenv("CHROME_BIN")); chromeBin != "" {
+		if _, err := os.Stat(chromeBin); err != nil {
+			return fmt.Errorf("backend_not_configured: local Chrome binary %q is not available: %w", chromeBin, err)
+		}
+		return nil
+	}
+	candidates := []string{"google-chrome", "chromium-browser", "chromium", "chrome"}
+	switch runtime.GOOS {
+	case "darwin":
+		candidates = append(candidates,
+			"/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+			"/Applications/Chromium.app/Contents/MacOS/Chromium",
+			"/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+		)
+	case "windows":
+		return nil
+	}
+	for _, candidate := range candidates {
+		if strings.Contains(candidate, "/") {
+			if _, err := os.Stat(candidate); err == nil {
+				return nil
+			}
+			continue
+		}
+		if _, err := exec.LookPath(candidate); err == nil {
+			return nil
+		}
+	}
+	return fmt.Errorf("backend_not_configured: local Chrome is not installed or not in PATH; use browserbase or configure CHROME_BIN")
+}
+
+func providerAttachError(backend, providerSessionID string, err error) error {
+	msg := err.Error()
+	switch {
+	case strings.Contains(msg, "Invalid Session ID"),
+		strings.Contains(msg, "TIMED_OUT"),
+		strings.Contains(msg, "not RUNNING"),
+		strings.Contains(msg, "not attachable"):
+		return fmt.Errorf("provider_session_expired: %s provider session %s is not attachable; open a new browser session with context_id or context_name instead: %w", backend, providerSessionID, err)
+	default:
+		return fmt.Errorf("OpenSession: %w", err)
+	}
 }
 
 func integrationFields(ctx *sdk.AppCtx, role string) map[string]string {
