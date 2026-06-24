@@ -611,11 +611,11 @@ func TestValidateEdit_DefaultsTTSVoiceSettings(t *testing.T) {
 	if settings == nil {
 		t.Fatalf("voice_settings missing: %+v", got.Timeline.Tracks[0].Clips[0].AI.Options)
 	}
-	if settings["stability"] != 0.75 {
-		t.Fatalf("stability = %v, want 0.75", settings["stability"])
+	if settings["stability"] != 0.85 {
+		t.Fatalf("stability = %v, want 0.85", settings["stability"])
 	}
-	if settings["similarity_boost"] != 0.9 {
-		t.Fatalf("similarity_boost = %v, want 0.9", settings["similarity_boost"])
+	if settings["similarity_boost"] != 0.95 {
+		t.Fatalf("similarity_boost = %v, want 0.95", settings["similarity_boost"])
 	}
 	if settings["style"] != 0 {
 		t.Fatalf("style = %v, want 0", settings["style"])
@@ -643,6 +643,69 @@ func TestValidateEdit_PreservesExplicitTTSVoiceSettings(t *testing.T) {
 	}
 	if settings["use_speaker_boost"] != false {
 		t.Fatalf("use_speaker_boost = %v, want explicit false", settings["use_speaker_boost"])
+	}
+}
+
+func TestTTSContinuityOptions_UsesNeighboringSameVoiceText(t *testing.T) {
+	edit := `{"timeline":{"tracks":[{"type":"audio","clips":[
+		{"uid":"a","asset":{"type":"audio","src":""},"start":0,"length":5,"ai":{"media_kind":"audio_tts","prompt":"First part.","voice":"voice-1","model":"eleven_multilingual_v2"}},
+		{"uid":"gap","asset":{"type":"silence","src":""},"start":5,"length":1},
+		{"uid":"b","asset":{"type":"audio","src":""},"start":6,"length":5,"ai":{"media_kind":"audio_tts","prompt":"Second part.","voice":"voice-1","model":"eleven_multilingual_v2"}},
+		{"uid":"sfx","asset":{"type":"audio","src":""},"start":11,"length":1,"ai":{"media_kind":"audio_sfx","prompt":"soft whoosh"}},
+		{"uid":"c","asset":{"type":"audio","src":""},"start":12,"length":5,"ai":{"media_kind":"audio_tts","prompt":"Third part.","voice":"voice-1","model":"eleven_multilingual_v2"}}
+	]}]}}`
+	got, err := parseEditJSON(edit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	opts := ttsContinuityOptions(&got.Timeline.Tracks[0], 2)
+	if opts["previous_text"] != "First part." {
+		t.Fatalf("previous_text = %v, want First part.", opts["previous_text"])
+	}
+	if opts["next_text"] != "Third part." {
+		t.Fatalf("next_text = %v, want Third part.", opts["next_text"])
+	}
+}
+
+func TestTTSContinuityOptions_StopsAtDifferentVoice(t *testing.T) {
+	edit := `{"timeline":{"tracks":[{"type":"audio","clips":[
+		{"uid":"a","asset":{"type":"audio","src":""},"start":0,"length":5,"ai":{"media_kind":"audio_tts","prompt":"First part.","voice":"voice-1","model":"eleven_multilingual_v2"}},
+		{"uid":"b","asset":{"type":"audio","src":""},"start":5,"length":5,"ai":{"media_kind":"audio_tts","prompt":"Second part.","voice":"voice-2","model":"eleven_multilingual_v2"}},
+		{"uid":"c","asset":{"type":"audio","src":""},"start":10,"length":5,"ai":{"media_kind":"audio_tts","prompt":"Third part.","voice":"voice-1","model":"eleven_multilingual_v2"}}
+	]}]}}`
+	got, err := parseEditJSON(edit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	opts := ttsContinuityOptions(&got.Timeline.Tracks[0], 1)
+	if len(opts) != 0 {
+		t.Fatalf("different voice should not receive context: %+v", opts)
+	}
+}
+
+func TestMediaGenerateOptions_AddsContinuityWithoutMutatingClipOptions(t *testing.T) {
+	ai := &AIAsset{
+		MediaKind: "audio_tts",
+		Prompt:    "Middle.",
+		Options: map[string]any{
+			"voice_settings": map[string]any{"stability": 0.85},
+		},
+	}
+	opts := mediaGenerateOptions(ai, map[string]any{"previous_text": "Before.", "next_text": "After."})
+	if opts["previous_text"] != "Before." || opts["next_text"] != "After." {
+		t.Fatalf("continuity options missing: %+v", opts)
+	}
+	if _, ok := ai.Options["previous_text"]; ok {
+		t.Fatalf("stored AI options mutated: %+v", ai.Options)
+	}
+}
+
+func TestAICacheKey_IncludesContinuityContext(t *testing.T) {
+	ai := &AIAsset{MediaKind: "audio_tts", Prompt: "Middle.", Voice: "voice-1", Model: "eleven_multilingual_v2"}
+	a := aiCacheKeyWithOptions(ai, map[string]any{"previous_text": "Before."})
+	b := aiCacheKeyWithOptions(ai, map[string]any{"previous_text": "Different before."})
+	if a == b {
+		t.Fatal("cache key should change when TTS continuity context changes")
 	}
 }
 

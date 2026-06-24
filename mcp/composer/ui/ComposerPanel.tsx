@@ -1,4 +1,4 @@
-// ComposerPanel v0.3.35 - timeline editor with storage and Media Studio AI assets.
+// ComposerPanel v0.3.36 - timeline editor with storage and Media Studio AI assets.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
@@ -599,8 +599,8 @@ function defaultOptionsForAI(kind: MediaKind): Record<string, unknown> | undefin
   if (kind !== "audio_tts") return undefined;
   return {
     voice_settings: {
-      stability: 0.75,
-      similarity_boost: 0.9,
+      stability: 0.85,
+      similarity_boost: 0.95,
       style: 0,
       use_speaker_boost: true,
     },

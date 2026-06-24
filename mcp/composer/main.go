@@ -28,7 +28,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: composer
 display_name: Composer
-version: 0.3.35
+version: 0.3.36
 description: |
   Multi-clip video compositions with a structured timeline panel,
   universal generated-asset clip editing, first-class AI avatar clips,
@@ -43,8 +43,10 @@ description: |
   playhead so short clips and silence clips render consistently even in
   narrow app frames and production host CSS. AI image clips carry explicit
   size metadata so portrait/landscape stills are generated at the intended
-  composition aspect through Media Studio, and new ElevenLabs AI voice clips
-  default to conservative cloned-voice settings unless a clip overrides them.
+  composition aspect through Media Studio. ElevenLabs AI voice clips default
+  to conservative cloned-voice settings unless a clip overrides them, and
+  sequential clips sharing a voice/model get previous_text and next_text
+  context at generation time for better continuity.
   Renders locally via ffmpeg, on a render host via instances, or against a
   bound render_executor integration.
 author: Apteva

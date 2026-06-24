@@ -25,6 +25,7 @@ func materializeAIAssets(ctx *sdk.AppCtx, edit *Edit, compositionID int64, proje
 	}
 	for ti := range edit.Timeline.Tracks {
 		for i := range edit.Timeline.Tracks[ti].Clips {
+			track := &edit.Timeline.Tracks[ti]
 			clip := &edit.Timeline.Tracks[ti].Clips[i]
 			normalizeGeneratedAsset(clip)
 			if clip.UID == "" {
@@ -37,7 +38,8 @@ func materializeAIAssets(ctx *sdk.AppCtx, edit *Edit, compositionID int64, proje
 			if prepareAIVideoDurationForTiming(edit, clip) {
 				out.Changed = true
 			}
-			changed, pending, err := materializeOneAIAsset(ctx, clip.AI, "clip "+clip.UID, projectID)
+			continuityOptions := ttsContinuityOptions(track, i)
+			changed, pending, err := materializeOneAIAsset(ctx, clip.AI, "clip "+clip.UID, projectID, continuityOptions)
 			if err != nil {
 				return out, err
 			}
@@ -72,7 +74,7 @@ func materializeAIAssets(ctx *sdk.AppCtx, edit *Edit, compositionID int64, proje
 		}
 	}
 	if s := edit.Timeline.Soundtrack; s != nil && s.AI != nil {
-		changed, pending, err := materializeOneAIAsset(ctx, s.AI, "soundtrack", projectID)
+		changed, pending, err := materializeOneAIAsset(ctx, s.AI, "soundtrack", projectID, nil)
 		if err != nil {
 			return out, err
 		}
@@ -156,7 +158,7 @@ func resolveRelativeClipStarts(edit *Edit) bool {
 	return changed
 }
 
-func materializeOneAIAsset(ctx *sdk.AppCtx, ai *AIAsset, label, projectID string) (bool, string, error) {
+func materializeOneAIAsset(ctx *sdk.AppCtx, ai *AIAsset, label, projectID string, contextualOptions map[string]any) (bool, string, error) {
 	if ai == nil {
 		return false, "", nil
 	}
@@ -165,7 +167,7 @@ func materializeOneAIAsset(ctx *sdk.AppCtx, ai *AIAsset, label, projectID string
 		ai.CachePolicy = "reuse"
 		changed = true
 	}
-	expectedCacheKey := aiCacheKey(ai)
+	expectedCacheKey := aiCacheKeyWithOptions(ai, contextualOptions)
 	if ai.CacheKey == "" {
 		ai.CacheKey = expectedCacheKey
 		changed = true
@@ -213,7 +215,7 @@ func materializeOneAIAsset(ctx *sdk.AppCtx, ai *AIAsset, label, projectID string
 	if ai.SourceImage != "" {
 		args["source_image"] = ai.SourceImage
 	}
-	if opts := mediaGenerateOptions(ai); len(opts) > 0 {
+	if opts := mediaGenerateOptions(ai, contextualOptions); len(opts) > 0 {
 		args["options"] = opts
 	}
 	var got map[string]any
@@ -270,6 +272,111 @@ func materializeOneAIAsset(ctx *sdk.AppCtx, ai *AIAsset, label, projectID string
 	ai.Status = "failed"
 	ai.Error = "Media Studio returned no storage id; bind Storage to Media Studio for Composer AI assets"
 	return true, "", errors.New(label + ": Media Studio returned no storage id")
+}
+
+func ttsContinuityOptions(track *Track, clipIndex int) map[string]any {
+	if track == nil || clipIndex < 0 || clipIndex >= len(track.Clips) {
+		return nil
+	}
+	current := &track.Clips[clipIndex]
+	if !isAudioTTS(current.AI) {
+		return nil
+	}
+	out := map[string]any{}
+	if !hasAIOption(current.AI, "previous_text") {
+		if prev := neighboringCompatibleTTS(track, clipIndex, -1); prev != nil {
+			if text := strings.TrimSpace(prev.AI.Prompt); text != "" {
+				out["previous_text"] = text
+			}
+		}
+	}
+	if !hasAIOption(current.AI, "next_text") {
+		if next := neighboringCompatibleTTS(track, clipIndex, 1); next != nil {
+			if text := strings.TrimSpace(next.AI.Prompt); text != "" {
+				out["next_text"] = text
+			}
+		}
+	}
+	if len(out) == 0 {
+		return nil
+	}
+	return out
+}
+
+func neighboringCompatibleTTS(track *Track, clipIndex, direction int) *Clip {
+	if track == nil || direction == 0 {
+		return nil
+	}
+	current := &track.Clips[clipIndex]
+	for i := clipIndex + direction; i >= 0 && i < len(track.Clips); i += direction {
+		candidate := &track.Clips[i]
+		if !isAudioTTS(candidate.AI) {
+			continue
+		}
+		if compatibleTTSContext(current.AI, candidate.AI) {
+			return candidate
+		}
+		return nil
+	}
+	return nil
+}
+
+func isAudioTTS(ai *AIAsset) bool {
+	return ai != nil && strings.ToLower(strings.TrimSpace(ai.MediaKind)) == "audio_tts"
+}
+
+func compatibleTTSContext(a, b *AIAsset) bool {
+	if !isAudioTTS(a) || !isAudioTTS(b) {
+		return false
+	}
+	if strings.TrimSpace(a.Voice) != strings.TrimSpace(b.Voice) {
+		return false
+	}
+	if effectiveTTSModelID(a) != effectiveTTSModelID(b) {
+		return false
+	}
+	if optionJSONKey(a.Options, "voice_settings") != optionJSONKey(b.Options, "voice_settings") {
+		return false
+	}
+	return true
+}
+
+func effectiveTTSModelID(ai *AIAsset) string {
+	if ai == nil {
+		return ""
+	}
+	if modelID := strings.TrimSpace(optionString(ai.Options, "model_id")); modelID != "" {
+		return modelID
+	}
+	return strings.TrimSpace(ai.Model)
+}
+
+func optionString(opts map[string]any, key string) string {
+	if len(opts) == 0 {
+		return ""
+	}
+	v, _ := opts[key].(string)
+	return strings.TrimSpace(v)
+}
+
+func hasAIOption(ai *AIAsset, key string) bool {
+	if ai == nil || len(ai.Options) == 0 {
+		return false
+	}
+	_, ok := ai.Options[key]
+	return ok
+}
+
+func optionJSONKey(opts map[string]any, key string) string {
+	if len(opts) == 0 {
+		return ""
+	}
+	v, ok := opts[key]
+	if !ok {
+		return ""
+	}
+	b, _ := json.Marshal(v)
+	return string(b)
 }
 
 func syncClipDurationFromAI(c *Clip) bool {
@@ -609,6 +716,10 @@ func aiKindHasMediaDuration(kind string) bool {
 }
 
 func aiCacheKey(ai *AIAsset) string {
+	return aiCacheKeyWithOptions(ai, nil)
+}
+
+func aiCacheKeyWithOptions(ai *AIAsset, contextualOptions map[string]any) string {
 	stable := map[string]any{
 		"media_kind":   ai.MediaKind,
 		"prompt":       ai.Prompt,
@@ -619,18 +730,22 @@ func aiCacheKey(ai *AIAsset) string {
 		"voice":        ai.Voice,
 		"avatar":       ai.Avatar,
 		"source_image": ai.SourceImage,
-		"options":      sortedStableOptions(ai.Options),
+		"options":      sortedStableOptions(mergedAIOptions(ai.Options, contextualOptions)),
 	}
 	b, _ := json.Marshal(stable)
 	sum := sha256.Sum256(b)
 	return "composer:" + hex.EncodeToString(sum[:16])
 }
 
-func mediaGenerateOptions(ai *AIAsset) map[string]any {
+func mediaGenerateOptions(ai *AIAsset, contextualOptions ...map[string]any) map[string]any {
 	if ai == nil {
 		return nil
 	}
-	opts := cloneOptions(ai.Options)
+	var contextual map[string]any
+	if len(contextualOptions) > 0 {
+		contextual = contextualOptions[0]
+	}
+	opts := mergedAIOptions(ai.Options, contextual)
 	if ai.EstimatedDurationSeconds > 0 {
 		if opts == nil {
 			opts = map[string]any{}
@@ -638,6 +753,20 @@ func mediaGenerateOptions(ai *AIAsset) map[string]any {
 		opts["estimated_duration_seconds"] = ai.EstimatedDurationSeconds
 	}
 	return opts
+}
+
+func mergedAIOptions(base, contextual map[string]any) map[string]any {
+	out := cloneOptions(base)
+	for k, v := range contextual {
+		if out == nil {
+			out = map[string]any{}
+		}
+		if _, exists := out[k]; exists {
+			continue
+		}
+		out[k] = v
+	}
+	return out
 }
 
 func sortedStableOptions(in map[string]any) map[string]any {
