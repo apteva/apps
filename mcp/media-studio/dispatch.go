@@ -729,7 +729,10 @@ func addExtraJSONField(raw, key string, value any) string {
 
 func providerRequestIDFromHeaders(headers map[string]string) string {
 	for k, v := range headers {
-		if strings.EqualFold(k, "request-id") || strings.EqualFold(k, "x-request-id") {
+		if strings.EqualFold(k, "request-id") ||
+			strings.EqualFold(k, "x-request-id") ||
+			strings.EqualFold(k, "x-elevenlabs-request-id") ||
+			strings.EqualFold(k, "xi-request-id") {
 			if s := strings.TrimSpace(v); s != "" {
 				return s
 			}

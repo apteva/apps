@@ -179,6 +179,13 @@ func TestToolMediaGenerate_ElevenLabsTTS_WithStorage(t *testing.T) {
 	}
 }
 
+func TestProviderRequestIDFromHeaders_AcceptsElevenLabsVariants(t *testing.T) {
+	headers := map[string]string{"x-elevenlabs-request-id": "el-req-variant"}
+	if got := providerRequestIDFromHeaders(headers); got != "el-req-variant" {
+		t.Fatalf("providerRequestIDFromHeaders = %q, want el-req-variant", got)
+	}
+}
+
 func TestToolMediaGenerate_ElevenLabsSFX_UsesGenerateSFX(t *testing.T) {
 	pf := newRecordingPlatform()
 	pf.appSlug = "elevenlabs"
