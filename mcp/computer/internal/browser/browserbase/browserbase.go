@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -32,6 +33,12 @@ const (
 	screenshotCaptureAttempts   = 2
 	screenshotCaptureTimeout    = 5 * time.Second
 	screenshotCaptureRetryDelay = 750 * time.Millisecond
+	clickActionTimeout          = 20 * time.Second
+	textActionTimeout           = 15 * time.Second
+	keyActionTimeout            = 15 * time.Second
+	scrollActionTimeout         = 15 * time.Second
+	waitActionTimeout           = 30 * time.Second
+	navigateActionTimeout       = 30 * time.Second
 )
 
 const screenshotRecoveryFreshTarget = "fresh_target_same_url"
@@ -313,40 +320,52 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 		return c.Screenshot()
 
 	case "navigate":
-		if err := chromedp.Run(c.ctx, chromedp.Navigate(action.URL)); err != nil {
+		ctx, cancel := c.actionContext("navigate")
+		defer cancel()
+		if err := chromedp.Run(ctx, chromedp.Navigate(action.URL)); err != nil {
 			return nil, fmt.Errorf("navigate: %w", err)
 		}
 		time.Sleep(500 * time.Millisecond)
 		return c.Screenshot()
 
 	case "click":
-		if err := c.executeClick(action, 1, true); err != nil {
+		ctx, cancel := c.actionContext(action.Type)
+		defer cancel()
+		if err := c.executeClick(ctx, action, 1, true); err != nil {
 			return nil, fmt.Errorf("click: %w", err)
 		}
 		return c.Screenshot()
 
 	case "double_click":
-		if err := c.executeClick(action, 2, false); err != nil {
+		ctx, cancel := c.actionContext(action.Type)
+		defer cancel()
+		if err := c.executeClick(ctx, action, 2, false); err != nil {
 			return nil, fmt.Errorf("double_click: %w", err)
 		}
 		return c.Screenshot()
 
 	case "type":
-		if err := textinput.Type(c.ctx, action.Text, "[BROWSERBASE]"); err != nil {
+		ctx, cancel := c.actionContext(action.Type)
+		defer cancel()
+		if err := textinput.Type(ctx, action.Text, "[BROWSERBASE]"); err != nil {
 			return nil, fmt.Errorf("type: %w", err)
 		}
 		time.Sleep(100 * time.Millisecond)
 		return c.Screenshot()
 
 	case "key":
-		if err := keyinput.Dispatch(c.ctx, action.Key, "[BROWSERBASE]"); err != nil {
+		ctx, cancel := c.actionContext(action.Type)
+		defer cancel()
+		if err := keyinput.Dispatch(ctx, action.Key, "[BROWSERBASE]"); err != nil {
 			return nil, fmt.Errorf("key: %w", err)
 		}
 		time.Sleep(100 * time.Millisecond)
 		return c.Screenshot()
 
 	case "scroll":
-		if err := c.scroll(action); err != nil {
+		ctx, cancel := c.actionContext(action.Type)
+		defer cancel()
+		if err := c.scroll(ctx, action); err != nil {
 			return nil, fmt.Errorf("scroll: %w", err)
 		}
 		time.Sleep(200 * time.Millisecond)
@@ -357,7 +376,11 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 		if dur <= 0 {
 			dur = 1000
 		}
-		time.Sleep(time.Duration(dur) * time.Millisecond)
+		ctx, cancel := c.actionContext(action.Type)
+		defer cancel()
+		if err := sleepWithContext(ctx, time.Duration(dur)*time.Millisecond); err != nil {
+			return nil, fmt.Errorf("wait: %w", err)
+		}
 		return c.Screenshot()
 
 	default:
@@ -371,12 +394,16 @@ func (c *Computer) ExecuteAction(action computer.Action) error {
 	}
 	switch action.Type {
 	case "click":
-		if err := c.executeClick(action, 1, true); err != nil {
+		ctx, cancel := c.actionContext(action.Type)
+		defer cancel()
+		if err := c.executeClick(ctx, action, 1, true); err != nil {
 			return fmt.Errorf("click: %w", err)
 		}
 		return nil
 	case "double_click":
-		if err := c.executeClick(action, 2, false); err != nil {
+		ctx, cancel := c.actionContext(action.Type)
+		defer cancel()
+		if err := c.executeClick(ctx, action, 2, false); err != nil {
 			return fmt.Errorf("double_click: %w", err)
 		}
 		return nil
@@ -385,8 +412,9 @@ func (c *Computer) ExecuteAction(action computer.Action) error {
 		if dur <= 0 {
 			dur = 1000
 		}
-		time.Sleep(time.Duration(dur) * time.Millisecond)
-		return nil
+		ctx, cancel := c.actionContext(action.Type)
+		defer cancel()
+		return sleepWithContext(ctx, time.Duration(dur)*time.Millisecond)
 	default:
 		return fmt.Errorf("browserbase action-only unsupported for %s", action.Type)
 	}
@@ -396,7 +424,7 @@ func (c *Computer) ExecuteAction(action computer.Action) error {
 // pages frequently have nested scroll containers (SaaS dashboards,
 // SPAs) where `window.scrollBy` is a no-op; wheel events scroll the
 // element under the cursor and fire wheel handlers like a human.
-func (c *Computer) scroll(a computer.Action) error {
+func (c *Computer) scroll(ctx context.Context, a computer.Action) error {
 	dx, dy, err := computer.ScrollDelta(a.Direction, a.Amount)
 	if err != nil {
 		return err
@@ -408,7 +436,7 @@ func (c *Computer) scroll(a computer.Action) error {
 		y = float64(c.display.Height) / 2
 	}
 
-	err = chromedp.Run(c.ctx,
+	err = chromedp.Run(ctx,
 		input.DispatchMouseEvent(input.MouseWheel, x, y).
 			WithDeltaX(dx).WithDeltaY(dy),
 	)
@@ -417,17 +445,17 @@ func (c *Computer) scroll(a computer.Action) error {
 	}
 	fmt.Fprintf(os.Stderr, "[BROWSERBASE] wheel dispatch failed (%v), falling back to window.scrollBy\n", err)
 	js := fmt.Sprintf("window.scrollBy(%d, %d)", int(dx), int(dy))
-	return chromedp.Run(c.ctx, chromedp.Evaluate(js, nil))
+	return chromedp.Run(ctx, chromedp.Evaluate(js, nil))
 }
 
-func (c *Computer) executeClick(action computer.Action, clickCount int, focusAfter bool) error {
+func (c *Computer) executeClick(ctx context.Context, action computer.Action, clickCount int, focusAfter bool) error {
 	x, y := action.X, action.Y
 	if action.Label != 0 {
 		if e, ok := c.resolveLabel(action.Label); ok {
 			x, y = e.Center()
 		}
 	}
-	if err := c.dispatchClick(x, y, clickCount); err != nil {
+	if err := c.dispatchClick(ctx, x, y, clickCount); err != nil {
 		return err
 	}
 	if focusAfter {
@@ -442,7 +470,7 @@ func (c *Computer) executeClick(action computer.Action, clickCount int, focusAft
 			return null;
 		})()`, x, y)
 		var focusedTag string
-		_ = chromedp.Run(c.ctx, chromedp.Evaluate(focusJS, &focusedTag))
+		_ = chromedp.Run(ctx, chromedp.Evaluate(focusJS, &focusedTag))
 		if focusedTag != "" {
 			fmt.Fprintf(os.Stderr, "[BROWSERBASE] click focused <%s>\n", strings.ToLower(focusedTag))
 		}
@@ -451,10 +479,47 @@ func (c *Computer) executeClick(action computer.Action, clickCount int, focusAft
 	return nil
 }
 
-func (c *Computer) dispatchClick(x, y, clickCount int) error {
-	return chromedp.Run(c.ctx,
+func (c *Computer) dispatchClick(ctx context.Context, x, y, clickCount int) error {
+	return chromedp.Run(ctx,
 		chromedp.MouseClickXY(float64(x), float64(y), chromedp.ClickCount(clickCount)),
 	)
+}
+
+func (c *Computer) actionContext(action string) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(c.ctx, actionTimeout(action))
+}
+
+func actionTimeout(action string) time.Duration {
+	switch action {
+	case "click", "double_click":
+		return clickActionTimeout
+	case "type":
+		return textActionTimeout
+	case "key":
+		return keyActionTimeout
+	case "scroll":
+		return scrollActionTimeout
+	case "wait":
+		return waitActionTimeout
+	case "navigate":
+		return navigateActionTimeout
+	default:
+		return 20 * time.Second
+	}
+}
+
+func sleepWithContext(ctx context.Context, d time.Duration) error {
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return nil
+	case <-ctx.Done():
+		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+			return fmt.Errorf("action_timeout: timed out after %s: %w", d, ctx.Err())
+		}
+		return ctx.Err()
+	}
 }
 
 func (c *Computer) Screenshot() ([]byte, error) {

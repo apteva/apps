@@ -2,9 +2,9 @@ schema: apteva-app/v1
 
 name: computer
 display_name: Computer
-version: 0.7.31
+version: 0.7.32
 description: |
-  Watch and steer browser sessions. v0.7.31 clarifies session identity and resume behavior.
+  Watch and steer browser sessions. v0.7.32 improves computer_use recovery errors.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/computer
@@ -66,7 +66,8 @@ provides:
         Drive an app-owned browser session. Default workflow: call
         action=screenshot first; screenshots contain Set-of-Mark numeric
         badges on interactive elements. To click, use action=click with
-        label=N from the latest screenshot. Prefer label over coordinate;
+        label=N from the latest screenshot. label must be >= 1; do not
+        pass 0. Prefer label over coordinate;
         use coordinate only for targets with no badge such as canvas or
         custom rendered widgets. If a click opens exactly one new tab,
         Computer automatically follows it and reports switched_tab=true.

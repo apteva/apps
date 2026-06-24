@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -236,6 +237,100 @@ func TestBrowserSessionComputerUseClose(t *testing.T) {
 	// screenshot after close — error, not panic
 	if _, err := app.toolComputerUse(ctx, map[string]any{"session_id": sessionID, "action": "screenshot"}); err == nil {
 		t.Errorf("screenshot after close: want error, got nil")
+	}
+}
+
+func TestComputerUseRejectsExplicitLabelZero(t *testing.T) {
+	prev := newBackend
+	t.Cleanup(func() { newBackend = prev })
+
+	fake := &fakeComp{
+		display: backends.DisplaySize{Width: 1024, Height: 768},
+		png:     []byte{0x89, 0x50, 0x4e, 0x47},
+		url:     "https://example.com",
+	}
+	newBackend = func(cfg backends.Config) (backends.Computer, error) { return fake, nil }
+
+	app := &App{reg: &registry{m: map[string]*session{}}}
+	ctx := tk.NewAppCtx(t, "apteva.yaml")
+	openOut, err := app.toolBrowserSession(ctx, map[string]any{"action": "open", "backend": "local"})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	sessionID := openOut.(map[string]any)["session_id"].(string)
+
+	_, err = app.toolComputerUse(ctx, map[string]any{
+		"session_id": sessionID,
+		"action":     "click",
+		"label":      0,
+	})
+	if err == nil || !strings.Contains(err.Error(), "invalid_target") || !strings.Contains(err.Error(), "label=0") {
+		t.Fatalf("click label=0: want invalid_target, got %v", err)
+	}
+	if fake.lastAction.Type != "" {
+		t.Fatalf("invalid click executed action: %+v", fake.lastAction)
+	}
+}
+
+func TestComputerUseContextCanceledEvictsSession(t *testing.T) {
+	fake := &fakeComp{
+		display:    backends.DisplaySize{Width: 1024, Height: 768},
+		executeErr: context.Canceled,
+	}
+	app := &App{reg: &registry{m: map[string]*session{}}}
+	rec := tk.NewEmitRecorder()
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithEmitter(rec))
+	openedAt := time.Now().Add(-time.Minute)
+	app.reg.put("br_dead", &session{
+		comp:         fake,
+		backend:      "browserbase",
+		appContextID: "ctx_login",
+		contextName:  "Ashley Login",
+		persist:      true,
+		openedAt:     openedAt,
+		lastUsed:     openedAt,
+	})
+
+	_, err := app.toolComputerUse(ctx, map[string]any{
+		"session_id": "br_dead",
+		"action":     "click",
+		"label":      5,
+	})
+	if err == nil || !strings.Contains(err.Error(), "session_unhealthy") || !strings.Contains(err.Error(), "context_id=ctx_login") {
+		t.Fatalf("context canceled: want session_unhealthy with context, got %v", err)
+	}
+	if _, ok := app.reg.get("br_dead"); ok {
+		t.Fatalf("unhealthy session was not removed from registry")
+	}
+	if fake.closeCalls != 1 {
+		t.Fatalf("unhealthy session Close calls: want 1, got %d", fake.closeCalls)
+	}
+	payload := lastEventData(t, rec, "session.closed")
+	if payload["session_id"] != "br_dead" || payload["close_reason"] != "session_unhealthy" {
+		t.Fatalf("session.closed payload = %#v", payload)
+	}
+}
+
+func TestComputerUseDeadlineExceededIsActionTimeout(t *testing.T) {
+	fake := &fakeComp{
+		display:    backends.DisplaySize{Width: 1024, Height: 768},
+		executeErr: context.DeadlineExceeded,
+	}
+	app := &App{reg: &registry{m: map[string]*session{}}}
+	ctx := tk.NewAppCtx(t, "apteva.yaml")
+	now := time.Now()
+	app.reg.put("br_slow", &session{comp: fake, backend: "browserbase", openedAt: now, lastUsed: now})
+
+	_, err := app.toolComputerUse(ctx, map[string]any{
+		"session_id": "br_slow",
+		"action":     "click",
+		"label":      5,
+	})
+	if err == nil || !strings.Contains(err.Error(), "action_timeout") {
+		t.Fatalf("deadline exceeded: want action_timeout, got %v", err)
+	}
+	if _, ok := app.reg.get("br_slow"); !ok {
+		t.Fatalf("action timeout should not evict session automatically")
 	}
 }
 
@@ -1327,28 +1422,31 @@ func TestAppBusEventForReapedSession(t *testing.T) {
 // fakeComp implements backends.Computer + SessionOpener + SessionInfo
 // for handler tests. Mutation is unguarded — tests are single-goroutine.
 type fakeComp struct {
-	display         backends.DisplaySize
-	png             []byte
-	url             string
-	openSessionURL  string
-	openSessionID   string
-	openContextID   string
-	openPersist     bool
-	openTimeout     int
-	openProxy       *bool
-	openErr         error
-	lastAction      backends.Action
-	screenshotCalls int
-	annotateCalls   []bool
-	closeCalls      int
-	tabs            []backends.TabInfo
-	activeTabID     string
-	switchCalls     []string
-	closeTabCalls   []string
-	addTabOnClick   *backends.TabInfo
-	actionOnlyCalls []backends.Action
-	lastRecovery    *backends.ScreenshotRecoveryInfo
-	mu              sync.Mutex // for the unlikely concurrent test
+	display          backends.DisplaySize
+	png              []byte
+	url              string
+	executeErr       error
+	screenshotErr    error
+	executeActionErr error
+	openSessionURL   string
+	openSessionID    string
+	openContextID    string
+	openPersist      bool
+	openTimeout      int
+	openProxy        *bool
+	openErr          error
+	lastAction       backends.Action
+	screenshotCalls  int
+	annotateCalls    []bool
+	closeCalls       int
+	tabs             []backends.TabInfo
+	activeTabID      string
+	switchCalls      []string
+	closeTabCalls    []string
+	addTabOnClick    *backends.TabInfo
+	actionOnlyCalls  []backends.Action
+	lastRecovery     *backends.ScreenshotRecoveryInfo
+	mu               sync.Mutex // for the unlikely concurrent test
 }
 
 func (f *fakeComp) Execute(action backends.Action) ([]byte, error) {
@@ -1363,6 +1461,9 @@ func (f *fakeComp) Execute(action backends.Action) ([]byte, error) {
 		f.addTabOnClick = nil
 	}
 	f.mu.Unlock()
+	if f.executeErr != nil {
+		return nil, f.executeErr
+	}
 	return f.png, nil
 }
 
@@ -1379,7 +1480,7 @@ func (f *fakeComp) ExecuteAction(action backends.Action) error {
 		f.addTabOnClick = nil
 	}
 	f.mu.Unlock()
-	return nil
+	return f.executeActionErr
 }
 
 func (f *fakeComp) Screenshot() ([]byte, error) {
@@ -1391,6 +1492,9 @@ func (f *fakeComp) ScreenshotWithOptions(options backends.ScreenshotOptions) ([]
 	f.screenshotCalls++
 	f.annotateCalls = append(f.annotateCalls, options.Annotate)
 	f.mu.Unlock()
+	if f.screenshotErr != nil {
+		return nil, f.screenshotErr
+	}
 	return f.png, nil
 }
 

@@ -10,6 +10,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	"crypto/rand"
 	"database/sql"
 	"encoding/base64"
@@ -44,9 +45,9 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: computer
 display_name: Computer
-version: 0.7.31
+version: 0.7.32
 description: |
-  Watch and steer browser sessions. v0.7.31 clarifies session identity and resume behavior.
+  Watch and steer browser sessions. v0.7.32 improves computer_use recovery errors.
 scopes: [project, global]
 requires:
   permissions:
@@ -73,7 +74,7 @@ provides:
     - name: browser_session
       description: "Open, resume, list, inspect, close, or switch tabs in app-owned browser sessions. Args: action, session_id?, tab_id?, backend?, backend_session_id?, url?, context_id?, context_name?, auto_create_context?, persist?, timeout?, proxy?, proxy_country?, viewport?. session_id is the app-owned live br_* handle for status/close/computer_use only. To continue later, open a new session with context_id or context_name. Use backend_session_id only for an explicit provider-level attach. For tab control, call browser_session(action=tabs) to list open tabs, then browser_session(action=switch_tab, tab_id=...) or browser_session(action=close_tab, tab_id=...). Do not use keyboard shortcuts such as Ctrl+Tab, Ctrl+PageDown, or Ctrl+1-9 to switch browser tabs. Browserbase honors timeout as max session lifetime. Prefer context_id from computer_context_list to reopen saved state; context_name works across backends when unique. For a reusable saved context, pass context_name with auto_create_context=true; omitted names are only a fallback and are auto-generated. Sessions consume local or cloud resources. When browser work is complete and the user did not explicitly ask to keep the browser open, close it with browser_session(action=close, session_id=...). Closing is especially important for Browserbase/Steel sessions and persisted contexts because it releases provider resources and lets context state flush cleanly."
     - name: computer_use
-      description: "Drive an app-owned browser session. Default workflow: call action=screenshot first; screenshots contain Set-of-Mark numeric badges on interactive elements. To click, use action=click with label=N from the latest screenshot. Prefer label over coordinate; use coordinate only for targets with no badge such as canvas or custom rendered widgets. If a click opens exactly one new tab, Computer automatically follows it and reports switched_tab=true. For explicit tab control, call browser_session(action=tabs) to list tabs, then browser_session(action=switch_tab, tab_id=...) or browser_session(action=close_tab, tab_id=...); do not use Ctrl+Tab, Ctrl+PageDown, or Ctrl+1-9 for browser tab switching. Use action=key for page/editor commands such as Tab, Backspace, Control+A, Control+Z; use action=type only for literal text and full date/time values such as 2026-06-05 or 08:00 PM. For action=scroll, amount is CSS pixels; use 200-500 for a small viewport move and omit amount for the 300px default. After scrolling, tab switching, or navigation, take a fresh screenshot because labels are re-enumerated. Args: session_id, action, tab_id?, coordinate?, label?, text?, key?, direction?, amount?, duration?, annotate? (screenshot only, default true). Returns screenshot bytes for visual actions."
+      description: "Drive an app-owned browser session. Default workflow: call action=screenshot first; screenshots contain Set-of-Mark numeric badges on interactive elements. To click, use action=click with label=N from the latest screenshot. label must be >= 1; do not pass 0. Prefer label over coordinate; use coordinate only for targets with no badge such as canvas or custom rendered widgets. If a click opens exactly one new tab, Computer automatically follows it and reports switched_tab=true. For explicit tab control, call browser_session(action=tabs) to list tabs, then browser_session(action=switch_tab, tab_id=...) or browser_session(action=close_tab, tab_id=...); do not use Ctrl+Tab, Ctrl+PageDown, or Ctrl+1-9 for browser tab switching. Use action=key for page/editor commands such as Tab, Backspace, Control+A, Control+Z; use action=type only for literal text and full date/time values such as 2026-06-05 or 08:00 PM. For action=scroll, amount is CSS pixels; use 200-500 for a small viewport move and omit amount for the 300px default. After scrolling, tab switching, or navigation, take a fresh screenshot because labels are re-enumerated. Args: session_id, action, tab_id?, coordinate?, label?, text?, key?, direction?, amount?, duration?, annotate? (screenshot only, default true). Returns screenshot bytes for visual actions."
     - name: computer_context_create
       description: "Create or import an app-managed browser context. Args: name, backend?, provider_context_id?, persist_default?, metadata?, auto_create_provider?."
     - name: computer_context_list
@@ -453,7 +454,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		{
 			Name: "computer_use",
 			Description: "Drive a browser session opened by browser_session. Default workflow: call action=screenshot first; screenshots contain Set-of-Mark numeric badges on interactive elements. " +
-				"To click, use action=click with label=N from the latest screenshot. Prefer label over coordinate; use coordinate only for targets with no badge such as canvas or custom rendered widgets. " +
+				"To click, use action=click with label=N from the latest screenshot. label must be >= 1; do not pass 0. Prefer label over coordinate; use coordinate only for targets with no badge such as canvas or custom rendered widgets. " +
 				"If a click opens exactly one new tab, Computer automatically follows it and reports switched_tab=true. For explicit tab control, call browser_session(action=tabs) to list tabs, then browser_session(action=switch_tab, tab_id=...) or browser_session(action=close_tab, tab_id=...). " +
 				"Do not use Ctrl+Tab, Ctrl+PageDown, or Ctrl+1-9 for browser tab switching. Use action=key for page/editor commands such as Tab, Backspace, Control+A, Control+Z; use action=type only for literal text and full date/time values such as 2026-06-05 or 08:00 PM. " +
 				"For action=scroll, amount is CSS pixels; use 200-500 for a small viewport move and omit amount for the 300px default. " +
@@ -465,7 +466,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"action":     map[string]any{"type": "string", "enum": []string{"screenshot", "click", "double_click", "type", "key", "scroll", "wait"}},
 				"tab_id":     map[string]any{"type": "string", "description": "Optional active tab/page target to switch to before running the action."},
 				"coordinate": map[string]any{"type": "string"},
-				"label":      map[string]any{"type": "integer", "description": "Set-of-Mark target number shown as a colored badge in the latest screenshot. Prefer this over coordinate for click/double_click."},
+				"label":      map[string]any{"type": "integer", "minimum": 1, "description": "Positive Set-of-Mark target number shown as a colored badge in the latest screenshot. Prefer this over coordinate for click/double_click. Do not pass 0."},
 				"text":       map[string]any{"type": "string", "description": "For action=type. Literal text. When focused on native date/time inputs, full values like 2026-06-05, 08:00 PM, or 2026-06-05 08:00 PM are normalized into the control value."},
 				"key":        map[string]any{"type": "string", "description": "For action=key. Page/editor command key such as Enter, Tab, Backspace, Escape, ArrowUp, Control+A, Control+Z, Meta+A, or Shift+Tab. Do not use action=type for command keys. Do not use Ctrl+Tab, Ctrl+PageDown, or Ctrl+1-9 for browser tab switching; call browser_session(action=tabs) then browser_session(action=switch_tab)."},
 				"direction":  map[string]any{"type": "string", "enum": []string{"up", "down", "left", "right"}, "description": "For action=scroll."},
@@ -1351,12 +1352,18 @@ func (a *App) toolComputerUse(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	if action == "navigate" {
 		return nil, fmt.Errorf("use browser_session(action=open, url=...) to navigate")
 	}
-	if (action == "click" || action == "double_click") && !hasClickTargetArg(args) {
-		return nil, fmt.Errorf("%s requires label=N from the latest screenshot, or coordinate=\"x,y\" for targets without a badge", action)
-	}
 	sess, ok := a.reg.get(id)
 	if !ok {
-		return nil, fmt.Errorf("session %s not found (may have been reaped or never opened by this sidecar)", id)
+		return nil, computerUseFailure("session_not_active", id, nil, action,
+			"app session is not active",
+			"Open a new browser_session using context_id or context_name, then retry from a fresh screenshot.",
+			nil)
+	}
+	if err := validateClickTargetArgs(action, args); err != nil {
+		return nil, computerUseFailure("invalid_target", id, sess, action,
+			err.Error(),
+			"Call computer_use(action=\"screenshot\", som=true), then click a visible label >= 1, or pass coordinate=\"x,y\".",
+			nil)
 	}
 	if tabID := stringArg(args, "tab_id"); tabID != "" {
 		tc, ok := sess.comp.(backends.TabController)
@@ -1395,7 +1402,19 @@ func (a *App) toolComputerUse(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		shot, err = sess.comp.Execute(act)
 	}
 	if err != nil {
-		return nil, fmt.Errorf("%s: %w", action, err)
+		if isSessionUnhealthyError(err) {
+			return nil, a.closeUnhealthySession(ctx, id, sess, action, err)
+		}
+		if isActionTimeoutError(err) {
+			return nil, computerUseFailure("action_timeout", id, sess, action,
+				"browser action timed out",
+				"Take a fresh screenshot. If the page is frozen, close this session and reopen from context.",
+				err)
+		}
+		return nil, computerUseFailure("backend_error", id, sess, action,
+			fmt.Sprintf("browser action failed: %v", err),
+			"Take a fresh screenshot and retry once. If the session is stale, close it and reopen from context.",
+			err)
 	}
 	tabEvent := tabFollowResult{}
 	if len(beforeTabs) > 0 && (action == "click" || action == "double_click") {
@@ -1444,6 +1463,17 @@ func (a *App) toolComputerUse(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	mergeScreenshotRecoveryPayload(out, recovery)
 	mergeTabFollowPayload(out, tabEvent)
 	return out, nil
+}
+
+func (a *App) closeUnhealthySession(ctx *sdk.AppCtx, id string, sess *session, action string, cause error) error {
+	payload := sessionUnhealthyEventPayload(id, sess, action, cause)
+	a.reg.remove(id)
+	_ = sess.comp.Close()
+	emitEvent(ctx, "session.closed", payload)
+	return computerUseFailure("session_unhealthy", id, sess, action,
+		"browser session is no longer usable",
+		reopenSessionRecoverHint(sess),
+		cause)
 }
 
 func shouldSkipPostActionScreenshot(sess *session, action string) bool {
@@ -2154,17 +2184,143 @@ func hasClickTargetArg(args map[string]any) bool {
 	return hasCoordinateArg(args)
 }
 
+func validateClickTargetArgs(action string, args map[string]any) error {
+	if action != "click" && action != "double_click" {
+		return nil
+	}
+	if rawArgPresent(args, "label") && intArg(args, "label") <= 0 {
+		return fmt.Errorf("label=%d is not clickable; label must be a positive label from the latest screenshot", intArg(args, "label"))
+	}
+	if !hasClickTargetArg(args) {
+		return fmt.Errorf("%s requires label=N from the latest screenshot, or coordinate=\"x,y\" for targets without a badge", action)
+	}
+	return nil
+}
+
 func hasCoordinateArg(args map[string]any) bool {
 	if strings.TrimSpace(stringArg(args, "coordinate")) != "" {
 		return true
 	}
 	if _, ok := args["x"]; ok {
-		return true
+		_, yOK := args["y"]
+		return yOK
 	}
 	if _, ok := args["y"]; ok {
-		return true
+		_, xOK := args["x"]
+		return xOK
 	}
 	return false
+}
+
+func rawArgPresent(args map[string]any, key string) bool {
+	_, ok := args[key]
+	return ok
+}
+
+func isSessionUnhealthyError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.Canceled) {
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	unhealthy := []string{
+		"context canceled",
+		"target closed",
+		"browser has disconnected",
+		"websocket: close",
+		"no active session",
+	}
+	for _, needle := range unhealthy {
+		if strings.Contains(msg, needle) {
+			return true
+		}
+	}
+	return false
+}
+
+func isActionTimeoutError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "action_timeout") ||
+		strings.Contains(msg, "deadline exceeded") ||
+		strings.Contains(msg, "timed out")
+}
+
+func computerUseFailure(code, id string, sess *session, action, message, recover string, cause error) error {
+	parts := []string{fmt.Sprintf("%s: %s", code, message)}
+	if id != "" {
+		parts = append(parts, "session_id="+id)
+	}
+	if action != "" {
+		parts = append(parts, "action="+action)
+	}
+	if sess != nil {
+		if sess.backend != "" {
+			parts = append(parts, "backend="+sess.backend)
+		}
+		if sess.appContextID != "" {
+			parts = append(parts, "context_id="+sess.appContextID)
+		}
+		if sess.contextName != "" {
+			parts = append(parts, fmt.Sprintf("context_name=%q", sess.contextName))
+		}
+	}
+	if recover != "" {
+		parts = append(parts, "recover="+recover)
+	}
+	if cause != nil {
+		parts = append(parts, fmt.Sprintf("cause=%q", cause.Error()))
+	}
+	return errors.New(strings.Join(parts, "; "))
+}
+
+func reopenSessionRecoverHint(sess *session) string {
+	if sess != nil {
+		if sess.appContextID != "" {
+			return fmt.Sprintf("Call browser_session(action=\"open\", context_id=\"%s\"), then take a fresh screenshot before retrying.", sess.appContextID)
+		}
+		if sess.contextName != "" {
+			return fmt.Sprintf("Call browser_session(action=\"open\", context_name=\"%s\"), then take a fresh screenshot before retrying.", sess.contextName)
+		}
+	}
+	return "Open a new browser_session using the same context_id or context_name, then take a fresh screenshot before retrying."
+}
+
+func sessionUnhealthyEventPayload(id string, sess *session, action string, cause error) map[string]any {
+	payload := map[string]any{
+		"session_id":   id,
+		"action":       action,
+		"close_reason": "session_unhealthy",
+	}
+	if sess == nil {
+		return payload
+	}
+	payload["backend"] = sess.backend
+	payload["backend_session_id"] = backendSessionID(sess.comp)
+	payload["context_id"] = contextID(sess.comp)
+	payload["app_context_id"] = sess.appContextID
+	payload["context_name"] = sess.contextName
+	payload["persist"] = sess.persist
+	payload["timeout_seconds"] = sess.timeout
+	payload["provider_expires_at"] = providerExpiresAt(sess.openedAt, sess.timeout)
+	payload["opened_at"] = sess.openedAt.UTC().Format(time.RFC3339)
+	payload["last_used_at"] = sess.lastUsed.UTC().Format(time.RFC3339)
+	if sess.comp != nil {
+		disp := sess.comp.DisplaySize()
+		payload["width"] = disp.Width
+		payload["height"] = disp.Height
+	}
+	if cause != nil {
+		payload["error"] = cause.Error()
+	}
+	return payload
 }
 
 func mapWithDefault(args map[string]any, k string, v any) map[string]any {
