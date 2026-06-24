@@ -209,6 +209,21 @@ interface VoiceEntry {
   preview?: string;
 }
 
+interface MediaIdentity {
+  id: number;
+  kind: "voice" | "avatar" | string;
+  provider: string;
+  name: string;
+  source_type: string;
+  provider_identity_id: string;
+  provider_job_id?: string;
+  preview_url?: string;
+  status: string;
+  prompt?: string;
+  error?: string;
+  created_at?: string;
+}
+
 interface SourceImageRef {
   value: string;
   label: string;
@@ -391,6 +406,13 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
   // Voices — HeyGen needs an explicit voice_id (Tavus bakes voice into
   // the replica, so this stays empty there). Reuses the `voice` state.
   const [voices, setVoices] = useState<VoiceEntry[]>([]);
+  const [voiceIdentities, setVoiceIdentities] = useState<MediaIdentity[]>([]);
+  const [voiceCreateOpen, setVoiceCreateOpen] = useState(false);
+  const [voiceCreateName, setVoiceCreateName] = useState("");
+  const [voiceCreateDescription, setVoiceCreateDescription] = useState("");
+  const [voiceCreatePreviewText, setVoiceCreatePreviewText] = useState("");
+  const [voiceCreateEnhance, setVoiceCreateEnhance] = useState(true);
+  const [voiceCreating, setVoiceCreating] = useState(false);
   // Reference-image state. When one or more source images are present,
   // image generation routes through image.edit. Models expose a max source
   // image count; the panel enforces that before submit.
@@ -499,6 +521,34 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
       });
     } catch {}
   }, [projectId]);
+
+  const loadVoiceIdentities = useCallback(async () => {
+    try {
+      const res = await fetch(
+        `${API}/identities?project_id=${encodeURIComponent(projectId)}&kind=voice`,
+        { credentials: "same-origin" },
+      );
+      if (!res.ok) return;
+      const data = await res.json();
+      setVoiceIdentities(Array.isArray(data.identities) ? data.identities : []);
+    } catch {}
+  }, [projectId]);
+
+  const loadVoices = useCallback(async () => {
+    try {
+      const res = await fetch(
+        `${API}/voices?project_id=${encodeURIComponent(projectId)}&kind=${encodeURIComponent(activeKind)}`,
+        { credentials: "same-origin" },
+      );
+      if (!res.ok) return;
+      const data = await res.json();
+      const list: VoiceEntry[] = Array.isArray(data.voices) ? data.voices : [];
+      setVoices(list);
+      if (list.length > 0 && !list.some((x) => x.id === voice)) {
+        setVoice(list[0].id);
+      }
+    } catch {}
+  }, [activeKind, projectId, voice]);
 
   useEffect(() => {
     loadBindings();
@@ -615,29 +665,12 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
   // audio_tts reads audio_provider (ElevenLabs).
   useEffect(() => {
     if (activeKind !== "avatar" && activeKind !== "audio_tts") return;
-    let cancelled = false;
     if (activeKind === "avatar") {
       loadAvatars();
     }
-    fetch(
-      `${API}/voices?project_id=${encodeURIComponent(projectId)}&kind=${encodeURIComponent(activeKind)}`,
-      { credentials: "same-origin" },
-    )
-      .then((r) => (r.ok ? r.json() : null))
-      .then((data) => {
-        if (cancelled || !data) return;
-        const list: VoiceEntry[] = Array.isArray(data.voices) ? data.voices : [];
-        setVoices(list);
-        // Default the voice to the first one when the provider needs it.
-        if (list.length > 0 && !list.some((x) => x.id === voice)) {
-          setVoice(list[0].id);
-        }
-      })
-      .catch(() => {});
-    return () => {
-      cancelled = true;
-    };
-  }, [activeKind, bindings, loadAvatars, projectId]); // eslint-disable-line react-hooks/exhaustive-deps
+    loadVoices();
+    if (activeKind === "audio_tts") loadVoiceIdentities();
+  }, [activeKind, bindings, loadAvatars, loadVoiceIdentities, loadVoices, projectId]);
 
   // Live-load the model list whenever the active kind or the bound
   // provider for that kind changes. The sidecar caches per-(provider,
@@ -892,6 +925,84 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
       setStatus("Error: " + (e as Error).message);
     } finally {
       setAvatarCreating(false);
+    }
+  };
+
+  const createVoice = async () => {
+    if (voiceCreating) return;
+    const name = voiceCreateName.trim();
+    const description = voiceCreateDescription.trim();
+    if (!name) {
+      setStatus("Voice name required.");
+      return;
+    }
+    if (description.length < 20) {
+      setStatus("Voice description must be at least 20 characters.");
+      return;
+    }
+    setVoiceCreating(true);
+    setStatus("Creating voice…");
+    try {
+      const options: Record<string, unknown> = {
+        auto_generate_text: !voiceCreatePreviewText.trim(),
+        should_enhance: voiceCreateEnhance,
+        quality: 0.9,
+        loudness: 0.5,
+        output_format: "mp3_44100_128",
+      };
+      if (voiceCreatePreviewText.trim()) options.text = voiceCreatePreviewText.trim();
+      const res = await fetch(
+        `${API}/identity-create?project_id=${encodeURIComponent(projectId)}`,
+        {
+          method: "POST",
+          credentials: "same-origin",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            project_id: projectId,
+            kind: "voice",
+            name,
+            source_type: "prompt",
+            voice_description: description,
+            labels: {
+              use_case: "hypnosis",
+              created_in: "media-studio",
+            },
+            options,
+          }),
+        },
+      );
+      const text = await res.text();
+      if (!res.ok) {
+        setStatus(`Error ${res.status}: ${text.slice(0, 300)}`);
+        return;
+      }
+      let result: {
+        isError?: boolean;
+        content?: { type: string; text?: string }[];
+        _meta?: { provider_identity_id?: string; identity?: MediaIdentity };
+      } = {};
+      try {
+        result = JSON.parse(text);
+      } catch {}
+      if (result.isError) {
+        const msg = result.content?.find((c) => c.type === "text")?.text || "voice creation failed";
+        setStatus(`Error: ${msg}`);
+        return;
+      }
+      const providerVoiceID = result._meta?.provider_identity_id || result._meta?.identity?.provider_identity_id || "";
+      if (providerVoiceID) setVoice(providerVoiceID);
+      setVoiceCreateName("");
+      setVoiceCreateDescription("");
+      setVoiceCreatePreviewText("");
+      setVoiceCreateOpen(false);
+      setStatus("Voice created.");
+      await loadVoiceIdentities();
+      await loadVoices();
+      if (providerVoiceID) setVoice(providerVoiceID);
+    } catch (e) {
+      setStatus("Error: " + (e as Error).message);
+    } finally {
+      setVoiceCreating(false);
     }
   };
 
@@ -1356,6 +1467,20 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
             avatarAspect={avatarAspect}
             setAvatarAspect={setAvatarAspect}
             voices={voices}
+            voiceIdentities={voiceIdentities}
+            voiceCreateOpen={voiceCreateOpen}
+            setVoiceCreateOpen={setVoiceCreateOpen}
+            voiceCreateName={voiceCreateName}
+            setVoiceCreateName={setVoiceCreateName}
+            voiceCreateDescription={voiceCreateDescription}
+            setVoiceCreateDescription={setVoiceCreateDescription}
+            voiceCreatePreviewText={voiceCreatePreviewText}
+            setVoiceCreatePreviewText={setVoiceCreatePreviewText}
+            voiceCreateEnhance={voiceCreateEnhance}
+            setVoiceCreateEnhance={setVoiceCreateEnhance}
+            voiceCreating={voiceCreating}
+            createVoice={createVoice}
+            audioProvider={currentBinding?.slug || ""}
             storageBound={!!bindings?.storage?.bound}
             storageFolder={storageFolder}
             setStorageFolder={setStorageFolder}
@@ -1563,6 +1688,20 @@ interface ComposerProps {
   avatarAspect: string;
   setAvatarAspect: (v: string) => void;
   voices: VoiceEntry[];
+  voiceIdentities: MediaIdentity[];
+  voiceCreateOpen: boolean;
+  setVoiceCreateOpen: (v: boolean) => void;
+  voiceCreateName: string;
+  setVoiceCreateName: (v: string) => void;
+  voiceCreateDescription: string;
+  setVoiceCreateDescription: (v: string) => void;
+  voiceCreatePreviewText: string;
+  setVoiceCreatePreviewText: (v: string) => void;
+  voiceCreateEnhance: boolean;
+  setVoiceCreateEnhance: (v: boolean) => void;
+  voiceCreating: boolean;
+  createVoice: () => void;
+  audioProvider: string;
   storageBound: boolean;
   storageFolder: string;
   setStorageFolder: (v: string) => void;
@@ -1670,6 +1809,24 @@ function Composer(p: ComposerProps) {
       )}
       {p.kind === "audio_tts" && (
         <>
+          <VoiceCreatePanel
+            provider={p.audioProvider}
+            identities={p.voiceIdentities}
+            open={p.voiceCreateOpen}
+            setOpen={p.setVoiceCreateOpen}
+            name={p.voiceCreateName}
+            setName={p.setVoiceCreateName}
+            description={p.voiceCreateDescription}
+            setDescription={p.setVoiceCreateDescription}
+            previewText={p.voiceCreatePreviewText}
+            setPreviewText={p.setVoiceCreatePreviewText}
+            enhance={p.voiceCreateEnhance}
+            setEnhance={p.setVoiceCreateEnhance}
+            creating={p.voiceCreating}
+            createVoice={p.createVoice}
+            selectedVoice={p.voice}
+            setSelectedVoice={p.setVoice}
+          />
           <MediaModelPicker
             model={p.audioModel}
             setModel={p.setAudioModel}
@@ -1799,6 +1956,145 @@ function EstimateBadge({
       title={estimate?.source || "estimate"}
     >
       {label}
+    </div>
+  );
+}
+
+function VoiceCreatePanel({
+  provider,
+  identities,
+  open,
+  setOpen,
+  name,
+  setName,
+  description,
+  setDescription,
+  previewText,
+  setPreviewText,
+  enhance,
+  setEnhance,
+  creating,
+  createVoice,
+  selectedVoice,
+  setSelectedVoice,
+}: {
+  provider: string;
+  identities: MediaIdentity[];
+  open: boolean;
+  setOpen: (v: boolean) => void;
+  name: string;
+  setName: (v: string) => void;
+  description: string;
+  setDescription: (v: string) => void;
+  previewText: string;
+  setPreviewText: (v: string) => void;
+  enhance: boolean;
+  setEnhance: (v: boolean) => void;
+  creating: boolean;
+  createVoice: () => void;
+  selectedVoice: string;
+  setSelectedVoice: (v: string) => void;
+}) {
+  const readyVoices = identities.filter((x) => x.status === "ready" && x.provider_identity_id);
+  const selectedTracked = readyVoices.some((x) => x.provider_identity_id === selectedVoice);
+  return (
+    <div style={{ flexBasis: "100%" }} className="border border-border rounded p-2 bg-bg-card">
+      <div className="flex items-center gap-2 flex-wrap">
+        <button
+          onClick={() => setOpen(!open)}
+          className="text-xs px-2 py-1 border border-border rounded text-accent hover:border-accent disabled:opacity-50"
+          disabled={provider !== "elevenlabs"}
+        >
+          {open ? "Close voice creator" : "Create voice"}
+        </button>
+        <span className="text-text-dim" style={{ fontSize: 10 }}>
+          {provider === "elevenlabs"
+            ? "ElevenLabs Voice Design"
+            : provider
+              ? `voice creation not wired for ${provider}`
+              : "bind ElevenLabs audio"}
+        </span>
+        {readyVoices.length > 0 && (
+          <>
+            <span className="text-text-dim" style={{ fontSize: 10 }}>
+              {readyVoices.length} custom
+            </span>
+            <select
+              value={selectedTracked ? selectedVoice : ""}
+              onChange={(e) => {
+                if (e.target.value) setSelectedVoice(e.target.value);
+              }}
+              className="bg-bg-input border border-border rounded px-2 py-1 text-xs"
+              style={{ maxWidth: 260 }}
+            >
+              <option value="">Tracked voices</option>
+              {readyVoices.map((identity) => (
+                <option key={identity.id} value={identity.provider_identity_id}>
+                  {identity.name || identity.provider_identity_id}
+                </option>
+              ))}
+            </select>
+          </>
+        )}
+      </div>
+      {open && (
+        <div className="mt-2 flex flex-col gap-2">
+          <div className="flex items-end gap-2 flex-wrap">
+            <TextField label="Name" value={name} onChange={setName} placeholder="Hypno Mistress" />
+            <label className="flex items-center gap-1.5 text-xs text-text-muted cursor-pointer select-none pb-2">
+              <input
+                type="checkbox"
+                checked={enhance}
+                onChange={(e) => setEnhance(e.target.checked)}
+                style={{ accentColor: "var(--apteva-accent, #4ade80)" }}
+              />
+              Enhance prompt
+            </label>
+            <button
+              onClick={createVoice}
+              disabled={creating || !name.trim() || description.trim().length < 20 || provider !== "elevenlabs"}
+              className="px-3 py-1.5 text-sm bg-accent text-bg rounded font-bold disabled:opacity-50"
+            >
+              {creating ? "…" : "Create"}
+            </button>
+          </div>
+          <div>
+            <label className="text-text-muted text-xs block">Voice description</label>
+            <textarea
+              value={description}
+              onChange={(e) => setDescription(e.target.value)}
+              placeholder="Adult feminine voice, intimate and composed, low warm tone, slow confident pacing, polished studio recording."
+              rows={3}
+              className="w-full bg-bg-input border border-border rounded px-2 py-1.5 text-sm"
+            />
+          </div>
+          <div>
+            <label className="text-text-muted text-xs block">Preview text</label>
+            <textarea
+              value={previewText}
+              onChange={(e) => setPreviewText(e.target.value)}
+              placeholder="Optional. Leave empty to let ElevenLabs generate preview text."
+              rows={2}
+              className="w-full bg-bg-input border border-border rounded px-2 py-1.5 text-sm"
+            />
+          </div>
+        </div>
+      )}
+      {identities.some((x) => x.status === "failed") && (
+        <div className="flex gap-2 flex-wrap mt-2">
+          {identities.filter((x) => x.status === "failed").slice(0, 4).map((identity) => (
+            <div
+              key={identity.id}
+              className="border rounded px-2 py-1 bg-bg-input"
+              style={{ borderColor: "var(--apteva-danger, #ef4444)", fontSize: 10, maxWidth: 220 }}
+              title={identity.error || identity.prompt || identity.name}
+            >
+              <span className="text-text truncate block">{identity.name || `#${identity.id}`}</span>
+              <span className="text-text-dim truncate block">{identity.error || identity.status}</span>
+            </div>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
