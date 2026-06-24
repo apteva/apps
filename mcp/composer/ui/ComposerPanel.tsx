@@ -564,6 +564,15 @@ function aspectRatio(aspect: Aspect): string {
   }
 }
 
+function previewFrameMaxWidth(aspect: Aspect): string {
+  switch (aspect) {
+    case "9:16": return "360px";
+    case "1:1": return "620px";
+    case "4:3": return "760px";
+    default: return "960px";
+  }
+}
+
 function assetTypeFromFile(file: StorageFile): AssetType {
   return storageFileKind(file) === "image" ? "image" : "video";
 }
@@ -1607,7 +1616,7 @@ export default function ComposerPanel({ projectId, installId }: NativePanelProps
                   onAddAISoundtrack={addAISoundtrack}
                   onBrowse={() => openPicker(clips.length ? { kind: "clip", clipId: clips[0].id } : { kind: "clip", clipId: "" })}
                 />
-                <RenderPreview render={selected?.latest_render || null} outputFormat={draft.output.format} onOpen={setLightbox} />
+                <RenderPreview render={selected?.latest_render || null} outputFormat={draft.output.format} aspect={draft.output.aspect} onOpen={setLightbox} />
               </section>
               <Inspector
                 projectId={projectId}
@@ -1922,12 +1931,19 @@ function PreviewStage({
         <span className="text-xs text-text-dim tabular-nums">{formatTime(playhead)} / {formatTime(duration)}</span>
       </div>
       <div className="p-4 flex items-center justify-center bg-bg">
-        <div className="relative w-full max-w-4xl min-h-72 border border-border overflow-hidden" style={{ background, aspectRatio: aspectRatio(aspect) }}>
+        <div
+          className="relative border border-border overflow-hidden"
+          style={{
+            background,
+            aspectRatio: aspectRatio(aspect),
+            width: `min(100%, ${previewFrameMaxWidth(aspect)})`,
+          }}
+        >
           {url && clip?.asset.type === "image" && (
-            <img src={url} alt="" className="absolute inset-0 w-full h-full object-cover" />
+            <img src={url} alt="" className="absolute inset-0 w-full h-full object-contain" />
           )}
           {url && clip?.asset.type !== "image" && (
-            <video ref={mediaRef} src={url} muted className="absolute inset-0 w-full h-full object-cover" />
+            <video ref={mediaRef} src={url} muted className="absolute inset-0 w-full h-full object-contain" />
           )}
           {!url && (
             <div className="absolute inset-0 flex flex-col items-center justify-center gap-3 px-6 text-center">
@@ -3337,7 +3353,7 @@ function StoragePicker({
   );
 }
 
-function RenderPreview({ render, outputFormat, onOpen }: { render: RenderRow | null; outputFormat: string; onOpen: (r: RenderRow) => void }) {
+function RenderPreview({ render, outputFormat, aspect, onOpen }: { render: RenderRow | null; outputFormat: string; aspect: Aspect; onOpen: (r: RenderRow) => void }) {
   if (!render) return null;
   const url = renderSrc(render);
   const audio = isAudioFormat(outputFormat);
@@ -3363,7 +3379,16 @@ function RenderPreview({ render, outputFormat, onOpen }: { render: RenderRow | n
         {url ? (
           audio
             ? <div className="p-3"><audio controls src={url} className="w-full" /></div>
-            : <video controls src={url} className="w-full" />
+            : (
+              <div className="p-3 flex justify-center bg-bg">
+                <video
+                  controls
+                  src={url}
+                  className="block object-contain border border-border bg-black"
+                  style={{ aspectRatio: aspectRatio(aspect), width: `min(100%, ${previewFrameMaxWidth(aspect)})` }}
+                />
+              </div>
+            )
         ) : <div className="py-12 text-center text-text-muted text-xs">no source</div>}
       </button>
     </section>
