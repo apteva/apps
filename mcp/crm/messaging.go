@@ -32,6 +32,47 @@ const (
 	channelWhatsApp = "whatsapp"
 )
 
+type actionableToolError struct {
+	Code             string `json:"error_code"`
+	Message          string `json:"message"`
+	RequiredField    string `json:"required_field,omitempty"`
+	Channel          string `json:"channel,omitempty"`
+	DefaultConfigKey string `json:"default_config_key,omitempty"`
+	ListID           int64  `json:"list_id,omitempty"`
+	Recovery         string `json:"recovery,omitempty"`
+}
+
+func (e actionableToolError) Error() string {
+	b, err := json.Marshal(e)
+	if err != nil {
+		return e.Message
+	}
+	return string(b)
+}
+
+func missingSenderError(channel string, listID int64) error {
+	hint := map[string]string{channelEmail: "email", channelSMS: "phone", channelWhatsApp: "phone"}[channel]
+	if hint == "" {
+		hint = "sender"
+	}
+	configKey := "default_sender_" + hint
+	message := fmt.Sprintf("from required (no %s configured)", configKey)
+	recovery := fmt.Sprintf("Pass from explicitly, or configure CRM install %s.", configKey)
+	if listID != 0 {
+		message = fmt.Sprintf("from required (list_id %d has no %s, and no install default configured)", listID, configKey)
+		recovery = fmt.Sprintf("Pass from explicitly, configure %s on list_id %d, or configure CRM install %s.", configKey, listID, configKey)
+	}
+	return actionableToolError{
+		Code:             "missing_sender",
+		Message:          message,
+		RequiredField:    "from",
+		Channel:          channel,
+		DefaultConfigKey: configKey,
+		ListID:           listID,
+		Recovery:         recovery,
+	}
+}
+
 // ─── Conversation type + DB helpers ────────────────────────────────
 
 type Conversation struct {
@@ -1107,11 +1148,7 @@ func (a *App) sendMessageImpl(ctx *sdk.AppCtx, args map[string]any, isTest bool)
 		from = defaultSenderForChannel(ctx, addr.Channel)
 	}
 	if from == "" {
-		hint := map[string]string{channelEmail: "email", channelSMS: "phone", channelWhatsApp: "phone"}[addr.Channel]
-		if listID != 0 {
-			return nil, fmt.Errorf("from required (list_id %d has no default_sender_%s, and no install default configured)", listID, hint)
-		}
-		return nil, fmt.Errorf("from required (no default_sender_%s configured)", hint)
+		return nil, missingSenderError(addr.Channel, listID)
 	}
 	_ = resolvedList // reserved for future "tag activity with list" enrichment
 
@@ -1361,6 +1398,12 @@ func (a *App) toolReply(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if from := strArg(args, "from"); from != "" {
 		sendArgs["from"] = from
 	}
+	if listID := int64Arg(args, "list_id"); listID != 0 {
+		sendArgs["list_id"] = listID
+	}
+	if bodyHTML := strArg(args, "body_html"); bodyHTML != "" {
+		sendArgs["body_html"] = bodyHTML
+	}
 	if templateID := int64Arg(args, "template_id"); templateID != 0 {
 		sendArgs["template_id"] = templateID
 	}
@@ -1373,6 +1416,9 @@ func (a *App) toolReply(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		sendArgs["subject"] = subj
 	} else if convo.Channel == channelEmail && convo.Subject != "" {
 		sendArgs["subject"] = "Re: " + strings.TrimPrefix(convo.Subject, "Re: ")
+	}
+	if idem := strArg(args, "idempotency_key"); idem != "" {
+		sendArgs["idempotency_key"] = idem
 	}
 	if pidArg := strArg(args, "_project_id"); pidArg != "" {
 		sendArgs["_project_id"] = pidArg

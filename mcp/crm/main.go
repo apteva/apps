@@ -33,7 +33,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: crm
 display_name: CRM
-version: 0.8.18
+version: 0.8.19
 description: |
   Contacts store for Apteva agents and human teams. Multi-value channels,
   typed custom attributes with provenance, append-only activity log,
@@ -643,16 +643,19 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "contacts_reply",
-			Description: "Reply on the contact's most-recent inbound conversation (or the one given by conversation_id). Sets In-Reply-To/References for email so the thread keeps grouping. Args: id, body? (required unless template_id), conversation_id?, subject?, from?, template_id?, template_vars?. For WhatsApp outside 24h, use messaging_templates_list and pass template_id/template_vars.",
+			Description: "Reply on the contact's most-recent inbound conversation (or the one given by conversation_id). Sets In-Reply-To/References for email so the thread keeps grouping. Sender precedence: from > list.default_sender > install default. Args: id, body? (required unless template_id), conversation_id?, subject?, from?, list_id?, body_html?, template_id?, template_vars?, idempotency_key?. For WhatsApp outside 24h, use messaging_templates_list and pass template_id/template_vars.",
 			InputSchema: schemaObject(map[string]any{
 				"id":              map[string]any{"type": "integer"},
 				"body":            map[string]any{"type": "string"},
 				"conversation_id": map[string]any{"type": "integer"},
 				"subject":         map[string]any{"type": "string"},
 				"from":            map[string]any{"type": "string"},
+				"list_id":         map[string]any{"type": "integer"},
+				"body_html":       map[string]any{"type": "string"},
 				"template_id":     map[string]any{"type": "integer"},
 				"template_vars":   map[string]any{"type": "object"},
 				"vars":            map[string]any{"type": "object"},
+				"idempotency_key": map[string]any{"type": "string"},
 			}, []string{"id"}),
 			Handler: a.toolReply,
 		},
