@@ -184,6 +184,7 @@ export default function TodoPanel({ projectId }: NativePanelProps) {
   const [newListOpen, setNewListOpen] = useState(false);
   const [newGroupOpen, setNewGroupOpen] = useState(false);
   const [collapsedGroups, setCollapsedGroups] = useState<Record<number, boolean>>({});
+  const [settlingTodos, setSettlingTodos] = useState<Record<number, "complete" | "uncomplete">>({});
 
   const params = useMemo(() => {
     const p = new URLSearchParams();
@@ -292,12 +293,26 @@ export default function TodoPanel({ projectId }: NativePanelProps) {
   };
 
   const toggle = async (t: Todo) => {
-    const path = t.status === "done" ? "uncomplete" : "complete";
-    await fetch(`${API}/todos/${t.id}/${path}`, {
-      method: "POST",
-      credentials: "same-origin",
-    });
-    loadTodos();
+    const action = t.status === "done" ? "uncomplete" : "complete";
+    setSettlingTodos((s) => ({ ...s, [t.id]: action }));
+    try {
+      const res = await fetch(`${API}/todos/${t.id}/${action}`, {
+        method: "POST",
+        credentials: "same-origin",
+      });
+      if (!res.ok) setStatusMsg(`Update: ${res.status}`);
+    } catch (e) {
+      setStatusMsg("Update: " + (e as Error).message);
+    } finally {
+      window.setTimeout(() => {
+        setSettlingTodos((s) => {
+          const next = { ...s };
+          delete next[t.id];
+          return next;
+        });
+        refreshAll();
+      }, action === "complete" ? 220 : 120);
+    }
   };
 
   const snooze = async (t: Todo, forKey: string) => {
@@ -587,6 +602,7 @@ export default function TodoPanel({ projectId }: NativePanelProps) {
                   key={t.id}
                   t={t}
                   list={lists.find((l) => l.id === t.list_id)}
+                  settling={settlingTodos[t.id]}
                   onToggle={() => toggle(t)}
                   onSnooze={(k) => snooze(t, k)}
                   onEdit={() => setEditing(t)}
@@ -1152,10 +1168,11 @@ function formatTime(dueAt?: string): string {
 }
 
 function TodoRow({
-  t, list, onToggle, onSnooze, onEdit, onDelete, onTagClick,
+  t, list, settling, onToggle, onSnooze, onEdit, onDelete, onTagClick,
 }: {
   t: Todo;
   list?: List;
+  settling?: "complete" | "uncomplete";
   onToggle: () => void;
   onSnooze: (k: string) => void;
   onEdit: () => void;
@@ -1164,22 +1181,41 @@ function TodoRow({
 }) {
   const due = t.due_at ? new Date(t.due_at) : null;
   const overdue = due && t.status === "open" && due < new Date();
+  const visuallyDone = t.status === "done" || settling === "complete";
+  const isSettling = !!settling;
   return (
-    <li className="flex items-start gap-2 py-1.5 px-2 border-b border-border/50 hover:bg-bg-card/50 group">
+    <li
+      className={`group relative flex items-start gap-2 rounded-md border-b border-border/50 px-2 py-1.5 transition-all duration-150 ease-out hover:-translate-y-px hover:bg-bg-card/70 hover:shadow-sm focus-within:bg-bg-card/70 ${
+        isSettling ? "translate-x-1 bg-success/5 opacity-70" : ""
+      }`}
+    >
       <button
+        type="button"
         onClick={onToggle}
-        className={`shrink-0 mt-0.5 w-4 h-4 rounded-full border ${
-          t.status === "done" ? "bg-success border-success" : "border-text-dim"
+        className={`relative mt-0.5 flex h-5 w-5 shrink-0 cursor-pointer items-center justify-center rounded-full border transition-all duration-150 ease-out hover:scale-110 hover:border-accent focus:outline-none focus:ring-2 focus:ring-accent/40 ${
+          visuallyDone ? "border-success bg-success text-bg" : "border-text-dim bg-transparent text-transparent group-hover:border-text-muted"
         }`}
-      />
+        aria-label={visuallyDone ? "Mark todo open" : "Mark todo complete"}
+        title={visuallyDone ? "Mark open" : "Complete todo"}
+      >
+        {settling === "complete" && (
+          <span className="absolute inset-[-3px] rounded-full border border-success/50 animate-ping" />
+        )}
+        <span className={`text-[11px] leading-none transition-transform duration-150 ${visuallyDone ? "scale-100" : "scale-0"}`}>
+          ✓
+        </span>
+      </button>
       <div className="flex-1 min-w-0">
         <div className="flex items-center gap-2">
           {t.priority < 4 && (
             <span className={`shrink-0 text-xs ${PRIORITY_TONE[t.priority]}`}>P{t.priority}</span>
           )}
           <button
+            type="button"
             onClick={onEdit}
-            className="flex-1 min-w-0 text-left text-text text-sm truncate"
+            className={`flex-1 min-w-0 cursor-pointer truncate text-left text-sm text-text transition-colors group-hover:text-accent ${
+              visuallyDone ? "text-text-muted line-through decoration-text-dim/70" : ""
+            }`}
             title={t.title}
           >
             {t.title}
@@ -1203,9 +1239,10 @@ function TodoRow({
           )}
           {t.tags.map((tag) => (
             <button
+              type="button"
               key={tag}
               onClick={(e) => { e.stopPropagation(); onTagClick(tag); }}
-              className="hover:text-text"
+              className="cursor-pointer transition-colors hover:text-text"
               title={`Filter by @${tag}`}
             >
               @{tag}
@@ -1213,10 +1250,10 @@ function TodoRow({
           ))}
         </div>
       </div>
-      <div className="shrink-0 opacity-30 group-hover:opacity-100 flex items-center gap-1 text-xs">
-        <button onClick={() => onSnooze("tomorrow")} className="text-text-muted hover:text-text px-1">tmrw</button>
-        <button onClick={() => onSnooze("next_week")} className="text-text-muted hover:text-text px-1">+1w</button>
-        <button onClick={onDelete} className="text-text-muted hover:text-error px-1">×</button>
+      <div className="shrink-0 flex items-center gap-1 text-xs opacity-25 transition-opacity duration-150 group-hover:opacity-100 group-focus-within:opacity-100">
+        <button type="button" onClick={() => onSnooze("tomorrow")} className="cursor-pointer rounded px-1 text-text-muted transition-colors hover:bg-bg-input hover:text-text">tmrw</button>
+        <button type="button" onClick={() => onSnooze("next_week")} className="cursor-pointer rounded px-1 text-text-muted transition-colors hover:bg-bg-input hover:text-text">+1w</button>
+        <button type="button" onClick={onDelete} className="cursor-pointer rounded px-1 text-text-muted transition-colors hover:bg-bg-input hover:text-error">×</button>
       </div>
     </li>
   );

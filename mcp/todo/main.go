@@ -40,7 +40,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: todo
 display_name: Todo
-version: 0.4.7
+version: 0.4.8
 description: Personal todo list — human-first, agent-helpful.
 author: Apteva
 scopes: [project, global]
