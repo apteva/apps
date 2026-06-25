@@ -94,6 +94,10 @@ const EnumScript = `
     // TinyMCE / Quill / etc. rich-text editors. Patreon's body
     // editor in particular is a contenteditable div with no role.
     '[contenteditable=true]','[contenteditable=""]',
+    // Upload libraries often use visible <a>/<span data-trigger="file-input-id">
+    // controls next to a hidden input[type=file]. They are the visual target
+    // agents can see; upload_file(label=N) resolves them to the hidden input.
+    '[data-trigger]',
     '[onclick]','[tabindex]:not([tabindex="-1"])'
   ];
   var vw = window.innerWidth, vh = window.innerHeight;
@@ -346,7 +350,7 @@ const EnumScript = `
     if (t === 'A' || t === 'BUTTON' || t === 'INPUT' ||
         t === 'TEXTAREA' || t === 'SELECT') return true;
     if (el.getAttribute('role')) return true;
-    if (el.hasAttribute('onclick')) return true;
+    if (el.hasAttribute('onclick') || el.hasAttribute('data-trigger')) return true;
     var ti = el.getAttribute('tabindex');
     if (ti !== null && ti !== '-1') return true;
     return false;

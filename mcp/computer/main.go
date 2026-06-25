@@ -48,9 +48,9 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: computer
 display_name: Computer
-version: 0.7.34
+version: 0.7.35
 description: |
-  Watch and steer browser sessions. v0.7.34 improves source URL upload fetching.
+  Watch and steer browser sessions. v0.7.35 improves Browserbase image uploads.
 scopes: [project, global]
 requires:
   permissions:

@@ -8,6 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"mime/multipart"
 	"net/http"
 	"os"
@@ -42,6 +43,7 @@ const (
 	scrollActionTimeout         = 15 * time.Second
 	waitActionTimeout           = 30 * time.Second
 	navigateActionTimeout       = 30 * time.Second
+	inlineUploadMaxBytes        = 64 * 1024 * 1024
 )
 
 const screenshotRecoveryFreshTarget = "fresh_target_same_url"
@@ -499,14 +501,6 @@ func (c *Computer) uploadFile(action computer.Action) error {
 	if c.sessionID == "" {
 		return fmt.Errorf("browserbase: no active session")
 	}
-	remoteFiles := make([]string, 0, len(action.Files))
-	for _, file := range action.Files {
-		remote, err := c.uploadSessionFile(file)
-		if err != nil {
-			return err
-		}
-		remoteFiles = append(remoteFiles, remote)
-	}
 	target := fileupload.Target{Selector: action.Selector}
 	if action.Label > 0 {
 		if e, ok := c.resolveLabel(action.Label); ok {
@@ -520,8 +514,44 @@ func (c *Computer) uploadFile(action computer.Action) error {
 	}
 	ctx, cancel := c.actionContext("upload_file")
 	defer cancel()
+	if payloads, ok := inlineUploadPayloads(action.Files); ok {
+		_, err := fileupload.SetPayloads(ctx, target, payloads)
+		return err
+	}
+	remoteFiles := make([]string, 0, len(action.Files))
+	for _, file := range action.Files {
+		remote, err := c.uploadSessionFile(file)
+		if err != nil {
+			return err
+		}
+		remoteFiles = append(remoteFiles, remote)
+	}
 	_, err := fileupload.SetFiles(ctx, target, remoteFiles)
 	return err
+}
+
+func inlineUploadPayloads(paths []string) ([]fileupload.Payload, bool) {
+	payloads := make([]fileupload.Payload, 0, len(paths))
+	for _, path := range paths {
+		info, err := os.Stat(path)
+		if err != nil || info.IsDir() || info.Size() > inlineUploadMaxBytes {
+			return nil, false
+		}
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			return nil, false
+		}
+		mimeType := mime.TypeByExtension(filepath.Ext(path))
+		if mimeType == "" {
+			mimeType = http.DetectContentType(raw)
+		}
+		payloads = append(payloads, fileupload.Payload{
+			Name: filepath.Base(path),
+			MIME: mimeType,
+			Data: raw,
+		})
+	}
+	return payloads, true
 }
 
 func (c *Computer) uploadSessionFile(filePath string) (string, error) {
