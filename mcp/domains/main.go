@@ -6,7 +6,7 @@
 //
 // Architecture:
 //   - manifest declares one required integration: dns_provider with
-//     compatible_slugs [porkbun, namecheap, ionos].
+//     compatible_slugs [porkbun, namecheap, ionos, spaceship].
 //   - all DNS record CRUD goes through the bound provider via
 //     ctx.PlatformAPI().ExecuteIntegrationTool.
 //   - no local record cache — records are always live; the local
@@ -37,12 +37,12 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: domains
 display_name: Domains
-version: 0.4.1
+version: 0.4.2
 description: |
   DNS + domain inventory and registrar workflows. Other apps call
   this for record CRUD instead of talking to registrars directly.
-  DNS providers: Porkbun, Namecheap, IONOS. Registration MVP:
-  Porkbun.
+  DNS providers: Porkbun, Namecheap, IONOS, Spaceship. Registration
+  purchases are Porkbun-only; Spaceship availability checks are read-only.
 author: Apteva
 scopes: [project, global]
 requires:
@@ -54,7 +54,7 @@ requires:
   integrations:
     - role: dns_provider
       kind: integration
-      compatible_slugs: [porkbun, namecheap, ionos]
+      compatible_slugs: [porkbun, namecheap, ionos, spaceship]
       capabilities: [dns.list_records, dns.create_record, dns.edit_records_by_type, dns.delete_records_by_type]
       tools:
         dns.list_records: list_dns_records
@@ -178,7 +178,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "domain_availability_check",
-			Description: "Check whether a domain is available for registration via the registrar provider. Safe/read-only. Args: domain, connection_id?. Porkbun is supported in v0.4; if no registrar_provider is bound, the DNS provider is used when it is Porkbun.",
+			Description: "Check whether a domain is available for registration via the registrar provider. Safe/read-only. Args: domain, connection_id?. Porkbun and Spaceship are supported; if no registrar_provider is bound, the DNS provider is used when it is Porkbun or Spaceship.",
 			InputSchema: schemaObject(map[string]any{
 				"domain":        map[string]any{"type": "string"},
 				"connection_id": map[string]any{"type": "integer"},
@@ -187,7 +187,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "domain_pricing_get",
-			Description: "Fetch registrar pricing via the registrar provider. Args: tld? (e.g. com), connection_id?. Porkbun is supported in v0.4.",
+			Description: "Fetch registrar pricing via the registrar provider. Args: tld? (e.g. com), connection_id?. Porkbun is supported; Spaceship pricing is not exposed because purchase flows are intentionally disabled.",
 			InputSchema: schemaObject(map[string]any{
 				"tld":           map[string]any{"type": "string"},
 				"connection_id": map[string]any{"type": "integer"},
@@ -197,7 +197,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		{
 			Name: "domain_register",
 			Description: "Register a new domain through the registrar provider. This SPENDS REAL MONEY against the registrar account. " +
-				"Call domain_availability_check and confirm with the user first. Args: domain, years? (1-10, default 1), auto_renew? (default true), whois_privacy? (default true), coupon?, connection_id?, notes?, skip_availability_check?. Porkbun is supported in v0.4.",
+				"Call domain_availability_check and confirm with the user first. Args: domain, years? (1-10, default 1), auto_renew? (default true), whois_privacy? (default true), coupon?, connection_id?, notes?, skip_availability_check?. Porkbun is supported for paid registration; Spaceship is availability-only.",
 			InputSchema: schemaObject(map[string]any{
 				"domain":                  map[string]any{"type": "string"},
 				"years":                   map[string]any{"type": "integer"},
@@ -290,17 +290,19 @@ type Domain struct {
 }
 
 // DNSRecord is the canonical shape we hand back to callers — flat,
-// provider-agnostic. The proxy layer translates the provider's actual
-// shape into this. Today we only support Porkbun's shape; a Namecheap
-// adapter would translate XML records into this struct.
+// provider-agnostic. The proxy layer translates each provider's actual
+// shape into this struct. Raw is reserved for providers whose delete
+// endpoint needs type-specific fields that are not part of the common
+// display/edit surface.
 type DNSRecord struct {
-	ID    string `json:"id"`    // provider-side record id (Porkbun: numeric string)
-	Name  string `json:"name"`  // FQDN as the provider returns it (e.g. "mail.acme.com")
-	Type  string `json:"type"`  // A | AAAA | CNAME | MX | TXT | NS | SRV | CAA
-	Value string `json:"value"` // record content
-	TTL   int    `json:"ttl"`
-	Prio  int    `json:"prio,omitempty"` // MX priority etc.
-	Notes string `json:"notes,omitempty"`
+	ID    string         `json:"id"`    // provider-side record id when available
+	Name  string         `json:"name"`  // FQDN or provider-local name (e.g. "mail.acme.com" or "mail")
+	Type  string         `json:"type"`  // A | AAAA | CNAME | MX | TXT | NS | SRV | CAA | ...
+	Value string         `json:"value"` // record content
+	TTL   int            `json:"ttl"`
+	Prio  int            `json:"prio,omitempty"` // MX priority etc.
+	Notes string         `json:"notes,omitempty"`
+	Raw   map[string]any `json:"raw,omitempty"`
 }
 
 type DomainAvailability struct {
@@ -381,7 +383,7 @@ func looksLikeDomain(s string) bool {
 func normaliseRecordType(t string) (string, error) {
 	t = strings.ToUpper(strings.TrimSpace(t))
 	switch t {
-	case "A", "AAAA", "CNAME", "MX", "TXT", "NS", "SRV", "CAA", "ALIAS":
+	case "A", "AAAA", "CNAME", "MX", "TXT", "NS", "SRV", "CAA", "ALIAS", "PTR", "HTTPS", "SVCB", "TLSA":
 		return t, nil
 	}
 	return "", fmt.Errorf("unsupported record type %q", t)
@@ -549,12 +551,14 @@ func (a *App) providerFor(ctx *sdk.AppCtx, connID int64) (dnsProviderImpl, *sdk.
 			return &namecheapProvider{bound: bound}, bound, nil
 		case "ionos":
 			return &ionosProvider{bound: bound}, bound, nil
+		case "spaceship":
+			return &spaceshipProvider{bound: bound}, bound, nil
 		}
-		return nil, bound, fmt.Errorf("unsupported provider slug %q on connection %d (compatible: porkbun, namecheap, ionos)", conn.AppSlug, connID)
+		return nil, bound, fmt.Errorf("unsupported provider slug %q on connection %d (compatible: porkbun, namecheap, ionos, spaceship)", conn.AppSlug, connID)
 	}
 	bound := ctx.IntegrationFor("dns_provider")
 	if bound == nil {
-		return nil, nil, errors.New("no dns_provider bound — install/select a Porkbun, Namecheap, or IONOS connection, or pass connection_id explicitly")
+		return nil, nil, errors.New("no dns_provider bound — install/select a Porkbun, Namecheap, IONOS, or Spaceship connection, or pass connection_id explicitly")
 	}
 	switch bound.AppSlug {
 	case "porkbun":
@@ -563,8 +567,10 @@ func (a *App) providerFor(ctx *sdk.AppCtx, connID int64) (dnsProviderImpl, *sdk.
 		return &namecheapProvider{bound: bound}, bound, nil
 	case "ionos":
 		return &ionosProvider{bound: bound}, bound, nil
+	case "spaceship":
+		return &spaceshipProvider{bound: bound}, bound, nil
 	}
-	return nil, bound, fmt.Errorf("unsupported dns_provider slug %q (compatible: porkbun, namecheap, ionos)", bound.AppSlug)
+	return nil, bound, fmt.Errorf("unsupported dns_provider slug %q (compatible: porkbun, namecheap, ionos, spaceship)", bound.AppSlug)
 }
 
 // provider is the legacy entry point — kept for callers that don't
@@ -614,8 +620,10 @@ func (a *App) registrarFor(ctx *sdk.AppCtx, connID int64) (registrarProviderImpl
 		switch conn.AppSlug {
 		case "porkbun":
 			return &porkbunRegistrar{bound: bound}, bound, nil
+		case "spaceship":
+			return &spaceshipRegistrar{bound: bound}, bound, nil
 		}
-		return nil, bound, fmt.Errorf("unsupported registrar provider %q on connection %d (compatible: porkbun)", conn.AppSlug, connID)
+		return nil, bound, fmt.Errorf("unsupported registrar provider %q on connection %d (compatible: porkbun, spaceship for availability)", conn.AppSlug, connID)
 	}
 	if bound := ctx.IntegrationFor("registrar_provider"); bound != nil {
 		switch bound.AppSlug {
@@ -629,11 +637,13 @@ func (a *App) registrarFor(ctx *sdk.AppCtx, connID int64) (registrarProviderImpl
 		switch bound.AppSlug {
 		case "porkbun":
 			return &porkbunRegistrar{bound: bound}, bound, nil
+		case "spaceship":
+			return &spaceshipRegistrar{bound: bound}, bound, nil
 		default:
-			return nil, bound, fmt.Errorf("dns_provider %q does not support registrar operations in domains v0.4 (compatible registrar: porkbun)", bound.AppSlug)
+			return nil, bound, fmt.Errorf("dns_provider %q does not support registrar operations in domains v0.4 (compatible registrar: porkbun; spaceship availability only)", bound.AppSlug)
 		}
 	}
-	return nil, nil, errors.New("no registrar_provider or compatible dns_provider bound - install/select a Porkbun connection, or pass connection_id explicitly")
+	return nil, nil, errors.New("no registrar_provider or compatible dns_provider bound - install/select a Porkbun connection, a Spaceship connection for availability, or pass connection_id explicitly")
 }
 
 func (a *App) toolDomainAvailabilityCheck(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -1407,6 +1417,415 @@ func (p *ionosProvider) Delete(ctx *sdk.AppCtx, domain, sub, rtype string) error
 	return nil
 }
 
+// ─── Spaceship provider ───────────────────────────────────────────
+//
+// Spaceship DNS works with batch "save" and "delete" operations. The
+// integration catalog exposes those as list_dns_records, save_dns_records,
+// and delete_dns_records, so this adapter stays inside the integration
+// boundary and never talks to Spaceship directly.
+
+type spaceshipProvider struct{ bound *sdk.BoundIntegration }
+
+type spaceshipRegistrar struct{ bound *sdk.BoundIntegration }
+
+func (r *spaceshipRegistrar) CheckAvailability(ctx *sdk.AppCtx, domain string) (*DomainAvailability, error) {
+	raw, err := providerCall(ctx, r.bound, "check_single_domain_availability", map[string]any{"domain": domain})
+	if err != nil {
+		return nil, err
+	}
+	out := parseSpaceshipAvailability(domain, r.bound, raw)
+	return &out, nil
+}
+
+func (r *spaceshipRegistrar) Pricing(*sdk.AppCtx, string) (any, error) {
+	return nil, errors.New("Spaceship pricing is not exposed in domains; paid registration flows are disabled for this provider")
+}
+
+func (r *spaceshipRegistrar) Register(*sdk.AppCtx, DomainRegistrationRequest) (json.RawMessage, error) {
+	return nil, errors.New("Spaceship registration is intentionally not supported by domains because it would spend money; use Porkbun for domain_register")
+}
+
+func (p *spaceshipProvider) List(ctx *sdk.AppCtx, domain string) ([]DNSRecord, error) {
+	raw, err := providerCall(ctx, p.bound, "list_dns_records", map[string]any{
+		"domain": domain,
+		"take":   500,
+		"skip":   0,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return parseSpaceshipRecords(domain, raw), nil
+}
+
+func (p *spaceshipProvider) Upsert(ctx *sdk.AppCtx, domain, sub, rtype, value string, ttl int) (string, error) {
+	existing, err := p.List(ctx, domain)
+	if err != nil {
+		return "", fmt.Errorf("list before upsert: %w", err)
+	}
+	content, prio := spaceshipCanonicalValuePrio(rtype, value)
+	var match *DNSRecord
+	for i := range existing {
+		r := &existing[i]
+		if !strings.EqualFold(r.Type, rtype) {
+			continue
+		}
+		if spaceshipRecordNameMatches(r.Name, domain, sub) {
+			match = r
+			break
+		}
+	}
+	if match != nil &&
+		strings.EqualFold(strings.TrimSpace(match.Value), strings.TrimSpace(content)) &&
+		match.TTL == ttl && match.Prio == prio {
+		return "unchanged", nil
+	}
+	item, err := spaceshipRecordItem(domain, sub, rtype, value, ttl)
+	if err != nil {
+		return "", err
+	}
+	if _, err := providerCall(ctx, p.bound, "save_dns_records", map[string]any{
+		"domain": domain,
+		"items":  []any{item},
+	}); err != nil {
+		return "", fmt.Errorf("save: %w", err)
+	}
+	if match != nil {
+		return "updated", nil
+	}
+	return "created", nil
+}
+
+func (p *spaceshipProvider) Delete(ctx *sdk.AppCtx, domain, sub, rtype string) error {
+	existing, err := p.List(ctx, domain)
+	if err != nil {
+		return err
+	}
+	records := make([]any, 0, 1)
+	for _, r := range existing {
+		if !strings.EqualFold(r.Type, rtype) {
+			continue
+		}
+		if !spaceshipRecordNameMatches(r.Name, domain, sub) {
+			continue
+		}
+		records = append(records, spaceshipDeleteItem(r))
+	}
+	if len(records) == 0 {
+		return nil
+	}
+	_, err = providerCall(ctx, p.bound, "delete_dns_records", map[string]any{
+		"domain":  domain,
+		"records": records,
+	})
+	return err
+}
+
+func parseSpaceshipRecords(domain string, raw json.RawMessage) []DNSRecord {
+	var root any
+	if err := json.Unmarshal(raw, &root); err != nil {
+		return nil
+	}
+	items := spaceshipArrayFrom(root, "items", "records")
+	out := make([]DNSRecord, 0, len(items))
+	for _, item := range items {
+		m, ok := item.(map[string]any)
+		if !ok {
+			continue
+		}
+		rtype := strings.ToUpper(spaceshipStringField(m, "type"))
+		name := spaceshipStringField(m, "name")
+		value, prio := spaceshipRecordValue(rtype, m)
+		out = append(out, DNSRecord{
+			ID:    spaceshipRecordID(m, rtype, name, value),
+			Name:  spaceshipCanonicalName(domain, name),
+			Type:  rtype,
+			Value: value,
+			TTL:   spaceshipIntField(m, "ttl"),
+			Prio:  prio,
+			Raw:   copyStringAnyMap(m),
+		})
+	}
+	return out
+}
+
+func parseSpaceshipAvailability(domain string, bound *sdk.BoundIntegration, raw json.RawMessage) DomainAvailability {
+	out := DomainAvailability{
+		Domain:       domain,
+		Provider:     bound.AppSlug,
+		ConnectionID: bound.ConnectionID,
+		Source:       "spaceship",
+		Confidence:   "provider",
+		Raw:          raw,
+	}
+	var root map[string]any
+	if err := json.Unmarshal(raw, &root); err != nil {
+		return out
+	}
+	scopes := []map[string]any{root}
+	for _, key := range []string{"response", "data", "result"} {
+		if nested, ok := root[key].(map[string]any); ok {
+			scopes = append(scopes, nested)
+		}
+	}
+	if v, ok := firstBool(scopes, "available", "isAvailable"); ok {
+		out.Available = v
+	} else if s := firstString(scopes, "availability", "status"); s != "" {
+		out.Available = availabilityStringIsAvailable(s)
+	}
+	if s := firstString(scopes, "price", "registrationPrice"); s != "" {
+		out.Price = s
+	}
+	if s := firstString(scopes, "currency"); s != "" {
+		out.Currency = s
+	}
+	if v, ok := firstBool(scopes, "premium", "isPremium"); ok {
+		out.Premium = v
+	}
+	return out
+}
+
+func spaceshipArrayFrom(root any, keys ...string) []any {
+	switch v := root.(type) {
+	case []any:
+		return v
+	case map[string]any:
+		for _, key := range keys {
+			if arr, ok := v[key].([]any); ok {
+				return arr
+			}
+		}
+		for _, key := range []string{"data", "result", "response"} {
+			if nested, ok := v[key]; ok {
+				if arr := spaceshipArrayFrom(nested, keys...); len(arr) > 0 {
+					return arr
+				}
+			}
+		}
+	}
+	return nil
+}
+
+func spaceshipCanonicalName(domain, name string) string {
+	name = strings.TrimSpace(strings.TrimSuffix(name, "."))
+	if name == "" || name == "@" {
+		return domain
+	}
+	return strings.ToLower(name)
+}
+
+func spaceshipRecordNameMatches(name, domain, sub string) bool {
+	name = strings.TrimSpace(strings.TrimSuffix(strings.ToLower(name), "."))
+	sub = strings.TrimSpace(strings.TrimSuffix(strings.ToLower(sub), "."))
+	domain = strings.TrimSpace(strings.TrimSuffix(strings.ToLower(domain), "."))
+	if sub == "" {
+		return name == "" || name == "@" || name == domain
+	}
+	wantFQ := sub + "." + domain
+	return name == sub || name == wantFQ
+}
+
+func spaceshipStringField(m map[string]any, keys ...string) string {
+	for _, key := range keys {
+		if v, ok := m[key]; ok {
+			switch t := v.(type) {
+			case string:
+				if strings.TrimSpace(t) != "" {
+					return strings.TrimSpace(t)
+				}
+			case float64:
+				return strconv.FormatFloat(t, 'f', -1, 64)
+			case int:
+				return strconv.Itoa(t)
+			}
+		}
+	}
+	return ""
+}
+
+func spaceshipIntField(m map[string]any, keys ...string) int {
+	for _, key := range keys {
+		if v, ok := m[key]; ok {
+			switch t := v.(type) {
+			case int:
+				return t
+			case float64:
+				return int(t)
+			case string:
+				n, _ := strconv.Atoi(strings.TrimSpace(t))
+				return n
+			}
+		}
+	}
+	return 0
+}
+
+func spaceshipRecordValue(rtype string, m map[string]any) (string, int) {
+	switch rtype {
+	case "MX":
+		return spaceshipStringField(m, "exchange", "value", "target"), spaceshipIntField(m, "preference", "priority")
+	case "SRV":
+		prio := spaceshipIntField(m, "priority")
+		weight := spaceshipIntField(m, "weight")
+		port := spaceshipIntField(m, "port")
+		target := spaceshipStringField(m, "target", "value")
+		if target != "" {
+			return fmt.Sprintf("%d %d %s", weight, port, target), prio
+		}
+		return "", prio
+	case "CAA":
+		flag := spaceshipIntField(m, "flag")
+		tag := spaceshipStringField(m, "tag")
+		value := spaceshipStringField(m, "value")
+		if tag != "" && value != "" {
+			return fmt.Sprintf("%d %s %s", flag, tag, value), 0
+		}
+		return value, 0
+	default:
+		return spaceshipStringField(m, "address", "value", "cname", "exchange", "nameserver", "aliasName", "pointer", "target", "targetName"), spaceshipIntField(m, "priority", "preference")
+	}
+}
+
+func spaceshipCanonicalValuePrio(rtype, value string) (string, int) {
+	value = strings.TrimSpace(value)
+	switch rtype {
+	case "MX":
+		parts := strings.SplitN(value, " ", 2)
+		if len(parts) == 2 {
+			if prio, err := strconv.Atoi(strings.TrimSpace(parts[0])); err == nil {
+				return strings.TrimSpace(parts[1]), prio
+			}
+		}
+		return value, 10
+	case "SRV":
+		parts := strings.Fields(value)
+		if len(parts) >= 4 {
+			if prio, err := strconv.Atoi(parts[0]); err == nil {
+				return strings.Join(parts[1:], " "), prio
+			}
+		}
+	}
+	return value, 0
+}
+
+func spaceshipRecordItem(domain, sub, rtype, value string, ttl int) (map[string]any, error) {
+	name := "@"
+	if sub != "" {
+		name = sub
+	}
+	item := map[string]any{
+		"type": rtype,
+		"name": name,
+	}
+	if ttl > 0 {
+		item["ttl"] = ttl
+	}
+	content, prio := spaceshipCanonicalValuePrio(rtype, value)
+	switch rtype {
+	case "A", "AAAA":
+		item["address"] = content
+	case "TXT":
+		item["value"] = content
+	case "CNAME":
+		item["cname"] = content
+	case "MX":
+		item["exchange"] = content
+		item["preference"] = prio
+	case "NS":
+		item["nameserver"] = content
+	case "ALIAS":
+		item["aliasName"] = content
+	case "PTR":
+		item["pointer"] = content
+	case "CAA":
+		parts := strings.Fields(content)
+		if len(parts) < 3 {
+			return nil, errors.New("Spaceship CAA value must be '<flag> <tag> <value>', for example '0 issue letsencrypt.org'")
+		}
+		flag, err := strconv.Atoi(parts[0])
+		if err != nil {
+			return nil, fmt.Errorf("Spaceship CAA flag must be numeric: %w", err)
+		}
+		item["flag"] = flag
+		item["tag"] = parts[1]
+		item["value"] = strings.Join(parts[2:], " ")
+	case "SRV":
+		parts := strings.Fields(value)
+		if len(parts) < 4 {
+			return nil, errors.New("Spaceship SRV value must be '<priority> <weight> <port> <target>'")
+		}
+		priority, err := strconv.Atoi(parts[0])
+		if err != nil {
+			return nil, fmt.Errorf("Spaceship SRV priority must be numeric: %w", err)
+		}
+		weight, err := strconv.Atoi(parts[1])
+		if err != nil {
+			return nil, fmt.Errorf("Spaceship SRV weight must be numeric: %w", err)
+		}
+		port, err := strconv.Atoi(parts[2])
+		if err != nil {
+			return nil, fmt.Errorf("Spaceship SRV port must be numeric: %w", err)
+		}
+		item["priority"] = priority
+		item["weight"] = weight
+		item["port"] = port
+		item["target"] = strings.Join(parts[3:], " ")
+	default:
+		return nil, fmt.Errorf("Spaceship DNS write support is not implemented for %s records", rtype)
+	}
+	_ = domain
+	return item, nil
+}
+
+func spaceshipDeleteItem(r DNSRecord) map[string]any {
+	if len(r.Raw) > 0 {
+		item := copyStringAnyMap(r.Raw)
+		delete(item, "ttl")
+		return item
+	}
+	item := map[string]any{
+		"type": r.Type,
+		"name": r.Name,
+	}
+	if r.Prio != 0 {
+		item["priority"] = r.Prio
+	}
+	switch r.Type {
+	case "A", "AAAA":
+		item["address"] = r.Value
+	case "TXT", "CAA":
+		item["value"] = r.Value
+	case "CNAME":
+		item["cname"] = r.Value
+	case "MX":
+		item["exchange"] = r.Value
+		item["preference"] = r.Prio
+	case "NS":
+		item["nameserver"] = r.Value
+	case "ALIAS":
+		item["aliasName"] = r.Value
+	case "PTR":
+		item["pointer"] = r.Value
+	default:
+		item["value"] = r.Value
+	}
+	return item
+}
+
+func spaceshipRecordID(m map[string]any, rtype, name, value string) string {
+	if id := spaceshipStringField(m, "id", "recordId"); id != "" {
+		return id
+	}
+	return strings.ToLower(strings.Join([]string{rtype, name, value}, ":"))
+}
+
+func copyStringAnyMap(in map[string]any) map[string]any {
+	out := make(map[string]any, len(in))
+	for k, v := range in {
+		out[k] = v
+	}
+	return out
+}
+
 // ─── Tool handlers (use dnsProviderImpl) ───────────────────────────
 
 // resolveProviderForDomain looks up the connection pinned on the
@@ -1469,18 +1888,83 @@ func (a *App) toolDomainRecordsSet(ctx *sdk.AppCtx, args map[string]any) (any, e
 	if err != nil {
 		return nil, err
 	}
+	deletedConflicts, err := deleteApexAddressConflicts(ctx, prov, domain, sub, rtype)
+	if err != nil {
+		return nil, err
+	}
 	action, err := prov.Upsert(ctx, domain, sub, rtype, value, ttl)
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{
+	out := map[string]any{
 		"action": action,
 		"domain": domain,
 		"name":   sub,
 		"type":   rtype,
 		"value":  value,
 		"ttl":    ttl,
-	}, nil
+	}
+	if len(deletedConflicts) > 0 {
+		out["deleted_conflicts"] = deletedConflicts
+	}
+	return out, nil
+}
+
+func deleteApexAddressConflicts(ctx *sdk.AppCtx, prov dnsProviderImpl, domain, sub, rtype string) ([]string, error) {
+	if sub != "" {
+		return nil, nil
+	}
+	conflicts := apexAddressConflictTypes(rtype)
+	if len(conflicts) == 0 {
+		return nil, nil
+	}
+	records, err := prov.List(ctx, domain)
+	if err != nil {
+		return nil, fmt.Errorf("list before conflict cleanup: %w", err)
+	}
+	var deleted []string
+	for _, conflictType := range conflicts {
+		if !hasRecordAtName(records, domain, "", conflictType) {
+			continue
+		}
+		if err := prov.Delete(ctx, domain, "", conflictType); err != nil {
+			return deleted, fmt.Errorf("delete conflicting %s record: %w", conflictType, err)
+		}
+		deleted = append(deleted, conflictType)
+	}
+	return deleted, nil
+}
+
+func apexAddressConflictTypes(rtype string) []string {
+	switch rtype {
+	case "A", "AAAA":
+		return []string{"ALIAS", "CNAME"}
+	case "ALIAS":
+		return []string{"A", "AAAA", "CNAME"}
+	case "CNAME":
+		return []string{"A", "AAAA", "ALIAS"}
+	default:
+		return nil
+	}
+}
+
+func hasRecordAtName(records []DNSRecord, domain, sub, rtype string) bool {
+	wantFQ := domain
+	if sub != "" {
+		wantFQ = sub + "." + domain
+	}
+	for _, r := range records {
+		if !strings.EqualFold(r.Type, rtype) {
+			continue
+		}
+		if strings.EqualFold(r.Name, wantFQ) || strings.EqualFold(r.Name, sub) {
+			return true
+		}
+		if sub == "" && (r.Name == "" || r.Name == "@") {
+			return true
+		}
+	}
+	return false
 }
 
 func (a *App) toolDomainRecordsDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -1770,7 +2254,7 @@ func (a *App) handleDomainItem(w http.ResponseWriter, r *http.Request) {
 }
 
 // handleConnectionsList — feeds the panel's connection picker. Returns
-// every Porkbun + Namecheap + IONOS connection in this project so the
+// every Porkbun + Namecheap + IONOS + Spaceship connection in this project so the
 // operator can pin one specifically when adding a domain. Not an MCP tool
 // because agents shouldn't be picking connections for users; operator UI.
 func (a *App) handleConnectionsList(w http.ResponseWriter, r *http.Request) {
@@ -1786,7 +2270,7 @@ func (a *App) handleConnectionsList(w http.ResponseWriter, r *http.Request) {
 		Status  string `json:"status"`
 	}
 	out := []conn{}
-	for _, slug := range []string{"porkbun", "namecheap", "ionos"} {
+	for _, slug := range []string{"porkbun", "namecheap", "ionos", "spaceship"} {
 		rows, err := globalCtx.PlatformAPI().ListConnections(sdk.ConnectionFilter{ProjectID: pid, AppSlug: slug})
 		if err != nil {
 			httpErr(w, http.StatusBadGateway, err.Error())

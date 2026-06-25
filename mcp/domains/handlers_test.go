@@ -561,6 +561,53 @@ func TestDomainRecordsSet_CreatesWhenAbsent(t *testing.T) {
 	}
 }
 
+func TestDomainRecordsSet_DeletesApexAliasBeforeARecord(t *testing.T) {
+	const withAlias = `{
+		"status": "SUCCESS",
+		"records": [
+			{"id": "200", "name": "acme.com", "type": "ALIAS", "content": "uixie.porkbun.com", "ttl": "600", "prio": "0"},
+			{"id": "201", "name": "www.acme.com", "type": "CNAME", "content": "acme.com", "ttl": "600", "prio": "0"}
+		]
+	}`
+	plat := newPorkbunStub(map[string]*sdk.ExecuteResult{
+		"list_dns_records":           {Success: true, Status: 200, Data: json.RawMessage(withAlias)},
+		"delete_dns_records_by_type": {Success: true, Status: 200, Data: json.RawMessage(`{"status":"SUCCESS"}`)},
+		"create_dns_record":          {Success: true, Status: 200, Data: json.RawMessage(`{"status":"SUCCESS","id":"999"}`)},
+	})
+	ctx := newTestCtx(t, plat)
+	app := &App{}
+
+	out, err := app.toolDomainRecordsSet(ctx, map[string]any{
+		"domain": "acme.com",
+		"name":   "@",
+		"type":   "A",
+		"value":  "5.6.7.8",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := out.(map[string]any)
+	if got["action"] != "created" {
+		t.Errorf("expected create, got %+v", out)
+	}
+	conflicts, _ := got["deleted_conflicts"].([]string)
+	if len(conflicts) != 1 || conflicts[0] != "ALIAS" {
+		t.Fatalf("deleted_conflicts = %+v, want [ALIAS]", got["deleted_conflicts"])
+	}
+	tools := []string{}
+	for _, c := range plat.calls {
+		tools = append(tools, c.Tool)
+	}
+	want := []string{"list_dns_records", "delete_dns_records_by_type", "list_dns_records", "create_dns_record"}
+	if strings.Join(tools, ",") != strings.Join(want, ",") {
+		t.Fatalf("dispatch order = %v, want %v", tools, want)
+	}
+	deleteCall := plat.calls[1]
+	if deleteCall.Input["type"] != "ALIAS" || deleteCall.Input["subdomain"] != "" {
+		t.Fatalf("delete payload = %+v", deleteCall.Input)
+	}
+}
+
 func TestDomainRecordsSet_EditsWhenPresent(t *testing.T) {
 	plat := newPorkbunStub(map[string]*sdk.ExecuteResult{
 		"edit_dns_records_by_type": {Success: true, Status: 200, Data: json.RawMessage(`{"status":"SUCCESS"}`)},

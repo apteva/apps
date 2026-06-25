@@ -3,9 +3,8 @@
 // Two views:
 //   - List: domains the project has registered with this app, with
 //     add + remove. Click a row to open the records browser.
-//   - Records: live-fetched from the bound DNS provider (Porkbun
-//     today, Namecheap once XML support lands). Add / edit / delete
-//     individual records.
+//   - Records: live-fetched from the bound DNS provider. Add / edit /
+//     delete individual records.
 //
 // All mutations go through /api/apps/domains/tools/call with the
 // generic tool dispatcher pattern messaging uses.
@@ -66,12 +65,13 @@ function providerLabel(slug: string): string {
   if (slug === "porkbun") return "Porkbun";
   if (slug === "namecheap") return "Namecheap";
   if (slug === "ionos") return "IONOS";
+  if (slug === "spaceship") return "Spaceship";
   if (slug === "rdap") return "Public RDAP";
   return slug;
 }
 
 const API = "/api/apps/domains";
-const RECORD_TYPES = ["A", "AAAA", "CNAME", "MX", "TXT", "NS", "SRV", "CAA", "ALIAS"] as const;
+const RECORD_TYPES = ["A", "AAAA", "CNAME", "MX", "TXT", "NS", "SRV", "CAA", "ALIAS", "PTR", "HTTPS", "SVCB", "TLSA"] as const;
 
 // Shared input class. Same tokens messaging uses so the look matches
 // across the dashboard's dark theme.
@@ -219,7 +219,7 @@ export default function DomainsPanel({ projectId, installId }: NativePanelProps)
         </>
       ) : (
         <RegisterDomainPane
-          connections={connections.filter((c) => c.app_slug === "porkbun")}
+          connections={connections.filter((c) => c.app_slug === "porkbun" || c.app_slug === "spaceship")}
           callTool={callTool}
           onRegistered={(d) => {
             reload();
@@ -344,6 +344,14 @@ function RegisterDomainPane({
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
 
+  const selectedConnection = useMemo(() => {
+    if (pick === "default" || pick === "other") return null;
+    return connections.find((c) => String(c.id) === pick) || null;
+  }, [connections, pick]);
+  const providerCanRegister =
+    availability?.available &&
+    (availability.provider === "porkbun" || (availability.provider === "rdap" && selectedConnection?.app_slug !== "spaceship"));
+
   const argsForProvider = (): Record<string, unknown> => {
     const args: Record<string, unknown> = { domain: name.trim() };
     if (pick !== "default" && pick !== "other") {
@@ -415,7 +423,7 @@ function RegisterDomainPane({
             value={pick}
             onChange={(e) => { setPick(e.target.value as ConnectionChoice); setAvailability(null); }}
           >
-            <option value="default">Default Porkbun binding</option>
+            <option value="default">Default registrar binding</option>
             {connections.map((c) => (
               <option key={c.id} value={String(c.id)}>
                 {providerLabel(c.app_slug)} - {c.name || `connection ${c.id}`}
@@ -464,7 +472,13 @@ function RegisterDomainPane({
               </div>
             )}
 
-            {availability.available && (
+            {availability.available && !providerCanRegister && (
+              <div className="text-xs text-yellow-300 border border-yellow-500/30 bg-yellow-500/10 rounded p-2">
+                {providerLabel(availability.provider)} confirmed availability, but this app only performs paid domain registration through Porkbun.
+              </div>
+            )}
+
+            {providerCanRegister && (
               <div className="flex gap-3 items-end flex-wrap">
                 <Field label="Years">
                   <input

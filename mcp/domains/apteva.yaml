@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: domains
 display_name: Domains
-version: 0.4.1
+version: 0.4.2
 description: |
   DNS + domain inventory and registrar workflows for Apteva projects.
   Other apps that need to write DNS records (messaging for SES
@@ -10,14 +10,15 @@ description: |
   challenges) call this app instead of speaking each registrar's API
   directly.
 
-  Porkbun and IONOS are supported end-to-end for record CRUD. IONOS
+  Porkbun, IONOS, and Spaceship are supported for record CRUD. IONOS
   is zone-id oriented (the provider resolves a domain to its zone id
   via list_zones before each op) and its create endpoint takes a
   top-level JSON array, carried through the integration runner via
   body_root_param. Namecheap DNS uses XML read-modify-write semantics.
-  Registrar purchase flows are Porkbun-only in v0.4; Namecheap
-  registration needs contact-profile support before it should be
-  exposed here.
+  Spaceship DNS uses batch save/delete tools and supports read-only
+  availability checks. Registrar purchase flows are Porkbun-only in
+  v0.4.2; Namecheap and Spaceship registration need safer purchase-flow
+  support before they should be exposed here.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/domains
@@ -36,7 +37,7 @@ requires:
   integrations:
     - role: dns_provider
       kind: integration
-      compatible_slugs: [porkbun, namecheap, ionos]
+      compatible_slugs: [porkbun, namecheap, ionos, spaceship]
       capabilities:
         - dns.list_records
         - dns.create_record
@@ -48,8 +49,8 @@ requires:
         dns.edit_records_by_type: edit_dns_records_by_type
         dns.delete_records_by_type: delete_dns_records_by_type
       required: true
-      label: "DNS provider (Porkbun, Namecheap, IONOS)"
-      hint: "Connect a Porkbun, Namecheap, or IONOS account; the domains app uses that connection's API to read and write DNS records on the domains it manages."
+      label: "DNS provider (Porkbun, Namecheap, IONOS, Spaceship)"
+      hint: "Connect a Porkbun, Namecheap, IONOS, or Spaceship account; the domains app uses that connection's API to read and write DNS records on the domains it manages."
     - role: registrar_provider
       kind: integration
       compatible_slugs: [porkbun]
@@ -63,7 +64,7 @@ requires:
         domains.pricing:             get_pricing
       required: false
       label: "Registrar provider (Porkbun)"
-      hint: "Connect a Porkbun account to check availability and register new domains. If unset, registrar tools fall back to the DNS provider when it is Porkbun."
+      hint: "Connect a Porkbun account to check availability and register new domains. If unset, registrar tools fall back to the DNS provider when it is Porkbun, or to Spaceship for availability checks only."
 
 provides:
   http_routes:

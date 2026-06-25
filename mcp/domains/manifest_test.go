@@ -37,3 +37,26 @@ func TestMCPTools_DeclaredMatchHandlers(t *testing.T) {
 		}
 	}
 }
+
+func TestEmbeddedManifest_DNSProviderAllowsSpaceship(t *testing.T) {
+	app := &App{}
+	for _, dep := range app.Manifest().Requires.Integrations {
+		if dep.Role != "dns_provider" {
+			continue
+		}
+		if !containsString(dep.CompatibleSlugs, "spaceship") {
+			t.Fatalf("dns_provider compatible_slugs=%v, want spaceship", dep.CompatibleSlugs)
+		}
+		return
+	}
+	t.Fatal("dns_provider integration role missing")
+}
+
+func containsString(values []string, want string) bool {
+	for _, v := range values {
+		if v == want {
+			return true
+		}
+	}
+	return false
+}
