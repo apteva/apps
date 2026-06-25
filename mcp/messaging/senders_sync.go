@@ -456,6 +456,17 @@ func identityRowToMap(r *identityRow) map[string]any {
 			m["inbound_config"] = cfg
 		}
 	}
+	if r.Metadata != "" {
+		var meta map[string]any
+		if err := json.Unmarshal([]byte(r.Metadata), &meta); err == nil {
+			m["metadata"] = meta
+			for _, key := range []string{"mail_from_domain", "mail_from_domain_status", "mail_from_mx_failure_mode"} {
+				if v, ok := meta[key]; ok {
+					m[key] = v
+				}
+			}
+		}
+	}
 	if r.LastSyncedAt != nil {
 		m["last_synced_at"] = r.LastSyncedAt.Format(time.RFC3339)
 	}

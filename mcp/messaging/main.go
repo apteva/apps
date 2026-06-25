@@ -54,7 +54,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: messaging
 display_name: Messaging
-version: 0.13.33
+version: 0.13.34
 description: |
   Send and receive messages across channels. v0.1 ships email via
   AWS SES.
@@ -508,8 +508,8 @@ func (a *App) MCPTools() []sdk.Tool {
 		{
 			Name: "senders_create",
 			Description: "Register a sender end-to-end across email + SMS providers. The address shape picks the path: " +
-				"\"foo@x.com\" → SES verify_email; \"x.com\" → SES verify_domain + DKIM/SPF DNS + (auto when aws-s3+aws-sns bound) full inbound bootstrap; \"+15551234567\" → adopt the Twilio phone for SMS or the approved WhatsApp sender for WhatsApp; SMS auto-wires SmsUrl and WhatsApp auto-wires sender callback_url to /webhooks/twilio-inbound. " +
-				"Args: address (required), channel? (email|sms|whatsapp; auto-detected if blank), inbound? (auto|true|false; default auto), publish_dns? (default true), spf? (default true), region? (email/SES inbound, default eu-west-1), bucket_name?, topic_name?, rule_set_name?, rule_name?, display_name?, set_default? (bool). " +
+				"\"foo@x.com\" → SES verify_email; \"x.com\" → SES verify_domain + DKIM/SPF/DMARC/custom-MAIL-FROM DNS + (auto when aws-s3+aws-sns bound) full inbound bootstrap; \"+15551234567\" → adopt the Twilio phone for SMS or the approved WhatsApp sender for WhatsApp; SMS auto-wires SmsUrl and WhatsApp auto-wires sender callback_url to /webhooks/twilio-inbound. " +
+				"Args: address (required), channel? (email|sms|whatsapp; auto-detected if blank), inbound? (auto|true|false; default auto), publish_dns? (default true), spf? (default true), dmarc? (default true), mail_from? (default true), mail_from_sub? (default mail), region? (email/SES inbound, default eu-west-1), bucket_name?, topic_name?, rule_set_name?, rule_name?, display_name?, set_default? (bool). " +
 				"Idempotent. Writes a row in the local senders table. Returns {address, kind, dkim_tokens?, dns_records?, inbound:{bootstrapped, …}, steps[]}.",
 			InputSchema: schemaObject(map[string]any{
 				"address":       map[string]any{"type": "string"},
@@ -517,6 +517,9 @@ func (a *App) MCPTools() []sdk.Tool {
 				"inbound":       map[string]any{"type": "string"},
 				"publish_dns":   map[string]any{"type": "boolean"},
 				"spf":           map[string]any{"type": "boolean"},
+				"dmarc":         map[string]any{"type": "boolean"},
+				"mail_from":     map[string]any{"type": "boolean"},
+				"mail_from_sub": map[string]any{"type": "string"},
 				"region":        map[string]any{"type": "string"},
 				"bucket_name":   map[string]any{"type": "string"},
 				"topic_name":    map[string]any{"type": "string"},
@@ -2654,11 +2657,21 @@ func (a *App) toolSendersGet(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 			channel = "email"
 		}
 	}
+	if channel == "email" {
+		if kind, raw, err := classifyEmailIdentity(addr); err == nil && kind == "domain" {
+			_ = a.refreshOneSESIdentity(ctx, pid, raw)
+			if ident, _ := dbFindIdentity(ctx.AppDB(), pid, "email_domain", raw); ident != nil {
+				return identityRowToMap(ident), nil
+			}
+		}
+	}
 	local, _ := dbFindSender(ctx.AppDB(), pid, channel, addr)
 	// Probe the provider for the freshest state — best-effort. If
 	// the probe fails we still return the local row.
 	if channel == "email" {
-		_ = a.refreshOneSESIdentity(ctx, pid, addr)
+		if local == nil || local.Kind != "email_mailbox" || local.ParentIdentityID == nil {
+			_ = a.refreshOneSESIdentity(ctx, pid, addr)
+		}
 	} else if channel == "sms" || channel == "whatsapp" {
 		_ = a.refreshOneTwilioNumber(ctx, pid, channel, addr)
 	}
@@ -2705,10 +2718,25 @@ func (a *App) refreshOneSESIdentity(ctx *sdk.AppCtx, pid, addr string) error {
 			SigningEnabled bool     `json:"SigningEnabled"`
 		} `json:"DkimAttributes"`
 		FeedbackForwardingStatus bool `json:"FeedbackForwardingStatus"`
+		MailFromAttributes       struct {
+			MailFromDomain       string `json:"MailFromDomain"`
+			MailFromDomainStatus string `json:"MailFromDomainStatus"`
+			BehaviorOnMxFailure  string `json:"BehaviorOnMxFailure"`
+		} `json:"MailFromAttributes"`
 	}
 	_ = json.Unmarshal(res.Data, &inner)
 	dkimStatus := inner.DkimAttributes.Status
 	verifiedStatus := domainVerificationStatus(dkimStatus)
+	metadata := ""
+	if inner.MailFromAttributes.MailFromDomain != "" || inner.MailFromAttributes.MailFromDomainStatus != "" {
+		if b, err := json.Marshal(map[string]any{
+			"mail_from_domain":          inner.MailFromAttributes.MailFromDomain,
+			"mail_from_domain_status":   inner.MailFromAttributes.MailFromDomainStatus,
+			"mail_from_mx_failure_mode": inner.MailFromAttributes.BehaviorOnMxFailure,
+		}); err == nil {
+			metadata = string(b)
+		}
+	}
 	// Route to the right table by what SES says this identity is.
 	if inner.IdentityType == "DOMAIN" || inner.IdentityType == "MANAGED_DOMAIN" {
 		_, err = dbUpsertIdentity(ctx.AppDB(), &identityUpsert{
@@ -2720,6 +2748,7 @@ func (a *App) refreshOneSESIdentity(ctx *sdk.AppCtx, pid, addr string) error {
 			Verified:           inner.VerifiedForSendingStatus,
 			VerificationStatus: verifiedStatus,
 			DkimStatus:         dkimStatus,
+			Metadata:           metadata,
 			MarkSyncedNow:      true,
 		})
 		return err
@@ -2906,6 +2935,10 @@ func dkimCNAMERecords(domain string, tokens []string) []map[string]string {
 		})
 	}
 	return out
+}
+
+func defaultDMARCRecord(domain string) string {
+	return "v=DMARC1; p=none; rua=mailto:dmarc@" + domain + "; adkim=s; aspf=r"
 }
 
 func normaliseSenderKind(k string) string {

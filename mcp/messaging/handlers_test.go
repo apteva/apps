@@ -1140,13 +1140,13 @@ func TestSendersCreate_DispatchesByShape(t *testing.T) {
 		t.Errorf("expected inbound.bootstrapped=false, got %+v", d.Inbound)
 	}
 
-	// Confirm dispatch by tool name — only the two SES verify_* calls,
-	// no SNS / S3 traffic on the unbound auto path.
+	// Confirm dispatch by tool name — SES verification plus custom MAIL
+	// FROM, but no SNS / S3 traffic on the unbound auto path.
 	tools := []string{}
 	for _, c := range plat.executeCalls {
 		tools = append(tools, c.Tool)
 	}
-	if len(tools) != 2 || tools[0] != "verify_email" || tools[1] != "verify_domain" {
+	if len(tools) != 3 || tools[0] != "verify_email" || tools[1] != "verify_domain" || tools[2] != "set_mail_from" {
 		t.Errorf("tool dispatch=%v", tools)
 	}
 }
@@ -3913,8 +3913,8 @@ func TestSendersCreate_Domain_PublishDNSSkippedWhenNoDomainsApp(t *testing.T) {
 		t.Fatal(err)
 	}
 	out := outRaw.(*sendersCreateResp)
-	if len(out.DnsRecords) != 3 {
-		t.Errorf("expected 3 dns_records, got %d", len(out.DnsRecords))
+	if len(out.DnsRecords) != 7 {
+		t.Errorf("expected 7 dns_records, got %d", len(out.DnsRecords))
 	}
 	// publish_dns step should be skipped with a clear reason — domains app not bound.
 	publishStep := false

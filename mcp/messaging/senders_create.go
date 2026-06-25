@@ -10,7 +10,8 @@ package main
 //
 //   • address looks like a domain (x.com) and inbound="auto" (default):
 //       - SES verify_domain → DKIM tokens
-//       - publish DKIM CNAMEs (+ SPF if enabled) via the domains app
+//       - publish DKIM CNAMEs (+ SPF/DMARC/custom MAIL FROM if enabled)
+//         via the domains app
 //       - if aws-s3 AND aws-sns are bound, also run the full inbound
 //         bootstrap (S3 bucket + bucket policy, SNS topic + topic
 //         policy, receipt rule set + rule + activation, SNS subscribe
@@ -45,7 +46,10 @@ type sendersCreateReq struct {
 	Inbound     string `json:"inbound"`       // "auto" | "true" | "false"; default "auto"
 	PublishDNS  *bool  `json:"publish_dns"`   // domain only; default true
 	SPF         *bool  `json:"spf"`           // domain only; default true
+	DMARC       *bool  `json:"dmarc"`         // domain only; default true
+	MailFrom    *bool  `json:"mail_from"`     // domain only; default true
 	Region      string `json:"region"`        // default eu-west-1 (inbound only)
+	MailFromSub string `json:"mail_from_sub"` // default "mail"
 	BucketName  string `json:"bucket_name"`   // auto-named if blank
 	TopicName   string `json:"topic_name"`    // auto-named if blank
 	RuleSetName string `json:"rule_set_name"` // default "apteva-default"
@@ -126,6 +130,7 @@ func (a *App) toolSendersCreate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 		Channel:     strArg(args, "channel"),
 		Inbound:     strArg(args, "inbound"),
 		Region:      strArg(args, "region"),
+		MailFromSub: strArg(args, "mail_from_sub"),
 		BucketName:  strArg(args, "bucket_name"),
 		TopicName:   strArg(args, "topic_name"),
 		RuleSetName: strArg(args, "rule_set_name"),
@@ -137,6 +142,12 @@ func (a *App) toolSendersCreate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	}
 	if v, ok := args["spf"].(bool); ok {
 		body.SPF = &v
+	}
+	if v, ok := args["dmarc"].(bool); ok {
+		body.DMARC = &v
+	}
+	if v, ok := args["mail_from"].(bool); ok {
+		body.MailFrom = &v
 	}
 	if v, ok := args["set_default"].(bool); ok {
 		body.SetDefault = v
@@ -381,6 +392,23 @@ func (a *App) sendersCreateDomain(ctx *sdk.AppCtx, pid string, sesConnID int64, 
 	if req.SPF != nil {
 		publishSPF = *req.SPF
 	}
+	publishDMARC := true
+	if req.DMARC != nil {
+		publishDMARC = *req.DMARC
+	}
+	configureMailFrom := true
+	if req.MailFrom != nil {
+		configureMailFrom = *req.MailFrom
+	}
+	mailFromSub := strings.ToLower(strings.TrimSpace(req.MailFromSub))
+	if mailFromSub == "" {
+		mailFromSub = "mail"
+	}
+	if strings.ContainsAny(mailFromSub, " @/\t\r\n") || strings.Trim(mailFromSub, ".") == "" {
+		return nil, fmt.Errorf("invalid mail_from_sub %q", req.MailFromSub)
+	}
+	mailFromSub = strings.Trim(mailFromSub, ".")
+	mailFromDomain := mailFromSub + "." + domain
 
 	s3Bound := ctx.IntegrationFor("inbound_storage")
 	snsBound := ctx.IntegrationFor("inbound_notifications")
@@ -474,6 +502,34 @@ func (a *App) sendersCreateDomain(ctx *sdk.AppCtx, pid string, sesConnID int64, 
 	resp.DkimTokens = dkimTokens
 	resp.DkimStatus = dkimStatus
 	resp.DnsRecords = dkimCNAMERecords(domain, dkimTokens)
+	if publishSPF {
+		resp.DnsRecords = append(resp.DnsRecords, map[string]string{
+			"name":  domain,
+			"type":  "TXT",
+			"value": "v=spf1 include:amazonses.com ~all",
+		})
+	}
+	if publishDMARC {
+		resp.DnsRecords = append(resp.DnsRecords, map[string]string{
+			"name":  "_dmarc." + domain,
+			"type":  "TXT",
+			"value": defaultDMARCRecord(domain),
+		})
+	}
+	if configureMailFrom {
+		resp.DnsRecords = append(resp.DnsRecords,
+			map[string]string{
+				"name":  mailFromDomain,
+				"type":  "MX",
+				"value": "10 feedback-smtp." + region + ".amazonses.com",
+			},
+			map[string]string{
+				"name":  mailFromDomain,
+				"type":  "TXT",
+				"value": "v=spf1 include:amazonses.com ~all",
+			},
+		)
+	}
 	detail := fmt.Sprintf("%d dkim tokens", len(dkimTokens))
 	if adopted {
 		detail += " (adopted existing identity)"
@@ -482,13 +538,14 @@ func (a *App) sendersCreateDomain(ctx *sdk.AppCtx, pid string, sesConnID int64, 
 		detail += " — re-probed stuck DKIM (delete+recreate)"
 	}
 	resp.Steps = append(resp.Steps, bootstrapStep{Step: "ses_verify_domain", OK: true, Detail: detail})
-	persistDomainIdentity(ctx, pid, domain, resp, false, "persist_domain_identity")
+	metadata := domainSetupMetadata(domain, region, mailFromSub, mailFromDomain, publishDMARC, configureMailFrom)
+	persistDomainIdentityWithMetadata(ctx, pid, domain, resp, false, metadata, "persist_domain_identity")
 
-	// On adoption of an identity created elsewhere, reset any leftover
-	// custom MAIL FROM domain back to the SES default — messaging doesn't
-	// use custom MAIL FROM, so a carried-over (often FAILED) value is
-	// just noise. Skip after a re-probe: the recreated identity is clean.
-	if adopted && !reprobed {
+	if configureMailFrom {
+		resp.Steps = append(resp.Steps, bootstrapSetMailFrom(ctx, sesConnID, domain, mailFromDomain))
+	} else if adopted && !reprobed {
+		// Explicit opt-out preserves the old cleanup behavior for
+		// deployments that do not want custom MAIL FROM on Messaging domains.
 		resp.Steps = append(resp.Steps, bootstrapClearMailFrom(ctx, sesConnID, domain))
 	}
 
@@ -545,10 +602,48 @@ func (a *App) sendersCreateDomain(ctx *sdk.AppCtx, pid string, sesConnID int64, 
 				}
 				resp.Steps = append(resp.Steps, st)
 			}
+			if publishDMARC {
+				st := bootstrapPublishDNSRecord(
+					ctx, pid, "dns_dmarc", domain, "_dmarc", "TXT",
+					defaultDMARCRecord(domain),
+				)
+				if !st.OK {
+					resp.DnsPublishPartial = true
+				}
+				resp.Steps = append(resp.Steps, st)
+			}
+			if configureMailFrom {
+				st := bootstrapPublishDNSRecord(
+					ctx, pid, "dns_mail_from_mx", domain, mailFromSub, "MX",
+					"10 feedback-smtp."+region+".amazonses.com",
+				)
+				if !st.OK {
+					resp.DnsPublishPartial = true
+				}
+				resp.Steps = append(resp.Steps, st)
+				st = bootstrapPublishDNSRecord(
+					ctx, pid, "dns_mail_from_spf", domain, mailFromSub, "TXT",
+					"v=spf1 include:amazonses.com ~all",
+				)
+				if !st.OK {
+					resp.DnsPublishPartial = true
+				}
+				resp.Steps = append(resp.Steps, st)
+			}
 		} else {
+			recordCount := len(dkimTokens)
+			if publishSPF {
+				recordCount++
+			}
+			if publishDMARC {
+				recordCount++
+			}
+			if configureMailFrom {
+				recordCount += 2
+			}
 			resp.Steps = append(resp.Steps, bootstrapStep{
 				Step: "publish_dns", OK: true,
-				Skipped: fmt.Sprintf("domains app not bound — publish %d DKIM CNAME(s) + MX/SPF manually", len(dkimTokens)),
+				Skipped: fmt.Sprintf("domains app not bound — publish %d DNS record(s) manually", recordCount),
 			})
 		}
 	}
@@ -631,7 +726,7 @@ func (a *App) sendersCreateDomain(ctx *sdk.AppCtx, pid string, sesConnID int64, 
 	}
 
 	if resp.Inbound != nil && resp.Inbound.Bootstrapped {
-		persistDomainIdentity(ctx, pid, domain, resp, true, "persist_domain_identity_inbound")
+		persistDomainIdentityWithMetadata(ctx, pid, domain, resp, true, metadata, "persist_domain_identity_inbound")
 	}
 	return resp, nil
 }
@@ -641,6 +736,10 @@ func (a *App) sendersCreateDomain(ctx *sdk.AppCtx, pid string, sesConnID int64, 
 // may fail independently; the mailbox inheritance path must still see
 // a verified parent domain when DKIM is already SUCCESS.
 func persistDomainIdentity(ctx *sdk.AppCtx, pid, domain string, resp *sendersCreateResp, includeInbound bool, stepName string) {
+	persistDomainIdentityWithMetadata(ctx, pid, domain, resp, includeInbound, "", stepName)
+}
+
+func persistDomainIdentityWithMetadata(ctx *sdk.AppCtx, pid, domain string, resp *sendersCreateResp, includeInbound bool, metadata string, stepName string) {
 	inboundBootstrapped := false
 	inboundConfig := ""
 	if includeInbound && resp.Inbound != nil {
@@ -658,6 +757,7 @@ func persistDomainIdentity(ctx *sdk.AppCtx, pid, domain string, resp *sendersCre
 		DkimStatus:          resp.DkimStatus,
 		InboundBootstrapped: inboundBootstrapped,
 		InboundConfig:       inboundConfig,
+		Metadata:            metadata,
 		MarkSyncedNow:       true,
 	})
 	if persistErr != nil {
@@ -665,6 +765,30 @@ func persistDomainIdentity(ctx *sdk.AppCtx, pid, domain string, resp *sendersCre
 		return
 	}
 	resp.Steps = append(resp.Steps, bootstrapStep{Step: stepName, OK: true, Detail: fmt.Sprintf("identity id=%d", identityID)})
+}
+
+func domainSetupMetadata(domain, region, mailFromSub, mailFromDomain string, publishDMARC, configureMailFrom bool) string {
+	meta := map[string]any{}
+	if publishDMARC {
+		meta["dmarc_desired"] = true
+		meta["dmarc_record"] = defaultDMARCRecord(domain)
+	}
+	if configureMailFrom {
+		meta["mail_from_domain"] = mailFromDomain
+		meta["mail_from_desired"] = true
+		meta["mail_from_dns_mx"] = "10 feedback-smtp." + region + ".amazonses.com"
+		meta["mail_from_dns_spf"] = "v=spf1 include:amazonses.com ~all"
+		meta["mail_from_mx_subdomain"] = mailFromSub
+		meta["mail_from_ses_mx_region"] = region
+	}
+	if len(meta) == 0 {
+		return ""
+	}
+	b, err := json.Marshal(meta)
+	if err != nil {
+		return ""
+	}
+	return string(b)
 }
 
 // domainVerificationStatus maps SES's DkimAttributes.Status to our
@@ -1484,6 +1608,21 @@ func bootstrapClearMailFrom(ctx *sdk.AppCtx, connID int64, domain string) bootst
 		return bootstrapStep{Step: "clear_mail_from", OK: true, Skipped: "set_mail_from not applied: " + truncateResData(res)}
 	}
 	return bootstrapStep{Step: "clear_mail_from", OK: true, Detail: "reset MAIL FROM to amazonses.com default"}
+}
+
+func bootstrapSetMailFrom(ctx *sdk.AppCtx, connID int64, domain, mailFromDomain string) bootstrapStep {
+	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "set_mail_from", map[string]any{
+		"EmailIdentity":       domain,
+		"MailFromDomain":      mailFromDomain,
+		"BehaviorOnMxFailure": "USE_DEFAULT_VALUE",
+	})
+	if err != nil {
+		return bootstrapStep{Step: "ses_mail_from", OK: false, Error: err.Error()}
+	}
+	if res == nil || !res.Success {
+		return bootstrapStep{Step: "ses_mail_from", OK: false, Error: truncateResData(res)}
+	}
+	return bootstrapStep{Step: "ses_mail_from", OK: true, Detail: mailFromDomain}
 }
 
 // looksLikeAlreadyExists classifies a SES failure as "identity is
