@@ -88,6 +88,9 @@ func TestCreateRemote_RoundTrip(t *testing.T) {
 		Name: "test-1", Provider: "hetzner", ProviderID: "12345",
 		PublicIPv4: "1.2.3.4", Status: "provisioning",
 		SSHUser: "root", SSHPrivateKey: "PRIV", SSHPublicKey: "PUB",
+		SSHHost: "ssh.example.test", SSHPort: 22022,
+		ResourcesJSON: `{"cpu":{"cores":2}}`,
+		PortsJSON:     `{"22":22022}`,
 	}
 	created, err := dbCreateInstance(db, in)
 	if err != nil {
@@ -100,8 +103,11 @@ func TestCreateRemote_RoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.PublicIPv4 != "1.2.3.4" || got.Provider != "hetzner" {
+	if got.PublicIPv4 != "1.2.3.4" || got.Provider != "hetzner" || got.SSHHost != "ssh.example.test" || got.SSHPort != 22022 {
 		t.Errorf("read back wrong: %+v", got)
+	}
+	if got.ResourcesJSON != `{"cpu":{"cores":2}}` || got.PortsJSON != `{"22":22022}` {
+		t.Errorf("generic metadata wrong: resources=%q ports=%q", got.ResourcesJSON, got.PortsJSON)
 	}
 	// stripSecrets clears the private key but leaves the public.
 	stripped := got.stripSecrets()

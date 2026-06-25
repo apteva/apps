@@ -79,6 +79,8 @@ func listServerTypes(ctx *sdk.AppCtx, provider string) ([]ServerType, error) {
 		return hetznerListServerTypes(ctx)
 	case "digitalocean":
 		return digitalOceanListServerTypes(ctx)
+	case "runpod":
+		return runPodListServerTypes(ctx)
 	default:
 		return nil, providerAdapterUnavailable(resolved, "server type catalog")
 	}
@@ -94,6 +96,8 @@ func listLocations(ctx *sdk.AppCtx, provider string) ([]Location, error) {
 		return hetznerListLocations(ctx)
 	case "digitalocean":
 		return digitalOceanListLocations(ctx)
+	case "runpod":
+		return runPodListLocations(ctx)
 	default:
 		return nil, providerAdapterUnavailable(resolved, "location catalog")
 	}
@@ -109,6 +113,8 @@ func listImages(ctx *sdk.AppCtx, provider string) ([]Image, error) {
 		return hetznerListImages(ctx)
 	case "digitalocean":
 		return digitalOceanListImages(ctx)
+	case "runpod":
+		return runPodListImages(ctx)
 	default:
 		return nil, providerAdapterUnavailable(resolved, "image catalog")
 	}

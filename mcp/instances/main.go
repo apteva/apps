@@ -40,12 +40,12 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: instances
 display_name: Instances
-version: 0.4.16
+version: 0.4.17
 description: |
   Compute-host inventory for Apteva. Manages local machine + VPS
   instances through a generic provider binding. Compatible provider
   integrations: Hetzner Cloud, DigitalOcean, Vultr, AWS EC2,
-  Scaleway, Huawei Cloud, Linode, and OVHcloud. Foundation layer
+  Scaleway, Huawei Cloud, Linode, OVHcloud, and RunPod. Foundation layer
   consumed by Live Link, Deploy, Backup, Containers via cross-app
   calls.
 author: Apteva
@@ -59,19 +59,19 @@ requires:
     - role: provider
       kind: integration
       required: false
-      compatible_slugs: [hetzner, digitalocean, vultr, aws-ec2, scaleway, huawei-cloud, linode, ovhcloud]
+      compatible_slugs: [hetzner, digitalocean, vultr, aws-ec2, scaleway, huawei-cloud, linode, ovhcloud, runpod]
       label: VPS provider
       hint: |
         Optional — local instance always available. Bind a VPS integration
         to provision remote instances through the generic Instances interface.
-        Hetzner and DigitalOcean have provisioning and catalog adapters;
+        Hetzner, DigitalOcean, and RunPod have provisioning and catalog adapters;
         other compatible provider bindings fail clearly until their adapters
         are implemented.
 provides:
   http_routes:
     - prefix: /
   mcp_tools:
-    - { name: instance_create,       description: "Provision a new instance via the bound VPS provider. Compatible bindings include Hetzner, DigitalOcean, Vultr, AWS EC2, Scaleway, Huawei Cloud, Linode, and OVHcloud; Hetzner and DigitalOcean provisioning are implemented today. Args: name, provider?, region?, size?, image?, tags?." }
+    - { name: instance_create,       description: "Provision a new instance via the bound VPS provider. Compatible bindings include Hetzner, DigitalOcean, Vultr, AWS EC2, Scaleway, Huawei Cloud, Linode, OVHcloud, and RunPod; Hetzner, DigitalOcean, and RunPod provisioning are implemented today. Args: name, provider?, region?, size?, image?, tags?." }
     - { name: instance_get,          description: "Fetch one instance by id." }
     - { name: instance_list,         description: "List instances. Args: provider? (filter), status? (filter)." }
     - { name: instance_destroy,      description: "Terminate the instance (refused for local id 0). Args: id." }
@@ -202,6 +202,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	// the original create response.
 	go reconcileHetznerProvisioning(ctx)
 	go reconcileDigitalOceanProvisioning(ctx)
+	go reconcileRunPodProvisioning(ctx)
 
 	return nil
 }

@@ -22,11 +22,15 @@ type Instance struct {
 	Size       string `json:"size,omitempty"`
 	Image      string `json:"image,omitempty"`
 	SSHUser    string `json:"ssh_user,omitempty"`
+	SSHHost    string `json:"ssh_host,omitempty"`
+	SSHPort    int    `json:"ssh_port,omitempty"`
 	// SSH keys are kept server-side only — never returned to MCP /
 	// REST callers. Cleared in API responses by stripSecrets().
 	SSHPrivateKey    string `json:"-"`
 	SSHPublicKey     string `json:"ssh_public_key,omitempty"`
 	TagsJSON         string `json:"tags_json,omitempty"`
+	ResourcesJSON    string `json:"resources_json,omitempty"`
+	PortsJSON        string `json:"ports_json,omitempty"`
 	MonthlyCostCents int    `json:"monthly_cost_cents"`
 	ErrorMessage     string `json:"error,omitempty"`
 	CreatedAt        string `json:"created_at,omitempty"`
@@ -61,9 +65,13 @@ type CreateInstanceInput struct {
 	Size             string
 	Image            string
 	SSHUser          string
+	SSHHost          string
+	SSHPort          int
 	SSHPrivateKey    string
 	SSHPublicKey     string
 	TagsJSON         string
+	ResourcesJSON    string
+	PortsJSON        string
 	MonthlyCostCents int
 }
 
@@ -92,15 +100,15 @@ func ensureLocalInstance(db *sql.DB) error {
 // ─── DB ops ────────────────────────────────────────────────────────
 
 const instanceCols = `id, name, provider, provider_id, public_ipv4, public_ipv6,
-		status, region, size, image, ssh_user, ssh_private_key, ssh_public_key,
-		tags_json, monthly_cost_cents, error_message,
+		status, region, size, image, ssh_user, ssh_host, ssh_port, ssh_private_key, ssh_public_key,
+		tags_json, resources_json, ports_json, monthly_cost_cents, error_message,
 		COALESCE(created_at,''), COALESCE(ready_at,''), COALESCE(destroyed_at,'')`
 
 func scanInstance(s rowScanner) (*Instance, error) {
 	var i Instance
 	if err := s.Scan(&i.ID, &i.Name, &i.Provider, &i.ProviderID, &i.PublicIPv4, &i.PublicIPv6,
-		&i.Status, &i.Region, &i.Size, &i.Image, &i.SSHUser, &i.SSHPrivateKey, &i.SSHPublicKey,
-		&i.TagsJSON, &i.MonthlyCostCents, &i.ErrorMessage,
+		&i.Status, &i.Region, &i.Size, &i.Image, &i.SSHUser, &i.SSHHost, &i.SSHPort, &i.SSHPrivateKey, &i.SSHPublicKey,
+		&i.TagsJSON, &i.ResourcesJSON, &i.PortsJSON, &i.MonthlyCostCents, &i.ErrorMessage,
 		&i.CreatedAt, &i.ReadyAt, &i.DestroyedAt,
 	); err != nil {
 		return nil, err
@@ -129,15 +137,18 @@ func dbCreateInstance(db *sql.DB, in CreateInstanceInput) (*Instance, error) {
 	if in.Status == "" {
 		in.Status = "pending"
 	}
+	if in.SSHPort == 0 {
+		in.SSHPort = 22
+	}
 	res, err := db.Exec(`
 		INSERT INTO instances (
 			name, provider, provider_id, public_ipv4, public_ipv6, status,
-			region, size, image, ssh_user, ssh_private_key, ssh_public_key,
-			tags_json, monthly_cost_cents, created_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			region, size, image, ssh_user, ssh_host, ssh_port, ssh_private_key, ssh_public_key,
+			tags_json, resources_json, ports_json, monthly_cost_cents, created_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		in.Name, in.Provider, in.ProviderID, in.PublicIPv4, in.PublicIPv6, in.Status,
-		in.Region, in.Size, in.Image, in.SSHUser, in.SSHPrivateKey, in.SSHPublicKey,
-		nullStr(in.TagsJSON, "[]"), in.MonthlyCostCents, nowUTC(),
+		in.Region, in.Size, in.Image, in.SSHUser, in.SSHHost, in.SSHPort, in.SSHPrivateKey, in.SSHPublicKey,
+		nullStr(in.TagsJSON, "[]"), nullStr(in.ResourcesJSON, "{}"), nullStr(in.PortsJSON, "{}"), in.MonthlyCostCents, nowUTC(),
 	)
 	if err != nil {
 		return nil, err
@@ -163,8 +174,8 @@ func dbUpdateInstance(db *sql.DB, id int64, fields map[string]any) error {
 	args := []any{}
 	for _, k := range []string{
 		"status", "provider_id", "public_ipv4", "public_ipv6",
-		"region", "size", "image", "ssh_user", "ssh_private_key",
-		"ssh_public_key", "tags_json", "monthly_cost_cents",
+		"region", "size", "image", "ssh_user", "ssh_host", "ssh_port", "ssh_private_key",
+		"ssh_public_key", "tags_json", "resources_json", "ports_json", "monthly_cost_cents",
 		"error_message", "ready_at", "destroyed_at",
 	} {
 		if v, ok := fields[k]; ok {

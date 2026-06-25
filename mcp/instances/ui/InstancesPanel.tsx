@@ -23,12 +23,16 @@ interface Instance {
   provider_id?: string;
   public_ipv4?: string;
   public_ipv6?: string;
+  ssh_host?: string;
+  ssh_port?: number;
   status: string;
   region?: string;
   size?: string;
   image?: string;
   ssh_user?: string;
   ssh_public_key?: string;
+  resources_json?: string;
+  ports_json?: string;
   monthly_cost_cents: number;
   error?: string;
   created_at?: string;
@@ -107,7 +111,7 @@ function formatCPUDetail(cpu: MetricsWire["cpu"]): string {
 }
 
 function providerCurrencySymbol(provider?: string): string {
-  return provider === "digitalocean" ? "$" : "€";
+  return provider === "digitalocean" || provider === "runpod" ? "$" : "€";
 }
 
 function formatProviderPrice(cents: number, provider?: string): string {
@@ -115,7 +119,7 @@ function formatProviderPrice(cents: number, provider?: string): string {
   return `${providerCurrencySymbol(provider)}${(cents / 100).toFixed(2)}`;
 }
 
-function formatRemoteTotal(instances: InstanceWire[]): string {
+function formatRemoteTotal(instances: Instance[]): string {
   const priced = instances.filter((i) => i.provider !== "local" && i.monthly_cost_cents > 0);
   if (priced.length === 0) return "";
   const providers = new Set(priced.map((i) => i.provider));
@@ -123,6 +127,30 @@ function formatRemoteTotal(instances: InstanceWire[]): string {
   return providers.size === 1
     ? formatProviderPrice(total, priced[0]?.provider)
     : `${(total / 100).toFixed(2)}`;
+}
+
+function resourceSummary(inst: Instance): string {
+  if (!inst.resources_json) return "";
+  try {
+    const parsed = JSON.parse(inst.resources_json);
+    const accelerators = Array.isArray(parsed?.accelerators) ? parsed.accelerators : [];
+    const gpu = accelerators
+      .filter((a: any) => a?.kind === "gpu")
+      .map((a: any) => {
+        const count = Number(a.count || 1);
+        const model = String(a.model || "GPU").replace(/^NVIDIA\s+/i, "");
+        return `${count}x ${model}`;
+      });
+    if (gpu.length) return gpu.join(", ");
+    const cores = Number(parsed?.cpu?.cores || 0);
+    const mem = Number(parsed?.memory_gb || 0);
+    const parts = [];
+    if (cores) parts.push(`${cores} vCPU`);
+    if (mem) parts.push(`${mem} GB RAM`);
+    return parts.join(" · ");
+  } catch {
+    return "";
+  }
 }
 
 // ─── Visuals ──────────────────────────────────────────────────────
@@ -793,7 +821,11 @@ function InstanceCard({
   }, [inst.id, inst.status, withParams]);
 
   const ip = inst.public_ipv4 || inst.public_ipv6 || "—";
+  const endpoint = inst.ssh_port && inst.ssh_port !== 22 && ip !== "—" ? `${ip}:${inst.ssh_port}` : ip;
   const isLocal = inst.provider === "local";
+  const resources = resourceSummary(inst);
+  const resourceModel = resources.toLowerCase().replace(/^[0-9]+x\s+/, "");
+  const showResources = resources && (!resources.startsWith("1x ") || !inst.size?.toLowerCase().includes(resourceModel));
   const memPct = metrics && metrics.mem.total_bytes > 0
     ? (metrics.mem.used_bytes / metrics.mem.total_bytes) * 100
     : 0;
@@ -829,8 +861,9 @@ function InstanceCard({
           {inst.provider}
           {inst.size ? ` · ${inst.size}` : ""}
           {inst.region ? ` · ${inst.region}` : ""}
+          {showResources ? ` · ${resources}` : ""}
         </span>
-        <span className="text-text-dim text-xs font-mono ml-2">{ip}</span>
+        <span className="text-text-dim text-xs font-mono ml-2">{endpoint}</span>
         {!isLocal && inst.monthly_cost_cents > 0 && (
           <span
             className="text-[11px] text-text-muted font-mono ml-2"

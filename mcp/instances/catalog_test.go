@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 )
 
@@ -83,5 +84,43 @@ func TestParseDigitalOceanDropletResponse(t *testing.T) {
 	}`))
 	if id != "12345" || ipv4 != "203.0.113.9" || ipv6 != "2001:db8::9" {
 		t.Fatalf("droplet = %q %q %q", id, ipv4, ipv6)
+	}
+}
+
+func TestParseRunPodPodResponse(t *testing.T) {
+	pod := parseRunPodPodResponse(json.RawMessage(`{
+		"id": "abc123",
+		"name": "gpu-1",
+		"publicIp": "203.0.113.20",
+		"portMappings": {"22": 31022},
+		"gpuTypeId": "NVIDIA L40S",
+		"gpuCount": 2,
+		"dataCenterId": "EU-RO-1",
+		"imageName": "runpod/pytorch:test",
+		"vcpuCount": 16,
+		"memoryInGb": 64,
+		"containerDiskInGb": 50,
+		"volumeInGb": 20
+	}`))
+	if pod.ID != "abc123" || pod.PublicIP != "203.0.113.20" {
+		t.Fatalf("pod identity = %#v", pod)
+	}
+	if got := runPodSSHPort(pod.PortMappings); got != 31022 {
+		t.Fatalf("ssh port = %d, want 31022", got)
+	}
+	res := runPodResourcesFromPod(pod)
+	if !strings.Contains(res, `"model":"L40S"`) || !strings.Contains(res, `"count":2`) {
+		t.Fatalf("resources_json = %s", res)
+	}
+}
+
+func TestParseRunPodSizeMultiGPUAndCPU(t *testing.T) {
+	compute, gpu, count, cpu := parseRunPodSize("NVIDIA H100 80GB HBM3 x4")
+	if compute != "GPU" || gpu != "NVIDIA H100 80GB HBM3" || count != 4 || cpu != 0 {
+		t.Fatalf("gpu size parse = %q %q %d %d", compute, gpu, count, cpu)
+	}
+	compute, gpu, count, cpu = parseRunPodSize("cpu:16")
+	if compute != "CPU" || gpu != "" || count != 0 || cpu != 16 {
+		t.Fatalf("cpu size parse = %q %q %d %d", compute, gpu, count, cpu)
 	}
 }

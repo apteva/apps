@@ -65,12 +65,19 @@ func dialSSH(inst *Instance, timeout time.Duration) (*ssh.Client, error) {
 	if user == "" {
 		user = "root"
 	}
-	host := inst.PublicIPv4
+	host := inst.SSHHost
+	if host == "" {
+		host = inst.PublicIPv4
+	}
 	if host == "" {
 		host = inst.PublicIPv6
 	}
 	if host == "" {
 		return nil, errors.New("instance has no public IP")
+	}
+	port := inst.SSHPort
+	if port <= 0 {
+		port = 22
 	}
 	cfg := &ssh.ClientConfig{
 		User: user,
@@ -85,7 +92,7 @@ func dialSSH(inst *Instance, timeout time.Duration) (*ssh.Client, error) {
 		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
 		Timeout:         timeout,
 	}
-	addr := net.JoinHostPort(host, "22")
+	addr := net.JoinHostPort(host, fmt.Sprintf("%d", port))
 	return ssh.Dial("tcp", addr, cfg)
 }
 

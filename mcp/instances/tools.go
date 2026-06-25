@@ -12,8 +12,8 @@ func (a *App) MCPTools() []sdk.Tool {
 	return []sdk.Tool{
 		{
 			Name: "instance_create",
-			Description: "Provision a new instance via the bound VPS provider. Compatible provider bindings: hetzner, digitalocean, vultr, aws-ec2, scaleway, huawei-cloud, linode, ovhcloud. " +
-				"Implemented provisioning adapter today: hetzner. Args: name (req), provider? (defaults to the bound provider), region?, size?, image?, tags_json?. " +
+			Description: "Provision a new instance via the bound VPS provider. Compatible provider bindings: hetzner, digitalocean, vultr, aws-ec2, scaleway, huawei-cloud, linode, ovhcloud, runpod. " +
+				"Implemented provisioning adapters today: hetzner, digitalocean, runpod. Args: name (req), provider? (defaults to the bound provider), region?, size?, image?, tags_json?. " +
 				"Local instance (id 0) is auto-seeded; passing provider=local is refused.",
 			InputSchema: schemaObject(map[string]any{
 				"name":      map[string]any{"type": "string"},
@@ -92,7 +92,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name: "instance_wait_ready",
-			Description: "Poll the instance until SSH is reachable. Already 'ready' instances return immediately. " +
+			Description: "Poll the instance until SSH accepts the key and can run a non-interactive command. Already 'ready' instances return immediately. " +
 				"Args: id, timeout_s? (default 300).",
 			InputSchema: schemaObject(map[string]any{
 				"id":        map[string]any{"type": "integer"},

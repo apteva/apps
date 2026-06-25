@@ -2,13 +2,13 @@ schema: apteva-app/v1
 
 name: instances
 display_name: Instances
-version: 0.4.16
+version: 0.4.17
 description: |
   Compute-host inventory + lifecycle for Apteva. The local Apteva
   machine is always available as a built-in instance (id 0); remote
   instances are provisioned through a generic VPS provider binding.
   The install can bind Hetzner Cloud, DigitalOcean, Vultr, AWS EC2,
-  Scaleway, Huawei Cloud, Linode, or OVHcloud; provider-specific
+  Scaleway, Huawei Cloud, Linode, OVHcloud, or RunPod; provider-specific
   adapters normalize into the same Instances contract.
 
   Foundation layer for higher-level apps that run workloads
@@ -42,22 +42,22 @@ requires:
     - role: provider
       kind: integration
       required: false
-      compatible_slugs: [hetzner, digitalocean, vultr, aws-ec2, scaleway, huawei-cloud, linode, ovhcloud]
+      compatible_slugs: [hetzner, digitalocean, vultr, aws-ec2, scaleway, huawei-cloud, linode, ovhcloud, runpod]
       label: VPS provider
       hint: |
         Optional — local instance always available. Bind a VPS
         integration to provision remote instances through the generic
-        Instances interface. Hetzner and DigitalOcean have provisioning
-        and catalog adapters; the other compatible provider integrations
-        are exposed here and fail clearly until their provider adapters
-        are implemented.
+        Instances interface. Hetzner, DigitalOcean, and RunPod have
+        provisioning and catalog adapters; the other compatible provider
+        integrations are exposed here and fail clearly until their
+        provider adapters are implemented.
 
 provides:
   http_routes:
     - prefix: /
   mcp_tools:
     - name: instance_create
-      description: Provision a new instance via the bound VPS provider. Compatible bindings include Hetzner, DigitalOcean, Vultr, AWS EC2, Scaleway, Huawei Cloud, Linode, and OVHcloud; Hetzner and DigitalOcean provisioning are implemented today.
+      description: Provision a new instance via the bound VPS provider. Compatible bindings include Hetzner, DigitalOcean, Vultr, AWS EC2, Scaleway, Huawei Cloud, Linode, OVHcloud, and RunPod; Hetzner, DigitalOcean, and RunPod provisioning are implemented today.
     - name: instance_get
       description: Fetch one instance by id (0 for local).
     - name: instance_list
