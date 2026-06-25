@@ -28,7 +28,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: composer
 display_name: Composer
-version: 0.3.42
+version: 0.3.43
 description: |
   Multi-clip video compositions with a structured timeline panel,
   universal generated-asset clip editing, first-class AI avatar clips,
@@ -49,7 +49,10 @@ description: |
   when Media Studio returns provider request IDs, falling back to text context.
   The panel lists compositions with lightweight summaries and loads full
   timeline/render details only when a composition is selected, so projects with
-  many saved compositions stay responsive.
+  many saved compositions stay responsive. Preview playback is single-owner:
+  switching compositions stops the live preview, render media is no longer
+  nested inside an opener button, and the full-size render viewer does not
+  autoplay over an already playing inline preview.
   Renders locally via ffmpeg, on a render host via instances, or against a
   bound render_executor integration.
 author: Apteva

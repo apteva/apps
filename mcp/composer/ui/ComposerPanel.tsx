@@ -1,4 +1,4 @@
-// ComposerPanel v0.3.42 - timeline editor with lazy composition details.
+// ComposerPanel v0.3.43 - timeline editor with single-owner preview playback.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
@@ -227,6 +227,17 @@ function renderSrc(r: RenderRow | null | undefined): string {
   if (r.storage_url) return r.storage_url;
   if (r.local_cache_url) return r.local_cache_url;
   return "";
+}
+
+function pauseAllPanelMedia() {
+  if (typeof document === "undefined") return;
+  document.querySelectorAll("video,audio").forEach((node) => {
+    try {
+      (node as HTMLMediaElement).pause();
+    } catch {
+      // Best-effort cleanup before switching preview owners.
+    }
+  });
 }
 
 function formatCost(n: number): string {
@@ -1008,9 +1019,22 @@ export default function ComposerPanel({ projectId, installId }: NativePanelProps
     }
   }, [projectId]);
 
+  const openLightbox = useCallback((render: RenderRow) => {
+    setPlaying(false);
+    pauseAllPanelMedia();
+    setLightbox(render);
+  }, []);
+
+  const closeLightbox = useCallback(() => {
+    pauseAllPanelMedia();
+    setLightbox(null);
+  }, []);
+
   useEffect(() => {
     setSelectedDetail(null);
     setSelectedId(null);
+    setPlaying(false);
+    pauseAllPanelMedia();
     load();
     loadBindings();
   }, [load, loadBindings, projectId]);
@@ -1031,6 +1055,8 @@ export default function ComposerPanel({ projectId, installId }: NativePanelProps
     setDraft(next);
     setSelectedClipId(next.clips[0]?.id || "");
     setPlayhead(0);
+    setPlaying(false);
+    pauseAllPanelMedia();
     setJsonEdit(selectedFull ? prettyJSON(selectedFull.edit_json || "", editJSONFromDraft(next)) : editJSONFromDraft(next));
     setJsonOutput(selectedFull ? prettyJSON(selectedFull.output_json || "", outputJSONFromDraft(next)) : outputJSONFromDraft(next));
   }, [selectedId, selectedFull?.edit_json, selectedFull?.output_json]);
@@ -1661,7 +1687,7 @@ export default function ComposerPanel({ projectId, installId }: NativePanelProps
                   onAddAISoundtrack={addAISoundtrack}
                   onBrowse={() => openPicker(clips.length ? { kind: "clip", clipId: clips[0].id } : { kind: "clip", clipId: "" })}
                 />
-                <RenderPreview render={selectedFull?.latest_render || null} outputFormat={draft.output.format} aspect={draft.output.aspect} onOpen={setLightbox} />
+                <RenderPreview render={selectedFull?.latest_render || null} outputFormat={draft.output.format} aspect={draft.output.aspect} onOpen={openLightbox} />
               </section>
               <Inspector
                 projectId={projectId}
@@ -1703,7 +1729,7 @@ export default function ComposerPanel({ projectId, installId }: NativePanelProps
         </main>
       </div>
 
-      {lightbox && <Lightbox render={lightbox} outputFormat={draft.output.format} onClose={() => setLightbox(null)} />}
+      {lightbox && <Lightbox render={lightbox} outputFormat={draft.output.format} onClose={closeLightbox} />}
       {clipEditor && (
         <ClipEditorModal
           projectId={projectId}
@@ -1955,6 +1981,13 @@ function PreviewStage({
       video.pause();
     }
   }, [playing, asset?.url]);
+
+  useEffect(() => {
+    const video = mediaRef.current;
+    return () => {
+      if (video) video.pause();
+    };
+  }, [asset?.url]);
 
   const url = asset?.url || "";
   return (
@@ -3419,23 +3452,26 @@ function RenderPreview({ render, outputFormat, aspect, onOpen }: { render: Rende
         <span className="text-text font-medium flex-1">Latest render</span>
         <span className="text-text-dim">{(render.duration_ms / 1000).toFixed(1)}s render</span>
         {formatCost(render.cost_usd) && <span className="text-accent">{formatCost(render.cost_usd)}</span>}
+        {url && (
+          <button type="button" onClick={() => onOpen(render)} className="px-2 py-1 border border-border rounded hover:bg-bg-input text-text">
+            Open
+          </button>
+        )}
       </header>
-      <button type="button" onClick={() => onOpen(render)} className="block w-full text-left">
-        {url ? (
-          audio
-            ? <div className="p-3"><audio controls src={url} className="w-full" /></div>
-            : (
-              <div className="p-3 flex justify-center bg-bg">
-                <video
-                  controls
-                  src={url}
-                  className="block object-contain border border-border bg-black"
-                  style={{ aspectRatio: aspectRatio(aspect), width: `min(100%, ${previewFrameMaxWidth(aspect)})` }}
-                />
-              </div>
-            )
-        ) : <div className="py-12 text-center text-text-muted text-xs">no source</div>}
-      </button>
+      {url ? (
+        audio
+          ? <div className="p-3"><audio controls src={url} className="w-full" /></div>
+          : (
+            <div className="p-3 flex justify-center bg-bg">
+              <video
+                controls
+                src={url}
+                className="block object-contain border border-border bg-black"
+                style={{ aspectRatio: aspectRatio(aspect), width: `min(100%, ${previewFrameMaxWidth(aspect)})` }}
+              />
+            </div>
+          )
+      ) : <div className="py-12 text-center text-text-muted text-xs">no source</div>}
     </section>
   );
 }
@@ -3458,8 +3494,8 @@ function Lightbox({ render, outputFormat, onClose }: { render: RenderRow; output
     >
       <div onClick={(e) => e.stopPropagation()} className="flex flex-col items-center gap-3">
         {url && (audio
-          ? <audio controls autoPlay src={url} style={{ width: "min(720px, 92vw)" }} />
-          : <video controls autoPlay src={url} style={{ maxWidth: "92vw", maxHeight: "82vh" }} />
+          ? <audio controls src={url} style={{ width: "min(720px, 92vw)" }} />
+          : <video controls src={url} style={{ maxWidth: "92vw", maxHeight: "82vh" }} />
         )}
         <div className="text-text-dim text-xs">render #{render.id} - {render.executor} - {(render.duration_ms / 1000).toFixed(1)}s</div>
         {url && (
