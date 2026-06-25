@@ -2,9 +2,9 @@ schema: apteva-app/v1
 
 name: computer
 display_name: Computer
-version: 0.7.35
+version: 0.7.36
 description: |
-  Watch and steer browser sessions. v0.7.35 improves Browserbase image uploads.
+  Watch and steer browser sessions. v0.7.36 improves source URL DNS fallback.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/computer

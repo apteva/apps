@@ -48,9 +48,9 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: computer
 display_name: Computer
-version: 0.7.35
+version: 0.7.36
 description: |
-  Watch and steer browser sessions. v0.7.35 improves Browserbase image uploads.
+  Watch and steer browser sessions. v0.7.36 improves source URL DNS fallback.
 scopes: [project, global]
 requires:
   permissions:
@@ -215,6 +215,7 @@ const maxUploadBytes = 100 * 1024 * 1024
 
 var sourceURLHTTPClient = http.DefaultClient
 var sourceURLIPv4HTTPClient = &http.Client{Transport: ipv4OnlyTransport()}
+var sourceURLPublicDNSHTTPClient = &http.Client{Transport: publicDNSTransport()}
 
 // session is one open browser, owned by this sidecar.
 type session struct {
@@ -2438,7 +2439,11 @@ func fetchUploadSourceURL(ctx context.Context, rawURL string) (*http.Response, e
 	if ipv4Err == nil {
 		return ipv4Resp, nil
 	}
-	return nil, fmt.Errorf("%w; IPv4 retry failed: %v", err, ipv4Err)
+	publicResp, publicErr := doUploadSourceGET(ctx, sourceURLPublicDNSHTTPClient, rawURL)
+	if publicErr == nil {
+		return publicResp, nil
+	}
+	return nil, fmt.Errorf("%w; IPv4 retry failed: %v; public DNS retry failed: %v", err, ipv4Err, publicErr)
 }
 
 func doUploadSourceGET(ctx context.Context, client *http.Client, rawURL string) (*http.Response, error) {
@@ -2462,6 +2467,31 @@ func ipv4OnlyTransport() http.RoundTripper {
 	tr.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
 		return dialer.DialContext(ctx, "tcp4", address)
 	}
+	return tr
+}
+
+func publicDNSTransport() http.RoundTripper {
+	base, ok := http.DefaultTransport.(*http.Transport)
+	if !ok {
+		base = &http.Transport{}
+	}
+	tr := base.Clone()
+	resolver := &net.Resolver{
+		PreferGo: true,
+		Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
+			dialer := net.Dialer{Timeout: 5 * time.Second}
+			if conn, err := dialer.DialContext(ctx, "udp", "1.1.1.1:53"); err == nil {
+				return conn, nil
+			}
+			return dialer.DialContext(ctx, "udp", "8.8.8.8:53")
+		},
+	}
+	dialer := &net.Dialer{
+		Timeout:   30 * time.Second,
+		KeepAlive: 30 * time.Second,
+		Resolver:  resolver,
+	}
+	tr.DialContext = dialer.DialContext
 	return tr
 }
 
