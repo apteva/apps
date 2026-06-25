@@ -19,10 +19,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"net/url"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"reflect"
 	"runtime"
 	"sort"
@@ -45,9 +47,9 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: computer
 display_name: Computer
-version: 0.7.32
+version: 0.7.33
 description: |
-  Watch and steer browser sessions. v0.7.32 improves computer_use recovery errors.
+  Watch and steer browser sessions. v0.7.33 adds file upload automation.
 scopes: [project, global]
 requires:
   permissions:
@@ -74,7 +76,7 @@ provides:
     - name: browser_session
       description: "Open, resume, list, inspect, close, or switch tabs in app-owned browser sessions. Args: action, session_id?, tab_id?, backend?, backend_session_id?, url?, context_id?, context_name?, auto_create_context?, persist?, timeout?, proxy?, proxy_country?, viewport?. session_id is the app-owned live br_* handle for status/close/computer_use only. To continue later, open a new session with context_id or context_name. Use backend_session_id only for an explicit provider-level attach. For tab control, call browser_session(action=tabs) to list open tabs, then browser_session(action=switch_tab, tab_id=...) or browser_session(action=close_tab, tab_id=...). Do not use keyboard shortcuts such as Ctrl+Tab, Ctrl+PageDown, or Ctrl+1-9 to switch browser tabs. Browserbase honors timeout as max session lifetime. Prefer context_id from computer_context_list to reopen saved state; context_name works across backends when unique. For a reusable saved context, pass context_name with auto_create_context=true; omitted names are only a fallback and are auto-generated. Sessions consume local or cloud resources. When browser work is complete and the user did not explicitly ask to keep the browser open, close it with browser_session(action=close, session_id=...). Closing is especially important for Browserbase/Steel sessions and persisted contexts because it releases provider resources and lets context state flush cleanly."
     - name: computer_use
-      description: "Drive an app-owned browser session. Default workflow: call action=screenshot first; screenshots contain Set-of-Mark numeric badges on interactive elements. To click, use action=click with label=N from the latest screenshot. label must be >= 1; do not pass 0. Prefer label over coordinate; use coordinate only for targets with no badge such as canvas or custom rendered widgets. If a click opens exactly one new tab, Computer automatically follows it and reports switched_tab=true. For explicit tab control, call browser_session(action=tabs) to list tabs, then browser_session(action=switch_tab, tab_id=...) or browser_session(action=close_tab, tab_id=...); do not use Ctrl+Tab, Ctrl+PageDown, or Ctrl+1-9 for browser tab switching. Use action=key for page/editor commands such as Tab, Backspace, Control+A, Control+Z; use action=type only for literal text and full date/time values such as 2026-06-05 or 08:00 PM. For action=scroll, amount is CSS pixels; use 200-500 for a small viewport move and omit amount for the 300px default. After scrolling, tab switching, or navigation, take a fresh screenshot because labels are re-enumerated. Args: session_id, action, tab_id?, coordinate?, label?, text?, key?, direction?, amount?, duration?, annotate? (screenshot only, default true). Returns screenshot bytes for visual actions."
+      description: "Drive an app-owned browser session. Default workflow: call action=screenshot first; screenshots contain Set-of-Mark numeric badges on interactive elements. To click, use action=click with label=N from the latest screenshot. label must be >= 1; do not pass 0. Prefer label over coordinate; use coordinate only for targets with no badge such as canvas or custom rendered widgets. If the page asks to Browse, choose, attach, upload, or drop a file, use action=upload_file with selector or label plus source_url/base64/file_path; do not operate the native OS file picker. If a click opens exactly one new tab, Computer automatically follows it and reports switched_tab=true. For explicit tab control, call browser_session(action=tabs) to list tabs, then browser_session(action=switch_tab, tab_id=...) or browser_session(action=close_tab, tab_id=...); do not use Ctrl+Tab, Ctrl+PageDown, or Ctrl+1-9 for browser tab switching. Use action=key for page/editor commands such as Tab, Backspace, Control+A, Control+Z; use action=type only for literal text and full date/time values such as 2026-06-05 or 08:00 PM. For action=scroll, amount is CSS pixels; use 200-500 for a small viewport move and omit amount for the 300px default. After scrolling, tab switching, upload, or navigation, take a fresh screenshot because labels are re-enumerated. Args: session_id, action, tab_id?, coordinate?, label?, selector?, source_url?, base64?, filename?, mime_type?, file_path?, text?, key?, direction?, amount?, duration?, annotate? (screenshot only, default true). Returns screenshot bytes for visual actions."
     - name: computer_context_create
       description: "Create or import an app-managed browser context. Args: name, backend?, provider_context_id?, persist_default?, metadata?, auto_create_provider?."
     - name: computer_context_list
@@ -208,6 +210,7 @@ var newBackend = backends.New
 // for callers that pause for human input.
 const idleTTL = 30 * time.Minute
 const reapInterval = 5 * time.Minute
+const maxUploadBytes = 100 * 1024 * 1024
 
 // session is one open browser, owned by this sidecar.
 type session struct {
@@ -455,18 +458,25 @@ func (a *App) MCPTools() []sdk.Tool {
 			Name: "computer_use",
 			Description: "Drive a browser session opened by browser_session. Default workflow: call action=screenshot first; screenshots contain Set-of-Mark numeric badges on interactive elements. " +
 				"To click, use action=click with label=N from the latest screenshot. label must be >= 1; do not pass 0. Prefer label over coordinate; use coordinate only for targets with no badge such as canvas or custom rendered widgets. " +
+				"If the page asks to Browse, choose, attach, upload, or drop a file, use action=upload_file with selector or label plus source_url/base64/file_path; do not operate the native OS file picker. " +
 				"If a click opens exactly one new tab, Computer automatically follows it and reports switched_tab=true. For explicit tab control, call browser_session(action=tabs) to list tabs, then browser_session(action=switch_tab, tab_id=...) or browser_session(action=close_tab, tab_id=...). " +
 				"Do not use Ctrl+Tab, Ctrl+PageDown, or Ctrl+1-9 for browser tab switching. Use action=key for page/editor commands such as Tab, Backspace, Control+A, Control+Z; use action=type only for literal text and full date/time values such as 2026-06-05 or 08:00 PM. " +
 				"For action=scroll, amount is CSS pixels; use 200-500 for a small viewport move and omit amount for the 300px default. " +
-				"After scrolling, tab switching, or navigation, take a fresh screenshot because labels are re-enumerated. Actions: screenshot, click, double_click, type, key, scroll, wait. " +
-				"Args: session_id, action, tab_id?, coordinate? (\"x,y\"), label? (Set-of-Mark label), text?, key?, direction?, amount?, duration?, annotate? (screenshot only, default true). " +
+				"After scrolling, tab switching, upload, or navigation, take a fresh screenshot because labels are re-enumerated. Actions: screenshot, click, double_click, type, key, scroll, wait, upload_file. " +
+				"Args: session_id, action, tab_id?, coordinate? (\"x,y\"), label? (Set-of-Mark label), selector? (CSS selector), source_url?, base64?, filename?, mime_type?, file_path?, text?, key?, direction?, amount?, duration?, annotate? (screenshot only, default true). " +
 				"Returns a binary screenshot envelope plus current_url, active_tab_id, tabs, width, height.",
 			InputSchema: schemaObject(map[string]any{
 				"session_id": map[string]any{"type": "string"},
-				"action":     map[string]any{"type": "string", "enum": []string{"screenshot", "click", "double_click", "type", "key", "scroll", "wait"}},
+				"action":     map[string]any{"type": "string", "enum": []string{"screenshot", "click", "double_click", "type", "key", "scroll", "wait", "upload_file"}},
 				"tab_id":     map[string]any{"type": "string", "description": "Optional active tab/page target to switch to before running the action."},
 				"coordinate": map[string]any{"type": "string"},
 				"label":      map[string]any{"type": "integer", "minimum": 1, "description": "Positive Set-of-Mark target number shown as a colored badge in the latest screenshot. Prefer this over coordinate for click/double_click. Do not pass 0."},
+				"selector":   map[string]any{"type": "string", "description": "For action=upload_file. CSS selector for the file input or related upload button/dropzone, e.g. input#mainMedia."},
+				"source_url": map[string]any{"type": "string", "description": "For action=upload_file. HTTP(S) URL to download and upload."},
+				"base64":     map[string]any{"type": "string", "description": "For action=upload_file. Base64 file content, optionally as a data URL."},
+				"filename":   map[string]any{"type": "string", "description": "For action=upload_file with source_url/base64. Suggested filename."},
+				"mime_type":  map[string]any{"type": "string", "description": "For action=upload_file with base64. MIME type hint."},
+				"file_path":  map[string]any{"type": "string", "description": "For action=upload_file. Local app filesystem path; mainly for local/dev/manual use."},
 				"text":       map[string]any{"type": "string", "description": "For action=type. Literal text. When focused on native date/time inputs, full values like 2026-06-05, 08:00 PM, or 2026-06-05 08:00 PM are normalized into the control value."},
 				"key":        map[string]any{"type": "string", "description": "For action=key. Page/editor command key such as Enter, Tab, Backspace, Escape, ArrowUp, Control+A, Control+Z, Meta+A, or Shift+Tab. Do not use action=type for command keys. Do not use Ctrl+Tab, Ctrl+PageDown, or Ctrl+1-9 for browser tab switching; call browser_session(action=tabs) then browser_session(action=switch_tab)."},
 				"direction":  map[string]any{"type": "string", "enum": []string{"up", "down", "left", "right"}, "description": "For action=scroll."},
@@ -1378,6 +1388,7 @@ func (a *App) toolComputerUse(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	act := backends.Action{
 		Type:      action,
 		Label:     intArg(args, "label"),
+		Selector:  stringArg(args, "selector"),
 		Text:      stringArg(args, "text"),
 		Key:       stringArg(args, "key"),
 		Direction: stringArg(args, "direction"),
@@ -1385,6 +1396,27 @@ func (a *App) toolComputerUse(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		Duration:  intArg(args, "duration"),
 	}
 	act.X, act.Y = coordinateArg(args)
+	var uploadMeta map[string]any
+	var uploadCleanup func()
+	if action == "upload_file" {
+		if sess.backend != "local" && sess.backend != "browserbase" {
+			return nil, computerUseFailure("backend_not_supported", id, sess, action,
+				fmt.Sprintf("backend %q does not support upload_file yet", sess.backend),
+				"Use local or Browserbase for file uploads, or ask the user to upload manually.",
+				nil)
+		}
+		files, meta, cleanup, err := prepareUploadFiles(args)
+		if err != nil {
+			return nil, computerUseFailure("invalid_file_source", id, sess, action,
+				err.Error(),
+				"Pass exactly one of source_url, base64, or file_path. For base64, also pass filename.",
+				nil)
+		}
+		act.Files = files
+		uploadMeta = meta
+		uploadCleanup = cleanup
+		defer uploadCleanup()
+	}
 
 	beforeTabs := []backends.TabInfo(nil)
 	if action == "click" || action == "double_click" {
@@ -1429,6 +1461,9 @@ func (a *App) toolComputerUse(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	}
 	disp := sess.comp.DisplaySize()
 	payload := a.sessionActionPayload(id, sess, act, args)
+	for k, v := range uploadMeta {
+		payload[k] = v
+	}
 	if screenshotSkipped {
 		payload["screenshot_available"] = false
 		payload["post_action_screenshot"] = "skipped"
@@ -1456,6 +1491,9 @@ func (a *App) toolComputerUse(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		out["screenshot"] = binaryEnvelope(shot, mime)
 		out["screenshot_b64"] = base64.StdEncoding.EncodeToString(shot)
 		out["mime_type"] = mime
+	}
+	for k, v := range uploadMeta {
+		out[k] = v
 	}
 	if tabs, _ := out["tabs"].([]backends.TabInfo); len(tabs) > 0 {
 		out["tab_count"] = len(tabs)
@@ -1676,6 +1714,16 @@ func (a *App) sessionActionPayload(id string, s *session, act backends.Action, a
 	case "wait":
 		if act.Duration != 0 {
 			payload["duration"] = act.Duration
+		}
+	case "upload_file":
+		if act.Selector != "" {
+			payload["selector"] = act.Selector
+		}
+		if act.Label > 0 {
+			payload["label"] = act.Label
+		}
+		if hasCoordinateArg(args) {
+			payload["coordinate"] = fmt.Sprintf("%d,%d", act.X, act.Y)
 		}
 	case "screenshot":
 		payload["annotate"] = annotateArg(args, true)
@@ -2291,6 +2339,185 @@ func reopenSessionRecoverHint(sess *session) string {
 		}
 	}
 	return "Open a new browser_session using the same context_id or context_name, then take a fresh screenshot before retrying."
+}
+
+func prepareUploadFiles(args map[string]any) ([]string, map[string]any, func(), error) {
+	filePath := strings.TrimSpace(stringArg(args, "file_path"))
+	sourceURL := strings.TrimSpace(stringArg(args, "source_url"))
+	b64 := strings.TrimSpace(stringArg(args, "base64"))
+	sources := 0
+	for _, s := range []string{filePath, sourceURL, b64} {
+		if s != "" {
+			sources++
+		}
+	}
+	if sources != 1 {
+		return nil, nil, func() {}, fmt.Errorf("upload_file requires exactly one of source_url, base64, or file_path")
+	}
+	if filePath != "" {
+		info, err := os.Stat(filePath)
+		if err != nil {
+			return nil, nil, func() {}, fmt.Errorf("file_path: %w", err)
+		}
+		if info.IsDir() {
+			return nil, nil, func() {}, fmt.Errorf("file_path %q is a directory", filePath)
+		}
+		return []string{filePath}, uploadFileMeta(filePath, info.Size(), stringArg(args, "mime_type"), "file_path"), func() {}, nil
+	}
+	if sourceURL != "" {
+		return prepareUploadFileFromURL(sourceURL, args)
+	}
+	return prepareUploadFileFromBase64(b64, args)
+}
+
+func prepareUploadFileFromURL(rawURL string, args map[string]any) ([]string, map[string]any, func(), error) {
+	u, err := url.Parse(rawURL)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
+		return nil, nil, func() {}, fmt.Errorf("source_url must be http or https")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	if err != nil {
+		return nil, nil, func() {}, err
+	}
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return nil, nil, func() {}, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, nil, func() {}, fmt.Errorf("source_url HTTP %d", resp.StatusCode)
+	}
+	filename := firstNonEmpty(stringArg(args, "filename"), filenameFromContentDisposition(resp.Header.Get("Content-Disposition")), filepath.Base(u.Path), "upload.bin")
+	filename = safeUploadFilename(filename)
+	tmpPath, cleanup, err := createUploadTempPath(filename)
+	if err != nil {
+		return nil, nil, func() {}, err
+	}
+	tmp, err := os.Create(tmpPath)
+	if err != nil {
+		cleanup()
+		return nil, nil, func() {}, err
+	}
+	limited := io.LimitReader(resp.Body, maxUploadBytes+1)
+	n, copyErr := io.Copy(tmp, limited)
+	closeErr := tmp.Close()
+	if copyErr != nil {
+		cleanup()
+		return nil, nil, func() {}, copyErr
+	}
+	if closeErr != nil {
+		cleanup()
+		return nil, nil, func() {}, closeErr
+	}
+	if n > maxUploadBytes {
+		cleanup()
+		return nil, nil, func() {}, fmt.Errorf("source_url file exceeds %d bytes", maxUploadBytes)
+	}
+	mimeType := firstNonEmpty(stringArg(args, "mime_type"), resp.Header.Get("Content-Type"))
+	return []string{tmpPath}, uploadFileMeta(filename, n, mimeType, "source_url"), cleanup, nil
+}
+
+func prepareUploadFileFromBase64(raw string, args map[string]any) ([]string, map[string]any, func(), error) {
+	filename := safeUploadFilename(firstNonEmpty(stringArg(args, "filename"), "upload.bin"))
+	mimeType := stringArg(args, "mime_type")
+	if strings.HasPrefix(raw, "data:") {
+		if comma := strings.Index(raw, ","); comma >= 0 {
+			header := raw[:comma]
+			raw = raw[comma+1:]
+			if strings.HasPrefix(header, "data:") {
+				if semi := strings.Index(header, ";"); semi > len("data:") {
+					mimeType = firstNonEmpty(mimeType, header[len("data:"):semi])
+				}
+			}
+		}
+	}
+	decoded, err := base64.StdEncoding.DecodeString(raw)
+	if err != nil {
+		decoded, err = base64.RawStdEncoding.DecodeString(raw)
+	}
+	if err != nil {
+		return nil, nil, func() {}, fmt.Errorf("base64 decode: %w", err)
+	}
+	if len(decoded) > maxUploadBytes {
+		return nil, nil, func() {}, fmt.Errorf("base64 file exceeds %d bytes", maxUploadBytes)
+	}
+	tmpPath, cleanup, err := createUploadTempPath(filename)
+	if err != nil {
+		return nil, nil, func() {}, err
+	}
+	tmp, err := os.Create(tmpPath)
+	if err != nil {
+		cleanup()
+		return nil, nil, func() {}, err
+	}
+	if _, err := tmp.Write(decoded); err != nil {
+		_ = tmp.Close()
+		cleanup()
+		return nil, nil, func() {}, err
+	}
+	if err := tmp.Close(); err != nil {
+		cleanup()
+		return nil, nil, func() {}, err
+	}
+	return []string{tmpPath}, uploadFileMeta(filename, int64(len(decoded)), mimeType, "base64"), cleanup, nil
+}
+
+func createUploadTempPath(filename string) (string, func(), error) {
+	dir, err := os.MkdirTemp("", "apteva-upload-*")
+	if err != nil {
+		return "", func() {}, err
+	}
+	cleanup := func() { _ = os.RemoveAll(dir) }
+	return filepath.Join(dir, filename), cleanup, nil
+}
+
+func uploadFileMeta(filename string, size int64, mimeType, source string) map[string]any {
+	return map[string]any{
+		"uploaded":    true,
+		"filename":    filepath.Base(filename),
+		"size_bytes":  size,
+		"mime_type":   strings.TrimSpace(strings.Split(mimeType, ";")[0]),
+		"file_source": source,
+	}
+}
+
+func filenameFromContentDisposition(v string) string {
+	if v == "" {
+		return ""
+	}
+	_, params, err := mime.ParseMediaType(v)
+	if err != nil {
+		return ""
+	}
+	return params["filename"]
+}
+
+func safeUploadFilename(name string) string {
+	name = filepath.Base(strings.TrimSpace(name))
+	if name == "." || name == "/" || name == "" {
+		name = "upload.bin"
+	}
+	name = strings.Map(func(r rune) rune {
+		switch {
+		case r >= 'a' && r <= 'z':
+			return r
+		case r >= 'A' && r <= 'Z':
+			return r
+		case r >= '0' && r <= '9':
+			return r
+		case r == '.', r == '-', r == '_':
+			return r
+		default:
+			return '-'
+		}
+	}, name)
+	name = strings.Trim(name, ".-")
+	if name == "" {
+		return "upload.bin"
+	}
+	return name
 }
 
 func sessionUnhealthyEventPayload(id string, sess *session, action string, cause error) map[string]any {

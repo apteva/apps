@@ -418,6 +418,72 @@ func TestComputerAppBrowserCloseTab(t *testing.T) {
 	}
 }
 
+// TestComputerAppBrowserUploadFile proves action=upload_file against a
+// real browser backend. It uses a data: page whose file input updates the
+// URL hash on change, so the assertion works for both local Chrome and
+// Browserbase without exposing a local test server to the cloud browser.
+//
+//	RUN_COMPUTER_APP_BROWSER_TESTS=1 APTEVA_HEADLESS_BROWSER=1 go test -run TestComputerAppBrowserUploadFile -timeout 3m .
+//	RUN_COMPUTER_APP_BROWSER_TESTS=1 COMPUTER_APP_BROWSER_BACKEND=browserbase BROWSERBASE_API_KEY=... BROWSERBASE_PROJECT_ID=... go test -run TestComputerAppBrowserUploadFile -timeout 5m .
+func TestComputerAppBrowserUploadFile(t *testing.T) {
+	if os.Getenv("RUN_COMPUTER_APP_BROWSER_TESTS") == "" {
+		t.Skip("set RUN_COMPUTER_APP_BROWSER_TESTS=1 to run the real browser upload test")
+	}
+	backend := strings.TrimSpace(os.Getenv("COMPUTER_APP_BROWSER_BACKEND"))
+	if backend == "" {
+		backend = "local"
+	}
+	if backend == "browserbase" && (os.Getenv("BROWSERBASE_API_KEY") == "" || os.Getenv("BROWSERBASE_PROJECT_ID") == "") {
+		t.Skip("COMPUTER_APP_BROWSER_BACKEND=browserbase requires BROWSERBASE_API_KEY and BROWSERBASE_PROJECT_ID")
+	}
+
+	pageHTML := `<!doctype html>
+<html><body>
+<input id="fileUpload" type="file" accept="image/png,image/jpeg">
+<div id="status">waiting</div>
+<script>
+document.getElementById('fileUpload').addEventListener('change', function() {
+  var file = this.files && this.files[0];
+  document.getElementById('status').textContent = file ? 'uploaded:' + file.name : 'none';
+  if (file) location.href = 'about:blank#uploaded-' + encodeURIComponent(file.name);
+});
+</script>
+</body></html>`
+	pageURL := "data:text/html;charset=utf-8," + url.PathEscape(pageHTML)
+
+	sc := tk.SpawnSidecar(t, ".", tk.WithEnv("APTEVA_HEADLESS_BROWSER", "1"))
+	open := sc.MCP("browser_session", map[string]any{
+		"action":  "open",
+		"backend": backend,
+		"url":     pageURL,
+		"viewport": map[string]any{
+			"width":  1000,
+			"height": 700,
+		},
+	})
+	sessionID, _ := open["session_id"].(string)
+	if sessionID == "" {
+		t.Fatalf("open returned no session_id: %v", open)
+	}
+	defer sc.MCP("browser_close", map[string]any{"session_id": sessionID})
+
+	out := sc.MCP("computer_use", map[string]any{
+		"session_id": sessionID,
+		"action":     "upload_file",
+		"selector":   "input#fileUpload",
+		"filename":   "agent-upload.png",
+		"mime_type":  "image/png",
+		"base64":     base64.StdEncoding.EncodeToString([]byte("fake png bytes")),
+	})
+	if out["uploaded"] != true || out["filename"] != "agent-upload.png" {
+		t.Fatalf("upload output metadata = %#v", out)
+	}
+	current, _ := out["current_url"].(string)
+	if !strings.Contains(current, "#uploaded-agent-upload.png") {
+		t.Fatalf("upload did not trigger page change, current_url=%q out=%#v", current, out)
+	}
+}
+
 func decodeScreenshot(t *testing.T, out map[string]any) []byte {
 	t.Helper()
 	b64, _ := out["screenshot_b64"].(string)

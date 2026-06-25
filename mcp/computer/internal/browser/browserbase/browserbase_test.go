@@ -2,6 +2,12 @@ package browserbase
 
 import (
 	"context"
+	"encoding/json"
+	"io"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -16,6 +22,7 @@ func TestActionTimeoutsAreBounded(t *testing.T) {
 		"scroll":       scrollActionTimeout,
 		"wait":         waitActionTimeout,
 		"navigate":     navigateActionTimeout,
+		"upload_file":  30 * time.Second,
 	}
 	for action, want := range cases {
 		if got := actionTimeout(action); got != want {
@@ -31,5 +38,55 @@ func TestSleepWithContextReportsActionTimeout(t *testing.T) {
 	err := sleepWithContext(ctx, time.Hour)
 	if err == nil || !strings.Contains(err.Error(), "action_timeout") {
 		t.Fatalf("sleepWithContext timeout: want action_timeout, got %v", err)
+	}
+}
+
+func TestUploadSessionFileUsesBrowserbaseUploadsAPI(t *testing.T) {
+	dir := t.TempDir()
+	localFile := filepath.Join(dir, "photo.jpg")
+	if err := os.WriteFile(localFile, []byte("image bytes"), 0o600); err != nil {
+		t.Fatalf("write test file: %v", err)
+	}
+
+	var sawPath, sawAPIKey, sawFilename, sawBody string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		sawPath = r.URL.Path
+		sawAPIKey = r.Header.Get("X-BB-API-Key")
+		if err := r.ParseMultipartForm(10 << 20); err != nil {
+			t.Fatalf("ParseMultipartForm: %v", err)
+		}
+		file, header, err := r.FormFile("file")
+		if err != nil {
+			t.Fatalf("FormFile: %v", err)
+		}
+		defer file.Close()
+		raw, _ := io.ReadAll(file)
+		sawFilename = header.Filename
+		sawBody = string(raw)
+		_ = json.NewEncoder(w).Encode(map[string]string{"message": "ok"})
+	}))
+	defer srv.Close()
+
+	prev := apiBase
+	apiBase = srv.URL
+	t.Cleanup(func() { apiBase = prev })
+
+	c := &Computer{
+		apiKey:    "bb_key",
+		sessionID: "bb_session",
+		http:      srv.Client(),
+	}
+	remote, err := c.uploadSessionFile(localFile)
+	if err != nil {
+		t.Fatalf("uploadSessionFile: %v", err)
+	}
+	if remote != "/tmp/.uploads/photo.jpg" {
+		t.Fatalf("remote path: got %q", remote)
+	}
+	if sawPath != "/sessions/bb_session/uploads" || sawAPIKey != "bb_key" {
+		t.Fatalf("request path/key: path=%q key=%q", sawPath, sawAPIKey)
+	}
+	if sawFilename != "photo.jpg" || sawBody != "image bytes" {
+		t.Fatalf("multipart file: filename=%q body=%q", sawFilename, sawBody)
 	}
 }

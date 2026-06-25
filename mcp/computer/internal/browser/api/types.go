@@ -10,15 +10,17 @@ import (
 
 // Action represents a normalized computer use action.
 type Action struct {
-	Type      string `json:"type"`                // "click", "double_click", "type", "key", "scroll", "screenshot", "navigate", "wait"
-	X         int    `json:"x,omitempty"`         // click/scroll coordinate
-	Y         int    `json:"y,omitempty"`         // click/scroll coordinate
-	Text      string `json:"text,omitempty"`      // for "type" action
-	Key       string `json:"key,omitempty"`       // for "key" action (e.g. "Enter", "Escape")
-	Direction string `json:"direction,omitempty"` // for "scroll": "up", "down", "left", "right"
-	Amount    int    `json:"amount,omitempty"`    // for "scroll": CSS pixels; defaults to 300
-	URL       string `json:"url,omitempty"`       // for "navigate"
-	Duration  int    `json:"duration,omitempty"`  // for "wait" (milliseconds)
+	Type      string   `json:"type"`                // "click", "double_click", "type", "key", "scroll", "screenshot", "navigate", "wait"
+	X         int      `json:"x,omitempty"`         // click/scroll coordinate
+	Y         int      `json:"y,omitempty"`         // click/scroll coordinate
+	Selector  string   `json:"selector,omitempty"`  // CSS selector for DOM-targeted actions like upload_file
+	Files     []string `json:"files,omitempty"`     // local or provider-session file paths for upload_file
+	Text      string   `json:"text,omitempty"`      // for "type" action
+	Key       string   `json:"key,omitempty"`       // for "key" action (e.g. "Enter", "Escape")
+	Direction string   `json:"direction,omitempty"` // for "scroll": "up", "down", "left", "right"
+	Amount    int      `json:"amount,omitempty"`    // for "scroll": CSS pixels; defaults to 300
+	URL       string   `json:"url,omitempty"`       // for "navigate"
+	Duration  int      `json:"duration,omitempty"`  // for "wait" (milliseconds)
 	// Label: Set-of-Mark target. When non-zero, click/double_click
 	// resolve the target via the label→bbox map populated by the
 	// most recent screenshot. Takes precedence over X/Y when set.

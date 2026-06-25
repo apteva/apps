@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
@@ -331,6 +332,142 @@ func TestComputerUseDeadlineExceededIsActionTimeout(t *testing.T) {
 	}
 	if _, ok := app.reg.get("br_slow"); !ok {
 		t.Fatalf("action timeout should not evict session automatically")
+	}
+}
+
+func TestComputerUseUploadFileFromBase64(t *testing.T) {
+	prev := newBackend
+	t.Cleanup(func() { newBackend = prev })
+
+	var seenPath string
+	fake := &fakeComp{
+		display: backends.DisplaySize{Width: 1024, Height: 768},
+		png:     []byte{0x89, 0x50, 0x4e, 0x47},
+		url:     "https://example.com",
+		executeHook: func(action backends.Action) error {
+			if action.Type != "upload_file" {
+				return nil
+			}
+			if action.Selector != "input#mainMedia" {
+				t.Fatalf("upload selector: got %q", action.Selector)
+			}
+			if len(action.Files) != 1 {
+				t.Fatalf("upload files: got %v", action.Files)
+			}
+			seenPath = action.Files[0]
+			raw, err := os.ReadFile(seenPath)
+			if err != nil {
+				t.Fatalf("read prepared upload file: %v", err)
+			}
+			if string(raw) != "hello image" {
+				t.Fatalf("prepared upload bytes: got %q", string(raw))
+			}
+			if filepath.Base(seenPath) != "photo.jpg" {
+				t.Fatalf("prepared upload filename: got %q", filepath.Base(seenPath))
+			}
+			return nil
+		},
+	}
+	newBackend = func(cfg backends.Config) (backends.Computer, error) { return fake, nil }
+
+	app := &App{reg: &registry{m: map[string]*session{}}}
+	ctx := tk.NewAppCtx(t, "apteva.yaml")
+	openOut, err := app.toolBrowserSession(ctx, map[string]any{"action": "open", "backend": "local"})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	sessionID := openOut.(map[string]any)["session_id"].(string)
+
+	out, err := app.toolComputerUse(ctx, map[string]any{
+		"session_id": sessionID,
+		"action":     "upload_file",
+		"selector":   "input#mainMedia",
+		"base64":     base64.StdEncoding.EncodeToString([]byte("hello image")),
+		"filename":   "photo.jpg",
+		"mime_type":  "image/jpeg",
+	})
+	if err != nil {
+		t.Fatalf("upload_file: %v", err)
+	}
+	if seenPath == "" {
+		t.Fatal("fake backend did not receive upload file path")
+	}
+	if _, err := os.Stat(seenPath); !os.IsNotExist(err) {
+		t.Fatalf("temporary upload file should be removed after action, stat err=%v", err)
+	}
+	m := out.(map[string]any)
+	if m["uploaded"] != true || m["filename"] != "photo.jpg" || m["mime_type"] != "image/jpeg" {
+		t.Fatalf("upload output metadata = %#v", m)
+	}
+}
+
+func TestComputerUseUploadFileFromSourceURL(t *testing.T) {
+	prev := newBackend
+	t.Cleanup(func() { newBackend = prev })
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/png")
+		w.Header().Set("Content-Disposition", `attachment; filename="remote.png"`)
+		_, _ = w.Write([]byte("png bytes"))
+	}))
+	t.Cleanup(srv.Close)
+
+	fake := &fakeComp{
+		display: backends.DisplaySize{Width: 1024, Height: 768},
+		png:     []byte{0x89, 0x50, 0x4e, 0x47},
+		executeHook: func(action backends.Action) error {
+			if len(action.Files) != 1 {
+				t.Fatalf("upload files: got %v", action.Files)
+			}
+			if filepath.Base(action.Files[0]) != "remote.png" {
+				t.Fatalf("source filename: got %q", filepath.Base(action.Files[0]))
+			}
+			raw, err := os.ReadFile(action.Files[0])
+			if err != nil {
+				t.Fatalf("read source file: %v", err)
+			}
+			if string(raw) != "png bytes" {
+				t.Fatalf("source bytes: got %q", string(raw))
+			}
+			return nil
+		},
+	}
+	newBackend = func(cfg backends.Config) (backends.Computer, error) { return fake, nil }
+
+	app := &App{reg: &registry{m: map[string]*session{}}}
+	ctx := tk.NewAppCtx(t, "apteva.yaml")
+	openOut, err := app.toolBrowserSession(ctx, map[string]any{"action": "open", "backend": "local"})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	sessionID := openOut.(map[string]any)["session_id"].(string)
+	out, err := app.toolComputerUse(ctx, map[string]any{
+		"session_id": sessionID,
+		"action":     "upload_file",
+		"selector":   "input[type=file]",
+		"source_url": srv.URL + "/remote.png",
+	})
+	if err != nil {
+		t.Fatalf("upload_file source_url: %v", err)
+	}
+	if out.(map[string]any)["filename"] != "remote.png" {
+		t.Fatalf("upload output filename: %v", out)
+	}
+}
+
+func TestComputerUseUploadFileUnsupportedBackend(t *testing.T) {
+	app := &App{reg: &registry{m: map[string]*session{}}}
+	ctx := tk.NewAppCtx(t, "apteva.yaml")
+	now := time.Now()
+	app.reg.put("br_steel", &session{comp: &fakeComp{}, backend: "steel", openedAt: now, lastUsed: now})
+	_, err := app.toolComputerUse(ctx, map[string]any{
+		"session_id": "br_steel",
+		"action":     "upload_file",
+		"base64":     base64.StdEncoding.EncodeToString([]byte("x")),
+		"filename":   "x.txt",
+	})
+	if err == nil || !strings.Contains(err.Error(), "backend_not_supported") {
+		t.Fatalf("unsupported upload backend: want backend_not_supported, got %v", err)
 	}
 }
 
@@ -1428,6 +1565,7 @@ type fakeComp struct {
 	executeErr       error
 	screenshotErr    error
 	executeActionErr error
+	executeHook      func(backends.Action) error
 	openSessionURL   string
 	openSessionID    string
 	openContextID    string
@@ -1461,6 +1599,11 @@ func (f *fakeComp) Execute(action backends.Action) ([]byte, error) {
 		f.addTabOnClick = nil
 	}
 	f.mu.Unlock()
+	if f.executeHook != nil {
+		if err := f.executeHook(action); err != nil {
+			return nil, err
+		}
+	}
 	if f.executeErr != nil {
 		return nil, f.executeErr
 	}

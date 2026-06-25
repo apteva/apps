@@ -24,6 +24,7 @@ import (
 
 	computer "github.com/apteva/apps/mcp/computer/internal/browser/api"
 	"github.com/apteva/apps/mcp/computer/internal/browser/cdptabs"
+	"github.com/apteva/apps/mcp/computer/internal/browser/fileupload"
 	"github.com/apteva/apps/mcp/computer/internal/browser/som"
 	"github.com/apteva/apps/mcp/computer/internal/browser/textinput"
 	"github.com/chromedp/cdproto/emulation"
@@ -804,9 +805,32 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 		time.Sleep(time.Duration(dur) * time.Millisecond)
 		return c.Screenshot()
 
+	case "upload_file":
+		if err := c.uploadFile(action); err != nil {
+			return nil, fmt.Errorf("upload_file: %w", err)
+		}
+		time.Sleep(500 * time.Millisecond)
+		return c.Screenshot()
+
 	default:
 		return nil, fmt.Errorf("unknown action: %s", action.Type)
 	}
+}
+
+func (c *Computer) uploadFile(action computer.Action) error {
+	target := fileupload.Target{Selector: action.Selector}
+	if action.Label > 0 {
+		if e, ok := c.resolveLabel(action.Label); ok {
+			target.X, target.Y = e.Center()
+			target.HasPoint = true
+		}
+	}
+	if !target.HasPoint && action.X != 0 && action.Y != 0 {
+		target.X, target.Y = action.X, action.Y
+		target.HasPoint = true
+	}
+	_, err := fileupload.SetFiles(c.ctx, target, action.Files)
+	return err
 }
 
 // scroll dispatches a real CDP mouseWheel event at (x, y). This scrolls

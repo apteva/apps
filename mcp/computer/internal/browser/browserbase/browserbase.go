@@ -8,14 +8,17 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
 
 	computer "github.com/apteva/apps/mcp/computer/internal/browser/api"
 	"github.com/apteva/apps/mcp/computer/internal/browser/cdptabs"
+	"github.com/apteva/apps/mcp/computer/internal/browser/fileupload"
 	"github.com/apteva/apps/mcp/computer/internal/browser/keyinput"
 	"github.com/apteva/apps/mcp/computer/internal/browser/som"
 	"github.com/apteva/apps/mcp/computer/internal/browser/textinput"
@@ -26,8 +29,8 @@ import (
 	"github.com/chromedp/chromedp"
 )
 
-// apiBase is the Browserbase REST API root. Override for staging via env.
-const apiBase = "https://api.browserbase.com/v1"
+// apiBase is the Browserbase REST API root. Tests override this.
+var apiBase = "https://api.browserbase.com/v1"
 
 const (
 	screenshotCaptureAttempts   = 2
@@ -383,6 +386,13 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 		}
 		return c.Screenshot()
 
+	case "upload_file":
+		if err := c.uploadFile(action); err != nil {
+			return nil, fmt.Errorf("upload_file: %w", err)
+		}
+		time.Sleep(500 * time.Millisecond)
+		return c.Screenshot()
+
 	default:
 		return nil, fmt.Errorf("unknown action: %s", action.Type)
 	}
@@ -485,6 +495,73 @@ func (c *Computer) dispatchClick(ctx context.Context, x, y, clickCount int) erro
 	)
 }
 
+func (c *Computer) uploadFile(action computer.Action) error {
+	if c.sessionID == "" {
+		return fmt.Errorf("browserbase: no active session")
+	}
+	remoteFiles := make([]string, 0, len(action.Files))
+	for _, file := range action.Files {
+		remote, err := c.uploadSessionFile(file)
+		if err != nil {
+			return err
+		}
+		remoteFiles = append(remoteFiles, remote)
+	}
+	target := fileupload.Target{Selector: action.Selector}
+	if action.Label > 0 {
+		if e, ok := c.resolveLabel(action.Label); ok {
+			target.X, target.Y = e.Center()
+			target.HasPoint = true
+		}
+	}
+	if !target.HasPoint && action.X != 0 && action.Y != 0 {
+		target.X, target.Y = action.X, action.Y
+		target.HasPoint = true
+	}
+	ctx, cancel := c.actionContext("upload_file")
+	defer cancel()
+	_, err := fileupload.SetFiles(ctx, target, remoteFiles)
+	return err
+}
+
+func (c *Computer) uploadSessionFile(filePath string) (string, error) {
+	f, err := os.Open(filePath)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+
+	var body bytes.Buffer
+	writer := multipart.NewWriter(&body)
+	part, err := writer.CreateFormFile("file", filepath.Base(filePath))
+	if err != nil {
+		return "", err
+	}
+	if _, err := io.Copy(part, f); err != nil {
+		return "", err
+	}
+	if err := writer.Close(); err != nil {
+		return "", err
+	}
+
+	req, err := http.NewRequest("POST", fmt.Sprintf("%s/sessions/%s/uploads", apiBase, c.sessionID), &body)
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("X-BB-API-Key", c.apiKey)
+	req.Header.Set("Content-Type", writer.FormDataContentType())
+	resp, err := c.http.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		b, _ := io.ReadAll(resp.Body)
+		return "", fmt.Errorf("browserbase upload: HTTP %d: %s", resp.StatusCode, string(b))
+	}
+	return "/tmp/.uploads/" + filepath.Base(filePath), nil
+}
+
 func (c *Computer) actionContext(action string) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(c.ctx, actionTimeout(action))
 }
@@ -503,6 +580,8 @@ func actionTimeout(action string) time.Duration {
 		return waitActionTimeout
 	case "navigate":
 		return navigateActionTimeout
+	case "upload_file":
+		return 30 * time.Second
 	default:
 		return 20 * time.Second
 	}
