@@ -8,7 +8,6 @@ import (
 	"fmt"
 	"io"
 	"net/http"
-	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -208,18 +207,129 @@ func remoteRenderScript(urls []string, ffmpegCmd, format, projectID, publicURL, 
 	b.WriteString("  echo \"missing sha256sum/shasum on remote render host\" >&2\n")
 	b.WriteString("  exit 127\n")
 	b.WriteString("fi\n")
-	uploadURL := strings.TrimRight(publicURL, "/") + "/api/apps/storage/files"
-	if projectID != "" {
-		uploadURL += "?project_id=" + url.QueryEscape(projectID)
-	}
-	fmt.Fprintf(&b, "UPLOAD_URL=%q\n", uploadURL)
-	fmt.Fprintf(&b, "UPLOAD_TOKEN=%q\n", token)
-	fmt.Fprintf(&b, "UPLOAD_RESP=$(curl -fsS --retry 3 -X POST \"$UPLOAD_URL\" -H \"Authorization: Bearer $UPLOAD_TOKEN\" -F folder=/.composer/ -F visibility=private -F source=composer-render -F tags=composer -F tags=render -F file=@./out.%s\\;filename=%s\\;type=%s)\n", format, shellFormValue(filename), shellFormValue(contentType))
-	b.WriteString("STORAGE_ID=$(printf '%s' \"$UPLOAD_RESP\" | sed -n 's/.*\"id\"[[:space:]]*:[[:space:]]*\\([0-9][0-9]*\\).*/\\1/p' | head -1)\n")
-	b.WriteString("test -n \"$STORAGE_ID\"\n")
+	fmt.Fprintf(&b, "export STORAGE_TOKEN=%q\n", token)
+	fmt.Fprintf(&b, "export STORAGE_BASE=%q\n", strings.TrimRight(publicURL, "/")+"/api/apps/storage")
+	fmt.Fprintf(&b, "export PROJECT_ID=%q\n", projectID)
+	b.WriteString("export FOLDER=/.composer/\n")
+	fmt.Fprintf(&b, "export NAME=%q\n", shellFormValue(filename))
+	fmt.Fprintf(&b, "export CT=%q\n", shellFormValue(contentType))
+	fmt.Fprintf(&b, "export OUT=./out.%s\n", format)
+	b.WriteString(remoteStorageUploadScriptFragment)
 	b.WriteString(`echo "APTEVA_RESULT:{\"storage_id\":${STORAGE_ID},\"bytes\":${BYTES},\"sha256\":\"${SHA}\",\"format\":\"` + format + `\"}"` + "\n")
 	return b.String()
 }
+
+// remoteStorageUploadScriptFragment uploads $OUT back to the Storage
+// app from the remote render host. It mirrors Media's hardened upload
+// ladder: direct presigned upload when the backend supports it, chunked
+// /uploads fallback for proxy-backed installs, and single multipart
+// POST only as a legacy last resort.
+const remoteStorageUploadScriptFragment = `CURL_RETRY=(--retry 3 --retry-delay 1 --retry-max-time 120 --retry-connrefused --retry-all-errors)
+INIT_BODY_FILE=$(mktemp)
+INIT_CODE=$(curl -sS "${CURL_RETRY[@]}" -o "$INIT_BODY_FILE" -w "%{http_code}" \
+  -X POST \
+  -H "Authorization: Bearer $STORAGE_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d "{\"name\":\"$NAME\",\"folder\":\"$FOLDER\",\"content_type\":\"$CT\",\"size_bytes\":$BYTES,\"sha256\":\"$SHA\",\"visibility\":\"private\",\"source\":\"composer-render\",\"tags\":[\"composer\",\"render\"]}" \
+  "$STORAGE_BASE/files/init?project_id=$PROJECT_ID" || echo 000)
+STORAGE_ID=""
+NEED_MULTIPART=1
+if [ "$INIT_CODE" = "200" ]; then
+  UPLOAD_URL=$(sed -n 's/.*"upload_url":[[:space:]]*"\([^"]*\)".*/\1/p' "$INIT_BODY_FILE")
+  UPLOAD_URL=$(printf '%s' "$UPLOAD_URL" | sed -e 's/\\u0026/\&/g' -e 's/\\u003c/</g' -e 's/\\u003e/>/g')
+  UPLOAD_ID=$(sed -n 's/.*"upload_id":[[:space:]]*"\([^"]*\)".*/\1/p' "$INIT_BODY_FILE")
+  if [ -n "$UPLOAD_URL" ] && [ -n "$UPLOAD_ID" ]; then
+    NEED_MULTIPART=0
+    curl -sS "${CURL_RETRY[@]}" --fail -o /dev/null -X PUT -H "Content-Type: $CT" --upload-file "$OUT" "$UPLOAD_URL"
+    FIN_BODY=$(curl -sS "${CURL_RETRY[@]}" --fail -X POST \
+      -H "Authorization: Bearer $STORAGE_TOKEN" \
+      -H "Content-Type: application/json" \
+      -d "{\"sha256\":\"$SHA\"}" \
+      "$STORAGE_BASE/files/$UPLOAD_ID/finalize?project_id=$PROJECT_ID")
+    STORAGE_ID=$(echo "$FIN_BODY" | sed -n 's/.*"id"[[:space:]]*:[[:space:]]*\([0-9]*\).*/\1/p' | head -1)
+  elif grep -q '"was_existing"[[:space:]]*:[[:space:]]*true' "$INIT_BODY_FILE"; then
+    STORAGE_ID=$(sed -n 's/.*"file":[[:space:]]*{[[:space:]]*"id":[[:space:]]*\([0-9]*\).*/\1/p' "$INIT_BODY_FILE")
+    if [ -n "$STORAGE_ID" ]; then
+      NEED_MULTIPART=0
+    else
+      echo "STORAGE_INIT_DEDUP_NO_ID body[0:300]=$(head -c 300 "$INIT_BODY_FILE" | tr '\n\r\t' '   ')" >&2
+    fi
+  else
+    echo "STORAGE_INIT_UNPARSEABLE code=$INIT_CODE body[0:300]=$(head -c 300 "$INIT_BODY_FILE" | tr '\n\r\t' '   ')" >&2
+  fi
+fi
+rm -f "$INIT_BODY_FILE"
+if [ "$NEED_MULTIPART" = "1" ]; then
+  UPLOADS_INIT_FILE=$(mktemp)
+  UPLOADS_INIT_CODE=$(curl -sS "${CURL_RETRY[@]}" -o "$UPLOADS_INIT_FILE" -w "%{http_code}" \
+    -X POST \
+    -H "Authorization: Bearer $STORAGE_TOKEN" \
+    -H "Content-Type: application/json" \
+    -d "{\"filename\":\"$NAME\",\"folder\":\"$FOLDER\",\"content_type\":\"$CT\",\"size\":$BYTES,\"sha256\":\"$SHA\",\"visibility\":\"private\",\"source\":\"composer-render\",\"tags\":[\"composer\",\"render\"]}" \
+    "$STORAGE_BASE/uploads?project_id=$PROJECT_ID" || echo 000)
+  if [ "$UPLOADS_INIT_CODE" = "200" ]; then
+    if grep -q '"was_existing"[[:space:]]*:[[:space:]]*true' "$UPLOADS_INIT_FILE"; then
+      STORAGE_ID=$(sed -n 's/.*"file":[[:space:]]*{[[:space:]]*"id":[[:space:]]*\([0-9]*\).*/\1/p' "$UPLOADS_INIT_FILE")
+      if [ -n "$STORAGE_ID" ]; then
+        NEED_MULTIPART=0
+      else
+        echo "STORAGE_UPLOADS_DEDUP_NO_ID body[0:300]=$(head -c 300 "$UPLOADS_INIT_FILE" | tr '\n\r\t' '   ')" >&2
+      fi
+    else
+      CHUNK_UPLOAD_ID=$(sed -n 's/.*"upload_id":[[:space:]]*"\([^"]*\)".*/\1/p' "$UPLOADS_INIT_FILE")
+      PART_SIZE=$(sed -n 's/.*"part_size":[[:space:]]*\([0-9]*\).*/\1/p' "$UPLOADS_INIT_FILE")
+      if [ -n "$CHUNK_UPLOAD_ID" ]; then
+        NEED_MULTIPART=0
+        PART_SIZE=${PART_SIZE:-5242880}
+        PART_FILE=$(mktemp)
+        OFFSET=0
+        PART=1
+        while [ "$OFFSET" -lt "$BYTES" ]; do
+          dd if="$OUT" of="$PART_FILE" bs="$PART_SIZE" skip="$OFFSET" count="$PART_SIZE" iflag=skip_bytes,count_bytes status=none
+          curl -sS "${CURL_RETRY[@]}" --fail -o /dev/null -X PUT \
+            -H "Content-Type: application/octet-stream" \
+            --data-binary "@$PART_FILE" \
+            "$STORAGE_BASE/uploads/$CHUNK_UPLOAD_ID/parts/$PART?project_id=$PROJECT_ID"
+          OFFSET=$((OFFSET + PART_SIZE))
+          PART=$((PART + 1))
+        done
+        rm -f "$PART_FILE"
+        COMPLETE_BODY=$(curl -sS "${CURL_RETRY[@]}" --fail -X POST \
+          -H "Authorization: Bearer $STORAGE_TOKEN" \
+          -H "Content-Type: application/json" \
+          -d "{\"sha256\":\"$SHA\"}" \
+          "$STORAGE_BASE/uploads/$CHUNK_UPLOAD_ID/complete?project_id=$PROJECT_ID")
+        STORAGE_ID=$(echo "$COMPLETE_BODY" | sed -n 's/.*"file":[[:space:]]*{[[:space:]]*"id":[[:space:]]*\([0-9]*\).*/\1/p' | head -1)
+        if [ -z "$STORAGE_ID" ]; then
+          echo "STORAGE_UPLOADS_COMPLETE_NO_ID body[0:300]=$(printf '%s' "$COMPLETE_BODY" | head -c 300 | tr '\n\r\t' '   ')" >&2
+          exit 1
+        fi
+      else
+        echo "STORAGE_UPLOADS_INIT_UNPARSEABLE code=$UPLOADS_INIT_CODE body[0:300]=$(head -c 300 "$UPLOADS_INIT_FILE" | tr '\n\r\t' '   ')" >&2
+      fi
+    fi
+  else
+    echo "STORAGE_UPLOADS_INIT_FAILED code=$UPLOADS_INIT_CODE body[0:300]=$(head -c 300 "$UPLOADS_INIT_FILE" | tr '\n\r\t' '   ')" >&2
+  fi
+  rm -f "$UPLOADS_INIT_FILE"
+fi
+if [ "$NEED_MULTIPART" = "1" ]; then
+  RESP=$(curl -sS "${CURL_RETRY[@]}" --fail -X POST \
+    -H "Authorization: Bearer $STORAGE_TOKEN" \
+    -F "folder=$FOLDER" \
+    -F "visibility=private" \
+    -F "source=composer-render" \
+    -F "tags=composer" \
+    -F "tags=render" \
+    -F "file=@$OUT;type=$CT;filename=$NAME" \
+    "$STORAGE_BASE/files?project_id=$PROJECT_ID")
+  STORAGE_ID=$(echo "$RESP" | sed -n 's/.*"id":[[:space:]]*\([0-9]*\).*/\1/p' | head -1)
+fi
+if [ -z "$STORAGE_ID" ]; then
+  echo "STORAGE_UPLOAD_FAILED" >&2
+  exit 1
+fi
+`
 
 func remoteFFmpegBootstrapScript() string {
 	return `if ! command -v ffmpeg >/dev/null 2>&1; then

@@ -1126,3 +1126,34 @@ func TestAssetKindHint(t *testing.T) {
 		}
 	}
 }
+
+func TestRemoteRenderScriptUsesStorageUploadLadder(t *testing.T) {
+	script := remoteRenderScript(
+		[]string{"https://example.com/in.mp4"},
+		"ffmpeg -i ./in0 ./out.mp4",
+		"mp4",
+		"project-1",
+		"https://agents.example.com/",
+		"token-redacted",
+		"composition.mp4",
+		"video/mp4",
+	)
+	for _, want := range []string{
+		"$STORAGE_BASE/files/init?project_id=$PROJECT_ID",
+		"$STORAGE_BASE/uploads?project_id=$PROJECT_ID",
+		"$STORAGE_BASE/uploads/$CHUNK_UPLOAD_ID/parts/$PART?project_id=$PROJECT_ID",
+		"$STORAGE_BASE/uploads/$CHUNK_UPLOAD_ID/complete?project_id=$PROJECT_ID",
+		"composer-render",
+		"APTEVA_RESULT:{\\\"storage_id\\\":${STORAGE_ID}",
+	} {
+		if !strings.Contains(script, want) {
+			t.Fatalf("remote script missing %q\n%s", want, script)
+		}
+	}
+	oneShot := "$STORAGE_BASE/files?project_id=$PROJECT_ID"
+	if first := strings.Index(script, "$STORAGE_BASE/files/init?project_id=$PROJECT_ID"); first < 0 {
+		t.Fatalf("missing direct upload init")
+	} else if last := strings.LastIndex(script, oneShot); last < first {
+		t.Fatalf("legacy one-shot upload should only appear after upload ladder")
+	}
+}
