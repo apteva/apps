@@ -11,6 +11,8 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
+	"os/exec"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -482,6 +484,88 @@ document.getElementById('fileUpload').addEventListener('change', function() {
 	if !strings.Contains(current, "#uploaded-agent-upload.png") {
 		t.Fatalf("upload did not trigger page change, current_url=%q out=%#v", current, out)
 	}
+}
+
+// TestComputerAppBrowserbasePublicUploadFromURL is an opt-in paid/live test
+// for the production Browserbase path: Computer downloads a public file URL,
+// uploads it into a real public file input, submits the real public form, and
+// verifies the resulting page text from the returned screenshot.
+//
+//	RUN_COMPUTER_APP_PUBLIC_UPLOAD_TESTS=1 BROWSERBASE_API_KEY=... BROWSERBASE_PROJECT_ID=... go test -run TestComputerAppBrowserbasePublicUploadFromURL -timeout 5m .
+func TestComputerAppBrowserbasePublicUploadFromURL(t *testing.T) {
+	if os.Getenv("RUN_COMPUTER_APP_PUBLIC_UPLOAD_TESTS") == "" {
+		t.Skip("set RUN_COMPUTER_APP_PUBLIC_UPLOAD_TESTS=1 to run the public Browserbase upload test")
+	}
+	if os.Getenv("BROWSERBASE_API_KEY") == "" || os.Getenv("BROWSERBASE_PROJECT_ID") == "" {
+		t.Skip("BROWSERBASE_API_KEY and BROWSERBASE_PROJECT_ID are required")
+	}
+
+	const (
+		uploadPage = "https://the-internet.herokuapp.com/upload"
+		sourceURL  = "https://the-internet.herokuapp.com/img/forkme_right_green_007200.png"
+		filename   = "apteva-public-upload.png"
+	)
+
+	sc := tk.SpawnSidecar(t, ".", tk.WithEnv("APTEVA_HEADLESS_BROWSER", "1"))
+	open := sc.MCP("browser_session", map[string]any{
+		"action":  "open",
+		"backend": "browserbase",
+		"url":     uploadPage,
+		"viewport": map[string]any{
+			"width":  1200,
+			"height": 800,
+		},
+	})
+	sessionID, _ := open["session_id"].(string)
+	providerSessionID, _ := open["backend_session_id"].(string)
+	if sessionID == "" || providerSessionID == "" {
+		t.Fatalf("open returned incomplete session ids: %v", open)
+	}
+	defer sc.MCP("browser_close", map[string]any{"session_id": sessionID})
+
+	out := sc.MCP("computer_use", map[string]any{
+		"session_id": sessionID,
+		"action":     "upload_file",
+		"selector":   "#file-upload",
+		"source_url": sourceURL,
+		"filename":   filename,
+		"mime_type":  "image/png",
+	})
+	if out["uploaded"] != true || out["filename"] != filename || out["file_source"] != "source_url" {
+		t.Fatalf("upload metadata = %#v", out)
+	}
+
+	_ = sc.MCP("computer_use", map[string]any{
+		"session_id": sessionID,
+		"action":     "click",
+		"label":      2,
+	})
+	final := sc.MCP("computer_use", map[string]any{
+		"session_id": sessionID,
+		"action":     "wait",
+		"duration":   1000,
+	})
+	ocr := ocrScreenshotText(t, final)
+	if !strings.Contains(ocr, "File Uploaded") || !strings.Contains(ocr, filename) {
+		t.Fatalf("upload success text not found in screenshot OCR; text=%q", ocr)
+	}
+}
+
+func ocrScreenshotText(t *testing.T, out map[string]any) string {
+	t.Helper()
+	if _, err := exec.LookPath("tesseract"); err != nil {
+		t.Skip("tesseract is required for screenshot OCR verification")
+	}
+	pngPath := filepath.Join(t.TempDir(), "browserbase-public-upload.png")
+	if err := os.WriteFile(pngPath, decodeScreenshot(t, out), 0o600); err != nil {
+		t.Fatalf("write OCR screenshot: %v", err)
+	}
+	raw, err := exec.Command("tesseract", pngPath, "stdout").CombinedOutput()
+	if err != nil {
+		t.Fatalf("tesseract OCR failed: %v output=%s", err, string(raw))
+	}
+	t.Logf("OCR screenshot saved to %s", pngPath)
+	return string(raw)
 }
 
 func decodeScreenshot(t *testing.T, out map[string]any) []byte {
