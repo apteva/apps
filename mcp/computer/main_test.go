@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -20,6 +21,12 @@ import (
 	tk "github.com/apteva/app-sdk/testkit"
 	backends "github.com/apteva/apps/mcp/computer/internal/browser"
 )
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	return f(req)
+}
 
 // TestEmbeddedManifestMatchesYAML guards the dual-source-of-truth
 // hazard: apteva.yaml is what the platform reads at install time,
@@ -451,6 +458,79 @@ func TestComputerUseUploadFileFromSourceURL(t *testing.T) {
 		t.Fatalf("upload_file source_url: %v", err)
 	}
 	if out.(map[string]any)["filename"] != "remote.png" {
+		t.Fatalf("upload output filename: %v", out)
+	}
+}
+
+func TestComputerUseUploadFileFromSourceURLRetriesIPv4(t *testing.T) {
+	prevBackend := newBackend
+	prevClient := sourceURLHTTPClient
+	prevIPv4Client := sourceURLIPv4HTTPClient
+	t.Cleanup(func() {
+		newBackend = prevBackend
+		sourceURLHTTPClient = prevClient
+		sourceURLIPv4HTTPClient = prevIPv4Client
+	})
+
+	var primaryCalls, ipv4Calls int
+	sourceURLHTTPClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		primaryCalls++
+		return nil, fmt.Errorf("dial tcp [2606:4700::6810:e684]:443: connect: no route to host")
+	})}
+	sourceURLIPv4HTTPClient = &http.Client{Transport: roundTripFunc(func(req *http.Request) (*http.Response, error) {
+		ipv4Calls++
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Header: http.Header{
+				"Content-Type": []string{"image/png"},
+			},
+			Body: io.NopCloser(strings.NewReader("ipv4 png bytes")),
+		}, nil
+	})}
+
+	fake := &fakeComp{
+		display: backends.DisplaySize{Width: 1024, Height: 768},
+		png:     []byte{0x89, 0x50, 0x4e, 0x47},
+		executeHook: func(action backends.Action) error {
+			if action.Type != "upload_file" {
+				return nil
+			}
+			if len(action.Files) != 1 {
+				t.Fatalf("upload files: got %v", action.Files)
+			}
+			raw, err := os.ReadFile(action.Files[0])
+			if err != nil {
+				t.Fatalf("read source file: %v", err)
+			}
+			if string(raw) != "ipv4 png bytes" {
+				t.Fatalf("source bytes: got %q", string(raw))
+			}
+			return nil
+		},
+	}
+	newBackend = func(cfg backends.Config) (backends.Computer, error) { return fake, nil }
+
+	app := &App{reg: &registry{m: map[string]*session{}}}
+	ctx := tk.NewAppCtx(t, "apteva.yaml")
+	openOut, err := app.toolBrowserSession(ctx, map[string]any{"action": "open", "backend": "local"})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	sessionID := openOut.(map[string]any)["session_id"].(string)
+	out, err := app.toolComputerUse(ctx, map[string]any{
+		"session_id": sessionID,
+		"action":     "upload_file",
+		"selector":   "input[type=file]",
+		"source_url": "https://example.test/image.png",
+		"filename":   "fallback.png",
+	})
+	if err != nil {
+		t.Fatalf("upload_file source_url with IPv4 retry: %v", err)
+	}
+	if primaryCalls != 1 || ipv4Calls != 1 {
+		t.Fatalf("source URL calls: primary=%d ipv4=%d", primaryCalls, ipv4Calls)
+	}
+	if out.(map[string]any)["filename"] != "fallback.png" {
 		t.Fatalf("upload output filename: %v", out)
 	}
 }

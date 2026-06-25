@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"io"
 	"mime"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -47,9 +48,9 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: computer
 display_name: Computer
-version: 0.7.33
+version: 0.7.34
 description: |
-  Watch and steer browser sessions. v0.7.33 adds file upload automation.
+  Watch and steer browser sessions. v0.7.34 improves source URL upload fetching.
 scopes: [project, global]
 requires:
   permissions:
@@ -211,6 +212,9 @@ var newBackend = backends.New
 const idleTTL = 30 * time.Minute
 const reapInterval = 5 * time.Minute
 const maxUploadBytes = 100 * 1024 * 1024
+
+var sourceURLHTTPClient = http.DefaultClient
+var sourceURLIPv4HTTPClient = &http.Client{Transport: ipv4OnlyTransport()}
 
 // session is one open browser, owned by this sidecar.
 type session struct {
@@ -1409,7 +1413,7 @@ func (a *App) toolComputerUse(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		if err != nil {
 			return nil, computerUseFailure("invalid_file_source", id, sess, action,
 				err.Error(),
-				"Pass exactly one of source_url, base64, or file_path. For base64, also pass filename.",
+				uploadFileRecoverHint(args),
 				nil)
 		}
 		act.Files = files
@@ -2341,6 +2345,13 @@ func reopenSessionRecoverHint(sess *session) string {
 	return "Open a new browser_session using the same context_id or context_name, then take a fresh screenshot before retrying."
 }
 
+func uploadFileRecoverHint(args map[string]any) string {
+	if strings.TrimSpace(stringArg(args, "source_url")) != "" {
+		return "The Computer app could not fetch source_url. Use a globally reachable URL, retry if the URL is temporary, or pass base64/file_path instead."
+	}
+	return "Pass exactly one of source_url, base64, or file_path. For base64, also pass filename."
+}
+
 func prepareUploadFiles(args map[string]any) ([]string, map[string]any, func(), error) {
 	filePath := strings.TrimSpace(stringArg(args, "file_path"))
 	sourceURL := strings.TrimSpace(stringArg(args, "source_url"))
@@ -2377,11 +2388,7 @@ func prepareUploadFileFromURL(rawURL string, args map[string]any) ([]string, map
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
-	if err != nil {
-		return nil, nil, func() {}, err
-	}
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := fetchUploadSourceURL(ctx, rawURL)
 	if err != nil {
 		return nil, nil, func() {}, err
 	}
@@ -2417,6 +2424,45 @@ func prepareUploadFileFromURL(rawURL string, args map[string]any) ([]string, map
 	}
 	mimeType := firstNonEmpty(stringArg(args, "mime_type"), resp.Header.Get("Content-Type"))
 	return []string{tmpPath}, uploadFileMeta(filename, n, mimeType, "source_url"), cleanup, nil
+}
+
+func fetchUploadSourceURL(ctx context.Context, rawURL string) (*http.Response, error) {
+	resp, err := doUploadSourceGET(ctx, sourceURLHTTPClient, rawURL)
+	if err == nil {
+		return resp, nil
+	}
+	if ctx.Err() != nil {
+		return nil, err
+	}
+	ipv4Resp, ipv4Err := doUploadSourceGET(ctx, sourceURLIPv4HTTPClient, rawURL)
+	if ipv4Err == nil {
+		return ipv4Resp, nil
+	}
+	return nil, fmt.Errorf("%w; IPv4 retry failed: %v", err, ipv4Err)
+}
+
+func doUploadSourceGET(ctx context.Context, client *http.Client, rawURL string) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
+	if err != nil {
+		return nil, err
+	}
+	return client.Do(req)
+}
+
+func ipv4OnlyTransport() http.RoundTripper {
+	base, ok := http.DefaultTransport.(*http.Transport)
+	if !ok {
+		base = &http.Transport{}
+	}
+	tr := base.Clone()
+	dialer := &net.Dialer{
+		Timeout:   30 * time.Second,
+		KeepAlive: 30 * time.Second,
+	}
+	tr.DialContext = func(ctx context.Context, network, address string) (net.Conn, error) {
+		return dialer.DialContext(ctx, "tcp4", address)
+	}
+	return tr
 }
 
 func prepareUploadFileFromBase64(raw string, args map[string]any) ([]string, map[string]any, func(), error) {
