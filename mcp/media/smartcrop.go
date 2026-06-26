@@ -253,6 +253,9 @@ func stabilizeNarrowSmartCrop(srcX, srcY, srcW, srcH, cropW, cropH int) (int, in
 	maxX := srcW - cropW
 	centerX := maxX / 2
 	if absInt(srcX-centerX) < cropW/5 {
+		if srcX < centerX {
+			return clampInt(roundEven(centerX), 0, maxX), srcY
+		}
 		return srcX, srcY
 	}
 	weight := (widthRatio - 1.6) / 3.0

@@ -60,6 +60,21 @@ func TestStabilizeNarrowSmartCrop_BlendsReelTowardCenter(t *testing.T) {
 	}
 }
 
+func TestStabilizeNarrowSmartCrop_SnapsSmallLeftDriftToCenter(t *testing.T) {
+	// Regression for a 1920x1080 still where smartcrop chose x=626
+	// for a 606px-wide 9:16 crop. That small leftward drift kept extra
+	// couch/brick texture and put the seated subject too far right. A
+	// small rightward shift is still left alone by the stabilizer.
+	x, y := stabilizeNarrowSmartCrop(626, 0, 1920, 1080, 606, 1080)
+	if x != 656 || y != 0 {
+		t.Fatalf("left drift should snap to centered crop, got (%d,%d), want (656,0)", x, y)
+	}
+	x, y = stabilizeNarrowSmartCrop(712, 0, 1920, 1080, 606, 1080)
+	if x != 712 || y != 0 {
+		t.Fatalf("small rightward crop should be unchanged, got (%d,%d)", x, y)
+	}
+}
+
 func TestStabilizeNarrowSmartCrop_WiderCropNoOp(t *testing.T) {
 	x, y := stabilizeNarrowSmartCrop(80, 0, 1280, 720, 960, 720)
 	if x != 80 || y != 0 {
