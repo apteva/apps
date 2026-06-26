@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: seo
 display_name: SEO
-version: 0.3.7
+version: 0.4.0
 description: |
   Generic SEO research workbench. Track domains, keywords, rankings,
   and backlinks; pull metrics from any provider behind one pluggable
@@ -30,6 +30,8 @@ description: |
         observation per page/keyword/day.
   v0.3.7: fixes DataForSEO domain refresh payloads for the current
         Google domain_rank_overview API.
+  v0.4.0: adds search-engine-aware entities and SERP snapshots for
+        Google and YouTube, with Google as the default search engine.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/seo
@@ -68,6 +70,15 @@ provides:
   http_routes:
     - prefix: /
   mcp_tools:
+    - { name: search_engines_list, description: "List supported search engines and generic SEO capabilities. Google is the default." }
+    - { name: entities_add, description: "Add a tracked search entity. Args: search_engine? (google default, youtube), entity_type, identifier, label?, url?, location_id? or country_iso+language_code?." }
+    - { name: entities_list, description: "List tracked search entities. Args: search_engine?, entity_type?, limit?." }
+    - { name: entities_get, description: "Read one tracked search entity. Args: id." }
+    - { name: entities_remove, description: "Remove one tracked search entity. Args: id." }
+    - { name: serp_search, description: "Run a paid provider SERP search and cache ranked results. Args: search_engine? (google default or youtube), keyword or keyword_id, location_id or country_iso+language_code, depth?." }
+    - { name: keyword_ideas, description: "Find keyword/content ideas. Args: search_engine? (google default or youtube), seed_keywords or keywords, location_id or country_iso+language_code, limit?, refresh?." }
+    - { name: rankings_for_entity, description: "List cached ranking rows for a generic search entity. Args: entity_id, since?, limit?." }
+    - { name: content_opportunities, description: "Summarize cached SERP snapshots into content opportunities. Args: search_engine? (youtube default), limit?." }
     - { name: locations_list, description: "List active SEO provider locations. Args: provider?, search_engine?, country_iso?, language_code?, q?, limit?. Sync locations from the SEO panel first." }
     # ── domain CRUD (v0.1) ──────────────────────────────────────────
     - { name: domains_add,    description: "Add a domain (hostname) to track. Args: host (required), label?, location_id? or country_iso+language_code? for the default locale." }
@@ -76,7 +87,7 @@ provides:
     - { name: domains_remove, description: "Remove a domain. Cascades to its pages, metrics, rankings, backlinks. Args: id." }
     # ── keyword CRUD (v0.1) ─────────────────────────────────────────
     - { name: keywords_add,    description: "Add a keyword to track. Args: text (required), location_id or country_iso+language_code. No implicit locale fallback is applied." }
-    - { name: keywords_list,   description: "List keywords in this scope. Args: country_iso?, limit? (default 200)." }
+    - { name: keywords_list,   description: "List keywords in this scope. Args: search_engine?, country_iso?, limit? (default 200)." }
     - { name: keywords_get,    description: "Read one keyword plus its latest metrics snapshot. Args: id." }
     - { name: keywords_remove, description: "Remove a keyword. Cascades to its metrics, volume history, rankings. Args: id." }
     # ── read-only views (v0.2) ──────────────────────────────────────

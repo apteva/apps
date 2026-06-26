@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.4.0
+
+- Added `search_engine`-based support for Google and YouTube, with Google as
+  the default.
+- Added generic search entities for Google domains/pages and YouTube
+  channels/videos.
+- Added cached SERP snapshots and generic entity rankings.
+- Added YouTube discovery tools for SERP search, keyword ideas, and content
+  opportunities.
+- Added a dashboard search-engine selector with engine-specific views,
+  filtered locales, discovery, entities, keywords, and locations.
+- Extended DataForSEO location sync to import YouTube locations and languages
+  into the shared `seo_locations` catalog.
+- Preserved the v0.3.7 DataForSEO domain refresh and ranking-history fixes.
+
 ## 0.3.1
 
 - Fixed DataForSEO live refresh calls by sending a top-level task array through

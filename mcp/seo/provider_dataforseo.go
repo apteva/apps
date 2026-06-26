@@ -599,22 +599,9 @@ func syncDataForSEOLocations(ctx *sdk.AppCtx) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "locations_and_languages", map[string]any{})
+	rows, err := dfsToolResultRows(ctx, connID, "locations_and_languages", map[string]any{})
 	if err != nil {
-		return nil, fmt.Errorf("dataforseo: ExecuteIntegrationTool(locations_and_languages): %w", err)
-	}
-	if !res.Success || res.Status >= 400 {
-		return nil, fmt.Errorf("dataforseo: locations_and_languages returned HTTP %d", res.Status)
-	}
-	var env dfsEnvelope
-	if err := json.Unmarshal(res.Data, &env); err != nil {
-		return nil, fmt.Errorf("dataforseo: parse locations envelope: %w", err)
-	}
-	if env.StatusCode != 20000 {
-		return nil, fmt.Errorf("dataforseo: locations status %d: %s", env.StatusCode, env.StatusMsg)
-	}
-	if len(env.Tasks) == 0 {
-		return nil, fmt.Errorf("dataforseo: locations returned zero tasks")
+		return nil, err
 	}
 	now := time.Now().Unix()
 	tx, err := ctx.AppDB().Begin()
@@ -624,19 +611,20 @@ func syncDataForSEOLocations(ctx *sdk.AppCtx) (any, error) {
 	defer tx.Rollback()
 	upserts := 0
 	skipped := 0
-	for _, task := range env.Tasks {
-		if task.StatusCode != 20000 {
-			return nil, fmt.Errorf("dataforseo: locations task status %d: %s", task.StatusCode, task.StatusMsg)
+	for _, raw := range rows {
+		n, s, err := upsertDfsLocationRaw(tx, raw, now)
+		if err != nil {
+			return nil, err
 		}
-		for _, raw := range task.Result {
-			n, s, err := upsertDfsLocationRaw(tx, raw, now)
-			if err != nil {
-				return nil, err
-			}
-			upserts += n
-			skipped += s
-		}
+		upserts += n
+		skipped += s
 	}
+	ytUpserts, ytSkipped, err := upsertDfsYouTubeLocations(ctx, tx, connID, now)
+	if err != nil {
+		return nil, err
+	}
+	upserts += ytUpserts
+	skipped += ytSkipped
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
@@ -646,6 +634,125 @@ func syncDataForSEOLocations(ctx *sdk.AppCtx) (any, error) {
 		"rows_skipped":  skipped,
 		"synced_at":     now,
 	}, nil
+}
+
+func dfsToolResultRows(ctx *sdk.AppCtx, connID int64, tool string, input map[string]any) ([]json.RawMessage, error) {
+	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, tool, input)
+	if err != nil {
+		return nil, fmt.Errorf("dataforseo: ExecuteIntegrationTool(%s): %w", tool, err)
+	}
+	if !res.Success || res.Status >= 400 {
+		return nil, fmt.Errorf("dataforseo: %s returned HTTP %d", tool, res.Status)
+	}
+	var env dfsEnvelope
+	if err := json.Unmarshal(res.Data, &env); err == nil && len(env.Tasks) > 0 {
+		if env.StatusCode != 0 && env.StatusCode != 20000 {
+			return nil, fmt.Errorf("dataforseo: %s status %d: %s", tool, env.StatusCode, env.StatusMsg)
+		}
+		out := []json.RawMessage{}
+		for _, task := range env.Tasks {
+			if task.StatusCode != 0 && task.StatusCode != 20000 {
+				return nil, fmt.Errorf("dataforseo: %s task status %d: %s", tool, task.StatusCode, task.StatusMsg)
+			}
+			out = append(out, task.Result...)
+		}
+		if len(out) == 0 {
+			return nil, fmt.Errorf("dataforseo: %s returned zero result rows", tool)
+		}
+		return out, nil
+	}
+	return []json.RawMessage{json.RawMessage(res.Data)}, nil
+}
+
+func upsertDfsYouTubeLocations(ctx *sdk.AppCtx, tx *sql.Tx, connID int64, syncedAt int64) (upserts int, skipped int, err error) {
+	locationRows, err := dfsToolResultRows(ctx, connID, "youtube_locations", map[string]any{})
+	if err != nil {
+		return 0, 0, err
+	}
+	languageRows, err := dfsToolResultRows(ctx, connID, "youtube_languages", map[string]any{})
+	if err != nil {
+		return 0, 0, err
+	}
+	locations := flattenDfsObjects(locationRows)
+	languages := flattenDfsObjects(languageRows)
+	if len(languages) == 0 {
+		languages = []map[string]any{{"language_code": "en", "language_name": "English"}}
+	}
+	for _, locObj := range locations {
+		locCode, hasCode := numberField(locObj, "location_code")
+		locName := firstString(locObj, "location_name", "location")
+		country := strings.ToUpper(firstString(locObj, "country_iso_code", "country_iso", "country_code"))
+		if !hasCode || locName == "" {
+			skipped++
+			continue
+		}
+		locRaw, _ := json.Marshal(locObj)
+		for _, langObj := range languages {
+			langCode := strings.ToLower(firstString(langObj, "language_code"))
+			langName := firstString(langObj, "language_name")
+			if langCode == "" {
+				skipped++
+				continue
+			}
+			langRaw, _ := json.Marshal(langObj)
+			rawText := fmt.Sprintf(`{"location":%s,"language":%s}`, locRaw, langRaw)
+			var countryArg any
+			if country != "" {
+				countryArg = country
+			}
+			_, err := tx.Exec(
+				`INSERT INTO seo_locations
+				   (provider, search_engine, location_code, location_name, country_iso,
+				    language_code, language_name, is_active, raw_json, synced_at)
+				 VALUES ('dataforseo', 'youtube', ?, ?, ?, ?, ?, 1, ?, ?)
+				 ON CONFLICT(provider, search_engine, location_code, language_code)
+				 DO UPDATE SET
+				    location_name = excluded.location_name,
+				    country_iso = excluded.country_iso,
+				    language_name = excluded.language_name,
+				    is_active = 1,
+				    raw_json = excluded.raw_json,
+				    synced_at = excluded.synced_at`,
+				locCode, locName, countryArg, langCode, langName, rawText, syncedAt)
+			if err != nil {
+				return upserts, skipped, fmt.Errorf("upsert dataforseo youtube location: %w", err)
+			}
+			upserts++
+		}
+	}
+	return upserts, skipped, nil
+}
+
+func flattenDfsObjects(rows []json.RawMessage) []map[string]any {
+	out := []map[string]any{}
+	var walk func(json.RawMessage)
+	walk = func(raw json.RawMessage) {
+		var arr []json.RawMessage
+		if err := json.Unmarshal(raw, &arr); err == nil && arr != nil {
+			for _, item := range arr {
+				walk(item)
+			}
+			return
+		}
+		var obj map[string]any
+		if err := json.Unmarshal(raw, &obj); err != nil {
+			return
+		}
+		for _, key := range []string{"items", "result", "results"} {
+			if xs, ok := obj[key].([]any); ok {
+				for _, x := range xs {
+					itemRaw, _ := json.Marshal(x)
+					walk(itemRaw)
+				}
+				return
+			}
+		}
+		out = append(out, obj)
+	}
+	for _, row := range rows {
+		walk(row)
+	}
+	return out
 }
 
 func upsertDfsLocationRaw(tx *sql.Tx, raw json.RawMessage, syncedAt int64) (upserts int, skipped int, err error) {
