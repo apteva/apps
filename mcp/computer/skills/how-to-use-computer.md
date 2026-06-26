@@ -74,6 +74,41 @@ Treat browser sessions like resources you open and close.
 
 ## Web-browsing patterns
 
+## Structured controls first
+
+Use the specialized DOM actions before falling back to human-like
+click/key sequences:
+
+- For native `<select>`, dropdowns, ARIA `role=combobox`, `role=listbox`,
+  and multiselect controls, use `computer_use(action="select_option", ...)`
+  first. Do not click options one by one or use ArrowDown/Enter unless
+  `select_option` fails.
+- Pass the control's SoM `label` or a CSS `selector`, then the desired
+  `text`/`value`; for several options use `texts`/`values`.
+- For multiselects, use `mode="replace"` to set the exact selection,
+  `mode="add"` to add, `mode="remove"` to unselect, or `mode="toggle"`
+  only when the requested final state is genuinely a toggle.
+- For checkboxes, radios, and switches, use
+  `computer_use(action="set_checked", checked=true|false, ...)` instead
+  of clicking and guessing the final state.
+- For date/time scheduler fields, use
+  `computer_use(action="set_temporal", value="2026-07-01", ...)` or
+  `value="11:00 AM"` when the field can be targeted directly.
+
+Examples:
+
+```json
+{"action":"select_option","session_id":"br_...","label":19,"texts":["Leather seats","Front seat warmers"],"mode":"replace"}
+```
+
+```json
+{"action":"select_option","session_id":"br_...","label":19,"text":"Front seat warmers","mode":"remove"}
+```
+
+```json
+{"action":"set_checked","session_id":"br_...","label":7,"checked":false}
+```
+
 ## Persistent contexts
 
 Use app contexts when cookies/storage should survive across sessions.

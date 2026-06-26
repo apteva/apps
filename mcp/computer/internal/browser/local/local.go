@@ -24,9 +24,11 @@ import (
 
 	computer "github.com/apteva/apps/mcp/computer/internal/browser/api"
 	"github.com/apteva/apps/mcp/computer/internal/browser/cdptabs"
+	"github.com/apteva/apps/mcp/computer/internal/browser/checkedinput"
 	"github.com/apteva/apps/mcp/computer/internal/browser/fileupload"
 	"github.com/apteva/apps/mcp/computer/internal/browser/selectinput"
 	"github.com/apteva/apps/mcp/computer/internal/browser/som"
+	"github.com/apteva/apps/mcp/computer/internal/browser/temporalinput"
 	"github.com/apteva/apps/mcp/computer/internal/browser/textinput"
 	"github.com/chromedp/cdproto/emulation"
 	"github.com/chromedp/cdproto/fetch"
@@ -78,8 +80,12 @@ type Computer struct {
 	labelMu    sync.RWMutex
 	lastLabels map[int]som.Element
 
-	selectMu         sync.Mutex
-	lastSelectResult *selectinput.Result
+	selectMu           sync.Mutex
+	lastSelectResult   *selectinput.Result
+	checkedMu          sync.Mutex
+	lastCheckedResult  *checkedinput.Result
+	temporalMu         sync.Mutex
+	lastTemporalResult *temporalinput.Result
 
 	// debugURL is Chrome's DevTools frontend URL for the active page
 	// target — opening it in any browser yields a live, interactive
@@ -823,6 +829,20 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 		time.Sleep(200 * time.Millisecond)
 		return c.Screenshot()
 
+	case "set_checked":
+		if _, err := c.setChecked(action); err != nil {
+			return nil, fmt.Errorf("set_checked: %w", err)
+		}
+		time.Sleep(150 * time.Millisecond)
+		return c.Screenshot()
+
+	case "set_temporal":
+		if _, err := c.setTemporal(action); err != nil {
+			return nil, fmt.Errorf("set_temporal: %w", err)
+		}
+		time.Sleep(150 * time.Millisecond)
+		return c.Screenshot()
+
 	default:
 		return nil, fmt.Errorf("unknown action: %s", action.Type)
 	}
@@ -838,6 +858,30 @@ func (c *Computer) setLastSelectResult(res *selectinput.Result) {
 	c.selectMu.Lock()
 	defer c.selectMu.Unlock()
 	c.lastSelectResult = cloneSelectResult(res)
+}
+
+func (c *Computer) LastCheckedResult() *checkedinput.Result {
+	c.checkedMu.Lock()
+	defer c.checkedMu.Unlock()
+	return cloneCheckedResult(c.lastCheckedResult)
+}
+
+func (c *Computer) setLastCheckedResult(res *checkedinput.Result) {
+	c.checkedMu.Lock()
+	defer c.checkedMu.Unlock()
+	c.lastCheckedResult = cloneCheckedResult(res)
+}
+
+func (c *Computer) LastTemporalResult() *temporalinput.Result {
+	c.temporalMu.Lock()
+	defer c.temporalMu.Unlock()
+	return cloneTemporalResult(c.lastTemporalResult)
+}
+
+func (c *Computer) setLastTemporalResult(res *temporalinput.Result) {
+	c.temporalMu.Lock()
+	defer c.temporalMu.Unlock()
+	c.lastTemporalResult = cloneTemporalResult(res)
 }
 
 func (c *Computer) selectOption(action computer.Action) (selectinput.Result, error) {
@@ -866,6 +910,50 @@ func (c *Computer) selectOption(action computer.Action) (selectinput.Result, err
 	return res, err
 }
 
+func (c *Computer) setChecked(action computer.Action) (checkedinput.Result, error) {
+	c.setLastCheckedResult(nil)
+	target := checkedinput.Target{Selector: action.Selector}
+	if action.Label > 0 {
+		if e, ok := c.resolveLabel(action.Label); ok {
+			target.X, target.Y = e.Center()
+			target.HasPoint = true
+		}
+	}
+	if !target.HasPoint && action.X != 0 && action.Y != 0 {
+		target.X, target.Y = action.X, action.Y
+		target.HasPoint = true
+	}
+	res, err := checkedinput.Set(c.ctx, target, checkedinput.Request{Checked: action.Checked})
+	if err == nil {
+		c.setLastCheckedResult(&res)
+	}
+	return res, err
+}
+
+func (c *Computer) setTemporal(action computer.Action) (temporalinput.Result, error) {
+	c.setLastTemporalResult(nil)
+	target := temporalinput.Target{Selector: action.Selector}
+	if action.Label > 0 {
+		if e, ok := c.resolveLabel(action.Label); ok {
+			target.X, target.Y = e.Center()
+			target.HasPoint = true
+		}
+	}
+	if !target.HasPoint && action.X != 0 && action.Y != 0 {
+		target.X, target.Y = action.X, action.Y
+		target.HasPoint = true
+	}
+	value := action.Value
+	if value == "" {
+		value = action.Text
+	}
+	res, err := temporalinput.Set(c.ctx, target, temporalinput.Request{Value: value})
+	if err == nil {
+		c.setLastTemporalResult(&res)
+	}
+	return res, err
+}
+
 func cloneSelectResult(res *selectinput.Result) *selectinput.Result {
 	if res == nil {
 		return nil
@@ -874,6 +962,22 @@ func cloneSelectResult(res *selectinput.Result) *selectinput.Result {
 	clone.Matched = append([]string(nil), res.Matched...)
 	clone.Selected = append([]string(nil), res.Selected...)
 	clone.Options = append([]selectinput.Option(nil), res.Options...)
+	return &clone
+}
+
+func cloneCheckedResult(res *checkedinput.Result) *checkedinput.Result {
+	if res == nil {
+		return nil
+	}
+	clone := *res
+	return &clone
+}
+
+func cloneTemporalResult(res *temporalinput.Result) *temporalinput.Result {
+	if res == nil {
+		return nil
+	}
+	clone := *res
 	return &clone
 }
 
