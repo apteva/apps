@@ -521,6 +521,9 @@ function InvoicesTab({ projectId, apiCall }: { projectId: string; apiCall: ApiCa
                       {fmtMoney(inv.total_cents, inv.currency)}
                     </span>
                   </div>
+                  <div className="text-[11px] text-text-dim mt-0.5">
+                    Updated {fmtDate(inv.updated_at || inv.created_at)}
+                  </div>
                 </li>
               ))}
             </ul>
