@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: messaging
 display_name: Messaging
-version: 0.13.34
+version: 0.13.35
 description: |
   Send and receive messages across channels. v0.1 ships email via
   AWS SES; SMS and push are reserved channel namespaces. Tracks
@@ -59,10 +59,10 @@ requires:
     - role: storage
       kind: app
       compatible_app_names: [storage]
-      capabilities: [files.write]
+      capabilities: [files.read, files.write]
       required: false
       label: "Storage (optional)"
-      hint: "Persists outbound attachments and parsed inbound parts. Without this, attachments on outbound must be base64-inline and inbound attachments are dropped."
+      hint: "Persists outbound attachments, resolves attachment bytes for email, and mints signed media URLs for SMS/WhatsApp. Without it, email can still send base64-inline attachments, but phone media from local files is unavailable."
     - role: domains
       kind: app
       compatible_app_names: [domains]
@@ -96,8 +96,8 @@ provides:
     - prefix: /
   mcp_tools:
     # outbound
-    - { name: send_message,           description: "Send a message. Args: to (URI or URI[]), body, subject?, body_html?, from?, reply_to?, in_reply_to?, references?, headers?, attachment_storage_ids?, template_id?, vars?, prefer_channel?, idempotency_key?. URI scheme picks the channel (mailto:, tel:, apteva://contact/N). Bare email strings are coerced to mailto:." }
-    - { name: send_message_template,  description: "Render a saved template + send. Args: template_id, to, vars?, attachment_storage_ids?, idempotency_key?. Convenience over send_message with template_id." }
+    - { name: send_message,           description: "Send a message. Args: to (URI or URI[]), body, subject?, body_html?, from?, reply_to?, in_reply_to?, references?, headers?, attachments? [{storage_id|url|content_base64, filename?, content_type?, disposition?, content_id?}], attachment_storage_ids?, media_url?, template_id?, vars?, prefer_channel?, idempotency_key?. URI scheme picks the channel (mailto:, tel:, apteva://contact/N). Bare email strings are coerced to mailto:." }
+    - { name: send_message_template,  description: "Render a saved template + send. Args: template_id, to, vars?, attachments?, attachment_storage_ids?, idempotency_key?. Convenience over send_message with template_id." }
     - { name: message_get,            description: "Fetch one message by id — headers, status, channel, direction, delivery events." }
     - { name: message_list,           description: "List messages. Filters: direction? (in|out), channel?, status?, since?, address? (canonical URI), limit?." }
     - { name: inbound_redispatch,     description: "Re-attempt routing for an inbound message that previously failed or had no_match. Args: id." }

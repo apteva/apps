@@ -474,6 +474,114 @@ func TestSendMessage_EmailReplyUsesRawMIMEHeaders(t *testing.T) {
 	}
 }
 
+func TestSendMessage_EmailAttachmentUsesRawMIMEAndPersistsAttachment(t *testing.T) {
+	plat := &stubPlatform{}
+	ctx := newTestCtx(t, plat)
+	app := &App{}
+
+	out, err := app.toolSendMessage(ctx, map[string]any{
+		"channel": "email",
+		"from":    fromAcme,
+		"to":      "alice@example.com",
+		"subject": "with file",
+		"body":    "see attached",
+		"attachments": []any{
+			map[string]any{
+				"filename":       "note.txt",
+				"content_type":   "text/plain",
+				"content_base64": base64.StdEncoding.EncodeToString([]byte("hello attachment")),
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := out.(map[string]any)
+	if r["provider_message_id"] != "ses-raw-123" {
+		t.Fatalf("provider_message_id=%v, want ses-raw-123", r["provider_message_id"])
+	}
+	if len(plat.executeCalls) != 1 || plat.executeCalls[0].Tool != "send_raw_email" {
+		t.Fatalf("provider calls=%+v, want one send_raw_email", plat.executeCalls)
+	}
+	content := plat.executeCalls[0].Input["Content"].(map[string]any)
+	raw := content["Raw"].(map[string]any)
+	data, err := base64.StdEncoding.DecodeString(raw["Data"].(string))
+	if err != nil {
+		t.Fatal(err)
+	}
+	mimeBody := string(data)
+	for _, want := range []string{
+		`Content-Type: multipart/mixed;`,
+		`Content-Disposition: attachment; filename=note.txt`,
+		base64.StdEncoding.EncodeToString([]byte("hello attachment")),
+	} {
+		if !strings.Contains(mimeBody, want) {
+			t.Fatalf("raw MIME missing %q:\n%s", want, mimeBody)
+		}
+	}
+
+	msg, err := dbMessageGet(ctx.AppDB(), "test-proj", r["id"].(int64))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(msg.Attachments) != 1 {
+		t.Fatalf("attachments=%+v, want one", msg.Attachments)
+	}
+	if msg.Attachments[0].Filename != "note.txt" || msg.Attachments[0].ContentType != "text/plain" {
+		t.Fatalf("attachment metadata=%+v", msg.Attachments[0])
+	}
+}
+
+func TestSendMessage_SMSURLAttachmentMapsToTwilioMediaURL(t *testing.T) {
+	plat := newPhoneStub(nil)
+	plat.replyByTool = map[string]*sdk.ExecuteResult{
+		"send_sms": {Success: true, Status: 201, Data: json.RawMessage(`{"sid":"SMmedia"}`)},
+	}
+	ctx := newTestCtx(t, plat)
+	app := &App{}
+
+	out, err := app.toolSendMessage(ctx, map[string]any{
+		"channel": "sms",
+		"from":    "+15551112222",
+		"to":      "+15553334444",
+		"body":    "see media",
+		"attachments": []any{
+			map[string]any{
+				"url":          "https://files.example.test/photo.jpg",
+				"filename":     "photo.jpg",
+				"content_type": "image/jpeg",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := out.(map[string]any)
+	if r["provider_message_id"] != "SMmedia" {
+		t.Fatalf("provider_message_id=%v, want SMmedia", r["provider_message_id"])
+	}
+	var sendCall *executeCall
+	for i := range plat.executeCalls {
+		if plat.executeCalls[i].Tool == "send_sms" {
+			sendCall = &plat.executeCalls[i]
+			break
+		}
+	}
+	if sendCall == nil {
+		t.Fatal("send_sms was not called")
+	}
+	if sendCall.Input["MediaUrl"] != "https://files.example.test/photo.jpg" {
+		t.Fatalf("MediaUrl=%v", sendCall.Input["MediaUrl"])
+	}
+	msg, err := dbMessageGet(ctx.AppDB(), "test-proj", r["id"].(int64))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(msg.Attachments) != 1 || msg.Attachments[0].URL != "https://files.example.test/photo.jpg" {
+		t.Fatalf("attachments=%+v", msg.Attachments)
+	}
+}
+
 func TestSendMessage_RequiresBodyOrTemplate(t *testing.T) {
 	plat := &stubPlatform{}
 	ctx := newTestCtx(t, plat)

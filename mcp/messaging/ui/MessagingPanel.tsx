@@ -110,11 +110,23 @@ interface MessageRow {
   message_id_header?: string;
   in_reply_to?: string;
   references?: string[];
+  attachments?: MessageAttachment[];
   created_at?: string;
   sent_at?: string;
   received_at?: string;
   last_event_at?: string;
   event_counts?: Record<string, number>;
+}
+interface MessageAttachment {
+  id?: number;
+  storage_id?: number;
+  url?: string;
+  filename: string;
+  content_type?: string;
+  size_bytes?: number;
+  content_id?: string;
+  disposition?: string;
+  source?: string;
 }
 interface DeliveryEvent {
   id: number;
@@ -256,6 +268,13 @@ interface ComposeDraft {
   body: string;
   in_reply_to?: string;
   references?: string[];
+}
+interface ComposeAttachment {
+  key: string;
+  filename: string;
+  content_type: string;
+  size_bytes: number;
+  content_base64: string;
 }
 
 // ─── Component ────────────────────────────────────────────────────
@@ -702,6 +721,26 @@ function MessageDetail({ m, events, onReply, onClose }: { m: MessageRow; events:
       {(m.body_text || m.body_html) && (
         <EmailBodyViewer bodyText={m.body_text || ""} bodyHTML={m.body_html || ""} />
       )}
+      {m.attachments && m.attachments.length > 0 && (
+        <div className="mt-4">
+          <div className="text-text-dim text-xs uppercase tracking-wide mb-1">Attachments</div>
+          <ul className="rounded border border-border divide-y divide-border">
+            {m.attachments.map((att, i) => (
+              <li key={att.id || i} className="px-3 py-2 text-xs">
+                <div className="font-medium break-all">{att.filename || "attachment"}</div>
+                <div className="text-text-dim">
+                  {att.content_type || "application/octet-stream"}
+                  {att.size_bytes ? ` · ${formatBytes(att.size_bytes)}` : ""}
+                  {att.source ? ` · ${att.source}` : ""}
+                </div>
+                {att.url && (
+                  <a className="text-accent break-all" href={att.url} target="_blank" rel="noreferrer">Open URL</a>
+                )}
+              </li>
+            ))}
+          </ul>
+        </div>
+      )}
       {events.length > 0 && (
         <div className="mt-4">
           <div className="text-text-dim text-xs uppercase tracking-wide mb-1">Message events</div>
@@ -1059,6 +1098,7 @@ function ComposeView({
   const [waSession, setWaSession] = useState<WhatsAppSessionState>({ state: "idle", checkedRecipients: [] });
   const [templateID, setTemplateID] = useState("");
   const [templateVars, setTemplateVars] = useState<Record<string, string>>({});
+  const [attachments, setAttachments] = useState<ComposeAttachment[]>([]);
 
   // Default selection: prefer email/domain for the original email-first
   // workflow, but phone-only installs must still initialise state. Without
@@ -1232,6 +1272,17 @@ function ComposeView({
     };
   }, [api, channel, computedFrom, inbox, recipients]);
 
+  const addAttachments = async (files: FileList | null) => {
+    if (!files || files.length === 0) return;
+    setErr("");
+    try {
+      const next = await Promise.all(Array.from(files).map(fileToComposeAttachment));
+      setAttachments((prev) => [...prev, ...next]);
+    } catch (e) {
+      setErr((e as Error).message);
+    }
+  };
+
   const send = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!computedFrom) {
@@ -1281,8 +1332,16 @@ function ComposeView({
         if (inReplyTo) args.in_reply_to = inReplyTo;
         if (references.length > 0) args.references = references;
       }
+      if (attachments.length > 0) {
+        args.attachments = attachments.map(({ key, ...att }) => ({
+          filename: att.filename,
+          content_type: att.content_type,
+          size_bytes: att.size_bytes,
+          content_base64: att.content_base64,
+        }));
+      }
       await api("POST", "/tools/call", {}, { tool: "send_message", args });
-      setTo(""); setSubject(""); setBody(""); setInReplyTo(""); setReferences([]); setTemplateVars({});
+      setTo(""); setSubject(""); setBody(""); setInReplyTo(""); setReferences([]); setTemplateVars({}); setAttachments([]);
       onSent();
     } catch (e) {
       setErr((e as Error).message);
@@ -1411,6 +1470,44 @@ function ComposeView({
         </Field>
       )}
 
+      <Field label={channel === "email" ? "Attachments" : "Media"}>
+        <div className="space-y-2">
+          <input
+            className={inputCls}
+            type="file"
+            multiple
+            disabled={noVerifiedSenders || whatsAppChecking || busy}
+            onChange={(e) => {
+              void addAttachments(e.currentTarget.files);
+              e.currentTarget.value = "";
+            }}
+          />
+          {attachments.length > 0 && (
+            <ul className="rounded border border-border divide-y divide-border bg-surface-2">
+              {attachments.map((att) => (
+                <li key={att.key} className="px-3 py-2 flex items-center justify-between gap-3 text-xs">
+                  <div className="min-w-0">
+                    <div className="truncate text-text">{att.filename}</div>
+                    <div className="text-text-dim">{att.content_type || "application/octet-stream"} · {formatBytes(att.size_bytes)}</div>
+                  </div>
+                  <button
+                    type="button"
+                    className="text-text-dim hover:text-red-400"
+                    onClick={() => setAttachments((prev) => prev.filter((x) => x.key !== att.key))}
+                    aria-label={`Remove ${att.filename}`}
+                  >
+                    Remove
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+          {channel !== "email" && attachments.length > 0 && (
+            <p className="text-xs text-text-dim">Media files are sent as Twilio-reachable signed URLs.</p>
+          )}
+        </div>
+      </Field>
+
       {quota && quota.sandboxed && (
         <p className="text-xs text-yellow-400/80">
           Sandbox: only recipients you've verified in SES will receive this message.
@@ -1428,6 +1525,39 @@ function ComposeView({
 }
 
 const whatsappSessionWindowMs = 24 * 60 * 60 * 1000;
+
+async function fileToComposeAttachment(file: File): Promise<ComposeAttachment> {
+  const maxBytes = 25 * 1024 * 1024;
+  if (file.size > maxBytes) {
+    throw new Error(`${file.name} is larger than 25 MB.`);
+  }
+  const dataURL = await new Promise<string>((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ""));
+    reader.onerror = () => reject(reader.error || new Error("Could not read file."));
+    reader.readAsDataURL(file);
+  });
+  const comma = dataURL.indexOf(",");
+  return {
+    key: `${file.name}:${file.size}:${file.lastModified}:${Math.random().toString(36).slice(2)}`,
+    filename: file.name || "attachment",
+    content_type: file.type || "application/octet-stream",
+    size_bytes: file.size,
+    content_base64: comma >= 0 ? dataURL.slice(comma + 1) : dataURL,
+  };
+}
+
+function formatBytes(n?: number): string {
+  if (!n || n <= 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB"];
+  let value = n;
+  let i = 0;
+  while (value >= 1024 && i < units.length - 1) {
+    value /= 1024;
+    i += 1;
+  }
+  return `${value >= 10 || i === 0 ? value.toFixed(0) : value.toFixed(1)} ${units[i]}`;
+}
 
 type WhatsAppSessionState =
   | { state: "idle" | "checking" | "active" | "closed"; checkedRecipients: string[] }

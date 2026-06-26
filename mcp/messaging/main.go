@@ -54,7 +54,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: messaging
 display_name: Messaging
-version: 0.13.34
+version: 0.13.35
 description: |
   Send and receive messages across channels. v0.1 ships email via
   AWS SES.
@@ -89,7 +89,7 @@ requires:
     - role: storage
       kind: app
       compatible_app_names: [storage]
-      capabilities: [files.write]
+      capabilities: [files.read, files.write]
       required: false
       label: "Storage (optional)"
     - role: domains
@@ -286,8 +286,8 @@ func (a *App) MCPTools() []sdk.Tool {
 		{
 			Name: "send_message",
 			Description: "Send a message. Args: channel (email|sms|whatsapp), from, to (string|string[]), body. " +
-				"Email-only fields: subject, body_html, cc, bcc, reply_to, in_reply_to, references, headers, attachment_storage_ids. " +
-				"SMS/WhatsApp-only fields: media_url, content_sid, content_variables. " +
+				"Email-only fields: subject, body_html, cc, bcc, reply_to, in_reply_to, references, headers. " +
+				"Cross-channel attachment fields: attachments, attachment_storage_ids. SMS/WhatsApp-only fields: media_url, content_sid, content_variables. " +
 				"Common: template_id, vars, idempotency_key. " +
 				"Addresses are plain — emails (alice@x.com) and E.164 phone numbers (+15551234567), no scheme prefix. " +
 				"Returns {id, channel, status, recipients:[{address, status}], provider_message_id?}.",
@@ -305,6 +305,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"cc":                     map[string]any{},
 				"bcc":                    map[string]any{},
 				"headers":                map[string]any{"type": "object"},
+				"attachments":            map[string]any{"type": "array"},
 				"attachment_storage_ids": map[string]any{"type": "array"},
 				"media_url":              map[string]any{"type": "string"},
 				"content_sid":            map[string]any{"type": "string"},
@@ -324,6 +325,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"from":                   map[string]any{"type": "string"},
 				"to":                     map[string]any{},
 				"vars":                   map[string]any{"type": "object"},
+				"attachments":            map[string]any{"type": "array"},
 				"attachment_storage_ids": map[string]any{"type": "array"},
 				"idempotency_key":        map[string]any{"type": "string"},
 			}, []string{"template_id", "channel", "from", "to"}),
@@ -787,35 +789,36 @@ func extractSubaddress(addr string) string {
 // ─── Domain types ──────────────────────────────────────────────────
 
 type Message struct {
-	ID                   int64           `json:"id"`
-	ProjectID            string          `json:"project_id,omitempty"`
-	Channel              string          `json:"channel"`
-	Direction            string          `json:"direction"`
-	From                 string          `json:"from"`
-	To                   []string        `json:"to"`
-	CC                   []string        `json:"cc"`
-	BCC                  []string        `json:"bcc"`
-	Subject              string          `json:"subject,omitempty"`
-	BodyText             string          `json:"body_text,omitempty"`
-	BodyHTML             string          `json:"body_html,omitempty"`
-	Headers              json.RawMessage `json:"headers"`
-	AttachmentStorageIDs []int64         `json:"attachment_storage_ids"`
-	MessageIDHeader      string          `json:"message_id_header,omitempty"`
-	InReplyTo            string          `json:"in_reply_to,omitempty"`
-	References           []string        `json:"references"`
-	Status               string          `json:"status"`
-	StatusReason         string          `json:"status_reason,omitempty"`
-	ProviderMessageID    string          `json:"provider_message_id,omitempty"`
-	IdempotencyKey       string          `json:"idempotency_key,omitempty"`
-	RouteTargetApp       string          `json:"route_target_app,omitempty"`
-	RouteTargetRoute     string          `json:"route_target_route,omitempty"`
-	RouteStatus          string          `json:"route_status,omitempty"`
-	RouteError           string          `json:"route_error,omitempty"`
-	RouteAttempts        int             `json:"route_attempts,omitempty"`
-	MatchedRecipient     string          `json:"matched_recipient,omitempty"`
-	MatchedPattern       string          `json:"matched_pattern,omitempty"`
-	ToSubaddress         string          `json:"to_subaddress,omitempty"`
-	TemplateID           int64           `json:"template_id,omitempty"`
+	ID                   int64               `json:"id"`
+	ProjectID            string              `json:"project_id,omitempty"`
+	Channel              string              `json:"channel"`
+	Direction            string              `json:"direction"`
+	From                 string              `json:"from"`
+	To                   []string            `json:"to"`
+	CC                   []string            `json:"cc"`
+	BCC                  []string            `json:"bcc"`
+	Subject              string              `json:"subject,omitempty"`
+	BodyText             string              `json:"body_text,omitempty"`
+	BodyHTML             string              `json:"body_html,omitempty"`
+	Headers              json.RawMessage     `json:"headers"`
+	AttachmentStorageIDs []int64             `json:"attachment_storage_ids"`
+	Attachments          []MessageAttachment `json:"attachments,omitempty"`
+	MessageIDHeader      string              `json:"message_id_header,omitempty"`
+	InReplyTo            string              `json:"in_reply_to,omitempty"`
+	References           []string            `json:"references"`
+	Status               string              `json:"status"`
+	StatusReason         string              `json:"status_reason,omitempty"`
+	ProviderMessageID    string              `json:"provider_message_id,omitempty"`
+	IdempotencyKey       string              `json:"idempotency_key,omitempty"`
+	RouteTargetApp       string              `json:"route_target_app,omitempty"`
+	RouteTargetRoute     string              `json:"route_target_route,omitempty"`
+	RouteStatus          string              `json:"route_status,omitempty"`
+	RouteError           string              `json:"route_error,omitempty"`
+	RouteAttempts        int                 `json:"route_attempts,omitempty"`
+	MatchedRecipient     string              `json:"matched_recipient,omitempty"`
+	MatchedPattern       string              `json:"matched_pattern,omitempty"`
+	ToSubaddress         string              `json:"to_subaddress,omitempty"`
+	TemplateID           int64               `json:"template_id,omitempty"`
 	// v0.5: verdicts (SES) and S3-mode raw .eml location.
 	Verdicts    json.RawMessage `json:"verdicts,omitempty"`
 	S3Key       string          `json:"s3_key,omitempty"`
@@ -1049,7 +1052,10 @@ func (a *App) toolSendMessage(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	references := stringArrayArg(args, "references")
 	referencesJSON, _ := json.Marshal(references)
 
-	attachIDs := int64ArrayArg(args, "attachment_storage_ids")
+	attachments, attachIDs, err := prepareMessageAttachments(ctx, pid, channel, args)
+	if err != nil {
+		return nil, fmt.Errorf("attachments: %w", err)
+	}
 	attachJSON, _ := json.Marshal(attachIDs)
 
 	// Suppression check — drop any recipient that's on the list.
@@ -1092,6 +1098,11 @@ func (a *App) toolSendMessage(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		return nil, fmt.Errorf("insert message: %w", err)
 	}
 	id, _ := res.LastInsertId()
+	if len(attachments) > 0 {
+		if err := dbInsertMessageAttachments(ctx.AppDB(), pid, id, attachments); err != nil {
+			return nil, fmt.Errorf("insert message attachments: %w", err)
+		}
+	}
 
 	// Provider call — dispatch by channel. Body / contentSid / etc.
 	// were resolved up in the template-render block above (raw args
@@ -1101,6 +1112,7 @@ func (a *App) toolSendMessage(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		From:    from, To: allowedTo, CC: allowedCC, BCC: allowedBCC,
 		Subject: subject, BodyText: body, BodyHTML: bodyHTML,
 		ReplyTo: replyTo, InReplyTo: inReplyTo, References: references, Headers: headers,
+		Attachments:      attachments,
 		MediaURL:         mediaURL,
 		ContentSid:       contentSid,
 		ContentVariables: contentVars,
@@ -1181,6 +1193,7 @@ type providerSendInput struct {
 	InReplyTo     string
 	References    []string
 	Headers       map[string]any
+	Attachments   []providerAttachment
 	MessageID     int64
 	ProjectID     string
 	// SMS / WhatsApp only:
@@ -1215,7 +1228,7 @@ func sendViaSES(ctx *sdk.AppCtx, in providerSendInput) (string, error) {
 	if len(in.BCC) > 0 {
 		dest["BccAddresses"] = in.BCC
 	}
-	if in.InReplyTo != "" || len(in.References) > 0 {
+	if in.InReplyTo != "" || len(in.References) > 0 || len(in.Attachments) > 0 {
 		return sendViaSESRaw(ctx, bound.ConnectionID, dest, in)
 	}
 
@@ -1393,6 +1406,23 @@ func buildRawEmail(in providerSendInput) ([]byte, error) {
 		}
 	}
 
+	if len(in.Attachments) > 0 {
+		boundary := fmt.Sprintf("apteva-mixed-%d", in.MessageID)
+		writeHeader(&b, "Content-Type", fmt.Sprintf(`multipart/mixed; boundary="%s"`, boundary))
+		b.WriteString("\r\n")
+		if err := writeRawEmailBodyPart(&b, boundary, in.BodyText, bodyHTML, in.MessageID); err != nil {
+			return nil, err
+		}
+		for _, att := range in.Attachments {
+			if len(att.Data) == 0 {
+				return nil, fmt.Errorf("attachment %q has no bytes for email send", att.Filename)
+			}
+			writeAttachmentMIMEPart(&b, boundary, att)
+		}
+		fmt.Fprintf(&b, "--%s--\r\n", boundary)
+		return b.Bytes(), nil
+	}
+
 	switch {
 	case in.BodyText != "" && bodyHTML != "":
 		boundary := fmt.Sprintf("apteva-alt-%d", in.MessageID)
@@ -1417,12 +1447,53 @@ func buildRawEmail(in providerSendInput) ([]byte, error) {
 	return b.Bytes(), nil
 }
 
+func writeRawEmailBodyPart(b *bytes.Buffer, boundary, textBody, htmlBody string, messageID int64) error {
+	switch {
+	case textBody != "" && htmlBody != "":
+		altBoundary := fmt.Sprintf("apteva-alt-%d", messageID)
+		fmt.Fprintf(b, "--%s\r\n", boundary)
+		writeHeader(b, "Content-Type", fmt.Sprintf(`multipart/alternative; boundary="%s"`, altBoundary))
+		b.WriteString("\r\n")
+		writeMIMEPart(b, altBoundary, "text/plain; charset=UTF-8", textBody)
+		writeMIMEPart(b, altBoundary, "text/html; charset=UTF-8", htmlBody)
+		fmt.Fprintf(b, "--%s--\r\n", altBoundary)
+	case htmlBody != "":
+		writeMIMEPart(b, boundary, "text/html; charset=UTF-8", htmlBody)
+	case textBody != "":
+		writeMIMEPart(b, boundary, "text/plain; charset=UTF-8", textBody)
+	default:
+		return errors.New("raw email body is empty")
+	}
+	return nil
+}
+
 func writeMIMEPart(b *bytes.Buffer, boundary, contentType, body string) {
 	fmt.Fprintf(b, "--%s\r\n", boundary)
 	writeHeader(b, "Content-Type", contentType)
 	writeHeader(b, "Content-Transfer-Encoding", "base64")
 	b.WriteString("\r\n")
 	b.WriteString(wrapBase64(body))
+}
+
+func writeAttachmentMIMEPart(b *bytes.Buffer, boundary string, att providerAttachment) {
+	filename := safeAttachmentFilename(att.Filename)
+	if filename == "" {
+		filename = "attachment"
+	}
+	contentType := strings.TrimSpace(att.ContentType)
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+	fmt.Fprintf(b, "--%s\r\n", boundary)
+	writeHeader(b, "Content-Type", mime.FormatMediaType(contentType, map[string]string{"name": filename}))
+	writeHeader(b, "Content-Transfer-Encoding", "base64")
+	disposition := normaliseAttachmentDisposition(att.Disposition)
+	writeHeader(b, "Content-Disposition", mime.FormatMediaType(disposition, map[string]string{"filename": filename}))
+	if disposition == "inline" && att.ContentID != "" {
+		writeHeader(b, "Content-ID", "<"+strings.Trim(att.ContentID, "<>")+">")
+	}
+	b.WriteString("\r\n")
+	b.WriteString(wrapBase64Bytes(att.Data))
 }
 
 func writeHeader(b *bytes.Buffer, name, value string) {
@@ -1434,7 +1505,11 @@ func writeHeader(b *bytes.Buffer, name, value string) {
 }
 
 func wrapBase64(s string) string {
-	enc := base64.StdEncoding.EncodeToString([]byte(s))
+	return wrapBase64Bytes([]byte(s))
+}
+
+func wrapBase64Bytes(data []byte) string {
+	enc := base64.StdEncoding.EncodeToString(data)
 	var b strings.Builder
 	for len(enc) > 76 {
 		b.WriteString(enc[:76])
@@ -1516,6 +1591,15 @@ func sendViaTwilio(ctx *sdk.AppCtx, in providerSendInput) (string, error) {
 
 	var firstSID string
 	var firstErr error
+	mediaURLs := []string{}
+	if in.MediaURL != "" {
+		mediaURLs = append(mediaURLs, in.MediaURL)
+	}
+	for _, att := range in.Attachments {
+		if att.MediaURL != "" {
+			mediaURLs = append(mediaURLs, att.MediaURL)
+		}
+	}
 	for _, to := range in.To {
 		payload := map[string]any{
 			"From": prefix + in.From,
@@ -1535,8 +1619,10 @@ func sendViaTwilio(ctx *sdk.AppCtx, in providerSendInput) (string, error) {
 		} else {
 			payload["Body"] = in.BodyText
 		}
-		if in.MediaURL != "" {
-			payload["MediaUrl"] = in.MediaURL
+		if len(mediaURLs) == 1 {
+			payload["MediaUrl"] = mediaURLs[0]
+		} else if len(mediaURLs) > 1 {
+			payload["MediaUrl"] = mediaURLs
 		}
 		res, err := ctx.PlatformAPI().ExecuteIntegrationTool(bound.ConnectionID, tool, payload)
 		if err != nil {
@@ -5388,6 +5474,7 @@ func dbMessageGet(db *sql.DB, pid string, id int64) (*Message, error) {
 	}
 	m.EventCounts = dbDeliveryEventCounts(db, m.ID)
 	m.Status = effectiveMessageStatus(m.Status, m.EventCounts)
+	m.Attachments = dbMessageAttachments(db, pid, m.ID)
 	return m, nil
 }
 
