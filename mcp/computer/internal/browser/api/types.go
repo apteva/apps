@@ -10,12 +10,16 @@ import (
 
 // Action represents a normalized computer use action.
 type Action struct {
-	Type      string   `json:"type"`                // "click", "double_click", "type", "key", "scroll", "screenshot", "navigate", "wait"
+	Type      string   `json:"type"`                // "click", "double_click", "type", "key", "scroll", "screenshot", "navigate", "wait", "select_option"
 	X         int      `json:"x,omitempty"`         // click/scroll coordinate
 	Y         int      `json:"y,omitempty"`         // click/scroll coordinate
 	Selector  string   `json:"selector,omitempty"`  // CSS selector for DOM-targeted actions like upload_file
 	Files     []string `json:"files,omitempty"`     // local or provider-session file paths for upload_file
 	Text      string   `json:"text,omitempty"`      // for "type" action
+	Value     string   `json:"value,omitempty"`     // for "select_option": option value
+	Texts     []string `json:"texts,omitempty"`     // for "select_option": option display texts
+	Values    []string `json:"values,omitempty"`    // for "select_option": option values
+	Mode      string   `json:"mode,omitempty"`      // for "select_option": replace, add, remove, toggle
 	Key       string   `json:"key,omitempty"`       // for "key" action (e.g. "Enter", "Escape")
 	Direction string   `json:"direction,omitempty"` // for "scroll": "up", "down", "left", "right"
 	Amount    int      `json:"amount,omitempty"`    // for "scroll": CSS pixels; defaults to 300

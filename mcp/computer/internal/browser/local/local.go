@@ -25,6 +25,7 @@ import (
 	computer "github.com/apteva/apps/mcp/computer/internal/browser/api"
 	"github.com/apteva/apps/mcp/computer/internal/browser/cdptabs"
 	"github.com/apteva/apps/mcp/computer/internal/browser/fileupload"
+	"github.com/apteva/apps/mcp/computer/internal/browser/selectinput"
 	"github.com/apteva/apps/mcp/computer/internal/browser/som"
 	"github.com/apteva/apps/mcp/computer/internal/browser/textinput"
 	"github.com/chromedp/cdproto/emulation"
@@ -76,6 +77,9 @@ type Computer struct {
 	// when the action carries a label= instead of coordinate=x,y.
 	labelMu    sync.RWMutex
 	lastLabels map[int]som.Element
+
+	selectMu         sync.Mutex
+	lastSelectResult *selectinput.Result
 
 	// debugURL is Chrome's DevTools frontend URL for the active page
 	// target — opening it in any browser yields a live, interactive
@@ -812,9 +816,65 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 		time.Sleep(500 * time.Millisecond)
 		return c.Screenshot()
 
+	case "select_option":
+		if _, err := c.selectOption(action); err != nil {
+			return nil, fmt.Errorf("select_option: %w", err)
+		}
+		time.Sleep(200 * time.Millisecond)
+		return c.Screenshot()
+
 	default:
 		return nil, fmt.Errorf("unknown action: %s", action.Type)
 	}
+}
+
+func (c *Computer) LastSelectResult() *selectinput.Result {
+	c.selectMu.Lock()
+	defer c.selectMu.Unlock()
+	return cloneSelectResult(c.lastSelectResult)
+}
+
+func (c *Computer) setLastSelectResult(res *selectinput.Result) {
+	c.selectMu.Lock()
+	defer c.selectMu.Unlock()
+	c.lastSelectResult = cloneSelectResult(res)
+}
+
+func (c *Computer) selectOption(action computer.Action) (selectinput.Result, error) {
+	c.setLastSelectResult(nil)
+	target := selectinput.Target{Selector: action.Selector}
+	if action.Label > 0 {
+		if e, ok := c.resolveLabel(action.Label); ok {
+			target.X, target.Y = e.Center()
+			target.HasPoint = true
+		}
+	}
+	if !target.HasPoint && action.X != 0 && action.Y != 0 {
+		target.X, target.Y = action.X, action.Y
+		target.HasPoint = true
+	}
+	res, err := selectinput.Select(c.ctx, target, selectinput.Request{
+		Text:   action.Text,
+		Value:  action.Value,
+		Texts:  action.Texts,
+		Values: action.Values,
+		Mode:   action.Mode,
+	})
+	if err == nil {
+		c.setLastSelectResult(&res)
+	}
+	return res, err
+}
+
+func cloneSelectResult(res *selectinput.Result) *selectinput.Result {
+	if res == nil {
+		return nil
+	}
+	clone := *res
+	clone.Matched = append([]string(nil), res.Matched...)
+	clone.Selected = append([]string(nil), res.Selected...)
+	clone.Options = append([]selectinput.Option(nil), res.Options...)
+	return &clone
 }
 
 func (c *Computer) uploadFile(action computer.Action) error {

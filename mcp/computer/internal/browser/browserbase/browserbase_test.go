@@ -15,14 +15,15 @@ import (
 
 func TestActionTimeoutsAreBounded(t *testing.T) {
 	cases := map[string]time.Duration{
-		"click":        clickActionTimeout,
-		"double_click": clickActionTimeout,
-		"type":         textActionTimeout,
-		"key":          keyActionTimeout,
-		"scroll":       scrollActionTimeout,
-		"wait":         waitActionTimeout,
-		"navigate":     navigateActionTimeout,
-		"upload_file":  30 * time.Second,
+		"click":         clickActionTimeout,
+		"double_click":  clickActionTimeout,
+		"type":          textActionTimeout,
+		"key":           keyActionTimeout,
+		"scroll":        scrollActionTimeout,
+		"wait":          waitActionTimeout,
+		"navigate":      navigateActionTimeout,
+		"upload_file":   30 * time.Second,
+		"select_option": 20 * time.Second,
 	}
 	for action, want := range cases {
 		if got := actionTimeout(action); got != want {
