@@ -21,6 +21,7 @@ import (
 	"github.com/apteva/apps/mcp/computer/internal/browser/cdptabs"
 	"github.com/apteva/apps/mcp/computer/internal/browser/fileupload"
 	"github.com/apteva/apps/mcp/computer/internal/browser/keyinput"
+	"github.com/apteva/apps/mcp/computer/internal/browser/selectinput"
 	"github.com/apteva/apps/mcp/computer/internal/browser/som"
 	"github.com/apteva/apps/mcp/computer/internal/browser/textinput"
 	"github.com/chromedp/cdproto/cdp"
@@ -100,6 +101,9 @@ type Computer struct {
 	// SoM: same wiring as local.Computer. See local.go for rationale.
 	labelMu    sync.RWMutex
 	lastLabels map[int]som.Element
+
+	selectMu         sync.Mutex
+	lastSelectResult *selectinput.Result
 
 	recoveryMu            sync.Mutex
 	lastScreenshotRecover *computer.ScreenshotRecoveryInfo
@@ -395,6 +399,15 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 		time.Sleep(500 * time.Millisecond)
 		return c.Screenshot()
 
+	case "select_option":
+		ctx, cancel := c.actionContext(action.Type)
+		defer cancel()
+		if _, err := c.selectOption(ctx, action); err != nil {
+			return nil, fmt.Errorf("select_option: %w", err)
+		}
+		time.Sleep(200 * time.Millisecond)
+		return c.Screenshot()
+
 	default:
 		return nil, fmt.Errorf("unknown action: %s", action.Type)
 	}
@@ -495,6 +508,55 @@ func (c *Computer) dispatchClick(ctx context.Context, x, y, clickCount int) erro
 	return chromedp.Run(ctx,
 		chromedp.MouseClickXY(float64(x), float64(y), chromedp.ClickCount(clickCount)),
 	)
+}
+
+func (c *Computer) selectOption(ctx context.Context, action computer.Action) (selectinput.Result, error) {
+	c.setLastSelectResult(nil)
+	target := selectinput.Target{Selector: action.Selector}
+	if action.Label > 0 {
+		if e, ok := c.resolveLabel(action.Label); ok {
+			target.X, target.Y = e.Center()
+			target.HasPoint = true
+		}
+	}
+	if !target.HasPoint && action.X != 0 && action.Y != 0 {
+		target.X, target.Y = action.X, action.Y
+		target.HasPoint = true
+	}
+	res, err := selectinput.Select(ctx, target, selectinput.Request{
+		Text:   action.Text,
+		Value:  action.Value,
+		Texts:  action.Texts,
+		Values: action.Values,
+		Mode:   action.Mode,
+	})
+	if err == nil {
+		c.setLastSelectResult(&res)
+	}
+	return res, err
+}
+
+func (c *Computer) LastSelectResult() *selectinput.Result {
+	c.selectMu.Lock()
+	defer c.selectMu.Unlock()
+	return cloneSelectResult(c.lastSelectResult)
+}
+
+func (c *Computer) setLastSelectResult(res *selectinput.Result) {
+	c.selectMu.Lock()
+	defer c.selectMu.Unlock()
+	c.lastSelectResult = cloneSelectResult(res)
+}
+
+func cloneSelectResult(res *selectinput.Result) *selectinput.Result {
+	if res == nil {
+		return nil
+	}
+	clone := *res
+	clone.Matched = append([]string(nil), res.Matched...)
+	clone.Selected = append([]string(nil), res.Selected...)
+	clone.Options = append([]selectinput.Option(nil), res.Options...)
+	return &clone
 }
 
 func (c *Computer) uploadFile(action computer.Action) error {
@@ -612,6 +674,8 @@ func actionTimeout(action string) time.Duration {
 		return navigateActionTimeout
 	case "upload_file":
 		return 30 * time.Second
+	case "select_option":
+		return 20 * time.Second
 	default:
 		return 20 * time.Second
 	}

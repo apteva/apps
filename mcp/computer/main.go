@@ -36,6 +36,7 @@ import (
 
 	sdk "github.com/apteva/app-sdk"
 	backends "github.com/apteva/apps/mcp/computer/internal/browser"
+	"github.com/apteva/apps/mcp/computer/internal/browser/selectinput"
 	_ "modernc.org/sqlite"
 )
 
@@ -48,9 +49,9 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: computer
 display_name: Computer
-version: 0.7.36
+version: 0.7.37
 description: |
-  Watch and steer browser sessions. v0.7.36 improves source URL DNS fallback.
+  Watch and steer browser sessions. v0.7.37 adds direct select/listbox option selection.
 scopes: [project, global]
 requires:
   permissions:
@@ -75,9 +76,9 @@ provides:
     - prefix: /
   mcp_tools:
     - name: browser_session
-      description: "Open, resume, list, inspect, close, or switch tabs in app-owned browser sessions. Args: action, session_id?, tab_id?, backend?, backend_session_id?, url?, context_id?, context_name?, auto_create_context?, persist?, timeout?, proxy?, proxy_country?, viewport?. session_id is the app-owned live br_* handle for status/close/computer_use only. To continue later, open a new session with context_id or context_name. Use backend_session_id only for an explicit provider-level attach. For tab control, call browser_session(action=tabs) to list open tabs, then browser_session(action=switch_tab, tab_id=...) or browser_session(action=close_tab, tab_id=...). Do not use keyboard shortcuts such as Ctrl+Tab, Ctrl+PageDown, or Ctrl+1-9 to switch browser tabs. Browserbase honors timeout as max session lifetime. Prefer context_id from computer_context_list to reopen saved state; context_name works across backends when unique. For a reusable saved context, pass context_name with auto_create_context=true; omitted names are only a fallback and are auto-generated. Sessions consume local or cloud resources. When browser work is complete and the user did not explicitly ask to keep the browser open, close it with browser_session(action=close, session_id=...). Closing is especially important for Browserbase/Steel sessions and persisted contexts because it releases provider resources and lets context state flush cleanly."
+      description: "Open, resume, list, inspect, close, or switch tabs in app-owned browser sessions. Args: action, session_id?, tab_id?, backend?, backend_session_id?, url?, context_id?, context_name?, auto_create_context?, persist?, timeout?, proxy?, proxy_country?, viewport?. Usually omit viewport to use Computer's default desktop viewport, 1600x800. Pass viewport when a specific resolution is needed, for example mobile/tablet testing or a site-specific requirement. session_id is the app-owned live br_* handle for status/close/computer_use only. To continue later, open a new session with context_id or context_name. Use backend_session_id only for an explicit provider-level attach. For tab control, call browser_session(action=tabs) to list open tabs, then browser_session(action=switch_tab, tab_id=...) or browser_session(action=close_tab, tab_id=...). Do not use keyboard shortcuts such as Ctrl+Tab, Ctrl+PageDown, or Ctrl+1-9 to switch browser tabs. Browserbase honors timeout as max session lifetime. Prefer context_id from computer_context_list to reopen saved state; context_name works across backends when unique. For a reusable saved context, pass context_name with auto_create_context=true; omitted names are only a fallback and are auto-generated. Sessions consume local or cloud resources. When browser work is complete and the user did not explicitly ask to keep the browser open, close it with browser_session(action=close, session_id=...). Closing is especially important for Browserbase/Steel sessions and persisted contexts because it releases provider resources and lets context state flush cleanly."
     - name: computer_use
-      description: "Drive an app-owned browser session. Default workflow: call action=screenshot first; screenshots contain Set-of-Mark numeric badges on interactive elements. To click, use action=click with label=N from the latest screenshot. label must be >= 1; do not pass 0. Prefer label over coordinate; use coordinate only for targets with no badge such as canvas or custom rendered widgets. If the page asks to Browse, choose, attach, upload, or drop a file, use action=upload_file with selector or label plus source_url/base64/file_path; do not operate the native OS file picker. If a click opens exactly one new tab, Computer automatically follows it and reports switched_tab=true. For explicit tab control, call browser_session(action=tabs) to list tabs, then browser_session(action=switch_tab, tab_id=...) or browser_session(action=close_tab, tab_id=...); do not use Ctrl+Tab, Ctrl+PageDown, or Ctrl+1-9 for browser tab switching. Use action=key for page/editor commands such as Tab, Backspace, Control+A, Control+Z; use action=type only for literal text and full date/time values such as 2026-06-05 or 08:00 PM. For action=scroll, amount is CSS pixels; use 200-500 for a small viewport move and omit amount for the 300px default. After scrolling, tab switching, upload, or navigation, take a fresh screenshot because labels are re-enumerated. Args: session_id, action, tab_id?, coordinate?, label?, selector?, source_url?, base64?, filename?, mime_type?, file_path?, text?, key?, direction?, amount?, duration?, annotate? (screenshot only, default true). Returns screenshot bytes for visual actions."
+      description: "Drive an app-owned browser session. Default workflow: call action=screenshot first; screenshots contain Set-of-Mark numeric badges on interactive elements. To click, use action=click with label=N from the latest screenshot. label must be >= 1; do not pass 0. Prefer label over coordinate; use coordinate only for targets with no badge such as canvas or custom rendered widgets. If the page asks to Browse, choose, attach, upload, or drop a file, use action=upload_file with selector or label plus source_url/base64/file_path; do not operate the native OS file picker. For native selects or custom ARIA combobox/listbox controls, use action=select_option with label/selector plus text/value or texts/values and optional mode=replace|add|remove|toggle. If a click opens exactly one new tab, Computer automatically follows it and reports switched_tab=true. For explicit tab control, call browser_session(action=tabs) to list tabs, then browser_session(action=switch_tab, tab_id=...) or browser_session(action=close_tab, tab_id=...); do not use Ctrl+Tab, Ctrl+PageDown, or Ctrl+1-9 for browser tab switching. Use action=key for page/editor commands such as Tab, Backspace, Control+A, Control+Z; use action=type only for literal text and full date/time values such as 2026-06-05 or 08:00 PM. For action=scroll, amount is CSS pixels; use 200-500 for a small viewport move and omit amount for the 300px default. After scrolling, tab switching, selection, upload, or navigation, take a fresh screenshot because labels are re-enumerated. Args: session_id, action, tab_id?, coordinate?, label?, selector?, source_url?, base64?, filename?, mime_type?, file_path?, text?, value?, texts?, values?, mode?, key?, direction?, amount?, duration?, annotate? (screenshot only, default true). Returns screenshot bytes for visual actions."
     - name: computer_context_create
       description: "Create or import an app-managed browser context. Args: name, backend?, provider_context_id?, persist_default?, metadata?, auto_create_provider?."
     - name: computer_context_list
@@ -421,6 +422,7 @@ func (a *App) MCPTools() []sdk.Tool {
 			Description: "Session lifecycle and tab control for app-owned browsers. Actions: open, resume, status, close, list, tabs, switch_tab, close_tab. " +
 				"Open/resume args: backend? (local|browserbase|steel|browser-engine|service), url?, context_id?, persist?, " +
 				"context_name?, auto_create_context?, backend_session_id? (provider attach), timeout?, proxy?, proxy_country?, viewport?. " +
+				"Usually omit viewport to use Computer's default desktop viewport, 1600x800. Pass viewport when a specific resolution is needed, for example mobile/tablet testing or a site-specific requirement. " +
 				"session_id is the app-owned live br_* handle for status/close/computer_use, not a durable resume id. " +
 				"To continue work after a session is gone, open a new session with context_id or context_name. " +
 				"Use backend_session_id only for an explicit short-lived provider attach. " +
@@ -450,10 +452,11 @@ func (a *App) MCPTools() []sdk.Tool {
 				"proxy":               map[string]any{"type": "boolean"},
 				"proxy_country":       map[string]any{"type": "string"},
 				"viewport": map[string]any{
-					"type": "object",
+					"type":        "object",
+					"description": "Optional. Usually omit to use Computer's default desktop viewport, 1600x800. Pass width/height when a specific resolution is needed.",
 					"properties": map[string]any{
-						"width":  map[string]any{"type": "integer"},
-						"height": map[string]any{"type": "integer"},
+						"width":  map[string]any{"type": "integer", "description": "Viewport width in CSS pixels. Default is 1600 when viewport is omitted."},
+						"height": map[string]any{"type": "integer", "description": "Viewport height in CSS pixels. Default is 800 when viewport is omitted."},
 					},
 				},
 			}, []string{"action"}),
@@ -464,25 +467,30 @@ func (a *App) MCPTools() []sdk.Tool {
 			Description: "Drive a browser session opened by browser_session. Default workflow: call action=screenshot first; screenshots contain Set-of-Mark numeric badges on interactive elements. " +
 				"To click, use action=click with label=N from the latest screenshot. label must be >= 1; do not pass 0. Prefer label over coordinate; use coordinate only for targets with no badge such as canvas or custom rendered widgets. " +
 				"If the page asks to Browse, choose, attach, upload, or drop a file, use action=upload_file with selector or label plus source_url/base64/file_path; do not operate the native OS file picker. " +
+				"For native selects or custom ARIA combobox/listbox controls, use action=select_option with label/selector plus text/value or texts/values and optional mode=replace|add|remove|toggle. " +
 				"If a click opens exactly one new tab, Computer automatically follows it and reports switched_tab=true. For explicit tab control, call browser_session(action=tabs) to list tabs, then browser_session(action=switch_tab, tab_id=...) or browser_session(action=close_tab, tab_id=...). " +
 				"Do not use Ctrl+Tab, Ctrl+PageDown, or Ctrl+1-9 for browser tab switching. Use action=key for page/editor commands such as Tab, Backspace, Control+A, Control+Z; use action=type only for literal text and full date/time values such as 2026-06-05 or 08:00 PM. " +
 				"For action=scroll, amount is CSS pixels; use 200-500 for a small viewport move and omit amount for the 300px default. " +
-				"After scrolling, tab switching, upload, or navigation, take a fresh screenshot because labels are re-enumerated. Actions: screenshot, click, double_click, type, key, scroll, wait, upload_file. " +
-				"Args: session_id, action, tab_id?, coordinate? (\"x,y\"), label? (Set-of-Mark label), selector? (CSS selector), source_url?, base64?, filename?, mime_type?, file_path?, text?, key?, direction?, amount?, duration?, annotate? (screenshot only, default true). " +
+				"After scrolling, tab switching, selection, upload, or navigation, take a fresh screenshot because labels are re-enumerated. Actions: screenshot, click, double_click, type, key, scroll, wait, upload_file, select_option. " +
+				"Args: session_id, action, tab_id?, coordinate? (\"x,y\"), label? (Set-of-Mark label), selector? (CSS selector), source_url?, base64?, filename?, mime_type?, file_path?, text?, value?, texts?, values?, mode?, key?, direction?, amount?, duration?, annotate? (screenshot only, default true). " +
 				"Returns a binary screenshot envelope plus current_url, active_tab_id, tabs, width, height.",
 			InputSchema: schemaObject(map[string]any{
 				"session_id": map[string]any{"type": "string"},
-				"action":     map[string]any{"type": "string", "enum": []string{"screenshot", "click", "double_click", "type", "key", "scroll", "wait", "upload_file"}},
+				"action":     map[string]any{"type": "string", "enum": []string{"screenshot", "click", "double_click", "type", "key", "scroll", "wait", "upload_file", "select_option"}},
 				"tab_id":     map[string]any{"type": "string", "description": "Optional active tab/page target to switch to before running the action."},
 				"coordinate": map[string]any{"type": "string"},
 				"label":      map[string]any{"type": "integer", "minimum": 1, "description": "Positive Set-of-Mark target number shown as a colored badge in the latest screenshot. Prefer this over coordinate for click/double_click. Do not pass 0."},
-				"selector":   map[string]any{"type": "string", "description": "For action=upload_file. CSS selector for the file input or related upload button/dropzone, e.g. input#mainMedia."},
+				"selector":   map[string]any{"type": "string", "description": "For action=upload_file or select_option. CSS selector for the target input/select/combobox/dropzone, e.g. input#mainMedia or button[role=combobox]."},
 				"source_url": map[string]any{"type": "string", "description": "For action=upload_file. HTTP(S) URL to download and upload."},
 				"base64":     map[string]any{"type": "string", "description": "For action=upload_file. Base64 file content, optionally as a data URL."},
 				"filename":   map[string]any{"type": "string", "description": "For action=upload_file with source_url/base64. Suggested filename."},
 				"mime_type":  map[string]any{"type": "string", "description": "For action=upload_file with base64. MIME type hint."},
 				"file_path":  map[string]any{"type": "string", "description": "For action=upload_file. Local app filesystem path; mainly for local/dev/manual use."},
-				"text":       map[string]any{"type": "string", "description": "For action=type. Literal text. When focused on native date/time inputs, full values like 2026-06-05, 08:00 PM, or 2026-06-05 08:00 PM are normalized into the control value."},
+				"text":       map[string]any{"type": "string", "description": "For action=type, literal text. For action=select_option, one option display text to select. When focused on native date/time inputs, full values like 2026-06-05, 08:00 PM, or 2026-06-05 08:00 PM are normalized into the control value."},
+				"value":      map[string]any{"type": "string", "description": "For action=select_option. One option value to select."},
+				"texts":      map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "For action=select_option. Multiple option display texts."},
+				"values":     map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "For action=select_option. Multiple option values."},
+				"mode":       map[string]any{"type": "string", "enum": []string{"replace", "add", "remove", "toggle"}, "description": "For action=select_option. replace is default; add/remove/toggle are intended for multiselect controls."},
 				"key":        map[string]any{"type": "string", "description": "For action=key. Page/editor command key such as Enter, Tab, Backspace, Escape, ArrowUp, Control+A, Control+Z, Meta+A, or Shift+Tab. Do not use action=type for command keys. Do not use Ctrl+Tab, Ctrl+PageDown, or Ctrl+1-9 for browser tab switching; call browser_session(action=tabs) then browser_session(action=switch_tab)."},
 				"direction":  map[string]any{"type": "string", "enum": []string{"up", "down", "left", "right"}, "description": "For action=scroll."},
 				"amount":     map[string]any{"type": "integer", "description": "For action=scroll. CSS pixels, not wheel ticks. Defaults to 300 when omitted; use 200-500 for a small viewport move."},
@@ -547,7 +555,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		{
 			Name: "browser_open",
 			Description: "Compatibility alias for browser_session(action=open). Args: backend? (local|browserbase|steel|browser-engine, default from Computer app settings), " +
-				"url? (navigate after open), context_name?, auto_create_context?, timeout?, viewport? ({width:int, height:int}, default 1600x800). " +
+				"url? (navigate after open), context_name?, auto_create_context?, timeout?, viewport?. Usually omit viewport to use Computer's default desktop viewport, 1600x800. Pass viewport when a specific resolution is needed, for example mobile/tablet testing or a site-specific requirement. " +
 				"Browserbase honors timeout as max session lifetime. " +
 				"For a reusable saved context, pass context_name with auto_create_context=true; omitted names are only a fallback and are auto-generated. " +
 				"Returns {session_id, backend, current_url, width, height}. " +
@@ -566,10 +574,11 @@ func (a *App) MCPTools() []sdk.Tool {
 				"proxy":               map[string]any{"type": "boolean"},
 				"proxy_country":       map[string]any{"type": "string"},
 				"viewport": map[string]any{
-					"type": "object",
+					"type":        "object",
+					"description": "Optional. Usually omit to use Computer's default desktop viewport, 1600x800. Pass width/height when a specific resolution is needed.",
 					"properties": map[string]any{
-						"width":  map[string]any{"type": "integer"},
-						"height": map[string]any{"type": "integer"},
+						"width":  map[string]any{"type": "integer", "description": "Viewport width in CSS pixels. Default is 1600 when viewport is omitted."},
+						"height": map[string]any{"type": "integer", "description": "Viewport height in CSS pixels. Default is 800 when viewport is omitted."},
 					},
 				},
 			}, nil),
@@ -1380,6 +1389,12 @@ func (a *App) toolComputerUse(ctx *sdk.AppCtx, args map[string]any) (any, error)
 			"Call computer_use(action=\"screenshot\", som=true), then click a visible label >= 1, or pass coordinate=\"x,y\".",
 			nil)
 	}
+	if err := validateSelectOptionArgs(action, args); err != nil {
+		return nil, computerUseFailure("invalid_target", id, sess, action,
+			err.Error(),
+			"Call computer_use(action=\"screenshot\", som=true), then use action=select_option with label=N or selector plus text/value.",
+			nil)
+	}
 	if tabID := stringArg(args, "tab_id"); tabID != "" {
 		tc, ok := sess.comp.(backends.TabController)
 		if !ok {
@@ -1395,6 +1410,10 @@ func (a *App) toolComputerUse(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		Label:     intArg(args, "label"),
 		Selector:  stringArg(args, "selector"),
 		Text:      stringArg(args, "text"),
+		Value:     stringArg(args, "value"),
+		Texts:     stringSliceArg(args, "texts"),
+		Values:    stringSliceArg(args, "values"),
+		Mode:      stringArg(args, "mode"),
 		Key:       stringArg(args, "key"),
 		Direction: stringArg(args, "direction"),
 		Amount:    intArg(args, "amount"),
@@ -1421,6 +1440,12 @@ func (a *App) toolComputerUse(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		uploadMeta = meta
 		uploadCleanup = cleanup
 		defer uploadCleanup()
+	}
+	if action == "select_option" && sess.backend != "local" && sess.backend != "browserbase" && sess.backend != "steel" && sess.backend != "browser-engine" {
+		return nil, computerUseFailure("backend_not_supported", id, sess, action,
+			fmt.Sprintf("backend %q does not support select_option yet", sess.backend),
+			"Use local, Browserbase, Steel, or browser-engine for select_option, or use screenshot plus click/key fallback.",
+			nil)
 	}
 
 	beforeTabs := []backends.TabInfo(nil)
@@ -1474,6 +1499,11 @@ func (a *App) toolComputerUse(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		payload["post_action_screenshot"] = "skipped"
 	}
 	recovery := screenshotRecoveryFor(sess.comp)
+	var selectResult *selectinput.Result
+	if action == "select_option" {
+		selectResult = selectResultFor(sess.comp)
+	}
+	mergeSelectResultPayload(payload, selectResult)
 	mergeScreenshotRecoveryPayload(payload, recovery)
 	mergeTabFollowPayload(payload, tabEvent)
 	emitEvent(ctx, "session.action", payload)
@@ -1503,6 +1533,7 @@ func (a *App) toolComputerUse(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	if tabs, _ := out["tabs"].([]backends.TabInfo); len(tabs) > 0 {
 		out["tab_count"] = len(tabs)
 	}
+	mergeSelectResultPayload(out, selectResult)
 	mergeScreenshotRecoveryPayload(out, recovery)
 	mergeTabFollowPayload(out, tabEvent)
 	return out, nil
@@ -1603,6 +1634,39 @@ func mergeTabFollowPayload(payload map[string]any, result tabFollowResult) {
 	}
 	if result.Switched {
 		payload["switched_tab"] = true
+	}
+}
+
+type selectResultReporter interface {
+	LastSelectResult() *selectinput.Result
+}
+
+func selectResultFor(comp backends.Computer) *selectinput.Result {
+	reporter, ok := comp.(selectResultReporter)
+	if !ok {
+		return nil
+	}
+	return reporter.LastSelectResult()
+}
+
+func mergeSelectResultPayload(payload map[string]any, result *selectinput.Result) {
+	if result == nil {
+		return
+	}
+	payload["select_kind"] = result.Kind
+	payload["select_mode"] = result.Mode
+	payload["select_multiple"] = result.Multiple
+	if result.ControlText != "" {
+		payload["select_control_text"] = result.ControlText
+	}
+	if len(result.Matched) > 0 {
+		payload["select_matched"] = result.Matched
+	}
+	if len(result.Selected) > 0 {
+		payload["select_selected"] = result.Selected
+	}
+	if len(result.Options) > 0 {
+		payload["select_options"] = result.Options
 	}
 }
 
@@ -1729,6 +1793,31 @@ func (a *App) sessionActionPayload(id string, s *session, act backends.Action, a
 		}
 		if hasCoordinateArg(args) {
 			payload["coordinate"] = fmt.Sprintf("%d,%d", act.X, act.Y)
+		}
+	case "select_option":
+		if act.Selector != "" {
+			payload["selector"] = act.Selector
+		}
+		if act.Label > 0 {
+			payload["label"] = act.Label
+		}
+		if hasCoordinateArg(args) {
+			payload["coordinate"] = fmt.Sprintf("%d,%d", act.X, act.Y)
+		}
+		if act.Text != "" {
+			payload["text"] = act.Text
+		}
+		if act.Value != "" {
+			payload["value"] = act.Value
+		}
+		if len(act.Texts) > 0 {
+			payload["texts"] = act.Texts
+		}
+		if len(act.Values) > 0 {
+			payload["values"] = act.Values
+		}
+		if act.Mode != "" {
+			payload["mode"] = act.Mode
 		}
 	case "screenshot":
 		payload["annotate"] = annotateArg(args, true)
@@ -2164,6 +2253,33 @@ func stringArg(args map[string]any, k string) string {
 	return ""
 }
 
+func stringSliceArg(args map[string]any, k string) []string {
+	switch v := args[k].(type) {
+	case []string:
+		return v
+	case []any:
+		out := make([]string, 0, len(v))
+		for _, item := range v {
+			if s := strings.TrimSpace(fmt.Sprint(item)); s != "" {
+				out = append(out, s)
+			}
+		}
+		return out
+	case string:
+		s := strings.TrimSpace(v)
+		if s == "" {
+			return nil
+		}
+		var parsed []string
+		if strings.HasPrefix(s, "[") && json.Unmarshal([]byte(s), &parsed) == nil {
+			return parsed
+		}
+		return []string{s}
+	default:
+		return nil
+	}
+}
+
 func intArg(args map[string]any, k string) int {
 	switch v := args[k].(type) {
 	case int:
@@ -2246,6 +2362,22 @@ func validateClickTargetArgs(action string, args map[string]any) error {
 	}
 	if !hasClickTargetArg(args) {
 		return fmt.Errorf("%s requires label=N from the latest screenshot, or coordinate=\"x,y\" for targets without a badge", action)
+	}
+	return nil
+}
+
+func validateSelectOptionArgs(action string, args map[string]any) error {
+	if action != "select_option" {
+		return nil
+	}
+	if strings.TrimSpace(stringArg(args, "selector")) == "" && intArg(args, "label") <= 0 && !hasCoordinateArg(args) {
+		return fmt.Errorf("select_option requires label=N, selector, or coordinate=\"x,y\"")
+	}
+	if strings.TrimSpace(stringArg(args, "text")) == "" &&
+		strings.TrimSpace(stringArg(args, "value")) == "" &&
+		len(stringSliceArg(args, "texts")) == 0 &&
+		len(stringSliceArg(args, "values")) == 0 {
+		return fmt.Errorf("select_option requires text/texts or value/values")
 	}
 	return nil
 }

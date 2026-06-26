@@ -210,6 +210,135 @@ func TestComputerAppBrowserShortcutKeys(t *testing.T) {
 	t.Fatal("shortcut key test did not reach pass URL")
 }
 
+// TestComputerAppBrowserSelectOption verifies the higher-level
+// select_option action against native selects, native multiselects, and a
+// Patreon-style ARIA combobox. It defaults to local and can also run against
+// Browserbase because the fixture is a data: URL.
+//
+//	RUN_COMPUTER_APP_BROWSER_TESTS=1 APTEVA_HEADLESS_BROWSER=1 go test -run TestComputerAppBrowserSelectOption -timeout 3m .
+//	RUN_COMPUTER_APP_BROWSER_TESTS=1 COMPUTER_APP_BROWSER_BACKEND=browserbase BROWSERBASE_API_KEY=... BROWSERBASE_PROJECT_ID=... go test -run TestComputerAppBrowserSelectOption -timeout 5m .
+func TestComputerAppBrowserSelectOption(t *testing.T) {
+	if os.Getenv("RUN_COMPUTER_APP_BROWSER_TESTS") == "" {
+		t.Skip("set RUN_COMPUTER_APP_BROWSER_TESTS=1 to run the real browser select_option test")
+	}
+	backend := strings.TrimSpace(os.Getenv("COMPUTER_APP_BROWSER_BACKEND"))
+	if backend == "" {
+		backend = "local"
+	}
+	if backend == "browserbase" && (os.Getenv("BROWSERBASE_API_KEY") == "" || os.Getenv("BROWSERBASE_PROJECT_ID") == "") {
+		t.Skip("COMPUTER_APP_BROWSER_BACKEND=browserbase requires BROWSERBASE_API_KEY and BROWSERBASE_PROJECT_ID")
+	}
+	runComputerAppBrowserSelectOption(t, backend)
+}
+
+// TestComputerAppBrowserbaseSelectOption is the provider-specific regression
+// for select_option over Browserbase/CDP. It is separate from the backend-
+// parameterized test above so CI and release checks can target Browserbase
+// explicitly without relying on COMPUTER_APP_BROWSER_BACKEND.
+//
+//	RUN_COMPUTER_APP_BROWSERBASE_TESTS=1 BROWSERBASE_API_KEY=... BROWSERBASE_PROJECT_ID=... go test -run TestComputerAppBrowserbaseSelectOption -timeout 5m .
+func TestComputerAppBrowserbaseSelectOption(t *testing.T) {
+	if os.Getenv("RUN_COMPUTER_APP_BROWSERBASE_TESTS") == "" {
+		t.Skip("set RUN_COMPUTER_APP_BROWSERBASE_TESTS=1 to run the Browserbase select_option test")
+	}
+	if os.Getenv("BROWSERBASE_API_KEY") == "" || os.Getenv("BROWSERBASE_PROJECT_ID") == "" {
+		t.Skip("BROWSERBASE_API_KEY and BROWSERBASE_PROJECT_ID are required")
+	}
+	runComputerAppBrowserSelectOption(t, "browserbase")
+}
+
+// TestComputerAppBrowserbasePublicMultiSelectOption verifies select_option on
+// a public WAI-ARIA APG multiselect listbox. This keeps coverage for real
+// role=listbox/aria-multiselectable markup, not just the local fixture.
+//
+//	RUN_COMPUTER_APP_BROWSERBASE_TESTS=1 BROWSERBASE_API_KEY=... BROWSERBASE_PROJECT_ID=... go test -run TestComputerAppBrowserbasePublicMultiSelectOption -timeout 5m .
+func TestComputerAppBrowserbasePublicMultiSelectOption(t *testing.T) {
+	if os.Getenv("RUN_COMPUTER_APP_BROWSERBASE_TESTS") == "" {
+		t.Skip("set RUN_COMPUTER_APP_BROWSERBASE_TESTS=1 to run the Browserbase public multiselect test")
+	}
+	if os.Getenv("BROWSERBASE_API_KEY") == "" || os.Getenv("BROWSERBASE_PROJECT_ID") == "" {
+		t.Skip("BROWSERBASE_API_KEY and BROWSERBASE_PROJECT_ID are required")
+	}
+
+	sc := tk.SpawnSidecar(t, ".", tk.WithEnv("APTEVA_HEADLESS_BROWSER", "1"))
+	open := sc.MCP("browser_session", map[string]any{
+		"action":  "open",
+		"backend": "browserbase",
+		"url":     "https://www.w3.org/WAI/ARIA/apg/patterns/listbox/examples/listbox-rearrangeable/",
+	})
+	sessionID, _ := open["session_id"].(string)
+	if sessionID == "" {
+		t.Fatalf("open returned no session_id: %v", open)
+	}
+	defer sc.MCP("browser_close", map[string]any{"session_id": sessionID})
+
+	out := sc.MCP("computer_use", map[string]any{
+		"session_id": sessionID,
+		"action":     "select_option",
+		"selector":   "#ms_imp_list",
+		"texts":      []any{"Leather seats", "Food synthesizer"},
+		"mode":       "replace",
+	})
+	selected := stringSliceValue(out["select_selected"])
+	if !containsString(selected, "Leather seats") || !containsString(selected, "Food synthesizer") {
+		t.Fatalf("public ARIA multiselect: want selected Leather seats and Food synthesizer, got %v out=%v", selected, out)
+	}
+}
+
+func runComputerAppBrowserSelectOption(t *testing.T, backend string) {
+	t.Helper()
+	sc := tk.SpawnSidecar(t, ".", tk.WithEnv("APTEVA_HEADLESS_BROWSER", "1"))
+	open := sc.MCP("browser_session", map[string]any{
+		"action":  "open",
+		"backend": backend,
+		"url":     selectOptionFixtureDataURL(),
+		"viewport": map[string]any{
+			"width":  1000,
+			"height": 700,
+		},
+	})
+	sessionID, _ := open["session_id"].(string)
+	if sessionID == "" {
+		t.Fatalf("open returned no session_id: %v", open)
+	}
+	defer sc.MCP("browser_close", map[string]any{"session_id": sessionID})
+
+	out := sc.MCP("computer_use", map[string]any{
+		"session_id": sessionID,
+		"action":     "select_option",
+		"selector":   "#tier",
+		"value":      "pro",
+	})
+	if got := stringSliceValue(out["select_selected"]); !containsString(got, "Pro") {
+		t.Fatalf("native select tier: want selected Pro, got %v out=%v", got, out)
+	}
+
+	out = sc.MCP("computer_use", map[string]any{
+		"session_id": sessionID,
+		"action":     "select_option",
+		"selector":   "#colors",
+		"texts":      []any{"Red", "Blue"},
+		"mode":       "replace",
+	})
+	selected := stringSliceValue(out["select_selected"])
+	if !containsString(selected, "Red") || !containsString(selected, "Blue") {
+		t.Fatalf("native multiselect colors: want selected Red and Blue, got %v out=%v", selected, out)
+	}
+
+	out = sc.MCP("computer_use", map[string]any{
+		"session_id": sessionID,
+		"action":     "select_option",
+		"selector":   "#tier-combobox",
+		"text":       "VIP",
+	})
+	if got := stringSliceValue(out["select_matched"]); !containsString(got, "VIP") {
+		t.Fatalf("custom combobox: want matched VIP, got %v out=%v", got, out)
+	}
+	if got := stringValue(out["select_control_text"]); got != "VIP" {
+		t.Fatalf("custom combobox: want control text VIP, got %q out=%v", got, out)
+	}
+}
+
 // TestComputerAppBrowserNewTabAutoFollow verifies that a normal target=_blank
 // click opens a real tab and Computer follows it when exactly one new tab is
 // created. It defaults to local and can also run against Browserbase.
@@ -689,6 +818,74 @@ sync();
 </script>`
 }
 
+func selectOptionFixtureDataURL() string {
+	html := `<!doctype html>
+<meta charset="utf-8">
+<title>Select option test</title>
+<style>
+  body { font: 20px system-ui, sans-serif; margin: 0; padding: 40px; }
+  label { display: block; margin: 18px 0 6px; }
+  select, button { font: inherit; padding: 8px 12px; min-width: 240px; }
+  #tier-listbox { display: none; position: absolute; left: 40px; top: 300px; padding: 8px; border: 1px solid #333; background: white; }
+  #tier-listbox.open { display: block; }
+  [role=option] { padding: 8px 12px; cursor: pointer; }
+  [role=option][aria-selected=true] { background: #cdeafe; }
+</style>
+<label for="tier">Tier</label>
+<select id="tier">
+  <option value="">All tiers</option>
+  <option value="free">Free</option>
+  <option value="pro">Pro</option>
+  <option value="vip">VIP</option>
+</select>
+<label for="colors">Colors</label>
+<select id="colors" multiple size="4">
+  <option value="red">Red</option>
+  <option value="green">Green</option>
+  <option value="blue">Blue</option>
+  <option value="gold">Gold</option>
+</select>
+<label>Patreon style</label>
+<button id="tier-combobox" type="button" role="combobox" aria-label="Select tiers" aria-expanded="false" aria-haspopup="listbox">All tiers</button>
+<div id="tier-listbox" role="listbox">
+  <div role="option" data-value="all" aria-selected="false">All tiers</div>
+  <div role="option" data-value="members" aria-selected="false">Paid members</div>
+  <div role="option" data-value="vip" aria-selected="false">VIP</div>
+</div>
+<script>
+const tier = document.getElementById("tier");
+const colors = document.getElementById("colors");
+const combo = document.getElementById("tier-combobox");
+const list = document.getElementById("tier-listbox");
+function sync(extra) {
+  const p = new URLSearchParams(location.hash.slice(1));
+  p.set("tier", tier.value);
+  p.set("colors", Array.from(colors.selectedOptions).map(o => o.value).join(","));
+  if (extra) for (const [k, v] of Object.entries(extra)) p.set(k, v);
+  location.hash = p.toString();
+}
+tier.addEventListener("change", () => sync());
+colors.addEventListener("change", () => sync());
+combo.addEventListener("click", () => {
+  const open = combo.getAttribute("aria-expanded") === "true";
+  combo.setAttribute("aria-expanded", open ? "false" : "true");
+  list.classList.toggle("open", !open);
+});
+for (const opt of list.querySelectorAll("[role=option]")) {
+  opt.addEventListener("click", () => {
+    for (const other of list.querySelectorAll("[role=option]")) other.setAttribute("aria-selected", "false");
+    opt.setAttribute("aria-selected", "true");
+    combo.textContent = opt.textContent;
+    combo.setAttribute("aria-expanded", "false");
+    list.classList.remove("open");
+    sync({custom: opt.textContent.trim()});
+  });
+}
+sync();
+</script>`
+	return "data:text/html;charset=utf-8," + url.PathEscape(html)
+}
+
 func newTabFixtureDataURL() string {
 	html := `<!doctype html>
 <meta charset="utf-8">
@@ -715,6 +912,32 @@ func numericValue(v any) (float64, bool) {
 	default:
 		return 0, false
 	}
+}
+
+func stringSliceValue(v any) []string {
+	switch vv := v.(type) {
+	case []string:
+		return append([]string(nil), vv...)
+	case []any:
+		out := make([]string, 0, len(vv))
+		for _, item := range vv {
+			if s := stringValue(item); s != "" {
+				out = append(out, s)
+			}
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
+func containsString(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }
 
 func fcoord(x, y int) string {

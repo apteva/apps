@@ -280,6 +280,58 @@ func TestComputerUseRejectsExplicitLabelZero(t *testing.T) {
 	}
 }
 
+func TestComputerUseSelectOptionArgs(t *testing.T) {
+	prev := newBackend
+	t.Cleanup(func() { newBackend = prev })
+
+	fake := &fakeComp{
+		display: backends.DisplaySize{Width: 1024, Height: 768},
+		png:     []byte{0x89, 0x50, 0x4e, 0x47},
+		url:     "https://example.com",
+	}
+	newBackend = func(cfg backends.Config) (backends.Computer, error) { return fake, nil }
+
+	app := &App{reg: &registry{m: map[string]*session{}}}
+	ctx := tk.NewAppCtx(t, "apteva.yaml")
+	openOut, err := app.toolBrowserSession(ctx, map[string]any{"action": "open", "backend": "local"})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	sessionID := openOut.(map[string]any)["session_id"].(string)
+
+	if _, err := app.toolComputerUse(ctx, map[string]any{
+		"session_id": sessionID,
+		"action":     "select_option",
+		"text":       "Gold",
+	}); err == nil || !strings.Contains(err.Error(), "requires label") {
+		t.Fatalf("select_option without target: want target error, got %v", err)
+	}
+
+	_, err = app.toolComputerUse(ctx, map[string]any{
+		"session_id": sessionID,
+		"action":     "select_option",
+		"selector":   "button[role=combobox]",
+		"texts":      []any{"Gold", "VIP"},
+		"values":     `["gold","vip"]`,
+		"mode":       "add",
+	})
+	if err != nil {
+		t.Fatalf("select_option: %v", err)
+	}
+	if fake.lastAction.Type != "select_option" {
+		t.Fatalf("action type: got %+v", fake.lastAction)
+	}
+	if fake.lastAction.Selector != "button[role=combobox]" || fake.lastAction.Mode != "add" {
+		t.Fatalf("select action target/mode: got %+v", fake.lastAction)
+	}
+	if got := strings.Join(fake.lastAction.Texts, ","); got != "Gold,VIP" {
+		t.Fatalf("texts: got %q", got)
+	}
+	if got := strings.Join(fake.lastAction.Values, ","); got != "gold,vip" {
+		t.Fatalf("values: got %q", got)
+	}
+}
+
 func TestComputerUseContextCanceledEvictsSession(t *testing.T) {
 	fake := &fakeComp{
 		display:    backends.DisplaySize{Width: 1024, Height: 768},
