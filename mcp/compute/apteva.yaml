@@ -1,0 +1,109 @@
+schema: apteva-app/v1
+
+name: compute
+display_name: Compute
+version: 0.1.0
+description: |
+  Shared transient compute queue for Apteva apps. Apps submit short-
+  lived resource-heavy jobs, and Compute serializes them across local
+  or remote hosts with priority, ownership, timeout, cancellation, and
+  run history. It is the resource scheduler layer between high-level
+  apps such as Media/Composer and low-level host providers such as
+  Instances.
+
+author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/compute
+icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/compute/icon.svg
+tags: [compute, queue, workloads, render, infrastructure]
+
+scopes: [project, global]
+min_apteva_version: "0.10.0"
+
+requires:
+  permissions:
+    - db.write.app
+    - net.egress
+    - platform.apps.call
+  integrations:
+    - role: hosts
+      kind: app
+      required: false
+      compatible_app_names: [instances]
+      label: Instances app
+      hint: Optional. When bound, Compute can dispatch jobs to remote hosts. Without it, jobs run through the local executor with the same queue semantics.
+    - role: containers
+      kind: app
+      required: false
+      compatible_app_names: [containers]
+      label: Containers app
+      hint: Optional future executor backend for containerized one-off tasks.
+
+provides:
+  http_routes:
+    - prefix: /
+  mcp_tools:
+    - name: compute_submit
+      description: "Submit a transient compute job. Args: command, timeout_s?, priority?, owner_app?, resource_class?, pool?, host_id?, idempotency_key?."
+    - name: compute_get
+      description: "Fetch one compute job by id."
+    - name: compute_list
+      description: "List compute jobs by status, owner_app, resource_class, host_id, pool."
+    - name: compute_cancel
+      description: "Cancel a queued or running compute job. Running local jobs are marked cancelling and the worker stops the process."
+  publishes:
+    - name: compute.queued
+      description: A compute job was queued.
+    - name: compute.started
+      description: A compute job started on an executor.
+    - name: compute.completed
+      description: A compute job completed successfully.
+    - name: compute.failed
+      description: A compute job failed.
+    - name: compute.cancelled
+      description: A compute job was cancelled.
+  workers:
+    - name: dispatcher
+      schedule: "@every 1s"
+
+runtime:
+  kind: source
+  source:
+    repo: github.com/apteva/apps
+    ref: main
+    entry: mcp/compute
+  port: 8080
+  health_check: /health
+
+db:
+  driver: sqlite
+  path: /data/compute.db
+  migrations: migrations/
+
+config_schema:
+  - name: local_enabled
+    type: text
+    default: "true"
+    label: Local executor enabled
+    description: When true, Compute can run jobs on the same machine as the sidecar.
+  - name: local_max_concurrency
+    type: text
+    default: "1"
+    label: Local max concurrency
+    description: Maximum concurrently running local jobs. Keep low on small hosts.
+  - name: default_timeout_seconds
+    type: text
+    default: "1800"
+    label: Default timeout (seconds)
+    description: Default deadline for jobs that omit timeout_s.
+  - name: max_output_bytes
+    type: text
+    default: "1048576"
+    label: Max captured output bytes
+    description: Combined stdout/stderr cap stored on the job row.
+  - name: instances_enabled
+    type: text
+    default: "false"
+    label: Instances executor enabled
+    description: Reserved for remote host dispatch through the Instances app.
+
+upgrade_policy: auto-patch
