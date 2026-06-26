@@ -24,6 +24,8 @@ func TestActionTimeoutsAreBounded(t *testing.T) {
 		"navigate":      navigateActionTimeout,
 		"upload_file":   30 * time.Second,
 		"select_option": 20 * time.Second,
+		"set_checked":   20 * time.Second,
+		"set_temporal":  20 * time.Second,
 	}
 	for action, want := range cases {
 		if got := actionTimeout(action); got != want {

@@ -151,6 +151,100 @@ func TestComputerAppBrowserDateTimeTyping(t *testing.T) {
 	}
 }
 
+// TestComputerAppBrowserSetCheckedAndTemporal verifies targeted DOM state
+// actions that avoid blind checkbox clicks and fragile focused-field typing.
+// It defaults to local and can also run against Browserbase because the
+// fixture is a data: URL.
+//
+//	RUN_COMPUTER_APP_BROWSER_TESTS=1 APTEVA_HEADLESS_BROWSER=1 go test -run TestComputerAppBrowserSetCheckedAndTemporal -timeout 3m .
+//	RUN_COMPUTER_APP_BROWSER_TESTS=1 COMPUTER_APP_BROWSER_BACKEND=browserbase BROWSERBASE_API_KEY=... BROWSERBASE_PROJECT_ID=... go test -run TestComputerAppBrowserSetCheckedAndTemporal -timeout 5m .
+func TestComputerAppBrowserSetCheckedAndTemporal(t *testing.T) {
+	if os.Getenv("RUN_COMPUTER_APP_BROWSER_TESTS") == "" {
+		t.Skip("set RUN_COMPUTER_APP_BROWSER_TESTS=1 to run the real browser checked/temporal test")
+	}
+	backend := strings.TrimSpace(os.Getenv("COMPUTER_APP_BROWSER_BACKEND"))
+	if backend == "" {
+		backend = "local"
+	}
+	if backend == "browserbase" && (os.Getenv("BROWSERBASE_API_KEY") == "" || os.Getenv("BROWSERBASE_PROJECT_ID") == "") {
+		t.Skip("COMPUTER_APP_BROWSER_BACKEND=browserbase requires BROWSERBASE_API_KEY and BROWSERBASE_PROJECT_ID")
+	}
+	runComputerAppBrowserSetCheckedAndTemporal(t, backend)
+}
+
+// TestComputerAppBrowserbaseSetCheckedAndTemporal is the Browserbase-specific
+// release regression for the Patreon-like checkbox/switch and date/time path.
+//
+//	RUN_COMPUTER_APP_BROWSERBASE_TESTS=1 BROWSERBASE_API_KEY=... BROWSERBASE_PROJECT_ID=... go test -run TestComputerAppBrowserbaseSetCheckedAndTemporal -timeout 5m .
+func TestComputerAppBrowserbaseSetCheckedAndTemporal(t *testing.T) {
+	if os.Getenv("RUN_COMPUTER_APP_BROWSERBASE_TESTS") == "" {
+		t.Skip("set RUN_COMPUTER_APP_BROWSERBASE_TESTS=1 to run the Browserbase checked/temporal test")
+	}
+	if os.Getenv("BROWSERBASE_API_KEY") == "" || os.Getenv("BROWSERBASE_PROJECT_ID") == "" {
+		t.Skip("BROWSERBASE_API_KEY and BROWSERBASE_PROJECT_ID are required")
+	}
+	runComputerAppBrowserSetCheckedAndTemporal(t, "browserbase")
+}
+
+func runComputerAppBrowserSetCheckedAndTemporal(t *testing.T, backend string) {
+	t.Helper()
+	sc := tk.SpawnSidecar(t, ".", tk.WithEnv("APTEVA_HEADLESS_BROWSER", "1"))
+	open := sc.MCP("browser_session", map[string]any{
+		"action":  "open",
+		"backend": backend,
+		"url":     checkedTemporalFixtureDataURL(),
+		"viewport": map[string]any{
+			"width":  1000,
+			"height": 700,
+		},
+	})
+	sessionID, _ := open["session_id"].(string)
+	if sessionID == "" {
+		t.Fatalf("open returned no session_id: %v", open)
+	}
+	defer sc.MCP("browser_close", map[string]any{"session_id": sessionID})
+
+	out := sc.MCP("computer_use", map[string]any{
+		"session_id": sessionID,
+		"action":     "set_checked",
+		"selector":   "#sell-post",
+		"checked":    false,
+	})
+	if out["checked"] != false {
+		t.Fatalf("native checkbox: want checked=false, got %v out=%v", out["checked"], out)
+	}
+
+	out = sc.MCP("computer_use", map[string]any{
+		"session_id": sessionID,
+		"action":     "set_checked",
+		"selector":   "#paid-members",
+		"checked":    true,
+	})
+	if out["checked"] != true {
+		t.Fatalf("ARIA switch: want checked=true, got %v out=%v", out["checked"], out)
+	}
+
+	out = sc.MCP("computer_use", map[string]any{
+		"session_id": sessionID,
+		"action":     "set_temporal",
+		"selector":   "#schedule-date",
+		"value":      "2026-07-01",
+	})
+	if got := stringValue(out["temporal_value"]); got != "2026-07-01" {
+		t.Fatalf("date temporal_value: want 2026-07-01, got %q out=%v", got, out)
+	}
+
+	out = sc.MCP("computer_use", map[string]any{
+		"session_id": sessionID,
+		"action":     "set_temporal",
+		"selector":   "#schedule-time",
+		"value":      "11:00 AM",
+	})
+	if got := stringValue(out["temporal_value"]); got != "11:00" {
+		t.Fatalf("time temporal_value: want 11:00, got %q out=%v", got, out)
+	}
+}
+
 // TestComputerAppBrowserShortcutKeys verifies that browser/editor command
 // keys are dispatched as real key events instead of literal text. It defaults
 // to local and can also run against Browserbase because the fixture is a data:
@@ -816,6 +910,48 @@ for (const input of document.querySelectorAll("input")) {
 }
 sync();
 </script>`
+}
+
+func checkedTemporalFixtureDataURL() string {
+	html := `<!doctype html>
+<meta charset="utf-8">
+<title>Checked and temporal test</title>
+<style>
+  body { font: 20px system-ui, sans-serif; margin: 0; padding: 40px; }
+  label, .row { display: block; margin: 18px 0 6px; }
+  input, button { font: inherit; padding: 8px 12px; min-width: 220px; }
+  [role=switch] { border: 1px solid #333; background: #eee; border-radius: 4px; }
+  [role=switch][aria-checked=true] { background: #cdeafe; }
+</style>
+<label><input id="sell-post" type="checkbox" checked> Sell this post</label>
+<button id="paid-members" role="switch" aria-checked="false" type="button">Paid members</button>
+<label for="schedule-date">Date</label><input id="schedule-date" type="date">
+<label for="schedule-time">Time</label><input id="schedule-time" type="time">
+<script>
+const sell = document.getElementById("sell-post");
+const paid = document.getElementById("paid-members");
+const date = document.getElementById("schedule-date");
+const time = document.getElementById("schedule-time");
+paid.addEventListener("click", () => {
+  const next = paid.getAttribute("aria-checked") !== "true";
+  paid.setAttribute("aria-checked", String(next));
+  sync();
+});
+function sync() {
+  const p = new URLSearchParams();
+  p.set("sell", String(sell.checked));
+  p.set("paid", String(paid.getAttribute("aria-checked") === "true"));
+  p.set("date", date.value);
+  p.set("time", time.value);
+  location.hash = p.toString();
+}
+for (const input of [sell, date, time]) {
+  input.addEventListener("input", sync);
+  input.addEventListener("change", sync);
+}
+sync();
+</script>`
+	return "data:text/html;charset=utf-8," + url.PathEscape(html)
 }
 
 func selectOptionFixtureDataURL() string {

@@ -332,6 +332,88 @@ func TestComputerUseSelectOptionArgs(t *testing.T) {
 	}
 }
 
+func TestComputerUseSetCheckedArgs(t *testing.T) {
+	prev := newBackend
+	t.Cleanup(func() { newBackend = prev })
+
+	fake := &fakeComp{
+		display: backends.DisplaySize{Width: 1024, Height: 768},
+		png:     []byte{0x89, 0x50, 0x4e, 0x47},
+		url:     "https://example.com",
+	}
+	newBackend = func(cfg backends.Config) (backends.Computer, error) { return fake, nil }
+
+	app := &App{reg: &registry{m: map[string]*session{}}}
+	ctx := tk.NewAppCtx(t, "apteva.yaml")
+	openOut, err := app.toolBrowserSession(ctx, map[string]any{"action": "open", "backend": "local"})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	sessionID := openOut.(map[string]any)["session_id"].(string)
+
+	if _, err := app.toolComputerUse(ctx, map[string]any{
+		"session_id": sessionID,
+		"action":     "set_checked",
+		"selector":   "#sell",
+	}); err == nil || !strings.Contains(err.Error(), "requires checked") {
+		t.Fatalf("set_checked without checked: want checked error, got %v", err)
+	}
+
+	_, err = app.toolComputerUse(ctx, map[string]any{
+		"session_id": sessionID,
+		"action":     "set_checked",
+		"selector":   "#sell",
+		"checked":    false,
+	})
+	if err != nil {
+		t.Fatalf("set_checked false: %v", err)
+	}
+	if fake.lastAction.Type != "set_checked" || fake.lastAction.Selector != "#sell" || fake.lastAction.Checked != false {
+		t.Fatalf("set_checked action: got %+v", fake.lastAction)
+	}
+}
+
+func TestComputerUseSetTemporalArgs(t *testing.T) {
+	prev := newBackend
+	t.Cleanup(func() { newBackend = prev })
+
+	fake := &fakeComp{
+		display: backends.DisplaySize{Width: 1024, Height: 768},
+		png:     []byte{0x89, 0x50, 0x4e, 0x47},
+		url:     "https://example.com",
+	}
+	newBackend = func(cfg backends.Config) (backends.Computer, error) { return fake, nil }
+
+	app := &App{reg: &registry{m: map[string]*session{}}}
+	ctx := tk.NewAppCtx(t, "apteva.yaml")
+	openOut, err := app.toolBrowserSession(ctx, map[string]any{"action": "open", "backend": "local"})
+	if err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	sessionID := openOut.(map[string]any)["session_id"].(string)
+
+	if _, err := app.toolComputerUse(ctx, map[string]any{
+		"session_id": sessionID,
+		"action":     "set_temporal",
+		"selector":   "#time",
+	}); err == nil || !strings.Contains(err.Error(), "requires value") {
+		t.Fatalf("set_temporal without value: want value error, got %v", err)
+	}
+
+	_, err = app.toolComputerUse(ctx, map[string]any{
+		"session_id": sessionID,
+		"action":     "set_temporal",
+		"selector":   "#time",
+		"value":      "11:00 AM",
+	})
+	if err != nil {
+		t.Fatalf("set_temporal: %v", err)
+	}
+	if fake.lastAction.Type != "set_temporal" || fake.lastAction.Selector != "#time" || fake.lastAction.Value != "11:00 AM" {
+		t.Fatalf("set_temporal action: got %+v", fake.lastAction)
+	}
+}
+
 func TestComputerUseContextCanceledEvictsSession(t *testing.T) {
 	fake := &fakeComp{
 		display:    backends.DisplaySize{Width: 1024, Height: 768},
@@ -1603,6 +1685,9 @@ func TestComputerUseDescriptionTeachesLabelWorkflow(t *testing.T) {
 		"browser_session(action=tabs)",
 		"browser_session(action=switch_tab",
 		"Do not use Ctrl+Tab",
+		"use action=select_option first",
+		"action=set_checked",
+		"action=set_temporal",
 	} {
 		if !strings.Contains(desc, want) {
 			t.Errorf("computer_use description missing %q:\n%s", want, desc)
@@ -1624,6 +1709,12 @@ func TestComputerUseDescriptionTeachesLabelWorkflow(t *testing.T) {
 			}
 			if !strings.Contains(tool.Description, "browser_session(action=tabs)") || !strings.Contains(tool.Description, "Do not use Ctrl+Tab") {
 				t.Fatalf("manifest computer_use description does not teach explicit tab switching:\n%s", tool.Description)
+			}
+			if !strings.Contains(tool.Description, "action=set_checked") || !strings.Contains(tool.Description, "action=set_temporal") {
+				t.Fatalf("manifest computer_use description does not teach safe checkbox/time actions:\n%s", tool.Description)
+			}
+			if !strings.Contains(tool.Description, "use action=select_option first") {
+				t.Fatalf("manifest computer_use description does not teach select_option first:\n%s", tool.Description)
 			}
 			return
 		}
