@@ -22,7 +22,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: media
 display_name: Media
-version: 0.13.51
+version: 0.13.53
 description: |
   Catalog + derivations + renders + transcripts + auto-descriptions
   for media files in storage. Indexes uploads (probe, thumbnail,
@@ -122,7 +122,20 @@ provides:
     - { name: media_extract_frame,   description: "Save a single frame at a specific timestamp as PNG. Returns render_id." }
     - { name: media_audio_extract,   description: "Strip audio from a video into a standalone file. Returns render_id." }
     - { name: media_audio_filter,    description: "Normalize, clean, adjust, or mute audio in an audio/video source. For video outputs, copies video and only re-encodes audio. Returns render_id." }
-    - { name: media_extract_reel,    description: "Trim + reframe to a target aspect ratio in one ffmpeg pass. Replaces media_trim → media_crop → media_resize for vertical-reel workflows. Args - file_id, start_ms, end_ms, target_ratio? (default 9:16), output_width? (default 1080)." }
+    - name: media_extract_reel
+      description: "Trim + reframe to a target aspect ratio in one ffmpeg pass. Replaces media_trim → media_crop → media_resize for vertical-reel workflows. Args - file_id, start_ms, end_ms, target_ratio? (default 9:16), output_width? (default 1080). Returns immediately with render_id; Apteva notifies the calling agent when this render completes, fails, or is cancelled, so agents should not poll media_get_render unless the user explicitly asks for progress."
+      async_result:
+        id_field: render_id
+        notify:
+          target: caller
+          mode: once
+          events:
+            - render.completed
+            - render.failed
+            - render.cancelled
+          match:
+            render_id: "$result.render_id"
+          expires_after: 24h
     - { name: media_get_render,      description: "Status of one render — progress + output_file_id when ready." }
     - { name: media_list_renders,    description: "List renders filtered by status / operation." }
     - { name: media_cancel_render,   description: "Cancel a pending or running render. Idempotent." }
@@ -542,7 +555,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "media_extract_reel",
-			Description: "Cut a clip from a video AND reframe it to a target aspect ratio in a single ffmpeg pass. Replaces the manual chain media_trim → media_crop → media_resize for the common 'make a 9:16 reel from a 16:9 source' workflow. Args: file_id, start_ms, end_ms (same units + names as media_trim), target_ratio? (default '9:16', e.g. '1:1', '4:5'), output_width? (default 1080; height auto-derives from ratio), output_name?, output_folder?.",
+			Description: "Cut a clip from a video AND reframe it to a target aspect ratio in a single ffmpeg pass. Replaces the manual chain media_trim → media_crop → media_resize for the common 'make a 9:16 reel from a 16:9 source' workflow. Args: file_id, start_ms, end_ms (same units + names as media_trim), target_ratio? (default '9:16', e.g. '1:1', '4:5'), output_width? (default 1080; height auto-derives from ratio), output_name?, output_folder?. Returns immediately with render_id; Apteva notifies the calling agent when this render completes, fails, or is cancelled, so do not poll media_get_render unless the user explicitly asks for progress.",
 			InputSchema: schemaObject(map[string]any{
 				"file_id":       map[string]any{"type": "string", "description": "Storage file_id of the source video."},
 				"start_ms":      map[string]any{"type": "integer", "description": "Clip start, milliseconds from start of source. Same convention as media_trim."},

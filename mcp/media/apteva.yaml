@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: media
 display_name: Media
-version: 0.13.52
+version: 0.13.53
 description: |
   Catalog + cheap derivations + parameterised renders for media files
   in storage. Probes uploads with ffprobe (duration, dimensions,
@@ -145,7 +145,19 @@ provides:
       description: Normalize, speech-clean, adjust volume, or mute audio in an audio/video source. For video outputs, copies video unchanged and only re-encodes audio. Args — file_id, mode? (normalize|speech_clean|volume|mute), target_lufs?, gain_db?, output_name?.
     - name: media_extract_reel
       description: |
-        Cut a clip from a video AND reframe it to a target aspect ratio in a single ffmpeg pass. Replaces the chain media_trim → media_crop → media_resize for the common "make a 9:16 reel from a 16:9 source" workflow — one render row, one download from storage, one re-encode, one upload. Time fields use the same units + names as media_trim (start_ms, end_ms in milliseconds). Args — file_id, start_ms, end_ms, target_ratio? (default "9:16", also accepts "1:1", "4:5", "16:9", …), output_width? (default 1080; height auto-derives from ratio).
+        Cut a clip from a video AND reframe it to a target aspect ratio in a single ffmpeg pass. Replaces the chain media_trim → media_crop → media_resize for the common "make a 9:16 reel from a 16:9 source" workflow — one render row, one download from storage, one re-encode, one upload. Time fields use the same units + names as media_trim (start_ms, end_ms in milliseconds). Args — file_id, start_ms, end_ms, target_ratio? (default "9:16", also accepts "1:1", "4:5", "16:9", …), output_width? (default 1080; height auto-derives from ratio). Returns immediately with render_id; Apteva notifies the calling agent when this render completes, fails, or is cancelled, so agents should not poll media_get_render unless the user explicitly asks for progress.
+      async_result:
+        id_field: render_id
+        notify:
+          target: caller
+          mode: once
+          events:
+            - render.completed
+            - render.failed
+            - render.cancelled
+          match:
+            render_id: "$result.render_id"
+          expires_after: 24h
 
     # Renders — manage
     - name: media_get_render
