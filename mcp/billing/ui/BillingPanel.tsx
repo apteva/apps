@@ -222,6 +222,52 @@ function fmtDateTime(s?: string): string {
   }
 }
 
+type InvoiceDatePreset = "all" | "this_month" | "last_month" | "past_3_months" | "custom";
+
+function dateInputValue(d: Date): string {
+  const yyyy = d.getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, "0");
+  const dd = String(d.getDate()).padStart(2, "0");
+  return `${yyyy}-${mm}-${dd}`;
+}
+
+function addDays(dateKey: string, days: number): string {
+  const d = new Date(`${dateKey}T00:00:00`);
+  if (Number.isNaN(d.getTime())) return "";
+  d.setDate(d.getDate() + days);
+  return dateInputValue(d);
+}
+
+function invoiceDateRange(
+  preset: InvoiceDatePreset,
+  customSince: string,
+  customUntil: string,
+): { since?: string; until?: string } {
+  const now = new Date();
+  if (preset === "this_month") {
+    const start = new Date(now.getFullYear(), now.getMonth(), 1);
+    const next = new Date(now.getFullYear(), now.getMonth() + 1, 1);
+    return { since: dateInputValue(start), until: dateInputValue(next) };
+  }
+  if (preset === "last_month") {
+    const start = new Date(now.getFullYear(), now.getMonth() - 1, 1);
+    const next = new Date(now.getFullYear(), now.getMonth(), 1);
+    return { since: dateInputValue(start), until: dateInputValue(next) };
+  }
+  if (preset === "past_3_months") {
+    const start = new Date(now);
+    start.setMonth(start.getMonth() - 3);
+    return { since: dateInputValue(start) };
+  }
+  if (preset === "custom") {
+    return {
+      since: customSince || undefined,
+      until: customUntil ? addDays(customUntil, 1) : undefined,
+    };
+  }
+  return {};
+}
+
 const STATUS_TONE: Record<Invoice["status"], string> = {
   draft: "bg-border text-text-muted",
   open: "bg-accent/15 text-accent",
@@ -327,6 +373,9 @@ function InvoicesTab({ projectId, apiCall }: { projectId: string; apiCall: ApiCa
   const [list, setList] = useState<Invoice[]>([]);
   const [filter, setFilter] = useState<string>("");
   const [statusFilter, setStatusFilter] = useState<string>("");
+  const [datePreset, setDatePreset] = useState<InvoiceDatePreset>("all");
+  const [customSince, setCustomSince] = useState<string>("");
+  const [customUntil, setCustomUntil] = useState<string>("");
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [detail, setDetail] = useState<Invoice | null>(null);
   const [status, setStatus] = useState<string>("");
@@ -343,6 +392,9 @@ function InvoicesTab({ projectId, apiCall }: { projectId: string; apiCall: ApiCa
       try {
         const query: Record<string, string> = {};
         if (statusFilter) query.status = statusFilter;
+        const range = invoiceDateRange(datePreset, customSince, customUntil);
+        if (range.since) query.since = range.since;
+        if (range.until) query.until = range.until;
         const res = await apiCall<{ invoices: Invoice[] }>(
           "GET",
           "/invoices",
@@ -364,7 +416,7 @@ function InvoicesTab({ projectId, apiCall }: { projectId: string; apiCall: ApiCa
         setStatus(`Error: ${(err as Error).message}`);
       }
     },
-    [apiCall, filter, statusFilter],
+    [apiCall, customSince, customUntil, datePreset, filter, statusFilter],
   );
 
   useEffect(() => {
@@ -487,6 +539,36 @@ function InvoicesTab({ projectId, apiCall }: { projectId: string; apiCall: ApiCa
             <option value="void">Void</option>
             <option value="uncollectible">Uncollectible</option>
           </select>
+          <select
+            value={datePreset}
+            onChange={(e) => setDatePreset(e.target.value as InvoiceDatePreset)}
+            className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm"
+            title="Filter by invoice creation date"
+          >
+            <option value="all">All dates</option>
+            <option value="this_month">Created this month</option>
+            <option value="last_month">Created last month</option>
+            <option value="past_3_months">Created in past 3 months</option>
+            <option value="custom">Custom created period</option>
+          </select>
+          {datePreset === "custom" && (
+            <div className="grid grid-cols-2 gap-2">
+              <input
+                type="date"
+                value={customSince}
+                onChange={(e) => setCustomSince(e.target.value)}
+                className="min-w-0 bg-bg-input border border-border rounded px-2 py-1 text-sm"
+                aria-label="Created from"
+              />
+              <input
+                type="date"
+                value={customUntil}
+                onChange={(e) => setCustomUntil(e.target.value)}
+                className="min-w-0 bg-bg-input border border-border rounded px-2 py-1 text-sm"
+                aria-label="Created through"
+              />
+            </div>
+          )}
         </div>
         <div className="flex-1 overflow-auto">
           {list.length === 0 ? (
@@ -522,7 +604,7 @@ function InvoicesTab({ projectId, apiCall }: { projectId: string; apiCall: ApiCa
                     </span>
                   </div>
                   <div className="text-[11px] text-text-dim mt-0.5">
-                    Updated {fmtDate(inv.updated_at || inv.created_at)}
+                    Created {fmtDate(inv.created_at)}
                   </div>
                 </li>
               ))}

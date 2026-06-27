@@ -1987,7 +1987,7 @@ func dbInvoiceSearch(db *sql.DB, pid string, f invoiceFilters) ([]*Invoice, erro
 		 FROM invoices i
 		 LEFT JOIN customers c ON c.id = i.customer_id AND c.deleted_at IS NULL
 		 WHERE `+strings.Join(where, " AND ")+`
-		 ORDER BY i.updated_at DESC
+		 ORDER BY i.created_at DESC
 		 LIMIT ?`, args...)
 	if err != nil {
 		return nil, err
