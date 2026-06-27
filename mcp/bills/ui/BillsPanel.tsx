@@ -1391,7 +1391,7 @@ function BillsTab({
   const [selectedId, setSelectedId] = useState<number | null>(null);
   const [detail, setDetail] = useState<Bill | null>(null);
   const [status, setStatus] = useState("");
-  const PAGE_SIZE = 50;
+  const PAGE_SIZE = 200;
 
   // Drop-to-create-bill flow: stash the dropped file, prompt for
   // vendor, then submit multipart to /bills/from-file.

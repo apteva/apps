@@ -295,7 +295,24 @@ func resolveVendorFromExtraction(db *sql.DB, pid string, e *ExtractedInvoice, ar
 	if name == "" {
 		return "", errors.New("OCR couldn't identify a vendor (no email or name) — call again with explicit vendor_id")
 	}
-	rows, err := dbVendorSearch(db, pid, name, "", 5)
+	exact, err := dbVendorFindByCanonicalName(db, pid, name)
+	if err != nil {
+		return "", err
+	}
+	if len(exact) == 1 {
+		args["vendor_id"] = exact[0].ID
+		return "name_unique", nil
+	}
+	if len(exact) > 1 {
+		ids := make([]int64, 0, len(exact))
+		for _, r := range exact {
+			ids = append(ids, r.ID)
+		}
+		return "", fmt.Errorf("OCR matched name %q to %d existing vendors %v — call again with explicit vendor_id to disambiguate",
+			name, len(exact), ids)
+	}
+
+	rows, err := dbVendorSearch(db, pid, name, "", 50)
 	if err != nil {
 		return "", err
 	}

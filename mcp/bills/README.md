@@ -1,8 +1,20 @@
-# Bills (v0.1.24)
+# Bills (v0.1.25)
 
 Vendors, bills, and bill payments for Apteva agents and human teams.
 The accounts-payable mirror of the `billing` app — money OUT instead
 of money in.
+
+## What's in v0.1.25
+
+Improves Bills data loading in two places:
+
+- OCR vendor resolution now checks exact/canonical vendor names across
+  the whole project before falling back to fuzzy search. This avoids
+  missing an existing vendor just because it was outside the old
+  five-result fuzzy search window.
+- The Bills panel now requests 200 bills per page, matching the
+  backend cap, so "All bill dates" shows substantially more history
+  before pagination.
 
 ## What's in v0.1.24
 

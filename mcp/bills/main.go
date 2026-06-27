@@ -37,6 +37,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
 
 	sdk "github.com/apteva/app-sdk"
 	_ "modernc.org/sqlite"
@@ -45,7 +46,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: bills
 display_name: Bills
-version: 0.1.24
+version: 0.1.25
 description: |
   Vendors, bills, and outbound payments. The AP mirror of billing.
 author: Apteva
@@ -113,7 +114,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	}
 
 	ctx.Logger().Info("bills mounted",
-		"version", "0.1.24",
+		"version", "0.1.25",
 		"scope_project_id", os.Getenv("APTEVA_PROJECT_ID"),
 		"ocr_provider", configString(ctx, "ocr_provider", "(disabled)"))
 	return nil
@@ -2520,6 +2521,65 @@ func dbVendorSearch(db *sql.DB, pid, q, email string, limit int) ([]*Vendor, err
 		out = append(out, v)
 	}
 	return out, rows.Err()
+}
+
+func dbVendorFindByCanonicalName(db *sql.DB, pid, name string) ([]*Vendor, error) {
+	want := canonicalVendorName(name)
+	if want == "" {
+		return nil, nil
+	}
+	rows, err := db.Query(
+		`SELECT id, project_id, name, email, phone, billing_address, tax_ids,
+		        currency, default_payment_method, default_payment_terms_days,
+		        w9_received_at, external_id, metadata, created_at, updated_at
+		 FROM vendors
+		 WHERE project_id = ? AND deleted_at IS NULL`, pid)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*Vendor
+	for rows.Next() {
+		v, err := scanVendor(rows)
+		if err != nil {
+			return nil, err
+		}
+		if canonicalVendorName(v.Name) == want {
+			out = append(out, v)
+		}
+	}
+	return out, rows.Err()
+}
+
+func canonicalVendorName(name string) string {
+	words := strings.Fields(strings.Map(func(r rune) rune {
+		switch {
+		case unicode.IsLetter(r), unicode.IsDigit(r):
+			return unicode.ToLower(r)
+		default:
+			return ' '
+		}
+	}, name))
+	if len(words) == 0 {
+		return ""
+	}
+	legalSuffixes := map[string]bool{
+		"co": true, "company": true, "corp": true, "corporation": true,
+		"gmbh": true, "inc": true, "incorporated": true, "limited": true,
+		"llc": true, "llp": true, "ltd": true, "plc": true, "sa": true,
+		"sl": true, "srl": true, "the": true,
+	}
+	filtered := words[:0]
+	for _, w := range words {
+		if legalSuffixes[w] {
+			continue
+		}
+		filtered = append(filtered, w)
+	}
+	if len(filtered) == 0 {
+		filtered = words
+	}
+	return strings.Join(filtered, " ")
 }
 
 func dbVendorGetByID(db *sql.DB, pid string, id int64) (*Vendor, error) {

@@ -6,6 +6,7 @@ package main
 // covered by tier 3 scenarios with a real Mindee install.
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -195,10 +196,41 @@ func TestResolveVendor_UniqueNameMatch(t *testing.T) {
 	}
 }
 
+func TestResolveVendor_ExactNameMatchBeyondFuzzyWindow(t *testing.T) {
+	ctx := newTestCtx(t)
+	v := mustVendor(t, ctx, "ap@acme.com", "Acme LLC")
+	if _, err := ctx.AppDB().Exec(
+		`UPDATE vendors SET updated_at = '2020-01-01T00:00:00Z' WHERE id = ?`, v.ID); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 6; i++ {
+		other := mustVendor(t, ctx, fmt.Sprintf("ap+other%d@acme.com", i), fmt.Sprintf("Acme Division %d", i))
+		if _, err := ctx.AppDB().Exec(
+			`UPDATE vendors SET updated_at = ? WHERE id = ?`,
+			fmt.Sprintf("2030-01-01T00:00:0%dZ", i), other.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	e := &ExtractedInvoice{}
+	e.Vendor.Name = "Acme"
+	args := map[string]any{}
+	via, err := resolveVendorFromExtraction(ctx.AppDB(), "test-proj", e, args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if via != "name_unique" {
+		t.Errorf("via=%q, want name_unique", via)
+	}
+	if got := args["vendor_id"].(int64); got != v.ID {
+		t.Errorf("vendor_id=%d, want exact canonical match %d", got, v.ID)
+	}
+}
+
 func TestResolveVendor_AmbiguousNameErrors(t *testing.T) {
 	ctx := newTestCtx(t)
-	mustVendor(t, ctx, "v1@x.com", "Acme")
-	mustVendor(t, ctx, "v2@x.com", "Acme Industries")
+	mustVendor(t, ctx, "v1@x.com", "Acme LLC")
+	mustVendor(t, ctx, "v2@x.com", "Acme Inc")
 
 	e := &ExtractedInvoice{}
 	e.Vendor.Name = "Acme"
