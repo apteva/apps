@@ -118,6 +118,32 @@ func TestParseAnthropicInvoice_TextBlock(t *testing.T) {
 	}
 }
 
+func TestParseAnthropicInvoice_CoercesFractionalCentFields(t *testing.T) {
+	envelope := map[string]any{
+		"content": []any{
+			map[string]any{
+				"type": "text",
+				"text": "```json\n{\"vendor\":{\"name\":\"Fireworks AI\",\"email\":\"fireworks.ai\"},\"invoice_number\":\"HQXZWR-00038\",\"issue_date\":\"2026-05-01\",\"currency\":\"USD\",\"total_cents\":7816,\"line_items\":[{\"description\":\"Embedding input tokens\",\"quantity\":3719742,\"unit_price_cents\":0.000000008,\"amount_cents\":3}]}\n```",
+			},
+		},
+		"stop_reason": "end_turn",
+	}
+	raw, _ := json.Marshal(envelope)
+	got, err := parseAnthropicInvoice(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Vendor.Name != "Fireworks AI" || got.InvoiceNumber != "HQXZWR-00038" || got.TotalCents != 7816 {
+		t.Errorf("got %+v", got)
+	}
+	if len(got.LineItems) != 1 {
+		t.Fatalf("line_items=%d, want 1", len(got.LineItems))
+	}
+	if got.LineItems[0].UnitPriceCents != 0 || got.LineItems[0].AmountCents != 3 {
+		t.Errorf("line item=%+v", got.LineItems[0])
+	}
+}
+
 func TestParseAnthropicInvoice_NoContentErrors(t *testing.T) {
 	envelope := map[string]any{
 		"content":     []any{},

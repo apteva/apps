@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"image/jpeg"
+	"math"
 	"strings"
 	"sync"
 	"time"
@@ -611,10 +612,77 @@ func parseInvoiceJSON(s string) (*ExtractedInvoice, error) {
 		s = s[i:]
 	}
 	var inv ExtractedInvoice
-	if err := json.Unmarshal([]byte(s), &inv); err != nil {
-		return nil, fmt.Errorf("invoice JSON parse: %w", err)
+	if err := json.Unmarshal([]byte(s), &inv); err == nil {
+		return &inv, nil
+	} else {
+		var raw any
+		dec := json.NewDecoder(strings.NewReader(s))
+		dec.UseNumber()
+		if decErr := dec.Decode(&raw); decErr != nil {
+			return nil, fmt.Errorf("invoice JSON parse: %w", err)
+		}
+		coerceInvoiceIntegerFields(raw)
+		cleaned, marshalErr := json.Marshal(raw)
+		if marshalErr != nil {
+			return nil, fmt.Errorf("invoice JSON normalise: %w", marshalErr)
+		}
+		if retryErr := json.Unmarshal(cleaned, &inv); retryErr != nil {
+			return nil, fmt.Errorf("invoice JSON parse: %w", retryErr)
+		}
 	}
 	return &inv, nil
+}
+
+var invoiceIntegerJSONFields = map[string]bool{
+	"subtotal_cents":     true,
+	"tax_cents":          true,
+	"total_cents":        true,
+	"payment_terms_days": true,
+	"unit_price_cents":   true,
+	"amount_cents":       true,
+	"tax_rate_bps":       true,
+}
+
+func coerceInvoiceIntegerFields(v any) {
+	switch x := v.(type) {
+	case map[string]any:
+		for k, val := range x {
+			if invoiceIntegerJSONFields[k] {
+				if coerced, ok := coerceJSONNumberToInteger(val); ok {
+					x[k] = coerced
+					continue
+				}
+			}
+			coerceInvoiceIntegerFields(val)
+		}
+	case []any:
+		for _, val := range x {
+			coerceInvoiceIntegerFields(val)
+		}
+	}
+}
+
+func coerceJSONNumberToInteger(v any) (int64, bool) {
+	switch n := v.(type) {
+	case json.Number:
+		if i, err := n.Int64(); err == nil {
+			return i, true
+		}
+		if f, err := n.Float64(); err == nil {
+			return int64(math.Round(f)), true
+		}
+	case float64:
+		return int64(math.Round(n)), true
+	case float32:
+		return int64(math.Round(float64(n))), true
+	case int:
+		return int64(n), true
+	case int64:
+		return n, true
+	case int32:
+		return int64(n), true
+	}
+	return 0, false
 }
 
 // configIntDefault — local to ocr_llm.go; main.go's configIntBps is

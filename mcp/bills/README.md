@@ -1,8 +1,17 @@
-# Bills (v0.1.26)
+# Bills (v0.1.27)
 
 Vendors, bills, and bill payments for Apteva agents and human teams.
 The accounts-payable mirror of the `billing` app — money OUT instead
 of money in.
+
+## What's in v0.1.27
+
+Fixes LLM OCR parsing for invoices that include very small unit rates
+such as token-based AI usage bills. Some models returned fractional
+values in integer-cent fields like `unit_price_cents`; Bills now
+coerces those known integer fields instead of discarding the whole OCR
+result. This preserves the extracted vendor, invoice date, invoice
+number, and total for invoices like Fireworks AI usage bills.
 
 ## What's in v0.1.26
 
