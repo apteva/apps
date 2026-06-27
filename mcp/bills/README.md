@@ -1,8 +1,17 @@
-# Bills (v0.1.28)
+# Bills (v0.1.29)
 
 Vendors, bills, and bill payments for Apteva agents and human teams.
 The accounts-payable mirror of the `billing` app — money OUT instead
 of money in.
+
+## What's in v0.1.29
+
+Fixes OCR vendor email handling when invoices show the customer's
+email in the Bill-to block. Bills now ignores extracted vendor emails
+that do not match the extracted vendor identity, so a Fireworks AI
+invoice cannot create or match a vendor using the customer's Gmail
+address. The OCR prompt also explicitly tells models to omit
+`vendor.email` when only the customer email is visible.
 
 ## What's in v0.1.28
 

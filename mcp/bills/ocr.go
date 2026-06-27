@@ -266,7 +266,7 @@ func resolveVendorFromExtraction(db *sql.DB, pid string, e *ExtractedInvoice, ar
 		return "", nil // caller-supplied
 	}
 
-	email := normaliseEmail(e.Vendor.Email)
+	email := usableExtractedVendorEmail(e.Vendor.Email, e.Vendor.Name)
 	if email != "" {
 		defaults := map[string]any{}
 		if e.Vendor.Name != "" {
@@ -341,6 +341,32 @@ func resolveVendorFromExtraction(db *sql.DB, pid string, e *ExtractedInvoice, ar
 	id, _ := res.LastInsertId()
 	args["vendor_id"] = id
 	return "auto_created", nil
+}
+
+func usableExtractedVendorEmail(rawEmail, vendorName string) string {
+	email := normaliseEmail(rawEmail)
+	local, domain, ok := strings.Cut(email, "@")
+	if !ok || local == "" || domain == "" || !strings.Contains(domain, ".") {
+		return ""
+	}
+
+	name := canonicalVendorName(vendorName)
+	if name == "" {
+		return email
+	}
+
+	compactName := strings.ReplaceAll(name, " ", "")
+	haystack := canonicalVendorName(local + " " + strings.ReplaceAll(domain, ".", " "))
+	compactHaystack := strings.ReplaceAll(haystack, " ", "")
+	if compactName != "" && strings.Contains(compactHaystack, compactName) {
+		return email
+	}
+	for _, token := range strings.Fields(name) {
+		if len(token) >= 3 && strings.Contains(haystack, token) {
+			return email
+		}
+	}
+	return ""
 }
 
 // ─── Audit ──────────────────────────────────────────────────────────

@@ -221,6 +221,50 @@ func TestResolveVendor_UniqueNameMatch(t *testing.T) {
 	}
 }
 
+func TestResolveVendor_IgnoresCustomerEmailForVendor(t *testing.T) {
+	ctx := newTestCtx(t)
+	v := mustVendor(t, ctx, "billing@fireworks.ai", "Fireworks AI")
+	e := &ExtractedInvoice{}
+	e.Vendor.Name = "Fireworks AI"
+	e.Vendor.Email = "marcolivier.schwartz@gmail.com"
+
+	args := map[string]any{}
+	via, err := resolveVendorFromExtraction(ctx.AppDB(), "test-proj", e, args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if via != "name_unique" {
+		t.Errorf("via=%q, want name_unique", via)
+	}
+	if got := args["vendor_id"].(int64); got != v.ID {
+		t.Errorf("vendor_id=%d, want %d", got, v.ID)
+	}
+	if wrong, err := dbVendorGetByEmail(ctx.AppDB(), "test-proj", "marcolivier.schwartz@gmail.com"); err != nil {
+		t.Fatal(err)
+	} else if wrong != nil {
+		t.Fatalf("customer email was created as vendor: %+v", wrong)
+	}
+}
+
+func TestUsableExtractedVendorEmail_AllowsNameRelatedDomains(t *testing.T) {
+	cases := []struct {
+		email string
+		name  string
+		want  string
+	}{
+		{"billing@aws.amazon.com", "AWS", "billing@aws.amazon.com"},
+		{"ap@fireworks.ai", "Fireworks AI", "ap@fireworks.ai"},
+		{"acme.billing@gmail.com", "Acme Corp", "acme.billing@gmail.com"},
+		{"marcolivier.schwartz@gmail.com", "Fireworks AI", ""},
+		{"fireworks.ai", "Fireworks AI", ""},
+	}
+	for _, tc := range cases {
+		if got := usableExtractedVendorEmail(tc.email, tc.name); got != tc.want {
+			t.Errorf("usableExtractedVendorEmail(%q, %q)=%q, want %q", tc.email, tc.name, got, tc.want)
+		}
+	}
+}
+
 func TestResolveVendor_ExactNameMatchBeyondFuzzyWindow(t *testing.T) {
 	ctx := newTestCtx(t)
 	v := mustVendor(t, ctx, "ap@acme.com", "Acme LLC")

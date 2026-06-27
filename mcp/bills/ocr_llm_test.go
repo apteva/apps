@@ -85,6 +85,7 @@ func TestOCRPromptGuidesMultiPageTotals(t *testing.T) {
 		"DD/MM/YYYY",
 		"filename date as a tie-breaker",
 		"Vendor_2026-04-03_123.pdf",
+		"Never copy emails from \"Bill to\"",
 	} {
 		if !strings.Contains(ocrSystemPrompt, phrase) {
 			t.Fatalf("OCR prompt missing %q", phrase)
