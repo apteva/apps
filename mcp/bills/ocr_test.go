@@ -128,6 +128,31 @@ func TestConvertExtractedLineItems_FallbackForMissingUnit(t *testing.T) {
 	}
 }
 
+func TestConvertExtractedLineItems_SubCentUnitUsesAmountOnly(t *testing.T) {
+	e := &ExtractedInvoice{}
+	e.LineItems = []struct {
+		Description    string  `json:"description"`
+		Quantity       float64 `json:"quantity,omitempty"`
+		UnitPriceCents int64   `json:"unit_price_cents,omitempty"`
+		AmountCents    int64   `json:"amount_cents,omitempty"`
+		TaxRateBps     int     `json:"tax_rate_bps,omitempty"`
+		Confidence     float64 `json:"confidence,omitempty"`
+	}{
+		{Description: "Embedding input tokens", Quantity: 3719742, UnitPriceCents: 0, AmountCents: 3},
+	}
+	got := convertExtractedLineItems(e)
+	if len(got) != 1 {
+		t.Fatalf("got %d items, want 1", len(got))
+	}
+	row := got[0].(map[string]any)
+	if row["unit_price_cents"].(int64) != 3 {
+		t.Errorf("unit_price_cents=%v, want 3", row["unit_price_cents"])
+	}
+	if row["quantity"].(float64) != 1 {
+		t.Errorf("quantity=%v, want 1", row["quantity"])
+	}
+}
+
 // ─── Vendor resolution ──────────────────────────────────────────────
 
 func TestResolveVendor_CallerSuppliedSkips(t *testing.T) {

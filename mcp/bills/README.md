@@ -1,8 +1,16 @@
-# Bills (v0.1.27)
+# Bills (v0.1.28)
 
 Vendors, bills, and bill payments for Apteva agents and human teams.
 The accounts-payable mirror of the `billing` app — money OUT instead
 of money in.
+
+## What's in v0.1.28
+
+Fixes amount-only OCR line items for token/usage invoices with
+sub-cent unit rates. When a model returns a valid line `amount_cents`
+but an unrepresentable fractional `unit_price_cents`, Bills now stores
+that row as quantity `1` at the row amount instead of multiplying the
+row amount by the original token quantity.
 
 ## What's in v0.1.27
 

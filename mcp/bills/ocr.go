@@ -232,6 +232,7 @@ func convertExtractedLineItems(e *ExtractedInvoice) []any {
 		if unit <= 0 {
 			if li.AmountCents > 0 {
 				unit = li.AmountCents
+				qty = 1
 			} else {
 				continue // can't reconstruct; skip silently
 			}
