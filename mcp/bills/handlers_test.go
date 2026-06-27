@@ -911,8 +911,10 @@ func TestStorageCrossAppCallsPassProjectID(t *testing.T) {
 	if err := storageFileExists(ctx, pid, 77); err != nil {
 		t.Fatalf("storageFileExists: %v", err)
 	}
-	if _, got, err := storageFetchBytes(ctx, pid, 77); err != nil {
+	if _, name, got, err := storageFetchBytes(ctx, pid, 77); err != nil {
 		t.Fatalf("storageFetchBytes: %v", err)
+	} else if name != "test.pdf" {
+		t.Fatalf("fetched name=%q, want test.pdf", name)
 	} else if string(got) != "%PDF" {
 		t.Fatalf("fetched bytes=%q, want %%PDF", string(got))
 	}

@@ -51,7 +51,7 @@ func callOCRViaLLM(ctx *sdk.AppCtx, pid string, fileID int64) (*ExtractedInvoice
 
 	// 1. Storage bytes + content type in one call (storage v0.9.5+).
 	t1 := time.Now()
-	contentType, rawBytes, err := storageFetchBytes(ctx, pid, fileID)
+	contentType, fileName, rawBytes, err := storageFetchBytes(ctx, pid, fileID)
 	if err != nil {
 		log.Warn("ocr/llm: storage fetch failed",
 			"file_id", fileID, "err", err, "elapsed_ms", time.Since(t1).Milliseconds())
@@ -59,6 +59,7 @@ func callOCRViaLLM(ctx *sdk.AppCtx, pid string, fileID int64) (*ExtractedInvoice
 	}
 	log.Info("ocr/llm: storage fetch ok",
 		"file_id", fileID, "bytes", len(rawBytes), "content_type", contentType,
+		"name", fileName,
 		"elapsed_ms", time.Since(t1).Milliseconds())
 
 	// 2. Materialise as JPEG image(s).
@@ -91,7 +92,7 @@ func callOCRViaLLM(ctx *sdk.AppCtx, pid string, fileID int64) (*ExtractedInvoice
 	//    Different request, different response, different model
 	//    defaults — but the rest of the pipeline (storage fetch, render,
 	//    audit, vendor resolve) is identical.
-	model, toolName, args := buildLLMArgs(ctx, bound, images)
+	model, toolName, args := buildLLMArgs(ctx, bound, images, fileName)
 
 	log.Info("ocr/llm: calling vision_llm",
 		"file_id", fileID, "provider_slug", bound.AppSlug, "model", model,
@@ -148,7 +149,7 @@ func callOCRViaLLM(ctx *sdk.AppCtx, pid string, fileID int64) (*ExtractedInvoice
 // vision_llm provider. Picks per-provider defaults for model + tool
 // name; the operator can override the model via `ocr_llm_model`
 // config but the tool name is fixed by the provider.
-func buildLLMArgs(ctx *sdk.AppCtx, bound *sdk.BoundIntegration, images [][]byte) (model, tool string, args map[string]any) {
+func buildLLMArgs(ctx *sdk.AppCtx, bound *sdk.BoundIntegration, images [][]byte, fileName string) (model, tool string, args map[string]any) {
 	switch bound.AppSlug {
 	case "anthropic-api":
 		// Anthropic's max_tokens caps at 4096 in their Messages API
@@ -157,7 +158,7 @@ func buildLLMArgs(ctx *sdk.AppCtx, bound *sdk.BoundIntegration, images [][]byte)
 		model = configString(ctx, "ocr_llm_model", "claude-haiku-4-5-20251001")
 		maxTokens := configIntDefault(ctx, "ocr_llm_max_tokens", 4096)
 		tool = "create_message"
-		args = buildAnthropicArgs(images, model, maxTokens)
+		args = buildAnthropicArgs(images, model, maxTokens, fileName)
 	case "openai-codex":
 		// Codex exposes an OpenAI-style chat_completion compatibility
 		// wrapper backed by the subscription/device-login Responses
@@ -166,7 +167,7 @@ func buildLLMArgs(ctx *sdk.AppCtx, bound *sdk.BoundIntegration, images [][]byte)
 		model = configString(ctx, "ocr_llm_model", "gpt-5.5")
 		maxTokens := configIntDefault(ctx, "ocr_llm_max_tokens", 8000)
 		tool = "chat_completion"
-		args = buildOpenAICompatibleArgs(images, model, maxTokens)
+		args = buildOpenAICompatibleArgs(images, model, maxTokens, fileName)
 	default:
 		// OpenAI-compatible chat-completion shape (opencode-go and any
 		// future compatible providers). Reasoning-shaped models (Kimi
@@ -175,15 +176,15 @@ func buildLLMArgs(ctx *sdk.AppCtx, bound *sdk.BoundIntegration, images [][]byte)
 		model = configString(ctx, "ocr_llm_model", "qwen3.6-plus")
 		maxTokens := configIntDefault(ctx, "ocr_llm_max_tokens", 8000)
 		tool = "chat_completion"
-		args = buildOpenAICompatibleArgs(images, model, maxTokens)
+		args = buildOpenAICompatibleArgs(images, model, maxTokens, fileName)
 	}
 	return
 }
 
-func buildOpenAICompatibleArgs(images [][]byte, model string, maxTokens int) map[string]any {
+func buildOpenAICompatibleArgs(images [][]byte, model string, maxTokens int, fileName string) map[string]any {
 	return map[string]any{
 		"model":           model,
-		"messages":        buildOCRMessages(images),
+		"messages":        buildOCRMessages(images, fileName),
 		"temperature":     0.1,
 		"max_tokens":      maxTokens,
 		"response_format": map[string]any{"type": "json_object"},
@@ -195,7 +196,7 @@ func buildOpenAICompatibleArgs(images [][]byte, model string, maxTokens int) map
 // blocks BEFORE the text instruction (Anthropic's recommended order
 // for vision tasks — the model attends to images first, then reads
 // the directive). Image content blocks use base64 source.
-func buildAnthropicArgs(images [][]byte, model string, maxTokens int) map[string]any {
+func buildAnthropicArgs(images [][]byte, model string, maxTokens int, fileName string) map[string]any {
 	parts := make([]any, 0, len(images)+1)
 	for _, img := range images {
 		parts = append(parts, map[string]any{
@@ -209,7 +210,7 @@ func buildAnthropicArgs(images [][]byte, model string, maxTokens int) map[string
 	}
 	parts = append(parts, map[string]any{
 		"type": "text",
-		"text": "Extract the invoice fields from the page(s) above. Reply with ONLY the JSON object described in the system prompt — no other text.",
+		"text": buildOCRUserInstruction(fileName, "above"),
 	})
 	return map[string]any{
 		"model":       model,
@@ -260,7 +261,7 @@ func parseAnthropicInvoice(raw json.RawMessage) (*ExtractedInvoice, error) {
 // failed when the platform's HTTP routing for /api/apps/storage/*
 // landed at a different storage install than the one the bound
 // CallAppResult uses (multi-storage-install case).
-func storageFetchBytes(ctx *sdk.AppCtx, pid string, fileID int64) (contentType string, data []byte, err error) {
+func storageFetchBytes(ctx *sdk.AppCtx, pid string, fileID int64) (contentType string, fileName string, data []byte, err error) {
 	var got struct {
 		ID            int64  `json:"id"`
 		Name          string `json:"name"`
@@ -270,16 +271,16 @@ func storageFetchBytes(ctx *sdk.AppCtx, pid string, fileID int64) (contentType s
 	}
 	if err := ctx.PlatformAPI().CallAppResult("storage", "files_get_content",
 		map[string]any{"id": fileID, "_project_id": pid}, &got); err != nil {
-		return "", nil, fmt.Errorf("storage.files_get_content(%d): %w", fileID, err)
+		return "", "", nil, fmt.Errorf("storage.files_get_content(%d): %w", fileID, err)
 	}
 	if got.ContentBase64 == "" {
-		return "", nil, fmt.Errorf("storage.files_get_content(%d): empty content_base64 (storage may be older than v0.9.5)", fileID)
+		return "", "", nil, fmt.Errorf("storage.files_get_content(%d): empty content_base64 (storage may be older than v0.9.5)", fileID)
 	}
 	bytes, err := base64.StdEncoding.DecodeString(got.ContentBase64)
 	if err != nil {
-		return "", nil, fmt.Errorf("decode content_base64: %w", err)
+		return "", "", nil, fmt.Errorf("decode content_base64: %w", err)
 	}
-	return got.ContentType, bytes, nil
+	return got.ContentType, got.Name, bytes, nil
 }
 
 // ─── PDFium-WASM render ─────────────────────────────────────────────
@@ -448,6 +449,13 @@ Critical rules:
   subtotal, previous balance, individual line amounts, tax-only amounts, or
   page subtotals as total_cents.
 - All dates are YYYY-MM-DD.
+- For ambiguous numeric dates with slashes or dots, infer day/month order from
+  the vendor's country and document style. EU/UK vendors usually use
+  DD/MM/YYYY or DD.MM.YYYY; US vendors usually use MM/DD/YYYY. If the uploaded
+  filename contains an ISO date like YYYY-MM-DD for the same invoice, use that
+  filename date as a tie-breaker. Example: a German vendor invoice named
+  Vendor_2026-04-03_123.pdf with printed date 03/04/2026 means 2026-04-03,
+  not 2026-03-04.
 - The vendor block describes the company billing US, not the customer (us).
 - If a field isn't on the document or you can't read it confidently, OMIT IT — do not invent.
 - Return only the JSON object. No surrounding prose, no fences.`
@@ -455,11 +463,11 @@ Critical rules:
 // buildOCRMessages assembles the OpenAI chat-completion messages
 // array. System prompt + a single user turn carrying the prompt
 // string and one image_url part per page (data URI base64).
-func buildOCRMessages(images [][]byte) []any {
+func buildOCRMessages(images [][]byte, fileName string) []any {
 	parts := make([]any, 0, len(images)+1)
 	parts = append(parts, map[string]any{
 		"type": "text",
-		"text": "Extract the invoice fields from the page(s) below. Reply with ONLY the JSON object described in the system prompt — no other text.",
+		"text": buildOCRUserInstruction(fileName, "below"),
 	})
 	for _, img := range images {
 		// JPEG by default (PDFs) or whatever pass-through mime we got
@@ -483,6 +491,15 @@ func buildOCRMessages(images [][]byte) []any {
 			"content": parts,
 		},
 	}
+}
+
+func buildOCRUserInstruction(fileName, imagePosition string) string {
+	msg := "Extract the invoice fields from the page(s) " + imagePosition + "."
+	if strings.TrimSpace(fileName) != "" {
+		msg += " Uploaded filename: " + fileName + "."
+	}
+	msg += " Reply with ONLY the JSON object described in the system prompt — no other text."
+	return msg
 }
 
 // parseAssistantInvoice digs the assistant's content out of the

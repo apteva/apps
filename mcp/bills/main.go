@@ -46,7 +46,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: bills
 display_name: Bills
-version: 0.1.25
+version: 0.1.26
 description: |
   Vendors, bills, and outbound payments. The AP mirror of billing.
 author: Apteva
@@ -114,7 +114,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	}
 
 	ctx.Logger().Info("bills mounted",
-		"version", "0.1.25",
+		"version", "0.1.26",
 		"scope_project_id", os.Getenv("APTEVA_PROJECT_ID"),
 		"ocr_provider", configString(ctx, "ocr_provider", "(disabled)"))
 	return nil

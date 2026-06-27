@@ -1,8 +1,17 @@
-# Bills (v0.1.25)
+# Bills (v0.1.26)
 
 Vendors, bills, and bill payments for Apteva agents and human teams.
 The accounts-payable mirror of the `billing` app — money OUT instead
 of money in.
+
+## What's in v0.1.26
+
+Improves OCR date extraction for EU invoices. Bills now passes the
+uploaded storage filename into the vision prompt and explicitly tells
+the model to resolve ambiguous numeric dates by issuer locale, using
+ISO dates in filenames as a tie-breaker. Example: a German vendor PDF
+named `Vendor_2026-04-03_123.pdf` with printed date `03/04/2026`
+should extract `2026-04-03`, not `2026-03-04`.
 
 ## What's in v0.1.25
 

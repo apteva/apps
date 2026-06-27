@@ -29,7 +29,7 @@ func withOCRConfig(provider string) tk.Option {
 
 func TestBuildOCRMessages_ShapeAndImageParts(t *testing.T) {
 	images := [][]byte{[]byte("page-1-jpeg-bytes"), []byte("page-2-jpeg-bytes")}
-	messages := buildOCRMessages(images)
+	messages := buildOCRMessages(images, "Hetzner_2026-04-03_088000833732.pdf")
 	if len(messages) != 2 {
 		t.Fatalf("expected 2 messages (system + user), got %d", len(messages))
 	}
@@ -52,6 +52,9 @@ func TestBuildOCRMessages_ShapeAndImageParts(t *testing.T) {
 	textPart := parts[0].(map[string]any)
 	if textPart["type"] != "text" {
 		t.Errorf("first part type=%q, want text", textPart["type"])
+	}
+	if !strings.Contains(textPart["text"].(string), "Hetzner_2026-04-03_088000833732.pdf") {
+		t.Errorf("user instruction should include uploaded filename, got %q", textPart["text"])
 	}
 	for i, img := range images {
 		p := parts[1+i].(map[string]any)
@@ -78,6 +81,10 @@ func TestOCRPromptGuidesMultiPageTotals(t *testing.T) {
 		"final payable amount",
 		"amount due",
 		"page subtotals",
+		"EU/UK vendors",
+		"DD/MM/YYYY",
+		"filename date as a tie-breaker",
+		"Vendor_2026-04-03_123.pdf",
 	} {
 		if !strings.Contains(ocrSystemPrompt, phrase) {
 			t.Fatalf("OCR prompt missing %q", phrase)
@@ -150,7 +157,7 @@ func TestBuildAnthropicArgs_ImageBeforeText(t *testing.T) {
 	// instruction so the model attends to images first — not a
 	// hard requirement but helps consistency. Pin the order so a
 	// refactor doesn't accidentally swap them.
-	args := buildAnthropicArgs([][]byte{[]byte("page-bytes")}, "claude-haiku-4-5-20251001", 4096)
+	args := buildAnthropicArgs([][]byte{[]byte("page-bytes")}, "claude-haiku-4-5-20251001", 4096, "invoice.pdf")
 	msgs := args["messages"].([]any)
 	parts := msgs[0].(map[string]any)["content"].([]any)
 	if len(parts) != 2 {
@@ -161,6 +168,9 @@ func TestBuildAnthropicArgs_ImageBeforeText(t *testing.T) {
 	}
 	if parts[1].(map[string]any)["type"] != "text" {
 		t.Errorf("second part type=%v, want text", parts[1].(map[string]any)["type"])
+	}
+	if !strings.Contains(parts[1].(map[string]any)["text"].(string), "invoice.pdf") {
+		t.Errorf("text instruction should include filename, got %q", parts[1].(map[string]any)["text"])
 	}
 	// system is a top-level field (not a message), per Anthropic API.
 	if args["system"] == "" {
@@ -175,7 +185,7 @@ func TestBuildAnthropicArgs_ImageBeforeText(t *testing.T) {
 func TestBuildLLMArgs_OpenAICodexDefaults(t *testing.T) {
 	ctx := newTestCtx(t)
 	bound := &sdk.BoundIntegration{AppSlug: "openai-codex"}
-	model, tool, args := buildLLMArgs(ctx, bound, [][]byte{[]byte("page-bytes")})
+	model, tool, args := buildLLMArgs(ctx, bound, [][]byte{[]byte("page-bytes")}, "invoice.pdf")
 	if model != "gpt-5.5" {
 		t.Fatalf("model=%q, want gpt-5.5", model)
 	}
@@ -196,7 +206,7 @@ func TestBuildLLMArgs_OpenAICodexDefaults(t *testing.T) {
 func TestBuildLLMArgs_OpenCodeDefaultsRemainSeparateFromCodex(t *testing.T) {
 	ctx := newTestCtx(t)
 	bound := &sdk.BoundIntegration{AppSlug: "opencode-go"}
-	model, tool, args := buildLLMArgs(ctx, bound, [][]byte{[]byte("page-bytes")})
+	model, tool, args := buildLLMArgs(ctx, bound, [][]byte{[]byte("page-bytes")}, "invoice.pdf")
 	if model != "qwen3.6-plus" {
 		t.Fatalf("model=%q, want qwen3.6-plus", model)
 	}
