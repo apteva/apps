@@ -45,7 +45,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: bills
 display_name: Bills
-version: 0.1.21
+version: 0.1.22
 description: |
   Vendors, bills, and outbound payments. The AP mirror of billing.
 author: Apteva
@@ -113,7 +113,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	}
 
 	ctx.Logger().Info("bills mounted",
-		"version", "0.1.21",
+		"version", "0.1.22",
 		"scope_project_id", os.Getenv("APTEVA_PROJECT_ID"),
 		"ocr_provider", configString(ctx, "ocr_provider", "(disabled)"))
 	return nil
@@ -429,7 +429,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "bills_search",
-			Description: "Filter bills. Args: vendor_id, status (received|approved|scheduled|paid|disputed|void), provider, currency, category, since (RFC3339), until (RFC3339), due_before, min_total_cents, max_total_cents, limit (default 50; values >200 are clamped to 200, NOT dropped to default), offset (for paging). Returns {bills, count, total, has_more, next_offset}. total is the unpaged match count; when has_more is true, re-call with offset=next_offset to page. bills is [] (never null) when nothing matches.",
+			Description: "Filter bills. Args: vendor_id, status (received|approved|scheduled|paid|disputed|void), provider, currency, category, since (bill date >=; RFC3339 or YYYY-MM-DD; uses vendor_invoice_date with created_at fallback), until (bill date <; RFC3339 or YYYY-MM-DD), due_before, min_total_cents, max_total_cents, limit (default 50; values >200 are clamped to 200, NOT dropped to default), offset (for paging). Returns {bills, count, total, has_more, next_offset}. total is the unpaged match count; when has_more is true, re-call with offset=next_offset to page. bills is [] (never null) when nothing matches.",
 			InputSchema: schemaObject(map[string]any{
 				"vendor_id":       map[string]any{"type": "integer"},
 				"status":          map[string]any{"type": "string"},
@@ -2734,6 +2734,7 @@ func billWhere(pid string, f billFilters, prefix string) ([]string, []any) {
 	p := prefix
 	where := []string{p + "project_id = ?", p + "deleted_at IS NULL"}
 	args := []any{pid}
+	billDateExpr := "COALESCE(NULLIF(" + p + "vendor_invoice_date, ''), " + p + "created_at)"
 	if f.vendorID != 0 {
 		where = append(where, p+"vendor_id = ?")
 		args = append(args, f.vendorID)
@@ -2763,11 +2764,11 @@ func billWhere(pid string, f billFilters, prefix string) ([]string, []any) {
 		args = append(args, f.category)
 	}
 	if f.since != "" {
-		where = append(where, p+"created_at >= ?")
+		where = append(where, billDateExpr+" >= ?")
 		args = append(args, f.since)
 	}
 	if f.until != "" {
-		where = append(where, p+"created_at < ?")
+		where = append(where, billDateExpr+" < ?")
 		args = append(args, f.until)
 	}
 	if f.dueBefore != "" {

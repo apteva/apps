@@ -566,6 +566,50 @@ func TestBillsSearch_OrdersByVendorInvoiceDateDescending(t *testing.T) {
 	}
 }
 
+func TestBillsSearch_FiltersByVendorInvoiceDate(t *testing.T) {
+	ctx := newTestCtx(t)
+	app := &App{}
+	v := mustVendor(t, ctx, "ap@acme.com", "Acme")
+
+	for _, tc := range []struct {
+		invoice string
+		date    string
+	}{
+		{invoice: "JAN", date: "2026-01-15"},
+		{invoice: "FEB", date: "2026-02-15"},
+		{invoice: "MAR", date: "2026-03-15"},
+		{invoice: "APR", date: "2026-04-15"},
+	} {
+		if _, err := app.toolBillsCreate(ctx, map[string]any{
+			"vendor_id":             v.ID,
+			"vendor_invoice_number": tc.invoice,
+			"vendor_invoice_date":   tc.date,
+			"line_items":            []any{line("service", 1, 100, 0)},
+		}); err != nil {
+			t.Fatalf("create %s: %v", tc.invoice, err)
+		}
+	}
+
+	out, err := app.toolBillsSearch(ctx, map[string]any{
+		"vendor_id": v.ID,
+		"since":     "2026-02-01",
+		"until":     "2026-04-01",
+		"limit":     10,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bills := out.(map[string]any)["bills"].([]*Bill)
+	got := make([]string, 0, len(bills))
+	for _, b := range bills {
+		got = append(got, b.VendorInvoiceNumber)
+	}
+	want := []string{"MAR", "FEB"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("date-filtered order = %v, want %v", got, want)
+	}
+}
+
 // ─── Render PDF ─────────────────────────────────────────────────────
 
 func TestBillsRenderPDF_ReturnsBase64(t *testing.T) {

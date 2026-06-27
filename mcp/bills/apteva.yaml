@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: bills
 display_name: Bills
-version: 0.1.21
+version: 0.1.22
 description: |
   Vendors, bills, and bill payments for Apteva agents and human teams.
   The accounts-payable mirror of the `billing` app — money OUT instead
@@ -102,7 +102,7 @@ provides:
     - name: bills_get
       description: Fetch one bill with line items, payment history, and audit log.
     - name: bills_search
-      description: Filter bills by status / vendor / due-date range / total range / category / currency.
+      description: Filter bills by status / vendor / bill-date range / due-date range / total range / category / currency.
     - name: bills_render_pdf
       description: |
         Render OUR voucher copy of the bill as a PDF — vendor info + their

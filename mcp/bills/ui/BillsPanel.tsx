@@ -205,6 +205,13 @@ function fmtDateTime(s?: string): string {
   }
 }
 
+function dateOnly(d: Date): string {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
+  return `${y}-${m}-${day}`;
+}
+
 const STATUS_TONE: Record<BillStatus, string> = {
   received: "bg-yellow-500/15 text-yellow-500",
   approved: "bg-accent/15 text-accent",
@@ -1375,6 +1382,7 @@ function BillsTab({
   const [total, setTotal] = useState(0);
   const [page, setPage] = useState(0);
   const [statusFilter, setStatusFilter] = useState("");
+  const [dateRange, setDateRange] = useState("");
   // searchInput is bound to the field; `search` is the debounced value
   // actually sent to the server (search is server-side now so paging
   // stays correct across the whole result set, not just one page).
@@ -1408,6 +1416,20 @@ function BillsTab({
       };
       if (statusFilter) query.status = statusFilter;
       if (search) query.q = search;
+      if (dateRange) {
+        const now = new Date();
+        const since = new Date(now);
+        if (dateRange === "1m") {
+          since.setMonth(since.getMonth() - 1);
+        } else if (dateRange === "3m") {
+          since.setMonth(since.getMonth() - 3);
+        } else if (dateRange === "6m") {
+          since.setMonth(since.getMonth() - 6);
+        } else if (dateRange === "ytd") {
+          since.setMonth(0, 1);
+        }
+        query.since = dateOnly(since);
+      }
       const res = await apiCall<{ bills: Bill[]; total: number }>(
         "GET",
         "/bills",
@@ -1419,7 +1441,7 @@ function BillsTab({
     } catch (err) {
       setStatus(`Error: ${(err as Error).message}`);
     }
-  }, [apiCall, statusFilter, search, page]);
+  }, [apiCall, statusFilter, dateRange, search, page]);
 
   // Debounce the search field into `search`, and reset to the first
   // page whenever the query text changes.
@@ -1980,9 +2002,24 @@ function BillsTab({
             <option value="disputed">Disputed</option>
             <option value="void">Void</option>
           </select>
+          <select
+            value={dateRange}
+            onChange={(e) => {
+              setDateRange(e.target.value);
+              setPage(0);
+            }}
+            className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm"
+            title="Filter by bill date"
+          >
+            <option value="">All bill dates</option>
+            <option value="1m">Past month</option>
+            <option value="3m">Last 3 months</option>
+            <option value="6m">Last 6 months</option>
+            <option value="ytd">This year</option>
+          </select>
         </div>
         <div className="flex-1 overflow-auto">
-          {list.length === 0 && (search || statusFilter) ? (
+          {list.length === 0 && (search || statusFilter || dateRange) ? (
             <div className="p-6 text-center text-sm text-text-muted">
               No bills match your search or filter.
             </div>

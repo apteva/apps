@@ -1,8 +1,16 @@
-# Bills (v0.1.21)
+# Bills (v0.1.22)
 
 Vendors, bills, and bill payments for Apteva agents and human teams.
 The accounts-payable mirror of the `billing` app — money OUT instead
 of money in.
+
+## What's in v0.1.22
+
+The Bills panel now has a bill-date range filter with quick presets:
+past month, last 3 months, last 6 months, and this year. The filter
+uses the vendor invoice date shown in the UI, with created-at fallback
+for undated bills, so the list and date filter use the same concept
+of "bill date."
 
 ## What's in v0.1.21
 
