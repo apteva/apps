@@ -33,6 +33,8 @@ import (
 	"github.com/klippa-app/go-pdfium/webassembly"
 )
 
+const defaultOCRMaxPages = 10
+
 // ─── Top-level orchestrator ─────────────────────────────────────────
 
 func callOCRViaLLM(ctx *sdk.AppCtx, pid string, fileID int64) (*ExtractedInvoice, string, error) {
@@ -61,7 +63,7 @@ func callOCRViaLLM(ctx *sdk.AppCtx, pid string, fileID int64) (*ExtractedInvoice
 
 	// 2. Materialise as JPEG image(s).
 	dpi := configIntDefault(ctx, "render_dpi", 200)
-	maxPages := configIntDefault(ctx, "max_pages", 3)
+	maxPages := configIntDefault(ctx, "max_pages", defaultOCRMaxPages)
 	t2 := time.Now()
 	images, err := materialiseImages(rawBytes, contentType, dpi, maxPages)
 	if err != nil {
@@ -439,6 +441,12 @@ The JSON must follow this shape EXACTLY (omit fields you cannot determine):
 
 Critical rules:
 - All money fields are INTEGER CENTS, never decimals.
+- Read every supplied page before choosing totals. Multi-page invoices often
+  show line items first and the invoice summary on the final page.
+- For total_cents, prefer the final payable amount labeled "total",
+  "invoice total", "amount due", "balance due", or "grand total". Do not use
+  subtotal, previous balance, individual line amounts, tax-only amounts, or
+  page subtotals as total_cents.
 - All dates are YYYY-MM-DD.
 - The vendor block describes the company billing US, not the customer (us).
 - If a field isn't on the document or you can't read it confidently, OMIT IT — do not invent.

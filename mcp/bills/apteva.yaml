@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: bills
 display_name: Bills
-version: 0.1.23
+version: 0.1.24
 description: |
   Vendors, bills, and bill payments for Apteva agents and human teams.
   The accounts-payable mirror of the `billing` app — money OUT instead
@@ -274,6 +274,15 @@ config_schema:
       ~250-500 on typical invoices), 8000 for opencode-go/openai-codex
       (reasoning models need headroom). Bump for line-item-heavy bills
       if responses are getting truncated.
+  - name: max_pages
+    type: text
+    default: "10"
+    label: OCR max PDF pages
+    description: |
+      Maximum number of PDF pages rendered and sent to the vision model.
+      Multi-page invoices often put the payable total on the final summary
+      page, so the default is 10. Lower it to reduce latency/cost, or raise
+      it for longer supplier invoices.
   - name: require_w9_before_payment
     type: select
     options: ["true", "false"]

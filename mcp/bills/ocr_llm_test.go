@@ -69,6 +69,22 @@ func TestBuildOCRMessages_ShapeAndImageParts(t *testing.T) {
 	}
 }
 
+func TestOCRPromptGuidesMultiPageTotals(t *testing.T) {
+	if defaultOCRMaxPages != 10 {
+		t.Fatalf("defaultOCRMaxPages=%d, want 10", defaultOCRMaxPages)
+	}
+	for _, phrase := range []string{
+		"Read every supplied page",
+		"final payable amount",
+		"amount due",
+		"page subtotals",
+	} {
+		if !strings.Contains(ocrSystemPrompt, phrase) {
+			t.Fatalf("OCR prompt missing %q", phrase)
+		}
+	}
+}
+
 // ─── Response parser ───────────────────────────────────────────────
 
 func TestParseAnthropicInvoice_TextBlock(t *testing.T) {

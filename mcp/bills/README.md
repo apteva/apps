@@ -1,8 +1,16 @@
-# Bills (v0.1.23)
+# Bills (v0.1.24)
 
 Vendors, bills, and bill payments for Apteva agents and human teams.
 The accounts-payable mirror of the `billing` app — money OUT instead
 of money in.
+
+## What's in v0.1.24
+
+Improves multi-page PDF OCR. Bills now renders up to 10 PDF pages by
+default for LLM OCR, exposes `max_pages` as an install setting, and
+the extraction prompt explicitly tells the model to read every page
+and prefer the final payable amount / amount due over page subtotals,
+line amounts, tax-only amounts, or previous balances.
 
 ## What's in v0.1.23
 
