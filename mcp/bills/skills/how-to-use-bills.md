@@ -247,6 +247,13 @@ What gets auto-filled when the caller didn't pass it:
 What doesn't auto-fill: `notes`, `category`, `gl_account`, `metadata`.
 Those are intent fields you set explicitly.
 
+Supported `vision_llm` bindings:
+
+- `anthropic-api` — Anthropic API key; fastest/default recommendation.
+- `opencode-go` — OpenCode Go bearer token/subscription key.
+- `openai-codex` — OpenAI Codex device-login connection; no API key
+  required for Bills.
+
 ### How to call it (when OCR is on)
 
 Minimal call — let extraction do the work:
@@ -304,6 +311,8 @@ Each extraction call is billed by the provider. Vision-LLM mode
   ~$0.0008/page. Recommended.
 - **OpenCode Go** (default model: Qwen3.6 Plus) typically lands at flat-rate
 subscription cost ($10/mo for the Go plan, no per-page billing).
+- **OpenAI Codex** (default model: gpt-5.5) uses the Codex
+device-login subscription connection; no API key in Bills.
 Sidecar-mode wrappers around external APIs (Mindee is ~$0.01-0.03
 per page, varies). v0.1.2 doesn't cache — uploading the same file
 twice triggers two extractions. Mitigate by only calling

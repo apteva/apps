@@ -35,12 +35,12 @@ import (
 
 // ─── Top-level orchestrator ─────────────────────────────────────────
 
-func callOCRViaLLM(ctx *sdk.AppCtx, fileID int64) (*ExtractedInvoice, string, error) {
+func callOCRViaLLM(ctx *sdk.AppCtx, pid string, fileID int64) (*ExtractedInvoice, string, error) {
 	log := ctx.Logger()
 	bound := ctx.IntegrationFor("vision_llm")
 	if bound == nil {
 		log.Warn("ocr/llm: vision_llm integration not bound", "file_id", fileID)
-		return nil, "llm", errors.New("ocr_provider=llm but vision_llm integration not bound — bind anthropic-api (recommended; ~3s/page with Claude Haiku 4.5) or opencode-go (Kimi/Qwen, slower) in the dashboard")
+		return nil, "llm", errors.New("ocr_provider=llm but vision_llm integration not bound — bind anthropic-api (recommended; ~3s/page with Claude Haiku 4.5), opencode-go (Kimi/Qwen), or openai-codex (device login) in the dashboard")
 	}
 	log.Info("ocr/llm: starting",
 		"file_id", fileID,
@@ -49,7 +49,7 @@ func callOCRViaLLM(ctx *sdk.AppCtx, fileID int64) (*ExtractedInvoice, string, er
 
 	// 1. Storage bytes + content type in one call (storage v0.9.5+).
 	t1 := time.Now()
-	contentType, rawBytes, err := storageFetchBytes(ctx, fileID)
+	contentType, rawBytes, err := storageFetchBytes(ctx, pid, fileID)
 	if err != nil {
 		log.Warn("ocr/llm: storage fetch failed",
 			"file_id", fileID, "err", err, "elapsed_ms", time.Since(t1).Milliseconds())
@@ -84,7 +84,8 @@ func callOCRViaLLM(ctx *sdk.AppCtx, fileID int64) (*ExtractedInvoice, string, er
 	// 3. Build the request shape per provider. Branch on bound.AppSlug
 	//    rather than on a generic capability name — anthropic-api
 	//    speaks Anthropic's Messages shape, every other compatible_slug
-	//    today (opencode-go) speaks OpenAI's chat-completion shape.
+	//    today (opencode-go/openai-codex) speaks OpenAI's
+	//    chat-completion shape.
 	//    Different request, different response, different model
 	//    defaults — but the rest of the pipeline (storage fetch, render,
 	//    audit, vendor resolve) is identical.
@@ -155,6 +156,15 @@ func buildLLMArgs(ctx *sdk.AppCtx, bound *sdk.BoundIntegration, images [][]byte)
 		maxTokens := configIntDefault(ctx, "ocr_llm_max_tokens", 4096)
 		tool = "create_message"
 		args = buildAnthropicArgs(images, model, maxTokens)
+	case "openai-codex":
+		// Codex exposes an OpenAI-style chat_completion compatibility
+		// wrapper backed by the subscription/device-login Responses
+		// runtime. Keep a Codex-native default model; falling through to
+		// OpenCode's qwen3.6-plus would fail for this integration.
+		model = configString(ctx, "ocr_llm_model", "gpt-5.5")
+		maxTokens := configIntDefault(ctx, "ocr_llm_max_tokens", 8000)
+		tool = "chat_completion"
+		args = buildOpenAICompatibleArgs(images, model, maxTokens)
 	default:
 		// OpenAI-compatible chat-completion shape (opencode-go and any
 		// future compatible providers). Reasoning-shaped models (Kimi
@@ -163,15 +173,19 @@ func buildLLMArgs(ctx *sdk.AppCtx, bound *sdk.BoundIntegration, images [][]byte)
 		model = configString(ctx, "ocr_llm_model", "qwen3.6-plus")
 		maxTokens := configIntDefault(ctx, "ocr_llm_max_tokens", 8000)
 		tool = "chat_completion"
-		args = map[string]any{
-			"model":           model,
-			"messages":        buildOCRMessages(images),
-			"temperature":     0.1,
-			"max_tokens":      maxTokens,
-			"response_format": map[string]any{"type": "json_object"},
-		}
+		args = buildOpenAICompatibleArgs(images, model, maxTokens)
 	}
 	return
+}
+
+func buildOpenAICompatibleArgs(images [][]byte, model string, maxTokens int) map[string]any {
+	return map[string]any{
+		"model":           model,
+		"messages":        buildOCRMessages(images),
+		"temperature":     0.1,
+		"max_tokens":      maxTokens,
+		"response_format": map[string]any{"type": "json_object"},
+	}
 }
 
 // buildAnthropicArgs assembles the Messages-API request: system as a
@@ -244,7 +258,7 @@ func parseAnthropicInvoice(raw json.RawMessage) (*ExtractedInvoice, error) {
 // failed when the platform's HTTP routing for /api/apps/storage/*
 // landed at a different storage install than the one the bound
 // CallAppResult uses (multi-storage-install case).
-func storageFetchBytes(ctx *sdk.AppCtx, fileID int64) (contentType string, data []byte, err error) {
+func storageFetchBytes(ctx *sdk.AppCtx, pid string, fileID int64) (contentType string, data []byte, err error) {
 	var got struct {
 		ID            int64  `json:"id"`
 		Name          string `json:"name"`
@@ -253,7 +267,7 @@ func storageFetchBytes(ctx *sdk.AppCtx, fileID int64) (contentType string, data 
 		ContentBase64 string `json:"content_base64"`
 	}
 	if err := ctx.PlatformAPI().CallAppResult("storage", "files_get_content",
-		map[string]any{"id": fileID}, &got); err != nil {
+		map[string]any{"id": fileID, "_project_id": pid}, &got); err != nil {
 		return "", nil, fmt.Errorf("storage.files_get_content(%d): %w", fileID, err)
 	}
 	if got.ContentBase64 == "" {

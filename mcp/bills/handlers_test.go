@@ -6,6 +6,8 @@ package main
 // guard on (vendor, vendor_invoice_number), and the W-9 gate.
 
 import (
+	"encoding/base64"
+	"encoding/json"
 	"strings"
 	"testing"
 
@@ -67,6 +69,48 @@ func line(desc string, qty float64, unit int64, taxBps int) map[string]any {
 		"unit_price_cents": unit,
 		"tax_rate_bps":     taxBps,
 	}
+}
+
+type storageCall struct {
+	App   string
+	Tool  string
+	Input map[string]any
+}
+
+type recordingStoragePlatform struct {
+	tk.BasePlatformClient
+	calls []storageCall
+}
+
+func (p *recordingStoragePlatform) CallAppResult(appName, tool string, input map[string]any, out any) error {
+	cp := make(map[string]any, len(input))
+	for k, v := range input {
+		cp[k] = v
+	}
+	p.calls = append(p.calls, storageCall{App: appName, Tool: tool, Input: cp})
+
+	var resp any
+	switch tool {
+	case "files_upload":
+		resp = map[string]any{"id": 88}
+	case "files_get":
+		resp = map[string]any{"id": input["id"]}
+	case "files_get_content":
+		resp = map[string]any{
+			"id":             input["id"],
+			"name":           "test.pdf",
+			"content_type":   "application/pdf",
+			"size_bytes":     4,
+			"content_base64": base64.StdEncoding.EncodeToString([]byte("%PDF")),
+		}
+	default:
+		resp = map[string]any{}
+	}
+	b, err := json.Marshal(resp)
+	if err != nil {
+		return err
+	}
+	return json.Unmarshal(b, out)
 }
 
 // ─── Vendors ────────────────────────────────────────────────────────
@@ -634,6 +678,55 @@ func TestBillsRenderPDF_ReturnsBase64(t *testing.T) {
 	}
 }
 
+func TestBillsRenderPDF_SaveToStoragePassesProjectID(t *testing.T) {
+	pf := &recordingStoragePlatform{}
+	t.Setenv("APTEVA_PROJECT_ID", "")
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithPlatform(pf))
+	globalCtx = ctx
+	app := &App{}
+	pid := "prod-project"
+
+	vOut, err := app.toolVendorsUpsertByEmail(ctx, map[string]any{
+		"_project_id": pid,
+		"email":       "ap@acme.com",
+		"defaults":    map[string]any{"name": "Acme"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	v := vOut.(map[string]any)["vendor"].(*Vendor)
+	bOut, err := app.toolBillsCreate(ctx, map[string]any{
+		"_project_id":           pid,
+		"vendor_id":             v.ID,
+		"vendor_invoice_number": "INV-1",
+		"line_items":            []any{line("X", 1, 1000, 0)},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	b := bOut.(map[string]any)["bill"].(*Bill)
+	if _, err := app.toolBillsApprove(ctx, map[string]any{"_project_id": pid, "bill_id": b.ID}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.toolBillsRenderPDF(ctx, map[string]any{
+		"_project_id":     pid,
+		"bill_id":         b.ID,
+		"save_to_storage": true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if len(pf.calls) != 1 {
+		t.Fatalf("recorded %d storage calls, want 1", len(pf.calls))
+	}
+	call := pf.calls[0]
+	if call.App != "storage" || call.Tool != "files_upload" {
+		t.Fatalf("call=%s.%s, want storage.files_upload", call.App, call.Tool)
+	}
+	if call.Input["_project_id"] != pid {
+		t.Fatalf("_project_id=%v, want %q (input=%v)", call.Input["_project_id"], pid, call.Input)
+	}
+}
+
 // ─── Attachments (v0.1.1) ───────────────────────────────────────────
 //
 // These exercise the DB layer directly rather than through the MCP
@@ -802,6 +895,39 @@ func TestBillsCreateFromFile_RejectsWithoutStorage(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "storage") {
 		t.Errorf("error %q should mention storage", err.Error())
+	}
+}
+
+func TestStorageCrossAppCallsPassProjectID(t *testing.T) {
+	pf := &recordingStoragePlatform{}
+	ctx := newTestCtx(t, tk.WithPlatform(pf))
+	pid := "prod-project"
+
+	if got, err := storageUploadBase64(ctx, pid, "invoice.pdf", "/.bills/attachments/", "application/pdf", "JVBERg=="); err != nil {
+		t.Fatalf("storageUploadBase64: %v", err)
+	} else if got != 88 {
+		t.Fatalf("uploaded file id=%d, want 88", got)
+	}
+	if err := storageFileExists(ctx, pid, 77); err != nil {
+		t.Fatalf("storageFileExists: %v", err)
+	}
+	if _, got, err := storageFetchBytes(ctx, pid, 77); err != nil {
+		t.Fatalf("storageFetchBytes: %v", err)
+	} else if string(got) != "%PDF" {
+		t.Fatalf("fetched bytes=%q, want %%PDF", string(got))
+	}
+
+	wantTools := []string{"files_upload", "files_get", "files_get_content"}
+	if len(pf.calls) != len(wantTools) {
+		t.Fatalf("recorded %d storage calls, want %d", len(pf.calls), len(wantTools))
+	}
+	for i, call := range pf.calls {
+		if call.App != "storage" || call.Tool != wantTools[i] {
+			t.Fatalf("call[%d]=%s.%s, want storage.%s", i, call.App, call.Tool, wantTools[i])
+		}
+		if call.Input["_project_id"] != pid {
+			t.Fatalf("call[%d] _project_id=%v, want %q (input=%v)", i, call.Input["_project_id"], pid, call.Input)
+		}
 	}
 }
 

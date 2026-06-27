@@ -38,22 +38,22 @@ import (
 // (mindee, veryfi, etc.) map their native response into this.
 type ExtractedInvoice struct {
 	Vendor struct {
-		Name    string                 `json:"name,omitempty"`
-		Email   string                 `json:"email,omitempty"`
-		Phone   string                 `json:"phone,omitempty"`
-		Address map[string]any         `json:"address,omitempty"`
-		TaxID   string                 `json:"tax_id,omitempty"`
-		Extra   map[string]any         `json:"extra,omitempty"`
+		Name    string         `json:"name,omitempty"`
+		Email   string         `json:"email,omitempty"`
+		Phone   string         `json:"phone,omitempty"`
+		Address map[string]any `json:"address,omitempty"`
+		TaxID   string         `json:"tax_id,omitempty"`
+		Extra   map[string]any `json:"extra,omitempty"`
 	} `json:"vendor"`
-	InvoiceNumber  string  `json:"invoice_number,omitempty"`
-	IssueDate      string  `json:"issue_date,omitempty"`
-	DueDate        string  `json:"due_date,omitempty"`
-	Currency       string  `json:"currency,omitempty"`
-	SubtotalCents  int64   `json:"subtotal_cents,omitempty"`
-	TaxCents       int64   `json:"tax_cents,omitempty"`
-	TotalCents     int64   `json:"total_cents,omitempty"`
-	PaymentTermsDays int   `json:"payment_terms_days,omitempty"`
-	LineItems []struct {
+	InvoiceNumber    string `json:"invoice_number,omitempty"`
+	IssueDate        string `json:"issue_date,omitempty"`
+	DueDate          string `json:"due_date,omitempty"`
+	Currency         string `json:"currency,omitempty"`
+	SubtotalCents    int64  `json:"subtotal_cents,omitempty"`
+	TaxCents         int64  `json:"tax_cents,omitempty"`
+	TotalCents       int64  `json:"total_cents,omitempty"`
+	PaymentTermsDays int    `json:"payment_terms_days,omitempty"`
+	LineItems        []struct {
 		Description    string  `json:"description"`
 		Quantity       float64 `json:"quantity,omitempty"`
 		UnitPriceCents int64   `json:"unit_price_cents,omitempty"`
@@ -62,10 +62,10 @@ type ExtractedInvoice struct {
 		Confidence     float64 `json:"confidence,omitempty"`
 	} `json:"line_items,omitempty"`
 
-	Confidences        map[string]float64 `json:"confidences,omitempty"`
-	Provider           string             `json:"provider,omitempty"`
-	ProviderRequestID  string             `json:"provider_request_id,omitempty"`
-	CostCents          int64              `json:"cost_cents,omitempty"`
+	Confidences       map[string]float64 `json:"confidences,omitempty"`
+	Provider          string             `json:"provider,omitempty"`
+	ProviderRequestID string             `json:"provider_request_id,omitempty"`
+	CostCents         int64              `json:"cost_cents,omitempty"`
 }
 
 // callOCR invokes whichever OCR backend the install is configured for.
@@ -88,7 +88,7 @@ type ExtractedInvoice struct {
 //
 // Real failures (network, malformed response) return an error; the
 // caller logs and continues with manual fields.
-func callOCR(ctx *sdk.AppCtx, fileID int64) (*ExtractedInvoice, string, error) {
+func callOCR(ctx *sdk.AppCtx, pid string, fileID int64) (*ExtractedInvoice, string, error) {
 	provider := strings.TrimSpace(configString(ctx, "ocr_provider", ""))
 
 	// Auto-detect (v0.1.5+): empty config means "use the binding if
@@ -119,7 +119,7 @@ func callOCR(ctx *sdk.AppCtx, fileID int64) (*ExtractedInvoice, string, error) {
 	// LLM path — uses the bound vision_llm integration (no separate
 	// sidecar). Lives in ocr_llm.go.
 	if provider == "llm" {
-		parsed, providerLabel, err := callOCRViaLLM(ctx, fileID)
+		parsed, providerLabel, err := callOCRViaLLM(ctx, pid, fileID)
 		if err != nil {
 			return nil, providerLabel, err
 		}
@@ -132,7 +132,8 @@ func callOCR(ctx *sdk.AppCtx, fileID int64) (*ExtractedInvoice, string, error) {
 	// OCR API as a sidecar (Mindee, Veryfi, custom internal service).
 	var parsed ExtractedInvoice
 	if err := ctx.PlatformAPI().CallAppResult(provider, "extract_invoice", map[string]any{
-		"file_id": fileID,
+		"file_id":     fileID,
+		"_project_id": pid,
 	}, &parsed); err != nil {
 		return nil, provider, fmt.Errorf("ocr provider %q: %w", provider, err)
 	}

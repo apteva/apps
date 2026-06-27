@@ -12,6 +12,7 @@ import (
 	"strings"
 	"testing"
 
+	sdk "github.com/apteva/app-sdk"
 	tk "github.com/apteva/app-sdk/testkit"
 )
 
@@ -152,6 +153,42 @@ func TestBuildAnthropicArgs_ImageBeforeText(t *testing.T) {
 	// max_tokens explicit, model explicit.
 	if args["model"] != "claude-haiku-4-5-20251001" {
 		t.Errorf("model=%v", args["model"])
+	}
+}
+
+func TestBuildLLMArgs_OpenAICodexDefaults(t *testing.T) {
+	ctx := newTestCtx(t)
+	bound := &sdk.BoundIntegration{AppSlug: "openai-codex"}
+	model, tool, args := buildLLMArgs(ctx, bound, [][]byte{[]byte("page-bytes")})
+	if model != "gpt-5.5" {
+		t.Fatalf("model=%q, want gpt-5.5", model)
+	}
+	if tool != "chat_completion" {
+		t.Fatalf("tool=%q, want chat_completion", tool)
+	}
+	if args["model"] != "gpt-5.5" {
+		t.Errorf("args model=%v", args["model"])
+	}
+	if args["max_tokens"] != 8000 {
+		t.Errorf("max_tokens=%v, want 8000", args["max_tokens"])
+	}
+	if args["response_format"].(map[string]any)["type"] != "json_object" {
+		t.Errorf("response_format=%v", args["response_format"])
+	}
+}
+
+func TestBuildLLMArgs_OpenCodeDefaultsRemainSeparateFromCodex(t *testing.T) {
+	ctx := newTestCtx(t)
+	bound := &sdk.BoundIntegration{AppSlug: "opencode-go"}
+	model, tool, args := buildLLMArgs(ctx, bound, [][]byte{[]byte("page-bytes")})
+	if model != "qwen3.6-plus" {
+		t.Fatalf("model=%q, want qwen3.6-plus", model)
+	}
+	if tool != "chat_completion" {
+		t.Fatalf("tool=%q, want chat_completion", tool)
+	}
+	if args["model"] != "qwen3.6-plus" {
+		t.Errorf("args model=%v", args["model"])
 	}
 }
 
@@ -309,7 +346,7 @@ func TestCallOCR_LLMWithoutBindingErrors(t *testing.T) {
 	// vision_llm binding check. The user-facing message is the same
 	// flavor either way: ocr_provider is set but not usable.
 	ctx := newTestCtx(t, withOCRConfig("llm"))
-	_, providerLabel, err := callOCR(ctx, 42)
+	_, providerLabel, err := callOCR(ctx, "test-proj", 42)
 	if err == nil {
 		t.Fatal("expected error when ocr_provider=llm with no platform")
 	}
@@ -324,7 +361,7 @@ func TestCallOCR_LLMWithoutBindingErrors(t *testing.T) {
 func TestCallOCR_DisabledByDefault(t *testing.T) {
 	// Empty ocr_provider → (nil, "", nil) — disabled, not an error.
 	ctx := newTestCtx(t)
-	parsed, providerLabel, err := callOCR(ctx, 42)
+	parsed, providerLabel, err := callOCR(ctx, "test-proj", 42)
 	if err != nil {
 		t.Fatalf("expected no error when disabled, got %v", err)
 	}

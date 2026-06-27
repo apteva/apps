@@ -7,13 +7,13 @@
 //
 // State machine:
 //
-//   bills_create     → received
-//   bills_update     : received only (line items, notes, …)
-//   bills_approve    : received → approved
-//   bills_reject     : received | approved → disputed
-//   bills_schedule_  : approved → scheduled
-//   bill_payments_   : scheduled | approved → paid (when covered)
-//   bills_void       : any → void
+//	bills_create     → received
+//	bills_update     : received only (line items, notes, …)
+//	bills_approve    : received → approved
+//	bills_reject     : received | approved → disputed
+//	bills_schedule_  : approved → scheduled
+//	bill_payments_   : scheduled | approved → paid (when covered)
+//	bills_void       : any → void
 //
 // Differences worth flagging vs billing/main.go:
 //   - We don't mint our own number — bills carry the VENDOR's invoice
@@ -45,7 +45,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: bills
 display_name: Bills
-version: 0.1.22
+version: 0.1.23
 description: |
   Vendors, bills, and outbound payments. The AP mirror of billing.
 author: Apteva
@@ -63,14 +63,14 @@ requires:
   integrations:
     - role: vision_llm
       kind: integration
-      compatible_slugs: [anthropic-api, opencode-go]
+      compatible_slugs: [anthropic-api, opencode-go, openai-codex]
       capabilities: [chat.complete, vision.describe]
       tools:
         chat.complete: chat_completion
         vision.describe: chat_completion
       required: false
       label: "Vision LLM provider"
-      hint: "Anthropic API (Haiku 4.5, ~3s/page) or OpenCode Go (Qwen3.6 Plus, ~100s/page)."
+      hint: "Anthropic API (Haiku 4.5, ~3s/page), OpenCode Go (Qwen3.6 Plus), or OpenAI Codex (gpt-5.5, device login)."
 provides:
   http_routes:
     - prefix: /
@@ -113,7 +113,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	}
 
 	ctx.Logger().Info("bills mounted",
-		"version", "0.1.22",
+		"version", "0.1.23",
 		"scope_project_id", os.Getenv("APTEVA_PROJECT_ID"),
 		"ocr_provider", configString(ctx, "ocr_provider", "(disabled)"))
 	return nil
@@ -346,7 +346,7 @@ func (a *App) MCPTools() []sdk.Tool {
 
 		// ── Bills ──────────────────────────────────────────────────
 		{
-			Name: "bills_create",
+			Name:        "bills_create",
 			Description: "Log a bill received from a vendor. Status starts at 'received'. Provider arg ('local' | 'mercury' | 'wise' | 'bill_dot_com') falls back to install default. PROVIDER IS FROZEN: to switch, void and recreate. v0.1.0 only honours 'local'. Args: vendor_id, vendor_invoice_number, vendor_invoice_date, currency, provider, due_date, line_items [{description, quantity, unit_price_cents, tax_rate_bps?}], subtotal_cents, tax_cents, total_cents (when supplied, override the line-items computation — use these when the OCR-extracted invoice header total is the source of truth and line items are only a partial breakdown), notes, category, gl_account, attached_file_id, paid (optional {amount_cents?, method, paid_at?, reference?} — when present and amount covers the total, the bill skips received→approved→scheduled and lands directly in 'paid' with a matching payment row; use this for bills you've already paid outside the system, e.g. on a credit card).",
 			InputSchema: schemaObject(map[string]any{
 				"vendor_id":             map[string]any{"type": "integer"},
@@ -459,7 +459,7 @@ func (a *App) MCPTools() []sdk.Tool {
 
 		// ── Attachments (v0.1.1) ──────────────────────────────────
 		{
-			Name: "bills_attach_file",
+			Name:        "bills_attach_file",
 			Description: "Link an existing storage app file to a bill. Use after the file is already in storage. Validates the file exists in storage before linking. Allowed on any status except void. Replaces an existing attachment if there is one — the previous file is NOT auto-deleted from storage. Args: bill_id, file_id.",
 			InputSchema: schemaObject(map[string]any{
 				"bill_id": map[string]any{"type": "integer"},
@@ -476,7 +476,7 @@ func (a *App) MCPTools() []sdk.Tool {
 			Handler: a.toolBillsDetachFile,
 		},
 		{
-			Name: "bills_create_from_file",
+			Name:        "bills_create_from_file",
 			Description: "Upload a PDF/image to the storage app AND create a bill row in one call. Saves the agent the storage.files_upload → bills_create two-step. Use when you have raw bytes; if you already have a storage file_id, use plain bills_create with attached_file_id instead. OCR auto-fills vendor + line items + totals when a vision_llm integration is bound. Args: name, content_base64, content_type (default 'application/pdf'), folder (default '/.bills/attachments/'), plus all bills_create args (vendor_id, vendor_invoice_number, line_items, totals, paid block to record an already-paid bill, etc.).",
 			InputSchema: schemaObject(map[string]any{
 				"name":           map[string]any{"type": "string"},
@@ -576,22 +576,22 @@ func actorFromRequest(r *http.Request) string {
 // ─── Domain types ───────────────────────────────────────────────────
 
 type Vendor struct {
-	ID                       int64           `json:"id"`
-	ProjectID                string          `json:"project_id,omitempty"`
-	Name                     string          `json:"name"`
-	Email                    string          `json:"email,omitempty"`
-	Phone                    string          `json:"phone,omitempty"`
-	BillingAddress           json.RawMessage `json:"billing_address,omitempty"`
-	TaxIDs                   json.RawMessage `json:"tax_ids,omitempty"`
-	Currency                 string          `json:"currency,omitempty"`
-	DefaultPaymentMethod     string          `json:"default_payment_method,omitempty"`
-	DefaultPaymentTermsDays  *int            `json:"default_payment_terms_days,omitempty"`
-	W9ReceivedAt             string          `json:"w9_received_at,omitempty"`
-	ExternalID               string          `json:"external_id,omitempty"`
-	Metadata                 json.RawMessage `json:"metadata,omitempty"`
-	CreatedAt                string          `json:"created_at,omitempty"`
-	UpdatedAt                string          `json:"updated_at,omitempty"`
-	DeletedAt                string          `json:"deleted_at,omitempty"`
+	ID                      int64           `json:"id"`
+	ProjectID               string          `json:"project_id,omitempty"`
+	Name                    string          `json:"name"`
+	Email                   string          `json:"email,omitempty"`
+	Phone                   string          `json:"phone,omitempty"`
+	BillingAddress          json.RawMessage `json:"billing_address,omitempty"`
+	TaxIDs                  json.RawMessage `json:"tax_ids,omitempty"`
+	Currency                string          `json:"currency,omitempty"`
+	DefaultPaymentMethod    string          `json:"default_payment_method,omitempty"`
+	DefaultPaymentTermsDays *int            `json:"default_payment_terms_days,omitempty"`
+	W9ReceivedAt            string          `json:"w9_received_at,omitempty"`
+	ExternalID              string          `json:"external_id,omitempty"`
+	Metadata                json.RawMessage `json:"metadata,omitempty"`
+	CreatedAt               string          `json:"created_at,omitempty"`
+	UpdatedAt               string          `json:"updated_at,omitempty"`
+	DeletedAt               string          `json:"deleted_at,omitempty"`
 }
 
 type Bill struct {
@@ -1145,7 +1145,7 @@ func (a *App) toolBillsAttachFile(ctx *sdk.AppCtx, args map[string]any) (any, er
 	if billID == 0 || fileID == 0 {
 		return nil, errors.New("bill_id and file_id required")
 	}
-	if err := storageFileExists(ctx, fileID); err != nil {
+	if err := storageFileExists(ctx, pid, fileID); err != nil {
 		return nil, err
 	}
 	bill, prevID, err := dbBillAttachFile(ctx.AppDB(), pid, billID, fileID, callerActor(args))
@@ -1190,7 +1190,8 @@ func (a *App) toolBillsDetachFile(ctx *sdk.AppCtx, args map[string]any) (any, er
 func (a *App) toolBillsCreateFromFile(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	// Resolve early so we don't upload bytes if project_id is missing.
 	// toolBillsCreate re-resolves from the same args downstream.
-	if _, err := resolveProjectFromArgs(args); err != nil {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
 		return nil, err
 	}
 	// vendor_id is OPTIONAL when an OCR provider is configured —
@@ -1217,7 +1218,7 @@ func (a *App) toolBillsCreateFromFile(ctx *sdk.AppCtx, args map[string]any) (any
 
 	// 1. Upload bytes to storage. Hard fail with a clear error when
 	//    storage isn't installed — agent can retry without this tool.
-	fileID, err := storageUploadBase64(ctx, name, folder, contentType, b64)
+	fileID, err := storageUploadBase64(ctx, pid, name, folder, contentType, b64)
 	if err != nil {
 		return nil, err
 	}
@@ -1246,8 +1247,7 @@ func (a *App) toolBillsCreateFromFile(ctx *sdk.AppCtx, args map[string]any) (any
 	//    from the file BEFORE creating the bill. Caller args win on
 	//    every conflict; extraction only fills gaps. Failures are
 	//    non-fatal — bill still gets created from caller args.
-	pid, _ := resolveProjectFromArgs(args)
-	extracted, ocrProvider, ocrErr := callOCR(ctx, fileID)
+	extracted, ocrProvider, ocrErr := callOCR(ctx, pid, fileID)
 	var fieldsFilled []string
 	var vendorVia string
 	if ocrErr != nil {
@@ -1298,7 +1298,7 @@ func (a *App) toolBillsCreateFromFile(ctx *sdk.AppCtx, args map[string]any) (any
 
 // storageFileExists validates a storage file_id is reachable for the
 // current project. Returns a clear error when storage isn't installed.
-func storageFileExists(ctx *sdk.AppCtx, fileID int64) error {
+func storageFileExists(ctx *sdk.AppCtx, pid string, fileID int64) error {
 	if ctx == nil || ctx.PlatformAPI() == nil {
 		return errors.New("attach: storage app not installed for this project — install it to attach files to bills")
 	}
@@ -1306,7 +1306,8 @@ func storageFileExists(ctx *sdk.AppCtx, fileID int64) error {
 		ID int64 `json:"id"`
 	}
 	if err := ctx.PlatformAPI().CallAppResult("storage", "files_get", map[string]any{
-		"id": fileID,
+		"id":          fileID,
+		"_project_id": pid,
 	}, &got); err != nil {
 		msg := err.Error()
 		if strings.Contains(strings.ToLower(msg), "not installed") ||
@@ -1324,7 +1325,7 @@ func storageFileExists(ctx *sdk.AppCtx, fileID int64) error {
 // storageUploadBase64 calls storage.files_upload with the bytes and
 // returns the new file_id. Adds standard tags so the storage panel
 // can filter "what came from bills."
-func storageUploadBase64(ctx *sdk.AppCtx, name, folder, contentType, b64 string) (int64, error) {
+func storageUploadBase64(ctx *sdk.AppCtx, pid, name, folder, contentType, b64 string) (int64, error) {
 	if ctx == nil || ctx.PlatformAPI() == nil {
 		return 0, errors.New("upload: storage app not installed for this project — install it to attach files to bills")
 	}
@@ -1338,6 +1339,7 @@ func storageUploadBase64(ctx *sdk.AppCtx, name, folder, contentType, b64 string)
 		"content_type":   contentType,
 		"tags":           []any{"bill", "attachment"},
 		"source":         "bills",
+		"_project_id":    pid,
 	}, &got); err != nil {
 		msg := err.Error()
 		if strings.Contains(strings.ToLower(msg), "not installed") ||
@@ -1401,6 +1403,7 @@ func (a *App) toolBillsRenderPDF(ctx *sdk.AppCtx, args map[string]any) (any, err
 		"content_type":   "application/pdf",
 		"tags":           []any{"bill", "voucher", bill.Status},
 		"source":         "bills",
+		"_project_id":    pid,
 	}, &got); callErr != nil {
 		return nil, fmt.Errorf("save_to_storage: storage app call failed (%w) — install the storage app or retry with save_to_storage=false", callErr)
 	}
@@ -1974,7 +1977,7 @@ func (a *App) handleHTTPBillAttachLink(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusBadRequest, "file_id required")
 		return
 	}
-	if err := storageFileExists(ctx, fileID); err != nil {
+	if err := storageFileExists(ctx, pid, fileID); err != nil {
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
@@ -2014,7 +2017,7 @@ func (a *App) handleHTTPBillAttachUpload(w http.ResponseWriter, r *http.Request)
 	if folder == "" {
 		folder = "/.bills/attachments/"
 	}
-	fileID, err := storageUploadBase64(ctx, name, folder, contentType, b64)
+	fileID, err := storageUploadBase64(ctx, pid, name, folder, contentType, b64)
 	if err != nil {
 		httpErr(w, http.StatusBadGateway, err.Error())
 		return
@@ -2118,7 +2121,7 @@ func (a *App) handleHTTPBillsCreateFromFile(w http.ResponseWriter, r *http.Reque
 			folder = "/.bills/attachments/"
 		}
 		uploadStart := time.Now()
-		fileID, err = storageUploadBase64(ctx, name, folder, ct, b64)
+		fileID, err = storageUploadBase64(ctx, pid, name, folder, ct, b64)
 		if err != nil {
 			ctx.Logger().Error("from-file: upload failed",
 				"name", name, "folder", folder, "err", err)
@@ -2143,7 +2146,7 @@ func (a *App) handleHTTPBillsCreateFromFile(w http.ResponseWriter, r *http.Reque
 			httpErr(w, http.StatusBadRequest, "file_id required")
 			return
 		}
-		if err := storageFileExists(ctx, body.FileID); err != nil {
+		if err := storageFileExists(ctx, pid, body.FileID); err != nil {
 			httpErr(w, http.StatusBadRequest, err.Error())
 			return
 		}
@@ -2158,7 +2161,7 @@ func (a *App) handleHTTPBillsCreateFromFile(w http.ResponseWriter, r *http.Reque
 	// before we validate vendor_id (extraction may resolve it). Same
 	// "caller-args win" rule as the MCP path. Failures are non-fatal.
 	ocrStart := time.Now()
-	extracted, ocrProvider, ocrErr := callOCR(ctx, fileID)
+	extracted, ocrProvider, ocrErr := callOCR(ctx, pid, fileID)
 	ocrElapsed := time.Since(ocrStart).Milliseconds()
 	var fieldsFilled []string
 	var vendorVia string

@@ -1,8 +1,20 @@
-# Bills (v0.1.22)
+# Bills (v0.1.23)
 
 Vendors, bills, and bill payments for Apteva agents and human teams.
 The accounts-payable mirror of the `billing` app — money OUT instead
 of money in.
+
+## What's in v0.1.23
+
+Fixes global-install Bills + global-install Storage flows by passing
+the resolved `_project_id` through every Bills-to-Storage app call:
+uploads, attachment validation, OCR byte fetches, and rendered voucher
+saves. This fixes the production `storage.files_upload: project_id
+missing` failure when creating bills from PDFs.
+
+Also allows OpenAI Codex as a `vision_llm` integration. Codex uses the
+device-login integration path, not a provider API key, and defaults to
+`gpt-5.5` for invoice OCR.
 
 ## What's in v0.1.22
 
@@ -22,23 +34,25 @@ fallback ordering.
 
 ## What's in v0.1.9
 
-LLM-OCR is now **dual-rail** — the `vision_llm` binding accepts either
-`anthropic-api` (recommended, ~3s/page with Claude Haiku 4.5) or
-`opencode-go` (Qwen3.6 Plus default, ~100s/page on the flat-rate plan).
+LLM-OCR is now provider-aware — the `vision_llm` binding accepts
+`anthropic-api` (recommended, ~3s/page with Claude Haiku 4.5),
+`opencode-go` (Qwen3.6 Plus default, flat-rate plan), or
+`openai-codex` (gpt-5.5 default, device-login subscription runtime).
 Bills branches on `bound.AppSlug` to build the right request shape:
 
 - **anthropic-api** → Anthropic Messages API: `system` as top-level
   field, single user message with image content blocks before text,
   response in `content[0].text` (parser handles ```json fences)
-- **opencode-go** → OpenAI chat-completion: `messages` array with
-  system message + user message with image_url parts, response in
-  `choices[0].message.content` with reasoning_content fallback for
-  reasoning-shaped models
+- **opencode-go / openai-codex** → OpenAI-compatible
+  chat-completion: `messages` array with system message + user message
+  with image_url parts, response in `choices[0].message.content` with
+  reasoning_content fallback for reasoning-shaped models
 
 Provider-aware defaults via the new `ocr_llm_model` config field
 (empty = pick per provider): `claude-haiku-4-5-20251001` for
 Anthropic, `qwen3.6-plus` for OpenCode Go (was `kimi-k2.6` —
-Qwen tested cleaner shape and similar speed).
+Qwen tested cleaner shape and similar speed), and `gpt-5.5` for
+OpenAI Codex.
 
 Plus pipeline observability — INFO logs at every stage of
 bills_create_from_file's OCR flow (request received → upload →
