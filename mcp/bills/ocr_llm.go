@@ -457,7 +457,8 @@ Critical rules:
   filename date as a tie-breaker. Example: a German vendor invoice named
   Vendor_2026-04-03_123.pdf with printed date 03/04/2026 means 2026-04-03,
   not 2026-03-04.
-- The vendor block describes the company billing US, not the customer (us).
+- The vendor block describes the company issuing the invoice, not the customer
+  or account holder receiving it.
 - vendor.email must be the vendor's own accounts/billing/contact email.
   Never copy emails from "Bill to", "Billed to", "Customer", "Ship to", or
   other recipient/customer blocks into vendor.email. If only the customer's

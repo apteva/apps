@@ -223,10 +223,10 @@ func TestResolveVendor_UniqueNameMatch(t *testing.T) {
 
 func TestResolveVendor_IgnoresCustomerEmailForVendor(t *testing.T) {
 	ctx := newTestCtx(t)
-	v := mustVendor(t, ctx, "billing@fireworks.ai", "Fireworks AI")
+	v := mustVendor(t, ctx, "billing@vendor-cloud.example", "Vendor Cloud")
 	e := &ExtractedInvoice{}
-	e.Vendor.Name = "Fireworks AI"
-	e.Vendor.Email = "marcolivier.schwartz@gmail.com"
+	e.Vendor.Name = "Vendor Cloud"
+	e.Vendor.Email = "account-holder@example.net"
 
 	args := map[string]any{}
 	via, err := resolveVendorFromExtraction(ctx.AppDB(), "test-proj", e, args)
@@ -239,7 +239,7 @@ func TestResolveVendor_IgnoresCustomerEmailForVendor(t *testing.T) {
 	if got := args["vendor_id"].(int64); got != v.ID {
 		t.Errorf("vendor_id=%d, want %d", got, v.ID)
 	}
-	if wrong, err := dbVendorGetByEmail(ctx.AppDB(), "test-proj", "marcolivier.schwartz@gmail.com"); err != nil {
+	if wrong, err := dbVendorGetByEmail(ctx.AppDB(), "test-proj", "account-holder@example.net"); err != nil {
 		t.Fatal(err)
 	} else if wrong != nil {
 		t.Fatalf("customer email was created as vendor: %+v", wrong)
@@ -253,10 +253,10 @@ func TestUsableExtractedVendorEmail_AllowsNameRelatedDomains(t *testing.T) {
 		want  string
 	}{
 		{"billing@aws.amazon.com", "AWS", "billing@aws.amazon.com"},
-		{"ap@fireworks.ai", "Fireworks AI", "ap@fireworks.ai"},
+		{"ap@vendor-cloud.example", "Vendor Cloud", "ap@vendor-cloud.example"},
 		{"acme.billing@gmail.com", "Acme Corp", "acme.billing@gmail.com"},
-		{"marcolivier.schwartz@gmail.com", "Fireworks AI", ""},
-		{"fireworks.ai", "Fireworks AI", ""},
+		{"account-holder@example.net", "Vendor Cloud", ""},
+		{"vendor-cloud.example", "Vendor Cloud", ""},
 	}
 	for _, tc := range cases {
 		if got := usableExtractedVendorEmail(tc.email, tc.name); got != tc.want {

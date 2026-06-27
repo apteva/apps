@@ -85,6 +85,7 @@ func TestOCRPromptGuidesMultiPageTotals(t *testing.T) {
 		"DD/MM/YYYY",
 		"filename date as a tie-breaker",
 		"Vendor_2026-04-03_123.pdf",
+		"company issuing the invoice",
 		"Never copy emails from \"Bill to\"",
 	} {
 		if !strings.Contains(ocrSystemPrompt, phrase) {
@@ -124,7 +125,7 @@ func TestParseAnthropicInvoice_CoercesFractionalCentFields(t *testing.T) {
 		"content": []any{
 			map[string]any{
 				"type": "text",
-				"text": "```json\n{\"vendor\":{\"name\":\"Fireworks AI\",\"email\":\"fireworks.ai\"},\"invoice_number\":\"HQXZWR-00038\",\"issue_date\":\"2026-05-01\",\"currency\":\"USD\",\"total_cents\":7816,\"line_items\":[{\"description\":\"Embedding input tokens\",\"quantity\":3719742,\"unit_price_cents\":0.000000008,\"amount_cents\":3}]}\n```",
+				"text": "```json\n{\"vendor\":{\"name\":\"Usage Cloud\",\"email\":\"usage-cloud.example\"},\"invoice_number\":\"USAGE-00038\",\"issue_date\":\"2026-05-01\",\"currency\":\"USD\",\"total_cents\":7816,\"line_items\":[{\"description\":\"Embedding input tokens\",\"quantity\":3719742,\"unit_price_cents\":0.000000008,\"amount_cents\":3}]}\n```",
 			},
 		},
 		"stop_reason": "end_turn",
@@ -134,7 +135,7 @@ func TestParseAnthropicInvoice_CoercesFractionalCentFields(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Vendor.Name != "Fireworks AI" || got.InvoiceNumber != "HQXZWR-00038" || got.TotalCents != 7816 {
+	if got.Vendor.Name != "Usage Cloud" || got.InvoiceNumber != "USAGE-00038" || got.TotalCents != 7816 {
 		t.Errorf("got %+v", got)
 	}
 	if len(got.LineItems) != 1 {
