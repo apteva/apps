@@ -305,6 +305,10 @@ func resolveVendorFromExtraction(db *sql.DB, pid string, e *ExtractedInvoice, ar
 		return "name_unique", nil
 	}
 	if len(exact) > 1 {
+		if best := uniqueVendorWithUsableOwnEmail(exact); best != nil {
+			args["vendor_id"] = best.ID
+			return "name_unique", nil
+		}
 		ids := make([]int64, 0, len(exact))
 		for _, r := range exact {
 			ids = append(ids, r.ID)
@@ -322,6 +326,10 @@ func resolveVendorFromExtraction(db *sql.DB, pid string, e *ExtractedInvoice, ar
 		return "name_unique", nil
 	}
 	if len(rows) > 1 {
+		if best := uniqueVendorWithUsableOwnEmail(rows); best != nil {
+			args["vendor_id"] = best.ID
+			return "name_unique", nil
+		}
 		ids := make([]int64, 0, len(rows))
 		for _, r := range rows {
 			ids = append(ids, r.ID)
@@ -367,6 +375,23 @@ func usableExtractedVendorEmail(rawEmail, vendorName string) string {
 		}
 	}
 	return ""
+}
+
+func uniqueVendorWithUsableOwnEmail(rows []*Vendor) *Vendor {
+	var best *Vendor
+	for _, row := range rows {
+		if row == nil {
+			continue
+		}
+		if usableExtractedVendorEmail(row.Email, row.Name) == "" {
+			continue
+		}
+		if best != nil {
+			return nil
+		}
+		best = row
+	}
+	return best
 }
 
 // ─── Audit ──────────────────────────────────────────────────────────

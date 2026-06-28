@@ -1,8 +1,16 @@
-# Bills (v0.1.30)
+# Bills (v0.1.31)
 
 Vendors, bills, and bill payments for Apteva agents and human teams.
 The accounts-payable mirror of the `billing` app — money OUT instead
 of money in.
+
+## What's in v0.1.31
+
+Improves OCR vendor matching when historical duplicate vendor rows
+share the same canonical name. If exactly one matching vendor has a
+usable vendor-owned email/domain and the others have malformed or
+missing emails, Bills now auto-selects the high-quality match instead
+of forcing an explicit `vendor_id`.
 
 ## What's in v0.1.30
 

@@ -246,6 +246,32 @@ func TestResolveVendor_IgnoresCustomerEmailForVendor(t *testing.T) {
 	}
 }
 
+func TestResolveVendor_DuplicateNamePrefersUsableVendorEmail(t *testing.T) {
+	ctx := newTestCtx(t)
+	good := mustVendor(t, ctx, "billing@vendor-cloud.example", "Vendor Cloud Inc.")
+	if _, err := ctx.AppDB().Exec(
+		`INSERT INTO vendors (project_id, name, email, billing_address, tax_ids, metadata, created_at, updated_at)
+		 VALUES (?, ?, ?, '{}', '[]', '{}', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)`,
+		"test-proj", "Vendor Cloud", "vendor-cloud.example"); err != nil {
+		t.Fatal(err)
+	}
+
+	e := &ExtractedInvoice{}
+	e.Vendor.Name = "Vendor Cloud"
+	e.Vendor.Email = "vendor-cloud.example"
+	args := map[string]any{}
+	via, err := resolveVendorFromExtraction(ctx.AppDB(), "test-proj", e, args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if via != "name_unique" {
+		t.Errorf("via=%q, want name_unique", via)
+	}
+	if got := args["vendor_id"].(int64); got != good.ID {
+		t.Errorf("vendor_id=%d, want good vendor %d", got, good.ID)
+	}
+}
+
 func TestUsableExtractedVendorEmail_AllowsNameRelatedDomains(t *testing.T) {
 	cases := []struct {
 		email string
