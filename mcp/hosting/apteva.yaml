@@ -1,0 +1,98 @@
+schema: apteva-app/v1
+
+name: hosting
+display_name: Hosting
+version: 1.0.0
+description: |
+  Managed container-backed hosting control plane. Hosting provisions and
+  operates hosted Apteva tenants on top of the generic Containers app,
+  tracks plan limits and usage, and exposes tenants through server-native
+  ingress. Free plans are first-class and do not require Billing or
+  Subscriptions.
+
+author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/hosting
+icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/hosting/icon.svg
+tags: [hosting, tenants, containers, apteva, infrastructure]
+
+scopes: [global]
+min_apteva_version: "0.11.0"
+
+requires:
+  permissions:
+    - db.write.app
+    - platform.apps.call
+    - platform.ingress.write
+  apps:
+    - name: containers
+      optional: false
+    - name: billing
+      optional: true
+    - name: subscriptions
+      optional: true
+    - name: entitlements
+      optional: true
+
+provides:
+  http_routes:
+    - prefix: /
+  mcp_tools:
+    - name: hosting_plan_list
+      description: List hosting plans, including free plans.
+    - name: hosting_customer_create
+      description: Find or create a hosting customer by email.
+    - name: hosting_tenant_create
+      description: Provision a hosted Apteva tenant container and expose its default hostname.
+    - name: hosting_tenant_get
+      description: Fetch one hosted tenant.
+    - name: hosting_tenant_list
+      description: List hosted tenants by customer, status, or plan.
+    - name: hosting_tenant_suspend
+      description: Stop a tenant container and mark it suspended.
+    - name: hosting_tenant_resume
+      description: Start a suspended or stopped tenant container.
+    - name: hosting_tenant_restart
+      description: Restart a hosted tenant container.
+    - name: hosting_tenant_delete
+      description: Destroy a hosted tenant container and remove its ingress route.
+    - name: hosting_tenant_logs
+      description: Tail logs for a hosted tenant.
+    - name: hosting_tenant_health
+      description: Probe and fetch hosted tenant health.
+    - name: hosting_usage_get
+      description: Return usage totals for a tenant or customer.
+    - name: hosting_subscription_sync
+      description: Apply a subscription status to a tenant lifecycle state.
+  ui_panels:
+    - slot: project.page
+      label: Hosting
+      icon: server
+      entry: /ui/HostingPanel.mjs
+
+runtime:
+  kind: source
+  source:
+    repo: github.com/apteva/apps
+    ref: main
+    entry: mcp/hosting
+  port: 8080
+  health_check: /health
+
+db:
+  driver: sqlite
+  path: /data/hosting.db
+  migrations: migrations/
+
+config_schema:
+  - name: default_base_domain
+    type: text
+    default: "hosted.apteva.local"
+    label: Default base domain
+    description: Base domain used for generated tenant hostnames, e.g. tenant.hosted.example.com.
+  - name: default_image
+    type: text
+    default: "apteva:latest"
+    label: Default Apteva image
+    description: Container image used when the selected plan does not override one.
+
+upgrade_policy: auto-patch
