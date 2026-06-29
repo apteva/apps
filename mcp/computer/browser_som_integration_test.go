@@ -186,6 +186,124 @@ func TestComputerAppBrowserbaseSetCheckedAndTemporal(t *testing.T) {
 	runComputerAppBrowserSetCheckedAndTemporal(t, "browserbase")
 }
 
+// TestComputerAppBrowserbasePublicDatePickerSetTemporal verifies set_temporal
+// on a real public page with no iframe. Selenium's web-form demo uses a
+// Bootstrap datepicker backed by a plain text input, similar to many scheduler
+// widgets where typing focus can be flaky but direct value setting should work.
+//
+//	RUN_COMPUTER_APP_BROWSERBASE_TESTS=1 BROWSERBASE_API_KEY=... BROWSERBASE_PROJECT_ID=... go test -run TestComputerAppBrowserbasePublicDatePickerSetTemporal -timeout 5m .
+func TestComputerAppBrowserbasePublicDatePickerSetTemporal(t *testing.T) {
+	if os.Getenv("RUN_COMPUTER_APP_BROWSERBASE_TESTS") == "" {
+		t.Skip("set RUN_COMPUTER_APP_BROWSERBASE_TESTS=1 to run the Browserbase public date picker test")
+	}
+	if os.Getenv("BROWSERBASE_API_KEY") == "" || os.Getenv("BROWSERBASE_PROJECT_ID") == "" {
+		t.Skip("BROWSERBASE_API_KEY and BROWSERBASE_PROJECT_ID are required")
+	}
+
+	sc := tk.SpawnSidecar(t, ".", tk.WithEnv("APTEVA_HEADLESS_BROWSER", "1"))
+	open := sc.MCP("browser_session", map[string]any{
+		"action":  "open",
+		"backend": "browserbase",
+		"url":     "https://www.selenium.dev/selenium/web/web-form.html",
+		"viewport": map[string]any{
+			"width":  1200,
+			"height": 900,
+		},
+	})
+	sessionID, _ := open["session_id"].(string)
+	if sessionID == "" {
+		t.Fatalf("open returned no session_id: %v", open)
+	}
+	defer sc.MCP("browser_close", map[string]any{"session_id": sessionID})
+
+	out := sc.MCP("computer_use", map[string]any{
+		"session_id": sessionID,
+		"action":     "set_temporal",
+		"selector":   "input[name='my-date']",
+		"value":      "07/01/2026",
+	})
+	if got := stringValue(out["temporal_value"]); got != "07/01/2026" {
+		t.Fatalf("public date picker temporal_value: want 07/01/2026, got %q out=%v", got, out)
+	}
+}
+
+// TestComputerAppBrowserbasePublicSetText verifies set_text against a stable
+// public non-iframe textarea on Selenium's automation test page.
+//
+//	RUN_COMPUTER_APP_BROWSERBASE_TESTS=1 BROWSERBASE_API_KEY=... BROWSERBASE_PROJECT_ID=... go test -run TestComputerAppBrowserbasePublicSetText -timeout 5m .
+func TestComputerAppBrowserbasePublicSetText(t *testing.T) {
+	if os.Getenv("RUN_COMPUTER_APP_BROWSERBASE_TESTS") == "" {
+		t.Skip("set RUN_COMPUTER_APP_BROWSERBASE_TESTS=1 to run the Browserbase public set_text test")
+	}
+	if os.Getenv("BROWSERBASE_API_KEY") == "" || os.Getenv("BROWSERBASE_PROJECT_ID") == "" {
+		t.Skip("BROWSERBASE_API_KEY and BROWSERBASE_PROJECT_ID are required")
+	}
+
+	sc := tk.SpawnSidecar(t, ".", tk.WithEnv("APTEVA_HEADLESS_BROWSER", "1"))
+	open := sc.MCP("browser_session", map[string]any{
+		"action":  "open",
+		"backend": "browserbase",
+		"url":     "https://www.selenium.dev/selenium/web/web-form.html",
+		"viewport": map[string]any{
+			"width":  1200,
+			"height": 900,
+		},
+	})
+	sessionID, _ := open["session_id"].(string)
+	if sessionID == "" {
+		t.Fatalf("open returned no session_id: %v", open)
+	}
+	defer sc.MCP("browser_close", map[string]any{"session_id": sessionID})
+
+	out := sc.MCP("computer_use", map[string]any{
+		"session_id":   sessionID,
+		"action":       "set_text",
+		"selector":     "textarea[name='my-textarea']",
+		"text":         "Hello,\n\nThis public textarea should not have a blank paragraph gap.",
+		"newline_mode": "compact",
+	})
+	if got := stringValue(out["text_value"]); got != "Hello,\nThis public textarea should not have a blank paragraph gap." {
+		t.Fatalf("public set_text text_value: got %q out=%v", got, out)
+	}
+	if got := stringValue(out["text_input_type"]); got != "textarea" {
+		t.Fatalf("public set_text input type: want textarea, got %q out=%v", got, out)
+	}
+}
+
+// TestComputerAppBrowserSetText verifies targeted text setting for plain
+// textareas and contenteditable composers. It defaults to local and can also
+// run against Browserbase because the fixture is a data: URL.
+//
+//	RUN_COMPUTER_APP_BROWSER_TESTS=1 APTEVA_HEADLESS_BROWSER=1 go test -run TestComputerAppBrowserSetText -timeout 3m .
+//	RUN_COMPUTER_APP_BROWSER_TESTS=1 COMPUTER_APP_BROWSER_BACKEND=browserbase BROWSERBASE_API_KEY=... BROWSERBASE_PROJECT_ID=... go test -run TestComputerAppBrowserSetText -timeout 5m .
+func TestComputerAppBrowserSetText(t *testing.T) {
+	if os.Getenv("RUN_COMPUTER_APP_BROWSER_TESTS") == "" {
+		t.Skip("set RUN_COMPUTER_APP_BROWSER_TESTS=1 to run the real browser set_text test")
+	}
+	backend := strings.TrimSpace(os.Getenv("COMPUTER_APP_BROWSER_BACKEND"))
+	if backend == "" {
+		backend = "local"
+	}
+	if backend == "browserbase" && (os.Getenv("BROWSERBASE_API_KEY") == "" || os.Getenv("BROWSERBASE_PROJECT_ID") == "") {
+		t.Skip("COMPUTER_APP_BROWSER_BACKEND=browserbase requires BROWSERBASE_API_KEY and BROWSERBASE_PROJECT_ID")
+	}
+	runComputerAppBrowserSetText(t, backend)
+}
+
+// TestComputerAppBrowserbaseSetText is the Browserbase-specific release
+// regression for composer text replacement and compact newline handling.
+//
+//	RUN_COMPUTER_APP_BROWSERBASE_TESTS=1 BROWSERBASE_API_KEY=... BROWSERBASE_PROJECT_ID=... go test -run TestComputerAppBrowserbaseSetText -timeout 5m .
+func TestComputerAppBrowserbaseSetText(t *testing.T) {
+	if os.Getenv("RUN_COMPUTER_APP_BROWSERBASE_TESTS") == "" {
+		t.Skip("set RUN_COMPUTER_APP_BROWSERBASE_TESTS=1 to run the Browserbase set_text test")
+	}
+	if os.Getenv("BROWSERBASE_API_KEY") == "" || os.Getenv("BROWSERBASE_PROJECT_ID") == "" {
+		t.Skip("BROWSERBASE_API_KEY and BROWSERBASE_PROJECT_ID are required")
+	}
+	runComputerAppBrowserSetText(t, "browserbase")
+}
+
 func runComputerAppBrowserSetCheckedAndTemporal(t *testing.T, backend string) {
 	t.Helper()
 	sc := tk.SpawnSidecar(t, ".", tk.WithEnv("APTEVA_HEADLESS_BROWSER", "1"))
@@ -242,6 +360,57 @@ func runComputerAppBrowserSetCheckedAndTemporal(t *testing.T, backend string) {
 	})
 	if got := stringValue(out["temporal_value"]); got != "11:00" {
 		t.Fatalf("time temporal_value: want 11:00, got %q out=%v", got, out)
+	}
+}
+
+func runComputerAppBrowserSetText(t *testing.T, backend string) {
+	t.Helper()
+	sc := tk.SpawnSidecar(t, ".", tk.WithEnv("APTEVA_HEADLESS_BROWSER", "1"))
+	open := sc.MCP("browser_session", map[string]any{
+		"action":  "open",
+		"backend": backend,
+		"url":     setTextFixtureDataURL(),
+		"viewport": map[string]any{
+			"width":  1000,
+			"height": 700,
+		},
+	})
+	sessionID, _ := open["session_id"].(string)
+	if sessionID == "" {
+		t.Fatalf("open returned no session_id: %v", open)
+	}
+	defer sc.MCP("browser_close", map[string]any{"session_id": sessionID})
+
+	out := sc.MCP("computer_use", map[string]any{
+		"session_id":   sessionID,
+		"action":       "set_text",
+		"selector":     "#message",
+		"text":         "Hello,\n\nLine two.",
+		"newline_mode": "compact",
+	})
+	if got := stringValue(out["text_value"]); got != "Hello,\nLine two." {
+		t.Fatalf("textarea text_value: want compact newline, got %q out=%v", got, out)
+	}
+
+	out = sc.MCP("computer_use", map[string]any{
+		"session_id": sessionID,
+		"action":     "set_text",
+		"selector":   "#editor",
+		"text":       "First paragraph.\n\nSecond paragraph.",
+	})
+	if got := stringValue(out["text_value"]); got != "First paragraph.\n\nSecond paragraph." {
+		t.Fatalf("contenteditable text_value: want preserved blank line, got %q out=%v", got, out)
+	}
+
+	out = sc.MCP("computer_use", map[string]any{
+		"session_id": sessionID,
+		"action":     "set_text",
+		"selector":   "#message",
+		"text":       "\nAppended.",
+		"mode":       "append",
+	})
+	if got := stringValue(out["text_value"]); got != "Hello,\nLine two.\nAppended." {
+		t.Fatalf("append text_value: got %q out=%v", got, out)
 	}
 }
 
@@ -948,6 +1117,37 @@ function sync() {
 for (const input of [sell, date, time]) {
   input.addEventListener("input", sync);
   input.addEventListener("change", sync);
+}
+sync();
+</script>`
+	return "data:text/html;charset=utf-8," + url.PathEscape(html)
+}
+
+func setTextFixtureDataURL() string {
+	html := `<!doctype html>
+<meta charset="utf-8">
+<title>Set text test</title>
+<style>
+  body { font: 20px system-ui, sans-serif; margin: 0; padding: 40px; }
+  label { display: block; margin: 18px 0 6px; }
+  textarea, [contenteditable] { display: block; width: 620px; min-height: 120px; font: inherit; padding: 8px 12px; border: 1px solid #777; white-space: pre-wrap; }
+</style>
+<label for="message">Message</label>
+<textarea id="message"></textarea>
+<label for="editor">Composer</label>
+<div id="editor" role="textbox" contenteditable="true" aria-label="Composer"></div>
+<script>
+const message = document.getElementById("message");
+const editor = document.getElementById("editor");
+function sync() {
+  const p = new URLSearchParams();
+  p.set("message", message.value);
+  p.set("editor", editor.innerText);
+  location.hash = p.toString();
+}
+for (const el of [message, editor]) {
+  el.addEventListener("input", sync);
+  el.addEventListener("change", sync);
 }
 sync();
 </script>`
