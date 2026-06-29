@@ -387,7 +387,7 @@ export default function CodePanel({ projectId, installId }: NativePanelProps) {
   const [showNewFile, setShowNewFile] = useState(false);
   const [showNewFolder, setShowNewFolder] = useState(false);
   const [showDevLogs, setShowDevLogs] = useState(false);
-  const [activeView, setActiveView] = useState<"files" | "issues">("files");
+  const [activeView, setActiveView] = useState<"code" | "issues">("code");
   // Lifted from DevBar so the main content area can render the live
   // device view for remote (Simulator-app) dev runs.
   const [devRun, setDevRun] = useState<DevRunWire | null>(null);
@@ -506,7 +506,7 @@ export default function CodePanel({ projectId, installId }: NativePanelProps) {
     setOpenFile(null);
     setEditing(false);
     setDraft("");
-    setActiveView("files");
+    setActiveView("code");
     setExpandedDirs(new Set()); // reset; loadTree seeds top-level dirs.
     loadTree(slug);
   };
@@ -597,7 +597,7 @@ export default function CodePanel({ projectId, installId }: NativePanelProps) {
 
   const selectFile = (path: string) => {
     if (!selectedSlug) return;
-    setActiveView("files");
+    setActiveView("code");
     if (dirty) {
       setConfirmState({
         title: "Discard unsaved changes?",
@@ -859,136 +859,62 @@ export default function CodePanel({ projectId, installId }: NativePanelProps) {
         </div>
       </aside>
 
-      {/* File tree */}
-      <aside className="w-72 border-r border-border flex flex-col">
-        {!selectedSlug ? (
-          <div className="p-4 text-text-muted text-sm">Select a repo on the left.</div>
-        ) : (
-          <>
-            <div className="p-3 border-b border-border flex items-center gap-1">
-              <span className="text-xs uppercase tracking-wide text-text-dim flex-1 truncate">
-                {selectedSlug}
-              </span>
-              <button
-                type="button"
-                onClick={() => setShowNewFile(true)}
-                className="px-1 py-0.5 text-xs text-accent hover:text-accent/80"
-                title="New file"
-              >+ File</button>
-              <button
-                type="button"
-                onClick={() => setShowNewFolder(true)}
-                className="px-1 py-0.5 text-xs text-accent hover:text-accent/80"
-                title="New folder"
-              >+ Dir</button>
-              <button
-                type="button"
-                onClick={() => uploadRef.current?.click()}
-                className="px-1 py-0.5 text-xs text-accent hover:text-accent/80"
-                title="Upload files"
-              >↑</button>
-              <button
-                type="button"
-                onClick={() => setZipImportTarget(selectedSlug)}
-                className="px-1 py-0.5 text-xs text-accent hover:text-accent/80"
-                title="Import ZIP"
-              >ZIP</button>
-              <input
-                ref={uploadRef}
-                type="file"
-                multiple
-                onChange={handleUpload}
-                className="hidden"
-              />
-              <button
-                type="button"
-                onClick={() => loadTree(selectedSlug)}
-                className="px-1 py-0.5 text-xs text-text-dim hover:text-text"
-                title="Refresh"
-              >↻</button>
-              <button
-                type="button"
-                onClick={() => handleToggleTemplate(selectedSlug)}
-                className="px-1 py-0.5 text-xs text-yellow/80 hover:text-yellow"
-                title={selectedRepo?.is_template ? "Unmark as template" : "Save as template"}
-              >★</button>
-              <button
-                type="button"
-                onClick={() => setForkSlug(selectedSlug)}
-                className="px-1 py-0.5 text-xs text-accent/80 hover:text-accent"
-                title="Fork into a new repo"
-              >⑂</button>
-              <button
-                type="button"
-                onClick={() => handleArchive(selectedSlug)}
-                className="px-1 py-0.5 text-xs text-red/70 hover:text-red"
-                title="Archive"
-              >✕</button>
+      {!selectedSlug ? (
+        <main className="flex-1 overflow-hidden flex items-center justify-center text-text-muted text-sm">
+          Select a repository.
+        </main>
+      ) : (
+        <main className="flex-1 min-w-0 overflow-hidden flex flex-col">
+          <header className="px-4 py-3 border-b border-border flex items-center gap-3">
+            <div className="min-w-0 flex-1">
+              <div className="flex items-center gap-2 min-w-0">
+                <h1 className="text-text font-semibold truncate">{selectedRepo?.name || selectedSlug}</h1>
+                {selectedRepo?.framework && (
+                  <span className="text-[10px] px-1.5 py-0.5 rounded bg-blue/15 text-blue">
+                    {selectedRepo.framework}
+                  </span>
+                )}
+                {selectedRepo?.is_template && (
+                  <span className="text-[10px] px-1.5 py-0.5 rounded bg-yellow/15 text-yellow">
+                    template
+                  </span>
+                )}
+              </div>
+              <div className="mt-0.5 text-xs text-text-dim font-mono truncate">{selectedSlug}</div>
             </div>
-            <div className="flex-1 overflow-auto">
-              {loadingTree ? (
-                <div className="p-3 text-text-muted text-sm">Loading tree…</div>
-              ) : tree.length === 0 ? (
-                <div className="p-3 text-text-muted text-sm">Empty repo.</div>
-              ) : (
-                <FileTree
-                  tree={buildTree(tree)}
-                  expanded={expandedDirs}
-                  onToggle={(p) => setExpandedDirs((prev) => {
-                    const next = new Set(prev);
-                    if (next.has(p)) next.delete(p);
-                    else next.add(p);
-                    return next;
-                  })}
-                  openPath={openFile?.path}
-                  renaming={renaming}
-                  renameTo={renameTo}
-                  setRenameTo={setRenameTo}
-                  onRenameSubmit={(from) => handleRename(from, renameTo)}
-                  onRenameCancel={() => { setRenaming(null); setRenameTo(""); }}
-                  onSelect={(p) => selectFile(p)}
-                  onStartRename={(p) => { setRenaming(p); setRenameTo(p); }}
-                  onDelete={(p) => handleDeleteFile(p)}
-                />
-              )}
-            </div>
-            <div className="p-2 text-xs text-text-dim border-t border-border">
-              {tree.length} file{tree.length !== 1 ? "s" : ""} · {formatSize(totalSize)}
-            </div>
-          </>
-        )}
-      </aside>
+            <button
+              type="button"
+              onClick={() => handleToggleTemplate(selectedSlug)}
+              className="px-2 py-0.5 text-xs border border-border rounded text-text-muted hover:text-text"
+            >{selectedRepo?.is_template ? "Unmark template" : "Save as template"}</button>
+            <button
+              type="button"
+              onClick={() => setForkSlug(selectedSlug)}
+              className="px-2 py-0.5 text-xs border border-border rounded text-text-muted hover:text-text"
+            >Fork</button>
+            <button
+              type="button"
+              onClick={() => handleArchive(selectedSlug)}
+              className="px-2 py-0.5 text-xs border border-red/50 text-red rounded hover:bg-red hover:text-white"
+            >Archive</button>
+          </header>
 
-      {/* File content / editor */}
-      <main className="flex-1 overflow-hidden flex flex-col">
-        {selectedSlug && (
-          <DevBar
-            slug={selectedSlug}
-            api={api}
-            withParams={withParams}
-            showLogs={showDevLogs}
-            onToggleLogs={() => {
-              setActiveView("files");
-              setShowDevLogs((v) => !v);
-            }}
-            onError={(msg) => setError(msg)}
-            onRunChange={setDevRun}
-          />
-        )}
-        {selectedSlug && !showDevLogs && (
-          <div className="px-3 py-1.5 border-b border-border flex items-center gap-1 bg-bg-input/20">
+          <nav className="px-4 border-b border-border flex items-center gap-4">
             <button
               type="button"
-              onClick={() => setActiveView("files")}
-              className={`px-2 py-0.5 text-xs border rounded ${
-                activeView === "files" ? "border-accent text-accent" : "border-border text-text-muted hover:text-text"
+              onClick={() => setActiveView("code")}
+              className={`py-2 text-sm border-b-2 ${
+                activeView === "code" ? "border-accent text-text" : "border-transparent text-text-muted hover:text-text"
               }`}
-            >Files</button>
+            >Code</button>
             <button
               type="button"
-              onClick={() => setActiveView("issues")}
-              className={`px-2 py-0.5 text-xs border rounded ${
-                activeView === "issues" ? "border-accent text-accent" : "border-border text-text-muted hover:text-text"
+              onClick={() => {
+                setShowDevLogs(false);
+                setActiveView("issues");
+              }}
+              className={`py-2 text-sm border-b-2 ${
+                activeView === "issues" ? "border-accent text-text" : "border-transparent text-text-muted hover:text-text"
               }`}
             >Issues</button>
             <span className="flex-1" />
@@ -997,86 +923,173 @@ export default function CodePanel({ projectId, installId }: NativePanelProps) {
                 current file <span className="font-mono">{openFile.path}</span>
               </span>
             )}
-          </div>
-        )}
-        {selectedSlug && showDevLogs ? (
-          <DevLogsView slug={selectedSlug} withParams={withParams} />
-        ) : selectedSlug && activeView === "issues" ? (
-          <IssuesView
-            slug={selectedSlug}
-            projectId={projectId}
-            api={api}
-            currentPath={openFile?.path}
-            onOpenPath={(path) => {
-              setActiveView("files");
-              selectFile(path);
-            }}
-          />
-        ) : selectedSlug && devRun?.runner === "simulator" && devRun.status === "live" ? (
-          <RemoteDeviceView run={devRun} />
-        ) : !openFile ? (
-          <div className="p-8 text-text-muted text-sm text-center mt-12">
-            {selectedSlug
-              ? "Click a file in the tree to view it. + File to create one."
-              : "Pick a repo, then a file."}
-          </div>
-        ) : (
-          <>
-            <header className="p-3 border-b border-border flex items-center gap-2">
-              <span className="text-xs uppercase tracking-wide text-text-dim">file</span>
-              <span className="text-text font-mono text-sm truncate flex-1">
-                {openFile.path}{dirty ? " •" : ""}
-              </span>
-              {isLikelyText(openFile.path) && (
-                editing ? (
-                  <>
-                    <button
-                      type="button"
-                      onClick={handleSave}
-                      disabled={saving || !dirty}
-                      className="px-2 py-0.5 text-xs border border-accent text-accent rounded hover:bg-accent hover:text-bg disabled:opacity-40"
-                    >{saving ? "Saving…" : "Save"}</button>
-                    <button
-                      type="button"
-                      onClick={handleDiscard}
-                      disabled={saving}
-                      className="px-2 py-0.5 text-xs border border-border rounded hover:bg-bg-input"
-                    >Cancel</button>
-                  </>
-                ) : (
+          </nav>
+
+          {activeView === "issues" ? (
+            <IssuesView
+              slug={selectedSlug}
+              projectId={projectId}
+              api={api}
+              currentPath={openFile?.path}
+              onOpenPath={(path) => {
+                setActiveView("code");
+                selectFile(path);
+              }}
+            />
+          ) : (
+            <div className="flex-1 min-h-0 flex">
+              <aside className="w-72 border-r border-border flex flex-col">
+                <div className="p-3 border-b border-border flex items-center gap-1">
+                  <span className="text-xs uppercase tracking-wide text-text-dim flex-1 truncate">Files</span>
                   <button
                     type="button"
-                    onClick={() => { setDraft(openFile.content); setEditing(true); }}
-                    className="px-2 py-0.5 text-xs border border-border rounded hover:bg-bg-input"
-                  >Edit</button>
-                )
-              )}
-            </header>
-            <div className="flex-1 overflow-auto">
-              {loadingFile ? (
-                <div className="p-4 text-text-muted text-sm">Loading…</div>
-              ) : editing ? (
-                <textarea
-                  value={draft}
-                  onChange={(e) => setDraft(e.target.value)}
-                  spellCheck={false}
-                  className="w-full h-full bg-bg text-text font-mono text-[11px] p-4 border-0 outline-none resize-none whitespace-pre"
-                  onKeyDown={(e) => {
-                    if ((e.metaKey || e.ctrlKey) && e.key === "s") {
-                      e.preventDefault();
-                      handleSave();
-                    }
-                  }}
+                    onClick={() => setShowNewFile(true)}
+                    className="px-1 py-0.5 text-xs text-accent hover:text-accent/80"
+                    title="New file"
+                  >+ File</button>
+                  <button
+                    type="button"
+                    onClick={() => setShowNewFolder(true)}
+                    className="px-1 py-0.5 text-xs text-accent hover:text-accent/80"
+                    title="New folder"
+                  >+ Dir</button>
+                  <button
+                    type="button"
+                    onClick={() => uploadRef.current?.click()}
+                    className="px-1 py-0.5 text-xs text-accent hover:text-accent/80"
+                    title="Upload files"
+                  >↑</button>
+                  <button
+                    type="button"
+                    onClick={() => setZipImportTarget(selectedSlug)}
+                    className="px-1 py-0.5 text-xs text-accent hover:text-accent/80"
+                    title="Import ZIP"
+                  >ZIP</button>
+                  <input
+                    ref={uploadRef}
+                    type="file"
+                    multiple
+                    onChange={handleUpload}
+                    className="hidden"
+                  />
+                  <button
+                    type="button"
+                    onClick={() => loadTree(selectedSlug)}
+                    className="px-1 py-0.5 text-xs text-text-dim hover:text-text"
+                    title="Refresh"
+                  >↻</button>
+                </div>
+                <div className="flex-1 overflow-auto">
+                  {loadingTree ? (
+                    <div className="p-3 text-text-muted text-sm">Loading tree…</div>
+                  ) : tree.length === 0 ? (
+                    <div className="p-3 text-text-muted text-sm">Empty repo.</div>
+                  ) : (
+                    <FileTree
+                      tree={buildTree(tree)}
+                      expanded={expandedDirs}
+                      onToggle={(p) => setExpandedDirs((prev) => {
+                        const next = new Set(prev);
+                        if (next.has(p)) next.delete(p);
+                        else next.add(p);
+                        return next;
+                      })}
+                      openPath={openFile?.path}
+                      renaming={renaming}
+                      renameTo={renameTo}
+                      setRenameTo={setRenameTo}
+                      onRenameSubmit={(from) => handleRename(from, renameTo)}
+                      onRenameCancel={() => { setRenaming(null); setRenameTo(""); }}
+                      onSelect={(p) => selectFile(p)}
+                      onStartRename={(p) => { setRenaming(p); setRenameTo(p); }}
+                      onDelete={(p) => handleDeleteFile(p)}
+                    />
+                  )}
+                </div>
+                <div className="p-2 text-xs text-text-dim border-t border-border">
+                  {tree.length} file{tree.length !== 1 ? "s" : ""} · {formatSize(totalSize)}
+                </div>
+              </aside>
+
+              <section className="flex-1 min-w-0 overflow-hidden flex flex-col">
+                <DevBar
+                  slug={selectedSlug}
+                  api={api}
+                  withParams={withParams}
+                  showLogs={showDevLogs}
+                  onToggleLogs={() => setShowDevLogs((v) => !v)}
+                  onError={(msg) => setError(msg)}
+                  onRunChange={setDevRun}
                 />
-              ) : (
-                <pre className="text-[11px] font-mono p-4 text-text whitespace-pre overflow-auto">
-                  {openFile.content}
-                </pre>
-              )}
+                {showDevLogs ? (
+                  <DevLogsView slug={selectedSlug} withParams={withParams} />
+                ) : devRun?.runner === "simulator" && devRun.status === "live" ? (
+                  <RemoteDeviceView run={devRun} />
+                ) : !openFile ? (
+                  <div className="p-8 text-text-muted text-sm text-center mt-12">
+                    Click a file in the tree to view it. + File to create one.
+                  </div>
+                ) : (
+                  <>
+                    <header className="p-3 border-b border-border flex items-center gap-2">
+                      <span className="text-xs uppercase tracking-wide text-text-dim">file</span>
+                      <span className="text-text font-mono text-sm truncate flex-1">
+                        {openFile.path}{dirty ? " •" : ""}
+                      </span>
+                      {isLikelyText(openFile.path) && (
+                        editing ? (
+                          <>
+                            <button
+                              type="button"
+                              onClick={handleSave}
+                              disabled={saving || !dirty}
+                              className="px-2 py-0.5 text-xs border border-accent text-accent rounded hover:bg-accent hover:text-bg disabled:opacity-40"
+                            >{saving ? "Saving…" : "Save"}</button>
+                            <button
+                              type="button"
+                              onClick={handleDiscard}
+                              disabled={saving}
+                              className="px-2 py-0.5 text-xs border border-border rounded hover:bg-bg-input"
+                            >Cancel</button>
+                          </>
+                        ) : (
+                          <button
+                            type="button"
+                            onClick={() => { setDraft(openFile.content); setEditing(true); }}
+                            className="px-2 py-0.5 text-xs border border-border rounded hover:bg-bg-input"
+                          >Edit</button>
+                        )
+                      )}
+                    </header>
+                    <div className="flex-1 overflow-auto">
+                      {loadingFile ? (
+                        <div className="p-4 text-text-muted text-sm">Loading…</div>
+                      ) : editing ? (
+                        <textarea
+                          value={draft}
+                          onChange={(e) => setDraft(e.target.value)}
+                          spellCheck={false}
+                          className="w-full h-full bg-bg text-text font-mono text-[11px] p-4 border-0 outline-none resize-none whitespace-pre"
+                          onKeyDown={(e) => {
+                            if ((e.metaKey || e.ctrlKey) && e.key === "s") {
+                              e.preventDefault();
+                              handleSave();
+                            }
+                          }}
+                        />
+                      ) : (
+                        <pre className="text-[11px] font-mono p-4 text-text whitespace-pre overflow-auto">
+                          {openFile.content}
+                        </pre>
+                      )}
+                    </div>
+                  </>
+                )}
+              </section>
             </div>
-          </>
-        )}
-      </main>
+          )}
+        </main>
+      )}
 
       {showCreate && (
         <CreateRepoDialog
