@@ -16,6 +16,21 @@ func TestEmbeddedManifest_Valid(t *testing.T) {
 	if m.DB == nil || m.DB.Migrations == "" {
 		t.Errorf("manifest.DB.Migrations missing")
 	}
+	foundProcessor := false
+	for _, dep := range m.Requires.Integrations {
+		if dep.Role == "payment_processor" {
+			foundProcessor = true
+			if dep.Kind != "integration" {
+				t.Errorf("payment_processor kind=%q, want integration", dep.Kind)
+			}
+			if dep.Tools["checkout_sessions.create"] == "" {
+				t.Error("payment_processor missing checkout_sessions.create tool mapping")
+			}
+		}
+	}
+	if !foundProcessor {
+		t.Error("embedded manifest missing payment_processor integration role")
+	}
 	scopes := map[string]bool{}
 	for _, s := range m.Scopes {
 		scopes[string(s)] = true

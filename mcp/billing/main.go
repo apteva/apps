@@ -37,7 +37,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: billing
 display_name: Billing
-version: 0.8.7
+version: 0.8.8
 description: |
   Customers, invoices, and payments. Per-invoice provider — local for
   internal/wire/cash, stripe for card-payable hosted invoices.
@@ -47,9 +47,29 @@ requires:
   permissions:
     - db.write.app
     - net.egress
+    - platform.apps.call
+    - platform.connections.read_credentials
+  apps:
+    - name: catalog
+      optional: true
+  integrations:
+    - role: payment_processor
+      kind: integration
+      compatible_slugs: [stripe]
+      capabilities: [customers.create, checkout_sessions.create, refunds.create, webhooks.receive]
+      tools:
+        customers.create: create_customer
+        customers.search: search_customers
+        checkout_sessions.create: create_checkout_session
+        refunds.create: create_refund
+        webhooks.process: process_webhook
+      required: false
+      label: "Payment processor (Stripe)"
 provides:
   http_routes:
     - prefix: /
+    - prefix: /webhooks/stripe
+      no_auth: true
 runtime:
   kind: source
   source:
@@ -95,7 +115,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	}
 
 	ctx.Logger().Info("billing mounted",
-		"version", "0.8.7",
+		"version", "0.8.8",
 		"scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
 	return nil
 }
@@ -393,7 +413,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "invoices_send_payment_link",
-			Description: "Generate a Stripe-hosted payment URL for an open invoice. Returns {url, stripe_session_id, expires_at}. Requires the payment_processor integration (Stripe) to be bound. URL is a Stripe Checkout Session, valid for 24h. On payment success, the /webhooks/stripe handler records the payment and transitions the invoice to 'paid' automatically (idempotent on the payment_intent id). Args: invoice_id (required), success_url, cancel_url.",
+			Description: "Generate a Stripe-hosted payment URL for an open invoice. Returns {url, stripe_session_id, expires_at}. Uses stripe_secret_key config when present, otherwise falls back to the bound payment_processor integration (Stripe). URL is a Stripe Checkout Session, valid for 24h. On payment success, the /webhooks/stripe handler records the payment and transitions the invoice to 'paid' automatically (idempotent on the payment_intent id). Args: invoice_id (required), success_url, cancel_url.",
 			InputSchema: schemaObject(map[string]any{
 				"invoice_id":  map[string]any{"type": "integer"},
 				"success_url": map[string]any{"type": "string"},
