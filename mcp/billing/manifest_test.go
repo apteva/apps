@@ -16,6 +16,15 @@ func TestEmbeddedManifest_Valid(t *testing.T) {
 	if m.DB == nil || m.DB.Migrations == "" {
 		t.Errorf("manifest.DB.Migrations missing")
 	}
+	perms := map[string]bool{}
+	for _, p := range m.Requires.Permissions {
+		perms[string(p)] = true
+	}
+	for _, want := range []string{"platform.connections.execute", "platform.connections.read_credentials"} {
+		if !perms[want] {
+			t.Errorf("embedded manifest missing permission %q", want)
+		}
+	}
 	foundProcessor := false
 	for _, dep := range m.Requires.Integrations {
 		if dep.Role == "payment_processor" {

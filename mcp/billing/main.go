@@ -37,7 +37,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: billing
 display_name: Billing
-version: 0.8.8
+version: 0.8.9
 description: |
   Customers, invoices, and payments. Per-invoice provider — local for
   internal/wire/cash, stripe for card-payable hosted invoices.
@@ -48,6 +48,7 @@ requires:
     - db.write.app
     - net.egress
     - platform.apps.call
+    - platform.connections.execute
     - platform.connections.read_credentials
   apps:
     - name: catalog
@@ -115,7 +116,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	}
 
 	ctx.Logger().Info("billing mounted",
-		"version", "0.8.8",
+		"version", "0.8.9",
 		"scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
 	return nil
 }

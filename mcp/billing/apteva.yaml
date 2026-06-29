@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: billing
 display_name: Billing
-version: 0.8.8
+version: 0.8.9
 description: |
   Customers, invoices, and payments for Apteva agents and human teams.
   Per-invoice provider — local for internal/wire/cash records, stripe
@@ -25,6 +25,7 @@ requires:
     - db.write.app
     - net.egress                              # direct Stripe API calls when stripe_secret_key is configured
     - platform.apps.call                       # billing calls catalog when line items reference price_id
+    - platform.connections.execute             # run Stripe integration tools when payment_processor is bound
     - platform.connections.read_credentials    # for the Stripe webhook signature verification path
   apps:
     - name: catalog
