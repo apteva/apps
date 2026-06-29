@@ -2097,6 +2097,7 @@ function IssuesView({
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
   const [showCreate, setShowCreate] = useState(false);
+  const [showMetaEdit, setShowMetaEdit] = useState(false);
   const [comment, setComment] = useState("");
 
   const loadIssues = useCallback(async () => {
@@ -2264,99 +2265,98 @@ function IssuesView({
           <div className="p-8 text-text-muted text-sm text-center">Select an issue.</div>
         ) : (
           <div className="p-4">
-            <div className="max-w-6xl grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_16rem] gap-5">
-              <div className="min-w-0 space-y-4">
-                <div className="border-b border-border pb-3">
-                  <div className="flex items-start gap-3">
-                    <div className="flex-1 min-w-0">
-                      <div className="text-xs text-text-dim font-mono">#{detail.issue.number}</div>
-                      <input
-                        value={detail.issue.title}
-                        onChange={(e) => setDetail((cur) => cur ? { ...cur, issue: { ...cur.issue, title: e.target.value } } : cur)}
-                        onBlur={(e) => patchIssue({ title: e.target.value })}
-                        className="mt-1 w-full bg-transparent text-text text-lg font-semibold outline-none border-b border-transparent focus:border-border"
-                      />
-                    </div>
-                    <button
-                      type="button"
-                      onClick={closeOrReopen}
-                      disabled={busy}
-                      className="px-3 py-1 text-xs border border-border rounded hover:bg-bg-input disabled:opacity-50"
-                    >{detail.issue.state === "closed" ? "Reopen" : "Close"}</button>
+            <div className="max-w-5xl space-y-4">
+              <div className="border-b border-border pb-3">
+                <div className="flex items-start gap-3">
+                  <div className="flex-1 min-w-0">
+                    <div className="text-xs text-text-dim font-mono">#{detail.issue.number}</div>
+                    <input
+                      value={detail.issue.title}
+                      onChange={(e) => setDetail((cur) => cur ? { ...cur, issue: { ...cur.issue, title: e.target.value } } : cur)}
+                      onBlur={(e) => patchIssue({ title: e.target.value })}
+                      className="mt-1 w-full bg-transparent text-text text-lg font-semibold outline-none border-b border-transparent focus:border-border"
+                    />
+                    <IssueMetaSummary issue={detail.issue} />
                   </div>
+                  <button
+                    type="button"
+                    onClick={() => setShowMetaEdit(true)}
+                    disabled={busy}
+                    className="px-3 py-1 text-xs border border-border rounded hover:bg-bg-input disabled:opacity-50"
+                  >Edit fields</button>
+                  <button
+                    type="button"
+                    onClick={closeOrReopen}
+                    disabled={busy}
+                    className="px-3 py-1 text-xs border border-border rounded hover:bg-bg-input disabled:opacity-50"
+                  >{detail.issue.state === "closed" ? "Reopen" : "Close"}</button>
                 </div>
-
-                <section>
-                  <textarea
-                    value={detail.issue.body}
-                    onChange={(e) => setDetail((cur) => cur ? { ...cur, issue: { ...cur.issue, body: e.target.value } } : cur)}
-                    onBlur={(e) => patchIssue({ body: e.target.value })}
-                    placeholder="Describe the issue…"
-                    className="w-full min-h-32 bg-bg-input border border-border rounded p-3 text-sm text-text outline-none resize-y"
-                  />
-                </section>
-
-                <section className="space-y-2">
-                  <div className="flex items-center gap-2">
-                    <h3 className="text-xs uppercase tracking-wide text-text-dim">Links</h3>
-                    <span className="flex-1" />
-                    <button
-                      type="button"
-                      onClick={linkCurrentPath}
-                      disabled={!currentPath || busy}
-                      className="px-2 py-0.5 text-xs border border-border rounded text-text-muted hover:text-text disabled:opacity-40"
-                    >Link current file</button>
-                  </div>
-                  {detail.links.length === 0 ? (
-                    <div className="text-xs text-text-muted">No code links yet.</div>
-                  ) : (
-                    <ul className="space-y-1">
-                      {detail.links.map((l) => (
-                        <li key={l.id} className="text-xs flex items-center gap-2">
-                          <span className="text-text-dim">{l.kind}</span>
-                          {l.kind === "path" ? (
-                            <button type="button" onClick={() => onOpenPath(l.target.split(":")[0])} className="font-mono text-accent hover:underline truncate">
-                              {l.target}
-                            </button>
-                          ) : (
-                            <span className="font-mono text-text truncate">{l.target}</span>
-                          )}
-                        </li>
-                      ))}
-                    </ul>
-                  )}
-                </section>
-
-                <section className="space-y-2">
-                  <h3 className="text-xs uppercase tracking-wide text-text-dim">Comments</h3>
-                  {detail.comments.map((c) => (
-                    <div key={c.id} className="border border-border rounded p-3">
-                      <div className="text-[11px] text-text-dim">{c.author || "comment"} · {shortDate(c.created_at)}</div>
-                      <div className="mt-1 text-sm text-text whitespace-pre-wrap">{c.body}</div>
-                    </div>
-                  ))}
-                  <textarea
-                    value={comment}
-                    onChange={(e) => setComment(e.target.value)}
-                    placeholder="Add a comment…"
-                    className="w-full min-h-20 bg-bg-input border border-border rounded p-2 text-sm text-text outline-none resize-y"
-                  />
-                  <div className="flex justify-end">
-                    <button
-                      type="button"
-                      onClick={addComment}
-                      disabled={busy || !comment.trim()}
-                      className="px-3 py-1 text-sm border border-accent text-accent rounded hover:bg-accent hover:text-bg disabled:opacity-50"
-                    >Comment</button>
-                  </div>
-                </section>
               </div>
-              <IssueMetaSidebar
-                issue={detail.issue}
-                busy={busy}
-                onPatch={patchIssue}
-                onDraft={(patch) => setDetail((cur) => cur ? { ...cur, issue: { ...cur.issue, ...patch } } : cur)}
-              />
+
+              <section>
+                <textarea
+                  value={detail.issue.body}
+                  onChange={(e) => setDetail((cur) => cur ? { ...cur, issue: { ...cur.issue, body: e.target.value } } : cur)}
+                  onBlur={(e) => patchIssue({ body: e.target.value })}
+                  placeholder="Describe the issue…"
+                  className="w-full min-h-32 bg-bg-input border border-border rounded p-3 text-sm text-text outline-none resize-y"
+                />
+              </section>
+
+              <section className="space-y-2">
+                <div className="flex items-center gap-2">
+                  <h3 className="text-xs uppercase tracking-wide text-text-dim">Links</h3>
+                  <span className="flex-1" />
+                  <button
+                    type="button"
+                    onClick={linkCurrentPath}
+                    disabled={!currentPath || busy}
+                    className="px-2 py-0.5 text-xs border border-border rounded text-text-muted hover:text-text disabled:opacity-40"
+                  >Link current file</button>
+                </div>
+                {detail.links.length === 0 ? (
+                  <div className="text-xs text-text-muted">No code links yet.</div>
+                ) : (
+                  <ul className="space-y-1">
+                    {detail.links.map((l) => (
+                      <li key={l.id} className="text-xs flex items-center gap-2">
+                        <span className="text-text-dim">{l.kind}</span>
+                        {l.kind === "path" ? (
+                          <button type="button" onClick={() => onOpenPath(l.target.split(":")[0])} className="font-mono text-accent hover:underline truncate">
+                            {l.target}
+                          </button>
+                        ) : (
+                          <span className="font-mono text-text truncate">{l.target}</span>
+                        )}
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </section>
+
+              <section className="space-y-2">
+                <h3 className="text-xs uppercase tracking-wide text-text-dim">Comments</h3>
+                {detail.comments.map((c) => (
+                  <div key={c.id} className="border border-border rounded p-3">
+                    <div className="text-[11px] text-text-dim">{c.author || "comment"} · {shortDate(c.created_at)}</div>
+                    <div className="mt-1 text-sm text-text whitespace-pre-wrap">{c.body}</div>
+                  </div>
+                ))}
+                <textarea
+                  value={comment}
+                  onChange={(e) => setComment(e.target.value)}
+                  placeholder="Add a comment…"
+                  className="w-full min-h-20 bg-bg-input border border-border rounded p-2 text-sm text-text outline-none resize-y"
+                />
+                <div className="flex justify-end">
+                  <button
+                    type="button"
+                    onClick={addComment}
+                    disabled={busy || !comment.trim()}
+                    className="px-3 py-1 text-sm border border-accent text-accent rounded hover:bg-accent hover:text-bg disabled:opacity-50"
+                  >Comment</button>
+                </div>
+              </section>
             </div>
           </div>
         )}
@@ -2375,6 +2375,16 @@ function IssuesView({
           }}
         />
       )}
+
+      {showMetaEdit && detail && (
+        <IssueMetaDialog
+          issue={detail.issue}
+          busy={busy}
+          onClose={() => setShowMetaEdit(false)}
+          onPatch={patchIssue}
+          onDraft={(patch) => setDetail((cur) => cur ? { ...cur, issue: { ...cur.issue, ...patch } } : cur)}
+        />
+      )}
     </div>
   );
 }
@@ -2390,46 +2400,73 @@ function IssueSelect({ label, value, options, onChange }: { label: string; value
   );
 }
 
-function IssueMetaSidebar({
+function IssueMetaSummary({ issue }: { issue: CodeIssue }) {
+  return (
+    <div className="mt-2 flex flex-wrap items-center gap-1 text-[10px] text-text-dim">
+      <IssuePill label={issue.type} tone={issue.type} />
+      <IssuePill label={issue.status} tone={issue.status} />
+      <IssuePill label={issue.priority} tone={issue.priority} />
+      <IssuePill label={issue.state} tone={issue.state} />
+      {issue.state === "closed" && issue.state_reason ? <IssuePill label={issue.state_reason} tone={issue.state_reason} /> : null}
+      {issue.assignee ? <span>assigned to {issue.assignee}</span> : null}
+    </div>
+  );
+}
+
+function IssueMetaDialog({
   issue,
   busy,
+  onClose,
   onPatch,
   onDraft,
 }: {
   issue: CodeIssue;
   busy: boolean;
+  onClose: () => void;
   onPatch: (patch: Partial<CodeIssue>) => void;
   onDraft: (patch: Partial<CodeIssue>) => void;
 }) {
   return (
-    <aside className="xl:border-l xl:border-border xl:pl-4 space-y-4">
-      <IssueMetaSection label="Workflow">
-        <IssueChipGroup value={issue.status} options={ISSUE_STATUSES} disabled={busy} onChange={(v) => onPatch({ status: v as IssueStatus })} />
-      </IssueMetaSection>
-      <IssueMetaSection label="State">
-        <IssueChipGroup value={issue.state} options={ISSUE_STATES} disabled={busy} onChange={(v) => onPatch({ state: v as IssueState })} />
-      </IssueMetaSection>
-      {issue.state === "closed" && (
-        <IssueMetaSection label="Reason">
-          <IssueChipGroup value={issue.state_reason || "completed"} options={ISSUE_STATE_REASONS} disabled={busy} onChange={(v) => onPatch({ state_reason: v as IssueStateReason })} />
+    <div className="fixed inset-0 z-30 flex items-center justify-center bg-black/50" onClick={onClose}>
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-label="Edit issue fields"
+        onClick={(e) => e.stopPropagation()}
+        className="w-[560px] max-w-[calc(100vw-2rem)] bg-bg border border-border rounded p-5 space-y-4"
+      >
+        <div className="flex items-center gap-3">
+          <h2 className="text-text font-semibold flex-1">Edit issue fields</h2>
+          <button type="button" onClick={onClose} className="px-2 py-0.5 text-xs border border-border rounded text-text-muted hover:text-text">Close</button>
+        </div>
+        <IssueMetaSection label="Workflow">
+          <IssueChipGroup value={issue.status} options={ISSUE_STATUSES} disabled={busy} onChange={(v) => onPatch({ status: v as IssueStatus })} />
         </IssueMetaSection>
-      )}
-      <IssueMetaSection label="Type">
-        <IssueChipGroup value={issue.type} options={ISSUE_TYPES} disabled={busy} onChange={(v) => onPatch({ type: v as IssueKind })} />
-      </IssueMetaSection>
-      <IssueMetaSection label="Priority">
-        <IssueChipGroup value={issue.priority} options={ISSUE_PRIORITIES} disabled={busy} onChange={(v) => onPatch({ priority: v as IssuePriority })} />
-      </IssueMetaSection>
-      <IssueMetaSection label="Assignee">
-        <input
-          value={issue.assignee || ""}
-          onChange={(e) => onDraft({ assignee: e.target.value })}
-          onBlur={(e) => onPatch({ assignee: e.target.value })}
-          placeholder="unassigned"
-          className="w-full bg-bg-input border border-border rounded px-2 py-1 text-xs"
-        />
-      </IssueMetaSection>
-    </aside>
+        <IssueMetaSection label="State">
+          <IssueChipGroup value={issue.state} options={ISSUE_STATES} disabled={busy} onChange={(v) => onPatch({ state: v as IssueState })} />
+        </IssueMetaSection>
+        {issue.state === "closed" && (
+          <IssueMetaSection label="Reason">
+            <IssueChipGroup value={issue.state_reason || "completed"} options={ISSUE_STATE_REASONS} disabled={busy} onChange={(v) => onPatch({ state_reason: v as IssueStateReason })} />
+          </IssueMetaSection>
+        )}
+        <IssueMetaSection label="Type">
+          <IssueChipGroup value={issue.type} options={ISSUE_TYPES} disabled={busy} onChange={(v) => onPatch({ type: v as IssueKind })} />
+        </IssueMetaSection>
+        <IssueMetaSection label="Priority">
+          <IssueChipGroup value={issue.priority} options={ISSUE_PRIORITIES} disabled={busy} onChange={(v) => onPatch({ priority: v as IssuePriority })} />
+        </IssueMetaSection>
+        <IssueMetaSection label="Assignee">
+          <input
+            value={issue.assignee || ""}
+            onChange={(e) => onDraft({ assignee: e.target.value })}
+            onBlur={(e) => onPatch({ assignee: e.target.value })}
+            placeholder="unassigned"
+            className="w-full bg-bg-input border border-border rounded px-2 py-1 text-xs"
+          />
+        </IssueMetaSection>
+      </div>
+    </div>
   );
 }
 
