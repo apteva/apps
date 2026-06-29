@@ -24,6 +24,8 @@ import (
 //go:embed apteva.yaml
 var manifestYAML string
 
+const appVersion = "1.1.0"
+
 const (
 	StatusProvisioning = "provisioning"
 	StatusActive       = "active"
@@ -50,10 +52,13 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		return errors.New("hosting requires a db block")
 	}
 	globalCtx = ctx
+	if err := seedProducts(ctx.AppDB(), configString(ctx, "default_image", "apteva:latest")); err != nil {
+		return err
+	}
 	if err := seedPlans(ctx.AppDB(), configString(ctx, "default_image", "apteva:latest")); err != nil {
 		return err
 	}
-	ctx.Logger().Info("hosting mounted", "version", "1.0.1", "scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
+	ctx.Logger().Info("hosting mounted", "version", appVersion, "scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
 	return nil
 }
 
@@ -73,6 +78,7 @@ func (a *App) Workers() []sdk.Worker {
 
 func (a *App) HTTPRoutes() []sdk.Route {
 	return []sdk.Route{
+		{Pattern: "/products", Handler: a.handleProducts},
 		{Pattern: "/plans", Handler: a.handlePlans},
 		{Pattern: "/customers", Handler: a.handleCustomers},
 		{Pattern: "/tenants", Handler: a.handleTenants},
@@ -83,12 +89,13 @@ func (a *App) HTTPRoutes() []sdk.Route {
 
 func (a *App) MCPTools() []sdk.Tool {
 	return []sdk.Tool{
+		{Name: "hosting_product_list", Description: "List hosting products and their plans.", InputSchema: schemaObject(nil, nil), Handler: a.toolProductList},
 		{Name: "hosting_plan_list", Description: "List hosting plans.", InputSchema: schemaObject(nil, nil), Handler: a.toolPlanList},
 		{Name: "hosting_customer_create", Description: "Find or create a hosting customer by email.", InputSchema: schemaObject(map[string]any{"email": strSchema(), "name": strSchema(), "billing_customer_id": intSchema(), "metadata": objSchema()}, []string{"email"}), Handler: a.toolCustomerCreate},
 		{Name: "hosting_tenant_create", Description: "Provision a hosted Apteva tenant container and default hostname.", InputSchema: schemaObject(map[string]any{
 			"customer_id": intSchema(), "customer_email": strSchema(), "customer_name": strSchema(),
-			"owner_email": strSchema(), "slug": strSchema(), "plan_key": strSchema(),
-			"subscription_id": intSchema(), "apteva_version": strSchema(), "image": strSchema(), "metadata": objSchema(),
+			"owner_email": strSchema(), "slug": strSchema(), "plan_key": strSchema(), "product_key": strSchema(),
+			"subscription_id": intSchema(), "apteva_version": strSchema(), "image": strSchema(), "runtime_config": objSchema(), "metadata": objSchema(),
 		}, []string{"owner_email", "slug"}), Handler: a.toolTenantCreate},
 		{Name: "hosting_tenant_get", Description: "Fetch one hosted tenant.", InputSchema: tenantIDSchema(), Handler: a.toolTenantGet},
 		{Name: "hosting_tenant_list", Description: "List hosted tenants.", InputSchema: schemaObject(map[string]any{"customer_id": intSchema(), "status": strSchema(), "plan_key": strSchema()}, nil), Handler: a.toolTenantList},
@@ -115,20 +122,51 @@ type Customer struct {
 	UpdatedAt         string          `json:"updated_at"`
 }
 
+type Product struct {
+	Key              string           `json:"key"`
+	CatalogProductID *int64           `json:"catalog_product_id,omitempty"`
+	Name             string           `json:"name"`
+	Description      string           `json:"description"`
+	RuntimeKind      string           `json:"runtime_kind"`
+	Status           string           `json:"status"`
+	Template         json.RawMessage  `json:"template,omitempty"`
+	Metadata         json.RawMessage  `json:"metadata,omitempty"`
+	Versions         []ProductVersion `json:"versions,omitempty"`
+	Plans            []*Plan          `json:"plans,omitempty"`
+	CreatedAt        string           `json:"created_at"`
+	UpdatedAt        string           `json:"updated_at"`
+}
+
+type ProductVersion struct {
+	ID                int64           `json:"id"`
+	ProductKey        string          `json:"product_key"`
+	Version           string          `json:"version"`
+	Image             string          `json:"image"`
+	DefaultPort       int             `json:"default_port"`
+	DefaultHealthPath string          `json:"default_health_path"`
+	Template          json.RawMessage `json:"template,omitempty"`
+	Status            string          `json:"status"`
+	CreatedAt         string          `json:"created_at"`
+	UpdatedAt         string          `json:"updated_at"`
+}
+
 type Plan struct {
-	Key         string          `json:"key"`
-	Name        string          `json:"name"`
-	BillingMode string          `json:"billing_mode"`
-	PriceCents  *int64          `json:"price_cents,omitempty"`
-	Interval    string          `json:"interval,omitempty"`
-	Image       string          `json:"image"`
-	CPU         float64         `json:"cpu"`
-	MemoryMB    int64           `json:"memory_mb"`
-	StorageMB   int64           `json:"storage_mb"`
-	Metadata    json.RawMessage `json:"metadata,omitempty"`
-	Limits      []PlanLimit     `json:"limits,omitempty"`
-	CreatedAt   string          `json:"created_at"`
-	UpdatedAt   string          `json:"updated_at"`
+	Key                  string          `json:"key"`
+	Name                 string          `json:"name"`
+	BillingMode          string          `json:"billing_mode"`
+	PriceCents           *int64          `json:"price_cents,omitempty"`
+	Interval             string          `json:"interval,omitempty"`
+	Image                string          `json:"image"`
+	CPU                  float64         `json:"cpu"`
+	MemoryMB             int64           `json:"memory_mb"`
+	StorageMB            int64           `json:"storage_mb"`
+	ProductKey           string          `json:"product_key,omitempty"`
+	CatalogPriceID       *int64          `json:"catalog_price_id,omitempty"`
+	SubscriptionRequired bool            `json:"subscription_required"`
+	Metadata             json.RawMessage `json:"metadata,omitempty"`
+	Limits               []PlanLimit     `json:"limits,omitempty"`
+	CreatedAt            string          `json:"created_at"`
+	UpdatedAt            string          `json:"updated_at"`
 }
 
 type PlanLimit struct {
@@ -182,6 +220,14 @@ type containerPort struct {
 
 type workloadResp struct {
 	Workload containerWorkload `json:"workload"`
+}
+
+func (a *App) toolProductList(ctx *sdk.AppCtx, _ map[string]any) (any, error) {
+	products, err := dbProductList(ctx.AppDB())
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"products": products, "count": len(products)}, nil
 }
 
 func (a *App) toolPlanList(ctx *sdk.AppCtx, _ map[string]any) (any, error) {
@@ -370,6 +416,18 @@ func (a *App) provisionTenant(ctx *sdk.AppCtx, args map[string]any) (*Tenant, er
 	if plan == nil {
 		return nil, fmt.Errorf("plan %q not found", planKey)
 	}
+	productKey := firstNonEmpty(strArg(args, "product_key"), plan.ProductKey, "apteva")
+	if plan.ProductKey != "" && productKey != plan.ProductKey {
+		return nil, fmt.Errorf("plan %q is bound to product %q, not %q", plan.Key, plan.ProductKey, productKey)
+	}
+	product, err := dbProductGet(ctx.AppDB(), productKey)
+	if err != nil {
+		return nil, err
+	}
+	if product == nil {
+		return nil, fmt.Errorf("product %q not found", productKey)
+	}
+	runtimeConfig := mapArg(args, "runtime_config")
 	customer, err := resolveCustomer(ctx.AppDB(), args)
 	if err != nil {
 		return nil, err
@@ -382,7 +440,13 @@ func (a *App) provisionTenant(ctx *sdk.AppCtx, args map[string]any) (*Tenant, er
 		return nil, err
 	}
 	host := slug + "." + strings.Trim(strings.ToLower(configString(ctx, "default_base_domain", "hosted.apteva.local")), ".")
-	image := firstNonEmpty(strArg(args, "image"), plan.Image, configString(ctx, "default_image", "apteva:latest"), "apteva:latest")
+	image, err := resolveRuntimeImage(ctx, product, plan, runtimeConfig, strArg(args, "image"))
+	if err != nil {
+		return nil, err
+	}
+	metadata := mapArg(args, "metadata")
+	metadata["product_key"] = product.Key
+	metadata["runtime_kind"] = product.RuntimeKind
 	tenant := &Tenant{
 		ID:              newID("htn"),
 		CustomerID:      customer.ID,
@@ -394,7 +458,7 @@ func (a *App) provisionTenant(ctx *sdk.AppCtx, args map[string]any) (*Tenant, er
 		Status:          StatusProvisioning,
 		AptevaVersion:   strArg(args, "apteva_version"),
 		Image:           image,
-		Metadata:        jsonRaw(args["metadata"]),
+		Metadata:        jsonRaw(metadata),
 	}
 	if tenant.OwnerEmail == "" {
 		return nil, errors.New("owner_email required")
@@ -404,7 +468,7 @@ func (a *App) provisionTenant(ctx *sdk.AppCtx, args map[string]any) (*Tenant, er
 	}
 	_ = recordEvent(ctx.AppDB(), tenant.ID, "provisioning.started", "tool", map[string]any{"plan_key": plan.Key})
 
-	workload, err := createContainer(ctx, tenant, plan)
+	workload, err := createContainer(ctx, tenant, plan, product, runtimeConfig)
 	if err != nil {
 		_, _ = dbTenantSetStatus(ctx.AppDB(), tenant.ID, StatusFailed, err.Error())
 		_ = recordEvent(ctx.AppDB(), tenant.ID, "provisioning.failed", "containers", map[string]any{"error": err.Error()})
@@ -438,30 +502,26 @@ func (a *App) provisionTenant(ctx *sdk.AppCtx, args map[string]any) (*Tenant, er
 	return dbTenantGet(ctx.AppDB(), tenant.ID)
 }
 
-func createContainer(ctx *sdk.AppCtx, tenant *Tenant, plan *Plan) (*containerWorkload, error) {
-	env := map[string]any{
-		"PORT":               "5280",
-		"APTEVA_BIND":        "0.0.0.0",
-		"DB_PATH":            "/data/apteva.db",
-		"DATA_DIR":           "/data",
-		"APTEVA_APPS_CACHE":  "/data/apps",
-		"CORE_CMD":           "/usr/local/bin/apteva-core",
-		"APTEVA_HOSTED":      "1",
-		"APTEVA_HOSTING_ID":  tenant.ID,
-		"APTEVA_OWNER_EMAIL": tenant.OwnerEmail,
-	}
-	if tenant.AptevaVersion != "" {
-		env["APTEVA_VERSION"] = tenant.AptevaVersion
-	}
-	input := map[string]any{
-		"name":           "hosting-" + tenant.Slug,
-		"blueprint_slug": "apteva",
-		"image":          tenant.Image,
-		"env":            env,
-		"resources": map[string]any{
-			"cpu":       plan.CPU,
-			"memory_mb": plan.MemoryMB,
-		},
+type runtimeTemplate struct {
+	BlueprintSlug string            `json:"blueprint_slug"`
+	Image         string            `json:"image"`
+	Port          int               `json:"port"`
+	HealthPath    string            `json:"health_path"`
+	Env           map[string]string `json:"env"`
+	Volumes       []runtimeVolume   `json:"volumes"`
+	Labels        map[string]string `json:"labels"`
+}
+
+type runtimeVolume struct {
+	Name      string `json:"name"`
+	MountPath string `json:"mount_path"`
+	SizeMB    int64  `json:"size_mb,omitempty"`
+}
+
+func createContainer(ctx *sdk.AppCtx, tenant *Tenant, plan *Plan, product *Product, runtimeConfig map[string]any) (*containerWorkload, error) {
+	input, err := containerRunInput(ctx, tenant, plan, product, runtimeConfig)
+	if err != nil {
+		return nil, err
 	}
 	var out workloadResp
 	if err := ctx.PlatformAPI().CallAppResult("containers", "containers_run", input, &out); err != nil {
@@ -471,6 +531,89 @@ func createContainer(ctx *sdk.AppCtx, tenant *Tenant, plan *Plan) (*containerWor
 		return nil, errors.New("containers_run returned empty workload id")
 	}
 	return &out.Workload, nil
+}
+
+func containerRunInput(ctx *sdk.AppCtx, tenant *Tenant, plan *Plan, product *Product, runtimeConfig map[string]any) (map[string]any, error) {
+	tpl := productTemplate(product)
+	blueprint := firstNonEmpty(strArg(runtimeConfig, "blueprint_slug"), tpl.BlueprintSlug, "custom-image")
+	port := intArg(runtimeConfig, "port", tpl.Port)
+	if port <= 0 {
+		port = 80
+	}
+	env := map[string]any{}
+	for k, v := range tpl.Env {
+		env[k] = v
+	}
+	for k, v := range stringMapArg(runtimeConfig, "env") {
+		env[k] = v
+	}
+	if product.Key == "apteva" {
+		env["PORT"] = firstNonEmpty(mapValueString(env, "PORT"), "5280")
+		env["APTEVA_BIND"] = firstNonEmpty(mapValueString(env, "APTEVA_BIND"), "0.0.0.0")
+		env["APTEVA_HOSTED"] = "1"
+		env["APTEVA_HOSTING_ID"] = tenant.ID
+		env["APTEVA_OWNER_EMAIL"] = tenant.OwnerEmail
+		if tenant.AptevaVersion != "" {
+			env["APTEVA_VERSION"] = tenant.AptevaVersion
+		}
+	}
+
+	input := map[string]any{
+		"name":           "hosting-" + tenant.Slug,
+		"blueprint_slug": blueprint,
+		"image":          tenant.Image,
+		"env":            env,
+		"resources": map[string]any{
+			"cpu":        plan.CPU,
+			"memory_mb":  plan.MemoryMB,
+			"storage_mb": plan.StorageMB,
+		},
+		"labels": mergeStringMaps(tpl.Labels, map[string]string{
+			"apteva.hosting.tenant_id":   tenant.ID,
+			"apteva.hosting.product_key": product.Key,
+			"apteva.hosting.plan_key":    plan.Key,
+		}),
+	}
+	if blueprint != "apteva" {
+		input["ports"] = []map[string]any{{
+			"container_port": port,
+			"bind_addr":      "127.0.0.1",
+			"protocol":       "tcp",
+		}}
+		input["health_path"] = firstNonEmpty(strArg(runtimeConfig, "health_path"), tpl.HealthPath, "/")
+		if len(tpl.Volumes) > 0 {
+			volumes := make([]map[string]any, 0, len(tpl.Volumes))
+			for _, v := range tpl.Volumes {
+				volumes = append(volumes, map[string]any{
+					"name":       firstNonEmpty(v.Name, tenant.Slug+"-data"),
+					"mount_path": v.MountPath,
+					"size_mb":    firstPositive(v.SizeMB, plan.StorageMB),
+				})
+			}
+			input["volumes"] = volumes
+		}
+	}
+	return input, nil
+}
+
+func resolveRuntimeImage(ctx *sdk.AppCtx, product *Product, plan *Plan, runtimeConfig map[string]any, explicitImage string) (string, error) {
+	tpl := productTemplate(product)
+	image := firstNonEmpty(strArg(runtimeConfig, "image"), explicitImage, plan.Image, tpl.Image)
+	if image == "" && product.Key == "apteva" {
+		image = configString(ctx, "default_image", "apteva:latest")
+	}
+	if image == "" {
+		return "", fmt.Errorf("image required for product %q", product.Key)
+	}
+	return image, nil
+}
+
+func productTemplate(product *Product) runtimeTemplate {
+	var tpl runtimeTemplate
+	if product != nil && len(product.Template) > 0 {
+		_ = json.Unmarshal(product.Template, &tpl)
+	}
+	return tpl
 }
 
 func workloadTarget(w *containerWorkload) string {
@@ -490,16 +633,108 @@ func workloadTarget(w *containerWorkload) string {
 	return ""
 }
 
+func seedProducts(db *sql.DB, defaultImage string) error {
+	products := []Product{
+		{
+			Key:         "apteva",
+			Name:        "Apteva Tenant",
+			Description: "Managed Apteva tenant instance.",
+			RuntimeKind: "single_container",
+			Status:      "active",
+			Template: jsonRaw(runtimeTemplate{
+				BlueprintSlug: "apteva",
+				Image:         defaultImage,
+				Port:          5280,
+				HealthPath:    "/health",
+				Env: map[string]string{
+					"PORT":              "5280",
+					"APTEVA_BIND":       "0.0.0.0",
+					"DB_PATH":           "/data/apteva.db",
+					"DATA_DIR":          "/data",
+					"APTEVA_APPS_CACHE": "/data/apps",
+					"CORE_CMD":          "/usr/local/bin/apteva-core",
+				},
+				Volumes: []runtimeVolume{{Name: "data", MountPath: "/data"}},
+			}),
+		},
+		{
+			Key:         "custom-docker",
+			Name:        "Custom Docker Image",
+			Description: "Single-container hosting for an arbitrary Docker image.",
+			RuntimeKind: "single_container",
+			Status:      "active",
+			Template: jsonRaw(runtimeTemplate{
+				BlueprintSlug: "custom-image",
+				Port:          80,
+				HealthPath:    "/",
+				Volumes:       []runtimeVolume{{Name: "data", MountPath: "/data"}},
+			}),
+		},
+		{
+			Key:         "wordpress-single",
+			Name:        "WordPress",
+			Description: "Single-container WordPress hosting template.",
+			RuntimeKind: "single_container",
+			Status:      "active",
+			Template: jsonRaw(runtimeTemplate{
+				BlueprintSlug: "custom-image",
+				Image:         "wordpress:php8.3-apache",
+				Port:          80,
+				HealthPath:    "/",
+				Volumes:       []runtimeVolume{{Name: "html", MountPath: "/var/www/html"}},
+			}),
+		},
+	}
+	for _, p := range products {
+		if _, err := db.Exec(`
+			INSERT INTO hosting_products (key, name, description, runtime_kind, status, template_json, metadata_json)
+			VALUES (?, ?, ?, ?, ?, ?, '{}')
+			ON CONFLICT(key) DO UPDATE SET
+				name=excluded.name,
+				description=excluded.description,
+				runtime_kind=excluded.runtime_kind,
+				status=excluded.status,
+				template_json=excluded.template_json,
+				updated_at=CURRENT_TIMESTAMP`,
+			p.Key, p.Name, p.Description, p.RuntimeKind, p.Status, stringOrJSON(p.Template, "{}")); err != nil {
+			return err
+		}
+		tpl := productTemplate(&p)
+		if _, err := db.Exec(`
+			INSERT INTO hosting_product_versions (product_key, version, image, default_port, default_health_path, template_json, status)
+			VALUES (?, 'default', ?, ?, ?, ?, 'active')
+			ON CONFLICT(product_key, version) DO UPDATE SET
+				image=excluded.image,
+				default_port=excluded.default_port,
+				default_health_path=excluded.default_health_path,
+				template_json=excluded.template_json,
+				status=excluded.status,
+				updated_at=CURRENT_TIMESTAMP`,
+			p.Key, tpl.Image, firstPositiveInt(tpl.Port, 80), firstNonEmpty(tpl.HealthPath, "/"), stringOrJSON(p.Template, "{}")); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func seedPlans(db *sql.DB, defaultImage string) error {
 	plans := []Plan{
-		{Key: "free", Name: "Free", BillingMode: "free", Image: defaultImage, CPU: 0.5, MemoryMB: 512, StorageMB: 512},
-		{Key: "starter", Name: "Starter", BillingMode: "paid", Image: defaultImage, CPU: 1, MemoryMB: 1024, StorageMB: 10240},
-		{Key: "pro", Name: "Pro", BillingMode: "paid", Image: defaultImage, CPU: 2, MemoryMB: 2048, StorageMB: 51200},
+		{Key: "free", Name: "Free", BillingMode: "free", Image: defaultImage, CPU: 0.5, MemoryMB: 512, StorageMB: 512, ProductKey: "apteva"},
+		{Key: "starter", Name: "Starter", BillingMode: "paid", Image: defaultImage, CPU: 1, MemoryMB: 1024, StorageMB: 10240, ProductKey: "apteva", SubscriptionRequired: true},
+		{Key: "pro", Name: "Pro", BillingMode: "paid", Image: defaultImage, CPU: 2, MemoryMB: 2048, StorageMB: 51200, ProductKey: "apteva", SubscriptionRequired: true},
+		{Key: "docker-free", Name: "Docker Free", BillingMode: "free", CPU: 0.25, MemoryMB: 256, StorageMB: 512, ProductKey: "custom-docker"},
+		{Key: "docker-starter", Name: "Docker Starter", BillingMode: "paid", CPU: 1, MemoryMB: 1024, StorageMB: 10240, ProductKey: "custom-docker", SubscriptionRequired: true},
+		{Key: "wordpress-free", Name: "WordPress Free", BillingMode: "free", Image: "wordpress:php8.3-apache", CPU: 0.5, MemoryMB: 512, StorageMB: 1024, ProductKey: "wordpress-single"},
+		{Key: "wordpress-starter", Name: "WordPress Starter", BillingMode: "paid", Image: "wordpress:php8.3-apache", CPU: 1, MemoryMB: 1024, StorageMB: 10240, ProductKey: "wordpress-single", SubscriptionRequired: true},
 	}
 	limits := map[string]map[string]int64{
-		"free":    {"hosting.tenants": 1, "hosting.custom_domains": 0, "containers.storage_mb": 512},
-		"starter": {"hosting.tenants": 1, "hosting.custom_domains": 1, "containers.storage_mb": 10240},
-		"pro":     {"hosting.tenants": 5, "hosting.custom_domains": 10, "containers.storage_mb": 51200},
+		"free":              {"hosting.tenants": 1, "hosting.custom_domains": 0, "containers.storage_mb": 512},
+		"starter":           {"hosting.tenants": 1, "hosting.custom_domains": 1, "containers.storage_mb": 10240},
+		"pro":               {"hosting.tenants": 5, "hosting.custom_domains": 10, "containers.storage_mb": 51200},
+		"docker-free":       {"hosting.tenants": 1, "hosting.custom_domains": 0, "containers.storage_mb": 512},
+		"docker-starter":    {"hosting.tenants": 3, "hosting.custom_domains": 1, "containers.storage_mb": 10240},
+		"wordpress-free":    {"hosting.tenants": 1, "hosting.custom_domains": 0, "containers.storage_mb": 1024},
+		"wordpress-starter": {"hosting.tenants": 3, "hosting.custom_domains": 1, "containers.storage_mb": 10240},
 	}
 	for _, p := range plans {
 		if _, err := db.Exec(`
@@ -514,6 +749,17 @@ func seedPlans(db *sql.DB, defaultImage string) error {
 				storage_mb=excluded.storage_mb,
 				updated_at=CURRENT_TIMESTAMP`,
 			p.Key, p.Name, p.BillingMode, p.PriceCents, nullStr(p.Interval), p.Image, p.CPU, p.MemoryMB, p.StorageMB); err != nil {
+			return err
+		}
+		if _, err := db.Exec(`
+			INSERT INTO hosting_plan_bindings (plan_key, product_key, catalog_price_id, subscription_required)
+			VALUES (?, ?, ?, ?)
+			ON CONFLICT(plan_key) DO UPDATE SET
+				product_key=excluded.product_key,
+				catalog_price_id=excluded.catalog_price_id,
+				subscription_required=excluded.subscription_required,
+				updated_at=CURRENT_TIMESTAMP`,
+			p.Key, p.ProductKey, p.CatalogPriceID, boolToInt(p.SubscriptionRequired)); err != nil {
 			return err
 		}
 		for feature, limit := range limits[p.Key] {
@@ -585,8 +831,77 @@ func dbCustomerGet(db *sql.DB, id int64) (*Customer, error) {
 	return &c, nil
 }
 
+func dbProductList(db *sql.DB) ([]*Product, error) {
+	rows, err := db.Query(`SELECT key, catalog_product_id, name, description, runtime_kind, status, template_json, metadata_json, created_at, updated_at FROM hosting_products ORDER BY key`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*Product
+	for rows.Next() {
+		p, err := scanProduct(rows)
+		if err != nil {
+			return nil, err
+		}
+		if p.Versions, err = dbProductVersions(db, p.Key); err != nil {
+			return nil, err
+		}
+		if p.Plans, err = dbPlansForProduct(db, p.Key); err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+func dbProductGet(db *sql.DB, key string) (*Product, error) {
+	p, err := scanProduct(db.QueryRow(`SELECT key, catalog_product_id, name, description, runtime_kind, status, template_json, metadata_json, created_at, updated_at FROM hosting_products WHERE key=?`, key))
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	p.Versions, err = dbProductVersions(db, p.Key)
+	return p, err
+}
+
+func scanProduct(row rowScanner) (*Product, error) {
+	var p Product
+	var catalogID sql.NullInt64
+	var tpl, meta string
+	if err := row.Scan(&p.Key, &catalogID, &p.Name, &p.Description, &p.RuntimeKind, &p.Status, &tpl, &meta, &p.CreatedAt, &p.UpdatedAt); err != nil {
+		return nil, err
+	}
+	if catalogID.Valid {
+		p.CatalogProductID = &catalogID.Int64
+	}
+	p.Template = json.RawMessage(tpl)
+	p.Metadata = json.RawMessage(meta)
+	return &p, nil
+}
+
+func dbProductVersions(db *sql.DB, productKey string) ([]ProductVersion, error) {
+	rows, err := db.Query(`SELECT id, product_key, version, image, default_port, default_health_path, template_json, status, created_at, updated_at FROM hosting_product_versions WHERE product_key=? ORDER BY version`, productKey)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []ProductVersion
+	for rows.Next() {
+		var v ProductVersion
+		var tpl string
+		if err := rows.Scan(&v.ID, &v.ProductKey, &v.Version, &v.Image, &v.DefaultPort, &v.DefaultHealthPath, &tpl, &v.Status, &v.CreatedAt, &v.UpdatedAt); err != nil {
+			return nil, err
+		}
+		v.Template = json.RawMessage(tpl)
+		out = append(out, v)
+	}
+	return out, rows.Err()
+}
+
 func dbPlanList(db *sql.DB) ([]*Plan, error) {
-	rows, err := db.Query(`SELECT key, name, billing_mode, price_cents, COALESCE(interval,''), image, cpu, memory_mb, storage_mb, metadata_json, created_at, updated_at FROM hosting_plans ORDER BY key`)
+	rows, err := db.Query(planSelect() + ` ORDER BY p.key`)
 	if err != nil {
 		return nil, err
 	}
@@ -608,7 +923,7 @@ func dbPlanList(db *sql.DB) ([]*Plan, error) {
 }
 
 func dbPlanGet(db *sql.DB, key string) (*Plan, error) {
-	p, err := scanPlan(db.QueryRow(`SELECT key, name, billing_mode, price_cents, COALESCE(interval,''), image, cpu, memory_mb, storage_mb, metadata_json, created_at, updated_at FROM hosting_plans WHERE key=?`, key))
+	p, err := scanPlan(db.QueryRow(planSelect()+` WHERE p.key=?`, key))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
@@ -619,18 +934,52 @@ func dbPlanGet(db *sql.DB, key string) (*Plan, error) {
 	return p, err
 }
 
+func dbPlansForProduct(db *sql.DB, productKey string) ([]*Plan, error) {
+	rows, err := db.Query(planSelect()+` WHERE b.product_key=? ORDER BY p.key`, productKey)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*Plan
+	for rows.Next() {
+		p, err := scanPlan(rows)
+		if err != nil {
+			return nil, err
+		}
+		p.Limits, err = dbPlanLimits(db, p.Key)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, p)
+	}
+	return out, rows.Err()
+}
+
+func planSelect() string {
+	return `SELECT p.key, p.name, p.billing_mode, p.price_cents, COALESCE(p.interval,''), p.image,
+		p.cpu, p.memory_mb, p.storage_mb, COALESCE(b.product_key,''), b.catalog_price_id,
+		COALESCE(b.subscription_required,0), p.metadata_json, p.created_at, p.updated_at
+		FROM hosting_plans p
+		LEFT JOIN hosting_plan_bindings b ON b.plan_key=p.key`
+}
+
 type rowScanner interface{ Scan(...any) error }
 
 func scanPlan(row rowScanner) (*Plan, error) {
 	var p Plan
-	var price sql.NullInt64
+	var price, catalogPrice sql.NullInt64
 	var meta string
-	if err := row.Scan(&p.Key, &p.Name, &p.BillingMode, &price, &p.Interval, &p.Image, &p.CPU, &p.MemoryMB, &p.StorageMB, &meta, &p.CreatedAt, &p.UpdatedAt); err != nil {
+	var subscriptionRequired int
+	if err := row.Scan(&p.Key, &p.Name, &p.BillingMode, &price, &p.Interval, &p.Image, &p.CPU, &p.MemoryMB, &p.StorageMB, &p.ProductKey, &catalogPrice, &subscriptionRequired, &meta, &p.CreatedAt, &p.UpdatedAt); err != nil {
 		return nil, err
 	}
 	if price.Valid {
 		p.PriceCents = &price.Int64
 	}
+	if catalogPrice.Valid {
+		p.CatalogPriceID = &catalogPrice.Int64
+	}
+	p.SubscriptionRequired = subscriptionRequired != 0
 	p.Metadata = json.RawMessage(meta)
 	return &p, nil
 }
@@ -850,6 +1199,19 @@ func httpErr(w http.ResponseWriter, code int, msg string) {
 	http.Error(w, msg, code)
 }
 
+func (a *App) handleProducts(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		httpErr(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
+	products, err := dbProductList(globalCtx.AppDB())
+	if err != nil {
+		httpErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	handleJSON(w, map[string]any{"products": products, "count": len(products)})
+}
+
 func (a *App) handlePlans(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		httpErr(w, http.StatusMethodNotAllowed, "method not allowed")
@@ -1031,6 +1393,43 @@ func intArg(args map[string]any, key string, fallback int) int {
 	return fallback
 }
 
+func mapArg(args map[string]any, key string) map[string]any {
+	out := map[string]any{}
+	if args == nil {
+		return out
+	}
+	switch v := args[key].(type) {
+	case map[string]any:
+		for k, vv := range v {
+			out[k] = vv
+		}
+	case map[string]string:
+		for k, vv := range v {
+			out[k] = vv
+		}
+	case json.RawMessage:
+		_ = json.Unmarshal(v, &out)
+	case []byte:
+		_ = json.Unmarshal(v, &out)
+	case string:
+		if strings.TrimSpace(v) != "" {
+			_ = json.Unmarshal([]byte(v), &out)
+		}
+	}
+	return out
+}
+
+func stringMapArg(args map[string]any, key string) map[string]string {
+	out := map[string]string{}
+	raw := mapArg(args, key)
+	for k, v := range raw {
+		if strings.TrimSpace(k) != "" {
+			out[k] = strings.TrimSpace(fmt.Sprint(v))
+		}
+	}
+	return out
+}
+
 func boolArg(args map[string]any, key string) bool {
 	if args == nil {
 		return false
@@ -1056,6 +1455,50 @@ func firstNonEmpty(vals ...string) string {
 		}
 	}
 	return ""
+}
+
+func firstPositive(vals ...int64) int64 {
+	for _, v := range vals {
+		if v > 0 {
+			return v
+		}
+	}
+	return 0
+}
+
+func firstPositiveInt(vals ...int) int {
+	for _, v := range vals {
+		if v > 0 {
+			return v
+		}
+	}
+	return 0
+}
+
+func mergeStringMaps(base map[string]string, override map[string]string) map[string]string {
+	out := map[string]string{}
+	for k, v := range base {
+		out[k] = v
+	}
+	for k, v := range override {
+		out[k] = v
+	}
+	return out
+}
+
+func mapValueString(vals map[string]any, key string) string {
+	v, ok := vals[key]
+	if !ok || v == nil {
+		return ""
+	}
+	return strings.TrimSpace(fmt.Sprint(v))
+}
+
+func boolToInt(v bool) int {
+	if v {
+		return 1
+	}
+	return 0
 }
 
 func firstErr(err error, fallback error) error {

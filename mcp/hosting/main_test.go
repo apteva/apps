@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 
@@ -75,12 +76,19 @@ func newTestCtx(t *testing.T, pf sdk.PlatformClient) (*sdk.AppCtx, *sql.DB) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	raw, err := os.ReadFile("migrations/001_init.sql")
+	migrations, err := filepath.Glob("migrations/*.sql")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(string(raw)); err != nil {
-		t.Fatal(err)
+	sort.Strings(migrations)
+	for _, migration := range migrations {
+		raw, err := os.ReadFile(migration)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(string(raw)); err != nil {
+			t.Fatalf("apply %s: %v", migration, err)
+		}
 	}
 	app := &App{}
 	manifest := app.Manifest()
@@ -100,8 +108,8 @@ func TestEmbeddedManifest_Valid(t *testing.T) {
 	if m.Name != "hosting" {
 		t.Errorf("manifest.Name=%q, want hosting", m.Name)
 	}
-	if m.Version != "1.0.1" {
-		t.Errorf("manifest.Version=%q, want 1.0.1", m.Version)
+	if m.Version != "1.1.0" {
+		t.Errorf("manifest.Version=%q, want 1.1.0", m.Version)
 	}
 	if m.DB == nil {
 		t.Fatal("manifest.DB missing")
@@ -128,6 +136,9 @@ func TestEmbeddedManifest_Valid(t *testing.T) {
 	}
 	if !gotRequired["containers"] {
 		t.Error("manifest should require containers")
+	}
+	if !gotRequired["catalog"] {
+		t.Error("manifest should require catalog")
 	}
 }
 
@@ -184,6 +195,42 @@ func TestSeedPlansIncludeFreePlanLimits(t *testing.T) {
 	}
 	if limits["containers.storage_mb"] != 512 {
 		t.Errorf("free containers.storage_mb limit=%d, want 512", limits["containers.storage_mb"])
+	}
+	if free.ProductKey != "apteva" {
+		t.Errorf("free product_key=%q, want apteva", free.ProductKey)
+	}
+	if byKey["docker-free"] == nil || byKey["docker-free"].ProductKey != "custom-docker" {
+		t.Fatalf("docker-free plan missing or unbound: %+v", byKey["docker-free"])
+	}
+	if byKey["wordpress-free"] == nil || byKey["wordpress-free"].ProductKey != "wordpress-single" {
+		t.Fatalf("wordpress-free plan missing or unbound: %+v", byKey["wordpress-free"])
+	}
+}
+
+func TestProductListSeedsCatalog(t *testing.T) {
+	ctx, db := newTestCtx(t, &platformStub{})
+	defer db.Close()
+
+	app := &App{}
+	out, err := app.toolProductList(ctx, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	products := out.(map[string]any)["products"].([]*Product)
+	byKey := map[string]*Product{}
+	for _, p := range products {
+		byKey[p.Key] = p
+	}
+	for _, key := range []string{"apteva", "custom-docker", "wordpress-single"} {
+		if byKey[key] == nil {
+			t.Fatalf("product %q missing from %+v", key, products)
+		}
+		if len(byKey[key].Versions) == 0 {
+			t.Fatalf("product %q has no versions", key)
+		}
+		if len(byKey[key].Plans) == 0 {
+			t.Fatalf("product %q has no plans", key)
+		}
 	}
 }
 
@@ -242,6 +289,9 @@ func TestTenantCreateProvisionsContainerAndIngress(t *testing.T) {
 	if len(pf.callAppCalls) == 0 || pf.callAppCalls[0].Tool != "containers_run" {
 		t.Fatalf("expected containers_run call, got %+v", pf.callAppCalls)
 	}
+	if got := pf.callAppCalls[0].Input["blueprint_slug"]; got != "apteva" {
+		t.Fatalf("blueprint_slug=%v, want apteva", got)
+	}
 	if len(pf.ingressCalls) != 1 {
 		t.Fatalf("expected one ingress call, got %d", len(pf.ingressCalls))
 	}
@@ -254,6 +304,73 @@ func TestTenantCreateProvisionsContainerAndIngress(t *testing.T) {
 	}
 	if len(usage) != 1 || usage[0].Quantity != 1 {
 		t.Fatalf("usage = %+v", usage)
+	}
+}
+
+func TestTenantCreateCustomDockerProduct(t *testing.T) {
+	pf := &platformStub{}
+	ctx, db := newTestCtx(t, pf)
+	defer db.Close()
+
+	app := &App{}
+	got, err := app.toolTenantCreate(ctx, map[string]any{
+		"owner_email": "owner@example.com",
+		"slug":        "docker",
+		"plan_key":    "docker-free",
+		"product_key": "custom-docker",
+		"runtime_config": map[string]any{
+			"image":       "nginx:alpine",
+			"port":        8080,
+			"health_path": "/healthz",
+			"env": map[string]any{
+				"FOO": "bar",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	tenant := got.(map[string]any)["tenant"].(*Tenant)
+	if tenant.Image != "nginx:alpine" {
+		t.Fatalf("tenant image=%q, want nginx:alpine", tenant.Image)
+	}
+	run := pf.callAppCalls[0].Input
+	if run["blueprint_slug"] != "custom-image" {
+		t.Fatalf("blueprint_slug=%v, want custom-image", run["blueprint_slug"])
+	}
+	if run["image"] != "nginx:alpine" {
+		t.Fatalf("image=%v, want nginx:alpine", run["image"])
+	}
+	ports := run["ports"].([]map[string]any)
+	if ports[0]["container_port"] != 8080 {
+		t.Fatalf("container_port=%v, want 8080", ports[0]["container_port"])
+	}
+	if run["health_path"] != "/healthz" {
+		t.Fatalf("health_path=%v, want /healthz", run["health_path"])
+	}
+	env := run["env"].(map[string]any)
+	if env["FOO"] != "bar" {
+		t.Fatalf("env=%+v, want FOO=bar", env)
+	}
+	if !strings.Contains(string(tenant.Metadata), `"product_key":"custom-docker"`) {
+		t.Fatalf("metadata=%s", tenant.Metadata)
+	}
+}
+
+func TestTenantCreateRejectsPlanProductMismatch(t *testing.T) {
+	ctx, db := newTestCtx(t, &platformStub{})
+	defer db.Close()
+
+	app := &App{}
+	_, err := app.toolTenantCreate(ctx, map[string]any{
+		"owner_email": "owner@example.com",
+		"slug":        "mismatch",
+		"plan_key":    "free",
+		"product_key": "custom-docker",
+		"image":       "nginx:alpine",
+	})
+	if err == nil || !strings.Contains(err.Error(), "bound to product") {
+		t.Fatalf("expected product mismatch error, got %v", err)
 	}
 }
 

@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: hosting
 display_name: Hosting
-version: 1.0.1
+version: 1.1.0
 description: |
   Managed container-backed hosting control plane. Hosting provisions and
   operates hosted Apteva tenants on top of the generic Containers app,
@@ -24,6 +24,8 @@ requires:
     - platform.apps.call
     - platform.ingress.write
   apps:
+    - name: catalog
+      optional: false
     - name: containers
       optional: false
     - name: billing
@@ -37,6 +39,8 @@ provides:
   http_routes:
     - prefix: /
   mcp_tools:
+    - name: hosting_product_list
+      description: List hosting products/templates and their available plans.
     - name: hosting_plan_list
       description: List hosting plans, including free plans.
     - name: hosting_customer_create
