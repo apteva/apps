@@ -24,6 +24,15 @@ func TestManifestValid(t *testing.T) {
 	if m.Name != "containers" {
 		t.Fatalf("name=%q", m.Name)
 	}
+	gotScopes := map[string]bool{}
+	for _, scope := range m.Scopes {
+		gotScopes[string(scope)] = true
+	}
+	for _, want := range []string{"project", "global"} {
+		if !gotScopes[want] {
+			t.Fatalf("manifest missing %s scope", want)
+		}
+	}
 }
 
 func testDB(t *testing.T) *sql.DB {
@@ -64,6 +73,15 @@ func TestManifestFileValid(t *testing.T) {
 	}
 	if m.Name != "containers" {
 		t.Fatalf("name=%q", m.Name)
+	}
+	gotScopes := map[string]bool{}
+	for _, scope := range m.Scopes {
+		gotScopes[string(scope)] = true
+	}
+	for _, want := range []string{"project", "global"} {
+		if !gotScopes[want] {
+			t.Fatalf("manifest missing %s scope", want)
+		}
 	}
 }
 
