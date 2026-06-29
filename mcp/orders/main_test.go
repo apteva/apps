@@ -18,7 +18,7 @@ func (p *platformStub) CallAppResult(appName, tool string, input map[string]any,
 		b, _ := json.Marshal(map[string]any{
 			"found": true,
 			"invoice": map[string]any{
-				"id":                input["invoice_id"],
+				"id":                input["id"],
 				"customer_id":       42,
 				"customer_email":    "wp@example.com",
 				"customer_name":     "WP Buyer",

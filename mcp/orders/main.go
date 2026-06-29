@@ -37,7 +37,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	}
 	globalCtx = ctx
 	ctx.Logger().Info("orders mounted",
-		"version", "0.1.0",
+		"version", a.Manifest().Version,
 		"scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
 	return nil
 }
@@ -426,7 +426,7 @@ func (a *App) createOrderFromInvoice(ctx *sdk.AppCtx, pid string, args map[strin
 		Invoice map[string]any `json:"invoice"`
 		Found   bool           `json:"found"`
 	}
-	if err := ctx.PlatformAPI().CallAppResult("billing", "invoices_get", map[string]any{"invoice_id": invoiceID, "_project_id": pid}, &invResp); err != nil {
+	if err := ctx.PlatformAPI().CallAppResult("billing", "invoices_get", map[string]any{"id": invoiceID, "_project_id": pid}, &invResp); err != nil {
 		return nil, nil, fmt.Errorf("billing invoice lookup failed: %w", err)
 	}
 	if invResp.Invoice == nil {
