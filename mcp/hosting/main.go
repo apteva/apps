@@ -24,7 +24,7 @@ import (
 //go:embed apteva.yaml
 var manifestYAML string
 
-const appVersion = "1.2.0"
+const appVersion = "1.3.0"
 
 const (
 	StatusProvisioning = "provisioning"
@@ -97,6 +97,10 @@ func (a *App) MCPTools() []sdk.Tool {
 			"owner_email": strSchema(), "slug": strSchema(), "plan_key": strSchema(), "product_key": strSchema(),
 			"subscription_id": intSchema(), "order_id": intSchema(), "fulfillment_id": intSchema(), "apteva_version": strSchema(), "image": strSchema(), "runtime_config": objSchema(), "metadata": objSchema(),
 		}, []string{"owner_email", "slug"}), Handler: a.toolTenantCreate},
+		{Name: "hosting_paid_invoice_provision", Description: "Given a paid Billing invoice for a hosting product, create/claim the generic Orders record and provision the tenant. Args: invoice_id, owner_email, slug, plan_key, product_key, runtime_config, metadata.", InputSchema: schemaObject(map[string]any{
+			"invoice_id": intSchema(), "owner_email": strSchema(), "slug": strSchema(), "plan_key": strSchema(), "product_key": strSchema(),
+			"image": strSchema(), "runtime_config": objSchema(), "metadata": objSchema(),
+		}, []string{"invoice_id"}), Handler: a.toolPaidInvoiceProvision},
 		{Name: "hosting_fulfillment_provision", Description: "Provision a tenant for an Orders generic fulfillment and report success/failure back to Orders. Args: order_id, fulfillment_id, owner_email, slug, plan_key, product_key, runtime_config, metadata.", InputSchema: schemaObject(map[string]any{
 			"order_id": intSchema(), "fulfillment_id": intSchema(), "customer_id": intSchema(), "customer_email": strSchema(), "customer_name": strSchema(),
 			"owner_email": strSchema(), "slug": strSchema(), "plan_key": strSchema(), "product_key": strSchema(),
@@ -265,6 +269,71 @@ func (a *App) toolTenantCreate(ctx *sdk.AppCtx, args map[string]any) (any, error
 	})
 	ctx.Emit("hosting.tenant.active", map[string]any{"tenant_id": t.ID, "customer_id": t.CustomerID, "hostname": t.DefaultHostname})
 	return map[string]any{"tenant": t}, nil
+}
+
+func (a *App) toolPaidInvoiceProvision(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	invoiceID := int64Arg(args, "invoice_id")
+	if invoiceID == 0 {
+		return nil, errors.New("invoice_id required")
+	}
+	if ctx.PlatformAPI() == nil {
+		return nil, errors.New("platform API unavailable")
+	}
+	projectID := firstNonEmpty(strArg(args, "_project_id"), ctx.CurrentProject())
+	invoice, err := fetchBillingInvoice(ctx, projectID, invoiceID)
+	if err != nil {
+		return nil, err
+	}
+	meta := mergeMaps(mapFromAny(invoice["metadata"]), mapArg(args, "metadata"))
+	if strings.ToLower(strArg(invoice, "status")) != "paid" {
+		return nil, fmt.Errorf("invoice %d is %s, not paid", invoiceID, strArg(invoice, "status"))
+	}
+	if !isHostingInvoice(meta, args) {
+		return nil, errors.New("invoice is not marked as a hosting product")
+	}
+	provisionArgs := hostingProvisionArgsFromInvoice(invoiceID, invoice, meta, args)
+
+	order, fulfillment, err := createHostingOrderFromInvoice(ctx, projectID, invoiceID, provisionArgs)
+	if err != nil {
+		return nil, err
+	}
+	orderID := int64Arg(order, "id")
+	fulfillmentID := int64Arg(fulfillment, "id")
+	if orderID == 0 || fulfillmentID == 0 {
+		return nil, errors.New("orders_create_from_invoice did not return order and fulfillment ids")
+	}
+	provisionArgs["order_id"] = orderID
+	provisionArgs["fulfillment_id"] = fulfillmentID
+	provisionArgs["metadata"] = mergeMaps(mapArg(provisionArgs, "metadata"), map[string]any{
+		"invoice_id":      invoiceID,
+		"order_id":        orderID,
+		"fulfillment_id":  fulfillmentID,
+		"fulfillment_app": "hosting",
+	})
+
+	if existing, err := dbTenantGetBySlug(ctx.AppDB(), strArg(provisionArgs, "slug")); err != nil {
+		return nil, err
+	} else if existing != nil {
+		if err := reportOrderFulfillment(ctx, provisionArgs, "succeeded", existing.ID, "", map[string]any{
+			"tenant_id":        existing.ID,
+			"default_hostname": existing.DefaultHostname,
+			"workload_id":      existing.WorkloadID,
+			"status":           existing.Status,
+		}); err != nil {
+			return nil, err
+		}
+		return map[string]any{"invoice": invoice, "order": order, "fulfillment": fulfillment, "tenant": existing, "idempotent": true}, nil
+	}
+
+	out, err := a.toolFulfillmentProvision(ctx, provisionArgs)
+	if err != nil {
+		return nil, err
+	}
+	result := out.(map[string]any)
+	result["invoice"] = invoice
+	result["order"] = order
+	result["fulfillment"] = fulfillment
+	return result, nil
 }
 
 func (a *App) toolFulfillmentProvision(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -463,6 +532,106 @@ func reportOrderFulfillment(ctx *sdk.AppCtx, args map[string]any, status, extern
 		return fmt.Errorf("orders fulfillments_update: %w", err)
 	}
 	return nil
+}
+
+func fetchBillingInvoice(ctx *sdk.AppCtx, projectID string, invoiceID int64) (map[string]any, error) {
+	input := map[string]any{"id": invoiceID}
+	if projectID != "" {
+		input["_project_id"] = projectID
+	}
+	var out struct {
+		Invoice map[string]any `json:"invoice"`
+		Found   bool           `json:"found"`
+	}
+	if err := ctx.PlatformAPI().CallAppResult("billing", "invoices_get", input, &out); err != nil {
+		return nil, fmt.Errorf("billing invoices_get: %w", err)
+	}
+	if out.Invoice == nil {
+		return nil, fmt.Errorf("invoice %d not found", invoiceID)
+	}
+	return out.Invoice, nil
+}
+
+func createHostingOrderFromInvoice(ctx *sdk.AppCtx, projectID string, invoiceID int64, provisionArgs map[string]any) (map[string]any, map[string]any, error) {
+	meta := mapArg(provisionArgs, "metadata")
+	input := map[string]any{
+		"invoice_id":       invoiceID,
+		"order_type":       "hosting",
+		"fulfillment_type": "hosting_tenant_provision",
+		"fulfillment_app":  "hosting",
+		"metadata":         meta,
+		"fulfillment_meta": meta,
+	}
+	if projectID != "" {
+		input["_project_id"] = projectID
+	}
+	var out map[string]any
+	if err := ctx.PlatformAPI().CallAppResult("orders", "orders_create_from_invoice", input, &out); err != nil {
+		return nil, nil, fmt.Errorf("orders create from invoice: %w", err)
+	}
+	order := mapFromAny(out["order"])
+	fulfillment := mapFromAny(out["fulfillment"])
+	if len(order) == 0 || len(fulfillment) == 0 {
+		return nil, nil, errors.New("orders_create_from_invoice returned no order or fulfillment")
+	}
+	return order, fulfillment, nil
+}
+
+func hostingProvisionArgsFromInvoice(invoiceID int64, invoice, meta, args map[string]any) map[string]any {
+	productKey := firstNonEmpty(strArg(args, "product_key"), strArg(meta, "product_key"), "wordpress-single")
+	planKey := firstNonEmpty(strArg(args, "plan_key"), strArg(meta, "plan_key"), defaultPlanForProduct(productKey))
+	customerEmail := firstNonEmpty(strArg(invoice, "customer_email"), strArg(meta, "customer_email"), strArg(args, "customer_email"))
+	slug := firstNonEmpty(strArg(args, "slug"), strArg(meta, "slug"), fmt.Sprintf("hosting-inv-%d", invoiceID))
+	ownerEmail := firstNonEmpty(strArg(args, "owner_email"), strArg(meta, "owner_email"), customerEmail)
+	out := map[string]any{
+		"customer_email":      customerEmail,
+		"customer_name":       firstNonEmpty(strArg(invoice, "customer_name"), strArg(meta, "customer_name"), strArg(args, "customer_name")),
+		"billing_customer_id": int64Arg(invoice, "customer_id"),
+		"owner_email":         ownerEmail,
+		"slug":                slug,
+		"plan_key":            planKey,
+		"product_key":         productKey,
+		"metadata": mergeMaps(meta, map[string]any{
+			"invoice_id":       invoiceID,
+			"product_key":      productKey,
+			"plan_key":         planKey,
+			"fulfillment_app":  "hosting",
+			"fulfillment_type": "hosting_tenant_provision",
+		}),
+	}
+	if runtimeConfig := mergeMaps(mapFromAny(meta["runtime_config"]), mapArg(args, "runtime_config")); len(runtimeConfig) > 0 {
+		out["runtime_config"] = runtimeConfig
+	}
+	if image := firstNonEmpty(strArg(args, "image"), strArg(meta, "image")); image != "" {
+		out["image"] = image
+	}
+	return out
+}
+
+func isHostingInvoice(meta, args map[string]any) bool {
+	if strArg(args, "product_key") != "" || strArg(args, "plan_key") != "" {
+		return true
+	}
+	if strings.EqualFold(strArg(meta, "fulfillment_app"), "hosting") || strings.EqualFold(strArg(meta, "order_type"), "hosting") {
+		return true
+	}
+	productType := strings.ToLower(firstNonEmpty(strArg(meta, "product_type"), strArg(meta, "type")))
+	if strings.Contains(productType, "hosting") || strings.Contains(productType, "wordpress") || strings.Contains(productType, "container") {
+		return true
+	}
+	productKey := strArg(meta, "product_key")
+	return productKey == "wordpress-single" || productKey == "custom-docker" || productKey == "apteva"
+}
+
+func defaultPlanForProduct(productKey string) string {
+	switch productKey {
+	case "wordpress-single":
+		return "wordpress-starter"
+	case "custom-docker":
+		return "docker-starter"
+	default:
+		return "starter"
+	}
 }
 
 func (a *App) provisionTenant(ctx *sdk.AppCtx, args map[string]any) (*Tenant, error) {
@@ -1169,6 +1338,17 @@ func dbTenantGet(db *sql.DB, id string) (*Tenant, error) {
 	return t, err
 }
 
+func dbTenantGetBySlug(db *sql.DB, slug string) (*Tenant, error) {
+	if strings.TrimSpace(slug) == "" {
+		return nil, nil
+	}
+	t, err := scanTenant(db.QueryRow(tenantSelect()+` WHERE slug=? AND status != ?`, slug, StatusDeleted))
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	return t, err
+}
+
 func dbTenantList(db *sql.DB, args map[string]any) ([]*Tenant, error) {
 	where := []string{"status != ?"}
 	qargs := []any{StatusDeleted}
@@ -1499,6 +1679,42 @@ func mapArg(args map[string]any, key string) map[string]any {
 	case string:
 		if strings.TrimSpace(v) != "" {
 			_ = json.Unmarshal([]byte(v), &out)
+		}
+	}
+	return out
+}
+
+func mapFromAny(v any) map[string]any {
+	out := map[string]any{}
+	switch x := v.(type) {
+	case map[string]any:
+		for k, vv := range x {
+			out[k] = vv
+		}
+	case map[string]string:
+		for k, vv := range x {
+			out[k] = vv
+		}
+	case json.RawMessage:
+		_ = json.Unmarshal(x, &out)
+	case []byte:
+		_ = json.Unmarshal(x, &out)
+	case string:
+		if strings.TrimSpace(x) != "" {
+			_ = json.Unmarshal([]byte(x), &out)
+		}
+	}
+	return out
+}
+
+func mergeMaps(base map[string]any, overlays ...map[string]any) map[string]any {
+	out := map[string]any{}
+	for k, v := range base {
+		out[k] = v
+	}
+	for _, overlay := range overlays {
+		for k, v := range overlay {
+			out[k] = v
 		}
 	}
 	return out

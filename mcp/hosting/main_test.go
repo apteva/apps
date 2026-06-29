@@ -32,6 +32,46 @@ type callAppCall struct {
 func (p *platformStub) CallAppResult(appName, tool string, input map[string]any, out any) error {
 	p.callAppCalls = append(p.callAppCalls, callAppCall{App: appName, Tool: tool, Input: input})
 	switch tool {
+	case "invoices_get":
+		b, _ := json.Marshal(map[string]any{
+			"found": true,
+			"invoice": map[string]any{
+				"id":             input["id"],
+				"customer_id":    42,
+				"customer_email": "buyer@example.com",
+				"customer_name":  "WP Buyer",
+				"status":         "paid",
+				"currency":       "USD",
+				"metadata": map[string]any{
+					"product_type":     "wordpress_hosting",
+					"product_key":      "wordpress-single",
+					"plan_key":         "wordpress-starter",
+					"owner_email":      "owner@example.com",
+					"slug":             "paid-wp-sale",
+					"fulfillment_app":  "hosting",
+					"fulfillment_type": "hosting_tenant_provision",
+				},
+			},
+		})
+		return json.Unmarshal(b, out)
+	case "orders_create_from_invoice":
+		b, _ := json.Marshal(map[string]any{
+			"order": map[string]any{
+				"id":             10,
+				"source":         "billing",
+				"source_ref":     "invoice:77",
+				"order_type":     "hosting",
+				"payment_status": "paid",
+			},
+			"fulfillment": map[string]any{
+				"id":               20,
+				"order_id":         10,
+				"fulfillment_app":  "hosting",
+				"fulfillment_type": "hosting_tenant_provision",
+				"status":           "queued",
+			},
+		})
+		return json.Unmarshal(b, out)
 	case "containers_run", "containers_start", "containers_stop", "containers_restart", "containers_health":
 		b, _ := json.Marshal(map[string]any{
 			"workload": map[string]any{
@@ -109,8 +149,8 @@ func TestEmbeddedManifest_Valid(t *testing.T) {
 	if m.Name != "hosting" {
 		t.Errorf("manifest.Name=%q, want hosting", m.Name)
 	}
-	if m.Version != "1.2.0" {
-		t.Errorf("manifest.Version=%q, want 1.2.0", m.Version)
+	if m.Version != "1.3.0" {
+		t.Errorf("manifest.Version=%q, want 1.3.0", m.Version)
 	}
 	if m.DB == nil {
 		t.Fatal("manifest.DB missing")
@@ -345,6 +385,52 @@ func TestFulfillmentProvisionReportsTenantToOrders(t *testing.T) {
 	}
 	if ordersCall.Input["id"] != int64(20) || ordersCall.Input["status"] != "succeeded" || ordersCall.Input["external_ref"] != tenant.ID {
 		t.Fatalf("unexpected orders update input: %+v", ordersCall.Input)
+	}
+}
+
+func TestPaidInvoiceProvisionDrivesOrdersAndTenantProvisioning(t *testing.T) {
+	pf := &platformStub{}
+	ctx, db := newTestCtx(t, pf)
+	defer db.Close()
+
+	app := &App{}
+	got, err := app.toolPaidInvoiceProvision(ctx, map[string]any{"invoice_id": int64(77)})
+	if err != nil {
+		t.Fatalf("paid invoice provision: %v", err)
+	}
+	tenant := got.(map[string]any)["tenant"].(*Tenant)
+	if tenant.Slug != "paid-wp-sale" {
+		t.Fatalf("tenant slug=%q, want paid-wp-sale", tenant.Slug)
+	}
+	if tenant.PlanKey != "wordpress-starter" || tenant.Image != "wordpress:php8.3-apache" {
+		t.Fatalf("unexpected tenant plan/image: %+v", tenant)
+	}
+	wantCalls := []string{"billing:invoices_get", "orders:orders_create_from_invoice", "containers:containers_run", "orders:fulfillments_update"}
+	var gotCalls []string
+	for _, c := range pf.callAppCalls {
+		gotCalls = append(gotCalls, c.App+":"+c.Tool)
+	}
+	for _, want := range wantCalls {
+		found := false
+		for _, got := range gotCalls {
+			if got == want {
+				found = true
+				break
+			}
+		}
+		if !found {
+			t.Fatalf("missing call %s in %+v", want, gotCalls)
+		}
+	}
+	var orderCall *callAppCall
+	for i := range pf.callAppCalls {
+		if pf.callAppCalls[i].Tool == "orders_create_from_invoice" {
+			orderCall = &pf.callAppCalls[i]
+			break
+		}
+	}
+	if orderCall == nil || orderCall.Input["fulfillment_app"] != "hosting" || orderCall.Input["fulfillment_type"] != "hosting_tenant_provision" {
+		t.Fatalf("unexpected orders_create_from_invoice input: %+v", orderCall)
 	}
 }
 
