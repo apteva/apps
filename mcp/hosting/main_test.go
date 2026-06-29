@@ -149,8 +149,8 @@ func TestEmbeddedManifest_Valid(t *testing.T) {
 	if m.Name != "hosting" {
 		t.Errorf("manifest.Name=%q, want hosting", m.Name)
 	}
-	if m.Version != "1.3.0" {
-		t.Errorf("manifest.Version=%q, want 1.3.0", m.Version)
+	if m.Version != "1.3.1" {
+		t.Errorf("manifest.Version=%q, want 1.3.1", m.Version)
 	}
 	if m.DB == nil {
 		t.Fatal("manifest.DB missing")
@@ -423,14 +423,20 @@ func TestPaidInvoiceProvisionDrivesOrdersAndTenantProvisioning(t *testing.T) {
 		}
 	}
 	var orderCall *callAppCall
+	var containersCall *callAppCall
 	for i := range pf.callAppCalls {
 		if pf.callAppCalls[i].Tool == "orders_create_from_invoice" {
 			orderCall = &pf.callAppCalls[i]
-			break
+		}
+		if pf.callAppCalls[i].Tool == "containers_run" {
+			containersCall = &pf.callAppCalls[i]
 		}
 	}
 	if orderCall == nil || orderCall.Input["fulfillment_app"] != "hosting" || orderCall.Input["fulfillment_type"] != "hosting_tenant_provision" {
 		t.Fatalf("unexpected orders_create_from_invoice input: %+v", orderCall)
+	}
+	if containersCall == nil || containersCall.Input["health_path"] != "/wp-admin/setup-config.php" {
+		t.Fatalf("unexpected containers_run health path: %+v", containersCall)
 	}
 }
 

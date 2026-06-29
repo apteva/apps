@@ -24,7 +24,7 @@ import (
 //go:embed apteva.yaml
 var manifestYAML string
 
-const appVersion = "1.3.0"
+const appVersion = "1.3.1"
 
 const (
 	StatusProvisioning = "provisioning"
@@ -913,7 +913,7 @@ func seedProducts(db *sql.DB, defaultImage string) error {
 				BlueprintSlug: "custom-image",
 				Image:         "wordpress:php8.3-apache",
 				Port:          80,
-				HealthPath:    "/",
+				HealthPath:    "/wp-admin/setup-config.php",
 				Volumes:       []runtimeVolume{{Name: "html", MountPath: "/var/www/html"}},
 			}),
 		},
