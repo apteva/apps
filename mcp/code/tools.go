@@ -233,10 +233,11 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name: "issues_list",
-			Description: "List native Code issues for a repo. Args: slug (required), status? " +
-				"(active | all | open | triage | planned | in_progress | blocked | done | closed; default active), type?, priority?, assignee?, q?, limit?.",
+			Description: "List native Code issues for a repo. Args: slug (required), state? " +
+				"(open | closed | all; default open), status? (all | todo | triage | planned | in_progress | in_review | blocked | done), type?, priority?, assignee?, q?, limit?.",
 			InputSchema: schemaObject(map[string]any{
 				"slug":     map[string]any{"type": "string"},
+				"state":    map[string]any{"type": "string"},
 				"status":   map[string]any{"type": "string"},
 				"type":     map[string]any{"type": "string"},
 				"priority": map[string]any{"type": "string"},
@@ -275,17 +276,19 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "issues_update",
-			Description: "Update a native Code issue. Args: slug, number, title?, body?, type?, status?, priority?, assignee?, actor?.",
+			Description: "Update a native Code issue. Args: slug, number, title?, body?, type?, status? (workflow), state? (open|closed), state_reason?, priority?, assignee?, actor?.",
 			InputSchema: schemaObject(map[string]any{
-				"slug":     map[string]any{"type": "string"},
-				"number":   map[string]any{"type": "integer"},
-				"title":    map[string]any{"type": "string"},
-				"body":     map[string]any{"type": "string"},
-				"type":     map[string]any{"type": "string"},
-				"status":   map[string]any{"type": "string"},
-				"priority": map[string]any{"type": "string"},
-				"assignee": map[string]any{"type": "string"},
-				"actor":    map[string]any{"type": "string"},
+				"slug":         map[string]any{"type": "string"},
+				"number":       map[string]any{"type": "integer"},
+				"title":        map[string]any{"type": "string"},
+				"body":         map[string]any{"type": "string"},
+				"type":         map[string]any{"type": "string"},
+				"status":       map[string]any{"type": "string"},
+				"state":        map[string]any{"type": "string"},
+				"state_reason": map[string]any{"type": "string"},
+				"priority":     map[string]any{"type": "string"},
+				"assignee":     map[string]any{"type": "string"},
+				"actor":        map[string]any{"type": "string"},
 			}, []string{"slug", "number"}),
 			Handler: a.toolIssuesUpdate,
 		},
@@ -302,18 +305,19 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "issues_close",
-			Description: "Close a native Code issue. Args: slug, number, resolution?, actor?. Sets status=closed and adds the resolution as a comment when provided.",
+			Description: "Close a native Code issue. Args: slug, number, state_reason? (completed | not_planned; default completed), resolution?, actor?. Sets state=closed, status=done, and adds the resolution as a comment when provided.",
 			InputSchema: schemaObject(map[string]any{
-				"slug":       map[string]any{"type": "string"},
-				"number":     map[string]any{"type": "integer"},
-				"resolution": map[string]any{"type": "string"},
-				"actor":      map[string]any{"type": "string"},
+				"slug":         map[string]any{"type": "string"},
+				"number":       map[string]any{"type": "integer"},
+				"state_reason": map[string]any{"type": "string"},
+				"resolution":   map[string]any{"type": "string"},
+				"actor":        map[string]any{"type": "string"},
 			}, []string{"slug", "number"}),
 			Handler: a.toolIssuesClose,
 		},
 		{
 			Name:        "issues_reopen",
-			Description: "Reopen a native Code issue. Args: slug, number, actor?. Sets status=open.",
+			Description: "Reopen a native Code issue. Args: slug, number, actor?. Sets state=open, clears state_reason, and moves workflow status to todo.",
 			InputSchema: schemaObject(map[string]any{
 				"slug":   map[string]any{"type": "string"},
 				"number": map[string]any{"type": "integer"},
@@ -520,9 +524,10 @@ func (a *App) toolIssuesList(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	}
 	status := strArg(args, "status")
 	if status == "" {
-		status = "active"
+		status = "all"
 	}
 	issues, err := dbListIssues(ctx.AppDB(), pid, repo.ID, IssueListOptions{
+		State:    strArg(args, "state"),
 		Status:   status,
 		Type:     strArg(args, "type"),
 		Priority: strArg(args, "priority"),
@@ -594,6 +599,12 @@ func (a *App) toolIssuesUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error
 	if v, ok := args["status"].(string); ok {
 		patch.Status = &v
 	}
+	if v, ok := args["state"].(string); ok {
+		patch.State = &v
+	}
+	if v, ok := args["state_reason"].(string); ok {
+		patch.StateReason = &v
+	}
 	if v, ok := args["priority"].(string); ok {
 		patch.Priority = &v
 	}
@@ -633,8 +644,13 @@ func (a *App) toolIssuesClose(ctx *sdk.AppCtx, args map[string]any) (any, error)
 			return nil, err
 		}
 	}
-	status := issueStatusClosed
-	updated, err := dbUpdateIssue(ctx.AppDB(), iss, IssuePatch{Status: &status, Actor: actor})
+	state := issueStateClosed
+	status := issueStatusDone
+	reason := strArg(args, "state_reason")
+	if reason == "" {
+		reason = issueReasonCompleted
+	}
+	updated, err := dbUpdateIssue(ctx.AppDB(), iss, IssuePatch{State: &state, StateReason: &reason, Status: &status, Actor: actor})
 	if err != nil {
 		return nil, err
 	}
@@ -647,8 +663,10 @@ func (a *App) toolIssuesReopen(ctx *sdk.AppCtx, args map[string]any) (any, error
 	if err != nil {
 		return nil, err
 	}
-	status := issueStatusOpen
-	updated, err := dbUpdateIssue(ctx.AppDB(), iss, IssuePatch{Status: &status, Actor: strArg(args, "actor")})
+	state := issueStateOpen
+	status := issueStatusTodo
+	reason := ""
+	updated, err := dbUpdateIssue(ctx.AppDB(), iss, IssuePatch{State: &state, StateReason: &reason, Status: &status, Actor: strArg(args, "actor")})
 	if err != nil {
 		return nil, err
 	}

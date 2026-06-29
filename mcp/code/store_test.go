@@ -178,7 +178,7 @@ func TestIssues_CreateUpdateCommentAndLink(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if iss.Number != 1 || iss.Status != "open" || iss.Type != "bug" {
+	if iss.Number != 1 || iss.State != issueStateOpen || iss.Status != issueStatusTodo || iss.Type != "bug" {
 		t.Fatalf("created issue wrong: %+v", iss)
 	}
 
@@ -198,12 +198,14 @@ func TestIssues_CreateUpdateCommentAndLink(t *testing.T) {
 		t.Fatalf("active issues=%d, want 2", len(active))
 	}
 
-	status := issueStatusClosed
-	closed, err := dbUpdateIssue(db, iss, IssuePatch{Status: &status, Actor: "agent:test"})
+	state := issueStateClosed
+	status := issueStatusDone
+	reason := issueReasonCompleted
+	closed, err := dbUpdateIssue(db, iss, IssuePatch{State: &state, StateReason: &reason, Status: &status, Actor: "agent:test"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if closed.Status != issueStatusClosed || closed.ClosedAt == "" {
+	if closed.State != issueStateClosed || closed.StateReason != issueReasonCompleted || closed.Status != issueStatusDone || closed.ClosedAt == "" {
 		t.Fatalf("close failed: %+v", closed)
 	}
 

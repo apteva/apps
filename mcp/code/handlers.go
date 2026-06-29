@@ -609,11 +609,13 @@ func (a *App) httpRepoIssuesCollection(w http.ResponseWriter, r *http.Request, s
 	}
 	switch r.Method {
 	case http.MethodGet:
+		state := r.URL.Query().Get("state")
 		status := r.URL.Query().Get("status")
 		if status == "" {
-			status = "active"
+			status = "all"
 		}
 		issues, err := dbListIssues(globalCtx.AppDB(), pid, repo.ID, IssueListOptions{
+			State:    state,
 			Status:   status,
 			Type:     r.URL.Query().Get("type"),
 			Priority: r.URL.Query().Get("priority"),
@@ -722,8 +724,9 @@ func (a *App) httpRepoIssueItem(w http.ResponseWriter, r *http.Request, slug, re
 			return
 		}
 		var body struct {
-			Resolution string `json:"resolution"`
-			Actor      string `json:"actor"`
+			Resolution  string `json:"resolution"`
+			StateReason string `json:"state_reason"`
+			Actor       string `json:"actor"`
 		}
 		_ = json.NewDecoder(r.Body).Decode(&body)
 		if strings.TrimSpace(body.Resolution) != "" {
@@ -732,8 +735,13 @@ func (a *App) httpRepoIssueItem(w http.ResponseWriter, r *http.Request, slug, re
 				return
 			}
 		}
-		status := issueStatusClosed
-		updated, err := dbUpdateIssue(globalCtx.AppDB(), iss, IssuePatch{Status: &status, Actor: body.Actor})
+		state := issueStateClosed
+		status := issueStatusDone
+		reason := strings.TrimSpace(body.StateReason)
+		if reason == "" {
+			reason = issueReasonCompleted
+		}
+		updated, err := dbUpdateIssue(globalCtx.AppDB(), iss, IssuePatch{State: &state, StateReason: &reason, Status: &status, Actor: body.Actor})
 		if err != nil {
 			httpErr(w, http.StatusBadRequest, err.Error())
 			return
@@ -747,8 +755,10 @@ func (a *App) httpRepoIssueItem(w http.ResponseWriter, r *http.Request, slug, re
 		}
 		var body struct{ Actor string }
 		_ = json.NewDecoder(r.Body).Decode(&body)
-		status := issueStatusOpen
-		updated, err := dbUpdateIssue(globalCtx.AppDB(), iss, IssuePatch{Status: &status, Actor: body.Actor})
+		state := issueStateOpen
+		status := issueStatusTodo
+		reason := ""
+		updated, err := dbUpdateIssue(globalCtx.AppDB(), iss, IssuePatch{State: &state, StateReason: &reason, Status: &status, Actor: body.Actor})
 		if err != nil {
 			httpErr(w, http.StatusBadRequest, err.Error())
 			return

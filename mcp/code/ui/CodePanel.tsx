@@ -128,7 +128,9 @@ interface FileMeta {
   sha256?: string;
 }
 
-type IssueStatus = "open" | "triage" | "planned" | "in_progress" | "blocked" | "done" | "closed";
+type IssueStatus = "todo" | "triage" | "planned" | "in_progress" | "in_review" | "blocked" | "done";
+type IssueState = "open" | "closed";
+type IssueStateReason = "" | "completed" | "not_planned";
 type IssueKind = "bug" | "feature" | "task" | "chore";
 type IssuePriority = "low" | "medium" | "high" | "urgent";
 
@@ -141,6 +143,8 @@ interface CodeIssue {
   body: string;
   type: IssueKind;
   status: IssueStatus;
+  state: IssueState;
+  state_reason?: IssueStateReason;
   priority: IssuePriority;
   assignee?: string;
   created_by?: string;
@@ -2066,7 +2070,9 @@ function ImportGithubDialog({
 // against the same lifecycle.
 
 const ISSUE_TYPES: IssueKind[] = ["bug", "feature", "task", "chore"];
-const ISSUE_STATUSES: IssueStatus[] = ["open", "triage", "planned", "in_progress", "blocked", "done", "closed"];
+const ISSUE_STATES: IssueState[] = ["open", "closed"];
+const ISSUE_STATE_REASONS: IssueStateReason[] = ["completed", "not_planned"];
+const ISSUE_STATUSES: IssueStatus[] = ["todo", "triage", "planned", "in_progress", "in_review", "blocked", "done"];
 const ISSUE_PRIORITIES: IssuePriority[] = ["low", "medium", "high", "urgent"];
 
 function IssuesView({
@@ -2085,7 +2091,8 @@ function IssuesView({
   const [issues, setIssues] = useState<CodeIssue[]>([]);
   const [selected, setSelected] = useState<number | null>(null);
   const [detail, setDetail] = useState<{ issue: CodeIssue; comments: IssueComment[]; links: IssueLink[] } | null>(null);
-  const [status, setStatus] = useState("active");
+  const [state, setState] = useState("open");
+  const [status, setStatus] = useState("all");
   const [kind, setKind] = useState("");
   const [priority, setPriority] = useState("");
   const [query, setQuery] = useState("");
@@ -2096,7 +2103,7 @@ function IssuesView({
 
   const loadIssues = useCallback(async () => {
     try {
-      const extra: Record<string, string> = { status };
+      const extra: Record<string, string> = { state, status };
       if (kind) extra.type = kind;
       if (priority) extra.priority = priority;
       if (query.trim()) extra.q = query.trim();
@@ -2110,7 +2117,7 @@ function IssuesView({
       setIssues([]);
       setSelected(null);
     }
-  }, [api, slug, status, kind, priority, query]);
+  }, [api, slug, state, status, kind, priority, query]);
 
   const loadDetail = useCallback(async (num: number | null) => {
     if (!num) {
@@ -2167,10 +2174,10 @@ function IssuesView({
 
   const closeOrReopen = async () => {
     if (!detail) return;
-    const closed = detail.issue.status === "closed" || detail.issue.status === "done";
+    const closed = detail.issue.state === "closed";
     setBusy(true);
     try {
-      await api("POST", `/repos/${slug}/issues/${detail.issue.number}/${closed ? "reopen" : "close"}`, { actor: "human" });
+      await api("POST", `/repos/${slug}/issues/${detail.issue.number}/${closed ? "reopen" : "close"}`, { actor: "human", state_reason: "completed" });
       await loadDetail(detail.issue.number);
       await loadIssues();
     } catch (e) {
@@ -2211,10 +2218,14 @@ function IssuesView({
               className="px-2 py-1 text-xs border border-accent text-accent rounded hover:bg-accent hover:text-bg"
             >New</button>
           </div>
-          <div className="grid grid-cols-3 gap-1">
-            <select value={status} onChange={(e) => setStatus(e.target.value)} className="bg-bg-input border border-border rounded px-1 py-0.5 text-xs">
-              <option value="active">active</option>
+          <div className="grid grid-cols-4 gap-1">
+            <select value={state} onChange={(e) => setState(e.target.value)} className="bg-bg-input border border-border rounded px-1 py-0.5 text-xs">
+              <option value="open">open</option>
+              <option value="closed">closed</option>
               <option value="all">all</option>
+            </select>
+            <select value={status} onChange={(e) => setStatus(e.target.value)} className="bg-bg-input border border-border rounded px-1 py-0.5 text-xs">
+              <option value="all">all workflow</option>
               {ISSUE_STATUSES.map((s) => <option key={s} value={s}>{s}</option>)}
             </select>
             <select value={kind} onChange={(e) => setKind(e.target.value)} className="bg-bg-input border border-border rounded px-1 py-0.5 text-xs">
@@ -2250,6 +2261,8 @@ function IssuesView({
                       <IssuePill label={iss.type} tone={iss.type} />
                       <IssuePill label={iss.priority} tone={iss.priority} />
                       <IssuePill label={iss.status} tone={iss.status} />
+                      <IssuePill label={iss.state} tone={iss.state} />
+                      {iss.state === "closed" && iss.state_reason ? <IssuePill label={iss.state_reason} tone={iss.state_reason} /> : null}
                       {iss.comments_count ? <span>{iss.comments_count} comments</span> : null}
                     </div>
                   </button>
@@ -2281,11 +2294,15 @@ function IssuesView({
                   onClick={closeOrReopen}
                   disabled={busy}
                   className="px-3 py-1 text-xs border border-border rounded hover:bg-bg-input disabled:opacity-50"
-                >{detail.issue.status === "closed" || detail.issue.status === "done" ? "Reopen" : "Close"}</button>
+                >{detail.issue.state === "closed" ? "Reopen" : "Close"}</button>
               </div>
-              <div className="mt-3 grid grid-cols-4 gap-2 max-w-2xl">
+              <div className="mt-3 grid grid-cols-5 gap-2 max-w-3xl">
                 <IssueSelect label="Type" value={detail.issue.type} options={ISSUE_TYPES} onChange={(v) => patchIssue({ type: v as IssueKind })} />
-                <IssueSelect label="Status" value={detail.issue.status} options={ISSUE_STATUSES} onChange={(v) => patchIssue({ status: v as IssueStatus })} />
+                <IssueSelect label="Workflow" value={detail.issue.status} options={ISSUE_STATUSES} onChange={(v) => patchIssue({ status: v as IssueStatus })} />
+                <IssueSelect label="State" value={detail.issue.state} options={ISSUE_STATES} onChange={(v) => patchIssue({ state: v as IssueState })} />
+                {detail.issue.state === "closed" && (
+                  <IssueSelect label="Reason" value={detail.issue.state_reason || "completed"} options={ISSUE_STATE_REASONS} onChange={(v) => patchIssue({ state_reason: v as IssueStateReason })} />
+                )}
                 <IssueSelect label="Priority" value={detail.issue.priority} options={ISSUE_PRIORITIES} onChange={(v) => patchIssue({ priority: v as IssuePriority })} />
                 <div>
                   <label className="text-[11px] text-text-muted block mb-1">Assignee</label>
@@ -2397,11 +2414,11 @@ function IssueSelect({ label, value, options, onChange }: { label: string; value
 }
 
 function IssuePill({ label, tone }: { label: string; tone: string }) {
-  const cls = tone === "bug" || tone === "urgent" || tone === "blocked" || tone === "closed"
+  const cls = tone === "bug" || tone === "urgent" || tone === "blocked" || tone === "not_planned"
     ? "border-red/50 text-red/80"
-    : tone === "feature" || tone === "planned" || tone === "high"
+    : tone === "feature" || tone === "planned" || tone === "in_review" || tone === "high"
       ? "border-blue/50 text-blue/80"
-      : tone === "done"
+      : tone === "done" || tone === "closed" || tone === "completed"
         ? "border-green/50 text-green/80"
         : "border-border text-text-muted";
   return <span className={`px-1 py-0.5 rounded border ${cls}`}>{label}</span>;

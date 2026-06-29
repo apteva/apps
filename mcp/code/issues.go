@@ -11,13 +11,17 @@ import (
 )
 
 const (
-	issueStatusOpen       = "open"
+	issueStateOpen        = "open"
+	issueStateClosed      = "closed"
+	issueReasonCompleted  = "completed"
+	issueReasonNotPlanned = "not_planned"
+	issueStatusTodo       = "todo"
 	issueStatusTriage     = "triage"
 	issueStatusPlanned    = "planned"
 	issueStatusInProgress = "in_progress"
+	issueStatusInReview   = "in_review"
 	issueStatusBlocked    = "blocked"
 	issueStatusDone       = "done"
-	issueStatusClosed     = "closed"
 )
 
 type Issue struct {
@@ -30,6 +34,8 @@ type Issue struct {
 	Body          string `json:"body"`
 	Type          string `json:"type"`
 	Status        string `json:"status"`
+	State         string `json:"state"`
+	StateReason   string `json:"state_reason,omitempty"`
 	Priority      string `json:"priority"`
 	Assignee      string `json:"assignee,omitempty"`
 	CreatedBy     string `json:"created_by,omitempty"`
@@ -75,6 +81,7 @@ type IssueDetail struct {
 }
 
 type IssueListOptions struct {
+	State    string
 	Status   string
 	Type     string
 	Priority string
@@ -93,13 +100,15 @@ type IssueCreateInput struct {
 }
 
 type IssuePatch struct {
-	Title    *string `json:"title,omitempty"`
-	Body     *string `json:"body,omitempty"`
-	Type     *string `json:"type,omitempty"`
-	Status   *string `json:"status,omitempty"`
-	Priority *string `json:"priority,omitempty"`
-	Assignee *string `json:"assignee,omitempty"`
-	Actor    string  `json:"actor,omitempty"`
+	Title       *string `json:"title,omitempty"`
+	Body        *string `json:"body,omitempty"`
+	Type        *string `json:"type,omitempty"`
+	Status      *string `json:"status,omitempty"`
+	State       *string `json:"state,omitempty"`
+	StateReason *string `json:"state_reason,omitempty"`
+	Priority    *string `json:"priority,omitempty"`
+	Assignee    *string `json:"assignee,omitempty"`
+	Actor       string  `json:"actor,omitempty"`
 }
 
 func validIssueType(s string) bool {
@@ -112,7 +121,23 @@ func validIssueType(s string) bool {
 
 func validIssueStatus(s string) bool {
 	switch s {
-	case issueStatusOpen, issueStatusTriage, issueStatusPlanned, issueStatusInProgress, issueStatusBlocked, issueStatusDone, issueStatusClosed:
+	case issueStatusTodo, issueStatusTriage, issueStatusPlanned, issueStatusInProgress, issueStatusInReview, issueStatusBlocked, issueStatusDone:
+		return true
+	}
+	return false
+}
+
+func validIssueState(s string) bool {
+	switch s {
+	case issueStateOpen, issueStateClosed:
+		return true
+	}
+	return false
+}
+
+func validIssueStateReason(s string) bool {
+	switch s {
+	case "", issueReasonCompleted, issueReasonNotPlanned:
 		return true
 	}
 	return false
@@ -147,7 +172,7 @@ func normaliseIssueCreate(in IssueCreateInput) (IssueCreateInput, error) {
 }
 
 const issueCols = `i.id, i.project_id, i.repo_id, r.slug, i.number, i.title, i.body,
-	i.type, i.status, i.priority, i.assignee, i.created_by,
+	i.type, i.status, COALESCE(i.state, 'open'), COALESCE(i.state_reason, ''), i.priority, i.assignee, i.created_by,
 	COALESCE(i.closed_at, ''), i.created_at, i.updated_at,
 	(SELECT COUNT(*) FROM repo_issue_comments c WHERE c.issue_id = i.id),
 	(SELECT COUNT(*) FROM repo_issue_links l WHERE l.issue_id = i.id)`
@@ -156,7 +181,7 @@ func scanIssueRow(s rowScanner) (*Issue, error) {
 	var iss Issue
 	if err := s.Scan(
 		&iss.ID, &iss.ProjectID, &iss.RepoID, &iss.RepoSlug, &iss.Number,
-		&iss.Title, &iss.Body, &iss.Type, &iss.Status, &iss.Priority,
+		&iss.Title, &iss.Body, &iss.Type, &iss.Status, &iss.State, &iss.StateReason, &iss.Priority,
 		&iss.Assignee, &iss.CreatedBy, &iss.ClosedAt, &iss.CreatedAt, &iss.UpdatedAt,
 		&iss.CommentsCount, &iss.LinksCount,
 	); err != nil {
@@ -186,7 +211,7 @@ func dbCreateIssue(db *sql.DB, projectID string, repo *Repo, in IssueCreateInput
 	res, err := tx.Exec(`
 		INSERT INTO repo_issues (
 			project_id, repo_id, number, title, body, type, status, priority, assignee, created_by
-		) VALUES (?, ?, ?, ?, ?, ?, 'open', ?, ?, ?)
+		) VALUES (?, ?, ?, ?, ?, ?, 'todo', ?, ?, ?)
 	`, projectID, repo.ID, next, in.Title, in.Body, in.Type, in.Priority, in.Assignee, in.CreatedBy)
 	if err != nil {
 		return nil, err
@@ -205,13 +230,24 @@ func dbListIssues(db *sql.DB, projectID string, repoID int64, opt IssueListOptio
 	query := `SELECT ` + issueCols + ` FROM repo_issues i JOIN repositories r ON r.id = i.repo_id
 		WHERE i.project_id = ? AND i.repo_id = ?`
 	args := []any{projectID, repoID}
+	if opt.Status == "active" {
+		opt.State = issueStateOpen
+		opt.Status = ""
+	}
+	if opt.Status == issueStateOpen || opt.Status == issueStateClosed {
+		opt.State = opt.Status
+		opt.Status = ""
+	}
+	if opt.State == "" {
+		opt.State = issueStateOpen
+	}
+	if opt.State != "all" {
+		query += ` AND COALESCE(i.state, 'open') = ?`
+		args = append(args, opt.State)
+	}
 	if opt.Status != "" && opt.Status != "all" {
-		if opt.Status == "active" {
-			query += ` AND i.status NOT IN ('done', 'closed')`
-		} else {
-			query += ` AND i.status = ?`
-			args = append(args, opt.Status)
-		}
+		query += ` AND i.status = ?`
+		args = append(args, opt.Status)
 	}
 	if opt.Type != "" {
 		query += ` AND i.type = ?`
@@ -331,11 +367,49 @@ func dbUpdateIssue(db *sql.DB, iss *Issue, patch IssuePatch) (*Issue, error) {
 			return nil, fmt.Errorf("invalid issue status %q", *patch.Status)
 		}
 		add("status", *patch.Status)
-		if *patch.Status == issueStatusDone || *patch.Status == issueStatusClosed {
+		if *patch.Status == issueStatusDone && patch.State == nil {
+			state := issueStateClosed
+			patch.State = &state
+		}
+		if *patch.Status != issueStatusDone && patch.State == nil && iss.State == issueStateClosed {
+			state := issueStateOpen
+			patch.State = &state
+		}
+	}
+	if patch.State != nil {
+		if !validIssueState(*patch.State) {
+			return nil, fmt.Errorf("invalid issue state %q", *patch.State)
+		}
+		add("state", *patch.State)
+		if *patch.State == issueStateClosed {
 			sets = append(sets, "closed_at = COALESCE(closed_at, CURRENT_TIMESTAMP)")
+			if patch.StateReason == nil && iss.StateReason == "" {
+				reason := issueReasonCompleted
+				patch.StateReason = &reason
+			}
+			if patch.Status == nil && iss.Status != issueStatusDone {
+				status := issueStatusDone
+				patch.Status = &status
+				add("status", status)
+			}
 		} else {
 			sets = append(sets, "closed_at = NULL")
+			if patch.StateReason == nil {
+				reason := ""
+				patch.StateReason = &reason
+			}
+			if patch.Status == nil && iss.Status == issueStatusDone {
+				status := issueStatusTodo
+				patch.Status = &status
+				add("status", status)
+			}
 		}
+	}
+	if patch.StateReason != nil {
+		if !validIssueStateReason(*patch.StateReason) {
+			return nil, fmt.Errorf("invalid issue state_reason %q", *patch.StateReason)
+		}
+		add("state_reason", *patch.StateReason)
 	}
 	if len(sets) == 0 {
 		return iss, nil
@@ -500,6 +574,7 @@ func emitIssueEvent(ctx *sdk.AppCtx, topic string, repo *Repo, issue *Issue) {
 	}
 	ctx.Emit(topic, map[string]any{
 		"slug": repo.Slug, "repo_id": repo.ID, "issue_id": issue.ID, "number": issue.Number,
-		"title": issue.Title, "status": issue.Status, "type": issue.Type, "priority": issue.Priority,
+		"title": issue.Title, "state": issue.State, "state_reason": issue.StateReason,
+		"status": issue.Status, "type": issue.Type, "priority": issue.Priority,
 	})
 }
