@@ -24,7 +24,7 @@ import (
 //go:embed apteva.yaml
 var manifestYAML string
 
-const appVersion = "1.1.0"
+const appVersion = "1.1.1"
 
 const (
 	StatusProvisioning = "provisioning"
@@ -836,22 +836,29 @@ func dbProductList(db *sql.DB) ([]*Product, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
 	var out []*Product
 	for rows.Next() {
 		p, err := scanProduct(rows)
 		if err != nil {
+			rows.Close()
 			return nil, err
 		}
+		out = append(out, p)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	rows.Close()
+	for _, p := range out {
 		if p.Versions, err = dbProductVersions(db, p.Key); err != nil {
 			return nil, err
 		}
 		if p.Plans, err = dbPlansForProduct(db, p.Key); err != nil {
 			return nil, err
 		}
-		out = append(out, p)
 	}
-	return out, rows.Err()
+	return out, nil
 }
 
 func dbProductGet(db *sql.DB, key string) (*Product, error) {
@@ -905,21 +912,28 @@ func dbPlanList(db *sql.DB) ([]*Plan, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
 	var out []*Plan
 	for rows.Next() {
 		p, err := scanPlan(rows)
 		if err != nil {
+			rows.Close()
 			return nil, err
 		}
+		out = append(out, p)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	rows.Close()
+	for _, p := range out {
 		limits, err := dbPlanLimits(db, p.Key)
 		if err != nil {
 			return nil, err
 		}
 		p.Limits = limits
-		out = append(out, p)
 	}
-	return out, rows.Err()
+	return out, nil
 }
 
 func dbPlanGet(db *sql.DB, key string) (*Plan, error) {
@@ -939,20 +953,27 @@ func dbPlansForProduct(db *sql.DB, productKey string) ([]*Plan, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
 	var out []*Plan
 	for rows.Next() {
 		p, err := scanPlan(rows)
 		if err != nil {
-			return nil, err
-		}
-		p.Limits, err = dbPlanLimits(db, p.Key)
-		if err != nil {
+			rows.Close()
 			return nil, err
 		}
 		out = append(out, p)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	rows.Close()
+	for _, p := range out {
+		p.Limits, err = dbPlanLimits(db, p.Key)
+		if err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
 }
 
 func planSelect() string {

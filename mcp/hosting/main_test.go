@@ -76,6 +76,7 @@ func newTestCtx(t *testing.T, pf sdk.PlatformClient) (*sdk.AppCtx, *sql.DB) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	db.SetMaxOpenConns(1)
 	migrations, err := filepath.Glob("migrations/*.sql")
 	if err != nil {
 		t.Fatal(err)
@@ -108,8 +109,8 @@ func TestEmbeddedManifest_Valid(t *testing.T) {
 	if m.Name != "hosting" {
 		t.Errorf("manifest.Name=%q, want hosting", m.Name)
 	}
-	if m.Version != "1.1.0" {
-		t.Errorf("manifest.Version=%q, want 1.1.0", m.Version)
+	if m.Version != "1.1.1" {
+		t.Errorf("manifest.Version=%q, want 1.1.1", m.Version)
 	}
 	if m.DB == nil {
 		t.Fatal("manifest.DB missing")
