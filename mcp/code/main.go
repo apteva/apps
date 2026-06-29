@@ -2,8 +2,8 @@
 //
 // Disk layout (LocalFileStore — v0.1 backend):
 //
-//   /data/repos/<slug>/files/<path>       file content
-//   /data/code.db                         repositories metadata
+//	/data/repos/<slug>/files/<path>       file content
+//	/data/code.db                         repositories metadata
 //
 // v0.2 will swap LocalFileStore for a StorageAppFileStore backed by
 // the Storage app over the cross-app RPC the SDK is gaining. The
@@ -34,15 +34,15 @@ var templatesFS embed.FS
 const manifestYAML = `schema: apteva-app/v1
 name: code
 display_name: Apteva Code
-version: 0.5.8
+version: 0.5.9
 description: |
   Repositories — code workspaces scoped to Apteva projects, with
   first-class editing tools modelled on Claude Code. Optionally
   imports repositories from GitHub when a github connection is bound,
   imports ZIP archives through the UI,
-  uses editor-style SVG icons in the source tree,
+  manages native repo issues for bugs, feature requests, and tasks,
   and optionally publishes dev runs at <slug>.<dev_base_hostname>
-  when the Routes app is bound.
+  through server-native ingress.
 author: Apteva
 scopes: [project, global]
 requires:
@@ -50,6 +50,7 @@ requires:
     - db.write.app
     - platform.connections.execute
     - platform.apps.call
+    - platform.ingress.write
   integrations:
     - role: github
       kind: integration
@@ -62,12 +63,6 @@ requires:
         list_repos:  list_repos
         get_archive: get_archive
         get_repo:    get_repo
-    - role: routes
-      kind: app
-      required: false
-      compatible_app_names: [routes]
-      label: Routes app
-      hint: Install the Routes app to publish dev runs at <slug>.<dev_base_hostname>. Off by default — pass expose=true on repos_dev_start to publish.
     - role: simulator
       kind: app
       required: false
@@ -103,6 +98,14 @@ provides:
     - { name: repos_dev_stop,         description: "Stop the dev process for a repo." }
     - { name: repos_dev_status,       description: "Get the current dev run state (port, pid, status, framework)." }
     - { name: repos_dev_logs,         description: "Tail the dev run's stdout/stderr log file." }
+    - { name: issues_list,            description: "List native Code issues for a repository." }
+    - { name: issues_get,             description: "Get a native Code issue with comments, links, and activity." }
+    - { name: issues_create,          description: "Create a native Code issue." }
+    - { name: issues_update,          description: "Update native Code issue fields." }
+    - { name: issues_comment,         description: "Add a comment to a native Code issue." }
+    - { name: issues_close,           description: "Close a native Code issue." }
+    - { name: issues_reopen,          description: "Reopen a native Code issue." }
+    - { name: issues_link_path,       description: "Link an issue to a repository path or line range." }
   ui_panels:
     - { slot: project.page, label: "Code", icon: code, entry: /ui/CodePanel.mjs }
 runtime:

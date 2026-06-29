@@ -80,6 +80,10 @@ func (a *App) handleRepoItem(w http.ResponseWriter, r *http.Request) {
 		a.httpRepoUnmarkTemplate(w, r, slug)
 	case tail == "fork":
 		a.httpRepoFork(w, r, slug)
+	case tail == "issues":
+		a.httpRepoIssuesCollection(w, r, slug)
+	case strings.HasPrefix(tail, "issues/"):
+		a.httpRepoIssueItem(w, r, slug, strings.TrimPrefix(tail, "issues/"))
 	case strings.HasPrefix(tail, "dev/") || tail == "dev":
 		a.httpRepoDev(w, r, slug, strings.TrimPrefix(tail, "dev/"))
 	default:
@@ -594,6 +598,204 @@ func httpErr(w http.ResponseWriter, code int, msg string) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(map[string]any{"error": msg})
+}
+
+// ─── Issues ───────────────────────────────────────────────────────
+
+func (a *App) httpRepoIssuesCollection(w http.ResponseWriter, r *http.Request, slug string) {
+	pid, repo, ok := a.httpIssueRepo(w, r, slug)
+	if !ok {
+		return
+	}
+	switch r.Method {
+	case http.MethodGet:
+		status := r.URL.Query().Get("status")
+		if status == "" {
+			status = "active"
+		}
+		issues, err := dbListIssues(globalCtx.AppDB(), pid, repo.ID, IssueListOptions{
+			Status:   status,
+			Type:     r.URL.Query().Get("type"),
+			Priority: r.URL.Query().Get("priority"),
+			Assignee: r.URL.Query().Get("assignee"),
+			Q:        r.URL.Query().Get("q"),
+			Limit:    atoiOr(r.URL.Query().Get("limit"), 100),
+		})
+		if err != nil {
+			httpErr(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		httpJSON(w, map[string]any{"issues": issues, "count": len(issues)})
+	case http.MethodPost:
+		var body IssueCreateInput
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			httpErr(w, http.StatusBadRequest, "invalid JSON")
+			return
+		}
+		iss, err := dbCreateIssue(globalCtx.AppDB(), pid, repo, body)
+		if err != nil {
+			httpErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		emitIssueEvent(globalCtx, "issue.created", repo, iss)
+		httpJSON(w, map[string]any{"issue": iss})
+	default:
+		httpErr(w, http.StatusMethodNotAllowed, "GET or POST")
+	}
+}
+
+func (a *App) httpRepoIssueItem(w http.ResponseWriter, r *http.Request, slug, rest string) {
+	pid, repo, ok := a.httpIssueRepo(w, r, slug)
+	if !ok {
+		return
+	}
+	parts := strings.SplitN(strings.Trim(rest, "/"), "/", 2)
+	n := atoiOr(parts[0], 0)
+	if n <= 0 {
+		httpErr(w, http.StatusBadRequest, "issue number required")
+		return
+	}
+	action := ""
+	if len(parts) == 2 {
+		action = parts[1]
+	}
+	iss, err := dbGetIssueByNumber(globalCtx.AppDB(), pid, repo.ID, n)
+	if err != nil {
+		httpErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if iss == nil {
+		httpErr(w, http.StatusNotFound, "issue not found")
+		return
+	}
+
+	switch action {
+	case "":
+		switch r.Method {
+		case http.MethodGet:
+			detail, err := dbGetIssueDetail(globalCtx.AppDB(), pid, repo.ID, n)
+			if err != nil {
+				httpErr(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			httpJSON(w, detail)
+		case http.MethodPatch:
+			var body IssuePatch
+			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+				httpErr(w, http.StatusBadRequest, "invalid JSON")
+				return
+			}
+			updated, err := dbUpdateIssue(globalCtx.AppDB(), iss, body)
+			if err != nil {
+				httpErr(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			emitIssueEvent(globalCtx, "issue.updated", repo, updated)
+			httpJSON(w, map[string]any{"issue": updated})
+		default:
+			httpErr(w, http.StatusMethodNotAllowed, "GET or PATCH")
+		}
+	case "comments":
+		if r.Method != http.MethodPost {
+			httpErr(w, http.StatusMethodNotAllowed, "POST")
+			return
+		}
+		var body struct {
+			Author string `json:"author"`
+			Body   string `json:"body"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			httpErr(w, http.StatusBadRequest, "invalid JSON")
+			return
+		}
+		comment, err := dbAddIssueComment(globalCtx.AppDB(), iss.ID, body.Author, body.Body)
+		if err != nil {
+			httpErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		refreshed, _ := dbGetIssueByID(globalCtx.AppDB(), iss.ID)
+		emitIssueEvent(globalCtx, "issue.commented", repo, refreshed)
+		httpJSON(w, map[string]any{"comment": comment, "issue": refreshed})
+	case "close":
+		if r.Method != http.MethodPost {
+			httpErr(w, http.StatusMethodNotAllowed, "POST")
+			return
+		}
+		var body struct {
+			Resolution string `json:"resolution"`
+			Actor      string `json:"actor"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if strings.TrimSpace(body.Resolution) != "" {
+			if _, err := dbAddIssueComment(globalCtx.AppDB(), iss.ID, body.Actor, body.Resolution); err != nil {
+				httpErr(w, http.StatusBadRequest, err.Error())
+				return
+			}
+		}
+		status := issueStatusClosed
+		updated, err := dbUpdateIssue(globalCtx.AppDB(), iss, IssuePatch{Status: &status, Actor: body.Actor})
+		if err != nil {
+			httpErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		emitIssueEvent(globalCtx, "issue.closed", repo, updated)
+		httpJSON(w, map[string]any{"issue": updated})
+	case "reopen":
+		if r.Method != http.MethodPost {
+			httpErr(w, http.StatusMethodNotAllowed, "POST")
+			return
+		}
+		var body struct{ Actor string }
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		status := issueStatusOpen
+		updated, err := dbUpdateIssue(globalCtx.AppDB(), iss, IssuePatch{Status: &status, Actor: body.Actor})
+		if err != nil {
+			httpErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		emitIssueEvent(globalCtx, "issue.reopened", repo, updated)
+		httpJSON(w, map[string]any{"issue": updated})
+	case "links/path":
+		if r.Method != http.MethodPost {
+			httpErr(w, http.StatusMethodNotAllowed, "POST")
+			return
+		}
+		var body struct {
+			Path      string `json:"path"`
+			LineStart int    `json:"line_start"`
+			LineEnd   int    `json:"line_end"`
+			Title     string `json:"title"`
+			Actor     string `json:"actor"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			httpErr(w, http.StatusBadRequest, "invalid JSON")
+			return
+		}
+		link, err := issuePathLink(globalCtx.AppDB(), iss, body.Path, body.LineStart, body.LineEnd, body.Title, body.Actor)
+		if err != nil {
+			httpErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		refreshed, _ := dbGetIssueByID(globalCtx.AppDB(), iss.ID)
+		emitIssueEvent(globalCtx, "issue.linked", repo, refreshed)
+		httpJSON(w, map[string]any{"link": link, "issue": refreshed})
+	default:
+		httpErr(w, http.StatusNotFound, "no such issue action: "+action)
+	}
+}
+
+func (a *App) httpIssueRepo(w http.ResponseWriter, r *http.Request, slug string) (string, *Repo, bool) {
+	pid, err := resolveProjectFromRequest(r)
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return "", nil, false
+	}
+	repo, err := requireRepoSlug(globalCtx, pid, slug)
+	if err != nil {
+		httpErr(w, http.StatusNotFound, err.Error())
+		return "", nil, false
+	}
+	return pid, repo, true
 }
 
 // ─── Templates / fork ─────────────────────────────────────────────

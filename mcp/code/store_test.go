@@ -162,6 +162,84 @@ func TestArchiveAndList(t *testing.T) {
 	}
 }
 
+func TestIssues_CreateUpdateCommentAndLink(t *testing.T) {
+	db := openTestDB(t)
+	repo, err := dbCreateRepo(db, "p1", CreateRepoInput{Name: "App"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	iss, err := dbCreateIssue(db, "p1", repo, IssueCreateInput{
+		Title:     "Login button does nothing",
+		Body:      "Clicking the button has no effect.",
+		Type:      "bug",
+		Priority:  "high",
+		CreatedBy: "human:test",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if iss.Number != 1 || iss.Status != "open" || iss.Type != "bug" {
+		t.Fatalf("created issue wrong: %+v", iss)
+	}
+
+	next, err := dbCreateIssue(db, "p1", repo, IssueCreateInput{Title: "Add dark mode", Type: "feature"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if next.Number != 2 {
+		t.Fatalf("second issue number=%d, want 2", next.Number)
+	}
+
+	active, err := dbListIssues(db, "p1", repo.ID, IssueListOptions{Status: "active"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(active) != 2 {
+		t.Fatalf("active issues=%d, want 2", len(active))
+	}
+
+	status := issueStatusClosed
+	closed, err := dbUpdateIssue(db, iss, IssuePatch{Status: &status, Actor: "agent:test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if closed.Status != issueStatusClosed || closed.ClosedAt == "" {
+		t.Fatalf("close failed: %+v", closed)
+	}
+
+	if _, err := dbAddIssueComment(db, iss.ID, "agent:test", "Fixed in input handler."); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := issuePathLink(db, iss, "src/App.tsx", 12, 15, "", "agent:test"); err != nil {
+		t.Fatal(err)
+	}
+	detail, err := dbGetIssueDetail(db, "p1", repo.ID, iss.Number)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(detail.Comments) != 1 || len(detail.Links) != 1 || len(detail.Events) < 4 {
+		t.Fatalf("detail missing related records: comments=%d links=%d events=%d", len(detail.Comments), len(detail.Links), len(detail.Events))
+	}
+}
+
+func TestIssues_ProjectScopeAndRepoScope(t *testing.T) {
+	db := openTestDB(t)
+	a, _ := dbCreateRepo(db, "p1", CreateRepoInput{Name: "App"})
+	b, _ := dbCreateRepo(db, "p1", CreateRepoInput{Name: "Other"})
+	c, _ := dbCreateRepo(db, "p2", CreateRepoInput{Name: "App"})
+	dbCreateIssue(db, "p1", a, IssueCreateInput{Title: "p1 app"})
+	dbCreateIssue(db, "p1", b, IssueCreateInput{Title: "p1 other"})
+	dbCreateIssue(db, "p2", c, IssueCreateInput{Title: "p2 app"})
+
+	got, err := dbListIssues(db, "p1", a.ID, IssueListOptions{Status: "all"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 1 || got[0].Title != "p1 app" {
+		t.Fatalf("scope leak: %+v", got)
+	}
+}
+
 // TestDevRun_UpsertAndGet pins the per-(project, repo) uniqueness
 // guarantee — re-upserting the same key updates in place rather than
 // creating a second row, so the supervisor can't end up with two

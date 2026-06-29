@@ -232,13 +232,117 @@ func (a *App) MCPTools() []sdk.Tool {
 			Handler: a.toolReposImportGithub,
 		},
 		{
+			Name: "issues_list",
+			Description: "List native Code issues for a repo. Args: slug (required), status? " +
+				"(active | all | open | triage | planned | in_progress | blocked | done | closed; default active), type?, priority?, assignee?, q?, limit?.",
+			InputSchema: schemaObject(map[string]any{
+				"slug":     map[string]any{"type": "string"},
+				"status":   map[string]any{"type": "string"},
+				"type":     map[string]any{"type": "string"},
+				"priority": map[string]any{"type": "string"},
+				"assignee": map[string]any{"type": "string"},
+				"q":        map[string]any{"type": "string"},
+				"limit":    map[string]any{"type": "integer"},
+			}, []string{"slug"}),
+			Handler: a.toolIssuesList,
+		},
+		{
+			Name:        "issues_get",
+			Description: "Get a native Code issue with comments, links, and activity. Args: slug, number.",
+			InputSchema: schemaObject(map[string]any{
+				"slug":   map[string]any{"type": "string"},
+				"number": map[string]any{"type": "integer"},
+			}, []string{"slug", "number"}),
+			Handler: a.toolIssuesGet,
+		},
+		{
+			Name: "issues_create",
+			Description: "Create a native Code issue. Args: slug, title, body?, type? " +
+				"(bug | feature | task | chore), priority? (low | medium | high | urgent), assignee?, created_by?, link_path?, line_start?, line_end?.",
+			InputSchema: schemaObject(map[string]any{
+				"slug":       map[string]any{"type": "string"},
+				"title":      map[string]any{"type": "string"},
+				"body":       map[string]any{"type": "string"},
+				"type":       map[string]any{"type": "string"},
+				"priority":   map[string]any{"type": "string"},
+				"assignee":   map[string]any{"type": "string"},
+				"created_by": map[string]any{"type": "string"},
+				"link_path":  map[string]any{"type": "string"},
+				"line_start": map[string]any{"type": "integer"},
+				"line_end":   map[string]any{"type": "integer"},
+			}, []string{"slug", "title"}),
+			Handler: a.toolIssuesCreate,
+		},
+		{
+			Name:        "issues_update",
+			Description: "Update a native Code issue. Args: slug, number, title?, body?, type?, status?, priority?, assignee?, actor?.",
+			InputSchema: schemaObject(map[string]any{
+				"slug":     map[string]any{"type": "string"},
+				"number":   map[string]any{"type": "integer"},
+				"title":    map[string]any{"type": "string"},
+				"body":     map[string]any{"type": "string"},
+				"type":     map[string]any{"type": "string"},
+				"status":   map[string]any{"type": "string"},
+				"priority": map[string]any{"type": "string"},
+				"assignee": map[string]any{"type": "string"},
+				"actor":    map[string]any{"type": "string"},
+			}, []string{"slug", "number"}),
+			Handler: a.toolIssuesUpdate,
+		},
+		{
+			Name:        "issues_comment",
+			Description: "Add a comment to a native Code issue. Args: slug, number, body, author?.",
+			InputSchema: schemaObject(map[string]any{
+				"slug":   map[string]any{"type": "string"},
+				"number": map[string]any{"type": "integer"},
+				"body":   map[string]any{"type": "string"},
+				"author": map[string]any{"type": "string"},
+			}, []string{"slug", "number", "body"}),
+			Handler: a.toolIssuesComment,
+		},
+		{
+			Name:        "issues_close",
+			Description: "Close a native Code issue. Args: slug, number, resolution?, actor?. Sets status=closed and adds the resolution as a comment when provided.",
+			InputSchema: schemaObject(map[string]any{
+				"slug":       map[string]any{"type": "string"},
+				"number":     map[string]any{"type": "integer"},
+				"resolution": map[string]any{"type": "string"},
+				"actor":      map[string]any{"type": "string"},
+			}, []string{"slug", "number"}),
+			Handler: a.toolIssuesClose,
+		},
+		{
+			Name:        "issues_reopen",
+			Description: "Reopen a native Code issue. Args: slug, number, actor?. Sets status=open.",
+			InputSchema: schemaObject(map[string]any{
+				"slug":   map[string]any{"type": "string"},
+				"number": map[string]any{"type": "integer"},
+				"actor":  map[string]any{"type": "string"},
+			}, []string{"slug", "number"}),
+			Handler: a.toolIssuesReopen,
+		},
+		{
+			Name:        "issues_link_path",
+			Description: "Link an issue to a repo path or line range. Args: slug, number, path, line_start?, line_end?, title?, actor?.",
+			InputSchema: schemaObject(map[string]any{
+				"slug":       map[string]any{"type": "string"},
+				"number":     map[string]any{"type": "integer"},
+				"path":       map[string]any{"type": "string"},
+				"line_start": map[string]any{"type": "integer"},
+				"line_end":   map[string]any{"type": "integer"},
+				"title":      map[string]any{"type": "string"},
+				"actor":      map[string]any{"type": "string"},
+			}, []string{"slug", "number", "path"}),
+			Handler: a.toolIssuesLinkPath,
+		},
+		{
 			Name: "repos_dev_start",
 			Description: "Start a Replit-style dev process for a repo. Auto-detects framework " +
 				"(nextjs / node / go / static) from the file tree, or accepts framework='blank' with run_cmd. " +
 				"Spawns the framework's dev command (next dev / <pm> run dev / go run . / in-process FileServer) " +
 				"with cwd set to the repo's storage_root, so edits via code_edit_file land directly where the " +
 				"running framework's watcher sees them. With expose=true, registers <slug>.<dev_base_hostname> " +
-				"with the Routes app so the dev process is reachable publicly via apteva-server's host router. " +
+				"with server-native ingress so the dev process is reachable publicly via apteva-server's host router. " +
 				"Args: slug (required), framework?, run_cmd?, env_json?, expose? (default false).",
 			InputSchema: schemaObject(map[string]any{
 				"slug":      map[string]any{"type": "string"},
@@ -298,11 +402,10 @@ func (a *App) toolDevStart(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	// Optional public exposure via the Routes app. Best-effort: a
+	// Optional public exposure via server-native ingress. Best-effort: a
 	// failure here doesn't roll back the dev run — the user can fix
-	// the routes-app binding and call again. Cert handling is the
-	// user's job (a wildcard *.<dev_base_hostname> cert in Certs is
-	// the natural pairing; v0.5.0 doesn't auto-issue per-slug certs).
+	// DNS/config and call again. Cert issuance is handled by the
+	// server for exact hostnames once DNS points at Apteva ingress.
 	exposeResult := map[string]any{"requested": false}
 	if boolArg(args, "expose") && dr != nil && dr.Status != "stopped" && dr.Port > 0 {
 		hostname, err := exposeDevRun(ctx, repo.Slug, dr.Port)
@@ -333,8 +436,8 @@ func (a *App) toolDevStop(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	}
 	// Best-effort route cleanup — if the user passed expose=true on
 	// start, we registered <slug>.<dev_base_hostname>. Drop it now
-	// regardless of whether expose was requested; routes_unregister
-	// is idempotent on a missing hostname.
+	// regardless of whether expose was requested; UnexposeIngress is
+	// idempotent on a missing hostname.
 	_ = unexposeDevRun(ctx, repo.Slug)
 	return map[string]any{"stopped": true}, nil
 }
@@ -408,6 +511,213 @@ func (a *App) toolReposImportGithub(ctx *sdk.AppCtx, args map[string]any) (any, 
 	}, nil
 }
 
+// ─── issues_* handlers ────────────────────────────────────────────
+
+func (a *App) toolIssuesList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, repo, err := issueRepoFromArgs(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	status := strArg(args, "status")
+	if status == "" {
+		status = "active"
+	}
+	issues, err := dbListIssues(ctx.AppDB(), pid, repo.ID, IssueListOptions{
+		Status:   status,
+		Type:     strArg(args, "type"),
+		Priority: strArg(args, "priority"),
+		Assignee: strArg(args, "assignee"),
+		Q:        strArg(args, "q"),
+		Limit:    intArg(args, "limit", 100),
+	})
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"issues": issues, "count": len(issues)}, nil
+}
+
+func (a *App) toolIssuesGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, repo, err := issueRepoFromArgs(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	detail, err := dbGetIssueDetail(ctx.AppDB(), pid, repo.ID, intArg(args, "number", 0))
+	if err != nil {
+		return nil, err
+	}
+	if detail == nil {
+		return map[string]any{"issue": nil, "found": false}, nil
+	}
+	return map[string]any{"issue": detail.Issue, "comments": detail.Comments, "links": detail.Links, "events": detail.Events, "found": true}, nil
+}
+
+func (a *App) toolIssuesCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, repo, err := issueRepoFromArgs(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	iss, err := dbCreateIssue(ctx.AppDB(), pid, repo, IssueCreateInput{
+		Title:     strArg(args, "title"),
+		Body:      strArg(args, "body"),
+		Type:      strArg(args, "type"),
+		Priority:  strArg(args, "priority"),
+		Assignee:  strArg(args, "assignee"),
+		CreatedBy: strArg(args, "created_by"),
+	})
+	if err != nil {
+		return nil, err
+	}
+	if p := strArg(args, "link_path"); p != "" {
+		if _, err := issuePathLink(ctx.AppDB(), iss, p, intArg(args, "line_start", 0), intArg(args, "line_end", 0), "", strArg(args, "created_by")); err != nil {
+			return nil, err
+		}
+	}
+	emitIssueEvent(ctx, "issue.created", repo, iss)
+	return map[string]any{"issue": iss}, nil
+}
+
+func (a *App) toolIssuesUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	_, repo, iss, err := issueFromArgs(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	patch := IssuePatch{Actor: strArg(args, "actor")}
+	if v, ok := args["title"].(string); ok {
+		patch.Title = &v
+	}
+	if v, ok := args["body"].(string); ok {
+		patch.Body = &v
+	}
+	if v, ok := args["type"].(string); ok {
+		patch.Type = &v
+	}
+	if v, ok := args["status"].(string); ok {
+		patch.Status = &v
+	}
+	if v, ok := args["priority"].(string); ok {
+		patch.Priority = &v
+	}
+	if v, ok := args["assignee"].(string); ok {
+		patch.Assignee = &v
+	}
+	updated, err := dbUpdateIssue(ctx.AppDB(), iss, patch)
+	if err != nil {
+		return nil, err
+	}
+	emitIssueEvent(ctx, "issue.updated", repo, updated)
+	return map[string]any{"issue": updated}, nil
+}
+
+func (a *App) toolIssuesComment(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	_, repo, iss, err := issueFromArgs(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	comment, err := dbAddIssueComment(ctx.AppDB(), iss.ID, strArg(args, "author"), strArg(args, "body"))
+	if err != nil {
+		return nil, err
+	}
+	refreshed, _ := dbGetIssueByID(ctx.AppDB(), iss.ID)
+	emitIssueEvent(ctx, "issue.commented", repo, refreshed)
+	return map[string]any{"comment": comment, "issue": refreshed}, nil
+}
+
+func (a *App) toolIssuesClose(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	_, repo, iss, err := issueFromArgs(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	actor := strArg(args, "actor")
+	if res := strArg(args, "resolution"); res != "" {
+		if _, err := dbAddIssueComment(ctx.AppDB(), iss.ID, actor, res); err != nil {
+			return nil, err
+		}
+	}
+	status := issueStatusClosed
+	updated, err := dbUpdateIssue(ctx.AppDB(), iss, IssuePatch{Status: &status, Actor: actor})
+	if err != nil {
+		return nil, err
+	}
+	emitIssueEvent(ctx, "issue.closed", repo, updated)
+	return map[string]any{"issue": updated}, nil
+}
+
+func (a *App) toolIssuesReopen(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	_, repo, iss, err := issueFromArgs(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	status := issueStatusOpen
+	updated, err := dbUpdateIssue(ctx.AppDB(), iss, IssuePatch{Status: &status, Actor: strArg(args, "actor")})
+	if err != nil {
+		return nil, err
+	}
+	emitIssueEvent(ctx, "issue.reopened", repo, updated)
+	return map[string]any{"issue": updated}, nil
+}
+
+func (a *App) toolIssuesLinkPath(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	_, repo, iss, err := issueFromArgs(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	link, err := issuePathLink(ctx.AppDB(), iss, strArg(args, "path"), intArg(args, "line_start", 0), intArg(args, "line_end", 0), strArg(args, "title"), strArg(args, "actor"))
+	if err != nil {
+		return nil, err
+	}
+	refreshed, _ := dbGetIssueByID(ctx.AppDB(), iss.ID)
+	emitIssueEvent(ctx, "issue.linked", repo, refreshed)
+	return map[string]any{"link": link, "issue": refreshed}, nil
+}
+
+func issueRepoFromArgs(ctx *sdk.AppCtx, args map[string]any) (string, *Repo, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return "", nil, err
+	}
+	repo, err := requireRepo(ctx, pid, strArg(args, "slug"))
+	return pid, repo, err
+}
+
+func issueFromArgs(ctx *sdk.AppCtx, args map[string]any) (string, *Repo, *Issue, error) {
+	pid, repo, err := issueRepoFromArgs(ctx, args)
+	if err != nil {
+		return "", nil, nil, err
+	}
+	n := intArg(args, "number", 0)
+	if n <= 0 {
+		return "", nil, nil, errors.New("number required")
+	}
+	iss, err := dbGetIssueByNumber(ctx.AppDB(), pid, repo.ID, n)
+	if err != nil {
+		return "", nil, nil, err
+	}
+	if iss == nil {
+		return "", nil, nil, fmt.Errorf("issue #%d not found", n)
+	}
+	return pid, repo, iss, nil
+}
+
+func issuePathLink(db *sql.DB, iss *Issue, rawPath string, lineStart, lineEnd int, title, actor string) (*IssueLink, error) {
+	rel, err := normalisePath(rawPath)
+	if err != nil {
+		return nil, err
+	}
+	target := rel
+	data := map[string]any{"path": rel}
+	if lineStart > 0 {
+		data["line_start"] = lineStart
+		target = fmt.Sprintf("%s:%d", rel, lineStart)
+	}
+	if lineEnd > 0 {
+		data["line_end"] = lineEnd
+	}
+	if title == "" {
+		title = target
+	}
+	return dbAddIssueLink(db, iss.ID, "path", target, title, data, actor)
+}
+
 // ─── Template / fork handlers ──────────────────────────────────────
 
 func (a *App) toolMarkTemplate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -455,10 +765,10 @@ func (a *App) toolUnmarkTemplate(ctx *sdk.AppCtx, args map[string]any) (any, err
 type TemplateEntry struct {
 	Kind      string `json:"kind"` // 'user' | 'embedded'
 	Name      string `json:"name"`
-	Slug      string `json:"slug"`              // user: repo slug; embedded: framework name
+	Slug      string `json:"slug"` // user: repo slug; embedded: framework name
 	Tagline   string `json:"tagline,omitempty"`
 	Icon      string `json:"icon,omitempty"`
-	Scope     string `json:"scope,omitempty"`   // user only
+	Scope     string `json:"scope,omitempty"` // user only
 	FileCount int    `json:"file_count"`
 	ProjectID string `json:"project_id,omitempty"` // user only
 }

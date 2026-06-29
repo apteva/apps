@@ -2,16 +2,20 @@ schema: apteva-app/v1
 
 name: code
 display_name: Apteva Code
-version: 0.5.8
+version: 0.5.9
 description: |
   Repositories — named, framework-tagged code workspaces scoped under
   Apteva projects. First-class editing tools modelled on Claude Code:
   partial reads with line numbers, exact-match string edits with
   uniqueness checks, atomic multi-edit, repo-wide grep + glob, and
-  ZIP import for repository initialization or overlay updates.
-  v0.5.8 refreshes the source tree with editor-style SVG icons.
+  ZIP import for repository initialization or overlay updates. Native
+  repo issues track bugs, feature requests, tasks, comments, and code
+  links for agents and humans.
+  v0.5.9 adds native repo issues so agents can see, work, comment on,
+  link, and close bugs or feature requests directly inside Code.
   v0.1 backs files on local disk; v0.2 delegates to the Storage app
-  via the cross-app RPC the SDK is gaining.
+  via the cross-app RPC the SDK is gaining. Dev runs can be published
+  through server-native ingress.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/code
@@ -26,6 +30,7 @@ requires:
     - db.write.app
     - platform.connections.execute
     - platform.apps.call
+    - platform.ingress.write
   integrations:
     - role: github
       kind: integration
@@ -38,12 +43,6 @@ requires:
         list_repos: list_repos
         get_archive: get_archive
         get_repo: get_repo
-    - role: routes
-      kind: app
-      required: false
-      compatible_app_names: [routes]
-      label: Routes app
-      hint: Install the Routes app to publish dev runs at <slug>.<dev_base_hostname>. Off by default — pass expose=true on repos_dev_start to publish.
     - role: simulator
       kind: app
       required: false
@@ -78,6 +77,22 @@ provides:
       description: Current dev run state (port, pid, status, framework, last error).
     - name: repos_dev_logs
       description: Tail the dev run's stdout/stderr log file.
+    - name: issues_list
+      description: List native Code issues for a repository.
+    - name: issues_get
+      description: Get a native Code issue with comments, links, and activity.
+    - name: issues_create
+      description: Create a native Code issue for bugs, feature requests, tasks, or chores.
+    - name: issues_update
+      description: Update native Code issue fields such as status, priority, type, assignee, title, or body.
+    - name: issues_comment
+      description: Add a comment to a native Code issue.
+    - name: issues_close
+      description: Close a native Code issue and optionally add a resolution comment.
+    - name: issues_reopen
+      description: Reopen a native Code issue.
+    - name: issues_link_path
+      description: Link a native Code issue to a repository path or line range.
     - name: code_list_files
       description: List files in a repository, optionally recursive.
     - name: code_glob

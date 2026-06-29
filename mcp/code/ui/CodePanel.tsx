@@ -128,6 +128,47 @@ interface FileMeta {
   sha256?: string;
 }
 
+type IssueStatus = "open" | "triage" | "planned" | "in_progress" | "blocked" | "done" | "closed";
+type IssueKind = "bug" | "feature" | "task" | "chore";
+type IssuePriority = "low" | "medium" | "high" | "urgent";
+
+interface CodeIssue {
+  id: number;
+  repo_id: number;
+  repo_slug?: string;
+  number: number;
+  title: string;
+  body: string;
+  type: IssueKind;
+  status: IssueStatus;
+  priority: IssuePriority;
+  assignee?: string;
+  created_by?: string;
+  comments_count?: number;
+  links_count?: number;
+  closed_at?: string;
+  created_at: string;
+  updated_at: string;
+}
+
+interface IssueComment {
+  id: number;
+  issue_id: number;
+  author?: string;
+  body: string;
+  created_at: string;
+}
+
+interface IssueLink {
+  id: number;
+  issue_id: number;
+  kind: string;
+  target: string;
+  title?: string;
+  data_json?: string;
+  created_at: string;
+}
+
 // ─── Tree builder + renderer ──────────────────────────────────────
 //
 // The /api/repos/<slug>/tree endpoint returns a flat list of file
@@ -288,6 +329,7 @@ interface FileEventData {
   path?: string;
   from?: string;
   to?: string;
+  number?: number;
 }
 
 const API = "/api/apps/code/api";
@@ -345,6 +387,7 @@ export default function CodePanel({ projectId, installId }: NativePanelProps) {
   const [showNewFile, setShowNewFile] = useState(false);
   const [showNewFolder, setShowNewFolder] = useState(false);
   const [showDevLogs, setShowDevLogs] = useState(false);
+  const [activeView, setActiveView] = useState<"files" | "issues">("files");
   // Lifted from DevBar so the main content area can render the live
   // device view for remote (Simulator-app) dev runs.
   const [devRun, setDevRun] = useState<DevRunWire | null>(null);
@@ -463,6 +506,7 @@ export default function CodePanel({ projectId, installId }: NativePanelProps) {
     setOpenFile(null);
     setEditing(false);
     setDraft("");
+    setActiveView("files");
     setExpandedDirs(new Set()); // reset; loadTree seeds top-level dirs.
     loadTree(slug);
   };
@@ -553,6 +597,7 @@ export default function CodePanel({ projectId, installId }: NativePanelProps) {
 
   const selectFile = (path: string) => {
     if (!selectedSlug) return;
+    setActiveView("files");
     if (dirty) {
       setConfirmState({
         title: "Discard unsaved changes?",
@@ -922,13 +967,51 @@ export default function CodePanel({ projectId, installId }: NativePanelProps) {
             api={api}
             withParams={withParams}
             showLogs={showDevLogs}
-            onToggleLogs={() => setShowDevLogs((v) => !v)}
+            onToggleLogs={() => {
+              setActiveView("files");
+              setShowDevLogs((v) => !v);
+            }}
             onError={(msg) => setError(msg)}
             onRunChange={setDevRun}
           />
         )}
+        {selectedSlug && !showDevLogs && (
+          <div className="px-3 py-1.5 border-b border-border flex items-center gap-1 bg-bg-input/20">
+            <button
+              type="button"
+              onClick={() => setActiveView("files")}
+              className={`px-2 py-0.5 text-xs border rounded ${
+                activeView === "files" ? "border-accent text-accent" : "border-border text-text-muted hover:text-text"
+              }`}
+            >Files</button>
+            <button
+              type="button"
+              onClick={() => setActiveView("issues")}
+              className={`px-2 py-0.5 text-xs border rounded ${
+                activeView === "issues" ? "border-accent text-accent" : "border-border text-text-muted hover:text-text"
+              }`}
+            >Issues</button>
+            <span className="flex-1" />
+            {activeView === "issues" && openFile?.path && (
+              <span className="text-[11px] text-text-dim truncate">
+                current file <span className="font-mono">{openFile.path}</span>
+              </span>
+            )}
+          </div>
+        )}
         {selectedSlug && showDevLogs ? (
           <DevLogsView slug={selectedSlug} withParams={withParams} />
+        ) : selectedSlug && activeView === "issues" ? (
+          <IssuesView
+            slug={selectedSlug}
+            projectId={projectId}
+            api={api}
+            currentPath={openFile?.path}
+            onOpenPath={(path) => {
+              setActiveView("files");
+              selectFile(path);
+            }}
+          />
         ) : selectedSlug && devRun?.runner === "simulator" && devRun.status === "live" ? (
           <RemoteDeviceView run={devRun} />
         ) : !openFile ? (
@@ -1957,6 +2040,459 @@ function ImportGithubDialog({
             disabled={busy || !owner.trim() || !repo.trim()}
             className="px-3 py-1.5 text-sm rounded bg-blue text-white hover:bg-blue/90 disabled:opacity-50"
           >{busy ? "Importing…" : "Import"}</button>
+        </div>
+      </form>
+    </div>
+  );
+}
+
+// ─── IssuesView ────────────────────────────────────────────────────
+//
+// Native local issue tracker for a selected Code repo. The backing
+// REST routes mirror the MCP issue tools, so humans and agents work
+// against the same lifecycle.
+
+const ISSUE_TYPES: IssueKind[] = ["bug", "feature", "task", "chore"];
+const ISSUE_STATUSES: IssueStatus[] = ["open", "triage", "planned", "in_progress", "blocked", "done", "closed"];
+const ISSUE_PRIORITIES: IssuePriority[] = ["low", "medium", "high", "urgent"];
+
+function IssuesView({
+  slug,
+  projectId,
+  api,
+  currentPath,
+  onOpenPath,
+}: {
+  slug: string;
+  projectId: string;
+  api: <T,>(m: string, p: string, b?: unknown, e?: Record<string, string>) => Promise<T>;
+  currentPath?: string;
+  onOpenPath: (path: string) => void;
+}) {
+  const [issues, setIssues] = useState<CodeIssue[]>([]);
+  const [selected, setSelected] = useState<number | null>(null);
+  const [detail, setDetail] = useState<{ issue: CodeIssue; comments: IssueComment[]; links: IssueLink[] } | null>(null);
+  const [status, setStatus] = useState("active");
+  const [kind, setKind] = useState("");
+  const [priority, setPriority] = useState("");
+  const [query, setQuery] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const [showCreate, setShowCreate] = useState(false);
+  const [comment, setComment] = useState("");
+
+  const loadIssues = useCallback(async () => {
+    try {
+      const extra: Record<string, string> = { status };
+      if (kind) extra.type = kind;
+      if (priority) extra.priority = priority;
+      if (query.trim()) extra.q = query.trim();
+      const r = await api<{ issues: CodeIssue[] }>("GET", `/repos/${slug}/issues`, undefined, extra);
+      const list = r.issues || [];
+      setIssues(list);
+      setSelected((cur) => (cur && list.some((i) => i.number === cur) ? cur : list[0]?.number ?? null));
+      setErr("");
+    } catch (e) {
+      setErr((e as Error).message);
+      setIssues([]);
+      setSelected(null);
+    }
+  }, [api, slug, status, kind, priority, query]);
+
+  const loadDetail = useCallback(async (num: number | null) => {
+    if (!num) {
+      setDetail(null);
+      return;
+    }
+    try {
+      const r = await api<{ issue: CodeIssue; comments?: IssueComment[]; links?: IssueLink[] }>("GET", `/repos/${slug}/issues/${num}`);
+      setDetail({ issue: r.issue, comments: r.comments || [], links: r.links || [] });
+      setErr("");
+    } catch (e) {
+      setErr((e as Error).message);
+      setDetail(null);
+    }
+  }, [api, slug]);
+
+  useEffect(() => { loadIssues(); }, [loadIssues]);
+  useEffect(() => { loadDetail(selected); }, [selected, loadDetail]);
+
+  useAppEvents<FileEventData>("code", projectId, (ev) => {
+    if (!ev.topic.startsWith("issue.") || ev.data?.slug !== slug) return;
+    loadIssues();
+    if (selected && ev.data.number === selected) loadDetail(selected);
+  });
+
+  const patchIssue = async (patch: Partial<CodeIssue>) => {
+    if (!detail) return;
+    setBusy(true);
+    try {
+      const r = await api<{ issue: CodeIssue }>("PATCH", `/repos/${slug}/issues/${detail.issue.number}`, patch);
+      setDetail((cur) => cur ? { ...cur, issue: r.issue } : cur);
+      await loadIssues();
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const addComment = async () => {
+    if (!detail || !comment.trim()) return;
+    setBusy(true);
+    try {
+      await api("POST", `/repos/${slug}/issues/${detail.issue.number}/comments`, { body: comment.trim(), author: "human" });
+      setComment("");
+      await loadDetail(detail.issue.number);
+      await loadIssues();
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const closeOrReopen = async () => {
+    if (!detail) return;
+    const closed = detail.issue.status === "closed" || detail.issue.status === "done";
+    setBusy(true);
+    try {
+      await api("POST", `/repos/${slug}/issues/${detail.issue.number}/${closed ? "reopen" : "close"}`, { actor: "human" });
+      await loadDetail(detail.issue.number);
+      await loadIssues();
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const linkCurrentPath = async () => {
+    if (!detail || !currentPath) return;
+    setBusy(true);
+    try {
+      await api("POST", `/repos/${slug}/issues/${detail.issue.number}/links/path`, { path: currentPath, actor: "human" });
+      await loadDetail(detail.issue.number);
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="flex-1 min-h-0 flex">
+      <aside className="w-80 border-r border-border flex flex-col min-h-0">
+        <div className="p-3 border-b border-border space-y-2">
+          <div className="flex items-center gap-2">
+            <input
+              type="text"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="Search issues…"
+              className="flex-1 bg-bg-input border border-border rounded px-2 py-1 text-sm"
+            />
+            <button
+              type="button"
+              onClick={() => setShowCreate(true)}
+              className="px-2 py-1 text-xs border border-accent text-accent rounded hover:bg-accent hover:text-bg"
+            >New</button>
+          </div>
+          <div className="grid grid-cols-3 gap-1">
+            <select value={status} onChange={(e) => setStatus(e.target.value)} className="bg-bg-input border border-border rounded px-1 py-0.5 text-xs">
+              <option value="active">active</option>
+              <option value="all">all</option>
+              {ISSUE_STATUSES.map((s) => <option key={s} value={s}>{s}</option>)}
+            </select>
+            <select value={kind} onChange={(e) => setKind(e.target.value)} className="bg-bg-input border border-border rounded px-1 py-0.5 text-xs">
+              <option value="">all types</option>
+              {ISSUE_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
+            </select>
+            <select value={priority} onChange={(e) => setPriority(e.target.value)} className="bg-bg-input border border-border rounded px-1 py-0.5 text-xs">
+              <option value="">all prio</option>
+              {ISSUE_PRIORITIES.map((p) => <option key={p} value={p}>{p}</option>)}
+            </select>
+          </div>
+        </div>
+        <div className="flex-1 overflow-auto">
+          {err && <div className="p-3 text-red text-xs">{err}</div>}
+          {issues.length === 0 ? (
+            <div className="p-4 text-text-muted text-sm">No issues match this view.</div>
+          ) : (
+            <ul>
+              {issues.map((iss) => (
+                <li key={iss.id}>
+                  <button
+                    type="button"
+                    onClick={() => setSelected(iss.number)}
+                    className={`w-full text-left px-3 py-2 border-b border-border hover:bg-bg-input/50 ${
+                      selected === iss.number ? "bg-bg-input" : ""
+                    }`}
+                  >
+                    <div className="flex items-start gap-2">
+                      <span className="text-[11px] text-text-dim font-mono mt-0.5">#{iss.number}</span>
+                      <span className="text-sm text-text flex-1 truncate">{iss.title}</span>
+                    </div>
+                    <div className="mt-1 flex items-center gap-1 text-[10px] text-text-dim">
+                      <IssuePill label={iss.type} tone={iss.type} />
+                      <IssuePill label={iss.priority} tone={iss.priority} />
+                      <IssuePill label={iss.status} tone={iss.status} />
+                      {iss.comments_count ? <span>{iss.comments_count} comments</span> : null}
+                    </div>
+                  </button>
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      </aside>
+
+      <main className="flex-1 min-w-0 overflow-auto">
+        {!detail ? (
+          <div className="p-8 text-text-muted text-sm text-center">Select an issue.</div>
+        ) : (
+          <div className="max-w-4xl p-4 space-y-4">
+            <div className="border-b border-border pb-3">
+              <div className="flex items-start gap-3">
+                <div className="flex-1 min-w-0">
+                  <div className="text-xs text-text-dim font-mono">#{detail.issue.number}</div>
+                  <input
+                    value={detail.issue.title}
+                    onChange={(e) => setDetail((cur) => cur ? { ...cur, issue: { ...cur.issue, title: e.target.value } } : cur)}
+                    onBlur={(e) => patchIssue({ title: e.target.value })}
+                    className="mt-1 w-full bg-transparent text-text text-lg font-semibold outline-none border-b border-transparent focus:border-border"
+                  />
+                </div>
+                <button
+                  type="button"
+                  onClick={closeOrReopen}
+                  disabled={busy}
+                  className="px-3 py-1 text-xs border border-border rounded hover:bg-bg-input disabled:opacity-50"
+                >{detail.issue.status === "closed" || detail.issue.status === "done" ? "Reopen" : "Close"}</button>
+              </div>
+              <div className="mt-3 grid grid-cols-4 gap-2 max-w-2xl">
+                <IssueSelect label="Type" value={detail.issue.type} options={ISSUE_TYPES} onChange={(v) => patchIssue({ type: v as IssueKind })} />
+                <IssueSelect label="Status" value={detail.issue.status} options={ISSUE_STATUSES} onChange={(v) => patchIssue({ status: v as IssueStatus })} />
+                <IssueSelect label="Priority" value={detail.issue.priority} options={ISSUE_PRIORITIES} onChange={(v) => patchIssue({ priority: v as IssuePriority })} />
+                <div>
+                  <label className="text-[11px] text-text-muted block mb-1">Assignee</label>
+                  <input
+                    value={detail.issue.assignee || ""}
+                    onChange={(e) => setDetail((cur) => cur ? { ...cur, issue: { ...cur.issue, assignee: e.target.value } } : cur)}
+                    onBlur={(e) => patchIssue({ assignee: e.target.value })}
+                    placeholder="unassigned"
+                    className="w-full bg-bg-input border border-border rounded px-2 py-1 text-xs"
+                  />
+                </div>
+              </div>
+            </div>
+
+            <section>
+              <textarea
+                value={detail.issue.body}
+                onChange={(e) => setDetail((cur) => cur ? { ...cur, issue: { ...cur.issue, body: e.target.value } } : cur)}
+                onBlur={(e) => patchIssue({ body: e.target.value })}
+                placeholder="Describe the issue…"
+                className="w-full min-h-32 bg-bg-input border border-border rounded p-3 text-sm text-text outline-none resize-y"
+              />
+            </section>
+
+            <section className="space-y-2">
+              <div className="flex items-center gap-2">
+                <h3 className="text-xs uppercase tracking-wide text-text-dim">Links</h3>
+                <span className="flex-1" />
+                <button
+                  type="button"
+                  onClick={linkCurrentPath}
+                  disabled={!currentPath || busy}
+                  className="px-2 py-0.5 text-xs border border-border rounded text-text-muted hover:text-text disabled:opacity-40"
+                >Link current file</button>
+              </div>
+              {detail.links.length === 0 ? (
+                <div className="text-xs text-text-muted">No code links yet.</div>
+              ) : (
+                <ul className="space-y-1">
+                  {detail.links.map((l) => (
+                    <li key={l.id} className="text-xs flex items-center gap-2">
+                      <span className="text-text-dim">{l.kind}</span>
+                      {l.kind === "path" ? (
+                        <button type="button" onClick={() => onOpenPath(l.target.split(":")[0])} className="font-mono text-accent hover:underline truncate">
+                          {l.target}
+                        </button>
+                      ) : (
+                        <span className="font-mono text-text truncate">{l.target}</span>
+                      )}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </section>
+
+            <section className="space-y-2">
+              <h3 className="text-xs uppercase tracking-wide text-text-dim">Comments</h3>
+              {detail.comments.map((c) => (
+                <div key={c.id} className="border border-border rounded p-3">
+                  <div className="text-[11px] text-text-dim">{c.author || "comment"} · {shortDate(c.created_at)}</div>
+                  <div className="mt-1 text-sm text-text whitespace-pre-wrap">{c.body}</div>
+                </div>
+              ))}
+              <textarea
+                value={comment}
+                onChange={(e) => setComment(e.target.value)}
+                placeholder="Add a comment…"
+                className="w-full min-h-20 bg-bg-input border border-border rounded p-2 text-sm text-text outline-none resize-y"
+              />
+              <div className="flex justify-end">
+                <button
+                  type="button"
+                  onClick={addComment}
+                  disabled={busy || !comment.trim()}
+                  className="px-3 py-1 text-sm border border-accent text-accent rounded hover:bg-accent hover:text-bg disabled:opacity-50"
+                >Comment</button>
+              </div>
+            </section>
+          </div>
+        )}
+      </main>
+
+      {showCreate && (
+        <CreateIssueDialog
+          slug={slug}
+          currentPath={currentPath}
+          api={api}
+          onClose={() => setShowCreate(false)}
+          onCreated={(issue) => {
+            setShowCreate(false);
+            setSelected(issue.number);
+            loadIssues();
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+function IssueSelect({ label, value, options, onChange }: { label: string; value: string; options: readonly string[]; onChange: (v: string) => void }) {
+  return (
+    <div>
+      <label className="text-[11px] text-text-muted block mb-1">{label}</label>
+      <select value={value} onChange={(e) => onChange(e.target.value)} className="w-full bg-bg-input border border-border rounded px-2 py-1 text-xs">
+        {options.map((o) => <option key={o} value={o}>{o}</option>)}
+      </select>
+    </div>
+  );
+}
+
+function IssuePill({ label, tone }: { label: string; tone: string }) {
+  const cls = tone === "bug" || tone === "urgent" || tone === "blocked" || tone === "closed"
+    ? "border-red/50 text-red/80"
+    : tone === "feature" || tone === "planned" || tone === "high"
+      ? "border-blue/50 text-blue/80"
+      : tone === "done"
+        ? "border-green/50 text-green/80"
+        : "border-border text-text-muted";
+  return <span className={`px-1 py-0.5 rounded border ${cls}`}>{label}</span>;
+}
+
+function shortDate(s?: string): string {
+  if (!s) return "";
+  const d = new Date(s);
+  if (Number.isNaN(d.getTime())) return s;
+  return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}
+
+function CreateIssueDialog({
+  slug,
+  currentPath,
+  api,
+  onClose,
+  onCreated,
+}: {
+  slug: string;
+  currentPath?: string;
+  api: <T,>(m: string, p: string, b?: unknown, e?: Record<string, string>) => Promise<T>;
+  onClose: () => void;
+  onCreated: (issue: CodeIssue) => void;
+}) {
+  const [title, setTitle] = useState("");
+  const [body, setBody] = useState("");
+  const [kind, setKind] = useState<IssueKind>("bug");
+  const [priority, setPriority] = useState<IssuePriority>("medium");
+  const [assignee, setAssignee] = useState("");
+  const [linkPath, setLinkPath] = useState(Boolean(currentPath));
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+
+  const submit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!title.trim()) {
+      setErr("title required");
+      return;
+    }
+    setBusy(true);
+    setErr("");
+    try {
+      const r = await api<{ issue: CodeIssue }>("POST", `/repos/${slug}/issues`, {
+        title: title.trim(),
+        body,
+        type: kind,
+        priority,
+        assignee: assignee.trim(),
+        created_by: "human",
+      });
+      if (linkPath && currentPath) {
+        await api("POST", `/repos/${slug}/issues/${r.issue.number}/links/path`, {
+          path: currentPath,
+          actor: "human",
+        });
+      }
+      onCreated(r.issue);
+    } catch (e2) {
+      setErr((e2 as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="fixed inset-0 z-30 flex items-center justify-center bg-black/50" onClick={onClose}>
+      <form
+        onClick={(e) => e.stopPropagation()}
+        onSubmit={submit}
+        className="w-[560px] bg-bg border border-border rounded p-5 space-y-4"
+      >
+        <h2 className="text-text font-semibold">New issue</h2>
+        <div>
+          <label className="text-xs text-text-muted block mb-1">Title</label>
+          <input
+            autoFocus
+            value={title}
+            onChange={(e) => setTitle(e.target.value)}
+            className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm"
+          />
+        </div>
+        <div className="grid grid-cols-3 gap-2">
+          <IssueSelect label="Type" value={kind} options={ISSUE_TYPES} onChange={(v) => setKind(v as IssueKind)} />
+          <IssueSelect label="Priority" value={priority} options={ISSUE_PRIORITIES} onChange={(v) => setPriority(v as IssuePriority)} />
+          <div>
+            <label className="text-[11px] text-text-muted block mb-1">Assignee</label>
+            <input value={assignee} onChange={(e) => setAssignee(e.target.value)} className="w-full bg-bg-input border border-border rounded px-2 py-1 text-xs" />
+          </div>
+        </div>
+        <div>
+          <label className="text-xs text-text-muted block mb-1">Body</label>
+          <textarea value={body} onChange={(e) => setBody(e.target.value)} className="w-full min-h-32 bg-bg-input border border-border rounded p-2 text-sm resize-y" />
+        </div>
+        {currentPath && (
+          <label className="text-xs text-text-muted flex items-center gap-2">
+            <input type="checkbox" checked={linkPath} onChange={(e) => setLinkPath(e.target.checked)} />
+            link <span className="font-mono">{currentPath}</span>
+          </label>
+        )}
+        {err && <div className="text-red text-xs">{err}</div>}
+        <div className="flex justify-end gap-2 pt-1">
+          <button type="button" onClick={onClose} disabled={busy} className="px-3 py-1.5 text-sm rounded border border-border text-text-muted hover:text-text disabled:opacity-50">Cancel</button>
+          <button type="submit" disabled={busy} className="px-3 py-1.5 text-sm rounded bg-blue text-white hover:bg-blue/90 disabled:opacity-50">{busy ? "Creating…" : "Create"}</button>
         </div>
       </form>
     </div>

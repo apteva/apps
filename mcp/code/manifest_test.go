@@ -14,8 +14,8 @@ func TestEmbeddedManifest_Valid(t *testing.T) {
 	if m.Version == "" {
 		t.Error("manifest.Version is empty")
 	}
-	if len(m.Provides.MCPTools) != 24 {
-		t.Errorf("expected 24 MCP tools in manifest, got %d", len(m.Provides.MCPTools))
+	if len(m.Provides.MCPTools) != 32 {
+		t.Errorf("expected 32 MCP tools in manifest, got %d", len(m.Provides.MCPTools))
 	}
 	if m.DB == nil || m.DB.Migrations == "" {
 		t.Errorf("manifest.DB.Migrations missing")
@@ -71,6 +71,8 @@ func TestMCPTools_EditingSurfaceComplete(t *testing.T) {
 		"code_read_file", "code_write_file",
 		"code_edit_file", "code_multi_edit",
 		"code_rename_path", "code_delete_file",
+		"issues_list", "issues_get", "issues_create", "issues_update",
+		"issues_comment", "issues_close", "issues_reopen", "issues_link_path",
 	}
 	for _, name := range must {
 		if !got[name] {
