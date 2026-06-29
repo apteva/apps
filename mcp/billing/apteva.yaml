@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: billing
 display_name: Billing
-version: 0.8.6
+version: 0.8.7
 description: |
   Customers, invoices, and payments for Apteva agents and human teams.
   Per-invoice provider — local for internal/wire/cash records, stripe
@@ -23,6 +23,7 @@ min_apteva_version: "0.10.0"
 requires:
   permissions:
     - db.write.app
+    - net.egress                              # direct Stripe API calls when stripe_secret_key is configured
     - platform.apps.call                       # billing calls catalog when line items reference price_id
     - platform.connections.read_credentials    # for the Stripe webhook signature verification path
   apps:
@@ -41,11 +42,13 @@ requires:
         webhooks.process:         process_webhook
       required: false                          # billing still works without it — manual payments only
       label: "Payment processor (Stripe)"
-      hint: "Bind to enable card payment links on invoices. Without it, payments_record handles wire / cash / check / other only."
+      hint: "Legacy fallback for card payment links. Prefer setting stripe_secret_key directly in Billing config; without either, payments_record handles wire / cash / check / other only."
 
 provides:
   http_routes:
     - prefix: /
+    - prefix: /webhooks/stripe
+      no_auth: true
   mcp_tools:
     - name: customers_search
       description: Filtered customer search by name / email / external_id / metadata.
@@ -81,11 +84,11 @@ provides:
     - name: invoices_send_payment_link
       description: |
         Generate a Stripe-hosted payment URL for an open invoice. Returns
-        {url, expires_at}. Requires the payment_processor integration
-        (Stripe) to be bound; otherwise errors with a clear "bind the
-        integration" message. URL is a Stripe Checkout Session, valid for
-        24h. On payment success, the webhook records the payment + transitions
-        the invoice to 'paid' automatically.
+        {url, expires_at}. Uses stripe_secret_key from Billing config
+        and auto-creates the Stripe webhook endpoint; legacy installs can
+        still use a bound payment_processor integration. URL is a Stripe
+        Checkout Session, valid for 24h. On payment success, the webhook
+        records the payment + transitions the invoice to 'paid' automatically.
     - name: payments_record
       description: Record a non-Stripe payment (wire / cash / check / other). Updates invoice status when fully covered.
     - name: payments_list
@@ -236,11 +239,33 @@ db:
   migrations: migrations/
 
 config_schema:
-  # Stripe is no longer a config-driven toggle — it's the
-  # payment_processor integration declared above. If bound, the
-  # send-payment-link flow lights up; if not, billing degrades
-  # gracefully to manual-only payment recording. No boot-time
-  # gating; runtime checks the binding per request.
+  - name: stripe_secret_key
+    type: password
+    default: ""
+    label: Stripe secret key
+    description: |
+      Optional. Set an sk_test_ or sk_live_ key to enable Stripe Checkout
+      payment links directly from Billing. Billing will create its own
+      Stripe webhook endpoint and store the returned signing secret, so
+      you do not need to paste a whsec_ value.
+  - name: stripe_webhook_url
+    type: text
+    default: ""
+    label: Stripe webhook URL override
+    description: |
+      Optional. Leave blank to use the platform public URL plus
+      /webhooks/stripe. For local testing, set this to a public tunnel URL
+      that forwards to the Billing webhook route.
+  - name: stripe_success_url
+    type: text
+    default: ""
+    label: Stripe success URL
+    description: Optional Checkout success redirect. Leave blank for Billing's dashboard deep link.
+  - name: stripe_cancel_url
+    type: text
+    default: ""
+    label: Stripe cancel URL
+    description: Optional Checkout cancel redirect. Leave blank for Billing's dashboard deep link.
   - name: default_provider
     type: select
     options: [local]

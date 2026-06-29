@@ -37,15 +37,16 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: billing
 display_name: Billing
-version: 0.1.1
+version: 0.8.7
 description: |
   Customers, invoices, and payments. Per-invoice provider — local for
-  internal/wire/cash, stripe for card-payable hosted invoices (v0.1.1+).
+  internal/wire/cash, stripe for card-payable hosted invoices.
 author: Apteva
 scopes: [project, global]
 requires:
   permissions:
     - db.write.app
+    - net.egress
 provides:
   http_routes:
     - prefix: /
@@ -82,18 +83,19 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	// passing AppCtx — can reach it. (Same pattern as crm.)
 	globalCtx = ctx
 
-	// v0.8.0: Stripe is now an integration (role: payment_processor),
-	// no longer a config-driven toggle. Surface the binding status at
-	// boot so install issues are visible in the logs without
-	// failing the mount.
-	if ctx.IntegrationFor("payment_processor") != nil {
+	if stripeDirectConfigured(ctx) {
+		ctx.Logger().Info("billing: stripe_secret_key configured — direct Stripe payment links enabled")
+		if err := ensureStripeWebhook(ctx); err != nil {
+			ctx.Logger().Warn("billing: Stripe webhook auto-registration pending", "err", err.Error())
+		}
+	} else if ctx.IntegrationFor("payment_processor") != nil {
 		ctx.Logger().Info("billing: payment_processor integration bound — Stripe payment links enabled")
 	} else {
 		ctx.Logger().Info("billing: no payment_processor bound — manual-payment mode only")
 	}
 
 	ctx.Logger().Info("billing mounted",
-		"version", "0.8.0",
+		"version", "0.8.7",
 		"scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
 	return nil
 }
@@ -117,9 +119,9 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/invoices/", Handler: a.handleHTTPInvoiceItem},
 		{Pattern: "/payments", Handler: a.handleHTTPPaymentsCollection},
 		{Pattern: "/issuer", Handler: a.handleHTTPIssuer},
-		// Stripe webhook receiver (v0.8.0+). Public POST endpoint
-		// Stripe Dashboard is configured to call. Signature verified
-		// via the integration's process_webhook tool.
+		// Stripe webhook receiver. Public POST endpoint configured
+		// automatically when stripe_secret_key is set, or manually
+		// when using the legacy payment_processor integration path.
 		{Pattern: "/webhooks/stripe", Handler: a.handleStripeWebhook},
 	}
 }
@@ -287,7 +289,7 @@ func (a *App) MCPTools() []sdk.Tool {
 
 		// ── Invoices ─────────────────────────────────────────────────
 		{
-			Name: "invoices_create",
+			Name:        "invoices_create",
 			Description: "Create a DRAFT invoice with optional initial line items. Provider arg ('local'|'stripe') falls back to install default. PROVIDER IS FROZEN. Line items can be either free-form ({description, quantity, unit_price_cents, tax_rate_bps?}) OR catalog references ({price_id, quantity}) — when price_id is set, billing calls the catalog app to snapshot description + unit_price_cents + currency into the line. Free-form and catalog-ref lines can mix on the same invoice. Args: customer_id, currency (catalog price wins; falls back to install default), provider, due_date, notes, line_items, metadata.",
 			InputSchema: schemaObject(map[string]any{
 				"customer_id": map[string]any{"type": "integer"},
@@ -383,9 +385,9 @@ func (a *App) MCPTools() []sdk.Tool {
 			Name:        "invoices_render_pdf",
 			Description: "Render an invoice as a PDF. Default returns {pdf_base64, filename, size_bytes}. With save_to_storage=true, writes the PDF to the storage app (must be installed) and returns {file_id, url, filename, size_bytes} so the agent can attach it to chat / email. Args: invoice_id, save_to_storage (default false), folder (storage path, default '/invoices/').",
 			InputSchema: schemaObject(map[string]any{
-				"invoice_id":       map[string]any{"type": "integer"},
-				"save_to_storage":  map[string]any{"type": "boolean"},
-				"folder":           map[string]any{"type": "string"},
+				"invoice_id":      map[string]any{"type": "integer"},
+				"save_to_storage": map[string]any{"type": "boolean"},
+				"folder":          map[string]any{"type": "string"},
 			}, []string{"invoice_id"}),
 			Handler: a.toolInvoicesRenderPDF,
 		},
@@ -501,9 +503,9 @@ type Customer struct {
 }
 
 type Invoice struct {
-	ID              int64           `json:"id"`
-	ProjectID       string          `json:"project_id,omitempty"`
-	CustomerID      int64           `json:"customer_id"`
+	ID         int64  `json:"id"`
+	ProjectID  string `json:"project_id,omitempty"`
+	CustomerID int64  `json:"customer_id"`
 	// Customer fields denormalised by the LEFT JOIN in dbInvoiceSearch /
 	// dbInvoiceGetByID — the panel renders these in the sidebar list so
 	// users don't have to fetch every customer separately. Empty when
@@ -535,23 +537,23 @@ type Invoice struct {
 }
 
 type LineItem struct {
-	ID             int64           `json:"id,omitempty"`
-	InvoiceID      int64           `json:"invoice_id,omitempty"`
-	Position       int             `json:"position"`
-	Description    string          `json:"description"`
-	Quantity       float64         `json:"quantity"`
-	UnitPriceCents int64           `json:"unit_price_cents"`
-	AmountCents    int64           `json:"amount_cents"`
-	TaxRateBps     int             `json:"tax_rate_bps"`
-	ExternalID     string          `json:"external_id,omitempty"`
+	ID             int64   `json:"id,omitempty"`
+	InvoiceID      int64   `json:"invoice_id,omitempty"`
+	Position       int     `json:"position"`
+	Description    string  `json:"description"`
+	Quantity       float64 `json:"quantity"`
+	UnitPriceCents int64   `json:"unit_price_cents"`
+	AmountCents    int64   `json:"amount_cents"`
+	TaxRateBps     int     `json:"tax_rate_bps"`
+	ExternalID     string  `json:"external_id,omitempty"`
 	// Optional cross-app FKs into the catalog app — populated when the
 	// caller passes price_id at create time, and snapshot fields above
 	// (description, unit_price_cents) are filled from catalog. NULL on
 	// free-form/ad-hoc lines (one-off custom work, refunds, manual
 	// adjustments). Used for analytics ("revenue by product") not for
 	// PDF rendering — the snapshot fields are what the customer sees.
-	PriceID   *int64 `json:"price_id,omitempty"`
-	ProductID *int64 `json:"product_id,omitempty"`
+	PriceID   *int64          `json:"price_id,omitempty"`
+	ProductID *int64          `json:"product_id,omitempty"`
 	Metadata  json.RawMessage `json:"metadata,omitempty"`
 }
 
@@ -645,11 +647,11 @@ func (a *App) toolCustomersGetContext(ctx *sdk.AppCtx, args map[string]any) (any
 		return nil, err
 	}
 	return map[string]any{
-		"customer":       c,
-		"open_invoices":  openInvs,
+		"customer":        c,
+		"open_invoices":   openInvs,
 		"recent_payments": pays,
-		"lifetime":       totals,
-		"found":          true,
+		"lifetime":        totals,
+		"found":           true,
 	}, nil
 }
 
@@ -1827,8 +1829,8 @@ func dbCustomerUpdate(db *sql.DB, pid string, id int64, patch map[string]any) (*
 		"currency": true, "billing_address": true, "tax_ids": true, "metadata": true,
 	}
 	var (
-		sets  []string
-		args  []any
+		sets []string
+		args []any
 	)
 	for k, v := range patch {
 		if !allowed[k] {
@@ -1897,10 +1899,10 @@ func dbCustomerMerge(db *sql.DB, pid string, loser, winner int64) error {
 
 func dbCustomerTotals(db *sql.DB, pid string, cid int64) (map[string]any, error) {
 	out := map[string]any{
-		"invoiced_cents":  int64(0),
-		"paid_cents":      int64(0),
+		"invoiced_cents":    int64(0),
+		"paid_cents":        int64(0),
 		"outstanding_cents": int64(0),
-		"invoice_count":   0,
+		"invoice_count":     0,
 	}
 	row := db.QueryRow(
 		`SELECT COUNT(*),
@@ -1925,11 +1927,11 @@ func dbCustomerTotals(db *sql.DB, pid string, cid int64) (map[string]any, error)
 // ── Invoices ──
 
 type invoiceFilters struct {
-	customerID                       int64
-	status, provider, currency       string
-	since, until                     string
-	minTotalCents, maxTotalCents     int64
-	limit                            int
+	customerID                   int64
+	status, provider, currency   string
+	since, until                 string
+	minTotalCents, maxTotalCents int64
+	limit                        int
 }
 
 func dbInvoiceSearch(db *sql.DB, pid string, f invoiceFilters) ([]*Invoice, error) {
@@ -2095,12 +2097,12 @@ func dbInvoiceCreate(db *sql.DB, inv *Invoice, actor string) (*Invoice, error) {
 		}
 	}
 	if err := writeAuditTx(tx, id, actor, "create", map[string]any{
-		"provider":      inv.Provider,
-		"currency":      inv.Currency,
-		"line_count":    len(inv.LineItems),
-		"total_cents":   inv.TotalCents,
+		"provider":       inv.Provider,
+		"currency":       inv.Currency,
+		"line_count":     len(inv.LineItems),
+		"total_cents":    inv.TotalCents,
 		"subtotal_cents": inv.SubtotalCents,
-		"tax_cents":     inv.TaxCents,
+		"tax_cents":      inv.TaxCents,
 	}); err != nil {
 		return nil, err
 	}

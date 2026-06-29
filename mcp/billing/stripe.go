@@ -2,14 +2,11 @@ package main
 
 // Stripe integration (v0.8.0+).
 //
-// Stripe enters billing as the `payment_processor` integration role
-// declared in apteva.yaml. When bound, the agent can call
-// invoices_send_payment_link(invoice_id) to generate a Stripe Checkout
-// Session and share its URL with the customer. The webhook handler
-// at /webhooks/stripe receives the payment confirmation event and
-// records a method='stripe' payment + transitions the invoice to
-// 'paid' (idempotent via the (method, external_id) unique index on
-// the payments table — already present since v0.1.0).
+// Stripe can be configured directly with `stripe_secret_key`. In that
+// mode billing creates its own webhook endpoint in Stripe and stores
+// the returned signing secret locally, so operators do not need to
+// paste a whsec_ value. The older `payment_processor` integration
+// remains a fallback for installs that already use it.
 //
 // When the integration isn't bound, the whole module degrades:
 // invoices_send_payment_link returns a clean "bind the integration"
@@ -17,11 +14,17 @@ package main
 // billing keeps working as before (manual payment recording).
 
 import (
+	"crypto/hmac"
+	"crypto/sha256"
+	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	neturl "net/url"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -78,6 +81,247 @@ func safeData(r *sdk.ExecuteResult) []byte {
 	return r.Data
 }
 
+func stripeSecretKey(ctx *sdk.AppCtx) string {
+	return strings.TrimSpace(configString(ctx, "stripe_secret_key", ""))
+}
+
+func stripeDirectConfigured(ctx *sdk.AppCtx) bool {
+	return stripeSecretKey(ctx) != ""
+}
+
+func stripeAPIBase() string {
+	if v := strings.TrimRight(strings.TrimSpace(os.Getenv("STRIPE_API_BASE")), "/"); v != "" {
+		return v
+	}
+	return "https://api.stripe.com/v1"
+}
+
+func stripeFormValues(values neturl.Values, prefix string, v any) {
+	switch x := v.(type) {
+	case nil:
+		return
+	case map[string]any:
+		for k, child := range x {
+			key := k
+			if prefix != "" {
+				key = prefix + "[" + k + "]"
+			}
+			stripeFormValues(values, key, child)
+		}
+	case []map[string]any:
+		for i, child := range x {
+			stripeFormValues(values, fmt.Sprintf("%s[%d]", prefix, i), child)
+		}
+	case []any:
+		for i, child := range x {
+			stripeFormValues(values, fmt.Sprintf("%s[%d]", prefix, i), child)
+		}
+	case []string:
+		for _, child := range x {
+			values.Add(prefix+"[]", child)
+		}
+	case string:
+		values.Set(prefix, x)
+	case fmt.Stringer:
+		values.Set(prefix, x.String())
+	case int:
+		values.Set(prefix, strconv.Itoa(x))
+	case int64:
+		values.Set(prefix, strconv.FormatInt(x, 10))
+	case float64:
+		values.Set(prefix, strconv.FormatFloat(x, 'f', -1, 64))
+	case bool:
+		values.Set(prefix, strconv.FormatBool(x))
+	default:
+		values.Set(prefix, fmt.Sprint(x))
+	}
+}
+
+func executeStripeDirect(ctx *sdk.AppCtx, method, path string, input map[string]any, out any) error {
+	secret := stripeSecretKey(ctx)
+	if secret == "" {
+		return errors.New("stripe_secret_key is not configured")
+	}
+	values := neturl.Values{}
+	for k, v := range input {
+		stripeFormValues(values, k, v)
+	}
+	req, err := http.NewRequest(method, stripeAPIBase()+path, strings.NewReader(values.Encode()))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Authorization", "Bearer "+secret)
+	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	req.Header.Set("Stripe-Version", "2024-06-20")
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("stripe %s %s: %w", method, path, err)
+	}
+	defer resp.Body.Close()
+	data, _ := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("stripe %s %s failed (HTTP %d): %s", method, path, resp.StatusCode, string(data))
+	}
+	if out != nil {
+		if err := json.Unmarshal(data, out); err != nil {
+			return fmt.Errorf("stripe %s %s: decode response: %w", method, path, err)
+		}
+	}
+	return nil
+}
+
+type stripeSettings struct {
+	WebhookEndpointID string
+	WebhookSecret     string
+	WebhookURL        string
+	Mode              string
+}
+
+func loadStripeSettings(db *sql.DB) (stripeSettings, error) {
+	var s stripeSettings
+	err := db.QueryRow(
+		`SELECT webhook_endpoint_id, webhook_secret, webhook_url, mode
+		 FROM billing_stripe_settings
+		 WHERE id = 1`,
+	).Scan(&s.WebhookEndpointID, &s.WebhookSecret, &s.WebhookURL, &s.Mode)
+	if errors.Is(err, sql.ErrNoRows) {
+		return s, nil
+	}
+	return s, err
+}
+
+func saveStripeSettings(db *sql.DB, s stripeSettings) error {
+	_, err := db.Exec(
+		`INSERT INTO billing_stripe_settings
+		   (id, webhook_endpoint_id, webhook_secret, webhook_url, mode, updated_at)
+		 VALUES (1, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+		 ON CONFLICT(id) DO UPDATE SET
+		   webhook_endpoint_id = excluded.webhook_endpoint_id,
+		   webhook_secret = excluded.webhook_secret,
+		   webhook_url = excluded.webhook_url,
+		   mode = excluded.mode,
+		   updated_at = CURRENT_TIMESTAMP`,
+		s.WebhookEndpointID, s.WebhookSecret, s.WebhookURL, s.Mode)
+	return err
+}
+
+func stripeWebhookURL(ctx *sdk.AppCtx) (string, error) {
+	if override := strings.TrimSpace(configString(ctx, "stripe_webhook_url", "")); override != "" {
+		return strings.TrimRight(override, "/"), nil
+	}
+	publicURL := stripePublicBaseURL(ctx)
+	if publicURL == "" {
+		return "", errors.New("platform public URL is not configured; set stripe_webhook_url to a public tunnel URL for local testing")
+	}
+	return strings.TrimRight(publicURL, "/") + "/webhooks/stripe", nil
+}
+
+func stripePublicBaseURL(ctx *sdk.AppCtx) string {
+	if override := strings.TrimSpace(configString(ctx, "stripe_webhook_url", "")); override != "" {
+		if u, err := neturl.Parse(override); err == nil && u.Scheme != "" && u.Host != "" {
+			return u.Scheme + "://" + u.Host
+		}
+	}
+	var publicURL string
+	if info, err := ctx.PlatformInfo(); err == nil && info != nil {
+		publicURL = strings.TrimSpace(info.PublicURL)
+	}
+	if publicURL == "" {
+		publicURL = strings.TrimSpace(os.Getenv("APTEVA_PUBLIC_URL"))
+	}
+	return strings.TrimRight(publicURL, "/")
+}
+
+func ensureStripeWebhook(ctx *sdk.AppCtx) error {
+	if !stripeDirectConfigured(ctx) {
+		return nil
+	}
+	webhookURL, err := stripeWebhookURL(ctx)
+	if err != nil {
+		return err
+	}
+	settings, err := loadStripeSettings(ctx.AppDB())
+	if err != nil {
+		return err
+	}
+	if settings.WebhookSecret != "" && settings.WebhookURL == webhookURL {
+		return nil
+	}
+	var endpoint struct {
+		ID     string `json:"id"`
+		URL    string `json:"url"`
+		Secret string `json:"secret"`
+	}
+	input := map[string]any{
+		"url": webhookURL,
+		"enabled_events": []string{
+			"checkout.session.completed",
+			"payment_intent.succeeded",
+			"charge.refunded",
+		},
+		"metadata": map[string]any{
+			"apteva_app": "billing",
+		},
+	}
+	if err := executeStripeDirect(ctx, http.MethodPost, "/webhook_endpoints", input, &endpoint); err != nil {
+		return err
+	}
+	if endpoint.ID == "" || endpoint.Secret == "" {
+		return errors.New("Stripe did not return a webhook endpoint id and signing secret")
+	}
+	return saveStripeSettings(ctx.AppDB(), stripeSettings{
+		WebhookEndpointID: endpoint.ID,
+		WebhookSecret:     endpoint.Secret,
+		WebhookURL:        endpoint.URL,
+		Mode:              "direct",
+	})
+}
+
+func parseStripeSignature(header string) (int64, []string) {
+	var ts int64
+	var sigs []string
+	for _, part := range strings.Split(header, ",") {
+		k, v, ok := strings.Cut(strings.TrimSpace(part), "=")
+		if !ok {
+			continue
+		}
+		switch k {
+		case "t":
+			ts = atoi64(v)
+		case "v1":
+			sigs = append(sigs, v)
+		}
+	}
+	return ts, sigs
+}
+
+func verifyStripeWebhookSignature(payload []byte, header, secret string, now time.Time) error {
+	if secret == "" {
+		return errors.New("stripe webhook signing secret is not configured")
+	}
+	ts, sigs := parseStripeSignature(header)
+	if ts == 0 || len(sigs) == 0 {
+		return errors.New("malformed Stripe-Signature header")
+	}
+	eventTime := time.Unix(ts, 0)
+	if now.Sub(eventTime) > 5*time.Minute || eventTime.Sub(now) > 5*time.Minute {
+		return errors.New("Stripe-Signature timestamp outside tolerance")
+	}
+	mac := hmac.New(sha256.New, []byte(secret))
+	_, _ = mac.Write([]byte(strconv.FormatInt(ts, 10)))
+	_, _ = mac.Write([]byte("."))
+	_, _ = mac.Write(payload)
+	expected := mac.Sum(nil)
+	for _, sig := range sigs {
+		got, err := hex.DecodeString(sig)
+		if err == nil && hmac.Equal(got, expected) {
+			return nil
+		}
+	}
+	return errors.New("Stripe-Signature HMAC mismatch")
+}
+
 // ─── Send payment link ──────────────────────────────────────────────
 
 // toolInvoicesSendPaymentLink implements the v0.8.0 "agent shares a
@@ -99,9 +343,13 @@ func (a *App) toolInvoicesSendPaymentLink(ctx *sdk.AppCtx, args map[string]any) 
 	if id == 0 {
 		return nil, errors.New("invoice_id required")
 	}
-	bound, err := requireProcessor(ctx)
-	if err != nil {
-		return nil, err
+	var bound *sdk.BoundIntegration
+	if !stripeDirectConfigured(ctx) {
+		var err error
+		bound, err = requireProcessor(ctx)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	inv, cust, err := loadInvoiceForRender(ctx.AppDB(), pid, id)
@@ -128,7 +376,7 @@ func (a *App) toolInvoicesSendPaymentLink(ctx *sdk.AppCtx, args map[string]any) 
 	for _, li := range inv.LineItems {
 		lineItems = append(lineItems, map[string]any{
 			"price_data": map[string]any{
-				"currency": strings.ToLower(inv.Currency),
+				"currency":    strings.ToLower(inv.Currency),
 				"unit_amount": li.UnitPriceCents,
 				"product_data": map[string]any{
 					"name": li.Description,
@@ -146,33 +394,31 @@ func (a *App) toolInvoicesSendPaymentLink(ctx *sdk.AppCtx, args map[string]any) 
 		// Sensible default — the dashboard's billing panel deep link
 		// for this invoice. {CHECKOUT_SESSION_ID} is replaced by
 		// Stripe at redirect time.
-		successURL = fmt.Sprintf(
-			"/dashboard?app=billing&invoice_id=%d&stripe_session={CHECKOUT_SESSION_ID}",
-			inv.ID,
-		)
+		successURL = stripePublicBaseURL(ctx) + fmt.Sprintf(
+			"/dashboard?app=billing&invoice_id=%d&stripe_session={CHECKOUT_SESSION_ID}", inv.ID)
 	}
 	cancelURL := strArg(args, "cancel_url")
 	if cancelURL == "" {
 		cancelURL = configString(ctx, "stripe_cancel_url", "")
 	}
 	if cancelURL == "" {
-		cancelURL = fmt.Sprintf("/dashboard?app=billing&invoice_id=%d", inv.ID)
+		cancelURL = stripePublicBaseURL(ctx) + fmt.Sprintf("/dashboard?app=billing&invoice_id=%d", inv.ID)
 	}
 
 	// metadata.invoice_id is THE join key — the webhook handler reads
 	// it back to find our invoice. project_id mirrors the integration
 	// global-call convention so cross-project routing works.
 	input := map[string]any{
-		"mode":                  "payment",
-		"line_items":            lineItems,
-		"customer_email":        cust.Email,
-		"success_url":           successURL,
-		"cancel_url":            cancelURL,
-		"client_reference_id":   fmt.Sprintf("inv_%d", inv.ID),
+		"mode":                "payment",
+		"line_items":          lineItems,
+		"customer_email":      cust.Email,
+		"success_url":         successURL,
+		"cancel_url":          cancelURL,
+		"client_reference_id": fmt.Sprintf("inv_%d", inv.ID),
 		"metadata": map[string]any{
-			"apteva_invoice_id":   fmt.Sprintf("%d", inv.ID),
-			"apteva_customer_id":  fmt.Sprintf("%d", inv.CustomerID),
-			"apteva_project_id":   pid,
+			"apteva_invoice_id":     fmt.Sprintf("%d", inv.ID),
+			"apteva_customer_id":    fmt.Sprintf("%d", inv.CustomerID),
+			"apteva_project_id":     pid,
 			"apteva_invoice_number": inv.Number,
 		},
 	}
@@ -182,8 +428,17 @@ func (a *App) toolInvoicesSendPaymentLink(ctx *sdk.AppCtx, args map[string]any) 
 		URL       string `json:"url"`
 		ExpiresAt int64  `json:"expires_at"`
 	}
-	if err := executeStripe(ctx, bound, "create_checkout_session", input, &sess); err != nil {
-		return nil, err
+	if stripeDirectConfigured(ctx) {
+		if err := ensureStripeWebhook(ctx); err != nil {
+			return nil, fmt.Errorf("stripe webhook setup: %w", err)
+		}
+		if err := executeStripeDirect(ctx, http.MethodPost, "/checkout/sessions", input, &sess); err != nil {
+			return nil, err
+		}
+	} else {
+		if err := executeStripe(ctx, bound, "create_checkout_session", input, &sess); err != nil {
+			return nil, err
+		}
 	}
 	if sess.URL == "" {
 		return nil, errors.New("Stripe returned no payment URL")
@@ -232,11 +487,6 @@ func (a *App) toolInvoicesSendPaymentLink(ctx *sdk.AppCtx, args map[string]any) 
 // return 200 OK without side effects.
 func (a *App) handleStripeWebhook(w http.ResponseWriter, r *http.Request) {
 	ctx := getAppCtx(r)
-	bound := ctx.IntegrationFor("payment_processor")
-	if bound == nil {
-		httpErr(w, http.StatusServiceUnavailable, "no payment_processor integration bound")
-		return
-	}
 	signature := r.Header.Get("Stripe-Signature")
 	if signature == "" {
 		httpErr(w, http.StatusBadRequest, "missing Stripe-Signature header")
@@ -258,12 +508,40 @@ func (a *App) handleStripeWebhook(w http.ResponseWriter, r *http.Request) {
 			Object json.RawMessage `json:"object"`
 		} `json:"data"`
 	}
-	if err := executeStripe(ctx, bound, "process_webhook", map[string]any{
-		"payload":   string(body),
-		"signature": signature,
-	}, &event); err != nil {
-		httpErr(w, http.StatusBadRequest, "webhook verification failed: "+err.Error())
-		return
+	if stripeDirectConfigured(ctx) {
+		settings, err := loadStripeSettings(ctx.AppDB())
+		if err != nil {
+			httpErr(w, http.StatusInternalServerError, "load stripe settings: "+err.Error())
+			return
+		}
+		if settings.WebhookSecret == "" {
+			if err := ensureStripeWebhook(ctx); err != nil {
+				httpErr(w, http.StatusServiceUnavailable, "stripe webhook is not configured: "+err.Error())
+				return
+			}
+			settings, _ = loadStripeSettings(ctx.AppDB())
+		}
+		if err := verifyStripeWebhookSignature(body, signature, settings.WebhookSecret, time.Now().UTC()); err != nil {
+			httpErr(w, http.StatusBadRequest, "webhook verification failed: "+err.Error())
+			return
+		}
+		if err := json.Unmarshal(body, &event); err != nil {
+			httpErr(w, http.StatusBadRequest, "decode webhook payload: "+err.Error())
+			return
+		}
+	} else {
+		bound := ctx.IntegrationFor("payment_processor")
+		if bound == nil {
+			httpErr(w, http.StatusServiceUnavailable, "no payment_processor integration bound")
+			return
+		}
+		if err := executeStripe(ctx, bound, "process_webhook", map[string]any{
+			"payload":   string(body),
+			"signature": signature,
+		}, &event); err != nil {
+			httpErr(w, http.StatusBadRequest, "webhook verification failed: "+err.Error())
+			return
+		}
 	}
 
 	if err := a.dispatchStripeEvent(ctx, event.ID, event.Type, event.Data.Object); err != nil {
@@ -310,15 +588,15 @@ func (a *App) dispatchStripeEvent(ctx *sdk.AppCtx, eventID, eventType string, ob
 // no-op.
 func (a *App) handleCheckoutCompleted(ctx *sdk.AppCtx, obj json.RawMessage) error {
 	var sess struct {
-		ID                  string            `json:"id"`
-		AmountTotal         int64             `json:"amount_total"`
-		Currency            string            `json:"currency"`
-		PaymentIntent       string            `json:"payment_intent"`
-		PaymentStatus       string            `json:"payment_status"`
-		ClientReferenceID   string            `json:"client_reference_id"`
-		Customer            string            `json:"customer"`
-		CustomerEmail       string            `json:"customer_email"`
-		Metadata            map[string]string `json:"metadata"`
+		ID                string            `json:"id"`
+		AmountTotal       int64             `json:"amount_total"`
+		Currency          string            `json:"currency"`
+		PaymentIntent     string            `json:"payment_intent"`
+		PaymentStatus     string            `json:"payment_status"`
+		ClientReferenceID string            `json:"client_reference_id"`
+		Customer          string            `json:"customer"`
+		CustomerEmail     string            `json:"customer_email"`
+		Metadata          map[string]string `json:"metadata"`
 	}
 	if err := json.Unmarshal(obj, &sess); err != nil {
 		return fmt.Errorf("decode session: %w", err)
