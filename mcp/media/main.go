@@ -114,14 +114,118 @@ provides:
     - { name: media_get_waveform,    description: "Get the waveform derivation pointer (audio only)." }
     - { name: media_reindex,         description: "Force a re-probe + re-derive — for one file_id or all failed rows." }
     - { name: media_index_status,    description: "Counts of pending / ok / failed / unsupported / skipped_size." }
-    - { name: media_trim,            description: "Cut a clip from a video/audio source. Returns render_id." }
-    - { name: media_resize,          description: "Scale a video/image to new dimensions. Returns render_id." }
-    - { name: media_transcode,       description: "Re-encode to a new container/codec. Returns render_id." }
-    - { name: media_concat,          description: "Join multiple sources end-to-end. Returns render_id." }
-    - { name: media_crop,            description: "Crop or smart-reframe an existing video/image. Exact mode: file_id, x, y, width, height. Smart image/video reframe mode: file_id, target_ratio (e.g. 9:16), crop_mode? (smart|center), output_width?. Returns render_id." }
-    - { name: media_extract_frame,   description: "Save a single frame at a specific timestamp as PNG. Returns render_id." }
-    - { name: media_audio_extract,   description: "Strip audio from a video into a standalone file. Returns render_id." }
-    - { name: media_audio_filter,    description: "Normalize, clean, adjust, or mute audio in an audio/video source. For video outputs, copies video and only re-encodes audio. Returns render_id." }
+    - name: media_trim
+      description: "Cut a clip from a video/audio source. Returns render_id."
+      async_result:
+        id_field: render_id
+        notify:
+          target: caller
+          mode: once
+          events:
+            - render.completed
+            - render.failed
+            - render.cancelled
+          match:
+            render_id: "$result.render_id"
+          expires_after: 24h
+    - name: media_resize
+      description: "Scale a video/image to new dimensions. Returns render_id."
+      async_result:
+        id_field: render_id
+        notify:
+          target: caller
+          mode: once
+          events:
+            - render.completed
+            - render.failed
+            - render.cancelled
+          match:
+            render_id: "$result.render_id"
+          expires_after: 24h
+    - name: media_transcode
+      description: "Re-encode to a new container/codec. Returns render_id."
+      async_result:
+        id_field: render_id
+        notify:
+          target: caller
+          mode: once
+          events:
+            - render.completed
+            - render.failed
+            - render.cancelled
+          match:
+            render_id: "$result.render_id"
+          expires_after: 24h
+    - name: media_concat
+      description: "Join multiple sources end-to-end. Returns render_id."
+      async_result:
+        id_field: render_id
+        notify:
+          target: caller
+          mode: once
+          events:
+            - render.completed
+            - render.failed
+            - render.cancelled
+          match:
+            render_id: "$result.render_id"
+          expires_after: 24h
+    - name: media_crop
+      description: "Crop or smart-reframe an existing video/image. Exact mode: file_id, x, y, width, height. Smart image/video reframe mode: file_id, target_ratio (e.g. 9:16), crop_mode? (smart|center), output_width?. Returns render_id."
+      async_result:
+        id_field: render_id
+        notify:
+          target: caller
+          mode: once
+          events:
+            - render.completed
+            - render.failed
+            - render.cancelled
+          match:
+            render_id: "$result.render_id"
+          expires_after: 24h
+    - name: media_extract_frame
+      description: "Save a single frame at a specific timestamp as PNG. Returns render_id."
+      async_result:
+        id_field: render_id
+        notify:
+          target: caller
+          mode: once
+          events:
+            - render.completed
+            - render.failed
+            - render.cancelled
+          match:
+            render_id: "$result.render_id"
+          expires_after: 24h
+    - name: media_audio_extract
+      description: "Strip audio from a video into a standalone file. Returns render_id."
+      async_result:
+        id_field: render_id
+        notify:
+          target: caller
+          mode: once
+          events:
+            - render.completed
+            - render.failed
+            - render.cancelled
+          match:
+            render_id: "$result.render_id"
+          expires_after: 24h
+    - name: media_audio_filter
+      description: "Normalize, clean, adjust, or mute audio in an audio/video source. For video outputs, copies video and only re-encodes audio. Returns render_id."
+      async_result:
+        id_field: render_id
+        notify:
+          target: caller
+          mode: once
+          events:
+            - render.completed
+            - render.failed
+            - render.cancelled
+          match:
+            render_id: "$result.render_id"
+          expires_after: 24h
     - name: media_extract_reel
       description: "Trim + reframe to a target aspect ratio in one ffmpeg pass. Replaces media_trim → media_crop → media_resize for vertical-reel workflows. Args - file_id, start_ms, end_ms, target_ratio? (default 9:16), output_width? (default 1080). Returns immediately with render_id; Apteva notifies the calling agent when this render completes, fails, or is cancelled, so agents should not poll media_get_render unless the user explicitly asks for progress."
       async_result:
