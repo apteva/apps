@@ -1,0 +1,65 @@
+schema: apteva-app/v1
+
+name: entitlements
+display_name: Entitlements
+version: 0.1.0
+description: |
+  Shared access-control and usage layer. Entitlements grants, revokes,
+  checks, and meters access for SaaS plans, courses, memberships,
+  digital downloads, paid content, manual grants, trials, and promos.
+
+author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/entitlements
+icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/entitlements/icon.svg
+tags: [entitlements, access, usage, saas, courses, memberships]
+
+scopes: [project, global]
+min_apteva_version: "0.11.0"
+
+requires:
+  permissions:
+    - db.write.app
+
+provides:
+  http_routes:
+    - prefix: /
+  mcp_tools:
+    - name: entitlement_grants_create
+      description: Grant a feature/key to a subject.
+    - name: entitlement_grants_revoke
+      description: Revoke an entitlement grant.
+    - name: entitlements_check
+      description: Check whether a subject currently has a feature/key.
+    - name: entitlement_grants_list
+      description: List active or historical grants for a subject.
+    - name: entitlement_limits_set
+      description: Set a quota/limit for a subject and feature.
+    - name: usage_record
+      description: Record usage against a subject and feature.
+    - name: usage_get
+      description: Return usage and limits for a subject and feature.
+  skills:
+    - name: how-to-use-entitlements
+      command: /entitlements
+      body_file: skills/how-to-use-entitlements.md
+      description: |
+        Access-control model for SaaS, courses, memberships, trials,
+        bundles, and usage limits.
+      metadata:
+        category: access
+
+runtime:
+  kind: source
+  source:
+    repo: github.com/apteva/apps
+    ref: main
+    entry: mcp/entitlements
+  port: 8080
+  health_check: /health
+
+db:
+  driver: sqlite
+  path: /data/entitlements.db
+  migrations: migrations/
+
+upgrade_policy: auto-patch

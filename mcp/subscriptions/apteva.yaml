@@ -1,0 +1,87 @@
+schema: apteva-app/v1
+
+name: subscriptions
+display_name: Subscriptions
+version: 0.1.0
+description: |
+  Generic recurring-commerce lifecycle for SaaS, physical product
+  subscriptions, and services. Subscriptions owns recurrence, status,
+  current periods, renewal cycles, and references to the invoice,
+  order, or entitlement produced by each cycle.
+
+author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/subscriptions
+icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/subscriptions/icon.svg
+tags: [subscriptions, recurring, commerce, saas, memberships]
+
+scopes: [project, global]
+min_apteva_version: "0.11.0"
+
+requires:
+  permissions:
+    - db.write.app
+    - platform.apps.call
+  apps:
+    - name: catalog
+      optional: false
+    - name: billing
+      optional: true
+    - name: orders
+      optional: true
+    - name: entitlements
+      optional: true
+
+provides:
+  http_routes:
+    - prefix: /
+  mcp_tools:
+    - name: subscriptions_create
+      description: Create a SaaS, physical, or service subscription with catalog-backed items.
+    - name: subscriptions_get
+      description: Fetch one subscription with items, cycles, and events.
+    - name: subscriptions_search
+      description: Search subscriptions by customer, kind, status, and q.
+    - name: subscriptions_update_status
+      description: Update subscription status and period fields.
+    - name: subscriptions_cancel
+      description: Cancel a subscription immediately or at period end.
+    - name: subscription_cycles_create
+      description: Record a renewal cycle and link invoice/order/entitlement outputs.
+    - name: subscription_cycles_update
+      description: Update a cycle's payment status or linked outputs.
+    - name: subscription_cycles_list
+      description: List cycles for a subscription.
+    - name: subscription_events_list
+      description: List subscription audit events.
+  skills:
+    - name: how-to-use-subscriptions
+      command: /subscriptions
+      body_file: skills/how-to-use-subscriptions.md
+      description: |
+        Recurring commerce lifecycle conventions. Load when working
+        with subscriptions, renewals, recurring plans, or membership cycles.
+      metadata:
+        category: commerce
+
+runtime:
+  kind: source
+  source:
+    repo: github.com/apteva/apps
+    ref: main
+    entry: mcp/subscriptions
+  port: 8080
+  health_check: /health
+
+db:
+  driver: sqlite
+  path: /data/subscriptions.db
+  migrations: migrations/
+
+config_schema:
+  - name: default_currency
+    type: text
+    default: "USD"
+    label: Default currency
+    description: ISO 4217 code used when subscription items omit currency.
+
+upgrade_policy: auto-patch

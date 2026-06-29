@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-label="Entitlements">
+  <rect width="256" height="256" rx="56" fill="#1e1b4b"/>
+  <path d="M128 42 70 66v50c0 42 24 78 58 98 34-20 58-56 58-98V66l-58-24Z" fill="#8b5cf6"/>
+  <path d="m98 130 22 22 44-52" fill="none" stroke="#f5f3ff" stroke-width="18" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M128 42v172" stroke="#c4b5fd" stroke-width="8" opacity=".35"/>
+</svg>
