@@ -100,8 +100,8 @@ func TestEmbeddedManifest_Valid(t *testing.T) {
 	if m.Name != "hosting" {
 		t.Errorf("manifest.Name=%q, want hosting", m.Name)
 	}
-	if m.Version != "1.0.0" {
-		t.Errorf("manifest.Version=%q, want 1.0.0", m.Version)
+	if m.Version != "1.0.1" {
+		t.Errorf("manifest.Version=%q, want 1.0.1", m.Version)
 	}
 	if m.DB == nil {
 		t.Fatal("manifest.DB missing")
@@ -118,6 +118,9 @@ func TestEmbeddedManifest_Valid(t *testing.T) {
 	}
 	if !gotScopes["global"] {
 		t.Error("manifest missing global scope")
+	}
+	if !gotScopes["project"] {
+		t.Error("manifest missing project scope")
 	}
 	gotRequired := map[string]bool{}
 	for _, dep := range m.Requires.Apps {

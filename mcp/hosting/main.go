@@ -53,7 +53,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	if err := seedPlans(ctx.AppDB(), configString(ctx, "default_image", "apteva:latest")); err != nil {
 		return err
 	}
-	ctx.Logger().Info("hosting mounted", "version", "1.0.0", "scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
+	ctx.Logger().Info("hosting mounted", "version", "1.0.1", "scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
 	return nil
 }
 
