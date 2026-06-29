@@ -39,6 +39,7 @@ import (
 	"github.com/apteva/apps/mcp/computer/internal/browser/checkedinput"
 	"github.com/apteva/apps/mcp/computer/internal/browser/selectinput"
 	"github.com/apteva/apps/mcp/computer/internal/browser/temporalinput"
+	"github.com/apteva/apps/mcp/computer/internal/browser/textinput"
 	_ "modernc.org/sqlite"
 )
 
@@ -51,9 +52,9 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: computer
 display_name: Computer
-version: 0.7.38
+version: 0.7.39
 description: |
-  Watch and steer browser sessions. v0.7.38 adds targeted checked-state and temporal-field actions.
+  Watch and steer browser sessions. v0.7.39 adds targeted set_text for text fields and composers.
 scopes: [project, global]
 requires:
   permissions:
@@ -80,7 +81,7 @@ provides:
     - name: browser_session
       description: "Open, resume, list, inspect, close, or switch tabs in app-owned browser sessions. Args: action, session_id?, tab_id?, backend?, backend_session_id?, url?, context_id?, context_name?, auto_create_context?, persist?, timeout?, proxy?, proxy_country?, viewport?. Usually omit viewport to use Computer's default desktop viewport, 1600x800. Pass viewport when a specific resolution is needed, for example mobile/tablet testing or a site-specific requirement. session_id is the app-owned live br_* handle for status/close/computer_use only. To continue later, open a new session with context_id or context_name. Use backend_session_id only for an explicit provider-level attach. For tab control, call browser_session(action=tabs) to list open tabs, then browser_session(action=switch_tab, tab_id=...) or browser_session(action=close_tab, tab_id=...). Do not use keyboard shortcuts such as Ctrl+Tab, Ctrl+PageDown, or Ctrl+1-9 to switch browser tabs. Browserbase honors timeout as max session lifetime. Prefer context_id from computer_context_list to reopen saved state; context_name works across backends when unique. For a reusable saved context, pass context_name with auto_create_context=true; omitted names are only a fallback and are auto-generated. Sessions consume local or cloud resources. When browser work is complete and the user did not explicitly ask to keep the browser open, close it with browser_session(action=close, session_id=...). Closing is especially important for Browserbase/Steel sessions and persisted contexts because it releases provider resources and lets context state flush cleanly."
     - name: computer_use
-      description: "Drive an app-owned browser session. Default workflow: call action=screenshot first; screenshots contain Set-of-Mark numeric badges on interactive elements. To click, use action=click with label=N from the latest screenshot. label must be >= 1; do not pass 0. Prefer label over coordinate; use coordinate only for targets with no badge such as canvas or custom rendered widgets. If the page asks to Browse, choose, attach, upload, or drop a file, use action=upload_file with selector or label plus source_url/base64/file_path; do not operate the native OS file picker. For any native select, dropdown, combobox, listbox, or multiselect, use action=select_option first with label/selector plus text/value or texts/values and optional mode=replace|add|remove|toggle; do not click options one by one or use keyboard navigation unless select_option fails. For checkboxes, radio buttons, and ARIA switches, use action=set_checked with label/selector plus checked=true|false instead of blind clicking. For native date/time/datetime-local fields or text-like scheduler fields, use action=set_temporal with label/selector plus value such as 2026-07-01 or 11:00 AM. If a click opens exactly one new tab, Computer automatically follows it and reports switched_tab=true. For explicit tab control, call browser_session(action=tabs) to list tabs, then browser_session(action=switch_tab, tab_id=...) or browser_session(action=close_tab, tab_id=...); do not use Ctrl+Tab, Ctrl+PageDown, or Ctrl+1-9 for browser tab switching. Use action=key for page/editor commands such as Tab, Backspace, Control+A, Control+Z; use action=type only for literal text and full date/time values such as 2026-06-05 or 08:00 PM. For action=scroll, amount is CSS pixels; use 200-500 for a small viewport move and omit amount for the 300px default. After scrolling, tab switching, selection, upload, checked-state changes, temporal-field changes, or navigation, take a fresh screenshot because labels are re-enumerated. Args: session_id, action, tab_id?, coordinate?, label?, selector?, checked?, source_url?, base64?, filename?, mime_type?, file_path?, text?, value?, texts?, values?, mode?, key?, direction?, amount?, duration?, annotate? (screenshot only, default true). Returns screenshot bytes for visual actions."
+      description: "Drive an app-owned browser session. Default workflow: call action=screenshot first; screenshots contain Set-of-Mark numeric badges on interactive elements. To click, use action=click with label=N from the latest screenshot. label must be >= 1; do not pass 0. Prefer label over coordinate; use coordinate only for targets with no badge such as canvas or custom rendered widgets. If the page asks to Browse, choose, attach, upload, or drop a file, use action=upload_file with selector or label plus source_url/base64/file_path; do not operate the native OS file picker. For any native select, dropdown, combobox, listbox, or multiselect, use action=select_option first with label/selector plus text/value or texts/values and optional mode=replace|add|remove|toggle; do not click options one by one or use keyboard navigation unless select_option fails. For checkboxes, radio buttons, and ARIA switches, use action=set_checked with label/selector plus checked=true|false instead of blind clicking. For long text fields, textareas, contenteditable editors, or message/post composers, use action=set_text with label/selector plus text instead of click + Control+A + type; use newline_mode=compact for public messages when blank paragraph gaps are not desired. For native date/time/datetime-local fields or text-like scheduler fields, use action=set_temporal with label/selector plus value such as 2026-07-01 or 11:00 AM. If a click opens exactly one new tab, Computer automatically follows it and reports switched_tab=true. For explicit tab control, call browser_session(action=tabs) to list tabs, then browser_session(action=switch_tab, tab_id=...) or browser_session(action=close_tab, tab_id=...); do not use Ctrl+Tab, Ctrl+PageDown, or Ctrl+1-9 for browser tab switching. Use action=key for page/editor commands such as Tab, Backspace, Control+A, Control+Z; use action=type only for short literal text and full date/time values such as 2026-06-05 or 08:00 PM. For action=scroll, amount is CSS pixels; use 200-500 for a small viewport move and omit amount for the 300px default. After scrolling, tab switching, selection, upload, checked-state changes, text changes, temporal-field changes, or navigation, take a fresh screenshot because labels are re-enumerated. Args: session_id, action, tab_id?, coordinate?, label?, selector?, checked?, source_url?, base64?, filename?, mime_type?, file_path?, text?, value?, texts?, values?, mode?, newline_mode?, key?, direction?, amount?, duration?, annotate? (screenshot only, default true). Returns screenshot bytes for visual actions."
     - name: computer_context_create
       description: "Create or import an app-managed browser context. Args: name, backend?, provider_context_id?, persist_default?, metadata?, auto_create_provider?."
     - name: computer_context_list
@@ -470,37 +471,38 @@ func (a *App) MCPTools() []sdk.Tool {
 				"To click, use action=click with label=N from the latest screenshot. label must be >= 1; do not pass 0. Prefer label over coordinate; use coordinate only for targets with no badge such as canvas or custom rendered widgets. " +
 				"If the page asks to Browse, choose, attach, upload, or drop a file, use action=upload_file with selector or label plus source_url/base64/file_path; do not operate the native OS file picker. " +
 				"For any native select, dropdown, combobox, listbox, or multiselect, use action=select_option first with label/selector plus text/value or texts/values and optional mode=replace|add|remove|toggle; do not click options one by one or use keyboard navigation unless select_option fails. " +
-				"For checkboxes, radio buttons, and ARIA switches, use action=set_checked with label/selector plus checked=true|false instead of blind clicking. For native date/time/datetime-local fields or text-like scheduler fields, use action=set_temporal with label/selector plus value such as 2026-07-01 or 11:00 AM. " +
+				"For checkboxes, radio buttons, and ARIA switches, use action=set_checked with label/selector plus checked=true|false instead of blind clicking. For long text fields, textareas, contenteditable editors, or message/post composers, use action=set_text with label/selector plus text instead of click + Control+A + type; use newline_mode=compact for public messages when blank paragraph gaps are not desired. For native date/time/datetime-local fields or text-like scheduler fields, use action=set_temporal with label/selector plus value such as 2026-07-01 or 11:00 AM. If the UI shows separate date and time fields, call set_temporal separately on each field; do not put a combined date-time string into the date field. " +
 				"If a click opens exactly one new tab, Computer automatically follows it and reports switched_tab=true. For explicit tab control, call browser_session(action=tabs) to list tabs, then browser_session(action=switch_tab, tab_id=...) or browser_session(action=close_tab, tab_id=...). " +
-				"Do not use Ctrl+Tab, Ctrl+PageDown, or Ctrl+1-9 for browser tab switching. Use action=key for page/editor commands such as Tab, Backspace, Control+A, Control+Z; use action=type only for literal text and full date/time values such as 2026-06-05 or 08:00 PM. " +
+				"Do not use Ctrl+Tab, Ctrl+PageDown, or Ctrl+1-9 for browser tab switching. Use action=key for page/editor commands such as Tab, Backspace, Control+A, Control+Z; use action=type only for short literal text and full date/time values such as 2026-06-05 or 08:00 PM. " +
 				"For action=scroll, amount is CSS pixels; use 200-500 for a small viewport move and omit amount for the 300px default. " +
-				"After scrolling, tab switching, selection, upload, checked-state changes, temporal-field changes, or navigation, take a fresh screenshot because labels are re-enumerated. Actions: screenshot, click, double_click, type, key, scroll, wait, upload_file, select_option, set_checked, set_temporal. " +
-				"Args: session_id, action, tab_id?, coordinate? (\"x,y\"), label? (Set-of-Mark label), selector? (CSS selector), checked?, source_url?, base64?, filename?, mime_type?, file_path?, text?, value?, texts?, values?, mode?, key?, direction?, amount?, duration?, annotate? (screenshot only, default true). " +
+				"After scrolling, tab switching, selection, upload, checked-state changes, text changes, temporal-field changes, or navigation, take a fresh screenshot because labels are re-enumerated. Actions: screenshot, click, double_click, type, key, scroll, wait, upload_file, select_option, set_checked, set_text, set_temporal. " +
+				"Args: session_id, action, tab_id?, coordinate? (\"x,y\"), label? (Set-of-Mark label), selector? (CSS selector), checked?, source_url?, base64?, filename?, mime_type?, file_path?, text?, value?, texts?, values?, mode?, newline_mode?, key?, direction?, amount?, duration?, annotate? (screenshot only, default true). " +
 				"Returns a binary screenshot envelope plus current_url, active_tab_id, tabs, width, height.",
 			InputSchema: schemaObject(map[string]any{
-				"session_id": map[string]any{"type": "string"},
-				"action":     map[string]any{"type": "string", "enum": []string{"screenshot", "click", "double_click", "type", "key", "scroll", "wait", "upload_file", "select_option", "set_checked", "set_temporal"}},
-				"tab_id":     map[string]any{"type": "string", "description": "Optional active tab/page target to switch to before running the action."},
-				"coordinate": map[string]any{"type": "string"},
-				"label":      map[string]any{"type": "integer", "minimum": 1, "description": "Positive Set-of-Mark target number shown as a colored badge in the latest screenshot. Prefer this over coordinate for click/double_click. Do not pass 0."},
-				"selector":   map[string]any{"type": "string", "description": "For action=upload_file, select_option, set_checked, or set_temporal. CSS selector for the target input/select/combobox/dropzone, e.g. input#mainMedia or button[role=combobox]."},
-				"checked":    map[string]any{"type": "boolean", "description": "For action=set_checked. Desired final checked state for a checkbox, radio button, ARIA checkbox, or ARIA switch."},
-				"source_url": map[string]any{"type": "string", "description": "For action=upload_file. HTTP(S) URL to download and upload."},
-				"base64":     map[string]any{"type": "string", "description": "For action=upload_file. Base64 file content, optionally as a data URL."},
-				"filename":   map[string]any{"type": "string", "description": "For action=upload_file with source_url/base64. Suggested filename."},
-				"mime_type":  map[string]any{"type": "string", "description": "For action=upload_file with base64. MIME type hint."},
-				"file_path":  map[string]any{"type": "string", "description": "For action=upload_file. Local app filesystem path; mainly for local/dev/manual use."},
-				"text":       map[string]any{"type": "string", "description": "For action=type, literal text. For action=select_option, one option display text to select. For action=set_temporal, accepted as a fallback value. When focused on native date/time inputs, action=type can normalize full values like 2026-06-05, 08:00 PM, or 2026-06-05 08:00 PM, but set_temporal is safer when focus is unstable."},
-				"value":      map[string]any{"type": "string", "description": "For action=select_option, one option value to select. For action=set_temporal, the full value to write, such as 2026-07-01, 11:00 AM, or 2026-07-01 11:00 AM."},
-				"texts":      map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "For action=select_option. Multiple option display texts."},
-				"values":     map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "For action=select_option. Multiple option values."},
-				"mode":       map[string]any{"type": "string", "enum": []string{"replace", "add", "remove", "toggle"}, "description": "For action=select_option. replace is default; add/remove/toggle are intended for multiselect controls."},
-				"key":        map[string]any{"type": "string", "description": "For action=key. Page/editor command key such as Enter, Tab, Backspace, Escape, ArrowUp, Control+A, Control+Z, Meta+A, or Shift+Tab. Do not use action=type for command keys. Do not use Ctrl+Tab, Ctrl+PageDown, or Ctrl+1-9 for browser tab switching; call browser_session(action=tabs) then browser_session(action=switch_tab)."},
-				"direction":  map[string]any{"type": "string", "enum": []string{"up", "down", "left", "right"}, "description": "For action=scroll."},
-				"amount":     map[string]any{"type": "integer", "description": "For action=scroll. CSS pixels, not wheel ticks. Defaults to 300 when omitted; use 200-500 for a small viewport move."},
-				"duration":   map[string]any{"type": "integer"},
-				"annotate":   map[string]any{"type": "boolean", "description": "For action=screenshot, include Set-of-Mark labels in the returned image. Defaults true for computer_use so agent click flow remains label-based."},
-				"som":        map[string]any{"type": "boolean", "description": "Alias for annotate."},
+				"session_id":   map[string]any{"type": "string"},
+				"action":       map[string]any{"type": "string", "enum": []string{"screenshot", "click", "double_click", "type", "key", "scroll", "wait", "upload_file", "select_option", "set_checked", "set_text", "set_temporal"}},
+				"tab_id":       map[string]any{"type": "string", "description": "Optional active tab/page target to switch to before running the action."},
+				"coordinate":   map[string]any{"type": "string"},
+				"label":        map[string]any{"type": "integer", "minimum": 1, "description": "Positive Set-of-Mark target number shown as a colored badge in the latest screenshot. Prefer this over coordinate for click/double_click. Do not pass 0."},
+				"selector":     map[string]any{"type": "string", "description": "For action=upload_file, select_option, set_checked, set_text, or set_temporal. CSS selector for the target input/select/combobox/dropzone/textbox, e.g. input#mainMedia or button[role=combobox]."},
+				"checked":      map[string]any{"type": "boolean", "description": "For action=set_checked. Desired final checked state for a checkbox, radio button, ARIA checkbox, or ARIA switch."},
+				"source_url":   map[string]any{"type": "string", "description": "For action=upload_file. HTTP(S) URL to download and upload."},
+				"base64":       map[string]any{"type": "string", "description": "For action=upload_file. Base64 file content, optionally as a data URL."},
+				"filename":     map[string]any{"type": "string", "description": "For action=upload_file with source_url/base64. Suggested filename."},
+				"mime_type":    map[string]any{"type": "string", "description": "For action=upload_file with base64. MIME type hint."},
+				"file_path":    map[string]any{"type": "string", "description": "For action=upload_file. Local app filesystem path; mainly for local/dev/manual use."},
+				"text":         map[string]any{"type": "string", "description": "For action=type, short literal text. For action=set_text, the full text to put into an input, textarea, contenteditable editor, or message/post composer. For action=select_option, one option display text to select. For action=set_temporal, accepted as a fallback value. When focused on native date/time inputs, action=type can normalize full values like 2026-06-05, 08:00 PM, or 2026-06-05 08:00 PM, but set_temporal is safer when focus is unstable. For split date/time UIs, target the date field and time field in separate calls."},
+				"value":        map[string]any{"type": "string", "description": "For action=select_option, one option value to select. For action=set_text, accepted as fallback text when text is omitted. For action=set_temporal, the value to write, such as 2026-07-01 for a date field, 11:00 AM for a time field, or 2026-07-01 11:00 AM only when the target is a single datetime field. For separate date and time fields, call set_temporal twice."},
+				"texts":        map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "For action=select_option. Multiple option display texts."},
+				"values":       map[string]any{"type": "array", "items": map[string]any{"type": "string"}, "description": "For action=select_option. Multiple option values."},
+				"mode":         map[string]any{"type": "string", "enum": []string{"replace", "add", "remove", "toggle", "append"}, "description": "For action=select_option, replace is default and add/remove/toggle are intended for multiselect controls. For action=set_text, use replace (default) or append."},
+				"newline_mode": map[string]any{"type": "string", "enum": []string{"preserve", "compact"}, "description": "For action=set_text. preserve keeps line breaks exactly; compact collapses repeated blank lines to single line breaks for public messages/composers."},
+				"key":          map[string]any{"type": "string", "description": "For action=key. Page/editor command key such as Enter, Tab, Backspace, Escape, ArrowUp, Control+A, Control+Z, Meta+A, or Shift+Tab. Do not use action=type for command keys. Do not use Ctrl+Tab, Ctrl+PageDown, or Ctrl+1-9 for browser tab switching; call browser_session(action=tabs) then browser_session(action=switch_tab)."},
+				"direction":    map[string]any{"type": "string", "enum": []string{"up", "down", "left", "right"}, "description": "For action=scroll."},
+				"amount":       map[string]any{"type": "integer", "description": "For action=scroll. CSS pixels, not wheel ticks. Defaults to 300 when omitted; use 200-500 for a small viewport move."},
+				"duration":     map[string]any{"type": "integer"},
+				"annotate":     map[string]any{"type": "boolean", "description": "For action=screenshot, include Set-of-Mark labels in the returned image. Defaults true for computer_use so agent click flow remains label-based."},
+				"som":          map[string]any{"type": "boolean", "description": "Alias for annotate."},
 			}, []string{"session_id", "action"}),
 			Handler: a.toolComputerUse,
 		},
@@ -1411,6 +1413,12 @@ func (a *App) toolComputerUse(ctx *sdk.AppCtx, args map[string]any) (any, error)
 			"Call computer_use(action=\"screenshot\", som=true), then use action=set_temporal with label=N or selector plus value.",
 			nil)
 	}
+	if err := validateSetTextArgs(action, args); err != nil {
+		return nil, computerUseFailure("invalid_target", id, sess, action,
+			err.Error(),
+			"Call computer_use(action=\"screenshot\", som=true), then use action=set_text with label=N or selector plus text.",
+			nil)
+	}
 	if tabID := stringArg(args, "tab_id"); tabID != "" {
 		tc, ok := sess.comp.(backends.TabController)
 		if !ok {
@@ -1422,18 +1430,19 @@ func (a *App) toolComputerUse(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	}
 
 	act := backends.Action{
-		Type:      action,
-		Label:     intArg(args, "label"),
-		Selector:  stringArg(args, "selector"),
-		Text:      stringArg(args, "text"),
-		Value:     stringArg(args, "value"),
-		Texts:     stringSliceArg(args, "texts"),
-		Values:    stringSliceArg(args, "values"),
-		Mode:      stringArg(args, "mode"),
-		Key:       stringArg(args, "key"),
-		Direction: stringArg(args, "direction"),
-		Amount:    intArg(args, "amount"),
-		Duration:  intArg(args, "duration"),
+		Type:        action,
+		Label:       intArg(args, "label"),
+		Selector:    stringArg(args, "selector"),
+		Text:        stringArg(args, "text"),
+		Value:       stringArg(args, "value"),
+		Texts:       stringSliceArg(args, "texts"),
+		Values:      stringSliceArg(args, "values"),
+		Mode:        stringArg(args, "mode"),
+		NewlineMode: stringArg(args, "newline_mode"),
+		Key:         stringArg(args, "key"),
+		Direction:   stringArg(args, "direction"),
+		Amount:      intArg(args, "amount"),
+		Duration:    intArg(args, "duration"),
 	}
 	if checked, ok := boolArg(args, "checked"); ok {
 		act.Checked = checked
@@ -1466,7 +1475,7 @@ func (a *App) toolComputerUse(ctx *sdk.AppCtx, args map[string]any) (any, error)
 			"Use local, Browserbase, Steel, or browser-engine for select_option, or use screenshot plus click/key fallback.",
 			nil)
 	}
-	if (action == "set_checked" || action == "set_temporal") && sess.backend != "local" && sess.backend != "browserbase" {
+	if (action == "set_checked" || action == "set_temporal" || action == "set_text") && sess.backend != "local" && sess.backend != "browserbase" {
 		return nil, computerUseFailure("backend_not_supported", id, sess, action,
 			fmt.Sprintf("backend %q does not support %s yet", sess.backend, action),
 			"Use local or Browserbase for this DOM-targeted action, or use screenshot plus click/key/type fallback.",
@@ -1536,9 +1545,14 @@ func (a *App) toolComputerUse(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	if action == "set_temporal" {
 		temporalResult = temporalResultFor(sess.comp)
 	}
+	var textResult *textinput.SetResult
+	if action == "set_text" {
+		textResult = textResultFor(sess.comp)
+	}
 	mergeSelectResultPayload(payload, selectResult)
 	mergeCheckedResultPayload(payload, checkedResult)
 	mergeTemporalResultPayload(payload, temporalResult)
+	mergeTextResultPayload(payload, textResult)
 	mergeScreenshotRecoveryPayload(payload, recovery)
 	mergeTabFollowPayload(payload, tabEvent)
 	emitEvent(ctx, "session.action", payload)
@@ -1571,6 +1585,7 @@ func (a *App) toolComputerUse(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	mergeSelectResultPayload(out, selectResult)
 	mergeCheckedResultPayload(out, checkedResult)
 	mergeTemporalResultPayload(out, temporalResult)
+	mergeTextResultPayload(out, textResult)
 	mergeScreenshotRecoveryPayload(out, recovery)
 	mergeTabFollowPayload(out, tabEvent)
 	return out, nil
@@ -1686,6 +1701,10 @@ type temporalResultReporter interface {
 	LastTemporalResult() *temporalinput.Result
 }
 
+type textResultReporter interface {
+	LastTextResult() *textinput.SetResult
+}
+
 func selectResultFor(comp backends.Computer) *selectinput.Result {
 	reporter, ok := comp.(selectResultReporter)
 	if !ok {
@@ -1708,6 +1727,14 @@ func temporalResultFor(comp backends.Computer) *temporalinput.Result {
 		return nil
 	}
 	return reporter.LastTemporalResult()
+}
+
+func textResultFor(comp backends.Computer) *textinput.SetResult {
+	reporter, ok := comp.(textResultReporter)
+	if !ok {
+		return nil
+	}
+	return reporter.LastTextResult()
 }
 
 func mergeSelectResultPayload(payload map[string]any, result *selectinput.Result) {
@@ -1766,6 +1793,27 @@ func mergeTemporalResultPayload(payload map[string]any, result *temporalinput.Re
 	}
 	if result.InputType != "" {
 		payload["temporal_input_type"] = result.InputType
+	}
+}
+
+func mergeTextResultPayload(payload map[string]any, result *textinput.SetResult) {
+	if result == nil {
+		return
+	}
+	payload["text_kind"] = result.Kind
+	payload["text_value"] = result.Value
+	payload["text_previous_value"] = result.PreviousValue
+	payload["text_changed"] = result.Changed
+	payload["text_mode"] = result.Mode
+	payload["text_newline_mode"] = result.NewlineMode
+	if result.Selector != "" {
+		payload["text_selector"] = result.Selector
+	}
+	if result.Label != "" {
+		payload["text_label"] = result.Label
+	}
+	if result.InputType != "" {
+		payload["text_input_type"] = result.InputType
 	}
 }
 
@@ -1943,6 +1991,27 @@ func (a *App) sessionActionPayload(id string, s *session, act backends.Action, a
 			payload["value"] = act.Value
 		} else if act.Text != "" {
 			payload["text"] = act.Text
+		}
+	case "set_text":
+		if act.Selector != "" {
+			payload["selector"] = act.Selector
+		}
+		if act.Label > 0 {
+			payload["label"] = act.Label
+		}
+		if hasCoordinateArg(args) {
+			payload["coordinate"] = fmt.Sprintf("%d,%d", act.X, act.Y)
+		}
+		if act.Text != "" {
+			payload["text"] = act.Text
+		} else if act.Value != "" {
+			payload["value"] = act.Value
+		}
+		if act.Mode != "" {
+			payload["mode"] = act.Mode
+		}
+		if act.NewlineMode != "" {
+			payload["newline_mode"] = act.NewlineMode
 		}
 	case "screenshot":
 		payload["annotate"] = annotateArg(args, true)
@@ -2535,6 +2604,30 @@ func validateSetTemporalArgs(action string, args map[string]any) error {
 	}
 	if strings.TrimSpace(stringArg(args, "value")) == "" && strings.TrimSpace(stringArg(args, "text")) == "" {
 		return fmt.Errorf("set_temporal requires value")
+	}
+	return nil
+}
+
+func validateSetTextArgs(action string, args map[string]any) error {
+	if action != "set_text" {
+		return nil
+	}
+	if strings.TrimSpace(stringArg(args, "selector")) == "" && intArg(args, "label") <= 0 && !hasCoordinateArg(args) {
+		return fmt.Errorf("set_text requires label=N, selector, or coordinate=\"x,y\"")
+	}
+	if rawArgPresent(args, "label") && intArg(args, "label") <= 0 {
+		return fmt.Errorf("label=%d is not valid; label must be a positive label from the latest screenshot", intArg(args, "label"))
+	}
+	if stringArg(args, "text") == "" && stringArg(args, "value") == "" {
+		return fmt.Errorf("set_text requires text")
+	}
+	mode := strings.ToLower(strings.TrimSpace(stringArg(args, "mode")))
+	if mode != "" && mode != "replace" && mode != "append" {
+		return fmt.Errorf("set_text mode must be replace or append")
+	}
+	newlineMode := strings.ToLower(strings.TrimSpace(stringArg(args, "newline_mode")))
+	if newlineMode != "" && newlineMode != "preserve" && newlineMode != "compact" {
+		return fmt.Errorf("set_text newline_mode must be preserve or compact")
 	}
 	return nil
 }

@@ -110,6 +110,8 @@ type Computer struct {
 	lastCheckedResult  *checkedinput.Result
 	temporalMu         sync.Mutex
 	lastTemporalResult *temporalinput.Result
+	textMu             sync.Mutex
+	lastTextResult     *textinput.SetResult
 
 	recoveryMu            sync.Mutex
 	lastScreenshotRecover *computer.ScreenshotRecoveryInfo
@@ -432,6 +434,15 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 		time.Sleep(150 * time.Millisecond)
 		return c.Screenshot()
 
+	case "set_text":
+		ctx, cancel := c.actionContext(action.Type)
+		defer cancel()
+		if _, err := c.setText(ctx, action); err != nil {
+			return nil, fmt.Errorf("set_text: %w", err)
+		}
+		time.Sleep(150 * time.Millisecond)
+		return c.Screenshot()
+
 	default:
 		return nil, fmt.Errorf("unknown action: %s", action.Type)
 	}
@@ -604,6 +615,30 @@ func (c *Computer) setTemporal(ctx context.Context, action computer.Action) (tem
 	return res, err
 }
 
+func (c *Computer) setText(ctx context.Context, action computer.Action) (textinput.SetResult, error) {
+	c.setLastTextResult(nil)
+	target := textinput.Target{Selector: action.Selector}
+	if action.Label > 0 {
+		if e, ok := c.resolveLabel(action.Label); ok {
+			target.X, target.Y = e.Center()
+			target.HasPoint = true
+		}
+	}
+	if !target.HasPoint && action.X != 0 && action.Y != 0 {
+		target.X, target.Y = action.X, action.Y
+		target.HasPoint = true
+	}
+	text := action.Text
+	if text == "" {
+		text = action.Value
+	}
+	res, err := textinput.Set(ctx, target, textinput.SetRequest{Text: text, Mode: action.Mode, NewlineMode: action.NewlineMode})
+	if err == nil {
+		c.setLastTextResult(&res)
+	}
+	return res, err
+}
+
 func (c *Computer) LastSelectResult() *selectinput.Result {
 	c.selectMu.Lock()
 	defer c.selectMu.Unlock()
@@ -640,6 +675,18 @@ func (c *Computer) setLastTemporalResult(res *temporalinput.Result) {
 	c.lastTemporalResult = cloneTemporalResult(res)
 }
 
+func (c *Computer) LastTextResult() *textinput.SetResult {
+	c.textMu.Lock()
+	defer c.textMu.Unlock()
+	return cloneTextResult(c.lastTextResult)
+}
+
+func (c *Computer) setLastTextResult(res *textinput.SetResult) {
+	c.textMu.Lock()
+	defer c.textMu.Unlock()
+	c.lastTextResult = cloneTextResult(res)
+}
+
 func cloneSelectResult(res *selectinput.Result) *selectinput.Result {
 	if res == nil {
 		return nil
@@ -660,6 +707,14 @@ func cloneCheckedResult(res *checkedinput.Result) *checkedinput.Result {
 }
 
 func cloneTemporalResult(res *temporalinput.Result) *temporalinput.Result {
+	if res == nil {
+		return nil
+	}
+	clone := *res
+	return &clone
+}
+
+func cloneTextResult(res *textinput.SetResult) *textinput.SetResult {
 	if res == nil {
 		return nil
 	}

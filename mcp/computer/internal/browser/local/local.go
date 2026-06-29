@@ -86,6 +86,8 @@ type Computer struct {
 	lastCheckedResult  *checkedinput.Result
 	temporalMu         sync.Mutex
 	lastTemporalResult *temporalinput.Result
+	textMu             sync.Mutex
+	lastTextResult     *textinput.SetResult
 
 	// debugURL is Chrome's DevTools frontend URL for the active page
 	// target — opening it in any browser yields a live, interactive
@@ -843,6 +845,13 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 		time.Sleep(150 * time.Millisecond)
 		return c.Screenshot()
 
+	case "set_text":
+		if _, err := c.setText(action); err != nil {
+			return nil, fmt.Errorf("set_text: %w", err)
+		}
+		time.Sleep(150 * time.Millisecond)
+		return c.Screenshot()
+
 	default:
 		return nil, fmt.Errorf("unknown action: %s", action.Type)
 	}
@@ -882,6 +891,18 @@ func (c *Computer) setLastTemporalResult(res *temporalinput.Result) {
 	c.temporalMu.Lock()
 	defer c.temporalMu.Unlock()
 	c.lastTemporalResult = cloneTemporalResult(res)
+}
+
+func (c *Computer) LastTextResult() *textinput.SetResult {
+	c.textMu.Lock()
+	defer c.textMu.Unlock()
+	return cloneTextResult(c.lastTextResult)
+}
+
+func (c *Computer) setLastTextResult(res *textinput.SetResult) {
+	c.textMu.Lock()
+	defer c.textMu.Unlock()
+	c.lastTextResult = cloneTextResult(res)
 }
 
 func (c *Computer) selectOption(action computer.Action) (selectinput.Result, error) {
@@ -954,6 +975,30 @@ func (c *Computer) setTemporal(action computer.Action) (temporalinput.Result, er
 	return res, err
 }
 
+func (c *Computer) setText(action computer.Action) (textinput.SetResult, error) {
+	c.setLastTextResult(nil)
+	target := textinput.Target{Selector: action.Selector}
+	if action.Label > 0 {
+		if e, ok := c.resolveLabel(action.Label); ok {
+			target.X, target.Y = e.Center()
+			target.HasPoint = true
+		}
+	}
+	if !target.HasPoint && action.X != 0 && action.Y != 0 {
+		target.X, target.Y = action.X, action.Y
+		target.HasPoint = true
+	}
+	text := action.Text
+	if text == "" {
+		text = action.Value
+	}
+	res, err := textinput.Set(c.ctx, target, textinput.SetRequest{Text: text, Mode: action.Mode, NewlineMode: action.NewlineMode})
+	if err == nil {
+		c.setLastTextResult(&res)
+	}
+	return res, err
+}
+
 func cloneSelectResult(res *selectinput.Result) *selectinput.Result {
 	if res == nil {
 		return nil
@@ -974,6 +1019,14 @@ func cloneCheckedResult(res *checkedinput.Result) *checkedinput.Result {
 }
 
 func cloneTemporalResult(res *temporalinput.Result) *temporalinput.Result {
+	if res == nil {
+		return nil
+	}
+	clone := *res
+	return &clone
+}
+
+func cloneTextResult(res *textinput.SetResult) *textinput.SetResult {
 	if res == nil {
 		return nil
 	}

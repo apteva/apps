@@ -91,9 +91,17 @@ click/key sequences:
 - For checkboxes, radios, and switches, use
   `computer_use(action="set_checked", checked=true|false, ...)` instead
   of clicking and guessing the final state.
+- For long text fields, textareas, contenteditable editors, or public
+  message/post composers, use
+  `computer_use(action="set_text", text="...", mode="replace", ...)`
+  instead of click + `Control+A` + `type`. Use `newline_mode="compact"`
+  when blank paragraph gaps are not desired.
 - For date/time scheduler fields, use
   `computer_use(action="set_temporal", value="2026-07-01", ...)` or
   `value="11:00 AM"` when the field can be targeted directly.
+- If the page shows separate date and time fields, set them separately with
+  their own `label` or `selector`. Use a combined date-time value only when the
+  page has one actual datetime field.
 
 Examples:
 

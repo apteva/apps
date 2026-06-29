@@ -2,9 +2,9 @@ schema: apteva-app/v1
 
 name: computer
 display_name: Computer
-version: 0.7.38
+version: 0.7.39
 description: |
-  Watch and steer browser sessions. v0.7.38 adds targeted checked-state and temporal-field actions.
+  Watch and steer browser sessions. v0.7.39 adds targeted set_text for text fields and composers.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/computer
@@ -82,24 +82,30 @@ provides:
         keyboard navigation unless select_option fails. For
         checkboxes, radio buttons, and ARIA switches, use action=set_checked
         with label/selector plus checked=true|false instead of blind clicking.
+        For long text fields, textareas, contenteditable editors, or message/post
+        composers, use action=set_text with label/selector plus text instead of
+        click + Control+A + type. Use newline_mode=compact for public messages
+        when blank paragraph gaps are not desired.
         For native date/time/datetime-local fields or text-like scheduler fields,
         use action=set_temporal with label/selector plus value such as
-        2026-07-01 or 11:00 AM. If a click opens exactly one new tab,
+        2026-07-01 or 11:00 AM. If the UI shows separate date and time fields,
+        call set_temporal separately on each field; do not put a combined
+        date-time string into the date field. If a click opens exactly one new tab,
         Computer automatically follows it and reports switched_tab=true.
         For explicit tab control, call browser_session(action=tabs) to list
         tabs, then browser_session(action=switch_tab, tab_id=...) or
         browser_session(action=close_tab, tab_id=...). Do not use Ctrl+Tab,
         Ctrl+PageDown, or Ctrl+1-9 for browser tab switching. Use action=key for page/editor commands
         such as Tab, Backspace, Control+A, Control+Z; use action=type only
-        for literal text and full date/time values such as 2026-06-05 or
+        for short literal text and full date/time values such as 2026-06-05 or
         08:00 PM. For action=scroll, amount is CSS pixels; use 200-500
         for a small viewport move and omit amount for the 300px default.
         After scrolling, tab switching, selection, upload, checked-state changes,
-        temporal-field changes, or navigation, take a fresh screenshot because
+        text changes, temporal-field changes, or navigation, take a fresh screenshot because
         labels are re-enumerated. Args:
         session_id, action, tab_id?, coordinate?, label?, selector?,
         checked?, source_url?, base64?, filename?, mime_type?, file_path?,
-        text?, value?, texts?, values?, mode?, key?, direction?, amount?,
+        text?, value?, texts?, values?, mode?, newline_mode?, key?, direction?, amount?,
         duration?, annotate? (screenshot only, default true).
         Returns screenshot bytes for visual actions.
     - name: computer_context_create
