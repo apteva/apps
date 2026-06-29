@@ -2091,7 +2091,7 @@ function IssuesView({
   const [issues, setIssues] = useState<CodeIssue[]>([]);
   const [selected, setSelected] = useState<number | null>(null);
   const [detail, setDetail] = useState<{ issue: CodeIssue; comments: IssueComment[]; links: IssueLink[] } | null>(null);
-  const [state, setState] = useState("open");
+  const [state, setState] = useState("all");
   const [status, setStatus] = useState("all");
   const [query, setQuery] = useState("");
   const [busy, setBusy] = useState(false);
@@ -2283,7 +2283,7 @@ function IssuesView({
                     onClick={() => setShowMetaEdit(true)}
                     disabled={busy}
                     className="px-3 py-1 text-xs border border-border rounded hover:bg-bg-input disabled:opacity-50"
-                  >Edit fields</button>
+                  >Edit</button>
                   <button
                     type="button"
                     onClick={closeOrReopen}
@@ -2382,7 +2382,6 @@ function IssuesView({
           busy={busy}
           onClose={() => setShowMetaEdit(false)}
           onPatch={patchIssue}
-          onDraft={(patch) => setDetail((cur) => cur ? { ...cur, issue: { ...cur.issue, ...patch } } : cur)}
         />
       )}
     </div>
@@ -2418,14 +2417,33 @@ function IssueMetaDialog({
   busy,
   onClose,
   onPatch,
-  onDraft,
 }: {
   issue: CodeIssue;
   busy: boolean;
   onClose: () => void;
   onPatch: (patch: Partial<CodeIssue>) => void;
-  onDraft: (patch: Partial<CodeIssue>) => void;
 }) {
+  const [draft, setDraft] = useState({
+    status: issue.status,
+    state: issue.state,
+    state_reason: issue.state_reason || "completed",
+    type: issue.type,
+    priority: issue.priority,
+    assignee: issue.assignee || "",
+  });
+
+  const save = () => {
+    onPatch({
+      status: draft.status,
+      state: draft.state,
+      state_reason: draft.state === "closed" ? draft.state_reason : "",
+      type: draft.type,
+      priority: draft.priority,
+      assignee: draft.assignee,
+    });
+    onClose();
+  };
+
   return (
     <div className="fixed inset-0 z-30 flex items-center justify-center bg-black/50" onClick={onClose}>
       <div
@@ -2437,34 +2455,37 @@ function IssueMetaDialog({
       >
         <div className="flex items-center gap-3">
           <h2 className="text-text font-semibold flex-1">Edit issue fields</h2>
-          <button type="button" onClick={onClose} className="px-2 py-0.5 text-xs border border-border rounded text-text-muted hover:text-text">Close</button>
+          <button type="button" onClick={onClose} className="px-2 py-0.5 text-xs border border-border rounded text-text-muted hover:text-text">Cancel</button>
         </div>
         <IssueMetaSection label="Workflow">
-          <IssueChipGroup value={issue.status} options={ISSUE_STATUSES} disabled={busy} onChange={(v) => onPatch({ status: v as IssueStatus })} />
+          <IssueChipGroup value={draft.status} options={ISSUE_STATUSES} disabled={busy} onChange={(v) => setDraft((d) => ({ ...d, status: v as IssueStatus }))} />
         </IssueMetaSection>
         <IssueMetaSection label="State">
-          <IssueChipGroup value={issue.state} options={ISSUE_STATES} disabled={busy} onChange={(v) => onPatch({ state: v as IssueState })} />
+          <IssueChipGroup value={draft.state} options={ISSUE_STATES} disabled={busy} onChange={(v) => setDraft((d) => ({ ...d, state: v as IssueState }))} />
         </IssueMetaSection>
-        {issue.state === "closed" && (
+        {draft.state === "closed" && (
           <IssueMetaSection label="Reason">
-            <IssueChipGroup value={issue.state_reason || "completed"} options={ISSUE_STATE_REASONS} disabled={busy} onChange={(v) => onPatch({ state_reason: v as IssueStateReason })} />
+            <IssueChipGroup value={draft.state_reason} options={ISSUE_STATE_REASONS} disabled={busy} onChange={(v) => setDraft((d) => ({ ...d, state_reason: v as IssueStateReason }))} />
           </IssueMetaSection>
         )}
         <IssueMetaSection label="Type">
-          <IssueChipGroup value={issue.type} options={ISSUE_TYPES} disabled={busy} onChange={(v) => onPatch({ type: v as IssueKind })} />
+          <IssueChipGroup value={draft.type} options={ISSUE_TYPES} disabled={busy} onChange={(v) => setDraft((d) => ({ ...d, type: v as IssueKind }))} />
         </IssueMetaSection>
         <IssueMetaSection label="Priority">
-          <IssueChipGroup value={issue.priority} options={ISSUE_PRIORITIES} disabled={busy} onChange={(v) => onPatch({ priority: v as IssuePriority })} />
+          <IssueChipGroup value={draft.priority} options={ISSUE_PRIORITIES} disabled={busy} onChange={(v) => setDraft((d) => ({ ...d, priority: v as IssuePriority }))} />
         </IssueMetaSection>
         <IssueMetaSection label="Assignee">
           <input
-            value={issue.assignee || ""}
-            onChange={(e) => onDraft({ assignee: e.target.value })}
-            onBlur={(e) => onPatch({ assignee: e.target.value })}
+            value={draft.assignee}
+            onChange={(e) => setDraft((d) => ({ ...d, assignee: e.target.value }))}
             placeholder="unassigned"
             className="w-full bg-bg-input border border-border rounded px-2 py-1 text-xs"
           />
         </IssueMetaSection>
+        <div className="flex justify-end gap-2 pt-1">
+          <button type="button" onClick={onClose} disabled={busy} className="px-3 py-1.5 text-sm rounded border border-border text-text-muted hover:text-text disabled:opacity-50">Cancel</button>
+          <button type="button" onClick={save} disabled={busy} className="px-3 py-1.5 text-sm rounded bg-blue text-white hover:bg-blue/90 disabled:opacity-50">Save</button>
+        </div>
       </div>
     </div>
   );

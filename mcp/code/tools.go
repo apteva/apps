@@ -248,6 +248,22 @@ func (a *App) MCPTools() []sdk.Tool {
 			Handler: a.toolIssuesList,
 		},
 		{
+			Name: "issues_search",
+			Description: "Search native Code issues across the current project, optionally scoped to one repo. Args: repo?, state? " +
+				"(open | closed | all; default all), status? (all | todo | triage | planned | in_progress | in_review | blocked | done), type?, priority?, assignee?, q?, limit?.",
+			InputSchema: schemaObject(map[string]any{
+				"repo":     map[string]any{"type": "string"},
+				"state":    map[string]any{"type": "string"},
+				"status":   map[string]any{"type": "string"},
+				"type":     map[string]any{"type": "string"},
+				"priority": map[string]any{"type": "string"},
+				"assignee": map[string]any{"type": "string"},
+				"q":        map[string]any{"type": "string"},
+				"limit":    map[string]any{"type": "integer"},
+			}, nil),
+			Handler: a.toolIssuesSearch,
+		},
+		{
 			Name:        "issues_get",
 			Description: "Get a native Code issue with comments, links, and activity. Args: slug, number.",
 			InputSchema: schemaObject(map[string]any{
@@ -532,6 +548,35 @@ func (a *App) toolIssuesList(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		Type:     strArg(args, "type"),
 		Priority: strArg(args, "priority"),
 		Assignee: strArg(args, "assignee"),
+		Q:        strArg(args, "q"),
+		Limit:    intArg(args, "limit", 100),
+	})
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"issues": issues, "count": len(issues)}, nil
+}
+
+func (a *App) toolIssuesSearch(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	status := strArg(args, "status")
+	if status == "" {
+		status = "all"
+	}
+	state := strArg(args, "state")
+	if state == "" {
+		state = "all"
+	}
+	issues, err := dbSearchIssues(ctx.AppDB(), pid, IssueListOptions{
+		State:    state,
+		Status:   status,
+		Type:     strArg(args, "type"),
+		Priority: strArg(args, "priority"),
+		Assignee: strArg(args, "assignee"),
+		RepoSlug: strArg(args, "repo"),
 		Q:        strArg(args, "q"),
 		Limit:    intArg(args, "limit", 100),
 	})

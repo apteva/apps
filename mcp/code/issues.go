@@ -86,6 +86,7 @@ type IssueListOptions struct {
 	Type     string
 	Priority string
 	Assignee string
+	RepoSlug string
 	Q        string
 	Limit    int
 }
@@ -230,6 +231,21 @@ func dbListIssues(db *sql.DB, projectID string, repoID int64, opt IssueListOptio
 	query := `SELECT ` + issueCols + ` FROM repo_issues i JOIN repositories r ON r.id = i.repo_id
 		WHERE i.project_id = ? AND i.repo_id = ?`
 	args := []any{projectID, repoID}
+	return dbQueryIssues(db, query, args, opt)
+}
+
+func dbSearchIssues(db *sql.DB, projectID string, opt IssueListOptions) ([]*Issue, error) {
+	query := `SELECT ` + issueCols + ` FROM repo_issues i JOIN repositories r ON r.id = i.repo_id
+		WHERE i.project_id = ?`
+	args := []any{projectID}
+	if opt.RepoSlug != "" {
+		query += ` AND r.slug = ?`
+		args = append(args, opt.RepoSlug)
+	}
+	return dbQueryIssues(db, query, args, opt)
+}
+
+func dbQueryIssues(db *sql.DB, query string, args []any, opt IssueListOptions) ([]*Issue, error) {
 	if opt.Status == "active" {
 		opt.State = issueStateOpen
 		opt.Status = ""

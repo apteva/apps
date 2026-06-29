@@ -34,13 +34,14 @@ var templatesFS embed.FS
 const manifestYAML = `schema: apteva-app/v1
 name: code
 display_name: Apteva Code
-version: 0.5.13
+version: 0.5.14
 description: |
   Repositories — code workspaces scoped to Apteva projects, with
   first-class editing tools modelled on Claude Code. Optionally
   imports repositories from GitHub when a github connection is bound,
   imports ZIP archives through the UI,
   manages native repo issues for bugs, feature requests, and tasks,
+  exposes project-wide issue search for agents,
   edits issue metadata in a focused modal,
   presents a compact issue list and chip-based issue metadata controls,
   separates issue lifecycle state from workflow status,
@@ -103,6 +104,7 @@ provides:
     - { name: repos_dev_status,       description: "Get the current dev run state (port, pid, status, framework)." }
     - { name: repos_dev_logs,         description: "Tail the dev run's stdout/stderr log file." }
     - { name: issues_list,            description: "List native Code issues for a repository." }
+    - { name: issues_search,          description: "Search native Code issues across all repositories in a project." }
     - { name: issues_get,             description: "Get a native Code issue with comments, links, and activity." }
     - { name: issues_create,          description: "Create a native Code issue." }
     - { name: issues_update,          description: "Update native Code issue fields." }

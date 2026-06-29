@@ -240,6 +240,21 @@ func TestIssues_ProjectScopeAndRepoScope(t *testing.T) {
 	if len(got) != 1 || got[0].Title != "p1 app" {
 		t.Fatalf("scope leak: %+v", got)
 	}
+
+	search, err := dbSearchIssues(db, "p1", IssueListOptions{State: "all", Status: "all"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(search) != 2 {
+		t.Fatalf("project search issues=%d, want 2: %+v", len(search), search)
+	}
+	repoSearch, err := dbSearchIssues(db, "p1", IssueListOptions{State: "all", Status: "all", RepoSlug: b.Slug})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(repoSearch) != 1 || repoSearch[0].RepoSlug != b.Slug || repoSearch[0].Title != "p1 other" {
+		t.Fatalf("repo-scoped search wrong: %+v", repoSearch)
+	}
 }
 
 // TestDevRun_UpsertAndGet pins the per-(project, repo) uniqueness
