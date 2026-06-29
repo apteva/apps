@@ -4,7 +4,7 @@
 // uses host React via importmap; talks to the code sidecar through
 // /api/apps/code/api/* with same-origin cookies.
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { DeviceFrame } from "./components/DeviceFrame";
 
 // Inlined SDK app-event subscription. Each app ships its own copy
@@ -2093,8 +2093,6 @@ function IssuesView({
   const [detail, setDetail] = useState<{ issue: CodeIssue; comments: IssueComment[]; links: IssueLink[] } | null>(null);
   const [state, setState] = useState("open");
   const [status, setStatus] = useState("all");
-  const [kind, setKind] = useState("");
-  const [priority, setPriority] = useState("");
   const [query, setQuery] = useState("");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
@@ -2104,8 +2102,6 @@ function IssuesView({
   const loadIssues = useCallback(async () => {
     try {
       const extra: Record<string, string> = { state, status };
-      if (kind) extra.type = kind;
-      if (priority) extra.priority = priority;
       if (query.trim()) extra.q = query.trim();
       const r = await api<{ issues: CodeIssue[] }>("GET", `/repos/${slug}/issues`, undefined, extra);
       const list = r.issues || [];
@@ -2117,7 +2113,7 @@ function IssuesView({
       setIssues([]);
       setSelected(null);
     }
-  }, [api, slug, state, status, kind, priority, query]);
+  }, [api, slug, state, status, query]);
 
   const loadDetail = useCallback(async (num: number | null) => {
     if (!num) {
@@ -2218,7 +2214,7 @@ function IssuesView({
               className="px-2 py-1 text-xs border border-accent text-accent rounded hover:bg-accent hover:text-bg"
             >New</button>
           </div>
-          <div className="grid grid-cols-4 gap-1">
+          <div className="grid grid-cols-2 gap-1">
             <select value={state} onChange={(e) => setState(e.target.value)} className="bg-bg-input border border-border rounded px-1 py-0.5 text-xs">
               <option value="open">open</option>
               <option value="closed">closed</option>
@@ -2227,14 +2223,6 @@ function IssuesView({
             <select value={status} onChange={(e) => setStatus(e.target.value)} className="bg-bg-input border border-border rounded px-1 py-0.5 text-xs">
               <option value="all">all workflow</option>
               {ISSUE_STATUSES.map((s) => <option key={s} value={s}>{s}</option>)}
-            </select>
-            <select value={kind} onChange={(e) => setKind(e.target.value)} className="bg-bg-input border border-border rounded px-1 py-0.5 text-xs">
-              <option value="">all types</option>
-              {ISSUE_TYPES.map((t) => <option key={t} value={t}>{t}</option>)}
-            </select>
-            <select value={priority} onChange={(e) => setPriority(e.target.value)} className="bg-bg-input border border-border rounded px-1 py-0.5 text-xs">
-              <option value="">all prio</option>
-              {ISSUE_PRIORITIES.map((p) => <option key={p} value={p}>{p}</option>)}
             </select>
           </div>
         </div>
@@ -2259,10 +2247,8 @@ function IssuesView({
                     </div>
                     <div className="mt-1 flex items-center gap-1 text-[10px] text-text-dim">
                       <IssuePill label={iss.type} tone={iss.type} />
-                      <IssuePill label={iss.priority} tone={iss.priority} />
                       <IssuePill label={iss.status} tone={iss.status} />
-                      <IssuePill label={iss.state} tone={iss.state} />
-                      {iss.state === "closed" && iss.state_reason ? <IssuePill label={iss.state_reason} tone={iss.state_reason} /> : null}
+                      {iss.state === "closed" ? <IssuePill label="closed" tone="closed" /> : null}
                       {iss.comments_count ? <span>{iss.comments_count} comments</span> : null}
                     </div>
                   </button>
@@ -2277,110 +2263,101 @@ function IssuesView({
         {!detail ? (
           <div className="p-8 text-text-muted text-sm text-center">Select an issue.</div>
         ) : (
-          <div className="max-w-4xl p-4 space-y-4">
-            <div className="border-b border-border pb-3">
-              <div className="flex items-start gap-3">
-                <div className="flex-1 min-w-0">
-                  <div className="text-xs text-text-dim font-mono">#{detail.issue.number}</div>
-                  <input
-                    value={detail.issue.title}
-                    onChange={(e) => setDetail((cur) => cur ? { ...cur, issue: { ...cur.issue, title: e.target.value } } : cur)}
-                    onBlur={(e) => patchIssue({ title: e.target.value })}
-                    className="mt-1 w-full bg-transparent text-text text-lg font-semibold outline-none border-b border-transparent focus:border-border"
-                  />
+          <div className="p-4">
+            <div className="max-w-6xl grid grid-cols-1 xl:grid-cols-[minmax(0,1fr)_16rem] gap-5">
+              <div className="min-w-0 space-y-4">
+                <div className="border-b border-border pb-3">
+                  <div className="flex items-start gap-3">
+                    <div className="flex-1 min-w-0">
+                      <div className="text-xs text-text-dim font-mono">#{detail.issue.number}</div>
+                      <input
+                        value={detail.issue.title}
+                        onChange={(e) => setDetail((cur) => cur ? { ...cur, issue: { ...cur.issue, title: e.target.value } } : cur)}
+                        onBlur={(e) => patchIssue({ title: e.target.value })}
+                        className="mt-1 w-full bg-transparent text-text text-lg font-semibold outline-none border-b border-transparent focus:border-border"
+                      />
+                    </div>
+                    <button
+                      type="button"
+                      onClick={closeOrReopen}
+                      disabled={busy}
+                      className="px-3 py-1 text-xs border border-border rounded hover:bg-bg-input disabled:opacity-50"
+                    >{detail.issue.state === "closed" ? "Reopen" : "Close"}</button>
+                  </div>
                 </div>
-                <button
-                  type="button"
-                  onClick={closeOrReopen}
-                  disabled={busy}
-                  className="px-3 py-1 text-xs border border-border rounded hover:bg-bg-input disabled:opacity-50"
-                >{detail.issue.state === "closed" ? "Reopen" : "Close"}</button>
-              </div>
-              <div className="mt-3 grid grid-cols-5 gap-2 max-w-3xl">
-                <IssueSelect label="Type" value={detail.issue.type} options={ISSUE_TYPES} onChange={(v) => patchIssue({ type: v as IssueKind })} />
-                <IssueSelect label="Workflow" value={detail.issue.status} options={ISSUE_STATUSES} onChange={(v) => patchIssue({ status: v as IssueStatus })} />
-                <IssueSelect label="State" value={detail.issue.state} options={ISSUE_STATES} onChange={(v) => patchIssue({ state: v as IssueState })} />
-                {detail.issue.state === "closed" && (
-                  <IssueSelect label="Reason" value={detail.issue.state_reason || "completed"} options={ISSUE_STATE_REASONS} onChange={(v) => patchIssue({ state_reason: v as IssueStateReason })} />
-                )}
-                <IssueSelect label="Priority" value={detail.issue.priority} options={ISSUE_PRIORITIES} onChange={(v) => patchIssue({ priority: v as IssuePriority })} />
-                <div>
-                  <label className="text-[11px] text-text-muted block mb-1">Assignee</label>
-                  <input
-                    value={detail.issue.assignee || ""}
-                    onChange={(e) => setDetail((cur) => cur ? { ...cur, issue: { ...cur.issue, assignee: e.target.value } } : cur)}
-                    onBlur={(e) => patchIssue({ assignee: e.target.value })}
-                    placeholder="unassigned"
-                    className="w-full bg-bg-input border border-border rounded px-2 py-1 text-xs"
+
+                <section>
+                  <textarea
+                    value={detail.issue.body}
+                    onChange={(e) => setDetail((cur) => cur ? { ...cur, issue: { ...cur.issue, body: e.target.value } } : cur)}
+                    onBlur={(e) => patchIssue({ body: e.target.value })}
+                    placeholder="Describe the issue…"
+                    className="w-full min-h-32 bg-bg-input border border-border rounded p-3 text-sm text-text outline-none resize-y"
                   />
-                </div>
-              </div>
-            </div>
+                </section>
 
-            <section>
-              <textarea
-                value={detail.issue.body}
-                onChange={(e) => setDetail((cur) => cur ? { ...cur, issue: { ...cur.issue, body: e.target.value } } : cur)}
-                onBlur={(e) => patchIssue({ body: e.target.value })}
-                placeholder="Describe the issue…"
-                className="w-full min-h-32 bg-bg-input border border-border rounded p-3 text-sm text-text outline-none resize-y"
-              />
-            </section>
+                <section className="space-y-2">
+                  <div className="flex items-center gap-2">
+                    <h3 className="text-xs uppercase tracking-wide text-text-dim">Links</h3>
+                    <span className="flex-1" />
+                    <button
+                      type="button"
+                      onClick={linkCurrentPath}
+                      disabled={!currentPath || busy}
+                      className="px-2 py-0.5 text-xs border border-border rounded text-text-muted hover:text-text disabled:opacity-40"
+                    >Link current file</button>
+                  </div>
+                  {detail.links.length === 0 ? (
+                    <div className="text-xs text-text-muted">No code links yet.</div>
+                  ) : (
+                    <ul className="space-y-1">
+                      {detail.links.map((l) => (
+                        <li key={l.id} className="text-xs flex items-center gap-2">
+                          <span className="text-text-dim">{l.kind}</span>
+                          {l.kind === "path" ? (
+                            <button type="button" onClick={() => onOpenPath(l.target.split(":")[0])} className="font-mono text-accent hover:underline truncate">
+                              {l.target}
+                            </button>
+                          ) : (
+                            <span className="font-mono text-text truncate">{l.target}</span>
+                          )}
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </section>
 
-            <section className="space-y-2">
-              <div className="flex items-center gap-2">
-                <h3 className="text-xs uppercase tracking-wide text-text-dim">Links</h3>
-                <span className="flex-1" />
-                <button
-                  type="button"
-                  onClick={linkCurrentPath}
-                  disabled={!currentPath || busy}
-                  className="px-2 py-0.5 text-xs border border-border rounded text-text-muted hover:text-text disabled:opacity-40"
-                >Link current file</button>
-              </div>
-              {detail.links.length === 0 ? (
-                <div className="text-xs text-text-muted">No code links yet.</div>
-              ) : (
-                <ul className="space-y-1">
-                  {detail.links.map((l) => (
-                    <li key={l.id} className="text-xs flex items-center gap-2">
-                      <span className="text-text-dim">{l.kind}</span>
-                      {l.kind === "path" ? (
-                        <button type="button" onClick={() => onOpenPath(l.target.split(":")[0])} className="font-mono text-accent hover:underline truncate">
-                          {l.target}
-                        </button>
-                      ) : (
-                        <span className="font-mono text-text truncate">{l.target}</span>
-                      )}
-                    </li>
+                <section className="space-y-2">
+                  <h3 className="text-xs uppercase tracking-wide text-text-dim">Comments</h3>
+                  {detail.comments.map((c) => (
+                    <div key={c.id} className="border border-border rounded p-3">
+                      <div className="text-[11px] text-text-dim">{c.author || "comment"} · {shortDate(c.created_at)}</div>
+                      <div className="mt-1 text-sm text-text whitespace-pre-wrap">{c.body}</div>
+                    </div>
                   ))}
-                </ul>
-              )}
-            </section>
-
-            <section className="space-y-2">
-              <h3 className="text-xs uppercase tracking-wide text-text-dim">Comments</h3>
-              {detail.comments.map((c) => (
-                <div key={c.id} className="border border-border rounded p-3">
-                  <div className="text-[11px] text-text-dim">{c.author || "comment"} · {shortDate(c.created_at)}</div>
-                  <div className="mt-1 text-sm text-text whitespace-pre-wrap">{c.body}</div>
-                </div>
-              ))}
-              <textarea
-                value={comment}
-                onChange={(e) => setComment(e.target.value)}
-                placeholder="Add a comment…"
-                className="w-full min-h-20 bg-bg-input border border-border rounded p-2 text-sm text-text outline-none resize-y"
-              />
-              <div className="flex justify-end">
-                <button
-                  type="button"
-                  onClick={addComment}
-                  disabled={busy || !comment.trim()}
-                  className="px-3 py-1 text-sm border border-accent text-accent rounded hover:bg-accent hover:text-bg disabled:opacity-50"
-                >Comment</button>
+                  <textarea
+                    value={comment}
+                    onChange={(e) => setComment(e.target.value)}
+                    placeholder="Add a comment…"
+                    className="w-full min-h-20 bg-bg-input border border-border rounded p-2 text-sm text-text outline-none resize-y"
+                  />
+                  <div className="flex justify-end">
+                    <button
+                      type="button"
+                      onClick={addComment}
+                      disabled={busy || !comment.trim()}
+                      className="px-3 py-1 text-sm border border-accent text-accent rounded hover:bg-accent hover:text-bg disabled:opacity-50"
+                    >Comment</button>
+                  </div>
+                </section>
               </div>
-            </section>
+              <IssueMetaSidebar
+                issue={detail.issue}
+                busy={busy}
+                onPatch={patchIssue}
+                onDraft={(patch) => setDetail((cur) => cur ? { ...cur, issue: { ...cur.issue, ...patch } } : cur)}
+              />
+            </div>
           </div>
         )}
       </main>
@@ -2409,6 +2386,80 @@ function IssueSelect({ label, value, options, onChange }: { label: string; value
       <select value={value} onChange={(e) => onChange(e.target.value)} className="w-full bg-bg-input border border-border rounded px-2 py-1 text-xs">
         {options.map((o) => <option key={o} value={o}>{o}</option>)}
       </select>
+    </div>
+  );
+}
+
+function IssueMetaSidebar({
+  issue,
+  busy,
+  onPatch,
+  onDraft,
+}: {
+  issue: CodeIssue;
+  busy: boolean;
+  onPatch: (patch: Partial<CodeIssue>) => void;
+  onDraft: (patch: Partial<CodeIssue>) => void;
+}) {
+  return (
+    <aside className="xl:border-l xl:border-border xl:pl-4 space-y-4">
+      <IssueMetaSection label="Workflow">
+        <IssueChipGroup value={issue.status} options={ISSUE_STATUSES} disabled={busy} onChange={(v) => onPatch({ status: v as IssueStatus })} />
+      </IssueMetaSection>
+      <IssueMetaSection label="State">
+        <IssueChipGroup value={issue.state} options={ISSUE_STATES} disabled={busy} onChange={(v) => onPatch({ state: v as IssueState })} />
+      </IssueMetaSection>
+      {issue.state === "closed" && (
+        <IssueMetaSection label="Reason">
+          <IssueChipGroup value={issue.state_reason || "completed"} options={ISSUE_STATE_REASONS} disabled={busy} onChange={(v) => onPatch({ state_reason: v as IssueStateReason })} />
+        </IssueMetaSection>
+      )}
+      <IssueMetaSection label="Type">
+        <IssueChipGroup value={issue.type} options={ISSUE_TYPES} disabled={busy} onChange={(v) => onPatch({ type: v as IssueKind })} />
+      </IssueMetaSection>
+      <IssueMetaSection label="Priority">
+        <IssueChipGroup value={issue.priority} options={ISSUE_PRIORITIES} disabled={busy} onChange={(v) => onPatch({ priority: v as IssuePriority })} />
+      </IssueMetaSection>
+      <IssueMetaSection label="Assignee">
+        <input
+          value={issue.assignee || ""}
+          onChange={(e) => onDraft({ assignee: e.target.value })}
+          onBlur={(e) => onPatch({ assignee: e.target.value })}
+          placeholder="unassigned"
+          className="w-full bg-bg-input border border-border rounded px-2 py-1 text-xs"
+        />
+      </IssueMetaSection>
+    </aside>
+  );
+}
+
+function IssueMetaSection({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <section>
+      <h3 className="text-[11px] uppercase tracking-wide text-text-dim mb-1.5">{label}</h3>
+      {children}
+    </section>
+  );
+}
+
+function IssueChipGroup({ value, options, disabled, onChange }: { value: string; options: readonly string[]; disabled?: boolean; onChange: (v: string) => void }) {
+  return (
+    <div className="flex flex-wrap gap-1">
+      {options.map((option) => (
+        <button
+          key={option}
+          type="button"
+          disabled={disabled}
+          onClick={() => {
+            if (option !== value) onChange(option);
+          }}
+          className={`px-2 py-0.5 text-xs rounded border ${
+            option === value
+              ? "border-accent text-accent bg-accent/10"
+              : "border-border text-text-muted hover:text-text hover:border-accent/60"
+          } disabled:opacity-60`}
+        >{option}</button>
+      ))}
     </div>
   );
 }

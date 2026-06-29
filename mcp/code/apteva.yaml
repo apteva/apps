@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: code
 display_name: Apteva Code
-version: 0.5.11
+version: 0.5.12
 description: |
   Repositories — named, framework-tagged code workspaces scoped under
   Apteva projects. First-class editing tools modelled on Claude Code:
@@ -11,6 +11,8 @@ description: |
   ZIP import for repository initialization or overlay updates. Native
   repo issues track bugs, feature requests, tasks, comments, and code
   links for agents and humans.
+  v0.5.12 simplifies the issue UI with quieter issue rows, fewer
+  visible filters, and compact metadata chips in the detail sidebar.
   v0.5.11 separates issue lifecycle state from workflow status:
   state=open|closed, reason=completed|not_planned, and status for
   board workflow such as todo, in_progress, blocked, or done.
