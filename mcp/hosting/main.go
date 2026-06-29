@@ -24,7 +24,7 @@ import (
 //go:embed apteva.yaml
 var manifestYAML string
 
-const appVersion = "1.1.1"
+const appVersion = "1.2.0"
 
 const (
 	StatusProvisioning = "provisioning"
@@ -95,8 +95,13 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "hosting_tenant_create", Description: "Provision a hosted Apteva tenant container and default hostname.", InputSchema: schemaObject(map[string]any{
 			"customer_id": intSchema(), "customer_email": strSchema(), "customer_name": strSchema(),
 			"owner_email": strSchema(), "slug": strSchema(), "plan_key": strSchema(), "product_key": strSchema(),
-			"subscription_id": intSchema(), "apteva_version": strSchema(), "image": strSchema(), "runtime_config": objSchema(), "metadata": objSchema(),
+			"subscription_id": intSchema(), "order_id": intSchema(), "fulfillment_id": intSchema(), "apteva_version": strSchema(), "image": strSchema(), "runtime_config": objSchema(), "metadata": objSchema(),
 		}, []string{"owner_email", "slug"}), Handler: a.toolTenantCreate},
+		{Name: "hosting_fulfillment_provision", Description: "Provision a tenant for an Orders generic fulfillment and report success/failure back to Orders. Args: order_id, fulfillment_id, owner_email, slug, plan_key, product_key, runtime_config, metadata.", InputSchema: schemaObject(map[string]any{
+			"order_id": intSchema(), "fulfillment_id": intSchema(), "customer_id": intSchema(), "customer_email": strSchema(), "customer_name": strSchema(),
+			"owner_email": strSchema(), "slug": strSchema(), "plan_key": strSchema(), "product_key": strSchema(),
+			"subscription_id": intSchema(), "apteva_version": strSchema(), "image": strSchema(), "runtime_config": objSchema(), "metadata": objSchema(),
+		}, []string{"order_id", "fulfillment_id", "owner_email", "slug"}), Handler: a.toolFulfillmentProvision},
 		{Name: "hosting_tenant_get", Description: "Fetch one hosted tenant.", InputSchema: tenantIDSchema(), Handler: a.toolTenantGet},
 		{Name: "hosting_tenant_list", Description: "List hosted tenants.", InputSchema: schemaObject(map[string]any{"customer_id": intSchema(), "status": strSchema(), "plan_key": strSchema()}, nil), Handler: a.toolTenantList},
 		{Name: "hosting_tenant_suspend", Description: "Stop and suspend a tenant.", InputSchema: tenantIDSchema(), Handler: a.toolTenantSuspend},
@@ -249,6 +254,37 @@ func (a *App) toolCustomerCreate(ctx *sdk.AppCtx, args map[string]any) (any, err
 func (a *App) toolTenantCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	t, err := a.provisionTenant(ctx, args)
 	if err != nil {
+		_ = reportOrderFulfillment(ctx, args, "failed", "", err.Error(), nil)
+		return nil, err
+	}
+	_ = reportOrderFulfillment(ctx, args, "succeeded", t.ID, "", map[string]any{
+		"tenant_id":        t.ID,
+		"default_hostname": t.DefaultHostname,
+		"workload_id":      t.WorkloadID,
+		"status":           t.Status,
+	})
+	ctx.Emit("hosting.tenant.active", map[string]any{"tenant_id": t.ID, "customer_id": t.CustomerID, "hostname": t.DefaultHostname})
+	return map[string]any{"tenant": t}, nil
+}
+
+func (a *App) toolFulfillmentProvision(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if int64Arg(args, "order_id") == 0 {
+		return nil, errors.New("order_id required")
+	}
+	if int64Arg(args, "fulfillment_id") == 0 {
+		return nil, errors.New("fulfillment_id required")
+	}
+	t, err := a.provisionTenant(ctx, args)
+	if err != nil {
+		_ = reportOrderFulfillment(ctx, args, "failed", "", err.Error(), nil)
+		return nil, err
+	}
+	if err := reportOrderFulfillment(ctx, args, "succeeded", t.ID, "", map[string]any{
+		"tenant_id":        t.ID,
+		"default_hostname": t.DefaultHostname,
+		"workload_id":      t.WorkloadID,
+		"status":           t.Status,
+	}); err != nil {
 		return nil, err
 	}
 	ctx.Emit("hosting.tenant.active", map[string]any{"tenant_id": t.ID, "customer_id": t.CustomerID, "hostname": t.DefaultHostname})
@@ -407,6 +443,28 @@ func (a *App) toolSubscriptionSync(ctx *sdk.AppCtx, args map[string]any) (any, e
 	}
 }
 
+func reportOrderFulfillment(ctx *sdk.AppCtx, args map[string]any, status, externalRef, errText string, response map[string]any) error {
+	fulfillmentID := int64Arg(args, "fulfillment_id")
+	if fulfillmentID == 0 || ctx.PlatformAPI() == nil {
+		return nil
+	}
+	input := map[string]any{
+		"id":           fulfillmentID,
+		"status":       status,
+		"external_ref": externalRef,
+		"error":        errText,
+		"actor":        "hosting",
+	}
+	if response != nil {
+		input["response_payload"] = response
+	}
+	var out map[string]any
+	if err := ctx.PlatformAPI().CallAppResult("orders", "fulfillments_update", input, &out); err != nil {
+		return fmt.Errorf("orders fulfillments_update: %w", err)
+	}
+	return nil
+}
+
 func (a *App) provisionTenant(ctx *sdk.AppCtx, args map[string]any) (*Tenant, error) {
 	planKey := firstNonEmpty(strArg(args, "plan_key"), "free")
 	plan, err := dbPlanGet(ctx.AppDB(), planKey)
@@ -447,6 +505,12 @@ func (a *App) provisionTenant(ctx *sdk.AppCtx, args map[string]any) (*Tenant, er
 	metadata := mapArg(args, "metadata")
 	metadata["product_key"] = product.Key
 	metadata["runtime_kind"] = product.RuntimeKind
+	if orderID := int64Arg(args, "order_id"); orderID != 0 {
+		metadata["order_id"] = orderID
+	}
+	if fulfillmentID := int64Arg(args, "fulfillment_id"); fulfillmentID != 0 {
+		metadata["fulfillment_id"] = fulfillmentID
+	}
 	tenant := &Tenant{
 		ID:              newID("htn"),
 		CustomerID:      customer.ID,

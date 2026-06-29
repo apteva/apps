@@ -2,6 +2,7 @@ package main
 
 import (
 	"database/sql"
+	_ "embed"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -15,47 +16,8 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const manifestYAML = `schema: apteva-app/v1
-name: orders
-display_name: Orders
-version: 0.1.0
-description: Physical commerce order ledger for fulfillment, shipment tracking, and returns.
-author: Apteva
-scopes: [project, global]
-requires:
-  permissions:
-    - db.write.app
-    - platform.apps.call
-    - platform.connections.read_credentials
-  apps:
-    - name: catalog
-      optional: false
-    - name: billing
-      optional: true
-    - name: checkout
-      optional: true
-  integrations:
-    - role: fulfillment_provider
-      kind: integration
-      compatible_slugs: [huboo, hive-fulfillment, byrd]
-      required: false
-provides:
-  http_routes:
-    - prefix: /
-runtime:
-  kind: source
-  source:
-    repo: github.com/apteva/apps
-    ref: main
-    entry: mcp/orders
-  port: 8080
-  health_check: /health
-db:
-  driver: sqlite
-  path: /data/orders.db
-  migrations: migrations/
-upgrade_policy: auto-patch
-`
+//go:embed apteva.yaml
+var manifestYAML string
 
 type App struct{}
 
@@ -80,10 +42,15 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	return nil
 }
 
-func (a *App) OnUnmount(*sdk.AppCtx) error       { return nil }
-func (a *App) Channels() []sdk.ChannelFactory    { return nil }
-func (a *App) Workers() []sdk.Worker             { return nil }
-func (a *App) EventHandlers() []sdk.EventHandler { return nil }
+func (a *App) OnUnmount(*sdk.AppCtx) error    { return nil }
+func (a *App) Channels() []sdk.ChannelFactory { return nil }
+func (a *App) Workers() []sdk.Worker          { return nil }
+func (a *App) EventHandlers() []sdk.EventHandler {
+	return []sdk.EventHandler{{
+		Topic:   "invoice.paid",
+		Handler: a.handleInvoicePaidEvent,
+	}}
+}
 
 // HTTP routes.
 
@@ -192,10 +159,11 @@ func (a *App) MCPTools() []sdk.Tool {
 	return []sdk.Tool{
 		{
 			Name:        "orders_create",
-			Description: "Create a NEW durable physical order when no order id exists yet. Use this for paid invoice-to-fulfillment handoffs. Args: source, source_ref, invoice_id, customer_email, customer_name, addresses, totals, payment_status, order_status, fulfillment_status, items, metadata.",
+			Description: "Create a NEW durable order when no order id exists yet. Defaults remain physical commerce; set order_type plus item fulfillment_type/fulfillment_app for hosting, SaaS, digital, or service fulfillment. Args: source, source_ref, order_type, invoice_id, customer_email, customer_name, addresses, totals, payment_status, order_status, fulfillment_status, items, metadata.",
 			InputSchema: schemaObject(map[string]any{
 				"source":              map[string]any{"type": "string"},
 				"source_ref":          map[string]any{"type": "string"},
+				"order_type":          map[string]any{"type": "string"},
 				"checkout_session_id": map[string]any{"type": "integer"},
 				"cart_id":             map[string]any{"type": "integer"},
 				"invoice_id":          map[string]any{"type": "integer"},
@@ -218,6 +186,21 @@ func (a *App) MCPTools() []sdk.Tool {
 				"metadata":            map[string]any{"type": "object"},
 			}, []string{"items"}),
 			Handler: a.toolOrdersCreate,
+		},
+		{
+			Name:        "orders_create_from_invoice",
+			Description: "Create or return an idempotent order from a Billing invoice. If fulfillment_app/fulfillment_type are present and the invoice is paid, also queues a generic fulfillment. Args: invoice_id, source_ref, order_type, fulfillment_type, fulfillment_app, metadata.",
+			InputSchema: schemaObject(map[string]any{
+				"invoice_id":       map[string]any{"type": "integer"},
+				"source_ref":       map[string]any{"type": "string"},
+				"order_type":       map[string]any{"type": "string"},
+				"fulfillment_type": map[string]any{"type": "string"},
+				"fulfillment_app":  map[string]any{"type": "string"},
+				"idempotency_key":  map[string]any{"type": "string"},
+				"metadata":         map[string]any{"type": "object"},
+				"fulfillment_meta": map[string]any{"type": "object"},
+			}, []string{"invoice_id"}),
+			Handler: a.toolOrdersCreateFromInvoice,
 		},
 		{
 			Name:        "orders_create_from_checkout",
@@ -251,10 +234,11 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "orders_search",
-			Description: "Search orders. Args: q, source, order_status, payment_status, fulfillment_status, limit.",
+			Description: "Search orders. Args: q, source, order_type, order_status, payment_status, fulfillment_status, limit.",
 			InputSchema: schemaObject(map[string]any{
 				"q":                  map[string]any{"type": "string"},
 				"source":             map[string]any{"type": "string"},
+				"order_type":         map[string]any{"type": "string"},
 				"order_status":       map[string]any{"type": "string"},
 				"payment_status":     map[string]any{"type": "string"},
 				"fulfillment_status": map[string]any{"type": "string"},
@@ -287,17 +271,36 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "fulfillments_create",
-			Description: "Create or submit a fulfillment. Args: order_id, provider, warehouse_id, service, submit, payload.",
+			Description: "Create or submit a fulfillment. Physical orders use provider/warehouse fields; generic orders can set fulfillment_type, fulfillment_app, idempotency_key, external_ref. Args: order_id, provider, fulfillment_type, fulfillment_app, idempotency_key, warehouse_id, service, submit, payload.",
 			InputSchema: schemaObject(map[string]any{
-				"order_id":     map[string]any{"type": "integer"},
-				"provider":     map[string]any{"type": "string"},
-				"warehouse_id": map[string]any{"type": "string"},
-				"service":      map[string]any{"type": "string"},
-				"submit":       map[string]any{"type": "boolean"},
-				"payload":      map[string]any{"type": "object"},
-				"metadata":     map[string]any{"type": "object"},
-			}, []string{"order_id", "provider"}),
+				"order_id":         map[string]any{"type": "integer"},
+				"provider":         map[string]any{"type": "string"},
+				"fulfillment_type": map[string]any{"type": "string"},
+				"fulfillment_app":  map[string]any{"type": "string"},
+				"idempotency_key":  map[string]any{"type": "string"},
+				"external_ref":     map[string]any{"type": "string"},
+				"status":           map[string]any{"type": "string"},
+				"warehouse_id":     map[string]any{"type": "string"},
+				"service":          map[string]any{"type": "string"},
+				"submit":           map[string]any{"type": "boolean"},
+				"payload":          map[string]any{"type": "object"},
+				"metadata":         map[string]any{"type": "object"},
+			}, []string{"order_id"}),
 			Handler: a.toolFulfillmentsCreate,
+		},
+		{
+			Name:        "fulfillments_update",
+			Description: "Update a fulfillment's status, external_ref, error, response payload, or metadata. Used by fulfillment apps such as Hosting after provisioning succeeds or fails.",
+			InputSchema: schemaObject(map[string]any{
+				"id":               map[string]any{"type": "integer"},
+				"status":           map[string]any{"type": "string"},
+				"external_ref":     map[string]any{"type": "string"},
+				"error":            map[string]any{"type": "string"},
+				"response_payload": map[string]any{"type": "object"},
+				"metadata":         map[string]any{"type": "object"},
+				"actor":            map[string]any{"type": "string"},
+			}, []string{"id"}),
+			Handler: a.toolFulfillmentsUpdate,
 		},
 		{
 			Name:        "fulfillments_sync",
@@ -371,6 +374,149 @@ func (a *App) toolOrdersCreate(ctx *sdk.AppCtx, args map[string]any) (any, error
 	}
 	emitOrder(ctx, "order.created", order)
 	return map[string]any{"order": order}, nil
+}
+
+func (a *App) toolOrdersCreateFromInvoice(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	order, fulfillment, err := a.createOrderFromInvoice(ctx.WithProject(pid), pid, args)
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]any{"order": order}
+	if fulfillment != nil {
+		out["fulfillment"] = fulfillment
+	}
+	return out, nil
+}
+
+func (a *App) handleInvoicePaidEvent(ctx *sdk.AppCtx, event sdk.Event) error {
+	pid := firstNonEmpty(event.ProjectID, strArg(event.Data, "_project_id"))
+	if pid == "" {
+		return nil
+	}
+	invoiceID := int64Arg(event.Data, "id")
+	if invoiceID == 0 {
+		invoiceID = int64Arg(event.Data, "invoice_id")
+	}
+	if invoiceID == 0 {
+		return nil
+	}
+	args := map[string]any{"invoice_id": invoiceID, "_project_id": pid}
+	if _, _, err := a.createOrderFromInvoice(ctx.WithProject(pid), pid, args); err != nil {
+		if strings.Contains(err.Error(), "no generic fulfillment metadata") {
+			return nil
+		}
+		return err
+	}
+	return nil
+}
+
+func (a *App) createOrderFromInvoice(ctx *sdk.AppCtx, pid string, args map[string]any) (*Order, *Fulfillment, error) {
+	invoiceID := int64Arg(args, "invoice_id")
+	if invoiceID == 0 {
+		return nil, nil, errors.New("invoice_id required")
+	}
+	if ctx.PlatformAPI() == nil {
+		return nil, nil, errors.New("platform API unavailable (billing app must be installed)")
+	}
+	var invResp struct {
+		Invoice map[string]any `json:"invoice"`
+		Found   bool           `json:"found"`
+	}
+	if err := ctx.PlatformAPI().CallAppResult("billing", "invoices_get", map[string]any{"invoice_id": invoiceID, "_project_id": pid}, &invResp); err != nil {
+		return nil, nil, fmt.Errorf("billing invoice lookup failed: %w", err)
+	}
+	if invResp.Invoice == nil {
+		return nil, nil, fmt.Errorf("invoice %d not found", invoiceID)
+	}
+	invMeta := mapFromAny(invResp.Invoice["metadata"])
+	orderType := normalizeOrderType(firstNonEmpty(strArg(args, "order_type"), strArg(invMeta, "order_type"), inferOrderType(strArg(invMeta, "product_type"))))
+	fulfillmentApp := firstNonEmpty(strArg(args, "fulfillment_app"), strArg(invMeta, "fulfillment_app"))
+	fulfillmentType := firstNonEmpty(strArg(args, "fulfillment_type"), strArg(invMeta, "fulfillment_type"), defaultFulfillmentType(orderType))
+	if orderType == "physical" && fulfillmentApp == "" && strArg(args, "order_type") == "" {
+		return nil, nil, errors.New("no generic fulfillment metadata on invoice")
+	}
+	status := strings.ToLower(strArg(invResp.Invoice, "status"))
+	paymentStatus := "unpaid"
+	orderStatus := "pending_payment"
+	fulfillmentStatus := "unsubmitted"
+	if status == "paid" {
+		paymentStatus = "paid"
+		orderStatus = "paid"
+		if fulfillmentApp != "" {
+			fulfillmentStatus = "queued"
+		}
+	}
+	sourceRef := firstNonEmpty(strArg(args, "source_ref"), fmt.Sprintf("invoice:%d", invoiceID))
+	if existing, err := dbOrderGetBySource(ctx.AppDB(), pid, "billing", sourceRef, true); err != nil {
+		return nil, nil, err
+	} else if existing != nil {
+		f, err := ensureGenericFulfillment(ctx, pid, existing, invoiceID, fulfillmentType, fulfillmentApp, args)
+		return existing, f, err
+	}
+	items := invoiceLineItems(invResp.Invoice, fulfillmentType, fulfillmentApp)
+	body := map[string]any{
+		"source":             "billing",
+		"source_ref":         sourceRef,
+		"source_payload":     map[string]any{"invoice": invResp.Invoice},
+		"order_type":         orderType,
+		"invoice_id":         invoiceID,
+		"customer_id":        int64Arg(invResp.Invoice, "customer_id"),
+		"customer_email":     strArg(invResp.Invoice, "customer_email"),
+		"customer_name":      strArg(invResp.Invoice, "customer_name"),
+		"currency":           strArg(invResp.Invoice, "currency"),
+		"subtotal_cents":     int64Arg(invResp.Invoice, "subtotal_cents"),
+		"tax_cents":          int64Arg(invResp.Invoice, "tax_cents"),
+		"total_cents":        int64Arg(invResp.Invoice, "total_cents"),
+		"payment_status":     paymentStatus,
+		"order_status":       orderStatus,
+		"fulfillment_status": fulfillmentStatus,
+		"items":              items,
+		"metadata":           mergeMaps(invMeta, mapFromAny(args["metadata"])),
+	}
+	order, err := dbOrderCreate(ctx, pid, body, "order.created_from_invoice")
+	if err != nil {
+		return nil, nil, err
+	}
+	emitOrder(ctx, "order.created", order)
+	f, err := ensureGenericFulfillment(ctx, pid, order, invoiceID, fulfillmentType, fulfillmentApp, args)
+	if err != nil {
+		return nil, nil, err
+	}
+	if f != nil {
+		order, _ = dbOrderGet(ctx.AppDB(), pid, order.ID, true)
+	}
+	return order, f, nil
+}
+
+func ensureGenericFulfillment(ctx *sdk.AppCtx, pid string, order *Order, invoiceID int64, fulfillmentType, fulfillmentApp string, args map[string]any) (*Fulfillment, error) {
+	if order == nil || fulfillmentApp == "" {
+		return nil, nil
+	}
+	key := firstNonEmpty(strArg(args, "idempotency_key"), fmt.Sprintf("billing_invoice:%d:%s", invoiceID, fulfillmentType))
+	if existing, err := dbFulfillmentGetByIdempotency(ctx.AppDB(), pid, key); err != nil {
+		return nil, err
+	} else if existing != nil {
+		return existing, nil
+	}
+	meta := mergeMaps(map[string]any{
+		"invoice_id": invoiceID,
+		"order_type": order.OrderType,
+	}, mapFromAny(args["fulfillment_meta"]))
+	f, _, err := dbFulfillmentCreate(ctx, pid, map[string]any{
+		"order_id":         order.ID,
+		"provider":         fulfillmentApp,
+		"fulfillment_type": fulfillmentType,
+		"fulfillment_app":  fulfillmentApp,
+		"idempotency_key":  key,
+		"status":           "queued",
+		"payload":          map[string]any{"order_id": order.ID, "invoice_id": invoiceID, "metadata": order.Metadata},
+		"metadata":         meta,
+	})
+	return f, err
 }
 
 func (a *App) toolOrdersCreateFromCheckout(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -497,6 +643,7 @@ func (a *App) toolOrdersSearch(ctx *sdk.AppCtx, args map[string]any) (any, error
 	out, err := dbOrdersSearch(ctx.AppDB(), pid, orderFilters{
 		query:             strArg(args, "q"),
 		source:            strArg(args, "source"),
+		orderType:         strArg(args, "order_type"),
 		orderStatus:       strArg(args, "order_status"),
 		paymentStatus:     strArg(args, "payment_status"),
 		fulfillmentStatus: strArg(args, "fulfillment_status"),
@@ -550,6 +697,19 @@ func (a *App) toolFulfillmentsCreate(ctx *sdk.AppCtx, args map[string]any) (any,
 		return nil, err
 	}
 	emitOrder(ctx, "fulfillment.created", order)
+	return map[string]any{"fulfillment": f, "order": order}, nil
+}
+
+func (a *App) toolFulfillmentsUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	f, order, err := dbFulfillmentUpdate(ctx.AppDB(), pid, args)
+	if err != nil {
+		return nil, err
+	}
+	emitOrder(ctx, "fulfillment.updated", order)
 	return map[string]any{"fulfillment": f, "order": order}, nil
 }
 
@@ -646,6 +806,7 @@ func (a *App) handleHTTPOrdersSearch(w http.ResponseWriter, r *http.Request) {
 	out, err := dbOrdersSearch(ctx.AppDB(), pid, orderFilters{
 		query:             r.URL.Query().Get("q"),
 		source:            r.URL.Query().Get("source"),
+		orderType:         r.URL.Query().Get("order_type"),
 		orderStatus:       r.URL.Query().Get("order_status"),
 		paymentStatus:     r.URL.Query().Get("payment_status"),
 		fulfillmentStatus: r.URL.Query().Get("fulfillment_status"),
@@ -872,6 +1033,7 @@ type Order struct {
 	Source            string          `json:"source"`
 	SourceRef         string          `json:"source_ref,omitempty"`
 	SourcePayload     json.RawMessage `json:"source_payload,omitempty"`
+	OrderType         string          `json:"order_type"`
 	CheckoutSessionID *int64          `json:"checkout_session_id,omitempty"`
 	CartID            *int64          `json:"cart_id,omitempty"`
 	InvoiceID         *int64          `json:"invoice_id,omitempty"`
@@ -916,6 +1078,8 @@ type OrderItem struct {
 	Currency         string          `json:"currency"`
 	SourceItemRef    string          `json:"source_item_ref,omitempty"`
 	FulfillmentSKU   string          `json:"fulfillment_sku,omitempty"`
+	FulfillmentType  string          `json:"fulfillment_type"`
+	FulfillmentApp   string          `json:"fulfillment_app"`
 	Metadata         json.RawMessage `json:"metadata,omitempty"`
 	CreatedAt        string          `json:"created_at"`
 	UpdatedAt        string          `json:"updated_at"`
@@ -926,10 +1090,15 @@ type Fulfillment struct {
 	ProjectID       string          `json:"project_id"`
 	OrderID         int64           `json:"order_id"`
 	Provider        string          `json:"provider"`
+	FulfillmentType string          `json:"fulfillment_type"`
+	FulfillmentApp  string          `json:"fulfillment_app"`
 	ProviderOrderID string          `json:"provider_order_id,omitempty"`
+	ExternalRef     string          `json:"external_ref,omitempty"`
+	IdempotencyKey  string          `json:"idempotency_key,omitempty"`
 	WarehouseID     string          `json:"warehouse_id,omitempty"`
 	Service         string          `json:"service,omitempty"`
 	Status          string          `json:"status"`
+	AttemptCount    int64           `json:"attempt_count"`
 	RequestPayload  json.RawMessage `json:"request_payload,omitempty"`
 	ResponsePayload json.RawMessage `json:"response_payload,omitempty"`
 	Error           string          `json:"error,omitempty"`
@@ -1016,6 +1185,7 @@ func dbOrderCreate(ctx *sdk.AppCtx, pid string, args map[string]any, eventAction
 		total = subtotal + tax + shipping - discount
 	}
 	source := firstNonEmpty(strArg(args, "source"), "manual")
+	orderType := normalizeOrderType(firstNonEmpty(strArg(args, "order_type"), "physical"))
 	paymentStatus := firstNonEmpty(strArg(args, "payment_status"), "unpaid")
 	orderStatus := firstNonEmpty(strArg(args, "order_status"), defaultOrderStatus(paymentStatus))
 	fulfillmentStatus := firstNonEmpty(strArg(args, "fulfillment_status"), "unsubmitted")
@@ -1036,14 +1206,14 @@ func dbOrderCreate(ctx *sdk.AppCtx, pid string, args map[string]any, eventAction
 	var id int64
 	err = tx.QueryRow(
 		`INSERT INTO orders
-		   (project_id, order_number, source, source_ref, source_payload,
+		   (project_id, order_number, source, source_ref, source_payload, order_type,
 		    checkout_session_id, cart_id, invoice_id, customer_id,
 		    customer_email, customer_name, shipping_address, billing_address,
 		    currency, subtotal_cents, tax_cents, shipping_cents, discount_cents, total_cents,
 		    payment_status, order_status, fulfillment_status, metadata, paid_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 RETURNING id`,
-		pid, number, source, nullStr(strArg(args, "source_ref")), jsonOrEmpty(args["source_payload"], "{}"),
+		pid, number, source, nullStr(strArg(args, "source_ref")), jsonOrEmpty(args["source_payload"], "{}"), orderType,
 		nullableInt64(int64Arg(args, "checkout_session_id")), nullableInt64(int64Arg(args, "cart_id")),
 		nullableInt64(int64Arg(args, "invoice_id")), nullableInt64(int64Arg(args, "customer_id")),
 		nullStr(strArg(args, "customer_email")), nullStr(strArg(args, "customer_name")),
@@ -1071,11 +1241,14 @@ func dbOrderCreate(ctx *sdk.AppCtx, pid string, args map[string]any, eventAction
 		_, err := tx.Exec(
 			`INSERT INTO order_items
 			   (order_id, position, catalog_product_id, catalog_price_id, sku, title,
-			    quantity, unit_amount_cents, currency, source_item_ref, fulfillment_sku, metadata)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			    quantity, unit_amount_cents, currency, source_item_ref, fulfillment_sku,
+			    fulfillment_type, fulfillment_app, metadata)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			id, i, nullablePtr(it.CatalogProductID), nullablePtr(it.CatalogPriceID), nullStr(it.SKU), it.Title,
 			it.Quantity, it.UnitAmountCents, strings.ToUpper(firstNonEmpty(it.Currency, currency)),
-			nullStr(it.SourceItemRef), nullStr(it.FulfillmentSKU), jsonOrEmpty(it.Metadata, "{}"),
+			nullStr(it.SourceItemRef), nullStr(it.FulfillmentSKU),
+			firstNonEmpty(it.FulfillmentType, "warehouse_shipment"), firstNonEmpty(it.FulfillmentApp, "orders"),
+			jsonOrEmpty(it.Metadata, "{}"),
 		)
 		if err != nil {
 			return nil, err
@@ -1094,8 +1267,8 @@ func dbOrderCreate(ctx *sdk.AppCtx, pid string, args map[string]any, eventAction
 }
 
 type orderFilters struct {
-	query, source, orderStatus, paymentStatus, fulfillmentStatus string
-	limit                                                        int
+	query, source, orderType, orderStatus, paymentStatus, fulfillmentStatus string
+	limit                                                                   int
 }
 
 func dbOrdersSearch(db *sql.DB, pid string, f orderFilters) ([]*Order, error) {
@@ -1104,6 +1277,10 @@ func dbOrdersSearch(db *sql.DB, pid string, f orderFilters) ([]*Order, error) {
 	if f.source != "" {
 		where = append(where, "source = ?")
 		args = append(args, f.source)
+	}
+	if f.orderType != "" {
+		where = append(where, "order_type = ?")
+		args = append(args, normalizeOrderType(f.orderType))
 	}
 	if f.orderStatus != "" {
 		where = append(where, "order_status = ?")
@@ -1172,6 +1349,25 @@ func dbOrderGetByNumber(db *sql.DB, pid, number string, nested bool) (*Order, er
 		return nil, nil
 	}
 	o, err := scanOrder(db.QueryRow(`SELECT `+orderSelectColumns()+` FROM orders WHERE order_number = ? AND project_id = ?`, number, pid))
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if nested {
+		if err := loadOrderNested(db, pid, o); err != nil {
+			return nil, err
+		}
+	}
+	return o, nil
+}
+
+func dbOrderGetBySource(db *sql.DB, pid, source, sourceRef string, nested bool) (*Order, error) {
+	if strings.TrimSpace(source) == "" || strings.TrimSpace(sourceRef) == "" {
+		return nil, nil
+	}
+	o, err := scanOrder(db.QueryRow(`SELECT `+orderSelectColumns()+` FROM orders WHERE source = ? AND source_ref = ? AND project_id = ?`, source, sourceRef, pid))
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -1272,9 +1468,11 @@ func dbOrderCancel(db *sql.DB, pid string, id int64, reason, actor string) (*Ord
 
 func dbFulfillmentCreate(ctx *sdk.AppCtx, pid string, args map[string]any) (*Fulfillment, *Order, error) {
 	orderID := int64Arg(args, "order_id")
-	provider := strings.TrimSpace(strArg(args, "provider"))
-	if orderID == 0 || provider == "" {
-		return nil, nil, errors.New("order_id and provider required")
+	fulfillmentApp := firstNonEmpty(strArg(args, "fulfillment_app"), strArg(args, "provider"), "orders")
+	fulfillmentType := firstNonEmpty(strArg(args, "fulfillment_type"), "warehouse_shipment")
+	provider := firstNonEmpty(strings.TrimSpace(strArg(args, "provider")), fulfillmentApp)
+	if orderID == 0 {
+		return nil, nil, errors.New("order_id required")
 	}
 	order, err := dbOrderGet(ctx.AppDB(), pid, orderID, true)
 	if err != nil {
@@ -1283,11 +1481,20 @@ func dbFulfillmentCreate(ctx *sdk.AppCtx, pid string, args map[string]any) (*Ful
 	if order == nil {
 		return nil, nil, errors.New("order not found")
 	}
+	if key := strings.TrimSpace(strArg(args, "idempotency_key")); key != "" {
+		existing, err := dbFulfillmentGetByIdempotency(ctx.AppDB(), pid, key)
+		if err != nil {
+			return nil, nil, err
+		}
+		if existing != nil {
+			return existing, order, nil
+		}
+	}
 	payload := args["payload"]
 	if payload == nil {
 		payload = fulfillmentPayload(order, args)
 	}
-	status := "queued"
+	status := firstNonEmpty(strArg(args, "status"), "queued")
 	response := "{}"
 	errText := ""
 	providerOrderID := ""
@@ -1311,22 +1518,24 @@ func dbFulfillmentCreate(ctx *sdk.AppCtx, pid string, args map[string]any) (*Ful
 	err = tx.QueryRow(
 		`INSERT INTO fulfillments
 		   (project_id, order_id, provider, provider_order_id, warehouse_id, service, status,
+		    fulfillment_type, fulfillment_app, external_ref, idempotency_key, attempt_count,
 		    request_payload, response_payload, error, metadata, submitted_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 RETURNING id`,
 		pid, orderID, provider, nullStr(providerOrderID), nullStr(strArg(args, "warehouse_id")),
-		nullStr(strArg(args, "service")), status, jsonOrEmpty(payload, "{}"), response,
+		nullStr(strArg(args, "service")), status, fulfillmentType, fulfillmentApp, nullStr(strArg(args, "external_ref")),
+		nullStr(strArg(args, "idempotency_key")), 0, jsonOrEmpty(payload, "{}"), response,
 		nullStr(errText), jsonOrEmpty(args["metadata"], "{}"), nullableTime(status == "submitted", time.Now().UTC().Format(time.RFC3339)),
 	).Scan(&id)
 	if err != nil {
+		if strings.Contains(err.Error(), "ux_fulfillments_idempotency") {
+			if existing, getErr := dbFulfillmentGetByIdempotency(ctx.AppDB(), pid, strArg(args, "idempotency_key")); getErr == nil && existing != nil {
+				return existing, order, nil
+			}
+		}
 		return nil, nil, err
 	}
-	nextFulfillmentStatus := "queued"
-	if status == "submitted" {
-		nextFulfillmentStatus = "submitted"
-	} else if status == "failed" {
-		nextFulfillmentStatus = "failed"
-	}
+	nextFulfillmentStatus := orderFulfillmentStatusFromFulfillment(status)
 	if _, err := tx.Exec(
 		`UPDATE orders SET fulfillment_status = ?, order_status = CASE
 		    WHEN order_status IN ('paid', 'ready_to_fulfill') THEN 'fulfilling'
@@ -1348,6 +1557,80 @@ func dbFulfillmentCreate(ctx *sdk.AppCtx, pid string, args map[string]any) (*Ful
 		return nil, nil, err
 	}
 	order, err = dbOrderGet(ctx.AppDB(), pid, orderID, true)
+	return f, order, err
+}
+
+func dbFulfillmentUpdate(db *sql.DB, pid string, args map[string]any) (*Fulfillment, *Order, error) {
+	id := int64Arg(args, "id")
+	if id == 0 {
+		return nil, nil, errors.New("id required")
+	}
+	f, err := dbFulfillmentGet(db, pid, id)
+	if err != nil {
+		return nil, nil, err
+	}
+	if f == nil {
+		return nil, nil, errors.New("fulfillment not found")
+	}
+	status := firstNonEmpty(strArg(args, "status"), f.Status)
+	if !validFulfillmentStatuses[status] {
+		return nil, nil, fmt.Errorf("invalid fulfillment status %q", status)
+	}
+	externalRef := firstNonEmpty(strArg(args, "external_ref"), f.ExternalRef)
+	errText := strArg(args, "error")
+	response := f.ResponsePayload
+	if _, ok := args["response_payload"]; ok {
+		response = json.RawMessage(jsonOrEmpty(args["response_payload"], "{}"))
+	}
+	metadata := f.Metadata
+	if _, ok := args["metadata"]; ok {
+		metadata = json.RawMessage(jsonOrEmpty(args["metadata"], "{}"))
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		return nil, nil, err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(
+		`UPDATE fulfillments
+		    SET status = ?, external_ref = ?, error = ?, response_payload = ?, metadata = ?,
+		        attempt_count = CASE WHEN ? IN ('running','failed') THEN attempt_count + 1 ELSE attempt_count END,
+		        accepted_at = CASE WHEN ? IN ('succeeded','active','completed') AND accepted_at IS NULL THEN CURRENT_TIMESTAMP ELSE accepted_at END,
+		        cancelled_at = CASE WHEN ? = 'cancelled' AND cancelled_at IS NULL THEN CURRENT_TIMESTAMP ELSE cancelled_at END,
+		        updated_at = CURRENT_TIMESTAMP
+		  WHERE id = ? AND project_id = ?`,
+		status, nullStr(externalRef), nullStr(errText), string(response), string(metadata),
+		status, status, status, id, pid); err != nil {
+		return nil, nil, err
+	}
+	orderStatus := orderStatusFromFulfillment(status)
+	fulfillmentStatus := orderFulfillmentStatusFromFulfillment(status)
+	if _, err := tx.Exec(
+		`UPDATE orders
+		    SET fulfillment_status = ?,
+		        order_status = CASE WHEN ? != '' THEN ? ELSE order_status END,
+		        fulfilled_at = CASE WHEN ? IN ('succeeded','active','completed') AND fulfilled_at IS NULL THEN CURRENT_TIMESTAMP ELSE fulfilled_at END,
+		        updated_at = CURRENT_TIMESTAMP
+		  WHERE id = ? AND project_id = ?`,
+		fulfillmentStatus, orderStatus, orderStatus, status, f.OrderID, pid); err != nil {
+		return nil, nil, err
+	}
+	if err := writeEventTx(tx, pid, f.OrderID, actorOrSystem(strArg(args, "actor")), "fulfillment.updated", map[string]any{
+		"fulfillment_id": id,
+		"status":         status,
+		"external_ref":   externalRef,
+		"error":          errText,
+	}); err != nil {
+		return nil, nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, nil, err
+	}
+	f, err = dbFulfillmentGet(db, pid, id)
+	if err != nil {
+		return nil, nil, err
+	}
+	order, err := dbOrderGet(db, pid, f.OrderID, true)
 	return f, order, err
 }
 
@@ -1423,7 +1706,7 @@ type rowScanner interface {
 }
 
 func orderSelectColumns() string {
-	return `id, project_id, COALESCE(order_number,''), source, COALESCE(source_ref,''), source_payload,
+	return `id, project_id, COALESCE(order_number,''), source, COALESCE(source_ref,''), source_payload, order_type,
 	        checkout_session_id, cart_id, invoice_id, customer_id,
 	        COALESCE(customer_email,''), COALESCE(customer_name,''), shipping_address, billing_address,
 	        currency, subtotal_cents, tax_cents, shipping_cents, discount_cents, total_cents,
@@ -1436,7 +1719,7 @@ func scanOrder(row rowScanner) (*Order, error) {
 	var checkoutID, cartID, invoiceID, customerID sql.NullInt64
 	var paidAt, cancelledAt, fulfilledAt, deliveredAt sql.NullString
 	var sourcePayload, shippingAddress, billingAddress, metadata string
-	err := row.Scan(&o.ID, &o.ProjectID, &o.OrderNumber, &o.Source, &o.SourceRef, &sourcePayload,
+	err := row.Scan(&o.ID, &o.ProjectID, &o.OrderNumber, &o.Source, &o.SourceRef, &sourcePayload, &o.OrderType,
 		&checkoutID, &cartID, &invoiceID, &customerID,
 		&o.CustomerEmail, &o.CustomerName, &shippingAddress, &billingAddress,
 		&o.Currency, &o.SubtotalCents, &o.TaxCents, &o.ShippingCents, &o.DiscountCents, &o.TotalCents,
@@ -1444,6 +1727,9 @@ func scanOrder(row rowScanner) (*Order, error) {
 		&o.CreatedAt, &o.UpdatedAt, &paidAt, &cancelledAt, &fulfilledAt, &deliveredAt)
 	if err != nil {
 		return nil, err
+	}
+	if o.OrderType == "" {
+		o.OrderType = "physical"
 	}
 	o.SourcePayload = json.RawMessage(sourcePayload)
 	o.ShippingAddress = json.RawMessage(shippingAddress)
@@ -1501,7 +1787,7 @@ func dbOrderItemsList(db *sql.DB, orderID int64) ([]*OrderItem, error) {
 	rows, err := db.Query(
 		`SELECT id, order_id, position, catalog_product_id, catalog_price_id, COALESCE(sku,''), title,
 		        quantity, unit_amount_cents, currency, COALESCE(source_item_ref,''), COALESCE(fulfillment_sku,''),
-		        metadata, created_at, updated_at
+		        fulfillment_type, fulfillment_app, metadata, created_at, updated_at
 		   FROM order_items WHERE order_id = ? ORDER BY position ASC, id ASC`, orderID)
 	if err != nil {
 		return nil, err
@@ -1514,8 +1800,14 @@ func dbOrderItemsList(db *sql.DB, orderID int64) ([]*OrderItem, error) {
 		var metadata string
 		if err := rows.Scan(&it.ID, &it.OrderID, &it.Position, &productID, &priceID, &it.SKU, &it.Title,
 			&it.Quantity, &it.UnitAmountCents, &it.Currency, &it.SourceItemRef, &it.FulfillmentSKU,
-			&metadata, &it.CreatedAt, &it.UpdatedAt); err != nil {
+			&it.FulfillmentType, &it.FulfillmentApp, &metadata, &it.CreatedAt, &it.UpdatedAt); err != nil {
 			return nil, err
+		}
+		if it.FulfillmentType == "" {
+			it.FulfillmentType = "warehouse_shipment"
+		}
+		if it.FulfillmentApp == "" {
+			it.FulfillmentApp = "orders"
 		}
 		it.Metadata = json.RawMessage(metadata)
 		it.CatalogProductID = ptrIfValid(productID)
@@ -1531,9 +1823,26 @@ func dbFulfillmentGet(db *sql.DB, pid string, id int64) (*Fulfillment, error) {
 	}
 	f, err := scanFulfillment(db.QueryRow(
 		`SELECT id, project_id, order_id, provider, COALESCE(provider_order_id,''), COALESCE(warehouse_id,''),
-		        COALESCE(service,''), status, request_payload, response_payload, COALESCE(error,''), metadata,
+		        COALESCE(service,''), status, fulfillment_type, fulfillment_app, COALESCE(external_ref,''), COALESCE(idempotency_key,''), attempt_count,
+		        request_payload, response_payload, COALESCE(error,''), metadata,
 		        created_at, updated_at, submitted_at, accepted_at, cancelled_at
 		   FROM fulfillments WHERE id = ? AND project_id = ?`, id, pid))
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	return f, err
+}
+
+func dbFulfillmentGetByIdempotency(db *sql.DB, pid, key string) (*Fulfillment, error) {
+	if strings.TrimSpace(key) == "" {
+		return nil, nil
+	}
+	f, err := scanFulfillment(db.QueryRow(
+		`SELECT id, project_id, order_id, provider, COALESCE(provider_order_id,''), COALESCE(warehouse_id,''),
+		        COALESCE(service,''), status, fulfillment_type, fulfillment_app, COALESCE(external_ref,''), COALESCE(idempotency_key,''), attempt_count,
+		        request_payload, response_payload, COALESCE(error,''), metadata,
+		        created_at, updated_at, submitted_at, accepted_at, cancelled_at
+		   FROM fulfillments WHERE project_id = ? AND idempotency_key = ?`, pid, key))
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -1543,7 +1852,8 @@ func dbFulfillmentGet(db *sql.DB, pid string, id int64) (*Fulfillment, error) {
 func dbFulfillmentsList(db *sql.DB, pid string, orderID int64) ([]*Fulfillment, error) {
 	rows, err := db.Query(
 		`SELECT id, project_id, order_id, provider, COALESCE(provider_order_id,''), COALESCE(warehouse_id,''),
-		        COALESCE(service,''), status, request_payload, response_payload, COALESCE(error,''), metadata,
+		        COALESCE(service,''), status, fulfillment_type, fulfillment_app, COALESCE(external_ref,''), COALESCE(idempotency_key,''), attempt_count,
+		        request_payload, response_payload, COALESCE(error,''), metadata,
 		        created_at, updated_at, submitted_at, accepted_at, cancelled_at
 		   FROM fulfillments WHERE order_id = ? AND project_id = ? ORDER BY updated_at DESC`, orderID, pid)
 	if err != nil {
@@ -1566,7 +1876,8 @@ func scanFulfillment(row rowScanner) (*Fulfillment, error) {
 	var submittedAt, acceptedAt, cancelledAt sql.NullString
 	var requestPayload, responsePayload, metadata string
 	err := row.Scan(&f.ID, &f.ProjectID, &f.OrderID, &f.Provider, &f.ProviderOrderID, &f.WarehouseID,
-		&f.Service, &f.Status, &requestPayload, &responsePayload, &f.Error, &metadata,
+		&f.Service, &f.Status, &f.FulfillmentType, &f.FulfillmentApp, &f.ExternalRef, &f.IdempotencyKey, &f.AttemptCount,
+		&requestPayload, &responsePayload, &f.Error, &metadata,
 		&f.CreatedAt, &f.UpdatedAt, &submittedAt, &acceptedAt, &cancelledAt)
 	if err != nil {
 		return nil, err
@@ -1574,6 +1885,12 @@ func scanFulfillment(row rowScanner) (*Fulfillment, error) {
 	f.RequestPayload = json.RawMessage(requestPayload)
 	f.ResponsePayload = json.RawMessage(responsePayload)
 	f.Metadata = json.RawMessage(metadata)
+	if f.FulfillmentType == "" {
+		f.FulfillmentType = "warehouse_shipment"
+	}
+	if f.FulfillmentApp == "" {
+		f.FulfillmentApp = "orders"
+	}
 	if submittedAt.Valid {
 		f.SubmittedAt = submittedAt.String
 	}
@@ -1901,6 +2218,8 @@ func normalizeItems(raw []any, defaultCurrency string) []*OrderItem {
 			Currency:        strings.ToUpper(firstNonEmpty(strArg(m, "currency"), defaultCurrency)),
 			SourceItemRef:   strArg(m, "source_item_ref"),
 			FulfillmentSKU:  firstNonEmpty(strArg(m, "fulfillment_sku"), strArg(m, "fulfillmentSKU")),
+			FulfillmentType: firstNonEmpty(strArg(m, "fulfillment_type"), "warehouse_shipment"),
+			FulfillmentApp:  firstNonEmpty(strArg(m, "fulfillment_app"), "orders"),
 			Metadata:        json.RawMessage(jsonOrEmpty(m["metadata"], "{}")),
 		}
 		if id := int64Arg(m, "catalog_product_id"); id != 0 {
@@ -1934,7 +2253,7 @@ func validateStatuses(orderStatus, paymentStatus, fulfillmentStatus string) erro
 var validOrderStatuses = map[string]bool{
 	"draft": true, "pending_payment": true, "paid": true, "ready_to_fulfill": true,
 	"fulfilling": true, "partially_fulfilled": true, "fulfilled": true, "delivered": true,
-	"cancelled": true, "returned": true, "error": true,
+	"active": true, "completed": true, "cancelled": true, "returned": true, "error": true, "failed": true,
 }
 
 var validPaymentStatuses = map[string]bool{
@@ -1945,7 +2264,57 @@ var validPaymentStatuses = map[string]bool{
 var validFulfillmentStatuses = map[string]bool{
 	"unsubmitted": true, "queued": true, "submitted": true, "accepted": true,
 	"picking": true, "packed": true, "shipped": true, "delivered": true,
+	"provisioning": true, "running": true, "succeeded": true, "active": true, "completed": true,
 	"cancelled": true, "failed": true, "returned": true,
+}
+
+func normalizeOrderType(v string) string {
+	v = strings.ToLower(strings.TrimSpace(v))
+	switch v {
+	case "", "physical", "hosting", "saas", "digital", "service":
+		if v == "" {
+			return "physical"
+		}
+		return v
+	default:
+		return v
+	}
+}
+
+func orderFulfillmentStatusFromFulfillment(status string) string {
+	switch status {
+	case "submitted", "accepted":
+		return "submitted"
+	case "running", "provisioning":
+		return "provisioning"
+	case "succeeded", "active":
+		return "active"
+	case "completed", "fulfilled":
+		return "fulfilled"
+	case "failed":
+		return "failed"
+	case "cancelled":
+		return "cancelled"
+	default:
+		return "queued"
+	}
+}
+
+func orderStatusFromFulfillment(status string) string {
+	switch status {
+	case "running", "provisioning", "submitted", "accepted":
+		return "fulfilling"
+	case "succeeded", "active":
+		return "active"
+	case "completed", "fulfilled":
+		return "fulfilled"
+	case "failed":
+		return "failed"
+	case "cancelled":
+		return "cancelled"
+	default:
+		return ""
+	}
 }
 
 func defaultOrderStatus(payment string) string {
@@ -2078,6 +2447,100 @@ func stringFromMap(m map[string]any, keys ...string) string {
 		}
 	}
 	return ""
+}
+
+func mapFromAny(v any) map[string]any {
+	switch x := v.(type) {
+	case map[string]any:
+		return x
+	case json.RawMessage:
+		var out map[string]any
+		if json.Unmarshal(x, &out) == nil {
+			return out
+		}
+	case string:
+		if strings.TrimSpace(x) != "" {
+			var out map[string]any
+			dec := json.NewDecoder(strings.NewReader(x))
+			dec.UseNumber()
+			if dec.Decode(&out) == nil {
+				return out
+			}
+		}
+	}
+	return map[string]any{}
+}
+
+func mergeMaps(base map[string]any, overlays ...map[string]any) map[string]any {
+	out := map[string]any{}
+	for k, v := range base {
+		out[k] = v
+	}
+	for _, overlay := range overlays {
+		for k, v := range overlay {
+			out[k] = v
+		}
+	}
+	return out
+}
+
+func inferOrderType(productType string) string {
+	productType = strings.ToLower(strings.TrimSpace(productType))
+	switch {
+	case strings.Contains(productType, "hosting"), strings.Contains(productType, "wordpress"), strings.Contains(productType, "container"):
+		return "hosting"
+	case strings.Contains(productType, "saas"):
+		return "saas"
+	case strings.Contains(productType, "digital"), strings.Contains(productType, "download"):
+		return "digital"
+	case strings.Contains(productType, "service"):
+		return "service"
+	default:
+		return ""
+	}
+}
+
+func defaultFulfillmentType(orderType string) string {
+	switch normalizeOrderType(orderType) {
+	case "hosting":
+		return "hosting_tenant_provision"
+	case "saas":
+		return "subscription_activation"
+	case "digital":
+		return "file_delivery"
+	case "service":
+		return "manual_service"
+	default:
+		return "warehouse_shipment"
+	}
+}
+
+func invoiceLineItems(inv map[string]any, fulfillmentType, fulfillmentApp string) []any {
+	lines := arrayArg(inv, "line_items")
+	out := make([]any, 0, len(lines))
+	for i, raw := range lines {
+		line := mapFromAny(raw)
+		title := firstNonEmpty(strArg(line, "description"), fmt.Sprintf("Invoice line %d", i+1))
+		meta := mapFromAny(line["metadata"])
+		item := map[string]any{
+			"title":             title,
+			"quantity":          float64Arg(line, "quantity", 1),
+			"unit_amount_cents": int64Arg(line, "unit_price_cents"),
+			"currency":          strArg(inv, "currency"),
+			"source_item_ref":   fmt.Sprintf("invoice:%d:line:%d", int64Arg(inv, "id"), int64Arg(line, "id")),
+			"fulfillment_type":  firstNonEmpty(strArg(meta, "fulfillment_type"), fulfillmentType, "warehouse_shipment"),
+			"fulfillment_app":   firstNonEmpty(strArg(meta, "fulfillment_app"), fulfillmentApp, "orders"),
+			"metadata":          meta,
+		}
+		if id := int64Arg(line, "product_id"); id != 0 {
+			item["catalog_product_id"] = id
+		}
+		if id := int64Arg(line, "price_id"); id != 0 {
+			item["catalog_price_id"] = id
+		}
+		out = append(out, item)
+	}
+	return out
 }
 
 func firstNonEmpty(vals ...string) string {

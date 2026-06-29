@@ -109,8 +109,8 @@ func TestEmbeddedManifest_Valid(t *testing.T) {
 	if m.Name != "hosting" {
 		t.Errorf("manifest.Name=%q, want hosting", m.Name)
 	}
-	if m.Version != "1.1.1" {
-		t.Errorf("manifest.Version=%q, want 1.1.1", m.Version)
+	if m.Version != "1.2.0" {
+		t.Errorf("manifest.Version=%q, want 1.2.0", m.Version)
 	}
 	if m.DB == nil {
 		t.Fatal("manifest.DB missing")
@@ -305,6 +305,46 @@ func TestTenantCreateProvisionsContainerAndIngress(t *testing.T) {
 	}
 	if len(usage) != 1 || usage[0].Quantity != 1 {
 		t.Fatalf("usage = %+v", usage)
+	}
+}
+
+func TestFulfillmentProvisionReportsTenantToOrders(t *testing.T) {
+	pf := &platformStub{}
+	ctx, db := newTestCtx(t, pf)
+	defer db.Close()
+
+	app := &App{}
+	got, err := app.toolFulfillmentProvision(ctx, map[string]any{
+		"order_id":       int64(10),
+		"fulfillment_id": int64(20),
+		"owner_email":    "owner@example.com",
+		"slug":           "paid-wp",
+		"plan_key":       "wordpress-free",
+		"product_key":    "wordpress-single",
+	})
+	if err != nil {
+		t.Fatalf("fulfillment provision: %v", err)
+	}
+	tenant := got.(map[string]any)["tenant"].(*Tenant)
+	if tenant.Status != StatusActive {
+		t.Fatalf("status=%s, want active", tenant.Status)
+	}
+	if !strings.Contains(string(tenant.Metadata), `"order_id":10`) || !strings.Contains(string(tenant.Metadata), `"fulfillment_id":20`) {
+		t.Fatalf("metadata missing order trace: %s", tenant.Metadata)
+	}
+	var ordersCall *callAppCall
+	for i := range pf.callAppCalls {
+		c := &pf.callAppCalls[i]
+		if c.App == "orders" && c.Tool == "fulfillments_update" {
+			ordersCall = c
+			break
+		}
+	}
+	if ordersCall == nil {
+		t.Fatalf("expected orders fulfillments_update call, got %+v", pf.callAppCalls)
+	}
+	if ordersCall.Input["id"] != int64(20) || ordersCall.Input["status"] != "succeeded" || ordersCall.Input["external_ref"] != tenant.ID {
+		t.Fatalf("unexpected orders update input: %+v", ordersCall.Input)
 	}
 }
 

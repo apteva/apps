@@ -2,13 +2,14 @@ schema: apteva-app/v1
 
 name: hosting
 display_name: Hosting
-version: 1.1.1
+version: 1.2.0
 description: |
   Managed container-backed hosting control plane. Hosting provisions and
   operates hosted Apteva tenants on top of the generic Containers app,
-  tracks plan limits and usage, and exposes tenants through server-native
-  ingress. Free plans are first-class and do not require Billing or
-  Subscriptions.
+  tracks plan limits and usage, exposes tenants through server-native
+  ingress, and can fulfill generic Orders records for paid hosting
+  products. Free plans are first-class and do not require Billing,
+  Orders, or Subscriptions.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/hosting
@@ -30,6 +31,8 @@ requires:
       optional: false
     - name: billing
       optional: true
+    - name: orders
+      optional: true
     - name: subscriptions
       optional: true
     - name: entitlements
@@ -46,7 +49,9 @@ provides:
     - name: hosting_customer_create
       description: Find or create a hosting customer by email.
     - name: hosting_tenant_create
-      description: Provision a hosted Apteva tenant container and expose its default hostname.
+      description: Provision a hosted tenant container and expose its default hostname. If order_id/fulfillment_id are provided, reports fulfillment status back to Orders.
+    - name: hosting_fulfillment_provision
+      description: Provision a tenant for an Orders hosting_tenant_provision fulfillment and report the tenant id back to Orders.
     - name: hosting_tenant_get
       description: Fetch one hosted tenant.
     - name: hosting_tenant_list

@@ -2,20 +2,21 @@ schema: apteva-app/v1
 
 name: orders
 display_name: Orders
-version: 0.1.1
+version: 0.2.0
 description: |
-  Physical commerce order ledger. Orders sits after checkout/billing
-  and before warehouse fulfillment: it records durable order state,
-  line items, fulfillment submissions, shipment tracking, returns, and
-  an append-only event log.
+  Generic commerce fulfillment ledger. Orders sits after checkout/billing
+  and before fulfillment: it records durable order state, line items,
+  fulfillment submissions, external fulfillment refs, retries/errors,
+  shipment tracking, returns, and an append-only event log.
 
   Catalog owns products/prices, Checkout owns buyer sessions, Billing
-  owns invoices/payments, and Orders owns physical delivery operations.
+  owns invoices/payments, and Orders owns fulfillment workflow for
+  physical, hosting, SaaS, digital, and service products.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/orders
 icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/orders/icon.svg
-tags: [orders, fulfillment, ecommerce, commerce, shipping, inventory]
+tags: [orders, fulfillment, ecommerce, commerce, hosting, saas, shipping, inventory]
 
 scopes: [project, global]
 min_apteva_version: "0.11.0"
@@ -60,7 +61,9 @@ provides:
     - prefix: /
   mcp_tools:
     - name: orders_create
-      description: Create a durable physical order with line items and shipping/customer snapshots.
+      description: Create a durable order with line items and customer snapshots. Defaults to physical, supports order_type for hosting/SaaS/digital/service.
+    - name: orders_create_from_invoice
+      description: Create or return an idempotent order from a Billing invoice and optionally queue a generic fulfillment.
     - name: orders_create_from_checkout
       description: Create an order from a Checkout session and its linked invoice/cart data.
     - name: orders_import_from_channel
@@ -74,7 +77,9 @@ provides:
     - name: orders_cancel
       description: Cancel an order that has not reached a terminal fulfillment state.
     - name: fulfillments_create
-      description: Submit or record a fulfillment attempt for an order.
+      description: Submit or record a fulfillment attempt for an order, including generic fulfillment_app/fulfillment_type requests.
+    - name: fulfillments_update
+      description: Update a fulfillment status, external_ref, response payload, or error after a product app fulfills it.
     - name: fulfillments_sync
       description: Refresh one fulfillment's provider status and raw payload.
     - name: shipments_list

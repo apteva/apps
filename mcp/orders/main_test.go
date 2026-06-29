@@ -1,11 +1,54 @@
 package main
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 
+	sdk "github.com/apteva/app-sdk"
 	tk "github.com/apteva/app-sdk/testkit"
 )
+
+type platformStub struct {
+	tk.BasePlatformClient
+}
+
+func (p *platformStub) CallAppResult(appName, tool string, input map[string]any, out any) error {
+	if appName == "billing" && tool == "invoices_get" {
+		b, _ := json.Marshal(map[string]any{
+			"found": true,
+			"invoice": map[string]any{
+				"id":                input["invoice_id"],
+				"customer_id":       42,
+				"customer_email":    "wp@example.com",
+				"customer_name":     "WP Buyer",
+				"status":            "paid",
+				"currency":          "USD",
+				"subtotal_cents":    990,
+				"tax_cents":         0,
+				"total_cents":       990,
+				"amount_paid_cents": 990,
+				"metadata": map[string]any{
+					"product_type":    "wordpress_hosting",
+					"product_key":     "wordpress-single",
+					"plan_key":        "wordpress-starter",
+					"fulfillment_app": "hosting",
+				},
+				"line_items": []map[string]any{{
+					"id":               7,
+					"description":      "WordPress Hosting Starter",
+					"quantity":         1,
+					"unit_price_cents": 990,
+					"amount_cents":     990,
+				}},
+			},
+		})
+		return json.Unmarshal(b, out)
+	}
+	return nil
+}
+
+var _ sdk.PlatformClient = (*platformStub)(nil)
 
 func TestOrderLifecycle(t *testing.T) {
 	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("proj-test"))
@@ -141,5 +184,45 @@ func TestDuplicateSourceRefRejected(t *testing.T) {
 	}
 	if _, err := dbOrderCreate(ctx, "proj-test", body, "order.imported"); err == nil {
 		t.Fatalf("expected duplicate source ref error")
+	}
+}
+
+func TestCreateFromInvoiceQueuesGenericHostingFulfillmentIdempotently(t *testing.T) {
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("proj-test"), tk.WithPlatform(&platformStub{}))
+	app := &App{}
+
+	out, err := app.toolOrdersCreateFromInvoice(ctx, map[string]any{
+		"_project_id": "proj-test",
+		"invoice_id":  int64(55),
+	})
+	if err != nil {
+		t.Fatalf("create from invoice: %v", err)
+	}
+	order := out.(map[string]any)["order"].(*Order)
+	fulfillment := out.(map[string]any)["fulfillment"].(*Fulfillment)
+	if order.OrderType != "hosting" {
+		t.Fatalf("order_type=%q, want hosting", order.OrderType)
+	}
+	if order.Source != "billing" || order.SourceRef != "invoice:55" || order.InvoiceID == nil || *order.InvoiceID != 55 {
+		t.Fatalf("unexpected order source/invoice: %+v", order)
+	}
+	if fulfillment.FulfillmentApp != "hosting" || fulfillment.FulfillmentType != "hosting_tenant_provision" {
+		t.Fatalf("unexpected fulfillment: %+v", fulfillment)
+	}
+	if fulfillment.IdempotencyKey != "billing_invoice:55:hosting_tenant_provision" {
+		t.Fatalf("idempotency_key=%q", fulfillment.IdempotencyKey)
+	}
+
+	out2, err := app.toolOrdersCreateFromInvoice(ctx, map[string]any{
+		"_project_id": "proj-test",
+		"invoice_id":  int64(55),
+	})
+	if err != nil {
+		t.Fatalf("second create from invoice: %v", err)
+	}
+	order2 := out2.(map[string]any)["order"].(*Order)
+	fulfillment2 := out2.(map[string]any)["fulfillment"].(*Fulfillment)
+	if order2.ID != order.ID || fulfillment2.ID != fulfillment.ID {
+		t.Fatalf("expected idempotent reuse, got order %d/%d fulfillment %d/%d", order.ID, order2.ID, fulfillment.ID, fulfillment2.ID)
 	}
 }
