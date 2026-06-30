@@ -19,6 +19,7 @@
 package main
 
 import (
+	"context"
 	"crypto/sha256"
 	"database/sql"
 	"encoding/base64"
@@ -43,7 +44,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: social
 display_name: Social
-version: 0.14.46
+version: 0.14.48
 description: |
   Schedule and publish posts to your social accounts (X, Facebook,
   Instagram, LinkedIn, TikTok, YouTube, Reddit, Pinterest, Threads).
@@ -79,6 +80,11 @@ requires:
 provides:
   http_routes:
     - prefix: /
+  workers:
+    - name: inbox-sync
+      schedule: "@every 5m"
+    - name: analytics_collector
+      schedule: "@every 6h"
   mcp_tools:
     - { name: account_add,                description: "Begin OAuth for a platform." }
     - { name: account_list_pending_pages, description: "List selectable pages/channels for a pending account." }
@@ -791,7 +797,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		{
 			Name: "post_edit",
 			Description: "Edit an already-published post's body and/or per-target metadata. Use plain text only for body/title/description fields; do not use Markdown formatting such as **bold**, # headings, bullet lists, tables, code blocks, or [label](url) links. The app normalizes common Markdown before storing/sending edits. Updates the local post + fans out to each platform's edit verb where supported. " +
-				"Editable platforms today: Facebook (message), YouTube (title, description, tags, privacy, category, thumbnail_storage_id). YouTube thumbnail-only edits are allowed; pass targets:[{social_account_id, thumbnail_storage_id}]. Twitter / TikTok / Instagram return status=unsupported — those platforms don't permit programmatic edits (or the catalog doesn't expose the verb yet). " +
+				"Editable platforms today: Facebook (message), X/Twitter (body/text via edit_options.previous_post_id when the authenticated account/API plan permits it), YouTube (title, description, tags, privacy, category, thumbnail_storage_id). YouTube thumbnail-only edits are allowed; pass targets:[{social_account_id, thumbnail_storage_id}]. TikTok / Instagram return status=unsupported — those platforms don't permit programmatic edits or the catalog doesn't expose the verb yet. " +
 				"Args: post_id, body? (new post-level default body), targets? (per-target overrides keyed by social_account_id, same shape as post_create's targets — body, title, visibility, category, tags, thumbnail_storage_id, etc.). At least one of body/targets must be set.",
 			InputSchema: schemaObject(map[string]any{
 				"post_id": map[string]any{"type": "integer"},
@@ -4153,9 +4159,12 @@ func extractPageToken(pageCreds string) string {
 // also nest under {data: [{...}]} when called for multiple tweets,
 // which we don't use here.
 func (a *App) getTwitterPostMetrics(ctx *sdk.AppCtx, out targetMetricsOutcome, connID int64) targetMetricsOutcome {
+	if rich := a.getTwitterPostAnalytics(ctx, out, connID); rich.Status == "ok" && rich.Metrics != nil && hasAnyMetrics(rich.Metrics) {
+		return rich
+	}
 	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "get_tweet_analytics", map[string]any{
 		"tweet_id":     out.PlatformPostID,
-		"tweet.fields": "public_metrics",
+		"tweet.fields": "public_metrics,non_public_metrics,organic_metrics",
 	})
 	if err != nil {
 		out.Status, out.Error = "failed", err.Error()
@@ -4191,6 +4200,79 @@ func (a *App) getTwitterPostMetrics(ctx *sdk.AppCtx, out targetMetricsOutcome, c
 		Raw:      res.Data,
 	}
 	return out
+}
+
+func (a *App) getTwitterPostAnalytics(ctx *sdk.AppCtx, out targetMetricsOutcome, connID int64) targetMetricsOutcome {
+	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "get_post_analytics", map[string]any{
+		"ids":              out.PlatformPostID,
+		"granularity":      "total",
+		"analytics.fields": "impressions,engagements,likes,replies,retweets,quote_tweets,bookmarks,media_views,url_clicks,user_profile_clicks",
+	})
+	if err != nil {
+		out.Status, out.Error = "failed", err.Error()
+		return out
+	}
+	if res == nil || !res.Success {
+		out.Status, out.Error = "failed", upstreamError(res).Error()
+		return out
+	}
+	values := extractNamedNumbers(res.Data)
+	out.Status = "ok"
+	out.Metrics = &normalizedMetrics{
+		Views:    firstMetricValue(values, "impressions", "media_views", "views"),
+		Likes:    firstMetricValue(values, "likes", "like_count"),
+		Comments: firstMetricValue(values, "replies", "reply_count"),
+		Shares:   firstMetricValue(values, "retweets", "quote_tweets", "shares"),
+		Raw:      res.Data,
+	}
+	return out
+}
+
+func hasAnyMetrics(m *normalizedMetrics) bool {
+	return m != nil && (m.Views != 0 || m.Likes != 0 || m.Comments != 0 || m.Shares != 0)
+}
+
+func extractNamedNumbers(raw json.RawMessage) map[string]int64 {
+	var v any
+	if json.Unmarshal(raw, &v) != nil {
+		return nil
+	}
+	out := map[string]int64{}
+	walkNamedNumbers(v, out)
+	return out
+}
+
+func walkNamedNumbers(v any, out map[string]int64) {
+	switch x := v.(type) {
+	case map[string]any:
+		for k, val := range x {
+			switch n := val.(type) {
+			case float64:
+				out[k] = int64(n)
+			case int64:
+				out[k] = n
+			case json.Number:
+				if i, err := n.Int64(); err == nil {
+					out[k] = i
+				}
+			default:
+				walkNamedNumbers(val, out)
+			}
+		}
+	case []any:
+		for _, item := range x {
+			walkNamedNumbers(item, out)
+		}
+	}
+}
+
+func firstMetricValue(values map[string]int64, keys ...string) int64 {
+	for _, key := range keys {
+		if v, ok := values[key]; ok {
+			return v
+		}
+	}
+	return 0
 }
 
 // getYoutubePostMetrics calls get_video?part=statistics and maps the
@@ -4415,6 +4497,7 @@ type accountMetricsResult struct {
 	Following       int64           `json:"following,omitempty"`
 	TotalLikes      int64           `json:"total_likes,omitempty"`
 	TotalVideos     int64           `json:"total_videos,omitempty"`
+	Posts           int64           `json:"posts,omitempty"`
 	Reach           int64           `json:"reach,omitempty"`
 	Impressions     int64           `json:"impressions,omitempty"`
 	Engagements     int64           `json:"engagements,omitempty"`
@@ -4452,6 +4535,8 @@ func (a *App) getAccountMetrics(ctx *sdk.AppCtx, accountID int64, period string,
 		DisplayName:     displayName,
 	}
 	switch platform {
+	case "twitter":
+		return a.getTwitterAccountMetrics(ctx, out, connID)
 	case "youtube":
 		return a.getYoutubeChannelMetrics(ctx, out, connID)
 	case "tiktok":
@@ -4465,6 +4550,58 @@ func (a *App) getAccountMetrics(ctx *sdk.AppCtx, accountID int64, period string,
 		out.Reason = "account-level metrics not wired for this platform yet"
 		return out
 	}
+}
+
+func (a *App) getTwitterAccountMetrics(ctx *sdk.AppCtx, out accountMetricsResult, connID int64) accountMetricsResult {
+	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "get_me", map[string]any{
+		"user.fields": "id,name,username,profile_image_url,public_metrics,verified,created_at",
+	})
+	if err != nil {
+		out.Status, out.Error = "failed", err.Error()
+		return out
+	}
+	if res == nil || !res.Success {
+		out.Status, out.Error = "failed", upstreamError(res).Error()
+		return out
+	}
+	var resp struct {
+		Data struct {
+			PublicMetrics struct {
+				FollowersCount int64 `json:"followers_count"`
+				FollowingCount int64 `json:"following_count"`
+				TweetCount     int64 `json:"tweet_count"`
+			} `json:"public_metrics"`
+		} `json:"data"`
+	}
+	_ = json.Unmarshal(res.Data, &resp)
+	out.Status = "ok"
+	out.Followers = resp.Data.PublicMetrics.FollowersCount
+	out.Following = resp.Data.PublicMetrics.FollowingCount
+	out.Posts = resp.Data.PublicMetrics.TweetCount
+	out.Raw = res.Data
+	return out
+}
+
+func twitterAuthenticatedUser(ctx *sdk.AppCtx, connID int64) (id, username string, err error) {
+	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "get_me", map[string]any{
+		"user.fields": "id,name,username,profile_image_url,public_metrics,verified,created_at",
+	})
+	if err != nil {
+		return "", "", err
+	}
+	if res == nil || !res.Success {
+		return "", "", upstreamError(res)
+	}
+	var resp struct {
+		Data struct {
+			ID       string `json:"id"`
+			Username string `json:"username"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(res.Data, &resp); err != nil {
+		return "", "", err
+	}
+	return resp.Data.ID, resp.Data.Username, nil
 }
 
 func (a *App) getYoutubeChannelMetrics(ctx *sdk.AppCtx, out accountMetricsResult, connID int64) accountMetricsResult {
@@ -4902,8 +5039,141 @@ func (a *App) toolAccountMetrics(ctx *sdk.AppCtx, args map[string]any) (any, err
 	}
 	period, _ := args["period"].(string) // currently unused; reserved for future
 	_ = period
-	res := a.getAccountMetrics(ctx, id, period, projectIDForTool(ctx, args))
+	pid := projectIDForTool(ctx, args)
+	res := a.getAccountMetrics(ctx, id, period, pid)
+	if res.Status == "ok" {
+		a.storeAccountMetricPoints(ctx, pid, res)
+		a.mergeStoredAccountMetricPoints(ctx, pid, &res)
+	}
 	return res, nil
+}
+
+func (a *App) runAnalyticsCollector(runCtx context.Context, app *sdk.AppCtx) error {
+	rows, err := app.AppDB().Query(
+		`SELECT id, project_id FROM social_accounts WHERE status='active' ORDER BY id`,
+	)
+	if err != nil {
+		return err
+	}
+	defer rows.Close()
+	type accountRef struct {
+		ID        int64
+		ProjectID string
+	}
+	var refs []accountRef
+	for rows.Next() {
+		var ref accountRef
+		if err := rows.Scan(&ref.ID, &ref.ProjectID); err == nil {
+			refs = append(refs, ref)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, ref := range refs {
+		select {
+		case <-runCtx.Done():
+			return runCtx.Err()
+		default:
+		}
+		res := a.getAccountMetrics(app, ref.ID, "day", ref.ProjectID)
+		if res.Status == "ok" {
+			a.storeAccountMetricPoints(app, ref.ProjectID, res)
+		}
+	}
+	return nil
+}
+
+func (a *App) storeAccountMetricPoints(ctx *sdk.AppCtx, projectID string, res accountMetricsResult) {
+	if projectID == "" || res.SocialAccountID == 0 || res.Platform == "" {
+		return
+	}
+	var profileID int64
+	_ = ctx.AppDB().QueryRow(
+		`SELECT COALESCE(profile_id,0) FROM social_accounts WHERE id=? AND project_id=?`,
+		res.SocialAccountID, projectID,
+	).Scan(&profileID)
+	now := time.Now().UTC().Format(time.RFC3339)
+	insert := func(metric, period, pointTime string, value int64) {
+		if metric == "" || value == 0 {
+			return
+		}
+		if period == "" {
+			period = "snapshot"
+		}
+		if pointTime == "" {
+			pointTime = now
+		}
+		_, _ = ctx.AppDB().Exec(
+			`INSERT OR IGNORE INTO social_metric_points
+			   (project_id, profile_id, social_account_id, post_id, post_target_id,
+			    platform, scope, metric, period, point_time, value, source, status)
+			 VALUES (?, ?, ?, 0, 0, ?, 'account', ?, ?, ?, ?, 'social', 'ok')`,
+			projectID, profileID, res.SocialAccountID, res.Platform, metric, period, pointTime, value,
+		)
+	}
+	insert("followers", "snapshot", now, res.Followers)
+	insert("following", "snapshot", now, res.Following)
+	insert("total_likes", "snapshot", now, res.TotalLikes)
+	insert("total_videos", "snapshot", now, res.TotalVideos)
+	insert("posts", "snapshot", now, res.Posts)
+	insert("reach", "snapshot", now, res.Reach)
+	insert("impressions", "snapshot", now, res.Impressions)
+	insert("engagements", "snapshot", now, res.Engagements)
+	insert("views", "snapshot", now, res.Views)
+	for metric, points := range res.Insights {
+		for _, point := range points {
+			insert(metric, "day", metricPointTime(point.Time), point.Value)
+		}
+	}
+}
+
+func (a *App) mergeStoredAccountMetricPoints(ctx *sdk.AppCtx, projectID string, res *accountMetricsResult) {
+	if res == nil || projectID == "" || res.SocialAccountID == 0 {
+		return
+	}
+	rows, err := ctx.AppDB().Query(
+		`SELECT metric, point_time, value
+		   FROM social_metric_points
+		  WHERE project_id=? AND social_account_id=? AND scope='account'
+		  ORDER BY point_time ASC`,
+		projectID, res.SocialAccountID,
+	)
+	if err != nil {
+		return
+	}
+	defer rows.Close()
+	if res.Insights == nil {
+		res.Insights = insightSeries{}
+	}
+	for rows.Next() {
+		var metric, pointTime string
+		var value int64
+		if err := rows.Scan(&metric, &pointTime, &value); err != nil {
+			continue
+		}
+		res.Insights[metric] = append(res.Insights[metric], insightPoint{
+			Time:  pointTime,
+			Value: value,
+		})
+	}
+	if len(res.Insights) == 0 {
+		res.Insights = nil
+	}
+}
+
+func metricPointTime(s string) string {
+	s = strings.TrimSpace(s)
+	if s == "" {
+		return time.Now().UTC().Format(time.RFC3339)
+	}
+	if t, err := time.Parse(time.RFC3339, s); err == nil {
+		return t.UTC().Format(time.RFC3339)
+	}
+	if t, err := time.Parse("2006-01-02", s); err == nil {
+		return t.UTC().Format(time.RFC3339)
+	}
+	return s
 }
 
 // ─── import ───────────────────────────────────────────────────────
@@ -4955,6 +5225,8 @@ func (a *App) importAccountPosts(ctx *sdk.AppCtx, accountID int64, limit int, pi
 		return a.importInstagramPosts(ctx, out, accountID, connID, extID, pageCreds, profileID, limit, pid)
 	case "tiktok":
 		return a.importTikTokPosts(ctx, out, accountID, connID, profileID, limit, pid)
+	case "twitter":
+		return a.importTwitterPosts(ctx, out, accountID, connID, profileID, limit, pid)
 	case "youtube":
 		return a.importYoutubePosts(ctx, out, accountID, connID, profileID, limit, pid)
 	default:
@@ -5219,6 +5491,117 @@ func (a *App) importTikTokPosts(
 		cursor = resp.Data.Cursor
 	}
 	out.Status = "ok"
+	return out
+}
+
+func (a *App) importTwitterPosts(
+	ctx *sdk.AppCtx, out importResult,
+	accountID, connID int64,
+	profileID int64, limit int, pid string,
+) importResult {
+	userID, _, err := twitterAuthenticatedUser(ctx, connID)
+	if err != nil {
+		out.Status, out.Error = "failed", err.Error()
+		return out
+	}
+	if userID == "" {
+		out.Status, out.Error = "failed", "authenticated X user id missing"
+		return out
+	}
+	if profileID == 0 {
+		profileID = projectDefaultProfileID(ctx, pid)
+	}
+	seen := 0
+	paginationToken := ""
+	for seen < limit {
+		maxResults := limit - seen
+		if maxResults > 100 {
+			maxResults = 100
+		}
+		if maxResults < 5 {
+			maxResults = 5
+		}
+		args := map[string]any{
+			"user_id":      userID,
+			"max_results":  maxResults,
+			"tweet.fields": "id,text,created_at,public_metrics,entities,attachments",
+			"expansions":   "attachments.media_keys",
+			"media.fields": "url,preview_image_url,type,width,height",
+		}
+		if paginationToken != "" {
+			args["pagination_token"] = paginationToken
+		}
+		res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "get_user_tweets", args)
+		if err != nil {
+			out.Status, out.Error = "failed", err.Error()
+			return out
+		}
+		if res == nil || !res.Success {
+			out.Status, out.Error = "failed", upstreamError(res).Error()
+			return out
+		}
+		var resp struct {
+			Data []struct {
+				ID        string `json:"id"`
+				Text      string `json:"text"`
+				CreatedAt string `json:"created_at"`
+				Entities  struct {
+					URLs []struct {
+						ExpandedURL string `json:"expanded_url"`
+						UnwoundURL  string `json:"unwound_url"`
+						URL         string `json:"url"`
+					} `json:"urls"`
+				} `json:"entities"`
+			} `json:"data"`
+			Meta struct {
+				NextToken string `json:"next_token"`
+			} `json:"meta"`
+		}
+		if err := json.Unmarshal(res.Data, &resp); err != nil {
+			out.Status, out.Error = "failed", "decode x posts: "+err.Error()
+			return out
+		}
+		if len(resp.Data) == 0 {
+			break
+		}
+		for _, p := range resp.Data {
+			if p.ID == "" {
+				continue
+			}
+			seen++
+			imported, err := a.insertImportedPost(ctx, pid, accountID, profileID, p.Text, p.ID, "https://twitter.com/i/web/status/"+p.ID, p.CreatedAt, twitterEntityMediaURLs(p.Entities.URLs))
+			if err != nil {
+				ctx.Logger().Warn("import: insert x post failed", "tweet_id", p.ID, "err", err)
+				continue
+			}
+			if imported {
+				out.Imported++
+			} else {
+				out.SkippedExisting++
+			}
+		}
+		if resp.Meta.NextToken == "" || resp.Meta.NextToken == paginationToken {
+			break
+		}
+		paginationToken = resp.Meta.NextToken
+	}
+	out.Status = "ok"
+	return out
+}
+
+func twitterEntityMediaURLs(urls []struct {
+	ExpandedURL string `json:"expanded_url"`
+	UnwoundURL  string `json:"unwound_url"`
+	URL         string `json:"url"`
+}) []string {
+	out := make([]string, 0, len(urls))
+	for _, u := range urls {
+		if u.UnwoundURL != "" {
+			out = append(out, u.UnwoundURL)
+		} else if u.ExpandedURL != "" {
+			out = append(out, u.ExpandedURL)
+		}
+	}
 	return out
 }
 
@@ -5600,9 +5983,11 @@ func (a *App) toolPostEdit(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		switch r.Platform {
 		case "facebook":
 			out = a.editFacebookPost(ctx, out, r.ConnID, r.PageCreds, eff)
+		case "twitter":
+			out = a.editTwitterPost(ctx, out, r.ConnID, eff)
 		case "youtube":
 			out = a.editYoutubePost(ctx, out, r.ConnID, eff, r.MediaProjectID)
-		case "twitter", "tiktok", "instagram":
+		case "tiktok", "instagram":
 			out.Status = "unsupported"
 			out.Reason = platformEditReason(r.Platform)
 		default:
@@ -5628,7 +6013,7 @@ func (a *App) toolPostEdit(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 func platformEditReason(platform string) string {
 	switch platform {
 	case "twitter":
-		return "Twitter / X has no public edit-tweet API — the X Premium edit feature is web-only"
+		return "X edit is exposed through post_tweet edit_options when the authenticated account/API plan permits it"
 	case "tiktok":
 		return "TikTok doesn't permit programmatic edits to published videos"
 	case "instagram":
@@ -5636,6 +6021,38 @@ func platformEditReason(platform string) string {
 	default:
 		return "no edit verb wired for this platform yet"
 	}
+}
+
+func (a *App) editTwitterPost(ctx *sdk.AppCtx, out targetEditOutcome, connID int64, eff map[string]any) targetEditOutcome {
+	body, _ := eff["body"].(string)
+	if strings.TrimSpace(body) == "" {
+		out.Status = "skipped"
+		out.Reason = "x edit needs non-empty text"
+		return out
+	}
+	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "post_tweet", map[string]any{
+		"text": body,
+		"edit_options": map[string]any{
+			"previous_post_id": out.PlatformPostID,
+		},
+	})
+	if err != nil {
+		out.Status, out.Error = "failed", err.Error()
+		return out
+	}
+	if res == nil || !res.Success {
+		out.Status, out.Error = "failed", upstreamError(res).Error()
+		return out
+	}
+	if id, url := extractPostIdentity("twitter", res.Data); id != "" && id != out.PlatformPostID {
+		_, _ = ctx.AppDB().Exec(
+			`UPDATE post_targets SET platform_post_id=?, platform_url=? WHERE id=?`,
+			id, nullable(url), out.TargetID,
+		)
+		out.PlatformPostID = id
+	}
+	out.Status = "ok"
+	return out
 }
 
 func (a *App) editFacebookPost(ctx *sdk.AppCtx, out targetEditOutcome, connID int64, pageCreds string, eff map[string]any) targetEditOutcome {

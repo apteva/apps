@@ -76,6 +76,9 @@ func replyInboxItem(ctx *sdk.AppCtx, item *inboxItem, creds *inboxAccountCreds, 
 		out.Error = "body required"
 		return out
 	}
+	if item.Platform == "twitter" {
+		return twitterReplyInboxItem(ctx, item, creds, out, body)
+	}
 	switch item.Kind {
 	case inboxKindComment:
 		res, err := ctx.PlatformAPI().ExecuteIntegrationTool(creds.ConnID, "reply_to_comment", map[string]any{

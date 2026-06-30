@@ -112,6 +112,9 @@ func platformSupportsInbox(platform, kind, action string) bool {
 		if action == "read" {
 			return c.MentionsRead
 		}
+		if action == "write" {
+			return c.CommentsWrite
+		}
 	case inboxKindReview:
 		switch action {
 		case "read":

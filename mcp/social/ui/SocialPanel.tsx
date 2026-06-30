@@ -1016,11 +1016,7 @@ function AccountCard({
       setStatus("Hard delete failed: " + (e as Error).message);
     }
   };
-  // Import is wired today only for Facebook accounts. Hide the button
-  // on platforms where the backend will return unsupported anyway —
-  // saves the user an action that can't succeed and keeps the AccountCard
-  // surface clean.
-  const importSupported = account.platform === "facebook";
+  const importSupported = isImportablePlatform(account.platform);
   const doImport = async () => {
     setImporting(true);
     setStatus(`Importing recent posts from ${account.display_name}…`);
@@ -3530,10 +3526,15 @@ function ConfirmDialog({
 // /platforms endpoint) because edit-support is more about platform
 // API constraints than per-install configuration. If the server gains
 // more edit verbs (Reddit, IG caption-only) we widen this set.
-const EDITABLE_PLATFORMS: Set<string> = new Set(["facebook", "youtube"]);
+const EDITABLE_PLATFORMS: Set<string> = new Set(["facebook", "twitter", "youtube"]);
+const IMPORTABLE_PLATFORMS: Set<string> = new Set(["facebook", "instagram", "tiktok", "twitter", "youtube"]);
 
 function isEditablePlatform(platform: string): boolean {
   return EDITABLE_PLATFORMS.has(platform);
+}
+
+function isImportablePlatform(platform: string): boolean {
+  return IMPORTABLE_PLATFORMS.has(platform);
 }
 
 // --- EditPostDialog ----------------------------------------------
@@ -3992,6 +3993,7 @@ interface AccountMetrics {
   following?: number;
   total_likes?: number;
   total_videos?: number;
+  posts?: number;
   reach?: number;
   impressions?: number;
   engagements?: number;
@@ -4274,6 +4276,7 @@ function AccountMetricsCell({ m }: { m: any }) {
   const bits: string[] = [];
   if (am.followers != null) bits.push(`${formatNumber(am.followers)} followers`);
   if (am.total_videos != null && am.total_videos > 0) bits.push(`${am.total_videos} videos`);
+  if (am.posts != null && am.posts > 0) bits.push(`${am.posts} posts`);
   return <span className="text-text text-xs">{bits.join(" · ") || "ok"}</span>;
 }
 
@@ -4288,6 +4291,7 @@ function AccountMetricsSummary({ metrics }: { metrics: AccountMetrics }) {
     ["followers", metrics.followers],
     ["following", metrics.following],
     ["videos", metrics.total_videos],
+    ["posts", metrics.posts],
     ["likes", metrics.total_likes],
     ["reach", metrics.reach],
     ["impressions", metrics.impressions],

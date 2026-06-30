@@ -66,6 +66,13 @@ func (a *App) Workers() []sdk.Worker {
 				return a.runInboxSyncWorker(ctx, app)
 			},
 		},
+		{
+			Name:     "analytics_collector",
+			Schedule: "@every 6h",
+			Run: func(ctx context.Context, app *sdk.AppCtx) error {
+				return a.runAnalyticsCollector(ctx, app)
+			},
+		},
 	}
 }
 
@@ -191,6 +198,8 @@ func (a *App) syncInboxAccount(ctx *sdk.AppCtx, acct inboxAccount, opts inboxSyn
 		syncFacebookInbox(ctx, acct, opts, &res)
 	case "instagram":
 		syncInstagramInbox(ctx, acct, opts, &res)
+	case "twitter":
+		syncTwitterInbox(ctx, acct, opts, &res)
 	default:
 		res.Status = "unsupported"
 		res.Warnings = append(res.Warnings, "inbox sync is not wired for "+acct.Platform)
