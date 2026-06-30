@@ -27,6 +27,7 @@ import (
 //   /api/repos/<slug>/glob                      POST {pattern}
 //   /api/repos/<slug>/import                    POST multipart zip OR {url}
 //   /api/repos/<slug>/export                    GET zip stream
+//   /api/issues                                 all repo issues in project
 
 func (a *App) handleReposCollection(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
@@ -601,6 +602,41 @@ func httpErr(w http.ResponseWriter, code int, msg string) {
 }
 
 // ─── Issues ───────────────────────────────────────────────────────
+
+func (a *App) httpIssuesCollection(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		httpErr(w, http.StatusMethodNotAllowed, "GET")
+		return
+	}
+	pid, err := resolveProjectFromRequest(r)
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	state := r.URL.Query().Get("state")
+	status := r.URL.Query().Get("status")
+	if state == "" {
+		state = "all"
+	}
+	if status == "" {
+		status = "all"
+	}
+	issues, err := dbSearchIssues(globalCtx.AppDB(), pid, IssueListOptions{
+		RepoSlug: r.URL.Query().Get("repo"),
+		State:    state,
+		Status:   status,
+		Type:     r.URL.Query().Get("type"),
+		Priority: r.URL.Query().Get("priority"),
+		Assignee: r.URL.Query().Get("assignee"),
+		Q:        r.URL.Query().Get("q"),
+		Limit:    atoiOr(r.URL.Query().Get("limit"), 100),
+	})
+	if err != nil {
+		httpErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	httpJSON(w, map[string]any{"issues": issues, "count": len(issues)})
+}
 
 func (a *App) httpRepoIssuesCollection(w http.ResponseWriter, r *http.Request, slug string) {
 	pid, repo, ok := a.httpIssueRepo(w, r, slug)

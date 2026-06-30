@@ -786,6 +786,25 @@ export default function CodePanel({ projectId, installId }: NativePanelProps) {
       {/* Repo list */}
       <aside className="w-64 border-r border-border flex flex-col">
         <div className="p-3 border-b border-border space-y-2">
+          <div className="grid grid-cols-2 gap-1">
+            <button
+              type="button"
+              onClick={() => setActiveView("code")}
+              className={`px-2 py-1 text-xs border rounded ${
+                activeView === "code" ? "border-accent text-accent" : "border-border text-text-muted hover:text-text"
+              }`}
+            >Code</button>
+            <button
+              type="button"
+              onClick={() => {
+                setShowDevLogs(false);
+                setActiveView("issues");
+              }}
+              className={`px-2 py-1 text-xs border rounded ${
+                activeView === "issues" ? "border-accent text-accent" : "border-border text-text-muted hover:text-text"
+              }`}
+            >Issues</button>
+          </div>
           <input
             type="text"
             value={query}
@@ -863,7 +882,29 @@ export default function CodePanel({ projectId, installId }: NativePanelProps) {
         </div>
       </aside>
 
-      {!selectedSlug ? (
+      {activeView === "issues" ? (
+        <main className="flex-1 min-w-0 overflow-hidden flex">
+          <IssuesView
+            repos={repos}
+            projectId={projectId}
+            api={api}
+            currentPath={openFile?.path}
+            currentRepoSlug={selectedSlug ?? undefined}
+            onOpenPath={(repoSlug, path) => {
+              setActiveView("code");
+              if (selectedSlug !== repoSlug) {
+                setSelectedSlug(repoSlug);
+                setOpenFile(null);
+                setEditing(false);
+                setDraft("");
+                setExpandedDirs(new Set());
+                loadTree(repoSlug);
+              }
+              openPath(repoSlug, path);
+            }}
+          />
+        </main>
+      ) : !selectedSlug ? (
         <main className="flex-1 overflow-hidden flex items-center justify-center text-text-muted text-sm">
           Select a repository.
         </main>
@@ -931,13 +972,16 @@ export default function CodePanel({ projectId, installId }: NativePanelProps) {
 
           {activeView === "issues" ? (
             <IssuesView
-              slug={selectedSlug}
+              repos={repos}
               projectId={projectId}
               api={api}
               currentPath={openFile?.path}
-              onOpenPath={(path) => {
+              currentRepoSlug={selectedSlug}
+              onOpenPath={(repoSlug, path) => {
                 setActiveView("code");
-                selectFile(path);
+                if (repoSlug === selectedSlug) {
+                  selectFile(path);
+                }
               }}
             />
           ) : (
@@ -2076,21 +2120,24 @@ const ISSUE_STATUSES: IssueStatus[] = ["todo", "triage", "planned", "in_progress
 const ISSUE_PRIORITIES: IssuePriority[] = ["low", "medium", "high", "urgent"];
 
 function IssuesView({
-  slug,
+  repos,
   projectId,
   api,
   currentPath,
+  currentRepoSlug,
   onOpenPath,
 }: {
-  slug: string;
+  repos: Repo[];
   projectId: string;
   api: <T,>(m: string, p: string, b?: unknown, e?: Record<string, string>) => Promise<T>;
   currentPath?: string;
-  onOpenPath: (path: string) => void;
+  currentRepoSlug?: string;
+  onOpenPath: (repoSlug: string, path: string) => void;
 }) {
   const [issues, setIssues] = useState<CodeIssue[]>([]);
   const [selected, setSelected] = useState<number | null>(null);
   const [detail, setDetail] = useState<{ issue: CodeIssue; comments: IssueComment[]; links: IssueLink[] } | null>(null);
+  const [repoFilter, setRepoFilter] = useState("");
   const [state, setState] = useState("all");
   const [status, setStatus] = useState("all");
   const [query, setQuery] = useState("");
@@ -2103,48 +2150,57 @@ function IssuesView({
   const loadIssues = useCallback(async () => {
     try {
       const extra: Record<string, string> = { state, status };
+      if (repoFilter) extra.repo = repoFilter;
       if (query.trim()) extra.q = query.trim();
-      const r = await api<{ issues: CodeIssue[] }>("GET", `/repos/${slug}/issues`, undefined, extra);
+      const r = await api<{ issues: CodeIssue[] }>("GET", "/issues", undefined, extra);
       const list = r.issues || [];
       setIssues(list);
-      setSelected((cur) => (cur && list.some((i) => i.number === cur) ? cur : list[0]?.number ?? null));
+      setSelected((cur) => (cur && list.some((i) => i.id === cur) ? cur : list[0]?.id ?? null));
       setErr("");
     } catch (e) {
       setErr((e as Error).message);
       setIssues([]);
       setSelected(null);
     }
-  }, [api, slug, state, status, query]);
+  }, [api, repoFilter, state, status, query]);
 
-  const loadDetail = useCallback(async (num: number | null) => {
-    if (!num) {
+  const loadDetail = useCallback(async (issueId: number | null) => {
+    if (!issueId) {
+      setDetail(null);
+      return;
+    }
+    const item = issues.find((i) => i.id === issueId);
+    if (!item?.repo_slug) {
       setDetail(null);
       return;
     }
     try {
-      const r = await api<{ issue: CodeIssue; comments?: IssueComment[]; links?: IssueLink[] }>("GET", `/repos/${slug}/issues/${num}`);
+      const r = await api<{ issue: CodeIssue; comments?: IssueComment[]; links?: IssueLink[] }>("GET", `/repos/${item.repo_slug}/issues/${item.number}`);
       setDetail({ issue: r.issue, comments: r.comments || [], links: r.links || [] });
       setErr("");
     } catch (e) {
       setErr((e as Error).message);
       setDetail(null);
     }
-  }, [api, slug]);
+  }, [api, issues]);
 
   useEffect(() => { loadIssues(); }, [loadIssues]);
   useEffect(() => { loadDetail(selected); }, [selected, loadDetail]);
 
   useAppEvents<FileEventData>("code", projectId, (ev) => {
-    if (!ev.topic.startsWith("issue.") || ev.data?.slug !== slug) return;
+    if (!ev.topic.startsWith("issue.")) return;
+    if (repoFilter && ev.data?.slug !== repoFilter) return;
     loadIssues();
-    if (selected && ev.data.number === selected) loadDetail(selected);
+    if (detail && ev.data?.slug === detail.issue.repo_slug && ev.data.number === detail.issue.number) {
+      loadDetail(selected);
+    }
   });
 
   const patchIssue = async (patch: Partial<CodeIssue>) => {
-    if (!detail) return;
+    if (!detail?.issue.repo_slug) return;
     setBusy(true);
     try {
-      const r = await api<{ issue: CodeIssue }>("PATCH", `/repos/${slug}/issues/${detail.issue.number}`, patch);
+      const r = await api<{ issue: CodeIssue }>("PATCH", `/repos/${detail.issue.repo_slug}/issues/${detail.issue.number}`, patch);
       setDetail((cur) => cur ? { ...cur, issue: r.issue } : cur);
       await loadIssues();
     } catch (e) {
@@ -2155,12 +2211,12 @@ function IssuesView({
   };
 
   const addComment = async () => {
-    if (!detail || !comment.trim()) return;
+    if (!detail?.issue.repo_slug || !comment.trim()) return;
     setBusy(true);
     try {
-      await api("POST", `/repos/${slug}/issues/${detail.issue.number}/comments`, { body: comment.trim(), author: "human" });
+      await api("POST", `/repos/${detail.issue.repo_slug}/issues/${detail.issue.number}/comments`, { body: comment.trim(), author: "human" });
       setComment("");
-      await loadDetail(detail.issue.number);
+      await loadDetail(detail.issue.id);
       await loadIssues();
     } catch (e) {
       setErr((e as Error).message);
@@ -2170,12 +2226,12 @@ function IssuesView({
   };
 
   const closeOrReopen = async () => {
-    if (!detail) return;
+    if (!detail?.issue.repo_slug) return;
     const closed = detail.issue.state === "closed";
     setBusy(true);
     try {
-      await api("POST", `/repos/${slug}/issues/${detail.issue.number}/${closed ? "reopen" : "close"}`, { actor: "human", state_reason: "completed" });
-      await loadDetail(detail.issue.number);
+      await api("POST", `/repos/${detail.issue.repo_slug}/issues/${detail.issue.number}/${closed ? "reopen" : "close"}`, { actor: "human", state_reason: "completed" });
+      await loadDetail(detail.issue.id);
       await loadIssues();
     } catch (e) {
       setErr((e as Error).message);
@@ -2185,11 +2241,11 @@ function IssuesView({
   };
 
   const linkCurrentPath = async () => {
-    if (!detail || !currentPath) return;
+    if (!detail?.issue.repo_slug || !currentPath || detail.issue.repo_slug !== currentRepoSlug) return;
     setBusy(true);
     try {
-      await api("POST", `/repos/${slug}/issues/${detail.issue.number}/links/path`, { path: currentPath, actor: "human" });
-      await loadDetail(detail.issue.number);
+      await api("POST", `/repos/${detail.issue.repo_slug}/issues/${detail.issue.number}/links/path`, { path: currentPath, actor: "human" });
+      await loadDetail(detail.issue.id);
     } catch (e) {
       setErr((e as Error).message);
     } finally {
@@ -2202,6 +2258,10 @@ function IssuesView({
       <aside className="w-80 border-r border-border flex flex-col min-h-0">
         <div className="p-3 border-b border-border space-y-2">
           <div className="flex items-center gap-2">
+            <div className="text-sm font-semibold text-text flex-1">Issues</div>
+            <span className="text-[11px] text-text-dim">{issues.length}</span>
+          </div>
+          <div className="flex items-center gap-2">
             <input
               type="text"
               value={query}
@@ -2212,10 +2272,15 @@ function IssuesView({
             <button
               type="button"
               onClick={() => setShowCreate(true)}
-              className="px-2 py-1 text-xs border border-accent text-accent rounded hover:bg-accent hover:text-bg"
+              disabled={repos.length === 0}
+              className="px-2 py-1 text-xs border border-accent text-accent rounded hover:bg-accent hover:text-bg disabled:opacity-40"
             >New</button>
           </div>
-          <div className="grid grid-cols-2 gap-1">
+          <div className="grid grid-cols-3 gap-1">
+            <select value={repoFilter} onChange={(e) => setRepoFilter(e.target.value)} className="bg-bg-input border border-border rounded px-1 py-0.5 text-xs">
+              <option value="">all repos</option>
+              {repos.map((r) => <option key={r.slug} value={r.slug}>{r.slug}</option>)}
+            </select>
             <select value={state} onChange={(e) => setState(e.target.value)} className="bg-bg-input border border-border rounded px-1 py-0.5 text-xs">
               <option value="open">open</option>
               <option value="closed">closed</option>
@@ -2237,13 +2302,13 @@ function IssuesView({
                 <li key={iss.id}>
                   <button
                     type="button"
-                    onClick={() => setSelected(iss.number)}
+                    onClick={() => setSelected(iss.id)}
                     className={`w-full text-left px-3 py-2 border-b border-border hover:bg-bg-input/50 ${
-                      selected === iss.number ? "bg-bg-input" : ""
+                      selected === iss.id ? "bg-bg-input" : ""
                     }`}
                   >
                     <div className="flex items-start gap-2">
-                      <span className="text-[11px] text-text-dim font-mono mt-0.5">#{iss.number}</span>
+                      <span className="text-[11px] text-text-dim font-mono mt-0.5">{iss.repo_slug}#{iss.number}</span>
                       <span className="text-sm text-text flex-1 truncate">{iss.title}</span>
                     </div>
                     <div className="mt-1 flex items-center gap-1 text-[10px] text-text-dim">
@@ -2269,7 +2334,7 @@ function IssuesView({
               <div className="border-b border-border pb-3">
                 <div className="flex items-start gap-3">
                   <div className="flex-1 min-w-0">
-                    <div className="text-xs text-text-dim font-mono">#{detail.issue.number}</div>
+                    <div className="text-xs text-text-dim font-mono">{detail.issue.repo_slug} #{detail.issue.number}</div>
                     <input
                       value={detail.issue.title}
                       onChange={(e) => setDetail((cur) => cur ? { ...cur, issue: { ...cur.issue, title: e.target.value } } : cur)}
@@ -2310,7 +2375,7 @@ function IssuesView({
                   <button
                     type="button"
                     onClick={linkCurrentPath}
-                    disabled={!currentPath || busy}
+                    disabled={!currentPath || detail.issue.repo_slug !== currentRepoSlug || busy}
                     className="px-2 py-0.5 text-xs border border-border rounded text-text-muted hover:text-text disabled:opacity-40"
                   >Link current file</button>
                 </div>
@@ -2322,7 +2387,7 @@ function IssuesView({
                       <li key={l.id} className="text-xs flex items-center gap-2">
                         <span className="text-text-dim">{l.kind}</span>
                         {l.kind === "path" ? (
-                          <button type="button" onClick={() => onOpenPath(l.target.split(":")[0])} className="font-mono text-accent hover:underline truncate">
+                          <button type="button" onClick={() => onOpenPath(detail.issue.repo_slug || "", l.target.split(":")[0])} className="font-mono text-accent hover:underline truncate">
                             {l.target}
                           </button>
                         ) : (
@@ -2364,13 +2429,15 @@ function IssuesView({
 
       {showCreate && (
         <CreateIssueDialog
-          slug={slug}
+          repos={repos}
+          defaultRepoSlug={currentRepoSlug}
           currentPath={currentPath}
+          currentRepoSlug={currentRepoSlug}
           api={api}
           onClose={() => setShowCreate(false)}
           onCreated={(issue) => {
             setShowCreate(false);
-            setSelected(issue.number);
+            setSelected(issue.id);
             loadIssues();
           }}
         />
@@ -2541,24 +2608,32 @@ function shortDate(s?: string): string {
 }
 
 function CreateIssueDialog({
-  slug,
+  repos,
+  defaultRepoSlug,
   currentPath,
+  currentRepoSlug,
   api,
   onClose,
   onCreated,
 }: {
-  slug: string;
+  repos: Repo[];
+  defaultRepoSlug?: string;
   currentPath?: string;
+  currentRepoSlug?: string;
   api: <T,>(m: string, p: string, b?: unknown, e?: Record<string, string>) => Promise<T>;
   onClose: () => void;
   onCreated: (issue: CodeIssue) => void;
 }) {
+  const initialSlug = defaultRepoSlug && repos.some((r) => r.slug === defaultRepoSlug)
+    ? defaultRepoSlug
+    : repos[0]?.slug ?? "";
+  const [slug, setSlug] = useState(initialSlug);
   const [title, setTitle] = useState("");
   const [body, setBody] = useState("");
   const [kind, setKind] = useState<IssueKind>("bug");
   const [priority, setPriority] = useState<IssuePriority>("medium");
   const [assignee, setAssignee] = useState("");
-  const [linkPath, setLinkPath] = useState(Boolean(currentPath));
+  const [linkPath, setLinkPath] = useState(Boolean(currentPath && initialSlug === currentRepoSlug));
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
 
@@ -2566,6 +2641,10 @@ function CreateIssueDialog({
     e.preventDefault();
     if (!title.trim()) {
       setErr("title required");
+      return;
+    }
+    if (!slug) {
+      setErr("repository required");
       return;
     }
     setBusy(true);
@@ -2579,7 +2658,7 @@ function CreateIssueDialog({
         assignee: assignee.trim(),
         created_by: "human",
       });
-      if (linkPath && currentPath) {
+      if (linkPath && currentPath && slug === currentRepoSlug) {
         await api("POST", `/repos/${slug}/issues/${r.issue.number}/links/path`, {
           path: currentPath,
           actor: "human",
@@ -2602,6 +2681,19 @@ function CreateIssueDialog({
       >
         <h2 className="text-text font-semibold">New issue</h2>
         <div>
+          <label className="text-xs text-text-muted block mb-1">Repository</label>
+          <select
+            value={slug}
+            onChange={(e) => {
+              setSlug(e.target.value);
+              setLinkPath(Boolean(currentPath && e.target.value === currentRepoSlug));
+            }}
+            className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm"
+          >
+            {repos.map((r) => <option key={r.slug} value={r.slug}>{r.slug}</option>)}
+          </select>
+        </div>
+        <div>
           <label className="text-xs text-text-muted block mb-1">Title</label>
           <input
             autoFocus
@@ -2622,7 +2714,7 @@ function CreateIssueDialog({
           <label className="text-xs text-text-muted block mb-1">Body</label>
           <textarea value={body} onChange={(e) => setBody(e.target.value)} className="w-full min-h-32 bg-bg-input border border-border rounded p-2 text-sm resize-y" />
         </div>
-        {currentPath && (
+        {currentPath && slug === currentRepoSlug && (
           <label className="text-xs text-text-muted flex items-center gap-2">
             <input type="checkbox" checked={linkPath} onChange={(e) => setLinkPath(e.target.checked)} />
             link <span className="font-mono">{currentPath}</span>
