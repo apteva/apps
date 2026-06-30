@@ -149,8 +149,8 @@ func TestEmbeddedManifest_Valid(t *testing.T) {
 	if m.Name != "hosting" {
 		t.Errorf("manifest.Name=%q, want hosting", m.Name)
 	}
-	if m.Version != "1.3.1" {
-		t.Errorf("manifest.Version=%q, want 1.3.1", m.Version)
+	if m.Version != "1.4.0" {
+		t.Errorf("manifest.Version=%q, want 1.4.0", m.Version)
 	}
 	if m.DB == nil {
 		t.Fatal("manifest.DB missing")
@@ -172,14 +172,22 @@ func TestEmbeddedManifest_Valid(t *testing.T) {
 		t.Error("manifest missing project scope")
 	}
 	gotRequired := map[string]bool{}
+	gotEvents := map[string][]string{}
 	for _, dep := range m.Requires.Apps {
 		gotRequired[dep.Name] = !dep.Optional
+		gotEvents[dep.Name] = dep.Events
 	}
 	if !gotRequired["containers"] {
 		t.Error("manifest should require containers")
 	}
 	if !gotRequired["catalog"] {
 		t.Error("manifest should require catalog")
+	}
+	if !containsString(gotEvents["billing"], "invoice.paid") {
+		t.Errorf("manifest should subscribe to billing invoice.paid, got %v", gotEvents["billing"])
+	}
+	if !containsString(gotEvents["subscriptions"], "subscription.cancelled") {
+		t.Errorf("manifest should subscribe to subscription lifecycle events, got %v", gotEvents["subscriptions"])
 	}
 }
 
@@ -440,6 +448,66 @@ func TestPaidInvoiceProvisionDrivesOrdersAndTenantProvisioning(t *testing.T) {
 	}
 }
 
+func TestInvoicePaidEventUsesPaidInvoiceProvisioning(t *testing.T) {
+	pf := &platformStub{}
+	ctx, db := newTestCtx(t, pf)
+	defer db.Close()
+
+	app := &App{}
+	err := app.handleInvoicePaidEvent(ctx, sdk.Event{
+		Event:     "invoice.paid",
+		ProjectID: "proj-test",
+		Data:      map[string]any{"id": int64(77)},
+	})
+	if err != nil {
+		t.Fatalf("handle invoice.paid: %v", err)
+	}
+	tenant, err := dbTenantGetBySlug(db, "paid-wp-sale")
+	if err != nil || tenant == nil {
+		t.Fatalf("expected tenant from invoice event, tenant=%+v err=%v", tenant, err)
+	}
+	if tenant.PlanKey != "wordpress-starter" {
+		t.Fatalf("tenant plan=%q, want wordpress-starter", tenant.PlanKey)
+	}
+}
+
+func TestSubscriptionEventSyncsTenantLifecycle(t *testing.T) {
+	pf := &platformStub{}
+	ctx, db := newTestCtx(t, pf)
+	defer db.Close()
+
+	app := &App{}
+	created, err := app.toolTenantCreate(ctx, map[string]any{
+		"owner_email":     "owner@example.com",
+		"slug":            "subevent",
+		"plan_key":        "free",
+		"subscription_id": int64(123),
+	})
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	tenant := created.(map[string]any)["tenant"].(*Tenant)
+
+	err = app.handleSubscriptionEvent(ctx, sdk.Event{
+		Event:     "subscription.cancelled",
+		SourceApp: "subscriptions",
+		Data:      map[string]any{"id": int64(123)},
+	})
+	if err != nil {
+		t.Fatalf("handle subscription.cancelled: %v", err)
+	}
+	got, err := dbTenantGet(db, tenant.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != StatusSuspended {
+		t.Fatalf("tenant status=%q, want suspended", got.Status)
+	}
+	if !containsToolCall(pf.callAppCalls, "containers", "containers_stop") {
+		t.Fatalf("expected containers_stop call, got %+v", pf.callAppCalls)
+	}
+}
+
 func TestTenantCreateCustomDockerProduct(t *testing.T) {
 	pf := &platformStub{}
 	ctx, db := newTestCtx(t, pf)
@@ -627,6 +695,15 @@ func TestHTTPHandlersServePanelData(t *testing.T) {
 func containsString(vals []string, want string) bool {
 	for _, v := range vals {
 		if v == want {
+			return true
+		}
+	}
+	return false
+}
+
+func containsToolCall(calls []callAppCall, app, tool string) bool {
+	for _, c := range calls {
+		if c.App == app && c.Tool == tool {
 			return true
 		}
 	}

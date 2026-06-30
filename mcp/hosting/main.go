@@ -24,7 +24,7 @@ import (
 //go:embed apteva.yaml
 var manifestYAML string
 
-const appVersion = "1.3.1"
+const appVersion = "1.4.0"
 
 const (
 	StatusProvisioning = "provisioning"
@@ -62,9 +62,19 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	return nil
 }
 
-func (a *App) OnUnmount(*sdk.AppCtx) error       { return nil }
-func (a *App) Channels() []sdk.ChannelFactory    { return nil }
-func (a *App) EventHandlers() []sdk.EventHandler { return nil }
+func (a *App) OnUnmount(*sdk.AppCtx) error    { return nil }
+func (a *App) Channels() []sdk.ChannelFactory { return nil }
+func (a *App) EventHandlers() []sdk.EventHandler {
+	return []sdk.EventHandler{
+		{Event: "invoice.paid", Handler: a.handleInvoicePaidEvent},
+		{Event: "subscription.active", Handler: a.handleSubscriptionEvent},
+		{Event: "subscription.trialing", Handler: a.handleSubscriptionEvent},
+		{Event: "subscription.past_due", Handler: a.handleSubscriptionEvent},
+		{Event: "subscription.cancelled", Handler: a.handleSubscriptionEvent},
+		{Event: "subscription.paused", Handler: a.handleSubscriptionEvent},
+		{Event: "subscription.ended", Handler: a.handleSubscriptionEvent},
+	}
+}
 
 func (a *App) Workers() []sdk.Worker {
 	return []sdk.Worker{{
@@ -253,6 +263,59 @@ func (a *App) toolCustomerCreate(ctx *sdk.AppCtx, args map[string]any) (any, err
 		return nil, err
 	}
 	return map[string]any{"customer": c}, nil
+}
+
+func (a *App) handleInvoicePaidEvent(ctx *sdk.AppCtx, event sdk.Event) error {
+	args := map[string]any{
+		"invoice_id":  firstPositive(int64Arg(event.Data, "invoice_id"), int64Arg(event.Data, "id")),
+		"_project_id": event.ProjectID,
+		"metadata":    mapArg(event.Data, "metadata"),
+	}
+	if args["invoice_id"].(int64) == 0 {
+		return errors.New("invoice.paid event missing invoice id")
+	}
+	_, err := a.toolPaidInvoiceProvision(ctx, args)
+	if err != nil {
+		msg := err.Error()
+		if strings.Contains(msg, "not marked as a hosting product") || strings.Contains(msg, "not paid") {
+			ctx.Logger().Info("hosting ignored invoice.paid event", "invoice_id", args["invoice_id"], "reason", msg)
+			return nil
+		}
+	}
+	return err
+}
+
+func (a *App) handleSubscriptionEvent(ctx *sdk.AppCtx, event sdk.Event) error {
+	status := strings.TrimPrefix(event.Name(), "subscription.")
+	if status == "" || status == event.Name() {
+		status = strArg(event.Data, "status")
+	}
+	tenantID := firstNonEmpty(
+		strArg(event.Data, "tenant_id"),
+		strArg(event.Data, "hosting_tenant_id"),
+		strArg(event.Data, "external_ref"),
+	)
+	if tenantID == "" {
+		subID := firstPositive(int64Arg(event.Data, "subscription_id"), int64Arg(event.Data, "id"))
+		if subID == 0 {
+			return nil
+		}
+		t, err := dbTenantGetBySubscriptionID(ctx.AppDB(), subID)
+		if err != nil || t == nil {
+			return err
+		}
+		tenantID = t.ID
+	}
+	_, err := a.toolSubscriptionSync(ctx, map[string]any{
+		"tenant_id":             tenantID,
+		"subscription_status":   status,
+		"actor":                 firstNonEmpty(event.SourceApp, "subscriptions"),
+		"_source_install_id":    event.SourceInstallID,
+		"_source_event":         event.Name(),
+		"_source_project_id":    event.ProjectID,
+		"_subscription_payload": event.Data,
+	})
+	return err
 }
 
 func (a *App) toolTenantCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -1343,6 +1406,17 @@ func dbTenantGetBySlug(db *sql.DB, slug string) (*Tenant, error) {
 		return nil, nil
 	}
 	t, err := scanTenant(db.QueryRow(tenantSelect()+` WHERE slug=? AND status != ?`, slug, StatusDeleted))
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	return t, err
+}
+
+func dbTenantGetBySubscriptionID(db *sql.DB, subscriptionID int64) (*Tenant, error) {
+	if subscriptionID <= 0 {
+		return nil, nil
+	}
+	t, err := scanTenant(db.QueryRow(tenantSelect()+` WHERE subscription_id=? AND status != ?`, subscriptionID, StatusDeleted))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
 	}
