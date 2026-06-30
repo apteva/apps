@@ -6,8 +6,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -19,7 +21,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: subscriptions
 display_name: Subscriptions
-version: 0.1.2
+version: 0.1.3
 description: Generic recurring-commerce lifecycle for SaaS, physical subscriptions, and services.
 author: Apteva
 scopes: [project, global]
@@ -39,6 +41,11 @@ requires:
 provides:
   http_routes:
     - prefix: /
+  ui_panels:
+    - slot: project.page
+      label: Subscriptions
+      icon: repeat
+      entry: /ui/SubscriptionsPanel.mjs
   publishes:
     - name: subscription.active
       description: Subscription entered active status.
@@ -84,7 +91,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		return errors.New("subscriptions requires a db block")
 	}
 	globalCtx = ctx
-	ctx.Logger().Info("subscriptions mounted", "version", "0.1.2", "scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
+	ctx.Logger().Info("subscriptions mounted", "version", "0.1.3", "scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
 	return nil
 }
 
@@ -108,6 +115,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 	return []sdk.Route{
 		{Pattern: "/subscriptions", Handler: a.handleSubscriptions},
 		{Pattern: "/subscriptions/", Handler: a.handleSubscriptionItem},
+		{Pattern: "/metrics", Handler: a.handleMetrics},
 		{Pattern: "/cycles", Handler: a.handleCycles},
 		{Pattern: "/cycles/", Handler: a.handleCycleItem},
 	}
@@ -126,6 +134,9 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "subscriptions_search", Description: "Search subscriptions.", InputSchema: schemaObject(map[string]any{
 			"q": map[string]any{"type": "string"}, "customer_id": map[string]any{"type": "integer"}, "customer_email": map[string]any{"type": "string"}, "kind": map[string]any{"type": "string"}, "status": map[string]any{"type": "string"}, "limit": map[string]any{"type": "integer"},
 		}, nil), Handler: a.toolSubscriptionsSearch},
+		{Name: "subscriptions_metrics_get", Description: "Return recurring subscription metrics such as MRR by currency. Args: source, statuses, include_trialing.", InputSchema: schemaObject(map[string]any{
+			"source": map[string]any{"type": "string"}, "statuses": map[string]any{"type": "array"}, "include_trialing": map[string]any{"type": "boolean"},
+		}, nil), Handler: a.toolSubscriptionsMetricsGet},
 		{Name: "subscriptions_update_status", Description: "Update subscription status/periods.", InputSchema: schemaObject(map[string]any{
 			"id": map[string]any{"type": "integer"}, "status": map[string]any{"type": "string"}, "current_period_start": map[string]any{"type": "string"}, "current_period_end": map[string]any{"type": "string"}, "next_renewal_at": map[string]any{"type": "string"}, "actor": map[string]any{"type": "string"}, "note": map[string]any{"type": "string"},
 		}, []string{"id"}), Handler: a.toolSubscriptionsUpdateStatus},
@@ -222,6 +233,22 @@ type Event struct {
 	CreatedAt      string          `json:"created_at"`
 }
 
+type SubscriptionMetricCurrency struct {
+	Currency             string `json:"currency"`
+	MRRCents             int64  `json:"mrr_cents"`
+	RecurringAmountCents int64  `json:"recurring_amount_cents"`
+	Subscriptions        int64  `json:"subscriptions"`
+}
+
+type SubscriptionMetrics struct {
+	ProjectID     string                       `json:"project_id"`
+	Source        string                       `json:"source,omitempty"`
+	Statuses      []string                     `json:"statuses"`
+	Currencies    []SubscriptionMetricCurrency `json:"currencies"`
+	Subscriptions int64                        `json:"subscriptions"`
+	GeneratedAt   string                       `json:"generated_at"`
+}
+
 func (a *App) toolSubscriptionsCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	pid, err := resolveProjectFromArgs(args)
 	if err != nil {
@@ -260,6 +287,18 @@ func (a *App) toolSubscriptionsSearch(ctx *sdk.AppCtx, args map[string]any) (any
 		return nil, err
 	}
 	return map[string]any{"subscriptions": out, "count": len(out)}, nil
+}
+
+func (a *App) toolSubscriptionsMetricsGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	metrics, err := dbSubscriptionMetrics(ctx.AppDB(), pid, args)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"metrics": metrics}, nil
 }
 
 func (a *App) toolSubscriptionsUpdateStatus(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -517,6 +556,88 @@ func dbSubscriptionGet(db *sql.DB, pid string, id int64, nested bool) (*Subscrip
 	return s, nil
 }
 
+func dbSubscriptionMetrics(db *sql.DB, pid string, args map[string]any) (*SubscriptionMetrics, error) {
+	statuses := metricStatuses(args)
+	where := []string{"s.project_id = ?"}
+	qargs := []any{pid}
+	if len(statuses) > 0 {
+		placeholders := make([]string, 0, len(statuses))
+		for _, status := range statuses {
+			placeholders = append(placeholders, "?")
+			qargs = append(qargs, status)
+		}
+		where = append(where, "s.status IN ("+strings.Join(placeholders, ",")+")")
+	}
+	source := strings.TrimSpace(strArg(args, "source"))
+	if source != "" {
+		where = append(where, "s.source = ?")
+		qargs = append(qargs, source)
+	}
+	rows, err := db.Query(`
+		SELECT s.id, s.currency, s.interval, s.interval_count, COALESCE(SUM(si.unit_amount_cents * si.quantity), 0)
+		  FROM subscriptions s
+		  JOIN subscription_items si ON si.subscription_id = s.id
+		 WHERE `+strings.Join(where, " AND ")+`
+		 GROUP BY s.id, s.currency, s.interval, s.interval_count
+		 ORDER BY s.id`, qargs...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	type bucket struct {
+		mrrCents       int64
+		recurringCents int64
+		subscriptions  int64
+	}
+	byCurrency := map[string]*bucket{}
+	var subscriptionCount int64
+	for rows.Next() {
+		var id int64
+		var currency, interval string
+		var intervalCount int64
+		var amount float64
+		if err := rows.Scan(&id, &currency, &interval, &intervalCount, &amount); err != nil {
+			return nil, err
+		}
+		monthly := monthlyNormalizedCents(amount, interval, intervalCount)
+		if monthly == 0 {
+			continue
+		}
+		cur := strings.ToUpper(firstNonEmpty(currency, "USD"))
+		b := byCurrency[cur]
+		if b == nil {
+			b = &bucket{}
+			byCurrency[cur] = b
+		}
+		b.mrrCents += monthly
+		b.recurringCents += int64(math.Round(amount))
+		b.subscriptions++
+		subscriptionCount++
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	currencies := make([]SubscriptionMetricCurrency, 0, len(byCurrency))
+	for cur, b := range byCurrency {
+		currencies = append(currencies, SubscriptionMetricCurrency{
+			Currency:             cur,
+			MRRCents:             b.mrrCents,
+			RecurringAmountCents: b.recurringCents,
+			Subscriptions:        b.subscriptions,
+		})
+	}
+	sortMetricCurrencies(currencies)
+	return &SubscriptionMetrics{
+		ProjectID:     pid,
+		Source:        source,
+		Statuses:      statuses,
+		Currencies:    currencies,
+		Subscriptions: subscriptionCount,
+		GeneratedAt:   time.Now().UTC().Format(time.RFC3339),
+	}, nil
+}
+
 func dbSubscriptionUpdateStatus(db *sql.DB, pid string, args map[string]any) (*Subscription, error) {
 	id := int64Arg(args, "id")
 	if id == 0 {
@@ -755,6 +876,58 @@ func dbCyclesList(db *sql.DB, pid string, subID int64, limit int) ([]*Cycle, err
 	return out, rows.Err()
 }
 
+func metricStatuses(args map[string]any) []string {
+	raw := arrayArg(args, "statuses")
+	statuses := make([]string, 0, len(raw)+2)
+	seen := map[string]bool{}
+	for _, v := range raw {
+		status := strings.ToLower(strings.TrimSpace(fmt.Sprint(v)))
+		if validSubStatus[status] && !seen[status] {
+			statuses = append(statuses, status)
+			seen[status] = true
+		}
+	}
+	if status := strings.ToLower(strings.TrimSpace(strArg(args, "status"))); status != "" && validSubStatus[status] && !seen[status] {
+		statuses = append(statuses, status)
+		seen[status] = true
+	}
+	if len(statuses) == 0 {
+		statuses = append(statuses, "active")
+		seen["active"] = true
+	}
+	if boolArg(args, "include_trialing") && !seen["trialing"] {
+		statuses = append(statuses, "trialing")
+	}
+	return statuses
+}
+
+func monthlyNormalizedCents(amount float64, interval string, intervalCount int64) int64 {
+	if amount <= 0 {
+		return 0
+	}
+	if intervalCount <= 0 {
+		intervalCount = 1
+	}
+	switch strings.ToLower(strings.TrimSpace(interval)) {
+	case "month", "monthly":
+		return int64(math.Round(amount / float64(intervalCount)))
+	case "year", "yearly", "annual", "annually":
+		return int64(math.Round(amount / 12 / float64(intervalCount)))
+	case "week", "weekly":
+		return int64(math.Round(amount * 52 / 12 / float64(intervalCount)))
+	case "day", "daily":
+		return int64(math.Round(amount * 365 / 12 / float64(intervalCount)))
+	default:
+		return 0
+	}
+}
+
+func sortMetricCurrencies(currencies []SubscriptionMetricCurrency) {
+	sort.Slice(currencies, func(i, j int) bool {
+		return currencies[i].Currency < currencies[j].Currency
+	})
+}
+
 func subCols() string {
 	return `id, project_id, customer_id, COALESCE(customer_email,''), COALESCE(customer_name,''), kind, status, billing_provider, COALESCE(external_id,''), currency, interval, interval_count, quantity, trial_start, trial_end, current_period_start, current_period_end, next_renewal_at, cancel_at, cancelled_at, ended_at, source, COALESCE(source_ref,''), metadata, created_at, updated_at`
 }
@@ -904,6 +1077,42 @@ func (a *App) handleSubscriptions(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httpErr(w, 405, "method not allowed")
+}
+
+func (a *App) handleMetrics(w http.ResponseWriter, r *http.Request) {
+	ctx := getAppCtx(r)
+	pid, err := resolveProjectFromRequest(r)
+	if err != nil {
+		httpErr(w, 400, err.Error())
+		return
+	}
+	if r.Method != http.MethodGet {
+		httpErr(w, 405, "method not allowed")
+		return
+	}
+	q := r.URL.Query()
+	args := map[string]any{
+		"source":           q.Get("source"),
+		"status":           q.Get("status"),
+		"include_trialing": q.Get("include_trialing"),
+	}
+	if statuses := q["statuses"]; len(statuses) > 0 {
+		raw := make([]any, 0, len(statuses))
+		for _, status := range statuses {
+			for _, part := range strings.Split(status, ",") {
+				if strings.TrimSpace(part) != "" {
+					raw = append(raw, strings.TrimSpace(part))
+				}
+			}
+		}
+		args["statuses"] = raw
+	}
+	metrics, err := dbSubscriptionMetrics(ctx.AppDB(), pid, args)
+	if err != nil {
+		httpErr(w, 500, err.Error())
+		return
+	}
+	httpJSON(w, map[string]any{"metrics": metrics})
 }
 
 func (a *App) handleSubscriptionItem(w http.ResponseWriter, r *http.Request) {
@@ -1128,6 +1337,35 @@ func boolArg(m map[string]any, key string) bool {
 		return v == "true" || v == "1"
 	}
 	return false
+}
+func arrayArg(m map[string]any, key string) []any {
+	if m == nil {
+		return nil
+	}
+	switch v := m[key].(type) {
+	case []any:
+		return v
+	case []string:
+		out := make([]any, 0, len(v))
+		for _, s := range v {
+			out = append(out, s)
+		}
+		return out
+	case string:
+		if strings.TrimSpace(v) == "" {
+			return nil
+		}
+		parts := strings.Split(v, ",")
+		out := make([]any, 0, len(parts))
+		for _, part := range parts {
+			if strings.TrimSpace(part) != "" {
+				out = append(out, strings.TrimSpace(part))
+			}
+		}
+		return out
+	default:
+		return nil
+	}
 }
 func mapFromAny(v any) map[string]any {
 	out := map[string]any{}

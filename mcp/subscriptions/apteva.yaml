@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: subscriptions
 display_name: Subscriptions
-version: 0.1.2
+version: 0.1.3
 description: |
   Generic recurring-commerce lifecycle for SaaS, physical product
   subscriptions, and services. Subscriptions owns recurrence, status,
@@ -36,6 +36,11 @@ requires:
 provides:
   http_routes:
     - prefix: /
+  ui_panels:
+    - slot: project.page
+      label: Subscriptions
+      icon: repeat
+      entry: /ui/SubscriptionsPanel.mjs
   publishes:
     - name: subscription.active
       description: Subscription entered active status.
@@ -56,6 +61,8 @@ provides:
       description: Fetch one subscription with items, cycles, and events.
     - name: subscriptions_search
       description: Search subscriptions by customer, kind, status, and q.
+    - name: subscriptions_metrics_get
+      description: Return recurring subscription metrics such as MRR by currency.
     - name: subscriptions_update_status
       description: Update subscription status and period fields.
     - name: subscriptions_cancel

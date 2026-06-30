@@ -1,6 +1,9 @@
 package main
 
 import (
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -153,5 +156,95 @@ func TestLifecycleWorkerExpiresTrialAndGrace(t *testing.T) {
 	}
 	if meta := mapFromAny(data["metadata"]); meta["on_unpaid_grace_expired"] != "delete" {
 		t.Fatalf("ended event missing metadata policy: %+v", data)
+	}
+}
+
+func TestMetricsCalculatesMRRByCurrencyAndSource(t *testing.T) {
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("proj-test"))
+	app := &App{}
+	globalCtx = ctx
+
+	fixtures := []map[string]any{
+		{
+			"customer_email": "monthly@example.com",
+			"kind":           "service",
+			"status":         "active",
+			"source":         "hosting",
+			"source_ref":     "monthly",
+			"currency":       "USD",
+			"interval":       "month",
+			"items": []any{
+				map[string]any{"title": "Monthly", "quantity": 1, "unit_amount_cents": 1900, "currency": "USD"},
+			},
+		},
+		{
+			"customer_email": "annual@example.com",
+			"kind":           "service",
+			"status":         "active",
+			"source":         "hosting",
+			"source_ref":     "annual",
+			"currency":       "USD",
+			"interval":       "year",
+			"items": []any{
+				map[string]any{"title": "Annual", "quantity": 1, "unit_amount_cents": 12000, "currency": "USD"},
+			},
+		},
+		{
+			"customer_email": "trial@example.com",
+			"kind":           "service",
+			"status":         "trialing",
+			"source":         "hosting",
+			"source_ref":     "trial",
+			"currency":       "USD",
+			"interval":       "month",
+			"items": []any{
+				map[string]any{"title": "Trial", "quantity": 1, "unit_amount_cents": 5000, "currency": "USD"},
+			},
+		},
+		{
+			"customer_email": "other@example.com",
+			"kind":           "service",
+			"status":         "active",
+			"source":         "manual",
+			"currency":       "USD",
+			"interval":       "month",
+			"items": []any{
+				map[string]any{"title": "Manual", "quantity": 1, "unit_amount_cents": 9900, "currency": "USD"},
+			},
+		},
+	}
+	for _, fixture := range fixtures {
+		if _, err := app.toolSubscriptionsCreate(ctx, fixture); err != nil {
+			t.Fatalf("create fixture: %v", err)
+		}
+	}
+
+	got, err := dbSubscriptionMetrics(ctx.AppDB(), "proj-test", map[string]any{"source": "hosting"})
+	if err != nil {
+		t.Fatalf("metrics: %v", err)
+	}
+	if got.Subscriptions != 2 || len(got.Currencies) != 1 {
+		t.Fatalf("unexpected metrics: %+v", got)
+	}
+	if got.Currencies[0].Currency != "USD" || got.Currencies[0].MRRCents != 2900 {
+		t.Fatalf("mrr=%+v, want USD 2900", got.Currencies[0])
+	}
+
+	got, err = dbSubscriptionMetrics(ctx.AppDB(), "proj-test", map[string]any{"source": "hosting", "include_trialing": true})
+	if err != nil {
+		t.Fatalf("metrics with trials: %v", err)
+	}
+	if got.Currencies[0].MRRCents != 7900 || got.Subscriptions != 3 {
+		t.Fatalf("trialing metrics=%+v, want 7900 over 3 subscriptions", got)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/metrics?project_id=proj-test&source=hosting", nil)
+	rec := httptest.NewRecorder()
+	app.handleMetrics(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if body := rec.Body.String(); !strings.Contains(body, `"mrr_cents":2900`) {
+		t.Fatalf("metrics response missing mrr: %s", body)
 	}
 }
