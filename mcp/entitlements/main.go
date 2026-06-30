@@ -17,7 +17,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: entitlements
 display_name: Entitlements
-version: 0.1.0
+version: 0.1.1
 description: Shared access-control and usage layer.
 author: Apteva
 scopes: [project, global]
@@ -59,7 +59,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		return errors.New("entitlements requires a db block")
 	}
 	globalCtx = ctx
-	ctx.Logger().Info("entitlements mounted", "version", "0.1.0", "scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
+	ctx.Logger().Info("entitlements mounted", "version", "0.1.1", "scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
 	return nil
 }
 
@@ -85,8 +85,8 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "entitlements_check", Description: "Check subject access to a feature/key.", InputSchema: subjectSchema(nil), Handler: a.toolCheck},
 		{Name: "entitlement_grants_list", Description: "List grants for a subject.", InputSchema: schemaObject(map[string]any{"subject_type": map[string]any{"type": "string"}, "subject_id": map[string]any{"type": "string"}, "feature_key": map[string]any{"type": "string"}, "status": map[string]any{"type": "string"}, "limit": map[string]any{"type": "integer"}}, []string{"subject_id"}), Handler: a.toolGrantsList},
 		{Name: "entitlement_limits_set", Description: "Set subject/feature limit.", InputSchema: subjectSchema(map[string]any{"limit_type": map[string]any{"type": "string"}, "limit_value": map[string]any{"type": "integer"}, "reset_interval": map[string]any{"type": "string"}, "metadata": map[string]any{"type": "object"}}), Handler: a.toolLimitSet},
-		{Name: "usage_record", Description: "Record usage.", InputSchema: subjectSchema(map[string]any{"quantity": map[string]any{"type": "integer"}, "idempotency_key": map[string]any{"type": "string"}, "metadata": map[string]any{"type": "object"}}), Handler: a.toolUsageRecord},
-		{Name: "usage_get", Description: "Get usage and limits.", InputSchema: subjectSchema(nil), Handler: a.toolUsageGet},
+		{Name: "usage_record", Description: "Record usage. Counters are summed; gauges represent current measured values.", InputSchema: subjectSchema(map[string]any{"quantity": map[string]any{"type": "integer"}, "usage_kind": map[string]any{"type": "string"}, "kind": map[string]any{"type": "string"}, "unit": map[string]any{"type": "string"}, "idempotency_key": map[string]any{"type": "string"}, "metadata": map[string]any{"type": "object"}}), Handler: a.toolUsageRecord},
+		{Name: "usage_get", Description: "Get usage and limits.", InputSchema: subjectSchema(map[string]any{"usage_kind": map[string]any{"type": "string"}, "kind": map[string]any{"type": "string"}}), Handler: a.toolUsageGet},
 	}
 }
 
@@ -201,7 +201,7 @@ func (a *App) toolUsageGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	usage, limit, err := dbUsageGet(ctx.AppDB(), pid, subjectType(args), strArg(args, "subject_id"), strArg(args, "feature_key"))
+	usage, limit, err := dbUsageGetKind(ctx.AppDB(), pid, subjectType(args), strArg(args, "subject_id"), strArg(args, "feature_key"), usageKind(args))
 	if err != nil {
 		return nil, err
 	}
@@ -349,25 +349,50 @@ func dbUsageRecord(db *sql.DB, pid string, args map[string]any) (map[string]any,
 		return nil, errors.New("subject_id and feature_key required")
 	}
 	qty := firstNonZero(int64Arg(args, "quantity"), 1)
+	kind := usageKind(args)
+	meta := mapFromAny(args["metadata"])
+	if kind != "" && kind != "counter" {
+		meta["usage_kind"] = kind
+	}
+	if unit := strArg(args, "unit"); unit != "" {
+		meta["unit"] = unit
+	}
 	_, err := db.Exec(`INSERT INTO usage_events (project_id, subject_type, subject_id, feature_key, quantity, idempotency_key, metadata) VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		pid, subjectType(args), strArg(args, "subject_id"), strArg(args, "feature_key"), qty, nullStr(strArg(args, "idempotency_key")), jsonOrEmpty(args["metadata"], "{}"))
+		pid, subjectType(args), strArg(args, "subject_id"), strArg(args, "feature_key"), qty, nullStr(strArg(args, "idempotency_key")), jsonOrEmpty(meta, "{}"))
 	if err != nil && strings.Contains(err.Error(), "ux_usage_idempotency") {
-		usage, limit, getErr := dbUsageGet(db, pid, subjectType(args), strArg(args, "subject_id"), strArg(args, "feature_key"))
-		return map[string]any{"quantity": usage, "limit": limit, "deduped": true}, getErr
+		usage, limit, getErr := dbUsageGetKind(db, pid, subjectType(args), strArg(args, "subject_id"), strArg(args, "feature_key"), kind)
+		return map[string]any{"quantity": usage, "limit": limit, "usage_kind": firstNonEmpty(kind, "counter"), "deduped": true}, getErr
 	}
 	if err != nil {
 		return nil, err
 	}
-	usage, limit, err := dbUsageGet(db, pid, subjectType(args), strArg(args, "subject_id"), strArg(args, "feature_key"))
-	return map[string]any{"quantity": usage, "limit": limit, "deduped": false}, err
+	usage, limit, err := dbUsageGetKind(db, pid, subjectType(args), strArg(args, "subject_id"), strArg(args, "feature_key"), kind)
+	return map[string]any{"quantity": usage, "limit": limit, "usage_kind": firstNonEmpty(kind, "counter"), "deduped": false}, err
 }
 
 func dbUsageGet(db *sql.DB, pid, subjType, subjID, feature string) (int64, *Limit, error) {
+	return dbUsageGetKind(db, pid, subjType, subjID, feature, "")
+}
+
+func dbUsageGetKind(db *sql.DB, pid, subjType, subjID, feature, kind string) (int64, *Limit, error) {
+	lim, err := dbLimitGet(db, pid, subjType, subjID, feature)
+	if err != nil {
+		return 0, nil, err
+	}
+	if kind == "" && lim != nil && strings.EqualFold(lim.LimitType, "gauge") {
+		kind = "gauge"
+	}
 	var total int64
+	if strings.EqualFold(kind, "gauge") {
+		err := db.QueryRow(`SELECT quantity FROM usage_events WHERE project_id=? AND subject_type=? AND subject_id=? AND feature_key=? ORDER BY occurred_at DESC, id DESC LIMIT 1`, pid, subjType, subjID, feature).Scan(&total)
+		if err == sql.ErrNoRows {
+			return 0, lim, nil
+		}
+		return total, lim, err
+	}
 	if err := db.QueryRow(`SELECT COALESCE(SUM(quantity),0) FROM usage_events WHERE project_id=? AND subject_type=? AND subject_id=? AND feature_key=?`, pid, subjType, subjID, feature).Scan(&total); err != nil {
 		return 0, nil, err
 	}
-	lim, err := dbLimitGet(db, pid, subjType, subjID, feature)
 	return total, lim, err
 }
 
@@ -517,8 +542,8 @@ func (a *App) handleUsage(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Method == http.MethodGet {
-		args := map[string]any{"subject_type": r.URL.Query().Get("subject_type"), "subject_id": r.URL.Query().Get("subject_id"), "feature_key": r.URL.Query().Get("feature_key")}
-		usage, limit, err := dbUsageGet(ctx.AppDB(), pid, subjectType(args), strArg(args, "subject_id"), strArg(args, "feature_key"))
+		args := map[string]any{"subject_type": r.URL.Query().Get("subject_type"), "subject_id": r.URL.Query().Get("subject_id"), "feature_key": r.URL.Query().Get("feature_key"), "usage_kind": r.URL.Query().Get("usage_kind"), "kind": r.URL.Query().Get("kind")}
+		usage, limit, err := dbUsageGetKind(ctx.AppDB(), pid, subjectType(args), strArg(args, "subject_id"), strArg(args, "feature_key"), usageKind(args))
 		if err != nil {
 			httpErr(w, 500, err.Error())
 			return
@@ -561,6 +586,15 @@ func schemaObject(props map[string]any, required []string) map[string]any {
 }
 func subjectType(m map[string]any) string {
 	return firstNonEmpty(strArg(m, "subject_type"), "customer")
+}
+func usageKind(m map[string]any) string {
+	kind := strings.ToLower(firstNonEmpty(strArg(m, "usage_kind"), strArg(m, "kind")))
+	switch kind {
+	case "", "counter", "gauge":
+		return kind
+	default:
+		return "counter"
+	}
 }
 func resolveProjectFromArgs(args map[string]any) (string, error) {
 	pid := strings.TrimSpace(strArg(args, "_project_id"))
@@ -607,6 +641,28 @@ func int64Arg(m map[string]any, key string) int64 {
 		return n
 	}
 	return 0
+}
+func mapFromAny(v any) map[string]any {
+	out := map[string]any{}
+	switch x := v.(type) {
+	case map[string]any:
+		for k, vv := range x {
+			out[k] = vv
+		}
+	case map[string]string:
+		for k, vv := range x {
+			out[k] = vv
+		}
+	case json.RawMessage:
+		_ = json.Unmarshal(x, &out)
+	case []byte:
+		_ = json.Unmarshal(x, &out)
+	case string:
+		if strings.TrimSpace(x) != "" {
+			_ = json.Unmarshal([]byte(x), &out)
+		}
+	}
+	return out
 }
 func firstNonEmpty(vals ...string) string {
 	for _, v := range vals {

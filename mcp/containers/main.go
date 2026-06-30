@@ -102,6 +102,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "containers_destroy", Description: "Destroy a workload.", InputSchema: schemaObject(map[string]any{"workload_id": map[string]any{"type": "string"}, "delete_volumes": map[string]any{"type": "boolean"}}, []string{"workload_id"}), Handler: a.toolDestroy},
 		{Name: "containers_logs", Description: "Tail workload logs.", InputSchema: schemaObject(map[string]any{"workload_id": map[string]any{"type": "string"}, "tail": map[string]any{"type": "integer"}}, []string{"workload_id"}), Handler: a.toolLogs},
 		{Name: "containers_health", Description: "Probe workload health.", InputSchema: idSchema(), Handler: a.toolHealth},
+		{Name: "containers_usage_get", Description: "Measure generic workload usage metrics such as container volume storage bytes.", InputSchema: idSchema(), Handler: a.toolUsageGet},
 		{Name: "containers_blueprints_list", Description: "List blueprints.", InputSchema: schemaObject(nil, nil), Handler: a.toolBlueprints},
 	}
 }
@@ -407,6 +408,47 @@ func (a *App) pollHealth(ctx context.Context, db *sql.DB) error {
 	return nil
 }
 
+func (a *App) workloadUsage(ctx context.Context, db *sql.DB, id string) (*WorkloadUsage, error) {
+	w, err := requireWorkload(db, id)
+	if err != nil {
+		return nil, err
+	}
+	usage := &WorkloadUsage{WorkloadID: w.ID, UpdatedAt: nowUTC()}
+	var total int64
+	for _, volume := range w.Volumes {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		size, err := a.backend.VolumeUsage(ctx, volume.DockerVolumeName)
+		if err != nil {
+			return nil, err
+		}
+		total += size
+		_ = updateVolumeSize(db, w.ID, volume.Name, size)
+		usage.Metrics = append(usage.Metrics, UsageMetric{
+			FeatureKey: "containers.storage.bytes",
+			Quantity:   size,
+			Unit:       "bytes",
+			Kind:       "gauge",
+			Source:     "docker_volume",
+			Dimensions: map[string]string{
+				"volume":             volume.Name,
+				"docker_volume_name": volume.DockerVolumeName,
+				"mount_path":         volume.MountPath,
+			},
+		})
+	}
+	usage.Metrics = append([]UsageMetric{{
+		FeatureKey: "containers.storage.bytes",
+		Quantity:   total,
+		Unit:       "bytes",
+		Kind:       "gauge",
+		Source:     "docker_volume_total",
+		Dimensions: map[string]string{"workload_id": w.ID},
+	}}, usage.Metrics...)
+	return usage, nil
+}
+
 func requireWorkload(db *sql.DB, id string) (*Workload, error) {
 	w, err := getWorkload(db, id)
 	if err != nil {
@@ -558,6 +600,16 @@ func (a *App) toolHealth(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	return map[string]any{"workload": w}, nil
 }
 
+func (a *App) toolUsageGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	cctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	usage, err := a.workloadUsage(cctx, ctx.AppDB(), getStr(args, "workload_id"))
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"usage": usage, "metrics": usage.Metrics}, nil
+}
+
 func (a *App) toolBlueprints(ctx *sdk.AppCtx, _ map[string]any) (any, error) {
 	bps, err := listBlueprints(ctx.AppDB())
 	if err != nil {
@@ -620,6 +672,9 @@ func (a *App) handleWorkloadItem(w http.ResponseWriter, r *http.Request) {
 		err := a.probeWorkload(r.Context(), globalCtx.AppDB(), id)
 		wk, _ := getWorkload(globalCtx.AppDB(), id)
 		writeResult(w, map[string]any{"workload": wk}, err)
+	case r.Method == http.MethodGet && action == "usage":
+		usage, err := a.workloadUsage(r.Context(), globalCtx.AppDB(), id)
+		writeResult(w, map[string]any{"usage": usage, "metrics": usage.Metrics}, err)
 	case r.Method == http.MethodGet && action == "logs":
 		wk, err := requireWorkload(globalCtx.AppDB(), id)
 		if err != nil {

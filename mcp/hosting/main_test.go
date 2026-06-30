@@ -190,8 +190,35 @@ func (p *platformStub) CallAppResult(appName, tool string, input map[string]any,
 	case "containers_logs":
 		b, _ := json.Marshal(map[string]any{"workload_id": input["workload_id"], "logs": "hello"})
 		return json.Unmarshal(b, out)
+	case "containers_usage_get":
+		b, _ := json.Marshal(map[string]any{
+			"usage": map[string]any{
+				"workload_id": input["workload_id"],
+				"metrics": []map[string]any{{
+					"feature_key": "containers.storage.bytes",
+					"quantity":    int64(700 * 1024 * 1024),
+					"unit":        "bytes",
+					"kind":        "gauge",
+					"source":      "docker_volume_total",
+				}},
+			},
+			"metrics": []map[string]any{{
+				"feature_key": "containers.storage.bytes",
+				"quantity":    int64(700 * 1024 * 1024),
+				"unit":        "bytes",
+				"kind":        "gauge",
+				"source":      "docker_volume_total",
+			}},
+		})
+		return json.Unmarshal(b, out)
 	case "containers_destroy":
 		b, _ := json.Marshal(map[string]any{"destroyed": true})
+		return json.Unmarshal(b, out)
+	case "entitlement_limits_set":
+		b, _ := json.Marshal(map[string]any{"limit": input})
+		return json.Unmarshal(b, out)
+	case "usage_record":
+		b, _ := json.Marshal(map[string]any{"usage": map[string]any{"quantity": input["quantity"], "deduped": false}})
 		return json.Unmarshal(b, out)
 	default:
 		return nil
@@ -247,8 +274,8 @@ func TestEmbeddedManifest_Valid(t *testing.T) {
 	if m.Name != "hosting" {
 		t.Errorf("manifest.Name=%q, want hosting", m.Name)
 	}
-	if m.Version != "1.6.0" {
-		t.Errorf("manifest.Version=%q, want 1.6.0", m.Version)
+	if m.Version != "1.7.0" {
+		t.Errorf("manifest.Version=%q, want 1.7.0", m.Version)
 	}
 	if m.DB == nil {
 		t.Fatal("manifest.DB missing")
@@ -454,6 +481,9 @@ func TestSeedPlansIncludeFreePlanLimits(t *testing.T) {
 	if limits["containers.storage_mb"] != 512 {
 		t.Errorf("free containers.storage_mb limit=%d, want 512", limits["containers.storage_mb"])
 	}
+	if limits["containers.storage.bytes"] != 512*1024*1024 {
+		t.Errorf("free containers.storage.bytes limit=%d, want %d", limits["containers.storage.bytes"], int64(512*1024*1024))
+	}
 	if free.ProductKey != "apteva" {
 		t.Errorf("free product_key=%q, want apteva", free.ProductKey)
 	}
@@ -562,6 +592,51 @@ func TestTenantCreateProvisionsContainerAndIngress(t *testing.T) {
 	}
 	if len(usage) != 1 || usage[0].Quantity != 1 {
 		t.Fatalf("usage = %+v", usage)
+	}
+}
+
+func TestUsageSyncRecordsGaugeAndSuspendsOverLimitTenant(t *testing.T) {
+	pf := &platformStub{}
+	ctx, db := newTestCtx(t, pf)
+	defer db.Close()
+
+	app := &App{}
+	got, err := app.toolTenantCreate(ctx, map[string]any{
+		"owner_email": "owner@example.com",
+		"slug":        "overlimit",
+		"plan_key":    "free",
+	})
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	tenant := got.(map[string]any)["tenant"].(*Tenant)
+	pf.callAppCalls = nil
+
+	out, err := app.toolUsageSync(ctx, map[string]any{"tenant_id": tenant.ID})
+	if err != nil {
+		t.Fatalf("usage sync: %v", err)
+	}
+	if out.(map[string]any)["count"] != 1 {
+		t.Fatalf("sync response=%+v", out)
+	}
+	usage, err := dbUsageTotals(db, map[string]any{"tenant_id": tenant.ID, "feature_key": "containers.storage.bytes"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(usage) != 1 || usage[0].Quantity != int64(700*1024*1024) {
+		t.Fatalf("storage usage=%+v", usage)
+	}
+	updated, err := dbTenantGet(db, tenant.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Status != StatusSuspended || !strings.Contains(updated.LastError, "usage over limit") {
+		t.Fatalf("tenant not suspended for usage: %+v", updated)
+	}
+	for _, want := range []string{"containers_usage_get", "containers_stop", "entitlement_limits_set", "usage_record"} {
+		if !containsToolCallAny(pf.callAppCalls, want) {
+			t.Fatalf("expected %s in calls: %+v", want, pf.callAppCalls)
+		}
 	}
 }
 
@@ -1013,6 +1088,15 @@ func containsString(vals []string, want string) bool {
 func containsToolCall(calls []callAppCall, app, tool string) bool {
 	for _, c := range calls {
 		if c.App == app && c.Tool == tool {
+			return true
+		}
+	}
+	return false
+}
+
+func containsToolCallAny(calls []callAppCall, tool string) bool {
+	for _, c := range calls {
+		if c.Tool == tool {
 			return true
 		}
 	}

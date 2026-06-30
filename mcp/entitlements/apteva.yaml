@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: entitlements
 display_name: Entitlements
-version: 0.1.0
+version: 0.1.1
 description: |
   Shared access-control and usage layer. Entitlements grants, revokes,
   checks, and meters access for SaaS plans, courses, memberships,
@@ -35,7 +35,7 @@ provides:
     - name: entitlement_limits_set
       description: Set a quota/limit for a subject and feature.
     - name: usage_record
-      description: Record usage against a subject and feature.
+      description: Record counter or gauge usage against a subject and feature.
     - name: usage_get
       description: Return usage and limits for a subject and feature.
   skills:

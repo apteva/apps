@@ -24,7 +24,7 @@ import (
 //go:embed apteva.yaml
 var manifestYAML string
 
-const appVersion = "1.6.0"
+const appVersion = "1.7.0"
 
 const (
 	StatusProvisioning = "provisioning"
@@ -78,10 +78,14 @@ func (a *App) EventHandlers() []sdk.EventHandler {
 
 func (a *App) Workers() []sdk.Worker {
 	return []sdk.Worker{{
-		Name:     "health-poll",
-		Schedule: "@every 60s",
-		Run: func(context.Context, *sdk.AppCtx) error {
-			return nil
+		Name:     "usage-sync",
+		Schedule: "@every 5m",
+		Run: func(_ context.Context, ctx *sdk.AppCtx) error {
+			if ctx == nil {
+				ctx = globalCtx
+			}
+			_, err := a.toolUsageSync(ctx, map[string]any{"actor": "worker"})
+			return err
 		},
 	}}
 }
@@ -131,6 +135,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "hosting_tenant_logs", Description: "Tail hosted tenant logs.", InputSchema: schemaObject(map[string]any{"tenant_id": strSchema(), "tail": intSchema()}, []string{"tenant_id"}), Handler: a.toolTenantLogs},
 		{Name: "hosting_tenant_health", Description: "Probe hosted tenant health.", InputSchema: tenantIDSchema(), Handler: a.toolTenantHealth},
 		{Name: "hosting_usage_get", Description: "Return usage totals.", InputSchema: schemaObject(map[string]any{"tenant_id": strSchema(), "customer_id": intSchema(), "feature_key": strSchema()}, nil), Handler: a.toolUsageGet},
+		{Name: "hosting_usage_sync", Description: "Sync generic runtime usage gauges from dependent apps and enforce hosting plan limits.", InputSchema: schemaObject(map[string]any{"tenant_id": strSchema(), "actor": strSchema()}, nil), Handler: a.toolUsageSync},
 		{Name: "hosting_subscription_sync", Description: "Apply a subscription status to a tenant.", InputSchema: schemaObject(map[string]any{"tenant_id": strSchema(), "subscription_status": strSchema(), "actor": strSchema()}, []string{"tenant_id", "subscription_status"}), Handler: a.toolSubscriptionSync},
 	}
 }
@@ -793,6 +798,138 @@ func (a *App) toolUsageGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	return map[string]any{"usage": out, "count": len(out)}, nil
 }
 
+func (a *App) toolUsageSync(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if ctx == nil || ctx.AppDB() == nil {
+		return nil, errors.New("hosting context unavailable")
+	}
+	var tenants []*Tenant
+	if tenantID := strArg(args, "tenant_id"); tenantID != "" {
+		t, err := requireTenant(ctx.AppDB(), tenantID)
+		if err != nil {
+			return nil, err
+		}
+		tenants = []*Tenant{t}
+	} else {
+		rows, err := dbTenantList(ctx.AppDB(), nil)
+		if err != nil {
+			return nil, err
+		}
+		tenants = rows
+	}
+	var synced []map[string]any
+	var errs []string
+	for _, tenant := range tenants {
+		if tenant.WorkloadID == "" || tenant.Status == StatusDeleted {
+			continue
+		}
+		out, err := a.syncTenantUsage(ctx, tenant, actor(args))
+		if err != nil {
+			errs = append(errs, tenant.ID+": "+err.Error())
+			_ = recordEvent(ctx.AppDB(), tenant.ID, "usage.sync_failed", actor(args), map[string]any{"error": err.Error()})
+			continue
+		}
+		synced = append(synced, out)
+	}
+	return map[string]any{"synced": synced, "count": len(synced), "errors": errs}, nil
+}
+
+func (a *App) syncTenantUsage(ctx *sdk.AppCtx, tenant *Tenant, actorName string) (map[string]any, error) {
+	if ctx.PlatformAPI() == nil {
+		return nil, errors.New("platform API unavailable")
+	}
+	projectID := ctx.CurrentProject()
+	usageResp, err := callAppMap(ctx, "containers", "containers_usage_get", withProject(projectID, map[string]any{"workload_id": tenant.WorkloadID}))
+	if err != nil {
+		return nil, err
+	}
+	metrics := arrayFromAny(usageResp["metrics"])
+	if len(metrics) == 0 {
+		metrics = arrayFromAny(mapFromAny(usageResp["usage"])["metrics"])
+	}
+	result := map[string]any{"tenant_id": tenant.ID, "workload_id": tenant.WorkloadID, "metrics": []any{}, "enforced": []any{}}
+	for _, raw := range metrics {
+		metric := mapFromAny(raw)
+		if strArg(metric, "kind") != "gauge" {
+			continue
+		}
+		if strArg(metric, "source") == "docker_volume" {
+			continue
+		}
+		feature := strArg(metric, "feature_key")
+		quantity := int64Arg(metric, "quantity")
+		if feature == "" {
+			continue
+		}
+		meta := map[string]any{
+			"source_app":  "containers",
+			"workload_id": tenant.WorkloadID,
+			"usage_kind":  "gauge",
+			"unit":        strArg(metric, "unit"),
+			"metric":      metric,
+		}
+		if err := recordUsageGauge(ctx.AppDB(), tenant.ID, tenant.CustomerID, feature, quantity, meta); err != nil {
+			return nil, err
+		}
+		limit, hasLimit, err := dbPlanLimitValue(ctx.AppDB(), tenant.PlanKey, feature)
+		if err != nil {
+			return nil, err
+		}
+		_ = a.syncEntitlementGauge(ctx, tenant, feature, quantity, limit, hasLimit, meta)
+		result["metrics"] = append(result["metrics"].([]any), map[string]any{"feature_key": feature, "quantity": quantity, "limit": limit, "has_limit": hasLimit})
+		if hasLimit && limit > 0 && quantity > limit {
+			enforced, err := a.enforceUsageLimit(ctx, tenant, feature, quantity, limit, actorName)
+			if err != nil {
+				return nil, err
+			}
+			result["enforced"] = append(result["enforced"].([]any), enforced)
+		}
+	}
+	return result, nil
+}
+
+func (a *App) syncEntitlementGauge(ctx *sdk.AppCtx, tenant *Tenant, feature string, quantity, limit int64, hasLimit bool, meta map[string]any) error {
+	if ctx.PlatformAPI() == nil {
+		return nil
+	}
+	projectID := ctx.CurrentProject()
+	if hasLimit {
+		_, _ = callAppMap(ctx, "entitlements", "entitlement_limits_set", withProject(projectID, map[string]any{
+			"subject_type": "tenant",
+			"subject_id":   tenant.ID,
+			"feature_key":  feature,
+			"limit_type":   "gauge",
+			"limit_value":  limit,
+			"metadata":     map[string]any{"source_app": "hosting", "plan_key": tenant.PlanKey},
+		}))
+	}
+	_, _ = callAppMap(ctx, "entitlements", "usage_record", withProject(projectID, map[string]any{
+		"subject_type": "tenant",
+		"subject_id":   tenant.ID,
+		"feature_key":  feature,
+		"quantity":     quantity,
+		"usage_kind":   "gauge",
+		"unit":         meta["unit"],
+		"metadata":     meta,
+	}))
+	return nil
+}
+
+func (a *App) enforceUsageLimit(ctx *sdk.AppCtx, tenant *Tenant, feature string, quantity, limit int64, actorName string) (map[string]any, error) {
+	payload := map[string]any{"feature_key": feature, "quantity": quantity, "limit": limit}
+	_ = recordEvent(ctx.AppDB(), tenant.ID, "usage.over_limit", actorName, payload)
+	if tenant.Status == StatusActive || tenant.Status == StatusProvisioning {
+		_, err := a.toolTenantSuspend(ctx, map[string]any{"tenant_id": tenant.ID, "actor": actorName})
+		if err != nil {
+			return nil, err
+		}
+		_, _ = dbTenantSetStatus(ctx.AppDB(), tenant.ID, StatusSuspended, fmt.Sprintf("usage over limit: %s %d > %d", feature, quantity, limit))
+		payload["action"] = "suspended"
+	} else {
+		payload["action"] = "recorded"
+	}
+	return payload, nil
+}
+
 func (a *App) toolSubscriptionSync(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	status := strings.ToLower(strings.TrimSpace(strArg(args, "subscription_status")))
 	switch status {
@@ -1419,13 +1556,13 @@ func seedPlans(db *sql.DB, defaultImage string) error {
 		{Key: "wordpress-starter", Name: "WordPress Starter", BillingMode: "paid", Image: "wordpress:php8.3-apache", CPU: 1, MemoryMB: 1024, StorageMB: 10240, ProductKey: "wordpress-single", SubscriptionRequired: true},
 	}
 	limits := map[string]map[string]int64{
-		"free":              {"hosting.tenants": 1, "hosting.custom_domains": 0, "containers.storage_mb": 512},
-		"starter":           {"hosting.tenants": 1, "hosting.custom_domains": 1, "containers.storage_mb": 10240},
-		"pro":               {"hosting.tenants": 5, "hosting.custom_domains": 10, "containers.storage_mb": 51200},
-		"docker-free":       {"hosting.tenants": 1, "hosting.custom_domains": 0, "containers.storage_mb": 512},
-		"docker-starter":    {"hosting.tenants": 3, "hosting.custom_domains": 1, "containers.storage_mb": 10240},
-		"wordpress-free":    {"hosting.tenants": 1, "hosting.custom_domains": 0, "containers.storage_mb": 1024},
-		"wordpress-starter": {"hosting.tenants": 3, "hosting.custom_domains": 1, "containers.storage_mb": 10240},
+		"free":              {"hosting.tenants": 1, "hosting.custom_domains": 0, "containers.storage_mb": 512, "containers.storage.bytes": 512 * 1024 * 1024},
+		"starter":           {"hosting.tenants": 1, "hosting.custom_domains": 1, "containers.storage_mb": 10240, "containers.storage.bytes": 10240 * 1024 * 1024},
+		"pro":               {"hosting.tenants": 5, "hosting.custom_domains": 10, "containers.storage_mb": 51200, "containers.storage.bytes": 51200 * 1024 * 1024},
+		"docker-free":       {"hosting.tenants": 1, "hosting.custom_domains": 0, "containers.storage_mb": 512, "containers.storage.bytes": 512 * 1024 * 1024},
+		"docker-starter":    {"hosting.tenants": 3, "hosting.custom_domains": 1, "containers.storage_mb": 10240, "containers.storage.bytes": 10240 * 1024 * 1024},
+		"wordpress-free":    {"hosting.tenants": 1, "hosting.custom_domains": 0, "containers.storage_mb": 1024, "containers.storage.bytes": 1024 * 1024 * 1024},
+		"wordpress-starter": {"hosting.tenants": 3, "hosting.custom_domains": 1, "containers.storage_mb": 10240, "containers.storage.bytes": 10240 * 1024 * 1024},
 	}
 	for _, p := range plans {
 		if _, err := db.Exec(`
@@ -1713,6 +1850,18 @@ func dbPlanLimits(db *sql.DB, planKey string) ([]PlanLimit, error) {
 	return out, rows.Err()
 }
 
+func dbPlanLimitValue(db *sql.DB, planKey, feature string) (int64, bool, error) {
+	var limit int64
+	err := db.QueryRow(`SELECT limit_value FROM hosting_plan_limits WHERE plan_key=? AND feature_key=?`, planKey, feature).Scan(&limit)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, false, nil
+	}
+	if err != nil {
+		return 0, false, err
+	}
+	return limit, true, nil
+}
+
 func enforceTenantLimit(db *sql.DB, customerID int64, planKey string) error {
 	var limit int64
 	err := db.QueryRow(`SELECT limit_value FROM hosting_plan_limits WHERE plan_key=? AND feature_key='hosting.tenants'`, planKey).Scan(&limit)
@@ -1880,6 +2029,24 @@ func recordUsage(db *sql.DB, tenantID string, customerID int64, feature string, 
 		return nil
 	}
 	return err
+}
+
+func recordUsageGauge(db *sql.DB, tenantID string, customerID int64, feature string, qty int64, meta any) error {
+	if feature == "" {
+		return errors.New("feature_key required")
+	}
+	idem := "gauge:" + tenantID + ":" + feature
+	res, err := db.Exec(`UPDATE hosting_usage_events
+		SET quantity=?, metadata_json=?, occurred_at=CURRENT_TIMESTAMP
+		WHERE customer_id=? AND idempotency_key=?`,
+		qty, jsonOrEmpty(meta, "{}"), customerID, idem)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n > 0 {
+		return nil
+	}
+	return recordUsage(db, tenantID, customerID, feature, qty, idem, meta)
 }
 
 func dbUsageTotals(db *sql.DB, args map[string]any) ([]UsageTotal, error) {
@@ -2174,6 +2341,34 @@ func mapFromAny(v any) map[string]any {
 		}
 	}
 	return out
+}
+
+func arrayFromAny(v any) []any {
+	switch x := v.(type) {
+	case []any:
+		return x
+	case []map[string]any:
+		out := make([]any, 0, len(x))
+		for _, item := range x {
+			out = append(out, item)
+		}
+		return out
+	case json.RawMessage:
+		var out []any
+		_ = json.Unmarshal(x, &out)
+		return out
+	case []byte:
+		var out []any
+		_ = json.Unmarshal(x, &out)
+		return out
+	case string:
+		if strings.TrimSpace(x) != "" {
+			var out []any
+			_ = json.Unmarshal([]byte(x), &out)
+			return out
+		}
+	}
+	return nil
 }
 
 func mergeMaps(base map[string]any, overlays ...map[string]any) map[string]any {

@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: hosting
 display_name: Hosting
-version: 1.6.0
+version: 1.7.0
 description: |
   Managed container-backed hosting control plane. Hosting provisions and
   operates hosted Apteva tenants on top of the generic Containers app,
@@ -84,6 +84,8 @@ provides:
       description: Probe and fetch hosted tenant health.
     - name: hosting_usage_get
       description: Return usage totals for a tenant or customer.
+    - name: hosting_usage_sync
+      description: Sync generic runtime usage gauges from dependent apps and enforce hosting plan limits.
     - name: hosting_subscription_sync
       description: Apply a subscription status to a tenant lifecycle state.
   ui_panels:

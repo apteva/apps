@@ -287,19 +287,24 @@ func hydrateWorkload(db *sql.DB, w *Workload) error {
 		}
 		w.Ports = append(w.Ports, p)
 	}
-	volRows, err := db.Query(`SELECT name, docker_volume_name, mount_path FROM containers_volumes WHERE workload_id=? ORDER BY id`, w.ID)
+	volRows, err := db.Query(`SELECT name, docker_volume_name, mount_path, size_bytes FROM containers_volumes WHERE workload_id=? ORDER BY id`, w.ID)
 	if err != nil {
 		return err
 	}
 	defer volRows.Close()
 	for volRows.Next() {
 		var v VolumeSpec
-		if err := volRows.Scan(&v.Name, &v.DockerVolumeName, &v.MountPath); err != nil {
+		if err := volRows.Scan(&v.Name, &v.DockerVolumeName, &v.MountPath, &v.SizeBytes); err != nil {
 			return err
 		}
 		w.Volumes = append(w.Volumes, v)
 	}
 	return nil
+}
+
+func updateVolumeSize(db *sql.DB, workloadID, volumeName string, sizeBytes int64) error {
+	_, err := execDB(db, "update volume size", `UPDATE containers_volumes SET size_bytes=? WHERE workload_id=? AND name=?`, sizeBytes, workloadID, volumeName)
+	return err
 }
 
 func deleteWorkloadRows(db *sql.DB, id string) error {

@@ -251,6 +251,43 @@ func TestHealthPollRetriesErrorWorkloads(t *testing.T) {
 	}
 }
 
+func TestWorkloadUsageMeasuresVolumeStorage(t *testing.T) {
+	db := testDB(t)
+	w := testWorkload("wrk_usage", "usage", StatusRunning)
+	if err := insertWorkload(db, w, nil, []VolumeSpec{
+		{Name: "data", DockerVolumeName: "containers-usage-data", MountPath: "/data"},
+		{Name: "cache", DockerVolumeName: "containers-usage-cache", MountPath: "/cache"},
+	}); err != nil {
+		t.Fatalf("insert workload: %v", err)
+	}
+	app := &App{backend: fakeDockerBackend{volumeUsage: map[string]int64{
+		"containers-usage-data":  512,
+		"containers-usage-cache": 128,
+	}}}
+	usage, err := app.workloadUsage(context.Background(), db, w.ID)
+	if err != nil {
+		t.Fatalf("usage: %v", err)
+	}
+	if usage.WorkloadID != w.ID || len(usage.Metrics) != 3 {
+		t.Fatalf("unexpected usage: %+v", usage)
+	}
+	total := usage.Metrics[0]
+	if total.FeatureKey != "containers.storage.bytes" || total.Kind != "gauge" || total.Quantity != 640 || total.Source != "docker_volume_total" {
+		t.Fatalf("unexpected total metric: %+v", total)
+	}
+	got, err := getWorkload(db, w.ID)
+	if err != nil {
+		t.Fatalf("get workload: %v", err)
+	}
+	sizes := map[string]int64{}
+	for _, v := range got.Volumes {
+		sizes[v.Name] = v.SizeBytes
+	}
+	if sizes["data"] != 512 || sizes["cache"] != 128 {
+		t.Fatalf("volume sizes not persisted: %+v", sizes)
+	}
+}
+
 func TestDockerErrorRedactsEnvValues(t *testing.T) {
 	err := formatDockerError([]string{"run", "-e", "SECRET=value", "--env", "TOKEN=abc", "--env=PASS=def", "nginx"}, "failed")
 	msg := err.Error()
@@ -281,6 +318,7 @@ type fakeDockerBackend struct {
 	removeVolumeErr  error
 	inspectState     *ContainerState
 	inspectErr       error
+	volumeUsage      map[string]int64
 }
 
 func (f fakeDockerBackend) Probe(context.Context) error { return nil }
@@ -304,6 +342,12 @@ func (f fakeDockerBackend) RemoveNetwork(context.Context, string) error {
 }
 func (f fakeDockerBackend) RemoveVolume(context.Context, string) error {
 	return f.removeVolumeErr
+}
+func (f fakeDockerBackend) VolumeUsage(_ context.Context, name string) (int64, error) {
+	if f.volumeUsage != nil {
+		return f.volumeUsage[name], nil
+	}
+	return 0, nil
 }
 func (f fakeDockerBackend) Logs(context.Context, string, int) (string, error) {
 	return "", nil

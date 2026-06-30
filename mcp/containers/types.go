@@ -62,11 +62,27 @@ type VolumeSpec struct {
 	Name             string `json:"name"`
 	DockerVolumeName string `json:"docker_volume_name,omitempty"`
 	MountPath        string `json:"mount_path"`
+	SizeBytes        int64  `json:"size_bytes,omitempty"`
 }
 
 type ResourceSpec struct {
 	MemoryMB int     `json:"memory_mb,omitempty"`
 	CPU      float64 `json:"cpu,omitempty"`
+}
+
+type UsageMetric struct {
+	FeatureKey string            `json:"feature_key"`
+	Quantity   int64             `json:"quantity"`
+	Unit       string            `json:"unit"`
+	Kind       string            `json:"kind"`
+	Source     string            `json:"source"`
+	Dimensions map[string]string `json:"dimensions,omitempty"`
+}
+
+type WorkloadUsage struct {
+	WorkloadID string        `json:"workload_id"`
+	Metrics    []UsageMetric `json:"metrics"`
+	UpdatedAt  string        `json:"updated_at"`
 }
 
 type RunSpec struct {

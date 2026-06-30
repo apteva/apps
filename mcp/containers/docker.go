@@ -27,6 +27,7 @@ type DockerBackend interface {
 	Remove(ctx context.Context, containerName string, force bool) error
 	RemoveNetwork(ctx context.Context, name string) error
 	RemoveVolume(ctx context.Context, name string) error
+	VolumeUsage(ctx context.Context, name string) (int64, error)
 	Logs(ctx context.Context, containerName string, tail int) (string, error)
 	Inspect(ctx context.Context, containerName string) (*ContainerState, error)
 }
@@ -130,6 +131,18 @@ func (d LocalDocker) RemoveNetwork(ctx context.Context, name string) error {
 func (d LocalDocker) RemoveVolume(ctx context.Context, name string) error {
 	_, err := docker(ctx, "volume", "rm", name)
 	return err
+}
+
+func (d LocalDocker) VolumeUsage(ctx context.Context, name string) (int64, error) {
+	out, err := docker(ctx, "run", "--rm", "-v", name+":/volume:ro", "alpine:3.20", "sh", "-c", "du -sk /volume | awk '{print $1 * 1024}'")
+	if err != nil {
+		return 0, err
+	}
+	n, err := strconv.ParseInt(strings.TrimSpace(out), 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("parse volume usage for %s: %w", name, err)
+	}
+	return n, nil
 }
 
 func (d LocalDocker) Logs(ctx context.Context, containerName string, tail int) (string, error) {
