@@ -390,7 +390,7 @@ function InvoicesTab({ projectId, apiCall }: { projectId: string; apiCall: ApiCa
     async () => {
       setStatus("Loading…");
       try {
-        const query: Record<string, string> = {};
+        const query: Record<string, string> = { sort: "due_date" };
         if (statusFilter) query.status = statusFilter;
         const range = invoiceDateRange(datePreset, customSince, customUntil);
         if (range.since) query.since = range.since;
@@ -604,7 +604,8 @@ function InvoicesTab({ projectId, apiCall }: { projectId: string; apiCall: ApiCa
                     </span>
                   </div>
                   <div className="text-[11px] text-text-dim mt-0.5">
-                    Created {fmtDate(inv.created_at)}
+                    {inv.due_date ? `Due ${fmtDate(inv.due_date)}` : "No due date"} - created{" "}
+                    {fmtDate(inv.created_at)}
                   </div>
                 </li>
               ))}

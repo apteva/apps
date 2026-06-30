@@ -806,3 +806,47 @@ func TestInvoicesSearch_FiltersByStatusAndCustomer(t *testing.T) {
 		t.Errorf("open invoices = %d, want 1", got)
 	}
 }
+
+func TestInvoicesSearch_SortsByDueDate(t *testing.T) {
+	ctx := newTestCtx(t)
+	app := &App{}
+	c := mustCustomer(t, ctx, "due@example.com", "Due Date Co")
+
+	create := func(label, dueDate string) *Invoice {
+		t.Helper()
+		args := map[string]any{
+			"customer_id": c.ID,
+			"line_items":  []any{line(label, 1, 100, 0)},
+		}
+		if dueDate != "" {
+			args["due_date"] = dueDate
+		}
+		out, err := app.toolInvoicesCreate(ctx, args)
+		if err != nil {
+			t.Fatalf("create %s invoice: %v", label, err)
+		}
+		return out.(map[string]any)["invoice"].(*Invoice)
+	}
+
+	undated := create("undated", "")
+	later := create("later", "2026-08-15")
+	earlier := create("earlier", "2026-07-01")
+
+	out, err := app.toolInvoicesSearch(ctx, map[string]any{
+		"customer_id": c.ID,
+		"sort":        "due_date",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := out.(map[string]any)["invoices"].([]*Invoice)
+	if len(got) != 3 {
+		t.Fatalf("invoice count = %d, want 3", len(got))
+	}
+	want := []int64{earlier.ID, later.ID, undated.ID}
+	for i, id := range want {
+		if got[i].ID != id {
+			t.Fatalf("invoice[%d] = %d, want %d (order: %d, %d, %d)", i, got[i].ID, id, got[0].ID, got[1].ID, got[2].ID)
+		}
+	}
+}

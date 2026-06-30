@@ -37,7 +37,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: billing
 display_name: Billing
-version: 0.8.9
+version: 0.8.10
 description: |
   Customers, invoices, and payments. Per-invoice provider — local for
   internal/wire/cash, stripe for card-payable hosted invoices.
@@ -374,7 +374,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "invoices_search",
-			Description: "Filter invoices. Args: customer_id, status (draft|open|paid|void|uncollectible), provider (local|stripe), currency, since (RFC3339), until (RFC3339), min_total_cents, max_total_cents, limit (default 50, max 200).",
+			Description: "Filter invoices. Args: customer_id, status (draft|open|paid|void|uncollectible), provider (local|stripe), currency, since (RFC3339), until (RFC3339), min_total_cents, max_total_cents, sort (due_date), limit (default 50, max 200).",
 			InputSchema: schemaObject(map[string]any{
 				"customer_id":     map[string]any{"type": "integer"},
 				"status":          map[string]any{"type": "string"},
@@ -384,6 +384,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"until":           map[string]any{"type": "string"},
 				"min_total_cents": map[string]any{"type": "integer"},
 				"max_total_cents": map[string]any{"type": "integer"},
+				"sort":            map[string]any{"type": "string"},
 				"limit":           map[string]any{"type": "integer"},
 			}, nil),
 			Handler: a.toolInvoicesSearch,
@@ -959,6 +960,7 @@ func (a *App) toolInvoicesSearch(ctx *sdk.AppCtx, args map[string]any) (any, err
 		until:         strArg(args, "until"),
 		minTotalCents: int64Arg(args, "min_total_cents"),
 		maxTotalCents: int64Arg(args, "max_total_cents"),
+		sort:          strArg(args, "sort"),
 		limit:         limit,
 	})
 	if err != nil {
@@ -1402,6 +1404,7 @@ func (a *App) handleHTTPInvoicesList(w http.ResponseWriter, r *http.Request) {
 		currency:   q.Get("currency"),
 		since:      q.Get("since"),
 		until:      q.Get("until"),
+		sort:       q.Get("sort"),
 		limit:      limit,
 	})
 	if err != nil {
@@ -1951,6 +1954,7 @@ type invoiceFilters struct {
 	customerID                   int64
 	status, provider, currency   string
 	since, until                 string
+	sort                         string
 	minTotalCents, maxTotalCents int64
 	limit                        int
 }
@@ -2001,6 +2005,10 @@ func dbInvoiceSearch(db *sql.DB, pid string, f invoiceFilters) ([]*Invoice, erro
 	for k, w := range where {
 		where[k] = "i." + w
 	}
+	orderBy := "i.created_at DESC"
+	if strings.EqualFold(f.sort, "due_date") {
+		orderBy = "CASE WHEN i.due_date IS NULL OR i.due_date = '' THEN 1 ELSE 0 END, i.due_date ASC, i.created_at DESC, i.id DESC"
+	}
 	rows, err := db.Query(
 		`SELECT i.id, i.project_id, i.customer_id, i.provider, i.number, i.status, i.currency,
 		        i.subtotal_cents, i.tax_cents, i.total_cents, i.amount_paid_cents,
@@ -2010,7 +2018,7 @@ func dbInvoiceSearch(db *sql.DB, pid string, f invoiceFilters) ([]*Invoice, erro
 		 FROM invoices i
 		 LEFT JOIN customers c ON c.id = i.customer_id AND c.deleted_at IS NULL
 		 WHERE `+strings.Join(where, " AND ")+`
-		 ORDER BY i.created_at DESC
+		 ORDER BY `+orderBy+`
 		 LIMIT ?`, args...)
 	if err != nil {
 		return nil, err
