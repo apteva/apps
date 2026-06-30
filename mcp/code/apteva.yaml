@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: code
 display_name: Apteva Code
-version: 0.5.15
+version: 0.5.16
 description: |
   Repositories — named, framework-tagged code workspaces scoped under
   Apteva projects. First-class editing tools modelled on Claude Code:
@@ -11,6 +11,8 @@ description: |
   ZIP import for repository initialization or overlay updates. Native
   repo issues track bugs, feature requests, tasks, comments, and code
   links for agents and humans.
+  v0.5.16 gives the project-wide Issues inbox the full panel width
+  and makes issue titles the primary row text with repo metadata below.
   v0.5.15 adds a project-wide Issues inbox in the UI so operators can
   scan and create issues across all repositories without selecting a repo first.
   v0.5.14 adds project-wide issue search for agents, defaults the

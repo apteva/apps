@@ -784,6 +784,7 @@ export default function CodePanel({ projectId, installId }: NativePanelProps) {
   return (
     <div className="h-full flex">
       {/* Repo list */}
+      {activeView === "code" && (
       <aside className="w-64 border-r border-border flex flex-col">
         <div className="p-3 border-b border-border space-y-2">
           <div className="grid grid-cols-2 gap-1">
@@ -881,6 +882,7 @@ export default function CodePanel({ projectId, installId }: NativePanelProps) {
           )}
         </div>
       </aside>
+      )}
 
       {activeView === "issues" ? (
         <main className="flex-1 min-w-0 overflow-hidden flex">
@@ -890,6 +892,7 @@ export default function CodePanel({ projectId, installId }: NativePanelProps) {
             api={api}
             currentPath={openFile?.path}
             currentRepoSlug={selectedSlug ?? undefined}
+            onShowCode={() => setActiveView("code")}
             onOpenPath={(repoSlug, path) => {
               setActiveView("code");
               if (selectedSlug !== repoSlug) {
@@ -977,6 +980,7 @@ export default function CodePanel({ projectId, installId }: NativePanelProps) {
               api={api}
               currentPath={openFile?.path}
               currentRepoSlug={selectedSlug}
+              onShowCode={() => setActiveView("code")}
               onOpenPath={(repoSlug, path) => {
                 setActiveView("code");
                 if (repoSlug === selectedSlug) {
@@ -2125,6 +2129,7 @@ function IssuesView({
   api,
   currentPath,
   currentRepoSlug,
+  onShowCode,
   onOpenPath,
 }: {
   repos: Repo[];
@@ -2132,6 +2137,7 @@ function IssuesView({
   api: <T,>(m: string, p: string, b?: unknown, e?: Record<string, string>) => Promise<T>;
   currentPath?: string;
   currentRepoSlug?: string;
+  onShowCode: () => void;
   onOpenPath: (repoSlug: string, path: string) => void;
 }) {
   const [issues, setIssues] = useState<CodeIssue[]>([]);
@@ -2254,8 +2260,20 @@ function IssuesView({
   };
 
   return (
-    <div className="flex-1 min-h-0 flex">
-      <aside className="w-80 border-r border-border flex flex-col min-h-0">
+    <div className="flex-1 min-h-0 flex flex-col">
+      <nav className="px-4 border-b border-border flex items-center gap-4 shrink-0">
+        <button
+          type="button"
+          onClick={onShowCode}
+          className="py-2 text-sm border-b-2 border-transparent text-text-muted hover:text-text"
+        >Code</button>
+        <button
+          type="button"
+          className="py-2 text-sm border-b-2 border-accent text-text"
+        >Issues</button>
+      </nav>
+      <div className="flex-1 min-h-0 flex">
+      <aside className="w-[34rem] border-r border-border flex flex-col min-h-0">
         <div className="p-3 border-b border-border space-y-2">
           <div className="flex items-center gap-2">
             <div className="text-sm font-semibold text-text flex-1">Issues</div>
@@ -2307,9 +2325,11 @@ function IssuesView({
                       selected === iss.id ? "bg-bg-input" : ""
                     }`}
                   >
-                    <div className="flex items-start gap-2">
-                      <span className="text-[11px] text-text-dim font-mono mt-0.5">{iss.repo_slug}#{iss.number}</span>
-                      <span className="text-sm text-text flex-1 truncate">{iss.title}</span>
+                    <div className="text-sm text-text font-medium truncate">
+                      {iss.title}
+                    </div>
+                    <div className="mt-0.5 text-[11px] text-text-dim font-mono truncate">
+                      {iss.repo_slug} #{iss.number}
                     </div>
                     <div className="mt-1 flex items-center gap-1 text-[10px] text-text-dim">
                       <IssuePill label={iss.type} tone={iss.type} />
@@ -2451,6 +2471,7 @@ function IssuesView({
           onPatch={patchIssue}
         />
       )}
+      </div>
     </div>
   );
 }
