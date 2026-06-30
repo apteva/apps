@@ -9,9 +9,11 @@ package main
 // error. New auth_orgs_* tools manage the partition itself.
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 
 	sdk "github.com/apteva/app-sdk"
 )
@@ -154,12 +156,17 @@ func (a *App) toolUsersCreate(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	// we're importing addresses we already trust. Pass false to force
 	// the verify-email flow on first login.
 	emailVerified := boolArg(args, "email_verified", true)
+	metadataJSON, err := metadataArg(args)
+	if err != nil {
+		return nil, err
+	}
 	user, resetSent, _, cErr := a.createUser(ctx, pid, org, createUserInput{
 		email:             stringArg(args, "email", ""),
 		password:          stringArg(args, "password", ""),
 		displayName:       stringArg(args, "display_name", ""),
 		emailVerified:     emailVerified,
 		sendPasswordReset: boolArg(args, "send_password_reset", false),
+		metadataJSON:      metadataJSON,
 	}, "", "agent", "mcp")
 	if cErr != nil {
 		return nil, cErr
@@ -185,6 +192,62 @@ func (a *App) toolUsersGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return nil, err
 	}
 	return map[string]any{"user": user}, nil
+}
+
+func (a *App) toolUsersUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	org, err := orgFromArgs(ctx, pid, args)
+	if err != nil {
+		return nil, err
+	}
+	uid, ok := intReq(args, "user_id")
+	if !ok {
+		uid, ok = intReq(args, "id")
+	}
+	if !ok {
+		return nil, errors.New("user_id required")
+	}
+	var displayName *string
+	if v, ok := args["display_name"].(string); ok {
+		displayName = &v
+	}
+	var emailVerified *bool
+	if v, ok := args["email_verified"].(bool); ok {
+		emailVerified = &v
+	}
+	var metadataPtr *string
+	if _, ok := args["metadata"]; ok {
+		metadataJSON, err := metadataArg(args)
+		if err != nil {
+			return nil, err
+		}
+		metadataPtr = &metadataJSON
+	}
+	if displayName == nil && emailVerified == nil && metadataPtr == nil {
+		return nil, errors.New("nothing to update")
+	}
+	if err := dbUpdateUserProfile(ctx.AppDB(), pid, org.ID, uid, displayName, emailVerified, metadataPtr); err != nil {
+		return nil, err
+	}
+	updated, err := dbGetUserByID(ctx.AppDB(), pid, org.ID, uid)
+	if err != nil {
+		return nil, err
+	}
+	changes := map[string]any{}
+	if displayName != nil {
+		changes["display_name"] = *displayName
+	}
+	if emailVerified != nil {
+		changes["email_verified"] = *emailVerified
+	}
+	if metadataPtr != nil {
+		changes["metadata"] = json.RawMessage(*metadataPtr)
+	}
+	dbAudit(ctx.AppDB(), pid, org.ID, &uid, "", "user_updated_admin", "", "agent", changes)
+	return map[string]any{"user": updated}, nil
 }
 
 func (a *App) toolUsersGetContext(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -628,6 +691,51 @@ func stringArg(args map[string]any, key, dflt string) string {
 		return v
 	}
 	return dflt
+}
+
+func metadataArg(args map[string]any) (string, error) {
+	raw, ok := args["metadata"]
+	if !ok || raw == nil {
+		return "{}", nil
+	}
+	return normalizeMetadataValue(raw)
+}
+
+func normalizeMetadataValue(raw any) (string, error) {
+	var b []byte
+	switch v := raw.(type) {
+	case json.RawMessage:
+		b = []byte(v)
+	case []byte:
+		b = v
+	case string:
+		if strings.TrimSpace(v) == "" {
+			return "{}", nil
+		}
+		b = []byte(v)
+	default:
+		var err error
+		b, err = json.Marshal(v)
+		if err != nil {
+			return "", fmt.Errorf("metadata must be a JSON object: %w", err)
+		}
+	}
+	b = []byte(strings.TrimSpace(string(b)))
+	if len(b) == 0 {
+		return "{}", nil
+	}
+	var obj map[string]any
+	if err := json.Unmarshal(b, &obj); err != nil {
+		return "", fmt.Errorf("metadata must be a valid JSON object: %w", err)
+	}
+	if obj == nil {
+		return "", errors.New("metadata must be a JSON object")
+	}
+	normalized, err := json.Marshal(obj)
+	if err != nil {
+		return "", err
+	}
+	return string(normalized), nil
 }
 
 func stringArrArg(args map[string]any, key string) []string {

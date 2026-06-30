@@ -25,6 +25,7 @@ interface User {
   email_verified_at?: string;
   display_name?: string;
   avatar_url?: string;
+  metadata?: Record<string, unknown>;
   status: string;
   has_password: boolean;
   mfa_enabled: boolean;
@@ -934,6 +935,7 @@ function CreateUserModal({ orgSlug, onClose, onCreated, setStatus }: {
   const [mode, setMode] = useState<"invite" | "password">("invite");
   const [password, setPassword] = useState("");
   const [emailVerified, setEmailVerified] = useState(true);
+  const [metadataDraft, setMetadataDraft] = useState("{}");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
 
@@ -954,6 +956,8 @@ function CreateUserModal({ orgSlug, onClose, onCreated, setStatus }: {
       if (mode === "password") {
         body.password = password;
       }
+      const metadata = parseMetadataDraft(metadataDraft);
+      body.metadata = metadata;
       const r = await fetch(`${API}/admin/users${orgQS(orgSlug)}`, {
         method: "POST",
         credentials: "same-origin",
@@ -1016,6 +1020,15 @@ function CreateUserModal({ orgSlug, onClose, onCreated, setStatus }: {
           <input type="checkbox" checked={emailVerified} onChange={(e) => setEmailVerified(e.target.checked)} />
           Mark email as already verified
         </label>
+        <Field label="Metadata" hint="JSON object for app-specific user state, such as onboarding status.">
+          <textarea
+            value={metadataDraft}
+            onChange={(e) => setMetadataDraft(e.target.value)}
+            rows={5}
+            spellCheck={false}
+            className="w-full bg-bg-input border border-border rounded px-2 py-1.5 text-sm text-text font-mono resize-y"
+          />
+        </Field>
         <FormError message={err} />
         <div className="flex justify-end gap-2 pt-2">
           <button type="button" onClick={onClose} className="px-3 py-1.5 text-sm text-text-muted hover:text-text">
@@ -1041,6 +1054,14 @@ function FormError({ message }: { message: string }) {
       {message}
     </div>
   );
+}
+
+function parseMetadataDraft(value: string): Record<string, unknown> {
+  const parsed = JSON.parse(value.trim() || "{}");
+  if (!parsed || Array.isArray(parsed) || typeof parsed !== "object") {
+    throw new Error("Metadata must be a JSON object");
+  }
+  return parsed as Record<string, unknown>;
 }
 
 function ModeButton({ active, onClick, children }: {
@@ -1080,6 +1101,8 @@ function UserDrawer({ userId, orgSlug, projectId, onClose, onChanged, setStatus 
   const [busy, setBusy] = useState(false);
   const [editingName, setEditingName] = useState(false);
   const [nameDraft, setNameDraft] = useState("");
+  const [editingMetadata, setEditingMetadata] = useState(false);
+  const [metadataDraft, setMetadataDraft] = useState("{}");
   const [passwordOpen, setPasswordOpen] = useState(false);
 
   const load = useCallback(async () => {
@@ -1123,6 +1146,16 @@ function UserDrawer({ userId, orgSlug, projectId, onClose, onChanged, setStatus 
     setEditingName(false);
   };
 
+  const saveMetadata = async () => {
+    try {
+      const metadata = parseMetadataDraft(metadataDraft);
+      await act("", { metadata }, "PATCH");
+      setEditingMetadata(false);
+    } catch (e) {
+      setStatus(`metadata: ${(e as Error).message}`);
+    }
+  };
+
   if (!data) {
     return (
       <aside style={{ width: 420 }} className="flex-shrink-0 p-4 text-text-dim text-sm">Loading…</aside>
@@ -1136,6 +1169,7 @@ function UserDrawer({ userId, orgSlug, projectId, onClose, onChanged, setStatus 
   const sessions = data.sessions ?? [];
   const auditLog = data.audit_log ?? [];
   const activeSessions = sessions.filter((s) => !s.revoked_at);
+  const metadataText = JSON.stringify(u.metadata || {}, null, 2);
   return (
     <aside style={{ width: 420 }} className="flex-shrink-0 overflow-auto">
       <header className="sticky top-0 bg-bg border-b border-border px-4 py-3 flex items-start gap-2">
@@ -1238,6 +1272,44 @@ function UserDrawer({ userId, orgSlug, projectId, onClose, onChanged, setStatus 
             <DetailRow label="Locked until" value={rfc(u.locked_until)} tone="warn" />
           )}
         </DetailGrid>
+
+        <section>
+          <div className="flex items-center justify-between mb-2">
+            <h4 className="text-text-dim text-xs uppercase tracking-wide">Metadata</h4>
+            {!editingMetadata && (
+              <button
+                onClick={() => { setMetadataDraft(metadataText); setEditingMetadata(true); }}
+                className="text-text-dim hover:text-text text-xs"
+              >Edit</button>
+            )}
+          </div>
+          {editingMetadata ? (
+            <div className="space-y-2">
+              <textarea
+                value={metadataDraft}
+                onChange={(e) => setMetadataDraft(e.target.value)}
+                rows={7}
+                spellCheck={false}
+                className="w-full bg-bg-input border border-border rounded px-2 py-1.5 text-sm text-text font-mono resize-y"
+              />
+              <div className="flex justify-end gap-2">
+                <button
+                  onClick={() => setEditingMetadata(false)}
+                  className="px-2 py-1 text-xs text-text-muted hover:text-text"
+                >Cancel</button>
+                <button
+                  onClick={saveMetadata}
+                  disabled={busy}
+                  className="px-2 py-1 text-xs bg-accent text-bg rounded font-medium disabled:opacity-50"
+                >Save metadata</button>
+              </div>
+            </div>
+          ) : (
+            <pre className="max-h-48 overflow-auto border border-border rounded bg-bg-input px-2 py-1.5 text-xs text-text font-mono whitespace-pre-wrap">
+              {metadataText}
+            </pre>
+          )}
+        </section>
 
         <section>
           <h4 className="text-text-dim text-xs uppercase tracking-wide mb-2">

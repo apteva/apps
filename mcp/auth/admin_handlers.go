@@ -252,11 +252,12 @@ func (a *App) handleAdminUsersCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx := getAppCtx(r)
 	var body struct {
-		Email             string `json:"email"`
-		Password          string `json:"password"`
-		DisplayName       string `json:"display_name"`
-		EmailVerified     *bool  `json:"email_verified"`
-		SendPasswordReset bool   `json:"send_password_reset"`
+		Email             string           `json:"email"`
+		Password          string           `json:"password"`
+		DisplayName       string           `json:"display_name"`
+		EmailVerified     *bool            `json:"email_verified"`
+		SendPasswordReset bool             `json:"send_password_reset"`
+		Metadata          *json.RawMessage `json:"metadata"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		httpErr(w, http.StatusBadRequest, "invalid json")
@@ -266,12 +267,18 @@ func (a *App) handleAdminUsersCreate(w http.ResponseWriter, r *http.Request) {
 	if body.EmailVerified != nil {
 		verified = *body.EmailVerified
 	}
+	metadataJSON, code, err := normalizeMetadataRaw(body.Metadata)
+	if err != nil {
+		httpErr(w, code, err.Error())
+		return
+	}
 	user, resetSent, code, err := a.createUser(ctx, pid, org, createUserInput{
 		email:             body.Email,
 		password:          body.Password,
 		displayName:       body.DisplayName,
 		emailVerified:     verified,
 		sendPasswordReset: body.SendPasswordReset,
+		metadataJSON:      metadataJSON,
 	}, r.RemoteAddr, r.UserAgent(), "admin_panel")
 	if err != nil {
 		httpErr(w, code, err.Error())
@@ -292,6 +299,7 @@ type createUserInput struct {
 	displayName       string
 	emailVerified     bool
 	sendPasswordReset bool // opt-in. NOT auto-triggered by an empty password.
+	metadataJSON      string
 }
 
 // createUser is the single create path behind both POST /admin/users
@@ -324,7 +332,11 @@ func (a *App) createUser(ctx *sdk.AppCtx, pid string, org *Organization, in crea
 		}
 		pwHash = h
 	}
-	uid, err := dbCreateUser(ctx.AppDB(), pid, org.ID, email, pwHash, in.displayName, in.emailVerified)
+	metadataJSON := strings.TrimSpace(in.metadataJSON)
+	if metadataJSON == "" {
+		metadataJSON = "{}"
+	}
+	uid, err := dbCreateUser(ctx.AppDB(), pid, org.ID, email, pwHash, in.displayName, in.emailVerified, metadataJSON)
 	if err != nil {
 		return nil, false, http.StatusInternalServerError, err
 	}
@@ -358,18 +370,28 @@ func (a *App) handleAdminUsersPatch(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		DisplayName   *string `json:"display_name"`
-		EmailVerified *bool   `json:"email_verified"`
+		DisplayName   *string          `json:"display_name"`
+		EmailVerified *bool            `json:"email_verified"`
+		Metadata      *json.RawMessage `json:"metadata"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		httpErr(w, http.StatusBadRequest, "invalid json")
 		return
 	}
-	if body.DisplayName == nil && body.EmailVerified == nil {
+	metadataJSON, code, err := normalizeMetadataRaw(body.Metadata)
+	if err != nil {
+		httpErr(w, code, err.Error())
+		return
+	}
+	var metadataPtr *string
+	if body.Metadata != nil {
+		metadataPtr = &metadataJSON
+	}
+	if body.DisplayName == nil && body.EmailVerified == nil && metadataPtr == nil {
 		httpErr(w, http.StatusBadRequest, "nothing to update")
 		return
 	}
-	if err := dbUpdateUserProfile(ctx.AppDB(), pid, org.ID, uid, body.DisplayName, body.EmailVerified); err != nil {
+	if err := dbUpdateUserProfile(ctx.AppDB(), pid, org.ID, uid, body.DisplayName, body.EmailVerified, metadataPtr); err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -385,8 +407,22 @@ func (a *App) handleAdminUsersPatch(w http.ResponseWriter, r *http.Request) {
 	if body.EmailVerified != nil {
 		changes["email_verified"] = *body.EmailVerified
 	}
+	if metadataPtr != nil {
+		changes["metadata"] = json.RawMessage(*metadataPtr)
+	}
 	dbAudit(ctx.AppDB(), pid, org.ID, &uid, "", "user_updated_admin", r.RemoteAddr, r.UserAgent(), changes)
 	httpJSON(w, map[string]any{"user": user})
+}
+
+func normalizeMetadataRaw(raw *json.RawMessage) (string, int, error) {
+	if raw == nil {
+		return "{}", 0, nil
+	}
+	metadataJSON, err := normalizeMetadataValue(*raw)
+	if err != nil {
+		return "", http.StatusBadRequest, err
+	}
+	return metadataJSON, 0, nil
 }
 
 func (a *App) handleAdminUsersSendPasswordReset(w http.ResponseWriter, r *http.Request) {

@@ -230,7 +230,7 @@ func performSignup(ctx *sdk.AppCtx, pid string, body signupRequest, mint session
 		return nil, http.StatusInternalServerError, err
 	}
 	verificationRequired := cfgBool(ctx, "email_verification_required", true)
-	uid, err := dbCreateUser(ctx.AppDB(), pid, org.ID, body.Email, pwHash, body.DisplayName, !verificationRequired)
+	uid, err := dbCreateUser(ctx.AppDB(), pid, org.ID, body.Email, pwHash, body.DisplayName, !verificationRequired, "{}")
 	if err != nil {
 		return nil, http.StatusInternalServerError, err
 	}

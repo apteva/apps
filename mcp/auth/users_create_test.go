@@ -88,6 +88,71 @@ func TestUsersCreate_WithPasswordCanLogin(t *testing.T) {
 	}
 }
 
+func TestUsersCreateAndUpdateMetadata(t *testing.T) {
+	ctx, _ := newAuthCtx(t)
+	app := &App{}
+
+	out, err := app.toolUsersCreate(ctx, map[string]any{
+		"organization_slug": "default",
+		"email":             "metadata@example.com",
+		"metadata": map[string]any{
+			"onboarding_status": "started",
+			"onboarding_step":   "profile",
+		},
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	user := out.(map[string]any)["user"].(*User)
+	assertUserMetadata(t, user, "onboarding_status", "started")
+
+	updatedOut, err := app.toolUsersUpdate(ctx, map[string]any{
+		"organization_slug": "default",
+		"user_id":           user.ID,
+		"metadata": map[string]any{
+			"onboarding_status": "completed",
+			"onboarding_step":   "done",
+		},
+	})
+	if err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	updated := updatedOut.(map[string]any)["user"].(*User)
+	assertUserMetadata(t, updated, "onboarding_status", "completed")
+
+	gotOut, err := app.toolUsersGet(ctx, map[string]any{
+		"organization_slug": "default",
+		"id":                user.ID,
+	})
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	got := gotOut.(map[string]any)["user"].(*User)
+	assertUserMetadata(t, got, "onboarding_step", "done")
+}
+
+func TestUsersUpdateRejectsNonObjectMetadata(t *testing.T) {
+	ctx, _ := newAuthCtx(t)
+	app := &App{}
+
+	out, err := app.toolUsersCreate(ctx, map[string]any{
+		"organization_slug": "default",
+		"email":             "bad-metadata@example.com",
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	user := out.(map[string]any)["user"].(*User)
+
+	if _, err := app.toolUsersUpdate(ctx, map[string]any{
+		"organization_slug": "default",
+		"user_id":           user.ID,
+		"metadata":          []any{"not", "an", "object"},
+	}); err == nil {
+		t.Fatal("expected non-object metadata to be rejected")
+	}
+}
+
 func TestUsersCreate_RequiresOrg(t *testing.T) {
 	ctx, _ := newAuthCtx(t)
 	app := &App{}
@@ -96,6 +161,17 @@ func TestUsersCreate_RequiresOrg(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("create without organization should error")
+	}
+}
+
+func assertUserMetadata(t *testing.T, user *User, key, want string) {
+	t.Helper()
+	var metadata map[string]any
+	if err := json.Unmarshal(user.Metadata, &metadata); err != nil {
+		t.Fatalf("metadata is not valid JSON: %v raw=%s", err, string(user.Metadata))
+	}
+	if got, _ := metadata[key].(string); got != want {
+		t.Fatalf("metadata[%s] = %q, want %q (raw=%s)", key, got, want, string(user.Metadata))
 	}
 }
 

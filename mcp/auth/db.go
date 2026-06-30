@@ -152,7 +152,7 @@ func dbDefaultOrgID(db *sql.DB, projectID string) int64 {
 func dbGetUserByID(db *sql.DB, projectID string, orgID, id int64) (*User, error) {
 	row := db.QueryRow(`
 		SELECT id, IFNULL(organization_id,0), email, IFNULL(email_verified_at,''), IFNULL(display_name,''), IFNULL(avatar_url,''),
-		       status, password_hash IS NOT NULL,
+		       COALESCE(metadata_json, '{}'), status, password_hash IS NOT NULL,
 		       IFNULL(last_login_at,''), IFNULL(locked_until,''),
 		       IFNULL(created_at,''), IFNULL(updated_at,'')
 		FROM users WHERE project_id = ? AND organization_id = ? AND id = ?`,
@@ -163,7 +163,7 @@ func dbGetUserByID(db *sql.DB, projectID string, orgID, id int64) (*User, error)
 func dbGetUserByEmail(db *sql.DB, projectID string, orgID int64, email string) (*User, error) {
 	row := db.QueryRow(`
 		SELECT id, IFNULL(organization_id,0), email, IFNULL(email_verified_at,''), IFNULL(display_name,''), IFNULL(avatar_url,''),
-		       status, password_hash IS NOT NULL,
+		       COALESCE(metadata_json, '{}'), status, password_hash IS NOT NULL,
 		       IFNULL(last_login_at,''), IFNULL(locked_until,''),
 		       IFNULL(created_at,''), IFNULL(updated_at,'')
 		FROM users WHERE project_id = ? AND organization_id = ? AND email = ?`,
@@ -174,10 +174,15 @@ func dbGetUserByEmail(db *sql.DB, projectID string, orgID int64, email string) (
 func scanUser(db *sql.DB, projectID string, row *sql.Row) (*User, error) {
 	var u User
 	var hasPw int
+	var metadata string
 	if err := row.Scan(&u.ID, &u.OrganizationID, &u.Email, &u.EmailVerifiedAt, &u.DisplayName, &u.AvatarURL,
-		&u.Status, &hasPw, &u.LastLoginAt, &u.LockedUntil, &u.CreatedAt, &u.UpdatedAt); err != nil {
+		&metadata, &u.Status, &hasPw, &u.LastLoginAt, &u.LockedUntil, &u.CreatedAt, &u.UpdatedAt); err != nil {
 		return nil, err
 	}
+	if strings.TrimSpace(metadata) == "" {
+		metadata = "{}"
+	}
+	u.Metadata = json.RawMessage(metadata)
 	u.HasPassword = hasPw == 1
 	u.ProjectID = projectID
 	mfa, err := dbUserHasConfirmedMFA(db, u.ID)
@@ -196,7 +201,7 @@ func dbUserHasConfirmedMFA(db *sql.DB, userID int64) (bool, error) {
 	return n > 0, err
 }
 
-func dbCreateUser(db *sql.DB, projectID string, orgID int64, email, passwordHash, displayName string, emailVerified bool) (int64, error) {
+func dbCreateUser(db *sql.DB, projectID string, orgID int64, email, passwordHash, displayName string, emailVerified bool, metadataJSON string) (int64, error) {
 	now := time.Now().UTC().Format(time.RFC3339)
 	verifiedAt := sql.NullString{}
 	if emailVerified {
@@ -206,10 +211,13 @@ func dbCreateUser(db *sql.DB, projectID string, orgID int64, email, passwordHash
 	if passwordHash != "" {
 		pw = sql.NullString{Valid: true, String: passwordHash}
 	}
+	if strings.TrimSpace(metadataJSON) == "" {
+		metadataJSON = "{}"
+	}
 	res, err := db.Exec(`
-		INSERT INTO users(project_id, organization_id, email, password_hash, display_name, email_verified_at, status, created_at, updated_at)
-		VALUES(?, ?, ?, ?, ?, ?, 'active', ?, ?)`,
-		projectID, orgID, strings.ToLower(strings.TrimSpace(email)), pw, displayName, verifiedAt, now, now)
+		INSERT INTO users(project_id, organization_id, email, password_hash, display_name, email_verified_at, metadata_json, status, created_at, updated_at)
+		VALUES(?, ?, ?, ?, ?, ?, ?, 'active', ?, ?)`,
+		projectID, orgID, strings.ToLower(strings.TrimSpace(email)), pw, displayName, verifiedAt, metadataJSON, now, now)
 	if err != nil {
 		return 0, err
 	}
@@ -268,7 +276,7 @@ func dbSetUserStatus(db *sql.DB, projectID string, orgID, userID int64, status s
 }
 
 func dbUpdateUserProfile(db *sql.DB, projectID string, orgID, userID int64,
-	displayName *string, markEmailVerified *bool) error {
+	displayName *string, markEmailVerified *bool, metadataJSON *string) error {
 	sets := []string{"updated_at = ?"}
 	args := []any{time.Now().UTC().Format(time.RFC3339)}
 	if displayName != nil {
@@ -282,6 +290,10 @@ func dbUpdateUserProfile(db *sql.DB, projectID string, orgID, userID int64,
 		} else {
 			args = append(args, sql.NullString{})
 		}
+	}
+	if metadataJSON != nil {
+		sets = append(sets, "metadata_json = ?")
+		args = append(args, *metadataJSON)
 	}
 	if len(sets) == 1 {
 		return nil
@@ -317,7 +329,7 @@ func dbSearchUsers(db *sql.DB, projectID string, orgID int64, q, status, created
 		args = append(args, createdAfter)
 	}
 	args = append(args, limit)
-	q1 := "SELECT id, IFNULL(organization_id,0), email, IFNULL(email_verified_at,''), IFNULL(display_name,''), IFNULL(avatar_url,''), status, password_hash IS NOT NULL, IFNULL(last_login_at,''), IFNULL(locked_until,''), IFNULL(created_at,''), IFNULL(updated_at,'') FROM users WHERE " + strings.Join(conds, " AND ") + " ORDER BY created_at DESC LIMIT ?"
+	q1 := "SELECT id, IFNULL(organization_id,0), email, IFNULL(email_verified_at,''), IFNULL(display_name,''), IFNULL(avatar_url,''), COALESCE(metadata_json, '{}'), status, password_hash IS NOT NULL, IFNULL(last_login_at,''), IFNULL(locked_until,''), IFNULL(created_at,''), IFNULL(updated_at,'') FROM users WHERE " + strings.Join(conds, " AND ") + " ORDER BY created_at DESC LIMIT ?"
 	rows, err := db.Query(q1, args...)
 	if err != nil {
 		return nil, err
@@ -330,11 +342,16 @@ func dbSearchUsers(db *sql.DB, projectID string, orgID int64, q, status, created
 	for rows.Next() {
 		var u User
 		var hasPw int
+		var metadata string
 		if err := rows.Scan(&u.ID, &u.OrganizationID, &u.Email, &u.EmailVerifiedAt, &u.DisplayName, &u.AvatarURL,
-			&u.Status, &hasPw, &u.LastLoginAt, &u.LockedUntil, &u.CreatedAt, &u.UpdatedAt); err != nil {
+			&metadata, &u.Status, &hasPw, &u.LastLoginAt, &u.LockedUntil, &u.CreatedAt, &u.UpdatedAt); err != nil {
 			rows.Close()
 			return nil, err
 		}
+		if strings.TrimSpace(metadata) == "" {
+			metadata = "{}"
+		}
+		u.Metadata = json.RawMessage(metadata)
 		u.HasPassword = hasPw == 1
 		u.ProjectID = projectID
 		out = append(out, u)
@@ -775,11 +792,11 @@ func dbAuditSearch(db *sql.DB, projectID string, orgID, userID int64, event, sin
 // ─── Stats ───────────────────────────────────────────────────────────
 
 type Stats struct {
-	Active     int `json:"active"`
-	Disabled   int `json:"disabled"`
-	Locked     int `json:"locked"`
-	Signups7d  int `json:"signups_7d"`
-	Logins24h  int `json:"logins_24h"`
+	Active    int `json:"active"`
+	Disabled  int `json:"disabled"`
+	Locked    int `json:"locked"`
+	Signups7d int `json:"signups_7d"`
+	Logins24h int `json:"logins_24h"`
 }
 
 // dbStats — orgID = 0 = project-wide rollup (Overview tab); orgID > 0

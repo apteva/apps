@@ -44,7 +44,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: auth
 display_name: Auth
-version: 0.6.1
+version: 0.7.0
 description: |
   Identity layer for Apteva-deployed SaaS, partitioned by Organization
   (row-level multi-tenancy a la Auth0/Clerk/Stytch B2B). One install
@@ -78,7 +78,9 @@ provides:
     - name: auth_users_search
       description: Filtered user search; org-scoped or project-wide.
     - name: auth_users_create
-      description: ADMIN — provision a user (requires org). send_password_reset defaults false. No session minted. For visitor signup use auth_public_signup.
+      description: ADMIN — provision a user (requires org). send_password_reset defaults false. No session minted. Supports metadata JSON. For visitor signup use auth_public_signup.
+    - name: auth_users_update
+      description: ADMIN — update display_name, email_verified, or metadata JSON for one user.
     - name: auth_public_signup
       description: Visitor-facing signup, equivalent to POST /signup. Resolves org from client_id, mints tokens or sends verify email.
     - name: auth_users_get
@@ -300,8 +302,20 @@ func (a *App) MCPTools() []sdk.Tool {
 				"display_name":        map[string]any{"type": "string"},
 				"email_verified":      map[string]any{"type": "boolean"},
 				"send_password_reset": map[string]any{"type": "boolean"},
+				"metadata":            map[string]any{"type": "object"},
 			}), []string{"email"}),
 			Handler: a.toolUsersCreate,
+		},
+		{
+			Name:        "auth_users_update",
+			Description: "Update a user. Requires organization_id/slug + user_id. Optional: display_name, email_verified, metadata (JSON object).",
+			InputSchema: schemaObject(merge(map[string]any{
+				"user_id":        map[string]any{"type": "integer"},
+				"display_name":   map[string]any{"type": "string"},
+				"email_verified": map[string]any{"type": "boolean"},
+				"metadata":       map[string]any{"type": "object"},
+			}), []string{"user_id"}),
+			Handler: a.toolUsersUpdate,
 		},
 		{
 			Name:        "auth_public_signup",

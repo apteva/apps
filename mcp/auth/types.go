@@ -1,5 +1,7 @@
 package main
 
+import "encoding/json"
+
 // Domain types — JSON shapes returned by HTTP and MCP. Kept thin: each
 // row in the schema gets one struct, with omitempty everywhere that
 // nullability is meaningful so JSON output doesn't leak null padding.
@@ -9,52 +11,53 @@ package main
 // signing keys, audit log, MFA factors. Slug is the URL/CLI-facing
 // identifier; ID is internal.
 type Organization struct {
-	ID               int64  `json:"id"`
-	ProjectID        string `json:"project_id,omitempty"`
-	Slug             string `json:"slug"`
-	Name             string `json:"name"`
-	Color            string `json:"color,omitempty"`
-	Status           string `json:"status"`                       // active | archived
-	PolicyOverrides  string `json:"policy_overrides,omitempty"`   // raw JSON; nil = inherit install defaults
-	CreatedAt        string `json:"created_at,omitempty"`
-	UpdatedAt        string `json:"updated_at,omitempty"`
-}
-
-type User struct {
 	ID              int64  `json:"id"`
 	ProjectID       string `json:"project_id,omitempty"`
-	OrganizationID  int64  `json:"organization_id"`
-	Email           string `json:"email"`
-	EmailVerifiedAt string `json:"email_verified_at,omitempty"`
-	DisplayName     string `json:"display_name,omitempty"`
-	AvatarURL       string `json:"avatar_url,omitempty"`
-	Status          string `json:"status"`
-	HasPassword     bool   `json:"has_password"`
-	MFAEnabled      bool   `json:"mfa_enabled"`
-	LastLoginAt     string `json:"last_login_at,omitempty"`
-	LockedUntil     string `json:"locked_until,omitempty"`
+	Slug            string `json:"slug"`
+	Name            string `json:"name"`
+	Color           string `json:"color,omitempty"`
+	Status          string `json:"status"`                     // active | archived
+	PolicyOverrides string `json:"policy_overrides,omitempty"` // raw JSON; nil = inherit install defaults
 	CreatedAt       string `json:"created_at,omitempty"`
 	UpdatedAt       string `json:"updated_at,omitempty"`
 }
 
+type User struct {
+	ID              int64           `json:"id"`
+	ProjectID       string          `json:"project_id,omitempty"`
+	OrganizationID  int64           `json:"organization_id"`
+	Email           string          `json:"email"`
+	EmailVerifiedAt string          `json:"email_verified_at,omitempty"`
+	DisplayName     string          `json:"display_name,omitempty"`
+	AvatarURL       string          `json:"avatar_url,omitempty"`
+	Metadata        json.RawMessage `json:"metadata,omitempty"`
+	Status          string          `json:"status"`
+	HasPassword     bool            `json:"has_password"`
+	MFAEnabled      bool            `json:"mfa_enabled"`
+	LastLoginAt     string          `json:"last_login_at,omitempty"`
+	LockedUntil     string          `json:"locked_until,omitempty"`
+	CreatedAt       string          `json:"created_at,omitempty"`
+	UpdatedAt       string          `json:"updated_at,omitempty"`
+}
+
 type Client struct {
-	ID                       int64    `json:"id"`
-	OrganizationID           int64    `json:"organization_id"`
-	ClientID                 string   `json:"client_id"`
-	Name                     string   `json:"name"`
-	Type                     string   `json:"type"`
-	RedirectURIs             []string `json:"redirect_uris"`
-	AllowedOrigins           []string `json:"allowed_origins"`
-	AllowedGrantTypes        []string `json:"allowed_grant_types"`
-	TokenEndpointAuthMethod  string   `json:"token_endpoint_auth_method"`
-	RequirePKCE              bool     `json:"require_pkce"`
-	RequireMFA               bool     `json:"require_mfa"`
-	JWTAudience              string   `json:"jwt_audience,omitempty"`
-	AccessTokenTTLSeconds    int      `json:"access_token_ttl_seconds,omitempty"`
-	RefreshTokenTTLSeconds   int      `json:"refresh_token_ttl_seconds,omitempty"`
-	RefreshRotation          bool     `json:"refresh_rotation"`
-	DisabledAt               string   `json:"disabled_at,omitempty"`
-	CreatedAt                string   `json:"created_at,omitempty"`
+	ID                      int64    `json:"id"`
+	OrganizationID          int64    `json:"organization_id"`
+	ClientID                string   `json:"client_id"`
+	Name                    string   `json:"name"`
+	Type                    string   `json:"type"`
+	RedirectURIs            []string `json:"redirect_uris"`
+	AllowedOrigins          []string `json:"allowed_origins"`
+	AllowedGrantTypes       []string `json:"allowed_grant_types"`
+	TokenEndpointAuthMethod string   `json:"token_endpoint_auth_method"`
+	RequirePKCE             bool     `json:"require_pkce"`
+	RequireMFA              bool     `json:"require_mfa"`
+	JWTAudience             string   `json:"jwt_audience,omitempty"`
+	AccessTokenTTLSeconds   int      `json:"access_token_ttl_seconds,omitempty"`
+	RefreshTokenTTLSeconds  int      `json:"refresh_token_ttl_seconds,omitempty"`
+	RefreshRotation         bool     `json:"refresh_rotation"`
+	DisabledAt              string   `json:"disabled_at,omitempty"`
+	CreatedAt               string   `json:"created_at,omitempty"`
 }
 
 type Session struct {
