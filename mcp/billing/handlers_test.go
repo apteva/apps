@@ -843,7 +843,7 @@ func TestInvoicesSearch_SortsByDueDate(t *testing.T) {
 	if len(got) != 3 {
 		t.Fatalf("invoice count = %d, want 3", len(got))
 	}
-	want := []int64{earlier.ID, later.ID, undated.ID}
+	want := []int64{later.ID, earlier.ID, undated.ID}
 	for i, id := range want {
 		if got[i].ID != id {
 			t.Fatalf("invoice[%d] = %d, want %d (order: %d, %d, %d)", i, got[i].ID, id, got[0].ID, got[1].ID, got[2].ID)

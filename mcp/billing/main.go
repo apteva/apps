@@ -37,7 +37,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: billing
 display_name: Billing
-version: 0.8.10
+version: 0.8.11
 description: |
   Customers, invoices, and payments. Per-invoice provider — local for
   internal/wire/cash, stripe for card-payable hosted invoices.
@@ -2007,7 +2007,7 @@ func dbInvoiceSearch(db *sql.DB, pid string, f invoiceFilters) ([]*Invoice, erro
 	}
 	orderBy := "i.created_at DESC"
 	if strings.EqualFold(f.sort, "due_date") {
-		orderBy = "CASE WHEN i.due_date IS NULL OR i.due_date = '' THEN 1 ELSE 0 END, i.due_date ASC, i.created_at DESC, i.id DESC"
+		orderBy = "CASE WHEN i.due_date IS NULL OR i.due_date = '' THEN 1 ELSE 0 END, i.due_date DESC, i.created_at DESC, i.id DESC"
 	}
 	rows, err := db.Query(
 		`SELECT i.id, i.project_id, i.customer_id, i.provider, i.number, i.status, i.currency,
