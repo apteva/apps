@@ -274,8 +274,8 @@ func TestEmbeddedManifest_Valid(t *testing.T) {
 	if m.Name != "hosting" {
 		t.Errorf("manifest.Name=%q, want hosting", m.Name)
 	}
-	if m.Version != "1.7.0" {
-		t.Errorf("manifest.Version=%q, want 1.7.0", m.Version)
+	if m.Version != "1.7.1" {
+		t.Errorf("manifest.Version=%q, want 1.7.1", m.Version)
 	}
 	if m.DB == nil {
 		t.Fatal("manifest.DB missing")

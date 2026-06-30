@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 interface NativePanelProps {
   projectId: string;
@@ -88,10 +88,76 @@ function gb(mb: number): string {
   return `${Math.round((mb / 1024) * 10) / 10} GB`;
 }
 
+function featureLabel(feature: string): string {
+  switch (feature) {
+    case "containers.storage.bytes":
+      return "Container storage";
+    case "containers.storage_mb":
+      return "Container storage";
+    case "hosting.tenants":
+      return "Hosted tenants";
+    case "hosting.seats":
+      return "Seats";
+    default:
+      return feature.replace(/\./g, " ");
+  }
+}
+
+function formatQuantity(feature: string, value: number): string {
+  if (!Number.isFinite(value)) return "0";
+  if (feature.endsWith(".bytes")) return formatBytes(value);
+  if (feature.endsWith("_mb")) return `${new Intl.NumberFormat().format(value)} MB`;
+  return new Intl.NumberFormat().format(value);
+}
+
+function formatBytes(value: number): string {
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  let n = Math.max(0, value || 0);
+  let i = 0;
+  while (n >= 1024 && i < units.length - 1) {
+    n /= 1024;
+    i++;
+  }
+  const digits = n >= 10 || i === 0 ? 0 : 1;
+  return `${n.toFixed(digits)} ${units[i]}`;
+}
+
+function limitTone(percent: number, over: boolean): string {
+  if (over) return "bg-red";
+  if (percent >= 85) return "bg-warn";
+  return "bg-accent";
+}
+
 async function getJSON<T>(path: string): Promise<T> {
   const res = await fetch(`${API}${path}`, { credentials: "same-origin" });
   if (!res.ok) throw new Error(`${res.status}: ${await res.text().catch(() => "")}`);
   return (await res.json()) as T;
+}
+
+function eventNameFromPayload(payload: unknown): string {
+  if (!payload || typeof payload !== "object") return "";
+  const obj = payload as Record<string, unknown>;
+  const event = obj.event;
+  if (typeof obj.name === "string") return obj.name;
+  if (typeof obj.event_name === "string") return obj.event_name;
+  if (typeof obj.type === "string" && obj.type.includes(".")) return obj.type;
+  if (typeof event === "string") return event;
+  if (event && typeof event === "object") return eventNameFromPayload(event);
+  return "";
+}
+
+function isRelevantHostEvent(payload: unknown): boolean {
+  if (!payload || typeof payload !== "object") return false;
+  const obj = payload as Record<string, unknown>;
+  const app = String(obj.app || obj.app_name || obj.source_app || "");
+  const eventName = eventNameFromPayload(payload);
+  if (app === "hosting" || app === "containers" || app === "subscriptions" || app === "billing") return true;
+  return (
+    eventName.startsWith("hosting.") ||
+    eventName.startsWith("containers.") ||
+    eventName.startsWith("subscription.") ||
+    eventName.startsWith("invoice.")
+  );
 }
 
 export default function HostingPanel(_props: NativePanelProps) {
@@ -104,6 +170,8 @@ export default function HostingPanel(_props: NativePanelProps) {
   const [error, setError] = useState("");
   const [logs, setLogs] = useState<{ tenant: string; body: string } | null>(null);
   const [createdCustomer, setCreatedCustomer] = useState<Customer | null>(null);
+  const [lastUsageSync, setLastUsageSync] = useState("");
+  const eventReloadTimer = useRef<number | null>(null);
   const [form, setForm] = useState({
     owner_email: "",
     customer_name: "",
@@ -120,6 +188,30 @@ export default function HostingPanel(_props: NativePanelProps) {
     () => plans.find((p) => p.key === form.plan_key) || plans[0] || null,
     [plans, form.plan_key],
   );
+
+  const tenantPlan = useMemo(
+    () => plans.find((p) => p.key === selected?.plan_key) || null,
+    [plans, selected?.plan_key],
+  );
+
+  const usageRows = useMemo(() => {
+    const limits = new Map((tenantPlan?.limits || []).map((l) => [l.feature_key, l]));
+    return usage.map((u) => {
+      const limit = limits.get(u.feature_key);
+      const limitValue = limit?.limit_value || 0;
+      const percent = limitValue > 0 ? Math.min(100, Math.round((u.quantity / limitValue) * 100)) : 0;
+      const over = limitValue > 0 && u.quantity > limitValue;
+      return {
+        ...u,
+        label: featureLabel(u.feature_key),
+        formattedQuantity: formatQuantity(u.feature_key, u.quantity),
+        formattedLimit: limitValue > 0 ? formatQuantity(u.feature_key, limitValue) : "No limit",
+        percent,
+        over,
+        reset: limit?.reset_interval || "none",
+      };
+    });
+  }, [tenantPlan?.limits, usage]);
 
   const load = useCallback(async () => {
     try {
@@ -154,6 +246,10 @@ export default function HostingPanel(_props: NativePanelProps) {
     }
   }, []);
 
+  const refreshSelected = useCallback(async (tenant: Tenant | null = selected) => {
+    await Promise.all([load(), loadUsage(tenant)]);
+  }, [load, loadUsage, selected]);
+
   useEffect(() => {
     load();
     const timer = window.setInterval(load, 8000);
@@ -163,6 +259,29 @@ export default function HostingPanel(_props: NativePanelProps) {
   useEffect(() => {
     loadUsage(selected);
   }, [selected, loadUsage]);
+
+  useEffect(() => {
+    const scheduleReload = (payload: unknown) => {
+      if (!isRelevantHostEvent(payload)) return;
+      if (eventReloadTimer.current != null) window.clearTimeout(eventReloadTimer.current);
+      eventReloadTimer.current = window.setTimeout(() => {
+        refreshSelected().catch(() => undefined);
+      }, 150);
+    };
+    const onMessage = (event: MessageEvent) => scheduleReload(event.data);
+    const onCustom = (event: Event) => scheduleReload((event as CustomEvent).detail);
+    window.addEventListener("message", onMessage);
+    for (const name of ["apteva:event", "apteva:app-event", "app:event", "app-event", "hosting:event"]) {
+      window.addEventListener(name, onCustom);
+    }
+    return () => {
+      window.removeEventListener("message", onMessage);
+      for (const name of ["apteva:event", "apteva:app-event", "app:event", "app-event", "hosting:event"]) {
+        window.removeEventListener(name, onCustom);
+      }
+      if (eventReloadTimer.current != null) window.clearTimeout(eventReloadTimer.current);
+    };
+  }, [refreshSelected]);
 
   const callTool = useCallback(async <T,>(tool: string, args: Record<string, unknown>): Promise<T> => {
     const res = await fetch(`${API}/mcp`, {
@@ -233,6 +352,28 @@ export default function HostingPanel(_props: NativePanelProps) {
       setBusy("");
     }
   }, [callTool, load]);
+
+  const syncUsage = useCallback(async (tenant: Tenant) => {
+    setBusy(`usage:${tenant.id}`);
+    setError("");
+    try {
+      const out = await callTool<{ count: number; errors?: string[] }>("hosting_usage_sync", {
+        tenant_id: tenant.id,
+        actor: "ui",
+      });
+      await refreshSelected(tenant);
+      setLastUsageSync(new Date().toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", second: "2-digit" }));
+      if (out.errors?.length) {
+        setError(out.errors.join("; "));
+      } else {
+        setStatus(`Usage synced for ${tenant.slug}`);
+      }
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy("");
+    }
+  }, [callTool, refreshSelected]);
 
   const showLogs = useCallback(async (tenant: Tenant) => {
     setBusy(`logs:${tenant.id}`);
@@ -362,6 +503,7 @@ export default function HostingPanel(_props: NativePanelProps) {
               <div className="flex items-center gap-2 flex-wrap justify-end">
                 <Action label="Health" busy={busy === `health:${selected.id}`} onClick={() => tenantAction(selected, "health")} />
                 <Action label="Logs" busy={busy === `logs:${selected.id}`} onClick={() => showLogs(selected)} />
+                <Action label="Sync usage" busy={busy === `usage:${selected.id}`} onClick={() => syncUsage(selected)} />
                 <Action label="Restart" busy={busy === `restart:${selected.id}`} onClick={() => tenantAction(selected, "restart")} />
                 {selected.status === "active" ? (
                   <Action label="Suspend" busy={busy === `suspend:${selected.id}`} onClick={() => tenantAction(selected, "suspend")} />
@@ -381,33 +523,71 @@ export default function HostingPanel(_props: NativePanelProps) {
               <Metric label="Updated" value={fmtDate(selected.updated_at)} />
             </section>
 
-            <section className="p-4 grid grid-cols-[1fr_360px] gap-4 min-h-0 flex-1">
-              <div className="border border-border rounded-md overflow-hidden min-h-0 flex flex-col">
-                <div className="px-3 py-2 border-b border-border text-xs uppercase text-text-dim font-semibold">Usage</div>
-                <div className="overflow-auto">
-                  {usage.length === 0 ? (
-                    <div className="p-4 text-sm text-text-dim">No usage recorded yet.</div>
-                  ) : (
-                    usage.map((u) => (
-                      <div key={`${u.customer_id}-${u.tenant_id}-${u.feature_key}`} className="px-3 py-2 border-b border-border flex items-center gap-3">
-                        <span className="font-mono text-sm flex-1">{u.feature_key}</span>
-                        <span className="font-mono text-sm text-text">{u.quantity}</span>
-                      </div>
-                    ))
-                  )}
+            <section className="p-4 grid grid-cols-[minmax(0,1fr)_360px] gap-4 min-h-0 flex-1">
+              <div className="min-h-0 flex flex-col gap-3">
+                <div className="flex items-center justify-between gap-3">
+                  <div>
+                    <h2 className="text-sm font-semibold">Usage</h2>
+                    <p className="text-xs text-text-dim">
+                      {lastUsageSync ? `Last synced ${lastUsageSync}` : "Updates when hosting or dependency events arrive"}
+                    </p>
+                  </div>
+                  <button
+                    type="button"
+                    disabled={busy === `usage:${selected.id}`}
+                    onClick={() => syncUsage(selected)}
+                    className="px-2.5 py-1 rounded bg-bg-input text-xs font-medium hover:bg-bg-hover disabled:opacity-50"
+                  >
+                    {busy === `usage:${selected.id}` ? "Syncing..." : "Sync usage"}
+                  </button>
                 </div>
+                {usageRows.length === 0 ? (
+                  <div className="border border-border rounded-md p-4 text-sm text-text-dim">No usage recorded yet.</div>
+                ) : (
+                  <div className="grid gap-3 overflow-auto pr-1">
+                    {usageRows.map((u) => (
+                      <div key={`${u.customer_id}-${u.tenant_id}-${u.feature_key}`} className="border border-border rounded-md bg-bg-card p-3">
+                        <div className="flex items-start justify-between gap-3">
+                          <div className="min-w-0">
+                            <div className="text-sm font-medium text-text truncate">{u.label}</div>
+                            <div className="text-[11px] text-text-dim font-mono truncate">{u.feature_key}</div>
+                          </div>
+                          <div className="text-right shrink-0">
+                            <div className="text-sm font-semibold text-text">{u.formattedQuantity}</div>
+                            <div className={`text-[11px] ${u.over ? "text-red" : "text-text-dim"}`}>
+                              {u.over ? "Over limit" : `${u.percent}% used`}
+                            </div>
+                          </div>
+                        </div>
+                        <div className="mt-3 h-2 rounded bg-bg-input overflow-hidden">
+                          <div className={`h-full ${limitTone(u.percent, u.over)}`} style={{ width: `${u.percent}%` }} />
+                        </div>
+                        <div className="mt-2 flex items-center justify-between gap-2 text-xs text-text-dim">
+                          <span>{u.formattedQuantity} / {u.formattedLimit}</span>
+                          <span>{u.reset === "none" ? "No reset" : `Resets ${u.reset}`}</span>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                )}
               </div>
 
               <div className="border border-border rounded-md overflow-hidden min-h-0 flex flex-col">
-                <div className="px-3 py-2 border-b border-border text-xs uppercase text-text-dim font-semibold">Plan Limits</div>
+                <div className="px-3 py-2 border-b border-border">
+                  <div className="text-xs uppercase text-text-dim font-semibold">Plan Limits</div>
+                  <div className="text-[11px] text-text-dim">{tenantPlan?.name || selected.plan_key}</div>
+                </div>
                 <div className="overflow-auto">
-                  {(plans.find((p) => p.key === selected.plan_key)?.limits || []).map((l) => (
+                  {(tenantPlan?.limits || []).map((l) => (
                     <div key={l.feature_key} className="px-3 py-2 border-b border-border">
                       <div className="font-mono text-xs text-text">{l.feature_key}</div>
-                      <div className="text-xs text-text-dim">{l.limit_value} · {l.reset_interval}</div>
+                      <div className="text-xs text-text-dim">{formatQuantity(l.feature_key, l.limit_value)} · {l.reset_interval}</div>
                     </div>
                   ))}
                 </div>
+                {(tenantPlan?.limits || []).length === 0 && (
+                  <div className="p-3 text-sm text-text-dim">No limits configured for this plan.</div>
+                )}
               </div>
             </section>
           </>
