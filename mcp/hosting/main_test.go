@@ -3,6 +3,7 @@ package main
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -21,6 +22,7 @@ type platformStub struct {
 	callAppCalls  []callAppCall
 	ingressCalls  []sdk.IngressExposeRequest
 	unexposeHosts []string
+	authMissing   bool
 }
 
 type callAppCall struct {
@@ -31,6 +33,9 @@ type callAppCall struct {
 
 func (p *platformStub) CallAppResult(appName, tool string, input map[string]any, out any) error {
 	p.callAppCalls = append(p.callAppCalls, callAppCall{App: appName, Tool: tool, Input: input})
+	if appName == "auth" && p.authMissing {
+		return errors.New("auth app not installed")
+	}
 	switch tool {
 	case "catalog_prices_get":
 		trialDays := int64(0)
@@ -220,6 +225,53 @@ func (p *platformStub) CallAppResult(appName, tool string, input map[string]any,
 	case "usage_record":
 		b, _ := json.Marshal(map[string]any{"usage": map[string]any{"quantity": input["quantity"], "deduped": false}})
 		return json.Unmarshal(b, out)
+	case "auth_orgs_create":
+		b, _ := json.Marshal(map[string]any{
+			"organization": map[string]any{
+				"id":   int64(901),
+				"slug": input["slug"],
+				"name": input["name"],
+			},
+		})
+		return json.Unmarshal(b, out)
+	case "auth_orgs_list":
+		b, _ := json.Marshal(map[string]any{
+			"organizations": []map[string]any{{
+				"id":   int64(901),
+				"slug": input["slug"],
+				"name": "Existing Org",
+			}},
+			"count": 1,
+		})
+		return json.Unmarshal(b, out)
+	case "auth_users_create":
+		b, _ := json.Marshal(map[string]any{
+			"user": map[string]any{
+				"id":    int64(902),
+				"email": input["email"],
+			},
+			"password_reset_sent": input["send_password_reset"],
+		})
+		return json.Unmarshal(b, out)
+	case "auth_users_search":
+		b, _ := json.Marshal(map[string]any{
+			"users": []map[string]any{{
+				"id":    int64(902),
+				"email": input["q"],
+			}},
+			"count": 1,
+		})
+		return json.Unmarshal(b, out)
+	case "auth_clients_create":
+		b, _ := json.Marshal(map[string]any{
+			"client": map[string]any{
+				"client_id": "akc_hosting_test",
+				"name":      input["name"],
+				"type":      input["type"],
+			},
+			"client_id": "akc_hosting_test",
+		})
+		return json.Unmarshal(b, out)
 	default:
 		return nil
 	}
@@ -274,8 +326,8 @@ func TestEmbeddedManifest_Valid(t *testing.T) {
 	if m.Name != "hosting" {
 		t.Errorf("manifest.Name=%q, want hosting", m.Name)
 	}
-	if m.Version != "1.7.1" {
-		t.Errorf("manifest.Version=%q, want 1.7.1", m.Version)
+	if m.Version != "1.8.0" {
+		t.Errorf("manifest.Version=%q, want 1.8.0", m.Version)
 	}
 	if m.DB == nil {
 		t.Fatal("manifest.DB missing")
@@ -313,6 +365,9 @@ func TestEmbeddedManifest_Valid(t *testing.T) {
 	}
 	if !containsString(gotEvents["subscriptions"], "subscription.cancelled") {
 		t.Errorf("manifest should subscribe to subscription lifecycle events, got %v", gotEvents["subscriptions"])
+	}
+	if gotRequired["auth"] {
+		t.Error("auth dependency should be optional")
 	}
 }
 
@@ -592,6 +647,66 @@ func TestTenantCreateProvisionsContainerAndIngress(t *testing.T) {
 	}
 	if len(usage) != 1 || usage[0].Quantity != 1 {
 		t.Fatalf("usage = %+v", usage)
+	}
+}
+
+func TestTenantCreateProvisionsOptionalAuthIdentity(t *testing.T) {
+	pf := &platformStub{}
+	ctx, db := newTestCtx(t, pf)
+	defer db.Close()
+
+	app := &App{}
+	got, err := app.toolTenantCreate(ctx, map[string]any{
+		"owner_email":   "owner@example.com",
+		"customer_name": "Owner Person",
+		"slug":          "authdemo",
+		"plan_key":      "free",
+	})
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	tenant := got.(map[string]any)["tenant"].(*Tenant)
+	meta := mapFromAny(tenant.Metadata)
+	if meta["auth_enabled"] != true {
+		t.Fatalf("tenant metadata missing auth_enabled: %s", tenant.Metadata)
+	}
+	if strArg(meta, "auth_org_slug") == "" || int64Arg(meta, "auth_org_id") != 901 || int64Arg(meta, "auth_user_id") != 902 {
+		t.Fatalf("tenant metadata missing auth refs: %+v", meta)
+	}
+	if strArg(meta, "auth_client_id") != "akc_hosting_test" {
+		t.Fatalf("tenant metadata missing auth client: %+v", meta)
+	}
+	for _, want := range []string{"auth_orgs_create", "auth_users_create", "auth_clients_create"} {
+		if !containsToolCall(pf.callAppCalls, "auth", want) {
+			t.Fatalf("missing %s call in %+v", want, pf.callAppCalls)
+		}
+	}
+}
+
+func TestTenantCreateDoesNotRequireAuthApp(t *testing.T) {
+	pf := &platformStub{authMissing: true}
+	ctx, db := newTestCtx(t, pf)
+	defer db.Close()
+
+	app := &App{}
+	got, err := app.toolTenantCreate(ctx, map[string]any{
+		"owner_email": "owner@example.com",
+		"slug":        "noauth",
+		"plan_key":    "free",
+	})
+	if err != nil {
+		t.Fatalf("create tenant with missing auth should still succeed: %v", err)
+	}
+	tenant := got.(map[string]any)["tenant"].(*Tenant)
+	if tenant.Status != StatusActive {
+		t.Fatalf("status = %s, want active", tenant.Status)
+	}
+	meta := mapFromAny(tenant.Metadata)
+	if _, ok := meta["auth_error"]; ok {
+		t.Fatalf("missing optional auth should not store tenant auth_error: %+v", meta)
+	}
+	if !containsToolCall(pf.callAppCalls, "containers", "containers_run") {
+		t.Fatalf("expected container provisioning, got %+v", pf.callAppCalls)
 	}
 }
 

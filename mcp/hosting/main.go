@@ -24,7 +24,7 @@ import (
 //go:embed apteva.yaml
 var manifestYAML string
 
-const appVersion = "1.7.1"
+const appVersion = "1.8.0"
 
 const (
 	StatusProvisioning = "provisioning"
@@ -1327,7 +1327,102 @@ func (a *App) provisionTenant(ctx *sdk.AppCtx, args map[string]any) (*Tenant, er
 	_ = recordUsage(ctx.AppDB(), tenant.ID, tenant.CustomerID, "hosting.tenants", 1, tenant.ID+":created", nil)
 	_ = recordEvent(ctx.AppDB(), tenant.ID, "ingress.active", "platform", map[string]any{"hostname": route.Hostname, "target": route.Target})
 	_ = recordEvent(ctx.AppDB(), tenant.ID, "provisioning.active", "tool", map[string]any{"workload_id": workload.ID})
+	_ = a.ensureTenantAuth(ctx, tenant, customer, metadata, runtimeConfig)
 	return dbTenantGet(ctx.AppDB(), tenant.ID)
+}
+
+func (a *App) ensureTenantAuth(ctx *sdk.AppCtx, tenant *Tenant, customer *Customer, metadata, runtimeConfig map[string]any) error {
+	if tenant == nil || ctx == nil {
+		return nil
+	}
+	authEnabled := boolValue(firstPresent(metadata, runtimeConfig, "auth_enabled"), true)
+	if !authEnabled {
+		_ = recordEvent(ctx.AppDB(), tenant.ID, "auth.skipped", "hosting", map[string]any{"reason": "disabled"})
+		return nil
+	}
+	if strings.TrimSpace(tenant.OwnerEmail) == "" {
+		_ = recordEvent(ctx.AppDB(), tenant.ID, "auth.skipped", "hosting", map[string]any{"reason": "owner_email_missing"})
+		return nil
+	}
+	projectID := ctx.CurrentProject()
+	orgSlug := firstNonEmpty(strArg(metadata, "auth_org_slug"), authOrgSlugForTenant(tenant.Slug, tenant.ID))
+	orgName := firstNonEmpty(strArg(metadata, "auth_org_name"), customerDisplayName(customer, tenant))
+	patch := map[string]any{
+		"auth_enabled":  true,
+		"auth_org_slug": orgSlug,
+	}
+
+	orgResp, err := callAppMap(ctx, "auth", "auth_orgs_create", withProject(projectID, map[string]any{
+		"slug": orgSlug,
+		"name": orgName,
+	}))
+	if err != nil {
+		if isOptionalAuthMissing(err) {
+			_ = recordEvent(ctx.AppDB(), tenant.ID, "auth.skipped", "hosting", map[string]any{"reason": "auth_unavailable"})
+			return nil
+		}
+		if strings.Contains(strings.ToLower(err.Error()), "slug already in use") {
+			orgResp, err = findAuthOrg(ctx, projectID, orgSlug)
+		}
+		if err != nil {
+			patch["auth_error"] = err.Error()
+			_ = dbTenantMergeMetadata(ctx.AppDB(), tenant.ID, patch)
+			_ = recordEvent(ctx.AppDB(), tenant.ID, "auth.provision_failed", "auth", map[string]any{"error": err.Error(), "stage": "organization"})
+			return nil
+		}
+	}
+	org := mapFromAny(orgResp["organization"])
+	if orgID := int64Arg(org, "id"); orgID > 0 {
+		patch["auth_org_id"] = orgID
+	}
+
+	userResp, err := callAppMap(ctx, "auth", "auth_users_create", withProject(projectID, map[string]any{
+		"organization_slug":   orgSlug,
+		"email":               tenant.OwnerEmail,
+		"display_name":        firstNonEmpty(strArg(metadata, "auth_user_display_name"), customerDisplayName(customer, tenant)),
+		"email_verified":      boolValue(firstPresent(metadata, runtimeConfig, "auth_email_verified"), true),
+		"send_password_reset": boolValue(firstPresent(metadata, runtimeConfig, "auth_send_password_reset"), true),
+	}))
+	if err != nil {
+		if strings.Contains(strings.ToLower(err.Error()), "already") || strings.Contains(strings.ToLower(err.Error()), "exists") {
+			userResp, err = findAuthUser(ctx, projectID, orgSlug, tenant.OwnerEmail)
+		}
+		if err != nil {
+			patch["auth_error"] = err.Error()
+			_ = dbTenantMergeMetadata(ctx.AppDB(), tenant.ID, patch)
+			_ = recordEvent(ctx.AppDB(), tenant.ID, "auth.provision_failed", "auth", map[string]any{"error": err.Error(), "stage": "user"})
+			return nil
+		}
+	}
+	user := mapFromAny(userResp["user"])
+	if userID := int64Arg(user, "id"); userID > 0 {
+		patch["auth_user_id"] = userID
+	}
+	if _, ok := userResp["password_reset_sent"]; ok {
+		patch["auth_password_reset_sent"] = boolValue(userResp["password_reset_sent"], false)
+	}
+
+	if boolValue(firstPresent(metadata, runtimeConfig, "auth_create_client"), true) {
+		clientResp, err := callAppMap(ctx, "auth", "auth_clients_create", withProject(projectID, map[string]any{
+			"organization_slug": orgSlug,
+			"name":              "Hosting Admin - " + tenant.Slug,
+			"type":              "spa",
+			"redirect_uris":     stringSliceFromAny(firstPresent(metadata, runtimeConfig, "auth_redirect_uris")),
+			"allowed_origins":   stringSliceFromAny(firstPresent(metadata, runtimeConfig, "auth_allowed_origins")),
+		}))
+		if err != nil {
+			patch["auth_client_error"] = err.Error()
+			_ = recordEvent(ctx.AppDB(), tenant.ID, "auth.client_failed", "auth", map[string]any{"error": err.Error()})
+		} else if clientID := firstNonEmpty(strArg(clientResp, "client_id"), strArg(mapFromAny(clientResp["client"]), "client_id")); clientID != "" {
+			patch["auth_client_id"] = clientID
+		}
+	}
+	delete(patch, "auth_error")
+	if err := dbTenantMergeMetadata(ctx.AppDB(), tenant.ID, patch); err != nil {
+		return err
+	}
+	_ = recordEvent(ctx.AppDB(), tenant.ID, "auth.provisioned", "auth", patch)
+	return nil
 }
 
 type runtimeTemplate struct {
@@ -1901,6 +1996,31 @@ func dbTenantActivate(db *sql.DB, t *Tenant) error {
 	return err
 }
 
+func dbTenantMergeMetadata(db *sql.DB, tenantID string, patch map[string]any) error {
+	if len(patch) == 0 {
+		return nil
+	}
+	t, err := dbTenantGet(db, tenantID)
+	if err != nil {
+		return err
+	}
+	if t == nil {
+		return errors.New("tenant not found")
+	}
+	meta := mapFromAny(t.Metadata)
+	for k, v := range patch {
+		meta[k] = v
+	}
+	res, err := db.Exec(`UPDATE hosting_tenants SET metadata_json=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`, jsonOrEmpty(meta, "{}"), tenantID)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return errors.New("tenant not found")
+	}
+	return nil
+}
+
 func dbTenantSetStatus(db *sql.DB, id, status, errMsg string) (*Tenant, error) {
 	res, err := db.Exec(`UPDATE hosting_tenants SET status=?, last_error=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`, status, errMsg, id)
 	if err != nil {
@@ -2341,6 +2461,176 @@ func mapFromAny(v any) map[string]any {
 		}
 	}
 	return out
+}
+
+func firstPresent(first, second map[string]any, key string) any {
+	if first != nil {
+		if v, ok := first[key]; ok {
+			return v
+		}
+	}
+	if second != nil {
+		if v, ok := second[key]; ok {
+			return v
+		}
+	}
+	return nil
+}
+
+func boolValue(v any, fallback bool) bool {
+	switch x := v.(type) {
+	case bool:
+		return x
+	case string:
+		switch strings.ToLower(strings.TrimSpace(x)) {
+		case "true", "1", "yes", "y", "on":
+			return true
+		case "false", "0", "no", "n", "off":
+			return false
+		default:
+			return fallback
+		}
+	case int:
+		return x != 0
+	case int64:
+		return x != 0
+	case float64:
+		return x != 0
+	case nil:
+		return fallback
+	default:
+		return fallback
+	}
+}
+
+func stringSliceFromAny(v any) []string {
+	switch x := v.(type) {
+	case nil:
+		return nil
+	case []string:
+		return x
+	case []any:
+		out := make([]string, 0, len(x))
+		for _, item := range x {
+			if s := strings.TrimSpace(fmt.Sprint(item)); s != "" {
+				out = append(out, s)
+			}
+		}
+		return out
+	case string:
+		if strings.TrimSpace(x) == "" {
+			return nil
+		}
+		var parsed []string
+		if json.Unmarshal([]byte(x), &parsed) == nil {
+			return parsed
+		}
+		parts := strings.Split(x, ",")
+		out := make([]string, 0, len(parts))
+		for _, part := range parts {
+			if s := strings.TrimSpace(part); s != "" {
+				out = append(out, s)
+			}
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
+func authOrgSlugForTenant(slug, tenantID string) string {
+	base := strings.ToLower(strings.TrimSpace(slug))
+	replacer := regexp.MustCompile(`[^a-z0-9-]+`)
+	base = replacer.ReplaceAllString(base, "-")
+	base = strings.Trim(base, "-")
+	if base == "" {
+		base = "tenant"
+	}
+	suffix := strings.TrimPrefix(tenantID, "htn_")
+	if len(suffix) > 8 {
+		suffix = suffix[len(suffix)-8:]
+	}
+	if suffix == "" {
+		suffix = strconv.FormatInt(time.Now().UnixNano(), 36)
+	}
+	maxBase := 32 - len(suffix) - 1
+	if maxBase < 3 {
+		maxBase = 3
+	}
+	if len(base) > maxBase {
+		base = strings.Trim(base[:maxBase], "-")
+	}
+	out := strings.Trim(base+"-"+suffix, "-")
+	if len(out) < 3 {
+		out += strings.Repeat("0", 3-len(out))
+	}
+	if len(out) > 32 {
+		out = strings.Trim(out[:32], "-")
+	}
+	return out
+}
+
+func customerDisplayName(customer *Customer, tenant *Tenant) string {
+	if customer != nil {
+		if s := strings.TrimSpace(customer.Name); s != "" {
+			return s
+		}
+		if s := strings.TrimSpace(customer.Email); s != "" {
+			return s
+		}
+	}
+	if tenant != nil {
+		if s := strings.TrimSpace(tenant.OwnerEmail); s != "" {
+			return s
+		}
+		if s := strings.TrimSpace(tenant.Slug); s != "" {
+			return s
+		}
+	}
+	return "Hosting Customer"
+}
+
+func isOptionalAuthMissing(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "auth") && (strings.Contains(msg, "not installed") ||
+		strings.Contains(msg, "not found") ||
+		strings.Contains(msg, "missing dependency") ||
+		strings.Contains(msg, "dependency"))
+}
+
+func findAuthOrg(ctx *sdk.AppCtx, projectID, slug string) (map[string]any, error) {
+	resp, err := callAppMap(ctx, "auth", "auth_orgs_list", withProject(projectID, map[string]any{}))
+	if err != nil {
+		return nil, err
+	}
+	for _, item := range arrayFromAny(resp["organizations"]) {
+		org := mapFromAny(item)
+		if strArg(org, "slug") == slug {
+			return map[string]any{"organization": org}, nil
+		}
+	}
+	return nil, fmt.Errorf("auth organization %q already exists but could not be loaded", slug)
+}
+
+func findAuthUser(ctx *sdk.AppCtx, projectID, orgSlug, email string) (map[string]any, error) {
+	resp, err := callAppMap(ctx, "auth", "auth_users_search", withProject(projectID, map[string]any{
+		"organization_slug": orgSlug,
+		"q":                 email,
+		"limit":             10,
+	}))
+	if err != nil {
+		return nil, err
+	}
+	for _, item := range arrayFromAny(resp["users"]) {
+		user := mapFromAny(item)
+		if strings.EqualFold(strArg(user, "email"), email) {
+			return map[string]any{"user": user}, nil
+		}
+	}
+	return nil, fmt.Errorf("auth user %q already exists but could not be loaded", email)
 }
 
 func arrayFromAny(v any) []any {

@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: hosting
 display_name: Hosting
-version: 1.7.1
+version: 1.8.0
 description: |
   Managed container-backed hosting control plane. Hosting provisions and
   operates hosted Apteva tenants on top of the generic Containers app,
@@ -46,6 +46,8 @@ requires:
         - subscription.paused
         - subscription.ended
     - name: entitlements
+      optional: true
+    - name: auth
       optional: true
 
 provides:
