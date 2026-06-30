@@ -782,30 +782,32 @@ export default function CodePanel({ projectId, installId }: NativePanelProps) {
   );
 
   return (
-    <div className="h-full flex">
+    <div className="h-full flex flex-col">
+      <nav className="px-4 border-b border-border flex items-center gap-4 shrink-0">
+        <button
+          type="button"
+          onClick={() => setActiveView("code")}
+          className={`py-2 text-sm border-b-2 ${
+            activeView === "code" ? "border-accent text-text" : "border-transparent text-text-muted hover:text-text"
+          }`}
+        >Repositories</button>
+        <button
+          type="button"
+          onClick={() => {
+            setShowDevLogs(false);
+            setActiveView("issues");
+          }}
+          className={`py-2 text-sm border-b-2 ${
+            activeView === "issues" ? "border-accent text-text" : "border-transparent text-text-muted hover:text-text"
+          }`}
+        >Issues</button>
+      </nav>
+
+      <div className="flex-1 min-h-0 flex">
       {/* Repo list */}
       {activeView === "code" && (
       <aside className="w-64 border-r border-border flex flex-col">
         <div className="p-3 border-b border-border space-y-2">
-          <div className="grid grid-cols-2 gap-1">
-            <button
-              type="button"
-              onClick={() => setActiveView("code")}
-              className={`px-2 py-1 text-xs border rounded ${
-                activeView === "code" ? "border-accent text-accent" : "border-border text-text-muted hover:text-text"
-              }`}
-            >Code</button>
-            <button
-              type="button"
-              onClick={() => {
-                setShowDevLogs(false);
-                setActiveView("issues");
-              }}
-              className={`px-2 py-1 text-xs border rounded ${
-                activeView === "issues" ? "border-accent text-accent" : "border-border text-text-muted hover:text-text"
-              }`}
-            >Issues</button>
-          </div>
           <input
             type="text"
             value={query}
@@ -892,7 +894,6 @@ export default function CodePanel({ projectId, installId }: NativePanelProps) {
             api={api}
             currentPath={openFile?.path}
             currentRepoSlug={selectedSlug ?? undefined}
-            onShowCode={() => setActiveView("code")}
             onOpenPath={(repoSlug, path) => {
               setActiveView("code");
               if (selectedSlug !== repoSlug) {
@@ -947,49 +948,7 @@ export default function CodePanel({ projectId, installId }: NativePanelProps) {
             >Archive</button>
           </header>
 
-          <nav className="px-4 border-b border-border flex items-center gap-4">
-            <button
-              type="button"
-              onClick={() => setActiveView("code")}
-              className={`py-2 text-sm border-b-2 ${
-                activeView === "code" ? "border-accent text-text" : "border-transparent text-text-muted hover:text-text"
-              }`}
-            >Code</button>
-            <button
-              type="button"
-              onClick={() => {
-                setShowDevLogs(false);
-                setActiveView("issues");
-              }}
-              className={`py-2 text-sm border-b-2 ${
-                activeView === "issues" ? "border-accent text-text" : "border-transparent text-text-muted hover:text-text"
-              }`}
-            >Issues</button>
-            <span className="flex-1" />
-            {activeView === "issues" && openFile?.path && (
-              <span className="text-[11px] text-text-dim truncate">
-                current file <span className="font-mono">{openFile.path}</span>
-              </span>
-            )}
-          </nav>
-
-          {activeView === "issues" ? (
-            <IssuesView
-              repos={repos}
-              projectId={projectId}
-              api={api}
-              currentPath={openFile?.path}
-              currentRepoSlug={selectedSlug}
-              onShowCode={() => setActiveView("code")}
-              onOpenPath={(repoSlug, path) => {
-                setActiveView("code");
-                if (repoSlug === selectedSlug) {
-                  selectFile(path);
-                }
-              }}
-            />
-          ) : (
-            <div className="flex-1 min-h-0 flex">
+          <div className="flex-1 min-h-0 flex">
               <aside className="w-72 border-r border-border flex flex-col">
                 <div className="p-3 border-b border-border flex items-center gap-1">
                   <span className="text-xs uppercase tracking-wide text-text-dim flex-1 truncate">Files</span>
@@ -1139,9 +1098,9 @@ export default function CodePanel({ projectId, installId }: NativePanelProps) {
                 )}
               </section>
             </div>
-          )}
         </main>
       )}
+      </div>
 
       {showCreate && (
         <CreateRepoDialog
@@ -2129,7 +2088,6 @@ function IssuesView({
   api,
   currentPath,
   currentRepoSlug,
-  onShowCode,
   onOpenPath,
 }: {
   repos: Repo[];
@@ -2137,7 +2095,6 @@ function IssuesView({
   api: <T,>(m: string, p: string, b?: unknown, e?: Record<string, string>) => Promise<T>;
   currentPath?: string;
   currentRepoSlug?: string;
-  onShowCode: () => void;
   onOpenPath: (repoSlug: string, path: string) => void;
 }) {
   const [issues, setIssues] = useState<CodeIssue[]>([]);
@@ -2260,19 +2217,7 @@ function IssuesView({
   };
 
   return (
-    <div className="flex-1 min-h-0 flex flex-col">
-      <nav className="px-4 border-b border-border flex items-center gap-4 shrink-0">
-        <button
-          type="button"
-          onClick={onShowCode}
-          className="py-2 text-sm border-b-2 border-transparent text-text-muted hover:text-text"
-        >Code</button>
-        <button
-          type="button"
-          className="py-2 text-sm border-b-2 border-accent text-text"
-        >Issues</button>
-      </nav>
-      <div className="flex-1 min-h-0 flex">
+    <div className="flex-1 min-h-0 flex">
       <aside className="w-[34rem] border-r border-border flex flex-col min-h-0">
         <div className="p-3 border-b border-border space-y-2">
           <div className="flex items-center gap-2">
@@ -2471,7 +2416,6 @@ function IssuesView({
           onPatch={patchIssue}
         />
       )}
-      </div>
     </div>
   );
 }
