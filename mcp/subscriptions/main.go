@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"errors"
@@ -18,7 +19,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: subscriptions
 display_name: Subscriptions
-version: 0.1.1
+version: 0.1.2
 description: Generic recurring-commerce lifecycle for SaaS, physical subscriptions, and services.
 author: Apteva
 scopes: [project, global]
@@ -83,13 +84,24 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		return errors.New("subscriptions requires a db block")
 	}
 	globalCtx = ctx
-	ctx.Logger().Info("subscriptions mounted", "version", "0.1.1", "scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
+	ctx.Logger().Info("subscriptions mounted", "version", "0.1.2", "scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
 	return nil
 }
 
-func (a *App) OnUnmount(*sdk.AppCtx) error       { return nil }
-func (a *App) Channels() []sdk.ChannelFactory    { return nil }
-func (a *App) Workers() []sdk.Worker             { return nil }
+func (a *App) OnUnmount(*sdk.AppCtx) error    { return nil }
+func (a *App) Channels() []sdk.ChannelFactory { return nil }
+func (a *App) Workers() []sdk.Worker {
+	return []sdk.Worker{{
+		Name:     "subscription-lifecycle",
+		Schedule: "@every 15m",
+		Run: func(_ context.Context, appCtx *sdk.AppCtx) error {
+			if appCtx == nil {
+				appCtx = globalCtx
+			}
+			return runSubscriptionLifecycle(appCtx, time.Now().UTC())
+		},
+	}}
+}
 func (a *App) EventHandlers() []sdk.EventHandler { return nil }
 
 func (a *App) HTTPRoutes() []sdk.Route {
@@ -288,7 +300,58 @@ func emitSubscriptionLifecycle(ctx *sdk.AppCtx, sub *Subscription) {
 		"customer_id":     sub.CustomerID,
 		"customer_email":  sub.CustomerEmail,
 		"kind":            sub.Kind,
+		"source":          sub.Source,
+		"source_ref":      sub.SourceRef,
+		"trial_start":     sub.TrialStart,
+		"trial_end":       sub.TrialEnd,
+		"metadata":        mapFromAny(sub.Metadata),
 	})
+}
+
+func runSubscriptionLifecycle(ctx *sdk.AppCtx, now time.Time) error {
+	if ctx == nil || ctx.AppDB() == nil {
+		return nil
+	}
+	expiredTrials, err := dbSubscriptionsExpiredTrials(ctx.AppDB(), now)
+	if err != nil {
+		return err
+	}
+	nowStr := now.UTC().Format(time.RFC3339)
+	for _, sub := range expiredTrials {
+		meta := mapFromAny(sub.Metadata)
+		targetStatus := trialExpiredStatus(meta)
+		meta["trial_ended_at"] = nowStr
+		if targetStatus == "past_due" || targetStatus == "paused" {
+			meta["past_due_since"] = nowStr
+		}
+		updated, err := dbSubscriptionSetStatusMetadata(ctx.AppDB(), sub.ProjectID, sub.ID, targetStatus, meta, "subscription.trial_expired", map[string]any{
+			"from_status": "trialing",
+			"to_status":   targetStatus,
+			"trial_end":   sub.TrialEnd,
+		}, now)
+		if err != nil {
+			return err
+		}
+		emitSubscriptionLifecycle(ctx, updated)
+	}
+
+	graceExpired, err := dbSubscriptionsGraceExpired(ctx.AppDB(), now)
+	if err != nil {
+		return err
+	}
+	for _, sub := range graceExpired {
+		meta := mapFromAny(sub.Metadata)
+		meta["unpaid_grace_expired_at"] = nowStr
+		updated, err := dbSubscriptionSetStatusMetadata(ctx.AppDB(), sub.ProjectID, sub.ID, "ended", meta, "subscription.unpaid_grace_expired", map[string]any{
+			"from_status": sub.Status,
+			"to_status":   "ended",
+		}, now)
+		if err != nil {
+			return err
+		}
+		emitSubscriptionLifecycle(ctx, updated)
+	}
+	return nil
 }
 
 func (a *App) toolCyclesCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -484,6 +547,79 @@ func dbSubscriptionUpdateStatus(db *sql.DB, pid string, args map[string]any) (*S
 		return nil, err
 	}
 	if err := writeEventTx(tx, pid, id, actorOrSystem(strArg(args, "actor")), "subscription.status_updated", map[string]any{"status": status, "note": strArg(args, "note")}); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return dbSubscriptionGet(db, pid, id, true)
+}
+
+func dbSubscriptionsExpiredTrials(db *sql.DB, now time.Time) ([]*Subscription, error) {
+	rows, err := db.Query(`SELECT `+subCols()+` FROM subscriptions WHERE status='trialing' AND trial_end IS NOT NULL AND trial_end <= ? ORDER BY trial_end ASC`, now.UTC().Format(time.RFC3339))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*Subscription
+	for rows.Next() {
+		sub, err := scanSub(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, sub)
+	}
+	return out, rows.Err()
+}
+
+func dbSubscriptionsGraceExpired(db *sql.DB, now time.Time) ([]*Subscription, error) {
+	rows, err := db.Query(`SELECT ` + subCols() + ` FROM subscriptions WHERE status IN ('past_due','paused') ORDER BY updated_at ASC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*Subscription
+	for rows.Next() {
+		sub, err := scanSub(rows)
+		if err != nil {
+			return nil, err
+		}
+		meta := mapFromAny(sub.Metadata)
+		graceDays := int64Arg(meta, "unpaid_grace_days")
+		if graceDays <= 0 {
+			continue
+		}
+		since, ok := parseTime(strArg(meta, "past_due_since"))
+		if !ok || now.Before(since.AddDate(0, 0, int(graceDays))) {
+			continue
+		}
+		out = append(out, sub)
+	}
+	return out, rows.Err()
+}
+
+func dbSubscriptionSetStatusMetadata(db *sql.DB, pid string, id int64, status string, metadata map[string]any, action string, details map[string]any, now time.Time) (*Subscription, error) {
+	if !validSubStatus[status] {
+		return nil, fmt.Errorf("invalid status %q", status)
+	}
+	nowStr := now.UTC().Format(time.RFC3339)
+	tx, err := db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	_, err = tx.Exec(
+		`UPDATE subscriptions
+		    SET status=?,
+		        metadata=?,
+		        ended_at = CASE WHEN ?='ended' THEN COALESCE(ended_at, ?) ELSE ended_at END,
+		        updated_at=CURRENT_TIMESTAMP
+		  WHERE id=? AND project_id=?`,
+		status, jsonOrEmpty(metadata, "{}"), status, nowStr, id, pid)
+	if err != nil {
+		return nil, err
+	}
+	if err := writeEventTx(tx, pid, id, "system", action, details); err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -992,6 +1128,51 @@ func boolArg(m map[string]any, key string) bool {
 		return v == "true" || v == "1"
 	}
 	return false
+}
+func mapFromAny(v any) map[string]any {
+	out := map[string]any{}
+	switch x := v.(type) {
+	case map[string]any:
+		for k, vv := range x {
+			out[k] = vv
+		}
+	case map[string]string:
+		for k, vv := range x {
+			out[k] = vv
+		}
+	case json.RawMessage:
+		_ = json.Unmarshal(x, &out)
+	case []byte:
+		_ = json.Unmarshal(x, &out)
+	case string:
+		if strings.TrimSpace(x) != "" {
+			_ = json.Unmarshal([]byte(x), &out)
+		}
+	}
+	return out
+}
+func trialExpiredStatus(meta map[string]any) string {
+	switch strings.ToLower(firstNonEmpty(strArg(meta, "trial_end_status"), strArg(meta, "on_trial_end_unpaid"))) {
+	case "pause", "paused", "suspend", "suspended":
+		return "paused"
+	case "end", "ended":
+		return "ended"
+	default:
+		return "past_due"
+	}
+}
+func parseTime(value string) (time.Time, bool) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return time.Time{}, false
+	}
+	for _, layout := range []string{time.RFC3339, "2006-01-02 15:04:05"} {
+		t, err := time.Parse(layout, value)
+		if err == nil {
+			return t.UTC(), true
+		}
+	}
+	return time.Time{}, false
 }
 func firstNonEmpty(vals ...string) string {
 	for _, v := range vals {

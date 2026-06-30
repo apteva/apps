@@ -33,6 +33,10 @@ func (p *platformStub) CallAppResult(appName, tool string, input map[string]any,
 	p.callAppCalls = append(p.callAppCalls, callAppCall{App: appName, Tool: tool, Input: input})
 	switch tool {
 	case "catalog_prices_get":
+		trialDays := int64(0)
+		if int64Arg(input, "id") == 100 {
+			trialDays = 14
+		}
 		b, _ := json.Marshal(map[string]any{
 			"price": map[string]any{
 				"id":                input["id"],
@@ -42,8 +46,12 @@ func (p *platformStub) CallAppResult(appName, tool string, input map[string]any,
 				"currency":          "USD",
 				"interval":          "month",
 				"interval_count":    1,
+				"trial_days":        trialDays,
 				"metadata": map[string]any{
-					"plan_key": "starter",
+					"plan_key":                "starter",
+					"on_trial_end_unpaid":     "suspend",
+					"unpaid_grace_days":       7,
+					"on_unpaid_grace_expired": "delete",
 				},
 			},
 		})
@@ -239,8 +247,8 @@ func TestEmbeddedManifest_Valid(t *testing.T) {
 	if m.Name != "hosting" {
 		t.Errorf("manifest.Name=%q, want hosting", m.Name)
 	}
-	if m.Version != "1.5.0" {
-		t.Errorf("manifest.Version=%q, want 1.5.0", m.Version)
+	if m.Version != "1.6.0" {
+		t.Errorf("manifest.Version=%q, want 1.6.0", m.Version)
 	}
 	if m.DB == nil {
 		t.Fatal("manifest.DB missing")
@@ -342,6 +350,53 @@ func TestCheckoutCreatePaidPlanCreatesSubscriptionInvoiceAndPaymentLink(t *testi
 	line := invoiceCall.Input["line_items"].([]any)[0].(map[string]any)
 	if line["price_id"] != int64(99) {
 		t.Fatalf("invoice line should reference catalog price: %+v", line)
+	}
+}
+
+func TestCheckoutCreateNoCardTrialProvisionsImmediately(t *testing.T) {
+	pf := &platformStub{}
+	ctx, db := newTestCtx(t, pf)
+	defer db.Close()
+
+	app := &App{}
+	got, err := app.toolCheckoutCreate(ctx, map[string]any{
+		"catalog_price_id": int64(100),
+		"owner_email":      "trial@example.com",
+		"customer_name":    "Trial Buyer",
+		"slug":             "trial-apteva",
+	})
+	if err != nil {
+		t.Fatalf("checkout create: %v", err)
+	}
+	result := got.(map[string]any)
+	checkout := result["checkout"].(map[string]any)
+	if checkout["status"] != "trialing" || checkout["requires_payment"] != false || checkout["trial_end"] == "" {
+		t.Fatalf("unexpected checkout: %+v", checkout)
+	}
+	tenant, ok := result["tenant"].(*Tenant)
+	if !ok || tenant == nil {
+		t.Fatalf("trial checkout should provision tenant immediately: %+v", result["tenant"])
+	}
+	if containsToolCall(pf.callAppCalls, "billing", "invoices_create") || containsToolCall(pf.callAppCalls, "billing", "invoices_send_payment_link") {
+		t.Fatalf("no-card trial should not create invoice/payment link: %+v", pf.callAppCalls)
+	}
+
+	var subCall *callAppCall
+	for i := range pf.callAppCalls {
+		if pf.callAppCalls[i].Tool == "subscriptions_create" {
+			subCall = &pf.callAppCalls[i]
+			break
+		}
+	}
+	if subCall == nil {
+		t.Fatalf("missing subscriptions_create call")
+	}
+	if subCall.Input["status"] != "trialing" || subCall.Input["trial_start"] == "" || subCall.Input["trial_end"] == "" {
+		t.Fatalf("trial subscription missing status/dates: %+v", subCall.Input)
+	}
+	meta := mapArg(subCall.Input, "metadata")
+	if int64Arg(meta, "trial_days") != 14 || meta["on_unpaid_grace_expired"] != "delete" {
+		t.Fatalf("trial metadata not carried through: %+v", meta)
 	}
 }
 
@@ -665,6 +720,100 @@ func TestSubscriptionEventSyncsTenantLifecycle(t *testing.T) {
 	}
 	if !containsToolCall(pf.callAppCalls, "containers", "containers_stop") {
 		t.Fatalf("expected containers_stop call, got %+v", pf.callAppCalls)
+	}
+}
+
+func TestSubscriptionPastDueSuspendsTenant(t *testing.T) {
+	pf := &platformStub{}
+	ctx, db := newTestCtx(t, pf)
+	defer db.Close()
+
+	app := &App{}
+	created, err := app.toolTenantCreate(ctx, map[string]any{
+		"owner_email":     "owner@example.com",
+		"slug":            "pastdue",
+		"plan_key":        "free",
+		"subscription_id": int64(124),
+	})
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	tenant := created.(map[string]any)["tenant"].(*Tenant)
+	pf.callAppCalls = nil
+
+	err = app.handleSubscriptionEvent(ctx, sdk.Event{
+		Event:     "subscription.past_due",
+		SourceApp: "subscriptions",
+		Data:      map[string]any{"id": int64(124), "status": "past_due"},
+	})
+	if err != nil {
+		t.Fatalf("handle subscription.past_due: %v", err)
+	}
+	got, err := dbTenantGet(db, tenant.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != StatusSuspended {
+		t.Fatalf("tenant status=%q, want suspended", got.Status)
+	}
+	if !containsToolCall(pf.callAppCalls, "containers", "containers_stop") {
+		t.Fatalf("expected containers_stop call, got %+v", pf.callAppCalls)
+	}
+}
+
+func TestSubscriptionEndedPolicyDeletesTenant(t *testing.T) {
+	pf := &platformStub{}
+	ctx, db := newTestCtx(t, pf)
+	defer db.Close()
+
+	app := &App{}
+	created, err := app.toolTenantCreate(ctx, map[string]any{
+		"owner_email":     "owner@example.com",
+		"slug":            "ended-delete",
+		"plan_key":        "free",
+		"subscription_id": int64(125),
+		"metadata": map[string]any{
+			"on_unpaid_grace_expired":  "delete",
+			"delete_volumes_on_expiry": true,
+		},
+	})
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	tenant := created.(map[string]any)["tenant"].(*Tenant)
+	pf.callAppCalls = nil
+
+	err = app.handleSubscriptionEvent(ctx, sdk.Event{
+		Event:     "subscription.ended",
+		SourceApp: "subscriptions",
+		Data: map[string]any{
+			"id":     int64(125),
+			"status": "ended",
+			"metadata": map[string]any{
+				"on_unpaid_grace_expired":  "delete",
+				"delete_volumes_on_expiry": true,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("handle subscription.ended: %v", err)
+	}
+	got, err := dbTenantGet(db, tenant.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != StatusDeleted {
+		t.Fatalf("tenant status=%q, want deleted", got.Status)
+	}
+	var destroy *callAppCall
+	for i := range pf.callAppCalls {
+		if pf.callAppCalls[i].Tool == "containers_destroy" {
+			destroy = &pf.callAppCalls[i]
+			break
+		}
+	}
+	if destroy == nil || destroy.Input["delete_volumes"] != true {
+		t.Fatalf("expected containers_destroy with delete_volumes=true, got %+v", pf.callAppCalls)
 	}
 }
 

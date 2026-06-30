@@ -24,7 +24,7 @@ import (
 //go:embed apteva.yaml
 var manifestYAML string
 
-const appVersion = "1.5.0"
+const appVersion = "1.6.0"
 
 const (
 	StatusProvisioning = "provisioning"
@@ -106,6 +106,7 @@ func (a *App) MCPTools() []sdk.Tool {
 			"catalog_price_id": intSchema(), "price_id": intSchema(), "owner_email": strSchema(), "customer_email": strSchema(), "customer_name": strSchema(),
 			"slug": strSchema(), "plan_key": strSchema(), "product_key": strSchema(), "runtime_config": objSchema(), "metadata": objSchema(),
 			"success_url": strSchema(), "cancel_url": strSchema(), "provider": strSchema(), "create_payment_link": boolSchema(),
+			"trial_days": intSchema(), "trial_requires_payment_method": boolSchema(),
 		}, []string{"owner_email", "slug"}), Handler: a.toolCheckoutCreate},
 		{Name: "hosting_tenant_create", Description: "Provision a hosted Apteva tenant container and default hostname.", InputSchema: schemaObject(map[string]any{
 			"customer_id": intSchema(), "customer_email": strSchema(), "customer_name": strSchema(),
@@ -363,9 +364,25 @@ func (a *App) toolCheckoutCreate(ctx *sdk.AppCtx, args map[string]any) (any, err
 	interval := firstNonEmpty(strArg(price, "interval"), plan.Interval, "month")
 	intervalCount := firstPositive(int64Arg(price, "interval_count"), 1)
 	title := firstNonEmpty(strArg(price, "nickname"), strArg(productFromCatalog, "name"), plan.Name)
+	now := time.Now().UTC()
+	isPaid := priceCents > 0 && plan.BillingMode != "free"
+	trialDays := firstPositive(int64Arg(args, "trial_days"), int64Arg(price, "trial_days"), int64Arg(catalogMeta, "trial_days"))
+	trialRequiresPaymentMethod := boolArgDefault(args, "trial_requires_payment_method", boolFromAny(catalogMeta["trial_requires_payment_method"], false))
+	if isPaid && trialDays > 0 && trialRequiresPaymentMethod {
+		return nil, errors.New("card-required trials are not supported yet; use a no-card trial or a paid checkout")
+	}
+	var trialStart, trialEnd string
+	if trialDays > 0 {
+		trialStart = now.Format(time.RFC3339)
+		trialEnd = now.AddDate(0, 0, int(trialDays)).Format(time.RFC3339)
+		saleMeta["trial_days"] = trialDays
+		saleMeta["trial_start"] = trialStart
+		saleMeta["trial_end"] = trialEnd
+		saleMeta["trial_requires_payment_method"] = trialRequiresPaymentMethod
+	}
 	subStatus := "active"
-	if priceCents > 0 && plan.BillingMode != "free" {
-		if int64Arg(price, "trial_days") > 0 {
+	if isPaid {
+		if trialDays > 0 {
 			subStatus = "trialing"
 		} else {
 			subStatus = "past_due"
@@ -385,7 +402,9 @@ func (a *App) toolCheckoutCreate(ctx *sdk.AppCtx, args map[string]any) (any, err
 		"source_ref":           slug,
 		"metadata":             saleMeta,
 		"items":                []any{subscriptionItemFromCheckout(priceID, price, productFromCatalog, title, priceCents, currency, saleMeta)},
-		"current_period_start": time.Now().UTC().Format(time.RFC3339),
+		"trial_start":          trialStart,
+		"trial_end":            trialEnd,
+		"current_period_start": now.Format(time.RFC3339),
 	}))
 	if err != nil {
 		return nil, fmt.Errorf("subscriptions create: %w", err)
@@ -400,7 +419,7 @@ func (a *App) toolCheckoutCreate(ctx *sdk.AppCtx, args map[string]any) (any, err
 	result := map[string]any{
 		"checkout": map[string]any{
 			"status":           "created",
-			"requires_payment": priceCents > 0 && plan.BillingMode != "free",
+			"requires_payment": isPaid,
 			"product_key":      productKey,
 			"plan_key":         planKey,
 		},
@@ -409,7 +428,8 @@ func (a *App) toolCheckoutCreate(ctx *sdk.AppCtx, args map[string]any) (any, err
 		"subscription":     subscription,
 	}
 
-	if priceCents <= 0 || plan.BillingMode == "free" {
+	provisionNow := !isPaid || (trialDays > 0 && !trialRequiresPaymentMethod)
+	if provisionNow {
 		provisioned, err := a.toolTenantCreate(ctx, map[string]any{
 			"customer_id":     hostingCustomer.ID,
 			"customer_email":  ownerEmail,
@@ -428,6 +448,11 @@ func (a *App) toolCheckoutCreate(ctx *sdk.AppCtx, args map[string]any) (any, err
 		}
 		result["tenant"] = provisioned.(map[string]any)["tenant"]
 		result["checkout"].(map[string]any)["status"] = "provisioned"
+		if isPaid && trialDays > 0 {
+			result["checkout"].(map[string]any)["status"] = "trialing"
+			result["checkout"].(map[string]any)["trial_end"] = trialEnd
+			result["checkout"].(map[string]any)["requires_payment"] = false
+		}
 		return result, nil
 	}
 
@@ -779,11 +804,45 @@ func (a *App) toolSubscriptionSync(ctx *sdk.AppCtx, args map[string]any) (any, e
 			return nil, err
 		}
 		_ = recordEvent(ctx.AppDB(), t.ID, "subscription.past_due", actor(args), nil)
-		return map[string]any{"tenant": t}, nil
-	case "paused", "cancelled", "ended":
+		return a.toolTenantSuspend(ctx, args)
+	case "paused", "cancelled":
+		return a.toolTenantSuspend(ctx, args)
+	case "ended":
+		t, err := requireTenant(ctx.AppDB(), strArg(args, "tenant_id"))
+		if err != nil {
+			return nil, err
+		}
+		policy := subscriptionPolicyMetadata(t, args)
+		if shouldDeleteOnSubscriptionEnded(policy) {
+			deleteArgs := mergeMaps(args, map[string]any{"delete_volumes": boolFromAny(policy["delete_volumes_on_expiry"], false)})
+			return a.toolTenantDelete(ctx, deleteArgs)
+		}
 		return a.toolTenantSuspend(ctx, args)
 	default:
 		return nil, fmt.Errorf("unsupported subscription_status %q", status)
+	}
+}
+
+func subscriptionPolicyMetadata(t *Tenant, args map[string]any) map[string]any {
+	policy := map[string]any{}
+	if t != nil {
+		policy = mergeMaps(policy, mapFromAny(t.Metadata))
+	}
+	payload := mapArg(args, "_subscription_payload")
+	policy = mergeMaps(policy, mapFromAny(payload["metadata"]), mapArg(args, "metadata"))
+	return policy
+}
+
+func shouldDeleteOnSubscriptionEnded(policy map[string]any) bool {
+	switch strings.ToLower(firstNonEmpty(
+		strArg(policy, "on_subscription_ended"),
+		strArg(policy, "on_unpaid_grace_expired"),
+		strArg(policy, "on_trial_expired"),
+	)) {
+	case "delete", "destroy", "remove":
+		return true
+	default:
+		return false
 	}
 }
 
@@ -2163,6 +2222,26 @@ func boolArgDefault(args map[string]any, key string, fallback bool) bool {
 		return fallback
 	}
 	return boolArg(args, key)
+}
+
+func boolFromAny(v any, fallback bool) bool {
+	switch x := v.(type) {
+	case bool:
+		return x
+	case string:
+		if strings.TrimSpace(x) == "" {
+			return fallback
+		}
+		return strings.EqualFold(x, "true") || x == "1" || strings.EqualFold(x, "yes")
+	case int:
+		return x != 0
+	case int64:
+		return x != 0
+	case float64:
+		return x != 0
+	default:
+		return fallback
+	}
 }
 
 func actor(args map[string]any) string {
