@@ -18,7 +18,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: subscriptions
 display_name: Subscriptions
-version: 0.1.0
+version: 0.1.1
 description: Generic recurring-commerce lifecycle for SaaS, physical subscriptions, and services.
 author: Apteva
 scopes: [project, global]
@@ -38,6 +38,19 @@ requires:
 provides:
   http_routes:
     - prefix: /
+  publishes:
+    - name: subscription.active
+      description: Subscription entered active status.
+    - name: subscription.trialing
+      description: Subscription entered trialing status.
+    - name: subscription.past_due
+      description: Subscription entered past_due status.
+    - name: subscription.cancelled
+      description: Subscription was cancelled.
+    - name: subscription.paused
+      description: Subscription entered paused status.
+    - name: subscription.ended
+      description: Subscription ended.
 runtime:
   kind: source
   source:
@@ -70,7 +83,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		return errors.New("subscriptions requires a db block")
 	}
 	globalCtx = ctx
-	ctx.Logger().Info("subscriptions mounted", "version", "0.1.0", "scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
+	ctx.Logger().Info("subscriptions mounted", "version", "0.1.1", "scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
 	return nil
 }
 
@@ -247,6 +260,7 @@ func (a *App) toolSubscriptionsUpdateStatus(ctx *sdk.AppCtx, args map[string]any
 		return nil, err
 	}
 	ctx.Emit("subscription.updated", map[string]any{"subscription_id": sub.ID, "status": sub.Status})
+	emitSubscriptionLifecycle(ctx, sub)
 	return map[string]any{"subscription": sub}, nil
 }
 
@@ -261,6 +275,20 @@ func (a *App) toolSubscriptionsCancel(ctx *sdk.AppCtx, args map[string]any) (any
 	}
 	ctx.Emit("subscription.cancelled", map[string]any{"subscription_id": sub.ID})
 	return map[string]any{"subscription": sub}, nil
+}
+
+func emitSubscriptionLifecycle(ctx *sdk.AppCtx, sub *Subscription) {
+	if ctx == nil || sub == nil || !validSubStatus[sub.Status] {
+		return
+	}
+	ctx.Emit("subscription."+sub.Status, map[string]any{
+		"id":              sub.ID,
+		"subscription_id": sub.ID,
+		"status":          sub.Status,
+		"customer_id":     sub.CustomerID,
+		"customer_email":  sub.CustomerEmail,
+		"kind":            sub.Kind,
+	})
 }
 
 func (a *App) toolCyclesCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {

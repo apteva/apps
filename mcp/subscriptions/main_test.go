@@ -48,3 +48,41 @@ func TestSubscriptionLifecycle(t *testing.T) {
 		t.Fatalf("status = %s, want cancelled", cancelled.Status)
 	}
 }
+
+func TestUpdateStatusEmitsLifecycleEvent(t *testing.T) {
+	rec := tk.NewEmitRecorder()
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("proj-test"), tk.WithEmitter(rec))
+	app := &App{}
+
+	created, err := app.toolSubscriptionsCreate(ctx, map[string]any{
+		"customer_email": "buyer@example.com",
+		"kind":           "service",
+		"status":         "active",
+		"items": []any{
+			map[string]any{"title": "Hosted app", "quantity": 1, "unit_amount_cents": 1900, "currency": "USD"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("create subscription: %v", err)
+	}
+	sub := created.(map[string]any)["subscription"].(*Subscription)
+	rec.Reset()
+
+	if _, err := app.toolSubscriptionsUpdateStatus(ctx, map[string]any{"id": sub.ID, "status": "past_due"}); err != nil {
+		t.Fatalf("update status: %v", err)
+	}
+	if got := rec.EventsByTopic("subscription.updated"); len(got) != 1 {
+		t.Fatalf("subscription.updated events=%d, want 1", len(got))
+	}
+	got := rec.EventsByTopic("subscription.past_due")
+	if len(got) != 1 {
+		t.Fatalf("subscription.past_due events=%d, want 1", len(got))
+	}
+	data, ok := got[0].Data.(map[string]any)
+	if !ok {
+		t.Fatalf("event data type=%T", got[0].Data)
+	}
+	if data["subscription_id"] != sub.ID || data["status"] != "past_due" {
+		t.Fatalf("unexpected lifecycle payload: %+v", data)
+	}
+}

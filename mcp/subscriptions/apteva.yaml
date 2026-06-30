@@ -2,12 +2,14 @@ schema: apteva-app/v1
 
 name: subscriptions
 display_name: Subscriptions
-version: 0.1.0
+version: 0.1.1
 description: |
   Generic recurring-commerce lifecycle for SaaS, physical product
   subscriptions, and services. Subscriptions owns recurrence, status,
   current periods, renewal cycles, and references to the invoice,
-  order, or entitlement produced by each cycle.
+  order, or entitlement produced by each cycle. Status updates emit
+  specific lifecycle events such as subscription.active and
+  subscription.past_due for dependent apps.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/subscriptions
@@ -34,6 +36,19 @@ requires:
 provides:
   http_routes:
     - prefix: /
+  publishes:
+    - name: subscription.active
+      description: Subscription entered active status.
+    - name: subscription.trialing
+      description: Subscription entered trialing status.
+    - name: subscription.past_due
+      description: Subscription entered past_due status.
+    - name: subscription.cancelled
+      description: Subscription was cancelled.
+    - name: subscription.paused
+      description: Subscription entered paused status.
+    - name: subscription.ended
+      description: Subscription ended.
   mcp_tools:
     - name: subscriptions_create
       description: Create a SaaS, physical, or service subscription with catalog-backed items.
