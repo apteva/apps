@@ -37,7 +37,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: billing
 display_name: Billing
-version: 0.8.11
+version: 0.8.12
 description: |
   Customers, invoices, and payments. Per-invoice provider — local for
   internal/wire/cash, stripe for card-payable hosted invoices.
@@ -116,7 +116,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	}
 
 	ctx.Logger().Info("billing mounted",
-		"version", "0.8.9",
+		"version", "0.8.12",
 		"scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
 	return nil
 }
@@ -2980,49 +2980,62 @@ func resolveCatalogRefs(ctx *sdk.AppCtx, raw []any) (string, error) {
 		if api == nil {
 			return "", errors.New("price_id requires platform API (catalog app must be installed)")
 		}
-		var price struct {
-			ID              int64  `json:"id"`
-			ProductID       int64  `json:"product_id"`
-			Nickname        string `json:"nickname"`
-			UnitAmountCents int64  `json:"unit_amount_cents"`
-			Currency        string `json:"currency"`
-			Active          bool   `json:"active"`
-			ArchivedAt      string `json:"archived_at"`
-		}
+		var priceResp map[string]any
 		if err := api.CallAppResult("catalog", "catalog_prices_get",
-			map[string]any{"id": priceID}, &price); err != nil {
+			map[string]any{"id": priceID}, &priceResp); err != nil {
 			return "", fmt.Errorf("line_items[%d]: catalog price %d lookup failed (is the catalog app installed?): %w", i, priceID, err)
 		}
-		if price.ArchivedAt != "" {
+		price := mapFromAny(priceResp["price"])
+		if len(price) == 0 {
+			price = priceResp
+		}
+		productID := int64Arg(price, "product_id")
+		if strArg(price, "archived_at") != "" {
 			return "", fmt.Errorf("line_items[%d]: catalog price %d is archived; pick a different price", i, priceID)
+		}
+		product := map[string]any{}
+		if productID != 0 {
+			var productResp map[string]any
+			if err := api.CallAppResult("catalog", "catalog_products_get",
+				map[string]any{"id": productID}, &productResp); err == nil {
+				product = mapFromAny(productResp["product"])
+				if len(product) == 0 {
+					product = productResp
+				}
+			}
 		}
 		// Fill missing fields from the snapshot. Caller's explicit
 		// values always win (lets you override description per invoice).
 		if strArg(m, "description") == "" {
-			desc := price.Nickname
+			desc := strArg(price, "nickname")
 			if desc == "" {
 				// Fall back to product name when the price has no nickname.
-				var product struct {
-					Name string `json:"name"`
-				}
-				if err := api.CallAppResult("catalog", "catalog_products_get",
-					map[string]any{"id": price.ProductID}, &product); err == nil && product.Name != "" {
-					desc = product.Name
+				if name := strArg(product, "name"); name != "" {
+					desc = name
 				} else {
-					desc = fmt.Sprintf("Product #%d", price.ProductID)
+					desc = fmt.Sprintf("Product #%d", productID)
 				}
 			}
 			m["description"] = desc
 		}
 		if int64Arg(m, "unit_price_cents") == 0 {
-			m["unit_price_cents"] = price.UnitAmountCents
+			m["unit_price_cents"] = int64Arg(price, "unit_amount_cents")
 		}
 		// product_id is always taken from the catalog (caller can't override).
-		m["product_id"] = price.ProductID
+		m["product_id"] = productID
+		m["metadata"] = mergeMaps(
+			mapFromAny(product["metadata"]),
+			mapFromAny(price["metadata"]),
+			mapFromAny(m["metadata"]),
+			map[string]any{
+				"catalog_product_id": productID,
+				"catalog_price_id":   priceID,
+			},
+		)
 		// Currency hint — first line's catalog currency wins as the
 		// invoice's currency if the caller didn't set one explicitly.
 		if currencyHint == "" {
-			currencyHint = price.Currency
+			currencyHint = strArg(price, "currency")
 		}
 	}
 	return currencyHint, nil
@@ -3196,6 +3209,42 @@ func strArg(args map[string]any, key string) string {
 		return v
 	}
 	return ""
+}
+
+func mapFromAny(v any) map[string]any {
+	out := map[string]any{}
+	switch x := v.(type) {
+	case map[string]any:
+		for k, vv := range x {
+			out[k] = vv
+		}
+	case map[string]string:
+		for k, vv := range x {
+			out[k] = vv
+		}
+	case json.RawMessage:
+		_ = json.Unmarshal(x, &out)
+	case []byte:
+		_ = json.Unmarshal(x, &out)
+	case string:
+		if strings.TrimSpace(x) != "" {
+			_ = json.Unmarshal([]byte(x), &out)
+		}
+	}
+	return out
+}
+
+func mergeMaps(base map[string]any, overlays ...map[string]any) map[string]any {
+	out := map[string]any{}
+	for k, v := range base {
+		out[k] = v
+	}
+	for _, overlay := range overlays {
+		for k, v := range overlay {
+			out[k] = v
+		}
+	}
+	return out
 }
 
 func schemaObject(props map[string]any, required []string) map[string]any {

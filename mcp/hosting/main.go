@@ -24,7 +24,7 @@ import (
 //go:embed apteva.yaml
 var manifestYAML string
 
-const appVersion = "1.4.0"
+const appVersion = "1.5.0"
 
 const (
 	StatusProvisioning = "provisioning"
@@ -52,10 +52,10 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		return errors.New("hosting requires a db block")
 	}
 	globalCtx = ctx
-	if err := seedProducts(ctx.AppDB(), configString(ctx, "default_image", "apteva:latest")); err != nil {
+	if err := seedProducts(ctx.AppDB(), configString(ctx, "default_image", "ghcr.io/apteva/apteva:latest")); err != nil {
 		return err
 	}
-	if err := seedPlans(ctx.AppDB(), configString(ctx, "default_image", "apteva:latest")); err != nil {
+	if err := seedPlans(ctx.AppDB(), configString(ctx, "default_image", "ghcr.io/apteva/apteva:latest")); err != nil {
 		return err
 	}
 	ctx.Logger().Info("hosting mounted", "version", appVersion, "scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
@@ -102,6 +102,11 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "hosting_product_list", Description: "List hosting products and their plans.", InputSchema: schemaObject(nil, nil), Handler: a.toolProductList},
 		{Name: "hosting_plan_list", Description: "List hosting plans.", InputSchema: schemaObject(nil, nil), Handler: a.toolPlanList},
 		{Name: "hosting_customer_create", Description: "Find or create a hosting customer by email.", InputSchema: schemaObject(map[string]any{"email": strSchema(), "name": strSchema(), "billing_customer_id": intSchema(), "metadata": objSchema()}, []string{"email"}), Handler: a.toolCustomerCreate},
+		{Name: "hosting_checkout_create", Description: "Create a Hosting-owned sale/checkout from a Catalog price or free hosting plan. Paid plans create Billing and Subscription records; free plans provision immediately.", InputSchema: schemaObject(map[string]any{
+			"catalog_price_id": intSchema(), "price_id": intSchema(), "owner_email": strSchema(), "customer_email": strSchema(), "customer_name": strSchema(),
+			"slug": strSchema(), "plan_key": strSchema(), "product_key": strSchema(), "runtime_config": objSchema(), "metadata": objSchema(),
+			"success_url": strSchema(), "cancel_url": strSchema(), "provider": strSchema(), "create_payment_link": boolSchema(),
+		}, []string{"owner_email", "slug"}), Handler: a.toolCheckoutCreate},
 		{Name: "hosting_tenant_create", Description: "Provision a hosted Apteva tenant container and default hostname.", InputSchema: schemaObject(map[string]any{
 			"customer_id": intSchema(), "customer_email": strSchema(), "customer_name": strSchema(),
 			"owner_email": strSchema(), "slug": strSchema(), "plan_key": strSchema(), "product_key": strSchema(),
@@ -265,6 +270,209 @@ func (a *App) toolCustomerCreate(ctx *sdk.AppCtx, args map[string]any) (any, err
 	return map[string]any{"customer": c}, nil
 }
 
+func (a *App) toolCheckoutCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if ctx.PlatformAPI() == nil {
+		return nil, errors.New("platform API unavailable")
+	}
+	projectID := firstNonEmpty(strArg(args, "_project_id"), ctx.CurrentProject())
+	ownerEmail := strings.ToLower(firstNonEmpty(strArg(args, "owner_email"), strArg(args, "customer_email")))
+	if ownerEmail == "" || !strings.Contains(ownerEmail, "@") {
+		return nil, errors.New("valid owner_email required")
+	}
+	slug, err := normalizeSlug(strArg(args, "slug"))
+	if err != nil {
+		return nil, err
+	}
+
+	priceID := firstPositive(int64Arg(args, "catalog_price_id"), int64Arg(args, "price_id"))
+	price, productFromCatalog, err := fetchCatalogCheckoutRefs(ctx, projectID, priceID)
+	if err != nil {
+		return nil, err
+	}
+	catalogMeta := mergeMaps(mapFromAny(productFromCatalog["metadata"]), mapFromAny(price["metadata"]))
+	productKey := firstNonEmpty(strArg(args, "product_key"), strArg(catalogMeta, "product_key"), "apteva")
+	planKey := firstNonEmpty(strArg(args, "plan_key"), strArg(catalogMeta, "plan_key"), defaultPlanForProduct(productKey))
+
+	plan, err := dbPlanGet(ctx.AppDB(), planKey)
+	if err != nil {
+		return nil, err
+	}
+	if plan == nil {
+		return nil, fmt.Errorf("plan %q not found", planKey)
+	}
+	if plan.ProductKey != "" && plan.ProductKey != productKey {
+		return nil, fmt.Errorf("plan %q is bound to product %q, not %q", plan.Key, plan.ProductKey, productKey)
+	}
+	hostingProduct, err := dbProductGet(ctx.AppDB(), productKey)
+	if err != nil {
+		return nil, err
+	}
+	if hostingProduct == nil {
+		return nil, fmt.Errorf("product %q not found", productKey)
+	}
+
+	runtimeConfig := mergeMaps(mapFromAny(catalogMeta["runtime_config"]), mapArg(args, "runtime_config"))
+	saleMeta := mergeMaps(catalogMeta, mapArg(args, "metadata"), map[string]any{
+		"fulfillment_app":  "hosting",
+		"fulfillment_type": "hosting_tenant_provision",
+		"order_type":       "hosting",
+		"owner_email":      ownerEmail,
+		"slug":             slug,
+		"product_key":      productKey,
+		"plan_key":         planKey,
+	})
+	if len(runtimeConfig) > 0 {
+		saleMeta["runtime_config"] = runtimeConfig
+	}
+	if priceID != 0 {
+		saleMeta["catalog_price_id"] = priceID
+	}
+	if productID := int64Arg(price, "product_id"); productID != 0 {
+		saleMeta["catalog_product_id"] = productID
+	}
+
+	customerName := firstNonEmpty(strArg(args, "customer_name"), ownerEmail)
+	billingCustomer, err := callAppMap(ctx, "billing", "customers_upsert_by_email", withProject(projectID, map[string]any{
+		"email": ownerEmail,
+		"defaults": map[string]any{
+			"name":     customerName,
+			"metadata": map[string]any{"source_app": "hosting"},
+		},
+	}))
+	if err != nil {
+		return nil, fmt.Errorf("billing customer: %w", err)
+	}
+	billingCustomer = unwrapMap(billingCustomer, "customer")
+	billingCustomerID := int64Arg(billingCustomer, "id")
+	if billingCustomerID == 0 {
+		return nil, errors.New("billing customers_upsert_by_email returned no customer id")
+	}
+
+	hostingCustomer, err := dbCustomerUpsert(ctx.AppDB(), map[string]any{
+		"email":               ownerEmail,
+		"name":                customerName,
+		"billing_customer_id": billingCustomerID,
+		"metadata":            map[string]any{"source_app": "hosting"},
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	priceCents := firstPositive(int64Arg(price, "unit_amount_cents"), derefInt64(plan.PriceCents))
+	currency := strings.ToUpper(firstNonEmpty(strArg(price, "currency"), "USD"))
+	interval := firstNonEmpty(strArg(price, "interval"), plan.Interval, "month")
+	intervalCount := firstPositive(int64Arg(price, "interval_count"), 1)
+	title := firstNonEmpty(strArg(price, "nickname"), strArg(productFromCatalog, "name"), plan.Name)
+	subStatus := "active"
+	if priceCents > 0 && plan.BillingMode != "free" {
+		if int64Arg(price, "trial_days") > 0 {
+			subStatus = "trialing"
+		} else {
+			subStatus = "past_due"
+		}
+	}
+	subscription, err := callAppMap(ctx, "subscriptions", "subscriptions_create", withProject(projectID, map[string]any{
+		"customer_id":          billingCustomerID,
+		"customer_email":       ownerEmail,
+		"customer_name":        customerName,
+		"kind":                 "service",
+		"status":               subStatus,
+		"billing_provider":     firstNonEmpty(strArg(args, "provider"), "local"),
+		"currency":             currency,
+		"interval":             interval,
+		"interval_count":       intervalCount,
+		"source":               "hosting",
+		"source_ref":           slug,
+		"metadata":             saleMeta,
+		"items":                []any{subscriptionItemFromCheckout(priceID, price, productFromCatalog, title, priceCents, currency, saleMeta)},
+		"current_period_start": time.Now().UTC().Format(time.RFC3339),
+	}))
+	if err != nil {
+		return nil, fmt.Errorf("subscriptions create: %w", err)
+	}
+	subscription = unwrapMap(subscription, "subscription")
+	subscriptionID := int64Arg(subscription, "id")
+	if subscriptionID == 0 {
+		return nil, errors.New("subscriptions_create returned no subscription id")
+	}
+	saleMeta["subscription_id"] = subscriptionID
+
+	result := map[string]any{
+		"checkout": map[string]any{
+			"status":           "created",
+			"requires_payment": priceCents > 0 && plan.BillingMode != "free",
+			"product_key":      productKey,
+			"plan_key":         planKey,
+		},
+		"billing_customer": billingCustomer,
+		"customer":         hostingCustomer,
+		"subscription":     subscription,
+	}
+
+	if priceCents <= 0 || plan.BillingMode == "free" {
+		provisioned, err := a.toolTenantCreate(ctx, map[string]any{
+			"customer_id":     hostingCustomer.ID,
+			"customer_email":  ownerEmail,
+			"customer_name":   customerName,
+			"owner_email":     ownerEmail,
+			"slug":            slug,
+			"plan_key":        planKey,
+			"product_key":     productKey,
+			"subscription_id": subscriptionID,
+			"runtime_config":  runtimeConfig,
+			"metadata":        saleMeta,
+			"_project_id":     projectID,
+		})
+		if err != nil {
+			return nil, err
+		}
+		result["tenant"] = provisioned.(map[string]any)["tenant"]
+		result["checkout"].(map[string]any)["status"] = "provisioned"
+		return result, nil
+	}
+
+	invoice, err := callAppMap(ctx, "billing", "invoices_create", withProject(projectID, map[string]any{
+		"customer_id": billingCustomerID,
+		"currency":    currency,
+		"provider":    strArg(args, "provider"),
+		"line_items":  []any{invoiceLineFromCheckout(priceID, title, priceCents, saleMeta)},
+		"metadata":    saleMeta,
+	}))
+	if err != nil {
+		return nil, fmt.Errorf("billing invoice create: %w", err)
+	}
+	invoice = unwrapMap(invoice, "invoice")
+	invoiceID := int64Arg(invoice, "id")
+	if invoiceID == 0 {
+		return nil, errors.New("invoices_create returned no invoice id")
+	}
+	finalized, err := callAppMap(ctx, "billing", "invoices_finalize", withProject(projectID, map[string]any{"invoice_id": invoiceID}))
+	if err != nil {
+		return nil, fmt.Errorf("billing invoice finalize: %w", err)
+	}
+	result["invoice"] = unwrapMap(finalized, "invoice")
+
+	if boolArgDefault(args, "create_payment_link", true) {
+		linkInput := map[string]any{"invoice_id": invoiceID}
+		if v := strArg(args, "success_url"); v != "" {
+			linkInput["success_url"] = v
+		}
+		if v := strArg(args, "cancel_url"); v != "" {
+			linkInput["cancel_url"] = v
+		}
+		paymentLink, err := callAppMap(ctx, "billing", "invoices_send_payment_link", withProject(projectID, linkInput))
+		if err != nil {
+			return nil, fmt.Errorf("billing payment link: %w", err)
+		}
+		result["payment_link"] = paymentLink
+		if url := strArg(paymentLink, "url"); url != "" {
+			result["checkout"].(map[string]any)["url"] = url
+		}
+	}
+
+	return result, nil
+}
+
 func (a *App) handleInvoicePaidEvent(ctx *sdk.AppCtx, event sdk.Event) error {
 	args := map[string]any{
 		"invoice_id":  firstPositive(int64Arg(event.Data, "invoice_id"), int64Arg(event.Data, "id")),
@@ -347,7 +555,7 @@ func (a *App) toolPaidInvoiceProvision(ctx *sdk.AppCtx, args map[string]any) (an
 	if err != nil {
 		return nil, err
 	}
-	meta := mergeMaps(mapFromAny(invoice["metadata"]), mapArg(args, "metadata"))
+	meta := mergeMaps(hostingMetadataFromInvoiceLines(invoice), mapFromAny(invoice["metadata"]), mapArg(args, "metadata"))
 	if strings.ToLower(strArg(invoice, "status")) != "paid" {
 		return nil, fmt.Errorf("invoice %d is %s, not paid", invoiceID, strArg(invoice, "status"))
 	}
@@ -377,6 +585,7 @@ func (a *App) toolPaidInvoiceProvision(ctx *sdk.AppCtx, args map[string]any) (an
 	if existing, err := dbTenantGetBySlug(ctx.AppDB(), strArg(provisionArgs, "slug")); err != nil {
 		return nil, err
 	} else if existing != nil {
+		_ = markSubscriptionActive(ctx, existing.ID, int64Arg(provisionArgs, "subscription_id"))
 		if err := reportOrderFulfillment(ctx, provisionArgs, "succeeded", existing.ID, "", map[string]any{
 			"tenant_id":        existing.ID,
 			"default_hostname": existing.DefaultHostname,
@@ -393,6 +602,9 @@ func (a *App) toolPaidInvoiceProvision(ctx *sdk.AppCtx, args map[string]any) (an
 		return nil, err
 	}
 	result := out.(map[string]any)
+	if tenant, ok := result["tenant"].(*Tenant); ok {
+		_ = markSubscriptionActive(ctx, tenant.ID, int64Arg(provisionArgs, "subscription_id"))
+	}
 	result["invoice"] = invoice
 	result["order"] = order
 	result["fulfillment"] = fulfillment
@@ -597,6 +809,84 @@ func reportOrderFulfillment(ctx *sdk.AppCtx, args map[string]any, status, extern
 	return nil
 }
 
+func callAppMap(ctx *sdk.AppCtx, appName, tool string, input map[string]any) (map[string]any, error) {
+	if ctx.PlatformAPI() == nil {
+		return nil, errors.New("platform API unavailable")
+	}
+	var out map[string]any
+	if err := ctx.PlatformAPI().CallAppResult(appName, tool, input, &out); err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func withProject(projectID string, input map[string]any) map[string]any {
+	if projectID != "" {
+		input["_project_id"] = projectID
+	}
+	return input
+}
+
+func unwrapMap(in map[string]any, key string) map[string]any {
+	if out := mapFromAny(in[key]); len(out) > 0 {
+		return out
+	}
+	return in
+}
+
+func fetchCatalogCheckoutRefs(ctx *sdk.AppCtx, projectID string, priceID int64) (map[string]any, map[string]any, error) {
+	if priceID == 0 {
+		return map[string]any{}, map[string]any{}, nil
+	}
+	priceResp, err := callAppMap(ctx, "catalog", "catalog_prices_get", withProject(projectID, map[string]any{"id": priceID}))
+	if err != nil {
+		return nil, nil, fmt.Errorf("catalog price: %w", err)
+	}
+	price := unwrapMap(priceResp, "price")
+	productID := int64Arg(price, "product_id")
+	if productID == 0 {
+		return nil, nil, fmt.Errorf("catalog price %d returned no product_id", priceID)
+	}
+	productResp, err := callAppMap(ctx, "catalog", "catalog_products_get", withProject(projectID, map[string]any{"id": productID}))
+	if err != nil {
+		return nil, nil, fmt.Errorf("catalog product: %w", err)
+	}
+	return price, unwrapMap(productResp, "product"), nil
+}
+
+func subscriptionItemFromCheckout(priceID int64, price, product map[string]any, title string, priceCents int64, currency string, metadata map[string]any) map[string]any {
+	item := map[string]any{
+		"title":             title,
+		"quantity":          1,
+		"unit_amount_cents": priceCents,
+		"currency":          currency,
+		"metadata":          metadata,
+	}
+	if priceID != 0 {
+		item["catalog_price_id"] = priceID
+	}
+	if productID := int64Arg(price, "product_id"); productID != 0 {
+		item["catalog_product_id"] = productID
+	}
+	if sku := firstNonEmpty(strArg(price, "external_id"), strArg(product, "slug")); sku != "" {
+		item["sku"] = sku
+	}
+	return item
+}
+
+func invoiceLineFromCheckout(priceID int64, title string, priceCents int64, metadata map[string]any) map[string]any {
+	line := map[string]any{
+		"description":      title,
+		"quantity":         1,
+		"unit_price_cents": priceCents,
+		"metadata":         metadata,
+	}
+	if priceID != 0 {
+		line["price_id"] = priceID
+	}
+	return line
+}
+
 func fetchBillingInvoice(ctx *sdk.AppCtx, projectID string, invoiceID int64) (map[string]any, error) {
 	input := map[string]any{"id": invoiceID}
 	if projectID != "" {
@@ -613,6 +903,47 @@ func fetchBillingInvoice(ctx *sdk.AppCtx, projectID string, invoiceID int64) (ma
 		return nil, fmt.Errorf("invoice %d not found", invoiceID)
 	}
 	return out.Invoice, nil
+}
+
+func hostingMetadataFromInvoiceLines(invoice map[string]any) map[string]any {
+	var lines []any
+	switch v := invoice["line_items"].(type) {
+	case []any:
+		lines = v
+	case []map[string]any:
+		for _, line := range v {
+			lines = append(lines, line)
+		}
+	}
+	for _, raw := range lines {
+		line := mapFromAny(raw)
+		meta := mapFromAny(line["metadata"])
+		if isHostingInvoice(meta, nil) {
+			return meta
+		}
+	}
+	return map[string]any{}
+}
+
+func markSubscriptionActive(ctx *sdk.AppCtx, tenantID string, subscriptionID int64) error {
+	if subscriptionID == 0 || ctx.PlatformAPI() == nil {
+		return nil
+	}
+	input := map[string]any{
+		"id":     subscriptionID,
+		"status": "active",
+		"actor":  "hosting",
+		"note":   "tenant provisioned: " + tenantID,
+	}
+	if projectID := ctx.CurrentProject(); projectID != "" {
+		input["_project_id"] = projectID
+	}
+	var out map[string]any
+	if err := ctx.PlatformAPI().CallAppResult("subscriptions", "subscriptions_update_status", input, &out); err != nil {
+		_ = recordEvent(ctx.AppDB(), tenantID, "subscription.sync_failed", "hosting", map[string]any{"subscription_id": subscriptionID, "error": err.Error()})
+		return err
+	}
+	return nil
 }
 
 func createHostingOrderFromInvoice(ctx *sdk.AppCtx, projectID string, invoiceID int64, provisionArgs map[string]any) (map[string]any, map[string]any, error) {
@@ -646,6 +977,7 @@ func hostingProvisionArgsFromInvoice(invoiceID int64, invoice, meta, args map[st
 	customerEmail := firstNonEmpty(strArg(invoice, "customer_email"), strArg(meta, "customer_email"), strArg(args, "customer_email"))
 	slug := firstNonEmpty(strArg(args, "slug"), strArg(meta, "slug"), fmt.Sprintf("hosting-inv-%d", invoiceID))
 	ownerEmail := firstNonEmpty(strArg(args, "owner_email"), strArg(meta, "owner_email"), customerEmail)
+	subscriptionID := firstPositive(int64Arg(args, "subscription_id"), int64Arg(meta, "subscription_id"), int64Arg(invoice, "subscription_id"))
 	out := map[string]any{
 		"customer_email":      customerEmail,
 		"customer_name":       firstNonEmpty(strArg(invoice, "customer_name"), strArg(meta, "customer_name"), strArg(args, "customer_name")),
@@ -661,6 +993,10 @@ func hostingProvisionArgsFromInvoice(invoiceID int64, invoice, meta, args map[st
 			"fulfillment_app":  "hosting",
 			"fulfillment_type": "hosting_tenant_provision",
 		}),
+	}
+	if subscriptionID != 0 {
+		out["subscription_id"] = subscriptionID
+		out["metadata"] = mergeMaps(mapArg(out, "metadata"), map[string]any{"subscription_id": subscriptionID})
 	}
 	if runtimeConfig := mergeMaps(mapFromAny(meta["runtime_config"]), mapArg(args, "runtime_config")); len(runtimeConfig) > 0 {
 		out["runtime_config"] = runtimeConfig
@@ -1104,7 +1440,7 @@ func resolveCustomer(db *sql.DB, args map[string]any) (*Customer, error) {
 		return c, nil
 	}
 	email := firstNonEmpty(strArg(args, "customer_email"), strArg(args, "owner_email"))
-	body := map[string]any{"email": email, "name": strArg(args, "customer_name")}
+	body := map[string]any{"email": email, "name": strArg(args, "customer_name"), "billing_customer_id": int64Arg(args, "billing_customer_id")}
 	return dbCustomerUpsert(db, body)
 }
 
@@ -1819,6 +2155,16 @@ func boolArg(args map[string]any, key string) bool {
 	}
 }
 
+func boolArgDefault(args map[string]any, key string, fallback bool) bool {
+	if args == nil {
+		return fallback
+	}
+	if _, ok := args[key]; !ok {
+		return fallback
+	}
+	return boolArg(args, key)
+}
+
 func actor(args map[string]any) string {
 	return firstNonEmpty(strArg(args, "actor"), "tool")
 }
@@ -1839,6 +2185,13 @@ func firstPositive(vals ...int64) int64 {
 		}
 	}
 	return 0
+}
+
+func derefInt64(v *int64) int64 {
+	if v == nil {
+		return 0
+	}
+	return *v
 }
 
 func firstPositiveInt(vals ...int) int {

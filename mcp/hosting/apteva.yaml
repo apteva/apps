@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: hosting
 display_name: Hosting
-version: 1.4.0
+version: 1.5.0
 description: |
   Managed container-backed hosting control plane. Hosting provisions and
   operates hosted Apteva tenants on top of the generic Containers app,
@@ -58,6 +58,8 @@ provides:
       description: List hosting plans, including free plans.
     - name: hosting_customer_create
       description: Find or create a hosting customer by email.
+    - name: hosting_checkout_create
+      description: Create a Hosting-owned sale/checkout from a Catalog price or free hosting plan. Paid plans create Billing and Subscription records; free plans provision immediately.
     - name: hosting_tenant_create
       description: Provision a hosted tenant container and expose its default hostname. If order_id/fulfillment_id are provided, reports fulfillment status back to Orders.
     - name: hosting_paid_invoice_provision
@@ -112,7 +114,7 @@ config_schema:
     description: Base domain used for generated tenant hostnames, e.g. tenant.hosted.example.com.
   - name: default_image
     type: text
-    default: "apteva:latest"
+    default: "ghcr.io/apteva/apteva:latest"
     label: Default Apteva image
     description: Container image used when the selected plan does not override one.
 

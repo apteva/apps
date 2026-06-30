@@ -32,6 +32,95 @@ type callAppCall struct {
 func (p *platformStub) CallAppResult(appName, tool string, input map[string]any, out any) error {
 	p.callAppCalls = append(p.callAppCalls, callAppCall{App: appName, Tool: tool, Input: input})
 	switch tool {
+	case "catalog_prices_get":
+		b, _ := json.Marshal(map[string]any{
+			"price": map[string]any{
+				"id":                input["id"],
+				"product_id":        501,
+				"nickname":          "Apteva Starter",
+				"unit_amount_cents": 1900,
+				"currency":          "USD",
+				"interval":          "month",
+				"interval_count":    1,
+				"metadata": map[string]any{
+					"plan_key": "starter",
+				},
+			},
+		})
+		return json.Unmarshal(b, out)
+	case "catalog_products_get":
+		b, _ := json.Marshal(map[string]any{
+			"product": map[string]any{
+				"id":   input["id"],
+				"name": "Apteva Hosting",
+				"slug": "apteva-hosting",
+				"metadata": map[string]any{
+					"product_key":  "apteva",
+					"product_type": "apteva_hosting",
+					"runtime_config": map[string]any{
+						"image":       "ghcr.io/apteva/apteva:latest",
+						"port":        5280,
+						"health_path": "/health",
+					},
+				},
+			},
+		})
+		return json.Unmarshal(b, out)
+	case "customers_upsert_by_email":
+		b, _ := json.Marshal(map[string]any{
+			"customer": map[string]any{
+				"id":    55,
+				"email": input["email"],
+				"name":  "Checkout Buyer",
+			},
+			"was_created": true,
+		})
+		return json.Unmarshal(b, out)
+	case "subscriptions_create":
+		b, _ := json.Marshal(map[string]any{
+			"subscription": map[string]any{
+				"id":             66,
+				"status":         input["status"],
+				"customer_id":    input["customer_id"],
+				"customer_email": input["customer_email"],
+				"metadata":       input["metadata"],
+			},
+		})
+		return json.Unmarshal(b, out)
+	case "subscriptions_update_status":
+		b, _ := json.Marshal(map[string]any{
+			"subscription": map[string]any{
+				"id":     input["id"],
+				"status": input["status"],
+			},
+		})
+		return json.Unmarshal(b, out)
+	case "invoices_create":
+		b, _ := json.Marshal(map[string]any{
+			"invoice": map[string]any{
+				"id":          77,
+				"status":      "draft",
+				"customer_id": input["customer_id"],
+				"currency":    input["currency"],
+				"metadata":    input["metadata"],
+				"line_items":  input["line_items"],
+			},
+		})
+		return json.Unmarshal(b, out)
+	case "invoices_finalize":
+		b, _ := json.Marshal(map[string]any{
+			"invoice": map[string]any{
+				"id":     input["invoice_id"],
+				"status": "open",
+			},
+		})
+		return json.Unmarshal(b, out)
+	case "invoices_send_payment_link":
+		b, _ := json.Marshal(map[string]any{
+			"url":               "https://checkout.stripe.test/session",
+			"stripe_session_id": "cs_test_123",
+		})
+		return json.Unmarshal(b, out)
 	case "invoices_get":
 		b, _ := json.Marshal(map[string]any{
 			"found": true,
@@ -48,6 +137,7 @@ func (p *platformStub) CallAppResult(appName, tool string, input map[string]any,
 					"plan_key":         "wordpress-starter",
 					"owner_email":      "owner@example.com",
 					"slug":             "paid-wp-sale",
+					"subscription_id":  int64(66),
 					"fulfillment_app":  "hosting",
 					"fulfillment_type": "hosting_tenant_provision",
 				},
@@ -149,8 +239,8 @@ func TestEmbeddedManifest_Valid(t *testing.T) {
 	if m.Name != "hosting" {
 		t.Errorf("manifest.Name=%q, want hosting", m.Name)
 	}
-	if m.Version != "1.4.0" {
-		t.Errorf("manifest.Version=%q, want 1.4.0", m.Version)
+	if m.Version != "1.5.0" {
+		t.Errorf("manifest.Version=%q, want 1.5.0", m.Version)
 	}
 	if m.DB == nil {
 		t.Fatal("manifest.DB missing")
@@ -188,6 +278,70 @@ func TestEmbeddedManifest_Valid(t *testing.T) {
 	}
 	if !containsString(gotEvents["subscriptions"], "subscription.cancelled") {
 		t.Errorf("manifest should subscribe to subscription lifecycle events, got %v", gotEvents["subscriptions"])
+	}
+}
+
+func TestCheckoutCreatePaidPlanCreatesSubscriptionInvoiceAndPaymentLink(t *testing.T) {
+	pf := &platformStub{}
+	ctx, db := newTestCtx(t, pf)
+	defer db.Close()
+
+	app := &App{}
+	got, err := app.toolCheckoutCreate(ctx, map[string]any{
+		"catalog_price_id": int64(99),
+		"owner_email":      "buyer@example.com",
+		"customer_name":    "Checkout Buyer",
+		"slug":             "checkout-apteva",
+		"success_url":      "https://example.com/success",
+		"cancel_url":       "https://example.com/cancel",
+	})
+	if err != nil {
+		t.Fatalf("checkout create: %v", err)
+	}
+	result := got.(map[string]any)
+	checkout := result["checkout"].(map[string]any)
+	if checkout["requires_payment"] != true || checkout["url"] != "https://checkout.stripe.test/session" {
+		t.Fatalf("unexpected checkout: %+v", checkout)
+	}
+	if result["tenant"] != nil {
+		t.Fatalf("paid checkout should wait for invoice.paid, got tenant %+v", result["tenant"])
+	}
+
+	wantCalls := []string{
+		"catalog:catalog_prices_get",
+		"catalog:catalog_products_get",
+		"billing:customers_upsert_by_email",
+		"subscriptions:subscriptions_create",
+		"billing:invoices_create",
+		"billing:invoices_finalize",
+		"billing:invoices_send_payment_link",
+	}
+	for _, want := range wantCalls {
+		parts := strings.Split(want, ":")
+		if !containsToolCall(pf.callAppCalls, parts[0], parts[1]) {
+			t.Fatalf("missing call %s in %+v", want, pf.callAppCalls)
+		}
+	}
+
+	var invoiceCall *callAppCall
+	var subCall *callAppCall
+	for i := range pf.callAppCalls {
+		if pf.callAppCalls[i].Tool == "invoices_create" {
+			invoiceCall = &pf.callAppCalls[i]
+		}
+		if pf.callAppCalls[i].Tool == "subscriptions_create" {
+			subCall = &pf.callAppCalls[i]
+		}
+	}
+	if invoiceCall == nil || int64Arg(mapArg(invoiceCall.Input, "metadata"), "subscription_id") != 66 {
+		t.Fatalf("invoice metadata missing subscription_id: %+v", invoiceCall)
+	}
+	if subCall == nil || subCall.Input["status"] != "past_due" {
+		t.Fatalf("subscription status should start past_due before payment: %+v", subCall)
+	}
+	line := invoiceCall.Input["line_items"].([]any)[0].(map[string]any)
+	if line["price_id"] != int64(99) {
+		t.Fatalf("invoice line should reference catalog price: %+v", line)
 	}
 }
 
@@ -413,7 +567,10 @@ func TestPaidInvoiceProvisionDrivesOrdersAndTenantProvisioning(t *testing.T) {
 	if tenant.PlanKey != "wordpress-starter" || tenant.Image != "wordpress:php8.3-apache" {
 		t.Fatalf("unexpected tenant plan/image: %+v", tenant)
 	}
-	wantCalls := []string{"billing:invoices_get", "orders:orders_create_from_invoice", "containers:containers_run", "orders:fulfillments_update"}
+	if tenant.SubscriptionID == nil || *tenant.SubscriptionID != 66 {
+		t.Fatalf("tenant subscription_id=%v, want 66", tenant.SubscriptionID)
+	}
+	wantCalls := []string{"billing:invoices_get", "orders:orders_create_from_invoice", "containers:containers_run", "orders:fulfillments_update", "subscriptions:subscriptions_update_status"}
 	var gotCalls []string
 	for _, c := range pf.callAppCalls {
 		gotCalls = append(gotCalls, c.App+":"+c.Tool)
@@ -445,6 +602,9 @@ func TestPaidInvoiceProvisionDrivesOrdersAndTenantProvisioning(t *testing.T) {
 	}
 	if containersCall == nil || containersCall.Input["health_path"] != "/wp-admin/setup-config.php" {
 		t.Fatalf("unexpected containers_run health path: %+v", containersCall)
+	}
+	if !containsToolCall(pf.callAppCalls, "subscriptions", "subscriptions_update_status") {
+		t.Fatalf("expected subscription active update, got %+v", pf.callAppCalls)
 	}
 }
 
