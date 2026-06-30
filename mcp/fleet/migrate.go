@@ -141,7 +141,7 @@ func (a *App) toolMigrate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err := a.store.setLocation(t.ID, targetID, baseURL, targetDir); err != nil {
 		if targetStarted {
 			if targetHost.IsLocal() {
-				_ = a.stopTenantBy(t.Slug, targetPort, 10*time.Second)
+				_ = a.stopTenantBy(t.Slug, targetDir, targetPort, 10*time.Second)
 			} else {
 				_ = stopHostedTenant(ctx, targetHost.InstanceID, targetPort, 10*time.Second)
 			}

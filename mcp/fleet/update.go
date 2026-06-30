@@ -318,11 +318,10 @@ func (a *App) toolUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	}
 
 	// Stop, respawn. stopTenantBy uses the in-memory handle when present
-	// AND falls back to "kill the pid currently listening on the port"
-	// when it isn't — so an update fired after a fleet sidecar upgrade
-	// (in-memory procs map cleared) still cleanly evicts the running
-	// tenant instead of leaving an orphan that owns the port.
-	if err := a.stopTenantBy(t.Slug, port, 10*time.Second); err != nil {
+	// and falls back to tenant-owned systemd scopes or a validated
+	// process tree. It deliberately avoids broad process-group kills
+	// from a port lookup, which can cross the parent service boundary.
+	if err := a.stopTenantBy(t.Slug, t.ConfigDir, port, 10*time.Second); err != nil {
 		return nil, fmt.Errorf("stop tenant: %w", err)
 	}
 	_, proc, spawnErr := a.spawnTenant(context.Background(), t.ID, t.Slug, t.ConfigDir, bin, port, false)

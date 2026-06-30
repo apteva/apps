@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -204,22 +205,17 @@ func stopProcess(p *tenantProc, grace time.Duration) error {
 // fleet's in-memory procs handle is empty — e.g., after a fleet
 // upgrade re-spawned the sidecar but left the tenant running.
 //
-// Resolves a pid (from in-memory handle if present, else by port),
-// then signals the WHOLE PROCESS GROUP (kill -PGID). The pgrp signal
-// is critical because a tenant is a 3-deep tree:
-//
-//	node /apteva (npm shim)
-//	  apteva  (Go CLI binary; acts as a watchdog)
-//	    apteva-server  (the actual listener)
-//
-// SIGTERM to the listener alone leaves the watchdog alive and it
-// respawns apteva-server; SIGTERM to the npm shim alone may not
-// propagate. The whole tree is in one pgrp (fleet sets Setpgid on the
-// outermost cmd), so kill -PGID cascades correctly.
+// The important safety rule is: never signal a process group inferred
+// from a port listener. In production a listener's process group can
+// cross an unexpected boundary and include the parent apteva service.
+// Instead we stop the tenant's own systemd scope when available, then
+// fall back to a validated process tree whose command line contains
+// the tenant data dir marker.
 //
 // Returns nil if no process is on the port (already stopped). Errors
-// only on unexpected signal failures.
-func (a *App) stopTenantBy(slug string, port int, grace time.Duration) error {
+// only when a listener remains but we cannot prove how to stop it
+// without risking unrelated processes.
+func (a *App) stopTenantBy(slug, configDir string, port int, grace time.Duration) error {
 	a.procMu.Lock()
 	p := a.procs[slug]
 	if p != nil {
@@ -228,49 +224,233 @@ func (a *App) stopTenantBy(slug string, port int, grace time.Duration) error {
 	}
 	a.procMu.Unlock()
 
-	// Pick the pid to signal. Handle's pid is preferred (we know it
-	// matches); port lookup is the orphan fallback.
-	var pid int
-	if p != nil && p.cmd != nil && p.cmd.Process != nil {
-		pid = p.cmd.Process.Pid
-	} else if port > 0 {
-		pid, _ = findPidOnPort(port)
+	if stopped, err := stopTenantScopes(slug, port, grace); err != nil {
+		return err
+	} else if stopped {
+		return nil
 	}
+
+	marker := tenantProcessMarker(slug, configDir)
+	if p != nil && p.cmd != nil && p.cmd.Process != nil {
+		if stopped, err := stopTenantProcessTree(p.cmd.Process.Pid, marker, port, grace); err != nil {
+			return err
+		} else if stopped {
+			return nil
+		}
+	}
+
+	if port <= 0 {
+		return nil
+	}
+	pid, _ := findPidOnPort(port)
 	if pid <= 0 {
 		return nil // nothing to stop
 	}
-
-	pgid, err := syscall.Getpgid(pid)
-	if err != nil || pgid <= 0 {
-		pgid = pid // fall back to single-pid signalling
-	}
-
-	// Graceful first: SIGTERM the whole pgrp, give the tree time to
-	// shut down cleanly, then verify by polling the port.
-	_ = syscall.Kill(-pgid, syscall.SIGTERM)
-	deadline := time.Now().Add(grace)
-	for time.Now().Before(deadline) {
-		if port == 0 || !portInUse(port) {
-			return nil
-		}
-		time.Sleep(250 * time.Millisecond)
-	}
-	// Hard kill on timeout. Signal the pgrp twice (kill -PGID and the
-	// leader directly) because some watchdogs catch and ignore the
-	// first round; SIGKILL can't be caught at all but the wait is what
-	// matters here.
-	_ = syscall.Kill(-pgid, syscall.SIGKILL)
-	_ = syscall.Kill(pid, syscall.SIGKILL)
-	for i := 0; i < 20; i++ { // up to 5s after SIGKILL
-		if port == 0 || !portInUse(port) {
-			return nil
-		}
-		time.Sleep(250 * time.Millisecond)
+	if stopped, err := stopTenantProcessTree(pid, marker, port, grace); err != nil {
+		return err
+	} else if stopped {
+		return nil
 	}
 	if port > 0 && portInUse(port) {
-		return fmt.Errorf("pid %d (pgrp %d) still listening on :%d after SIGKILL", pid, pgid, port)
+		return fmt.Errorf("pid %d still listening on :%d, but no tenant-owned scope or process tree matched %q", pid, port, marker)
 	}
 	return nil
+}
+
+func tenantProcessMarker(slug, configDir string) string {
+	if marker := strings.TrimSpace(configDir); marker != "" {
+		return marker
+	}
+	return string(os.PathSeparator) + ".apteva-fleet" + string(os.PathSeparator) + sanitizeUnit(slug)
+}
+
+func tenantScopePattern(slug string) string {
+	return "fleet-tenant-" + sanitizeUnit(slug) + "*.scope"
+}
+
+func stopTenantScopes(slug string, port int, grace time.Duration) (bool, error) {
+	systemctl, err := exec.LookPath("systemctl")
+	if err != nil || systemctl == "" {
+		return false, nil
+	}
+	units, err := listTenantScopeUnits(systemctl, slug)
+	if err != nil {
+		return false, err
+	}
+	if len(units) == 0 {
+		return false, nil
+	}
+	args := append([]string{"kill", "--signal=TERM"}, units...)
+	_ = exec.Command(systemctl, args...).Run()
+	if waitForPortFree(port, grace) {
+		return true, nil
+	}
+	args = append([]string{"kill", "--signal=KILL"}, units...)
+	_ = exec.Command(systemctl, args...).Run()
+	if waitForPortFree(port, 5*time.Second) {
+		return true, nil
+	}
+	return true, fmt.Errorf("tenant scope(s) %s still listening on :%d after SIGKILL", strings.Join(units, ","), port)
+}
+
+func listTenantScopeUnits(systemctl, slug string) ([]string, error) {
+	out, err := exec.Command(systemctl, "list-units", "--all", "--plain", "--no-legend", tenantScopePattern(slug)).Output()
+	if err != nil {
+		return nil, fmt.Errorf("list tenant scopes: %w", err)
+	}
+	var units []string
+	for _, line := range strings.Split(string(out), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			continue
+		}
+		unit := fields[0]
+		base := "fleet-tenant-" + sanitizeUnit(slug)
+		if unit == base+".scope" || (strings.HasPrefix(unit, base+"-") && strings.HasSuffix(unit, ".scope")) {
+			units = append(units, unit)
+		}
+	}
+	return units, nil
+}
+
+type procInfo struct {
+	pid     int
+	ppid    int
+	cmdline string
+}
+
+func stopTenantProcessTree(seedPID int, marker string, port int, grace time.Duration) (bool, error) {
+	if seedPID <= 0 {
+		return false, nil
+	}
+	procs, err := readProcTable()
+	if err != nil {
+		return false, nil // /proc is Linux-only; callers may still be on macOS.
+	}
+	root, ok := tenantTreeRoot(seedPID, marker, procs)
+	if !ok {
+		return false, nil
+	}
+	pids := procTreePIDs(root, procs)
+	signalPIDs(pids, syscall.SIGTERM)
+	if waitForPortFree(port, grace) {
+		return true, nil
+	}
+	signalPIDs(pids, syscall.SIGKILL)
+	if waitForPortFree(port, 5*time.Second) {
+		return true, nil
+	}
+	return true, fmt.Errorf("tenant process tree rooted at pid %d still listening on :%d after SIGKILL", root, port)
+}
+
+func readProcTable() (map[int]procInfo, error) {
+	entries, err := os.ReadDir("/proc")
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[int]procInfo)
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		pid, err := strconv.Atoi(entry.Name())
+		if err != nil || pid <= 0 {
+			continue
+		}
+		stat, err := os.ReadFile(filepath.Join("/proc", entry.Name(), "stat"))
+		if err != nil {
+			continue
+		}
+		ppid, ok := parseProcPPID(string(stat))
+		if !ok {
+			continue
+		}
+		rawCmd, _ := os.ReadFile(filepath.Join("/proc", entry.Name(), "cmdline"))
+		cmdline := strings.ReplaceAll(string(rawCmd), "\x00", " ")
+		out[pid] = procInfo{pid: pid, ppid: ppid, cmdline: strings.TrimSpace(cmdline)}
+	}
+	return out, nil
+}
+
+func parseProcPPID(stat string) (int, bool) {
+	end := strings.LastIndex(stat, ")")
+	if end < 0 || end+2 >= len(stat) {
+		return 0, false
+	}
+	fields := strings.Fields(stat[end+2:])
+	if len(fields) < 2 {
+		return 0, false
+	}
+	ppid, err := strconv.Atoi(fields[1])
+	return ppid, err == nil
+}
+
+func tenantTreeRoot(seedPID int, marker string, procs map[int]procInfo) (int, bool) {
+	marker = strings.TrimSpace(marker)
+	if marker == "" {
+		return 0, false
+	}
+	seen := map[int]bool{}
+	root := 0
+	for pid := seedPID; pid > 1 && !seen[pid]; {
+		seen[pid] = true
+		p, ok := procs[pid]
+		if !ok {
+			break
+		}
+		if strings.Contains(p.cmdline, marker) {
+			root = pid
+		}
+		pid = p.ppid
+	}
+	if root == 0 {
+		return 0, false
+	}
+	return root, true
+}
+
+func procTreePIDs(root int, procs map[int]procInfo) []int {
+	children := map[int][]int{}
+	for _, p := range procs {
+		children[p.ppid] = append(children[p.ppid], p.pid)
+	}
+	for ppid := range children {
+		sort.Ints(children[ppid])
+	}
+	var out []int
+	var walk func(int)
+	walk = func(pid int) {
+		for _, child := range children[pid] {
+			walk(child)
+		}
+		out = append(out, pid)
+	}
+	walk(root)
+	return out
+}
+
+func signalPIDs(pids []int, sig syscall.Signal) {
+	for _, pid := range pids {
+		if pid > 1 {
+			_ = syscall.Kill(pid, sig)
+		}
+	}
+}
+
+func waitForPortFree(port int, timeout time.Duration) bool {
+	if port == 0 {
+		return true
+	}
+	deadline := time.Now().Add(timeout)
+	for {
+		if !portInUse(port) {
+			return true
+		}
+		if time.Now().After(deadline) {
+			return false
+		}
+		time.Sleep(250 * time.Millisecond)
+	}
 }
 
 // findPidOnPort returns the pid of the process LISTENING on the given

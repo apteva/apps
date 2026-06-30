@@ -20,8 +20,8 @@ import (
 type keyring struct{ aead cipher.AEAD }
 
 // loadKeyring resolves the fleet master key in this order:
-//   1. FLEET_MASTER_KEY env var (base64-encoded 32 bytes)
-//   2. <DataDir>/master.key (auto-created with 32 random bytes on first run)
+//  1. FLEET_MASTER_KEY env var (base64-encoded 32 bytes)
+//  2. <DataDir>/master.key (auto-created with 32 random bytes on first run)
 //
 // The on-disk path is only as safe as the parent host's filesystem.
 // Operators wanting HSM/KMS-backed keys set FLEET_MASTER_KEY from a

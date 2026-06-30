@@ -87,7 +87,7 @@ func (a *App) toolFleetTenantSnapshot(ctx *sdk.AppCtx, args map[string]any) (any
 	port, _ := portFromBaseURL(t.BaseURL)
 	wasRunning := port > 0 && portInUse(port)
 	if wasRunning {
-		if err := a.stopTenantBy(t.Slug, port, 15*time.Second); err != nil {
+		if err := a.stopTenantBy(t.Slug, t.ConfigDir, port, 15*time.Second); err != nil {
 			return nil, fmt.Errorf("stop tenant for snapshot: %w", err)
 		}
 		defer a.restartTenantAfterBackup(ctx, t)
@@ -159,7 +159,7 @@ func (a *App) toolFleetTenantRestore(ctx *sdk.AppCtx, args map[string]any) (any,
 	port, _ := portFromBaseURL(t.BaseURL)
 	wasRunning := port > 0 && portInUse(port)
 	if wasRunning {
-		if err := a.stopTenantBy(t.Slug, port, 15*time.Second); err != nil {
+		if err := a.stopTenantBy(t.Slug, t.ConfigDir, port, 15*time.Second); err != nil {
 			return nil, fmt.Errorf("stop tenant for restore: %w", err)
 		}
 	}

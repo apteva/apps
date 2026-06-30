@@ -513,7 +513,7 @@ func (a *App) toolStop(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	// Local: stopTenantBy handles both paths: in-memory handle and
 	// orphan-pid-by-port (fleet was upgraded since the tenant spawned).
 	port, _ := portFromBaseURL(t.BaseURL)
-	if err := a.stopTenantBy(t.Slug, port, 10*time.Second); err != nil {
+	if err := a.stopTenantBy(t.Slug, t.ConfigDir, port, 10*time.Second); err != nil {
 		return nil, fmt.Errorf("stop: %w", err)
 	}
 	_ = a.store.setStatus(t.ID, StatusStopped, "user")
@@ -537,7 +537,7 @@ func (a *App) toolDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		if t.IsHosted() {
 			_ = stopHostedTenant(ctx, t.InstanceID, port, 10*time.Second)
 		} else {
-			_ = a.stopTenantBy(t.Slug, port, 10*time.Second)
+			_ = a.stopTenantBy(t.Slug, t.ConfigDir, port, 10*time.Second)
 		}
 		if !confirm {
 			// Process stopped but data dir preserved — let the operator

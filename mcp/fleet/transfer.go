@@ -79,7 +79,7 @@ func (a *App) stopTenantOnHost(ctx *sdk.AppCtx, t *Tenant, port int) {
 		return
 	}
 	if port > 0 {
-		_ = a.stopTenantBy(t.Slug, port, 10*time.Second)
+		_ = a.stopTenantBy(t.Slug, t.ConfigDir, port, 10*time.Second)
 	}
 	a.procMu.Lock()
 	delete(a.procs, t.Slug)

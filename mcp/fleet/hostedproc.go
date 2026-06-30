@@ -129,12 +129,12 @@ func instanceRunCommand(ctx *sdk.AppCtx, instanceID int64, cmd string, timeoutS 
 // hostedSpawnSpec captures everything spawnHosted needs. Built from
 // toolCreate's args + a fresh resolution of the target instance.
 type hostedSpawnSpec struct {
-	InstanceID  int64
-	InstanceIP  string
-	Slug        string
-	Port        int
-	AptevaVer   string // npm version, e.g. "0.17.3"
-	FreshSetup  bool   // first boot → scrape setup_token from log
+	InstanceID int64
+	InstanceIP string
+	Slug       string
+	Port       int
+	AptevaVer  string // npm version, e.g. "0.17.3"
+	FreshSetup bool   // first boot → scrape setup_token from log
 }
 
 // spawnHostedTenant boots a fresh apteva-server on the remote VPS.
@@ -351,7 +351,7 @@ func (a *App) pickHostedPort(instanceID int64, override int) int {
 }
 
 // sh wraps an argument in single quotes for safe shell interpolation.
-// Apostrophes get the standard `'\''` dance. Used everywhere we build
+// Apostrophes get the standard `'\”` dance. Used everywhere we build
 // commands for instance_run_command — keeps slugs / paths / versions
 // from being able to inject shell metacharacters.
 func sh(s string) string {
@@ -459,14 +459,14 @@ func (a *App) toolCreateHosted(ctx *sdk.AppCtx, args map[string]any, slug, owner
 		_ = a.store.recordEvent(t.ID, "auto_setup_failed", "user",
 			map[string]any{"error": err.Error()})
 		return map[string]any{
-			"tenant_id":         t.ID,
-			"slug":              slug,
-			"base_url":          baseURL,
-			"status":            StatusSetupPending,
-			"setup_url":         baseURL + "/?setup=1",
-			"setup_token":       setupToken,
-			"instance_id":       instanceID,
-			"auto_setup_error":  err.Error(),
+			"tenant_id":        t.ID,
+			"slug":             slug,
+			"base_url":         baseURL,
+			"status":           StatusSetupPending,
+			"setup_url":        baseURL + "/?setup=1",
+			"setup_token":      setupToken,
+			"instance_id":      instanceID,
+			"auto_setup_error": err.Error(),
 		}, nil
 	}
 
@@ -492,4 +492,3 @@ func (a *App) toolCreateHosted(ctx *sdk.AppCtx, args map[string]any, slug, owner
 		"target_version": version,
 	}, nil
 }
-
