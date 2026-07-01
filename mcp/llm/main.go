@@ -25,7 +25,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: llm
 display_name: LLM Gateway
-version: 0.1.0
+version: 0.1.1
 description: Managed AI API access for Apteva-hosted apps and agents.
 author: Apteva
 scopes: [project, global]
@@ -33,14 +33,8 @@ icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/llm/icon.svg
 requires:
   permissions:
     - db.write.app
-    - platform.apps.call
     - platform.connections.read
     - platform.connections.read_credentials
-  apps:
-    - name: billing
-      optional: true
-    - name: entitlements
-      optional: true
   integrations:
     - role: anthropic_provider
       kind: integration
@@ -91,7 +85,7 @@ provides:
     - name: llm.request.failed
       description: An LLM request failed.
     - name: llm.usage.recorded
-      description: Billable LLM usage was recorded.
+      description: LLM usage was recorded.
     - name: llm.spend_cap.exceeded
       description: A request was denied because the project spend cap was exceeded.
 runtime:
@@ -144,7 +138,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		a.httpClient = &http.Client{Timeout: 3 * time.Minute}
 	}
 	globalCtx = ctx
-	ctx.Logger().Info("llm gateway mounted", "version", "0.1.0", "scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
+	ctx.Logger().Info("llm gateway mounted", "version", "0.1.1", "scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
 	return nil
 }
 
@@ -300,7 +294,7 @@ func (a *App) handleV1(w http.ResponseWriter, r *http.Request) {
 	case r.Method == http.MethodPost && r.URL.Path == "/v1/responses":
 		a.handleV1Responses(ctx, ident, w, r)
 	case r.Method == http.MethodPost && r.URL.Path == "/v1/embeddings":
-		writeOpenAIError(w, http.StatusNotImplemented, "not_implemented", "embeddings are deferred in llm v0.1.0")
+		writeOpenAIError(w, http.StatusNotImplemented, "not_implemented", "embeddings are deferred in this LLM Gateway version")
 	default:
 		writeOpenAIError(w, http.StatusNotFound, "not_found", "unknown LLM endpoint")
 	}
@@ -358,7 +352,7 @@ func (a *App) handleV1Chat(ctx *sdk.AppCtx, ident *TokenIdentity, w http.Respons
 		return
 	}
 	if boolArg(body, "stream") {
-		writeOpenAIError(w, http.StatusBadRequest, "invalid_request_error", "streaming is deferred in llm v0.1.0")
+		writeOpenAIError(w, http.StatusBadRequest, "invalid_request_error", "streaming is deferred in this LLM Gateway version")
 		return
 	}
 	res, err := a.executeChat(ctx, ident, body)
@@ -506,7 +500,6 @@ func (a *App) executeChat(ctx *sdk.AppCtx, ident *TokenIdentity, body map[string
 	if status == "completed" {
 		ctx.EmitWithProject("llm.request.completed", ident.ProjectID, event)
 	}
-	recordEntitlementsUsage(ctx, ident, result)
 	return result, nil
 }
 
@@ -1120,33 +1113,6 @@ func enforcePreflightLimits(l Limits, usage *UsageSummary, estimatedInput int64)
 		return forbiddenError("monthly spend cap exceeded")
 	}
 	return nil
-}
-
-func recordEntitlementsUsage(ctx *sdk.AppCtx, ident *TokenIdentity, res *chatResult) {
-	if ctx == nil || ctx.PlatformAPI() == nil {
-		return
-	}
-	features := map[string]int64{
-		"llm.requests":      1,
-		"llm.tokens.input":  res.RequestTokens,
-		"llm.tokens.output": res.ResponseTokens,
-		"llm.spend.cents":   res.EstimatedCostCents,
-	}
-	for feature, qty := range features {
-		if qty <= 0 {
-			continue
-		}
-		var ignored map[string]any
-		_ = ctx.PlatformAPI().CallAppResult("entitlements", "usage_record", map[string]any{
-			"_project_id":     ident.ProjectID,
-			"project_id":      ident.ProjectID,
-			"subject_type":    ident.SubjectType,
-			"subject_id":      ident.SubjectID,
-			"feature_key":     feature,
-			"quantity":        qty,
-			"idempotency_key": "",
-		}, &ignored)
-	}
 }
 
 func openAIChatToAnthropic(body map[string]any) (map[string]any, error) {

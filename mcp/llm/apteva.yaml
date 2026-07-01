@@ -2,17 +2,17 @@ schema: apteva-app/v1
 
 name: llm
 display_name: LLM Gateway
-version: 0.1.0
+version: 0.1.1
 description: |
   Managed AI API access for Apteva-hosted apps and agents. Provides an
   OpenAI-compatible tenant-safe gateway that routes requests to configured
   model providers, enforces project policy and spend caps, tracks usage, and
-  emits billable usage events for Billing and Entitlements.
+  exposes usage records for orchestration apps to consume.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/llm
 icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/llm/icon.svg
-tags: [llm, ai, gateway, openai-compatible, usage, billing]
+tags: [llm, ai, gateway, openai-compatible, usage]
 
 scopes: [project, global]
 min_apteva_version: "0.11.0"
@@ -20,14 +20,8 @@ min_apteva_version: "0.11.0"
 requires:
   permissions:
     - db.write.app
-    - platform.apps.call
     - platform.connections.read
     - platform.connections.read_credentials
-  apps:
-    - name: billing
-      optional: true
-    - name: entitlements
-      optional: true
   integrations:
     - role: anthropic_provider
       kind: integration
@@ -83,7 +77,7 @@ provides:
     - name: llm.request.failed
       description: An LLM request failed before or during provider execution.
     - name: llm.usage.recorded
-      description: Billable LLM usage was recorded.
+      description: LLM usage was recorded.
     - name: llm.spend_cap.exceeded
       description: A request was denied because the project spend cap was exceeded.
     - name: llm.provider.failed
