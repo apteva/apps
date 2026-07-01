@@ -25,7 +25,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: llm
 display_name: LLM Gateway
-version: 0.1.2
+version: 0.1.3
 description: Managed AI API access for Apteva-hosted apps and agents.
 author: Apteva
 scopes: [project, global]
@@ -138,7 +138,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		a.httpClient = &http.Client{Timeout: 3 * time.Minute}
 	}
 	globalCtx = ctx
-	ctx.Logger().Info("llm gateway mounted", "version", "0.1.2", "scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
+	ctx.Logger().Info("llm gateway mounted", "version", "0.1.3", "scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
 	return nil
 }
 

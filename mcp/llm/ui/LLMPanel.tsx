@@ -17,6 +17,7 @@ interface ProviderConfig {
   key_ref?: string;
   enabled: boolean;
   priority: number;
+  source?: string;
 }
 
 interface Policy {
@@ -65,7 +66,8 @@ export default function LLMPanel({ projectId }: NativePanelProps) {
   const [token, setToken] = useState("");
   const [tokenSubjectType, setTokenSubjectType] = useState("agent");
   const [tokenSubjectId, setTokenSubjectId] = useState("manual-test");
-  const [model, setModel] = useState("openai/gpt-4.1");
+  const [selectedProvider, setSelectedProvider] = useState("");
+  const [modelId, setModelId] = useState("");
   const [prompt, setPrompt] = useState("Reply with one short sentence confirming the gateway works.");
   const [response, setResponse] = useState<any>(null);
   const [status, setStatus] = useState("");
@@ -91,7 +93,12 @@ export default function LLMPanel({ projectId }: NativePanelProps) {
         api<{ policy: Policy }>("/policy"),
         api<UsageSummary>("/usage"),
       ]);
-      setProviders(providerData.providers || []);
+      const nextProviders = providerData.providers || [];
+      setProviders(nextProviders);
+      setSelectedProvider((current) => {
+        if (nextProviders.some((p) => p.enabled && p.provider === current)) return current;
+        return nextProviders.find((p) => p.enabled)?.provider || current;
+      });
       setPolicy(policyData.policy || { project_id: projectId, limits: {} });
       setUsage(usageData);
       setStatus("");
@@ -102,11 +109,17 @@ export default function LLMPanel({ projectId }: NativePanelProps) {
 
   useEffect(() => { load(); }, [load]);
 
-  const providerModels = useMemo(() => {
-    const fromPolicy = policy.allowed_models || [];
-    if (fromPolicy.length > 0) return fromPolicy;
-    return providers.filter((p) => p.enabled).map((p) => `${p.provider}/*`);
-  }, [policy.allowed_models, providers]);
+  const activeProviders = useMemo(() => (
+    providers.filter((p) => p.enabled)
+  ), [providers]);
+
+  const modelSuggestions = useMemo(() => {
+    const prefix = `${selectedProvider}/`;
+    return (policy.allowed_models || [])
+      .filter((m) => m.startsWith(prefix))
+      .map((m) => m.slice(prefix.length))
+      .filter((m) => m && m !== "*");
+  }, [policy.allowed_models, selectedProvider]);
 
   const saveProvider = async () => {
     setBusy(true);
@@ -181,6 +194,7 @@ export default function LLMPanel({ projectId }: NativePanelProps) {
     setStatus("");
     setResponse(null);
     try {
+      const gatewayModel = modelForRequest(selectedProvider, modelId);
       const res = await fetch(`${API}/v1/chat/completions?project_id=${encodeURIComponent(projectId)}`, {
         method: "POST",
         credentials: "include",
@@ -189,7 +203,7 @@ export default function LLMPanel({ projectId }: NativePanelProps) {
           "Authorization": `Bearer ${token}`,
         },
         body: JSON.stringify({
-          model,
+          model: gatewayModel,
           messages: [{ role: "user", content: prompt }],
           max_tokens: 256,
         }),
@@ -227,15 +241,31 @@ export default function LLMPanel({ projectId }: NativePanelProps) {
       {tab === "test" && (
         <div className="flex-1 min-h-0 grid grid-cols-[minmax(380px,520px)_1fr]">
           <main className="overflow-auto p-4 border-r border-border space-y-3">
-            <Field label="Model">
+            <Field label="Provider">
+              <select
+                value={selectedProvider}
+                onChange={(e) => setSelectedProvider(e.target.value)}
+                disabled={activeProviders.length === 0}
+                className="w-full bg-bg-input border border-border rounded px-2 py-1.5 text-sm"
+              >
+                {activeProviders.length === 0 && <option value="">No enabled providers</option>}
+                {activeProviders.map((p) => (
+                  <option key={`${p.provider}:${p.connection_id || p.id || p.source || ""}`} value={p.provider}>
+                    {p.provider}{p.source === "bound_integration" ? " (bound integration)" : ""}
+                  </option>
+                ))}
+              </select>
+            </Field>
+            <Field label="Model ID">
               <input
-                value={model}
-                onChange={(e) => setModel(e.target.value)}
+                value={modelId}
+                onChange={(e) => setModelId(e.target.value)}
                 list="llm-models"
+                placeholder={selectedProvider ? `${selectedProvider} model id` : "Select a provider first"}
                 className="w-full bg-bg-input border border-border rounded px-2 py-1.5 text-sm font-mono"
               />
               <datalist id="llm-models">
-                {providerModels.map((m) => <option key={m} value={m} />)}
+                {modelSuggestions.map((m) => <option key={m} value={m} />)}
               </datalist>
             </Field>
             <Field label="Prompt">
@@ -246,7 +276,7 @@ export default function LLMPanel({ projectId }: NativePanelProps) {
               />
             </Field>
             <div className="flex items-center gap-2">
-              <button type="button" disabled={busy || !model || !prompt} onClick={runTest} className="px-3 py-1.5 text-sm bg-accent text-bg rounded disabled:opacity-50">
+              <button type="button" disabled={busy || !selectedProvider || !modelId || !prompt} onClick={runTest} className="px-3 py-1.5 text-sm bg-accent text-bg rounded disabled:opacity-50">
                 {busy ? "Running" : "Run"}
               </button>
               <button type="button" onClick={createToken} disabled={busy} className="px-3 py-1.5 text-sm border border-border rounded hover:bg-bg-input disabled:opacity-50">
@@ -410,4 +440,12 @@ function textFromList(values?: string[]): string {
 
 function pretty(value: unknown): string {
   return JSON.stringify(value ?? {}, null, 2);
+}
+
+function modelForRequest(provider: string, modelId: string): string {
+  const cleanProvider = provider.trim();
+  const cleanModel = modelId.trim();
+  if (!cleanProvider || !cleanModel) return cleanModel;
+  if (cleanModel.startsWith(`${cleanProvider}/`)) return cleanModel;
+  return `${cleanProvider}/${cleanModel}`;
 }

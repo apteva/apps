@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: llm
 display_name: LLM Gateway
-version: 0.1.2
+version: 0.1.3
 description: |
   Managed AI API access for Apteva-hosted apps and agents. Provides an
   OpenAI-compatible tenant-safe gateway that routes requests to configured
