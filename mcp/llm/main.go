@@ -25,7 +25,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: llm
 display_name: LLM Gateway
-version: 0.1.1
+version: 0.1.2
 description: Managed AI API access for Apteva-hosted apps and agents.
 author: Apteva
 scopes: [project, global]
@@ -138,7 +138,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		a.httpClient = &http.Client{Timeout: 3 * time.Minute}
 	}
 	globalCtx = ctx
-	ctx.Logger().Info("llm gateway mounted", "version", "0.1.1", "scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
+	ctx.Logger().Info("llm gateway mounted", "version", "0.1.2", "scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
 	return nil
 }
 
@@ -220,6 +220,7 @@ type ProviderConfig struct {
 	KeyRef       string          `json:"key_ref,omitempty"`
 	Enabled      bool            `json:"enabled"`
 	Priority     int             `json:"priority"`
+	Source       string          `json:"source,omitempty"`
 	Metadata     json.RawMessage `json:"metadata,omitempty"`
 	CreatedAt    string          `json:"created_at,omitempty"`
 	UpdatedAt    string          `json:"updated_at,omitempty"`
@@ -316,7 +317,7 @@ func (a *App) handleV1Models(ctx *sdk.AppCtx, ident *TokenIdentity, w http.Respo
 		data = append(data, map[string]any{"id": model, "object": "model", "owned_by": providerFromModel(model)})
 	}
 	if len(data) == 0 {
-		cfgs, _ := dbProviderConfigsList(ctx.AppDB(), ident.ProjectID)
+		cfgs, _ := providerConfigsList(ctx, ident.ProjectID)
 		for _, cfg := range cfgs {
 			if !cfg.Enabled || seen[cfg.Provider+"/*"] {
 				continue
@@ -456,7 +457,7 @@ func (a *App) executeChat(ctx *sdk.AppCtx, ident *TokenIdentity, body map[string
 		_ = dbAudit(ctx.AppDB(), ident, "request.denied", provider, model, "denied", err.Error(), nil)
 		return nil, err
 	}
-	cfg, err := dbProviderConfigFor(ctx.AppDB(), ident.ProjectID, provider)
+	cfg, err := providerConfigFor(ctx, ident.ProjectID, provider)
 	if err != nil {
 		_ = dbAudit(ctx.AppDB(), ident, "provider.missing", provider, model, "error", err.Error(), nil)
 		return nil, err
@@ -589,7 +590,7 @@ func (a *App) handleProviders(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
 		pid := projectFromRequest(r)
-		rows, err := dbProviderConfigsList(globalCtx.AppDB(), pid)
+		rows, err := providerConfigsList(globalCtx, pid)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -708,7 +709,7 @@ func (a *App) toolUsageGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 }
 
 func (a *App) toolProviderConfigsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	rows, err := dbProviderConfigsList(ctx.AppDB(), projectFromArgs(args))
+	rows, err := providerConfigsList(ctx, projectFromArgs(args))
 	if err != nil {
 		return nil, err
 	}
@@ -786,6 +787,19 @@ func dbProviderConfigUpsert(db *sql.DB, projectID string, args map[string]any) (
 	return dbProviderConfigFor(db, projectID, provider)
 }
 
+func providerConfigFor(ctx *sdk.AppCtx, projectID, provider string) (*ProviderConfig, error) {
+	if ctx == nil || ctx.AppDB() == nil {
+		return nil, errors.New("llm app context unavailable")
+	}
+	if cfg, err := dbProviderConfigFor(ctx.AppDB(), projectID, provider); err == nil {
+		return cfg, nil
+	}
+	if cfg := boundProviderConfig(ctx, projectID, provider); cfg != nil {
+		return cfg, nil
+	}
+	return nil, fmt.Errorf("no enabled provider config or bound provider integration for %q", provider)
+}
+
 func dbProviderConfigFor(db *sql.DB, projectID, provider string) (*ProviderConfig, error) {
 	row := db.QueryRow(`
 		SELECT id, project_id, provider, base_url, auth_mode, connection_id, key_ref, enabled, priority, metadata_json,
@@ -823,6 +837,64 @@ func dbProviderConfigsList(db *sql.DB, projectID string) ([]ProviderConfig, erro
 	return out, rows.Err()
 }
 
+func providerConfigsList(ctx *sdk.AppCtx, projectID string) ([]ProviderConfig, error) {
+	rows, err := dbProviderConfigsList(ctx.AppDB(), projectID)
+	if err != nil {
+		return nil, err
+	}
+	seen := map[string]bool{}
+	for _, row := range rows {
+		seen[row.Provider] = true
+	}
+	for provider := range providerIntegrationRoles() {
+		if seen[provider] {
+			continue
+		}
+		if cfg := boundProviderConfig(ctx, projectID, provider); cfg != nil {
+			rows = append(rows, *cfg)
+			seen[provider] = true
+		}
+	}
+	sort.SliceStable(rows, func(i, j int) bool {
+		if rows[i].Priority != rows[j].Priority {
+			return rows[i].Priority < rows[j].Priority
+		}
+		return rows[i].Provider < rows[j].Provider
+	})
+	return rows, nil
+}
+
+func boundProviderConfig(ctx *sdk.AppCtx, projectID, provider string) *ProviderConfig {
+	role := providerIntegrationRoles()[provider]
+	if role == "" || ctx == nil {
+		return nil
+	}
+	bound := ctx.IntegrationFor(role)
+	if bound == nil || bound.ConnectionID <= 0 {
+		return nil
+	}
+	return &ProviderConfig{
+		ProjectID:    projectID,
+		Provider:     provider,
+		BaseURL:      defaultBaseURL(provider),
+		AuthMode:     "customer_owned",
+		ConnectionID: bound.ConnectionID,
+		Enabled:      true,
+		Priority:     100,
+		Source:       "bound_integration",
+		Metadata:     json.RawMessage(`{}`),
+	}
+}
+
+func providerIntegrationRoles() map[string]string {
+	return map[string]string{
+		"anthropic":  "anthropic_provider",
+		"fireworks":  "fireworks_provider",
+		"openai":     "openai_provider",
+		"openrouter": "openrouter_provider",
+	}
+}
+
 type providerScanner interface {
 	Scan(dest ...any) error
 }
@@ -835,6 +907,7 @@ func scanProviderConfig(row providerScanner) (*ProviderConfig, error) {
 		return nil, err
 	}
 	cfg.Enabled = enabled != 0
+	cfg.Source = "configured"
 	cfg.Metadata = json.RawMessage(firstNonEmpty(meta, "{}"))
 	return &cfg, nil
 }

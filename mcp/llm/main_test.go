@@ -1,12 +1,14 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
+	sdk "github.com/apteva/app-sdk"
 	tk "github.com/apteva/app-sdk/testkit"
 )
 
@@ -133,3 +135,201 @@ func TestOpenAICompatibleRouteForwardsAndRecordsUsage(t *testing.T) {
 		t.Fatalf("usage = %+v", usage)
 	}
 }
+
+func TestBoundAnthropicIntegrationBecomesProviderRoute(t *testing.T) {
+	ctx := tk.NewAppCtx(t, "apteva.yaml",
+		tk.WithProjectID("proj-test"),
+		tk.WithPlatform(&llmPlatformStub{
+			identity: &sdk.InstallIdentity{Bindings: map[string]any{"anthropic_provider": float64(42)}},
+			credentials: map[int64]*sdk.ConnectionCredentials{
+				42: {ConnectionID: 42, Slug: "anthropic-api", Fields: map[string]string{"api_key": "sk-ant-test"}},
+			},
+		}),
+	)
+	app := &App{}
+	if err := app.OnMount(ctx); err != nil {
+		t.Fatalf("mount: %v", err)
+	}
+
+	cfg, err := providerConfigFor(ctx, "proj-test", "anthropic")
+	if err != nil {
+		t.Fatalf("provider config: %v", err)
+	}
+	if cfg.AuthMode != "customer_owned" || cfg.ConnectionID != 42 || cfg.Source != "bound_integration" {
+		t.Fatalf("cfg = %+v", cfg)
+	}
+	rows, err := providerConfigsList(ctx, "proj-test")
+	if err != nil {
+		t.Fatalf("provider list: %v", err)
+	}
+	found := false
+	for _, row := range rows {
+		if row.Provider == "anthropic" && row.ConnectionID == 42 {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("bound anthropic provider not listed: %+v", rows)
+	}
+}
+
+func TestBoundAnthropicIntegrationExecutesWithoutProviderRow(t *testing.T) {
+	var gotKey, gotModel string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/messages" {
+			t.Fatalf("path = %s", r.URL.Path)
+		}
+		gotKey = r.Header.Get("X-Api-Key")
+		var body map[string]any
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			t.Fatalf("decode upstream request: %v", err)
+		}
+		gotModel, _ = body["model"].(string)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"id":"msg_test",
+			"type":"message",
+			"role":"assistant",
+			"model":"claude-test",
+			"content":[{"type":"text","text":"bound provider works"}],
+			"usage":{"input_tokens":5,"output_tokens":4}
+		}`))
+	}))
+	defer upstream.Close()
+
+	ctx := tk.NewAppCtx(t, "apteva.yaml",
+		tk.WithProjectID("proj-test"),
+		tk.WithPlatform(&llmPlatformStub{
+			identity: &sdk.InstallIdentity{Bindings: map[string]any{"anthropic_provider": float64(42)}},
+			credentials: map[int64]*sdk.ConnectionCredentials{
+				42: {ConnectionID: 42, Slug: "anthropic-api", Fields: map[string]string{"api_key": "sk-ant-test"}},
+			},
+		}),
+	)
+	app := &App{httpClient: upstream.Client()}
+	if err := app.OnMount(ctx); err != nil {
+		t.Fatalf("mount: %v", err)
+	}
+	if _, err := dbPolicySet(ctx.AppDB(), "proj-test", map[string]any{
+		"allowed_models": []any{"anthropic/*"},
+	}); err != nil {
+		t.Fatalf("policy: %v", err)
+	}
+	cfg, err := providerConfigFor(ctx, "proj-test", "anthropic")
+	if err != nil {
+		t.Fatalf("provider config: %v", err)
+	}
+	cfg.BaseURL = upstream.URL
+
+	key, err := resolveProviderKey(ctx, cfg)
+	if err != nil {
+		t.Fatalf("provider key: %v", err)
+	}
+	res, err := app.callProvider(context.Background(), cfg, key, map[string]any{
+		"model": "anthropic/claude-test",
+		"messages": []any{
+			map[string]any{"role": "user", "content": "hello"},
+		},
+		"max_tokens": 64,
+	})
+	if err != nil {
+		t.Fatalf("call provider: %v", err)
+	}
+	if gotKey != "sk-ant-test" {
+		t.Fatalf("got key %q", gotKey)
+	}
+	if gotModel != "claude-test" {
+		t.Fatalf("got model %q", gotModel)
+	}
+	if res.RequestTokens != 5 || res.ResponseTokens != 4 {
+		t.Fatalf("usage tokens = %d/%d", res.RequestTokens, res.ResponseTokens)
+	}
+}
+
+type llmPlatformStub struct {
+	identity    *sdk.InstallIdentity
+	credentials map[int64]*sdk.ConnectionCredentials
+}
+
+func (p *llmPlatformStub) GetConnection(id int64) (*sdk.PlatformConnection, error) {
+	return &sdk.PlatformConnection{ID: id, AppSlug: "anthropic-api", Status: "connected", ProjectID: "proj-test"}, nil
+}
+func (p *llmPlatformStub) ListConnections(sdk.ConnectionFilter) ([]sdk.PlatformConnection, error) {
+	return nil, nil
+}
+func (p *llmPlatformStub) GetInstance(int64) (*sdk.PlatformInstance, error) { return nil, nil }
+func (p *llmPlatformStub) GetAgent(int64) (*sdk.PlatformAgent, error)       { return nil, nil }
+func (p *llmPlatformStub) SendEvent(int64, string) error                    { return nil }
+func (p *llmPlatformStub) SendToChannel(string, string, string) error       { return nil }
+func (p *llmPlatformStub) WhoAmI() (*sdk.InstallIdentity, error)            { return p.identity, nil }
+func (p *llmPlatformStub) ExecuteIntegrationTool(int64, string, map[string]any) (*sdk.ExecuteResult, error) {
+	return nil, nil
+}
+func (p *llmPlatformStub) CallApp(string, string, map[string]any) (json.RawMessage, error) {
+	return nil, nil
+}
+func (p *llmPlatformStub) CallAppResult(string, string, map[string]any, any) error {
+	return nil
+}
+func (p *llmPlatformStub) StartOAuth(sdk.OAuthStartRequest) (*sdk.OAuthStartResult, error) {
+	return nil, nil
+}
+func (p *llmPlatformStub) DisconnectConnection(int64) error { return nil }
+func (p *llmPlatformStub) ListOwnedConnections() ([]sdk.PlatformConnection, error) {
+	return nil, nil
+}
+func (p *llmPlatformStub) GetGrants(int64) (*sdk.GrantsResponse, error) { return nil, nil }
+func (p *llmPlatformStub) GetConnectionCredentials(id int64) (*sdk.ConnectionCredentials, error) {
+	return p.credentials[id], nil
+}
+func (p *llmPlatformStub) ListProjects() ([]sdk.PlatformProject, error) { return nil, nil }
+func (p *llmPlatformStub) SpawnRealtimeThread(sdk.RealtimeSpawnRequest) (*sdk.RealtimeSpawnResult, error) {
+	return nil, nil
+}
+func (p *llmPlatformStub) KillThread(string) error { return nil }
+func (p *llmPlatformStub) PlatformInfo() (*sdk.PlatformInfo, error) {
+	return &sdk.PlatformInfo{}, nil
+}
+func (p *llmPlatformStub) ExposeIngress(sdk.IngressExposeRequest) (*sdk.IngressRoute, error) {
+	return nil, nil
+}
+func (p *llmPlatformStub) UnexposeIngress(string) error { return nil }
+func (p *llmPlatformStub) ListIngressRoutes() ([]sdk.IngressRoute, error) {
+	return nil, nil
+}
+func (p *llmPlatformStub) ListDomainGrants() ([]sdk.DomainGrant, error) { return nil, nil }
+func (p *llmPlatformStub) UpsertDNSRecord(sdk.DNSRecordRequest) (*sdk.DNSRecordResult, error) {
+	return nil, nil
+}
+func (p *llmPlatformStub) DeleteDNSRecord(sdk.DNSRecordRequest) (*sdk.DNSRecordResult, error) {
+	return nil, nil
+}
+func (p *llmPlatformStub) ListEnvironments() ([]sdk.EnvironmentSummary, error) {
+	return nil, nil
+}
+func (p *llmPlatformStub) CreateEnvironment(sdk.EnvironmentCreateRequest) (*sdk.EnvironmentSummary, error) {
+	return nil, nil
+}
+func (p *llmPlatformStub) GetEnvironment(string) (*sdk.EnvironmentSummary, error) {
+	return nil, nil
+}
+func (p *llmPlatformStub) DestroyEnvironment(string) error { return nil }
+func (p *llmPlatformStub) SeedEnvironment(string, []sdk.EnvironmentSeedCall, string) ([]json.RawMessage, error) {
+	return nil, nil
+}
+func (p *llmPlatformStub) CallEnvironmentApp(string, string, string, map[string]any) (json.RawMessage, error) {
+	return nil, nil
+}
+func (p *llmPlatformStub) CallEnvironmentAppResult(string, string, string, map[string]any, any) error {
+	return nil
+}
+func (p *llmPlatformStub) SnapshotEnvironment(string, sdk.EnvironmentSnapshotRequest) (*sdk.EnvironmentSnapshot, error) {
+	return nil, nil
+}
+func (p *llmPlatformStub) ListEnvironmentAgents(string) ([]sdk.EnvironmentAgent, error) {
+	return nil, nil
+}
+func (p *llmPlatformStub) SpawnEnvironmentAgent(string, sdk.EnvironmentAgentSpawnRequest) (*sdk.EnvironmentAgent, error) {
+	return nil, nil
+}
+func (p *llmPlatformStub) StopEnvironmentAgent(string, string) error { return nil }
