@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: billing
 display_name: Billing
-version: 0.8.12
+version: 0.8.13
 description: |
   Customers, invoices, and payments for Apteva agents and human teams.
   Per-invoice provider — local for internal/wire/cash records, stripe
@@ -11,6 +11,8 @@ description: |
   Stripe provider via the integrations catalog. Lifecycle is explicit
   (draft → open → paid/void/uncollectible) with an append-only audit
   log per invoice.
+  v0.8.13 adds a generic prepared-line invoice creation tool for
+  upstream apps such as Subscriptions; Billing remains product-agnostic.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/billing
@@ -65,6 +67,8 @@ provides:
       description: Merge one customer into another. Reassigns invoices + payments.
     - name: invoices_create
       description: Create a DRAFT invoice with optional initial line items. Provider arg ('local' | 'stripe') falls back to install default. Provider is frozen after create.
+    - name: invoices_create_from_prepared_lines
+      description: Create an invoice from generic prepared line items produced by another app, optionally finalizing it.
     - name: invoices_add_line_item
       description: Append a line item to a DRAFT invoice. Errors on non-draft invoices.
     - name: invoices_finalize

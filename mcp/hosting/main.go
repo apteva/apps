@@ -24,7 +24,7 @@ import (
 //go:embed apteva.yaml
 var manifestYAML string
 
-const appVersion = "1.9.0"
+const appVersion = "1.10.0"
 
 const (
 	StatusProvisioning = "provisioning"

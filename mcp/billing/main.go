@@ -37,7 +37,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: billing
 display_name: Billing
-version: 0.8.12
+version: 0.8.13
 description: |
   Customers, invoices, and payments. Per-invoice provider — local for
   internal/wire/cash, stripe for card-payable hosted invoices.
@@ -116,7 +116,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	}
 
 	ctx.Logger().Info("billing mounted",
-		"version", "0.8.12",
+		"version", "0.8.13",
 		"scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
 	return nil
 }
@@ -322,6 +322,21 @@ func (a *App) MCPTools() []sdk.Tool {
 				"metadata":    map[string]any{"type": "object"},
 			}, []string{"customer_id"}),
 			Handler: a.toolInvoicesCreate,
+		},
+		{
+			Name:        "invoices_create_from_prepared_lines",
+			Description: "Create a Billing invoice from generic prepared line items produced by another app, optionally finalizing it. Billing stays product-agnostic; source details live in invoice/line metadata.",
+			InputSchema: schemaObject(map[string]any{
+				"customer_id": map[string]any{"type": "integer"},
+				"currency":    map[string]any{"type": "string"},
+				"provider":    map[string]any{"type": "string"},
+				"due_date":    map[string]any{"type": "string"},
+				"notes":       map[string]any{"type": "string"},
+				"line_items":  map[string]any{"type": "array"},
+				"metadata":    map[string]any{"type": "object"},
+				"finalize":    map[string]any{"type": "boolean"},
+			}, []string{"customer_id", "line_items"}),
+			Handler: a.toolInvoicesCreateFromPreparedLines,
 		},
 		{
 			Name:        "invoices_add_line_item",
@@ -801,6 +816,37 @@ func (a *App) toolInvoicesCreate(ctx *sdk.AppCtx, args map[string]any) (any, err
 	}
 	emitInvoice(ctx, "invoice.added", created)
 	return map[string]any{"invoice": created}, nil
+}
+
+func (a *App) toolInvoicesCreateFromPreparedLines(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	rawItems, _ := args["line_items"].([]any)
+	if len(rawItems) == 0 {
+		return nil, errors.New("line_items required")
+	}
+	createArgs := map[string]any{
+		"_project_id": strArg(args, "_project_id"),
+		"_caller":     callerActor(args),
+		"customer_id": int64Arg(args, "customer_id"),
+		"currency":    strArg(args, "currency"),
+		"provider":    strArg(args, "provider"),
+		"due_date":    strArg(args, "due_date"),
+		"notes":       strArg(args, "notes"),
+		"line_items":  rawItems,
+		"metadata":    args["metadata"],
+	}
+	out, err := a.toolInvoicesCreate(ctx, createArgs)
+	if err != nil {
+		return nil, err
+	}
+	inv := out.(map[string]any)["invoice"].(*Invoice)
+	if boolFromArg(args, "finalize") {
+		finalOut, err := a.toolInvoicesFinalize(ctx, map[string]any{"_project_id": strArg(args, "_project_id"), "_caller": callerActor(args), "invoice_id": inv.ID})
+		if err != nil {
+			return nil, err
+		}
+		return finalOut, nil
+	}
+	return out, nil
 }
 
 func (a *App) toolInvoicesAddLineItem(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -3209,6 +3255,21 @@ func strArg(args map[string]any, key string) string {
 		return v
 	}
 	return ""
+}
+
+func boolFromArg(args map[string]any, key string) bool {
+	if args == nil {
+		return false
+	}
+	switch v := args[key].(type) {
+	case bool:
+		return v
+	case string:
+		s := strings.ToLower(strings.TrimSpace(v))
+		return s == "true" || s == "1" || s == "yes"
+	default:
+		return false
+	}
 }
 
 func mapFromAny(v any) map[string]any {

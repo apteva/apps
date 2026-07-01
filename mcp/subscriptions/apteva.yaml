@@ -2,14 +2,16 @@ schema: apteva-app/v1
 
 name: subscriptions
 display_name: Subscriptions
-version: 0.1.3
+version: 0.2.0
 description: |
   Generic recurring-commerce lifecycle for SaaS, physical product
   subscriptions, and services. Subscriptions owns recurrence, status,
   current periods, renewal cycles, and references to the invoice,
   order, or entitlement produced by each cycle. Status updates emit
   specific lifecycle events such as subscription.active and
-  subscription.past_due for dependent apps.
+  subscription.past_due for dependent apps. v0.2.0 adds generic flat
+  and metered subscription items, idempotent usage records, usage
+  summaries, and subscription-period invoice preparation/creation.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/subscriptions
@@ -54,6 +56,12 @@ provides:
       description: Subscription entered paused status.
     - name: subscription.ended
       description: Subscription ended.
+    - name: subscription.item.created
+      description: A subscription item was created.
+    - name: subscription.usage.recorded
+      description: Metered subscription usage was recorded.
+    - name: subscription.invoice.requested
+      description: A subscription period invoice was requested.
   mcp_tools:
     - name: subscriptions_create
       description: Create a SaaS, physical, or service subscription with catalog-backed items.
@@ -67,6 +75,22 @@ provides:
       description: Update subscription status and period fields.
     - name: subscriptions_cancel
       description: Cancel a subscription immediately or at period end.
+    - name: subscription_items_create
+      description: Add a flat or metered item to a subscription.
+    - name: subscription_items_list
+      description: List subscription items.
+    - name: subscription_items_update
+      description: Patch item status, quantity, amount, included usage, unit size, or metadata.
+    - name: subscription_items_cancel
+      description: Cancel a subscription item.
+    - name: subscriptions_usage_record
+      description: Record idempotent metered usage against a subscription item.
+    - name: subscriptions_usage_summary
+      description: Summarize metered usage and billable overage for a subscription item and period.
+    - name: subscriptions_invoice_prepare
+      description: Prepare generic Billing line items for a subscription period.
+    - name: subscriptions_invoice_create
+      description: Create a Billing invoice from prepared subscription period lines.
     - name: subscription_cycles_create
       description: Record a renewal cycle and link invoice/order/entitlement outputs.
     - name: subscription_cycles_update

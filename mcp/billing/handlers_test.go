@@ -85,6 +85,42 @@ func line(desc string, qty float64, unitCents int64, taxBps int) map[string]any 
 	}
 }
 
+func TestInvoicesCreateFromPreparedLines(t *testing.T) {
+	ctx := newTestCtx(t)
+	app := &App{}
+	customer := mustCustomer(t, ctx, "metered@example.com", "Metered Co")
+
+	out, err := app.toolInvoicesCreateFromPreparedLines(ctx, map[string]any{
+		"customer_id": customer.ID,
+		"currency":    "USD",
+		"finalize":    true,
+		"line_items": []any{
+			map[string]any{
+				"description":      "LLM token overage",
+				"quantity":         3,
+				"unit_price_cents": 25,
+				"metadata": map[string]any{
+					"source_app":           "subscriptions",
+					"subscription_id":      9,
+					"subscription_item_id": 12,
+					"meter_key":            "llm.tokens",
+				},
+			},
+		},
+		"metadata": map[string]any{"source_app": "subscriptions", "subscription_id": 9},
+	})
+	if err != nil {
+		t.Fatalf("create from prepared lines: %v", err)
+	}
+	inv := out.(map[string]any)["invoice"].(*Invoice)
+	if inv.Status != "open" || inv.TotalCents != 75 {
+		t.Fatalf("invoice = %+v, want finalized 75 cent invoice", inv)
+	}
+	if len(inv.LineItems) != 1 || inv.LineItems[0].Description != "LLM token overage" {
+		t.Fatalf("line items = %+v", inv.LineItems)
+	}
+}
+
 // ─── Customers ──────────────────────────────────────────────────────
 
 func TestCustomerUpsertByEmail_CreatesThenDedupes(t *testing.T) {

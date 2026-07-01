@@ -142,6 +142,7 @@ func (a *App) toolUsageRecord(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		return nil, err
 	}
 	recordEntitlementUsage(ctx, tenant, feature, qty, idem, args["metadata"])
+	recordSubscriptionUsage(ctx, tenant, feature, qty, idem, args["metadata"])
 	return map[string]any{"recorded": true, "tenant_id": tenant.ID, "feature_key": feature, "quantity": qty}, nil
 }
 
@@ -184,6 +185,7 @@ func (a *App) handleLLMUsageRecorded(ctx *sdk.AppCtx, event sdk.Event) error {
 		return err
 	}
 	recordEntitlementUsage(ctx, tenant, feature, qty, idem, data)
+	recordSubscriptionUsage(ctx, tenant, feature, qty, idem, data)
 	_ = recordEvent(ctx.AppDB(), tenant.ID, "usage.recorded", "llm", map[string]any{"feature_key": feature, "quantity": qty, "idempotency_key": idem})
 	return nil
 }
@@ -237,6 +239,9 @@ func (a *App) enableAddon(ctx *sdk.AppCtx, args map[string]any) (*TenantAddon, m
 	if strings.HasPrefix(feature, "llm.") && addon.ExternalApp == "" {
 		addon.ExternalApp = "llm"
 	}
+	if err := ensureSubscriptionItem(ctx, addon, args); err != nil {
+		return nil, nil, err
+	}
 	credentials, err := provisionExternalAddon(ctx, addon, args)
 	if err != nil {
 		return nil, nil, err
@@ -253,6 +258,69 @@ func (a *App) enableAddon(ctx *sdk.AppCtx, args map[string]any) (*TenantAddon, m
 	grantEntitlement(ctx, saved)
 	_ = recordEvent(ctx.AppDB(), tenant.ID, "addon.active", "hosting", map[string]any{"addon_id": saved.ID, "addon_key": saved.AddonKey, "feature_key": saved.FeatureKey})
 	return saved, credentials, nil
+}
+
+func ensureSubscriptionItem(ctx *sdk.AppCtx, addon *TenantAddon, args map[string]any) error {
+	if addon == nil || addon.SubscriptionID == nil || *addon.SubscriptionID == 0 || addon.SubscriptionItemID != nil {
+		return nil
+	}
+	if ctx == nil || ctx.PlatformAPI() == nil {
+		return nil
+	}
+	title := firstNonEmpty(strArg(args, "title"), strArg(args, "name"), addon.AddonKey)
+	itemArgs := map[string]any{
+		"subscription_id":   *addon.SubscriptionID,
+		"title":             title,
+		"quantity":          1,
+		"unit_amount_cents": addon.UnitAmountCents,
+		"currency":          addon.Currency,
+		"billing_scheme":    "metered",
+		"meter_key":         addon.FeatureKey,
+		"included_units":    addon.IncludedQuantity,
+		"unit_size":         addon.UnitSize,
+		"product_id":        derefInt64(addon.OverageProductID),
+		"price_id":          derefInt64(addon.OveragePriceID),
+		"metadata": mergeMaps(mapFromAny(addon.Metadata), map[string]any{
+			"source_app":  "hosting",
+			"tenant_id":   addon.TenantID,
+			"addon_key":   addon.AddonKey,
+			"feature_key": addon.FeatureKey,
+		}),
+	}
+	out, err := callAppMap(ctx, "subscriptions", "subscription_items_create", withProject(ctx.CurrentProject(), itemArgs))
+	if err != nil {
+		return fmt.Errorf("create subscription item for addon: %w", err)
+	}
+	item := unwrapMap(out, "item")
+	if id := int64Arg(item, "id"); id > 0 {
+		addon.SubscriptionItemID = &id
+	}
+	return nil
+}
+
+func recordSubscriptionUsage(ctx *sdk.AppCtx, tenant *Tenant, feature string, qty int64, idem string, meta any) {
+	if ctx == nil || ctx.PlatformAPI() == nil || tenant == nil {
+		return
+	}
+	addon, err := dbAddonGetByTenantFeature(ctx.AppDB(), tenant.ID, feature)
+	if err != nil || addon == nil || addon.SubscriptionID == nil || *addon.SubscriptionID == 0 {
+		return
+	}
+	args := map[string]any{
+		"subscription_id": *addon.SubscriptionID,
+		"meter_key":       addon.FeatureKey,
+		"subject_type":    "hosting_tenant",
+		"subject_id":      tenant.ID,
+		"quantity":        qty,
+		"occurred_at":     time.Now().UTC().Format(time.RFC3339),
+		"idempotency_key": idem,
+		"metadata":        meta,
+	}
+	if addon.SubscriptionItemID != nil && *addon.SubscriptionItemID > 0 {
+		args["subscription_item_id"] = *addon.SubscriptionItemID
+	}
+	var out map[string]any
+	_ = ctx.PlatformAPI().CallAppResult("subscriptions", "subscriptions_usage_record", withProject(ctx.CurrentProject(), args), &out)
 }
 
 func provisionExternalAddon(ctx *sdk.AppCtx, addon *TenantAddon, args map[string]any) (map[string]any, error) {
@@ -339,13 +407,6 @@ func (a *App) createMeteredInvoice(ctx *sdk.AppCtx, args map[string]any) (*Meter
 	if err != nil {
 		return nil, nil, err
 	}
-	customer, err := dbCustomerGet(ctx.AppDB(), addon.CustomerID)
-	if err != nil || customer == nil {
-		return nil, nil, firstErr(err, errors.New("hosting customer not found"))
-	}
-	if customer.BillingCustomerID == nil || *customer.BillingCustomerID == 0 {
-		return nil, nil, errors.New("hosting customer has no billing_customer_id")
-	}
 	start, end, err := meteringWindow(args)
 	if err != nil {
 		return nil, nil, err
@@ -385,6 +446,46 @@ func (a *App) createMeteredInvoice(ctx *sdk.AppCtx, args map[string]any) (*Meter
 	if billable == 0 && !boolArg(args, "invoice_zero_usage") {
 		saved, err := dbMeteringPeriodUpsert(ctx.AppDB(), period)
 		return saved, map[string]any{"skipped": true, "reason": "no billable overage"}, err
+	}
+	if addon.SubscriptionID != nil && *addon.SubscriptionID > 0 {
+		invoiceArgs := map[string]any{
+			"subscription_id":    *addon.SubscriptionID,
+			"period_start":       period.PeriodStart,
+			"period_end":         period.PeriodEnd,
+			"provider":           firstNonEmpty(strArg(args, "provider"), "local"),
+			"due_date":           strArg(args, "due_date"),
+			"notes":              strArg(args, "notes"),
+			"finalize":           boolArg(args, "finalize"),
+			"include_flat":       boolArg(args, "include_flat"),
+			"include_metered":    true,
+			"invoice_zero_usage": boolArg(args, "invoice_zero_usage"),
+			"metadata": mergeMaps(mapFromAny(args["metadata"]), map[string]any{
+				"source_app":      "hosting",
+				"tenant_id":       addon.TenantID,
+				"addon_id":        addon.ID,
+				"subscription_id": *addon.SubscriptionID,
+			}),
+		}
+		invOut, err := callAppMap(ctx, "subscriptions", "subscriptions_invoice_create", withProject(ctx.CurrentProject(), invoiceArgs))
+		if err != nil {
+			return nil, nil, fmt.Errorf("create subscription invoice: %w", err)
+		}
+		invoiceID := invoiceIDFromResult(invOut)
+		period.InvoiceID = nullableInt64(invoiceID)
+		period.Status = "invoiced"
+		saved, err := dbMeteringPeriodUpsert(ctx.AppDB(), period)
+		if err != nil {
+			return nil, nil, err
+		}
+		_ = recordEvent(ctx.AppDB(), addon.TenantID, "metered_invoice.created", "hosting", map[string]any{"addon_id": addon.ID, "invoice_id": invoiceID, "billable_quantity": billable, "source_app": "subscriptions"})
+		return saved, invOut, nil
+	}
+	customer, err := dbCustomerGet(ctx.AppDB(), addon.CustomerID)
+	if err != nil || customer == nil {
+		return nil, nil, firstErr(err, errors.New("hosting customer not found"))
+	}
+	if customer.BillingCustomerID == nil || *customer.BillingCustomerID == 0 {
+		return nil, nil, errors.New("hosting customer has no billing_customer_id")
 	}
 	description := firstNonEmpty(strArg(args, "description"), fmt.Sprintf("%s overage %s to %s", addon.FeatureKey, start.Format("2006-01-02"), end.Format("2006-01-02")))
 	line := map[string]any{
@@ -505,6 +606,10 @@ func dbAddonGet(db *sql.DB, id int64) (*TenantAddon, error) {
 
 func dbAddonGetByTenantKey(db *sql.DB, tenantID, key string) (*TenantAddon, error) {
 	return scanAddon(db.QueryRow(addonSelect()+` WHERE tenant_id=? AND addon_key=?`, tenantID, key))
+}
+
+func dbAddonGetByTenantFeature(db *sql.DB, tenantID, feature string) (*TenantAddon, error) {
+	return scanAddon(db.QueryRow(addonSelect()+` WHERE tenant_id=? AND feature_key=? AND status IN (?, ?) ORDER BY id DESC LIMIT 1`, tenantID, feature, AddonStatusActive, AddonStatusSuspended))
 }
 
 func dbAddonList(db *sql.DB, args map[string]any) ([]*TenantAddon, error) {

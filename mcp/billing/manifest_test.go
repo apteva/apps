@@ -68,7 +68,7 @@ func TestMCPTools_ManifestMatchesHandlers(t *testing.T) {
 	want := []string{
 		"customers_search", "customers_get", "customers_get_context",
 		"customers_upsert_by_email", "customers_update", "customers_merge",
-		"invoices_create", "invoices_add_line_item", "invoices_update",
+		"invoices_create", "invoices_create_from_prepared_lines", "invoices_add_line_item", "invoices_update",
 		"invoices_finalize", "invoices_void", "invoices_get", "invoices_search",
 		"invoices_render_pdf", "invoices_send_payment_link",
 		"payments_record", "payments_list",

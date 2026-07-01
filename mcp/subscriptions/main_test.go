@@ -53,6 +53,101 @@ func TestSubscriptionLifecycle(t *testing.T) {
 	}
 }
 
+func TestMeteredSubscriptionUsageAndInvoicePrepare(t *testing.T) {
+	rec := tk.NewEmitRecorder()
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("proj-test"), tk.WithEmitter(rec))
+	app := &App{}
+
+	created, err := app.toolSubscriptionsCreate(ctx, map[string]any{
+		"customer_id":    int64(77),
+		"customer_email": "buyer@example.com",
+		"kind":           "service",
+		"currency":       "USD",
+		"items": []any{
+			map[string]any{"title": "Hosting base", "quantity": 1, "unit_amount_cents": 1900, "currency": "USD"},
+		},
+	})
+	if err != nil {
+		t.Fatalf("create subscription: %v", err)
+	}
+	sub := created.(map[string]any)["subscription"].(*Subscription)
+	itemOut, err := app.toolSubscriptionItemsCreate(ctx, map[string]any{
+		"subscription_id":   sub.ID,
+		"title":             "Managed LLM",
+		"billing_scheme":    "metered",
+		"meter_key":         "llm.tokens",
+		"included_units":    int64(1000),
+		"unit_size":         int64(1000),
+		"unit_amount_cents": int64(25),
+		"currency":          "USD",
+	})
+	if err != nil {
+		t.Fatalf("create metered item: %v", err)
+	}
+	item := itemOut.(map[string]any)["item"].(*SubItem)
+	if item.BillingScheme != "metered" || item.MeterKey != "llm.tokens" {
+		t.Fatalf("item = %+v", item)
+	}
+
+	usageArgs := map[string]any{
+		"subscription_item_id": item.ID,
+		"quantity":             int64(2500),
+		"subject_type":         "hosting_tenant",
+		"subject_id":           "tenant-1",
+		"occurred_at":          "2026-06-15T00:00:00Z",
+		"idempotency_key":      "usage-1",
+	}
+	first, err := app.toolSubscriptionsUsageRecord(ctx, usageArgs)
+	if err != nil {
+		t.Fatalf("record usage: %v", err)
+	}
+	if first.(map[string]any)["usage"].(*UsageRecord).Deduped {
+		t.Fatalf("first usage should not be deduped")
+	}
+	second, err := app.toolSubscriptionsUsageRecord(ctx, usageArgs)
+	if err != nil {
+		t.Fatalf("record duplicate usage: %v", err)
+	}
+	if !second.(map[string]any)["usage"].(*UsageRecord).Deduped {
+		t.Fatalf("duplicate usage should be deduped")
+	}
+
+	summaryOut, err := app.toolSubscriptionsUsageSummary(ctx, map[string]any{
+		"subscription_item_id": item.ID,
+		"period_start":         "2026-06-01",
+		"period_end":           "2026-07-01",
+	})
+	if err != nil {
+		t.Fatalf("usage summary: %v", err)
+	}
+	summary := summaryOut.(map[string]any)["summary"].(*UsageSummary)
+	if summary.TotalQuantity != 2500 || summary.BillableQuantity != 1500 || summary.QuantityUnits != 2 {
+		t.Fatalf("summary = %+v", summary)
+	}
+
+	prepared, err := app.toolSubscriptionsInvoicePrepare(ctx, map[string]any{
+		"subscription_id": sub.ID,
+		"period_start":    "2026-06-01",
+		"period_end":      "2026-07-01",
+		"include_flat":    false,
+		"include_metered": true,
+	})
+	if err != nil {
+		t.Fatalf("invoice prepare: %v", err)
+	}
+	lines := prepared.(map[string]any)["line_items"].([]any)
+	if len(lines) != 1 {
+		t.Fatalf("line count=%d, want 1", len(lines))
+	}
+	line := lines[0].(map[string]any)
+	if line["quantity"] != float64(2) || line["unit_price_cents"] != int64(25) {
+		t.Fatalf("prepared line = %+v", line)
+	}
+	if got := rec.EventsByTopic("subscription.usage.recorded"); len(got) != 2 {
+		t.Fatalf("usage events=%d, want 2", len(got))
+	}
+}
+
 func TestUpdateStatusEmitsLifecycleEvent(t *testing.T) {
 	rec := tk.NewEmitRecorder()
 	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("proj-test"), tk.WithEmitter(rec))
