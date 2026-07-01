@@ -3,6 +3,7 @@ package main
 import (
 	"database/sql"
 	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -18,12 +19,18 @@ func newTestDB(t *testing.T) *sql.DB {
 	if err != nil {
 		t.Fatalf("open db: %v", err)
 	}
-	mig, err := os.ReadFile("migrations/001_init.sql")
+	matches, err := filepath.Glob("migrations/*.sql")
 	if err != nil {
-		t.Fatalf("read migration: %v", err)
+		t.Fatalf("list migrations: %v", err)
 	}
-	if _, err := db.Exec(string(mig)); err != nil {
-		t.Fatalf("apply migration: %v", err)
+	for _, path := range matches {
+		mig, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatalf("read migration %s: %v", path, err)
+		}
+		if _, err := db.Exec(string(mig)); err != nil {
+			t.Fatalf("apply migration %s: %v", path, err)
+		}
 	}
 	t.Cleanup(func() { db.Close() })
 	return db
@@ -197,6 +204,21 @@ func TestPriceCreate_HappyPathBothTypes(t *testing.T) {
 	if rec.Interval != "month" || rec.TrialDays != 14 || rec.IntervalCount != 1 {
 		t.Errorf("unexpected recurring: %+v", rec)
 	}
+	metered, err := dbPriceCreate(db, testPID, prod.ID, map[string]any{
+		"nickname":          "LLM overage",
+		"unit_amount_cents": 200,
+		"currency":          "EUR",
+		"billing_scheme":    "metered",
+		"meter_key":         "llm.tokens",
+		"unit_label":        "1K tokens",
+		"unit_size":         1000,
+	})
+	if err != nil {
+		t.Fatalf("metered create: %v", err)
+	}
+	if metered.BillingScheme != "metered" || metered.MeterKey != "llm.tokens" || metered.UnitSize != 1000 {
+		t.Errorf("unexpected metered price: %+v", metered)
+	}
 }
 
 // Critical invariant: prices are immutable for financial fields.
@@ -207,7 +229,7 @@ func TestPriceUpdate_RejectsFinancialFieldChanges(t *testing.T) {
 	p, _ := dbPriceCreate(db, testPID, prod.ID, map[string]any{
 		"unit_amount_cents": 2900, "currency": "EUR", "interval": "month",
 	})
-	locked := []string{"unit_amount_cents", "currency", "interval", "interval_count", "trial_days", "product_id"}
+	locked := []string{"unit_amount_cents", "currency", "interval", "interval_count", "trial_days", "product_id", "billing_scheme", "meter_key", "unit_label", "unit_size"}
 	for _, field := range locked {
 		t.Run(field, func(t *testing.T) {
 			_, err := dbPriceUpdate(db, testPID, p.ID, map[string]any{field: "x"})

@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: hosting
 display_name: Hosting
-version: 1.8.0
+version: 1.9.0
 description: |
   Managed container-backed hosting control plane. Hosting provisions and
   operates hosted Apteva tenants on top of the generic Containers app,
@@ -49,6 +49,10 @@ requires:
       optional: true
     - name: auth
       optional: true
+    - name: llm
+      optional: true
+      events:
+        - llm.usage.recorded
 
 provides:
   http_routes:
@@ -86,10 +90,22 @@ provides:
       description: Probe and fetch hosted tenant health.
     - name: hosting_usage_get
       description: Return usage totals for a tenant or customer.
+    - name: hosting_usage_record
+      description: Record generic tenant usage and mirror it to Entitlements when installed.
     - name: hosting_usage_sync
       description: Sync generic runtime usage gauges from dependent apps and enforce hosting plan limits.
     - name: hosting_subscription_sync
       description: Apply a subscription status to a tenant lifecycle state.
+    - name: hosting_addon_enable
+      description: Enable a generic tenant add-on and orchestrate external app access when needed.
+    - name: hosting_addon_list
+      description: List tenant add-ons.
+    - name: hosting_addon_suspend
+      description: Suspend a tenant add-on and its external subject where supported.
+    - name: hosting_addon_resume
+      description: Resume a tenant add-on and its external subject where supported.
+    - name: hosting_metered_invoice_create
+      description: Aggregate metered overage and create a generic Billing invoice.
   ui_panels:
     - slot: project.page
       label: Hosting

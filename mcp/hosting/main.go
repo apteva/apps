@@ -24,7 +24,7 @@ import (
 //go:embed apteva.yaml
 var manifestYAML string
 
-const appVersion = "1.8.0"
+const appVersion = "1.9.0"
 
 const (
 	StatusProvisioning = "provisioning"
@@ -73,6 +73,7 @@ func (a *App) EventHandlers() []sdk.EventHandler {
 		{Event: "subscription.cancelled", Handler: a.handleSubscriptionEvent},
 		{Event: "subscription.paused", Handler: a.handleSubscriptionEvent},
 		{Event: "subscription.ended", Handler: a.handleSubscriptionEvent},
+		{Event: "llm.usage.recorded", Handler: a.handleLLMUsageRecorded},
 	}
 }
 
@@ -97,6 +98,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/customers", Handler: a.handleCustomers},
 		{Pattern: "/tenants", Handler: a.handleTenants},
 		{Pattern: "/tenants/", Handler: a.handleTenantItem},
+		{Pattern: "/addons", Handler: a.handleAddons},
 		{Pattern: "/usage", Handler: a.handleUsage},
 	}
 }
@@ -108,14 +110,14 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "hosting_customer_create", Description: "Find or create a hosting customer by email.", InputSchema: schemaObject(map[string]any{"email": strSchema(), "name": strSchema(), "billing_customer_id": intSchema(), "metadata": objSchema()}, []string{"email"}), Handler: a.toolCustomerCreate},
 		{Name: "hosting_checkout_create", Description: "Create a Hosting-owned sale/checkout from a Catalog price or free hosting plan. Paid plans create Billing and Subscription records; free plans provision immediately.", InputSchema: schemaObject(map[string]any{
 			"catalog_price_id": intSchema(), "price_id": intSchema(), "owner_email": strSchema(), "customer_email": strSchema(), "customer_name": strSchema(),
-			"slug": strSchema(), "plan_key": strSchema(), "product_key": strSchema(), "runtime_config": objSchema(), "metadata": objSchema(),
+			"slug": strSchema(), "plan_key": strSchema(), "product_key": strSchema(), "runtime_config": objSchema(), "metadata": objSchema(), "addons": arraySchema(),
 			"success_url": strSchema(), "cancel_url": strSchema(), "provider": strSchema(), "create_payment_link": boolSchema(),
 			"trial_days": intSchema(), "trial_requires_payment_method": boolSchema(),
 		}, []string{"owner_email", "slug"}), Handler: a.toolCheckoutCreate},
 		{Name: "hosting_tenant_create", Description: "Provision a hosted Apteva tenant container and default hostname.", InputSchema: schemaObject(map[string]any{
 			"customer_id": intSchema(), "customer_email": strSchema(), "customer_name": strSchema(),
 			"owner_email": strSchema(), "slug": strSchema(), "plan_key": strSchema(), "product_key": strSchema(),
-			"subscription_id": intSchema(), "order_id": intSchema(), "fulfillment_id": intSchema(), "apteva_version": strSchema(), "image": strSchema(), "runtime_config": objSchema(), "metadata": objSchema(),
+			"subscription_id": intSchema(), "order_id": intSchema(), "fulfillment_id": intSchema(), "apteva_version": strSchema(), "image": strSchema(), "runtime_config": objSchema(), "metadata": objSchema(), "addons": arraySchema(),
 		}, []string{"owner_email", "slug"}), Handler: a.toolTenantCreate},
 		{Name: "hosting_paid_invoice_provision", Description: "Given a paid Billing invoice for a hosting product, create/claim the generic Orders record and provision the tenant. Args: invoice_id, owner_email, slug, plan_key, product_key, runtime_config, metadata.", InputSchema: schemaObject(map[string]any{
 			"invoice_id": intSchema(), "owner_email": strSchema(), "slug": strSchema(), "plan_key": strSchema(), "product_key": strSchema(),
@@ -124,7 +126,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "hosting_fulfillment_provision", Description: "Provision a tenant for an Orders generic fulfillment and report success/failure back to Orders. Args: order_id, fulfillment_id, owner_email, slug, plan_key, product_key, runtime_config, metadata.", InputSchema: schemaObject(map[string]any{
 			"order_id": intSchema(), "fulfillment_id": intSchema(), "customer_id": intSchema(), "customer_email": strSchema(), "customer_name": strSchema(),
 			"owner_email": strSchema(), "slug": strSchema(), "plan_key": strSchema(), "product_key": strSchema(),
-			"subscription_id": intSchema(), "apteva_version": strSchema(), "image": strSchema(), "runtime_config": objSchema(), "metadata": objSchema(),
+			"subscription_id": intSchema(), "apteva_version": strSchema(), "image": strSchema(), "runtime_config": objSchema(), "metadata": objSchema(), "addons": arraySchema(),
 		}, []string{"order_id", "fulfillment_id", "owner_email", "slug"}), Handler: a.toolFulfillmentProvision},
 		{Name: "hosting_tenant_get", Description: "Fetch one hosted tenant.", InputSchema: tenantIDSchema(), Handler: a.toolTenantGet},
 		{Name: "hosting_tenant_list", Description: "List hosted tenants.", InputSchema: schemaObject(map[string]any{"customer_id": intSchema(), "status": strSchema(), "plan_key": strSchema()}, nil), Handler: a.toolTenantList},
@@ -135,8 +137,19 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "hosting_tenant_logs", Description: "Tail hosted tenant logs.", InputSchema: schemaObject(map[string]any{"tenant_id": strSchema(), "tail": intSchema()}, []string{"tenant_id"}), Handler: a.toolTenantLogs},
 		{Name: "hosting_tenant_health", Description: "Probe hosted tenant health.", InputSchema: tenantIDSchema(), Handler: a.toolTenantHealth},
 		{Name: "hosting_usage_get", Description: "Return usage totals.", InputSchema: schemaObject(map[string]any{"tenant_id": strSchema(), "customer_id": intSchema(), "feature_key": strSchema()}, nil), Handler: a.toolUsageGet},
+		{Name: "hosting_usage_record", Description: "Record generic tenant usage and mirror it to Entitlements when installed.", InputSchema: schemaObject(map[string]any{"tenant_id": strSchema(), "feature_key": strSchema(), "quantity": intSchema(), "idempotency_key": strSchema(), "metadata": objSchema()}, []string{"tenant_id", "feature_key"}), Handler: a.toolUsageRecord},
 		{Name: "hosting_usage_sync", Description: "Sync generic runtime usage gauges from dependent apps and enforce hosting plan limits.", InputSchema: schemaObject(map[string]any{"tenant_id": strSchema(), "actor": strSchema()}, nil), Handler: a.toolUsageSync},
 		{Name: "hosting_subscription_sync", Description: "Apply a subscription status to a tenant.", InputSchema: schemaObject(map[string]any{"tenant_id": strSchema(), "subscription_status": strSchema(), "actor": strSchema()}, []string{"tenant_id", "subscription_status"}), Handler: a.toolSubscriptionSync},
+		{Name: "hosting_addon_enable", Description: "Enable a generic tenant add-on and orchestrate external app access when needed.", InputSchema: schemaObject(map[string]any{
+			"tenant_id": strSchema(), "addon_key": strSchema(), "feature_key": strSchema(), "included_quantity": intSchema(), "reset_interval": strSchema(),
+			"catalog_product_id": intSchema(), "catalog_price_id": intSchema(), "overage_product_id": intSchema(), "overage_price_id": intSchema(),
+			"subscription_id": intSchema(), "subscription_item_id": intSchema(), "unit_amount_cents": intSchema(), "unit_size": intSchema(), "currency": strSchema(),
+			"external_app": strSchema(), "external_subject_type": strSchema(), "external_subject_id": strSchema(), "limits": objSchema(), "llm_policy": objSchema(), "metadata": objSchema(),
+		}, []string{"tenant_id", "feature_key"}), Handler: a.toolAddonEnable},
+		{Name: "hosting_addon_list", Description: "List tenant add-ons.", InputSchema: schemaObject(map[string]any{"tenant_id": strSchema(), "customer_id": intSchema(), "subscription_id": intSchema(), "status": strSchema()}, nil), Handler: a.toolAddonList},
+		{Name: "hosting_addon_suspend", Description: "Suspend one tenant add-on and its external subject where supported.", InputSchema: schemaObject(map[string]any{"addon_id": intSchema(), "actor": strSchema()}, []string{"addon_id"}), Handler: a.toolAddonSuspend},
+		{Name: "hosting_addon_resume", Description: "Resume one tenant add-on and its external subject where supported.", InputSchema: schemaObject(map[string]any{"addon_id": intSchema(), "actor": strSchema()}, []string{"addon_id"}), Handler: a.toolAddonResume},
+		{Name: "hosting_metered_invoice_create", Description: "Aggregate a tenant add-on's metered overage for a period and create a generic Billing invoice line item.", InputSchema: schemaObject(map[string]any{"addon_id": intSchema(), "period_start": strSchema(), "period_end": strSchema(), "included_quantity": intSchema(), "unit_amount_cents": intSchema(), "unit_size": intSchema(), "currency": strSchema(), "description": strSchema(), "provider": strSchema(), "finalize": boolSchema(), "round_up_units": boolSchema(), "invoice_zero_usage": boolSchema(), "metadata": objSchema()}, []string{"addon_id"}), Handler: a.toolMeteredInvoiceCreate},
 	}
 }
 
@@ -330,6 +343,9 @@ func (a *App) toolCheckoutCreate(ctx *sdk.AppCtx, args map[string]any) (any, err
 	if len(runtimeConfig) > 0 {
 		saleMeta["runtime_config"] = runtimeConfig
 	}
+	if addons := arrayFromAny(args["addons"]); len(addons) > 0 {
+		saleMeta["addons"] = addons
+	}
 	if priceID != 0 {
 		saleMeta["catalog_price_id"] = priceID
 	}
@@ -446,6 +462,7 @@ func (a *App) toolCheckoutCreate(ctx *sdk.AppCtx, args map[string]any) (any, err
 			"subscription_id": subscriptionID,
 			"runtime_config":  runtimeConfig,
 			"metadata":        saleMeta,
+			"addons":          saleMeta["addons"],
 			"_project_id":     projectID,
 		})
 		if err != nil {
@@ -699,6 +716,7 @@ func (a *App) toolTenantSuspend(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	if err != nil {
 		return nil, err
 	}
+	_ = suspendTenantAddons(ctx, t.ID)
 	_ = recordEvent(ctx.AppDB(), t.ID, "suspended", "tool", nil)
 	return map[string]any{"tenant": t}, nil
 }
@@ -718,6 +736,7 @@ func (a *App) toolTenantResume(ctx *sdk.AppCtx, args map[string]any) (any, error
 	if err != nil {
 		return nil, err
 	}
+	_ = resumeTenantAddons(ctx, t.ID)
 	_ = recordEvent(ctx.AppDB(), t.ID, "resumed", "tool", nil)
 	return map[string]any{"tenant": t}, nil
 }
@@ -1328,6 +1347,21 @@ func (a *App) provisionTenant(ctx *sdk.AppCtx, args map[string]any) (*Tenant, er
 	_ = recordEvent(ctx.AppDB(), tenant.ID, "ingress.active", "platform", map[string]any{"hostname": route.Hostname, "target": route.Target})
 	_ = recordEvent(ctx.AppDB(), tenant.ID, "provisioning.active", "tool", map[string]any{"workload_id": workload.ID})
 	_ = a.ensureTenantAuth(ctx, tenant, customer, metadata, runtimeConfig)
+	addons := arrayFromAny(args["addons"])
+	if len(addons) == 0 {
+		addons = arrayFromAny(metadata["addons"])
+	}
+	if len(addons) > 0 {
+		addonBase := map[string]any{
+			"subscription_id": derefInt64(tenant.SubscriptionID),
+			"metadata":        map[string]any{"source_app": "hosting", "tenant_id": tenant.ID, "plan_key": tenant.PlanKey, "product_key": product.Key},
+		}
+		if _, err := a.enableTenantAddons(ctx, tenant, addons, addonBase); err != nil {
+			_, _ = dbTenantSetStatus(ctx.AppDB(), tenant.ID, StatusFailed, err.Error())
+			_ = recordEvent(ctx.AppDB(), tenant.ID, "addon.provision_failed", "hosting", map[string]any{"error": err.Error()})
+			return nil, err
+		}
+	}
 	return dbTenantGet(ctx.AppDB(), tenant.ID)
 }
 
@@ -2143,9 +2177,9 @@ func recordUsage(db *sql.DB, tenantID string, customerID int64, feature string, 
 	if feature == "" {
 		return errors.New("feature_key required")
 	}
-	_, err := db.Exec(`INSERT INTO hosting_usage_events (tenant_id, customer_id, feature_key, quantity, idempotency_key, metadata_json) VALUES (?, ?, ?, ?, ?, ?)`,
-		nullStr(tenantID), customerID, feature, qty, nullStr(idem), jsonOrEmpty(meta, "{}"))
-	if err != nil && strings.Contains(err.Error(), "ux_hosting_usage_idempotency") {
+	_, err := db.Exec(`INSERT INTO hosting_usage_events (tenant_id, customer_id, feature_key, quantity, idempotency_key, metadata_json, occurred_at) VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		nullStr(tenantID), customerID, feature, qty, nullStr(idem), jsonOrEmpty(meta, "{}"), time.Now().UTC().Format(time.RFC3339))
+	if err != nil && (strings.Contains(err.Error(), "ux_hosting_usage_idempotency") || strings.Contains(err.Error(), "UNIQUE constraint failed: hosting_usage_events.customer_id, hosting_usage_events.idempotency_key")) {
 		return nil
 	}
 	return err
@@ -2157,9 +2191,9 @@ func recordUsageGauge(db *sql.DB, tenantID string, customerID int64, feature str
 	}
 	idem := "gauge:" + tenantID + ":" + feature
 	res, err := db.Exec(`UPDATE hosting_usage_events
-		SET quantity=?, metadata_json=?, occurred_at=CURRENT_TIMESTAMP
+		SET quantity=?, metadata_json=?, occurred_at=?
 		WHERE customer_id=? AND idempotency_key=?`,
-		qty, jsonOrEmpty(meta, "{}"), customerID, idem)
+		qty, jsonOrEmpty(meta, "{}"), time.Now().UTC().Format(time.RFC3339), customerID, idem)
 	if err != nil {
 		return err
 	}
@@ -2323,6 +2357,37 @@ func (a *App) handleUsage(w http.ResponseWriter, r *http.Request) {
 	handleJSON(w, map[string]any{"usage": out, "count": len(out)})
 }
 
+func (a *App) handleAddons(w http.ResponseWriter, r *http.Request) {
+	switch r.Method {
+	case http.MethodGet:
+		args := map[string]any{"tenant_id": r.URL.Query().Get("tenant_id"), "status": r.URL.Query().Get("status")}
+		if v := r.URL.Query().Get("customer_id"); v != "" {
+			args["customer_id"] = v
+		}
+		out, err := dbAddonList(globalCtx.AppDB(), args)
+		if err != nil {
+			httpErr(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		handleJSON(w, map[string]any{"addons": out, "count": len(out)})
+	case http.MethodPost:
+		var args map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&args)
+		addon, credentials, err := a.enableAddon(globalCtx, args)
+		if err != nil {
+			httpErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		out := map[string]any{"addon": addon}
+		if len(credentials) > 0 {
+			out["credentials"] = credentials
+		}
+		handleJSON(w, out)
+	default:
+		httpErr(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
 var slugRE = regexp.MustCompile(`^[a-z0-9][a-z0-9-]{0,62}$`)
 
 func normalizeSlug(s string) (string, error) {
@@ -2362,10 +2427,11 @@ func tenantIDSchema() map[string]any {
 	return schemaObject(map[string]any{"tenant_id": strSchema()}, []string{"tenant_id"})
 }
 
-func strSchema() map[string]any  { return map[string]any{"type": "string"} }
-func intSchema() map[string]any  { return map[string]any{"type": "integer"} }
-func boolSchema() map[string]any { return map[string]any{"type": "boolean"} }
-func objSchema() map[string]any  { return map[string]any{"type": "object"} }
+func strSchema() map[string]any   { return map[string]any{"type": "string"} }
+func intSchema() map[string]any   { return map[string]any{"type": "integer"} }
+func boolSchema() map[string]any  { return map[string]any{"type": "boolean"} }
+func objSchema() map[string]any   { return map[string]any{"type": "object"} }
+func arraySchema() map[string]any { return map[string]any{"type": "array"} }
 
 func strArg(args map[string]any, key string) string {
 	if args == nil {

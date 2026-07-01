@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: catalog
 display_name: Catalog
-version: 0.1.1
+version: 0.1.2
 description: |
   Products and prices — the source of truth for what your business
   sells. Modelled after Stripe's Product + Price split: one product,
@@ -44,11 +44,11 @@ provides:
     - name: catalog_prices_list
       description: List prices. Filter by product_id, active, archived, limit.
     - name: catalog_prices_create
-      description: "Create a price under a product. Args — product_id, unit_amount_cents, currency (req), nickname, interval, interval_count, trial_days, tax_inclusive, metadata."
+      description: "Create a price under a product. Args — product_id, unit_amount_cents, currency (req), nickname, interval, interval_count, trial_days, billing_scheme, meter_key, unit_label, unit_size, tax_inclusive, metadata."
     - name: catalog_prices_get
       description: Fetch one price.
     - name: catalog_prices_update
-      description: "Patch a price — limited fields only (nickname, active, metadata, tax_inclusive). Amount/currency/interval changes are rejected; create a new price and archive the old one."
+      description: "Patch a price — limited fields only (nickname, active, metadata, tax_inclusive). Amount/currency/interval/metering changes are rejected; create a new price and archive the old one."
     - name: catalog_prices_archive
       description: Soft-delete a price. Existing references keep resolving.
   ui_panels:

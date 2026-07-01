@@ -32,7 +32,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: catalog
 display_name: Catalog
-version: 0.1.0
+version: 0.1.2
 description: |
   Products and prices — source of truth for what the business sells.
   Modelled after Stripe's Product + Price split. Self-contained: calls
@@ -79,7 +79,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	}
 	globalCtx = ctx
 	ctx.Logger().Info("catalog mounted",
-		"version", "0.1.0",
+		"version", "0.1.2",
 		"scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
 	return nil
 }
@@ -247,7 +247,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "catalog_prices_create",
-			Description: "Create a price under a product. Args: product_id (required), unit_amount_cents (required), currency (required, ISO 4217 or empty for install default), nickname, interval (day|week|month|year for recurring; omit for one-time), interval_count (default 1), trial_days (default 0), tax_inclusive (default false), metadata.",
+			Description: "Create a price under a product. Args: product_id (required), unit_amount_cents (required), currency (required, ISO 4217 or empty for install default), nickname, interval (day|week|month|year for recurring; omit for one-time), interval_count (default 1), trial_days (default 0), billing_scheme (flat|metered), meter_key, unit_label, unit_size, tax_inclusive (default false), metadata.",
 			InputSchema: schemaObject(map[string]any{
 				"product_id":        map[string]any{"type": "integer"},
 				"unit_amount_cents": map[string]any{"type": "integer"},
@@ -256,6 +256,10 @@ func (a *App) MCPTools() []sdk.Tool {
 				"interval":          map[string]any{"type": "string"},
 				"interval_count":    map[string]any{"type": "integer"},
 				"trial_days":        map[string]any{"type": "integer"},
+				"billing_scheme":    map[string]any{"type": "string"},
+				"meter_key":         map[string]any{"type": "string"},
+				"unit_label":        map[string]any{"type": "string"},
+				"unit_size":         map[string]any{"type": "integer"},
 				"tax_inclusive":     map[string]any{"type": "boolean"},
 				"metadata":          map[string]any{"type": "object"},
 			}, []string{"product_id", "unit_amount_cents"}),
@@ -346,6 +350,10 @@ type Price struct {
 	Interval        string          `json:"interval,omitempty"`
 	IntervalCount   int             `json:"interval_count"`
 	TrialDays       int             `json:"trial_days"`
+	BillingScheme   string          `json:"billing_scheme"`
+	MeterKey        string          `json:"meter_key,omitempty"`
+	UnitLabel       string          `json:"unit_label,omitempty"`
+	UnitSize        int64           `json:"unit_size"`
 	Active          bool            `json:"active"`
 	TaxInclusive    bool            `json:"tax_inclusive"`
 	ExternalID      string          `json:"external_id,omitempty"`
@@ -358,6 +366,7 @@ type Price struct {
 var validTypes = map[string]bool{"one_time": true, "recurring": true, "service": true}
 var validIntervals = map[string]bool{"day": true, "week": true, "month": true, "year": true}
 var validTaxCategories = map[string]bool{"standard": true, "reduced": true, "zero": true, "exempt": true}
+var validBillingSchemes = map[string]bool{"flat": true, "metered": true}
 
 // ─── MCP tool handlers ──────────────────────────────────────────────
 
@@ -1101,7 +1110,7 @@ func dbPricesList(db *sql.DB, pid string, f priceFilters) ([]*Price, error) {
 	args = append(args, limit)
 	rows, err := db.Query(
 		`SELECT id, product_id, project_id, COALESCE(nickname,''), unit_amount_cents, currency,
-		        COALESCE(interval,''), interval_count, trial_days, active, tax_inclusive,
+		        COALESCE(interval,''), interval_count, trial_days, billing_scheme, meter_key, unit_label, unit_size, active, tax_inclusive,
 		        COALESCE(external_id,''), metadata, created_at, updated_at, archived_at
 		 FROM prices
 		 WHERE `+strings.Join(where, " AND ")+`
@@ -1125,7 +1134,7 @@ func dbPricesList(db *sql.DB, pid string, f priceFilters) ([]*Price, error) {
 func dbPriceGet(db *sql.DB, pid string, id int64) (*Price, error) {
 	row := db.QueryRow(
 		`SELECT id, product_id, project_id, COALESCE(nickname,''), unit_amount_cents, currency,
-		        COALESCE(interval,''), interval_count, trial_days, active, tax_inclusive,
+		        COALESCE(interval,''), interval_count, trial_days, billing_scheme, meter_key, unit_label, unit_size, active, tax_inclusive,
 		        COALESCE(external_id,''), metadata, created_at, updated_at, archived_at
 		 FROM prices
 		 WHERE id = ? AND project_id = ?`, id, pid)
@@ -1170,6 +1179,28 @@ func dbPriceCreate(db *sql.DB, pid string, productID int64, args map[string]any)
 	if trialDays < 0 {
 		return nil, errors.New("trial_days must be >= 0")
 	}
+	billingScheme := strings.ToLower(strings.TrimSpace(strArg(args, "billing_scheme")))
+	if billingScheme == "" {
+		billingScheme = "flat"
+	}
+	if !validBillingSchemes[billingScheme] {
+		return nil, fmt.Errorf("billing_scheme must be flat or metered (got %q)", billingScheme)
+	}
+	meterKey := strings.TrimSpace(strArg(args, "meter_key"))
+	if billingScheme == "metered" && meterKey == "" {
+		return nil, errors.New("meter_key required for metered prices")
+	}
+	if billingScheme == "flat" && meterKey != "" {
+		return nil, errors.New("meter_key is only valid for metered prices")
+	}
+	unitLabel := strings.TrimSpace(strArg(args, "unit_label"))
+	unitSize := int64Arg(args, "unit_size")
+	if unitSize == 0 {
+		unitSize = 1
+	}
+	if unitSize < 1 {
+		return nil, errors.New("unit_size must be >= 1")
+	}
 	nickname := strArg(args, "nickname")
 	taxIncl := boolArg(args, "tax_inclusive", false)
 	meta := jsonOrEmpty(args["metadata"], "{}")
@@ -1179,10 +1210,11 @@ func dbPriceCreate(db *sql.DB, pid string, productID int64, args map[string]any)
 		`INSERT INTO prices
 		     (product_id, project_id, nickname, unit_amount_cents, currency,
 		      interval, interval_count, trial_days, active, tax_inclusive,
+		      billing_scheme, meter_key, unit_label, unit_size,
 		      metadata, created_at, updated_at)
-		 VALUES (?, ?, NULLIF(?, ''), ?, ?, NULLIF(?, ''), ?, ?, 1, ?, ?, ?, ?)`,
+		 VALUES (?, ?, NULLIF(?, ''), ?, ?, NULLIF(?, ''), ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		productID, pid, nickname, amount, currency, interval, intervalCount,
-		trialDays, taxIncl, meta, now, now)
+		trialDays, taxIncl, billingScheme, meterKey, unitLabel, unitSize, meta, now, now)
 	if err != nil {
 		return nil, err
 	}
@@ -1197,7 +1229,7 @@ func dbPriceUpdate(db *sql.DB, pid string, id int64, patch map[string]any) (*Pri
 	// Reject changes to immutable financial fields. Stripe enforces
 	// the same rule — to change pricing, create a new Price and
 	// archive the old one. Historical invoice snapshots stay sound.
-	for _, locked := range []string{"unit_amount_cents", "currency", "interval", "interval_count", "trial_days", "product_id"} {
+	for _, locked := range []string{"unit_amount_cents", "currency", "interval", "interval_count", "trial_days", "product_id", "billing_scheme", "meter_key", "unit_label", "unit_size"} {
 		if _, present := patch[locked]; present {
 			return nil, fmt.Errorf("%s cannot be changed after price creation; create a new price and archive this one", locked)
 		}
@@ -1270,9 +1302,16 @@ func scanPrice(s rowScanner) (*Price, error) {
 	if err := s.Scan(
 		&p.ID, &p.ProductID, &p.ProjectID, &p.Nickname, &p.UnitAmountCents,
 		&p.Currency, &p.Interval, &p.IntervalCount, &p.TrialDays,
+		&p.BillingScheme, &p.MeterKey, &p.UnitLabel, &p.UnitSize,
 		&active, &taxIncl, &p.ExternalID, &meta,
 		&p.CreatedAt, &p.UpdatedAt, &archivedAt); err != nil {
 		return nil, err
+	}
+	if p.BillingScheme == "" {
+		p.BillingScheme = "flat"
+	}
+	if p.UnitSize == 0 {
+		p.UnitSize = 1
 	}
 	p.Active = active != 0
 	p.TaxInclusive = taxIncl != 0
@@ -1309,6 +1348,8 @@ func emitPrice(ctx *sdk.AppCtx, topic string, p *Price) {
 		"currency":   p.Currency,
 		"amount":     p.UnitAmountCents,
 		"interval":   p.Interval,
+		"scheme":     p.BillingScheme,
+		"meter_key":  p.MeterKey,
 	})
 }
 

@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 	"testing"
+	"time"
 
 	sdk "github.com/apteva/app-sdk"
 	tk "github.com/apteva/app-sdk/testkit"
@@ -222,8 +223,20 @@ func (p *platformStub) CallAppResult(appName, tool string, input map[string]any,
 	case "entitlement_limits_set":
 		b, _ := json.Marshal(map[string]any{"limit": input})
 		return json.Unmarshal(b, out)
+	case "entitlement_grants_create":
+		b, _ := json.Marshal(map[string]any{"grant": input})
+		return json.Unmarshal(b, out)
 	case "usage_record":
 		b, _ := json.Marshal(map[string]any{"usage": map[string]any{"quantity": input["quantity"], "deduped": false}})
+		return json.Unmarshal(b, out)
+	case "llm_policy_set":
+		b, _ := json.Marshal(map[string]any{"policy": map[string]any{"subject_type": input["subject_type"], "subject_id": input["subject_id"]}})
+		return json.Unmarshal(b, out)
+	case "llm_tokens_create":
+		b, _ := json.Marshal(map[string]any{"id": 42, "token": "llm_test_token", "subject_type": input["subject_type"], "subject_id": input["subject_id"]})
+		return json.Unmarshal(b, out)
+	case "llm_subject_suspend", "llm_subject_resume":
+		b, _ := json.Marshal(map[string]any{"ok": true})
 		return json.Unmarshal(b, out)
 	case "auth_orgs_create":
 		b, _ := json.Marshal(map[string]any{
@@ -326,8 +339,8 @@ func TestEmbeddedManifest_Valid(t *testing.T) {
 	if m.Name != "hosting" {
 		t.Errorf("manifest.Name=%q, want hosting", m.Name)
 	}
-	if m.Version != "1.8.0" {
-		t.Errorf("manifest.Version=%q, want 1.8.0", m.Version)
+	if m.Version != "1.9.0" {
+		t.Errorf("manifest.Version=%q, want 1.9.0", m.Version)
 	}
 	if m.DB == nil {
 		t.Fatal("manifest.DB missing")
@@ -368,6 +381,9 @@ func TestEmbeddedManifest_Valid(t *testing.T) {
 	}
 	if gotRequired["auth"] {
 		t.Error("auth dependency should be optional")
+	}
+	if !containsString(gotEvents["llm"], "llm.usage.recorded") {
+		t.Errorf("manifest should subscribe to llm usage events, got %v", gotEvents["llm"])
 	}
 }
 
@@ -710,6 +726,196 @@ func TestTenantCreateDoesNotRequireAuthApp(t *testing.T) {
 	}
 }
 
+func TestAddonEnableConfiguresGenericEntitlementsAndLLM(t *testing.T) {
+	pf := &platformStub{}
+	ctx, db := newTestCtx(t, pf)
+	defer db.Close()
+
+	app := &App{}
+	created, err := app.toolTenantCreate(ctx, map[string]any{
+		"owner_email":     "owner@example.com",
+		"slug":            "addon",
+		"plan_key":        "free",
+		"subscription_id": int64(123),
+	})
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	tenant := created.(map[string]any)["tenant"].(*Tenant)
+
+	out, err := app.toolAddonEnable(ctx, map[string]any{
+		"tenant_id":         tenant.ID,
+		"addon_key":         "managed-llm",
+		"feature_key":       "llm.tokens",
+		"included_quantity": int64(1000),
+		"unit_amount_cents": int64(200),
+		"unit_size":         int64(1000),
+		"currency":          "usd",
+	})
+	if err != nil {
+		t.Fatalf("enable addon: %v", err)
+	}
+	addon := out.(map[string]any)["addon"].(*TenantAddon)
+	if addon.ExternalApp != "llm" || addon.ExternalSubjectType != "hosting_tenant" || addon.ExternalSubjectID != tenant.ID {
+		t.Fatalf("unexpected external binding: %+v", addon)
+	}
+	if addon.IncludedQuantity != 1000 || addon.UnitAmountCents != 200 || addon.UnitSize != 1000 {
+		t.Fatalf("unexpected addon pricing: %+v", addon)
+	}
+	for _, want := range []string{"llm_policy_set", "llm_tokens_create", "entitlement_grants_create", "entitlement_limits_set"} {
+		if !containsToolCallAny(pf.callAppCalls, want) {
+			t.Fatalf("expected %s call, got %+v", want, pf.callAppCalls)
+		}
+	}
+}
+
+func TestCheckoutTrialCanProvisionLLMAddon(t *testing.T) {
+	pf := &platformStub{}
+	ctx, db := newTestCtx(t, pf)
+	defer db.Close()
+
+	app := &App{}
+	got, err := app.toolCheckoutCreate(ctx, map[string]any{
+		"catalog_price_id": int64(100),
+		"owner_email":      "trial-addon@example.com",
+		"customer_name":    "Trial Addon Buyer",
+		"slug":             "trial-addon",
+		"addons": []any{map[string]any{
+			"addon_key":         "managed-llm",
+			"feature_key":       "llm.tokens",
+			"included_quantity": int64(5000),
+			"unit_amount_cents": int64(150),
+			"unit_size":         int64(1000),
+			"currency":          "USD",
+		}},
+	})
+	if err != nil {
+		t.Fatalf("checkout create: %v", err)
+	}
+	tenant := got.(map[string]any)["tenant"].(*Tenant)
+	addons, err := dbAddonList(db, map[string]any{"tenant_id": tenant.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(addons) != 1 || addons[0].AddonKey != "managed-llm" || addons[0].IncludedQuantity != 5000 {
+		t.Fatalf("unexpected addons: %+v", addons)
+	}
+	if !containsToolCall(pf.callAppCalls, "llm", "llm_tokens_create") {
+		t.Fatalf("expected llm token create, got %+v", pf.callAppCalls)
+	}
+}
+
+func TestLLMUsageEventRecordsIdempotentHostingAndEntitlementsUsage(t *testing.T) {
+	pf := &platformStub{}
+	ctx, db := newTestCtx(t, pf)
+	defer db.Close()
+
+	app := &App{}
+	created, err := app.toolTenantCreate(ctx, map[string]any{
+		"owner_email": "owner@example.com",
+		"slug":        "llmusage",
+		"plan_key":    "free",
+	})
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	tenant := created.(map[string]any)["tenant"].(*Tenant)
+	ev := sdk.Event{Event: "llm.usage.recorded", Data: map[string]any{
+		"subject_type":    "hosting_tenant",
+		"subject_id":      tenant.ID,
+		"total_tokens":    123,
+		"request_id":      "req_123",
+		"provider":        "openai",
+		"model":           "openai/gpt-test",
+		"request_tokens":  100,
+		"response_tokens": 23,
+	}}
+	if err := app.handleLLMUsageRecorded(ctx, ev); err != nil {
+		t.Fatalf("usage event: %v", err)
+	}
+	if err := app.handleLLMUsageRecorded(ctx, ev); err != nil {
+		t.Fatalf("usage event replay: %v", err)
+	}
+	usage, err := dbUsageTotals(db, map[string]any{"tenant_id": tenant.ID, "feature_key": "llm.tokens"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(usage) != 1 || usage[0].Quantity != 123 {
+		t.Fatalf("usage = %+v, want one idempotent 123-token row", usage)
+	}
+	if !containsToolCall(pf.callAppCalls, "entitlements", "usage_record") {
+		t.Fatalf("expected entitlements usage_record call, got %+v", pf.callAppCalls)
+	}
+}
+
+func TestMeteredInvoiceCreatesBillingLineForOverage(t *testing.T) {
+	pf := &platformStub{}
+	ctx, db := newTestCtx(t, pf)
+	defer db.Close()
+
+	app := &App{}
+	created, err := app.toolTenantCreate(ctx, map[string]any{
+		"owner_email": "owner@example.com",
+		"slug":        "metered",
+		"plan_key":    "free",
+	})
+	if err != nil {
+		t.Fatalf("create tenant: %v", err)
+	}
+	tenant := created.(map[string]any)["tenant"].(*Tenant)
+	if _, err := db.Exec(`UPDATE hosting_customers SET billing_customer_id=77 WHERE id=?`, tenant.CustomerID); err != nil {
+		t.Fatal(err)
+	}
+	addon, err := dbAddonUpsert(db, &TenantAddon{
+		TenantID:            tenant.ID,
+		CustomerID:          tenant.CustomerID,
+		AddonKey:            "managed-llm",
+		Status:              AddonStatusActive,
+		FeatureKey:          "llm.tokens",
+		IncludedQuantity:    100,
+		ResetInterval:       "month",
+		UnitAmountCents:     200,
+		UnitSize:            1000,
+		Currency:            "USD",
+		ExternalApp:         "llm",
+		ExternalSubjectType: "hosting_tenant",
+		ExternalSubjectID:   tenant.ID,
+		Metadata:            json.RawMessage(`{}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := recordUsage(db, tenant.ID, tenant.CustomerID, "llm.tokens", 2500, "metered-test", nil); err != nil {
+		t.Fatal(err)
+	}
+	start := time.Now().UTC().Add(-time.Hour).Format(time.RFC3339)
+	end := time.Now().UTC().Add(time.Hour).Format(time.RFC3339)
+	out, err := app.toolMeteredInvoiceCreate(ctx, map[string]any{
+		"addon_id":     addon.ID,
+		"period_start": start,
+		"period_end":   end,
+	})
+	if err != nil {
+		t.Fatalf("metered invoice: %v", err)
+	}
+	period := out.(map[string]any)["metering_period"].(*MeteringPeriod)
+	if period.TotalQuantity != 2500 || period.BillableQuantity != 2400 || period.InvoiceID == nil || *period.InvoiceID != 77 {
+		t.Fatalf("period = %+v", period)
+	}
+	var invoiceCall *callAppCall
+	for i := range pf.callAppCalls {
+		if pf.callAppCalls[i].Tool == "invoices_create" {
+			invoiceCall = &pf.callAppCalls[i]
+		}
+	}
+	if invoiceCall == nil {
+		t.Fatalf("expected invoices_create call, got %+v", pf.callAppCalls)
+	}
+	if invoiceCall.Input["customer_id"] != int64(77) {
+		t.Fatalf("billing customer = %#v", invoiceCall.Input["customer_id"])
+	}
+}
+
 func TestUsageSyncRecordsGaugeAndSuspendsOverLimitTenant(t *testing.T) {
 	pf := &platformStub{}
 	ctx, db := newTestCtx(t, pf)
@@ -892,6 +1098,15 @@ func TestSubscriptionEventSyncsTenantLifecycle(t *testing.T) {
 		t.Fatalf("create tenant: %v", err)
 	}
 	tenant := created.(map[string]any)["tenant"].(*Tenant)
+	if _, err := app.toolAddonEnable(ctx, map[string]any{
+		"tenant_id":         tenant.ID,
+		"addon_key":         "managed-llm",
+		"feature_key":       "llm.tokens",
+		"included_quantity": int64(1000),
+	}); err != nil {
+		t.Fatalf("enable addon: %v", err)
+	}
+	pf.callAppCalls = nil
 
 	err = app.handleSubscriptionEvent(ctx, sdk.Event{
 		Event:     "subscription.cancelled",
@@ -910,6 +1125,9 @@ func TestSubscriptionEventSyncsTenantLifecycle(t *testing.T) {
 	}
 	if !containsToolCall(pf.callAppCalls, "containers", "containers_stop") {
 		t.Fatalf("expected containers_stop call, got %+v", pf.callAppCalls)
+	}
+	if !containsToolCall(pf.callAppCalls, "llm", "llm_subject_suspend") {
+		t.Fatalf("expected llm subject suspend call, got %+v", pf.callAppCalls)
 	}
 }
 
