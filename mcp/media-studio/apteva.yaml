@@ -2,12 +2,15 @@ schema: apteva-app/v1
 
 name: media-studio
 display_name: Media Studio
-version: 0.10.31
+version: 0.10.32
 description: |
   Generate images, video, audio, music, and avatars via compatible
   providers. ElevenLabs powers audio TTS, sound effects, and music.
   Optionally saves outputs to the Storage app for permanent, shareable
-  references. v0.10.31 adds multiple reference image support for
+  references. v0.10.32 forwards provider consent objects for
+  face-bearing video reference jobs such as Seedance.
+
+  v0.10.31 adds multiple reference image support for
   Venice reference-to-video models.
 
   v0.10.30 lets voice creation choose the ElevenLabs
@@ -104,7 +107,7 @@ provides:
   http_routes:
     - prefix: /
   mcp_tools:
-    - { name: media_generate, description: "Generate media (image / video / audio / music / avatar). Args: kind (required: image|video|audio_tts|audio_sfx|music|avatar), prompt (required — for avatar this is the spoken script), model?, size?, duration?, voice?, aspect?, avatar? (replica/avatar id, avatar kind), source_image?, source_images? (image edit and video references; Venice *reference-to-video supports multiple refs), n?, options?, cache_key?, cache_policy? ('reuse'|'refresh'). Video + avatar are async (queued; delivered via media.generated). Returns thumbnail + storage URL when storage is bound, else inline (small media) or expiring upstream URL." }
+    - { name: media_generate, description: "Generate media (image / video / audio / music / avatar). Args: kind (required: image|video|audio_tts|audio_sfx|music|avatar), prompt (required — for avatar this is the spoken script), model?, size?, duration?, voice?, aspect?, avatar? (replica/avatar id, avatar kind), source_image?, source_images? (image edit and video references; Venice *reference-to-video supports multiple refs), n?, options? (provider extras; video supports consents.seedance when required), cache_key?, cache_policy? ('reuse'|'refresh'). Video + avatar are async (queued; delivered via media.generated). Returns thumbnail + storage URL when storage is bound, else inline (small media) or expiring upstream URL." }
     - { name: media_estimate, description: "Estimate generation cost without creating media. Args match media_generate. Returns cost_usd when the bound provider exposes pricing or Media Studio can derive it." }
     - { name: media_delete, description: "Delete one generation for this project. Args: id, delete_storage? (default true). Also removes linked Storage files, async job rows, and local cache files when enabled." }
     - { name: media_identity_create, description: "Create a reusable provider-side identity such as a voice or avatar. Args: kind (voice|avatar), name, source_type (prompt|audio|photo|video), prompt?/voice_description?, model_id? for ElevenLabs Voice Design, source_image?, source_video?, options?." }

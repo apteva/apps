@@ -35,7 +35,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: media-studio
 display_name: Media Studio
-version: 0.10.31
+version: 0.10.32
 description: |
   Generate images, video, audio, music, and avatars via compatible
   providers. Optionally saves outputs to Storage, supports stable
@@ -209,7 +209,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"Args: kind (required: image|video|audio_tts|audio_sfx|music|avatar), prompt (required — " +
 				"for avatar this is the spoken script), model?, size? (image), duration? (video/audio/music, seconds), " +
 				"voice? (audio_tts / avatar voice override), aspect? (video), avatar? (replica/avatar id, avatar kind), " +
-				"source_image? or source_images? (image edit and video references; Venice reference-to-video models support multiple refs), mode? ('generate'|'draft'), draft_id?/generation_id? to generate a saved draft, n?, options? (provider-specific extras). Video + avatar are async (queued; delivered via the " +
+				"source_image? or source_images? (image edit and video references; Venice reference-to-video models support multiple refs), mode? ('generate'|'draft'), draft_id?/generation_id? to generate a saved draft, n?, options? (provider-specific extras; video supports consents.seedance when required). Video + avatar are async (queued; delivered via the " +
 				"media.generated event). Returns MCP content blocks: image (thumbnail base64 for image kind only " +
 				"when no storage), text (summary), resource (fetchable URL per storage_id).",
 			InputSchema: schemaObject(map[string]any{

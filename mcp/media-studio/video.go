@@ -72,6 +72,7 @@ func buildVeniceVideoQueueArgs(args map[string]any) (map[string]any, error) {
 			"negative_prompt", "resolution", "upscale_factor", "audio",
 			"end_image_url", "audio_url", "video_url",
 			"reference_image_urls", "reference_video_urls", "reference_audio_urls",
+			"consents",
 		}
 		for _, k := range passThrough {
 			if v, exists := opts[k]; exists {

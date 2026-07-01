@@ -1854,6 +1854,15 @@ func TestToolMediaGenerate_Video_VeniceReferenceToVideo_MultipleSourceImages(t *
 		"model":         "seedance-2-0-mini-enhanced-reference-to-video",
 		"duration":      "5s",
 		"source_images": []any{"storage:1001", "https://example.com/tights.png"},
+		"options": map[string]any{
+			"consents": map[string]any{
+				"seedance": map[string]any{
+					"confirmed_terms_and_privacy":      true,
+					"confirmed_legal_right":            true,
+					"confirmed_screening_acknowledged": true,
+				},
+			},
+		},
 	})
 	if err != nil {
 		t.Fatalf("toolMediaGenerate: %v", err)
@@ -1884,6 +1893,9 @@ func TestToolMediaGenerate_Video_VeniceReferenceToVideo_MultipleSourceImages(t *
 	}
 	if _, exists := call.Input["image_url"]; exists {
 		t.Fatalf("reference-to-video payload should not include image_url: %+v", call.Input)
+	}
+	if consents, ok := call.Input["consents"].(map[string]any); !ok || consents["seedance"] == nil {
+		t.Fatalf("consents.seedance was not forwarded: %+v", call.Input)
 	}
 	meta := res["_meta"].(map[string]any)
 	sourceRefs, ok := meta["source_image_refs"].([]string)
