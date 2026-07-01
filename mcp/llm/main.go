@@ -25,7 +25,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: llm
 display_name: LLM Gateway
-version: 0.1.3
+version: 0.2.0
 description: Managed AI API access for Apteva-hosted apps and agents.
 author: Apteva
 scopes: [project, global]
@@ -138,7 +138,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		a.httpClient = &http.Client{Timeout: 3 * time.Minute}
 	}
 	globalCtx = ctx
-	ctx.Logger().Info("llm gateway mounted", "version", "0.1.3", "scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
+	ctx.Logger().Info("llm gateway mounted", "version", "0.2.0", "scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
 	return nil
 }
 
@@ -152,6 +152,8 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/v1/", Handler: a.handleV1, NoAuth: true},
 		{Pattern: "/tokens", Handler: a.handleTokens},
 		{Pattern: "/providers", Handler: a.handleProviders},
+		{Pattern: "/models/sync", Handler: a.handleModelsSync},
+		{Pattern: "/models", Handler: a.handleModels},
 		{Pattern: "/policy", Handler: a.handlePolicy},
 		{Pattern: "/usage", Handler: a.handleUsage},
 		{Pattern: "/audit", Handler: a.handleAudit},
@@ -265,6 +267,32 @@ type UsageSummary struct {
 	EstimatedCostCents int64  `json:"estimated_cost_cents"`
 }
 
+type ProviderModel struct {
+	ID               int64           `json:"id,omitempty"`
+	ProjectID        string          `json:"project_id"`
+	Provider         string          `json:"provider"`
+	ModelID          string          `json:"model_id"`
+	DisplayName      string          `json:"display_name,omitempty"`
+	GatewayModel     string          `json:"gateway_model"`
+	Capabilities     json.RawMessage `json:"capabilities,omitempty"`
+	ContextWindow    int64           `json:"context_window,omitempty"`
+	InputModalities  json.RawMessage `json:"input_modalities,omitempty"`
+	OutputModalities json.RawMessage `json:"output_modalities,omitempty"`
+	Status           string          `json:"status"`
+	Raw              json.RawMessage `json:"raw,omitempty"`
+	LastSeenAt       string          `json:"last_seen_at,omitempty"`
+	CreatedAt        string          `json:"created_at,omitempty"`
+	UpdatedAt        string          `json:"updated_at,omitempty"`
+}
+
+type ModelSyncResult struct {
+	Provider   string          `json:"provider"`
+	Status     string          `json:"status"`
+	ModelCount int             `json:"model_count"`
+	Error      string          `json:"error,omitempty"`
+	Models     []ProviderModel `json:"models,omitempty"`
+}
+
 type chatResult struct {
 	Status             int
 	Body               []byte
@@ -309,6 +337,31 @@ func (a *App) handleV1Models(ctx *sdk.AppCtx, ident *TokenIdentity, w http.Respo
 	}
 	data := []map[string]any{}
 	seen := map[string]bool{}
+	cached, err := dbProviderModelsList(ctx.AppDB(), providerModelFilter{ProjectID: ident.ProjectID, Status: "active"})
+	if err != nil {
+		writeOpenAIError(w, http.StatusInternalServerError, "server_error", err.Error())
+		return
+	}
+	for _, model := range cached {
+		id := model.GatewayModel
+		if id == "" {
+			id = gatewayModelID(model.Provider, model.ModelID)
+		}
+		if id == "" || seen[id] {
+			continue
+		}
+		if len(pol.AllowedModels) > 0 && !matchesAny(pol.AllowedModels, id) {
+			continue
+		}
+		if matchesAny(pol.BlockedModels, id) {
+			continue
+		}
+		if len(pol.AllowedProviders) > 0 && !matchesAny(pol.AllowedProviders, model.Provider) {
+			continue
+		}
+		seen[id] = true
+		data = append(data, map[string]any{"id": id, "object": "model", "owned_by": model.Provider, "display_name": model.DisplayName})
+	}
 	for _, model := range pol.AllowedModels {
 		if model == "" || seen[model] {
 			continue
@@ -613,6 +666,45 @@ func (a *App) handleProviders(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+func (a *App) handleModels(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "GET only", http.StatusMethodNotAllowed)
+		return
+	}
+	q := r.URL.Query()
+	rows, err := dbProviderModelsList(globalCtx.AppDB(), providerModelFilter{
+		ProjectID: projectFromRequest(r),
+		Provider:  normalizeProvider(q.Get("provider")),
+		Status:    firstNonEmpty(q.Get("status"), "active"),
+	})
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, map[string]any{"models": rows})
+}
+
+func (a *App) handleModelsSync(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST only", http.StatusMethodNotAllowed)
+		return
+	}
+	var args map[string]any
+	if r.Body != nil && r.Body != http.NoBody {
+		if err := json.NewDecoder(r.Body).Decode(&args); err != nil && err != io.EOF {
+			http.Error(w, "invalid json", http.StatusBadRequest)
+			return
+		}
+	}
+	if args == nil {
+		args = map[string]any{}
+	}
+	projectID := firstNonEmpty(projectFromArgs(args), projectFromRequest(r))
+	provider := normalizeProvider(firstNonEmpty(strArg(args, "provider"), r.URL.Query().Get("provider")))
+	results := a.syncProviderModels(globalCtx, projectID, provider)
+	writeJSON(w, map[string]any{"results": results})
+}
+
 func (a *App) handlePolicy(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
@@ -691,7 +783,11 @@ func (a *App) toolModelsList(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"models": pol.AllowedModels, "policy": pol}, nil
+	models, err := dbProviderModelsList(ctx.AppDB(), providerModelFilter{ProjectID: projectFromArgs(args), Status: "active"})
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"models": models, "policy": pol}, nil
 }
 
 func (a *App) toolUsageGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -910,6 +1006,244 @@ func scanProviderConfig(row providerScanner) (*ProviderConfig, error) {
 	cfg.Source = "configured"
 	cfg.Metadata = json.RawMessage(firstNonEmpty(meta, "{}"))
 	return &cfg, nil
+}
+
+type providerModelFilter struct {
+	ProjectID string
+	Provider  string
+	Status    string
+}
+
+func (a *App) syncProviderModels(ctx *sdk.AppCtx, projectID, provider string) []ModelSyncResult {
+	results := []ModelSyncResult{}
+	if ctx == nil || ctx.AppDB() == nil {
+		return []ModelSyncResult{{Provider: provider, Status: "error", Error: "llm app context unavailable"}}
+	}
+	providers := []ProviderConfig{}
+	if provider != "" {
+		cfg, err := providerConfigFor(ctx, projectID, provider)
+		if err != nil {
+			return []ModelSyncResult{{Provider: provider, Status: "error", Error: err.Error()}}
+		}
+		providers = append(providers, *cfg)
+	} else {
+		rows, err := providerConfigsList(ctx, projectID)
+		if err != nil {
+			return []ModelSyncResult{{Status: "error", Error: err.Error()}}
+		}
+		providers = rows
+	}
+	for _, cfg := range providers {
+		if !cfg.Enabled {
+			continue
+		}
+		models, err := a.discoverProviderModels(ctx, &cfg)
+		if err != nil {
+			results = append(results, ModelSyncResult{Provider: cfg.Provider, Status: "error", Error: err.Error()})
+			continue
+		}
+		if err := dbProviderModelsReplace(ctx.AppDB(), projectID, cfg.Provider, models); err != nil {
+			results = append(results, ModelSyncResult{Provider: cfg.Provider, Status: "error", Error: err.Error()})
+			continue
+		}
+		rows, err := dbProviderModelsList(ctx.AppDB(), providerModelFilter{ProjectID: projectID, Provider: cfg.Provider, Status: "active"})
+		if err != nil {
+			results = append(results, ModelSyncResult{Provider: cfg.Provider, Status: "error", Error: err.Error()})
+			continue
+		}
+		results = append(results, ModelSyncResult{Provider: cfg.Provider, Status: "ok", ModelCount: len(rows), Models: rows})
+	}
+	return results
+}
+
+func (a *App) discoverProviderModels(ctx *sdk.AppCtx, cfg *ProviderConfig) ([]ProviderModel, error) {
+	key, err := resolveProviderKey(ctx, cfg)
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodGet, strings.TrimRight(cfg.BaseURL, "/")+"/models", nil)
+	if err != nil {
+		return nil, err
+	}
+	if cfg.Provider == "anthropic" {
+		req.Header.Set("X-Api-Key", key)
+		req.Header.Set("Anthropic-Version", "2023-06-01")
+	} else {
+		req.Header.Set("Authorization", "Bearer "+key)
+	}
+	req.Header.Set("Accept", "application/json")
+	resp, err := a.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	raw, _ := io.ReadAll(io.LimitReader(resp.Body, 16<<20))
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, providerError(resp.StatusCode, string(raw))
+	}
+	models := parseProviderModels(cfg.Provider, raw)
+	if len(models) == 0 {
+		return nil, fmt.Errorf("provider %q returned no models", cfg.Provider)
+	}
+	return models, nil
+}
+
+func parseProviderModels(provider string, raw []byte) []ProviderModel {
+	var envelope struct {
+		Data []json.RawMessage `json:"data"`
+	}
+	if err := json.Unmarshal(raw, &envelope); err != nil || len(envelope.Data) == 0 {
+		var arr []json.RawMessage
+		if err := json.Unmarshal(raw, &arr); err == nil {
+			envelope.Data = arr
+		}
+	}
+	out := []ProviderModel{}
+	seen := map[string]bool{}
+	for _, item := range envelope.Data {
+		model, ok := providerModelFromRaw(provider, item)
+		if !ok || seen[model.ModelID] {
+			continue
+		}
+		seen[model.ModelID] = true
+		out = append(out, model)
+	}
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].ModelID < out[j].ModelID
+	})
+	return out
+}
+
+func providerModelFromRaw(provider string, raw json.RawMessage) (ProviderModel, bool) {
+	var m map[string]any
+	if err := json.Unmarshal(raw, &m); err != nil {
+		return ProviderModel{}, false
+	}
+	id := firstNonEmpty(strAny(m["id"]), strAny(m["name"]))
+	if id == "" {
+		return ProviderModel{}, false
+	}
+	display := firstNonEmpty(strAny(m["display_name"]), strAny(m["name"]), id)
+	capabilities := json.RawMessage(`{}`)
+	if v, ok := m["capabilities"]; ok {
+		capabilities = jsonFromAny(v)
+	}
+	inputModalities := json.RawMessage(`[]`)
+	if v, ok := m["input_modalities"]; ok {
+		inputModalities = jsonFromAny(v)
+	}
+	outputModalities := json.RawMessage(`[]`)
+	if v, ok := m["output_modalities"]; ok {
+		outputModalities = jsonFromAny(v)
+	}
+	rawCopy := make([]byte, len(raw))
+	copy(rawCopy, raw)
+	return ProviderModel{
+		Provider:         provider,
+		ModelID:          id,
+		DisplayName:      display,
+		GatewayModel:     gatewayModelID(provider, id),
+		Capabilities:     capabilities,
+		ContextWindow:    int64FromAny(firstNonNil(m["context_window"], m["context_length"], m["max_context_length"])),
+		InputModalities:  inputModalities,
+		OutputModalities: outputModalities,
+		Status:           "active",
+		Raw:              json.RawMessage(rawCopy),
+	}, true
+}
+
+func dbProviderModelsReplace(db *sql.DB, projectID, provider string, models []ProviderModel) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`UPDATE provider_models SET status='inactive', updated_at=CURRENT_TIMESTAMP WHERE project_id=? AND provider=?`, projectID, provider); err != nil {
+		return err
+	}
+	for _, model := range models {
+		if model.ModelID == "" {
+			continue
+		}
+		if model.Capabilities == nil {
+			model.Capabilities = json.RawMessage(`{}`)
+		}
+		if model.InputModalities == nil {
+			model.InputModalities = json.RawMessage(`[]`)
+		}
+		if model.OutputModalities == nil {
+			model.OutputModalities = json.RawMessage(`[]`)
+		}
+		if model.Raw == nil {
+			model.Raw = json.RawMessage(`{}`)
+		}
+		if model.GatewayModel == "" {
+			model.GatewayModel = gatewayModelID(provider, model.ModelID)
+		}
+		if model.Status == "" {
+			model.Status = "active"
+		}
+		if _, err := tx.Exec(`
+			INSERT INTO provider_models
+				(project_id, provider, model_id, display_name, gateway_model, capabilities_json, context_window,
+				 input_modalities_json, output_modalities_json, status, raw_json, last_seen_at, updated_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+			ON CONFLICT(project_id, provider, model_id) DO UPDATE SET
+				display_name=excluded.display_name,
+				gateway_model=excluded.gateway_model,
+				capabilities_json=excluded.capabilities_json,
+				context_window=excluded.context_window,
+				input_modalities_json=excluded.input_modalities_json,
+				output_modalities_json=excluded.output_modalities_json,
+				status=excluded.status,
+				raw_json=excluded.raw_json,
+				last_seen_at=CURRENT_TIMESTAMP,
+				updated_at=CURRENT_TIMESTAMP`,
+			projectID, provider, model.ModelID, model.DisplayName, model.GatewayModel, string(model.Capabilities), model.ContextWindow,
+			string(model.InputModalities), string(model.OutputModalities), model.Status, string(model.Raw)); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func dbProviderModelsList(db *sql.DB, f providerModelFilter) ([]ProviderModel, error) {
+	conds := []string{"project_id = ?"}
+	args := []any{f.ProjectID}
+	if f.Provider != "" {
+		conds = append(conds, "provider = ?")
+		args = append(args, f.Provider)
+	}
+	if f.Status != "" {
+		conds = append(conds, "status = ?")
+		args = append(args, f.Status)
+	}
+	rows, err := db.Query(`
+		SELECT id, project_id, provider, model_id, display_name, gateway_model, capabilities_json, context_window,
+		       input_modalities_json, output_modalities_json, status, raw_json,
+		       COALESCE(last_seen_at,''), COALESCE(created_at,''), COALESCE(updated_at,'')
+		  FROM provider_models
+		 WHERE `+strings.Join(conds, " AND ")+`
+		 ORDER BY provider ASC, model_id ASC`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []ProviderModel{}
+	for rows.Next() {
+		var model ProviderModel
+		var caps, input, output, raw string
+		if err := rows.Scan(&model.ID, &model.ProjectID, &model.Provider, &model.ModelID, &model.DisplayName, &model.GatewayModel,
+			&caps, &model.ContextWindow, &input, &output, &model.Status, &raw, &model.LastSeenAt, &model.CreatedAt, &model.UpdatedAt); err != nil {
+			return nil, err
+		}
+		model.Capabilities = json.RawMessage(firstNonEmpty(caps, "{}"))
+		model.InputModalities = json.RawMessage(firstNonEmpty(input, "[]"))
+		model.OutputModalities = json.RawMessage(firstNonEmpty(output, "[]"))
+		model.Raw = json.RawMessage(firstNonEmpty(raw, "{}"))
+		out = append(out, model)
+	}
+	return out, rows.Err()
 }
 
 func dbPolicyGet(db *sql.DB, projectID string) (*Policy, error) {
@@ -1486,6 +1820,42 @@ func rawJSON(s string) any {
 	return s
 }
 
+func strAny(v any) string {
+	switch x := v.(type) {
+	case string:
+		return strings.TrimSpace(x)
+	case fmt.Stringer:
+		return strings.TrimSpace(x.String())
+	default:
+		return ""
+	}
+}
+
+func int64FromAny(v any) int64 {
+	switch x := v.(type) {
+	case int:
+		return int64(x)
+	case int64:
+		return x
+	case float64:
+		return int64(x)
+	case json.Number:
+		n, _ := x.Int64()
+		return n
+	default:
+		return 0
+	}
+}
+
+func firstNonNil(values ...any) any {
+	for _, v := range values {
+		if v != nil {
+			return v
+		}
+	}
+	return nil
+}
+
 func cloneMap(in map[string]any) map[string]any {
 	out := make(map[string]any, len(in))
 	for k, v := range in {
@@ -1511,6 +1881,18 @@ func normalizeProvider(p string) string {
 func upstreamModel(provider, model string) string {
 	prefix := provider + "/"
 	return strings.TrimPrefix(model, prefix)
+}
+
+func gatewayModelID(provider, modelID string) string {
+	provider = normalizeProvider(provider)
+	modelID = strings.TrimSpace(modelID)
+	if provider == "" || modelID == "" {
+		return modelID
+	}
+	if strings.HasPrefix(modelID, provider+"/") {
+		return modelID
+	}
+	return provider + "/" + modelID
 }
 
 func defaultBaseURL(provider string) string {

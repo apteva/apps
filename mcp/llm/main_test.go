@@ -246,6 +246,97 @@ func TestBoundAnthropicIntegrationExecutesWithoutProviderRow(t *testing.T) {
 	}
 }
 
+func TestProviderModelSyncCachesOpenAICompatibleModels(t *testing.T) {
+	var gotAuth string
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/models" {
+			t.Fatalf("path = %s", r.URL.Path)
+		}
+		gotAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{
+			"object":"list",
+			"data":[
+				{"id":"model-a","object":"model","owned_by":"test"},
+				{"id":"model-b","object":"model","owned_by":"test","context_window":8192}
+			]
+		}`))
+	}))
+	defer upstream.Close()
+
+	ctx := tk.NewAppCtx(t, "apteva.yaml",
+		tk.WithProjectID("proj-test"),
+		tk.WithConfig(map[string]string{"openai_api_key": "sk-test"}),
+	)
+	app := &App{httpClient: upstream.Client()}
+	if err := app.OnMount(ctx); err != nil {
+		t.Fatalf("mount: %v", err)
+	}
+	if _, err := dbProviderConfigUpsert(ctx.AppDB(), "proj-test", map[string]any{
+		"provider": "openai",
+		"base_url": upstream.URL,
+		"key_ref":  "openai_api_key",
+	}); err != nil {
+		t.Fatalf("provider: %v", err)
+	}
+
+	results := app.syncProviderModels(ctx, "proj-test", "openai")
+	if len(results) != 1 || results[0].Status != "ok" || results[0].ModelCount != 2 {
+		t.Fatalf("sync results = %+v", results)
+	}
+	if gotAuth != "Bearer sk-test" {
+		t.Fatalf("upstream auth = %q", gotAuth)
+	}
+	rows, err := dbProviderModelsList(ctx.AppDB(), providerModelFilter{ProjectID: "proj-test", Provider: "openai", Status: "active"})
+	if err != nil {
+		t.Fatalf("models: %v", err)
+	}
+	if len(rows) != 2 || rows[0].GatewayModel != "openai/model-a" || rows[1].ContextWindow != 8192 {
+		t.Fatalf("models = %+v", rows)
+	}
+}
+
+func TestV1ModelsReturnsDiscoveredModels(t *testing.T) {
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("proj-test"))
+	app := &App{}
+	if err := app.OnMount(ctx); err != nil {
+		t.Fatalf("mount: %v", err)
+	}
+	if err := dbProviderModelsReplace(ctx.AppDB(), "proj-test", "anthropic", []ProviderModel{
+		{Provider: "anthropic", ModelID: "claude-test", DisplayName: "Claude Test"},
+	}); err != nil {
+		t.Fatalf("replace models: %v", err)
+	}
+	tok, err := createToken(ctx.AppDB(), map[string]any{
+		"project_id":   "proj-test",
+		"subject_type": "agent",
+		"subject_id":   "agent-1",
+	})
+	if err != nil {
+		t.Fatalf("token: %v", err)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	req.Header.Set("Authorization", "Bearer "+tok["token"].(string))
+	rec := httptest.NewRecorder()
+	app.handleV1(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Data []struct {
+			ID      string `json:"id"`
+			OwnedBy string `json:"owned_by"`
+		} `json:"data"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if len(body.Data) != 1 || body.Data[0].ID != "anthropic/claude-test" || body.Data[0].OwnedBy != "anthropic" {
+		t.Fatalf("models response = %+v", body.Data)
+	}
+}
+
 type llmPlatformStub struct {
 	identity    *sdk.InstallIdentity
 	credentials map[int64]*sdk.ConnectionCredentials

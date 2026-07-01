@@ -44,6 +44,17 @@ interface UsageSummary {
   estimated_cost_cents: number;
 }
 
+interface ProviderModel {
+  id?: number;
+  project_id: string;
+  provider: string;
+  model_id: string;
+  display_name?: string;
+  gateway_model: string;
+  status: string;
+  last_seen_at?: string;
+}
+
 type Tab = "test" | "providers" | "policy" | "tokens" | "usage";
 
 const API = "/api/apps/llm";
@@ -60,6 +71,7 @@ const defaultProvider: ProviderConfig = {
 export default function LLMPanel({ projectId }: NativePanelProps) {
   const [tab, setTab] = useState<Tab>("test");
   const [providers, setProviders] = useState<ProviderConfig[]>([]);
+  const [models, setModels] = useState<ProviderModel[]>([]);
   const [providerDraft, setProviderDraft] = useState<ProviderConfig>(defaultProvider);
   const [policy, setPolicy] = useState<Policy>({ project_id: projectId, limits: {} });
   const [usage, setUsage] = useState<UsageSummary | null>(null);
@@ -71,6 +83,8 @@ export default function LLMPanel({ projectId }: NativePanelProps) {
   const [prompt, setPrompt] = useState("Reply with one short sentence confirming the gateway works.");
   const [response, setResponse] = useState<any>(null);
   const [status, setStatus] = useState("");
+  const [syncStatus, setSyncStatus] = useState("");
+  const [autoSyncedProviders, setAutoSyncedProviders] = useState<string[]>([]);
   const [busy, setBusy] = useState(false);
 
   const api = useCallback(async <T,>(path: string, init?: RequestInit): Promise<T> => {
@@ -93,8 +107,10 @@ export default function LLMPanel({ projectId }: NativePanelProps) {
         api<{ policy: Policy }>("/policy"),
         api<UsageSummary>("/usage"),
       ]);
+      const modelData = await api<{ models: ProviderModel[] }>("/models");
       const nextProviders = providerData.providers || [];
       setProviders(nextProviders);
+      setModels(modelData.models || []);
       setSelectedProvider((current) => {
         if (nextProviders.some((p) => p.enabled && p.provider === current)) return current;
         return nextProviders.find((p) => p.enabled)?.provider || current;
@@ -114,12 +130,25 @@ export default function LLMPanel({ projectId }: NativePanelProps) {
   ), [providers]);
 
   const modelSuggestions = useMemo(() => {
+    const discovered = models
+      .filter((m) => m.provider === selectedProvider && m.status === "active")
+      .map((m) => m.model_id);
+    if (discovered.length > 0) return discovered;
     const prefix = `${selectedProvider}/`;
     return (policy.allowed_models || [])
       .filter((m) => m.startsWith(prefix))
       .map((m) => m.slice(prefix.length))
       .filter((m) => m && m !== "*");
-  }, [policy.allowed_models, selectedProvider]);
+  }, [models, policy.allowed_models, selectedProvider]);
+
+  useEffect(() => {
+    if (!selectedProvider) return;
+    if (models.some((m) => m.provider === selectedProvider && m.status === "active")) return;
+    if (autoSyncedProviders.includes(selectedProvider)) return;
+    const provider = activeProviders.find((p) => p.provider === selectedProvider);
+    if (!provider) return;
+    void syncModels(selectedProvider, true);
+  }, [activeProviders, autoSyncedProviders, models, selectedProvider]);
 
   const saveProvider = async () => {
     setBusy(true);
@@ -179,6 +208,37 @@ export default function LLMPanel({ projectId }: NativePanelProps) {
       setToken(out.token);
     } catch (e) {
       setStatus((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const syncModels = async (provider = selectedProvider, quiet = false) => {
+    if (!provider) return;
+    if (quiet) {
+      setAutoSyncedProviders((current) => current.includes(provider) ? current : [...current, provider]);
+    }
+    setBusy(true);
+    if (!quiet) {
+      setSyncStatus("");
+      setStatus("");
+    }
+    try {
+      const out = await api<{ results: Array<{ provider: string; status: string; model_count: number; error?: string }> }>("/models/sync", {
+        method: "POST",
+        body: JSON.stringify({ project_id: projectId, provider }),
+      });
+      const result = out.results?.find((r) => r.provider === provider) || out.results?.[0];
+      if (result?.status === "error") {
+        setSyncStatus(`${provider}: ${result.error || "sync failed"}`);
+      } else {
+        setSyncStatus(`${provider}: ${result?.model_count || 0} models synced`);
+      }
+      const modelData = await api<{ models: ProviderModel[] }>("/models");
+      setModels(modelData.models || []);
+    } catch (e) {
+      setSyncStatus((e as Error).message);
+      if (!quiet) setStatus((e as Error).message);
     } finally {
       setBusy(false);
     }
@@ -268,6 +328,12 @@ export default function LLMPanel({ projectId }: NativePanelProps) {
                 {modelSuggestions.map((m) => <option key={m} value={m} />)}
               </datalist>
             </Field>
+            <div className="flex items-center gap-2">
+              <button type="button" onClick={() => syncModels()} disabled={busy || !selectedProvider} className="px-3 py-1.5 text-sm border border-border rounded hover:bg-bg-input disabled:opacity-50">
+                Sync models
+              </button>
+              {syncStatus && <span className="text-xs text-text-dim truncate">{syncStatus}</span>}
+            </div>
             <Field label="Prompt">
               <textarea
                 value={prompt}
@@ -305,6 +371,7 @@ export default function LLMPanel({ projectId }: NativePanelProps) {
                   <span className="ml-auto text-xs text-text-dim">{p.auth_mode}</span>
                 </div>
                 <div className="mt-1 text-xs text-text-dim truncate">{p.base_url || "default base URL"}</div>
+                <div className="mt-1 text-xs text-text-dim">{models.filter((m) => m.provider === p.provider && m.status === "active").length} models</div>
               </button>
             ))}
           </aside>
