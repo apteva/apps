@@ -85,11 +85,11 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "persona_item_create", Description: "Create a reusable item/product/prop/location/brand asset. Args: persona_id, name, kind?, description?, usage_rules?, visual_rules?, storage_file_ids?, metadata?.", InputSchema: schemaObject(map[string]any{"persona_id": sInteger(), "name": sString(), "kind": sString(), "description": sString(), "usage_rules": sString(), "visual_rules": sString(), "storage_file_ids": sArray("integer"), "metadata": sObject()}, []string{"persona_id", "name"}), Handler: a.toolItemCreate},
 		{Name: "persona_item_update", Description: "Update a reusable item. Args: id, patch object.", InputSchema: schemaObject(map[string]any{"id": sInteger(), "patch": sObject()}, []string{"id", "patch"}), Handler: a.toolItemUpdate},
 		{Name: "persona_item_list", Description: "List items. Args: persona_id, kind?, active?.", InputSchema: schemaObject(map[string]any{"persona_id": sInteger(), "kind": sString(), "active": sBool()}, []string{"persona_id"}), Handler: a.toolItemList},
-		{Name: "persona_generate_asset", Description: "Generate one asset via Media Studio. Args: persona_id, asset_type (image|video|audio_tts|audio_sfx|music|avatar), prompt, style_profile_id?, item_ids?, reference_kinds?, campaign_id?, use_cache?, settings? ({model, size, aspect, duration, quality, source_images, voice, avatar, storage_folder, options}). Image generation automatically sends linked persona/item references via source_images up to the selected model's limit.", InputSchema: schemaObject(map[string]any{"persona_id": sInteger(), "asset_type": sString(), "prompt": sString(), "style_profile_id": sInteger(), "item_ids": sArray("integer"), "reference_kinds": sArray("string"), "campaign_id": sInteger(), "use_cache": sBool(), "settings": sObject()}, []string{"persona_id", "asset_type", "prompt"}), Handler: a.toolGenerateAsset},
+		{Name: "persona_generate_asset", Description: "Generate one asset via Media Studio. Args: persona_id, asset_type (image|video|audio_tts|audio_sfx|music|avatar), prompt, style_profile_id?, item_ids?, reference_kinds?, campaign_id?, use_cache?, settings? ({model, size, aspect, duration, quality, source_image, source_images, voice, avatar, storage_folder, options}). Image/video/avatar generation automatically sends linked persona/item visual references via source_images up to the selected model's limit.", InputSchema: schemaObject(map[string]any{"persona_id": sInteger(), "asset_type": sString(), "prompt": sString(), "style_profile_id": sInteger(), "item_ids": sArray("integer"), "reference_kinds": sArray("string"), "campaign_id": sInteger(), "use_cache": sBool(), "settings": sObject()}, []string{"persona_id", "asset_type", "prompt"}), Handler: a.toolGenerateAsset},
 		{Name: "persona_generate_pack", Description: "Generate a starter pack. Args: persona_id, campaign_id?, prompts? object, use_cache?.", InputSchema: schemaObject(map[string]any{"persona_id": sInteger(), "campaign_id": sInteger(), "prompts": sObject(), "use_cache": sBool()}, []string{"persona_id"}), Handler: a.toolGeneratePack},
 		{Name: "persona_campaign_create", Description: "Create a campaign. Args: persona_id, name, brief?, platforms?, content_pillars?, status?.", InputSchema: schemaObject(map[string]any{"persona_id": sInteger(), "name": sString(), "brief": sString(), "platforms": sArray("string"), "content_pillars": sArray("string"), "status": sString()}, []string{"persona_id", "name"}), Handler: a.toolCampaignCreate},
 		{Name: "persona_create_clip_plan", Description: "Create a structured clip plan. Args: persona_id, brief, campaign_id?, asset_ids?, aspect?, duration_ms?.", InputSchema: schemaObject(map[string]any{"persona_id": sInteger(), "brief": sString(), "campaign_id": sInteger(), "asset_ids": sArray("integer"), "aspect": sString(), "duration_ms": sInteger()}, []string{"persona_id", "brief"}), Handler: a.toolCreateClipPlan},
-		{Name: "persona_create_composition", Description: "Create a Composer composition owned by a persona. Args: persona_id, title?, campaign_id?, tracks?, soundtrack?, background?, output?, render?, executor?, asset_ids?, plan?, aspect?, duration_ms?. AI clips are resolved with persona identity, default voice/avatar, references, and items.", InputSchema: schemaObject(map[string]any{"persona_id": sInteger(), "title": sString(), "campaign_id": sInteger(), "tracks": map[string]any{"type": "array"}, "soundtrack": sObject(), "background": sString(), "output": sObject(), "render": sBool(), "executor": sString(), "asset_ids": sArray("integer"), "plan": sObject(), "aspect": sString(), "duration_ms": sInteger()}, []string{"persona_id"}), Handler: a.toolCreateComposition},
+		{Name: "persona_create_composition", Description: "Create a Composer composition owned by a persona. Args: persona_id, title?, campaign_id?, tracks?, soundtrack?, background?, output?, render?, executor?, asset_ids?, plan?, aspect?, duration_ms?. AI clips are resolved with persona identity, default voice/avatar, references, and items; visual AI clips receive source_images for image/video/avatar references.", InputSchema: schemaObject(map[string]any{"persona_id": sInteger(), "title": sString(), "campaign_id": sInteger(), "tracks": map[string]any{"type": "array"}, "soundtrack": sObject(), "background": sString(), "output": sObject(), "render": sBool(), "executor": sString(), "asset_ids": sArray("integer"), "plan": sObject(), "aspect": sString(), "duration_ms": sInteger()}, []string{"persona_id"}), Handler: a.toolCreateComposition},
 		{Name: "persona_composition_list", Description: "List Composer compositions owned by a persona. Args: persona_id, limit?.", InputSchema: schemaObject(map[string]any{"persona_id": sInteger(), "limit": sInteger()}, []string{"persona_id"}), Handler: a.toolCompositionList},
 		{Name: "persona_composition_get", Description: "Fetch one persona-owned composition with source and resolved Composer JSON. Args: id.", InputSchema: schemaObject(map[string]any{"id": sInteger()}, []string{"id"}), Handler: a.toolCompositionGet},
 		{Name: "persona_render_composition", Description: "Render a persona-owned Composer composition. Args: id, executor? ('local'|'remote').", InputSchema: schemaObject(map[string]any{"id": sInteger(), "executor": sString()}, []string{"id"}), Handler: a.toolRenderComposition},
@@ -876,15 +876,16 @@ func (a *App) toolGenerateAsset(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	itemIDs := int64SliceArg(args, "item_ids")
 	items, _ := listItemsByIDs(ctx.AppDB(), pid, personaID, itemIDs)
 	settings := cloneMap(mapArg(args, "settings"))
-	if assetType == "image" {
-		sourceImages := defaultImageSourceRefs(refs, items, settings)
+	if compositionKindUsesVisualSources(assetType) {
+		sourceImages := defaultVisualSourceRefs(assetType, refs, items, settings)
 		if len(sourceImages) > 0 {
 			// Always use Media Studio's provider-neutral multi-reference path,
 			// even for one source. This avoids the old single-source UI path and
 			// lets Media Studio choose the correct edit tool per provider.
 			delete(settings, "source_image")
 			settings["source_images"] = sourceImages
-			if !isImageEditModel(strArg(settings, "model")) {
+			settings["source_image"] = sourceImages[0]
+			if assetType == "image" && !isImageEditModel(strArg(settings, "model")) {
 				delete(settings, "model")
 			}
 		}
@@ -1337,9 +1338,11 @@ func resolvePersonaCompositionPlan(ctx *sdk.AppCtx, pid string, personaID int64,
 			if kind == "avatar" && strArg(ai, "avatar") == "" && persona.DefaultAvatarID != "" {
 				ai["avatar"] = persona.DefaultAvatarID
 			}
-			if (kind == "image" || kind == "video" || kind == "avatar") && strArg(ai, "source_image") == "" {
-				if ref := firstVisualSourceRef(refs, items); ref != "" {
-					ai["source_image"] = ref
+			if compositionKindUsesVisualSources(kind) {
+				sourceImages := defaultVisualSourceRefs(kind, refs, items, ai)
+				if len(sourceImages) > 0 {
+					ai["source_images"] = sourceImages
+					ai["source_image"] = sourceImages[0]
 				}
 			}
 		}
@@ -1368,23 +1371,6 @@ func aiMediaKind(ai, clip map[string]any, trackType string) string {
 	default:
 		return ""
 	}
-}
-
-func firstVisualSourceRef(refs []Reference, items []Item) string {
-	for _, ref := range refs {
-		if ref.StorageFileID == 0 || strings.EqualFold(ref.Kind, "voice") || strings.EqualFold(ref.Kind, "avatar") {
-			continue
-		}
-		return fmt.Sprintf("storage:%d", ref.StorageFileID)
-	}
-	for _, item := range items {
-		for _, id := range item.StorageFileIDs {
-			if id > 0 {
-				return fmt.Sprintf("storage:%d", id)
-			}
-		}
-	}
-	return ""
 }
 
 func jsonMapClone(in map[string]any) map[string]any {
@@ -2155,7 +2141,11 @@ func generationCacheKey(personaID int64, assetType, resolved string, settings ma
 }
 
 func defaultImageSourceRefs(refs []Reference, items []Item, settings map[string]any) []string {
-	limit := imageSourceLimit(settings)
+	return defaultVisualSourceRefs("image", refs, items, settings)
+}
+
+func defaultVisualSourceRefs(assetType string, refs []Reference, items []Item, settings map[string]any) []string {
+	limit := visualSourceLimit(assetType, settings)
 	if limit <= 0 {
 		return nil
 	}
@@ -2189,6 +2179,32 @@ func defaultImageSourceRefs(refs []Reference, items []Item, settings map[string]
 		}
 	}
 	return out
+}
+
+func visualSourceLimit(assetType string, settings map[string]any) int {
+	switch normalizeAssetType(assetType) {
+	case "image":
+		return imageSourceLimit(settings)
+	case "video", "avatar":
+		if n := intArg(settings, "source_image_limit", 0); n > 0 {
+			return n
+		}
+		if n := intArg(settings, "max_source_images", 0); n > 0 {
+			return n
+		}
+		return 3
+	default:
+		return 0
+	}
+}
+
+func compositionKindUsesVisualSources(kind string) bool {
+	switch normalizeCompositionAIKind(kind) {
+	case "image", "video", "avatar":
+		return true
+	default:
+		return false
+	}
 }
 
 func imageSourceLimit(settings map[string]any) int {

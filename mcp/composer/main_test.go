@@ -679,6 +679,15 @@ func TestAICacheKey_IncludesImageSize(t *testing.T) {
 	}
 }
 
+func TestAICacheKey_IncludesSourceImages(t *testing.T) {
+	base := &AIAsset{MediaKind: "video", Prompt: "try-on", Model: "seedance-2-0-mini-enhanced-reference-to-video", SourceImages: []string{"storage:1", "storage:2"}}
+	other := *base
+	other.SourceImages = []string{"storage:1", "storage:3"}
+	if aiCacheKey(base) == aiCacheKey(&other) {
+		t.Fatal("cache key should change when AI source images change")
+	}
+}
+
 func TestAICacheKey_IgnoresInternalEstimatedDurationOption(t *testing.T) {
 	base := &AIAsset{
 		MediaKind: "video",
@@ -917,6 +926,29 @@ func TestEnrichEditJSONWithMediaHistory_RestoresImageSize(t *testing.T) {
 	ai := got.Timeline.Tracks[0].Clips[0].AI
 	if ai == nil || ai.Size != "720x1280" {
 		t.Fatalf("expected enriched AI size, got %+v", ai)
+	}
+}
+
+func TestEnrichEditJSONWithMediaHistory_RestoresSourceImages(t *testing.T) {
+	edit := `{"timeline":{"tracks":[{"type":"visual","clips":[{"asset":{"type":"video","src":"storage:42"},"start":0,"length":4}]}]}}`
+	out := enrichEditJSONWithMediaHistory(edit, map[int64]*mediaHistoryRow{
+		42: {
+			ID:         7,
+			Kind:       "video",
+			Prompt:     "try-on",
+			Model:      "seedance-2-0-mini-enhanced-reference-to-video",
+			StorageIDs: []int64{42},
+			Status:     "complete",
+			ExtraJSON:  `{"source_image_refs":["storage:10","storage:11"]}`,
+		},
+	})
+	var got Edit
+	if err := json.Unmarshal([]byte(out), &got); err != nil {
+		t.Fatal(err)
+	}
+	ai := got.Timeline.Tracks[0].Clips[0].AI
+	if ai == nil || len(ai.SourceImages) != 2 || ai.SourceImages[0] != "storage:10" || ai.SourceImages[1] != "storage:11" {
+		t.Fatalf("expected enriched source images, got %+v", ai)
 	}
 }
 

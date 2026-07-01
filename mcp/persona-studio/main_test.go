@@ -133,6 +133,13 @@ func TestResolvePersonaCompositionPlanInjectsDefaults(t *testing.T) {
 	}); err != nil {
 		t.Fatalf("add reference: %v", err)
 	}
+	if _, err := app.toolReferenceAdd(ctx, map[string]any{
+		"persona_id":      p.ID,
+		"storage_file_id": 43,
+		"kind":            "outfit",
+	}); err != nil {
+		t.Fatalf("add second reference: %v", err)
+	}
 	source := map[string]any{
 		"output": map[string]any{"format": "mp3"},
 		"tracks": []any{
@@ -162,6 +169,10 @@ func TestResolvePersonaCompositionPlanInjectsDefaults(t *testing.T) {
 	if visualAI["source_image"] != "storage:42" {
 		t.Fatalf("source image not injected: %#v", visualAI)
 	}
+	sourceImages, _ := visualAI["source_images"].([]string)
+	if len(sourceImages) != 2 || sourceImages[0] != "storage:42" || sourceImages[1] != "storage:43" {
+		t.Fatalf("source images not injected: %#v", visualAI["source_images"])
+	}
 	if !strings.Contains(visualAI["prompt"].(string), "Mira Vale") || !strings.Contains(visualAI["prompt"].(string), "Portrait.") {
 		t.Fatalf("visual prompt should be persona-resolved: %s", visualAI["prompt"])
 	}
@@ -185,6 +196,21 @@ func TestDefaultImageSourceRefsUsesSourceImagesArrayForOneReference(t *testing.T
 	got := defaultImageSourceRefs(refs, nil, map[string]any{"model": "firered-image-edit"})
 	if len(got) != 1 || got[0] != "storage:42" {
 		t.Fatalf("unexpected source refs: %#v", got)
+	}
+}
+
+func TestDefaultVisualSourceRefsVideoPreservesExplicitThenPersonaRefs(t *testing.T) {
+	refs := []Reference{
+		{ID: 1, StorageFileID: 42, Kind: "face", Active: true},
+		{ID: 2, StorageFileID: 43, Kind: "outfit", Active: true},
+	}
+	got := defaultVisualSourceRefs("video", refs, nil, map[string]any{
+		"source_images": []any{"storage:99"},
+		"model":         "seedance-2-0-mini-enhanced-reference-to-video",
+	})
+	want := []string{"storage:99", "storage:42", "storage:43"}
+	if strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatalf("video source refs = %#v, want %#v", got, want)
 	}
 }
 

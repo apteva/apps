@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: persona-studio
 display_name: Persona Studio
-version: 0.1.18
+version: 0.1.19
 description: |
   Virtual influencer and reusable persona workspace. Persona Studio owns
   consistent identities, reference sets, reusable items/products, style
@@ -12,6 +12,9 @@ description: |
   v0.1.18 previews persona composition renders inline in the
   Compositions panel, with audio, video, and image viewers selected
   from the composition output format.
+  v0.1.19 sends persona and item visual references as source_images for
+  image, video, and avatar generation, including persona-owned Composer
+  composition AI clips.
 
   v0.1.17 keeps Composer audio_tts and avatar AI prompts as literal
   scripts while still injecting persona voice/avatar defaults and
@@ -85,7 +88,7 @@ provides:
     - name: persona_item_list
       description: List reusable items for a persona.
     - name: persona_generate_asset
-      description: Generate one persona-consistent asset through Media Studio, using style profiles, references, items, cache, and optional settings such as model, size, aspect, duration, quality, and provider options.
+      description: Generate one persona-consistent asset through Media Studio, using style profiles, references, items, cache, source_images, and optional provider settings.
     - name: persona_generate_pack
       description: Generate a small starter pack of persona assets using Media Studio.
     - name: persona_campaign_create
@@ -93,7 +96,7 @@ provides:
     - name: persona_create_clip_plan
       description: Create a structured clip plan from a campaign or brief.
     - name: persona_create_composition
-      description: Create a persona-owned Composer composition from generic tracks, soundtrack, background, output, selected persona assets, or a clip plan.
+      description: Create a persona-owned Composer composition from generic tracks, selected assets, or a clip plan, resolving visual AI clips with persona source_images.
     - name: persona_composition_list
       description: List Composer compositions owned by a persona.
     - name: persona_composition_get

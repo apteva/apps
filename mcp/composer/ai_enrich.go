@@ -201,10 +201,18 @@ func aiFromMediaHistory(row mediaHistoryRow, storageID int64) *AIAsset {
 	} else if avatar, _ := req["avatar"].(string); avatar != "" {
 		ai.Avatar = avatar
 	}
-	if source, _ := extra["source_image_ref"].(string); source != "" {
+	if refs := stringSliceFromAny(extra["source_image_refs"]); len(refs) > 0 {
+		ai.SourceImages = refs
+		ai.SourceImage = refs[0]
+	} else if refs := stringSliceFromAny(req["source_images"]); len(refs) > 0 {
+		ai.SourceImages = refs
+		ai.SourceImage = refs[0]
+	} else if source, _ := extra["source_image_ref"].(string); source != "" {
 		ai.SourceImage = source
+		ai.SourceImages = []string{source}
 	} else if source, _ := req["source_image"].(string); source != "" {
 		ai.SourceImage = source
+		ai.SourceImages = []string{source}
 	}
 	if aspect, _ := extra["aspect"].(string); aspect != "" {
 		ai.Aspect = aspect
@@ -220,6 +228,29 @@ func aiFromMediaHistory(row mediaHistoryRow, storageID int64) *AIAsset {
 		ai.Options = opts
 	}
 	return ai
+}
+
+func stringSliceFromAny(v any) []string {
+	switch t := v.(type) {
+	case []string:
+		out := make([]string, 0, len(t))
+		for _, s := range t {
+			if s = strings.TrimSpace(s); s != "" {
+				out = append(out, s)
+			}
+		}
+		return out
+	case []any:
+		out := make([]string, 0, len(t))
+		for _, item := range t {
+			if s := strings.TrimSpace(strFromAny(item)); s != "" {
+				out = append(out, s)
+			}
+		}
+		return out
+	default:
+		return nil
+	}
 }
 
 func decodeJSONObject(raw string) map[string]any {

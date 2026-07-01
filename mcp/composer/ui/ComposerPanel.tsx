@@ -86,6 +86,7 @@ interface AIAsset {
   voice?: string;
   avatar?: string;
   source_image?: string;
+  source_images?: string[];
   options?: Record<string, unknown>;
   cache_key?: string;
   cache_policy?: "reuse" | "refresh";
@@ -883,7 +884,7 @@ function cacheKeyForAI(ai: AIAsset): string {
     aspect: ai.aspect || "",
     voice: ai.voice || "",
     avatar: ai.avatar || "",
-    source_image: ai.source_image || "",
+    source_images: aiSourceImages(ai),
     options: ai.options || {},
   });
   let h = 2166136261;
@@ -892,6 +893,20 @@ function cacheKeyForAI(ai: AIAsset): string {
     h = Math.imul(h, 16777619);
   }
   return `composer:${(h >>> 0).toString(16)}`;
+}
+
+function aiSourceImages(ai: Pick<AIAsset, "source_image" | "source_images"> | undefined): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  const add = (value: string | undefined) => {
+    const ref = String(value || "").trim();
+    if (!ref || seen.has(ref)) return;
+    seen.add(ref);
+    out.push(ref);
+  };
+  for (const ref of ai?.source_images || []) add(ref);
+  add(ai?.source_image);
+  return out;
 }
 
 function storageIDFromMeta(meta: any): number {
@@ -943,6 +958,10 @@ function aiFromGeneration(g: MediaHistoryGeneration, storageId: number): AIAsset
   const extra = parseJSONRecord(g.extra_json);
   const req = parseJSONRecord(g.request_json);
   const opts = req.options && typeof req.options === "object" && !Array.isArray(req.options) ? req.options as Record<string, any> : {};
+  const sourceImages = stringArray(extra.source_image_refs).length
+    ? stringArray(extra.source_image_refs)
+    : stringArray(req.source_images);
+  const sourceImage = sourceImages[0] || String(extra.source_image_ref || req.source_image || "") || undefined;
   const kind = (g.kind || "audio_tts") as MediaKind;
   const status = g.status === "complete" || g.status === "completed" ? "ready" : (g.status || "ready");
   return {
@@ -954,7 +973,8 @@ function aiFromGeneration(g: MediaHistoryGeneration, storageId: number): AIAsset
     aspect: String(extra.aspect || req.aspect || "") || undefined,
     voice: String(extra.voice || req.voice || "") || undefined,
     avatar: String(extra.avatar || req.avatar || "") || undefined,
-    source_image: String(extra.source_image_ref || req.source_image || "") || undefined,
+    source_image: sourceImage,
+    source_images: sourceImages.length ? sourceImages : sourceImage ? [sourceImage] : undefined,
     options: Object.keys(opts).length ? opts : undefined,
     cache_key: g.cache_key || undefined,
     cache_policy: "reuse",
@@ -965,6 +985,11 @@ function aiFromGeneration(g: MediaHistoryGeneration, storageId: number): AIAsset
     actual_duration_seconds: Number(g.actual_duration_seconds || 0) || undefined,
     error: "",
   };
+}
+
+function stringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.map((item) => String(item || "").trim()).filter(Boolean);
 }
 
 function compositionNeedsAIEnrichment(c: Composition): boolean {
@@ -1604,7 +1629,11 @@ export default function ComposerPanel({ projectId, installId }: NativePanelProps
     if (nextAI.aspect) body.aspect = nextAI.aspect;
     if (nextAI.voice) body.voice = nextAI.voice;
     if (nextAI.avatar) body.avatar = nextAI.avatar;
-    if (nextAI.source_image) body.source_image = nextAI.source_image;
+    const sourceImages = aiSourceImages(nextAI);
+    if (sourceImages.length > 0) {
+      body.source_images = sourceImages;
+      body.source_image = sourceImages[0];
+    }
     const options = { ...(nextAI.options || {}) };
     if (nextAI.estimated_duration_seconds && !options.estimated_duration_seconds) {
       options.estimated_duration_seconds = nextAI.estimated_duration_seconds;
@@ -3483,6 +3512,7 @@ function AIAssetEditor({
     "voice",
     "avatar",
     "source_image",
+    "source_images",
     "options",
   ]);
   const update = (patch: Partial<AIAsset>) => {
@@ -3657,13 +3687,18 @@ function AIAssetEditor({
         </Field>
       </div>
       {(ai.media_kind === "image" || ai.media_kind === "video" || ai.media_kind === "avatar") && (
-        <Field label="Reference image">
-          <input
-            value={ai.source_image || ""}
-            onChange={(e) => update({ source_image: e.target.value })}
-            placeholder="storage:1 or URL"
-            className={field}
+        <Field label="Reference images">
+          <textarea
+            value={aiSourceImages(ai).join("\n")}
+            onChange={(e) => {
+              const refs = e.target.value.split(/\r?\n|,/).map((ref) => ref.trim()).filter(Boolean);
+              update({ source_images: refs.length ? refs : undefined, source_image: refs[0] || undefined });
+            }}
+            placeholder={"storage:1\nstorage:2 or https://..."}
+            className={`${field} resize-y`}
+            rows={Math.max(2, Math.min(5, aiSourceImages(ai).length || 2))}
           />
+          <div className="mt-1 text-[11px] text-text-dim">One storage id or URL per line. The first is also sent as the single-reference fallback.</div>
         </Field>
       )}
       {ai.error && <div className="text-xs text-red whitespace-pre-wrap">{ai.error}</div>}

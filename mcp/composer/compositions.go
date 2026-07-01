@@ -96,6 +96,7 @@ type AIAsset struct {
 	Voice                    string         `json:"voice,omitempty"`
 	Avatar                   string         `json:"avatar,omitempty"`
 	SourceImage              string         `json:"source_image,omitempty"`
+	SourceImages             []string       `json:"source_images,omitempty"`
 	Options                  map[string]any `json:"options,omitempty"`
 	CacheKey                 string         `json:"cache_key,omitempty"`
 	CachePolicy              string         `json:"cache_policy,omitempty"`

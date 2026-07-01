@@ -212,8 +212,9 @@ func materializeOneAIAsset(ctx *sdk.AppCtx, ai *AIAsset, label, projectID string
 	if ai.Avatar != "" {
 		args["avatar"] = ai.Avatar
 	}
-	if ai.SourceImage != "" {
-		args["source_image"] = ai.SourceImage
+	if refs := aiSourceImages(ai); len(refs) > 0 {
+		args["source_images"] = refs
+		args["source_image"] = refs[0]
 	}
 	if opts := mediaGenerateOptions(ai, contextualOptions); len(opts) > 0 {
 		args["options"] = opts
@@ -812,20 +813,41 @@ func aiCacheKey(ai *AIAsset) string {
 
 func aiCacheKeyWithOptions(ai *AIAsset, contextualOptions map[string]any) string {
 	stable := map[string]any{
-		"media_kind":   ai.MediaKind,
-		"prompt":       ai.Prompt,
-		"model":        ai.Model,
-		"size":         ai.Size,
-		"duration":     ai.Duration,
-		"aspect":       ai.Aspect,
-		"voice":        ai.Voice,
-		"avatar":       ai.Avatar,
-		"source_image": ai.SourceImage,
-		"options":      sortedStableOptions(mergedAIOptions(ai.Options, contextualOptions)),
+		"media_kind":    ai.MediaKind,
+		"prompt":        ai.Prompt,
+		"model":         ai.Model,
+		"size":          ai.Size,
+		"duration":      ai.Duration,
+		"aspect":        ai.Aspect,
+		"voice":         ai.Voice,
+		"avatar":        ai.Avatar,
+		"source_images": aiSourceImages(ai),
+		"options":       sortedStableOptions(mergedAIOptions(ai.Options, contextualOptions)),
 	}
 	b, _ := json.Marshal(stable)
 	sum := sha256.Sum256(b)
 	return "composer:" + hex.EncodeToString(sum[:16])
+}
+
+func aiSourceImages(ai *AIAsset) []string {
+	if ai == nil {
+		return nil
+	}
+	out := []string{}
+	seen := map[string]bool{}
+	add := func(ref string) {
+		ref = strings.TrimSpace(ref)
+		if ref == "" || seen[ref] {
+			return
+		}
+		seen[ref] = true
+		out = append(out, ref)
+	}
+	for _, ref := range ai.SourceImages {
+		add(ref)
+	}
+	add(ai.SourceImage)
+	return out
 }
 
 func mediaGenerateOptions(ai *AIAsset, contextualOptions ...map[string]any) map[string]any {
