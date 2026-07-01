@@ -1,5 +1,7 @@
-// MarketIntelPanel — v0.1 console for the market-intel gateway.
-// Two tabs:
+// MarketIntelPanel — v0.1.3 console for the market-intel gateway.
+// Tabs:
+//   Markets — browse the normalized market catalog
+//   Indicators — technical indicator snapshots for agents and operators
 //   Sources — which data integrations are bound (what the gateway can answer)
 //   Query   — a test harness: run enrich / probability / context and see
 //             the normalized result
@@ -45,7 +47,7 @@ const Icon = {
   Dot: ({ on }: { on: boolean }) => <svg width="8" height="8" viewBox="0 0 8 8"><circle cx="4" cy="4" r="3" className={on ? "text-green" : "text-text-dim"} fill="currentColor" /></svg>,
 };
 
-type TabId = "markets" | "sources" | "query";
+type TabId = "markets" | "indicators" | "sources" | "query";
 
 export default function MarketIntelPanel({ projectId, installId }: NativePanelProps) {
   const [tab, setTab] = useState<TabId>("markets");
@@ -67,12 +69,12 @@ export default function MarketIntelPanel({ projectId, installId }: NativePanelPr
     <div className="h-full flex flex-col bg-bg text-text text-sm">
       <header className="px-4 py-2 flex items-center gap-3 border-b border-border">
         <h1 className="text-sm font-semibold m-0">Market Intelligence</h1>
-        <span className="text-xs text-text-dim">gateway · v0.1</span>
+        <span className="text-xs text-text-dim">gateway · v0.1.3</span>
         <span className="flex-1" />
       </header>
 
       <nav className="flex border-b border-border px-3 text-xs">
-        {(["markets", "sources", "query"] as TabId[]).map((id) => (
+        {(["markets", "indicators", "sources", "query"] as TabId[]).map((id) => (
           <button key={id} onClick={() => setTab(id)}
             className={`px-3 py-2 capitalize ${tab === id ? "text-text font-semibold border-b-2 border-accent -mb-px" : "text-text-muted hover:text-text border-b-2 border-transparent -mb-px"}`}>
             {id}
@@ -89,6 +91,7 @@ export default function MarketIntelPanel({ projectId, installId }: NativePanelPr
 
       <div className="flex-1 overflow-auto p-4">
         {tab === "markets" && <MarketsTab api={api} setError={setError} />}
+        {tab === "indicators" && <IndicatorsTab api={api} setError={setError} />}
         {tab === "sources" && <SourcesTab api={api} setError={setError} />}
         {tab === "query" && <QueryTab api={api} setError={setError} />}
       </div>
@@ -178,6 +181,133 @@ function MarketsTab({ api, setError }: {
               ))}
             </tbody>
           </table>
+        </div>
+      )}
+    </>
+  );
+}
+
+// ─── Indicators tab ────────────────────────────────────────────────
+
+interface IndicatorResult {
+  symbol: string;
+  interval: string;
+  range: string;
+  as_of?: string;
+  source: string;
+  bar_count: number;
+  values: Record<string, unknown>;
+  summary?: { bias?: string; confidence?: number; score?: number; reasons?: string[]; warnings?: string[] };
+  warnings?: string[];
+}
+
+const INTERVALS = ["5m", "15m", "1h", "4h", "1d", "1w"];
+const RANGES = ["1D", "5D", "1M", "3M", "6M", "1Y", "ALL"];
+const PRESETS = ["trend", "momentum", "mean_reversion", "volatility", "breakout", "risk"];
+
+function fmtNum(v: unknown): string {
+  if (typeof v !== "number" || !Number.isFinite(v)) return "—";
+  const abs = Math.abs(v);
+  if (abs >= 1000) return v.toLocaleString(undefined, { maximumFractionDigits: 1 });
+  if (abs >= 10) return v.toFixed(2);
+  return v.toFixed(4).replace(/\.?0+$/, "");
+}
+
+function indicatorValueText(v: unknown): string {
+  if (typeof v === "number") return fmtNum(v);
+  if (v && typeof v === "object") {
+    return Object.entries(v as Record<string, unknown>)
+      .map(([k, val]) => `${k} ${fmtNum(val)}`)
+      .join(" · ");
+  }
+  return "—";
+}
+
+function biasClass(bias?: string): string {
+  if (bias === "bullish") return "text-green";
+  if (bias === "bearish") return "text-red";
+  return "text-text-muted";
+}
+
+function IndicatorsTab({ api, setError }: {
+  api: <T>(p: string, q?: Record<string, string>) => Promise<T>;
+  setError: (e: string | null) => void;
+}) {
+  const [symbol, setSymbol] = useState("BTC-USD");
+  const [interval, setIntervalValue] = useState("1h");
+  const [range, setRange] = useState("3M");
+  const [preset, setPreset] = useState("trend");
+  const [result, setResult] = useState<IndicatorResult | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const load = useCallback(async () => {
+    setBusy(true);
+    try {
+      const r = await api<IndicatorResult>("/query/indicators", { symbol, interval, range, preset });
+      setResult(r);
+      setError(null);
+    } catch (e) { setError((e as Error).message); } finally { setBusy(false); }
+  }, [api, symbol, interval, range, preset, setError]);
+
+  useEffect(() => { load(); }, []);
+
+  const inputCls = "w-full text-sm px-2 py-1.5 bg-bg-input border border-border rounded text-text";
+  const labelCls = "block text-xs uppercase tracking-wide font-medium text-text-dim mb-1";
+  const summary = result?.summary;
+  const entries = result ? Object.entries(result.values || {}) : [];
+
+  return (
+    <>
+      <div className="p-3 border border-border rounded bg-bg-card mb-4">
+        <div className="grid gap-3 mb-3" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))" }}>
+          <div><label className={labelCls}>Symbol</label><input className={inputCls} value={symbol} onChange={(e) => setSymbol(e.target.value.toUpperCase())} /></div>
+          <div><label className={labelCls}>Interval</label><select className={inputCls} value={interval} onChange={(e) => setIntervalValue(e.target.value)}>{INTERVALS.map((x) => <option key={x} value={x}>{x}</option>)}</select></div>
+          <div><label className={labelCls}>Range</label><select className={inputCls} value={range} onChange={(e) => setRange(e.target.value)}>{RANGES.map((x) => <option key={x} value={x}>{x}</option>)}</select></div>
+          <div><label className={labelCls}>Preset</label><select className={inputCls} value={preset} onChange={(e) => setPreset(e.target.value)}>{PRESETS.map((x) => <option key={x} value={x}>{x.replace("_", " ")}</option>)}</select></div>
+          <div className="flex items-end"><button disabled={busy || !symbol.trim()} onClick={load} className="w-full px-3 py-1.5 text-sm rounded bg-accent text-bg font-medium hover:opacity-90 disabled:opacity-50">{busy ? "Running…" : "Run"}</button></div>
+        </div>
+        {result && (
+          <div className="flex flex-wrap gap-3 text-xs text-text-muted">
+            <span>{result.source}</span>
+            <span>{result.bar_count} bars</span>
+            {result.as_of && <span>{new Date(result.as_of).toLocaleString()}</span>}
+          </div>
+        )}
+      </div>
+
+      {result && (
+        <div className="space-y-4">
+          <div className="border border-border rounded bg-bg-card p-3">
+            <div className="flex items-center gap-3">
+              <div className="text-xs uppercase tracking-wide text-text-dim">Bias</div>
+              <div className={`text-lg font-semibold capitalize ${biasClass(summary?.bias)}`}>{summary?.bias || "neutral"}</div>
+              <div className="text-xs text-text-muted">confidence {fmtNum(summary?.confidence)}</div>
+              <div className="flex-1" />
+              <div className="text-xs text-text-muted">{result.symbol} · {result.interval} · {result.range}</div>
+            </div>
+            {(summary?.reasons || []).length > 0 && (
+              <div className="mt-2 flex flex-wrap gap-1">
+                {(summary?.reasons || []).map((reason) => <span key={reason} className="text-xs px-2 py-0.5 rounded bg-bg-input text-text-muted">{reason}</span>)}
+              </div>
+            )}
+            {((summary?.warnings || []).length > 0 || (result.warnings || []).length > 0) && (
+              <div className="mt-2 text-xs text-amber">{[...(summary?.warnings || []), ...(result.warnings || [])].join(" · ")}</div>
+            )}
+          </div>
+
+          <div className="grid gap-3" style={{ gridTemplateColumns: "repeat(auto-fill, minmax(210px, 1fr))" }}>
+            {entries.map(([key, value]) => (
+              <div key={key} className="border border-border rounded bg-bg-card p-3">
+                <div className="text-xs uppercase tracking-wide text-text-dim mb-1">{key}</div>
+                <div className="text-sm font-semibold tabular-nums">{indicatorValueText(value)}</div>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+      {!result && !busy && (
+        <div className="p-8 text-center text-text-muted text-sm">
+          <div className="font-medium text-text mb-1">No indicator result</div>
         </div>
       )}
     </>

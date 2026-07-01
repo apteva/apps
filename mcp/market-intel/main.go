@@ -25,7 +25,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: market-intel
 display_name: Market Intelligence
-version: 0.1.2
+version: 0.1.3
 description: Cross-source market-intelligence gateway for trading agents (unified data queries; signals in v0.2).
 author: Apteva
 scopes: [project, global]
@@ -36,6 +36,7 @@ requires:
     - net.egress
     - platform.connections.execute
     - platform.connections.read
+    - platform.apps.call
   integrations:
     - role: prediction_market_polymarket
       kind: integration
@@ -82,6 +83,12 @@ provides:
       description: "Head-to-head between two entities, or one entity's time series."
     - name: context
       description: "Deduped news + sentiment + event-volume for a topic or entity."
+    - name: indicators
+      description: "Latest technical indicators for a symbol."
+    - name: indicator_series
+      description: "Time series for one scalar technical indicator."
+    - name: indicator_presets
+      description: "Named technical-indicator bundles."
     - name: probability
       description: "Best ground-truth probability for an event."
     - name: resolve_entity
@@ -134,9 +141,9 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	return nil
 }
 
-func (a *App) OnUnmount(*sdk.AppCtx) error            { return nil }
-func (a *App) Channels() []sdk.ChannelFactory         { return nil }
-func (a *App) EventHandlers() []sdk.EventHandler      { return nil }
+func (a *App) OnUnmount(*sdk.AppCtx) error       { return nil }
+func (a *App) Channels() []sdk.ChannelFactory    { return nil }
+func (a *App) EventHandlers() []sdk.EventHandler { return nil }
 
 // Workers — none in v0.1. The signal-engine scanners (venue_sync,
 // signal_scan, discovery, resolution_watch) land in v0.2.
@@ -200,6 +207,12 @@ func (a *App) handleHTTPQuery(w http.ResponseWriter, r *http.Request) {
 		out, err = a.toolContext(globalCtx, args)
 	case "history":
 		out, err = a.toolHistory(globalCtx, args)
+	case "indicators":
+		out, err = a.toolIndicators(globalCtx, args)
+	case "indicator_series":
+		out, err = a.toolIndicatorSeries(globalCtx, args)
+	case "indicator_presets":
+		out, err = a.toolIndicatorPresets(globalCtx, args)
 	default:
 		httpErr(w, 404, "unknown query tool: "+tool)
 		return

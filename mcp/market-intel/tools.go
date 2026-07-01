@@ -51,6 +51,29 @@ func (a *App) MCPTools() []sdk.Tool {
 			}, []string{"topic"}),
 			Handler: a.toolContext},
 
+		{Name: "indicators", Description: "Latest technical indicators for a symbol. Args: symbol, interval (5m|15m|1h|4h|1d|1w), range (1D|5D|1M|3M|6M|1Y|ALL), preset, indicators (comma string or array).",
+			InputSchema: schemaObject(map[string]any{
+				"symbol":     map[string]any{"type": "string"},
+				"interval":   map[string]any{"type": "string"},
+				"range":      map[string]any{"type": "string"},
+				"preset":     map[string]any{"type": "string"},
+				"indicators": map[string]any{"oneOf": []map[string]any{{"type": "string"}, {"type": "array", "items": map[string]any{"type": "string"}}}},
+			}, []string{"symbol"}),
+			Handler: a.toolIndicators},
+
+		{Name: "indicator_series", Description: "Time series for one scalar indicator. Args: symbol, indicator, interval, range. MACD returns histogram; Bollinger Bands returns middle band.",
+			InputSchema: schemaObject(map[string]any{
+				"symbol":    map[string]any{"type": "string"},
+				"indicator": map[string]any{"type": "string"},
+				"interval":  map[string]any{"type": "string"},
+				"range":     map[string]any{"type": "string"},
+			}, []string{"symbol", "indicator"}),
+			Handler: a.toolIndicatorSeries},
+
+		{Name: "indicator_presets", Description: "Named indicator bundles for trend, momentum, mean_reversion, volatility, breakout, and risk.",
+			InputSchema: schemaObject(nil, nil),
+			Handler:     a.toolIndicatorPresets},
+
 		{Name: "resolve_entity", Description: "Resolve a name to a canonical entity record (cached cross-source ids). Args: name, domain.",
 			InputSchema: schemaObject(map[string]any{
 				"name":   map[string]any{"type": "string"},
@@ -66,7 +89,7 @@ func (a *App) MCPTools() []sdk.Tool {
 
 		{Name: "sources_status", Description: "Which data sources are bound right now (by slug). Use to see what the gateway can answer.",
 			InputSchema: schemaObject(nil, nil),
-			Handler: a.toolSourcesStatus},
+			Handler:     a.toolSourcesStatus},
 	}
 }
 
