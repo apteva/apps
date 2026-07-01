@@ -25,7 +25,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: llm
 display_name: LLM Gateway
-version: 0.2.1
+version: 0.3.0
 description: Managed AI API access for Apteva-hosted apps and agents.
 author: Apteva
 scopes: [project, global]
@@ -61,7 +61,7 @@ provides:
     - name: llm_chat_complete
       description: OpenAI-compatible chat completion through the configured LLM gateway.
     - name: llm_models_list
-      description: List models allowed by the current project policy.
+      description: List models allowed by the current policy.
     - name: llm_usage_get
       description: Return usage for a project, subject, or model in a monthly period.
     - name: llm_provider_configs_list
@@ -69,11 +69,17 @@ provides:
     - name: llm_provider_configs_upsert
       description: Create or update a provider route.
     - name: llm_policy_get
-      description: Return the project policy.
+      description: Return the project or subject policy.
     - name: llm_policy_set
-      description: Replace the project policy.
+      description: Replace the project or subject policy.
     - name: llm_tokens_create
       description: Issue an OpenAI-compatible bearer token.
+    - name: llm_tokens_revoke
+      description: Revoke an issued LLM token by token id, token value, or subject.
+    - name: llm_subject_suspend
+      description: Disable LLM access for a generic subject within a project.
+    - name: llm_subject_resume
+      description: Re-enable LLM access for a generic subject within a project.
   ui_panels:
     - slot: project.page
       label: LLM Gateway
@@ -87,7 +93,7 @@ provides:
     - name: llm.usage.recorded
       description: LLM usage was recorded.
     - name: llm.spend_cap.exceeded
-      description: A request was denied because the project spend cap was exceeded.
+      description: A request was denied because a policy spend cap was exceeded.
 runtime:
   kind: source
   source:
@@ -138,7 +144,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		a.httpClient = &http.Client{Timeout: 3 * time.Minute}
 	}
 	globalCtx = ctx
-	ctx.Logger().Info("llm gateway mounted", "version", "0.2.1", "scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
+	ctx.Logger().Info("llm gateway mounted", "version", "0.3.0", "scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
 	return nil
 }
 
@@ -150,7 +156,11 @@ func (a *App) EventHandlers() []sdk.EventHandler { return nil }
 func (a *App) HTTPRoutes() []sdk.Route {
 	return []sdk.Route{
 		{Pattern: "/v1/", Handler: a.handleV1, NoAuth: true},
+		{Pattern: "/tokens/revoke_subject", Handler: a.handleTokensRevokeSubject},
+		{Pattern: "/tokens/revoke", Handler: a.handleTokensRevoke},
 		{Pattern: "/tokens", Handler: a.handleTokens},
+		{Pattern: "/subjects/suspend", Handler: a.handleSubjectSuspend},
+		{Pattern: "/subjects/resume", Handler: a.handleSubjectResume},
 		{Pattern: "/providers", Handler: a.handleProviders},
 		{Pattern: "/models/sync", Handler: a.handleModelsSync},
 		{Pattern: "/models", Handler: a.handleModels},
@@ -194,10 +204,13 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "llm_policy_get", Description: "Return project policy.", InputSchema: schemaObject(map[string]any{"project_id": map[string]any{"type": "string"}}, nil), Handler: a.toolPolicyGet},
 		{Name: "llm_policy_set", Description: "Replace project policy.", InputSchema: schemaObject(map[string]any{
 			"project_id":        map[string]any{"type": "string"},
+			"subject_type":      map[string]any{"type": "string"},
+			"subject_id":        map[string]any{"type": "string"},
 			"allowed_models":    map[string]any{"type": "array"},
 			"blocked_models":    map[string]any{"type": "array"},
 			"allowed_providers": map[string]any{"type": "array"},
 			"limits":            map[string]any{"type": "object"},
+			"disabled":          map[string]any{"type": "boolean"},
 			"fallback_policy":   map[string]any{"type": "object"},
 		}, nil), Handler: a.toolPolicySet},
 		{Name: "llm_tokens_create", Description: "Issue an OpenAI-compatible bearer token.", InputSchema: schemaObject(map[string]any{
@@ -207,6 +220,23 @@ func (a *App) MCPTools() []sdk.Tool {
 			"scopes":       map[string]any{"type": "array"},
 			"expires_at":   map[string]any{"type": "string"},
 		}, nil), Handler: a.toolTokenCreate},
+		{Name: "llm_tokens_revoke", Description: "Revoke an LLM token by id/token, or revoke all tokens for a subject.", InputSchema: schemaObject(map[string]any{
+			"project_id":   map[string]any{"type": "string"},
+			"token_id":     map[string]any{"type": "integer"},
+			"token":        map[string]any{"type": "string"},
+			"subject_type": map[string]any{"type": "string"},
+			"subject_id":   map[string]any{"type": "string"},
+		}, nil), Handler: a.toolTokenRevoke},
+		{Name: "llm_subject_suspend", Description: "Disable LLM access for a generic subject.", InputSchema: schemaObject(map[string]any{
+			"project_id":   map[string]any{"type": "string"},
+			"subject_type": map[string]any{"type": "string"},
+			"subject_id":   map[string]any{"type": "string"},
+		}, []string{"subject_type", "subject_id"}), Handler: a.toolSubjectSuspend},
+		{Name: "llm_subject_resume", Description: "Re-enable LLM access for a generic subject.", InputSchema: schemaObject(map[string]any{
+			"project_id":   map[string]any{"type": "string"},
+			"subject_type": map[string]any{"type": "string"},
+			"subject_id":   map[string]any{"type": "string"},
+		}, []string{"subject_type", "subject_id"}), Handler: a.toolSubjectResume},
 	}
 }
 
@@ -231,10 +261,13 @@ type ProviderConfig struct {
 type Policy struct {
 	ID               int64           `json:"id,omitempty"`
 	ProjectID        string          `json:"project_id"`
+	SubjectType      string          `json:"subject_type,omitempty"`
+	SubjectID        string          `json:"subject_id,omitempty"`
 	AllowedModels    []string        `json:"allowed_models"`
 	BlockedModels    []string        `json:"blocked_models"`
 	AllowedProviders []string        `json:"allowed_providers"`
 	Limits           Limits          `json:"limits"`
+	Disabled         bool            `json:"disabled,omitempty"`
 	FallbackPolicy   json.RawMessage `json:"fallback_policy,omitempty"`
 }
 
@@ -265,6 +298,25 @@ type UsageSummary struct {
 	ResponseTokens     int64  `json:"response_tokens"`
 	TotalTokens        int64  `json:"total_tokens"`
 	EstimatedCostCents int64  `json:"estimated_cost_cents"`
+}
+
+type UsageEvent struct {
+	ID                 int64  `json:"id"`
+	ProjectID          string `json:"project_id"`
+	SubjectType        string `json:"subject_type"`
+	SubjectID          string `json:"subject_id"`
+	Provider           string `json:"provider"`
+	Model              string `json:"model"`
+	RequestTokens      int64  `json:"request_tokens"`
+	ResponseTokens     int64  `json:"response_tokens"`
+	TotalTokens        int64  `json:"total_tokens"`
+	EstimatedCostCents int64  `json:"estimated_cost_cents"`
+	Status             string `json:"status"`
+	Period             string `json:"period"`
+	RequestID          string `json:"request_id"`
+	ProviderRequestID  string `json:"provider_request_id"`
+	CreatedAt          string `json:"created_at"`
+	Duplicate          bool   `json:"duplicate,omitempty"`
 }
 
 type ProviderModel struct {
@@ -330,7 +382,7 @@ func (a *App) handleV1(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleV1Models(ctx *sdk.AppCtx, ident *TokenIdentity, w http.ResponseWriter, _ *http.Request) {
-	pol, err := dbPolicyGet(ctx.AppDB(), ident.ProjectID)
+	policies, err := dbEffectivePolicies(ctx.AppDB(), ident)
 	if err != nil {
 		writeOpenAIError(w, http.StatusInternalServerError, "server_error", err.Error())
 		return
@@ -350,24 +402,24 @@ func (a *App) handleV1Models(ctx *sdk.AppCtx, ident *TokenIdentity, w http.Respo
 		if id == "" || seen[id] {
 			continue
 		}
-		if len(pol.AllowedModels) > 0 && !matchesAny(pol.AllowedModels, id) {
-			continue
-		}
-		if matchesAny(pol.BlockedModels, id) {
-			continue
-		}
-		if len(pol.AllowedProviders) > 0 && !matchesAny(pol.AllowedProviders, model.Provider) {
+		if err := policiesAllow(policies, model.Provider, id, 0); err != nil {
 			continue
 		}
 		seen[id] = true
 		data = append(data, map[string]any{"id": id, "object": "model", "owned_by": model.Provider, "display_name": model.DisplayName})
 	}
-	for _, model := range pol.AllowedModels {
-		if model == "" || seen[model] {
-			continue
+	for _, pol := range policies {
+		for _, model := range pol.AllowedModels {
+			if model == "" || seen[model] {
+				continue
+			}
+			provider := providerFromModel(model)
+			if err := policiesAllow(policies, provider, model, 0); err != nil {
+				continue
+			}
+			seen[model] = true
+			data = append(data, map[string]any{"id": model, "object": "model", "owned_by": provider})
 		}
-		seen[model] = true
-		data = append(data, map[string]any{"id": model, "object": "model", "owned_by": providerFromModel(model)})
 	}
 	if len(data) == 0 {
 		cfgs, _ := providerConfigsList(ctx, ident.ProjectID)
@@ -409,6 +461,7 @@ func (a *App) handleV1Chat(ctx *sdk.AppCtx, ident *TokenIdentity, w http.Respons
 		writeOpenAIError(w, http.StatusBadRequest, "invalid_request_error", "streaming is deferred in this LLM Gateway version")
 		return
 	}
+	body["_llm_request_id"] = requestIDFor(r, body)
 	res, err := a.executeChat(ctx, ident, body)
 	if err != nil {
 		status, typ := errorStatus(err)
@@ -447,6 +500,7 @@ func (a *App) handleV1Responses(ctx *sdk.AppCtx, ident *TokenIdentity, w http.Re
 	if v, ok := req["max_output_tokens"]; ok {
 		chatReq["max_tokens"] = v
 	}
+	chatReq["_llm_request_id"] = requestIDFor(r, req)
 	res, err := a.executeChat(ctx, ident, chatReq)
 	if err != nil {
 		status, typ := errorStatus(err)
@@ -491,24 +545,35 @@ func (a *App) executeChat(ctx *sdk.AppCtx, ident *TokenIdentity, body map[string
 	if provider == "" {
 		return nil, userError("model must include provider prefix, for example openai/gpt-4.1 or openrouter/anthropic/claude-sonnet-4")
 	}
-	pol, err := dbPolicyGet(ctx.AppDB(), ident.ProjectID)
+	policies, err := dbEffectivePolicies(ctx.AppDB(), ident)
 	if err != nil {
 		return nil, err
 	}
-	if err := policyAllows(pol, provider, model, int64Arg(body, "max_tokens")); err != nil {
+	if err := policiesAllow(policies, provider, model, int64Arg(body, "max_tokens")); err != nil {
 		_ = dbAudit(ctx.AppDB(), ident, "request.denied", provider, model, "denied", err.Error(), nil)
 		return nil, err
 	}
 	period := currentPeriod()
-	current, err := dbUsageGet(ctx.AppDB(), usageFilter{ProjectID: ident.ProjectID, Period: period})
+	projectUsage, err := dbUsageGet(ctx.AppDB(), usageFilter{ProjectID: ident.ProjectID, Period: period})
 	if err != nil {
 		return nil, err
 	}
 	estimatedInput := estimateTokens(body)
-	if err := enforcePreflightLimits(pol.Limits, current, estimatedInput); err != nil {
-		ctx.EmitWithProject("llm.spend_cap.exceeded", ident.ProjectID, map[string]any{"model": model, "subject_type": ident.SubjectType, "subject_id": ident.SubjectID, "error": err.Error()})
+	if err := enforcePreflightLimits(policies[0].Limits, projectUsage, estimatedInput); err != nil {
+		ctx.EmitWithProject("llm.spend_cap.exceeded", ident.ProjectID, map[string]any{"request_id": strArg(body, "_llm_request_id"), "model": model, "subject_type": ident.SubjectType, "subject_id": ident.SubjectID, "error": err.Error()})
 		_ = dbAudit(ctx.AppDB(), ident, "request.denied", provider, model, "denied", err.Error(), nil)
 		return nil, err
+	}
+	if len(policies) > 1 {
+		subjectUsage, err := dbUsageGet(ctx.AppDB(), usageFilter{ProjectID: ident.ProjectID, Period: period, SubjectType: ident.SubjectType, SubjectID: ident.SubjectID})
+		if err != nil {
+			return nil, err
+		}
+		if err := enforcePreflightLimits(policies[1].Limits, subjectUsage, estimatedInput); err != nil {
+			ctx.EmitWithProject("llm.spend_cap.exceeded", ident.ProjectID, map[string]any{"request_id": strArg(body, "_llm_request_id"), "model": model, "subject_type": ident.SubjectType, "subject_id": ident.SubjectID, "error": err.Error()})
+			_ = dbAudit(ctx.AppDB(), ident, "request.denied", provider, model, "denied", err.Error(), nil)
+			return nil, err
+		}
 	}
 	cfg, err := providerConfigFor(ctx, ident.ProjectID, provider)
 	if err != nil {
@@ -522,11 +587,16 @@ func (a *App) executeChat(ctx *sdk.AppCtx, ident *TokenIdentity, body map[string
 	}
 	result, err := a.callProvider(context.Background(), cfg, key, body)
 	status := "completed"
+	requestID := firstNonEmpty(strArg(body, "_llm_request_id"), "llm_req_"+randomSuffix(16))
 	if err != nil {
 		status = "failed"
-		_ = dbUsageRecord(ctx.AppDB(), ident, provider, model, estimatedInput, 0, 0, status, "")
+		usageEvent, duplicate, _ := dbUsageRecord(ctx.AppDB(), ident, provider, model, estimatedInput, 0, 0, status, requestID, "")
 		_ = dbAudit(ctx.AppDB(), ident, "request.failed", provider, model, "error", err.Error(), nil)
-		ctx.EmitWithProject("llm.request.failed", ident.ProjectID, map[string]any{"provider": provider, "model": model, "error": err.Error()})
+		event := usageEventPayload(usageEvent, map[string]any{"provider": provider, "model": model, "error": err.Error()})
+		if !duplicate {
+			ctx.EmitWithProject("llm.usage.recorded", ident.ProjectID, event)
+		}
+		ctx.EmitWithProject("llm.request.failed", ident.ProjectID, event)
 		return nil, err
 	}
 	if result.RequestTokens == 0 {
@@ -535,24 +605,17 @@ func (a *App) executeChat(ctx *sdk.AppCtx, ident *TokenIdentity, body map[string
 	if result.Status < 200 || result.Status >= 300 {
 		status = "failed"
 	}
-	if err := dbUsageRecord(ctx.AppDB(), ident, provider, model, result.RequestTokens, result.ResponseTokens, result.EstimatedCostCents, status, result.RequestID); err != nil {
+	usageEvent, duplicate, err := dbUsageRecord(ctx.AppDB(), ident, provider, model, result.RequestTokens, result.ResponseTokens, result.EstimatedCostCents, status, requestID, result.RequestID)
+	if err != nil {
 		return nil, err
 	}
-	_ = dbAudit(ctx.AppDB(), ident, "request."+status, provider, model, status, "", map[string]any{"request_id": result.RequestID})
-	event := map[string]any{
-		"provider":             provider,
-		"model":                model,
-		"request_tokens":       result.RequestTokens,
-		"response_tokens":      result.ResponseTokens,
-		"total_tokens":         result.RequestTokens + result.ResponseTokens,
-		"estimated_cost_cents": result.EstimatedCostCents,
-		"subject_type":         ident.SubjectType,
-		"subject_id":           ident.SubjectID,
-		"period":               period,
-	}
-	ctx.EmitWithProject("llm.usage.recorded", ident.ProjectID, event)
-	if status == "completed" {
-		ctx.EmitWithProject("llm.request.completed", ident.ProjectID, event)
+	_ = dbAudit(ctx.AppDB(), ident, "request."+status, provider, model, status, "", map[string]any{"request_id": requestID, "provider_request_id": result.RequestID, "usage_event_id": usageEvent.ID})
+	event := usageEventPayload(usageEvent, nil)
+	if !duplicate {
+		ctx.EmitWithProject("llm.usage.recorded", ident.ProjectID, event)
+		if status == "completed" {
+			ctx.EmitWithProject("llm.request.completed", ident.ProjectID, event)
+		}
 	}
 	return result, nil
 }
@@ -566,6 +629,7 @@ func (a *App) callProvider(ctx context.Context, cfg *ProviderConfig, apiKey stri
 
 func (a *App) callOpenAICompatible(ctx context.Context, cfg *ProviderConfig, apiKey string, body map[string]any) (*chatResult, error) {
 	outBody := cloneMap(body)
+	delete(outBody, "_llm_request_id")
 	outBody["model"] = upstreamModel(cfg.Provider, strArg(body, "model"))
 	b, _ := json.Marshal(outBody)
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, strings.TrimRight(cfg.BaseURL, "/")+"/chat/completions", bytes.NewReader(b))
@@ -639,6 +703,68 @@ func (a *App) handleTokens(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, out)
 }
 
+func (a *App) handleTokensRevoke(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST only", http.StatusMethodNotAllowed)
+		return
+	}
+	var args map[string]any
+	if err := json.NewDecoder(r.Body).Decode(&args); err != nil {
+		http.Error(w, "invalid json", http.StatusBadRequest)
+		return
+	}
+	out, err := revokeToken(globalCtx.AppDB(), args)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, out)
+}
+
+func (a *App) handleTokensRevokeSubject(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST only", http.StatusMethodNotAllowed)
+		return
+	}
+	var args map[string]any
+	if err := json.NewDecoder(r.Body).Decode(&args); err != nil {
+		http.Error(w, "invalid json", http.StatusBadRequest)
+		return
+	}
+	out, err := revokeSubjectTokens(globalCtx.AppDB(), args)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, out)
+}
+
+func (a *App) handleSubjectSuspend(w http.ResponseWriter, r *http.Request) {
+	a.handleSubjectStatus(w, r, true)
+}
+
+func (a *App) handleSubjectResume(w http.ResponseWriter, r *http.Request) {
+	a.handleSubjectStatus(w, r, false)
+}
+
+func (a *App) handleSubjectStatus(w http.ResponseWriter, r *http.Request, disabled bool) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST only", http.StatusMethodNotAllowed)
+		return
+	}
+	var args map[string]any
+	if err := json.NewDecoder(r.Body).Decode(&args); err != nil {
+		http.Error(w, "invalid json", http.StatusBadRequest)
+		return
+	}
+	pol, err := dbPolicySetDisabled(globalCtx.AppDB(), projectFromArgs(args), strArg(args, "subject_type"), strArg(args, "subject_id"), disabled)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, map[string]any{"policy": pol})
+}
+
 func (a *App) handleProviders(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
@@ -708,7 +834,7 @@ func (a *App) handleModelsSync(w http.ResponseWriter, r *http.Request) {
 func (a *App) handlePolicy(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		pol, err := dbPolicyGet(globalCtx.AppDB(), projectFromRequest(r))
+		pol, err := dbPolicyGet(globalCtx.AppDB(), projectFromRequest(r), subjectTypeFromRequest(r), subjectIDFromRequest(r))
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -779,7 +905,7 @@ func (a *App) toolChatComplete(ctx *sdk.AppCtx, args map[string]any) (any, error
 }
 
 func (a *App) toolModelsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	pol, err := dbPolicyGet(ctx.AppDB(), projectFromArgs(args))
+	pol, err := dbPolicyGet(ctx.AppDB(), projectFromArgs(args), strArg(args, "subject_type"), strArg(args, "subject_id"))
 	if err != nil {
 		return nil, err
 	}
@@ -821,7 +947,7 @@ func (a *App) toolProviderConfigUpsert(ctx *sdk.AppCtx, args map[string]any) (an
 }
 
 func (a *App) toolPolicyGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	pol, err := dbPolicyGet(ctx.AppDB(), projectFromArgs(args))
+	pol, err := dbPolicyGet(ctx.AppDB(), projectFromArgs(args), strArg(args, "subject_type"), strArg(args, "subject_id"))
 	if err != nil {
 		return nil, err
 	}
@@ -838,6 +964,29 @@ func (a *App) toolPolicySet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 
 func (a *App) toolTokenCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	return createToken(ctx.AppDB(), args)
+}
+
+func (a *App) toolTokenRevoke(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if strArg(args, "subject_type") != "" || strArg(args, "subject_id") != "" {
+		return revokeSubjectTokens(ctx.AppDB(), args)
+	}
+	return revokeToken(ctx.AppDB(), args)
+}
+
+func (a *App) toolSubjectSuspend(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pol, err := dbPolicySetDisabled(ctx.AppDB(), projectFromArgs(args), strArg(args, "subject_type"), strArg(args, "subject_id"), true)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"policy": pol}, nil
+}
+
+func (a *App) toolSubjectResume(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pol, err := dbPolicySetDisabled(ctx.AppDB(), projectFromArgs(args), strArg(args, "subject_type"), strArg(args, "subject_id"), false)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"policy": pol}, nil
 }
 
 func dbProviderConfigUpsert(db *sql.DB, projectID string, args map[string]any) (*ProviderConfig, error) {
@@ -1246,7 +1395,7 @@ func dbProviderModelsList(db *sql.DB, f providerModelFilter) ([]ProviderModel, e
 	return out, rows.Err()
 }
 
-func dbPolicyGet(db *sql.DB, projectID string) (*Policy, error) {
+func dbPolicyGet(db *sql.DB, projectID, subjectType, subjectID string) (*Policy, error) {
 	var (
 		pol             Policy
 		allowedModels   string
@@ -1254,13 +1403,16 @@ func dbPolicyGet(db *sql.DB, projectID string) (*Policy, error) {
 		allowedProvider string
 		limits          string
 		fallback        string
+		disabled        int
 	)
 	err := db.QueryRow(`
-		SELECT id, project_id, allowed_models_json, blocked_models_json, allowed_providers_json, limits_json, fallback_policy_json
-		  FROM policies WHERE project_id = ?`, projectID).
-		Scan(&pol.ID, &pol.ProjectID, &allowedModels, &blockedModels, &allowedProvider, &limits, &fallback)
+		SELECT id, project_id, subject_type, subject_id, allowed_models_json, blocked_models_json,
+		       allowed_providers_json, limits_json, disabled, fallback_policy_json
+		  FROM policies WHERE project_id = ? AND subject_type = ? AND subject_id = ?`,
+		projectID, strings.TrimSpace(subjectType), strings.TrimSpace(subjectID)).
+		Scan(&pol.ID, &pol.ProjectID, &pol.SubjectType, &pol.SubjectID, &allowedModels, &blockedModels, &allowedProvider, &limits, &disabled, &fallback)
 	if err == sql.ErrNoRows {
-		return &Policy{ProjectID: projectID, FallbackPolicy: json.RawMessage(`{}`)}, nil
+		return &Policy{ProjectID: projectID, SubjectType: strings.TrimSpace(subjectType), SubjectID: strings.TrimSpace(subjectID), FallbackPolicy: json.RawMessage(`{}`)}, nil
 	}
 	if err != nil {
 		return nil, err
@@ -1269,16 +1421,25 @@ func dbPolicyGet(db *sql.DB, projectID string) (*Policy, error) {
 	_ = json.Unmarshal([]byte(blockedModels), &pol.BlockedModels)
 	_ = json.Unmarshal([]byte(allowedProvider), &pol.AllowedProviders)
 	_ = json.Unmarshal([]byte(limits), &pol.Limits)
+	pol.Disabled = disabled != 0
 	pol.FallbackPolicy = json.RawMessage(firstNonEmpty(fallback, "{}"))
 	return &pol, nil
 }
 
 func dbPolicySet(db *sql.DB, projectID string, args map[string]any) (*Policy, error) {
+	subjectType := strArg(args, "subject_type")
+	subjectID := strArg(args, "subject_id")
+	if (subjectType == "") != (subjectID == "") {
+		return nil, errors.New("subject_type and subject_id must be provided together")
+	}
 	pol := &Policy{
 		ProjectID:        projectID,
+		SubjectType:      subjectType,
+		SubjectID:        subjectID,
 		AllowedModels:    stringSlice(args["allowed_models"]),
 		BlockedModels:    stringSlice(args["blocked_models"]),
 		AllowedProviders: stringSlice(args["allowed_providers"]),
+		Disabled:         boolArg(args, "disabled"),
 		FallbackPolicy:   jsonFromAny(args["fallback_policy"]),
 	}
 	pol.Limits = limitsFromAny(args["limits"])
@@ -1291,20 +1452,70 @@ func dbPolicySet(db *sql.DB, projectID string, args map[string]any) (*Policy, er
 	lim, _ := json.Marshal(pol.Limits)
 	_, err := db.Exec(`
 		INSERT INTO policies
-			(project_id, allowed_models_json, blocked_models_json, allowed_providers_json, limits_json, fallback_policy_json, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
-		ON CONFLICT(project_id) DO UPDATE SET
+			(project_id, subject_type, subject_id, allowed_models_json, blocked_models_json, allowed_providers_json, limits_json, disabled, fallback_policy_json, updated_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+		ON CONFLICT(project_id, subject_type, subject_id) DO UPDATE SET
 			allowed_models_json=excluded.allowed_models_json,
 			blocked_models_json=excluded.blocked_models_json,
 			allowed_providers_json=excluded.allowed_providers_json,
 			limits_json=excluded.limits_json,
+			disabled=excluded.disabled,
 			fallback_policy_json=excluded.fallback_policy_json,
 			updated_at=CURRENT_TIMESTAMP`,
-		projectID, string(am), string(bm), string(ap), string(lim), string(pol.FallbackPolicy))
+		projectID, subjectType, subjectID, string(am), string(bm), string(ap), string(lim), boolToInt(pol.Disabled), string(pol.FallbackPolicy))
 	if err != nil {
 		return nil, err
 	}
-	return dbPolicyGet(db, projectID)
+	return dbPolicyGet(db, projectID, subjectType, subjectID)
+}
+
+func dbPolicySetDisabled(db *sql.DB, projectID, subjectType, subjectID string, disabled bool) (*Policy, error) {
+	if projectID == "" || strings.TrimSpace(subjectType) == "" || strings.TrimSpace(subjectID) == "" {
+		return nil, errors.New("project_id, subject_type, and subject_id are required")
+	}
+	existing, err := dbPolicyGet(db, projectID, subjectType, subjectID)
+	if err != nil {
+		return nil, err
+	}
+	fallback := existing.FallbackPolicy
+	if len(fallback) == 0 {
+		fallback = json.RawMessage(`{}`)
+	}
+	args := map[string]any{
+		"project_id":        projectID,
+		"subject_type":      subjectType,
+		"subject_id":        subjectID,
+		"allowed_models":    existing.AllowedModels,
+		"blocked_models":    existing.BlockedModels,
+		"allowed_providers": existing.AllowedProviders,
+		"limits":            existing.Limits,
+		"disabled":          disabled,
+		"fallback_policy":   fallback,
+	}
+	return dbPolicySet(db, projectID, args)
+}
+
+func dbEffectivePolicies(db *sql.DB, ident *TokenIdentity) ([]*Policy, error) {
+	projectPolicy, err := dbPolicyGet(db, ident.ProjectID, "", "")
+	if err != nil {
+		return nil, err
+	}
+	out := []*Policy{projectPolicy}
+	if strings.TrimSpace(ident.SubjectType) == "" || strings.TrimSpace(ident.SubjectID) == "" {
+		return out, nil
+	}
+	subjectPolicy, err := dbPolicyGet(db, ident.ProjectID, ident.SubjectType, ident.SubjectID)
+	if err != nil {
+		return nil, err
+	}
+	if subjectPolicy.ID != 0 || subjectPolicy.Disabled || hasPolicyRules(subjectPolicy) {
+		out = append(out, subjectPolicy)
+	}
+	return out, nil
+}
+
+func hasPolicyRules(pol *Policy) bool {
+	return len(pol.AllowedModels) > 0 || len(pol.BlockedModels) > 0 || len(pol.AllowedProviders) > 0 || pol.Limits != (Limits{})
 }
 
 func createToken(db *sql.DB, args map[string]any) (map[string]any, error) {
@@ -1340,6 +1551,45 @@ func createToken(db *sql.DB, args map[string]any) (map[string]any, error) {
 		"scopes":       scopes,
 		"base_url":     "/api/apps/llm/v1",
 	}, nil
+}
+
+func revokeToken(db *sql.DB, args map[string]any) (map[string]any, error) {
+	tokenID := int64Arg(args, "token_id")
+	token := strArg(args, "token")
+	if tokenID <= 0 && token == "" {
+		return nil, errors.New("token_id or token is required")
+	}
+	var res sql.Result
+	var err error
+	if tokenID > 0 {
+		res, err = db.Exec(`UPDATE api_tokens SET revoked_at=CURRENT_TIMESTAMP WHERE id = ? AND revoked_at IS NULL`, tokenID)
+	} else {
+		res, err = db.Exec(`UPDATE api_tokens SET revoked_at=CURRENT_TIMESTAMP WHERE token_hash = ? AND revoked_at IS NULL`, hashToken(token))
+	}
+	if err != nil {
+		return nil, err
+	}
+	n, _ := res.RowsAffected()
+	return map[string]any{"revoked": n, "token_id": tokenID}, nil
+}
+
+func revokeSubjectTokens(db *sql.DB, args map[string]any) (map[string]any, error) {
+	projectID := projectFromArgs(args)
+	subjectType := strArg(args, "subject_type")
+	subjectID := strArg(args, "subject_id")
+	if projectID == "" || subjectType == "" || subjectID == "" {
+		return nil, errors.New("project_id, subject_type, and subject_id are required")
+	}
+	res, err := db.Exec(`
+		UPDATE api_tokens
+		   SET revoked_at=CURRENT_TIMESTAMP
+		 WHERE project_id = ? AND subject_type = ? AND subject_id = ? AND revoked_at IS NULL`,
+		projectID, subjectType, subjectID)
+	if err != nil {
+		return nil, err
+	}
+	n, _ := res.RowsAffected()
+	return map[string]any{"revoked": n, "project_id": projectID, "subject_type": subjectType, "subject_id": subjectID}, nil
 }
 
 func authenticateLLMToken(db *sql.DB, r *http.Request) (*TokenIdentity, error) {
@@ -1416,12 +1666,45 @@ func dbUsageGet(db *sql.DB, f usageFilter) (*UsageSummary, error) {
 	return &out, nil
 }
 
-func dbUsageRecord(db *sql.DB, ident *TokenIdentity, provider, model string, input, output, cost int64, status, requestID string) error {
-	_, err := db.Exec(`INSERT INTO usage_events
-		(project_id, subject_type, subject_id, provider, model, request_tokens, response_tokens, total_tokens, estimated_cost_cents, status, period, request_id)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		ident.ProjectID, ident.SubjectType, ident.SubjectID, provider, model, input, output, input+output, cost, status, currentPeriod(), requestID)
-	return err
+func dbUsageRecord(db *sql.DB, ident *TokenIdentity, provider, model string, input, output, cost int64, status, requestID, providerRequestID string) (*UsageEvent, bool, error) {
+	period := currentPeriod()
+	res, err := db.Exec(`INSERT OR IGNORE INTO usage_events
+		(project_id, subject_type, subject_id, provider, model, request_tokens, response_tokens, total_tokens, estimated_cost_cents, status, period, request_id, provider_request_id)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		ident.ProjectID, ident.SubjectType, ident.SubjectID, provider, model, input, output, input+output, cost, status, period, requestID, providerRequestID)
+	if err != nil {
+		return nil, false, err
+	}
+	n, _ := res.RowsAffected()
+	ev, err := dbUsageEventByRequestID(db, ident.ProjectID, requestID)
+	if err != nil {
+		return nil, false, err
+	}
+	return ev, n == 0, nil
+}
+
+func dbUsageEventByRequestID(db *sql.DB, projectID, requestID string) (*UsageEvent, error) {
+	row := db.QueryRow(`
+		SELECT id, project_id, subject_type, subject_id, provider, model, request_tokens, response_tokens,
+		       total_tokens, estimated_cost_cents, status, period, request_id, provider_request_id, COALESCE(created_at,'')
+		  FROM usage_events
+		 WHERE project_id = ? AND request_id = ?
+		 LIMIT 1`, projectID, requestID)
+	return scanUsageEvent(row)
+}
+
+type usageEventScanner interface {
+	Scan(dest ...any) error
+}
+
+func scanUsageEvent(row usageEventScanner) (*UsageEvent, error) {
+	var ev UsageEvent
+	if err := row.Scan(&ev.ID, &ev.ProjectID, &ev.SubjectType, &ev.SubjectID, &ev.Provider, &ev.Model,
+		&ev.RequestTokens, &ev.ResponseTokens, &ev.TotalTokens, &ev.EstimatedCostCents, &ev.Status, &ev.Period,
+		&ev.RequestID, &ev.ProviderRequestID, &ev.CreatedAt); err != nil {
+		return nil, err
+	}
+	return &ev, nil
 }
 
 func dbAudit(db *sql.DB, ident *TokenIdentity, action, provider, model, status, message string, metadata any) error {
@@ -1494,6 +1777,9 @@ func resolveProviderKey(ctx *sdk.AppCtx, cfg *ProviderConfig) (string, error) {
 }
 
 func policyAllows(pol *Policy, provider, model string, maxTokens int64) error {
+	if pol.Disabled {
+		return forbiddenError("subject disabled by project policy")
+	}
 	if len(pol.AllowedProviders) > 0 && !matchesAny(pol.AllowedProviders, provider) {
 		return forbiddenError("provider not allowed by project policy")
 	}
@@ -1505,6 +1791,18 @@ func policyAllows(pol *Policy, provider, model string, maxTokens int64) error {
 	}
 	if pol.Limits.MaxTokensPerRequest > 0 && maxTokens > pol.Limits.MaxTokensPerRequest {
 		return forbiddenError("max_tokens exceeds project policy")
+	}
+	return nil
+}
+
+func policiesAllow(policies []*Policy, provider, model string, maxTokens int64) error {
+	for _, pol := range policies {
+		if pol == nil {
+			continue
+		}
+		if err := policyAllows(pol, provider, model, maxTokens); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -1639,6 +1937,61 @@ func copyProviderHeaders(w http.ResponseWriter, res *chatResult) {
 	}
 }
 
+func requestIDFor(r *http.Request, body map[string]any) string {
+	for _, v := range []string{
+		r.Header.Get("Idempotency-Key"),
+		r.Header.Get("X-Request-Id"),
+		strArg(body, "request_id"),
+	} {
+		if v = strings.TrimSpace(v); v != "" {
+			return v
+		}
+	}
+	return "llm_req_" + randomSuffix(16)
+}
+
+func usageEventPayload(ev *UsageEvent, extra map[string]any) map[string]any {
+	out := map[string]any{
+		"schema_version":       "2026-07-llm-usage-v1",
+		"usage_event_id":       int64(0),
+		"request_id":           "",
+		"provider_request_id":  "",
+		"project_id":           "",
+		"subject_type":         "",
+		"subject_id":           "",
+		"provider":             "",
+		"model":                "",
+		"period":               currentPeriod(),
+		"request_tokens":       int64(0),
+		"response_tokens":      int64(0),
+		"total_tokens":         int64(0),
+		"estimated_cost_cents": int64(0),
+		"status":               "",
+		"created_at":           "",
+	}
+	if ev != nil {
+		out["usage_event_id"] = ev.ID
+		out["request_id"] = ev.RequestID
+		out["provider_request_id"] = ev.ProviderRequestID
+		out["project_id"] = ev.ProjectID
+		out["subject_type"] = ev.SubjectType
+		out["subject_id"] = ev.SubjectID
+		out["provider"] = ev.Provider
+		out["model"] = ev.Model
+		out["period"] = ev.Period
+		out["request_tokens"] = ev.RequestTokens
+		out["response_tokens"] = ev.ResponseTokens
+		out["total_tokens"] = ev.TotalTokens
+		out["estimated_cost_cents"] = ev.EstimatedCostCents
+		out["status"] = ev.Status
+		out["created_at"] = ev.CreatedAt
+	}
+	for k, v := range extra {
+		out[k] = v
+	}
+	return out
+}
+
 type typedErr struct {
 	status int
 	typ    string
@@ -1698,6 +2051,14 @@ func projectFromRequest(r *http.Request) string {
 		return globalCtx.CurrentProject()
 	}
 	return ""
+}
+
+func subjectTypeFromRequest(r *http.Request) string {
+	return strings.TrimSpace(r.URL.Query().Get("subject_type"))
+}
+
+func subjectIDFromRequest(r *http.Request) string {
+	return strings.TrimSpace(r.URL.Query().Get("subject_id"))
 }
 
 func projectFromArgs(args map[string]any) string {
@@ -1788,6 +2149,9 @@ func stringSlice(v any) []string {
 }
 
 func limitsFromAny(v any) Limits {
+	if l, ok := v.(Limits); ok {
+		return l
+	}
 	m, ok := v.(map[string]any)
 	if !ok {
 		return Limits{}

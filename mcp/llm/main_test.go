@@ -37,6 +37,30 @@ func TestTokenAuthAcceptsOriginalAuthorization(t *testing.T) {
 	}
 }
 
+func TestTokenRevokeInvalidatesToken(t *testing.T) {
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("proj-test"))
+	app := &App{}
+	if err := app.OnMount(ctx); err != nil {
+		t.Fatalf("mount: %v", err)
+	}
+	out, err := createToken(ctx.AppDB(), map[string]any{
+		"project_id":   "proj-test",
+		"subject_type": "agent",
+		"subject_id":   "agent-1",
+	})
+	if err != nil {
+		t.Fatalf("token: %v", err)
+	}
+	if _, err := revokeToken(ctx.AppDB(), map[string]any{"token_id": out["id"]}); err != nil {
+		t.Fatalf("revoke: %v", err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	req.Header.Set("Authorization", "Bearer "+out["token"].(string))
+	if _, err := authenticateLLMToken(ctx.AppDB(), req); err == nil || !strings.Contains(err.Error(), "revoked") {
+		t.Fatalf("expected revoked token error, got %v", err)
+	}
+}
+
 func TestPolicyDeniesDisallowedModel(t *testing.T) {
 	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("proj-test"))
 	app := &App{}
@@ -56,6 +80,49 @@ func TestPolicyDeniesDisallowedModel(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "model not allowed") {
 		t.Fatalf("expected model policy error, got %v", err)
+	}
+}
+
+func TestSubjectScopedPolicyCanSuspendSubject(t *testing.T) {
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("proj-test"))
+	app := &App{}
+	if err := app.OnMount(ctx); err != nil {
+		t.Fatalf("mount: %v", err)
+	}
+	if _, err := dbPolicySetDisabled(ctx.AppDB(), "proj-test", "tenant", "acme", true); err != nil {
+		t.Fatalf("suspend: %v", err)
+	}
+	_, err := app.executeChat(ctx, &TokenIdentity{ProjectID: "proj-test", SubjectType: "tenant", SubjectID: "acme"}, map[string]any{
+		"model": "openai/model-a",
+		"messages": []any{
+			map[string]any{"role": "user", "content": "hello"},
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "disabled") {
+		t.Fatalf("expected disabled subject error, got %v", err)
+	}
+}
+
+func TestUsageRecordIsIdempotentByRequestID(t *testing.T) {
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("proj-test"))
+	app := &App{}
+	if err := app.OnMount(ctx); err != nil {
+		t.Fatalf("mount: %v", err)
+	}
+	ident := &TokenIdentity{ProjectID: "proj-test", SubjectType: "tenant", SubjectID: "acme"}
+	first, dup, err := dbUsageRecord(ctx.AppDB(), ident, "openai", "openai/model-a", 10, 5, 0, "completed", "req-1", "provider-1")
+	if err != nil {
+		t.Fatalf("first usage: %v", err)
+	}
+	if dup || first.ID == 0 || first.RequestID != "req-1" || first.ProviderRequestID != "provider-1" {
+		t.Fatalf("first event = %+v duplicate=%v", first, dup)
+	}
+	second, dup, err := dbUsageRecord(ctx.AppDB(), ident, "openai", "openai/model-a", 100, 50, 0, "completed", "req-1", "provider-2")
+	if err != nil {
+		t.Fatalf("second usage: %v", err)
+	}
+	if !dup || second.ID != first.ID || second.RequestTokens != 10 || second.ProviderRequestID != "provider-1" {
+		t.Fatalf("second event = %+v duplicate=%v first=%+v", second, dup, first)
 	}
 }
 
