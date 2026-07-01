@@ -285,7 +285,7 @@ func buildLocalFFmpegArgsWithAudioInfo(edit *Edit, output Output, inputs []strin
 	videoLabel := "vcat"
 	for i, c := range textOverlayClips(edit) {
 		outLabel := fmt.Sprintf("vtxt%d", i)
-		fmt.Fprintf(&filter, "[%s]%s[%s];", videoLabel, buildTimedDrawText(c, w, h), outLabel)
+		filter.WriteString(buildTimedDrawTextChain(videoLabel, outLabel, c, w, h))
 		videoLabel = outLabel
 	}
 	fmt.Fprintf(&filter, "[%s]null[vout]", videoLabel)
@@ -562,7 +562,60 @@ func buildDrawText(t *TextOver, w, h int) string {
 }
 
 func buildTimedDrawText(c Clip, w, h int) string {
-	body := strings.TrimSpace(textClipBody(c))
+	return buildTimedDrawTextWithBody(c, w, h, styledTextClipBody(c, true))
+}
+
+func buildTimedDrawTextChain(inputLabel, outLabel string, c Clip, w, h int) string {
+	if !usesRevealText(c) {
+		return fmt.Sprintf("[%s]%s[%s];", inputLabel, buildTimedDrawText(c, w, h), outLabel)
+	}
+	body := styledTextClipBody(c, true)
+	steps := revealTextBodies(body, animationPreset(c.Animation.In))
+	if len(steps) <= 1 {
+		return fmt.Sprintf("[%s]%s[%s];", inputLabel, buildTimedDrawText(c, w, h), outLabel)
+	}
+	start := c.Start
+	end := c.Start + clipDuration(c)
+	revealDur := animationDuration(c.Animation.In, 1.2)
+	if revealDur <= 0 {
+		revealDur = 1.2
+	}
+	if revealDur > clipDuration(c) {
+		revealDur = clipDuration(c)
+	}
+	stepDur := revealDur / float64(len(steps))
+	var b strings.Builder
+	prev := inputLabel
+	for i, body := range steps {
+		stepStart := start + float64(i)*stepDur
+		stepEnd := start + float64(i+1)*stepDur
+		if i == len(steps)-1 || stepEnd > end {
+			stepEnd = end
+		}
+		if stepEnd <= stepStart {
+			continue
+		}
+		next := outLabel
+		if i < len(steps)-1 {
+			next = fmt.Sprintf("%s_%d", outLabel, i)
+		}
+		cc := c
+		cc.Start = stepStart
+		cc.Length = stepEnd - stepStart
+		cc.Animation = nil
+		if i == len(steps)-1 && c.Animation != nil && c.Animation.Out != nil {
+			cc.Animation = &Animation{Out: c.Animation.Out}
+		}
+		fmt.Fprintf(&b, "[%s]%s[%s];", prev, buildTimedDrawTextWithBody(cc, w, h, body), next)
+		prev = next
+	}
+	if prev != outLabel {
+		fmt.Fprintf(&b, "[%s]null[%s];", prev, outLabel)
+	}
+	return b.String()
+}
+
+func buildTimedDrawTextWithBody(c Clip, w, h int, body string) string {
 	if c.Asset.Style != nil {
 		switch strings.ToLower(strings.TrimSpace(c.Asset.Style.Transform)) {
 		case "uppercase":
@@ -629,6 +682,118 @@ func buildTimedDrawText(c Clip, w, h int) string {
 		parts = append(parts, "font='"+escDrawText(c.Asset.Font.Family)+"'")
 	}
 	return strings.Join(parts, ":")
+}
+
+func styledTextClipBody(c Clip, trim bool) string {
+	body := textClipBody(c)
+	if trim {
+		return strings.TrimSpace(body)
+	}
+	return strings.TrimRight(body, "\r\n")
+}
+
+func usesRevealText(c Clip) bool {
+	if c.Animation == nil || c.Animation.In == nil {
+		return false
+	}
+	switch animationPreset(c.Animation.In) {
+	case "typewriter", "word_by_word":
+		return animationDuration(c.Animation.In, 1.2) > 0
+	default:
+		return false
+	}
+}
+
+func revealTextBodies(body, preset string) []string {
+	switch preset {
+	case "word_by_word":
+		return revealTextBodiesByWord(body)
+	default:
+		return revealTextBodiesByRune(body)
+	}
+}
+
+func revealTextBodiesByRune(body string) []string {
+	total := visibleRuneCount(body)
+	if total == 0 {
+		return nil
+	}
+	step := 1
+	if total > 120 {
+		step = (total + 119) / 120
+	}
+	out := make([]string, 0, (total+step-1)/step)
+	for n := step; n < total; n += step {
+		out = append(out, revealBody(body, n))
+	}
+	out = append(out, revealBody(body, total))
+	return out
+}
+
+func revealTextBodiesByWord(body string) []string {
+	total := visibleRuneCount(body)
+	if total == 0 {
+		return nil
+	}
+	var stops []int
+	visible := 0
+	inWord := false
+	for _, r := range body {
+		if r == '\n' || r == '\r' {
+			continue
+		}
+		visible++
+		if r == ' ' || r == '\t' {
+			if inWord {
+				stops = append(stops, visible-1)
+			}
+			inWord = false
+			continue
+		}
+		inWord = true
+	}
+	if inWord {
+		stops = append(stops, total)
+	}
+	if len(stops) == 0 || stops[len(stops)-1] != total {
+		stops = append(stops, total)
+	}
+	out := make([]string, 0, len(stops))
+	for _, n := range stops {
+		if n > 0 {
+			out = append(out, revealBody(body, n))
+		}
+	}
+	return out
+}
+
+func visibleRuneCount(body string) int {
+	n := 0
+	for _, r := range body {
+		if r != '\n' && r != '\r' {
+			n++
+		}
+	}
+	return n
+}
+
+func revealBody(body string, revealCount int) string {
+	var b strings.Builder
+	visible := 0
+	for _, r := range body {
+		switch r {
+		case '\n', '\r':
+			b.WriteRune(r)
+		default:
+			visible++
+			if visible <= revealCount {
+				b.WriteRune(r)
+			} else {
+				b.WriteByte(' ')
+			}
+		}
+	}
+	return b.String()
 }
 
 func textOpacity(c Clip) float64 {

@@ -28,7 +28,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: composer
 display_name: Composer
-version: 0.3.45
+version: 0.3.46
 description: |
   Multi-clip video compositions with a structured timeline panel,
   universal generated-asset clip editing, first-class AI avatar clips,
@@ -55,7 +55,8 @@ description: |
   autoplay over an already playing inline preview. Composer also supports
   first-class overlay/text tracks with rich typography fields, stroke/shadow
   styling, UI editing, and animation presets rendered after visual
-  concatenation.
+  concatenation. Typewriter and word-by-word overlay presets render as real
+  time-gated reveal steps instead of a full-text fade.
   Renders locally via ffmpeg, on a render host via instances, or against a
   bound render_executor integration.
 author: Apteva

@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: composer
 display_name: Composer
-version: 0.3.45
+version: 0.3.46
 description: |
   Multi-clip video composition. Stitch generated or uploaded assets
   into a single video — one visual track, timed audio tracks, optional
@@ -14,6 +14,8 @@ description: |
   v0.3.45 adds first-class overlay/text tracks with rich text styling,
   timeline/UI editing, animation presets, and ffmpeg rendering after
   visual concatenation while preserving legacy per-clip text overlays.
+  v0.3.46 renders typewriter and word-by-word text overlays as real
+  time-gated reveal steps instead of treating them as simple fades.
 
   v0.3.44 makes remote instance renders upload Composer outputs through
   Storage's direct/chunked upload flow before falling back to single multipart

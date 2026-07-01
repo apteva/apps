@@ -373,6 +373,34 @@ func TestBuildLocalFFmpegArgs_TextOverlayTrack(t *testing.T) {
 	}
 }
 
+func TestBuildLocalFFmpegArgs_TypewriterOverlayTrack(t *testing.T) {
+	e, err := parseEditJSON(`{"timeline":{"tracks":[
+		{"type":"visual","clips":[{"asset":{"src":"https://a","type":"video"},"start":0,"length":6}]},
+		{"type":"overlay","clips":[{
+			"asset":{"type":"text","text":"Hi","font":{"size":40,"color":"#ffffff"}},
+			"start":1,"length":3,
+			"animation":{"in":{"preset":"typewriter","duration":1,"style":"character"},"out":{"preset":"fade","duration":0.4}}
+		}]}
+	]}}`)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	args := buildLocalFFmpegArgs(e, defaultOutput(), []string{"https://a"}, -1, "out.mp4")
+	cmd := strings.Join(args, " ")
+	if strings.Count(cmd, "drawtext=text=") < 2 {
+		t.Fatalf("typewriter should emit multiple reveal drawtext filters: %s", cmd)
+	}
+	if !strings.Contains(cmd, "drawtext=text='H '") {
+		t.Fatalf("first reveal step should pad unrevealed characters to keep position stable: %s", cmd)
+	}
+	if !strings.Contains(cmd, "drawtext=text='Hi'") {
+		t.Fatalf("final reveal step should contain the complete text: %s", cmd)
+	}
+	if !strings.Contains(cmd, "enable='between(t\\,1\\,1.5)'") || !strings.Contains(cmd, "enable='between(t\\,1.5\\,4)'") {
+		t.Fatalf("typewriter reveal steps should be time-gated: %s", cmd)
+	}
+}
+
 func TestValidateEdit_TextOverlayTrackRejectsMissingText(t *testing.T) {
 	_, err := parseEditJSON(`{"timeline":{"tracks":[
 		{"type":"visual","clips":[{"asset":{"src":"https://a","type":"video"},"start":0,"length":3}]},
