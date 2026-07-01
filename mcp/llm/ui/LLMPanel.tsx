@@ -192,20 +192,25 @@ export default function LLMPanel({ projectId }: NativePanelProps) {
     }
   };
 
+  const issueToken = async () => {
+    const out = await api<{ token: string }>("/tokens", {
+      method: "POST",
+      body: JSON.stringify({
+        project_id: projectId,
+        subject_type: tokenSubjectType,
+        subject_id: tokenSubjectId,
+        scopes: ["chat", "models", "usage"],
+      }),
+    });
+    setToken(out.token);
+    return out.token;
+  };
+
   const createToken = async () => {
     setBusy(true);
     setStatus("");
     try {
-      const out = await api<{ token: string }>("/tokens", {
-        method: "POST",
-        body: JSON.stringify({
-          project_id: projectId,
-          subject_type: tokenSubjectType,
-          subject_id: tokenSubjectId,
-          scopes: ["chat", "models", "usage"],
-        }),
-      });
-      setToken(out.token);
+      await issueToken();
     } catch (e) {
       setStatus((e as Error).message);
     } finally {
@@ -245,22 +250,18 @@ export default function LLMPanel({ projectId }: NativePanelProps) {
   };
 
   const runTest = async () => {
-    if (!token) {
-      setStatus("Create a token first.");
-      setTab("tokens");
-      return;
-    }
     setBusy(true);
     setStatus("");
     setResponse(null);
     try {
+      const runToken = token || await issueToken();
       const gatewayModel = modelForRequest(selectedProvider, modelId);
       const res = await fetch(`${API}/v1/chat/completions?project_id=${encodeURIComponent(projectId)}`, {
         method: "POST",
         credentials: "include",
         headers: {
           "Content-Type": "application/json",
-          "Authorization": `Bearer ${token}`,
+          "Authorization": `Bearer ${runToken}`,
         },
         body: JSON.stringify({
           model: gatewayModel,
