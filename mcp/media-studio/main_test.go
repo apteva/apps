@@ -1823,6 +1823,106 @@ func TestToolMediaGenerate_Video_VeniceQueue(t *testing.T) {
 	}
 }
 
+func TestToolMediaGenerate_Video_VeniceReferenceToVideo_MultipleSourceImages(t *testing.T) {
+	pf := newRecordingPlatform()
+	pf.appSlug = "venice-ai"
+	pf.identity.Bindings["video_provider"] = float64(77)
+	pf.perAppCallResults = map[string]json.RawMessage{
+		"storage:files_get_content": json.RawMessage(
+			`{"result":{"content":[{"type":"text","text":"{\"content_base64\":\"U09VUkNF\"}"}]}}`,
+		),
+	}
+	pf.perExecuteResults = map[string]*sdk.ExecuteResult{
+		"list_models": {
+			Success: true, Status: 200,
+			Data: json.RawMessage(`{"data":[{"id":"seedance-2-0-mini-enhanced-reference-to-video","model_spec":{"constraints":{"model_type":"image-to-video","durations":["5s","10s"]}}}]}`),
+		},
+		"queue_video": {
+			Success: true, Status: 200,
+			Data: json.RawMessage(`{"model":"seedance-2-0-mini-enhanced-reference-to-video","queue_id":"q-ref-123"}`),
+		},
+		"quote_video": {
+			Success: true, Status: 200,
+			Data: json.RawMessage(`{"data":{"quote":{"usd":0.12}}}`),
+		},
+	}
+	ctx := newMediaStudioCtx(t, pf)
+	app := &App{}
+	out, err := app.toolMediaGenerate(ctx, map[string]any{
+		"kind":          "video",
+		"prompt":        "same presenter reviewing dotted black tights",
+		"model":         "seedance-2-0-mini-enhanced-reference-to-video",
+		"duration":      "5s",
+		"source_images": []any{"storage:1001", "https://example.com/tights.png"},
+	})
+	if err != nil {
+		t.Fatalf("toolMediaGenerate: %v", err)
+	}
+	res := out.(map[string]any)
+	if res["isError"] == true {
+		t.Fatalf("unexpected error result: %+v", res)
+	}
+	var call executeCall
+	for _, c := range pf.executeCalls {
+		if c.Tool == "queue_video" {
+			call = c
+			break
+		}
+	}
+	if call.Tool == "" {
+		t.Fatalf("expected queue_video call, got %+v", pf.executeCalls)
+	}
+	refs, ok := call.Input["reference_image_urls"].([]string)
+	if !ok || len(refs) != 2 {
+		t.Fatalf("reference_image_urls = %#v", call.Input["reference_image_urls"])
+	}
+	if !strings.HasPrefix(refs[0], "data:image/png;base64,U09VUkNF") {
+		t.Fatalf("first reference was not resolved/wrapped as data URL: %q", refs[0])
+	}
+	if refs[1] != "https://example.com/tights.png" {
+		t.Fatalf("second reference = %q", refs[1])
+	}
+	if _, exists := call.Input["image_url"]; exists {
+		t.Fatalf("reference-to-video payload should not include image_url: %+v", call.Input)
+	}
+	meta := res["_meta"].(map[string]any)
+	sourceRefs, ok := meta["source_image_refs"].([]string)
+	if !ok || len(sourceRefs) != 2 || sourceRefs[0] != "storage:1001" || sourceRefs[1] != "https://example.com/tights.png" {
+		t.Fatalf("source_image_refs meta = %#v", meta["source_image_refs"])
+	}
+}
+
+func TestToolMediaGenerate_Video_VeniceImageToVideo_RejectsMultipleSourceImages(t *testing.T) {
+	pf := newRecordingPlatform()
+	pf.appSlug = "venice-ai"
+	pf.identity.Bindings["video_provider"] = float64(77)
+	ctx := newMediaStudioCtx(t, pf)
+	app := &App{}
+	out, err := app.toolMediaGenerate(ctx, map[string]any{
+		"kind":          "video",
+		"prompt":        "animate this image",
+		"model":         "seedance-2-0-mini-image-to-video",
+		"duration":      "5s",
+		"source_images": []any{"storage:1001", "https://example.com/ref2.png"},
+	})
+	if err != nil {
+		t.Fatalf("toolMediaGenerate: %v", err)
+	}
+	res := out.(map[string]any)
+	if res["isError"] != true {
+		t.Fatalf("expected isError, got %+v", res)
+	}
+	txt := fmt.Sprint(res["content"])
+	if !strings.Contains(txt, "at most 1 source image") {
+		t.Fatalf("error did not explain source limit: %+v", res)
+	}
+	for _, c := range pf.executeCalls {
+		if c.Tool == "queue_video" {
+			t.Fatalf("provider should not be called when video source limit is exceeded: %+v", pf.executeCalls)
+		}
+	}
+}
+
 func TestToolMediaEstimate_Video_VeniceQuote(t *testing.T) {
 	pf := newRecordingPlatform()
 	pf.appSlug = "venice-ai"

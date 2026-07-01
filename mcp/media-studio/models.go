@@ -526,6 +526,7 @@ func buildModelEntryFromVeniceSpec(id string, raw json.RawMessage, veniceType st
 
 	supportsImg2Vid := c.ModelType == "image-to-video"
 	supportsEdit := isVeniceEditModel(id)
+	maxSourceImages := veniceMaxSourceImages(id)
 
 	entry := modelEntry{
 		ID:                   id,
@@ -538,7 +539,7 @@ func buildModelEntryFromVeniceSpec(id string, raw json.RawMessage, veniceType st
 		Durations:            c.Durations,
 		SupportsImageToVideo: supportsImg2Vid,
 		SupportsImageEdit:    supportsEdit,
-		MaxSourceImages:      veniceMaxSourceImages(id),
+		MaxSourceImages:      maxSourceImages,
 		AudioConfigurable:    c.AudioConfigurable,
 		StepsDefault:         c.Steps.Default,
 		StepsMax:             c.Steps.Max,
@@ -593,8 +594,15 @@ func isVeniceEditModel(id string) bool {
 }
 
 func veniceMaxSourceImages(id string) int {
+	lower := strings.ToLower(id)
 	if isVeniceEditModel(id) {
 		return 3
+	}
+	if strings.Contains(lower, "reference-to-video") {
+		return 9
+	}
+	if strings.Contains(lower, "image-to-video") {
+		return 1
 	}
 	return 0
 }

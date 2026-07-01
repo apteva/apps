@@ -620,6 +620,9 @@ func resolvedSourceImages(args map[string]any) []string {
 		}
 		return out
 	}
+	if s := strArg(args, "source_image", ""); strings.TrimSpace(s) != "" {
+		return []string{s}
+	}
 	return nil
 }
 

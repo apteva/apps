@@ -5,6 +5,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	sdk "github.com/apteva/app-sdk"
@@ -334,6 +335,12 @@ func (a *App) finalizeJob(app *sdk.AppCtx, p pendingJob, base64Bytes, mime strin
 	if p.SourceImageRef != "" {
 		extras["source_image_ref"] = p.SourceImageRef
 	}
+	if refs := sourceImageRefsFromRequestJSON(p.RequestJSON); len(refs) > 0 {
+		extras["source_image_refs"] = refs
+		if p.SourceImageRef == "" {
+			extras["source_image_ref"] = refs[0]
+		}
+	}
 	extraJSON, _ := json.Marshal(extras)
 
 	var costUSD float64
@@ -387,4 +394,29 @@ func (a *App) finalizeJob(app *sdk.AppCtx, p pendingJob, base64Bytes, mime strin
 		"estimated_duration_seconds": p.EstimatedDurationSeconds,
 		"actual_duration_seconds":    actualSeconds,
 	})
+}
+
+func sourceImageRefsFromRequestJSON(raw string) []string {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	var body map[string]any
+	if err := json.Unmarshal([]byte(raw), &body); err != nil {
+		return nil
+	}
+	if refs, ok := body["_source_image_refs"].([]any); ok {
+		out := make([]string, 0, len(refs))
+		for _, ref := range refs {
+			if s, ok := ref.(string); ok && strings.TrimSpace(s) != "" {
+				out = append(out, s)
+			}
+		}
+		if len(out) > 0 {
+			return out
+		}
+	}
+	if ref, ok := body["_source_image_ref"].(string); ok && strings.TrimSpace(ref) != "" {
+		return []string{ref}
+	}
+	return nil
 }

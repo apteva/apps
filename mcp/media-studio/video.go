@@ -26,10 +26,9 @@ func buildVideoArgs(args map[string]any, providerSlug, capability string) (map[s
 }
 
 // buildVeniceVideoQueueArgs assembles Venice's POST /video/queue body.
-// Required: model, prompt, duration. Source-image (for image-to-video)
-// arrives as args["source_image"]; we pass it through as image_url —
-// Venice accepts both HTTPS URLs and data: URLs, and the dispatcher
-// has already resolved storage:N handles before the build phase.
+// Required: model, prompt, duration. Source-image refs arrive as resolved
+// args from the dispatcher; image-to-video uses image_url, while
+// reference-to-video uses Venice's reference_image_urls array.
 func buildVeniceVideoQueueArgs(args map[string]any) (map[string]any, error) {
 	model := strArg(args, "model", "")
 	if model == "" {
@@ -53,7 +52,15 @@ func buildVeniceVideoQueueArgs(args map[string]any) (map[string]any, error) {
 	if v := strArg(args, "aspect", ""); v != "" {
 		out["aspect_ratio"] = v
 	}
-	if v := strArg(args, "source_image", ""); v != "" {
+	if isReferenceToVideoModel(model) {
+		if refs := resolvedSourceImages(args); len(refs) > 0 {
+			urls := make([]string, 0, len(refs))
+			for _, ref := range refs {
+				urls = append(urls, ensureDataURL(ref))
+			}
+			out["reference_image_urls"] = urls
+		}
+	} else if v := strArg(args, "source_image", ""); v != "" {
 		// source_image at this point is either a URL or a base64 string
 		// (dispatcher resolved storage:N before us). Venice's image_url
 		// accepts both forms — base64 must be a data: URL.
@@ -73,6 +80,10 @@ func buildVeniceVideoQueueArgs(args map[string]any) (map[string]any, error) {
 		}
 	}
 	return out, nil
+}
+
+func isReferenceToVideoModel(model string) bool {
+	return strings.Contains(strings.ToLower(model), "reference-to-video")
 }
 
 // ensureDataURL leaves URLs untouched but wraps raw base64 in a
@@ -184,23 +195,31 @@ func (a *App) handleAsyncQueueResponse(ctx *sdk.AppCtx, kind, role, providerSlug
 			"media_history surfaces the finished row.",
 		noun, providerSlug, model, jobID, queueID, prompt, costLine,
 	)
+	meta := map[string]any{
+		"kind":                       kind,
+		"status":                     "queued",
+		"job_id":                     jobID,
+		"queue_id":                   queueID,
+		"model":                      model,
+		"provider":                   providerSlug,
+		"generation_id":              draftID,
+		"cost_usd":                   costUSD,
+		"cache_key":                  cacheKey,
+		"storage_folder":             storageFolder,
+		"estimated_duration_seconds": estimatedSeconds,
+	}
+	if refs, ok := args["_source_image_refs"].([]string); ok && len(refs) > 0 {
+		meta["source_image_refs"] = refs
+		meta["source_image_ref"] = refs[0]
+	} else if sourceRef != "" {
+		meta["source_image_ref"] = sourceRef
+		meta["source_image_refs"] = []string{sourceRef}
+	}
 	return map[string]any{
 		"content": []map[string]any{
 			{"type": "text", "text": summary},
 		},
-		"_meta": map[string]any{
-			"kind":                       kind,
-			"status":                     "queued",
-			"job_id":                     jobID,
-			"queue_id":                   queueID,
-			"model":                      model,
-			"provider":                   providerSlug,
-			"generation_id":              draftID,
-			"cost_usd":                   costUSD,
-			"cache_key":                  cacheKey,
-			"storage_folder":             storageFolder,
-			"estimated_duration_seconds": estimatedSeconds,
-		},
+		"_meta": meta,
 	}
 }
 

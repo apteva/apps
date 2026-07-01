@@ -813,7 +813,11 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
     activeKind === "image"
       ? currentModel?.max_source_images || EDIT_MODEL_SOURCE_LIMITS[editModel] || 1
       : 1;
-  const referenceInputMax = activeKind === "image" ? editSourceLimit : 1;
+  const videoSourceLimit =
+    activeKind === "video" && showVideoRefInput
+      ? currentModel?.max_source_images || (videoModel.includes("reference-to-video") ? 9 : 1)
+      : 1;
+  const referenceInputMax = activeKind === "image" ? editSourceLimit : videoSourceLimit;
 
   const addSourceImage = (value: string, label: string) => {
     const trimmed = value.trim();
@@ -1052,10 +1056,14 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
       if (videoNoSound) {
         body.options = { audio: false };
       }
-      // Image-to-video: pass the reference image through the same
-      // source_image arg the dispatcher uses for image.edit.
-      if (showVideoRefInput && sourceImages[0]?.value) {
-        body.source_image = sourceImages[0].value;
+      // Image/video references pass through the same source args as
+      // image edit. Reference-to-video models can accept multiple refs.
+      if (showVideoRefInput && sourceImages.length > 0) {
+        if (sourceImages.length === 1) {
+          body.source_image = sourceImages[0].value;
+        } else {
+          body.source_images = sourceImages.map((x) => x.value);
+        }
       }
     } else if (activeKind === "audio_tts") {
       if (audioModel) body.model = audioModel;
@@ -1386,14 +1394,16 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
         <div className="flex-1 flex flex-col p-6 gap-4 min-w-0">
           {(activeKind === "image" || showVideoRefInput) && (
             <ReferenceImageInput
-              sources={showVideoRefInput ? sourceImages.slice(0, 1) : sourceImages}
+              sources={sourceImages}
               maxSources={referenceInputMax}
               onAdd={addSourceImage}
               onRemove={removeSourceImage}
               onClear={() => setSourceImages([])}
               hint={
                 showVideoRefInput
-                  ? "Source image for the image-to-video model (required)"
+                  ? referenceInputMax > 1
+                    ? "Reference images for this video model"
+                    : "Source image for the image-to-video model (required)"
                   : undefined
               }
             />

@@ -830,6 +830,15 @@ func maxSourceImagesFor(providerSlug, capability, model string) int {
 		}
 		return 1
 	case "video.generate":
+		if providerSlug == "venice-ai" {
+			m := strings.ToLower(model)
+			if strings.Contains(m, "reference-to-video") {
+				return 9
+			}
+			if strings.Contains(m, "image-to-video") {
+				return 1
+			}
+		}
 		return 1
 	}
 	return 0
