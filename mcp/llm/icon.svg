@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-label="LLM Gateway">
+  <rect width="256" height="256" rx="48" fill="#101828"/>
+  <path d="M64 132c0-35.346 28.654-64 64-64s64 28.654 64 64-28.654 64-64 64-64-28.654-64-64Z" fill="#2DD4BF" opacity=".16"/>
+  <path d="M82 128h92M128 82v92M96 96l64 64M160 96l-64 64" stroke="#2DD4BF" stroke-width="14" stroke-linecap="round"/>
+  <circle cx="128" cy="128" r="22" fill="#F8FAFC"/>
+  <circle cx="128" cy="128" r="8" fill="#101828"/>
+</svg>

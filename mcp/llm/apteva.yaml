@@ -1,0 +1,120 @@
+schema: apteva-app/v1
+
+name: llm
+display_name: LLM Gateway
+version: 0.1.0
+description: |
+  Managed AI API access for Apteva-hosted apps and agents. Provides an
+  OpenAI-compatible tenant-safe gateway that routes requests to configured
+  model providers, enforces project policy and spend caps, tracks usage, and
+  emits billable usage events for Billing and Entitlements.
+
+author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/llm
+icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/llm/icon.svg
+tags: [llm, ai, gateway, openai-compatible, usage, billing]
+
+scopes: [project, global]
+min_apteva_version: "0.11.0"
+
+requires:
+  permissions:
+    - db.write.app
+    - platform.apps.call
+    - platform.connections.read
+    - platform.connections.read_credentials
+  apps:
+    - name: billing
+      optional: true
+    - name: entitlements
+      optional: true
+  integrations:
+    - role: anthropic_provider
+      kind: integration
+      compatible_slugs: [anthropic-api]
+      required: false
+      label: "Anthropic provider"
+    - role: fireworks_provider
+      kind: integration
+      compatible_slugs: [fireworks]
+      required: false
+      label: "Fireworks provider"
+    - role: openai_provider
+      kind: integration
+      compatible_slugs: [openai-api]
+      required: false
+      label: "OpenAI provider"
+    - role: openrouter_provider
+      kind: integration
+      compatible_slugs: [openrouter]
+      required: false
+      label: "OpenRouter provider"
+
+provides:
+  http_routes:
+    - prefix: /
+    - prefix: /v1/
+      no_auth: true
+  mcp_tools:
+    - name: llm_chat_complete
+      description: OpenAI-compatible chat completion through the configured LLM gateway.
+    - name: llm_models_list
+      description: List models allowed by the current project policy.
+    - name: llm_usage_get
+      description: Return usage for a project, subject, or model in a monthly period.
+    - name: llm_provider_configs_list
+      description: List configured provider routes.
+    - name: llm_provider_configs_upsert
+      description: Create or update a provider route.
+    - name: llm_policy_get
+      description: Return the project policy.
+    - name: llm_policy_set
+      description: Replace the project policy.
+    - name: llm_tokens_create
+      description: Issue an OpenAI-compatible bearer token for app, agent, project, or system access.
+  ui_panels:
+    - slot: project.page
+      label: LLM Gateway
+      icon: brain-circuit
+      entry: /ui/LLMPanel.mjs
+  publishes:
+    - name: llm.request.completed
+      description: An LLM request completed and usage was recorded.
+    - name: llm.request.failed
+      description: An LLM request failed before or during provider execution.
+    - name: llm.usage.recorded
+      description: Billable LLM usage was recorded.
+    - name: llm.spend_cap.exceeded
+      description: A request was denied because the project spend cap was exceeded.
+    - name: llm.provider.failed
+      description: A provider route returned a retryable or terminal failure.
+
+runtime:
+  kind: source
+  source:
+    repo: github.com/apteva/apps
+    ref: main
+    entry: mcp/llm
+  port: 8080
+  health_check: /health
+
+db:
+  driver: sqlite
+  path: /data/llm.db
+  migrations: migrations/
+
+config_schema:
+  - name: openai_api_key
+    type: password
+    label: OpenAI API key
+  - name: anthropic_api_key
+    type: password
+    label: Anthropic API key
+  - name: fireworks_api_key
+    type: password
+    label: Fireworks API key
+  - name: openrouter_api_key
+    type: password
+    label: OpenRouter API key
+
+upgrade_policy: auto-patch
