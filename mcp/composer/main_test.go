@@ -345,6 +345,54 @@ func TestBuildLocalFFmpegArgs_TextOverlay(t *testing.T) {
 	}
 }
 
+func TestBuildLocalFFmpegArgs_TextOverlayTrack(t *testing.T) {
+	e, err := parseEditJSON(`{"timeline":{"tracks":[
+		{"type":"visual","clips":[{"asset":{"src":"https://a","type":"video"},"start":0,"length":6}]},
+		{"type":"overlay","clips":[{
+			"asset":{"type":"text","text":"Cinematic title","font":{"size":72,"color":"#ffffff"},"stroke":{"color":"#000000","width":4},"shadow":{"color":"#ff2f6d","offset_y":2}},
+			"start":1,"length":3,
+			"animation":{"in":{"preset":"fade_up","duration":0.5},"out":{"preset":"fade","duration":0.4}}
+		}]}
+	]}}`)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	args := buildLocalFFmpegArgs(e, defaultOutput(), []string{"https://a"}, -1, "out.mp4")
+	cmd := strings.Join(args, " ")
+	if !strings.Contains(cmd, "drawtext=text='Cinematic title'") {
+		t.Fatalf("text overlay track should emit drawtext: %s", cmd)
+	}
+	if !strings.Contains(cmd, "enable='between(t\\,1\\,4)'") {
+		t.Fatalf("text overlay should be time-gated: %s", cmd)
+	}
+	if !strings.Contains(cmd, "alpha='(if(lt(t\\,1)") {
+		t.Fatalf("fade animation should emit alpha expression: %s", cmd)
+	}
+	if !strings.Contains(cmd, "[vcat]drawtext") || !strings.Contains(cmd, "[vtxt0];[vtxt0]null[vout]") {
+		t.Fatalf("text overlay should apply after visual concat: %s", cmd)
+	}
+}
+
+func TestValidateEdit_TextOverlayTrackRejectsMissingText(t *testing.T) {
+	_, err := parseEditJSON(`{"timeline":{"tracks":[
+		{"type":"visual","clips":[{"asset":{"src":"https://a","type":"video"},"start":0,"length":3}]},
+		{"type":"overlay","clips":[{"asset":{"type":"text"},"start":0,"length":2}]}
+	]}}`)
+	if err == nil || !strings.Contains(err.Error(), "text asset requires") {
+		t.Fatalf("expected missing text rejection, got %v", err)
+	}
+}
+
+func TestValidateEdit_TextOverlayTrackRejectsBadAnimation(t *testing.T) {
+	_, err := parseEditJSON(`{"timeline":{"tracks":[
+		{"type":"visual","clips":[{"asset":{"src":"https://a","type":"video"},"start":0,"length":3}]},
+		{"type":"text","clips":[{"asset":{"type":"text","text":"Hello"},"start":0,"length":2,"animation":{"in":{"preset":"explode"}}}]}
+	]}}`)
+	if err == nil || !strings.Contains(err.Error(), "animation.in") {
+		t.Fatalf("expected animation rejection, got %v", err)
+	}
+}
+
 func TestBuildLocalFFmpegArgs_SoundtrackMix(t *testing.T) {
 	e, _ := parseEditJSON(`{"timeline":{
 		"soundtrack":{"src":"https://s","volume":0.5},

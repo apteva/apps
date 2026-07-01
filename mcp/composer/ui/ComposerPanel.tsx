@@ -1,4 +1,4 @@
-// ComposerPanel v0.3.43 - timeline editor with single-owner preview playback.
+// ComposerPanel v0.3.45 - timeline editor with animated text overlay tracks.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
@@ -63,6 +63,7 @@ type MediaKind = "image" | "video" | "audio_tts" | "audio_sfx" | "music" | "avat
 type OutputFormat = "mp4" | "mp3" | "wav" | "m4a" | "aac";
 type Aspect = "16:9" | "9:16" | "1:1" | "4:3";
 type DurationMode = "fixed_trim_pad" | "fit_generated" | "fit_generated_keep_start" | "fit_generated_reflow";
+type TextAnimationPreset = "none" | "fade" | "fade_up" | "fade_down" | "slide_left" | "slide_right" | "scale_pop" | "typewriter" | "word_by_word";
 
 interface Timing {
   mode?: "fixed" | "fit_generated" | "fit_source" | "fit_group" | "fit_timeline";
@@ -152,6 +153,26 @@ interface AudioClipDraft {
   ai?: AIAsset;
 }
 
+interface TextClipDraft {
+  id: string;
+  start: number;
+  length: number;
+  asset: {
+    type: "text";
+    text: string;
+    font?: { family?: string; size?: number; weight?: number; color?: string; opacity?: number };
+    style?: { letter_spacing?: number; line_height?: number; transform?: "none" | "uppercase" | "lowercase" | "capitalize" };
+    stroke?: { color?: string; width?: number; opacity?: number };
+    shadow?: { color?: string; offset_x?: number; offset_y?: number; blur?: number; opacity?: number };
+    align?: { horizontal?: "left" | "center" | "right"; vertical?: "top" | "center" | "bottom" };
+  };
+  position?: { x?: string; y?: string; anchor?: "top-left" | "top" | "top-right" | "left" | "center" | "right" | "bottom-left" | "bottom" | "bottom-right" };
+  animation?: {
+    in?: { preset?: TextAnimationPreset; duration?: number; easing?: string };
+    out?: { preset?: TextAnimationPreset; duration?: number; easing?: string };
+  };
+}
+
 interface OutputDraft {
   format: OutputFormat;
   resolution: "sd" | "hd" | "fullhd" | "4k";
@@ -163,6 +184,7 @@ interface DraftState {
   name: string;
   clips: ClipDraft[];
   audioClips: AudioClipDraft[];
+  textClips: TextClipDraft[];
   soundtrack: { src: string; volume: number; timing?: Timing; ai?: AIAsset } | null;
   background: string;
   output: OutputDraft;
@@ -200,7 +222,9 @@ interface MediaHistoryGeneration {
 
 type Tab = "timeline" | "json";
 type AssetPickerTarget = { kind: "clip"; clipId: string } | { kind: "audio"; clipId: string } | { kind: "soundtrack" };
-type ClipEditorTarget = { kind: "visual"; id: string } | { kind: "audio"; id: string };
+type ClipEditorTarget = { kind: "visual"; id: string } | { kind: "audio"; id: string } | { kind: "text"; id: string };
+
+const TEXT_ANIMATIONS: TextAnimationPreset[] = ["none", "fade", "fade_up", "fade_down", "slide_left", "slide_right", "scale_pop", "typewriter", "word_by_word"];
 
 interface DraftExample {
   id: string;
@@ -214,6 +238,7 @@ const DEFAULT_DRAFT: DraftState = {
   background: "#000000",
   clips: [],
   audioClips: [],
+  textClips: [],
   soundtrack: null,
   output: { format: "mp4", resolution: "hd", aspect: "16:9", fps: 30 },
 };
@@ -302,8 +327,12 @@ function durationOfAudio(clips: AudioClipDraft[]): number {
   return clips.reduce((max, c) => Math.max(max, Math.max(0, Number(c.start) || 0) + Math.max(0.1, Number(c.length) || 0)), 0);
 }
 
+function durationOfText(clips: TextClipDraft[]): number {
+  return clips.reduce((max, c) => Math.max(max, Math.max(0, Number(c.start) || 0) + Math.max(0.1, Number(c.length) || 0)), 0);
+}
+
 function durationOfDraft(draft: DraftState): number {
-  return Math.max(durationOf(draft.clips), durationOfAudio(draft.audioClips));
+  return Math.max(durationOf(draft.clips), durationOfAudio(draft.audioClips), durationOfText(draft.textClips));
 }
 
 function normalizeClips(clips: ClipDraft[]): ClipDraft[] {
@@ -346,6 +375,39 @@ function normalizeAudioClips(clips: AudioClipDraft[]): AudioClipDraft[] {
   });
 }
 
+function normalizeTextClips(clips: TextClipDraft[]): TextClipDraft[] {
+  return clips.map((clip, i) => ({
+    ...clip,
+    id: clip.id || `text-${i + 1}-${Date.now()}`,
+    start: Math.max(0, Number(clip.start) || 0),
+    length: Math.max(0.1, Number(clip.length) || 3),
+    asset: {
+      type: "text",
+      text: String(clip.asset?.text || ""),
+      font: {
+        size: Number(clip.asset?.font?.size) || 64,
+        color: clip.asset?.font?.color || "#ffffff",
+        weight: Number(clip.asset?.font?.weight) || 800,
+        opacity: clip.asset?.font?.opacity,
+        family: clip.asset?.font?.family,
+      },
+      style: clip.asset?.style,
+      stroke: {
+        color: clip.asset?.stroke?.color || "#000000",
+        width: Number(clip.asset?.stroke?.width ?? 3),
+        opacity: clip.asset?.stroke?.opacity,
+      },
+      shadow: clip.asset?.shadow,
+      align: {
+        horizontal: clip.asset?.align?.horizontal || "center",
+        vertical: clip.asset?.align?.vertical || "center",
+      },
+    },
+    position: clip.position,
+    animation: clip.animation || { in: { preset: "fade_up", duration: 0.6 }, out: { preset: "fade", duration: 0.35 } },
+  }));
+}
+
 function prettyJSON(raw: string, fallback: string): string {
   try {
     return JSON.stringify(JSON.parse(raw || "{}"), null, 2);
@@ -358,7 +420,8 @@ function visualTrack(tracks: any[]): any | null {
   if (!Array.isArray(tracks)) return null;
   return tracks.find((track) => {
     const kind = String(track?.type || "visual").toLowerCase();
-    return kind !== "audio" && kind !== "sound" && kind !== "music" && kind !== "voice" && kind !== "sfx";
+    return kind !== "audio" && kind !== "sound" && kind !== "music" && kind !== "voice" && kind !== "sfx" &&
+      kind !== "overlay" && kind !== "text" && kind !== "title" && kind !== "titles" && kind !== "subtitle" && kind !== "subtitles";
   }) || null;
 }
 
@@ -370,6 +433,14 @@ function audioTracks(tracks: any[]): any[] {
     if (kind) return false;
     const clips = Array.isArray(track?.clips) ? track.clips : [];
     return clips.length > 0 && clips.every((clip: any) => clip?.asset?.type === "audio" || ["music", "audio_tts", "audio_sfx"].includes(clip?.ai?.media_kind));
+  });
+}
+
+function textTracks(tracks: any[]): any[] {
+  if (!Array.isArray(tracks)) return [];
+  return tracks.filter((track) => {
+    const kind = String(track?.type || "").toLowerCase();
+    return kind === "overlay" || kind === "text" || kind === "title" || kind === "titles" || kind === "subtitle" || kind === "subtitles";
   });
 }
 
@@ -430,6 +501,29 @@ function parseComposition(c: Composition | null): DraftState {
         timing: clip.timing,
         audio: clip.audio,
         ai: clip.ai,
+      })));
+    }
+    const text = textTracks(timeline.tracks || []).flatMap((track: any) => Array.isArray(track?.clips) ? track.clips : []);
+    if (text.length) {
+      draft.textClips = normalizeTextClips(text.map((clip: any, i: number) => ({
+        id: String(clip.uid || `text-${i + 1}`),
+        start: Number(clip.start) || 0,
+        length: Number(clip.length ?? clip.duration) || 3,
+        asset: {
+          type: "text",
+          text: String(clip.asset?.text || clip.text?.body || ""),
+          font: clip.asset?.font || {
+            size: Number(clip.text?.font_size) || 64,
+            color: clip.text?.color || "#ffffff",
+            weight: 800,
+          },
+          style: clip.asset?.style,
+          stroke: clip.asset?.stroke,
+          shadow: clip.asset?.shadow,
+          align: clip.asset?.align,
+        },
+        position: clip.position,
+        animation: clip.animation,
       })));
     }
     if (timeline.soundtrack?.src) {
@@ -512,8 +606,17 @@ function draftToBody(draft: DraftState): Record<string, unknown> {
     if (clip.audio) out.audio = clip.audio;
     return out;
   });
+  const textClips = normalizeTextClips(draft.textClips).filter((clip) => clip.asset.text.trim()).map((clip) => ({
+    uid: clip.id,
+    asset: clip.asset,
+    start: clip.start,
+    length: clip.length,
+    position: clip.position,
+    animation: clip.animation,
+  }));
   const tracks: any[] = [];
   if (clips.length) tracks.push({ type: "visual", clips });
+  if (textClips.length) tracks.push({ type: "overlay", clips: textClips });
   if (audioClips.length) tracks.push({ type: "audio", clips: audioClips });
   const body: Record<string, unknown> = {
     name: draft.name,
@@ -970,7 +1073,8 @@ export default function ComposerPanel({ projectId, installId }: NativePanelProps
   const examples = useMemo(() => composerExamples(), []);
   const clips = useMemo(() => normalizeClips(draft.clips), [draft.clips]);
   const audioClips = useMemo(() => normalizeAudioClips(draft.audioClips), [draft.audioClips]);
-  const totalDuration = useMemo(() => Math.max(durationOf(clips), durationOfAudio(audioClips)), [clips, audioClips]);
+  const textClips = useMemo(() => normalizeTextClips(draft.textClips), [draft.textClips]);
+  const totalDuration = useMemo(() => Math.max(durationOf(clips), durationOfAudio(audioClips), durationOfText(textClips)), [clips, audioClips, textClips]);
   const activeClip = useMemo(() => activeClipAt(clips, playhead), [clips, playhead]);
   const selectedClip = clips.find((clip) => clip.id === selectedClipId) || clips[0] || null;
 
@@ -1053,7 +1157,7 @@ export default function ComposerPanel({ projectId, installId }: NativePanelProps
     if (selectedId != null && !selectedFull) return;
     const next = parseComposition(selectedFull);
     setDraft(next);
-    setSelectedClipId(next.clips[0]?.id || "");
+    setSelectedClipId(next.clips[0]?.id || next.textClips[0]?.id || next.audioClips[0]?.id || "");
     setPlayhead(0);
     setPlaying(false);
     pauseAllPanelMedia();
@@ -1101,7 +1205,7 @@ export default function ComposerPanel({ projectId, installId }: NativePanelProps
   const updateDraft = (fn: (draft: DraftState) => DraftState) => {
     setDraft((cur) => {
       const next = fn(cur);
-      const normalized = { ...next, clips: normalizeClips(next.clips), audioClips: normalizeAudioClips(next.audioClips) };
+      const normalized = { ...next, clips: normalizeClips(next.clips), audioClips: normalizeAudioClips(next.audioClips), textClips: normalizeTextClips(next.textClips) };
       setJsonEdit(editJSONFromDraft(normalized));
       setJsonOutput(outputJSONFromDraft(normalized));
       return normalized;
@@ -1201,6 +1305,41 @@ export default function ComposerPanel({ projectId, installId }: NativePanelProps
     }));
   };
 
+  const updateTextClip = (id: string, patch: Partial<TextClipDraft>) => {
+    updateDraft((cur) => ({
+      ...cur,
+      textClips: cur.textClips.map((clip) => clip.id === id ? { ...clip, ...patch, asset: patch.asset ? { ...clip.asset, ...patch.asset } : clip.asset } : clip),
+    }));
+  };
+
+  const addTextClip = () => {
+    const id = `text-${Date.now()}`;
+    updateDraft((cur) => ({
+      ...cur,
+      textClips: [
+        ...cur.textClips,
+        {
+          id,
+          start: Math.max(0, playhead || 0),
+          length: 4,
+          asset: {
+            type: "text",
+            text: "CINEMATIC TITLE",
+            font: { size: 72, color: "#ffffff", weight: 800 },
+            style: { transform: "uppercase", letter_spacing: 2 },
+            stroke: { color: "#000000", width: 4, opacity: 0.85 },
+            shadow: { color: "#ff2f6d", offset_x: 0, offset_y: 2, opacity: 0.65 },
+            align: { horizontal: "center", vertical: "center" },
+          },
+          animation: { in: { preset: "fade_up", duration: 0.6, easing: "ease_out" }, out: { preset: "fade", duration: 0.35 } },
+        },
+      ],
+      output: { ...cur.output, format: "mp4" },
+    }));
+    setSelectedClipId(id);
+    setClipEditor({ kind: "text", id });
+  };
+
   const addAudioClip = (ai: boolean | MediaKind = true) => {
     const id = `audio-${Date.now()}`;
     const aiKind: MediaKind = typeof ai === "string" ? ai : "music";
@@ -1280,10 +1419,14 @@ export default function ComposerPanel({ projectId, installId }: NativePanelProps
     updateDraft((cur) => ({ ...cur, audioClips: cur.audioClips.filter((clip) => clip.id !== id) }));
   };
 
+  const deleteTextClip = (id: string) => {
+    updateDraft((cur) => ({ ...cur, textClips: cur.textClips.filter((clip) => clip.id !== id) }));
+  };
+
   const save = async () => {
     setStatus("Saving...");
     try {
-      if (tab !== "json" && draft.clips.length === 0 && draft.audioClips.length === 0) {
+      if (tab !== "json" && draft.clips.length === 0 && draft.audioClips.length === 0 && draft.textClips.length === 0) {
         setStatus("Add at least one clip before saving.");
         return;
       }
@@ -1342,7 +1485,7 @@ export default function ComposerPanel({ projectId, installId }: NativePanelProps
   };
 
   const render = async () => {
-    if (selectedId == null && tab !== "json" && draft.clips.length === 0 && draft.audioClips.length === 0) {
+    if (selectedId == null && tab !== "json" && draft.clips.length === 0 && draft.audioClips.length === 0 && draft.textClips.length === 0) {
       setStatus("Add at least one clip before rendering.");
       return;
     }
@@ -1396,10 +1539,10 @@ export default function ComposerPanel({ projectId, installId }: NativePanelProps
 
   const loadExample = (example: DraftExample) => {
     const next = JSON.parse(JSON.stringify(example.draft)) as DraftState;
-    const normalized = { ...next, clips: normalizeClips(next.clips), audioClips: normalizeAudioClips(next.audioClips) };
+    const normalized = { ...next, clips: normalizeClips(next.clips), audioClips: normalizeAudioClips(next.audioClips), textClips: normalizeTextClips(next.textClips) };
     setSelectedId(null);
     setDraft(normalized);
-    setSelectedClipId(normalized.clips[0]?.id || "");
+    setSelectedClipId(normalized.clips[0]?.id || normalized.textClips[0]?.id || normalized.audioClips[0]?.id || "");
     setPlayhead(0);
     setTab("timeline");
     setJsonEdit(editJSONFromDraft(normalized));
@@ -1656,6 +1799,7 @@ export default function ComposerPanel({ projectId, installId }: NativePanelProps
                 <PreviewStage
                   clip={activeClip}
                   audioClips={audioClips}
+                  textClips={textClips}
                   asset={activeClip ? resolved[activeClip.asset.src] : undefined}
                   background={draft.background}
                   aspect={draft.output.aspect}
@@ -1670,6 +1814,7 @@ export default function ComposerPanel({ projectId, installId }: NativePanelProps
                 <Timeline
                   clips={clips}
                   audioClips={audioClips}
+                  textClips={textClips}
                   selectedClipId={selectedClipId}
                   playhead={playhead}
                   duration={totalDuration}
@@ -1678,11 +1823,13 @@ export default function ComposerPanel({ projectId, installId }: NativePanelProps
                   onSelect={setSelectedClipId}
   onEditVisual={(id) => setClipEditor({ kind: "visual", id })}
   onEditAudio={(id) => setClipEditor({ kind: "audio", id })}
+  onEditText={(id) => setClipEditor({ kind: "text", id })}
   onEditGap={(start, length) => editGapAsSilence(start, length)}
   onSeek={setPlayhead}
                   onAdd={addClip}
                   onAddAIVisual={addAIVisualClip}
                   onAddAIAudio={() => addAudioClip("music")}
+                  onAddText={addTextClip}
                   onAddSilence={addSilenceClip}
                   onAddAISoundtrack={addAISoundtrack}
                   onBrowse={() => openPicker(clips.length ? { kind: "clip", clipId: clips[0].id } : { kind: "clip", clipId: "" })}
@@ -1696,8 +1843,10 @@ export default function ComposerPanel({ projectId, installId }: NativePanelProps
                 onDraft={updateDraft}
                 onClip={updateClip}
                 onAudioClip={updateAudioClip}
+                onTextClip={updateTextClip}
                 onDelete={deleteClip}
                 onDeleteAudio={deleteAudioClip}
+                onDeleteText={deleteTextClip}
                 onMove={moveClip}
                 onDeleteComposition={deleteSelected}
                 canDeleteComposition={selectedId != null}
@@ -1706,6 +1855,7 @@ export default function ComposerPanel({ projectId, installId }: NativePanelProps
                 onBrowseSoundtrack={() => openPicker({ kind: "soundtrack" })}
                 onAddClip={addClip}
                 onAddAudioClip={addAudioClip}
+                onAddTextClip={addTextClip}
                 onAddSilenceClip={addSilenceClip}
                 onAddAISoundtrack={addAISoundtrack}
                 onAddAIVisualClip={addAIVisualClip}
@@ -1736,11 +1886,13 @@ export default function ComposerPanel({ projectId, installId }: NativePanelProps
           target={clipEditor}
           visualClip={clipEditor.kind === "visual" ? clips.find((clip) => clip.id === clipEditor.id) || null : null}
           audioClip={clipEditor.kind === "audio" ? audioClips.find((clip) => clip.id === clipEditor.id) || null : null}
+          textClip={clipEditor.kind === "text" ? textClips.find((clip) => clip.id === clipEditor.id) || null : null}
           aspect={draft.output.aspect}
           aiBusy={aiBusy}
           onClose={() => setClipEditor(null)}
           onVisualClip={updateClip}
           onAudioClip={updateAudioClip}
+          onTextClip={updateTextClip}
           onBrowseVisual={(id) => openPicker({ kind: "clip", clipId: id })}
           onBrowseAudio={(id) => openPicker({ kind: "audio", clipId: id })}
           onGenerateVisual={generateClipAI}
@@ -1751,6 +1903,10 @@ export default function ComposerPanel({ projectId, installId }: NativePanelProps
           }}
           onDeleteAudio={(id) => {
             deleteAudioClip(id);
+            setClipEditor(null);
+          }}
+          onDeleteText={(id) => {
+            deleteTextClip(id);
             setClipEditor(null);
           }}
         />
@@ -1946,6 +2102,7 @@ function Sidebar({
 function PreviewStage({
   clip,
   audioClips,
+  textClips,
   asset,
   background,
   aspect,
@@ -1959,6 +2116,7 @@ function PreviewStage({
 }: {
   clip: ClipDraft | null;
   audioClips: AudioClipDraft[];
+  textClips: TextClipDraft[];
   asset?: ResolvedAsset;
   background: string;
   aspect: Aspect;
@@ -1972,6 +2130,7 @@ function PreviewStage({
 }) {
   const mediaRef = useRef<HTMLVideoElement | null>(null);
   const audioOnly = !clip && audioClips.length > 0;
+  const activeText = textClips.filter((text) => playhead >= text.start && playhead < text.start + text.length);
   useEffect(() => {
     const video = mediaRef.current;
     if (!video) return;
@@ -2059,10 +2218,47 @@ function PreviewStage({
               {clip.text.body}
             </div>
           )}
+          {activeText.map((text) => (
+            <div
+              key={text.id}
+              className="absolute font-bold pointer-events-none"
+              style={previewTextStyle(text)}
+            >
+              {text.asset.text}
+            </div>
+          ))}
         </div>
       </div>
     </section>
   );
+}
+
+function previewTextStyle(text: TextClipDraft): React.CSSProperties {
+  const align = text.asset.align || {};
+  const position = text.position || {};
+  const anchor = position.anchor || "center";
+  let left = position.x || (align.horizontal === "left" ? "8%" : align.horizontal === "right" ? "92%" : "50%");
+  let top = position.y || (align.vertical === "top" ? "12%" : align.vertical === "bottom" ? "84%" : "50%");
+  let transform = "";
+  if (anchor.includes("right") || anchor === "right") transform += " translateX(-100%)";
+  else if (!anchor.includes("left") && anchor !== "left") transform += " translateX(-50%)";
+  if (anchor.includes("bottom") || anchor === "bottom") transform += " translateY(-100%)";
+  else if (!anchor.includes("top") && anchor !== "top") transform += " translateY(-50%)";
+  return {
+    left,
+    top,
+    transform: transform.trim() || undefined,
+    color: text.asset.font?.color || "#ffffff",
+    fontSize: Math.max(12, Math.min(96, text.asset.font?.size || 64)) / 2,
+    fontWeight: text.asset.font?.weight || 800,
+    textTransform: text.asset.style?.transform === "uppercase" ? "uppercase" : text.asset.style?.transform === "lowercase" ? "lowercase" : undefined,
+    letterSpacing: text.asset.style?.letter_spacing ? `${text.asset.style.letter_spacing}px` : undefined,
+    textAlign: align.horizontal || "center",
+    WebkitTextStroke: `${text.asset.stroke?.width || 3}px ${text.asset.stroke?.color || "#000000"}`,
+    textShadow: text.asset.shadow ? `0 2px 14px ${text.asset.shadow.color || "#ff2f6d"}` : "0 2px 8px rgba(0,0,0,.8)",
+    whiteSpace: "pre-wrap",
+    maxWidth: "84%",
+  };
 }
 
 function shortPrompt(prompt: string | undefined, fallback: string): string {
@@ -2103,6 +2299,7 @@ function audioClipSubtitle(clip: AudioClipDraft): string {
 function Timeline({
   clips,
   audioClips,
+  textClips,
   selectedClipId,
   playhead,
   duration,
@@ -2111,17 +2308,20 @@ function Timeline({
   onSelect,
   onEditVisual,
   onEditAudio,
+  onEditText,
   onEditGap,
   onSeek,
   onAdd,
   onAddAIVisual,
   onAddAIAudio,
+  onAddText,
   onAddSilence,
   onAddAISoundtrack,
   onBrowse,
 }: {
   clips: ClipDraft[];
   audioClips: AudioClipDraft[];
+  textClips: TextClipDraft[];
   selectedClipId: string;
   playhead: number;
   duration: number;
@@ -2130,20 +2330,25 @@ function Timeline({
   onSelect: (id: string) => void;
   onEditVisual: (id: string) => void;
   onEditAudio: (id: string) => void;
+  onEditText: (id: string) => void;
   onEditGap: (start: number, length: number) => void;
   onSeek: (t: number) => void;
   onAdd: () => void;
   onAddAIVisual: (kind: "image" | "video" | "avatar") => void;
   onAddAIAudio: () => void;
+  onAddText: () => void;
   onAddSilence: () => void;
   onAddAISoundtrack: () => void;
   onBrowse: () => void;
 }) {
-  const hasAny = clips.length > 0 || audioClips.length > 0;
+  const hasAny = clips.length > 0 || audioClips.length > 0 || textClips.length > 0;
   const hasVisual = clips.length > 0;
-  const timelineHeight = hasVisual ? 192 : 128;
-  const audioLabelTop = hasVisual ? 112 : 12;
-  const audioTrackTop = hasVisual ? 128 : 32;
+  const hasText = textClips.length > 0;
+  const timelineHeight = (hasVisual ? 96 : 0) + (hasText ? 80 : 0) + 96;
+  const textLabelTop = hasVisual ? 112 : 12;
+  const textTrackTop = hasVisual ? 128 : 32;
+  const audioLabelTop = (hasVisual ? 112 : 12) + (hasText ? 80 : 0);
+  const audioTrackTop = (hasVisual ? 128 : 32) + (hasText ? 80 : 0);
   const laneInset = 12;
   const laneWidth = Math.max(936, Math.ceil(Math.max(duration, 1) * 12 * Math.max(1, zoom)));
   const timelineWidth = laneWidth + laneInset * 2;
@@ -2169,6 +2374,7 @@ function Timeline({
         <button onClick={() => onAddAIVisual("image")} className="text-xs px-2 py-1 border border-border rounded hover:bg-bg-input">AI image</button>
         <button onClick={() => onAddAIVisual("video")} className="text-xs px-2 py-1 border border-border rounded hover:bg-bg-input">AI video</button>
         <button onClick={() => onAddAIVisual("avatar")} className="text-xs px-2 py-1 border border-border rounded hover:bg-bg-input">AI avatar</button>
+        <button onClick={onAddText} className="text-xs px-2 py-1 border border-border rounded hover:bg-bg-input">Text</button>
         <button onClick={onAddAISoundtrack} className="text-xs px-2 py-1 border border-border rounded hover:bg-bg-input">AI music</button>
         <button onClick={onAddAIAudio} className="text-xs px-2 py-1 border border-border rounded hover:bg-bg-input">Timed AI audio</button>
         <button onClick={onAddSilence} className="text-xs px-2 py-1 border border-border rounded hover:bg-bg-input">Silence</button>
@@ -2183,6 +2389,7 @@ function Timeline({
               <button type="button" onClick={() => onAddAIVisual("image")} className="px-3 py-1.5 text-sm border border-border rounded hover:bg-bg-input">AI image</button>
               <button type="button" onClick={() => onAddAIVisual("video")} className="px-3 py-1.5 text-sm border border-border rounded hover:bg-bg-input">AI video</button>
               <button type="button" onClick={() => onAddAIVisual("avatar")} className="px-3 py-1.5 text-sm border border-border rounded hover:bg-bg-input">AI avatar</button>
+              <button type="button" onClick={onAddText} className="px-3 py-1.5 text-sm border border-border rounded hover:bg-bg-input">Text</button>
               <button type="button" onClick={onAddAISoundtrack} className="px-3 py-1.5 text-sm border border-border rounded hover:bg-bg-input">AI music</button>
               <button type="button" onClick={onAddAIAudio} className="px-3 py-1.5 text-sm border border-border rounded hover:bg-bg-input">Timed AI audio</button>
               <button type="button" onClick={onAddSilence} className="px-3 py-1.5 text-sm border border-border rounded hover:bg-bg-input">Silence</button>
@@ -2229,6 +2436,37 @@ function Timeline({
                         >
                           <span className="block text-text truncate leading-5">{visualClipLabel(clip)}</span>
                           <span className="block text-text-dim truncate leading-5">{clip.ai?.status || clip.asset.type} - {clip.length.toFixed(1)}s</span>
+                        </div>
+                      );
+                    })}
+                  </div>
+                </>
+              )}
+              {hasText && (
+                <>
+                  <div className="text-[10px] uppercase tracking-wide text-text-dim" style={{ position: "absolute", left: laneInset, top: textLabelTop }}>Text</div>
+                  <div style={{ position: "absolute", left: laneInset, top: textTrackTop, width: laneWidth, height: 48 }}>
+                    {textClips.map((clip) => {
+                      const left = Math.max(0, clip.start * pxPerSecond);
+                      const width = Math.max(64, clip.length * pxPerSecond);
+                      const selected = clip.id === selectedClipId;
+                      return (
+                        <div
+                          key={clip.id}
+                          role="button"
+                          tabIndex={0}
+                          title={clip.asset.text}
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            onSelect(clip.id);
+                            onSeek(clip.start);
+                            onEditText(clip.id);
+                          }}
+                          className={`border text-xs ${selected ? "border-accent bg-accent/10" : "border-border bg-bg-input hover:border-accent"}`}
+                          style={{ position: "absolute", left, top: 0, width, minWidth: width, height: 48, display: "flex", flexDirection: "column", justifyContent: "center", padding: "0 8px", overflow: "hidden" }}
+                        >
+                          <span className="block text-text truncate leading-5">Text - {clip.asset.text || "empty text"}</span>
+                          <span className="block text-text-dim truncate leading-5">{clip.length.toFixed(1)}s @ {clip.start.toFixed(1)}s</span>
                         </div>
                       );
                     })}
@@ -2373,43 +2611,49 @@ function ClipEditorModal({
   target,
   visualClip,
   audioClip,
+  textClip,
   aspect,
   aiBusy,
   onClose,
   onVisualClip,
   onAudioClip,
+  onTextClip,
   onBrowseVisual,
   onBrowseAudio,
   onGenerateVisual,
   onGenerateAudio,
   onDeleteVisual,
   onDeleteAudio,
+  onDeleteText,
 }: {
   projectId: string;
   target: ClipEditorTarget;
   visualClip: ClipDraft | null;
   audioClip: AudioClipDraft | null;
+  textClip: TextClipDraft | null;
   aspect: Aspect;
   aiBusy: string;
   onClose: () => void;
   onVisualClip: (id: string, patch: Partial<ClipDraft>) => void;
   onAudioClip: (id: string, patch: Partial<AudioClipDraft>) => void;
+  onTextClip: (id: string, patch: Partial<TextClipDraft>) => void;
   onBrowseVisual: (id: string) => void;
   onBrowseAudio: (id: string) => void;
   onGenerateVisual: (clip: ClipDraft) => void;
   onGenerateAudio: (clip: AudioClipDraft) => void;
   onDeleteVisual: (id: string) => void;
   onDeleteAudio: (id: string) => void;
+  onDeleteText: (id: string) => void;
 }) {
   const field = "bg-bg-input border border-border rounded px-2 py-1.5 text-sm w-full";
-  const missing = target.kind === "visual" ? !visualClip : !audioClip;
+  const missing = target.kind === "visual" ? !visualClip : target.kind === "audio" ? !audioClip : !textClip;
   return (
     <div className="fixed inset-0 bg-black/70 flex items-center justify-center p-6" style={{ zIndex: 9997 }} onClick={onClose}>
       <div className="bg-bg border border-border rounded shadow-xl w-full max-w-2xl max-h-[88vh] overflow-auto" onClick={(e) => e.stopPropagation()}>
         <header className="px-4 py-3 border-b border-border flex items-center gap-2">
           <div className="min-w-0 flex-1">
-            <div className="text-sm text-text font-medium">{target.kind === "visual" ? "Edit visual clip" : "Edit audio clip"}</div>
-            <div className="text-xs text-text-dim">Storage, URL, or Media Studio generated source</div>
+            <div className="text-sm text-text font-medium">{target.kind === "visual" ? "Edit visual clip" : target.kind === "audio" ? "Edit audio clip" : "Edit text overlay"}</div>
+            <div className="text-xs text-text-dim">{target.kind === "text" ? "Timed overlay text, styling, and animation" : "Storage, URL, or Media Studio generated source"}</div>
           </div>
           <button type="button" onClick={onClose} className="text-text-dim hover:text-text px-2 text-lg leading-none">x</button>
         </header>
@@ -2511,6 +2755,85 @@ function ClipEditorModal({
               <button type="button" onClick={onClose} className="text-sm px-3 py-1.5 border border-border rounded hover:bg-bg-input">Done</button>
             </div>
           </div>
+        ) : target.kind === "text" && textClip ? (
+          <div className="p-4 space-y-4">
+            <Field label="Text">
+              <textarea
+                value={textClip.asset.text}
+                onChange={(e) => onTextClip(textClip.id, { asset: { ...textClip.asset, text: e.target.value } })}
+                className={`${field} resize-y`}
+                rows={3}
+              />
+            </Field>
+            <div className="grid grid-cols-3 gap-2">
+              <Field label="Start">
+                <input type="number" min={0} step={0.1} value={textClip.start} onChange={(e) => onTextClip(textClip.id, { start: Number(e.target.value) })} className={field} />
+              </Field>
+              <Field label="Length">
+                <input type="number" min={0.1} step={0.1} value={textClip.length} onChange={(e) => onTextClip(textClip.id, { length: Number(e.target.value) })} className={field} />
+              </Field>
+              <Field label="Size">
+                <input type="number" min={12} max={180} value={textClip.asset.font?.size || 64} onChange={(e) => onTextClip(textClip.id, { asset: { ...textClip.asset, font: { ...(textClip.asset.font || {}), size: Number(e.target.value) } } })} className={field} />
+              </Field>
+              <Field label="Color">
+                <input type="color" value={textClip.asset.font?.color || "#ffffff"} onChange={(e) => onTextClip(textClip.id, { asset: { ...textClip.asset, font: { ...(textClip.asset.font || {}), color: e.target.value } } })} className="w-full h-9 bg-bg-input border border-border rounded" />
+              </Field>
+              <Field label="Weight">
+                <input type="number" min={100} max={900} step={100} value={textClip.asset.font?.weight || 800} onChange={(e) => onTextClip(textClip.id, { asset: { ...textClip.asset, font: { ...(textClip.asset.font || {}), weight: Number(e.target.value) } } })} className={field} />
+              </Field>
+              <Field label="Transform">
+                <select value={textClip.asset.style?.transform || "uppercase"} onChange={(e) => onTextClip(textClip.id, { asset: { ...textClip.asset, style: { ...(textClip.asset.style || {}), transform: e.target.value as any } } })} className={field}>
+                  <option value="none">None</option>
+                  <option value="uppercase">Uppercase</option>
+                  <option value="lowercase">Lowercase</option>
+                  <option value="capitalize">Capitalize</option>
+                </select>
+              </Field>
+              <Field label="Horizontal">
+                <select value={textClip.asset.align?.horizontal || "center"} onChange={(e) => onTextClip(textClip.id, { asset: { ...textClip.asset, align: { ...(textClip.asset.align || {}), horizontal: e.target.value as any } } })} className={field}>
+                  <option value="left">Left</option>
+                  <option value="center">Center</option>
+                  <option value="right">Right</option>
+                </select>
+              </Field>
+              <Field label="Vertical">
+                <select value={textClip.asset.align?.vertical || "center"} onChange={(e) => onTextClip(textClip.id, { asset: { ...textClip.asset, align: { ...(textClip.asset.align || {}), vertical: e.target.value as any } } })} className={field}>
+                  <option value="top">Top</option>
+                  <option value="center">Center</option>
+                  <option value="bottom">Bottom</option>
+                </select>
+              </Field>
+              <Field label="Letter spacing">
+                <input type="number" min={0} max={40} value={textClip.asset.style?.letter_spacing || 0} onChange={(e) => onTextClip(textClip.id, { asset: { ...textClip.asset, style: { ...(textClip.asset.style || {}), letter_spacing: Number(e.target.value) || undefined } } })} className={field} />
+              </Field>
+              <Field label="Stroke width">
+                <input type="number" min={0} max={20} value={textClip.asset.stroke?.width ?? 3} onChange={(e) => onTextClip(textClip.id, { asset: { ...textClip.asset, stroke: { ...(textClip.asset.stroke || {}), width: Number(e.target.value) } } })} className={field} />
+              </Field>
+              <Field label="Stroke color">
+                <input type="color" value={textClip.asset.stroke?.color || "#000000"} onChange={(e) => onTextClip(textClip.id, { asset: { ...textClip.asset, stroke: { ...(textClip.asset.stroke || {}), color: e.target.value } } })} className="w-full h-9 bg-bg-input border border-border rounded" />
+              </Field>
+              <Field label="Glow/shadow">
+                <input type="color" value={textClip.asset.shadow?.color || "#ff2f6d"} onChange={(e) => onTextClip(textClip.id, { asset: { ...textClip.asset, shadow: { ...(textClip.asset.shadow || {}), color: e.target.value, offset_y: textClip.asset.shadow?.offset_y ?? 2, opacity: textClip.asset.shadow?.opacity ?? 0.65 } } })} className="w-full h-9 bg-bg-input border border-border rounded" />
+              </Field>
+              <Field label="Animate in">
+                <select value={textClip.animation?.in?.preset || "fade_up"} onChange={(e) => onTextClip(textClip.id, { animation: { ...(textClip.animation || {}), in: { ...(textClip.animation?.in || {}), preset: e.target.value as TextAnimationPreset } } })} className={field}>
+                  {TEXT_ANIMATIONS.map((name) => <option key={name} value={name}>{name}</option>)}
+                </select>
+              </Field>
+              <Field label="In duration">
+                <input type="number" min={0} step={0.1} value={textClip.animation?.in?.duration ?? 0.6} onChange={(e) => onTextClip(textClip.id, { animation: { ...(textClip.animation || {}), in: { ...(textClip.animation?.in || {}), duration: Number(e.target.value) } } })} className={field} />
+              </Field>
+              <Field label="Animate out">
+                <select value={textClip.animation?.out?.preset || "fade"} onChange={(e) => onTextClip(textClip.id, { animation: { ...(textClip.animation || {}), out: { ...(textClip.animation?.out || {}), preset: e.target.value as TextAnimationPreset } } })} className={field}>
+                  {TEXT_ANIMATIONS.map((name) => <option key={name} value={name}>{name}</option>)}
+                </select>
+              </Field>
+            </div>
+            <div className="flex justify-between gap-2">
+              <button type="button" onClick={() => onDeleteText(textClip.id)} className="text-sm px-3 py-1.5 border border-red/50 text-red rounded hover:bg-red/10">Delete text</button>
+              <button type="button" onClick={onClose} className="text-sm px-3 py-1.5 border border-border rounded hover:bg-bg-input">Done</button>
+            </div>
+          </div>
         ) : audioClip ? (
           <div className="p-4 space-y-4">
             {audioClip.asset.type !== "silence" && (
@@ -2609,8 +2932,10 @@ function Inspector({
   onDraft,
   onClip,
   onAudioClip,
+  onTextClip,
   onDelete,
   onDeleteAudio,
+  onDeleteText,
   onMove,
   onDeleteComposition,
   canDeleteComposition,
@@ -2619,6 +2944,7 @@ function Inspector({
   onBrowseSoundtrack,
   onAddClip,
   onAddAudioClip,
+  onAddTextClip,
   onAddSilenceClip,
   onAddAISoundtrack,
   onAddAIVisualClip,
@@ -2633,8 +2959,10 @@ function Inspector({
   onDraft: (fn: (draft: DraftState) => DraftState) => void;
   onClip: (id: string, patch: Partial<ClipDraft>) => void;
   onAudioClip: (id: string, patch: Partial<AudioClipDraft>) => void;
+  onTextClip: (id: string, patch: Partial<TextClipDraft>) => void;
   onDelete: (id: string) => void;
   onDeleteAudio: (id: string) => void;
+  onDeleteText: (id: string) => void;
   onMove: (id: string, dir: -1 | 1) => void;
   onDeleteComposition: () => void;
   canDeleteComposition: boolean;
@@ -2643,6 +2971,7 @@ function Inspector({
   onBrowseSoundtrack: () => void;
   onAddClip: () => void;
   onAddAudioClip: (ai?: boolean | MediaKind) => void;
+  onAddTextClip: () => void;
   onAddSilenceClip: () => void;
   onAddAISoundtrack: () => void;
   onAddAIVisualClip: (kind: "image" | "video" | "avatar") => void;
@@ -2767,6 +3096,9 @@ function Inspector({
             <button type="button" onClick={() => onAddAIVisualClip("avatar")} className="text-xs px-2 py-1.5 border border-border rounded hover:bg-bg-input">
               AI avatar
             </button>
+            <button type="button" onClick={onAddTextClip} className="text-xs px-2 py-1.5 border border-border rounded hover:bg-bg-input">
+              Text
+            </button>
             <button type="button" onClick={onAddAISoundtrack} className="text-xs px-2 py-1.5 border border-border rounded hover:bg-bg-input">
               AI music
             </button>
@@ -2777,6 +3109,44 @@ function Inspector({
               Silence
             </button>
           </div>
+        </section>
+
+        <section className="space-y-2">
+          <div className="flex items-center gap-2">
+            <h2 className="text-xs uppercase tracking-wide text-text-dim flex-1">Text overlays</h2>
+            <button type="button" onClick={onAddTextClip} className="text-xs px-2 py-1 border border-accent text-accent rounded hover:bg-accent hover:text-bg">
+              Add
+            </button>
+          </div>
+          {draft.textClips.length === 0 ? (
+            <div className="border border-dashed border-border rounded p-3 text-sm text-text-muted">
+              No text overlays.
+            </div>
+          ) : (
+            <div className="space-y-2">
+              {draft.textClips.map((text) => (
+                <div key={text.id} className="border border-border rounded p-2 bg-bg space-y-2">
+                  <div className="flex items-center gap-2">
+                    <span className="text-xs text-text flex-1 truncate">{text.asset.text || "empty text"}</span>
+                    <button type="button" onClick={() => onDeleteText(text.id)} className="text-xs px-2 py-1 border border-red/50 text-red rounded hover:bg-red/10">
+                      Delete
+                    </button>
+                  </div>
+                  <div className="grid grid-cols-2 gap-2">
+                    <Field label="Start">
+                      <input type="number" min={0} step={0.1} value={text.start} onChange={(e) => onTextClip(text.id, { start: Number(e.target.value) })} className={field} />
+                    </Field>
+                    <Field label="Length">
+                      <input type="number" min={0.1} step={0.1} value={text.length} onChange={(e) => onTextClip(text.id, { length: Number(e.target.value) })} className={field} />
+                    </Field>
+                  </div>
+                  <Field label="Text">
+                    <input value={text.asset.text} onChange={(e) => onTextClip(text.id, { asset: { ...text.asset, text: e.target.value } })} className={field} />
+                  </Field>
+                </div>
+              ))}
+            </div>
+          )}
         </section>
 
         <section className="space-y-2">

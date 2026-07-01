@@ -282,7 +282,13 @@ func buildLocalFFmpegArgsWithAudioInfo(edit *Edit, output Output, inputs []strin
 	} else {
 		filter.WriteString("[acat]anull[aout];")
 	}
-	filter.WriteString("[vcat]null[vout]")
+	videoLabel := "vcat"
+	for i, c := range textOverlayClips(edit) {
+		outLabel := fmt.Sprintf("vtxt%d", i)
+		fmt.Fprintf(&filter, "[%s]%s[%s];", videoLabel, buildTimedDrawText(c, w, h), outLabel)
+		videoLabel = outLabel
+	}
+	fmt.Fprintf(&filter, "[%s]null[vout]", videoLabel)
 
 	args = append(args,
 		"-filter_complex", filter.String(),
@@ -553,6 +559,257 @@ func buildDrawText(t *TextOver, w, h int) string {
 		"drawtext=text='%s':fontsize=%d:fontcolor=%s:borderw=2:bordercolor=black@0.6:x=%s:y=%s",
 		escDrawText(t.Body), fs, color, x, y,
 	)
+}
+
+func buildTimedDrawText(c Clip, w, h int) string {
+	body := strings.TrimSpace(textClipBody(c))
+	if c.Asset.Style != nil {
+		switch strings.ToLower(strings.TrimSpace(c.Asset.Style.Transform)) {
+		case "uppercase":
+			body = strings.ToUpper(body)
+		case "lowercase":
+			body = strings.ToLower(body)
+		}
+	}
+	fs := 48
+	if c.Text != nil && c.Text.FontSize > 0 {
+		fs = c.Text.FontSize
+	}
+	if c.Asset.Font != nil && c.Asset.Font.Size > 0 {
+		fs = c.Asset.Font.Size
+	}
+	color := "#ffffff"
+	if c.Text != nil && strings.TrimSpace(c.Text.Color) != "" {
+		color = c.Text.Color
+	}
+	if c.Asset.Font != nil && strings.TrimSpace(c.Asset.Font.Color) != "" {
+		color = c.Asset.Font.Color
+	}
+	color = ffmpegColorWithAlpha(color, textOpacity(c))
+	borderW := 2
+	borderColor := "black@0.7"
+	if c.Asset.Stroke != nil {
+		borderW = c.Asset.Stroke.Width
+		if strings.TrimSpace(c.Asset.Stroke.Color) != "" {
+			borderColor = ffmpegColorWithAlpha(c.Asset.Stroke.Color, c.Asset.Stroke.Opacity)
+		}
+	}
+	x, y := drawTextXY(c, w, h, fs)
+	if c.Animation != nil && c.Animation.In != nil {
+		switch strings.ToLower(strings.TrimSpace(c.Animation.In.Preset)) {
+		case "fade_up":
+			y = timedMoveExpr(c.Start, animationDuration(c.Animation.In, 0.6), y, "30", "-")
+		case "fade_down":
+			y = timedMoveExpr(c.Start, animationDuration(c.Animation.In, 0.6), y, "30", "+")
+		case "slide_left":
+			x = timedMoveExpr(c.Start, animationDuration(c.Animation.In, 0.6), x, "120", "-")
+		case "slide_right":
+			x = timedMoveExpr(c.Start, animationDuration(c.Animation.In, 0.6), x, "120", "+")
+		case "scale_pop":
+			fs = int(float64(fs) * 1.04)
+		}
+	}
+	parts := []string{
+		fmt.Sprintf("drawtext=text='%s'", escDrawText(body)),
+		fmt.Sprintf("fontsize=%d", fs),
+		fmt.Sprintf("fontcolor=%s", color),
+		fmt.Sprintf("borderw=%d", borderW),
+		fmt.Sprintf("bordercolor=%s", borderColor),
+		fmt.Sprintf("x=%s", escapeDrawTextExpr(x)),
+		fmt.Sprintf("y=%s", escapeDrawTextExpr(y)),
+		fmt.Sprintf("enable='%s'", escapeDrawTextExpr(fmt.Sprintf("between(t,%s,%s)", trimFloat(c.Start), trimFloat(c.Start+clipDuration(c))))),
+	}
+	if shadow := drawTextShadow(c.Asset.Shadow); shadow != "" {
+		parts = append(parts, shadow)
+	}
+	if alpha := drawTextAlpha(c); alpha != "" {
+		parts = append(parts, "alpha='"+escapeDrawTextExpr(alpha)+"'")
+	}
+	if c.Asset.Font != nil && strings.TrimSpace(c.Asset.Font.Family) != "" {
+		parts = append(parts, "font='"+escDrawText(c.Asset.Font.Family)+"'")
+	}
+	return strings.Join(parts, ":")
+}
+
+func textOpacity(c Clip) float64 {
+	if c.Asset.Font == nil || c.Asset.Font.Opacity <= 0 {
+		return 1
+	}
+	return c.Asset.Font.Opacity
+}
+
+func drawTextShadow(s *TextShadow) string {
+	if s == nil {
+		return ""
+	}
+	color := s.Color
+	if color == "" {
+		color = "black"
+	}
+	opacity := s.Opacity
+	if opacity <= 0 {
+		opacity = 0.65
+	}
+	x := s.OffsetX
+	y := s.OffsetY
+	if x == 0 && y == 0 {
+		x, y = 2, 2
+	}
+	return fmt.Sprintf("shadowcolor=%s:shadowx=%d:shadowy=%d", ffmpegColorWithAlpha(color, opacity), x, y)
+}
+
+func drawTextXY(c Clip, w, h, fs int) (string, string) {
+	if c.Position != nil && (strings.TrimSpace(c.Position.X) != "" || strings.TrimSpace(c.Position.Y) != "") {
+		x := positionExpr(c.Position.X, "50%", "w", "text_w")
+		y := positionExpr(c.Position.Y, "50%", "h", "text_h")
+		switch strings.ToLower(strings.TrimSpace(c.Position.Anchor)) {
+		case "top-left":
+		case "top":
+			x = "(" + x + ")-text_w/2"
+		case "top-right":
+			x = "(" + x + ")-text_w"
+		case "left":
+			y = "(" + y + ")-text_h/2"
+		case "right":
+			x = "(" + x + ")-text_w"
+			y = "(" + y + ")-text_h/2"
+		case "bottom-left":
+			y = "(" + y + ")-text_h"
+		case "bottom":
+			x = "(" + x + ")-text_w/2"
+			y = "(" + y + ")-text_h"
+		case "bottom-right":
+			x = "(" + x + ")-text_w"
+			y = "(" + y + ")-text_h"
+		default:
+			x = "(" + x + ")-text_w/2"
+			y = "(" + y + ")-text_h/2"
+		}
+		return x, y
+	}
+	hAlign, vAlign := "center", "bottom"
+	if c.Text != nil && c.Text.Position != "" {
+		vAlign = c.Text.Position
+	}
+	if c.Asset.Align != nil {
+		if c.Asset.Align.Horizontal != "" {
+			hAlign = c.Asset.Align.Horizontal
+		}
+		if c.Asset.Align.Vertical != "" {
+			vAlign = c.Asset.Align.Vertical
+		}
+	}
+	var x string
+	switch hAlign {
+	case "left":
+		x = strconv.Itoa(w / 14)
+	case "right":
+		x = "w-text_w-" + strconv.Itoa(w/14)
+	default:
+		x = "(w-text_w)/2"
+	}
+	var y string
+	switch vAlign {
+	case "top":
+		y = strconv.Itoa(h / 16)
+	case "center":
+		y = "(h-text_h)/2"
+	default:
+		y = strconv.Itoa(h - h/8 - fs)
+	}
+	return x, y
+}
+
+func positionExpr(value, fallback, axis, size string) string {
+	v := strings.TrimSpace(value)
+	if v == "" {
+		v = fallback
+	}
+	if strings.HasSuffix(v, "%") {
+		n := strings.TrimSuffix(v, "%")
+		if n == "" {
+			n = "0"
+		}
+		return axis + "*" + n + "/100"
+	}
+	return v
+}
+
+func drawTextAlpha(c Clip) string {
+	if c.Animation == nil {
+		return ""
+	}
+	start := c.Start
+	end := c.Start + clipDuration(c)
+	inDur := animationDuration(c.Animation.In, 0)
+	outDur := animationDuration(c.Animation.Out, 0)
+	inPreset := animationPreset(c.Animation.In)
+	outPreset := animationPreset(c.Animation.Out)
+	if inDur <= 0 && outDur <= 0 {
+		return ""
+	}
+	base := "1"
+	if inDur > 0 && (inPreset == "fade" || inPreset == "fade_up" || inPreset == "fade_down" || inPreset == "slide_left" || inPreset == "slide_right" || inPreset == "scale_pop" || inPreset == "typewriter" || inPreset == "word_by_word") {
+		base = fmt.Sprintf("if(lt(t,%s),0,if(lt(t,%s),(t-%s)/%s,1))", trimFloat(start), trimFloat(start+inDur), trimFloat(start), trimFloat(inDur))
+	}
+	if outDur > 0 && (outPreset == "fade" || outPreset == "fade_up" || outPreset == "fade_down" || outPreset == "slide_left" || outPreset == "slide_right") {
+		outStart := end - outDur
+		base = fmt.Sprintf("(%s)*if(lt(t,%s),1,if(lt(t,%s),(%s-t)/%s,0))", base, trimFloat(outStart), trimFloat(end), trimFloat(end), trimFloat(outDur))
+	}
+	return base
+}
+
+func animationPreset(p *AnimationPreset) string {
+	if p == nil {
+		return ""
+	}
+	return strings.ToLower(strings.TrimSpace(p.Preset))
+}
+
+func animationDuration(p *AnimationPreset, fallback float64) float64 {
+	if p == nil {
+		return 0
+	}
+	if p.Duration > 0 {
+		return p.Duration
+	}
+	if animationPreset(p) != "" && animationPreset(p) != "none" {
+		return fallback
+	}
+	return 0
+}
+
+func timedMoveExpr(start, dur float64, base, distance, direction string) string {
+	if dur <= 0 {
+		return base
+	}
+	if direction == "+" {
+		return fmt.Sprintf("if(lt(t,%s),(%s)+%s,if(lt(t,%s),(%s)+%s*(1-(t-%s)/%s),%s))",
+			trimFloat(start), base, distance, trimFloat(start+dur), base, distance, trimFloat(start), trimFloat(dur), base)
+	}
+	return fmt.Sprintf("if(lt(t,%s),(%s)-%s,if(lt(t,%s),(%s)-%s*(1-(t-%s)/%s),%s))",
+		trimFloat(start), base, distance, trimFloat(start+dur), base, distance, trimFloat(start), trimFloat(dur), base)
+}
+
+func ffmpegColorWithAlpha(color string, alpha float64) string {
+	color = strings.TrimSpace(color)
+	if color == "" {
+		color = "white"
+	}
+	if alpha <= 0 || alpha > 1 {
+		alpha = 1
+	}
+	if strings.HasPrefix(color, "#") {
+		color = "0x" + color[1:]
+	}
+	if alpha < 1 {
+		return fmt.Sprintf("%s@%s", color, trimFloat(alpha))
+	}
+	return color
+}
+
+func escapeDrawTextExpr(s string) string {
+	return strings.NewReplacer(",", `\,`, ":", `\:`, "'", `\'`).Replace(s)
 }
 
 // escDrawText escapes the drawtext expression body. ffmpeg's drawtext

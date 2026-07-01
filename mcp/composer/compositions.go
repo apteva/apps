@@ -33,7 +33,7 @@ type Soundtrack struct {
 
 type Track struct {
 	ID    string `json:"id,omitempty"`
-	Type  string `json:"type,omitempty"` // visual|video|audio
+	Type  string `json:"type,omitempty"` // visual|video|audio|overlay|text
 	Clips []Clip `json:"clips"`
 }
 
@@ -56,6 +56,8 @@ type Clip struct {
 	Audio           *AudioFX    `json:"audio,omitempty"`
 	Transition      *Transition `json:"transition,omitempty"`
 	Text            *TextOver   `json:"text,omitempty"`
+	Position        *Position   `json:"position,omitempty"`
+	Animation       *Animation  `json:"animation,omitempty"`
 	AI              *AIAsset    `json:"ai,omitempty"`
 }
 
@@ -76,6 +78,12 @@ type Asset struct {
 	Provider string         `json:"provider,omitempty"`
 	Kind     string         `json:"kind,omitempty"`
 	Request  map[string]any `json:"request,omitempty"`
+	Text     string         `json:"text,omitempty"`
+	Font     *TextFont      `json:"font,omitempty"`
+	Style    *TextStyle     `json:"style,omitempty"`
+	Stroke   *TextStroke    `json:"stroke,omitempty"`
+	Shadow   *TextShadow    `json:"shadow,omitempty"`
+	Align    *TextAlign     `json:"align,omitempty"`
 }
 
 type AIAsset struct {
@@ -135,6 +143,75 @@ type TextOver struct {
 	Color    string `json:"color,omitempty"`     // hex, default "#ffffff"
 }
 
+type TextFont struct {
+	Family  string  `json:"family,omitempty"`
+	Size    int     `json:"size,omitempty"`
+	Weight  int     `json:"weight,omitempty"`
+	Color   string  `json:"color,omitempty"`
+	Opacity float64 `json:"opacity,omitempty"`
+}
+
+type TextStyle struct {
+	LetterSpacing int     `json:"letter_spacing,omitempty"`
+	LineHeight    float64 `json:"line_height,omitempty"`
+	Transform     string  `json:"transform,omitempty"` // none|uppercase|lowercase
+}
+
+type TextStroke struct {
+	Color   string  `json:"color,omitempty"`
+	Width   int     `json:"width,omitempty"`
+	Opacity float64 `json:"opacity,omitempty"`
+}
+
+type TextShadow struct {
+	Color   string  `json:"color,omitempty"`
+	OffsetX int     `json:"offset_x,omitempty"`
+	OffsetY int     `json:"offset_y,omitempty"`
+	Blur    int     `json:"blur,omitempty"`
+	Opacity float64 `json:"opacity,omitempty"`
+}
+
+type TextAlign struct {
+	Horizontal string `json:"horizontal,omitempty"` // left|center|right
+	Vertical   string `json:"vertical,omitempty"`   // top|center|bottom
+}
+
+type Position struct {
+	X      string `json:"x,omitempty"`      // percent or pixels, e.g. 50%
+	Y      string `json:"y,omitempty"`      // percent or pixels, e.g. 50%
+	Anchor string `json:"anchor,omitempty"` // top-left|top|top-right|left|center|right|bottom-left|bottom|bottom-right
+}
+
+type Animation struct {
+	In        *AnimationPreset `json:"in,omitempty"`
+	Out       *AnimationPreset `json:"out,omitempty"`
+	Keyframes *Keyframes       `json:"keyframes,omitempty"`
+}
+
+type AnimationPreset struct {
+	Preset    string  `json:"preset,omitempty"` // none|fade|fade_up|fade_down|slide_left|slide_right|scale_pop|typewriter|word_by_word
+	Duration  float64 `json:"duration,omitempty"`
+	Easing    string  `json:"easing,omitempty"` // linear|ease_in|ease_out|ease_in_out
+	Direction string  `json:"direction,omitempty"`
+	Style     string  `json:"style,omitempty"` // element|word|character
+}
+
+type Keyframes struct {
+	Opacity []Tween `json:"opacity,omitempty"`
+	X       []Tween `json:"x,omitempty"`
+	Y       []Tween `json:"y,omitempty"`
+	Scale   []Tween `json:"scale,omitempty"`
+	Rotate  []Tween `json:"rotate,omitempty"`
+}
+
+type Tween struct {
+	From   any     `json:"from,omitempty"`
+	To     any     `json:"to,omitempty"`
+	Start  float64 `json:"start,omitempty"`
+	Length float64 `json:"length,omitempty"`
+	Easing string  `json:"easing,omitempty"`
+}
+
 type Output struct {
 	Format     string `json:"format"`     // mp4|mp3|wav|m4a|aac
 	Resolution string `json:"resolution"` // "sd" | "hd" | "fullhd" | "4k"
@@ -171,20 +248,26 @@ func validateEdit(e *Edit) error {
 			if visualTracks > 1 {
 				return errors.New("composer currently renders one visual track plus optional audio tracks")
 			}
-		} else if tt != "audio" {
-			return fmt.Errorf("track[%d]: unsupported track.type %q (use visual or audio)", ti, track.Type)
+		} else if tt != "audio" && tt != "overlay" {
+			return fmt.Errorf("track[%d]: unsupported track.type %q (use visual, audio, or overlay/text)", ti, track.Type)
 		}
 		for i := range track.Clips {
 			c := &track.Clips[i]
 			at := clipAssetType(*c, tt)
-			if c.Asset.Src == "" && c.AI == nil && at != "silence" {
+			if c.Asset.Src == "" && c.AI == nil && at != "silence" && at != "text" {
 				return fmt.Errorf("track[%d].clip[%d]: asset.src required", ti, i)
 			}
 			if at == "" {
 				at = "video"
 			}
-			if at != "video" && at != "image" && at != "audio" && at != "silence" {
+			if at != "video" && at != "image" && at != "audio" && at != "silence" && at != "text" {
 				return fmt.Errorf("track[%d].clip[%d]: unsupported asset.type %q", ti, i, c.Asset.Type)
+			}
+			if tt == "overlay" && at != "text" {
+				return fmt.Errorf("track[%d].clip[%d]: overlay/text tracks require text assets", ti, i)
+			}
+			if tt != "overlay" && at == "text" {
+				return fmt.Errorf("track[%d].clip[%d]: text assets belong on overlay/text tracks", ti, i)
 			}
 			if tt == "visual" && at == "audio" {
 				return fmt.Errorf("track[%d].clip[%d]: audio assets belong on audio tracks", ti, i)
@@ -194,6 +277,9 @@ func validateEdit(e *Edit) error {
 			}
 			if tt == "audio" && at != "audio" && at != "silence" {
 				return fmt.Errorf("track[%d].clip[%d]: audio tracks require audio assets", ti, i)
+			}
+			if tt == "overlay" && strings.TrimSpace(textClipBody(*c)) == "" {
+				return fmt.Errorf("track[%d].clip[%d]: text asset requires asset.text or text.body", ti, i)
 			}
 			if clipDuration(*c) <= 0 {
 				return fmt.Errorf("track[%d].clip[%d]: length must be > 0", ti, i)
@@ -215,11 +301,14 @@ func validateEdit(e *Edit) error {
 			if err := validateAudioFX(c.Audio); err != nil {
 				return fmt.Errorf("track[%d].clip[%d]: %w", ti, i, err)
 			}
+			if err := validateTextStyle(c); err != nil {
+				return fmt.Errorf("track[%d].clip[%d]: %w", ti, i, err)
+			}
 			if tt == "audio" && c.Text != nil {
 				return fmt.Errorf("track[%d].clip[%d]: text overlays are only supported on visual clips", ti, i)
 			}
 			if c.Transition != nil {
-				if tt == "audio" {
+				if tt != "visual" {
 					return fmt.Errorf("track[%d].clip[%d]: transitions are only supported on visual clips", ti, i)
 				}
 				if c.Transition.In != "" && c.Transition.In != "none" && c.Transition.In != "fade" {
@@ -308,6 +397,98 @@ func validateAudioFX(fx *AudioFX) error {
 	return nil
 }
 
+func validateTextStyle(c *Clip) error {
+	if c == nil {
+		return nil
+	}
+	if c.Asset.Font != nil {
+		if c.Asset.Font.Size < 0 || c.Asset.Font.Size > 512 {
+			return errors.New("text font.size must be 0..512")
+		}
+		if c.Asset.Font.Opacity < 0 || c.Asset.Font.Opacity > 1 {
+			return errors.New("text font.opacity must be 0..1")
+		}
+	}
+	if c.Asset.Style != nil {
+		switch strings.ToLower(strings.TrimSpace(c.Asset.Style.Transform)) {
+		case "", "none", "uppercase", "lowercase", "capitalize":
+		default:
+			return fmt.Errorf("text style.transform must be none|uppercase|lowercase|capitalize (got %q)", c.Asset.Style.Transform)
+		}
+	}
+	if c.Asset.Stroke != nil {
+		if c.Asset.Stroke.Width < 0 || c.Asset.Stroke.Width > 64 {
+			return errors.New("text stroke.width must be 0..64")
+		}
+		if c.Asset.Stroke.Opacity < 0 || c.Asset.Stroke.Opacity > 1 {
+			return errors.New("text stroke.opacity must be 0..1")
+		}
+	}
+	if c.Asset.Shadow != nil {
+		if c.Asset.Shadow.Opacity < 0 || c.Asset.Shadow.Opacity > 1 {
+			return errors.New("text shadow.opacity must be 0..1")
+		}
+	}
+	if c.Asset.Align != nil {
+		switch strings.ToLower(strings.TrimSpace(c.Asset.Align.Horizontal)) {
+		case "", "left", "center", "right":
+		default:
+			return fmt.Errorf("text align.horizontal must be left|center|right (got %q)", c.Asset.Align.Horizontal)
+		}
+		switch strings.ToLower(strings.TrimSpace(c.Asset.Align.Vertical)) {
+		case "", "top", "center", "bottom":
+		default:
+			return fmt.Errorf("text align.vertical must be top|center|bottom (got %q)", c.Asset.Align.Vertical)
+		}
+	}
+	if c.Position != nil {
+		switch strings.ToLower(strings.TrimSpace(c.Position.Anchor)) {
+		case "", "top-left", "top", "top-right", "left", "center", "right", "bottom-left", "bottom", "bottom-right":
+		default:
+			return fmt.Errorf("position.anchor must be one of top-left|top|top-right|left|center|right|bottom-left|bottom|bottom-right (got %q)", c.Position.Anchor)
+		}
+	}
+	return validateAnimation(c.Animation)
+}
+
+func validateAnimation(a *Animation) error {
+	if a == nil {
+		return nil
+	}
+	if err := validateAnimationPreset(a.In); err != nil {
+		return fmt.Errorf("animation.in: %w", err)
+	}
+	if err := validateAnimationPreset(a.Out); err != nil {
+		return fmt.Errorf("animation.out: %w", err)
+	}
+	return nil
+}
+
+func validateAnimationPreset(p *AnimationPreset) error {
+	if p == nil {
+		return nil
+	}
+	switch strings.ToLower(strings.TrimSpace(p.Preset)) {
+	case "", "none", "fade", "fade_up", "fade_down", "slide_left", "slide_right", "scale_pop", "typewriter", "word_by_word":
+	default:
+		return fmt.Errorf("preset must be none|fade|fade_up|fade_down|slide_left|slide_right|scale_pop|typewriter|word_by_word (got %q)", p.Preset)
+	}
+	if p.Duration < 0 {
+		return errors.New("duration must be >= 0")
+	}
+	switch strings.ToLower(strings.TrimSpace(p.Easing)) {
+	case "", "linear", "ease", "ease_in", "ease_out", "ease_in_out":
+	default:
+		return fmt.Errorf("easing must be linear|ease|ease_in|ease_out|ease_in_out (got %q)", p.Easing)
+	}
+	switch strings.ToLower(strings.TrimSpace(p.Style)) {
+	case "", "element", "word", "character":
+	default:
+		return fmt.Errorf("style must be element|word|character (got %q)", p.Style)
+	}
+	return nil
+}
+
 func defaultOutput() Output {
 	return Output{Format: "mp4", Resolution: "hd", Aspect: "16:9", FPS: 30}
 }
@@ -352,6 +533,9 @@ func validateEditOutput(e *Edit, o Output) error {
 	}
 	if hasVisual && isAudioOutput(o) {
 		return errors.New("audio output currently requires an audio-only composition")
+	}
+	if len(textOverlayClips(e)) > 0 && !hasVisual {
+		return errors.New("text overlay tracks require a visual composition")
 	}
 	return nil
 }
@@ -399,6 +583,11 @@ func editDurationSeconds(e *Edit) float64 {
 			d = end
 		}
 	}
+	for _, c := range textOverlayClips(e) {
+		if end := c.Start + clipDuration(c); end > d {
+			d = end
+		}
+	}
 	return d
 }
 
@@ -428,6 +617,20 @@ func audioTimelineClips(e *Edit) []Clip {
 	return out
 }
 
+func textOverlayClips(e *Edit) []Clip {
+	if e == nil {
+		return nil
+	}
+	var out []Clip
+	for _, t := range e.Timeline.Tracks {
+		if trackKind(t) != "overlay" {
+			continue
+		}
+		out = append(out, t.Clips...)
+	}
+	return out
+}
+
 func trackKind(t Track) string {
 	switch strings.ToLower(strings.TrimSpace(t.Type)) {
 	case "", "visual", "video":
@@ -447,6 +650,8 @@ func trackKind(t Track) string {
 		return "visual"
 	case "audio", "sound", "music", "voice", "sfx":
 		return "audio"
+	case "overlay", "text", "title", "titles", "subtitle", "subtitles":
+		return "overlay"
 	default:
 		return strings.ToLower(strings.TrimSpace(t.Type))
 	}
@@ -455,6 +660,9 @@ func trackKind(t Track) string {
 func clipAssetType(c Clip, trackType string) string {
 	switch strings.ToLower(strings.TrimSpace(c.Asset.Type)) {
 	case "", "generated":
+		if trackType == "overlay" {
+			return "text"
+		}
 		if c.AI != nil {
 			return assetTypeForAI(c.AI.MediaKind)
 		}
@@ -464,9 +672,21 @@ func clipAssetType(c Clip, trackType string) string {
 		return "video"
 	case "silence", "blank", "gap":
 		return "silence"
+	case "text", "rich-text", "rich_text", "title", "caption":
+		return "text"
 	default:
 		return strings.ToLower(strings.TrimSpace(c.Asset.Type))
 	}
+}
+
+func textClipBody(c Clip) string {
+	if strings.TrimSpace(c.Asset.Text) != "" {
+		return c.Asset.Text
+	}
+	if c.Text != nil {
+		return c.Text.Body
+	}
+	return ""
 }
 
 func clipDuration(c Clip) float64 {

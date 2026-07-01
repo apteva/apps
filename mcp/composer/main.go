@@ -28,7 +28,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: composer
 display_name: Composer
-version: 0.3.43
+version: 0.3.45
 description: |
   Multi-clip video compositions with a structured timeline panel,
   universal generated-asset clip editing, first-class AI avatar clips,
@@ -52,7 +52,10 @@ description: |
   many saved compositions stay responsive. Preview playback is single-owner:
   switching compositions stops the live preview, render media is no longer
   nested inside an opener button, and the full-size render viewer does not
-  autoplay over an already playing inline preview.
+  autoplay over an already playing inline preview. Composer also supports
+  first-class overlay/text tracks with rich typography fields, stroke/shadow
+  styling, UI editing, and animation presets rendered after visual
+  concatenation.
   Renders locally via ffmpeg, on a render host via instances, or against a
   bound render_executor integration.
 author: Apteva
