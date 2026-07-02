@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: social
 display_name: Social
-version: 0.14.49
+version: 0.14.50
 description: |
   Schedule and publish posts to your social media accounts: X (Twitter),
   Facebook Pages, Instagram Business, LinkedIn, TikTok, YouTube, Reddit,
@@ -51,35 +51,42 @@ requires:
       required: false
       label: "Jobs (optional)"
       hint: "Without jobs, scheduled posts publish synchronously when the app's worker tick fires; with jobs, scheduling is durable + retried with exponential backoff."
+    - role: social_provider
+      kind: integration
+      compatible_app_names: [zernio]
+      required: false
+      label: "Social provider (optional)"
+      hint: "Import and publish through a unified social API for platforms that are hard to connect directly."
 
 provides:
   http_routes:
     - prefix: /
   workers:
-    - name: inbox-sync
-      schedule: "@every 5m"
     - name: analytics_collector
       schedule: "@every 6h"
   mcp_tools:
     - { name: account_add,                 description: "Begin OAuth for a platform. Returns authorize_url + pending_account_id." }
     - { name: account_list_pending_pages,  description: "After OAuth completes, list selectable pages/channels (FB pages, IG business accounts, YouTube channels)." }
     - { name: account_finalize,            description: "Commit a pending account into the active account list. For multi-page platforms, supply page_id." }
+    - { name: account_import_provider,     description: "Import provider-backed accounts such as Zernio into Social without changing Social's posting tools." }
     - { name: account_list,                description: "List connected social accounts in this project." }
     - { name: account_check,               description: "Check that one or more connected social accounts still work; refreshes Meta page credentials when possible." }
-    - { name: account_disconnect,          description: "Disconnect a social account while preserving post history. Pass hard_delete=true and delete_posts=true to remove this account and its local-only history; upstream social-network posts are never deleted by this tool." }
-    - { name: post_create,                 description: "Create + publish (or schedule) a post across N social_account_ids. Args: body, social_account_ids[], schedule_at?, media_storage_ids?." }
+    - { name: account_disconnect,          description: "Revoke a social account (deletes underlying connection too)." }
+    - { name: post_create,                 description: "Create + publish (or schedule) a post across N social accounts. Scheduled creates are idempotent; retry failed scheduling via post_retry, do not create a duplicate. Args: body or targets[].body, social_account_ids[] or targets[], schedule_at?, media_storage_ids?." }
     - { name: post_list,                   description: "List recent posts with per-target status. Args: limit?, status?." }
-    - { name: post_retry,                  description: "Re-attempt failed targets on a post. Args: post_id." }
+    - { name: post_retry,                  description: "Re-attempt a failed post. Failed scheduled posts retry job creation on the same post; failed publish targets are re-published. Args: post_id." }
     - { name: inbox_list,                  description: "List inbox items (comments, DMs, mentions, reviews) across connected social accounts. Filters: kinds, status, social_account_ids, since, limit." }
     - { name: inbox_get,                   description: "Fetch one inbox item by id; with_thread=true returns the surrounding conversation." }
     - { name: inbox_mark_read,             description: "Mark one or more inbox items as read (local-only state)." }
     - { name: inbox_mark_unread,           description: "Mark one or more inbox items as unread (local-only state)." }
     - { name: inbox_archive,               description: "Archive one or more inbox items (hides from default list view)." }
     - { name: inbox_reply,                 description: "Reply to a comment or DM. Routes by kind. Returns the standard {status, reason?, error?, external_id?, permalink?} envelope." }
-    - { name: inbox_private_reply,         description: "Facebook/Instagram: reply to a comment by sending the author a private message." }
+    - { name: inbox_private_reply,         description: "Instagram-only: reply to a comment by sending the author a DM." }
     - { name: inbox_hide,                  description: "Hide a comment on the platform side (Facebook, Instagram). Unsupported elsewhere." }
     - { name: inbox_unhide,                description: "Reverse inbox_hide." }
+    - { name: inbox_like,                  description: "Like a comment on the platform side (Facebook, Instagram)." }
     - { name: inbox_delete,                description: "Delete a comment where the platform permits it." }
+    - { name: inbox_sync,                  description: "Trigger an out-of-cycle inbox poll for one or more accounts (or all active accounts when omitted)." }
   ui_panels:
     - slot: project.page
       label: Social

@@ -1,13 +1,28 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
 
 	sdk "github.com/apteva/app-sdk"
 )
+
+type twitterAccountCreds struct {
+	AccountID int64
+	ConnID    int64
+	UserID    string
+	Username  string
+}
+
+type twitterSyncReport struct {
+	NewMentions int      `json:"new_mentions"`
+	NewDMs      int      `json:"new_dms"`
+	Warnings    []string `json:"warnings,omitempty"`
+}
 
 type twitterUserNode struct {
 	ID              string `json:"id"`
@@ -17,12 +32,14 @@ type twitterUserNode struct {
 }
 
 type twitterTweetNode struct {
-	ID               string           `json:"id"`
-	Text             string           `json:"text"`
-	AuthorID         string           `json:"author_id"`
-	CreatedAt        string           `json:"created_at"`
-	ConversationID   string           `json:"conversation_id"`
-	ReferencedTweets []twitterRefNode `json:"referenced_tweets"`
+	ID                  string           `json:"id"`
+	Text                string           `json:"text"`
+	AuthorID            string           `json:"author_id"`
+	CreatedAt           string           `json:"created_at"`
+	ConversationID      string           `json:"conversation_id"`
+	InReplyToUserID     string           `json:"in_reply_to_user_id"`
+	ReferencedTweets    []twitterRefNode `json:"referenced_tweets"`
+	EditHistoryTweetIDs []string         `json:"edit_history_tweet_ids"`
 }
 
 type twitterRefNode struct {
@@ -39,47 +56,73 @@ type twitterDMEventNode struct {
 	SenderID         string `json:"sender_id"`
 }
 
-func syncTwitterInbox(ctx *sdk.AppCtx, acct inboxAccount, opts inboxSyncOptions, res *inboxSyncResult) {
-	userID, _, err := twitterAuthenticatedUser(ctx, acct.ConnID)
+func loadTwitterAccountCreds(ctx *sdk.AppCtx, projectID string, accountID int64) (*twitterAccountCreds, error) {
+	var connID int64
+	var platform string
+	err := ctx.AppDB().QueryRow(
+		`SELECT connection_id, platform
+		   FROM social_accounts
+		  WHERE id=? AND project_id=? AND status='active'`,
+		accountID, projectID,
+	).Scan(&connID, &platform)
+	if err == sql.ErrNoRows {
+		return nil, fmt.Errorf("social_account %d not found or inactive", accountID)
+	}
 	if err != nil {
-		res.Status = "failed"
-		res.Error = err.Error()
-		return
+		return nil, err
+	}
+	if platform != "twitter" {
+		return nil, fmt.Errorf("social_account %d is not an X/Twitter account (got %q)", accountID, platform)
+	}
+	userID, username, err := twitterAuthenticatedUser(ctx, connID)
+	if err != nil {
+		return nil, err
 	}
 	if userID == "" {
-		res.Status = "failed"
-		res.Error = "authenticated X user id missing"
-		return
+		return nil, errors.New("authenticated X user id missing")
 	}
-	res.Mentions += syncTwitterMentions(ctx, acct, userID, opts, res)
-	res.DMs += syncTwitterDMs(ctx, acct, userID, opts, res)
+	return &twitterAccountCreds{AccountID: accountID, ConnID: connID, UserID: userID, Username: username}, nil
 }
 
-func syncTwitterMentions(ctx *sdk.AppCtx, acct inboxAccount, userID string, opts inboxSyncOptions, res *inboxSyncResult) int {
-	limit := opts.Limit
-	if limit <= 0 {
-		limit = 50
+func syncTwitterAccount(ctx *sdk.AppCtx, projectID string, accountID int64) (*twitterSyncReport, error) {
+	creds, err := loadTwitterAccountCreds(ctx, projectID, accountID)
+	if err != nil {
+		return nil, err
 	}
-	if limit > 100 {
-		limit = 100
+	report := &twitterSyncReport{}
+
+	if n, warns := syncTwitterMentions(ctx, projectID, creds); n >= 0 {
+		report.NewMentions = n
+		report.Warnings = append(report.Warnings, warns...)
 	}
-	if limit < 5 {
-		limit = 5
+	if n, warns := syncTwitterDMs(ctx, projectID, creds); n >= 0 {
+		report.NewDMs = n
+		report.Warnings = append(report.Warnings, warns...)
 	}
-	out, err := ctx.PlatformAPI().ExecuteIntegrationTool(acct.ConnID, "get_user_mentions", map[string]any{
-		"user_id":      userID,
-		"max_results":  limit,
-		"tweet.fields": "id,text,author_id,created_at,public_metrics,conversation_id,in_reply_to_user_id,referenced_tweets",
+
+	_, _ = ctx.AppDB().Exec(
+		`INSERT INTO inbox_cursors (social_account_id, kind, cursor, last_sync_at)
+		 VALUES (?, ?, '', CURRENT_TIMESTAMP)
+		 ON CONFLICT(social_account_id, kind) DO UPDATE SET
+		   last_sync_at=excluded.last_sync_at, last_error=NULL`,
+		accountID, "all",
+	)
+	return report, nil
+}
+
+func syncTwitterMentions(ctx *sdk.AppCtx, projectID string, creds *twitterAccountCreds) (int, []string) {
+	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(creds.ConnID, "get_user_mentions", map[string]any{
+		"user_id":      creds.UserID,
+		"max_results":  100,
+		"tweet.fields": "id,text,author_id,created_at,public_metrics,conversation_id,in_reply_to_user_id,referenced_tweets,edit_history_tweet_ids",
 		"expansions":   "author_id",
 		"user.fields":  "id,name,username,profile_image_url,verified",
 	})
 	if err != nil {
-		res.Warnings = append(res.Warnings, "get_user_mentions: "+err.Error())
-		return 0
+		return -1, []string{"get_user_mentions: " + err.Error()}
 	}
-	if out == nil || !out.Success {
-		res.Warnings = append(res.Warnings, "get_user_mentions: "+upstreamError(out).Error())
-		return 0
+	if res == nil || !res.Success {
+		return -1, []string{"get_user_mentions: " + upstreamError(res).Error()}
 	}
 	var resp struct {
 		Data     []twitterTweetNode `json:"data"`
@@ -87,27 +130,29 @@ func syncTwitterMentions(ctx *sdk.AppCtx, acct inboxAccount, userID string, opts
 			Users []twitterUserNode `json:"users"`
 		} `json:"includes"`
 	}
-	if err := json.Unmarshal(out.Data, &resp); err != nil {
-		res.Warnings = append(res.Warnings, "decode X mentions: "+err.Error())
-		return 0
+	if err := json.Unmarshal(res.Data, &resp); err != nil {
+		return -1, []string{"decode X mentions: " + err.Error()}
 	}
 	users := twitterUsersByID(resp.Includes.Users)
 	added := 0
 	for _, tw := range resp.Data {
-		if tw.ID == "" || tw.AuthorID == userID {
+		if tw.ID == "" || tw.AuthorID == creds.UserID {
 			continue
 		}
 		author := users[tw.AuthorID]
-		threadID := firstNonEmpty(tw.ConversationID, twitterReplyParentID(tw), tw.ID)
+		parentID := twitterReplyParentID(tw)
+		externalPostID := tw.ConversationID
+		if externalPostID == "" {
+			externalPostID = tw.ID
+		}
 		_, inserted, err := upsertInboxItem(ctx.AppDB(), inboxUpsertInput{
-			ProjectID:        acct.ProjectID,
-			SocialAccountID:  acct.ID,
+			ProjectID:        projectID,
+			SocialAccountID:  creds.AccountID,
 			Platform:         "twitter",
 			Kind:             inboxKindMention,
 			ExternalID:       tw.ID,
-			ThreadExternalID: threadID,
-			ParentExternalID: twitterReplyParentID(tw),
-			ExternalPostID:   threadID,
+			ParentExternalID: parentID,
+			ExternalPostID:   externalPostID,
 			AuthorExternalID: tw.AuthorID,
 			AuthorName:       twitterDisplayName(author),
 			AuthorHandle:     author.Username,
@@ -116,7 +161,6 @@ func syncTwitterMentions(ctx *sdk.AppCtx, acct inboxAccount, userID string, opts
 			Permalink:        "https://twitter.com/i/web/status/" + tw.ID,
 			OccurredAt:       parseTwitterTimestamp(tw.CreatedAt),
 			RawJSON:          marshalSafe(tw),
-			Direction:        "inbound",
 		})
 		if err != nil {
 			ctx.Logger().Warn("x mention upsert failed", "external_id", tw.ID, "err", err)
@@ -126,31 +170,22 @@ func syncTwitterMentions(ctx *sdk.AppCtx, acct inboxAccount, userID string, opts
 			added++
 		}
 	}
-	return added
+	return added, nil
 }
 
-func syncTwitterDMs(ctx *sdk.AppCtx, acct inboxAccount, userID string, opts inboxSyncOptions, res *inboxSyncResult) int {
-	limit := opts.Limit
-	if limit <= 0 {
-		limit = 50
-	}
-	if limit > 100 {
-		limit = 100
-	}
-	out, err := ctx.PlatformAPI().ExecuteIntegrationTool(acct.ConnID, "get_dm_events", map[string]any{
-		"max_results":     limit,
+func syncTwitterDMs(ctx *sdk.AppCtx, projectID string, creds *twitterAccountCreds) (int, []string) {
+	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(creds.ConnID, "get_dm_events", map[string]any{
+		"max_results":     100,
 		"event_types":     "MessageCreate",
 		"dm_event.fields": "id,text,event_type,created_at,dm_conversation_id,sender_id",
 		"expansions":      "sender_id",
 		"user.fields":     "id,name,username,profile_image_url,verified",
 	})
 	if err != nil {
-		res.Warnings = append(res.Warnings, "get_dm_events: "+err.Error())
-		return 0
+		return -1, []string{"get_dm_events: " + err.Error()}
 	}
-	if out == nil || !out.Success {
-		res.Warnings = append(res.Warnings, "get_dm_events: "+upstreamError(out).Error())
-		return 0
+	if res == nil || !res.Success {
+		return -1, []string{"get_dm_events: " + upstreamError(res).Error()}
 	}
 	var resp struct {
 		Data     []twitterDMEventNode `json:"data"`
@@ -158,24 +193,22 @@ func syncTwitterDMs(ctx *sdk.AppCtx, acct inboxAccount, userID string, opts inbo
 			Users []twitterUserNode `json:"users"`
 		} `json:"includes"`
 	}
-	if err := json.Unmarshal(out.Data, &resp); err != nil {
-		res.Warnings = append(res.Warnings, "decode X DMs: "+err.Error())
-		return 0
+	if err := json.Unmarshal(res.Data, &resp); err != nil {
+		return -1, []string{"decode X DMs: " + err.Error()}
 	}
 	users := twitterUsersByID(resp.Includes.Users)
 	added := 0
 	for _, dm := range resp.Data {
-		if dm.ID == "" || dm.SenderID == "" || dm.SenderID == userID {
+		if dm.ID == "" || dm.SenderID == "" || dm.SenderID == creds.UserID {
 			continue
 		}
 		author := users[dm.SenderID]
 		_, inserted, err := upsertInboxItem(ctx.AppDB(), inboxUpsertInput{
-			ProjectID:        acct.ProjectID,
-			SocialAccountID:  acct.ID,
+			ProjectID:        projectID,
+			SocialAccountID:  creds.AccountID,
 			Platform:         "twitter",
 			Kind:             inboxKindDM,
 			ExternalID:       dm.ID,
-			ThreadExternalID: dm.DMConversationID,
 			ExternalPostID:   dm.DMConversationID,
 			AuthorExternalID: dm.SenderID,
 			AuthorName:       twitterDisplayName(author),
@@ -184,7 +217,6 @@ func syncTwitterDMs(ctx *sdk.AppCtx, acct inboxAccount, userID string, opts inbo
 			Body:             dm.Text,
 			OccurredAt:       parseTwitterTimestamp(dm.CreatedAt),
 			RawJSON:          marshalSafe(dm),
-			Direction:        "inbound",
 		})
 		if err != nil {
 			ctx.Logger().Warn("x dm upsert failed", "external_id", dm.ID, "err", err)
@@ -194,64 +226,111 @@ func syncTwitterDMs(ctx *sdk.AppCtx, acct inboxAccount, userID string, opts inbo
 			added++
 		}
 	}
-	return added
+	return added, nil
 }
 
-func twitterReplyInboxItem(ctx *sdk.AppCtx, item *inboxItem, creds *inboxAccountCreds, out inboxOutcome, body string) inboxOutcome {
-	switch item.Kind {
-	case inboxKindMention, inboxKindComment:
-		res, err := ctx.PlatformAPI().ExecuteIntegrationTool(creds.ConnID, "post_tweet", map[string]any{
-			"text": body,
-			"reply": map[string]any{
-				"in_reply_to_tweet_id": item.ExternalID,
-			},
-		})
-		if err != nil {
-			out.Status, out.Error = "failed", err.Error()
-			return out
-		}
-		if res == nil || !res.Success {
-			out.Status, out.Error = "failed", upstreamError(res).Error()
-			return out
-		}
-		id, url := extractPostIdentity("twitter", res.Data)
-		out.Status = "ok"
-		out.ExternalID = id
-		out.Permalink = url
-		_ = markInboxRepliedByExternalID(ctx.AppDB(), item.SocialAccountID, item.Kind, item.ExternalID)
-		insertOutboundInboxRow(ctx, item, id, body)
-		return out
-	case inboxKindDM:
-		args := map[string]any{"text": body}
-		tool := "send_dm"
-		if item.ExternalPostID != "" {
-			tool = "send_dm_to_conversation"
-			args["dm_conversation_id"] = item.ExternalPostID
-		} else if item.AuthorExternalID != "" {
-			args["participant_id"] = item.AuthorExternalID
-		} else {
-			out.Status, out.Error = "failed", "X DM target requires dm_conversation_id or author_external_id"
-			return out
-		}
-		res, err := ctx.PlatformAPI().ExecuteIntegrationTool(creds.ConnID, tool, args)
-		if err != nil {
-			out.Status, out.Error = "failed", err.Error()
-			return out
-		}
-		if res == nil || !res.Success {
-			out.Status, out.Error = "failed", upstreamError(res).Error()
-			return out
-		}
-		out.Status = "ok"
-		out.ExternalID = twitterDMResponseID(res.Data)
-		_ = markInboxRepliedByExternalID(ctx.AppDB(), item.SocialAccountID, inboxKindDM, item.ExternalID)
-		insertOutboundInboxRow(ctx, item, out.ExternalID, body)
-		return out
-	default:
-		out.Status = "unsupported"
-		out.Reason = fmt.Sprintf("X reply is not supported for %s items", item.Kind)
+func twitterInboxReply(ctx *sdk.AppCtx, item *inboxItem, body string) inboxOutcome {
+	out := inboxOutcome{
+		InboxItemID:     item.ID,
+		SocialAccountID: item.SocialAccountID,
+		Platform:        item.Platform,
+	}
+	if strings.TrimSpace(body) == "" {
+		out.Status, out.Error = "failed", "body required"
 		return out
 	}
+	creds, err := loadTwitterAccountCreds(ctx, item.ProjectID, item.SocialAccountID)
+	if err != nil {
+		out.Status, out.Error = "failed", err.Error()
+		return out
+	}
+	switch item.Kind {
+	case inboxKindMention, inboxKindComment:
+		return twitterReplyToPost(ctx, out, creds, item, body)
+	case inboxKindDM:
+		return twitterSendDM(ctx, out, creds, item, body)
+	default:
+		out.Status = "unsupported"
+		out.Reason = fmt.Sprintf("X inbox_reply: kind %q has no reply path", item.Kind)
+		return out
+	}
+}
+
+func twitterReplyToPost(ctx *sdk.AppCtx, out inboxOutcome, creds *twitterAccountCreds, item *inboxItem, body string) inboxOutcome {
+	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(creds.ConnID, "post_tweet", map[string]any{
+		"text": body,
+		"reply": map[string]any{
+			"in_reply_to_tweet_id": item.ExternalID,
+		},
+	})
+	if err != nil {
+		out.Status, out.Error = "failed", err.Error()
+		return out
+	}
+	if res == nil || !res.Success {
+		out.Status, out.Error = "failed", upstreamError(res).Error()
+		return out
+	}
+	id, url := extractPostIdentity("twitter", res.Data)
+	out.Status = "ok"
+	out.ExternalID = id
+	out.Permalink = url
+	_ = markInboxRepliedByExternalID(ctx.AppDB(), creds.AccountID, item.Kind, item.ExternalID)
+	if id != "" {
+		_, _, _ = upsertInboxItem(ctx.AppDB(), inboxUpsertInput{
+			ProjectID:        item.ProjectID,
+			SocialAccountID:  creds.AccountID,
+			Platform:         "twitter",
+			Kind:             item.Kind,
+			ExternalID:       id,
+			ParentExternalID: item.ExternalID,
+			ExternalPostID:   item.ExternalPostID,
+			Body:             body,
+			Permalink:        url,
+			OccurredAt:       time.Now().UTC(),
+		})
+	}
+	return out
+}
+
+func twitterSendDM(ctx *sdk.AppCtx, out inboxOutcome, creds *twitterAccountCreds, item *inboxItem, body string) inboxOutcome {
+	args := map[string]any{"text": body}
+	tool := "send_dm"
+	if item.ExternalPostID != "" {
+		tool = "send_dm_to_conversation"
+		args["dm_conversation_id"] = item.ExternalPostID
+	} else if item.AuthorExternalID != "" {
+		args["participant_id"] = item.AuthorExternalID
+	} else {
+		out.Status, out.Error = "failed", "X DM target requires dm_conversation_id or author_external_id"
+		return out
+	}
+	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(creds.ConnID, tool, args)
+	if err != nil {
+		out.Status, out.Error = "failed", err.Error()
+		return out
+	}
+	if res == nil || !res.Success {
+		out.Status, out.Error = "failed", upstreamError(res).Error()
+		return out
+	}
+	out.Status = "ok"
+	out.ExternalID = twitterDMResponseID(res.Data)
+	_ = markInboxRepliedByExternalID(ctx.AppDB(), creds.AccountID, inboxKindDM, item.ExternalID)
+	if out.ExternalID != "" {
+		_, _, _ = upsertInboxItem(ctx.AppDB(), inboxUpsertInput{
+			ProjectID:        item.ProjectID,
+			SocialAccountID:  creds.AccountID,
+			Platform:         "twitter",
+			Kind:             inboxKindDM,
+			ExternalID:       out.ExternalID,
+			ParentExternalID: item.ExternalID,
+			ExternalPostID:   item.ExternalPostID,
+			Body:             body,
+			OccurredAt:       time.Now().UTC(),
+		})
+	}
+	return out
 }
 
 func twitterUsersByID(users []twitterUserNode) map[string]twitterUserNode {
@@ -290,6 +369,9 @@ func parseTwitterTimestamp(s string) time.Time {
 	if t, err := time.Parse(time.RFC3339, s); err == nil {
 		return t.UTC()
 	}
+	if t, err := time.Parse("2006-01-02T15:04:05.000Z", s); err == nil {
+		return t.UTC()
+	}
 	return time.Now().UTC()
 }
 
@@ -305,18 +387,14 @@ func twitterDMResponseID(data []byte) string {
 	if err := json.Unmarshal(data, &resp); err != nil {
 		return ""
 	}
-	for _, v := range []string{resp.Data.DMEventID, resp.Data.ID, resp.DMEventID, resp.ID} {
-		if strings.TrimSpace(v) != "" {
-			return v
-		}
+	if resp.Data.DMEventID != "" {
+		return resp.Data.DMEventID
 	}
-	return ""
-}
-
-func marshalSafe(v any) string {
-	b, err := json.Marshal(v)
-	if err != nil {
-		return ""
+	if resp.Data.ID != "" {
+		return resp.Data.ID
 	}
-	return string(b)
+	if resp.DMEventID != "" {
+		return resp.DMEventID
+	}
+	return resp.ID
 }

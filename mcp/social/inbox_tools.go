@@ -1,7 +1,8 @@
 // inbox_tools — MCP handlers for the inbox_* surface. Reads go
 // straight at the local DB via inbox.go; replies / moderation
-// dispatch into per-platform code. Sync/backfill is intentionally
-// app-owned and not exposed as an MCP tool.
+// dispatch into per-platform code (not yet wired — every platform
+// returns status='unsupported' with a clear reason until handlers
+// land).
 package main
 
 import (
@@ -14,7 +15,7 @@ import (
 // ─── inbox_list ────────────────────────────────────────────────────
 
 func (a *App) toolInboxList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	pid := projectIDForTool(ctx, args)
+	pid := projectScope(ctx, args)
 	filter := inboxListFilter{ProjectID: pid}
 
 	if v, ok := args["social_account_ids"]; ok {
@@ -63,7 +64,7 @@ func (a *App) toolInboxList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 // ─── inbox_get ─────────────────────────────────────────────────────
 
 func (a *App) toolInboxGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	pid := projectIDForTool(ctx, args)
+	pid := projectScope(ctx, args)
 	id := int64(intArg(args, "id", 0))
 	if id <= 0 {
 		return mcpError("id required"), nil
@@ -105,7 +106,7 @@ func (a *App) toolInboxArchive(ctx *sdk.AppCtx, args map[string]any) (any, error
 // setInboxStatusTool accepts either {id} or {ids: [...]} so callers
 // can mark a whole thread read in one call.
 func setInboxStatusTool(ctx *sdk.AppCtx, args map[string]any, status string) (any, error) {
-	pid := projectIDForTool(ctx, args)
+	pid := projectScope(ctx, args)
 	ids := collectIDs(args)
 	if len(ids) == 0 {
 		return mcpError("id or ids required"), nil
@@ -143,47 +144,98 @@ type inboxOutcome struct {
 }
 
 func (a *App) toolInboxReply(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	return dispatchInboxAction(ctx, args, "reply", func(item *inboxItem) bool {
-		return platformSupportsInbox(item.Platform, item.Kind, "write")
-	})
+	pid := projectScope(ctx, args)
+	id := int64(intArg(args, "id", 0))
+	if id <= 0 {
+		return mcpError("id required"), nil
+	}
+	body, _ := args["body"].(string)
+	if body == "" {
+		return mcpError("body required"), nil
+	}
+	item, err := getInboxItem(ctx.AppDB(), pid, id)
+	if err != nil {
+		return nil, fmt.Errorf("get inbox item: %w", err)
+	}
+	if item == nil {
+		return mcpError("inbox item not found"), nil
+	}
+	if isProviderBackedAccount(ctx, pid, item.SocialAccountID, zernioProviderSlug) {
+		return a.zernioInboxReply(ctx, item, body), nil
+	}
+	if !platformSupportsInbox(item.Platform, item.Kind, "write") {
+		return inboxOutcome{
+			InboxItemID:     item.ID,
+			SocialAccountID: item.SocialAccountID,
+			Platform:        item.Platform,
+			Status:          "unsupported",
+			Reason:          fmt.Sprintf("%s does not support replies to %s items", item.Platform, item.Kind),
+		}, nil
+	}
+	switch item.Platform {
+	case "instagram":
+		return instagramInboxReply(ctx, item, body), nil
+	case "twitter":
+		return twitterInboxReply(ctx, item, body), nil
+	}
+	return inboxOutcome{
+		InboxItemID:     item.ID,
+		SocialAccountID: item.SocialAccountID,
+		Platform:        item.Platform,
+		Status:          "unsupported",
+		Reason:          fmt.Sprintf("%s reply handler not yet wired", item.Platform),
+	}, nil
 }
 
 func (a *App) toolInboxPrivateReply(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	return dispatchInboxAction(ctx, args, "private_reply", func(item *inboxItem) bool {
-		return item.Kind == inboxKindComment &&
-			platformSupportsInbox(item.Platform, inboxKindComment, "private_reply")
-	})
+	pid := projectScope(ctx, args)
+	id := int64(intArg(args, "id", 0))
+	if id <= 0 {
+		return mcpError("id required"), nil
+	}
+	body, _ := args["body"].(string)
+	if body == "" {
+		return mcpError("body required"), nil
+	}
+	item, err := getInboxItem(ctx.AppDB(), pid, id)
+	if err != nil {
+		return nil, fmt.Errorf("get inbox item: %w", err)
+	}
+	if item == nil {
+		return mcpError("inbox item not found"), nil
+	}
+	if !platformSupportsInbox(item.Platform, inboxKindComment, "private_reply") {
+		return inboxOutcome{
+			InboxItemID:     item.ID,
+			SocialAccountID: item.SocialAccountID,
+			Platform:        item.Platform,
+			Status:          "unsupported",
+			Reason:          "private_reply is Instagram-only",
+		}, nil
+	}
+	if item.Platform == "instagram" {
+		return instagramInboxPrivateReply(ctx, item, body), nil
+	}
+	return inboxOutcome{Status: "unsupported", Reason: "private_reply handler missing"}, nil
 }
 
 func (a *App) toolInboxHide(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	return dispatchInboxAction(ctx, args, "hide", func(item *inboxItem) bool {
-		return platformSupportsInbox(item.Platform, item.Kind, "hide")
-	})
+	return moderateComment(ctx, args, "hide", true)
 }
 
 func (a *App) toolInboxUnhide(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	return dispatchInboxAction(ctx, args, "unhide", func(item *inboxItem) bool {
-		return platformSupportsInbox(item.Platform, item.Kind, "hide")
-	})
+	return moderateComment(ctx, args, "hide", false)
 }
 
 func (a *App) toolInboxLike(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	return dispatchInboxAction(ctx, args, "like", func(item *inboxItem) bool {
-		return platformSupportsInbox(item.Platform, item.Kind, "like")
-	})
+	// Like isn't wired on any platform yet — IG Graph API doesn't
+	// expose the verb at all; FB pages support /{id}/likes POST but
+	// that integration tool isn't in the catalog. Honest stub.
+	return commentModerationStub(ctx, args, "like")
 }
 
 func (a *App) toolInboxDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	return dispatchInboxAction(ctx, args, "delete", func(item *inboxItem) bool {
-		return platformSupportsInbox(item.Platform, item.Kind, "delete")
-	})
-}
-
-// dispatchInboxAction is the shared body for every platform-touching
-// inbox tool. It loads the item, gates on the capability matrix, then
-// dispatches to the platform-specific handler.
-func dispatchInboxAction(ctx *sdk.AppCtx, args map[string]any, action string, capCheck func(*inboxItem) bool) (any, error) {
-	pid := projectIDForTool(ctx, args)
+	pid := projectScope(ctx, args)
 	id := int64(intArg(args, "id", 0))
 	if id <= 0 {
 		return mcpError("id required"), nil
@@ -195,21 +247,241 @@ func dispatchInboxAction(ctx *sdk.AppCtx, args map[string]any, action string, ca
 	if item == nil {
 		return mcpError("inbox item not found"), nil
 	}
-
-	out := inboxOutcome{
+	if isProviderBackedAccount(ctx, pid, item.SocialAccountID, zernioProviderSlug) {
+		return a.zernioCommentModeration(ctx, item, "delete", false), nil
+	}
+	if !platformSupportsInbox(item.Platform, item.Kind, "delete") {
+		return inboxOutcome{
+			InboxItemID:     item.ID,
+			SocialAccountID: item.SocialAccountID,
+			Platform:        item.Platform,
+			Status:          "unsupported",
+			Reason:          fmt.Sprintf("%s does not support delete on %s items", item.Platform, item.Kind),
+		}, nil
+	}
+	if item.Platform == "instagram" {
+		return instagramInboxDelete(ctx, item), nil
+	}
+	return inboxOutcome{
 		InboxItemID:     item.ID,
 		SocialAccountID: item.SocialAccountID,
 		Platform:        item.Platform,
+		Status:          "unsupported",
+		Reason:          fmt.Sprintf("%s delete handler not yet wired", item.Platform),
+	}, nil
+}
+
+// moderateComment is the shared body for inbox_hide / inbox_unhide.
+// `hide=true` hides, `hide=false` unhides — the upstream verb is the
+// same endpoint.
+func moderateComment(ctx *sdk.AppCtx, args map[string]any, action string, hide bool) (any, error) {
+	pid := projectScope(ctx, args)
+	id := int64(intArg(args, "id", 0))
+	if id <= 0 {
+		return mcpError("id required"), nil
+	}
+	item, err := getInboxItem(ctx.AppDB(), pid, id)
+	if err != nil {
+		return nil, fmt.Errorf("get inbox item: %w", err)
+	}
+	if item == nil {
+		return mcpError("inbox item not found"), nil
+	}
+	if isProviderBackedAccount(ctx, pid, item.SocialAccountID, zernioProviderSlug) {
+		return (&App{}).zernioCommentModeration(ctx, item, action, hide), nil
+	}
+	if !platformSupportsInbox(item.Platform, item.Kind, "hide") {
+		return inboxOutcome{
+			InboxItemID:     item.ID,
+			SocialAccountID: item.SocialAccountID,
+			Platform:        item.Platform,
+			Status:          "unsupported",
+			Reason:          fmt.Sprintf("%s does not support %s on %s items", item.Platform, action, item.Kind),
+		}, nil
+	}
+	if item.Platform == "instagram" {
+		return instagramInboxHide(ctx, item, hide), nil
+	}
+	return inboxOutcome{
+		InboxItemID:     item.ID,
+		SocialAccountID: item.SocialAccountID,
+		Platform:        item.Platform,
+		Status:          "unsupported",
+		Reason:          fmt.Sprintf("%s %s handler not yet wired", item.Platform, action),
+	}, nil
+}
+
+// commentModerationStub mirrors moderateComment's plumbing but always
+// returns unsupported with a clear reason. Lets inbox_like share the
+// load-an-item-and-respond shape without a real implementation.
+func commentModerationStub(ctx *sdk.AppCtx, args map[string]any, action string) (any, error) {
+	pid := projectScope(ctx, args)
+	id := int64(intArg(args, "id", 0))
+	if id <= 0 {
+		return mcpError("id required"), nil
+	}
+	item, err := getInboxItem(ctx.AppDB(), pid, id)
+	if err != nil {
+		return nil, fmt.Errorf("get inbox item: %w", err)
+	}
+	if item == nil {
+		return mcpError("inbox item not found"), nil
+	}
+	if isProviderBackedAccount(ctx, pid, item.SocialAccountID, zernioProviderSlug) {
+		return (&App{}).zernioCommentModeration(ctx, item, action, true), nil
+	}
+	if !platformSupportsInbox(item.Platform, item.Kind, action) {
+		return inboxOutcome{
+			InboxItemID:     item.ID,
+			SocialAccountID: item.SocialAccountID,
+			Platform:        item.Platform,
+			Status:          "unsupported",
+			Reason:          fmt.Sprintf("%s does not support %s on %s items", item.Platform, action, item.Kind),
+		}, nil
+	}
+	return inboxOutcome{
+		InboxItemID:     item.ID,
+		SocialAccountID: item.SocialAccountID,
+		Platform:        item.Platform,
+		Status:          "unsupported",
+		Reason:          fmt.Sprintf("%s %s handler not yet wired", item.Platform, action),
+	}, nil
+}
+
+// ─── inbox_sync (stub — poll worker lands later) ───────────────────
+
+func (a *App) toolInboxSync(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid := projectScope(ctx, args)
+	// Resolve which accounts to (eventually) sync — if caller passed
+	// none we'd cover all active accounts. For now we still return the
+	// list so callers can see what WILL be synced once the worker
+	// lands.
+	var ids []int64
+	if v, ok := args["social_account_ids"]; ok {
+		for _, raw := range toAnySlice(v) {
+			if id := toInt64Loose(raw); id > 0 {
+				ids = append(ids, id)
+			}
+		}
+	}
+	if len(ids) == 0 {
+		rows, err := ctx.AppDB().Query(
+			`SELECT id FROM social_accounts WHERE project_id=? AND status='active' ORDER BY id`,
+			pid,
+		)
+		if err != nil {
+			return nil, err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			var id int64
+			if err := rows.Scan(&id); err == nil {
+				ids = append(ids, id)
+			}
+		}
 	}
 
-	if !capCheck(item) {
-		out.Status = "unsupported"
-		out.Reason = fmt.Sprintf("%s does not support %s on %ss", item.Platform, action, item.Kind)
-		return out, nil
+	type syncResult struct {
+		SocialAccountID int64  `json:"social_account_id"`
+		Platform        string `json:"platform,omitempty"`
+		Status          string `json:"status"`
+		Reason          string `json:"reason,omitempty"`
+		Error           string `json:"error,omitempty"`
+		Report          any    `json:"report,omitempty"`
 	}
+	results := make([]syncResult, 0, len(ids))
+	for _, id := range ids {
+		var platform, providerSlug string
+		var providerAccountID string
+		var connID int64
+		if err := ctx.AppDB().QueryRow(
+			`SELECT platform, COALESCE(provider_slug,'native'), COALESCE(provider_account_id,''), connection_id
+			   FROM social_accounts WHERE id=? AND project_id=?`,
+			id, pid,
+		).Scan(&platform, &providerSlug, &providerAccountID, &connID); err != nil {
+			results = append(results, syncResult{
+				SocialAccountID: id,
+				Status:          "failed",
+				Error:           err.Error(),
+			})
+			continue
+		}
+		if providerSlug == zernioProviderSlug {
+			report, err := a.syncZernioInbox(ctx, pid, id, connID, providerAccountID, platform)
+			if err != nil {
+				results = append(results, syncResult{
+					SocialAccountID: id,
+					Platform:        platform,
+					Status:          "failed",
+					Error:           err.Error(),
+				})
+				continue
+			}
+			results = append(results, syncResult{
+				SocialAccountID: id,
+				Platform:        platform,
+				Status:          "ok",
+				Report:          report,
+			})
+			continue
+		}
+		switch platform {
+		case "instagram":
+			report, err := syncInstagramAccount(ctx, id)
+			if err != nil {
+				results = append(results, syncResult{
+					SocialAccountID: id,
+					Platform:        platform,
+					Status:          "failed",
+					Error:           err.Error(),
+				})
+				continue
+			}
+			results = append(results, syncResult{
+				SocialAccountID: id,
+				Platform:        platform,
+				Status:          "ok",
+				Report:          report,
+			})
+		case "twitter":
+			report, err := syncTwitterAccount(ctx, pid, id)
+			if err != nil {
+				results = append(results, syncResult{
+					SocialAccountID: id,
+					Platform:        platform,
+					Status:          "failed",
+					Error:           err.Error(),
+				})
+				continue
+			}
+			results = append(results, syncResult{
+				SocialAccountID: id,
+				Platform:        platform,
+				Status:          "ok",
+				Report:          report,
+			})
+		default:
+			results = append(results, syncResult{
+				SocialAccountID: id,
+				Platform:        platform,
+				Status:          "unsupported",
+				Reason:          fmt.Sprintf("%s poll handler not yet wired", platform),
+			})
+		}
+	}
+	return map[string]any{
+		"results": results,
+		"count":   len(results),
+	}, nil
+}
 
-	body, _ := args["body"].(string)
-	return performInboxAction(ctx, item, action, body), nil
+func isProviderBackedAccount(ctx *sdk.AppCtx, pid string, accountID int64, provider string) bool {
+	var slug string
+	_ = ctx.AppDB().QueryRow(
+		`SELECT COALESCE(provider_slug,'native') FROM social_accounts WHERE id=? AND project_id=?`,
+		accountID, pid,
+	).Scan(&slug)
+	return slug == provider
 }
 
 // ─── helpers ───────────────────────────────────────────────────────

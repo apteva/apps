@@ -7,8 +7,6 @@
 //     (storage app, when bound) + Schedule/Now → post_create.
 //   - Tab "Posts": list of recent posts with per-target status pills,
 //     retry button on failed/partial.
-//   - Tab "Inbox": unified comments/messages/mentions/reviews pulled
-//     automatically from supported connected accounts.
 //
 // Lives in the social app's sidecar at /api/apps/social/ui/SocialPanel.mjs.
 // The host React (19) + react-dom come from the dashboard's importmap;
@@ -28,37 +26,15 @@ import { uploadResumable } from "./uploadResumable";
 const API = "/api/apps/social";
 const STORAGE_API = "/api/apps/storage";
 const MEDIA_API = "/api/apps/media";
+const PANEL_PROJECT_ID = new URL(import.meta.url).searchParams.get("project_id") || "";
+let activePanelProjectId = PANEL_PROJECT_ID;
+const IMPORTABLE_PLATFORMS = new Set(["facebook", "instagram", "tiktok", "twitter", "youtube"]);
 
-function socialURL(path: string, projectId?: string | null, extra?: Record<string, string | number | undefined | null>): string {
-  const params = new URLSearchParams();
-  if (projectId) params.set("project_id", projectId);
-  for (const [key, value] of Object.entries(extra || {})) {
-    if (value !== undefined && value !== null && value !== "") params.set(key, String(value));
-  }
-  const qs = params.toString();
-  return `${API}${path}${qs ? `?${qs}` : ""}`;
-}
-
-function waitForOAuthPopupResult(popup: Window | null, onDone: (ok: boolean) => void) {
-  let settled = false;
-  let poll: number | null = null;
-  const finish = (ok: boolean) => {
-    if (settled) return;
-    settled = true;
-    window.removeEventListener("message", onMsg);
-    if (poll !== null) window.clearInterval(poll);
-    onDone(ok);
-  };
-  const onMsg = (ev: MessageEvent) => {
-    if (ev.origin !== window.location.origin) return;
-    if (ev.data?.type !== "apteva-oauth-result") return;
-    finish(ev.data.ok !== false);
-  };
-  window.addEventListener("message", onMsg);
-  poll = window.setInterval(() => {
-    if (popup?.closed) finish(false);
-  }, 800);
-  window.setTimeout(() => finish(false), 10 * 60 * 1000);
+function appURL(path: string, projectId?: string | null): string {
+  const scopedProject = projectId || activePanelProjectId || PANEL_PROJECT_ID;
+  if (!scopedProject) return `${API}${path}`;
+  const sep = path.includes("?") ? "&" : "?";
+  return `${API}${path}${sep}project_id=${encodeURIComponent(scopedProject)}`;
 }
 
 function storageURL(path: string, projectId?: string | null): string {
@@ -88,6 +64,10 @@ interface SocialAccount {
   platform: string;
   connection_id: number;
   external_account_id: string;
+  provider_slug?: string;
+  provider_account_id?: string;
+  provider_profile_id?: string;
+  capabilities?: Record<string, unknown> | null;
   display_name: string;
   avatar_url: string;
   status: string;
@@ -117,48 +97,12 @@ interface Post {
   id: number;
   body: string;
   media_storage_ids: number[];
-  media_project_id?: string;
   schedule_at: string;
   status: string;
   created_at: string;
   published_at: string;
   targets: PostTarget[];
   profile_id?: number;
-}
-
-interface InboxItem {
-  id: number;
-  project_id: string;
-  social_account_id: number;
-  platform: string;
-  kind: "comment" | "dm" | "mention" | "review";
-  external_id: string;
-  thread_external_id?: string;
-  parent_external_id?: string;
-  author_external_id?: string;
-  author_name?: string;
-  author_handle?: string;
-  author_avatar_url?: string;
-  body?: string;
-  permalink?: string;
-  occurred_at: string;
-  status: "unread" | "read" | "replied" | "hidden" | "archived";
-  direction?: "inbound" | "outbound";
-}
-
-interface InboxSyncResult {
-  social_account_id: number;
-  platform: string;
-  display_name?: string;
-  status: "ok" | "unsupported" | "failed";
-  new_items: number;
-  comments?: number;
-  dms?: number;
-  mentions?: number;
-  reviews?: number;
-  warnings?: string[];
-  error?: string;
-  last_sync_at?: string;
 }
 
 // Profile = brand/client/site container (see profiles.go). One
@@ -187,6 +131,8 @@ interface PlatformInfo {
   // it, OAuth start would fail with "missing client_id" — we gray
   // out the button instead of letting the user click into an error.
   available: boolean;
+  zernio_available?: boolean;
+  provider_only?: boolean;
   // option_fields — per-platform overrides the compose dialog can
   // surface as inputs. Empty when the platform has nothing to
   // customise (Twitter / FB / IG / LinkedIn / TikTok in v1; only
@@ -301,35 +247,39 @@ function useAppEvents<T = unknown>(
 // --- Panel ---------------------------------------------------------
 
 export default function SocialPanel({ projectId }: NativePanelProps) {
-  const [tab, setTab] = useState<"accounts" | "posts" | "inbox" | "metrics">("posts");
-  const [allAccounts, setAllAccounts] = useState<SocialAccount[]>([]);
-  const [allPosts, setAllPosts] = useState<Post[]>([]);
+  activePanelProjectId = projectId || PANEL_PROJECT_ID;
+  const [tab, setTab] = useState<"accounts" | "posts" | "metrics">("posts");
+  const [accounts, setAccounts] = useState<SocialAccount[]>([]);
+  const [posts, setPosts] = useState<Post[]>([]);
   const [platforms, setPlatforms] = useState<PlatformInfo[]>([]);
   const [status, setStatus] = useState("");
   const [composeOpen, setComposeOpen] = useState(false);
   // Profile filter — null = "All profiles" (project-wide view).
+  // Persists per-project so refreshing the page keeps the user's
+  // last-selected brand context.
   const [profiles, setProfiles] = useState<Profile[]>([]);
-  const [activeProfileId, setActiveProfileId] = useState<number | null>(null);
+  const [activeProfileId, setActiveProfileId] = useState<number | null>(() => {
+    try {
+      const raw = localStorage.getItem(`social.activeProfile.${projectId || ""}`);
+      return raw ? Number(raw) || null : null;
+    } catch {
+      return null;
+    }
+  });
   const [manageOpen, setManageOpen] = useState(false);
-  const activeProfile = profiles.find((p) => p.id === activeProfileId) || null;
-  const effectiveProfileId = activeProfile?.id ?? null;
-  const accounts = effectiveProfileId == null
-    ? allAccounts
-    : allAccounts.filter((a) => (a.profile_id || 0) === effectiveProfileId);
-  const posts = effectiveProfileId == null
-    ? allPosts
-    : allPosts.filter((p) => (p.profile_id || 0) === effectiveProfileId);
-
   useEffect(() => {
-    setActiveProfileId(null);
-    setProfiles([]);
-    setAllAccounts([]);
-    setAllPosts([]);
-  }, [projectId]);
+    try {
+      if (activeProfileId == null) {
+        localStorage.removeItem(`social.activeProfile.${projectId || ""}`);
+      } else {
+        localStorage.setItem(`social.activeProfile.${projectId || ""}`, String(activeProfileId));
+      }
+    } catch {}
+  }, [activeProfileId, projectId]);
 
   const loadProfiles = useCallback(async () => {
     try {
-      const res = await fetch(socialURL("/profiles", projectId), { credentials: "same-origin" });
+      const res = await fetch(appURL("/profiles", projectId), { credentials: "same-origin" });
       const data = await res.json();
       setProfiles(data.profiles || []);
     } catch (e) {
@@ -337,32 +287,37 @@ export default function SocialPanel({ projectId }: NativePanelProps) {
     }
   }, [projectId]);
 
-  // Project-scoped fetches. The panel filters locally by profile_id
-  // so switching profiles cannot be overwritten by an older network
-  // response from another profile/all-profiles request.
+  // Profile-scoped fetches — when activeProfileId is set, the
+  // accounts/posts queries pass profile_id and the panel only sees
+  // that brand's rows. activeProfileId=null = project-wide.
+  const profileQuery = useCallback(() => {
+    if (activeProfileId == null) return "";
+    return `?profile_id=${activeProfileId}`;
+  }, [activeProfileId]);
+
   const loadAccounts = useCallback(async () => {
     try {
-      const res = await fetch(socialURL("/accounts", projectId), { credentials: "same-origin" });
+      const res = await fetch(appURL(`/accounts${profileQuery()}`, projectId), { credentials: "same-origin" });
       const data = await res.json();
-      setAllAccounts(data.accounts || []);
+      setAccounts(data.accounts || []);
     } catch (e) {
       setStatus("Load accounts: " + (e as Error).message);
     }
-  }, [projectId]);
+  }, [profileQuery, projectId]);
 
   const loadPosts = useCallback(async () => {
     try {
-      const res = await fetch(socialURL("/posts", projectId), { credentials: "same-origin" });
+      const res = await fetch(appURL(`/posts${profileQuery()}`, projectId), { credentials: "same-origin" });
       const data = await res.json();
-      setAllPosts(data.posts || []);
+      setPosts(data.posts || []);
     } catch (e) {
       setStatus("Load posts: " + (e as Error).message);
     }
-  }, [projectId]);
+  }, [profileQuery, projectId]);
 
   const loadPlatforms = useCallback(async () => {
     try {
-      const res = await fetch(socialURL("/platforms", projectId), { credentials: "same-origin" });
+      const res = await fetch(appURL("/platforms", projectId), { credentials: "same-origin" });
       const data = await res.json();
       setPlatforms(data.platforms || []);
     } catch {}
@@ -378,8 +333,7 @@ export default function SocialPanel({ projectId }: NativePanelProps) {
   // Live updates — account adds/removals + per-target publish events
   // + profile CRUD + post lifecycle (reschedule/delete from agent).
   useAppEvents("social", projectId, (ev) => {
-    if (ev.topic === "account.added" || ev.topic === "account.removed" ||
-        ev.topic === "account.disconnected" || ev.topic === "account.deleted") {
+    if (ev.topic === "account.added" || ev.topic === "account.removed") {
       loadAccounts();
     }
     if (ev.topic === "account.checked") {
@@ -417,18 +371,19 @@ export default function SocialPanel({ projectId }: NativePanelProps) {
     return () => window.removeEventListener("message", onMsg);
   }, []);
 
+  const activeProfile = profiles.find((p) => p.id === activeProfileId) || null;
+
   return (
     <div className="h-full flex flex-col">
       <header className="flex items-center gap-1 border-b border-border px-4 py-2">
         <ProfileSwitcher
           profiles={profiles}
-          activeId={effectiveProfileId}
+          activeId={activeProfileId}
           onSelect={setActiveProfileId}
           onManage={() => setManageOpen(true)}
         />
         <span className="w-px h-5 bg-border mx-2" />
         <Tab label="Posts" value="posts" current={tab} onClick={setTab} count={posts.length} />
-        <Tab label="Inbox" value="inbox" current={tab} onClick={setTab} />
         <Tab label="Accounts" value="accounts" current={tab} onClick={setTab} count={accounts.length} />
         <Tab label="Metrics" value="metrics" current={tab} onClick={setTab} />
         <button
@@ -442,35 +397,28 @@ export default function SocialPanel({ projectId }: NativePanelProps) {
         <span className="text-text-dim text-xs ml-2">{status}</span>
       </header>
 
-      <div className={"flex-1 min-h-0 " + (tab === "inbox" ? "overflow-hidden" : "overflow-auto")}>
+      <div className="flex-1 overflow-auto">
         {tab === "accounts" && (
           <AccountsView
             accounts={accounts}
             platforms={platforms}
-            oauthLanding={oauthLanding}
+            activeProfile={activeProfile}
             projectId={projectId}
-            activeProfileId={effectiveProfileId}
+            oauthLanding={oauthLanding}
             onClearLanding={() => setOauthLanding(null)}
             onSetLanding={(pendingId, connId) =>
               setOauthLanding({ pendingId, connectionId: connId })
             }
             onChange={loadAccounts}
+            onImported={loadPosts}
             setStatus={setStatus}
           />
         )}
         {tab === "posts" && (
           <PostsView posts={posts} onChange={loadPosts} setStatus={setStatus} projectId={projectId} />
         )}
-        {tab === "inbox" && (
-          <InboxView
-            accounts={accounts}
-            projectId={projectId}
-            activeProfileId={effectiveProfileId}
-            setStatus={setStatus}
-          />
-        )}
         {tab === "metrics" && (
-          <MetricsView posts={posts} accounts={accounts} setStatus={setStatus} onPostsChanged={loadPosts} projectId={projectId} />
+          <MetricsView posts={posts} accounts={accounts} setStatus={setStatus} onPostsChanged={loadPosts} />
         )}
       </div>
 
@@ -488,8 +436,7 @@ export default function SocialPanel({ projectId }: NativePanelProps) {
       {manageOpen && (
         <ProfileManageModal
           profiles={profiles}
-          accounts={allAccounts}
-          projectId={projectId}
+          accounts={accounts}
           onClose={() => setManageOpen(false)}
           onChanged={() => { loadProfiles(); loadAccounts(); }}
           setStatus={setStatus}
@@ -583,18 +530,16 @@ function ProfileSwitcher({
 // --- ProfileManageModal: create / rename / set-default / delete ---
 
 function ProfileManageModal({
-  profiles, accounts, projectId, onClose, onChanged, setStatus,
+  profiles, accounts, onClose, onChanged, setStatus,
 }: {
   profiles: Profile[];
   accounts: SocialAccount[];
-  projectId?: string | null;
   onClose: () => void;
   onChanged: () => void;
   setStatus: (s: string) => void;
 }) {
   const [newName, setNewName] = useState("");
   const [newColor, setNewColor] = useState("#3b82f6");
-  const [nameDrafts, setNameDrafts] = useState<Record<number, string>>({});
   const [busy, setBusy] = useState(false);
   const [confirmingDelete, setConfirmingDelete] = useState<Profile | null>(null);
 
@@ -603,7 +548,7 @@ function ProfileManageModal({
     if (!name) return;
     setBusy(true);
     try {
-      const res = await fetch(socialURL("/profiles", projectId), {
+      const res = await fetch(appURL("/profiles"), {
         method: "POST",
         credentials: "same-origin",
         headers: { "Content-Type": "application/json" },
@@ -621,7 +566,7 @@ function ProfileManageModal({
 
   const promote = async (id: number) => {
     try {
-      await fetch(socialURL(`/profiles/${id}`, projectId), {
+      await fetch(appURL(`/profiles/${id}`), {
         method: "PATCH",
         credentials: "same-origin",
         headers: { "Content-Type": "application/json" },
@@ -635,19 +580,11 @@ function ProfileManageModal({
 
   const rename = async (id: number, name: string) => {
     try {
-      const nextName = name.trim();
-      if (!nextName) return;
-      const res = await fetch(socialURL(`/profiles/${id}`, projectId), {
+      await fetch(appURL(`/profiles/${id}`), {
         method: "PATCH",
         credentials: "same-origin",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ name: nextName }),
-      });
-      if (!res.ok) throw new Error(await res.text());
-      setNameDrafts((drafts) => {
-        const next = { ...drafts };
-        delete next[id];
-        return next;
+        body: JSON.stringify({ name }),
       });
       onChanged();
     } catch (e) {
@@ -657,7 +594,7 @@ function ProfileManageModal({
 
   const recolor = async (id: number, color: string) => {
     try {
-      await fetch(socialURL(`/profiles/${id}`, projectId), {
+      await fetch(appURL(`/profiles/${id}`), {
         method: "PATCH",
         credentials: "same-origin",
         headers: { "Content-Type": "application/json" },
@@ -671,7 +608,7 @@ function ProfileManageModal({
 
   const removeProfile = async (id: number) => {
     try {
-      const res = await fetch(socialURL(`/profiles/${id}`, projectId), {
+      const res = await fetch(appURL(`/profiles/${id}`), {
         method: "DELETE",
         credentials: "same-origin",
       });
@@ -684,7 +621,7 @@ function ProfileManageModal({
 
   const moveAccount = async (accountId: number, profileId: number) => {
     try {
-      await fetch(socialURL(`/profiles/${profileId}/move`, projectId), {
+      await fetch(appURL(`/profiles/${profileId}/move`), {
         method: "POST",
         credentials: "same-origin",
         headers: { "Content-Type": "application/json" },
@@ -743,12 +680,6 @@ function ProfileManageModal({
             {profiles.map((p) => (
               <div key={p.id} className="border border-border rounded p-3 flex flex-col gap-2">
                 <div className="flex items-center gap-2">
-                  {(() => {
-                    const draftName = nameDrafts[p.id] ?? p.name;
-                    const trimmedDraft = draftName.trim();
-                    const nameChanged = trimmedDraft !== "" && trimmedDraft !== p.name;
-                    return (
-                      <>
                   <input
                     type="color"
                     value={p.color || "#94a3b8"}
@@ -757,23 +688,13 @@ function ProfileManageModal({
                   />
                   <input
                     type="text"
-                    value={draftName}
-                    onChange={(e) => setNameDrafts((drafts) => ({ ...drafts, [p.id]: e.target.value }))}
-                    onKeyDown={(e) => {
-                      if (e.key === "Enter" && nameChanged) rename(p.id, trimmedDraft);
+                    defaultValue={p.name}
+                    onBlur={(e) => {
+                      const v = e.target.value.trim();
+                      if (v && v !== p.name) rename(p.id, v);
                     }}
                     className="flex-1 bg-transparent border-b border-transparent hover:border-border focus:border-accent outline-none text-text font-medium"
                   />
-                  <button
-                    onClick={() => rename(p.id, trimmedDraft)}
-                    disabled={!nameChanged}
-                    className="text-xs text-accent hover:underline disabled:text-text-dim disabled:no-underline disabled:cursor-not-allowed"
-                  >
-                    Rename
-                  </button>
-                      </>
-                    );
-                  })()}
                   <span className="text-text-dim text-xs">{p.account_count ?? 0} accounts</span>
                   {!p.is_default && (
                     <button
@@ -866,7 +787,7 @@ function ProfileManageModal({
 function Tab({
   label, value, current, onClick, count,
 }: {
-  label: string; value: "accounts" | "posts" | "inbox" | "metrics";
+  label: string; value: "accounts" | "posts" | "metrics";
   current: string; onClick: (v: any) => void; count?: number;
 }) {
   const active = value === current;
@@ -889,27 +810,36 @@ function Tab({
 // --- AccountsView -------------------------------------------------
 
 function AccountsView({
-  accounts, platforms, oauthLanding, projectId, activeProfileId, onClearLanding, onSetLanding, onChange, setStatus,
+  accounts, platforms, activeProfile, projectId, oauthLanding, onClearLanding, onSetLanding, onChange, onImported, setStatus,
 }: {
   accounts: SocialAccount[]; platforms: PlatformInfo[];
-  oauthLanding: { pendingId: number; connectionId: number } | null;
+  activeProfile: Profile | null;
   projectId?: string | null;
-  activeProfileId?: number | null;
+  oauthLanding: { pendingId: number; connectionId: number } | null;
   onClearLanding: () => void;
   onSetLanding: (pendingId: number, connectionId: number) => void;
-  onChange: () => void; setStatus: (s: string) => void;
+  onChange: () => void;
+  onImported: () => void;
+  setStatus: (s: string) => void;
 }) {
   const [adding, setAdding] = useState(false);
+  const [importOpen, setImportOpen] = useState(false);
+  const [providerImportOpen, setProviderImportOpen] = useState(false);
 
   const handleLanded = useCallback(async (pendingId: number) => {
     // After OAuth, fetch the page list. If empty (no picker required),
     // finalize directly. Otherwise, keep oauthLanding set so the picker
     // renders below.
     try {
-      const res = await fetch(socialURL(`/accounts/${pendingId}/pages`, projectId), { credentials: "same-origin" });
+      const res = await fetch(appURL(`/accounts/${pendingId}/pages`), { credentials: "same-origin" });
       const data = await res.json();
+      if (data?.isError) {
+        const inner = (data.content || []).find((c: any) => c.type === "text")?.text;
+        setStatus(inner || "Account picker is not ready yet.");
+        return;
+      }
       if (!data.requires_picker) {
-        await fetch(socialURL("/accounts/finalize", projectId), {
+        await fetch(appURL("/accounts/finalize"), {
           method: "POST",
           credentials: "same-origin",
           headers: { "Content-Type": "application/json" },
@@ -923,7 +853,7 @@ function AccountsView({
     } catch (e) {
       setStatus("Finalize failed: " + (e as Error).message);
     }
-  }, [onChange, onClearLanding, projectId, setStatus]);
+  }, [onChange, onClearLanding, setStatus]);
 
   // When oauthLanding flips, kick the auto-finalize / picker decision.
   useEffect(() => {
@@ -934,12 +864,28 @@ function AccountsView({
     <div className="p-4 flex flex-col gap-4">
       <div className="flex items-center justify-between">
         <div className="text-text font-medium">Connected accounts</div>
-        <button
-          onClick={() => setAdding(true)}
-          className="px-3 py-1.5 text-sm bg-accent text-bg rounded font-bold"
-        >
-          + Add account
-        </button>
+        <div className="flex items-center gap-2">
+          <button
+            onClick={() => setImportOpen(true)}
+            disabled={accounts.length === 0}
+            className="px-3 py-1.5 text-sm border border-border rounded text-text hover:border-text-dim disabled:opacity-50"
+          >
+            Import history
+          </button>
+          <button
+            onClick={() => setProviderImportOpen(true)}
+            className="px-3 py-1.5 text-sm border border-border rounded text-text hover:border-accent"
+            title="Import accounts from an optional social provider such as Zernio"
+          >
+            Import provider
+          </button>
+          <button
+            onClick={() => setAdding(true)}
+            className="px-3 py-1.5 text-sm bg-accent text-bg rounded font-bold"
+          >
+            + Add account
+          </button>
+        </div>
       </div>
 
       {accounts.length === 0 ? (
@@ -949,7 +895,7 @@ function AccountsView({
       ) : (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
           {accounts.map((a) => (
-            <AccountCard key={a.id} account={a} onChange={onChange} setStatus={setStatus} projectId={projectId} />
+            <AccountCard key={a.id} account={a} onChange={onChange} setStatus={setStatus} />
           ))}
         </div>
       )}
@@ -959,8 +905,6 @@ function AccountsView({
           platforms={platforms}
           onClose={() => setAdding(false)}
           setStatus={setStatus}
-          projectId={projectId}
-          activeProfileId={activeProfileId}
           onReuseExisting={(pendingId, connId) => {
             // Backend returned 'reusing existing connection' — skip the
             // OAuth popup entirely, jump straight into the page picker.
@@ -970,10 +914,33 @@ function AccountsView({
         />
       )}
 
+      {importOpen && (
+        <ImportHistoryDialog
+          accounts={accounts}
+          activeProfile={activeProfile}
+          projectId={projectId}
+          onClose={() => setImportOpen(false)}
+          onImported={() => {
+            onImported();
+            onChange();
+          }}
+          setStatus={setStatus}
+        />
+      )}
+
+      {providerImportOpen && (
+        <ProviderImportDialog
+          activeProfile={activeProfile}
+          projectId={projectId}
+          onClose={() => setProviderImportOpen(false)}
+          onImported={onChange}
+          setStatus={setStatus}
+        />
+      )}
+
       {oauthLanding && (
         <PagePicker
           pendingId={oauthLanding.pendingId}
-          projectId={projectId}
           onClose={() => { onClearLanding(); onChange(); }}
           setStatus={setStatus}
         />
@@ -982,46 +949,461 @@ function AccountsView({
   );
 }
 
+interface ImportRunAccount {
+  account_id: number;
+  display_name: string;
+  platform: string;
+  status: "ready" | "ok" | "unsupported" | "failed";
+  imported?: number;
+  skipped_existing?: number;
+  reason?: string;
+  error?: string;
+}
+
+interface ImportRunResponse {
+  status: string;
+  dry_run: boolean;
+  limit_per_account: number;
+  accounts: ImportRunAccount[];
+  imported: number;
+  skipped_existing: number;
+  unsupported: number;
+  failed: number;
+}
+
+function ImportHistoryDialog({
+  accounts, activeProfile, projectId, onClose, onImported, setStatus,
+}: {
+  accounts: SocialAccount[];
+  activeProfile: Profile | null;
+  projectId?: string | null;
+  onClose: () => void;
+  onImported: () => void;
+  setStatus: (s: string) => void;
+}) {
+  const importableAccounts = accounts.filter((a) => IMPORTABLE_PLATFORMS.has(a.platform));
+  const allPlatforms = Array.from(new Set(accounts.map((a) => a.platform))).sort();
+  const [selectedPlatforms, setSelectedPlatforms] = useState<Set<string>>(
+    () => new Set(importableAccounts.map((a) => a.platform))
+  );
+  const [selectedAccounts, setSelectedAccounts] = useState<Set<number>>(
+    () => new Set(importableAccounts.map((a) => a.id))
+  );
+  const [limit, setLimit] = useState(100);
+  const [busy, setBusy] = useState<"preview" | "import" | null>(null);
+  const [result, setResult] = useState<ImportRunResponse | null>(null);
+
+  useEffect(() => {
+    setSelectedPlatforms(new Set(importableAccounts.map((a) => a.platform)));
+    setSelectedAccounts(new Set(importableAccounts.map((a) => a.id)));
+    setResult(null);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [accounts.map((a) => `${a.id}:${a.platform}`).join(",")]);
+
+  const togglePlatform = (platform: string) => {
+    setSelectedPlatforms((prev) => {
+      const next = new Set(prev);
+      if (next.has(platform)) next.delete(platform);
+      else next.add(platform);
+      setSelectedAccounts((accountPrev) => {
+        const accountNext = new Set(accountPrev);
+        for (const account of accounts) {
+          if (account.platform !== platform) continue;
+          if (next.has(platform) && IMPORTABLE_PLATFORMS.has(platform)) accountNext.add(account.id);
+          else accountNext.delete(account.id);
+        }
+        return accountNext;
+      });
+      return next;
+    });
+  };
+
+  const toggleAccount = (id: number) => {
+    setSelectedAccounts((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
+
+  const run = async (dryRun: boolean) => {
+    setBusy(dryRun ? "preview" : "import");
+    try {
+      const payload: Record<string, any> = {
+        dry_run: dryRun,
+        limit_per_account: limit,
+        platforms: Array.from(selectedPlatforms),
+        social_account_ids: Array.from(selectedAccounts),
+      };
+      if (activeProfile) payload.profile_id = activeProfile.id;
+      const res = await fetch(appURL("/imports/run", projectId), {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      const data = await res.json() as ImportRunResponse;
+      setResult(data);
+      if (dryRun) {
+        setStatus(`Import preview: ${data.accounts.length} account${data.accounts.length !== 1 ? "s" : ""}.`);
+      } else {
+        setStatus(`Imported ${data.imported}; skipped ${data.skipped_existing}; failed ${data.failed}.`);
+        onImported();
+      }
+    } catch (e) {
+      setStatus("Import failed: " + (e as Error).message);
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const selectableCount = selectedAccounts.size;
+
+  return (
+    <div
+      className="fixed inset-0 z-50 grid place-items-center bg-black/60"
+      onClick={(e) => { if (e.target === e.currentTarget && !busy) onClose(); }}
+    >
+      <div className="bg-bg-card border border-border rounded-lg shadow-lg w-[min(760px,94vw)] max-h-[86vh] flex flex-col">
+        <div className="flex items-center justify-between px-4 py-3 border-b border-border">
+          <div>
+            <div className="text-text font-bold">Import history</div>
+            <div className="text-text-dim text-xs">
+              {activeProfile ? `Profile: ${activeProfile.name}` : "Scope: all profiles in this project"}
+            </div>
+          </div>
+          <button onClick={onClose} disabled={!!busy} className="text-text-muted hover:text-text text-lg leading-none disabled:opacity-50">×</button>
+        </div>
+
+        <div className="flex-1 overflow-y-auto p-4 flex flex-col gap-4">
+          <div className="grid grid-cols-1 md:grid-cols-[180px_1fr] gap-4">
+            <div className="flex flex-col gap-2">
+              <label className="text-xs uppercase tracking-wide text-text-dim">Depth</label>
+              <select
+                value={limit}
+                onChange={(e) => setLimit(Number(e.target.value))}
+                className="bg-bg-input border border-border rounded px-2 py-1.5 text-sm"
+              >
+                <option value={25}>Last 25 / account</option>
+                <option value={100}>Last 100 / account</option>
+                <option value={200}>Last 200 / account</option>
+              </select>
+            </div>
+            <div className="flex flex-col gap-2">
+              <label className="text-xs uppercase tracking-wide text-text-dim">Networks</label>
+              <div className="flex flex-wrap gap-2">
+                {allPlatforms.map((platform) => {
+                  const supported = IMPORTABLE_PLATFORMS.has(platform);
+                  return (
+                    <button
+                      key={platform}
+                      type="button"
+                      disabled={!supported}
+                      onClick={() => togglePlatform(platform)}
+                      className={
+                        "px-2 py-1 text-xs rounded border " +
+                        (!supported
+                          ? "border-border text-text-dim opacity-50 cursor-not-allowed"
+                          : selectedPlatforms.has(platform)
+                            ? "border-accent text-accent"
+                            : "border-border text-text-dim hover:text-text")
+                      }
+                      title={supported ? platform : "Import not wired for this platform yet"}
+                    >
+                      {platform}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          </div>
+
+          <div className="flex flex-col gap-2">
+            <label className="text-xs uppercase tracking-wide text-text-dim">Accounts</label>
+            {accounts.length === 0 ? (
+              <div className="text-text-dim text-sm py-6 text-center">No accounts in this scope.</div>
+            ) : (
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                {accounts.map((account) => {
+                  const supported = IMPORTABLE_PLATFORMS.has(account.platform);
+                  const checked = selectedAccounts.has(account.id);
+                  return (
+                    <label
+                      key={account.id}
+                      className={
+                        "flex items-center gap-3 border border-border rounded px-3 py-2 " +
+                        (supported ? "cursor-pointer" : "opacity-50")
+                      }
+                    >
+                      <input
+                        type="checkbox"
+                        checked={checked}
+                        disabled={!supported}
+                        onChange={() => toggleAccount(account.id)}
+                        className="accent-accent"
+                      />
+                      {account.avatar_url ? (
+                        <img src={account.avatar_url} alt="" className="w-7 h-7 rounded-full" />
+                      ) : (
+                        <div className="w-7 h-7 rounded-full bg-bg-input" />
+                      )}
+                      <div className="min-w-0">
+                        <div className="text-text text-sm truncate">{account.display_name}</div>
+                        <div className="text-text-dim text-xs">{account.platform}</div>
+                      </div>
+                      {!supported && <span className="ml-auto text-text-dim text-xs">unsupported</span>}
+                    </label>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+
+          {result && (
+            <div className="border border-border rounded">
+              <div className="px-3 py-2 border-b border-border text-xs text-text-dim">
+                {result.dry_run
+                  ? `${result.accounts.filter((a) => a.status === "ready").length} ready · ${result.unsupported} unsupported`
+                  : `${result.imported} imported · ${result.skipped_existing} skipped · ${result.failed} failed`}
+              </div>
+              <div className="max-h-52 overflow-y-auto divide-y divide-border">
+                {result.accounts.map((account) => (
+                  <div key={account.account_id} className="px-3 py-2 flex items-center gap-3 text-sm">
+                    <div className="flex-1 min-w-0">
+                      <div className="text-text truncate">{account.display_name}</div>
+                      <div className="text-text-dim text-xs">{account.platform}</div>
+                    </div>
+                    <div className="text-xs text-text-dim">
+                      {account.status === "ready" && "ready"}
+                      {account.status === "ok" && `${account.imported || 0} imported · ${account.skipped_existing || 0} skipped`}
+                      {account.status === "unsupported" && (account.reason || "unsupported")}
+                      {account.status === "failed" && (account.error || "failed")}
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          )}
+        </div>
+
+        <div className="flex items-center justify-between gap-3 px-4 py-3 border-t border-border">
+          <div className="text-xs text-text-dim">
+            {selectableCount} account{selectableCount !== 1 ? "s" : ""} selected
+          </div>
+          <div className="flex items-center gap-2">
+            <button
+              onClick={onClose}
+              disabled={!!busy}
+              className="px-3 py-1.5 text-sm text-text-muted disabled:opacity-50"
+            >
+              Close
+            </button>
+            <button
+              onClick={() => run(true)}
+              disabled={!!busy || selectableCount === 0}
+              className="px-3 py-1.5 text-sm border border-border rounded hover:bg-bg disabled:opacity-50"
+            >
+              {busy === "preview" ? "Previewing…" : "Preview"}
+            </button>
+            <button
+              onClick={() => run(false)}
+              disabled={!!busy || selectableCount === 0}
+              className="px-4 py-1.5 text-sm bg-accent text-bg rounded font-bold disabled:opacity-50"
+            >
+              {busy === "import" ? "Importing…" : "Import"}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+interface ProviderImportResponse {
+  status: string;
+  provider: string;
+  imported: number;
+  skipped_existing: number;
+  failed: number;
+  accounts: Array<{
+    id?: number;
+    provider_account_id: string;
+    provider_profile_id?: string;
+    platform: string;
+    display_name: string;
+    status: string;
+    reason?: string;
+  }>;
+  error?: string;
+}
+
+function ProviderImportDialog({
+  activeProfile, projectId, onClose, onImported, setStatus,
+}: {
+  activeProfile: Profile | null;
+  projectId?: string | null;
+  onClose: () => void;
+  onImported: () => void;
+  setStatus: (s: string) => void;
+}) {
+  const [providerProfileId, setProviderProfileId] = useState("");
+  const [platforms, setPlatforms] = useState("");
+  const [dryRun, setDryRun] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [result, setResult] = useState<ProviderImportResponse | null>(null);
+  const run = async (preview: boolean) => {
+    setBusy(true);
+    setDryRun(preview);
+    setStatus(preview ? "Previewing provider accounts…" : "Importing provider accounts…");
+    try {
+      const body: Record<string, unknown> = {
+        provider: "zernio",
+        dry_run: preview,
+      };
+      if (activeProfile?.id) body.profile_id = activeProfile.id;
+      if (providerProfileId.trim()) body.provider_profile_id = providerProfileId.trim();
+      const platformList = platforms.split(",").map((s) => s.trim().toLowerCase()).filter(Boolean);
+      if (platformList.length) body.platforms = platformList;
+      const res = await fetch(appURL("/provider-accounts/import", projectId), {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      const data = await res.json() as ProviderImportResponse;
+      setResult(data);
+      if (data.status !== "ok") {
+        setStatus("Provider import failed: " + (data.error || "unknown error"));
+        return;
+      }
+      if (preview) {
+        setStatus(`Provider preview: ${data.accounts.length} account${data.accounts.length !== 1 ? "s" : ""}.`);
+      } else {
+        setStatus(`Imported ${data.imported}; skipped ${data.skipped_existing}; failed ${data.failed}.`);
+        onImported();
+      }
+    } catch (e) {
+      setStatus("Provider import failed: " + (e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+  return (
+    <div className="fixed inset-0 bg-black/60 grid place-items-center z-50" onClick={onClose}>
+      <div
+        className="bg-bg-card border border-border rounded p-4 w-[640px] max-w-[92vw] max-h-[86vh] flex flex-col"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="flex items-center justify-between mb-3">
+          <div>
+            <div className="text-text font-medium">Import provider accounts</div>
+            <div className="text-text-dim text-xs">Zernio accounts become normal Social accounts in this profile.</div>
+          </div>
+          <button onClick={onClose} className="text-text-muted hover:text-text">×</button>
+        </div>
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mb-3">
+          <label className="flex flex-col gap-1">
+            <span className="text-xs text-text-dim uppercase">Zernio profile ID</span>
+            <input
+              value={providerProfileId}
+              onChange={(e) => setProviderProfileId(e.target.value)}
+              placeholder="optional"
+              className="bg-bg-input border border-border rounded px-3 py-2 text-sm text-text"
+            />
+          </label>
+          <label className="flex flex-col gap-1">
+            <span className="text-xs text-text-dim uppercase">Platforms</span>
+            <input
+              value={platforms}
+              onChange={(e) => setPlatforms(e.target.value)}
+              placeholder="optional, e.g. linkedin,twitter"
+              className="bg-bg-input border border-border rounded px-3 py-2 text-sm text-text"
+            />
+          </label>
+        </div>
+        <div className="border border-border rounded overflow-hidden flex-1 min-h-[180px] overflow-y-auto">
+          {!result ? (
+            <div className="p-6 text-sm text-text-muted text-center">
+              Preview first to see which Zernio accounts will be imported.
+            </div>
+          ) : result.accounts.length === 0 ? (
+            <div className="p-6 text-sm text-text-muted text-center">
+              No provider accounts matched.
+            </div>
+          ) : (
+            result.accounts.map((a) => (
+              <div key={`${a.provider_account_id}-${a.platform}`} className="px-3 py-2 border-b border-border last:border-b-0 flex items-center justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="text-sm text-text truncate">{a.display_name || a.provider_account_id}</div>
+                  <div className="text-xs text-text-dim truncate">
+                    {a.platform} · {a.provider_account_id}
+                  </div>
+                </div>
+                <div className={
+                  "text-xs " +
+                  (a.status === "ok" ? "text-success" : a.status === "failed" ? "text-error" : "text-text-dim")
+                }>
+                  {a.status}
+                </div>
+              </div>
+            ))
+          )}
+        </div>
+        <div className="flex items-center justify-between gap-3 mt-4">
+          <div className="text-xs text-text-dim">
+            {activeProfile ? `Target profile: ${activeProfile.name}` : "Target profile: default"}
+            {dryRun ? " · preview mode" : ""}
+          </div>
+          <div className="flex items-center gap-2">
+            <button onClick={onClose} disabled={busy} className="px-3 py-1.5 text-sm text-text-muted disabled:opacity-50">
+              Close
+            </button>
+            <button
+              onClick={() => run(true)}
+              disabled={busy}
+              className="px-3 py-1.5 text-sm border border-border rounded hover:bg-bg disabled:opacity-50"
+            >
+              {busy && dryRun ? "Previewing…" : "Preview"}
+            </button>
+            <button
+              onClick={() => run(false)}
+              disabled={busy}
+              className="px-4 py-1.5 text-sm bg-accent text-bg rounded font-bold disabled:opacity-50"
+            >
+              {busy && !dryRun ? "Importing…" : "Import"}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
 function AccountCard({
-  account, onChange, setStatus, projectId,
-}: { account: SocialAccount; onChange: () => void; setStatus: (s: string) => void; projectId?: string | null }) {
+  account, onChange, setStatus,
+}: { account: SocialAccount; onChange: () => void; setStatus: (s: string) => void }) {
   const [confirming, setConfirming] = useState(false);
   const [importing, setImporting] = useState(false);
   const [checking, setChecking] = useState(false);
-  const [reauthing, setReauthing] = useState(false);
   const doRemove = async () => {
     try {
-      const res = await fetch(socialURL(`/accounts/${account.id}`, projectId), { method: "DELETE", credentials: "same-origin" });
-      if (!res.ok) throw new Error(await res.text());
+      await fetch(appURL(`/accounts/${account.id}`), { method: "DELETE", credentials: "same-origin" });
       setStatus("Disconnected.");
       onChange();
     } catch (e) {
       setStatus("Disconnect failed: " + (e as Error).message);
     }
   };
-  const doHardRemove = async () => {
-    try {
-      const res = await fetch(socialURL(`/accounts/${account.id}`, projectId, {
-        hard_delete: "true",
-        delete_posts: "true",
-      }), { method: "DELETE", credentials: "same-origin" });
-      if (!res.ok) throw new Error(await res.text());
-      const data = await res.json() as {
-        posts_deleted?: number;
-        post_targets_deleted?: number;
-      };
-      setStatus(`Hard deleted locally: ${data.posts_deleted || 0} post${data.posts_deleted === 1 ? "" : "s"}, ${data.post_targets_deleted || 0} target${data.post_targets_deleted === 1 ? "" : "s"}.`);
-      onChange();
-    } catch (e) {
-      setStatus("Hard delete failed: " + (e as Error).message);
-    }
-  };
-  const importSupported = isImportablePlatform(account.platform);
+  const provider = account.provider_slug || "native";
+  const importSupported = provider === "zernio" || IMPORTABLE_PLATFORMS.has(account.platform);
   const doImport = async () => {
     setImporting(true);
     setStatus(`Importing recent posts from ${account.display_name}…`);
     try {
-      const res = await fetch(socialURL(`/accounts/${account.id}/import`, projectId, { limit: 25 }), {
+      const res = await fetch(appURL(`/accounts/${account.id}/import?limit=25`), {
         method: "POST",
         credentials: "same-origin",
       });
@@ -1046,7 +1428,7 @@ function AccountCard({
     setChecking(true);
     setStatus(`Checking ${account.display_name}…`);
     try {
-      const res = await fetch(socialURL(`/accounts/${account.id}/check`, projectId), {
+      const res = await fetch(appURL(`/accounts/${account.id}/check`), {
         method: "POST",
         credentials: "same-origin",
       });
@@ -1069,56 +1451,6 @@ function AccountCard({
       setChecking(false);
     }
   };
-  const doReauth = () => {
-    if (!account.connection_id) {
-      setStatus("Reconnect failed: account has no linked connection.");
-      return;
-    }
-    const popup = window.open("about:blank", `social_reauth_${account.id}`, "width=600,height=700");
-    if (!popup) {
-      setStatus("Popup blocked. Allow pop-ups for this site and try again.");
-      return;
-    }
-    setReauthing(true);
-    setStatus(`Starting reconnect for ${account.display_name}…`);
-    (async () => {
-      const fail = (msg: string) => {
-        setStatus(msg);
-        setReauthing(false);
-        try { popup.close(); } catch {}
-      };
-      try {
-        const res = await fetch(`/api/connections/${account.connection_id}/oauth/reauth`, {
-          method: "POST",
-          credentials: "same-origin",
-          headers: { "Content-Type": "application/json" },
-          body: "{}",
-        });
-        if (!res.ok) {
-          fail(`Reconnect failed (HTTP ${res.status}): ${await res.text()}`);
-          return;
-        }
-        const data = await res.json() as { redirect_url?: string };
-        if (!data.redirect_url) {
-          fail("Reconnect failed: server did not return an OAuth URL.");
-          return;
-        }
-        popup.location.href = data.redirect_url;
-        waitForOAuthPopupResult(popup, async (ok) => {
-          if (!ok) {
-            setStatus("Reconnect did not complete.");
-            setReauthing(false);
-            return;
-          }
-          setStatus(`Reconnect complete. Refreshing ${account.display_name}…`);
-          setReauthing(false);
-          await doCheck();
-        });
-      } catch (e) {
-        fail("Reconnect failed: " + (e as Error).message);
-      }
-    })();
-  };
   return (
     <>
       <div className="border border-border rounded p-3 flex items-center gap-3">
@@ -1133,6 +1465,11 @@ function AccountCard({
           <div className="text-text text-sm truncate">{account.display_name}</div>
           <div className="flex items-center gap-2 text-xs">
             <span className="text-text-dim">{account.platform}</span>
+            {provider !== "native" && (
+              <span className="text-accent" title={`Backed by ${provider}`}>
+                {provider}
+              </span>
+            )}
             <HealthPill account={account} />
           </div>
         </div>
@@ -1143,14 +1480,6 @@ function AccountCard({
           title="Check whether this account still works"
         >
           {checking ? "Checking…" : "Check"}
-        </button>
-        <button
-          onClick={doReauth}
-          disabled={reauthing || checking}
-          className="text-xs text-text-muted hover:text-text px-2 py-1 border border-border rounded disabled:opacity-50"
-          title="Reconnect OAuth and update the linked tokens for this account"
-        >
-          {reauthing ? "Reconnecting…" : "Reconnect"}
         </button>
         {importSupported && (
           <button
@@ -1173,22 +1502,17 @@ function AccountCard({
       {confirming && (
         <ConfirmDialog
           title={`Disconnect ${account.display_name}?`}
-	          body={
-	            <>
-	              Disconnect hides this account from posting while preserving local post history.
-	              Hard delete removes this account and its local history only; posts already published
-	              on social networks are not deleted.
-	            </>
-	          }
-	          confirmLabel="Disconnect"
-	          secondaryDangerLabel="Hard delete local history"
-	          onSecondaryDanger={async () => {
-	            await doHardRemove();
-	            setConfirming(false);
-	          }}
-	          onClose={() => setConfirming(false)}
-	          onConfirm={async () => {
-	            await doRemove();
+          body={
+            <>
+              The OAuth grant stays valid upstream — you can re-add this {account.platform} account
+              later without going through the auth dance again. Scheduled posts targeting this
+              account will fail to publish until reconnected.
+            </>
+          }
+          confirmLabel="Disconnect"
+          onClose={() => setConfirming(false)}
+          onConfirm={async () => {
+            await doRemove();
             setConfirming(false);
           }}
         />
@@ -1213,14 +1537,12 @@ function HealthPill({ account }: { account: SocialAccount }) {
 }
 
 function AddAccountDialog({
-  platforms, onClose, setStatus, onReuseExisting, projectId, activeProfileId,
+  platforms, onClose, setStatus, onReuseExisting,
 }: {
   platforms: PlatformInfo[];
   onClose: () => void;
   setStatus: (s: string) => void;
   onReuseExisting: (pendingId: number, connectionId: number) => void;
-  projectId?: string | null;
-  activeProfileId?: number | null;
 }) {
   const [busy, setBusy] = useState<string | null>(null);
   // Inline error inside the modal. The panel-header status used to
@@ -1229,8 +1551,9 @@ function AddAccountDialog({
   // it looked like 'popup flashed and closed for no reason'.
   const [err, setErr] = useState<string>("");
 
-  const start = (p: PlatformInfo) => {
-    if (!p.available) return;
+  const start = (p: PlatformInfo, provider: "native" | "zernio" = "native") => {
+    const canStart = provider === "zernio" ? !!p.zernio_available : p.available;
+    if (!canStart) return;
     setErr("");
     // Reuse-existing path: backend skips OAuth when a connection for
     // this platform already exists. Detect that ahead of opening the
@@ -1253,8 +1576,9 @@ function AddAccountDialog({
       setStatus("Popup blocked. Allow pop-ups for this site and try again.");
       return;
     }
-    setBusy(p.platform);
-    setStatus("Starting OAuth for " + p.display_name + "…");
+    const busyKey = provider === "zernio" ? `${p.platform}:zernio` : p.platform;
+    setBusy(busyKey);
+    setStatus("Starting OAuth for " + p.display_name + (provider === "zernio" ? " via Zernio…" : "…"));
     (async () => {
       const fail = (msg: string) => {
         setErr(msg);
@@ -1263,12 +1587,13 @@ function AddAccountDialog({
         try { popup.close(); } catch {}
       };
       try {
-        const profileId = activeProfileId ?? undefined;
-        const res = await fetch(socialURL("/accounts/start", projectId, { profile_id: profileId }), {
+        const res = await fetch(appURL("/accounts/start"), {
           method: "POST",
           credentials: "same-origin",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ platform: p.platform, profile_id: profileId }),
+          body: JSON.stringify(provider === "zernio"
+            ? { platform: p.platform, provider: "zernio" }
+            : { platform: p.platform }),
         });
         if (!res.ok) {
           fail(`Start failed (HTTP ${res.status}): ${await res.text()}`);
@@ -1335,27 +1660,44 @@ function AddAccountDialog({
         )}
         <div className="flex flex-col gap-1">
           {platforms.map((p) => {
-            const disabled = !p.available || busy === p.platform;
+            const directDisabled = !p.available || !!busy;
+            const zernioDisabled = !p.zernio_available || !!busy;
             return (
-              <button
+              <div
                 key={p.platform}
-                onClick={() => start(p)}
-                disabled={disabled}
-                title={
-                  !p.available
-                    ? `No ${p.display_name} integration installed. Add one in Settings → Integrations to enable this.`
-                    : undefined
-                }
-                className="text-left px-3 py-2 border border-border rounded hover:border-accent text-sm disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:border-border"
+                className="px-3 py-2 border border-border rounded text-sm flex items-center justify-between gap-3"
               >
-                <span className="text-text">{p.display_name}</span>
-                {p.requires_picker && p.available && (
-                  <span className="text-text-dim text-xs ml-2">({pickerKind(p.platform).singular} picker after auth)</span>
-                )}
-                {!p.available && (
-                  <span className="text-text-dim text-xs ml-2">— integration not installed</span>
-                )}
-              </button>
+                <div className="min-w-0">
+                  <div className="text-text truncate">{p.display_name}</div>
+                  <div className="text-text-dim text-xs">
+                    {p.provider_only ? "Provider-backed" : p.requires_picker ? `${pickerKind(p.platform).singular} picker after auth` : "Single account"}
+                  </div>
+                </div>
+                <div className="flex items-center gap-2 shrink-0">
+                  {!p.provider_only && (
+                    <button
+                      onClick={() => start(p)}
+                      disabled={directDisabled}
+                      title={
+                        !p.available
+                          ? `No ${p.display_name} integration installed. Add one in Settings → Integrations to enable this.`
+                          : undefined
+                      }
+                      className="px-2.5 py-1 border border-border rounded text-xs text-text hover:border-accent disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:border-border"
+                    >
+                      Direct
+                    </button>
+                  )}
+                  <button
+                    onClick={() => start(p, "zernio")}
+                    disabled={zernioDisabled}
+                    title={!p.zernio_available ? "Connect Zernio in Settings → Integrations to enable provider-backed accounts." : undefined}
+                    className="px-2.5 py-1 border border-border rounded text-xs text-text hover:border-accent disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:border-border"
+                  >
+                    Zernio
+                  </button>
+                </div>
+              </div>
             );
           })}
         </div>
@@ -1365,8 +1707,8 @@ function AddAccountDialog({
 }
 
 function PagePicker({
-  pendingId, projectId, onClose, setStatus,
-}: { pendingId: number; projectId?: string | null; onClose: () => void; setStatus: (s: string) => void }) {
+  pendingId, onClose, setStatus,
+}: { pendingId: number; onClose: () => void; setStatus: (s: string) => void }) {
   const [pages, setPages] = useState<PageEntry[]>([]);
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState("");
@@ -1375,9 +1717,15 @@ function PagePicker({
   const kind = pickerKind(platform);
 
   useEffect(() => {
-    fetch(socialURL(`/accounts/${pendingId}/pages`, projectId), { credentials: "same-origin" })
+    fetch(appURL(`/accounts/${pendingId}/pages`), { credentials: "same-origin" })
       .then((r) => r.json())
       .then((d) => {
+        if (d?.isError) {
+          const inner = (d.content || []).find((c: any) => c.type === "text")?.text;
+          setStatus(inner || "Account picker failed.");
+          setLoading(false);
+          return;
+        }
         setPages(d.pages || []);
         setPlatform(d.platform || "");
         setLoading(false);
@@ -1386,12 +1734,12 @@ function PagePicker({
         }
       })
       .catch(() => setLoading(false));
-  }, [pendingId, onClose, projectId]);
+  }, [pendingId, onClose]);
 
   const pick = async (page: PageEntry) => {
     setBusyID(page.id);
     try {
-      await fetch(socialURL("/accounts/finalize", projectId), {
+      await fetch(appURL("/accounts/finalize"), {
         method: "POST",
         credentials: "same-origin",
         headers: { "Content-Type": "application/json" },
@@ -1718,12 +2066,11 @@ function ComposeDialog({
   // time keeps the form readable; null = nothing expanded.
   const [expanded, setExpanded] = useState<number | null>(null);
   // Media attached to the post. We upload immediately to the storage app
-  // (so post_create only carries IDs), and keep lightweight preview
-  // URLs for the compose modal. Videos prefer Media thumbnails when
-  // present; otherwise we generate a small poster from metadata/range
-  // loading instead of trying to load the whole file.
-  const [media, setMedia] = useState<ComposeMedia[]>([]);
-  const mediaRef = useRef<ComposeMedia[]>([]);
+  // (so the post_create call only carries IDs, not bytes) and remember the
+  // returned id + a local preview URL. The previewURL is a local
+  // ObjectURL — cheap, but we revoke it on remove + unmount so the
+  // browser doesn't keep the bytes around forever.
+  const [media, setMedia] = useState<{ id: number; name: string; mime: string; previewURL: string }[]>([]);
   const [uploading, setUploading] = useState(false);
   const [showPicker, setShowPicker] = useState(false);
   const fileInputRef = useRef<HTMLInputElement | null>(null);
@@ -1763,47 +2110,13 @@ function ComposeDialog({
     });
   };
 
-  useEffect(() => {
-    mediaRef.current = media;
-  }, [media]);
-
   // Revoke any object URLs we created when the modal closes.
   useEffect(() => {
     return () => {
-      for (const m of mediaRef.current) revokeComposeMedia(m);
+      for (const m of media) URL.revokeObjectURL(m.previewURL);
     };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
-
-  useEffect(() => {
-    const pending = media.filter((m) =>
-      isVideoMime(m.mime, m.name) && !m.posterURL && !m.posterLoading && !m.posterTried
-    );
-    if (pending.length === 0) return;
-    setMedia((prev) => prev.map((m) =>
-      pending.some((p) => p.id === m.id) ? { ...m, posterLoading: true } : m
-    ));
-    for (const item of pending) {
-      buildVideoPoster(item.previewURL).then((posterURL) => {
-        setMedia((prev) => {
-          let found = false;
-          const next = prev.map((m) => {
-            if (m.id !== item.id) return m;
-            found = true;
-            if (m.posterObjectURL && m.posterURL) URL.revokeObjectURL(m.posterURL);
-            return {
-              ...m,
-              posterURL: posterURL || m.posterURL,
-              posterObjectURL: posterURL ? true : m.posterObjectURL,
-              posterLoading: false,
-              posterTried: true,
-            };
-          });
-          if (!found && posterURL) URL.revokeObjectURL(posterURL);
-          return next;
-        });
-      });
-    }
-  }, [media]);
 
   const toggle = (id: number) => {
     setSelected((s) => {
@@ -1819,7 +2132,7 @@ function ComposeDialog({
     if (fileList.length === 0) return;
     setUploading(true);
     try {
-      const uploaded: ComposeMedia[] = [];
+      const uploaded: typeof media = [];
       let i = 0;
       for (const file of fileList) {
         i += 1;
@@ -1839,14 +2152,11 @@ function ComposeDialog({
         if (typeof row.id !== "number") {
           throw new Error("storage didn't return a file id");
         }
-        const previewURL = URL.createObjectURL(file);
         uploaded.push({
           id: row.id,
           name: file.name,
           mime: file.type,
-          previewURL,
-          previewObjectURL: true,
-          posterTried: !isVideoMime(file.type, file.name),
+          previewURL: URL.createObjectURL(file),
         });
       }
       setMedia((prev) => [...prev, ...uploaded]);
@@ -1862,7 +2172,7 @@ function ComposeDialog({
   const removeMedia = (id: number) => {
     setMedia((prev) => {
       const dropped = prev.find((m) => m.id === id);
-      if (dropped) revokeComposeMedia(dropped);
+      if (dropped) URL.revokeObjectURL(dropped.previewURL);
       return prev.filter((m) => m.id !== id);
     });
   };
@@ -1871,23 +2181,17 @@ function ComposeDialog({
   // upload flow — the only difference is previewURL points at storage's
   // /content endpoint instead of a local ObjectURL. Skip ids already in
   // media so users don't double-attach the same file.
-  const addFromStorage = (picked: { id: number; name: string; content_type: string; preview_url?: string }[]) => {
+  const addFromStorage = (picked: { id: number; name: string; content_type: string }[]) => {
     setMedia((prev) => {
       const existing = new Set(prev.map((m) => m.id));
       const adds = picked
         .filter((f) => !existing.has(f.id))
-        .map((f) => {
-          const mime = f.content_type || "";
-          const isVideo = isVideoMime(mime, f.name);
-          return {
-            id: f.id,
-            name: f.name,
-            mime,
-            previewURL: storageURL(`/files/${f.id}/content`, projectId),
-            posterURL: isVideo ? f.preview_url : undefined,
-            posterTried: !isVideo || !!f.preview_url,
-          };
-        });
+        .map((f) => ({
+          id: f.id,
+          name: f.name,
+          mime: f.content_type || "",
+          previewURL: storageURL(`/files/${f.id}/content`, projectId),
+        }));
       return [...prev, ...adds];
     });
     setStatus(`Added ${picked.length} file${picked.length !== 1 ? "s" : ""} from storage.`);
@@ -1906,7 +2210,6 @@ function ComposeDialog({
       const anyCustomized = selectedIds.some((id) => isCustomized(id));
       const payload: Record<string, any> = {
         body,
-        _project_id: projectId || undefined,
         schedule_at: scheduleAt || undefined,
         media_storage_ids: media.length > 0 ? media.map((m) => m.id) : undefined,
         media_project_id: media.length > 0 ? projectId : undefined,
@@ -1925,7 +2228,7 @@ function ComposeDialog({
       } else {
         payload.social_account_ids = selectedIds;
       }
-      const res = await fetch(socialURL("/posts", projectId), {
+      const res = await fetch(appURL("/posts", projectId), {
         method: "POST",
         credentials: "same-origin",
         headers: { "Content-Type": "application/json" },
@@ -1938,8 +2241,8 @@ function ComposeDialog({
       setBody("");
       setSelected(new Set());
       setScheduleAt("");
-      for (const m of mediaRef.current) revokeComposeMedia(m);
-      mediaRef.current = [];
+      // Don't revoke the object URLs here — the cleanup effect handles
+      // them on unmount. Just clear the list visually.
       setMedia([]);
       setStatus("Done.");
       onCreated();
@@ -2013,23 +2316,10 @@ function ComposeDialog({
                 <div
                   key={m.id}
                   className="relative w-20 h-20 rounded border border-border overflow-hidden bg-bg-input flex-shrink-0 group"
-                  aria-label={m.name}
+                  title={m.name}
                 >
-                  {isVideoMime(m.mime, m.name) ? (
-                    <>
-                      {m.posterURL ? (
-                        <img src={m.posterURL} alt="" className="w-full h-full object-cover" />
-                      ) : (
-                        <video
-                          src={m.previewURL}
-                          className="w-full h-full object-cover"
-                          muted
-                          playsInline
-                          preload="metadata"
-                        />
-                      )}
-                      <PlayBadge />
-                    </>
+                  {m.mime.startsWith("video/") ? (
+                    <video src={m.previewURL} className="w-full h-full object-cover" muted />
                   ) : (
                     <img src={m.previewURL} alt={m.name} className="w-full h-full object-cover" />
                   )}
@@ -2177,13 +2467,11 @@ interface StorageFile {
   content_type: string;
   folder?: string;
   size_bytes?: number;
-  preview_url?: string;
 }
 
 interface MediaDerivation {
   kind: "thumbnail" | "waveform" | "cover" | "keyframe" | string;
   storage_file_id: string;
-  position_ms?: number;
   status: "ok" | "failed" | "stale" | string;
 }
 
@@ -2201,18 +2489,6 @@ interface MediaLibraryRow {
   description?: string;
   audience_rating?: "unrated" | "general" | "mature" | "adult" | "";
   derivations?: MediaDerivation[];
-}
-
-interface ComposeMedia {
-  id: number;
-  name: string;
-  mime: string;
-  previewURL: string;
-  previewObjectURL?: boolean;
-  posterURL?: string;
-  posterObjectURL?: boolean;
-  posterLoading?: boolean;
-  posterTried?: boolean;
 }
 
 type PickerTab = "media" | "storage";
@@ -2249,81 +2525,6 @@ function mediaPreviewURL(row: MediaLibraryRow, projectId?: string | null): strin
 
 function mediaHasThumbnail(row: MediaLibraryRow): boolean {
   return !!row.derivations?.some((d) => d.kind === "thumbnail" && d.status === "ok" && d.storage_file_id);
-}
-
-function isVideoMime(mime: string, name = ""): boolean {
-  return mime.startsWith("video/") || /\.(mp4|m4v|mov|webm|avi|mkv)$/i.test(name);
-}
-
-function revokeComposeMedia(m: ComposeMedia) {
-  if (m.previewObjectURL) URL.revokeObjectURL(m.previewURL);
-  if (m.posterObjectURL && m.posterURL) URL.revokeObjectURL(m.posterURL);
-}
-
-async function buildVideoPoster(src: string): Promise<string | null> {
-  if (typeof document === "undefined") return null;
-  return new Promise((resolve) => {
-    const video = document.createElement("video");
-    let done = false;
-    let timer: number | undefined;
-    const finish = (url: string | null) => {
-      if (done) return;
-      done = true;
-      if (timer != null) window.clearTimeout(timer);
-      video.pause();
-      video.removeAttribute("src");
-      video.load();
-      resolve(url);
-    };
-    const capture = () => {
-      if (!video.videoWidth || !video.videoHeight) {
-        finish(null);
-        return;
-      }
-      const maxSide = 240;
-      const scale = Math.min(1, maxSide / Math.max(video.videoWidth, video.videoHeight));
-      const canvas = document.createElement("canvas");
-      canvas.width = Math.max(1, Math.round(video.videoWidth * scale));
-      canvas.height = Math.max(1, Math.round(video.videoHeight * scale));
-      const ctx = canvas.getContext("2d");
-      if (!ctx) {
-        finish(null);
-        return;
-      }
-      try {
-        ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
-        canvas.toBlob((blob) => {
-          finish(blob ? URL.createObjectURL(blob) : null);
-        }, "image/jpeg", 0.72);
-      } catch {
-        finish(null);
-      }
-    };
-    video.preload = "metadata";
-    video.muted = true;
-    video.playsInline = true;
-    video.addEventListener("error", () => finish(null), { once: true });
-    video.addEventListener("loadedmetadata", () => {
-      const target = Number.isFinite(video.duration) && video.duration > 0.2 ? 0.1 : 0;
-      if (Math.abs(video.currentTime - target) < 0.01) {
-        if (video.readyState >= 2) {
-          capture();
-          return;
-        }
-        video.addEventListener("loadeddata", capture, { once: true });
-        return;
-      }
-      video.addEventListener("seeked", capture, { once: true });
-      try {
-        video.currentTime = target;
-      } catch {
-        video.addEventListener("loadeddata", capture, { once: true });
-      }
-    }, { once: true });
-    timer = window.setTimeout(() => finish(null), 7000);
-    video.src = src;
-    video.load();
-  });
 }
 
 function PlayBadge() {
@@ -2538,7 +2739,6 @@ function StoragePickerDialog({
             name: mediaDisplayName(row),
             content_type: mediaContentType(row),
             folder: row.folder,
-            preview_url: mediaHasThumbnail(row) ? mediaPreviewURL(row, projectId) : undefined,
           } as StorageFile;
         })
         .filter((f): f is StorageFile => !!f);
@@ -2838,341 +3038,6 @@ function StoragePickerDialog({
 
 // --- PostsView ----------------------------------------------------
 
-function InboxView({
-  accounts, projectId, activeProfileId, setStatus,
-}: {
-  accounts: SocialAccount[];
-  projectId?: string | null;
-  activeProfileId: number | null;
-  setStatus: (s: string) => void;
-}) {
-  const [items, setItems] = useState<InboxItem[]>([]);
-  const [selectedID, setSelectedID] = useState<number | null>(null);
-  const [selected, setSelected] = useState<InboxItem | null>(null);
-  const [thread, setThread] = useState<InboxItem[]>([]);
-  const [accountID, setAccountID] = useState<number | "all">("all");
-  const [kind, setKind] = useState<string>("all");
-  const [status, setLocalStatus] = useState<string>("all");
-  const [loading, setLoading] = useState(true);
-  const [syncing, setSyncing] = useState(false);
-  const [replyBody, setReplyBody] = useState("");
-  const [syncResults, setSyncResults] = useState<InboxSyncResult[]>([]);
-  const [search, setSearch] = useState("");
-
-  const load = useCallback(async () => {
-    setLoading(true);
-    try {
-      const extra: Record<string, string | number | undefined> = {
-        profile_id: activeProfileId ?? undefined,
-        account_id: accountID === "all" ? undefined : accountID,
-        status: status === "all" ? undefined : status,
-        limit: 100,
-      };
-      const res = await fetch(socialURL("/inbox", projectId, extra), { credentials: "same-origin" });
-      if (!res.ok) throw new Error(await res.text());
-      const data = await res.json();
-      const next = data.items || [];
-      setItems(next);
-      if (!selectedID && next.length > 0) setSelectedID(next[0].id);
-    } catch (e) {
-      setStatus("Inbox load failed: " + (e as Error).message);
-    } finally {
-      setLoading(false);
-    }
-  }, [accountID, activeProfileId, projectId, selectedID, setStatus, status]);
-
-  const loadSelected = useCallback(async (id: number | null) => {
-    if (!id) {
-      setSelected(null);
-      setThread([]);
-      return;
-    }
-    try {
-      const res = await fetch(socialURL(`/inbox/${id}`, projectId), { credentials: "same-origin" });
-      if (!res.ok) throw new Error(await res.text());
-      const data = await res.json();
-      setSelected(data.item || null);
-      setThread(data.thread && data.thread.length > 0 ? data.thread : (data.item ? [data.item] : []));
-    } catch (e) {
-      setStatus("Inbox item failed: " + (e as Error).message);
-    }
-  }, [projectId, setStatus]);
-
-  const sync = useCallback(async (initial = false) => {
-    setSyncing(true);
-    try {
-      const extra: Record<string, string | number | undefined> = {
-        profile_id: activeProfileId ?? undefined,
-        account_id: accountID === "all" ? undefined : accountID,
-        limit: initial ? 100 : 50,
-      };
-      const res = await fetch(socialURL("/inbox/sync", projectId, extra), {
-        method: "POST",
-        credentials: "same-origin",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ initial }),
-      });
-      if (!res.ok) throw new Error(await res.text());
-      const data = await res.json();
-      setSyncResults(data.results || []);
-      await load();
-      setStatus("Inbox synced.");
-    } catch (e) {
-      setStatus("Inbox sync failed: " + (e as Error).message);
-    } finally {
-      setSyncing(false);
-    }
-  }, [accountID, activeProfileId, load, projectId, setStatus]);
-
-  useEffect(() => { load(); }, [load]);
-  useEffect(() => { loadSelected(selectedID); }, [loadSelected, selectedID]);
-  useEffect(() => {
-    if (items.length === 0 && accounts.length > 0 && !syncing) {
-      sync(true);
-    }
-  // run only when the current filter first resolves empty
-  // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [items.length, accounts.length]);
-
-  useAppEvents("social", projectId, (ev) => {
-    if (ev.topic === "inbox.synced" || ev.topic === "inbox.item.created") load();
-  });
-
-  const act = async (action: string, body?: Record<string, unknown>) => {
-    if (!selected) return;
-    try {
-      const actionBody = { ...(body || {}) };
-      if ((action === "read" || action === "unread" || action === "archive") && thread.length > 0) {
-        actionBody.ids = thread.map((item) => item.id);
-      }
-      const res = await fetch(socialURL(`/inbox/${selected.id}/${action}`, projectId), {
-        method: "POST",
-        credentials: "same-origin",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(actionBody),
-      });
-      if (!res.ok) throw new Error(await res.text());
-      const data = await res.json().catch(() => ({}));
-      if (data.status === "failed") throw new Error(data.error || "failed");
-      if (data.status === "unsupported") {
-        setStatus(data.reason || "Unsupported action.");
-      } else {
-        setStatus("Inbox updated.");
-      }
-      setReplyBody("");
-      await load();
-      await loadSelected(selected.id);
-    } catch (e) {
-      setStatus("Inbox action failed: " + (e as Error).message);
-    }
-  };
-
-  const accountName = (id: number) => accounts.find((a) => a.id === id)?.display_name || `#${id}`;
-  const accountFor = (id: number) => accounts.find((a) => a.id === id);
-  const inboxAuthor = (item: InboxItem) => {
-    if (item.author_name) return item.author_name;
-    if (item.author_handle) return item.author_handle;
-    if (item.direction === "outbound") return "You";
-    if (item.platform === "facebook" && item.kind === "comment") return "Facebook commenter";
-    return "Author unavailable";
-  };
-  const itemAvatar = (item: InboxItem) => item.author_avatar_url || (item.direction === "outbound" ? accountFor(item.social_account_id)?.avatar_url : "");
-  const initials = (label: string) => {
-    const words = label.trim().split(/\s+/).filter(Boolean);
-    if (words.length === 0) return "?";
-    return (words[0][0] + (words[1]?.[0] || "")).toUpperCase();
-  };
-  const kindLabel = (k: string) => k === "dm" ? "Message" : k.charAt(0).toUpperCase() + k.slice(1);
-  const counts = items.reduce((acc, item) => {
-    acc.all++;
-    acc[item.kind] = (acc[item.kind] || 0) + 1;
-    return acc;
-  }, { all: 0 } as Record<string, number>);
-  const filteredItems = items.filter((item) => {
-    if (kind !== "all" && item.kind !== kind) return false;
-    const q = search.trim().toLowerCase();
-    if (!q) return true;
-    return [
-      inboxAuthor(item),
-      item.body || "",
-      item.platform,
-      item.kind,
-      accountName(item.social_account_id),
-    ].join(" ").toLowerCase().includes(q);
-  });
-  const statusText = selected?.status === "unread" ? "Unread" : selected?.status ? selected.status.charAt(0).toUpperCase() + selected.status.slice(1) : "";
-  const Avatar = ({ item, size = "md" }: { item: InboxItem; size?: "sm" | "md" | "lg" }) => {
-    const label = inboxAuthor(item);
-    const src = itemAvatar(item);
-    const cls = size === "lg" ? "w-10 h-10 text-sm" : size === "sm" ? "w-7 h-7 text-[10px]" : "w-9 h-9 text-xs";
-    if (src) {
-      return <img src={src} alt="" className={`${cls} rounded-full object-cover flex-shrink-0 border border-border`} />;
-    }
-    return (
-      <div className={`${cls} rounded-full flex-shrink-0 grid place-items-center border border-border bg-bg-input text-text-dim font-bold`}>
-        {initials(label)}
-      </div>
-    );
-  };
-
-  return (
-    <div className="h-full min-h-0 flex flex-col bg-bg">
-      <div className="border-b border-border px-4 py-3 flex flex-wrap items-center gap-2">
-        <button onClick={() => setKind("all")} className={"px-3 py-1.5 rounded text-sm border " + (kind === "all" ? "bg-accent/15 border-accent text-accent" : "bg-bg-card border-border text-text-dim hover:text-text")}>
-          All <span className="ml-1 text-xs">{counts.all || 0}</span>
-        </button>
-        <button onClick={() => setKind("dm")} className={"px-3 py-1.5 rounded text-sm border " + (kind === "dm" ? "bg-accent/15 border-accent text-accent" : "bg-bg-card border-border text-text-dim hover:text-text")}>
-          Messages <span className="ml-1 text-xs">{counts.dm || 0}</span>
-        </button>
-        <button onClick={() => setKind("comment")} className={"px-3 py-1.5 rounded text-sm border " + (kind === "comment" ? "bg-accent/15 border-accent text-accent" : "bg-bg-card border-border text-text-dim hover:text-text")}>
-          Comments <span className="ml-1 text-xs">{counts.comment || 0}</span>
-        </button>
-        <button onClick={() => setKind("mention")} className={"px-3 py-1.5 rounded text-sm border " + (kind === "mention" ? "bg-accent/15 border-accent text-accent" : "bg-bg-card border-border text-text-dim hover:text-text")}>
-          Mentions <span className="ml-1 text-xs">{counts.mention || 0}</span>
-        </button>
-        <button onClick={() => setKind("review")} className={"px-3 py-1.5 rounded text-sm border " + (kind === "review" ? "bg-accent/15 border-accent text-accent" : "bg-bg-card border-border text-text-dim hover:text-text")}>
-          Reviews <span className="ml-1 text-xs">{counts.review || 0}</span>
-        </button>
-        <select value={status} onChange={(e) => setLocalStatus(e.target.value)} className="ml-auto bg-bg-input border border-border rounded px-2 py-1.5 text-sm text-text">
-          <option value="all">Open</option>
-          <option value="unread">Unread</option>
-          <option value="read">Read</option>
-          <option value="replied">Replied</option>
-          <option value="hidden">Hidden</option>
-          <option value="archived">Archived</option>
-        </select>
-        <button onClick={() => sync(false)} disabled={syncing} className="px-3 py-1.5 text-sm border border-border rounded text-accent disabled:opacity-50">
-          {syncing ? "Syncing..." : "Refresh"}
-        </button>
-      </div>
-      {syncResults.some((r) => r.status === "failed" || (r.warnings && r.warnings.length > 0)) && (
-        <div className="px-4 py-2 border-b border-border text-xs text-text-dim">
-          {syncResults.map((r) => (
-            <div key={r.social_account_id}>
-              {r.display_name || accountName(r.social_account_id)}: {r.status === "failed" ? r.error : (r.warnings || []).join("; ")}
-            </div>
-          ))}
-        </div>
-      )}
-      <div className="flex-1 min-h-0 overflow-hidden flex">
-        <aside
-          className="border-r border-border min-h-0 overflow-hidden flex flex-col bg-bg-card/20 shrink-0"
-          style={{ width: "42%", minWidth: 300, maxWidth: 460 }}
-        >
-          <div className="p-3 border-b border-border flex flex-col gap-2">
-            <input
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-              placeholder="Search inbox..."
-              className="w-full bg-bg-input border border-border rounded px-3 py-2 text-sm text-text"
-            />
-            <select
-              value={accountID}
-              onChange={(e) => setAccountID(e.target.value === "all" ? "all" : Number(e.target.value))}
-              className="bg-bg-input border border-border rounded px-2 py-1.5 text-sm text-text"
-            >
-              <option value="all">All accounts</option>
-              {accounts.map((a) => (
-                <option key={a.id} value={a.id}>{a.display_name} · {a.platform}</option>
-              ))}
-            </select>
-          </div>
-          <div className="flex-1 min-h-0 overflow-y-auto">
-          {loading ? (
-            <div className="p-6 text-sm text-text-dim">Loading...</div>
-          ) : filteredItems.length === 0 ? (
-            <div className="p-6 text-sm text-text-dim">No inbox items yet.</div>
-          ) : filteredItems.map((it) => (
-            <button
-              key={it.id}
-              onClick={() => setSelectedID(it.id)}
-              className={
-                "w-full text-left px-3 py-3 border-b border-border hover:bg-bg-card transition-colors " +
-                (selectedID === it.id ? "bg-bg-card border-l-2 border-l-accent" : "border-l-2 border-l-transparent")
-              }
-            >
-              <div className="flex items-start gap-3">
-                <Avatar item={it} />
-                <div className="min-w-0 flex-1">
-                  <div className="flex items-center gap-2 min-w-0">
-                    <div className="text-sm text-text truncate font-medium">{inboxAuthor(it)}</div>
-                    {it.status === "unread" && <span className="w-2 h-2 rounded-full bg-accent flex-shrink-0" />}
-                    <div className="ml-auto text-[11px] text-text-muted flex-shrink-0">{new Date(it.occurred_at).toLocaleDateString()}</div>
-                  </div>
-                  <div className="mt-1 flex items-center gap-2">
-                    <span className="text-[10px] uppercase text-accent">{kindLabel(it.kind)}</span>
-                    <span className="text-[10px] uppercase text-text-dim">{it.platform}</span>
-                    <span className="text-[10px] text-text-muted truncate">{accountName(it.social_account_id)}</span>
-                  </div>
-                  <div className="text-xs text-text-dim truncate mt-1">{it.body || "(no text)"}</div>
-                </div>
-              </div>
-            </button>
-          ))}
-          </div>
-        </aside>
-        <main className="min-w-0 min-h-0 overflow-hidden flex flex-col bg-bg flex-1">
-          {!selected ? (
-            <div className="m-auto text-sm text-text-dim">Select an item</div>
-          ) : (
-            <>
-              <div className="border-b border-border px-5 py-4 flex items-center gap-3 bg-bg-card/30">
-                <Avatar item={selected} size="lg" />
-                <div className="min-w-0">
-                  <div className="text-text font-medium truncate">{inboxAuthor(selected)}</div>
-                  <div className="text-xs text-text-dim truncate">
-                    {accountName(selected.social_account_id)} · {selected.platform} · {kindLabel(selected.kind)} {statusText && `· ${statusText}`}
-                  </div>
-                </div>
-                <div className="ml-auto flex flex-wrap justify-end items-center gap-2">
-                  {selected.permalink && (
-                    <a href={selected.permalink} target="_blank" rel="noopener" className="px-3 py-1.5 text-sm border border-border rounded text-accent hover:bg-bg-card">Open</a>
-                  )}
-                  <button onClick={() => act(selected.status === "unread" ? "read" : "unread")} className="px-3 py-1.5 text-sm border border-border rounded text-text-dim hover:text-text">{selected.status === "unread" ? "Read" : "Unread"}</button>
-                  <button onClick={() => act("archive")} className="px-3 py-1.5 text-sm border border-border rounded text-text-dim hover:text-text">Archive</button>
-                </div>
-              </div>
-              <div className="flex-1 min-h-0 overflow-y-auto p-5 flex flex-col gap-3">
-                {thread.map((m) => (
-                  <div key={m.id} className={"flex gap-2 " + (m.direction === "outbound" ? "justify-end" : "justify-start")}>
-                    {m.direction !== "outbound" && <Avatar item={m} size="sm" />}
-                    <div className={"max-w-[78%] rounded px-3 py-2 border " + (m.direction === "outbound" ? "bg-accent/15 border-accent/40 text-text" : "bg-bg-card border-border text-text")}>
-                      <div className="text-xs text-text-dim mb-1">{inboxAuthor(m)}</div>
-                      <div className="text-sm whitespace-pre-wrap">{m.body || "(no text)"}</div>
-                      <div className="text-[11px] text-text-muted mt-2">{new Date(m.occurred_at).toLocaleString()}</div>
-                    </div>
-                  </div>
-                ))}
-              </div>
-              <div className="border-t border-border p-4 flex flex-col gap-2 bg-bg-card/20">
-                <textarea
-                  value={replyBody}
-                  onChange={(e) => setReplyBody(e.target.value)}
-                  placeholder="Reply..."
-                  className="w-full min-h-[88px] bg-bg-input border border-border rounded px-3 py-2 text-sm text-text resize-y"
-                />
-                <div className="flex flex-wrap gap-2">
-                  <button onClick={() => act("reply", { body: replyBody })} disabled={!replyBody.trim()} className="px-3 py-1.5 text-sm bg-accent text-bg rounded font-bold disabled:opacity-50">Reply</button>
-                  {(selected.platform === "instagram" || selected.platform === "facebook") && selected.kind === "comment" && (
-                    <button onClick={() => act("private_reply", { body: replyBody })} disabled={!replyBody.trim()} className="px-3 py-1.5 text-sm border border-border rounded text-accent disabled:opacity-50">Private reply</button>
-                  )}
-                  {selected.kind === "comment" && (
-                    <>
-                      <button onClick={() => act("like")} className="px-3 py-1.5 text-sm border border-border rounded text-text-dim hover:text-text">Like</button>
-                      <button onClick={() => act(selected.status === "hidden" ? "unhide" : "hide")} className="px-3 py-1.5 text-sm border border-border rounded text-text-dim hover:text-text">{selected.status === "hidden" ? "Unhide" : "Hide"}</button>
-                      <button onClick={() => act("delete")} className="px-3 py-1.5 text-sm border border-red text-red rounded">Delete</button>
-                    </>
-                  )}
-                </div>
-              </div>
-            </>
-          )}
-        </main>
-      </div>
-    </div>
-  );
-}
-
 function PostsView({
   posts, onChange, setStatus, projectId,
 }: { posts: Post[]; onChange: () => void; setStatus: (s: string) => void; projectId?: string | null }) {
@@ -3185,7 +3050,7 @@ function PostsView({
 
   const retry = async (postId: number) => {
     try {
-      await fetch(socialURL(`/posts/${postId}/retry`, projectId), { method: "POST", credentials: "same-origin" });
+      await fetch(appURL(`/posts/${postId}/retry`, projectId), { method: "POST", credentials: "same-origin" });
       setStatus("Retry triggered.");
       onChange();
     } catch (e) {
@@ -3195,7 +3060,7 @@ function PostsView({
 
   const executeDelete = async (post: Post) => {
     try {
-      const res = await fetch(socialURL(`/posts/${post.id}`, projectId), {
+      const res = await fetch(appURL(`/posts/${post.id}`, projectId), {
         method: "DELETE", credentials: "same-origin",
       });
       if (!res.ok) throw new Error(await res.text());
@@ -3277,7 +3142,7 @@ function PostsView({
           {p.media_storage_ids && p.media_storage_ids.length > 0 && (
             <div className="mt-3 flex flex-wrap gap-2">
               {p.media_storage_ids.map((id) => (
-                <MediaThumb key={id} fileId={id} projectId={p.media_project_id || projectId} />
+                <MediaThumb key={id} fileId={id} projectId={projectId} />
               ))}
             </div>
           )}
@@ -3296,7 +3161,6 @@ function PostsView({
           onClose={() => setRescheduleFor(null)}
           onChanged={() => { setRescheduleFor(null); onChange(); }}
           setStatus={setStatus}
-          projectId={projectId}
         />
       )}
       {deleteFor && (
@@ -3313,10 +3177,10 @@ function PostsView({
       {editFor && (
         <EditPostDialog
           post={editFor}
+          projectId={projectId}
           onClose={() => setEditFor(null)}
           onSaved={() => { setEditFor(null); onChange(); }}
           setStatus={setStatus}
-          projectId={projectId}
         />
       )}
     </div>
@@ -3451,22 +3315,20 @@ function DeleteConfirmDialog({
 
 function ConfirmDialog({
   title, body, confirmLabel = "Confirm", cancelLabel = "Cancel",
-  secondaryDangerLabel, onSecondaryDanger, onConfirm, onClose,
+  onConfirm, onClose,
 }: {
   title: string;
   body?: React.ReactNode;
   confirmLabel?: string;
   cancelLabel?: string;
-  secondaryDangerLabel?: string;
-  onSecondaryDanger?: () => void | Promise<void>;
   onConfirm: () => void | Promise<void>;
   onClose: () => void;
 }) {
   const [busy, setBusy] = useState(false);
-  const run = async (fn: () => void | Promise<void>) => {
+  const handleConfirm = async () => {
     setBusy(true);
     try {
-      await fn();
+      await onConfirm();
     } finally {
       setBusy(false);
     }
@@ -3489,29 +3351,19 @@ function ConfirmDialog({
           </button>
         </div>
         {body && <div className="text-text-dim text-sm">{body}</div>}
-	        <div className="flex justify-end gap-2 pt-1">
-	          {secondaryDangerLabel && onSecondaryDanger && (
-	            <button
-	              type="button"
-	              onClick={() => run(onSecondaryDanger)}
-	              disabled={busy}
-	              className="mr-auto px-3 py-1.5 text-sm border border-red text-red rounded hover:bg-red/10 disabled:opacity-50"
-	            >
-	              {busy ? "…" : secondaryDangerLabel}
-	            </button>
-	          )}
-	          <button
-	            type="button"
-	            onClick={onClose}
+        <div className="flex justify-end gap-2 pt-1">
+          <button
+            type="button"
+            onClick={onClose}
             disabled={busy}
             className="px-3 py-1.5 text-sm border border-border rounded hover:bg-bg-card disabled:opacity-50"
           >
             {cancelLabel}
           </button>
-	          <button
-	            type="button"
-	            onClick={() => run(onConfirm)}
-	            disabled={busy}
+          <button
+            type="button"
+            onClick={handleConfirm}
+            disabled={busy}
             className="px-3 py-1.5 text-sm bg-red text-bg rounded font-bold hover:opacity-90 disabled:opacity-50"
           >
             {busy ? "…" : confirmLabel}
@@ -3526,15 +3378,10 @@ function ConfirmDialog({
 // /platforms endpoint) because edit-support is more about platform
 // API constraints than per-install configuration. If the server gains
 // more edit verbs (Reddit, IG caption-only) we widen this set.
-const EDITABLE_PLATFORMS: Set<string> = new Set(["facebook", "twitter", "youtube"]);
-const IMPORTABLE_PLATFORMS: Set<string> = new Set(["facebook", "instagram", "tiktok", "twitter", "youtube"]);
+const EDITABLE_PLATFORMS: Set<string> = new Set(["facebook", "youtube"]);
 
 function isEditablePlatform(platform: string): boolean {
   return EDITABLE_PLATFORMS.has(platform);
-}
-
-function isImportablePlatform(platform: string): boolean {
-  return IMPORTABLE_PLATFORMS.has(platform);
 }
 
 // --- EditPostDialog ----------------------------------------------
@@ -3554,13 +3401,13 @@ interface TargetEditOutcome {
 }
 
 function EditPostDialog({
-  post, onClose, onSaved, setStatus, projectId,
+  post, projectId, onClose, onSaved, setStatus,
 }: {
   post: Post;
+  projectId?: string | null;
   onClose: () => void;
   onSaved: () => void;
   setStatus: (s: string) => void;
-  projectId?: string | null;
 }) {
   const [body, setBody] = useState(post.body || "");
   // Per-target option overrides, keyed by social_account_id. Seeded
@@ -3600,7 +3447,7 @@ function EditPostDialog({
         setBusy(false);
         return;
       }
-      const res = await fetch(socialURL(`/posts/${post.id}/edit`, projectId), {
+      const res = await fetch(appURL(`/posts/${post.id}/edit`, projectId), {
         method: "POST",
         credentials: "same-origin",
         headers: { "Content-Type": "application/json" },
@@ -3781,13 +3628,12 @@ function FieldText({
 }
 
 function RescheduleDialog({
-  post, onClose, onChanged, setStatus, projectId,
+  post, onClose, onChanged, setStatus,
 }: {
   post: Post;
   onClose: () => void;
   onChanged: () => void;
   setStatus: (s: string) => void;
-  projectId?: string | null;
 }) {
   // Seed the input with the post's current schedule_at as a
   // datetime-local value (the input wants "YYYY-MM-DDTHH:MM",
@@ -3800,11 +3646,11 @@ function RescheduleDialog({
     if (!when) return;
     setBusy(true);
     try {
-      const res = await fetch(socialURL(`/posts/${post.id}/reschedule`, projectId), {
+      const res = await fetch(appURL(`/posts/${post.id}/reschedule`), {
         method: "POST",
         credentials: "same-origin",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ schedule_at: when, _project_id: projectId || undefined }),
+        body: JSON.stringify({ schedule_at: when }),
       });
       if (!res.ok) throw new Error(await res.text());
       setStatus("Rescheduled.");
@@ -3852,18 +3698,16 @@ function RescheduleDialog({
 
 // MediaThumb renders a single attached-media tile. We don't get the
 // MIME from post_list (it'd cost a storage round-trip per id at list
-// time), so the component fetches metadata via files_get on mount.
-// Images render directly from storage. Videos prefer Media's generated
-// thumbnail/keyframe images; browser-side canvas extraction is avoided
-// here because S3 redirects make the video drawable cross-origin even
-// though normal image/video display still works.
+// time), so the component fetches metadata via files_get on mount —
+// images render with <img>, videos render with <video preload=
+// "metadata"> so the browser fetches just the moov atom + first
+// keyframe, not the whole file. Click expands to a full-screen
+// modal with playback controls / open-in-new-tab.
 //
 // Cache is process-wide: the same fileId rendered in five posts
 // only triggers one /files/<id> fetch, even before React Query.
 const mediaMetaCache = new Map<string, { mime: string; name: string } | "loading" | "error">();
 const mediaMetaWaiters = new Map<string, ((m: { mime: string; name: string } | null) => void)[]>();
-const mediaPosterCache = new Map<string, string | "loading" | "none" | "error">();
-const mediaPosterWaiters = new Map<string, ((url: string | null) => void)[]>();
 
 async function loadMediaMeta(fileId: number, projectId?: string | null): Promise<{ mime: string; name: string } | null> {
   const key = `${projectId || ""}:${fileId}`;
@@ -3899,51 +3743,6 @@ async function loadMediaMeta(fileId: number, projectId?: string | null): Promise
   }
 }
 
-async function loadMediaPosterURL(fileId: number, projectId?: string | null): Promise<string | null> {
-  const key = `${projectId || ""}:${fileId}`;
-  const cached = mediaPosterCache.get(key);
-  if (cached && cached !== "loading" && cached !== "none" && cached !== "error") return cached;
-  if (cached === "none" || cached === "error") return null;
-  if (cached === "loading") {
-    return new Promise((resolve) => {
-      const w = mediaPosterWaiters.get(key) ?? [];
-      w.push(resolve);
-      mediaPosterWaiters.set(key, w);
-    });
-  }
-  mediaPosterCache.set(key, "loading");
-  try {
-    const params = new URLSearchParams();
-    appendProjectScope(params, projectId);
-    const qs = params.toString();
-    const res = await fetch(`${MEDIA_API}/media/${fileId}${qs ? `?${qs}` : ""}`, {
-      credentials: "same-origin",
-    });
-    if (!res.ok) throw new Error("HTTP " + res.status);
-    const data = (await res.json()) as { derivations?: MediaDerivation[] };
-    const derivations = data.derivations || [];
-    const pick =
-      derivations.find((d) => d.kind === "thumbnail" && d.status === "ok" && d.storage_file_id) ||
-      derivations
-        .filter((d) => d.kind === "keyframe" && d.status === "ok" && d.storage_file_id)
-        .sort((a, b) => (a.position_ms || 0) - (b.position_ms || 0))[0];
-    const url = pick?.storage_file_id
-      ? storageURL(`/files/${pick.storage_file_id}/content`, projectId)
-      : null;
-    mediaPosterCache.set(key, url || "none");
-    const waiters = mediaPosterWaiters.get(key) ?? [];
-    mediaPosterWaiters.delete(key);
-    for (const w of waiters) w(url);
-    return url;
-  } catch {
-    mediaPosterCache.set(key, "error");
-    const waiters = mediaPosterWaiters.get(key) ?? [];
-    mediaPosterWaiters.delete(key);
-    for (const w of waiters) w(null);
-    return null;
-  }
-}
-
 // --- MetricsView --------------------------------------------------
 //
 // Two sections:
@@ -3953,9 +3752,9 @@ async function loadMediaPosterURL(fileId: number, projectId?: string | null): Pr
 //      Click a row to expand and fetch per-target details (raw blob
 //      included for deep-dives).
 //
-// All data is fetched fresh on click — no caching today, matching the
-// MCP-tool semantics. Be mindful that scanning many posts will burn
-// upstream rate limits.
+// Account charts read stored social_metric_points first. The explicit
+// Refresh metrics action still fetches upstream live data and persists
+// new points, matching the MCP-tool refresh semantics.
 
 interface PostMetrics {
   post_id: number;
@@ -3984,6 +3783,7 @@ interface TargetMetrics {
 
 interface AccountMetrics {
   social_account_id: number;
+  profile_id?: number;
   platform: string;
   display_name: string;
   status: "ok" | "unsupported" | "failed";
@@ -3999,17 +3799,17 @@ interface AccountMetrics {
   engagements?: number;
   views?: number;
   insights?: Record<string, { time?: string; value: number }[]>;
+  history_source?: string;
   raw?: any;
 }
 
 function MetricsView({
-  posts, accounts, setStatus, onPostsChanged, projectId,
+  posts, accounts, setStatus, onPostsChanged,
 }: {
   posts: Post[];
   accounts: SocialAccount[];
   setStatus: (s: string) => void;
   onPostsChanged: () => void;
-  projectId?: string | null;
 }) {
   const [accountFor, setAccountFor] = useState<Record<number, AccountMetrics | "loading" | { error: string }>>({});
   const [postFor, setPostFor] = useState<Record<number, PostMetrics | "loading" | { error: string }>>({});
@@ -4029,10 +3829,10 @@ function MetricsView({
     }
   }, [accounts, activeAccountId]);
 
-  const loadAccount = async (id: number) => {
+  const loadAccount = async (id: number, refresh = false) => {
     setAccountFor((prev) => ({ ...prev, [id]: "loading" }));
     try {
-      const res = await fetch(socialURL(`/accounts/${id}/metrics`, projectId), { credentials: "same-origin" });
+      const res = await fetch(appURL(`/accounts/${id}/metrics?refresh=${refresh ? "1" : "0"}`), { credentials: "same-origin" });
       if (!res.ok) throw new Error(await res.text());
       const data = await res.json() as AccountMetrics;
       setAccountFor((prev) => ({ ...prev, [id]: data }));
@@ -4044,7 +3844,7 @@ function MetricsView({
   const syncAccountPosts = async (id: number, quiet = false) => {
     setSyncFor((prev) => ({ ...prev, [id]: "loading" }));
     try {
-      const res = await fetch(socialURL(`/accounts/${id}/import`, projectId, { limit: 100 }), {
+      const res = await fetch(appURL(`/accounts/${id}/import?limit=100`), {
         method: "POST",
         credentials: "same-origin",
       });
@@ -4077,7 +3877,7 @@ function MetricsView({
   const loadPost = async (id: number) => {
     setPostFor((prev) => ({ ...prev, [id]: "loading" }));
     try {
-      const res = await fetch(socialURL(`/posts/${id}/metrics`, projectId), { credentials: "same-origin" });
+      const res = await fetch(appURL(`/posts/${id}/metrics`), { credentials: "same-origin" });
       if (!res.ok) throw new Error(await res.text());
       const data = await res.json() as PostMetrics;
       setPostFor((prev) => ({ ...prev, [id]: data }));
@@ -4110,7 +3910,7 @@ function MetricsView({
       <section className="flex flex-col gap-2">
         <div className="flex items-center justify-between">
           <h2 className="text-sm uppercase tracking-wide text-text-dim">Accounts</h2>
-          <span className="text-text-dim text-xs">Auto-loads first account</span>
+          <span className="text-text-dim text-xs">Shows stored history first</span>
         </div>
         {accounts.length === 0 ? (
           <div className="text-text-dim text-sm py-6 text-center">No accounts connected.</div>
@@ -4152,7 +3952,7 @@ function MetricsView({
               <div className="text-text-dim text-xs">{activeAccount.platform}</div>
             </div>
             <button
-              onClick={() => loadAccount(activeAccount.id)}
+              onClick={() => loadAccount(activeAccount.id, true)}
               className="text-xs text-accent hover:underline"
             >
               Refresh metrics
@@ -4275,8 +4075,8 @@ function AccountMetricsCell({ m }: { m: any }) {
   }
   const bits: string[] = [];
   if (am.followers != null) bits.push(`${formatNumber(am.followers)} followers`);
-  if (am.total_videos != null && am.total_videos > 0) bits.push(`${am.total_videos} videos`);
   if (am.posts != null && am.posts > 0) bits.push(`${am.posts} posts`);
+  if (am.total_videos != null && am.total_videos > 0) bits.push(`${am.total_videos} videos`);
   return <span className="text-text text-xs">{bits.join(" · ") || "ok"}</span>;
 }
 
@@ -4498,26 +4298,14 @@ function formatNumber(n: number): string {
 
 function MediaThumb({ fileId, projectId }: { fileId: number; projectId?: string | null }) {
   const [meta, setMeta] = useState<{ mime: string; name: string } | null>(null);
-  const [posterURL, setPosterURL] = useState<string | null>(null);
   const [open, setOpen] = useState(false);
   const url = storageURL(`/files/${fileId}/content`, projectId);
   useEffect(() => {
     let alive = true;
-    setMeta(null);
-    setPosterURL(null);
     loadMediaMeta(fileId, projectId).then((m) => { if (alive) setMeta(m); });
     return () => { alive = false; };
   }, [fileId, projectId]);
-  const isVideo = isVideoMime(meta?.mime || "", meta?.name || "");
-  useEffect(() => {
-    if (!isVideo || posterURL) return;
-    let alive = true;
-    loadMediaPosterURL(fileId, projectId).then((poster) => {
-      if (!alive) return;
-      setPosterURL(poster);
-    });
-    return () => { alive = false; };
-  }, [fileId, isVideo, posterURL, projectId]);
+  const isVideo = meta?.mime.startsWith("video/") ?? false;
   return (
     <>
       <button
@@ -4526,19 +4314,23 @@ function MediaThumb({ fileId, projectId }: { fileId: number; projectId?: string 
         title={meta?.name || `file #${fileId}`}
       >
         {isVideo ? (
+          // preload="metadata" → browser pulls just the container
+          // header + first keyframe for the still, not the whole
+          // file. <video muted> with no controls renders as a
+          // single-frame poster in this size.
           <>
-            {posterURL ? (
-              <img src={posterURL} alt={meta?.name || ""} className="w-full h-full object-cover" />
-            ) : (
-              <video
-                src={url}
-                preload="metadata"
-                muted
-                playsInline
-                className="w-full h-full object-cover"
-              />
-            )}
-            <PlayBadge />
+            <video
+              src={url}
+              preload="metadata"
+              muted
+              playsInline
+              className="w-full h-full object-cover"
+            />
+            <div className="absolute inset-0 flex items-center justify-center bg-black/30 group-hover:bg-black/50 transition-colors">
+              <div className="w-8 h-8 rounded-full bg-bg/80 grid place-items-center">
+                <span className="text-text text-xs leading-none">▶</span>
+              </div>
+            </div>
           </>
         ) : (
           <img src={url} alt={meta?.name || ""} className="w-full h-full object-cover" />

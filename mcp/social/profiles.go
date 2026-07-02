@@ -21,7 +21,6 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"os"
 	"regexp"
 	"strconv"
 	"strings"
@@ -210,10 +209,7 @@ func (a *App) profileTools() []sdk.Tool {
 }
 
 func (a *App) toolProfileCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	pid := projectIDForTool(ctx, args)
-	if pid == "" {
-		return mcpError("project_id required for global Social install"), nil
-	}
+	pid := projectScope(ctx, args)
 	name, _ := args["name"].(string)
 	name = strings.TrimSpace(name)
 	if name == "" {
@@ -265,7 +261,7 @@ func (a *App) toolProfileCreate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 }
 
 func (a *App) toolProfileList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	pid := projectIDForTool(ctx, args)
+	pid := projectScope(ctx, args)
 	// First pass: gather row data + close the cursor BEFORE issuing
 	// the per-row count queries. Holding a Rows open while running
 	// nested QueryRows deadlocks under MaxOpenConns(1) in tests
@@ -304,7 +300,7 @@ func (a *App) toolProfileList(ctx *sdk.AppCtx, args map[string]any) (any, error)
 }
 
 func (a *App) toolProfileGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	pid := projectIDForTool(ctx, args)
+	pid := projectScope(ctx, args)
 	id := int64(intArg(args, "id", 0))
 	if id == 0 {
 		if slug, _ := args["profile"].(string); slug != "" {
@@ -358,7 +354,7 @@ func (a *App) toolProfileGet(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 }
 
 func (a *App) toolProfileUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	pid := projectIDForTool(ctx, args)
+	pid := projectScope(ctx, args)
 	id := int64(intArg(args, "id", 0))
 	if id == 0 {
 		return mcpError("id required"), nil
@@ -418,7 +414,7 @@ func (a *App) toolProfileUpdate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 }
 
 func (a *App) toolProfileDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	pid := projectIDForTool(ctx, args)
+	pid := projectScope(ctx, args)
 	id := int64(intArg(args, "id", 0))
 	if id == 0 {
 		return mcpError("id required"), nil
@@ -484,28 +480,35 @@ func (a *App) toolProfileDelete(ctx *sdk.AppCtx, args map[string]any) (any, erro
 
 // ─── HTTP wrappers (panel) ───────────────────────────────────────────
 
+func projectArgsFromRequest(r *http.Request) map[string]any {
+	args := map[string]any{}
+	if pid := strings.TrimSpace(r.URL.Query().Get("project_id")); pid != "" {
+		args["_project_id"] = pid
+	}
+	return args
+}
+
+func copyProjectArgs(dst, src map[string]any) {
+	if dst == nil || src == nil {
+		return
+	}
+	for _, key := range []string{"_project_id", "project_id"} {
+		if v, ok := src[key]; ok {
+			dst[key] = v
+		}
+	}
+}
+
 // handleProfilesCollection: GET /profiles → list, POST /profiles → create.
 func (a *App) handleProfilesCollection(w http.ResponseWriter, r *http.Request) {
+	scopeArgs := projectArgsFromRequest(r)
 	switch r.Method {
 	case http.MethodGet:
-		ctx := requestCtx(r)
-		args := queryToolArgs(r)
-		started := time.Now()
-		ctx.Logger().Info("profiles.list: start",
-			"project_id", stringArgAny(args, "_project_id", "project_id"),
-			"query", r.URL.RawQuery)
-		out, err := a.toolProfileList(ctx, args)
+		out, err := a.toolProfileList(globalCtx, scopeArgs)
 		if err != nil {
-			ctx.Logger().Warn("profiles.list: failed",
-				"project_id", stringArgAny(args, "_project_id", "project_id"),
-				"err", err, "elapsed_ms", time.Since(started).Milliseconds())
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
-		ctx.Logger().Info("profiles.list: done",
-			"project_id", stringArgAny(args, "_project_id", "project_id"),
-			"count", listCount(out, "profiles"),
-			"elapsed_ms", time.Since(started).Milliseconds())
 		writeJSON(w, out)
 	case http.MethodPost:
 		var body struct {
@@ -518,15 +521,16 @@ func (a *App) handleProfilesCollection(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid json: "+err.Error(), http.StatusBadRequest)
 			return
 		}
-		args := queryToolArgs(r)
-		args["name"] = body.Name
-		args["description"] = body.Description
-		args["color"] = body.Color
+		args := map[string]any{
+			"name":        body.Name,
+			"description": body.Description,
+			"color":       body.Color,
+		}
+		copyProjectArgs(args, scopeArgs)
 		if body.IsDefault != nil {
 			args["is_default"] = *body.IsDefault
 		}
-		ctx := requestCtx(r)
-		out, err := a.toolProfileCreate(ctx, args)
+		out, err := a.toolProfileCreate(globalCtx, args)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -540,7 +544,7 @@ func (a *App) handleProfilesCollection(w http.ResponseWriter, r *http.Request) {
 // handleProfilesItem: GET/PATCH/DELETE /profiles/:id and
 // POST /profiles/:id/move (bulk-reassigns accounts to this profile).
 func (a *App) handleProfilesItem(w http.ResponseWriter, r *http.Request) {
-	ctx := requestCtx(r)
+	scopeArgs := projectArgsFromRequest(r)
 	rest := strings.TrimPrefix(r.URL.Path, "/profiles/")
 	if rest == "" {
 		http.Error(w, "id required", http.StatusBadRequest)
@@ -560,9 +564,9 @@ func (a *App) handleProfilesItem(w http.ResponseWriter, r *http.Request) {
 	case "":
 		switch r.Method {
 		case http.MethodGet:
-			args := queryToolArgs(r)
-			args["id"] = id
-			out, err := a.toolProfileGet(ctx, args)
+			args := map[string]any{"id": id}
+			copyProjectArgs(args, scopeArgs)
+			out, err := a.toolProfileGet(globalCtx, args)
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
@@ -575,24 +579,22 @@ func (a *App) handleProfilesItem(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			body["id"] = id
-			for k, v := range queryToolArgs(r) {
-				body[k] = v
-			}
-			out, err := a.toolProfileUpdate(ctx, body)
+			copyProjectArgs(body, scopeArgs)
+			out, err := a.toolProfileUpdate(globalCtx, body)
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
 			}
 			writeJSON(w, out)
 		case http.MethodDelete:
-			args := queryToolArgs(r)
-			args["id"] = id
+			args := map[string]any{"id": id}
+			copyProjectArgs(args, scopeArgs)
 			if v := r.URL.Query().Get("reassign_to"); v != "" {
 				if rt, err := strconv.ParseInt(v, 10, 64); err == nil {
 					args["reassign_to"] = rt
 				}
 			}
-			out, err := a.toolProfileDelete(ctx, args)
+			out, err := a.toolProfileDelete(globalCtx, args)
 			if err != nil {
 				http.Error(w, err.Error(), http.StatusInternalServerError)
 				return
@@ -617,7 +619,7 @@ func (a *App) handleProfilesItem(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid json: "+err.Error(), http.StatusBadRequest)
 			return
 		}
-		out, err := a.bulkAssignAccounts(ctx, id, body.AccountIDs, strings.TrimSpace(r.URL.Query().Get("project_id")))
+		out, err := a.bulkAssignAccounts(globalCtx, projectScope(globalCtx, scopeArgs), id, body.AccountIDs)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
@@ -628,10 +630,7 @@ func (a *App) handleProfilesItem(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (a *App) bulkAssignAccounts(ctx *sdk.AppCtx, profileID int64, accountIDs []int64, pid string) (map[string]any, error) {
-	if pid == "" {
-		pid = strings.TrimSpace(os.Getenv("APTEVA_PROJECT_ID"))
-	}
+func (a *App) bulkAssignAccounts(ctx *sdk.AppCtx, pid string, profileID int64, accountIDs []int64) (map[string]any, error) {
 	target, err := loadProfile(ctx.AppDB(), pid, profileID)
 	if err != nil {
 		return nil, err

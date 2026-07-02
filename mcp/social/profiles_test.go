@@ -43,7 +43,6 @@ func TestProfileCreate_FirstAutoDefaults(t *testing.T) {
 func TestProfileCreate_UsesInjectedProjectScope(t *testing.T) {
 	ctx := newSocialCtx(t, newRecordingPlatform())
 	app := &App{}
-	t.Setenv("APTEVA_PROJECT_ID", "")
 
 	out, err := app.toolProfileCreate(ctx, map[string]any{"name": "Scoped", "_project_id": "global-panel-project"})
 	if err != nil {

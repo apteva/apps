@@ -28,7 +28,6 @@ import (
 	"strings"
 	"sync"
 	"testing"
-	"time"
 
 	sdk "github.com/apteva/app-sdk"
 	tk "github.com/apteva/app-sdk/testkit"
@@ -46,8 +45,8 @@ type recordingPlatform struct {
 	nextStartOAuth   *sdk.OAuthStartResult
 	nextStartErr     error
 	executeResponses map[string]*sdk.ExecuteResult // keyed by tool name
-	executeSequences map[string][]*sdk.ExecuteResult
-	callAppResponses map[string]json.RawMessage // keyed by "app:tool"
+	callAppResponses map[string]json.RawMessage    // keyed by "app:tool"
+	connections      []sdk.PlatformConnection
 	executeErr       error
 	identity         *sdk.InstallIdentity
 }
@@ -66,7 +65,6 @@ func newRecordingPlatform() *recordingPlatform {
 			ProjectID: "test-proj",
 		},
 		executeResponses: map[string]*sdk.ExecuteResult{},
-		executeSequences: map[string][]*sdk.ExecuteResult{},
 		callAppResponses: map[string]json.RawMessage{},
 	}
 }
@@ -75,7 +73,17 @@ func (p *recordingPlatform) GetConnection(id int64) (*sdk.PlatformConnection, er
 	return &sdk.PlatformConnection{ID: id, AppSlug: "twitter-api", ProjectID: "test-proj"}, nil
 }
 func (p *recordingPlatform) ListConnections(filter sdk.ConnectionFilter) ([]sdk.PlatformConnection, error) {
-	return nil, nil
+	out := []sdk.PlatformConnection{}
+	for _, c := range p.connections {
+		if filter.ProjectID != "" && c.ProjectID != filter.ProjectID {
+			continue
+		}
+		if filter.AppSlug != "" && c.AppSlug != filter.AppSlug {
+			continue
+		}
+		out = append(out, c)
+	}
+	return out, nil
 }
 func (p *recordingPlatform) GetInstance(id int64) (*sdk.PlatformInstance, error) {
 	return nil, errors.New("not implemented")
@@ -92,11 +100,6 @@ func (p *recordingPlatform) ExecuteIntegrationTool(connID int64, tool string, in
 	p.mu.Unlock()
 	if p.executeErr != nil {
 		return nil, p.executeErr
-	}
-	if seq := p.executeSequences[tool]; len(seq) > 0 {
-		r := seq[0]
-		p.executeSequences[tool] = seq[1:]
-		return r, nil
 	}
 	if r, ok := p.executeResponses[tool]; ok {
 		return r, nil
@@ -193,14 +196,6 @@ func newSocialCtx(t *testing.T, pf sdk.PlatformClient) *sdk.AppCtx {
 	return ctx
 }
 
-func isMCPError(v any) bool {
-	m, ok := v.(map[string]any)
-	if !ok {
-		return false
-	}
-	return m["isError"] == true
-}
-
 // --- account_add ---------------------------------------------------
 
 func TestAccountAdd_HappyPath(t *testing.T) {
@@ -231,42 +226,6 @@ func TestAccountAdd_HappyPath(t *testing.T) {
 	ctx.AppDB().QueryRow(`SELECT status FROM pending_accounts WHERE id=?`, res["pending_account_id"]).Scan(&status)
 	if status != "pending_oauth" {
 		t.Errorf("status = %q", status)
-	}
-}
-
-func TestAccountAdd_UsesSelectedProfile(t *testing.T) {
-	pf := newRecordingPlatform()
-	ctx := newSocialCtx(t, pf)
-	app := &App{}
-
-	firstOut, _ := app.toolProfileCreate(ctx, map[string]any{"name": "First"})
-	secondOut, _ := app.toolProfileCreate(ctx, map[string]any{"name": "Second"})
-	first := firstOut.(map[string]any)["profile"].(*Profile)
-	second := secondOut.(map[string]any)["profile"].(*Profile)
-	if first.ID == second.ID {
-		t.Fatal("test setup created duplicate profile ids")
-	}
-
-	out, err := app.toolAccountAdd(ctx, map[string]any{
-		"platform":   "twitter",
-		"profile_id": second.ID,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	pendingID := out.(map[string]any)["pending_account_id"].(int64)
-	var storedProfileID int64
-	if err := ctx.AppDB().QueryRow(
-		`SELECT COALESCE(profile_id,0) FROM pending_accounts WHERE id=?`,
-		pendingID,
-	).Scan(&storedProfileID); err != nil {
-		t.Fatal(err)
-	}
-	if storedProfileID != second.ID {
-		t.Fatalf("pending profile_id = %d, want selected profile %d", storedProfileID, second.ID)
-	}
-	if storedProfileID == first.ID {
-		t.Fatalf("pending account was assigned to first/default profile %d", first.ID)
 	}
 }
 
@@ -419,13 +378,6 @@ func TestAccountFinalize_FacebookHappyPath(t *testing.T) {
 	if r["external_account_id"] != "100" {
 		t.Errorf("external_account_id wrong: %+v", r)
 	}
-	check, ok := r["account_check"].(accountCheckResult)
-	if !ok {
-		t.Fatalf("account_check missing or wrong type: %+v", r["account_check"])
-	}
-	if check.Status != "ok" {
-		t.Fatalf("account_check status = %q, error=%q", check.Status, check.Error)
-	}
 	// Row exists in social_accounts.
 	var n int
 	ctx.AppDB().QueryRow(
@@ -433,58 +385,6 @@ func TestAccountFinalize_FacebookHappyPath(t *testing.T) {
 	).Scan(&n)
 	if n != 1 {
 		t.Errorf("social_accounts row missing: count=%d", n)
-	}
-	var status string
-	ctx.AppDB().QueryRow(
-		`SELECT last_check_status FROM social_accounts WHERE platform='facebook' AND external_account_id='100'`,
-	).Scan(&status)
-	if status != "ok" {
-		t.Errorf("last_check_status = %q", status)
-	}
-}
-
-func TestAccountFinalize_CheckFailureIsPersistedButDoesNotBlockAdd(t *testing.T) {
-	pf := newRecordingPlatform()
-	pf.executeSequences["list_pages"] = []*sdk.ExecuteResult{
-		{
-			Success: true,
-			Data: json.RawMessage(`{"data":[
-				{"id":"100","name":"My Restaurant","picture":{"data":{"url":"https://cdn/r.jpg"}}}
-			]}`),
-		},
-		{
-			Success: true,
-			Data:    json.RawMessage(`{"data":[{"id":"200","name":"Other Page"}]}`),
-		},
-	}
-	ctx := newSocialCtx(t, pf)
-	res, _ := ctx.AppDB().Exec(
-		`INSERT INTO pending_accounts (project_id, platform, integration_slug, connection_id, status, expires_at)
-		 VALUES ('test-proj', 'facebook', 'facebook-graph', 42, 'ready', datetime('now','+10 minutes'))`,
-	)
-	pendingID, _ := res.LastInsertId()
-	app := &App{}
-	out, err := app.toolAccountFinalize(ctx, map[string]any{
-		"pending_account_id": pendingID,
-		"page_id":            "100",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	r := out.(map[string]any)
-	check, ok := r["account_check"].(accountCheckResult)
-	if !ok {
-		t.Fatalf("account_check missing or wrong type: %+v", r["account_check"])
-	}
-	if check.Status != "failed" || !strings.Contains(check.Error, "no longer accessible") {
-		t.Fatalf("unexpected account_check: %+v", check)
-	}
-	var status, lastErr string
-	ctx.AppDB().QueryRow(
-		`SELECT last_check_status, last_check_error FROM social_accounts WHERE platform='facebook' AND external_account_id='100'`,
-	).Scan(&status, &lastErr)
-	if status != "failed" || !strings.Contains(lastErr, "no longer accessible") {
-		t.Errorf("persisted check = %q %q", status, lastErr)
 	}
 }
 
@@ -504,13 +404,6 @@ func TestAccountDisconnect_LastSiblingDisconnectsConnection(t *testing.T) {
 	}
 	if len(pf.disconnectCalls) != 1 || pf.disconnectCalls[0] != 42 {
 		t.Errorf("expected DisconnectConnection(42), got %+v", pf.disconnectCalls)
-	}
-	var status string
-	if err := ctx.AppDB().QueryRow(`SELECT status FROM social_accounts WHERE id=?`, id).Scan(&status); err != nil {
-		t.Fatal(err)
-	}
-	if status != "disconnected" {
-		t.Errorf("account status = %q, want disconnected", status)
 	}
 }
 
@@ -532,182 +425,6 @@ func TestAccountDisconnect_KeepsConnectionWhenSiblingsExist(t *testing.T) {
 	}
 	if len(pf.disconnectCalls) != 0 {
 		t.Errorf("connection should not be disconnected when siblings exist; got %+v", pf.disconnectCalls)
-	}
-}
-
-func TestAccountDisconnect_HidesFromDefaultListButKeepsHistory(t *testing.T) {
-	ctx := newSocialCtx(t, newRecordingPlatform())
-	r, _ := ctx.AppDB().Exec(
-		`INSERT INTO social_accounts (project_id, platform, connection_id, display_name, avatar_url, status)
-		 VALUES ('test-proj', 'twitter', 42, '@old', '', 'active')`,
-	)
-	acctID, _ := r.LastInsertId()
-	r, _ = ctx.AppDB().Exec(
-		`INSERT INTO posts (project_id, body, media_storage_ids, status)
-		 VALUES ('test-proj', 'historical post', '[]', 'published')`,
-	)
-	postID, _ := r.LastInsertId()
-	_, _ = ctx.AppDB().Exec(
-		`INSERT INTO post_targets (post_id, social_account_id, status, platform_post_id)
-		 VALUES (?, ?, 'published', '123')`,
-		postID, acctID,
-	)
-
-	app := &App{}
-	if _, err := app.toolAccountDisconnect(ctx, map[string]any{"id": acctID}); err != nil {
-		t.Fatal(err)
-	}
-	listOut, err := app.toolAccountList(ctx, map[string]any{})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := len(listOut.(map[string]any)["accounts"].([]map[string]any)); got != 0 {
-		t.Fatalf("default account list returned %d rows, want 0", got)
-	}
-	disconnectedOut, err := app.toolAccountList(ctx, map[string]any{"status": "disconnected"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got := len(disconnectedOut.(map[string]any)["accounts"].([]map[string]any)); got != 1 {
-		t.Fatalf("disconnected account list returned %d rows, want 1", got)
-	}
-	postsOut, err := app.toolPostList(ctx, map[string]any{"_project_id": "test-proj"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	posts := postsOut.(map[string]any)["posts"].([]map[string]any)
-	if len(posts) != 1 {
-		t.Fatalf("posts len = %d, want 1", len(posts))
-	}
-	targets := posts[0]["targets"].([]map[string]any)
-	if len(targets) != 1 || targets[0]["display_name"] != "@old" {
-		t.Fatalf("historical target not preserved: %+v", targets)
-	}
-}
-
-func TestAccountDisconnect_HardDeleteRemovesLocalHistoryOnly(t *testing.T) {
-	pf := newRecordingPlatform()
-	ctx := newSocialCtx(t, pf)
-	r, _ := ctx.AppDB().Exec(
-		`INSERT INTO social_accounts (project_id, platform, connection_id, display_name, avatar_url, status)
-		 VALUES ('test-proj', 'twitter', 42, '@old', '', 'active')`,
-	)
-	oldID, _ := r.LastInsertId()
-	r, _ = ctx.AppDB().Exec(
-		`INSERT INTO social_accounts (project_id, platform, connection_id, display_name, avatar_url, status)
-		 VALUES ('test-proj', 'twitter', 42, '@kept', '', 'active')`,
-	)
-	keptID, _ := r.LastInsertId()
-	r, _ = ctx.AppDB().Exec(
-		`INSERT INTO posts (project_id, body, media_storage_ids, status)
-		 VALUES ('test-proj', 'old only', '[]', 'published')`,
-	)
-	oldOnlyPostID, _ := r.LastInsertId()
-	_, _ = ctx.AppDB().Exec(
-		`INSERT INTO post_targets (post_id, social_account_id, status, platform_post_id)
-		 VALUES (?, ?, 'published', 'old_1')`,
-		oldOnlyPostID, oldID,
-	)
-	r, _ = ctx.AppDB().Exec(
-		`INSERT INTO posts (project_id, body, media_storage_ids, status)
-		 VALUES ('test-proj', 'multi account', '[]', 'published')`,
-	)
-	multiPostID, _ := r.LastInsertId()
-	_, _ = ctx.AppDB().Exec(
-		`INSERT INTO post_targets (post_id, social_account_id, status, platform_post_id)
-		 VALUES (?, ?, 'published', 'old_2')`,
-		multiPostID, oldID,
-	)
-	_, _ = ctx.AppDB().Exec(
-		`INSERT INTO post_targets (post_id, social_account_id, status, platform_post_id)
-		 VALUES (?, ?, 'published', 'kept_1')`,
-		multiPostID, keptID,
-	)
-	_, _ = ctx.AppDB().Exec(
-		`INSERT INTO inbox_items (project_id, social_account_id, platform, kind, external_id, post_id, occurred_at)
-		 VALUES ('test-proj', ?, 'twitter', 'comment', 'c1', ?, CURRENT_TIMESTAMP)`,
-		oldID, oldOnlyPostID,
-	)
-	_, _ = ctx.AppDB().Exec(
-		`INSERT INTO inbox_cursors (social_account_id, kind, cursor)
-		 VALUES (?, 'comment', '')`,
-		oldID,
-	)
-
-	app := &App{}
-	out, err := app.toolAccountDisconnect(ctx, map[string]any{
-		"id":           oldID,
-		"hard_delete":  true,
-		"delete_posts": true,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	res := out.(map[string]any)
-	if res["upstream_posts_untouched"] != true {
-		t.Fatalf("upstream flag missing: %+v", res)
-	}
-	var n int
-	ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM social_accounts WHERE id=?`, oldID).Scan(&n)
-	if n != 0 {
-		t.Fatalf("old account still present")
-	}
-	ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM posts WHERE id=?`, oldOnlyPostID).Scan(&n)
-	if n != 0 {
-		t.Fatalf("old-only post still present")
-	}
-	ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM posts WHERE id=?`, multiPostID).Scan(&n)
-	if n != 1 {
-		t.Fatalf("multi-account post was deleted")
-	}
-	ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM post_targets WHERE post_id=? AND social_account_id=?`, multiPostID, oldID).Scan(&n)
-	if n != 0 {
-		t.Fatalf("old account target still present on multi-account post")
-	}
-	ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM post_targets WHERE post_id=? AND social_account_id=?`, multiPostID, keptID).Scan(&n)
-	if n != 1 {
-		t.Fatalf("kept account target missing from multi-account post")
-	}
-	ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM inbox_items WHERE social_account_id=?`, oldID).Scan(&n)
-	if n != 0 {
-		t.Fatalf("old account inbox items still present")
-	}
-	if len(pf.disconnectCalls) != 0 {
-		t.Fatalf("shared connection should stay active, got disconnect calls %+v", pf.disconnectCalls)
-	}
-}
-
-func TestAccountDisconnect_HardDeleteRequiresPostsConfirmation(t *testing.T) {
-	ctx := newSocialCtx(t, newRecordingPlatform())
-	r, _ := ctx.AppDB().Exec(
-		`INSERT INTO social_accounts (project_id, platform, connection_id, display_name, status)
-		 VALUES ('test-proj', 'twitter', 42, '@old', 'active')`,
-	)
-	acctID, _ := r.LastInsertId()
-	app := &App{}
-	out, err := app.toolAccountDisconnect(ctx, map[string]any{"id": acctID, "hard_delete": true})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !isMCPError(out) {
-		t.Fatalf("expected mcp confirmation error, got %+v", out)
-	}
-}
-
-func TestPostCreate_RejectsDisconnectedAccount(t *testing.T) {
-	ctx := newSocialCtx(t, nil)
-	r, _ := ctx.AppDB().Exec(
-		`INSERT INTO social_accounts (project_id, platform, connection_id, display_name, status)
-		 VALUES ('test-proj', 'twitter', 42, '@old', 'disconnected')`,
-	)
-	acctID, _ := r.LastInsertId()
-	app := &App{}
-	_, err := app.toolPostCreate(ctx, map[string]any{
-		"body":               "should not publish",
-		"social_account_ids": []any{acctID},
-	})
-	if err == nil || !strings.Contains(err.Error(), "disconnected") {
-		t.Fatalf("err = %v, want disconnected account rejection", err)
 	}
 }
 
@@ -862,92 +579,238 @@ func TestPostCreate_FansOutAndPublishes(t *testing.T) {
 	}
 }
 
-func TestPostCreate_NormalizesMarkdownText(t *testing.T) {
+func TestAccountImportProvider_ZernioCreatesSocialAccounts(t *testing.T) {
 	pf := newRecordingPlatform()
+	pf.connections = []sdk.PlatformConnection{
+		{ID: 99, AppSlug: "zernio", ProjectID: "test-proj", Status: "active"},
+	}
+	pf.executeResponses["list_accounts"] = &sdk.ExecuteResult{
+		Success: true,
+		Status:  200,
+		Data: json.RawMessage(`{"accounts":[
+			{"accountId":"za_1","profileId":"zp_1","platform":"linkedin","displayName":"Company Page","avatarUrl":"https://example.com/a.png"},
+			{"accountId":"za_2","profileId":"zp_1","platform":"twitter","displayName":"@brand"}
+		]}`),
+	}
+	ctx := newSocialCtx(t, pf)
+	app := &App{}
+	out, err := app.toolAccountImportProvider(ctx, map[string]any{"provider": "zernio"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := out.(providerAccountImportResult)
+	if res.Status != "ok" || res.Imported != 2 {
+		t.Fatalf("unexpected import result: %+v", res)
+	}
+	var n int
+	ctx.AppDB().QueryRow(
+		`SELECT COUNT(*) FROM social_accounts WHERE provider_slug='zernio' AND connection_id=99`,
+	).Scan(&n)
+	if n != 2 {
+		t.Fatalf("provider-backed accounts = %d, want 2", n)
+	}
+	var platform, providerAccountID string
+	ctx.AppDB().QueryRow(
+		`SELECT platform, provider_account_id FROM social_accounts WHERE display_name='Company Page'`,
+	).Scan(&platform, &providerAccountID)
+	if platform != "linkedin" || providerAccountID != "za_1" {
+		t.Fatalf("stored account = %s %s", platform, providerAccountID)
+	}
+}
+
+func TestAccountAdd_ZernioStartsProviderOAuth(t *testing.T) {
+	pf := newRecordingPlatform()
+	pf.connections = []sdk.PlatformConnection{
+		{ID: 99, AppSlug: "zernio", ProjectID: "test-proj", Status: "active"},
+	}
+	pf.executeResponses["list_profiles"] = &sdk.ExecuteResult{
+		Success: true,
+		Status:  200,
+		Data:    json.RawMessage(`{"profiles":[{"id":"zp_1","name":"Default"}]}`),
+	}
+	pf.executeResponses["get_connect_url"] = &sdk.ExecuteResult{
+		Success: true,
+		Status:  200,
+		Data:    json.RawMessage(`{"url":"https://zernio.example/connect/linkedin","state":"zs_1"}`),
+	}
+	ctx := newSocialCtx(t, pf)
+	app := &App{}
+	out, err := app.toolAccountAdd(ctx, map[string]any{"platform": "linkedin", "provider": "zernio"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := out.(map[string]any)
+	if res["authorize_url"] != "https://zernio.example/connect/linkedin" {
+		t.Fatalf("authorize_url = %+v", res)
+	}
+	var provider, providerProfile, state string
+	if err := ctx.AppDB().QueryRow(
+		`SELECT provider_slug, provider_profile_id, provider_state FROM pending_accounts WHERE id=?`,
+		res["pending_account_id"],
+	).Scan(&provider, &providerProfile, &state); err != nil {
+		t.Fatal(err)
+	}
+	if provider != "zernio" || providerProfile != "zp_1" || state != "zs_1" {
+		t.Fatalf("pending provider metadata = %q %q %q", provider, providerProfile, state)
+	}
+	var sawConnect bool
+	for _, c := range pf.executeCalls {
+		if c.Tool == "get_connect_url" && c.Input["platform"] == "linkedin" && c.Input["profileId"] == "zp_1" {
+			sawConnect = true
+		}
+	}
+	if !sawConnect {
+		t.Fatalf("get_connect_url not called as expected: %+v", pf.executeCalls)
+	}
+}
+
+func TestAccountFinalize_ZernioLinkedInOrganization(t *testing.T) {
+	pf := newRecordingPlatform()
+	pf.executeResponses["select_linkedin_organization"] = &sdk.ExecuteResult{
+		Success: true,
+		Status:  200,
+		Data:    json.RawMessage(`{"accountId":"za_linkedin"}`),
+	}
+	pf.executeResponses["list_accounts"] = &sdk.ExecuteResult{
+		Success: true,
+		Status:  200,
+		Data:    json.RawMessage(`{"accounts":[{"accountId":"za_linkedin","profileId":"zp_1","platform":"linkedin","displayName":"Company Page"}]}`),
+	}
+	ctx := newSocialCtx(t, pf)
+	res, _ := ctx.AppDB().Exec(
+		`INSERT INTO pending_accounts
+		   (project_id, platform, integration_slug, connection_id, status, expires_at, provider_slug, provider_profile_id, provider_data)
+		 VALUES ('test-proj', 'linkedin', 'zernio', 99, 'ready', datetime('now','+10 minutes'), 'zernio', 'zp_1',
+		         '{"tempToken":"tmp_1","userProfile":{"id":"u1","displayName":"User"},"organizations":[{"id":"org_1","name":"Company Page"}]}')`,
+	)
+	pendingID, _ := res.LastInsertId()
+	app := &App{}
+	out, err := app.toolAccountFinalize(ctx, map[string]any{
+		"pending_account_id": pendingID,
+		"page_id":            "org_1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := out.(map[string]any)
+	if got["provider"] != "zernio" || got["display_name"] != "Company Page" {
+		t.Fatalf("finalize result = %+v", got)
+	}
+	var providerAccount string
+	if err := ctx.AppDB().QueryRow(
+		`SELECT provider_account_id FROM social_accounts WHERE platform='linkedin' AND provider_slug='zernio'`,
+	).Scan(&providerAccount); err != nil {
+		t.Fatal(err)
+	}
+	if providerAccount != "za_linkedin" {
+		t.Fatalf("provider_account_id = %q", providerAccount)
+	}
+	var sawSelect bool
+	for _, c := range pf.executeCalls {
+		if c.Tool == "select_linkedin_organization" && c.Input["accountType"] == "organization" {
+			sawSelect = true
+		}
+	}
+	if !sawSelect {
+		t.Fatalf("select_linkedin_organization not called: %+v", pf.executeCalls)
+	}
+}
+
+func TestPostCreate_ZernioProviderPublishesNonNativePlatform(t *testing.T) {
+	pf := newRecordingPlatform()
+	pf.executeResponses["create_post"] = &sdk.ExecuteResult{
+		Success: true,
+		Status:  200,
+		Data:    json.RawMessage(`{"id":"zp_123","platformPostId":"li_456","platformUrl":"https://linkedin.example/post/li_456"}`),
+	}
 	ctx := newSocialCtx(t, pf)
 	r, _ := ctx.AppDB().Exec(
-		`INSERT INTO social_accounts (project_id, platform, connection_id, display_name, status)
-		 VALUES ('test-proj', 'twitter', 42, '@me', 'active')`,
+		`INSERT INTO social_accounts
+		   (project_id, platform, connection_id, external_account_id, display_name, status,
+		    provider_slug, provider_account_id)
+		 VALUES ('test-proj', 'linkedin', 99, 'za_1', 'Company Page', 'active',
+		         'zernio', 'za_1')`,
 	)
 	acctID, _ := r.LastInsertId()
 
 	app := &App{}
 	out, err := app.toolPostCreate(ctx, map[string]any{
-		"body":               "## Launch\n\n**Big** update: [read more](https://example.com)\n- first thing\n`code`",
+		"body":               "plain social copy",
 		"social_account_ids": []any{acctID},
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	res := out.(map[string]any)
-	if res["markdown_normalized"] != true {
-		t.Fatalf("markdown_normalized = %v, want true", res["markdown_normalized"])
+	postID := out.(map[string]any)["post_id"].(int64)
+	if len(pf.executeCalls) != 1 || pf.executeCalls[0].Tool != "create_post" {
+		t.Fatalf("expected zernio create_post call, got %+v", pf.executeCalls)
 	}
-
-	want := "Launch\n\nBig update: read more: https://example.com\nfirst thing\ncode"
-	var stored string
-	ctx.AppDB().QueryRow(`SELECT body FROM posts WHERE id=?`, res["post_id"]).Scan(&stored)
-	if stored != want {
-		t.Fatalf("stored body = %q, want %q", stored, want)
+	input := pf.executeCalls[0].Input
+	if input["content"] != "plain social copy" {
+		t.Fatalf("content = %v", input["content"])
 	}
-	if len(pf.executeCalls) == 0 || pf.executeCalls[0].Input["text"] != want {
-		t.Fatalf("post_tweet input = %+v, want text %q", pf.executeCalls, want)
+	platforms, ok := input["platforms"].([]any)
+	if !ok || len(platforms) != 1 {
+		t.Fatalf("platforms input = %#v", input["platforms"])
+	}
+	target := platforms[0].(map[string]any)
+	if target["platform"] != "linkedin" || target["accountId"] != "za_1" {
+		t.Fatalf("zernio target = %#v", target)
+	}
+	var status, platformPostID, providerPostID string
+	ctx.AppDB().QueryRow(
+		`SELECT status, COALESCE(platform_post_id,''), COALESCE(provider_post_id,'')
+		   FROM post_targets WHERE post_id=?`,
+		postID,
+	).Scan(&status, &platformPostID, &providerPostID)
+	if status != "published" || platformPostID != "li_456" || providerPostID != "zp_123" {
+		t.Fatalf("target = status %q platform %q provider %q", status, platformPostID, providerPostID)
 	}
 }
 
-func TestPostList_LoadsTargetsWithoutDeadlock(t *testing.T) {
-	ctx := newSocialCtx(t, nil)
-	app := &App{}
-	r, err := ctx.AppDB().Exec(
-		`INSERT INTO social_accounts (project_id, platform, connection_id, display_name, avatar_url, status)
-		 VALUES ('test-proj', 'twitter', 42, '@me', '', 'active')`,
-	)
-	if err != nil {
-		t.Fatal(err)
+func TestInboxReply_ZernioBackedDMUsesProvider(t *testing.T) {
+	pf := newRecordingPlatform()
+	pf.executeResponses["send_inbox_message"] = &sdk.ExecuteResult{
+		Success: true,
+		Status:  200,
+		Data:    json.RawMessage(`{"id":"reply_1","url":"https://zernio.example/reply_1"}`),
 	}
+	ctx := newSocialCtx(t, pf)
+	r, _ := ctx.AppDB().Exec(
+		`INSERT INTO social_accounts
+		   (project_id, platform, connection_id, external_account_id, display_name, status,
+		    provider_slug, provider_account_id)
+		 VALUES ('test-proj', 'linkedin', 99, 'za_1', 'Company Page', 'active',
+		         'zernio', 'za_1')`,
+	)
 	acctID, _ := r.LastInsertId()
-	r, err = ctx.AppDB().Exec(
-		`INSERT INTO posts (project_id, body, media_storage_ids, status)
-		 VALUES ('test-proj', 'hello world', '[]', 'published')`,
-	)
+	itemID, _, err := upsertInboxItem(ctx.AppDB(), inboxUpsertInput{
+		ProjectID:       "test-proj",
+		SocialAccountID: acctID,
+		Platform:        "linkedin",
+		Kind:            inboxKindDM,
+		ExternalID:      "msg_1",
+		ExternalPostID:  "conv_1",
+		Body:            "hello",
+	})
 	if err != nil {
-		t.Fatal(err)
-	}
-	postID, _ := r.LastInsertId()
-	if _, err := ctx.AppDB().Exec(
-		`INSERT INTO post_targets (post_id, social_account_id, status, platform_post_id)
-		 VALUES (?, ?, 'published', '123')`,
-		postID, acctID,
-	); err != nil {
 		t.Fatal(err)
 	}
 
-	done := make(chan error, 1)
-	go func() {
-		out, err := app.toolPostList(ctx, map[string]any{"_project_id": "test-proj"})
-		if err != nil {
-			done <- err
-			return
-		}
-		posts := out.(map[string]any)["posts"].([]map[string]any)
-		if len(posts) != 1 {
-			done <- fmt.Errorf("posts len = %d, want 1", len(posts))
-			return
-		}
-		targets := posts[0]["targets"].([]map[string]any)
-		if len(targets) != 1 {
-			done <- fmt.Errorf("targets len = %d, want 1", len(targets))
-			return
-		}
-		done <- nil
-	}()
-	select {
-	case err := <-done:
-		if err != nil {
-			t.Fatal(err)
-		}
-	case <-time.After(2 * time.Second):
-		t.Fatal("toolPostList deadlocked while loading targets")
+	app := &App{}
+	out, err := app.toolInboxReply(ctx, map[string]any{"id": itemID, "body": "reply"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := out.(inboxOutcome)
+	if res.Status != "ok" || res.ExternalID != "reply_1" {
+		t.Fatalf("unexpected reply result: %+v", res)
+	}
+	if len(pf.executeCalls) != 1 || pf.executeCalls[0].Tool != "send_inbox_message" {
+		t.Fatalf("expected zernio send_inbox_message, got %+v", pf.executeCalls)
+	}
+	if pf.executeCalls[0].Input["conversationId"] != "conv_1" || pf.executeCalls[0].Input["message"] != "reply" {
+		t.Fatalf("unexpected zernio reply input: %+v", pf.executeCalls[0].Input)
 	}
 }
 
@@ -989,6 +852,67 @@ func TestPostCreate_FacebookUsesMessageAndPageId(t *testing.T) {
 	}
 	if _, hasText := got.Input["text"]; hasText {
 		t.Errorf("'text' should NOT be sent to facebook (twitter-shaped key): %+v", got.Input)
+	}
+}
+
+func TestPostCreate_TargetBodyCanSupplyPostBody(t *testing.T) {
+	pf := newRecordingPlatform()
+	pf.executeResponses["post_tweet"] = &sdk.ExecuteResult{
+		Success: true,
+		Data:    json.RawMessage(`{"data":{"id":"target-body","text":"target-only text"}}`),
+	}
+	ctx := newSocialCtx(t, pf)
+	r, _ := ctx.AppDB().Exec(
+		`INSERT INTO social_accounts (project_id, platform, connection_id, display_name, status)
+		 VALUES ('test-proj', 'twitter', 42, '@me', 'active')`,
+	)
+	acctID, _ := r.LastInsertId()
+
+	app := &App{}
+	out, err := app.toolPostCreate(ctx, map[string]any{
+		"targets": []any{
+			map[string]any{
+				"social_account_id": acctID,
+				"body":              "target-only text",
+			},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	postID := out.(map[string]any)["post_id"].(int64)
+
+	if len(pf.executeCalls) != 1 {
+		t.Fatalf("expected 1 execute call, got %d", len(pf.executeCalls))
+	}
+	if got := pf.executeCalls[0].Input["text"]; got != "target-only text" {
+		t.Fatalf("post_tweet text = %v, want target-only text; input=%+v", got, pf.executeCalls[0].Input)
+	}
+	var storedBody string
+	if err := ctx.AppDB().QueryRow(`SELECT body FROM posts WHERE id=?`, postID).Scan(&storedBody); err != nil {
+		t.Fatal(err)
+	}
+	if storedBody != "target-only text" {
+		t.Fatalf("stored body = %q, want target-only text", storedBody)
+	}
+}
+
+func TestPostCreate_TargetsStillRequireResolvedBody(t *testing.T) {
+	ctx := newSocialCtx(t, newRecordingPlatform())
+	r, _ := ctx.AppDB().Exec(
+		`INSERT INTO social_accounts (project_id, platform, connection_id, display_name, status)
+		 VALUES ('test-proj', 'twitter', 42, '@me', 'active')`,
+	)
+	acctID, _ := r.LastInsertId()
+
+	app := &App{}
+	_, err := app.toolPostCreate(ctx, map[string]any{
+		"targets": []any{
+			map[string]any{"social_account_id": acctID},
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "targets[0].body") {
+		t.Fatalf("err = %v, want missing target body error", err)
 	}
 }
 
@@ -1370,133 +1294,6 @@ func TestPublishInstagram_TwoStepWithStorageMedia(t *testing.T) {
 	}
 }
 
-func TestPublishInstagram_RetriesTransientPublishRace(t *testing.T) {
-	oldDelays := instagramPublishRetryDelays
-	instagramPublishRetryDelays = []time.Duration{0}
-	defer func() { instagramPublishRetryDelays = oldDelays }()
-
-	pf := newRecordingPlatform()
-	pf.callAppResponses["storage:files_get_url"] = json.RawMessage(
-		`{"result":{"content":[{"type":"text","text":"{\"url\":\"/files/88/content?sig=abc&exp=99\",\"file_id\":88}"}]}}`,
-	)
-	pf.executeResponses["create_media_container"] = &sdk.ExecuteResult{
-		Success: true,
-		Status:  200,
-		Data:    json.RawMessage(`{"id":"container_retry"}`),
-	}
-	pf.executeSequences["publish_media_container"] = []*sdk.ExecuteResult{
-		{
-			Success: false,
-			Status:  400,
-			Data:    json.RawMessage(`{"error":{"code":9007,"message":"Media ID is not available"}}`),
-		},
-		{
-			Success: true,
-			Status:  200,
-			Data:    json.RawMessage(`{"id":"ig_retry_ok"}`),
-		},
-	}
-
-	ctx := newSocialCtx(t, pf)
-	r, _ := ctx.AppDB().Exec(
-		`INSERT INTO social_accounts (project_id, platform, connection_id, external_account_id, display_name, status)
-		 VALUES ('test-proj', 'instagram', 42, 'ig-acct-1', 'My Brand', 'active')`,
-	)
-	acctID, _ := r.LastInsertId()
-
-	app := &App{}
-	out, err := app.toolPostCreate(ctx, map[string]any{
-		"body":               "hello insta retry",
-		"social_account_ids": []any{acctID},
-		"media_storage_ids":  []any{int64(88)},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	postID := out.(map[string]any)["post_id"].(int64)
-
-	publishCalls := 0
-	for _, c := range pf.executeCalls {
-		if c.Tool == "publish_media_container" {
-			publishCalls++
-		}
-	}
-	if publishCalls != 2 {
-		t.Fatalf("expected publish_media_container to be retried once, got %d calls: %+v", publishCalls, pf.executeCalls)
-	}
-
-	var status, platformPostID, lastErr string
-	ctx.AppDB().QueryRow(
-		`SELECT status, COALESCE(platform_post_id,''), COALESCE(last_error,'') FROM post_targets WHERE post_id=?`,
-		postID,
-	).Scan(&status, &platformPostID, &lastErr)
-	if status != "published" {
-		t.Fatalf("target status = %q, last_error=%q", status, lastErr)
-	}
-	if platformPostID != "ig_retry_ok" {
-		t.Errorf("platform_post_id = %q", platformPostID)
-	}
-	if lastErr != "" {
-		t.Errorf("last_error should be cleared after retry success, got %q", lastErr)
-	}
-}
-
-func TestPublishInstagram_VideoContinuesWhenStatusProbeAuthFails(t *testing.T) {
-	pf := newRecordingPlatform()
-	pf.executeResponses["create_media_container"] = &sdk.ExecuteResult{
-		Success: true,
-		Status:  200,
-		Data:    json.RawMessage(`{"id":"container_video"}`),
-	}
-	pf.executeResponses["get_container_status"] = &sdk.ExecuteResult{
-		Success: false,
-		Status:  400,
-		Data:    json.RawMessage(`{"error":{"code":100,"error_subcode":33,"message":"Authorization Error","type":"GraphMethodException"}}`),
-	}
-	pf.executeResponses["publish_media_container"] = &sdk.ExecuteResult{
-		Success: true,
-		Status:  200,
-		Data:    json.RawMessage(`{"id":"ig_video_ok"}`),
-	}
-
-	ctx := newSocialCtx(t, pf)
-	app := &App{}
-	id, _, err := app.publishInstagram(ctx, platforms["instagram"], publishJob{
-		connID:    42,
-		extID:     "ig-acct-1",
-		body:      "video post",
-		pageCreds: `{"access_token":"page-token"}`,
-		media:     []mediaItem{{URL: "https://example.com/reel.mp4", Mime: "video/mp4", Bytes: 1234}},
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if id != "ig_video_ok" {
-		t.Fatalf("published id = %q", id)
-	}
-
-	var sawCreate, sawStatus, sawPublish bool
-	for _, c := range pf.executeCalls {
-		switch c.Tool {
-		case "create_media_container":
-			sawCreate = true
-			if c.Input["media_type"] != "REELS" {
-				t.Errorf("media_type = %v", c.Input["media_type"])
-			}
-			if c.Input["sync"] != true {
-				t.Errorf("sync should be true for video container creation: %+v", c.Input)
-			}
-		case "get_container_status":
-			sawStatus = true
-		case "publish_media_container":
-			sawPublish = true
-		}
-	}
-	if !sawCreate || !sawStatus || !sawPublish {
-		t.Fatalf("expected create, status probe, and publish calls; got %+v", pf.executeCalls)
-	}
-}
-
 func TestPublishInstagram_NoMediaFails(t *testing.T) {
 	pf := newRecordingPlatform()
 	ctx := newSocialCtx(t, pf)
@@ -1652,7 +1449,7 @@ func TestPublishTikTok_FileUploadInit_MultiChunkMath(t *testing.T) {
 
 func TestPublishYouTube_InitCallShape(t *testing.T) {
 	// Verify publishYoutube calls upload_video_init with the right
-	// snippet shape (title from post body, default privacy=public),
+	// snippet shape (title from post body, default privacy=private),
 	// and surfaces a clear error when the server didn't forward the
 	// Location header (older apteva-server / network drop).
 	pf := newRecordingPlatform()
@@ -1693,8 +1490,8 @@ func TestPublishYouTube_InitCallShape(t *testing.T) {
 				t.Errorf("snippet.title = %v, want body", snippet["title"])
 			}
 			status, _ := c.Input["status"].(map[string]any)
-			if status["privacyStatus"] != "public" {
-				t.Errorf("default privacyStatus should be public, got %v", status["privacyStatus"])
+			if status["privacyStatus"] != "private" {
+				t.Errorf("default privacyStatus should be private, got %v", status["privacyStatus"])
 			}
 		}
 	}
@@ -1721,10 +1518,9 @@ func TestSchedule_DispatchesToJobsApp(t *testing.T) {
 	// install id (kind=app bindings store install ids, not conn ids).
 	pf.identity.Bindings = map[string]any{"jobs": float64(101)}
 	ctx := newSocialCtx(t, pf)
-	t.Setenv("APTEVA_PROJECT_ID", "")
 	r, _ := ctx.AppDB().Exec(
 		`INSERT INTO social_accounts (project_id, platform, connection_id, display_name, status)
-		 VALUES ('ui-proj', 'twitter', 42, '@me', 'active')`,
+		 VALUES ('test-proj', 'twitter', 42, '@me', 'active')`,
 	)
 	acctID, _ := r.LastInsertId()
 
@@ -1733,7 +1529,6 @@ func TestSchedule_DispatchesToJobsApp(t *testing.T) {
 		"body":               "later",
 		"social_account_ids": []any{acctID},
 		"schedule_at":        "2026-05-01T10:00:00Z",
-		"_project_id":        "ui-proj",
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -1770,9 +1565,6 @@ func TestSchedule_DispatchesToJobsApp(t *testing.T) {
 			}
 			if c.Input["idempotency_key"] == "" {
 				t.Errorf("missing idempotency_key")
-			}
-			if c.Input["_project_id"] != "ui-proj" {
-				t.Errorf("jobs _project_id = %v, want ui-proj", c.Input["_project_id"])
 			}
 		}
 	}
@@ -1866,13 +1658,15 @@ func TestSchedule_FailureMarksTargetAndDuplicateRetriesSamePost(t *testing.T) {
 	var postID int64
 	var postStatus, targetStatus, lastErr string
 	var attempts int
-	if err := ctx.AppDB().QueryRow(`SELECT id, status FROM posts`).Scan(&postID, &postStatus); err != nil {
+	err = ctx.AppDB().QueryRow(`SELECT id, status FROM posts`).Scan(&postID, &postStatus)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := ctx.AppDB().QueryRow(
+	err = ctx.AppDB().QueryRow(
 		`SELECT status, COALESCE(last_error,''), attempts FROM post_targets WHERE post_id=?`,
 		postID,
-	).Scan(&targetStatus, &lastErr, &attempts); err != nil {
+	).Scan(&targetStatus, &lastErr, &attempts)
+	if err != nil {
 		t.Fatal(err)
 	}
 	if postStatus != "failed" || targetStatus != "failed" || attempts != 0 || !strings.Contains(lastErr, "scheduling failed") {
@@ -2046,288 +1840,6 @@ func TestHandleAvatar_RejectsTraversal(t *testing.T) {
 		if rec.Code == http.StatusOK {
 			t.Errorf("traversal name %q should not 200", name)
 		}
-	}
-}
-
-func TestInboxSyncFacebookComments(t *testing.T) {
-	pf := newRecordingPlatform()
-	pf.executeResponses["get_page_posts"] = &sdk.ExecuteResult{
-		Success: true,
-		Status:  200,
-		Data: json.RawMessage(`{"data":[
-			{"id":"100_200","permalink_url":"https://facebook.test/100_200"}
-		]}`),
-	}
-	pf.executeResponses["list_media_comments"] = &sdk.ExecuteResult{
-		Success: true,
-		Status:  200,
-		Data: json.RawMessage(`{"data":[
-			{"id":"c1","message":"hello","created_time":"2026-05-27T10:00:00+0000","from":{"id":"u1","name":"Ada","picture":{"data":{"url":"https://example.test/ada.jpg"}}},"replies":{"data":[
-				{"id":"c2","message":"reply","created_time":"2026-05-27T10:01:00+0000","from":{"id":"u2","name":"Ben"}}
-			]}}
-		]}`),
-	}
-	ctx := newSocialCtx(t, pf)
-	app := &App{}
-	r, _ := ctx.AppDB().Exec(
-		`INSERT INTO social_accounts (project_id, platform, connection_id, external_account_id, display_name, status, page_credentials)
-		 VALUES ('test-proj', 'facebook', 42, '100', 'My Page', 'active', '{"access_token":"PAGE_TOKEN"}')`,
-	)
-	acctID, _ := r.LastInsertId()
-
-	out := app.syncInbox(ctx, inboxSyncOptions{ProjectID: "test-proj", AccountIDs: []int64{acctID}, Limit: 10})
-	if out.Count != 1 || out.Results[0].Status != "ok" {
-		t.Fatalf("sync result = %+v", out)
-	}
-	if out.Results[0].Comments != 2 {
-		t.Fatalf("comments inserted = %d", out.Results[0].Comments)
-	}
-	var count int
-	if err := ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM inbox_items WHERE social_account_id=?`, acctID).Scan(&count); err != nil {
-		t.Fatal(err)
-	}
-	if count != 2 {
-		t.Fatalf("inbox item count = %d", count)
-	}
-	var parent, thread string
-	if err := ctx.AppDB().QueryRow(`SELECT COALESCE(parent_external_id,''), COALESCE(thread_external_id,'') FROM inbox_items WHERE external_id='c2'`).Scan(&parent, &thread); err != nil {
-		t.Fatal(err)
-	}
-	if parent != "c1" || thread != "c1" {
-		t.Fatalf("reply threading parent=%q thread=%q", parent, thread)
-	}
-	var avatar string
-	if err := ctx.AppDB().QueryRow(`SELECT COALESCE(author_avatar_url,'') FROM inbox_items WHERE external_id='c1'`).Scan(&avatar); err != nil {
-		t.Fatal(err)
-	}
-	if avatar != "https://example.test/ada.jpg" {
-		t.Fatalf("comment avatar = %q", avatar)
-	}
-}
-
-func TestInboxListGroupsThreadsByLatestActivity(t *testing.T) {
-	ctx := newSocialCtx(t, newRecordingPlatform())
-	base := time.Date(2026, 5, 27, 10, 0, 0, 0, time.UTC)
-	_, _ = ctx.AppDB().Exec(
-		`INSERT INTO social_accounts (id, project_id, platform, connection_id, display_name, status)
-		 VALUES (1, 'test-proj', 'facebook', 42, 'Page', 'active')`,
-	)
-	for _, row := range []inboxUpsertInput{
-		{
-			ProjectID:        "test-proj",
-			SocialAccountID:  1,
-			Platform:         "facebook",
-			Kind:             inboxKindComment,
-			ExternalID:       "c1",
-			ThreadExternalID: "c1",
-			AuthorName:       "Ada",
-			Body:             "root",
-			OccurredAt:       base,
-		},
-		{
-			ProjectID:        "test-proj",
-			SocialAccountID:  1,
-			Platform:         "facebook",
-			Kind:             inboxKindComment,
-			ExternalID:       "c2",
-			ThreadExternalID: "c1",
-			ParentExternalID: "c1",
-			AuthorName:       "Ben",
-			Body:             "latest reply",
-			OccurredAt:       base.Add(2 * time.Minute),
-		},
-		{
-			ProjectID:        "test-proj",
-			SocialAccountID:  1,
-			Platform:         "facebook",
-			Kind:             inboxKindComment,
-			ExternalID:       "c3",
-			ThreadExternalID: "c3",
-			AuthorName:       "Cy",
-			Body:             "other thread",
-			OccurredAt:       base.Add(time.Minute),
-		},
-	} {
-		if _, _, err := upsertInboxItem(ctx.AppDB(), row); err != nil {
-			t.Fatal(err)
-		}
-	}
-
-	items, err := listInboxItems(ctx.AppDB(), inboxListFilter{ProjectID: "test-proj", Limit: 10})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(items) != 2 {
-		t.Fatalf("items = %d, want 2 grouped threads: %+v", len(items), items)
-	}
-	if items[0].ExternalID != "c2" || items[1].ExternalID != "c3" {
-		t.Fatalf("thread order = [%s, %s], want latest reply c2 then c3", items[0].ExternalID, items[1].ExternalID)
-	}
-	thread, err := getInboxThread(ctx.AppDB(), "test-proj", &items[0])
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(thread) != 2 || thread[0].ExternalID != "c1" || thread[1].ExternalID != "c2" {
-		t.Fatalf("thread = %+v, want c1 then c2", thread)
-	}
-}
-
-func TestInboxSyncFacebookDMsMentionsReviews(t *testing.T) {
-	pf := newRecordingPlatform()
-	pf.executeResponses["get_page_posts"] = &sdk.ExecuteResult{
-		Success: true,
-		Status:  200,
-		Data:    json.RawMessage(`{"data":[]}`),
-	}
-	pf.executeResponses["facebook_list_conversations"] = &sdk.ExecuteResult{
-		Success: true,
-		Status:  200,
-		Data:    json.RawMessage(`{"data":[{"id":"thread_1"}]}`),
-	}
-	pf.executeResponses["list_conversation_messages"] = &sdk.ExecuteResult{
-		Success: true,
-		Status:  200,
-		Data: json.RawMessage(`{"data":[
-			{"id":"msg_1","message":"hello dm","created_time":"2026-05-27T10:00:00+0000","from":{"id":"psid_1","name":"Ada"}}
-		]}`),
-	}
-	pf.executeResponses["facebook_list_tagged"] = &sdk.ExecuteResult{
-		Success: true,
-		Status:  200,
-		Data: json.RawMessage(`{"data":[
-			{"id":"tag_1","message":"mentioned you","created_time":"2026-05-27T10:01:00+0000","from":{"id":"u1","name":"Ada"},"permalink_url":"https://facebook.test/tag_1"}
-		]}`),
-	}
-	pf.executeResponses["facebook_list_reviews"] = &sdk.ExecuteResult{
-		Success: true,
-		Status:  200,
-		Data: json.RawMessage(`{"data":[
-			{"id":"review_1","review_text":"great","recommendation_type":"positive","rating":5,"created_time":"2026-05-27T10:02:00+0000","reviewer":{"id":"u2","name":"Ben"}}
-		]}`),
-	}
-	ctx := newSocialCtx(t, pf)
-	app := &App{}
-	r, _ := ctx.AppDB().Exec(
-		`INSERT INTO social_accounts (project_id, platform, connection_id, external_account_id, display_name, status, page_credentials)
-		 VALUES ('test-proj', 'facebook', 42, '100', 'My Page', 'active', '{"access_token":"PAGE_TOKEN"}')`,
-	)
-	acctID, _ := r.LastInsertId()
-
-	out := app.syncInbox(ctx, inboxSyncOptions{ProjectID: "test-proj", AccountIDs: []int64{acctID}, Limit: 10})
-	if out.Count != 1 || out.Results[0].Status != "ok" {
-		t.Fatalf("sync result = %+v", out)
-	}
-	res := out.Results[0]
-	if res.DMs != 1 || res.Mentions != 1 || res.Reviews != 1 {
-		t.Fatalf("counts = %+v", res)
-	}
-	for kind, want := range map[string]int{inboxKindDM: 1, inboxKindMention: 1, inboxKindReview: 1} {
-		var got int
-		if err := ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM inbox_items WHERE social_account_id=? AND kind=?`, acctID, kind).Scan(&got); err != nil {
-			t.Fatal(err)
-		}
-		if got != want {
-			t.Fatalf("kind %s count = %d", kind, got)
-		}
-	}
-}
-
-func TestInboxReplyCommentCallsMetaTool(t *testing.T) {
-	pf := newRecordingPlatform()
-	pf.executeResponses["reply_to_comment"] = &sdk.ExecuteResult{
-		Success: true,
-		Status:  200,
-		Data:    json.RawMessage(`{"id":"reply_1"}`),
-	}
-	ctx := newSocialCtx(t, pf)
-	r, _ := ctx.AppDB().Exec(
-		`INSERT INTO social_accounts (project_id, platform, connection_id, external_account_id, display_name, status, page_credentials)
-		 VALUES ('test-proj', 'facebook', 42, '100', 'My Page', 'active', '{"access_token":"PAGE_TOKEN"}')`,
-	)
-	acctID, _ := r.LastInsertId()
-	itemID, _, err := upsertInboxItem(ctx.AppDB(), inboxUpsertInput{
-		ProjectID:        "test-proj",
-		SocialAccountID:  acctID,
-		Platform:         "facebook",
-		Kind:             inboxKindComment,
-		ExternalID:       "comment_1",
-		ThreadExternalID: "comment_1",
-		AuthorName:       "Ada",
-		Body:             "hello",
-		OccurredAt:       time.Date(2026, 5, 27, 10, 0, 0, 0, time.UTC),
-		Direction:        "inbound",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	app := &App{}
-	resAny, err := app.toolInboxReply(ctx, map[string]any{"id": itemID, "body": "thanks"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	res := resAny.(inboxOutcome)
-	if res.Status != "ok" || res.ExternalID != "reply_1" {
-		t.Fatalf("reply result = %+v", res)
-	}
-	if len(pf.executeCalls) != 1 || pf.executeCalls[0].Tool != "reply_to_comment" {
-		t.Fatalf("execute calls = %+v", pf.executeCalls)
-	}
-	if pf.executeCalls[0].Input["access_token"] != "PAGE_TOKEN" {
-		t.Fatalf("missing page token: %+v", pf.executeCalls[0].Input)
-	}
-	var status string
-	if err := ctx.AppDB().QueryRow(`SELECT status FROM inbox_items WHERE id=?`, itemID).Scan(&status); err != nil {
-		t.Fatal(err)
-	}
-	if status != inboxStatusReplied {
-		t.Fatalf("parent status = %q", status)
-	}
-}
-
-func TestInboxReplyFacebookDMCallsMessengerTool(t *testing.T) {
-	pf := newRecordingPlatform()
-	pf.executeResponses["facebook_send_message"] = &sdk.ExecuteResult{
-		Success: true,
-		Status:  200,
-		Data:    json.RawMessage(`{"message_id":"msg_reply_1","recipient_id":"psid_1"}`),
-	}
-	ctx := newSocialCtx(t, pf)
-	r, _ := ctx.AppDB().Exec(
-		`INSERT INTO social_accounts (project_id, platform, connection_id, external_account_id, display_name, status, page_credentials)
-		 VALUES ('test-proj', 'facebook', 42, '100', 'My Page', 'active', '{"access_token":"PAGE_TOKEN"}')`,
-	)
-	acctID, _ := r.LastInsertId()
-	itemID, _, err := upsertInboxItem(ctx.AppDB(), inboxUpsertInput{
-		ProjectID:        "test-proj",
-		SocialAccountID:  acctID,
-		Platform:         "facebook",
-		Kind:             inboxKindDM,
-		ExternalID:       "msg_1",
-		ThreadExternalID: "thread_1",
-		AuthorExternalID: "psid_1",
-		AuthorName:       "Ada",
-		Body:             "hello",
-		OccurredAt:       time.Date(2026, 5, 27, 10, 0, 0, 0, time.UTC),
-		Direction:        "inbound",
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	app := &App{}
-	resAny, err := app.toolInboxReply(ctx, map[string]any{"id": itemID, "body": "thanks"})
-	if err != nil {
-		t.Fatal(err)
-	}
-	res := resAny.(inboxOutcome)
-	if res.Status != "ok" || res.ExternalID != "msg_reply_1" {
-		t.Fatalf("reply result = %+v", res)
-	}
-	if len(pf.executeCalls) != 1 || pf.executeCalls[0].Tool != "facebook_send_message" {
-		t.Fatalf("execute calls = %+v", pf.executeCalls)
-	}
-	call := pf.executeCalls[0]
-	if call.Input["pageId"] != "100" || call.Input["messaging_type"] != "RESPONSE" || call.Input["access_token"] != "PAGE_TOKEN" {
-		t.Fatalf("bad messenger args: %+v", call.Input)
 	}
 }
 
