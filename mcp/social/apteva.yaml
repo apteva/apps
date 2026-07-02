@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: social
 display_name: Social
-version: 0.14.50
+version: 0.14.51
 description: |
   Schedule and publish posts to your social media accounts: X (Twitter),
   Facebook Pages, Instagram Business, LinkedIn, TikTok, YouTube, Reddit,
@@ -53,7 +53,7 @@ requires:
       hint: "Without jobs, scheduled posts publish synchronously when the app's worker tick fires; with jobs, scheduling is durable + retried with exponential backoff."
     - role: social_provider
       kind: integration
-      compatible_app_names: [zernio]
+      compatible_slugs: [zernio]
       required: false
       label: "Social provider (optional)"
       hint: "Import and publish through a unified social API for platforms that are hard to connect directly."

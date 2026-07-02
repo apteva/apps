@@ -44,7 +44,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: social
 display_name: Social
-version: 0.14.50
+version: 0.14.51
 description: |
   Schedule and publish posts to your social accounts (X, Facebook,
   Instagram, LinkedIn, TikTok, YouTube, Reddit, Pinterest, Threads).
@@ -79,7 +79,7 @@ requires:
       label: "Jobs (optional)"
     - role: social_provider
       kind: integration
-      compatible_app_names: [zernio]
+      compatible_slugs: [zernio]
       required: false
       label: "Social provider (optional)"
       hint: "Import and publish through a unified social API for platforms that are hard to connect directly."
