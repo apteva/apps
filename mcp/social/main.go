@@ -44,7 +44,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: social
 display_name: Social
-version: 0.14.51
+version: 0.14.52
 description: |
   Schedule and publish posts to your social accounts (X, Facebook,
   Instagram, LinkedIn, TikTok, YouTube, Reddit, Pinterest, Threads).
@@ -581,6 +581,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/accounts/oauth_done", Handler: a.handleOAuthDone},
 		{Pattern: "/accounts/finalize", Handler: a.handleAccountsFinalize},
 		{Pattern: "/accounts/", Handler: a.handleAccountsItem}, // /accounts/:id (DELETE) and /accounts/:id/pages (GET)
+		{Pattern: "/provider-profiles", Handler: a.handleProviderProfiles},
 		{Pattern: "/provider-accounts/import", Handler: a.handleProviderAccountsImport},
 		// Import management (HTTP/panel only; intentionally not an MCP tool)
 		{Pattern: "/imports/run", Handler: a.handleImportsRun},

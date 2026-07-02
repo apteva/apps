@@ -1231,10 +1231,26 @@ interface ProviderImportResponse {
     id?: number;
     provider_account_id: string;
     provider_profile_id?: string;
+    provider_profile?: string;
     platform: string;
     display_name: string;
+    avatar_url?: string;
     status: string;
     reason?: string;
+  }>;
+  error?: string;
+}
+
+interface ProviderProfileResponse {
+  status: string;
+  provider: string;
+  profiles: Array<{
+    provider_profile_id: string;
+    name: string;
+    description?: string;
+    color?: string;
+    is_default?: boolean;
+    account_usernames?: string[];
   }>;
   error?: string;
 }
@@ -1252,6 +1268,8 @@ function ProviderImportDialog({
   const [platforms, setPlatforms] = useState("");
   const [dryRun, setDryRun] = useState(true);
   const [busy, setBusy] = useState(false);
+  const [profilesBusy, setProfilesBusy] = useState(false);
+  const [providerProfiles, setProviderProfiles] = useState<ProviderProfileResponse["profiles"]>([]);
   const [result, setResult] = useState<ProviderImportResponse | null>(null);
   const run = async (preview: boolean) => {
     setBusy(true);
@@ -1291,6 +1309,30 @@ function ProviderImportDialog({
       setBusy(false);
     }
   };
+  useEffect(() => {
+    let cancelled = false;
+    const load = async () => {
+      setProfilesBusy(true);
+      try {
+        const res = await fetch(appURL("/provider-profiles", projectId), { credentials: "same-origin" });
+        if (!res.ok) throw new Error(await res.text());
+        const data = await res.json() as ProviderProfileResponse;
+        if (cancelled) return;
+        if (data.status === "ok") {
+          setProviderProfiles(data.profiles || []);
+        } else {
+          setStatus("Provider profiles failed: " + (data.error || "unknown error"));
+        }
+      } catch (e) {
+        if (!cancelled) setStatus("Provider profiles failed: " + (e as Error).message);
+      } finally {
+        if (!cancelled) setProfilesBusy(false);
+      }
+    };
+    load();
+    run(true);
+    return () => { cancelled = true; };
+  }, []);
   return (
     <div className="fixed inset-0 bg-black/60 grid place-items-center z-50" onClick={onClose}>
       <div
@@ -1306,13 +1348,19 @@ function ProviderImportDialog({
         </div>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3 mb-3">
           <label className="flex flex-col gap-1">
-            <span className="text-xs text-text-dim uppercase">Zernio profile ID</span>
-            <input
+            <span className="text-xs text-text-dim uppercase">Zernio profile</span>
+            <select
               value={providerProfileId}
               onChange={(e) => setProviderProfileId(e.target.value)}
-              placeholder="optional"
               className="bg-bg-input border border-border rounded px-3 py-2 text-sm text-text"
-            />
+            >
+              <option value="">{profilesBusy ? "Loading profiles..." : "All profiles"}</option>
+              {providerProfiles.map((profile) => (
+                <option key={profile.provider_profile_id} value={profile.provider_profile_id}>
+                  {profile.name}{profile.is_default ? " (default)" : ""}
+                </option>
+              ))}
+            </select>
           </label>
           <label className="flex flex-col gap-1">
             <span className="text-xs text-text-dim uppercase">Platforms</span>
@@ -1325,9 +1373,13 @@ function ProviderImportDialog({
           </label>
         </div>
         <div className="border border-border rounded overflow-hidden flex-1 min-h-[180px] overflow-y-auto">
-          {!result ? (
+          {!result && busy ? (
             <div className="p-6 text-sm text-text-muted text-center">
-              Preview first to see which Zernio accounts will be imported.
+              Loading Zernio accounts...
+            </div>
+          ) : !result ? (
+            <div className="p-6 text-sm text-text-muted text-center">
+              No provider preview loaded yet.
             </div>
           ) : result.accounts.length === 0 ? (
             <div className="p-6 text-sm text-text-muted text-center">
@@ -1336,10 +1388,19 @@ function ProviderImportDialog({
           ) : (
             result.accounts.map((a) => (
               <div key={`${a.provider_account_id}-${a.platform}`} className="px-3 py-2 border-b border-border last:border-b-0 flex items-center justify-between gap-3">
-                <div className="min-w-0">
-                  <div className="text-sm text-text truncate">{a.display_name || a.provider_account_id}</div>
-                  <div className="text-xs text-text-dim truncate">
-                    {a.platform} · {a.provider_account_id}
+                <div className="min-w-0 flex items-center gap-3">
+                  {a.avatar_url ? (
+                    <img src={a.avatar_url} alt="" className="w-8 h-8 rounded-full object-cover border border-border flex-shrink-0" />
+                  ) : (
+                    <div className="w-8 h-8 rounded-full bg-bg-input border border-border flex-shrink-0" />
+                  )}
+                  <div className="min-w-0">
+                    <div className="text-sm text-text truncate">{a.display_name || a.provider_account_id}</div>
+                    <div className="text-xs text-text-dim truncate">
+                      {a.platform}
+                      {a.provider_profile && ` · ${a.provider_profile}`}
+                      {` · ${a.provider_account_id}`}
+                    </div>
                   </div>
                 </div>
                 <div className={

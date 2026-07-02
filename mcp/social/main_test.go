@@ -588,7 +588,7 @@ func TestAccountImportProvider_ZernioCreatesSocialAccounts(t *testing.T) {
 		Success: true,
 		Status:  200,
 		Data: json.RawMessage(`{"accounts":[
-			{"accountId":"za_1","profileId":"zp_1","platform":"linkedin","displayName":"Company Page","avatarUrl":"https://example.com/a.png"},
+			{"accountId":"za_1","profileId":{"_id":"zp_1","name":"Default Profile"},"platform":"linkedin","displayName":"Company Page","avatarUrl":"https://example.com/a.png"},
 			{"accountId":"za_2","profileId":"zp_1","platform":"twitter","displayName":"@brand"}
 		]}`),
 	}
@@ -609,12 +609,12 @@ func TestAccountImportProvider_ZernioCreatesSocialAccounts(t *testing.T) {
 	if n != 2 {
 		t.Fatalf("provider-backed accounts = %d, want 2", n)
 	}
-	var platform, providerAccountID string
+	var platform, providerAccountID, providerProfileID string
 	ctx.AppDB().QueryRow(
-		`SELECT platform, provider_account_id FROM social_accounts WHERE display_name='Company Page'`,
-	).Scan(&platform, &providerAccountID)
-	if platform != "linkedin" || providerAccountID != "za_1" {
-		t.Fatalf("stored account = %s %s", platform, providerAccountID)
+		`SELECT platform, provider_account_id, provider_profile_id FROM social_accounts WHERE display_name='Company Page'`,
+	).Scan(&platform, &providerAccountID, &providerProfileID)
+	if platform != "linkedin" || providerAccountID != "za_1" || providerProfileID != "zp_1" {
+		t.Fatalf("stored account = %s %s %s", platform, providerAccountID, providerProfileID)
 	}
 }
 

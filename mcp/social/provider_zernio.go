@@ -29,6 +29,7 @@ type providerAccountRow struct {
 	ID                int64          `json:"id,omitempty"`
 	ProviderAccountID string         `json:"provider_account_id"`
 	ProviderProfileID string         `json:"provider_profile_id,omitempty"`
+	ProviderProfile   string         `json:"provider_profile,omitempty"`
 	Platform          string         `json:"platform"`
 	DisplayName       string         `json:"display_name"`
 	AvatarURL         string         `json:"avatar_url,omitempty"`
@@ -40,11 +41,28 @@ type providerAccountRow struct {
 type zernioAccount struct {
 	AccountID string
 	ProfileID string
+	Profile   string
 	Platform  string
 	Name      string
 	Avatar    string
 	Status    string
 	Raw       map[string]any
+}
+
+type zernioProfile struct {
+	ID               string   `json:"provider_profile_id"`
+	Name             string   `json:"name"`
+	Description      string   `json:"description,omitempty"`
+	Color            string   `json:"color,omitempty"`
+	IsDefault        bool     `json:"is_default,omitempty"`
+	AccountUsernames []string `json:"account_usernames,omitempty"`
+}
+
+type providerProfileListResult struct {
+	Status   string          `json:"status"`
+	Provider string          `json:"provider"`
+	Profiles []zernioProfile `json:"profiles"`
+	Error    string          `json:"error,omitempty"`
 }
 
 type zernioProviderPlatform struct {
@@ -120,6 +138,31 @@ func (a *App) handleProviderAccountsImport(w http.ResponseWriter, r *http.Reques
 	writeJSON(w, out)
 }
 
+func (a *App) handleProviderProfiles(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "GET only", http.StatusMethodNotAllowed)
+		return
+	}
+	args := projectArgsFromRequest(r)
+	out := providerProfileListResult{Status: "ok", Provider: zernioProviderSlug}
+	connID, err := zernioConnectionID(globalCtx, projectScope(globalCtx, args))
+	if err != nil {
+		out.Status = "failed"
+		out.Error = err.Error()
+		writeJSON(w, out)
+		return
+	}
+	profiles, err := a.listZernioProfiles(globalCtx, connID, args)
+	if err != nil {
+		out.Status = "failed"
+		out.Error = err.Error()
+		writeJSON(w, out)
+		return
+	}
+	out.Profiles = profiles
+	writeJSON(w, out)
+}
+
 func (a *App) importZernioAccounts(ctx *sdk.AppCtx, pid string, args map[string]any) providerAccountImportResult {
 	out := providerAccountImportResult{
 		Status:   "ok",
@@ -157,6 +200,7 @@ func (a *App) importZernioAccounts(ctx *sdk.AppCtx, pid string, args map[string]
 		row := providerAccountRow{
 			ProviderAccountID: za.AccountID,
 			ProviderProfileID: za.ProfileID,
+			ProviderProfile:   za.Profile,
 			Platform:          za.Platform,
 			DisplayName:       za.Name,
 			AvatarURL:         za.Avatar,
@@ -205,6 +249,7 @@ func (a *App) upsertZernioSocialAccount(ctx *sdk.AppCtx, pid string, connID int6
 	row := providerAccountRow{
 		ProviderAccountID: za.AccountID,
 		ProviderProfileID: za.ProfileID,
+		ProviderProfile:   za.Profile,
 		Platform:          za.Platform,
 		DisplayName:       nonEmpty(za.Name, za.Platform),
 		AvatarURL:         za.Avatar,
@@ -563,14 +608,53 @@ func (a *App) listZernioAccounts(ctx *sdk.AppCtx, connID int64, args map[string]
 		if name == "" {
 			name = id
 		}
+		profileID, profileName := zernioProfileIdentity(item["profileId"])
+		if profileID == "" {
+			profileID, profileName = zernioProfileIdentity(item["profile_id"])
+		}
 		out = append(out, zernioAccount{
 			AccountID: id,
-			ProfileID: firstString(item, "profileId", "profile_id"),
+			ProfileID: profileID,
+			Profile:   profileName,
 			Platform:  platform,
 			Name:      name,
 			Avatar:    firstString(item, "avatarUrl", "avatar_url", "profilePictureUrl", "profile_picture_url", "picture", "image"),
 			Status:    firstString(item, "status", "state"),
 			Raw:       item,
+		})
+	}
+	return out, nil
+}
+
+func (a *App) listZernioProfiles(ctx *sdk.AppCtx, connID int64, args map[string]any) ([]zernioProfile, error) {
+	input := map[string]any{}
+	if v := strings.TrimSpace(toString(args["search"])); v != "" {
+		input["search"] = v
+	}
+	if limit := intArg(args, "limit", 100); limit > 0 {
+		input["limit"] = limit
+	}
+	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "list_profiles", input)
+	if err != nil {
+		return nil, err
+	}
+	if res == nil || !res.Success {
+		return nil, upstreamError(res)
+	}
+	items := jsonItems(res.Data, "profiles", "data", "items", "results")
+	out := make([]zernioProfile, 0, len(items))
+	for _, item := range items {
+		id, name := zernioProfileIdentity(item)
+		if id == "" {
+			continue
+		}
+		out = append(out, zernioProfile{
+			ID:               id,
+			Name:             nonEmpty(name, id),
+			Description:      firstString(item, "description"),
+			Color:            firstString(item, "color"),
+			IsDefault:        boolFromAny(item["isDefault"]) || boolFromAny(item["is_default"]),
+			AccountUsernames: stringSliceAny(item["accountUsernames"], item["account_usernames"]),
 		})
 	}
 	return out, nil
@@ -1288,6 +1372,45 @@ func mapItems(arr []any) []map[string]any {
 	for _, v := range arr {
 		if m, ok := v.(map[string]any); ok {
 			out = append(out, m)
+		}
+	}
+	return out
+}
+
+func zernioProfileIdentity(v any) (id, name string) {
+	switch x := v.(type) {
+	case string:
+		return strings.TrimSpace(x), ""
+	case map[string]any:
+		return firstString(x, "_id", "id", "profileId", "profile_id"), firstString(x, "name", "displayName", "display_name")
+	default:
+		return "", ""
+	}
+}
+
+func stringSliceAny(values ...any) []string {
+	out := []string{}
+	for _, value := range values {
+		switch x := value.(type) {
+		case []any:
+			for _, item := range x {
+				if s := strings.TrimSpace(toString(item)); s != "" {
+					out = append(out, s)
+				}
+			}
+		case []string:
+			for _, item := range x {
+				if s := strings.TrimSpace(item); s != "" {
+					out = append(out, s)
+				}
+			}
+		case string:
+			if s := strings.TrimSpace(x); s != "" {
+				out = append(out, s)
+			}
+		}
+		if len(out) > 0 {
+			return out
 		}
 	}
 	return out
