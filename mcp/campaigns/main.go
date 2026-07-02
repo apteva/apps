@@ -31,7 +31,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: campaigns
 display_name: Campaigns
-version: 0.2.8
+version: 0.2.9
 description: |
   Bulk-send orchestrator. Compose a campaign, target a CRM segment or
   list, schedule it; jobs drives the materialise → tick loop, messaging
@@ -95,6 +95,8 @@ provides:
       description: List a campaign's recipients with status filter.
     - name: campaigns_stats
       description: Aggregate counts per status.
+    - name: campaigns_reconcile
+      description: Backfill recipient delivery/open/bounce status from Messaging.
   ui_panels:
     - slot: project.page
       label: Campaigns
@@ -209,7 +211,7 @@ func (a *App) handleHTTPCampaigns(w http.ResponseWriter, r *http.Request) {
 // Sub-paths:
 //   - recipients          — GET list with status filter
 //   - stats               — GET aggregate counts
-//   - schedule | start_now| pause | resume | cancel | send_test — POST lifecycle
+//   - schedule | start_now| pause | resume | cancel | send_test | reconcile — POST lifecycle
 //   - materialise | tick  — POST internal (called by jobs only)
 func (a *App) handleHTTPCampaignItem(w http.ResponseWriter, r *http.Request) {
 	rest := strings.TrimPrefix(r.URL.Path, "/campaigns/")
@@ -244,6 +246,9 @@ func (a *App) handleHTTPCampaignItem(w http.ResponseWriter, r *http.Request) {
 			return
 		case "send_test":
 			a.handleHTTPSendTest(w, r, id)
+			return
+		case "reconcile":
+			a.handleHTTPReconcile(w, r, id)
 			return
 		case "materialise":
 			a.handleHTTPMaterialise(w, r, id)
@@ -407,6 +412,14 @@ func (a *App) MCPTools() []sdk.Tool {
 				"id": map[string]any{"type": "integer"},
 			}, []string{"id"}),
 			Handler: a.toolCampaignsStats,
+		},
+		{
+			Name:        "campaigns_reconcile",
+			Description: "Backfill recipient delivery/open/bounce status from Messaging. Args: id.",
+			InputSchema: schemaObject(map[string]any{
+				"id": map[string]any{"type": "integer"},
+			}, []string{"id"}),
+			Handler: a.toolCampaignsReconcile,
 		},
 	}
 }

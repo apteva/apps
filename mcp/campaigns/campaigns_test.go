@@ -37,6 +37,15 @@ func (p *campaignsPlatform) CallAppResult(appName, tool string, input map[string
 		reply = map[string]any{"suppressed": false}
 	case "jobs_schedule":
 		reply = map[string]any{"job": map[string]any{"id": 123}}
+	case "message_get":
+		reply = map[string]any{
+			"found":   true,
+			"message": map[string]any{"id": input["id"], "status": "opened"},
+			"events": []map[string]any{
+				{"message_id": input["id"], "kind": "delivered", "occurred_at": "2026-07-02T12:00:00Z"},
+				{"message_id": input["id"], "kind": "opened", "occurred_at": "2026-07-02T12:01:00Z"},
+			},
+		}
 	}
 	if out == nil {
 		return nil
@@ -281,6 +290,32 @@ func TestJobsTargetsIncludeProjectIDForGlobalInstall(t *testing.T) {
 		if !strings.Contains(path, "project_id=test-proj") {
 			t.Fatalf("job target path %q missing project_id", path)
 		}
+	}
+}
+
+func TestCampaignsReconcileBackfillsFromMessagingEvents(t *testing.T) {
+	recorder := tk.NewEmitRecorder()
+	platform := &campaignsPlatform{}
+	ctx := newCampaignsTestCtx(t, platform, tk.WithEmitter(recorder))
+	campaignID := mustSeedSentRecipient(t, ctx, 900, "alice@example.com")
+
+	out, err := (&App{}).toolCampaignsReconcile(ctx, map[string]any{"_project_id": "test-proj", "id": campaignID})
+	if err != nil {
+		t.Fatalf("reconcile: %v", err)
+	}
+	got := out.(map[string]any)
+	if got["checked"] != 1 || got["updated"] != 2 {
+		t.Fatalf("reconcile result=%#v, want checked=1 updated=2", got)
+	}
+	recips, err := dbRecipientsList(ctx.AppDB(), "test-proj", campaignID, "", 10)
+	if err != nil {
+		t.Fatalf("list recipients: %v", err)
+	}
+	if len(recips) != 1 || recips[0].Status != RecipOpened {
+		t.Fatalf("recipient after reconcile=%#v, want opened", recips)
+	}
+	if events := recorder.EventsByTopic("campaign.recipient_updated"); len(events) != 2 {
+		t.Fatalf("recipient_updated events=%d, want 2", len(events))
 	}
 }
 

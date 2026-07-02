@@ -406,6 +406,75 @@ func (a *App) toolCampaignsStats(ctx *sdk.AppCtx, args map[string]any) (any, err
 	return map[string]any{"stats": stats}, nil
 }
 
+func (a *App) toolCampaignsReconcile(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	id := int64Arg(args, "id")
+	if id == 0 {
+		return nil, errors.New("id required")
+	}
+	if c, err := dbCampaignGet(ctx.AppDB(), pid, id); err != nil {
+		return nil, err
+	} else if c == nil {
+		return nil, errors.New("campaign not found")
+	}
+	recips, err := dbRecipientsList(ctx.AppDB(), pid, id, "", 1000)
+	if err != nil {
+		return nil, err
+	}
+	checked, updated, failed := 0, 0, 0
+	for _, r := range recips {
+		if r.MessagingID == nil || *r.MessagingID == 0 {
+			continue
+		}
+		checked++
+		events, messageStatus, err := callMessagingMessageEvents(ctx, pid, *r.MessagingID)
+		if err != nil {
+			failed++
+			continue
+		}
+		current := r.Status
+		applied := false
+		for _, ev := range events {
+			status := campaignRecipientStatusForMessageEvent(strArg(ev, "kind"))
+			if !shouldApplyCampaignRecipientStatus(current, status) {
+				continue
+			}
+			rec, changed, err := dbRecipientApplyMessageEvent(ctx.AppDB(), pid, *r.MessagingID, strArg(ev, "recipient"), status, strArg(ev, "occurred_at"), strArg(ev, "reason"))
+			if err != nil {
+				failed++
+				continue
+			}
+			if changed && rec != nil {
+				current = rec.Status
+				updated++
+				applied = true
+				emitRecipientUpdated(ctx, rec, *r.MessagingID, strArg(ev, "kind"))
+			}
+		}
+		if applied {
+			continue
+		}
+		status := campaignRecipientStatusForMessageEvent(messageStatus)
+		if !shouldApplyCampaignRecipientStatus(current, status) {
+			continue
+		}
+		rec, changed, err := dbRecipientApplyMessageEvent(ctx.AppDB(), pid, *r.MessagingID, "", status, "", "")
+		if err != nil {
+			failed++
+			continue
+		}
+		if changed && rec != nil {
+			updated++
+			emitRecipientUpdated(ctx, rec, *r.MessagingID, messageStatus)
+		}
+	}
+	stats, _ := dbRecipientStats(ctx.AppDB(), pid, id)
+	return map[string]any{"checked": checked, "updated": updated, "failed": failed, "stats": stats}, nil
+}
+
 // ─── Send pipeline core ───────────────────────────────────────────
 
 // materialiseCampaign expands the audience into campaign_recipients
@@ -787,15 +856,19 @@ func (a *App) handleMessageEvent(ctx *sdk.AppCtx, ev sdk.Event) error {
 	if err != nil || !changed || rec == nil {
 		return err
 	}
+	emitRecipientUpdated(ctx, rec, messageID, strArg(ev.Data, "kind"))
+	return nil
+}
+
+func emitRecipientUpdated(ctx *sdk.AppCtx, rec *Recipient, messageID int64, eventKind string) {
 	ctx.Emit("campaign.recipient_updated", map[string]any{
 		"campaign_id":  rec.CampaignID,
 		"recipient_id": rec.ID,
 		"messaging_id": messageID,
 		"status":       rec.Status,
-		"event_kind":   strArg(ev.Data, "kind"),
+		"event_kind":   eventKind,
 		"address":      rec.Address,
 	})
-	return nil
 }
 
 func campaignRecipientStatusForMessageEvent(kind string) string {
@@ -814,6 +887,37 @@ func campaignRecipientStatusForMessageEvent(kind string) string {
 	default:
 		return ""
 	}
+}
+
+func shouldApplyCampaignRecipientStatus(current, next string) bool {
+	if next == "" || current == next {
+		return false
+	}
+	if current == RecipBounced || current == RecipComplained || current == RecipFailed || current == RecipSkipped || current == RecipUnsubscribed {
+		return false
+	}
+	if next == RecipDelivered && current == RecipOpened {
+		return false
+	}
+	return true
+}
+
+func callMessagingMessageEvents(ctx *sdk.AppCtx, pid string, messagingID int64) ([]map[string]any, string, error) {
+	var out struct {
+		Found   bool             `json:"found"`
+		Message map[string]any   `json:"message"`
+		Events  []map[string]any `json:"events"`
+	}
+	if err := ctx.PlatformAPI().CallAppResult("messaging", "message_get", map[string]any{
+		"_project_id": pid,
+		"id":          messagingID,
+	}, &out); err != nil {
+		return nil, "", err
+	}
+	if !out.Found {
+		return nil, "", nil
+	}
+	return out.Events, strArg(out.Message, "status"), nil
 }
 
 func int64Value(v any) int64 {
@@ -1101,6 +1205,9 @@ func (a *App) handleHTTPCancel(w http.ResponseWriter, r *http.Request, id int64)
 func (a *App) handleHTTPSendTest(w http.ResponseWriter, r *http.Request, id int64) {
 	a.runLifecycle(w, r, id, "send_test")
 }
+func (a *App) handleHTTPReconcile(w http.ResponseWriter, r *http.Request, id int64) {
+	a.runLifecycle(w, r, id, "reconcile")
+}
 func (a *App) handleHTTPClone(w http.ResponseWriter, r *http.Request, id int64) {
 	a.runLifecycle(w, r, id, "clone")
 }
@@ -1138,6 +1245,8 @@ func (a *App) runLifecycle(w http.ResponseWriter, r *http.Request, id int64, act
 		out, err = a.toolCampaignsSendTest(globalCtx, body)
 	case "clone":
 		out, err = a.toolCampaignsClone(globalCtx, body)
+	case "reconcile":
+		out, err = a.toolCampaignsReconcile(globalCtx, body)
 	default:
 		httpErr(w, http.StatusBadRequest, "unknown action")
 		return

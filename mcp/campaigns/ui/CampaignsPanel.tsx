@@ -415,6 +415,7 @@ export default function CampaignsPanel({ projectId, installId }: NativePanelProp
                   onResume={() => lifecycleAction(detail.id, "resume")}
                   onCancel={() => cancelCampaign(detail)}
                   onSendTest={() => setTestOpen(true)}
+                  onReconcile={() => lifecycleAction(detail.id, "reconcile")}
                   onArchive={() => archive(detail)}
                 />
               </div>
@@ -685,7 +686,7 @@ function AudienceSummary({
 
 // ─── Campaign actions ──────────────────────────────────────────────
 
-function CampaignActions({ c, onEdit, onClone, onSchedule, onStartNow, onPause, onResume, onCancel, onSendTest, onArchive }: {
+function CampaignActions({ c, onEdit, onClone, onSchedule, onStartNow, onPause, onResume, onCancel, onSendTest, onReconcile, onArchive }: {
   c: Campaign;
   onEdit: () => void;
   onClone: () => void;
@@ -695,6 +696,7 @@ function CampaignActions({ c, onEdit, onClone, onSchedule, onStartNow, onPause, 
   onResume: () => void;
   onCancel: () => void;
   onSendTest: () => void;
+  onReconcile: () => void;
   onArchive: () => void;
 }) {
   const editable = c.status === "draft" || c.status === "paused";
@@ -705,6 +707,7 @@ function CampaignActions({ c, onEdit, onClone, onSchedule, onStartNow, onPause, 
       {editable && <ActBtn onClick={onEdit}>Edit</ActBtn>}
       <ActBtn onClick={onClone}>Clone</ActBtn>
       <ActBtn onClick={onSendTest}>Test send</ActBtn>
+      <ActBtn onClick={onReconcile}>Refresh stats</ActBtn>
       {c.status === "draft" && <ActBtn onClick={onSchedule}>Schedule</ActBtn>}
       {startable && <ActBtn primary onClick={onStartNow}>Start now</ActBtn>}
       {c.status === "sending" && <ActBtn onClick={onPause}>Pause</ActBtn>}
