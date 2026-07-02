@@ -29,6 +29,29 @@ import (
 	sdk "github.com/apteva/app-sdk"
 )
 
+func campaignEventPayload(c *Campaign, id int64, status string, extra map[string]any) map[string]any {
+	if c != nil {
+		id = c.ID
+		if status == "" {
+			status = c.Status
+		}
+	}
+	payload := map[string]any{
+		"campaign_id": id,
+		"id":          id,
+	}
+	if c != nil && c.Name != "" {
+		payload["name"] = c.Name
+	}
+	if status != "" {
+		payload["status"] = status
+	}
+	for k, v := range extra {
+		payload[k] = v
+	}
+	return payload
+}
+
 // ─── Authoring tools ──────────────────────────────────────────────
 
 func (a *App) toolCampaignsCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -60,7 +83,7 @@ func (a *App) toolCampaignsCreate(ctx *sdk.AppCtx, args map[string]any) (any, er
 	if err != nil {
 		return nil, err
 	}
-	ctx.Emit("campaign.created", map[string]any{"id": out.ID, "name": out.Name})
+	ctx.Emit("campaign.created", campaignEventPayload(out, 0, "", nil))
 	return map[string]any{"campaign": out}, nil
 }
 
@@ -127,7 +150,7 @@ func (a *App) toolCampaignsUpdate(ctx *sdk.AppCtx, args map[string]any) (any, er
 	if err != nil {
 		return nil, err
 	}
-	ctx.Emit("campaign.updated", map[string]any{"id": id})
+	ctx.Emit("campaign.updated", campaignEventPayload(out, id, "", nil))
 	return map[string]any{"campaign": out}, nil
 }
 
@@ -165,7 +188,7 @@ func (a *App) toolCampaignsClone(ctx *sdk.AppCtx, args map[string]any) (any, err
 	if err != nil {
 		return nil, err
 	}
-	ctx.Emit("campaign.created", map[string]any{"id": out.ID, "name": out.Name})
+	ctx.Emit("campaign.created", campaignEventPayload(out, 0, "", nil))
 	return map[string]any{"campaign": out}, nil
 }
 
@@ -181,7 +204,7 @@ func (a *App) toolCampaignsDelete(ctx *sdk.AppCtx, args map[string]any) (any, er
 	if err := dbCampaignArchive(ctx.AppDB(), pid, id); err != nil {
 		return nil, err
 	}
-	ctx.Emit("campaign.archived", map[string]any{"id": id})
+	ctx.Emit("campaign.archived", campaignEventPayload(nil, id, "", map[string]any{"archived": true}))
 	return map[string]any{"archived": true, "id": id}, nil
 }
 
@@ -261,7 +284,10 @@ func (a *App) toolCampaignsSchedule(ctx *sdk.AppCtx, args map[string]any) (any, 
 		return nil, err
 	}
 	out, _ := dbCampaignSetStatus(ctx.AppDB(), pid, id, StatusScheduled, "", false, false)
-	ctx.Emit("campaign.scheduled", map[string]any{"id": id, "scheduled_at": scheduledAt, "job_id": jobID})
+	ctx.Emit("campaign.scheduled", campaignEventPayload(out, id, StatusScheduled, map[string]any{
+		"scheduled_at": scheduledAt,
+		"job_id":       jobID,
+	}))
 	return map[string]any{"campaign": out, "job_id": jobID}, nil
 }
 
@@ -319,7 +345,7 @@ func (a *App) toolCampaignsPause(ctx *sdk.AppCtx, args map[string]any) (any, err
 	cancelOwnedJobs(ctx, pid, c)
 	out, _ := dbCampaignSetStatus(ctx.AppDB(), pid, id, StatusPaused, "", false, false)
 	_ = dbCampaignSetJobIDs(ctx.AppDB(), pid, id, "")
-	ctx.Emit("campaign.paused", map[string]any{"id": id})
+	ctx.Emit("campaign.paused", campaignEventPayload(out, id, StatusPaused, nil))
 	return map[string]any{"campaign": out}, nil
 }
 
@@ -343,7 +369,7 @@ func (a *App) toolCampaignsResume(ctx *sdk.AppCtx, args map[string]any) (any, er
 		return nil, fmt.Errorf("start tick job: %w", err)
 	}
 	out, _ := dbCampaignSetStatus(ctx.AppDB(), pid, id, StatusSending, "", false, false)
-	ctx.Emit("campaign.resumed", map[string]any{"id": id})
+	ctx.Emit("campaign.resumed", campaignEventPayload(out, id, StatusSending, nil))
 	return map[string]any{"campaign": out}, nil
 }
 
@@ -370,7 +396,7 @@ func (a *App) toolCampaignsCancel(ctx *sdk.AppCtx, args map[string]any) (any, er
 	skipped, _ := dbRecipientCancelPending(ctx.AppDB(), pid, id)
 	out, _ := dbCampaignSetStatus(ctx.AppDB(), pid, id, StatusCancelled, "cancelled by user", false, true)
 	_ = dbCampaignSetJobIDs(ctx.AppDB(), pid, id, "")
-	ctx.Emit("campaign.cancelled", map[string]any{"id": id, "skipped": skipped})
+	ctx.Emit("campaign.cancelled", campaignEventPayload(out, id, StatusCancelled, map[string]any{"skipped": skipped}))
 	return map[string]any{"campaign": out, "skipped_pending": skipped}, nil
 }
 
@@ -415,9 +441,11 @@ func (a *App) toolCampaignsReconcile(ctx *sdk.AppCtx, args map[string]any) (any,
 	if id == 0 {
 		return nil, errors.New("id required")
 	}
-	if c, err := dbCampaignGet(ctx.AppDB(), pid, id); err != nil {
+	c, err := dbCampaignGet(ctx.AppDB(), pid, id)
+	if err != nil {
 		return nil, err
-	} else if c == nil {
+	}
+	if c == nil {
 		return nil, errors.New("campaign not found")
 	}
 	recips, err := dbRecipientsList(ctx.AppDB(), pid, id, "", 1000)
@@ -472,6 +500,13 @@ func (a *App) toolCampaignsReconcile(ctx *sdk.AppCtx, args map[string]any) (any,
 		}
 	}
 	stats, _ := dbRecipientStats(ctx.AppDB(), pid, id)
+	payload := campaignEventPayload(c, id, "", map[string]any{
+		"checked": checked,
+		"updated": updated,
+		"failed":  failed,
+		"stats":   stats,
+	})
+	ctx.Emit("campaign.reconciled", payload)
 	return map[string]any{"checked": checked, "updated": updated, "failed": failed, "stats": stats}, nil
 }
 
@@ -542,7 +577,7 @@ func materialiseCampaign(ctx *sdk.AppCtx, pid string, c *Campaign) error {
 	if _, err := dbCampaignSetStatus(ctx.AppDB(), pid, c.ID, StatusSending, "", false, false); err != nil {
 		return err
 	}
-	ctx.Emit("campaign.sending", map[string]any{"id": c.ID, "audience_size": len(contactIDs)})
+	ctx.Emit("campaign.sending", campaignEventPayload(c, 0, StatusSending, map[string]any{"audience_size": len(contactIDs)}))
 	return nil
 }
 
@@ -647,7 +682,8 @@ func tickCampaign(ctx *sdk.AppCtx, pid string, c *Campaign) error {
 		cancelOwnedJobs(ctx, pid, c)
 		_, _ = dbCampaignSetStatus(ctx.AppDB(), pid, c.ID, StatusSent, "", false, true)
 		_ = dbCampaignSetJobIDs(ctx.AppDB(), pid, c.ID, "")
-		ctx.Emit("campaign.sent", map[string]any{"id": c.ID})
+		stats, _ := dbRecipientStats(ctx.AppDB(), pid, c.ID)
+		ctx.Emit("campaign.sent", campaignEventPayload(c, 0, StatusSent, map[string]any{"stats": stats}))
 	}
 	return nil
 }
@@ -1150,7 +1186,7 @@ func (a *App) handleHTTPCampaignDelete(w http.ResponseWriter, r *http.Request, i
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	globalCtx.Emit("campaign.archived", map[string]any{"id": id})
+	globalCtx.Emit("campaign.archived", campaignEventPayload(nil, id, "", map[string]any{"archived": true}))
 	httpJSON(w, map[string]any{"archived": true, "id": id})
 }
 
@@ -1349,6 +1385,7 @@ func (a *App) handleHTTPUnsubscribe(w http.ResponseWriter, r *http.Request) {
 				"address", rec.Address, "err", err.Error())
 		}
 		globalCtx.Emit("campaign.unsubscribed", map[string]any{
+			"id":           u.CampaignID,
 			"campaign_id":  u.CampaignID,
 			"recipient_id": u.RecipientID,
 			"address":      rec.Address,

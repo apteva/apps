@@ -86,6 +86,38 @@ func newCampaignsTestCtx(t *testing.T, platform *campaignsPlatform, opts ...tk.O
 	return tk.NewAppCtx(t, "apteva.yaml", full...)
 }
 
+func TestCampaignCreateEventIncludesCampaignIDAndStatus(t *testing.T) {
+	recorder := tk.NewEmitRecorder()
+	ctx := newCampaignsTestCtx(t, nil, tk.WithEmitter(recorder))
+
+	out, err := (&App{}).toolCampaignsCreate(ctx, map[string]any{
+		"_project_id": "test-proj",
+		"name":        "Launch",
+		"channel":     ChannelEmail,
+		"subject":     "Hello",
+		"body_text":   "Body",
+		"segment_id":  int64(42),
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	campaign := out.(map[string]any)["campaign"].(*Campaign)
+	events := recorder.EventsByTopic("campaign.created")
+	if len(events) != 1 {
+		t.Fatalf("campaign.created events=%d, want 1", len(events))
+	}
+	data, ok := events[0].Data.(map[string]any)
+	if !ok {
+		t.Fatalf("event data type=%T, want map[string]any", events[0].Data)
+	}
+	if data["campaign_id"] != campaign.ID || data["id"] != campaign.ID {
+		t.Fatalf("event campaign ids=%#v, want %d", data, campaign.ID)
+	}
+	if data["status"] != StatusDraft || data["name"] != "Launch" {
+		t.Fatalf("event data=%#v, want draft Launch", data)
+	}
+}
+
 func TestTickEmailCampaignAddsUnsubscribeLinkAndToken(t *testing.T) {
 	platform := &campaignsPlatform{}
 	ctx := newCampaignsTestCtx(t, platform)
@@ -316,6 +348,17 @@ func TestCampaignsReconcileBackfillsFromMessagingEvents(t *testing.T) {
 	}
 	if events := recorder.EventsByTopic("campaign.recipient_updated"); len(events) != 2 {
 		t.Fatalf("recipient_updated events=%d, want 2", len(events))
+	}
+	events := recorder.EventsByTopic("campaign.reconciled")
+	if len(events) != 1 {
+		t.Fatalf("campaign.reconciled events=%d, want 1", len(events))
+	}
+	data, ok := events[0].Data.(map[string]any)
+	if !ok {
+		t.Fatalf("reconciled event data type=%T, want map[string]any", events[0].Data)
+	}
+	if data["campaign_id"] != campaignID || data["updated"] != 2 || data["stats"] == nil {
+		t.Fatalf("reconciled event data=%#v", data)
 	}
 }
 

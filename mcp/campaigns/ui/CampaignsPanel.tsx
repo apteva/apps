@@ -79,6 +79,13 @@ function useAppEvents<T = unknown>(
   }, [app, projectId]);
 }
 
+function eventCampaignId(ev: AppEventEnvelope<unknown>): number | null {
+  const data = ev.data && typeof ev.data === "object" ? ev.data as Record<string, unknown> : {};
+  const raw = data.campaign_id ?? data.id;
+  const id = typeof raw === "number" ? raw : typeof raw === "string" ? Number(raw) : NaN;
+  return Number.isFinite(id) && id > 0 ? id : null;
+}
+
 interface NativePanelProps {
   appName: string;
   installId: number;
@@ -228,10 +235,36 @@ export default function CampaignsPanel({ projectId, installId }: NativePanelProp
   useEffect(() => { loadAudienceOptions(); }, [loadAudienceOptions]);
 
   useAppEvents("campaigns", projectId, (ev) => {
-    if (ev.topic.startsWith("campaign.")) {
-      setLastCampaignEvent(`${ev.topic} · ${fmt(ev.time)}`);
-      loadList();
-      if (selectedId) loadDetail(selectedId);
+    if (!ev.topic.startsWith("campaign.")) return;
+    setLastCampaignEvent(`${ev.topic} · ${fmt(ev.time)}`);
+
+    const campaignId = eventCampaignId(ev);
+    const selectedMatches = selectedId != null && campaignId === selectedId;
+    const refreshSelected = () => {
+      if (selectedMatches) loadDetail(selectedId);
+    };
+
+    switch (ev.topic) {
+      case "campaign.created":
+      case "campaign.updated":
+      case "campaign.archived":
+      case "campaign.scheduled":
+      case "campaign.sending":
+      case "campaign.paused":
+      case "campaign.resumed":
+      case "campaign.cancelled":
+      case "campaign.sent":
+        loadList();
+        refreshSelected();
+        break;
+      case "campaign.recipient_updated":
+      case "campaign.reconciled":
+      case "campaign.unsubscribed":
+        refreshSelected();
+        break;
+      default:
+        loadList();
+        refreshSelected();
     }
   });
 

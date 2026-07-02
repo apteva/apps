@@ -31,7 +31,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: campaigns
 display_name: Campaigns
-version: 0.2.9
+version: 0.2.10
 description: |
   Bulk-send orchestrator. Compose a campaign, target a CRM segment or
   list, schedule it; jobs drives the materialise → tick loop, messaging
@@ -130,6 +130,14 @@ provides:
         status: string
         event_kind: string
         address: string
+    - name: campaign.reconciled
+      description: Campaign recipient delivery stats were reconciled from Messaging.
+      payload:
+        campaign_id: integer
+        checked: integer
+        updated: integer
+        failed: integer
+        stats: object
     - name: campaign.unsubscribed
       description: A recipient used a campaign unsubscribe link and was added to Messaging suppression.
       payload:
