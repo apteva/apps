@@ -1271,6 +1271,20 @@ function ProviderImportDialog({
   const [profilesBusy, setProfilesBusy] = useState(false);
   const [providerProfiles, setProviderProfiles] = useState<ProviderProfileResponse["profiles"]>([]);
   const [result, setResult] = useState<ProviderImportResponse | null>(null);
+  const [selectedAccountIds, setSelectedAccountIds] = useState<Set<string>>(new Set());
+  const selectedCount = result?.accounts.filter((a) => selectedAccountIds.has(a.provider_account_id)).length || 0;
+  const selectableCount = result?.accounts.filter((a) => a.status !== "failed").length || 0;
+  const setAllSelected = (accounts: ProviderImportResponse["accounts"]) => {
+    setSelectedAccountIds(new Set(accounts.filter((a) => a.status !== "failed").map((a) => a.provider_account_id)));
+  };
+  const toggleSelected = (id: string) => {
+    setSelectedAccountIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  };
   const run = async (preview: boolean) => {
     setBusy(true);
     setDryRun(preview);
@@ -1284,6 +1298,7 @@ function ProviderImportDialog({
       if (providerProfileId.trim()) body.provider_profile_id = providerProfileId.trim();
       const platformList = platforms.split(",").map((s) => s.trim().toLowerCase()).filter(Boolean);
       if (platformList.length) body.platforms = platformList;
+      if (!preview) body.provider_account_ids = Array.from(selectedAccountIds);
       const res = await fetch(appURL("/provider-accounts/import", projectId), {
         method: "POST",
         credentials: "same-origin",
@@ -1298,6 +1313,7 @@ function ProviderImportDialog({
         return;
       }
       if (preview) {
+        setAllSelected(data.accounts);
         setStatus(`Provider preview: ${data.accounts.length} account${data.accounts.length !== 1 ? "s" : ""}.`);
       } else {
         setStatus(`Imported ${data.imported}; skipped ${data.skipped_existing}; failed ${data.failed}.`);
@@ -1387,8 +1403,15 @@ function ProviderImportDialog({
             </div>
           ) : (
             result.accounts.map((a) => (
-              <div key={`${a.provider_account_id}-${a.platform}`} className="px-3 py-2 border-b border-border last:border-b-0 flex items-center justify-between gap-3">
+              <label key={`${a.provider_account_id}-${a.platform}`} className="px-3 py-2 border-b border-border last:border-b-0 flex items-center justify-between gap-3 hover:bg-bg/40 cursor-pointer">
                 <div className="min-w-0 flex items-center gap-3">
+                  <input
+                    type="checkbox"
+                    checked={selectedAccountIds.has(a.provider_account_id)}
+                    disabled={a.status === "failed"}
+                    onChange={() => toggleSelected(a.provider_account_id)}
+                    className="w-4 h-4 accent-orange-500 flex-shrink-0"
+                  />
                   {a.avatar_url ? (
                     <img src={a.avatar_url} alt="" className="w-8 h-8 rounded-full object-cover border border-border flex-shrink-0" />
                   ) : (
@@ -1409,7 +1432,7 @@ function ProviderImportDialog({
                 }>
                   {a.status}
                 </div>
-              </div>
+              </label>
             ))
           )}
         </div>
@@ -1417,8 +1440,21 @@ function ProviderImportDialog({
           <div className="text-xs text-text-dim">
             {activeProfile ? `Target profile: ${activeProfile.name}` : "Target profile: default"}
             {dryRun ? " · preview mode" : ""}
+            {result && ` · ${selectedCount}/${selectableCount} selected`}
           </div>
           <div className="flex items-center gap-2">
+            {result && selectableCount > 0 && (
+              <button
+                onClick={() => {
+                  if (selectedCount === selectableCount) setSelectedAccountIds(new Set());
+                  else setAllSelected(result.accounts);
+                }}
+                disabled={busy}
+                className="px-3 py-1.5 text-sm text-text-muted hover:text-text disabled:opacity-50"
+              >
+                {selectedCount === selectableCount ? "Select none" : "Select all"}
+              </button>
+            )}
             <button onClick={onClose} disabled={busy} className="px-3 py-1.5 text-sm text-text-muted disabled:opacity-50">
               Close
             </button>
@@ -1431,7 +1467,7 @@ function ProviderImportDialog({
             </button>
             <button
               onClick={() => run(false)}
-              disabled={busy}
+              disabled={busy || selectedCount === 0}
               className="px-4 py-1.5 text-sm bg-accent text-bg rounded font-bold disabled:opacity-50"
             >
               {busy && !dryRun ? "Importing…" : "Import"}

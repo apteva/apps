@@ -618,9 +618,19 @@ func (a *App) listZernioAccounts(ctx *sdk.AppCtx, connID int64, args map[string]
 			Profile:   profileName,
 			Platform:  platform,
 			Name:      name,
-			Avatar:    firstString(item, "avatarUrl", "avatar_url", "profilePictureUrl", "profile_picture_url", "picture", "image"),
-			Status:    firstString(item, "status", "state"),
-			Raw:       item,
+			Avatar: firstString(item,
+				"avatarUrl", "avatar_url",
+				"profilePicture", "profile_picture",
+				"profilePictureUrl", "profile_picture_url",
+				"metadata.profileData.profilePicture",
+				"metadata.profileData.profile_picture",
+				"metadata.userProfile.profilePicture",
+				"profileData.profilePicture",
+				"userProfile.profilePicture",
+				"picture", "image",
+			),
+			Status: firstString(item, "status", "state"),
+			Raw:    item,
 		})
 	}
 	return out, nil
