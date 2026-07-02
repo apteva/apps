@@ -28,6 +28,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	sdk "github.com/apteva/app-sdk"
 	tk "github.com/apteva/app-sdk/testkit"
@@ -615,6 +616,26 @@ func TestAccountImportProvider_ZernioCreatesSocialAccounts(t *testing.T) {
 	).Scan(&platform, &providerAccountID, &providerProfileID, &avatarURL)
 	if platform != "linkedin" || providerAccountID != "za_1" || providerProfileID != "zp_1" || avatarURL != "https://example.com/a.png" {
 		t.Fatalf("stored account = %s %s %s %s", platform, providerAccountID, providerProfileID, avatarURL)
+	}
+}
+
+func TestZernioUsableAvatarURL_DropsExpiredLinkedInMedia(t *testing.T) {
+	past := time.Now().Add(-time.Hour).Unix()
+	future := time.Now().Add(48 * time.Hour).Unix()
+
+	expired := fmt.Sprintf("https://media.licdn.com/dms/image/foo?e=%d&v=beta", past)
+	if got := zernioUsableAvatarURL(expired); got != "" {
+		t.Fatalf("expired LinkedIn avatar = %q, want blank", got)
+	}
+
+	valid := fmt.Sprintf("https://media.licdn.com/dms/image/foo?e=%d&v=beta", future)
+	if got := zernioUsableAvatarURL(valid); got != valid {
+		t.Fatalf("future LinkedIn avatar = %q, want %q", got, valid)
+	}
+
+	plain := "https://example.com/a.png"
+	if got := zernioUsableAvatarURL(plain); got != plain {
+		t.Fatalf("plain avatar = %q, want %q", got, plain)
 	}
 }
 

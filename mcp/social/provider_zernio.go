@@ -6,6 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -618,7 +620,7 @@ func (a *App) listZernioAccounts(ctx *sdk.AppCtx, connID int64, args map[string]
 			Profile:   profileName,
 			Platform:  platform,
 			Name:      name,
-			Avatar: firstString(item,
+			Avatar: zernioUsableAvatarURL(firstString(item,
 				"avatarUrl", "avatar_url",
 				"profilePicture", "profile_picture",
 				"profilePictureUrl", "profile_picture_url",
@@ -628,7 +630,7 @@ func (a *App) listZernioAccounts(ctx *sdk.AppCtx, connID int64, args map[string]
 				"profileData.profilePicture",
 				"userProfile.profilePicture",
 				"picture", "image",
-			),
+			)),
 			Status: firstString(item, "status", "state"),
 			Raw:    item,
 		})
@@ -1433,6 +1435,27 @@ func firstString(m map[string]any, keys ...string) string {
 		}
 	}
 	return ""
+}
+
+func zernioUsableAvatarURL(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return raw
+	}
+	host := strings.ToLower(u.Hostname())
+	if strings.HasSuffix(host, "licdn.com") || strings.HasSuffix(host, "linkedin.com") {
+		if exp := strings.TrimSpace(u.Query().Get("e")); exp != "" {
+			sec, err := strconv.ParseInt(exp, 10, 64)
+			if err == nil && sec > 0 && time.Unix(sec, 0).Before(time.Now().Add(24*time.Hour)) {
+				return ""
+			}
+		}
+	}
+	return raw
 }
 
 func nestedMap(m map[string]any, keys ...string) map[string]any {

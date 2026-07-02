@@ -1255,6 +1255,26 @@ interface ProviderProfileResponse {
   error?: string;
 }
 
+function ProviderAvatar({ src, label }: { src?: string; label: string }) {
+  const [failed, setFailed] = useState(false);
+  const initial = (label.trim()[0] || "?").toUpperCase();
+  if (src && !failed) {
+    return (
+      <img
+        src={src}
+        alt=""
+        onError={() => setFailed(true)}
+        className="w-8 h-8 rounded-full object-cover border border-border flex-shrink-0"
+      />
+    );
+  }
+  return (
+    <div className="w-8 h-8 rounded-full bg-bg-input border border-border flex-shrink-0 grid place-items-center text-xs text-text-dim font-medium">
+      {initial}
+    </div>
+  );
+}
+
 function ProviderImportDialog({
   activeProfile, projectId, onClose, onImported, setStatus,
 }: {
@@ -1412,11 +1432,7 @@ function ProviderImportDialog({
                     onChange={() => toggleSelected(a.provider_account_id)}
                     className="w-4 h-4 accent-orange-500 flex-shrink-0"
                   />
-                  {a.avatar_url ? (
-                    <img src={a.avatar_url} alt="" className="w-8 h-8 rounded-full object-cover border border-border flex-shrink-0" />
-                  ) : (
-                    <div className="w-8 h-8 rounded-full bg-bg-input border border-border flex-shrink-0" />
-                  )}
+                  <ProviderAvatar src={a.avatar_url} label={a.display_name || a.provider_account_id || a.platform} />
                   <div className="min-w-0">
                     <div className="text-sm text-text truncate">{a.display_name || a.provider_account_id}</div>
                     <div className="text-xs text-text-dim truncate">
