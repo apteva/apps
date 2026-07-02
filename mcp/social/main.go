@@ -44,7 +44,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: social
 display_name: Social
-version: 0.14.54
+version: 0.14.55
 description: |
   Schedule and publish posts to your social accounts (X, Facebook,
   Instagram, LinkedIn, TikTok, YouTube, Reddit, Pinterest, Threads).
@@ -1369,13 +1369,17 @@ func (a *App) toolAccountCheck(ctx *sdk.AppCtx, args map[string]any) (any, error
 		if err != nil {
 			return nil, err
 		}
-		defer rows.Close()
-		results := []accountCheckResult{}
+		ids := []int64{}
 		for rows.Next() {
 			var id int64
 			if rows.Scan(&id) == nil {
-				results = append(results, a.checkAccount(ctx, pid, id))
+				ids = append(ids, id)
 			}
+		}
+		rows.Close()
+		results := []accountCheckResult{}
+		for _, id := range ids {
+			results = append(results, a.checkAccount(ctx, pid, id))
 		}
 		return map[string]any{"checks": results, "count": len(results)}, nil
 	}
@@ -3616,8 +3620,17 @@ func (a *App) toolPostList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	out := []map[string]any{}
+	type postRow struct {
+		id       int64
+		profID   int64
+		body     string
+		mediaIDs []int64
+		schedAt  string
+		status   string
+		created  string
+		pubAt    string
+	}
+	postRows := []postRow{}
 	for rows.Next() {
 		var (
 			id, profID                                         int64
@@ -3628,16 +3641,30 @@ func (a *App) toolPostList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		}
 		var mediaIDs []int64
 		_ = json.Unmarshal([]byte(mediaJSON), &mediaIDs)
-		targets := a.loadTargets(ctx, id)
+		postRows = append(postRows, postRow{
+			id:       id,
+			profID:   profID,
+			body:     body,
+			mediaIDs: mediaIDs,
+			schedAt:  schedAt,
+			status:   status,
+			created:  createdAt,
+			pubAt:    pubAt,
+		})
+	}
+	rows.Close()
+	out := []map[string]any{}
+	for _, p := range postRows {
+		targets := a.loadTargets(ctx, p.id)
 		out = append(out, map[string]any{
-			"id":                id,
-			"body":              body,
-			"media_storage_ids": mediaIDs,
-			"profile_id":        profID,
-			"schedule_at":       schedAt,
-			"status":            status,
-			"created_at":        createdAt,
-			"published_at":      pubAt,
+			"id":                p.id,
+			"body":              p.body,
+			"media_storage_ids": p.mediaIDs,
+			"profile_id":        p.profID,
+			"schedule_at":       p.schedAt,
+			"status":            p.status,
+			"created_at":        p.created,
+			"published_at":      p.pubAt,
 			"targets":           targets,
 		})
 	}
@@ -3646,7 +3673,7 @@ func (a *App) toolPostList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 
 func (a *App) loadTargets(ctx *sdk.AppCtx, postID int64) []map[string]any {
 	rows, err := ctx.AppDB().Query(
-		`SELECT t.id, t.social_account_id, a.platform, a.display_name, a.avatar_url,
+		`SELECT t.id, t.social_account_id, a.platform, a.display_name, COALESCE(a.avatar_url,''),
 		        t.status, COALESCE(t.platform_post_id,''), COALESCE(t.platform_url,''),
 		        t.attempts, COALESCE(t.last_error,''), COALESCE(t.published_at,'')
 		 FROM post_targets t JOIN social_accounts a ON a.id=t.social_account_id

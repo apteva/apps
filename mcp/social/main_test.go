@@ -580,6 +580,90 @@ func TestPostCreate_FansOutAndPublishes(t *testing.T) {
 	}
 }
 
+func TestPostList_DoesNotDeadlockLoadingTargets(t *testing.T) {
+	ctx := newSocialCtx(t, nil)
+	ctx.AppDB().SetMaxOpenConns(1)
+	acctRes, err := ctx.AppDB().Exec(
+		`INSERT INTO social_accounts (project_id, platform, connection_id, display_name, status)
+		 VALUES ('test-proj', 'linkedin', 42, 'AgentDojo', 'active')`,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	acctID, _ := acctRes.LastInsertId()
+	postRes, err := ctx.AppDB().Exec(
+		`INSERT INTO posts (project_id, body, status) VALUES ('test-proj', 'hello', 'published')`,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	postID, _ := postRes.LastInsertId()
+	if _, err := ctx.AppDB().Exec(
+		`INSERT INTO post_targets (post_id, social_account_id, status, platform_post_id, attempts)
+		 VALUES (?, ?, 'published', 'urn:li:share:1', 1)`,
+		postID, acctID,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	done := make(chan any, 1)
+	go func() {
+		out, err := (&App{}).toolPostList(ctx, map[string]any{})
+		if err != nil {
+			done <- err
+			return
+		}
+		done <- out
+	}()
+	select {
+	case got := <-done:
+		if err, ok := got.(error); ok {
+			t.Fatal(err)
+		}
+		posts := got.(map[string]any)["posts"].([]map[string]any)
+		if len(posts) != 1 {
+			t.Fatalf("posts len = %d, want 1", len(posts))
+		}
+		targets := posts[0]["targets"].([]map[string]any)
+		if len(targets) != 1 || targets[0]["social_account_id"].(int64) != acctID {
+			t.Fatalf("targets = %+v", targets)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("toolPostList deadlocked while loading targets")
+	}
+}
+
+func TestAccountCheckAll_DoesNotDeadlock(t *testing.T) {
+	ctx := newSocialCtx(t, nil)
+	ctx.AppDB().SetMaxOpenConns(1)
+	_, _ = ctx.AppDB().Exec(
+		`INSERT INTO social_accounts (project_id, platform, connection_id, display_name, status)
+		 VALUES ('test-proj', 'linkedin', 42, 'AgentDojo', 'active')`,
+	)
+
+	done := make(chan any, 1)
+	go func() {
+		out, err := (&App{}).toolAccountCheck(ctx, map[string]any{"all": true})
+		if err != nil {
+			done <- err
+			return
+		}
+		done <- out
+	}()
+	select {
+	case got := <-done:
+		if err, ok := got.(error); ok {
+			t.Fatal(err)
+		}
+		checks := got.(map[string]any)["checks"].([]accountCheckResult)
+		if len(checks) != 1 {
+			t.Fatalf("checks len = %d, want 1", len(checks))
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("toolAccountCheck(all=true) deadlocked")
+	}
+}
+
 func TestAccountImportProvider_ZernioCreatesSocialAccounts(t *testing.T) {
 	pf := newRecordingPlatform()
 	pf.connections = []sdk.PlatformConnection{
