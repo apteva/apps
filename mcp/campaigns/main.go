@@ -31,13 +31,12 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: campaigns
 display_name: Campaigns
-version: 0.2.2
+version: 0.2.3
 description: |
   Bulk-send orchestrator. Compose a campaign, target a CRM segment or
   list, schedule it; jobs drives the materialise → tick loop, messaging
   does the sending. Per-recipient state, suppression respect, email
-  unsubscribe links backed by persisted tokens, provider delivery
-  reconciliation, and basic stats.
+  unsubscribe links backed by persisted tokens, and basic stats.
 author: Apteva
 scopes: [project, global]
 requires:
@@ -46,12 +45,6 @@ requires:
     - net.egress
     - platform.instances.read
     - platform.apps.call
-  apps:
-    - name: messaging
-      optional: true
-      reason: Receive provider delivery/bounce/complaint/open events for campaign recipient reconciliation; the required Messaging sender binding below is the actual app dependency.
-      events:
-        - message.event
   integrations:
     - role: crm
       kind: app
