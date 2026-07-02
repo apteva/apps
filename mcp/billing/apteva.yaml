@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: billing
 display_name: Billing
-version: 0.8.14
+version: 0.8.15
 description: |
   Customers, invoices, and payments for Apteva agents and human teams.
   Per-invoice provider — local for internal/wire/cash records, stripe
@@ -11,9 +11,8 @@ description: |
   Stripe provider via the integrations catalog. Lifecycle is explicit
   (draft → open → paid/void/uncollectible) with an append-only audit
   log per invoice.
-  v0.8.14 adds generic reusable payment methods and provider-hosted
-  setup sessions for card and bank-debit collection. Billing remains
-  product-agnostic.
+  v0.8.15 moves payment-method setup into a modal with customer search.
+  Billing remains product-agnostic.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/billing
