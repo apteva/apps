@@ -1242,11 +1242,23 @@ func (a *App) deleteZernioPost(ctx *sdk.AppCtx, out targetDeleteOutcome, connID 
 		return out
 	}
 	if res == nil || !res.Success {
+		if zernioDeletePublishedUnsupported(res) {
+			out.Status = "unsupported"
+			out.Error = "Zernio cannot delete already-published posts from the upstream social network"
+			return out
+		}
 		out.Status, out.Error = "failed", upstreamError(res).Error()
 		return out
 	}
 	out.Status = "deleted"
 	return out
+}
+
+func zernioDeletePublishedUnsupported(res *sdk.ExecuteResult) bool {
+	if res == nil || res.Status != http.StatusBadRequest {
+		return false
+	}
+	return strings.Contains(strings.ToLower(string(res.Data)), "published posts cannot be deleted")
 }
 
 func zernioConnForInboxItem(ctx *sdk.AppCtx, item *inboxItem) (int64, error) {

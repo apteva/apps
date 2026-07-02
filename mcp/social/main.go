@@ -44,7 +44,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: social
 display_name: Social
-version: 0.14.55
+version: 0.14.56
 description: |
   Schedule and publish posts to your social accounts (X, Facebook,
   Instagram, LinkedIn, TikTok, YouTube, Reddit, Pinterest, Threads).
@@ -750,7 +750,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "post_delete",
-			Description: "Delete a post locally and, where the platform allows it, remove the upstream copy too. For each published target the app calls the platform's delete verb (Twitter, Facebook, YouTube wired today; LinkedIn/Reddit/Threads pending catalog work; Instagram and TikTok don't permit programmatic deletion of posted media). The local rows always go regardless of upstream outcome — the response includes a per-target `upstream` array (status: deleted | unsupported | skipped | failed) so callers can flag platforms that still hold a copy. Cancels any scheduled job first. Args: post_id, force_local_only? (skip all upstream calls; default false).",
+			Description: "Delete a post locally and, where the platform/provider allows it, remove the upstream copy too. For each published target the app calls the native platform delete verb or the bound provider delete verb (for example Zernio). Some providers/platforms report published-post deletion as unsupported; in that case local rows still go and the response includes a per-target `upstream` array (status: deleted | unsupported | skipped | failed) so callers can flag platforms that still hold a copy. Cancels any scheduled job first. Args: post_id, force_local_only? (skip all upstream calls; default false).",
 			InputSchema: schemaObject(map[string]any{
 				"post_id":          map[string]any{"type": "integer"},
 				"force_local_only": map[string]any{"type": "boolean", "description": "Skip upstream platform deletion; only remove local rows. Default false."},

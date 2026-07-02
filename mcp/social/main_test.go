@@ -2264,6 +2264,55 @@ func TestPostDelete_FansOutUpstream(t *testing.T) {
 	}
 }
 
+func TestPostDelete_ZernioPublishedPostUnsupported(t *testing.T) {
+	pf := newRecordingPlatform()
+	pf.executeResponses["delete_post"] = &sdk.ExecuteResult{
+		Success: false,
+		Status:  400,
+		Data:    json.RawMessage(`{"error":"Published posts cannot be deleted"}`),
+	}
+	ctx := newSocialCtx(t, pf)
+	app := &App{}
+
+	accountRes, _ := ctx.AppDB().Exec(
+		`INSERT INTO social_accounts (
+			project_id, platform, connection_id, display_name, status,
+			provider_slug, provider_account_id
+		) VALUES ('test-proj', 'linkedin', 36, 'AgentDojo', 'active', 'zernio', 'za_1')`,
+	)
+	accountID, _ := accountRes.LastInsertId()
+	postRes, _ := ctx.AppDB().Exec(
+		`INSERT INTO posts (project_id, body, status) VALUES ('test-proj', 'hi', 'published')`,
+	)
+	postID, _ := postRes.LastInsertId()
+	_, _ = ctx.AppDB().Exec(
+		`INSERT INTO post_targets (
+			post_id, social_account_id, status, platform_post_id, provider_post_id
+		) VALUES (?, ?, 'published', 'urn:li:share:1', 'zp_1')`,
+		postID, accountID,
+	)
+
+	out, err := app.toolPostDelete(ctx, map[string]any{"post_id": postID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	upstream := out.(map[string]any)["upstream"].([]targetDeleteOutcome)
+	if len(upstream) != 1 {
+		t.Fatalf("upstream len = %d, want 1", len(upstream))
+	}
+	if upstream[0].Status != "unsupported" {
+		t.Fatalf("zernio outcome = %+v, want unsupported", upstream[0])
+	}
+	if len(pf.executeCalls) != 1 || pf.executeCalls[0].Tool != "delete_post" || pf.executeCalls[0].Input["postId"] != "zp_1" {
+		t.Fatalf("delete_post call = %+v", pf.executeCalls)
+	}
+	var n int
+	ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM posts WHERE id=?`, postID).Scan(&n)
+	if n != 0 {
+		t.Fatal("post row should be deleted locally")
+	}
+}
+
 func TestPostDelete_ForceLocalOnlySkipsUpstream(t *testing.T) {
 	pf := newRecordingPlatform()
 	ctx := newSocialCtx(t, pf)
