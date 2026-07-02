@@ -182,12 +182,14 @@ export default function CampaignsPanel({ projectId, installId }: NativePanelProp
     return () => window.clearTimeout(id);
   }, [errorToast]);
 
-  const params = useCallback((extra: Record<string, string> = {}) =>
-    new URLSearchParams({ project_id: projectId, install_id: String(installId), ...extra }).toString(),
-    [projectId, installId]);
+  const params = useCallback((extra: Record<string, string> = {}, includeInstallId = true) => {
+    const values: Record<string, string> = { project_id: projectId, ...extra };
+    if (includeInstallId) values.install_id = String(installId);
+    return new URLSearchParams(values).toString();
+  }, [projectId, installId]);
 
   const api = useCallback(async <T,>(method: string, path: string, body?: unknown, prefix: string = API, query: Record<string, string> = {}): Promise<T> => {
-    const res = await fetch(`${prefix}${path}?${params(query)}`, {
+    const res = await fetch(`${prefix}${path}?${params(query, prefix === API)}`, {
       method,
       credentials: "same-origin",
       headers: body ? { "Content-Type": "application/json" } : {},
