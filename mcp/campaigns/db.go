@@ -13,6 +13,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 )
 
 // ─── Campaigns ────────────────────────────────────────────────────
@@ -400,6 +401,56 @@ func dbRecipientMarkUnsubscribed(db *sql.DB, pid string, recipID int64) error {
 	return err
 }
 
+func dbRecipientApplyMessageEvent(db *sql.DB, pid string, messagingID int64, recipient, status, occurredAt, reason string) (*Recipient, bool, error) {
+	if messagingID == 0 || status == "" {
+		return nil, false, nil
+	}
+	if occurredAt == "" {
+		occurredAt = time.Now().UTC().Format(time.RFC3339)
+	}
+	setDeliveredAt := status == RecipDelivered
+	terminal := status == RecipBounced || status == RecipComplained || status == RecipFailed
+
+	sets := []string{"status = ?"}
+	args := []any{status}
+	if setDeliveredAt {
+		sets = append(sets, "delivered_at = COALESCE(delivered_at, ?)")
+		args = append(args, occurredAt)
+	}
+	if reason != "" {
+		sets = append(sets, "error = ?")
+		args = append(args, truncate(reason, 500))
+	} else if terminal {
+		sets = append(sets, "error = NULL")
+	}
+	where := []string{"project_id = ?", "messaging_id = ?"}
+	args = append(args, pid, messagingID)
+	if recipient != "" {
+		where = append(where, "address = ?")
+		args = append(args, recipient)
+	}
+	if !terminal {
+		where = append(where, "status NOT IN ('bounced', 'complained', 'failed', 'skipped', 'unsubscribed')")
+	}
+	res, err := db.Exec(
+		`UPDATE campaign_recipients SET `+strings.Join(sets, ", ")+
+			` WHERE `+strings.Join(where, " AND "),
+		args...,
+	)
+	if err != nil {
+		return nil, false, err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return nil, false, nil
+	}
+	r, err := dbRecipientByMessagingID(db, pid, messagingID, recipient)
+	if err != nil {
+		return nil, false, err
+	}
+	return r, r != nil, nil
+}
+
 // dbRecipientCancelPending bulk-marks every pending recipient of a
 // campaign as 'skipped' (with reason 'campaign cancelled'). Used by
 // campaigns_cancel.
@@ -484,6 +535,37 @@ func dbRecipientByID(db *sql.DB, pid string, id int64) (*Recipient, error) {
 	return r, nil
 }
 
+func dbRecipientByMessagingID(db *sql.DB, pid string, messagingID int64, recipient string) (*Recipient, error) {
+	where := []string{"messaging_id = ?", "project_id = ?"}
+	args := []any{messagingID, pid}
+	if recipient != "" {
+		where = append(where, "address = ?")
+		args = append(args, recipient)
+	}
+	row := db.QueryRow(
+		`SELECT id, campaign_id, contact_id, address, status,
+				messaging_id, attempt_count,
+				COALESCE(last_attempt_at,''), COALESCE(sent_at,''),
+				COALESCE(delivered_at,''), COALESCE(error,''), created_at
+		 FROM campaign_recipients WHERE `+strings.Join(where, " AND ")+` ORDER BY id DESC LIMIT 1`,
+		args...,
+	)
+	r := &Recipient{}
+	var msgID sql.NullInt64
+	if err := row.Scan(&r.ID, &r.CampaignID, &r.ContactID, &r.Address, &r.Status,
+		&msgID, &r.AttemptCount, &r.LastAttemptAt, &r.SentAt, &r.DeliveredAt, &r.Error, &r.CreatedAt); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	if msgID.Valid {
+		v := msgID.Int64
+		r.MessagingID = &v
+	}
+	return r, nil
+}
+
 // dbRecipientStats returns counts per status. Drives the panel
 // progress bar and campaigns_stats tool.
 func dbRecipientStats(db *sql.DB, pid string, campaignID int64) (map[string]int64, error) {
@@ -533,6 +615,27 @@ func dbUnsubscribeTokenCreate(db *sql.DB, pid string, recipID, campaignID int64,
 		token, campaignID, recipID, pid,
 	)
 	return err
+}
+
+func dbUnsubscribeTokenForRecipient(db *sql.DB, pid string, recipID, campaignID int64) (string, error) {
+	var existing string
+	err := db.QueryRow(
+		`SELECT token FROM campaign_unsubscribe_tokens
+		 WHERE project_id = ? AND recipient_id = ? AND campaign_id = ?
+		 ORDER BY created_at DESC LIMIT 1`,
+		pid, recipID, campaignID,
+	).Scan(&existing)
+	if err == nil && existing != "" {
+		return existing, nil
+	}
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return "", err
+	}
+	token := generateUnsubscribeToken()
+	if err := dbUnsubscribeTokenCreate(db, pid, recipID, campaignID, token); err != nil {
+		return "", err
+	}
+	return token, nil
 }
 
 type unsubLookup struct {

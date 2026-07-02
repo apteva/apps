@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -534,13 +535,27 @@ func tickCampaign(ctx *sdk.AppCtx, pid string, c *Campaign) error {
 		return err
 	}
 	for _, r := range claimed {
+		bodyText := renderRecipientBody(c.BodyText, c, r)
+		bodyHTML := renderRecipientBody(c.BodyHTML, c, r)
+		if c.Channel == ChannelEmail {
+			token, err := dbUnsubscribeTokenForRecipient(ctx.AppDB(), pid, r.ID, c.ID)
+			if err != nil {
+				_ = dbRecipientMarkFailed(ctx.AppDB(), pid, r.ID, "unsubscribe token: "+err.Error())
+				ctx.Logger().Warn("campaign tick: unsubscribe token failed",
+					"campaign_id", c.ID, "recipient_id", r.ID, "err", err.Error())
+				continue
+			}
+			unsubURL := unsubscribeURL(ctx, token)
+			bodyText = appendTextUnsubscribe(bodyText, unsubURL)
+			bodyHTML = appendHTMLUnsubscribe(bodyHTML, unsubURL)
+		}
 		out, sendErr := callMessagingSend(ctx, map[string]any{
 			"_project_id":     pid,
 			"channel":         c.Channel,
 			"to":              r.Address,
 			"subject":         c.Subject,
-			"body":            renderRecipientBody(c.BodyText, c, r),
-			"body_html":       renderRecipientBody(c.BodyHTML, c, r),
+			"body":            bodyText,
+			"body_html":       bodyHTML,
 			"from":            c.SenderAddress,
 			"idempotency_key": fmt.Sprintf("campaign:%d:recipient:%d", c.ID, r.ID),
 			"template_name":   c.TemplateName,
@@ -572,6 +587,39 @@ func tickCampaign(ctx *sdk.AppCtx, pid string, c *Campaign) error {
 // bodies and substitute {{first_name}}-style merge tags.
 func renderRecipientBody(body string, _ *Campaign, _ Recipient) string {
 	return body
+}
+
+func unsubscribeURL(ctx *sdk.AppCtx, token string) string {
+	base := publicBaseURL(ctx)
+	if base == "" {
+		base = "/api/apps/campaigns"
+	}
+	base = strings.TrimRight(base, "/")
+	return base + "/unsubscribe?t=" + url.QueryEscape(token)
+}
+
+func appendTextUnsubscribe(body, unsubURL string) string {
+	if unsubURL == "" {
+		return body
+	}
+	footer := "Unsubscribe: " + unsubURL
+	if strings.TrimSpace(body) == "" {
+		return footer
+	}
+	return strings.TrimRight(body, "\r\n") + "\n\n--\n" + footer
+}
+
+func appendHTMLUnsubscribe(body, unsubURL string) string {
+	if unsubURL == "" {
+		return body
+	}
+	link := escapeHTML(unsubURL)
+	footer := `<p style="margin-top:24px;color:#666;font-size:12px;line-height:1.4">` +
+		`You can <a href="` + link + `">unsubscribe</a> from these messages.</p>`
+	if strings.TrimSpace(body) == "" {
+		return footer
+	}
+	return body + footer
 }
 
 // ─── Cross-app helpers (CRM / messaging / jobs) ───────────────────
@@ -683,14 +731,86 @@ func callCRMResult(ctx *sdk.AppCtx, tool string, args map[string]any) (map[strin
 	return out, nil
 }
 
+func (a *App) handleMessageEvent(ctx *sdk.AppCtx, ev sdk.Event) error {
+	pid := ev.ProjectID
+	if pid == "" {
+		pid = ctx.CurrentProject()
+	}
+	if pid == "" {
+		return errors.New("message.event missing project_id")
+	}
+	messageID := int64Value(ev.Data["message_id"])
+	if messageID == 0 {
+		messageID = int64Value(ev.Data["id"])
+	}
+	status := campaignRecipientStatusForMessageEvent(strArg(ev.Data, "kind"))
+	if messageID == 0 || status == "" {
+		return nil
+	}
+	rec, changed, err := dbRecipientApplyMessageEvent(ctx.AppDB(), pid, messageID, "", status,
+		strArg(ev.Data, "occurred_at"), strArg(ev.Data, "reason"))
+	if err != nil || !changed || rec == nil {
+		return err
+	}
+	ctx.Emit("campaign.recipient_updated", map[string]any{
+		"campaign_id":  rec.CampaignID,
+		"recipient_id": rec.ID,
+		"messaging_id": messageID,
+		"status":       rec.Status,
+		"event_kind":   strArg(ev.Data, "kind"),
+		"address":      rec.Address,
+	})
+	return nil
+}
+
+func campaignRecipientStatusForMessageEvent(kind string) string {
+	switch strings.ToLower(strings.TrimSpace(kind)) {
+	case "delivered", "opened":
+		return RecipDelivered
+	case "bounced":
+		return RecipBounced
+	case "complained":
+		return RecipComplained
+	case "failed", "rejected", "rendering_failed":
+		return RecipFailed
+	default:
+		return ""
+	}
+}
+
+func int64Value(v any) int64 {
+	switch x := v.(type) {
+	case int:
+		return int64(x)
+	case int64:
+		return x
+	case float64:
+		return int64(x)
+	case json.Number:
+		n, _ := x.Int64()
+		return n
+	case string:
+		n, _ := strconv.ParseInt(strings.TrimSpace(x), 10, 64)
+		return n
+	default:
+		return 0
+	}
+}
+
 // publicBaseURL returns the URL prefix tracking links use. Reads
 // install config first, falls back to platform's reverse-proxy URL.
 func publicBaseURL(ctx *sdk.AppCtx) string {
 	if v := strings.TrimSpace(ctx.Config().Get("public_base_url")); v != "" {
 		return strings.TrimRight(v, "/")
 	}
-	// Platform proxy is the safe default — the unsubscribe endpoint is
-	// mounted under /api/apps/campaigns/.
+	if info, err := ctx.PlatformInfo(); err == nil && info != nil {
+		if v := strings.TrimSpace(info.PublicURL); v != "" {
+			return strings.TrimRight(v, "/") + "/api/apps/campaigns"
+		}
+	}
+	// Last-resort dashboard-relative fallback. Operators should set
+	// public_base_url or run on a platform that exposes PublicURL for
+	// externally delivered email.
 	return "/api/apps/campaigns"
 }
 
@@ -733,8 +853,8 @@ func startTickJob(ctx *sdk.AppCtx, pid string, c *Campaign) error {
 		"name":        fmt.Sprintf("campaign-%d-tick", c.ID),
 		"owner_app":   "campaigns",
 		"schedule": map[string]any{
-			"kind":           "every",
-			"every_seconds":  tickInterval,
+			"kind":          "every",
+			"every_seconds": tickInterval,
 		},
 		"target": map[string]any{
 			"kind": "http",

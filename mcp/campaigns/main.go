@@ -5,9 +5,10 @@
 // loop so this app doesn't need its own scheduler.
 //
 // File map:
-//   main.go      — manifest, App struct, MCP/HTTP registration, helpers
-//   db.go        — SQL layer (campaigns, recipients, unsubscribe tokens)
-//   pipeline.go  — handlers: CRUD, lifecycle, send pipeline, public endpoints
+//
+//	main.go      — manifest, App struct, MCP/HTTP registration, helpers
+//	db.go        — SQL layer (campaigns, recipients, unsubscribe tokens)
+//	pipeline.go  — handlers: CRUD, lifecycle, send pipeline, public endpoints
 package main
 
 import (
@@ -30,12 +31,13 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: campaigns
 display_name: Campaigns
-version: 0.1.1
+version: 0.2.0
 description: |
   Bulk-send orchestrator. Compose a campaign, target a CRM segment or
   list, schedule it; jobs drives the materialise → tick loop, messaging
   does the sending. Per-recipient state, suppression respect, email
-  unsubscribe with HMAC-validated tokens, basic stats.
+  unsubscribe links backed by persisted tokens, provider delivery
+  reconciliation, and basic stats.
 author: Apteva
 scopes: [project, global]
 requires:
@@ -44,6 +46,12 @@ requires:
     - net.egress
     - platform.instances.read
     - platform.apps.call
+  apps:
+    - name: messaging
+      optional: false
+      reason: Receive provider delivery/bounce/complaint/open events for campaign recipient reconciliation.
+      events:
+        - message.event
   integrations:
     - role: crm
       kind: app
@@ -100,6 +108,40 @@ provides:
       label: Campaigns
       icon: send
       entry: /ui/CampaignsPanel.mjs
+  publishes:
+    - name: campaign.created
+      description: A campaign draft was created.
+    - name: campaign.updated
+      description: A draft or paused campaign was edited.
+    - name: campaign.archived
+      description: A campaign was archived.
+    - name: campaign.scheduled
+      description: A campaign was scheduled for future materialisation.
+    - name: campaign.sending
+      description: A campaign materialised its audience and entered sending.
+    - name: campaign.paused
+      description: A sending campaign was paused.
+    - name: campaign.resumed
+      description: A paused campaign resumed sending.
+    - name: campaign.cancelled
+      description: A campaign was cancelled and pending recipients were skipped.
+    - name: campaign.sent
+      description: A campaign finished attempting all recipients.
+    - name: campaign.recipient_updated
+      description: A Messaging provider event changed one campaign recipient's status.
+      payload:
+        campaign_id: integer
+        recipient_id: integer
+        messaging_id: integer
+        status: string
+        event_kind: string
+        address: string
+    - name: campaign.unsubscribed
+      description: A recipient used a campaign unsubscribe link and was added to Messaging suppression.
+      payload:
+        campaign_id: integer
+        recipient_id: integer
+        address: string
 runtime:
   kind: source
   source:
@@ -135,10 +177,14 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	return nil
 }
 
-func (a *App) OnUnmount(*sdk.AppCtx) error       { return nil }
-func (a *App) Channels() []sdk.ChannelFactory    { return nil }
-func (a *App) Workers() []sdk.Worker             { return nil }
-func (a *App) EventHandlers() []sdk.EventHandler { return nil }
+func (a *App) OnUnmount(*sdk.AppCtx) error    { return nil }
+func (a *App) Channels() []sdk.ChannelFactory { return nil }
+func (a *App) Workers() []sdk.Worker          { return nil }
+func (a *App) EventHandlers() []sdk.EventHandler {
+	return []sdk.EventHandler{
+		{Topic: "message.event", Handler: a.handleMessageEvent},
+	}
+}
 
 // ─── HTTP routes ──────────────────────────────────────────────────
 
