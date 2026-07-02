@@ -51,10 +51,8 @@ func (a *App) handleRedirectItem(w http.ResponseWriter, r *http.Request) {
 
 // handleMeta surfaces install-time context the panel needs before
 // drawing the add form — chiefly "is domains installed, and which
-// apexes does it manage." Mirrors the certs app's /api/_meta pattern.
-// Returns {domains_available, domains} plus the public host the
-// CNAME would point at, so the panel can show users what they'd
-// have to configure if they manage DNS themselves.
+// apexes does it manage." Returns {domains_available, domains} plus
+// the public host/IP the DNS record would point at.
 func (a *App) handleMeta(w http.ResponseWriter, r *http.Request) {
 	pid := projectFromRequest(r)
 	names := domainsList(globalCtx, pid)
@@ -100,8 +98,8 @@ func (a *App) httpCreateRedirect(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	// Best-effort glue — claim the hostname with routes (and CNAME via
-	// domains when possible). Wire failures don't roll back the rule;
+	// Best-effort glue — claim the hostname with platform ingress and
+	// wire DNS via domains when possible. Failures don't roll back the rule;
 	// the panel surfaces a warning so the operator can retry.
 	wireWarning := wireHostname(globalCtx, rule.ProjectID, rule.Hostname)
 	emitRuleChange(globalCtx, "rule.created", rule)
@@ -127,6 +125,15 @@ func (a *App) httpUpdateRedirect(w http.ResponseWriter, r *http.Request, id int6
 		httpErr(w, http.StatusBadRequest, "invalid json: "+err.Error())
 		return
 	}
+	existing, err := dbGetRedirect(globalCtx.AppDB(), id)
+	if err != nil {
+		if errors.Is(err, ErrNotFound) {
+			httpErr(w, http.StatusNotFound, "redirect not found")
+			return
+		}
+		httpErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	in := body.toInput()
 	rule, err := dbUpdateRedirect(globalCtx.AppDB(), id, in)
 	if err != nil {
@@ -139,6 +146,9 @@ func (a *App) httpUpdateRedirect(w http.ResponseWriter, r *http.Request, id int6
 			httpErr(w, http.StatusBadRequest, err.Error())
 		}
 		return
+	}
+	if existing.Hostname != rule.Hostname || existing.ProjectID != rule.ProjectID {
+		maybeUnwireHostname(globalCtx, existing.Hostname, existing.ProjectID)
 	}
 	wireWarning := wireHostname(globalCtx, rule.ProjectID, rule.Hostname)
 	emitRuleChange(globalCtx, "rule.updated", rule)

@@ -7,7 +7,7 @@
 //
 // We deliberately don't wire DNS / route status into the table cells
 // here — the wiring warning from the create endpoint surfaces inline.
-// The Domains / Routes panels remain the source of truth for those.
+// The Domains panel remains the source of truth for DNS records.
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
@@ -238,7 +238,7 @@ export default function RedirectsPanel({ projectId, installId }: NativePanelProp
       <header className="px-4 py-3 border-b border-border flex items-baseline gap-3">
         <h1 className="text-text font-semibold">Redirects</h1>
         <span className="text-xs text-text-muted flex-1">
-          Branded short links and domain redirects. Composes on top of Routes (ingress) and Domains (DNS).
+          Branded short links and domain redirects. Uses platform ingress and optional Domains DNS.
         </span>
         <button
           type="button"
@@ -347,8 +347,8 @@ function EmptyState() {
       </svg>
       <div className="text-text-muted text-sm">No redirect rules yet.</div>
       <div className="text-text-dim text-xs max-w-md">
-        Add one below. The hostname will be claimed with Routes automatically; if it's
-        managed by the Domains app, a CNAME pointing at the platform will be upserted too.
+        Add one below. The hostname will be claimed with platform ingress automatically; if it's
+        managed by the Domains app, an A or CNAME record pointing at the platform will be upserted too.
       </div>
     </div>
   );

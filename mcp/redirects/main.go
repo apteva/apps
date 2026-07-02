@@ -5,14 +5,13 @@
 // 30x + Location header. The /api/redirects/* surface is the panel +
 // agent REST mirror.
 //
-// Boundary with routes: every redirect_add hits routes.routes_register
-// to claim its hostname so apteva-server reverse-proxies inbound HTTP
-// here. We never touch the routes table directly — that's the routes
-// app's responsibility.
+// Boundary with ingress: every redirect_add exposes its hostname via
+// platform ingress so apteva-server reverse-proxies inbound HTTP here.
+// TLS is owned by platform ingress through the route's cert_fqdn.
 //
 // Boundary with domains: when the hostname is registered in domains,
-// redirect_add upserts a CNAME via domain_records_set so DNS points at
-// the platform. When it isn't (user manages DNS elsewhere), we skip
+// redirect_add upserts a DNS record so DNS points at the platform.
+// When it isn't managed here (user manages DNS elsewhere), we skip
 // silently and just record the rule.
 package main
 
@@ -22,7 +21,6 @@ import (
 	"fmt"
 	"net/http"
 	"os"
-	"strconv"
 
 	sdk "github.com/apteva/app-sdk"
 	_ "modernc.org/sqlite"
@@ -33,21 +31,26 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: redirects
 display_name: Redirects
-version: 0.3.2
+version: 0.3.3
 description: |
   Branded short links and domain redirects. Each rule maps a
   (hostname, path) pair to an external URL and returns a 30x.
-  Composes on top of routes (ingress) and domains (DNS).
+  Uses server-native ingress for hostname routing and optionally
+  composes with domains for DNS.
 author: Apteva
 scopes: [project, global]
 requires:
   permissions:
     - db.write.app
     - platform.apps.call
-  apps:
-    - { name: routes,  reason: "Hostname routing" }
-    - { name: domains, optional: true, reason: "DNS auto-config (optional)" }
-    - { name: certs,   optional: true, reason: "TLS cert auto-issuance (optional)" }
+    - platform.ingress.write
+  integrations:
+    - role: domains
+      kind: app
+      required: false
+      compatible_app_names: [domains]
+      label: Domains app
+      hint: Install the Domains app to auto-create DNS records for redirect hostnames.
 provides:
   http_routes:
     - prefix: /
@@ -72,6 +75,12 @@ db:
   driver: sqlite
   path: /data/redirects.db
   migrations: migrations/
+config_schema:
+  - name: public_host
+    type: text
+    default: ""
+    label: Public host
+    description: Host or IP this redirects app is reachable at from the public internet.
 upgrade_policy: auto-patch
 `
 
@@ -135,33 +144,4 @@ func httpErr(w http.ResponseWriter, code int, msg string) {
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	w.WriteHeader(code)
 	_, _ = w.Write([]byte(msg))
-}
-
-// callerInstallID resolves the calling sidecar's install id from the
-// platform-set header. Manual panel entries get owner=0.
-func callerInstallID(r *http.Request) int64 {
-	v := r.Header.Get("X-Apteva-App-Install-ID")
-	if v == "" {
-		return 0
-	}
-	n, err := strconv.ParseInt(v, 10, 64)
-	if err != nil {
-		return 0
-	}
-	return n
-}
-
-// myInstallID reads the platform-injected APTEVA_INSTALL_ID env. Used
-// when calling routes_register from inside this sidecar — the routes
-// app insists on a non-zero owner.
-func myInstallID() int64 {
-	v := os.Getenv("APTEVA_INSTALL_ID")
-	if v == "" {
-		return 0
-	}
-	n, err := strconv.ParseInt(v, 10, 64)
-	if err != nil {
-		return 0
-	}
-	return n
 }

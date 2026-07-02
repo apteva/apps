@@ -2,20 +2,20 @@ schema: apteva-app/v1
 
 name: redirects
 display_name: Redirects
-version: 0.3.2
+version: 0.3.3
 description: |
   Branded short links and domain redirects. Each rule maps a
   (hostname, path) pair to an external URL and returns a 301/302/
   307/308 with the right Location header. Think Bitly on your own
   domain, or EasyRedir for post-rebrand 301s.
 
-  Composes on top of two existing apps:
-    - routes  — apteva-server's ingress map; redirects claims a
-                hostname here so inbound traffic for go.acme.com
-                lands on this sidecar.
-    - domains — DNS provider integration; when the hostname is
-                managed by Apteva, redirects upserts a CNAME so
-                the hostname points at the platform.
+  Uses server-native ingress to claim hostnames so inbound traffic for
+  go.acme.com lands on this sidecar. TLS is issued by the platform
+  ingress layer for exact hostnames.
+
+  Optionally composes with Domains: when the hostname is managed by
+  Apteva, redirects upserts an A or CNAME record so the hostname points
+  at the platform.
 
   Domains is optional — if you manage DNS elsewhere, point the
   hostname at the platform yourself and just call redirect_add.
@@ -32,15 +32,14 @@ requires:
   permissions:
     - db.write.app
     - platform.apps.call
-  apps:
-    - name: routes
-      reason: "Claims the public hostname for this app's sidecar so apteva-server reverse-proxies inbound HTTP here."
-    - name: domains
-      optional: true
-      reason: "When the hostname is in domains, redirects upserts a CNAME so DNS points at the platform. Skip this app to manage DNS elsewhere."
-    - name: certs
-      optional: true
-      reason: "When certs is linked, redirects fires cert_issue for each new redirect hostname so HTTPS works without a manual step. Skip this app to manage TLS yourself."
+    - platform.ingress.write
+  integrations:
+    - role: domains
+      kind: app
+      required: false
+      compatible_app_names: [domains]
+      label: Domains app
+      hint: Install the Domains app to auto-create DNS records for redirect hostnames. Without it, point DNS at the platform yourself.
 
 provides:
   http_routes:
@@ -68,5 +67,12 @@ db:
   driver: sqlite
   path: /data/redirects.db
   migrations: migrations/
+
+config_schema:
+  - name: public_host
+    type: text
+    default: ""
+    label: Public host
+    description: Host or IP this redirects app is reachable at from the public internet. Used as the default DNS record target when Domains is installed. Leave empty to use APTEVA_PUBLIC_HOST, APTEVA_PUBLIC_URL, or the platform public URL.
 
 upgrade_policy: auto-patch

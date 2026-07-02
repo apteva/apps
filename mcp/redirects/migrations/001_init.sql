@@ -6,10 +6,9 @@
 -- can target the same hostname (one per path); rule selection is
 -- longest-match with `exact` winning over `prefix` on a tie.
 --
--- DNS auto-config and ingress wiring don't live here — those are the
--- domains and routes apps. On every insert/update the app calls
--- routes.routes_register to claim the hostname; domains gets a CNAME
--- upsert when the hostname is known to it.
+-- DNS auto-config and ingress wiring don't live here. On every
+-- insert/update the app exposes platform ingress for the hostname;
+-- domains gets an A/CNAME upsert when the hostname is known to it.
 
 CREATE TABLE redirects (
   id              INTEGER PRIMARY KEY AUTOINCREMENT,

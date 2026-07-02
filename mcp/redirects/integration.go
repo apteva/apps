@@ -68,50 +68,39 @@ func shouldEmitHit(ruleID int64) bool {
 	return false
 }
 
-// integration.go — glue calling the routes and domains apps.
+// integration.go — glue calling platform ingress and the Domains app.
 //
-// routes  is required: every redirect_add tries to claim the hostname
-//         on apteva-server's ingress map so inbound traffic for that
-//         hostname lands on this sidecar. Failure is a hard warning
-//         the panel surfaces (the rule is created either way; the
-//         operator can retry once routes is reachable).
+// Ingress is required: every redirect_add tries to expose the hostname
+// through apteva-server's server-native ingress map so inbound traffic
+// lands on this sidecar. TLS issuance is owned by platform ingress
+// through CertFQDN.
 //
-// domains is optional: when the hostname is registered in domains,
-//         we upsert a CNAME pointing at the platform's public host.
-//         If domains isn't installed (or doesn't manage this hostname)
-//         we skip silently — the operator manages DNS themselves.
+// Domains is optional: when the hostname is registered in domains, we
+// upsert an A or CNAME record pointing at the platform. If domains
+// isn't installed or doesn't manage this hostname, we skip silently.
 
-// wireHostname claims hostname for this sidecar with routes, upserts a
-// CNAME via domains when the hostname is known there, and kicks off a
-// cert issuance via the certs app when it's installed. Returns a
-// human-readable warning string when something failed (or "" on full
-// success); errors are not propagated because creating the redirect
-// rule should not roll back on wiring failure.
+// wireHostname claims hostname for this sidecar with platform ingress
+// and upserts DNS via domains when the hostname is managed there.
+// Returns a human-readable warning string when something failed (or ""
+// on full success); errors are not propagated because creating the
+// redirect rule should not roll back on wiring failure.
 func wireHostname(ctx *sdk.AppCtx, projectID, hostname string) string {
 	if hostname == "" {
 		return ""
 	}
 	var warnings []string
 
-	// Routes — required.
-	if err := registerRoute(ctx, hostname); err != nil {
-		warnings = append(warnings, "routes: "+err.Error())
+	// Ingress — required for public hostname routing. TLS is handled by
+	// platform ingress because CertFQDN is set on the route.
+	if err := registerRoute(ctx, projectID, hostname); err != nil {
+		warnings = append(warnings, "ingress: "+err.Error())
 	}
 
-	// Domains — best effort. Probe first; only call domain_records_set
-	// when the domain is actually present. This avoids creating noise
-	// in the domains app's panel when the user manages DNS elsewhere.
-	if err := maybeUpsertCNAME(ctx, projectID, hostname); err != nil {
+	// Domains — best effort. Only call domain_records_set when the
+	// apex is actually present. This avoids creating noise in the
+	// domains app's panel when the user manages DNS elsewhere.
+	if err := maybeUpsertDNS(ctx, projectID, hostname); err != nil {
 		warnings = append(warnings, "domains: "+err.Error())
-	}
-
-	// Certs — best effort. Async on the certs side; cert_issue returns
-	// immediately and ACME runs in the background. The route's
-	// cert_fqdn is already set to this hostname (registerRoute above),
-	// so apteva-server's TLS GetCertificate hook will pick up the cert
-	// the moment certs finishes issuing it.
-	if err := maybeIssueCert(ctx, projectID, hostname); err != nil {
-		warnings = append(warnings, "certs: "+err.Error())
 	}
 
 	if len(warnings) == 0 {
@@ -120,9 +109,9 @@ func wireHostname(ctx *sdk.AppCtx, projectID, hostname string) string {
 	return strings.Join(warnings, "; ")
 }
 
-// maybeUnwireHostname unregisters the route when no rules remain for
+// maybeUnwireHostname unexposes ingress when no rules remain for
 // this hostname (within the same project_id). We never delete DNS —
-// CNAMEs may be shared with other services on the same hostname.
+// records may be shared with other services on the same hostname.
 func maybeUnwireHostname(ctx *sdk.AppCtx, hostname, projectID string) {
 	remaining, err := dbListRedirects(ctx.AppDB(), hostname, projectID, 1, 0)
 	if err != nil {
@@ -141,13 +130,13 @@ func maybeUnwireHostname(ctx *sdk.AppCtx, hostname, projectID string) {
 		}
 	}
 	if err := unregisterRoute(ctx, hostname); err != nil {
-		ctx.Logger().Info("maybeUnwireHostname.unregister", "host", hostname, "err", err.Error())
+		ctx.Logger().Info("maybeUnwireHostname.unexpose", "host", hostname, "err", err.Error())
 	}
 }
 
-// reconcileRegisteredRoutes refreshes Routes with this sidecar's
-// current APTEVA_APP_PORT after a restart. Routes stores concrete
-// targets for proxy-mode Caddy/nginx, so a sidecar port change must be
+// reconcileRegisteredRoutes refreshes platform ingress with this
+// sidecar's current APTEVA_APP_PORT after a restart. Ingress stores
+// concrete loopback targets, so a sidecar port change must be
 // pushed even when no redirect rule changed.
 func reconcileRegisteredRoutes(ctx *sdk.AppCtx) {
 	if ctx == nil || ctx.AppDB() == nil {
@@ -155,7 +144,7 @@ func reconcileRegisteredRoutes(ctx *sdk.AppCtx) {
 	}
 	hosts, err := dbDistinctHostnames(ctx.AppDB(), "")
 	if err != nil {
-		ctx.Logger().Warn("redirects route reconcile list failed", "err", err.Error())
+		ctx.Logger().Warn("redirects ingress reconcile list failed", "err", err.Error())
 		return
 	}
 	if len(hosts) == 0 {
@@ -163,67 +152,47 @@ func reconcileRegisteredRoutes(ctx *sdk.AppCtx) {
 	}
 	var refreshed, failed int
 	for _, host := range hosts {
-		if err := registerRoute(ctx, host); err != nil {
+		if err := registerRoute(ctx, "", host); err != nil {
 			failed++
-			ctx.Logger().Warn("redirects route reconcile failed", "host", host, "err", err.Error())
+			ctx.Logger().Warn("redirects ingress reconcile failed", "host", host, "err", err.Error())
 			continue
 		}
 		refreshed++
 	}
-	ctx.Logger().Info("redirects routes reconciled", "refreshed", refreshed, "failed", failed, "target", sidecarTarget())
+	ctx.Logger().Info("redirects ingress reconciled", "refreshed", refreshed, "failed", failed, "target", sidecarTarget())
 }
 
-// ─── routes ───────────────────────────────────────────────────────
+// ─── ingress ──────────────────────────────────────────────────────
 
-func registerRoute(ctx *sdk.AppCtx, hostname string) error {
+func registerRoute(ctx *sdk.AppCtx, projectID, hostname string) error {
 	if ctx == nil || ctx.PlatformAPI() == nil {
 		return errors.New("platform api unavailable")
 	}
-	installID := myInstallID()
-	if installID == 0 {
-		return errors.New("APTEVA_INSTALL_ID unset; cannot register route")
+	if projectID == "" {
+		projectID = strings.TrimSpace(os.Getenv("APTEVA_PROJECT_ID"))
 	}
-	target := sidecarTarget()
-	var resp struct {
-		Route  any    `json:"route"`
-		Action string `json:"action"`
-	}
-	err := ctx.PlatformAPI().CallAppResult("routes", "routes_register", map[string]any{
-		"hostname":         hostname,
-		"target":           target,
-		"owner_install_id": installID,
-		"owner_kind":       "redirects",
-	}, &resp)
-	if err != nil {
-		return fmt.Errorf("routes_register: %w", err)
-	}
-	return nil
+	_, err := ctx.PlatformAPI().ExposeIngress(sdk.IngressExposeRequest{
+		Hostname:  hostname,
+		Target:    sidecarTarget(),
+		ProjectID: projectID,
+		OwnerKind: "redirects",
+		CertFQDN:  hostname,
+	})
+	return err
 }
 
 func unregisterRoute(ctx *sdk.AppCtx, hostname string) error {
 	if ctx == nil || ctx.PlatformAPI() == nil {
 		return errors.New("platform api unavailable")
 	}
-	installID := myInstallID()
-	if installID == 0 {
-		return errors.New("APTEVA_INSTALL_ID unset; cannot unregister route")
-	}
-	var resp struct {
-		Removed bool `json:"removed"`
-	}
-	return ctx.PlatformAPI().CallAppResult("routes", "routes_unregister", map[string]any{
-		"hostname":         hostname,
-		"owner_install_id": installID,
-	}, &resp)
+	return ctx.PlatformAPI().UnexposeIngress(hostname)
 }
 
-// sidecarTarget builds the http://127.0.0.1:<port> URL the routes app
-// should reverse-proxy this hostname to. The platform injects
+// sidecarTarget builds the http://127.0.0.1:<port> URL platform
+// ingress should reverse-proxy this hostname to. The platform injects
 // APTEVA_APP_PORT into each sidecar — it's the free port the platform
 // picked for this install, distinct from the manifest's static port.
-// Falling back to the manifest port (8080) is wrong on multi-app
-// hosts; we'd register a bogus target and Caddy / apteva-server
-// returns 502 for the configured hostname.
+// Falling back to the manifest port (8080) is a dev-only fallback.
 func sidecarTarget() string {
 	port := os.Getenv("APTEVA_APP_PORT")
 	if port == "" {
@@ -268,7 +237,9 @@ func domainsList(ctx *sdk.AppCtx, projectID string) []string {
 		} `json:"domains"`
 	}
 	if err := callDomains(ctx, projectID, "domain_list", map[string]any{}, &resp); err != nil {
-		ctx.Logger().Info("domain_list unavailable", "err", err.Error())
+		if ctx != nil {
+			ctx.Logger().Info("domain_list unavailable", "err", err.Error())
+		}
 		return nil
 	}
 	names := make([]string, 0, len(resp.Domains))
@@ -280,37 +251,39 @@ func domainsList(ctx *sdk.AppCtx, projectID string) []string {
 	return names
 }
 
-// maybeUpsertCNAME checks whether the hostname's apex is known to
-// domains. If so it upserts a CNAME pointing at the platform's public
-// host. If the domains app isn't installed (or doesn't manage this
-// hostname), it returns nil — DNS wiring is optional.
-func maybeUpsertCNAME(ctx *sdk.AppCtx, projectID, hostname string) error {
+// maybeUpsertDNS checks whether the hostname's apex is known to
+// domains. If so it upserts an A or CNAME pointing at the platform's
+// public host/IP. If the domains app isn't installed or doesn't manage
+// this hostname, it returns nil — DNS wiring is optional.
+func maybeUpsertDNS(ctx *sdk.AppCtx, projectID, hostname string) error {
 	if ctx == nil || ctx.PlatformAPI() == nil {
 		return nil
 	}
-	apex := apexOf(hostname)
-	sub := strings.TrimSuffix(strings.TrimSuffix(hostname, apex), ".")
+	apex, sub, managed, err := resolveManagedApex(ctx, projectID, hostname)
+	if err != nil {
+		ctx.Logger().Info("domain_list probe failed (skipping DNS)", "host", hostname, "err", err.Error())
+		return nil
+	}
+	if !managed {
+		return nil
+	}
 	if sub == "" {
 		sub = "@"
 	}
 
-	// Is the apex in domains? domain_get returns null when missing.
-	var probe struct {
-		Domain map[string]any `json:"domain"`
-	}
-	if err := callDomains(ctx, projectID, "domain_get", map[string]any{"name": apex}, &probe); err != nil {
-		// domains app not installed, or no permission — skip silently.
-		ctx.Logger().Info("domain_get probe failed (skipping CNAME)", "host", hostname, "err", err.Error())
-		return nil
-	}
-	if probe.Domain == nil {
-		// Apex isn't managed here. Nothing to wire.
-		return nil
-	}
-
-	target := platformPublicHost()
+	target := platformDNSTarget(ctx)
 	if target == "" {
-		return errors.New("APTEVA_PUBLIC_HOST unset; can't pick a CNAME target")
+		return errors.New("public host unavailable; set redirects public_host, APTEVA_PUBLIC_HOST, APTEVA_PUBLIC_URL, or platform public URL")
+	}
+	recordType := inferRecordType(target)
+	if recordType == "A" {
+		ip := net.ParseIP(target)
+		if ip == nil || ip.To4() == nil {
+			return errors.New("IPv6 DNS targets are not supported yet; use a hostname target")
+		}
+	}
+	if recordType == "CNAME" && sub == "@" {
+		return errors.New("apex CNAME isn't allowed; set public_host to an IP or use a subdomain")
 	}
 
 	var setResp struct {
@@ -319,7 +292,7 @@ func maybeUpsertCNAME(ctx *sdk.AppCtx, projectID, hostname string) error {
 	if err := callDomains(ctx, projectID, "domain_records_set", map[string]any{
 		"domain": apex,
 		"name":   sub,
-		"type":   "CNAME",
+		"type":   recordType,
 		"value":  target,
 	}, &setResp); err != nil {
 		return fmt.Errorf("domain_records_set: %w", err)
@@ -327,89 +300,90 @@ func maybeUpsertCNAME(ctx *sdk.AppCtx, projectID, hostname string) error {
 	return nil
 }
 
-// ─── certs ────────────────────────────────────────────────────────
-
-// maybeIssueCert kicks off TLS cert issuance for the hostname via the
-// certs app. Fire-and-forget — certs handles ACME asynchronously, and
-// apteva-server's TLS GetCertificate hook picks up the result via the
-// route's cert_fqdn. If certs isn't installed the call surfaces as a
-// warning on the redirect response; the operator can choose to install
-// certs and re-fire by updating the rule.
-//
-// We use the requires.apps declaration (not requires.integrations +
-// IntegrationFor) so cross-app reachability matches the domains call
-// path — both go through CallAppResult with _project_id threaded.
-// Discriminating "certs not installed" from "certs errored" is left
-// to the warning string the caller sees; we don't try to be smart
-// about hiding one but not the other.
-func maybeIssueCert(ctx *sdk.AppCtx, projectID, hostname string) error {
-	if ctx == nil || ctx.PlatformAPI() == nil {
-		return nil
+func resolveManagedApex(ctx *sdk.AppCtx, projectID, hostname string) (string, string, bool, error) {
+	names := domainsList(ctx, projectID)
+	if len(names) == 0 {
+		return "", "", false, nil
 	}
-	args := map[string]any{"fqdn": hostname}
-	if projectID != "" {
-		args["_project_id"] = projectID
+	host := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(hostname), "."))
+	var best string
+	for _, name := range names {
+		apex := strings.ToLower(strings.TrimSuffix(strings.TrimSpace(name), "."))
+		if apex == "" {
+			continue
+		}
+		if host == apex || strings.HasSuffix(host, "."+apex) {
+			if len(apex) > len(best) {
+				best = apex
+			}
+		}
 	}
-	// CallAppResult requires non-nil out; ack is a sentinel we don't read.
-	var ack map[string]any
-	if err := ctx.PlatformAPI().CallAppResult("certs", "cert_issue", args, &ack); err != nil {
-		return fmt.Errorf("cert_issue: %w", err)
+	if best == "" {
+		return "", "", false, nil
 	}
-	return nil
+	sub := ""
+	if host != best {
+		sub = strings.TrimSuffix(host, "."+best)
+	}
+	return best, sub, true, nil
 }
 
-// apexOf returns the registrable apex of a hostname using a naive
-// "last two labels" heuristic. Real PSL handling lives in the domains
-// app — this is just for picking which apex to query. Multi-label
-// TLDs (.co.uk) will fall back to a wrong guess; users with those
-// should add the redirect from the panel, which lets them pick the
-// apex explicitly. We don't ship a PSL list in this sidecar to keep
-// the binary lean.
-func apexOf(hostname string) string {
-	parts := strings.Split(hostname, ".")
-	if len(parts) < 2 {
-		return hostname
-	}
-	return parts[len(parts)-2] + "." + parts[len(parts)-1]
-}
-
-// platformPublicHost — the hostname the CNAME should target. The
-// platform injects APTEVA_PUBLIC_URL into every sidecar (sourced from
-// the dashboard's "Public URL" setting); we parse it for the host
-// part. If the public URL points at an IP rather than a hostname we
-// return "" — CNAMEs can't target IPs, that case needs an A record
-// and isn't implemented yet.
-//
-// APTEVA_PUBLIC_HOST stays supported as a manual override for the
-// rare case where the operator wants the CNAME to target a different
-// hostname than the dashboard URL (e.g. an apex behind a CDN vs the
-// origin host).
+// platformPublicHost returns the host/IP the DNS record should point
+// at. Kept for the panel's _meta response.
 func platformPublicHost() string {
+	return platformDNSTarget(globalCtx)
+}
+
+func platformDNSTarget(ctx *sdk.AppCtx) string {
+	if t := configOr(ctx, "public_host", ""); t != "" {
+		return normalizeDNSTarget(t)
+	}
 	if v := strings.TrimSpace(os.Getenv("APTEVA_PUBLIC_HOST")); v != "" {
-		return v
+		return normalizeDNSTarget(v)
 	}
 	if v := strings.TrimSpace(os.Getenv("APTEVA_PUBLIC_URL")); v != "" {
-		u, err := url.Parse(v)
-		if err == nil && u.Hostname() != "" {
-			host := u.Hostname()
-			if ip := net.ParseIP(host); ip == nil {
-				return host
-			}
-			// Public URL is an IP — can't CNAME to it.
-			return ""
+		return normalizeDNSTarget(v)
+	}
+	if ctx != nil {
+		info, err := ctx.PlatformInfo()
+		if err == nil && info != nil {
+			return normalizeDNSTarget(info.PublicURL)
 		}
-		// Not a parseable URL — assume it's already bare host:port or
-		// just a hostname. Strip scheme/port defensively.
-		v = strings.TrimPrefix(v, "https://")
-		v = strings.TrimPrefix(v, "http://")
-		v = strings.TrimSuffix(v, "/")
-		if i := strings.IndexAny(v, ":/"); i >= 0 {
-			v = v[:i]
-		}
-		if ip := net.ParseIP(v); ip != nil {
-			return ""
-		}
-		return v
 	}
 	return ""
+}
+
+func normalizeDNSTarget(raw string) string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return ""
+	}
+	if u, err := url.Parse(raw); err == nil && u.Hostname() != "" {
+		raw = u.Hostname()
+	} else {
+		raw = strings.TrimPrefix(raw, "https://")
+		raw = strings.TrimPrefix(raw, "http://")
+		raw = strings.TrimSuffix(raw, "/")
+		if i := strings.IndexAny(raw, ":/"); i >= 0 {
+			raw = raw[:i]
+		}
+	}
+	return strings.ToLower(strings.TrimSuffix(raw, "."))
+}
+
+func inferRecordType(target string) string {
+	if net.ParseIP(target) != nil {
+		return "A"
+	}
+	return "CNAME"
+}
+
+func configOr(ctx *sdk.AppCtx, key, def string) string {
+	if ctx == nil {
+		return def
+	}
+	if v := strings.TrimSpace(ctx.Config().Get(key)); v != "" {
+		return v
+	}
+	return def
 }

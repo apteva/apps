@@ -59,7 +59,7 @@ func (a *App) MCPTools() []sdk.Tool {
 			Handler: a.toolRedirectRemove,
 		},
 		{
-			Name: "redirect_list",
+			Name:        "redirect_list",
 			Description: "List redirect rules. Args: hostname? (filter), project_id?, limit? (default 100), offset? (default 0).",
 			InputSchema: schemaObject(map[string]any{
 				"hostname":   map[string]any{"type": "string"},
@@ -112,10 +112,17 @@ func (a *App) toolRedirectUpdate(ctx *sdk.AppCtx, args map[string]any) (any, err
 	if id == 0 {
 		return nil, errors.New("id required")
 	}
+	existing, err := dbGetRedirect(ctx.AppDB(), id)
+	if err != nil {
+		return nil, err
+	}
 	in := inputFromArgs(args)
 	rule, err := dbUpdateRedirect(ctx.AppDB(), id, in)
 	if err != nil {
 		return nil, err
+	}
+	if existing.Hostname != rule.Hostname || existing.ProjectID != rule.ProjectID {
+		maybeUnwireHostname(ctx, existing.Hostname, existing.ProjectID)
 	}
 	warning := wireHostname(ctx, rule.ProjectID, rule.Hostname)
 	emitRuleChange(ctx, "rule.updated", rule)
