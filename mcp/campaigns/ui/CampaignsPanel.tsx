@@ -113,6 +113,15 @@ interface Campaign {
   archived_at?: string;
   error?: string;
   stats?: Record<string, number>;
+  audience?: AudienceInfo;
+}
+
+interface AudienceInfo {
+  kind?: string;
+  id?: number;
+  count?: number;
+  contact_ids?: number[];
+  error?: string;
 }
 
 interface Recipient {
@@ -129,6 +138,8 @@ interface Recipient {
 
 interface List { id: number; name: string; slug: string; default_sender_email?: string; default_sender_phone?: string; }
 interface Segment { id: number; name: string; kind: string; cached_count?: number; list_id?: number | null; }
+interface AudienceContact { id: number; display_name?: string; primary_email?: string; primary_phone?: string; company?: string; status?: string; }
+interface AudiencePreview { count: number; contacts: AudienceContact[]; error?: string; }
 
 const API = "/api/apps/campaigns";
 const CRM_API = "/api/apps/crm";
@@ -162,6 +173,7 @@ export default function CampaignsPanel({ projectId, installId }: NativePanelProp
   const [errorToast, setErrorToast] = useState<string | null>(null);
   const [lists, setLists] = useState<List[]>([]);
   const [segments, setSegments] = useState<Segment[]>([]);
+  const [audiencePreview, setAudiencePreview] = useState<AudiencePreview | null>(null);
   const [status, setStatus] = useState("");
 
   useEffect(() => {
@@ -227,6 +239,34 @@ export default function CampaignsPanel({ projectId, installId }: NativePanelProp
       ]);
       setDetail(c.campaign);
       setRecipients(rs.recipients || []);
+      setAudiencePreview(null);
+      const campaign = c.campaign;
+      const audiencePath = campaign.segment_id != null
+        ? `/segments/${campaign.segment_id}/members`
+        : campaign.list_id != null
+          ? `/lists/${campaign.list_id}/members`
+          : "";
+      if (audiencePath) {
+        try {
+          const preview = await api<{ count?: number; contacts?: AudienceContact[] }>(
+            "GET",
+            audiencePath,
+            undefined,
+            CRM_API,
+            { limit: "8" },
+          );
+          setAudiencePreview({
+            count: preview.count ?? preview.contacts?.length ?? 0,
+            contacts: preview.contacts || [],
+          });
+        } catch (previewErr) {
+          setAudiencePreview({
+            count: campaign.audience?.count ?? 0,
+            contacts: [],
+            error: (previewErr as Error).message,
+          });
+        }
+      }
     } catch (e) {
       setErrorToast("Detail error: " + (e as Error).message);
     }
@@ -429,18 +469,22 @@ export default function CampaignsPanel({ projectId, installId }: NativePanelProp
 
             <section>
               <h2 className="text-xs uppercase tracking-wide text-text-dim mb-2">Audience</h2>
-              <div className="border border-border rounded p-3 text-sm">
+              <div className="border border-border rounded p-3 text-sm space-y-3">
                 {detail.segment_id != null && (
-                  <div>
-                    <span className="text-text-muted">Segment: </span>
-                    <span className="text-text">{segments.find((s) => s.id === detail.segment_id)?.name || `#${detail.segment_id}`}</span>
-                  </div>
+                  <AudienceSummary
+                    label="Segment"
+                    name={segments.find((s) => s.id === detail.segment_id)?.name || `#${detail.segment_id}`}
+                    apiAudience={detail.audience}
+                    preview={audiencePreview}
+                  />
                 )}
                 {detail.list_id != null && (
-                  <div>
-                    <span className="text-text-muted">List: </span>
-                    <span className="text-text">{lists.find((l) => l.id === detail.list_id)?.name || `#${detail.list_id}`}</span>
-                  </div>
+                  <AudienceSummary
+                    label="List"
+                    name={lists.find((l) => l.id === detail.list_id)?.name || `#${detail.list_id}`}
+                    apiAudience={detail.audience}
+                    preview={audiencePreview}
+                  />
                 )}
                 {detail.segment_id == null && detail.list_id == null && (
                   <span className="text-text-dim">No audience selected — set one before scheduling.</span>
@@ -556,6 +600,58 @@ function Stat({ label, value, accent }: { label: string; value: number; accent?:
     <div>
       <div className={`text-lg font-semibold ${cls}`}>{value}</div>
       <div className="text-[10px] uppercase text-text-dim tracking-wide">{label}</div>
+    </div>
+  );
+}
+
+function AudienceSummary({
+  label,
+  name,
+  apiAudience,
+  preview,
+}: {
+  label: string;
+  name: string;
+  apiAudience?: AudienceInfo;
+  preview: AudiencePreview | null;
+}) {
+  const count = preview?.count ?? apiAudience?.count;
+  const contacts = preview?.contacts || [];
+  return (
+    <div className="space-y-2">
+      <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+        <div>
+          <span className="text-text-muted">{label}: </span>
+          <span className="text-text">{name}</span>
+        </div>
+        {typeof count === "number" && (
+          <span className="text-xs text-accent border border-accent/40 rounded px-1.5 py-0.5">
+            {count} recipient{count === 1 ? "" : "s"}
+          </span>
+        )}
+      </div>
+      {apiAudience?.error && (
+        <div className="text-xs text-red">Audience check failed: {apiAudience.error}</div>
+      )}
+      {preview?.error && (
+        <div className="text-xs text-amber">Could not load contact preview: {preview.error}</div>
+      )}
+      {contacts.length > 0 && (
+        <ul className="divide-y divide-border border border-border rounded">
+          {contacts.map((c) => (
+            <li key={c.id} className="px-2 py-1.5 flex items-center gap-2">
+              <span className="text-[10px] text-text-dim font-mono w-12 shrink-0">#{c.id}</span>
+              <span className="text-text truncate flex-1">{c.display_name || c.primary_email || c.primary_phone || "Unnamed contact"}</span>
+              {(c.primary_email || c.primary_phone) && (
+                <span className="text-text-muted truncate max-w-sm">{c.primary_email || c.primary_phone}</span>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+      {typeof count === "number" && contacts.length > 0 && count > contacts.length && (
+        <div className="text-xs text-text-dim">Showing {contacts.length} of {count} matching contacts.</div>
+      )}
     </div>
   );
 }

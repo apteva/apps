@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: campaigns
 display_name: Campaigns
-version: 0.2.4
+version: 0.2.5
 description: |
   Bulk-send orchestrator. Compose a campaign, target a CRM segment (or
   a list — segments scoped to a list work too), schedule it, and the
@@ -10,8 +10,9 @@ description: |
   actual sending. Per-recipient state, suppression respect, email
   unsubscribe links backed by persisted tokens, and basic stats.
 
-  v0.2.4 ships authoring, scheduled sends, unsubscribe links, campaign
-  recipient state tracking, and a full-width operator panel.
+  v0.2.5 ships authoring, scheduled sends, unsubscribe links, campaign
+  recipient state tracking, a full-width operator panel, and live CRM
+  audience count / preview before sending.
   Click tracking, drip sequences, recurring schedules, and A/B variants
   remain future polish on top of the same schema.
 
@@ -62,7 +63,7 @@ provides:
     - name: campaigns_list
       description: List campaigns with filter on status / channel.
     - name: campaigns_get
-      description: Fetch one campaign with stats.
+      description: Fetch one campaign with stats and live CRM audience count / preview.
     - name: campaigns_update
       description: Partial-patch a draft / paused campaign.
     - name: campaigns_clone

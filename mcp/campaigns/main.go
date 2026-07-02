@@ -31,7 +31,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: campaigns
 display_name: Campaigns
-version: 0.2.4
+version: 0.2.5
 description: |
   Bulk-send orchestrator. Compose a campaign, target a CRM segment or
   list, schedule it; jobs drives the materialise → tick loop, messaging
@@ -73,7 +73,7 @@ provides:
     - name: campaigns_list
       description: List campaigns with status / channel filter.
     - name: campaigns_get
-      description: Fetch one campaign with stats.
+      description: Fetch one campaign with stats and live CRM audience count / preview.
     - name: campaigns_update
       description: Partial-patch a draft / paused campaign.
     - name: campaigns_clone
@@ -506,7 +506,16 @@ type Campaign struct {
 	Error               string `json:"error,omitempty"`
 
 	// Optional populated only when the caller asks for stats.
-	Stats map[string]int64 `json:"stats,omitempty"`
+	Stats    map[string]int64 `json:"stats,omitempty"`
+	Audience *AudienceInfo    `json:"audience,omitempty"`
+}
+
+type AudienceInfo struct {
+	Kind       string  `json:"kind,omitempty"`
+	ID         int64   `json:"id,omitempty"`
+	Count      int64   `json:"count"`
+	ContactIDs []int64 `json:"contact_ids,omitempty"`
+	Error      string  `json:"error,omitempty"`
 }
 
 type Recipient struct {

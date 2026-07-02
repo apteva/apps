@@ -96,6 +96,7 @@ func (a *App) toolCampaignsGet(ctx *sdk.AppCtx, args map[string]any) (any, error
 	}
 	stats, _ := dbRecipientStats(ctx.AppDB(), pid, id)
 	c.Stats = stats
+	c.Audience = campaignAudienceInfo(ctx, pid, c, 10)
 	return map[string]any{"campaign": c, "found": true}, nil
 }
 
@@ -655,6 +656,40 @@ func listMembers(ctx *sdk.AppCtx, pid string, listID int64) ([]int64, error) {
 	return out.ContactIDs, nil
 }
 
+func campaignAudienceInfo(ctx *sdk.AppCtx, pid string, c *Campaign, limit int) *AudienceInfo {
+	if c == nil {
+		return nil
+	}
+	if limit <= 0 {
+		limit = 10
+	}
+	var (
+		kind string
+		id   int64
+		tool string
+	)
+	if c.SegmentID != nil && *c.SegmentID != 0 {
+		kind, id, tool = "segment", *c.SegmentID, "segments_eval"
+	} else if c.ListID != nil && *c.ListID != 0 {
+		kind, id, tool = "list", *c.ListID, "lists_eval"
+	} else {
+		return nil
+	}
+	info := &AudienceInfo{Kind: kind, ID: id}
+	var out struct {
+		ContactIDs []int64 `json:"contact_ids"`
+		Count      int64   `json:"count"`
+	}
+	if err := ctx.PlatformAPI().CallAppResult("crm", tool,
+		map[string]any{"_project_id": pid, "id": id, "limit": limit}, &out); err != nil {
+		info.Error = err.Error()
+		return info
+	}
+	info.Count = out.Count
+	info.ContactIDs = out.ContactIDs
+	return info
+}
+
 // contactAddressForChannel asks CRM for one contact's address on the
 // given channel. Returns ("", false) if the contact has no usable
 // address — caller marks the recipient 'skipped'.
@@ -964,6 +999,7 @@ func (a *App) handleHTTPCampaignGet(w http.ResponseWriter, r *http.Request, id i
 	}
 	stats, _ := dbRecipientStats(globalCtx.AppDB(), pid, id)
 	c.Stats = stats
+	c.Audience = campaignAudienceInfo(globalCtx, pid, c, 10)
 	httpJSON(w, map[string]any{"campaign": c})
 }
 

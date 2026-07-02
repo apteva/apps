@@ -27,6 +27,10 @@ func (p *campaignsPlatform) CallAppResult(appName, tool string, input map[string
 	p.calls = append(p.calls, campaignsPlatformCall{App: appName, Tool: tool, Input: input})
 	var reply any = map[string]any{}
 	switch tool {
+	case "segments_eval":
+		reply = map[string]any{"contact_ids": []int64{101, 102}, "count": 2}
+	case "lists_eval":
+		reply = map[string]any{"contact_ids": []int64{201, 202, 203}, "count": 3}
 	case "send_message":
 		reply = map[string]any{"id": 777, "status": "sent", "provider_message_id": "provider-777"}
 	case "suppression_check":
@@ -212,6 +216,47 @@ func TestMessageEventUpdatesCampaignRecipientStatus(t *testing.T) {
 	}
 	if recips[0].Status != RecipBounced {
 		t.Fatalf("delivered downgraded terminal status to %q", recips[0].Status)
+	}
+}
+
+func TestCampaignsGetIncludesAudiencePreview(t *testing.T) {
+	platform := &campaignsPlatform{}
+	ctx := newCampaignsTestCtx(t, platform)
+	c, err := dbCampaignCreate(ctx.AppDB(), "test-proj", &Campaign{
+		Name:         "Preview",
+		Channel:      ChannelEmail,
+		Subject:      "Hello",
+		BodyText:     "Body",
+		SegmentID:    ptrInt64(42),
+		ScheduleKind: "immediate",
+	})
+	if err != nil {
+		t.Fatalf("create campaign: %v", err)
+	}
+
+	out, err := (&App{}).toolCampaignsGet(ctx, map[string]any{"_project_id": "test-proj", "id": c.ID})
+	if err != nil {
+		t.Fatalf("campaigns_get: %v", err)
+	}
+	got := out.(map[string]any)["campaign"].(*Campaign)
+	if got.Audience == nil {
+		t.Fatal("audience is nil")
+	}
+	if got.Audience.Kind != "segment" || got.Audience.ID != 42 {
+		t.Fatalf("audience target = %s/%d, want segment/42", got.Audience.Kind, got.Audience.ID)
+	}
+	if got.Audience.Count != 2 {
+		t.Fatalf("audience count = %d, want 2", got.Audience.Count)
+	}
+	if len(got.Audience.ContactIDs) != 2 || got.Audience.ContactIDs[0] != 101 || got.Audience.ContactIDs[1] != 102 {
+		t.Fatalf("audience contact ids = %+v, want [101 102]", got.Audience.ContactIDs)
+	}
+	calls := platform.callsTo("crm", "segments_eval")
+	if len(calls) != 1 {
+		t.Fatalf("segments_eval calls=%d, want 1", len(calls))
+	}
+	if calls[0].Input["limit"] != 10 {
+		t.Fatalf("segments_eval limit=%v, want 10", calls[0].Input["limit"])
 	}
 }
 
