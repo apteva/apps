@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: billing
 display_name: Billing
-version: 0.8.15
+version: 0.8.16
 description: |
   Customers, invoices, and payments for Apteva agents and human teams.
   Per-invoice provider — local for internal/wire/cash records, stripe
@@ -11,7 +11,8 @@ description: |
   Stripe provider via the integrations catalog. Lifecycle is explicit
   (draft → open → paid/void/uncollectible) with an append-only audit
   log per invoice.
-  v0.8.15 moves payment-method setup into a modal with customer search.
+  v0.8.16 includes reusable payment-method metadata in generic events
+  so orchestrator apps can correlate provider-hosted setup flows.
   Billing remains product-agnostic.
 
 author: Apteva
@@ -229,6 +230,7 @@ provides:
         type: string
         status: string
         is_default: boolean
+        metadata: object
     - name: payment_method.default_changed
       description: A customer's default payment method changed.
       payload:
@@ -239,6 +241,7 @@ provides:
         type: string
         status: string
         is_default: boolean
+        metadata: object
     - name: payment_method.detached
       description: A reusable customer payment method was detached or revoked.
       payload:
@@ -248,6 +251,7 @@ provides:
         provider_payment_method_id: string
         type: string
         status: string
+        metadata: object
         is_default: boolean
   skills:
     # Foundational "how this app thinks" skill loaded whenever the

@@ -24,7 +24,7 @@ import (
 //go:embed apteva.yaml
 var manifestYAML string
 
-const appVersion = "1.10.0"
+const appVersion = "1.11.0"
 
 const (
 	StatusProvisioning = "provisioning"
@@ -67,6 +67,7 @@ func (a *App) Channels() []sdk.ChannelFactory { return nil }
 func (a *App) EventHandlers() []sdk.EventHandler {
 	return []sdk.EventHandler{
 		{Event: "invoice.paid", Handler: a.handleInvoicePaidEvent},
+		{Event: "payment_method.attached", Handler: a.handlePaymentMethodAttachedEvent},
 		{Event: "subscription.active", Handler: a.handleSubscriptionEvent},
 		{Event: "subscription.trialing", Handler: a.handleSubscriptionEvent},
 		{Event: "subscription.past_due", Handler: a.handleSubscriptionEvent},
@@ -112,7 +113,7 @@ func (a *App) MCPTools() []sdk.Tool {
 			"catalog_price_id": intSchema(), "price_id": intSchema(), "owner_email": strSchema(), "customer_email": strSchema(), "customer_name": strSchema(),
 			"slug": strSchema(), "plan_key": strSchema(), "product_key": strSchema(), "runtime_config": objSchema(), "metadata": objSchema(), "addons": arraySchema(),
 			"success_url": strSchema(), "cancel_url": strSchema(), "provider": strSchema(), "create_payment_link": boolSchema(),
-			"trial_days": intSchema(), "trial_requires_payment_method": boolSchema(),
+			"trial_days": intSchema(), "trial_requires_payment_method": boolSchema(), "payment_method_types": arraySchema(),
 		}, []string{"owner_email", "slug"}), Handler: a.toolCheckoutCreate},
 		{Name: "hosting_tenant_create", Description: "Provision a hosted Apteva tenant container and default hostname.", InputSchema: schemaObject(map[string]any{
 			"customer_id": intSchema(), "customer_email": strSchema(), "customer_name": strSchema(),
@@ -379,6 +380,10 @@ func (a *App) toolCheckoutCreate(ctx *sdk.AppCtx, args map[string]any) (any, err
 	if err != nil {
 		return nil, err
 	}
+	saleMeta["billing_customer_id"] = billingCustomerID
+	saleMeta["hosting_customer_id"] = hostingCustomer.ID
+	saleMeta["customer_email"] = ownerEmail
+	saleMeta["customer_name"] = customerName
 
 	priceCents := firstPositive(int64Arg(price, "unit_amount_cents"), derefInt64(plan.PriceCents))
 	currency := strings.ToUpper(firstNonEmpty(strArg(price, "currency"), "USD"))
@@ -389,9 +394,6 @@ func (a *App) toolCheckoutCreate(ctx *sdk.AppCtx, args map[string]any) (any, err
 	isPaid := priceCents > 0 && plan.BillingMode != "free"
 	trialDays := firstPositive(int64Arg(args, "trial_days"), int64Arg(price, "trial_days"), int64Arg(catalogMeta, "trial_days"))
 	trialRequiresPaymentMethod := boolArgDefault(args, "trial_requires_payment_method", boolFromAny(catalogMeta["trial_requires_payment_method"], false))
-	if isPaid && trialDays > 0 && trialRequiresPaymentMethod {
-		return nil, errors.New("card-required trials are not supported yet; use a no-card trial or a paid checkout")
-	}
 	var trialStart, trialEnd string
 	if trialDays > 0 {
 		trialStart = now.Format(time.RFC3339)
@@ -447,6 +449,43 @@ func (a *App) toolCheckoutCreate(ctx *sdk.AppCtx, args map[string]any) (any, err
 		"billing_customer": billingCustomer,
 		"customer":         hostingCustomer,
 		"subscription":     subscription,
+	}
+
+	if isPaid && trialDays > 0 && trialRequiresPaymentMethod {
+		paymentTypes := arrayFromAny(args["payment_method_types"])
+		if len(paymentTypes) == 0 {
+			paymentTypes = []any{"card"}
+		}
+		setupInput := map[string]any{
+			"customer_id":          billingCustomerID,
+			"payment_method_types": paymentTypes,
+			"set_default":          true,
+			"metadata": stripeSafeMetadata(mergeMaps(saleMeta, map[string]any{
+				"source_app":                    "hosting",
+				"flow":                          "hosting_checkout",
+				"trial_requires_payment_method": true,
+			})),
+		}
+		if v := strArg(args, "success_url"); v != "" {
+			setupInput["success_url"] = v
+		}
+		if v := strArg(args, "cancel_url"); v != "" {
+			setupInput["cancel_url"] = v
+		}
+		setup, err := callAppMap(ctx, "billing", "payment_method_setup_create", withProject(projectID, setupInput))
+		if err != nil {
+			return nil, fmt.Errorf("billing payment method setup: %w", err)
+		}
+		result["payment_method_setup"] = setup
+		checkout := result["checkout"].(map[string]any)
+		checkout["status"] = "payment_method_required"
+		checkout["requires_payment"] = false
+		checkout["requires_payment_method"] = true
+		checkout["trial_end"] = trialEnd
+		if url := strArg(setup, "url"); url != "" {
+			checkout["url"] = url
+		}
+		return result, nil
 	}
 
 	provisionNow := !isPaid || (trialDays > 0 && !trialRequiresPaymentMethod)
@@ -538,6 +577,61 @@ func (a *App) handleInvoicePaidEvent(ctx *sdk.AppCtx, event sdk.Event) error {
 		}
 	}
 	return err
+}
+
+func (a *App) handlePaymentMethodAttachedEvent(ctx *sdk.AppCtx, event sdk.Event) error {
+	meta := mapArg(event.Data, "metadata")
+	if !strings.EqualFold(strArg(meta, "source_app"), "hosting") || !strings.EqualFold(strArg(meta, "flow"), "hosting_checkout") {
+		return nil
+	}
+	slug := strArg(meta, "slug")
+	if slug == "" {
+		return errors.New("hosting payment method event missing slug metadata")
+	}
+	if existing, err := dbTenantGetBySlug(ctx.AppDB(), slug); err != nil {
+		return err
+	} else if existing != nil {
+		_ = recordEvent(ctx.AppDB(), existing.ID, "checkout.payment_method_attached", firstNonEmpty(event.SourceApp, "billing"), map[string]any{
+			"payment_method_id": int64Arg(event.Data, "id"),
+			"idempotent":        true,
+		})
+		return nil
+	}
+	productKey := firstNonEmpty(strArg(meta, "product_key"), "apteva")
+	planKey := firstNonEmpty(strArg(meta, "plan_key"), defaultPlanForProduct(productKey))
+	provisionArgs := map[string]any{
+		"customer_id":          int64Arg(meta, "hosting_customer_id"),
+		"customer_email":       firstNonEmpty(strArg(meta, "customer_email"), strArg(meta, "owner_email")),
+		"customer_name":        strArg(meta, "customer_name"),
+		"billing_customer_id":  firstPositive(int64Arg(meta, "billing_customer_id"), int64Arg(event.Data, "customer_id")),
+		"owner_email":          strArg(meta, "owner_email"),
+		"slug":                 slug,
+		"plan_key":             planKey,
+		"product_key":          productKey,
+		"subscription_id":      int64Arg(meta, "subscription_id"),
+		"runtime_config":       mapFromAny(meta["runtime_config"]),
+		"addons":               arrayFromAny(meta["addons"]),
+		"_project_id":          event.ProjectID,
+		"payment_method_id":    int64Arg(event.Data, "id"),
+		"payment_method_event": event.Name(),
+		"metadata": mergeMaps(meta, map[string]any{
+			"payment_method_id":          int64Arg(event.Data, "id"),
+			"payment_method_type":        strArg(event.Data, "type"),
+			"payment_method_provider":    strArg(event.Data, "provider"),
+			"payment_method_attached_at": time.Now().UTC().Format(time.RFC3339),
+		}),
+	}
+	out, err := a.toolTenantCreate(ctx, provisionArgs)
+	if err != nil {
+		return err
+	}
+	if tenant, ok := out.(map[string]any)["tenant"].(*Tenant); ok && tenant != nil {
+		_ = recordEvent(ctx.AppDB(), tenant.ID, "checkout.payment_method_attached", firstNonEmpty(event.SourceApp, "billing"), map[string]any{
+			"payment_method_id": int64Arg(event.Data, "id"),
+			"subscription_id":   int64Arg(meta, "subscription_id"),
+		})
+	}
+	return nil
 }
 
 func (a *App) handleSubscriptionEvent(ctx *sdk.AppCtx, event sdk.Event) error {
@@ -2524,6 +2618,33 @@ func mapFromAny(v any) map[string]any {
 	case string:
 		if strings.TrimSpace(x) != "" {
 			_ = json.Unmarshal([]byte(x), &out)
+		}
+	}
+	return out
+}
+
+func stripeSafeMetadata(in map[string]any) map[string]any {
+	out := map[string]any{}
+	for k, v := range in {
+		if strings.TrimSpace(k) == "" || v == nil {
+			continue
+		}
+		switch x := v.(type) {
+		case string:
+			out[k] = x
+		case fmt.Stringer:
+			out[k] = x.String()
+		case bool, int, int64, float64:
+			out[k] = fmt.Sprint(x)
+		case json.RawMessage:
+			out[k] = string(x)
+		default:
+			raw, err := json.Marshal(x)
+			if err == nil {
+				out[k] = string(raw)
+			} else {
+				out[k] = fmt.Sprint(x)
+			}
 		}
 	}
 	return out

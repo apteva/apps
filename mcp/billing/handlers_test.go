@@ -214,8 +214,13 @@ func TestStripeSetupIntentSucceededStoresPaymentMethod(t *testing.T) {
 	if methods[0].ProviderPaymentMethodID != "pm_123" || methods[0].Type != "sepa_debit" || !methods[0].DelayedNotification {
 		t.Fatalf("stored payment method = %+v", methods[0])
 	}
-	if len(rec.EventsByTopic("payment_method.attached")) != 1 {
-		t.Fatalf("payment_method.attached events = %d, want 1", len(rec.EventsByTopic("payment_method.attached")))
+	events := rec.EventsByTopic("payment_method.attached")
+	if len(events) != 1 {
+		t.Fatalf("payment_method.attached events = %d, want 1", len(events))
+	}
+	meta := mapFromAny(events[0].Data.(map[string]any)["metadata"])
+	if meta["apteva_customer_id"] != strconv.FormatInt(customer.ID, 10) || meta["stripe_setup_intent_id"] != "seti_123" {
+		t.Fatalf("payment_method.attached metadata = %+v", meta)
 	}
 }
 

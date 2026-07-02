@@ -316,6 +316,7 @@ func emitPaymentMethod(ctx *sdk.AppCtx, topic string, pm *PaymentMethod) {
 		"type":                       pm.Type,
 		"status":                     pm.Status,
 		"is_default":                 pm.IsDefault,
+		"metadata":                   mapFromAny(pm.Metadata),
 	})
 }
 

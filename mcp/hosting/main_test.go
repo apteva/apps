@@ -135,6 +135,17 @@ func (p *platformStub) CallAppResult(appName, tool string, input map[string]any,
 			"stripe_session_id": "cs_test_123",
 		})
 		return json.Unmarshal(b, out)
+	case "payment_method_setup_create":
+		b, _ := json.Marshal(map[string]any{
+			"url": "https://checkout.stripe.test/setup",
+			"setup_session": map[string]any{
+				"id":          88,
+				"customer_id": input["customer_id"],
+				"status":      "pending",
+				"metadata":    input["metadata"],
+			},
+		})
+		return json.Unmarshal(b, out)
 	case "invoices_get":
 		b, _ := json.Marshal(map[string]any{
 			"found": true,
@@ -339,8 +350,8 @@ func TestEmbeddedManifest_Valid(t *testing.T) {
 	if m.Name != "hosting" {
 		t.Errorf("manifest.Name=%q, want hosting", m.Name)
 	}
-	if m.Version != "1.10.0" {
-		t.Errorf("manifest.Version=%q, want 1.10.0", m.Version)
+	if m.Version != "1.11.0" {
+		t.Errorf("manifest.Version=%q, want 1.11.0", m.Version)
 	}
 	if m.DB == nil {
 		t.Fatal("manifest.DB missing")
@@ -375,6 +386,9 @@ func TestEmbeddedManifest_Valid(t *testing.T) {
 	}
 	if !containsString(gotEvents["billing"], "invoice.paid") {
 		t.Errorf("manifest should subscribe to billing invoice.paid, got %v", gotEvents["billing"])
+	}
+	if !containsString(gotEvents["billing"], "payment_method.attached") {
+		t.Errorf("manifest should subscribe to billing payment_method.attached, got %v", gotEvents["billing"])
 	}
 	if !containsString(gotEvents["subscriptions"], "subscription.cancelled") {
 		t.Errorf("manifest should subscribe to subscription lifecycle events, got %v", gotEvents["subscriptions"])
@@ -495,6 +509,129 @@ func TestCheckoutCreateNoCardTrialProvisionsImmediately(t *testing.T) {
 	meta := mapArg(subCall.Input, "metadata")
 	if int64Arg(meta, "trial_days") != 14 || meta["on_unpaid_grace_expired"] != "delete" {
 		t.Fatalf("trial metadata not carried through: %+v", meta)
+	}
+}
+
+func TestCheckoutCreateCardRequiredTrialCreatesSetupSession(t *testing.T) {
+	pf := &platformStub{}
+	ctx, db := newTestCtx(t, pf)
+	defer db.Close()
+
+	app := &App{}
+	got, err := app.toolCheckoutCreate(ctx, map[string]any{
+		"catalog_price_id":              int64(100),
+		"owner_email":                   "card-trial@example.com",
+		"customer_name":                 "Card Trial Buyer",
+		"slug":                          "card-trial-apteva",
+		"trial_requires_payment_method": true,
+		"success_url":                   "https://example.com/trial/success",
+		"cancel_url":                    "https://example.com/trial/cancel",
+		"payment_method_types":          []any{"card", "sepa_debit"},
+	})
+	if err != nil {
+		t.Fatalf("checkout create: %v", err)
+	}
+	result := got.(map[string]any)
+	checkout := result["checkout"].(map[string]any)
+	if checkout["status"] != "payment_method_required" || checkout["requires_payment_method"] != true || checkout["url"] != "https://checkout.stripe.test/setup" {
+		t.Fatalf("unexpected checkout: %+v", checkout)
+	}
+	if result["tenant"] != nil {
+		t.Fatalf("card-required trial should wait for payment_method.attached, got tenant %+v", result["tenant"])
+	}
+	if containsToolCall(pf.callAppCalls, "billing", "invoices_create") || containsToolCall(pf.callAppCalls, "billing", "invoices_send_payment_link") {
+		t.Fatalf("card-required trial should not create invoice/payment link: %+v", pf.callAppCalls)
+	}
+	var setupCall *callAppCall
+	for i := range pf.callAppCalls {
+		if pf.callAppCalls[i].Tool == "payment_method_setup_create" {
+			setupCall = &pf.callAppCalls[i]
+			break
+		}
+	}
+	if setupCall == nil {
+		t.Fatalf("missing payment_method_setup_create call in %+v", pf.callAppCalls)
+	}
+	if setupCall.Input["customer_id"] != int64(55) {
+		t.Fatalf("setup session should use billing customer id: %+v", setupCall.Input)
+	}
+	meta := mapArg(setupCall.Input, "metadata")
+	if meta["source_app"] != "hosting" || meta["flow"] != "hosting_checkout" || int64Arg(meta, "subscription_id") != 66 {
+		t.Fatalf("setup metadata missing hosting checkout context: %+v", meta)
+	}
+	if meta["runtime_config"] == nil || meta["trial_requires_payment_method"] != "true" {
+		t.Fatalf("setup metadata should be stripe-safe strings: %+v", meta)
+	}
+}
+
+func TestPaymentMethodAttachedEventProvisionsCardRequiredTrial(t *testing.T) {
+	pf := &platformStub{}
+	ctx, db := newTestCtx(t, pf)
+	defer db.Close()
+
+	app := &App{}
+	err := app.handlePaymentMethodAttachedEvent(ctx, sdk.Event{
+		Event:     "payment_method.attached",
+		SourceApp: "billing",
+		ProjectID: "proj-test",
+		Data: map[string]any{
+			"id":          int64(501),
+			"customer_id": int64(55),
+			"provider":    "stripe",
+			"type":        "card",
+			"metadata": map[string]any{
+				"source_app":          "hosting",
+				"flow":                "hosting_checkout",
+				"owner_email":         "card-trial@example.com",
+				"customer_email":      "card-trial@example.com",
+				"customer_name":       "Card Trial Buyer",
+				"slug":                "card-trial-apteva",
+				"product_key":         "apteva",
+				"plan_key":            "starter",
+				"subscription_id":     "66",
+				"billing_customer_id": "55",
+				"runtime_config":      `{"image":"ghcr.io/apteva/apteva:latest","port":5280,"health_path":"/health"}`,
+				"addons":              `[{"addon_key":"managed-llm","feature_key":"llm.tokens","included_quantity":1000}]`,
+			},
+		},
+	})
+	if err != nil {
+		t.Fatalf("handle payment_method.attached: %v", err)
+	}
+	tenant, err := dbTenantGetBySlug(db, "card-trial-apteva")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if tenant == nil {
+		t.Fatal("expected tenant to be provisioned")
+	}
+	if tenant.SubscriptionID == nil || *tenant.SubscriptionID != 66 {
+		t.Fatalf("tenant subscription_id=%v, want 66", tenant.SubscriptionID)
+	}
+	if !containsToolCall(pf.callAppCalls, "containers", "containers_run") {
+		t.Fatalf("expected containers_run, got %+v", pf.callAppCalls)
+	}
+	if !containsToolCall(pf.callAppCalls, "llm", "llm_tokens_create") {
+		t.Fatalf("expected LLM addon provisioning, got %+v", pf.callAppCalls)
+	}
+	beforeCalls := len(pf.callAppCalls)
+	if err := app.handlePaymentMethodAttachedEvent(ctx, sdk.Event{
+		Event:     "payment_method.attached",
+		SourceApp: "billing",
+		ProjectID: "proj-test",
+		Data: map[string]any{
+			"id": int64(501),
+			"metadata": map[string]any{
+				"source_app": "hosting",
+				"flow":       "hosting_checkout",
+				"slug":       "card-trial-apteva",
+			},
+		},
+	}); err != nil {
+		t.Fatalf("idempotent payment_method.attached: %v", err)
+	}
+	if len(pf.callAppCalls) != beforeCalls {
+		t.Fatalf("idempotent event should not provision again: before %d after %d calls=%+v", beforeCalls, len(pf.callAppCalls), pf.callAppCalls)
 	}
 }
 

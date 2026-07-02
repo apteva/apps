@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: hosting
 display_name: Hosting
-version: 1.10.0
+version: 1.11.0
 description: |
   Managed container-backed hosting control plane. Hosting provisions and
   operates hosted Apteva tenants on top of the generic Containers app,
@@ -10,9 +10,8 @@ description: |
   ingress, fulfills generic Orders records for paid hosting products,
   and reacts to Billing/Subscriptions events declared in this manifest.
   Free plans are first-class and do not require Billing, Orders, or
-  Subscriptions. v1.10.0 wires tenant add-on metering into generic
-  Subscriptions items/usage so overage billing is reusable across
-  future SaaS apps.
+  Subscriptions. v1.11.0 supports card-required trials by using
+  Billing setup sessions and provisioning after payment_method.attached.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/hosting
@@ -36,6 +35,7 @@ requires:
       optional: true
       events:
         - invoice.paid
+        - payment_method.attached
     - name: orders
       optional: true
     - name: subscriptions
