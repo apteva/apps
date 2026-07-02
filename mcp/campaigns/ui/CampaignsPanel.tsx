@@ -175,6 +175,7 @@ export default function CampaignsPanel({ projectId, installId }: NativePanelProp
   const [segments, setSegments] = useState<Segment[]>([]);
   const [audiencePreview, setAudiencePreview] = useState<AudiencePreview | null>(null);
   const [status, setStatus] = useState("");
+  const [lastCampaignEvent, setLastCampaignEvent] = useState<string>("");
 
   useEffect(() => {
     if (!errorToast) return;
@@ -228,6 +229,7 @@ export default function CampaignsPanel({ projectId, installId }: NativePanelProp
 
   useAppEvents("campaigns", projectId, (ev) => {
     if (ev.topic.startsWith("campaign.")) {
+      setLastCampaignEvent(`${ev.topic} · ${fmt(ev.time)}`);
       loadList();
       if (selectedId) loadDetail(selectedId);
     }
@@ -418,7 +420,7 @@ export default function CampaignsPanel({ projectId, installId }: NativePanelProp
               </div>
             </header>
 
-            <StatsCard stats={detail.stats || {}} />
+            <StatsCard stats={detail.stats || {}} lastEvent={lastCampaignEvent} />
 
             <section>
               <div className="flex items-center justify-between mb-2">
@@ -429,7 +431,7 @@ export default function CampaignsPanel({ projectId, installId }: NativePanelProp
                   className="bg-bg-input border border-border rounded text-xs px-1.5 py-0.5"
                 >
                   <option value="">all</option>
-                  {["pending", "sending", "sent", "delivered", "bounced", "complained", "failed", "skipped", "unsubscribed"].map((s) => (
+                  {["pending", "sending", "sent", "delivered", "opened", "bounced", "complained", "failed", "skipped", "unsubscribed"].map((s) => (
                     <option key={s} value={s}>{s}</option>
                   ))}
                 </select>
@@ -551,7 +553,7 @@ function StatusPill({ status }: { status: string }) {
 }
 
 function recipientStatusClass(s: string) {
-  if (s === "sent" || s === "delivered") return "bg-accent/10 text-accent";
+  if (s === "sent" || s === "delivered" || s === "opened") return "bg-accent/10 text-accent";
   if (s === "bounced" || s === "complained" || s === "failed") return "bg-red/15 text-red";
   if (s === "unsubscribed") return "bg-amber/15 text-amber";
   if (s === "skipped") return "bg-border text-text-dim";
@@ -561,25 +563,39 @@ function recipientStatusClass(s: string) {
 
 // ─── Stats card ────────────────────────────────────────────────────
 
-function StatsCard({ stats }: { stats: Record<string, number> }) {
+function StatsCard({ stats, lastEvent }: { stats: Record<string, number>; lastEvent?: string }) {
   const total = useMemo(() => Object.values(stats).reduce((a, b) => a + b, 0), [stats]);
   if (total === 0) {
     return (
-      <div className="border border-border rounded p-3 text-sm text-text-muted">
-        No recipients yet — schedule the campaign or run materialise to populate.
+      <div className="border border-border rounded p-3 text-sm text-text-muted flex items-center justify-between gap-3">
+        <span>No recipients yet — schedule the campaign or run materialise to populate.</span>
+        <LiveEventLabel lastEvent={lastEvent} />
       </div>
     );
   }
-  const sent = (stats.sent || 0) + (stats.delivered || 0);
+  const accepted = stats.sent || 0;
+  const delivered = stats.delivered || 0;
+  const opened = stats.opened || 0;
   const bounced = (stats.bounced || 0) + (stats.complained || 0);
   const failed = stats.failed || 0;
   const pending = (stats.pending || 0) + (stats.sending || 0);
   const skipped = (stats.skipped || 0);
   const unsubbed = (stats.unsubscribed || 0);
+  const problems = bounced + failed;
+  const inactive = pending + skipped + unsubbed;
   return (
     <section className="border border-border rounded p-3">
-      <div className="grid grid-cols-3 gap-2 text-center text-sm">
-        <Stat label="sent" value={sent} />
+      <div className="flex items-center justify-between gap-3 mb-3">
+        <div>
+          <h2 className="text-xs uppercase tracking-wide text-text-dim">Delivery stats</h2>
+          <div className="text-sm text-text">{total} total recipient{total === 1 ? "" : "s"}</div>
+        </div>
+        <LiveEventLabel lastEvent={lastEvent} />
+      </div>
+      <div className="grid grid-cols-2 md:grid-cols-5 gap-2 text-center text-sm">
+        <Stat label="sent" value={accepted} />
+        <Stat label="delivered" value={delivered} />
+        <Stat label="opened" value={opened} />
         <Stat label="bounced/spam" value={bounced} accent="red" />
         <Stat label="failed" value={failed} accent="red" />
         <Stat label="pending" value={pending} accent="amber" />
@@ -587,12 +603,21 @@ function StatsCard({ stats }: { stats: Record<string, number> }) {
         <Stat label="unsubscribed" value={unsubbed} accent="amber" />
       </div>
       <div className="mt-3 h-1.5 bg-bg-input rounded overflow-hidden flex">
-        <div className="bg-accent" style={{ width: `${(sent / total) * 100}%` }} />
-        <div className="bg-red" style={{ width: `${(bounced / total) * 100}%` }} />
-        <div className="bg-amber" style={{ width: `${(pending / total) * 100}%` }} />
+        <div className="bg-accent" style={{ width: `${(opened / total) * 100}%` }} />
+        <div className="bg-accent/70" style={{ width: `${(delivered / total) * 100}%` }} />
+        <div className="bg-accent/40" style={{ width: `${(accepted / total) * 100}%` }} />
+        <div className="bg-red" style={{ width: `${(problems / total) * 100}%` }} />
+        <div className="bg-amber" style={{ width: `${(inactive / total) * 100}%` }} />
       </div>
-      <div className="mt-1 text-xs text-text-dim text-right">{total} total recipient{total === 1 ? "" : "s"}</div>
     </section>
+  );
+}
+
+function LiveEventLabel({ lastEvent }: { lastEvent?: string }) {
+  return (
+    <span className="text-[10px] uppercase tracking-wide text-text-dim whitespace-nowrap">
+      {lastEvent ? `Live ${lastEvent}` : "Live events ready"}
+    </span>
   );
 }
 

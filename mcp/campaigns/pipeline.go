@@ -801,6 +801,9 @@ func (a *App) handleMessageEvent(ctx *sdk.AppCtx, ev sdk.Event) error {
 func campaignRecipientStatusForMessageEvent(kind string) string {
 	switch strings.ToLower(strings.TrimSpace(kind)) {
 	case "delivered", "opened":
+		if strings.EqualFold(strings.TrimSpace(kind), "opened") {
+			return RecipOpened
+		}
 		return RecipDelivered
 	case "bounced":
 		return RecipBounced
@@ -863,7 +866,7 @@ func scheduleMaterialiseJob(ctx *sdk.AppCtx, pid string, c *Campaign, scheduledA
 		"target": map[string]any{
 			"kind": "http",
 			"app":  "campaigns",
-			"path": fmt.Sprintf("/campaigns/%d/materialise", c.ID),
+			"path": campaignJobPath(pid, fmt.Sprintf("/campaigns/%d/materialise", c.ID)),
 		},
 		"max_retries": 3,
 	}
@@ -894,7 +897,7 @@ func startTickJob(ctx *sdk.AppCtx, pid string, c *Campaign) error {
 		"target": map[string]any{
 			"kind": "http",
 			"app":  "campaigns",
-			"path": fmt.Sprintf("/campaigns/%d/tick", c.ID),
+			"path": campaignJobPath(pid, fmt.Sprintf("/campaigns/%d/tick", c.ID)),
 		},
 		"max_retries": 3,
 	}
@@ -908,6 +911,17 @@ func startTickJob(ctx *sdk.AppCtx, pid string, c *Campaign) error {
 		prefix = current.JobIDs + ","
 	}
 	return dbCampaignSetJobIDs(ctx.AppDB(), pid, c.ID, prefix+fmt.Sprintf("%d", jobID))
+}
+
+func campaignJobPath(pid, path string) string {
+	if strings.TrimSpace(pid) == "" {
+		return path
+	}
+	sep := "?"
+	if strings.Contains(path, "?") {
+		sep = "&"
+	}
+	return path + sep + "project_id=" + url.QueryEscape(pid)
 }
 
 // callJobsSchedule wraps the jobs MCP tool. Returns the job id.

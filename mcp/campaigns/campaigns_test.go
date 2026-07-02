@@ -35,6 +35,8 @@ func (p *campaignsPlatform) CallAppResult(appName, tool string, input map[string
 		reply = map[string]any{"id": 777, "status": "sent", "provider_message_id": "provider-777"}
 	case "suppression_check":
 		reply = map[string]any{"suppressed": false}
+	case "jobs_schedule":
+		reply = map[string]any{"job": map[string]any{"id": 123}}
 	}
 	if out == nil {
 		return nil
@@ -216,6 +218,69 @@ func TestMessageEventUpdatesCampaignRecipientStatus(t *testing.T) {
 	}
 	if recips[0].Status != RecipBounced {
 		t.Fatalf("delivered downgraded terminal status to %q", recips[0].Status)
+	}
+
+	openedCampaignID := mustSeedSentRecipient(t, ctx, 556, "bob@example.com")
+	if err := (&App{}).handleMessageEvent(ctx, sdk.Event{
+		Event:     "message.event",
+		ProjectID: "test-proj",
+		Data:      map[string]any{"message_id": int64(556), "kind": "opened"},
+	}); err != nil {
+		t.Fatalf("handle opened: %v", err)
+	}
+	recips, err = dbRecipientsList(ctx.AppDB(), "test-proj", openedCampaignID, "", 10)
+	if err != nil {
+		t.Fatalf("list opened recipients: %v", err)
+	}
+	if len(recips) != 1 || recips[0].Status != RecipOpened {
+		t.Fatalf("recipient after opened=%#v, want opened", recips)
+	}
+	if err := (&App{}).handleMessageEvent(ctx, sdk.Event{
+		Event:     "message.event",
+		ProjectID: "test-proj",
+		Data:      map[string]any{"message_id": int64(556), "kind": "delivered"},
+	}); err != nil {
+		t.Fatalf("handle delivered after opened: %v", err)
+	}
+	recips, err = dbRecipientsList(ctx.AppDB(), "test-proj", openedCampaignID, "", 10)
+	if err != nil {
+		t.Fatalf("list opened recipients after delivered: %v", err)
+	}
+	if recips[0].Status != RecipOpened {
+		t.Fatalf("delivered downgraded opened status to %q", recips[0].Status)
+	}
+}
+
+func TestJobsTargetsIncludeProjectIDForGlobalInstall(t *testing.T) {
+	platform := &campaignsPlatform{}
+	ctx := newCampaignsTestCtx(t, platform)
+	c, err := dbCampaignCreate(ctx.AppDB(), "test-proj", &Campaign{
+		Name:         "Scheduled",
+		Channel:      ChannelEmail,
+		Subject:      "Hello",
+		BodyText:     "Body",
+		SegmentID:    ptrInt64(42),
+		ScheduleKind: "once",
+	})
+	if err != nil {
+		t.Fatalf("create campaign: %v", err)
+	}
+	if _, err := scheduleMaterialiseJob(ctx, "test-proj", c, "2026-07-02T12:00:00Z"); err != nil {
+		t.Fatalf("schedule materialise: %v", err)
+	}
+	if err := startTickJob(ctx, "test-proj", c); err != nil {
+		t.Fatalf("start tick job: %v", err)
+	}
+	jobs := platform.callsTo("jobs", "jobs_schedule")
+	if len(jobs) != 2 {
+		t.Fatalf("jobs_schedule calls=%d, want 2", len(jobs))
+	}
+	for _, job := range jobs {
+		target, _ := job.Input["target"].(map[string]any)
+		path, _ := target["path"].(string)
+		if !strings.Contains(path, "project_id=test-proj") {
+			t.Fatalf("job target path %q missing project_id", path)
+		}
 	}
 }
 

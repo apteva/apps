@@ -408,7 +408,7 @@ func dbRecipientApplyMessageEvent(db *sql.DB, pid string, messagingID int64, rec
 	if occurredAt == "" {
 		occurredAt = time.Now().UTC().Format(time.RFC3339)
 	}
-	setDeliveredAt := status == RecipDelivered
+	setDeliveredAt := status == RecipDelivered || status == RecipOpened
 	terminal := status == RecipBounced || status == RecipComplained || status == RecipFailed
 
 	sets := []string{"status = ?"}
@@ -431,6 +431,9 @@ func dbRecipientApplyMessageEvent(db *sql.DB, pid string, messagingID int64, rec
 	}
 	if !terminal {
 		where = append(where, "status NOT IN ('bounced', 'complained', 'failed', 'skipped', 'unsubscribed')")
+	}
+	if status == RecipDelivered {
+		where = append(where, "status != 'opened'")
 	}
 	res, err := db.Exec(
 		`UPDATE campaign_recipients SET `+strings.Join(sets, ", ")+

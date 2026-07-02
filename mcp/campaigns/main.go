@@ -31,7 +31,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: campaigns
 display_name: Campaigns
-version: 0.2.6
+version: 0.2.7
 description: |
   Bulk-send orchestrator. Compose a campaign, target a CRM segment or
   list, schedule it; jobs drives the materialise → tick loop, messaging
@@ -56,6 +56,7 @@ requires:
       kind: app
       compatible_app_names: [messaging]
       capabilities: [message.send, suppression.check]
+      events: [message.event]
       required: true
       label: "Messaging (sender)"
     - role: jobs
@@ -464,6 +465,7 @@ const (
 	RecipSending      = "sending"
 	RecipSent         = "sent"
 	RecipDelivered    = "delivered"
+	RecipOpened       = "opened"
 	RecipBounced      = "bounced"
 	RecipComplained   = "complained"
 	RecipFailed       = "failed"
