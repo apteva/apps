@@ -343,7 +343,7 @@ export default function CampaignsPanel({ projectId, installId }: NativePanelProp
             {selectedId ? "Loading…" : "Pick a campaign to see details, or create a new one."}
           </div>
         ) : (
-          <div className="max-w-3xl space-y-6">
+          <div className="w-full space-y-6">
             <header className="flex items-start justify-between gap-3">
               <div className="min-w-0">
                 <h1 className="text-xl text-text font-semibold flex items-center gap-2">
