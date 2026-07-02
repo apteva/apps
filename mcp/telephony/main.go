@@ -41,10 +41,10 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: telephony
 display_name: Telephony
-version: 0.1.2
+version: 0.1.3
 description: |
-  Place outbound voice calls via programmable carriers. Each call runs as a realtime
-  sub-thread in core; carrier audio is bridged through this sidecar.
+  Place and receive voice calls via programmable carriers. Calls run as realtime
+  sub-threads in core; carrier audio is bridged through this sidecar.
 author: Apteva
 icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/telephony/icon.svg
 scopes: [project, global]
@@ -75,6 +75,12 @@ provides:
     - prefix: /
   mcp_tools:
     - { name: telephony_place_call,   description: "Place an outbound voice call." }
+    - { name: telephony_answer_call,  description: "Answer an inbound call by spawning a realtime thread." }
+    - { name: telephony_reject_call,  description: "Reject a pending inbound call." }
+    - { name: telephony_routes_create, description: "Create an inbound phone-number route to an agent." }
+    - { name: telephony_routes_configure_carrier, description: "Configure the carrier phone number webhook for an inbound route." }
+    - { name: telephony_routes_list,  description: "List inbound call routes." }
+    - { name: telephony_pending_calls, description: "List pending inbound calls." }
     - { name: telephony_hangup,       description: "End an active call." }
     - { name: telephony_active_calls, description: "List ongoing calls." }
   ui_panels:
@@ -139,6 +145,9 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/xml/plivo/", Handler: a.handlePlivoXML},
 		// Carrier status callbacks (initiated, ringing, in-progress, completed, ...).
 		{Pattern: "/webhook/status/", Handler: a.handleStatusCallback},
+		// Twilio inbound call control. The route id maps a phone number
+		// to the agent that should receive the incoming-call event.
+		{Pattern: "/inbound/twilio/", Handler: a.handleTwilioInbound},
 		// Panel data endpoint — lists active + recent calls.
 		{Pattern: "/calls", Handler: a.handleListCalls},
 		// Panel action endpoint.
@@ -152,7 +161,7 @@ func (a *App) MCPTools() []sdk.Tool {
 	return []sdk.Tool{
 		{
 			Name: "telephony_place_call",
-			Description: "Place an outbound voice call via the bound carrier. The conversation runs in a realtime sub-thread you can reach via send(id=<thread_id>, text=...) for live guidance. The thread escalates via send(id='main', ...) and reports completion via [thread:<thread_id> done]. " +
+			Description: "Place an outbound voice call via the bound carrier. Telephony spawns a realtime sub-thread and bridges carrier audio into it. " +
 				"Args: to (E.164 phone number, required), directive (system instructions for the call, required), voice? (alloy/echo/fable/onyx/nova/shimmer, default alloy), timeout_sec? (ring timeout, default 30). " +
 				"Returns: { call_id, thread_id }. Use send/done events to monitor — do not poll telephony_active_calls in a tight loop.",
 			InputSchema: schemaObject(map[string]any{
@@ -165,6 +174,56 @@ func (a *App) MCPTools() []sdk.Tool {
 			// the Caller context — the realtime thread needs to spawn
 			// INSIDE that agent so send/done flows between them.
 			HandlerCtx: a.toolPlaceCall,
+		},
+		{
+			Name:        "telephony_routes_create",
+			Description: "Create an inbound route from a carrier phone number to the calling agent. After creating it, call telephony_routes_configure_carrier(route_id) to set the provider webhook. Args: phone_number? (defaults to bound connection phone_number), phone_number_sid? (Twilio PN SID if known), hold_prompt?, timeout_sec?.",
+			InputSchema: schemaObject(map[string]any{
+				"phone_number":     map[string]any{"type": "string", "description": "Inbound number in E.164. Defaults to bound carrier connection phone_number."},
+				"phone_number_sid": map[string]any{"type": "string", "description": "Carrier phone number id. For Twilio this is PNxxxxxxxx; can be auto-discovered if omitted."},
+				"hold_prompt":      map[string]any{"type": "string", "description": "Short prompt callers hear while the agent decides whether to answer."},
+				"timeout_sec":      map[string]any{"type": "integer", "description": "How long to hold before ending if no answer.", "default": 60, "minimum": 10, "maximum": 300},
+			}, nil),
+			HandlerCtx: a.toolRoutesCreate,
+		},
+		{
+			Name:        "telephony_routes_configure_carrier",
+			Description: "Configure the bound carrier phone number webhook for an inbound route. Currently implemented for Twilio update_phone_number. Args: route_id (required).",
+			InputSchema: schemaObject(map[string]any{
+				"route_id": map[string]any{"type": "string", "description": "Route id returned by telephony_routes_create."},
+			}, []string{"route_id"}),
+			HandlerCtx: a.toolRoutesConfigureCarrier,
+		},
+		{
+			Name:        "telephony_routes_list",
+			Description: "List inbound phone-number routes for this app/project.",
+			InputSchema: schemaObject(map[string]any{}, nil),
+			Handler:     a.toolRoutesList,
+		},
+		{
+			Name:        "telephony_pending_calls",
+			Description: "List pending inbound calls for the calling agent. Prefer reacting to the incoming-call event; this is for recovery/inspection.",
+			InputSchema: schemaObject(map[string]any{}, nil),
+			HandlerCtx:  a.toolPendingCalls,
+		},
+		{
+			Name:        "telephony_answer_call",
+			Description: "Answer a pending inbound call by spawning a realtime sub-thread and redirecting the carrier call into it. Args: call_id, directive, voice?.",
+			InputSchema: schemaObject(map[string]any{
+				"call_id":   map[string]any{"type": "string", "description": "Pending inbound call id from the event."},
+				"directive": map[string]any{"type": "string", "description": "System instructions for the realtime call thread."},
+				"voice":     map[string]any{"type": "string", "description": "Realtime voice id.", "enum": []string{"alloy", "echo", "fable", "onyx", "nova", "shimmer"}, "default": "alloy"},
+			}, []string{"call_id", "directive"}),
+			HandlerCtx: a.toolAnswerCall,
+		},
+		{
+			Name:        "telephony_reject_call",
+			Description: "Reject or end a pending inbound call. Args: call_id (required), reason?.",
+			InputSchema: schemaObject(map[string]any{
+				"call_id": map[string]any{"type": "string", "description": "Pending inbound call id."},
+				"reason":  map[string]any{"type": "string", "description": "Optional reason stored on the call."},
+			}, []string{"call_id"}),
+			HandlerCtx: a.toolRejectCall,
 		},
 		{
 			Name:        "telephony_hangup",
@@ -231,8 +290,6 @@ func (a *App) toolPlaceCall(callerCtx context.Context, ctx *sdk.AppCtx, args map
 	callID := newCallID()
 	threadID := "tel-" + callID
 
-	// 1. Spawn the realtime thread in core. The audio bridge URL it
-	//    returns is what the carrier media stream will feed.
 	rt, err := ctx.PlatformAPI().SpawnRealtimeThread(sdk.RealtimeSpawnRequest{
 		AgentID:   agentID,
 		ThreadID:  threadID,
@@ -260,6 +317,8 @@ func (a *App) toolPlaceCall(callerCtx context.Context, ctx *sdk.AppCtx, args map
 	if err := a.db().insertCall(callRow{
 		ID:                  callID,
 		ThreadID:            threadID,
+		Direction:           "outbound",
+		AgentID:             agentID,
 		CarrierSlug:         carrier.Slug(),
 		CarrierConnectionID: bound.ConnectionID,
 		ToNumber:            to,
@@ -336,7 +395,7 @@ func (a *App) hangupCall(ctx *sdk.AppCtx, callID string) string {
 			ctx.Logger().Warn("carrier hangup failed (still killing thread)", "err", err)
 		}
 	}
-	if err := ctx.PlatformAPI().KillThread(row.ThreadID); err != nil {
+	if err := a.killCallThread(ctx, row); err != nil {
 		ctx.Logger().Warn("kill thread failed", "err", err)
 	}
 	_ = a.db().updateStatus(callID, "completed", "")
@@ -366,6 +425,256 @@ func (a *App) toolActiveCalls(ctx *sdk.AppCtx, _ map[string]any) (any, error) {
 	return map[string]any{"calls": out}, nil
 }
 
+// ─── inbound routing tools ────────────────────────────────────────
+
+func (a *App) toolRoutesCreate(callerCtx context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	agentID := callerAgentID(callerCtx)
+	if agentID == 0 {
+		return mcpError("could not determine calling agent id"), nil
+	}
+	bound := ctx.IntegrationFor("carrier")
+	if bound == nil {
+		return mcpError("no carrier bound"), nil
+	}
+	creds, err := ctx.PlatformAPI().GetConnectionCredentials(bound.ConnectionID)
+	if err != nil {
+		return mcpError("read carrier credentials: " + err.Error()), nil
+	}
+	phone := strArg(args, "phone_number", creds.Fields["phone_number"])
+	if phone == "" {
+		return mcpError("phone_number required, or carrier connection must define phone_number"), nil
+	}
+	slug := strings.ToLower(firstNonEmpty(creds.Slug, bound.AppSlug))
+	if slug == "" {
+		return mcpError("could not determine carrier slug"), nil
+	}
+	if slug != "twilio" {
+		return mcpError("inbound call routing is currently implemented for Twilio only"), nil
+	}
+	holdPrompt := strArg(args, "hold_prompt", "Please hold while I connect you.")
+	timeout := intArg(args, "timeout_sec", 60)
+	if timeout < 10 {
+		timeout = 10
+	}
+	if timeout > 300 {
+		timeout = 300
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	route := routeRow{
+		ID:                  "route-" + newCallID(),
+		ProjectID:           currentProject(ctx),
+		CarrierSlug:         slug,
+		CarrierConnectionID: bound.ConnectionID,
+		PhoneNumber:         phone,
+		PhoneNumberSID:      strArg(args, "phone_number_sid", ""),
+		AgentID:             agentID,
+		Enabled:             true,
+		HoldPrompt:          holdPrompt,
+		TimeoutSec:          timeout,
+		Secret:              newSecret(),
+		CreatedAt:           now,
+		UpdatedAt:           now,
+	}
+	if err := a.db().insertRoute(route); err != nil {
+		return mcpError("persist inbound route: " + err.Error()), nil
+	}
+	return map[string]any{
+		"route":       routePublic(a, route),
+		"inbound_url": a.inboundRouteURL(route),
+		"next":        "Call telephony_routes_configure_carrier with route_id to set the carrier webhook.",
+	}, nil
+}
+
+func (a *App) toolRoutesConfigureCarrier(_ context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	routeID := strArg(args, "route_id", "")
+	if routeID == "" {
+		return mcpError("route_id required"), nil
+	}
+	route, err := a.db().findRoute(routeID)
+	if err != nil {
+		return mcpError("load route: " + err.Error()), nil
+	}
+	if route == nil {
+		return mcpError("unknown route_id"), nil
+	}
+	if route.CarrierSlug != "twilio" {
+		return mcpError("carrier webhook configuration is currently implemented for Twilio routes only"), nil
+	}
+	sid := route.PhoneNumberSID
+	if sid == "" {
+		var err error
+		sid, err = a.findTwilioPhoneNumberSID(ctx, route)
+		if err != nil {
+			return mcpError("find Twilio phone number SID: " + err.Error()), nil
+		}
+		if sid == "" {
+			return mcpError("could not find Twilio phone number SID for " + route.PhoneNumber), nil
+		}
+		_ = a.db().updateRoutePhoneSID(route.ID, sid)
+		route.PhoneNumberSID = sid
+	}
+	_, err = executeCarrierTool(ctx, route.CarrierConnectionID, "update_phone_number", map[string]any{
+		"PhoneNumberSid": sid,
+		"VoiceUrl":       a.inboundRouteURL(*route),
+	})
+	if err != nil {
+		return mcpError("configure Twilio webhook: " + err.Error()), nil
+	}
+	return map[string]any{
+		"ok":          true,
+		"route":       routePublic(a, *route),
+		"inbound_url": a.inboundRouteURL(*route),
+	}, nil
+}
+
+func (a *App) toolRoutesList(ctx *sdk.AppCtx, _ map[string]any) (any, error) {
+	routes, err := a.db().listRoutes(currentProject(ctx))
+	if err != nil {
+		return mcpError("db error: " + err.Error()), nil
+	}
+	out := make([]map[string]any, 0, len(routes))
+	for _, r := range routes {
+		out = append(out, routePublic(a, r))
+	}
+	return map[string]any{"routes": out}, nil
+}
+
+func (a *App) toolPendingCalls(callerCtx context.Context, ctx *sdk.AppCtx, _ map[string]any) (any, error) {
+	agentID := callerAgentID(callerCtx)
+	rows, err := a.db().listPending(agentID, currentProject(ctx))
+	if err != nil {
+		return mcpError("db error: " + err.Error()), nil
+	}
+	return map[string]any{"calls": callsPublic(rows)}, nil
+}
+
+func (a *App) toolAnswerCall(callerCtx context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	agentID := callerAgentID(callerCtx)
+	if agentID == 0 {
+		return mcpError("could not determine calling agent id"), nil
+	}
+	callID := strArg(args, "call_id", "")
+	directive := strArg(args, "directive", "")
+	voice := strArg(args, "voice", "alloy")
+	if callID == "" || strings.TrimSpace(directive) == "" {
+		return mcpError("call_id and directive required"), nil
+	}
+	row, err := a.db().findCall(callID)
+	if err != nil {
+		return mcpError("load call: " + err.Error()), nil
+	}
+	if row == nil {
+		return mcpError("unknown call_id"), nil
+	}
+	if row.Direction != "inbound" || row.Status != "pending" {
+		return mcpError("call is not a pending inbound call"), nil
+	}
+	if row.AgentID != 0 && row.AgentID != agentID {
+		return mcpError("this call is routed to another agent"), nil
+	}
+	if row.CarrierSlug != "twilio" {
+		return mcpError("answer redirect is currently implemented for Twilio inbound calls only"), nil
+	}
+
+	threadID := "tel-" + callID
+	rt, err := ctx.PlatformAPI().SpawnRealtimeThread(sdk.RealtimeSpawnRequest{
+		AgentID:   agentID,
+		ThreadID:  threadID,
+		Directive: directive,
+		Voice:     voice,
+	})
+	if err != nil {
+		return mcpError("spawn realtime thread: " + err.Error()), nil
+	}
+	if rt.AudioBridgeURL == "" {
+		_ = ctx.PlatformAPI().KillThread(threadID)
+		return mcpError("realtime spawn returned no audio bridge URL"), nil
+	}
+	if err := a.db().attachCall(callID, threadID, rt.AudioBridgeURL); err != nil {
+		_ = ctx.PlatformAPI().KillThread(threadID)
+		return mcpError("persist call answer: " + err.Error()), nil
+	}
+	row.ThreadID = threadID
+	row.AudioBridgeURL = rt.AudioBridgeURL
+	row.Status = "answered"
+
+	twiml := fmt.Sprintf(`<Response><Connect><Stream url="%s"/></Connect></Response>`, xmlEscape(a.publicWSStreamURL("twilio", callID)))
+	if _, err := executeCarrierTool(ctx, row.CarrierConnectionID, "update_call", map[string]any{
+		"CallSid": row.CarrierSID,
+		"Twiml":   twiml,
+	}); err != nil {
+		_ = ctx.PlatformAPI().KillThread(threadID)
+		return mcpError("redirect Twilio call to media stream: " + err.Error()), nil
+	}
+	return map[string]any{
+		"ok":        true,
+		"call_id":   callID,
+		"thread_id": threadID,
+	}, nil
+}
+
+func (a *App) toolRejectCall(callerCtx context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	agentID := callerAgentID(callerCtx)
+	callID := strArg(args, "call_id", "")
+	if callID == "" {
+		return mcpError("call_id required"), nil
+	}
+	row, err := a.db().findCall(callID)
+	if err != nil {
+		return mcpError("load call: " + err.Error()), nil
+	}
+	if row == nil {
+		return mcpError("unknown call_id"), nil
+	}
+	if row.AgentID != 0 && agentID != 0 && row.AgentID != agentID {
+		return mcpError("this call is routed to another agent"), nil
+	}
+	if row.CarrierSID != "" && row.CarrierSlug == "twilio" {
+		_, _ = executeCarrierTool(ctx, row.CarrierConnectionID, "update_call", map[string]any{
+			"CallSid": row.CarrierSID,
+			"Status":  "completed",
+		})
+	}
+	reason := strArg(args, "reason", "rejected by agent")
+	_ = a.db().updateStatus(callID, "canceled", reason)
+	return map[string]any{"ok": true, "call_id": callID}, nil
+}
+
+func (a *App) findTwilioPhoneNumberSID(ctx *sdk.AppCtx, route *routeRow) (string, error) {
+	data, err := executeCarrierTool(ctx, route.CarrierConnectionID, "list_phone_numbers", map[string]any{
+		"PhoneNumber": route.PhoneNumber,
+		"PageSize":    20,
+	})
+	if err != nil {
+		return "", err
+	}
+	var out struct {
+		IncomingPhoneNumbers []struct {
+			SID         string `json:"sid"`
+			PhoneNumber string `json:"phone_number"`
+		} `json:"incoming_phone_numbers"`
+	}
+	if err := json.Unmarshal(data, &out); err != nil {
+		return "", err
+	}
+	for _, n := range out.IncomingPhoneNumbers {
+		if n.PhoneNumber == route.PhoneNumber {
+			return n.SID, nil
+		}
+	}
+	if len(out.IncomingPhoneNumbers) == 1 {
+		return out.IncomingPhoneNumbers[0].SID, nil
+	}
+	return "", nil
+}
+
+func (a *App) killCallThread(ctx *sdk.AppCtx, row *callRow) error {
+	if row == nil || row.ThreadID == "" || strings.HasPrefix(row.ThreadID, "pending-") {
+		return nil
+	}
+	return ctx.PlatformAPI().KillThread(row.ThreadID)
+}
+
 // ─── webhook + panel handlers ──────────────────────────────────────
 
 func (a *App) handleStatusCallback(w http.ResponseWriter, r *http.Request) {
@@ -383,10 +692,112 @@ func (a *App) handleStatusCallback(w http.ResponseWriter, r *http.Request) {
 	case "completed", "failed", "no-answer", "busy", "canceled":
 		row, _ := a.db().findCall(callID)
 		if row != nil && row.ThreadID != "" && globalCtx != nil {
-			_ = globalCtx.PlatformAPI().KillThread(row.ThreadID)
+			_ = a.killCallThread(globalCtx, row)
 		}
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (a *App) handleTwilioInbound(w http.ResponseWriter, r *http.Request) {
+	path := strings.Trim(strings.TrimPrefix(r.URL.Path, "/inbound/twilio/"), "/")
+	parts := strings.Split(path, "/")
+	if len(parts) == 0 || parts[0] == "" {
+		http.Error(w, "missing route_id", http.StatusBadRequest)
+		return
+	}
+	routeID := parts[0]
+	if len(parts) > 1 && parts[1] == "wait" {
+		a.handleTwilioInboundWait(w, r, routeID)
+		return
+	}
+
+	route, err := a.db().findRoute(routeID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if route == nil || !route.Enabled || route.Secret == "" || r.URL.Query().Get("secret") != route.Secret {
+		http.Error(w, "route not found", http.StatusNotFound)
+		return
+	}
+	callSID := firstNonEmpty(r.FormValue("CallSid"), r.URL.Query().Get("CallSid"))
+	from := firstNonEmpty(r.FormValue("From"), r.URL.Query().Get("From"))
+	to := firstNonEmpty(r.FormValue("To"), r.URL.Query().Get("To"), route.PhoneNumber)
+	if callSID == "" {
+		http.Error(w, "missing CallSid", http.StatusBadRequest)
+		return
+	}
+	callID := newCallID()
+	now := time.Now().UTC().Format(time.RFC3339)
+	if err := a.db().insertCall(callRow{
+		ID:                  callID,
+		ThreadID:            "pending-" + callID,
+		Direction:           "inbound",
+		AgentID:             route.AgentID,
+		RouteID:             route.ID,
+		CarrierSID:          callSID,
+		CarrierSlug:         route.CarrierSlug,
+		CarrierConnectionID: route.CarrierConnectionID,
+		ToNumber:            to,
+		FromNumber:          from,
+		Directive:           "inbound pending",
+		Voice:               "",
+		AudioBridgeURL:      "pending",
+		Status:              "pending",
+		PlacedAt:            now,
+		ProjectID:           route.ProjectID,
+	}); err != nil {
+		http.Error(w, "persist call: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if globalCtx != nil && globalCtx.PlatformAPI() != nil {
+		msg := fmt.Sprintf(
+			"Incoming phone call. call_id=%s from=%s to=%s. To answer: call telephony_answer_call with call_id=%q and a directive for the realtime call thread. To decline: call telephony_reject_call with call_id=%q.",
+			callID, from, to, callID, callID,
+		)
+		if err := globalCtx.PlatformAPI().SendEvent(route.AgentID, msg); err != nil {
+			globalCtx.Logger().Warn("send incoming call event failed", "route", route.ID, "agent", route.AgentID, "err", err)
+		}
+	}
+	writeTwilioHold(w, a.holdText(*route), a.twilioWaitURL(*route, callID))
+}
+
+func (a *App) handleTwilioInboundWait(w http.ResponseWriter, r *http.Request, routeID string) {
+	route, err := a.db().findRoute(routeID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if route == nil || route.Secret == "" || r.URL.Query().Get("secret") != route.Secret {
+		http.Error(w, "route not found", http.StatusNotFound)
+		return
+	}
+	callID := r.URL.Query().Get("call_id")
+	row, err := a.db().findCall(callID)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if row == nil {
+		writeTwilioSayHangup(w, "This call can no longer be connected.")
+		return
+	}
+	switch row.Status {
+	case "pending":
+		if callTimedOut(*route, *row) {
+			_ = a.db().updateStatus(row.ID, "no-answer", "agent did not answer before route timeout")
+			writeTwilioSayHangup(w, "No one is available to take this call.")
+			return
+		}
+		writeTwilioHold(w, a.holdText(*route), a.twilioWaitURL(*route, row.ID))
+	case "answered", "in-progress", "initiated", "ringing":
+		// The answer tool updates the live Twilio call directly. If a
+		// pending redirect was already queued, keep the call open briefly.
+		w.Header().Set("Content-Type", "application/xml")
+		_, _ = w.Write([]byte(`<Response><Pause length="1"/></Response>`))
+	default:
+		writeTwilioSayHangup(w, "This call has ended.")
+	}
 }
 
 func (a *App) handleListCalls(w http.ResponseWriter, r *http.Request) {
@@ -463,8 +874,105 @@ func (a *App) publicWSStreamURL(provider, callID string) string {
 	return "ws://" + strings.TrimPrefix(base, "http://") + "/media/" + provider + "/" + callID
 }
 
+func (a *App) inboundRouteURL(route routeRow) string {
+	return fmt.Sprintf("%s/inbound/%s/%s?secret=%s",
+		a.publicAppURL(),
+		route.CarrierSlug,
+		route.ID,
+		route.Secret,
+	)
+}
+
+func (a *App) twilioWaitURL(route routeRow, callID string) string {
+	return fmt.Sprintf("%s/inbound/twilio/%s/wait?secret=%s&call_id=%s",
+		a.publicAppURL(),
+		route.ID,
+		route.Secret,
+		callID,
+	)
+}
+
+func (a *App) holdText(route routeRow) string {
+	if strings.TrimSpace(route.HoldPrompt) != "" {
+		return route.HoldPrompt
+	}
+	return "Please hold while I connect you."
+}
+
+func writeTwilioHold(w http.ResponseWriter, prompt, redirectURL string) {
+	w.Header().Set("Content-Type", "application/xml")
+	_, _ = fmt.Fprintf(w, `<Response><Say>%s</Say><Pause length="5"/><Redirect method="POST">%s</Redirect></Response>`,
+		xmlEscape(prompt),
+		xmlEscape(redirectURL),
+	)
+}
+
+func writeTwilioSayHangup(w http.ResponseWriter, prompt string) {
+	w.Header().Set("Content-Type", "application/xml")
+	_, _ = fmt.Fprintf(w, `<Response><Say>%s</Say><Hangup/></Response>`, xmlEscape(prompt))
+}
+
+func callTimedOut(route routeRow, row callRow) bool {
+	timeout := route.TimeoutSec
+	if timeout <= 0 {
+		timeout = 60
+	}
+	start, err := time.Parse(time.RFC3339, row.PlacedAt)
+	if err != nil {
+		return false
+	}
+	return time.Since(start) > time.Duration(timeout)*time.Second
+}
+
 func currentProject(ctx *sdk.AppCtx) string {
 	return ctx.CurrentProject()
+}
+
+func callerAgentID(ctx context.Context) int64 {
+	caller := sdk.CallerFrom(ctx)
+	if caller == nil {
+		return 0
+	}
+	return caller.AgentID
+}
+
+func routePublic(a *App, r routeRow) map[string]any {
+	return map[string]any{
+		"id":                    r.ID,
+		"project_id":            r.ProjectID,
+		"carrier":               r.CarrierSlug,
+		"carrier_connection_id": r.CarrierConnectionID,
+		"phone_number":          r.PhoneNumber,
+		"phone_number_sid":      r.PhoneNumberSID,
+		"agent_id":              r.AgentID,
+		"enabled":               r.Enabled,
+		"hold_prompt":           r.HoldPrompt,
+		"timeout_sec":           r.TimeoutSec,
+		"inbound_url":           a.inboundRouteURL(r),
+		"created_at":            r.CreatedAt,
+		"updated_at":            r.UpdatedAt,
+	}
+}
+
+func callsPublic(rows []callRow) []map[string]any {
+	out := make([]map[string]any, 0, len(rows))
+	for _, r := range rows {
+		out = append(out, map[string]any{
+			"call_id":     r.ID,
+			"thread_id":   r.ThreadID,
+			"direction":   r.Direction,
+			"agent_id":    r.AgentID,
+			"route_id":    r.RouteID,
+			"carrier":     r.CarrierSlug,
+			"to":          r.ToNumber,
+			"from":        r.FromNumber,
+			"status":      r.Status,
+			"placed_at":   r.PlacedAt,
+			"answered_at": r.AnsweredAt,
+			"duration":    callDuration(r),
+		})
+	}
+	return out
 }
 
 func callDuration(r callRow) string {
@@ -590,6 +1098,12 @@ func newCallID() string {
 	return fmt.Sprintf("%d-%06x", time.Now().UnixNano()/1e6, randomU24())
 }
 
+func newSecret() string {
+	var b [16]byte
+	_, _ = rand.Read(b[:])
+	return fmt.Sprintf("%x", b[:])
+}
+
 func randomU24() uint32 {
 	var b [3]byte
 	_, _ = rand.Read(b[:])
@@ -601,6 +1115,9 @@ func randomU24() uint32 {
 type callRow struct {
 	ID                  string
 	ThreadID            string
+	Direction           string
+	AgentID             int64
+	RouteID             string
 	CarrierSID          string
 	CarrierSlug         string
 	CarrierConnectionID int64
@@ -617,15 +1134,31 @@ type callRow struct {
 	ErrorMessage        string
 }
 
+type routeRow struct {
+	ID                  string
+	ProjectID           string
+	CarrierSlug         string
+	CarrierConnectionID int64
+	PhoneNumber         string
+	PhoneNumberSID      string
+	AgentID             int64
+	Enabled             bool
+	HoldPrompt          string
+	TimeoutSec          int
+	Secret              string
+	CreatedAt           string
+	UpdatedAt           string
+}
+
 type callsDB struct{ db *sql.DB }
 
 func (c *callsDB) insertCall(r callRow) error {
 	_, err := c.db.Exec(`INSERT INTO calls
-        (id, thread_id, carrier_sid, carrier_slug, carrier_connection_id,
+        (id, thread_id, direction, agent_id, route_id, carrier_sid, carrier_slug, carrier_connection_id,
          to_number, from_number, directive, voice, audio_bridge_url, status,
          placed_at, project_id)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		r.ID, r.ThreadID, r.CarrierSID, r.CarrierSlug, r.CarrierConnectionID,
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		r.ID, r.ThreadID, r.Direction, r.AgentID, r.RouteID, r.CarrierSID, r.CarrierSlug, r.CarrierConnectionID,
 		r.ToNumber, r.FromNumber, r.Directive, r.Voice, r.AudioBridgeURL,
 		r.Status, r.PlacedAt, r.ProjectID,
 	)
@@ -633,14 +1166,16 @@ func (c *callsDB) insertCall(r callRow) error {
 }
 
 func (c *callsDB) findCall(id string) (*callRow, error) {
-	row := c.db.QueryRow(`SELECT id, thread_id, COALESCE(carrier_sid,''),
+	row := c.db.QueryRow(`SELECT id, thread_id,
+        COALESCE(direction,'outbound'), COALESCE(agent_id,0), COALESCE(route_id,''),
+        COALESCE(carrier_sid,''),
         COALESCE(carrier_slug,'twilio'), COALESCE(carrier_connection_id,0),
         to_number, from_number, directive, voice, audio_bridge_url, status,
         placed_at, COALESCE(answered_at,''), COALESCE(ended_at,''),
         project_id, COALESCE(error_message,'')
         FROM calls WHERE id = ?`, id)
 	var r callRow
-	if err := row.Scan(&r.ID, &r.ThreadID, &r.CarrierSID,
+	if err := row.Scan(&r.ID, &r.ThreadID, &r.Direction, &r.AgentID, &r.RouteID, &r.CarrierSID,
 		&r.CarrierSlug, &r.CarrierConnectionID,
 		&r.ToNumber, &r.FromNumber, &r.Directive, &r.Voice, &r.AudioBridgeURL, &r.Status,
 		&r.PlacedAt, &r.AnsweredAt, &r.EndedAt, &r.ProjectID, &r.ErrorMessage); err != nil {
@@ -684,9 +1219,22 @@ func (c *callsDB) updateStatus(id, status, errMsg string) error {
 	return err
 }
 
+func (c *callsDB) attachCall(id, threadID, audioBridgeURL string) error {
+	now := time.Now().UTC().Format(time.RFC3339)
+	_, err := c.db.Exec(`UPDATE calls
+        SET thread_id = ?, audio_bridge_url = ?, status = 'answered', answered_at = COALESCE(answered_at, ?)
+        WHERE id = ?`, threadID, audioBridgeURL, now, id)
+	return err
+}
+
 func (c *callsDB) listActive(project string) ([]callRow, error) {
-	return c.listWhere(`status IN ('initiated','ringing','in-progress','answered') AND (? = '' OR project_id = ?) ORDER BY placed_at DESC`,
+	return c.listWhere(`status IN ('initiated','ringing','in-progress','answered','pending') AND (? = '' OR project_id = ?) ORDER BY placed_at DESC`,
 		project, project)
+}
+
+func (c *callsDB) listPending(agentID int64, project string) ([]callRow, error) {
+	return c.listWhere(`direction = 'inbound' AND status = 'pending' AND (? = 0 OR agent_id = ?) AND (? = '' OR project_id = ?) ORDER BY placed_at DESC`,
+		agentID, agentID, project, project)
 }
 
 func (c *callsDB) recent(project string, limit int) ([]callRow, error) {
@@ -695,7 +1243,9 @@ func (c *callsDB) recent(project string, limit int) ([]callRow, error) {
 }
 
 func (c *callsDB) listWhere(where string, argv ...any) ([]callRow, error) {
-	rows, err := c.db.Query(`SELECT id, thread_id, COALESCE(carrier_sid,''),
+	rows, err := c.db.Query(`SELECT id, thread_id,
+        COALESCE(direction,'outbound'), COALESCE(agent_id,0), COALESCE(route_id,''),
+        COALESCE(carrier_sid,''),
         COALESCE(carrier_slug,'twilio'), COALESCE(carrier_connection_id,0),
         to_number, from_number, directive, voice, audio_bridge_url, status,
         placed_at, COALESCE(answered_at,''), COALESCE(ended_at,''),
@@ -708,7 +1258,7 @@ func (c *callsDB) listWhere(where string, argv ...any) ([]callRow, error) {
 	var out []callRow
 	for rows.Next() {
 		var r callRow
-		if err := rows.Scan(&r.ID, &r.ThreadID, &r.CarrierSID,
+		if err := rows.Scan(&r.ID, &r.ThreadID, &r.Direction, &r.AgentID, &r.RouteID, &r.CarrierSID,
 			&r.CarrierSlug, &r.CarrierConnectionID,
 			&r.ToNumber, &r.FromNumber, &r.Directive, &r.Voice, &r.AudioBridgeURL, &r.Status,
 			&r.PlacedAt, &r.AnsweredAt, &r.EndedAt, &r.ProjectID, &r.ErrorMessage); err != nil {
@@ -717,4 +1267,64 @@ func (c *callsDB) listWhere(where string, argv ...any) ([]callRow, error) {
 		out = append(out, r)
 	}
 	return out, nil
+}
+
+func (c *callsDB) insertRoute(r routeRow) error {
+	enabled := 0
+	if r.Enabled {
+		enabled = 1
+	}
+	_, err := c.db.Exec(`INSERT INTO inbound_routes
+        (id, project_id, carrier_slug, carrier_connection_id, phone_number, phone_number_sid,
+         agent_id, enabled, hold_prompt, timeout_sec, secret, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		r.ID, r.ProjectID, r.CarrierSlug, r.CarrierConnectionID, r.PhoneNumber, r.PhoneNumberSID,
+		r.AgentID, enabled, r.HoldPrompt, r.TimeoutSec, r.Secret, r.CreatedAt, r.UpdatedAt,
+	)
+	return err
+}
+
+func (c *callsDB) findRoute(id string) (*routeRow, error) {
+	row := c.db.QueryRow(`SELECT id, project_id, carrier_slug, carrier_connection_id, phone_number,
+        phone_number_sid, agent_id, enabled, hold_prompt, timeout_sec, secret, created_at, updated_at
+        FROM inbound_routes WHERE id = ?`, id)
+	var r routeRow
+	var enabled int
+	if err := row.Scan(&r.ID, &r.ProjectID, &r.CarrierSlug, &r.CarrierConnectionID, &r.PhoneNumber,
+		&r.PhoneNumberSID, &r.AgentID, &enabled, &r.HoldPrompt, &r.TimeoutSec, &r.Secret, &r.CreatedAt, &r.UpdatedAt); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	r.Enabled = enabled != 0
+	return &r, nil
+}
+
+func (c *callsDB) listRoutes(project string) ([]routeRow, error) {
+	rows, err := c.db.Query(`SELECT id, project_id, carrier_slug, carrier_connection_id, phone_number,
+        phone_number_sid, agent_id, enabled, hold_prompt, timeout_sec, secret, created_at, updated_at
+        FROM inbound_routes WHERE (? = '' OR project_id = ?) ORDER BY created_at DESC`, project, project)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []routeRow
+	for rows.Next() {
+		var r routeRow
+		var enabled int
+		if err := rows.Scan(&r.ID, &r.ProjectID, &r.CarrierSlug, &r.CarrierConnectionID, &r.PhoneNumber,
+			&r.PhoneNumberSID, &r.AgentID, &enabled, &r.HoldPrompt, &r.TimeoutSec, &r.Secret, &r.CreatedAt, &r.UpdatedAt); err != nil {
+			return nil, err
+		}
+		r.Enabled = enabled != 0
+		out = append(out, r)
+	}
+	return out, nil
+}
+
+func (c *callsDB) updateRoutePhoneSID(id, sid string) error {
+	_, err := c.db.Exec(`UPDATE inbound_routes SET phone_number_sid = ?, updated_at = ? WHERE id = ?`,
+		sid, time.Now().UTC().Format(time.RFC3339), id)
+	return err
 }

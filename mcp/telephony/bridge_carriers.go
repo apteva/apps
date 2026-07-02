@@ -359,7 +359,7 @@ func (a *App) finishMediaBridge(callID, status string) {
 	_ = a.db().updateStatus(callID, status, "")
 	row, _ := a.db().findCall(callID)
 	if row != nil && row.ThreadID != "" && globalCtx != nil {
-		_ = globalCtx.PlatformAPI().KillThread(row.ThreadID)
+		_ = a.killCallThread(globalCtx, row)
 	}
 }
 
