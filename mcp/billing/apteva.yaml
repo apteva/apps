@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: billing
 display_name: Billing
-version: 0.8.13
+version: 0.8.14
 description: |
   Customers, invoices, and payments for Apteva agents and human teams.
   Per-invoice provider — local for internal/wire/cash records, stripe
@@ -11,8 +11,9 @@ description: |
   Stripe provider via the integrations catalog. Lifecycle is explicit
   (draft → open → paid/void/uncollectible) with an append-only audit
   log per invoice.
-  v0.8.13 adds a generic prepared-line invoice creation tool for
-  upstream apps such as Subscriptions; Billing remains product-agnostic.
+  v0.8.14 adds generic reusable payment methods and provider-hosted
+  setup sessions for card and bank-debit collection. Billing remains
+  product-agnostic.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/billing
@@ -94,6 +95,14 @@ provides:
         still use a bound payment_processor integration. URL is a Stripe
         Checkout Session, valid for 24h. On payment success, the webhook
         records the payment + transitions the invoice to 'paid' automatically.
+    - name: payment_method_setup_create
+      description: Create a provider-hosted setup session so a customer can save a reusable payment method. Supports card and bank-debit types such as sepa_debit where the processor supports them.
+    - name: payment_methods_list
+      description: List stored customer payment methods by customer, status, or type.
+    - name: payment_method_default_set
+      description: Mark one active payment method as the customer's default.
+    - name: payment_method_detach
+      description: Detach a stored payment method locally and at Stripe when direct Stripe config is available.
     - name: payments_record
       description: Record a non-Stripe payment (wire / cash / check / other). Updates invoice status when fully covered.
     - name: payments_list
@@ -211,6 +220,36 @@ provides:
         status: string
         total_cents: integer
         currency: string
+    - name: payment_method.attached
+      description: A reusable customer payment method was attached after a successful setup flow.
+      payload:
+        id: integer
+        customer_id: integer
+        provider: string
+        provider_payment_method_id: string
+        type: string
+        status: string
+        is_default: boolean
+    - name: payment_method.default_changed
+      description: A customer's default payment method changed.
+      payload:
+        id: integer
+        customer_id: integer
+        provider: string
+        provider_payment_method_id: string
+        type: string
+        status: string
+        is_default: boolean
+    - name: payment_method.detached
+      description: A reusable customer payment method was detached or revoked.
+      payload:
+        id: integer
+        customer_id: integer
+        provider: string
+        provider_payment_method_id: string
+        type: string
+        status: string
+        is_default: boolean
   skills:
     # Foundational "how this app thinks" skill loaded whenever the
     # agent touches billing. Lifecycle, picking provider at create

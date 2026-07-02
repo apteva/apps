@@ -258,6 +258,9 @@ func ensureStripeWebhook(ctx *sdk.AppCtx) error {
 		"enabled_events": []string{
 			"checkout.session.completed",
 			"payment_intent.succeeded",
+			"setup_intent.succeeded",
+			"setup_intent.setup_failed",
+			"payment_method.detached",
 			"charge.refunded",
 		},
 		"metadata": map[string]any{
@@ -276,6 +279,141 @@ func ensureStripeWebhook(ctx *sdk.AppCtx) error {
 		WebhookURL:        endpoint.URL,
 		Mode:              "direct",
 	})
+}
+
+type setupSessionRequest struct {
+	PaymentMethodTypes []string
+	SuccessURL         string
+	CancelURL          string
+	SetDefault         bool
+	Metadata           map[string]any
+}
+
+func (a *App) createStripeSetupSession(ctx *sdk.AppCtx, pid string, cust *Customer, req setupSessionRequest) (*SetupSession, error) {
+	var bound *sdk.BoundIntegration
+	if stripeDirectConfigured(ctx) {
+		if err := ensureStripeWebhook(ctx); err != nil {
+			return nil, fmt.Errorf("stripe webhook setup: %w", err)
+		}
+	} else {
+		var err error
+		bound, err = requireProcessor(ctx)
+		if err != nil {
+			return nil, err
+		}
+	}
+	stripeCustomerID, err := ensureStripeCustomer(ctx, pid, cust, bound)
+	if err != nil {
+		return nil, err
+	}
+	successURL := strings.TrimSpace(req.SuccessURL)
+	if successURL == "" {
+		successURL = configString(ctx, "stripe_setup_success_url", "")
+	}
+	if successURL == "" {
+		successURL = stripePublicBaseURL(ctx) + "/dashboard?app=billing&setup_session={CHECKOUT_SESSION_ID}"
+	}
+	cancelURL := strings.TrimSpace(req.CancelURL)
+	if cancelURL == "" {
+		cancelURL = configString(ctx, "stripe_setup_cancel_url", "")
+	}
+	if cancelURL == "" {
+		cancelURL = stripePublicBaseURL(ctx) + "/dashboard?app=billing"
+	}
+	metadata := mergeMaps(req.Metadata, map[string]any{
+		"apteva_project_id":  pid,
+		"apteva_customer_id": fmt.Sprintf("%d", cust.ID),
+		"apteva_set_default": strconv.FormatBool(req.SetDefault),
+	})
+	input := map[string]any{
+		"mode":                 "setup",
+		"customer":             stripeCustomerID,
+		"payment_method_types": req.PaymentMethodTypes,
+		"success_url":          successURL,
+		"cancel_url":           cancelURL,
+		"client_reference_id":  fmt.Sprintf("cust_%d_setup", cust.ID),
+		"metadata":             metadata,
+		"setup_intent_data": map[string]any{
+			"metadata": metadata,
+		},
+	}
+	var sess struct {
+		ID          string `json:"id"`
+		URL         string `json:"url"`
+		Customer    string `json:"customer"`
+		SetupIntent string `json:"setup_intent"`
+		ExpiresAt   int64  `json:"expires_at"`
+	}
+	if stripeDirectConfigured(ctx) {
+		if err := executeStripeDirect(ctx, http.MethodPost, "/checkout/sessions", input, &sess); err != nil {
+			return nil, err
+		}
+	} else {
+		if err := executeStripe(ctx, bound, "create_checkout_session", input, &sess); err != nil {
+			return nil, err
+		}
+	}
+	if sess.ID == "" || sess.URL == "" {
+		return nil, errors.New("Stripe returned no setup session URL")
+	}
+	rawTypes, _ := json.Marshal(req.PaymentMethodTypes)
+	rawMeta, _ := json.Marshal(metadata)
+	return dbSetupSessionCreate(ctx.AppDB(), &SetupSession{
+		ProjectID:             pid,
+		CustomerID:            cust.ID,
+		Provider:              "stripe",
+		ProviderCustomerID:    stripeCustomerID,
+		ProviderSessionID:     sess.ID,
+		ProviderSetupIntentID: sess.SetupIntent,
+		Status:                "pending",
+		SuccessURL:            successURL,
+		CancelURL:             cancelURL,
+		URL:                   sess.URL,
+		PaymentMethodTypes:    rawTypes,
+		Metadata:              rawMeta,
+		ExpiresAt:             timestampFromUnix(sess.ExpiresAt),
+	})
+}
+
+func ensureStripeCustomer(ctx *sdk.AppCtx, pid string, cust *Customer, bound *sdk.BoundIntegration) (string, error) {
+	if cust == nil {
+		return "", errors.New("customer required")
+	}
+	if strings.TrimSpace(cust.ExternalID) != "" {
+		return cust.ExternalID, nil
+	}
+	input := map[string]any{
+		"email": cust.Email,
+		"name":  cust.Name,
+		"metadata": map[string]any{
+			"apteva_project_id":  pid,
+			"apteva_customer_id": fmt.Sprintf("%d", cust.ID),
+		},
+	}
+	var out struct {
+		ID string `json:"id"`
+	}
+	if stripeDirectConfigured(ctx) {
+		if err := executeStripeDirect(ctx, http.MethodPost, "/customers", input, &out); err != nil {
+			return "", err
+		}
+	} else {
+		if bound == nil {
+			return "", errors.New("payment_processor integration required")
+		}
+		if err := executeStripe(ctx, bound, "create_customer", input, &out); err != nil {
+			return "", err
+		}
+	}
+	if out.ID == "" {
+		return "", errors.New("Stripe returned no customer id")
+	}
+	if _, err := ctx.AppDB().Exec(
+		`UPDATE customers SET external_id = ?, updated_at = CURRENT_TIMESTAMP
+		 WHERE id = ? AND project_id = ?`, out.ID, cust.ID, pid); err != nil {
+		ctx.Logger().Warn("stripe customer id persistence failed", "customer_id", cust.ID, "err", err.Error())
+	}
+	return out.ID, nil
 }
 
 func parseStripeSignature(header string) (int64, []string) {
@@ -567,6 +705,12 @@ func (a *App) dispatchStripeEvent(ctx *sdk.AppCtx, eventID, eventType string, ob
 		// creation). Not used by v0.8.0's send-payment-link path
 		// but the catalog declares the event, so handle gracefully.
 		return nil
+	case "setup_intent.succeeded":
+		return a.handleSetupIntentSucceeded(ctx, obj)
+	case "setup_intent.setup_failed":
+		return a.handleSetupIntentFailed(ctx, obj)
+	case "payment_method.detached":
+		return a.handlePaymentMethodDetached(ctx, obj)
 	case "charge.refunded":
 		return a.handleChargeRefunded(ctx, obj)
 	case "invoice.paid":
@@ -591,8 +735,10 @@ func (a *App) handleCheckoutCompleted(ctx *sdk.AppCtx, obj json.RawMessage) erro
 		ID                string            `json:"id"`
 		AmountTotal       int64             `json:"amount_total"`
 		Currency          string            `json:"currency"`
+		Mode              string            `json:"mode"`
 		PaymentIntent     string            `json:"payment_intent"`
 		PaymentStatus     string            `json:"payment_status"`
+		SetupIntent       string            `json:"setup_intent"`
 		ClientReferenceID string            `json:"client_reference_id"`
 		Customer          string            `json:"customer"`
 		CustomerEmail     string            `json:"customer_email"`
@@ -600,6 +746,12 @@ func (a *App) handleCheckoutCompleted(ctx *sdk.AppCtx, obj json.RawMessage) erro
 	}
 	if err := json.Unmarshal(obj, &sess); err != nil {
 		return fmt.Errorf("decode session: %w", err)
+	}
+	if sess.Mode == "setup" {
+		if err := dbSetupSessionCompleteByProviderSession(ctx.AppDB(), "stripe", sess.ID, sess.SetupIntent); err != nil {
+			return fmt.Errorf("complete setup session: %w", err)
+		}
+		return nil
 	}
 	if sess.PaymentStatus != "paid" {
 		// async_payment_succeeded would be the followup for async
@@ -647,6 +799,161 @@ func (a *App) handleCheckoutCompleted(ctx *sdk.AppCtx, obj json.RawMessage) erro
 	ctx.Logger().Info("stripe payment recorded",
 		"invoice_id", invoiceID, "payment_id", pay.ID, "amount", sess.AmountTotal, "session", sess.ID)
 	return nil
+}
+
+func (a *App) handleSetupIntentSucceeded(ctx *sdk.AppCtx, obj json.RawMessage) error {
+	var si struct {
+		ID                 string            `json:"id"`
+		Status             string            `json:"status"`
+		Customer           string            `json:"customer"`
+		PaymentMethod      string            `json:"payment_method"`
+		Mandate            string            `json:"mandate"`
+		PaymentMethodTypes []string          `json:"payment_method_types"`
+		Metadata           map[string]string `json:"metadata"`
+	}
+	if err := json.Unmarshal(obj, &si); err != nil {
+		return fmt.Errorf("decode setup_intent: %w", err)
+	}
+	if si.Status != "" && si.Status != "succeeded" {
+		return nil
+	}
+	pid := si.Metadata["apteva_project_id"]
+	customerID := atoi64(si.Metadata["apteva_customer_id"])
+	if pid == "" || customerID == 0 {
+		return fmt.Errorf("setup_intent %s missing apteva project/customer metadata", si.ID)
+	}
+	if si.PaymentMethod == "" {
+		return fmt.Errorf("setup_intent %s has no payment_method", si.ID)
+	}
+	pm := &PaymentMethod{
+		ProjectID:               pid,
+		CustomerID:              customerID,
+		Provider:                "stripe",
+		ProviderCustomerID:      si.Customer,
+		ProviderPaymentMethodID: si.PaymentMethod,
+		ProviderMandateID:       si.Mandate,
+		Type:                    firstNonEmpty(si.PaymentMethodTypes, "unknown"),
+		Status:                  "active",
+		IsDefault:               si.Metadata["apteva_set_default"] != "false",
+		Reusable:                true,
+		Metadata:                json.RawMessage(`{}`),
+	}
+	if stripeDirectConfigured(ctx) {
+		if fetched, err := fetchStripePaymentMethod(ctx, si.PaymentMethod); err == nil && fetched != nil {
+			pm.ProviderCustomerID = firstString(pm.ProviderCustomerID, fetched.ProviderCustomerID)
+			pm.Type = firstString(fetched.Type, pm.Type)
+			pm.DisplayBrand = fetched.DisplayBrand
+			pm.DisplayLast4 = fetched.DisplayLast4
+			pm.ExpMonth = fetched.ExpMonth
+			pm.ExpYear = fetched.ExpYear
+			pm.Country = fetched.Country
+			pm.Currency = fetched.Currency
+			pm.DelayedNotification = fetched.DelayedNotification
+		} else if err != nil {
+			ctx.Logger().Warn("stripe payment method fetch failed", "payment_method", si.PaymentMethod, "err", err.Error())
+		}
+	}
+	if pm.Type == "sepa_debit" {
+		pm.DelayedNotification = true
+	}
+	rawMeta, _ := json.Marshal(mergeMaps(mapFromStringMap(si.Metadata), map[string]any{
+		"stripe_setup_intent_id": si.ID,
+	}))
+	pm.Metadata = rawMeta
+	created, err := dbPaymentMethodUpsert(ctx.AppDB(), pm)
+	if err != nil {
+		return fmt.Errorf("save payment method: %w", err)
+	}
+	emitPaymentMethod(ctx, "payment_method.attached", created)
+	return nil
+}
+
+func (a *App) handleSetupIntentFailed(ctx *sdk.AppCtx, obj json.RawMessage) error {
+	var si struct {
+		ID       string            `json:"id"`
+		Metadata map[string]string `json:"metadata"`
+	}
+	if err := json.Unmarshal(obj, &si); err != nil {
+		return fmt.Errorf("decode setup_intent: %w", err)
+	}
+	if si.ID != "" {
+		return dbSetupSessionFailBySetupIntent(ctx.AppDB(), "stripe", si.ID)
+	}
+	return nil
+}
+
+func (a *App) handlePaymentMethodDetached(ctx *sdk.AppCtx, obj json.RawMessage) error {
+	var raw struct {
+		ID string `json:"id"`
+	}
+	if err := json.Unmarshal(obj, &raw); err != nil {
+		return fmt.Errorf("decode payment_method: %w", err)
+	}
+	if raw.ID == "" {
+		return nil
+	}
+	pm, err := dbPaymentMethodByProviderID(ctx.AppDB(), "stripe", raw.ID)
+	if err != nil || pm == nil {
+		return err
+	}
+	detached, err := dbPaymentMethodDetach(ctx.AppDB(), pm.ProjectID, pm.ID)
+	if err != nil {
+		return err
+	}
+	emitPaymentMethod(ctx, "payment_method.detached", detached)
+	return nil
+}
+
+func fetchStripePaymentMethod(ctx *sdk.AppCtx, providerPaymentMethodID string) (*PaymentMethod, error) {
+	var raw struct {
+		ID       string            `json:"id"`
+		Type     string            `json:"type"`
+		Customer string            `json:"customer"`
+		Metadata map[string]string `json:"metadata"`
+		Card     struct {
+			Brand    string `json:"brand"`
+			Last4    string `json:"last4"`
+			ExpMonth int    `json:"exp_month"`
+			ExpYear  int    `json:"exp_year"`
+			Country  string `json:"country"`
+		} `json:"card"`
+		SepaDebit struct {
+			Last4   string `json:"last4"`
+			Country string `json:"country"`
+		} `json:"sepa_debit"`
+		USBankAccount struct {
+			BankName string `json:"bank_name"`
+			Last4    string `json:"last4"`
+		} `json:"us_bank_account"`
+	}
+	if err := executeStripeDirect(ctx, http.MethodGet, "/payment_methods/"+providerPaymentMethodID, map[string]any{}, &raw); err != nil {
+		return nil, err
+	}
+	pm := &PaymentMethod{
+		Provider:                "stripe",
+		ProviderCustomerID:      raw.Customer,
+		ProviderPaymentMethodID: raw.ID,
+		Type:                    firstString(raw.Type, "unknown"),
+		Reusable:                true,
+	}
+	switch raw.Type {
+	case "card":
+		pm.DisplayBrand = raw.Card.Brand
+		pm.DisplayLast4 = raw.Card.Last4
+		pm.ExpMonth = raw.Card.ExpMonth
+		pm.ExpYear = raw.Card.ExpYear
+		pm.Country = raw.Card.Country
+	case "sepa_debit":
+		pm.DisplayBrand = "SEPA Direct Debit"
+		pm.DisplayLast4 = raw.SepaDebit.Last4
+		pm.Country = raw.SepaDebit.Country
+		pm.DelayedNotification = true
+	case "us_bank_account":
+		pm.DisplayBrand = raw.USBankAccount.BankName
+		pm.DisplayLast4 = raw.USBankAccount.Last4
+		pm.DelayedNotification = true
+	}
+	return pm, nil
 }
 
 // handleChargeRefunded records a negative-amount payment row for a

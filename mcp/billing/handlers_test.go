@@ -9,6 +9,7 @@ package main
 import (
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"strings"
 	"testing"
 
@@ -118,6 +119,103 @@ func TestInvoicesCreateFromPreparedLines(t *testing.T) {
 	}
 	if len(inv.LineItems) != 1 || inv.LineItems[0].Description != "LLM token overage" {
 		t.Fatalf("line items = %+v", inv.LineItems)
+	}
+}
+
+func TestPaymentMethods_DefaultSwitchAndDetach(t *testing.T) {
+	ctx := newTestCtx(t)
+	customer := mustCustomer(t, ctx, "cards@example.com", "Cards Co")
+
+	pm1, err := dbPaymentMethodUpsert(ctx.AppDB(), &PaymentMethod{
+		ProjectID:               "test-proj",
+		CustomerID:              customer.ID,
+		Provider:                "stripe",
+		ProviderCustomerID:      "cus_123",
+		ProviderPaymentMethodID: "pm_card_1",
+		Type:                    "card",
+		Status:                  "active",
+		Reusable:                true,
+		DisplayBrand:            "visa",
+		DisplayLast4:            "4242",
+	})
+	if err != nil {
+		t.Fatalf("upsert pm1: %v", err)
+	}
+	if !pm1.IsDefault {
+		t.Fatalf("first active payment method should become default")
+	}
+
+	pm2, err := dbPaymentMethodUpsert(ctx.AppDB(), &PaymentMethod{
+		ProjectID:               "test-proj",
+		CustomerID:              customer.ID,
+		Provider:                "stripe",
+		ProviderCustomerID:      "cus_123",
+		ProviderPaymentMethodID: "pm_card_2",
+		Type:                    "card",
+		Status:                  "active",
+		IsDefault:               true,
+		Reusable:                true,
+		DisplayBrand:            "mastercard",
+		DisplayLast4:            "4444",
+	})
+	if err != nil {
+		t.Fatalf("upsert pm2: %v", err)
+	}
+	if !pm2.IsDefault {
+		t.Fatalf("explicit default payment method not marked default")
+	}
+	pm1, _ = dbPaymentMethodGet(ctx.AppDB(), "test-proj", pm1.ID)
+	if pm1.IsDefault {
+		t.Fatalf("old payment method still default after switch")
+	}
+
+	if _, err := dbPaymentMethodDetach(ctx.AppDB(), "test-proj", pm2.ID); err != nil {
+		t.Fatalf("detach pm2: %v", err)
+	}
+	pm1, _ = dbPaymentMethodGet(ctx.AppDB(), "test-proj", pm1.ID)
+	if !pm1.IsDefault {
+		t.Fatalf("remaining active payment method should become default after default detach")
+	}
+}
+
+func TestStripeSetupIntentSucceededStoresPaymentMethod(t *testing.T) {
+	rec := tk.NewEmitRecorder()
+	ctx := newTestCtx(t, tk.WithEmitter(rec))
+	app := &App{}
+	customer := mustCustomer(t, ctx, "setup@example.com", "Setup Co")
+
+	payload := []byte(`{
+		"id": "seti_123",
+		"status": "succeeded",
+		"customer": "cus_123",
+		"payment_method": "pm_123",
+		"payment_method_types": ["sepa_debit"],
+		"mandate": "mandate_123",
+		"metadata": {
+			"apteva_project_id": "test-proj",
+			"apteva_customer_id": "` + strconv.FormatInt(customer.ID, 10) + `",
+			"apteva_set_default": "true"
+		}
+	}`)
+	if err := app.handleSetupIntentSucceeded(ctx, payload); err != nil {
+		t.Fatalf("setup intent: %v", err)
+	}
+	methods, err := dbPaymentMethodsList(ctx.AppDB(), "test-proj", paymentMethodFilters{
+		customerID: customer.ID,
+		status:     "active",
+		limit:      10,
+	})
+	if err != nil {
+		t.Fatalf("list payment methods: %v", err)
+	}
+	if len(methods) != 1 {
+		t.Fatalf("methods = %d, want 1", len(methods))
+	}
+	if methods[0].ProviderPaymentMethodID != "pm_123" || methods[0].Type != "sepa_debit" || !methods[0].DelayedNotification {
+		t.Fatalf("stored payment method = %+v", methods[0])
+	}
+	if len(rec.EventsByTopic("payment_method.attached")) != 1 {
+		t.Fatalf("payment_method.attached events = %d, want 1", len(rec.EventsByTopic("payment_method.attached")))
 	}
 }
 

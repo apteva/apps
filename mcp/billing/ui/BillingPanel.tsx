@@ -156,6 +156,31 @@ interface Payment {
   notes?: string;
 }
 
+interface PaymentMethod {
+  id: number;
+  customer_id: number;
+  customer_name?: string;
+  customer_email?: string;
+  provider: string;
+  provider_customer_id?: string;
+  provider_payment_method_id: string;
+  provider_mandate_id?: string;
+  type: string;
+  status: string;
+  is_default: boolean;
+  reusable: boolean;
+  delayed_notification: boolean;
+  display_brand?: string;
+  display_last4?: string;
+  exp_month?: number;
+  exp_year?: number;
+  country?: string;
+  currency?: string;
+  created_at?: string;
+  updated_at?: string;
+  detached_at?: string;
+}
+
 interface AuditEntry {
   id: number;
   invoice_id: number;
@@ -281,9 +306,9 @@ const API = "/api/apps/billing";
 // ─── Panel ──────────────────────────────────────────────────────────
 
 export default function BillingPanel({ projectId, installId }: NativePanelProps) {
-  const [tab, setTab] = useState<"invoices" | "customers" | "settings">(
-    "invoices",
-  );
+  const [tab, setTab] = useState<
+    "invoices" | "customers" | "payment_methods" | "settings"
+  >("invoices");
 
   const queryString = useCallback(
     (extra: Record<string, string> = {}) =>
@@ -338,6 +363,15 @@ export default function BillingPanel({ projectId, installId }: NativePanelProps)
         </button>
         <button
           type="button"
+          onClick={() => setTab("payment_methods")}
+          className={`px-3 py-1 rounded ${
+            tab === "payment_methods" ? "bg-accent text-bg" : "hover:bg-bg-input/50"
+          }`}
+        >
+          Payment methods
+        </button>
+        <button
+          type="button"
           onClick={() => setTab("settings")}
           className={`px-3 py-1 rounded ml-auto ${
             tab === "settings" ? "bg-accent text-bg" : "hover:bg-bg-input/50"
@@ -353,6 +387,9 @@ export default function BillingPanel({ projectId, installId }: NativePanelProps)
         )}
         {tab === "customers" && (
           <CustomersTab projectId={projectId} apiCall={apiCall} />
+        )}
+        {tab === "payment_methods" && (
+          <PaymentMethodsTab projectId={projectId} apiCall={apiCall} />
         )}
         {tab === "settings" && <SettingsTab apiCall={apiCall} />}
       </div>
@@ -3692,6 +3729,270 @@ function EditCustomerModal({
           </button>
         </footer>
       </div>
+    </div>
+  );
+}
+
+// ─── Payment methods tab ────────────────────────────────────────────
+
+function paymentMethodLabel(pm: PaymentMethod): string {
+  const brand = pm.display_brand || pm.type || pm.provider;
+  const last4 = pm.display_last4 ? `•••• ${pm.display_last4}` : pm.provider_payment_method_id;
+  return `${brand} ${last4}`.trim();
+}
+
+function PaymentMethodsTab({
+  projectId,
+  apiCall,
+}: {
+  projectId: string;
+  apiCall: ApiCall;
+}) {
+  const [methods, setMethods] = useState<PaymentMethod[]>([]);
+  const [status, setStatus] = useState("");
+  const [customerId, setCustomerId] = useState("");
+  const [paymentTypes, setPaymentTypes] = useState("card");
+  const [successUrl, setSuccessUrl] = useState("");
+  const [cancelUrl, setCancelUrl] = useState("");
+  const [setDefault, setSetDefault] = useState(true);
+  const [submitting, setSubmitting] = useState(false);
+
+  const load = useCallback(async () => {
+    setStatus("Loading…");
+    try {
+      const res = await apiCall<{ payment_methods: PaymentMethod[] }>(
+        "GET",
+        "/payment-methods",
+        undefined,
+        { limit: "200" },
+      );
+      setMethods(res.payment_methods || []);
+      setStatus(`${(res.payment_methods || []).length} payment method${(res.payment_methods || []).length === 1 ? "" : "s"}`);
+    } catch (err) {
+      setStatus(`Error: ${(err as Error).message}`);
+    }
+  }, [apiCall]);
+
+  useEffect(() => {
+    load();
+  }, [load]);
+
+  useAppEvents("billing", projectId, (ev) => {
+    if (ev.topic.startsWith("payment_method.") || ev.topic.startsWith("customer.")) {
+      load();
+    }
+  });
+
+  const createSetup = async () => {
+    const id = Number(customerId);
+    if (!Number.isFinite(id) || id <= 0) {
+      setStatus("Enter a valid customer id.");
+      return;
+    }
+    const types = paymentTypes
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+    setSubmitting(true);
+    setStatus("Creating setup session…");
+    try {
+      const body: Record<string, unknown> = {
+        customer_id: id,
+        payment_method_types: types.length > 0 ? types : ["card"],
+        set_default: setDefault,
+      };
+      if (successUrl.trim()) body.success_url = successUrl.trim();
+      if (cancelUrl.trim()) body.cancel_url = cancelUrl.trim();
+      const res = await apiCall<{ url?: string }>("POST", "/setup-sessions", body);
+      if (res.url) {
+        window.open(res.url, "_blank", "noopener,noreferrer");
+        setStatus("Setup link opened. This list updates after Stripe confirms the setup.");
+      } else {
+        setStatus("Setup session created.");
+      }
+      await load();
+    } catch (err) {
+      setStatus(`Setup failed: ${(err as Error).message}`);
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const setAsDefault = async (pm: PaymentMethod) => {
+    setStatus("Updating default…");
+    try {
+      await apiCall("POST", `/payment-methods/${pm.id}/default`);
+      await load();
+    } catch (err) {
+      setStatus(`Default update failed: ${(err as Error).message}`);
+    }
+  };
+
+  const detach = async (pm: PaymentMethod) => {
+    if (!window.confirm(`Detach ${paymentMethodLabel(pm)}?`)) return;
+    setStatus("Detaching…");
+    try {
+      await apiCall("POST", `/payment-methods/${pm.id}/detach`);
+      await load();
+    } catch (err) {
+      setStatus(`Detach failed: ${(err as Error).message}`);
+    }
+  };
+
+  return (
+    <div className="h-full overflow-auto">
+      <div className="p-4 border-b border-border space-y-3">
+        <div className="flex items-center justify-between gap-4">
+          <div>
+            <h1 className="text-lg font-semibold text-text">Payment methods</h1>
+            <p className="text-sm text-text-muted">
+              Reusable customer payment methods saved through the processor.
+            </p>
+          </div>
+          <button
+            type="button"
+            onClick={load}
+            className="px-3 py-1 text-sm border border-border rounded hover:bg-bg-input"
+          >
+            Refresh
+          </button>
+        </div>
+
+        <div className="grid grid-cols-1 lg:grid-cols-[140px_180px_1fr_1fr_auto_auto] gap-2 items-end">
+          <label className="space-y-1 text-xs text-text-muted">
+            <span>Customer ID</span>
+            <input
+              type="number"
+              min={1}
+              value={customerId}
+              onChange={(e) => setCustomerId(e.target.value)}
+              className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm text-text"
+            />
+          </label>
+          <label className="space-y-1 text-xs text-text-muted">
+            <span>Types</span>
+            <input
+              type="text"
+              value={paymentTypes}
+              onChange={(e) => setPaymentTypes(e.target.value)}
+              placeholder="card,sepa_debit"
+              className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm text-text"
+            />
+          </label>
+          <label className="space-y-1 text-xs text-text-muted">
+            <span>Success URL</span>
+            <input
+              type="url"
+              value={successUrl}
+              onChange={(e) => setSuccessUrl(e.target.value)}
+              placeholder="Default dashboard URL"
+              className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm text-text"
+            />
+          </label>
+          <label className="space-y-1 text-xs text-text-muted">
+            <span>Cancel URL</span>
+            <input
+              type="url"
+              value={cancelUrl}
+              onChange={(e) => setCancelUrl(e.target.value)}
+              placeholder="Default dashboard URL"
+              className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm text-text"
+            />
+          </label>
+          <label className="flex items-center gap-2 text-sm text-text-muted pb-1">
+            <input
+              type="checkbox"
+              checked={setDefault}
+              onChange={(e) => setSetDefault(e.target.checked)}
+            />
+            Default
+          </label>
+          <button
+            type="button"
+            onClick={createSetup}
+            disabled={submitting}
+            className="px-3 py-1 text-sm border border-accent text-accent rounded hover:bg-accent hover:text-bg disabled:opacity-50"
+          >
+            {submitting ? "Creating…" : "Create setup link"}
+          </button>
+        </div>
+        <div className="text-xs text-text-muted">{status}</div>
+      </div>
+
+      <table className="w-full text-sm">
+        <thead className="sticky top-0 bg-bg border-b border-border text-xs uppercase text-text-dim">
+          <tr>
+            <th className="text-left p-2">Customer</th>
+            <th className="text-left p-2">Method</th>
+            <th className="text-left p-2">Type</th>
+            <th className="text-left p-2">Status</th>
+            <th className="text-left p-2">Created</th>
+            <th className="text-right p-2">Actions</th>
+          </tr>
+        </thead>
+        <tbody>
+          {methods.map((pm) => (
+            <tr key={pm.id} className="border-b border-border/60 hover:bg-bg-input/30">
+              <td className="p-2">
+                <div className="text-text">{pm.customer_name || `Customer #${pm.customer_id}`}</div>
+                <div className="text-xs text-text-dim">{pm.customer_email || `#${pm.customer_id}`}</div>
+              </td>
+              <td className="p-2">
+                <div className="text-text">{paymentMethodLabel(pm)}</div>
+                <div className="text-xs text-text-dim break-all">
+                  {pm.provider_payment_method_id}
+                </div>
+              </td>
+              <td className="p-2">
+                <div className="text-text">{pm.type}</div>
+                {pm.delayed_notification && (
+                  <div className="text-xs text-yellow-500">Delayed confirmation</div>
+                )}
+              </td>
+              <td className="p-2">
+                <span className="inline-flex items-center rounded border border-border px-2 py-0.5 text-xs">
+                  {pm.status}
+                </span>
+                {pm.is_default && (
+                  <span className="ml-2 inline-flex items-center rounded border border-accent text-accent px-2 py-0.5 text-xs">
+                    Default
+                  </span>
+                )}
+              </td>
+              <td className="p-2 text-text-muted">{fmtDateTime(pm.created_at)}</td>
+              <td className="p-2">
+                <div className="flex justify-end gap-2">
+                  {!pm.is_default && pm.status === "active" && (
+                    <button
+                      type="button"
+                      onClick={() => setAsDefault(pm)}
+                      className="px-2 py-1 text-xs border border-border rounded hover:bg-bg-input"
+                    >
+                      Set default
+                    </button>
+                  )}
+                  {pm.status === "active" && (
+                    <button
+                      type="button"
+                      onClick={() => detach(pm)}
+                      className="px-2 py-1 text-xs border border-red text-red rounded hover:bg-red hover:text-bg"
+                    >
+                      Detach
+                    </button>
+                  )}
+                </div>
+              </td>
+            </tr>
+          ))}
+          {methods.length === 0 && (
+            <tr>
+              <td colSpan={6} className="p-6 text-center text-text-muted">
+                No payment methods yet.
+              </td>
+            </tr>
+          )}
+        </tbody>
+      </table>
     </div>
   );
 }

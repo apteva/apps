@@ -37,10 +37,11 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: billing
 display_name: Billing
-version: 0.8.13
+version: 0.8.14
 description: |
-  Customers, invoices, and payments. Per-invoice provider — local for
-  internal/wire/cash, stripe for card-payable hosted invoices.
+  Customers, invoices, payments, and reusable customer payment methods.
+  Per-invoice provider — local for internal/wire/cash, stripe for
+  card-payable hosted invoices.
 author: Apteva
 scopes: [project, global]
 requires:
@@ -116,7 +117,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	}
 
 	ctx.Logger().Info("billing mounted",
-		"version", "0.8.13",
+		"version", "0.8.14",
 		"scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
 	return nil
 }
@@ -139,6 +140,9 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/invoices", Handler: a.handleHTTPInvoicesCollection},
 		{Pattern: "/invoices/", Handler: a.handleHTTPInvoiceItem},
 		{Pattern: "/payments", Handler: a.handleHTTPPaymentsCollection},
+		{Pattern: "/payment-methods", Handler: a.handleHTTPPaymentMethodsCollection},
+		{Pattern: "/payment-methods/", Handler: a.handleHTTPPaymentMethodItem},
+		{Pattern: "/setup-sessions", Handler: a.handleHTTPSetupSessionsCollection},
 		{Pattern: "/issuer", Handler: a.handleHTTPIssuer},
 		// Stripe webhook receiver. Public POST endpoint configured
 		// automatically when stripe_secret_key is set, or manually
@@ -437,6 +441,47 @@ func (a *App) MCPTools() []sdk.Tool {
 				"cancel_url":  map[string]any{"type": "string"},
 			}, []string{"invoice_id"}),
 			Handler: a.toolInvoicesSendPaymentLink,
+		},
+		// ── Payment methods ──────────────────────────────────────────
+		{
+			Name:        "payment_method_setup_create",
+			Description: "Create a provider-hosted setup session so a customer can save a reusable payment method. Returns {setup_session, url}. Args: customer_id, payment_method_types (default ['card']; e.g. ['card','sepa_debit']), success_url, cancel_url, set_default (default true), metadata.",
+			InputSchema: schemaObject(map[string]any{
+				"customer_id":          map[string]any{"type": "integer"},
+				"payment_method_types": map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+				"success_url":          map[string]any{"type": "string"},
+				"cancel_url":           map[string]any{"type": "string"},
+				"set_default":          map[string]any{"type": "boolean"},
+				"metadata":             map[string]any{"type": "object"},
+			}, []string{"customer_id"}),
+			Handler: a.toolPaymentMethodSetupCreate,
+		},
+		{
+			Name:        "payment_methods_list",
+			Description: "List stored customer payment methods. Args: customer_id, status (active|detached), type (card|sepa_debit|...), limit.",
+			InputSchema: schemaObject(map[string]any{
+				"customer_id": map[string]any{"type": "integer"},
+				"status":      map[string]any{"type": "string"},
+				"type":        map[string]any{"type": "string"},
+				"limit":       map[string]any{"type": "integer"},
+			}, nil),
+			Handler: a.toolPaymentMethodsList,
+		},
+		{
+			Name:        "payment_method_default_set",
+			Description: "Set an active stored payment method as the customer's default. Args: id.",
+			InputSchema: schemaObject(map[string]any{
+				"id": map[string]any{"type": "integer"},
+			}, []string{"id"}),
+			Handler: a.toolPaymentMethodDefaultSet,
+		},
+		{
+			Name:        "payment_method_detach",
+			Description: "Detach a stored payment method. With direct Stripe config, detaches it at Stripe too; otherwise marks it detached locally after the provider webhook or operator action. Args: id.",
+			InputSchema: schemaObject(map[string]any{
+				"id": map[string]any{"type": "integer"},
+			}, []string{"id"}),
+			Handler: a.toolPaymentMethodDetach,
 		},
 		// ── Issuer ───────────────────────────────────────────────────
 		{
