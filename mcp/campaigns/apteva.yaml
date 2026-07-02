@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: campaigns
 display_name: Campaigns
-version: 0.2.1
+version: 0.2.2
 description: |
   Bulk-send orchestrator. Compose a campaign, target a CRM segment (or
   a list — segments scoped to a list work too), schedule it, and the
@@ -11,9 +11,8 @@ description: |
   unsubscribe links backed by persisted tokens, provider delivery
   reconciliation, and basic stats.
 
-  v0.2.1 ships authoring, scheduled sends, unsubscribe links, and
-  delivery/bounce/complaint/open reconciliation from Messaging events
-  through a single Messaging app-role dependency.
+  v0.2.2 ships authoring, scheduled sends, unsubscribe links, and
+  delivery/bounce/complaint/open reconciliation from Messaging events.
   Click tracking, drip sequences, recurring schedules, and A/B variants
   remain future polish on top of the same schema.
 
@@ -31,6 +30,12 @@ requires:
     - net.egress
     - platform.instances.read
     - platform.apps.call
+  apps:
+    - name: messaging
+      optional: true
+      reason: Receive provider delivery/bounce/complaint/open events for campaign recipient reconciliation; the required Messaging sender binding below is the actual app dependency.
+      events:
+        - message.event
   integrations:
     - role: crm
       kind: app
@@ -43,8 +48,6 @@ requires:
       kind: app
       compatible_app_names: [messaging]
       capabilities: [message.send, suppression.check]
-      events:
-        - message.event
       required: true
       label: "Messaging (sender)"
       hint: "Every recipient is sent via messaging.send_message; suppression respect goes through messaging.suppression_check; delivery state reconciles from message.event."
