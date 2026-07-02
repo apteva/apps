@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Voice Notes">
+  <rect width="64" height="64" rx="14" fill="#111827"/>
+  <path d="M32 12a9 9 0 0 0-9 9v12a9 9 0 0 0 18 0V21a9 9 0 0 0-9-9Z" fill="#F8FAFC"/>
+  <path d="M17 30v3a15 15 0 0 0 30 0v-3" fill="none" stroke="#22C55E" stroke-width="5" stroke-linecap="round"/>
+  <path d="M32 48v6M24 54h16" fill="none" stroke="#F8FAFC" stroke-width="5" stroke-linecap="round"/>
+  <path d="M47 14h5M47 23h7M47 32h5" fill="none" stroke="#60A5FA" stroke-width="4" stroke-linecap="round"/>
+</svg>

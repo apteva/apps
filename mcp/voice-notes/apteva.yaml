@@ -1,0 +1,114 @@
+schema: apteva-app/v1
+
+name: voice-notes
+display_name: Voice Notes
+version: 0.1.0
+description: |
+  Lightweight audio notes for Apteva projects. Record voice memos from the
+  browser, store the raw audio in Storage, and optionally transcribe through a
+  bound Deepgram connection. Notes are standalone by default: CRM, tasks, and
+  meeting workflows can layer on later without making simple recording heavy.
+
+author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/voice-notes
+icon: icon.svg
+tags: [audio, notes, transcription, voice]
+
+scopes: [project, global]
+min_apteva_version: "0.10.0"
+
+requires:
+  permissions:
+    - db.write.app
+    - platform.apps.call
+    - platform.connections.execute
+  apps:
+    - name: storage
+      version: ">=0.8.1"
+      reason: Stores raw audio recordings and mints signed playback/transcription URLs.
+  integrations:
+    - role: transcripts
+      kind: integration
+      compatible_slugs: [deepgram]
+      capabilities: [audio.transcribe]
+      tools:
+        audio.transcribe: listen
+        transcribe: listen
+      required: false
+      label: "Speech-to-text provider"
+      hint: "Optional. Bind Deepgram to transcribe saved voice notes. Without it, recordings still save and transcripts can be added manually."
+
+provides:
+  http_routes:
+    - prefix: /
+  mcp_tools:
+    - name: voice_notes_create
+      description: Create a text/manual voice note shell. Args: title?, transcript_text?, tags?.
+    - name: voice_notes_upload_audio
+      description: Upload a base64 audio recording to Storage, create a note, and optionally transcribe it. Args: name, content_base64, content_type?, title?, duration_ms?, transcribe?.
+    - name: voice_notes_get
+      description: Fetch one voice note by id, including signed playback URL when available.
+    - name: voice_notes_list
+      description: List/search voice notes. Args: q?, status?, limit?.
+    - name: voice_notes_transcribe
+      description: Transcribe a saved note using the bound Deepgram connection. Args: id, force?.
+    - name: voice_notes_set_transcript
+      description: Manually set or replace a note transcript. Args: id, text, language?.
+  ui_panels:
+    - slot: project.page
+      label: Voice Notes
+      icon: mic
+      entry: /ui/VoiceNotesPanel.mjs
+  publishes:
+    - name: voice_note.created
+      description: A voice note was created.
+      payload:
+        id: integer
+        title: string
+        status: string
+        storage_file_id: string
+    - name: voice_note.transcribed
+      description: A voice note transcript was saved.
+      payload:
+        id: integer
+        title: string
+        language: string
+        chars: integer
+
+runtime:
+  kind: source
+  source:
+    repo: github.com/apteva/apps
+    ref: main
+    entry: mcp/voice-notes
+  port: 8080
+  health_check: /health
+
+db:
+  driver: sqlite
+  path: /data/voice-notes.db
+  migrations: migrations/
+
+config_schema:
+  - name: default_folder
+    type: text
+    default: "/voice-notes/"
+    label: Default storage folder
+    description: Folder where audio recordings are uploaded.
+  - name: auto_transcribe
+    type: bool
+    default: true
+    label: Auto-transcribe
+    description: When Deepgram is bound, transcribe new uploaded notes automatically.
+  - name: transcribe_model
+    type: text
+    default: "nova-3"
+    label: Deepgram model
+    description: Speech-to-text model passed to Deepgram listen.
+  - name: transcribe_language
+    type: text
+    default: "auto"
+    label: Language
+    description: Use "auto" for detection or pass a language code such as en or en-US.
+
+upgrade_policy: auto-patch
