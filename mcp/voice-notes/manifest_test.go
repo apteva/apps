@@ -149,7 +149,7 @@ func (p *voiceNotesPlatform) CallAppResult(appName, tool string, input map[strin
 	case "files_get_url":
 		payload = map[string]any{
 			"url":        "/api/apps/storage/files/42/content/sample.webm?sig=test&exp=999",
-			"expires_at": "999",
+			"expires_at": 999,
 		}
 	default:
 		payload = map[string]any{}

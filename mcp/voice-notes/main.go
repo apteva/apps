@@ -19,7 +19,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: voice-notes
 display_name: Voice Notes
-version: 0.1.1
+version: 0.1.2
 description: Lightweight audio notes backed by Storage with optional Deepgram transcription.
 author: Apteva
 icon: icon.svg
@@ -217,7 +217,7 @@ type storageUploadResult struct {
 
 type storageURLResult struct {
 	URL       string `json:"url"`
-	ExpiresAt string `json:"expires_at"`
+	ExpiresAt any    `json:"expires_at,omitempty"`
 }
 
 type parsedTranscript struct {
