@@ -56,7 +56,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 			return err
 		}
 	}
-	ctx.Logger().Info("saas mounted", "version", "0.1.1", "scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
+	ctx.Logger().Info("saas mounted", "version", "0.1.2", "scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
 	return nil
 }
 

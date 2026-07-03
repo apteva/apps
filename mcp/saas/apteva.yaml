@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: saas
 display_name: SaaS
-version: 0.1.1
+version: 0.1.2
 description: |
   Shared SaaS access control for Apteva apps. SaaS packages installed
   apps into sellable plans, creates customer accounts backed by Auth
@@ -19,6 +19,7 @@ scopes: [project, global]
 min_apteva_version: "0.11.0"
 
 requires:
+  dynamic_app_calls: true
   permissions:
     - db.write.app
     - platform.apps.call

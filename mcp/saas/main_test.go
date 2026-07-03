@@ -84,8 +84,11 @@ func TestEmbeddedManifest_Valid(t *testing.T) {
 	if m.Name != "saas" {
 		t.Errorf("manifest.Name=%q, want saas", m.Name)
 	}
-	if m.Version != "0.1.1" {
-		t.Errorf("manifest.Version=%q, want 0.1.1", m.Version)
+	if m.Version != "0.1.2" {
+		t.Errorf("manifest.Version=%q, want 0.1.2", m.Version)
+	}
+	if !m.Requires.DynamicAppCalls {
+		t.Error("manifest should allow dynamic app calls for configured usage sources")
 	}
 	if m.DB == nil || m.DB.Migrations != "migrations/" {
 		t.Fatalf("manifest DB not declared correctly: %+v", m.DB)

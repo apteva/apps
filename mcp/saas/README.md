@@ -22,6 +22,10 @@ SaaS does not install apps, run containers, or expose domains. Hosting can
 become a target later through its existing tools, but SaaS does not modify
 or depend on Hosting.
 
+SaaS declares dynamic app calls so operators can meter whichever installed
+apps they configure in usage sources. Target apps are still ordinary apps;
+they do not need SaaS-specific hooks.
+
 ## Live Usage
 
 Plan usage sources point at app tools and tell SaaS where to read the
