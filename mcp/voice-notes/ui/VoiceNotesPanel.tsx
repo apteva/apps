@@ -263,7 +263,7 @@ export default function VoiceNotesPanel({ projectId }: NativePanelProps) {
 
               {selected.playback_url && (
                 <div className="border border-border rounded p-4 bg-bg-input/30">
-                  <audio src={selected.playback_url} controls preload="metadata" className="w-full" />
+                  <audio src={sameOriginStorageURL(selected.playback_url)} controls preload="metadata" className="w-full" />
                 </div>
               )}
 
@@ -331,6 +331,19 @@ function formatDate(value: string): string {
   const d = new Date(value);
   if (Number.isNaN(d.getTime())) return value || "";
   return d.toLocaleString();
+}
+
+function sameOriginStorageURL(value: string): string {
+  if (!value) return "";
+  try {
+    const url = new URL(value, window.location.origin);
+    if (url.pathname.startsWith("/api/apps/storage/")) {
+      return `${url.pathname}${url.search}${url.hash}`;
+    }
+  } catch {
+    return value;
+  }
+  return value;
 }
 
 function StatusPill({ value }: { value: string }) {
