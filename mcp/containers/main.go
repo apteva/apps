@@ -77,7 +77,7 @@ func (a *App) Workers() []sdk.Worker {
 		Name:     "health-poll",
 		Schedule: "@every 30s",
 		Run: func(ctx context.Context, app *sdk.AppCtx) error {
-			return a.pollHealth(ctx, app.AppDB())
+			return a.pollHealth(ctx, app, app.AppDB())
 		},
 	}}
 }
@@ -109,14 +109,14 @@ func (a *App) MCPTools() []sdk.Tool {
 
 func main() { sdk.Run(&App{}) }
 
-func (a *App) createWorkload(ctx context.Context, db *sql.DB, in RunSpec) (*Workload, error) {
-	w, spec, err := a.prepareWorkload(db, in)
+func (a *App) createWorkload(ctx context.Context, appCtx *sdk.AppCtx, db *sql.DB, in RunSpec) (*Workload, error) {
+	w, spec, err := a.prepareWorkload(appCtx, db, in)
 	if err != nil {
 		return nil, err
 	}
 	log.Printf("[containers] mcp create start workload_id=%s name=%q image=%q ports=%s volumes=%s",
 		w.ID, spec.Name, spec.Image, describePorts(spec.Ports), describeVolumes(spec.Volumes))
-	if err := a.startWorkloadRuntime(ctx, db, w.ID, spec, w.ContainerName, w.NetworkName); err != nil {
+	if err := a.startWorkloadRuntime(ctx, appCtx, db, w.ID, spec, w.ContainerName, w.NetworkName); err != nil {
 		log.Printf("[containers] mcp create failed workload_id=%s err=%q", w.ID, err.Error())
 		return nil, err
 	}
@@ -124,8 +124,8 @@ func (a *App) createWorkload(ctx context.Context, db *sql.DB, in RunSpec) (*Work
 	return getWorkload(db, w.ID)
 }
 
-func (a *App) queueWorkload(db *sql.DB, in RunSpec) (*Workload, error) {
-	w, spec, err := a.prepareWorkload(db, in)
+func (a *App) queueWorkload(appCtx *sdk.AppCtx, db *sql.DB, in RunSpec) (*Workload, error) {
+	w, spec, err := a.prepareWorkload(appCtx, db, in)
 	if err != nil {
 		return nil, err
 	}
@@ -134,7 +134,7 @@ func (a *App) queueWorkload(db *sql.DB, in RunSpec) (*Workload, error) {
 	go func(id, containerName, networkName string, spec RunSpec) {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 		defer cancel()
-		if err := a.startWorkloadRuntime(ctx, db, id, spec, containerName, networkName); err != nil {
+		if err := a.startWorkloadRuntime(ctx, appCtx, db, id, spec, containerName, networkName); err != nil {
 			log.Printf("[containers] async start failed workload_id=%s err=%q", id, err.Error())
 		} else {
 			log.Printf("[containers] async start done workload_id=%s", id)
@@ -143,7 +143,7 @@ func (a *App) queueWorkload(db *sql.DB, in RunSpec) (*Workload, error) {
 	return getWorkload(db, w.ID)
 }
 
-func (a *App) prepareWorkload(db *sql.DB, in RunSpec) (*Workload, RunSpec, error) {
+func (a *App) prepareWorkload(appCtx *sdk.AppCtx, db *sql.DB, in RunSpec) (*Workload, RunSpec, error) {
 	log.Printf("[containers] prepare begin name=%q image=%q blueprint=%q ports=%s volumes=%s env_keys=%s",
 		in.Name, in.Image, in.BlueprintSlug, describePorts(in.Ports), describeVolumes(in.Volumes), describeEnvKeys(in.Env))
 	spec, err := a.expandBlueprint(db, in)
@@ -174,8 +174,9 @@ func (a *App) prepareWorkload(db *sql.DB, in RunSpec) (*Workload, RunSpec, error
 	for i := range spec.Volumes {
 		spec.Volumes[i].DockerVolumeName = containerName + "-" + spec.Volumes[i].Name
 	}
+	targetID := runSpecTargetID(spec)
 	w := &Workload{
-		ID: id, Name: spec.Name, BlueprintSlug: spec.BlueprintSlug, HostID: 0, InstanceID: 0,
+		ID: id, Name: spec.Name, BlueprintSlug: spec.BlueprintSlug, HostID: targetID, InstanceID: targetID,
 		Kind: "container", Image: spec.Image, Status: StatusCreating, DesiredStatus: StatusRunning,
 		ContainerName: containerName, NetworkName: networkName, HealthStatus: "unknown",
 		HealthPath: spec.HealthPath, ConfigJSON: encodeJSON(spec), Env: spec.Env,
@@ -184,8 +185,14 @@ func (a *App) prepareWorkload(db *sql.DB, in RunSpec) (*Workload, RunSpec, error
 	}
 	if len(spec.Ports) > 0 {
 		p := spec.Ports[0]
-		w.HealthURL = fmt.Sprintf("http://%s:%d%s", p.BindAddr, p.HostPort, spec.HealthPath)
-		w.PublicURL = fmt.Sprintf("http://%s:%d", p.BindAddr, p.HostPort)
+		host := p.BindAddr
+		if targetID != 0 {
+			if remoteHost := remotePublicHost(appCtx, targetID); remoteHost != "" {
+				host = remoteHost
+			}
+		}
+		w.HealthURL = fmt.Sprintf("http://%s:%d%s", host, p.HostPort, spec.HealthPath)
+		w.PublicURL = fmt.Sprintf("http://%s:%d", host, p.HostPort)
 	}
 	if err := insertWorkload(db, w, spec.Ports, spec.Volumes); err != nil {
 		log.Printf("[containers] insert workload failed name=%q image=%q err=%q", spec.Name, spec.Image, err.Error())
@@ -196,7 +203,7 @@ func (a *App) prepareWorkload(db *sql.DB, in RunSpec) (*Workload, RunSpec, error
 	return w, spec, nil
 }
 
-func (a *App) startWorkloadRuntime(ctx context.Context, db *sql.DB, id string, spec RunSpec, containerName, networkName string) error {
+func (a *App) startWorkloadRuntime(ctx context.Context, appCtx *sdk.AppCtx, db *sql.DB, id string, spec RunSpec, containerName, networkName string) error {
 	start := time.Now()
 	log.Printf("[containers] runtime start workload_id=%s name=%q image=%q container=%q network=%q ports=%s volumes=%s",
 		id, spec.Name, spec.Image, containerName, networkName, describePorts(spec.Ports), describeVolumes(spec.Volumes))
@@ -207,18 +214,22 @@ func (a *App) startWorkloadRuntime(ctx context.Context, db *sql.DB, id string, s
 		_ = recordEvent(db, id, "error", "runtime", map[string]any{"error": err.Error()})
 		return err
 	}
+	backend, err := a.backendForTarget(appCtx, runSpecTargetID(spec))
+	if err != nil {
+		return fail(err)
+	}
 	log.Printf("[containers] runtime create_network workload_id=%s network=%q", id, networkName)
-	if err := a.backend.CreateNetwork(ctx, networkName); err != nil {
+	if err := backend.CreateNetwork(ctx, networkName); err != nil {
 		return fail(err)
 	}
 	for _, v := range spec.Volumes {
 		log.Printf("[containers] runtime create_volume workload_id=%s volume=%q mount=%q", id, v.DockerVolumeName, v.MountPath)
-		if err := a.backend.CreateVolume(ctx, v.DockerVolumeName); err != nil {
+		if err := backend.CreateVolume(ctx, v.DockerVolumeName); err != nil {
 			return fail(err)
 		}
 	}
 	log.Printf("[containers] runtime docker_run workload_id=%s container=%q image=%q", id, containerName, spec.Image)
-	cid, err := a.backend.Run(ctx, spec, containerName, networkName)
+	cid, err := backend.Run(ctx, spec, containerName, networkName)
 	if err != nil {
 		return fail(err)
 	}
@@ -226,7 +237,7 @@ func (a *App) startWorkloadRuntime(ctx context.Context, db *sql.DB, id string, s
 	_ = updateWorkload(db, id, map[string]any{"status": StatusRunning, "container_id": cid, "last_error": "", "updated_at": nowUTC()})
 	_ = recordEvent(db, id, "started", "tool", map[string]any{"container_id": cid})
 	log.Printf("[containers] runtime probe workload_id=%s", id)
-	_ = a.probeWorkload(ctx, db, id)
+	_ = a.probeWorkload(ctx, appCtx, db, id)
 	log.Printf("[containers] runtime done workload_id=%s duration=%s", id, time.Since(start).Round(time.Millisecond))
 	return nil
 }
@@ -276,27 +287,35 @@ func (a *App) expandBlueprint(db *sql.DB, in RunSpec) (RunSpec, error) {
 	return base, nil
 }
 
-func (a *App) startWorkload(ctx context.Context, db *sql.DB, id string) (*Workload, error) {
+func (a *App) startWorkload(ctx context.Context, appCtx *sdk.AppCtx, db *sql.DB, id string) (*Workload, error) {
 	w, err := requireWorkload(db, id)
 	if err != nil {
 		return nil, err
 	}
-	if err := a.backend.Start(ctx, w.ContainerName); err != nil {
+	backend, err := a.backendForWorkload(appCtx, w)
+	if err != nil {
+		return nil, err
+	}
+	if err := backend.Start(ctx, w.ContainerName); err != nil {
 		_ = updateWorkload(db, id, map[string]any{"status": StatusError, "last_error": err.Error(), "updated_at": nowUTC()})
 		return nil, err
 	}
 	_ = updateWorkload(db, id, map[string]any{"status": StatusRunning, "desired_status": StatusRunning, "last_error": "", "updated_at": nowUTC()})
 	_ = recordEvent(db, id, "started", "tool", map[string]any{})
-	_ = a.probeWorkload(ctx, db, id)
+	_ = a.probeWorkload(ctx, appCtx, db, id)
 	return getWorkload(db, id)
 }
 
-func (a *App) stopWorkload(ctx context.Context, db *sql.DB, id string) (*Workload, error) {
+func (a *App) stopWorkload(ctx context.Context, appCtx *sdk.AppCtx, db *sql.DB, id string) (*Workload, error) {
 	w, err := requireWorkload(db, id)
 	if err != nil {
 		return nil, err
 	}
-	if err := a.backend.Stop(ctx, w.ContainerName); err != nil {
+	backend, err := a.backendForWorkload(appCtx, w)
+	if err != nil {
+		return nil, err
+	}
+	if err := backend.Stop(ctx, w.ContainerName); err != nil {
 		_ = updateWorkload(db, id, map[string]any{"status": StatusError, "health_status": "error", "last_error": err.Error(), "updated_at": nowUTC()})
 		return nil, err
 	}
@@ -305,36 +324,44 @@ func (a *App) stopWorkload(ctx context.Context, db *sql.DB, id string) (*Workloa
 	return getWorkload(db, id)
 }
 
-func (a *App) restartWorkload(ctx context.Context, db *sql.DB, id string) (*Workload, error) {
+func (a *App) restartWorkload(ctx context.Context, appCtx *sdk.AppCtx, db *sql.DB, id string) (*Workload, error) {
 	w, err := requireWorkload(db, id)
 	if err != nil {
 		return nil, err
 	}
-	if err := a.backend.Restart(ctx, w.ContainerName); err != nil {
+	backend, err := a.backendForWorkload(appCtx, w)
+	if err != nil {
+		return nil, err
+	}
+	if err := backend.Restart(ctx, w.ContainerName); err != nil {
 		_ = updateWorkload(db, id, map[string]any{"status": StatusError, "health_status": "error", "last_error": err.Error(), "updated_at": nowUTC()})
 		return nil, err
 	}
 	_ = updateWorkload(db, id, map[string]any{"status": StatusRunning, "desired_status": StatusRunning, "last_error": "", "updated_at": nowUTC()})
 	_ = recordEvent(db, id, "restarted", "tool", map[string]any{})
-	_ = a.probeWorkload(ctx, db, id)
+	_ = a.probeWorkload(ctx, appCtx, db, id)
 	return getWorkload(db, id)
 }
 
-func (a *App) destroyWorkload(ctx context.Context, db *sql.DB, id string, deleteVolumes bool) error {
+func (a *App) destroyWorkload(ctx context.Context, appCtx *sdk.AppCtx, db *sql.DB, id string, deleteVolumes bool) error {
 	w, err := requireWorkload(db, id)
 	if err != nil {
 		return err
 	}
+	backend, err := a.backendForWorkload(appCtx, w)
+	if err != nil {
+		return err
+	}
 	var cleanupErrs []error
-	if err := a.backend.Remove(ctx, w.ContainerName, true); err != nil && !isDockerMissingResourceError(err, "container") {
+	if err := backend.Remove(ctx, w.ContainerName, true); err != nil && !isDockerMissingResourceError(err, "container") {
 		cleanupErrs = append(cleanupErrs, err)
 	}
-	if err := a.backend.RemoveNetwork(ctx, w.NetworkName); err != nil && !isDockerMissingResourceError(err, "network") {
+	if err := backend.RemoveNetwork(ctx, w.NetworkName); err != nil && !isDockerMissingResourceError(err, "network") {
 		cleanupErrs = append(cleanupErrs, err)
 	}
 	if deleteVolumes {
 		for _, v := range w.Volumes {
-			if err := a.backend.RemoveVolume(ctx, v.DockerVolumeName); err != nil && !isDockerMissingResourceError(err, "volume") {
+			if err := backend.RemoveVolume(ctx, v.DockerVolumeName); err != nil && !isDockerMissingResourceError(err, "volume") {
 				cleanupErrs = append(cleanupErrs, err)
 			}
 		}
@@ -348,12 +375,17 @@ func (a *App) destroyWorkload(ctx context.Context, db *sql.DB, id string, delete
 	return deleteWorkloadRows(db, id)
 }
 
-func (a *App) probeWorkload(ctx context.Context, db *sql.DB, id string) error {
+func (a *App) probeWorkload(ctx context.Context, appCtx *sdk.AppCtx, db *sql.DB, id string) error {
 	w, err := requireWorkload(db, id)
 	if err != nil {
 		return err
 	}
-	state, err := a.backend.Inspect(ctx, w.ContainerName)
+	backend, err := a.backendForWorkload(appCtx, w)
+	if err != nil {
+		_ = updateWorkload(db, id, map[string]any{"status": StatusError, "health_status": "error", "last_health_at": nowUTC(), "last_error": err.Error(), "updated_at": nowUTC()})
+		return err
+	}
+	state, err := backend.Inspect(ctx, w.ContainerName)
 	if err != nil {
 		_ = updateWorkload(db, id, map[string]any{"status": StatusError, "health_status": "error", "last_health_at": nowUTC(), "last_error": err.Error(), "updated_at": nowUTC()})
 		return err
@@ -391,7 +423,7 @@ func (a *App) probeWorkload(ctx context.Context, db *sql.DB, id string) error {
 	return updateWorkload(db, id, fields)
 }
 
-func (a *App) pollHealth(ctx context.Context, db *sql.DB) error {
+func (a *App) pollHealth(ctx context.Context, appCtx *sdk.AppCtx, db *sql.DB) error {
 	rows, err := listWorkloads(db, "")
 	if err != nil {
 		return err
@@ -403,13 +435,17 @@ func (a *App) pollHealth(ctx context.Context, db *sql.DB) error {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		_ = a.probeWorkload(ctx, db, w.ID)
+		_ = a.probeWorkload(ctx, appCtx, db, w.ID)
 	}
 	return nil
 }
 
-func (a *App) workloadUsage(ctx context.Context, db *sql.DB, id string) (*WorkloadUsage, error) {
+func (a *App) workloadUsage(ctx context.Context, appCtx *sdk.AppCtx, db *sql.DB, id string) (*WorkloadUsage, error) {
 	w, err := requireWorkload(db, id)
+	if err != nil {
+		return nil, err
+	}
+	backend, err := a.backendForWorkload(appCtx, w)
 	if err != nil {
 		return nil, err
 	}
@@ -419,7 +455,7 @@ func (a *App) workloadUsage(ctx context.Context, db *sql.DB, id string) (*Worklo
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
-		size, err := a.backend.VolumeUsage(ctx, volume.DockerVolumeName)
+		size, err := backend.VolumeUsage(ctx, volume.DockerVolumeName)
 		if err != nil {
 			return nil, err
 		}
@@ -447,6 +483,61 @@ func (a *App) workloadUsage(ctx context.Context, db *sql.DB, id string) (*Worklo
 		Dimensions: map[string]string{"workload_id": w.ID},
 	}}, usage.Metrics...)
 	return usage, nil
+}
+
+func (a *App) backendForWorkload(appCtx *sdk.AppCtx, w *Workload) (DockerBackend, error) {
+	return a.backendForTarget(appCtx, workloadTargetID(w))
+}
+
+func (a *App) backendForTarget(appCtx *sdk.AppCtx, targetID int64) (DockerBackend, error) {
+	if targetID == 0 {
+		if a.backend == nil {
+			a.backend = LocalDocker{}
+		}
+		return a.backend, nil
+	}
+	if appCtx == nil || appCtx.PlatformAPI() == nil {
+		return nil, errors.New("remote container target requires platform app calls")
+	}
+	return RemoteDocker{app: appCtx, instanceID: targetID}, nil
+}
+
+func runSpecTargetID(spec RunSpec) int64 {
+	if spec.InstanceID != 0 {
+		return spec.InstanceID
+	}
+	return spec.HostID
+}
+
+func workloadTargetID(w *Workload) int64 {
+	if w.InstanceID != 0 {
+		return w.InstanceID
+	}
+	return w.HostID
+}
+
+func remotePublicHost(appCtx *sdk.AppCtx, instanceID int64) string {
+	if appCtx == nil || appCtx.PlatformAPI() == nil || instanceID <= 0 {
+		return ""
+	}
+	var resp struct {
+		Instance struct {
+			PublicIPv4 string `json:"public_ipv4"`
+			PublicIPv6 string `json:"public_ipv6"`
+		} `json:"instance"`
+	}
+	err := appCtx.PlatformAPI().CallAppResult("instances", "instance_get", map[string]any{"id": instanceID}, &resp)
+	if err != nil {
+		log.Printf("[containers] remote public host lookup failed instance_id=%d err=%q", instanceID, err.Error())
+		return ""
+	}
+	if strings.TrimSpace(resp.Instance.PublicIPv4) != "" {
+		return strings.TrimSpace(resp.Instance.PublicIPv4)
+	}
+	if strings.TrimSpace(resp.Instance.PublicIPv6) != "" {
+		return "[" + strings.Trim(resp.Instance.PublicIPv6, "[]") + "]"
+	}
+	return ""
 }
 
 func requireWorkload(db *sql.DB, id string) (*Workload, error) {
@@ -512,7 +603,7 @@ func (a *App) toolRun(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	spec := parseRunSpec(args)
 	cctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	w, err := a.createWorkload(cctx, ctx.AppDB(), spec)
+	w, err := a.createWorkload(cctx, ctx, ctx.AppDB(), spec)
 	if err != nil {
 		return nil, err
 	}
@@ -538,7 +629,7 @@ func (a *App) toolList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 func (a *App) toolStart(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	cctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	w, err := a.startWorkload(cctx, ctx.AppDB(), getStr(args, "workload_id"))
+	w, err := a.startWorkload(cctx, ctx, ctx.AppDB(), getStr(args, "workload_id"))
 	if err != nil {
 		return nil, err
 	}
@@ -548,7 +639,7 @@ func (a *App) toolStart(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 func (a *App) toolStop(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	cctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	w, err := a.stopWorkload(cctx, ctx.AppDB(), getStr(args, "workload_id"))
+	w, err := a.stopWorkload(cctx, ctx, ctx.AppDB(), getStr(args, "workload_id"))
 	if err != nil {
 		return nil, err
 	}
@@ -558,7 +649,7 @@ func (a *App) toolStop(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 func (a *App) toolRestart(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	cctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
-	w, err := a.restartWorkload(cctx, ctx.AppDB(), getStr(args, "workload_id"))
+	w, err := a.restartWorkload(cctx, ctx, ctx.AppDB(), getStr(args, "workload_id"))
 	if err != nil {
 		return nil, err
 	}
@@ -569,7 +660,7 @@ func (a *App) toolDestroy(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	cctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
 	id := getStr(args, "workload_id")
-	if err := a.destroyWorkload(cctx, ctx.AppDB(), id, boolArg(args, "delete_volumes")); err != nil {
+	if err := a.destroyWorkload(cctx, ctx, ctx.AppDB(), id, boolArg(args, "delete_volumes")); err != nil {
 		return nil, err
 	}
 	return map[string]any{"destroyed": true, "workload_id": id}, nil
@@ -582,7 +673,11 @@ func (a *App) toolLogs(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	}
 	cctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
-	logs, err := a.backend.Logs(cctx, w.ContainerName, intArg(args, "tail", 200))
+	backend, err := a.backendForWorkload(ctx, w)
+	if err != nil {
+		return nil, err
+	}
+	logs, err := backend.Logs(cctx, w.ContainerName, intArg(args, "tail", 200))
 	if err != nil {
 		return nil, err
 	}
@@ -593,7 +688,7 @@ func (a *App) toolHealth(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	cctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	id := getStr(args, "workload_id")
-	if err := a.probeWorkload(cctx, ctx.AppDB(), id); err != nil {
+	if err := a.probeWorkload(cctx, ctx, ctx.AppDB(), id); err != nil {
 		return nil, err
 	}
 	w, _ := getWorkload(ctx.AppDB(), id)
@@ -603,7 +698,7 @@ func (a *App) toolHealth(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 func (a *App) toolUsageGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	cctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	usage, err := a.workloadUsage(cctx, ctx.AppDB(), getStr(args, "workload_id"))
+	usage, err := a.workloadUsage(cctx, ctx, ctx.AppDB(), getStr(args, "workload_id"))
 	if err != nil {
 		return nil, err
 	}
@@ -633,7 +728,7 @@ func (a *App) handleWorkloads(w http.ResponseWriter, r *http.Request) {
 		}
 		log.Printf("[containers] http POST /api/workloads name=%q image=%q blueprint=%q ports=%s volumes=%s env_keys=%s",
 			spec.Name, spec.Image, spec.BlueprintSlug, describePorts(spec.Ports), describeVolumes(spec.Volumes), describeEnvKeys(spec.Env))
-		res, err := a.queueWorkload(globalCtx.AppDB(), spec)
+		res, err := a.queueWorkload(globalCtx, globalCtx.AppDB(), spec)
 		writeResult(w, map[string]any{"workload": res}, err)
 	default:
 		http.Error(w, "GET or POST", http.StatusMethodNotAllowed)
@@ -657,23 +752,27 @@ func (a *App) handleWorkloadItem(w http.ResponseWriter, r *http.Request) {
 		wk, err := requireWorkload(globalCtx.AppDB(), id)
 		writeResult(w, map[string]any{"workload": wk}, err)
 	case r.Method == http.MethodDelete && action == "":
-		err := a.destroyWorkload(r.Context(), globalCtx.AppDB(), id, r.URL.Query().Get("delete_volumes") == "1")
+		err := a.destroyWorkload(r.Context(), globalCtx, globalCtx.AppDB(), id, r.URL.Query().Get("delete_volumes") == "1")
 		writeResult(w, map[string]any{"destroyed": err == nil, "workload_id": id}, err)
 	case r.Method == http.MethodPost && action == "start":
-		wk, err := a.startWorkload(r.Context(), globalCtx.AppDB(), id)
+		wk, err := a.startWorkload(r.Context(), globalCtx, globalCtx.AppDB(), id)
 		writeResult(w, map[string]any{"workload": wk}, err)
 	case r.Method == http.MethodPost && action == "stop":
-		wk, err := a.stopWorkload(r.Context(), globalCtx.AppDB(), id)
+		wk, err := a.stopWorkload(r.Context(), globalCtx, globalCtx.AppDB(), id)
 		writeResult(w, map[string]any{"workload": wk}, err)
 	case r.Method == http.MethodPost && action == "restart":
-		wk, err := a.restartWorkload(r.Context(), globalCtx.AppDB(), id)
+		wk, err := a.restartWorkload(r.Context(), globalCtx, globalCtx.AppDB(), id)
 		writeResult(w, map[string]any{"workload": wk}, err)
 	case r.Method == http.MethodPost && action == "health":
-		err := a.probeWorkload(r.Context(), globalCtx.AppDB(), id)
+		err := a.probeWorkload(r.Context(), globalCtx, globalCtx.AppDB(), id)
 		wk, _ := getWorkload(globalCtx.AppDB(), id)
 		writeResult(w, map[string]any{"workload": wk}, err)
 	case r.Method == http.MethodGet && action == "usage":
-		usage, err := a.workloadUsage(r.Context(), globalCtx.AppDB(), id)
+		usage, err := a.workloadUsage(r.Context(), globalCtx, globalCtx.AppDB(), id)
+		if usage == nil {
+			writeResult(w, nil, err)
+			return
+		}
 		writeResult(w, map[string]any{"usage": usage, "metrics": usage.Metrics}, err)
 	case r.Method == http.MethodGet && action == "logs":
 		wk, err := requireWorkload(globalCtx.AppDB(), id)
@@ -681,7 +780,12 @@ func (a *App) handleWorkloadItem(w http.ResponseWriter, r *http.Request) {
 			writeResult(w, nil, err)
 			return
 		}
-		logs, err := a.backend.Logs(r.Context(), wk.ContainerName, queryInt(r, "tail", 200))
+		backend, err := a.backendForWorkload(globalCtx, wk)
+		if err != nil {
+			writeResult(w, nil, err)
+			return
+		}
+		logs, err := backend.Logs(r.Context(), wk.ContainerName, queryInt(r, "tail", 200))
 		writeResult(w, map[string]any{"workload_id": id, "logs": logs}, err)
 	default:
 		http.Error(w, "not found", http.StatusNotFound)
@@ -799,6 +903,7 @@ func runSchema() map[string]any {
 		"image":          map[string]any{"type": "string"},
 		"blueprint_slug": map[string]any{"type": "string"},
 		"host_id":        map[string]any{"type": "integer"},
+		"instance_id":    map[string]any{"type": "integer"},
 		"ports":          map[string]any{"type": "array"},
 		"env":            map[string]any{"type": "object"},
 		"volumes":        map[string]any{"type": "array"},

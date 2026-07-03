@@ -14,6 +14,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	sdk "github.com/apteva/app-sdk"
 )
 
 type DockerBackend interface {
@@ -33,6 +35,11 @@ type DockerBackend interface {
 }
 
 type LocalDocker struct{}
+
+type RemoteDocker struct {
+	app        *sdk.AppCtx
+	instanceID int64
+}
 
 type ContainerState struct {
 	ID      string `json:"id"`
@@ -180,6 +187,188 @@ func (d LocalDocker) Inspect(ctx context.Context, containerName string) (*Contai
 	return st, nil
 }
 
+func (d RemoteDocker) Probe(ctx context.Context) error {
+	_, err := d.remoteDocker(ctx, 15, "version", "--format", "{{.Server.Version}}")
+	return err
+}
+
+func (d RemoteDocker) CreateNetwork(ctx context.Context, name string) error {
+	cmd := "docker network inspect " + shellQuote(name) + " >/dev/null 2>&1 || docker network create " + shellQuote(name)
+	_, _, err := d.runRemote(ctx, cmd, 30)
+	return err
+}
+
+func (d RemoteDocker) CreateVolume(ctx context.Context, name string) error {
+	cmd := "docker volume inspect " + shellQuote(name) + " >/dev/null 2>&1 || docker volume create " + shellQuote(name)
+	_, _, err := d.runRemote(ctx, cmd, 30)
+	return err
+}
+
+func (d RemoteDocker) Run(ctx context.Context, spec RunSpec, containerName, networkName string) (string, error) {
+	args := []string{"run", "-d", "--name", containerName, "--restart", spec.RestartPolicy, "--network", networkName}
+	for _, p := range spec.Ports {
+		hostPort := p.HostPort
+		if hostPort == 0 {
+			allocated, err := freePort()
+			if err != nil {
+				return "", err
+			}
+			hostPort = allocated
+		}
+		args = append(args, "-p", fmt.Sprintf("%s:%d:%d/%s", p.BindAddr, hostPort, p.ContainerPort, p.Protocol))
+	}
+	for k, v := range spec.Env {
+		if !validEnvKey(k) {
+			return "", fmt.Errorf("invalid env key %q", k)
+		}
+		args = append(args, "-e", k+"="+v)
+	}
+	for _, v := range spec.Volumes {
+		args = append(args, "-v", fmt.Sprintf("%s:%s", v.DockerVolumeName, v.MountPath))
+	}
+	if spec.Resources.MemoryMB > 0 {
+		args = append(args, "--memory", strconv.Itoa(spec.Resources.MemoryMB)+"m")
+	}
+	if spec.Resources.CPU > 0 {
+		args = append(args, "--cpus", strconv.FormatFloat(spec.Resources.CPU, 'f', -1, 64))
+	}
+	args = append(args, spec.Image)
+	out, err := d.remoteDocker(ctx, 120, args...)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(out), nil
+}
+
+func (d RemoteDocker) Start(ctx context.Context, containerName string) error {
+	_, err := d.remoteDocker(ctx, 30, "start", containerName)
+	return err
+}
+
+func (d RemoteDocker) Stop(ctx context.Context, containerName string) error {
+	_, err := d.remoteDocker(ctx, 30, "stop", "-t", "10", containerName)
+	return err
+}
+
+func (d RemoteDocker) Restart(ctx context.Context, containerName string) error {
+	_, err := d.remoteDocker(ctx, 45, "restart", "-t", "10", containerName)
+	return err
+}
+
+func (d RemoteDocker) Remove(ctx context.Context, containerName string, force bool) error {
+	args := []string{"rm"}
+	if force {
+		args = append(args, "-f")
+	}
+	args = append(args, containerName)
+	_, err := d.remoteDocker(ctx, 45, args...)
+	return err
+}
+
+func (d RemoteDocker) RemoveNetwork(ctx context.Context, name string) error {
+	_, err := d.remoteDocker(ctx, 30, "network", "rm", name)
+	return err
+}
+
+func (d RemoteDocker) RemoveVolume(ctx context.Context, name string) error {
+	_, err := d.remoteDocker(ctx, 30, "volume", "rm", name)
+	return err
+}
+
+func (d RemoteDocker) VolumeUsage(ctx context.Context, name string) (int64, error) {
+	out, err := d.remoteDocker(ctx, 120, "run", "--rm", "-v", name+":/volume:ro", "alpine:3.20", "sh", "-c", "du -sk /volume | awk '{print $1 * 1024}'")
+	if err != nil {
+		return 0, err
+	}
+	n, err := strconv.ParseInt(strings.TrimSpace(out), 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("parse volume usage for %s: %w", name, err)
+	}
+	return n, nil
+}
+
+func (d RemoteDocker) Logs(ctx context.Context, containerName string, tail int) (string, error) {
+	if tail <= 0 || tail > 2000 {
+		tail = 200
+	}
+	return d.remoteDocker(ctx, 30, "logs", "--tail", strconv.Itoa(tail), containerName)
+}
+
+func (d RemoteDocker) Inspect(ctx context.Context, containerName string) (*ContainerState, error) {
+	raw, err := d.remoteDocker(ctx, 30, "inspect", containerName)
+	if err != nil {
+		return nil, err
+	}
+	var arr []struct {
+		ID    string `json:"Id"`
+		State struct {
+			Status  string `json:"Status"`
+			Running bool   `json:"Running"`
+			Health  *struct {
+				Status string `json:"Status"`
+			} `json:"Health"`
+		} `json:"State"`
+	}
+	if err := json.Unmarshal([]byte(raw), &arr); err != nil {
+		return nil, err
+	}
+	if len(arr) == 0 {
+		return nil, errors.New("container not found")
+	}
+	st := &ContainerState{ID: arr[0].ID, Status: arr[0].State.Status, Running: arr[0].State.Running}
+	if arr[0].State.Health != nil {
+		st.Health = arr[0].State.Health.Status
+	}
+	return st, nil
+}
+
+func (d RemoteDocker) remoteDocker(ctx context.Context, timeoutS int, args ...string) (string, error) {
+	cmd := shellJoin(append([]string{"docker"}, args...)...)
+	out, _, err := d.runRemote(ctx, cmd, timeoutS)
+	if err != nil {
+		return out, formatDockerError(args, err.Error())
+	}
+	return out, nil
+}
+
+func (d RemoteDocker) runRemote(ctx context.Context, cmd string, timeoutS int) (string, int, error) {
+	if d.app == nil || d.app.PlatformAPI() == nil {
+		return "", 0, errors.New("platform API unavailable")
+	}
+	if d.instanceID <= 0 {
+		return "", 0, errors.New("remote docker requires instance_id > 0")
+	}
+	type result struct {
+		Output   string `json:"output"`
+		ExitCode int    `json:"exit_code"`
+		Err      string `json:"error"`
+	}
+	var resp result
+	done := make(chan error, 1)
+	go func() {
+		done <- d.app.PlatformAPI().CallAppResult("instances", "instance_run_command", map[string]any{
+			"id":        d.instanceID,
+			"cmd":       cmd,
+			"timeout_s": timeoutS,
+		}, &resp)
+	}()
+	select {
+	case <-ctx.Done():
+		return resp.Output, resp.ExitCode, ctx.Err()
+	case err := <-done:
+		if err != nil {
+			return resp.Output, resp.ExitCode, fmt.Errorf("instance_run_command instance_id=%d: %w", d.instanceID, err)
+		}
+		if resp.Err != "" {
+			return resp.Output, resp.ExitCode, errors.New(resp.Err)
+		}
+		if resp.ExitCode != 0 {
+			return resp.Output, resp.ExitCode, fmt.Errorf("remote command exited %d: %s", resp.ExitCode, strings.TrimSpace(resp.Output))
+		}
+		return resp.Output, resp.ExitCode, nil
+	}
+}
+
 func docker(ctx context.Context, args ...string) (string, error) {
 	start := time.Now()
 	log.Printf("[containers] docker start args=%s", redactDockerArgs(args))
@@ -243,6 +432,18 @@ func validEnvKey(k string) bool {
 		}
 	}
 	return true
+}
+
+func shellJoin(args ...string) string {
+	parts := make([]string, 0, len(args))
+	for _, arg := range args {
+		parts = append(parts, shellQuote(arg))
+	}
+	return strings.Join(parts, " ")
+}
+
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", `'\''`) + "'"
 }
 
 func probeHTTP(ctx context.Context, url string) error {
