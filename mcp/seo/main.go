@@ -35,7 +35,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: seo
 display_name: SEO
-version: 0.4.0
+version: 0.4.1
 description: Generic SEO research workbench — locale-aware domains, keywords, rankings, backlinks behind one pluggable provider integration.
 author: Apteva
 scopes: [project, global]
@@ -1408,7 +1408,7 @@ func upsertSearchEntity(db execer, pid, search_engine, entityType, identifier, l
 	if rawJSON == "" {
 		rawJSON = "{}"
 	}
-	res, err := db.Exec(
+	if _, err := db.Exec(
 		`INSERT INTO search_entities
 		    (project_id, search_engine, entity_type, identifier, label, url, default_location_id, raw_json, updated_at)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
@@ -1418,18 +1418,14 @@ func upsertSearchEntity(db execer, pid, search_engine, entityType, identifier, l
 		    default_location_id = COALESCE(excluded.default_location_id, search_entities.default_location_id),
 		    raw_json = CASE WHEN excluded.raw_json != '{}' THEN excluded.raw_json ELSE search_entities.raw_json END,
 		    updated_at = CURRENT_TIMESTAMP`,
-		pid, search_engine, entityType, identifier, label, urlText, defaultLocationID, rawJSON)
-	if err != nil {
+		pid, search_engine, entityType, identifier, label, urlText, defaultLocationID, rawJSON); err != nil {
 		return 0, err
-	}
-	id, _ := res.LastInsertId()
-	if id != 0 {
-		return id, nil
 	}
 	qr, ok := db.(queryRower)
 	if !ok {
 		return 0, errors.New("database handle cannot query inserted search_engine entity")
 	}
+	var id int64
 	row := qr.QueryRow(
 		`SELECT id FROM search_entities
 		  WHERE project_id = ? AND search_engine = ? AND entity_type = ? AND identifier = ?`,

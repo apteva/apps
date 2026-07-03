@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.1
+
+- Fixed DataForSEO location sync so Google locations are committed even if a
+  secondary search engine sync, such as YouTube, fails.
+- Fixed generic SERP result saves by always reading back the canonical
+  `search_entities` ID after upsert conflicts before inserting result rows.
+
 ## 0.4.0
 
 - Added `search_engine`-based support for Google and YouTube, with Google as

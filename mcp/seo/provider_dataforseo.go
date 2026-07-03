@@ -604,36 +604,83 @@ func syncDataForSEOLocations(ctx *sdk.AppCtx) (any, error) {
 		return nil, err
 	}
 	now := time.Now().Unix()
-	tx, err := ctx.AppDB().Begin()
+	upserts, skipped, err := syncDataForSEOGoogleLocationRows(ctx.AppDB(), rows, now)
 	if err != nil {
 		return nil, err
 	}
-	defer tx.Rollback()
-	upserts := 0
-	skipped := 0
-	for _, raw := range rows {
-		n, s, err := upsertDfsLocationRaw(tx, raw, now)
-		if err != nil {
-			return nil, err
+	engineResults := map[string]any{
+		"google": map[string]any{
+			"rows_upserted": upserts,
+			"rows_skipped":  skipped,
+			"ok":            true,
+		},
+	}
+	warnings := []string{}
+	ytUpserts, ytSkipped, err := syncDataForSEOYouTubeLocations(ctx, connID, now)
+	if err != nil {
+		warnings = append(warnings, err.Error())
+		engineResults["youtube"] = map[string]any{
+			"rows_upserted": 0,
+			"rows_skipped":  0,
+			"ok":            false,
+			"error":         err.Error(),
 		}
-		upserts += n
-		skipped += s
+	} else {
+		upserts += ytUpserts
+		skipped += ytSkipped
+		engineResults["youtube"] = map[string]any{
+			"rows_upserted": ytUpserts,
+			"rows_skipped":  ytSkipped,
+			"ok":            true,
+		}
 	}
-	ytUpserts, ytSkipped, err := upsertDfsYouTubeLocations(ctx, tx, connID, now)
-	if err != nil {
-		return nil, err
-	}
-	upserts += ytUpserts
-	skipped += ytSkipped
-	if err := tx.Commit(); err != nil {
-		return nil, err
-	}
-	return map[string]any{
+	out := map[string]any{
 		"provider":      "dataforseo",
 		"rows_upserted": upserts,
 		"rows_skipped":  skipped,
 		"synced_at":     now,
-	}, nil
+		"engines":       engineResults,
+	}
+	if len(warnings) > 0 {
+		out["warnings"] = warnings
+	}
+	return out, nil
+}
+
+func syncDataForSEOGoogleLocationRows(db *sql.DB, rows []json.RawMessage, syncedAt int64) (upserts int, skipped int, err error) {
+	tx, err := db.Begin()
+	if err != nil {
+		return 0, 0, err
+	}
+	defer tx.Rollback()
+	for _, raw := range rows {
+		n, s, err := upsertDfsLocationRaw(tx, raw, syncedAt)
+		if err != nil {
+			return 0, 0, err
+		}
+		upserts += n
+		skipped += s
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, 0, err
+	}
+	return upserts, skipped, nil
+}
+
+func syncDataForSEOYouTubeLocations(ctx *sdk.AppCtx, connID int64, syncedAt int64) (upserts int, skipped int, err error) {
+	tx, err := ctx.AppDB().Begin()
+	if err != nil {
+		return 0, 0, err
+	}
+	defer tx.Rollback()
+	upserts, skipped, err = upsertDfsYouTubeLocations(ctx, tx, connID, syncedAt)
+	if err != nil {
+		return 0, 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, 0, err
+	}
+	return upserts, skipped, nil
 }
 
 func dfsToolResultRows(ctx *sdk.AppCtx, connID int64, tool string, input map[string]any) ([]json.RawMessage, error) {
