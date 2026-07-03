@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: seo
 display_name: SEO
-version: 0.4.1
+version: 0.4.2
 description: |
   Generic SEO research workbench. Track domains, keywords, rankings,
   and backlinks; pull metrics from any provider behind one pluggable
@@ -34,6 +34,8 @@ description: |
         Google and YouTube, with Google as the default search engine.
   v0.4.1: makes DataForSEO location sync tolerate per-engine failures
         and fixes generic SERP entity IDs after upserts.
+  v0.4.2: parses DataForSEO Labs location rows with nested
+        available_languages entries.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/seo

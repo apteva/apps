@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.2
+
+- Fixed DataForSEO Labs location parsing for the current
+  `available_languages` response shape so country/language locales populate
+  correctly.
+
 ## 0.4.1
 
 - Fixed DataForSEO location sync so Google locations are committed even if a

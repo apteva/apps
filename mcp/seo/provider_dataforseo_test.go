@@ -87,9 +87,16 @@ func TestSyncDataForSEOGoogleLocationRows_CommitsGoogleRows(t *testing.T) {
 		"location_code": 2826,
 		"location_name": "United Kingdom",
 		"country_iso_code": "GB",
-		"language_code": "en",
-		"language_name": "English",
-		"available_sources": ["google"]
+		"location_type": "Country",
+		"available_languages": [
+			{
+				"available_sources": ["google"],
+				"language_code": "en",
+				"language_name": "English",
+				"keywords": 123,
+				"serps": 456
+			}
+		]
 	}`)}
 	upserts, skipped, err := syncDataForSEOGoogleLocationRows(db, rows, 12345)
 	if err != nil {

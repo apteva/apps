@@ -834,6 +834,36 @@ func upsertDfsLocationRaw(tx *sql.Tx, raw json.RawMessage, syncedAt int64) (upse
 	locCode, hasCode := numberField(obj, "location_code")
 	locName := firstString(obj, "location_name", "location")
 	country := strings.ToUpper(firstString(obj, "country_iso_code", "country_iso", "country_code"))
+	if languages, ok := obj["available_languages"].([]any); ok && len(languages) > 0 {
+		for _, rawLang := range languages {
+			langObj, ok := rawLang.(map[string]any)
+			if !ok {
+				skipped++
+				continue
+			}
+			langCode := strings.ToLower(firstString(langObj, "language_code"))
+			langName := firstString(langObj, "language_name")
+			if !hasCode || locName == "" || langCode == "" {
+				skipped++
+				continue
+			}
+			sources := dfsLocationSources(langObj)
+			if len(sources) == 0 {
+				sources = dfsLocationSources(obj)
+			}
+			if len(sources) == 0 {
+				sources = []string{"google"}
+			}
+			langRaw, _ := json.Marshal(langObj)
+			rawText := fmt.Sprintf(`{"location":%s,"language":%s}`, raw, langRaw)
+			n, err := upsertDfsLocationEntry(tx, locCode, locName, country, langCode, langName, sources, rawText, syncedAt)
+			if err != nil {
+				return upserts, skipped, err
+			}
+			upserts += n
+		}
+		return upserts, skipped, nil
+	}
 	langCode := strings.ToLower(firstString(obj, "language_code"))
 	langName := firstString(obj, "language_name")
 	if !hasCode || locName == "" || langCode == "" {
@@ -844,6 +874,14 @@ func upsertDfsLocationRaw(tx *sql.Tx, raw json.RawMessage, syncedAt int64) (upse
 		sources = []string{"google"}
 	}
 	rawText := string(raw)
+	n, err := upsertDfsLocationEntry(tx, locCode, locName, country, langCode, langName, sources, rawText, syncedAt)
+	if err != nil {
+		return upserts, skipped, err
+	}
+	return n, skipped, nil
+}
+
+func upsertDfsLocationEntry(tx *sql.Tx, locCode int64, locName, country, langCode, langName string, sources []string, rawText string, syncedAt int64) (upserts int, err error) {
 	for _, source := range sources {
 		if source == "" {
 			continue
@@ -867,11 +905,11 @@ func upsertDfsLocationRaw(tx *sql.Tx, raw json.RawMessage, syncedAt int64) (upse
 			    synced_at = excluded.synced_at`,
 			source, locCode, locName, countryArg, langCode, langName, rawText, syncedAt)
 		if err != nil {
-			return upserts, skipped, fmt.Errorf("upsert dataforseo location: %w", err)
+			return upserts, fmt.Errorf("upsert dataforseo location: %w", err)
 		}
 		upserts++
 	}
-	return upserts, skipped, nil
+	return upserts, nil
 }
 
 func dfsLocationSources(obj map[string]any) []string {
