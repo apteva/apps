@@ -107,8 +107,8 @@ func TestEmbeddedManifest_Valid(t *testing.T) {
 	if m.Name != "saas" {
 		t.Errorf("manifest.Name=%q, want saas", m.Name)
 	}
-	if m.Version != "0.1.4" {
-		t.Errorf("manifest.Version=%q, want 0.1.4", m.Version)
+	if m.Version != "0.1.5" {
+		t.Errorf("manifest.Version=%q, want 0.1.5", m.Version)
 	}
 	if !m.Requires.DynamicAppCalls {
 		t.Error("manifest should allow dynamic app calls for configured usage sources")
@@ -411,6 +411,15 @@ func TestFulfillmentLifecycleActionsUseStoredMetadata(t *testing.T) {
 	}); err != nil {
 		t.Fatal(err)
 	}
+	if _, err := app.toolPlanActionAdd(ctx, map[string]any{
+		"plan_key":  "container-pro",
+		"event":     "account_resumed",
+		"app_name":  "containers",
+		"tool_name": "containers_start",
+		"args":      map[string]any{"workload_id": "{{account.metadata.workload_id}}"},
+	}); err != nil {
+		t.Fatal(err)
+	}
 
 	created, err := app.toolAccountCreate(ctx, map[string]any{"owner_email": "owner@example.com", "slug": "container-acme", "plan_key": "container-pro", "subscription_id": 99})
 	if err != nil {
@@ -430,6 +439,13 @@ func TestFulfillmentLifecycleActionsUseStoredMetadata(t *testing.T) {
 	stop := findCall(pf.calls, "containers", "containers_stop")
 	if stop == nil || stop.Input["workload_id"] != "wrk_123" {
 		t.Fatalf("past_due fulfillment did not use stored workload id: %+v calls=%+v", stop, pf.calls)
+	}
+	if _, err := app.toolSubscriptionSync(ctx, map[string]any{"subscription_id": 99, "subscription_status": "resumed"}); err != nil {
+		t.Fatal(err)
+	}
+	start := findCall(pf.calls, "containers", "containers_start")
+	if start == nil || start.Input["workload_id"] != "wrk_123" {
+		t.Fatalf("resumed fulfillment did not use stored workload id: %+v calls=%+v", start, pf.calls)
 	}
 }
 

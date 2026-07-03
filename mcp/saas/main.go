@@ -56,7 +56,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 			return err
 		}
 	}
-	ctx.Logger().Info("saas mounted", "version", "0.1.4", "scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
+	ctx.Logger().Info("saas mounted", "version", "0.1.5", "scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
 	return nil
 }
 
@@ -1435,6 +1435,8 @@ func fulfillmentEventFromLifecycle(event, status string) string {
 	switch event {
 	case "subscription.active", "subscription.trialing":
 		return "account_active"
+	case "subscription.resumed":
+		return "account_resumed"
 	case "subscription.past_due":
 		return "account_past_due"
 	case "subscription.paused", "subscription.cancelled", "subscription.ended", "cancelled":
