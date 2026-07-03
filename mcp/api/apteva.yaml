@@ -1,0 +1,93 @@
+schema: apteva-app/v1
+
+name: api
+display_name: API Gateway
+version: 0.1.1
+description: |
+  Lightweight API gateway for Apteva SaaS projects. Owns public API
+  hostnames, method/path routes, simple API keys, CORS policy, request
+  logs, and dispatch to Functions, installed app HTTP surfaces, or
+  plain HTTP origins.
+
+author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/api
+tags: [api, gateway, rest, graphql, routing, saas]
+
+scopes: [project, global]
+min_apteva_version: "0.11.0"
+
+requires:
+  permissions:
+    - db.write.app
+    - platform.apps.call
+    - platform.ingress.write
+    - net.egress
+  apps:
+    - name: functions
+      optional: true
+      reason: Used when an API route targets a serverless function.
+    - name: domains
+      optional: true
+      reason: Used to write DNS records when attaching a public hostname.
+    - name: auth
+      optional: true
+      reason: Used to verify Auth-issued JWTs for protected SaaS routes.
+
+provides:
+  http_routes:
+    - prefix: /
+    - prefix: /gw/
+      no_auth: true
+  mcp_tools:
+    - name: api_create
+      description: "Create an API and optionally expose a hostname. Args: slug, name?, description?, hostname?, dns_mode? (manual|domains|skipped), allow_http?, cors?, auth?."
+    - name: api_get
+      description: "Fetch one API by id or slug."
+    - name: api_list
+      description: "List APIs in this project."
+    - name: api_update
+      description: "Update API metadata, hostname state, default CORS/auth, or status."
+    - name: api_delete
+      description: "Delete an API, routes, keys, and logs."
+    - name: api_route_add
+      description: "Add or update a route. Args: api_id or api_slug, method, path_pattern, target_kind (function|app|http), target_ref, target_path?, auth?, cors?, timeout_ms?, priority?, enabled?."
+    - name: api_route_list
+      description: "List routes for an API."
+    - name: api_route_delete
+      description: "Delete a route by id."
+    - name: api_key_create
+      description: "Create an API key. Returns the plaintext key once. Args: api_id or api_slug, name."
+    - name: api_key_list
+      description: "List API keys for an API, excluding key hashes."
+    - name: api_key_revoke
+      description: "Revoke an API key by id."
+    - name: api_logs
+      description: "List recent request logs for an API."
+  ui_panels:
+    - slot: project.page
+      label: API Gateway
+      icon: network
+      entry: /ui/ApiPanel.mjs
+
+runtime:
+  kind: source
+  source:
+    repo: github.com/apteva/apps
+    ref: main
+    entry: mcp/api
+  port: 8080
+  health_check: /health
+
+db:
+  driver: sqlite
+  path: /data/api.db
+  migrations: migrations/
+
+config_schema:
+  - name: public_host
+    type: text
+    default: ""
+    label: Public host
+    description: Hostname or IP that DNS records should point at when dns_mode=domains.
+
+upgrade_policy: auto-patch
