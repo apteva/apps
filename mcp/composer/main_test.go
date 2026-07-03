@@ -575,6 +575,69 @@ func TestApplyClipTiming_FitSourceTrackAudioBySection(t *testing.T) {
 	}
 }
 
+func TestApplyClipTiming_FitTimelineIgnoresOwnStaleLength(t *testing.T) {
+	e, err := parseEditJSON(`{"timeline":{"tracks":[
+		{"type":"visual","clips":[
+			{"uid":"background","asset":{"type":"image","src":"storage:1"},"start":0,"length":305,
+				"timing":{"mode":"fit_timeline","behavior":"stretch"}}
+		]},
+		{"type":"audio","clips":[
+			{"uid":"voice","asset":{"type":"audio","src":"storage:2"},"start":0,"length":120}
+		]}
+	]}}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !applyTimelineTiming(e) {
+		t.Fatal("expected stale visual length to shrink to the non-fit timeline")
+	}
+	got := e.Timeline.Tracks[0].Clips[0].Length
+	if !sameTime(got, 120) {
+		t.Fatalf("visual length = %v, want audio timeline length 120", got)
+	}
+}
+
+func TestFinalizeTimelineTiming_ReappliesFitTimelineAfterAudioReflow(t *testing.T) {
+	e, err := parseEditJSON(`{"timeline":{"tracks":[
+		{"type":"visual","clips":[
+			{"uid":"background","asset":{"type":"image","src":"storage:1"},"start":0,"length":142.720816,
+				"timing":{"mode":"fit_timeline","behavior":"stretch"}}
+		]},
+		{"type":"audio","clips":[
+			{"uid":"a","asset":{"type":"audio","src":"storage:2"},"start":0,"length":33,"duration_mode":"fit_generated_reflow",
+				"ai":{"media_kind":"audio_tts","prompt":"a","actual_duration_seconds":50.808163}},
+			{"uid":"b","asset":{"type":"audio","src":"storage:3"},"start":33,"length":34,"duration_mode":"fit_generated_reflow",
+				"ai":{"media_kind":"audio_tts","prompt":"b","actual_duration_seconds":46.994286}},
+			{"uid":"c","asset":{"type":"audio","src":"storage:4"},"start":67,"length":31,"duration_mode":"fit_generated_reflow",
+				"ai":{"media_kind":"audio_tts","prompt":"c","actual_duration_seconds":45.270204}},
+			{"uid":"d","asset":{"type":"audio","src":"storage:5"},"start":98,"length":44.720816,"duration_mode":"fit_generated_reflow",
+				"ai":{"media_kind":"audio_tts","prompt":"d","actual_duration_seconds":44.120816}}
+		]}
+	]}}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := range e.Timeline.Tracks[1].Clips {
+		if !syncClipDurationFromAI(&e.Timeline.Tracks[1].Clips[i]) {
+			t.Fatalf("expected audio clip %d to sync generated duration", i)
+		}
+	}
+	if !finalizeTimelineTiming(e) {
+		t.Fatal("expected final timing pass to reflow audio starts and stretch visual")
+	}
+	visual := e.Timeline.Tracks[0].Clips[0]
+	if !sameTime(visual.Length, 187.193469) {
+		t.Fatalf("visual length = %v, want full generated audio timeline 187.193469", visual.Length)
+	}
+	last := e.Timeline.Tracks[1].Clips[3]
+	if !sameTime(last.Start, 143.072653) {
+		t.Fatalf("last audio start = %v, want 143.072653", last.Start)
+	}
+	if !sameTime(editDurationSeconds(e), 187.193469) {
+		t.Fatalf("composition duration = %v, want 187.193469", editDurationSeconds(e))
+	}
+}
+
 func TestPrepareAIVideoDurationForTiming_UsesAudioMatchedHandle(t *testing.T) {
 	e, err := parseEditJSON(`{"timeline":{"tracks":[
 		{"type":"visual","clips":[

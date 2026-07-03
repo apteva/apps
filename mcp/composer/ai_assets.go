@@ -94,10 +94,7 @@ func materializeAIAssets(ctx *sdk.AppCtx, edit *Edit, compositionID int64, proje
 			}
 		}
 	}
-	if applyTimelineTiming(edit) {
-		out.Changed = true
-	}
-	if resolveRelativeClipStarts(edit) {
+	if finalizeTimelineTiming(edit) {
 		out.Changed = true
 	}
 	if out.Changed {
@@ -108,6 +105,27 @@ func materializeAIAssets(ctx *sdk.AppCtx, edit *Edit, compositionID int64, proje
 		)
 	}
 	return out, nil
+}
+
+func finalizeTimelineTiming(edit *Edit) bool {
+	if edit == nil {
+		return false
+	}
+	changed := false
+	for i := 0; i < 4; i++ {
+		passChanged := false
+		if applyTimelineTiming(edit) {
+			passChanged = true
+		}
+		if resolveRelativeClipStarts(edit) {
+			passChanged = true
+		}
+		if !passChanged {
+			break
+		}
+		changed = true
+	}
+	return changed
 }
 
 func applyTimelineTiming(edit *Edit) bool {
@@ -601,7 +619,7 @@ func targetDurationForTiming(edit *Edit, c *Clip) float64 {
 	case "fit_group":
 		base = groupDuration(edit, c)
 	case "fit_timeline":
-		base = editDurationSeconds(edit)
+		base = timelineFitDurationSeconds(edit)
 	default:
 		return 0
 	}
@@ -664,7 +682,7 @@ func applyClipTiming(edit *Edit, c *Clip) bool {
 	case "fit_group":
 		base = groupDuration(edit, c)
 	case "fit_timeline":
-		base = editDurationSeconds(edit)
+		base = timelineFitDurationSeconds(edit)
 	default:
 		return false
 	}
@@ -683,6 +701,47 @@ func applyClipTiming(edit *Edit, c *Clip) bool {
 	}
 	c.Length = next
 	return true
+}
+
+func timelineFitDurationSeconds(edit *Edit) float64 {
+	if edit == nil {
+		return 0
+	}
+	var d float64
+	if vt := primaryVisualTrack(edit); vt != nil {
+		var visualDuration float64
+		for _, c := range vt.Clips {
+			if timingMode(c.Timing) == "fit_timeline" {
+				continue
+			}
+			visualDuration += clipDuration(c)
+		}
+		d = maxFloat(d, visualDuration)
+	}
+	for _, c := range audioTimelineClips(edit) {
+		if timingMode(c.Timing) == "fit_timeline" {
+			continue
+		}
+		if end := c.Start + clipDuration(c); end > d {
+			d = end
+		}
+	}
+	for _, c := range textOverlayClips(edit) {
+		if timingMode(c.Timing) == "fit_timeline" {
+			continue
+		}
+		if end := c.Start + clipDuration(c); end > d {
+			d = end
+		}
+	}
+	return d
+}
+
+func timingMode(t *Timing) string {
+	if t == nil {
+		return ""
+	}
+	return strings.ToLower(strings.TrimSpace(t.Mode))
 }
 
 func sourceDuration(edit *Edit, current *Clip, source string) float64 {
