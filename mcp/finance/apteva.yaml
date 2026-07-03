@@ -2,13 +2,13 @@ schema: apteva-app/v1
 
 name: finance
 display_name: Finance
-version: 0.1.13
+version: 0.1.15
 description: |
   Unified personal-wealth tracker. Cash, stocks, ETFs, crypto, P2P,
-  real estate, vehicles, pensions, loans — all in one ledger. v0.1
-  is manual-entry; v0.2 adds integrations (Trading 212 first, then
-  Plaid, Mintos, Binance, …) via the platform integrations engine.
-  Net worth, allocation, performance, cashflow reports.
+  real estate, vehicles, pensions, loans — all in one ledger. Manual
+  entry, CSV import, brokerage sync, and open-banking sync use the
+  platform integrations engine. Net worth, allocation, performance,
+  and cashflow reports.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/finance
@@ -48,6 +48,16 @@ requires:
         transactions.history: get_transaction_history
       label: "Brokerage import"
       hint: "Connect Trading 212 to import account cash, current positions, filled orders, dividends, and cash movements into Finance. Finance never places broker orders."
+    - role: open_banking
+      kind: integration
+      required: false
+      compatible_slugs: [plaid, teller, nordigen, truelayer, saltedge]
+      capabilities:
+        - accounts.list
+        - balances.read
+        - transactions.read
+      label: "Open banking"
+      hint: "Connect Plaid, Teller, GoCardless/Nordigen, TrueLayer, or Salt Edge to discover bank accounts, link them to Finance cash accounts, and import transactions/balances read-only."
 
 provides:
   http_routes:
@@ -87,6 +97,11 @@ provides:
     - { name: stocks_quote,        description: "Fetch a linked stocks quote or historical close and persist the price when instrument_id is supplied. Args: symbol? or instrument_id?, date?." }
     - { name: stocks_dividends_import, description: "Import cash dividend transactions from linked stocks app for an account holding. Args: account_id, instrument_id, from?, to?, dry_run?." }
     - { name: brokerage_sync,      description: "Read-only import from a bound brokerage integration such as Trading 212. Args: connection_id?, account_id?, import_positions?, import_orders?, import_dividends?, import_cash?, dry_run?." }
+    - { name: banking_connections, description: "List bound open-banking integration connections supported by Finance. Args: provider?." }
+    - { name: banking_discover,    description: "Discover bank accounts from a bound open-banking integration. Args: provider? or connection_id, import_accounts?, access_token? for Plaid, provider_connection_id? for Salt Edge." }
+    - { name: banking_link_account, description: "Link one discovered bank account to a Finance cash account, creating one by default. Args: external_account_id, provider? or connection_id, finance_account_id?, create_account?, access_token? for Plaid, provider_connection_id? for Salt Edge." }
+    - { name: banking_sync,        description: "Import transactions and reconcile balances for linked bank accounts. Args: provider?, connection_id?, account_id?, from?, to?, dry_run?." }
+    - { name: banking_unlink,      description: "Remove an open-banking link from a Finance account without deleting the account or transactions. Args: account_id." }
 
     - { name: valuation_set,       description: "Re-value an illiquid holding (real estate / vehicle / private). Writes a price-series row + audit 'valuation' transaction. Args: instrument_id, value, as_of?, account_id? (for the audit row)." }
 

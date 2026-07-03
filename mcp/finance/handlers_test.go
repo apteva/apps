@@ -384,6 +384,65 @@ func TestUnit_StocksQuoteUsesHistoricalChartForTradeDate(t *testing.T) {
 	}
 }
 
+func TestUnit_BankingDiscoverLinkSyncIsIdempotent(t *testing.T) {
+	pf := &bankingPlatform{
+		conn: sdk.PlatformConnection{ID: 44, AppSlug: "teller", Name: "Teller test", Status: "active"},
+	}
+	ctx := newCtxWithPlatform(t, pf)
+	app := &App{}
+
+	connsOut, err := app.toolBankingConnections(ctx, map[string]any{"provider": "teller"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	conns := connsOut.(map[string]any)["connections"].([]bankingConnectionView)
+	if len(conns) != 1 || conns[0].ID != 44 {
+		t.Fatalf("unexpected banking connections: %+v", conns)
+	}
+
+	discovered, err := app.toolBankingDiscover(ctx, map[string]any{"connection_id": float64(44)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	bankAccounts := discovered.(map[string]any)["accounts"].([]bankingAccount)
+	if len(bankAccounts) != 1 || bankAccounts[0].ExternalID != "acc_1" {
+		t.Fatalf("unexpected discovered accounts: %+v", bankAccounts)
+	}
+
+	linked, err := app.toolBankingLinkAccount(ctx, map[string]any{
+		"connection_id":       float64(44),
+		"external_account_id": "acc_1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	link := linked.(bankingLink)
+	if link.Account.ID == 0 || link.Account.Source != "integration:teller" {
+		t.Fatalf("unexpected linked account: %+v", link)
+	}
+
+	synced, err := app.toolBankingSync(ctx, map[string]any{"connection_id": float64(44), "from": "2026-06-01", "to": "2026-06-30"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	stats := synced.(bankingSyncStats)
+	if stats.Imported != 1 || stats.Skipped != 0 {
+		t.Fatalf("expected first sync to import one transaction, got %+v", stats)
+	}
+	if bal := mustCashBalance(ctx, link.Account.ID, 0); bal != -1234 {
+		t.Fatalf("cash balance=%d, want -1234", bal)
+	}
+
+	syncedAgain, err := app.toolBankingSync(ctx, map[string]any{"connection_id": float64(44), "from": "2026-06-01", "to": "2026-06-30"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	again := syncedAgain.(bankingSyncStats)
+	if again.Imported != 0 || again.Skipped == 0 {
+		t.Fatalf("expected duplicate sync to skip existing transaction, got %+v", again)
+	}
+}
+
 func TestUnit_StocksDividendsImportIsIdempotent(t *testing.T) {
 	pf := &stockQuotePlatform{dividends: map[string]any{
 		"symbol": "AAPL",
@@ -881,6 +940,56 @@ func (p *stockQuotePlatform) CallAppResult(app, tool string, input map[string]an
 		return err
 	}
 	return json.Unmarshal(b, out)
+}
+
+type bankingPlatform struct {
+	tk.BasePlatformClient
+	conn sdk.PlatformConnection
+}
+
+func (p *bankingPlatform) GetConnection(id int64) (*sdk.PlatformConnection, error) {
+	if id == p.conn.ID {
+		return &p.conn, nil
+	}
+	return nil, nil
+}
+
+func (p *bankingPlatform) ListConnections(filter sdk.ConnectionFilter) ([]sdk.PlatformConnection, error) {
+	if filter.AppSlug != "" && filter.AppSlug != p.conn.AppSlug {
+		return nil, nil
+	}
+	return []sdk.PlatformConnection{p.conn}, nil
+}
+
+func (p *bankingPlatform) ExecuteIntegrationTool(connID int64, tool string, input map[string]any) (*sdk.ExecuteResult, error) {
+	var body any
+	switch tool {
+	case "list_accounts":
+		body = []map[string]any{{
+			"id":        "acc_1",
+			"name":      "Checking",
+			"currency":  "EUR",
+			"last_four": "1234",
+		}}
+	case "list_transactions":
+		body = []map[string]any{{
+			"id":          "txn_1",
+			"account_id":  "acc_1",
+			"date":        "2026-06-15",
+			"amount":      -12.34,
+			"currency":    "EUR",
+			"description": "Coffee",
+		}}
+	case "get_account_balances":
+		body = map[string]any{}
+	default:
+		body = map[string]any{}
+	}
+	raw, err := json.Marshal(body)
+	if err != nil {
+		return nil, err
+	}
+	return &sdk.ExecuteResult{Success: true, Status: 200, Data: raw}, nil
 }
 
 func newHTTPServer(t *testing.T) *httptest.Server {
