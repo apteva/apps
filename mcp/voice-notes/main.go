@@ -19,7 +19,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: voice-notes
 display_name: Voice Notes
-version: 0.1.0
+version: 0.1.1
 description: Lightweight audio notes backed by Storage with optional Deepgram transcription.
 author: Apteva
 icon: icon.svg
@@ -412,7 +412,7 @@ func (a *App) createFromAudio(ctx *sdk.AppCtx, pid string, req uploadRequest) (*
 		return nil, err
 	}
 	emit(ctx, pid, "voice_note.created", n)
-	if req.Transcribe {
+	if req.Transcribe && ctx.IntegrationFor("transcripts") != nil {
 		if transcribed, err := a.transcribe(ctx, pid, id, false); err == nil {
 			return transcribed, nil
 		}
@@ -433,8 +433,7 @@ func (a *App) transcribe(ctx *sdk.AppCtx, pid string, id int64, force bool) (*Vo
 	}
 	bound := ctx.IntegrationFor("transcripts")
 	if bound == nil {
-		_ = markTranscriptFailed(ctx.AppDB(), pid, id, "no Deepgram transcript integration bound")
-		return getNote(ctx, pid, id, true)
+		return nil, errors.New("no Deepgram transcript integration bound")
 	}
 	if _, err := ctx.AppDB().Exec(
 		`UPDATE voice_notes SET transcript_status='running', status='transcribing', error_message='', updated_at=CURRENT_TIMESTAMP WHERE project_id=? AND id=?`,
@@ -513,6 +512,7 @@ func (a *App) handleNotes(w http.ResponseWriter, r *http.Request) {
 			httpErr(w, http.StatusBadRequest, err.Error())
 			return
 		}
+		attachPlaybackURLs(ctx, notes)
 		httpJSON(w, map[string]any{"notes": notes})
 	case http.MethodPost:
 		var body struct {
@@ -705,14 +705,29 @@ func getNote(ctx *sdk.AppCtx, pid string, id int64, withURL bool) (*VoiceNote, e
 	}
 	n.TranscriptSegmentsJSON = json.RawMessage(defaultJSON(segs, "[]"))
 	n.TagsJSON = json.RawMessage(defaultJSON(tags, "[]"))
-	if withURL && n.StorageFileID != "" {
-		if fid, err := strconv.ParseInt(n.StorageFileID, 10, 64); err == nil {
-			if got, err := signedStorageURL(ctx, fid); err == nil {
-				n.PlaybackURL = got.URL
-			}
-		}
+	if withURL {
+		attachPlaybackURL(ctx, n)
 	}
 	return n, nil
+}
+
+func attachPlaybackURLs(ctx *sdk.AppCtx, notes []*VoiceNote) {
+	for _, n := range notes {
+		attachPlaybackURL(ctx, n)
+	}
+}
+
+func attachPlaybackURL(ctx *sdk.AppCtx, n *VoiceNote) {
+	if ctx == nil || n == nil || n.StorageFileID == "" || n.PlaybackURL != "" {
+		return
+	}
+	fid, err := strconv.ParseInt(n.StorageFileID, 10, 64)
+	if err != nil {
+		return
+	}
+	if got, err := signedStorageURL(ctx, fid); err == nil {
+		n.PlaybackURL = got.URL
+	}
 }
 
 func listNotes(db *sql.DB, pid, q, status string, limit int) ([]*VoiceNote, error) {
@@ -855,6 +870,9 @@ func uploadToStorage(ctx *sdk.AppCtx, name, folder, contentType string, body []b
 }
 
 func signedStorageURL(ctx *sdk.AppCtx, fileID int64) (*storageURLResult, error) {
+	if ctx.PlatformAPI() == nil {
+		return nil, errors.New("no platform client")
+	}
 	var out storageURLResult
 	if err := ctx.PlatformAPI().CallAppResult("storage", "files_get_url", map[string]any{
 		"id":          fileID,
