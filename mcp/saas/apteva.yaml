@@ -1,0 +1,108 @@
+schema: apteva-app/v1
+
+name: saas
+display_name: SaaS
+version: 0.1.0
+description: |
+  Shared SaaS access control for Apteva apps. SaaS packages installed
+  apps into sellable plans, creates customer accounts backed by Auth
+  organizations, grants Entitlements, stores live usage gauges from
+  participating apps, and applies subscription lifecycle state. It does
+  not install apps, run containers, or own invoices/payments directly.
+
+author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/saas
+icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/saas/icon.svg
+tags: [saas, access, subscriptions, entitlements, usage]
+
+scopes: [project, global]
+min_apteva_version: "0.11.0"
+
+requires:
+  permissions:
+    - db.write.app
+    - platform.apps.call
+  apps:
+    - name: catalog
+      optional: false
+    - name: billing
+      optional: false
+    - name: subscriptions
+      optional: false
+      events:
+        - subscription.active
+        - subscription.trialing
+        - subscription.past_due
+        - subscription.paused
+        - subscription.cancelled
+        - subscription.ended
+    - name: entitlements
+      optional: false
+    - name: auth
+      optional: false
+    - name: messaging
+      optional: true
+    - name: analytics
+      optional: true
+
+provides:
+  http_routes:
+    - prefix: /
+  mcp_tools:
+    - name: saas_plan_list
+      description: List SaaS plans and their features, limits, and usage sources.
+    - name: saas_plan_get
+      description: Fetch one SaaS plan.
+    - name: saas_plan_upsert
+      description: Create or update a SaaS plan linked to Catalog/Billing metadata.
+    - name: saas_plan_feature_add
+      description: Add a feature grant to a SaaS plan.
+    - name: saas_plan_limit_set
+      description: Set a live usage limit for a SaaS plan.
+    - name: saas_plan_usage_source_add
+      description: Register an app/tool that returns live usage gauges for a plan.
+    - name: saas_customer_create
+      description: Find or create a SaaS customer by email.
+    - name: saas_account_create
+      description: Create a SaaS account, Auth organization, Entitlement grants, and plan limits.
+    - name: saas_account_get
+      description: Fetch one SaaS account.
+    - name: saas_account_list
+      description: List SaaS accounts by customer, status, or plan.
+    - name: saas_account_suspend
+      description: Suspend a SaaS account and record lifecycle state.
+    - name: saas_account_resume
+      description: Resume a suspended, past-due, or cancelled SaaS account.
+    - name: saas_account_cancel
+      description: Cancel a SaaS account.
+    - name: saas_subscription_sync
+      description: Apply a subscription lifecycle status to a SaaS account.
+    - name: saas_usage_sync
+      description: Pull live usage gauges from configured app usage sources.
+    - name: saas_usage_record
+      description: Upsert one live usage gauge for a SaaS account.
+    - name: saas_usage_get
+      description: Return current live usage totals and plan limits.
+    - name: saas_access_check
+      description: Check whether a SaaS account is active and within limit for a feature.
+  ui_panels:
+    - slot: project.page
+      label: SaaS
+      icon: badge-dollar-sign
+      entry: /ui/SaaSPanel.mjs
+
+runtime:
+  kind: source
+  source:
+    repo: github.com/apteva/apps
+    ref: main
+    entry: mcp/saas
+  port: 8080
+  health_check: /health
+
+db:
+  driver: sqlite
+  path: /data/saas.db
+  migrations: migrations/
+
+upgrade_policy: auto-patch

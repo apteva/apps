@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-labelledby="title desc">
+  <title id="title">SaaS</title>
+  <desc id="desc">Stacked product blocks connected to an access ring.</desc>
+  <rect width="256" height="256" rx="48" fill="#0f172a"/>
+  <circle cx="128" cy="128" r="70" fill="none" stroke="#38bdf8" stroke-width="16"/>
+  <path d="M82 96h92a14 14 0 0 1 14 14v36a14 14 0 0 1-14 14H82a14 14 0 0 1-14-14v-36a14 14 0 0 1 14-14Z" fill="#f8fafc"/>
+  <path d="M91 82h74a12 12 0 0 1 12 12v14H79V94a12 12 0 0 1 12-12Z" fill="#94a3b8"/>
+  <path d="M91 148h74a12 12 0 0 1 12 12v14H79v-14a12 12 0 0 1 12-12Z" fill="#94a3b8"/>
+  <circle cx="100" cy="128" r="10" fill="#0f172a"/>
+  <path d="M121 128h43" stroke="#0f172a" stroke-width="12" stroke-linecap="round"/>
+</svg>
