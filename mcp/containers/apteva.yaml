@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: containers
 display_name: Containers
-version: 0.1.21
+version: 0.1.22
 description: |
   Generic Docker workload runtime for Apteva. Runs container images on
   the local host or remote Instances hosts, bootstraps Docker when
@@ -102,5 +102,24 @@ db:
   driver: sqlite
   path: /data/containers.db
   migrations: migrations/
+
+config_schema:
+  - name: default_host_id
+    type: select_from_app
+    app: instances
+    discovery:
+      route: /api/instances
+      response_path: instances
+      value_field: id
+      label_field: name
+    fallback: text
+    default: "0"
+    label: Default container host
+    description: |
+      Pick the default Docker host for new Containers workloads.
+      Local host (id 0) runs containers on the machine where this
+      app is installed. Remote hosts come from the Instances app; when
+      selected, Containers connects through Instances and bootstraps
+      Docker on first use.
 
 upgrade_policy: auto-patch

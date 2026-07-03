@@ -86,6 +86,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 	return []sdk.Route{
 		{Pattern: "/api/workloads", Handler: a.handleWorkloads},
 		{Pattern: "/api/workloads/", Handler: a.handleWorkloadItem},
+		{Pattern: "/api/hosts", Handler: a.handleHosts},
 		{Pattern: "/api/blueprints", Handler: a.handleBlueprints},
 	}
 }
@@ -150,6 +151,12 @@ func (a *App) prepareWorkload(appCtx *sdk.AppCtx, db *sql.DB, in RunSpec) (*Work
 	if err != nil {
 		log.Printf("[containers] prepare expand failed name=%q err=%q", in.Name, err.Error())
 		return nil, spec, err
+	}
+	if runSpecTargetID(spec) == 0 {
+		if defaultID := defaultHostID(appCtx); defaultID > 0 {
+			spec.HostID = defaultID
+			spec.InstanceID = defaultID
+		}
 	}
 	spec, err = normalizeRunSpec(spec)
 	if err != nil {
@@ -801,6 +808,22 @@ func (a *App) handleBlueprints(w http.ResponseWriter, r *http.Request) {
 	writeResult(w, map[string]any{"blueprints": bps}, err)
 }
 
+func (a *App) handleHosts(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "GET", http.StatusMethodNotAllowed)
+		return
+	}
+	hosts, warning := containerHosts(globalCtx)
+	out := map[string]any{
+		"hosts":           hosts,
+		"default_host_id": defaultHostID(globalCtx),
+	}
+	if warning != "" {
+		out["warning"] = warning
+	}
+	writeResult(w, out, nil)
+}
+
 func writeResult(w http.ResponseWriter, v any, err error) {
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -850,6 +873,81 @@ func queryInt(r *http.Request, key string, def int) int {
 		}
 	}
 	return def
+}
+
+type containerHost struct {
+	ID         int64  `json:"id"`
+	Name       string `json:"name"`
+	Provider   string `json:"provider"`
+	Status     string `json:"status"`
+	PublicIPv4 string `json:"public_ipv4,omitempty"`
+	Label      string `json:"label"`
+	Default    bool   `json:"default"`
+}
+
+func defaultHostID(ctx *sdk.AppCtx) int64 {
+	if ctx == nil || ctx.Config() == nil {
+		return 0
+	}
+	raw := strings.TrimSpace(ctx.Config().Get("default_host_id"))
+	if raw == "" {
+		return 0
+	}
+	n, err := strconv.ParseInt(raw, 10, 64)
+	if err != nil || n < 0 {
+		return 0
+	}
+	return n
+}
+
+func containerHosts(ctx *sdk.AppCtx) ([]containerHost, string) {
+	defaultID := defaultHostID(ctx)
+	hosts := []containerHost{formatContainerHost(containerHost{
+		ID:       0,
+		Name:     "localhost",
+		Provider: "local",
+		Status:   "ready",
+	}, defaultID)}
+	if ctx == nil || ctx.PlatformAPI() == nil {
+		return hosts, ""
+	}
+	var resp struct {
+		Instances []containerHost `json:"instances"`
+	}
+	if err := ctx.PlatformAPI().CallAppResult("instances", "instance_list", map[string]any{}, &resp); err != nil {
+		return hosts, err.Error()
+	}
+	seen := map[int64]bool{0: true}
+	for _, h := range resp.Instances {
+		if seen[h.ID] {
+			continue
+		}
+		seen[h.ID] = true
+		hosts = append(hosts, formatContainerHost(h, defaultID))
+	}
+	return hosts, ""
+}
+
+func formatContainerHost(h containerHost, defaultID int64) containerHost {
+	if h.Name == "" {
+		h.Name = fmt.Sprintf("instance %d", h.ID)
+	}
+	if h.Provider == "" {
+		h.Provider = "instances"
+	}
+	if h.Status == "" {
+		h.Status = "unknown"
+	}
+	if h.Label == "" {
+		h.Label = h.Name
+		if h.ID == 0 {
+			h.Label = "Local Docker host"
+		} else if h.PublicIPv4 != "" {
+			h.Label = fmt.Sprintf("%s (%s)", h.Name, h.PublicIPv4)
+		}
+	}
+	h.Default = h.ID == defaultID
+	return h
 }
 
 func describePorts(ports []PortSpec) string {

@@ -453,6 +453,50 @@ func TestPrepareWorkloadStoresRemoteTargetAndPublicURL(t *testing.T) {
 	}
 }
 
+func TestPrepareWorkloadUsesDefaultHostConfig(t *testing.T) {
+	db := testDB(t)
+	platform := &containersPlatformStub{publicIPv4: "203.0.113.10"}
+	manifest := (&App{}).Manifest()
+	ctx := sdk.NewAppCtxForTest(&manifest, db, sdk.Config{"default_host_id": "7"}, platform, nil)
+	app := &App{backend: fakeDockerBackend{}}
+	w, spec, err := app.prepareWorkload(ctx, db, RunSpec{
+		Name:  "demo",
+		Image: "nginx:alpine",
+		Ports: []PortSpec{{ContainerPort: 80, HostPort: 18080}},
+	})
+	if err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	if w.HostID != 7 || w.InstanceID != 7 || spec.HostID != 7 || spec.InstanceID != 7 {
+		t.Fatalf("default target not applied: workload=%+v spec=%+v", w, spec)
+	}
+	if spec.Ports[0].BindAddr != "0.0.0.0" {
+		t.Fatalf("remote default bind_addr=%q", spec.Ports[0].BindAddr)
+	}
+}
+
+func TestContainerHostsIncludesInstancesAndDefault(t *testing.T) {
+	platform := &containersPlatformStub{instances: []containerHost{
+		{ID: 0, Name: "localhost", Provider: "local", Status: "ready", PublicIPv4: "127.0.0.1"},
+		{ID: 7, Name: "render-a", Provider: "digitalocean", Status: "ready", PublicIPv4: "203.0.113.10"},
+	}}
+	manifest := (&App{}).Manifest()
+	ctx := sdk.NewAppCtxForTest(&manifest, nil, sdk.Config{"default_host_id": "7"}, platform, nil)
+	hosts, warning := containerHosts(ctx)
+	if warning != "" {
+		t.Fatalf("warning=%q", warning)
+	}
+	if len(hosts) != 2 {
+		t.Fatalf("hosts=%+v", hosts)
+	}
+	if hosts[0].ID != 0 || hosts[0].Default {
+		t.Fatalf("local host wrong: %+v", hosts[0])
+	}
+	if hosts[1].ID != 7 || !hosts[1].Default || !strings.Contains(hosts[1].Label, "203.0.113.10") {
+		t.Fatalf("remote host wrong: %+v", hosts[1])
+	}
+}
+
 func testWorkload(id, name, status string) *Workload {
 	return &Workload{
 		ID: id, Name: name, Kind: "container", Image: "nginx:alpine",
@@ -473,6 +517,7 @@ type containersPlatformStub struct {
 	calls         []containersPlatformCall
 	publicIPv4    string
 	failBootstrap bool
+	instances     []containerHost
 }
 
 func (p *containersPlatformStub) CallAppResult(appName, tool string, input map[string]any, out any) error {
@@ -490,6 +535,8 @@ func (p *containersPlatformStub) CallAppResult(appName, tool string, input map[s
 		}
 	case "instance_get":
 		raw, _ = json.Marshal(map[string]any{"instance": map[string]any{"public_ipv4": p.publicIPv4, "status": "ready"}})
+	case "instance_list":
+		raw, _ = json.Marshal(map[string]any{"instances": p.instances, "count": len(p.instances)})
 	default:
 		raw, _ = json.Marshal(map[string]any{})
 	}

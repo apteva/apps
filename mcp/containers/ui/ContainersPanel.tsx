@@ -9,6 +9,8 @@ interface Workload {
   id: string;
   name: string;
   image: string;
+  host_id: number;
+  instance_id: number;
   status: string;
   desired_status: string;
   health_status: string;
@@ -25,6 +27,16 @@ interface Blueprint {
   slug: string;
   name: string;
   description: string;
+}
+
+interface HostOption {
+  id: number;
+  name: string;
+  provider: string;
+  status: string;
+  public_ipv4?: string;
+  label?: string;
+  default?: boolean;
 }
 
 const API = "/api/apps/containers/api";
@@ -88,6 +100,7 @@ async function api<T>(path: string, init?: RequestInit): Promise<T> {
 export default function ContainersPanel(_props: NativePanelProps) {
   const [workloads, setWorkloads] = useState<Workload[]>([]);
   const [blueprints, setBlueprints] = useState<Blueprint[]>([]);
+  const [hosts, setHosts] = useState<HostOption[]>([{ id: 0, name: "localhost", provider: "local", status: "ready", label: "Local Docker host" }]);
   const [error, setError] = useState("");
   const [status, setStatus] = useState("Loading containers...");
   const [busy, setBusy] = useState("");
@@ -101,9 +114,28 @@ export default function ContainersPanel(_props: NativePanelProps) {
     healthPath: "/",
     memoryMB: "256",
     cpu: "0.5",
+    hostId: "0",
   });
 
   const runningCount = useMemo(() => workloads.filter((w) => w.status === "running").length, [workloads]);
+  const hostLabels = useMemo(() => {
+    const labels = new Map<number, string>();
+    for (const host of hosts) labels.set(host.id, host.label || host.name || `Host ${host.id}`);
+    labels.set(0, labels.get(0) || "Local Docker host");
+    return labels;
+  }, [hosts]);
+
+  const loadHosts = useCallback(async () => {
+    try {
+      const res = await api<{ hosts: HostOption[]; default_host_id?: number; warning?: string }>("/hosts");
+      const rows = res.hosts?.length ? res.hosts : [{ id: 0, name: "localhost", provider: "local", status: "ready", label: "Local Docker host" }];
+      setHosts(rows);
+      const defaultID = res.default_host_id ?? rows.find((h) => h.default)?.id ?? 0;
+      setForm((f) => ({ ...f, hostId: String(defaultID) }));
+    } catch {
+      setHosts([{ id: 0, name: "localhost", provider: "local", status: "ready", label: "Local Docker host" }]);
+    }
+  }, []);
 
   const load = useCallback(async () => {
     try {
@@ -123,10 +155,11 @@ export default function ContainersPanel(_props: NativePanelProps) {
   }, []);
 
   useEffect(() => {
+    loadHosts();
     load();
     const timer = window.setInterval(load, 5000);
     return () => window.clearInterval(timer);
-  }, [load]);
+  }, [load, loadHosts]);
 
   const runSpec = useCallback(async (next: typeof form) => {
     setBusy("run");
@@ -138,15 +171,16 @@ export default function ContainersPanel(_props: NativePanelProps) {
         ? [{
             container_port: Number(next.containerPort),
             host_port: next.hostPort ? Number(next.hostPort) : 0,
-            bind_addr: "127.0.0.1",
             protocol: "tcp",
           }]
         : [];
+      const instanceID = Number(next.hostId || 0);
       await api("/workloads", {
         method: "POST",
         body: JSON.stringify({
           name,
           image: next.image.trim(),
+          instance_id: Number.isFinite(instanceID) && instanceID > 0 ? instanceID : 0,
           ports,
           health_path: next.healthPath || "/",
           resources: {
@@ -215,6 +249,7 @@ export default function ContainersPanel(_props: NativePanelProps) {
       healthPath: preset.healthPath,
       memoryMB: preset.memoryMB,
       cpu: preset.cpu,
+      hostId: form.hostId,
     });
   };
 
@@ -266,6 +301,7 @@ export default function ContainersPanel(_props: NativePanelProps) {
 
                   <div style={styles.metaGrid}>
                     <Meta label="URL" value={w.public_url || "-"} />
+                    <Meta label="Host" value={hostLabels.get(w.instance_id || w.host_id || 0) || `Host ${w.instance_id || w.host_id || 0}`} />
                     <Meta label="Port" value={portLabel(w)} />
                     <Meta label="Created" value={fmtDate(w.created_at)} />
                     <Meta label="Resources" value={`${w.resources?.memory_mb || 0} MB / ${w.resources?.cpu || 0} CPU`} />
@@ -306,6 +342,7 @@ export default function ContainersPanel(_props: NativePanelProps) {
                       healthPath: preset.healthPath,
                       memoryMB: preset.memoryMB,
                       cpu: preset.cpu,
+                      hostId: form.hostId,
                     })}>Run</button>
                   </div>
                 </div>
@@ -317,6 +354,13 @@ export default function ContainersPanel(_props: NativePanelProps) {
             <h2 style={styles.sectionTitle}>Run Image</h2>
             <div style={styles.form}>
               <input style={styles.input} placeholder="name" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
+              <select style={styles.input} value={form.hostId} onChange={(e) => setForm({ ...form, hostId: e.target.value })}>
+                {hosts.map((host) => (
+                  <option key={host.id} value={String(host.id)}>
+                    {host.label || host.name}{host.status !== "ready" ? ` · ${host.status}` : ""}
+                  </option>
+                ))}
+              </select>
               <input style={styles.input} placeholder="image, e.g. nginx:alpine" value={form.image} onChange={(e) => setForm({ ...form, image: e.target.value })} />
               <div style={styles.twoCols}>
                 <input style={styles.input} placeholder="container port" value={form.containerPort} onChange={(e) => setForm({ ...form, containerPort: e.target.value })} />
