@@ -193,12 +193,18 @@ func (d RemoteDocker) Probe(ctx context.Context) error {
 }
 
 func (d RemoteDocker) CreateNetwork(ctx context.Context, name string) error {
+	if err := d.ensureDocker(ctx); err != nil {
+		return err
+	}
 	cmd := "docker network inspect " + shellQuote(name) + " >/dev/null 2>&1 || docker network create " + shellQuote(name)
 	_, _, err := d.runRemote(ctx, cmd, 30)
 	return err
 }
 
 func (d RemoteDocker) CreateVolume(ctx context.Context, name string) error {
+	if err := d.ensureDocker(ctx); err != nil {
+		return err
+	}
 	cmd := "docker volume inspect " + shellQuote(name) + " >/dev/null 2>&1 || docker volume create " + shellQuote(name)
 	_, _, err := d.runRemote(ctx, cmd, 30)
 	return err
@@ -323,12 +329,23 @@ func (d RemoteDocker) Inspect(ctx context.Context, containerName string) (*Conta
 }
 
 func (d RemoteDocker) remoteDocker(ctx context.Context, timeoutS int, args ...string) (string, error) {
+	if err := d.ensureDocker(ctx); err != nil {
+		return "", err
+	}
 	cmd := shellJoin(append([]string{"docker"}, args...)...)
 	out, _, err := d.runRemote(ctx, cmd, timeoutS)
 	if err != nil {
 		return out, formatDockerError(args, err.Error())
 	}
 	return out, nil
+}
+
+func (d RemoteDocker) ensureDocker(ctx context.Context) error {
+	_, _, err := d.runRemote(ctx, remoteDockerBootstrapScript, 360)
+	if err != nil {
+		return fmt.Errorf("bootstrap remote docker: %w", err)
+	}
+	return nil
 }
 
 func (d RemoteDocker) runRemote(ctx context.Context, cmd string, timeoutS int) (string, int, error) {
@@ -368,6 +385,46 @@ func (d RemoteDocker) runRemote(ctx context.Context, cmd string, timeoutS int) (
 		return resp.Output, resp.ExitCode, nil
 	}
 }
+
+const remoteDockerBootstrapScript = `set -eu
+if command -v docker >/dev/null 2>&1 && docker version >/dev/null 2>&1; then
+  exit 0
+fi
+
+SUDO=""
+if [ "$(id -u)" != "0" ]; then
+  if ! command -v sudo >/dev/null 2>&1; then
+    echo "docker is not installed and sudo is unavailable" >&2
+    exit 1
+  fi
+  SUDO="sudo"
+fi
+
+if ! command -v docker >/dev/null 2>&1; then
+  if command -v apt-get >/dev/null 2>&1; then
+    $SUDO env DEBIAN_FRONTEND=noninteractive apt-get update -y
+    $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y docker.io || (
+      $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates curl &&
+      curl -fsSL https://get.docker.com | $SUDO sh
+    )
+  elif command -v dnf >/dev/null 2>&1; then
+    $SUDO dnf install -y docker || $SUDO dnf install -y moby-engine
+  elif command -v yum >/dev/null 2>&1; then
+    $SUDO yum install -y docker
+  elif command -v apk >/dev/null 2>&1; then
+    $SUDO apk add --no-cache docker
+    $SUDO rc-update add docker boot >/dev/null 2>&1 || true
+  else
+    echo "unsupported host: no apt-get, dnf, yum, or apk package manager found" >&2
+    exit 1
+  fi
+fi
+
+$SUDO systemctl enable --now docker >/dev/null 2>&1 ||
+  $SUDO service docker start >/dev/null 2>&1 ||
+  true
+
+docker version >/dev/null 2>&1`
 
 func docker(ctx context.Context, args ...string) (string, error) {
 	start := time.Now()

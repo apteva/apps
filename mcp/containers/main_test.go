@@ -342,10 +342,20 @@ func TestRemoteDockerUsesInstancesRunCommand(t *testing.T) {
 	if cid != "cid123" {
 		t.Fatalf("cid=%q", cid)
 	}
-	if len(platform.calls) != 1 {
-		t.Fatalf("calls=%d, want 1", len(platform.calls))
+	if len(platform.calls) != 2 {
+		t.Fatalf("calls=%d, want 2", len(platform.calls))
 	}
-	call := platform.calls[0]
+	bootstrap := platform.calls[0]
+	if bootstrap.appName != "instances" || bootstrap.tool != "instance_run_command" || bootstrap.input["id"] != int64(7) {
+		t.Fatalf("unexpected bootstrap call: %+v", bootstrap)
+	}
+	bootstrapCmd, _ := bootstrap.input["cmd"].(string)
+	for _, want := range []string{"command -v docker", "apt-get install -y docker.io", "docker version"} {
+		if !strings.Contains(bootstrapCmd, want) {
+			t.Fatalf("bootstrap command missing %q in %q", want, bootstrapCmd)
+		}
+	}
+	call := platform.calls[1]
 	if call.appName != "instances" || call.tool != "instance_run_command" || call.input["id"] != int64(7) {
 		t.Fatalf("unexpected call: %+v", call)
 	}
@@ -354,6 +364,20 @@ func TestRemoteDockerUsesInstancesRunCommand(t *testing.T) {
 		if !strings.Contains(cmd, want) {
 			t.Fatalf("remote docker command missing %q in %q", want, cmd)
 		}
+	}
+}
+
+func TestRemoteDockerBootstrapFailureStopsDockerCommand(t *testing.T) {
+	platform := &containersPlatformStub{failBootstrap: true}
+	manifest := (&App{}).Manifest()
+	ctx := sdk.NewAppCtxForTest(&manifest, nil, sdk.Config{}, platform, nil)
+	remote := RemoteDocker{app: ctx, instanceID: 7}
+	err := remote.Probe(context.Background())
+	if err == nil || !strings.Contains(err.Error(), "bootstrap remote docker") {
+		t.Fatalf("expected bootstrap error, got %v", err)
+	}
+	if len(platform.calls) != 1 {
+		t.Fatalf("calls=%d, want only bootstrap call", len(platform.calls))
 	}
 }
 
@@ -404,8 +428,9 @@ type containersPlatformCall struct {
 
 type containersPlatformStub struct {
 	tk.BasePlatformClient
-	calls      []containersPlatformCall
-	publicIPv4 string
+	calls         []containersPlatformCall
+	publicIPv4    string
+	failBootstrap bool
 }
 
 func (p *containersPlatformStub) CallAppResult(appName, tool string, input map[string]any, out any) error {
@@ -413,7 +438,14 @@ func (p *containersPlatformStub) CallAppResult(appName, tool string, input map[s
 	var raw []byte
 	switch tool {
 	case "instance_run_command":
-		raw, _ = json.Marshal(map[string]any{"output": "cid123\n", "exit_code": 0})
+		cmd, _ := input["cmd"].(string)
+		if p.failBootstrap && strings.Contains(cmd, "command -v docker") {
+			raw, _ = json.Marshal(map[string]any{"output": "unsupported host\n", "exit_code": 1, "error": "Process exited with status 1"})
+		} else if strings.Contains(cmd, "command -v docker") {
+			raw, _ = json.Marshal(map[string]any{"output": "", "exit_code": 0})
+		} else {
+			raw, _ = json.Marshal(map[string]any{"output": "cid123\n", "exit_code": 0})
+		}
 	case "instance_get":
 		raw, _ = json.Marshal(map[string]any{"instance": map[string]any{"public_ipv4": p.publicIPv4, "status": "ready"}})
 	default:
