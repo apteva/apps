@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -11,6 +12,7 @@ import (
 	"testing"
 
 	sdk "github.com/apteva/app-sdk"
+	tk "github.com/apteva/app-sdk/testkit"
 )
 
 func TestManifestValid(t *testing.T) {
@@ -106,11 +108,30 @@ func TestNormalizeRunSpecDefaults(t *testing.T) {
 	}
 }
 
+func TestNormalizeRunSpecRemoteDefaults(t *testing.T) {
+	spec, err := normalizeRunSpec(RunSpec{
+		Name:       "demo-nginx",
+		Image:      "nginx:alpine",
+		InstanceID: 7,
+		Ports:      []PortSpec{{ContainerPort: 80}},
+	})
+	if err != nil {
+		t.Fatalf("normalize: %v", err)
+	}
+	if spec.HostID != 7 || spec.InstanceID != 7 {
+		t.Fatalf("target ids not normalized: host=%d instance=%d", spec.HostID, spec.InstanceID)
+	}
+	if spec.Ports[0].BindAddr != "0.0.0.0" {
+		t.Fatalf("remote bind_addr=%q, want 0.0.0.0", spec.Ports[0].BindAddr)
+	}
+}
+
 func TestNormalizeRunSpecRejectsUnsafeInputs(t *testing.T) {
 	bad := []RunSpec{
 		{Name: "Bad Name", Image: "nginx"},
 		{Name: "ok", Image: ""},
-		{Name: "ok", Image: "nginx", HostID: 7},
+		{Name: "ok", Image: "nginx", HostID: -1},
+		{Name: "ok", Image: "nginx", HostID: 7, InstanceID: 8},
 		{Name: "ok", Image: "nginx", Ports: []PortSpec{{ContainerPort: 70000}}},
 		{Name: "ok", Image: "nginx", Volumes: []VolumeSpec{{Name: "data", MountPath: "relative"}}},
 	}
@@ -189,7 +210,7 @@ func TestDestroyDoesNotHideWorkloadWhenDockerCleanupFails(t *testing.T) {
 		t.Fatalf("insert workload: %v", err)
 	}
 	app := &App{backend: fakeDockerBackend{removeErr: errors.New("docker unavailable")}}
-	err := app.destroyWorkload(context.Background(), db, w.ID, false)
+	err := app.destroyWorkload(context.Background(), nil, db, w.ID, false)
 	if err == nil {
 		t.Fatalf("expected destroy failure")
 	}
@@ -220,7 +241,7 @@ func TestDestroyIgnoresAlreadyMissingDockerResources(t *testing.T) {
 		removeNetworkErr: errors.New("docker network rm: No such network: containers-demo"),
 		removeVolumeErr:  errors.New("docker volume rm: No such volume: containers-demo-data"),
 	}}
-	if err := app.destroyWorkload(context.Background(), db, w.ID, true); err != nil {
+	if err := app.destroyWorkload(context.Background(), nil, db, w.ID, true); err != nil {
 		t.Fatalf("destroy missing resources should succeed: %v", err)
 	}
 	got, err := getWorkload(db, w.ID)
@@ -239,7 +260,7 @@ func TestHealthPollRetriesErrorWorkloads(t *testing.T) {
 		t.Fatalf("insert workload: %v", err)
 	}
 	app := &App{backend: fakeDockerBackend{inspectState: &ContainerState{ID: "cid", Running: true}}}
-	if err := app.pollHealth(context.Background(), db); err != nil {
+	if err := app.pollHealth(context.Background(), nil, db); err != nil {
 		t.Fatalf("poll health: %v", err)
 	}
 	got, err := getWorkload(db, w.ID)
@@ -264,7 +285,7 @@ func TestWorkloadUsageMeasuresVolumeStorage(t *testing.T) {
 		"containers-usage-data":  512,
 		"containers-usage-cache": 128,
 	}}}
-	usage, err := app.workloadUsage(context.Background(), db, w.ID)
+	usage, err := app.workloadUsage(context.Background(), nil, db, w.ID)
 	if err != nil {
 		t.Fatalf("usage: %v", err)
 	}
@@ -303,6 +324,69 @@ func TestDockerErrorRedactsEnvValues(t *testing.T) {
 	}
 }
 
+func TestRemoteDockerUsesInstancesRunCommand(t *testing.T) {
+	platform := &containersPlatformStub{}
+	manifest := (&App{}).Manifest()
+	ctx := sdk.NewAppCtxForTest(&manifest, nil, sdk.Config{}, platform, nil)
+	remote := RemoteDocker{app: ctx, instanceID: 7}
+	cid, err := remote.Run(context.Background(), RunSpec{
+		Name:          "demo",
+		Image:         "nginx:alpine",
+		RestartPolicy: "unless-stopped",
+		Ports:         []PortSpec{{BindAddr: "0.0.0.0", HostPort: 8080, ContainerPort: 80, Protocol: "tcp"}},
+		Env:           map[string]string{"PORT": "80"},
+	}, "containers-demo", "containers-demo")
+	if err != nil {
+		t.Fatalf("remote run: %v", err)
+	}
+	if cid != "cid123" {
+		t.Fatalf("cid=%q", cid)
+	}
+	if len(platform.calls) != 1 {
+		t.Fatalf("calls=%d, want 1", len(platform.calls))
+	}
+	call := platform.calls[0]
+	if call.appName != "instances" || call.tool != "instance_run_command" || call.input["id"] != int64(7) {
+		t.Fatalf("unexpected call: %+v", call)
+	}
+	cmd, _ := call.input["cmd"].(string)
+	for _, want := range []string{"'docker' 'run'", "'-p' '0.0.0.0:8080:80/tcp'", "'nginx:alpine'"} {
+		if !strings.Contains(cmd, want) {
+			t.Fatalf("remote docker command missing %q in %q", want, cmd)
+		}
+	}
+}
+
+func TestPrepareWorkloadStoresRemoteTargetAndPublicURL(t *testing.T) {
+	db := testDB(t)
+	platform := &containersPlatformStub{publicIPv4: "203.0.113.10"}
+	manifest := (&App{}).Manifest()
+	ctx := sdk.NewAppCtxForTest(&manifest, db, sdk.Config{}, platform, nil)
+	app := &App{backend: fakeDockerBackend{}}
+	w, spec, err := app.prepareWorkload(ctx, db, RunSpec{
+		Name:   "demo",
+		Image:  "nginx:alpine",
+		HostID: 7,
+		Ports:  []PortSpec{{ContainerPort: 80, HostPort: 18080}},
+	})
+	if err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	if w.HostID != 7 || w.InstanceID != 7 || spec.HostID != 7 || spec.InstanceID != 7 {
+		t.Fatalf("remote target not stored: workload=%+v spec=%+v", w, spec)
+	}
+	if w.PublicURL != "http://203.0.113.10:18080" || w.HealthURL != "http://203.0.113.10:18080/" {
+		t.Fatalf("remote urls wrong: public=%q health=%q", w.PublicURL, w.HealthURL)
+	}
+	got, err := getWorkload(db, w.ID)
+	if err != nil {
+		t.Fatalf("get workload: %v", err)
+	}
+	if got.HostID != 7 || got.InstanceID != 7 {
+		t.Fatalf("db target not stored: %+v", got)
+	}
+}
+
 func testWorkload(id, name, status string) *Workload {
 	return &Workload{
 		ID: id, Name: name, Kind: "container", Image: "nginx:alpine",
@@ -310,6 +394,32 @@ func testWorkload(id, name, status string) *Workload {
 		NetworkName: "containers-" + name, HealthStatus: "unknown", HealthPath: "/",
 		ConfigJSON: `{}`, EnvJSON: `{}`, ResourcesJSON: `{}`, RestartPolicy: "unless-stopped",
 	}
+}
+
+type containersPlatformCall struct {
+	appName string
+	tool    string
+	input   map[string]any
+}
+
+type containersPlatformStub struct {
+	tk.BasePlatformClient
+	calls      []containersPlatformCall
+	publicIPv4 string
+}
+
+func (p *containersPlatformStub) CallAppResult(appName, tool string, input map[string]any, out any) error {
+	p.calls = append(p.calls, containersPlatformCall{appName: appName, tool: tool, input: input})
+	var raw []byte
+	switch tool {
+	case "instance_run_command":
+		raw, _ = json.Marshal(map[string]any{"output": "cid123\n", "exit_code": 0})
+	case "instance_get":
+		raw, _ = json.Marshal(map[string]any{"instance": map[string]any{"public_ipv4": p.publicIPv4, "status": "ready"}})
+	default:
+		raw, _ = json.Marshal(map[string]any{})
+	}
+	return json.Unmarshal(raw, out)
 }
 
 type fakeDockerBackend struct {

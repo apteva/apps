@@ -117,8 +117,19 @@ func normalizeRunSpec(in RunSpec) (RunSpec, error) {
 	if in.Image == "" {
 		return in, errors.New("image is required")
 	}
-	if in.HostID != 0 || in.InstanceID != 0 {
-		return in, errors.New("remote hosts are not implemented in Containers v0.1; use host_id=0")
+	if in.HostID < 0 || in.InstanceID < 0 {
+		return in, errors.New("host_id and instance_id must be >= 0")
+	}
+	targetID := in.InstanceID
+	if targetID == 0 {
+		targetID = in.HostID
+	}
+	if in.HostID != 0 && in.InstanceID != 0 && in.HostID != in.InstanceID {
+		return in, errors.New("host_id and instance_id must match when both are provided")
+	}
+	if targetID != 0 {
+		in.HostID = targetID
+		in.InstanceID = targetID
 	}
 	if in.RestartPolicy == "" {
 		in.RestartPolicy = "unless-stopped"
@@ -149,7 +160,11 @@ func normalizeRunSpec(in RunSpec) (RunSpec, error) {
 			return in, fmt.Errorf("ports[%d].host_port invalid", i)
 		}
 		if p.BindAddr == "" {
-			p.BindAddr = "127.0.0.1"
+			if targetID != 0 {
+				p.BindAddr = "0.0.0.0"
+			} else {
+				p.BindAddr = "127.0.0.1"
+			}
 		}
 	}
 	for i := range in.Volumes {
