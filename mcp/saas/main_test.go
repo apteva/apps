@@ -3,10 +3,12 @@ package main
 import (
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	sdk "github.com/apteva/app-sdk"
 	tk "github.com/apteva/app-sdk/testkit"
@@ -107,8 +109,8 @@ func TestEmbeddedManifest_Valid(t *testing.T) {
 	if m.Name != "saas" {
 		t.Errorf("manifest.Name=%q, want saas", m.Name)
 	}
-	if m.Version != "0.1.5" {
-		t.Errorf("manifest.Version=%q, want 0.1.5", m.Version)
+	if m.Version != "0.1.6" {
+		t.Errorf("manifest.Version=%q, want 0.1.6", m.Version)
 	}
 	if !m.Requires.DynamicAppCalls {
 		t.Error("manifest should allow dynamic app calls for configured usage sources")
@@ -657,6 +659,46 @@ func TestPlanChildrenRequireExistingPlan(t *testing.T) {
 	}
 	if _, err := app.toolPlanUsageSourceAdd(ctx, map[string]any{"plan_key": "missing-pro", "app_name": "crm", "tool_name": "crm_saas_usage_snapshot"}); err == nil {
 		t.Fatal("usage source add should fail for a missing plan")
+	}
+}
+
+func TestPlanListDoesNotHoldRowsWhileHydrating(t *testing.T) {
+	ctx, db := newTestCtx(t, &platformStub{})
+	defer db.Close()
+	db.SetMaxOpenConns(1)
+	app := &App{}
+
+	if _, err := app.toolPlanLimitSet(ctx, map[string]any{"plan_key": "free", "feature_key": "hosting.tenants", "limit_value": 1}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.toolPlanActionAdd(ctx, map[string]any{
+		"plan_key":  "free",
+		"event":     "account_active",
+		"app_name":  "containers",
+		"tool_name": "containers_create",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		out, err := app.toolPlanList(ctx, map[string]any{})
+		if err == nil {
+			plans := out.(map[string]any)["plans"].([]*Plan)
+			if len(plans) != 1 || len(plans[0].Limits) != 1 || len(plans[0].Actions) != 1 {
+				err = fmt.Errorf("plan hydration mismatch: %+v", plans)
+			}
+		}
+		done <- err
+	}()
+
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("plan list hung while hydrating child rows")
 	}
 }
 

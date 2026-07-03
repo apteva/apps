@@ -56,7 +56,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 			return err
 		}
 	}
-	ctx.Logger().Info("saas mounted", "version", "0.1.5", "scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
+	ctx.Logger().Info("saas mounted", "version", "0.1.6", "scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
 	return nil
 }
 
@@ -1657,19 +1657,28 @@ func dbPlanList(db *sql.DB, pid string) ([]*Plan, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
 	var out []*Plan
 	for rows.Next() {
 		p, err := scanPlan(rows)
 		if err != nil {
-			return nil, err
-		}
-		if err := hydratePlan(db, p); err != nil {
+			rows.Close()
 			return nil, err
 		}
 		out = append(out, p)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	for _, p := range out {
+		if err := hydratePlan(db, p); err != nil {
+			return nil, err
+		}
+	}
+	return out, nil
 }
 
 func dbPlanGet(db *sql.DB, pid, key string) (*Plan, error) {
