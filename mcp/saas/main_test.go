@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	sdk "github.com/apteva/app-sdk"
@@ -39,6 +40,20 @@ func (p *platformStub) CallAppResult(appName, tool string, input map[string]any,
 		body = map[string]any{"limit": map[string]any{"id": 401, "feature_key": input["feature_key"], "limit_value": input["limit_value"]}}
 	case "entitlements_check":
 		body = map[string]any{"allowed": p.entitled}
+	case "customers_upsert_by_email":
+		body = map[string]any{"customer": map[string]any{"id": 501, "email": input["email"], "name": input["name"]}}
+	case "catalog_prices_get":
+		body = map[string]any{"price": map[string]any{"id": input["id"], "product_id": 7001, "unit_amount_cents": 2900, "currency": "USD", "interval": "month", "interval_count": 1}}
+	case "subscriptions_create":
+		body = map[string]any{"subscription": map[string]any{"id": 601, "status": input["status"], "customer_id": input["customer_id"], "items": input["items"]}}
+	case "subscriptions_invoice_create":
+		body = map[string]any{"invoice": map[string]any{"id": 701, "status": "open", "total_cents": 2900}, "cycle": map[string]any{"id": 801, "invoice_id": 701, "payment_status": "open"}}
+	case "payments_record":
+		body = map[string]any{"payment": map[string]any{"id": 901, "method": input["method"], "amount_cents": input["amount_cents"]}, "invoice": map[string]any{"id": input["invoice_id"], "status": "paid", "total_cents": input["amount_cents"], "amount_paid_cents": input["amount_cents"]}}
+	case "invoices_send_payment_link":
+		body = map[string]any{"url": "https://pay.example/session", "stripe_session_id": "cs_test_123", "expires_at": 123}
+	case "payment_method_setup_create":
+		body = map[string]any{"setup_session": map[string]any{"id": 1001, "customer_id": input["customer_id"], "status": "pending", "url": "https://pay.example/setup"}, "url": "https://pay.example/setup"}
 	case "crm_saas_usage_snapshot":
 		body = map[string]any{"usage": []map[string]any{{"feature_key": "crm:contacts", "quantity": p.contacts}}}
 	case "contacts_search":
@@ -84,8 +99,8 @@ func TestEmbeddedManifest_Valid(t *testing.T) {
 	if m.Name != "saas" {
 		t.Errorf("manifest.Name=%q, want saas", m.Name)
 	}
-	if m.Version != "0.1.2" {
-		t.Errorf("manifest.Version=%q, want 0.1.2", m.Version)
+	if m.Version != "0.1.3" {
+		t.Errorf("manifest.Version=%q, want 0.1.3", m.Version)
 	}
 	if !m.Requires.DynamicAppCalls {
 		t.Error("manifest should allow dynamic app calls for configured usage sources")
@@ -193,6 +208,126 @@ func TestAccountCreate_AppliesAuthAndEntitlements(t *testing.T) {
 		if !got[key] {
 			t.Errorf("missing call %s; calls=%+v", key, pf.calls)
 		}
+	}
+}
+
+func TestAccountCreate_StoresBillingCustomerID(t *testing.T) {
+	ctx, db := newTestCtx(t, &platformStub{})
+	defer db.Close()
+	app := &App{}
+
+	out, err := app.toolAccountCreate(ctx, map[string]any{
+		"owner_email":         "owner@example.com",
+		"customer_name":       "Acme Inc",
+		"billing_customer_id": 77,
+		"slug":                "acme",
+		"plan_key":            "free",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	acct := out.(map[string]any)["account"].(*Account)
+	customer, err := dbCustomerGet(db, "proj-test", acct.CustomerID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if customer.BillingCustomerID == nil || *customer.BillingCustomerID != 77 {
+		t.Fatalf("billing_customer_id=%v, want 77", customer.BillingCustomerID)
+	}
+}
+
+func TestCheckoutCreate_ManualPaymentActivatesAccountAndStoresBillingRefs(t *testing.T) {
+	pf := &platformStub{}
+	ctx, db := newTestCtx(t, pf)
+	defer db.Close()
+	app := &App{}
+	setupPaidCRMPlan(t, app, ctx)
+
+	out, err := app.toolCheckoutCreate(ctx, map[string]any{
+		"owner_email":           "buyer@example.com",
+		"customer_name":         "Buyer Co",
+		"slug":                  "buyer",
+		"plan_key":              "crm-pro",
+		"payment_mode":          "manual",
+		"record_payment":        true,
+		"manual_payment_method": "wire",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := out.(map[string]any)
+	acct := body["account"].(*Account)
+	if acct.Status != StatusActive {
+		t.Fatalf("status=%s, want active", acct.Status)
+	}
+	if acct.SubscriptionID == nil || *acct.SubscriptionID != 601 {
+		t.Fatalf("subscription_id=%v, want 601", acct.SubscriptionID)
+	}
+	customer, err := dbCustomerGet(db, "proj-test", acct.CustomerID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if customer.BillingCustomerID == nil || *customer.BillingCustomerID != 501 {
+		t.Fatalf("billing_customer_id=%v, want 501", customer.BillingCustomerID)
+	}
+	for _, key := range []string{
+		"billing:customers_upsert_by_email",
+		"catalog:catalog_prices_get",
+		"subscriptions:subscriptions_create",
+		"subscriptions:subscriptions_invoice_create",
+		"billing:payments_record",
+		"auth:auth_orgs_create",
+		"entitlements:entitlement_grants_create",
+		"entitlements:entitlement_limits_set",
+	} {
+		if !hasCall(pf.calls, key) {
+			t.Fatalf("missing call %s; calls=%+v", key, pf.calls)
+		}
+	}
+	payment := findCall(pf.calls, "billing", "payments_record")
+	if payment == nil {
+		t.Fatal("payments_record was not called")
+	}
+	if int64FromAny(payment.Input["amount_cents"]) != 2900 || payment.Input["method"] != "wire" {
+		t.Fatalf("bad payment input: %+v", payment.Input)
+	}
+}
+
+func TestCheckoutCreate_PaymentLinkLeavesAccountPastDueAndAccessDenied(t *testing.T) {
+	pf := &platformStub{entitled: true, contacts: 0}
+	ctx, db := newTestCtx(t, pf)
+	defer db.Close()
+	app := &App{}
+	setupPaidCRMPlan(t, app, ctx)
+
+	out, err := app.toolCheckoutCreate(ctx, map[string]any{
+		"owner_email":   "buyer@example.com",
+		"customer_name": "Buyer Co",
+		"slug":          "buyer",
+		"plan_key":      "crm-pro",
+		"payment_mode":  "payment_link",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := out.(map[string]any)
+	acct := body["account"].(*Account)
+	if acct.Status != StatusPastDue || body["status"] != "awaiting_payment" {
+		t.Fatalf("checkout should await payment with past_due account: status=%s body=%+v", acct.Status, body)
+	}
+	link := mapFromAny(body["payment_link"])
+	if strArg(link, "url") != "https://pay.example/session" {
+		t.Fatalf("payment link missing: %+v", body["payment_link"])
+	}
+	if hasCall(pf.calls, "billing:payments_record") {
+		t.Fatalf("payments_record should not run for payment_link; calls=%+v", pf.calls)
+	}
+	access, err := app.toolAccessCheck(ctx, map[string]any{"account_id": acct.ID, "feature_key": "crm:contacts"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if access.(map[string]any)["allowed"].(bool) {
+		t.Fatalf("unpaid past_due checkout should not allow access: %+v", access)
 	}
 }
 
@@ -530,4 +665,41 @@ func TestSubscriptionLifecycle_MatchesHostingEventShape(t *testing.T) {
 	if got.Status != StatusActive {
 		t.Fatalf("status=%s, want active after resumed", got.Status)
 	}
+}
+
+func setupPaidCRMPlan(t *testing.T, app *App, ctx *sdk.AppCtx) {
+	t.Helper()
+	if _, err := app.toolPlanUpsert(ctx, map[string]any{
+		"key":                   "crm-pro",
+		"name":                  "CRM Pro",
+		"billing_mode":          "paid",
+		"catalog_product_id":    7001,
+		"catalog_price_id":      8001,
+		"subscription_required": true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.toolPlanFeatureAdd(ctx, map[string]any{"plan_key": "crm-pro", "feature_key": "crm:contacts"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.toolPlanLimitSet(ctx, map[string]any{"plan_key": "crm-pro", "feature_key": "crm:contacts", "limit_value": 3}); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func hasCall(calls []callAppCall, key string) bool {
+	parts := strings.SplitN(key, ":", 2)
+	if len(parts) != 2 {
+		return false
+	}
+	return findCall(calls, parts[0], parts[1]) != nil
+}
+
+func findCall(calls []callAppCall, app, tool string) *callAppCall {
+	for i := range calls {
+		if calls[i].App == app && calls[i].Tool == tool {
+			return &calls[i]
+		}
+	}
+	return nil
 }

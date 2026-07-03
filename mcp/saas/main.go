@@ -56,7 +56,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 			return err
 		}
 	}
-	ctx.Logger().Info("saas mounted", "version", "0.1.2", "scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
+	ctx.Logger().Info("saas mounted", "version", "0.1.3", "scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
 	return nil
 }
 
@@ -112,9 +112,15 @@ func (a *App) MCPTools() []sdk.Tool {
 			"read_path": strSchema(), "quantity_path": strSchema(), "call_args": objSchema(), "metadata": objSchema(),
 		}, []string{"plan_key", "app_name", "tool_name"}), Handler: a.toolPlanUsageSourceAdd},
 		{Name: "saas_customer_create", Description: "Find or create a SaaS customer by email.", InputSchema: schemaObject(map[string]any{"email": strSchema(), "name": strSchema(), "billing_customer_id": intSchema(), "auth_user_id": intSchema(), "metadata": objSchema()}, []string{"email"}), Handler: a.toolCustomerCreate},
+		{Name: "saas_checkout_create", Description: "Create a paid SaaS checkout: Billing customer, Subscription, invoice/payment link or manual payment, then SaaS account.", InputSchema: schemaObject(map[string]any{
+			"owner_email": strSchema(), "customer_id": intSchema(), "customer_email": strSchema(), "customer_name": strSchema(), "slug": strSchema(), "plan_key": strSchema(),
+			"billing_customer_id": intSchema(), "auth_org_id": intSchema(), "auth_user_id": intSchema(), "create_owner_user": boolSchema(), "send_password_reset": boolSchema(),
+			"payment_mode": strSchema(), "record_payment": boolSchema(), "manual_payment_method": strSchema(), "activate_without_payment": boolSchema(),
+			"success_url": strSchema(), "cancel_url": strSchema(), "period_start": strSchema(), "period_end": strSchema(), "provider": strSchema(), "metadata": objSchema(),
+		}, []string{"owner_email", "slug"}), Handler: a.toolCheckoutCreate},
 		{Name: "saas_account_create", Description: "Create a SaaS account and apply plan access.", InputSchema: schemaObject(map[string]any{
 			"customer_id": intSchema(), "customer_email": strSchema(), "customer_name": strSchema(), "owner_email": strSchema(), "slug": strSchema(), "plan_key": strSchema(),
-			"auth_org_id": intSchema(), "auth_user_id": intSchema(), "subscription_id": intSchema(), "create_owner_user": boolSchema(), "send_password_reset": boolSchema(), "metadata": objSchema(),
+			"billing_customer_id": intSchema(), "auth_org_id": intSchema(), "auth_user_id": intSchema(), "subscription_id": intSchema(), "create_owner_user": boolSchema(), "send_password_reset": boolSchema(), "metadata": objSchema(),
 		}, []string{"owner_email", "slug"}), Handler: a.toolAccountCreate},
 		{Name: "saas_account_get", Description: "Fetch one SaaS account.", InputSchema: accountIDSchema(), Handler: a.toolAccountGet},
 		{Name: "saas_account_list", Description: "List SaaS accounts.", InputSchema: schemaObject(map[string]any{"customer_id": intSchema(), "status": strSchema(), "plan_key": strSchema()}, nil), Handler: a.toolAccountList},
@@ -469,6 +475,14 @@ func (a *App) toolCustomerCreate(ctx *sdk.AppCtx, args map[string]any) (any, err
 	return map[string]any{"customer": c}, nil
 }
 
+func (a *App) toolCheckoutCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	out, err := a.createCheckout(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (a *App) toolAccountCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	acct, err := a.createAccount(ctx, args)
 	if err != nil {
@@ -681,7 +695,7 @@ func (a *App) toolAccessCheck(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	}, &entitlement); err != nil {
 		return nil, fmt.Errorf("check entitlement %s: %w", feature, err)
 	}
-	allowedStatus := acct.Status == StatusActive || acct.Status == StatusPastDue
+	allowedStatus := acct.Status == StatusActive
 	usage, err := dbUsageTotals(ctx.AppDB(), pid, map[string]any{"account_id": acct.ID, "feature_key": feature})
 	if err != nil {
 		return nil, err
@@ -776,6 +790,327 @@ func (a *App) createAccount(ctx *sdk.AppCtx, args map[string]any) (*Account, err
 	_ = recordEvent(ctx.AppDB(), pid, acct.ID, "provisioning.active", actor(args), nil)
 	_, _ = a.toolUsageSync(ctx, map[string]any{"_project_id": pid, "account_id": acct.ID})
 	return dbAccountGet(ctx.AppDB(), pid, acct.ID)
+}
+
+func (a *App) createCheckout(ctx *sdk.AppCtx, args map[string]any) (map[string]any, error) {
+	pid, err := requireProject(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	planKey := firstNonEmpty(strArg(args, "plan_key"), "free")
+	plan, err := dbPlanGet(ctx.AppDB(), pid, planKey)
+	if err != nil {
+		return nil, err
+	}
+	if plan == nil {
+		return nil, fmt.Errorf("plan %q not found", planKey)
+	}
+	customer, err := resolveCustomer(ctx.AppDB(), pid, args)
+	if err != nil {
+		return nil, err
+	}
+	out := map[string]any{"customer": customer, "plan": plan}
+	requiresCommerce := plan.BillingMode != "free" || plan.SubscriptionRequired
+	if !requiresCommerce {
+		acct, err := a.createAccount(ctx, args)
+		if err != nil {
+			return nil, err
+		}
+		out["account"] = acct
+		out["status"] = "active"
+		return out, nil
+	}
+
+	billingCustomerID, billingCustomer, err := a.ensureBillingCustomer(ctx, pid, customer, args)
+	if err != nil {
+		return nil, err
+	}
+	out["billing_customer"] = billingCustomer
+	customer, _ = dbCustomerGet(ctx.AppDB(), pid, customer.ID)
+	out["customer"] = customer
+
+	price, err := a.resolveCheckoutPrice(ctx, pid, plan, args)
+	if err != nil {
+		return nil, err
+	}
+	out["price"] = price.asMap()
+
+	periodStart := firstNonEmpty(strArg(args, "period_start"), time.Now().UTC().Format(time.RFC3339))
+	periodEnd := firstNonEmpty(strArg(args, "period_end"), periodEndFrom(periodStart, price.Interval, price.IntervalCount))
+	paymentMode := strings.ToLower(firstNonEmpty(strArg(args, "payment_mode"), "payment_link"))
+	recordPayment := boolArg(args, "record_payment")
+	paidNow := boolArg(args, "activate_without_payment") || (paymentMode == "manual" && recordPayment)
+	if paidNow && strArg(args, "payment_mode") == "" {
+		paymentMode = "none"
+	}
+	subStatus := StatusActive
+	if !paidNow {
+		subStatus = StatusPastDue
+	}
+
+	subOut, err := a.createSubscription(ctx, pid, customer, billingCustomerID, plan, price, subStatus, periodStart, periodEnd, args)
+	if err != nil {
+		return nil, err
+	}
+	out["subscription"] = unwrapMap(subOut, "subscription")
+	subID := int64FromResult(subOut, "subscription", "id")
+	if subID == 0 {
+		return nil, errors.New("subscriptions_create returned no subscription id")
+	}
+
+	invOut, err := a.createSubscriptionInvoice(ctx, pid, subID, periodStart, periodEnd, args)
+	if err != nil {
+		return nil, err
+	}
+	out["invoice"] = unwrapMap(invOut, "invoice")
+	if cycle := unwrapMap(invOut, "cycle"); cycle != nil {
+		out["cycle"] = cycle
+	}
+	invoiceID := int64FromResult(invOut, "invoice", "id")
+	if invoiceID == 0 {
+		return nil, errors.New("subscriptions_invoice_create returned no invoice id")
+	}
+
+	switch paymentMode {
+	case "manual":
+		if recordPayment {
+			paymentOut, err := a.recordCheckoutPayment(ctx, pid, invoiceID, price, args)
+			if err != nil {
+				return nil, err
+			}
+			out["payment"] = unwrapMap(paymentOut, "payment")
+			out["invoice"] = unwrapMap(paymentOut, "invoice")
+		}
+	case "payment_link", "stripe", "":
+		linkOut, err := a.createPaymentLink(ctx, pid, invoiceID, args)
+		if err != nil {
+			return nil, err
+		}
+		out["payment_link"] = linkOut
+	case "setup_session":
+		setupOut, err := a.createPaymentSetupSession(ctx, pid, billingCustomerID, args)
+		if err != nil {
+			return nil, err
+		}
+		out["setup_session"] = unwrapMap(setupOut, "setup_session")
+		if url := strArg(setupOut, "url"); url != "" {
+			out["url"] = url
+		}
+	case "none":
+	default:
+		return nil, fmt.Errorf("unsupported payment_mode %q", paymentMode)
+	}
+
+	accountArgs := copyMap(args)
+	accountArgs["customer_id"] = customer.ID
+	accountArgs["billing_customer_id"] = billingCustomerID
+	accountArgs["subscription_id"] = subID
+	accountArgs["metadata"] = mergeMetadata(args["metadata"], map[string]any{
+		"billing_customer_id": billingCustomerID,
+		"subscription_id":     subID,
+		"invoice_id":          invoiceID,
+		"checkout_status":     map[bool]string{true: "paid", false: "awaiting_payment"}[paidNow],
+	})
+	acct, err := a.createAccount(ctx, accountArgs)
+	if err != nil {
+		return nil, err
+	}
+	if !paidNow {
+		acct, err = dbAccountSetStatus(ctx.AppDB(), pid, acct.ID, StatusPastDue, "")
+		if err != nil {
+			return nil, err
+		}
+		_ = recordEvent(ctx.AppDB(), pid, acct.ID, "checkout.awaiting_payment", actor(args), map[string]any{"invoice_id": invoiceID, "subscription_id": subID})
+	}
+	out["account"] = acct
+	if paidNow {
+		out["status"] = "active"
+	} else {
+		out["status"] = "awaiting_payment"
+	}
+	return out, nil
+}
+
+type checkoutPrice struct {
+	ProductID       int64
+	PriceID         int64
+	Title           string
+	UnitAmountCents int64
+	Currency        string
+	Interval        string
+	IntervalCount   int64
+}
+
+func (p checkoutPrice) asMap() map[string]any {
+	return map[string]any{
+		"catalog_product_id": p.ProductID,
+		"catalog_price_id":   p.PriceID,
+		"title":              p.Title,
+		"unit_amount_cents":  p.UnitAmountCents,
+		"currency":           p.Currency,
+		"interval":           p.Interval,
+		"interval_count":     p.IntervalCount,
+	}
+}
+
+func (a *App) ensureBillingCustomer(ctx *sdk.AppCtx, pid string, customer *Customer, args map[string]any) (int64, map[string]any, error) {
+	if id := firstNonZero(int64Arg(args, "billing_customer_id"), int64PtrValue(customer.BillingCustomerID)); id != 0 {
+		if err := dbCustomerSetBillingID(ctx.AppDB(), pid, customer.ID, id); err != nil {
+			return 0, nil, err
+		}
+		return id, map[string]any{"id": id}, nil
+	}
+	input := map[string]any{
+		"_project_id": pid,
+		"email":       customer.Email,
+		"name":        customer.Name,
+		"metadata":    map[string]any{"source": "saas", "saas_customer_id": customer.ID},
+	}
+	var out map[string]any
+	if err := ctx.PlatformAPI().CallAppResult("billing", "customers_upsert_by_email", input, &out); err != nil {
+		return 0, nil, fmt.Errorf("create billing customer: %w", err)
+	}
+	billingCustomer := unwrapMap(out, "customer")
+	id := firstNonZero(int64Arg(billingCustomer, "id"), int64Arg(out, "id"))
+	if id == 0 {
+		return 0, nil, errors.New("billing customer response missing id")
+	}
+	if err := dbCustomerSetBillingID(ctx.AppDB(), pid, customer.ID, id); err != nil {
+		return 0, nil, err
+	}
+	return id, billingCustomer, nil
+}
+
+func (a *App) resolveCheckoutPrice(ctx *sdk.AppCtx, pid string, plan *Plan, args map[string]any) (checkoutPrice, error) {
+	price := checkoutPrice{
+		ProductID:       int64PtrValue(plan.CatalogProductID),
+		PriceID:         int64PtrValue(plan.CatalogPriceID),
+		Title:           firstNonEmpty(strArg(args, "title"), plan.Name),
+		UnitAmountCents: int64Arg(args, "unit_amount_cents"),
+		Currency:        strings.ToUpper(firstNonEmpty(strArg(args, "currency"), "USD")),
+		Interval:        firstNonEmpty(strArg(args, "interval"), "month"),
+		IntervalCount:   firstNonZero(int64Arg(args, "interval_count"), 1),
+	}
+	if price.PriceID != 0 {
+		var out map[string]any
+		if err := ctx.PlatformAPI().CallAppResult("catalog", "catalog_prices_get", map[string]any{"_project_id": pid, "id": price.PriceID}, &out); err != nil {
+			return price, fmt.Errorf("get catalog price: %w", err)
+		}
+		pm := unwrapMap(out, "price")
+		price.ProductID = firstNonZero(int64Arg(pm, "product_id"), price.ProductID)
+		price.UnitAmountCents = firstNonZero(int64Arg(pm, "unit_amount_cents"), price.UnitAmountCents)
+		price.Currency = strings.ToUpper(firstNonEmpty(strArg(pm, "currency"), price.Currency))
+		price.Interval = firstNonEmpty(strArg(pm, "interval"), price.Interval)
+		price.IntervalCount = firstNonZero(int64Arg(pm, "interval_count"), price.IntervalCount)
+	}
+	if price.UnitAmountCents == 0 {
+		return price, errors.New("paid SaaS checkout requires catalog_price_id or unit_amount_cents")
+	}
+	if price.ProductID == 0 && price.PriceID != 0 {
+		return price, errors.New("catalog price response missing product_id")
+	}
+	return price, nil
+}
+
+func (a *App) createSubscription(ctx *sdk.AppCtx, pid string, customer *Customer, billingCustomerID int64, plan *Plan, price checkoutPrice, status, periodStart, periodEnd string, args map[string]any) (map[string]any, error) {
+	input := map[string]any{
+		"_project_id":          pid,
+		"customer_id":          billingCustomerID,
+		"customer_email":       customer.Email,
+		"customer_name":        customer.Name,
+		"kind":                 "saas",
+		"status":               status,
+		"billing_provider":     firstNonEmpty(strArg(args, "provider"), "local"),
+		"currency":             price.Currency,
+		"interval":             price.Interval,
+		"interval_count":       price.IntervalCount,
+		"current_period_start": periodStart,
+		"current_period_end":   periodEnd,
+		"next_renewal_at":      periodEnd,
+		"source":               "saas",
+		"source_ref":           plan.Key,
+		"metadata":             map[string]any{"saas_plan_key": plan.Key, "saas_customer_id": customer.ID},
+		"items": []any{map[string]any{
+			"catalog_product_id": price.ProductID,
+			"catalog_price_id":   price.PriceID,
+			"title":              price.Title,
+			"quantity":           1,
+			"unit_amount_cents":  price.UnitAmountCents,
+			"currency":           price.Currency,
+			"metadata":           map[string]any{"saas_plan_key": plan.Key},
+		}},
+	}
+	var out map[string]any
+	if err := ctx.PlatformAPI().CallAppResult("subscriptions", "subscriptions_create", input, &out); err != nil {
+		return nil, fmt.Errorf("create subscription: %w", err)
+	}
+	return out, nil
+}
+
+func (a *App) createSubscriptionInvoice(ctx *sdk.AppCtx, pid string, subID int64, periodStart, periodEnd string, args map[string]any) (map[string]any, error) {
+	input := map[string]any{
+		"_project_id":        pid,
+		"subscription_id":    subID,
+		"period_start":       periodStart,
+		"period_end":         periodEnd,
+		"include_flat":       true,
+		"include_metered":    true,
+		"finalize":           true,
+		"provider":           firstNonEmpty(strArg(args, "provider"), "local"),
+		"invoice_zero_usage": true,
+		"metadata":           map[string]any{"source": "saas_checkout"},
+	}
+	var out map[string]any
+	if err := ctx.PlatformAPI().CallAppResult("subscriptions", "subscriptions_invoice_create", input, &out); err != nil {
+		return nil, fmt.Errorf("create subscription invoice: %w", err)
+	}
+	return out, nil
+}
+
+func (a *App) createPaymentLink(ctx *sdk.AppCtx, pid string, invoiceID int64, args map[string]any) (map[string]any, error) {
+	input := map[string]any{"_project_id": pid, "invoice_id": invoiceID}
+	if v := strArg(args, "success_url"); v != "" {
+		input["success_url"] = v
+	}
+	if v := strArg(args, "cancel_url"); v != "" {
+		input["cancel_url"] = v
+	}
+	var out map[string]any
+	if err := ctx.PlatformAPI().CallAppResult("billing", "invoices_send_payment_link", input, &out); err != nil {
+		return nil, fmt.Errorf("create payment link: %w", err)
+	}
+	return out, nil
+}
+
+func (a *App) createPaymentSetupSession(ctx *sdk.AppCtx, pid string, billingCustomerID int64, args map[string]any) (map[string]any, error) {
+	input := map[string]any{"_project_id": pid, "customer_id": billingCustomerID, "set_default": true}
+	if v := strArg(args, "success_url"); v != "" {
+		input["success_url"] = v
+	}
+	if v := strArg(args, "cancel_url"); v != "" {
+		input["cancel_url"] = v
+	}
+	var out map[string]any
+	if err := ctx.PlatformAPI().CallAppResult("billing", "payment_method_setup_create", input, &out); err != nil {
+		return nil, fmt.Errorf("create payment setup session: %w", err)
+	}
+	return out, nil
+}
+
+func (a *App) recordCheckoutPayment(ctx *sdk.AppCtx, pid string, invoiceID int64, price checkoutPrice, args map[string]any) (map[string]any, error) {
+	amount := firstNonZero(int64Arg(args, "amount_cents"), price.UnitAmountCents)
+	input := map[string]any{
+		"_project_id":  pid,
+		"invoice_id":   invoiceID,
+		"amount_cents": amount,
+		"method":       firstNonEmpty(strArg(args, "manual_payment_method"), "wire"),
+		"notes":        firstNonEmpty(strArg(args, "payment_notes"), "SaaS checkout payment"),
+	}
+	var out map[string]any
+	if err := ctx.PlatformAPI().CallAppResult("billing", "payments_record", input, &out); err != nil {
+		return nil, fmt.Errorf("record payment: %w", err)
+	}
+	return out, nil
 }
 
 func (a *App) applyPlanAccess(ctx *sdk.AppCtx, pid string, acct *Account, plan *Plan) error {
@@ -1233,7 +1568,7 @@ func resolveCustomer(db *sql.DB, pid string, args map[string]any) (*Customer, er
 		return c, nil
 	}
 	email := firstNonEmpty(strArg(args, "customer_email"), strArg(args, "owner_email"))
-	body := map[string]any{"email": email, "name": strArg(args, "customer_name"), "auth_user_id": int64Arg(args, "auth_user_id")}
+	body := map[string]any{"email": email, "name": strArg(args, "customer_name"), "billing_customer_id": int64Arg(args, "billing_customer_id"), "auth_user_id": int64Arg(args, "auth_user_id")}
 	return dbCustomerUpsert(db, pid, body)
 }
 
@@ -1257,6 +1592,20 @@ func dbCustomerGet(db *sql.DB, pid string, id int64) (*Customer, error) {
 	}
 	c.Metadata = json.RawMessage(meta)
 	return &c, nil
+}
+
+func dbCustomerSetBillingID(db *sql.DB, pid string, customerID, billingID int64) error {
+	if billingID == 0 {
+		return nil
+	}
+	res, err := db.Exec(`UPDATE saas_customers SET billing_customer_id=?, updated_at=CURRENT_TIMESTAMP WHERE project_id=? AND id=?`, billingID, pid, customerID)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return errors.New("customer not found")
+	}
+	return nil
 }
 
 func dbAccountInsert(db *sql.DB, a *Account) error {
@@ -1799,6 +2148,55 @@ func unwrapMap(m map[string]any, key string) map[string]any {
 		return nil
 	}
 	return mapFromAny(m[key])
+}
+
+func copyMap(m map[string]any) map[string]any {
+	out := make(map[string]any, len(m))
+	for k, v := range m {
+		out[k] = v
+	}
+	return out
+}
+
+func mergeMetadata(raw any, extra map[string]any) map[string]any {
+	out := mapFromAny(raw)
+	if out == nil {
+		out = map[string]any{}
+	}
+	for k, v := range extra {
+		out[k] = v
+	}
+	return out
+}
+
+func int64FromResult(out map[string]any, objectKey, idKey string) int64 {
+	if nested := unwrapMap(out, objectKey); nested != nil {
+		if id := int64Arg(nested, idKey); id != 0 {
+			return id
+		}
+	}
+	return int64Arg(out, idKey)
+}
+
+func periodEndFrom(start, interval string, count int64) string {
+	if count <= 0 {
+		count = 1
+	}
+	t, err := time.Parse(time.RFC3339, start)
+	if err != nil {
+		t = time.Now().UTC()
+	}
+	switch strings.ToLower(strings.TrimSpace(interval)) {
+	case "day", "daily":
+		t = t.AddDate(0, 0, int(count))
+	case "week", "weekly":
+		t = t.AddDate(0, 0, int(7*count))
+	case "year", "yearly", "annual", "annually":
+		t = t.AddDate(int(count), 0, 0)
+	default:
+		t = t.AddDate(0, int(count), 0)
+	}
+	return t.UTC().Format(time.RFC3339)
 }
 
 var slugRe = regexp.MustCompile(`^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$`)

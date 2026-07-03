@@ -26,6 +26,21 @@ SaaS declares dynamic app calls so operators can meter whichever installed
 apps they configure in usage sources. Target apps are still ordinary apps;
 they do not need SaaS-specific hooks.
 
+## Checkout
+
+`saas_checkout_create` is the paid-sale entrypoint. For a paid plan it:
+
+- creates or links the Billing customer;
+- resolves the Catalog price;
+- creates the Subscription and first invoice;
+- either records a manual payment and activates the SaaS account, or
+  returns a payment/setup link and leaves the account `past_due`;
+- grants Entitlements during provisioning, while access checks only allow
+  `active` accounts.
+
+This keeps the sales flow inside SaaS without moving invoices, payments,
+subscriptions, auth, or product data out of their owner apps.
+
 ## Live Usage
 
 Plan usage sources point at app tools and tell SaaS where to read the

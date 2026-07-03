@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: saas
 display_name: SaaS
-version: 0.1.2
+version: 0.1.3
 description: |
   Shared SaaS access control for Apteva apps. SaaS packages installed
   apps into sellable plans, creates customer accounts backed by Auth
@@ -64,6 +64,8 @@ provides:
       description: Register an app/tool plus response extraction config for live usage.
     - name: saas_customer_create
       description: Find or create a SaaS customer by email.
+    - name: saas_checkout_create
+      description: Orchestrate a SaaS sale through Billing and Subscriptions, then provision or hold the SaaS account.
     - name: saas_account_create
       description: Create a SaaS account, Auth organization, Entitlement grants, and plan limits.
     - name: saas_account_get
