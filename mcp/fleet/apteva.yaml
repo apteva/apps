@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: fleet
 display_name: Fleet
-version: 0.8.9
+version: 0.8.10
 description: |
   Control plane for a fleet of client apteva instances. Spawns every
   tenant as a local apteva process on the parent host with admin-
@@ -84,6 +84,14 @@ provides:
       description: "Mint a short-lived super-admin URL on the tenant. Args: tenant_id, reason."
     - name: tenant_run_remote
       description: "Proxy an MCP tool call to a tenant's gateway using its api_key. Args: tenant_id, app, tool, input."
+    - name: tenant_inventory
+      description: "Read tenant-local platform inventory through the tenant API. Returns tenant metadata, Fleet grants, and best-effort tenant projects/apps/agents/connections/MCP servers. Args: tenant_id, project_id?, include_users?, include_catalog?."
+    - name: tenant_platform_call
+      description: "Generic allowlisted tenant platform operation. Resources: apps, agents, projects, users, integrations, connections, mcp_servers. Args: tenant_id, resource, action, arguments?. Destructive actions require confirm=true."
+    - name: tenant_app_tools
+      description: "List MCP tools exposed by an installed tenant app. Args: tenant_id, app?, install_id?, project_id?."
+    - name: tenant_app_call
+      description: "Call an MCP tool exposed by an installed tenant app. Args: tenant_id, app, tool, arguments?, input?, install_id?, project_id?."
     - name: tenant_attach_domain
       description: "Attach a public hostname to a tenant. Managed DNS writes the record through Domains; routing and exact-host certs are registered through server-native ingress. For manage_dns=false, Fleet assumes the client already pointed DNS at this machine and only registers ingress. Args: tenant_id, fqdn, manage_dns? (default true), target?, type?, ttl?."
     - name: tenant_detach_domain

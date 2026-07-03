@@ -17,7 +17,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: fleet
 display_name: Fleet
-version: 0.8.9
+version: 0.8.10
 description: Control plane for a local fleet of apteva tenants.
 author: Apteva
 scopes: [project, global]
@@ -73,6 +73,14 @@ provides:
       description: Mint a short-lived super-admin URL on the tenant.
     - name: tenant_run_remote
       description: Proxy an MCP tool call to a tenant.
+    - name: tenant_inventory
+      description: Read tenant-local platform inventory through the tenant API.
+    - name: tenant_platform_call
+      description: Generic allowlisted tenant platform operation.
+    - name: tenant_app_tools
+      description: List MCP tools exposed by an installed tenant app.
+    - name: tenant_app_call
+      description: Call an MCP tool exposed by an installed tenant app.
     - name: tenant_attach_domain
       description: Attach a public hostname to a tenant via Domains DNS and server-native ingress.
     - name: tenant_detach_domain
@@ -375,6 +383,69 @@ func (a *App) MCPTools() []sdk.Tool {
 				"required": []string{"tenant_id", "app", "tool"},
 			},
 			Handler: a.toolRunRemote,
+		},
+		{
+			Name:        "tenant_inventory",
+			Description: "Read tenant-local platform inventory through the tenant API. Returns tenant metadata, Fleet domain/provider grants, and best-effort tenant projects/apps/agents/connections/MCP servers. Args: tenant_id, project_id?, include_users?, include_catalog?.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"tenant_id":       map[string]any{"type": "string"},
+					"project_id":      map[string]any{"type": "string"},
+					"include_users":   map[string]any{"type": "boolean"},
+					"include_catalog": map[string]any{"type": "boolean"},
+				},
+				"required": []string{"tenant_id"},
+			},
+			Handler: a.toolTenantInventory,
+		},
+		{
+			Name:        "tenant_platform_call",
+			Description: "Generic allowlisted tenant platform operation. Resources: apps, agents, projects, users, integrations, connections, mcp_servers. Args: tenant_id, resource, action, arguments?. Destructive actions require confirm=true inside arguments.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"tenant_id": map[string]any{"type": "string"},
+					"resource":  map[string]any{"type": "string"},
+					"action":    map[string]any{"type": "string"},
+					"arguments": map[string]any{"type": "object"},
+				},
+				"required": []string{"tenant_id", "resource", "action"},
+			},
+			Handler: a.toolTenantPlatformCall,
+		},
+		{
+			Name:        "tenant_app_tools",
+			Description: "List MCP tools exposed by an installed tenant app. Use install_id to disambiguate multiple installs of the same app. Args: tenant_id, app?, install_id?, project_id?.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"tenant_id":  map[string]any{"type": "string"},
+					"app":        map[string]any{"type": "string"},
+					"install_id": map[string]any{"type": "integer"},
+					"project_id": map[string]any{"type": "string"},
+				},
+				"required": []string{"tenant_id"},
+			},
+			Handler: a.toolTenantAppTools,
+		},
+		{
+			Name:        "tenant_app_call",
+			Description: "Call an MCP tool exposed by an installed tenant app. Use install_id or project_id to disambiguate multiple installs. Args: tenant_id, app, tool, arguments?, input?, install_id?, project_id?.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"tenant_id":  map[string]any{"type": "string"},
+					"app":        map[string]any{"type": "string"},
+					"tool":       map[string]any{"type": "string"},
+					"arguments":  map[string]any{"type": "object"},
+					"input":      map[string]any{"type": "object"},
+					"install_id": map[string]any{"type": "integer"},
+					"project_id": map[string]any{"type": "string"},
+				},
+				"required": []string{"tenant_id", "app", "tool"},
+			},
+			Handler: a.toolTenantAppCall,
 		},
 		{
 			Name:        "tenant_attach_domain",
