@@ -145,11 +145,40 @@ interface BudgetStatus {
   currency: string;
 }
 
-type Tab = "overview" | "accounts" | "holdings";
+type Tab = "overview" | "accounts" | "holdings" | "banking";
 type CashTxnKind = "deposit" | "withdraw" | "income" | "expense" | "fee" | "tax";
 type InvestmentTxnKind = "buy" | "sell" | "dividend";
 type TxnKind = CashTxnKind | InvestmentTxnKind;
 type TradeInstrumentKind = "stock" | "etf";
+
+interface BankingConnection {
+  id: number;
+  provider: string;
+  app_slug: string;
+  name: string;
+  status: string;
+}
+
+interface BankingAccount {
+  external_id: string;
+  name: string;
+  currency: string;
+  kind: string;
+  institution?: string;
+  mask?: string;
+  balance_minor?: number;
+}
+
+interface BankingSyncStats {
+  provider: string;
+  connection_id: number;
+  accounts: number;
+  imported: number;
+  reconciled: number;
+  skipped: number;
+  dry_run: boolean;
+  errors?: string[];
+}
 
 const CASH_TXN_OPTIONS: Array<{ value: CashTxnKind; label: string }> = [
   { value: "deposit", label: "Deposit" },
@@ -468,7 +497,7 @@ export default function FinancePanel({ projectId }: NativePanelProps) {
         </div>
         <div className="flex items-center gap-2">
           <nav className="flex rounded-md border border-border overflow-hidden text-sm">
-            {(["overview", "accounts", "holdings"] as Tab[]).map(t => (
+            {(["overview", "accounts", "holdings", "banking"] as Tab[]).map(t => (
               <button
                 key={t}
                 onClick={() => setTab(t)}
@@ -516,6 +545,9 @@ export default function FinancePanel({ projectId }: NativePanelProps) {
         )}
         {tab === "holdings" && (
           <HoldingsTab holdings={holdings} accounts={accounts} />
+        )}
+        {tab === "banking" && (
+          <BankingTab accounts={accounts} onChanged={refresh} />
         )}
       </div>
 
@@ -804,6 +836,195 @@ function arcPath(cx: number, cy: number, r: number, start: number, end: number):
   const y1 = cy + r * Math.sin(a1);
   const large = end - start > 0.5 ? 1 : 0;
   return `M ${cx} ${cy} L ${x0} ${y0} A ${r} ${r} 0 ${large} 1 ${x1} ${y1} Z`;
+}
+
+// ─── Banking tab ─────────────────────────────────────────────────
+
+function BankingTab({ accounts, onChanged }: { accounts: Account[]; onChanged: () => void }) {
+  const [connections, setConnections] = useState<BankingConnection[]>([]);
+  const [selected, setSelected] = useState("");
+  const [accessToken, setAccessToken] = useState("");
+  const [providerConnectionID, setProviderConnectionID] = useState("");
+  const [bankAccounts, setBankAccounts] = useState<BankingAccount[]>([]);
+  const [syncResult, setSyncResult] = useState<BankingSyncStats | null>(null);
+  const [busy, setBusy] = useState("");
+  const [err, setErr] = useState("");
+
+  const linked = useMemo(
+    () => accounts.filter(a => a.source.startsWith("integration:") && a.kind === "cash"),
+    [accounts],
+  );
+
+  const loadConnections = useCallback(async () => {
+    setErr("");
+    const body = await api<{ connections: BankingConnection[] }>("/banking/connections");
+    const next = body.connections ?? [];
+    setConnections(next);
+    setSelected(prev => prev || (next[0] ? String(next[0].id) : ""));
+  }, []);
+
+  useEffect(() => { void loadConnections(); }, [loadConnections]);
+
+  const selectedConn = connections.find(c => String(c.id) === selected) ?? null;
+  const provider = selectedConn?.provider ?? "";
+
+  const providerArgs = () => ({
+    connection_id: selectedConn?.id,
+    provider,
+    ...(accessToken ? { access_token: accessToken } : {}),
+    ...(providerConnectionID ? { provider_connection_id: providerConnectionID } : {}),
+  });
+
+  const discover = async () => {
+    if (!selectedConn) return;
+    setBusy("discover"); setErr(""); setSyncResult(null);
+    try {
+      const body = await api<{ accounts: BankingAccount[] }>("/banking/discover", {
+        method: "POST",
+        body: JSON.stringify(providerArgs()),
+      });
+      setBankAccounts(body.accounts ?? []);
+    } catch (e: unknown) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const linkAccount = async (externalID: string) => {
+    setBusy(`link:${externalID}`); setErr("");
+    try {
+      await api("/banking/link", {
+        method: "POST",
+        body: JSON.stringify({ ...providerArgs(), external_account_id: externalID, create_account: true }),
+      });
+      await onChanged();
+    } catch (e: unknown) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy("");
+    }
+  };
+
+  const sync = async (dryRun = false) => {
+    setBusy(dryRun ? "dry" : "sync"); setErr("");
+    try {
+      const body = await api<BankingSyncStats>("/banking/sync", {
+        method: "POST",
+        body: JSON.stringify({ connection_id: selectedConn?.id, dry_run: dryRun }),
+      });
+      setSyncResult(body);
+      if (!dryRun) await onChanged();
+    } catch (e: unknown) {
+      setErr(e instanceof Error ? e.message : String(e));
+    } finally {
+      setBusy("");
+    }
+  };
+
+  return (
+    <div className="grid grid-cols-1 gap-4 lg:grid-cols-3">
+      <section className="rounded-lg border border-border bg-bg-card p-4">
+        <div className="mb-3 flex items-center justify-between">
+          <div>
+            <div className="text-xs uppercase tracking-wide text-text-muted">Connections</div>
+            <div className="text-sm text-text-muted">Plaid, Teller, Nordigen, TrueLayer, Salt Edge</div>
+          </div>
+          <button onClick={() => void loadConnections()} className="text-text-muted hover:text-text">
+            <Icon name="arrow-up-right" size={16} />
+          </button>
+        </div>
+        {connections.length === 0 ? (
+          <EmptyState message="No open-banking connections bound to this project yet." />
+        ) : (
+          <Field label="Connection">
+            <select value={selected} onChange={e => setSelected(e.target.value)} className="input">
+              {connections.map(c => (
+                <option key={c.id} value={c.id}>{c.name || c.provider} - {c.provider} #{c.id}</option>
+              ))}
+            </select>
+          </Field>
+        )}
+        {provider === "plaid" && (
+          <Field label="Plaid access token">
+            <input value={accessToken} onChange={e => setAccessToken(e.target.value)} className="input" placeholder="access-..." />
+          </Field>
+        )}
+        {provider === "saltedge" && (
+          <Field label="Salt Edge connection id">
+            <input value={providerConnectionID} onChange={e => setProviderConnectionID(e.target.value)} className="input" placeholder="connection id" />
+          </Field>
+        )}
+        <div className="mt-3 flex gap-2">
+          <button onClick={discover} disabled={!selectedConn || busy === "discover"} className="btn-primary">
+            {busy === "discover" ? "Discovering..." : "Discover"}
+          </button>
+          <button onClick={() => void sync(false)} disabled={busy === "sync" || linked.length === 0} className="btn-secondary">
+            {busy === "sync" ? "Syncing..." : "Sync linked"}
+          </button>
+        </div>
+      </section>
+
+      <section className="rounded-lg border border-border bg-bg-card lg:col-span-2">
+        <header className="flex items-center justify-between border-b border-border-subtle px-4 py-2">
+          <div className="text-xs uppercase tracking-wide text-text-muted">Discovered accounts</div>
+          <button onClick={() => void sync(true)} disabled={busy === "dry" || linked.length === 0} className="text-xs text-text-muted hover:text-text">
+            Dry run sync
+          </button>
+        </header>
+        {err && <div className="m-4 rounded-md border border-error/30 bg-error/10 px-3 py-2 text-sm text-error">{err}</div>}
+        {bankAccounts.length === 0 ? (
+          <EmptyState message="Choose a connection and discover accounts." />
+        ) : (
+          <ul className="divide-y divide-border-subtle">
+            {bankAccounts.map(a => {
+              const existing = linked.find(x => x.external_id === a.external_id);
+              return (
+                <li key={a.external_id} className="flex items-center justify-between px-4 py-3">
+                  <div className="min-w-0">
+                    <div className="truncate text-sm font-medium">{a.name}</div>
+                    <div className="text-xs text-text-muted">
+                      {[a.institution, a.mask, a.currency].filter(Boolean).join(" - ")}
+                    </div>
+                  </div>
+                  <div className="flex items-center gap-3">
+                    {a.balance_minor != null && <span className="text-sm tabular-nums">{fmtMoney(a.balance_minor, a.currency || "EUR")}</span>}
+                    {existing ? (
+                      <span className="text-xs text-success">Linked</span>
+                    ) : (
+                      <button
+                        onClick={() => void linkAccount(a.external_id)}
+                        disabled={busy === `link:${a.external_id}`}
+                        className="btn-secondary"
+                      >
+                        {busy === `link:${a.external_id}` ? "Linking..." : "Link"}
+                      </button>
+                    )}
+                  </div>
+                </li>
+              );
+            })}
+          </ul>
+        )}
+        {syncResult && (
+          <div className="border-t border-border-subtle px-4 py-3 text-sm text-text-muted">
+            Synced {syncResult.accounts} accounts: imported {syncResult.imported}, reconciled {syncResult.reconciled}, skipped {syncResult.skipped}.
+            {syncResult.errors?.length ? <span className="ml-2 text-error">{syncResult.errors.join("; ")}</span> : null}
+          </div>
+        )}
+      </section>
+      <style>{`
+        .input { width: 100%; padding: 0.5rem 0.75rem; border-radius: 0.375rem; border: 1px solid var(--border); background: var(--bg-input); color: var(--text); }
+        .input:focus { outline: 2px solid var(--accent); outline-offset: -1px; }
+        .btn-primary { padding: 0.5rem 1rem; border-radius: 0.375rem; background: var(--accent); color: var(--bg); font-size: 0.875rem; }
+        .btn-primary:disabled { opacity: 0.5; }
+        .btn-primary:hover:not(:disabled) { background: var(--accent-hover); }
+        .btn-secondary { padding: 0.5rem 1rem; border-radius: 0.375rem; background: transparent; color: var(--text); font-size: 0.875rem; border: 1px solid var(--border); }
+        .btn-secondary:disabled { opacity: 0.5; }
+        .btn-secondary:hover:not(:disabled) { background: var(--bg-hover); }
+      `}</style>
+    </div>
+  );
 }
 
 // ─── Accounts tab ────────────────────────────────────────────────
