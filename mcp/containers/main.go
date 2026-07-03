@@ -99,8 +99,8 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "containers_start", Description: "Start a stopped workload.", InputSchema: idSchema(), Handler: a.toolStart},
 		{Name: "containers_stop", Description: "Stop a running workload.", InputSchema: idSchema(), Handler: a.toolStop},
 		{Name: "containers_restart", Description: "Restart a workload.", InputSchema: idSchema(), Handler: a.toolRestart},
-		{Name: "containers_destroy", Description: "Destroy a workload.", InputSchema: schemaObject(map[string]any{"workload_id": map[string]any{"type": "string"}, "delete_volumes": map[string]any{"type": "boolean"}}, []string{"workload_id"}), Handler: a.toolDestroy},
-		{Name: "containers_logs", Description: "Tail workload logs.", InputSchema: schemaObject(map[string]any{"workload_id": map[string]any{"type": "string"}, "tail": map[string]any{"type": "integer"}}, []string{"workload_id"}), Handler: a.toolLogs},
+		{Name: "containers_destroy", Description: "Destroy a workload.", InputSchema: workloadIDSchema(map[string]any{"delete_volumes": map[string]any{"type": "boolean"}}), Handler: a.toolDestroy},
+		{Name: "containers_logs", Description: "Tail workload logs.", InputSchema: workloadIDSchema(map[string]any{"tail": map[string]any{"type": "integer"}}), Handler: a.toolLogs},
 		{Name: "containers_health", Description: "Probe workload health.", InputSchema: idSchema(), Handler: a.toolHealth},
 		{Name: "containers_usage_get", Description: "Measure generic workload usage metrics such as container volume storage bytes.", InputSchema: idSchema(), Handler: a.toolUsageGet},
 		{Name: "containers_blueprints_list", Description: "List blueprints.", InputSchema: schemaObject(nil, nil), Handler: a.toolBlueprints},
@@ -611,7 +611,7 @@ func (a *App) toolRun(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 }
 
 func (a *App) toolGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	w, err := requireWorkload(ctx.AppDB(), getStr(args, "workload_id"))
+	w, err := requireWorkload(ctx.AppDB(), workloadIDArg(args))
 	if err != nil {
 		return nil, err
 	}
@@ -629,7 +629,7 @@ func (a *App) toolList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 func (a *App) toolStart(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	cctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	w, err := a.startWorkload(cctx, ctx, ctx.AppDB(), getStr(args, "workload_id"))
+	w, err := a.startWorkload(cctx, ctx, ctx.AppDB(), workloadIDArg(args))
 	if err != nil {
 		return nil, err
 	}
@@ -639,7 +639,7 @@ func (a *App) toolStart(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 func (a *App) toolStop(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	cctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	w, err := a.stopWorkload(cctx, ctx, ctx.AppDB(), getStr(args, "workload_id"))
+	w, err := a.stopWorkload(cctx, ctx, ctx.AppDB(), workloadIDArg(args))
 	if err != nil {
 		return nil, err
 	}
@@ -649,7 +649,7 @@ func (a *App) toolStop(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 func (a *App) toolRestart(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	cctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
-	w, err := a.restartWorkload(cctx, ctx, ctx.AppDB(), getStr(args, "workload_id"))
+	w, err := a.restartWorkload(cctx, ctx, ctx.AppDB(), workloadIDArg(args))
 	if err != nil {
 		return nil, err
 	}
@@ -659,7 +659,7 @@ func (a *App) toolRestart(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 func (a *App) toolDestroy(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	cctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
 	defer cancel()
-	id := getStr(args, "workload_id")
+	id := workloadIDArg(args)
 	if err := a.destroyWorkload(cctx, ctx, ctx.AppDB(), id, boolArg(args, "delete_volumes")); err != nil {
 		return nil, err
 	}
@@ -667,7 +667,7 @@ func (a *App) toolDestroy(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 }
 
 func (a *App) toolLogs(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	w, err := requireWorkload(ctx.AppDB(), getStr(args, "workload_id"))
+	w, err := requireWorkload(ctx.AppDB(), workloadIDArg(args))
 	if err != nil {
 		return nil, err
 	}
@@ -687,7 +687,7 @@ func (a *App) toolLogs(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 func (a *App) toolHealth(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	cctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	id := getStr(args, "workload_id")
+	id := workloadIDArg(args)
 	if err := a.probeWorkload(cctx, ctx, ctx.AppDB(), id); err != nil {
 		return nil, err
 	}
@@ -698,7 +698,7 @@ func (a *App) toolHealth(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 func (a *App) toolUsageGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	cctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
-	usage, err := a.workloadUsage(cctx, ctx, ctx.AppDB(), getStr(args, "workload_id"))
+	usage, err := a.workloadUsage(cctx, ctx, ctx.AppDB(), workloadIDArg(args))
 	if err != nil {
 		return nil, err
 	}
@@ -894,7 +894,25 @@ func schemaObject(props map[string]any, required []string) map[string]any {
 }
 
 func idSchema() map[string]any {
-	return schemaObject(map[string]any{"workload_id": map[string]any{"type": "string"}}, []string{"workload_id"})
+	return workloadIDSchema(nil)
+}
+
+func workloadIDSchema(extra map[string]any) map[string]any {
+	props := map[string]any{
+		"workload_id": map[string]any{"type": "string"},
+		"id":          map[string]any{"type": "string"},
+	}
+	for k, v := range extra {
+		props[k] = v
+	}
+	return schemaObject(props, nil)
+}
+
+func workloadIDArg(args map[string]any) string {
+	if id := getStr(args, "workload_id"); id != "" {
+		return id
+	}
+	return getStr(args, "id")
 }
 
 func runSchema() map[string]any {

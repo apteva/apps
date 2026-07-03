@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: containers
 display_name: Containers
-version: 0.1.20
+version: 0.1.21
 description: |
   Generic Docker workload runtime for Apteva. Runs container images on
   the local host or remote Instances hosts, bootstraps Docker when
@@ -64,23 +64,23 @@ provides:
     - name: containers_create
       description: Alias of containers_run.
     - name: containers_get
-      description: "Fetch one managed workload. Args: workload_id."
+      description: "Fetch one managed workload. Args: workload_id or id."
     - name: containers_list
       description: "List managed workloads. Args: status? optional."
     - name: containers_start
-      description: "Start a stopped workload container. Args: workload_id."
+      description: "Start a stopped workload container. Args: workload_id or id."
     - name: containers_stop
-      description: "Stop a running workload container. Args: workload_id."
+      description: "Stop a running workload container. Args: workload_id or id."
     - name: containers_restart
-      description: "Restart a workload container. Args: workload_id."
+      description: "Restart a workload container. Args: workload_id or id."
     - name: containers_destroy
-      description: "Stop and remove a workload container and network. Volumes are preserved unless delete_volumes=true. Args: workload_id, delete_volumes?."
+      description: "Stop and remove a workload container and network. Volumes are preserved unless delete_volumes=true. Args: workload_id or id, delete_volumes?."
     - name: containers_logs
-      description: "Tail workload logs. Args: workload_id, tail?."
+      description: "Tail workload logs. Args: workload_id or id, tail?."
     - name: containers_health
-      description: "Probe a workload health URL and update health_status. Args: workload_id."
+      description: "Probe a workload health URL and update health_status. Args: workload_id or id."
     - name: containers_usage_get
-      description: "Measure generic workload usage metrics such as storage bytes for attached volumes. Args: workload_id."
+      description: "Measure generic workload usage metrics such as storage bytes for attached volumes. Args: workload_id or id."
     - name: containers_blueprints_list
       description: List built-in and custom container blueprints.
   ui_panels:

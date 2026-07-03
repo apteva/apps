@@ -142,6 +142,48 @@ func TestNormalizeRunSpecRejectsUnsafeInputs(t *testing.T) {
 	}
 }
 
+func TestWorkloadIDArgAcceptsIDAlias(t *testing.T) {
+	if got := workloadIDArg(map[string]any{"id": "wrk_alias"}); got != "wrk_alias" {
+		t.Fatalf("alias id resolved to %q", got)
+	}
+	if got := workloadIDArg(map[string]any{"id": "wrk_alias", "workload_id": "wrk_canonical"}); got != "wrk_canonical" {
+		t.Fatalf("workload_id should take precedence, got %q", got)
+	}
+}
+
+func TestWorkloadToolSchemasExposeIDAlias(t *testing.T) {
+	tools := (&App{}).MCPTools()
+	want := map[string]bool{
+		"containers_get":       true,
+		"containers_start":     true,
+		"containers_stop":      true,
+		"containers_restart":   true,
+		"containers_destroy":   true,
+		"containers_logs":      true,
+		"containers_health":    true,
+		"containers_usage_get": true,
+	}
+	for _, tool := range tools {
+		if !want[tool.Name] {
+			continue
+		}
+		props, ok := tool.InputSchema["properties"].(map[string]any)
+		if !ok {
+			t.Fatalf("%s properties missing from schema: %+v", tool.Name, tool.InputSchema)
+		}
+		if _, ok := props["workload_id"]; !ok {
+			t.Fatalf("%s schema missing workload_id: %+v", tool.Name, props)
+		}
+		if _, ok := props["id"]; !ok {
+			t.Fatalf("%s schema missing id alias: %+v", tool.Name, props)
+		}
+		delete(want, tool.Name)
+	}
+	if len(want) > 0 {
+		t.Fatalf("missing tools: %+v", want)
+	}
+}
+
 func TestListWorkloadsHidesDestroyedByDefault(t *testing.T) {
 	db := testDB(t)
 	running := &Workload{
