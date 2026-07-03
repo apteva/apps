@@ -54,6 +54,14 @@ func (p *platformStub) CallAppResult(appName, tool string, input map[string]any,
 		body = map[string]any{"url": "https://pay.example/session", "stripe_session_id": "cs_test_123", "expires_at": 123}
 	case "payment_method_setup_create":
 		body = map[string]any{"setup_session": map[string]any{"id": 1001, "customer_id": input["customer_id"], "status": "pending", "url": "https://pay.example/setup"}, "url": "https://pay.example/setup"}
+	case "containers_create":
+		body = map[string]any{"workload": map[string]any{"id": "wrk_123", "name": input["name"], "image": input["image"], "status": "running"}}
+	case "containers_stop":
+		body = map[string]any{"workload": map[string]any{"id": input["workload_id"], "status": "stopped"}}
+	case "containers_start":
+		body = map[string]any{"workload": map[string]any{"id": input["workload_id"], "status": "running"}}
+	case "containers_destroy":
+		body = map[string]any{"workload": map[string]any{"id": input["workload_id"], "status": "deleted"}}
 	case "crm_saas_usage_snapshot":
 		body = map[string]any{"usage": []map[string]any{{"feature_key": "crm:contacts", "quantity": p.contacts}}}
 	case "contacts_search":
@@ -99,8 +107,8 @@ func TestEmbeddedManifest_Valid(t *testing.T) {
 	if m.Name != "saas" {
 		t.Errorf("manifest.Name=%q, want saas", m.Name)
 	}
-	if m.Version != "0.1.3" {
-		t.Errorf("manifest.Version=%q, want 0.1.3", m.Version)
+	if m.Version != "0.1.4" {
+		t.Errorf("manifest.Version=%q, want 0.1.4", m.Version)
 	}
 	if !m.Requires.DynamicAppCalls {
 		t.Error("manifest should allow dynamic app calls for configured usage sources")
@@ -242,6 +250,21 @@ func TestCheckoutCreate_ManualPaymentActivatesAccountAndStoresBillingRefs(t *tes
 	defer db.Close()
 	app := &App{}
 	setupPaidCRMPlan(t, app, ctx)
+	if _, err := app.toolPlanActionAdd(ctx, map[string]any{
+		"plan_key":     "crm-pro",
+		"event":        "account_active",
+		"app_name":     "containers",
+		"tool_name":    "containers_create",
+		"failure_mode": "fail_account",
+		"args": map[string]any{
+			"name":  "saas-{{account.slug}}",
+			"image": "example/crm:latest",
+			"env":   map[string]any{"SAAS_ACCOUNT_ID": "{{account.id}}", "CUSTOMER_ID": "{{customer.id}}"},
+		},
+		"store": map[string]any{"metadata.workload_id": "workload.id"},
+	}); err != nil {
+		t.Fatal(err)
+	}
 
 	out, err := app.toolCheckoutCreate(ctx, map[string]any{
 		"owner_email":           "buyer@example.com",
@@ -279,10 +302,26 @@ func TestCheckoutCreate_ManualPaymentActivatesAccountAndStoresBillingRefs(t *tes
 		"auth:auth_orgs_create",
 		"entitlements:entitlement_grants_create",
 		"entitlements:entitlement_limits_set",
+		"containers:containers_create",
 	} {
 		if !hasCall(pf.calls, key) {
 			t.Fatalf("missing call %s; calls=%+v", key, pf.calls)
 		}
+	}
+	container := findCall(pf.calls, "containers", "containers_create")
+	if container.Input["name"] != "saas-buyer" || container.Input["image"] != "example/crm:latest" {
+		t.Fatalf("container args not expanded: %+v", container.Input)
+	}
+	env := mapFromAny(container.Input["env"])
+	if env["SAAS_ACCOUNT_ID"] != acct.ID || int64FromAny(env["CUSTOMER_ID"]) != acct.CustomerID {
+		t.Fatalf("container env not expanded: %+v", env)
+	}
+	gotAcct, err := dbAccountGet(db, "proj-test", acct.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strArg(mapFromAny(gotAcct.Metadata), "workload_id") != "wrk_123" {
+		t.Fatalf("workload_id not stored in account metadata: %s", gotAcct.Metadata)
 	}
 	payment := findCall(pf.calls, "billing", "payments_record")
 	if payment == nil {
@@ -299,6 +338,16 @@ func TestCheckoutCreate_PaymentLinkLeavesAccountPastDueAndAccessDenied(t *testin
 	defer db.Close()
 	app := &App{}
 	setupPaidCRMPlan(t, app, ctx)
+	if _, err := app.toolPlanActionAdd(ctx, map[string]any{
+		"plan_key":  "crm-pro",
+		"event":     "account_active",
+		"app_name":  "containers",
+		"tool_name": "containers_create",
+		"args":      map[string]any{"name": "saas-{{account.slug}}", "image": "example/crm:latest"},
+		"store":     map[string]any{"metadata.workload_id": "workload.id"},
+	}); err != nil {
+		t.Fatal(err)
+	}
 
 	out, err := app.toolCheckoutCreate(ctx, map[string]any{
 		"owner_email":   "buyer@example.com",
@@ -322,12 +371,65 @@ func TestCheckoutCreate_PaymentLinkLeavesAccountPastDueAndAccessDenied(t *testin
 	if hasCall(pf.calls, "billing:payments_record") {
 		t.Fatalf("payments_record should not run for payment_link; calls=%+v", pf.calls)
 	}
+	if hasCall(pf.calls, "containers:containers_create") {
+		t.Fatalf("containers_create should not run before payment; calls=%+v", pf.calls)
+	}
 	access, err := app.toolAccessCheck(ctx, map[string]any{"account_id": acct.ID, "feature_key": "crm:contacts"})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if access.(map[string]any)["allowed"].(bool) {
 		t.Fatalf("unpaid past_due checkout should not allow access: %+v", access)
+	}
+}
+
+func TestFulfillmentLifecycleActionsUseStoredMetadata(t *testing.T) {
+	pf := &platformStub{}
+	ctx, db := newTestCtx(t, pf)
+	defer db.Close()
+	app := &App{}
+
+	if _, err := app.toolPlanUpsert(ctx, map[string]any{"key": "container-pro", "name": "Container Pro"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.toolPlanActionAdd(ctx, map[string]any{
+		"plan_key":  "container-pro",
+		"event":     "account_active",
+		"app_name":  "containers",
+		"tool_name": "containers_create",
+		"args":      map[string]any{"name": "saas-{{account.slug}}", "image": "nginx:alpine"},
+		"store":     map[string]any{"metadata.workload_id": "workload.id"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.toolPlanActionAdd(ctx, map[string]any{
+		"plan_key":  "container-pro",
+		"event":     "account_past_due",
+		"app_name":  "containers",
+		"tool_name": "containers_stop",
+		"args":      map[string]any{"workload_id": "{{account.metadata.workload_id}}"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	created, err := app.toolAccountCreate(ctx, map[string]any{"owner_email": "owner@example.com", "slug": "container-acme", "plan_key": "container-pro", "subscription_id": 99})
+	if err != nil {
+		t.Fatal(err)
+	}
+	acct := created.(map[string]any)["account"].(*Account)
+	stored, err := dbAccountGet(db, "proj-test", acct.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strArg(mapFromAny(stored.Metadata), "workload_id") != "wrk_123" {
+		t.Fatalf("active fulfillment did not store workload id: %s", stored.Metadata)
+	}
+	if _, err := app.toolSubscriptionSync(ctx, map[string]any{"subscription_id": 99, "subscription_status": "past_due"}); err != nil {
+		t.Fatal(err)
+	}
+	stop := findCall(pf.calls, "containers", "containers_stop")
+	if stop == nil || stop.Input["workload_id"] != "wrk_123" {
+		t.Fatalf("past_due fulfillment did not use stored workload id: %+v calls=%+v", stop, pf.calls)
 	}
 }
 

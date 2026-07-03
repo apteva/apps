@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: saas
 display_name: SaaS
-version: 0.1.3
+version: 0.1.4
 description: |
   Shared SaaS access control for Apteva apps. SaaS packages installed
   apps into sellable plans, creates customer accounts backed by Auth
@@ -62,8 +62,14 @@ provides:
       description: Set a live usage limit for a SaaS plan.
     - name: saas_plan_usage_source_add
       description: Register an app/tool plus response extraction config for live usage.
+    - name: saas_plan_action_add
+      description: Register a generic fulfillment action that calls another app/tool on a SaaS lifecycle event.
+    - name: saas_plan_action_list
+      description: List generic fulfillment actions for a plan.
     - name: saas_customer_create
       description: Find or create a SaaS customer by email.
+    - name: saas_fulfillment_run
+      description: Run or retry configured fulfillment actions for a SaaS account lifecycle event.
     - name: saas_checkout_create
       description: Orchestrate a SaaS sale through Billing and Subscriptions, then provision or hold the SaaS account.
     - name: saas_account_create

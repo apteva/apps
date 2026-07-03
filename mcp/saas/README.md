@@ -41,6 +41,48 @@ they do not need SaaS-specific hooks.
 This keeps the sales flow inside SaaS without moving invoices, payments,
 subscriptions, auth, or product data out of their owner apps.
 
+## Fulfillment Actions
+
+Plans can define generic lifecycle actions. SaaS calls the configured
+app/tool, expands `{{...}}` templates from the account/customer/plan
+context, and stores selected output fields in account metadata.
+
+```json
+{
+  "plan_key": "container-pro",
+  "event": "account_active",
+  "app_name": "containers",
+  "tool_name": "containers_create",
+  "args": {
+    "name": "saas-{{account.slug}}",
+    "image": "nginx:alpine",
+    "env": {
+      "SAAS_ACCOUNT_ID": "{{account.id}}"
+    }
+  },
+  "store": {
+    "metadata.workload_id": "workload.id"
+  }
+}
+```
+
+Later lifecycle actions can use stored metadata:
+
+```json
+{
+  "plan_key": "container-pro",
+  "event": "account_past_due",
+  "app_name": "containers",
+  "tool_name": "containers_stop",
+  "args": {
+    "workload_id": "{{account.metadata.workload_id}}"
+  }
+}
+```
+
+Supported lifecycle events are `account_active`, `account_past_due`,
+`account_suspended`, `account_resumed`, and `account_cancelled`.
+
 ## Live Usage
 
 Plan usage sources point at app tools and tell SaaS where to read the

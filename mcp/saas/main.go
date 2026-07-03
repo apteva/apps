@@ -56,7 +56,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 			return err
 		}
 	}
-	ctx.Logger().Info("saas mounted", "version", "0.1.3", "scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
+	ctx.Logger().Info("saas mounted", "version", "0.1.4", "scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
 	return nil
 }
 
@@ -111,6 +111,11 @@ func (a *App) MCPTools() []sdk.Tool {
 			"plan_key": strSchema(), "app_name": strSchema(), "tool_name": strSchema(), "feature_prefix": strSchema(), "feature_key": strSchema(),
 			"read_path": strSchema(), "quantity_path": strSchema(), "call_args": objSchema(), "metadata": objSchema(),
 		}, []string{"plan_key", "app_name", "tool_name"}), Handler: a.toolPlanUsageSourceAdd},
+		{Name: "saas_plan_action_add", Description: "Register a generic fulfillment action for a SaaS plan lifecycle event.", InputSchema: schemaObject(map[string]any{
+			"plan_key": strSchema(), "event": strSchema(), "app_name": strSchema(), "tool_name": strSchema(),
+			"args": objSchema(), "store": objSchema(), "failure_mode": strSchema(), "enabled": boolSchema(), "metadata": objSchema(),
+		}, []string{"plan_key", "event", "app_name", "tool_name"}), Handler: a.toolPlanActionAdd},
+		{Name: "saas_plan_action_list", Description: "List generic fulfillment actions for a SaaS plan.", InputSchema: schemaObject(map[string]any{"plan_key": strSchema(), "event": strSchema()}, []string{"plan_key"}), Handler: a.toolPlanActionList},
 		{Name: "saas_customer_create", Description: "Find or create a SaaS customer by email.", InputSchema: schemaObject(map[string]any{"email": strSchema(), "name": strSchema(), "billing_customer_id": intSchema(), "auth_user_id": intSchema(), "metadata": objSchema()}, []string{"email"}), Handler: a.toolCustomerCreate},
 		{Name: "saas_checkout_create", Description: "Create a paid SaaS checkout: Billing customer, Subscription, invoice/payment link or manual payment, then SaaS account.", InputSchema: schemaObject(map[string]any{
 			"owner_email": strSchema(), "customer_id": intSchema(), "customer_email": strSchema(), "customer_name": strSchema(), "slug": strSchema(), "plan_key": strSchema(),
@@ -118,6 +123,7 @@ func (a *App) MCPTools() []sdk.Tool {
 			"payment_mode": strSchema(), "record_payment": boolSchema(), "manual_payment_method": strSchema(), "activate_without_payment": boolSchema(),
 			"success_url": strSchema(), "cancel_url": strSchema(), "period_start": strSchema(), "period_end": strSchema(), "provider": strSchema(), "metadata": objSchema(),
 		}, []string{"owner_email", "slug"}), Handler: a.toolCheckoutCreate},
+		{Name: "saas_fulfillment_run", Description: "Run or retry configured fulfillment actions for a SaaS account lifecycle event.", InputSchema: schemaObject(map[string]any{"account_id": strSchema(), "event": strSchema()}, []string{"account_id", "event"}), Handler: a.toolFulfillmentRun},
 		{Name: "saas_account_create", Description: "Create a SaaS account and apply plan access.", InputSchema: schemaObject(map[string]any{
 			"customer_id": intSchema(), "customer_email": strSchema(), "customer_name": strSchema(), "owner_email": strSchema(), "slug": strSchema(), "plan_key": strSchema(),
 			"billing_customer_id": intSchema(), "auth_org_id": intSchema(), "auth_user_id": intSchema(), "subscription_id": intSchema(), "create_owner_user": boolSchema(), "send_password_reset": boolSchema(), "metadata": objSchema(),
@@ -161,6 +167,7 @@ type Plan struct {
 	Features             []PlanFeature   `json:"features,omitempty"`
 	Limits               []PlanLimit     `json:"limits,omitempty"`
 	UsageSources         []UsageSource   `json:"usage_sources,omitempty"`
+	Actions              []PlanAction    `json:"actions,omitempty"`
 	CreatedAt            string          `json:"created_at"`
 	UpdatedAt            string          `json:"updated_at"`
 }
@@ -198,6 +205,38 @@ type UsageSource struct {
 	Metadata      json.RawMessage `json:"metadata,omitempty"`
 	CreatedAt     string          `json:"created_at"`
 	UpdatedAt     string          `json:"updated_at"`
+}
+
+type PlanAction struct {
+	ID          int64           `json:"id"`
+	ProjectID   string          `json:"project_id"`
+	PlanKey     string          `json:"plan_key"`
+	Event       string          `json:"event"`
+	AppName     string          `json:"app_name"`
+	ToolName    string          `json:"tool_name"`
+	Args        json.RawMessage `json:"args,omitempty"`
+	Store       json.RawMessage `json:"store,omitempty"`
+	FailureMode string          `json:"failure_mode"`
+	Enabled     bool            `json:"enabled"`
+	Metadata    json.RawMessage `json:"metadata,omitempty"`
+	CreatedAt   string          `json:"created_at"`
+	UpdatedAt   string          `json:"updated_at"`
+}
+
+type FulfillmentRun struct {
+	ID           int64           `json:"id"`
+	ProjectID    string          `json:"project_id"`
+	AccountID    string          `json:"account_id"`
+	PlanActionID int64           `json:"plan_action_id"`
+	Event        string          `json:"event"`
+	AppName      string          `json:"app_name"`
+	ToolName     string          `json:"tool_name"`
+	Status       string          `json:"status"`
+	Input        json.RawMessage `json:"input,omitempty"`
+	Output       json.RawMessage `json:"output,omitempty"`
+	Error        string          `json:"error,omitempty"`
+	CreatedAt    string          `json:"created_at"`
+	UpdatedAt    string          `json:"updated_at"`
 }
 
 type Account struct {
@@ -381,10 +420,18 @@ func expandUsageString(s, pid string, acct *Account) any {
 	if v, ok := values[s]; ok {
 		return v
 	}
+	ctx := fulfillmentTemplateContext(pid, acct, nil, nil)
+	if strings.HasPrefix(s, "{{") && strings.HasSuffix(s, "}}") {
+		path := strings.TrimSpace(strings.TrimSuffix(strings.TrimPrefix(s, "{{"), "}}"))
+		if v, ok := valueAtPath(ctx, path); ok {
+			return v
+		}
+	}
 	out := s
 	for token, value := range values {
 		out = strings.ReplaceAll(out, token, fmt.Sprint(value))
 	}
+	out = expandTemplateString(out, ctx).(string)
 	return out
 }
 
@@ -463,6 +510,34 @@ func (a *App) toolPlanUsageSourceAdd(ctx *sdk.AppCtx, args map[string]any) (any,
 	return map[string]any{"usage_source": s}, nil
 }
 
+func (a *App) toolPlanActionAdd(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := requireProject(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	action, err := dbPlanActionInsert(ctx.AppDB(), pid, args)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"action": action}, nil
+}
+
+func (a *App) toolPlanActionList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := requireProject(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	planKey, err := normalizeKey(strArg(args, "plan_key"))
+	if err != nil {
+		return nil, err
+	}
+	actions, err := dbPlanActions(ctx.AppDB(), pid, planKey, normalizeFulfillmentEvent(strArg(args, "event")), false)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"actions": actions, "count": len(actions)}, nil
+}
+
 func (a *App) toolCustomerCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	pid, err := requireProject(ctx, args)
 	if err != nil {
@@ -481,6 +556,23 @@ func (a *App) toolCheckoutCreate(ctx *sdk.AppCtx, args map[string]any) (any, err
 		return nil, err
 	}
 	return out, nil
+}
+
+func (a *App) toolFulfillmentRun(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := requireProject(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	acct, err := dbAccountGet(ctx.AppDB(), pid, strArg(args, "account_id"))
+	if err != nil || acct == nil {
+		return nil, firstErr(err, errors.New("account not found"))
+	}
+	runs, err := a.runFulfillment(ctx, pid, acct, normalizeFulfillmentEvent(strArg(args, "event")))
+	if err != nil {
+		return nil, err
+	}
+	acct, _ = dbAccountGet(ctx.AppDB(), pid, acct.ID)
+	return map[string]any{"account": acct, "runs": runs, "count": len(runs)}, nil
 }
 
 func (a *App) toolAccountCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -788,6 +880,14 @@ func (a *App) createAccount(ctx *sdk.AppCtx, args map[string]any) (*Account, err
 		return nil, err
 	}
 	_ = recordEvent(ctx.AppDB(), pid, acct.ID, "provisioning.active", actor(args), nil)
+	if !boolArg(args, "skip_fulfillment") {
+		if _, err := a.runFulfillment(ctx, pid, acct, "account_active"); err != nil {
+			_, _ = dbAccountSetStatus(ctx.AppDB(), pid, acct.ID, StatusFailed, err.Error())
+			_ = recordEvent(ctx.AppDB(), pid, acct.ID, "fulfillment.failed", "fulfillment", map[string]any{"event": "account_active", "error": err.Error()})
+			return nil, err
+		}
+		acct, _ = dbAccountGet(ctx.AppDB(), pid, acct.ID)
+	}
 	_, _ = a.toolUsageSync(ctx, map[string]any{"_project_id": pid, "account_id": acct.ID})
 	return dbAccountGet(ctx.AppDB(), pid, acct.ID)
 }
@@ -902,6 +1002,7 @@ func (a *App) createCheckout(ctx *sdk.AppCtx, args map[string]any) (map[string]a
 	}
 
 	accountArgs := copyMap(args)
+	accountArgs["skip_fulfillment"] = true
 	accountArgs["customer_id"] = customer.ID
 	accountArgs["billing_customer_id"] = billingCustomerID
 	accountArgs["subscription_id"] = subID
@@ -921,6 +1022,12 @@ func (a *App) createCheckout(ctx *sdk.AppCtx, args map[string]any) (map[string]a
 			return nil, err
 		}
 		_ = recordEvent(ctx.AppDB(), pid, acct.ID, "checkout.awaiting_payment", actor(args), map[string]any{"invoice_id": invoiceID, "subscription_id": subID})
+	} else {
+		if _, err := a.runFulfillment(ctx, pid, acct, "account_active"); err != nil {
+			_, _ = dbAccountSetStatus(ctx.AppDB(), pid, acct.ID, StatusFailed, err.Error())
+			return nil, err
+		}
+		acct, _ = dbAccountGet(ctx.AppDB(), pid, acct.ID)
 	}
 	out["account"] = acct
 	if paidNow {
@@ -1113,6 +1220,272 @@ func (a *App) recordCheckoutPayment(ctx *sdk.AppCtx, pid string, invoiceID int64
 	return out, nil
 }
 
+func (a *App) runFulfillment(ctx *sdk.AppCtx, pid string, acct *Account, event string) ([]*FulfillmentRun, error) {
+	event = normalizeFulfillmentEvent(event)
+	if event == "" {
+		return nil, errors.New("fulfillment event required")
+	}
+	actions, err := dbPlanActions(ctx.AppDB(), pid, acct.PlanKey, event, true)
+	if err != nil || len(actions) == 0 {
+		return nil, err
+	}
+	customer, err := dbCustomerGet(ctx.AppDB(), pid, acct.CustomerID)
+	if err != nil {
+		return nil, err
+	}
+	plan, err := dbPlanGet(ctx.AppDB(), pid, acct.PlanKey)
+	if err != nil {
+		return nil, err
+	}
+	var runs []*FulfillmentRun
+	for _, action := range actions {
+		if !action.Enabled {
+			continue
+		}
+		args, _ := expandFulfillmentValue(mapFromAny(action.Args), fulfillmentTemplateContext(pid, acct, customer, plan)).(map[string]any)
+		if args == nil {
+			args = map[string]any{}
+		}
+		args["_project_id"] = pid
+		var out map[string]any
+		callErr := ctx.PlatformAPI().CallAppResult(action.AppName, action.ToolName, args, &out)
+		status := "succeeded"
+		errText := ""
+		if callErr != nil {
+			status = "failed"
+			errText = callErr.Error()
+		}
+		run, recErr := dbFulfillmentRunInsert(ctx.AppDB(), pid, acct.ID, &action, status, args, out, errText)
+		if recErr != nil {
+			return runs, recErr
+		}
+		runs = append(runs, run)
+		if callErr != nil {
+			_ = recordEvent(ctx.AppDB(), pid, acct.ID, "fulfillment.failed", action.AppName, map[string]any{"event": event, "tool": action.ToolName, "error": errText})
+			switch action.FailureMode {
+			case "ignore":
+				continue
+			case "mark_degraded":
+				_, _ = dbAccountSetStatus(ctx.AppDB(), pid, acct.ID, acct.Status, errText)
+				continue
+			default:
+				return runs, fmt.Errorf("fulfillment %s.%s failed: %w", action.AppName, action.ToolName, callErr)
+			}
+		}
+		if err := a.applyFulfillmentStore(ctx, pid, acct, action, out); err != nil {
+			return runs, err
+		}
+		_ = recordEvent(ctx.AppDB(), pid, acct.ID, "fulfillment.succeeded", action.AppName, map[string]any{"event": event, "tool": action.ToolName, "run_id": run.ID})
+		acct, _ = dbAccountGet(ctx.AppDB(), pid, acct.ID)
+	}
+	return runs, nil
+}
+
+func (a *App) applyFulfillmentStore(ctx *sdk.AppCtx, pid string, acct *Account, action PlanAction, out map[string]any) error {
+	store := mapFromAny(action.Store)
+	if len(store) == 0 {
+		return nil
+	}
+	meta := mapFromAny(acct.Metadata)
+	if meta == nil {
+		meta = map[string]any{}
+	}
+	changed := false
+	for target, rawSource := range store {
+		sourcePath := strFromAny(rawSource)
+		if sourcePath == "" {
+			continue
+		}
+		value, ok := valueAtPath(out, sourcePath)
+		if !ok {
+			return fmt.Errorf("fulfillment store source %q not found", sourcePath)
+		}
+		target = normalizeStoreTarget(target)
+		if target == "" {
+			continue
+		}
+		setPathValue(meta, strings.Split(target, "."), value)
+		changed = true
+	}
+	if !changed {
+		return nil
+	}
+	return dbAccountSetMetadata(ctx.AppDB(), pid, acct.ID, meta)
+}
+
+func fulfillmentTemplateContext(pid string, acct *Account, customer *Customer, plan *Plan) map[string]any {
+	accountMeta := mapFromAny(acct.Metadata)
+	customerMeta := map[string]any{}
+	if customer != nil {
+		customerMeta = mapFromAny(customer.Metadata)
+	}
+	planMeta := map[string]any{}
+	if plan != nil {
+		planMeta = mapFromAny(plan.Metadata)
+	}
+	ctx := map[string]any{
+		"project": map[string]any{"id": pid},
+		"account": map[string]any{
+			"id":              acct.ID,
+			"slug":            acct.Slug,
+			"owner_email":     acct.OwnerEmail,
+			"customer_id":     acct.CustomerID,
+			"auth_org_id":     int64PtrValue(acct.AuthOrgID),
+			"auth_user_id":    int64PtrValue(acct.AuthUserID),
+			"subscription_id": int64PtrValue(acct.SubscriptionID),
+			"plan_key":        acct.PlanKey,
+			"status":          acct.Status,
+			"metadata":        accountMeta,
+		},
+		"customer": map[string]any{
+			"id":                  acct.CustomerID,
+			"email":               "",
+			"name":                "",
+			"billing_customer_id": int64(0),
+			"auth_user_id":        int64(0),
+			"metadata":            customerMeta,
+		},
+		"plan": map[string]any{
+			"key":      acct.PlanKey,
+			"name":     acct.PlanKey,
+			"metadata": planMeta,
+		},
+	}
+	if customer != nil {
+		c := ctx["customer"].(map[string]any)
+		c["id"] = customer.ID
+		c["email"] = customer.Email
+		c["name"] = customer.Name
+		c["billing_customer_id"] = int64PtrValue(customer.BillingCustomerID)
+		c["auth_user_id"] = int64PtrValue(customer.AuthUserID)
+	}
+	if plan != nil {
+		p := ctx["plan"].(map[string]any)
+		p["key"] = plan.Key
+		p["name"] = plan.Name
+		p["billing_mode"] = plan.BillingMode
+	}
+	return ctx
+}
+
+func expandFulfillmentValue(v any, ctx map[string]any) any {
+	switch t := v.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(t))
+		for k, v := range t {
+			out[k] = expandFulfillmentValue(v, ctx)
+		}
+		return out
+	case []any:
+		out := make([]any, len(t))
+		for i, v := range t {
+			out[i] = expandFulfillmentValue(v, ctx)
+		}
+		return out
+	case string:
+		return expandTemplateString(t, ctx)
+	default:
+		return v
+	}
+}
+
+func expandTemplateString(s string, ctx map[string]any) any {
+	exact := regexp.MustCompile(`^\{\{\s*([^{}]+?)\s*\}\}$`)
+	if m := exact.FindStringSubmatch(s); len(m) == 2 {
+		if v, ok := valueAtPath(ctx, strings.TrimSpace(m[1])); ok {
+			return v
+		}
+		return ""
+	}
+	re := regexp.MustCompile(`\{\{\s*([^{}]+?)\s*\}\}`)
+	return re.ReplaceAllStringFunc(s, func(token string) string {
+		m := re.FindStringSubmatch(token)
+		if len(m) != 2 {
+			return token
+		}
+		if v, ok := valueAtPath(ctx, strings.TrimSpace(m[1])); ok {
+			return fmt.Sprint(v)
+		}
+		return ""
+	})
+}
+
+func normalizeFulfillmentEvent(event string) string {
+	event = strings.ToLower(strings.TrimSpace(event))
+	event = strings.ReplaceAll(event, ".", "_")
+	event = strings.ReplaceAll(event, "-", "_")
+	switch event {
+	case "active", "subscription_active", "subscription_trialing":
+		return "account_active"
+	case "past_due", "subscription_past_due":
+		return "account_past_due"
+	case "suspend", "suspended":
+		return "account_suspended"
+	case "resume", "resumed":
+		return "account_resumed"
+	case "cancel", "cancelled", "subscription_cancelled", "subscription_ended", "subscription_paused":
+		return "account_cancelled"
+	default:
+		return event
+	}
+}
+
+func fulfillmentEventFromLifecycle(event, status string) string {
+	event = strings.ToLower(strings.TrimSpace(event))
+	switch event {
+	case "subscription.active", "subscription.trialing":
+		return "account_active"
+	case "subscription.past_due":
+		return "account_past_due"
+	case "subscription.paused", "subscription.cancelled", "subscription.ended", "cancelled":
+		return "account_cancelled"
+	case "suspended":
+		return "account_suspended"
+	case "resumed":
+		return "account_resumed"
+	}
+	switch status {
+	case StatusPastDue:
+		return "account_past_due"
+	case StatusSuspended:
+		return "account_suspended"
+	case StatusCancelled:
+		return "account_cancelled"
+	}
+	return ""
+}
+
+func normalizeStoreTarget(target string) string {
+	target = strings.TrimSpace(target)
+	target = strings.TrimPrefix(target, "account.")
+	target = strings.TrimPrefix(target, "metadata.")
+	target = strings.Trim(target, ".")
+	if target == "" {
+		return ""
+	}
+	return target
+}
+
+func setPathValue(m map[string]any, parts []string, value any) {
+	if len(parts) == 0 {
+		return
+	}
+	key := strings.TrimSpace(parts[0])
+	if key == "" {
+		return
+	}
+	if len(parts) == 1 {
+		m[key] = value
+		return
+	}
+	child := mapFromAny(m[key])
+	if child == nil {
+		child = map[string]any{}
+	}
+	m[key] = child
+	setPathValue(child, parts[1:], value)
+}
+
 func (a *App) applyPlanAccess(ctx *sdk.AppCtx, pid string, acct *Account, plan *Plan) error {
 	for _, f := range plan.Features {
 		var out map[string]any
@@ -1158,6 +1531,13 @@ func (a *App) setAccountStatus(ctx *sdk.AppCtx, args map[string]any, status, eve
 		return nil, err
 	}
 	_ = recordEvent(ctx.AppDB(), pid, acct.ID, event, actor(args), nil)
+	if fe := fulfillmentEventFromLifecycle(event, status); fe != "" {
+		if _, err := a.runFulfillment(ctx, pid, acct, fe); err != nil {
+			_, _ = dbAccountSetStatus(ctx.AppDB(), pid, acct.ID, StatusFailed, err.Error())
+			return nil, err
+		}
+		acct, _ = dbAccountGet(ctx.AppDB(), pid, acct.ID)
+	}
 	return map[string]any{"account": acct}, nil
 }
 
@@ -1325,6 +1705,10 @@ func hydratePlan(db *sql.DB, p *Plan) error {
 		return err
 	}
 	p.UsageSources, err = dbUsageSources(db, p.ProjectID, p.Key)
+	if err != nil {
+		return err
+	}
+	p.Actions, err = dbPlanActions(db, p.ProjectID, p.Key, "", false)
 	return err
 }
 
@@ -1535,6 +1919,100 @@ func dbUsageSources(db *sql.DB, pid, planKey string) ([]UsageSource, error) {
 	return out, rows.Err()
 }
 
+func dbPlanActionInsert(db *sql.DB, pid string, args map[string]any) (*PlanAction, error) {
+	planKey, err := normalizeKey(strArg(args, "plan_key"))
+	if err != nil {
+		return nil, err
+	}
+	if err := requirePlanExists(db, pid, planKey); err != nil {
+		return nil, err
+	}
+	event := normalizeFulfillmentEvent(strArg(args, "event"))
+	if event == "" {
+		return nil, errors.New("event required")
+	}
+	app, tool := strArg(args, "app_name"), strArg(args, "tool_name")
+	if app == "" || tool == "" {
+		return nil, errors.New("app_name and tool_name required")
+	}
+	failureMode := firstNonEmpty(strArg(args, "failure_mode"), "fail_account")
+	switch failureMode {
+	case "fail_account", "mark_degraded", "ignore":
+	default:
+		return nil, fmt.Errorf("unsupported failure_mode %q", failureMode)
+	}
+	enabled := 1
+	if _, ok := args["enabled"]; ok {
+		enabled = boolInt(boolArg(args, "enabled"))
+	}
+	res, err := db.Exec(`
+		INSERT INTO saas_plan_actions
+			(project_id, plan_key, event, app_name, tool_name, args_json, store_json, failure_mode, enabled, metadata_json)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		pid, planKey, event, app, tool, jsonOrEmpty(args["args"], "{}"), jsonOrEmpty(args["store"], "{}"), failureMode, enabled, jsonOrEmpty(args["metadata"], "{}"))
+	if err != nil {
+		return nil, err
+	}
+	id, _ := res.LastInsertId()
+	return dbPlanActionGet(db, pid, id)
+}
+
+func dbPlanActionGet(db *sql.DB, pid string, id int64) (*PlanAction, error) {
+	rows, err := db.Query(`
+		SELECT id, project_id, plan_key, event, app_name, tool_name, args_json, store_json, failure_mode, enabled, metadata_json, created_at, updated_at
+		FROM saas_plan_actions WHERE project_id=? AND id=?`, pid, id)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	if !rows.Next() {
+		return nil, nil
+	}
+	return scanPlanAction(rows)
+}
+
+func dbPlanActions(db *sql.DB, pid, planKey, event string, enabledOnly bool) ([]PlanAction, error) {
+	where := []string{"project_id=?", "plan_key=?"}
+	vals := []any{pid, planKey}
+	if event != "" {
+		where = append(where, "event=?")
+		vals = append(vals, event)
+	}
+	if enabledOnly {
+		where = append(where, "enabled=1")
+	}
+	rows, err := db.Query(`
+		SELECT id, project_id, plan_key, event, app_name, tool_name, args_json, store_json, failure_mode, enabled, metadata_json, created_at, updated_at
+		FROM saas_plan_actions WHERE `+strings.Join(where, " AND ")+` ORDER BY id`, vals...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []PlanAction
+	for rows.Next() {
+		action, err := scanPlanAction(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *action)
+	}
+	return out, rows.Err()
+}
+
+func scanPlanAction(row rowScanner) (*PlanAction, error) {
+	var a PlanAction
+	var enabled int
+	var args, store, meta string
+	if err := row.Scan(&a.ID, &a.ProjectID, &a.PlanKey, &a.Event, &a.AppName, &a.ToolName, &args, &store, &a.FailureMode, &enabled, &meta, &a.CreatedAt, &a.UpdatedAt); err != nil {
+		return nil, err
+	}
+	a.Args = json.RawMessage(args)
+	a.Store = json.RawMessage(store)
+	a.Enabled = enabled != 0
+	a.Metadata = json.RawMessage(meta)
+	return &a, nil
+}
+
 func dbCustomerUpsert(db *sql.DB, pid string, args map[string]any) (*Customer, error) {
 	email := strings.ToLower(strings.TrimSpace(strArg(args, "email")))
 	if email == "" || !strings.Contains(email, "@") {
@@ -1626,6 +2104,17 @@ func dbAccountSetStatus(db *sql.DB, pid, id, status, errMsg string) (*Account, e
 		return nil, errors.New("account not found")
 	}
 	return dbAccountGet(db, pid, id)
+}
+
+func dbAccountSetMetadata(db *sql.DB, pid, id string, meta map[string]any) error {
+	res, err := db.Exec(`UPDATE saas_accounts SET metadata_json=?, updated_at=CURRENT_TIMESTAMP WHERE project_id=? AND id=?`, jsonOrEmpty(meta, "{}"), pid, id)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return errors.New("account not found")
+	}
+	return nil
 }
 
 func dbAccountUsageSynced(db *sql.DB, pid, id string) error {
@@ -1783,6 +2272,34 @@ func recordEvent(db *sql.DB, pid, accountID, eventType, actor string, payload an
 	_, err := db.Exec(`INSERT INTO saas_events (project_id, account_id, event_type, actor, payload_json) VALUES (?, ?, ?, ?, ?)`,
 		pid, accountID, eventType, firstNonEmpty(actor, "system"), jsonOrEmpty(payload, "{}"))
 	return err
+}
+
+func dbFulfillmentRunInsert(db *sql.DB, pid, accountID string, action *PlanAction, status string, input, output any, errText string) (*FulfillmentRun, error) {
+	res, err := db.Exec(`
+		INSERT INTO saas_fulfillment_runs
+			(project_id, account_id, plan_action_id, event, app_name, tool_name, status, input_json, output_json, error)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		pid, accountID, action.ID, action.Event, action.AppName, action.ToolName, status, jsonOrEmpty(input, "{}"), jsonOrEmpty(output, "{}"), errText)
+	if err != nil {
+		return nil, err
+	}
+	id, _ := res.LastInsertId()
+	return dbFulfillmentRunGet(db, pid, id)
+}
+
+func dbFulfillmentRunGet(db *sql.DB, pid string, id int64) (*FulfillmentRun, error) {
+	var r FulfillmentRun
+	var input, output string
+	err := db.QueryRow(`
+		SELECT id, project_id, account_id, plan_action_id, event, app_name, tool_name, status, input_json, output_json, error, created_at, updated_at
+		FROM saas_fulfillment_runs WHERE project_id=? AND id=?`, pid, id).
+		Scan(&r.ID, &r.ProjectID, &r.AccountID, &r.PlanActionID, &r.Event, &r.AppName, &r.ToolName, &r.Status, &input, &output, &r.Error, &r.CreatedAt, &r.UpdatedAt)
+	if err != nil {
+		return nil, err
+	}
+	r.Input = json.RawMessage(input)
+	r.Output = json.RawMessage(output)
+	return &r, nil
 }
 
 func (a *App) handlePlans(w http.ResponseWriter, r *http.Request) {
