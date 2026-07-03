@@ -56,7 +56,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 			return err
 		}
 	}
-	ctx.Logger().Info("saas mounted", "version", "0.1.0", "scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
+	ctx.Logger().Info("saas mounted", "version", "0.1.1", "scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
 	return nil
 }
 
@@ -107,7 +107,10 @@ func (a *App) MCPTools() []sdk.Tool {
 		}, []string{"key", "name"}), Handler: a.toolPlanUpsert},
 		{Name: "saas_plan_feature_add", Description: "Add a feature grant to a SaaS plan.", InputSchema: schemaObject(map[string]any{"plan_key": strSchema(), "feature_key": strSchema(), "grant_type": strSchema(), "metadata": objSchema()}, []string{"plan_key", "feature_key"}), Handler: a.toolPlanFeatureAdd},
 		{Name: "saas_plan_limit_set", Description: "Set a plan limit.", InputSchema: schemaObject(map[string]any{"plan_key": strSchema(), "feature_key": strSchema(), "limit_value": intSchema(), "reset_interval": strSchema(), "metadata": objSchema()}, []string{"plan_key", "feature_key"}), Handler: a.toolPlanLimitSet},
-		{Name: "saas_plan_usage_source_add", Description: "Register a live usage source for a SaaS plan.", InputSchema: schemaObject(map[string]any{"plan_key": strSchema(), "app_name": strSchema(), "tool_name": strSchema(), "feature_prefix": strSchema(), "metadata": objSchema()}, []string{"plan_key", "app_name", "tool_name"}), Handler: a.toolPlanUsageSourceAdd},
+		{Name: "saas_plan_usage_source_add", Description: "Register a live usage source for a SaaS plan.", InputSchema: schemaObject(map[string]any{
+			"plan_key": strSchema(), "app_name": strSchema(), "tool_name": strSchema(), "feature_prefix": strSchema(), "feature_key": strSchema(),
+			"read_path": strSchema(), "quantity_path": strSchema(), "call_args": objSchema(), "metadata": objSchema(),
+		}, []string{"plan_key", "app_name", "tool_name"}), Handler: a.toolPlanUsageSourceAdd},
 		{Name: "saas_customer_create", Description: "Find or create a SaaS customer by email.", InputSchema: schemaObject(map[string]any{"email": strSchema(), "name": strSchema(), "billing_customer_id": intSchema(), "auth_user_id": intSchema(), "metadata": objSchema()}, []string{"email"}), Handler: a.toolCustomerCreate},
 		{Name: "saas_account_create", Description: "Create a SaaS account and apply plan access.", InputSchema: schemaObject(map[string]any{
 			"customer_id": intSchema(), "customer_email": strSchema(), "customer_name": strSchema(), "owner_email": strSchema(), "slug": strSchema(), "plan_key": strSchema(),
@@ -225,6 +228,13 @@ type usageSnapshotResponse struct {
 	Usage []usageGauge `json:"usage"`
 }
 
+type usageSourceConfig struct {
+	FeatureKey   string         `json:"feature_key,omitempty"`
+	QuantityPath string         `json:"quantity_path,omitempty"`
+	ReadPath     string         `json:"read_path,omitempty"`
+	CallArgs     map[string]any `json:"call_args,omitempty"`
+}
+
 type entitlementCheckResponse struct {
 	Allowed bool `json:"allowed"`
 }
@@ -233,6 +243,143 @@ type usageGauge struct {
 	FeatureKey string         `json:"feature_key"`
 	Quantity   int64          `json:"quantity"`
 	Metadata   map[string]any `json:"metadata,omitempty"`
+}
+
+func parseUsageSourceConfig(raw json.RawMessage) usageSourceConfig {
+	var cfg usageSourceConfig
+	if len(raw) > 0 {
+		_ = json.Unmarshal(raw, &cfg)
+	}
+	if cfg.QuantityPath == "" {
+		cfg.QuantityPath = cfg.ReadPath
+	}
+	return cfg
+}
+
+func usageGaugesFromResponse(src UsageSource, cfg usageSourceConfig, body map[string]any) ([]usageGauge, error) {
+	path := firstNonEmpty(cfg.QuantityPath, cfg.ReadPath)
+	if cfg.FeatureKey != "" || path != "" {
+		feature := firstNonEmpty(cfg.FeatureKey, src.FeaturePrefix)
+		if feature == "" {
+			return nil, errors.New("usage source feature_key required when using read_path")
+		}
+		if path == "" {
+			path = "quantity"
+		}
+		value, ok := valueAtPath(body, path)
+		if !ok {
+			return nil, fmt.Errorf("usage source read_path %q not found", path)
+		}
+		return []usageGauge{{FeatureKey: feature, Quantity: int64FromAny(value), Metadata: map[string]any{"read_path": path}}}, nil
+	}
+
+	rawUsage, ok := body["usage"]
+	if !ok {
+		return nil, nil
+	}
+	var parsed usageSnapshotResponse
+	b, err := json.Marshal(map[string]any{"usage": rawUsage})
+	if err != nil {
+		return nil, err
+	}
+	if err := json.Unmarshal(b, &parsed); err != nil {
+		return nil, err
+	}
+	return parsed.Usage, nil
+}
+
+func valueAtPath(v any, path string) (any, bool) {
+	path = strings.TrimSpace(path)
+	if path == "" {
+		return v, true
+	}
+	cur := v
+	for _, part := range strings.Split(path, ".") {
+		part = strings.TrimSpace(part)
+		if part == "" {
+			return nil, false
+		}
+		if part == "length" {
+			switch t := cur.(type) {
+			case []any:
+				cur = len(t)
+			case []map[string]any:
+				cur = len(t)
+			case string:
+				cur = len(t)
+			default:
+				return nil, false
+			}
+			continue
+		}
+		m := mapFromAny(cur)
+		if m == nil {
+			return nil, false
+		}
+		next, ok := m[part]
+		if !ok {
+			return nil, false
+		}
+		cur = next
+	}
+	return cur, true
+}
+
+func expandUsageArgs(args map[string]any, pid string, acct *Account) map[string]any {
+	if len(args) == 0 {
+		return nil
+	}
+	out := make(map[string]any, len(args))
+	for k, v := range args {
+		out[k] = expandUsageValue(v, pid, acct)
+	}
+	return out
+}
+
+func expandUsageValue(v any, pid string, acct *Account) any {
+	switch t := v.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(t))
+		for k, v := range t {
+			out[k] = expandUsageValue(v, pid, acct)
+		}
+		return out
+	case []any:
+		out := make([]any, len(t))
+		for i, v := range t {
+			out[i] = expandUsageValue(v, pid, acct)
+		}
+		return out
+	case string:
+		return expandUsageString(t, pid, acct)
+	default:
+		return v
+	}
+}
+
+func expandUsageString(s, pid string, acct *Account) any {
+	values := map[string]any{
+		"{{project.id}}":   pid,
+		"{{account.id}}":   acct.ID,
+		"{{account.slug}}": acct.Slug,
+		"{{customer.id}}":  acct.CustomerID,
+		"{{plan.key}}":     acct.PlanKey,
+		"{{auth_org.id}}":  int64PtrValue(acct.AuthOrgID),
+		"$project.id":      pid,
+		"$account.id":      acct.ID,
+		"$account.slug":    acct.Slug,
+		"$customer.id":     acct.CustomerID,
+		"$plan.key":        acct.PlanKey,
+		"$auth_org.id":     int64PtrValue(acct.AuthOrgID),
+	}
+	if v, ok := values[s]; ok {
+		return v
+	}
+	out := s
+	for token, value := range values {
+		out = strings.ReplaceAll(out, token, fmt.Sprint(value))
+	}
+	return out
 }
 
 func (a *App) toolPlanList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -440,19 +587,30 @@ func (a *App) toolUsageSync(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 			return nil, err
 		}
 		for _, src := range sources {
-			var out usageSnapshotResponse
+			cfg := parseUsageSourceConfig(src.Metadata)
+			var out map[string]any
 			input := map[string]any{
+				"_project_id": pid,
 				"account_id":  acct.ID,
 				"customer_id": acct.CustomerID,
 				"auth_org_id": int64PtrValue(acct.AuthOrgID),
 				"plan_key":    acct.PlanKey,
+			}
+			for k, v := range expandUsageArgs(cfg.CallArgs, pid, acct) {
+				input[k] = v
 			}
 			if err := ctx.PlatformAPI().CallAppResult(src.AppName, src.ToolName, input, &out); err != nil {
 				_, _ = dbAccountSetStatus(ctx.AppDB(), pid, acct.ID, acct.Status, err.Error())
 				_ = recordEvent(ctx.AppDB(), pid, acct.ID, "usage_sync.failed", src.AppName, map[string]any{"tool": src.ToolName, "error": err.Error()})
 				return nil, err
 			}
-			for _, gauge := range out.Usage {
+			gauges, err := usageGaugesFromResponse(src, cfg, out)
+			if err != nil {
+				_, _ = dbAccountSetStatus(ctx.AppDB(), pid, acct.ID, acct.Status, err.Error())
+				_ = recordEvent(ctx.AppDB(), pid, acct.ID, "usage_sync.failed", src.AppName, map[string]any{"tool": src.ToolName, "error": err.Error()})
+				return nil, err
+			}
+			for _, gauge := range gauges {
 				feature := firstNonEmpty(gauge.FeatureKey, src.FeaturePrefix)
 				if feature == "" {
 					continue
@@ -985,6 +1143,18 @@ func dbUsageSourceUpsert(db *sql.DB, pid string, args map[string]any) (*UsageSou
 	if app == "" || tool == "" {
 		return nil, errors.New("app_name and tool_name required")
 	}
+	meta := mapFromAny(args["metadata"])
+	if meta == nil {
+		meta = map[string]any{}
+	}
+	for _, key := range []string{"feature_key", "read_path", "quantity_path"} {
+		if v := strArg(args, key); v != "" {
+			meta[key] = v
+		}
+	}
+	if callArgs := mapFromAny(args["call_args"]); callArgs != nil {
+		meta["call_args"] = callArgs
+	}
 	_, err = db.Exec(`
 		INSERT INTO saas_usage_sources (project_id, plan_key, app_name, tool_name, feature_prefix, metadata_json)
 		VALUES (?, ?, ?, ?, ?, ?)
@@ -992,7 +1162,7 @@ func dbUsageSourceUpsert(db *sql.DB, pid string, args map[string]any) (*UsageSou
 			feature_prefix=excluded.feature_prefix,
 			metadata_json=excluded.metadata_json,
 			updated_at=CURRENT_TIMESTAMP`,
-		pid, planKey, app, tool, strArg(args, "feature_prefix"), jsonOrEmpty(args["metadata"], "{}"))
+		pid, planKey, app, tool, strArg(args, "feature_prefix"), jsonOrEmpty(meta, "{}"))
 	if err != nil {
 		return nil, err
 	}

@@ -41,6 +41,8 @@ func (p *platformStub) CallAppResult(appName, tool string, input map[string]any,
 		body = map[string]any{"allowed": p.entitled}
 	case "crm_saas_usage_snapshot":
 		body = map[string]any{"usage": []map[string]any{{"feature_key": "crm:contacts", "quantity": p.contacts}}}
+	case "contacts_search":
+		body = map[string]any{"contacts": []any{}, "count": 0, "total": p.contacts, "offset": input["offset"]}
 	default:
 		body = map[string]any{"ok": true}
 	}
@@ -82,8 +84,8 @@ func TestEmbeddedManifest_Valid(t *testing.T) {
 	if m.Name != "saas" {
 		t.Errorf("manifest.Name=%q, want saas", m.Name)
 	}
-	if m.Version != "0.1.0" {
-		t.Errorf("manifest.Version=%q, want 0.1.0", m.Version)
+	if m.Version != "0.1.1" {
+		t.Errorf("manifest.Version=%q, want 0.1.1", m.Version)
 	}
 	if m.DB == nil || m.DB.Migrations != "migrations/" {
 		t.Fatalf("manifest DB not declared correctly: %+v", m.DB)
@@ -233,6 +235,61 @@ func TestUsageSync_StoresLiveGaugeNotAdditive(t *testing.T) {
 	}
 	if usage[0].OverLimit {
 		t.Fatal("usage should not be over limit after gauge dropped below 5")
+	}
+}
+
+func TestUsageSync_ExtractsGenericToolResponsePath(t *testing.T) {
+	pf := &platformStub{contacts: 12}
+	ctx, db := newTestCtx(t, pf)
+	defer db.Close()
+	app := &App{}
+
+	if _, err := app.toolPlanUpsert(ctx, map[string]any{"key": "crm-pro", "name": "CRM Pro"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.toolPlanLimitSet(ctx, map[string]any{"plan_key": "crm-pro", "feature_key": "crm:contacts", "limit_value": 10}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.toolPlanUsageSourceAdd(ctx, map[string]any{
+		"plan_key":       "crm-pro",
+		"app_name":       "crm",
+		"tool_name":      "contacts_search",
+		"feature_key":    "crm:contacts",
+		"read_path":      "total",
+		"call_args":      map[string]any{"limit": 1, "offset": 0, "q": "{{account.slug}}"},
+		"feature_prefix": "crm",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	created, err := app.toolAccountCreate(ctx, map[string]any{"owner_email": "owner@example.com", "slug": "acme", "plan_key": "crm-pro"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	acct := created.(map[string]any)["account"].(*Account)
+
+	if _, err := app.toolUsageSync(ctx, map[string]any{"account_id": acct.ID}); err != nil {
+		t.Fatal(err)
+	}
+	out, err := app.toolUsageGet(ctx, map[string]any{"account_id": acct.ID, "feature_key": "crm:contacts"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	usage := out.(map[string]any)["usage"].([]UsageTotal)
+	if len(usage) != 1 || usage[0].Quantity != 12 || !usage[0].OverLimit {
+		t.Fatalf("generic usage extraction failed: %+v", usage)
+	}
+
+	var search callAppCall
+	for _, call := range pf.calls {
+		if call.App == "crm" && call.Tool == "contacts_search" {
+			search = call
+		}
+	}
+	if search.Tool == "" {
+		t.Fatalf("contacts_search was not called; calls=%+v", pf.calls)
+	}
+	if search.Input["_project_id"] != "proj-test" || int64FromAny(search.Input["limit"]) != 1 || search.Input["q"] != "acme" {
+		t.Fatalf("usage source input not expanded correctly: %+v", search.Input)
 	}
 }
 
