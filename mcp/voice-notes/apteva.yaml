@@ -43,17 +43,17 @@ provides:
     - prefix: /
   mcp_tools:
     - name: voice_notes_create
-      description: Create a text/manual voice note shell. Args: title?, transcript_text?, tags?.
+      description: "Create a text/manual voice note shell. Args: title?, transcript_text?, tags?."
     - name: voice_notes_upload_audio
-      description: Upload a base64 audio recording to Storage, create a note, and optionally transcribe it. Args: name, content_base64, content_type?, title?, duration_ms?, transcribe?.
+      description: "Upload a base64 audio recording to Storage, create a note, and optionally transcribe it. Args: name, content_base64, content_type?, title?, duration_ms?, transcribe?."
     - name: voice_notes_get
       description: Fetch one voice note by id, including signed playback URL when available.
     - name: voice_notes_list
-      description: List/search voice notes. Args: q?, status?, limit?.
+      description: "List/search voice notes. Args: q?, status?, limit?."
     - name: voice_notes_transcribe
-      description: Transcribe a saved note using the bound Deepgram connection. Args: id, force?.
+      description: "Transcribe a saved note using the bound Deepgram connection. Args: id, force?."
     - name: voice_notes_set_transcript
-      description: Manually set or replace a note transcript. Args: id, text, language?.
+      description: "Manually set or replace a note transcript. Args: id, text, language?."
   ui_panels:
     - slot: project.page
       label: Voice Notes

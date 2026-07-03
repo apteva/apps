@@ -1,6 +1,25 @@
 package main
 
-import "testing"
+import (
+	"os"
+	"testing"
+
+	sdk "github.com/apteva/app-sdk"
+)
+
+func TestExternalManifestValid(t *testing.T) {
+	data, err := os.ReadFile("apteva.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	m, err := sdk.ParseManifest(data)
+	if err != nil {
+		t.Fatalf("parse apteva.yaml: %v", err)
+	}
+	if m.Name != "voice-notes" {
+		t.Fatalf("name=%q", m.Name)
+	}
+}
 
 func TestEmbeddedManifestValid(t *testing.T) {
 	app := &App{}
