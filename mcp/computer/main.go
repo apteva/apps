@@ -52,9 +52,9 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: computer
 display_name: Computer
-version: 0.7.42
+version: 0.7.43
 description: |
-  Watch and steer browser sessions. v0.7.42 improves rendered text, markdown, and structured-data extraction.
+  Watch and steer browser sessions. v0.7.43 improves rendered text block spacing for browser DOM extraction.
 scopes: [project, global]
 requires:
   permissions:

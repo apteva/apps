@@ -70,9 +70,15 @@ const extractScript = `(() => {
     el.remove();
   }
 
+  const textBlocks = [];
   const markdownBlocks = [];
-  const pushBlock = (s) => {
+  const pushTextBlock = (s) => {
     const t = cleanInline(s);
+    if (t) textBlocks.push(t);
+    return t;
+  };
+  const pushBlock = (s) => {
+    const t = pushTextBlock(s);
     if (t) markdownBlocks.push(t);
   };
   const walkMarkdown = (node) => {
@@ -81,11 +87,18 @@ const extractScript = `(() => {
     if (['script','style','noscript','svg','template','iframe','canvas','nav','header','footer','aside'].includes(tag)) return;
     if (/^h[1-6]$/.test(tag)) {
       const level = Number(tag.slice(1));
-      pushBlock('#'.repeat(level) + ' ' + (node.innerText || node.textContent || ''));
+      const heading = node.innerText || node.textContent || '';
+      pushTextBlock(heading);
+      const markdownText = cleanInline(heading);
+      if (markdownText) markdownBlocks.push('#'.repeat(level) + ' ' + markdownText);
       return;
     }
     if (tag === 'p' || tag === 'blockquote') {
       pushBlock(node.innerText || node.textContent || '');
+      return;
+    }
+    if (tag === 'a') {
+      pushBlock(node.innerText || node.textContent || node.getAttribute('aria-label') || node.getAttribute('title') || '');
       return;
     }
     if (tag === 'li') {
@@ -107,7 +120,7 @@ const extractScript = `(() => {
     for (const child of Array.from(node.children)) walkMarkdown(child);
   };
   walkMarkdown(root);
-  const text = normalizeBlocks(root.innerText || root.textContent || '');
+  const text = textBlocks.length ? textBlocks.join('\n\n') : normalizeBlocks(root.innerText || root.textContent || '');
   const markdown = markdownBlocks.length ? markdownBlocks.join('\n\n') : text;
   const description = meta.description || meta['og:description'] || meta['twitter:description'] || '';
   const links = Array.from(document.querySelectorAll('a[href]')).map((a) => ({
