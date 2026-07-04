@@ -52,9 +52,9 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: computer
 display_name: Computer
-version: 0.7.39
+version: 0.7.40
 description: |
-  Watch and steer browser sessions. v0.7.39 adds targeted set_text for text fields and composers.
+  Watch and steer browser sessions. v0.7.40 adds rendered DOM extraction for higher-level web tools.
 scopes: [project, global]
 requires:
   permissions:
@@ -98,6 +98,8 @@ provides:
       description: "Compatibility alias for browser_session(action=list)."
     - name: browser_screenshot
       description: "Capture a clean PNG of the session viewport. Args: session_id, annotate? (default false; set true for Set-of-Mark labels)."
+    - name: browser_extract
+      description: "Infrastructure-only rendered DOM extraction for higher-level web apps. Agents should usually prefer the Web app's web_extract/web_search/web_research tools instead of calling this directly. Args: session_id, formats?, max_chars?, readability?, wait_ms?."
     - name: browser_close
       description: "Close a session opened by this app and release browser/provider resources. Use this when finished unless the user explicitly wants the session left open. Compatibility alias for browser_session(action=close)."
   ui_panels:
@@ -606,6 +608,20 @@ func (a *App) MCPTools() []sdk.Tool {
 				"som":        map[string]any{"type": "boolean", "description": "Alias for annotate."},
 			}, []string{"session_id"}),
 			Handler: a.toolBrowserScreenshot,
+		},
+		{
+			Name: "browser_extract",
+			Description: "Infrastructure-only rendered DOM extraction for higher-level web apps. Agents should usually prefer the Web app's web_extract, web_search, and web_research tools instead of calling this directly. " +
+				"Args: session_id, formats? (text, markdown, html, metadata, links, images), max_chars?, readability?, wait_ms?. " +
+				"Returns {session_id, backend, current_url, title, description, text, markdown, html, metadata, links, images, rendered, extraction_backend}.",
+			InputSchema: schemaObject(map[string]any{
+				"session_id":  map[string]any{"type": "string"},
+				"formats":     map[string]any{"type": "array", "items": map[string]any{"type": "string", "enum": []string{"text", "markdown", "html", "metadata", "links", "images"}}},
+				"max_chars":   map[string]any{"type": "integer", "description": "Maximum characters for text, markdown, and html fields. Default 50000."},
+				"readability": map[string]any{"type": "boolean", "description": "Prefer the largest article/main/content region when true. Defaults true."},
+				"wait_ms":     map[string]any{"type": "integer", "description": "Optional wait before reading the DOM, useful for client-rendered pages."},
+			}, []string{"session_id"}),
+			Handler: a.toolBrowserExtract,
 		},
 		{
 			Name:        "browser_close",
@@ -1368,6 +1384,69 @@ func (a *App) toolBrowserScreenshot(ctx *sdk.AppCtx, args map[string]any) (any, 
 		"width":       m["width"],
 		"height":      m["height"],
 	}, nil
+}
+
+func (a *App) toolBrowserExtract(_ *sdk.AppCtx, args map[string]any) (any, error) {
+	id := stringArg(args, "session_id")
+	if id == "" {
+		return nil, fmt.Errorf("session_id required")
+	}
+	sess, ok := a.reg.get(id)
+	if !ok {
+		return nil, fmt.Errorf("session %s not found", id)
+	}
+	extractor, ok := sess.comp.(backends.DOMExtractor)
+	if !ok {
+		return nil, fmt.Errorf("backend %q does not support browser_extract", sess.backend)
+	}
+	maxChars := intArg(args, "max_chars")
+	if maxChars < 0 {
+		maxChars = 0
+	}
+	if maxChars > 200000 {
+		maxChars = 200000
+	}
+	opts := backends.ExtractOptions{
+		Formats:     stringSliceArg(args, "formats"),
+		MaxChars:    maxChars,
+		Readability: boolArgDefault(args, "readability", true),
+		WaitMS:      intArg(args, "wait_ms"),
+	}
+	if opts.WaitMS < 0 {
+		opts.WaitMS = 0
+	}
+	if opts.WaitMS > 10000 {
+		opts.WaitMS = 10000
+	}
+	res, err := extractor.ExtractDOM(opts)
+	if err != nil {
+		return nil, fmt.Errorf("browser_extract: %w", err)
+	}
+	disp := sess.comp.DisplaySize()
+	out := map[string]any{
+		"session_id":         id,
+		"backend":            sess.backend,
+		"current_url":        firstNonEmpty(res.URL, currentURL(sess.comp)),
+		"title":              res.Title,
+		"description":        res.Description,
+		"text":               res.Text,
+		"markdown":           res.Markdown,
+		"html":               res.HTML,
+		"links":              res.Links,
+		"images":             res.Images,
+		"metadata":           res.Metadata,
+		"rendered":           res.Rendered,
+		"extraction_backend": res.ExtractionBackend,
+		"width":              disp.Width,
+		"height":             disp.Height,
+	}
+	if bID := backendSessionID(sess.comp); bID != "" {
+		out["backend_session_id"] = bID
+	}
+	if tabID := activeTabID(sess.comp); tabID != "" {
+		out["active_tab_id"] = tabID
+	}
+	return out, nil
 }
 
 func (a *App) toolComputerUse(ctx *sdk.AppCtx, args map[string]any) (any, error) {

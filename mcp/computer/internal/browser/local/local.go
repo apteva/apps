@@ -25,6 +25,7 @@ import (
 	computer "github.com/apteva/apps/mcp/computer/internal/browser/api"
 	"github.com/apteva/apps/mcp/computer/internal/browser/cdptabs"
 	"github.com/apteva/apps/mcp/computer/internal/browser/checkedinput"
+	"github.com/apteva/apps/mcp/computer/internal/browser/domextract"
 	"github.com/apteva/apps/mcp/computer/internal/browser/fileupload"
 	"github.com/apteva/apps/mcp/computer/internal/browser/selectinput"
 	"github.com/apteva/apps/mcp/computer/internal/browser/som"
@@ -1527,6 +1528,13 @@ func (c *Computer) CurrentURL() string {
 	var url string
 	_ = chromedp.Run(c.ctx, chromedp.Location(&url))
 	return url
+}
+
+func (c *Computer) ExtractDOM(opts computer.ExtractOptions) (computer.ExtractResult, error) {
+	if c.ctx == nil {
+		return computer.ExtractResult{}, fmt.Errorf("local: no active session — call browser_session open first")
+	}
+	return domextract.Run(c.ctx, opts)
 }
 
 // gracefulCancel runs chromedp.Cancel(ctx) in a goroutine with a

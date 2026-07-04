@@ -63,6 +63,43 @@ type DisplaySize struct {
 	Height int `json:"height"`
 }
 
+// ExtractOptions controls browser-DOM extraction from the currently active
+// page. This is intentionally narrower than arbitrary JavaScript evaluation:
+// callers can request structured page data without gaining script execution.
+type ExtractOptions struct {
+	Formats     []string `json:"formats,omitempty"`
+	MaxChars    int      `json:"max_chars,omitempty"`
+	Readability bool     `json:"readability"`
+	WaitMS      int      `json:"wait_ms,omitempty"`
+}
+
+// ExtractLink is a normalized anchor from the rendered page.
+type ExtractLink struct {
+	URL  string `json:"url"`
+	Text string `json:"text,omitempty"`
+}
+
+// ExtractResult is structured content read from the live rendered DOM.
+type ExtractResult struct {
+	URL               string         `json:"url"`
+	Title             string         `json:"title,omitempty"`
+	Description       string         `json:"description,omitempty"`
+	Text              string         `json:"text,omitempty"`
+	Markdown          string         `json:"markdown,omitempty"`
+	HTML              string         `json:"html,omitempty"`
+	Links             []ExtractLink  `json:"links,omitempty"`
+	Images            []string       `json:"images,omitempty"`
+	Metadata          map[string]any `json:"metadata,omitempty"`
+	Rendered          bool           `json:"rendered"`
+	ExtractionBackend string         `json:"extraction_backend"`
+}
+
+// DOMExtractor is implemented by browser backends that can read structured
+// content from the active page's live DOM.
+type DOMExtractor interface {
+	ExtractDOM(opts ExtractOptions) (ExtractResult, error)
+}
+
 // ScreenshotOptions controls optional post-processing for a screenshot.
 type ScreenshotOptions struct {
 	// Annotate composites Set-of-Mark labels onto the returned pixels and

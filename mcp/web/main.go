@@ -1,10 +1,9 @@
-// Web v0.1 — browser-backed web intelligence.
+// Web v0.1.1 — browser-backed web intelligence.
 //
-// The app requires computer for session lifecycle and screenshots. v0.1 opens
-// a browser before search/extract/crawl/map/research page visits, then uses an
-// HTTP retrieval adapter to read HTML because computer does not yet expose DOM
-// or readability export. Responses make that explicit through
-// extraction_backend.
+// The app requires computer for session lifecycle, rendered extraction, and
+// screenshots. It opens a browser before search/extract/crawl/map/research page
+// visits, prefers live browser DOM extraction when available, and falls back to
+// HTTP retrieval when the active backend cannot expose rendered content.
 package main
 
 import (
@@ -32,7 +31,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: web
 display_name: Web
-version: 0.1.0
+version: 0.1.1
 description: Browser-native web intelligence for agents.
 author: Apteva
 scopes: [project, global]
@@ -225,6 +224,24 @@ type browserSession struct {
 	StreamURL  string `json:"stream_url,omitempty"`
 	Width      int    `json:"width"`
 	Height     int    `json:"height"`
+}
+
+type browserExtractResult struct {
+	SessionID         string         `json:"session_id"`
+	Backend           string         `json:"backend"`
+	CurrentURL        string         `json:"current_url"`
+	URL               string         `json:"url"`
+	Title             string         `json:"title"`
+	Description       string         `json:"description"`
+	Text              string         `json:"text"`
+	Markdown          string         `json:"markdown"`
+	Links             []linkInfo     `json:"links"`
+	Images            []string       `json:"images"`
+	Metadata          map[string]any `json:"metadata"`
+	Rendered          bool           `json:"rendered"`
+	ExtractionBackend string         `json:"extraction_backend"`
+	Width             int            `json:"width"`
+	Height            int            `json:"height"`
 }
 
 type searchResult struct {
@@ -506,7 +523,7 @@ func (a *App) toolSnapshot(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 }
 
 func (a *App) extractURL(ctx *sdk.AppCtx, runID int64, target string, args map[string]any, includeText bool) pageDoc {
-	doc := pageDoc{URL: target, FinalURL: target, ExtractionBackend: "http_after_browser_open"}
+	doc := pageDoc{URL: target, FinalURL: target, ExtractionBackend: "browser_dom"}
 	if err := validateHTTPURL(target); err != nil {
 		doc.Error = err.Error()
 		return doc
@@ -519,6 +536,46 @@ func (a *App) extractURL(ctx *sdk.AppCtx, runID int64, target string, args map[s
 	doc.Browser = browser
 	defer a.closeBrowser(ctx, browser.SessionID)
 
+	if extracted, err := a.extractBrowserDOM(ctx, browser.SessionID, args, includeText); err == nil {
+		doc.FinalURL = firstNonEmpty(extracted.CurrentURL, extracted.URL, browser.CurrentURL, target)
+		doc.Title = extracted.Title
+		doc.Description = extracted.Description
+		doc.Links = extracted.Links
+		doc.Images = extracted.Images
+		doc.Metadata = extracted.Metadata
+		doc.ExtractionBackend = firstNonEmpty(extracted.ExtractionBackend, "browser_dom")
+		doc.Bytes = len(extracted.Text) + len(extracted.Markdown)
+		doc.Truncated = false
+		if includeText {
+			maxChars := boundedInt(intArg(args, "max_chars"), defaultMaxChars, 1000, 200000)
+			doc.Text = truncateString(extracted.Text, maxChars)
+			doc.Markdown = truncateString(extracted.Markdown, maxChars)
+		}
+		if boolArgDefault(args, "store", storeDefault(ctx)) && includeText {
+			if art, err := storePageArtifact(ctx, runID, &doc); err == nil {
+				doc.Artifact = art
+			} else {
+				ctx.Logger().Warn("store page artifact failed", "url", target, "err", err.Error())
+			}
+		}
+		if boolArg(args, "snapshot") {
+			shot, err := a.snapshot(ctx, runID, mapMerge(args, map[string]any{
+				"session_id": browser.SessionID,
+				"label":      firstNonEmpty(doc.Title, target),
+				"store":      true,
+			}))
+			if err == nil {
+				doc.Snapshot = shot
+			} else {
+				ctx.Logger().Warn("snapshot failed", "url", target, "err", err.Error())
+			}
+		}
+		return doc
+	} else {
+		ctx.Logger().Warn("computer.browser_extract failed; falling back to HTTP extraction", "url", target, "err", err.Error())
+	}
+
+	doc.ExtractionBackend = "http_after_browser_open"
 	body, meta, err := fetchURL(ctx, target)
 	doc.Status = intFromMap(meta, "status")
 	doc.ContentType = stringFromMap(meta, "content_type")
@@ -703,6 +760,30 @@ func (a *App) closeBrowser(ctx *sdk.AppCtx, sessionID string) {
 	if err := ctx.PlatformAPI().CallAppResult("computer", "browser_close", withProjectID(ctx, map[string]any{"session_id": sessionID}), &out); err != nil {
 		ctx.Logger().Warn("computer.browser_close failed", "session_id", sessionID, "err", err.Error())
 	}
+}
+
+func (a *App) extractBrowserDOM(ctx *sdk.AppCtx, sessionID string, args map[string]any, includeText bool) (*browserExtractResult, error) {
+	formats := []string{"metadata", "links", "images"}
+	if includeText {
+		formats = append([]string{"text", "markdown"}, formats...)
+	}
+	extractArgs := withProjectID(ctx, map[string]any{
+		"session_id":  sessionID,
+		"formats":     formats,
+		"max_chars":   boundedInt(intArg(args, "max_chars"), defaultMaxChars, 1000, 200000),
+		"readability": true,
+	})
+	if waitMS := intArg(args, "wait_ms"); waitMS > 0 {
+		extractArgs["wait_ms"] = waitMS
+	}
+	var out browserExtractResult
+	if err := ctx.PlatformAPI().CallAppResult("computer", "browser_extract", extractArgs, &out); err != nil {
+		return nil, fmt.Errorf("computer.browser_extract: %w", err)
+	}
+	if out.ExtractionBackend == "" {
+		out.ExtractionBackend = "browser_dom"
+	}
+	return &out, nil
 }
 
 // ─── Retrieval and parsing ────────────────────────────────────────
@@ -1200,7 +1281,7 @@ func synthesizeExtractiveAnswer(question string, citations []map[string]any) str
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "Browser-backed research for %q reviewed %d source(s). ", question, len(citations))
-	b.WriteString("Key evidence is available in the citations array; v0.1 returns an extractive report rather than an LLM-written conclusion.")
+	b.WriteString("Key evidence is available in the citations array; v0.1.1 returns an extractive report rather than an LLM-written conclusion.")
 	return b.String()
 }
 

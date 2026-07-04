@@ -280,6 +280,59 @@ func TestComputerUseRejectsExplicitLabelZero(t *testing.T) {
 	}
 }
 
+func TestBrowserExtract(t *testing.T) {
+	fake := &fakeComp{
+		display: backends.DisplaySize{Width: 1280, Height: 720},
+		url:     "https://example.com/rendered",
+		extractResult: backends.ExtractResult{
+			URL:               "https://example.com/rendered",
+			Title:             "Rendered Page",
+			Description:       "Live DOM content",
+			Text:              "Hello from the hydrated page",
+			Markdown:          "Hello from the hydrated page",
+			Links:             []backends.ExtractLink{{URL: "https://example.com/next", Text: "Next"}},
+			Metadata:          map[string]any{"description": "Live DOM content"},
+			Rendered:          true,
+			ExtractionBackend: "browser_dom",
+		},
+	}
+	app := &App{reg: &registry{m: map[string]*session{}}}
+	app.reg.put("br_test", &session{
+		comp:     fake,
+		backend:  "local",
+		openedAt: time.Now(),
+		lastUsed: time.Now(),
+	})
+
+	outAny, err := app.toolBrowserExtract(nil, map[string]any{
+		"session_id": "br_test",
+		"formats":    []any{"text", "markdown", "metadata", "links"},
+		"max_chars":  float64(2000),
+	})
+	if err != nil {
+		t.Fatalf("browser_extract: %v", err)
+	}
+	out := outAny.(map[string]any)
+	if out["session_id"] != "br_test" {
+		t.Errorf("session_id: got %v", out["session_id"])
+	}
+	if out["extraction_backend"] != "browser_dom" {
+		t.Errorf("extraction_backend: got %v", out["extraction_backend"])
+	}
+	if out["title"] != "Rendered Page" {
+		t.Errorf("title: got %v", out["title"])
+	}
+	if out["text"] != "Hello from the hydrated page" {
+		t.Errorf("text: got %v", out["text"])
+	}
+	if got := fake.extractOptions.MaxChars; got != 2000 {
+		t.Errorf("max_chars forwarded: want 2000, got %d", got)
+	}
+	if len(fake.extractOptions.Formats) != 4 || fake.extractOptions.Formats[0] != "text" {
+		t.Errorf("formats forwarded: got %v", fake.extractOptions.Formats)
+	}
+}
+
 func TestComputerUseSelectOptionArgs(t *testing.T) {
 	prev := newBackend
 	t.Cleanup(func() { newBackend = prev })
@@ -1861,7 +1914,8 @@ func TestAppBusEventForReapedSession(t *testing.T) {
 
 // ─── fake Computer ─────────────────────────────────────────────────
 
-// fakeComp implements backends.Computer + SessionOpener + SessionInfo
+// fakeComp implements backends.Computer + SessionOpener + SessionInfo +
+// DOMExtractor
 // for handler tests. Mutation is unguarded — tests are single-goroutine.
 type fakeComp struct {
 	display          backends.DisplaySize
@@ -1889,6 +1943,9 @@ type fakeComp struct {
 	addTabOnClick    *backends.TabInfo
 	actionOnlyCalls  []backends.Action
 	lastRecovery     *backends.ScreenshotRecoveryInfo
+	extractResult    backends.ExtractResult
+	extractErr       error
+	extractOptions   backends.ExtractOptions
 	mu               sync.Mutex // for the unlikely concurrent test
 }
 
@@ -2046,6 +2103,16 @@ func (f *fakeComp) CurrentURL() string {
 		}
 	}
 	return f.url
+}
+
+func (f *fakeComp) ExtractDOM(opts backends.ExtractOptions) (backends.ExtractResult, error) {
+	f.mu.Lock()
+	f.extractOptions = opts
+	f.mu.Unlock()
+	if f.extractErr != nil {
+		return backends.ExtractResult{}, f.extractErr
+	}
+	return f.extractResult, nil
 }
 
 // ─── helpers ───────────────────────────────────────────────────────

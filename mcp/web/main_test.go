@@ -58,7 +58,7 @@ func TestParseDuckDuckGoResults(t *testing.T) {
 	}
 }
 
-func TestExtractURLUsesComputerThenHTTPParser(t *testing.T) {
+func TestExtractURLUsesComputerDOMParser(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html")
 		fmt.Fprint(w, `<html><head><title>Readable Page</title><meta name="description" content="A page for extraction"></head><body><h1>Hello</h1><p>This page has useful text.</p><a href="/next">Next page</a></body></html>`)
@@ -76,14 +76,14 @@ func TestExtractURLUsesComputerThenHTTPParser(t *testing.T) {
 	if page.Title != "Readable Page" {
 		t.Fatalf("title=%q", page.Title)
 	}
-	if page.ExtractionBackend != "http_after_browser_open" {
+	if page.ExtractionBackend != "browser_dom" {
 		t.Fatalf("backend=%q", page.ExtractionBackend)
 	}
 	if len(page.Links) != 1 || page.Links[0].URL != srv.URL+"/next" {
 		t.Fatalf("links=%#v", page.Links)
 	}
 	calls := plat.callLog()
-	want := []string{"computer.browser_open", "computer.browser_close"}
+	want := []string{"computer.browser_open", "computer.browser_extract", "computer.browser_close"}
 	if !sameOrderedPrefix(calls, want) {
 		t.Fatalf("calls=%v want prefix %v", calls, want)
 	}
@@ -131,6 +131,7 @@ type fakePlatform struct {
 	calls      []fakeCall
 	storageID  int64
 	storageURL string
+	openURL    string
 }
 
 func newFakePlatform() *fakePlatform {
@@ -152,12 +153,32 @@ func (p *fakePlatform) CallAppResult(app, tool string, in map[string]any, out an
 func (p *fakePlatform) respond(app, tool string, in map[string]any) map[string]any {
 	switch app + "." + tool {
 	case "computer.browser_open":
+		if u, ok := in["url"].(string); ok {
+			p.openURL = u
+		}
 		return map[string]any{
 			"session_id":  "sess_1",
 			"backend":     "local",
 			"current_url": in["url"],
 			"width":       1280,
 			"height":      720,
+		}
+	case "computer.browser_extract":
+		return map[string]any{
+			"session_id":         in["session_id"],
+			"backend":            "local",
+			"current_url":        p.openURL,
+			"url":                p.openURL,
+			"title":              "Readable Page",
+			"description":        "A page for extraction",
+			"text":               "Hello This page has useful text.",
+			"markdown":           "# Hello\n\nThis page has useful text.",
+			"links":              []map[string]any{{"url": p.openURL + "/next", "text": "Next page"}},
+			"metadata":           map[string]any{"description": "A page for extraction"},
+			"rendered":           true,
+			"extraction_backend": "browser_dom",
+			"width":              1280,
+			"height":             720,
 		}
 	case "computer.browser_close":
 		return map[string]any{"closed": true}

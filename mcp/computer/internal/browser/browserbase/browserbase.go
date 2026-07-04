@@ -20,6 +20,7 @@ import (
 	computer "github.com/apteva/apps/mcp/computer/internal/browser/api"
 	"github.com/apteva/apps/mcp/computer/internal/browser/cdptabs"
 	"github.com/apteva/apps/mcp/computer/internal/browser/checkedinput"
+	"github.com/apteva/apps/mcp/computer/internal/browser/domextract"
 	"github.com/apteva/apps/mcp/computer/internal/browser/fileupload"
 	"github.com/apteva/apps/mcp/computer/internal/browser/keyinput"
 	"github.com/apteva/apps/mcp/computer/internal/browser/selectinput"
@@ -1056,6 +1057,13 @@ func (c *Computer) CurrentURL() string {
 	var url string
 	_ = chromedp.Run(c.ctx, chromedp.Location(&url))
 	return url
+}
+
+func (c *Computer) ExtractDOM(opts computer.ExtractOptions) (computer.ExtractResult, error) {
+	if c.ctx == nil {
+		return computer.ExtractResult{}, fmt.Errorf("browserbase: no active session — call browser_session open first")
+	}
+	return domextract.Run(c.ctx, opts)
 }
 
 // DebugURL returns the Browserbase live-view URL for this session, or ""

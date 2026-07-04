@@ -28,9 +28,9 @@ crawling, site mapping, research, or visual proof.
 
 ## Defaults
 
-The app opens computer browser sessions by default. v0.1 extracts readable text
-through an HTTP retrieval adapter after browser open because the computer app
-does not yet expose DOM/readability export. Check `extraction_backend` in tool
+The app opens computer browser sessions by default. Extraction prefers rendered
+browser DOM through Computer and falls back to HTTP retrieval when the active
+Computer backend cannot expose DOM content. Check `extraction_backend` in tool
 responses when precision matters.
 
 Prefer `store: true` for durable research, crawls, and snapshots. Use
