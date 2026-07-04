@@ -604,11 +604,20 @@ func validVeniceEditResolution(model string, v any) bool {
 	if _, _, ok := parseWxH(s); ok {
 		return false
 	}
+	return veniceEditModelSupportsResolution(model)
+}
+
+func veniceEditModelSupportsResolution(model string) bool {
 	switch strings.ToLower(strings.TrimSpace(model)) {
-	case "flux-2-max-edit", "qwen-edit":
-		return false
-	default:
+	case "grok-imagine-edit",
+		"grok-imagine-quality-edit",
+		"gpt-image-2-edit",
+		"nano-banana-2-edit",
+		"nano-banana-pro-edit",
+		"wan-2-7-pro-edit":
 		return true
+	default:
+		return false
 	}
 }
 

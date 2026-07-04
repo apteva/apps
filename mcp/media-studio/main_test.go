@@ -1329,7 +1329,14 @@ func TestFilterModelsForImageEditCapability(t *testing.T) {
 }
 
 func TestBuildVeniceImageEditArgs_DropsUnsupportedModelResolution(t *testing.T) {
-	for _, model := range []string{"qwen-edit", "flux-2-max-edit"} {
+	for _, model := range []string{
+		"qwen-edit",
+		"qwen-image-2-edit",
+		"qwen-image-2-pro-edit",
+		"flux-2-max-edit",
+		"gpt-image-1-5-edit",
+		"seedream-v5-lite-edit",
+	} {
 		t.Run(model, func(t *testing.T) {
 			args := map[string]any{
 				"prompt":       "remove the tree",
@@ -1363,22 +1370,31 @@ func TestBuildVeniceImageEditArgs_DropsUnsupportedModelResolution(t *testing.T) 
 }
 
 func TestBuildVeniceImageEditArgs_KeepsSupportedModelResolution(t *testing.T) {
-	args := map[string]any{
-		"prompt":       "update the style",
-		"source_image": "AAAA",
-		"model":        "grok-imagine-edit",
-		"options": map[string]any{
-			"aspect_ratio":  "9:16",
-			"resolution":    "1K",
-			"output_format": "png",
-		},
-	}
-	got, err := buildImageArgs(args, "venice-ai", "image.edit")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if got["resolution"] != "1K" {
-		t.Fatalf("grok-imagine-edit should keep tier resolution: %+v", got)
+	for _, model := range []string{
+		"grok-imagine-edit",
+		"gpt-image-2-edit",
+		"nano-banana-2-edit",
+		"nano-banana-pro-edit",
+	} {
+		t.Run(model, func(t *testing.T) {
+			args := map[string]any{
+				"prompt":       "update the style",
+				"source_image": "AAAA",
+				"model":        model,
+				"options": map[string]any{
+					"aspect_ratio":  "9:16",
+					"resolution":    "1K",
+					"output_format": "png",
+				},
+			}
+			got, err := buildImageArgs(args, "venice-ai", "image.edit")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got["resolution"] != "1K" {
+				t.Fatalf("%s should keep tier resolution: %+v", model, got)
+			}
+		})
 	}
 }
 
