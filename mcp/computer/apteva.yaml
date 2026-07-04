@@ -2,9 +2,9 @@ schema: apteva-app/v1
 
 name: computer
 display_name: Computer
-version: 0.7.40
+version: 0.7.41
 description: |
-  Watch and steer browser sessions. v0.7.40 adds rendered DOM extraction for higher-level web tools.
+  Watch and steer browser sessions. v0.7.41 clarifies rendered DOM extraction as a low-level browser capability.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/computer
@@ -144,9 +144,9 @@ provides:
         annotate? (default false; set true for Set-of-Mark labels).
     - name: browser_extract
       description: |
-        Infrastructure-only rendered DOM extraction for higher-level web apps.
-        Agents should usually prefer the Web app's web_extract, web_search, and
-        web_research tools instead of calling this directly. Args: session_id,
+        Infrastructure-only rendered DOM extraction for advanced browser
+        integrations. General agents should usually prefer higher-level
+        browsing tools instead of calling this directly. Args: session_id,
         formats? (text, markdown, html, metadata, links, images), max_chars?,
         readability?, wait_ms?. Returns rendered page text, metadata, links,
         images, and browser/session metadata.

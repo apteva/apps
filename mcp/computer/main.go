@@ -52,9 +52,9 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: computer
 display_name: Computer
-version: 0.7.40
+version: 0.7.41
 description: |
-  Watch and steer browser sessions. v0.7.40 adds rendered DOM extraction for higher-level web tools.
+  Watch and steer browser sessions. v0.7.41 clarifies rendered DOM extraction as a low-level browser capability.
 scopes: [project, global]
 requires:
   permissions:
@@ -99,7 +99,7 @@ provides:
     - name: browser_screenshot
       description: "Capture a clean PNG of the session viewport. Args: session_id, annotate? (default false; set true for Set-of-Mark labels)."
     - name: browser_extract
-      description: "Infrastructure-only rendered DOM extraction for higher-level web apps. Agents should usually prefer the Web app's web_extract/web_search/web_research tools instead of calling this directly. Args: session_id, formats?, max_chars?, readability?, wait_ms?."
+      description: "Infrastructure-only rendered DOM extraction for advanced browser integrations. General agents should usually prefer higher-level browsing tools instead of calling this directly. Args: session_id, formats?, max_chars?, readability?, wait_ms?."
     - name: browser_close
       description: "Close a session opened by this app and release browser/provider resources. Use this when finished unless the user explicitly wants the session left open. Compatibility alias for browser_session(action=close)."
   ui_panels:
@@ -611,7 +611,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name: "browser_extract",
-			Description: "Infrastructure-only rendered DOM extraction for higher-level web apps. Agents should usually prefer the Web app's web_extract, web_search, and web_research tools instead of calling this directly. " +
+			Description: "Infrastructure-only rendered DOM extraction for advanced browser integrations. General agents should usually prefer higher-level browsing tools instead of calling this directly. " +
 				"Args: session_id, formats? (text, markdown, html, metadata, links, images), max_chars?, readability?, wait_ms?. " +
 				"Returns {session_id, backend, current_url, title, description, text, markdown, html, metadata, links, images, rendered, extraction_backend}.",
 			InputSchema: schemaObject(map[string]any{
