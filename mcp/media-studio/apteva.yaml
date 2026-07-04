@@ -2,12 +2,15 @@ schema: apteva-app/v1
 
 name: media-studio
 display_name: Media Studio
-version: 0.10.32
+version: 0.10.33
 description: |
   Generate images, video, audio, music, and avatars via compatible
   providers. ElevenLabs powers audio TTS, sound effects, and music.
   Optionally saves outputs to the Storage app for permanent, shareable
-  references. v0.10.32 forwards provider consent objects for
+  references. v0.10.33 filters Venice image-edit options per model so
+  Flux and Qwen edits no longer receive unsupported resolution tiers.
+
+  v0.10.32 forwards provider consent objects for
   face-bearing video reference jobs such as Seedance.
 
   v0.10.31 adds multiple reference image support for

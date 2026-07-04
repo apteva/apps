@@ -1328,30 +1328,57 @@ func TestFilterModelsForImageEditCapability(t *testing.T) {
 	}
 }
 
-func TestBuildVeniceImageEditArgs(t *testing.T) {
+func TestBuildVeniceImageEditArgs_DropsUnsupportedModelResolution(t *testing.T) {
+	for _, model := range []string{"qwen-edit", "flux-2-max-edit"} {
+		t.Run(model, func(t *testing.T) {
+			args := map[string]any{
+				"prompt":       "remove the tree",
+				"source_image": "AAAA",
+				"model":        model,
+				"options": map[string]any{
+					"aspect_ratio":  "16:9",
+					"resolution":    "2K",
+					"output_format": "png",
+					"safe_mode":     false,
+				},
+			}
+			got, err := buildImageArgs(args, "venice-ai", "image.edit")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if got["model"] != model || got["prompt"] != "remove the tree" || got["image"] != "AAAA" {
+				t.Errorf("base fields: %+v", got)
+			}
+			if got["aspect_ratio"] != "16:9" || got["output_format"] != "png" {
+				t.Errorf("options not passed through: %+v", got)
+			}
+			if _, ok := got["resolution"]; ok {
+				t.Errorf("%s must not receive resolution: %+v", model, got)
+			}
+			if got["safe_mode"] != false {
+				t.Errorf("safe_mode not passed through: %+v", got["safe_mode"])
+			}
+		})
+	}
+}
+
+func TestBuildVeniceImageEditArgs_KeepsSupportedModelResolution(t *testing.T) {
 	args := map[string]any{
-		"prompt":       "remove the tree",
+		"prompt":       "update the style",
 		"source_image": "AAAA",
-		"model":        "qwen-edit",
+		"model":        "grok-imagine-edit",
 		"options": map[string]any{
-			"aspect_ratio":  "16:9",
-			"resolution":    "2K",
+			"aspect_ratio":  "9:16",
+			"resolution":    "1K",
 			"output_format": "png",
-			"safe_mode":     false,
 		},
 	}
 	got, err := buildImageArgs(args, "venice-ai", "image.edit")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got["model"] != "qwen-edit" || got["prompt"] != "remove the tree" || got["image"] != "AAAA" {
-		t.Errorf("base fields: %+v", got)
-	}
-	if got["aspect_ratio"] != "16:9" || got["resolution"] != "2K" || got["output_format"] != "png" {
-		t.Errorf("options not passed through: %+v", got)
-	}
-	if got["safe_mode"] != false {
-		t.Errorf("safe_mode not passed through: %+v", got["safe_mode"])
+	if got["resolution"] != "1K" {
+		t.Fatalf("grok-imagine-edit should keep tier resolution: %+v", got)
 	}
 }
 

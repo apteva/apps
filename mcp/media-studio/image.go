@@ -551,7 +551,7 @@ func buildVeniceImageEditArgs(args map[string]any) map[string]any {
 		}
 		for _, k := range passThrough {
 			if v, exists := opts[k]; exists {
-				if k == "resolution" && !validVeniceEditResolution(v) {
+				if k == "resolution" && !validVeniceEditResolution(model, v) {
 					continue
 				}
 				out[k] = v
@@ -577,7 +577,7 @@ func buildVeniceImageMultiEditArgs(args map[string]any, model, prompt string, so
 				if k == "quality" && !validVeniceEditQuality(v) {
 					continue
 				}
-				if k == "resolution" && !validVeniceEditResolution(v) {
+				if k == "resolution" && !validVeniceEditResolution(model, v) {
 					continue
 				}
 				out[k] = v
@@ -596,7 +596,7 @@ func validVeniceEditQuality(v any) bool {
 	}
 }
 
-func validVeniceEditResolution(v any) bool {
+func validVeniceEditResolution(model string, v any) bool {
 	s := strings.TrimSpace(fmt.Sprint(v))
 	if s == "" {
 		return false
@@ -604,7 +604,12 @@ func validVeniceEditResolution(v any) bool {
 	if _, _, ok := parseWxH(s); ok {
 		return false
 	}
-	return true
+	switch strings.ToLower(strings.TrimSpace(model)) {
+	case "flux-2-max-edit", "qwen-edit":
+		return false
+	default:
+		return true
+	}
 }
 
 func resolvedSourceImages(args map[string]any) []string {
