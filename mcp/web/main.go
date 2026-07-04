@@ -1,4 +1,4 @@
-// Web v0.1.2 — browser-backed web intelligence.
+// Web v0.1.3 — browser-backed web intelligence.
 //
 // The app requires computer for session lifecycle, rendered extraction, and
 // screenshots. It opens a browser before search/extract/crawl/map/research page
@@ -10,6 +10,8 @@ import (
 	"bytes"
 	"context"
 	"crypto/rand"
+	"crypto/sha256"
+	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
@@ -19,6 +21,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -31,7 +34,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: web
 display_name: Web
-version: 0.1.2
+version: 0.1.3
 description: Browser-native web intelligence for agents.
 author: Apteva
 scopes: [project, global]
@@ -48,17 +51,17 @@ provides:
     - prefix: /
   mcp_tools:
     - name: web_search
-      description: "Browser-backed web search. Args: query, limit?, engine?, backend?, viewport?, visit_top?."
+      description: "Browser-backed web search. Args: query, limit?, engine?, backend?, viewport?, visit_top?, cache?, max_age?, cache_ttl?."
     - name: web_extract
-      description: "Open a URL in a browser session and extract readable text, metadata, and links."
+      description: "Open a URL in a browser session and extract readable text, metadata, links, and cache metadata."
     - name: web_crawl
-      description: "Browser-backed bounded crawl from seed URLs."
+      description: "Browser-backed bounded crawl from seed URLs with optional response caching."
     - name: web_map
-      description: "Fast site map discovery from seed URLs."
+      description: "Fast site map discovery from seed URLs with optional response caching."
     - name: web_research
-      description: "Multi-step browser-backed research with citations and artifacts."
+      description: "Multi-step browser-backed research with citations, artifacts, and optional response caching."
     - name: web_snapshot
-      description: "Capture visual evidence for a URL or existing computer session."
+      description: "Capture visual evidence for a URL or existing computer session. Snapshot cache is only used when max_age is set."
   ui_panels:
     - slot: project.page
       label: Web
@@ -84,13 +87,19 @@ upgrade_policy: auto-patch
 `
 
 const (
-	defaultHTTPTimeout = 20 * time.Second
-	defaultMaxChars    = 20000
-	maxFetchBytes      = 5 * 1024 * 1024
-	defaultCrawlPages  = 10
-	maxCrawlPages      = 50
-	defaultSearchLimit = 10
-	maxSearchLimit     = 25
+	defaultHTTPTimeout    = 20 * time.Second
+	defaultMaxChars       = 20000
+	maxFetchBytes         = 5 * 1024 * 1024
+	defaultCrawlPages     = 10
+	maxCrawlPages         = 50
+	defaultSearchLimit    = 10
+	maxSearchLimit        = 25
+	defaultSearchMaxAge   = 15 * time.Minute
+	defaultSearchTTL      = time.Hour
+	defaultExtractMaxAge  = 24 * time.Hour
+	defaultExtractTTL     = 24 * time.Hour
+	defaultResearchMaxAge = time.Hour
+	defaultResearchTTL    = time.Hour
 )
 
 type App struct{}
@@ -138,6 +147,9 @@ func (a *App) MCPTools() []sdk.Tool {
 				"viewport":  viewportSchema(),
 				"visit_top": map[string]any{"type": "boolean"},
 				"store":     map[string]any{"type": "boolean"},
+				"cache":     cacheModeSchema(),
+				"max_age":   cacheSecondsSchema("Maximum accepted cached result age in seconds. Default 900 for search."),
+				"cache_ttl": cacheSecondsSchema("How long to retain newly fetched results in seconds. Default 3600 for search."),
 			}, []string{"query"}),
 			Handler: a.toolSearch,
 		},
@@ -152,6 +164,9 @@ func (a *App) MCPTools() []sdk.Tool {
 				"max_chars": map[string]any{"type": "integer"},
 				"store":     map[string]any{"type": "boolean"},
 				"snapshot":  map[string]any{"type": "boolean"},
+				"cache":     cacheModeSchema(),
+				"max_age":   cacheSecondsSchema("Maximum accepted cached page age in seconds. Default 86400 for extraction."),
+				"cache_ttl": cacheSecondsSchema("How long to retain newly extracted page data in seconds. Default 86400."),
 			}, []string{"url"}),
 			Handler: a.toolExtract,
 		},
@@ -168,6 +183,9 @@ func (a *App) MCPTools() []sdk.Tool {
 				"viewport":  viewportSchema(),
 				"store":     map[string]any{"type": "boolean"},
 				"max_chars": map[string]any{"type": "integer"},
+				"cache":     cacheModeSchema(),
+				"max_age":   cacheSecondsSchema("Maximum accepted cached crawl age in seconds. Default 86400."),
+				"cache_ttl": cacheSecondsSchema("How long to retain newly crawled data in seconds. Default 86400."),
 			}, nil),
 			Handler: a.toolCrawl,
 		},
@@ -183,6 +201,9 @@ func (a *App) MCPTools() []sdk.Tool {
 				"backend":   map[string]any{"type": "string"},
 				"viewport":  viewportSchema(),
 				"store":     map[string]any{"type": "boolean"},
+				"cache":     cacheModeSchema(),
+				"max_age":   cacheSecondsSchema("Maximum accepted cached map age in seconds. Default 86400."),
+				"cache_ttl": cacheSecondsSchema("How long to retain newly mapped data in seconds. Default 86400."),
 			}, nil),
 			Handler: a.toolMap,
 		},
@@ -198,6 +219,9 @@ func (a *App) MCPTools() []sdk.Tool {
 				"viewport":    viewportSchema(),
 				"snapshots":   map[string]any{"type": "boolean"},
 				"store":       map[string]any{"type": "boolean"},
+				"cache":       cacheModeSchema(),
+				"max_age":     cacheSecondsSchema("Maximum accepted cached research age in seconds. Default 3600."),
+				"cache_ttl":   cacheSecondsSchema("How long to retain newly generated research in seconds. Default 3600."),
 			}, []string{"question"}),
 			Handler: a.toolResearch,
 		},
@@ -211,6 +235,9 @@ func (a *App) MCPTools() []sdk.Tool {
 				"viewport":   viewportSchema(),
 				"label":      map[string]any{"type": "string"},
 				"store":      map[string]any{"type": "boolean"},
+				"cache":      cacheModeSchema(),
+				"max_age":    cacheSecondsSchema("Maximum accepted cached snapshot age in seconds. Snapshot caching is disabled unless max_age is set."),
+				"cache_ttl":  cacheSecondsSchema("How long to retain newly captured snapshots in seconds. Defaults to max_age when set."),
 			}, nil),
 			Handler: a.toolSnapshot,
 		},
@@ -302,6 +329,33 @@ type crawlEdge struct {
 	Text string `json:"text,omitempty"`
 }
 
+type cachePolicy struct {
+	Kind           string
+	Mode           string
+	Key            string
+	RequestJSON    string
+	MaxAge         time.Duration
+	TTL            time.Duration
+	Read           bool
+	Write          bool
+	ForceOnly      bool
+	ExplicitMaxAge bool
+	Reason         string
+}
+
+type cacheInfo struct {
+	Hit             bool   `json:"hit"`
+	Mode            string `json:"mode"`
+	CacheKey        string `json:"cache_key"`
+	AgeSeconds      int64  `json:"age_seconds,omitempty"`
+	MaxAgeSeconds   int64  `json:"max_age_seconds,omitempty"`
+	CacheTTLSeconds int64  `json:"cache_ttl_seconds,omitempty"`
+	CachedAt        string `json:"cached_at,omitempty"`
+	ExpiresAt       string `json:"expires_at,omitempty"`
+	Stored          bool   `json:"stored,omitempty"`
+	Reason          string `json:"reason,omitempty"`
+}
+
 func (a *App) toolSearch(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	query := strings.TrimSpace(stringArg(args, "query"))
 	if query == "" {
@@ -314,6 +368,18 @@ func (a *App) toolSearch(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	engine := firstNonEmpty(stringArg(args, "engine"), configString(ctx, "default_search_engine"), "duckduckgo")
 	if engine != "duckduckgo" {
 		return nil, fmt.Errorf("unsupported engine %q", engine)
+	}
+	policy, err := newCachePolicy("search", args)
+	if err != nil {
+		completeRun(ctx, runID, "failed", nil, err)
+		return nil, err
+	}
+	if cached, ok, err := loadCachedResponse(ctx, policy); ok {
+		completeRun(ctx, runID, "completed", cached, nil)
+		return cached, nil
+	} else if err != nil {
+		completeRun(ctx, runID, "failed", nil, err)
+		return nil, err
 	}
 	searchURL := duckDuckGoURL(query)
 	browser, browserErr := a.openBrowser(ctx, searchURL, args)
@@ -344,6 +410,7 @@ func (a *App) toolSearch(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		"extraction_backend": "http_after_browser_open",
 		"fetch":              fetchMeta,
 	}
+	applyCacheAfterFetch(ctx, policy, out)
 	if boolArg(args, "store") {
 		if art, err := storeJSONArtifact(ctx, runID, "search", searchURL, "search: "+query, out); err == nil {
 			out["artifact"] = art
@@ -363,8 +430,21 @@ func (a *App) toolExtract(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	runID, _ := startRun(ctx, "extract", args)
 	defer failRunOnPanic(ctx, runID)
 
+	policy, err := newCachePolicy("extract", args)
+	if err != nil {
+		completeRun(ctx, runID, "failed", nil, err)
+		return nil, err
+	}
+	if cached, ok, err := loadCachedResponse(ctx, policy); ok {
+		completeRun(ctx, runID, "completed", cached, nil)
+		return cached, nil
+	} else if err != nil {
+		completeRun(ctx, runID, "failed", nil, err)
+		return nil, err
+	}
 	doc := a.extractURL(ctx, runID, target, args, true)
 	out := map[string]any{"page": doc}
+	applyCacheAfterFetch(ctx, policy, out)
 	if doc.Error != "" {
 		err := errors.New(doc.Error)
 		completeRun(ctx, runID, "failed", out, err)
@@ -382,6 +462,18 @@ func (a *App) toolCrawl(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	runID, _ := startRun(ctx, "crawl", args)
 	defer failRunOnPanic(ctx, runID)
 
+	policy, err := newCachePolicy("crawl", args)
+	if err != nil {
+		completeRun(ctx, runID, "failed", nil, err)
+		return nil, err
+	}
+	if cached, ok, err := loadCachedResponse(ctx, policy); ok {
+		completeRun(ctx, runID, "completed", cached, nil)
+		return cached, nil
+	} else if err != nil {
+		completeRun(ctx, runID, "failed", nil, err)
+		return nil, err
+	}
 	maxPages := boundedInt(intArg(args, "max_pages"), defaultCrawlPages, 1, maxCrawlPages)
 	maxDepth := boundedInt(intArg(args, "max_depth"), 1, 0, 5)
 	sameHost := boolArgDefault(args, "same_host", true)
@@ -393,6 +485,7 @@ func (a *App) toolCrawl(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		"count":              len(pages),
 		"extraction_backend": "http_after_browser_open",
 	}
+	applyCacheAfterFetch(ctx, policy, out)
 	if boolArgDefault(args, "store", storeDefault(ctx)) {
 		if art, err := storeJSONArtifact(ctx, runID, "crawl", seeds[0], "crawl", out); err == nil {
 			out["artifact"] = art
@@ -410,6 +503,18 @@ func (a *App) toolMap(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	runID, _ := startRun(ctx, "map", args)
 	defer failRunOnPanic(ctx, runID)
 
+	policy, err := newCachePolicy("map", args)
+	if err != nil {
+		completeRun(ctx, runID, "failed", nil, err)
+		return nil, err
+	}
+	if cached, ok, err := loadCachedResponse(ctx, policy); ok {
+		completeRun(ctx, runID, "completed", cached, nil)
+		return cached, nil
+	} else if err != nil {
+		completeRun(ctx, runID, "failed", nil, err)
+		return nil, err
+	}
 	maxPages := boundedInt(intArg(args, "max_pages"), defaultCrawlPages, 1, maxCrawlPages)
 	maxDepth := boundedInt(intArg(args, "max_depth"), 2, 0, 5)
 	sameHost := boolArgDefault(args, "same_host", true)
@@ -427,6 +532,7 @@ func (a *App) toolMap(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		})
 	}
 	out := map[string]any{"seeds": seeds, "pages": mapPages, "edges": edges, "count": len(mapPages)}
+	applyCacheAfterFetch(ctx, policy, out)
 	if boolArgDefault(args, "store", storeDefault(ctx)) {
 		if art, err := storeJSONArtifact(ctx, runID, "map", seeds[0], "map", out); err == nil {
 			out["artifact"] = art
@@ -444,6 +550,18 @@ func (a *App) toolResearch(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	runID, _ := startRun(ctx, "research", args)
 	defer failRunOnPanic(ctx, runID)
 
+	policy, err := newCachePolicy("research", args)
+	if err != nil {
+		completeRun(ctx, runID, "failed", nil, err)
+		return nil, err
+	}
+	if cached, ok, err := loadCachedResponse(ctx, policy); ok {
+		completeRun(ctx, runID, "completed", cached, nil)
+		return cached, nil
+	} else if err != nil {
+		completeRun(ctx, runID, "failed", nil, err)
+		return nil, err
+	}
 	queries := stringSliceArg(args, "queries")
 	if len(queries) == 0 {
 		queries = []string{question}
@@ -458,6 +576,7 @@ func (a *App) toolResearch(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 			"query": q,
 			"limit": maxResults,
 			"store": false,
+			"cache": "bypass",
 		}))
 		if err != nil {
 			ctx.Logger().Warn("research search failed", "query", q, "err", err.Error())
@@ -506,6 +625,7 @@ func (a *App) toolResearch(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		"open_questions":     researchGaps(sources),
 		"extraction_backend": "http_after_browser_open",
 	}
+	applyCacheAfterFetch(ctx, policy, out)
 	if boolArgDefault(args, "store", storeDefault(ctx)) {
 		if art, err := storeJSONArtifact(ctx, runID, "research", "", "research: "+question, out); err == nil {
 			out["artifact"] = art
@@ -518,7 +638,22 @@ func (a *App) toolResearch(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 func (a *App) toolSnapshot(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	runID, _ := startRun(ctx, "snapshot", args)
 	defer failRunOnPanic(ctx, runID)
+	policy, policyErr := newCachePolicy("snapshot", args)
+	if policyErr != nil {
+		completeRun(ctx, runID, "failed", nil, policyErr)
+		return nil, policyErr
+	}
+	if cached, ok, err := loadCachedResponse(ctx, policy); ok {
+		completeRun(ctx, runID, "completed", cached, nil)
+		return cached, nil
+	} else if err != nil {
+		completeRun(ctx, runID, "failed", nil, err)
+		return nil, err
+	}
 	out, err := a.snapshot(ctx, runID, args)
+	if out != nil {
+		applyCacheAfterFetch(ctx, policy, out)
+	}
 	status := "completed"
 	if err != nil {
 		status = "failed"
@@ -794,6 +929,306 @@ func (a *App) extractBrowserDOM(ctx *sdk.AppCtx, sessionID string, args map[stri
 		out.ExtractionBackend = "browser_dom"
 	}
 	return &out, nil
+}
+
+// ─── Response cache ───────────────────────────────────────────────
+
+func newCachePolicy(kind string, args map[string]any) (cachePolicy, error) {
+	mode := strings.ToLower(strings.TrimSpace(firstNonEmpty(stringArg(args, "cache"), "auto")))
+	switch mode {
+	case "auto", "bypass", "refresh", "force":
+	default:
+		return cachePolicy{}, fmt.Errorf("cache must be one of auto, bypass, refresh, force")
+	}
+
+	maxAge, explicitMaxAge := cacheDurationArg(args, "max_age", defaultMaxAge(kind))
+	ttl, explicitTTL := cacheDurationArg(args, "cache_ttl", defaultCacheTTL(kind))
+	if kind == "snapshot" && explicitMaxAge && !explicitTTL {
+		ttl = maxAge
+	}
+	if maxAge < 0 || ttl < 0 {
+		return cachePolicy{}, errors.New("max_age and cache_ttl must be >= 0")
+	}
+
+	requestJSON, key, err := cacheKey(kind, args)
+	if err != nil {
+		return cachePolicy{}, err
+	}
+	p := cachePolicy{
+		Kind:           kind,
+		Mode:           mode,
+		Key:            key,
+		RequestJSON:    requestJSON,
+		MaxAge:         maxAge,
+		TTL:            ttl,
+		ExplicitMaxAge: explicitMaxAge,
+	}
+
+	switch mode {
+	case "bypass":
+		p.Read = false
+		p.Write = false
+		p.Reason = "bypass requested"
+	case "refresh":
+		p.Read = false
+		p.Write = ttl > 0
+	case "force":
+		p.Read = true
+		p.Write = false
+		p.ForceOnly = true
+	case "auto":
+		p.Read = maxAge > 0
+		p.Write = ttl > 0
+		if maxAge == 0 {
+			p.Reason = "max_age=0"
+		}
+	}
+
+	if kind == "snapshot" && !explicitMaxAge {
+		p.Read = false
+		p.Write = false
+		if p.Reason == "" {
+			p.Reason = "snapshot cache requires max_age"
+		}
+	}
+	if kind == "extract" && boolArg(args, "snapshot") && !explicitMaxAge {
+		p.Read = false
+		p.Write = false
+		if p.Reason == "" {
+			p.Reason = "snapshot requested"
+		}
+	}
+	return p, nil
+}
+
+func loadCachedResponse(ctx *sdk.AppCtx, p cachePolicy) (map[string]any, bool, error) {
+	if !p.Read {
+		return nil, false, nil
+	}
+	var responseJSON string
+	var createdAt time.Time
+	var expiresAt sql.NullTime
+	err := ctx.AppDB().QueryRow(
+		`SELECT response_json, created_at, expires_at
+		   FROM web_cache
+		  WHERE project_id=? AND kind=? AND cache_key=?`,
+		projectID(ctx), p.Kind, p.Key,
+	).Scan(&responseJSON, &createdAt, &expiresAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		if p.ForceOnly {
+			return nil, false, fmt.Errorf("cache miss for %s", p.Kind)
+		}
+		return nil, false, nil
+	}
+	if err != nil {
+		return nil, false, err
+	}
+	now := time.Now().UTC()
+	age := now.Sub(createdAt)
+	if !p.ForceOnly {
+		if p.MaxAge <= 0 || age > p.MaxAge {
+			return nil, false, nil
+		}
+		if expiresAt.Valid && now.After(expiresAt.Time) {
+			return nil, false, nil
+		}
+	}
+	var out map[string]any
+	if err := json.Unmarshal([]byte(responseJSON), &out); err != nil {
+		return nil, false, err
+	}
+	_, _ = ctx.AppDB().Exec(
+		`UPDATE web_cache SET last_accessed_at=?, hit_count=hit_count+1 WHERE project_id=? AND kind=? AND cache_key=?`,
+		now, projectID(ctx), p.Kind, p.Key,
+	)
+	info := cacheInfo{
+		Hit:             true,
+		Mode:            p.Mode,
+		CacheKey:        p.Key,
+		AgeSeconds:      int64(age.Seconds()),
+		MaxAgeSeconds:   int64(p.MaxAge.Seconds()),
+		CacheTTLSeconds: int64(p.TTL.Seconds()),
+		CachedAt:        createdAt.UTC().Format(time.RFC3339),
+	}
+	if expiresAt.Valid {
+		info.ExpiresAt = expiresAt.Time.UTC().Format(time.RFC3339)
+	}
+	out["cache"] = info
+	return out, true, nil
+}
+
+func applyCacheAfterFetch(ctx *sdk.AppCtx, p cachePolicy, out map[string]any) {
+	info := cacheInfo{
+		Hit:             false,
+		Mode:            p.Mode,
+		CacheKey:        p.Key,
+		MaxAgeSeconds:   int64(p.MaxAge.Seconds()),
+		CacheTTLSeconds: int64(p.TTL.Seconds()),
+		Reason:          p.Reason,
+	}
+	if p.Write && !responseHasError(out) {
+		if err := storeCachedResponse(ctx, p, out); err != nil {
+			info.Reason = "cache store failed: " + err.Error()
+		} else {
+			info.Stored = true
+		}
+	}
+	out["cache"] = info
+}
+
+func storeCachedResponse(ctx *sdk.AppCtx, p cachePolicy, out map[string]any) error {
+	payload := cloneResponseForCache(out)
+	b, err := json.Marshal(payload)
+	if err != nil {
+		return err
+	}
+	cacheURL, title := cacheResponseURLTitle(out)
+	now := time.Now().UTC()
+	var expires any
+	if p.TTL > 0 {
+		expires = now.Add(p.TTL)
+	}
+	_, err = ctx.AppDB().Exec(
+		`INSERT INTO web_cache
+			(project_id, kind, cache_key, request_json, response_json, url, title, created_at, expires_at, last_accessed_at, hit_count)
+		 VALUES (?,?,?,?,?,?,?,?,?,?,0)
+		 ON CONFLICT(project_id, kind, cache_key) DO UPDATE SET
+			request_json=excluded.request_json,
+			response_json=excluded.response_json,
+			url=excluded.url,
+			title=excluded.title,
+			created_at=excluded.created_at,
+			expires_at=excluded.expires_at,
+			last_accessed_at=excluded.last_accessed_at,
+			hit_count=0`,
+		projectID(ctx), p.Kind, p.Key, p.RequestJSON, string(b), nullIfEmpty(cacheURL), nullIfEmpty(title), now, expires, now,
+	)
+	return err
+}
+
+func cacheKey(kind string, args map[string]any) (string, string, error) {
+	cleaned := map[string]any{"kind": kind}
+	for k, v := range args {
+		switch k {
+		case "cache", "max_age", "cache_ttl", "store":
+			continue
+		}
+		cleaned[k] = normalizeCacheValue(k, v)
+	}
+	b, err := json.Marshal(cleaned)
+	if err != nil {
+		return "", "", err
+	}
+	sum := sha256.Sum256(b)
+	return string(b), hex.EncodeToString(sum[:]), nil
+}
+
+func normalizeCacheValue(key string, v any) any {
+	switch x := v.(type) {
+	case []string:
+		cp := append([]string(nil), x...)
+		if key == "formats" || key == "urls" {
+			sort.Strings(cp)
+		}
+		return cp
+	case []any:
+		cp := append([]any(nil), x...)
+		if key == "formats" || key == "urls" {
+			ss := make([]string, 0, len(cp))
+			for _, item := range cp {
+				ss = append(ss, fmt.Sprint(item))
+			}
+			sort.Strings(ss)
+			return ss
+		}
+		return cp
+	case map[string]any:
+		out := make(map[string]any, len(x))
+		for k, v := range x {
+			out[k] = normalizeCacheValue(k, v)
+		}
+		return out
+	default:
+		return v
+	}
+}
+
+func cloneResponseForCache(out map[string]any) map[string]any {
+	cp := make(map[string]any, len(out))
+	for k, v := range out {
+		if k == "cache" {
+			continue
+		}
+		cp[k] = v
+	}
+	return cp
+}
+
+func responseHasError(out map[string]any) bool {
+	if errText, _ := out["error"].(string); errText != "" {
+		return true
+	}
+	if page, ok := out["page"].(pageDoc); ok && page.Error != "" {
+		return true
+	}
+	if page, ok := out["page"].(map[string]any); ok {
+		if errText, _ := page["error"].(string); errText != "" {
+			return true
+		}
+	}
+	return false
+}
+
+func cacheResponseURLTitle(out map[string]any) (string, string) {
+	if page, ok := out["page"].(pageDoc); ok {
+		return firstNonEmpty(page.FinalURL, page.URL), page.Title
+	}
+	if page, ok := out["page"].(map[string]any); ok {
+		return stringFromAny(firstNonEmptyAny(page["final_url"], page["url"])), stringFromAny(page["title"])
+	}
+	if u := stringFromAny(out["url"]); u != "" {
+		return u, stringFromAny(out["title"])
+	}
+	if q := stringFromAny(out["query"]); q != "" {
+		return "", q
+	}
+	if q := stringFromAny(out["question"]); q != "" {
+		return "", q
+	}
+	return "", ""
+}
+
+func defaultMaxAge(kind string) time.Duration {
+	switch kind {
+	case "search":
+		return defaultSearchMaxAge
+	case "extract", "crawl", "map":
+		return defaultExtractMaxAge
+	case "research":
+		return defaultResearchMaxAge
+	default:
+		return 0
+	}
+}
+
+func defaultCacheTTL(kind string) time.Duration {
+	switch kind {
+	case "search":
+		return defaultSearchTTL
+	case "extract", "crawl", "map":
+		return defaultExtractTTL
+	case "research":
+		return defaultResearchTTL
+	default:
+		return 0
+	}
+}
+
+func cacheDurationArg(args map[string]any, key string, fallback time.Duration) (time.Duration, bool) {
+	if _, ok := args[key]; !ok {
+		return fallback, false
+	}
+	return time.Duration(intArg(args, key)) * time.Second, true
 }
 
 // ─── Retrieval and parsing ────────────────────────────────────────
@@ -1125,6 +1560,22 @@ func viewportSchema() map[string]any {
 	}
 }
 
+func cacheModeSchema() map[string]any {
+	return map[string]any{
+		"type":        "string",
+		"enum":        []string{"auto", "bypass", "refresh", "force"},
+		"description": "auto uses a fresh-enough cached response when available; bypass ignores and does not write cache; refresh fetches live and updates cache; force returns only cached data and errors on miss.",
+	}
+}
+
+func cacheSecondsSchema(description string) map[string]any {
+	return map[string]any{
+		"type":        "integer",
+		"minimum":     0,
+		"description": description,
+	}
+}
+
 func duckDuckGoURL(query string) string {
 	return "https://duckduckgo.com/html/?" + url.Values{"q": []string{query}}.Encode()
 }
@@ -1293,7 +1744,7 @@ func synthesizeExtractiveAnswer(question string, citations []map[string]any) str
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "Browser-backed research for %q reviewed %d source(s). ", question, len(citations))
-	b.WriteString("Key evidence is available in the citations array; v0.1.2 returns an extractive report rather than an LLM-written conclusion.")
+	b.WriteString("Key evidence is available in the citations array; v0.1.3 returns an extractive report rather than an LLM-written conclusion.")
 	return b.String()
 }
 
@@ -1424,6 +1875,26 @@ func firstNonEmpty(vals ...string) string {
 		}
 	}
 	return ""
+}
+
+func firstNonEmptyAny(vals ...any) any {
+	for _, v := range vals {
+		if stringFromAny(v) != "" {
+			return v
+		}
+	}
+	return nil
+}
+
+func stringFromAny(v any) string {
+	switch x := v.(type) {
+	case string:
+		return strings.TrimSpace(x)
+	case fmt.Stringer:
+		return strings.TrimSpace(x.String())
+	default:
+		return ""
+	}
 }
 
 func truncateString(s string, max int) string {

@@ -37,6 +37,17 @@ matters.
 Prefer `store: true` for durable research, crawls, and snapshots. Use
 `snapshots: true` in `web_research` when the user needs visual proof.
 
+## Cache controls
+
+Responses include a top-level `cache` object. Use the defaults for ordinary
+web work. Pass `cache: "bypass"` or `max_age: 0` when the user asks for latest,
+today, prices, status, news, or other freshness-sensitive data. Pass
+`cache: "refresh"` to force a live browser visit and update the cache. Pass
+`cache: "force"` only when cached data is required and a miss should fail.
+
+Default freshness windows: search is 15 minutes, extract/crawl/map are 24 hours,
+research is 1 hour. Snapshot caching is disabled unless `max_age` is set.
+
 ## Attachments
 
 After a high-value `web_search` or `web_research`, attach `web-result-card` for

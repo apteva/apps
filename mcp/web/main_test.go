@@ -100,6 +100,50 @@ func TestExtractURLUsesComputerDOMParser(t *testing.T) {
 	}
 }
 
+func TestExtractUsesResponseCache(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		fmt.Fprint(w, `<html><head><title>Cached Page</title></head><body><h1>Cached</h1></body></html>`)
+	}))
+	defer srv.Close()
+
+	plat := newFakePlatform()
+	ctx, app := newTestCtx(t, plat)
+	args := map[string]any{"url": srv.URL, "store": false, "max_age": 3600}
+
+	first, err := app.toolExtract(ctx, args)
+	if err != nil {
+		t.Fatalf("first extract: %v", err)
+	}
+	firstCache := first.(map[string]any)["cache"].(cacheInfo)
+	if firstCache.Hit || !firstCache.Stored {
+		t.Fatalf("first cache=%#v, want miss stored", firstCache)
+	}
+	if got := len(plat.callLog()); got != 3 {
+		t.Fatalf("first call count=%d, want 3", got)
+	}
+
+	second, err := app.toolExtract(ctx, args)
+	if err != nil {
+		t.Fatalf("second extract: %v", err)
+	}
+	secondCache := second.(map[string]any)["cache"].(cacheInfo)
+	if !secondCache.Hit || secondCache.AgeSeconds < 0 {
+		t.Fatalf("second cache=%#v, want hit", secondCache)
+	}
+	if got := len(plat.callLog()); got != 3 {
+		t.Fatalf("second call count=%d, want still 3 (cache hit)", got)
+	}
+
+	_, err = app.toolExtract(ctx, map[string]any{"url": srv.URL, "store": false, "cache": "bypass", "max_age": 3600})
+	if err != nil {
+		t.Fatalf("bypass extract: %v", err)
+	}
+	if got := len(plat.callLog()); got != 6 {
+		t.Fatalf("bypass call count=%d, want 6", got)
+	}
+}
+
 func TestSnapshotUploadsAndInjectsProjectID(t *testing.T) {
 	plat := newFakePlatform()
 	plat.storageID = 88

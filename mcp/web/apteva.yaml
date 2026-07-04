@@ -2,13 +2,13 @@ schema: apteva-app/v1
 
 name: web
 display_name: Web
-version: 0.1.2
+version: 0.1.3
 description: |
   Browser-native web intelligence for agents. Provides JSON-first search,
   extraction, crawl, map, research, and snapshot tools using the computer app
   as the required browser/session backend, with storage for durable artifacts.
 
-  v0.1.2 opens real browser sessions for search, extraction, crawl, map,
+  v0.1.3 adds response caching controls. v0.1.2 opens real browser sessions for search, extraction, crawl, map,
   research source visits, and snapshots. Text extraction prefers rendered
   browser DOM and returns cleaner text, markdown, metadata, structured data,
   links, and images, falling back to HTTP retrieval when the lower-level
@@ -40,31 +40,37 @@ provides:
     - name: web_search
       description: |
         Browser-backed web search. Args: query, limit?, engine? (duckduckgo),
-        backend?, viewport?, visit_top? bool. Returns normalized JSON results.
+        backend?, viewport?, visit_top? bool, cache?, max_age?, cache_ttl?.
+        Returns normalized JSON results with cache metadata.
     - name: web_extract
       description: |
         Open a URL in a browser session, extract readable text, markdown,
         metadata, structured data, links, images, and optionally store the
         artifact. Args: url, formats?, backend?, viewport?, max_chars?,
-        store? bool, snapshot? bool.
+        store? bool, snapshot? bool, cache?, max_age?, cache_ttl?.
     - name: web_crawl
       description: |
         Browser-backed bounded crawl from one or more seed URLs. Args: url or
-        urls, max_pages?, max_depth?, same_host?, backend?, store? bool.
+        urls, max_pages?, max_depth?, same_host?, backend?, store? bool,
+        cache?, max_age?, cache_ttl?.
     - name: web_map
       description: |
         Fast site map discovery from one or more seed URLs. Args: url or urls,
-        max_pages?, max_depth?, same_host?, backend?, store? bool.
+        max_pages?, max_depth?, same_host?, backend?, store? bool, cache?,
+        max_age?, cache_ttl?.
     - name: web_research
       description: |
         Multi-step browser-backed research. Args: question, queries?,
-        max_results?, max_sources?, backend?, snapshots? bool, store? bool.
+        max_results?, max_sources?, backend?, snapshots? bool, store? bool,
+        cache?, max_age?, cache_ttl?.
         Returns an extractive report JSON with citations, sources, gaps, and
         artifacts.
     - name: web_snapshot
       description: |
         Capture visual evidence for a URL or existing computer session.
-        Args: url? or session_id?, backend?, viewport?, label?, store? bool.
+        Args: url? or session_id?, backend?, viewport?, label?, store? bool,
+        cache?, max_age?, cache_ttl?. Snapshot cache is disabled unless
+        max_age is set.
         Returns screenshot metadata, storage_id/url when stored, and session
         metadata.
 
