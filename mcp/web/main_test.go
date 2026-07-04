@@ -82,6 +82,17 @@ func TestExtractURLUsesComputerDOMParser(t *testing.T) {
 	if len(page.Links) != 1 || page.Links[0].URL != srv.URL+"/next" {
 		t.Fatalf("links=%#v", page.Links)
 	}
+	if page.Markdown != "# Hello\n\nThis page has useful text." {
+		t.Fatalf("markdown=%q", page.Markdown)
+	}
+	if got := page.StructuredData["json_ld"]; got == nil {
+		t.Fatalf("structured_data missing json_ld: %#v", page.StructuredData)
+	}
+	extractArgs := plat.lastCall("computer", "browser_extract")
+	formats, _ := extractArgs["formats"].([]string)
+	if len(formats) != 6 || formats[0] != "text" || formats[3] != "structured_data" {
+		t.Fatalf("formats=%#v", extractArgs["formats"])
+	}
 	calls := plat.callLog()
 	want := []string{"computer.browser_open", "computer.browser_extract", "computer.browser_close"}
 	if !sameOrderedPrefix(calls, want) {
@@ -175,6 +186,7 @@ func (p *fakePlatform) respond(app, tool string, in map[string]any) map[string]a
 			"markdown":           "# Hello\n\nThis page has useful text.",
 			"links":              []map[string]any{{"url": p.openURL + "/next", "text": "Next page"}},
 			"metadata":           map[string]any{"description": "A page for extraction"},
+			"structured_data":    map[string]any{"json_ld": []any{map[string]any{"@type": "Article", "headline": "Readable Page"}}},
 			"rendered":           true,
 			"extraction_backend": "browser_dom",
 			"width":              1280,

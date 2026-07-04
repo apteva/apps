@@ -29,9 +29,10 @@ crawling, site mapping, research, or visual proof.
 ## Defaults
 
 The app opens computer browser sessions by default. Extraction prefers rendered
-browser DOM through Computer and falls back to HTTP retrieval when the active
-Computer backend cannot expose DOM content. Check `extraction_backend` in tool
-responses when precision matters.
+browser DOM and returns text, markdown, metadata, structured data, links, and
+images. It falls back to HTTP retrieval when the active Computer backend cannot
+expose DOM content. Check `extraction_backend` in tool responses when precision
+matters.
 
 Prefer `store: true` for durable research, crawls, and snapshots. Use
 `snapshots: true` in `web_research` when the user needs visual proof.

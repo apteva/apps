@@ -2,16 +2,17 @@ schema: apteva-app/v1
 
 name: web
 display_name: Web
-version: 0.1.1
+version: 0.1.2
 description: |
   Browser-native web intelligence for agents. Provides JSON-first search,
   extraction, crawl, map, research, and snapshot tools using the computer app
   as the required browser/session backend, with storage for durable artifacts.
 
-  v0.1.1 opens real browser sessions for search, extraction, crawl, map,
+  v0.1.2 opens real browser sessions for search, extraction, crawl, map,
   research source visits, and snapshots. Text extraction prefers rendered
-  browser DOM via computer.browser_extract and falls back to HTTP retrieval when
-  that lower-level capability is unavailable.
+  browser DOM and returns cleaner text, markdown, metadata, structured data,
+  links, and images, falling back to HTTP retrieval when the lower-level
+  browser capability is unavailable.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/web
@@ -42,9 +43,10 @@ provides:
         backend?, viewport?, visit_top? bool. Returns normalized JSON results.
     - name: web_extract
       description: |
-        Open a URL in a browser session, extract readable text/metadata/links,
-        and optionally store the artifact. Args: url, backend?, viewport?,
-        max_chars?, store? bool, snapshot? bool.
+        Open a URL in a browser session, extract readable text, markdown,
+        metadata, structured data, links, images, and optionally store the
+        artifact. Args: url, formats?, backend?, viewport?, max_chars?,
+        store? bool, snapshot? bool.
     - name: web_crawl
       description: |
         Browser-backed bounded crawl from one or more seed URLs. Args: url or

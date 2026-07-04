@@ -2,9 +2,9 @@ schema: apteva-app/v1
 
 name: computer
 display_name: Computer
-version: 0.7.41
+version: 0.7.42
 description: |
-  Watch and steer browser sessions. v0.7.41 clarifies rendered DOM extraction as a low-level browser capability.
+  Watch and steer browser sessions. v0.7.42 improves rendered text, markdown, and structured-data extraction.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/computer
@@ -147,9 +147,10 @@ provides:
         Infrastructure-only rendered DOM extraction for advanced browser
         integrations. General agents should usually prefer higher-level
         browsing tools instead of calling this directly. Args: session_id,
-        formats? (text, markdown, html, metadata, links, images), max_chars?,
-        readability?, wait_ms?. Returns rendered page text, metadata, links,
-        images, and browser/session metadata.
+        formats? (text, markdown, html, metadata, structured_data, json, links,
+        images), max_chars?, readability?, wait_ms?. Returns rendered page
+        text, markdown, metadata, structured data, links, images, and
+        browser/session metadata.
     - name: browser_close
       description: |
         Close a session opened by this app and release browser/provider

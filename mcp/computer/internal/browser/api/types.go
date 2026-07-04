@@ -90,6 +90,7 @@ type ExtractResult struct {
 	Links             []ExtractLink  `json:"links,omitempty"`
 	Images            []string       `json:"images,omitempty"`
 	Metadata          map[string]any `json:"metadata,omitempty"`
+	StructuredData    map[string]any `json:"structured_data,omitempty"`
 	Rendered          bool           `json:"rendered"`
 	ExtractionBackend string         `json:"extraction_backend"`
 }

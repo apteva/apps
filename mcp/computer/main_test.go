@@ -292,6 +292,7 @@ func TestBrowserExtract(t *testing.T) {
 			Markdown:          "Hello from the hydrated page",
 			Links:             []backends.ExtractLink{{URL: "https://example.com/next", Text: "Next"}},
 			Metadata:          map[string]any{"description": "Live DOM content"},
+			StructuredData:    map[string]any{"json_ld": []any{map[string]any{"@type": "Article"}}},
 			Rendered:          true,
 			ExtractionBackend: "browser_dom",
 		},
@@ -324,6 +325,9 @@ func TestBrowserExtract(t *testing.T) {
 	}
 	if out["text"] != "Hello from the hydrated page" {
 		t.Errorf("text: got %v", out["text"])
+	}
+	if out["structured_data"] == nil {
+		t.Errorf("structured_data missing")
 	}
 	if got := fake.extractOptions.MaxChars; got != 2000 {
 		t.Errorf("max_chars forwarded: want 2000, got %d", got)

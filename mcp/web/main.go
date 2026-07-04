@@ -1,4 +1,4 @@
-// Web v0.1.1 — browser-backed web intelligence.
+// Web v0.1.2 — browser-backed web intelligence.
 //
 // The app requires computer for session lifecycle, rendered extraction, and
 // screenshots. It opens a browser before search/extract/crawl/map/research page
@@ -31,7 +31,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: web
 display_name: Web
-version: 0.1.1
+version: 0.1.2
 description: Browser-native web intelligence for agents.
 author: Apteva
 scopes: [project, global]
@@ -143,9 +143,10 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "web_extract",
-			Description: "Open a URL in a browser session, extract readable text, metadata, links, images, and optional artifact storage. Args: url, backend?, viewport?, max_chars?, store?, snapshot?.",
+			Description: "Open a URL in a browser session, extract readable text, markdown, metadata, structured_data, links, images, and optional artifact storage. Args: url, formats?, backend?, viewport?, max_chars?, store?, snapshot?.",
 			InputSchema: schemaObject(map[string]any{
 				"url":       map[string]any{"type": "string"},
+				"formats":   map[string]any{"type": "array", "items": map[string]any{"type": "string", "enum": []string{"text", "markdown", "html", "metadata", "structured_data", "json", "links", "images"}}},
 				"backend":   map[string]any{"type": "string"},
 				"viewport":  viewportSchema(),
 				"max_chars": map[string]any{"type": "integer"},
@@ -235,9 +236,11 @@ type browserExtractResult struct {
 	Description       string         `json:"description"`
 	Text              string         `json:"text"`
 	Markdown          string         `json:"markdown"`
+	HTML              string         `json:"html"`
 	Links             []linkInfo     `json:"links"`
 	Images            []string       `json:"images"`
 	Metadata          map[string]any `json:"metadata"`
+	StructuredData    map[string]any `json:"structured_data"`
 	Rendered          bool           `json:"rendered"`
 	ExtractionBackend string         `json:"extraction_backend"`
 	Width             int            `json:"width"`
@@ -261,9 +264,11 @@ type pageDoc struct {
 	Description       string           `json:"description,omitempty"`
 	Text              string           `json:"text,omitempty"`
 	Markdown          string           `json:"markdown,omitempty"`
+	HTML              string           `json:"html,omitempty"`
 	Links             []linkInfo       `json:"links,omitempty"`
 	Images            []string         `json:"images,omitempty"`
 	Metadata          map[string]any   `json:"metadata,omitempty"`
+	StructuredData    map[string]any   `json:"structured_data,omitempty"`
 	Status            int              `json:"status"`
 	ContentType       string           `json:"content_type,omitempty"`
 	Bytes             int              `json:"bytes"`
@@ -543,6 +548,7 @@ func (a *App) extractURL(ctx *sdk.AppCtx, runID int64, target string, args map[s
 		doc.Links = extracted.Links
 		doc.Images = extracted.Images
 		doc.Metadata = extracted.Metadata
+		doc.StructuredData = extracted.StructuredData
 		doc.ExtractionBackend = firstNonEmpty(extracted.ExtractionBackend, "browser_dom")
 		doc.Bytes = len(extracted.Text) + len(extracted.Markdown)
 		doc.Truncated = false
@@ -550,6 +556,7 @@ func (a *App) extractURL(ctx *sdk.AppCtx, runID int64, target string, args map[s
 			maxChars := boundedInt(intArg(args, "max_chars"), defaultMaxChars, 1000, 200000)
 			doc.Text = truncateString(extracted.Text, maxChars)
 			doc.Markdown = truncateString(extracted.Markdown, maxChars)
+			doc.HTML = truncateString(extracted.HTML, maxChars)
 		}
 		if boolArgDefault(args, "store", storeDefault(ctx)) && includeText {
 			if art, err := storePageArtifact(ctx, runID, &doc); err == nil {
@@ -763,9 +770,12 @@ func (a *App) closeBrowser(ctx *sdk.AppCtx, sessionID string) {
 }
 
 func (a *App) extractBrowserDOM(ctx *sdk.AppCtx, sessionID string, args map[string]any, includeText bool) (*browserExtractResult, error) {
-	formats := []string{"metadata", "links", "images"}
-	if includeText {
-		formats = append([]string{"text", "markdown"}, formats...)
+	formats := stringSliceArg(args, "formats")
+	if len(formats) == 0 {
+		formats = []string{"metadata", "structured_data", "links", "images"}
+		if includeText {
+			formats = append([]string{"text", "markdown"}, formats...)
+		}
 	}
 	extractArgs := withProjectID(ctx, map[string]any{
 		"session_id":  sessionID,
@@ -993,14 +1003,16 @@ func failRunOnPanic(ctx *sdk.AppCtx, runID int64) {
 
 func storePageArtifact(ctx *sdk.AppCtx, runID int64, doc *pageDoc) (*artifactSummary, error) {
 	payload := map[string]any{
-		"url":         doc.URL,
-		"final_url":   doc.FinalURL,
-		"title":       doc.Title,
-		"description": doc.Description,
-		"text":        doc.Text,
-		"markdown":    doc.Markdown,
-		"links":       doc.Links,
-		"metadata":    doc.Metadata,
+		"url":             doc.URL,
+		"final_url":       doc.FinalURL,
+		"title":           doc.Title,
+		"description":     doc.Description,
+		"text":            doc.Text,
+		"markdown":        doc.Markdown,
+		"html":            doc.HTML,
+		"links":           doc.Links,
+		"metadata":        doc.Metadata,
+		"structured_data": doc.StructuredData,
 	}
 	return storeArtifact(ctx, runID, "page", doc.URL, doc.Title, "application/json", payload)
 }
@@ -1281,7 +1293,7 @@ func synthesizeExtractiveAnswer(question string, citations []map[string]any) str
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "Browser-backed research for %q reviewed %d source(s). ", question, len(citations))
-	b.WriteString("Key evidence is available in the citations array; v0.1.1 returns an extractive report rather than an LLM-written conclusion.")
+	b.WriteString("Key evidence is available in the citations array; v0.1.2 returns an extractive report rather than an LLM-written conclusion.")
 	return b.String()
 }
 
