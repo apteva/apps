@@ -198,6 +198,66 @@ func TestSignup_ConflictOnDuplicateEmail(t *testing.T) {
 	}
 }
 
+func TestClientAllowedOriginsGateBrowserAuthRoutes(t *testing.T) {
+	ctx, _ := newAuthCtx(t)
+	app := &App{}
+	out, err := app.toolClientsCreate(ctx, map[string]any{
+		"organization_slug": "default",
+		"name":              "origin-client",
+		"type":              "spa",
+		"allowed_origins":   []any{"https://cloud.apteva.ai"},
+	})
+	if err != nil {
+		t.Fatalf("create origin client: %v", err)
+	}
+	clientID := out.(map[string]any)["client_id"].(string)
+	signupBody := map[string]any{
+		"email":     "origin@example.com",
+		"password":  "VerySafe!Pw#12345",
+		"client_id": clientID,
+	}
+
+	rec := call(app.handleSignup, "POST", "/signup", signupBody, "Origin", "https://evil.example")
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("signup from disallowed origin expected 403, got %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	rec = call(app.handleSignup, "POST", "/signup", signupBody, "Origin", "https://cloud.apteva.ai")
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("signup from allowed origin expected 201, got %d body=%s", rec.Code, rec.Body.String())
+	}
+	signupResp := decode(t, rec)
+	refresh, _ := signupResp["refresh_token"].(string)
+	if refresh == "" {
+		t.Fatal("signup did not return refresh token")
+	}
+
+	rec = call(app.handleLogin, "POST", "/login", map[string]any{
+		"email":     "origin@example.com",
+		"password":  "VerySafe!Pw#12345",
+		"client_id": clientID,
+	}, "Origin", "https://evil.example")
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("login from disallowed origin expected 403, got %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	rec = call(app.handleRefresh, "POST", "/refresh", map[string]any{
+		"refresh_token": refresh,
+		"client_id":     clientID,
+	}, "Origin", "https://evil.example")
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("refresh from disallowed origin expected 403, got %d body=%s", rec.Code, rec.Body.String())
+	}
+
+	rec = call(app.handleRefresh, "POST", "/refresh", map[string]any{
+		"refresh_token": refresh,
+		"client_id":     clientID,
+	}, "Origin", "https://cloud.apteva.ai")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("refresh from allowed origin expected 200, got %d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestJWKS_PublishesActiveKey(t *testing.T) {
 	_, _ = newAuthCtx(t)
 	app := &App{}

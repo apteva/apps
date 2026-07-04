@@ -134,6 +134,7 @@ func (a *App) handleSignup(w http.ResponseWriter, r *http.Request) {
 	}
 	body.IP = r.RemoteAddr
 	body.UserAgent = r.UserAgent()
+	body.Origin = r.Header.Get("Origin")
 
 	res, status, err := performSignup(ctx, pid, body, mintSessionFor(r))
 	if err != nil {
@@ -167,6 +168,7 @@ type signupRequest struct {
 	OrganizationSlug string `json:"organization_slug"`
 	IP               string `json:"-"`
 	UserAgent        string `json:"-"`
+	Origin           string `json:"-"`
 }
 
 // signupResult mirrors what /signup writes to the response body, but
@@ -207,6 +209,9 @@ func performSignup(ctx *sdk.AppCtx, pid string, body signupRequest, mint session
 	client, clientErr := requireClient(ctx, pid, body.ClientID)
 	if clientErr != nil {
 		return nil, http.StatusBadRequest, clientErr
+	}
+	if err := requireAllowedOrigin(client, body.Origin); err != nil {
+		return nil, http.StatusForbidden, err
 	}
 	org, orgErr := resolveOrgForRequest(ctx, pid, client, body.OrganizationSlug)
 	if orgErr != nil {
@@ -285,6 +290,10 @@ func (a *App) handleLogin(w http.ResponseWriter, r *http.Request) {
 	client, clientErr := requireClient(ctx, pid, body.ClientID)
 	if clientErr != nil {
 		httpErr(w, http.StatusBadRequest, clientErr.Error())
+		return
+	}
+	if err := requireAllowedOrigin(client, r.Header.Get("Origin")); err != nil {
+		httpStatus(w, http.StatusForbidden, map[string]string{"error": "origin_not_allowed"})
 		return
 	}
 	org, orgErr := resolveOrgForRequest(ctx, pid, client, body.OrganizationSlug)
@@ -403,6 +412,10 @@ func (a *App) handleRefresh(w http.ResponseWriter, r *http.Request) {
 	client, clientErr := requireClient(ctx, pid, body.ClientID)
 	if clientErr != nil {
 		httpErr(w, http.StatusBadRequest, clientErr.Error())
+		return
+	}
+	if err := requireAllowedOrigin(client, r.Header.Get("Origin")); err != nil {
+		httpStatus(w, http.StatusForbidden, map[string]string{"error": "origin_not_allowed"})
 		return
 	}
 
@@ -581,6 +594,10 @@ func (a *App) handleMe(w http.ResponseWriter, r *http.Request) {
 	httpJSON(w, map[string]any{"user": user, "org": org.Slug})
 }
 
+func (a *App) handleOrgPublic(w http.ResponseWriter, r *http.Request) {
+	http.NotFound(w, r)
+}
+
 // ─── helpers used only by handlers ────────────────────────────────────
 
 type tokenPair struct {
@@ -669,6 +686,20 @@ func requireClient(ctx *sdk.AppCtx, projectID, clientID string) (*Client, error)
 		return nil, errors.New("client disabled")
 	}
 	return c, nil
+}
+
+func requireAllowedOrigin(client *Client, origin string) error {
+	origin = strings.TrimRight(strings.TrimSpace(origin), "/")
+	if origin == "" || client == nil || len(client.AllowedOrigins) == 0 {
+		return nil
+	}
+	for _, allowed := range client.AllowedOrigins {
+		allowed = strings.TrimRight(strings.TrimSpace(allowed), "/")
+		if allowed == "*" || allowed == origin {
+			return nil
+		}
+	}
+	return errors.New("origin not allowed")
 }
 
 // resolveOrgForRequest picks the Organization for a public-endpoint

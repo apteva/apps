@@ -37,9 +37,10 @@ func newSidecar(t *testing.T) (*tk.Sidecar, string) {
 			"app_url":                     "http://localhost:8080",
 		}))
 	clientResp := sc.MCP("auth_clients_create", map[string]any{
-		"name":          "tier2-client",
-		"type":          "spa",
-		"redirect_uris": []any{"http://localhost:3000/callback"},
+		"organization_slug": "default",
+		"name":              "tier2-client",
+		"type":              "spa",
+		"redirect_uris":     []any{"http://localhost:3000/callback"},
 	})
 	clientID, _ := clientResp["client_id"].(string)
 	if clientID == "" {

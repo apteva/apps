@@ -59,6 +59,38 @@ func TestManifest_OnDiskMatchesEmbedded(t *testing.T) {
 	if !equalStrSlices(dt, et) {
 		t.Errorf("tool list drift\ndisk: %v\nembd: %v", dt, et)
 	}
+	dr := routeSpecs(mDisk.Provides.HTTPRoutes)
+	er := routeSpecs(mEmb.Provides.HTTPRoutes)
+	if !equalStrSlices(dr, er) {
+		t.Errorf("http route drift\ndisk: %v\nembd: %v", dr, er)
+	}
+}
+
+func TestManifest_PublicRoutesAreNoAuth(t *testing.T) {
+	body, _ := os.ReadFile("apteva.yaml")
+	m, _ := sdk.ParseManifest(body)
+	want := map[string]string{
+		"POST /signup":                          "",
+		"POST /login":                           "",
+		"POST /logout":                          "",
+		"POST /refresh":                         "",
+		"GET /me":                               "",
+		"GET /.well-known/jwks.json":            "",
+		"GET /.well-known/openid-configuration": "",
+		"GET /orgs/":                            "",
+	}
+	for _, route := range m.Provides.HTTPRoutes {
+		key := route.Method + " " + route.Prefix
+		if route.NoAuth {
+			delete(want, key)
+		}
+		if route.Prefix == "/" && route.NoAuth {
+			t.Fatal("root route must never be no_auth; it would expose admin routes")
+		}
+	}
+	for key := range want {
+		t.Errorf("missing no_auth route %s", key)
+	}
 }
 
 func TestMCPTools_MatchManifest(t *testing.T) {
@@ -99,6 +131,19 @@ func toolNames(tools []sdk.MCPToolSpec) []string {
 	out := make([]string, len(tools))
 	for i, t := range tools {
 		out[i] = t.Name
+	}
+	sort.Strings(out)
+	return out
+}
+
+func routeSpecs(routes []sdk.RouteSpec) []string {
+	out := make([]string, len(routes))
+	for i, r := range routes {
+		auth := "auth"
+		if r.NoAuth {
+			auth = "noauth"
+		}
+		out[i] = r.Method + " " + r.Prefix + " " + auth
 	}
 	sort.Strings(out)
 	return out

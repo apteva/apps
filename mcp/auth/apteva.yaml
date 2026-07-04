@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: auth
 display_name: Auth
-version: 0.7.0
+version: 0.7.1
 description: |
   Identity layer for Apteva-deployed SaaS, partitioned by Organization
   (row-level multi-tenancy a la Auth0/Clerk/Stytch B2B). One auth install
@@ -36,7 +36,31 @@ requires:
 
 provides:
   http_routes:
-    - prefix: /
+    - prefix: /signup
+      method: POST
+      no_auth: true
+    - prefix: /login
+      method: POST
+      no_auth: true
+    - prefix: /logout
+      method: POST
+      no_auth: true
+    - prefix: /refresh
+      method: POST
+      no_auth: true
+    - prefix: /me
+      method: GET
+      no_auth: true
+    - prefix: /.well-known/jwks.json
+      method: GET
+      no_auth: true
+    - prefix: /.well-known/openid-configuration
+      method: GET
+      no_auth: true
+    - prefix: /orgs/
+      method: GET
+      no_auth: true
+    - prefix: /admin/
   mcp_tools:
     # v0.4 surface — Organization-partitioned. Reads (search/list/stats/audit)
     # accept optional organization_id or organization_slug and roll up

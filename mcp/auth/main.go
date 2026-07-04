@@ -44,7 +44,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: auth
 display_name: Auth
-version: 0.7.0
+version: 0.7.1
 description: |
   Identity layer for Apteva-deployed SaaS, partitioned by Organization
   (row-level multi-tenancy a la Auth0/Clerk/Stytch B2B). One install
@@ -65,7 +65,31 @@ requires:
       reason: Sends transactional email. Without it, links go to the audit log.
 provides:
   http_routes:
-    - prefix: /
+    - prefix: /signup
+      method: POST
+      no_auth: true
+    - prefix: /login
+      method: POST
+      no_auth: true
+    - prefix: /logout
+      method: POST
+      no_auth: true
+    - prefix: /refresh
+      method: POST
+      no_auth: true
+    - prefix: /me
+      method: GET
+      no_auth: true
+    - prefix: /.well-known/jwks.json
+      method: GET
+      no_auth: true
+    - prefix: /.well-known/openid-configuration
+      method: GET
+      no_auth: true
+    - prefix: /orgs/
+      method: GET
+      no_auth: true
+    - prefix: /admin/
   mcp_tools:
     - name: auth_orgs_list
       description: List organizations in the project.
@@ -181,21 +205,22 @@ func (a *App) EventHandlers() []sdk.EventHandler { return nil }
 func (a *App) HTTPRoutes() []sdk.Route {
 	return []sdk.Route{
 		// Per-org discovery (v0.4.0).
-		{Pattern: "/orgs/{slug}/.well-known/jwks.json", Handler: a.handleJWKS},
-		{Pattern: "/orgs/{slug}/.well-known/openid-configuration", Handler: a.handleOIDCConfig},
+		{Pattern: "/orgs/", Handler: a.handleOrgPublic, NoAuth: true},
+		{Pattern: "/orgs/{slug}/.well-known/jwks.json", Handler: a.handleJWKS, NoAuth: true},
+		{Pattern: "/orgs/{slug}/.well-known/openid-configuration", Handler: a.handleOIDCConfig, NoAuth: true},
 
 		// Legacy discovery — resolves to the default org. Scheduled for
 		// removal in v0.5.0; old SaaS code keeps working for one release
 		// window so callers can update their JWT verifier configuration.
-		{Pattern: "/.well-known/jwks.json", Handler: a.handleJWKS},
-		{Pattern: "/.well-known/openid-configuration", Handler: a.handleOIDCConfig},
+		{Pattern: "/.well-known/jwks.json", Handler: a.handleJWKS, NoAuth: true},
+		{Pattern: "/.well-known/openid-configuration", Handler: a.handleOIDCConfig, NoAuth: true},
 
 		// Public auth endpoints — tenant resolved from client_id at runtime.
-		{Pattern: "/signup", Handler: a.handleSignup},
-		{Pattern: "/login", Handler: a.handleLogin},
-		{Pattern: "/logout", Handler: a.handleLogout},
-		{Pattern: "/refresh", Handler: a.handleRefresh},
-		{Pattern: "/me", Handler: a.handleMe},
+		{Pattern: "/signup", Handler: a.handleSignup, NoAuth: true},
+		{Pattern: "/login", Handler: a.handleLogin, NoAuth: true},
+		{Pattern: "/logout", Handler: a.handleLogout, NoAuth: true},
+		{Pattern: "/refresh", Handler: a.handleRefresh, NoAuth: true},
+		{Pattern: "/me", Handler: a.handleMe, NoAuth: true},
 
 		// Admin surface — consumed by the dashboard AuthPanel. Auth is
 		// the SDK's bearer-token gate (platform proxy attaches it).
