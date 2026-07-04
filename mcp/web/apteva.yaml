@@ -1,0 +1,136 @@
+schema: apteva-app/v1
+
+name: web
+display_name: Web
+version: 0.1.0
+description: |
+  Browser-native web intelligence for agents. Provides JSON-first search,
+  extraction, crawl, map, research, and snapshot tools using the computer app
+  as the required browser/session backend, with storage for durable artifacts.
+
+  v0.1 opens real browser sessions for search, extraction, crawl, map,
+  research source visits, and snapshots. Text extraction currently uses an
+  HTTP retrieval adapter after the browser-open step because computer does not
+  yet expose DOM/readability export.
+
+author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/web
+tags: [browser, search, research, crawl, observability]
+
+scopes: [project, global]
+min_apteva_version: "0.11.0"
+
+requires:
+  permissions:
+    - db.write.app
+    - net.egress
+    - platform.apps.call
+  apps:
+    - name: computer
+      reason: "Browser session lifecycle, rendered navigation, and screenshots."
+    - name: storage
+      reason: "Persists screenshots, extracted pages, crawl maps, and research JSON."
+
+provides:
+  http_routes:
+    - prefix: /
+
+  mcp_tools:
+    - name: web_search
+      description: |
+        Browser-backed web search. Args: query, limit?, engine? (duckduckgo),
+        backend?, viewport?, visit_top? bool. Returns normalized JSON results.
+    - name: web_extract
+      description: |
+        Open a URL in a browser session, extract readable text/metadata/links,
+        and optionally store the artifact. Args: url, backend?, viewport?,
+        max_chars?, store? bool, snapshot? bool.
+    - name: web_crawl
+      description: |
+        Browser-backed bounded crawl from one or more seed URLs. Args: url or
+        urls, max_pages?, max_depth?, same_host?, backend?, store? bool.
+    - name: web_map
+      description: |
+        Fast site map discovery from one or more seed URLs. Args: url or urls,
+        max_pages?, max_depth?, same_host?, backend?, store? bool.
+    - name: web_research
+      description: |
+        Multi-step browser-backed research. Args: question, queries?,
+        max_results?, max_sources?, backend?, snapshots? bool, store? bool.
+        Returns an extractive report JSON with citations, sources, gaps, and
+        artifacts.
+    - name: web_snapshot
+      description: |
+        Capture visual evidence for a URL or existing computer session.
+        Args: url? or session_id?, backend?, viewport?, label?, store? bool.
+        Returns screenshot metadata, storage_id/url when stored, and session
+        metadata.
+
+  ui_panels:
+    - slot: project.page
+      label: Web
+      icon: globe
+      entry: /ui/WebPanel.mjs
+
+  ui_components:
+    - name: web-result-card
+      entry: /ui/WebResultCard.mjs
+      slots: [chat.message_attachment]
+      props_schema:
+        type: object
+        required: [title, url]
+        properties:
+          title: { type: string }
+          url: { type: string }
+          snippet: { type: string }
+          source: { type: string }
+      preview_props:
+        preview: true
+        title: "Example result"
+        url: "https://example.com"
+        snippet: "A browser-backed search result."
+        source: "duckduckgo"
+
+  skills:
+    - name: how-to-use-web
+      command: /web
+      body_file: skills/how-to-use-web.md
+      description: |
+        Teaches the agent when to use browser-backed search, extract, crawl,
+        map, research, and snapshot tools.
+      metadata:
+        category: browsing
+
+runtime:
+  kind: source
+  source:
+    repo: github.com/apteva/apps
+    ref: main
+    entry: mcp/web
+  port: 8080
+  health_check: /health
+
+db:
+  driver: sqlite
+  path: /data/web.db
+  migrations: migrations/
+
+config_schema:
+  - name: default_search_engine
+    type: text
+    default: duckduckgo
+    label: Default search engine
+  - name: default_backend
+    type: text
+    label: Default browser backend
+    description: "Optional computer backend override: local, browserbase, steel, browser-engine, or service."
+  - name: max_pages
+    type: number
+    default: 25
+    label: Maximum crawl pages
+  - name: store_artifacts_by_default
+    type: bool
+    default: true
+    label: Store artifacts by default
+
+upgrade_policy: auto-patch
