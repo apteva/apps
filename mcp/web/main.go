@@ -1,4 +1,4 @@
-// Web v0.1.4 — browser-backed web intelligence.
+// Web v0.1.5 — browser-backed web intelligence.
 //
 // The app requires computer for session lifecycle, rendered extraction, and
 // screenshots. It opens a browser before search/extract/crawl/map/research page
@@ -34,7 +34,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: web
 display_name: Web
-version: 0.1.4
+version: 0.1.5
 description: Browser-native web intelligence for agents.
 author: Apteva
 scopes: [project, global]
@@ -138,11 +138,11 @@ func (a *App) MCPTools() []sdk.Tool {
 	return []sdk.Tool{
 		{
 			Name:        "web_search",
-			Description: "Browser-backed web search. Args: query, limit?, engine? (duckduckgo), backend?, viewport?, visit_top? bool. Returns normalized JSON results.",
+			Description: "Browser-backed web search. Args: query, limit?, engine? (google|duckduckgo, default google), backend?, viewport?, visit_top? bool. Returns normalized JSON results.",
 			InputSchema: schemaObject(map[string]any{
 				"query":     map[string]any{"type": "string"},
 				"limit":     map[string]any{"type": "integer"},
-				"engine":    map[string]any{"type": "string", "enum": []string{"duckduckgo"}},
+				"engine":    map[string]any{"type": "string", "enum": []string{"google", "duckduckgo"}},
 				"backend":   map[string]any{"type": "string"},
 				"viewport":  viewportSchema(),
 				"visit_top": map[string]any{"type": "boolean"},
@@ -365,8 +365,8 @@ func (a *App) toolSearch(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	defer failRunOnPanic(ctx, runID)
 
 	limit := boundedInt(intArg(args, "limit"), defaultSearchLimit, 1, maxSearchLimit)
-	engine := firstNonEmpty(stringArg(args, "engine"), configString(ctx, "default_search_engine"), "duckduckgo")
-	if engine != "duckduckgo" {
+	engine := firstNonEmpty(stringArg(args, "engine"), configString(ctx, "default_search_engine"), "google")
+	if engine != "google" && engine != "duckduckgo" {
 		return nil, fmt.Errorf("unsupported engine %q", engine)
 	}
 	policy, err := newCachePolicy("search", args)
@@ -381,7 +381,7 @@ func (a *App) toolSearch(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		completeRun(ctx, runID, "failed", nil, err)
 		return nil, err
 	}
-	searchURL := duckDuckGoURL(query)
+	searchURL := searchEngineURL(engine, query)
 	browser, browserErr := a.openBrowser(ctx, searchURL, args)
 	if browserErr != nil {
 		completeRun(ctx, runID, "failed", nil, browserErr)
@@ -396,7 +396,7 @@ func (a *App) toolSearch(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		completeRun(ctx, runID, "failed", nil, err)
 		return nil, err
 	}
-	results := parseDuckDuckGoSearch(extracted, limit)
+	results := parseSearchResults(engine, extracted, limit)
 	now := time.Now().UTC().Format(time.RFC3339)
 	for i := range results {
 		results[i].FetchedAt = now
@@ -417,7 +417,7 @@ func (a *App) toolSearch(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 			"links_count": len(extracted.Links),
 		},
 	}
-	if searchBlocked := detectSearchBlocked(extracted); searchBlocked != "" {
+	if searchBlocked := detectSearchBlocked(engine, extracted); searchBlocked != "" {
 		out["blocked"] = true
 		out["error"] = searchBlocked
 	}
@@ -1440,7 +1440,46 @@ func parseDuckDuckGoSearch(extracted *browserExtractResult, limit int) []searchR
 	return results
 }
 
-func detectSearchBlocked(extracted *browserExtractResult) string {
+func parseSearchResults(engine string, extracted *browserExtractResult, limit int) []searchResult {
+	switch engine {
+	case "google":
+		return parseGoogleSearch(extracted, limit)
+	default:
+		return parseDuckDuckGoSearch(extracted, limit)
+	}
+}
+
+func parseGoogleSearch(extracted *browserExtractResult, limit int) []searchResult {
+	if extracted == nil {
+		return []searchResult{}
+	}
+	results := make([]searchResult, 0, limit)
+	seen := map[string]bool{}
+	for _, l := range extracted.Links {
+		if len(results) >= limit {
+			break
+		}
+		href := decodeGoogleURL(l.URL)
+		title := cleanGoogleResultTitle(l.Text, href)
+		if href == "" || title == "" || seen[href] || !isLikelyGoogleResultURL(href) {
+			continue
+		}
+		seen[href] = true
+		results = append(results, searchResult{
+			Title:      truncateString(title, 240),
+			URL:        href,
+			Source:     "google",
+			Rank:       len(results) + 1,
+			Confidence: "medium",
+		})
+	}
+	if results == nil {
+		return []searchResult{}
+	}
+	return results
+}
+
+func detectSearchBlocked(engine string, extracted *browserExtractResult) string {
 	if extracted == nil {
 		return ""
 	}
@@ -1451,13 +1490,25 @@ func detectSearchBlocked(extracted *browserExtractResult) string {
 		extracted.HTML,
 		fmt.Sprint(extracted.Metadata),
 	}, "\n"))
-	switch {
-	case strings.Contains(haystack, "unfortunately, bots use duckduckgo too"):
-		return "search_blocked: duckduckgo returned an anti-bot challenge"
-	case strings.Contains(haystack, "error-lite@duckduckgo.com"):
-		return "search_blocked: duckduckgo returned an anti-bot challenge"
-	case strings.Contains(haystack, "anomaly-modal") || strings.Contains(haystack, "anomaly.js"):
-		return "search_blocked: duckduckgo returned an anti-bot challenge"
+	switch engine {
+	case "google":
+		switch {
+		case strings.Contains(haystack, "our systems have detected unusual traffic"):
+			return "search_blocked: google returned an anti-bot challenge"
+		case strings.Contains(haystack, "/sorry/") || strings.Contains(haystack, "google.com/sorry"):
+			return "search_blocked: google returned an anti-bot challenge"
+		case strings.Contains(haystack, "to continue, please type the characters below"):
+			return "search_blocked: google returned an anti-bot challenge"
+		}
+	default:
+		switch {
+		case strings.Contains(haystack, "unfortunately, bots use duckduckgo too"):
+			return "search_blocked: duckduckgo returned an anti-bot challenge"
+		case strings.Contains(haystack, "error-lite@duckduckgo.com"):
+			return "search_blocked: duckduckgo returned an anti-bot challenge"
+		case strings.Contains(haystack, "anomaly-modal") || strings.Contains(haystack, "anomaly.js"):
+			return "search_blocked: duckduckgo returned an anti-bot challenge"
+		}
 	}
 	return ""
 }
@@ -1684,6 +1735,19 @@ func duckDuckGoURL(query string) string {
 	return "https://duckduckgo.com/html/?" + url.Values{"q": []string{query}}.Encode()
 }
 
+func googleURL(query string) string {
+	return "https://www.google.com/search?" + url.Values{"q": []string{query}}.Encode()
+}
+
+func searchEngineURL(engine, query string) string {
+	switch engine {
+	case "google":
+		return googleURL(query)
+	default:
+		return duckDuckGoURL(query)
+	}
+}
+
 func decodeDuckURL(href string) string {
 	if href == "" {
 		return ""
@@ -1710,6 +1774,35 @@ func decodeDuckURL(href string) string {
 	return ""
 }
 
+func decodeGoogleURL(href string) string {
+	if href == "" {
+		return ""
+	}
+	if strings.HasPrefix(href, "//") {
+		href = "https:" + href
+	}
+	u, err := url.Parse(href)
+	if err != nil {
+		return ""
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return ""
+	}
+	host := strings.ToLower(u.Hostname())
+	if strings.Contains(host, "google.") {
+		for _, key := range []string{"q", "url"} {
+			if raw := u.Query().Get(key); raw != "" {
+				if parsed, err := url.QueryUnescape(raw); err == nil {
+					return parsed
+				}
+				return raw
+			}
+		}
+		return ""
+	}
+	return u.String()
+}
+
 func isLikelyResultURL(raw string) bool {
 	u, err := url.Parse(raw)
 	if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
@@ -1717,6 +1810,55 @@ func isLikelyResultURL(raw string) bool {
 	}
 	host := strings.ToLower(u.Hostname())
 	return host != "" && !strings.Contains(host, "duckduckgo.com")
+}
+
+func isLikelyGoogleResultURL(raw string) bool {
+	u, err := url.Parse(raw)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
+		return false
+	}
+	host := strings.ToLower(u.Hostname())
+	if host == "" {
+		return false
+	}
+	blockedHosts := []string{
+		"google.", "gstatic.", "googleusercontent.", "accounts.google.", "support.google.",
+		"policies.google.", "maps.google.", "webcache.googleusercontent.",
+	}
+	for _, blocked := range blockedHosts {
+		if strings.Contains(host, blocked) {
+			return false
+		}
+	}
+	return true
+}
+
+func cleanGoogleResultTitle(text, href string) string {
+	text = cleanText(text)
+	if text == "" {
+		return ""
+	}
+	if strings.HasPrefix(strings.ToLower(text), "read more") {
+		return ""
+	}
+	if strings.Contains(text, " - View related links") {
+		text = strings.TrimSpace(strings.Split(text, " - View related links")[0])
+	}
+	if strings.Contains(text, " Opens in new tab.") {
+		text = strings.TrimSpace(strings.ReplaceAll(text, " Opens in new tab.", ""))
+	}
+	if u, err := url.Parse(href); err == nil {
+		host := strings.TrimPrefix(strings.ToLower(u.Hostname()), "www.")
+		if host != "" {
+			for _, sep := range []string{" https://" + host, " http://" + host, host + " https://", host + " http://"} {
+				if idx := strings.Index(strings.ToLower(text), sep); idx > 0 {
+					text = strings.TrimSpace(text[:idx])
+					break
+				}
+			}
+		}
+	}
+	return text
 }
 
 func validateHTTPURL(raw string) error {

@@ -59,6 +59,28 @@ func TestParseDuckDuckGoResults(t *testing.T) {
 	}
 }
 
+func TestParseGoogleSearchResults(t *testing.T) {
+	extracted := &browserExtractResult{
+		Links: []linkInfo{
+			{URL: "https://www.google.com/search?q=alpha", Text: "Web"},
+			{URL: "https://support.google.com/websearch/answer/181196?hl=en", Text: "Accessibility help"},
+			{URL: "https://www.flexoffers.com/affiliate-programs/financial-services/peer-to-peer-lending/", Text: "Peer-To-Peer Lending Affiliate Programs | FlexOffers.com flexoffers.com https://www.flexoffers.com › financial-services"},
+			{URL: "https://www.kuflink.com/affiliates/", Text: "Affiliate PartnershipsKuflinkhttps://www.kuflink.com › affiliates"},
+			{URL: "https://www.kuflink.com/affiliates/#:~:text=foo", Text: "Read more"},
+		},
+	}
+	got := parseGoogleSearch(extracted, 10)
+	if len(got) != 2 {
+		t.Fatalf("results len=%d, want 2: %#v", len(got), got)
+	}
+	if got[0].Source != "google" || got[0].URL != "https://www.flexoffers.com/affiliate-programs/financial-services/peer-to-peer-lending/" {
+		t.Fatalf("first result wrong: %#v", got[0])
+	}
+	if got[1].URL != "https://www.kuflink.com/affiliates/" {
+		t.Fatalf("second result wrong: %#v", got[1])
+	}
+}
+
 func TestSearchUsesComputerDOMParser(t *testing.T) {
 	plat := newFakePlatform()
 	ctx, app := newTestCtx(t, plat)
@@ -78,8 +100,11 @@ func TestSearchUsesComputerDOMParser(t *testing.T) {
 	if len(results) != 2 {
 		t.Fatalf("results len=%d, want 2: %#v", len(results), results)
 	}
-	if results[0].URL != "https://example.com/a" || results[0].Title != "Alpha result" {
+	if results[0].URL != "https://www.flexoffers.com/affiliate-programs/financial-services/peer-to-peer-lending/" || results[0].Source != "google" {
 		t.Fatalf("first result wrong: %#v", results[0])
+	}
+	if out["engine"] != "google" {
+		t.Fatalf("engine=%v, want google", out["engine"])
 	}
 	calls := plat.callLog()
 	want := []string{"computer.browser_open", "computer.browser_extract", "computer.browser_close"}
@@ -98,7 +123,7 @@ func TestSearchBlockedIsReportedAndNotCached(t *testing.T) {
 	plat.searchBlocked = true
 	ctx, app := newTestCtx(t, plat)
 
-	outAny, err := app.toolSearch(ctx, map[string]any{"query": "blocked", "cache": "refresh"})
+	outAny, err := app.toolSearch(ctx, map[string]any{"query": "blocked", "engine": "duckduckgo", "cache": "refresh"})
 	if err != nil {
 		t.Fatalf("search: %v", err)
 	}
@@ -277,6 +302,34 @@ func (p *fakePlatform) respond(app, tool string, in map[string]any) map[string]a
 			"height":      720,
 		}
 	case "computer.browser_extract":
+		if strings.Contains(p.openURL, "google.com/search") {
+			if p.searchBlocked {
+				return map[string]any{
+					"session_id":         in["session_id"],
+					"backend":            "local",
+					"current_url":        p.openURL,
+					"title":              "Google Search",
+					"text":               "Our systems have detected unusual traffic from your computer network.",
+					"links":              []map[string]any{{"url": "https://www.google.com/sorry/index", "text": "Google"}},
+					"rendered":           true,
+					"extraction_backend": "browser_dom",
+				}
+			}
+			return map[string]any{
+				"session_id":  in["session_id"],
+				"backend":     "local",
+				"current_url": p.openURL,
+				"title":       "Google Search",
+				"text":        "Peer-To-Peer Lending Affiliate Programs Affiliate Partnerships",
+				"links": []map[string]any{
+					{"url": "https://www.google.com/search?q=alpha", "text": "Web"},
+					{"url": "https://www.flexoffers.com/affiliate-programs/financial-services/peer-to-peer-lending/", "text": "Peer-To-Peer Lending Affiliate Programs | FlexOffers.com flexoffers.com https://www.flexoffers.com › financial-services"},
+					{"url": "https://www.kuflink.com/affiliates/", "text": "Affiliate PartnershipsKuflinkhttps://www.kuflink.com › affiliates"},
+				},
+				"rendered":           true,
+				"extraction_backend": "browser_dom",
+			}
+		}
 		if strings.Contains(p.openURL, "duckduckgo.com/html/") {
 			if p.searchBlocked {
 				return map[string]any{

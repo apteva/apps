@@ -2,13 +2,14 @@ schema: apteva-app/v1
 
 name: web
 display_name: Web
-version: 0.1.4
+version: 0.1.5
 description: |
   Browser-native web intelligence for agents. Provides JSON-first search,
   extraction, crawl, map, research, and snapshot tools using the computer app
   as the required browser/session backend, with storage for durable artifacts.
 
-  v0.1.4 makes search parse the live browser DOM and report blocked search
+  v0.1.5 adds Google search and makes it the default engine. v0.1.4 makes
+  search parse the live browser DOM and report blocked search
   challenge pages instead of empty results. v0.1.3 adds response caching
   controls. v0.1.2 opens real browser sessions for search, extraction, crawl, map,
   research source visits, and snapshots. Text extraction prefers rendered
@@ -41,7 +42,7 @@ provides:
   mcp_tools:
     - name: web_search
       description: |
-        Browser-backed web search. Args: query, limit?, engine? (duckduckgo),
+        Browser-backed web search. Args: query, limit?, engine? (google|duckduckgo, default google),
         backend?, viewport?, visit_top? bool, cache?, max_age?, cache_ttl?.
         Returns normalized JSON results with cache metadata.
     - name: web_extract
@@ -128,7 +129,7 @@ db:
 config_schema:
   - name: default_search_engine
     type: text
-    default: duckduckgo
+    default: google
     label: Default search engine
   - name: default_backend
     type: text
