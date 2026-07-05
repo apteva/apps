@@ -94,11 +94,25 @@ func (a *App) httpGetRoute(w http.ResponseWriter, r *http.Request, hostname stri
 }
 
 func (a *App) httpDeleteRoute(w http.ResponseWriter, r *http.Request, hostname string) {
+	hostname = strings.ToLower(strings.TrimSpace(hostname))
+	exists, err := ingressRouteExists(globalCtx, hostname)
+	if err != nil {
+		httpErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if !exists {
+		httpJSON(w, map[string]any{"removed": false, "hostname": hostname})
+		return
+	}
 	if err := globalCtx.PlatformAPI().UnexposeIngress(hostname); err != nil {
+		if isMissingIngressRouteError(err) {
+			httpJSON(w, map[string]any{"removed": false, "hostname": hostname})
+			return
+		}
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	httpJSON(w, map[string]any{"removed": true, "hostname": strings.ToLower(strings.TrimSpace(hostname))})
+	httpJSON(w, map[string]any{"removed": true, "hostname": hostname})
 }
 
 func sdkIngressRequest(hostname, target, ownerKind, certFQDN, tlsMode, tls string, allowHTTP bool) sdk.IngressExposeRequest {

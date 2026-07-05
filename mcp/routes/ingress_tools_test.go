@@ -1,6 +1,8 @@
 package main
 
 import (
+	"database/sql"
+	"errors"
 	"testing"
 
 	sdk "github.com/apteva/app-sdk"
@@ -9,9 +11,10 @@ import (
 
 type ingressPlatformStub struct {
 	testkit.BasePlatformClient
-	exposed   []sdk.IngressExposeRequest
-	unexposed []string
-	routes    []sdk.IngressRoute
+	exposed       []sdk.IngressExposeRequest
+	unexposed     []string
+	routes        []sdk.IngressRoute
+	unexposeError error
 }
 
 func (p *ingressPlatformStub) ExposeIngress(req sdk.IngressExposeRequest) (*sdk.IngressRoute, error) {
@@ -35,6 +38,9 @@ func (p *ingressPlatformStub) ExposeIngress(req sdk.IngressExposeRequest) (*sdk.
 
 func (p *ingressPlatformStub) UnexposeIngress(hostname string) error {
 	p.unexposed = append(p.unexposed, hostname)
+	if p.unexposeError != nil {
+		return p.unexposeError
+	}
 	return nil
 }
 
@@ -100,7 +106,7 @@ func TestRoutesRegister_TLSOffPublicURL(t *testing.T) {
 }
 
 func TestRoutesUnregister_UsesServerNativeIngress(t *testing.T) {
-	pf := &ingressPlatformStub{}
+	pf := &ingressPlatformStub{routes: []sdk.IngressRoute{{Hostname: "acme.cloud.apteva.ai"}}}
 	ctx := testIngressCtx(t, pf)
 	app := &App{}
 
@@ -113,6 +119,56 @@ func TestRoutesUnregister_UsesServerNativeIngress(t *testing.T) {
 	}
 	if out.(map[string]any)["removed"] != true {
 		t.Fatalf("removed response = %+v", out)
+	}
+}
+
+func TestRoutesUnregister_IsIdempotentWhenRouteMissing(t *testing.T) {
+	pf := &ingressPlatformStub{}
+	ctx := testIngressCtx(t, pf)
+	app := &App{}
+
+	out, err := app.toolRoutesUnregister(ctx, map[string]any{"hostname": "missing.cloud.apteva.ai"})
+	if err != nil {
+		t.Fatalf("routes_unregister missing route: %v", err)
+	}
+	if len(pf.unexposed) != 0 {
+		t.Fatalf("UnexposeIngress should not be called for missing route: %+v", pf.unexposed)
+	}
+	if out.(map[string]any)["removed"] != false {
+		t.Fatalf("removed response = %+v", out)
+	}
+}
+
+func TestRoutesUnregister_TreatsConcurrentMissingAsRemovedFalse(t *testing.T) {
+	pf := &ingressPlatformStub{
+		routes:        []sdk.IngressRoute{{Hostname: "race.cloud.apteva.ai"}},
+		unexposeError: sql.ErrNoRows,
+	}
+	ctx := testIngressCtx(t, pf)
+	app := &App{}
+
+	out, err := app.toolRoutesUnregister(ctx, map[string]any{"hostname": "race.cloud.apteva.ai"})
+	if err != nil {
+		t.Fatalf("routes_unregister concurrent missing route: %v", err)
+	}
+	if len(pf.unexposed) != 1 {
+		t.Fatalf("UnexposeIngress calls = %+v", pf.unexposed)
+	}
+	if out.(map[string]any)["removed"] != false {
+		t.Fatalf("removed response = %+v", out)
+	}
+}
+
+func TestRoutesUnregister_ReturnsUnexpectedUnexposeError(t *testing.T) {
+	pf := &ingressPlatformStub{
+		routes:        []sdk.IngressRoute{{Hostname: "broken.cloud.apteva.ai"}},
+		unexposeError: errors.New("proxy unavailable"),
+	}
+	ctx := testIngressCtx(t, pf)
+	app := &App{}
+
+	if _, err := app.toolRoutesUnregister(ctx, map[string]any{"hostname": "broken.cloud.apteva.ai"}); err == nil {
+		t.Fatal("routes_unregister should return unexpected unexpose errors")
 	}
 }
 

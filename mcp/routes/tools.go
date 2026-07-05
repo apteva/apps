@@ -75,10 +75,21 @@ func (a *App) toolRoutesUnregister(ctx *sdk.AppCtx, args map[string]any) (any, e
 	if host == "" {
 		return nil, errors.New("hostname required")
 	}
-	if err := ctx.PlatformAPI().UnexposeIngress(host); err != nil {
+	host = strings.ToLower(strings.TrimSpace(host))
+	exists, err := ingressRouteExists(ctx, host)
+	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"removed": true, "hostname": strings.ToLower(strings.TrimSpace(host))}, nil
+	if !exists {
+		return map[string]any{"removed": false, "hostname": host}, nil
+	}
+	if err := ctx.PlatformAPI().UnexposeIngress(host); err != nil {
+		if isMissingIngressRouteError(err) {
+			return map[string]any{"removed": false, "hostname": host}, nil
+		}
+		return nil, err
+	}
+	return map[string]any{"removed": true, "hostname": host}, nil
 }
 
 func (a *App) toolRoutesList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -137,6 +148,27 @@ func routeResponse(route *sdk.IngressRoute, action string) map[string]any {
 		out["public_url"] = publicURLForIngress(route)
 	}
 	return out
+}
+
+func ingressRouteExists(ctx *sdk.AppCtx, host string) (bool, error) {
+	rows, err := ctx.PlatformAPI().ListIngressRoutes()
+	if err != nil {
+		return false, err
+	}
+	for i := range rows {
+		if strings.EqualFold(rows[i].Hostname, host) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func isMissingIngressRouteError(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "no rows in result set") || strings.Contains(msg, "route not found")
 }
 
 func publicURLForIngress(route *sdk.IngressRoute) string {
