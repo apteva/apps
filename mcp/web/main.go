@@ -1,4 +1,4 @@
-// Web v0.1.3 — browser-backed web intelligence.
+// Web v0.1.4 — browser-backed web intelligence.
 //
 // The app requires computer for session lifecycle, rendered extraction, and
 // screenshots. It opens a browser before search/extract/crawl/map/research page
@@ -34,7 +34,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: web
 display_name: Web
-version: 0.1.3
+version: 0.1.4
 description: Browser-native web intelligence for agents.
 author: Apteva
 scopes: [project, global]
@@ -389,12 +389,14 @@ func (a *App) toolSearch(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	}
 	defer a.closeBrowser(ctx, browser.SessionID)
 
-	body, fetchMeta, err := fetchURL(ctx, searchURL)
+	extracted, err := a.extractBrowserDOM(ctx, browser.SessionID, mapMerge(args, map[string]any{
+		"formats": []string{"text", "html", "links", "metadata"},
+	}), true)
 	if err != nil {
 		completeRun(ctx, runID, "failed", nil, err)
 		return nil, err
 	}
-	results := parseDuckDuckGo(body, limit)
+	results := parseDuckDuckGoSearch(extracted, limit)
 	now := time.Now().UTC().Format(time.RFC3339)
 	for i := range results {
 		results[i].FetchedAt = now
@@ -407,8 +409,17 @@ func (a *App) toolSearch(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		"browser":            browser,
 		"results":            results,
 		"count":              len(results),
-		"extraction_backend": "http_after_browser_open",
-		"fetch":              fetchMeta,
+		"extraction_backend": firstNonEmpty(extracted.ExtractionBackend, "browser_dom"),
+		"page": map[string]any{
+			"current_url": extracted.CurrentURL,
+			"title":       extracted.Title,
+			"text":        truncateString(extracted.Text, 1200),
+			"links_count": len(extracted.Links),
+		},
+	}
+	if searchBlocked := detectSearchBlocked(extracted); searchBlocked != "" {
+		out["blocked"] = true
+		out["error"] = searchBlocked
 	}
 	applyCacheAfterFetch(ctx, policy, out)
 	if boolArg(args, "store") {
@@ -582,7 +593,7 @@ func (a *App) toolResearch(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 			ctx.Logger().Warn("research search failed", "query", q, "err", err.Error())
 			continue
 		}
-		for _, r := range searchOut.(map[string]any)["results"].([]searchResult) {
+		for _, r := range searchResultsFromOutput(searchOut) {
 			if !seen[r.URL] {
 				seen[r.URL] = true
 				allResults = append(allResults, r)
@@ -1394,6 +1405,99 @@ func parseDuckDuckGo(body []byte, limit int) []searchResult {
 	return results
 }
 
+func parseDuckDuckGoSearch(extracted *browserExtractResult, limit int) []searchResult {
+	if extracted == nil {
+		return []searchResult{}
+	}
+	if strings.TrimSpace(extracted.HTML) != "" {
+		if results := parseDuckDuckGo([]byte(extracted.HTML), limit); len(results) > 0 {
+			return results
+		}
+	}
+	results := make([]searchResult, 0, limit)
+	seen := map[string]bool{}
+	for _, l := range extracted.Links {
+		if len(results) >= limit {
+			break
+		}
+		href := decodeDuckURL(l.URL)
+		title := cleanText(l.Text)
+		if href == "" || title == "" || seen[href] || !isLikelyResultURL(href) {
+			continue
+		}
+		seen[href] = true
+		results = append(results, searchResult{
+			Title:      truncateString(title, 240),
+			URL:        href,
+			Source:     "duckduckgo",
+			Rank:       len(results) + 1,
+			Confidence: "medium",
+		})
+	}
+	if results == nil {
+		return []searchResult{}
+	}
+	return results
+}
+
+func detectSearchBlocked(extracted *browserExtractResult) string {
+	if extracted == nil {
+		return ""
+	}
+	haystack := strings.ToLower(strings.Join([]string{
+		extracted.Title,
+		extracted.Description,
+		extracted.Text,
+		extracted.HTML,
+		fmt.Sprint(extracted.Metadata),
+	}, "\n"))
+	switch {
+	case strings.Contains(haystack, "unfortunately, bots use duckduckgo too"):
+		return "search_blocked: duckduckgo returned an anti-bot challenge"
+	case strings.Contains(haystack, "error-lite@duckduckgo.com"):
+		return "search_blocked: duckduckgo returned an anti-bot challenge"
+	case strings.Contains(haystack, "anomaly-modal") || strings.Contains(haystack, "anomaly.js"):
+		return "search_blocked: duckduckgo returned an anti-bot challenge"
+	}
+	return ""
+}
+
+func searchResultsFromOutput(out any) []searchResult {
+	m, ok := out.(map[string]any)
+	if !ok {
+		return nil
+	}
+	switch results := m["results"].(type) {
+	case []searchResult:
+		return results
+	case []any:
+		out := make([]searchResult, 0, len(results))
+		for _, item := range results {
+			switch r := item.(type) {
+			case searchResult:
+				out = append(out, r)
+			case map[string]any:
+				u := stringFromAny(r["url"])
+				if u == "" {
+					continue
+				}
+				out = append(out, searchResult{
+					Title:      stringFromAny(r["title"]),
+					URL:        u,
+					Snippet:    stringFromAny(r["snippet"]),
+					Source:     firstNonEmpty(stringFromAny(r["source"]), "duckduckgo"),
+					Rank:       intFromAny(r["rank"]),
+					FetchedAt:  stringFromAny(r["fetched_at"]),
+					Confidence: stringFromAny(r["confidence"]),
+				})
+			}
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
 // ─── Storage and DB ───────────────────────────────────────────────
 
 func startRun(ctx *sdk.AppCtx, kind string, input any) (int64, error) {
@@ -1894,6 +1998,22 @@ func stringFromAny(v any) string {
 		return strings.TrimSpace(x.String())
 	default:
 		return ""
+	}
+}
+
+func intFromAny(v any) int {
+	switch x := v.(type) {
+	case int:
+		return x
+	case int64:
+		return int(x)
+	case float64:
+		return int(x)
+	case json.Number:
+		n, _ := strconv.Atoi(x.String())
+		return n
+	default:
+		return 0
 	}
 }
 

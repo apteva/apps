@@ -8,6 +8,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"sort"
+	"strings"
 	"sync"
 	"testing"
 
@@ -55,6 +56,62 @@ func TestParseDuckDuckGoResults(t *testing.T) {
 	}
 	if got[1].Title != "Beta result" || got[1].Source != "duckduckgo" {
 		t.Fatalf("second result wrong: %#v", got[1])
+	}
+}
+
+func TestSearchUsesComputerDOMParser(t *testing.T) {
+	plat := newFakePlatform()
+	ctx, app := newTestCtx(t, plat)
+
+	outAny, err := app.toolSearch(ctx, map[string]any{"query": "alpha", "limit": 2, "cache": "bypass"})
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	out := outAny.(map[string]any)
+	if got := out["extraction_backend"]; got != "browser_dom" {
+		t.Fatalf("backend=%v", got)
+	}
+	if _, ok := out["fetch"]; ok {
+		t.Fatalf("search should not expose HTTP fetch metadata: %#v", out["fetch"])
+	}
+	results := out["results"].([]searchResult)
+	if len(results) != 2 {
+		t.Fatalf("results len=%d, want 2: %#v", len(results), results)
+	}
+	if results[0].URL != "https://example.com/a" || results[0].Title != "Alpha result" {
+		t.Fatalf("first result wrong: %#v", results[0])
+	}
+	calls := plat.callLog()
+	want := []string{"computer.browser_open", "computer.browser_extract", "computer.browser_close"}
+	if !sameOrderedPrefix(calls, want) {
+		t.Fatalf("calls=%v want prefix %v", calls, want)
+	}
+	extractArgs := plat.lastCall("computer", "browser_extract")
+	formats, _ := extractArgs["formats"].([]string)
+	if !sameStrings(formats, []string{"text", "html", "links", "metadata"}) {
+		t.Fatalf("formats=%#v", formats)
+	}
+}
+
+func TestSearchBlockedIsReportedAndNotCached(t *testing.T) {
+	plat := newFakePlatform()
+	plat.searchBlocked = true
+	ctx, app := newTestCtx(t, plat)
+
+	outAny, err := app.toolSearch(ctx, map[string]any{"query": "blocked", "cache": "refresh"})
+	if err != nil {
+		t.Fatalf("search: %v", err)
+	}
+	out := outAny.(map[string]any)
+	if out["blocked"] != true {
+		t.Fatalf("blocked=%v out=%#v", out["blocked"], out)
+	}
+	if errText, _ := out["error"].(string); !strings.Contains(errText, "search_blocked") {
+		t.Fatalf("error=%q", errText)
+	}
+	cache := out["cache"].(cacheInfo)
+	if cache.Stored {
+		t.Fatalf("blocked search should not be cached: %#v", cache)
 	}
 }
 
@@ -182,11 +239,12 @@ type fakeCall struct {
 
 type fakePlatform struct {
 	tk.BasePlatformClient
-	mu         sync.Mutex
-	calls      []fakeCall
-	storageID  int64
-	storageURL string
-	openURL    string
+	mu            sync.Mutex
+	calls         []fakeCall
+	storageID     int64
+	storageURL    string
+	openURL       string
+	searchBlocked bool
 }
 
 func newFakePlatform() *fakePlatform {
@@ -219,6 +277,38 @@ func (p *fakePlatform) respond(app, tool string, in map[string]any) map[string]a
 			"height":      720,
 		}
 	case "computer.browser_extract":
+		if strings.Contains(p.openURL, "duckduckgo.com/html/") {
+			if p.searchBlocked {
+				return map[string]any{
+					"session_id":         in["session_id"],
+					"backend":            "local",
+					"current_url":        p.openURL,
+					"title":              "DuckDuckGo",
+					"text":               "DuckDuckGo\n\nUnfortunately, bots use DuckDuckGo too.\n\nerror-lite@duckduckgo.com",
+					"links":              []map[string]any{{"url": "https://html.duckduckgo.com/html/", "text": "DuckDuckGo"}},
+					"metadata":           map[string]any{"canonical": "https://duckduckgo.com/"},
+					"rendered":           true,
+					"extraction_backend": "browser_dom",
+				}
+			}
+			return map[string]any{
+				"session_id":  in["session_id"],
+				"backend":     "local",
+				"current_url": p.openURL,
+				"title":       "DuckDuckGo Search",
+				"text":        "Alpha result Beta result",
+				"html": `<html><body>
+  <a class="result__a" href="//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fa">Alpha result</a>
+  <a class="result__a" href="https://duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.org%2Fb">Beta result</a>
+</body></html>`,
+				"links": []map[string]any{
+					{"url": "https://duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fa", "text": "Alpha result"},
+					{"url": "https://duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.org%2Fb", "text": "Beta result"},
+				},
+				"rendered":           true,
+				"extraction_backend": "browser_dom",
+			}
+		}
 		return map[string]any{
 			"session_id":         in["session_id"],
 			"backend":            "local",
