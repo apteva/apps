@@ -112,6 +112,59 @@ func TestApplyUnifiedPatch_AppliesModifyAndCreate(t *testing.T) {
 	}
 }
 
+func TestApplyUnifiedPatch_RelocatesHunkWhenLineNumbersAreStale(t *testing.T) {
+	store := newMemFileStore()
+	store.CreateRepo("r")
+	store.Write("r", "a.txt", []byte("intro\none\ntwo\nthree\n"))
+	patch := `--- a/a.txt
++++ b/a.txt
+@@ -1,3 +1,3 @@
+ one
+-two
++TWO
+ three
+`
+	res, err := applyUnifiedPatch(store, "r", patch, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Applied || len(res.ChangedFiles) != 1 {
+		t.Fatalf("unexpected result: %+v", res)
+	}
+	got, _ := store.Read("r", "a.txt")
+	if string(got) != "intro\none\nTWO\nthree\n" {
+		t.Errorf("relocated patch wrote %q", got)
+	}
+}
+
+func TestApplyUnifiedPatch_ToleratesStaleContextWhenRemovalAnchorMatches(t *testing.T) {
+	store := newMemFileStore()
+	store.CreateRepo("r")
+	store.Write("r", "App.jsx", []byte("const selectedIssue = issueData[0];\n<span className=\"status-chip\">{selectedIssue.status}</span>\n<h2>{selectedIssue.title}</h2>\n"))
+	patch := `--- a/App.jsx
++++ b/App.jsx
+@@ -1,3 +1,6 @@
+ const selected = issueData[0];
+-<span className="status-chip">{selectedIssue.status}</span>
++<div className="detail-header">
++  <span className="status-chip">{selectedIssue.status}</span>
++</div>
+ <h2>{selected.title}</h2>
+`
+	res, err := applyUnifiedPatch(store, "r", patch, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !res.Applied || len(res.RejectedHunks) != 0 {
+		t.Fatalf("unexpected result: %+v", res)
+	}
+	got, _ := store.Read("r", "App.jsx")
+	want := "const selectedIssue = issueData[0];\n<div className=\"detail-header\">\n  <span className=\"status-chip\">{selectedIssue.status}</span>\n</div>\n<h2>{selectedIssue.title}</h2>\n"
+	if string(got) != want {
+		t.Errorf("context-drift patch wrote:\n%q\nwant:\n%q", got, want)
+	}
+}
+
 func TestApplyUnifiedPatch_RejectsMismatchWithoutWriting(t *testing.T) {
 	store := newMemFileStore()
 	store.CreateRepo("r")

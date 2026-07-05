@@ -330,28 +330,14 @@ func applyFilePatch(body []byte, hunks []patchHunk) ([]byte, error) {
 		if start < cursor || start > len(lines) {
 			return nil, patchApplyError{Hunk: idx + 1, OldLine: start + 1, Reason: "starts outside file"}
 		}
-		out = append(out, lines[cursor:start]...)
-		pos := start
-		for _, pline := range h.lines {
-			prefix := pline[0]
-			text := pline[1:]
-			switch prefix {
-			case ' ':
-				if pos >= len(lines) || lines[pos] != text {
-					return nil, patchApplyError{Hunk: idx + 1, OldLine: pos + 1, Reason: "context mismatch"}
-				}
-				out = append(out, text)
-				pos++
-			case '-':
-				if pos >= len(lines) || lines[pos] != text {
-					return nil, patchApplyError{Hunk: idx + 1, OldLine: pos + 1, Reason: "removal mismatch"}
-				}
-				pos++
-			case '+':
-				out = append(out, text)
-			}
+		applied, err := applyHunk(lines, cursor, start, h)
+		if err != nil {
+			return nil, withHunkNumber(err, idx+1)
 		}
-		cursor = pos
+		start = applied.start
+		out = append(out, lines[cursor:start]...)
+		out = append(out, applied.lines...)
+		cursor = applied.next
 	}
 	out = append(out, lines[cursor:]...)
 	joined := strings.Join(out, "\n")
@@ -359,6 +345,171 @@ func applyFilePatch(body []byte, hunks []patchHunk) ([]byte, error) {
 		joined += "\n"
 	}
 	return []byte(joined), nil
+}
+
+type hunkApplyResult struct {
+	start  int
+	next   int
+	lines  []string
+	drifts int
+}
+
+func applyHunk(lines []string, cursor, nominalStart int, h patchHunk) (hunkApplyResult, error) {
+	res, firstErr := applyHunkAt(lines, nominalStart, h, false)
+	if firstErr == nil {
+		return res, nil
+	}
+	if res, ok := findStrictHunkLocation(lines, cursor, nominalStart, h); ok {
+		return res, nil
+	}
+	if !hunkHasRemoval(h) {
+		return hunkApplyResult{}, firstErr
+	}
+	if res, err := applyHunkAt(lines, nominalStart, h, true); err == nil && res.drifts <= maxContextDrifts(h) {
+		return res, nil
+	}
+	if res, ok := findContextDriftHunkLocation(lines, cursor, nominalStart, h); ok {
+		return res, nil
+	}
+	return hunkApplyResult{}, firstErr
+}
+
+func applyHunkAt(lines []string, start int, h patchHunk, allowContextDrift bool) (hunkApplyResult, error) {
+	if start < 0 || start > len(lines) {
+		return hunkApplyResult{}, patchApplyError{OldLine: start + 1, Reason: "starts outside file"}
+	}
+	out := []string{}
+	pos := start
+	drifts := 0
+	for _, pline := range h.lines {
+		prefix := pline[0]
+		text := pline[1:]
+		switch prefix {
+		case ' ':
+			if pos >= len(lines) {
+				return hunkApplyResult{}, patchApplyError{OldLine: pos + 1, Reason: "context mismatch"}
+			}
+			if lines[pos] != text {
+				if !allowContextDrift {
+					return hunkApplyResult{}, patchApplyError{OldLine: pos + 1, Reason: "context mismatch"}
+				}
+				drifts++
+				out = append(out, lines[pos])
+			} else {
+				out = append(out, text)
+			}
+			pos++
+		case '-':
+			if pos >= len(lines) || lines[pos] != text {
+				return hunkApplyResult{}, patchApplyError{OldLine: pos + 1, Reason: "removal mismatch"}
+			}
+			pos++
+		case '+':
+			out = append(out, text)
+		}
+	}
+	return hunkApplyResult{start: start, next: pos, lines: out, drifts: drifts}, nil
+}
+
+func findStrictHunkLocation(lines []string, cursor, nominalStart int, h patchHunk) (hunkApplyResult, bool) {
+	var found hunkApplyResult
+	matches := 0
+	for start := cursor; start <= len(lines); start++ {
+		if start == nominalStart {
+			continue
+		}
+		res, err := applyHunkAt(lines, start, h, false)
+		if err != nil {
+			continue
+		}
+		found = res
+		matches++
+		if matches > 1 {
+			return hunkApplyResult{}, false
+		}
+	}
+	return found, matches == 1
+}
+
+func findContextDriftHunkLocation(lines []string, cursor, nominalStart int, h patchHunk) (hunkApplyResult, bool) {
+	firstRemoval, oldOffset, ok := firstRemovalAnchor(h)
+	if !ok {
+		return hunkApplyResult{}, false
+	}
+	var best hunkApplyResult
+	bestDistance := 0
+	matches := 0
+	for pos := cursor; pos < len(lines); pos++ {
+		if lines[pos] != firstRemoval {
+			continue
+		}
+		start := pos - oldOffset
+		if start < cursor || start < 0 {
+			continue
+		}
+		res, err := applyHunkAt(lines, start, h, true)
+		if err != nil || res.drifts > maxContextDrifts(h) {
+			continue
+		}
+		distance := start - nominalStart
+		if distance < 0 {
+			distance = -distance
+		}
+		if matches == 0 || res.drifts < best.drifts || (res.drifts == best.drifts && distance < bestDistance) {
+			best = res
+			bestDistance = distance
+			matches = 1
+			continue
+		}
+		if res.drifts == best.drifts && distance == bestDistance {
+			matches++
+		}
+	}
+	return best, matches == 1
+}
+
+func firstRemovalAnchor(h patchHunk) (string, int, bool) {
+	oldOffset := 0
+	for _, pline := range h.lines {
+		switch pline[0] {
+		case ' ':
+			oldOffset++
+		case '-':
+			return pline[1:], oldOffset, true
+		}
+	}
+	return "", 0, false
+}
+
+func hunkHasRemoval(h patchHunk) bool {
+	for _, line := range h.lines {
+		if len(line) > 0 && line[0] == '-' {
+			return true
+		}
+	}
+	return false
+}
+
+func maxContextDrifts(h patchHunk) int {
+	context := 0
+	for _, line := range h.lines {
+		if len(line) > 0 && line[0] == ' ' {
+			context++
+		}
+	}
+	if context < 2 {
+		return context
+	}
+	return 2
+}
+
+func withHunkNumber(err error, n int) error {
+	var pe patchApplyError
+	if errors.As(err, &pe) {
+		pe.Hunk = n
+		return pe
+	}
+	return fmt.Errorf("hunk #%d: %w", n, err)
 }
 
 func patchSplitVisibleLines(body string) []string {

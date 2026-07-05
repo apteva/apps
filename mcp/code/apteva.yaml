@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: code
 display_name: Apteva Code
-version: 0.5.19
+version: 0.5.20
 description: |
   Repositories — named, framework-tagged code workspaces scoped under
   Apteva projects. First-class editing tools modelled on Claude Code:
@@ -11,9 +11,10 @@ description: |
   ZIP import for repository initialization or overlay updates. Native
   repo issues track bugs, feature requests, tasks, comments, and code
   links for agents and humans.
-  v0.5.19 makes coding tools more agent-efficient with compact grep
+  v0.5.20 makes coding tools more agent-efficient with compact grep
   modes, smaller paged reads, file outlines/excerpts, and dry-run
   unified patch previews that can be applied by patch_id.
+  v0.5.20 also relocates stale patch hunks and tolerates already-refactored context when removal anchors still match.
   v0.5.17 unifies project navigation with a single top tab bar and
   renames the global code view to Repositories.
   v0.5.16 gives the project-wide Issues inbox the full panel width
