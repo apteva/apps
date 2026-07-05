@@ -37,18 +37,17 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: tapo
 display_name: Tapo Cameras
-version: 0.3.3
+version: 0.3.4
 description: Local-LAN control of TP-Link Tapo cameras.
 author: Apteva
 scopes: [project, global]
 requires:
-  permissions: [db.write.app, net.egress]
+  permissions: [db.write.app, net.egress, platform.apps.call]
   integrations: []
   apps:
     - name: ffmpeg
       version: ">=0.1.0"
-      optional: true
-      reason: "snapshot_capture delegates to ffmpeg_grab_frame"
+      reason: "snapshots and browser live view delegate to ffmpeg_grab_frame"
 provides:
   http_routes:
     - prefix: /
@@ -167,6 +166,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/cameras", Handler: a.handleCameras},
 		{Pattern: "/cameras/", Handler: a.handleCameraItem},
 		{Pattern: "/snapshots/", Handler: a.handleSnapshot}, // GET /snapshots/{id}.jpg
+		{Pattern: "/streams/", Handler: a.handleStream},     // GET /streams/{id}.mjpg
 		{Pattern: "/motion-events", Handler: a.handleEvents},
 	}
 }
@@ -261,7 +261,7 @@ func (a *App) handleCameraItem(w http.ResponseWriter, r *http.Request) {
 // this in <img src> tags so the browser can stream it. /snapshots/{id}.jpg
 func (a *App) handleSnapshot(w http.ResponseWriter, r *http.Request) {
 	id := pathInt(r.URL.Path, "/snapshots/")
-	cam, err := getCamera(globalCtx.AppDB(), projectScope(), id)
+	cam, err := getCameraFull(globalCtx.AppDB(), projectScope(), id)
 	if err != nil {
 		http.Error(w, err.Error(), 404)
 		return
@@ -279,6 +279,73 @@ func (a *App) handleSnapshot(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "image/jpeg")
 	w.Header().Set("Cache-Control", "no-store")
 	_, _ = w.Write(jpg)
+}
+
+func (a *App) handleStream(w http.ResponseWriter, r *http.Request) {
+	id := pathInt(r.URL.Path, "/streams/")
+	cam, err := getCameraFull(globalCtx.AppDB(), projectScope(), id)
+	if err != nil {
+		http.Error(w, err.Error(), 404)
+		return
+	}
+	cli, err := clientFor(cam)
+	if err != nil {
+		http.Error(w, err.Error(), 502)
+		return
+	}
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		http.Error(w, "streaming unsupported", 500)
+		return
+	}
+
+	const boundary = "apteva-tapo-frame"
+	interval := time.Second
+	if fps := intArg(map[string]any{"fps": r.URL.Query().Get("fps")}, "fps"); fps > 0 {
+		if fps > 2 {
+			fps = 2
+		}
+		interval = time.Second / time.Duration(fps)
+	}
+
+	wroteHeader := false
+	for {
+		jpg, err := snapshotViaFfmpegApp(globalCtx, cli)
+		if err != nil {
+			if !wroteHeader {
+				http.Error(w, err.Error(), 502)
+				return
+			}
+			globalCtx.Logger().Warn("stream frame", "camera", cam.Name, "err", err.Error())
+			select {
+			case <-r.Context().Done():
+				return
+			case <-time.After(interval):
+				continue
+			}
+		}
+		if !wroteHeader {
+			w.Header().Set("Content-Type", "multipart/x-mixed-replace; boundary="+boundary)
+			w.Header().Set("Cache-Control", "no-store")
+			w.Header().Set("X-Accel-Buffering", "no")
+			wroteHeader = true
+		}
+		if _, err := fmt.Fprintf(w, "--%s\r\nContent-Type: image/jpeg\r\nContent-Length: %d\r\n\r\n", boundary, len(jpg)); err != nil {
+			return
+		}
+		if _, err := w.Write(jpg); err != nil {
+			return
+		}
+		if _, err := io.WriteString(w, "\r\n"); err != nil {
+			return
+		}
+		flusher.Flush()
+		select {
+		case <-r.Context().Done():
+			return
+		case <-time.After(interval):
+		}
+	}
 }
 
 func (a *App) handleEvents(w http.ResponseWriter, r *http.Request) {
@@ -547,10 +614,10 @@ func (a *App) toolStreamGetURL(ctx *sdk.AppCtx, args map[string]any) (any, error
 		ttl = 3600
 	}
 	return map[string]any{
-		"camera_id": id,
-		"url":       url,
-		"protocol":  "rtsp",
-		"quality":   quality,
+		"camera_id":  id,
+		"url":        url,
+		"protocol":   "rtsp",
+		"quality":    quality,
 		"expires_at": time.Now().UTC().Add(time.Duration(ttl) * time.Second).Format(time.RFC3339),
 	}, nil
 }
@@ -710,21 +777,21 @@ func (a *App) toolSirenTrigger(ctx *sdk.AppCtx, args map[string]any) (any, error
 // ─── DB layer ───────────────────────────────────────────────────────
 
 type Camera struct {
-	ID           int64           `json:"id"`
-	ProjectID    string          `json:"project_id"`
-	Name         string          `json:"name"`
-	Room         string          `json:"room"`
-	IP           string          `json:"ip"`
-	Username     string          `json:"username"`
-	Model        string          `json:"model"`
-	Firmware     string          `json:"firmware"`
-	Capabilities Capabilities    `json:"capabilities"`
-	Online       bool            `json:"online"`
-	LastSeenAt   string          `json:"last_seen_at,omitempty"`
-	LastError    string          `json:"last_error,omitempty"`
-	CreatedAt    string          `json:"created_at"`
-	UpdatedAt    string          `json:"updated_at"`
-	password     string          `json:"-"` // decrypted on demand, not exposed
+	ID           int64        `json:"id"`
+	ProjectID    string       `json:"project_id"`
+	Name         string       `json:"name"`
+	Room         string       `json:"room"`
+	IP           string       `json:"ip"`
+	Username     string       `json:"username"`
+	Model        string       `json:"model"`
+	Firmware     string       `json:"firmware"`
+	Capabilities Capabilities `json:"capabilities"`
+	Online       bool         `json:"online"`
+	LastSeenAt   string       `json:"last_seen_at,omitempty"`
+	LastError    string       `json:"last_error,omitempty"`
+	CreatedAt    string       `json:"created_at"`
+	UpdatedAt    string       `json:"updated_at"`
+	password     string       `json:"-"` // decrypted on demand, not exposed
 }
 
 func projectScope() string {
