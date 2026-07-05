@@ -16,7 +16,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: ffmpeg
 display_name: FFmpeg
-version: 0.1.0
+version: 0.1.1
 description: Stateless ffmpeg-as-a-service. Three sync MCP tools — grab_frame / probe / version — for sibling apps that need a single frame out of a stream without bundling their own ffmpeg.
 author: Apteva
 scopes: [project, global]
