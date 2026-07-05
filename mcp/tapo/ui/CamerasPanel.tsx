@@ -51,6 +51,7 @@ interface Camera {
   firmware: string;
   capabilities: Capabilities;
   online: boolean;
+  paused: boolean;
   last_seen_at?: string;
   last_error?: string;
 }
@@ -95,6 +96,15 @@ export default function CamerasPanel({ installId, projectId }: NativePanelProps)
     }
   }, [installId]);
 
+  const handleCameraChanged = useCallback((updated?: Camera) => {
+    if (updated) {
+      setCameras((prev) => prev.map((camera) => camera.id === updated.id ? updated : camera));
+      setSelected((current) => current?.id === updated.id ? updated : current);
+      return;
+    }
+    refresh();
+  }, [refresh]);
+
   useEffect(() => {
     refresh();
     const t = setInterval(refresh, 30_000);
@@ -115,6 +125,8 @@ export default function CamerasPanel({ installId, projectId }: NativePanelProps)
         const env = JSON.parse(e.data) as AppBusEnvelope;
         if (!env.topic.startsWith("tapo.") || !env.data.camera_id) return;
         const event = eventFromBus(env);
+        const camera = cameras.find((item) => item.id === event.camera_id);
+        if (camera?.paused) return;
         setLatestEvents((prev) => ({ ...prev, [event.camera_id]: event }));
         setHighlighted((prev) => ({ ...prev, [event.camera_id]: true }));
         const prevTimer = timers.get(event.camera_id);
@@ -133,7 +145,7 @@ export default function CamerasPanel({ installId, projectId }: NativePanelProps)
       es.close();
       timers.forEach((timer) => window.clearTimeout(timer));
     };
-  }, [projectId]);
+  }, [cameras, projectId]);
 
   const rooms = useMemo(
     () => Array.from(new Set(cameras.map((c) => c.room).filter(Boolean))).sort(),
@@ -180,10 +192,10 @@ export default function CamerasPanel({ installId, projectId }: NativePanelProps)
           <CameraTile
             key={c.id}
             camera={c}
-            installId={installId}
-            latestEvent={latestEvents[c.id]}
-            highlighted={!!highlighted[c.id]}
-            onClick={() => setSelected(c)}
+          installId={installId}
+          latestEvent={latestEvents[c.id]}
+          highlighted={!c.paused && !!highlighted[c.id]}
+          onClick={() => setSelected(c)}
           />
         ))}
         {filtered.length === 0 && (
@@ -206,7 +218,7 @@ export default function CamerasPanel({ installId, projectId }: NativePanelProps)
           installId={installId}
           latestEvent={latestEvents[selected.id]}
           onClose={() => setSelected(null)}
-          onChanged={refresh}
+          onChanged={handleCameraChanged}
         />
       )}
     </div>
@@ -248,7 +260,14 @@ function CameraImage({
   const currentURL = useRef("");
 
   useEffect(() => {
-    if (!camera.online) return;
+    if (!camera.online || camera.paused) {
+      setFrameURL((prev) => {
+        if (prev) URL.revokeObjectURL(prev);
+        currentURL.current = "";
+        return "";
+      });
+      return;
+    }
     let stopped = false;
     let timer: number | undefined;
     const controller = new AbortController();
@@ -294,8 +313,11 @@ function CameraImage({
         currentURL.current = "";
       }
     };
-  }, [camera.id, camera.online, installId, refreshMs]);
+  }, [camera.id, camera.online, camera.paused, installId, refreshMs]);
 
+  if (camera.paused) {
+    return <span className="text-sm">paused</span>;
+  }
   if (!camera.online) {
     return <span className="text-sm">offline</span>;
   }
@@ -328,7 +350,12 @@ function CameraTile({
     >
       <div className="aspect-video bg-black flex items-center justify-center text-text-dim relative">
         <CameraImage camera={camera} installId={installId} refreshMs={SNAP_REFRESH_MS} />
-        {highlighted && latestEvent && (
+        {camera.paused && (
+          <div className="absolute top-2 left-2 bg-bg border border-border text-text text-xs font-medium px-2 py-1 rounded">
+            Paused
+          </div>
+        )}
+        {highlighted && latestEvent && !camera.paused && (
           <div className="absolute top-2 left-2 bg-accent text-bg text-xs font-medium px-2 py-1 rounded">
             {latestEvent.kind || "motion"} detected
           </div>
@@ -336,18 +363,20 @@ function CameraTile({
       </div>
       <div className="px-3 py-2 flex items-center gap-2">
         <span
-          className={`w-2 h-2 rounded-full ${camera.online ? "bg-success" : "bg-error"}`}
+          className={`w-2 h-2 rounded-full ${camera.paused ? "bg-text-dim" : camera.online ? "bg-success" : "bg-error"}`}
         />
         <div className="flex-1 min-w-0">
           <div className="text-sm font-medium truncate">{camera.name}</div>
           <div className="text-xs text-text-dim truncate">
             {camera.room || "—"} · {camera.model || "Tapo"}
           </div>
-          {latestEvent && (
+          {camera.paused ? (
+            <div className="text-xs text-text-dim truncate">Paused</div>
+          ) : latestEvent ? (
             <div className="text-xs text-accent truncate">
               {latestEvent.kind || "motion"} {formatEventAge(latestEvent.occurred_at)}
             </div>
-          )}
+          ) : null}
         </div>
       </div>
     </div>
@@ -428,7 +457,7 @@ function CameraDetail({
   installId: number;
   latestEvent?: MotionEvent;
   onClose: () => void;
-  onChanged: () => void;
+  onChanged: (camera?: Camera) => void;
 }) {
   const [events, setEvents] = useState<MotionEvent[]>([]);
   const [busy, setBusy] = useState(false);
@@ -471,7 +500,9 @@ function CameraDetail({
       <div className="grid gap-4 lg:grid-cols-[minmax(320px,1.2fr)_minmax(260px,0.8fr)]">
         <div>
           <div className="aspect-video bg-black rounded overflow-hidden">
-            {camera.online ? (
+            {camera.paused ? (
+              <div className="flex items-center justify-center h-full text-text-dim">paused</div>
+            ) : camera.online ? (
               <div className="w-full h-full flex items-center justify-center text-text-dim">
                 <CameraImage camera={camera} installId={installId} refreshMs={250} />
               </div>
@@ -495,9 +526,15 @@ function CameraDetail({
         </div>
 
         <div className="space-y-3 text-sm">
-          <div className="text-text-dim">
-            {camera.model} · fw {camera.firmware} · {camera.ip}
+          <div className="flex items-start gap-2">
+            <div className="text-text-dim flex-1 min-w-0">
+              {camera.model} · fw {camera.firmware} · {camera.ip}
+            </div>
+            {camera.paused && (
+              <span className="text-xs border border-border rounded px-2 py-0.5">Paused</span>
+            )}
           </div>
+          <PauseControls camera={camera} installId={installId} onChanged={onChanged} />
           <Toggles camera={camera} installId={installId} onChanged={onChanged} />
           <div>
             <div className="text-xs text-text-dim mb-1">Recent motion</div>
@@ -538,7 +575,7 @@ function Toggles({
   camera,
   installId,
   onChanged,
-}: { camera: Camera; installId: number; onChanged: () => void }) {
+}: { camera: Camera; installId: number; onChanged: (camera?: Camera) => void }) {
   const post = async (path: string, body: any) => {
     await fetch(apiPath(installId, `/cameras/${camera.id}/${path}`), {
       method: "POST",
@@ -560,6 +597,88 @@ function Toggles({
         Trigger toggles via the agent (privacy_set, led_set, motion_detection_set).
       </div>
     </div>
+  );
+}
+
+function PauseControls({
+  camera,
+  installId,
+  onChanged,
+}: { camera: Camera; installId: number; onChanged: (camera?: Camera) => void }) {
+  const [privacy, setPrivacy] = useState(false);
+  const [disableMotion, setDisableMotion] = useState(false);
+  const [privacyOff, setPrivacyOff] = useState(false);
+  const [restoreMotion, setRestoreMotion] = useState(false);
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+
+  const submit = async () => {
+    setBusy(true);
+    setErr("");
+    try {
+      const path = camera.paused ? "resume" : "pause";
+      const body = camera.paused
+        ? { privacy_off: privacyOff, restore_motion: restoreMotion }
+        : { privacy, disable_motion: disableMotion };
+      const r = await fetch(apiPath(installId, `/cameras/${camera.id}/${path}`), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!r.ok) throw new Error(await r.text());
+      const out = await r.json();
+      onChanged(out.camera);
+    } catch (e: any) {
+      setErr(e.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="border border-border rounded p-3 space-y-2">
+      <div className="flex items-center gap-2">
+        <div className="flex-1 text-xs text-text-dim">
+          {camera.paused ? "Apteva is not fetching images or watching events." : "Pause Apteva image and event activity for this camera."}
+        </div>
+        <button
+          className="bg-accent text-bg px-3 py-1 rounded text-sm disabled:opacity-50"
+          onClick={submit}
+          disabled={busy}
+        >
+          {busy ? "Saving..." : camera.paused ? "Resume" : "Pause"}
+        </button>
+      </div>
+      {camera.paused ? (
+        <div className="grid gap-1 text-xs text-text-dim sm:grid-cols-2">
+          <Check label="Turn privacy off" checked={privacyOff} onChange={setPrivacyOff} />
+          <Check label="Restore motion detection" checked={restoreMotion} onChange={setRestoreMotion} />
+        </div>
+      ) : (
+        <div className="grid gap-1 text-xs text-text-dim sm:grid-cols-2">
+          <Check label="Turn privacy on" checked={privacy} onChange={setPrivacy} />
+          <Check label="Disable motion detection" checked={disableMotion} onChange={setDisableMotion} />
+        </div>
+      )}
+      {err && <div className="text-xs text-error">{err}</div>}
+    </div>
+  );
+}
+
+function Check({
+  label,
+  checked,
+  onChange,
+}: { label: string; checked: boolean; onChange: (checked: boolean) => void }) {
+  return (
+    <label className="flex items-center gap-2">
+      <input
+        type="checkbox"
+        checked={checked}
+        onChange={(e) => onChange(e.target.checked)}
+      />
+      <span>{label}</span>
+    </label>
   );
 }
 

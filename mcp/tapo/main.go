@@ -36,7 +36,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: tapo
 display_name: Tapo Cameras
-version: 0.3.7
+version: 0.3.8
 description: Local-LAN control of TP-Link Tapo cameras.
 author: Apteva
 scopes: [project, global]
@@ -56,6 +56,8 @@ provides:
     - { name: cameras_get,           description: "Read one camera." }
     - { name: cameras_test,          description: "Re-probe a camera." }
     - { name: cameras_rename,        description: "Rename / re-room a camera." }
+    - { name: cameras_pause,         description: "Pause a camera in Apteva." }
+    - { name: cameras_resume,        description: "Resume a paused camera." }
     - { name: cameras_remove,        description: "Delete a camera." }
     - { name: snapshot_capture,      description: "Grab a still frame." }
     - { name: stream_get_url,        description: "Get an RTSP/HLS URL." }
@@ -246,6 +248,30 @@ func (a *App) handleCameraItem(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		writeJSON(w, out)
+	case action == "pause" && r.Method == http.MethodPost:
+		var body struct {
+			Privacy       bool `json:"privacy"`
+			DisableMotion bool `json:"disable_motion"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		out, err := pauseCamera(globalCtx, pid, id, body.Privacy, body.DisableMotion)
+		if err != nil {
+			http.Error(w, err.Error(), 502)
+			return
+		}
+		writeJSON(w, out)
+	case action == "resume" && r.Method == http.MethodPost:
+		var body struct {
+			PrivacyOff    bool `json:"privacy_off"`
+			RestoreMotion bool `json:"restore_motion"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		out, err := resumeCamera(globalCtx, pid, id, body.PrivacyOff, body.RestoreMotion)
+		if err != nil {
+			http.Error(w, err.Error(), 502)
+			return
+		}
+		writeJSON(w, out)
 	case action == "ptz" && r.Method == http.MethodPost:
 		var body struct {
 			Direction               string `json:"direction"`
@@ -272,6 +298,10 @@ func (a *App) handleSnapshot(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), 404)
 		return
 	}
+	if cam.Paused {
+		http.Error(w, "camera paused", http.StatusConflict)
+		return
+	}
 	cli, err := clientFor(cam)
 	if err != nil {
 		http.Error(w, err.Error(), 502)
@@ -292,6 +322,10 @@ func (a *App) handleStream(w http.ResponseWriter, r *http.Request) {
 	cam, err := getCameraFull(globalCtx.AppDB(), projectScope(globalCtx), id)
 	if err != nil {
 		http.Error(w, err.Error(), 404)
+		return
+	}
+	if cam.Paused {
+		http.Error(w, "camera paused", http.StatusConflict)
 		return
 	}
 	cli, err := clientFor(cam)
@@ -404,6 +438,14 @@ func (a *App) MCPTools() []sdk.Tool {
 			Description: "Rename a camera or change its room. Pass either name or room (or both).",
 			InputSchema: obj(map[string]any{"id": num, "name": str, "room": str}, []string{"id"}),
 			Handler:     a.toolCamerasRename},
+		{Name: "cameras_pause",
+			Description: "Pause a camera inside Apteva. Paused cameras stay registered but stop snapshots, streams, ONVIF event watching and app-bus motion events. Optional privacy=true turns camera privacy mode on; disable_motion=true turns on-camera motion detection off.",
+			InputSchema: obj(map[string]any{"id": num, "privacy": boo, "disable_motion": boo}, []string{"id"}),
+			Handler:     a.toolCamerasPause},
+		{Name: "cameras_resume",
+			Description: "Resume a paused camera. Optional privacy_off=true turns camera privacy mode off; restore_motion=true turns on-camera motion detection on.",
+			InputSchema: obj(map[string]any{"id": num, "privacy_off": boo, "restore_motion": boo}, []string{"id"}),
+			Handler:     a.toolCamerasResume},
 		{Name: "cameras_remove",
 			Description: "Delete a camera registration.",
 			InputSchema: obj(map[string]any{"id": num}, []string{"id"}),
@@ -545,6 +587,26 @@ func (a *App) toolCamerasRemove(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	return map[string]any{"status": "deleted", "id": id}, nil
 }
 
+func (a *App) toolCamerasPause(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	id := intArg(args, "id")
+	if id == 0 {
+		return nil, errors.New("id required")
+	}
+	privacy, _ := args["privacy"].(bool)
+	disableMotion, _ := args["disable_motion"].(bool)
+	return pauseCamera(ctx, projectScope(ctx), id, privacy, disableMotion)
+}
+
+func (a *App) toolCamerasResume(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	id := intArg(args, "id")
+	if id == 0 {
+		return nil, errors.New("id required")
+	}
+	privacyOff, _ := args["privacy_off"].(bool)
+	restoreMotion, _ := args["restore_motion"].(bool)
+	return resumeCamera(ctx, projectScope(ctx), id, privacyOff, restoreMotion)
+}
+
 func (a *App) toolSnapshotCapture(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	id := intArg(args, "id")
 	if id == 0 {
@@ -553,6 +615,9 @@ func (a *App) toolSnapshotCapture(ctx *sdk.AppCtx, args map[string]any) (any, er
 	cam, err := getCameraFull(ctx.AppDB(), projectScope(ctx), id)
 	if err != nil {
 		return nil, err
+	}
+	if cam.Paused {
+		return nil, errors.New("camera paused")
 	}
 	cli, err := clientFor(cam)
 	if err != nil {
@@ -596,6 +661,9 @@ func (a *App) toolStreamGetURL(ctx *sdk.AppCtx, args map[string]any) (any, error
 	cam, err := getCameraFull(ctx.AppDB(), projectScope(ctx), id)
 	if err != nil {
 		return nil, err
+	}
+	if cam.Paused {
+		return nil, errors.New("camera paused")
 	}
 	cli, err := clientFor(cam)
 	if err != nil {
@@ -793,6 +861,7 @@ type Camera struct {
 	Firmware     string       `json:"firmware"`
 	Capabilities Capabilities `json:"capabilities"`
 	Online       bool         `json:"online"`
+	Paused       bool         `json:"paused"`
 	LastSeenAt   string       `json:"last_seen_at,omitempty"`
 	LastError    string       `json:"last_error,omitempty"`
 	CreatedAt    string       `json:"created_at"`
@@ -860,7 +929,7 @@ func listCameras(db *sql.DB, pid string) ([]Camera, error) {
 	rows, err := db.Query(
 		`SELECT id, project_id, name, room, ip, username,
 		        model, firmware, capabilities_json,
-		        online, last_seen_at, last_error, created_at, updated_at
+		        online, paused, last_seen_at, last_error, created_at, updated_at
 		   FROM cameras WHERE project_id = ? ORDER BY name`, pid)
 	if err != nil {
 		return nil, err
@@ -881,7 +950,7 @@ func getCamera(db *sql.DB, pid string, id int64) (*Camera, error) {
 	rows, err := db.Query(
 		`SELECT id, project_id, name, room, ip, username,
 		        model, firmware, capabilities_json,
-		        online, last_seen_at, last_error, created_at, updated_at
+		        online, paused, last_seen_at, last_error, created_at, updated_at
 		   FROM cameras WHERE project_id = ? AND id = ?`, pid, id)
 	if err != nil {
 		return nil, err
@@ -917,15 +986,16 @@ func getCameraFull(db *sql.DB, pid string, id int64) (*Camera, error) {
 func scanCamera(rows *sql.Rows) (*Camera, error) {
 	var c Camera
 	var capsJSON, lastSeen sql.NullString
-	var online int
+	var online, paused int
 	if err := rows.Scan(
 		&c.ID, &c.ProjectID, &c.Name, &c.Room, &c.IP, &c.Username,
 		&c.Model, &c.Firmware, &capsJSON,
-		&online, &lastSeen, &c.LastError, &c.CreatedAt, &c.UpdatedAt,
+		&online, &paused, &lastSeen, &c.LastError, &c.CreatedAt, &c.UpdatedAt,
 	); err != nil {
 		return nil, err
 	}
 	c.Online = online == 1
+	c.Paused = paused == 1
 	c.LastSeenAt = lastSeen.String
 	if capsJSON.Valid && capsJSON.String != "" {
 		_ = json.Unmarshal([]byte(capsJSON.String), &c.Capabilities)
@@ -966,6 +1036,101 @@ func removeCamera(db *sql.DB, pid string, id int64) error {
 	delete(clientCache, id)
 	clientCacheMu.Unlock()
 	return nil
+}
+
+func setCameraPaused(db *sql.DB, pid string, id int64, paused bool) error {
+	res, err := db.Exec(
+		`UPDATE cameras SET paused = ?, updated_at = ? WHERE id = ? AND project_id = ?`,
+		boolToInt(paused), time.Now().UTC().Format(time.RFC3339), id, pid,
+	)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return fmt.Errorf("camera %d not found", id)
+	}
+	if paused {
+		stopONVIFWatcher(id)
+	}
+	return nil
+}
+
+func isCameraPaused(db *sql.DB, pid string, id int64) bool {
+	var paused int
+	if err := db.QueryRow(
+		`SELECT paused FROM cameras WHERE id = ? AND project_id = ?`, id, pid,
+	).Scan(&paused); err != nil {
+		return true
+	}
+	return paused == 1
+}
+
+func pauseCamera(ctx *sdk.AppCtx, pid string, id int64, privacy, disableMotion bool) (map[string]any, error) {
+	if err := setCameraPaused(ctx.AppDB(), pid, id, true); err != nil {
+		return nil, err
+	}
+	warnings := applyPauseDeviceOptions(ctx, pid, id, privacy, disableMotion)
+	cam, err := getCamera(ctx.AppDB(), pid, id)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"status": "paused", "camera": cam, "warnings": warnings}, nil
+}
+
+func resumeCamera(ctx *sdk.AppCtx, pid string, id int64, privacyOff, restoreMotion bool) (map[string]any, error) {
+	if err := setCameraPaused(ctx.AppDB(), pid, id, false); err != nil {
+		return nil, err
+	}
+	warnings := applyResumeDeviceOptions(ctx, pid, id, privacyOff, restoreMotion)
+	cam, err := getCamera(ctx.AppDB(), pid, id)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"status": "running", "camera": cam, "warnings": warnings}, nil
+}
+
+func applyPauseDeviceOptions(ctx *sdk.AppCtx, pid string, id int64, privacy, disableMotion bool) []string {
+	if !privacy && !disableMotion {
+		return nil
+	}
+	cli, err := clientForID(ctx.AppDB(), pid, id)
+	if err != nil {
+		return []string{err.Error()}
+	}
+	var warnings []string
+	if privacy {
+		if err := cli.PrivacySet(true); err != nil {
+			warnings = append(warnings, "privacy: "+err.Error())
+		}
+	}
+	if disableMotion {
+		if err := cli.MotionDetectionSet(false, ""); err != nil {
+			warnings = append(warnings, "motion detection: "+err.Error())
+		}
+	}
+	return warnings
+}
+
+func applyResumeDeviceOptions(ctx *sdk.AppCtx, pid string, id int64, privacyOff, restoreMotion bool) []string {
+	if !privacyOff && !restoreMotion {
+		return nil
+	}
+	cli, err := clientForID(ctx.AppDB(), pid, id)
+	if err != nil {
+		return []string{err.Error()}
+	}
+	var warnings []string
+	if privacyOff {
+		if err := cli.PrivacySet(false); err != nil {
+			warnings = append(warnings, "privacy: "+err.Error())
+		}
+	}
+	if restoreMotion {
+		if err := cli.MotionDetectionSet(true, ""); err != nil {
+			warnings = append(warnings, "motion detection: "+err.Error())
+		}
+	}
+	return warnings
 }
 
 func testCamera(db *sql.DB, pid string, id int64) (*Camera, error) {
@@ -1065,7 +1230,7 @@ func reconcileONVIFWatchers(parent context.Context, app *sdk.AppCtx) error {
 	}
 	seen := map[int64]bool{}
 	for _, cam := range cams {
-		if !cam.Online || cam.Capabilities.OnvifPort == 0 || cam.password == "" {
+		if cam.Paused || !cam.Online || cam.Capabilities.OnvifPort == 0 || cam.password == "" {
 			continue
 		}
 		seen[cam.ID] = true
@@ -1131,7 +1296,19 @@ func stopAllONVIFWatchers() {
 	}
 }
 
+func stopONVIFWatcher(id int64) {
+	onvifWatchersMu.Lock()
+	defer onvifWatchersMu.Unlock()
+	if cancel, ok := onvifWatchers[id]; ok {
+		cancel()
+		delete(onvifWatchers, id)
+	}
+}
+
 func handleONVIFEvent(ctx *sdk.AppCtx, cam Camera, onvifEv ONVIFEvent) {
+	if isCameraPaused(ctx.AppDB(), cam.ProjectID, cam.ID) {
+		return
+	}
 	meta, _ := json.Marshal(map[string]any{
 		"source":     "onvif",
 		"topic":      onvifEv.Topic,
@@ -1219,7 +1396,7 @@ func listCamerasWithPasswords(db *sql.DB, pid string) ([]Camera, error) {
 	rows, err := db.Query(
 		`SELECT id, project_id, name, room, ip, username, password_enc,
 		        model, firmware, capabilities_json,
-		        online, last_seen_at, last_error, created_at, updated_at
+		        online, paused, last_seen_at, last_error, created_at, updated_at
 		   FROM cameras WHERE project_id = ?`, pid)
 	if err != nil {
 		return nil, err
@@ -1229,16 +1406,17 @@ func listCamerasWithPasswords(db *sql.DB, pid string) ([]Camera, error) {
 	for rows.Next() {
 		var c Camera
 		var capsJSON, lastSeen sql.NullString
-		var online int
+		var online, paused int
 		var enc string
 		if err := rows.Scan(
 			&c.ID, &c.ProjectID, &c.Name, &c.Room, &c.IP, &c.Username, &enc,
 			&c.Model, &c.Firmware, &capsJSON,
-			&online, &lastSeen, &c.LastError, &c.CreatedAt, &c.UpdatedAt,
+			&online, &paused, &lastSeen, &c.LastError, &c.CreatedAt, &c.UpdatedAt,
 		); err != nil {
 			return nil, err
 		}
 		c.Online = online == 1
+		c.Paused = paused == 1
 		c.LastSeenAt = lastSeen.String
 		if capsJSON.Valid && capsJSON.String != "" {
 			_ = json.Unmarshal([]byte(capsJSON.String), &c.Capabilities)
