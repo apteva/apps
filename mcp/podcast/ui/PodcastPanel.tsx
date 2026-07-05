@@ -440,12 +440,16 @@ function ShowCover({ show, params }: { show: Show; params: string }) {
   const hasCover = Boolean(show.image_file_id) && !failed;
   return (
     <div className="w-28 shrink-0 sm:w-32">
-      <div className="aspect-square overflow-hidden rounded border border-border bg-bg-input">
+      <div
+        className="overflow-hidden rounded border border-border bg-bg-input"
+        style={{ width: "100%", aspectRatio: "1 / 1" }}
+      >
         {hasCover ? (
           <img
             src={`/api/apps/podcast/art/show/${show.id}?${params}`}
             alt={`${show.title} cover art`}
             className="h-full w-full object-cover"
+            style={{ display: "block", width: "100%", height: "100%", objectFit: "cover" }}
             loading="lazy"
             onError={() => setFailed(true)}
           />
