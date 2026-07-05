@@ -145,13 +145,18 @@ func (a *App) handleSignup(w http.ResponseWriter, r *http.Request) {
 		httpStatus(w, status, map[string]any{"user": res.User, "verification_required": true})
 		return
 	}
-	httpStatus(w, status, map[string]any{
+	resp := map[string]any{
 		"user":          res.User,
 		"access_token":  res.AccessToken,
 		"refresh_token": res.RefreshToken,
 		"expires_in":    res.ExpiresIn,
 		"token_type":    "Bearer",
-	})
+	}
+	if res.AptevaAccessToken != "" {
+		resp["apteva_access_token"] = res.AptevaAccessToken
+		resp["apteva_expires_in"] = res.AptevaExpiresIn
+	}
+	httpStatus(w, status, resp)
 }
 
 // signupRequest is the shared input to performSignup — used by both
@@ -181,6 +186,8 @@ type signupResult struct {
 	AccessToken          string `json:"access_token,omitempty"`
 	RefreshToken         string `json:"refresh_token,omitempty"`
 	ExpiresIn            int    `json:"expires_in,omitempty"`
+	AptevaAccessToken    string `json:"apteva_access_token,omitempty"`
+	AptevaExpiresIn      int    `json:"apteva_expires_in,omitempty"`
 	VerificationRequired bool   `json:"verification_required,omitempty"`
 }
 
@@ -256,11 +263,23 @@ func performSignup(ctx *sdk.AppCtx, pid string, body signupRequest, mint session
 	if err != nil {
 		return nil, http.StatusInternalServerError, err
 	}
+	aptevaToken, err := mintAptevaDelegatedToken(ctx, pid, org, user)
+	if err != nil {
+		return nil, http.StatusInternalServerError, err
+	}
+	aptevaAccessToken := ""
+	aptevaExpiresIn := 0
+	if aptevaToken != nil {
+		aptevaAccessToken = aptevaToken.AccessToken
+		aptevaExpiresIn = aptevaToken.ExpiresIn
+	}
 	return &signupResult{
-		User:         user,
-		AccessToken:  tokens.access,
-		RefreshToken: tokens.refresh,
-		ExpiresIn:    tokens.expiresIn,
+		User:              user,
+		AccessToken:       tokens.access,
+		RefreshToken:      tokens.refresh,
+		ExpiresIn:         tokens.expiresIn,
+		AptevaAccessToken: aptevaAccessToken,
+		AptevaExpiresIn:   aptevaExpiresIn,
 	}, http.StatusCreated, nil
 }
 
@@ -370,17 +389,27 @@ func (a *App) handleLogin(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	aptevaToken, err := mintAptevaDelegatedToken(ctx, pid, org, user)
+	if err != nil {
+		httpErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	dbAudit(ctx.AppDB(), pid, org.ID, &user.ID, client.ClientID, "login", r.RemoteAddr, r.UserAgent(), nil)
 
 	user, _ = dbGetUserByID(ctx.AppDB(), pid, org.ID, user.ID)
 
-	httpJSON(w, map[string]any{
+	resp := map[string]any{
 		"user":          user,
 		"access_token":  tokens.access,
 		"refresh_token": tokens.refresh,
 		"expires_in":    tokens.expiresIn,
 		"token_type":    "Bearer",
-	})
+	}
+	if aptevaToken != nil {
+		resp["apteva_access_token"] = aptevaToken.AccessToken
+		resp["apteva_expires_in"] = aptevaToken.ExpiresIn
+	}
+	httpJSON(w, resp)
 }
 
 // ─── /refresh ────────────────────────────────────────────────────────
@@ -481,14 +510,24 @@ func (a *App) handleRefresh(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	aptevaToken, err := mintAptevaDelegatedToken(ctx, pid, org, user)
+	if err != nil {
+		httpErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	dbAudit(ctx.AppDB(), pid, org.ID, &user.ID, client.ClientID, "refresh", r.RemoteAddr, r.UserAgent(), nil)
 
-	httpJSON(w, map[string]any{
+	resp := map[string]any{
 		"access_token":  tokens.access,
 		"refresh_token": tokens.refresh,
 		"expires_in":    tokens.expiresIn,
 		"token_type":    "Bearer",
-	})
+	}
+	if aptevaToken != nil {
+		resp["apteva_access_token"] = aptevaToken.AccessToken
+		resp["apteva_expires_in"] = aptevaToken.ExpiresIn
+	}
+	httpJSON(w, resp)
 }
 
 // ─── /logout ─────────────────────────────────────────────────────────

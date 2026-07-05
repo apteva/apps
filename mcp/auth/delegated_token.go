@@ -1,0 +1,74 @@
+package main
+
+import (
+	"bytes"
+	"encoding/json"
+	"errors"
+	"net/http"
+	"os"
+	"strings"
+	"time"
+
+	sdk "github.com/apteva/app-sdk"
+)
+
+type aptevaDelegatedToken struct {
+	AccessToken string `json:"access_token"`
+	TokenType   string `json:"token_type"`
+	ExpiresIn   int    `json:"expires_in"`
+	ExpiresAt   string `json:"expires_at"`
+	KeyPrefix   string `json:"key_prefix"`
+	ProjectID   string `json:"project_id"`
+}
+
+func mintAptevaDelegatedToken(ctx *sdk.AppCtx, projectID string, org *Organization, user *User) (*aptevaDelegatedToken, error) {
+	appToken := strings.TrimSpace(os.Getenv("APTEVA_APP_TOKEN"))
+	if appToken == "" {
+		return nil, nil
+	}
+	base := strings.TrimRight(strings.TrimSpace(os.Getenv("APTEVA_GATEWAY_URL")), "/")
+	if base == "" {
+		base = "http://127.0.0.1:5280"
+	}
+	body := map[string]any{
+		"project_id":        projectID,
+		"subject_type":      "user",
+		"subject_id":        uintToStr(user.ID),
+		"subject_email":     user.Email,
+		"organization_id":   uintToStr(org.ID),
+		"organization_slug": org.Slug,
+		"expires_in":        cfgInt(ctx, "apteva_token_ttl_seconds", 3600),
+		"scopes": []map[string]any{
+			{"type": "app_user", "app": "*", "actions": []string{"*"}},
+		},
+	}
+	raw, _ := json.Marshal(body)
+	req, err := http.NewRequest(http.MethodPost, base+"/api/apps/callback/delegated-keys/mint", bytes.NewReader(raw))
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+appToken)
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		var detail map[string]any
+		_ = json.NewDecoder(resp.Body).Decode(&detail)
+		if msg, _ := detail["error"].(string); msg != "" {
+			return nil, errors.New(msg)
+		}
+		return nil, errors.New("delegated token mint failed")
+	}
+	var out aptevaDelegatedToken
+	if err := json.NewDecoder(resp.Body).Decode(&out); err != nil {
+		return nil, err
+	}
+	if out.AccessToken == "" {
+		return nil, errors.New("delegated token response missing access_token")
+	}
+	return &out, nil
+}
