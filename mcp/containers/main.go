@@ -225,6 +225,12 @@ func (a *App) startWorkloadRuntime(ctx context.Context, appCtx *sdk.AppCtx, db *
 	if err != nil {
 		return fail(err)
 	}
+	cleanupRuntime := func(cause error) error {
+		if err := cleanupFailedRuntime(ctx, db, id, backend, networkName, spec.Volumes); err != nil {
+			log.Printf("[containers] runtime cleanup failed workload_id=%s err=%q", id, err.Error())
+		}
+		return fail(cause)
+	}
 	log.Printf("[containers] runtime create_network workload_id=%s network=%q", id, networkName)
 	if err := backend.CreateNetwork(ctx, networkName); err != nil {
 		return fail(err)
@@ -232,13 +238,13 @@ func (a *App) startWorkloadRuntime(ctx context.Context, appCtx *sdk.AppCtx, db *
 	for _, v := range spec.Volumes {
 		log.Printf("[containers] runtime create_volume workload_id=%s volume=%q mount=%q", id, v.DockerVolumeName, v.MountPath)
 		if err := backend.CreateVolume(ctx, v.DockerVolumeName); err != nil {
-			return fail(err)
+			return cleanupRuntime(err)
 		}
 	}
 	log.Printf("[containers] runtime docker_run workload_id=%s container=%q image=%q", id, containerName, spec.Image)
 	cid, err := backend.Run(ctx, spec, containerName, networkName)
 	if err != nil {
-		return fail(err)
+		return cleanupRuntime(err)
 	}
 	log.Printf("[containers] runtime docker_run ok workload_id=%s container_id=%s", id, cid)
 	_ = updateWorkload(db, id, map[string]any{"status": StatusRunning, "container_id": cid, "last_error": "", "updated_at": nowUTC()})
@@ -247,6 +253,29 @@ func (a *App) startWorkloadRuntime(ctx context.Context, appCtx *sdk.AppCtx, db *
 	_ = a.probeWorkload(ctx, appCtx, db, id)
 	log.Printf("[containers] runtime done workload_id=%s duration=%s", id, time.Since(start).Round(time.Millisecond))
 	return nil
+}
+
+func cleanupFailedRuntime(ctx context.Context, db *sql.DB, id string, backend DockerBackend, networkName string, volumes []VolumeSpec) error {
+	var errs []error
+	for _, v := range volumes {
+		if strings.TrimSpace(v.DockerVolumeName) == "" {
+			continue
+		}
+		if err := backend.RemoveVolume(ctx, v.DockerVolumeName); err != nil && !isDockerMissingResourceError(err, "volume") {
+			errs = append(errs, fmt.Errorf("remove volume %s: %w", v.DockerVolumeName, err))
+		}
+	}
+	if strings.TrimSpace(networkName) != "" {
+		if err := backend.RemoveNetwork(ctx, networkName); err != nil && !isDockerMissingResourceError(err, "network") {
+			errs = append(errs, fmt.Errorf("remove network %s: %w", networkName, err))
+		}
+	}
+	if len(errs) == 0 {
+		return nil
+	}
+	err := errors.Join(errs...)
+	_ = recordEvent(db, id, "cleanup_error", "runtime", map[string]any{"error": err.Error()})
+	return err
 }
 
 func (a *App) expandBlueprint(db *sql.DB, in RunSpec) (RunSpec, error) {

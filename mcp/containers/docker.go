@@ -160,7 +160,7 @@ func (d LocalDocker) Logs(ctx context.Context, containerName string, tail int) (
 }
 
 func (d LocalDocker) Inspect(ctx context.Context, containerName string) (*ContainerState, error) {
-	raw, err := docker(ctx, "inspect", containerName)
+	raw, err := docker(ctx, "container", "inspect", containerName)
 	if err != nil {
 		return nil, err
 	}
@@ -301,7 +301,7 @@ func (d RemoteDocker) Logs(ctx context.Context, containerName string, tail int) 
 }
 
 func (d RemoteDocker) Inspect(ctx context.Context, containerName string) (*ContainerState, error) {
-	raw, err := d.remoteDocker(ctx, 30, "inspect", containerName)
+	raw, err := d.remoteDocker(ctx, 30, "container", "inspect", containerName)
 	if err != nil {
 		return nil, err
 	}

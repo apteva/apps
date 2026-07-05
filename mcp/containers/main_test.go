@@ -475,6 +475,59 @@ func TestPrepareWorkloadUsesDefaultHostConfig(t *testing.T) {
 	}
 }
 
+func TestStartRuntimeCleansNetworkAndVolumesWhenRunFails(t *testing.T) {
+	db := testDB(t)
+	manifest := (&App{}).Manifest()
+	ctx := sdk.NewAppCtxForTest(&manifest, db, sdk.Config{}, nil, nil)
+	var removedNetworks []string
+	var removedVolumes []string
+	app := &App{backend: fakeDockerBackend{
+		runErr:          errors.New("docker run: no matching manifest for linux/amd64"),
+		removedNetworks: &removedNetworks,
+		removedVolumes:  &removedVolumes,
+	}}
+	w := &Workload{
+		ID:            "w1",
+		Name:          "demo",
+		Image:         "ghcr.io/apteva/apteva:latest",
+		Status:        StatusCreating,
+		DesiredStatus: StatusRunning,
+		ContainerName: "containers-demo-w1",
+		NetworkName:   "containers-demo-w1",
+	}
+	vols := []VolumeSpec{{Name: "data", DockerVolumeName: "containers-demo-data", MountPath: "/data"}}
+	if err := insertWorkload(db, w, nil, vols); err != nil {
+		t.Fatalf("insert workload: %v", err)
+	}
+	err := app.startWorkloadRuntime(context.Background(), ctx, db, w.ID, RunSpec{
+		Name:    "demo",
+		Image:   "ghcr.io/apteva/apteva:latest",
+		Volumes: vols,
+	}, w.ContainerName, w.NetworkName)
+	if err == nil || !strings.Contains(err.Error(), "no matching manifest") {
+		t.Fatalf("expected manifest error, got %v", err)
+	}
+	if len(removedVolumes) != 1 || removedVolumes[0] != "containers-demo-data" {
+		t.Fatalf("removedVolumes=%v", removedVolumes)
+	}
+	if len(removedNetworks) != 1 || removedNetworks[0] != "containers-demo-w1" {
+		t.Fatalf("removedNetworks=%v", removedNetworks)
+	}
+	got, err := getWorkload(db, w.ID)
+	if err != nil {
+		t.Fatalf("get workload: %v", err)
+	}
+	if got.Status != StatusError {
+		t.Fatalf("status=%q, want error", got.Status)
+	}
+	if got.ContainerID != "" {
+		t.Fatalf("container_id=%q, want empty", got.ContainerID)
+	}
+	if !strings.Contains(got.LastError, "no matching manifest") {
+		t.Fatalf("last_error=%q", got.LastError)
+	}
+}
+
 func TestContainerHostsIncludesInstancesAndDefault(t *testing.T) {
 	platform := &containersPlatformStub{instances: []containerHost{
 		{ID: 0, Name: "localhost", Provider: "local", Status: "ready", PublicIPv4: "127.0.0.1"},
@@ -547,6 +600,9 @@ type fakeDockerBackend struct {
 	removeErr        error
 	removeNetworkErr error
 	removeVolumeErr  error
+	runErr           error
+	removedNetworks  *[]string
+	removedVolumes   *[]string
 	inspectState     *ContainerState
 	inspectErr       error
 	volumeUsage      map[string]int64
@@ -560,6 +616,9 @@ func (f fakeDockerBackend) CreateVolume(context.Context, string) error {
 	return nil
 }
 func (f fakeDockerBackend) Run(context.Context, RunSpec, string, string) (string, error) {
+	if f.runErr != nil {
+		return "", f.runErr
+	}
 	return "cid", nil
 }
 func (f fakeDockerBackend) Start(context.Context, string) error   { return nil }
@@ -568,10 +627,16 @@ func (f fakeDockerBackend) Restart(context.Context, string) error { return nil }
 func (f fakeDockerBackend) Remove(context.Context, string, bool) error {
 	return f.removeErr
 }
-func (f fakeDockerBackend) RemoveNetwork(context.Context, string) error {
+func (f fakeDockerBackend) RemoveNetwork(_ context.Context, name string) error {
+	if f.removedNetworks != nil {
+		*f.removedNetworks = append(*f.removedNetworks, name)
+	}
 	return f.removeNetworkErr
 }
-func (f fakeDockerBackend) RemoveVolume(context.Context, string) error {
+func (f fakeDockerBackend) RemoveVolume(_ context.Context, name string) error {
+	if f.removedVolumes != nil {
+		*f.removedVolumes = append(*f.removedVolumes, name)
+	}
 	return f.removeVolumeErr
 }
 func (f fakeDockerBackend) VolumeUsage(_ context.Context, name string) (int64, error) {
