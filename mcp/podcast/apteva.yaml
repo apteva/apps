@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: podcast
 display_name: Podcast
-version: 0.1.9
+version: 0.1.10
 description: |
   Podcast hosting + management for Apteva. Owns shows, episodes, and
   the RSS feed; serves the public feed XML and an IAB-style download

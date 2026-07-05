@@ -438,11 +438,15 @@ function ShowDetail({
 function ShowCover({ show, params }: { show: Show; params: string }) {
   const [failed, setFailed] = useState(false);
   const hasCover = Boolean(show.image_file_id) && !failed;
+  const coverSize = 128;
   return (
-    <div className="w-28 shrink-0 sm:w-32">
+    <div
+      className="shrink-0"
+      style={{ width: coverSize, flex: `0 0 ${coverSize}px`, maxWidth: "32vw" }}
+    >
       <div
         className="overflow-hidden rounded border border-border bg-bg-input"
-        style={{ width: "100%", aspectRatio: "1 / 1" }}
+        style={{ width: coverSize, height: coverSize, maxWidth: "100%" }}
       >
         {hasCover ? (
           <img
