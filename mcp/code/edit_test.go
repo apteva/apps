@@ -234,6 +234,38 @@ func TestFileOutline_MarkdownAndCode(t *testing.T) {
 	}
 }
 
+func TestFileOutline_TopLevelOnlyAndCorrectKinds(t *testing.T) {
+	store := newMemFileStore()
+	store.CreateRepo("r")
+	store.Write("r", "App.jsx", []byte(`import React from 'react';
+const items = [];
+
+export default function App() {
+  const local = true;
+  function helper() {}
+  return null;
+}
+
+export const loader = () => null;
+`))
+	out, err := fileOutline(store, "r", "App.jsx", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := []string{}
+	for _, e := range out.Entries {
+		got = append(got, e.Kind+":"+e.Text)
+	}
+	want := []string{
+		"variable:const items = [];",
+		"export_default_function:export default function App() {",
+		"export:export const loader = () => null;",
+	}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Fatalf("outline:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+}
+
 // ─── Glob ──────────────────────────────────────────────────────────
 
 func TestGlobRepo(t *testing.T) {

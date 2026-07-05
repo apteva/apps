@@ -253,21 +253,32 @@ func outlineLine(path, line string) (outlineLineResult, bool) {
 		}
 		return outlineLineResult{}, false
 	}
-	patterns := []struct {
-		kind string
-		re   *regexp.Regexp
-	}{
-		{"export", regexp.MustCompile(`^(export\s+)?(default\s+)?(async\s+)?(function|class|interface|type|const|let|var)\s+([A-Za-z_$][\w$]*)`)},
-		{"function", regexp.MustCompile(`^(async\s+)?function\s+([A-Za-z_$][\w$]*)`)},
-		{"go", regexp.MustCompile(`^func\s+(\([^)]+\)\s*)?([A-Za-z_]\w*)\s*\(`)},
-		{"go", regexp.MustCompile(`^type\s+([A-Za-z_]\w*)\s+(struct|interface|func|\w+)`)},
-		{"python", regexp.MustCompile(`^(async\s+)?def\s+([A-Za-z_]\w*)\s*\(`)},
-		{"python", regexp.MustCompile(`^class\s+([A-Za-z_]\w*)`)},
+	if line != strings.TrimLeft(line, " \t") {
+		return outlineLineResult{}, false
 	}
-	for _, p := range patterns {
-		if p.re.MatchString(trimmed) {
-			return outlineLineResult{Kind: p.kind, Text: trimmed}, true
-		}
+	switch {
+	case regexp.MustCompile(`^export\s+default\s+(async\s+)?function\s+([A-Za-z_$][\w$]*)?`).MatchString(trimmed):
+		return outlineLineResult{Kind: "export_default_function", Text: trimmed}, true
+	case regexp.MustCompile(`^export\s+(async\s+)?function\s+([A-Za-z_$][\w$]*)`).MatchString(trimmed):
+		return outlineLineResult{Kind: "export_function", Text: trimmed}, true
+	case regexp.MustCompile(`^export\s+(class|interface|type|const|let|var)\s+([A-Za-z_$][\w$]*)`).MatchString(trimmed):
+		return outlineLineResult{Kind: "export", Text: trimmed}, true
+	case regexp.MustCompile(`^(async\s+)?function\s+([A-Za-z_$][\w$]*)`).MatchString(trimmed):
+		return outlineLineResult{Kind: "function", Text: trimmed}, true
+	case regexp.MustCompile(`^class\s+([A-Za-z_$][\w$]*)`).MatchString(trimmed):
+		return outlineLineResult{Kind: "class", Text: trimmed}, true
+	case regexp.MustCompile(`^(interface|type)\s+([A-Za-z_$][\w$]*)`).MatchString(trimmed):
+		return outlineLineResult{Kind: "type", Text: trimmed}, true
+	case regexp.MustCompile(`^(const|let|var)\s+([A-Za-z_$][\w$]*)\s*=`).MatchString(trimmed):
+		return outlineLineResult{Kind: "variable", Text: trimmed}, true
+	case regexp.MustCompile(`^func\s+(\([^)]+\)\s*)?([A-Za-z_]\w*)\s*\(`).MatchString(trimmed):
+		return outlineLineResult{Kind: "go_func", Text: trimmed}, true
+	case regexp.MustCompile(`^type\s+([A-Za-z_]\w*)\s+(struct|interface|func|\w+)`).MatchString(trimmed):
+		return outlineLineResult{Kind: "go_type", Text: trimmed}, true
+	case regexp.MustCompile(`^(async\s+)?def\s+([A-Za-z_]\w*)\s*\(`).MatchString(trimmed):
+		return outlineLineResult{Kind: "python_def", Text: trimmed}, true
+	case regexp.MustCompile(`^class\s+([A-Za-z_]\w*)`).MatchString(trimmed):
+		return outlineLineResult{Kind: "python_class", Text: trimmed}, true
 	}
 	return outlineLineResult{}, false
 }

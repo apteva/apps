@@ -34,14 +34,15 @@ var templatesFS embed.FS
 const manifestYAML = `schema: apteva-app/v1
 name: code
 display_name: Apteva Code
-version: 0.5.18
+version: 0.5.19
 description: |
   Repositories — code workspaces scoped to Apteva projects, with
   first-class editing tools modelled on Claude Code. Optionally
   imports repositories from GitHub when a github connection is bound,
   imports ZIP archives through the UI,
   manages native repo issues for bugs, feature requests, and tasks,
-  makes grep/read/patch tools more compact for agents,
+  makes grep/read/patch tools more compact for agents with reusable
+  patch previews and targeted rejected-hunk context,
   unifies project navigation with a Repositories tab,
   gives the project-wide Issues inbox the full panel width,
   adds a project-wide Issues inbox in the UI,

@@ -166,12 +166,14 @@ func (a *App) MCPTools() []sdk.Tool {
 		{
 			Name: "code_apply_patch",
 			Description: "Apply a unified diff patch across one or more files. Use dry_run=true to preview. " +
+				"Dry runs return patch_id; pass patch_id later to apply the exact reviewed patch without resending it. " +
 				"Preferred for large existing-file rewrites instead of code_write_file full-content overwrites.",
 			InputSchema: schemaObject(map[string]any{
-				"slug":    map[string]any{"type": "string"},
-				"patch":   map[string]any{"type": "string"},
-				"dry_run": map[string]any{"type": "boolean"},
-			}, []string{"slug", "patch"}),
+				"slug":     map[string]any{"type": "string"},
+				"patch":    map[string]any{"type": "string"},
+				"patch_id": map[string]any{"type": "string"},
+				"dry_run":  map[string]any{"type": "boolean"},
+			}, []string{"slug"}),
 			Handler: a.toolApplyPatch,
 		},
 		{
@@ -1342,7 +1344,21 @@ func (a *App) toolApplyPatch(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	if _, err := requireRepo(ctx, pid, slug); err != nil {
 		return nil, err
 	}
-	res, err := applyUnifiedPatch(a.store, slug, strArg(args, "patch"), boolArg(args, "dry_run"))
+	patch := strArg(args, "patch")
+	if patchID := strArg(args, "patch_id"); patchID != "" {
+		if boolArg(args, "dry_run") {
+			return nil, errors.New("patch_id applies an existing dry run; omit dry_run or set it false")
+		}
+		var err error
+		patch, err = loadPatchPreview(patchID, slug)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if patch == "" {
+		return nil, errors.New("patch or patch_id required")
+	}
+	res, err := applyUnifiedPatch(a.store, slug, patch, boolArg(args, "dry_run"))
 	if err != nil {
 		return nil, err
 	}

@@ -8,6 +8,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 )
 
 type PatchFileResult struct {
@@ -21,10 +23,20 @@ type PatchFileResult struct {
 }
 
 type PatchResult struct {
-	DryRun        bool              `json:"dry_run"`
-	Applied       bool              `json:"applied"`
-	ChangedFiles  []PatchFileResult `json:"changed_files"`
-	RejectedHunks []string          `json:"rejected_hunks,omitempty"`
+	DryRun          bool                `json:"dry_run"`
+	Applied         bool                `json:"applied"`
+	PatchID         string              `json:"patch_id,omitempty"`
+	ChangedFiles    []PatchFileResult   `json:"changed_files"`
+	RejectedHunks   []string            `json:"rejected_hunks,omitempty"`
+	RejectedContext []PatchRejectDetail `json:"rejected_context,omitempty"`
+	Hint            string              `json:"hint,omitempty"`
+}
+
+type PatchRejectDetail struct {
+	Path      string `json:"path"`
+	Reason    string `json:"reason"`
+	StartLine int    `json:"start_line,omitempty"`
+	Excerpt   string `json:"excerpt,omitempty"`
 }
 
 type patchFile struct {
@@ -43,13 +55,26 @@ type patchHunk struct {
 
 var hunkHeaderRe = regexp.MustCompile(`^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@`)
 
+const patchFormatHint = "expected unified diff format: --- a/path, +++ b/path, then @@ -old,count +new,count @@ hunks with lines prefixed by space, -, or +"
+
+type patchPreview struct {
+	Slug      string
+	Patch     string
+	CreatedAt time.Time
+}
+
+var patchPreviewStore = struct {
+	sync.Mutex
+	items map[string]patchPreview
+}{items: map[string]patchPreview{}}
+
 func applyUnifiedPatch(store FileStore, slug, patch string, dryRun bool) (*PatchResult, error) {
 	files, err := parseUnifiedPatch(patch)
 	if err != nil {
 		return nil, err
 	}
 	if len(files) == 0 {
-		return nil, errors.New("patch contains no file hunks")
+		return nil, fmt.Errorf("patch contains no file hunks; %s", patchFormatHint)
 	}
 	result := &PatchResult{DryRun: dryRun, Applied: !dryRun}
 	type pendingWrite struct {
@@ -86,6 +111,8 @@ func applyUnifiedPatch(store FileStore, slug, patch string, dryRun bool) (*Patch
 		if err != nil {
 			result.Applied = false
 			result.RejectedHunks = append(result.RejectedHunks, fmt.Sprintf("%s: %v", clean, err))
+			result.RejectedContext = append(result.RejectedContext, patchRejectDetail(clean, oldBody, err))
+			result.Hint = "patch was not applied; use rejected_context to rebuild the hunk with current file context"
 			return result, nil
 		}
 		newSHA := ""
@@ -106,6 +133,10 @@ func applyUnifiedPatch(store FileStore, slug, patch string, dryRun bool) (*Patch
 		pending = append(pending, pendingWrite{path: clean, body: nextBody, deleted: deleted})
 	}
 	if dryRun {
+		id := patchPreviewID(slug, patch)
+		storePatchPreview(id, slug, patch)
+		result.PatchID = id
+		result.Hint = "dry run succeeded; call code_apply_patch again with the same slug and patch_id to apply this exact patch"
 		return result, nil
 	}
 	for i, p := range pending {
@@ -123,6 +154,84 @@ func applyUnifiedPatch(store FileStore, slug, patch string, dryRun bool) (*Patch
 		result.ChangedFiles[i].NewSize = meta.Size
 	}
 	return result, nil
+}
+
+func patchPreviewID(slug, patch string) string {
+	sum := sha256.Sum256([]byte(slug + "\x00" + patch))
+	return hex.EncodeToString(sum[:])[:24]
+}
+
+func storePatchPreview(id, slug, patch string) {
+	patchPreviewStore.Lock()
+	defer patchPreviewStore.Unlock()
+	now := time.Now()
+	for k, v := range patchPreviewStore.items {
+		if now.Sub(v.CreatedAt) > 30*time.Minute {
+			delete(patchPreviewStore.items, k)
+		}
+	}
+	patchPreviewStore.items[id] = patchPreview{Slug: slug, Patch: patch, CreatedAt: now}
+}
+
+func loadPatchPreview(id, slug string) (string, error) {
+	patchPreviewStore.Lock()
+	defer patchPreviewStore.Unlock()
+	v, ok := patchPreviewStore.items[id]
+	if !ok {
+		return "", fmt.Errorf("patch_id %q not found or expired; pass patch again", id)
+	}
+	if v.Slug != slug {
+		return "", fmt.Errorf("patch_id %q belongs to a different repository", id)
+	}
+	if time.Since(v.CreatedAt) > 30*time.Minute {
+		delete(patchPreviewStore.items, id)
+		return "", fmt.Errorf("patch_id %q expired; pass patch again", id)
+	}
+	return v.Patch, nil
+}
+
+type patchApplyError struct {
+	Hunk    int
+	OldLine int
+	Reason  string
+}
+
+func (e patchApplyError) Error() string {
+	if e.OldLine > 0 {
+		return fmt.Sprintf("hunk #%d %s at old line %d", e.Hunk, e.Reason, e.OldLine)
+	}
+	return fmt.Sprintf("hunk #%d %s", e.Hunk, e.Reason)
+}
+
+func patchRejectDetail(path string, oldBody []byte, err error) PatchRejectDetail {
+	d := PatchRejectDetail{Path: path, Reason: err.Error()}
+	var pe patchApplyError
+	if errors.As(err, &pe) && pe.OldLine > 0 {
+		d.StartLine = pe.OldLine
+		d.Excerpt = patchContextExcerpt(oldBody, pe.OldLine, 3)
+	}
+	return d
+}
+
+func patchContextExcerpt(body []byte, around, radius int) string {
+	lines := patchSplitVisibleLines(string(body))
+	if around < 1 {
+		around = 1
+	}
+	start := around - radius
+	if start < 1 {
+		start = 1
+	}
+	end := around + radius
+	if end > len(lines) {
+		end = len(lines)
+	}
+	width := numWidth(end)
+	var b strings.Builder
+	for i := start; i <= end; i++ {
+		fmt.Fprintf(&b, "%*d\t%s\n", width, i, lines[i-1])
+	}
+	return b.String()
 }
 
 func parseUnifiedPatch(patch string) ([]patchFile, error) {
@@ -219,7 +328,7 @@ func applyFilePatch(body []byte, hunks []patchHunk) ([]byte, error) {
 			start = 0
 		}
 		if start < cursor || start > len(lines) {
-			return nil, fmt.Errorf("hunk #%d starts outside file", idx+1)
+			return nil, patchApplyError{Hunk: idx + 1, OldLine: start + 1, Reason: "starts outside file"}
 		}
 		out = append(out, lines[cursor:start]...)
 		pos := start
@@ -229,13 +338,13 @@ func applyFilePatch(body []byte, hunks []patchHunk) ([]byte, error) {
 			switch prefix {
 			case ' ':
 				if pos >= len(lines) || lines[pos] != text {
-					return nil, fmt.Errorf("hunk #%d context mismatch at old line %d", idx+1, pos+1)
+					return nil, patchApplyError{Hunk: idx + 1, OldLine: pos + 1, Reason: "context mismatch"}
 				}
 				out = append(out, text)
 				pos++
 			case '-':
 				if pos >= len(lines) || lines[pos] != text {
-					return nil, fmt.Errorf("hunk #%d removal mismatch at old line %d", idx+1, pos+1)
+					return nil, patchApplyError{Hunk: idx + 1, OldLine: pos + 1, Reason: "removal mismatch"}
 				}
 				pos++
 			case '+':
@@ -250,6 +359,14 @@ func applyFilePatch(body []byte, hunks []patchHunk) ([]byte, error) {
 		joined += "\n"
 	}
 	return []byte(joined), nil
+}
+
+func patchSplitVisibleLines(body string) []string {
+	lines := strings.Split(body, "\n")
+	if n := len(lines); n > 0 && lines[n-1] == "" {
+		lines = lines[:n-1]
+	}
+	return lines
 }
 
 func patchSplitLines(body string) ([]string, bool) {
