@@ -5,11 +5,10 @@
 // reuse across calls — the legacy stok session is good for ~25min, so
 // constantly re-logging-in would 401-loop us.
 //
-// The motion poller (one Worker) walks every online camera every
-// pollInterval, fetches recent on-device events, deduplicates against
-// motion_events.raw_event_id, and (when configured) auto-snapshots to
-// the storage app and emits a `tapo.motion` event so todo / messaging
-// apps can react.
+// The motion worker keeps one ONVIF PullMessages subscription per
+// online camera, deduplicates against motion_events.raw_event_id, and
+// emits app events (`tapo.motion`, plus typed topics like
+// `tapo.person`) so todo / messaging apps can react.
 package main
 
 import (
@@ -37,7 +36,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: tapo
 display_name: Tapo Cameras
-version: 0.3.5
+version: 0.3.6
 description: Local-LAN control of TP-Link Tapo cameras.
 author: Apteva
 scopes: [project, global]
@@ -109,6 +108,9 @@ var globalCtx *sdk.AppCtx
 var (
 	clientCache   = map[int64]*Client{}
 	clientCacheMu sync.Mutex
+
+	onvifWatchers   = map[int64]context.CancelFunc{}
+	onvifWatchersMu sync.Mutex
 )
 
 type App struct{}
@@ -139,17 +141,21 @@ func (a *App) EventHandlers() []sdk.EventHandler { return nil }
 func (a *App) Workers() []sdk.Worker {
 	return []sdk.Worker{
 		{
-			Name: "motion-poller",
+			Name: "onvif-events",
 			Run: func(ctx context.Context, app *sdk.AppCtx) error {
 				t := time.NewTicker(pollInterval)
 				defer t.Stop()
+				defer stopAllONVIFWatchers()
+				if err := reconcileONVIFWatchers(ctx, app); err != nil {
+					app.Logger().Warn("onvif reconcile", "err", err.Error())
+				}
 				for {
 					select {
 					case <-ctx.Done():
 						return nil
 					case <-t.C:
-						if err := pollAllCameras(app); err != nil {
-							app.Logger().Warn("motion poll", "err", err.Error())
+						if err := reconcileONVIFWatchers(ctx, app); err != nil {
+							app.Logger().Warn("onvif reconcile", "err", err.Error())
 						}
 						pruneMotionEvents(app)
 					}
@@ -261,7 +267,7 @@ func (a *App) handleCameraItem(w http.ResponseWriter, r *http.Request) {
 // this in <img src> tags so the browser can stream it. /snapshots/{id}.jpg
 func (a *App) handleSnapshot(w http.ResponseWriter, r *http.Request) {
 	id := pathInt(r.URL.Path, "/snapshots/")
-	cam, err := getCameraFull(globalCtx.AppDB(), projectScope(), id)
+	cam, err := getCameraFull(globalCtx.AppDB(), projectScope(globalCtx), id)
 	if err != nil {
 		http.Error(w, err.Error(), 404)
 		return
@@ -283,7 +289,7 @@ func (a *App) handleSnapshot(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) handleStream(w http.ResponseWriter, r *http.Request) {
 	id := pathInt(r.URL.Path, "/streams/")
-	cam, err := getCameraFull(globalCtx.AppDB(), projectScope(), id)
+	cam, err := getCameraFull(globalCtx.AppDB(), projectScope(globalCtx), id)
 	if err != nil {
 		http.Error(w, err.Error(), 404)
 		return
@@ -349,7 +355,7 @@ func (a *App) handleStream(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleEvents(w http.ResponseWriter, r *http.Request) {
-	pid := projectScope()
+	pid := projectScope(globalCtx)
 	camID, _ := strconv.ParseInt(r.URL.Query().Get("camera_id"), 10, 64)
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 	since := r.URL.Query().Get("since")
@@ -487,11 +493,11 @@ func (a *App) toolCamerasAdd(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	if name == "" || ip == "" || user == "" || pass == "" {
 		return nil, errors.New("name, ip, username and password are required")
 	}
-	return addCamera(ctx.AppDB(), projectScope(), name, room, ip, user, pass)
+	return addCamera(ctx.AppDB(), projectScope(ctx), name, room, ip, user, pass)
 }
 
 func (a *App) toolCamerasList(ctx *sdk.AppCtx, _ map[string]any) (any, error) {
-	return listCameras(ctx.AppDB(), projectScope())
+	return listCameras(ctx.AppDB(), projectScope(ctx))
 }
 
 func (a *App) toolCamerasGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -499,7 +505,7 @@ func (a *App) toolCamerasGet(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	if id == 0 {
 		return nil, errors.New("id required")
 	}
-	return getCamera(ctx.AppDB(), projectScope(), id)
+	return getCamera(ctx.AppDB(), projectScope(ctx), id)
 }
 
 func (a *App) toolCamerasTest(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -507,7 +513,7 @@ func (a *App) toolCamerasTest(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	if id == 0 {
 		return nil, errors.New("id required")
 	}
-	return testCamera(ctx.AppDB(), projectScope(), id)
+	return testCamera(ctx.AppDB(), projectScope(ctx), id)
 }
 
 func (a *App) toolCamerasRename(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -522,10 +528,10 @@ func (a *App) toolCamerasRename(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	if v, ok := args["room"].(string); ok {
 		room = &v
 	}
-	if err := renameCamera(ctx.AppDB(), projectScope(), id, name, room); err != nil {
+	if err := renameCamera(ctx.AppDB(), projectScope(ctx), id, name, room); err != nil {
 		return nil, err
 	}
-	return getCamera(ctx.AppDB(), projectScope(), id)
+	return getCamera(ctx.AppDB(), projectScope(ctx), id)
 }
 
 func (a *App) toolCamerasRemove(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -533,7 +539,7 @@ func (a *App) toolCamerasRemove(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	if id == 0 {
 		return nil, errors.New("id required")
 	}
-	if err := removeCamera(ctx.AppDB(), projectScope(), id); err != nil {
+	if err := removeCamera(ctx.AppDB(), projectScope(ctx), id); err != nil {
 		return nil, err
 	}
 	return map[string]any{"status": "deleted", "id": id}, nil
@@ -544,7 +550,7 @@ func (a *App) toolSnapshotCapture(ctx *sdk.AppCtx, args map[string]any) (any, er
 	if id == 0 {
 		return nil, errors.New("id required")
 	}
-	cam, err := getCameraFull(ctx.AppDB(), projectScope(), id)
+	cam, err := getCameraFull(ctx.AppDB(), projectScope(ctx), id)
 	if err != nil {
 		return nil, err
 	}
@@ -587,7 +593,7 @@ func (a *App) toolStreamGetURL(ctx *sdk.AppCtx, args map[string]any) (any, error
 	if id == 0 {
 		return nil, errors.New("id required")
 	}
-	cam, err := getCameraFull(ctx.AppDB(), projectScope(), id)
+	cam, err := getCameraFull(ctx.AppDB(), projectScope(ctx), id)
 	if err != nil {
 		return nil, err
 	}
@@ -638,12 +644,12 @@ func (a *App) toolPTZMove(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		n := int(toInt64(v))
 		tilt = &n
 	}
-	return nil, doPTZ(projectScope(), id, dir, dur, pan, tilt)
+	return nil, doPTZ(projectScope(ctx), id, dir, dur, pan, tilt)
 }
 
 func (a *App) toolPTZCalibrate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	id := intArg(args, "id")
-	cli, err := clientForID(ctx.AppDB(), projectScope(), id)
+	cli, err := clientForID(ctx.AppDB(), projectScope(ctx), id)
 	if err != nil {
 		return nil, err
 	}
@@ -656,7 +662,7 @@ func (a *App) toolPresetSave(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	if id == 0 || name == "" {
 		return nil, errors.New("id and name required")
 	}
-	cli, err := clientForID(ctx.AppDB(), projectScope(), id)
+	cli, err := clientForID(ctx.AppDB(), projectScope(ctx), id)
 	if err != nil {
 		return nil, err
 	}
@@ -669,7 +675,7 @@ func (a *App) toolPresetSave(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 
 func (a *App) toolPresetRecall(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	id := intArg(args, "id")
-	cli, err := clientForID(ctx.AppDB(), projectScope(), id)
+	cli, err := clientForID(ctx.AppDB(), projectScope(ctx), id)
 	if err != nil {
 		return nil, err
 	}
@@ -699,7 +705,7 @@ func (a *App) toolPresetRecall(ctx *sdk.AppCtx, args map[string]any) (any, error
 
 func (a *App) toolPresetList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	id := intArg(args, "id")
-	cli, err := clientForID(ctx.AppDB(), projectScope(), id)
+	cli, err := clientForID(ctx.AppDB(), projectScope(ctx), id)
 	if err != nil {
 		return nil, err
 	}
@@ -712,7 +718,7 @@ func (a *App) toolPresetDelete(ctx *sdk.AppCtx, args map[string]any) (any, error
 	if id == 0 || pid == "" {
 		return nil, errors.New("id and preset_id required")
 	}
-	cli, err := clientForID(ctx.AppDB(), projectScope(), id)
+	cli, err := clientForID(ctx.AppDB(), projectScope(ctx), id)
 	if err != nil {
 		return nil, err
 	}
@@ -721,7 +727,7 @@ func (a *App) toolPresetDelete(ctx *sdk.AppCtx, args map[string]any) (any, error
 
 func (a *App) toolPrivacySet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	id := intArg(args, "id")
-	cli, err := clientForID(ctx.AppDB(), projectScope(), id)
+	cli, err := clientForID(ctx.AppDB(), projectScope(ctx), id)
 	if err != nil {
 		return nil, err
 	}
@@ -731,7 +737,7 @@ func (a *App) toolPrivacySet(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 
 func (a *App) toolLEDSet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	id := intArg(args, "id")
-	cli, err := clientForID(ctx.AppDB(), projectScope(), id)
+	cli, err := clientForID(ctx.AppDB(), projectScope(ctx), id)
 	if err != nil {
 		return nil, err
 	}
@@ -741,7 +747,7 @@ func (a *App) toolLEDSet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 
 func (a *App) toolNightModeSet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	id := intArg(args, "id")
-	cli, err := clientForID(ctx.AppDB(), projectScope(), id)
+	cli, err := clientForID(ctx.AppDB(), projectScope(ctx), id)
 	if err != nil {
 		return nil, err
 	}
@@ -750,7 +756,7 @@ func (a *App) toolNightModeSet(ctx *sdk.AppCtx, args map[string]any) (any, error
 
 func (a *App) toolMotionDetectionSet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	id := intArg(args, "id")
-	cli, err := clientForID(ctx.AppDB(), projectScope(), id)
+	cli, err := clientForID(ctx.AppDB(), projectScope(ctx), id)
 	if err != nil {
 		return nil, err
 	}
@@ -762,12 +768,12 @@ func (a *App) toolMotionEventsRecent(ctx *sdk.AppCtx, args map[string]any) (any,
 	camID := intArg(args, "camera_id")
 	since := strArg(args, "since")
 	limit := int(intArg(args, "limit"))
-	return listEvents(ctx.AppDB(), projectScope(), camID, since, limit)
+	return listEvents(ctx.AppDB(), projectScope(ctx), camID, since, limit)
 }
 
 func (a *App) toolSirenTrigger(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	id := intArg(args, "id")
-	cli, err := clientForID(ctx.AppDB(), projectScope(), id)
+	cli, err := clientForID(ctx.AppDB(), projectScope(ctx), id)
 	if err != nil {
 		return nil, err
 	}
@@ -794,8 +800,13 @@ type Camera struct {
 	password     string       `json:"-"` // decrypted on demand, not exposed
 }
 
-func projectScope() string {
-	if pid := os.Getenv("APTEVA_PROJECT_ID"); pid != "" {
+func projectScope(ctxs ...*sdk.AppCtx) string {
+	if len(ctxs) > 0 && ctxs[0] != nil {
+		if pid := strings.TrimSpace(ctxs[0].CurrentProject()); pid != "" {
+			return pid
+		}
+	}
+	if pid := strings.TrimSpace(os.Getenv("APTEVA_PROJECT_ID")); pid != "" {
 		return pid
 	}
 	return "default"
@@ -1047,59 +1058,128 @@ func listEvents(db *sql.DB, pid string, camID int64, since string, limit int) ([
 	return out, nil
 }
 
-// pollAllCameras fetches recent motion events from each online camera
-// and inserts new ones (deduped by raw_event_id). When configured,
-// auto-snapshots the first event of a burst and pushes it into the
-// storage app.
-func pollAllCameras(ctx *sdk.AppCtx) error {
-	cams, err := listCamerasWithPasswords(ctx.AppDB(), projectScope())
+func reconcileONVIFWatchers(parent context.Context, app *sdk.AppCtx) error {
+	cams, err := listCamerasWithPasswords(app.AppDB(), projectScope(app))
 	if err != nil {
 		return err
 	}
-	autoSnap := configFlag(ctx, "default_snapshot_on_motion", true)
+	seen := map[int64]bool{}
 	for _, cam := range cams {
-		if !cam.Online {
+		if !cam.Online || cam.Capabilities.OnvifPort == 0 || cam.password == "" {
 			continue
 		}
-		cli, err := clientFor(&cam)
-		if err != nil {
-			continue
-		}
-		// "Recent": last 10 minutes — generous enough to recover from
-		// short network blips without re-loading the entire camera buffer.
-		events, err := cli.ListMotionEvents(time.Now().Add(-10 * time.Minute))
-		if err != nil {
-			ctx.Logger().Warn("poll events", "camera", cam.Name, "err", err.Error())
-			continue
-		}
-		for _, ev := range events {
-			inserted, dbID, err := insertEventIfNew(ctx.AppDB(), cam, ev)
-			if err != nil {
-				ctx.Logger().Warn("insert event", "err", err.Error())
-				continue
-			}
-			if !inserted {
-				continue
-			}
-			if autoSnap {
-				if jpg, err := snapshotViaFfmpegApp(ctx, cli); err == nil {
-					if fid, err := pushToStorage(ctx, "/cameras/"+cam.Name, cam.Name, jpg); err == nil {
-						_, _ = ctx.AppDB().Exec(
-							`UPDATE motion_events SET snapshot_file_id = ? WHERE id = ?`,
-							fid, dbID,
-						)
-					}
-				}
-			}
-			ctx.Emit("tapo.motion", map[string]any{
-				"camera_id":   cam.ID,
-				"camera_name": cam.Name,
-				"occurred_at": ev.OccurredAt.Format(time.RFC3339),
-				"kind":        ev.Kind,
-			})
+		seen[cam.ID] = true
+		onvifWatchersMu.Lock()
+		_, running := onvifWatchers[cam.ID]
+		onvifWatchersMu.Unlock()
+		if !running {
+			startONVIFWatcher(parent, app, cam)
 		}
 	}
+
+	onvifWatchersMu.Lock()
+	for id, cancel := range onvifWatchers {
+		if !seen[id] {
+			cancel()
+			delete(onvifWatchers, id)
+		}
+	}
+	onvifWatchersMu.Unlock()
 	return nil
+}
+
+func startONVIFWatcher(parent context.Context, app *sdk.AppCtx, cam Camera) {
+	ctx, cancel := context.WithCancel(parent)
+	onvifWatchersMu.Lock()
+	onvifWatchers[cam.ID] = cancel
+	onvifWatchersMu.Unlock()
+
+	go func() {
+		app.Logger().Info("onvif watcher start", "camera", cam.Name, "ip", cam.IP)
+		defer func() {
+			onvifWatchersMu.Lock()
+			delete(onvifWatchers, cam.ID)
+			onvifWatchersMu.Unlock()
+			app.Logger().Info("onvif watcher stop", "camera", cam.Name)
+		}()
+		for {
+			cli := NewONVIFEventClient(cam.IP, cam.Username, cam.password)
+			err := cli.PullLoop(ctx, func(ev ONVIFEvent) {
+				handleONVIFEvent(app, cam, ev)
+			})
+			if ctx.Err() != nil {
+				return
+			}
+			if err != nil {
+				app.Logger().Warn("onvif watcher", "camera", cam.Name, "err", err.Error())
+			}
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(10 * time.Second):
+			}
+		}
+	}()
+}
+
+func stopAllONVIFWatchers() {
+	onvifWatchersMu.Lock()
+	defer onvifWatchersMu.Unlock()
+	for id, cancel := range onvifWatchers {
+		cancel()
+		delete(onvifWatchers, id)
+	}
+}
+
+func handleONVIFEvent(ctx *sdk.AppCtx, cam Camera, onvifEv ONVIFEvent) {
+	meta, _ := json.Marshal(map[string]any{
+		"source":     "onvif",
+		"topic":      onvifEv.Topic,
+		"operation":  onvifEv.Operation,
+		"value_name": onvifEv.ValueName,
+		"value":      onvifEv.Value,
+	})
+	ev := MotionEvent{
+		ID:         onvifEv.ID,
+		OccurredAt: onvifEv.OccurredAt,
+		Kind:       onvifEv.Kind,
+		BBoxJSON:   string(meta),
+	}
+	inserted, dbID, err := insertEventIfNew(ctx.AppDB(), cam, ev)
+	if err != nil {
+		ctx.Logger().Warn("insert onvif event", "camera", cam.Name, "err", err.Error())
+		return
+	}
+	if !inserted {
+		return
+	}
+	if configFlag(ctx, "default_snapshot_on_motion", true) {
+		if cli, err := clientFor(&cam); err == nil {
+			if jpg, err := snapshotViaFfmpegApp(ctx, cli); err == nil {
+				if fid, err := pushToStorage(ctx, "/cameras/"+cam.Name, cam.Name, jpg); err == nil {
+					_, _ = ctx.AppDB().Exec(
+						`UPDATE motion_events SET snapshot_file_id = ? WHERE id = ?`,
+						fid, dbID,
+					)
+				}
+			}
+		}
+	}
+	payload := map[string]any{
+		"camera_id":   cam.ID,
+		"camera_name": cam.Name,
+		"occurred_at": ev.OccurredAt.Format(time.RFC3339),
+		"kind":        ev.Kind,
+		"source":      "onvif",
+		"onvif_topic": onvifEv.Topic,
+		"operation":   onvifEv.Operation,
+		"value_name":  onvifEv.ValueName,
+		"value":       onvifEv.Value,
+	}
+	ctx.Emit("tapo.motion", payload)
+	if ev.Kind != "motion" {
+		ctx.Emit("tapo."+ev.Kind, payload)
+	}
 }
 
 func insertEventIfNew(db *sql.DB, cam Camera, ev MotionEvent) (bool, int64, error) {
