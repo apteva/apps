@@ -37,7 +37,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: tapo
 display_name: Tapo Cameras
-version: 0.3.2
+version: 0.3.3
 description: Local-LAN control of TP-Link Tapo cameras.
 author: Apteva
 scopes: [project, global]
@@ -167,7 +167,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/cameras", Handler: a.handleCameras},
 		{Pattern: "/cameras/", Handler: a.handleCameraItem},
 		{Pattern: "/snapshots/", Handler: a.handleSnapshot}, // GET /snapshots/{id}.jpg
-		{Pattern: "/events", Handler: a.handleEvents},
+		{Pattern: "/motion-events", Handler: a.handleEvents},
 	}
 }
 

@@ -289,7 +289,7 @@ function CameraDetail({
   const caps = camera.capabilities;
 
   useEffect(() => {
-    fetch(`${API}/events?camera_id=${camera.id}&limit=20`)
+    fetch(`${API}/motion-events?camera_id=${camera.id}&limit=20`)
       .then((r) => r.json())
       .then(setEvents)
       .catch(() => {});
