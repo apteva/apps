@@ -160,6 +160,54 @@ func TestGoldenPath_SignupLoginRefreshMeLogout(t *testing.T) {
 	}
 }
 
+func TestMeMetadata_UpdatesAuthenticatedUserOnly(t *testing.T) {
+	_, clientID := newAuthCtx(t)
+	app := &App{}
+
+	rec := callJSON(app.handleSignup, "POST", "/signup", map[string]any{
+		"email":        "metadata-self@example.com",
+		"password":     "VerySafe!Pw#12345",
+		"display_name": "Metadata Self",
+		"client_id":    clientID,
+	})
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("signup status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	signupResp := decode(t, rec)
+	access, _ := signupResp["access_token"].(string)
+	if access == "" {
+		t.Fatalf("signup did not return access token: %v", signupResp)
+	}
+
+	rec = call(app.handleMeMetadata, "PATCH", "/me/metadata", map[string]any{
+		"metadata": map[string]any{
+			"onboarding": map[string]any{
+				"completed":     true,
+				"instance_slug": "metadata-self",
+			},
+		},
+	}, "Authorization", "Bearer "+access)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("me metadata status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	updated := decode(t, rec)["user"].(map[string]any)
+	metadata := updated["metadata"].(map[string]any)
+	onboarding := metadata["onboarding"].(map[string]any)
+	if onboarding["completed"] != true || onboarding["instance_slug"] != "metadata-self" {
+		t.Fatalf("metadata not saved: %+v", metadata)
+	}
+
+	rec = call(app.handleMe, "GET", "/me", nil, "Authorization", "Bearer "+access)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("me status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	meUser := decode(t, rec)["user"].(map[string]any)
+	meMetadata := meUser["metadata"].(map[string]any)
+	if meMetadata["onboarding"] == nil {
+		t.Fatalf("/me did not return saved metadata: %+v", meMetadata)
+	}
+}
+
 func TestLogin_BadPasswordIs401(t *testing.T) {
 	_, clientID := newAuthCtx(t)
 	app := &App{}

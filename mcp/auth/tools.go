@@ -724,6 +724,9 @@ func normalizeMetadataValue(raw any) (string, error) {
 	if len(b) == 0 {
 		return "{}", nil
 	}
+	if len(b) > 65536 {
+		return "", errors.New("metadata must be 65536 bytes or less")
+	}
 	var obj map[string]any
 	if err := json.Unmarshal(b, &obj); err != nil {
 		return "", fmt.Errorf("metadata must be a valid JSON object: %w", err)

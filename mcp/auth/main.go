@@ -44,7 +44,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: auth
 display_name: Auth
-version: 0.7.2
+version: 0.7.3
 description: |
   Identity layer for Apteva-deployed SaaS, partitioned by Organization
   (row-level multi-tenancy a la Auth0/Clerk/Stytch B2B). One install
@@ -79,6 +79,9 @@ provides:
       no_auth: true
     - prefix: /me
       method: GET
+      no_auth: true
+    - prefix: /me/metadata
+      method: PATCH
       no_auth: true
     - prefix: /.well-known/jwks.json
       method: GET
@@ -221,6 +224,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/logout", Handler: a.handleLogout, NoAuth: true},
 		{Pattern: "/refresh", Handler: a.handleRefresh, NoAuth: true},
 		{Pattern: "/me", Handler: a.handleMe, NoAuth: true},
+		{Method: "PATCH", Pattern: "/me/metadata", Handler: a.handleMeMetadata, NoAuth: true},
 
 		// Admin surface — consumed by the dashboard AuthPanel. Auth is
 		// the SDK's bearer-token gate (platform proxy attaches it).

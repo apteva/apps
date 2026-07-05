@@ -576,11 +576,67 @@ func (a *App) handleMe(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	org, user, ok := a.authenticatedBearerUser(w, r, ctx, pid)
+	if !ok {
+		return
+	}
+	httpJSON(w, map[string]any{"user": user, "org": org.Slug})
+}
+
+// ─── /me/metadata ───────────────────────────────────────────────────
+
+func (a *App) handleMeMetadata(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPatch {
+		httpErr(w, http.StatusMethodNotAllowed, "PATCH only")
+		return
+	}
+	ctx := getAppCtx(r)
+	pid, err := resolveProjectFromRequest(r)
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	org, user, ok := a.authenticatedBearerUser(w, r, ctx, pid)
+	if !ok {
+		return
+	}
+	var body struct {
+		Metadata *json.RawMessage `json:"metadata"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		httpErr(w, http.StatusBadRequest, "invalid json")
+		return
+	}
+	if body.Metadata == nil {
+		httpErr(w, http.StatusBadRequest, "metadata required")
+		return
+	}
+	metadataJSON, code, err := normalizeMetadataRaw(body.Metadata)
+	if err != nil {
+		httpErr(w, code, err.Error())
+		return
+	}
+	if err := dbUpdateUserProfile(ctx.AppDB(), pid, org.ID, user.ID, nil, nil, &metadataJSON); err != nil {
+		httpErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	updated, err := dbGetUserByID(ctx.AppDB(), pid, org.ID, user.ID)
+	if err != nil {
+		httpErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	dbAudit(ctx.AppDB(), pid, org.ID, &user.ID, "", "user_metadata_updated", r.RemoteAddr, r.UserAgent(), map[string]any{
+		"self_service": true,
+	})
+	httpJSON(w, map[string]any{"user": updated, "org": org.Slug})
+}
+
+func (a *App) authenticatedBearerUser(w http.ResponseWriter, r *http.Request, ctx *sdk.AppCtx, pid string) (*Organization, *User, bool) {
 	authz := r.Header.Get("Authorization")
 	const prefix = "Bearer "
 	if !strings.HasPrefix(authz, prefix) {
 		httpStatus(w, http.StatusUnauthorized, map[string]string{"error": "missing_bearer"})
-		return
+		return nil, nil, false
 	}
 	token := strings.TrimPrefix(authz, prefix)
 
@@ -590,7 +646,7 @@ func (a *App) handleMe(w http.ResponseWriter, r *http.Request) {
 	orgSlug, err := peekJWTOrg(token)
 	if err != nil {
 		httpStatus(w, http.StatusUnauthorized, map[string]string{"error": "invalid_token", "detail": err.Error()})
-		return
+		return nil, nil, false
 	}
 	if orgSlug == "" {
 		// Legacy v0.3.x token — no org claim. Resolve to default org for
@@ -600,12 +656,12 @@ func (a *App) handleMe(w http.ResponseWriter, r *http.Request) {
 	org, err := dbGetOrgBySlug(ctx.AppDB(), pid, orgSlug)
 	if err != nil {
 		httpStatus(w, http.StatusUnauthorized, map[string]string{"error": "invalid_token", "detail": "unknown org"})
-		return
+		return nil, nil, false
 	}
 	keys, err := dbAllSigningKeys(ctx.AppDB(), pid, org.ID)
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
-		return
+		return nil, nil, false
 	}
 	claims, err := jwtVerify(token, func(kid string) (ed25519.PublicKey, bool) {
 		k, ok := keys[kid]
@@ -613,24 +669,24 @@ func (a *App) handleMe(w http.ResponseWriter, r *http.Request) {
 	})
 	if err != nil {
 		httpStatus(w, http.StatusUnauthorized, map[string]string{"error": "invalid_token", "detail": err.Error()})
-		return
+		return nil, nil, false
 	}
 	subRaw, _ := claims["sub"].(string)
 	uidParsed, _ := parseUint(subRaw)
 	if uidParsed == 0 {
 		httpStatus(w, http.StatusUnauthorized, map[string]string{"error": "invalid_token"})
-		return
+		return nil, nil, false
 	}
 	user, err := dbGetUserByID(ctx.AppDB(), pid, org.ID, uidParsed)
 	if err != nil {
 		httpStatus(w, http.StatusUnauthorized, map[string]string{"error": "invalid_token"})
-		return
+		return nil, nil, false
 	}
 	if user.Status != "active" {
 		httpStatus(w, http.StatusUnauthorized, map[string]string{"error": "user_inactive"})
-		return
+		return nil, nil, false
 	}
-	httpJSON(w, map[string]any{"user": user, "org": org.Slug})
+	return org, user, true
 }
 
 func (a *App) handleOrgPublic(w http.ResponseWriter, r *http.Request) {
