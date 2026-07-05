@@ -2,17 +2,17 @@ schema: apteva-app/v1
 
 name: tapo
 display_name: Tapo Cameras
-version: 0.2.1
+version: 0.3.2
 description: |
   Local-LAN control of TP-Link Tapo cameras. Pan/tilt/zoom, snapshots,
   RTSP streams, motion events, privacy + LED + night-mode toggles,
   presets. Talks the camera's HTTPS JSON-RPC protocol directly — no
-  cloud dependency, no Tapo account required (only a "Camera Account"
-  set in the Tapo mobile app).
+  cloud round-trips.
 
-  v0.1 scope: legacy MD5+stok auth (firmware ≤1.3.x). KLAP handshake
-  for newer firmware is scaffolded but not wired — pin Tapo firmware
-  to a known-working version, or contribute the KLAP path.
+  Auth uses TP-Link's current secure_passthrough flow. Setup requires
+  enabling Third-Party Compatibility in the Tapo app and using the
+  dedicated third-party username/password it creates. These are not
+  your TP-Link cloud credentials.
 
   Composition: snapshots can be pushed straight into the `storage`
   app via `files_upload` so the agent can hand out signed URLs in
