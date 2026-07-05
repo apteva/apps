@@ -41,6 +41,12 @@ they do not need SaaS-specific hooks.
 This keeps the sales flow inside SaaS without moving invoices, payments,
 subscriptions, auth, or product data out of their owner apps.
 
+Paid plans with `trial_days > 0` and
+`trial_requires_payment_method: false` in plan or Catalog price metadata
+start as no-card trials. SaaS creates a `trialing` Subscription, activates
+the account, runs fulfillment immediately, and does not call Billing until
+payment is required at trial end.
+
 ## Fulfillment Actions
 
 Plans can define generic lifecycle actions. SaaS calls the configured

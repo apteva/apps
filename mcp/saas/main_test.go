@@ -17,9 +17,11 @@ import (
 
 type platformStub struct {
 	tk.BasePlatformClient
-	calls    []callAppCall
-	contacts int64
-	entitled bool
+	calls          []callAppCall
+	contacts       int64
+	entitled       bool
+	priceTrialDays int64
+	priceMetadata  map[string]any
 }
 
 type callAppCall struct {
@@ -45,9 +47,27 @@ func (p *platformStub) CallAppResult(appName, tool string, input map[string]any,
 	case "customers_upsert_by_email":
 		body = map[string]any{"customer": map[string]any{"id": 501, "email": input["email"], "name": input["name"]}}
 	case "catalog_prices_get":
-		body = map[string]any{"price": map[string]any{"id": input["id"], "product_id": 7001, "unit_amount_cents": 2900, "currency": "USD", "interval": "month", "interval_count": 1}}
+		price := map[string]any{"id": input["id"], "product_id": 7001, "unit_amount_cents": 2900, "currency": "USD", "interval": "month", "interval_count": 1}
+		if p.priceTrialDays > 0 {
+			price["trial_days"] = p.priceTrialDays
+		}
+		if p.priceMetadata != nil {
+			price["metadata"] = p.priceMetadata
+		}
+		body = map[string]any{"price": price}
 	case "subscriptions_create":
-		body = map[string]any{"subscription": map[string]any{"id": 601, "status": input["status"], "customer_id": input["customer_id"], "items": input["items"]}}
+		body = map[string]any{"subscription": map[string]any{
+			"id":                   601,
+			"status":               input["status"],
+			"customer_id":          input["customer_id"],
+			"items":                input["items"],
+			"trial_start":          input["trial_start"],
+			"trial_end":            input["trial_end"],
+			"current_period_start": input["current_period_start"],
+			"current_period_end":   input["current_period_end"],
+			"next_renewal_at":      input["next_renewal_at"],
+			"metadata":             input["metadata"],
+		}}
 	case "subscriptions_invoice_create":
 		body = map[string]any{"invoice": map[string]any{"id": 701, "status": "open", "total_cents": 2900}, "cycle": map[string]any{"id": 801, "invoice_id": 701, "payment_status": "open"}}
 	case "payments_record":
@@ -109,8 +129,8 @@ func TestEmbeddedManifest_Valid(t *testing.T) {
 	if m.Name != "saas" {
 		t.Errorf("manifest.Name=%q, want saas", m.Name)
 	}
-	if m.Version != "0.1.6" {
-		t.Errorf("manifest.Version=%q, want 0.1.6", m.Version)
+	if m.Version != "0.1.7" {
+		t.Errorf("manifest.Version=%q, want 0.1.7", m.Version)
 	}
 	if !m.Requires.DynamicAppCalls {
 		t.Error("manifest should allow dynamic app calls for configured usage sources")
@@ -246,6 +266,39 @@ func TestAccountCreate_StoresBillingCustomerID(t *testing.T) {
 	}
 }
 
+func TestCheckoutCreate_FreePlanActivatesWithoutCommerce(t *testing.T) {
+	pf := &platformStub{}
+	ctx, db := newTestCtx(t, pf)
+	defer db.Close()
+	app := &App{}
+
+	out, err := app.toolCheckoutCreate(ctx, map[string]any{
+		"owner_email":   "free@example.com",
+		"customer_name": "Free Co",
+		"slug":          "free-co",
+		"plan_key":      "free",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := out.(map[string]any)
+	acct := body["account"].(*Account)
+	if acct.Status != StatusActive || body["status"] != "active" || body["requires_payment"] != false {
+		t.Fatalf("free checkout should activate without payment: account=%+v body=%+v", acct, body)
+	}
+	for _, key := range []string{
+		"billing:customers_upsert_by_email",
+		"catalog:catalog_prices_get",
+		"subscriptions:subscriptions_create",
+		"subscriptions:subscriptions_invoice_create",
+		"billing:invoices_send_payment_link",
+	} {
+		if hasCall(pf.calls, key) {
+			t.Fatalf("%s should not run for free checkout; calls=%+v", key, pf.calls)
+		}
+	}
+}
+
 func TestCheckoutCreate_ManualPaymentActivatesAccountAndStoresBillingRefs(t *testing.T) {
 	pf := &platformStub{}
 	ctx, db := newTestCtx(t, pf)
@@ -334,8 +387,104 @@ func TestCheckoutCreate_ManualPaymentActivatesAccountAndStoresBillingRefs(t *tes
 	}
 }
 
+func TestCheckoutCreate_NoCardTrialActivatesAndFulfillsWithoutBilling(t *testing.T) {
+	pf := &platformStub{
+		entitled:       true,
+		priceTrialDays: 7,
+		priceMetadata:  map[string]any{"trial_requires_payment_method": false},
+	}
+	ctx, db := newTestCtx(t, pf)
+	defer db.Close()
+	app := &App{}
+	setupPaidCRMPlan(t, app, ctx)
+	if _, err := app.toolPlanActionAdd(ctx, map[string]any{
+		"plan_key":  "crm-pro",
+		"event":     "account_active",
+		"app_name":  "containers",
+		"tool_name": "containers_create",
+		"args":      map[string]any{"name": "saas-{{account.slug}}", "image": "example/crm:latest"},
+		"store":     map[string]any{"metadata.workload_id": "workload.id"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := app.toolCheckoutCreate(ctx, map[string]any{
+		"owner_email":   "buyer@example.com",
+		"customer_name": "Buyer Co",
+		"slug":          "buyer",
+		"plan_key":      "crm-pro",
+		"payment_mode":  "payment_link",
+		"period_start":  "2026-07-05T00:00:00Z",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := out.(map[string]any)
+	acct := body["account"].(*Account)
+	if acct.Status != StatusActive || body["status"] != "trialing" || body["requires_payment"] != false {
+		t.Fatalf("no-card trial should activate as trialing without payment: account=%+v body=%+v", acct, body)
+	}
+	if acct.SubscriptionID == nil || *acct.SubscriptionID != 601 {
+		t.Fatalf("subscription_id=%v, want 601", acct.SubscriptionID)
+	}
+	if _, ok := body["payment_link"]; ok {
+		t.Fatalf("no-card trial returned payment_link: %+v", body["payment_link"])
+	}
+	if _, ok := body["url"]; ok {
+		t.Fatalf("no-card trial returned url: %+v", body["url"])
+	}
+	for _, key := range []string{
+		"billing:customers_upsert_by_email",
+		"subscriptions:subscriptions_invoice_create",
+		"billing:invoices_send_payment_link",
+		"billing:payment_method_setup_create",
+	} {
+		if hasCall(pf.calls, key) {
+			t.Fatalf("%s should not run for no-card trial; calls=%+v", key, pf.calls)
+		}
+	}
+	for _, key := range []string{
+		"catalog:catalog_prices_get",
+		"subscriptions:subscriptions_create",
+		"containers:containers_create",
+	} {
+		if !hasCall(pf.calls, key) {
+			t.Fatalf("missing call %s; calls=%+v", key, pf.calls)
+		}
+	}
+	subCreate := findCall(pf.calls, "subscriptions", "subscriptions_create")
+	if subCreate == nil {
+		t.Fatal("subscriptions_create was not called")
+	}
+	if subCreate.Input["status"] != "trialing" || subCreate.Input["trial_start"] != "2026-07-05T00:00:00Z" || subCreate.Input["trial_end"] != "2026-07-12T00:00:00Z" {
+		t.Fatalf("bad trial subscription input: %+v", subCreate.Input)
+	}
+	subMeta := mapFromAny(subCreate.Input["metadata"])
+	if subMeta["payment_method_missing"] != true || subMeta["trial_requires_payment_method"] != false || subMeta["payment_required_at"] != "2026-07-12T00:00:00Z" {
+		t.Fatalf("trial metadata missing on subscription: %+v", subMeta)
+	}
+	gotAcct, err := dbAccountGet(db, "proj-test", acct.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	meta := mapFromAny(gotAcct.Metadata)
+	if meta["checkout_status"] != "trialing" || meta["payment_method_missing"] != true || meta["payment_required_at"] != "2026-07-12T00:00:00Z" {
+		t.Fatalf("trial metadata missing on account: %+v", meta)
+	}
+	if strArg(meta, "workload_id") != "wrk_123" {
+		t.Fatalf("fulfillment did not store workload_id: %+v", meta)
+	}
+	access, err := app.toolAccessCheck(ctx, map[string]any{"account_id": acct.ID, "feature_key": "crm:contacts"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !access.(map[string]any)["allowed"].(bool) {
+		t.Fatalf("trial account should allow access: %+v", access)
+	}
+}
+
 func TestCheckoutCreate_PaymentLinkLeavesAccountPastDueAndAccessDenied(t *testing.T) {
-	pf := &platformStub{entitled: true, contacts: 0}
+	pf := &platformStub{entitled: true, contacts: 0, priceTrialDays: 7, priceMetadata: map[string]any{"trial_requires_payment_method": true}}
 	ctx, db := newTestCtx(t, pf)
 	defer db.Close()
 	app := &App{}

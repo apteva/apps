@@ -56,7 +56,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 			return err
 		}
 	}
-	ctx.Logger().Info("saas mounted", "version", "0.1.6", "scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
+	ctx.Logger().Info("saas mounted", "version", "0.1.7", "scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
 	return nil
 }
 
@@ -117,7 +117,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		}, []string{"plan_key", "event", "app_name", "tool_name"}), Handler: a.toolPlanActionAdd},
 		{Name: "saas_plan_action_list", Description: "List generic fulfillment actions for a SaaS plan.", InputSchema: schemaObject(map[string]any{"plan_key": strSchema(), "event": strSchema()}, []string{"plan_key"}), Handler: a.toolPlanActionList},
 		{Name: "saas_customer_create", Description: "Find or create a SaaS customer by email.", InputSchema: schemaObject(map[string]any{"email": strSchema(), "name": strSchema(), "billing_customer_id": intSchema(), "auth_user_id": intSchema(), "metadata": objSchema()}, []string{"email"}), Handler: a.toolCustomerCreate},
-		{Name: "saas_checkout_create", Description: "Create a paid SaaS checkout: Billing customer, Subscription, invoice/payment link or manual payment, then SaaS account.", InputSchema: schemaObject(map[string]any{
+		{Name: "saas_checkout_create", Description: "Create a SaaS checkout: free activation, no-card trials, or paid Billing/Subscription checkout.", InputSchema: schemaObject(map[string]any{
 			"owner_email": strSchema(), "customer_id": intSchema(), "customer_email": strSchema(), "customer_name": strSchema(), "slug": strSchema(), "plan_key": strSchema(),
 			"billing_customer_id": intSchema(), "auth_org_id": intSchema(), "auth_user_id": intSchema(), "create_owner_user": boolSchema(), "send_password_reset": boolSchema(),
 			"payment_mode": strSchema(), "record_payment": boolSchema(), "manual_payment_method": strSchema(), "activate_without_payment": boolSchema(),
@@ -918,7 +918,21 @@ func (a *App) createCheckout(ctx *sdk.AppCtx, args map[string]any) (map[string]a
 		}
 		out["account"] = acct
 		out["status"] = "active"
+		out["requires_payment"] = false
 		return out, nil
+	}
+
+	price, err := a.resolveCheckoutPrice(ctx, pid, plan, args)
+	if err != nil {
+		return nil, err
+	}
+	out["price"] = price.asMap()
+
+	periodStart := firstNonEmpty(strArg(args, "period_start"), time.Now().UTC().Format(time.RFC3339))
+	periodEnd := firstNonEmpty(strArg(args, "period_end"), periodEndFrom(periodStart, price.Interval, price.IntervalCount))
+	trialDays, trialRequiresPaymentMethod := checkoutTrialConfig(plan, price, args)
+	if plan.BillingMode == "paid" && trialDays > 0 && !trialRequiresPaymentMethod {
+		return a.createNoCardTrialCheckout(ctx, pid, customer, plan, price, periodStart, trialDays, args, out)
 	}
 
 	billingCustomerID, billingCustomer, err := a.ensureBillingCustomer(ctx, pid, customer, args)
@@ -929,14 +943,6 @@ func (a *App) createCheckout(ctx *sdk.AppCtx, args map[string]any) (map[string]a
 	customer, _ = dbCustomerGet(ctx.AppDB(), pid, customer.ID)
 	out["customer"] = customer
 
-	price, err := a.resolveCheckoutPrice(ctx, pid, plan, args)
-	if err != nil {
-		return nil, err
-	}
-	out["price"] = price.asMap()
-
-	periodStart := firstNonEmpty(strArg(args, "period_start"), time.Now().UTC().Format(time.RFC3339))
-	periodEnd := firstNonEmpty(strArg(args, "period_end"), periodEndFrom(periodStart, price.Interval, price.IntervalCount))
 	paymentMode := strings.ToLower(firstNonEmpty(strArg(args, "payment_mode"), "payment_link"))
 	recordPayment := boolArg(args, "record_payment")
 	paidNow := boolArg(args, "activate_without_payment") || (paymentMode == "manual" && recordPayment)
@@ -1032,8 +1038,10 @@ func (a *App) createCheckout(ctx *sdk.AppCtx, args map[string]any) (map[string]a
 	out["account"] = acct
 	if paidNow {
 		out["status"] = "active"
+		out["requires_payment"] = false
 	} else {
 		out["status"] = "awaiting_payment"
+		out["requires_payment"] = true
 	}
 	return out, nil
 }
@@ -1046,10 +1054,12 @@ type checkoutPrice struct {
 	Currency        string
 	Interval        string
 	IntervalCount   int64
+	TrialDays       int64
+	Metadata        map[string]any
 }
 
 func (p checkoutPrice) asMap() map[string]any {
-	return map[string]any{
+	out := map[string]any{
 		"catalog_product_id": p.ProductID,
 		"catalog_price_id":   p.PriceID,
 		"title":              p.Title,
@@ -1058,6 +1068,13 @@ func (p checkoutPrice) asMap() map[string]any {
 		"interval":           p.Interval,
 		"interval_count":     p.IntervalCount,
 	}
+	if p.TrialDays > 0 {
+		out["trial_days"] = p.TrialDays
+	}
+	if len(p.Metadata) > 0 {
+		out["metadata"] = p.Metadata
+	}
+	return out
 }
 
 func (a *App) ensureBillingCustomer(ctx *sdk.AppCtx, pid string, customer *Customer, args map[string]any) (int64, map[string]any, error) {
@@ -1097,6 +1114,10 @@ func (a *App) resolveCheckoutPrice(ctx *sdk.AppCtx, pid string, plan *Plan, args
 		Currency:        strings.ToUpper(firstNonEmpty(strArg(args, "currency"), "USD")),
 		Interval:        firstNonEmpty(strArg(args, "interval"), "month"),
 		IntervalCount:   firstNonZero(int64Arg(args, "interval_count"), 1),
+		Metadata:        mapFromAny(plan.Metadata),
+	}
+	if price.Metadata == nil {
+		price.Metadata = map[string]any{}
 	}
 	if price.PriceID != 0 {
 		var out map[string]any
@@ -1109,7 +1130,12 @@ func (a *App) resolveCheckoutPrice(ctx *sdk.AppCtx, pid string, plan *Plan, args
 		price.Currency = strings.ToUpper(firstNonEmpty(strArg(pm, "currency"), price.Currency))
 		price.Interval = firstNonEmpty(strArg(pm, "interval"), price.Interval)
 		price.IntervalCount = firstNonZero(int64Arg(pm, "interval_count"), price.IntervalCount)
+		price.TrialDays = firstNonZero(int64Arg(pm, "trial_days"), price.TrialDays)
+		for k, v := range mapFromAny(pm["metadata"]) {
+			price.Metadata[k] = v
+		}
 	}
+	price.TrialDays = firstNonZero(price.TrialDays, int64Arg(price.Metadata, "trial_days"))
 	if price.UnitAmountCents == 0 {
 		return price, errors.New("paid SaaS checkout requires catalog_price_id or unit_amount_cents")
 	}
@@ -1117,6 +1143,73 @@ func (a *App) resolveCheckoutPrice(ctx *sdk.AppCtx, pid string, plan *Plan, args
 		return price, errors.New("catalog price response missing product_id")
 	}
 	return price, nil
+}
+
+func checkoutTrialConfig(plan *Plan, price checkoutPrice, args map[string]any) (int64, bool) {
+	planMeta := mapFromAny(plan.Metadata)
+	trialDays := firstNonZero(price.TrialDays, int64Arg(price.Metadata, "trial_days"), int64Arg(planMeta, "trial_days"))
+	requiresPaymentMethod := true
+	requiresPaymentMethod = boolArgDefault(planMeta, "trial_requires_payment_method", requiresPaymentMethod)
+	requiresPaymentMethod = boolArgDefault(price.Metadata, "trial_requires_payment_method", requiresPaymentMethod)
+	return trialDays, requiresPaymentMethod
+}
+
+func (a *App) createNoCardTrialCheckout(ctx *sdk.AppCtx, pid string, customer *Customer, plan *Plan, price checkoutPrice, periodStart string, trialDays int64, args map[string]any, out map[string]any) (map[string]any, error) {
+	trialStart := periodStart
+	trialEnd := periodEndFrom(trialStart, "day", trialDays)
+	trialMeta := map[string]any{
+		"saas_plan_key":                 plan.Key,
+		"saas_customer_id":              customer.ID,
+		"trial_started_at":              trialStart,
+		"trial_ends_at":                 trialEnd,
+		"payment_required_at":           trialEnd,
+		"trial_requires_payment_method": false,
+		"payment_method_missing":        true,
+		"catalog_product_id":            price.ProductID,
+		"catalog_price_id":              price.PriceID,
+	}
+	subArgs := copyMap(args)
+	subArgs["trial_start"] = trialStart
+	subArgs["trial_end"] = trialEnd
+	subArgs["subscription_metadata"] = mergeMetadata(args["subscription_metadata"], trialMeta)
+	subOut, err := a.createSubscription(ctx, pid, customer, 0, plan, price, "trialing", trialStart, trialEnd, subArgs)
+	if err != nil {
+		return nil, err
+	}
+	subscription := unwrapMap(subOut, "subscription")
+	out["subscription"] = subscription
+	subID := int64FromResult(subOut, "subscription", "id")
+	if subID == 0 {
+		return nil, errors.New("subscriptions_create returned no subscription id")
+	}
+
+	accountArgs := copyMap(args)
+	accountArgs["skip_fulfillment"] = true
+	accountArgs["customer_id"] = customer.ID
+	accountArgs["subscription_id"] = subID
+	accountArgs["metadata"] = mergeMetadata(args["metadata"], mergeMetadata(trialMeta, map[string]any{
+		"subscription_id": subID,
+		"checkout_status": "trialing",
+	}))
+	acct, err := a.createAccount(ctx, accountArgs)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := a.runFulfillment(ctx, pid, acct, "account_active"); err != nil {
+		_, _ = dbAccountSetStatus(ctx.AppDB(), pid, acct.ID, StatusFailed, err.Error())
+		return nil, err
+	}
+	acct, _ = dbAccountGet(ctx.AppDB(), pid, acct.ID)
+	out["account"] = acct
+	out["trial"] = map[string]any{
+		"trial_started_at":    trialStart,
+		"trial_ends_at":       trialEnd,
+		"payment_required_at": trialEnd,
+		"trial_days":          trialDays,
+	}
+	out["status"] = "trialing"
+	out["requires_payment"] = false
+	return out, nil
 }
 
 func (a *App) createSubscription(ctx *sdk.AppCtx, pid string, customer *Customer, billingCustomerID int64, plan *Plan, price checkoutPrice, status, periodStart, periodEnd string, args map[string]any) (map[string]any, error) {
@@ -1146,6 +1239,15 @@ func (a *App) createSubscription(ctx *sdk.AppCtx, pid string, customer *Customer
 			"currency":           price.Currency,
 			"metadata":           map[string]any{"saas_plan_key": plan.Key},
 		}},
+	}
+	if v := strArg(args, "trial_start"); v != "" {
+		input["trial_start"] = v
+	}
+	if v := strArg(args, "trial_end"); v != "" {
+		input["trial_end"] = v
+	}
+	if extra := mapFromAny(args["subscription_metadata"]); len(extra) > 0 {
+		input["metadata"] = mergeMetadata(input["metadata"], extra)
 	}
 	var out map[string]any
 	if err := ctx.PlatformAPI().CallAppResult("subscriptions", "subscriptions_create", input, &out); err != nil {
@@ -2534,6 +2636,28 @@ func boolArg(m map[string]any, key string) bool {
 		return strings.EqualFold(strings.TrimSpace(v), "true") || strings.TrimSpace(v) == "1"
 	}
 	return false
+}
+
+func boolArgDefault(m map[string]any, key string, fallback bool) bool {
+	if m == nil {
+		return fallback
+	}
+	if _, ok := m[key]; !ok {
+		return fallback
+	}
+	switch v := m[key].(type) {
+	case bool:
+		return v
+	case string:
+		s := strings.TrimSpace(v)
+		if strings.EqualFold(s, "true") || s == "1" {
+			return true
+		}
+		if strings.EqualFold(s, "false") || s == "0" {
+			return false
+		}
+	}
+	return fallback
 }
 
 func int64Arg(m map[string]any, key string) int64 {
