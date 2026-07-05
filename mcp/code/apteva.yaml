@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: code
 display_name: Apteva Code
-version: 0.5.17
+version: 0.5.18
 description: |
   Repositories — named, framework-tagged code workspaces scoped under
   Apteva projects. First-class editing tools modelled on Claude Code:
@@ -11,6 +11,9 @@ description: |
   ZIP import for repository initialization or overlay updates. Native
   repo issues track bugs, feature requests, tasks, comments, and code
   links for agents and humans.
+  v0.5.18 makes coding tools more agent-efficient with compact grep
+  modes, smaller paged reads, file outlines/excerpts, and dry-run
+  unified patch application for large edits.
   v0.5.17 unifies project navigation with a single top tab bar and
   renames the global code view to Repositories.
   v0.5.16 gives the project-wide Issues inbox the full panel width
@@ -117,11 +120,17 @@ provides:
     - name: code_glob
       description: Find files in a repository by glob pattern (e.g. "**/*.tsx").
     - name: code_grep
-      description: Search file contents with regex or literal text. Returns matches with line and column.
+      description: Search file contents compactly. Defaults to file paths; request content or counts when needed.
     - name: code_read_file
-      description: Read a file with line numbers prefixed (cat -n format). Supports offset+limit for partial reads.
+      description: Read a small paged slice with line numbers prefixed (cat -n format). Supports offset+limit and next_offset.
+    - name: code_read_excerpt
+      description: Read a targeted first/tail/range/around-line excerpt with line numbers.
+    - name: code_file_outline
+      description: Return a compact outline of Markdown headings and common code declarations with line numbers.
     - name: code_write_file
-      description: Write or overwrite a file with full content (creates parent folders).
+      description: Write or overwrite a file with full content; prefer code_apply_patch for large existing-file rewrites.
+    - name: code_apply_patch
+      description: Apply a unified diff across files, with dry_run preview support.
     - name: code_edit_file
       description: Exact-string replacement. Fails if old_string is not unique unless replace_all is true.
     - name: code_multi_edit

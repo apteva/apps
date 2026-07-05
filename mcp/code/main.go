@@ -34,13 +34,14 @@ var templatesFS embed.FS
 const manifestYAML = `schema: apteva-app/v1
 name: code
 display_name: Apteva Code
-version: 0.5.17
+version: 0.5.18
 description: |
   Repositories — code workspaces scoped to Apteva projects, with
   first-class editing tools modelled on Claude Code. Optionally
   imports repositories from GitHub when a github connection is bound,
   imports ZIP archives through the UI,
   manages native repo issues for bugs, feature requests, and tasks,
+  makes grep/read/patch tools more compact for agents,
   unifies project navigation with a Repositories tab,
   gives the project-wide Issues inbox the full panel width,
   adds a project-wide Issues inbox in the UI,
@@ -90,9 +91,12 @@ provides:
     - { name: repos_export,           description: "Export a repo as a zip; returns base64 bytes for cross-app calls." }
     - { name: code_list_files,        description: "List files in a repository." }
     - { name: code_glob,              description: "Find files by glob pattern." }
-    - { name: code_grep,              description: "Search file contents with regex or literal text." }
-    - { name: code_read_file,         description: "Read with line numbers; supports offset+limit." }
+    - { name: code_grep,              description: "Search file contents compactly; defaults to file paths." }
+    - { name: code_read_file,         description: "Read small paged slices with line numbers; supports offset+limit." }
+    - { name: code_read_excerpt,      description: "Read targeted excerpts around lines, ranges, starts, or tails." }
+    - { name: code_file_outline,      description: "Return compact Markdown/code structure with line numbers." }
     - { name: code_write_file,        description: "Write or overwrite a file (full content)." }
+    - { name: code_apply_patch,       description: "Apply unified diffs with dry-run preview support." }
     - { name: code_edit_file,         description: "Exact-string replacement; uniqueness enforced." }
     - { name: code_multi_edit,        description: "Multiple edits to one file, atomic." }
     - { name: code_rename_path,       description: "Move or rename a file or folder." }

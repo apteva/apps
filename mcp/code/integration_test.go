@@ -109,9 +109,38 @@ func TestSidecar_FullRepoLifecycle(t *testing.T) {
 		"slug":    slug,
 		"pattern": "integration test",
 	})
-	matches := grep["matches"].([]any)
+	paths := grep["paths"].([]any)
+	if len(paths) != 1 || paths[0].(string) != "app/page.tsx" {
+		t.Errorf("grep paths=%v, want app/page.tsx", paths)
+	}
+	grepContent := sc.MCP("code_grep", map[string]any{
+		"slug":        slug,
+		"pattern":     "integration test",
+		"output_mode": "content",
+		"limit":       5,
+	})
+	matches := grepContent["matches"].([]any)
 	if len(matches) != 1 {
-		t.Errorf("grep matches=%d, want 1", len(matches))
+		t.Errorf("grep content matches=%d, want 1", len(matches))
+	}
+
+	// 6b. Outline and excerpt avoid whole-file reads for orientation.
+	outline := sc.MCP("code_file_outline", map[string]any{
+		"slug": slug,
+		"path": "app/page.tsx",
+	})
+	if outline["count"].(float64) == 0 {
+		t.Errorf("outline unexpectedly empty: %+v", outline)
+	}
+	excerpt := sc.MCP("code_read_excerpt", map[string]any{
+		"slug":   slug,
+		"path":   "app/page.tsx",
+		"around": 5,
+		"before": 1,
+		"after":  1,
+	})
+	if !strings.Contains(excerpt["content"].(string), "integration test") {
+		t.Errorf("excerpt missing edited content: %q", excerpt["content"])
 	}
 
 	// 7. Glob — find every TSX.
@@ -134,6 +163,32 @@ func TestSidecar_FullRepoLifecycle(t *testing.T) {
 	})
 	if multi["operation_count"].(float64) != 2 {
 		t.Errorf("multi-edit ops=%v", multi["operation_count"])
+	}
+
+	// 8b. Apply a unified diff with dry-run preview first.
+	patch := `--- a/app/page.tsx
++++ b/app/page.tsx
+@@ -1,4 +1,4 @@
+ export default function Home() {
+   return (
+-    <section style={{ font-family-stub: 'system-ui, sans-serif', padding: '4rem' }}>
++    <section style={{ font-family-stub: 'system-ui', padding: '4rem' }}>
+       <h1>Hello from the integration test.</h1>
+`
+	dry := sc.MCP("code_apply_patch", map[string]any{
+		"slug":    slug,
+		"patch":   patch,
+		"dry_run": true,
+	})
+	if dry["applied"].(bool) {
+		t.Errorf("dry-run patch should not be applied: %+v", dry)
+	}
+	applied := sc.MCP("code_apply_patch", map[string]any{
+		"slug":  slug,
+		"patch": patch,
+	})
+	if !applied["applied"].(bool) {
+		t.Errorf("patch not applied: %+v", applied)
 	}
 
 	// 9. REST — fetch the tree via the HTTP mirror.

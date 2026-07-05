@@ -22,14 +22,17 @@ import (
 // count of the whole file even when the read was partial; agents use
 // it to decide whether to re-read with a different offset.
 type ReadResult struct {
-	Path       string `json:"path"`
-	Content    string `json:"content"`
-	TotalLines int    `json:"total_lines"`
-	StartLine  int    `json:"start_line"`
-	EndLine    int    `json:"end_line"`
-	Size       int64  `json:"size"`
-	SHA256     string `json:"sha256"`
-	Truncated  bool   `json:"truncated,omitempty"`
+	Path               string `json:"path"`
+	Content            string `json:"content"`
+	TotalLines         int    `json:"total_lines"`
+	StartLine          int    `json:"start_line"`
+	EndLine            int    `json:"end_line"`
+	NextOffset         int    `json:"next_offset,omitempty"`
+	Size               int64  `json:"size"`
+	SHA256             string `json:"sha256"`
+	Truncated          bool   `json:"truncated,omitempty"`
+	LongLinesTruncated int    `json:"long_lines_truncated,omitempty"`
+	Hint               string `json:"hint,omitempty"`
 }
 
 // readWithLineNumbers fetches a file and renders it with line numbers.
@@ -37,7 +40,11 @@ type ReadResult struct {
 // lines to return; <=0 means "default" (defaultReadLimit). When the
 // file is very large and offset+limit doesn't cover it all, Truncated
 // is set.
-const defaultReadLimit = 2000
+const (
+	defaultReadLimit = 200
+	maxReadLimit     = 2000
+	maxReadLineChars = 4000
+)
 
 func readWithLineNumbers(store FileStore, slug, p string, offset, limit int) (*ReadResult, error) {
 	body, sha, err := readWithSHA(store, slug, p)
@@ -58,6 +65,9 @@ func readWithLineNumbers(store FileStore, slug, p string, offset, limit int) (*R
 	if limit <= 0 {
 		limit = defaultReadLimit
 	}
+	if limit > maxReadLimit {
+		limit = maxReadLimit
+	}
 	start := offset - 1
 	if start > total {
 		start = total
@@ -72,20 +82,194 @@ func readWithLineNumbers(store FileStore, slug, p string, offset, limit int) (*R
 	// trained on Claude Code recognise this pattern.
 	width := numWidth(end)
 	var b strings.Builder
+	longLinesTruncated := 0
 	for i, ln := range view {
+		ln, truncated := truncateLine(ln, maxReadLineChars)
+		if truncated {
+			longLinesTruncated++
+		}
 		fmt.Fprintf(&b, "%*d\t%s\n", width, start+i+1, ln)
+	}
+	truncated := end < total
+	nextOffset := 0
+	hint := ""
+	if truncated {
+		nextOffset = end + 1
+		hint = fmt.Sprintf("partial read; call code_read_file with offset=%d and limit=%d to continue", nextOffset, limit)
 	}
 
 	return &ReadResult{
-		Path:       p,
-		Content:    b.String(),
-		TotalLines: total,
-		StartLine:  start + 1,
-		EndLine:    end,
-		Size:       int64(len(body)),
-		SHA256:     sha,
-		Truncated:  end < total,
+		Path:               p,
+		Content:            b.String(),
+		TotalLines:         total,
+		StartLine:          start + 1,
+		EndLine:            end,
+		NextOffset:         nextOffset,
+		Size:               int64(len(body)),
+		SHA256:             sha,
+		Truncated:          truncated,
+		LongLinesTruncated: longLinesTruncated,
+		Hint:               hint,
 	}, nil
+}
+
+func truncateLine(line string, max int) (string, bool) {
+	runes := []rune(line)
+	if max <= 0 || len(runes) <= max {
+		return line, false
+	}
+	return string(runes[:max]) + " … [line truncated]", true
+}
+
+type ExcerptOptions struct {
+	StartLine int
+	EndLine   int
+	Around    int
+	Before    int
+	After     int
+	Limit     int
+	Tail      bool
+}
+
+func readExcerpt(store FileStore, slug, p string, o ExcerptOptions) (*ReadResult, error) {
+	body, _, err := readWithSHA(store, slug, p)
+	if err != nil {
+		return nil, err
+	}
+	lines := splitVisibleLines(body)
+	total := len(lines)
+	limit := o.Limit
+	if limit <= 0 {
+		limit = defaultReadLimit
+	}
+	if o.StartLine > 0 && o.EndLine >= o.StartLine {
+		limit = o.EndLine - o.StartLine + 1
+		return readWithLineNumbers(store, slug, p, o.StartLine, limit)
+	}
+	if o.Around > 0 {
+		before := o.Before
+		after := o.After
+		if before <= 0 && after <= 0 {
+			before = limit / 2
+			after = limit - before - 1
+			if after < 0 {
+				after = 0
+			}
+		}
+		start := o.Around - before
+		if start < 1 {
+			start = 1
+		}
+		limit = before + 1 + after
+		return readWithLineNumbers(store, slug, p, start, limit)
+	}
+	if o.Tail {
+		start := total - limit + 1
+		if start < 1 {
+			start = 1
+		}
+		return readWithLineNumbers(store, slug, p, start, limit)
+	}
+	start := o.StartLine
+	if start <= 0 {
+		start = 1
+	}
+	return readWithLineNumbers(store, slug, p, start, limit)
+}
+
+type OutlineEntry struct {
+	Line int    `json:"line"`
+	Kind string `json:"kind"`
+	Text string `json:"text"`
+}
+
+type OutlineResult struct {
+	Path       string         `json:"path"`
+	Entries    []OutlineEntry `json:"entries"`
+	Count      int            `json:"count"`
+	TotalLines int            `json:"total_lines"`
+	Truncated  bool           `json:"truncated,omitempty"`
+}
+
+const defaultOutlineLimit = 200
+
+func fileOutline(store FileStore, slug, p string, limit int) (*OutlineResult, error) {
+	body, _, err := readWithSHA(store, slug, p)
+	if err != nil {
+		return nil, err
+	}
+	if limit <= 0 {
+		limit = defaultOutlineLimit
+	}
+	if limit > 1000 {
+		limit = 1000
+	}
+	lines := splitVisibleLines(body)
+	out := &OutlineResult{Path: p, TotalLines: len(lines)}
+	for i, line := range lines {
+		if entry, ok := outlineLine(p, line); ok {
+			out.Entries = append(out.Entries, OutlineEntry{
+				Line: i + 1,
+				Kind: entry.Kind,
+				Text: entry.Text,
+			})
+			if len(out.Entries) >= limit {
+				out.Truncated = true
+				break
+			}
+		}
+	}
+	out.Count = len(out.Entries)
+	return out, nil
+}
+
+func splitVisibleLines(body []byte) []string {
+	lines := strings.Split(string(body), "\n")
+	if n := len(lines); n > 0 && lines[n-1] == "" {
+		lines = lines[:n-1]
+	}
+	return lines
+}
+
+type outlineLineResult struct {
+	Kind string
+	Text string
+}
+
+func outlineLine(path, line string) (outlineLineResult, bool) {
+	trimmed := strings.TrimSpace(line)
+	if trimmed == "" {
+		return outlineLineResult{}, false
+	}
+	if strings.HasSuffix(path, ".md") || strings.HasSuffix(path, ".mdx") {
+		if strings.HasPrefix(trimmed, "#") {
+			level := 0
+			for level < len(trimmed) && trimmed[level] == '#' {
+				level++
+			}
+			if level > 0 && level < len(trimmed) && trimmed[level] == ' ' {
+				return outlineLineResult{Kind: fmt.Sprintf("heading%d", level), Text: strings.TrimSpace(trimmed[level:])}, true
+			}
+		}
+		return outlineLineResult{}, false
+	}
+	patterns := []struct {
+		kind string
+		re   *regexp.Regexp
+	}{
+		{"export", regexp.MustCompile(`^(export\s+)?(default\s+)?(async\s+)?(function|class|interface|type|const|let|var)\s+([A-Za-z_$][\w$]*)`)},
+		{"function", regexp.MustCompile(`^(async\s+)?function\s+([A-Za-z_$][\w$]*)`)},
+		{"go", regexp.MustCompile(`^func\s+(\([^)]+\)\s*)?([A-Za-z_]\w*)\s*\(`)},
+		{"go", regexp.MustCompile(`^type\s+([A-Za-z_]\w*)\s+(struct|interface|func|\w+)`)},
+		{"python", regexp.MustCompile(`^(async\s+)?def\s+([A-Za-z_]\w*)\s*\(`)},
+		{"python", regexp.MustCompile(`^class\s+([A-Za-z_]\w*)`)},
+	}
+	for _, p := range patterns {
+		if p.re.MatchString(trimmed) {
+			return outlineLineResult{Kind: p.kind, Text: trimmed}, true
+		}
+	}
+	return outlineLineResult{}, false
 }
 
 func numWidth(n int) int {
@@ -107,11 +291,11 @@ func numWidth(n int) int {
 
 // EditResult is what code_edit_file returns when an edit succeeds.
 type EditResult struct {
-	Path        string `json:"path"`
-	Replacements int   `json:"replacements"`
-	OldSHA256   string `json:"old_sha256"`
-	NewSHA256   string `json:"new_sha256"`
-	NewSize     int64  `json:"new_size"`
+	Path         string `json:"path"`
+	Replacements int    `json:"replacements"`
+	OldSHA256    string `json:"old_sha256"`
+	NewSHA256    string `json:"new_sha256"`
+	NewSize      int64  `json:"new_size"`
 }
 
 // applyEdit performs a single string-replace in `body` with the same
@@ -295,28 +479,65 @@ type GrepMatch struct {
 	After  []string `json:"after,omitempty"`
 }
 
-// GrepOptions mirrors what callers can configure.
-type GrepOptions struct {
-	Pattern     string
-	Path        string // sub-tree prefix
-	FilePattern string // glob; empty = all files
-	Regex       bool   // false = literal, true = regex
-	Context     int    // lines of before/after context
-	IgnoreCase  bool
-	Limit       int // max matches
+type GrepFileCount struct {
+	Path  string `json:"path"`
+	Count int    `json:"count"`
 }
 
-const grepDefaultLimit = 500
+type GrepResult struct {
+	OutputMode string          `json:"output_mode"`
+	Paths      []string        `json:"paths,omitempty"`
+	Matches    []GrepMatch     `json:"matches,omitempty"`
+	Counts     []GrepFileCount `json:"counts,omitempty"`
+	Count      int             `json:"count"`
+	Truncated  bool            `json:"truncated,omitempty"`
+	Hint       string          `json:"hint,omitempty"`
+}
+
+// GrepOptions mirrors what callers can configure.
+type GrepOptions struct {
+	Pattern        string
+	Path           string // sub-tree prefix
+	FilePattern    string // glob; empty = all files
+	Regex          bool   // false = literal, true = regex
+	Context        int    // lines of before/after context
+	IgnoreCase     bool
+	Limit          int // max matches
+	OutputMode     string
+	MatchesPerFile int
+}
+
+const (
+	grepDefaultLimit      = 50
+	grepMaxLimit          = 1000
+	grepMaxContext        = 3
+	grepDefaultOutputMode = "files"
+)
 
 // grepRepo scans every textual file in a repo for matches. Cheap
 // enough for repos up to a few thousand files; v0.2 adds a content
 // cache + FTS5 for larger trees.
-func grepRepo(store FileStore, slug string, o GrepOptions) ([]GrepMatch, error) {
+func grepRepo(store FileStore, slug string, o GrepOptions) (*GrepResult, error) {
 	if o.Pattern == "" {
 		return nil, errors.New("pattern required")
 	}
-	if o.Limit <= 0 || o.Limit > 5000 {
+	if o.OutputMode == "" {
+		o.OutputMode = grepDefaultOutputMode
+	}
+	if o.OutputMode != "files" && o.OutputMode != "content" && o.OutputMode != "count" {
+		return nil, fmt.Errorf("invalid output_mode %q (want files, content, or count)", o.OutputMode)
+	}
+	if o.Limit <= 0 {
 		o.Limit = grepDefaultLimit
+	}
+	if o.Limit > grepMaxLimit {
+		o.Limit = grepMaxLimit
+	}
+	if o.Context < 0 {
+		o.Context = 0
+	}
+	if o.Context > grepMaxContext {
+		o.Context = grepMaxContext
 	}
 	files, err := store.List(slug, o.Path, true)
 	if err != nil {
@@ -338,9 +559,11 @@ func grepRepo(store FileStore, slug string, o GrepOptions) ([]GrepMatch, error) 
 		needle = strings.ToLower(needle)
 	}
 
-	out := []GrepMatch{}
+	result := &GrepResult{OutputMode: o.OutputMode}
+	seenPaths := map[string]bool{}
 	for _, f := range files {
-		if len(out) >= o.Limit {
+		if result.Count >= o.Limit {
+			result.Truncated = true
 			break
 		}
 		if o.FilePattern != "" {
@@ -362,6 +585,8 @@ func grepRepo(store FileStore, slug string, o GrepOptions) ([]GrepMatch, error) 
 		if n := len(lines); n > 0 && lines[n-1] == "" {
 			lines = lines[:n-1]
 		}
+		fileCount := 0
+	lineLoop:
 		for i, ln := range lines {
 			var matched bool
 			var col int
@@ -385,29 +610,74 @@ func grepRepo(store FileStore, slug string, o GrepOptions) ([]GrepMatch, error) 
 			if !matched {
 				continue
 			}
-			match := GrepMatch{
-				Path:  f.Path,
-				Line:  i + 1,
-				Col:   col,
-				Match: ln,
+			fileCount++
+			if o.MatchesPerFile > 0 && fileCount > o.MatchesPerFile {
+				continue
 			}
-			if o.Context > 0 {
-				lo := i - o.Context
-				if lo < 0 {
-					lo = 0
+			switch o.OutputMode {
+			case "files":
+				if !seenPaths[f.Path] {
+					result.Paths = append(result.Paths, f.Path)
+					seenPaths[f.Path] = true
+					result.Count++
 				}
-				hi := i + o.Context + 1
-				if hi > len(lines) {
-					hi = len(lines)
+				break lineLoop
+			case "count":
+				// Accumulated after the file scan so one file produces
+				// one compact row.
+			case "content":
+				match := GrepMatch{
+					Path:  f.Path,
+					Line:  i + 1,
+					Col:   col,
+					Match: truncateGrepLine(ln),
 				}
-				match.Before = append([]string{}, lines[lo:i]...)
-				match.After = append([]string{}, lines[i+1:hi]...)
+				if o.Context > 0 {
+					lo := i - o.Context
+					if lo < 0 {
+						lo = 0
+					}
+					hi := i + o.Context + 1
+					if hi > len(lines) {
+						hi = len(lines)
+					}
+					match.Before = truncateLines(lines[lo:i])
+					match.After = truncateLines(lines[i+1 : hi])
+				}
+				result.Matches = append(result.Matches, match)
+				result.Count++
 			}
-			out = append(out, match)
-			if len(out) >= o.Limit {
+			if result.Count >= o.Limit && o.OutputMode != "count" {
+				result.Truncated = true
+				break
+			}
+		}
+		if o.OutputMode == "count" && fileCount > 0 {
+			result.Counts = append(result.Counts, GrepFileCount{Path: f.Path, Count: fileCount})
+			result.Count++
+			if result.Count >= o.Limit {
+				result.Truncated = true
 				break
 			}
 		}
 	}
-	return out, nil
+	if result.Truncated {
+		result.Hint = "results truncated; narrow with path, file_pattern, output_mode, limit, or matches_per_file"
+	}
+	sort.Strings(result.Paths)
+	sort.Slice(result.Counts, func(i, j int) bool { return result.Counts[i].Path < result.Counts[j].Path })
+	return result, nil
+}
+
+func truncateGrepLine(line string) string {
+	out, _ := truncateLine(line, maxReadLineChars)
+	return out
+}
+
+func truncateLines(lines []string) []string {
+	out := make([]string, len(lines))
+	for i, line := range lines {
+		out[i] = truncateGrepLine(line)
+	}
+	return out
 }

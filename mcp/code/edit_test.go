@@ -175,6 +175,63 @@ func TestReadWithLineNumbers_OffsetLimit(t *testing.T) {
 	if !res.Truncated {
 		t.Error("partial read should set truncated=true")
 	}
+	if res.NextOffset != 4 {
+		t.Errorf("next_offset=%d, want 4", res.NextOffset)
+	}
+}
+
+func TestReadWithLineNumbers_DefaultIsSmallPage(t *testing.T) {
+	store := newMemFileStore()
+	store.CreateRepo("r")
+	var b strings.Builder
+	for i := 0; i < 250; i++ {
+		b.WriteString("line\n")
+	}
+	store.Write("r", "f.txt", []byte(b.String()))
+	res, err := readWithLineNumbers(store, "r", "f.txt", 0, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.EndLine != defaultReadLimit || !res.Truncated || res.NextOffset != defaultReadLimit+1 {
+		t.Errorf("default page result = %+v", res)
+	}
+}
+
+func TestReadExcerpt_AroundLine(t *testing.T) {
+	store := newMemFileStore()
+	store.CreateRepo("r")
+	store.Write("r", "f.txt", []byte("one\ntwo\nthree\nfour\nfive\n"))
+	res, err := readExcerpt(store, "r", "f.txt", ExcerptOptions{Around: 3, Before: 1, After: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.StartLine != 2 || res.EndLine != 4 {
+		t.Errorf("excerpt range = %d-%d, want 2-4", res.StartLine, res.EndLine)
+	}
+	if !strings.Contains(res.Content, "\tthree\n") || strings.Contains(res.Content, "\tone\n") {
+		t.Errorf("unexpected excerpt content: %q", res.Content)
+	}
+}
+
+func TestFileOutline_MarkdownAndCode(t *testing.T) {
+	store := newMemFileStore()
+	store.CreateRepo("r")
+	store.Write("r", "README.md", []byte("# Title\ntext\n## Setup\n"))
+	md, err := fileOutline(store, "r", "README.md", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if md.Count != 2 || md.Entries[0].Kind != "heading1" || md.Entries[1].Line != 3 {
+		t.Errorf("markdown outline = %+v", md)
+	}
+	store.Write("r", "app.ts", []byte("import x from 'x'\nexport function run() {}\nclass Local {}\n"))
+	code, err := fileOutline(store, "r", "app.ts", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if code.Count != 2 {
+		t.Errorf("code outline = %+v", code)
+	}
 }
 
 // ─── Glob ──────────────────────────────────────────────────────────
@@ -220,15 +277,12 @@ func TestGrepRepo_Literal(t *testing.T) {
 	store.Write("r", "a.go", []byte("package main\n\nfunc Hello() {}\n"))
 	store.Write("r", "b.go", []byte("package main\n\nfunc World() {}\n"))
 
-	matches, err := grepRepo(store, "r", GrepOptions{Pattern: "Hello"})
+	res, err := grepRepo(store, "r", GrepOptions{Pattern: "Hello"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(matches) != 1 {
-		t.Fatalf("matches: %+v", matches)
-	}
-	if matches[0].Path != "a.go" || matches[0].Line != 3 {
-		t.Errorf("unexpected match: %+v", matches[0])
+	if res.OutputMode != "files" || len(res.Paths) != 1 || res.Paths[0] != "a.go" {
+		t.Fatalf("compact grep result: %+v", res)
 	}
 }
 
@@ -236,12 +290,12 @@ func TestGrepRepo_Regex(t *testing.T) {
 	store := newMemFileStore()
 	store.CreateRepo("r")
 	store.Write("r", "a.go", []byte("func Hello()\nfunc World()\n"))
-	matches, err := grepRepo(store, "r", GrepOptions{Pattern: `^func \w+\(`, Regex: true})
+	res, err := grepRepo(store, "r", GrepOptions{Pattern: `^func \w+\(`, Regex: true, OutputMode: "content"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(matches) != 2 {
-		t.Errorf("matches: %+v", matches)
+	if len(res.Matches) != 2 {
+		t.Errorf("matches: %+v", res.Matches)
 	}
 }
 
@@ -250,12 +304,12 @@ func TestGrepRepo_FilePattern(t *testing.T) {
 	store.CreateRepo("r")
 	store.Write("r", "a.go", []byte("hello\n"))
 	store.Write("r", "a.txt", []byte("hello\n"))
-	matches, err := grepRepo(store, "r", GrepOptions{Pattern: "hello", FilePattern: "**/*.go"})
+	res, err := grepRepo(store, "r", GrepOptions{Pattern: "hello", FilePattern: "**/*.go"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(matches) != 1 || matches[0].Path != "a.go" {
-		t.Errorf("expected only a.go, got %+v", matches)
+	if len(res.Paths) != 1 || res.Paths[0] != "a.go" {
+		t.Errorf("expected only a.go, got %+v", res)
 	}
 }
 
@@ -263,14 +317,14 @@ func TestGrepRepo_Context(t *testing.T) {
 	store := newMemFileStore()
 	store.CreateRepo("r")
 	store.Write("r", "a.txt", []byte("one\ntwo\nNEEDLE\nfour\nfive\n"))
-	matches, err := grepRepo(store, "r", GrepOptions{Pattern: "NEEDLE", Context: 1})
+	res, err := grepRepo(store, "r", GrepOptions{Pattern: "NEEDLE", Context: 1, OutputMode: "content"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(matches) != 1 {
-		t.Fatal(matches)
+	if len(res.Matches) != 1 {
+		t.Fatal(res.Matches)
 	}
-	m := matches[0]
+	m := res.Matches[0]
 	if len(m.Before) != 1 || m.Before[0] != "two" {
 		t.Errorf("before = %v", m.Before)
 	}
@@ -284,13 +338,27 @@ func TestGrepRepo_SkipsBinary(t *testing.T) {
 	store.CreateRepo("r")
 	store.Write("r", "blob.bin", []byte{0x00, 0xff, 0xab, 0x00})
 	store.Write("r", "code.go", []byte("hello"))
-	matches, err := grepRepo(store, "r", GrepOptions{Pattern: "h"})
+	res, err := grepRepo(store, "r", GrepOptions{Pattern: "h"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, m := range matches {
-		if m.Path == "blob.bin" {
-			t.Errorf("binary file should be skipped: %+v", m)
+	for _, p := range res.Paths {
+		if p == "blob.bin" {
+			t.Errorf("binary file should be skipped: %+v", res)
 		}
+	}
+}
+
+func TestGrepRepo_CountAndLimit(t *testing.T) {
+	store := newMemFileStore()
+	store.CreateRepo("r")
+	store.Write("r", "a.txt", []byte("hit\nhit\n"))
+	store.Write("r", "b.txt", []byte("hit\n"))
+	res, err := grepRepo(store, "r", GrepOptions{Pattern: "hit", OutputMode: "count", Limit: 1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(res.Counts) != 1 || res.Counts[0].Path != "a.txt" || res.Counts[0].Count != 2 || !res.Truncated {
+		t.Errorf("count result = %+v", res)
 	}
 }

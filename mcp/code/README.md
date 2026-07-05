@@ -5,11 +5,13 @@ first-class editing tools modelled on Claude Code.
 
 ## Surfaces
 
-- **14 MCP tools** — repository lifecycle (`repos_list`, `repos_create`,
+- **36 MCP tools** — repository lifecycle (`repos_list`, `repos_create`,
   `repos_get`, `repos_archive`, `repos_set_deploy_hints`) and the
   editing surface (`code_list_files`, `code_glob`, `code_grep`,
-  `code_read_file`, `code_write_file`, `code_edit_file`,
-  `code_multi_edit`, `code_rename_path`, `code_delete_file`).
+  `code_read_file`, `code_read_excerpt`, `code_file_outline`,
+  `code_write_file`, `code_apply_patch`, `code_edit_file`,
+  `code_multi_edit`, `code_rename_path`, `code_delete_file`), plus
+  templates, dev runs, GitHub import, export, and native issues.
 - **REST mirror** at `/api/repos/*` for the SPA and curl debugging.
 - **Templates** baked into the binary via `embed`: `blank`, `nextjs`.
   More land by dropping a directory under `templates/` and re-building.
@@ -17,8 +19,12 @@ first-class editing tools modelled on Claude Code.
 ## Editing semantics — modelled on Claude Code
 
 - `code_read_file` returns content prefixed with `cat -n` line numbers,
-  supports `offset` and `limit` for partial reads, and reports the
-  total line count + a `truncated` flag.
+  defaults to a small 200-line page, supports `offset` and `limit`,
+  and reports `next_offset`, total line count, and a `truncated` flag.
+- `code_read_excerpt` reads ranges, tails, or lines around a target
+  without forcing agents to fetch a whole large file for examples.
+- `code_file_outline` returns Markdown headings and common code
+  declarations with line numbers so agents can orient before reading.
 - `code_edit_file` does exact-string replacement and **enforces
   uniqueness** — if `old_string` matches more than once, the call
   fails with the line numbers of the first few matches so the agent
@@ -26,8 +32,12 @@ first-class editing tools modelled on Claude Code.
 - `code_multi_edit` is **atomic**: if any operation fails the file
   isn't touched. Each edit applies to the state after the previous
   one — same semantics as Claude Code's MultiEdit.
+- `code_apply_patch` applies unified diffs across files and supports
+  `dry_run=true`. Patch validation is all-or-nothing before writes.
 - `code_grep` supports literal + regex modes, glob-scoped paths,
-  before/after context, ignore-case. Skips binary files.
+  before/after context, ignore-case, `matches_per_file`, and
+  `output_mode`. It defaults to compact file paths; agents request
+  `output_mode=content` only when they need matching lines.
 
 ## Storage
 
@@ -73,13 +83,15 @@ apteva test ./scenarios/            # tier 3, ~3min — real LLM
 
 **Tier 1 (unit).** Path normalisation, slug generation, repository
 CRUD (project-scoping + slug uniqueness), the editing engine
-(uniqueness, multi-edit atomicity, partial reads, glob, grep), the
+(uniqueness, multi-edit atomicity, partial reads, excerpts, outlines,
+patch dry-runs/apply/reject behavior, glob, compact grep), the
 embedded manifest's parse + handler agreement, template
 materialisation. Runs without spawning a binary.
 
 **Tier 2 (integration).** Builds the sidecar and talks to it over
 HTTP via the SDK testkit: full repo lifecycle (create → tree → read
-→ edit → grep → glob → multi-edit → REST tree), path-traversal
+→ edit → grep → outline → excerpt → glob → multi-edit → patch →
+REST tree), path-traversal
 rejection, project-scope isolation between sidecars, and the
 global-scope `_project_id` fallback. Catches SDK-wiring drift.
 

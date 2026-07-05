@@ -95,24 +95,27 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name: "code_grep",
-			Description: "Search file contents. Args: slug, pattern, regex? (default false), path?, file_pattern?, " +
-				"context? (lines of before/after), ignore_case?, limit?.",
+			Description: "Search file contents compactly. Defaults to output_mode=files and limit=50; use " +
+				"output_mode=content only when matching lines are needed. Narrow with path, file_pattern, " +
+				"matches_per_file, and small context.",
 			InputSchema: schemaObject(map[string]any{
-				"slug":         map[string]any{"type": "string"},
-				"pattern":      map[string]any{"type": "string"},
-				"regex":        map[string]any{"type": "boolean"},
-				"path":         map[string]any{"type": "string"},
-				"file_pattern": map[string]any{"type": "string"},
-				"context":      map[string]any{"type": "integer"},
-				"ignore_case":  map[string]any{"type": "boolean"},
-				"limit":        map[string]any{"type": "integer"},
+				"slug":             map[string]any{"type": "string"},
+				"pattern":          map[string]any{"type": "string"},
+				"regex":            map[string]any{"type": "boolean"},
+				"path":             map[string]any{"type": "string"},
+				"file_pattern":     map[string]any{"type": "string"},
+				"output_mode":      map[string]any{"type": "string", "enum": []string{"files", "content", "count"}},
+				"context":          map[string]any{"type": "integer"},
+				"matches_per_file": map[string]any{"type": "integer"},
+				"ignore_case":      map[string]any{"type": "boolean"},
+				"limit":            map[string]any{"type": "integer"},
 			}, []string{"slug", "pattern"}),
 			Handler: a.toolGrep,
 		},
 		{
 			Name: "code_read_file",
 			Description: "Read a file with cat -n line numbers prefixed. Args: slug, path, offset? (1-indexed), " +
-				"limit? (default 2000).",
+				"limit? (default 200, max 2000). Prefer small limits and use next_offset to continue.",
 			InputSchema: schemaObject(map[string]any{
 				"slug":   map[string]any{"type": "string"},
 				"path":   map[string]any{"type": "string"},
@@ -122,14 +125,54 @@ func (a *App) MCPTools() []sdk.Tool {
 			Handler: a.toolReadFile,
 		},
 		{
-			Name:        "code_write_file",
-			Description: "Write or overwrite a file with full content. Args: slug, path, content. Creates parent folders.",
+			Name: "code_read_excerpt",
+			Description: "Read a targeted excerpt with line numbers instead of a whole file. Args: slug, path, " +
+				"start_line?/end_line?, around?/before?/after?, tail?, limit? (default 200).",
+			InputSchema: schemaObject(map[string]any{
+				"slug":       map[string]any{"type": "string"},
+				"path":       map[string]any{"type": "string"},
+				"start_line": map[string]any{"type": "integer"},
+				"end_line":   map[string]any{"type": "integer"},
+				"around":     map[string]any{"type": "integer"},
+				"before":     map[string]any{"type": "integer"},
+				"after":      map[string]any{"type": "integer"},
+				"tail":       map[string]any{"type": "boolean"},
+				"limit":      map[string]any{"type": "integer"},
+			}, []string{"slug", "path"}),
+			Handler: a.toolReadExcerpt,
+		},
+		{
+			Name: "code_file_outline",
+			Description: "Return a compact structural outline with line numbers for Markdown headings and common " +
+				"code declarations. Use before reading large files. Args: slug, path, limit?.",
+			InputSchema: schemaObject(map[string]any{
+				"slug":  map[string]any{"type": "string"},
+				"path":  map[string]any{"type": "string"},
+				"limit": map[string]any{"type": "integer"},
+			}, []string{"slug", "path"}),
+			Handler: a.toolFileOutline,
+		},
+		{
+			Name: "code_write_file",
+			Description: "Write or overwrite a file with full content. Best for new files or simple overwrites; use " +
+				"code_apply_patch for large existing-file rewrites. Args: slug, path, content.",
 			InputSchema: schemaObject(map[string]any{
 				"slug":    map[string]any{"type": "string"},
 				"path":    map[string]any{"type": "string"},
 				"content": map[string]any{"type": "string"},
 			}, []string{"slug", "path", "content"}),
 			Handler: a.toolWriteFile,
+		},
+		{
+			Name: "code_apply_patch",
+			Description: "Apply a unified diff patch across one or more files. Use dry_run=true to preview. " +
+				"Preferred for large existing-file rewrites instead of code_write_file full-content overwrites.",
+			InputSchema: schemaObject(map[string]any{
+				"slug":    map[string]any{"type": "string"},
+				"patch":   map[string]any{"type": "string"},
+				"dry_run": map[string]any{"type": "boolean"},
+			}, []string{"slug", "patch"}),
+			Handler: a.toolApplyPatch,
 		},
 		{
 			Name: "code_edit_file",
@@ -1186,13 +1229,15 @@ func (a *App) toolGrep(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return nil, err
 	}
 	o := GrepOptions{
-		Pattern:     strArg(args, "pattern"),
-		Path:        strArg(args, "path"),
-		FilePattern: strArg(args, "file_pattern"),
-		Regex:       boolArg(args, "regex"),
-		IgnoreCase:  boolArg(args, "ignore_case"),
-		Context:     intArg(args, "context", 0),
-		Limit:       intArg(args, "limit", 0),
+		Pattern:        strArg(args, "pattern"),
+		Path:           strArg(args, "path"),
+		FilePattern:    strArg(args, "file_pattern"),
+		OutputMode:     strArg(args, "output_mode"),
+		Regex:          boolArg(args, "regex"),
+		IgnoreCase:     boolArg(args, "ignore_case"),
+		Context:        intArg(args, "context", 0),
+		Limit:          intArg(args, "limit", 0),
+		MatchesPerFile: intArg(args, "matches_per_file", 0),
 	}
 	if o.Path != "" {
 		clean, err := normalisePath(o.Path)
@@ -1201,11 +1246,11 @@ func (a *App) toolGrep(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		}
 		o.Path = clean
 	}
-	matches, err := grepRepo(a.store, strArg(args, "slug"), o)
+	res, err := grepRepo(a.store, strArg(args, "slug"), o)
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"matches": matches, "count": len(matches)}, nil
+	return res, nil
 }
 
 func (a *App) toolReadFile(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -1228,6 +1273,44 @@ func (a *App) toolReadFile(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	return res, nil
 }
 
+func (a *App) toolReadExcerpt(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := requireRepo(ctx, pid, strArg(args, "slug")); err != nil {
+		return nil, err
+	}
+	rel, err := normalisePath(strArg(args, "path"))
+	if err != nil {
+		return nil, err
+	}
+	return readExcerpt(a.store, strArg(args, "slug"), rel, ExcerptOptions{
+		StartLine: intArg(args, "start_line", 0),
+		EndLine:   intArg(args, "end_line", 0),
+		Around:    intArg(args, "around", 0),
+		Before:    intArg(args, "before", 0),
+		After:     intArg(args, "after", 0),
+		Limit:     intArg(args, "limit", 0),
+		Tail:      boolArg(args, "tail"),
+	})
+}
+
+func (a *App) toolFileOutline(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := requireRepo(ctx, pid, strArg(args, "slug")); err != nil {
+		return nil, err
+	}
+	rel, err := normalisePath(strArg(args, "path"))
+	if err != nil {
+		return nil, err
+	}
+	return fileOutline(a.store, strArg(args, "slug"), rel, intArg(args, "limit", 0))
+}
+
 func (a *App) toolWriteFile(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	pid, err := resolveProjectFromArgs(args)
 	if err != nil {
@@ -1248,6 +1331,31 @@ func (a *App) toolWriteFile(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	}
 	emitFileChange(ctx, "file.changed", slug, rel)
 	return map[string]any{"file": meta}, nil
+}
+
+func (a *App) toolApplyPatch(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	slug := strArg(args, "slug")
+	if _, err := requireRepo(ctx, pid, slug); err != nil {
+		return nil, err
+	}
+	res, err := applyUnifiedPatch(a.store, slug, strArg(args, "patch"), boolArg(args, "dry_run"))
+	if err != nil {
+		return nil, err
+	}
+	if res.Applied {
+		for _, f := range res.ChangedFiles {
+			topic := "file.changed"
+			if f.Deleted {
+				topic = "file.deleted"
+			}
+			emitFileChange(ctx, topic, slug, f.Path)
+		}
+	}
+	return res, nil
 }
 
 // emitFileChange broadcasts a per-file mutation. Lightweight payload:

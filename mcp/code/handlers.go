@@ -463,26 +463,30 @@ func (a *App) httpRepoGrep(w http.ResponseWriter, r *http.Request, slug string) 
 		return
 	}
 	var body struct {
-		Pattern     string `json:"pattern"`
-		Path        string `json:"path"`
-		FilePattern string `json:"file_pattern"`
-		Regex       bool   `json:"regex"`
-		IgnoreCase  bool   `json:"ignore_case"`
-		Context     int    `json:"context"`
-		Limit       int    `json:"limit"`
+		Pattern        string `json:"pattern"`
+		Path           string `json:"path"`
+		FilePattern    string `json:"file_pattern"`
+		Regex          bool   `json:"regex"`
+		IgnoreCase     bool   `json:"ignore_case"`
+		Context        int    `json:"context"`
+		Limit          int    `json:"limit"`
+		OutputMode     string `json:"output_mode"`
+		MatchesPerFile int    `json:"matches_per_file"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		httpErr(w, http.StatusBadRequest, "invalid JSON")
 		return
 	}
 	o := GrepOptions{
-		Pattern:     body.Pattern,
-		Path:        body.Path,
-		FilePattern: body.FilePattern,
-		Regex:       body.Regex,
-		IgnoreCase:  body.IgnoreCase,
-		Context:     body.Context,
-		Limit:       body.Limit,
+		Pattern:        body.Pattern,
+		Path:           body.Path,
+		FilePattern:    body.FilePattern,
+		Regex:          body.Regex,
+		IgnoreCase:     body.IgnoreCase,
+		Context:        body.Context,
+		Limit:          body.Limit,
+		OutputMode:     body.OutputMode,
+		MatchesPerFile: body.MatchesPerFile,
 	}
 	if o.Path != "" {
 		clean, err := normalisePath(o.Path)
@@ -492,12 +496,12 @@ func (a *App) httpRepoGrep(w http.ResponseWriter, r *http.Request, slug string) 
 		}
 		o.Path = clean
 	}
-	matches, err := grepRepo(a.store, slug, o)
+	res, err := grepRepo(a.store, slug, o)
 	if err != nil {
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	httpJSON(w, map[string]any{"matches": matches, "count": len(matches)})
+	httpJSON(w, res)
 }
 
 // ─── Import / export ──────────────────────────────────────────────
