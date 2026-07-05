@@ -2,17 +2,15 @@ package main
 
 import (
 	"encoding/json"
-	"errors"
 	"net/http"
-	"strconv"
 	"strings"
+
+	sdk "github.com/apteva/app-sdk"
 )
 
 // REST surface — mirror of the MCP tools, used by:
 //   • the panel (browser → /api/apps/routes/api/routes/* with session auth)
-//   • apteva-server's route cache (server → same endpoints with API key auth)
-//   • sidecars that prefer REST over CallApp (the platform middleware
-//     forwards X-Apteva-App-Install-ID on these requests)
+//   • sidecars that prefer REST over CallApp
 //
 // Path scheme:
 //   GET    /api/routes                        list (optional ?owner=)
@@ -50,13 +48,7 @@ func (a *App) handleRouteItem(w http.ResponseWriter, r *http.Request) {
 // ─── handlers ─────────────────────────────────────────────────────
 
 func (a *App) httpListRoutes(w http.ResponseWriter, r *http.Request) {
-	var filter *int64
-	if v := r.URL.Query().Get("owner"); v != "" {
-		if n, err := strconv.ParseInt(v, 10, 64); err == nil {
-			filter = &n
-		}
-	}
-	routes, err := dbListRoutes(globalCtx.AppDB(), filter)
+	routes, err := globalCtx.PlatformAPI().ListIngressRoutes()
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -70,88 +62,53 @@ func (a *App) httpUpsertRoute(w http.ResponseWriter, r *http.Request) {
 		Target    string `json:"target"`
 		CertFQDN  string `json:"cert_fqdn"`
 		AllowHTTP bool   `json:"allow_http"`
+		TLSMode   string `json:"tls_mode"`
+		TLS       string `json:"tls"`
 		OwnerKind string `json:"owner_kind"` // panel can override; sidecars usually leave blank
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		httpErr(w, http.StatusBadRequest, "invalid json: "+err.Error())
 		return
 	}
-	owner := callerInstallID(r)
-	// owner_kind: trust the platform's middleware-set header for
-	// sidecar calls; for panel calls (owner=0) tag as "manual".
-	kind := body.OwnerKind
-	if kind == "" {
-		if owner == 0 {
-			kind = "manual"
-		} else {
-			kind = ownerKindForInstallID(globalCtx, owner)
-		}
-	}
-	in := RegisterInput{
-		Hostname:       body.Hostname,
-		Target:         body.Target,
-		OwnerInstallID: owner,
-		OwnerKind:      kind,
-		CertFQDN:       body.CertFQDN,
-		AllowHTTP:      body.AllowHTTP,
-	}
-	if in.CertFQDN == "" {
-		in.CertFQDN = in.Hostname
-	}
-	route, action, err := dbUpsertRoute(globalCtx.AppDB(), in)
+	route, err := globalCtx.PlatformAPI().ExposeIngress(sdkIngressRequest(body.Hostname, body.Target, body.OwnerKind, body.CertFQDN, body.TLSMode, body.TLS, body.AllowHTTP))
 	if err != nil {
-		switch {
-		case errors.Is(err, ErrHostnameOwnedElsewhere):
-			httpErr(w, http.StatusConflict, "hostname_in_use_by_other_owner")
-		default:
-			httpErr(w, http.StatusBadRequest, err.Error())
-		}
+		httpErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	a.emitRouteChanged(globalCtx, action, route)
-	httpJSON(w, map[string]any{"route": route, "action": action})
+	httpJSON(w, routeResponse(route, "exposed"))
 }
 
 func (a *App) httpGetRoute(w http.ResponseWriter, r *http.Request, hostname string) {
-	route, err := dbGetRouteByHostname(globalCtx.AppDB(), hostname)
+	routes, err := globalCtx.PlatformAPI().ListIngressRoutes()
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	if route == nil {
-		httpErr(w, http.StatusNotFound, "route not found")
-		return
-	}
-	httpJSON(w, map[string]any{"route": route})
-}
-
-func (a *App) httpDeleteRoute(w http.ResponseWriter, r *http.Request, hostname string) {
-	owner := callerInstallID(r)
-	removed, err := dbDeleteRouteByHostname(globalCtx.AppDB(), hostname, owner)
-	if err != nil {
-		switch {
-		case errors.Is(err, ErrNotOwner):
-			// For the panel (owner=0) we want to allow deleting ANY route —
-			// the panel is admin UI. We re-attempt with the route's actual
-			// owner so the schema check still happens but the panel can
-			// clean up.
-			if owner == 0 {
-				existing, _ := dbGetRouteByHostname(globalCtx.AppDB(), hostname)
-				if existing != nil {
-					removed, err = dbDeleteRouteByHostname(globalCtx.AppDB(), hostname, existing.OwnerInstallID)
-				}
-			}
-			if err != nil {
-				httpErr(w, http.StatusForbidden, "not_owner")
-				return
-			}
-		default:
-			httpErr(w, http.StatusInternalServerError, err.Error())
+	for i := range routes {
+		if strings.EqualFold(routes[i].Hostname, hostname) {
+			httpJSON(w, routeResponse(&routes[i], ""))
 			return
 		}
 	}
-	if removed {
-		a.emitRouteChanged(globalCtx, "removed", &Route{Hostname: hostname, OwnerInstallID: owner})
+	httpErr(w, http.StatusNotFound, "route not found")
+}
+
+func (a *App) httpDeleteRoute(w http.ResponseWriter, r *http.Request, hostname string) {
+	if err := globalCtx.PlatformAPI().UnexposeIngress(hostname); err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
 	}
-	httpJSON(w, map[string]any{"removed": removed})
+	httpJSON(w, map[string]any{"removed": true, "hostname": strings.ToLower(strings.TrimSpace(hostname))})
+}
+
+func sdkIngressRequest(hostname, target, ownerKind, certFQDN, tlsMode, tls string, allowHTTP bool) sdk.IngressExposeRequest {
+	return sdk.IngressExposeRequest{
+		Hostname:  hostname,
+		Target:    target,
+		OwnerKind: firstNonEmpty(ownerKind, "routes"),
+		CertFQDN:  certFQDN,
+		TLSMode:   tlsMode,
+		TLS:       tls,
+		AllowHTTP: allowHTTP,
+	}
 }

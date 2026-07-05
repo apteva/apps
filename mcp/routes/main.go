@@ -1,10 +1,8 @@
-// Apteva Routes v0.1.0 — hostname-based routing for the install.
+// Apteva Routes — public hostname control for Apteva.
 //
-// This sidecar owns the table mapping public hostnames
-// (blog.example.com) to local backend targets (http://127.0.0.1:7100).
-// Apps register routes via routes_register; apteva-server reads this
-// table and reverse-proxies inbound traffic. The data lives here so
-// the platform stays agnostic to which apps want public hostnames.
+// The public tools expose a stable app-level API while the actual
+// routing table and TLS lifecycle live in apteva-server's native
+// ingress system.
 //
 // Boundary with apteva-server: this app is the source of truth for
 // the routing table. Apteva-server holds an in-memory cache that
@@ -39,27 +37,28 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: routes
 display_name: Routes
-version: 0.4.0
+version: 0.5.0
 description: |
-  Hostname-based routing for Apteva. Owns the table mapping public
-  hostnames to local backend targets. Apps register routes; apteva-
-  server reads them and reverse-proxies inbound traffic.
+  Public hostname control for Apteva. Routes exposes a stable app-level
+  API for registering hostnames and delegates the actual routing and TLS
+  ownership to apteva-server's native ingress system.
 
-  Optional — uninstall this app and the platform keeps working;
-  hostname routing simply stops, the server falls back to its
-  existing path-based routing for everything.
+  Apps can keep calling routes_register/routes_unregister without
+  learning the lower-level PlatformAPI ingress callbacks directly.
 author: Apteva
 scopes: [global]
 requires:
   permissions:
     - db.write.app
+    - platform.ingress.read
+    - platform.ingress.write
 provides:
   http_routes:
     - prefix: /
   mcp_tools:
-    - { name: routes_register,   description: "Register a hostname → target route (target is http(s)://host:port or app://<name>, live-resolved). Idempotent on (hostname, target) from the same owner. Args: hostname, target, cert_fqdn?, allow_http?." }
-    - { name: routes_unregister, description: "Remove a route by hostname. Caller must own it. Args: hostname." }
-    - { name: routes_list,       description: "List routes. Args: owner_install_id? (filter)." }
+    - { name: routes_register,   description: "Register a hostname → target route through server-native ingress. Args: hostname, target, cert_fqdn?, tls_mode?, allow_http?." }
+    - { name: routes_unregister, description: "Remove a route by hostname. Args: hostname." }
+    - { name: routes_list,       description: "List routes owned by this Routes install." }
     - { name: routes_get,        description: "Fetch one route by hostname. Args: hostname." }
   ui_panels:
     - { slot: project.page, label: "Routes", icon: route, entry: /ui/RoutesPanel.mjs }

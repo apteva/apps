@@ -2,21 +2,15 @@ schema: apteva-app/v1
 
 name: routes
 display_name: Routes
-version: 0.4.0
+version: 0.5.0
 description: |
-  Hostname-based routing for Apteva. Owns the table mapping public
-  hostnames (blog.example.com) to local backend targets
-  (http://127.0.0.1:7100). Apps register routes via routes_register;
-  apteva-server reads this table and reverse-proxies inbound traffic.
+  Public hostname control for Apteva. Routes exposes a stable app-level
+  API for registering hostnames such as app.example.com or
+  customer.cloud.example.com and delegates the actual routing and TLS
+  ownership to apteva-server's native ingress system.
 
-  Optional — uninstall this app and the platform keeps working;
-  hostname routing simply stops, the server falls back to its
-  existing path-based routing for everything.
-
-  Works identically for cloud installs (browser → public IP →
-  apteva-server) and tunnel installs (browser → cloudflared →
-  apteva-server). The exposure mechanism doesn't matter — apteva-
-  server is always the routing point.
+  Apps can keep calling routes_register/routes_unregister without
+  learning the lower-level PlatformAPI ingress callbacks directly.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/routes
@@ -29,16 +23,15 @@ min_apteva_version: "0.10.0"
 requires:
   permissions:
     - db.write.app
-  # v0.2 will add platform.events.subscribe for auto-orphan cleanup
-  # when an install is uninstalled. v0.1 defers this — orphans show
-  # in the panel; the user removes them by hand.
+    - platform.ingress.read
+    - platform.ingress.write
 
 provides:
   http_routes:
     - prefix: /
   mcp_tools:
     - name: routes_register
-      description: Register a hostname → target route. target is http(s)://host:port or app://<name> (live-resolved sidecar). Idempotent on (hostname, target) from the same owner.
+      description: Register a hostname → target route through server-native ingress. target is http(s)://host:port or app://<name>.
     - name: routes_unregister
       description: Remove a route by hostname. Caller must own it (errors if not).
     - name: routes_list

@@ -2,53 +2,44 @@ package main
 
 import (
 	"errors"
-	"fmt"
+	"strings"
 
 	sdk "github.com/apteva/app-sdk"
 )
 
-// MCPTools — agent-facing surface. Each tool's REST twin is in
-// handlers.go; the underlying logic in store.go is shared between
-// them. owner_install_id comes from the caller's context (panel =
-// 0, sidecar = its install id), not from MCP args, so the agent
-// can't fake ownership.
+// MCPTools exposes the stable app-level routing API. The implementation
+// delegates to apteva-server's native ingress callbacks so the server
+// remains the source of truth for routing/TLS.
 
 func (a *App) MCPTools() []sdk.Tool {
 	return []sdk.Tool{
 		{
 			Name: "routes_register",
-			Description: "Register a hostname → target route. Idempotent on (hostname, target) from the same owner. " +
-				"Sidecars must pass their own install id as owner_install_id (read from APTEVA_INSTALL_ID env); " +
-				"the platform doesn't yet forward caller identity through CallApp. Args: hostname (req), " +
-				"target (req — http(s)://host:port for a literal backend, OR app://<name>[/prefix] to front an " +
-				"installed app by name; apteva-server resolves app:// to the app's live sidecar port per request, " +
-				"so it survives sidecar restarts), owner_install_id (req — pass APTEVA_INSTALL_ID), " +
-				"owner_kind? ('deploy' | 'code' | etc), cert_fqdn? (default = hostname; pass a wildcard to share certs), " +
-				"allow_http? (default false; true = serve plain HTTP without 301 to HTTPS).",
+			Description: "Register a hostname → target route through server-native ingress. " +
+				"Args: hostname (req), target (req — http(s)://host:port or app://<name>[/prefix]), " +
+				"owner_kind?, cert_fqdn?, tls_mode? ('auto' default or 'off'), allow_http?.",
 			InputSchema: schemaObject(map[string]any{
-				"hostname":         map[string]any{"type": "string"},
-				"target":           map[string]any{"type": "string"},
-				"owner_install_id": map[string]any{"type": "integer"},
-				"owner_kind":       map[string]any{"type": "string"},
-				"cert_fqdn":        map[string]any{"type": "string"},
-				"allow_http":       map[string]any{"type": "boolean"},
-			}, []string{"hostname", "target", "owner_install_id"}),
+				"hostname":   map[string]any{"type": "string"},
+				"target":     map[string]any{"type": "string"},
+				"owner_kind": map[string]any{"type": "string"},
+				"cert_fqdn":  map[string]any{"type": "string"},
+				"tls_mode":   map[string]any{"type": "string"},
+				"tls":        map[string]any{"type": "string"},
+				"allow_http": map[string]any{"type": "boolean"},
+			}, []string{"hostname", "target"}),
 			Handler: a.toolRoutesRegister,
 		},
 		{
-			Name: "routes_unregister",
-			Description: "Remove a route by hostname. Caller must own it (errors if not). Sidecars pass their " +
-				"own install id as owner_install_id from APTEVA_INSTALL_ID. Args: hostname (req), " +
-				"owner_install_id (req).",
+			Name:        "routes_unregister",
+			Description: "Remove a server-native ingress route owned by this Routes install. Args: hostname.",
 			InputSchema: schemaObject(map[string]any{
-				"hostname":         map[string]any{"type": "string"},
-				"owner_install_id": map[string]any{"type": "integer"},
-			}, []string{"hostname", "owner_install_id"}),
+				"hostname": map[string]any{"type": "string"},
+			}, []string{"hostname"}),
 			Handler: a.toolRoutesUnregister,
 		},
 		{
 			Name:        "routes_list",
-			Description: "List routes. Args: owner_install_id? (filter to one owner).",
+			Description: "List server-native ingress routes owned by this Routes install.",
 			InputSchema: schemaObject(map[string]any{
 				"owner_install_id": map[string]any{"type": "integer"},
 			}, nil),
@@ -68,25 +59,15 @@ func (a *App) MCPTools() []sdk.Tool {
 // ─── handlers ─────────────────────────────────────────────────────
 
 func (a *App) toolRoutesRegister(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	in, err := registerInputFromArgs(args)
+	req, err := ingressExposeRequestFromArgs(args)
 	if err != nil {
 		return nil, err
 	}
-	if in.OwnerInstallID == 0 {
-		return nil, errors.New("owner_install_id required (sidecars: pass APTEVA_INSTALL_ID; manual entries should use the REST endpoint)")
-	}
-	if in.OwnerKind == "" {
-		in.OwnerKind = ownerKindForInstallID(ctx, in.OwnerInstallID)
-	}
-	route, action, err := dbUpsertRoute(ctx.AppDB(), in)
+	route, err := ctx.PlatformAPI().ExposeIngress(req)
 	if err != nil {
-		if errors.Is(err, ErrHostnameOwnedElsewhere) {
-			return nil, fmt.Errorf("hostname_in_use_by_other_owner: %s already claimed by another install", in.Hostname)
-		}
 		return nil, err
 	}
-	a.emitRouteChanged(ctx, action, route)
-	return map[string]any{"route": route, "action": action}, nil
+	return routeResponse(route, "exposed"), nil
 }
 
 func (a *App) toolRoutesUnregister(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -94,35 +75,14 @@ func (a *App) toolRoutesUnregister(ctx *sdk.AppCtx, args map[string]any) (any, e
 	if host == "" {
 		return nil, errors.New("hostname required")
 	}
-	owner := int64(intArg(args, "owner_install_id", 0))
-	if owner == 0 {
-		return nil, errors.New("owner_install_id required")
-	}
-	removed, err := dbDeleteRouteByHostname(ctx.AppDB(), host, owner)
-	if err != nil {
-		if errors.Is(err, ErrNotOwner) {
-			return nil, errors.New("not_owner: caller does not own this route")
-		}
+	if err := ctx.PlatformAPI().UnexposeIngress(host); err != nil {
 		return nil, err
 	}
-	if removed {
-		a.emitRouteChanged(ctx, "removed", &Route{Hostname: host, OwnerInstallID: owner})
-	}
-	return map[string]any{"removed": removed}, nil
+	return map[string]any{"removed": true, "hostname": strings.ToLower(strings.TrimSpace(host))}, nil
 }
 
 func (a *App) toolRoutesList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	var filter *int64
-	if v, ok := args["owner_install_id"]; ok {
-		switch n := v.(type) {
-		case float64:
-			id := int64(n)
-			filter = &id
-		case int64:
-			filter = &n
-		}
-	}
-	rows, err := dbListRoutes(ctx.AppDB(), filter)
+	rows, err := ctx.PlatformAPI().ListIngressRoutes()
 	if err != nil {
 		return nil, err
 	}
@@ -134,14 +94,70 @@ func (a *App) toolRoutesGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if host == "" {
 		return nil, errors.New("hostname required")
 	}
-	r, err := dbGetRouteByHostname(ctx.AppDB(), host)
+	rows, err := ctx.PlatformAPI().ListIngressRoutes()
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"route": r}, nil
+	host = strings.ToLower(strings.TrimSpace(host))
+	for i := range rows {
+		if strings.EqualFold(rows[i].Hostname, host) {
+			return routeResponse(&rows[i], ""), nil
+		}
+	}
+	return map[string]any{"route": nil, "found": false}, nil
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────
+
+func ingressExposeRequestFromArgs(args map[string]any) (sdk.IngressExposeRequest, error) {
+	req := sdk.IngressExposeRequest{
+		Hostname:  strArg(args, "hostname"),
+		Target:    strArg(args, "target"),
+		OwnerKind: firstNonEmpty(strArg(args, "owner_kind"), "routes"),
+		CertFQDN:  strArg(args, "cert_fqdn"),
+		AllowHTTP: boolArg(args, "allow_http"),
+		TLSMode:   strArg(args, "tls_mode"),
+		TLS:       strArg(args, "tls"),
+	}
+	if err := validateHostname(req.Hostname); err != nil {
+		return req, err
+	}
+	if err := validateTarget(req.Target); err != nil {
+		return req, err
+	}
+	return req, nil
+}
+
+func routeResponse(route *sdk.IngressRoute, action string) map[string]any {
+	out := map[string]any{"route": route, "found": route != nil}
+	if action != "" {
+		out["action"] = action
+	}
+	if route != nil {
+		out["public_url"] = publicURLForIngress(route)
+	}
+	return out
+}
+
+func publicURLForIngress(route *sdk.IngressRoute) string {
+	if route == nil || strings.TrimSpace(route.Hostname) == "" {
+		return ""
+	}
+	scheme := "https"
+	if strings.EqualFold(route.TLSMode, "off") {
+		scheme = "http"
+	}
+	return scheme + "://" + strings.TrimSpace(route.Hostname)
+}
+
+func firstNonEmpty(vals ...string) string {
+	for _, v := range vals {
+		if v = strings.TrimSpace(v); v != "" {
+			return v
+		}
+	}
+	return ""
+}
 
 func registerInputFromArgs(args map[string]any) (RegisterInput, error) {
 	in := RegisterInput{
