@@ -18,6 +18,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 const API = "/api/apps/tapo";
 const SNAP_REFRESH_MS = 5000;
+const EVENT_HIGHLIGHT_MS = 12_000;
 
 function apiPath(installId: number, path: string) {
   const join = path.includes("?") ? "&" : "?";
@@ -60,6 +61,19 @@ interface MotionEvent {
   occurred_at: string;
   kind: string;
   snapshot_file_id?: number;
+  source?: string;
+  onvif_topic?: string;
+}
+
+interface AppBusEnvelope {
+  topic: string;
+  data: {
+    camera_id?: number;
+    occurred_at?: string;
+    kind?: string;
+    source?: string;
+    onvif_topic?: string;
+  };
 }
 
 export default function CamerasPanel({ installId, projectId }: NativePanelProps) {
@@ -68,6 +82,8 @@ export default function CamerasPanel({ installId, projectId }: NativePanelProps)
   const [showAdd, setShowAdd] = useState(false);
   const [selected, setSelected] = useState<Camera | null>(null);
   const [status, setStatus] = useState("");
+  const [latestEvents, setLatestEvents] = useState<Record<number, MotionEvent>>({});
+  const [highlighted, setHighlighted] = useState<Record<number, boolean>>({});
 
   const refresh = useCallback(async () => {
     try {
@@ -85,21 +101,38 @@ export default function CamerasPanel({ installId, projectId }: NativePanelProps)
     return () => clearInterval(t);
   }, [refresh]);
 
-  // Subscribe to tapo.motion events so the panel flashes the
-  // affected tile without waiting for the next 30s poll.
+  // Subscribe to tapo.* events so the panel can react immediately
+  // without waiting for the next cameras/motion-events poll.
   useEffect(() => {
     if (!projectId) return;
+    const timers = new Map<number, number>();
     const es = new EventSource(
       `/api/app-events/tapo?project_id=${encodeURIComponent(projectId)}`,
       { withCredentials: true },
     );
     es.onmessage = (e) => {
       try {
-        const env = JSON.parse(e.data) as { topic: string; data: { camera_id: number } };
-        if (env.topic === "tapo.motion") flashTile(env.data.camera_id);
+        const env = JSON.parse(e.data) as AppBusEnvelope;
+        if (!env.topic.startsWith("tapo.") || !env.data.camera_id) return;
+        const event = eventFromBus(env);
+        setLatestEvents((prev) => ({ ...prev, [event.camera_id]: event }));
+        setHighlighted((prev) => ({ ...prev, [event.camera_id]: true }));
+        const prevTimer = timers.get(event.camera_id);
+        if (prevTimer) window.clearTimeout(prevTimer);
+        timers.set(event.camera_id, window.setTimeout(() => {
+          setHighlighted((prev) => {
+            const next = { ...prev };
+            delete next[event.camera_id];
+            return next;
+          });
+          timers.delete(event.camera_id);
+        }, EVENT_HIGHLIGHT_MS));
       } catch {}
     };
-    return () => es.close();
+    return () => {
+      es.close();
+      timers.forEach((timer) => window.clearTimeout(timer));
+    };
   }, [projectId]);
 
   const rooms = useMemo(
@@ -148,6 +181,8 @@ export default function CamerasPanel({ installId, projectId }: NativePanelProps)
             key={c.id}
             camera={c}
             installId={installId}
+            latestEvent={latestEvents[c.id]}
+            highlighted={!!highlighted[c.id]}
             onClick={() => setSelected(c)}
           />
         ))}
@@ -169,6 +204,7 @@ export default function CamerasPanel({ installId, projectId }: NativePanelProps)
         <CameraDetail
           camera={selected}
           installId={installId}
+          latestEvent={latestEvents[selected.id]}
           onClose={() => setSelected(null)}
           onChanged={refresh}
         />
@@ -177,14 +213,30 @@ export default function CamerasPanel({ installId, projectId }: NativePanelProps)
   );
 }
 
-// ─── tile ───────────────────────────────────────────────────────────
-
-function flashTile(id: number) {
-  const el = document.querySelector(`[data-camera-tile="${id}"]`) as HTMLElement | null;
-  if (!el) return;
-  el.classList.add("ring-2", "ring-accent");
-  setTimeout(() => el.classList.remove("ring-2", "ring-accent"), 4000);
+function eventFromBus(env: AppBusEnvelope): MotionEvent {
+  const cameraID = Number(env.data.camera_id);
+  return {
+    id: -Date.now(),
+    camera_id: cameraID,
+    occurred_at: env.data.occurred_at || new Date().toISOString(),
+    kind: env.data.kind || env.topic.replace(/^tapo\./, "") || "motion",
+    source: env.data.source,
+    onvif_topic: env.data.onvif_topic,
+  };
 }
+
+function formatEventAge(iso: string) {
+  const then = new Date(iso).getTime();
+  if (!Number.isFinite(then)) return "";
+  const seconds = Math.max(0, Math.round((Date.now() - then) / 1000));
+  if (seconds < 5) return "now";
+  if (seconds < 60) return `${seconds}s ago`;
+  const minutes = Math.round(seconds / 60);
+  if (minutes < 60) return `${minutes}m ago`;
+  return new Date(iso).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+}
+
+// ─── tile ───────────────────────────────────────────────────────────
 
 function CameraImage({
   camera,
@@ -256,16 +308,31 @@ function CameraImage({
 function CameraTile({
   camera,
   installId,
+  latestEvent,
+  highlighted,
   onClick,
-}: { camera: Camera; installId: number; onClick: () => void }) {
+}: {
+  camera: Camera;
+  installId: number;
+  latestEvent?: MotionEvent;
+  highlighted: boolean;
+  onClick: () => void;
+}) {
   return (
     <div
       data-camera-tile={camera.id}
       onClick={onClick}
-      className="bg-bg-elev border border-border rounded-lg overflow-hidden cursor-pointer hover:border-accent transition"
+      className={`bg-bg-elev border rounded-lg overflow-hidden cursor-pointer transition ${
+        highlighted ? "border-accent ring-2 ring-accent/60" : "border-border hover:border-accent"
+      }`}
     >
-      <div className="aspect-video bg-black flex items-center justify-center text-text-dim">
+      <div className="aspect-video bg-black flex items-center justify-center text-text-dim relative">
         <CameraImage camera={camera} installId={installId} refreshMs={SNAP_REFRESH_MS} />
+        {highlighted && latestEvent && (
+          <div className="absolute top-2 left-2 bg-accent text-bg text-xs font-medium px-2 py-1 rounded">
+            {latestEvent.kind || "motion"} detected
+          </div>
+        )}
       </div>
       <div className="px-3 py-2 flex items-center gap-2">
         <span
@@ -276,6 +343,11 @@ function CameraTile({
           <div className="text-xs text-text-dim truncate">
             {camera.room || "—"} · {camera.model || "Tapo"}
           </div>
+          {latestEvent && (
+            <div className="text-xs text-accent truncate">
+              {latestEvent.kind || "motion"} {formatEventAge(latestEvent.occurred_at)}
+            </div>
+          )}
         </div>
       </div>
     </div>
@@ -348,9 +420,16 @@ function AddCameraModal({
 function CameraDetail({
   camera,
   installId,
+  latestEvent,
   onClose,
   onChanged,
-}: { camera: Camera; installId: number; onClose: () => void; onChanged: () => void }) {
+}: {
+  camera: Camera;
+  installId: number;
+  latestEvent?: MotionEvent;
+  onClose: () => void;
+  onChanged: () => void;
+}) {
   const [events, setEvents] = useState<MotionEvent[]>([]);
   const [busy, setBusy] = useState(false);
   const caps = camera.capabilities;
@@ -361,6 +440,18 @@ function CameraDetail({
       .then(setEvents)
       .catch(() => {});
   }, [camera.id, installId]);
+
+  useEffect(() => {
+    if (!latestEvent || latestEvent.camera_id !== camera.id) return;
+    setEvents((prev) => {
+      const exists = prev.some((event) =>
+        event.id === latestEvent.id ||
+        (event.occurred_at === latestEvent.occurred_at && event.kind === latestEvent.kind),
+      );
+      if (exists) return prev;
+      return [latestEvent, ...prev].slice(0, 20);
+    });
+  }, [camera.id, latestEvent]);
 
   const ptz = async (direction: string) => {
     setBusy(true);
@@ -420,6 +511,9 @@ function CameraDetail({
                     {new Date(e.occurred_at).toLocaleString()}
                   </span>
                   <span className="text-xs">{e.kind}</span>
+                  {e.source && (
+                    <span className="text-[11px] text-text-dim">{e.source}</span>
+                  )}
                   {e.snapshot_file_id && (
                     <a
                       className="text-xs text-accent ml-auto"
