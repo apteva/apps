@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: tapo
 display_name: Tapo Cameras
-version: 0.3.4
+version: 0.3.5
 description: |
   Local-LAN control of TP-Link Tapo cameras. Pan/tilt/zoom, snapshots,
   RTSP streams, motion events, privacy + LED + night-mode toggles,

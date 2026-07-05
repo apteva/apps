@@ -186,18 +186,78 @@ function flashTile(id: number) {
   setTimeout(() => el.classList.remove("ring-2", "ring-accent"), 4000);
 }
 
+function CameraImage({
+  camera,
+  installId,
+  refreshMs,
+  className,
+}: { camera: Camera; installId: number; refreshMs: number; className?: string }) {
+  const [frameURL, setFrameURL] = useState("");
+  const currentURL = useRef("");
+
+  useEffect(() => {
+    if (!camera.online) return;
+    let stopped = false;
+    let timer: number | undefined;
+    const controller = new AbortController();
+
+    const load = async () => {
+      try {
+        const r = await fetch(apiPath(installId, `/snapshots/${camera.id}.jpg?t=${Date.now()}`), {
+          cache: "no-store",
+          signal: controller.signal,
+        });
+        if (!r.ok) throw new Error(await r.text());
+        const blob = await r.blob();
+        const url = URL.createObjectURL(blob);
+        await new Promise<void>((resolve, reject) => {
+          const img = new Image();
+          img.onload = () => resolve();
+          img.onerror = () => reject(new Error("image decode failed"));
+          img.src = url;
+        });
+        if (stopped) {
+          URL.revokeObjectURL(url);
+          return;
+        }
+        setFrameURL((prev) => {
+          if (prev) URL.revokeObjectURL(prev);
+          currentURL.current = url;
+          return url;
+        });
+      } catch {
+        // Keep the last good frame visible. The next tick will retry.
+      } finally {
+        if (!stopped) timer = window.setTimeout(load, refreshMs);
+      }
+    };
+
+    load();
+    return () => {
+      stopped = true;
+      controller.abort();
+      if (timer !== undefined) window.clearTimeout(timer);
+      if (currentURL.current) {
+        URL.revokeObjectURL(currentURL.current);
+        currentURL.current = "";
+      }
+    };
+  }, [camera.id, camera.online, installId, refreshMs]);
+
+  if (!camera.online) {
+    return <span className="text-sm">offline</span>;
+  }
+  if (!frameURL) {
+    return <span className="text-sm text-text-dim">loading…</span>;
+  }
+  return <img src={frameURL} alt={camera.name} className={className || "w-full h-full object-cover"} />;
+}
+
 function CameraTile({
   camera,
   installId,
   onClick,
 }: { camera: Camera; installId: number; onClick: () => void }) {
-  const [bust, setBust] = useState(0);
-  useEffect(() => {
-    if (!camera.online) return;
-    const t = setInterval(() => setBust((n) => n + 1), SNAP_REFRESH_MS);
-    return () => clearInterval(t);
-  }, [camera.online]);
-
   return (
     <div
       data-camera-tile={camera.id}
@@ -205,17 +265,7 @@ function CameraTile({
       className="bg-bg-elev border border-border rounded-lg overflow-hidden cursor-pointer hover:border-accent transition"
     >
       <div className="aspect-video bg-black flex items-center justify-center text-text-dim">
-        {camera.online ? (
-          <img
-            key={bust}
-            src={apiPath(installId, `/snapshots/${camera.id}.jpg?t=${bust}`)}
-            alt={camera.name}
-            className="w-full h-full object-cover"
-            onError={(e) => { (e.target as HTMLImageElement).style.display = "none"; }}
-          />
-        ) : (
-          <span className="text-sm">offline</span>
-        )}
+        <CameraImage camera={camera} installId={installId} refreshMs={SNAP_REFRESH_MS} />
       </div>
       <div className="px-3 py-2 flex items-center gap-2">
         <span
@@ -331,12 +381,9 @@ function CameraDetail({
         <div>
           <div className="aspect-video bg-black rounded overflow-hidden">
             {camera.online ? (
-              <img
-                key={camera.id}
-                src={apiPath(installId, `/streams/${camera.id}.mjpg?fps=1`)}
-                className="w-full h-full object-cover"
-                alt={camera.name}
-              />
+              <div className="w-full h-full flex items-center justify-center text-text-dim">
+                <CameraImage camera={camera} installId={installId} refreshMs={250} />
+              </div>
             ) : (
               <div className="flex items-center justify-center h-full text-text-dim">offline</div>
             )}
