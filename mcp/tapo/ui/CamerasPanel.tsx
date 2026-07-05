@@ -19,6 +19,11 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 const API = "/api/apps/tapo";
 const SNAP_REFRESH_MS = 5000;
 
+function apiPath(installId: number, path: string) {
+  const join = path.includes("?") ? "&" : "?";
+  return `${API}${path}${join}install_id=${encodeURIComponent(String(installId))}`;
+}
+
 interface NativePanelProps {
   appName: string;
   installId: number;
@@ -57,7 +62,7 @@ interface MotionEvent {
   snapshot_file_id?: number;
 }
 
-export default function CamerasPanel({ projectId }: NativePanelProps) {
+export default function CamerasPanel({ installId, projectId }: NativePanelProps) {
   const [cameras, setCameras] = useState<Camera[]>([]);
   const [room, setRoom] = useState<string>("");
   const [showAdd, setShowAdd] = useState(false);
@@ -66,13 +71,13 @@ export default function CamerasPanel({ projectId }: NativePanelProps) {
 
   const refresh = useCallback(async () => {
     try {
-      const r = await fetch(`${API}/cameras`);
+      const r = await fetch(apiPath(installId, "/cameras"));
       if (!r.ok) throw new Error(await r.text());
       setCameras(await r.json());
     } catch (e: any) {
       setStatus(`load: ${e.message}`);
     }
-  }, []);
+  }, [installId]);
 
   useEffect(() => {
     refresh();
@@ -133,11 +138,16 @@ export default function CamerasPanel({ projectId }: NativePanelProps) {
       )}
 
       <div className="flex-1 overflow-auto p-4 grid gap-4"
-           style={{ gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))" }}>
+           style={{
+             alignItems: "start",
+             gridAutoRows: "max-content",
+             gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))",
+           }}>
         {filtered.map((c) => (
           <CameraTile
             key={c.id}
             camera={c}
+            installId={installId}
             onClick={() => setSelected(c)}
           />
         ))}
@@ -150,6 +160,7 @@ export default function CamerasPanel({ projectId }: NativePanelProps) {
 
       {showAdd && (
         <AddCameraModal
+          installId={installId}
           onClose={() => setShowAdd(false)}
           onAdded={() => { setShowAdd(false); refresh(); }}
         />
@@ -157,6 +168,7 @@ export default function CamerasPanel({ projectId }: NativePanelProps) {
       {selected && (
         <CameraDetail
           camera={selected}
+          installId={installId}
           onClose={() => setSelected(null)}
           onChanged={refresh}
         />
@@ -174,14 +186,78 @@ function flashTile(id: number) {
   setTimeout(() => el.classList.remove("ring-2", "ring-accent"), 4000);
 }
 
-function CameraTile({ camera, onClick }: { camera: Camera; onClick: () => void }) {
-  const [bust, setBust] = useState(0);
+function CameraImage({
+  camera,
+  installId,
+  refreshMs,
+  className,
+}: { camera: Camera; installId: number; refreshMs: number; className?: string }) {
+  const [frameURL, setFrameURL] = useState("");
+  const currentURL = useRef("");
+
   useEffect(() => {
     if (!camera.online) return;
-    const t = setInterval(() => setBust((n) => n + 1), SNAP_REFRESH_MS);
-    return () => clearInterval(t);
-  }, [camera.online]);
+    let stopped = false;
+    let timer: number | undefined;
+    const controller = new AbortController();
 
+    const load = async () => {
+      try {
+        const r = await fetch(apiPath(installId, `/snapshots/${camera.id}.jpg?t=${Date.now()}`), {
+          cache: "no-store",
+          signal: controller.signal,
+        });
+        if (!r.ok) throw new Error(await r.text());
+        const blob = await r.blob();
+        const url = URL.createObjectURL(blob);
+        await new Promise<void>((resolve, reject) => {
+          const img = new Image();
+          img.onload = () => resolve();
+          img.onerror = () => reject(new Error("image decode failed"));
+          img.src = url;
+        });
+        if (stopped) {
+          URL.revokeObjectURL(url);
+          return;
+        }
+        setFrameURL((prev) => {
+          if (prev) URL.revokeObjectURL(prev);
+          currentURL.current = url;
+          return url;
+        });
+      } catch {
+        // Keep the last good frame visible. The next tick will retry.
+      } finally {
+        if (!stopped) timer = window.setTimeout(load, refreshMs);
+      }
+    };
+
+    load();
+    return () => {
+      stopped = true;
+      controller.abort();
+      if (timer !== undefined) window.clearTimeout(timer);
+      if (currentURL.current) {
+        URL.revokeObjectURL(currentURL.current);
+        currentURL.current = "";
+      }
+    };
+  }, [camera.id, camera.online, installId, refreshMs]);
+
+  if (!camera.online) {
+    return <span className="text-sm">offline</span>;
+  }
+  if (!frameURL) {
+    return <span className="text-sm text-text-dim">loading…</span>;
+  }
+  return <img src={frameURL} alt={camera.name} className={className || "w-full h-full object-cover"} />;
+}
+
+function CameraTile({
+  camera,
+  installId,
+  onClick,
+}: { camera: Camera; installId: number; onClick: () => void }) {
   return (
     <div
       data-camera-tile={camera.id}
@@ -189,17 +265,7 @@ function CameraTile({ camera, onClick }: { camera: Camera; onClick: () => void }
       className="bg-bg-elev border border-border rounded-lg overflow-hidden cursor-pointer hover:border-accent transition"
     >
       <div className="aspect-video bg-black flex items-center justify-center text-text-dim">
-        {camera.online ? (
-          <img
-            key={bust}
-            src={`${API}/snapshots/${camera.id}.jpg?t=${bust}`}
-            alt={camera.name}
-            className="w-full h-full object-cover"
-            onError={(e) => { (e.target as HTMLImageElement).style.display = "none"; }}
-          />
-        ) : (
-          <span className="text-sm">offline</span>
-        )}
+        <CameraImage camera={camera} installId={installId} refreshMs={SNAP_REFRESH_MS} />
       </div>
       <div className="px-3 py-2 flex items-center gap-2">
         <span
@@ -219,9 +285,10 @@ function CameraTile({ camera, onClick }: { camera: Camera; onClick: () => void }
 // ─── add modal ──────────────────────────────────────────────────────
 
 function AddCameraModal({
+  installId,
   onClose,
   onAdded,
-}: { onClose: () => void; onAdded: () => void }) {
+}: { installId: number; onClose: () => void; onAdded: () => void }) {
   const [name, setName] = useState("");
   const [ip, setIp] = useState("");
   const [room, setRoom] = useState("");
@@ -234,7 +301,7 @@ function AddCameraModal({
     setBusy(true);
     setErr("");
     try {
-      const r = await fetch(`${API}/cameras`, {
+      const r = await fetch(apiPath(installId, "/cameras"), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ name, ip, room, username: user, password: pass }),
@@ -280,27 +347,25 @@ function AddCameraModal({
 
 function CameraDetail({
   camera,
+  installId,
   onClose,
   onChanged,
-}: { camera: Camera; onClose: () => void; onChanged: () => void }) {
+}: { camera: Camera; installId: number; onClose: () => void; onChanged: () => void }) {
   const [events, setEvents] = useState<MotionEvent[]>([]);
-  const [bust, setBust] = useState(0);
   const [busy, setBusy] = useState(false);
   const caps = camera.capabilities;
 
   useEffect(() => {
-    fetch(`${API}/events?camera_id=${camera.id}&limit=20`)
+    fetch(apiPath(installId, `/motion-events?camera_id=${camera.id}&limit=20`))
       .then((r) => r.json())
       .then(setEvents)
       .catch(() => {});
-    const t = setInterval(() => setBust((n) => n + 1), 2000);
-    return () => clearInterval(t);
-  }, [camera.id]);
+  }, [camera.id, installId]);
 
   const ptz = async (direction: string) => {
     setBusy(true);
     try {
-      await fetch(`${API}/cameras/${camera.id}/ptz`, {
+      await fetch(apiPath(installId, `/cameras/${camera.id}/ptz`), {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ direction, duration_ms: 400 }),
@@ -312,16 +377,13 @@ function CameraDetail({
 
   return (
     <Modal title={camera.name} onClose={onClose} wide>
-      <div className="grid grid-cols-2 gap-4">
+      <div className="grid gap-4 lg:grid-cols-[minmax(320px,1.2fr)_minmax(260px,0.8fr)]">
         <div>
           <div className="aspect-video bg-black rounded overflow-hidden">
             {camera.online ? (
-              <img
-                key={bust}
-                src={`${API}/snapshots/${camera.id}.jpg?t=${bust}`}
-                className="w-full h-full object-cover"
-                alt={camera.name}
-              />
+              <div className="w-full h-full flex items-center justify-center text-text-dim">
+                <CameraImage camera={camera} installId={installId} refreshMs={250} />
+              </div>
             ) : (
               <div className="flex items-center justify-center h-full text-text-dim">offline</div>
             )}
@@ -345,7 +407,7 @@ function CameraDetail({
           <div className="text-text-dim">
             {camera.model} · fw {camera.firmware} · {camera.ip}
           </div>
-          <Toggles camera={camera} onChanged={onChanged} />
+          <Toggles camera={camera} installId={installId} onChanged={onChanged} />
           <div>
             <div className="text-xs text-text-dim mb-1">Recent motion</div>
             <div className="border border-border rounded max-h-64 overflow-auto">
@@ -378,9 +440,13 @@ function CameraDetail({
   );
 }
 
-function Toggles({ camera, onChanged }: { camera: Camera; onChanged: () => void }) {
+function Toggles({
+  camera,
+  installId,
+  onChanged,
+}: { camera: Camera; installId: number; onChanged: () => void }) {
   const post = async (path: string, body: any) => {
-    await fetch(`${API}/cameras/${camera.id}/${path}`, {
+    await fetch(apiPath(installId, `/cameras/${camera.id}/${path}`), {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body),
@@ -443,7 +509,8 @@ function Modal({
       onClick={onClose}
     >
       <div
-        className={`bg-bg border border-border rounded-lg p-4 ${wide ? "w-[820px]" : "w-[420px]"} max-w-full max-h-[90vh] overflow-auto`}
+        className="bg-bg border border-border rounded-lg p-4 max-h-[90vh] overflow-auto"
+        style={{ width: wide ? "min(960px, calc(100vw - 32px))" : "min(420px, calc(100vw - 32px))" }}
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center mb-3">

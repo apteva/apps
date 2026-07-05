@@ -10,41 +10,41 @@
 //
 // Wire shape (secure_passthrough — current):
 //
-//   1. POST https://{ip}/  with cnonce  → -40413 envelope carrying
-//      RSA pubkey + server nonce + device_confirm proof
+//  1. POST https://{ip}/  with cnonce  → -40413 envelope carrying
+//     RSA pubkey + server nonce + device_confirm proof
 //
-//      device_confirm = sha256(cnonce + hashedPwd + nonce).hex.upper +
-//                       nonce + cnonce
+//     device_confirm = sha256(cnonce + hashedPwd + nonce).hex.upper +
+//     nonce + cnonce
 //
-//      Try hashedPwd = sha256(password) first, fall back to md5 — the
-//      camera advertises which by which proof it returns.
+//     Try hashedPwd = sha256(password) first, fall back to md5 — the
+//     camera advertises which by which proof it returns.
 //
-//   2. POST https://{ip}/  with digest_passwd =
-//        sha256(hashedPwd + cnonce + nonce).hex.upper + cnonce + nonce
-//      → { "result":{ "stok":<token>, "start_seq":<int>, ... }, "error_code":0 }
+//  2. POST https://{ip}/  with digest_passwd =
+//     sha256(hashedPwd + cnonce + nonce).hex.upper + cnonce + nonce
+//     → { "result":{ "stok":<token>, "start_seq":<int>, ... }, "error_code":0 }
 //
-//   3. Derive AES-128 key + IV:
-//        hashedKey = sha256(cnonce + hashedPwd + nonce).hex.upper
-//        lsk = sha256("lsk" + cnonce + nonce + hashedKey)[:16]
-//        ivb = sha256("ivb" + cnonce + nonce + hashedKey)[:16]
+//  3. Derive AES-128 key + IV:
+//     hashedKey = sha256(cnonce + hashedPwd + nonce).hex.upper
+//     lsk = sha256("lsk" + cnonce + nonce + hashedKey)[:16]
+//     ivb = sha256("ivb" + cnonce + nonce + hashedKey)[:16]
 //
-//   4. Per request to /stok={stok}/ds, wrap the inner JSON in:
-//        ciphertext = AES-128-CBC(lsk, ivb, pkcs7-pad(json))
-//        envelope   = {"method":"securePassthrough",
-//                      "params":{"request": base64(ciphertext)}}
-//        Headers:
-//          Seq:      <seq>            (incremented per request)
-//          Tapo_tag: sha256(sha256(hashedPwd + cnonce).hex.upper +
-//                           json(envelope) + str(seq)).hex.upper
-//      Decrypt the response.params.response field with the same
-//      lsk/ivb to recover the inner JSON.
+//  4. Per request to /stok={stok}/ds, wrap the inner JSON in:
+//     ciphertext = AES-128-CBC(lsk, ivb, pkcs7-pad(json))
+//     envelope   = {"method":"securePassthrough",
+//     "params":{"request": base64(ciphertext)}}
+//     Headers:
+//     Seq:      <seq>            (incremented per request)
+//     Tapo_tag: sha256(sha256(hashedPwd + cnonce).hex.upper +
+//     json(envelope) + str(seq)).hex.upper
+//     Decrypt the response.params.response field with the same
+//     lsk/ivb to recover the inner JSON.
 //
 // Notes:
-//   * TLS verification disabled — self-signed internal CN. LAN-only.
-//   * AES-CBC reuses (key, iv) per request, by protocol design. The
+//   - TLS verification disabled — self-signed internal CN. LAN-only.
+//   - AES-CBC reuses (key, iv) per request, by protocol design. The
 //     Tapo_tag (HMAC-flavoured proof) is what makes per-request
 //     auth work despite the static IV.
-//   * Method names below are the camera-facing strings — keep them.
+//   - Method names below are the camera-facing strings — keep them.
 package main
 
 import (
@@ -74,13 +74,13 @@ import (
 // e.g. ptz_move asserts caps.PTZ.
 type Capabilities struct {
 	PTZ          bool `json:"ptz"`
-	PrivacyLens  bool `json:"privacy_lens"`  // physical motorised cover
+	PrivacyLens  bool `json:"privacy_lens"` // physical motorised cover
 	Siren        bool `json:"siren"`
 	NightVision  bool `json:"night_vision"`
 	StatusLED    bool `json:"status_led"`
 	MotionDetect bool `json:"motion_detect"`
-	BabyCry      bool `json:"baby_cry"`      // person+sound classifier on C2xx
-	OnvifPort    int  `json:"onvif_port"`    // 0 if not detected
+	BabyCry      bool `json:"baby_cry"`   // person+sound classifier on C2xx
+	OnvifPort    int  `json:"onvif_port"` // 0 if not detected
 }
 
 // Client is one camera's session. Holds the stok + AES key/IV +
@@ -532,10 +532,10 @@ func (c *Client) ProbeCapabilities() (*Capabilities, error) {
 // degrees, as a string — the camera rotates toward that compass
 // heading by one step.
 //
-//   right (clockwise)         = 0
-//   up    (vertical up)       = 90
-//   left  (counter-clockwise) = 180
-//   down  (vertical down)     = 270
+//	right (clockwise)         = 0
+//	up    (vertical up)       = 90
+//	left  (counter-clockwise) = 180
+//	down  (vertical down)     = 270
 //
 // durationMs is honoured by issuing additional steps until elapsed,
 // then a `stop`. Each step is small (~10° on C200/C210) so a 500ms
@@ -745,9 +745,9 @@ func (c *Client) SirenTrigger(seconds int) error {
 		"method": "do",
 		"msg_alarm": map[string]any{
 			"manual_msg_alarm": map[string]any{
-				"action":      "start",
-				"alarm_type":  "siren",
-				"alarm_mode":  []string{"sound", "light"},
+				"action":     "start",
+				"alarm_type": "siren",
+				"alarm_mode": []string{"sound", "light"},
 			},
 		},
 	})
@@ -788,7 +788,7 @@ func (c *Client) ListMotionEvents(since time.Time) ([]MotionEvent, error) {
 		params["start_time"] = strconv.FormatInt(since.Unix(), 10)
 	}
 	resp, err := c.call(map[string]any{
-		"method":  "get",
+		"method":   "get",
 		"playback": params,
 	})
 	if err != nil {

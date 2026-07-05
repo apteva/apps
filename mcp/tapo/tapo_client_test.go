@@ -35,7 +35,7 @@ func TestValidateDeviceConfirm(t *testing.T) {
 	hashedPwd := strings.ToUpper(hex.EncodeToString(sha256Sum([]byte("Apteva-Test-1"))))
 
 	confirm := strings.ToUpper(hex.EncodeToString(
-		sha256Sum([]byte(cnonce + hashedPwd + nonce)))) + nonce + cnonce
+		sha256Sum([]byte(cnonce+hashedPwd+nonce)))) + nonce + cnonce
 
 	if !validateDeviceConfirm(cnonce, hashedPwd, nonce, confirm) {
 		t.Errorf("validator rejected a hand-built valid confirm")
@@ -61,10 +61,10 @@ func TestAESRoundTrip(t *testing.T) {
 	cases := [][]byte{
 		[]byte(""),
 		[]byte("a"),
-		[]byte("0123456789abcdef"),                    // exact block
-		[]byte("0123456789abcdef!"),                   // one over
-		bytes.Repeat([]byte{0xff}, 4096),              // long
-		[]byte(`{"method":"get","device_info":{}}`),   // realistic
+		[]byte("0123456789abcdef"),                  // exact block
+		[]byte("0123456789abcdef!"),                 // one over
+		bytes.Repeat([]byte{0xff}, 4096),            // long
+		[]byte(`{"method":"get","device_info":{}}`), // realistic
 	}
 	for _, pt := range cases {
 		ct, err := aesEncrypt(key, iv, pkcs7Pad(pt, aes.BlockSize))
