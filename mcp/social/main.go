@@ -44,7 +44,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: social
 display_name: Social
-version: 0.14.56
+version: 0.14.57
 description: |
   Schedule and publish posts to your social accounts (X, Facebook,
   Instagram, LinkedIn, TikTok, YouTube, Reddit, Pinterest, Threads).
@@ -279,7 +279,7 @@ type inboxCaps struct {
 type optionField struct {
 	Name    string   `json:"name"`
 	Label   string   `json:"label"`
-	Type    string   `json:"type"` // "text" | "textarea" | "select" | "tags" | "media" | "number"
+	Type    string   `json:"type"` // "text" | "textarea" | "select" | "tags" | "media" | "number" | "boolean"
 	Options []string `json:"options,omitempty"`
 	Help    string   `json:"help,omitempty"`
 }
@@ -444,7 +444,7 @@ var platforms = map[string]platformDef{
 		PostTool:      "post_video",
 		BodyField:     "title", // logical, lifted into post_info.title
 		MediaRequired: true,
-		MediaType:     "video",
+		MediaType:     "any",
 		// TikTok's catalog has no "get_creator_info" tool (an older name
 		// that never existed); the right primitive for our profile-fetch
 		// use case is /user/info/ via get_user_info — same scope
@@ -465,6 +465,12 @@ var platforms = map[string]platformDef{
 		OptionFields: []optionField{
 			{Name: "thumbnail_frame_ms", Type: "number", Label: "Cover frame (ms)",
 				Help: "Optional video timestamp used as TikTok's cover frame."},
+			{Name: "auto_add_music", Type: "boolean", Label: "Auto add music",
+				Help: "For TikTok photo posts only. TikTok chooses recommended music; the API does not allow selecting a specific song."},
+			{Name: "photo_cover_index", Type: "number", Label: "Photo cover index",
+				Help: "For TikTok photo posts only. Zero-based index of the image used as the cover."},
+			{Name: "title", Type: "text", Label: "Photo title",
+				Help: "Optional TikTok photo title. The main post body is sent as the photo description."},
 		},
 		// TikTok exposes a "publish comment" verb but no read API for
 		// comments on others' content — leaving Comments* false until
@@ -702,7 +708,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"Each target object: {social_account_id (required), body? (required when top-level body is omitted; otherwise override text for this target), " +
 				"plus platform-specific keys for the target's platform}. " +
 				"Today: youtube accepts {title, body, visibility (public|unlisted|private), category, tags[], thumbnail_storage_id}. " +
-				"Facebook accepts {body, thumbnail_storage_id} for video posts; Instagram accepts {body, thumbnail_storage_id, thumbnail_frame_ms} for Reels; TikTok accepts {body, thumbnail_frame_ms}. " +
+				"Facebook accepts {body, thumbnail_storage_id} for video posts; Instagram accepts {body, thumbnail_storage_id, thumbnail_frame_ms} for Reels; TikTok accepts videos with {body, thumbnail_frame_ms} or photo posts with {body, title, auto_add_music, photo_cover_index}. " +
 				"Use plain platform text, not Markdown formatting; most social platforms do not render Markdown. " +
 				"Body resolution per target: target.body if set, else post-level body. Top-level body may be omitted only when every target has its own non-empty body. " +
 				"Scheduled creates are idempotent: if the same profile/account/media/body/options/time already exists, the existing post is returned or its failed scheduling is retried instead of creating a duplicate. " +
@@ -2991,7 +2997,86 @@ func (a *App) waitContainerReady(ctx *sdk.AppCtx, connID int64, containerID, pag
 	}
 }
 
-// publishTikTok drives TikTok's video publish flow.
+// publishTikTok drives TikTok's native publish flows.
+//
+// Videos use FILE_UPLOAD because TikTok gives us a temporary upload URL
+// and does not require the Apteva/storage domain to be verified. Photo
+// posts are different in TikTok's API: /post/publish/content/init/ only
+// accepts PULL_FROM_URL, so the Storage URLs must be public and the URL
+// prefix/domain must be verified in the TikTok developer app.
+func (a *App) publishTikTok(ctx *sdk.AppCtx, def platformDef, j publishJob) (string, string, error) {
+	if len(j.media) == 0 {
+		return "", "", errors.New("tiktok requires media")
+	}
+	first := j.media[0]
+	if first.IsImage() {
+		return a.publishTikTokPhotos(ctx, j)
+	}
+	if first.IsVideo() {
+		return a.publishTikTokVideo(ctx, def, j)
+	}
+	return "", "", fmt.Errorf("tiktok only accepts image or video files, got %q", first.Mime)
+}
+
+func (a *App) publishTikTokPhotos(ctx *sdk.AppCtx, j publishJob) (string, string, error) {
+	if len(j.media) > 35 {
+		return "", "", fmt.Errorf("tiktok photo posts accept at most 35 images, got %d", len(j.media))
+	}
+	images := make([]string, 0, len(j.media))
+	for i, item := range j.media {
+		if !item.IsImage() {
+			return "", "", fmt.Errorf("tiktok photo posts cannot mix images with %q media at index %d", item.Mime, i)
+		}
+		if item.URL == "" {
+			return "", "", fmt.Errorf("tiktok photo %d has no public URL", i)
+		}
+		images = append(images, item.URL)
+	}
+	coverIndex := 0
+	if n, ok := numericOption(j.options, "photo_cover_index"); ok {
+		coverIndex = int(n)
+	}
+	if coverIndex < 0 || coverIndex >= len(images) {
+		return "", "", fmt.Errorf("tiktok photo_cover_index %d out of range for %d images", coverIndex, len(images))
+	}
+	postInfo := map[string]any{
+		"description":          j.body,
+		"privacy_level":        "PUBLIC_TO_EVERYONE",
+		"brand_content_toggle": false,
+		"brand_organic_toggle": false,
+	}
+	if title := strings.TrimSpace(strOption(j.options, "title")); title != "" {
+		postInfo["title"] = title
+	}
+	if autoMusic, ok := boolOption(j.options, "auto_add_music"); ok {
+		postInfo["auto_add_music"] = autoMusic
+	}
+	input := map[string]any{
+		"post_info": postInfo,
+		"source_info": map[string]any{
+			"source":            "PULL_FROM_URL",
+			"photo_images":      images,
+			"photo_cover_index": coverIndex,
+		},
+		"post_mode":  "DIRECT_POST",
+		"media_type": "PHOTO",
+	}
+	ctx.Logger().Info("publishTikTok: init photo post", "image_count", len(images), "cover_index", coverIndex)
+	out, err := ctx.PlatformAPI().ExecuteIntegrationTool(j.connID, "post_photo", input)
+	if err != nil {
+		return "", "", fmt.Errorf("post_photo: %w", err)
+	}
+	if out == nil || !out.Success {
+		return "", "", upstreamError(out)
+	}
+	pubID := extractTikTokPublishID(out.Data)
+	if pubID == "" {
+		return "", "", fmt.Errorf("post_photo: missing publish_id in response: %s", string(out.Data))
+	}
+	return pubID, "", nil
+}
+
+// publishTikTokVideo drives TikTok's video publish flow.
 //
 // Default path: FILE_UPLOAD — TikTok hands us a temporary upload_url
 // and we PUT the video bytes there directly (no domain verification
@@ -3013,7 +3098,7 @@ func (a *App) waitContainerReady(ctx *sdk.AppCtx, connID int64, containerID, pag
 // PULL_FROM_URL path is preserved as publishTikTokPullFromURL below
 // for callers that need it (verified-domain installs that want
 // TikTok's servers to do the fetch instead of streaming through us).
-func (a *App) publishTikTok(ctx *sdk.AppCtx, def platformDef, j publishJob) (string, string, error) {
+func (a *App) publishTikTokVideo(ctx *sdk.AppCtx, def platformDef, j publishJob) (string, string, error) {
 	if len(j.media) == 0 {
 		return "", "", errors.New("tiktok requires a video")
 	}
@@ -7413,6 +7498,28 @@ func strOption(opts map[string]any, key string) string {
 		return strings.TrimSpace(s)
 	}
 	return ""
+}
+
+func boolOption(opts map[string]any, key string) (bool, bool) {
+	if opts == nil {
+		return false, false
+	}
+	switch v := opts[key].(type) {
+	case bool:
+		return v, true
+	case string:
+		s := strings.TrimSpace(strings.ToLower(v))
+		if s == "" {
+			return false, false
+		}
+		switch s {
+		case "true", "1", "yes", "on":
+			return true, true
+		case "false", "0", "no", "off":
+			return false, true
+		}
+	}
+	return false, false
 }
 
 func anySliceOption(opts map[string]any, key string) []any {

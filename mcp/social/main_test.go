@@ -118,6 +118,11 @@ func (p *recordingPlatform) CallApp(appName, tool string, input map[string]any) 
 	p.mu.Lock()
 	p.callAppCalls = append(p.callAppCalls, callAppCall{AppName: appName, Tool: tool, Input: input})
 	p.mu.Unlock()
+	if id := toInt64Loose(input["id"]); id > 0 {
+		if r, ok := p.callAppResponses[fmt.Sprintf("%s:%s:%d", appName, tool, id)]; ok {
+			return r, nil
+		}
+	}
 	if r, ok := p.callAppResponses[appName+":"+tool]; ok {
 		return r, nil
 	}
@@ -1547,6 +1552,119 @@ func TestPublishTikTok_FileUploadInit_MultiChunkMath(t *testing.T) {
 	}
 	if srcInfo["total_chunk_count"] != 3 {
 		t.Errorf("total_chunk_count = %v, want 3 (floor(100/32))", srcInfo["total_chunk_count"])
+	}
+}
+
+func TestPublishTikTok_PhotoPostInput(t *testing.T) {
+	pf := newRecordingPlatform()
+	pf.callAppResponses["storage:files_get"] = json.RawMessage(
+		`{"result":{"content":[{"type":"text","text":"{\"id\":9,\"content_type\":\"image/jpeg\",\"size_bytes\":12345}"}]}}`,
+	)
+	pf.callAppResponses["storage:files_get_url"] = json.RawMessage(
+		`{"result":{"content":[{"type":"text","text":"{\"url\":\"https://cdn.test/p.jpg\"}"}]}}`,
+	)
+	pf.executeResponses["post_photo"] = &sdk.ExecuteResult{
+		Success: true,
+		Data:    json.RawMessage(`{"data":{"publish_id":"photo_pub_1"}}`),
+	}
+	ctx := newSocialCtx(t, pf)
+	r, _ := ctx.AppDB().Exec(
+		`INSERT INTO social_accounts (project_id, platform, connection_id, display_name, status)
+		 VALUES ('test-proj', 'tiktok', 42, '@tt', 'active')`,
+	)
+	acctID, _ := r.LastInsertId()
+
+	app := &App{}
+	if _, err := app.toolPostCreate(ctx, map[string]any{
+		"body":              "photo description #fyp",
+		"media_storage_ids": []any{int64(9)},
+		"targets": []any{
+			map[string]any{
+				"social_account_id": acctID,
+				"title":             "Photo title",
+				"auto_add_music":    true,
+			},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(pf.executeCalls) != 1 || pf.executeCalls[0].Tool != "post_photo" {
+		t.Fatalf("expected one post_photo call: %+v", pf.executeCalls)
+	}
+	in := pf.executeCalls[0].Input
+	if in["post_mode"] != "DIRECT_POST" || in["media_type"] != "PHOTO" {
+		t.Fatalf("unexpected photo mode fields: %+v", in)
+	}
+	postInfo := in["post_info"].(map[string]any)
+	if postInfo["description"] != "photo description #fyp" || postInfo["title"] != "Photo title" {
+		t.Fatalf("unexpected post_info: %+v", postInfo)
+	}
+	if postInfo["privacy_level"] != "PUBLIC_TO_EVERYONE" {
+		t.Fatalf("privacy = %v, want PUBLIC_TO_EVERYONE", postInfo["privacy_level"])
+	}
+	if postInfo["auto_add_music"] != true {
+		t.Fatalf("auto_add_music not threaded: %+v", postInfo)
+	}
+	if postInfo["brand_content_toggle"] != false || postInfo["brand_organic_toggle"] != false {
+		t.Fatalf("brand toggles not set false: %+v", postInfo)
+	}
+	srcInfo := in["source_info"].(map[string]any)
+	if srcInfo["source"] != "PULL_FROM_URL" || srcInfo["photo_cover_index"] != 0 {
+		t.Fatalf("unexpected source_info: %+v", srcInfo)
+	}
+	images := srcInfo["photo_images"].([]string)
+	if len(images) != 1 || images[0] != "https://cdn.test/p.jpg" {
+		t.Fatalf("photo_images = %+v", images)
+	}
+	var status, platformPostID string
+	ctx.AppDB().QueryRow(
+		`SELECT status, COALESCE(platform_post_id,'') FROM post_targets WHERE social_account_id=? ORDER BY id DESC LIMIT 1`, acctID,
+	).Scan(&status, &platformPostID)
+	if status != "published" || platformPostID != "photo_pub_1" {
+		t.Fatalf("target = status %q platform_post_id %q", status, platformPostID)
+	}
+}
+
+func TestPublishTikTok_PhotoPostRejectsMixedMedia(t *testing.T) {
+	pf := newRecordingPlatform()
+	pf.callAppResponses["storage:files_get"] = json.RawMessage(
+		`{"result":{"content":[{"type":"text","text":"{\"id\":9,\"content_type\":\"image/jpeg\",\"size_bytes\":12345}"}]}}`,
+	)
+	pf.callAppResponses["storage:files_get_url"] = json.RawMessage(
+		`{"result":{"content":[{"type":"text","text":"{\"url\":\"https://cdn.test/p.jpg\"}"}]}}`,
+	)
+	pf.callAppResponses["storage:files_get:10"] = json.RawMessage(
+		`{"result":{"content":[{"type":"text","text":"{\"id\":10,\"content_type\":\"video/mp4\",\"size_bytes\":99999}"}]}}`,
+	)
+	pf.callAppResponses["storage:files_get_url:10"] = json.RawMessage(
+		`{"result":{"content":[{"type":"text","text":"{\"url\":\"https://cdn.test/v.mp4\"}"}]}}`,
+	)
+	ctx := newSocialCtx(t, pf)
+	r, _ := ctx.AppDB().Exec(
+		`INSERT INTO social_accounts (project_id, platform, connection_id, display_name, status)
+		 VALUES ('test-proj', 'tiktok', 42, '@tt', 'active')`,
+	)
+	acctID, _ := r.LastInsertId()
+
+	app := &App{}
+	if _, err := app.toolPostCreate(ctx, map[string]any{
+		"body":               "mixed media",
+		"social_account_ids": []any{acctID},
+		"media_storage_ids":  []any{int64(9), int64(10)},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if len(pf.executeCalls) != 0 {
+		t.Fatalf("TikTok integration should not be called for mixed media: %+v", pf.executeCalls)
+	}
+	var lastErr string
+	ctx.AppDB().QueryRow(
+		`SELECT COALESCE(last_error,'') FROM post_targets WHERE social_account_id=? ORDER BY id DESC LIMIT 1`, acctID,
+	).Scan(&lastErr)
+	if !strings.Contains(lastErr, "cannot mix images") {
+		t.Fatalf("last_error = %q, want mixed-media rejection", lastErr)
 	}
 }
 

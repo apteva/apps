@@ -135,15 +135,15 @@ interface PlatformInfo {
   provider_only?: boolean;
   // option_fields — per-platform overrides the compose dialog can
   // surface as inputs. Empty when the platform has nothing to
-  // customise (Twitter / FB / IG / LinkedIn / TikTok in v1; only
-  // YouTube exposes title / visibility / category / tags today).
+  // customise (Twitter / FB / IG / LinkedIn in v1; YouTube and
+  // TikTok expose a few platform-specific controls).
   option_fields?: OptionField[];
 }
 
 interface OptionField {
   name: string;
   label: string;
-  type: "text" | "textarea" | "select" | "tags" | "media" | "number";
+  type: "text" | "textarea" | "select" | "tags" | "media" | "number" | "boolean";
   options?: string[];
   help?: string;
 }
@@ -2085,6 +2085,23 @@ function OptionFieldInput({
           className="bg-bg-input border border-border rounded px-2 py-1.5 text-sm"
         />
       </div>
+    );
+  }
+
+  if (field.type === "boolean") {
+    return (
+      <label className="flex items-start gap-2 border border-border rounded px-2 py-2 bg-bg-input/50">
+        <input
+          type="checkbox"
+          checked={value === true}
+          onChange={(e) => onChange(e.target.checked)}
+          className="mt-0.5 w-4 h-4 accent-orange-500"
+        />
+        <span className="min-w-0">
+          <span className="block text-xs uppercase tracking-wide text-text-dim">{field.label}</span>
+          {field.help && <span className="block text-text-dim text-[10px] leading-snug">{field.help}</span>}
+        </span>
+      </label>
     );
   }
 
