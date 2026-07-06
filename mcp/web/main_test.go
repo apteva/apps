@@ -438,6 +438,76 @@ func TestRankRegionsDedupesNestedParent(t *testing.T) {
 	}
 }
 
+func TestRankRegionsDedupesExactDuplicateRegions(t *testing.T) {
+	regions := []browserRegion{
+		{
+			ID:       "hero_a",
+			Tag:      "section",
+			Heading:  "Invest in real estate with confidence",
+			Text:     "Discover a platform for investing through property-backed loans.",
+			Selector: "section.hero",
+			Rect:     browserRect{X: 0, Y: 72, Width: 1350, Height: 512},
+		},
+		{
+			ID:       "hero_b",
+			Tag:      "section",
+			Heading:  "Invest in real estate with confidence",
+			Text:     "Discover a platform for investing through property-backed loans.",
+			Selector: "section.hero",
+			Rect:     browserRect{X: 0, Y: 72, Width: 1350, Height: 512},
+		},
+		{
+			ID:       "loans",
+			Tag:      "section",
+			Heading:  "Loans backed by real estate",
+			Text:     "Investors can review secured loans and expected returns.",
+			Selector: "section.loans",
+			Rect:     browserRect{X: 0, Y: 1300, Width: 1350, Height: 480},
+		},
+	}
+
+	got := rankRegions(regions, "real estate platform loans investors", 3)
+	if len(got) != 2 {
+		t.Fatalf("ranked len=%d, want duplicate removed: %#v", len(got), got)
+	}
+	seen := map[string]bool{}
+	for _, r := range got {
+		if seen[r.Region.Selector] {
+			t.Fatalf("duplicate selector kept: %#v", got)
+		}
+		seen[r.Region.Selector] = true
+	}
+}
+
+func TestRankRegionsPrefersSectionOverStandaloneHeading(t *testing.T) {
+	regions := []browserRegion{
+		{
+			ID:       "heading",
+			Tag:      "h3",
+			Heading:  "All Estateguru loans are backed by real estate and secured with a mortgage in favor of our investors.",
+			Text:     "All Estateguru loans are backed by real estate and secured with a mortgage in favor of our investors.",
+			Selector: "section.loans h3",
+			Rect:     browserRect{X: 20, Y: 3001, Width: 595, Height: 120},
+		},
+		{
+			ID:       "section",
+			Tag:      "section",
+			Heading:  "Invest in real estate with confidence",
+			Text:     "A pioneer in real estate investing. Discover a platform for investing through property-backed loans.",
+			Selector: "section.hero",
+			Rect:     browserRect{X: 0, Y: 72, Width: 1350, Height: 512},
+		},
+	}
+
+	got := rankRegions(regions, "real estate platform loans investors", 2)
+	if len(got) == 0 {
+		t.Fatalf("ranked len=0")
+	}
+	if got[0].Region.ID != "section" {
+		t.Fatalf("first region=%s, want section; ranked=%#v", got[0].Region.ID, got)
+	}
+}
+
 func TestRankRegionsPenalizesFooterNavigation(t *testing.T) {
 	regions := []browserRegion{
 		{

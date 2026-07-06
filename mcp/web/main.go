@@ -39,7 +39,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: web
 display_name: Web
-version: 0.1.11
+version: 0.1.12
 description: Browser-native web intelligence for agents.
 author: Apteva
 scopes: [project, global]
@@ -1478,6 +1478,12 @@ func regionSpecificityScore(r browserRegion) float64 {
 	if area > 0 && area < 700000 && height >= 80 && height <= 900 {
 		score += 1.25
 	}
+	if isLeafTextRegion(r) {
+		score -= 4
+		if r.Rect.Width < 720 || r.Rect.Height < 180 {
+			score -= 1
+		}
+	}
 	selector := strings.ToLower(r.Selector)
 	if strings.Contains(selector, "card") || strings.Contains(selector, "tile") || strings.Contains(selector, "product") || strings.Contains(selector, "pricing") {
 		score += 0.5
@@ -1488,11 +1494,35 @@ func regionSpecificityScore(r browserRegion) float64 {
 	return score
 }
 
+func isLeafTextRegion(r browserRegion) bool {
+	switch strings.ToLower(r.Tag) {
+	case "h1", "h2", "h3", "h4", "h5", "h6", "p", "span", "strong", "em", "small", "a":
+		return true
+	default:
+		return false
+	}
+}
+
 func dedupeRankedRegions(in []rankedRegion) []rankedRegion {
 	if len(in) <= 1 {
 		return in
 	}
 	suppressed := make([]bool, len(in))
+	for i := range in {
+		if suppressed[i] {
+			continue
+		}
+		for j := i + 1; j < len(in); j++ {
+			if suppressed[j] || !duplicateRegion(in[i].Region, in[j].Region) {
+				continue
+			}
+			if in[j].Score > in[i].Score {
+				suppressed[i] = true
+				break
+			}
+			suppressed[j] = true
+		}
+	}
 	for i := range in {
 		for j := range in {
 			if i == j || suppressed[i] {
@@ -1515,6 +1545,28 @@ func dedupeRankedRegions(in []rankedRegion) []rankedRegion {
 		}
 	}
 	return out
+}
+
+func duplicateRegion(a, b browserRegion) bool {
+	if strings.TrimSpace(a.Selector) != "" && a.Selector == b.Selector {
+		return rectsNearEqual(a.Rect, b.Rect, 2)
+	}
+	if !rectsNearEqual(a.Rect, b.Rect, 2) {
+		return false
+	}
+	return normalizeRegionText(a.Heading) == normalizeRegionText(b.Heading) &&
+		normalizeRegionText(a.Text) == normalizeRegionText(b.Text)
+}
+
+func rectsNearEqual(a, b browserRect, tolerance float64) bool {
+	return math.Abs(a.X-b.X) <= tolerance &&
+		math.Abs(a.Y-b.Y) <= tolerance &&
+		math.Abs(a.Width-b.Width) <= tolerance &&
+		math.Abs(a.Height-b.Height) <= tolerance
+}
+
+func normalizeRegionText(s string) string {
+	return strings.Join(strings.Fields(strings.ToLower(strings.TrimSpace(s))), " ")
 }
 
 func regionArea(r browserRegion) float64 {
