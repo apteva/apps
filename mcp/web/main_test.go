@@ -500,8 +500,8 @@ func TestRankRegionsPrefersSectionOverStandaloneHeading(t *testing.T) {
 	}
 
 	got := rankRegions(regions, "real estate platform loans investors", 2)
-	if len(got) == 0 {
-		t.Fatalf("ranked len=0")
+	if len(got) != 1 {
+		t.Fatalf("ranked len=%d, want only section; ranked=%#v", len(got), got)
 	}
 	if got[0].Region.ID != "section" {
 		t.Fatalf("first region=%s, want section; ranked=%#v", got[0].Region.ID, got)

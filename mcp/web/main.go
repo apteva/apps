@@ -39,7 +39,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: web
 display_name: Web
-version: 0.1.12
+version: 0.1.13
 description: Browser-native web intelligence for agents.
 author: Apteva
 scopes: [project, global]
@@ -1407,6 +1407,9 @@ func rankRegions(regions []browserRegion, query string, limit int) []rankedRegio
 		if strings.TrimSpace(text) == "" || r.Rect.Width <= 0 || r.Rect.Height <= 0 {
 			continue
 		}
+		if isSmallLeafTextRegion(r) && !(querySuggestsContact(tokens) && strings.Contains(text, "@")) {
+			continue
+		}
 		score := 0.0
 		var hits []string
 		for _, tok := range tokens {
@@ -1501,6 +1504,10 @@ func isLeafTextRegion(r browserRegion) bool {
 	default:
 		return false
 	}
+}
+
+func isSmallLeafTextRegion(r browserRegion) bool {
+	return isLeafTextRegion(r) && (r.Rect.Width < 720 || r.Rect.Height < 180)
 }
 
 func dedupeRankedRegions(in []rankedRegion) []rankedRegion {
