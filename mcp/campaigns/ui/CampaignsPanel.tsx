@@ -749,7 +749,7 @@ function CampaignActions({ c, onEdit, onClone, onSchedule, onStartNow, onPause, 
       {editable && <ActBtn onClick={onEdit}>Edit</ActBtn>}
       <ActBtn onClick={onClone}>Clone</ActBtn>
       <ActBtn onClick={onSendTest}>Test send</ActBtn>
-      <ActBtn onClick={onReconcile}>Refresh stats</ActBtn>
+      <ActBtn onClick={onReconcile}>Repair from Messaging</ActBtn>
       {c.status === "draft" && <ActBtn onClick={onSchedule}>Schedule</ActBtn>}
       {startable && <ActBtn primary onClick={onStartNow}>Start now</ActBtn>}
       {c.status === "sending" && <ActBtn onClick={onPause}>Pause</ActBtn>}
