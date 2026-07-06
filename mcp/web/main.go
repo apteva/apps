@@ -39,7 +39,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: web
 display_name: Web
-version: 0.1.13
+version: 0.1.14
 description: Browser-native web intelligence for agents.
 author: Apteva
 scopes: [project, global]
@@ -1557,6 +1557,11 @@ func dedupeRankedRegions(in []rankedRegion) []rankedRegion {
 func duplicateRegion(a, b browserRegion) bool {
 	if strings.TrimSpace(a.Selector) != "" && a.Selector == b.Selector {
 		return rectsNearEqual(a.Rect, b.Rect, 2)
+	}
+	if overlapRatio(a, b) > 0.94 &&
+		normalizeRegionText(a.Heading) != "" &&
+		normalizeRegionText(a.Heading) == normalizeRegionText(b.Heading) {
+		return true
 	}
 	if !rectsNearEqual(a.Rect, b.Rect, 2) {
 		return false

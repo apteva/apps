@@ -479,6 +479,32 @@ func TestRankRegionsDedupesExactDuplicateRegions(t *testing.T) {
 	}
 }
 
+func TestRankRegionsDedupesNearIdenticalNestedRegions(t *testing.T) {
+	regions := []browserRegion{
+		{
+			ID:       "outer",
+			Tag:      "section",
+			Heading:  "Mortgage-backed investments",
+			Text:     "Mortgage-backed investments. All loans are backed by real estate and secured with a mortgage in favor of investors.",
+			Selector: "section.outer",
+			Rect:     browserRect{X: 0, Y: 2807, Width: 1350, Height: 604},
+		},
+		{
+			ID:       "inner",
+			Tag:      "section",
+			Heading:  "Mortgage-backed investments",
+			Text:     "Mortgage-backed investments. All loans are backed by real estate and secured with a mortgage in favor of investors.",
+			Selector: "section.outer section.inner",
+			Rect:     browserRect{X: 10, Y: 2817, Width: 1330, Height: 584},
+		},
+	}
+
+	got := rankRegions(regions, "real estate investment loans investors", 3)
+	if len(got) != 1 {
+		t.Fatalf("ranked len=%d, want one near-duplicate representative: %#v", len(got), got)
+	}
+}
+
 func TestRankRegionsPrefersSectionOverStandaloneHeading(t *testing.T) {
 	regions := []browserRegion{
 		{

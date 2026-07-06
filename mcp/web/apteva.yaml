@@ -2,12 +2,14 @@ schema: apteva-app/v1
 
 name: web
 display_name: Web
-version: 0.1.13
+version: 0.1.14
 description: |
   Browser-native web intelligence for agents. Provides JSON-first search,
   extraction, crawl, map, research, and snapshot tools using the computer app
   as the required browser/session backend, with storage for durable artifacts.
 
+  v0.1.14 dedupes near-identical nested smart snapshot regions with the same
+  heading and very high visual overlap.
   v0.1.13 excludes small standalone text nodes from smart visual crops unless
   they contain contact emails for contact-style queries.
   v0.1.12 improves smart snapshot ranking by deduping exact duplicate DOM
