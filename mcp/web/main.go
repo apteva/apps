@@ -1,4 +1,4 @@
-// Web v0.1.6 — browser-backed web intelligence.
+// Web v0.1.7 — browser-backed web intelligence.
 //
 // The app requires computer for session lifecycle, rendered extraction, and
 // screenshots. It opens a browser before search/extract/crawl/map/research page
@@ -19,6 +19,7 @@ import (
 	"fmt"
 	"image"
 	"image/draw"
+	_ "image/jpeg"
 	"image/png"
 	"io"
 	"math"
@@ -38,7 +39,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: web
 display_name: Web
-version: 0.1.6
+version: 0.1.7
 description: Browser-native web intelligence for agents.
 author: Apteva
 scopes: [project, global]

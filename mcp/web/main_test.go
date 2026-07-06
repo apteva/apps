@@ -8,6 +8,7 @@ import (
 	"image"
 	"image/color"
 	"image/draw"
+	"image/jpeg"
 	"image/png"
 	"net/http"
 	"net/http/httptest"
@@ -298,6 +299,35 @@ func TestSmartSnapshotUsesRegionExtraction(t *testing.T) {
 	upload := plat.lastCall("storage", "files_upload")
 	if upload["content_type"] != "image/png" {
 		t.Fatalf("content_type=%v", upload["content_type"])
+	}
+}
+
+func TestCropScreenshotAcceptsJPEGInput(t *testing.T) {
+	img := image.NewRGBA(image.Rect(0, 0, 120, 80))
+	draw.Draw(img, img.Bounds(), &image.Uniform{C: color.RGBA{R: 12, G: 34, B: 56, A: 255}}, image.Point{}, draw.Src)
+	var src bytes.Buffer
+	if err := jpeg.Encode(&src, img, &jpeg.Options{Quality: 85}); err != nil {
+		t.Fatalf("encode jpeg: %v", err)
+	}
+
+	cropped, w, h, err := cropScreenshotPNG(base64.StdEncoding.EncodeToString(src.Bytes()), browserRect{
+		X:      10,
+		Y:      10,
+		Width:  40,
+		Height: 30,
+	}, 120, 80, 0)
+	if err != nil {
+		t.Fatalf("crop jpeg: %v", err)
+	}
+	raw, err := base64.StdEncoding.DecodeString(cropped)
+	if err != nil {
+		t.Fatalf("decode crop: %v", err)
+	}
+	if w != 40 || h != 30 {
+		t.Fatalf("crop size=%dx%d, want 40x30", w, h)
+	}
+	if string(raw[:8]) != "\x89PNG\r\n\x1a\n" {
+		t.Fatalf("crop output is not PNG: % x", raw[:8])
 	}
 }
 

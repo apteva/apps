@@ -2,12 +2,13 @@ schema: apteva-app/v1
 
 name: web
 display_name: Web
-version: 0.1.6
+version: 0.1.7
 description: |
   Browser-native web intelligence for agents. Provides JSON-first search,
   extraction, crawl, map, research, and snapshot tools using the computer app
   as the required browser/session backend, with storage for durable artifacts.
 
+  v0.1.7 accepts JPEG browser screenshots when producing smart PNG crops.
   v0.1.6 adds smart query-matched snapshot crops using rendered DOM regions
   from Computer. v0.1.5 adds Google search and makes it the default engine. v0.1.4 makes
   search parse the live browser DOM and report blocked search
