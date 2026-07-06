@@ -1,4 +1,4 @@
-// Web v0.1.8 — browser-backed web intelligence.
+// Web v0.1.9 — browser-backed web intelligence.
 //
 // The app requires computer for session lifecycle, rendered extraction, and
 // screenshots. It opens a browser before search/extract/crawl/map/research page
@@ -39,7 +39,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: web
 display_name: Web
-version: 0.1.8
+version: 0.1.9
 description: Browser-native web intelligence for agents.
 author: Apteva
 scopes: [project, global]
@@ -1276,8 +1276,10 @@ func rankRegions(regions []browserRegion, query string, limit int) []rankedRegio
 			score += 0.75
 		}
 		switch r.Tag {
-		case "form", "table", "section", "article", "footer":
+		case "form", "table", "section", "article":
 			score += 0.75
+		case "footer", "nav":
+			score -= 3
 		case "main":
 			score -= 1.5
 		}
@@ -1329,6 +1331,9 @@ func regionSpecificityScore(r browserRegion) float64 {
 	selector := strings.ToLower(r.Selector)
 	if strings.Contains(selector, "card") || strings.Contains(selector, "tile") || strings.Contains(selector, "product") || strings.Contains(selector, "pricing") {
 		score += 0.5
+	}
+	if strings.Contains(selector, "footer") || strings.Contains(selector, "nav") {
+		score -= 2
 	}
 	return score
 }

@@ -401,6 +401,34 @@ func TestRankRegionsDedupesNestedParent(t *testing.T) {
 	}
 }
 
+func TestRankRegionsPenalizesFooterNavigation(t *testing.T) {
+	regions := []browserRegion{
+		{
+			ID:       "footer",
+			Tag:      "footer",
+			Text:     "Investing Loans Bonds ETFs Real estate Crypto Smart Cash Fees Company Legal documents",
+			Selector: "footer.m-u-padding-top-6",
+			Rect:     browserRect{X: 0, Y: 7200, Width: 1350, Height: 780},
+		},
+		{
+			ID:       "hero",
+			Tag:      "section",
+			Heading:  "Build wealth with confidence",
+			Text:     "Investing designed to meet your ambition. Loans Real estate Bonds Smart Cash ETFs.",
+			Selector: "#js-page-hero",
+			Rect:     browserRect{X: 0, Y: 120, Width: 1350, Height: 620},
+		},
+	}
+
+	got := rankRegions(regions, "investment products returns loans ETFs bonds", 2)
+	if len(got) == 0 {
+		t.Fatalf("ranked len=0")
+	}
+	if got[0].Region.ID != "hero" {
+		t.Fatalf("first region=%s, want hero; ranked=%#v", got[0].Region.ID, got)
+	}
+}
+
 func TestCropScreenshotAcceptsJPEGInput(t *testing.T) {
 	img := image.NewRGBA(image.Rect(0, 0, 120, 80))
 	draw.Draw(img, img.Bounds(), &image.Uniform{C: color.RGBA{R: 12, G: 34, B: 56, A: 255}}, image.Point{}, draw.Src)
