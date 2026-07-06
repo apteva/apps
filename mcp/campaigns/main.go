@@ -31,7 +31,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: campaigns
 display_name: Campaigns
-version: 0.2.11
+version: 0.2.12
 description: |
   Bulk-send orchestrator. Compose a campaign, target a CRM segment or
   list, schedule it; jobs drives the materialise → tick loop, messaging
@@ -72,7 +72,7 @@ provides:
     - name: campaigns_list
       description: List campaigns with status / channel filter.
     - name: campaigns_get
-      description: Fetch one campaign with stats and live CRM audience count / preview.
+      description: Fetch one campaign with current live stats and CRM audience count / preview. Use this for normal reporting.
     - name: campaigns_update
       description: Partial-patch a draft / paused campaign.
     - name: campaigns_clone
@@ -94,9 +94,9 @@ provides:
     - name: campaigns_recipients
       description: List a campaign's recipients with status filter.
     - name: campaigns_stats
-      description: Aggregate counts per status.
+      description: Read-only current recipient counts by status. Prefer this over reconcile for normal stats checks.
     - name: campaigns_reconcile
-      description: Backfill recipient delivery/open/bounce status from Messaging.
+      description: Maintenance repair only: backfill recipient delivery/open/click/bounce status from Messaging if events were missed. Mutates recipient statuses; do not use for normal stats checks.
   ui_panels:
     - slot: project.page
       label: Campaigns
@@ -344,7 +344,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "campaigns_get",
-			Description: "Fetch one campaign with status counts. Args: id.",
+			Description: "Fetch one campaign with current live status counts. Use this for normal campaign reporting. Args: id.",
 			InputSchema: schemaObject(map[string]any{
 				"id": map[string]any{"type": "integer"},
 			}, []string{"id"}),
@@ -442,7 +442,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "campaigns_stats",
-			Description: "Aggregate counts per recipient status — drives the panel progress bar. Args: id.",
+			Description: "Read-only current counts per recipient status. Prefer this over campaigns_reconcile for normal stats checks. Args: id.",
 			InputSchema: schemaObject(map[string]any{
 				"id": map[string]any{"type": "integer"},
 			}, []string{"id"}),
@@ -450,7 +450,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "campaigns_reconcile",
-			Description: "Backfill recipient delivery/open/bounce status from Messaging. Args: id.",
+			Description: "Maintenance/repair only: backfill recipient delivery/open/click/bounce status from Messaging if provider events were missed. This mutates recipient statuses and should not be used for normal stats checks. Args: id.",
 			InputSchema: schemaObject(map[string]any{
 				"id": map[string]any{"type": "integer"},
 			}, []string{"id"}),

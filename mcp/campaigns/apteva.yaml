@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: campaigns
 display_name: Campaigns
-version: 0.2.11
+version: 0.2.12
 description: |
   Bulk-send orchestrator. Compose a campaign, target a CRM segment (or
   a list — segments scoped to a list work too), schedule it, and the
@@ -63,7 +63,7 @@ provides:
     - name: campaigns_list
       description: List campaigns with filter on status / channel.
     - name: campaigns_get
-      description: Fetch one campaign with stats and live CRM audience count / preview.
+      description: Fetch one campaign with current live stats and CRM audience count / preview. Use this for normal reporting.
     - name: campaigns_update
       description: Partial-patch a draft / paused campaign.
     - name: campaigns_clone
@@ -87,9 +87,9 @@ provides:
     - name: campaigns_recipients
       description: List a campaign's recipients with filter on status.
     - name: campaigns_stats
-      description: Aggregate counts per status — drives the panel progress bar.
+      description: Read-only current recipient counts by status. Prefer this over reconcile for normal stats checks.
     - name: campaigns_reconcile
-      description: Backfill recipient delivery/open/bounce status from Messaging message events.
+      description: Maintenance repair only. Backfill recipient delivery/open/click/bounce status from Messaging if events were missed. Mutates recipient statuses; do not use for normal stats checks.
   ui_panels:
     - slot: project.page
       label: Campaigns
