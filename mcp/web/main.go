@@ -1,4 +1,4 @@
-// Web v0.1.9 — browser-backed web intelligence.
+// Web v0.1.10 — browser-backed web intelligence.
 //
 // The app requires computer for session lifecycle, rendered extraction, and
 // screenshots. It opens a browser before search/extract/crawl/map/research page
@@ -39,7 +39,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: web
 display_name: Web
-version: 0.1.9
+version: 0.1.10
 description: Browser-native web intelligence for agents.
 author: Apteva
 scopes: [project, global]
@@ -312,6 +312,25 @@ type browserScreenshot struct {
 	CurrentURL string `json:"current_url"`
 	Width      int    `json:"width"`
 	Height     int    `json:"height"`
+}
+
+type computerSOMScreenshot struct {
+	CurrentURL string            `json:"current_url"`
+	Width      int               `json:"width"`
+	Height     int               `json:"height"`
+	SOM        []setOfMarkTarget `json:"som"`
+}
+
+type setOfMarkTarget struct {
+	Label int    `json:"label"`
+	X     int    `json:"x"`
+	Y     int    `json:"y"`
+	W     int    `json:"w"`
+	H     int    `json:"h"`
+	Tag   string `json:"tag"`
+	Role  string `json:"role"`
+	Text  string `json:"text"`
+	Type  string `json:"type"`
 }
 
 type searchResult struct {
@@ -954,14 +973,17 @@ func (a *App) dismissCookieBanner(ctx *sdk.AppCtx, sessionID string, args map[st
 		return out, nil
 	}
 	extracted, err := a.extractBrowserDOM(ctx, sessionID, mapMerge(args, map[string]any{
-		"formats":   []string{"regions"},
-		"max_chars": 5000,
+		"formats":   []string{"regions", "text", "html"},
+		"max_chars": 50000,
 	}), false)
 	if err != nil {
 		return out, err
 	}
 	region, strategy, ok := findCookieBannerRegion(extracted.Regions)
 	if !ok {
+		if a.dismissCookieBannerWithSOM(ctx, sessionID, args, extracted, out) {
+			return out, nil
+		}
 		out["reason"] = "no_cookie_banner_detected"
 		return out, nil
 	}
@@ -1024,6 +1046,115 @@ func findCookieBannerRegion(regions []browserRegion) (browserRegion, string, boo
 		}
 	}
 	return browserRegion{}, "", false
+}
+
+func (a *App) dismissCookieBannerWithSOM(ctx *sdk.AppCtx, sessionID string, args map[string]any, extracted *browserExtractResult, out map[string]any) bool {
+	pageText := strings.Join([]string{extracted.Text, extracted.HTML}, " ")
+	if !hasGenericCookieBannerText(pageText) {
+		return false
+	}
+	var shot computerSOMScreenshot
+	if err := ctx.PlatformAPI().CallAppResult("computer", "computer_use", withProjectID(ctx, map[string]any{
+		"session_id":  sessionID,
+		"action":      "screenshot",
+		"som":         true,
+		"include_som": true,
+	}), &shot); err != nil {
+		out["reason"] = "cookie_banner_text_detected_but_som_unavailable"
+		out["error"] = err.Error()
+		return true
+	}
+	target, ok := findCookieAcceptTarget(shot.SOM)
+	if !ok {
+		out["reason"] = "cookie_banner_text_detected_but_no_som_accept_target"
+		out["som_targets"] = len(shot.SOM)
+		return true
+	}
+	out["attempted"] = true
+	out["strategy"] = "som_accept_button"
+	out["label"] = target.Label
+	out["target_text"] = target.Text
+	out["target_tag"] = target.Tag
+	out["target_role"] = target.Role
+	var clickOut map[string]any
+	if err := ctx.PlatformAPI().CallAppResult("computer", "computer_use", withProjectID(ctx, map[string]any{
+		"session_id": sessionID,
+		"action":     "click",
+		"label":      target.Label,
+	}), &clickOut); err != nil {
+		out["reason"] = "som_cookie_click_failed"
+		out["error"] = err.Error()
+		return true
+	}
+	var waitOut map[string]any
+	_ = ctx.PlatformAPI().CallAppResult("computer", "computer_use", withProjectID(ctx, map[string]any{
+		"session_id": sessionID,
+		"action":     "wait",
+		"duration":   800,
+	}), &waitOut)
+	verified, _ := a.extractBrowserDOM(ctx, sessionID, mapMerge(args, map[string]any{
+		"formats":   []string{"text", "html"},
+		"max_chars": 50000,
+	}), false)
+	if verified != nil {
+		stillPresent := hasGenericCookieBannerText(strings.Join([]string{verified.Text, verified.HTML}, " "))
+		out["dismissed"] = !stillPresent
+		if stillPresent {
+			out["reason"] = "banner_still_detected_after_som_click"
+		}
+		return true
+	}
+	out["dismissed"] = true
+	out["reason"] = "som_clicked_not_verified"
+	return true
+}
+
+func hasGenericCookieBannerText(text string) bool {
+	low := strings.ToLower(text)
+	hasCookie := strings.Contains(low, "cookie") || strings.Contains(low, "consent")
+	hasNotice := strings.Contains(low, "we use cookies") ||
+		strings.Contains(low, "similar technologies") ||
+		strings.Contains(low, "personalize content") ||
+		strings.Contains(low, "provide a better experience") ||
+		(strings.Contains(low, "privacy notice") && strings.Contains(low, "cookies policy"))
+	hasAccept := strings.Contains(low, "i accept") ||
+		strings.Contains(low, "accept all") ||
+		strings.Contains(low, "accept cookies") ||
+		strings.Contains(low, "allow all") ||
+		strings.Contains(low, "agree") ||
+		strings.Contains(low, "got it")
+	return hasCookie && hasNotice && hasAccept
+}
+
+func findCookieAcceptTarget(targets []setOfMarkTarget) (setOfMarkTarget, bool) {
+	for _, t := range targets {
+		if isCookieAcceptTarget(t) {
+			return t, true
+		}
+	}
+	return setOfMarkTarget{}, false
+}
+
+func isCookieAcceptTarget(t setOfMarkTarget) bool {
+	text := strings.ToLower(strings.TrimSpace(t.Text))
+	if text == "" {
+		return false
+	}
+	buttonish := strings.EqualFold(t.Tag, "button") ||
+		strings.EqualFold(t.Role, "button") ||
+		strings.EqualFold(t.Type, "button") ||
+		strings.EqualFold(t.Type, "submit")
+	if !buttonish {
+		return false
+	}
+	switch text {
+	case "accept", "i accept", "agree", "got it", "ok":
+		return true
+	}
+	return strings.Contains(text, "accept all") ||
+		strings.Contains(text, "accept cookies") ||
+		strings.Contains(text, "allow all") ||
+		strings.Contains(text, "i accept")
 }
 
 func isGenericCookieBanner(r browserRegion, text string) bool {

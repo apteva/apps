@@ -2,9 +2,10 @@ schema: apteva-app/v1
 
 name: computer
 display_name: Computer
-version: 0.7.44
+version: 0.7.45
 description: |
-  Watch and steer browser sessions. v0.7.44 adds rendered DOM regions to browser_extract for smart screenshots.
+  Watch and steer browser sessions. v0.7.45 adds opt-in structured Set-of-Mark
+  targets in screenshot responses. v0.7.44 adds rendered DOM regions to browser_extract for smart screenshots.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/computer
@@ -106,8 +107,9 @@ provides:
         session_id, action, tab_id?, coordinate?, label?, selector?,
         checked?, source_url?, base64?, filename?, mime_type?, file_path?,
         text?, value?, texts?, values?, mode?, newline_mode?, key?, direction?, amount?,
-        duration?, annotate? (screenshot only, default true).
-        Returns screenshot bytes for visual actions.
+        duration?, annotate? (screenshot only, default true), include_som?
+        (screenshot only, default false). Returns screenshot bytes for visual
+        actions; structured som targets are returned only when include_som=true.
     - name: computer_context_create
       description: |
         Create or import an app-managed browser context. Args: name,
@@ -141,7 +143,8 @@ provides:
     - name: browser_screenshot
       description: |
         Capture a clean PNG of the session viewport. Args: session_id,
-        annotate? (default false; set true for Set-of-Mark labels).
+        annotate? (default false; set true for Set-of-Mark labels),
+        include_som? (default false; returns structured SoM targets only when true).
     - name: browser_extract
       description: |
         Infrastructure-only rendered DOM extraction for advanced browser

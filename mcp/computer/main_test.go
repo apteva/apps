@@ -198,6 +198,31 @@ func TestBrowserSessionComputerUseClose(t *testing.T) {
 	if got := fake.lastScreenshotAnnotate(); got == nil || *got != true {
 		t.Errorf("computer_use screenshot annotate default: want true, got %v", got)
 	}
+	if _, ok := shotMap["som"]; ok {
+		t.Fatalf("computer_use screenshot should not return structured som unless include_som=true: %#v", shotMap["som"])
+	}
+
+	fake.somTargets = []backends.SetOfMarkTarget{{
+		Label: 3,
+		X:     100,
+		Y:     200,
+		W:     80,
+		H:     32,
+		Tag:   "button",
+		Text:  "I accept",
+	}}
+	somOut, err := app.toolComputerUse(ctx, map[string]any{
+		"session_id":  sessionID,
+		"action":      "screenshot",
+		"include_som": true,
+	})
+	if err != nil {
+		t.Fatalf("computer_use screenshot include_som: %v", err)
+	}
+	somItems, ok := somOut.(map[string]any)["som"].([]backends.SetOfMarkTarget)
+	if !ok || len(somItems) != 1 || somItems[0].Label != 3 || somItems[0].Text != "I accept" {
+		t.Fatalf("structured som=%#v", somOut.(map[string]any)["som"])
+	}
 
 	if _, err := app.toolComputerUse(ctx, map[string]any{
 		"session_id": sessionID,
@@ -1534,11 +1559,15 @@ func TestBrowserScreenshotDefaultsClean(t *testing.T) {
 	}
 	sessionID := openOut.(map[string]any)["session_id"].(string)
 
-	if _, err := app.toolBrowserScreenshot(ctx, map[string]any{"session_id": sessionID}); err != nil {
+	clean, err := app.toolBrowserScreenshot(ctx, map[string]any{"session_id": sessionID})
+	if err != nil {
 		t.Fatalf("browser_screenshot: %v", err)
 	}
 	if got := fake.lastScreenshotAnnotate(); got == nil || *got != false {
 		t.Errorf("browser_screenshot annotate default: want false, got %v", got)
+	}
+	if _, ok := clean.(map[string]any)["som"]; ok {
+		t.Fatalf("browser_screenshot should not return structured som by default: %#v", clean.(map[string]any)["som"])
 	}
 
 	if _, err := app.toolBrowserScreenshot(ctx, map[string]any{"session_id": sessionID, "annotate": true}); err != nil {
@@ -1546,6 +1575,19 @@ func TestBrowserScreenshotDefaultsClean(t *testing.T) {
 	}
 	if got := fake.lastScreenshotAnnotate(); got == nil || *got != true {
 		t.Errorf("browser_screenshot annotate=true: want true, got %v", got)
+	}
+
+	fake.somTargets = []backends.SetOfMarkTarget{{Label: 4, Tag: "button", Text: "I accept"}}
+	withSOM, err := app.toolBrowserScreenshot(ctx, map[string]any{"session_id": sessionID, "include_som": true})
+	if err != nil {
+		t.Fatalf("browser_screenshot include_som=true: %v", err)
+	}
+	if got := fake.lastScreenshotAnnotate(); got == nil || *got != true {
+		t.Errorf("browser_screenshot include_som should force annotate: got %v", got)
+	}
+	somItems, ok := withSOM.(map[string]any)["som"].([]backends.SetOfMarkTarget)
+	if !ok || len(somItems) != 1 || somItems[0].Label != 4 {
+		t.Fatalf("browser_screenshot som=%#v", withSOM.(map[string]any)["som"])
 	}
 }
 
@@ -1953,6 +1995,7 @@ type fakeComp struct {
 	lastAction       backends.Action
 	screenshotCalls  int
 	annotateCalls    []bool
+	somTargets       []backends.SetOfMarkTarget
 	closeCalls       int
 	tabs             []backends.TabInfo
 	activeTabID      string
@@ -2029,6 +2072,14 @@ func (f *fakeComp) LastScreenshotRecovery() *backends.ScreenshotRecoveryInfo {
 	}
 	cp := *f.lastRecovery
 	return &cp
+}
+
+func (f *fakeComp) LastSetOfMark() []backends.SetOfMarkTarget {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	out := make([]backends.SetOfMarkTarget, len(f.somTargets))
+	copy(out, f.somTargets)
+	return out
 }
 
 func (f *fakeComp) lastScreenshotAnnotate() *bool {

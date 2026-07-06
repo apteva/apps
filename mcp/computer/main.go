@@ -52,9 +52,9 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: computer
 display_name: Computer
-version: 0.7.44
+version: 0.7.45
 description: |
-  Watch and steer browser sessions. v0.7.44 adds rendered DOM regions to browser_extract for smart screenshots.
+  Watch and steer browser sessions. v0.7.45 adds opt-in structured Set-of-Mark targets in screenshot responses.
 scopes: [project, global]
 requires:
   permissions:
@@ -81,7 +81,7 @@ provides:
     - name: browser_session
       description: "Open, resume, list, inspect, close, or switch tabs in app-owned browser sessions. Args: action, session_id?, tab_id?, backend?, backend_session_id?, url?, context_id?, context_name?, auto_create_context?, persist?, timeout?, proxy?, proxy_country?, viewport?. Usually omit viewport to use Computer's default desktop viewport, 1600x800. Pass viewport when a specific resolution is needed, for example mobile/tablet testing or a site-specific requirement. session_id is the app-owned live br_* handle for status/close/computer_use only. To continue later, open a new session with context_id or context_name. Use backend_session_id only for an explicit provider-level attach. For tab control, call browser_session(action=tabs) to list open tabs, then browser_session(action=switch_tab, tab_id=...) or browser_session(action=close_tab, tab_id=...). Do not use keyboard shortcuts such as Ctrl+Tab, Ctrl+PageDown, or Ctrl+1-9 to switch browser tabs. Browserbase honors timeout as max session lifetime. Prefer context_id from computer_context_list to reopen saved state; context_name works across backends when unique. For a reusable saved context, pass context_name with auto_create_context=true; omitted names are only a fallback and are auto-generated. Sessions consume local or cloud resources. When browser work is complete and the user did not explicitly ask to keep the browser open, close it with browser_session(action=close, session_id=...). Closing is especially important for Browserbase/Steel sessions and persisted contexts because it releases provider resources and lets context state flush cleanly."
     - name: computer_use
-      description: "Drive an app-owned browser session. Default workflow: call action=screenshot first; screenshots contain Set-of-Mark numeric badges on interactive elements. To click, use action=click with label=N from the latest screenshot. label must be >= 1; do not pass 0. Prefer label over coordinate; use coordinate only for targets with no badge such as canvas or custom rendered widgets. If the page asks to Browse, choose, attach, upload, or drop a file, use action=upload_file with selector or label plus source_url/base64/file_path; do not operate the native OS file picker. For any native select, dropdown, combobox, listbox, or multiselect, use action=select_option first with label/selector plus text/value or texts/values and optional mode=replace|add|remove|toggle; do not click options one by one or use keyboard navigation unless select_option fails. For checkboxes, radio buttons, and ARIA switches, use action=set_checked with label/selector plus checked=true|false instead of blind clicking. For long text fields, textareas, contenteditable editors, or message/post composers, use action=set_text with label/selector plus text instead of click + Control+A + type; use newline_mode=compact for public messages when blank paragraph gaps are not desired. For native date/time/datetime-local fields or text-like scheduler fields, use action=set_temporal with label/selector plus value such as 2026-07-01 or 11:00 AM. If a click opens exactly one new tab, Computer automatically follows it and reports switched_tab=true. For explicit tab control, call browser_session(action=tabs) to list tabs, then browser_session(action=switch_tab, tab_id=...) or browser_session(action=close_tab, tab_id=...); do not use Ctrl+Tab, Ctrl+PageDown, or Ctrl+1-9 for browser tab switching. Use action=key for page/editor commands such as Tab, Backspace, Control+A, Control+Z; use action=type only for short literal text and full date/time values such as 2026-06-05 or 08:00 PM. For action=scroll, amount is CSS pixels; use 200-500 for a small viewport move and omit amount for the 300px default. After scrolling, tab switching, selection, upload, checked-state changes, text changes, temporal-field changes, or navigation, take a fresh screenshot because labels are re-enumerated. Args: session_id, action, tab_id?, coordinate?, label?, selector?, checked?, source_url?, base64?, filename?, mime_type?, file_path?, text?, value?, texts?, values?, mode?, newline_mode?, key?, direction?, amount?, duration?, annotate? (screenshot only, default true). Returns screenshot bytes for visual actions."
+      description: "Drive an app-owned browser session. Default workflow: call action=screenshot first; screenshots contain Set-of-Mark numeric badges on interactive elements. To click, use action=click with label=N from the latest screenshot. label must be >= 1; do not pass 0. Prefer label over coordinate; use coordinate only for targets with no badge such as canvas or custom rendered widgets. If the page asks to Browse, choose, attach, upload, or drop a file, use action=upload_file with selector or label plus source_url/base64/file_path; do not operate the native OS file picker. For any native select, dropdown, combobox, listbox, or multiselect, use action=select_option first with label/selector plus text/value or texts/values and optional mode=replace|add|remove|toggle; do not click options one by one or use keyboard navigation unless select_option fails. For checkboxes, radio buttons, and ARIA switches, use action=set_checked with label/selector plus checked=true|false instead of blind clicking. For long text fields, textareas, contenteditable editors, or message/post composers, use action=set_text with label/selector plus text instead of click + Control+A + type; use newline_mode=compact for public messages when blank paragraph gaps are not desired. For native date/time/datetime-local fields or text-like scheduler fields, use action=set_temporal with label/selector plus value such as 2026-07-01 or 11:00 AM. If a click opens exactly one new tab, Computer automatically follows it and reports switched_tab=true. For explicit tab control, call browser_session(action=tabs) to list tabs, then browser_session(action=switch_tab, tab_id=...) or browser_session(action=close_tab, tab_id=...); do not use Ctrl+Tab, Ctrl+PageDown, or Ctrl+1-9 for browser tab switching. Use action=key for page/editor commands such as Tab, Backspace, Control+A, Control+Z; use action=type only for short literal text and full date/time values such as 2026-06-05 or 08:00 PM. For action=scroll, amount is CSS pixels; use 200-500 for a small viewport move and omit amount for the 300px default. After scrolling, tab switching, selection, upload, checked-state changes, text changes, temporal-field changes, or navigation, take a fresh screenshot because labels are re-enumerated. Args: session_id, action, tab_id?, coordinate?, label?, selector?, checked?, source_url?, base64?, filename?, mime_type?, file_path?, text?, value?, texts?, values?, mode?, newline_mode?, key?, direction?, amount?, duration?, annotate? (screenshot only, default true), include_som? (screenshot only, default false). Returns screenshot bytes for visual actions; structured som targets are returned only when include_som=true."
     - name: computer_context_create
       description: "Create or import an app-managed browser context. Args: name, backend?, provider_context_id?, persist_default?, metadata?, auto_create_provider?."
     - name: computer_context_list
@@ -97,7 +97,7 @@ provides:
     - name: browser_list
       description: "Compatibility alias for browser_session(action=list)."
     - name: browser_screenshot
-      description: "Capture a clean PNG of the session viewport. Args: session_id, annotate? (default false; set true for Set-of-Mark labels)."
+      description: "Capture a clean PNG of the session viewport. Args: session_id, annotate? (default false; set true for Set-of-Mark labels), include_som? (default false; returns structured SoM targets only when true)."
     - name: browser_extract
       description: "Infrastructure-only rendered DOM extraction for advanced browser integrations. General agents should usually prefer higher-level browsing tools instead of calling this directly. Args: session_id, formats?, max_chars?, readability?, wait_ms?. formats may include text, markdown, html, metadata, structured_data, json, links, images, regions."
     - name: browser_close
@@ -505,6 +505,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"duration":     map[string]any{"type": "integer"},
 				"annotate":     map[string]any{"type": "boolean", "description": "For action=screenshot, include Set-of-Mark labels in the returned image. Defaults true for computer_use so agent click flow remains label-based."},
 				"som":          map[string]any{"type": "boolean", "description": "Alias for annotate."},
+				"include_som":  map[string]any{"type": "boolean", "description": "For action=screenshot. Opt-in structured Set-of-Mark targets in the response. Defaults false to keep MCP payloads small."},
 			}, []string{"session_id", "action"}),
 			Handler: a.toolComputerUse,
 		},
@@ -600,12 +601,13 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name: "browser_screenshot",
-			Description: "Capture a clean PNG of the session's current viewport. Args: session_id, annotate? (default false; set true for Set-of-Mark labels). " +
-				"Returns {png_b64, current_url, width, height}.",
+			Description: "Capture a clean PNG of the session's current viewport. Args: session_id, annotate? (default false; set true for Set-of-Mark labels), include_som? (default false; returns structured SoM targets only when true). " +
+				"Returns {png_b64, current_url, width, height} and som only when include_som=true.",
 			InputSchema: schemaObject(map[string]any{
-				"session_id": map[string]any{"type": "string"},
-				"annotate":   map[string]any{"type": "boolean", "description": "Include Set-of-Mark labels in the image. Defaults false for clean capture/export screenshots."},
-				"som":        map[string]any{"type": "boolean", "description": "Alias for annotate."},
+				"session_id":  map[string]any{"type": "string"},
+				"annotate":    map[string]any{"type": "boolean", "description": "Include Set-of-Mark labels in the image. Defaults false for clean capture/export screenshots."},
+				"som":         map[string]any{"type": "boolean", "description": "Alias for annotate."},
+				"include_som": map[string]any{"type": "boolean", "description": "Opt-in structured Set-of-Mark targets in the response. Defaults false to keep MCP payloads small."},
 			}, []string{"session_id"}),
 			Handler: a.toolBrowserScreenshot,
 		},
@@ -1377,13 +1379,17 @@ func (a *App) toolBrowserScreenshot(ctx *sdk.AppCtx, args map[string]any) (any, 
 		return nil, err
 	}
 	m := out.(map[string]any)
-	return map[string]any{
+	res := map[string]any{
 		"png_b64":     m["screenshot_b64"],
 		"screenshot":  m["screenshot"],
 		"current_url": m["current_url"],
 		"width":       m["width"],
 		"height":      m["height"],
-	}, nil
+	}
+	if som, ok := m["som"]; ok {
+		res["som"] = som
+	}
+	return res, nil
 }
 
 func (a *App) toolBrowserExtract(_ *sdk.AppCtx, args map[string]any) (any, error) {
@@ -1570,8 +1576,13 @@ func (a *App) toolComputerUse(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	var shot []byte
 	var err error
 	screenshotSkipped := false
+	includeSOM := boolArgDefault(args, "include_som", false)
+	annotate := annotateArg(args, true)
+	if includeSOM {
+		annotate = true
+	}
 	if action == "screenshot" {
-		shot, err = screenshotWithOptions(sess.comp, annotateArg(args, true))
+		shot, err = screenshotWithOptions(sess.comp, annotate)
 	} else if shouldSkipPostActionScreenshot(sess, action) {
 		err = sess.comp.(backends.ActionOnlyExecutor).ExecuteAction(act)
 		screenshotSkipped = true
@@ -1656,6 +1667,9 @@ func (a *App) toolComputerUse(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		out["screenshot"] = binaryEnvelope(shot, mime)
 		out["screenshot_b64"] = base64.StdEncoding.EncodeToString(shot)
 		out["mime_type"] = mime
+	}
+	if includeSOM && !screenshotSkipped {
+		out["som"] = setOfMarkFor(sess.comp)
 	}
 	for k, v := range uploadMeta {
 		out[k] = v
@@ -1904,6 +1918,14 @@ func screenshotRecoveryFor(comp backends.Computer) *backends.ScreenshotRecoveryI
 		return nil
 	}
 	return reporter.LastScreenshotRecovery()
+}
+
+func setOfMarkFor(comp backends.Computer) []backends.SetOfMarkTarget {
+	reporter, ok := comp.(backends.SetOfMarkReporter)
+	if !ok {
+		return nil
+	}
+	return reporter.LastSetOfMark()
 }
 
 func mergeScreenshotRecoveryPayload(payload map[string]any, info *backends.ScreenshotRecoveryInfo) {

@@ -332,6 +332,41 @@ func TestSmartSnapshotDismissesCookieBanner(t *testing.T) {
 	}
 }
 
+func TestSmartSnapshotDismissesCookieBannerWithSOM(t *testing.T) {
+	plat := newFakePlatform()
+	plat.cookieTextBanner = true
+	ctx, app := newTestCtx(t, plat, tk.WithProjectID("proj-web"))
+
+	outAny, err := app.toolSnapshot(ctx, map[string]any{
+		"url":       "https://example.com",
+		"query":     "affiliate contact email",
+		"max_shots": 1,
+	})
+	if err != nil {
+		t.Fatalf("smart snapshot: %v", err)
+	}
+	out := outAny.(map[string]any)
+	cookie := out["cookie_handling"].(map[string]any)
+	if cookie["strategy"] != "som_accept_button" || cookie["dismissed"] != true || cookie["label"] != 9 {
+		t.Fatalf("cookie_handling=%#v", cookie)
+	}
+	var sawSOM, sawLabelClick bool
+	for _, c := range plat.calls {
+		if c.app != "computer" || c.tool != "computer_use" {
+			continue
+		}
+		if c.args["action"] == "screenshot" && c.args["include_som"] == true {
+			sawSOM = true
+		}
+		if c.args["action"] == "click" && c.args["label"] == 9 {
+			sawLabelClick = true
+		}
+	}
+	if !sawSOM || !sawLabelClick {
+		t.Fatalf("missing som screenshot or label click; calls=%#v", plat.calls)
+	}
+}
+
 func TestRankRegionsPrefersSpecificChildOverGiantContainer(t *testing.T) {
 	regions := []browserRegion{
 		{
@@ -465,14 +500,15 @@ type fakeCall struct {
 
 type fakePlatform struct {
 	tk.BasePlatformClient
-	mu              sync.Mutex
-	calls           []fakeCall
-	storageID       int64
-	storageURL      string
-	openURL         string
-	searchBlocked   bool
-	cookieBanner    bool
-	cookieDismissed bool
+	mu               sync.Mutex
+	calls            []fakeCall
+	storageID        int64
+	storageURL       string
+	openURL          string
+	searchBlocked    bool
+	cookieBanner     bool
+	cookieTextBanner bool
+	cookieDismissed  bool
 }
 
 func newFakePlatform() *fakePlatform {
@@ -609,6 +645,12 @@ func (p *fakePlatform) respond(app, tool string, in map[string]any) map[string]a
 				"visible":          true,
 			}}, regions...)
 		}
+		text := "Hello This page has useful text."
+		html := "<html><body><h1>Hello</h1><p>This page has useful text.</p></body></html>"
+		if p.cookieTextBanner && !p.cookieDismissed {
+			text += " We use cookies and similar technologies to help personalize content and provide a better experience. I accept."
+			html += `<div class="cookie-bar"><p>We use cookies and similar technologies to help personalize content, tailor and measure ads, and provide a better experience.</p><button>I accept</button></div>`
+		}
 		return map[string]any{
 			"session_id":         in["session_id"],
 			"backend":            "local",
@@ -616,8 +658,9 @@ func (p *fakePlatform) respond(app, tool string, in map[string]any) map[string]a
 			"url":                p.openURL,
 			"title":              "Readable Page",
 			"description":        "A page for extraction",
-			"text":               "Hello This page has useful text.",
+			"text":               text,
 			"markdown":           "# Hello\n\nThis page has useful text.",
+			"html":               html,
 			"links":              []map[string]any{{"url": p.openURL + "/next", "text": "Next page"}},
 			"regions":            regions,
 			"metadata":           map[string]any{"description": "A page for extraction"},
@@ -633,7 +676,23 @@ func (p *fakePlatform) respond(app, tool string, in map[string]any) map[string]a
 		if in["action"] == "click" && stringFromAny(in["coordinate"]) != "" && p.cookieBanner {
 			p.cookieDismissed = true
 		}
-		return map[string]any{"current_url": p.openURL, "width": 1280, "height": 720}
+		if in["action"] == "click" && in["label"] != nil && p.cookieTextBanner {
+			p.cookieDismissed = true
+		}
+		out := map[string]any{"current_url": p.openURL, "width": 1280, "height": 720}
+		if in["action"] == "screenshot" && in["include_som"] == true && p.cookieTextBanner && !p.cookieDismissed {
+			out["som"] = []map[string]any{{
+				"label": 9,
+				"x":     1068,
+				"y":     740,
+				"w":     128,
+				"h":     44,
+				"tag":   "button",
+				"role":  "button",
+				"text":  "I accept",
+			}}
+		}
+		return out
 	case "computer.browser_screenshot":
 		return map[string]any{
 			"png_b64":     testPNGB64(),

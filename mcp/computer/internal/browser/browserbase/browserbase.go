@@ -13,6 +13,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -1045,6 +1046,35 @@ func (c *Computer) resolveLabel(label int) (som.Element, bool) {
 	}
 	e, ok := c.lastLabels[label]
 	return e, ok
+}
+
+func (c *Computer) LastSetOfMark() []computer.SetOfMarkTarget {
+	c.labelMu.RLock()
+	defer c.labelMu.RUnlock()
+	if len(c.lastLabels) == 0 {
+		return nil
+	}
+	labels := make([]int, 0, len(c.lastLabels))
+	for label := range c.lastLabels {
+		labels = append(labels, label)
+	}
+	sort.Ints(labels)
+	out := make([]computer.SetOfMarkTarget, 0, len(labels))
+	for _, label := range labels {
+		e := c.lastLabels[label]
+		out = append(out, computer.SetOfMarkTarget{
+			Label: e.Label,
+			X:     e.X,
+			Y:     e.Y,
+			W:     e.W,
+			H:     e.H,
+			Tag:   e.Tag,
+			Role:  e.Role,
+			Text:  e.Text,
+			Type:  e.Type,
+		})
+	}
+	return out
 }
 
 func (c *Computer) DisplaySize() computer.DisplaySize { return c.display }
