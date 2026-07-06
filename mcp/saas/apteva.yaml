@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: saas
 display_name: SaaS
-version: 0.1.7
+version: 0.1.8
 description: |
   Shared SaaS access control for Apteva apps. SaaS packages installed
   apps into sellable plans, creates customer accounts backed by Auth
@@ -64,6 +64,8 @@ provides:
       description: Register an app/tool plus response extraction config for live usage.
     - name: saas_plan_action_add
       description: Register a generic fulfillment action that calls another app/tool on a SaaS lifecycle event.
+    - name: saas_plan_action_update
+      description: Update an existing generic fulfillment action by id.
     - name: saas_plan_action_list
       description: List generic fulfillment actions for a plan.
     - name: saas_customer_create

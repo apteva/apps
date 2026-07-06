@@ -3,6 +3,7 @@ package main
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -129,8 +130,8 @@ func TestEmbeddedManifest_Valid(t *testing.T) {
 	if m.Name != "saas" {
 		t.Errorf("manifest.Name=%q, want saas", m.Name)
 	}
-	if m.Version != "0.1.7" {
-		t.Errorf("manifest.Version=%q, want 0.1.7", m.Version)
+	if m.Version != "0.1.8" {
+		t.Errorf("manifest.Version=%q, want 0.1.8", m.Version)
 	}
 	if !m.Requires.DynamicAppCalls {
 		t.Error("manifest should allow dynamic app calls for configured usage sources")
@@ -162,6 +163,95 @@ func TestEmbeddedManifest_Valid(t *testing.T) {
 	}
 	if required["messaging"] || required["analytics"] {
 		t.Error("messaging and analytics should be optional")
+	}
+}
+
+func TestPlanActionUpdate_PartialPatch(t *testing.T) {
+	ctx, db := newTestCtx(t, &platformStub{})
+	defer db.Close()
+	app := &App{}
+
+	created, err := app.toolPlanActionAdd(ctx, map[string]any{
+		"plan_key":     "free",
+		"event":        "account_active",
+		"app_name":     "containers",
+		"tool_name":    "containers_create",
+		"failure_mode": "fail_account",
+		"args":         map[string]any{"name": "old", "image": "nginx"},
+		"store":        map[string]any{"metadata.workload_id": "workload.id"},
+		"metadata":     map[string]any{"source": "test"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	action := created.(map[string]any)["action"].(*PlanAction)
+
+	updated, err := app.toolPlanActionUpdate(ctx, map[string]any{
+		"id":           action.ID,
+		"enabled":      false,
+		"failure_mode": "mark_degraded",
+		"args": map[string]any{
+			"name":  "new",
+			"image": "ghcr.io/apteva/apteva:latest",
+			"files": []any{map[string]any{
+				"path":   "/data/apteva.yaml",
+				"mode":   "0600",
+				"secret": true,
+			}},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := updated.(map[string]any)["action"].(*PlanAction)
+	if got.ID != action.ID || got.PlanKey != "free" || got.Event != "account_active" || got.AppName != "containers" || got.ToolName != "containers_create" {
+		t.Fatalf("identity fields changed unexpectedly: %+v", got)
+	}
+	if got.Enabled {
+		t.Fatalf("enabled=%v, want false", got.Enabled)
+	}
+	if got.FailureMode != "mark_degraded" {
+		t.Fatalf("failure_mode=%q", got.FailureMode)
+	}
+	args := mapFromAny(got.Args)
+	if args["name"] != "new" || args["image"] != "ghcr.io/apteva/apteva:latest" {
+		t.Fatalf("args not updated: %+v", args)
+	}
+	files, ok := args["files"].([]any)
+	if !ok || len(files) != 1 || mapFromAny(files[0])["path"] != "/data/apteva.yaml" {
+		t.Fatalf("files not preserved in args: %#v", args["files"])
+	}
+	store := mapFromAny(got.Store)
+	if store["metadata.workload_id"] != "workload.id" {
+		t.Fatalf("store should be unchanged: %+v", store)
+	}
+	meta := mapFromAny(got.Metadata)
+	if meta["source"] != "test" {
+		t.Fatalf("metadata should be unchanged: %+v", meta)
+	}
+}
+
+func TestPlanActionUpdate_RejectsUnknownAndBadFailureMode(t *testing.T) {
+	ctx, db := newTestCtx(t, &platformStub{})
+	defer db.Close()
+	app := &App{}
+
+	if _, err := app.toolPlanActionUpdate(ctx, map[string]any{"id": 999, "enabled": false}); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("err=%v, want sql.ErrNoRows", err)
+	}
+
+	created, err := app.toolPlanActionAdd(ctx, map[string]any{
+		"plan_key":  "free",
+		"event":     "account_active",
+		"app_name":  "containers",
+		"tool_name": "containers_create",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	action := created.(map[string]any)["action"].(*PlanAction)
+	if _, err := app.toolPlanActionUpdate(ctx, map[string]any{"id": action.ID, "failure_mode": "explode"}); err == nil || !strings.Contains(err.Error(), "unsupported failure_mode") {
+		t.Fatalf("expected unsupported failure mode, got %v", err)
 	}
 }
 
