@@ -186,7 +186,7 @@ func (a *App) prepareWorkload(appCtx *sdk.AppCtx, db *sql.DB, in RunSpec) (*Work
 		ID: id, Name: spec.Name, BlueprintSlug: spec.BlueprintSlug, HostID: targetID, InstanceID: targetID,
 		Kind: "container", Image: spec.Image, Status: StatusCreating, DesiredStatus: StatusRunning,
 		ContainerName: containerName, NetworkName: networkName, HealthStatus: "unknown",
-		HealthPath: spec.HealthPath, ConfigJSON: encodeJSON(spec), Env: spec.Env,
+		HealthPath: spec.HealthPath, ConfigJSON: encodeJSON(sanitizeRunSpecForStorage(spec)), Env: spec.Env,
 		EnvJSON: encodeJSON(spec.Env), Resources: spec.Resources, ResourcesJSON: encodeJSON(spec.Resources),
 		RestartPolicy: spec.RestartPolicy,
 	}
@@ -238,6 +238,17 @@ func (a *App) startWorkloadRuntime(ctx context.Context, appCtx *sdk.AppCtx, db *
 	for _, v := range spec.Volumes {
 		log.Printf("[containers] runtime create_volume workload_id=%s volume=%q mount=%q", id, v.DockerVolumeName, v.MountPath)
 		if err := backend.CreateVolume(ctx, v.DockerVolumeName); err != nil {
+			return cleanupRuntime(err)
+		}
+	}
+	writes, err := resolveFileWrites(spec)
+	if err != nil {
+		return cleanupRuntime(err)
+	}
+	for _, write := range writes {
+		log.Printf("[containers] runtime write_file workload_id=%s path=%q volume=%q mode=%s secret=%t bytes=%d",
+			id, write.Path, write.VolumeName, write.Mode, write.Secret, len(write.Content))
+		if err := backend.WriteVolumeFile(ctx, write.VolumeName, write.RelPath, write.Content, write.Mode); err != nil {
 			return cleanupRuntime(err)
 		}
 	}
@@ -310,6 +321,9 @@ func (a *App) expandBlueprint(db *sql.DB, in RunSpec) (RunSpec, error) {
 	}
 	if len(in.Volumes) > 0 {
 		base.Volumes = in.Volumes
+	}
+	if len(in.Files) > 0 {
+		base.Files = in.Files
 	}
 	if in.HealthPath != "" {
 		base.HealthPath = in.HealthPath
@@ -1052,6 +1066,7 @@ func runSchema() map[string]any {
 		"ports":          map[string]any{"type": "array"},
 		"env":            map[string]any{"type": "object"},
 		"volumes":        map[string]any{"type": "array"},
+		"files":          map[string]any{"type": "array", "items": schemaObject(map[string]any{"path": map[string]any{"type": "string"}, "content": map[string]any{"type": "string"}, "content_base64": map[string]any{"type": "string"}, "mode": map[string]any{"type": "string"}, "secret": map[string]any{"type": "boolean"}}, []string{"path"})},
 		"health_path":    map[string]any{"type": "string"},
 		"resources":      map[string]any{"type": "object"},
 		"restart_policy": map[string]any{"type": "string"},

@@ -2,10 +2,12 @@ package main
 
 import (
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"path"
 	"regexp"
 	"strconv"
 	"strings"
@@ -65,6 +67,14 @@ type VolumeSpec struct {
 	SizeBytes        int64  `json:"size_bytes,omitempty"`
 }
 
+type FileSpec struct {
+	Path          string `json:"path"`
+	Content       string `json:"content,omitempty"`
+	ContentBase64 string `json:"content_base64,omitempty"`
+	Mode          string `json:"mode,omitempty"`
+	Secret        bool   `json:"secret,omitempty"`
+}
+
 type ResourceSpec struct {
 	MemoryMB int     `json:"memory_mb,omitempty"`
 	CPU      float64 `json:"cpu,omitempty"`
@@ -94,6 +104,7 @@ type RunSpec struct {
 	Ports         []PortSpec        `json:"ports,omitempty"`
 	Env           map[string]string `json:"env,omitempty"`
 	Volumes       []VolumeSpec      `json:"volumes,omitempty"`
+	Files         []FileSpec        `json:"files,omitempty"`
 	HealthPath    string            `json:"health_path,omitempty"`
 	Resources     ResourceSpec      `json:"resources,omitempty"`
 	RestartPolicy string            `json:"restart_policy,omitempty"`
@@ -170,7 +181,7 @@ func normalizeRunSpec(in RunSpec) (RunSpec, error) {
 	for i := range in.Volumes {
 		v := &in.Volumes[i]
 		v.Name = strings.ToLower(strings.TrimSpace(v.Name))
-		v.MountPath = strings.TrimSpace(v.MountPath)
+		v.MountPath = path.Clean(strings.TrimSpace(v.MountPath))
 		if v.Name == "" {
 			return in, fmt.Errorf("volumes[%d].name required", i)
 		}
@@ -181,7 +192,147 @@ func normalizeRunSpec(in RunSpec) (RunSpec, error) {
 			return in, fmt.Errorf("volumes[%d].mount_path must be absolute", i)
 		}
 	}
+	for i := range in.Files {
+		if err := normalizeFileSpec(&in.Files[i], i, in.Volumes); err != nil {
+			return in, err
+		}
+	}
 	return in, nil
+}
+
+func normalizeFileSpec(f *FileSpec, i int, volumes []VolumeSpec) error {
+	f.Path = path.Clean(strings.TrimSpace(f.Path))
+	if f.Path == "." || f.Path == "" {
+		return fmt.Errorf("files[%d].path required", i)
+	}
+	if !strings.HasPrefix(f.Path, "/") {
+		return fmt.Errorf("files[%d].path must be absolute", i)
+	}
+	if f.Path == "/" {
+		return fmt.Errorf("files[%d].path must target a file", i)
+	}
+	if f.Content != "" && f.ContentBase64 != "" {
+		return fmt.Errorf("files[%d] must set only one of content or content_base64", i)
+	}
+	if f.Content == "" && f.ContentBase64 == "" {
+		return fmt.Errorf("files[%d] content or content_base64 required", i)
+	}
+	if f.ContentBase64 != "" {
+		if _, err := base64.StdEncoding.DecodeString(f.ContentBase64); err != nil {
+			return fmt.Errorf("files[%d].content_base64 invalid: %w", i, err)
+		}
+	}
+	mode := strings.TrimSpace(f.Mode)
+	if mode == "" {
+		mode = "0600"
+	}
+	n, err := strconv.ParseUint(mode, 8, 32)
+	if err != nil || n > 0o777 {
+		return fmt.Errorf("files[%d].mode must be an octal permission from 0000 to 0777", i)
+	}
+	f.Mode = fmt.Sprintf("%04o", n)
+	if _, _, err := resolveVolumeFileTarget(volumes, f.Path); err != nil {
+		return fmt.Errorf("files[%d].path: %w", i, err)
+	}
+	return nil
+}
+
+type VolumeFileWrite struct {
+	Path       string
+	VolumeName string
+	RelPath    string
+	Content    []byte
+	Mode       string
+	Secret     bool
+}
+
+func resolveFileWrites(spec RunSpec) ([]VolumeFileWrite, error) {
+	if len(spec.Files) == 0 {
+		return nil, nil
+	}
+	out := make([]VolumeFileWrite, 0, len(spec.Files))
+	for i, f := range spec.Files {
+		volume, relPath, err := resolveVolumeFileTarget(spec.Volumes, f.Path)
+		if err != nil {
+			return nil, fmt.Errorf("files[%d].path: %w", i, err)
+		}
+		if strings.TrimSpace(volume.DockerVolumeName) == "" {
+			return nil, fmt.Errorf("files[%d].path: target volume %q has no docker volume name", i, volume.Name)
+		}
+		content, err := fileContentBytes(f)
+		if err != nil {
+			return nil, fmt.Errorf("files[%d]: %w", i, err)
+		}
+		out = append(out, VolumeFileWrite{
+			Path:       f.Path,
+			VolumeName: volume.DockerVolumeName,
+			RelPath:    relPath,
+			Content:    content,
+			Mode:       f.Mode,
+			Secret:     f.Secret,
+		})
+	}
+	return out, nil
+}
+
+func resolveVolumeFileTarget(volumes []VolumeSpec, filePath string) (VolumeSpec, string, error) {
+	cleanPath := path.Clean(filePath)
+	var best *VolumeSpec
+	bestLen := -1
+	for i := range volumes {
+		mount := path.Clean(strings.TrimSpace(volumes[i].MountPath))
+		if mount == "." || mount == "" || !strings.HasPrefix(mount, "/") {
+			continue
+		}
+		matches := false
+		switch {
+		case mount == "/":
+			matches = strings.HasPrefix(cleanPath, "/")
+		case cleanPath == mount:
+			return VolumeSpec{}, "", errors.New("must target a file below a declared volume mount")
+		case strings.HasPrefix(cleanPath, mount+"/"):
+			matches = true
+		}
+		if matches && len(mount) > bestLen {
+			best = &volumes[i]
+			bestLen = len(mount)
+		}
+	}
+	if best == nil {
+		return VolumeSpec{}, "", errors.New("must be under a declared volume mount")
+	}
+	mount := path.Clean(best.MountPath)
+	rel := ""
+	if mount == "/" {
+		rel = strings.TrimPrefix(cleanPath, "/")
+	} else {
+		rel = strings.TrimPrefix(cleanPath, mount+"/")
+	}
+	rel = strings.TrimPrefix(path.Clean("/"+rel), "/")
+	if rel == "" || rel == "." {
+		return VolumeSpec{}, "", errors.New("must target a file below a declared volume mount")
+	}
+	return *best, rel, nil
+}
+
+func fileContentBytes(f FileSpec) ([]byte, error) {
+	if f.ContentBase64 != "" {
+		return base64.StdEncoding.DecodeString(f.ContentBase64)
+	}
+	return []byte(f.Content), nil
+}
+
+func sanitizeRunSpecForStorage(spec RunSpec) RunSpec {
+	out := spec
+	if len(out.Files) == 0 {
+		return out
+	}
+	out.Files = append([]FileSpec(nil), out.Files...)
+	for i := range out.Files {
+		out.Files[i].Content = ""
+		out.Files[i].ContentBase64 = ""
+	}
+	return out
 }
 
 func newWorkloadID() string {

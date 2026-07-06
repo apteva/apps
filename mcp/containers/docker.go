@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -22,6 +23,7 @@ type DockerBackend interface {
 	Probe(ctx context.Context) error
 	CreateNetwork(ctx context.Context, name string) error
 	CreateVolume(ctx context.Context, name string) error
+	WriteVolumeFile(ctx context.Context, volumeName, relPath string, content []byte, mode string) error
 	Run(ctx context.Context, spec RunSpec, containerName, networkName string) (string, error)
 	Start(ctx context.Context, containerName string) error
 	Stop(ctx context.Context, containerName string) error
@@ -66,6 +68,20 @@ func (d LocalDocker) CreateVolume(ctx context.Context, name string) error {
 		return nil
 	}
 	_, err := docker(ctx, "volume", "create", name)
+	return err
+}
+
+func (d LocalDocker) WriteVolumeFile(ctx context.Context, volumeName, relPath string, content []byte, mode string) error {
+	target := "/target/" + strings.TrimLeft(relPath, "/")
+	script := `set -eu
+dest="$1"
+mode="$2"
+mkdir -p "$(dirname "$dest")"
+tmp="${dest}.tmp.$$"
+cat > "$tmp"
+chmod "$mode" "$tmp"
+mv "$tmp" "$dest"`
+	_, err := dockerWithInput(ctx, content, "run", "--rm", "-i", "-v", volumeName+":/target", "alpine:3.20", "sh", "-c", script, "sh", target, mode)
 	return err
 }
 
@@ -208,6 +224,42 @@ func (d RemoteDocker) CreateVolume(ctx context.Context, name string) error {
 	cmd := "docker volume inspect " + shellQuote(name) + " >/dev/null 2>&1 || docker volume create " + shellQuote(name)
 	_, _, err := d.runRemote(ctx, cmd, 30)
 	return err
+}
+
+func (d RemoteDocker) WriteVolumeFile(ctx context.Context, volumeName, relPath string, content []byte, mode string) error {
+	if d.app == nil || d.app.PlatformAPI() == nil {
+		return errors.New("platform API unavailable")
+	}
+	if err := d.ensureDocker(ctx); err != nil {
+		return err
+	}
+	hostPath := fmt.Sprintf("/tmp/apteva-containers-files/%d/%d", d.instanceID, time.Now().UnixNano())
+	var uploadOut map[string]any
+	if err := d.app.PlatformAPI().CallAppResult("instances", "instance_upload_file", map[string]any{
+		"id":          d.instanceID,
+		"path":        hostPath,
+		"content_b64": base64.StdEncoding.EncodeToString(content),
+	}, &uploadOut); err != nil {
+		return fmt.Errorf("stage remote volume file: %w", err)
+	}
+	defer func() {
+		_, _, _ = d.runRemote(context.Background(), "rm -f "+shellQuote(hostPath), 15)
+	}()
+	target := "/target/" + strings.TrimLeft(relPath, "/")
+	script := `set -eu
+dest="$1"
+mode="$2"
+mkdir -p "$(dirname "$dest")"
+tmp="${dest}.tmp.$$"
+cat /payload > "$tmp"
+chmod "$mode" "$tmp"
+mv "$tmp" "$dest"`
+	cmd := shellJoin("docker", "run", "--rm", "-v", volumeName+":/target", "-v", hostPath+":/payload:ro", "alpine:3.20", "sh", "-c", script, "sh", target, mode)
+	_, _, err := d.runRemote(ctx, cmd, 120)
+	if err != nil {
+		return formatDockerError([]string{"run", "--rm", "-v", volumeName + ":/target", "-v", "<staged-file>:/payload:ro", "alpine:3.20", "sh", "-c", "<write-file>"}, err.Error())
+	}
+	return nil
 }
 
 func (d RemoteDocker) Run(ctx context.Context, spec RunSpec, containerName, networkName string) (string, error) {
@@ -427,12 +479,19 @@ $SUDO systemctl enable --now docker >/dev/null 2>&1 ||
 docker version >/dev/null 2>&1`
 
 func docker(ctx context.Context, args ...string) (string, error) {
+	return dockerWithInput(ctx, nil, args...)
+}
+
+func dockerWithInput(ctx context.Context, stdin []byte, args ...string) (string, error) {
 	start := time.Now()
 	log.Printf("[containers] docker start args=%s", redactDockerArgs(args))
 	cmd := exec.CommandContext(ctx, "docker", args...)
 	var out, stderr bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &stderr
+	if stdin != nil {
+		cmd.Stdin = bytes.NewReader(stdin)
+	}
 	if err := cmd.Run(); err != nil {
 		msg := strings.TrimSpace(stderr.String())
 		if msg == "" {

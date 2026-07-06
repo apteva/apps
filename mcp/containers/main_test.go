@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"os"
@@ -93,6 +94,7 @@ func TestNormalizeRunSpecDefaults(t *testing.T) {
 		Image:   "nginx:alpine",
 		Ports:   []PortSpec{{ContainerPort: 80}},
 		Volumes: []VolumeSpec{{Name: "data", MountPath: "/data"}},
+		Files:   []FileSpec{{Path: "/data/apteva.yaml", Content: "server:\n  registration: locked\n"}},
 	})
 	if err != nil {
 		t.Fatalf("normalize: %v", err)
@@ -105,6 +107,9 @@ func TestNormalizeRunSpecDefaults(t *testing.T) {
 	}
 	if spec.Ports[0].BindAddr != "127.0.0.1" || spec.Ports[0].Protocol != "tcp" {
 		t.Fatalf("port defaults not applied: %+v", spec.Ports[0])
+	}
+	if spec.Files[0].Mode != "0600" || spec.Files[0].Path != "/data/apteva.yaml" {
+		t.Fatalf("file defaults not applied: %+v", spec.Files[0])
 	}
 }
 
@@ -134,11 +139,43 @@ func TestNormalizeRunSpecRejectsUnsafeInputs(t *testing.T) {
 		{Name: "ok", Image: "nginx", HostID: 7, InstanceID: 8},
 		{Name: "ok", Image: "nginx", Ports: []PortSpec{{ContainerPort: 70000}}},
 		{Name: "ok", Image: "nginx", Volumes: []VolumeSpec{{Name: "data", MountPath: "relative"}}},
+		{Name: "ok", Image: "nginx", Volumes: []VolumeSpec{{Name: "data", MountPath: "/data"}}, Files: []FileSpec{{Path: "relative", Content: "x"}}},
+		{Name: "ok", Image: "nginx", Volumes: []VolumeSpec{{Name: "data", MountPath: "/data"}}, Files: []FileSpec{{Path: "/etc/apteva.yaml", Content: "x"}}},
+		{Name: "ok", Image: "nginx", Volumes: []VolumeSpec{{Name: "data", MountPath: "/data"}}, Files: []FileSpec{{Path: "/data/apteva.yaml", Content: "x", ContentBase64: "eA=="}}},
+		{Name: "ok", Image: "nginx", Volumes: []VolumeSpec{{Name: "data", MountPath: "/data"}}, Files: []FileSpec{{Path: "/data/apteva.yaml", Content: "x", Mode: "9999"}}},
 	}
 	for _, spec := range bad {
 		if _, err := normalizeRunSpec(spec); err == nil {
 			t.Fatalf("expected error for %+v", spec)
 		}
+	}
+}
+
+func TestNormalizeRunSpecAcceptsBase64FileContent(t *testing.T) {
+	spec, err := normalizeRunSpec(RunSpec{
+		Name:    "demo",
+		Image:   "nginx",
+		Volumes: []VolumeSpec{{Name: "data", MountPath: "/data"}},
+		Files: []FileSpec{{
+			Path:          "/data/config.json",
+			ContentBase64: base64.StdEncoding.EncodeToString([]byte(`{"ok":true}`)),
+			Mode:          "0640",
+		}},
+	})
+	if err != nil {
+		t.Fatalf("normalize: %v", err)
+	}
+	writes, err := resolveFileWrites(RunSpec{
+		Name:    spec.Name,
+		Image:   spec.Image,
+		Volumes: []VolumeSpec{{Name: "data", DockerVolumeName: "containers-demo-data", MountPath: "/data"}},
+		Files:   spec.Files,
+	})
+	if err != nil {
+		t.Fatalf("resolve writes: %v", err)
+	}
+	if len(writes) != 1 || string(writes[0].Content) != `{"ok":true}` || writes[0].RelPath != "config.json" {
+		t.Fatalf("unexpected writes: %+v", writes)
 	}
 }
 
@@ -409,6 +446,40 @@ func TestRemoteDockerUsesInstancesRunCommand(t *testing.T) {
 	}
 }
 
+func TestRemoteDockerWritesVolumeFileWithoutContentInRunCommand(t *testing.T) {
+	platform := &containersPlatformStub{}
+	manifest := (&App{}).Manifest()
+	ctx := sdk.NewAppCtxForTest(&manifest, nil, sdk.Config{}, platform, nil)
+	remote := RemoteDocker{app: ctx, instanceID: 7}
+	secret := "super-secret-password"
+	if err := remote.WriteVolumeFile(context.Background(), "containers-demo-data", "secrets/password", []byte(secret), "0400"); err != nil {
+		t.Fatalf("write volume file: %v", err)
+	}
+	if len(platform.calls) < 3 {
+		t.Fatalf("calls=%d, want at least 3", len(platform.calls))
+	}
+	if platform.calls[0].tool != "instance_run_command" {
+		t.Fatalf("first call = %+v, want docker bootstrap", platform.calls[0])
+	}
+	if platform.calls[1].tool != "instance_upload_file" {
+		t.Fatalf("second call = %+v, want upload", platform.calls[1])
+	}
+	runCall := platform.calls[2]
+	if runCall.tool != "instance_run_command" {
+		t.Fatalf("third call = %+v, want run command", runCall)
+	}
+	cmd, _ := runCall.input["cmd"].(string)
+	encoded := base64.StdEncoding.EncodeToString([]byte(secret))
+	if strings.Contains(cmd, secret) || strings.Contains(cmd, encoded) {
+		t.Fatalf("remote run command leaked file content: %q", cmd)
+	}
+	for _, want := range []string{"'docker' 'run'", "'containers-demo-data:/target'", "'/target/secrets/password'", "'0400'"} {
+		if !strings.Contains(cmd, want) {
+			t.Fatalf("remote write command missing %q in %q", want, cmd)
+		}
+	}
+}
+
 func TestRemoteDockerBootstrapFailureStopsDockerCommand(t *testing.T) {
 	platform := &containersPlatformStub{failBootstrap: true}
 	manifest := (&App{}).Manifest()
@@ -528,6 +599,137 @@ func TestStartRuntimeCleansNetworkAndVolumesWhenRunFails(t *testing.T) {
 	}
 }
 
+func TestPrepareWorkloadSanitizesFileContentsFromConfigJSON(t *testing.T) {
+	db := testDB(t)
+	app := &App{backend: fakeDockerBackend{}}
+	w, _, err := app.prepareWorkload(nil, db, RunSpec{
+		Name:    "demo",
+		Image:   "nginx:alpine",
+		Volumes: []VolumeSpec{{Name: "data", MountPath: "/data"}},
+		Files: []FileSpec{{
+			Path:    "/data/apteva.yaml",
+			Content: "top-secret-config",
+			Mode:    "0600",
+			Secret:  true,
+		}},
+	})
+	if err != nil {
+		t.Fatalf("prepare: %v", err)
+	}
+	if strings.Contains(w.ConfigJSON, "top-secret-config") || strings.Contains(w.ConfigJSON, "content") {
+		t.Fatalf("config_json leaked file content: %s", w.ConfigJSON)
+	}
+	if !strings.Contains(w.ConfigJSON, "/data/apteva.yaml") || !strings.Contains(w.ConfigJSON, `"secret":true`) {
+		t.Fatalf("config_json missing file metadata: %s", w.ConfigJSON)
+	}
+	got, err := getWorkload(db, w.ID)
+	if err != nil {
+		t.Fatalf("get workload: %v", err)
+	}
+	if strings.Contains(got.ConfigJSON, "top-secret-config") || strings.Contains(got.ConfigJSON, "content") {
+		t.Fatalf("stored config_json leaked file content: %s", got.ConfigJSON)
+	}
+}
+
+func TestStartRuntimeWritesFilesBeforeRun(t *testing.T) {
+	db := testDB(t)
+	manifest := (&App{}).Manifest()
+	ctx := sdk.NewAppCtxForTest(&manifest, db, sdk.Config{}, nil, nil)
+	var ops []string
+	var writes []VolumeFileWrite
+	app := &App{backend: fakeDockerBackend{ops: &ops, writes: &writes}}
+	w := &Workload{
+		ID:            "w1",
+		Name:          "demo",
+		Image:         "nginx:alpine",
+		Status:        StatusCreating,
+		DesiredStatus: StatusRunning,
+		ContainerName: "containers-demo",
+		NetworkName:   "containers-demo",
+	}
+	vols := []VolumeSpec{{Name: "data", DockerVolumeName: "containers-demo-data", MountPath: "/data"}}
+	if err := insertWorkload(db, w, nil, vols); err != nil {
+		t.Fatalf("insert workload: %v", err)
+	}
+	err := app.startWorkloadRuntime(context.Background(), ctx, db, w.ID, RunSpec{
+		Name:          "demo",
+		Image:         "nginx:alpine",
+		RestartPolicy: "unless-stopped",
+		Volumes:       vols,
+		Files: []FileSpec{{
+			Path:    "/data/apteva.yaml",
+			Content: "server:\n  public_url: https://agent.example.com\n",
+			Mode:    "0600",
+			Secret:  true,
+		}},
+	}, w.ContainerName, w.NetworkName)
+	if err != nil {
+		t.Fatalf("start runtime: %v", err)
+	}
+	wantOps := []string{
+		"network:containers-demo",
+		"volume:containers-demo-data",
+		"write:containers-demo-data:apteva.yaml",
+		"run:containers-demo",
+	}
+	if strings.Join(ops, "|") != strings.Join(wantOps, "|") {
+		t.Fatalf("ops=%#v, want %#v", ops, wantOps)
+	}
+	if len(writes) != 1 || writes[0].VolumeName != "containers-demo-data" || writes[0].RelPath != "apteva.yaml" || string(writes[0].Content) == "" || writes[0].Mode != "0600" {
+		t.Fatalf("unexpected writes: %+v", writes)
+	}
+}
+
+func TestStartRuntimeCleansNetworkAndVolumesWhenFileWriteFails(t *testing.T) {
+	db := testDB(t)
+	manifest := (&App{}).Manifest()
+	ctx := sdk.NewAppCtxForTest(&manifest, db, sdk.Config{}, nil, nil)
+	var ops []string
+	var removedNetworks []string
+	var removedVolumes []string
+	app := &App{backend: fakeDockerBackend{
+		writeErr:        errors.New("write failed"),
+		ops:             &ops,
+		removedNetworks: &removedNetworks,
+		removedVolumes:  &removedVolumes,
+	}}
+	w := &Workload{
+		ID:            "w1",
+		Name:          "demo",
+		Image:         "nginx:alpine",
+		Status:        StatusCreating,
+		DesiredStatus: StatusRunning,
+		ContainerName: "containers-demo",
+		NetworkName:   "containers-demo",
+	}
+	vols := []VolumeSpec{{Name: "data", DockerVolumeName: "containers-demo-data", MountPath: "/data"}}
+	if err := insertWorkload(db, w, nil, vols); err != nil {
+		t.Fatalf("insert workload: %v", err)
+	}
+	err := app.startWorkloadRuntime(context.Background(), ctx, db, w.ID, RunSpec{
+		Name:          "demo",
+		Image:         "nginx:alpine",
+		RestartPolicy: "unless-stopped",
+		Volumes:       vols,
+		Files:         []FileSpec{{Path: "/data/apteva.yaml", Content: "secret-value", Mode: "0600", Secret: true}},
+	}, w.ContainerName, w.NetworkName)
+	if err == nil || !strings.Contains(err.Error(), "write failed") {
+		t.Fatalf("expected write failure, got %v", err)
+	}
+	if strings.Contains(err.Error(), "secret-value") {
+		t.Fatalf("write failure leaked secret content: %v", err)
+	}
+	if strings.Contains(strings.Join(ops, "|"), "run:") {
+		t.Fatalf("run should not happen after write failure: %#v", ops)
+	}
+	if len(removedVolumes) != 1 || removedVolumes[0] != "containers-demo-data" {
+		t.Fatalf("removedVolumes=%v", removedVolumes)
+	}
+	if len(removedNetworks) != 1 || removedNetworks[0] != "containers-demo" {
+		t.Fatalf("removedNetworks=%v", removedNetworks)
+	}
+}
+
 func TestContainerHostsIncludesInstancesAndDefault(t *testing.T) {
 	platform := &containersPlatformStub{instances: []containerHost{
 		{ID: 0, Name: "localhost", Provider: "local", Status: "ready", PublicIPv4: "127.0.0.1"},
@@ -586,6 +788,8 @@ func (p *containersPlatformStub) CallAppResult(appName, tool string, input map[s
 		} else {
 			raw, _ = json.Marshal(map[string]any{"output": "cid123\n", "exit_code": 0})
 		}
+	case "instance_upload_file":
+		raw, _ = json.Marshal(map[string]any{"bytes_written": 12})
 	case "instance_get":
 		raw, _ = json.Marshal(map[string]any{"instance": map[string]any{"public_ipv4": p.publicIPv4, "status": "ready"}})
 	case "instance_list":
@@ -601,21 +805,42 @@ type fakeDockerBackend struct {
 	removeNetworkErr error
 	removeVolumeErr  error
 	runErr           error
+	writeErr         error
 	removedNetworks  *[]string
 	removedVolumes   *[]string
 	inspectState     *ContainerState
 	inspectErr       error
 	volumeUsage      map[string]int64
+	ops              *[]string
+	writes           *[]VolumeFileWrite
 }
 
 func (f fakeDockerBackend) Probe(context.Context) error { return nil }
-func (f fakeDockerBackend) CreateNetwork(context.Context, string) error {
+func (f fakeDockerBackend) CreateNetwork(_ context.Context, name string) error {
+	if f.ops != nil {
+		*f.ops = append(*f.ops, "network:"+name)
+	}
 	return nil
 }
-func (f fakeDockerBackend) CreateVolume(context.Context, string) error {
+func (f fakeDockerBackend) CreateVolume(_ context.Context, name string) error {
+	if f.ops != nil {
+		*f.ops = append(*f.ops, "volume:"+name)
+	}
 	return nil
 }
-func (f fakeDockerBackend) Run(context.Context, RunSpec, string, string) (string, error) {
+func (f fakeDockerBackend) WriteVolumeFile(_ context.Context, volumeName, relPath string, content []byte, mode string) error {
+	if f.ops != nil {
+		*f.ops = append(*f.ops, "write:"+volumeName+":"+relPath)
+	}
+	if f.writes != nil {
+		*f.writes = append(*f.writes, VolumeFileWrite{VolumeName: volumeName, RelPath: relPath, Content: content, Mode: mode})
+	}
+	return f.writeErr
+}
+func (f fakeDockerBackend) Run(_ context.Context, _ RunSpec, containerName, _ string) (string, error) {
+	if f.ops != nil {
+		*f.ops = append(*f.ops, "run:"+containerName)
+	}
 	if f.runErr != nil {
 		return "", f.runErr
 	}
