@@ -39,7 +39,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: web
 display_name: Web
-version: 0.1.10
+version: 0.1.11
 description: Browser-native web intelligence for agents.
 author: Apteva
 scopes: [project, global]
@@ -1092,6 +1092,20 @@ func (a *App) dismissCookieBannerWithSOM(ctx *sdk.AppCtx, sessionID string, args
 		"action":     "wait",
 		"duration":   800,
 	}), &waitOut)
+	var verifyShot computerSOMScreenshot
+	if err := ctx.PlatformAPI().CallAppResult("computer", "computer_use", withProjectID(ctx, map[string]any{
+		"session_id":  sessionID,
+		"action":      "screenshot",
+		"som":         true,
+		"include_som": true,
+	}), &verifyShot); err == nil {
+		stillVisible := hasVisibleCookieAcceptTarget(verifyShot.SOM)
+		out["dismissed"] = !stillVisible
+		if stillVisible {
+			out["reason"] = "som_accept_target_still_visible_after_click"
+		}
+		return true
+	}
 	verified, _ := a.extractBrowserDOM(ctx, sessionID, mapMerge(args, map[string]any{
 		"formats":   []string{"text", "html"},
 		"max_chars": 50000,
@@ -1155,6 +1169,11 @@ func isCookieAcceptTarget(t setOfMarkTarget) bool {
 		strings.Contains(text, "accept cookies") ||
 		strings.Contains(text, "allow all") ||
 		strings.Contains(text, "i accept")
+}
+
+func hasVisibleCookieAcceptTarget(targets []setOfMarkTarget) bool {
+	_, ok := findCookieAcceptTarget(targets)
+	return ok
 }
 
 func isGenericCookieBanner(r browserRegion, text string) bool {

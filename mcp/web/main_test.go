@@ -335,6 +335,7 @@ func TestSmartSnapshotDismissesCookieBanner(t *testing.T) {
 func TestSmartSnapshotDismissesCookieBannerWithSOM(t *testing.T) {
 	plat := newFakePlatform()
 	plat.cookieTextBanner = true
+	plat.cookiePolicyText = true
 	ctx, app := newTestCtx(t, plat, tk.WithProjectID("proj-web"))
 
 	outAny, err := app.toolSnapshot(ctx, map[string]any{
@@ -350,19 +351,20 @@ func TestSmartSnapshotDismissesCookieBannerWithSOM(t *testing.T) {
 	if cookie["strategy"] != "som_accept_button" || cookie["dismissed"] != true || cookie["label"] != 9 {
 		t.Fatalf("cookie_handling=%#v", cookie)
 	}
-	var sawSOM, sawLabelClick bool
+	var somCalls int
+	var sawLabelClick bool
 	for _, c := range plat.calls {
 		if c.app != "computer" || c.tool != "computer_use" {
 			continue
 		}
 		if c.args["action"] == "screenshot" && c.args["include_som"] == true {
-			sawSOM = true
+			somCalls++
 		}
 		if c.args["action"] == "click" && c.args["label"] == 9 {
 			sawLabelClick = true
 		}
 	}
-	if !sawSOM || !sawLabelClick {
+	if somCalls < 2 || !sawLabelClick {
 		t.Fatalf("missing som screenshot or label click; calls=%#v", plat.calls)
 	}
 }
@@ -508,6 +510,7 @@ type fakePlatform struct {
 	searchBlocked    bool
 	cookieBanner     bool
 	cookieTextBanner bool
+	cookiePolicyText bool
 	cookieDismissed  bool
 }
 
@@ -647,6 +650,10 @@ func (p *fakePlatform) respond(app, tool string, in map[string]any) map[string]a
 		}
 		text := "Hello This page has useful text."
 		html := "<html><body><h1>Hello</h1><p>This page has useful text.</p></body></html>"
+		if p.cookiePolicyText {
+			text += " Privacy notice and cookies policy."
+			html += `<footer><a href="/cookies">Cookies policy</a></footer>`
+		}
 		if p.cookieTextBanner && !p.cookieDismissed {
 			text += " We use cookies and similar technologies to help personalize content and provide a better experience. I accept."
 			html += `<div class="cookie-bar"><p>We use cookies and similar technologies to help personalize content, tailor and measure ads, and provide a better experience.</p><button>I accept</button></div>`
