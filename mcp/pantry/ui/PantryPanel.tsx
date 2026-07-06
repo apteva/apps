@@ -53,9 +53,11 @@ interface ShoppingLine {
 }
 
 type View = "stock" | "expiring" | "shopping";
+type AddMode = "item" | "stock";
 
 export default function PantryPanel({}: NativePanelProps) {
   const [view, setView] = useState<View>("stock");
+  const [addMode, setAddMode] = useState<AddMode>("stock");
   const [items, setItems] = useState<Item[]>([]);
   const [lots, setLots] = useState<Lot[]>([]);
   const [expiring, setExpiring] = useState<Lot[]>([]);
@@ -173,6 +175,33 @@ export default function PantryPanel({}: NativePanelProps) {
     refresh();
   };
 
+  const submitItem = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!form.name.trim()) return;
+    const body = {
+      name: form.name,
+      default_unit: form.unit || "each",
+      category: form.category,
+      min_quantity: Number(form.min_quantity || "0"),
+      target_quantity: Number(form.target_quantity || "0"),
+    };
+    const res = await fetch(`${API}/items`, {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!res.ok) {
+      setStatus(await res.text());
+      return;
+    }
+    const item: Item = await res.json();
+    setSelectedItem(item.id);
+    setForm({ ...form, name: "" });
+    setStatus("Item saved");
+    refresh();
+  };
+
   const useLot = async (lot: Lot, action: "use" | "discard") => {
     const res = await fetch(`${API}/stock/use`, {
       method: "POST",
@@ -257,23 +286,35 @@ export default function PantryPanel({}: NativePanelProps) {
                 <LotList lots={lots} onUse={useLot} />
               </section>
 
-              <form onSubmit={submitStock} className="border border-border rounded p-3 flex flex-col gap-2 h-fit">
-                <h3 className="text-sm font-semibold">Add Stock</h3>
-                <input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="Item" className="bg-bg-input border border-border rounded px-2 py-1.5 text-sm" />
-                <div className="grid grid-cols-2 gap-2">
-                  <input value={form.quantity} onChange={(e) => setForm({ ...form, quantity: e.target.value })} placeholder="Qty" className="bg-bg-input border border-border rounded px-2 py-1.5 text-sm" />
-                  <input value={form.unit} onChange={(e) => setForm({ ...form, unit: e.target.value })} placeholder="Unit" className="bg-bg-input border border-border rounded px-2 py-1.5 text-sm" />
+              <form onSubmit={addMode === "item" ? submitItem : submitStock} className="border border-border rounded p-3 flex flex-col gap-2 h-fit">
+                <div className="flex items-center justify-between gap-2">
+                  <h3 className="text-sm font-semibold">{addMode === "item" ? "Add Item" : "Add Stock"}</h3>
+                  <div className="border border-border rounded p-0.5 flex text-xs">
+                    <button type="button" onClick={() => setAddMode("item")} className={segClass(addMode === "item")}>Item</button>
+                    <button type="button" onClick={() => setAddMode("stock")} className={segClass(addMode === "stock")}>Stock</button>
+                  </div>
                 </div>
-                <select value={form.location} onChange={(e) => setForm({ ...form, location: e.target.value })} className="bg-bg-input border border-border rounded px-2 py-1.5 text-sm">
-                  {locations.map((l) => <option key={l.id} value={l.name}>{l.name}</option>)}
-                </select>
-                <input type="date" value={form.expires_at} onChange={(e) => setForm({ ...form, expires_at: e.target.value })} className="bg-bg-input border border-border rounded px-2 py-1.5 text-sm" />
+                <input value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} placeholder="Item" className="bg-bg-input border border-border rounded px-2 py-1.5 text-sm" />
+                {addMode === "stock" ? (
+                  <>
+                    <div className="grid grid-cols-2 gap-2">
+                      <input value={form.quantity} onChange={(e) => setForm({ ...form, quantity: e.target.value })} placeholder="Qty" className="bg-bg-input border border-border rounded px-2 py-1.5 text-sm" />
+                      <input value={form.unit} onChange={(e) => setForm({ ...form, unit: e.target.value })} placeholder="Unit" className="bg-bg-input border border-border rounded px-2 py-1.5 text-sm" />
+                    </div>
+                    <select value={form.location} onChange={(e) => setForm({ ...form, location: e.target.value })} className="bg-bg-input border border-border rounded px-2 py-1.5 text-sm">
+                      {locations.map((l) => <option key={l.id} value={l.name}>{l.name}</option>)}
+                    </select>
+                    <input type="date" value={form.expires_at} onChange={(e) => setForm({ ...form, expires_at: e.target.value })} className="bg-bg-input border border-border rounded px-2 py-1.5 text-sm" />
+                  </>
+                ) : (
+                  <input value={form.unit} onChange={(e) => setForm({ ...form, unit: e.target.value })} placeholder="Default unit" className="bg-bg-input border border-border rounded px-2 py-1.5 text-sm" />
+                )}
                 <input value={form.category} onChange={(e) => setForm({ ...form, category: e.target.value })} placeholder="Category" className="bg-bg-input border border-border rounded px-2 py-1.5 text-sm" />
                 <div className="grid grid-cols-2 gap-2">
                   <input value={form.min_quantity} onChange={(e) => setForm({ ...form, min_quantity: e.target.value })} placeholder="Min" className="bg-bg-input border border-border rounded px-2 py-1.5 text-sm" />
                   <input value={form.target_quantity} onChange={(e) => setForm({ ...form, target_quantity: e.target.value })} placeholder="Target" className="bg-bg-input border border-border rounded px-2 py-1.5 text-sm" />
                 </div>
-                <button className="bg-accent text-bg rounded px-3 py-1.5 text-sm" type="submit">Save</button>
+                <button className="bg-accent text-bg rounded px-3 py-1.5 text-sm" type="submit">{addMode === "item" ? "Save Item" : "Save Stock"}</button>
               </form>
             </div>
           )}
@@ -345,6 +386,10 @@ function Metric({ label, value }: { label: string; value: number }) {
 
 function tabClass(active: boolean) {
   return `px-3 py-1.5 rounded text-sm ${active ? "bg-bg-card text-text" : "text-text-muted hover:text-text"}`;
+}
+
+function segClass(active: boolean) {
+  return `px-2 py-1 rounded ${active ? "bg-bg-card text-text" : "text-text-muted hover:text-text"}`;
 }
 
 function fmtQty(n: number) {

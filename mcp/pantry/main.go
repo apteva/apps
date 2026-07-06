@@ -25,7 +25,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: pantry
 display_name: Pantry
-version: 0.1.0
+version: 0.1.1
 description: Food inventory for pantry, fridge, and freezer.
 author: Apteva
 scopes: [project, global]
