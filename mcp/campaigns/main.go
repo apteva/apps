@@ -31,7 +31,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: campaigns
 display_name: Campaigns
-version: 0.2.10
+version: 0.2.11
 description: |
   Bulk-send orchestrator. Compose a campaign, target a CRM segment or
   list, schedule it; jobs drives the materialise → tick loop, messaging
@@ -156,6 +156,31 @@ db:
   driver: sqlite
   path: /data/campaigns.db
   migrations: migrations/
+config_schema:
+  - name: default_batch_size
+    type: number
+    default: 100
+    label: Default tick batch size
+    description: Number of recipients claimed per tick. Per-campaign override via campaign.batch_size.
+  - name: default_tick_seconds
+    type: number
+    default: 60
+    label: Default tick interval (seconds)
+    description: How often the tick job runs while the campaign is sending. Per-campaign override.
+  - name: default_open_tracking
+    type: boolean
+    default: true
+    label: Track email opens by default
+    description: Default open_tracking value for newly created email campaigns when the caller omits it.
+  - name: default_click_tracking
+    type: boolean
+    default: true
+    label: Track email clicks by default
+    description: Default click_tracking value for newly created email campaigns when the caller omits it.
+  - name: public_base_url
+    type: text
+    label: Public base URL for tracking links
+    description: Base URL the unsubscribe and tracking links point at. Defaults to the platform reverse-proxy URL when blank.
 upgrade_policy: auto-patch
 `
 
@@ -288,7 +313,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		// Authoring.
 		{
 			Name:        "campaigns_create",
-			Description: "Create a campaign in draft state. Args: name, channel (email|sms|whatsapp), subject?, body_text?, body_html?, sender_address?, list_id?, segment_id?, batch_size?, tick_interval_seconds?.",
+			Description: "Create a campaign in draft state. Args: name, channel (email|sms|whatsapp), subject?, body_text?, body_html?, sender_address?, list_id?, segment_id?, batch_size?, tick_interval_seconds?, open_tracking?, click_tracking?. Email campaigns default open/click tracking on unless explicitly disabled.",
 			InputSchema: schemaObject(map[string]any{
 				"name":                  map[string]any{"type": "string"},
 				"description":           map[string]any{"type": "string"},
@@ -302,6 +327,8 @@ func (a *App) MCPTools() []sdk.Tool {
 				"segment_id":            map[string]any{"type": "integer"},
 				"batch_size":            map[string]any{"type": "integer"},
 				"tick_interval_seconds": map[string]any{"type": "integer"},
+				"open_tracking":         map[string]any{"type": "boolean"},
+				"click_tracking":        map[string]any{"type": "boolean"},
 			}, []string{"name", "channel"}),
 			Handler: a.toolCampaignsCreate,
 		},
@@ -485,6 +512,7 @@ const (
 	RecipSent         = "sent"
 	RecipDelivered    = "delivered"
 	RecipOpened       = "opened"
+	RecipClicked      = "clicked"
 	RecipBounced      = "bounced"
 	RecipComplained   = "complained"
 	RecipFailed       = "failed"
@@ -620,6 +648,30 @@ func strArg(args map[string]any, key string) string {
 func boolArg(args map[string]any, key string) bool {
 	v, _ := args[key].(bool)
 	return v
+}
+
+func trackingArg(ctx *sdk.AppCtx, args map[string]any, key, channel string) bool {
+	if v, ok := args[key].(bool); ok {
+		return v
+	}
+	if channel != ChannelEmail {
+		return false
+	}
+	return configBool(ctx, "default_"+key, true)
+}
+
+func configBool(ctx *sdk.AppCtx, key string, def bool) bool {
+	if ctx == nil || ctx.Config() == nil {
+		return def
+	}
+	switch strings.ToLower(strings.TrimSpace(ctx.Config().Get(key))) {
+	case "1", "true", "yes", "on":
+		return true
+	case "0", "false", "no", "off":
+		return false
+	default:
+		return def
+	}
 }
 
 func boolToInt(b bool) int {

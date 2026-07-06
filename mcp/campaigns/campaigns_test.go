@@ -116,6 +116,31 @@ func TestCampaignCreateEventIncludesCampaignIDAndStatus(t *testing.T) {
 	if data["status"] != StatusDraft || data["name"] != "Launch" {
 		t.Fatalf("event data=%#v, want draft Launch", data)
 	}
+	if !campaign.OpenTracking || !campaign.ClickTracking {
+		t.Fatalf("tracking defaults open=%v click=%v, want both true", campaign.OpenTracking, campaign.ClickTracking)
+	}
+}
+
+func TestCampaignCreateCanDisableTracking(t *testing.T) {
+	ctx := newCampaignsTestCtx(t, nil)
+
+	out, err := (&App{}).toolCampaignsCreate(ctx, map[string]any{
+		"_project_id":    "test-proj",
+		"name":           "No tracking",
+		"channel":        ChannelEmail,
+		"subject":        "Hello",
+		"body_text":      "Body",
+		"segment_id":     int64(42),
+		"open_tracking":  false,
+		"click_tracking": false,
+	})
+	if err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	campaign := out.(map[string]any)["campaign"].(*Campaign)
+	if campaign.OpenTracking || campaign.ClickTracking {
+		t.Fatalf("tracking open=%v click=%v, want both false", campaign.OpenTracking, campaign.ClickTracking)
+	}
 }
 
 func TestTickEmailCampaignAddsUnsubscribeLinkAndToken(t *testing.T) {
@@ -289,6 +314,34 @@ func TestMessageEventUpdatesCampaignRecipientStatus(t *testing.T) {
 	}
 	if recips[0].Status != RecipOpened {
 		t.Fatalf("delivered downgraded opened status to %q", recips[0].Status)
+	}
+	if err := (&App{}).handleMessageEvent(ctx, sdk.Event{
+		Event:     "message.event",
+		ProjectID: "test-proj",
+		Data:      map[string]any{"message_id": int64(556), "kind": "clicked"},
+	}); err != nil {
+		t.Fatalf("handle clicked: %v", err)
+	}
+	recips, err = dbRecipientsList(ctx.AppDB(), "test-proj", openedCampaignID, "", 10)
+	if err != nil {
+		t.Fatalf("list clicked recipients: %v", err)
+	}
+	if recips[0].Status != RecipClicked {
+		t.Fatalf("clicked status=%q, want clicked", recips[0].Status)
+	}
+	if err := (&App{}).handleMessageEvent(ctx, sdk.Event{
+		Event:     "message.event",
+		ProjectID: "test-proj",
+		Data:      map[string]any{"message_id": int64(556), "kind": "opened"},
+	}); err != nil {
+		t.Fatalf("handle opened after clicked: %v", err)
+	}
+	recips, err = dbRecipientsList(ctx.AppDB(), "test-proj", openedCampaignID, "", 10)
+	if err != nil {
+		t.Fatalf("list clicked recipients after opened: %v", err)
+	}
+	if recips[0].Status != RecipClicked {
+		t.Fatalf("opened downgraded clicked status to %q", recips[0].Status)
 	}
 }
 
