@@ -402,8 +402,9 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name: "repos_dev_start",
-			Description: "Start a Replit-style dev process for a repo. Auto-detects framework " +
+			Description: "Start a dev/test preview process for a repo. This is for testing while editing; use the Deploy app for production builds, releases, domains, and hosting. Auto-detects framework " +
 				"(nextjs / node / go / static) from the file tree, or accepts framework='blank' with run_cmd. " +
+				"For JS/Bun/Node repos with package.json, bootstraps dependencies before the command when node_modules is missing or dependency files changed. " +
 				"Spawns the framework's dev command (next dev / <pm> run dev / go run . / in-process FileServer) " +
 				"with cwd set to the repo's storage_root, so edits via code_edit_file land directly where the " +
 				"running framework's watcher sees them. With expose=true, registers <slug>.<dev_base_hostname> " +

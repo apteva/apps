@@ -2829,7 +2829,7 @@ function DevBar({
             Crashed: <span className="font-mono">{(run?.error || "").split("\n")[0].slice(0, 80)}</span>
           </span>
         ) : (
-          <>Dev runtime stopped</>
+          <>Dev preview stopped · deploy production from the Deploy app</>
         )}
       </span>
       <span className="flex-1" />

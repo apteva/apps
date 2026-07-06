@@ -16,6 +16,7 @@ package main
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -24,6 +25,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"syscall"
@@ -265,6 +267,25 @@ func detectPackageManagerInDir(dir string) string {
 	case exists(filepath.Join(dir, "yarn.lock")):
 		return "yarn"
 	default:
+		body, err := os.ReadFile(filepath.Join(dir, "package.json"))
+		if err == nil {
+			var pkg struct {
+				PackageManager string `json:"packageManager"`
+			}
+			if json.Unmarshal(body, &pkg) == nil {
+				pm := strings.ToLower(pkg.PackageManager)
+				switch {
+				case strings.HasPrefix(pm, "bun@"):
+					return "bun"
+				case strings.HasPrefix(pm, "pnpm@"):
+					return "pnpm"
+				case strings.HasPrefix(pm, "yarn@"):
+					return "yarn"
+				case strings.HasPrefix(pm, "npm@"):
+					return "npm"
+				}
+			}
+		}
 		return "npm"
 	}
 }
@@ -308,9 +329,9 @@ type devSupervisor struct {
 type devProcess struct {
 	DevRunID int64
 	Port     int
-	cmd      *exec.Cmd        // nil for static
+	cmd      *exec.Cmd // nil for static
 	cancel   context.CancelFunc
-	server   *http.Server     // non-nil for static
+	server   *http.Server // non-nil for static
 	logFile  *os.File
 	stopCh   chan struct{}
 }
@@ -434,15 +455,17 @@ func (s *devSupervisor) startDevRun(ctx *sdk.AppCtx, in startDevInput) (*DevRun,
 		return nil, fmt.Errorf("persist dev_run: %w", err)
 	}
 
-	// Node-family frameworks need node_modules/ before `<pm> run dev`
-	// works — otherwise `next dev` / `vite` etc fail with exit 127.
-	// Auto-install on first start (or whenever node_modules is gone)
-	// so "Run" Just Works on a freshly-imported repo. Output streams
-	// to the same log file the panel tails, so the user sees it live.
-	// Override via CODE_SKIP_AUTO_INSTALL=1 if a workflow needs to
-	// manage installs externally.
-	if needsNodeInstall(fw, srcDir) {
-		if err := installNodeDeps(srcDir, logF); err != nil {
+	// JS/Bun/Node repos need dependencies before dev/test commands can
+	// run. This is based on repo contents, not just the detected
+	// framework, so framework=blank with run_cmd="bun run build" still
+	// bootstraps local CLIs such as Tailwind, Vite, Astro, Next, and
+	// TypeScript on a clean workspace. Code's dev runner remains a
+	// test/preview path; production releases still belong to Deploy.
+	if plan, err := nodeDepsInstallPlan(srcDir); err != nil {
+		logF.Close()
+		return nil, err
+	} else if plan.Needed {
+		if err := installNodeDeps(srcDir, logF, plan); err != nil {
 			_ = dbUpdateDevRun(ctx.AppDB(), dr.ID, map[string]any{
 				"status":     "crashed",
 				"stopped_at": time.Now().UTC().Format(time.RFC3339),
@@ -465,40 +488,144 @@ func (s *devSupervisor) startDevRun(ctx *sdk.AppCtx, in startDevInput) (*DevRun,
 	return dbGetDevRun(ctx.AppDB(), in.ProjectID, in.Repo.ID)
 }
 
-// needsNodeInstall returns true when the framework is node-based
-// AND node_modules/ is missing. Skipped when CODE_SKIP_AUTO_INSTALL
-// is set so power users can manage installs themselves (e.g. via
-// `bun install` directly in the storage_root).
-func needsNodeInstall(framework, srcDir string) bool {
-	if os.Getenv("CODE_SKIP_AUTO_INSTALL") != "" {
-		return false
-	}
-	switch framework {
-	case "nextjs", "node":
-		// fall through
-	default:
-		return false
-	}
-	return !exists(filepath.Join(srcDir, "node_modules"))
+var dependencyFingerprintFiles = []string{
+	"package.json",
+	"bun.lock",
+	"bun.lockb",
+	"package-lock.json",
+	"pnpm-lock.yaml",
+	"yarn.lock",
 }
 
-// installNodeDeps runs `<pm> install` synchronously, streaming both
-// stdout and stderr into the dev log so the panel shows progress
-// live. Returns an error if the install command can't be found or
-// exits non-zero. Detects pm via lockfile precedence (bun > pnpm >
-// yarn > npm), same rule used by the dev command resolver.
-func installNodeDeps(srcDir string, logF *os.File) error {
+type nodeDepsInstall struct {
+	Needed bool
+	Reason string
+	PM     string
+	Args   []string
+	Hash   string
+}
+
+// nodeDepsInstallPlan decides whether the dev runner should install JS
+// dependencies before executing a repo command. It intentionally does
+// not look at the framework; run_cmd overrides for "blank" repos still
+// need package-local CLIs when package.json is present.
+func nodeDepsInstallPlan(srcDir string) (nodeDepsInstall, error) {
+	if os.Getenv("CODE_SKIP_AUTO_INSTALL") != "" {
+		return nodeDepsInstall{}, nil
+	}
+	if !exists(filepath.Join(srcDir, "package.json")) {
+		return nodeDepsInstall{}, nil
+	}
+	hash, err := dependencyFingerprint(srcDir)
+	if err != nil {
+		return nodeDepsInstall{}, err
+	}
 	pm := detectPackageManagerInDir(srcDir)
+	plan := nodeDepsInstall{PM: pm, Args: installArgsForPackageManager(srcDir, pm), Hash: hash}
+	if !exists(filepath.Join(srcDir, "node_modules")) {
+		plan.Needed = true
+		plan.Reason = "dependencies missing"
+		return plan, nil
+	}
+	prev, err := os.ReadFile(nodeDepsStatePath(srcDir))
+	if err != nil || strings.TrimSpace(string(prev)) != hash {
+		plan.Needed = true
+		plan.Reason = "dependency files changed"
+		return plan, nil
+	}
+	return plan, nil
+}
+
+func installArgsForPackageManager(srcDir, pm string) []string {
+	switch pm {
+	case "bun":
+		if exists(filepath.Join(srcDir, "bun.lock")) || exists(filepath.Join(srcDir, "bun.lockb")) {
+			return []string{"install", "--frozen-lockfile"}
+		}
+	case "pnpm":
+		if exists(filepath.Join(srcDir, "pnpm-lock.yaml")) {
+			return []string{"install", "--frozen-lockfile"}
+		}
+	case "yarn":
+		if exists(filepath.Join(srcDir, "yarn.lock")) {
+			return []string{"install", "--frozen-lockfile"}
+		}
+	case "npm":
+		if exists(filepath.Join(srcDir, "package-lock.json")) {
+			return []string{"ci"}
+		}
+	}
+	return []string{"install"}
+}
+
+func dependencyFingerprint(srcDir string) (string, error) {
+	type entry struct {
+		Path string
+		Sum  string
+	}
+	entries := make([]entry, 0, len(dependencyFingerprintFiles))
+	for _, name := range dependencyFingerprintFiles {
+		body, err := os.ReadFile(filepath.Join(srcDir, name))
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			return "", err
+		}
+		sum := sha256.Sum256(body)
+		entries = append(entries, entry{Path: name, Sum: fmt.Sprintf("%x", sum[:])})
+	}
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Path < entries[j].Path })
+	body, _ := json.Marshal(entries)
+	sum := sha256.Sum256(body)
+	return fmt.Sprintf("%x", sum[:]), nil
+}
+
+func nodeDepsStatePath(srcDir string) string {
+	return filepath.Join(srcDir, "node_modules", ".apteva-code-deps.sha256")
+}
+
+// installNodeDeps runs the selected package-manager install
+// synchronously, streaming stdout/stderr into the dev log so the panel
+// shows progress live.
+func installNodeDeps(srcDir string, logF *os.File, plan nodeDepsInstall) error {
+	pm := plan.PM
+	if pm == "" {
+		pm = detectPackageManagerInDir(srcDir)
+	}
+	args := plan.Args
+	if len(args) == 0 {
+		args = installArgsForPackageManager(srcDir, pm)
+	}
 	if _, err := exec.LookPath(pm); err != nil {
 		return fmt.Errorf("%s not on PATH; install it first or set CODE_SKIP_AUTO_INSTALL=1 and run install manually", pm)
 	}
-	fmt.Fprintf(logF, "+ %s install (cwd=%s) — first-run dependency install\n", pm, srcDir)
-	cmd := exec.Command(pm, "install")
+	reason := plan.Reason
+	if reason == "" {
+		reason = "dependencies need bootstrap"
+	}
+	fmt.Fprintf(logF, "%s; running %s %s\n", reason, pm, strings.Join(args, " "))
+	fmt.Fprintf(logF, "+ %s %s (cwd=%s)\n", pm, strings.Join(args, " "), srcDir)
+	cmd := exec.Command(pm, args...)
 	cmd.Dir = srcDir
 	cmd.Stdout = logF
 	cmd.Stderr = logF
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("%s install: %w (see dev log for details)", pm, err)
+		return fmt.Errorf("%s %s: %w (see dev log for details)", pm, strings.Join(args, " "), err)
+	}
+	hash := plan.Hash
+	if hash == "" {
+		var err error
+		hash, err = dependencyFingerprint(srcDir)
+		if err != nil {
+			return err
+		}
+	}
+	if err := os.MkdirAll(filepath.Join(srcDir, "node_modules"), 0o755); err != nil {
+		return err
+	}
+	if err := os.WriteFile(nodeDepsStatePath(srcDir), []byte(hash+"\n"), 0o644); err != nil {
+		return err
 	}
 	fmt.Fprintln(logF, "=== install complete ===")
 	return nil
@@ -561,7 +688,11 @@ func (s *devSupervisor) spawnProcess(ctx *sdk.AppCtx, dr *DevRun, srcDir, framew
 	cmd.Env = mergeDevEnv(envJSON, port)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
-	fmt.Fprintf(logF, "+ %s %s (cwd=%s, port=%d)\n", bin, strings.Join(args, " "), srcDir, port)
+	if strings.TrimSpace(runCmd) != "" {
+		fmt.Fprintf(logF, "+ %s (cwd=%s, port=%d)\n", strings.TrimSpace(runCmd), srcDir, port)
+	} else {
+		fmt.Fprintf(logF, "+ %s %s (cwd=%s, port=%d)\n", bin, strings.Join(args, " "), srcDir, port)
+	}
 	if err := cmd.Start(); err != nil {
 		cancel()
 		return fmt.Errorf("exec %s: %w", bin, err)

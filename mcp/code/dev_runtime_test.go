@@ -4,6 +4,8 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -13,9 +15,9 @@ import (
 // "node"); this test enforces that.
 func TestDetectDevFramework(t *testing.T) {
 	cases := []struct {
-		name  string
-		seed  map[string][]byte
-		want  string
+		name string
+		seed map[string][]byte
+		want string
 	}{
 		{"empty", nil, ""},
 		{"go.mod → go", map[string][]byte{"go.mod": []byte("module x")}, "go"},
@@ -95,6 +97,123 @@ func TestTailFile(t *testing.T) {
 	_ = os.WriteFile(p, []byte("a\nb\nc\nd\ne\n"), 0o644)
 	if got, _ := tailFile(p, 2); got != "d\ne\n" {
 		t.Errorf("tail 2: got %q", got)
+	}
+}
+
+func TestNodeDepsInstallPlan_BunRunCmdRepo(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "package.json"), []byte(`{"scripts":{"build":"bun build.ts"}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "bun.lock"), []byte("lock"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	plan, err := nodeDepsInstallPlan(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !plan.Needed {
+		t.Fatal("expected dependency install for package.json repo without node_modules")
+	}
+	if plan.Reason != "dependencies missing" {
+		t.Fatalf("reason = %q", plan.Reason)
+	}
+	if plan.PM != "bun" {
+		t.Fatalf("PM = %q, want bun", plan.PM)
+	}
+	if want := []string{"install", "--frozen-lockfile"}; !reflect.DeepEqual(plan.Args, want) {
+		t.Fatalf("Args = %v, want %v", plan.Args, want)
+	}
+}
+
+func TestNodeDepsInstallPlan_ReinstallsWhenDependencyFilesChange(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "package.json"), []byte(`{"dependencies":{"vite":"1.0.0"}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Join(dir, "node_modules"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	hash, err := dependencyFingerprint(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(nodeDepsStatePath(dir), []byte(hash+"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	plan, err := nodeDepsInstallPlan(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Needed {
+		t.Fatalf("expected dependency install to be skipped when fingerprint is current: %+v", plan)
+	}
+
+	if err := os.WriteFile(filepath.Join(dir, "package.json"), []byte(`{"dependencies":{"vite":"2.0.0"}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	plan, err = nodeDepsInstallPlan(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !plan.Needed || plan.Reason != "dependency files changed" {
+		t.Fatalf("expected reinstall after package.json changed, got %+v", plan)
+	}
+}
+
+func TestInstallNodeDeps_UsesFrozenBunAndRecordsFingerprint(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(dir, "package.json"), []byte(`{"name":"x"}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "bun.lock"), []byte("lock"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	binDir := t.TempDir()
+	fakeBun := filepath.Join(binDir, "bun")
+	script := "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$PWD/bun-args.txt\"\nmkdir -p node_modules\n"
+	if err := os.WriteFile(fakeBun, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	plan, err := nodeDepsInstallPlan(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	logPath := filepath.Join(dir, "dev.log")
+	logF, err := os.Create(logPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := installNodeDeps(dir, logF, plan); err != nil {
+		_ = logF.Close()
+		t.Fatal(err)
+	}
+	if err := logF.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	args, err := os.ReadFile(filepath.Join(dir, "bun-args.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(string(args)); got != "install\n--frozen-lockfile" {
+		t.Fatalf("fake bun args = %q", got)
+	}
+	if !exists(nodeDepsStatePath(dir)) {
+		t.Fatal("expected dependency fingerprint state file")
+	}
+	logBody, _ := os.ReadFile(logPath)
+	log := string(logBody)
+	if !strings.Contains(log, "dependencies missing; running bun install --frozen-lockfile") {
+		t.Fatalf("log does not explain dependency bootstrap:\n%s", log)
+	}
+	if !strings.Contains(log, "+ bun install --frozen-lockfile") {
+		t.Fatalf("log does not show install command:\n%s", log)
 	}
 }
 
