@@ -465,7 +465,7 @@ export default function CampaignsPanel({ projectId, installId }: NativePanelProp
                   className="bg-bg-input border border-border rounded text-xs px-1.5 py-0.5"
                 >
                   <option value="">all</option>
-                  {["pending", "sending", "sent", "delivered", "opened", "bounced", "complained", "failed", "skipped", "unsubscribed"].map((s) => (
+                  {["pending", "sending", "sent", "delivered", "opened", "clicked", "bounced", "complained", "failed", "skipped", "unsubscribed"].map((s) => (
                     <option key={s} value={s}>{s}</option>
                   ))}
                 </select>
@@ -495,6 +495,12 @@ export default function CampaignsPanel({ projectId, installId }: NativePanelProp
               <div className="border border-border rounded p-3 space-y-2 text-sm">
                 <div><span className="text-text-muted">From: </span><span className="text-text">{detail.sender_address || <em className="text-text-dim">install / list default</em>}</span></div>
                 {detail.channel === "email" && detail.subject && <div><span className="text-text-muted">Subject: </span><span className="text-text">{detail.subject}</span></div>}
+                {detail.channel === "email" && (
+                  <div>
+                    <span className="text-text-muted">Tracking: </span>
+                    <span className="text-text">opens {detail.open_tracking ? "on" : "off"} · clicks {detail.click_tracking ? "on" : "off"}</span>
+                  </div>
+                )}
                 {detail.body_text && <pre className="whitespace-pre-wrap font-mono text-xs text-text bg-bg-input/50 rounded p-2 max-h-60 overflow-auto">{detail.body_text}</pre>}
                 {detail.body_html && (
                   <details>
@@ -587,7 +593,7 @@ function StatusPill({ status }: { status: string }) {
 }
 
 function recipientStatusClass(s: string) {
-  if (s === "sent" || s === "delivered" || s === "opened") return "bg-accent/10 text-accent";
+  if (s === "sent" || s === "delivered" || s === "opened" || s === "clicked") return "bg-accent/10 text-accent";
   if (s === "bounced" || s === "complained" || s === "failed") return "bg-red/15 text-red";
   if (s === "unsubscribed") return "bg-amber/15 text-amber";
   if (s === "skipped") return "bg-border text-text-dim";
@@ -610,6 +616,7 @@ function StatsCard({ stats, lastEvent }: { stats: Record<string, number>; lastEv
   const accepted = stats.sent || 0;
   const delivered = stats.delivered || 0;
   const opened = stats.opened || 0;
+  const clicked = stats.clicked || 0;
   const bounced = (stats.bounced || 0) + (stats.complained || 0);
   const failed = stats.failed || 0;
   const pending = (stats.pending || 0) + (stats.sending || 0);
@@ -630,6 +637,7 @@ function StatsCard({ stats, lastEvent }: { stats: Record<string, number>; lastEv
         <Stat label="sent" value={accepted} />
         <Stat label="delivered" value={delivered} />
         <Stat label="opened" value={opened} />
+        <Stat label="clicked" value={clicked} />
         <Stat label="bounced/spam" value={bounced} accent="red" />
         <Stat label="failed" value={failed} accent="red" />
         <Stat label="pending" value={pending} accent="amber" />
@@ -637,7 +645,8 @@ function StatsCard({ stats, lastEvent }: { stats: Record<string, number>; lastEv
         <Stat label="unsubscribed" value={unsubbed} accent="amber" />
       </div>
       <div className="mt-3 h-1.5 bg-bg-input rounded overflow-hidden flex">
-        <div className="bg-accent" style={{ width: `${(opened / total) * 100}%` }} />
+        <div className="bg-accent" style={{ width: `${(clicked / total) * 100}%` }} />
+        <div className="bg-accent/90" style={{ width: `${(opened / total) * 100}%` }} />
         <div className="bg-accent/70" style={{ width: `${(delivered / total) * 100}%` }} />
         <div className="bg-accent/40" style={{ width: `${(accepted / total) * 100}%` }} />
         <div className="bg-red" style={{ width: `${(problems / total) * 100}%` }} />
@@ -784,6 +793,8 @@ function CampaignEditorModal({ editing, lists, segments, onCancel, onSubmit }: {
   const [listID, setListID] = useState<number | "">(editing?.list_id ?? "");
   const [batchSize, setBatchSize] = useState<string>(editing?.batch_size ? String(editing.batch_size) : "");
   const [tickInterval, setTickInterval] = useState<string>(editing?.tick_interval_seconds ? String(editing.tick_interval_seconds) : "");
+  const [openTracking, setOpenTracking] = useState<boolean>(editing ? !!editing.open_tracking : true);
+  const [clickTracking, setClickTracking] = useState<boolean>(editing ? !!editing.click_tracking : true);
   const [busy, setBusy] = useState(false);
 
   const submit = async () => {
@@ -798,6 +809,8 @@ function CampaignEditorModal({ editing, lists, segments, onCancel, onSubmit }: {
         subject: subject.trim(),
         body_text: body,
         body_html: bodyHTML.trim(),
+        open_tracking: channel === "email" ? openTracking : false,
+        click_tracking: channel === "email" ? clickTracking : false,
         list_id: audienceKind === "list" && listID ? Number(listID) : null,
         segment_id: audienceKind === "segment" && segmentID ? Number(segmentID) : null,
       };
@@ -858,6 +871,17 @@ function CampaignEditorModal({ editing, lists, segments, onCancel, onSubmit }: {
             <textarea value={bodyHTML} onChange={(e) => setBodyHTML(e.target.value)} rows={4}
               placeholder="optional"
               className="bg-bg-input border border-border rounded px-2 py-1 font-mono text-xs" />
+            <label className="text-text-muted">Tracking</label>
+            <div className="flex flex-wrap items-center gap-4 text-xs text-text-muted">
+              <label className="flex items-center gap-1.5">
+                <input type="checkbox" checked={openTracking} onChange={(e) => setOpenTracking(e.target.checked)} />
+                Open tracking
+              </label>
+              <label className="flex items-center gap-1.5">
+                <input type="checkbox" checked={clickTracking} onChange={(e) => setClickTracking(e.target.checked)} />
+                Click tracking
+              </label>
+            </div>
           </>
         )}
       </div>

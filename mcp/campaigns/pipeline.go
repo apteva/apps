@@ -59,10 +59,11 @@ func (a *App) toolCampaignsCreate(ctx *sdk.AppCtx, args map[string]any) (any, er
 	if err != nil {
 		return nil, err
 	}
+	channel := strings.ToLower(strings.TrimSpace(strArg(args, "channel")))
 	c := &Campaign{
 		Name:                strArg(args, "name"),
 		Description:         strArg(args, "description"),
-		Channel:             strings.ToLower(strings.TrimSpace(strArg(args, "channel"))),
+		Channel:             channel,
 		SenderAddress:       strArg(args, "sender_address"),
 		Subject:             strArg(args, "subject"),
 		BodyText:            strArg(args, "body_text"),
@@ -70,8 +71,8 @@ func (a *App) toolCampaignsCreate(ctx *sdk.AppCtx, args map[string]any) (any, er
 		TemplateName:        strArg(args, "template_name"),
 		BatchSize:           int64(intArg(args, "batch_size", 0)),
 		TickIntervalSeconds: int64(intArg(args, "tick_interval_seconds", 0)),
-		OpenTracking:        boolArg(args, "open_tracking"),
-		ClickTracking:       boolArg(args, "click_tracking"),
+		OpenTracking:        trackingArg(ctx, args, "open_tracking", channel),
+		ClickTracking:       trackingArg(ctx, args, "click_tracking", channel),
 	}
 	if listID := int64Arg(args, "list_id"); listID != 0 {
 		c.ListID = &listID
@@ -909,9 +910,12 @@ func emitRecipientUpdated(ctx *sdk.AppCtx, rec *Recipient, messageID int64, even
 
 func campaignRecipientStatusForMessageEvent(kind string) string {
 	switch strings.ToLower(strings.TrimSpace(kind)) {
-	case "delivered", "opened":
+	case "delivered", "opened", "clicked":
 		if strings.EqualFold(strings.TrimSpace(kind), "opened") {
 			return RecipOpened
+		}
+		if strings.EqualFold(strings.TrimSpace(kind), "clicked") {
+			return RecipClicked
 		}
 		return RecipDelivered
 	case "bounced":
@@ -932,7 +936,10 @@ func shouldApplyCampaignRecipientStatus(current, next string) bool {
 	if current == RecipBounced || current == RecipComplained || current == RecipFailed || current == RecipSkipped || current == RecipUnsubscribed {
 		return false
 	}
-	if next == RecipDelivered && current == RecipOpened {
+	if next == RecipDelivered && (current == RecipOpened || current == RecipClicked) {
+		return false
+	}
+	if next == RecipOpened && current == RecipClicked {
 		return false
 	}
 	return true
