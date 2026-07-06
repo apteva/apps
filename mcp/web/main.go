@@ -1,4 +1,4 @@
-// Web v0.1.5 — browser-backed web intelligence.
+// Web v0.1.6 — browser-backed web intelligence.
 //
 // The app requires computer for session lifecycle, rendered extraction, and
 // screenshots. It opens a browser before search/extract/crawl/map/research page
@@ -17,7 +17,11 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"image"
+	"image/draw"
+	"image/png"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
 	"os"
@@ -34,7 +38,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: web
 display_name: Web
-version: 0.1.5
+version: 0.1.6
 description: Browser-native web intelligence for agents.
 author: Apteva
 scopes: [project, global]
@@ -61,7 +65,7 @@ provides:
     - name: web_research
       description: "Multi-step browser-backed research with citations, artifacts, and optional response caching."
     - name: web_snapshot
-      description: "Capture visual evidence for a URL or existing computer session. Snapshot cache is only used when max_age is set."
+      description: "Capture visual evidence for a URL or existing computer session, with optional smart query-matched region crops. Snapshot cache is only used when max_age is set."
   ui_panels:
     - slot: project.page
       label: Web
@@ -227,13 +231,17 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "web_snapshot",
-			Description: "Capture visual evidence for a URL or existing computer session. Args: url? or session_id?, backend?, viewport?, label?, store?.",
+			Description: "Capture visual evidence for a URL or existing computer session. Args: url? or session_id?, backend?, viewport?, label?, store?, mode? (viewport|smart), query?, max_shots?, crop?.",
 			InputSchema: schemaObject(map[string]any{
 				"url":        map[string]any{"type": "string"},
 				"session_id": map[string]any{"type": "string"},
 				"backend":    map[string]any{"type": "string"},
 				"viewport":   viewportSchema(),
 				"label":      map[string]any{"type": "string"},
+				"mode":       map[string]any{"type": "string", "enum": []string{"viewport", "smart"}},
+				"query":      map[string]any{"type": "string"},
+				"max_shots":  map[string]any{"type": "integer"},
+				"crop":       map[string]any{"type": "boolean"},
 				"store":      map[string]any{"type": "boolean"},
 				"cache":      cacheModeSchema(),
 				"max_age":    cacheSecondsSchema("Maximum accepted cached snapshot age in seconds. Snapshot caching is disabled unless max_age is set."),
@@ -255,23 +263,53 @@ type browserSession struct {
 }
 
 type browserExtractResult struct {
-	SessionID         string         `json:"session_id"`
-	Backend           string         `json:"backend"`
-	CurrentURL        string         `json:"current_url"`
-	URL               string         `json:"url"`
-	Title             string         `json:"title"`
-	Description       string         `json:"description"`
-	Text              string         `json:"text"`
-	Markdown          string         `json:"markdown"`
-	HTML              string         `json:"html"`
-	Links             []linkInfo     `json:"links"`
-	Images            []string       `json:"images"`
-	Metadata          map[string]any `json:"metadata"`
-	StructuredData    map[string]any `json:"structured_data"`
-	Rendered          bool           `json:"rendered"`
-	ExtractionBackend string         `json:"extraction_backend"`
-	Width             int            `json:"width"`
-	Height            int            `json:"height"`
+	SessionID         string          `json:"session_id"`
+	Backend           string          `json:"backend"`
+	CurrentURL        string          `json:"current_url"`
+	URL               string          `json:"url"`
+	Title             string          `json:"title"`
+	Description       string          `json:"description"`
+	Text              string          `json:"text"`
+	Markdown          string          `json:"markdown"`
+	HTML              string          `json:"html"`
+	Links             []linkInfo      `json:"links"`
+	Images            []string        `json:"images"`
+	Regions           []browserRegion `json:"regions"`
+	Metadata          map[string]any  `json:"metadata"`
+	StructuredData    map[string]any  `json:"structured_data"`
+	Rendered          bool            `json:"rendered"`
+	ExtractionBackend string          `json:"extraction_backend"`
+	Width             int             `json:"width"`
+	Height            int             `json:"height"`
+}
+
+type browserRect struct {
+	X      float64 `json:"x"`
+	Y      float64 `json:"y"`
+	Width  float64 `json:"width"`
+	Height float64 `json:"height"`
+}
+
+type browserRegion struct {
+	ID              string      `json:"id"`
+	Tag             string      `json:"tag,omitempty"`
+	Role            string      `json:"role,omitempty"`
+	Selector        string      `json:"selector,omitempty"`
+	Heading         string      `json:"heading,omitempty"`
+	Text            string      `json:"text,omitempty"`
+	Rect            browserRect `json:"rect"`
+	ViewportRect    browserRect `json:"viewport_rect"`
+	CoordinateFrame string      `json:"coordinate_frame"`
+	Visible         bool        `json:"visible"`
+	LinkCount       int         `json:"link_count,omitempty"`
+	ImageCount      int         `json:"image_count,omitempty"`
+}
+
+type browserScreenshot struct {
+	PNGB64     string `json:"png_b64"`
+	CurrentURL string `json:"current_url"`
+	Width      int    `json:"width"`
+	Height     int    `json:"height"`
 }
 
 type searchResult struct {
@@ -834,13 +872,12 @@ func (a *App) snapshot(ctx *sdk.AppCtx, runID int64, args map[string]any) (map[s
 		defer a.closeBrowser(ctx, sessionID)
 	}
 
-	var shot struct {
-		PNGB64     string `json:"png_b64"`
-		CurrentURL string `json:"current_url"`
-		Width      int    `json:"width"`
-		Height     int    `json:"height"`
+	if wantsSmartSnapshot(args) {
+		return a.smartSnapshot(ctx, runID, sessionID, browser, opened, args)
 	}
-	if err := ctx.PlatformAPI().CallAppResult("computer", "browser_screenshot", withProjectID(ctx, map[string]any{"session_id": sessionID}), &shot); err != nil {
+
+	shot, err := a.captureBrowserScreenshot(ctx, sessionID)
+	if err != nil {
 		return nil, fmt.Errorf("computer.browser_screenshot: %w", err)
 	}
 	out := map[string]any{
@@ -883,6 +920,360 @@ func (a *App) snapshot(ctx *sdk.AppCtx, runID int64, args map[string]any) (map[s
 	out["artifact_id"] = art.ID
 	out["opened_session"] = opened
 	return out, nil
+}
+
+func wantsSmartSnapshot(args map[string]any) bool {
+	mode := strings.ToLower(strings.TrimSpace(stringArg(args, "mode")))
+	return mode == "smart" || strings.TrimSpace(stringArg(args, "query")) != ""
+}
+
+func (a *App) captureBrowserScreenshot(ctx *sdk.AppCtx, sessionID string) (*browserScreenshot, error) {
+	var shot browserScreenshot
+	if err := ctx.PlatformAPI().CallAppResult("computer", "browser_screenshot", withProjectID(ctx, map[string]any{"session_id": sessionID}), &shot); err != nil {
+		return nil, err
+	}
+	return &shot, nil
+}
+
+func (a *App) smartSnapshot(ctx *sdk.AppCtx, runID int64, sessionID string, browser *browserSession, opened bool, args map[string]any) (map[string]any, error) {
+	query := strings.TrimSpace(stringArg(args, "query"))
+	if query == "" {
+		return nil, errors.New("query required for smart snapshot")
+	}
+	extracted, err := a.extractBrowserDOM(ctx, sessionID, mapMerge(args, map[string]any{
+		"formats":   []string{"regions"},
+		"max_chars": 5000,
+	}), false)
+	if err != nil {
+		return nil, err
+	}
+	maxShots := boundedInt(intArg(args, "max_shots"), 3, 1, 5)
+	candidates := rankRegions(extracted.Regions, query, maxShots)
+	out := map[string]any{
+		"session_id":         sessionID,
+		"current_url":        firstNonEmpty(extracted.CurrentURL, extracted.URL),
+		"mode":               "smart",
+		"query":              query,
+		"stored":             false,
+		"opened_session":     opened,
+		"extraction_backend": firstNonEmpty(extracted.ExtractionBackend, "browser_dom"),
+		"candidate_regions":  len(extracted.Regions),
+		"coordinate_frame":   "viewport_css_px",
+		"matching_algorithm": "lexical_region_score_v1",
+	}
+	if browser != nil {
+		out["browser"] = browser
+	}
+	if len(candidates) == 0 {
+		shot, err := a.captureBrowserScreenshot(ctx, sessionID)
+		if err != nil {
+			return nil, fmt.Errorf("computer.browser_screenshot: %w", err)
+		}
+		out["current_url"] = firstNonEmpty(shot.CurrentURL, stringFromAny(out["current_url"]))
+		out["width"] = shot.Width
+		out["height"] = shot.Height
+		out["shots"] = []map[string]any{}
+		out["fallback"] = "no_matching_regions"
+		if !boolArgDefault(args, "store", true) {
+			out["png_b64"] = shot.PNGB64
+			return out, nil
+		}
+		if err := a.storeSnapshotImage(ctx, runID, out, shot.PNGB64, "smart-fallback", stringArg(args, "label"), 0); err != nil {
+			return nil, err
+		}
+		return out, nil
+	}
+
+	shots := make([]map[string]any, 0, len(candidates))
+	startScroll := candidates[0].Region.Rect.Y - candidates[0].Region.ViewportRect.Y
+	if startScroll < 0 {
+		startScroll = 0
+	}
+	currentScroll := startScroll
+	store := boolArgDefault(args, "store", true)
+	crop := boolArgDefault(args, "crop", true)
+	for i, ranked := range candidates {
+		region := ranked.Region
+		targetScroll := math.Max(0, region.Rect.Y-120)
+		if diff := targetScroll - currentScroll; math.Abs(diff) >= 20 {
+			direction := "down"
+			amount := int(math.Round(diff))
+			if amount < 0 {
+				direction = "up"
+				amount = -amount
+			}
+			var actionOut map[string]any
+			if err := ctx.PlatformAPI().CallAppResult("computer", "computer_use", withProjectID(ctx, map[string]any{
+				"session_id": sessionID,
+				"action":     "scroll",
+				"direction":  direction,
+				"amount":     amount,
+			}), &actionOut); err != nil {
+				return nil, fmt.Errorf("computer.computer_use scroll: %w", err)
+			}
+			currentScroll = targetScroll
+		}
+		shot, err := a.captureBrowserScreenshot(ctx, sessionID)
+		if err != nil {
+			return nil, fmt.Errorf("computer.browser_screenshot: %w", err)
+		}
+		viewportRect := browserRect{
+			X:      region.Rect.X,
+			Y:      region.Rect.Y - currentScroll,
+			Width:  region.Rect.Width,
+			Height: region.Rect.Height,
+		}
+		contentB64 := shot.PNGB64
+		width, height := shot.Width, shot.Height
+		cropErr := ""
+		if crop {
+			if cropped, cw, ch, err := cropScreenshotPNG(shot.PNGB64, viewportRect, shot.Width, shot.Height, 24); err == nil {
+				contentB64, width, height = cropped, cw, ch
+			} else {
+				cropErr = err.Error()
+			}
+		}
+		item := map[string]any{
+			"rank":          i + 1,
+			"region_id":     region.ID,
+			"score":         ranked.Score,
+			"confidence":    confidenceLabel(ranked.Score),
+			"reason":        ranked.Reason,
+			"nearby_text":   truncateString(firstNonEmpty(region.Text, region.Heading), 700),
+			"heading":       region.Heading,
+			"selector":      region.Selector,
+			"coordinates":   viewportRect,
+			"source_region": region,
+			"current_url":   shot.CurrentURL,
+			"width":         width,
+			"height":        height,
+			"stored":        false,
+		}
+		if cropErr != "" {
+			item["crop_error"] = cropErr
+		}
+		if store {
+			label := safeFilename(firstNonEmpty(stringArg(args, "label"), region.Heading, "smart-snapshot"))
+			if err := a.storeSnapshotImage(ctx, runID, item, contentB64, "smart", label, 0); err != nil {
+				return nil, err
+			}
+		} else {
+			item["png_b64"] = contentB64
+		}
+		if i == 0 {
+			out["current_url"] = shot.CurrentURL
+			out["width"] = width
+			out["height"] = height
+			for _, key := range []string{"storage_id", "url", "artifact_id", "png_b64"} {
+				if v, ok := item[key]; ok {
+					out[key] = v
+				}
+			}
+			out["stored"] = item["stored"]
+		}
+		shots = append(shots, item)
+	}
+	out["shots"] = shots
+	return out, nil
+}
+
+func (a *App) storeSnapshotImage(ctx *sdk.AppCtx, runID int64, out map[string]any, pngB64, prefix, label string, size int) error {
+	folder := "/.web/snapshots/" + time.Now().UTC().Format("2006-01")
+	var up struct {
+		ID  int64  `json:"id"`
+		URL string `json:"url"`
+	}
+	name := randName() + ".png"
+	if safe := safeFilename(firstNonEmpty(label, prefix)); safe != "" {
+		name = safe + "-" + name
+	}
+	upArgs := withProjectID(ctx, map[string]any{
+		"name":           name,
+		"content_base64": pngB64,
+		"folder":         folder,
+		"content_type":   "image/png",
+		"source":         "web:snapshot",
+	})
+	if err := ctx.PlatformAPI().CallAppResult("storage", "files_upload", upArgs, &up); err != nil {
+		return fmt.Errorf("storage.files_upload: %w", err)
+	}
+	art, _ := insertArtifact(ctx, runID, "snapshot", stringFromAny(out["current_url"]), stringFromAny(out["heading"]), up.ID, up.URL, "image/png", size, out)
+	out["stored"] = true
+	out["storage_id"] = up.ID
+	out["url"] = up.URL
+	out["artifact_id"] = art.ID
+	return nil
+}
+
+type rankedRegion struct {
+	Region browserRegion
+	Score  float64
+	Reason string
+}
+
+func rankRegions(regions []browserRegion, query string, limit int) []rankedRegion {
+	tokens := tokenizeQuery(query)
+	if len(tokens) == 0 {
+		return nil
+	}
+	ranked := make([]rankedRegion, 0, len(regions))
+	for _, r := range regions {
+		text := strings.ToLower(strings.Join([]string{r.Heading, r.Text, r.Tag, r.Role, r.Selector}, " "))
+		if strings.TrimSpace(text) == "" || r.Rect.Width <= 0 || r.Rect.Height <= 0 {
+			continue
+		}
+		score := 0.0
+		var hits []string
+		for _, tok := range tokens {
+			if strings.Contains(text, tok) {
+				score += 2
+				hits = append(hits, tok)
+				if strings.Contains(strings.ToLower(r.Heading), tok) {
+					score += 1.5
+				}
+			}
+		}
+		if strings.Contains(text, "@") && querySuggestsContact(tokens) {
+			score += 3
+			hits = append(hits, "email")
+		}
+		if strings.Contains(text, "contact") || strings.Contains(text, "partner") || strings.Contains(text, "affiliate") {
+			score += 0.75
+		}
+		switch r.Tag {
+		case "form", "table", "section", "article", "main", "footer":
+			score += 0.5
+		}
+		if r.Visible {
+			score += 0.25
+		}
+		area := r.Rect.Width * r.Rect.Height
+		if area > 25000 && area < 900000 {
+			score += 0.25
+		}
+		if score <= 0 {
+			continue
+		}
+		reason := "Matched query terms in rendered page region."
+		if len(hits) > 0 {
+			reason = "Matched " + strings.Join(uniqueStrings(hits), ", ") + " in rendered page region."
+		}
+		ranked = append(ranked, rankedRegion{Region: r, Score: math.Round(score*100) / 100, Reason: reason})
+	}
+	sort.SliceStable(ranked, func(i, j int) bool {
+		if ranked[i].Score == ranked[j].Score {
+			return ranked[i].Region.Rect.Y < ranked[j].Region.Rect.Y
+		}
+		return ranked[i].Score > ranked[j].Score
+	})
+	if limit > 0 && len(ranked) > limit {
+		ranked = ranked[:limit]
+	}
+	return ranked
+}
+
+func tokenizeQuery(query string) []string {
+	fields := strings.FieldsFunc(strings.ToLower(query), func(r rune) bool {
+		return !(r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '@')
+	})
+	out := make([]string, 0, len(fields))
+	for _, f := range fields {
+		f = strings.TrimSpace(f)
+		if len(f) < 3 {
+			continue
+		}
+		switch f {
+		case "the", "and", "for", "with", "from", "that", "this", "page", "site":
+			continue
+		}
+		out = append(out, f)
+	}
+	return uniqueStrings(out)
+}
+
+func querySuggestsContact(tokens []string) bool {
+	for _, t := range tokens {
+		switch t {
+		case "email", "contact", "affiliate", "partner", "partnership", "support", "sales":
+			return true
+		}
+	}
+	return false
+}
+
+func uniqueStrings(in []string) []string {
+	seen := map[string]bool{}
+	out := make([]string, 0, len(in))
+	for _, s := range in {
+		s = strings.TrimSpace(s)
+		if s == "" || seen[s] {
+			continue
+		}
+		seen[s] = true
+		out = append(out, s)
+	}
+	return out
+}
+
+func confidenceLabel(score float64) string {
+	switch {
+	case score >= 7:
+		return "high"
+	case score >= 3:
+		return "medium"
+	default:
+		return "low"
+	}
+}
+
+func cropScreenshotPNG(pngB64 string, rect browserRect, shotWidth, shotHeight, padding int) (string, int, int, error) {
+	raw, err := base64.StdEncoding.DecodeString(pngB64)
+	if err != nil {
+		return "", 0, 0, err
+	}
+	src, _, err := image.Decode(bytes.NewReader(raw))
+	if err != nil {
+		return "", 0, 0, err
+	}
+	bounds := src.Bounds()
+	imgW, imgH := bounds.Dx(), bounds.Dy()
+	if imgW <= 0 || imgH <= 0 {
+		return "", 0, 0, errors.New("empty screenshot")
+	}
+	if shotWidth <= 0 {
+		shotWidth = imgW
+	}
+	if shotHeight <= 0 {
+		shotHeight = imgH
+	}
+	scaleX := float64(imgW) / float64(shotWidth)
+	scaleY := float64(imgH) / float64(shotHeight)
+	padX := float64(padding) * scaleX
+	padY := float64(padding) * scaleY
+	x0 := clampInt(int(math.Floor(rect.X*scaleX-padX)), 0, imgW)
+	y0 := clampInt(int(math.Floor(rect.Y*scaleY-padY)), 0, imgH)
+	x1 := clampInt(int(math.Ceil((rect.X+rect.Width)*scaleX+padX)), 0, imgW)
+	y1 := clampInt(int(math.Ceil((rect.Y+rect.Height)*scaleY+padY)), 0, imgH)
+	if x1 <= x0 || y1 <= y0 || x1-x0 < 8 || y1-y0 < 8 {
+		return "", 0, 0, fmt.Errorf("invalid crop rect %.1f,%.1f %.1fx%.1f", rect.X, rect.Y, rect.Width, rect.Height)
+	}
+	dst := image.NewRGBA(image.Rect(0, 0, x1-x0, y1-y0))
+	draw.Draw(dst, dst.Bounds(), src, image.Point{X: bounds.Min.X + x0, Y: bounds.Min.Y + y0}, draw.Src)
+	var buf bytes.Buffer
+	if err := png.Encode(&buf, dst); err != nil {
+		return "", 0, 0, err
+	}
+	return base64.StdEncoding.EncodeToString(buf.Bytes()), dst.Bounds().Dx(), dst.Bounds().Dy(), nil
+}
+
+func clampInt(v, min, max int) int {
+	if v < min {
+		return min
+	}
+	if v > max {
+		return max
+	}
+	return v
 }
 
 func (a *App) openBrowser(ctx *sdk.AppCtx, target string, args map[string]any) (*browserSession, error) {

@@ -131,6 +131,105 @@ const extractScript = `(() => {
     const raw = img.getAttribute('src') || String(img.getAttribute('srcset') || '').split(/\s+/)[0];
     return abs(raw);
   }).filter(Boolean);
+  const cssIdent = (s) => {
+    if (window.CSS && typeof window.CSS.escape === 'function') return window.CSS.escape(s);
+    return String(s || '').replace(/[^a-zA-Z0-9_-]/g, '\\$&');
+  };
+  const selectorFor = (el) => {
+    if (!el || el.nodeType !== Node.ELEMENT_NODE) return '';
+    if (el.id) return '#' + cssIdent(el.id);
+    const parts = [];
+    let cur = el;
+    while (cur && cur.nodeType === Node.ELEMENT_NODE && cur !== document.body && parts.length < 5) {
+      let part = cur.tagName.toLowerCase();
+      const cls = Array.from(cur.classList || []).filter(Boolean).slice(0, 2);
+      if (cls.length) part += '.' + cls.map(cssIdent).join('.');
+      const parent = cur.parentElement;
+      if (parent) {
+        const same = Array.from(parent.children).filter((x) => x.tagName === cur.tagName);
+        if (same.length > 1) part += ':nth-of-type(' + (same.indexOf(cur) + 1) + ')';
+      }
+      parts.unshift(part);
+      cur = parent;
+    }
+    return parts.join(' > ');
+  };
+  const nearestHeading = (el) => {
+    const own = el.matches && el.matches('h1,h2,h3,h4,h5,h6') ? cleanInline(el.innerText || el.textContent || '') : '';
+    if (own) return own;
+    const inner = el.querySelector && el.querySelector('h1,h2,h3,h4,h5,h6');
+    if (inner) {
+      const t = cleanInline(inner.innerText || inner.textContent || '');
+      if (t) return t;
+    }
+    let prev = el.previousElementSibling;
+    let steps = 0;
+    while (prev && steps < 4) {
+      if (prev.matches && prev.matches('h1,h2,h3,h4,h5,h6')) {
+        const t = cleanInline(prev.innerText || prev.textContent || '');
+        if (t) return t;
+      }
+      prev = prev.previousElementSibling;
+      steps++;
+    }
+    const labelled = el.getAttribute && el.getAttribute('aria-labelledby');
+    if (labelled) {
+      const lab = document.getElementById(labelled);
+      const t = lab ? cleanInline(lab.innerText || lab.textContent || '') : '';
+      if (t) return t;
+    }
+    return '';
+  };
+  const regionSelector = [
+    'main','article','section','aside','footer','header','nav','form','table',
+    '[role="main"]','[role="region"]','[role="contentinfo"]','[role="form"]','[role="article"]',
+    '[class*="contact" i]','[id*="contact" i]','[class*="affiliate" i]','[id*="affiliate" i]',
+    'h1','h2','h3','h4','[data-testid]','.card','.panel','.pricing'
+  ].join(',');
+  const regions = [];
+  const seenEls = new Set();
+  for (const el of Array.from(document.querySelectorAll(regionSelector))) {
+    if (!el || seenEls.has(el)) continue;
+    seenEls.add(el);
+    const tag = el.tagName.toLowerCase();
+    if (['script','style','noscript','svg','template'].includes(tag)) continue;
+    const style = window.getComputedStyle(el);
+    if (style.display === 'none' || style.visibility === 'hidden' || Number(style.opacity || '1') === 0) continue;
+    const rect = el.getBoundingClientRect();
+    const width = Math.max(0, rect.width);
+    const height = Math.max(0, rect.height);
+    if (width < 24 || height < 16) continue;
+    const text = cleanInline(el.innerText || el.textContent || el.getAttribute('aria-label') || el.getAttribute('title') || '');
+    const linkCount = el.querySelectorAll ? el.querySelectorAll('a[href]').length : 0;
+    const imageCount = el.querySelectorAll ? el.querySelectorAll('img,source').length : 0;
+    const isStructural = ['main','article','section','aside','footer','header','nav','form','table'].includes(tag) || (el.getAttribute('role') || '');
+    if (text.length < 20 && !isStructural && linkCount === 0 && imageCount === 0) continue;
+    regions.push({
+      id: 'r' + (regions.length + 1),
+      tag,
+      role: el.getAttribute('role') || '',
+      selector: selectorFor(el),
+      heading: nearestHeading(el),
+      text: text.slice(0, 1200),
+      rect: {
+        x: rect.left + window.scrollX,
+        y: rect.top + window.scrollY,
+        width,
+        height
+      },
+      viewport_rect: {
+        x: rect.left,
+        y: rect.top,
+        width,
+        height
+      },
+      coordinate_frame: 'document_css_px',
+      visible: rect.bottom > 0 && rect.right > 0 && rect.top < window.innerHeight && rect.left < window.innerWidth,
+      link_count: linkCount,
+      image_count: imageCount
+    });
+    if (regions.length >= 200) break;
+  }
   return {
     url: location.href,
     title: cleanInline(document.title || meta['og:title'] || meta['twitter:title'] || ''),
@@ -140,6 +239,7 @@ const extractScript = `(() => {
     html: root.innerHTML || '',
     links,
     images,
+    regions,
     metadata: meta,
     structured_data: {
       json_ld: jsonLd,
@@ -205,6 +305,9 @@ func filterFormats(out *computer.ExtractResult, formats []string) {
 	}
 	if !want["images"] {
 		out.Images = nil
+	}
+	if !want["regions"] {
+		out.Regions = nil
 	}
 	if !want["metadata"] {
 		out.Metadata = nil

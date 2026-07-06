@@ -285,12 +285,22 @@ func TestBrowserExtract(t *testing.T) {
 		display: backends.DisplaySize{Width: 1280, Height: 720},
 		url:     "https://example.com/rendered",
 		extractResult: backends.ExtractResult{
-			URL:               "https://example.com/rendered",
-			Title:             "Rendered Page",
-			Description:       "Live DOM content",
-			Text:              "Hello from the hydrated page",
-			Markdown:          "Hello from the hydrated page",
-			Links:             []backends.ExtractLink{{URL: "https://example.com/next", Text: "Next"}},
+			URL:         "https://example.com/rendered",
+			Title:       "Rendered Page",
+			Description: "Live DOM content",
+			Text:        "Hello from the hydrated page",
+			Markdown:    "Hello from the hydrated page",
+			Links:       []backends.ExtractLink{{URL: "https://example.com/next", Text: "Next"}},
+			Regions: []backends.ExtractRegion{{
+				ID:              "r1",
+				Tag:             "section",
+				Heading:         "Contact",
+				Text:            "Contact partnerships@example.com",
+				CoordinateFrame: "document_css_px",
+				Rect:            backends.ExtractRect{X: 10, Y: 20, Width: 300, Height: 120},
+				ViewportRect:    backends.ExtractRect{X: 10, Y: 20, Width: 300, Height: 120},
+				Visible:         true,
+			}},
 			Metadata:          map[string]any{"description": "Live DOM content"},
 			StructuredData:    map[string]any{"json_ld": []any{map[string]any{"@type": "Article"}}},
 			Rendered:          true,
@@ -307,7 +317,7 @@ func TestBrowserExtract(t *testing.T) {
 
 	outAny, err := app.toolBrowserExtract(nil, map[string]any{
 		"session_id": "br_test",
-		"formats":    []any{"text", "markdown", "metadata", "links"},
+		"formats":    []any{"text", "markdown", "metadata", "links", "regions"},
 		"max_chars":  float64(2000),
 	})
 	if err != nil {
@@ -329,10 +339,14 @@ func TestBrowserExtract(t *testing.T) {
 	if out["structured_data"] == nil {
 		t.Errorf("structured_data missing")
 	}
+	regions, ok := out["regions"].([]backends.ExtractRegion)
+	if !ok || len(regions) != 1 || regions[0].Heading != "Contact" {
+		t.Fatalf("regions missing: %#v", out["regions"])
+	}
 	if got := fake.extractOptions.MaxChars; got != 2000 {
 		t.Errorf("max_chars forwarded: want 2000, got %d", got)
 	}
-	if len(fake.extractOptions.Formats) != 4 || fake.extractOptions.Formats[0] != "text" {
+	if len(fake.extractOptions.Formats) != 5 || fake.extractOptions.Formats[0] != "text" {
 		t.Errorf("formats forwarded: got %v", fake.extractOptions.Formats)
 	}
 }

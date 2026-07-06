@@ -52,9 +52,9 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: computer
 display_name: Computer
-version: 0.7.43
+version: 0.7.44
 description: |
-  Watch and steer browser sessions. v0.7.43 improves rendered text block spacing for browser DOM extraction.
+  Watch and steer browser sessions. v0.7.44 adds rendered DOM regions to browser_extract for smart screenshots.
 scopes: [project, global]
 requires:
   permissions:
@@ -99,7 +99,7 @@ provides:
     - name: browser_screenshot
       description: "Capture a clean PNG of the session viewport. Args: session_id, annotate? (default false; set true for Set-of-Mark labels)."
     - name: browser_extract
-      description: "Infrastructure-only rendered DOM extraction for advanced browser integrations. General agents should usually prefer higher-level browsing tools instead of calling this directly. Args: session_id, formats?, max_chars?, readability?, wait_ms?. formats may include text, markdown, html, metadata, structured_data, json, links, images."
+      description: "Infrastructure-only rendered DOM extraction for advanced browser integrations. General agents should usually prefer higher-level browsing tools instead of calling this directly. Args: session_id, formats?, max_chars?, readability?, wait_ms?. formats may include text, markdown, html, metadata, structured_data, json, links, images, regions."
     - name: browser_close
       description: "Close a session opened by this app and release browser/provider resources. Use this when finished unless the user explicitly wants the session left open. Compatibility alias for browser_session(action=close)."
   ui_panels:
@@ -612,11 +612,11 @@ func (a *App) MCPTools() []sdk.Tool {
 		{
 			Name: "browser_extract",
 			Description: "Infrastructure-only rendered DOM extraction for advanced browser integrations. General agents should usually prefer higher-level browsing tools instead of calling this directly. " +
-				"Args: session_id, formats? (text, markdown, html, metadata, structured_data, json, links, images), max_chars?, readability?, wait_ms?. " +
-				"Returns {session_id, backend, current_url, title, description, text, markdown, html, metadata, structured_data, links, images, rendered, extraction_backend}.",
+				"Args: session_id, formats? (text, markdown, html, metadata, structured_data, json, links, images, regions), max_chars?, readability?, wait_ms?. " +
+				"Returns {session_id, backend, current_url, title, description, text, markdown, html, metadata, structured_data, links, images, regions, rendered, extraction_backend}.",
 			InputSchema: schemaObject(map[string]any{
 				"session_id":  map[string]any{"type": "string"},
-				"formats":     map[string]any{"type": "array", "items": map[string]any{"type": "string", "enum": []string{"text", "markdown", "html", "metadata", "structured_data", "json", "links", "images"}}},
+				"formats":     map[string]any{"type": "array", "items": map[string]any{"type": "string", "enum": []string{"text", "markdown", "html", "metadata", "structured_data", "json", "links", "images", "regions"}}},
 				"max_chars":   map[string]any{"type": "integer", "description": "Maximum characters for text, markdown, and html fields. Default 50000."},
 				"readability": map[string]any{"type": "boolean", "description": "Prefer the largest article/main/content region when true. Defaults true."},
 				"wait_ms":     map[string]any{"type": "integer", "description": "Optional wait before reading the DOM, useful for client-rendered pages."},
@@ -1434,6 +1434,7 @@ func (a *App) toolBrowserExtract(_ *sdk.AppCtx, args map[string]any) (any, error
 		"html":               res.HTML,
 		"links":              res.Links,
 		"images":             res.Images,
+		"regions":            res.Regions,
 		"metadata":           res.Metadata,
 		"structured_data":    res.StructuredData,
 		"rendered":           res.Rendered,

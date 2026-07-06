@@ -79,20 +79,47 @@ type ExtractLink struct {
 	Text string `json:"text,omitempty"`
 }
 
+// ExtractRect is a rendered DOM rectangle in CSS pixels.
+type ExtractRect struct {
+	X      float64 `json:"x"`
+	Y      float64 `json:"y"`
+	Width  float64 `json:"width"`
+	Height float64 `json:"height"`
+}
+
+// ExtractRegion is a query-rankable rendered DOM block with text and geometry.
+// Rect uses document CSS pixels so callers can scroll to Y and crop viewport
+// screenshots deterministically.
+type ExtractRegion struct {
+	ID              string      `json:"id"`
+	Tag             string      `json:"tag,omitempty"`
+	Role            string      `json:"role,omitempty"`
+	Selector        string      `json:"selector,omitempty"`
+	Heading         string      `json:"heading,omitempty"`
+	Text            string      `json:"text,omitempty"`
+	Rect            ExtractRect `json:"rect"`
+	ViewportRect    ExtractRect `json:"viewport_rect"`
+	CoordinateFrame string      `json:"coordinate_frame"`
+	Visible         bool        `json:"visible"`
+	LinkCount       int         `json:"link_count,omitempty"`
+	ImageCount      int         `json:"image_count,omitempty"`
+}
+
 // ExtractResult is structured content read from the live rendered DOM.
 type ExtractResult struct {
-	URL               string         `json:"url"`
-	Title             string         `json:"title,omitempty"`
-	Description       string         `json:"description,omitempty"`
-	Text              string         `json:"text,omitempty"`
-	Markdown          string         `json:"markdown,omitempty"`
-	HTML              string         `json:"html,omitempty"`
-	Links             []ExtractLink  `json:"links,omitempty"`
-	Images            []string       `json:"images,omitempty"`
-	Metadata          map[string]any `json:"metadata,omitempty"`
-	StructuredData    map[string]any `json:"structured_data,omitempty"`
-	Rendered          bool           `json:"rendered"`
-	ExtractionBackend string         `json:"extraction_backend"`
+	URL               string          `json:"url"`
+	Title             string          `json:"title,omitempty"`
+	Description       string          `json:"description,omitempty"`
+	Text              string          `json:"text,omitempty"`
+	Markdown          string          `json:"markdown,omitempty"`
+	HTML              string          `json:"html,omitempty"`
+	Links             []ExtractLink   `json:"links,omitempty"`
+	Images            []string        `json:"images,omitempty"`
+	Regions           []ExtractRegion `json:"regions,omitempty"`
+	Metadata          map[string]any  `json:"metadata,omitempty"`
+	StructuredData    map[string]any  `json:"structured_data,omitempty"`
+	Rendered          bool            `json:"rendered"`
+	ExtractionBackend string          `json:"extraction_backend"`
 }
 
 // DOMExtractor is implemented by browser backends that can read structured

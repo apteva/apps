@@ -2,9 +2,9 @@ schema: apteva-app/v1
 
 name: computer
 display_name: Computer
-version: 0.7.43
+version: 0.7.44
 description: |
-  Watch and steer browser sessions. v0.7.43 improves rendered text block spacing for browser DOM extraction.
+  Watch and steer browser sessions. v0.7.44 adds rendered DOM regions to browser_extract for smart screenshots.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/computer
@@ -148,9 +148,9 @@ provides:
         integrations. General agents should usually prefer higher-level
         browsing tools instead of calling this directly. Args: session_id,
         formats? (text, markdown, html, metadata, structured_data, json, links,
-        images), max_chars?, readability?, wait_ms?. Returns rendered page
-        text, markdown, metadata, structured data, links, images, and
-        browser/session metadata.
+        images, regions), max_chars?, readability?, wait_ms?. Returns rendered
+        page text, markdown, metadata, structured data, links, images, DOM
+        regions with rendered coordinates, and browser/session metadata.
     - name: browser_close
       description: |
         Close a session opened by this app and release browser/provider

@@ -42,3 +42,45 @@ func TestRunPreservesBlockSpacingInText(t *testing.T) {
 		t.Fatalf("markdown did not preserve heading paragraph break: %q", out.Markdown)
 	}
 }
+
+func TestRunExtractsRegions(t *testing.T) {
+	ctx, cancel := chromedp.NewContext(context.Background())
+	defer cancel()
+
+	ctx, cancel = context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+
+	html := `<html><head><title>Regions</title></head><body>
+		<section id="contact" style="margin-top:40px;width:420px;height:140px">
+			<h2>Affiliate contact</h2>
+			<p>Email partners@example.com for platform partnerships.</p>
+		</section>
+	</body></html>`
+	page := "data:text/html," + url.PathEscape(html)
+	if err := chromedp.Run(ctx, chromedp.Navigate(page), chromedp.WaitReady("#contact")); err != nil {
+		if strings.Contains(err.Error(), "exec") || strings.Contains(err.Error(), "Chrome") {
+			t.Skipf("chrome unavailable: %v", err)
+		}
+		t.Fatalf("navigate: %v", err)
+	}
+
+	out, err := Run(ctx, computer.ExtractOptions{
+		Formats: []string{"regions"},
+	})
+	if err != nil {
+		t.Fatalf("Run: %v", err)
+	}
+	if len(out.Regions) == 0 {
+		t.Fatalf("regions empty")
+	}
+	got := out.Regions[0]
+	if got.Selector != "#contact" || got.Heading != "Affiliate contact" {
+		t.Fatalf("region identity mismatch: %#v", got)
+	}
+	if got.Rect.Width <= 0 || got.Rect.Height <= 0 || got.CoordinateFrame != "document_css_px" {
+		t.Fatalf("region geometry mismatch: %#v", got)
+	}
+	if out.Text != "" || out.Markdown != "" {
+		t.Fatalf("formats=regions should filter text fields: text=%q markdown=%q", out.Text, out.Markdown)
+	}
+}

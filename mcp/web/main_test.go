@@ -1,9 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"image"
+	"image/color"
+	"image/draw"
+	"image/png"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -257,6 +262,45 @@ func TestSnapshotUploadsAndInjectsProjectID(t *testing.T) {
 	}
 }
 
+func TestSmartSnapshotUsesRegionExtraction(t *testing.T) {
+	plat := newFakePlatform()
+	ctx, app := newTestCtx(t, plat, tk.WithProjectID("proj-web"))
+
+	outAny, err := app.toolSnapshot(ctx, map[string]any{
+		"url":       "https://example.com",
+		"query":     "affiliate contact email",
+		"max_shots": 1,
+	})
+	if err != nil {
+		t.Fatalf("smart snapshot: %v", err)
+	}
+	out := outAny.(map[string]any)
+	if out["mode"] != "smart" || out["storage_id"] != int64(10) {
+		t.Fatalf("smart output wrong: %#v", out)
+	}
+	shots := out["shots"].([]map[string]any)
+	if len(shots) != 1 {
+		t.Fatalf("shots len=%d out=%#v", len(shots), out)
+	}
+	if shots[0]["region_id"] != "r_contact" || shots[0]["stored"] != true {
+		t.Fatalf("shot wrong: %#v", shots[0])
+	}
+	calls := plat.callLog()
+	want := []string{"computer.browser_open", "computer.browser_extract", "computer.computer_use", "computer.browser_screenshot", "storage.files_upload", "computer.browser_close"}
+	if !sameOrderedPrefix(calls, want) {
+		t.Fatalf("calls=%v want prefix %v", calls, want)
+	}
+	extractArgs := plat.lastCall("computer", "browser_extract")
+	formats, _ := extractArgs["formats"].([]string)
+	if !sameStrings(formats, []string{"regions"}) {
+		t.Fatalf("formats=%#v", extractArgs["formats"])
+	}
+	upload := plat.lastCall("storage", "files_upload")
+	if upload["content_type"] != "image/png" {
+		t.Fatalf("content_type=%v", upload["content_type"])
+	}
+}
+
 type fakeCall struct {
 	app, tool string
 	args      map[string]any
@@ -363,15 +407,36 @@ func (p *fakePlatform) respond(app, tool string, in map[string]any) map[string]a
 			}
 		}
 		return map[string]any{
-			"session_id":         in["session_id"],
-			"backend":            "local",
-			"current_url":        p.openURL,
-			"url":                p.openURL,
-			"title":              "Readable Page",
-			"description":        "A page for extraction",
-			"text":               "Hello This page has useful text.",
-			"markdown":           "# Hello\n\nThis page has useful text.",
-			"links":              []map[string]any{{"url": p.openURL + "/next", "text": "Next page"}},
+			"session_id":  in["session_id"],
+			"backend":     "local",
+			"current_url": p.openURL,
+			"url":         p.openURL,
+			"title":       "Readable Page",
+			"description": "A page for extraction",
+			"text":        "Hello This page has useful text.",
+			"markdown":    "# Hello\n\nThis page has useful text.",
+			"links":       []map[string]any{{"url": p.openURL + "/next", "text": "Next page"}},
+			"regions": []map[string]any{{
+				"id":       "r_contact",
+				"tag":      "section",
+				"heading":  "Affiliate contact",
+				"text":     "For affiliate contact email partners@example.com.",
+				"selector": "#contact",
+				"rect": map[string]any{
+					"x":      80,
+					"y":      1100,
+					"width":  520,
+					"height": 180,
+				},
+				"viewport_rect": map[string]any{
+					"x":      80,
+					"y":      1100,
+					"width":  520,
+					"height": 180,
+				},
+				"coordinate_frame": "document_css_px",
+				"visible":          false,
+			}},
 			"metadata":           map[string]any{"description": "A page for extraction"},
 			"structured_data":    map[string]any{"json_ld": []any{map[string]any{"@type": "Article", "headline": "Readable Page"}}},
 			"rendered":           true,
@@ -381,9 +446,11 @@ func (p *fakePlatform) respond(app, tool string, in map[string]any) map[string]a
 		}
 	case "computer.browser_close":
 		return map[string]any{"closed": true}
+	case "computer.computer_use":
+		return map[string]any{"current_url": p.openURL, "width": 1280, "height": 720}
 	case "computer.browser_screenshot":
 		return map[string]any{
-			"png_b64":     base64.StdEncoding.EncodeToString([]byte("fake-png")),
+			"png_b64":     testPNGB64(),
 			"current_url": "https://example.com",
 			"width":       1280,
 			"height":      720,
@@ -393,6 +460,14 @@ func (p *fakePlatform) respond(app, tool string, in map[string]any) map[string]a
 	default:
 		return map[string]any{}
 	}
+}
+
+func testPNGB64() string {
+	img := image.NewRGBA(image.Rect(0, 0, 1280, 720))
+	draw.Draw(img, img.Bounds(), &image.Uniform{C: color.RGBA{R: 240, G: 240, B: 240, A: 255}}, image.Point{}, draw.Src)
+	var buf bytes.Buffer
+	_ = png.Encode(&buf, img)
+	return base64.StdEncoding.EncodeToString(buf.Bytes())
 }
 
 func (p *fakePlatform) callLog() []string {
