@@ -1,4 +1,4 @@
-// Web v0.1.7 — browser-backed web intelligence.
+// Web v0.1.8 — browser-backed web intelligence.
 //
 // The app requires computer for session lifecycle, rendered extraction, and
 // screenshots. It opens a browser before search/extract/crawl/map/research page
@@ -39,7 +39,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: web
 display_name: Web
-version: 0.1.7
+version: 0.1.8
 description: Browser-native web intelligence for agents.
 author: Apteva
 scopes: [project, global]
@@ -232,21 +232,22 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "web_snapshot",
-			Description: "Capture visual evidence for a URL or existing computer session. Args: url? or session_id?, backend?, viewport?, label?, store?, mode? (viewport|smart), query?, max_shots?, crop?.",
+			Description: "Capture visual evidence for a URL or existing computer session. Args: url? or session_id?, backend?, viewport?, label?, store?, mode? (viewport|smart), query?, max_shots?, crop?, cookie_handling? (auto|off).",
 			InputSchema: schemaObject(map[string]any{
-				"url":        map[string]any{"type": "string"},
-				"session_id": map[string]any{"type": "string"},
-				"backend":    map[string]any{"type": "string"},
-				"viewport":   viewportSchema(),
-				"label":      map[string]any{"type": "string"},
-				"mode":       map[string]any{"type": "string", "enum": []string{"viewport", "smart"}},
-				"query":      map[string]any{"type": "string"},
-				"max_shots":  map[string]any{"type": "integer"},
-				"crop":       map[string]any{"type": "boolean"},
-				"store":      map[string]any{"type": "boolean"},
-				"cache":      cacheModeSchema(),
-				"max_age":    cacheSecondsSchema("Maximum accepted cached snapshot age in seconds. Snapshot caching is disabled unless max_age is set."),
-				"cache_ttl":  cacheSecondsSchema("How long to retain newly captured snapshots in seconds. Defaults to max_age when set."),
+				"url":             map[string]any{"type": "string"},
+				"session_id":      map[string]any{"type": "string"},
+				"backend":         map[string]any{"type": "string"},
+				"viewport":        viewportSchema(),
+				"label":           map[string]any{"type": "string"},
+				"mode":            map[string]any{"type": "string", "enum": []string{"viewport", "smart"}},
+				"query":           map[string]any{"type": "string"},
+				"max_shots":       map[string]any{"type": "integer"},
+				"crop":            map[string]any{"type": "boolean"},
+				"cookie_handling": map[string]any{"type": "string", "enum": []string{"auto", "off"}},
+				"store":           map[string]any{"type": "boolean"},
+				"cache":           cacheModeSchema(),
+				"max_age":         cacheSecondsSchema("Maximum accepted cached snapshot age in seconds. Snapshot caching is disabled unless max_age is set."),
+				"cache_ttl":       cacheSecondsSchema("How long to retain newly captured snapshots in seconds. Defaults to max_age when set."),
 			}, nil),
 			Handler: a.toolSnapshot,
 		},
@@ -936,10 +937,142 @@ func (a *App) captureBrowserScreenshot(ctx *sdk.AppCtx, sessionID string) (*brow
 	return &shot, nil
 }
 
+func cookieHandlingMode(args map[string]any) string {
+	mode := strings.ToLower(strings.TrimSpace(firstNonEmpty(stringArg(args, "cookie_handling"), "auto")))
+	switch mode {
+	case "auto", "off":
+		return mode
+	default:
+		return "auto"
+	}
+}
+
+func (a *App) dismissCookieBanner(ctx *sdk.AppCtx, sessionID string, args map[string]any) (map[string]any, error) {
+	mode := cookieHandlingMode(args)
+	out := map[string]any{"mode": mode, "attempted": false, "dismissed": false}
+	if mode == "off" {
+		return out, nil
+	}
+	extracted, err := a.extractBrowserDOM(ctx, sessionID, mapMerge(args, map[string]any{
+		"formats":   []string{"regions"},
+		"max_chars": 5000,
+	}), false)
+	if err != nil {
+		return out, err
+	}
+	region, strategy, ok := findCookieBannerRegion(extracted.Regions)
+	if !ok {
+		out["reason"] = "no_cookie_banner_detected"
+		return out, nil
+	}
+	x, y := cookieAcceptCoordinate(region, strategy)
+	out["attempted"] = true
+	out["strategy"] = strategy
+	out["region_id"] = region.ID
+	out["selector"] = region.Selector
+	out["heading"] = region.Heading
+	out["coordinate"] = fmt.Sprintf("%d,%d", x, y)
+	var clickOut map[string]any
+	if err := ctx.PlatformAPI().CallAppResult("computer", "computer_use", withProjectID(ctx, map[string]any{
+		"session_id": sessionID,
+		"action":     "click",
+		"coordinate": out["coordinate"],
+	}), &clickOut); err != nil {
+		return out, fmt.Errorf("computer.computer_use cookie click: %w", err)
+	}
+	var waitOut map[string]any
+	_ = ctx.PlatformAPI().CallAppResult("computer", "computer_use", withProjectID(ctx, map[string]any{
+		"session_id": sessionID,
+		"action":     "wait",
+		"duration":   800,
+	}), &waitOut)
+	verified, _ := a.extractBrowserDOM(ctx, sessionID, mapMerge(args, map[string]any{
+		"formats":   []string{"regions"},
+		"max_chars": 5000,
+	}), false)
+	if verified != nil {
+		_, _, stillPresent := findCookieBannerRegion(verified.Regions)
+		out["dismissed"] = !stillPresent
+		if stillPresent {
+			out["reason"] = "banner_still_detected_after_click"
+		}
+		return out, nil
+	}
+	out["dismissed"] = true
+	out["reason"] = "clicked_not_verified"
+	return out, nil
+}
+
+func findCookieBannerRegion(regions []browserRegion) (browserRegion, string, bool) {
+	for _, r := range regions {
+		selector := strings.ToLower(r.Selector)
+		text := strings.ToLower(strings.Join([]string{r.Heading, r.Text, selector}, " "))
+		if strings.Contains(selector, "onetrust") || strings.Contains(selector, "#onetrust-banner-sdk") {
+			return r, "onetrust", true
+		}
+		if strings.Contains(selector, "cybot") || strings.Contains(text, "cookiebot") {
+			return r, "cookiebot", true
+		}
+		if strings.Contains(selector, "didomi") || strings.Contains(text, "didomi") {
+			return r, "didomi", true
+		}
+		if strings.Contains(selector, "usercentrics") || strings.Contains(selector, "uc-") || strings.Contains(text, "usercentrics") {
+			return r, "usercentrics", true
+		}
+		if isGenericCookieBanner(r, text) {
+			return r, "generic_accept_all", true
+		}
+	}
+	return browserRegion{}, "", false
+}
+
+func isGenericCookieBanner(r browserRegion, text string) bool {
+	if r.Rect.Width <= 0 || r.Rect.Height <= 0 {
+		return false
+	}
+	if r.Rect.Width*r.Rect.Height > 1200000 || r.Rect.Height > 750 {
+		return false
+	}
+	hasCookie := strings.Contains(text, "cookie") || strings.Contains(text, "consent") || strings.Contains(text, "privacy preferences")
+	hasAccept := strings.Contains(text, "accept all") || strings.Contains(text, "allow all") || strings.Contains(text, "agree")
+	return hasCookie && hasAccept
+}
+
+func cookieAcceptCoordinate(r browserRegion, strategy string) (int, int) {
+	rect := r.ViewportRect
+	if rect.Width <= 0 || rect.Height <= 0 {
+		rect = r.Rect
+	}
+	xRatio, yRatio := 0.84, 0.8
+	switch strategy {
+	case "onetrust":
+		xRatio, yRatio = 0.85, 0.79
+	case "cookiebot", "didomi", "usercentrics":
+		xRatio, yRatio = 0.78, 0.82
+	}
+	x := int(math.Round(rect.X + rect.Width*xRatio))
+	y := int(math.Round(rect.Y + rect.Height*yRatio))
+	if x < 1 {
+		x = 1
+	}
+	if y < 1 {
+		y = 1
+	}
+	return x, y
+}
+
 func (a *App) smartSnapshot(ctx *sdk.AppCtx, runID int64, sessionID string, browser *browserSession, opened bool, args map[string]any) (map[string]any, error) {
 	query := strings.TrimSpace(stringArg(args, "query"))
 	if query == "" {
 		return nil, errors.New("query required for smart snapshot")
+	}
+	cookieResult, err := a.dismissCookieBanner(ctx, sessionID, args)
+	if err != nil {
+		ctx.Logger().Warn("cookie banner dismissal failed", "err", err.Error())
+		cookieResult = map[string]any{
+			"mode":  cookieHandlingMode(args),
+			"error": err.Error(),
+		}
 	}
 	extracted, err := a.extractBrowserDOM(ctx, sessionID, mapMerge(args, map[string]any{
 		"formats":   []string{"regions"},
@@ -960,7 +1093,8 @@ func (a *App) smartSnapshot(ctx *sdk.AppCtx, runID int64, sessionID string, brow
 		"extraction_backend": firstNonEmpty(extracted.ExtractionBackend, "browser_dom"),
 		"candidate_regions":  len(extracted.Regions),
 		"coordinate_frame":   "viewport_css_px",
-		"matching_algorithm": "lexical_region_score_v1",
+		"matching_algorithm": "lexical_region_score_v2",
+		"cookie_handling":    cookieResult,
 	}
 	if browser != nil {
 		out["browser"] = browser
@@ -1142,8 +1276,10 @@ func rankRegions(regions []browserRegion, query string, limit int) []rankedRegio
 			score += 0.75
 		}
 		switch r.Tag {
-		case "form", "table", "section", "article", "main", "footer":
-			score += 0.5
+		case "form", "table", "section", "article", "footer":
+			score += 0.75
+		case "main":
+			score -= 1.5
 		}
 		if r.Visible {
 			score += 0.25
@@ -1152,6 +1288,7 @@ func rankRegions(regions []browserRegion, query string, limit int) []rankedRegio
 		if area > 25000 && area < 900000 {
 			score += 0.25
 		}
+		score += regionSpecificityScore(r)
 		if score <= 0 {
 			continue
 		}
@@ -1161,6 +1298,7 @@ func rankRegions(regions []browserRegion, query string, limit int) []rankedRegio
 		}
 		ranked = append(ranked, rankedRegion{Region: r, Score: math.Round(score*100) / 100, Reason: reason})
 	}
+	ranked = dedupeRankedRegions(ranked)
 	sort.SliceStable(ranked, func(i, j int) bool {
 		if ranked[i].Score == ranked[j].Score {
 			return ranked[i].Region.Rect.Y < ranked[j].Region.Rect.Y
@@ -1171,6 +1309,92 @@ func rankRegions(regions []browserRegion, query string, limit int) []rankedRegio
 		ranked = ranked[:limit]
 	}
 	return ranked
+}
+
+func regionSpecificityScore(r browserRegion) float64 {
+	area := r.Rect.Width * r.Rect.Height
+	height := r.Rect.Height
+	score := 0.0
+	switch {
+	case area > 6000000 || height > 3000:
+		score -= 7
+	case area > 2500000 || height > 1800:
+		score -= 4
+	case area > 1200000 || height > 1200:
+		score -= 2
+	}
+	if area > 0 && area < 700000 && height >= 80 && height <= 900 {
+		score += 1.25
+	}
+	selector := strings.ToLower(r.Selector)
+	if strings.Contains(selector, "card") || strings.Contains(selector, "tile") || strings.Contains(selector, "product") || strings.Contains(selector, "pricing") {
+		score += 0.5
+	}
+	return score
+}
+
+func dedupeRankedRegions(in []rankedRegion) []rankedRegion {
+	if len(in) <= 1 {
+		return in
+	}
+	suppressed := make([]bool, len(in))
+	for i := range in {
+		for j := range in {
+			if i == j || suppressed[i] {
+				continue
+			}
+			a, b := in[i], in[j]
+			if regionContains(a.Region, b.Region, 24) && regionArea(a.Region) > regionArea(b.Region)*2.25 && b.Score >= a.Score-2 {
+				suppressed[i] = true
+				continue
+			}
+			if overlapRatio(a.Region, b.Region) > 0.86 && regionArea(a.Region) > regionArea(b.Region)*1.35 && b.Score >= a.Score-1 {
+				suppressed[i] = true
+			}
+		}
+	}
+	out := make([]rankedRegion, 0, len(in))
+	for i, r := range in {
+		if !suppressed[i] {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+func regionArea(r browserRegion) float64 {
+	if r.Rect.Width <= 0 || r.Rect.Height <= 0 {
+		return 0
+	}
+	return r.Rect.Width * r.Rect.Height
+}
+
+func regionContains(parent, child browserRegion, tolerance float64) bool {
+	if regionArea(parent) <= 0 || regionArea(child) <= 0 {
+		return false
+	}
+	return child.Rect.X >= parent.Rect.X-tolerance &&
+		child.Rect.Y >= parent.Rect.Y-tolerance &&
+		child.Rect.X+child.Rect.Width <= parent.Rect.X+parent.Rect.Width+tolerance &&
+		child.Rect.Y+child.Rect.Height <= parent.Rect.Y+parent.Rect.Height+tolerance
+}
+
+func overlapRatio(a, b browserRegion) float64 {
+	ax0, ay0 := a.Rect.X, a.Rect.Y
+	ax1, ay1 := a.Rect.X+a.Rect.Width, a.Rect.Y+a.Rect.Height
+	bx0, by0 := b.Rect.X, b.Rect.Y
+	bx1, by1 := b.Rect.X+b.Rect.Width, b.Rect.Y+b.Rect.Height
+	x0, y0 := math.Max(ax0, bx0), math.Max(ay0, by0)
+	x1, y1 := math.Min(ax1, bx1), math.Min(ay1, by1)
+	if x1 <= x0 || y1 <= y0 {
+		return 0
+	}
+	intersection := (x1 - x0) * (y1 - y0)
+	smaller := math.Min(regionArea(a), regionArea(b))
+	if smaller <= 0 {
+		return 0
+	}
+	return intersection / smaller
 }
 
 func tokenizeQuery(query string) []string {

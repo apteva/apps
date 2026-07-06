@@ -287,7 +287,7 @@ func TestSmartSnapshotUsesRegionExtraction(t *testing.T) {
 		t.Fatalf("shot wrong: %#v", shots[0])
 	}
 	calls := plat.callLog()
-	want := []string{"computer.browser_open", "computer.browser_extract", "computer.computer_use", "computer.browser_screenshot", "storage.files_upload", "computer.browser_close"}
+	want := []string{"computer.browser_open", "computer.browser_extract", "computer.browser_extract", "computer.computer_use", "computer.browser_screenshot", "storage.files_upload", "computer.browser_close"}
 	if !sameOrderedPrefix(calls, want) {
 		t.Fatalf("calls=%v want prefix %v", calls, want)
 	}
@@ -299,6 +299,105 @@ func TestSmartSnapshotUsesRegionExtraction(t *testing.T) {
 	upload := plat.lastCall("storage", "files_upload")
 	if upload["content_type"] != "image/png" {
 		t.Fatalf("content_type=%v", upload["content_type"])
+	}
+}
+
+func TestSmartSnapshotDismissesCookieBanner(t *testing.T) {
+	plat := newFakePlatform()
+	plat.cookieBanner = true
+	ctx, app := newTestCtx(t, plat, tk.WithProjectID("proj-web"))
+
+	outAny, err := app.toolSnapshot(ctx, map[string]any{
+		"url":       "https://example.com",
+		"query":     "affiliate contact email",
+		"max_shots": 1,
+	})
+	if err != nil {
+		t.Fatalf("smart snapshot: %v", err)
+	}
+	out := outAny.(map[string]any)
+	cookie := out["cookie_handling"].(map[string]any)
+	if cookie["strategy"] != "onetrust" || cookie["dismissed"] != true {
+		t.Fatalf("cookie_handling=%#v", cookie)
+	}
+	var cookieClick map[string]any
+	for _, c := range plat.calls {
+		if c.app == "computer" && c.tool == "computer_use" && c.args["action"] == "click" {
+			cookieClick = c.args
+			break
+		}
+	}
+	if cookieClick == nil || cookieClick["coordinate"] == "" {
+		t.Fatalf("missing cookie coordinate click; calls=%#v", plat.calls)
+	}
+}
+
+func TestRankRegionsPrefersSpecificChildOverGiantContainer(t *testing.T) {
+	regions := []browserRegion{
+		{
+			ID:       "main",
+			Tag:      "main",
+			Heading:  "Build wealth with confidence",
+			Text:     "Loans Real estate Bonds Smart Cash ETFs investment returns " + strings.Repeat("site navigation ", 40),
+			Selector: "main",
+			Rect:     browserRect{X: 0, Y: 0, Width: 1350, Height: 9480},
+		},
+		{
+			ID:       "products",
+			Tag:      "section",
+			Heading:  "Loans",
+			Text:     "Loans can offer competitive investment returns. Explore bonds ETFs and real estate investment products.",
+			Selector: "main > section:nth-of-type(4)",
+			Rect:     browserRect{X: 0, Y: 2400, Width: 1350, Height: 540},
+		},
+		{
+			ID:       "testimonials",
+			Tag:      "section",
+			Heading:  "Trusted by 700k+ registered users",
+			Text:     "Best investment platform with ETFs, smart cash, loans and returns.",
+			Selector: "main > section:nth-of-type(10)",
+			Rect:     browserRect{X: 0, Y: 6200, Width: 1350, Height: 548},
+		},
+	}
+
+	got := rankRegions(regions, "investment products returns loans ETFs bonds", 3)
+	if len(got) != 2 {
+		t.Fatalf("ranked len=%d, want only specific sections: %#v", len(got), got)
+	}
+	if got[0].Region.ID == "main" || got[1].Region.ID == "main" {
+		t.Fatalf("giant container should be suppressed: %#v", got)
+	}
+	if got[0].Region.ID != "products" {
+		t.Fatalf("first region=%s, want products; ranked=%#v", got[0].Region.ID, got)
+	}
+}
+
+func TestRankRegionsDedupesNestedParent(t *testing.T) {
+	regions := []browserRegion{
+		{
+			ID:       "parent",
+			Tag:      "section",
+			Heading:  "Investment products",
+			Text:     "Investment products include loans bonds and ETFs.",
+			Selector: "section.products",
+			Rect:     browserRect{X: 0, Y: 1000, Width: 1200, Height: 900},
+		},
+		{
+			ID:       "card",
+			Tag:      "section",
+			Heading:  "Loans",
+			Text:     "Loans can offer competitive investment returns.",
+			Selector: "section.products .card",
+			Rect:     browserRect{X: 80, Y: 1120, Width: 420, Height: 260},
+		},
+	}
+
+	got := rankRegions(regions, "investment returns loans", 2)
+	if len(got) != 1 {
+		t.Fatalf("ranked len=%d, want deduped child only: %#v", len(got), got)
+	}
+	if got[0].Region.ID != "card" {
+		t.Fatalf("region=%s, want card; ranked=%#v", got[0].Region.ID, got)
 	}
 }
 
@@ -338,12 +437,14 @@ type fakeCall struct {
 
 type fakePlatform struct {
 	tk.BasePlatformClient
-	mu            sync.Mutex
-	calls         []fakeCall
-	storageID     int64
-	storageURL    string
-	openURL       string
-	searchBlocked bool
+	mu              sync.Mutex
+	calls           []fakeCall
+	storageID       int64
+	storageURL      string
+	openURL         string
+	searchBlocked   bool
+	cookieBanner    bool
+	cookieDismissed bool
 }
 
 func newFakePlatform() *fakePlatform {
@@ -436,37 +537,61 @@ func (p *fakePlatform) respond(app, tool string, in map[string]any) map[string]a
 				"extraction_backend": "browser_dom",
 			}
 		}
-		return map[string]any{
-			"session_id":  in["session_id"],
-			"backend":     "local",
-			"current_url": p.openURL,
-			"url":         p.openURL,
-			"title":       "Readable Page",
-			"description": "A page for extraction",
-			"text":        "Hello This page has useful text.",
-			"markdown":    "# Hello\n\nThis page has useful text.",
-			"links":       []map[string]any{{"url": p.openURL + "/next", "text": "Next page"}},
-			"regions": []map[string]any{{
-				"id":       "r_contact",
-				"tag":      "section",
-				"heading":  "Affiliate contact",
-				"text":     "For affiliate contact email partners@example.com.",
-				"selector": "#contact",
+		regions := []map[string]any{{
+			"id":       "r_contact",
+			"tag":      "section",
+			"heading":  "Affiliate contact",
+			"text":     "For affiliate contact email partners@example.com.",
+			"selector": "#contact",
+			"rect": map[string]any{
+				"x":      80,
+				"y":      1100,
+				"width":  520,
+				"height": 180,
+			},
+			"viewport_rect": map[string]any{
+				"x":      80,
+				"y":      1100,
+				"width":  520,
+				"height": 180,
+			},
+			"coordinate_frame": "document_css_px",
+			"visible":          false,
+		}}
+		if p.cookieBanner && !p.cookieDismissed {
+			regions = append([]map[string]any{{
+				"id":       "r_cookie",
+				"tag":      "div",
+				"heading":  "Cookies on Mintos",
+				"text":     "Cookies on Mintos. We use cookies to improve your experience. Select cookies. Accept necessary. Accept all.",
+				"selector": "#onetrust-banner-sdk",
 				"rect": map[string]any{
-					"x":      80,
-					"y":      1100,
-					"width":  520,
-					"height": 180,
+					"x":      357,
+					"y":      90,
+					"width":  650,
+					"height": 232.765625,
 				},
 				"viewport_rect": map[string]any{
-					"x":      80,
-					"y":      1100,
-					"width":  520,
-					"height": 180,
+					"x":      357,
+					"y":      90,
+					"width":  650,
+					"height": 232.765625,
 				},
 				"coordinate_frame": "document_css_px",
-				"visible":          false,
-			}},
+				"visible":          true,
+			}}, regions...)
+		}
+		return map[string]any{
+			"session_id":         in["session_id"],
+			"backend":            "local",
+			"current_url":        p.openURL,
+			"url":                p.openURL,
+			"title":              "Readable Page",
+			"description":        "A page for extraction",
+			"text":               "Hello This page has useful text.",
+			"markdown":           "# Hello\n\nThis page has useful text.",
+			"links":              []map[string]any{{"url": p.openURL + "/next", "text": "Next page"}},
+			"regions":            regions,
 			"metadata":           map[string]any{"description": "A page for extraction"},
 			"structured_data":    map[string]any{"json_ld": []any{map[string]any{"@type": "Article", "headline": "Readable Page"}}},
 			"rendered":           true,
@@ -477,6 +602,9 @@ func (p *fakePlatform) respond(app, tool string, in map[string]any) map[string]a
 	case "computer.browser_close":
 		return map[string]any{"closed": true}
 	case "computer.computer_use":
+		if in["action"] == "click" && stringFromAny(in["coordinate"]) != "" && p.cookieBanner {
+			p.cookieDismissed = true
+		}
 		return map[string]any{"current_url": p.openURL, "width": 1280, "height": 720}
 	case "computer.browser_screenshot":
 		return map[string]any{
