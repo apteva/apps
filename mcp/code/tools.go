@@ -420,6 +420,21 @@ func (a *App) MCPTools() []sdk.Tool {
 			Handler: a.toolDevStart,
 		},
 		{
+			Name: "repos_run_command",
+			Description: "Run a finite repo command and wait for it to exit. Use this for builds, tests, lint, typecheck, generators, and validation commands such as 'bun run build' or 'go test ./...'. " +
+				"Do not use repos_dev_start for finite commands; repos_dev_start is only for long-running preview servers. " +
+				"For JS/Bun/Node repos with package.json, bootstraps dependencies first when node_modules is missing or dependency files changed. " +
+				"Returns structured status, exit_code, duration_ms, dependency_install_ran, stdout_tail, stderr_tail, and log_tail. Args: slug, command, env_json?, timeout_seconds? (default 300, max 1800), tail? (default 200).",
+			InputSchema: schemaObject(map[string]any{
+				"slug":            map[string]any{"type": "string"},
+				"command":         map[string]any{"type": "string"},
+				"env_json":        map[string]any{"type": "string"},
+				"timeout_seconds": map[string]any{"type": "integer"},
+				"tail":            map[string]any{"type": "integer"},
+			}, []string{"slug", "command"}),
+			Handler: a.toolRunCommand,
+		},
+		{
 			Name:        "repos_dev_stop",
 			Description: "Stop the dev process for a repo. SIGTERM the process group, then SIGKILL after 5s. Idempotent.",
 			InputSchema: schemaObject(map[string]any{"slug": map[string]any{"type": "string"}}, []string{"slug"}),
@@ -548,6 +563,33 @@ func (a *App) toolDevLogs(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return nil, err
 	}
 	return map[string]any{"log": body, "available": true}, nil
+}
+
+func (a *App) toolRunCommand(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	slug := strArg(args, "slug")
+	repo, err := requireRepo(ctx, pid, slug)
+	if err != nil {
+		return nil, err
+	}
+	pp, ok := a.store.(FileStoreLocalPath)
+	if !ok {
+		return nil, errors.New("repo command runner requires a local filesystem store")
+	}
+	srcDir := pp.RepoPath(repo.Slug)
+	res, err := a.runRepoCommand(repo, srcDir, repoCommandInput{
+		Command:        strArg(args, "command"),
+		EnvJSON:        strArg(args, "env_json"),
+		TimeoutSeconds: intArg(args, "timeout_seconds", 300),
+		TailLines:      intArg(args, "tail", 200),
+	})
+	if err != nil {
+		return nil, err
+	}
+	return res, nil
 }
 
 // ─── repos_import_github handler ──────────────────────────────────

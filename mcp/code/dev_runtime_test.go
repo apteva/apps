@@ -217,6 +217,80 @@ func TestInstallNodeDeps_UsesFrozenBunAndRecordsFingerprint(t *testing.T) {
 	}
 }
 
+func TestRunRepoCommand_SuccessAndFailureUseExitCodeSemantics(t *testing.T) {
+	a := &App{dataDir: t.TempDir()}
+	srcDir := t.TempDir()
+	repo := &Repo{ID: 7, ProjectID: "p1", Slug: "cmd"}
+
+	ok, err := a.runRepoCommand(repo, srcDir, repoCommandInput{
+		Command: "printf out && printf err >&2",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ok.Status != "success" || ok.ExitCode != 0 {
+		t.Fatalf("success result = %+v", ok)
+	}
+	if ok.StdoutTail != "out" || ok.StderrTail != "err" {
+		t.Fatalf("tails stdout=%q stderr=%q", ok.StdoutTail, ok.StderrTail)
+	}
+
+	failed, err := a.runRepoCommand(repo, srcDir, repoCommandInput{
+		Command: "printf broken >&2; exit 7",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if failed.Status != "failed" || failed.ExitCode != 7 {
+		t.Fatalf("failure result = %+v", failed)
+	}
+	if !strings.Contains(failed.StderrTail, "broken") {
+		t.Fatalf("stderr tail missing command output: %+v", failed)
+	}
+}
+
+func TestRunRepoCommand_BootstrapsBunDepsBeforeFiniteCommand(t *testing.T) {
+	a := &App{dataDir: t.TempDir()}
+	srcDir := t.TempDir()
+	repo := &Repo{ID: 8, ProjectID: "p1", Slug: "build"}
+	if err := os.WriteFile(filepath.Join(srcDir, "package.json"), []byte(`{"scripts":{"build":"echo built"}}`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(srcDir, "bun.lock"), []byte("lock"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	binDir := t.TempDir()
+	fakeBun := filepath.Join(binDir, "bun")
+	script := "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$PWD/bun-args.txt\"\nmkdir -p node_modules\n"
+	if err := os.WriteFile(fakeBun, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	res, err := a.runRepoCommand(repo, srcDir, repoCommandInput{
+		Command: "test -f node_modules/.apteva-code-deps.sha256 && echo built",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Status != "success" || !res.DependencyInstallRan {
+		t.Fatalf("expected successful command with dependency install, got %+v", res)
+	}
+	args, err := os.ReadFile(filepath.Join(srcDir, "bun-args.txt"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.TrimSpace(string(args)); got != "install\n--frozen-lockfile" {
+		t.Fatalf("fake bun args = %q", got)
+	}
+	if !strings.Contains(res.StdoutTail, "built") {
+		t.Fatalf("stdout tail missing build output: %+v", res)
+	}
+	if !strings.Contains(res.LogTail, "dependencies missing; running bun install --frozen-lockfile") {
+		t.Fatalf("log tail missing dependency install note:\n%s", res.LogTail)
+	}
+}
+
 // TestStartDevRun_BlankWithRunCmd spawns a real "child process" via
 // run_cmd. We can't easily fake the framework path without an
 // AppCtx, so we go straight at the supervisor primitives — port

@@ -34,7 +34,7 @@ var templatesFS embed.FS
 const manifestYAML = `schema: apteva-app/v1
 name: code
 display_name: Apteva Code
-version: 0.5.20
+version: 0.5.22
 description: |
   Repositories — code workspaces scoped to Apteva projects, with
   first-class editing tools modelled on Claude Code. Optionally
@@ -43,6 +43,7 @@ description: |
   manages native repo issues for bugs, feature requests, and tasks,
   makes grep/read/patch tools more compact for agents with reusable
   patch previews, targeted rejected-hunk context, and stale-hunk recovery,
+  runs finite build/test/lint/generator commands through repos_run_command,
   unifies project navigation with a Repositories tab,
   gives the project-wide Issues inbox the full panel width,
   adds a project-wide Issues inbox in the UI,
@@ -107,7 +108,8 @@ provides:
     - { name: templates_list,         description: "List user templates visible to this project + embedded ones." }
     - { name: repos_fork,             description: "Create a new repo by snapshot-copying a template or another repo." }
     - { name: repos_import_github,    description: "Import a GitHub repo as a local repository (gzip tarball snapshot)." }
-    - { name: repos_dev_start,        description: "Start a Replit-style dev process for a repo. Auto-detects framework or accepts run_cmd." }
+    - { name: repos_dev_start,        description: "Start a long-running dev preview server for a repo." }
+    - { name: repos_run_command,      description: "Run a finite repo command such as build, test, lint, typecheck, or generator and return exit-code semantics." }
     - { name: repos_dev_stop,         description: "Stop the dev process for a repo." }
     - { name: repos_dev_status,       description: "Get the current dev run state (port, pid, status, framework)." }
     - { name: repos_dev_logs,         description: "Tail the dev run's stdout/stderr log file." }
