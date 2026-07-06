@@ -97,6 +97,7 @@ interface Post {
   id: number;
   body: string;
   media_storage_ids: number[];
+  external_media_urls?: string[];
   schedule_at: string;
   status: string;
   created_at: string;
@@ -3276,6 +3277,13 @@ function PostsView({
               ))}
             </div>
           )}
+          {p.external_media_urls && p.external_media_urls.length > 0 && (
+            <div className="mt-3 flex flex-wrap gap-2">
+              {p.external_media_urls.map((url) => (
+                <ExternalMediaThumb key={url} url={url} />
+              ))}
+            </div>
+          )}
           {p.targets.length > 0 && (
             <div className="mt-3 flex flex-wrap gap-2">
               {p.targets.map((t) => (
@@ -4508,6 +4516,36 @@ function MediaThumb({ fileId, projectId }: { fileId: number; projectId?: string 
         </div>
       )}
     </>
+  );
+}
+
+function ExternalMediaThumb({ url }: { url: string }) {
+  const [failed, setFailed] = useState(false);
+  return (
+    <a
+      href={url}
+      target="_blank"
+      rel="noopener"
+      className="block w-20 h-20 rounded border border-border overflow-hidden bg-bg-input flex-shrink-0 relative group"
+      title="Imported media"
+    >
+      {!failed ? (
+        <img
+          src={url}
+          alt=""
+          loading="lazy"
+          onError={() => setFailed(true)}
+          className="w-full h-full object-cover"
+        />
+      ) : (
+        <div className="w-full h-full grid place-items-center px-2 text-center text-[10px] text-text-dim">
+          Open media
+        </div>
+      )}
+      <div className="absolute left-1 bottom-1 px-1 py-0.5 rounded bg-black/70 text-[9px] uppercase text-white">
+        imported
+      </div>
+    </a>
   );
 }
 

@@ -44,7 +44,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: social
 display_name: Social
-version: 0.14.57
+version: 0.14.58
 description: |
   Schedule and publish posts to your social accounts (X, Facebook,
   Instagram, LinkedIn, TikTok, YouTube, Reddit, Pinterest, Threads).
@@ -3687,7 +3687,7 @@ func (a *App) toolPostList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if profileID < 0 {
 		return mcpError(fmt.Sprintf("profile %q not found in this project", args["profile"])), nil
 	}
-	q := `SELECT id, body, COALESCE(media_storage_ids,'[]'), COALESCE(schedule_at,''),
+	q := `SELECT id, body, COALESCE(media_storage_ids,'[]'), COALESCE(external_media_urls,'[]'), COALESCE(schedule_at,''),
 	             status, created_at, COALESCE(published_at,''), COALESCE(profile_id,0)
 	      FROM posts WHERE project_id=?`
 	qArgs := []any{pid}
@@ -3710,6 +3710,7 @@ func (a *App) toolPostList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		profID   int64
 		body     string
 		mediaIDs []int64
+		extMedia []string
 		schedAt  string
 		status   string
 		created  string
@@ -3718,19 +3719,22 @@ func (a *App) toolPostList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	postRows := []postRow{}
 	for rows.Next() {
 		var (
-			id, profID                                         int64
-			body, mediaJSON, schedAt, status, createdAt, pubAt string
+			id, profID                                                       int64
+			body, mediaJSON, extMediaJSON, schedAt, status, createdAt, pubAt string
 		)
-		if err := rows.Scan(&id, &body, &mediaJSON, &schedAt, &status, &createdAt, &pubAt, &profID); err != nil {
+		if err := rows.Scan(&id, &body, &mediaJSON, &extMediaJSON, &schedAt, &status, &createdAt, &pubAt, &profID); err != nil {
 			continue
 		}
 		var mediaIDs []int64
 		_ = json.Unmarshal([]byte(mediaJSON), &mediaIDs)
+		var extMedia []string
+		_ = json.Unmarshal([]byte(extMediaJSON), &extMedia)
 		postRows = append(postRows, postRow{
 			id:       id,
 			profID:   profID,
 			body:     body,
 			mediaIDs: mediaIDs,
+			extMedia: extMedia,
 			schedAt:  schedAt,
 			status:   status,
 			created:  createdAt,
@@ -3742,15 +3746,16 @@ func (a *App) toolPostList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	for _, p := range postRows {
 		targets := a.loadTargets(ctx, p.id)
 		out = append(out, map[string]any{
-			"id":                p.id,
-			"body":              p.body,
-			"media_storage_ids": p.mediaIDs,
-			"profile_id":        p.profID,
-			"schedule_at":       p.schedAt,
-			"status":            p.status,
-			"created_at":        p.created,
-			"published_at":      p.pubAt,
-			"targets":           targets,
+			"id":                  p.id,
+			"body":                p.body,
+			"media_storage_ids":   p.mediaIDs,
+			"external_media_urls": p.extMedia,
+			"profile_id":          p.profID,
+			"schedule_at":         p.schedAt,
+			"status":              p.status,
+			"created_at":          p.created,
+			"published_at":        p.pubAt,
+			"targets":             targets,
 		})
 	}
 	return map[string]any{"posts": out}, nil

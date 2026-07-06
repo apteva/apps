@@ -597,7 +597,8 @@ func TestPostList_DoesNotDeadlockLoadingTargets(t *testing.T) {
 	}
 	acctID, _ := acctRes.LastInsertId()
 	postRes, err := ctx.AppDB().Exec(
-		`INSERT INTO posts (project_id, body, status) VALUES ('test-proj', 'hello', 'published')`,
+		`INSERT INTO posts (project_id, body, status, external_media_urls)
+		 VALUES ('test-proj', 'hello', 'published', '["https://cdn.test/thumb.jpg"]')`,
 	)
 	if err != nil {
 		t.Fatal(err)
@@ -632,6 +633,10 @@ func TestPostList_DoesNotDeadlockLoadingTargets(t *testing.T) {
 		targets := posts[0]["targets"].([]map[string]any)
 		if len(targets) != 1 || targets[0]["social_account_id"].(int64) != acctID {
 			t.Fatalf("targets = %+v", targets)
+		}
+		extMedia := posts[0]["external_media_urls"].([]string)
+		if len(extMedia) != 1 || extMedia[0] != "https://cdn.test/thumb.jpg" {
+			t.Fatalf("external_media_urls = %+v", extMedia)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("toolPostList deadlocked while loading targets")
