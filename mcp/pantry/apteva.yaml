@@ -1,0 +1,85 @@
+schema: apteva-app/v1
+
+name: pantry
+display_name: Pantry
+version: 0.1.0
+description: |
+  Food inventory for pantry, fridge, and freezer. Track products,
+  barcode aliases, locations, quantities, expiry batches, low-stock
+  thresholds, and shopping-list needs. Agents can add/use stock from
+  natural-language lines or structured MCP tools, then answer questions
+  like "what expires this week?" and "what should I buy?".
+
+author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/pantry
+tags: [pantry, groceries, food, inventory, household]
+
+scopes: [project, global]
+min_apteva_version: "0.10.0"
+
+requires:
+  permissions:
+    - db.write.app
+  integrations: []
+  apps: []
+
+provides:
+  http_routes:
+    - prefix: /
+  mcp_tools:
+    - { name: pantry_quick_add,      description: "Parse one pantry line. Examples: 'add 2 milk fridge exp 2026-07-12', 'use 1 eggs', 'discard spinach'." }
+    - { name: pantry_items_create,   description: "Create a pantry item/product. Args: name, category?, barcode?, brand?, default_unit?, min_quantity?, target_quantity?, notes?." }
+    - { name: pantry_items_list,     description: "List items with current total quantity. Args: q?, category?, include_archived?, limit?." }
+    - { name: pantry_items_get,      description: "Fetch one item with its lots. Args: id." }
+    - { name: pantry_items_update,   description: "Patch an item. Args: id, patch." }
+    - { name: pantry_items_archive,  description: "Archive an item so it hides from normal lists. Args: id." }
+    - { name: pantry_stock_add,      description: "Add stock as a lot/batch. Args: item_id? or name, quantity, unit?, location?, expires_at?, barcode?, brand?, category?, notes?." }
+    - { name: pantry_stock_use,      description: "Consume stock FIFO by expiry. Args: item_id? or name, quantity?, location_id?, action? (use|discard)." }
+    - { name: pantry_lots_list,      description: "List stock lots. Args: item_id?, location_id?, expiring_days?, q?, limit?." }
+    - { name: pantry_lot_update,     description: "Patch a lot. Args: id, patch (quantity, location_id, expires_at, notes, opened_at)." }
+    - { name: pantry_lot_delete,     description: "Delete one lot. Args: id." }
+    - { name: pantry_locations_list, description: "List pantry/fridge/freezer locations." }
+    - { name: pantry_locations_create, description: "Create a location. Args: name, kind? (pantry|fridge|freezer|other)." }
+    - { name: pantry_expiring,       description: "Items/lots expiring soon. Args: days? default 14, limit?." }
+    - { name: pantry_low_stock,      description: "Items at or below configured min_quantity." }
+    - { name: pantry_shopping_list,  description: "Suggested shopping list based on low stock and target quantities." }
+    - { name: pantry_summary,        description: "Short markdown summary of expiring and low-stock food." }
+  ui_panels:
+    - slot: project.page
+      label: Pantry
+      icon: shopping-basket
+      entry: /ui/PantryPanel.mjs
+  publishes:
+    - name: pantry.item.created
+      description: A pantry item was created.
+      payload:
+        id: integer
+        name: string
+    - name: pantry.stock.added
+      description: A stock lot was added.
+      payload:
+        id: integer
+        item_id: integer
+        quantity: number
+    - name: pantry.stock.used
+      description: Stock was used or discarded.
+      payload:
+        item_id: integer
+        quantity: number
+        action: string
+
+runtime:
+  kind: source
+  source:
+    repo: github.com/apteva/apps
+    ref: main
+    entry: mcp/pantry
+  port: 8080
+  health_check: /health
+
+db:
+  driver: sqlite
+  path: /data/pantry.db
+  migrations: migrations/
+
+upgrade_policy: auto-patch
