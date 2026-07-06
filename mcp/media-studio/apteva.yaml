@@ -7,9 +7,12 @@ description: |
   Generate images, video, audio, music, and avatars via compatible
   providers. ElevenLabs powers audio TTS, sound effects, and music.
   Optionally saves outputs to the Storage app for permanent, shareable
-  references. v0.10.34 loads Venice edit models from the inpaint model
-  catalog and filters edit-only resolution tiers for current model ids
-  such as Nano Banana, Qwen, Flux, and GPT Image edit.
+  references. v0.10.34 adds media_models for agent-side model
+  discovery, prepares image generation for multiple bound image
+  providers without explicit provider selection in tool calls, and
+  loads Venice edit models from the inpaint model catalog with
+  edit-only resolution filtering for current model ids such as
+  Nano Banana, Qwen, Flux, and GPT Image edit.
 
   v0.10.33 filters Venice image-edit options per model so
   Flux and Qwen edits no longer receive unsupported resolution tiers.
@@ -58,7 +61,7 @@ requires:
         image.edit: edit_image
       required: false
       label: "Image provider"
-      hint: "Bind any compatible integration (OpenAI API, OpenAI Codex, Venice AI, Gemini; Replicate / Stability soon) to enable image generation. Reference-image edits use each provider's image.edit support where available."
+      hint: "Bind any compatible integration (OpenAI API, OpenAI Codex, Venice AI, Gemini; Replicate / Stability soon) to enable image generation. Newer Apteva builds can bind multiple image providers and Media Studio exposes one merged model list."
 
     - role: video_provider
       kind: integration
@@ -114,7 +117,8 @@ provides:
   http_routes:
     - prefix: /
   mcp_tools:
-    - { name: media_generate, description: "Generate media (image / video / audio / music / avatar). Args: kind (required: image|video|audio_tts|audio_sfx|music|avatar), prompt (required — for avatar this is the spoken script), model?, size?, duration?, voice?, aspect?, avatar? (replica/avatar id, avatar kind), source_image?, source_images? (image edit and video references; Venice *reference-to-video supports multiple refs), n?, options? (provider extras; video supports consents.seedance when required), cache_key?, cache_policy? ('reuse'|'refresh'). Video + avatar are async (queued; delivered via media.generated). Returns thumbnail + storage URL when storage is bound, else inline (small media) or expiring upstream URL." }
+    - { name: media_models, description: "List available media models for a kind. Args: kind? (default image). Use returned model ids in media_generate; image ids may include a provider prefix when multiple image providers are bound." }
+    - { name: media_generate, description: "Generate media (image / video / audio / music / avatar). Args: kind (required: image|video|audio_tts|audio_sfx|music|avatar), prompt (required — for avatar this is the spoken script), model? (use a model id returned by media_models; image ids may include a provider prefix when multiple image providers are bound), size?, duration?, voice?, aspect?, avatar? (replica/avatar id, avatar kind), source_image?, source_images? (image edit and video references; Venice *reference-to-video supports multiple refs), n?, options? (provider extras; video supports consents.seedance when required), cache_key?, cache_policy? ('reuse'|'refresh'). Video + avatar are async (queued; delivered via media.generated). Returns thumbnail + storage URL when storage is bound, else inline (small media) or expiring upstream URL." }
     - { name: media_estimate, description: "Estimate generation cost without creating media. Args match media_generate. Returns cost_usd when the bound provider exposes pricing or Media Studio can derive it." }
     - { name: media_delete, description: "Delete one generation for this project. Args: id, delete_storage? (default true). Also removes linked Storage files, async job rows, and local cache files when enabled." }
     - { name: media_identity_create, description: "Create a reusable provider-side identity such as a voice or avatar. Args: kind (voice|avatar), name, source_type (prompt|audio|photo|video), prompt?/voice_description?, model_id? for ElevenLabs Voice Design, source_image?, source_video?, options?." }

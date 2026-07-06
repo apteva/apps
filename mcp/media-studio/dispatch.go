@@ -195,12 +195,12 @@ func (a *App) toolMediaGenerate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 		}
 	}
 
-	bound := ctx.IntegrationFor(h.Role)
+	capability := h.ResolveCapability(args)
+	bound := selectBoundProvider(ctx, h, args, capability)
 	if bound == nil {
 		return mcpError("no " + h.Role + " bound — pick one in app settings"), nil
 	}
 	draftID := int64Arg(args, "_draft_generation_id", 0)
-	capability := h.ResolveCapability(args)
 	tool := bound.ToolFor(capability)
 	// Per-slug tool override — for kinds where compatible providers name
 	// the same capability's tool differently (avatar).
@@ -412,6 +412,66 @@ func (a *App) toolMediaGenerate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 		EstimatedDurationSeconds: estimatedSeconds,
 		ActualDurationSeconds:    totalActualSeconds,
 	}), nil
+}
+
+func selectBoundProvider(ctx *sdk.AppCtx, h kindHandler, args map[string]any, capability string) *sdk.BoundIntegration {
+	if h.Role != "image_provider" {
+		return ctx.IntegrationFor(h.Role)
+	}
+	bounds := boundIntegrationsFor(ctx, h.Role)
+	if len(bounds) == 0 {
+		return nil
+	}
+	model := strArg(args, "model", "")
+	if provider, stripped, ok := splitProviderModel(model); ok {
+		args["model"] = stripped
+		for _, bound := range bounds {
+			if bound != nil && bound.AppSlug == provider && imageProviderSupports(bound.AppSlug, capability) {
+				return bound
+			}
+		}
+		return nil
+	}
+	for _, bound := range bounds {
+		if bound != nil && imageProviderSupports(bound.AppSlug, capability) {
+			return bound
+		}
+	}
+	return nil
+}
+
+func splitProviderModel(model string) (string, string, bool) {
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return "", "", false
+	}
+	for _, sep := range []string{":", "/"} {
+		parts := strings.SplitN(model, sep, 2)
+		if len(parts) != 2 || parts[0] == "" || parts[1] == "" {
+			continue
+		}
+		switch parts[0] {
+		case "openai-api", "openai-codex", "venice-ai", "gemini":
+			return parts[0], parts[1], true
+		}
+	}
+	return "", model, false
+}
+
+func imageProviderSupports(provider, capability string) bool {
+	switch capability {
+	case "image.generate":
+		switch provider {
+		case "openai-api", "openai-codex", "venice-ai", "gemini":
+			return true
+		}
+	case "image.edit":
+		switch provider {
+		case "openai-api", "venice-ai", "gemini":
+			return true
+		}
+	}
+	return false
 }
 
 func wantsDraft(args map[string]any) bool {
@@ -949,7 +1009,29 @@ func (a *App) handleBindings(w http.ResponseWriter, r *http.Request) {
 	out := map[string]any{}
 	for kind, h := range handlers {
 		entry := map[string]any{"bound": false}
-		if b := globalCtx.IntegrationFor(h.Role); b != nil {
+		var b *sdk.BoundIntegration
+		if kind == KindImage {
+			providers := []map[string]any{}
+			for i, bound := range boundIntegrationsFor(globalCtx, h.Role) {
+				if bound == nil {
+					continue
+				}
+				providers = append(providers, map[string]any{
+					"connection_id": bound.ConnectionID,
+					"slug":          bound.AppSlug,
+					"default":       i == 0,
+				})
+				if b == nil {
+					b = bound
+				}
+			}
+			if len(providers) > 0 {
+				entry["providers"] = providers
+			}
+		} else {
+			b = globalCtx.IntegrationFor(h.Role)
+		}
+		if b != nil {
 			entry["bound"] = true
 			entry["slug"] = b.AppSlug
 			// Default-capability support — what an empty-args call would

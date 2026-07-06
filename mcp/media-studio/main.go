@@ -35,12 +35,16 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: media-studio
 display_name: Media Studio
-version: 0.10.32
+version: 0.10.34
 description: |
   Generate images, video, audio, music, and avatars via compatible
   providers. Optionally saves outputs to Storage, supports stable
   cache keys for app-to-app generation reuse, and can use OpenAI Codex
-  as a subscription-backed image provider. v0.10.30 lets voice
+  as a subscription-backed image provider. v0.10.34 adds media_models
+  for agent-side model discovery and prepares image generation for
+  multiple bound image providers without explicit provider selection
+  in tool calls.
+  v0.10.30 lets voice
   creation choose the ElevenLabs Voice Design model, defaulting to
   eleven_ttv_v3. v0.10.29 adds UI controls for ElevenLabs Voice Design
   voice creation on the Audio/TTS tab.
@@ -105,7 +109,8 @@ provides:
   http_routes:
     - prefix: /
   mcp_tools:
-    - { name: media_generate, description: "Generate media (image/video/audio/music/avatar). Args: kind, prompt, model?, size?, duration?, voice?, aspect?, avatar?, storage_folder?, n?, options?, cache_key?, cache_policy?." }
+    - { name: media_models, description: "List available media models for a kind. Args: kind? (default image). Use returned model ids in media_generate; image ids may include a provider prefix when multiple image providers are bound." }
+    - { name: media_generate, description: "Generate media (image/video/audio/music/avatar). Args: kind, prompt, model? (use a model id returned by media_models; image ids may include a provider prefix when multiple image providers are bound), size?, duration?, voice?, aspect?, avatar?, storage_folder?, n?, options?, cache_key?, cache_policy?." }
     - { name: media_estimate, description: "Estimate generation cost without creating media. Args match media_generate." }
     - { name: media_delete, description: "Delete a media generation and, by default, its linked Storage files. Args: id, delete_storage?." }
     - { name: media_identity_create, description: "Create a reusable provider-side identity such as a voice or avatar. Args: kind (voice|avatar), name, source_type (prompt|audio|photo|video), prompt?/voice_description?, source_image?, source_video?, options?." }
@@ -203,6 +208,19 @@ func (a *App) HTTPRoutes() []sdk.Route {
 
 func (a *App) MCPTools() []sdk.Tool {
 	return []sdk.Tool{
+		{
+			Name:        "media_models",
+			Description: "List available media models for a kind. Args: kind? (image|video|audio_tts|audio_sfx|music; default image). Use returned model ids in media_generate; when multiple image providers are bound, image model ids may be provider-prefixed.",
+			InputSchema: schemaObject(map[string]any{
+				"kind": map[string]any{
+					"type":        "string",
+					"description": "Media kind to list models for.",
+					"enum":        []string{"image", "video", "audio_tts", "audio_sfx", "music"},
+					"default":     "image",
+				},
+			}, nil),
+			Handler: a.toolMediaModels,
+		},
 		{
 			Name: "media_generate",
 			Description: "Generate media (image / video / audio / music / avatar). " +

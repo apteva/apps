@@ -21,8 +21,9 @@ import (
 const modelCacheTTL = 10 * time.Minute
 
 type modelEntry struct {
-	ID    string `json:"id"`
-	Label string `json:"label"`
+	ID       string `json:"id"`
+	Label    string `json:"label"`
+	Provider string `json:"provider,omitempty"`
 	// SizeModes tells callers how to express output shape for this model:
 	// "pixel" for WxH size, "aspect" for aspect_ratio, and
 	// "resolution" for provider tiers such as 1K/2K/4K.
@@ -114,6 +115,58 @@ func loadModelsForCapability(ctx *sdk.AppCtx, kind, capability string) ([]modelE
 		return nil, nil
 	}
 	bound := ctx.IntegrationFor(h.Role)
+	return loadModelsForBoundCapability(ctx, kind, capability, bound)
+}
+
+func providerScopedModels(provider string, models []modelEntry, namespace bool) []modelEntry {
+	out := make([]modelEntry, 0, len(models))
+	for _, m := range models {
+		m.Provider = provider
+		if namespace {
+			m.ID = provider + ":" + m.ID
+			if !strings.Contains(m.Label, provider) {
+				m.Label = m.Label + " · " + provider
+			}
+		}
+		out = append(out, m)
+	}
+	return out
+}
+
+func loadImageModelsForAllProviders(ctx *sdk.AppCtx, capability string) ([]modelEntry, []string, error) {
+	h, ok := handlers[KindImage]
+	if !ok {
+		return nil, nil, nil
+	}
+	bounds := boundIntegrationsFor(ctx, h.Role)
+	if len(bounds) == 0 {
+		return nil, nil, nil
+	}
+	namespace := len(bounds) > 1
+	out := []modelEntry{}
+	providers := []string{}
+	for _, bound := range bounds {
+		if bound == nil || !imageProviderSupports(bound.AppSlug, capability) {
+			continue
+		}
+		providers = append(providers, bound.AppSlug)
+		models, err := loadModelsForBoundCapability(ctx, KindImage, capability, bound)
+		if err != nil {
+			return out, providers, err
+		}
+		out = append(out, providerScopedModels(bound.AppSlug, models, namespace)...)
+	}
+	return out, providers, nil
+}
+
+func loadModelsForBoundCapability(ctx *sdk.AppCtx, kind, capability string, bound *sdk.BoundIntegration) ([]modelEntry, error) {
+	if bound == nil {
+		return nil, nil
+	}
+	return loadModelsForCapabilityBound(ctx, kind, capability, bound)
+}
+
+func loadModelsForCapabilityBound(ctx *sdk.AppCtx, kind, capability string, bound *sdk.BoundIntegration) ([]modelEntry, error) {
 	if bound == nil {
 		return nil, nil
 	}
@@ -165,6 +218,50 @@ func loadModelsForCapability(ctx *sdk.AppCtx, kind, capability string) ([]modelE
 	modelCache[key] = modelCacheValue{Models: models, FetchedAt: time.Now()}
 	modelCacheMu.Unlock()
 	return models, nil
+}
+
+func modelCatalogForKind(ctx *sdk.AppCtx, kind, capability string) (map[string]any, error) {
+	if kind == "" {
+		kind = KindImage
+	}
+	if _, ok := handlers[kind]; !ok {
+		return map[string]any{
+			"kind":   kind,
+			"bound":  false,
+			"models": []modelEntry{},
+			"error":  "unknown kind",
+		}, nil
+	}
+	if kind == KindImage {
+		models, providers, err := loadImageModelsForAllProviders(ctx, capability)
+		return map[string]any{
+			"kind":      kind,
+			"bound":     len(providers) > 0,
+			"providers": providers,
+			"provider":  strings.Join(providers, ","),
+			"models":    models,
+		}, err
+	}
+	h := handlers[kind]
+	bound := ctx.IntegrationFor(h.Role)
+	resp := map[string]any{
+		"kind":   kind,
+		"bound":  bound != nil,
+		"models": []modelEntry{},
+	}
+	if bound == nil {
+		return resp, nil
+	}
+	resp["provider"] = bound.AppSlug
+	models, err := loadModelsForBoundCapability(ctx, kind, capability, bound)
+	resp["models"] = models
+	return resp, err
+}
+
+func (a *App) toolMediaModels(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	ctx = withProjectScope(ctx, args)
+	kind := strArg(args, "kind", KindImage)
+	return modelCatalogForKind(ctx, kind, "")
 }
 
 func filterModelsForCapability(models []modelEntry, capability string) []modelEntry {
@@ -756,8 +853,7 @@ func (a *App) handleListModels(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	capability := r.URL.Query().Get("capability")
-	h, ok := handlers[kind]
-	if !ok {
+	if _, ok := handlers[kind]; !ok {
 		http.Error(w, "unknown kind", http.StatusBadRequest)
 		return
 	}
@@ -765,27 +861,19 @@ func (a *App) handleListModels(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unsupported capability", http.StatusBadRequest)
 		return
 	}
-	bound := globalCtx.IntegrationFor(h.Role)
-	resp := map[string]any{
-		"kind":   kind,
-		"bound":  bound != nil,
-		"models": []modelEntry{},
+	if r.URL.Query().Get("refresh") == "1" {
+		for _, bound := range boundIntegrationsFor(globalCtx, handlers[kind].Role) {
+			if bound != nil {
+				invalidateModelCacheForConnection(bound.ConnectionID)
+			}
+		}
 	}
+	resp, err := modelCatalogForKind(globalCtx, kind, capability)
 	if capability != "" {
 		resp["capability"] = capability
 	}
-	if bound != nil {
-		resp["provider"] = bound.AppSlug
-		// ?refresh=1 forces a re-fetch even if the cached entry is fresh.
-		if r.URL.Query().Get("refresh") == "1" {
-			invalidateModelCacheForConnection(bound.ConnectionID)
-		}
-		models, err := loadModelsForCapability(globalCtx, kind, capability)
-		if err != nil {
-			resp["error"] = err.Error()
-		} else {
-			resp["models"] = models
-		}
+	if err != nil {
+		resp["error"] = err.Error()
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(resp)
