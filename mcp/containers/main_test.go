@@ -102,6 +102,9 @@ func TestNormalizeRunSpecDefaults(t *testing.T) {
 	if spec.RestartPolicy != "unless-stopped" {
 		t.Fatalf("restart_policy=%q", spec.RestartPolicy)
 	}
+	if spec.PullPolicy != "missing" {
+		t.Fatalf("pull_policy=%q", spec.PullPolicy)
+	}
 	if spec.HealthPath != "/" {
 		t.Fatalf("health_path=%q", spec.HealthPath)
 	}
@@ -137,6 +140,7 @@ func TestNormalizeRunSpecRejectsUnsafeInputs(t *testing.T) {
 		{Name: "ok", Image: ""},
 		{Name: "ok", Image: "nginx", HostID: -1},
 		{Name: "ok", Image: "nginx", HostID: 7, InstanceID: 8},
+		{Name: "ok", Image: "nginx", PullPolicy: "sometimes"},
 		{Name: "ok", Image: "nginx", Ports: []PortSpec{{ContainerPort: 70000}}},
 		{Name: "ok", Image: "nginx", Volumes: []VolumeSpec{{Name: "data", MountPath: "relative"}}},
 		{Name: "ok", Image: "nginx", Volumes: []VolumeSpec{{Name: "data", MountPath: "/data"}}, Files: []FileSpec{{Path: "relative", Content: "x"}}},
@@ -148,6 +152,26 @@ func TestNormalizeRunSpecRejectsUnsafeInputs(t *testing.T) {
 		if _, err := normalizeRunSpec(spec); err == nil {
 			t.Fatalf("expected error for %+v", spec)
 		}
+	}
+}
+
+func TestDockerRunArgsIncludesPullPolicy(t *testing.T) {
+	args, err := dockerRunArgs(RunSpec{
+		Name:          "demo",
+		Image:         "ghcr.io/apteva/apteva:latest",
+		RestartPolicy: "unless-stopped",
+		PullPolicy:    "always",
+		Ports:         []PortSpec{{BindAddr: "127.0.0.1", HostPort: 18080, ContainerPort: 5280, Protocol: "tcp"}},
+	}, "containers-demo", "containers-demo")
+	if err != nil {
+		t.Fatalf("docker run args: %v", err)
+	}
+	joined := strings.Join(args, " ")
+	if !strings.Contains(joined, "--pull always") {
+		t.Fatalf("run args missing pull policy: %v", args)
+	}
+	if args[len(args)-1] != "ghcr.io/apteva/apteva:latest" {
+		t.Fatalf("image should remain final arg: %v", args)
 	}
 }
 
@@ -412,6 +436,7 @@ func TestRemoteDockerUsesInstancesRunCommand(t *testing.T) {
 		Name:          "demo",
 		Image:         "nginx:alpine",
 		RestartPolicy: "unless-stopped",
+		PullPolicy:    "always",
 		Ports:         []PortSpec{{BindAddr: "0.0.0.0", HostPort: 8080, ContainerPort: 80, Protocol: "tcp"}},
 		Env:           map[string]string{"PORT": "80"},
 	}, "containers-demo", "containers-demo")
@@ -439,7 +464,7 @@ func TestRemoteDockerUsesInstancesRunCommand(t *testing.T) {
 		t.Fatalf("unexpected call: %+v", call)
 	}
 	cmd, _ := call.input["cmd"].(string)
-	for _, want := range []string{"'docker' 'run'", "'-p' '0.0.0.0:8080:80/tcp'", "'nginx:alpine'"} {
+	for _, want := range []string{"'docker' 'run'", "'--pull' 'always'", "'-p' '0.0.0.0:8080:80/tcp'", "'nginx:alpine'"} {
 		if !strings.Contains(cmd, want) {
 			t.Fatalf("remote docker command missing %q in %q", want, cmd)
 		}

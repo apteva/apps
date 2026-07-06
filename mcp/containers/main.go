@@ -1067,6 +1067,7 @@ func runSchema() map[string]any {
 		"env":            map[string]any{"type": "object"},
 		"volumes":        map[string]any{"type": "array"},
 		"files":          map[string]any{"type": "array", "items": schemaObject(map[string]any{"path": map[string]any{"type": "string"}, "content": map[string]any{"type": "string"}, "content_base64": map[string]any{"type": "string"}, "mode": map[string]any{"type": "string"}, "secret": map[string]any{"type": "boolean"}}, []string{"path"})},
+		"pull_policy":    map[string]any{"type": "string", "enum": []string{"missing", "always", "never"}},
 		"health_path":    map[string]any{"type": "string"},
 		"resources":      map[string]any{"type": "object"},
 		"restart_policy": map[string]any{"type": "string"},

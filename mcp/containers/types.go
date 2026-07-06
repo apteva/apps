@@ -105,6 +105,7 @@ type RunSpec struct {
 	Env           map[string]string `json:"env,omitempty"`
 	Volumes       []VolumeSpec      `json:"volumes,omitempty"`
 	Files         []FileSpec        `json:"files,omitempty"`
+	PullPolicy    string            `json:"pull_policy,omitempty"`
 	HealthPath    string            `json:"health_path,omitempty"`
 	Resources     ResourceSpec      `json:"resources,omitempty"`
 	RestartPolicy string            `json:"restart_policy,omitempty"`
@@ -149,6 +150,15 @@ func normalizeRunSpec(in RunSpec) (RunSpec, error) {
 	case "no", "on-failure", "always", "unless-stopped":
 	default:
 		return in, fmt.Errorf("unsupported restart_policy %q", in.RestartPolicy)
+	}
+	in.PullPolicy = strings.ToLower(strings.TrimSpace(in.PullPolicy))
+	if in.PullPolicy == "" {
+		in.PullPolicy = "missing"
+	}
+	switch in.PullPolicy {
+	case "missing", "always", "never":
+	default:
+		return in, fmt.Errorf("unsupported pull_policy %q", in.PullPolicy)
 	}
 	if in.HealthPath == "" {
 		in.HealthPath = "/"

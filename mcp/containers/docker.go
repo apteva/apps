@@ -86,34 +86,10 @@ mv "$tmp" "$dest"`
 }
 
 func (d LocalDocker) Run(ctx context.Context, spec RunSpec, containerName, networkName string) (string, error) {
-	args := []string{"run", "-d", "--name", containerName, "--restart", spec.RestartPolicy, "--network", networkName}
-	for _, p := range spec.Ports {
-		hostPort := p.HostPort
-		if hostPort == 0 {
-			allocated, err := freePort()
-			if err != nil {
-				return "", err
-			}
-			hostPort = allocated
-		}
-		args = append(args, "-p", fmt.Sprintf("%s:%d:%d/%s", p.BindAddr, hostPort, p.ContainerPort, p.Protocol))
+	args, err := dockerRunArgs(spec, containerName, networkName)
+	if err != nil {
+		return "", err
 	}
-	for k, v := range spec.Env {
-		if !validEnvKey(k) {
-			return "", fmt.Errorf("invalid env key %q", k)
-		}
-		args = append(args, "-e", k+"="+v)
-	}
-	for _, v := range spec.Volumes {
-		args = append(args, "-v", fmt.Sprintf("%s:%s", v.DockerVolumeName, v.MountPath))
-	}
-	if spec.Resources.MemoryMB > 0 {
-		args = append(args, "--memory", strconv.Itoa(spec.Resources.MemoryMB)+"m")
-	}
-	if spec.Resources.CPU > 0 {
-		args = append(args, "--cpus", strconv.FormatFloat(spec.Resources.CPU, 'f', -1, 64))
-	}
-	args = append(args, spec.Image)
 	out, err := docker(ctx, args...)
 	if err != nil {
 		return "", err
@@ -263,13 +239,28 @@ mv "$tmp" "$dest"`
 }
 
 func (d RemoteDocker) Run(ctx context.Context, spec RunSpec, containerName, networkName string) (string, error) {
+	args, err := dockerRunArgs(spec, containerName, networkName)
+	if err != nil {
+		return "", err
+	}
+	out, err := d.remoteDocker(ctx, 120, args...)
+	if err != nil {
+		return "", err
+	}
+	return strings.TrimSpace(out), nil
+}
+
+func dockerRunArgs(spec RunSpec, containerName, networkName string) ([]string, error) {
 	args := []string{"run", "-d", "--name", containerName, "--restart", spec.RestartPolicy, "--network", networkName}
+	if spec.PullPolicy != "" {
+		args = append(args, "--pull", spec.PullPolicy)
+	}
 	for _, p := range spec.Ports {
 		hostPort := p.HostPort
 		if hostPort == 0 {
 			allocated, err := freePort()
 			if err != nil {
-				return "", err
+				return nil, err
 			}
 			hostPort = allocated
 		}
@@ -277,7 +268,7 @@ func (d RemoteDocker) Run(ctx context.Context, spec RunSpec, containerName, netw
 	}
 	for k, v := range spec.Env {
 		if !validEnvKey(k) {
-			return "", fmt.Errorf("invalid env key %q", k)
+			return nil, fmt.Errorf("invalid env key %q", k)
 		}
 		args = append(args, "-e", k+"="+v)
 	}
@@ -291,11 +282,7 @@ func (d RemoteDocker) Run(ctx context.Context, spec RunSpec, containerName, netw
 		args = append(args, "--cpus", strconv.FormatFloat(spec.Resources.CPU, 'f', -1, 64))
 	}
 	args = append(args, spec.Image)
-	out, err := d.remoteDocker(ctx, 120, args...)
-	if err != nil {
-		return "", err
-	}
-	return strings.TrimSpace(out), nil
+	return args, nil
 }
 
 func (d RemoteDocker) Start(ctx context.Context, containerName string) error {
