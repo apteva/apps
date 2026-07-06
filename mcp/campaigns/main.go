@@ -31,7 +31,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: campaigns
 display_name: Campaigns
-version: 0.2.12
+version: 0.2.13
 description: |
   Bulk-send orchestrator. Compose a campaign, target a CRM segment or
   list, schedule it; jobs drives the materialise → tick loop, messaging
@@ -96,7 +96,7 @@ provides:
     - name: campaigns_stats
       description: Read-only current recipient counts by status. Prefer this over reconcile for normal stats checks.
     - name: campaigns_reconcile
-      description: Maintenance repair only: backfill recipient delivery/open/click/bounce status from Messaging if events were missed. Mutates recipient statuses; do not use for normal stats checks.
+      description: Maintenance repair only. Backfill recipient delivery/open/click/bounce status from Messaging if events were missed. Mutates recipient statuses; do not use for normal stats checks.
   ui_panels:
     - slot: project.page
       label: Campaigns

@@ -86,6 +86,16 @@ func newCampaignsTestCtx(t *testing.T, platform *campaignsPlatform, opts ...tk.O
 	return tk.NewAppCtx(t, "apteva.yaml", full...)
 }
 
+func TestEmbeddedManifestParses(t *testing.T) {
+	manifest := (&App{}).Manifest()
+	if manifest.Name != "campaigns" {
+		t.Fatalf("manifest name=%q, want campaigns", manifest.Name)
+	}
+	if manifest.Version == "" {
+		t.Fatal("manifest version is empty")
+	}
+}
+
 func TestCampaignCreateEventIncludesCampaignIDAndStatus(t *testing.T) {
 	recorder := tk.NewEmitRecorder()
 	ctx := newCampaignsTestCtx(t, nil, tk.WithEmitter(recorder))
