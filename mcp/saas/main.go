@@ -56,7 +56,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 			return err
 		}
 	}
-	ctx.Logger().Info("saas mounted", "version", "0.1.7", "scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
+	ctx.Logger().Info("saas mounted", "version", "0.1.8", "scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
 	return nil
 }
 
@@ -115,6 +115,9 @@ func (a *App) MCPTools() []sdk.Tool {
 			"plan_key": strSchema(), "event": strSchema(), "app_name": strSchema(), "tool_name": strSchema(),
 			"args": objSchema(), "store": objSchema(), "failure_mode": strSchema(), "enabled": boolSchema(), "metadata": objSchema(),
 		}, []string{"plan_key", "event", "app_name", "tool_name"}), Handler: a.toolPlanActionAdd},
+		{Name: "saas_plan_action_update", Description: "Update a generic fulfillment action by id.", InputSchema: schemaObject(map[string]any{
+			"id": intSchema(), "args": objSchema(), "store": objSchema(), "failure_mode": strSchema(), "enabled": boolSchema(), "metadata": objSchema(),
+		}, []string{"id"}), Handler: a.toolPlanActionUpdate},
 		{Name: "saas_plan_action_list", Description: "List generic fulfillment actions for a SaaS plan.", InputSchema: schemaObject(map[string]any{"plan_key": strSchema(), "event": strSchema()}, []string{"plan_key"}), Handler: a.toolPlanActionList},
 		{Name: "saas_customer_create", Description: "Find or create a SaaS customer by email.", InputSchema: schemaObject(map[string]any{"email": strSchema(), "name": strSchema(), "billing_customer_id": intSchema(), "auth_user_id": intSchema(), "metadata": objSchema()}, []string{"email"}), Handler: a.toolCustomerCreate},
 		{Name: "saas_checkout_create", Description: "Create a SaaS checkout: free activation, no-card trials, or paid Billing/Subscription checkout.", InputSchema: schemaObject(map[string]any{
@@ -516,6 +519,18 @@ func (a *App) toolPlanActionAdd(ctx *sdk.AppCtx, args map[string]any) (any, erro
 		return nil, err
 	}
 	action, err := dbPlanActionInsert(ctx.AppDB(), pid, args)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"action": action}, nil
+}
+
+func (a *App) toolPlanActionUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := requireProject(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	action, err := dbPlanActionUpdate(ctx.AppDB(), pid, args)
 	if err != nil {
 		return nil, err
 	}
@@ -2067,6 +2082,56 @@ func dbPlanActionInsert(db *sql.DB, pid string, args map[string]any) (*PlanActio
 		return nil, err
 	}
 	id, _ := res.LastInsertId()
+	return dbPlanActionGet(db, pid, id)
+}
+
+func dbPlanActionUpdate(db *sql.DB, pid string, args map[string]any) (*PlanAction, error) {
+	id := int64Arg(args, "id")
+	if id <= 0 {
+		return nil, errors.New("id required")
+	}
+	if existing, err := dbPlanActionGet(db, pid, id); err != nil {
+		return nil, err
+	} else if existing == nil {
+		return nil, sql.ErrNoRows
+	}
+
+	sets := []string{}
+	vals := []any{}
+	if _, ok := args["args"]; ok {
+		sets = append(sets, "args_json=?")
+		vals = append(vals, jsonOrEmpty(args["args"], "{}"))
+	}
+	if _, ok := args["store"]; ok {
+		sets = append(sets, "store_json=?")
+		vals = append(vals, jsonOrEmpty(args["store"], "{}"))
+	}
+	if _, ok := args["failure_mode"]; ok {
+		failureMode := firstNonEmpty(strArg(args, "failure_mode"), "fail_account")
+		switch failureMode {
+		case "fail_account", "mark_degraded", "ignore":
+		default:
+			return nil, fmt.Errorf("unsupported failure_mode %q", failureMode)
+		}
+		sets = append(sets, "failure_mode=?")
+		vals = append(vals, failureMode)
+	}
+	if _, ok := args["enabled"]; ok {
+		sets = append(sets, "enabled=?")
+		vals = append(vals, boolInt(boolArg(args, "enabled")))
+	}
+	if _, ok := args["metadata"]; ok {
+		sets = append(sets, "metadata_json=?")
+		vals = append(vals, jsonOrEmpty(args["metadata"], "{}"))
+	}
+	if len(sets) == 0 {
+		return dbPlanActionGet(db, pid, id)
+	}
+	sets = append(sets, "updated_at=CURRENT_TIMESTAMP")
+	vals = append(vals, pid, id)
+	if _, err := db.Exec(`UPDATE saas_plan_actions SET `+strings.Join(sets, ", ")+` WHERE project_id=? AND id=?`, vals...); err != nil {
+		return nil, err
+	}
 	return dbPlanActionGet(db, pid, id)
 }
 
