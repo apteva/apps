@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: pantry
 display_name: Pantry
-version: 0.1.1
+version: 0.2.0
 description: |
   Food inventory for pantry, fridge, and freezer. Track products,
   barcode aliases, locations, quantities, expiry batches, low-stock
@@ -42,7 +42,13 @@ provides:
     - { name: pantry_locations_create, description: "Create a location. Args: name, kind? (pantry|fridge|freezer|other)." }
     - { name: pantry_expiring,       description: "Items/lots expiring soon. Args: days? default 14, limit?." }
     - { name: pantry_low_stock,      description: "Items at or below configured min_quantity." }
-    - { name: pantry_shopping_list,  description: "Suggested shopping list based on low stock and target quantities." }
+    - { name: pantry_shopping_items_create, description: "Create a manual shopping-list item. Args: name, quantity?, unit?, category?, store?, notes?, item_id?." }
+    - { name: pantry_shopping_items_list, description: "List manual shopping-list items. Args: status? (open|checked|dismissed|purchased|all)." }
+    - { name: pantry_shopping_items_update, description: "Patch a manual shopping-list item. Args: id, patch." }
+    - { name: pantry_shopping_items_check, description: "Mark a shopping-list item checked or open. Args: id, checked?." }
+    - { name: pantry_shopping_items_delete, description: "Delete a shopping-list item. Args: id." }
+    - { name: pantry_shopping_suggestions, description: "Generated low-stock shopping suggestions." }
+    - { name: pantry_shopping_list,  description: "Combined manual shopping rows plus generated low-stock suggestions." }
     - { name: pantry_summary,        description: "Short markdown summary of expiring and low-stock food." }
   ui_panels:
     - slot: project.page

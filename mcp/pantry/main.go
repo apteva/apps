@@ -25,7 +25,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: pantry
 display_name: Pantry
-version: 0.1.1
+version: 0.2.0
 description: Food inventory for pantry, fridge, and freezer.
 author: Apteva
 scopes: [project, global]
@@ -52,7 +52,13 @@ provides:
     - { name: pantry_locations_create, description: "Create a location." }
     - { name: pantry_expiring, description: "Lots expiring soon." }
     - { name: pantry_low_stock, description: "Items below threshold." }
-    - { name: pantry_shopping_list, description: "Suggested shopping list." }
+    - { name: pantry_shopping_items_create, description: "Create a manual shopping-list item." }
+    - { name: pantry_shopping_items_list, description: "List manual shopping-list items." }
+    - { name: pantry_shopping_items_update, description: "Patch a manual shopping-list item." }
+    - { name: pantry_shopping_items_check, description: "Mark a shopping-list item checked or open." }
+    - { name: pantry_shopping_items_delete, description: "Delete a shopping-list item." }
+    - { name: pantry_shopping_suggestions, description: "Generated low-stock shopping suggestions." }
+    - { name: pantry_shopping_list, description: "Combined manual shopping rows and suggestions." }
     - { name: pantry_summary, description: "Short pantry summary." }
   ui_panels:
     - slot: project.page
@@ -113,6 +119,8 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/stock/use", Handler: a.handleStockUse},
 		{Pattern: "/expiring", Handler: a.handleExpiring},
 		{Pattern: "/low_stock", Handler: a.handleLowStock},
+		{Pattern: "/shopping/items", Handler: a.handleShoppingItems},
+		{Pattern: "/shopping/items/", Handler: a.handleShoppingItem},
 		{Pattern: "/shopping_list", Handler: a.handleShoppingList},
 	}
 }
@@ -134,7 +142,13 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "pantry_locations_create", Description: "Create a location. Args: name, kind?.", InputSchema: schemaObject(map[string]any{"name": typ("string"), "kind": typ("string")}, []string{"name"}), Handler: a.toolLocationsCreate},
 		{Name: "pantry_expiring", Description: "Lots expiring soon. Args: days? default 14, limit?.", InputSchema: schemaObject(map[string]any{"days": typ("integer"), "limit": typ("integer")}, nil), Handler: a.toolExpiring},
 		{Name: "pantry_low_stock", Description: "Items at or below min_quantity.", InputSchema: schemaObject(map[string]any{}, nil), Handler: a.toolLowStock},
-		{Name: "pantry_shopping_list", Description: "Suggested shopping list based on target quantities.", InputSchema: schemaObject(map[string]any{}, nil), Handler: a.toolShoppingList},
+		{Name: "pantry_shopping_items_create", Description: "Create a manual shopping-list item. Args: name, quantity?, unit?, category?, store?, notes?, item_id?, source?. Does not create pantry stock.", InputSchema: schemaObject(shoppingItemProps(), []string{"name"}), Handler: a.toolShoppingItemsCreate},
+		{Name: "pantry_shopping_items_list", Description: "List manual shopping-list items. Args: status? (open|checked|dismissed|purchased|all; default open), limit?.", InputSchema: schemaObject(map[string]any{"status": typ("string"), "limit": typ("integer")}, nil), Handler: a.toolShoppingItemsList},
+		{Name: "pantry_shopping_items_update", Description: "Patch a manual shopping-list item. Args: id, patch.", InputSchema: schemaObject(map[string]any{"id": typ("integer"), "patch": typ("object")}, []string{"id", "patch"}), Handler: a.toolShoppingItemsUpdate},
+		{Name: "pantry_shopping_items_check", Description: "Mark a shopping-list item checked or open. Args: id, checked? default true.", InputSchema: schemaObject(map[string]any{"id": typ("integer"), "checked": typ("boolean")}, []string{"id"}), Handler: a.toolShoppingItemsCheck},
+		{Name: "pantry_shopping_items_delete", Description: "Delete a shopping-list item. Args: id.", InputSchema: schemaObject(map[string]any{"id": typ("integer")}, []string{"id"}), Handler: a.toolShoppingItemsDelete},
+		{Name: "pantry_shopping_suggestions", Description: "Generated low-stock shopping suggestions based on target quantities.", InputSchema: schemaObject(map[string]any{}, nil), Handler: a.toolShoppingSuggestions},
+		{Name: "pantry_shopping_list", Description: "Combined manual shopping rows plus generated low-stock suggestions.", InputSchema: schemaObject(map[string]any{}, nil), Handler: a.toolShoppingList},
 		{Name: "pantry_summary", Description: "Short markdown summary of expiring and low-stock food. Args: days?.", InputSchema: schemaObject(map[string]any{"days": typ("integer")}, nil), Handler: a.toolSummary},
 	}
 }
@@ -193,6 +207,26 @@ type ShoppingLine struct {
 	MinQuantity     float64 `json:"min_quantity"`
 	TargetQuantity  float64 `json:"target_quantity"`
 	BuyQuantity     float64 `json:"buy_quantity"`
+}
+
+type ShoppingItem struct {
+	ID        int64   `json:"id"`
+	ItemID    *int64  `json:"item_id,omitempty"`
+	Name      string  `json:"name"`
+	Quantity  float64 `json:"quantity"`
+	Unit      string  `json:"unit"`
+	Category  string  `json:"category"`
+	Store     string  `json:"store"`
+	Source    string  `json:"source"`
+	Status    string  `json:"status"`
+	Notes     string  `json:"notes"`
+	CreatedAt string  `json:"created_at"`
+	UpdatedAt string  `json:"updated_at"`
+}
+
+type ShoppingList struct {
+	Items       []ShoppingItem `json:"items"`
+	Suggestions []ShoppingLine `json:"suggestions"`
 }
 
 type UseResult struct {
@@ -796,6 +830,196 @@ func lowStockItems(db *sql.DB, pid string) ([]ShoppingLine, error) {
 	return out, rows.Err()
 }
 
+func createShoppingItem(db *sql.DB, pid string, in map[string]any) (*ShoppingItem, error) {
+	name := cleanName(strArg(in, "name", ""))
+	if name == "" {
+		return nil, errors.New("name required")
+	}
+	qty := floatArg(in, "quantity", 1)
+	if qty <= 0 {
+		return nil, errors.New("quantity must be > 0")
+	}
+	unit := strings.TrimSpace(strArg(in, "unit", ""))
+	if unit == "" {
+		unit = "each"
+	}
+	var itemID any
+	if id := intArg(in, "item_id", 0); id > 0 {
+		itemID = id
+	} else if item, err := getItemByName(db, pid, name); err == nil {
+		itemID = item.ID
+		if unit == "each" && item.DefaultUnit != "" {
+			unit = item.DefaultUnit
+		}
+	}
+	source := normaliseShoppingSource(strArg(in, "source", "manual"))
+	status := normaliseShoppingStatus(strArg(in, "status", "open"))
+	res, err := db.Exec(
+		`INSERT INTO shopping_list_items (project_id, item_id, name, quantity, unit, category, store, source, status, notes)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		pid, itemID, name, qty, unit, strings.TrimSpace(strArg(in, "category", "")),
+		strings.TrimSpace(strArg(in, "store", "")), source, status, strings.TrimSpace(strArg(in, "notes", "")),
+	)
+	if err != nil {
+		return nil, err
+	}
+	id, _ := res.LastInsertId()
+	return getShoppingItem(db, pid, id)
+}
+
+func getShoppingItem(db *sql.DB, pid string, id int64) (*ShoppingItem, error) {
+	rows, err := db.Query(
+		`SELECT id, item_id, name, quantity, unit, category, store, source, status, notes, created_at, updated_at
+		   FROM shopping_list_items
+		  WHERE project_id = ? AND id = ?`, pid, id,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	items, err := scanShoppingItems(rows)
+	if err != nil {
+		return nil, err
+	}
+	if len(items) == 0 {
+		return nil, sql.ErrNoRows
+	}
+	return &items[0], nil
+}
+
+func listShoppingItems(db *sql.DB, pid, status string, limit int) ([]ShoppingItem, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 200
+	}
+	status = normaliseShoppingListFilter(status)
+	where := []string{"project_id = ?"}
+	args := []any{pid}
+	if status != "all" {
+		where = append(where, "status = ?")
+		args = append(args, status)
+	}
+	args = append(args, limit)
+	rows, err := db.Query(
+		`SELECT id, item_id, name, quantity, unit, category, store, source, status, notes, created_at, updated_at
+		   FROM shopping_list_items
+		  WHERE `+strings.Join(where, " AND ")+`
+		  ORDER BY CASE status WHEN 'open' THEN 0 WHEN 'checked' THEN 1 WHEN 'purchased' THEN 2 ELSE 3 END,
+		           lower(category), lower(name), created_at
+		  LIMIT ?`, args...,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanShoppingItems(rows)
+}
+
+func scanShoppingItems(rows *sql.Rows) ([]ShoppingItem, error) {
+	out := []ShoppingItem{}
+	for rows.Next() {
+		var it ShoppingItem
+		var itemID sql.NullInt64
+		if err := rows.Scan(&it.ID, &itemID, &it.Name, &it.Quantity, &it.Unit, &it.Category, &it.Store, &it.Source, &it.Status, &it.Notes, &it.CreatedAt, &it.UpdatedAt); err != nil {
+			return nil, err
+		}
+		if itemID.Valid {
+			id := itemID.Int64
+			it.ItemID = &id
+		}
+		out = append(out, it)
+	}
+	return out, rows.Err()
+}
+
+func updateShoppingItem(db *sql.DB, pid string, id int64, patch map[string]any) (*ShoppingItem, error) {
+	item, err := getShoppingItem(db, pid, id)
+	if err != nil {
+		return nil, err
+	}
+	fields := map[string]any{
+		"item_id":  item.ItemID,
+		"name":     item.Name,
+		"quantity": item.Quantity,
+		"unit":     item.Unit,
+		"category": item.Category,
+		"store":    item.Store,
+		"source":   item.Source,
+		"status":   item.Status,
+		"notes":    item.Notes,
+	}
+	if _, ok := patch["item_id"]; ok {
+		if id := intArg(patch, "item_id", 0); id > 0 {
+			v := int64(id)
+			fields["item_id"] = &v
+		} else {
+			fields["item_id"] = (*int64)(nil)
+		}
+	}
+	for _, key := range []string{"name", "unit", "category", "store", "notes"} {
+		if v, ok := patch[key].(string); ok {
+			if key == "name" {
+				fields[key] = cleanName(v)
+			} else {
+				fields[key] = strings.TrimSpace(v)
+			}
+		}
+	}
+	if _, ok := patch["quantity"]; ok {
+		fields["quantity"] = floatArg(patch, "quantity", item.Quantity)
+	}
+	if v, ok := patch["source"].(string); ok {
+		fields["source"] = normaliseShoppingSource(v)
+	}
+	if v, ok := patch["status"].(string); ok {
+		fields["status"] = normaliseShoppingStatus(v)
+	}
+	if fields["name"] == "" {
+		return nil, errors.New("name required")
+	}
+	if fields["quantity"].(float64) <= 0 {
+		return nil, errors.New("quantity must be > 0")
+	}
+	itemID := fields["item_id"]
+	if p, ok := itemID.(*int64); ok {
+		if p == nil {
+			itemID = nil
+		} else {
+			itemID = *p
+		}
+	}
+	_, err = db.Exec(
+		`UPDATE shopping_list_items
+		    SET item_id = ?, name = ?, quantity = ?, unit = ?, category = ?, store = ?, source = ?, status = ?, notes = ?, updated_at = CURRENT_TIMESTAMP
+		  WHERE project_id = ? AND id = ?`,
+		itemID, fields["name"], fields["quantity"], fields["unit"], fields["category"], fields["store"], fields["source"], fields["status"], fields["notes"], pid, id,
+	)
+	if err != nil {
+		return nil, err
+	}
+	return getShoppingItem(db, pid, id)
+}
+
+func deleteShoppingItem(db *sql.DB, pid string, id int64) (int64, error) {
+	res, err := db.Exec(`DELETE FROM shopping_list_items WHERE project_id = ? AND id = ?`, pid, id)
+	if err != nil {
+		return 0, err
+	}
+	n, _ := res.RowsAffected()
+	return n, nil
+}
+
+func shoppingList(db *sql.DB, pid string) (*ShoppingList, error) {
+	items, err := listShoppingItems(db, pid, "all", 200)
+	if err != nil {
+		return nil, err
+	}
+	suggestions, err := lowStockItems(db, pid)
+	if err != nil {
+		return nil, err
+	}
+	return &ShoppingList{Items: items, Suggestions: suggestions}, nil
+}
+
 func pantrySummary(db *sql.DB, pid string, days int) (string, error) {
 	exp, err := expiringLots(db, pid, days, 8)
 	if err != nil {
@@ -995,8 +1219,34 @@ func (a *App) toolExpiring(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 func (a *App) toolLowStock(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	return lowStockItems(ctx.AppDB(), projectScope(ctx))
 }
-func (a *App) toolShoppingList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+func (a *App) toolShoppingItemsCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	return createShoppingItem(ctx.AppDB(), projectScope(ctx), args)
+}
+func (a *App) toolShoppingItemsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	return listShoppingItems(ctx.AppDB(), projectScope(ctx), strArg(args, "status", "open"), intArg(args, "limit", 200))
+}
+func (a *App) toolShoppingItemsUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	return updateShoppingItem(ctx.AppDB(), projectScope(ctx), int64(intArg(args, "id", 0)), mapArg(args, "patch"))
+}
+func (a *App) toolShoppingItemsCheck(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	status := "checked"
+	if !boolArg(args, "checked", true) {
+		status = "open"
+	}
+	return updateShoppingItem(ctx.AppDB(), projectScope(ctx), int64(intArg(args, "id", 0)), map[string]any{"status": status})
+}
+func (a *App) toolShoppingItemsDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	n, err := deleteShoppingItem(ctx.AppDB(), projectScope(ctx), int64(intArg(args, "id", 0)))
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"deleted": n}, nil
+}
+func (a *App) toolShoppingSuggestions(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	return lowStockItems(ctx.AppDB(), projectScope(ctx))
+}
+func (a *App) toolShoppingList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	return shoppingList(ctx.AppDB(), projectScope(ctx))
 }
 func (a *App) toolSummary(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	md, err := pantrySummary(ctx.AppDB(), projectScope(ctx), intArg(args, "days", 14))
@@ -1161,8 +1411,46 @@ func (a *App) handleLowStock(w http.ResponseWriter, r *http.Request) {
 	writeResult(w, out, err)
 }
 
+func (a *App) handleShoppingItems(w http.ResponseWriter, r *http.Request) {
+	ctx := mustCtx(r)
+	switch r.Method {
+	case http.MethodGet:
+		q := r.URL.Query()
+		out, err := listShoppingItems(ctx.AppDB(), projectScope(ctx), q.Get("status"), atoiOr(q.Get("limit"), 200))
+		writeResult(w, out, err)
+	case http.MethodPost:
+		var in map[string]any
+		if !decodeJSON(w, r, &in) {
+			return
+		}
+		out, err := createShoppingItem(ctx.AppDB(), projectScope(ctx), in)
+		writeResult(w, out, err)
+	default:
+		httpErr(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
+func (a *App) handleShoppingItem(w http.ResponseWriter, r *http.Request) {
+	ctx := mustCtx(r)
+	id := pathSuffixInt(r.URL.Path, "/shopping/items/")
+	switch r.Method {
+	case http.MethodPatch:
+		var in map[string]any
+		if !decodeJSON(w, r, &in) {
+			return
+		}
+		out, err := updateShoppingItem(ctx.AppDB(), projectScope(ctx), id, in)
+		writeResult(w, out, err)
+	case http.MethodDelete:
+		n, err := deleteShoppingItem(ctx.AppDB(), projectScope(ctx), id)
+		writeResult(w, map[string]any{"deleted": n}, err)
+	default:
+		httpErr(w, http.StatusMethodNotAllowed, "method not allowed")
+	}
+}
+
 func (a *App) handleShoppingList(w http.ResponseWriter, r *http.Request) {
-	out, err := lowStockItems(mustCtx(r).AppDB(), projectScope(mustCtx(r)))
+	out, err := shoppingList(mustCtx(r).AppDB(), projectScope(mustCtx(r)))
 	writeResult(w, out, err)
 }
 
@@ -1242,6 +1530,33 @@ func normaliseSource(s string) string {
 	}
 }
 
+func normaliseShoppingSource(s string) string {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "low_stock", "agent", "recipe":
+		return strings.ToLower(strings.TrimSpace(s))
+	default:
+		return "manual"
+	}
+}
+
+func normaliseShoppingStatus(s string) string {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "checked", "dismissed", "purchased":
+		return strings.ToLower(strings.TrimSpace(s))
+	default:
+		return "open"
+	}
+}
+
+func normaliseShoppingListFilter(s string) string {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "checked", "dismissed", "purchased", "all":
+		return strings.ToLower(strings.TrimSpace(s))
+	default:
+		return "open"
+	}
+}
+
 func normaliseDate(s string) string {
 	s = strings.TrimSpace(s)
 	if s == "" {
@@ -1292,6 +1607,20 @@ func stockAddProps() map[string]any {
 	p["purchased_at"] = map[string]any{"type": "string"}
 	p["source"] = map[string]any{"type": "string"}
 	return p
+}
+
+func shoppingItemProps() map[string]any {
+	return map[string]any{
+		"item_id":  typ("integer"),
+		"name":     typ("string"),
+		"quantity": typ("number"),
+		"unit":     typ("string"),
+		"category": typ("string"),
+		"store":    typ("string"),
+		"source":   typ("string"),
+		"status":   typ("string"),
+		"notes":    typ("string"),
+	}
 }
 
 func strArg(args map[string]any, key, def string) string {

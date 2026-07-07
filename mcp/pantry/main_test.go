@@ -102,6 +102,70 @@ func TestLowStockShoppingListUsesTargetQuantity(t *testing.T) {
 	}
 }
 
+func TestManualShoppingItemsDoNotCreateInventory(t *testing.T) {
+	db := openTestDB(t)
+	const pid = "project-test"
+
+	row, err := createShoppingItem(db, pid, map[string]any{
+		"name":     "Basil",
+		"quantity": 1.0,
+		"unit":     "bunch",
+		"category": "Produce",
+		"notes":    "For pasta",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row.ItemID != nil {
+		t.Fatalf("manual row linked item_id = %v, want nil for unknown item", *row.ItemID)
+	}
+
+	items, err := listItems(db, pid, "", "", true, 20, "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 0 {
+		t.Fatalf("manual shopping row created %d pantry items, want 0", len(items))
+	}
+
+	list, err := shoppingList(db, pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(list.Items) != 1 || list.Items[0].Name != "Basil" {
+		t.Fatalf("shopping list items = %#v, want Basil", list.Items)
+	}
+	if _, err := updateShoppingItem(db, pid, row.ID, map[string]any{"status": "checked"}); err != nil {
+		t.Fatal(err)
+	}
+	open, err := listShoppingItems(db, pid, "open", 20)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(open) != 0 {
+		t.Fatalf("open items after check = %d, want 0", len(open))
+	}
+}
+
+func TestManualShoppingItemLinksExistingItem(t *testing.T) {
+	db := openTestDB(t)
+	const pid = "project-test"
+	item, err := createItem(db, pid, map[string]any{"name": "Eggs", "default_unit": "dozen"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	row, err := createShoppingItem(db, pid, map[string]any{"name": "Eggs", "quantity": 1.0})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row.ItemID == nil || *row.ItemID != item.ID {
+		t.Fatalf("item link = %v, want %d", row.ItemID, item.ID)
+	}
+	if row.Unit != "dozen" {
+		t.Fatalf("unit = %q, want dozen", row.Unit)
+	}
+}
+
 func openTestDB(t *testing.T) *sql.DB {
 	t.Helper()
 	db, err := sql.Open("sqlite", ":memory:")
@@ -109,12 +173,14 @@ func openTestDB(t *testing.T) *sql.DB {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { db.Close() })
-	raw, err := os.ReadFile("migrations/001_init.sql")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := db.Exec(string(raw)); err != nil {
-		t.Fatal(err)
+	for _, path := range []string{"migrations/001_init.sql", "migrations/002_shopping_list.sql"} {
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(string(raw)); err != nil {
+			t.Fatalf("%s: %v", path, err)
+		}
 	}
 	return db
 }

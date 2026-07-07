@@ -52,6 +52,19 @@ interface ShoppingLine {
   buy_quantity: number;
 }
 
+interface ShoppingItem {
+  id: number;
+  item_id?: number;
+  name: string;
+  quantity: number;
+  unit: string;
+  category: string;
+  store: string;
+  source: string;
+  status: "open" | "checked" | "dismissed" | "purchased";
+  notes: string;
+}
+
 type View = "stock" | "expiring" | "shopping";
 type AddMode = "item" | "stock";
 
@@ -62,6 +75,7 @@ export default function PantryPanel({}: NativePanelProps) {
   const [lots, setLots] = useState<Lot[]>([]);
   const [expiring, setExpiring] = useState<Lot[]>([]);
   const [shopping, setShopping] = useState<ShoppingLine[]>([]);
+  const [shoppingItems, setShoppingItems] = useState<ShoppingItem[]>([]);
   const [locations, setLocations] = useState<Location[]>([]);
   const [selectedItem, setSelectedItem] = useState<number | null>(null);
   const [quickText, setQuickText] = useState("");
@@ -76,6 +90,13 @@ export default function PantryPanel({}: NativePanelProps) {
     category: "",
     min_quantity: "",
     target_quantity: "",
+  });
+  const [shoppingForm, setShoppingForm] = useState({
+    name: "",
+    quantity: "1",
+    unit: "each",
+    category: "",
+    store: "",
   });
 
   const loadItems = useCallback(async () => {
@@ -97,7 +118,16 @@ export default function PantryPanel({}: NativePanelProps) {
 
   const loadShopping = useCallback(async () => {
     const res = await fetch(`${API}/shopping_list`, { credentials: "same-origin" });
-    if (res.ok) setShopping(await res.json() || []);
+    if (res.ok) {
+      const data = await res.json();
+      if (Array.isArray(data)) {
+        setShopping(data);
+        setShoppingItems([]);
+      } else {
+        setShopping(data?.suggestions || []);
+        setShoppingItems(data?.items || []);
+      }
+    }
   }, []);
 
   const loadLocations = useCallback(async () => {
@@ -119,9 +149,9 @@ export default function PantryPanel({}: NativePanelProps) {
     const itemCount = items.length;
     const lotCount = items.reduce((sum, i) => sum + i.lot_count, 0);
     const soonCount = expiring.length;
-    const shoppingCount = shopping.length;
+    const shoppingCount = shoppingItems.filter((item) => item.status === "open").length + shopping.length;
     return { itemCount, lotCount, soonCount, shoppingCount };
-  }, [items, expiring, shopping]);
+  }, [items, expiring, shopping, shoppingItems]);
 
   const selected = useMemo(
     () => items.find((item) => item.id === selectedItem) || null,
@@ -214,6 +244,66 @@ export default function PantryPanel({}: NativePanelProps) {
       return;
     }
     setStatus(action === "use" ? "Used" : "Discarded");
+    refresh();
+  };
+
+  const submitShoppingItem = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!shoppingForm.name.trim()) return;
+    const res = await fetch(`${API}/shopping/items`, {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        name: shoppingForm.name,
+        quantity: Number(shoppingForm.quantity || "1"),
+        unit: shoppingForm.unit || "each",
+        category: shoppingForm.category,
+        store: shoppingForm.store,
+      }),
+    });
+    if (!res.ok) {
+      setStatus(await res.text());
+      return;
+    }
+    setShoppingForm({ ...shoppingForm, name: "", quantity: "1" });
+    setStatus("Added to list");
+    refresh();
+  };
+
+  const patchShoppingItem = async (id: number, patch: Partial<ShoppingItem>) => {
+    const res = await fetch(`${API}/shopping/items/${id}`, {
+      method: "PATCH",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(patch),
+    });
+    if (!res.ok) {
+      setStatus(await res.text());
+      return;
+    }
+    refresh();
+  };
+
+  const addSuggestion = async (line: ShoppingLine) => {
+    const res = await fetch(`${API}/shopping/items`, {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        item_id: line.item_id,
+        name: line.name,
+        quantity: line.buy_quantity || 1,
+        unit: line.unit || "each",
+        category: line.category,
+        source: "low_stock",
+      }),
+    });
+    if (!res.ok) {
+      setStatus(await res.text());
+      return;
+    }
+    setStatus("Suggestion added");
     refresh();
   };
 
@@ -327,22 +417,53 @@ export default function PantryPanel({}: NativePanelProps) {
           )}
 
           {view === "shopping" && (
-            <div className="p-4">
-              <h3 className="text-base font-semibold mb-3">Shopping List</h3>
-              <div className="border border-border rounded overflow-hidden">
-                {shopping.length === 0 ? (
-                  <div className="p-4 text-sm text-text-muted">Nothing to buy from current thresholds.</div>
-                ) : shopping.map((line) => (
-                  <div key={line.item_id} className="grid grid-cols-[1fr_120px_120px] gap-3 px-3 py-2 border-b border-border last:border-b-0 text-sm">
-                    <div>
-                      <div className="font-medium">{line.name}</div>
-                      <div className="text-xs text-text-dim">{line.category || "uncategorized"}</div>
+            <div className="p-4 flex flex-col gap-4">
+              <form onSubmit={submitShoppingItem} className="border border-border rounded p-3 grid md:grid-cols-[1fr_80px_90px_120px_1fr_80px] gap-2">
+                <input value={shoppingForm.name} onChange={(e) => setShoppingForm({ ...shoppingForm, name: e.target.value })} placeholder="Item" className="bg-bg-input border border-border rounded px-2 py-1.5 text-sm" />
+                <input value={shoppingForm.quantity} onChange={(e) => setShoppingForm({ ...shoppingForm, quantity: e.target.value })} placeholder="Qty" className="bg-bg-input border border-border rounded px-2 py-1.5 text-sm" />
+                <input value={shoppingForm.unit} onChange={(e) => setShoppingForm({ ...shoppingForm, unit: e.target.value })} placeholder="Unit" className="bg-bg-input border border-border rounded px-2 py-1.5 text-sm" />
+                <input value={shoppingForm.category} onChange={(e) => setShoppingForm({ ...shoppingForm, category: e.target.value })} placeholder="Category" className="bg-bg-input border border-border rounded px-2 py-1.5 text-sm" />
+                <input value={shoppingForm.store} onChange={(e) => setShoppingForm({ ...shoppingForm, store: e.target.value })} placeholder="Store" className="bg-bg-input border border-border rounded px-2 py-1.5 text-sm" />
+                <button className="bg-accent text-bg rounded px-3 py-1.5 text-sm" type="submit">Add</button>
+              </form>
+
+              <section>
+                <h3 className="text-base font-semibold mb-3">Shopping List</h3>
+                <div className="border border-border rounded overflow-hidden">
+                  {shoppingItems.length === 0 ? (
+                    <div className="p-4 text-sm text-text-muted">No manual shopping items.</div>
+                  ) : shoppingItems.map((item) => (
+                    <div key={item.id} className="grid grid-cols-[28px_1fr_120px_120px] gap-3 px-3 py-2 border-b border-border last:border-b-0 items-center text-sm">
+                      <input type="checkbox" checked={item.status === "checked"} onChange={(e) => patchShoppingItem(item.id, { status: e.target.checked ? "checked" : "open" })} />
+                      <div className="min-w-0">
+                        <div className={item.status === "checked" ? "font-medium truncate line-through text-text-muted" : "font-medium truncate"}>{item.name}</div>
+                        <div className="text-xs text-text-dim truncate">{item.category || "uncategorized"}{item.store ? ` / ${item.store}` : ""}</div>
+                      </div>
+                      <div className="text-text-muted">{fmtQty(item.quantity)} {item.unit}</div>
+                      <div className="text-xs text-text-dim">{item.source}</div>
                     </div>
-                    <div className="text-text-muted">Have {fmtQty(line.current_quantity)} {line.unit}</div>
-                    <div className="text-text">Buy {fmtQty(line.buy_quantity)} {line.unit}</div>
-                  </div>
-                ))}
-              </div>
+                  ))}
+                </div>
+              </section>
+
+              <section>
+                <h3 className="text-base font-semibold mb-3">Suggested</h3>
+                <div className="border border-border rounded overflow-hidden">
+                  {shopping.length === 0 ? (
+                    <div className="p-4 text-sm text-text-muted">No low-stock suggestions.</div>
+                  ) : shopping.map((line) => (
+                    <div key={line.item_id} className="grid grid-cols-[1fr_120px_120px_70px] gap-3 px-3 py-2 border-b border-border last:border-b-0 items-center text-sm">
+                      <div>
+                        <div className="font-medium">{line.name}</div>
+                        <div className="text-xs text-text-dim">{line.category || "uncategorized"}</div>
+                      </div>
+                      <div className="text-text-muted">Have {fmtQty(line.current_quantity)} {line.unit}</div>
+                      <div className="text-text">Buy {fmtQty(line.buy_quantity)} {line.unit}</div>
+                      <button onClick={() => addSuggestion(line)} className="border border-border rounded px-2 py-1 text-xs">Add</button>
+                    </div>
+                  ))}
+                </div>
+              </section>
             </div>
           )}
         </main>
