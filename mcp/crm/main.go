@@ -33,7 +33,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: crm
 display_name: CRM
-version: 0.8.19
+version: 0.8.20
 description: |
   Contacts store for Apteva agents and human teams. Multi-value channels,
   typed custom attributes with provenance, append-only activity log,
@@ -498,7 +498,7 @@ func (a *App) MCPTools() []sdk.Tool {
 	return []sdk.Tool{
 		{
 			Name:        "contacts_search",
-			Description: "Filtered contact search. Args: q (free text over name/email/phone/company), filters [], limit (default 50, max 200), offset (for paging). Returns {contacts, count, total, offset} — use total + offset to page. Each filter is either a core-field filter {field, op, value} (field ∈ first_name,last_name,display_name,company,job_title,primary_email,primary_phone,status,owner_user_id,source), a custom-field filter {attribute: \"<key>\", op, value}, or a list predicate {predicate: \"in_list\"|\"not_in_list\", list_id}. ops: eq,neq,gt,gte,lt,lte,contains,starts_with,is_null,in.",
+			Description: "Filtered contact search. Args: q (free text over name/email/phone/company), filters [], limit (default 50, max 200), offset (for paging). Returns {contacts, count, total, offset} — use total + offset to page. Each filter is either a core-field filter {field, op, value} (field ∈ first_name,last_name,display_name,company,job_title,primary_email,primary_phone,status,owner_user_id,source,first_contact_at,last_contact_at,created_at,updated_at), a custom-field filter {attribute: \"<key>\", op, value}, or a list predicate {predicate: \"in_list\"|\"not_in_list\", list_id}. ops: eq,neq,gt,gte,lt,lte,contains,starts_with,is_null,in. Timestamp fields support ISO-8601 values.",
 			InputSchema: schemaObject(map[string]any{
 				"filters": map[string]any{"type": "array"},
 				"q":       map[string]any{"type": "string"},
@@ -1995,10 +1995,29 @@ func buildFilterClause(field, op string, val any) (string, []any, error) {
 		"first_name": true, "last_name": true, "display_name": true,
 		"company": true, "job_title": true, "primary_email": true,
 		"primary_phone": true, "status": true, "owner_user_id": true,
-		"source": true,
+		"source": true, "first_contact_at": true, "last_contact_at": true,
+		"created_at": true, "updated_at": true,
 	}
 	if !allowed[field] {
 		return "", nil, fmt.Errorf("unknown filter field %q", field)
+	}
+	if dateFilterField(field) {
+		switch op {
+		case "eq", "":
+			return "datetime(" + field + ") = datetime(?)", []any{val}, nil
+		case "neq":
+			return "datetime(" + field + ") != datetime(?)", []any{val}, nil
+		case "gt":
+			return "datetime(" + field + ") > datetime(?)", []any{val}, nil
+		case "gte":
+			return "datetime(" + field + ") >= datetime(?)", []any{val}, nil
+		case "lt":
+			return "datetime(" + field + ") < datetime(?)", []any{val}, nil
+		case "lte":
+			return "datetime(" + field + ") <= datetime(?)", []any{val}, nil
+		case "is_null":
+			return field + " IS NULL", nil, nil
+		}
 	}
 	switch op {
 	case "eq", "":
@@ -2029,6 +2048,15 @@ func buildFilterClause(field, op string, val any) (string, []any, error) {
 		return field + " IN (" + placeholders + ")", arr, nil
 	}
 	return "", nil, fmt.Errorf("unknown op %q", op)
+}
+
+func dateFilterField(field string) bool {
+	switch field {
+	case "first_contact_at", "last_contact_at", "created_at", "updated_at":
+		return true
+	default:
+		return false
+	}
 }
 
 func dbUpdate(db *sql.DB, pid string, id int64, patch map[string]any, source string) (*Contact, error) {

@@ -130,6 +130,43 @@ func TestSearch_FilterByListMembership(t *testing.T) {
 	}
 }
 
+func TestSearch_FilterByCreatedAt(t *testing.T) {
+	ctx := newTestCtx(t)
+	app := &App{}
+
+	old := mustCreate(t, ctx, map[string]any{"display_name": "Old Lead"})
+	recent := mustCreate(t, ctx, map[string]any{"display_name": "Recent Lead"})
+	if _, err := ctx.AppDB().Exec(
+		`UPDATE contacts SET created_at = ? WHERE id = ?`,
+		"2026-06-01 09:00:00", old.ID,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ctx.AppDB().Exec(
+		`UPDATE contacts SET created_at = ? WHERE id = ?`,
+		"2026-07-06 12:00:00", recent.ID,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	got := searchIDs(t, ctx, app, map[string]any{
+		"filters": []any{map[string]any{"field": "created_at", "op": "gte", "value": "2026-07-01T00:00:00Z"}},
+	})
+	if len(got) != 1 || !got[recent.ID] {
+		t.Fatalf("created_at>=2026-07-01 should return only recent contact, got %v", got)
+	}
+
+	out, err := app.toolSearch(ctx, map[string]any{
+		"filters": []any{map[string]any{"field": "created_at", "op": "lt", "value": "2026-07-01T00:00:00Z"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total := out.(map[string]any)["total"].(int); total != 1 {
+		t.Fatalf("created_at<2026-07-01 total=%d, want 1", total)
+	}
+}
+
 func setAttr(t *testing.T, ctx *sdk.AppCtx, contactID int64, key string, value any) {
 	t.Helper()
 	if err := dbSetAttribute(ctx.AppDB(), "test-proj", contactID, key, value, "test"); err != nil {

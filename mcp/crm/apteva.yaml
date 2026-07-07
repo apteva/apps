@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: crm
 display_name: CRM
-version: 0.8.19
+version: 0.8.20
 description: |
   Contacts store for Apteva agents and human teams. Multi-value channels
   (emails, phones, social), typed custom attributes with provenance,
@@ -37,7 +37,7 @@ provides:
     - prefix: /
   mcp_tools:
     - name: contacts_search
-      description: Filtered contact search.
+      description: Filtered contact search over core fields including created_at/updated_at timestamps, attributes, and list predicates.
     - name: contacts_get
       description: Fetch one contact (snapshot only).
     - name: contacts_get_context
