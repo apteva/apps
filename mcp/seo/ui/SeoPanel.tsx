@@ -376,12 +376,18 @@ export default function SeoPanel({ projectId, installId }: NativePanelProps) {
   useEffect(() => {
     if (!selectedKeyword) {
       setKeywordMetrics(null);
+      if (searchEngine === "youtube") setSerpResults([]);
       return;
     }
     callTool<{ keyword: Keyword; metrics: KeywordMetrics | null }>("keywords_get", { id: selectedKeyword.id })
       .then((r) => setKeywordMetrics(r.metrics || null))
       .catch((e) => setErr((e as Error).message));
-  }, [callTool, selectedKeyword]);
+    if ((selectedKeyword.search_engine || searchEngine) === "youtube") {
+      callTool<SearchRanking[]>("rankings_for_keyword", { keyword_id: selectedKeyword.id, limit: 100 })
+        .then((rows) => setSerpResults(rows || []))
+        .catch((e) => setErr((e as Error).message));
+    }
+  }, [callTool, searchEngine, selectedKeyword]);
 
   useEffect(() => {
     if (!selectedEntity) {

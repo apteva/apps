@@ -35,7 +35,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: seo
 display_name: SEO
-version: 0.4.5
+version: 0.4.6
 description: Generic SEO research workbench — locale-aware domains, keywords, rankings, backlinks behind one pluggable provider integration.
 author: Apteva
 scopes: [project, global]
@@ -58,10 +58,10 @@ provides:
     - { name: entities_list, description: "List tracked search entities. Args: search_engine?, entity_type?, limit?." }
     - { name: entities_get, description: "Read one tracked search entity. Args: id." }
     - { name: entities_remove, description: "Remove one tracked search entity. Args: id." }
-    - { name: serp_search, description: "Run a paid provider SERP search and cache ranked results. Args: search_engine? (google default or youtube), keyword or keyword_id, location_id or country_iso+language_code, depth?." }
+    - { name: serp_search, description: "Run a paid provider SERP search and cache ranked results. Args: search_engine? (google default or youtube), keyword or keyword_id, location_id or country_iso+language_code, depth?. YouTube stores video results only." }
     - { name: keyword_ideas, description: "Find keyword/content ideas. Args: search_engine? (google default or youtube), seed_keywords or keywords, location_id or country_iso+language_code, limit?, refresh?." }
     - { name: rankings_for_entity, description: "List cached ranking rows for a generic search entity. Args: entity_id, since?, limit?." }
-    - { name: content_opportunities, description: "Summarize cached SERP snapshots into content opportunities. Args: search_engine? (youtube default), result_type? (youtube defaults to video; use all to include channels/playlists), limit?." }
+    - { name: content_opportunities, description: "Summarize cached SERP snapshots into content opportunities. Args: search_engine? (youtube default), limit?. YouTube uses video results only." }
     - { name: locations_list, description: "List active SEO provider locations." }
     - { name: domains_add,    description: "Add a domain (hostname) to track; accepts location_id or country_iso+language_code for the default locale." }
     - { name: domains_list,   description: "List tracked domains in this scope." }
@@ -72,7 +72,7 @@ provides:
     - { name: keywords_get,    description: "Read one keyword plus latest metrics." }
     - { name: keywords_remove, description: "Remove a keyword (cascades to children)." }
     - { name: rankings_for_domain,    description: "Cached current rankings for a domain; pass history=true for daily observations." }
-    - { name: rankings_for_keyword,   description: "Cached current rankings for a keyword; pass history=true for daily observations." }
+    - { name: rankings_for_keyword,   description: "Cached current rankings/results for a keyword; Google returns tracked-domain rankings, YouTube returns ranked videos." }
     - { name: backlinks_list,         description: "Cached backlinks pointing at a domain." }
     - { name: keyword_volume_history, description: "Monthly search-volume series (cached)." }
   ui_panels:
@@ -183,7 +183,7 @@ func (a *App) MCPTools() []sdk.Tool {
 			InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}}, []string{"id"}),
 			Handler:     a.toolEntitiesRemove},
 		{Name: "serp_search",
-			Description: "Run a paid provider SERP search and cache ranked results. Args: search_engine? (google default or youtube), keyword or keyword_id, location_id or country_iso+language_code, depth?.",
+			Description: "Run a paid provider SERP search and cache ranked results. Args: search_engine? (google default or youtube), keyword or keyword_id, location_id or country_iso+language_code, depth?. YouTube stores video results only.",
 			InputSchema: schemaObject(map[string]any{
 				"search_engine": map[string]any{"type": "string"},
 				"keyword":       map[string]any{"type": "string"},
@@ -217,10 +217,9 @@ func (a *App) MCPTools() []sdk.Tool {
 			}, []string{"entity_id"}),
 			Handler: a.toolRankingsForEntity},
 		{Name: "content_opportunities",
-			Description: "Summarize cached SERP snapshots into content opportunities. Args: search_engine? (youtube default for this tool), result_type? (youtube defaults to video; use all to include channels/playlists), limit?.",
+			Description: "Summarize cached SERP snapshots into content opportunities. Args: search_engine? (youtube default for this tool), limit?. YouTube uses video results only.",
 			InputSchema: schemaObject(map[string]any{
 				"search_engine": map[string]any{"type": "string"},
-				"result_type":   map[string]any{"type": "string"},
 				"limit":         map[string]any{"type": "integer"},
 			}, nil),
 			Handler: a.toolContentOpportunities},
@@ -287,7 +286,7 @@ func (a *App) MCPTools() []sdk.Tool {
 			}, []string{"domain_id"}),
 			Handler: a.toolRankingsForDomain},
 		{Name: "rankings_for_keyword",
-			Description: "List current tracked-domain rankings for a keyword by default, or daily observations with history=true. Args: keyword_id (required), since? (unix seconds), limit? (default 200), history? (default false).",
+			Description: "List current rankings/results for a keyword. Google returns tracked-domain rankings; YouTube returns ranked video results from the latest SERP snapshot by default, or all cached video results with history=true. Args: keyword_id (required), since? (unix seconds), limit? (default 200), history? (default false).",
 			InputSchema: schemaObject(map[string]any{
 				"keyword_id": map[string]any{"type": "integer"},
 				"since":      map[string]any{"type": "integer"},
@@ -1015,7 +1014,9 @@ func (a *App) toolRankingsForKeyword(ctx *sdk.AppCtx, args map[string]any) (any,
 	if id == 0 {
 		return nil, errors.New("keyword_id required")
 	}
-	if _, err := getKeyword(ctx.AppDB(), projectScopeFromArgs(ctx, args), id); err != nil {
+	pid := projectScopeFromArgs(ctx, args)
+	k, err := getKeyword(ctx.AppDB(), pid, id)
+	if err != nil {
 		return nil, err
 	}
 	since := toInt64(args["since"])
@@ -1023,8 +1024,10 @@ func (a *App) toolRankingsForKeyword(ctx *sdk.AppCtx, args map[string]any) (any,
 	if limit <= 0 {
 		limit = 200
 	}
+	if k.SearchEngine == "youtube" {
+		return youtubeRankingsForKeyword(ctx.AppDB(), pid, k, since, limit, boolArg(args, "history", false))
+	}
 	var rows *sql.Rows
-	var err error
 	if boolArg(args, "history", false) {
 		rows, err = ctx.AppDB().Query(
 			`SELECT id, domain_id, keyword_id, location_id, provider, ts, observed_date,
@@ -1054,6 +1057,45 @@ func (a *App) toolRankingsForKeyword(ctx *sdk.AppCtx, args map[string]any) (any,
 		return nil, err
 	}
 	return scanRankings(rows)
+}
+
+func youtubeRankingsForKeyword(db *sql.DB, pid string, k *Keyword, since int64, limit int, history bool) ([]SearchRanking, error) {
+	baseSelect := `SELECT r.id, r.snapshot_id, r.entity_id, s.search_engine, s.keyword_id, s.keyword_text,
+	             s.location_id, s.provider, s.ts, r.rank, r.result_type, r.title, r.url,
+	             r.identifier, r.channel_identifier, r.channel_title, r.snippet, r.published_at
+	        FROM search_serp_results r
+	        JOIN search_serp_snapshots s ON s.id = r.snapshot_id
+	       WHERE s.project_id = ?
+	         AND s.search_engine = 'youtube'
+	         AND COALESCE(NULLIF(r.result_type, ''), 'video') = 'video'
+	         AND s.ts >= ?`
+	args := []any{pid, since}
+	if k.ID != 0 {
+		baseSelect += ` AND (s.keyword_id = ? OR (s.keyword_id IS NULL AND s.keyword_text = ? AND s.location_id = ?))`
+		args = append(args, k.ID, k.Text, k.LocationID)
+	} else {
+		baseSelect += ` AND s.keyword_text = ? AND s.location_id = ?`
+		args = append(args, k.Text, k.LocationID)
+	}
+	if !history {
+		baseSelect += ` AND s.id = (
+			SELECT s2.id
+			  FROM search_serp_snapshots s2
+			 WHERE s2.project_id = ?
+			   AND s2.search_engine = 'youtube'
+			   AND (s2.keyword_id = ? OR (s2.keyword_id IS NULL AND s2.keyword_text = ? AND s2.location_id = ?))
+			 ORDER BY s2.ts DESC, s2.id DESC
+			 LIMIT 1
+		)`
+		args = append(args, pid, k.ID, k.Text, k.LocationID)
+	}
+	baseSelect += ` ORDER BY s.ts DESC, r.rank ASC LIMIT ?`
+	args = append(args, limit)
+	rows, err := db.Query(baseSelect, args...)
+	if err != nil {
+		return nil, err
+	}
+	return scanSearchRankings(rows)
 }
 
 func scanRankings(rows *sql.Rows) ([]Ranking, error) {
@@ -1558,6 +1600,9 @@ func (a *App) toolSERPSearch(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	stored := []SearchRanking{}
 	for _, raw := range items {
 		item := normalizeSERPItem(search_engine, raw)
+		if search_engine == "youtube" && item.ResultType != "video" {
+			continue
+		}
 		if item.Identifier == "" && item.URL == "" && item.Title == "" {
 			continue
 		}
@@ -1959,15 +2004,10 @@ func (a *App) toolContentOpportunities(ctx *sdk.AppCtx, args map[string]any) (an
 	if limit <= 0 || limit > 100 {
 		limit = 25
 	}
-	resultType := strings.ToLower(strings.TrimSpace(strArg(args, "result_type", "")))
-	if search_engine == "youtube" && resultType == "" {
-		resultType = "video"
-	}
 	where := `s.project_id = ? AND s.search_engine = ?`
 	qargs := []any{projectScopeFromArgs(ctx, args), search_engine}
-	if resultType != "" && resultType != "all" {
-		where += ` AND COALESCE(NULLIF(r.result_type, ''), 'video') = ?`
-		qargs = append(qargs, resultType)
+	if search_engine == "youtube" {
+		where += ` AND COALESCE(NULLIF(r.result_type, ''), 'video') = 'video'`
 	}
 	qargs = append(qargs, limit)
 	rows, err := ctx.AppDB().Query(
@@ -2007,7 +2047,6 @@ func (a *App) toolContentOpportunities(ctx *sdk.AppCtx, args map[string]any) (an
 		}
 		out = append(out, map[string]any{
 			"search_engine":     search_engine,
-			"result_type":       resultType,
 			"keyword":           keyword,
 			"opportunity_score": minInt64(score, 100),
 			"result_count":      resultCount,

@@ -297,6 +297,66 @@ func TestYouTubeIdeasFromCachedSERPs_UsesVideoRowsOnly(t *testing.T) {
 	}
 }
 
+func TestYouTubeRankingsForKeyword_ReturnsLatestVideoRowsOnly(t *testing.T) {
+	db := newSEOTestDB(t, "migrations/001_init.sql", "migrations/004_search_entities.sql")
+	if _, err := db.Exec(`ALTER TABLE keywords ADD COLUMN search_engine TEXT NOT NULL DEFAULT 'google'`); err != nil {
+		t.Fatalf("add keyword search_engine column: %v", err)
+	}
+	if _, err := db.Exec(`INSERT INTO seo_locations
+		(provider, search_engine, location_code, location_name, country_iso, language_code, language_name)
+		VALUES ('dataforseo', 'youtube', 2840, 'United States', 'US', 'en', 'English')`); err != nil {
+		t.Fatalf("insert location: %v", err)
+	}
+	res, err := db.Exec(`INSERT INTO keywords
+		(project_id, search_engine, text, location_id, country_iso, language_iso)
+		VALUES ('project-1', 'youtube', 'hypnosis obedience trigger', 1, 'US', 'en')`)
+	if err != nil {
+		t.Fatalf("insert keyword: %v", err)
+	}
+	keywordID, _ := res.LastInsertId()
+	insertSnapshot := func(ts int64) int64 {
+		t.Helper()
+		res, err := db.Exec(`INSERT INTO search_serp_snapshots
+			(project_id, search_engine, keyword_id, keyword_text, location_id, provider, ts, raw_json)
+			VALUES ('project-1', 'youtube', ?, 'hypnosis obedience trigger', 1, 'dataforseo', ?, '{}')`,
+			keywordID, ts)
+		if err != nil {
+			t.Fatalf("insert snapshot: %v", err)
+		}
+		id, _ := res.LastInsertId()
+		return id
+	}
+	oldSnapshot := insertSnapshot(100)
+	latestSnapshot := insertSnapshot(200)
+	if _, err := db.Exec(`INSERT INTO search_serp_results
+		(snapshot_id, rank, result_type, title, url, channel_title, raw_json)
+		VALUES
+		(?, 1, 'video', 'Old Video', 'https://www.youtube.com/watch?v=old', 'Old Channel', '{}'),
+		(?, 1, 'channel', 'UltraHypnosis', 'https://www.youtube.com/@UltraHypnosis', '', '{}'),
+		(?, 2, 'playlist', 'Hypnosis Playlist', 'https://www.youtube.com/playlist?list=abc', '', '{}'),
+		(?, 3, 'video', 'Obedient Trigger - Hypnosis', 'https://www.youtube.com/watch?v=LJ-MYX3YNjg', 'Nimja Hypnosis', '{}')`,
+		oldSnapshot, latestSnapshot, latestSnapshot, latestSnapshot); err != nil {
+		t.Fatalf("insert SERP rows: %v", err)
+	}
+
+	k := &Keyword{ID: keywordID, SearchEngine: "youtube", Text: "hypnosis obedience trigger", LocationID: 1}
+	current, err := youtubeRankingsForKeyword(db, "project-1", k, 0, 20, false)
+	if err != nil {
+		t.Fatalf("youtubeRankingsForKeyword current returned error: %v", err)
+	}
+	if len(current) != 1 || current[0].Title != "Obedient Trigger - Hypnosis" || current[0].ResultType != "video" {
+		t.Fatalf("current rows = %+v, want latest video row only", current)
+	}
+
+	history, err := youtubeRankingsForKeyword(db, "project-1", k, 0, 20, true)
+	if err != nil {
+		t.Fatalf("youtubeRankingsForKeyword history returned error: %v", err)
+	}
+	if len(history) != 2 {
+		t.Fatalf("history rows = %+v, want old and latest video rows only", history)
+	}
+}
+
 func newSEOTestDB(t *testing.T, migrations ...string) *sql.DB {
 	t.Helper()
 	db, err := sql.Open("sqlite", ":memory:")

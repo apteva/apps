@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.6
+
+- Changed YouTube SERP ingestion to store and return video results only.
+  Channel and playlist rows from DataForSEO are skipped for normal SEO data.
+- Simplified YouTube content opportunities back to the standard interface while
+  preserving the video-only default.
+
 ## 0.4.5
 
 - Classified YouTube SERP rows as videos, channels, or playlists instead of
