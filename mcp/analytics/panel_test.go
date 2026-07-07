@@ -20,7 +20,7 @@ func TestHTTPRoutesRegistered(t *testing.T) {
 	for _, r := range (&App{}).HTTPRoutes() {
 		got[r.Pattern] = true
 	}
-	for _, want := range []string{"/summary", "/series", "/top", "/feed", "/dimensions", "/collect", "/keys", "/keys/revoke", "/capture", "/dashboards", "/dashboards/", "/widgets/", "/query-widget", "/event-specs", "/event-specs/", "/event-spec-violations"} {
+	for _, want := range []string{"/summary", "/series", "/top", "/feed", "/dimensions", "/collect", "/keys", "/keys/revoke", "/capture", "/dashboards", "/dashboards/", "/widgets/", "/query-widget", "/dashboard-filter-options", "/event-specs", "/event-specs/", "/event-spec-violations"} {
 		if !got[want] {
 			t.Errorf("missing route %s", want)
 		}

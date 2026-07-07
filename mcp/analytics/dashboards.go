@@ -15,6 +15,7 @@ type Dashboard struct {
 	ProjectID   string            `json:"project_id"`
 	Name        string            `json:"name"`
 	Description string            `json:"description"`
+	Config      map[string]any    `json:"config"`
 	CreatedAt   int64             `json:"created_at"`
 	UpdatedAt   int64             `json:"updated_at"`
 	Widgets     []DashboardWidget `json:"widgets,omitempty"`
@@ -122,6 +123,7 @@ func (a *App) handleWidgetQuery(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		ProjectID string          `json:"project_id"`
 		Widget    DashboardWidget `json:"widget"`
+		Filters   map[string]any  `json:"filters"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		http.Error(w, "invalid json", http.StatusBadRequest)
@@ -130,7 +132,7 @@ func (a *App) handleWidgetQuery(w http.ResponseWriter, r *http.Request) {
 	if body.ProjectID == "" {
 		body.ProjectID = globalCtx.CurrentProject()
 	}
-	result, err := evaluateWidget(globalCtx.AppDB(), body.ProjectID, body.Widget)
+	result, err := evaluateWidget(globalCtx.AppDB(), body.ProjectID, body.Widget, body.Filters)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -138,10 +140,38 @@ func (a *App) handleWidgetQuery(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, result)
 }
 
+func (a *App) handleDashboardFilterOptions(w http.ResponseWriter, r *http.Request) {
+	if !requireUser(r) {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST only", http.StatusMethodNotAllowed)
+		return
+	}
+	var body struct {
+		ProjectID string         `json:"project_id"`
+		Filter    map[string]any `json:"filter"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "invalid json", http.StatusBadRequest)
+		return
+	}
+	if body.ProjectID == "" {
+		body.ProjectID = globalCtx.CurrentProject()
+	}
+	options, err := dashboardFilterOptions(globalCtx.AppDB(), body.ProjectID, body.Filter)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	writeJSON(w, map[string]any{"options": options})
+}
+
 func (a *App) handleDashboardsList(w http.ResponseWriter, r *http.Request) {
 	projectID := projectFromRequest(r)
 	rows, err := globalCtx.AppDB().Query(
-		`SELECT id, project_id, name, description, created_at, updated_at
+		`SELECT id, project_id, name, description, COALESCE(config_json, '{}'), created_at, updated_at
 		 FROM dashboards WHERE project_id = ? ORDER BY updated_at DESC, id DESC`,
 		projectID,
 	)
@@ -153,10 +183,15 @@ func (a *App) handleDashboardsList(w http.ResponseWriter, r *http.Request) {
 	var out []Dashboard
 	for rows.Next() {
 		var d Dashboard
-		if err := rows.Scan(&d.ID, &d.ProjectID, &d.Name, &d.Description, &d.CreatedAt, &d.UpdatedAt); err != nil {
+		var cfg string
+		if err := rows.Scan(&d.ID, &d.ProjectID, &d.Name, &d.Description, &cfg, &d.CreatedAt, &d.UpdatedAt); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
+		if cfg != "" {
+			_ = json.Unmarshal([]byte(cfg), &d.Config)
+		}
+		d.Config = nonNilConfig(d.Config)
 		out = append(out, d)
 	}
 	writeJSON(w, map[string]any{"dashboards": out})
@@ -164,10 +199,11 @@ func (a *App) handleDashboardsList(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) handleDashboardsCreate(w http.ResponseWriter, r *http.Request) {
 	var body struct {
-		ProjectID   string `json:"project_id"`
-		Name        string `json:"name"`
-		Description string `json:"description"`
-		Template    string `json:"template"`
+		ProjectID   string         `json:"project_id"`
+		Name        string         `json:"name"`
+		Description string         `json:"description"`
+		Template    string         `json:"template"`
+		Config      map[string]any `json:"config"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		http.Error(w, "invalid json", http.StatusBadRequest)
@@ -180,11 +216,17 @@ func (a *App) handleDashboardsCreate(w http.ResponseWriter, r *http.Request) {
 	if body.Name == "" {
 		if body.Template == "website_traffic" {
 			body.Name = "Website Traffic"
+		} else if body.Template == "patreon_overview" {
+			body.Name = "Patreon Overview"
 		} else {
 			body.Name = "Analytics Dashboard"
 		}
 	}
-	d, err := createDashboard(globalCtx.AppDB(), body.ProjectID, body.Name, body.Description, templateWidgets(body.Template))
+	cfg := nonNilConfig(body.Config)
+	if body.Template != "" && len(cfg) == 0 {
+		cfg = templateDashboardConfig(body.Template)
+	}
+	d, err := createDashboard(globalCtx.AppDB(), body.ProjectID, body.Name, body.Description, cfg, templateWidgets(body.Template))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -207,8 +249,9 @@ func (a *App) handleDashboardGet(w http.ResponseWriter, r *http.Request, id int6
 
 func (a *App) handleDashboardUpdate(w http.ResponseWriter, r *http.Request, id int64) {
 	var body struct {
-		Name        string `json:"name"`
-		Description string `json:"description"`
+		Name        string         `json:"name"`
+		Description string         `json:"description"`
+		Config      map[string]any `json:"config"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		http.Error(w, "invalid json", http.StatusBadRequest)
@@ -219,9 +262,10 @@ func (a *App) handleDashboardUpdate(w http.ResponseWriter, r *http.Request, id i
 		http.Error(w, "name required", http.StatusBadRequest)
 		return
 	}
+	cfg, _ := json.Marshal(nonNilConfig(body.Config))
 	_, err := globalCtx.AppDB().Exec(
-		`UPDATE dashboards SET name=?, description=?, updated_at=? WHERE id=?`,
-		body.Name, body.Description, time.Now().UnixMilli(), id,
+		`UPDATE dashboards SET name=?, description=?, config_json=?, updated_at=? WHERE id=?`,
+		body.Name, body.Description, string(cfg), time.Now().UnixMilli(), id,
 	)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -292,17 +336,18 @@ func (a *App) handleWidgetDelete(w http.ResponseWriter, r *http.Request, id int6
 	writeJSON(w, map[string]any{"ok": true})
 }
 
-func createDashboard(db *sql.DB, projectID, name, description string, widgets []DashboardWidget) (*Dashboard, error) {
+func createDashboard(db *sql.DB, projectID, name, description string, config map[string]any, widgets []DashboardWidget) (*Dashboard, error) {
 	now := time.Now().UnixMilli()
 	tx, err := db.Begin()
 	if err != nil {
 		return nil, err
 	}
 	defer tx.Rollback()
+	cfg, _ := json.Marshal(nonNilConfig(config))
 	res, err := tx.Exec(
-		`INSERT INTO dashboards (project_id, name, description, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?)`,
-		projectID, name, description, now, now,
+		`INSERT INTO dashboards (project_id, name, description, config_json, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?)`,
+		projectID, name, description, string(cfg), now, now,
 	)
 	if err != nil {
 		return nil, err
@@ -322,13 +367,18 @@ func createDashboard(db *sql.DB, projectID, name, description string, widgets []
 
 func getDashboard(db *sql.DB, id int64) (*Dashboard, error) {
 	var d Dashboard
+	var cfg string
 	err := db.QueryRow(
-		`SELECT id, project_id, name, description, created_at, updated_at FROM dashboards WHERE id=?`,
+		`SELECT id, project_id, name, description, COALESCE(config_json, '{}'), created_at, updated_at FROM dashboards WHERE id=?`,
 		id,
-	).Scan(&d.ID, &d.ProjectID, &d.Name, &d.Description, &d.CreatedAt, &d.UpdatedAt)
+	).Scan(&d.ID, &d.ProjectID, &d.Name, &d.Description, &cfg, &d.CreatedAt, &d.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
+	if cfg != "" {
+		_ = json.Unmarshal([]byte(cfg), &d.Config)
+	}
+	d.Config = nonNilConfig(d.Config)
 	widgets, err := listWidgets(db, id)
 	if err != nil {
 		return nil, err
@@ -391,12 +441,13 @@ func listWidgets(db *sql.DB, dashboardID int64) ([]DashboardWidget, error) {
 	return out, rows.Err()
 }
 
-func evaluateWidget(db *sql.DB, projectID string, w DashboardWidget) (map[string]any, error) {
-	f := filterFromWidget(projectID, w.Config)
-	limit := intConfig(w.Config, "limit", 10)
+func evaluateWidget(db *sql.DB, projectID string, w DashboardWidget, selectedFilters map[string]any) (map[string]any, error) {
+	cfg := resolveDashboardFilters(w.Config, selectedFilters)
+	f := filterFromWidget(projectID, cfg)
+	limit := intConfig(cfg, "limit", 10)
 	switch w.Type {
 	case "stat":
-		if valueKey := stringConfig(w.Config, "value", ""); valueKey != "" {
+		if valueKey := stringConfig(cfg, "value", ""); valueKey != "" {
 			sum, count, err := sumScalarForWidget(db, f, valueKey)
 			if err != nil {
 				return nil, err
@@ -407,7 +458,7 @@ func evaluateWidget(db *sql.DB, projectID string, w DashboardWidget) (map[string
 			n   int64
 			err error
 		)
-		if by := stringConfig(w.Config, "by", ""); by != "" {
+		if by := stringConfig(cfg, "by", ""); by != "" {
 			n, err = distinctCount(db, f, by)
 		} else {
 			n, err = countEvents(db, f)
@@ -417,20 +468,20 @@ func evaluateWidget(db *sql.DB, projectID string, w DashboardWidget) (map[string
 		}
 		return map[string]any{"type": w.Type, "value": n}, nil
 	case "timeseries":
-		rows, err := seriesForWidget(db, f, stringConfig(w.Config, "interval", "minute"), stringConfig(w.Config, "value", ""))
+		rows, err := seriesForWidget(db, f, stringConfig(cfg, "interval", "minute"), stringConfig(cfg, "value", ""))
 		if err != nil {
 			return nil, err
 		}
 		return map[string]any{"type": w.Type, "series": rows}, nil
 	case "top", "breakdown":
-		by := stringConfig(w.Config, "by", "props.path")
+		by := stringConfig(cfg, "by", "props.path")
 		rows, err := topByPropsKey(db, f, by, limit)
 		if err != nil {
 			return nil, err
 		}
 		return map[string]any{"type": w.Type, "top": rows, "by": by}, nil
 	case "feed":
-		rows, err := queryRows(db, f, intConfig(w.Config, "limit", 25))
+		rows, err := queryRows(db, f, intConfig(cfg, "limit", 25))
 		if err != nil {
 			return nil, err
 		}
@@ -565,7 +616,186 @@ func dashboardGroupExpr(by string) (string, bool) {
 	}
 }
 
+func resolveDashboardFilters(cfg map[string]any, selected map[string]any) map[string]any {
+	if len(cfg) == 0 {
+		return map[string]any{}
+	}
+	b, _ := json.Marshal(cfg)
+	var out map[string]any
+	_ = json.Unmarshal(b, &out)
+	out = nonNilConfig(out)
+	for k, v := range out {
+		if s, ok := v.(string); ok {
+			if resolved, found := filterPlaceholderValue(s, selected); found {
+				if isEmptyDashboardFilterValue(resolved) {
+					delete(out, k)
+				} else {
+					out[k] = resolved
+				}
+			}
+		}
+	}
+	if raw, ok := out["where"].(map[string]any); ok {
+		where := map[string]any{}
+		for k, v := range raw {
+			if s, ok := v.(string); ok {
+				resolved, found := filterPlaceholderValue(s, selected)
+				if found {
+					if !isEmptyDashboardFilterValue(resolved) {
+						where[k] = resolved
+					}
+					continue
+				}
+			}
+			if !isEmptyDashboardFilterValue(v) {
+				where[k] = v
+			}
+		}
+		if len(where) == 0 {
+			delete(out, "where")
+		} else {
+			out["where"] = where
+		}
+	}
+	return out
+}
+
+func filterPlaceholderValue(s string, selected map[string]any) (any, bool) {
+	const prefix = "$filters."
+	if !strings.HasPrefix(s, prefix) {
+		return nil, false
+	}
+	if selected == nil {
+		return nil, true
+	}
+	value, ok := selected[strings.TrimPrefix(s, prefix)]
+	if !ok {
+		return nil, true
+	}
+	return value, true
+}
+
+func isEmptyDashboardFilterValue(v any) bool {
+	if v == nil {
+		return true
+	}
+	switch raw := v.(type) {
+	case string:
+		return raw == "" || raw == "all"
+	case []any:
+		if len(raw) == 0 {
+			return true
+		}
+		for _, item := range raw {
+			if !isEmptyDashboardFilterValue(item) {
+				return false
+			}
+		}
+		return true
+	case []string:
+		if len(raw) == 0 {
+			return true
+		}
+		for _, item := range raw {
+			if item != "" && item != "all" {
+				return false
+			}
+		}
+		return true
+	default:
+		return false
+	}
+}
+
+func dashboardFilterOptions(db *sql.DB, projectID string, filter map[string]any) ([]map[string]any, error) {
+	source, ok := filter["source"].(map[string]any)
+	if !ok {
+		if options, ok := filter["options"].([]any); ok {
+			out := make([]map[string]any, 0, len(options))
+			for _, item := range options {
+				switch v := item.(type) {
+				case string:
+					out = append(out, map[string]any{"value": v, "label": v})
+				case map[string]any:
+					out = append(out, v)
+				}
+			}
+			return out, nil
+		}
+		return nil, fmt.Errorf("filter source required")
+	}
+	valueField := stringConfig(source, "value_field", "")
+	if valueField == "" {
+		return nil, fmt.Errorf("filter source value_field required")
+	}
+	valueExpr, ok := dashboardGroupExpr(valueField)
+	if !ok {
+		return nil, fmt.Errorf("filter value_field must be app, topic, source, project_id, session_id, user_id or props.X")
+	}
+	labelField := stringConfig(source, "label_field", "")
+	labelExpr := valueExpr
+	if labelField != "" {
+		var labelOK bool
+		labelExpr, labelOK = dashboardGroupExpr(labelField)
+		if !labelOK {
+			return nil, fmt.Errorf("filter label_field must be app, topic, source, project_id, session_id, user_id or props.X")
+		}
+	}
+	f := Filter{
+		App:       stringConfig(source, "app", ""),
+		Topic:     stringConfig(source, "topic", ""),
+		ProjectID: projectID,
+		Source:    stringConfig(source, "source", ""),
+	}
+	if window := stringConfig(source, "window", ""); window != "" {
+		if ms := windowMillis(window); ms > 0 {
+			f.Since = time.Now().UnixMilli() - ms
+		}
+	}
+	where, args := f.buildWhere()
+	q := "SELECT " + valueExpr + " AS value, MAX(CAST(" + labelExpr + " AS TEXT)) AS label, COUNT(*) AS count FROM events"
+	if where != "" {
+		q += " WHERE " + where + " AND " + valueExpr + " IS NOT NULL"
+	} else {
+		q += " WHERE " + valueExpr + " IS NOT NULL"
+	}
+	q += " GROUP BY value ORDER BY label COLLATE NOCASE LIMIT 200"
+	rows, err := db.Query(q, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []map[string]any
+	for rows.Next() {
+		var value, label sql.NullString
+		var count int64
+		if err := rows.Scan(&value, &label, &count); err != nil {
+			return nil, err
+		}
+		if !value.Valid || value.String == "" {
+			continue
+		}
+		display := value.String
+		if label.Valid && label.String != "" {
+			display = label.String
+		}
+		out = append(out, map[string]any{"value": value.String, "label": display, "count": count})
+	}
+	return out, rows.Err()
+}
+
 func templateWidgets(name string) []DashboardWidget {
+	if name == "patreon_overview" {
+		filtered := map[string]any{
+			"props.page_id": "$filters.page_id",
+		}
+		return []DashboardWidget{
+			{Type: "timeseries", Title: "Net Earnings", Config: map[string]any{"app": "patreon", "topic": "daily_earnings_snapshot", "window": "$filters.window", "interval": "day", "value": "props.net_earnings_total", "where": map[string]any{"props.page_id": "$filters.page_id", "props.currency": "$filters.currency"}}},
+			{Type: "timeseries", Title: "Paid Members", Config: map[string]any{"app": "patreon", "topic": "daily_membership_snapshot", "window": "$filters.window", "interval": "day", "value": "props.paid_members", "where": filtered}},
+			{Type: "timeseries", Title: "Traffic Views", Config: map[string]any{"app": "patreon", "topic": "daily_traffic_snapshot", "window": "$filters.window", "interval": "day", "value": "props.total_views", "where": filtered}},
+			{Type: "feed", Title: "Latest Patreon Snapshots", Config: map[string]any{"app": "patreon", "window": "$filters.window", "limit": 25, "where": filtered}},
+		}
+	}
 	if name != "website_traffic" {
 		return nil
 	}
@@ -576,6 +806,51 @@ func templateWidgets(name string) []DashboardWidget {
 		{Type: "top", Title: "Top Pages", Config: map[string]any{"topic": "page_view", "window": "24h", "by": "props.path", "limit": 8}},
 		{Type: "breakdown", Title: "Devices", Config: map[string]any{"topic": "page_view", "window": "24h", "by": "props.device", "limit": 5}},
 		{Type: "feed", Title: "Live Activity", Config: map[string]any{"topic": "page_view", "window": "30m", "limit": 20}},
+	}
+}
+
+func templateDashboardConfig(name string) map[string]any {
+	if name != "patreon_overview" {
+		return map[string]any{}
+	}
+	return map[string]any{
+		"filters": []map[string]any{
+			{
+				"key":     "page_id",
+				"label":   "Page",
+				"type":    "select",
+				"default": "all",
+				"source": map[string]any{
+					"app":         "patreon",
+					"topic":       "daily_traffic_snapshot",
+					"value_field": "props.page_id",
+					"label_field": "props.page_name",
+				},
+			},
+			{
+				"key":     "currency",
+				"label":   "Currency",
+				"type":    "select",
+				"default": "all",
+				"source": map[string]any{
+					"app":         "patreon",
+					"topic":       "daily_earnings_snapshot",
+					"value_field": "props.currency",
+				},
+			},
+			{
+				"key":     "window",
+				"label":   "Window",
+				"type":    "date_window",
+				"default": "90d",
+				"options": []map[string]any{
+					{"value": "7d", "label": "7d"},
+					{"value": "30d", "label": "30d"},
+					{"value": "90d", "label": "90d"},
+					{"value": "all", "label": "All"},
+				},
+			},
+		},
 	}
 }
 

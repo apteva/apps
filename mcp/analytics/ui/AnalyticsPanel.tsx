@@ -152,11 +152,23 @@ interface DashboardWidget {
   config: Record<string, unknown>;
 }
 
+interface DashboardFilter {
+  key: string;
+  label: string;
+  type: "select" | "multi_select" | "date_window";
+  default?: string;
+  options?: Array<{ value: string; label?: string } | string>;
+  source?: Record<string, unknown>;
+}
+
 interface Dashboard {
   id: number;
   project_id: string;
   name: string;
   description: string;
+  config?: {
+    filters?: DashboardFilter[];
+  };
   widgets?: DashboardWidget[];
 }
 
@@ -852,11 +864,40 @@ function WidgetView({ widget, data }: { widget: DashboardWidget; data: any }) {
   );
 }
 
+function filterList(dashboard: Dashboard | null): DashboardFilter[] {
+  return Array.isArray(dashboard?.config?.filters) ? dashboard.config!.filters! : [];
+}
+
+function initialFilterValues(filters: DashboardFilter[]): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const filter of filters) {
+    out[filter.key] = filter.default || (filter.type === "date_window" ? "90d" : "all");
+  }
+  return out;
+}
+
+function staticFilterOptions(filter: DashboardFilter): Array<{ value: string; label: string }> {
+  if (filter.type === "date_window") {
+    return [
+      { value: "7d", label: "7d" },
+      { value: "30d", label: "30d" },
+      { value: "90d", label: "90d" },
+      { value: "all", label: "All" },
+    ];
+  }
+  if (!Array.isArray(filter.options)) return [];
+  return filter.options.map((option) =>
+    typeof option === "string" ? { value: option, label: option } : { value: option.value, label: option.label || option.value },
+  );
+}
+
 function DashboardsTab({ projectId }: { projectId: string }) {
   const [dashboards, setDashboards] = useState<Dashboard[]>([]);
   const [selectedId, setSelectedId] = useState(0);
   const [selected, setSelected] = useState<Dashboard | null>(null);
   const [widgetData, setWidgetData] = useState<Record<number, any>>({});
+  const [filterValues, setFilterValues] = useState<Record<string, string>>({});
+  const [filterOptions, setFilterOptions] = useState<Record<string, Array<{ value: string; label: string; count?: number }>>>({});
   const [status, setStatus] = useState("");
   const reloadTimer = useRef<number | null>(null);
 
@@ -890,12 +931,36 @@ function DashboardsTab({ projectId }: { projectId: string }) {
       }
       const d = await r.json();
       setSelected(d);
+      setFilterValues(initialFilterValues(filterList(d)));
     } catch (e) {
       setStatus((e as Error).message);
     }
   }, []);
 
-  const refreshWidgets = useCallback(async (d: Dashboard | null) => {
+  const loadFilterOptions = useCallback(async (d: Dashboard | null) => {
+    const filters = filterList(d);
+    if (!filters.length) {
+      setFilterOptions({});
+      return;
+    }
+    const pairs = await Promise.all(filters.map(async (filter) => {
+      const staticOptions = staticFilterOptions(filter);
+      if (staticOptions.length) return [filter.key, staticOptions] as const;
+      if (!filter.source) return [filter.key, []] as const;
+      const r = await fetch(`${API}/dashboard-filter-options`, {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ project_id: projectId, filter }),
+      });
+      if (!r.ok) return [filter.key, []] as const;
+      const rows = (await r.json()).options ?? [];
+      return [filter.key, rows] as const;
+    }));
+    setFilterOptions(Object.fromEntries(pairs));
+  }, [projectId]);
+
+  const refreshWidgets = useCallback(async (d: Dashboard | null, filters: Record<string, string>) => {
     if (!d?.widgets?.length) return;
     setStatus("refreshing…");
     try {
@@ -905,7 +970,7 @@ function DashboardsTab({ projectId }: { projectId: string }) {
             method: "POST",
             credentials: "same-origin",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ project_id: projectId, widget }),
+            body: JSON.stringify({ project_id: projectId, widget, filters }),
           });
           return [widget.id, r.ok ? await r.json() : { error: await r.text() }] as const;
         }),
@@ -926,26 +991,31 @@ function DashboardsTab({ projectId }: { projectId: string }) {
   }, [selectedId, loadDashboard]);
 
   useEffect(() => {
-    refreshWidgets(selected);
-  }, [selected, refreshWidgets]);
+    loadFilterOptions(selected);
+  }, [selected, loadFilterOptions]);
+
+  useEffect(() => {
+    refreshWidgets(selected, filterValues);
+  }, [filterValues, selected, refreshWidgets]);
 
   useAppEvents("analytics", projectId, () => {
     if (reloadTimer.current) window.clearTimeout(reloadTimer.current);
-    reloadTimer.current = window.setTimeout(() => refreshWidgets(selected), 1000);
+    reloadTimer.current = window.setTimeout(() => refreshWidgets(selected, filterValues), 1000);
   });
 
-  const createTemplate = async () => {
+  const createTemplate = async (template: "website_traffic" | "patreon_overview") => {
     setStatus("creating…");
     const r = await fetch(`${API}/dashboards`, {
       method: "POST",
       credentials: "same-origin",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ project_id: projectId, template: "website_traffic" }),
+      body: JSON.stringify({ project_id: projectId, template }),
     });
     if (r.ok) {
       const d = await r.json();
       setSelectedId(d.id);
       setSelected(d);
+      setFilterValues(initialFilterValues(filterList(d)));
       await loadList();
       setStatus("");
     } else {
@@ -970,10 +1040,16 @@ function DashboardsTab({ projectId }: { projectId: string }) {
     <div className="flex-1 min-h-0 flex">
       <aside className="border-r border-border p-3 flex flex-col gap-2" style={{ width: "230px" }}>
         <button
-          onClick={createTemplate}
+          onClick={() => createTemplate("website_traffic")}
           className="px-3 py-1.5 text-sm bg-accent text-bg rounded font-bold"
         >
           Website Traffic
+        </button>
+        <button
+          onClick={() => createTemplate("patreon_overview")}
+          className="px-3 py-1.5 text-sm border border-accent text-accent rounded font-bold"
+        >
+          Patreon Overview
         </button>
         <div className="text-text-dim text-xs uppercase mt-2">Dashboards</div>
         <div className="flex flex-col gap-1 overflow-auto">
@@ -1012,7 +1088,7 @@ function DashboardsTab({ projectId }: { projectId: string }) {
                 </div>
               </div>
               <button
-                onClick={() => refreshWidgets(selected)}
+                onClick={() => refreshWidgets(selected, filterValues)}
                 className="ml-auto px-3 py-1 text-sm border border-border rounded text-text-muted hover:text-text"
               >
                 Refresh
@@ -1033,6 +1109,31 @@ function DashboardsTab({ projectId }: { projectId: string }) {
                 <option value="feed">Feed</option>
               </select>
             </div>
+            {filterList(selected).length > 0 && (
+              <div className="flex items-center gap-2 flex-wrap border border-border rounded p-2">
+                {filterList(selected).map((filter) => {
+                  const options = filterOptions[filter.key] ?? [];
+                  const value = filterValues[filter.key] ?? filter.default ?? "all";
+                  return (
+                    <label key={filter.key} className="flex items-center gap-1.5 text-xs">
+                      <span className="text-text-dim">{filter.label}</span>
+                      <select
+                        value={value}
+                        onChange={(e) => setFilterValues((current) => ({ ...current, [filter.key]: e.target.value }))}
+                        className="bg-bg-input border border-border rounded px-2 py-1 text-xs"
+                      >
+                        {filter.type !== "date_window" && <option value="all">All</option>}
+                        {options.map((option) => (
+                          <option key={option.value} value={option.value}>
+                            {option.label || option.value}
+                          </option>
+                        ))}
+                      </select>
+                    </label>
+                  );
+                })}
+              </div>
+            )}
             {status && <div className="text-text-dim text-xs">{status}</div>}
             <div className="grid gap-4" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))" }}>
               {(selected.widgets ?? []).map((widget) => (

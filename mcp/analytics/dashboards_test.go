@@ -15,7 +15,7 @@ func testDashboardDB(t *testing.T) *sql.DB {
 		t.Fatalf("open sqlite: %v", err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	for _, name := range []string{"001_init.sql", "004_dashboards.sql", "005_event_specs.sql"} {
+	for _, name := range []string{"001_init.sql", "004_dashboards.sql", "005_event_specs.sql", "006_dashboard_config.sql"} {
 		b, err := os.ReadFile(filepath.Join("migrations", name))
 		if err != nil {
 			t.Fatalf("read migration %s: %v", name, err)
@@ -43,7 +43,7 @@ func TestWebsiteTrafficTemplateEvaluatesActiveSessions(t *testing.T) {
 			t.Fatalf("insert event: %v", err)
 		}
 	}
-	d, err := createDashboard(db, "p1", "Website Traffic", "", templateWidgets("website_traffic"))
+	d, err := createDashboard(db, "p1", "Website Traffic", "", templateDashboardConfig("website_traffic"), templateWidgets("website_traffic"))
 	if err != nil {
 		t.Fatalf("create dashboard: %v", err)
 	}
@@ -57,7 +57,7 @@ func TestWebsiteTrafficTemplateEvaluatesActiveSessions(t *testing.T) {
 	if active.Type == "" {
 		t.Fatal("missing Active Sessions widget")
 	}
-	got, err := evaluateWidget(db, "p1", active)
+	got, err := evaluateWidget(db, "p1", active, nil)
 	if err != nil {
 		t.Fatalf("evaluate widget: %v", err)
 	}
@@ -92,7 +92,7 @@ func TestTimeseriesWidgetCanSumNumericProperty(t *testing.T) {
 		Type:   "timeseries",
 		Title:  "Daily Views",
 		Config: map[string]any{"app": "patreon", "topic": "post_views_daily_observed", "window": "all", "interval": "day", "value": "props.views"},
-	})
+	}, nil)
 	if err != nil {
 		t.Fatalf("evaluate widget: %v", err)
 	}
@@ -105,5 +105,73 @@ func TestTimeseriesWidgetCanSumNumericProperty(t *testing.T) {
 	}
 	if series[1]["bucket"] != "2026-06-16" || series[1]["count"] != int64(1) || series[1]["value"] != 7.0 {
 		t.Fatalf("second bucket = %#v, want 2026-06-16 count 1 value 7", series[1])
+	}
+}
+
+func TestWidgetFilterPlaceholders(t *testing.T) {
+	db := testDashboardDB(t)
+	ts := time.Date(2026, 6, 16, 8, 0, 0, 0, time.UTC).UnixMilli()
+	for _, ev := range []EventInsert{
+		{TS: ts, App: "patreon", Topic: "daily_traffic_snapshot", ProjectID: "p1", Source: "seed", Props: `{"page_id":"a","total_views":10}`},
+		{TS: ts, App: "patreon", Topic: "daily_traffic_snapshot", ProjectID: "p1", Source: "seed", Props: `{"page_id":"b","total_views":30}`},
+	} {
+		if _, err := insertEvent(db, ev); err != nil {
+			t.Fatalf("insert event: %v", err)
+		}
+	}
+	widget := DashboardWidget{
+		Type: "stat",
+		Config: map[string]any{
+			"app":    "patreon",
+			"topic":  "daily_traffic_snapshot",
+			"window": "all",
+			"value":  "props.total_views",
+			"where":  map[string]any{"props.page_id": "$filters.page_id"},
+		},
+	}
+	got, err := evaluateWidget(db, "p1", widget, map[string]any{"page_id": "a"})
+	if err != nil {
+		t.Fatalf("evaluate filtered widget: %v", err)
+	}
+	if got["value"] != 10.0 {
+		t.Fatalf("filtered value = %v, want 10", got["value"])
+	}
+	got, err = evaluateWidget(db, "p1", widget, map[string]any{"page_id": "all"})
+	if err != nil {
+		t.Fatalf("evaluate all widget: %v", err)
+	}
+	if got["value"] != 40.0 {
+		t.Fatalf("all value = %v, want 40", got["value"])
+	}
+}
+
+func TestDashboardFilterOptions(t *testing.T) {
+	db := testDashboardDB(t)
+	ts := time.Date(2026, 6, 16, 8, 0, 0, 0, time.UTC).UnixMilli()
+	for _, ev := range []EventInsert{
+		{TS: ts, App: "patreon", Topic: "daily_traffic_snapshot", ProjectID: "p1", Source: "seed", Props: `{"page_id":"a","page_name":"Page A","total_views":10}`},
+		{TS: ts, App: "patreon", Topic: "daily_traffic_snapshot", ProjectID: "p1", Source: "seed", Props: `{"page_id":"b","page_name":"Page B","total_views":30}`},
+		{TS: ts, App: "patreon", Topic: "daily_traffic_snapshot", ProjectID: "p1", Source: "seed", Props: `{"page_id":"a","page_name":"Page A","total_views":12}`},
+	} {
+		if _, err := insertEvent(db, ev); err != nil {
+			t.Fatalf("insert event: %v", err)
+		}
+	}
+	options, err := dashboardFilterOptions(db, "p1", map[string]any{
+		"source": map[string]any{
+			"app":         "patreon",
+			"topic":       "daily_traffic_snapshot",
+			"value_field": "props.page_id",
+			"label_field": "props.page_name",
+		},
+	})
+	if err != nil {
+		t.Fatalf("filter options: %v", err)
+	}
+	if len(options) != 2 {
+		t.Fatalf("options len = %d, want 2: %#v", len(options), options)
+	}
+	if options[0]["value"] != "a" || options[0]["label"] != "Page A" || options[0]["count"] != int64(2) {
+		t.Fatalf("first option = %#v, want Page A count 2", options[0])
 	}
 }

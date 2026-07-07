@@ -19,7 +19,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: analytics
 display_name: Analytics
-version: 0.8.1
+version: 0.8.3
 description: |
   Generic event analytics for Apteva apps. Other apps call
   analytics_track to record typed events; analytics_query / count /
@@ -36,6 +36,7 @@ description: |
   spec-driven auto upsert / rollup policies, and analytics_sum.
   v0.8.1 fixes a Catalog load deadlock with the SDK's single SQLite
   connection runtime.
+  v0.8.3 adds dashboard-level filters and a Patreon Overview template.
 author: Apteva
 tags: [analytics, events, observability]
 scopes: [global]
@@ -170,6 +171,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/dashboards/", Handler: a.handleDashboardItem},
 		{Pattern: "/widgets/", Handler: a.handleWidgetItem},
 		{Pattern: "/query-widget", Handler: a.handleWidgetQuery},
+		{Pattern: "/dashboard-filter-options", Handler: a.handleDashboardFilterOptions},
 
 		// Event catalog / tracking plan.
 		{Pattern: "/event-specs", Handler: a.handleEventSpecs},

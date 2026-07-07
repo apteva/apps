@@ -156,6 +156,18 @@ func (f Filter) buildWhere() (string, []any) {
 		if !ok {
 			continue
 		}
+		if values, ok := filterValues(v); ok {
+			if len(values) == 0 {
+				continue
+			}
+			placeholders := make([]string, 0, len(values))
+			for _, value := range values {
+				placeholders = append(placeholders, "?")
+				args = append(args, value)
+			}
+			conds = append(conds, expr+" IN ("+strings.Join(placeholders, ", ")+")")
+			continue
+		}
 		conds = append(conds, expr+" = ?")
 		args = append(args, fmt.Sprint(v))
 	}
@@ -163,6 +175,40 @@ func (f Filter) buildWhere() (string, []any) {
 		return "", nil
 	}
 	return strings.Join(conds, " AND "), args
+}
+
+func filterValues(v any) ([]string, bool) {
+	switch raw := v.(type) {
+	case []any:
+		out := make([]string, 0, len(raw))
+		for _, item := range raw {
+			if isAllFilterValue(item) {
+				return nil, true
+			}
+			if item != nil && fmt.Sprint(item) != "" {
+				out = append(out, fmt.Sprint(item))
+			}
+		}
+		return out, true
+	case []string:
+		out := make([]string, 0, len(raw))
+		for _, item := range raw {
+			if isAllFilterValue(item) {
+				return nil, true
+			}
+			if item != "" {
+				out = append(out, item)
+			}
+		}
+		return out, true
+	default:
+		return nil, false
+	}
+}
+
+func isAllFilterValue(v any) bool {
+	s, ok := v.(string)
+	return ok && (s == "all" || s == "")
 }
 
 // propsExtract returns a json_extract expression for a "props.<key>"
