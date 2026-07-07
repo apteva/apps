@@ -264,6 +264,55 @@ func TestAccountAdd_RollsBackPendingOnStartOAuthError(t *testing.T) {
 	}
 }
 
+func TestAccountAdd_ReusedPickerConnectionPreservesProfileID(t *testing.T) {
+	ctx := newSocialCtx(t, newRecordingPlatform())
+	app := &App{}
+
+	defaultOut, err := app.toolProfileCreate(ctx, map[string]any{"name": "Default Brand"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defaultProfile := defaultOut.(map[string]any)["profile"].(*Profile)
+	selectedOut, err := app.toolProfileCreate(ctx, map[string]any{"name": "Selected Brand"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	selectedProfile := selectedOut.(map[string]any)["profile"].(*Profile)
+
+	_, err = ctx.AppDB().Exec(
+		`INSERT INTO social_accounts (project_id, platform, connection_id, display_name, status, profile_id)
+		 VALUES ('test-proj', 'facebook', 42, 'Existing Page', 'active', ?)`,
+		defaultProfile.ID,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := app.toolAccountAdd(ctx, map[string]any{
+		"platform":   "facebook",
+		"profile_id": selectedProfile.ID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := out.(map[string]any)
+	if res["reused_connection"] != int64(42) {
+		t.Fatalf("expected reused connection 42, got %+v", res)
+	}
+	pendingID := res["pending_account_id"].(int64)
+
+	var gotProfileID int64
+	if err := ctx.AppDB().QueryRow(
+		`SELECT profile_id FROM pending_accounts WHERE id=?`,
+		pendingID,
+	).Scan(&gotProfileID); err != nil {
+		t.Fatal(err)
+	}
+	if gotProfileID != selectedProfile.ID {
+		t.Fatalf("pending profile_id = %d, want selected profile %d", gotProfileID, selectedProfile.ID)
+	}
+}
+
 // --- account_list_pending_pages ------------------------------------
 
 func TestListPendingPages_RequiresOAuthComplete(t *testing.T) {
