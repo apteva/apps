@@ -35,7 +35,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: seo
 display_name: SEO
-version: 0.4.4
+version: 0.4.5
 description: Generic SEO research workbench — locale-aware domains, keywords, rankings, backlinks behind one pluggable provider integration.
 author: Apteva
 scopes: [project, global]
@@ -61,7 +61,7 @@ provides:
     - { name: serp_search, description: "Run a paid provider SERP search and cache ranked results. Args: search_engine? (google default or youtube), keyword or keyword_id, location_id or country_iso+language_code, depth?." }
     - { name: keyword_ideas, description: "Find keyword/content ideas. Args: search_engine? (google default or youtube), seed_keywords or keywords, location_id or country_iso+language_code, limit?, refresh?." }
     - { name: rankings_for_entity, description: "List cached ranking rows for a generic search entity. Args: entity_id, since?, limit?." }
-    - { name: content_opportunities, description: "Summarize cached SERP snapshots into content opportunities. Args: search_engine? (youtube default), limit?." }
+    - { name: content_opportunities, description: "Summarize cached SERP snapshots into content opportunities. Args: search_engine? (youtube default), result_type? (youtube defaults to video; use all to include channels/playlists), limit?." }
     - { name: locations_list, description: "List active SEO provider locations." }
     - { name: domains_add,    description: "Add a domain (hostname) to track; accepts location_id or country_iso+language_code for the default locale." }
     - { name: domains_list,   description: "List tracked domains in this scope." }
@@ -217,9 +217,10 @@ func (a *App) MCPTools() []sdk.Tool {
 			}, []string{"entity_id"}),
 			Handler: a.toolRankingsForEntity},
 		{Name: "content_opportunities",
-			Description: "Summarize cached SERP snapshots into content opportunities. Args: search_engine? (youtube default for this tool), limit?.",
+			Description: "Summarize cached SERP snapshots into content opportunities. Args: search_engine? (youtube default for this tool), result_type? (youtube defaults to video; use all to include channels/playlists), limit?.",
 			InputSchema: schemaObject(map[string]any{
 				"search_engine": map[string]any{"type": "string"},
+				"result_type":   map[string]any{"type": "string"},
 				"limit":         map[string]any{"type": "integer"},
 			}, nil),
 			Handler: a.toolContentOpportunities},
@@ -1279,6 +1280,39 @@ func youtubeVideoID(raw string) string {
 	return s
 }
 
+func youtubeChannelID(raw string) string {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return ""
+	}
+	if strings.Contains(s, "://") {
+		u, err := url.Parse(s)
+		if err == nil {
+			parts := strings.Split(strings.Trim(u.Path, "/"), "/")
+			if len(parts) > 0 {
+				return parts[len(parts)-1]
+			}
+		}
+	}
+	return s
+}
+
+func youtubePlaylistID(raw string) string {
+	s := strings.TrimSpace(raw)
+	if s == "" {
+		return ""
+	}
+	if strings.Contains(s, "://") {
+		u, err := url.Parse(s)
+		if err == nil {
+			if v := u.Query().Get("list"); v != "" {
+				return v
+			}
+		}
+	}
+	return s
+}
+
 func (a *App) toolEntitiesAdd(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	search_engine, err := normalizeSearchEngine(strArg(args, "search_engine", "google"))
 	if err != nil {
@@ -1639,13 +1673,28 @@ func normalizeSERPItem(search_engine string, raw map[string]any) normalizedSERPI
 	}
 	switch search_engine {
 	case "youtube":
-		item.EntityType = "video"
-		item.Identifier = firstString(raw, "video_id")
-		if item.Identifier == "" {
-			item.Identifier = youtubeVideoID(item.URL)
-		}
 		item.ChannelIdentifier = firstString(raw, "channel_id", "channel_url", "author_url")
 		item.ChannelTitle = firstString(raw, "channel_name", "channel_title", "author")
+		item.ResultType = normalizeYouTubeResultType(item.ResultType, item.URL, raw)
+		switch item.ResultType {
+		case "channel":
+			item.EntityType = "channel"
+			item.Identifier = firstString(raw, "channel_id", "channel_url", "author_url")
+			if item.Identifier == "" {
+				item.Identifier = item.URL
+			}
+			item.Identifier = youtubeChannelID(item.Identifier)
+		case "playlist":
+			item.EntityType = ""
+			item.Identifier = youtubePlaylistID(firstString(raw, "playlist_id", "playlist_url", "url", "link"))
+		default:
+			item.ResultType = "video"
+			item.EntityType = "video"
+			item.Identifier = firstString(raw, "video_id")
+			if item.Identifier == "" {
+				item.Identifier = youtubeVideoID(item.URL)
+			}
+		}
 	case "google":
 		item.EntityType = "page"
 		item.Identifier = item.URL
@@ -1657,6 +1706,47 @@ func normalizeSERPItem(search_engine string, raw map[string]any) normalizedSERPI
 		}
 	}
 	return item
+}
+
+func normalizeYouTubeResultType(rawType, rawURL string, raw map[string]any) string {
+	t := strings.ToLower(strings.TrimSpace(rawType))
+	t = strings.TrimPrefix(t, "youtube_")
+	t = strings.TrimPrefix(t, "organic_")
+	switch t {
+	case "channel", "channel_info":
+		return "channel"
+	case "playlist":
+		return "playlist"
+	case "video", "organic", "":
+		// Fall through to URL/field checks below.
+	default:
+		if strings.Contains(t, "channel") {
+			return "channel"
+		}
+		if strings.Contains(t, "playlist") {
+			return "playlist"
+		}
+		if strings.Contains(t, "video") {
+			return "video"
+		}
+	}
+	if firstString(raw, "video_id") != "" {
+		return "video"
+	}
+	if firstString(raw, "playlist_id", "playlist_url") != "" {
+		return "playlist"
+	}
+	u := strings.ToLower(strings.TrimSpace(rawURL))
+	switch {
+	case strings.Contains(u, "/watch?"), strings.Contains(u, "youtu.be/"), strings.Contains(u, "/shorts/"):
+		return "video"
+	case strings.Contains(u, "playlist?list="):
+		return "playlist"
+	case strings.Contains(u, "/@"), strings.Contains(u, "/channel/"), strings.Contains(u, "/c/"), strings.Contains(u, "/user/"):
+		return "channel"
+	default:
+		return "video"
+	}
 }
 
 func (a *App) toolRankingsForEntity(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -1802,6 +1892,7 @@ func youtubeIdeasFromCachedSERPs(db *sql.DB, pid string, seeds []string, limit i
 		   JOIN search_serp_snapshots s ON s.id = r.snapshot_id
 		  WHERE s.project_id = ? AND s.search_engine = 'youtube'
 		    AND s.keyword_text IN (`+placeholders(len(seeds))+`)
+		    AND COALESCE(NULLIF(r.result_type, ''), 'video') = 'video'
 		  ORDER BY s.ts DESC, r.rank ASC`,
 		append([]any{pid}, stringsToAny(seeds)...)...)
 	if err != nil {
@@ -1868,6 +1959,17 @@ func (a *App) toolContentOpportunities(ctx *sdk.AppCtx, args map[string]any) (an
 	if limit <= 0 || limit > 100 {
 		limit = 25
 	}
+	resultType := strings.ToLower(strings.TrimSpace(strArg(args, "result_type", "")))
+	if search_engine == "youtube" && resultType == "" {
+		resultType = "video"
+	}
+	where := `s.project_id = ? AND s.search_engine = ?`
+	qargs := []any{projectScopeFromArgs(ctx, args), search_engine}
+	if resultType != "" && resultType != "all" {
+		where += ` AND COALESCE(NULLIF(r.result_type, ''), 'video') = ?`
+		qargs = append(qargs, resultType)
+	}
+	qargs = append(qargs, limit)
 	rows, err := ctx.AppDB().Query(
 		`SELECT s.keyword_text,
 		        COUNT(*) AS result_count,
@@ -1876,11 +1978,11 @@ func (a *App) toolContentOpportunities(ctx *sdk.AppCtx, args map[string]any) (an
 		        GROUP_CONCAT(CASE WHEN r.rank <= 5 THEN r.title ELSE NULL END, ' || ') AS titles
 		   FROM search_serp_snapshots s
 		   JOIN search_serp_results r ON r.snapshot_id = s.id
-		  WHERE s.project_id = ? AND s.search_engine = ?
+		  WHERE `+where+`
 		  GROUP BY s.keyword_text
 		  ORDER BY latest_ts DESC
 		  LIMIT ?`,
-		projectScopeFromArgs(ctx, args), search_engine, limit)
+		qargs...)
 	if err != nil {
 		return nil, err
 	}
@@ -1905,6 +2007,7 @@ func (a *App) toolContentOpportunities(ctx *sdk.AppCtx, args map[string]any) (an
 		}
 		out = append(out, map[string]any{
 			"search_engine":     search_engine,
+			"result_type":       resultType,
 			"keyword":           keyword,
 			"opportunity_score": minInt64(score, 100),
 			"result_count":      resultCount,

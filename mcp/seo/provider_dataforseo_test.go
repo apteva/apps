@@ -228,6 +228,75 @@ func TestUpsertSearchEntity_ReturnsCanonicalIDAfterConflict(t *testing.T) {
 	}
 }
 
+func TestNormalizeSERPItem_YouTubeClassifiesMixedResults(t *testing.T) {
+	video := normalizeSERPItem("youtube", map[string]any{
+		"type":         "youtube_video",
+		"title":        "Obedient Trigger - Hypnosis",
+		"url":          "https://www.youtube.com/watch?v=LJ-MYX3YNjg",
+		"channel_name": "Nimja Hypnosis",
+	})
+	if video.ResultType != "video" || video.EntityType != "video" || video.Identifier != "LJ-MYX3YNjg" {
+		t.Fatalf("video item = %+v, want video entity with video id", video)
+	}
+
+	channel := normalizeSERPItem("youtube", map[string]any{
+		"type": "youtube_channel",
+		"name": "UltraHypnosis",
+		"url":  "https://www.youtube.com/@UltraHypnosis",
+	})
+	if channel.ResultType != "channel" || channel.EntityType != "channel" || channel.Identifier != "@UltraHypnosis" {
+		t.Fatalf("channel item = %+v, want channel entity with handle", channel)
+	}
+
+	playlist := normalizeSERPItem("youtube", map[string]any{
+		"type":  "youtube_playlist",
+		"title": "Slave/Control Hypnosis Videos",
+		"url":   "https://www.youtube.com/playlist?list=PL9EKyZt9BIs-WWV5OfWGZqvZm4ewvvFEF",
+	})
+	if playlist.ResultType != "playlist" || playlist.EntityType != "" || playlist.Identifier != "PL9EKyZt9BIs-WWV5OfWGZqvZm4ewvvFEF" {
+		t.Fatalf("playlist item = %+v, want playlist result without tracked entity", playlist)
+	}
+}
+
+func TestYouTubeIdeasFromCachedSERPs_UsesVideoRowsOnly(t *testing.T) {
+	db := newSEOTestDB(t, "migrations/001_init.sql", "migrations/004_search_entities.sql")
+	if _, err := db.Exec(`INSERT INTO seo_locations
+		(provider, search_engine, location_code, location_name, country_iso, language_code, language_name)
+		VALUES ('dataforseo', 'youtube', 2840, 'United States', 'US', 'en', 'English')`); err != nil {
+		t.Fatalf("insert location: %v", err)
+	}
+	res, err := db.Exec(`INSERT INTO search_serp_snapshots
+		(project_id, search_engine, keyword_text, location_id, provider, ts, raw_json)
+		VALUES ('project-1', 'youtube', 'hypnosis obedience trigger', 1, 'dataforseo', 12345, '{}')`)
+	if err != nil {
+		t.Fatalf("insert snapshot: %v", err)
+	}
+	snapshotID, _ := res.LastInsertId()
+	if _, err := db.Exec(`INSERT INTO search_serp_results
+		(snapshot_id, rank, result_type, title, url, channel_title, raw_json)
+		VALUES
+		(?, 1, 'channel', 'UltraHypnosis', 'https://www.youtube.com/@UltraHypnosis', '', '{}'),
+		(?, 2, 'video', 'Obedient Trigger - Hypnosis', 'https://www.youtube.com/watch?v=LJ-MYX3YNjg', 'Nimja Hypnosis', '{}')`,
+		snapshotID, snapshotID); err != nil {
+		t.Fatalf("insert SERP rows: %v", err)
+	}
+
+	got, err := youtubeIdeasFromCachedSERPs(db, "project-1", []string{"hypnosis obedience trigger"}, 20)
+	if err != nil {
+		t.Fatalf("youtubeIdeasFromCachedSERPs returned error: %v", err)
+	}
+	payload := got.(map[string]any)
+	items := payload["items"].([]*keywordIdea)
+	for _, item := range items {
+		if item.Keyword == "ultrahypnosis" {
+			t.Fatalf("channel title leaked into keyword ideas: %+v", item)
+		}
+	}
+	if len(items) == 0 || items[0].Keyword != "hypnosis obedience trigger" {
+		t.Fatalf("items = %+v, want video-derived seed idea", items)
+	}
+}
+
 func newSEOTestDB(t *testing.T, migrations ...string) *sql.DB {
 	t.Helper()
 	db, err := sql.Open("sqlite", ":memory:")

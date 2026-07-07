@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.5
+
+- Classified YouTube SERP rows as videos, channels, or playlists instead of
+  treating every YouTube result as a video.
+- Defaulted YouTube keyword ideas and content opportunities to video results so
+  channel names and playlists do not appear as video topics.
+- Added an explicit `result_type` filter to `content_opportunities`; use
+  `result_type: "all"` to inspect the complete mixed YouTube SERP.
+
 ## 0.4.4
 
 - Fixed DataForSEO YouTube SERP refreshes by translating the app's generic
