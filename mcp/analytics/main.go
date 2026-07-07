@@ -19,7 +19,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: analytics
 display_name: Analytics
-version: 0.8.3
+version: 0.8.4
 description: |
   Generic event analytics for Apteva apps. Other apps call
   analytics_track to record typed events; analytics_query / count /
@@ -36,7 +36,11 @@ description: |
   spec-driven auto upsert / rollup policies, and analytics_sum.
   v0.8.1 fixes a Catalog load deadlock with the SDK's single SQLite
   connection runtime.
-  v0.8.3 adds dashboard-level filters and a Patreon Overview template.
+  v0.8.2 lets dashboard stat and timeseries widgets sum numeric event
+  fields.
+  v0.8.3 adds dashboard-level filters and the Patreon Overview template.
+  v0.8.4 scopes agent MCP reads and writes to the platform-assigned
+  current project and rejects mismatched project_id args.
 author: Apteva
 tags: [analytics, events, observability]
 scopes: [global]
@@ -54,7 +58,7 @@ provides:
       description: Query events.
   mcp_tools:
     - name: analytics_track
-      description: Record one event. Args event (required), props?, app?, project_id?, user_id?, session_id?, ts?. Returns the new event id.
+      description: Record one event in the current project. Project is assigned automatically from the calling agent; do not pass project_id.
       requires: events.write
     - name: analytics_query
       description: Read events with optional filters and group_by.
@@ -72,7 +76,10 @@ provides:
       description: Sum a numeric property over events, optionally grouped.
       requires: events.read
     - name: analytics_event_specs_list
-      description: List event specs.
+      description: List current-project event specs.
+      requires: events.read
+    - name: analytics_event_specs_for_app
+      description: Show active current-project specs for an app before tracking.
       requires: events.read
     - name: analytics_event_spec_get
       description: Get one event spec with properties.
@@ -91,6 +98,9 @@ provides:
       requires: events.write
     - name: analytics_event_validate
       description: Validate a sample event against the catalog without storing it.
+      requires: events.read
+    - name: analytics_validate_track
+      description: Dry-run analytics_track in the current project without storing it.
       requires: events.read
     - name: analytics_event_violations
       description: List recent event spec validation violations.
@@ -187,12 +197,11 @@ func (a *App) MCPTools() []sdk.Tool {
 	return []sdk.Tool{
 		{
 			Name:        "analytics_track",
-			Description: "Record one event. Args: event (required), props?, app?, project_id?, user_id?, session_id?, install_id?, ts? (unix ms; defaults to now). Returns {id, ts}.",
+			Description: "Record one event in the current project. Args: event (required), props?, app?, user_id?, session_id?, install_id?, ts? (unix ms; defaults to now). Do not pass project_id; the platform assigns it automatically. Returns {id, ts}.",
 			InputSchema: schemaObject(map[string]any{
 				"event":      map[string]any{"type": "string"},
 				"props":      map[string]any{"type": "object"},
 				"app":        map[string]any{"type": "string"},
-				"project_id": map[string]any{"type": "string"},
 				"user_id":    map[string]any{"type": "string"},
 				"session_id": map[string]any{"type": "string"},
 				"install_id": map[string]any{"type": "integer"},
@@ -203,44 +212,41 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "analytics_query",
-			Description: "Read events. Args: app?, topic?, project_id?, since? (unix ms), until?, where? (map of \"props.X\" → value, equality only), group_by? (array of \"props.X\" / app / topic / project_id / source), limit? (default 100, max 1000). Without group_by returns recent rows; with group_by returns aggregate buckets.",
+			Description: "Read events in the current project. Args: app?, topic?, since? (unix ms), until?, where? (map of \"props.X\" → value, equality only), group_by? (array of \"props.X\" / app / topic / source), limit? (default 100, max 1000). Without group_by returns recent rows; with group_by returns aggregate buckets.",
 			InputSchema: schemaObject(map[string]any{
-				"app":        map[string]any{"type": "string"},
-				"topic":      map[string]any{"type": "string"},
-				"project_id": map[string]any{"type": "string"},
-				"since":      map[string]any{"type": "integer"},
-				"until":      map[string]any{"type": "integer"},
-				"where":      map[string]any{"type": "object"},
-				"group_by":   map[string]any{"type": "array"},
-				"limit":      map[string]any{"type": "integer"},
+				"app":      map[string]any{"type": "string"},
+				"topic":    map[string]any{"type": "string"},
+				"since":    map[string]any{"type": "integer"},
+				"until":    map[string]any{"type": "integer"},
+				"where":    map[string]any{"type": "object"},
+				"group_by": map[string]any{"type": "array"},
+				"limit":    map[string]any{"type": "integer"},
 			}, nil),
 			Handler: a.toolQuery,
 		},
 		{
 			Name:        "analytics_count",
-			Description: "Count events matching filters. Args: app?, topic?, project_id?, since?, until?, where?. Returns {count}.",
+			Description: "Count current-project events matching filters. Args: app?, topic?, since?, until?, where?. Returns {count}.",
 			InputSchema: schemaObject(map[string]any{
-				"app":        map[string]any{"type": "string"},
-				"topic":      map[string]any{"type": "string"},
-				"project_id": map[string]any{"type": "string"},
-				"since":      map[string]any{"type": "integer"},
-				"until":      map[string]any{"type": "integer"},
-				"where":      map[string]any{"type": "object"},
+				"app":   map[string]any{"type": "string"},
+				"topic": map[string]any{"type": "string"},
+				"since": map[string]any{"type": "integer"},
+				"until": map[string]any{"type": "integer"},
+				"where": map[string]any{"type": "object"},
 			}, nil),
 			Handler: a.toolCount,
 		},
 		{
 			Name:        "analytics_top",
-			Description: "Top-N values for a JSON props key. Args: by (required, e.g. \"props.platform\"), app?, topic?, project_id?, since?, until?, where?, limit? (default 10, max 200). Returns [{value, count}].",
+			Description: "Top-N values for a JSON props key in the current project. Args: by (required, e.g. \"props.platform\"), app?, topic?, since?, until?, where?, limit? (default 10, max 200). Returns [{value, count}].",
 			InputSchema: schemaObject(map[string]any{
-				"by":         map[string]any{"type": "string"},
-				"app":        map[string]any{"type": "string"},
-				"topic":      map[string]any{"type": "string"},
-				"project_id": map[string]any{"type": "string"},
-				"since":      map[string]any{"type": "integer"},
-				"until":      map[string]any{"type": "integer"},
-				"where":      map[string]any{"type": "object"},
-				"limit":      map[string]any{"type": "integer"},
+				"by":    map[string]any{"type": "string"},
+				"app":   map[string]any{"type": "string"},
+				"topic": map[string]any{"type": "string"},
+				"since": map[string]any{"type": "integer"},
+				"until": map[string]any{"type": "integer"},
+				"where": map[string]any{"type": "object"},
+				"limit": map[string]any{"type": "integer"},
 			}, []string{"by"}),
 			Handler: a.toolTop,
 		},
@@ -254,47 +260,51 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "analytics_sum",
-			Description: "Sum a numeric event field/path. Args value (required, e.g. props.views), app?, topic?, project_id?, since?, until?, where?, group_by? (array), limit?. Returns buckets with sum/count.",
+			Description: "Sum a numeric current-project event field/path. Args value (required, e.g. props.views), app?, topic?, since?, until?, where?, group_by? (array), limit?. Returns buckets with sum/count.",
 			InputSchema: schemaObject(map[string]any{
-				"value":      map[string]any{"type": "string"},
-				"app":        map[string]any{"type": "string"},
-				"topic":      map[string]any{"type": "string"},
-				"project_id": map[string]any{"type": "string"},
-				"since":      map[string]any{"type": "integer"},
-				"until":      map[string]any{"type": "integer"},
-				"where":      map[string]any{"type": "object"},
-				"group_by":   map[string]any{"type": "array"},
-				"limit":      map[string]any{"type": "integer"},
+				"value":    map[string]any{"type": "string"},
+				"app":      map[string]any{"type": "string"},
+				"topic":    map[string]any{"type": "string"},
+				"since":    map[string]any{"type": "integer"},
+				"until":    map[string]any{"type": "integer"},
+				"where":    map[string]any{"type": "object"},
+				"group_by": map[string]any{"type": "array"},
+				"limit":    map[string]any{"type": "integer"},
 			}, []string{"value"}),
 			Handler: a.toolSum,
 		},
 		{
 			Name:        "analytics_event_specs_list",
-			Description: "List event specs. Args project_id?, app?, status?. Returns specs with properties.",
+			Description: "List current-project event specs. Args app?, status?. Returns specs with properties.",
 			InputSchema: schemaObject(map[string]any{
-				"project_id": map[string]any{"type": "string"},
-				"app":        map[string]any{"type": "string"},
-				"status":     map[string]any{"type": "string"},
+				"app":    map[string]any{"type": "string"},
+				"status": map[string]any{"type": "string"},
 			}, nil),
 			Handler: a.toolEventSpecsList,
 		},
 		{
-			Name:        "analytics_event_spec_get",
-			Description: "Get one event spec by id or by project_id/app/topic.",
+			Name:        "analytics_event_specs_for_app",
+			Description: "Show active current-project event specs for an app before tracking. Args app (required). Returns required properties, examples, and ingest/upsert policies.",
 			InputSchema: schemaObject(map[string]any{
-				"id":         map[string]any{"type": "integer"},
-				"project_id": map[string]any{"type": "string"},
-				"app":        map[string]any{"type": "string"},
-				"topic":      map[string]any{"type": "string"},
+				"app": map[string]any{"type": "string"},
+			}, []string{"app"}),
+			Handler: a.toolEventSpecsForApp,
+		},
+		{
+			Name:        "analytics_event_spec_get",
+			Description: "Get one current-project event spec by id or by app/topic.",
+			InputSchema: schemaObject(map[string]any{
+				"id":    map[string]any{"type": "integer"},
+				"app":   map[string]any{"type": "string"},
+				"topic": map[string]any{"type": "string"},
 			}, nil),
 			Handler: a.toolEventSpecGet,
 		},
 		{
 			Name:        "analytics_event_spec_upsert",
-			Description: "Create or update an event spec. Args project_id?, app, topic, kind?, display_name?, description?, category?, status?, validation_mode?, ingest_mode?, upsert_policy?, rollup_policy?, properties?.",
+			Description: "Create or update an event spec in the current project. Args app, topic, kind?, display_name?, description?, category?, status?, validation_mode?, ingest_mode?, upsert_policy?, rollup_policy?, properties?.",
 			InputSchema: schemaObject(map[string]any{
 				"id":              map[string]any{"type": "integer"},
-				"project_id":      map[string]any{"type": "string"},
 				"app":             map[string]any{"type": "string"},
 				"topic":           map[string]any{"type": "string"},
 				"kind":            map[string]any{"type": "string"},
@@ -344,12 +354,11 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "analytics_event_validate",
-			Description: "Validate a sample event against specs without storing it.",
+			Description: "Validate a sample current-project event against specs without storing it.",
 			InputSchema: schemaObject(map[string]any{
 				"app":        map[string]any{"type": "string"},
 				"topic":      map[string]any{"type": "string"},
 				"event":      map[string]any{"type": "string"},
-				"project_id": map[string]any{"type": "string"},
 				"user_id":    map[string]any{"type": "string"},
 				"session_id": map[string]any{"type": "string"},
 				"upsert_key": map[string]any{"type": "string"},
@@ -358,14 +367,28 @@ func (a *App) MCPTools() []sdk.Tool {
 			Handler: a.toolEventValidate,
 		},
 		{
-			Name:        "analytics_event_violations",
-			Description: "List recent event spec violations. Args project_id?, app?, topic?, since?, limit?.",
+			Name:        "analytics_validate_track",
+			Description: "Dry-run analytics_track in the current project without storing it. Args: app?, event/topic, props?, user_id?, session_id?, upsert_key?, ts?. Returns validation status, required-property hints, example payload, and ingest preview.",
 			InputSchema: schemaObject(map[string]any{
-				"project_id": map[string]any{"type": "string"},
 				"app":        map[string]any{"type": "string"},
 				"topic":      map[string]any{"type": "string"},
-				"since":      map[string]any{"type": "integer"},
-				"limit":      map[string]any{"type": "integer"},
+				"event":      map[string]any{"type": "string"},
+				"user_id":    map[string]any{"type": "string"},
+				"session_id": map[string]any{"type": "string"},
+				"upsert_key": map[string]any{"type": "string"},
+				"props":      map[string]any{"type": "object"},
+				"ts":         map[string]any{"type": "integer"},
+			}, nil),
+			Handler: a.toolEventValidate,
+		},
+		{
+			Name:        "analytics_event_violations",
+			Description: "List recent current-project event spec violations. Args app?, topic?, since?, limit?.",
+			InputSchema: schemaObject(map[string]any{
+				"app":   map[string]any{"type": "string"},
+				"topic": map[string]any{"type": "string"},
+				"since": map[string]any{"type": "integer"},
+				"limit": map[string]any{"type": "integer"},
 			}, nil),
 			Handler: a.toolEventViolations,
 		},

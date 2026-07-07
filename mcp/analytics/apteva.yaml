@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: analytics
 display_name: Analytics
-version: 0.8.3
+version: 0.8.4
 description: |
   Generic event analytics for Apteva apps. Other apps call
   analytics_track to record typed events; analytics_query / count /
@@ -52,6 +52,10 @@ description: |
   filter-aware widget evaluation, and a Patreon Overview dashboard
   template with Page, Currency, and Window controls.
 
+  v0.8.4 scopes agent MCP reads and writes to the platform-assigned
+  current project, rejects mismatched project_id args, and adds
+  current-project spec discovery / dry-run validation tools.
+
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/analytics
 tags: [analytics, events, observability]
@@ -73,28 +77,31 @@ provides:
       description: Query events.
   mcp_tools:
     - name: analytics_track
-      description: Record one event. Args event (required), props?, app?, project_id?, user_id?, session_id?, ts? (unix ms — defaults to now). Returns the new event id.
+      description: Record one event in the current project. Args event (required), props?, app?, user_id?, session_id?, ts? (unix ms — defaults to now). Project is assigned automatically from the calling agent; do not pass project_id. Returns the new event id or validation hints.
       requires: events.write
     - name: analytics_query
-      description: Read events with optional filters. Args app?, topic?, project_id?, since?, until?, where? (map of "props.X" → value), group_by? (array of "props.X" keys), limit? (default 100, max 1000). Returns rows or aggregate buckets.
+      description: Read current-project events with optional filters. Args app?, topic?, since?, until?, where? (map of "props.X" → value), group_by? (array of "props.X" keys), limit? (default 100, max 1000). Returns rows or aggregate buckets.
       requires: events.read
     - name: analytics_count
-      description: Count events matching filters. Args same as query minus group_by/limit. Returns {count}.
+      description: Count current-project events matching filters. Args same as query minus group_by/limit. Returns {count}.
       requires: events.read
     - name: analytics_top
-      description: Top-N values for a JSON props key. Args topic?, app?, by (required, e.g. "props.platform"), since?, until?, limit? (default 10). Returns [{value, count}].
+      description: Top-N values for a JSON props key in the current project. Args topic?, app?, by (required, e.g. "props.platform"), since?, until?, limit? (default 10). Returns [{value, count}].
       requires: events.read
     - name: analytics_topics
-      description: List distinct (app, topic) pairs seen. Args app?. Returns [{app, topic, last_ts, count}].
+      description: List distinct (app, topic) pairs seen in the current project. Args app?. Returns [{app, topic, last_ts, count}].
       requires: events.read
     - name: analytics_sum
-      description: Sum a numeric event field/path. Args value (required, e.g. props.views), app?, topic?, project_id?, since?, until?, where?, group_by?, limit?. Returns aggregate buckets with sum/count.
+      description: Sum a numeric current-project event field/path. Args value (required, e.g. props.views), app?, topic?, since?, until?, where?, group_by?, limit?. Returns aggregate buckets with sum/count.
       requires: events.read
     - name: analytics_event_specs_list
-      description: List event specs with their property specs. Args project_id?, app?, status?.
+      description: List current-project event specs with their property specs. Args app?, status?.
+      requires: events.read
+    - name: analytics_event_specs_for_app
+      description: Show active current-project event specs for an app before tracking. Args app. Returns required properties, examples, and ingest/upsert policies.
       requires: events.read
     - name: analytics_event_spec_get
-      description: Get one event spec by id or by project_id/app/topic.
+      description: Get one current-project event spec by id or by app/topic.
       requires: events.read
     - name: analytics_event_spec_upsert
       description: Create or update an event spec and optionally replace its properties and ingest policy.
@@ -109,10 +116,13 @@ provides:
       description: Delete one property spec from an event spec.
       requires: events.write
     - name: analytics_event_validate
-      description: Validate a sample event against the event catalog without storing it.
+      description: Validate a sample current-project event against the event catalog without storing it.
+      requires: events.read
+    - name: analytics_validate_track
+      description: Dry-run analytics_track in the current project without storing it. Returns validation status, required-property hints, example payload, and ingest preview.
       requires: events.read
     - name: analytics_event_violations
-      description: List recent event spec validation violations.
+      description: List recent current-project event spec validation violations.
       requires: events.read
   ui_panels:
     - slot: project.page

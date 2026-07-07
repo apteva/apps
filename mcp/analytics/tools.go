@@ -5,19 +5,21 @@ package main
 // platform firehose is a v0.2 feature.
 
 import (
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	sdk "github.com/apteva/app-sdk"
 )
 
 // toolTrack — record one event. The caller passes the event name and
-// optionally an `app` slug, project_id, user/session ids, props, and a
-// back-dated ts. We don't currently derive the caller's app from the
-// MCP token — the calling install just sends it. Trust-but-verify is
-// fine at this scope; analytics is for aggregates, not audit.
+// optionally an `app` slug, user/session ids, props, and a back-dated
+// ts. The project is always owned by the platform dispatch context, not
+// by model-supplied args; otherwise an agent can accidentally scope data
+// to arbitrary page slugs.
 func (a *App) toolTrack(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	event := stringArg(args, "event")
 	if event == "" {
@@ -51,12 +53,12 @@ func (a *App) toolTrack(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		propsJSON = string(b)
 	}
 
-	projectID := stringArg(args, "project_id")
-	if projectID == "" {
-		projectID = ctx.CurrentProject()
+	projectID, err := scopedProject(ctx, args)
+	if err != nil {
+		return nil, err
 	}
 
-	id, err := insertEvent(ctx.AppDB(), EventInsert{
+	ev := EventInsert{
 		TS:        ts,
 		App:       app,
 		Topic:     event,
@@ -67,7 +69,16 @@ func (a *App) toolTrack(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		Source:    "track",
 		UpsertKey: stringArg(args, "upsert_key"),
 		Props:     propsJSON,
-	})
+	}
+	validation, err := validateEventAgainstSpecs(ctx.AppDB(), ev)
+	if err != nil {
+		return nil, err
+	}
+	if validation.Reject {
+		return validationFailure(ctx.AppDB(), ev, validation), nil
+	}
+
+	id, err := insertEvent(ctx.AppDB(), ev)
 	if err != nil {
 		return nil, fmt.Errorf("insert: %w", err)
 	}
@@ -88,7 +99,10 @@ func (a *App) toolTrack(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 // rows first. With group_by, returns aggregated buckets sorted by
 // count desc.
 func (a *App) toolQuery(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	f := filterFromArgs(args)
+	f, err := scopedFilter(ctx, args)
+	if err != nil {
+		return nil, err
+	}
 	limit := intArg(args, "limit")
 
 	if gb, ok := args["group_by"]; ok && gb != nil {
@@ -113,7 +127,11 @@ func (a *App) toolQuery(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 }
 
 func (a *App) toolCount(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	n, err := countEvents(ctx.AppDB(), filterFromArgs(args))
+	f, err := scopedFilter(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	n, err := countEvents(ctx.AppDB(), f)
 	if err != nil {
 		return nil, err
 	}
@@ -125,7 +143,11 @@ func (a *App) toolTop(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if by == "" {
 		return nil, errors.New("by required (e.g. \"props.platform\")")
 	}
-	rows, err := topByPropsKey(ctx.AppDB(), filterFromArgs(args), by, intArg(args, "limit"))
+	f, err := scopedFilter(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := topByPropsKey(ctx.AppDB(), f, by, intArg(args, "limit"))
 	if err != nil {
 		return nil, err
 	}
@@ -133,7 +155,11 @@ func (a *App) toolTop(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 }
 
 func (a *App) toolTopics(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	rows, err := listTopics(ctx.AppDB(), stringArg(args, "app"))
+	projectID, err := scopedProject(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := listTopics(ctx.AppDB(), projectID, stringArg(args, "app"))
 	if err != nil {
 		return nil, err
 	}
@@ -153,7 +179,11 @@ func (a *App) toolSum(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		}
 		groupBy = keys
 	}
-	rows, err := sumByValue(ctx.AppDB(), filterFromArgs(args), value, groupBy, intArg(args, "limit"))
+	f, err := scopedFilter(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := sumByValue(ctx.AppDB(), f, value, groupBy, intArg(args, "limit"))
 	if err != nil {
 		return nil, err
 	}
@@ -161,8 +191,12 @@ func (a *App) toolSum(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 }
 
 func (a *App) toolEventSpecsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	projectID, err := scopedProject(ctx, args)
+	if err != nil {
+		return nil, err
+	}
 	specs, err := listEventSpecs(ctx.AppDB(), specFilter{
-		ProjectID: stringArg(args, "project_id"),
+		ProjectID: projectID,
 		App:       stringArg(args, "app"),
 		Status:    stringArg(args, "status"),
 	})
@@ -172,15 +206,47 @@ func (a *App) toolEventSpecsList(ctx *sdk.AppCtx, args map[string]any) (any, err
 	return map[string]any{"specs": specs}, nil
 }
 
+func (a *App) toolEventSpecsForApp(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	app := stringArg(args, "app")
+	if app == "" {
+		return nil, errors.New("app required")
+	}
+	projectID, err := scopedProject(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	specs, err := listEventSpecs(ctx.AppDB(), specFilter{
+		ProjectID: projectID,
+		App:       app,
+		Status:    "active",
+	})
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{
+		"project_id": projectID,
+		"app":        app,
+		"specs":      specs,
+		"guidance":   "Use analytics_track with app and event/topic from one of these specs. Do not pass project_id; the platform assigns it automatically.",
+	}, nil
+}
+
 func (a *App) toolEventSpecGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if id := int64Arg(args, "id"); id > 0 {
 		spec, err := getEventSpecByID(ctx.AppDB(), id)
 		if err != nil {
 			return nil, err
 		}
+		if err := ensureSpecInCurrentProject(ctx, args, spec.ProjectID); err != nil {
+			return nil, err
+		}
 		return map[string]any{"spec": spec}, nil
 	}
-	spec, err := getEventSpec(ctx.AppDB(), stringArg(args, "project_id"), stringArg(args, "app"), stringArg(args, "topic"))
+	projectID, err := scopedProject(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	spec, err := getEventSpec(ctx.AppDB(), projectID, stringArg(args, "app"), stringArg(args, "topic"))
 	if err != nil {
 		return nil, err
 	}
@@ -192,9 +258,11 @@ func (a *App) toolEventSpecUpsert(ctx *sdk.AppCtx, args map[string]any) (any, er
 	if err != nil {
 		return nil, err
 	}
-	if spec.ProjectID == "" {
-		spec.ProjectID = ctx.CurrentProject()
+	projectID, err := scopedProject(ctx, args)
+	if err != nil {
+		return nil, err
 	}
+	spec.ProjectID = projectID
 	saved, err := upsertEventSpec(ctx.AppDB(), spec, true)
 	if err != nil {
 		return nil, err
@@ -207,9 +275,16 @@ func (a *App) toolEventSpecDelete(ctx *sdk.AppCtx, args map[string]any) (any, er
 	if id <= 0 {
 		return nil, errors.New("id required")
 	}
-	_, err := ctx.AppDB().Exec(`DELETE FROM event_specs WHERE id=?`, id)
+	projectID, err := scopedProject(ctx, args)
 	if err != nil {
 		return nil, err
+	}
+	res, err := ctx.AppDB().Exec(`DELETE FROM event_specs WHERE id=? AND project_id=?`, id, projectID)
+	if err != nil {
+		return nil, err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return nil, errors.New("event spec not found in current project")
 	}
 	return map[string]any{"ok": true}, nil
 }
@@ -219,10 +294,17 @@ func (a *App) toolEventPropertyUpsert(ctx *sdk.AppCtx, args map[string]any) (any
 	if err != nil {
 		return nil, err
 	}
+	spec, err := getEventSpecByID(ctx.AppDB(), prop.EventSpecID)
+	if err != nil {
+		return nil, err
+	}
+	if err := ensureSpecInCurrentProject(ctx, args, spec.ProjectID); err != nil {
+		return nil, err
+	}
 	if err := upsertEventPropertySpec(ctx.AppDB(), prop); err != nil {
 		return nil, err
 	}
-	spec, err := getEventSpecByID(ctx.AppDB(), prop.EventSpecID)
+	spec, err = getEventSpecByID(ctx.AppDB(), prop.EventSpecID)
 	if err != nil {
 		return nil, err
 	}
@@ -235,7 +317,14 @@ func (a *App) toolEventPropertyDelete(ctx *sdk.AppCtx, args map[string]any) (any
 	if specID <= 0 || key == "" {
 		return nil, errors.New("event_spec_id and key required")
 	}
-	_, err := ctx.AppDB().Exec(`DELETE FROM event_property_specs WHERE event_spec_id=? AND key=?`, specID, key)
+	spec, err := getEventSpecByID(ctx.AppDB(), specID)
+	if err != nil {
+		return nil, err
+	}
+	if err := ensureSpecInCurrentProject(ctx, args, spec.ProjectID); err != nil {
+		return nil, err
+	}
+	_, err = ctx.AppDB().Exec(`DELETE FROM event_property_specs WHERE event_spec_id=? AND key=?`, specID, key)
 	if err != nil {
 		return nil, err
 	}
@@ -247,18 +336,24 @@ func (a *App) toolEventValidate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	if err != nil {
 		return nil, err
 	}
-	if ev.ProjectID == "" {
-		ev.ProjectID = ctx.CurrentProject()
+	projectID, err := scopedProject(ctx, args)
+	if err != nil {
+		return nil, err
 	}
+	ev.ProjectID = projectID
 	out, err := validateEventAgainstSpecs(ctx.AppDB(), ev)
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"valid": len(out.Violations) == 0, "reject": out.Reject, "violations": out.Violations, "ingest": previewEventIngest(ctx.AppDB(), ev)}, nil
+	return validationResult(ctx.AppDB(), ev, out), nil
 }
 
 func (a *App) toolEventViolations(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	rows, err := listEventSpecViolations(ctx.AppDB(), filterFromArgs(args), intArg(args, "limit"))
+	f, err := scopedFilter(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := listEventSpecViolations(ctx.AppDB(), f, intArg(args, "limit"))
 	if err != nil {
 		return nil, err
 	}
@@ -280,6 +375,148 @@ func filterFromArgs(args map[string]any) Filter {
 		f.Where = w
 	}
 	return f
+}
+
+func scopedFilter(ctx *sdk.AppCtx, args map[string]any) (Filter, error) {
+	projectID, err := scopedProject(ctx, args)
+	if err != nil {
+		return Filter{}, err
+	}
+	f := filterFromArgs(args)
+	f.ProjectID = projectID
+	return f, nil
+}
+
+func scopedProject(ctx *sdk.AppCtx, args map[string]any) (string, error) {
+	current := ""
+	if ctx != nil {
+		current = strings.TrimSpace(ctx.CurrentProject())
+	}
+	if current == "" {
+		return "", errors.New("analytics tools require a platform project context")
+	}
+	supplied := strings.TrimSpace(stringArg(args, "project_id"))
+	if supplied != "" && supplied != current {
+		return "", fmt.Errorf("project_id is assigned by the platform; got %q but current project is %q", supplied, current)
+	}
+	return current, nil
+}
+
+func ensureSpecInCurrentProject(ctx *sdk.AppCtx, args map[string]any, specProjectID string) error {
+	projectID, err := scopedProject(ctx, args)
+	if err != nil {
+		return err
+	}
+	if specProjectID != projectID {
+		return fmt.Errorf("event spec belongs to project %q, current project is %q", specProjectID, projectID)
+	}
+	return nil
+}
+
+func validationResult(db *sql.DB, ev EventInsert, out validationOutcome) map[string]any {
+	resp := map[string]any{
+		"valid":      len(out.Violations) == 0,
+		"reject":     out.Reject,
+		"violations": out.Violations,
+		"summary":    validationSummary(out.Violations),
+		"ingest":     previewEventIngest(db, ev),
+	}
+	if spec, err := getEventSpec(db, ev.ProjectID, ev.App, ev.Topic); err == nil {
+		resp["spec"] = spec.App + "." + spec.Topic
+		resp["example"] = exampleEventForSpec(spec)
+	}
+	return resp
+}
+
+func validationFailure(db *sql.DB, ev EventInsert, out validationOutcome) map[string]any {
+	resp := validationResult(db, ev, out)
+	resp["error"] = firstViolationType(out.Violations)
+	return resp
+}
+
+func validationSummary(violations []EventSpecViolation) map[string]any {
+	summary := map[string]any{
+		"error": firstViolationType(violations),
+	}
+	var missing []string
+	for _, v := range violations {
+		if v.ViolationType == "missing_required" && v.PropertyKey != "" {
+			missing = append(missing, v.PropertyKey)
+		}
+	}
+	if len(missing) > 0 {
+		summary["missing"] = missing
+	}
+	return summary
+}
+
+func firstViolationType(violations []EventSpecViolation) string {
+	if len(violations) == 0 {
+		return ""
+	}
+	return violations[0].ViolationType
+}
+
+func exampleEventForSpec(spec *EventSpec) map[string]any {
+	example := map[string]any{
+		"app":   spec.App,
+		"event": spec.Topic,
+		"props": map[string]any{},
+	}
+	props := example["props"].(map[string]any)
+	for _, prop := range spec.Properties {
+		if !prop.Required {
+			continue
+		}
+		value := exampleValue(prop)
+		if strings.HasPrefix(prop.Key, "props.") {
+			setNestedExample(props, strings.TrimPrefix(prop.Key, "props."), value)
+			continue
+		}
+		example[prop.Key] = value
+	}
+	return example
+}
+
+func exampleValue(prop EventPropertySpec) any {
+	if prop.ExampleValue != "" {
+		return prop.ExampleValue
+	}
+	if len(prop.EnumValues) > 0 {
+		return prop.EnumValues[0]
+	}
+	switch prop.Type {
+	case "number", "timestamp":
+		return 0
+	case "boolean":
+		return true
+	case "object":
+		return map[string]any{}
+	case "array":
+		return []any{}
+	default:
+		return "string"
+	}
+}
+
+func setNestedExample(root map[string]any, path string, value any) {
+	parts := strings.Split(path, ".")
+	cur := root
+	for i, part := range parts {
+		if part == "" {
+			continue
+		}
+		if i == len(parts)-1 {
+			cur[part] = value
+			return
+		}
+		next, ok := cur[part].(map[string]any)
+		if !ok {
+			next = map[string]any{}
+			cur[part] = next
+		}
+		cur = next
+	}
 }
 
 func stringArg(args map[string]any, name string) string {
