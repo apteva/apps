@@ -35,4 +35,7 @@ DataForSEO `pos_*` counts, Moz link-count forest) survive without schema churn.
 v0.4 adds generic `search_engine` support for Google and YouTube. Google keeps
 the existing domain/keyword workflow and v0.3.7 ranking-history fixes, while
 YouTube uses the shared locale, keyword, SERP, entity, and opportunity tooling.
-Refresh actions for expensive provider calls remain UI/HTTP-driven.
+If DataForSEO's full YouTube location catalog is unavailable, sync seeds
+YouTube locales from active DataForSEO Google locations so YouTube SERP refresh
+still has explicit country/language rows. Refresh actions for expensive
+provider calls remain UI/HTTP-driven.

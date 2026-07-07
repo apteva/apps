@@ -604,36 +604,110 @@ func syncDataForSEOLocations(ctx *sdk.AppCtx) (any, error) {
 		return nil, err
 	}
 	now := time.Now().Unix()
-	tx, err := ctx.AppDB().Begin()
+	upserts, skipped, err := syncDataForSEOGoogleLocationRows(ctx.AppDB(), rows, now)
 	if err != nil {
 		return nil, err
 	}
-	defer tx.Rollback()
-	upserts := 0
-	skipped := 0
-	for _, raw := range rows {
-		n, s, err := upsertDfsLocationRaw(tx, raw, now)
+	engineResults := map[string]any{
+		"google": map[string]any{
+			"rows_upserted": upserts,
+			"rows_skipped":  skipped,
+			"ok":            true,
+		},
+	}
+	warnings := []string{}
+	ytUpserts, ytSkipped, err := syncDataForSEOYouTubeLocations(ctx, connID, now)
+	ytFallback := false
+	if err != nil || ytUpserts == 0 {
+		var syncErr error
 		if err != nil {
-			return nil, err
+			syncErr = err
+			warnings = append(warnings, err.Error())
+		} else {
+			syncErr = fmt.Errorf("dataforseo: youtube_locations returned zero usable rows")
+			warnings = append(warnings, syncErr.Error())
 		}
-		upserts += n
-		skipped += s
+		fallbackUpserts, fallbackSkipped, fallbackErr := seedYouTubeLocationsFromGoogle(ctx.AppDB(), now)
+		if fallbackErr != nil {
+			warnings = append(warnings, fallbackErr.Error())
+			engineResults["youtube"] = map[string]any{
+				"rows_upserted": 0,
+				"rows_skipped":  0,
+				"ok":            false,
+				"error":         syncErr.Error(),
+			}
+		} else {
+			ytUpserts = fallbackUpserts
+			ytSkipped = fallbackSkipped
+			ytFallback = true
+			upserts += ytUpserts
+			skipped += ytSkipped
+			engineResults["youtube"] = map[string]any{
+				"rows_upserted": ytUpserts,
+				"rows_skipped":  ytSkipped,
+				"ok":            true,
+				"fallback":      "google_locations",
+			}
+		}
+	} else {
+		upserts += ytUpserts
+		skipped += ytSkipped
+		engineResults["youtube"] = map[string]any{
+			"rows_upserted": ytUpserts,
+			"rows_skipped":  ytSkipped,
+			"ok":            true,
+		}
 	}
-	ytUpserts, ytSkipped, err := upsertDfsYouTubeLocations(ctx, tx, connID, now)
-	if err != nil {
-		return nil, err
+	if ytFallback {
+		warnings = append(warnings, "youtube locations were seeded from DataForSEO Google locations because the full YouTube catalog was unavailable")
 	}
-	upserts += ytUpserts
-	skipped += ytSkipped
-	if err := tx.Commit(); err != nil {
-		return nil, err
-	}
-	return map[string]any{
+	out := map[string]any{
 		"provider":      "dataforseo",
 		"rows_upserted": upserts,
 		"rows_skipped":  skipped,
 		"synced_at":     now,
-	}, nil
+		"engines":       engineResults,
+	}
+	if len(warnings) > 0 {
+		out["warnings"] = warnings
+	}
+	return out, nil
+}
+
+func syncDataForSEOGoogleLocationRows(db *sql.DB, rows []json.RawMessage, syncedAt int64) (upserts int, skipped int, err error) {
+	tx, err := db.Begin()
+	if err != nil {
+		return 0, 0, err
+	}
+	defer tx.Rollback()
+	for _, raw := range rows {
+		n, s, err := upsertDfsLocationRaw(tx, raw, syncedAt)
+		if err != nil {
+			return 0, 0, err
+		}
+		upserts += n
+		skipped += s
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, 0, err
+	}
+	return upserts, skipped, nil
+}
+
+func syncDataForSEOYouTubeLocations(ctx *sdk.AppCtx, connID int64, syncedAt int64) (upserts int, skipped int, err error) {
+	tx, err := ctx.AppDB().Begin()
+	if err != nil {
+		return 0, 0, err
+	}
+	defer tx.Rollback()
+	upserts, skipped, err = upsertDfsYouTubeLocations(ctx, tx, connID, syncedAt)
+	if err != nil {
+		return 0, 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, 0, err
+	}
+	return upserts, skipped, nil
 }
 
 func dfsToolResultRows(ctx *sdk.AppCtx, connID int64, tool string, input map[string]any) ([]json.RawMessage, error) {
@@ -723,6 +797,73 @@ func upsertDfsYouTubeLocations(ctx *sdk.AppCtx, tx *sql.Tx, connID int64, synced
 	return upserts, skipped, nil
 }
 
+func seedYouTubeLocationsFromGoogle(db *sql.DB, syncedAt int64) (upserts int, skipped int, err error) {
+	tx, err := db.Begin()
+	if err != nil {
+		return 0, 0, err
+	}
+	defer tx.Rollback()
+	rows, err := tx.Query(
+		`SELECT location_code, location_name, country_iso, language_code, language_name, raw_json
+		   FROM seo_locations
+		  WHERE provider = 'dataforseo'
+		    AND search_engine = 'google'
+		    AND is_active = 1
+		    AND location_code IS NOT NULL
+		    AND country_iso IS NOT NULL
+		    AND country_iso != ''
+		    AND language_code != ''`)
+	if err != nil {
+		return 0, 0, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var locCode int64
+		var locName, country, langCode, langName, rawText string
+		if err := rows.Scan(&locCode, &locName, &country, &langCode, &langName, &rawText); err != nil {
+			return 0, 0, err
+		}
+		if locCode == 0 || strings.TrimSpace(locName) == "" || strings.TrimSpace(langCode) == "" {
+			skipped++
+			continue
+		}
+		if !json.Valid([]byte(rawText)) {
+			rawText = "{}"
+		}
+		fallbackRaw, _ := json.Marshal(map[string]any{
+			"fallback": "google_location_for_youtube",
+			"source":   json.RawMessage(rawText),
+		})
+		if _, err := tx.Exec(
+			`INSERT INTO seo_locations
+			   (provider, search_engine, location_code, location_name, country_iso,
+			    language_code, language_name, is_active, raw_json, synced_at)
+			 VALUES ('dataforseo', 'youtube', ?, ?, ?, ?, ?, 1, ?, ?)
+			 ON CONFLICT(provider, search_engine, location_code, language_code)
+			 DO UPDATE SET
+			    location_name = excluded.location_name,
+			    country_iso = excluded.country_iso,
+			    language_name = excluded.language_name,
+			    is_active = 1,
+			    raw_json = excluded.raw_json,
+			    synced_at = excluded.synced_at`,
+			locCode, locName, strings.ToUpper(country), strings.ToLower(langCode), langName, string(fallbackRaw), syncedAt); err != nil {
+			return upserts, skipped, fmt.Errorf("seed youtube location from google location: %w", err)
+		}
+		upserts++
+	}
+	if err := rows.Err(); err != nil {
+		return upserts, skipped, err
+	}
+	if upserts == 0 {
+		return upserts, skipped, fmt.Errorf("youtube fallback found zero active google locations to copy")
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, 0, err
+	}
+	return upserts, skipped, nil
+}
+
 func flattenDfsObjects(rows []json.RawMessage) []map[string]any {
 	out := []map[string]any{}
 	var walk func(json.RawMessage)
@@ -787,6 +928,36 @@ func upsertDfsLocationRaw(tx *sql.Tx, raw json.RawMessage, syncedAt int64) (upse
 	locCode, hasCode := numberField(obj, "location_code")
 	locName := firstString(obj, "location_name", "location")
 	country := strings.ToUpper(firstString(obj, "country_iso_code", "country_iso", "country_code"))
+	if languages, ok := obj["available_languages"].([]any); ok && len(languages) > 0 {
+		for _, rawLang := range languages {
+			langObj, ok := rawLang.(map[string]any)
+			if !ok {
+				skipped++
+				continue
+			}
+			langCode := strings.ToLower(firstString(langObj, "language_code"))
+			langName := firstString(langObj, "language_name")
+			if !hasCode || locName == "" || langCode == "" {
+				skipped++
+				continue
+			}
+			sources := dfsLocationSources(langObj)
+			if len(sources) == 0 {
+				sources = dfsLocationSources(obj)
+			}
+			if len(sources) == 0 {
+				sources = []string{"google"}
+			}
+			langRaw, _ := json.Marshal(langObj)
+			rawText := fmt.Sprintf(`{"location":%s,"language":%s}`, raw, langRaw)
+			n, err := upsertDfsLocationEntry(tx, locCode, locName, country, langCode, langName, sources, rawText, syncedAt)
+			if err != nil {
+				return upserts, skipped, err
+			}
+			upserts += n
+		}
+		return upserts, skipped, nil
+	}
 	langCode := strings.ToLower(firstString(obj, "language_code"))
 	langName := firstString(obj, "language_name")
 	if !hasCode || locName == "" || langCode == "" {
@@ -797,6 +968,14 @@ func upsertDfsLocationRaw(tx *sql.Tx, raw json.RawMessage, syncedAt int64) (upse
 		sources = []string{"google"}
 	}
 	rawText := string(raw)
+	n, err := upsertDfsLocationEntry(tx, locCode, locName, country, langCode, langName, sources, rawText, syncedAt)
+	if err != nil {
+		return upserts, skipped, err
+	}
+	return n, skipped, nil
+}
+
+func upsertDfsLocationEntry(tx *sql.Tx, locCode int64, locName, country, langCode, langName string, sources []string, rawText string, syncedAt int64) (upserts int, err error) {
 	for _, source := range sources {
 		if source == "" {
 			continue
@@ -820,11 +999,11 @@ func upsertDfsLocationRaw(tx *sql.Tx, raw json.RawMessage, syncedAt int64) (upse
 			    synced_at = excluded.synced_at`,
 			source, locCode, locName, countryArg, langCode, langName, rawText, syncedAt)
 		if err != nil {
-			return upserts, skipped, fmt.Errorf("upsert dataforseo location: %w", err)
+			return upserts, fmt.Errorf("upsert dataforseo location: %w", err)
 		}
 		upserts++
 	}
-	return upserts, skipped, nil
+	return upserts, nil
 }
 
 func dfsLocationSources(obj map[string]any) []string {

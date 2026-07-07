@@ -466,6 +466,27 @@ export default function SeoPanel({ projectId, installId }: NativePanelProps) {
     }
   }
 
+  async function refreshKeywordSERP(keyword: Keyword) {
+    setBusy(true);
+    setErr("");
+    try {
+      const resp = await callTool<{ results: SearchRanking[]; count: number }>("serp_search", {
+        search_engine: keyword.search_engine || searchEngine,
+        keyword_id: keyword.id,
+        location_id: keyword.location_id,
+        depth: 20,
+      });
+      setSerpResults(resp.results || []);
+      await Promise.all([reloadEntities(), reloadOpportunities()]);
+      setStatus(`Cached ${fmt(resp.count || 0)} ${(keyword.search_engine || searchEngine)} results`);
+      pushActivity(`Searched ${(keyword.search_engine || searchEngine)}: ${keyword.text}`);
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function runSerp(keyword: string, locationId: number, depth: number) {
     setBusy(true);
     setErr("");
@@ -678,6 +699,7 @@ export default function SeoPanel({ projectId, installId }: NativePanelProps) {
           locations={filteredLocations}
           selected={selectedKeyword}
           metrics={keywordMetrics}
+          serpResults={serpResults}
           searchEngine={searchEngine}
           onSelect={setSelectedKeyword}
           onAdd={async (text, locationId) => {
@@ -691,6 +713,7 @@ export default function SeoPanel({ projectId, installId }: NativePanelProps) {
             await reloadKeywords();
           }}
           onRefresh={refreshKeyword}
+          onRefreshSERP={refreshKeywordSERP}
           locationById={locationById}
           busy={busy}
         />
@@ -1316,17 +1339,22 @@ function KeywordsView(props: {
   locations: SEOLocation[];
   selected: Keyword | null;
   metrics: KeywordMetrics | null;
+  serpResults: SearchRanking[];
   searchEngine: SearchEngine;
   onSelect(k: Keyword): void;
   onAdd(text: string, locationId: number): Promise<void>;
   onRemove(id: number): Promise<void>;
   onRefresh(k: Keyword): Promise<void>;
+  onRefreshSERP(k: Keyword): Promise<void>;
   locationById: Map<number, SEOLocation>;
   busy: boolean;
 }) {
   const [text, setText] = useState("");
   const [locationId, setLocationId] = useState<number | "">("");
   const selectedLoc = props.selected ? props.locationById.get(props.selected.location_id) : undefined;
+  const selectedSerpRows = props.selected
+    ? props.serpResults.filter((r) => r.keyword_text === props.selected!.text)
+    : [];
 
   useEffect(() => {
     if (props.locations.length === 0) {
@@ -1380,19 +1408,29 @@ function KeywordsView(props: {
                 <div className="text-sm text-text-dim">{localeLabel(selectedLoc)}</div>
               </div>
               <div className="flex gap-2">
-                {props.searchEngine === "google" && <button className={buttonCls} disabled={props.busy} onClick={() => props.onRefresh(props.selected!)}>Refresh Metrics</button>}
+                {props.searchEngine === "google" ? (
+                  <button className={buttonCls} disabled={props.busy} onClick={() => props.onRefresh(props.selected!)}>Refresh Metrics</button>
+                ) : (
+                  <button className={buttonCls} disabled={props.busy} onClick={() => props.onRefreshSERP(props.selected!)}>Refresh SERP</button>
+                )}
                 <button className={buttonCls} disabled={props.busy} onClick={() => props.onRemove(props.selected!.id)}>Remove</button>
               </div>
             </div>
-            <MetricGrid
-              rows={[
-                ["Volume", fmt(props.metrics?.volume)],
-                ["Difficulty", fmt(props.metrics?.difficulty)],
-                ["CPC", props.metrics?.cpc_usd === undefined ? "-" : `$${props.metrics.cpc_usd.toFixed(2)}`],
-                ["Provider", props.metrics?.provider || "-"],
-              ]}
-            />
-            <div className="text-xs text-text-dim">Last refresh: {date(props.metrics?.ts)}</div>
+            {props.searchEngine === "google" ? (
+              <>
+                <MetricGrid
+                  rows={[
+                    ["Volume", fmt(props.metrics?.volume)],
+                    ["Difficulty", fmt(props.metrics?.difficulty)],
+                    ["CPC", props.metrics?.cpc_usd === undefined ? "-" : `$${props.metrics.cpc_usd.toFixed(2)}`],
+                    ["Provider", props.metrics?.provider || "-"],
+                  ]}
+                />
+                <div className="text-xs text-text-dim">Last refresh: {date(props.metrics?.ts)}</div>
+              </>
+            ) : (
+              <SERPResultsTable rows={selectedSerpRows} />
+            )}
           </div>
         ) : (
           <div className="text-sm text-text-dim">No keyword selected.</div>
