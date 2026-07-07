@@ -298,10 +298,7 @@ func TestYouTubeIdeasFromCachedSERPs_UsesVideoRowsOnly(t *testing.T) {
 }
 
 func TestYouTubeRankingsForKeyword_ReturnsLatestVideoRowsOnly(t *testing.T) {
-	db := newSEOTestDB(t, "migrations/001_init.sql", "migrations/004_search_entities.sql")
-	if _, err := db.Exec(`ALTER TABLE keywords ADD COLUMN search_engine TEXT NOT NULL DEFAULT 'google'`); err != nil {
-		t.Fatalf("add keyword search_engine column: %v", err)
-	}
+	db := newSEOTestDB(t, "migrations/001_init.sql", "migrations/004_search_entities.sql", "migrations/005_search_engine_keyword_backfill.sql")
 	if _, err := db.Exec(`INSERT INTO seo_locations
 		(provider, search_engine, location_code, location_name, country_iso, language_code, language_name)
 		VALUES ('dataforseo', 'youtube', 2840, 'United States', 'US', 'en', 'English')`); err != nil {
@@ -357,6 +354,58 @@ func TestYouTubeRankingsForKeyword_ReturnsLatestVideoRowsOnly(t *testing.T) {
 	}
 }
 
+func TestSearchEngineKeywordBackfillMigration_CleansLegacyYouTubeRows(t *testing.T) {
+	db := newSEOTestDB(t, "migrations/001_init.sql", "migrations/004_search_entities.sql")
+	if _, err := db.Exec(`INSERT INTO seo_locations
+		(provider, search_engine, location_code, location_name, country_iso, language_code, language_name)
+		VALUES ('dataforseo', 'youtube', 2840, 'United States', 'US', 'en', 'English')`); err != nil {
+		t.Fatalf("insert location: %v", err)
+	}
+	res, err := db.Exec(`INSERT INTO search_serp_snapshots
+		(project_id, search_engine, keyword_text, location_id, provider, ts, raw_json)
+		VALUES ('project-1', 'youtube', 'sleep hypnosis', 1, 'dataforseo', 200, '{}')`)
+	if err != nil {
+		t.Fatalf("insert snapshot: %v", err)
+	}
+	snapshotID, _ := res.LastInsertId()
+	if _, err := db.Exec(`INSERT INTO search_serp_results
+		(snapshot_id, rank, result_type, title, url, raw_json)
+		VALUES
+		(?, 1, 'youtube_channel', 'Channel Result', 'https://www.youtube.com/@channel', '{}'),
+		(?, 2, 'youtube_playlist', 'Playlist Result', 'https://www.youtube.com/playlist?list=abc', '{}'),
+		(?, 3, 'youtube_video', 'Video Result', 'https://www.youtube.com/watch?v=abc', '{}')`,
+		snapshotID, snapshotID, snapshotID); err != nil {
+		t.Fatalf("insert legacy rows: %v", err)
+	}
+
+	applySEOMigration(t, db, "migrations/005_search_engine_keyword_backfill.sql")
+
+	var keywordID int64
+	if err := db.QueryRow(`SELECT keyword_id FROM search_serp_snapshots WHERE id = ?`, snapshotID).Scan(&keywordID); err != nil {
+		t.Fatalf("read snapshot keyword_id: %v", err)
+	}
+	if keywordID == 0 {
+		t.Fatalf("snapshot keyword_id was not backfilled")
+	}
+	var searchEngine string
+	if err := db.QueryRow(`SELECT search_engine FROM keywords WHERE id = ?`, keywordID).Scan(&searchEngine); err != nil {
+		t.Fatalf("read keyword search_engine: %v", err)
+	}
+	if searchEngine != "youtube" {
+		t.Fatalf("keyword search_engine = %q, want youtube", searchEngine)
+	}
+	var total, bad int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM search_serp_results WHERE snapshot_id = ?`, snapshotID).Scan(&total); err != nil {
+		t.Fatalf("count rows: %v", err)
+	}
+	if err := db.QueryRow(`SELECT COUNT(*) FROM search_serp_results WHERE snapshot_id = ? AND result_type <> 'video'`, snapshotID).Scan(&bad); err != nil {
+		t.Fatalf("count bad rows: %v", err)
+	}
+	if total != 1 || bad != 0 {
+		t.Fatalf("after cleanup total=%d bad=%d, want one video row only", total, bad)
+	}
+}
+
 func newSEOTestDB(t *testing.T, migrations ...string) *sql.DB {
 	t.Helper()
 	db, err := sql.Open("sqlite", ":memory:")
@@ -368,13 +417,18 @@ func newSEOTestDB(t *testing.T, migrations ...string) *sql.DB {
 		t.Fatalf("enable foreign keys: %v", err)
 	}
 	for _, migration := range migrations {
-		body, err := os.ReadFile(migration)
-		if err != nil {
-			t.Fatalf("read %s: %v", migration, err)
-		}
-		if _, err := db.Exec(string(body)); err != nil {
-			t.Fatalf("apply %s: %v", migration, err)
-		}
+		applySEOMigration(t, db, migration)
 	}
 	return db
+}
+
+func applySEOMigration(t *testing.T, db *sql.DB, migration string) {
+	t.Helper()
+	body, err := os.ReadFile(migration)
+	if err != nil {
+		t.Fatalf("read %s: %v", migration, err)
+	}
+	if _, err := db.Exec(string(body)); err != nil {
+		t.Fatalf("apply %s: %v", migration, err)
+	}
 }

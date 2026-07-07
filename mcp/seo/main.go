@@ -35,7 +35,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: seo
 display_name: SEO
-version: 0.4.6
+version: 0.4.7
 description: Generic SEO research workbench — locale-aware domains, keywords, rankings, backlinks behind one pluggable provider integration.
 author: Apteva
 scopes: [project, global]
@@ -694,7 +694,7 @@ func latestDomainMetrics(db *sql.DB, domainID int64) (*DomainMetrics, error) {
 func getKeyword(db *sql.DB, pid string, id int64) (*Keyword, error) {
 	var k Keyword
 	err := db.QueryRow(
-		`SELECT k.id, k.project_id, COALESCE(l.search_engine, 'google') AS search_engine,
+		`SELECT k.id, k.project_id, COALESCE(NULLIF(l.search_engine, ''), NULLIF(k.search_engine, ''), 'google') AS search_engine,
 		        k.text, k.location_id, k.country_iso, k.language_iso, k.created_at
 		   FROM keywords k
 		   LEFT JOIN seo_locations l ON l.id = k.location_id
@@ -717,14 +717,14 @@ func listKeywordsWithSearchEngine(db *sql.DB, pid, searchEngine, countryISO stri
 	if limit <= 0 {
 		limit = 200
 	}
-	sqlText := `SELECT k.id, k.project_id, COALESCE(l.search_engine, 'google') AS search_engine,
+	sqlText := `SELECT k.id, k.project_id, COALESCE(NULLIF(l.search_engine, ''), NULLIF(k.search_engine, ''), 'google') AS search_engine,
 	                   k.text, k.location_id, k.country_iso, k.language_iso, k.created_at
 	              FROM keywords k
 	              LEFT JOIN seo_locations l ON l.id = k.location_id
 	             WHERE k.project_id = ?`
 	qargs := []any{pid}
 	if searchEngine != "" {
-		sqlText += ` AND COALESCE(l.search_engine, 'google') = ?`
+		sqlText += ` AND COALESCE(NULLIF(l.search_engine, ''), NULLIF(k.search_engine, ''), 'google') = ?`
 		qargs = append(qargs, searchEngine)
 	}
 	if countryISO != "" {
@@ -859,10 +859,10 @@ func (a *App) toolKeywordsAdd(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	}
 	lang := strings.ToLower(loc.LanguageCode)
 	res, err := db.Exec(
-		`INSERT INTO keywords (project_id, text, location_id, country_iso, language_iso)
-		   VALUES (?, ?, ?, ?, ?)
+		`INSERT INTO keywords (project_id, search_engine, text, location_id, country_iso, language_iso)
+		   VALUES (?, ?, ?, ?, ?, ?)
 		   ON CONFLICT(project_id, text, location_id) DO NOTHING`,
-		pid, text, loc.ID, country, lang)
+		pid, loc.SearchEngine, text, loc.ID, country, lang)
 	if err != nil {
 		return nil, fmt.Errorf("insert keyword: %w", err)
 	}

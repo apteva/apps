@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: seo
 display_name: SEO
-version: 0.4.6
+version: 0.4.7
 description: |
   Generic SEO research workbench. Track domains, keywords, rankings,
   and backlinks; pull metrics from any provider behind one pluggable
@@ -47,6 +47,8 @@ description: |
         video results so channel names are not treated as video topics.
   v0.4.6: stores and returns YouTube SERP video results only, so normal
         SEO views do not include channels or playlists.
+  v0.4.7: backfills existing installs into the uniform search-engine keyword
+        model and cleans legacy YouTube channel/playlist SERP rows.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/seo

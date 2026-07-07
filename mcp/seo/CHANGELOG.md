@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.7
+
+- Added an install migration that backfills keyword search-engine metadata,
+  links existing YouTube SERP snapshots to keyword rows, and cleans legacy
+  YouTube channel/playlist SERP rows.
+
 ## 0.4.6
 
 - Changed YouTube SERP ingestion to store and return video results only.
