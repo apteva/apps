@@ -49,19 +49,27 @@ func (a *App) handleRegistrationPage(w http.ResponseWriter, r *http.Request) {
 
 	switch r.Method {
 	case http.MethodGet:
-		renderRegistrationForm(w, webinar)
+		slots, err := app.dbListSlots(ctx, pid, webinar.ID, "", "", true)
+		if err != nil {
+			httpErr(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		renderRegistrationForm(w, webinar, slots)
 	case http.MethodPost:
 		_ = r.ParseForm()
 		email := strings.TrimSpace(r.FormValue("email"))
 		phone := strings.TrimSpace(r.FormValue("phone"))
 		name := strings.TrimSpace(r.FormValue("display_name"))
+		slotID, _ := strconv.ParseInt(strings.TrimSpace(r.FormValue("slot_id")), 10, 64)
 		if email == "" && phone == "" {
-			renderRegistrationForm(w, webinar)
+			slots, _ := app.dbListSlots(ctx, pid, webinar.ID, "", "", true)
+			renderRegistrationForm(w, webinar, slots)
 			return
 		}
 		out, err := app.toolRegister(ctx, map[string]any{
 			"_project_id":  pid,
 			"webinar_id":   webinar.ID,
+			"slot_id":      slotID,
 			"email":        email,
 			"phone":        phone,
 			"display_name": name,
@@ -86,7 +94,7 @@ func (a *App) handleRegistrationPage(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func renderRegistrationForm(w http.ResponseWriter, webinar *Webinar) {
+func renderRegistrationForm(w http.ResponseWriter, webinar *Webinar, slots []*WebinarSlot) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	when := webinar.ScheduledAt
 	if when == "" {
@@ -95,6 +103,7 @@ func renderRegistrationForm(w http.ResponseWriter, webinar *Webinar) {
 	host := html.EscapeString(webinar.HostName)
 	title := html.EscapeString(webinar.Title)
 	desc := html.EscapeString(webinar.Description)
+	slotHTML := renderSlotInputs(slots)
 	fmt.Fprintf(w, `<!doctype html>
 <html><head><meta charset="utf-8"><title>Register: %s</title>
 <meta name="viewport" content="width=device-width, initial-scale=1">
@@ -103,6 +112,11 @@ func renderRegistrationForm(w http.ResponseWriter, webinar *Webinar) {
   h1 { margin-bottom: 0.25rem; }
   .meta { color: #666; margin-bottom: 1.5rem; }
   form { display: grid; gap: 0.75rem; }
+  .slots { display: grid; gap: 0.5rem; margin: 0.25rem 0 0.5rem; }
+  .slot { display: flex; gap: 0.6rem; align-items: flex-start; padding: 0.7rem; border: 1px solid #d7d7d7; border-radius: 8px; cursor: pointer; }
+  .slot:hover { border-color: #1a73e8; }
+  .slot strong { display: block; }
+  .slot span { color: #666; font-size: 0.9rem; }
   input { font-size: 1rem; padding: 0.6rem; border: 1px solid #ccc; border-radius: 6px; }
   button { font-size: 1rem; padding: 0.7rem; background: #1a73e8; color: white; border: 0; border-radius: 6px; cursor: pointer; }
   button:hover { background: #155ec0; }
@@ -113,13 +127,62 @@ func renderRegistrationForm(w http.ResponseWriter, webinar *Webinar) {
   <div class="meta">%s · %s</div>
   <div class="desc">%s</div>
   <form method="POST">
+    %s
     <input type="text"  name="display_name" placeholder="Your name" required>
     <input type="email" name="email"        placeholder="Email"      required>
     <input type="tel"   name="phone"        placeholder="Phone (optional, for SMS reminders)">
     <button type="submit">Save my seat</button>
   </form>
 </body></html>`,
-		title, title, html.EscapeString(when), host, desc)
+		title, title, html.EscapeString(when), host, desc, slotHTML)
+}
+
+func renderSlotInputs(slots []*WebinarSlot) string {
+	if len(slots) == 0 {
+		return ""
+	}
+	if len(slots) == 1 {
+		slot := slots[0]
+		return fmt.Sprintf(`<input type="hidden" name="slot_id" value="%d"><div class="slots"><label class="slot"><div><strong>%s</strong><span>%s</span></div></label></div>`,
+			slot.ID, html.EscapeString(formatSlotTime(slot)), html.EscapeString(formatSlotMeta(slot)))
+	}
+	var b strings.Builder
+	b.WriteString(`<div class="slots">`)
+	for i, slot := range slots {
+		checked := ""
+		if i == 0 {
+			checked = " checked"
+		}
+		b.WriteString(fmt.Sprintf(`<label class="slot"><input type="radio" name="slot_id" value="%d"%s required><div><strong>%s</strong><span>%s</span></div></label>`,
+			slot.ID, checked, html.EscapeString(formatSlotTime(slot)), html.EscapeString(formatSlotMeta(slot))))
+	}
+	b.WriteString(`</div>`)
+	return b.String()
+}
+
+func formatSlotTime(slot *WebinarSlot) string {
+	if slot == nil {
+		return ""
+	}
+	start, err := time.Parse(time.RFC3339, slot.StartsAt)
+	if err != nil {
+		return slot.StartsAt
+	}
+	return start.Format("Mon, Jan 2, 2006 15:04 MST")
+}
+
+func formatSlotMeta(slot *WebinarSlot) string {
+	if slot == nil {
+		return ""
+	}
+	parts := []string{}
+	if slot.EndsAt != "" {
+		parts = append(parts, "ends "+slot.EndsAt)
+	}
+	if slot.Capacity > 0 {
+		parts = append(parts, fmt.Sprintf("%d/%d registered", slot.Registered, slot.Capacity))
+	}
+	return strings.Join(parts, " · ")
 }
 
 // ─── Live route dispatcher ────────────────────────────────────────

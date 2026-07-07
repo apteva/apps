@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: webinars
 display_name: Webinars
-version: 0.1.0
+version: 0.1.1
 description: |
   Live, scheduled, and on-demand webinars. Composes the streaming app
   for the pipe (RTMP→HLS+recording), CRM for the contact + activity
@@ -57,7 +57,9 @@ provides:
     - { name: webinars_list,             description: "Filter by status (draft|scheduled|live|ended|cancelled), kind, scheduled_at_after, scheduled_at_before, limit (default 50). Args: status?, kind?, scheduled_at_after?, scheduled_at_before?, limit?." }
     - { name: webinars_update,           description: "Patch — change title, scheduled_at, host_name, description, duration_minutes. Reschedules reminders if scheduled_at changes. Args: id, patch." }
     - { name: webinars_delete,           description: "Cancel + tear down stream + delete registrants and attendance. Idempotent. Args: id." }
-    - { name: webinars_register,         description: "Add a registrant. Creates a CRM contact if bound. Args: webinar_id, email, phone?, display_name?, source? (form|agent|import). Returns registrant + join_url." }
+    - { name: webinars_create_slot,      description: "Create one joinable slot for a webinar. Args: webinar_id, starts_at, ends_at?, timezone?, capacity?, status?." }
+    - { name: webinars_list_slots,       description: "List slots for a webinar. Args: webinar_id, from?, to?, available_only?." }
+    - { name: webinars_register,         description: "Add a registrant. Creates a CRM contact if bound. Args: webinar_id, slot_id?, email, phone?, display_name?, source? (form|agent|import). Returns registrant + join_url." }
     - { name: webinars_list_registrants, description: "List registrants for a webinar with attendance status. Args: webinar_id, attended? (bool), limit? (default 100)." }
     - { name: webinars_send_reminder,    description: "Fire a reminder now (manual override of the scheduler). Args: id, channel? (email|sms|all, default all), audience? (all|registered|joined|no_show, default registered), body? (override default template)." }
     - { name: webinars_define_offer,     description: "Script an offer to auto-show at offset_seconds from start. Args: id, offset_seconds, headline, body?, cta_label, cta_url, duration_seconds? (default 30)." }

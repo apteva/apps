@@ -39,20 +39,40 @@ func (a *App) toolCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if durationMinutes <= 0 {
 		durationMinutes = 60
 	}
+	schedulingMode := strArg(args, "scheduling_mode")
+	if schedulingMode == "" {
+		schedulingMode = "single"
+	}
+	if schedulingMode != "single" && schedulingMode != "multi" && schedulingMode != "evergreen" && schedulingMode != "replay" {
+		return nil, fmt.Errorf("scheduling_mode must be single|multi|evergreen|replay, got %q", schedulingMode)
+	}
+	timezone := strArg(args, "timezone")
+	if timezone == "" {
+		timezone = "UTC"
+	}
+	slotDuration := intArg(args, "slot_duration_minutes", durationMinutes)
+	if slotDuration <= 0 {
+		slotDuration = durationMinutes
+	}
 
 	slug := uniqueSlug(ctx, pid, slugify(title))
 
 	res, err := ctx.AppDB().Exec(
 		`INSERT INTO webinars
 			(project_id, slug, title, host_name, description, kind,
-			 scheduled_at, duration_minutes, status)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'draft')`,
+			 scheduled_at, duration_minutes, scheduling_mode, timezone,
+			 slot_duration_minutes, registration_policy, status)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'draft')`,
 		pid, slug, title,
 		nullStr(strArg(args, "host_name")),
 		nullStr(strArg(args, "description")),
 		kind,
 		nullStr(scheduledAt),
-		durationMinutes)
+		durationMinutes,
+		schedulingMode,
+		timezone,
+		slotDuration,
+		nullStr(strArg(args, "registration_policy")))
 	if err != nil {
 		return nil, err
 	}
@@ -78,11 +98,75 @@ func (a *App) toolCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		created.Stream.ID, id); err != nil {
 		return nil, err
 	}
+	if scheduledAt != "" && schedulingMode == "single" {
+		if _, err := a.createSlot(ctx, pid, id, scheduledAt, "", timezone, slotDuration, 0, "scheduled", "scheduled_at", ""); err != nil {
+			return nil, err
+		}
+	}
 
 	w, _ := a.dbGet(ctx, pid, id)
 	a.materialize(ctx, w, &created.Stream)
 	ctx.Emit("webinar.created", map[string]any{"id": id, "slug": slug})
 	return map[string]any{"webinar": w}, nil
+}
+
+// ─── webinars_create_slot / webinars_list_slots ──────────────────
+
+func (a *App) toolCreateSlot(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	webinarID := int64Arg(args, "webinar_id")
+	startsAt := strArg(args, "starts_at")
+	if webinarID == 0 || startsAt == "" {
+		return nil, errors.New("webinar_id and starts_at required")
+	}
+	w, err := a.dbGet(ctx, pid, webinarID)
+	if err != nil || w == nil {
+		return nil, errors.New("webinar not found")
+	}
+	endsAt := strArg(args, "ends_at")
+	timezone := strArg(args, "timezone")
+	if timezone == "" {
+		timezone = w.Timezone
+	}
+	if timezone == "" {
+		timezone = "UTC"
+	}
+	duration := intArg(args, "duration_minutes", w.SlotDurationMin)
+	if duration <= 0 {
+		duration = w.DurationMinutes
+	}
+	capacity := intArg(args, "capacity", 0)
+	status := strArg(args, "status")
+	if status == "" {
+		status = "scheduled"
+	}
+	slot, err := a.createSlot(ctx, pid, webinarID, startsAt, endsAt, timezone, duration, capacity, status, "manual", "")
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"slot": slot}, nil
+}
+
+func (a *App) toolListSlots(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	webinarID := int64Arg(args, "webinar_id")
+	if webinarID == 0 {
+		return nil, errors.New("webinar_id required")
+	}
+	if w, err := a.dbGet(ctx, pid, webinarID); err != nil || w == nil {
+		return nil, errors.New("webinar not found")
+	}
+	slots, err := a.dbListSlots(ctx, pid, webinarID, strArg(args, "from"), strArg(args, "to"), boolArg(args, "available_only", false))
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"slots": slots, "count": len(slots)}, nil
 }
 
 // uniqueSlug ensures the slug is unique per project. Appends -2, -3 …
@@ -146,11 +230,11 @@ func (a *App) toolGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		 WHERE webinar_id = ? AND source = 'live'`, id).Scan(&attendedLive)
 
 	return map[string]any{
-		"webinar":            w,
-		"found":              true,
-		"registrant_count":   regCount,
+		"webinar":             w,
+		"found":               true,
+		"registrant_count":    regCount,
 		"attended_live_count": attendedLive,
-		"stream":             snap,
+		"stream":              snap,
 	}, nil
 }
 
@@ -333,6 +417,11 @@ func (a *App) toolRegister(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if w.Status == "cancelled" {
 		return nil, errors.New("webinar is cancelled")
 	}
+	slotID := int64Arg(args, "slot_id")
+	slot, err := a.resolveRegistrationSlot(ctx, pid, w.ID, slotID)
+	if err != nil {
+		return nil, err
+	}
 
 	displayName := strArg(args, "display_name")
 	source := strArg(args, "source")
@@ -345,12 +434,12 @@ func (a *App) toolRegister(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	res, err := ctx.AppDB().Exec(
 		`INSERT INTO webinar_registrants
 			(project_id, webinar_id, email, phone, display_name,
-			 join_token, source)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)
+			 join_token, source, slot_id)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(webinar_id, email) WHERE email IS NOT NULL AND email <> ''
 		 DO NOTHING`,
 		pid, wid, nullStr(email), nullStr(phone),
-		nullStr(displayName), joinToken, source)
+		nullStr(displayName), joinToken, source, nullableSlotID(slot))
 	var registrantID int64
 	if err == nil {
 		registrantID, _ = res.LastInsertId()
@@ -368,10 +457,10 @@ func (a *App) toolRegister(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 			res, err = ctx.AppDB().Exec(
 				`INSERT INTO webinar_registrants
 					(project_id, webinar_id, email, phone, display_name,
-					 join_token, source)
-				 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+					 join_token, source, slot_id)
+				 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 				pid, wid, nullStr(email), nullStr(phone),
-				nullStr(displayName), joinToken, source)
+				nullStr(displayName), joinToken, source, nullableSlotID(slot))
 			if err != nil {
 				return nil, fmt.Errorf("insert registrant: %w", err)
 			}
@@ -425,7 +514,11 @@ func (a *App) toolRegister(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	}
 
 	// Schedule reminders.
-	if err := a.scheduleRemindersForRegistrant(ctx, pid, w, registrantID, email != "", phone != ""); err != nil {
+	reminderWebinar := *w
+	if slot != nil {
+		reminderWebinar.ScheduledAt = slot.StartsAt
+	}
+	if err := a.scheduleRemindersForRegistrant(ctx, pid, &reminderWebinar, registrantID, email != "", phone != ""); err != nil {
 		ctx.Logger().Warn("schedule reminders", "registrant", registrantID, "err", err)
 	}
 
@@ -541,7 +634,7 @@ func (a *App) toolSendReminder(ctx *sdk.AppCtx, args map[string]any) (any, error
 		return nil, err
 	}
 	type rec struct {
-		ID                                  int64
+		ID                                   int64
 		Email, Phone, DisplayName, JoinToken string
 	}
 	recs := []rec{}
@@ -878,6 +971,8 @@ func (a *App) dbGet(ctx *sdk.AppCtx, pid string, id int64) (*Webinar, error) {
 		`SELECT id, project_id, slug, title,
 				COALESCE(host_name,''), COALESCE(description,''),
 				kind, COALESCE(scheduled_at,''), duration_minutes,
+				COALESCE(scheduling_mode,'single'), COALESCE(timezone,'UTC'),
+				COALESCE(slot_duration_minutes,0), COALESCE(registration_policy,''),
 				status, COALESCE(stream_id, 0),
 				recording_published, COALESCE(replay_token,''),
 				COALESCE(replay_expires_at,''),
@@ -889,6 +984,7 @@ func (a *App) dbGet(ctx *sdk.AppCtx, pid string, id int64) (*Webinar, error) {
 		&w.ID, &w.ProjectID, &w.Slug, &w.Title,
 		&w.HostName, &w.Description,
 		&w.Kind, &w.ScheduledAt, &w.DurationMinutes,
+		&w.SchedulingMode, &w.Timezone, &w.SlotDurationMin, &w.RegistrationPolicy,
 		&w.Status, &w.StreamID,
 		&published, &w.ReplayToken,
 		&w.ReplayExpiresAt,
@@ -905,7 +1001,7 @@ func (a *App) dbGet(ctx *sdk.AppCtx, pid string, id int64) (*Webinar, error) {
 
 func (a *App) dbGetRegistrant(ctx *sdk.AppCtx, pid string, id int64) (*Registrant, error) {
 	row := ctx.AppDB().QueryRow(
-		`SELECT id, webinar_id, contact_id,
+		`SELECT id, webinar_id, COALESCE(slot_id,0), contact_id,
 				COALESCE(email,''), COALESCE(phone,''),
 				COALESCE(display_name,''), join_token,
 				registered_at, COALESCE(source,''),
@@ -915,7 +1011,7 @@ func (a *App) dbGetRegistrant(ctx *sdk.AppCtx, pid string, id int64) (*Registran
 	var contactID sql.NullInt64
 	var live, replay int
 	if err := row.Scan(
-		&r.ID, &r.WebinarID, &contactID,
+		&r.ID, &r.WebinarID, &r.SlotID, &contactID,
 		&r.Email, &r.Phone, &r.DisplayName, &r.JoinToken,
 		&r.RegisteredAt, &r.Source,
 		&live, &replay,
@@ -932,6 +1028,175 @@ func (a *App) dbGetRegistrant(ctx *sdk.AppCtx, pid string, id int64) (*Registran
 	r.AttendedLive = live != 0
 	r.AttendedReplay = replay != 0
 	return r, nil
+}
+
+func (a *App) createSlot(ctx *sdk.AppCtx, pid string, webinarID int64, startsAt, endsAt, timezone string, durationMinutes, capacity int, status, source, generationKey string) (*WebinarSlot, error) {
+	start, err := time.Parse(time.RFC3339, startsAt)
+	if err != nil {
+		return nil, fmt.Errorf("starts_at must be RFC3339: %w", err)
+	}
+	if endsAt != "" {
+		if _, err := time.Parse(time.RFC3339, endsAt); err != nil {
+			return nil, fmt.Errorf("ends_at must be RFC3339: %w", err)
+		}
+	} else if durationMinutes > 0 {
+		endsAt = start.Add(time.Duration(durationMinutes) * time.Minute).UTC().Format(time.RFC3339)
+	}
+	if timezone == "" {
+		timezone = "UTC"
+	}
+	if status == "" {
+		status = "scheduled"
+	}
+	if !validSlotStatus(status) {
+		return nil, fmt.Errorf("invalid slot status %q", status)
+	}
+	if source == "" {
+		source = "manual"
+	}
+	res, err := ctx.AppDB().Exec(
+		`INSERT INTO webinar_slots
+			(project_id, webinar_id, starts_at, ends_at, timezone,
+			 capacity, status, source, generation_key)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		pid, webinarID, startsAt, nullStr(endsAt), nullStr(timezone),
+		nullablePositiveInt(capacity), status, source, nullStr(generationKey))
+	if err != nil {
+		return nil, err
+	}
+	id, _ := res.LastInsertId()
+	return a.dbGetSlot(ctx, pid, id)
+}
+
+func (a *App) dbGetSlot(ctx *sdk.AppCtx, pid string, id int64) (*WebinarSlot, error) {
+	row := ctx.AppDB().QueryRow(
+		`SELECT s.id, s.project_id, s.webinar_id, s.starts_at,
+				COALESCE(s.ends_at,''), COALESCE(s.timezone,''),
+				COALESCE(s.capacity,0), s.status, s.source,
+				COALESCE(s.generation_key,''), s.created_at,
+				COUNT(r.id)
+		 FROM webinar_slots s
+		 LEFT JOIN webinar_registrants r ON r.slot_id = s.id
+		 WHERE s.id = ? AND s.project_id = ?
+		 GROUP BY s.id`, id, pid)
+	slot := &WebinarSlot{}
+	if err := row.Scan(
+		&slot.ID, &slot.ProjectID, &slot.WebinarID, &slot.StartsAt,
+		&slot.EndsAt, &slot.Timezone, &slot.Capacity, &slot.Status,
+		&slot.Source, &slot.GenerationKey, &slot.CreatedAt, &slot.Registered,
+	); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	slot.Available = slotIsAvailable(slot)
+	return slot, nil
+}
+
+func (a *App) dbListSlots(ctx *sdk.AppCtx, pid string, webinarID int64, from, to string, availableOnly bool) ([]*WebinarSlot, error) {
+	where := []string{"s.project_id = ?", "s.webinar_id = ?"}
+	args := []any{pid, webinarID}
+	if from != "" {
+		where = append(where, "s.starts_at >= ?")
+		args = append(args, from)
+	}
+	if to != "" {
+		where = append(where, "s.starts_at <= ?")
+		args = append(args, to)
+	}
+	rows, err := ctx.AppDB().Query(
+		`SELECT s.id, s.project_id, s.webinar_id, s.starts_at,
+				COALESCE(s.ends_at,''), COALESCE(s.timezone,''),
+				COALESCE(s.capacity,0), s.status, s.source,
+				COALESCE(s.generation_key,''), s.created_at,
+				COUNT(r.id)
+		 FROM webinar_slots s
+		 LEFT JOIN webinar_registrants r ON r.slot_id = s.id
+		 WHERE `+strings.Join(where, " AND ")+`
+		 GROUP BY s.id
+		 ORDER BY s.starts_at ASC`, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []*WebinarSlot{}
+	for rows.Next() {
+		slot := &WebinarSlot{}
+		if err := rows.Scan(
+			&slot.ID, &slot.ProjectID, &slot.WebinarID, &slot.StartsAt,
+			&slot.EndsAt, &slot.Timezone, &slot.Capacity, &slot.Status,
+			&slot.Source, &slot.GenerationKey, &slot.CreatedAt, &slot.Registered,
+		); err != nil {
+			return nil, err
+		}
+		slot.Available = slotIsAvailable(slot)
+		if availableOnly && !slot.Available {
+			continue
+		}
+		out = append(out, slot)
+	}
+	return out, nil
+}
+
+func (a *App) resolveRegistrationSlot(ctx *sdk.AppCtx, pid string, webinarID, requestedSlotID int64) (*WebinarSlot, error) {
+	if requestedSlotID != 0 {
+		slot, err := a.dbGetSlot(ctx, pid, requestedSlotID)
+		if err != nil {
+			return nil, err
+		}
+		if slot == nil || slot.WebinarID != webinarID {
+			return nil, errors.New("slot not found")
+		}
+		if !slot.Available {
+			return nil, errors.New("slot is not available")
+		}
+		return slot, nil
+	}
+	slots, err := a.dbListSlots(ctx, pid, webinarID, "", "", true)
+	if err != nil {
+		return nil, err
+	}
+	switch len(slots) {
+	case 0:
+		return nil, nil
+	case 1:
+		return slots[0], nil
+	default:
+		return nil, errors.New("slot_id required when multiple slots are available")
+	}
+}
+
+func slotIsAvailable(slot *WebinarSlot) bool {
+	if slot == nil {
+		return false
+	}
+	if slot.Status != "scheduled" && slot.Status != "open" && slot.Status != "live" {
+		return false
+	}
+	return slot.Capacity <= 0 || slot.Registered < slot.Capacity
+}
+
+func validSlotStatus(status string) bool {
+	switch status {
+	case "scheduled", "open", "live", "ended", "cancelled":
+		return true
+	}
+	return false
+}
+
+func nullableSlotID(slot *WebinarSlot) any {
+	if slot == nil || slot.ID == 0 {
+		return nil
+	}
+	return slot.ID
+}
+
+func nullablePositiveInt(v int) any {
+	if v <= 0 {
+		return nil
+	}
+	return v
 }
 
 // dbGetWebinarByStreamID lets the lifecycle EventHandler find the

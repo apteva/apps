@@ -81,6 +81,46 @@ func (a *App) handleAdminItem(w http.ResponseWriter, r *http.Request) {
 			}
 			httpJSON(w, out)
 			return
+		case "slots":
+			args["webinar_id"] = id
+			delete(args, "id")
+			switch r.Method {
+			case http.MethodGet:
+				if v := r.URL.Query().Get("from"); v != "" {
+					args["from"] = v
+				}
+				if v := r.URL.Query().Get("to"); v != "" {
+					args["to"] = v
+				}
+				if r.URL.Query().Get("available_only") == "true" {
+					args["available_only"] = true
+				}
+				out, err := a.toolListSlots(globalCtx, args)
+				if err != nil {
+					httpErr(w, http.StatusBadRequest, err.Error())
+					return
+				}
+				httpJSON(w, out)
+				return
+			case http.MethodPost:
+				var body map[string]any
+				_ = json.NewDecoder(r.Body).Decode(&body)
+				if body == nil {
+					body = map[string]any{}
+				}
+				body["_project_id"] = pid
+				body["webinar_id"] = id
+				out, err := a.toolCreateSlot(globalCtx, body)
+				if err != nil {
+					httpErr(w, http.StatusBadRequest, err.Error())
+					return
+				}
+				httpJSON(w, out)
+				return
+			default:
+				httpErr(w, http.StatusMethodNotAllowed, "GET or POST")
+				return
+			}
 		case "register":
 			if r.Method != http.MethodPost {
 				httpErr(w, http.StatusMethodNotAllowed, "POST")

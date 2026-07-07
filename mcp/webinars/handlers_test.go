@@ -232,6 +232,17 @@ func TestCreate_AllocatesStreamAndReturnsURLs(t *testing.T) {
 	if w.Status != "scheduled" {
 		t.Errorf("status=%q, want scheduled (since scheduled_at was set)", w.Status)
 	}
+	slotsOut, err := app.toolListSlots(ctx, map[string]any{"webinar_id": w.ID})
+	if err != nil {
+		t.Fatalf("list slots: %v", err)
+	}
+	slots := slotsOut.(map[string]any)["slots"].([]*WebinarSlot)
+	if len(slots) != 1 {
+		t.Fatalf("scheduled webinar should get one default slot, got %d", len(slots))
+	}
+	if slots[0].StartsAt != "2026-06-01T15:00:00Z" {
+		t.Errorf("slot starts_at=%q", slots[0].StartsAt)
+	}
 }
 
 func TestCreate_DraftWhenNoSchedule(t *testing.T) {
@@ -276,6 +287,9 @@ func TestRegister_CreatesContactWhenCRMBound(t *testing.T) {
 	if r.JoinURL == "" || !strings.Contains(r.JoinURL, r.JoinToken) {
 		t.Errorf("join_url=%q", r.JoinURL)
 	}
+	if r.SlotID == 0 {
+		t.Errorf("scheduled webinar registration should auto-assign default slot")
+	}
 	if r.ContactID == nil {
 		t.Errorf("contact_id should be set when CRM bound")
 	}
@@ -310,6 +324,69 @@ func TestRegister_RejectsWithoutContactInfo(t *testing.T) {
 	_, err := app.toolRegister(ctx, map[string]any{"webinar_id": w.ID})
 	if err == nil {
 		t.Fatal("expected error when both email and phone empty")
+	}
+}
+
+func TestSlots_MultipleSlotsRequireSelection(t *testing.T) {
+	app, ctx, _, _, _ := newTestApp(t, false, false)
+	out, _ := app.toolCreate(ctx, map[string]any{
+		"title":           "Weekly Demo",
+		"scheduling_mode": "multi",
+	})
+	w := out.(map[string]any)["webinar"].(*Webinar)
+	slot1Out, err := app.toolCreateSlot(ctx, map[string]any{
+		"webinar_id": w.ID,
+		"starts_at":  "2099-06-01T15:00:00Z",
+	})
+	if err != nil {
+		t.Fatalf("slot 1: %v", err)
+	}
+	_, err = app.toolCreateSlot(ctx, map[string]any{
+		"webinar_id": w.ID,
+		"starts_at":  "2099-06-02T15:00:00Z",
+	})
+	if err != nil {
+		t.Fatalf("slot 2: %v", err)
+	}
+	if _, err := app.toolRegister(ctx, map[string]any{"webinar_id": w.ID, "email": "slot@example.com"}); err == nil {
+		t.Fatal("expected slot_id required for multiple slots")
+	}
+	slot1 := slot1Out.(map[string]any)["slot"].(*WebinarSlot)
+	rOut, err := app.toolRegister(ctx, map[string]any{
+		"webinar_id": w.ID,
+		"slot_id":    slot1.ID,
+		"email":      "slot@example.com",
+	})
+	if err != nil {
+		t.Fatalf("register with slot: %v", err)
+	}
+	r := rOut.(map[string]any)["registrant"].(*Registrant)
+	if r.SlotID != slot1.ID {
+		t.Fatalf("slot_id=%d, want %d", r.SlotID, slot1.ID)
+	}
+}
+
+func TestSlots_CapacityEnforced(t *testing.T) {
+	app, ctx, _, _, _ := newTestApp(t, false, false)
+	out, _ := app.toolCreate(ctx, map[string]any{
+		"title":           "Capacity Demo",
+		"scheduling_mode": "multi",
+	})
+	w := out.(map[string]any)["webinar"].(*Webinar)
+	slotOut, err := app.toolCreateSlot(ctx, map[string]any{
+		"webinar_id": w.ID,
+		"starts_at":  "2099-06-01T15:00:00Z",
+		"capacity":   1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	slot := slotOut.(map[string]any)["slot"].(*WebinarSlot)
+	if _, err := app.toolRegister(ctx, map[string]any{"webinar_id": w.ID, "slot_id": slot.ID, "email": "a@example.com"}); err != nil {
+		t.Fatalf("first register: %v", err)
+	}
+	if _, err := app.toolRegister(ctx, map[string]any{"webinar_id": w.ID, "slot_id": slot.ID, "email": "b@example.com"}); err == nil {
+		t.Fatal("expected capacity error")
 	}
 }
 

@@ -6,15 +6,16 @@
 //   - Soft dep on messaging for reminder fan-out.
 //
 // Public pages (NoAuth):
-//   /r/<slug>                  — registration form
-//   /r/<slug>/submit           — POST → 302 to /live/<token>
-//   /live/<token>              — live room: HLS player + chat + offers
-//   /live/<token>/heartbeat    — 10s heartbeat for attendance
-//   /live/<token>/chat         — chat send
-//   /live/<token>/poll-response
-//   /live/<token>/offer-click
-//   /live/<token>/events?since=N — long-poll for chat/offer/poll updates
-//   /replay/<slug>?t=<token>   — replay page (when status=ended + published)
+//
+//	/r/<slug>                  — registration form
+//	/r/<slug>/submit           — POST → 302 to /live/<token>
+//	/live/<token>              — live room: HLS player + chat + offers
+//	/live/<token>/heartbeat    — 10s heartbeat for attendance
+//	/live/<token>/chat         — chat send
+//	/live/<token>/poll-response
+//	/live/<token>/offer-click
+//	/live/<token>/events?since=N — long-poll for chat/offer/poll updates
+//	/replay/<slug>?t=<token>   — replay page (when status=ended + published)
 package main
 
 import (
@@ -40,7 +41,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: webinars
 display_name: Webinars
-version: 0.1.0
+version: 0.1.1
 description: |
   Live, scheduled, and on-demand webinars on top of streaming + CRM
   + messaging.
@@ -79,6 +80,8 @@ provides:
     - { name: webinars_list,             description: "Filter by status/kind/scheduled-window." }
     - { name: webinars_update,           description: "Patch fields; reschedules reminders if scheduled_at moves." }
     - { name: webinars_delete,           description: "Cancel + tear down stream." }
+    - { name: webinars_create_slot,      description: "Create one joinable webinar slot." }
+    - { name: webinars_list_slots,       description: "List joinable webinar slots." }
     - { name: webinars_register,         description: "Add a registrant; CRM contact upsert when bound." }
     - { name: webinars_list_registrants, description: "List registrants with attendance status." }
     - { name: webinars_send_reminder,    description: "Fire a reminder now (manual override)." }
@@ -149,8 +152,8 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	return nil
 }
 
-func (a *App) OnUnmount(ctx *sdk.AppCtx) error    { return nil }
-func (a *App) Channels() []sdk.ChannelFactory     { return nil }
+func (a *App) OnUnmount(ctx *sdk.AppCtx) error { return nil }
+func (a *App) Channels() []sdk.ChannelFactory  { return nil }
 
 func (a *App) EventHandlers() []sdk.EventHandler {
 	return []sdk.EventHandler{
@@ -189,12 +192,16 @@ func (a *App) MCPTools() []sdk.Tool {
 			Name:        "webinars_create",
 			Description: "Create a webinar — allocates a stream via streaming.streams_create. Args: title, scheduled_at? (RFC3339), host_name?, kind? (live|scheduled|replay, default scheduled), duration_minutes? (default 60), description?.",
 			InputSchema: schemaObject(map[string]any{
-				"title":            map[string]any{"type": "string"},
-				"scheduled_at":     map[string]any{"type": "string"},
-				"host_name":        map[string]any{"type": "string"},
-				"kind":             map[string]any{"type": "string"},
-				"duration_minutes": map[string]any{"type": "integer"},
-				"description":      map[string]any{"type": "string"},
+				"title":                 map[string]any{"type": "string"},
+				"scheduled_at":          map[string]any{"type": "string"},
+				"host_name":             map[string]any{"type": "string"},
+				"kind":                  map[string]any{"type": "string"},
+				"duration_minutes":      map[string]any{"type": "integer"},
+				"description":           map[string]any{"type": "string"},
+				"scheduling_mode":       map[string]any{"type": "string"},
+				"timezone":              map[string]any{"type": "string"},
+				"slot_duration_minutes": map[string]any{"type": "integer"},
+				"registration_policy":   map[string]any{"type": "string"},
 			}, []string{"title"}),
 			Handler: a.toolCreate,
 		},
@@ -232,10 +239,35 @@ func (a *App) MCPTools() []sdk.Tool {
 			Handler:     a.toolDelete,
 		},
 		{
+			Name:        "webinars_create_slot",
+			Description: "Create one joinable slot for a webinar. Args: webinar_id, starts_at (RFC3339), ends_at?, timezone?, capacity?, status?.",
+			InputSchema: schemaObject(map[string]any{
+				"webinar_id": map[string]any{"type": "integer"},
+				"starts_at":  map[string]any{"type": "string"},
+				"ends_at":    map[string]any{"type": "string"},
+				"timezone":   map[string]any{"type": "string"},
+				"capacity":   map[string]any{"type": "integer"},
+				"status":     map[string]any{"type": "string"},
+			}, []string{"webinar_id", "starts_at"}),
+			Handler: a.toolCreateSlot,
+		},
+		{
+			Name:        "webinars_list_slots",
+			Description: "List slots for a webinar. Args: webinar_id, from?, to?, available_only?.",
+			InputSchema: schemaObject(map[string]any{
+				"webinar_id":     map[string]any{"type": "integer"},
+				"from":           map[string]any{"type": "string"},
+				"to":             map[string]any{"type": "string"},
+				"available_only": map[string]any{"type": "boolean"},
+			}, []string{"webinar_id"}),
+			Handler: a.toolListSlots,
+		},
+		{
 			Name:        "webinars_register",
-			Description: "Add a registrant. Creates a CRM contact if bound. Args: webinar_id, email?, phone?, display_name?, source? (form|agent|import).",
+			Description: "Add a registrant. Creates a CRM contact if bound. Args: webinar_id, slot_id?, email?, phone?, display_name?, source? (form|agent|import).",
 			InputSchema: schemaObject(map[string]any{
 				"webinar_id":   map[string]any{"type": "integer"},
+				"slot_id":      map[string]any{"type": "integer"},
 				"email":        map[string]any{"type": "string"},
 				"phone":        map[string]any{"type": "string"},
 				"display_name": map[string]any{"type": "string"},
@@ -362,6 +394,10 @@ type Webinar struct {
 	Kind               string `json:"kind"`
 	ScheduledAt        string `json:"scheduled_at,omitempty"`
 	DurationMinutes    int    `json:"duration_minutes"`
+	SchedulingMode     string `json:"scheduling_mode,omitempty"`
+	Timezone           string `json:"timezone,omitempty"`
+	SlotDurationMin    int    `json:"slot_duration_minutes,omitempty"`
+	RegistrationPolicy string `json:"registration_policy,omitempty"`
 	Status             string `json:"status"`
 	StreamID           int64  `json:"stream_id,omitempty"`
 	RecordingPublished bool   `json:"recording_published"`
@@ -379,9 +415,26 @@ type Webinar struct {
 	ReplayURL       string `json:"replay_url,omitempty"`
 }
 
+type WebinarSlot struct {
+	ID            int64  `json:"id"`
+	ProjectID     string `json:"project_id,omitempty"`
+	WebinarID     int64  `json:"webinar_id"`
+	StartsAt      string `json:"starts_at"`
+	EndsAt        string `json:"ends_at,omitempty"`
+	Timezone      string `json:"timezone,omitempty"`
+	Capacity      int    `json:"capacity,omitempty"`
+	Status        string `json:"status"`
+	Source        string `json:"source"`
+	GenerationKey string `json:"generation_key,omitempty"`
+	Registered    int    `json:"registered_count,omitempty"`
+	Available     bool   `json:"available"`
+	CreatedAt     string `json:"created_at"`
+}
+
 type Registrant struct {
 	ID             int64  `json:"id"`
 	WebinarID      int64  `json:"webinar_id"`
+	SlotID         int64  `json:"slot_id,omitempty"`
 	ContactID      *int64 `json:"contact_id,omitempty"`
 	Email          string `json:"email,omitempty"`
 	Phone          string `json:"phone,omitempty"`
