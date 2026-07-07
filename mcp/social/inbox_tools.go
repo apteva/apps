@@ -1,12 +1,11 @@
 // inbox_tools — MCP handlers for the inbox_* surface. Reads go
-// straight at the local DB via inbox.go; replies / moderation
-// dispatch into per-platform code (not yet wired — every platform
-// returns status='unsupported' with a clear reason until handlers
-// land).
+// straight at the local DB via inbox.go; replies / moderation dispatch
+// into per-platform code and return a consistent envelope.
 package main
 
 import (
 	"fmt"
+	"strings"
 	"time"
 
 	sdk "github.com/apteva/app-sdk"
@@ -127,7 +126,13 @@ func setInboxStatusTool(ctx *sdk.AppCtx, args map[string]any, status string) (an
 	}, nil
 }
 
-// ─── inbox_reply (stub — per-platform dispatch lands later) ────────
+const (
+	inboxReplyModeAuto    = "auto"
+	inboxReplyModePublic  = "public"
+	inboxReplyModePrivate = "private"
+)
+
+// ─── inbox_reply ───────────────────────────────────────────────────
 
 // inboxOutcome is the unified per-target envelope every inbox_* tool
 // that touches a platform returns. Mirrors the post_metrics shape so
@@ -160,8 +165,50 @@ func (a *App) toolInboxReply(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	if item == nil {
 		return mcpError("inbox item not found"), nil
 	}
+	mode := strings.ToLower(strings.TrimSpace(toString(args["mode"])))
+	if mode == "" {
+		mode = inboxReplyModeAuto
+	}
+	switch mode {
+	case inboxReplyModeAuto, inboxReplyModePublic, inboxReplyModePrivate:
+	default:
+		return mcpError("mode must be auto, public, or private"), nil
+	}
 	if isProviderBackedAccount(ctx, pid, item.SocialAccountID, zernioProviderSlug) {
+		if mode == inboxReplyModePrivate {
+			return inboxOutcome{
+				InboxItemID:     item.ID,
+				SocialAccountID: item.SocialAccountID,
+				Platform:        item.Platform,
+				Status:          "unsupported",
+				Reason:          "provider-backed accounts do not expose private comment replies yet",
+			}, nil
+		}
 		return a.zernioInboxReply(ctx, item, body), nil
+	}
+	if mode == inboxReplyModePrivate {
+		if item.Kind != inboxKindComment || !platformSupportsInbox(item.Platform, item.Kind, "private_reply") {
+			return inboxOutcome{
+				InboxItemID:     item.ID,
+				SocialAccountID: item.SocialAccountID,
+				Platform:        item.Platform,
+				Status:          "unsupported",
+				Reason:          fmt.Sprintf("%s does not support private replies to %s items", item.Platform, item.Kind),
+			}, nil
+		}
+		switch item.Platform {
+		case "instagram":
+			return instagramInboxPrivateReply(ctx, item, body), nil
+		case "facebook":
+			return facebookInboxReply(ctx, item, body, mode), nil
+		}
+		return inboxOutcome{
+			InboxItemID:     item.ID,
+			SocialAccountID: item.SocialAccountID,
+			Platform:        item.Platform,
+			Status:          "unsupported",
+			Reason:          fmt.Sprintf("%s private reply handler not yet wired", item.Platform),
+		}, nil
 	}
 	if !platformSupportsInbox(item.Platform, item.Kind, "write") {
 		return inboxOutcome{
@@ -173,6 +220,8 @@ func (a *App) toolInboxReply(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		}, nil
 	}
 	switch item.Platform {
+	case "facebook":
+		return facebookInboxReply(ctx, item, body, mode), nil
 	case "instagram":
 		return instagramInboxReply(ctx, item, body), nil
 	case "twitter":
@@ -188,35 +237,8 @@ func (a *App) toolInboxReply(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 }
 
 func (a *App) toolInboxPrivateReply(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	pid := projectScope(ctx, args)
-	id := int64(intArg(args, "id", 0))
-	if id <= 0 {
-		return mcpError("id required"), nil
-	}
-	body, _ := args["body"].(string)
-	if body == "" {
-		return mcpError("body required"), nil
-	}
-	item, err := getInboxItem(ctx.AppDB(), pid, id)
-	if err != nil {
-		return nil, fmt.Errorf("get inbox item: %w", err)
-	}
-	if item == nil {
-		return mcpError("inbox item not found"), nil
-	}
-	if !platformSupportsInbox(item.Platform, inboxKindComment, "private_reply") {
-		return inboxOutcome{
-			InboxItemID:     item.ID,
-			SocialAccountID: item.SocialAccountID,
-			Platform:        item.Platform,
-			Status:          "unsupported",
-			Reason:          "private_reply is Instagram-only",
-		}, nil
-	}
-	if item.Platform == "instagram" {
-		return instagramInboxPrivateReply(ctx, item, body), nil
-	}
-	return inboxOutcome{Status: "unsupported", Reason: "private_reply handler missing"}, nil
+	args["mode"] = inboxReplyModePrivate
+	return a.toolInboxReply(ctx, args)
 }
 
 func (a *App) toolInboxHide(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -262,6 +284,9 @@ func (a *App) toolInboxDelete(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	if item.Platform == "instagram" {
 		return instagramInboxDelete(ctx, item), nil
 	}
+	if item.Platform == "facebook" {
+		return facebookInboxDelete(ctx, item), nil
+	}
 	return inboxOutcome{
 		InboxItemID:     item.ID,
 		SocialAccountID: item.SocialAccountID,
@@ -301,6 +326,9 @@ func moderateComment(ctx *sdk.AppCtx, args map[string]any, action string, hide b
 	}
 	if item.Platform == "instagram" {
 		return instagramInboxHide(ctx, item, hide), nil
+	}
+	if item.Platform == "facebook" {
+		return facebookInboxHide(ctx, item, hide), nil
 	}
 	return inboxOutcome{
 		InboxItemID:     item.ID,
@@ -426,6 +454,23 @@ func (a *App) toolInboxSync(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 			continue
 		}
 		switch platform {
+		case "facebook":
+			report, err := syncFacebookAccount(ctx, pid, id)
+			if err != nil {
+				results = append(results, syncResult{
+					SocialAccountID: id,
+					Platform:        platform,
+					Status:          "failed",
+					Error:           err.Error(),
+				})
+				continue
+			}
+			results = append(results, syncResult{
+				SocialAccountID: id,
+				Platform:        platform,
+				Status:          "ok",
+				Report:          report,
+			})
 		case "instagram":
 			report, err := syncInstagramAccount(ctx, id)
 			if err != nil {

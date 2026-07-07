@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: social
 display_name: Social
-version: 0.14.58
+version: 0.14.59
 description: |
   Schedule and publish posts to your social media accounts: X (Twitter),
   Facebook Pages, Instagram Business, LinkedIn, TikTok, YouTube, Reddit,
@@ -80,8 +80,8 @@ provides:
     - { name: inbox_mark_read,             description: "Mark one or more inbox items as read (local-only state)." }
     - { name: inbox_mark_unread,           description: "Mark one or more inbox items as unread (local-only state)." }
     - { name: inbox_archive,               description: "Archive one or more inbox items (hides from default list view)." }
-    - { name: inbox_reply,                 description: "Reply to a comment or DM. Routes by kind. Returns the standard {status, reason?, error?, external_id?, permalink?} envelope." }
-    - { name: inbox_private_reply,         description: "Instagram-only: reply to a comment by sending the author a DM." }
+    - { name: inbox_reply,                 description: "Reply to a comment or DM. For comment items, pass mode=public|private|auto; private is supported where the platform exposes private comment replies. Returns the standard {status, reason?, error?, external_id?, permalink?} envelope." }
+    - { name: inbox_private_reply,         description: "Compatibility alias for inbox_reply with mode=private." }
     - { name: inbox_hide,                  description: "Hide a comment on the platform side (Facebook, Instagram). Unsupported elsewhere." }
     - { name: inbox_unhide,                description: "Reverse inbox_hide." }
     - { name: inbox_like,                  description: "Like a comment on the platform side (Facebook, Instagram)." }

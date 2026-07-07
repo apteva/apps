@@ -44,7 +44,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: social
 display_name: Social
-version: 0.14.58
+version: 0.14.59
 description: |
   Schedule and publish posts to your social accounts (X, Facebook,
   Instagram, LinkedIn, TikTok, YouTube, Reddit, Pinterest, Threads).
@@ -104,8 +104,8 @@ provides:
     - { name: inbox_mark_read,            description: "Mark inbox items read (local-only)." }
     - { name: inbox_mark_unread,          description: "Mark inbox items unread (local-only)." }
     - { name: inbox_archive,              description: "Archive inbox items (local-only)." }
-    - { name: inbox_reply,                description: "Reply to a comment or DM (routes by kind)." }
-    - { name: inbox_private_reply,        description: "Reply to an Instagram comment as a DM (IG-only)." }
+    - { name: inbox_reply,                description: "Reply to a comment or DM. For comment items, pass mode=public|private|auto; private is supported where the platform exposes private comment replies." }
+    - { name: inbox_private_reply,        description: "Compatibility alias for inbox_reply with mode=private." }
     - { name: inbox_hide,                 description: "Hide a comment on the platform side." }
     - { name: inbox_unhide,               description: "Reverse inbox_hide." }
     - { name: inbox_like,                 description: "Like a comment on the platform side." }
@@ -262,7 +262,8 @@ type platformDef struct {
 // inboxCaps captures the per-platform inbound surface. A "Read" flag
 // means the poll worker pulls items of that kind for this platform;
 // a "Write" flag means inbox_reply / inbox_send can target it.
-// PrivateReply is Instagram-only (reply to a comment as a DM).
+// PrivateReply covers platforms that can answer a public comment with
+// a private message (Meta exposes this for Facebook Pages + IG).
 type inboxCaps struct {
 	CommentsRead, CommentsWrite                bool
 	CommentsHide, CommentsLike, CommentsDelete bool
@@ -363,11 +364,12 @@ var platforms = map[string]platformDef{
 			CommentsRead:   true,
 			CommentsWrite:  true,
 			CommentsHide:   true,
-			CommentsLike:   true,
 			CommentsDelete: true,
+			PrivateReply:   true,
+			DMsRead:        true,
+			DMsWrite:       true,
 			MentionsRead:   true,
 			ReviewsRead:    true,
-			ReviewsReply:   true,
 		},
 	},
 	"instagram": {
@@ -591,6 +593,9 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/provider-accounts/import", Handler: a.handleProviderAccountsImport},
 		// Import management (HTTP/panel only; intentionally not an MCP tool)
 		{Pattern: "/imports/run", Handler: a.handleImportsRun},
+		// Inbox management
+		{Pattern: "/inbox", Handler: a.handleInboxAPI},
+		{Pattern: "/inbox/", Handler: a.handleInboxItem},
 		// Post management
 		{Pattern: "/posts", Handler: a.handlePostsAPI},
 		{Pattern: "/posts/", Handler: a.handlePostsItem}, // /posts/:id and /posts/:id/retry
@@ -852,17 +857,18 @@ func (a *App) MCPTools() []sdk.Tool {
 		{
 			Name: "inbox_reply",
 			Description: "Reply to an inbox item. Routes by kind — a `comment` produces a child comment, a `dm` produces an outbound message in the same thread. Returns {status: ok|unsupported|skipped|failed, reason?, error?, external_id?, permalink?}. " +
-				"v1 status: every platform currently returns `unsupported` with reason `platform handler not yet wired`; Instagram + Twitter implementations land first. Args: id, body, media_storage_ids?.",
+				"For comment items, mode controls the route: `auto`/`public` creates a public child comment, `private` sends a private reply where supported (Facebook Pages and Instagram Business). Args: id, body, mode? (`auto` default, `public`, `private`), media_storage_ids?.",
 			InputSchema: schemaObject(map[string]any{
 				"id":                map[string]any{"type": "integer"},
 				"body":              map[string]any{"type": "string"},
+				"mode":              map[string]any{"type": "string", "enum": []string{"auto", "public", "private"}, "default": "auto"},
 				"media_storage_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}},
 			}, []string{"id", "body"}),
 			Handler: a.toolInboxReply,
 		},
 		{
 			Name:        "inbox_private_reply",
-			Description: "Reply to an Instagram comment by sending the author a DM. IG-only — returns `unsupported` for every other platform. Args: id (must be a comment kind), body.",
+			Description: "Compatibility alias for inbox_reply with mode=private. Sends a private reply to a comment where supported (Facebook Pages and Instagram Business). Args: id (must be a comment kind), body.",
 			InputSchema: schemaObject(map[string]any{
 				"id":   map[string]any{"type": "integer"},
 				"body": map[string]any{"type": "string"},
@@ -6666,6 +6672,31 @@ func scopedQueryArgs(r *http.Request, keys ...string) map[string]any {
 	return args
 }
 
+func splitQueryList(raw string) []string {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if s := strings.TrimSpace(p); s != "" {
+			out = append(out, s)
+		}
+	}
+	return out
+}
+
+func splitQueryIDs(raw string) []int64 {
+	parts := splitQueryList(raw)
+	out := make([]int64, 0, len(parts))
+	for _, p := range parts {
+		if id := toInt64Loose(p); id > 0 {
+			out = append(out, id)
+		}
+	}
+	return out
+}
+
 func (a *App) handleAccountsAPI(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "GET only", http.StatusMethodNotAllowed)
@@ -6677,6 +6708,169 @@ func (a *App) handleAccountsAPI(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, out)
+}
+
+func (a *App) handleInboxAPI(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "GET only", http.StatusMethodNotAllowed)
+		return
+	}
+	q := r.URL.Query()
+	args := projectArgsFromRequest(r)
+	if ids := splitQueryIDs(q.Get("social_account_ids")); len(ids) > 0 {
+		args["social_account_ids"] = ids
+	}
+	if kinds := splitQueryList(q.Get("kinds")); len(kinds) > 0 {
+		args["kinds"] = kinds
+	}
+	if statuses := splitQueryList(q.Get("status")); len(statuses) > 0 {
+		args["status"] = statuses
+	}
+	if since := strings.TrimSpace(q.Get("since")); since != "" {
+		args["since"] = since
+	}
+	if limit := strings.TrimSpace(q.Get("limit")); limit != "" {
+		args["limit"] = limit
+	}
+	out, err := a.toolInboxList(globalCtx, args)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	writeJSON(w, out)
+}
+
+func (a *App) handleInboxItem(w http.ResponseWriter, r *http.Request) {
+	rest := strings.Trim(strings.TrimPrefix(r.URL.Path, "/inbox/"), "/")
+	if rest == "" {
+		http.Error(w, "id required", http.StatusBadRequest)
+		return
+	}
+	if rest == "sync" {
+		if r.Method != http.MethodPost {
+			http.Error(w, "POST only", http.StatusMethodNotAllowed)
+			return
+		}
+		var body struct {
+			SocialAccountIDs []int64 `json:"social_account_ids"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil && !errors.Is(err, io.EOF) {
+			http.Error(w, "invalid json: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		args := projectArgsFromRequest(r)
+		if len(body.SocialAccountIDs) > 0 {
+			args["social_account_ids"] = body.SocialAccountIDs
+		}
+		out, err := a.toolInboxSync(globalCtx, args)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, out)
+		return
+	}
+
+	parts := strings.Split(rest, "/")
+	id, err := strconv.ParseInt(parts[0], 10, 64)
+	if err != nil || id <= 0 {
+		http.Error(w, "invalid id", http.StatusBadRequest)
+		return
+	}
+	if len(parts) == 1 {
+		if r.Method != http.MethodGet {
+			http.Error(w, "GET only", http.StatusMethodNotAllowed)
+			return
+		}
+		args := projectArgsFromRequest(r)
+		args["id"] = id
+		args["with_thread"] = r.URL.Query().Get("with_thread") != "false"
+		out, err := a.toolInboxGet(globalCtx, args)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, out)
+		return
+	}
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST only", http.StatusMethodNotAllowed)
+		return
+	}
+	args := projectArgsFromRequest(r)
+	args["id"] = id
+	switch parts[1] {
+	case "read":
+		out, err := a.toolInboxMarkRead(globalCtx, args)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, out)
+	case "unread":
+		out, err := a.toolInboxMarkUnread(globalCtx, args)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, out)
+	case "archive":
+		out, err := a.toolInboxArchive(globalCtx, args)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, out)
+	case "reply", "private_reply":
+		var body struct {
+			Body string `json:"body"`
+			Mode string `json:"mode"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			http.Error(w, "invalid json: "+err.Error(), http.StatusBadRequest)
+			return
+		}
+		args["body"] = body.Body
+		if parts[1] == "private_reply" {
+			args["mode"] = inboxReplyModePrivate
+		} else if strings.TrimSpace(body.Mode) != "" {
+			args["mode"] = body.Mode
+		}
+		var out any
+		if parts[1] == "private_reply" {
+			out, err = a.toolInboxPrivateReply(globalCtx, args)
+		} else {
+			out, err = a.toolInboxReply(globalCtx, args)
+		}
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, out)
+	case "hide":
+		out, err := a.toolInboxHide(globalCtx, args)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, out)
+	case "unhide":
+		out, err := a.toolInboxUnhide(globalCtx, args)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, out)
+	case "delete":
+		out, err := a.toolInboxDelete(globalCtx, args)
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, out)
+	default:
+		http.Error(w, "not found", http.StatusNotFound)
+	}
 }
 
 func (a *App) handleAccountsStart(w http.ResponseWriter, r *http.Request) {

@@ -929,6 +929,222 @@ func TestInboxReply_ZernioBackedDMUsesProvider(t *testing.T) {
 	}
 }
 
+func TestInboxReply_FacebookCommentPublic(t *testing.T) {
+	pf := newRecordingPlatform()
+	pf.executeResponses["reply_to_comment"] = &sdk.ExecuteResult{
+		Success: true,
+		Status:  200,
+		Data:    json.RawMessage(`{"id":"reply_1"}`),
+	}
+	ctx := newSocialCtx(t, pf)
+	acctID := insertFacebookInboxAccount(t, ctx)
+	itemID, _, err := upsertInboxItem(ctx.AppDB(), inboxUpsertInput{
+		ProjectID:        "test-proj",
+		SocialAccountID:  acctID,
+		Platform:         "facebook",
+		Kind:             inboxKindComment,
+		ExternalID:       "comment_1",
+		ExternalPostID:   "page_1_post_1",
+		AuthorExternalID: "user_1",
+		Body:             "hello",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := (&App{}).toolInboxReply(ctx, map[string]any{"id": itemID, "body": "thanks", "mode": "public"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := out.(inboxOutcome)
+	if res.Status != "ok" || res.ExternalID != "reply_1" {
+		t.Fatalf("unexpected facebook public reply result: %+v", res)
+	}
+	if len(pf.executeCalls) != 1 || pf.executeCalls[0].Tool != "reply_to_comment" {
+		t.Fatalf("expected reply_to_comment call, got %+v", pf.executeCalls)
+	}
+	input := pf.executeCalls[0].Input
+	if input["commentId"] != "comment_1" || input["message"] != "thanks" || input["access_token"] != "page_tok" {
+		t.Fatalf("unexpected reply_to_comment input: %+v", input)
+	}
+}
+
+func TestInboxReply_FacebookCommentPrivate(t *testing.T) {
+	pf := newRecordingPlatform()
+	pf.executeResponses["facebook_private_reply_to_comment"] = &sdk.ExecuteResult{
+		Success: true,
+		Status:  200,
+		Data:    json.RawMessage(`{"message_id":"dm_1"}`),
+	}
+	ctx := newSocialCtx(t, pf)
+	acctID := insertFacebookInboxAccount(t, ctx)
+	itemID, _, err := upsertInboxItem(ctx.AppDB(), inboxUpsertInput{
+		ProjectID:        "test-proj",
+		SocialAccountID:  acctID,
+		Platform:         "facebook",
+		Kind:             inboxKindComment,
+		ExternalID:       "comment_1",
+		ExternalPostID:   "page_1_post_1",
+		AuthorExternalID: "user_1",
+		Body:             "hello",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := (&App{}).toolInboxReply(ctx, map[string]any{"id": itemID, "body": "sent privately", "mode": "private"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := out.(inboxOutcome)
+	if res.Status != "ok" || res.ExternalID != "dm_1" {
+		t.Fatalf("unexpected facebook private reply result: %+v", res)
+	}
+	if len(pf.executeCalls) != 1 || pf.executeCalls[0].Tool != "facebook_private_reply_to_comment" {
+		t.Fatalf("expected facebook_private_reply_to_comment call, got %+v", pf.executeCalls)
+	}
+	input := pf.executeCalls[0].Input
+	if input["commentId"] != "comment_1" || input["message"] != "sent privately" || input["access_token"] != "page_tok" {
+		t.Fatalf("unexpected private reply input: %+v", input)
+	}
+}
+
+func TestInboxReply_FacebookDM(t *testing.T) {
+	pf := newRecordingPlatform()
+	pf.executeResponses["facebook_send_message"] = &sdk.ExecuteResult{
+		Success: true,
+		Status:  200,
+		Data:    json.RawMessage(`{"message_id":"m_reply_1"}`),
+	}
+	ctx := newSocialCtx(t, pf)
+	acctID := insertFacebookInboxAccount(t, ctx)
+	itemID, _, err := upsertInboxItem(ctx.AppDB(), inboxUpsertInput{
+		ProjectID:        "test-proj",
+		SocialAccountID:  acctID,
+		Platform:         "facebook",
+		Kind:             inboxKindDM,
+		ExternalID:       "m_1",
+		ExternalPostID:   "conv_1",
+		AuthorExternalID: "psid_1",
+		AuthorName:       "Reader",
+		Body:             "hello",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := (&App{}).toolInboxReply(ctx, map[string]any{"id": itemID, "body": "hello back"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := out.(inboxOutcome)
+	if res.Status != "ok" || res.ExternalID != "m_reply_1" {
+		t.Fatalf("unexpected facebook dm reply result: %+v", res)
+	}
+	if len(pf.executeCalls) != 1 || pf.executeCalls[0].Tool != "facebook_send_message" {
+		t.Fatalf("expected facebook_send_message call, got %+v", pf.executeCalls)
+	}
+	input := pf.executeCalls[0].Input
+	if input["pageId"] != "page_1" || input["access_token"] != "page_tok" {
+		t.Fatalf("unexpected facebook_send_message input: %+v", input)
+	}
+	recipient := input["recipient"].(map[string]any)
+	message := input["message"].(map[string]any)
+	if recipient["id"] != "psid_1" || message["text"] != "hello back" {
+		t.Fatalf("unexpected dm payload: %+v", input)
+	}
+}
+
+func TestInboxSync_FacebookPullsCommentsAndDMs(t *testing.T) {
+	pf := newRecordingPlatform()
+	pf.executeResponses["list_media_comments"] = &sdk.ExecuteResult{
+		Success: true,
+		Status:  200,
+		Data: json.RawMessage(`{"data":[{
+			"id":"c_1",
+			"message":"Nice",
+			"created_time":"2026-07-07T10:00:00+0000",
+			"from":{"id":"u_1","name":"Reader","picture":{"data":{"url":"https://example.com/u.jpg"}}}
+		}]}`),
+	}
+	pf.executeResponses["facebook_list_conversations"] = &sdk.ExecuteResult{
+		Success: true,
+		Status:  200,
+		Data:    json.RawMessage(`{"data":[{"id":"conv_1"}]}`),
+	}
+	pf.executeResponses["facebook_get_conversation"] = &sdk.ExecuteResult{
+		Success: true,
+		Status:  200,
+		Data: json.RawMessage(`{"id":"conv_1","messages":{"data":[
+			{"id":"m_page","message":"hello","created_time":"2026-07-07T10:01:00+0000","from":{"id":"page_1","name":"Page"}},
+			{"id":"m_user","message":"hi","created_time":"2026-07-07T10:02:00+0000","from":{"id":"psid_1","name":"Reader","picture":{"data":{"url":"https://example.com/r.jpg"}}}}
+		]}}`),
+	}
+	pf.executeResponses["facebook_list_tagged"] = &sdk.ExecuteResult{Success: true, Status: 200, Data: json.RawMessage(`{"data":[]}`)}
+	pf.executeResponses["facebook_list_reviews"] = &sdk.ExecuteResult{Success: true, Status: 200, Data: json.RawMessage(`{"data":[]}`)}
+	ctx := newSocialCtx(t, pf)
+	acctID := insertFacebookInboxAccount(t, ctx)
+	postRes, err := ctx.AppDB().Exec(
+		`INSERT INTO posts (project_id, body, status, published_at)
+		 VALUES ('test-proj', 'body', 'published', datetime('now'))`,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	postID, _ := postRes.LastInsertId()
+	if _, err := ctx.AppDB().Exec(
+		`INSERT INTO post_targets (post_id, social_account_id, status, platform_post_id, published_at)
+		 VALUES (?, ?, 'published', 'page_1_post_1', datetime('now'))`,
+		postID, acctID,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := (&App{}).toolInboxSync(ctx, map[string]any{"social_account_ids": []any{acctID}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rawResults, _ := json.Marshal(out.(map[string]any)["results"])
+	var results []struct {
+		Platform string `json:"platform"`
+		Status   string `json:"status"`
+	}
+	if err := json.Unmarshal(rawResults, &results); err != nil {
+		t.Fatal(err)
+	}
+	if len(results) != 1 {
+		t.Fatalf("results = %+v", results)
+	}
+	got := results[0]
+	if got.Status != "ok" || got.Platform != "facebook" {
+		t.Fatalf("sync result = %+v", got)
+	}
+	var comments, dms int
+	if err := ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM inbox_items WHERE kind='comment' AND author_name='Reader'`).Scan(&comments); err != nil {
+		t.Fatal(err)
+	}
+	if err := ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM inbox_items WHERE kind='dm' AND author_external_id='psid_1'`).Scan(&dms); err != nil {
+		t.Fatal(err)
+	}
+	if comments != 1 || dms != 1 {
+		t.Fatalf("synced comments=%d dms=%d, want 1/1", comments, dms)
+	}
+}
+
+func insertFacebookInboxAccount(t *testing.T, ctx *sdk.AppCtx) int64 {
+	t.Helper()
+	res, err := ctx.AppDB().Exec(
+		`INSERT INTO social_accounts
+		   (project_id, platform, connection_id, external_account_id, display_name, status, page_credentials)
+		 VALUES ('test-proj', 'facebook', 42, 'page_1', 'Page', 'active', '{"access_token":"page_tok"}')`,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, _ := res.LastInsertId()
+	return id
+}
+
 func TestPostCreate_FacebookUsesMessageAndPageId(t *testing.T) {
 	// Facebook's post_to_page expects {pageId, message}. Our adapter
 	// must remap from the social_accounts row's external_account_id
