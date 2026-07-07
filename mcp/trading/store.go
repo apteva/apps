@@ -122,11 +122,41 @@ type PortfolioExecutionSettings struct {
 	SlippageBps float64
 }
 
+type Strategy struct {
+	ID               int64          `json:"id"`
+	ProjectID        string         `json:"project_id,omitempty"`
+	Name             string         `json:"name"`
+	Description      string         `json:"description"`
+	Status           string         `json:"status"`
+	Definition       map[string]any `json:"definition"`
+	Version          int            `json:"version"`
+	CreatedByAgentID int64          `json:"created_by_agent_id,omitempty"`
+	CreatedAt        string         `json:"created_at"`
+	UpdatedAt        string         `json:"updated_at"`
+}
+
+type StrategyAssignment struct {
+	ID              int64  `json:"id"`
+	ProjectID       string `json:"project_id,omitempty"`
+	PortfolioID     int64  `json:"portfolio_id"`
+	StrategyID      int64  `json:"strategy_id"`
+	ControlMode     string `json:"control_mode"`
+	Status          string `json:"status"`
+	AssignedAgentID int64  `json:"assigned_agent_id,omitempty"`
+	Cadence         string `json:"cadence"`
+	LastEvaluatedAt string `json:"last_evaluated_at,omitempty"`
+	CreatedAt       string `json:"created_at"`
+	UpdatedAt       string `json:"updated_at"`
+}
+
 type BacktestRun struct {
 	ID                     int64          `json:"id"`
 	ProjectID              string         `json:"project_id,omitempty"`
 	PortfolioID            int64          `json:"portfolio_id"`
 	SourceAgentID          int64          `json:"source_agent_id"`
+	StrategyID             int64          `json:"strategy_id,omitempty"`
+	RunKind                string         `json:"run_kind,omitempty"`
+	StrategyVersion        int            `json:"strategy_version,omitempty"`
 	EnvironmentID          string         `json:"environment_id,omitempty"`
 	EnvironmentAgentID     int64          `json:"environment_agent_id,omitempty"`
 	EnvironmentPortfolioID int64          `json:"environment_portfolio_id,omitempty"`
@@ -930,6 +960,168 @@ func dbGetMark(db *sql.DB, symbol string) (*Mark, error) {
 	return &m, nil
 }
 
+// ─── Strategies ────────────────────────────────────────────────────
+
+func dbCreateStrategy(db *sql.DB, s *Strategy) (int64, error) {
+	raw, err := json.Marshal(s.Definition)
+	if err != nil {
+		return 0, err
+	}
+	status := strings.TrimSpace(s.Status)
+	if status == "" {
+		status = "draft"
+	}
+	res, err := db.Exec(`
+		INSERT INTO strategies (project_id, name, description, status, definition_json, version, created_by_agent_id)
+		VALUES (?, ?, ?, ?, ?, ?, NULLIF(?, 0))`,
+		s.ProjectID, s.Name, s.Description, status, string(raw), maxInt(s.Version, 1), s.CreatedByAgentID)
+	if err != nil {
+		return 0, err
+	}
+	return res.LastInsertId()
+}
+
+func dbUpdateStrategy(db *sql.DB, projectID string, id int64, patch *Strategy) (*Strategy, error) {
+	cur, err := dbGetStrategy(db, projectID, id)
+	if err != nil {
+		return nil, err
+	}
+	if strings.TrimSpace(patch.Name) != "" {
+		cur.Name = strings.TrimSpace(patch.Name)
+	}
+	if patch.Description != "" {
+		cur.Description = patch.Description
+	}
+	if strings.TrimSpace(patch.Status) != "" {
+		cur.Status = strings.TrimSpace(patch.Status)
+	}
+	if patch.Definition != nil {
+		cur.Definition = patch.Definition
+		cur.Version++
+	}
+	raw, err := json.Marshal(cur.Definition)
+	if err != nil {
+		return nil, err
+	}
+	_, err = db.Exec(`
+		UPDATE strategies
+		   SET name = ?, description = ?, status = ?, definition_json = ?, version = ?,
+		       updated_at = CURRENT_TIMESTAMP
+		 WHERE id = ? AND project_id = ?`,
+		cur.Name, cur.Description, cur.Status, string(raw), cur.Version, id, projectID)
+	if err != nil {
+		return nil, err
+	}
+	return dbGetStrategy(db, projectID, id)
+}
+
+func dbGetStrategy(db *sql.DB, projectID string, id int64) (*Strategy, error) {
+	row := db.QueryRow(`
+		SELECT id, project_id, name, description, status, definition_json, version,
+		       COALESCE(created_by_agent_id, 0), created_at, updated_at
+		FROM strategies WHERE id = ? AND project_id = ?`, id, projectID)
+	return scanStrategy(row)
+}
+
+func dbListStrategies(db *sql.DB, projectID, status string) ([]*Strategy, error) {
+	q := `
+		SELECT id, project_id, name, description, status, definition_json, version,
+		       COALESCE(created_by_agent_id, 0), created_at, updated_at
+		FROM strategies
+		WHERE project_id = ? AND (? = '' OR status = ?)
+		ORDER BY updated_at DESC, id DESC`
+	rows, err := db.Query(q, projectID, status, status)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []*Strategy{}
+	for rows.Next() {
+		s, err := scanStrategyRows(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, s)
+	}
+	return out, rows.Err()
+}
+
+func scanStrategy(row *sql.Row) (*Strategy, error) {
+	var s Strategy
+	var raw string
+	if err := row.Scan(&s.ID, &s.ProjectID, &s.Name, &s.Description, &s.Status,
+		&raw, &s.Version, &s.CreatedByAgentID, &s.CreatedAt, &s.UpdatedAt); err != nil {
+		return nil, err
+	}
+	decodeStrategyDefinition(&s, raw)
+	return &s, nil
+}
+
+func scanStrategyRows(rows *sql.Rows) (*Strategy, error) {
+	var s Strategy
+	var raw string
+	if err := rows.Scan(&s.ID, &s.ProjectID, &s.Name, &s.Description, &s.Status,
+		&raw, &s.Version, &s.CreatedByAgentID, &s.CreatedAt, &s.UpdatedAt); err != nil {
+		return nil, err
+	}
+	decodeStrategyDefinition(&s, raw)
+	return &s, nil
+}
+
+func decodeStrategyDefinition(s *Strategy, raw string) {
+	_ = json.Unmarshal([]byte(raw), &s.Definition)
+	if s.Definition == nil {
+		s.Definition = map[string]any{}
+	}
+}
+
+func dbAssignStrategy(db *sql.DB, a *StrategyAssignment) (int64, error) {
+	control := strings.TrimSpace(a.ControlMode)
+	if control == "" {
+		control = "strategy"
+	}
+	cadence := strings.TrimSpace(a.Cadence)
+	if cadence == "" {
+		cadence = "1d"
+	}
+	if err := dbUnassignStrategy(db, a.ProjectID, a.PortfolioID); err != nil {
+		return 0, err
+	}
+	res, err := db.Exec(`
+		INSERT INTO portfolio_strategy_assignments (
+			project_id, portfolio_id, strategy_id, control_mode, status, assigned_agent_id, cadence
+		) VALUES (?, ?, ?, ?, 'active', NULLIF(?, 0), ?)`,
+		a.ProjectID, a.PortfolioID, a.StrategyID, control, a.AssignedAgentID, cadence)
+	if err != nil {
+		return 0, err
+	}
+	return res.LastInsertId()
+}
+
+func dbActiveStrategyAssignment(db *sql.DB, projectID string, portfolioID int64) (*StrategyAssignment, error) {
+	row := db.QueryRow(`
+		SELECT id, project_id, portfolio_id, strategy_id, control_mode, status,
+		       COALESCE(assigned_agent_id, 0), cadence, COALESCE(last_evaluated_at, ''),
+		       created_at, updated_at
+		FROM portfolio_strategy_assignments
+		WHERE project_id = ? AND portfolio_id = ? AND status = 'active'
+		ORDER BY id DESC LIMIT 1`, projectID, portfolioID)
+	var a StrategyAssignment
+	if err := row.Scan(&a.ID, &a.ProjectID, &a.PortfolioID, &a.StrategyID, &a.ControlMode,
+		&a.Status, &a.AssignedAgentID, &a.Cadence, &a.LastEvaluatedAt, &a.CreatedAt, &a.UpdatedAt); err != nil {
+		return nil, err
+	}
+	return &a, nil
+}
+
+func dbUnassignStrategy(db *sql.DB, projectID string, portfolioID int64) error {
+	_, err := db.Exec(`
+		UPDATE portfolio_strategy_assignments
+		   SET status = 'inactive', updated_at = CURRENT_TIMESTAMP
+		 WHERE project_id = ? AND portfolio_id = ? AND status = 'active'`, projectID, portfolioID)
+	return err
+}
+
 // ─── Backtests ─────────────────────────────────────────────────────
 
 func dbCreateBacktestRun(db *sql.DB, run *BacktestRun) (int64, error) {
@@ -947,11 +1139,13 @@ func dbCreateBacktestRun(db *sql.DB, run *BacktestRun) (int64, error) {
 	}
 	res, err := db.Exec(`
 		INSERT INTO backtest_runs (
-			project_id, portfolio_id, source_agent_id, name, status, symbols,
+			project_id, portfolio_id, source_agent_id, strategy_id, run_kind, strategy_version,
+			name, status, symbols,
 			start_at, end_at, interval, starting_cash, fee_bps, slippage_bps,
 			total_steps, summary_json
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		run.ProjectID, run.PortfolioID, run.SourceAgentID, run.Name, status, string(symbolsJSON),
+		) VALUES (?, ?, ?, NULLIF(?, 0), ?, NULLIF(?, 0), ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		run.ProjectID, run.PortfolioID, run.SourceAgentID, run.StrategyID,
+		nonEmpty(run.RunKind, "agent"), run.StrategyVersion, run.Name, status, string(symbolsJSON),
 		run.StartAt, run.EndAt, run.Interval, run.StartingCash, run.FeeBps, run.SlippageBps,
 		run.TotalSteps, string(summaryJSON))
 	if err != nil {
@@ -963,6 +1157,7 @@ func dbCreateBacktestRun(db *sql.DB, run *BacktestRun) (int64, error) {
 func dbGetBacktestRun(db *sql.DB, projectID string, id int64) (*BacktestRun, error) {
 	row := db.QueryRow(`
 		SELECT id, project_id, portfolio_id, source_agent_id,
+		       COALESCE(strategy_id, 0), COALESCE(run_kind, 'agent'), COALESCE(strategy_version, 0),
 		       COALESCE(environment_id, ''), COALESCE(environment_agent_id, 0),
 		       COALESCE(environment_portfolio_id, 0), name, status, symbols,
 		       start_at, end_at, interval, starting_cash, fee_bps, slippage_bps,
@@ -975,6 +1170,7 @@ func dbGetBacktestRun(db *sql.DB, projectID string, id int64) (*BacktestRun, err
 func dbListBacktestRuns(db *sql.DB, projectID string, portfolioID int64) ([]*BacktestRun, error) {
 	rows, err := db.Query(`
 		SELECT id, project_id, portfolio_id, source_agent_id,
+		       COALESCE(strategy_id, 0), COALESCE(run_kind, 'agent'), COALESCE(strategy_version, 0),
 		       COALESCE(environment_id, ''), COALESCE(environment_agent_id, 0),
 		       COALESCE(environment_portfolio_id, 0), name, status, symbols,
 		       start_at, end_at, interval, starting_cash, fee_bps, slippage_bps,
@@ -1002,6 +1198,7 @@ func scanBacktestRun(row *sql.Row) (*BacktestRun, error) {
 	var run BacktestRun
 	var symbolsJSON, summaryJSON string
 	if err := row.Scan(&run.ID, &run.ProjectID, &run.PortfolioID, &run.SourceAgentID,
+		&run.StrategyID, &run.RunKind, &run.StrategyVersion,
 		&run.EnvironmentID, &run.EnvironmentAgentID, &run.EnvironmentPortfolioID,
 		&run.Name, &run.Status, &symbolsJSON, &run.StartAt, &run.EndAt, &run.Interval,
 		&run.StartingCash, &run.FeeBps, &run.SlippageBps, &run.CurrentStep, &run.TotalSteps,
@@ -1016,6 +1213,7 @@ func scanBacktestRunRows(rows *sql.Rows) (*BacktestRun, error) {
 	var run BacktestRun
 	var symbolsJSON, summaryJSON string
 	if err := rows.Scan(&run.ID, &run.ProjectID, &run.PortfolioID, &run.SourceAgentID,
+		&run.StrategyID, &run.RunKind, &run.StrategyVersion,
 		&run.EnvironmentID, &run.EnvironmentAgentID, &run.EnvironmentPortfolioID,
 		&run.Name, &run.Status, &symbolsJSON, &run.StartAt, &run.EndAt, &run.Interval,
 		&run.StartingCash, &run.FeeBps, &run.SlippageBps, &run.CurrentStep, &run.TotalSteps,
@@ -1034,6 +1232,9 @@ func decodeBacktestJSON(run *BacktestRun, symbolsJSON, summaryJSON string) {
 	_ = json.Unmarshal([]byte(summaryJSON), &run.Summary)
 	if run.Summary == nil {
 		run.Summary = map[string]any{}
+	}
+	if run.RunKind == "" {
+		run.RunKind = "agent"
 	}
 }
 
@@ -1289,6 +1490,20 @@ func nullable(p *float64) any {
 		return nil
 	}
 	return *p
+}
+
+func maxInt(a, b int) int {
+	if a > b {
+		return a
+	}
+	return b
+}
+
+func nonEmpty(value, fallback string) string {
+	if strings.TrimSpace(value) == "" {
+		return fallback
+	}
+	return value
 }
 
 func utcDay(t time.Time) string {

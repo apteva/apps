@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: trading
 display_name: Trading
-version: 0.4.24
+version: 0.4.25
 description: |
   Trading desk for Apteva agents. Multi-portfolio, multi-asset (equity,
   etf, crypto, polymarket prediction markets). Each portfolio runs in
@@ -122,6 +122,22 @@ provides:
       description: "Read journal entries for a portfolio (recent or filtered by kind)."
     - name: portfolio_pause
       description: "Pause this portfolio (no new orders). Self-only — resume is human-only via REST."
+    - name: strategy_create
+      description: "Create a deterministic strategy definition with indicator/ranking/allocation rules."
+    - name: strategy_update
+      description: "Update a deterministic strategy; definition changes create a new version."
+    - name: strategy_get
+      description: "Fetch one saved deterministic strategy."
+    - name: strategy_list
+      description: "List saved deterministic strategies."
+    - name: strategy_validate
+      description: "Validate a deterministic strategy definition without saving it."
+    - name: strategy_evaluate
+      description: "Evaluate a saved strategy against current market data."
+    - name: strategy_assign
+      description: "Assign a saved strategy to a portfolio for strategy or hybrid control."
+    - name: strategy_backtest_create
+      description: "Create a deterministic strategy backtest using the existing backtest tables."
     - name: backtest_market_step
       description: "Internal backtest runner tool: load replay prices into an isolated environment."
   # Same shape as crm + storage: a panel mounted in the dashboard's

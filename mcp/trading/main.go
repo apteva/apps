@@ -43,7 +43,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: trading
 display_name: Trading
-version: 0.4.24
+version: 0.4.25
 description: Trading desk for Apteva agents (paper + live via per-portfolio broker integration).
 author: Apteva
 scopes: [project, global]
@@ -124,6 +124,22 @@ provides:
       description: "Read journal entries for a portfolio."
     - name: portfolio_pause
       description: "Pause a portfolio (no new orders)."
+    - name: strategy_create
+      description: "Create a deterministic strategy definition."
+    - name: strategy_update
+      description: "Update a deterministic strategy."
+    - name: strategy_get
+      description: "Fetch one saved deterministic strategy."
+    - name: strategy_list
+      description: "List saved deterministic strategies."
+    - name: strategy_validate
+      description: "Validate a deterministic strategy definition."
+    - name: strategy_evaluate
+      description: "Evaluate a saved strategy against current market data."
+    - name: strategy_assign
+      description: "Assign a saved strategy to a portfolio."
+    - name: strategy_backtest_create
+      description: "Create a deterministic strategy backtest."
     - name: backtest_market_step
       description: "Internal backtest runner tool: load replay prices into an isolated environment."
   ui_panels:
@@ -273,6 +289,8 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/history/", Handler: a.handleHTTPHistory},
 		{Pattern: "/universe", Handler: a.handleHTTPUniverse},
 		{Pattern: "/brokers", Handler: a.handleHTTPBrokers},
+		{Pattern: "/strategies", Handler: a.handleHTTPStrategies},
+		{Pattern: "/strategies/", Handler: a.handleHTTPStrategies},
 		{Pattern: "/backtests", Handler: a.handleHTTPBacktests},
 		{Pattern: "/backtests/", Handler: a.handleHTTPBacktests},
 		{Pattern: "/healthz/details", Handler: a.handleHTTPHealthDetails},

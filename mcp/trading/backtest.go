@@ -152,6 +152,7 @@ func (a *App) handleHTTPPortfolioBacktests(w http.ResponseWriter, r *http.Reques
 		var body struct {
 			Name         string   `json:"name"`
 			AgentID      int64    `json:"agent_id"`
+			StrategyID   int64    `json:"strategy_id"`
 			Symbols      []string `json:"symbols"`
 			StartAt      string   `json:"start_at"`
 			EndAt        string   `json:"end_at"`
@@ -164,26 +165,48 @@ func (a *App) handleHTTPPortfolioBacktests(w http.ResponseWriter, r *http.Reques
 			httpErr(w, 400, err.Error())
 			return
 		}
-		agentID := body.AgentID
-		if agentID == 0 {
-			agentID = portfolioAgentIDInt(pf.AgentID)
-		}
-		if agentID == 0 {
-			httpErr(w, 400, "agent_id required or bind an agent to this portfolio")
-			return
-		}
-		if globalCtx.PlatformAPI() != nil {
-			agent, err := globalCtx.PlatformAPI().GetAgent(agentID)
-			if err != nil {
-				httpErr(w, 400, fmt.Sprintf("agent %d not found", agentID))
-				return
-			}
-			if agent.ProjectID != "" && agent.ProjectID != projectID {
-				httpErr(w, 400, "agent belongs to a different project")
-				return
-			}
-		}
 		symbols := cleanSymbols(body.Symbols)
+		var strategy *Strategy
+		runKind := "agent"
+		strategyVersion := 0
+		agentID := body.AgentID
+		if body.StrategyID > 0 {
+			runKind = "strategy"
+			var err error
+			strategy, err = dbGetStrategy(globalCtx.AppDB(), projectID, body.StrategyID)
+			if err != nil {
+				httpErr(w, 400, fmt.Sprintf("strategy %d not found", body.StrategyID))
+				return
+			}
+			def, _, err := validateStrategyDefinition(strategy.Definition)
+			if err != nil {
+				httpErr(w, 400, err.Error())
+				return
+			}
+			strategyVersion = strategy.Version
+			if len(symbols) == 0 {
+				symbols = def.Universe
+			}
+		} else {
+			if agentID == 0 {
+				agentID = portfolioAgentIDInt(pf.AgentID)
+			}
+			if agentID == 0 {
+				httpErr(w, 400, "agent_id required or bind an agent to this portfolio")
+				return
+			}
+			if globalCtx.PlatformAPI() != nil {
+				agent, err := globalCtx.PlatformAPI().GetAgent(agentID)
+				if err != nil {
+					httpErr(w, 400, fmt.Sprintf("agent %d not found", agentID))
+					return
+				}
+				if agent.ProjectID != "" && agent.ProjectID != projectID {
+					httpErr(w, 400, "agent belongs to a different project")
+					return
+				}
+			}
+		}
 		if len(symbols) == 0 {
 			symbols = pf.Watchlist
 		}
@@ -203,35 +226,50 @@ func (a *App) handleHTTPPortfolioBacktests(w http.ResponseWriter, r *http.Reques
 		}
 		name := strings.TrimSpace(body.Name)
 		if name == "" {
-			name = fmt.Sprintf("%s backtest", pf.Name)
+			if strategy != nil {
+				name = fmt.Sprintf("%s strategy backtest", strategy.Name)
+			} else {
+				name = fmt.Sprintf("%s backtest", pf.Name)
+			}
 		}
 		startingCash := body.StartingCash
 		if startingCash <= 0 {
 			startingCash = pf.StartingCash
 		}
 		id, err := dbCreateBacktestRun(globalCtx.AppDB(), &BacktestRun{
-			ProjectID:     projectID,
-			PortfolioID:   pf.ID,
-			SourceAgentID: agentID,
-			Name:          name,
-			Status:        "queued",
-			Symbols:       symbols,
-			StartAt:       startAt.Format("2006-01-02"),
-			EndAt:         endAt.Format("2006-01-02"),
-			Interval:      interval,
-			StartingCash:  startingCash,
-			FeeBps:        body.FeeBps,
-			SlippageBps:   body.SlippageBps,
-			TotalSteps:    steps,
-			Summary:       map[string]any{"portfolio_name": pf.Name},
+			ProjectID:       projectID,
+			PortfolioID:     pf.ID,
+			SourceAgentID:   agentID,
+			StrategyID:      body.StrategyID,
+			RunKind:         runKind,
+			StrategyVersion: strategyVersion,
+			Name:            name,
+			Status:          "queued",
+			Symbols:         symbols,
+			StartAt:         startAt.Format("2006-01-02"),
+			EndAt:           endAt.Format("2006-01-02"),
+			Interval:        interval,
+			StartingCash:    startingCash,
+			FeeBps:          body.FeeBps,
+			SlippageBps:     body.SlippageBps,
+			TotalSteps:      steps,
+			Summary: map[string]any{
+				"portfolio_name": pf.Name,
+				"strategy_name": func() string {
+					if strategy != nil {
+						return strategy.Name
+					}
+					return ""
+				}(),
+			},
 		})
 		if err != nil {
 			httpErr(w, 500, err.Error())
 			return
 		}
 		run, _ := dbGetBacktestRun(globalCtx.AppDB(), projectID, id)
-		_, _ = dbInsertBacktestEvent(globalCtx.AppDB(), id, "created", "Backtest created", map[string]any{"symbols": symbols})
-		emitBacktest("trading.backtest.created", id, map[string]any{"portfolio_id": pf.ID, "agent_id": agentID, "symbols": symbols})
+		_, _ = dbInsertBacktestEvent(globalCtx.AppDB(), id, "created", "Backtest created", map[string]any{"symbols": symbols, "run_kind": runKind, "strategy_id": body.StrategyID})
+		emitBacktest("trading.backtest.created", id, map[string]any{"portfolio_id": pf.ID, "agent_id": agentID, "strategy_id": body.StrategyID, "symbols": symbols, "run_kind": runKind})
 		httpJSON(w, 201, map[string]any{"backtest": run})
 	default:
 		httpErr(w, 405, "GET or POST")
@@ -239,6 +277,9 @@ func (a *App) handleHTTPPortfolioBacktests(w http.ResponseWriter, r *http.Reques
 }
 
 func startBacktestRun(run *BacktestRun) (map[string]any, error) {
+	if run != nil && run.RunKind == "strategy" {
+		return startStrategyBacktestRun(run)
+	}
 	if run.Status != "queued" && run.Status != "failed" {
 		return map[string]any{"backtest": run}, nil
 	}
@@ -318,6 +359,9 @@ func startBacktestRun(run *BacktestRun) (map[string]any, error) {
 }
 
 func runBacktestToEnd(run *BacktestRun) (map[string]any, error) {
+	if run != nil && run.RunKind == "strategy" {
+		return runStrategyBacktestToEnd(run)
+	}
 	if run == nil {
 		return nil, errors.New("backtest run required")
 	}
@@ -593,6 +637,9 @@ func fetchBacktestTelemetry(ctx context.Context, agentID int64, since time.Time,
 }
 
 func stepBacktestRun(run *BacktestRun) (map[string]any, error) {
+	if run != nil && run.RunKind == "strategy" {
+		return stepStrategyBacktestRun(run)
+	}
 	if run == nil {
 		return nil, errors.New("backtest run required")
 	}

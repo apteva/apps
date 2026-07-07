@@ -316,10 +316,31 @@ interface Bar {
   yes?: number;
 }
 interface HistoryResp { symbol: string; range: string; bars: Bar[] }
+interface Strategy {
+  id: number;
+  name: string;
+  description: string;
+  status: string;
+  definition: Record<string, any>;
+  version: number;
+  created_at: string;
+  updated_at: string;
+}
+interface StrategyEvaluation {
+  strategy_id: number;
+  strategy_version: number;
+  as_of: string;
+  target_allocations: Array<{ symbol: string; weight: number }>;
+  decisions: string[];
+  warnings?: string[];
+}
 interface BacktestRun {
   id: number;
   portfolio_id: number;
   source_agent_id: number;
+  strategy_id?: number;
+  run_kind?: "agent" | "strategy" | "hybrid";
+  strategy_version?: number;
   environment_id?: string;
   environment_agent_id?: number;
   environment_portfolio_id?: number;
@@ -444,7 +465,9 @@ const TRADING_TOOLS = new Set([
   "account_summary", "positions_list", "orders_list", "order_place",
   "order_cancel", "market_quote", "market_history", "market_source",
   "watchlist_add", "watchlist_remove", "alert_create", "journal_write",
-  "journal_read", "portfolio_pause",
+  "journal_read", "portfolio_pause", "strategy_create", "strategy_update",
+  "strategy_get", "strategy_list", "strategy_validate", "strategy_evaluate",
+  "strategy_assign", "strategy_backtest_create",
 ]);
 
 function compactText(value: unknown, fallback = ""): string {
@@ -1031,7 +1054,7 @@ function pnlClass(n: number | undefined): string {
 
 // ─── Main ──────────────────────────────────────────────────────────
 
-type TabId = "portfolios" | "trade" | "positions" | "agents" | "backtests" | "brokers" | "journal";
+type TabId = "portfolios" | "trade" | "positions" | "agents" | "strategies" | "backtests" | "brokers" | "journal";
 
 export default function TradingPanel({ projectId, installId }: NativePanelProps) {
   const [tab, setTab] = useState<TabId>("portfolios");
@@ -1116,7 +1139,7 @@ export default function TradingPanel({ projectId, installId }: NativePanelProps)
       </header>
 
       <nav className="flex border-b border-border px-3 text-xs">
-        {(["portfolios","trade","positions","agents","backtests","brokers","journal"] as TabId[]).map((id) => {
+        {(["portfolios","trade","positions","agents","strategies","backtests","brokers","journal"] as TabId[]).map((id) => {
           const active = id === tab;
           return (
             <button
@@ -1149,6 +1172,9 @@ export default function TradingPanel({ projectId, installId }: NativePanelProps)
         )}
         {tab === "agents" && (
           <AgentsTab portfolio={selected} api={api} projectId={projectId} onChanged={loadPortfolios} setError={setError} />
+        )}
+        {tab === "strategies" && (
+          <StrategiesTab portfolio={selected} api={api} setError={setError} />
         )}
         {tab === "backtests" && (
           <BacktestsTab portfolio={selected} api={api} projectId={projectId} setError={setError} />
@@ -2474,6 +2500,221 @@ function activityDotClass(a: AgentActivity): string {
   return "bg-text-dim";
 }
 
+// ─── Strategies tab ───────────────────────────────────────────────
+
+function StrategiesTab({ portfolio, api, setError }: {
+  portfolio: Portfolio | null;
+  api: <T>(m: string, p: string, q?: Record<string, string>, b?: unknown) => Promise<T>;
+  setError: (e: string | null) => void;
+}) {
+  const [strategies, setStrategies] = useState<Strategy[]>([]);
+  const [selectedId, setSelectedId] = useState<number | null>(null);
+  const [name, setName] = useState("Momentum rotation");
+  const [description, setDescription] = useState("");
+  const [definitionText, setDefinitionText] = useState("");
+  const [evaluation, setEvaluation] = useState<StrategyEvaluation | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  const load = useCallback(async () => {
+    try {
+      const r = await api<{ strategies: Strategy[] }>("GET", "/strategies");
+      const list = r.strategies || [];
+      setStrategies(list);
+      setSelectedId((cur) => cur ?? list[0]?.id ?? null);
+    } catch (e) { setError((e as Error).message); }
+  }, [api, setError]);
+
+  useEffect(() => { load(); }, [load]);
+  useEffect(() => {
+    if (!portfolio) return;
+    const symbols = cleanSymbolList(portfolio.watchlist?.length ? portfolio.watchlist : ["SPY", "QQQ", "TLT"]);
+    setDefinitionText(JSON.stringify(defaultStrategyDefinition(symbols), null, 2));
+  }, [portfolio?.id]);
+
+  const selected = useMemo(
+    () => strategies.find((s) => s.id === selectedId) || null,
+    [strategies, selectedId],
+  );
+
+  const create = async () => {
+    setBusy(true);
+    try {
+      const definition = JSON.parse(definitionText);
+      const r = await api<{ strategy: Strategy }>("POST", "/strategies", undefined, {
+        name,
+        description,
+        status: "active",
+        definition,
+      });
+      setSelectedId(r.strategy.id);
+      setEvaluation(null);
+      await load();
+    } catch (e) { setError((e as Error).message); }
+    finally { setBusy(false); }
+  };
+
+  const evaluate = async (strategy: Strategy) => {
+    setBusy(true);
+    try {
+      const r = await api<{ evaluation: StrategyEvaluation }>("POST", `/strategies/${strategy.id}/evaluate`);
+      setEvaluation(r.evaluation);
+    } catch (e) { setError((e as Error).message); }
+    finally { setBusy(false); }
+  };
+
+  const assign = async (strategy: Strategy) => {
+    if (!portfolio) return;
+    setBusy(true);
+    try {
+      await api("POST", `/strategies/${strategy.id}/assign`, undefined, {
+        portfolio_id: portfolio.id,
+        control_mode: "strategy",
+        cadence: strategy.definition?.cadence || "1d",
+      });
+      setError(null);
+    } catch (e) { setError((e as Error).message); }
+    finally { setBusy(false); }
+  };
+
+  const createBacktest = async (strategy: Strategy) => {
+    if (!portfolio) return;
+    setBusy(true);
+    try {
+      const symbols = cleanSymbolList(strategy.definition?.universe || portfolio.watchlist || []);
+      await api<{ backtest: BacktestRun }>("POST", `/portfolios/${portfolio.id}/backtests`, undefined, {
+        name: `${strategy.name} replay`,
+        strategy_id: strategy.id,
+        symbols,
+        start_at: defaultDate(-90),
+        end_at: defaultDate(0),
+        interval: strategy.definition?.cadence || "1d",
+        starting_cash: portfolio.starting_cash || portfolio.cash || 100000,
+        fee_bps: 1,
+        slippage_bps: 5,
+      });
+      setError(null);
+    } catch (e) { setError((e as Error).message); }
+    finally { setBusy(false); }
+  };
+
+  if (!portfolio) return <EmptyState title="Pick a portfolio" hint="No portfolio selected." />;
+
+  return (
+    <div className="grid gap-4" style={{ gridTemplateColumns: "minmax(280px, 380px) minmax(0, 1fr)" }}>
+      <Section title="Saved strategies">
+        {strategies.length === 0 ? (
+          <EmptyState title="No strategies" hint="Create a strategy definition." />
+        ) : (
+          <div className="divide-y divide-border border border-border rounded overflow-hidden">
+            {strategies.map((strategy) => (
+              <button
+                key={strategy.id}
+                onClick={() => { setSelectedId(strategy.id); setEvaluation(null); }}
+                className={`w-full text-left px-3 py-2 hover:bg-bg-hover ${selectedId === strategy.id ? "bg-bg-input" : "bg-bg-card"}`}
+              >
+                <div className="flex items-center gap-2">
+                  <span className="font-medium text-sm truncate">{strategy.name}</span>
+                  <span className="ml-auto text-xs text-text-dim">v{strategy.version}</span>
+                </div>
+                <div className="mt-1 text-xs text-text-dim truncate">
+                  {(strategy.definition?.universe || []).join(", ")}
+                </div>
+              </button>
+            ))}
+          </div>
+        )}
+        {selected && (
+          <div className="mt-3 flex flex-wrap gap-2">
+            <button disabled={busy} onClick={() => evaluate(selected)} className="px-2 py-1 text-xs rounded bg-accent text-bg font-medium disabled:opacity-50">
+              Evaluate
+            </button>
+            <button disabled={busy} onClick={() => assign(selected)} className="px-2 py-1 text-xs rounded border border-border text-text-muted hover:bg-bg-hover disabled:opacity-50">
+              Assign
+            </button>
+            <button disabled={busy} onClick={() => createBacktest(selected)} className="px-2 py-1 text-xs rounded border border-border text-text-muted hover:bg-bg-hover disabled:opacity-50">
+              Backtest
+            </button>
+          </div>
+        )}
+      </Section>
+
+      <div className="grid gap-4">
+        <Section title="New strategy">
+          <div className="grid gap-3" style={{ gridTemplateColumns: "minmax(180px, 1fr) minmax(180px, 1fr)" }}>
+            <label className="text-xs">
+              <FieldLabel>Name</FieldLabel>
+              <input value={name} onChange={(e) => setName(e.target.value)} className={inputClass} />
+            </label>
+            <label className="text-xs">
+              <FieldLabel>Description</FieldLabel>
+              <input value={description} onChange={(e) => setDescription(e.target.value)} className={inputClass} />
+            </label>
+          </div>
+          <label className="block mt-3 text-xs">
+            <FieldLabel>Definition JSON</FieldLabel>
+            <textarea
+              value={definitionText}
+              onChange={(e) => setDefinitionText(e.target.value)}
+              className={`${inputClass} font-mono h-72 resize-y`}
+              spellCheck={false}
+            />
+          </label>
+          <div className="mt-3 flex justify-end">
+            <button disabled={busy || !name.trim()} onClick={create} className="px-3 py-1.5 text-xs rounded bg-accent text-bg font-medium hover:opacity-90 disabled:opacity-50">
+              Create strategy
+            </button>
+          </div>
+        </Section>
+
+        <Section title="Evaluation">
+          {!evaluation ? (
+            <EmptyState title="No evaluation" hint="Select a saved strategy and evaluate it." />
+          ) : (
+            <div className="grid gap-3">
+              <div className="grid gap-2" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))" }}>
+                {evaluation.target_allocations.length === 0 ? (
+                  <Stat label="Target" value="Cash" />
+                ) : evaluation.target_allocations.map((a) => (
+                  <Stat key={a.symbol} label={a.symbol} value={formatPct(a.weight * 100)} />
+                ))}
+              </div>
+              <div className="text-xs text-text-dim">as of {new Date(evaluation.as_of).toLocaleString()}</div>
+              <div className="space-y-1">
+                {evaluation.decisions.map((d, i) => (
+                  <div key={i} className="text-sm text-text">{d}</div>
+                ))}
+              </div>
+              {evaluation.warnings && evaluation.warnings.length > 0 && (
+                <div className="text-xs text-amber">{evaluation.warnings.join(" · ")}</div>
+              )}
+            </div>
+          )}
+        </Section>
+      </div>
+    </div>
+  );
+}
+
+function defaultStrategyDefinition(symbols: string[]) {
+  const clean = cleanSymbolList(symbols.length ? symbols : ["SPY", "QQQ", "TLT"]);
+  return {
+    universe: clean,
+    cadence: "1d",
+    rules: [
+      {
+        name: "Risk on",
+        when: { symbol: clean[0], indicator: "price", operator: "above", compare: "sma_20" },
+        rank: { symbols: clean, by: "return_20", top: Math.min(2, clean.length), weight: "equal_weight" },
+      },
+      {
+        name: "Risk off",
+        allocate: [{ symbol: clean[clean.length - 1], weight: 1 }],
+      },
+    ],
+    risk: { max_position_weight: 0.6 },
+  };
+}
+
 // ─── Backtests tab ────────────────────────────────────────────────
 
 function BacktestsTab({ portfolio, api, projectId, setError }: {
@@ -2533,7 +2774,7 @@ function BacktestsTab({ portfolio, api, projectId, setError }: {
       setPerformance(null);
       return;
     }
-    if (!selectedRun.environment_id || !selectedRun.environment_portfolio_id) {
+    if (selectedRun.run_kind !== "strategy" && (!selectedRun.environment_id || !selectedRun.environment_portfolio_id)) {
       setPerformance(null);
       return;
     }
@@ -2541,7 +2782,7 @@ function BacktestsTab({ portfolio, api, projectId, setError }: {
       const r = await api<{ performance: BacktestPerformance }>("GET", `/backtests/${selectedRun.id}/performance`);
       setPerformance(r.performance || null);
     } catch (e) { setError((e as Error).message); }
-  }, [selectedRun?.id, selectedRun?.environment_id, selectedRun?.environment_portfolio_id, api, setError]);
+  }, [selectedRun?.id, selectedRun?.run_kind, selectedRun?.environment_id, selectedRun?.environment_portfolio_id, api, setError]);
 
   useEffect(() => { load(); }, [load]);
   useEffect(() => { loadEvents(); }, [loadEvents]);
@@ -2765,7 +3006,7 @@ function BacktestsTab({ portfolio, api, projectId, setError }: {
                     <BacktestStatus status={run.status} />
                   </div>
                   <div className="mt-1 text-xs text-text-dim">
-                    {run.start_at} to {run.end_at} · {run.interval} · {run.current_step}/{run.total_steps}
+                    {(run.run_kind || "agent")} · {run.start_at} to {run.end_at} · {run.interval} · {run.current_step}/{run.total_steps}
                   </div>
                 </button>
               ))}
@@ -2800,7 +3041,11 @@ function BacktestRunDetail({ run, events, liveEvents, performance, busy, onActio
         <div className="flex flex-wrap items-center gap-2">
           <strong className="text-sm">{run.name}</strong>
           <BacktestStatus status={run.status} />
-          <span className="text-xs text-text-dim">agent #{run.source_agent_id}</span>
+          {run.run_kind === "strategy" ? (
+            <span className="text-xs text-text-dim">strategy #{run.strategy_id}</span>
+          ) : (
+            <span className="text-xs text-text-dim">agent #{run.source_agent_id}</span>
+          )}
           {run.environment_id && <span className="text-xs text-text-dim">env {run.environment_id}</span>}
           <span className="flex-1" />
           {run.status === "queued" || run.status === "failed" ? (
@@ -2847,7 +3092,7 @@ function BacktestRunDetail({ run, events, liveEvents, performance, busy, onActio
       <BacktestPerformancePanel run={run} performance={performance} />
       <div className="border border-border rounded bg-bg-card overflow-hidden">
         <div className="px-3 py-2 border-b border-border text-xs font-semibold uppercase tracking-wide text-text-dim">
-          Live agent activity
+          {run.run_kind === "strategy" ? "Strategy activity" : "Live agent activity"}
         </div>
         {liveEvents.length === 0 ? (
           <EmptyState title="No live activity yet" />

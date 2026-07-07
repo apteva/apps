@@ -158,6 +158,74 @@ func (a *App) MCPTools() []sdk.Tool {
 			}, []string{"portfolio_id", "reason"}),
 			Handler: a.toolPortfolioPause},
 
+		// ─── Strategies ───────────────────────────────────────────
+		{Name: "strategy_create", Description: "Create a deterministic strategy definition. Supports indicator conditions, ranking, and allocation rules.",
+			InputSchema: schemaObject(map[string]any{
+				"name":                map[string]any{"type": "string"},
+				"description":         map[string]any{"type": "string"},
+				"status":              map[string]any{"type": "string"},
+				"definition":          map[string]any{"type": "object"},
+				"created_by_agent_id": map[string]any{"type": "integer"},
+			}, []string{"name", "definition"}),
+			Handler: a.toolStrategyCreate},
+
+		{Name: "strategy_update", Description: "Update a deterministic strategy. Supplying definition creates a new strategy version.",
+			InputSchema: schemaObject(map[string]any{
+				"strategy_id": map[string]any{"type": "integer"},
+				"name":        map[string]any{"type": "string"},
+				"description": map[string]any{"type": "string"},
+				"status":      map[string]any{"type": "string"},
+				"definition":  map[string]any{"type": "object"},
+			}, []string{"strategy_id"}),
+			Handler: a.toolStrategyUpdate},
+
+		{Name: "strategy_get", Description: "Fetch one saved deterministic strategy.",
+			InputSchema: schemaObject(map[string]any{
+				"strategy_id": map[string]any{"type": "integer"},
+			}, []string{"strategy_id"}),
+			Handler: a.toolStrategyGet},
+
+		{Name: "strategy_list", Description: "List saved deterministic strategies in this project.",
+			InputSchema: schemaObject(map[string]any{
+				"status": map[string]any{"type": "string"},
+			}, nil),
+			Handler: a.toolStrategyList},
+
+		{Name: "strategy_validate", Description: "Validate a deterministic strategy definition without saving it.",
+			InputSchema: schemaObject(map[string]any{
+				"definition": map[string]any{"type": "object"},
+			}, []string{"definition"}),
+			Handler: a.toolStrategyValidate},
+
+		{Name: "strategy_evaluate", Description: "Evaluate a saved strategy against current market data and return target allocations.",
+			InputSchema: schemaObject(map[string]any{
+				"strategy_id": map[string]any{"type": "integer"},
+			}, []string{"strategy_id"}),
+			Handler: a.toolStrategyEvaluate},
+
+		{Name: "strategy_assign", Description: "Assign a saved strategy to a portfolio for strategy or hybrid control.",
+			InputSchema: schemaObject(map[string]any{
+				"portfolio_id": map[string]any{"type": "integer"},
+				"strategy_id":  map[string]any{"type": "integer"},
+				"control_mode": map[string]any{"type": "string"},
+				"cadence":      map[string]any{"type": "string"},
+			}, []string{"portfolio_id", "strategy_id"}),
+			Handler: a.toolStrategyAssign},
+
+		{Name: "strategy_backtest_create", Description: "Create a strategy backtest that reuses backtest_runs/events/snapshots with run_kind=strategy.",
+			InputSchema: schemaObject(map[string]any{
+				"portfolio_id":  map[string]any{"type": "integer"},
+				"strategy_id":   map[string]any{"type": "integer"},
+				"name":          map[string]any{"type": "string"},
+				"start_at":      map[string]any{"type": "string"},
+				"end_at":        map[string]any{"type": "string"},
+				"interval":      map[string]any{"type": "string"},
+				"starting_cash": map[string]any{"type": "number"},
+				"fee_bps":       map[string]any{"type": "number"},
+				"slippage_bps":  map[string]any{"type": "number"},
+			}, []string{"portfolio_id", "strategy_id"}),
+			Handler: a.toolStrategyBacktestCreate},
+
 		{Name: "backtest_market_step", Description: "Internal runner tool: load replay prices into an isolated backtest environment.",
 			InputSchema: schemaObject(map[string]any{
 				"portfolio_id": map[string]any{"type": "integer"},
