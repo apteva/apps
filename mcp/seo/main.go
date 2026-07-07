@@ -35,7 +35,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: seo
 display_name: SEO
-version: 0.4.3
+version: 0.4.4
 description: Generic SEO research workbench — locale-aware domains, keywords, rankings, backlinks behind one pluggable provider integration.
 author: Apteva
 scopes: [project, global]
@@ -1594,14 +1594,15 @@ func serpSearchViaProvider(ctx *sdk.AppCtx, search_engine, keyword string, loc *
 		"keyword":       keyword,
 		"location_code": *loc.LocationCode,
 		"language_code": strings.ToLower(loc.LanguageCode),
-		"depth":         depth,
 	}
 	toolName := "serp_organic"
 	if search_engine == "youtube" {
 		toolName = "youtube_organic_serp"
 		input["device"] = device
+		input["block_depth"] = clampInt(depth, 1, 200)
 	} else {
 		input["device"] = device
+		input["depth"] = depth
 	}
 	rowRaw, taskRaw, err := callDfs(ctx, connID, toolName, input)
 	return rowRaw, taskRaw, toolName, err
@@ -2086,6 +2087,16 @@ func minInt64(a, b int64) int64 {
 		return a
 	}
 	return b
+}
+
+func clampInt(v, lo, hi int) int {
+	if v < lo {
+		return lo
+	}
+	if v > hi {
+		return hi
+	}
+	return v
 }
 
 func splitLimited(s, sep string, limit int) []string {

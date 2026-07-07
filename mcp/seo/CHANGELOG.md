@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.4
+
+- Fixed DataForSEO YouTube SERP refreshes by translating the app's generic
+  `depth` argument to YouTube Organic's provider-specific `block_depth`
+  parameter.
+
 ## 0.4.3
 
 - Added a DataForSEO YouTube location fallback that seeds YouTube locales from
