@@ -35,7 +35,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: seo
 display_name: SEO
-version: 0.4.2
+version: 0.4.3
 description: Generic SEO research workbench — locale-aware domains, keywords, rankings, backlinks behind one pluggable provider integration.
 author: Apteva
 scopes: [project, global]
@@ -2323,6 +2323,9 @@ func refreshKeyword(ctx *sdk.AppCtx, keywordID int64, args map[string]any) (any,
 	k, err := getKeyword(ctx.AppDB(), pid, keywordID)
 	if err != nil {
 		return nil, err
+	}
+	if k.SearchEngine != "" && k.SearchEngine != "google" {
+		return nil, fmt.Errorf("%s keyword metrics are not supported; refresh %s SERP data with serp_search or keyword_ideas refresh=true", k.SearchEngine, k.SearchEngine)
 	}
 	loc, err := resolveLocationFromArgs(ctx.AppDB(), args, &k.LocationID)
 	if err != nil {

@@ -617,13 +617,37 @@ func syncDataForSEOLocations(ctx *sdk.AppCtx) (any, error) {
 	}
 	warnings := []string{}
 	ytUpserts, ytSkipped, err := syncDataForSEOYouTubeLocations(ctx, connID, now)
-	if err != nil {
-		warnings = append(warnings, err.Error())
-		engineResults["youtube"] = map[string]any{
-			"rows_upserted": 0,
-			"rows_skipped":  0,
-			"ok":            false,
-			"error":         err.Error(),
+	ytFallback := false
+	if err != nil || ytUpserts == 0 {
+		var syncErr error
+		if err != nil {
+			syncErr = err
+			warnings = append(warnings, err.Error())
+		} else {
+			syncErr = fmt.Errorf("dataforseo: youtube_locations returned zero usable rows")
+			warnings = append(warnings, syncErr.Error())
+		}
+		fallbackUpserts, fallbackSkipped, fallbackErr := seedYouTubeLocationsFromGoogle(ctx.AppDB(), now)
+		if fallbackErr != nil {
+			warnings = append(warnings, fallbackErr.Error())
+			engineResults["youtube"] = map[string]any{
+				"rows_upserted": 0,
+				"rows_skipped":  0,
+				"ok":            false,
+				"error":         syncErr.Error(),
+			}
+		} else {
+			ytUpserts = fallbackUpserts
+			ytSkipped = fallbackSkipped
+			ytFallback = true
+			upserts += ytUpserts
+			skipped += ytSkipped
+			engineResults["youtube"] = map[string]any{
+				"rows_upserted": ytUpserts,
+				"rows_skipped":  ytSkipped,
+				"ok":            true,
+				"fallback":      "google_locations",
+			}
 		}
 	} else {
 		upserts += ytUpserts
@@ -633,6 +657,9 @@ func syncDataForSEOLocations(ctx *sdk.AppCtx) (any, error) {
 			"rows_skipped":  ytSkipped,
 			"ok":            true,
 		}
+	}
+	if ytFallback {
+		warnings = append(warnings, "youtube locations were seeded from DataForSEO Google locations because the full YouTube catalog was unavailable")
 	}
 	out := map[string]any{
 		"provider":      "dataforseo",
@@ -766,6 +793,73 @@ func upsertDfsYouTubeLocations(ctx *sdk.AppCtx, tx *sql.Tx, connID int64, synced
 			}
 			upserts++
 		}
+	}
+	return upserts, skipped, nil
+}
+
+func seedYouTubeLocationsFromGoogle(db *sql.DB, syncedAt int64) (upserts int, skipped int, err error) {
+	tx, err := db.Begin()
+	if err != nil {
+		return 0, 0, err
+	}
+	defer tx.Rollback()
+	rows, err := tx.Query(
+		`SELECT location_code, location_name, country_iso, language_code, language_name, raw_json
+		   FROM seo_locations
+		  WHERE provider = 'dataforseo'
+		    AND search_engine = 'google'
+		    AND is_active = 1
+		    AND location_code IS NOT NULL
+		    AND country_iso IS NOT NULL
+		    AND country_iso != ''
+		    AND language_code != ''`)
+	if err != nil {
+		return 0, 0, err
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var locCode int64
+		var locName, country, langCode, langName, rawText string
+		if err := rows.Scan(&locCode, &locName, &country, &langCode, &langName, &rawText); err != nil {
+			return 0, 0, err
+		}
+		if locCode == 0 || strings.TrimSpace(locName) == "" || strings.TrimSpace(langCode) == "" {
+			skipped++
+			continue
+		}
+		if !json.Valid([]byte(rawText)) {
+			rawText = "{}"
+		}
+		fallbackRaw, _ := json.Marshal(map[string]any{
+			"fallback": "google_location_for_youtube",
+			"source":   json.RawMessage(rawText),
+		})
+		if _, err := tx.Exec(
+			`INSERT INTO seo_locations
+			   (provider, search_engine, location_code, location_name, country_iso,
+			    language_code, language_name, is_active, raw_json, synced_at)
+			 VALUES ('dataforseo', 'youtube', ?, ?, ?, ?, ?, 1, ?, ?)
+			 ON CONFLICT(provider, search_engine, location_code, language_code)
+			 DO UPDATE SET
+			    location_name = excluded.location_name,
+			    country_iso = excluded.country_iso,
+			    language_name = excluded.language_name,
+			    is_active = 1,
+			    raw_json = excluded.raw_json,
+			    synced_at = excluded.synced_at`,
+			locCode, locName, strings.ToUpper(country), strings.ToLower(langCode), langName, string(fallbackRaw), syncedAt); err != nil {
+			return upserts, skipped, fmt.Errorf("seed youtube location from google location: %w", err)
+		}
+		upserts++
+	}
+	if err := rows.Err(); err != nil {
+		return upserts, skipped, err
+	}
+	if upserts == 0 {
+		return upserts, skipped, fmt.Errorf("youtube fallback found zero active google locations to copy")
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, 0, err
 	}
 	return upserts, skipped, nil
 }

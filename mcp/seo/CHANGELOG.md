@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.4.3
+
+- Added a DataForSEO YouTube location fallback that seeds YouTube locales from
+  active Google DataForSEO locations when the full YouTube location catalog is
+  unavailable through the integration runner.
+- Added a YouTube keyword `Refresh SERP` panel action that calls the generic
+  `serp_search` tool and displays cached YouTube rankings.
+- Guarded Google Ads keyword metric refresh so it does not run against
+  YouTube keywords.
+
 ## 0.4.2
 
 - Fixed DataForSEO Labs location parsing for the current

@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: seo
 display_name: SEO
-version: 0.4.2
+version: 0.4.3
 description: |
   Generic SEO research workbench. Track domains, keywords, rankings,
   and backlinks; pull metrics from any provider behind one pluggable
@@ -36,6 +36,9 @@ description: |
         and fixes generic SERP entity IDs after upserts.
   v0.4.2: parses DataForSEO Labs location rows with nested
         available_languages entries.
+  v0.4.3: seeds YouTube locales from DataForSEO Google locations when
+        the full YouTube location catalog is unavailable, and adds a
+        YouTube keyword SERP refresh action in the panel.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/seo

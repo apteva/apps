@@ -124,6 +124,56 @@ func TestSyncDataForSEOGoogleLocationRows_CommitsGoogleRows(t *testing.T) {
 	}
 }
 
+func TestSeedYouTubeLocationsFromGoogle_CopiesResolvableLocales(t *testing.T) {
+	db := newSEOTestDB(t, "migrations/001_init.sql")
+	if _, err := db.Exec(`INSERT INTO seo_locations
+		(provider, search_engine, location_code, location_name, country_iso, language_code, language_name, raw_json)
+		VALUES
+		('dataforseo', 'google', 2840, 'United States', 'US', 'en', 'English', '{"source":"google"}'),
+		('dataforseo', 'google', 2826, 'United Kingdom', 'GB', 'en', 'English', '{"source":"google"}')`); err != nil {
+		t.Fatalf("insert google locations: %v", err)
+	}
+
+	upserts, skipped, err := seedYouTubeLocationsFromGoogle(db, 22222)
+	if err != nil {
+		t.Fatalf("seedYouTubeLocationsFromGoogle returned error: %v", err)
+	}
+	if upserts != 2 || skipped != 0 {
+		t.Fatalf("upserts/skipped = %d/%d, want 2/0", upserts, skipped)
+	}
+
+	loc, err := resolveLocationFromArgs(db, map[string]any{
+		"search_engine": "youtube",
+		"country_iso":   "US",
+		"language_code": "en",
+	}, nil)
+	if err != nil {
+		t.Fatalf("resolve youtube US/en location: %v", err)
+	}
+	if loc == nil || loc.SearchEngine != "youtube" || loc.LocationCode == nil || *loc.LocationCode != 2840 {
+		t.Fatalf("resolved location = %+v, want youtube 2840", loc)
+	}
+
+	var raw string
+	if err := db.QueryRow(`SELECT raw_json FROM seo_locations WHERE search_engine = 'youtube' AND country_iso = 'US' AND language_code = 'en'`).Scan(&raw); err != nil {
+		t.Fatalf("read fallback raw_json: %v", err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal([]byte(raw), &payload); err != nil {
+		t.Fatalf("fallback raw_json is invalid: %v", err)
+	}
+	if payload["fallback"] != "google_location_for_youtube" {
+		t.Fatalf("fallback marker = %v, want google_location_for_youtube", payload["fallback"])
+	}
+}
+
+func TestSeedYouTubeLocationsFromGoogle_RequiresGoogleRows(t *testing.T) {
+	db := newSEOTestDB(t, "migrations/001_init.sql")
+	if _, _, err := seedYouTubeLocationsFromGoogle(db, 22222); err == nil {
+		t.Fatal("expected empty google location catalog to fail")
+	}
+}
+
 func TestUpsertSearchEntity_ReturnsCanonicalIDAfterConflict(t *testing.T) {
 	db := newSEOTestDB(t, "migrations/001_init.sql", "migrations/004_search_entities.sql")
 	if _, err := db.Exec(`INSERT INTO seo_locations
