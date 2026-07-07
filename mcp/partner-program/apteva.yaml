@@ -1,0 +1,86 @@
+schema: apteva-app/v1
+
+name: partner-program
+display_name: Partner Program
+version: 0.1.0
+description: |
+  Merchant-side referral and affiliate program for SaaS, services, and
+  commerce. Track approved partners, campaigns, referral links/codes,
+  referred customers, and commission ledger entries. MVP intentionally
+  uses five tables and manual payout tracking so teams can run a real
+  program before adding payout automation.
+
+author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/partner-program
+tags: [partners, referrals, affiliate, commissions, growth, saas]
+
+scopes: [project, global]
+min_apteva_version: "0.11.0"
+
+requires:
+  permissions:
+    - db.write.app
+    - platform.apps.call
+  apps:
+    - name: crm
+      optional: true
+      reason: "Partners and referred customers can link back to CRM contacts."
+    - name: redirects
+      optional: true
+      reason: "Future versions can mint branded short links automatically."
+    - name: billing
+      optional: true
+      reason: "Future versions can create commissions from paid invoices."
+    - name: checkout
+      optional: true
+      reason: "Future versions can attribute checkout sessions automatically."
+    - name: subscriptions
+      optional: true
+      reason: "Future versions can create recurring commissions from subscription renewals."
+
+provides:
+  http_routes:
+    - prefix: /
+  mcp_tools:
+    - name: partners_create
+      description: Create a referral/affiliate partner.
+    - name: partners_search
+      description: Search partners by name, email, type, or status.
+    - name: partners_get
+      description: Fetch one partner by id.
+    - name: partners_update
+      description: Partial-patch a partner.
+    - name: campaigns_create
+      description: Create a partner-program campaign with default commission settings.
+    - name: campaigns_search
+      description: Search campaigns.
+    - name: referral_link_create
+      description: Create a referral link/code for a partner and campaign.
+    - name: referral_links_search
+      description: Search referral links.
+    - name: referrals_record
+      description: Record a referred lead or conversion and optionally create a commission.
+    - name: referrals_search
+      description: Search referred leads/customers.
+    - name: commissions_search
+      description: Search commission ledger entries.
+    - name: commissions_update
+      description: Approve, reject, void, or mark commissions paid.
+    - name: program_stats
+      description: Return high-level partner-program counts and totals.
+
+runtime:
+  kind: source
+  source:
+    repo: github.com/apteva/apps
+    ref: main
+    entry: mcp/partner-program
+  port: 8080
+  health_check: /health
+
+db:
+  driver: sqlite
+  path: /data/partner-program.db
+  migrations: migrations/
+
+upgrade_policy: auto-patch
