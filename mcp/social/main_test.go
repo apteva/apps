@@ -435,15 +435,24 @@ func TestAccountDisconnect_KeepsConnectionWhenSiblingsExist(t *testing.T) {
 }
 
 func TestAccountCheck_TwitterProfileOK(t *testing.T) {
+	dir := t.TempDir()
+	t.Setenv("DB_PATH", dir+"/app.db")
+	body := []byte{0xff, 0xd8, 0xff, 0xe0, 0x42}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/jpeg")
+		w.Write(body)
+	}))
+	defer srv.Close()
+
 	pf := newRecordingPlatform()
 	pf.executeResponses["get_me"] = &sdk.ExecuteResult{
 		Success: true,
-		Data:    json.RawMessage(`{"data":{"id":"u1","username":"me"}}`),
+		Data:    json.RawMessage(fmt.Sprintf(`{"data":{"id":"u1","username":"me","profile_image_url":%q}}`, srv.URL+"/avatar.jpg")),
 	}
 	ctx := newSocialCtx(t, pf)
 	r, _ := ctx.AppDB().Exec(
 		`INSERT INTO social_accounts (project_id, platform, connection_id, display_name, status)
-		 VALUES ('test-proj', 'twitter', 42, '@me', 'active')`,
+		 VALUES ('test-proj', 'twitter', 42, 'old-name', 'active')`,
 	)
 	acctID, _ := r.LastInsertId()
 
@@ -459,10 +468,19 @@ func TestAccountCheck_TwitterProfileOK(t *testing.T) {
 	if len(pf.executeCalls) != 1 || pf.executeCalls[0].Tool != "get_me" {
 		t.Fatalf("calls = %+v", pf.executeCalls)
 	}
-	var status string
-	ctx.AppDB().QueryRow(`SELECT last_check_status FROM social_accounts WHERE id=?`, acctID).Scan(&status)
+	if got := pf.executeCalls[0].Input["user.fields"]; !strings.Contains(fmt.Sprint(got), "profile_image_url") {
+		t.Fatalf("get_me missing profile_image_url field request: %+v", pf.executeCalls[0].Input)
+	}
+	var status, displayName, avatarURL string
+	ctx.AppDB().QueryRow(`SELECT last_check_status, display_name, COALESCE(avatar_url,'') FROM social_accounts WHERE id=?`, acctID).Scan(&status, &displayName, &avatarURL)
 	if status != "ok" {
 		t.Errorf("last_check_status = %q", status)
+	}
+	if displayName != "me" {
+		t.Errorf("display_name = %q, want me", displayName)
+	}
+	if !strings.HasPrefix(avatarURL, "/api/apps/social/avatars/") {
+		t.Fatalf("avatar_url was not cached: %q", avatarURL)
 	}
 }
 

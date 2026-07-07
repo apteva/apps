@@ -44,7 +44,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: social
 display_name: Social
-version: 0.14.59
+version: 0.14.60
 description: |
   Schedule and publish posts to your social accounts (X, Facebook,
   Instagram, LinkedIn, TikTok, YouTube, Reddit, Pinterest, Threads).
@@ -302,8 +302,11 @@ var platforms = map[string]platformDef{
 		ProfileTool:        "get_me",
 		ProfileNameField:   "username",
 		ProfileAvatarField: "profile_image_url",
-		DeleteTool:         "delete_tweet",
-		DeleteIDField:      "tweet_id",
+		ProfileToolArgs: map[string]any{
+			"user.fields": "id,name,username,profile_image_url,public_metrics,verified,created_at",
+		},
+		DeleteTool:    "delete_tweet",
+		DeleteIDField: "tweet_id",
 		Inbox: inboxCaps{
 			CommentsRead:   true,
 			CommentsWrite:  true,
@@ -1474,6 +1477,33 @@ func (a *App) checkAccount(ctx *sdk.AppCtx, pid string, accountID int64) account
 		result.Status = "ok"
 		result.Error = ""
 		result.Details["tool"] = def.ProfileTool
+		if profile := profileFromToolData(out.Data, def); profile != nil {
+			name := strings.TrimSpace(profile.Name)
+			avatar := strings.TrimSpace(profile.Avatar)
+			if avatar != "" {
+				avatar = a.cacheAvatar(ctx, avatar)
+			}
+			updates := []string{}
+			vals := []any{}
+			if name != "" && name != displayName {
+				updates = append(updates, "display_name=?")
+				vals = append(vals, name)
+				result.DisplayName = name
+				result.Details["display_name_refreshed"] = true
+			}
+			if avatar != "" {
+				updates = append(updates, "avatar_url=?")
+				vals = append(vals, avatar)
+				result.Details["avatar_refreshed"] = true
+			}
+			if len(updates) > 0 {
+				vals = append(vals, result.AccountID, pid)
+				_, _ = ctx.AppDB().Exec(
+					`UPDATE social_accounts SET `+strings.Join(updates, ", ")+` WHERE id=? AND project_id=?`,
+					vals...,
+				)
+			}
+		}
 		a.persistAccountCheck(ctx, pid, result)
 		return result
 	}
@@ -7443,8 +7473,12 @@ func (a *App) fetchProfile(ctx *sdk.AppCtx, connID int64, def platformDef) (*pro
 			"platform", def.Platform, "tool", def.ProfileTool, "err", upstreamError(res))
 		return nil, nil
 	}
+	return profileFromToolData(res.Data, def), nil
+}
+
+func profileFromToolData(data []byte, def platformDef) *profileEntry {
 	var raw map[string]any
-	_ = json.Unmarshal(res.Data, &raw)
+	_ = json.Unmarshal(data, &raw)
 	// Unwrap whichever envelope the integration uses so the platformDef
 	// path expressions can stay shallow:
 	//   Twitter / TikTok → {data: {...}}
@@ -7460,7 +7494,7 @@ func (a *App) fetchProfile(ctx *sdk.AppCtx, connID int64, def platformDef) (*pro
 	return &profileEntry{
 		Name:   toString(walkPath(raw, def.ProfileNameField)),
 		Avatar: toString(walkPath(raw, def.ProfileAvatarField)),
-	}, nil
+	}
 }
 
 // ─── avatar cache ──────────────────────────────────────────────────
