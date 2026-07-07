@@ -76,7 +76,8 @@ var validInboxStatuses = map[string]bool{
 // platformSupportsInbox returns true if the platform supports the
 // given (kind, action) pair. action is "read" or "write" for
 // comments/dms/mentions/reviews; "hide" / "like" / "delete" for
-// comment moderation; "private_reply" for IG. Unknown combos return
+// comment moderation; "private_reply" for Meta comment private replies.
+// Unknown combos return
 // false. Used by tool handlers to short-circuit per-account fan-outs
 // with status='unsupported'.
 func platformSupportsInbox(platform, kind, action string) bool {

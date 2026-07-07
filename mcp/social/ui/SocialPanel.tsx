@@ -97,12 +97,36 @@ interface Post {
   id: number;
   body: string;
   media_storage_ids: number[];
+  external_media_urls?: string[];
   schedule_at: string;
   status: string;
   created_at: string;
   published_at: string;
   targets: PostTarget[];
   profile_id?: number;
+}
+
+interface InboxItem {
+  id: number;
+  project_id: string;
+  social_account_id: number;
+  platform: string;
+  kind: "comment" | "dm" | "mention" | "review";
+  external_id: string;
+  parent_external_id?: string;
+  post_id?: number;
+  external_post_id?: string;
+  author_external_id?: string;
+  author_name?: string;
+  author_handle?: string;
+  author_avatar_url?: string;
+  body: string;
+  media?: unknown;
+  permalink?: string;
+  rating?: number;
+  occurred_at: string;
+  fetched_at: string;
+  status: "unread" | "read" | "replied" | "hidden" | "archived";
 }
 
 // Profile = brand/client/site container (see profiles.go). One
@@ -135,15 +159,15 @@ interface PlatformInfo {
   provider_only?: boolean;
   // option_fields — per-platform overrides the compose dialog can
   // surface as inputs. Empty when the platform has nothing to
-  // customise (Twitter / FB / IG / LinkedIn / TikTok in v1; only
-  // YouTube exposes title / visibility / category / tags today).
+  // customise (Twitter / FB / IG / LinkedIn in v1; YouTube and
+  // TikTok expose a few platform-specific controls).
   option_fields?: OptionField[];
 }
 
 interface OptionField {
   name: string;
   label: string;
-  type: "text" | "textarea" | "select" | "tags" | "media" | "number";
+  type: "text" | "textarea" | "select" | "tags" | "media" | "number" | "boolean";
   options?: string[];
   help?: string;
 }
@@ -246,11 +270,14 @@ function useAppEvents<T = unknown>(
 
 // --- Panel ---------------------------------------------------------
 
+type MainTab = "accounts" | "posts" | "inbox" | "metrics";
+
 export default function SocialPanel({ projectId }: NativePanelProps) {
   activePanelProjectId = projectId || PANEL_PROJECT_ID;
-  const [tab, setTab] = useState<"accounts" | "posts" | "metrics">("posts");
+  const [tab, setTab] = useState<MainTab>("posts");
   const [accounts, setAccounts] = useState<SocialAccount[]>([]);
   const [posts, setPosts] = useState<Post[]>([]);
+  const [inboxCount, setInboxCount] = useState(0);
   const [platforms, setPlatforms] = useState<PlatformInfo[]>([]);
   const [status, setStatus] = useState("");
   const [composeOpen, setComposeOpen] = useState(false);
@@ -385,6 +412,7 @@ export default function SocialPanel({ projectId }: NativePanelProps) {
         <span className="w-px h-5 bg-border mx-2" />
         <Tab label="Posts" value="posts" current={tab} onClick={setTab} count={posts.length} />
         <Tab label="Accounts" value="accounts" current={tab} onClick={setTab} count={accounts.length} />
+        <Tab label="Inbox" value="inbox" current={tab} onClick={setTab} count={inboxCount} />
         <Tab label="Metrics" value="metrics" current={tab} onClick={setTab} />
         <button
           onClick={() => setComposeOpen(true)}
@@ -416,6 +444,14 @@ export default function SocialPanel({ projectId }: NativePanelProps) {
         )}
         {tab === "posts" && (
           <PostsView posts={posts} onChange={loadPosts} setStatus={setStatus} projectId={projectId} />
+        )}
+        {tab === "inbox" && (
+          <InboxView
+            accounts={accounts}
+            projectId={projectId}
+            setStatus={setStatus}
+            onCountChange={setInboxCount}
+          />
         )}
         {tab === "metrics" && (
           <MetricsView posts={posts} accounts={accounts} setStatus={setStatus} onPostsChanged={loadPosts} />
@@ -787,8 +823,8 @@ function ProfileManageModal({
 function Tab({
   label, value, current, onClick, count,
 }: {
-  label: string; value: "accounts" | "posts" | "metrics";
-  current: string; onClick: (v: any) => void; count?: number;
+  label: string; value: MainTab;
+  current: string; onClick: (v: MainTab) => void; count?: number;
 }) {
   const active = value === current;
   return (
@@ -1219,6 +1255,443 @@ function ImportHistoryDialog({
       </div>
     </div>
   );
+}
+
+// --- InboxView -----------------------------------------------------
+
+function InboxView({
+  accounts, projectId, setStatus, onCountChange,
+}: {
+  accounts: SocialAccount[];
+  projectId?: string | null;
+  setStatus: (s: string) => void;
+  onCountChange: (n: number) => void;
+}) {
+  const [items, setItems] = useState<InboxItem[]>([]);
+  const [selectedId, setSelectedId] = useState<number | null>(null);
+  const [selected, setSelected] = useState<InboxItem | null>(null);
+  const [thread, setThread] = useState<InboxItem[]>([]);
+  const [accountFilter, setAccountFilter] = useState("all");
+  const [kindFilter, setKindFilter] = useState("all");
+  const [statusFilter, setStatusFilter] = useState("open");
+  const [loading, setLoading] = useState(false);
+  const [busy, setBusy] = useState<string | null>(null);
+  const [replyBody, setReplyBody] = useState("");
+  const [replyMode, setReplyMode] = useState<"public" | "private">("public");
+
+  const accountIDs = accounts.map((a) => a.id);
+  const selectedAccountIDs =
+    accountFilter === "all"
+      ? accountIDs
+      : accountFilter ? [Number(accountFilter)] : [];
+
+  const loadItems = useCallback(async () => {
+    if (accounts.length === 0) {
+      setItems([]);
+      setSelectedId(null);
+      setSelected(null);
+      setThread([]);
+      onCountChange(0);
+      return;
+    }
+    setLoading(true);
+    try {
+      const params = new URLSearchParams();
+      if (selectedAccountIDs.length > 0) {
+        params.set("social_account_ids", selectedAccountIDs.join(","));
+      }
+      if (kindFilter !== "all") params.set("kinds", kindFilter);
+      if (statusFilter !== "open") {
+        params.set(
+          "status",
+          statusFilter === "all" ? "unread,read,replied,hidden,archived" : statusFilter,
+        );
+      }
+      params.set("limit", "100");
+      const res = await fetch(appURL(`/inbox?${params.toString()}`, projectId), {
+        credentials: "same-origin",
+      });
+      if (!res.ok) throw new Error(await res.text());
+      const data = await res.json() as { items?: InboxItem[]; count?: number };
+      const next = data.items || [];
+      setItems(next);
+      onCountChange(next.filter((it) => it.status === "unread").length || next.length);
+      setSelectedId((prev) => {
+        if (prev && next.some((it) => it.id === prev)) return prev;
+        return next[0]?.id || null;
+      });
+    } catch (e) {
+      setStatus("Load inbox: " + (e as Error).message);
+    } finally {
+      setLoading(false);
+    }
+  }, [accounts.length, accountFilter, kindFilter, statusFilter, projectId, setStatus, onCountChange, selectedAccountIDs.join(",")]);
+
+  const loadThread = useCallback(async (id: number | null) => {
+    if (!id) {
+      setSelected(null);
+      setThread([]);
+      return;
+    }
+    try {
+      const res = await fetch(appURL(`/inbox/${id}?with_thread=true`, projectId), {
+        credentials: "same-origin",
+      });
+      if (!res.ok) throw new Error(await res.text());
+      const data = await res.json() as { item?: InboxItem; thread?: InboxItem[] };
+      setSelected(data.item || null);
+      setThread(data.thread && data.thread.length > 0 ? data.thread : data.item ? [data.item] : []);
+    } catch (e) {
+      setStatus("Load thread: " + (e as Error).message);
+    }
+  }, [projectId, setStatus]);
+
+  useEffect(() => {
+    loadItems();
+  }, [loadItems]);
+
+  useEffect(() => {
+    loadThread(selectedId);
+  }, [selectedId, loadThread]);
+
+  useEffect(() => {
+    setReplyMode("public");
+  }, [selectedId]);
+
+  const runAction = async (action: string, id = selectedId, body?: Record<string, unknown>) => {
+    if (!id) return;
+    setBusy(action);
+    try {
+      const res = await fetch(appURL(`/inbox/${id}/${action}`, projectId), {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: body ? JSON.stringify(body) : "{}",
+      });
+      if (!res.ok) throw new Error(await res.text());
+      const data = await res.json();
+      if (data?.status === "unsupported") {
+        setStatus(data.reason || "Inbox action unsupported.");
+      } else if (data?.status === "failed") {
+        setStatus(data.error || "Inbox action failed.");
+      } else {
+        setStatus("");
+      }
+      if (action === "reply" || action === "private_reply") setReplyBody("");
+      await loadItems();
+      await loadThread(id);
+    } catch (e) {
+      setStatus(`Inbox ${action}: ` + (e as Error).message);
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const syncInbox = async () => {
+    setBusy("sync");
+    try {
+      const res = await fetch(appURL("/inbox/sync", projectId), {
+        method: "POST",
+        credentials: "same-origin",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ social_account_ids: selectedAccountIDs }),
+      });
+      if (!res.ok) throw new Error(await res.text());
+      const data = await res.json() as { results?: { status: string }[] };
+      const ok = (data.results || []).filter((r) => r.status === "ok").length;
+      const failed = (data.results || []).filter((r) => r.status === "failed").length;
+      const unsupported = (data.results || []).filter((r) => r.status === "unsupported").length;
+      setStatus(`Inbox sync: ${ok} ok · ${unsupported} unsupported · ${failed} failed`);
+      await loadItems();
+    } catch (e) {
+      setStatus("Inbox sync: " + (e as Error).message);
+    } finally {
+      setBusy(null);
+    }
+  };
+
+  const accountByID = new Map(accounts.map((a) => [a.id, a]));
+  const activeItem = selected || (selectedId ? items.find((it) => it.id === selectedId) || null : null);
+  const canPrivateReply =
+    !!activeItem &&
+    activeItem.kind === "comment" &&
+    (activeItem.platform === "facebook" || activeItem.platform === "instagram");
+
+  return (
+    <div className="h-full min-h-[560px] flex flex-col bg-bg">
+      <div className="border-b border-border px-4 py-3 flex flex-wrap items-center gap-2">
+        <select
+          value={accountFilter}
+          onChange={(e) => setAccountFilter(e.target.value)}
+          className="bg-bg-input border border-border rounded px-2 py-1.5 text-sm text-text"
+        >
+          <option value="all">All accounts</option>
+          {accounts.map((a) => (
+            <option key={a.id} value={a.id}>{a.display_name} · {a.platform}</option>
+          ))}
+        </select>
+        <select
+          value={kindFilter}
+          onChange={(e) => setKindFilter(e.target.value)}
+          className="bg-bg-input border border-border rounded px-2 py-1.5 text-sm text-text"
+        >
+          <option value="all">All kinds</option>
+          <option value="dm">Messages</option>
+          <option value="comment">Comments</option>
+          <option value="mention">Mentions</option>
+          <option value="review">Reviews</option>
+        </select>
+        <select
+          value={statusFilter}
+          onChange={(e) => setStatusFilter(e.target.value)}
+          className="bg-bg-input border border-border rounded px-2 py-1.5 text-sm text-text"
+        >
+          <option value="open">Open</option>
+          <option value="unread">Unread</option>
+          <option value="read">Read</option>
+          <option value="replied">Replied</option>
+          <option value="hidden">Hidden</option>
+          <option value="archived">Archived</option>
+          <option value="all">All statuses</option>
+        </select>
+        <button
+          onClick={loadItems}
+          disabled={loading}
+          className="px-3 py-1.5 text-sm border border-border rounded text-text hover:border-accent disabled:opacity-50"
+        >
+          {loading ? "Refreshing..." : "Refresh"}
+        </button>
+        <button
+          onClick={syncInbox}
+          disabled={busy === "sync" || accounts.length === 0}
+          className="ml-auto px-3 py-1.5 text-sm bg-accent text-bg rounded font-bold disabled:opacity-50"
+        >
+          {busy === "sync" ? "Syncing..." : "Sync inbox"}
+        </button>
+      </div>
+
+      <div className="flex-1 min-h-0 flex flex-col lg:flex-row">
+        <aside className="lg:w-[42%] xl:w-[38%] border-r border-border min-h-0 flex flex-col">
+          <div className="px-4 py-2 border-b border-border text-xs uppercase tracking-wide text-text-dim flex items-center justify-between">
+            <span>Inbox</span>
+            <span>{items.length}</span>
+          </div>
+          <div className="flex-1 min-h-0 overflow-y-auto">
+            {items.length === 0 ? (
+              <div className="text-text-dim text-sm text-center py-10">
+                {accounts.length === 0 ? "No accounts in this profile." : "No inbox items in this view."}
+              </div>
+            ) : (
+              items.map((item) => {
+                const active = item.id === selectedId;
+                const account = accountByID.get(item.social_account_id);
+                return (
+                  <button
+                    key={item.id}
+                    onClick={() => setSelectedId(item.id)}
+                    className={
+                      "w-full text-left px-4 py-3 border-b border-border flex gap-3 hover:bg-bg-card/60 " +
+                      (active ? "bg-bg-card border-l-2 border-l-accent" : "border-l-2 border-l-transparent")
+                    }
+                  >
+                    <InboxAvatar item={item} account={account} />
+                    <div className="min-w-0 flex-1">
+                      <div className="flex items-center gap-2 min-w-0">
+                        <span className={`text-xs uppercase ${item.status === "unread" ? "text-accent" : "text-text-dim"}`}>
+                          {item.kind}
+                        </span>
+                        <span className="text-text-dim text-xs">{item.platform}</span>
+                        <span className="ml-auto text-text-dim text-xs flex-shrink-0">{formatInboxDate(item.occurred_at)}</span>
+                      </div>
+                      <div className={`truncate mt-1 ${item.status === "unread" ? "text-text font-semibold" : "text-text"}`}>
+                        {inboxAuthor(item)}
+                      </div>
+                      <div className="text-text-dim text-sm truncate mt-0.5">
+                        {item.body || "(no text)"}
+                      </div>
+                      {account && (
+                        <div className="text-text-dim text-xs truncate mt-1">{account.display_name}</div>
+                      )}
+                    </div>
+                  </button>
+                );
+              })
+            )}
+          </div>
+        </aside>
+
+        <section className="flex-1 min-w-0 min-h-0 flex flex-col">
+          {!activeItem ? (
+            <div className="flex-1 grid place-items-center text-text-dim text-sm">
+              Select an inbox item.
+            </div>
+          ) : (
+            <>
+              <div className="border-b border-border px-4 py-3 flex items-start gap-3">
+                <InboxAvatar item={activeItem} account={accountByID.get(activeItem.social_account_id)} large />
+                <div className="min-w-0">
+                  <div className="text-text font-semibold truncate">{inboxAuthor(activeItem)}</div>
+                  <div className="text-text-dim text-xs">
+                    {activeItem.platform} · {activeItem.kind} · {formatInboxDate(activeItem.occurred_at)}
+                  </div>
+                </div>
+                <div className="ml-auto flex items-center gap-2">
+                  {activeItem.permalink && (
+                    <a
+                      href={activeItem.permalink}
+                      target="_blank"
+                      rel="noopener"
+                      className="px-2 py-1 text-xs border border-border rounded text-text-dim hover:text-text"
+                    >
+                      Open
+                    </a>
+                  )}
+                  <button
+                    onClick={() => runAction(activeItem.status === "read" ? "unread" : "read")}
+                    disabled={!!busy}
+                    className="px-2 py-1 text-xs border border-border rounded text-text-dim hover:text-text disabled:opacity-50"
+                  >
+                    {activeItem.status === "read" ? "Unread" : "Read"}
+                  </button>
+                  <button
+                    onClick={() => runAction("archive")}
+                    disabled={!!busy}
+                    className="px-2 py-1 text-xs border border-border rounded text-text-dim hover:text-text disabled:opacity-50"
+                  >
+                    Archive
+                  </button>
+                </div>
+              </div>
+
+              <div className="flex-1 min-h-0 overflow-y-auto px-4 py-4 flex flex-col gap-3">
+                {thread.map((message) => {
+                  const own = message.author_external_id === accountByID.get(message.social_account_id)?.external_account_id;
+                  return (
+                    <div
+                      key={message.id}
+                      className={
+                        "max-w-[78%] rounded border px-3 py-2 " +
+                        (own
+                          ? "ml-auto border-accent/40 bg-accent/10"
+                          : "border-border bg-bg-card/50")
+                      }
+                    >
+                      <div className="flex items-center gap-2 text-xs text-text-dim mb-1">
+                        <span>{inboxAuthor(message)}</span>
+                        <span>·</span>
+                        <span>{formatInboxDate(message.occurred_at)}</span>
+                      </div>
+                      <div className="text-text text-sm whitespace-pre-wrap break-words">
+                        {message.body || "(no text)"}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+
+              <form
+                className="border-t border-border p-4 flex flex-col gap-2"
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  if (replyBody.trim()) {
+                    runAction("reply", activeItem.id, {
+                      body: replyBody.trim(),
+                      mode: canPrivateReply ? replyMode : "auto",
+                    });
+                  }
+                }}
+              >
+                <textarea
+                  value={replyBody}
+                  onChange={(e) => setReplyBody(e.target.value)}
+                  placeholder={`Reply to ${activeItem.kind === "dm" ? "message" : activeItem.kind}...`}
+                  className="min-h-24 bg-bg-input border border-border rounded px-3 py-2 text-sm text-text resize-y"
+                />
+                <div className="flex items-center gap-2">
+                  {canPrivateReply && (
+                    <select
+                      value={replyMode}
+                      onChange={(e) => setReplyMode(e.target.value as "public" | "private")}
+                      className="bg-bg-input border border-border rounded px-2 py-1.5 text-sm text-text"
+                    >
+                      <option value="public">Public comment</option>
+                      <option value="private">Private message</option>
+                    </select>
+                  )}
+                  {(activeItem.kind === "comment" || activeItem.kind === "mention") && (
+                    <>
+                      <button
+                        type="button"
+                        onClick={() => runAction(activeItem.status === "hidden" ? "unhide" : "hide")}
+                        disabled={!!busy}
+                        className="px-3 py-1.5 text-sm border border-border rounded text-text-dim hover:text-text disabled:opacity-50"
+                      >
+                        {activeItem.status === "hidden" ? "Unhide" : "Hide"}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => runAction("delete")}
+                        disabled={!!busy}
+                        className="px-3 py-1.5 text-sm border border-error/50 rounded text-error disabled:opacity-50"
+                      >
+                        Delete
+                      </button>
+                    </>
+                  )}
+                  <button
+                    type="submit"
+                    disabled={!replyBody.trim() || !!busy}
+                    className="ml-auto px-4 py-1.5 text-sm bg-accent text-bg rounded font-bold disabled:opacity-50"
+                  >
+                    {busy === "reply" ? "Sending..." : "Reply"}
+                  </button>
+                </div>
+              </form>
+            </>
+          )}
+        </section>
+      </div>
+    </div>
+  );
+}
+
+function InboxAvatar({
+  item, account, large = false,
+}: {
+  item: InboxItem;
+  account?: SocialAccount;
+  large?: boolean;
+}) {
+  const src = item.author_avatar_url || account?.avatar_url || "";
+  const size = large ? "w-10 h-10" : "w-9 h-9";
+  if (src) {
+    return <img src={src} alt="" className={`${size} rounded-full object-cover border border-border flex-shrink-0`} />;
+  }
+  const label = inboxAuthor(item).slice(0, 1).toUpperCase() || "?";
+  return (
+    <div className={`${size} rounded-full bg-bg-input border border-border grid place-items-center text-text-dim flex-shrink-0`}>
+      {label}
+    </div>
+  );
+}
+
+function inboxAuthor(item: InboxItem): string {
+  const raw = item.author_name || item.author_handle || "";
+  if (raw.trim()) return raw.trim();
+  if (item.platform === "facebook" && item.kind === "comment") return "Facebook commenter";
+  return "Author unavailable";
+}
+
+function formatInboxDate(raw: string): string {
+  if (!raw) return "";
+  const d = new Date(raw);
+  if (Number.isNaN(d.getTime())) return raw;
+  const now = Date.now();
+  const diff = now - d.getTime();
+  if (diff >= 0 && diff < 24 * 60 * 60 * 1000) {
+    return d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  }
+  return d.toLocaleDateString([], { month: "short", day: "numeric" });
 }
 
 interface ProviderImportResponse {
@@ -2085,6 +2558,23 @@ function OptionFieldInput({
           className="bg-bg-input border border-border rounded px-2 py-1.5 text-sm"
         />
       </div>
+    );
+  }
+
+  if (field.type === "boolean") {
+    return (
+      <label className="flex items-start gap-2 border border-border rounded px-2 py-2 bg-bg-input/50">
+        <input
+          type="checkbox"
+          checked={value === true}
+          onChange={(e) => onChange(e.target.checked)}
+          className="mt-0.5 w-4 h-4 accent-orange-500"
+        />
+        <span className="min-w-0">
+          <span className="block text-xs uppercase tracking-wide text-text-dim">{field.label}</span>
+          {field.help && <span className="block text-text-dim text-[10px] leading-snug">{field.help}</span>}
+        </span>
+      </label>
     );
   }
 
@@ -3256,6 +3746,13 @@ function PostsView({
             <div className="mt-3 flex flex-wrap gap-2">
               {p.media_storage_ids.map((id) => (
                 <MediaThumb key={id} fileId={id} projectId={projectId} />
+              ))}
+            </div>
+          )}
+          {p.external_media_urls && p.external_media_urls.length > 0 && (
+            <div className="mt-3 flex flex-wrap gap-2">
+              {p.external_media_urls.map((url) => (
+                <ExternalMediaThumb key={url} url={url} />
               ))}
             </div>
           )}
@@ -4491,6 +4988,36 @@ function MediaThumb({ fileId, projectId }: { fileId: number; projectId?: string 
         </div>
       )}
     </>
+  );
+}
+
+function ExternalMediaThumb({ url }: { url: string }) {
+  const [failed, setFailed] = useState(false);
+  return (
+    <a
+      href={url}
+      target="_blank"
+      rel="noopener"
+      className="block w-20 h-20 rounded border border-border overflow-hidden bg-bg-input flex-shrink-0 relative group"
+      title="Imported media"
+    >
+      {!failed ? (
+        <img
+          src={url}
+          alt=""
+          loading="lazy"
+          onError={() => setFailed(true)}
+          className="w-full h-full object-cover"
+        />
+      ) : (
+        <div className="w-full h-full grid place-items-center px-2 text-center text-[10px] text-text-dim">
+          Open media
+        </div>
+      )}
+      <div className="absolute left-1 bottom-1 px-1 py-0.5 rounded bg-black/70 text-[9px] uppercase text-white">
+        imported
+      </div>
+    </a>
   );
 }
 
