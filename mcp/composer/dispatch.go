@@ -479,11 +479,17 @@ func (a *App) toolCompositionRender(ctx *sdk.AppCtx, args map[string]any) (any, 
 	if isV2EditJSON(rawEditJSON) {
 		if spec, specErr := parseV2CompositionJSON(rawEditJSON); specErr == nil {
 			output := v2OutputToOutput(spec.Output)
-			if output.Format == "mp4" && !v2HasVideoElements(spec) {
+			if output.Format == "mp4" && v2UseDirectRenderer(spec) {
+				executorName := "native-v2"
+				renderFn := renderV2Native
+				if strings.EqualFold(strings.TrimSpace(spec.Output.Renderer), "browser") {
+					executorName = "browser-v2"
+					renderFn = renderV2Browser
+				}
 				insertRes, err := ctx.AppDB().Exec(
 					`INSERT INTO renders (composition_id, project_id, executor, status, edit_snapshot)
 				 VALUES (?, ?, ?, 'rendering', ?)`,
-					id, pid, "native-v2", rawEditJSON,
+					id, pid, executorName, rawEditJSON,
 				)
 				if err != nil {
 					return nil, fmt.Errorf("insert render: %w", err)
@@ -491,7 +497,7 @@ func (a *App) toolCompositionRender(ctx *sdk.AppCtx, args map[string]any) (any, 
 				renderID, _ := insertRes.LastInsertId()
 				rctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
 				defer cancel()
-				result, nativeWarnings, err := renderV2Native(rctx, ctx.WithProject(pid), spec, pid)
+				result, nativeWarnings, err := renderFn(rctx, ctx.WithProject(pid), spec, pid)
 				if err != nil {
 					ctx.AppDB().Exec(
 						`UPDATE renders SET status='failed', error=?, ffmpeg_command=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`,
@@ -523,7 +529,7 @@ func (a *App) toolCompositionRender(ctx *sdk.AppCtx, args map[string]any) (any, 
 				ctx.EmitWithProject("composition.rendered", pid, map[string]any{
 					"composition_id": id,
 					"render_id":      renderID,
-					"executor":       "native-v2",
+					"executor":       executorName,
 					"storage_id":     storageID,
 					"duration_ms":    result.DurationMS,
 					"qa":             qa,
@@ -532,7 +538,7 @@ func (a *App) toolCompositionRender(ctx *sdk.AppCtx, args map[string]any) (any, 
 					"render_id":   renderID,
 					"status":      "complete",
 					"storage_id":  storageID,
-					"executor":    "native-v2",
+					"executor":    executorName,
 					"version":     composerV2Version,
 					"warnings":    nativeWarnings,
 					"duration_ms": result.DurationMS,

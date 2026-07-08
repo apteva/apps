@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: composer
 display_name: Composer
-version: 0.5.3
+version: 0.5.4
 description: |
   Multi-clip video composition. Stitch generated or uploaded assets
   into a single video — one visual track, timed audio tracks, optional
@@ -10,6 +10,13 @@ description: |
   default, on a render host via instances when render_host_id is
   set, or against a SaaS render backend (Shotstack et al) when one
   is bound to the render_executor role.
+
+  v0.5.4 adds an opt-in browser Composer V2 renderer for richer motion-design
+  output. Specs can set output.renderer="browser" to render HTML/CSS scene
+  graphs with component elements, browser/phone/laptop/task-list mockups,
+  generic HTML components, CSS shadows/glow/blur/patterns, scene camera
+  keyframes, and Chrome-captured frames before the normal ffmpeg audio/encode
+  stage. Existing V1 and native V2 renders remain unchanged.
 
   v0.5.3 improves native V2 polish: parented scale animations now scale text
   layout with the element to avoid reflow wobble, text auto-fits tight boxes
@@ -265,5 +272,15 @@ config_schema:
     type: text
     default: "ffprobe"
     label: ffprobe binary
+  - name: browser_chrome_path
+    type: text
+    default: ""
+    label: Browser renderer Chrome binary
+    description: Optional Chrome/Chromium path for Composer V2 browser renders. If empty, Composer searches CHROME_BIN, CHROMIUM_BIN, google-chrome, chromium, and common macOS app paths.
+  - name: browser_node_path
+    type: text
+    default: "node"
+    label: Browser renderer Node binary
+    description: Node.js binary used for Chrome DevTools frame capture when output.renderer is browser.
 
 upgrade_policy: auto-patch

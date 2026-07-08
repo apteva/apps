@@ -47,7 +47,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "composition_validate",
-			Description: "Validate a composition before saving/rendering. Args: spec? (composer/v2 object) or edit_json? (string). Returns version, duration_seconds, renderer ('ffmpeg' or 'web_required'), warnings, errors.",
+			Description: "Validate a composition before saving/rendering. Args: spec? (composer/v2 object) or edit_json? (string). Returns version, duration_seconds, renderer ('ffmpeg', 'native-v2', 'browser-v2', or 'web_required'), warnings, errors.",
 			InputSchema: schemaObject(map[string]any{
 				"spec":      map[string]any{"type": "object"},
 				"edit_json": map[string]any{"type": "string"},

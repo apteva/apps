@@ -33,6 +33,7 @@ type V2Output struct {
 	Height       int     `json:"height,omitempty"`
 	DesignWidth  int     `json:"design_width,omitempty"`
 	DesignHeight int     `json:"design_height,omitempty"`
+	Renderer     string  `json:"renderer,omitempty"`
 	FPS          int     `json:"fps,omitempty"`
 	Duration     float64 `json:"duration,omitempty"`
 	Resolution   string  `json:"resolution,omitempty"`
@@ -79,24 +80,25 @@ type V2Clip struct {
 }
 
 type V2Element struct {
-	ID       string         `json:"id,omitempty"`
-	Type     string         `json:"type"`
-	Parent   string         `json:"parent,omitempty"`
-	Asset    string         `json:"asset,omitempty"`
-	Src      string         `json:"src,omitempty"`
-	Text     string         `json:"text,omitempty"`
-	Start    float64        `json:"start,omitempty"`
-	Duration float64        `json:"duration,omitempty"`
-	X        any            `json:"x,omitempty"`
-	Y        any            `json:"y,omitempty"`
-	Width    any            `json:"width,omitempty"`
-	Height   any            `json:"height,omitempty"`
-	Fit      string         `json:"fit,omitempty"`
-	Style    map[string]any `json:"style,omitempty"`
-	Enter    map[string]any `json:"enter,omitempty"`
-	Exit     map[string]any `json:"exit,omitempty"`
-	Animate  map[string]any `json:"animate,omitempty"`
-	Meta     map[string]any `json:"meta,omitempty"`
+	ID        string         `json:"id,omitempty"`
+	Type      string         `json:"type"`
+	Parent    string         `json:"parent,omitempty"`
+	Component string         `json:"component,omitempty"`
+	Asset     string         `json:"asset,omitempty"`
+	Src       string         `json:"src,omitempty"`
+	Text      string         `json:"text,omitempty"`
+	Start     float64        `json:"start,omitempty"`
+	Duration  float64        `json:"duration,omitempty"`
+	X         any            `json:"x,omitempty"`
+	Y         any            `json:"y,omitempty"`
+	Width     any            `json:"width,omitempty"`
+	Height    any            `json:"height,omitempty"`
+	Fit       string         `json:"fit,omitempty"`
+	Style     map[string]any `json:"style,omitempty"`
+	Enter     map[string]any `json:"enter,omitempty"`
+	Exit      map[string]any `json:"exit,omitempty"`
+	Animate   map[string]any `json:"animate,omitempty"`
+	Meta      map[string]any `json:"meta,omitempty"`
 }
 
 type V2Audio struct {
@@ -274,7 +276,7 @@ func validateV2Composition(spec *V2Composition) error {
 
 func validateV2Element(el V2Element, assets map[string]V2Asset) error {
 	switch el.Type {
-	case "image", "video", "text", "shape":
+	case "image", "video", "text", "shape", "group", "component":
 	default:
 		return fmt.Errorf("unsupported element type %q", el.Type)
 	}
@@ -716,13 +718,19 @@ func validateCompositionJSON(s string) CompositionValidation {
 		if err != nil {
 			return CompositionValidation{Valid: false, Version: composerV2Version, Renderer: "none", Errors: []string{err.Error()}}
 		}
-		if spec.Output.Format == "mp4" && len(spec.Scenes) > 0 && !v2HasVideoElements(spec) {
+		if spec.Output.Format == "mp4" && len(spec.Scenes) > 0 && v2UseDirectRenderer(spec) {
+			renderer := "native-v2"
+			warning := "native composer/v2 renderer supports image, shape, text, parented component motion, design-size scaling, opacity, enter/exit presets, and x/y/scale/opacity keyframes"
+			if strings.EqualFold(strings.TrimSpace(spec.Output.Renderer), "browser") {
+				renderer = "browser-v2"
+				warning = "browser composer/v2 renderer supports CSS scene graphs, component elements, masks, blur/glow, parented motion, rich browser text layout, and keyframes"
+			}
 			return CompositionValidation{
 				Valid:           true,
 				Version:         composerV2Version,
 				DurationSeconds: v2DurationSeconds(spec),
-				Renderer:        "native-v2",
-				Warnings:        []string{"native composer/v2 renderer supports image, shape, text, parented component motion, design-size scaling, opacity, enter/exit presets, and x/y/scale/opacity keyframes"},
+				Renderer:        renderer,
+				Warnings:        []string{warning},
 			}
 		}
 		_, _, warnings, convErr := v2ToV1FFmpeg(spec)
@@ -738,6 +746,16 @@ func validateCompositionJSON(s string) CompositionValidation {
 		return CompositionValidation{Valid: false, Version: "composer/v1", Renderer: "none", Errors: []string{err.Error()}}
 	}
 	return CompositionValidation{Valid: true, Version: "composer/v1", DurationSeconds: editDurationSeconds(edit), Renderer: "ffmpeg"}
+}
+
+func v2UseDirectRenderer(spec *V2Composition) bool {
+	if spec == nil || len(spec.Scenes) == 0 {
+		return false
+	}
+	if strings.EqualFold(strings.TrimSpace(spec.Output.Renderer), "browser") {
+		return true
+	}
+	return !v2HasVideoElements(spec)
 }
 
 func composerV2Examples() []map[string]any {
@@ -793,9 +811,44 @@ func composerV2Examples() []map[string]any {
 	    }
 	  },
 	  {
-	    "id": "v2-web-renderer-required",
-	    "title": "Advanced layout placeholder",
-	    "description": "Text-only and shape elements validate but require the upcoming web renderer to render faithfully.",
+	    "id": "v2-browser-saas-presentation",
+	    "title": "Browser V2 SaaS presentation",
+	    "description": "Opt-in browser renderer scene graph with CSS components, camera motion, cards, task lists, and browser/phone mockups.",
+	    "spec": {
+	      "version": "composer/v2",
+	      "name": "Browser V2 SaaS presentation",
+	      "output": {"format": "mp4", "renderer": "browser", "width": 1920, "height": 1080, "design_width": 1920, "design_height": 1080, "fps": 24, "background": "#90b7d8"},
+	      "scenes": [
+	        {"id": "open", "duration": 4, "background": "#8fb7d7", "elements": [
+	          {"id": "loops", "type": "component", "component": "loop_pattern", "x": "-8%", "y": "-8%", "width": "116%", "height": "116%"},
+	          {"id": "headline", "type": "text", "text": "Autonomous work,\\nwithout the handoff lag", "x": "22%", "y": "38%", "width": "56%", "height": "18%", "style": {"font_family": "Georgia, serif", "font_size": 56, "weight": 500, "color": "#ffffff", "align": "center"}, "enter": {"type": "rise", "duration": 0.7}, "animate": {"y": [{"start": 0.8, "duration": 2.6, "from": 0, "to": -18}]}}
+	        ]},
+	        {"id": "prompt", "duration": 5, "background": "#8fb7d7", "meta": {"camera": {"scale": [{"start": 2.6, "duration": 1.6, "from": 1, "to": 1.08}], "y": [{"start": 2.6, "duration": 1.6, "from": 0, "to": -24}]}}, "elements": [
+	          {"id": "prompt-card", "type": "component", "component": "browser_window", "text": "AI workspace", "x": "30%", "y": "18%", "width": "40%", "height": "25%", "meta": {"body": "<b>Prepare tomorrow's renewal briefing.</b><br>Pull email, CRM notes, support history, and recent company news. Turn it into a clean executive prep doc."}, "enter": {"type": "zoom_in", "duration": 0.45}},
+	          {"id": "callout", "type": "text", "text": "Build the prep doc", "x": "34%", "y": "51%", "width": "32%", "height": "9%", "style": {"font_size": 74, "weight": 650, "color": "#23201e", "align": "center", "background": "rgba(217,103,79,.22)", "radius": 16, "padding": 12}, "enter": {"type": "rise", "delay": 0.35, "duration": 0.45}},
+	          {"id": "cursor", "type": "component", "component": "cursor", "x": "66%", "y": "39%", "width": "3%", "height": "5%", "enter": {"type": "fade", "delay": 1.1, "duration": 0.2}, "animate": {"x": [{"start": 1.1, "duration": 1.1, "from": 0, "to": 80}], "y": [{"start": 1.1, "duration": 1.1, "from": 0, "to": 56}]}}
+	        ]},
+	        {"id": "work", "duration": 6, "background": "#eef4f8", "elements": [
+	          {"id": "got", "type": "text", "text": "Got it.", "x": "14%", "y": "20%", "width": "22%", "height": "9%", "style": {"font_family": "Georgia, serif", "font_size": 50, "color": "#2a211f"}, "enter": {"type": "rise", "duration": 0.35}},
+	          {"id": "tasks", "type": "component", "component": "task_list", "x": "64%", "y": "15%", "width": "26%", "height": "36%", "meta": {"items": ["Confirm account access", "Find renewal risks", "Summarize support history", "Draft the talk track"]}, "enter": {"type": "slide_left", "delay": 0.25, "duration": 0.45}},
+	          {"id": "doc", "type": "component", "component": "browser_window", "text": "Research + prep doc", "x": "34%", "y": "46%", "width": "38%", "height": "32%", "meta": {"body": "<b>Executive prep brief</b><br><br>• Renewal status and blocker map<br>• Top customer concerns<br>• Recommended QBR flow<br>• Suggested follow-up offers"}, "enter": {"type": "zoom_in", "delay": 0.95, "duration": 0.45}},
+	          {"id": "halo", "type": "component", "component": "halftone", "x": "0%", "y": "0%", "width": "100%", "height": "100%", "enter": {"type": "fade", "delay": 2.2, "duration": 0.4}}
+	        ]},
+	        {"id": "mobile", "duration": 5, "background": "#f6d6c5", "elements": [
+	          {"id": "phone", "type": "component", "component": "phone", "x": "57%", "y": "12%", "width": "19%", "height": "72%", "meta": {"bar": "10:42", "body": "<b>Prep doc ready</b><br><br>Renewal risk: medium<br>Suggested opener: acknowledge onboarding delay.<br><br><b>Next:</b> ask for success metrics."}, "enter": {"type": "slide_up", "duration": 0.42}},
+	          {"id": "copy", "type": "text", "text": "It follows up\\nwhile you move on.", "x": "17%", "y": "34%", "width": "34%", "height": "18%", "style": {"font_family": "Georgia, serif", "font_size": 56, "color": "#2c211e"}, "enter": {"type": "rise", "delay": 0.25, "duration": 0.45}}
+	        ]},
+	        {"id": "close", "duration": 4, "background": "#fbf6ee", "elements": [
+	          {"id": "brand", "type": "component", "component": "brand", "text": "Apteva", "x": "39%", "y": "42%", "width": "24%", "height": "12%", "enter": {"type": "zoom_in", "duration": 0.5}},
+	          {"id": "sub", "type": "text", "text": "Composed with browser V2", "x": "39%", "y": "55%", "width": "24%", "height": "5%", "style": {"font_size": 24, "color": "#8a7d76", "align": "center"}, "enter": {"type": "fade", "delay": 0.55, "duration": 0.45}}
+	        ]}
+	      ]
+	    }
+	  },
+	  {
+	    "id": "v2-native-title-card",
+	    "title": "Native title card",
+	    "description": "Simple text and shape scene that renders through the native V2 path without Chrome.",
 	    "spec": {
 	      "version": "composer/v2",
 	      "output": {"format": "mp4", "width": 1920, "height": 1080, "fps": 30, "background": "#08080c"},

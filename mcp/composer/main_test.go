@@ -1300,6 +1300,43 @@ func TestV2ValidationMarksAdvancedSceneAsNativeV2(t *testing.T) {
 	}
 }
 
+func TestV2ValidationMarksBrowserRenderer(t *testing.T) {
+	body := `{
+		"version":"composer/v2",
+		"output":{"format":"mp4","renderer":"browser","width":1920,"height":1080,"fps":24},
+		"scenes":[{"duration":3,"elements":[
+			{"type":"component","component":"browser_window","x":"20%","y":"20%","width":"60%","height":"30%","meta":{"body":"Browser-rendered layout"}},
+			{"type":"component","component":"loop_pattern","x":"0%","y":"0%","width":"100%","height":"100%"}
+		]}]
+	}`
+	validation := validateCompositionJSON(body)
+	if !validation.Valid {
+		t.Fatalf("expected v2 valid, got errors: %v", validation.Errors)
+	}
+	if validation.Renderer != "browser-v2" {
+		t.Fatalf("renderer = %q, want browser-v2", validation.Renderer)
+	}
+	if len(validation.Warnings) == 0 || !strings.Contains(validation.Warnings[0], "CSS scene graphs") {
+		t.Fatalf("expected browser-v2 capability warning, got %v", validation.Warnings)
+	}
+}
+
+func TestV2ParsePreservesComponentField(t *testing.T) {
+	spec, err := parseV2CompositionJSON(`{
+		"version":"composer/v2",
+		"output":{"format":"mp4","renderer":"browser","width":640,"height":360,"fps":24},
+		"scenes":[{"duration":1,"elements":[
+			{"id":"phone","type":"component","component":"phone","meta":{"body":"Continue on mobile"}}
+		]}]
+	}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := spec.Scenes[0].Elements[0].Component; got != "phone" {
+		t.Fatalf("component = %q, want phone", got)
+	}
+}
+
 func TestV2NativeRenderShapeAndText(t *testing.T) {
 	if _, err := exec.LookPath(ffmpegPath()); err != nil {
 		t.Skip("ffmpeg not available")
