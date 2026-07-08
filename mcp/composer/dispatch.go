@@ -38,6 +38,29 @@ func projectScopeFromArgs(ctx *sdk.AppCtx, args map[string]any) string {
 // --- composition CRUD ---------------------------------------------
 
 func (a *App) toolCompositionCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if editJSON, outputJSON, dur, version, ok, err := compositionPayloadFromV2Args(args); ok {
+		if err != nil {
+			return nil, err
+		}
+		pid := projectScopeFromArgs(ctx, args)
+		name := strArg(args, "name", "")
+		if name == "" {
+			var spec V2Composition
+			if json.Unmarshal([]byte(editJSON), &spec) == nil {
+				name = spec.Name
+			}
+		}
+		res, err := ctx.AppDB().Exec(
+			`INSERT INTO compositions (project_id, name, edit_json, output_json, duration_seconds)
+			 VALUES (?, ?, ?, ?, ?)`,
+			pid, name, editJSON, outputJSON, dur,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("insert: %w", err)
+		}
+		id, _ := res.LastInsertId()
+		return map[string]any{"id": id, "version": version, "duration_seconds": dur}, nil
+	}
 	edit, err := editFromArgs(args)
 	if err != nil {
 		return nil, err
@@ -63,7 +86,7 @@ func (a *App) toolCompositionCreate(ctx *sdk.AppCtx, args map[string]any) (any, 
 		return nil, fmt.Errorf("insert: %w", err)
 	}
 	id, _ := res.LastInsertId()
-	return map[string]any{"id": id, "duration_seconds": dur}, nil
+	return map[string]any{"id": id, "version": "composer/v1", "duration_seconds": dur}, nil
 }
 
 func (a *App) toolCompositionUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -85,14 +108,40 @@ func (a *App) toolCompositionUpdate(ctx *sdk.AppCtx, args map[string]any) (any, 
 	).Scan(&name, &editJSON, &outputJSON); err != nil {
 		return nil, fmt.Errorf("load: %w", err)
 	}
+	currentIsV2 := isV2EditJSON(editJSON)
+	if v := strArg(patch, "name", ""); v != "" {
+		name = v
+	}
+	if nextEditJSON, nextOutputJSON, dur, version, ok, err := compositionPayloadFromV2Args(patch); ok {
+		if err != nil {
+			return nil, err
+		}
+		_, err := ctx.AppDB().Exec(
+			`UPDATE compositions SET name=?, edit_json=?, output_json=?, duration_seconds=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`,
+			name, nextEditJSON, nextOutputJSON, dur, id,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("update: %w", err)
+		}
+		return map[string]any{"id": id, "version": version, "duration_seconds": dur}, nil
+	}
+	if currentIsV2 {
+		_, err := ctx.AppDB().Exec(
+			`UPDATE compositions SET name=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`,
+			name, id,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("update: %w", err)
+		}
+		var spec V2Composition
+		_ = json.Unmarshal([]byte(editJSON), &spec)
+		return map[string]any{"id": id, "version": composerV2Version, "duration_seconds": v2DurationSeconds(&spec)}, nil
+	}
 	edit, _ := parseEditJSON(editJSON)
 	var output Output
 	_ = json.Unmarshal([]byte(outputJSON), &output)
 
 	// Apply patch — only the fields the validator knows.
-	if v := strArg(patch, "name", ""); v != "" {
-		name = v
-	}
 	if _, ok := patch["tracks"]; ok || patch["soundtrack"] != nil || patch["background"] != nil {
 		// Compose a new edit from the supplied subset, falling back to
 		// the current values for missing fields.
@@ -151,6 +200,20 @@ func (a *App) toolCompositionUpdate(ctx *sdk.AppCtx, args map[string]any) (any, 
 		return nil, fmt.Errorf("update: %w", err)
 	}
 	return map[string]any{"id": id, "duration_seconds": dur}, nil
+}
+
+func compositionPayloadFromV2Args(args map[string]any) (editJSON string, outputJSON string, duration float64, version string, ok bool, err error) {
+	spec, isV2, err := v2SpecFromArgs(args)
+	if !isV2 {
+		return "", "", 0, "", false, nil
+	}
+	if err != nil {
+		return "", "", 0, composerV2Version, true, err
+	}
+	b, _ := json.MarshalIndent(spec, "", "  ")
+	output := v2OutputToOutput(spec.Output)
+	outBytes, _ := json.Marshal(output)
+	return string(b), string(outBytes), v2DurationSeconds(spec), composerV2Version, true, nil
 }
 
 func tracksAsAny(e *Edit) any {
@@ -308,6 +371,32 @@ func (a *App) toolCompositionDelete(ctx *sdk.AppCtx, args map[string]any) (any, 
 	return map[string]any{"id": id, "deleted": true}, nil
 }
 
+func (a *App) toolCompositionValidate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	var editJSON string
+	if raw := strArg(args, "edit_json", ""); strings.TrimSpace(raw) != "" {
+		editJSON = raw
+	} else if raw, ok := args["spec"]; ok {
+		b, err := json.Marshal(raw)
+		if err != nil {
+			return nil, err
+		}
+		editJSON = string(b)
+	} else if isV2Map(args) {
+		b, err := json.Marshal(args)
+		if err != nil {
+			return nil, err
+		}
+		editJSON = string(b)
+	} else {
+		return nil, errors.New("spec or edit_json required")
+	}
+	return validateCompositionJSON(editJSON), nil
+}
+
+func (a *App) toolCompositionExamples(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	return map[string]any{"examples": composerV2Examples()}, nil
+}
+
 func loadComposition(ctx *sdk.AppCtx, id int64) (map[string]any, error) {
 	var (
 		name, editJSON, outputJSON string
@@ -385,13 +474,11 @@ func (a *App) toolCompositionRender(ctx *sdk.AppCtx, args map[string]any) (any, 
 	if err != nil {
 		return nil, err
 	}
-	edit, err := parseEditJSON(row["edit_json"].(string))
+	rawEditJSON := row["edit_json"].(string)
+	edit, output, renderVersion, renderWarnings, err := renderEditFromStoredJSON(rawEditJSON, row["output_json"].(string))
 	if err != nil {
 		return nil, fmt.Errorf("composition.edit_json invalid: %w", err)
 	}
-	var output Output
-	_ = json.Unmarshal([]byte(row["output_json"].(string)), &output)
-	validateOutput(&output)
 	if err := validateEditOutput(edit, output); err != nil {
 		return nil, err
 	}
@@ -413,7 +500,10 @@ func (a *App) toolCompositionRender(ctx *sdk.AppCtx, args map[string]any) (any, 
 		return nil, err
 	}
 
-	editSnapshot, _ := json.Marshal(edit)
+	editSnapshot := []byte(rawEditJSON)
+	if renderVersion != composerV2Version {
+		editSnapshot, _ = json.Marshal(edit)
+	}
 
 	insertRes, err := ctx.AppDB().Exec(
 		`INSERT INTO renders (composition_id, project_id, executor, status, edit_snapshot)
@@ -446,6 +536,9 @@ func (a *App) toolCompositionRender(ctx *sdk.AppCtx, args map[string]any) (any, 
 	// (when bound) or local cache (when not).
 	var storageID int64
 	qa := RenderQA{Warnings: timelineWarnings(edit)}
+	if len(renderWarnings) > 0 {
+		qa.Warnings = append(qa.Warnings, renderWarnings...)
+	}
 	if result.Sync && strings.HasPrefix(result.LocalPath, "storage://files/") {
 		if id, err := strconv.ParseInt(strings.TrimPrefix(result.LocalPath, "storage://files/"), 10, 64); err == nil && id > 0 {
 			storageID = id
@@ -482,10 +575,31 @@ func (a *App) toolCompositionRender(ctx *sdk.AppCtx, args map[string]any) (any, 
 		"status":      "complete",
 		"storage_id":  storageID,
 		"executor":    exec.Name(),
+		"version":     renderVersion,
+		"warnings":    renderWarnings,
 		"duration_ms": result.DurationMS,
 		"cost_usd":    result.CostUSD,
 		"qa":          qa,
 	}, nil
+}
+
+func renderEditFromStoredJSON(editJSON, outputJSON string) (*Edit, Output, string, []string, error) {
+	if isV2EditJSON(editJSON) {
+		spec, err := parseV2CompositionJSON(editJSON)
+		if err != nil {
+			return nil, Output{}, composerV2Version, nil, err
+		}
+		edit, output, warnings, err := v2ToV1FFmpeg(spec)
+		return edit, output, composerV2Version, warnings, err
+	}
+	edit, err := parseEditJSON(editJSON)
+	if err != nil {
+		return nil, Output{}, "composer/v1", nil, err
+	}
+	var output Output
+	_ = json.Unmarshal([]byte(outputJSON), &output)
+	validateOutput(&output)
+	return edit, output, "composer/v1", nil, nil
 }
 
 // saveRenderOutput uploads the bytes to storage and returns the
@@ -837,6 +951,36 @@ func (a *App) handleBindings(w http.ResponseWriter, r *http.Request) {
 		out["render_executor"] = bound.AppSlug
 	}
 	jsonResp(w, out)
+}
+
+func (a *App) handleValidate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST only", http.StatusMethodNotAllowed)
+		return
+	}
+	if globalCtx == nil {
+		http.Error(w, "app not mounted", http.StatusServiceUnavailable)
+		return
+	}
+	var body map[string]any
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	out, err := a.toolCompositionValidate(globalCtx, body)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	jsonResp(w, out)
+}
+
+func (a *App) handleExamples(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "GET only", http.StatusMethodNotAllowed)
+		return
+	}
+	jsonResp(w, map[string]any{"examples": composerV2Examples()})
 }
 
 func appToolAvailable(ctx *sdk.AppCtx, appName, tool string, args map[string]any) bool {

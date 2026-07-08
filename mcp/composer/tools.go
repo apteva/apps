@@ -10,6 +10,8 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/render-status/", Handler: a.handleRenderStatus},
 		{Pattern: "/cache/", Handler: a.handleCacheGet},
 		{Pattern: "/bindings", Handler: a.handleBindings},
+		{Pattern: "/validate", Handler: a.handleValidate},
+		{Pattern: "/examples", Handler: a.handleExamples},
 		{Pattern: "/assets/resolve", Handler: a.handleAssetResolve},
 		{Pattern: "/assets/storage", Handler: a.handleStorageAssets},
 	}
@@ -19,24 +21,44 @@ func (a *App) MCPTools() []sdk.Tool {
 	return []sdk.Tool{
 		{
 			Name:        "composition_create",
-			Description: "Create a composition. Args: name?, tracks (array of {type?: visual|audio, clips:[{uid?,asset:{type,src,provider?,kind?,request?},ai?,start,length|duration,volume?,source_audio?:auto|keep|mute,transition?,text?}]}), soundtrack? ({src,volume?,ai?}), output? ({format: mp4|mp3|wav|m4a|aac,resolution,aspect,fps}). AI assets can include source_image or source_images for image/video/avatar references. Supports one visual track plus timed audio tracks, or audio-only tracks for audio formats. Returns {id, duration_seconds}.",
+			Description: "Create a composition. Supports v1 args (name?, tracks, soundtrack?, output?) or composer/v2 args via spec:{version:'composer/v2', assets?, scenes? or tracks?, audio?, output?}. Existing v1 clips still support AI generation, source_images, audio tracks, overlays, and audio-only outputs. Returns {id, version, duration_seconds}.",
 			InputSchema: schemaObject(map[string]any{
 				"name":       map[string]any{"type": "string"},
+				"spec":       map[string]any{"type": "object"},
+				"version":    map[string]any{"type": "string"},
+				"assets":     map[string]any{"type": "array"},
+				"scenes":     map[string]any{"type": "array"},
+				"audio":      map[string]any{"type": "array"},
 				"tracks":     map[string]any{"type": "array"},
 				"soundtrack": map[string]any{"type": "object"},
 				"background": map[string]any{"type": "string"},
 				"output":     map[string]any{"type": "object"},
-			}, []string{"tracks"}),
+			}, nil),
 			Handler: a.toolCompositionCreate,
 		},
 		{
 			Name:        "composition_update",
-			Description: "Patch a composition. Args: id, patch (subset of {name, tracks, soundtrack, background, output}).",
+			Description: "Patch a composition. Args: id, patch. For composer/v2, send patch.spec or a full composer/v2 payload; for v1, send subset of {name, tracks, soundtrack, background, output}.",
 			InputSchema: schemaObject(map[string]any{
 				"id":    map[string]any{"type": "integer"},
 				"patch": map[string]any{"type": "object"},
 			}, []string{"id", "patch"}),
 			Handler: a.toolCompositionUpdate,
+		},
+		{
+			Name:        "composition_validate",
+			Description: "Validate a composition before saving/rendering. Args: spec? (composer/v2 object) or edit_json? (string). Returns version, duration_seconds, renderer ('ffmpeg' or 'web_required'), warnings, errors.",
+			InputSchema: schemaObject(map[string]any{
+				"spec":      map[string]any{"type": "object"},
+				"edit_json": map[string]any{"type": "string"},
+			}, nil),
+			Handler: a.toolCompositionValidate,
+		},
+		{
+			Name:        "composition_examples",
+			Description: "Return canonical composer/v2 example specs agents can adapt.",
+			InputSchema: schemaObject(map[string]any{}, nil),
+			Handler:     a.toolCompositionExamples,
 		},
 		{
 			Name:        "composition_get",

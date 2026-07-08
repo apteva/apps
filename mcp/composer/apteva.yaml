@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: composer
 display_name: Composer
-version: 0.3.47
+version: 0.4.0
 description: |
   Multi-clip video composition. Stitch generated or uploaded assets
   into a single video — one visual track, timed audio tracks, optional
@@ -10,6 +10,12 @@ description: |
   default, on a render host via instances when render_host_id is
   set, or against a SaaS render backend (Shotstack et al) when one
   is bound to the render_executor role.
+
+  v0.4.0 introduces the Composer V2 JSON foundation: a renderer-neutral
+  scene/asset/audio schema, validation tools, canonical examples for agents,
+  and a compatibility path that renders simple V2 scene/timeline specs through
+  the existing ffmpeg executor while advanced animated layouts are explicitly
+  marked for the upcoming web renderer.
 
   v0.3.45 adds first-class overlay/text tracks with rich text styling,
   timeline/UI editing, animation presets, and ffmpeg rendering after
@@ -177,8 +183,10 @@ provides:
   http_routes:
     - prefix: /
   mcp_tools:
-    - { name: composition_create, description: "Create a composition. Args: name?, tracks (array of {type?: visual|audio|overlay|text, clips:[…]}), clips may include ai generation specs with source_image/source_images, asset.type=generated, or overlay text assets ({asset:{type:'text',text,font,style,stroke,shadow,align}, start, length, position?, animation?}), soundtrack? ({src, volume?, ai?}), output ({format: mp4|mp3|wav|m4a|aac, resolution, aspect, fps})." }
-    - { name: composition_update, description: "Patch a composition. Args: id, patch (subset of {name, tracks, soundtrack, output})." }
+    - { name: composition_create, description: "Create a v1 timeline composition or a composer/v2 composition via spec." }
+    - { name: composition_update, description: "Patch a composition. V2 compositions accept patch.spec or a full composer/v2 payload." }
+    - { name: composition_validate, description: "Validate composer/v1 or composer/v2 JSON and report renderer compatibility." }
+    - { name: composition_examples, description: "Return canonical composer/v2 examples for agents to adapt." }
     - { name: composition_get,    description: "Fetch one composition with its latest render row. Args: id." }
     - { name: composition_list,   description: "List compositions for this project. Args: limit? (default 50)." }
     - { name: composition_delete, description: "Delete a composition (cascades renders). Args: id." }
