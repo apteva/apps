@@ -26,7 +26,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: recipes
 display_name: Recipes
-version: 0.1.1
+version: 0.1.2
 description: Recipe library, nutrition estimates, meal planning, and pantry-aware shopping lists.
 author: Apteva
 icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/recipes/icon.png
