@@ -1,0 +1,106 @@
+schema: apteva-app/v1
+
+name: inventory
+display_name: Inventory
+version: 0.1.0
+description: |
+  Reusable stock ledger for Apteva apps. Tracks SKUs, locations,
+  on-hand stock, reservations, transfers, adjustments, receipts, and
+  an append-only movement audit trail. Commerce, Orders, Subscriptions,
+  and fulfillment apps can reserve and commit stock without owning
+  inventory logic themselves.
+
+author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/inventory
+tags: [inventory, stock, warehouse, sku, commerce, ecommerce, fulfillment]
+
+scopes: [project, global]
+min_apteva_version: "0.11.0"
+
+requires:
+  permissions:
+    - db.write.app
+  apps:
+    - name: catalog
+      optional: true
+      reason: "Inventory items can link to Catalog products/prices, but SKU tracking also works standalone."
+
+provides:
+  http_routes:
+    - prefix: /
+  mcp_tools:
+    - { name: inventory_locations_create, description: "Create a stock location. Args: name, code?, type?, address?, active?." }
+    - { name: inventory_locations_list, description: "List stock locations. Args: active?." }
+    - { name: inventory_locations_get, description: "Fetch one location. Args: id." }
+    - { name: inventory_locations_update, description: "Patch a location. Args: id, patch." }
+    - { name: inventory_items_create, description: "Create an inventory item/SKU. Args: sku, name, catalog_product_id?, catalog_price_id?, barcode?, unit?, track_quantity?, allow_backorder?, metadata?." }
+    - { name: inventory_items_list, description: "List inventory items with aggregate stock. Args: q?, include_archived?, limit?." }
+    - { name: inventory_items_get, description: "Fetch one item with levels and active reservations. Args: id? or sku?." }
+    - { name: inventory_items_update, description: "Patch an inventory item. Args: id, patch." }
+    - { name: inventory_levels_get, description: "List stock levels. Args: item_id?, sku?, location_id?, low_stock_only?." }
+    - { name: inventory_availability_check, description: "Check available quantity for an item, optionally at one location. Args: item_id? or sku, quantity?, location_id?." }
+    - { name: inventory_adjust, description: "Adjust on-hand stock. Args: item_id? or sku, location_id, quantity_delta, reason?, actor?, reference_*?, metadata?." }
+    - { name: inventory_receive, description: "Receive incoming stock. Args: item_id? or sku, location_id, quantity, reason?, actor?, reference_*?, metadata?." }
+    - { name: inventory_transfer, description: "Move on-hand stock between locations. Args: item_id? or sku, from_location_id, to_location_id, quantity, reason?, actor?, reference_*?, metadata?." }
+    - { name: inventory_reserve, description: "Reserve available stock. Args: item_id? or sku, quantity, location_id?, reference_app?, reference_type?, reference_id?, expires_at?, metadata?." }
+    - { name: inventory_release_reservation, description: "Release one active reservation. Args: reservation_id? or reference_app/reference_type/reference_id." }
+    - { name: inventory_commit_reservation, description: "Commit one active reservation, reducing on-hand stock. Args: reservation_id? or reference_app/reference_type/reference_id." }
+    - { name: inventory_reservations_list, description: "List reservations. Args: item_id?, location_id?, status?, reference_app?, reference_type?, reference_id?, limit?." }
+    - { name: inventory_movements_list, description: "List stock movement audit rows. Args: item_id?, location_id?, reference_app?, reference_type?, reference_id?, limit?." }
+  ui_panels:
+    - slot: project.page
+      label: Inventory
+      icon: warehouse
+      entry: /ui/InventoryPanel.mjs
+  publishes:
+    - name: inventory.item.created
+      description: An inventory item/SKU was created.
+      payload:
+        id: integer
+        sku: string
+        name: string
+    - name: inventory.level.changed
+      description: An inventory level changed.
+      payload:
+        item_id: integer
+        location_id: integer
+        on_hand: number
+        reserved: number
+        available: number
+    - name: inventory.reservation.created
+      description: Stock was reserved.
+      payload:
+        reservation_id: integer
+        item_id: integer
+        location_id: integer
+        quantity: number
+    - name: inventory.reservation.committed
+      description: Reserved stock was committed and removed from on-hand stock.
+      payload:
+        reservation_id: integer
+        item_id: integer
+        location_id: integer
+        quantity: number
+    - name: inventory.reservation.released
+      description: Reserved stock was released back to availability.
+      payload:
+        reservation_id: integer
+        item_id: integer
+        location_id: integer
+        quantity: number
+
+runtime:
+  kind: source
+  source:
+    repo: github.com/apteva/apps
+    ref: main
+    entry: mcp/inventory
+  port: 8080
+  health_check: /health
+
+db:
+  driver: sqlite
+  path: /data/inventory.db
+  migrations: migrations/
+
+upgrade_policy: auto-patch

@@ -1,0 +1,97 @@
+schema: apteva-app/v1
+
+name: commerce
+display_name: Commerce
+version: 0.1.0
+description: |
+  Shopify-style multi-store commerce layer for Apteva. Owns stores,
+  storefront listings, variants, collections, discounts, sale lifecycle
+  metadata, and merchant-facing operations while delegating product
+  price truth to Catalog, stock to Inventory, cart/session primitives
+  to Checkout, payments to Billing, and fulfillment to Orders.
+
+author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/commerce
+tags: [commerce, ecommerce, stores, storefront, shop, catalog, checkout]
+
+scopes: [project, global]
+min_apteva_version: "0.11.0"
+
+requires:
+  permissions:
+    - db.write.app
+    - platform.apps.call
+  apps:
+    - name: catalog
+      optional: false
+    - name: checkout
+      optional: false
+    - name: inventory
+      optional: true
+    - name: orders
+      optional: true
+    - name: billing
+      optional: true
+    - name: storage
+      optional: true
+
+provides:
+  http_routes:
+    - prefix: /
+  mcp_tools:
+    - { name: commerce_stores_create, description: "Create a store. Args: slug, name, default_currency?, default_locale?, timezone?." }
+    - { name: commerce_stores_list, description: "List stores." }
+    - { name: commerce_stores_get, description: "Fetch one store by id or slug." }
+    - { name: commerce_stores_update, description: "Patch a store. Args: id, patch." }
+    - { name: commerce_products_create, description: "Create a storefront listing and optional first variant. Can create Catalog product/price when catalog ids are omitted." }
+    - { name: commerce_products_list, description: "List storefront listings. Args: store_id?, status?, q?, limit?." }
+    - { name: commerce_products_get, description: "Fetch one listing with variants. Args: id? or handle? plus store_id?." }
+    - { name: commerce_products_publish, description: "Publish a listing. Args: id." }
+    - { name: commerce_products_archive, description: "Archive a listing. Args: id." }
+    - { name: commerce_variants_create, description: "Create a listing variant. Args: listing_id, sku, title?, catalog_price_id?, inventory_item_id?, price_cents?, currency?." }
+    - { name: commerce_variants_update, description: "Patch a variant. Args: id, patch." }
+    - { name: commerce_collections_create, description: "Create a collection. Args: store_id, handle?, title, description_html?." }
+    - { name: commerce_collections_list, description: "List collections. Args: store_id?." }
+    - { name: commerce_collections_add_product, description: "Add a listing to a collection. Args: collection_id, listing_id." }
+    - { name: commerce_cart_create, description: "Create a Commerce cart backed by Checkout. Args: store_id? or store_slug?, session_token?." }
+    - { name: commerce_cart_get, description: "Fetch a Commerce cart with items. Args: cart_id? or session_token?." }
+    - { name: commerce_cart_add_item, description: "Add a Commerce variant to a cart and delegate item snapshotting to Checkout. Args: cart_id, variant_id, quantity?." }
+    - { name: commerce_cart_set_quantity, description: "Set a Commerce cart item's quantity in the Commerce cart. Args: cart_id, item_id, quantity." }
+    - { name: commerce_checkout_start, description: "Reserve inventory where configured, then start the backing Checkout session. Args: cart_id." }
+    - { name: commerce_checkout_update, description: "Update buyer contact/address on Commerce and Checkout sessions. Args: checkout_id, patch." }
+    - { name: commerce_checkout_pay, description: "Submit the backing Checkout session for payment and create a Commerce sale record. Args: checkout_id." }
+    - { name: commerce_checkout_mark_paid, description: "Mark a sale paid after Billing confirms payment; commits inventory reservations and creates an Orders record when available. Args: sale_id." }
+    - { name: commerce_sales_list, description: "List sales. Args: store_id?, status?, payment_status?, limit?." }
+    - { name: commerce_sales_get, description: "Fetch one sale. Args: id." }
+  ui_panels:
+    - slot: project.page
+      label: Commerce
+      icon: shopping-bag
+      entry: /ui/CommercePanel.mjs
+  publishes:
+    - name: commerce.store.created
+      description: A commerce store was created.
+    - name: commerce.product.created
+      description: A storefront listing was created.
+    - name: commerce.checkout.started
+      description: A Commerce checkout was started.
+    - name: commerce.sale.created
+      description: A Commerce sale was created.
+    - name: commerce.sale.paid
+      description: A Commerce sale was marked paid.
+
+runtime:
+  kind: source
+  source:
+    repo: github.com/apteva/apps
+    ref: main
+    entry: mcp/commerce
+  port: 8080
+  health_check: /health
+
+db:
+  driver: sqlite
+  path: /data/commerce.db
+  migrations: migrations/
+
+upgrade_policy: auto-patch

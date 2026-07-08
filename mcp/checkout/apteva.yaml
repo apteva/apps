@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: checkout
 display_name: Checkout
-version: 0.1.1
+version: 0.1.2
 description: |
   Cart + checkout flow. Customers add catalog prices to a cart, fill
   contact info, and convert into a billing invoice. v0.1.0 is the
@@ -36,6 +36,8 @@ provides:
   http_routes:
     - prefix: /
   mcp_tools:
+    - name: cart_create
+      description: Create or fetch an open cart for a session_token or customer_id. Returns cart_id and session_token.
     - name: cart_get
       description: Fetch a cart by id or session_token. Returns items + materialised totals.
     - name: cart_add_item

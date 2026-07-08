@@ -298,7 +298,7 @@ func TestMCPTools_AllRegisteredHaveSchema(t *testing.T) {
 	app := &App{}
 	tools := app.MCPTools()
 	want := []string{
-		"cart_get", "cart_add_item", "cart_set_quantity", "cart_clear",
+		"cart_create", "cart_get", "cart_add_item", "cart_set_quantity", "cart_clear",
 		"checkout_start", "checkout_update", "checkout_pay",
 		"checkout_get", "checkout_cancel",
 	}

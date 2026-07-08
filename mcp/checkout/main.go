@@ -13,8 +13,9 @@
 // forward-compat for that, populated in v0.1.0 with defaults.
 //
 // Cross-app calls:
-//   catalog → catalog_prices_get  (snapshot price into cart_items)
-//   billing → customers_upsert_by_email, invoices_create, invoices_finalize
+//
+//	catalog → catalog_prices_get  (snapshot price into cart_items)
+//	billing → customers_upsert_by_email, invoices_create, invoices_finalize
 //
 // All cross-app calls inject _project_id so global-scope installs
 // (where both apps share a multi-project SQLite) route to the
@@ -41,7 +42,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: checkout
 display_name: Checkout
-version: 0.1.0
+version: 0.1.2
 description: |
   Cart + checkout flow. Creates billing invoices on conversion;
   Stripe support lands in v0.2.0.
@@ -59,6 +60,27 @@ requires:
 provides:
   http_routes:
     - prefix: /
+  mcp_tools:
+    - name: cart_create
+      description: Create or fetch an open cart for a session_token or customer_id. Returns cart_id and session_token.
+    - name: cart_get
+      description: Fetch a cart by id or session_token. Returns items + materialised totals.
+    - name: cart_add_item
+      description: Add a catalog price to a cart. Snapshots description/amount from the price.
+    - name: cart_set_quantity
+      description: Change an item's quantity. Setting 0 removes it.
+    - name: cart_clear
+      description: Remove all items from a cart.
+    - name: checkout_start
+      description: Lock a cart and create a checkout_session.
+    - name: checkout_update
+      description: Capture or update email / name / addresses on a started session.
+    - name: checkout_pay
+      description: Submit the session for payment and create a Billing invoice.
+    - name: checkout_get
+      description: Fetch a checkout_session by id.
+    - name: checkout_cancel
+      description: Cancel a started or awaiting-payment session.
 runtime:
   kind: source
   source:
@@ -92,7 +114,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	}
 	globalCtx = ctx
 	ctx.Logger().Info("checkout mounted",
-		"version", "0.1.0",
+		"version", "0.1.2",
 		"scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
 	return nil
 }
@@ -208,6 +230,16 @@ func (a *App) handleHTTPSessionItem(w http.ResponseWriter, r *http.Request) {
 func (a *App) MCPTools() []sdk.Tool {
 	return []sdk.Tool{
 		{
+			Name:        "cart_create",
+			Description: "Create or fetch an open cart for a session_token or customer_id. If neither is provided, a server session_token is generated.",
+			InputSchema: schemaObject(map[string]any{
+				"session_token": map[string]any{"type": "string"},
+				"customer_id":   map[string]any{"type": "integer"},
+				"metadata":      map[string]any{"type": "object"},
+			}, nil),
+			Handler: a.toolCartCreate,
+		},
+		{
 			Name:        "cart_get",
 			Description: "Fetch a cart by id or session_token. Returns the cart row plus items and materialised totals.",
 			InputSchema: schemaObject(map[string]any{
@@ -317,20 +349,20 @@ func resolveProjectFromRequest(r *http.Request) (string, error) {
 // ─── Types ──────────────────────────────────────────────────────────
 
 type Cart struct {
-	ID             int64           `json:"id"`
-	ProjectID      string          `json:"project_id,omitempty"`
-	SessionToken   string          `json:"session_token,omitempty"`
-	CustomerID     *int64          `json:"customer_id,omitempty"`
-	SubtotalCents  int64           `json:"subtotal_cents"`
-	Currency       string          `json:"currency"`
-	ItemCount      int             `json:"item_count"`
-	Status         string          `json:"status"`
-	InvoiceID      *int64          `json:"invoice_id,omitempty"`
-	Metadata       json.RawMessage `json:"metadata,omitempty"`
-	CreatedAt      string          `json:"created_at,omitempty"`
-	UpdatedAt      string          `json:"updated_at,omitempty"`
-	ExpiresAt      string          `json:"expires_at,omitempty"`
-	Items          []*CartItem     `json:"items,omitempty"`
+	ID            int64           `json:"id"`
+	ProjectID     string          `json:"project_id,omitempty"`
+	SessionToken  string          `json:"session_token,omitempty"`
+	CustomerID    *int64          `json:"customer_id,omitempty"`
+	SubtotalCents int64           `json:"subtotal_cents"`
+	Currency      string          `json:"currency"`
+	ItemCount     int             `json:"item_count"`
+	Status        string          `json:"status"`
+	InvoiceID     *int64          `json:"invoice_id,omitempty"`
+	Metadata      json.RawMessage `json:"metadata,omitempty"`
+	CreatedAt     string          `json:"created_at,omitempty"`
+	UpdatedAt     string          `json:"updated_at,omitempty"`
+	ExpiresAt     string          `json:"expires_at,omitempty"`
+	Items         []*CartItem     `json:"items,omitempty"`
 }
 
 type CartItem struct {
@@ -371,6 +403,19 @@ type CheckoutSession struct {
 }
 
 // ─── MCP tool handlers ──────────────────────────────────────────────
+
+func (a *App) toolCartCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	cart, err := dbCartCreate(ctx, pid, args)
+	if err != nil {
+		return nil, err
+	}
+	emitCart(ctx, "cart.created", cart)
+	return map[string]any{"cart": cart}, nil
+}
 
 func (a *App) toolCartGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	pid, err := resolveProjectFromArgs(args)
