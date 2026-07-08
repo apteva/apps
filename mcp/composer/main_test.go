@@ -1298,6 +1298,154 @@ func TestAssetKindHint(t *testing.T) {
 	}
 }
 
+func TestV2ValidateAndConvertScenes(t *testing.T) {
+	body := `{
+		"version":"composer/v2",
+		"output":{"format":"mp4","width":1920,"height":1080,"fps":30,"background":"#050505"},
+		"assets":[
+			{"id":"a","type":"image","src":"storage:1"},
+			{"id":"b","type":"image","src":"storage:2"},
+			{"id":"music","type":"audio","src":"storage:3"}
+		],
+		"scenes":[
+			{"duration":4,"elements":[{"type":"image","asset":"a"},{"type":"text","text":"Open","style":{"position":"center","font_size":48}}]},
+			{"duration":6,"elements":[{"type":"image","asset":"b"},{"type":"text","text":"Proof","style":{"position":"bottom"}}]}
+		],
+		"audio":[{"asset":"music","volume":0.2}]
+	}`
+	spec, err := parseV2CompositionJSON(body)
+	if err != nil {
+		t.Fatalf("parse v2: %v", err)
+	}
+	edit, output, warnings, err := v2ToV1FFmpeg(spec)
+	if err != nil {
+		t.Fatalf("convert v2: %v", err)
+	}
+	if len(warnings) != 0 {
+		t.Fatalf("unexpected warnings: %v", warnings)
+	}
+	if output.Resolution != "fullhd" || output.Aspect != "16:9" {
+		t.Fatalf("output = %+v, want fullhd 16:9", output)
+	}
+	if got := editDurationSeconds(edit); got != 10 {
+		t.Fatalf("duration = %v, want 10", got)
+	}
+	if edit.Timeline.Soundtrack == nil || edit.Timeline.Soundtrack.Src != "storage:3" {
+		t.Fatalf("soundtrack not converted: %+v", edit.Timeline.Soundtrack)
+	}
+	if edit.Timeline.Tracks[0].Clips[0].Text == nil || edit.Timeline.Tracks[0].Clips[0].Text.Position != "center" {
+		t.Fatalf("text overlay not converted: %+v", edit.Timeline.Tracks[0].Clips[0].Text)
+	}
+}
+
+func TestV2ValidationMarksAdvancedSceneAsWebRequired(t *testing.T) {
+	body := `{
+		"version":"composer/v2",
+		"output":{"format":"mp4","width":1920,"height":1080,"fps":30},
+		"scenes":[{"duration":5,"elements":[
+			{"type":"shape","style":{"fill":"#111111"}},
+			{"type":"text","text":"Title","enter":{"type":"typewriter","duration":1}}
+		]}]
+	}`
+	validation := validateCompositionJSON(body)
+	if !validation.Valid {
+		t.Fatalf("expected v2 valid, got errors: %v", validation.Errors)
+	}
+	if validation.Renderer != "web_required" {
+		t.Fatalf("renderer = %q, want web_required", validation.Renderer)
+	}
+	if len(validation.Warnings) == 0 {
+		t.Fatalf("expected a warning explaining why web renderer is required")
+	}
+}
+
+func TestV2AudioOnlyConvertsToAudioTrack(t *testing.T) {
+	body := `{
+		"version":"composer/v2",
+		"output":{"format":"mp3"},
+		"assets":[
+			{"id":"voice-1","type":"audio","src":"storage:10"},
+			{"id":"voice-2","type":"audio","src":"storage:11"}
+		],
+		"audio":[
+			{"id":"a","asset":"voice-1","start":0,"duration":8,"volume":1},
+			{"id":"b","asset":"voice-2","start":10,"duration":6,"volume":1}
+		]
+	}`
+	spec, err := parseV2CompositionJSON(body)
+	if err != nil {
+		t.Fatalf("parse v2 audio: %v", err)
+	}
+	edit, output, _, err := v2ToV1FFmpeg(spec)
+	if err != nil {
+		t.Fatalf("convert audio-only v2: %v", err)
+	}
+	if output.Format != "mp3" {
+		t.Fatalf("format = %q, want mp3", output.Format)
+	}
+	if len(edit.Timeline.Tracks) != 1 || edit.Timeline.Tracks[0].Type != "audio" {
+		t.Fatalf("expected one audio track, got %+v", edit.Timeline.Tracks)
+	}
+	if len(edit.Timeline.Tracks[0].Clips) != 2 {
+		t.Fatalf("expected two audio clips, got %+v", edit.Timeline.Tracks[0].Clips)
+	}
+}
+
+func TestV2SpecFromArgs(t *testing.T) {
+	args := map[string]any{
+		"name": "V2 Example",
+		"spec": map[string]any{
+			"version": "composer/v2",
+			"output":  map[string]any{"format": "mp4", "width": 1080, "height": 1920, "fps": 30},
+			"assets": []any{
+				map[string]any{"id": "v", "type": "video", "src": "storage:9"},
+			},
+			"tracks": []any{
+				map[string]any{"type": "video", "clips": []any{
+					map[string]any{"asset": "v", "duration": 4},
+				}},
+			},
+		},
+	}
+	editJSON, outputJSON, duration, version, ok, err := compositionPayloadFromV2Args(args)
+	if err != nil {
+		t.Fatalf("payload: %v", err)
+	}
+	if !ok {
+		t.Fatal("expected v2 payload")
+	}
+	if version != composerV2Version {
+		t.Fatalf("version = %q", version)
+	}
+	if duration != 4 {
+		t.Fatalf("duration = %v, want 4", duration)
+	}
+	if !isV2EditJSON(editJSON) {
+		t.Fatalf("stored edit is not v2: %s", editJSON)
+	}
+	var output Output
+	if err := json.Unmarshal([]byte(outputJSON), &output); err != nil {
+		t.Fatal(err)
+	}
+	if output.Aspect != "9:16" {
+		t.Fatalf("aspect = %q, want 9:16", output.Aspect)
+	}
+}
+
+func TestComposerV2ExamplesValidate(t *testing.T) {
+	examples := composerV2Examples()
+	if len(examples) < 3 {
+		t.Fatalf("expected at least 3 examples, got %d", len(examples))
+	}
+	for _, ex := range examples {
+		b, _ := json.Marshal(ex["spec"])
+		validation := validateCompositionJSON(string(b))
+		if !validation.Valid {
+			t.Fatalf("example %v invalid: %v", ex["id"], validation.Errors)
+		}
+	}
+}
+
 func TestRemoteRenderScriptUsesStorageUploadLadder(t *testing.T) {
 	script := remoteRenderScript(
 		[]string{"https://example.com/in.mp4"},

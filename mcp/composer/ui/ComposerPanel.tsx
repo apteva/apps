@@ -639,6 +639,9 @@ function draftToBody(draft: DraftState): Record<string, unknown> {
 function bodyFromEditorJSON(name: string, editText: string, outputText: string): Record<string, unknown> {
   const edit = JSON.parse(editText || "{}");
   const output = JSON.parse(outputText || "{}");
+  if (isV2CompositionJSON(editText)) {
+    return { name, spec: edit, output };
+  }
   const timeline = edit.timeline || {};
   return {
     name,
@@ -662,6 +665,16 @@ function editJSONFromDraft(draft: DraftState): string {
 
 function outputJSONFromDraft(draft: DraftState): string {
   return JSON.stringify(draft.output, null, 2);
+}
+
+function isV2CompositionJSON(raw?: string): boolean {
+  if (!raw) return false;
+  try {
+    const parsed = JSON.parse(raw);
+    return parsed?.version === "composer/v2" || Array.isArray(parsed?.scenes) || Array.isArray(parsed?.assets) || Array.isArray(parsed?.audio);
+  } catch {
+    return false;
+  }
 }
 
 function activeClipAt(clips: ClipDraft[], seconds: number): ClipDraft | null {
@@ -1456,7 +1469,7 @@ export default function ComposerPanel({ projectId, installId }: NativePanelProps
         return;
       }
       const body = tab === "json" ? bodyFromEditorJSON(draft.name, jsonEdit, jsonOutput) : draftToBody(draft);
-      if (!Array.isArray((body as any).tracks) || (body as any).tracks.length === 0) {
+      if (!(body as any).spec && (!Array.isArray((body as any).tracks) || (body as any).tracks.length === 0)) {
         setStatus("Add at least one track before saving.");
         return;
       }
@@ -1488,6 +1501,12 @@ export default function ComposerPanel({ projectId, installId }: NativePanelProps
     try {
       const edit = JSON.parse(jsonEdit);
       const output = JSON.parse(jsonOutput);
+      if (isV2CompositionJSON(jsonEdit)) {
+        setJsonEdit(JSON.stringify(edit, null, 2));
+        setJsonOutput(JSON.stringify(output, null, 2));
+        setStatus("Composer v2 JSON is valid. Save to persist it.");
+        return;
+      }
       const c: Composition = {
         id: selectedId || 0,
         name: draft.name,
