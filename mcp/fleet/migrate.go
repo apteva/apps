@@ -3,7 +3,6 @@ package main
 import (
 	"errors"
 	"fmt"
-	"os"
 	"strings"
 	"time"
 
@@ -108,27 +107,8 @@ func (a *App) toolMigrate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return map[string]any{"tenant": a.publicTenantView(out), "migrated": true, "instance_id": targetID, "base_url": baseURL}, nil
 	}
 
-	var raw []byte
-	if sourceHost.IsLocal() {
-		if _, err := os.Stat(sourceDir); err != nil {
-			return rollback("source stat", fmt.Errorf("local data dir %q not found: %w", sourceDir, err))
-		}
-		raw, err = makeTenantArchiveLocal(sourceDir)
-	} else {
-		raw, err = makeTenantArchiveRemoteCold(ctx, sourceHost.InstanceID, sourceDir, t.Slug)
-	}
-	if err != nil {
-		return rollback("archive", err)
-	}
-
-	if targetHost.IsLocal() {
-		if err := extractTenantArchiveLocal(raw, targetDir); err != nil {
-			return rollback("extract", err)
-		}
-	} else {
-		if err := extractTenantArchiveRemote(ctx, targetHost.InstanceID, raw, targetDir, t.Slug); err != nil {
-			return rollback("extract", err)
-		}
+	if err := a.transferTenantData(ctx, sourceHost, targetHost, sourceDir, targetDir, t.Slug, false); err != nil {
+		return rollback("transfer", err)
 	}
 	targetStarted := false
 	baseURL, newStatus, err := a.startTenantOnHost(ctx, targetHost, t.ID, t.Slug, targetDir, version, targetPort, prevStatus)

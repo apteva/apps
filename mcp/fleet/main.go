@@ -17,7 +17,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: fleet
 display_name: Fleet
-version: 0.8.10
+version: 0.8.11
 description: Control plane for a local fleet of apteva tenants.
 author: Apteva
 scopes: [project, global]
@@ -157,6 +157,10 @@ type App struct {
 	// outbound interface to change at runtime. Falls back to "localhost"
 	// when network detection fails (offline dev box, locked-down VPS).
 	publicHost string
+
+	transferMu     sync.Mutex
+	transfers      map[string]*tenantTransfer
+	transferSecret []byte
 }
 
 // globalCtx captures the platform context at OnMount so HTTP handlers
@@ -183,6 +187,9 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	a.keys = k
 	a.store = &store{db: ctx.AppDB()}
 	a.procs = map[string]*tenantProc{}
+	if err := a.initTransferState(); err != nil {
+		return err
+	}
 	a.publicHost = detectPublicHost()
 	globalCtx = ctx
 	if err := a.reconcileOnBoot(); err != nil {
@@ -209,6 +216,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 	return []sdk.Route{
 		{Method: http.MethodGet, Pattern: "/tenants", Handler: a.httpList},
 		{Pattern: "/tenants/", Handler: a.httpTenantItem},
+		{Method: http.MethodGet, Pattern: "/transfers/", Handler: a.httpTransfer},
 		{Method: http.MethodGet, Pattern: "/_meta", Handler: a.httpMeta},
 	}
 }

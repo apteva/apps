@@ -75,16 +75,6 @@ func (a *App) toolClone(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 			return nil, fmt.Errorf("source tenant data dir: %w", err)
 		}
 	}
-	var raw []byte
-	if sourceHost.IsLocal() {
-		raw, err = makeTenantArchiveLocal(sourceDir)
-	} else {
-		raw, err = makeTenantArchiveRemoteSnapshot(ctx, sourceHost.InstanceID, sourceDir, source.Slug)
-	}
-	if err != nil {
-		return nil, fmt.Errorf("snapshot source tenant: %w", err)
-	}
-
 	clone := &Tenant{
 		Slug:           slug,
 		Kind:           KindLocal,
@@ -107,14 +97,8 @@ func (a *App) toolClone(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 			a.removeTenantData(ctx, targetHost, slug, targetDir)
 		}
 	}()
-	if targetHost.IsLocal() {
-		if err := extractTenantArchiveLocal(raw, targetDir); err != nil {
-			return nil, fmt.Errorf("extract clone: %w", err)
-		}
-	} else {
-		if err := extractTenantArchiveRemote(ctx, targetHost.InstanceID, raw, targetDir, slug); err != nil {
-			return nil, fmt.Errorf("extract clone: %w", err)
-		}
+	if err := a.transferTenantData(ctx, sourceHost, targetHost, sourceDir, targetDir, slug, true); err != nil {
+		return nil, fmt.Errorf("transfer clone: %w", err)
 	}
 	_ = a.store.recordEvent(clone.ID, "cloned", "user", map[string]any{
 		"source_tenant_id": source.ID,
