@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: deploy
 display_name: Deploy
-version: 0.14.5
+version: 0.14.6
 description: |
   Local-first builds and runtime supervision for Apteva projects.
   Takes a code repo (from the Code app, a local path, or a git URL),
@@ -108,6 +108,11 @@ config_schema:
     default: "2"
     label: Max concurrent builds
     description: Hard cap on simultaneous build processes per host.
+  - name: retain_rollback_builds
+    type: text
+    default: "3"
+    label: Retained rollback builds
+    description: Number of most recent successful builds to keep per deployment in addition to any build referenced by the current/live release. Older unreferenced build artifacts are pruned automatically. Env DEPLOY_RETAIN_ROLLBACK_BUILDS overrides this.
   - name: public_host
     type: text
     default: ""

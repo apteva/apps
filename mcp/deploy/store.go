@@ -12,60 +12,59 @@ import (
 // is just a TEXT alias and the JSON marshalling stays human-readable.
 
 type Deployment struct {
-	ID               int64  `json:"id"`
-	ProjectID        string `json:"project_id"`
-	Name             string `json:"name"`
-	Description      string `json:"description"`
-	SourceKind       string `json:"source_kind"`
-	SourceRef        string `json:"source_ref"`
-	SourceExtraJSON  string `json:"source_extra_json"`
-	Framework        string `json:"framework"`
-	BuildCmd         string `json:"build_cmd"`
-	StartCmd         string `json:"start_cmd"`
-	PortHint         int    `json:"port_hint"`
-	PublicPort       bool   `json:"public_port"`
-	EnvJSON          string `json:"env_json"`
-	Domain           string `json:"domain"`
-	DomainRecordID   string `json:"domain_record_id,omitempty"`
-	DomainAttachedAt string `json:"domain_attached_at,omitempty"`
-	CurrentReleaseID *int64 `json:"current_release_id,omitempty"`
-	ArchivedAt       string `json:"archived_at,omitempty"`
-	CreatedAt        string `json:"created_at"`
-	UpdatedAt        string `json:"updated_at"`
+	ID                int64  `json:"id"`
+	ProjectID         string `json:"project_id"`
+	Name              string `json:"name"`
+	Description       string `json:"description"`
+	SourceKind        string `json:"source_kind"`
+	SourceRef         string `json:"source_ref"`
+	SourceExtraJSON   string `json:"source_extra_json"`
+	Framework         string `json:"framework"`
+	BuildCmd          string `json:"build_cmd"`
+	StartCmd          string `json:"start_cmd"`
+	PortHint          int    `json:"port_hint"`
+	EnvJSON           string `json:"env_json"`
+	Domain            string `json:"domain"`
+	DomainRecordID    string `json:"domain_record_id,omitempty"`
+	DomainAttachedAt  string `json:"domain_attached_at,omitempty"`
+	CurrentReleaseID  *int64 `json:"current_release_id,omitempty"`
+	ArchivedAt        string `json:"archived_at,omitempty"`
+	CreatedAt         string `json:"created_at"`
+	UpdatedAt         string `json:"updated_at"`
 }
 
 type Build struct {
-	ID           int64  `json:"id"`
-	DeploymentID int64  `json:"deployment_id"`
-	SourceSHA    string `json:"source_sha"`
-	Framework    string `json:"framework"`
-	BuildCmd     string `json:"build_cmd"`
-	Status       string `json:"status"`
-	StartedAt    string `json:"started_at,omitempty"`
-	FinishedAt   string `json:"finished_at,omitempty"`
-	DurationMs   int64  `json:"duration_ms"`
-	ExitCode     int    `json:"exit_code"`
-	ArtifactPath string `json:"artifact_path"`
-	ArtifactSize int64  `json:"artifact_size"`
-	LogPath      string `json:"log_path"`
-	Error        string `json:"error"`
-	CreatedAt    string `json:"created_at"`
+	ID            int64  `json:"id"`
+	DeploymentID  int64  `json:"deployment_id"`
+	SourceSHA     string `json:"source_sha"`
+	Framework     string `json:"framework"`
+	BuildCmd      string `json:"build_cmd"`
+	Status        string `json:"status"`
+	StartedAt     string `json:"started_at,omitempty"`
+	FinishedAt    string `json:"finished_at,omitempty"`
+	DurationMs    int64  `json:"duration_ms"`
+	ExitCode      int    `json:"exit_code"`
+	ArtifactPath  string `json:"artifact_path"`
+	ArtifactSize  int64  `json:"artifact_size"`
+	LogPath       string `json:"log_path"`
+	Error         string `json:"error"`
+	CreatedAt     string `json:"created_at"`
 }
 
 type Release struct {
-	ID           int64  `json:"id"`
-	DeploymentID int64  `json:"deployment_id"`
-	BuildID      int64  `json:"build_id"`
-	Status       string `json:"status"`
-	Port         int    `json:"port"`
-	PID          int    `json:"pid"`
-	StartedAt    string `json:"started_at,omitempty"`
-	StoppedAt    string `json:"stopped_at,omitempty"`
-	RestartCount int    `json:"restart_count"`
-	LastHealthAt string `json:"last_health_at,omitempty"`
-	LogPath      string `json:"log_path"`
-	Error        string `json:"error"`
-	CreatedAt    string `json:"created_at"`
+	ID            int64  `json:"id"`
+	DeploymentID  int64  `json:"deployment_id"`
+	BuildID       int64  `json:"build_id"`
+	Status        string `json:"status"`
+	Port          int    `json:"port"`
+	PID           int    `json:"pid"`
+	StartedAt     string `json:"started_at,omitempty"`
+	StoppedAt     string `json:"stopped_at,omitempty"`
+	RestartCount  int    `json:"restart_count"`
+	LastHealthAt  string `json:"last_health_at,omitempty"`
+	LogPath       string `json:"log_path"`
+	Error         string `json:"error"`
+	CreatedAt     string `json:"created_at"`
 }
 
 type CreateDeploymentInput struct {
@@ -78,7 +77,6 @@ type CreateDeploymentInput struct {
 	BuildCmd        string
 	StartCmd        string
 	PortHint        int
-	PublicPort      bool
 	EnvJSON         string
 	Domain          string
 }
@@ -99,13 +97,13 @@ func dbCreateDeployment(db *sql.DB, projectID string, in CreateDeploymentInput) 
 		INSERT INTO deployments (
 			project_id, name, description,
 			source_kind, source_ref, source_extra_json,
-			framework, build_cmd, start_cmd, port_hint, public_port, env_json, domain,
+			framework, build_cmd, start_cmd, port_hint, env_json, domain,
 			created_at, updated_at
-		) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+		) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 	`,
 		projectID, in.Name, in.Description,
 		in.SourceKind, in.SourceRef, defaultStr(in.SourceExtraJSON, "{}"),
-		in.Framework, in.BuildCmd, in.StartCmd, in.PortHint, boolToInt(in.PublicPort), defaultStr(in.EnvJSON, "{}"), in.Domain,
+		in.Framework, in.BuildCmd, in.StartCmd, in.PortHint, defaultStr(in.EnvJSON, "{}"), in.Domain,
 		now, now,
 	)
 	if err != nil {
@@ -214,7 +212,7 @@ func dbSetDeploymentDomain(db *sql.DB, id int64, domain, recordID, attachedAt st
 }
 
 const deploymentColumns = `id, project_id, name, description, source_kind, source_ref, source_extra_json,
-		framework, build_cmd, start_cmd, port_hint, public_port, env_json, domain,
+		framework, build_cmd, start_cmd, port_hint, env_json, domain,
 		domain_record_id, COALESCE(domain_attached_at,''),
 		current_release_id, COALESCE(archived_at,''), created_at, updated_at`
 
@@ -223,16 +221,14 @@ type rowScanner interface{ Scan(...any) error }
 func scanDeployment(r rowScanner) (*Deployment, error) {
 	var d Deployment
 	var current sql.NullInt64
-	var publicPort int
 	if err := r.Scan(
 		&d.ID, &d.ProjectID, &d.Name, &d.Description, &d.SourceKind, &d.SourceRef, &d.SourceExtraJSON,
-		&d.Framework, &d.BuildCmd, &d.StartCmd, &d.PortHint, &publicPort, &d.EnvJSON, &d.Domain,
+		&d.Framework, &d.BuildCmd, &d.StartCmd, &d.PortHint, &d.EnvJSON, &d.Domain,
 		&d.DomainRecordID, &d.DomainAttachedAt,
 		&current, &d.ArchivedAt, &d.CreatedAt, &d.UpdatedAt,
 	); err != nil {
 		return nil, err
 	}
-	d.PublicPort = publicPort != 0
 	if current.Valid {
 		d.CurrentReleaseID = &current.Int64
 	}
@@ -269,7 +265,7 @@ func dbUpdateDeployment(db *sql.DB, projectID string, id int64, fields map[strin
 	args := []any{}
 	for _, k := range []string{
 		"description", "framework", "build_cmd", "start_cmd",
-		"port_hint", "public_port", "env_json", "source_extra_json",
+		"port_hint", "env_json", "source_extra_json",
 	} {
 		if v, ok := fields[k]; ok {
 			cols = append(cols, k+" = ?")
@@ -285,13 +281,6 @@ func dbUpdateDeployment(db *sql.DB, projectID string, id int64, fields map[strin
 		`UPDATE deployments SET `+strings.Join(cols, ", ")+` WHERE id = ? AND project_id = ?`,
 		args...)
 	return err
-}
-
-func boolToInt(v bool) int {
-	if v {
-		return 1
-	}
-	return 0
 }
 
 func dbUpdateBuild(db *sql.DB, id int64, fields map[string]any) error {

@@ -15,7 +15,6 @@ package main
 // binary) so there's no extra binary to build, distribute, or pin.
 //
 // Args parsed:
-//   --host HOST         interface to bind (default 127.0.0.1)
 //   --port N            (required) TCP port to bind
 //   --root /path/to/dir (required) directory to serve
 //   --log-path /…       (optional) tee server log here; otherwise
@@ -47,7 +46,6 @@ import (
 // returns from main, ending the process).
 func runStaticServer(args []string) {
 	fs := flag.NewFlagSet("static-server", flag.ExitOnError)
-	host := fs.String("host", "127.0.0.1", "host/interface to bind")
 	port := fs.Int("port", 0, "TCP port to bind (required)")
 	root := fs.String("root", "", "directory to serve (required)")
 	logPath := fs.String("log-path", "", "optional log file; otherwise stderr")
@@ -73,14 +71,10 @@ func runStaticServer(args []string) {
 		// runtime.log persists past process exit).
 		logger = log.New(io.MultiWriter(os.Stderr, f), "static-server ", log.LstdFlags|log.Lmsgprefix)
 	}
-	if *host == "" {
-		fmt.Fprintln(os.Stderr, "static-server: --host cannot be empty")
-		os.Exit(2)
-	}
-	logger.Printf("listening on %s:%d root=%s", *host, *port, *root)
+	logger.Printf("listening on :%d root=%s", *port, *root)
 
 	srv := &http.Server{
-		Addr:              fmt.Sprintf("%s:%d", *host, *port),
+		Addr:              fmt.Sprintf("127.0.0.1:%d", *port),
 		Handler:           staticHandler(*root),
 		ReadHeaderTimeout: 10 * time.Second,
 	}
@@ -104,3 +98,4 @@ func runStaticServer(args []string) {
 	}
 	logger.Print("clean exit")
 }
+

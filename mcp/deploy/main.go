@@ -41,7 +41,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: deploy
 display_name: Deploy
-version: 0.14.5
+version: 0.14.6
 description: Local-first builds and runtime supervision for Apteva projects.
 author: Apteva
 scopes: [project, global]
@@ -93,6 +93,12 @@ db:
   driver: sqlite
   path: /data/deploy.db
   migrations: migrations/
+config_schema:
+  - name: retain_rollback_builds
+    type: text
+    default: "3"
+    label: Retained rollback builds
+    description: Number of most recent successful builds to keep per deployment in addition to live/current builds. Env DEPLOY_RETAIN_ROLLBACK_BUILDS overrides this.
 upgrade_policy: auto-patch
 `
 
@@ -105,9 +111,10 @@ type App struct {
 
 	cfg sourceConfig
 
-	portRangeStart int
-	portRangeEnd   int
-	maxBuilds      int
+	portRangeStart  int
+	portRangeEnd    int
+	maxBuilds       int
+	retainRollbacks int
 
 	buildSem     chan struct{} // throttle concurrent builds
 	watchdogStop chan struct{} // closed on unmount; pid-owns-port poller
@@ -178,6 +185,10 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	if a.maxBuilds < 1 {
 		a.maxBuilds = 1
 	}
+	a.retainRollbacks = atoiOr(os.Getenv("DEPLOY_RETAIN_ROLLBACK_BUILDS"), atoiOr(configOr(ctx, "retain_rollback_builds", "3"), 3))
+	if a.retainRollbacks < 0 {
+		a.retainRollbacks = 0
+	}
 	a.buildSem = make(chan struct{}, a.maxBuilds)
 	a.registry = NewSupervisorRegistry()
 	a.autoRestartState = map[int64]autoRestartInfo{}
@@ -187,13 +198,13 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		"data_dir", a.dataDir,
 		"port_range", fmt.Sprintf("%d-%d", a.portRangeStart, a.portRangeEnd),
 		"max_build_concurrency", a.maxBuilds,
+		"retain_rollback_builds", a.retainRollbacks,
 	)
 
 	// Releases the DB still thinks are "live"/"starting" were spawned
 	// by a previous instance of this sidecar. Re-adopt the ones whose
-	// processes survived (the common case across an app upgrade);
-	// restart the rest from their saved build so host routes recover
-	// after a full platform restart.
+	// processes survived (the common case across an app upgrade); mark
+	// the rest stopped so the panel reflects reality.
 	if err := a.reconcileReleases(); err != nil {
 		ctx.Logger().Warn("release reconciliation failed", "err", err)
 	}
@@ -206,6 +217,15 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	// release teardown). Best-effort; logs the count.
 	if n := a.sweepPhantomRoutes(ctx); n > 0 {
 		ctx.Logger().Info("dropped phantom routes", "count", n)
+	}
+	if pruned, err := a.pruneBuildArtifacts(ctx.AppDB(), "mount"); err != nil {
+		ctx.Logger().Warn("build retention prune failed", "err", err)
+	} else if pruned.ArtifactsPruned > 0 || pruned.OrphanDirsPruned > 0 {
+		ctx.Logger().Info("pruned build artifacts",
+			"artifacts", pruned.ArtifactsPruned,
+			"orphan_dirs", pruned.OrphanDirsPruned,
+			"bytes", pruned.BytesPruned,
+		)
 	}
 
 	// Watchdog promotes slow-bind "starting" releases and demotes
@@ -237,11 +257,10 @@ func (a *App) Workers() []sdk.Worker             { return nil }
 func (a *App) EventHandlers() []sdk.EventHandler { return nil }
 
 // reconcileReleases runs on boot. For every release the DB still
-// considers running, try to re-adopt the underlying process. If it
+// considers running, try to re-adopt the underlying process: if it
 // survived (an app upgrade left it running in its own process group),
-// pull it back into the registry so stop/destroy/route still work. If
-// it is gone, mark the stale release stopped, drop its route, and
-// restart from the same saved build_id.
+// pull it back into the registry so stop/destroy/route still work.
+// If the process is gone, mark the release stopped.
 func (a *App) reconcileReleases() error {
 	rows, err := dbListLiveReleases(globalCtx.AppDB())
 	if err != nil {
@@ -266,7 +285,6 @@ func (a *App) reconcileReleases() error {
 			// the orphan's death and pointed the domain at a port that
 			// another instance later bound.
 			a.cascadeUnregisterRoute(r.DeploymentID)
-			a.restartBootOrphan(r, adoptErr)
 			continue
 		}
 		a.registry.Put(rr)
@@ -283,53 +301,6 @@ func (a *App) reconcileReleases() error {
 		globalCtx.Logger().Info("re-adopted release", "release_id", r.ID, "pid", r.PID, "port", r.Port)
 	}
 	return nil
-}
-
-func (a *App) restartBootOrphan(r Release, adoptErr error) {
-	if globalCtx == nil || globalCtx.AppDB() == nil {
-		return
-	}
-	d, err := dbGetDeploymentByID(globalCtx.AppDB(), r.DeploymentID)
-	if err != nil || d == nil {
-		return
-	}
-	b, err := dbGetBuild(globalCtx.AppDB(), r.BuildID)
-	if err != nil || b == nil {
-		emit("deploy.boot_recovery_failed", map[string]any{
-			"deployment_id": r.DeploymentID, "release_id": r.ID,
-			"build_id": r.BuildID, "error": "saved build missing",
-		})
-		return
-	}
-	if b.Status != "succeeded" {
-		emit("deploy.boot_recovery_failed", map[string]any{
-			"deployment_id": r.DeploymentID, "release_id": r.ID,
-			"build_id": r.BuildID, "error": fmt.Sprintf("saved build status=%s", b.Status),
-		})
-		return
-	}
-	reason := ""
-	if adoptErr != nil {
-		reason = adoptErr.Error()
-	}
-	emit("deploy.boot_recovery_attempted", map[string]any{
-		"deployment_id": r.DeploymentID, "release_id": r.ID,
-		"build_id": r.BuildID, "reason": reason,
-	})
-	newRel, err := a.runRelease(d, b)
-	if err != nil {
-		_ = dbAppendReleaseEvent(globalCtx.AppDB(), r.ID, "boot_recovery_failed",
-			fmt.Sprintf(`{"error":%q}`, err.Error()))
-		emit("deploy.boot_recovery_failed", map[string]any{
-			"deployment_id": r.DeploymentID, "release_id": r.ID,
-			"build_id": r.BuildID, "error": err.Error(),
-		})
-		return
-	}
-	if newRel != nil {
-		_ = dbAppendReleaseEvent(globalCtx.AppDB(), newRel.ID, "boot_recovery_started",
-			fmt.Sprintf(`{"previous_release_id":%d}`, r.ID))
-	}
 }
 
 // ─── Routes ────────────────────────────────────────────────────────
@@ -592,6 +563,7 @@ func (a *App) runBuild(d *Deployment) (*Build, error) {
 		"deployment_id": d.ID, "build_id": build.ID,
 		"framework": fw, "duration_ms": durMs, "size": size,
 	})
+	a.pruneBuildArtifactsAsync("build_succeeded")
 	return dbGetBuild(globalCtx.AppDB(), build.ID)
 }
 
@@ -613,6 +585,9 @@ func (a *App) failBuild(b *Build, msg string) *Build {
 func (a *App) runRelease(d *Deployment, b *Build) (*Release, error) {
 	if b.Status != "succeeded" {
 		return nil, fmt.Errorf("build %d not succeeded (status=%s)", b.ID, b.Status)
+	}
+	if !buildArtifactAvailable(b) {
+		return nil, fmt.Errorf("build %d artifact has been pruned; rebuild before releasing", b.ID)
 	}
 
 	// Stop the previous live release first so we don't double-bind.
@@ -687,7 +662,6 @@ func (a *App) runRelease(d *Deployment, b *Build) (*Release, error) {
 		Entrypoint:   entrypoint,
 		StartCmd:     d.StartCmd,
 		Port:         port,
-		PublicPort:   d.PublicPort,
 		Env:          envMap,
 	}
 
@@ -722,6 +696,7 @@ func (a *App) runRelease(d *Deployment, b *Build) (*Release, error) {
 	emit("deploy.release.started", map[string]any{
 		"deployment_id": d.ID, "release_id": rel.ID, "port": port, "pid": rr.PID,
 	})
+	a.pruneBuildArtifactsAsync("release_started")
 	return dbGetRelease(globalCtx.AppDB(), rel.ID)
 }
 
@@ -886,7 +861,6 @@ func (a *App) sweepPhantomRoutes(ctx *sdk.AppCtx) int {
 	if ctx == nil || ctx.PlatformAPI() == nil {
 		return 0
 	}
-	myID := myInstallID()
 	routes, err := ctx.PlatformAPI().ListIngressRoutes()
 	if err != nil {
 		return 0
@@ -912,7 +886,7 @@ func (a *App) sweepPhantomRoutes(ctx *sdk.AppCtx) int {
 	}
 	dropped := 0
 	for _, r := range routes {
-		if r.OwnerInstallID != myID || r.OwnerKind != "deploy" {
+		if r.OwnerKind != "deploy" {
 			continue
 		}
 		if liveDomains[r.Hostname] {
@@ -1167,7 +1141,7 @@ func (a *App) autoRestart(deploymentID int64, reason string) {
 	}
 	var lastBuild *Build
 	for i := range builds {
-		if builds[i].Status == "succeeded" {
+		if builds[i].Status == "succeeded" && buildArtifactAvailable(&builds[i]) {
 			lastBuild = &builds[i]
 			break
 		}

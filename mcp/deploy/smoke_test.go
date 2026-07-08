@@ -1,20 +1,16 @@
 package main
 
 import (
-	"archive/zip"
 	"database/sql"
-	"errors"
 	"io"
 	"net"
 	"net/http"
-	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
-	sdk "github.com/apteva/app-sdk"
 	_ "modernc.org/sqlite"
 )
 
@@ -39,16 +35,13 @@ func TestStoreSmoke(t *testing.T) {
 	defer db.Close()
 
 	d, err := dbCreateDeployment(db, "p1", CreateDeploymentInput{
-		Name: "api", SourceKind: "local", SourceRef: "/tmp/src", Framework: "go", PublicPort: true,
+		Name: "api", SourceKind: "local", SourceRef: "/tmp/src", Framework: "go",
 	})
 	if err != nil {
 		t.Fatalf("create: %v", err)
 	}
 	if d.Name != "api" {
 		t.Fatalf("name = %q", d.Name)
-	}
-	if !d.PublicPort {
-		t.Fatalf("public_port = false, want true")
 	}
 
 	// Duplicate name is rejected by UNIQUE.
@@ -98,13 +91,6 @@ func TestStoreSmoke(t *testing.T) {
 	}
 	if err := dbReleasePortLease(db, 7000); err != nil {
 		t.Fatalf("release lease: %v", err)
-	}
-	if err := dbUpdateDeployment(db, "p1", d.ID, map[string]any{"public_port": 0}); err != nil {
-		t.Fatalf("update public_port: %v", err)
-	}
-	again, _ = dbGetDeployment(db, "p1", d.ID)
-	if again.PublicPort {
-		t.Fatalf("public_port should update to false")
 	}
 
 	// Cascade: deleting the deployment wipes builds + releases.
@@ -190,189 +176,6 @@ func TestDetectFramework(t *testing.T) {
 	}
 	if got := detectFramework(tmp); got != "go" {
 		t.Fatalf("detectFramework after go.mod = %q", got)
-	}
-}
-
-func TestCodeFetcherStreamsHTTPExport(t *testing.T) {
-	var sawAuth, sawProject, sawInstall bool
-	ts := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path != "/api/apps/code/api/repos/site/export" {
-			t.Fatalf("path = %q", r.URL.Path)
-		}
-		sawAuth = r.Header.Get("Authorization") == "Bearer dev-7"
-		sawProject = r.URL.Query().Get("project_id") == "p1"
-		sawInstall = r.URL.Query().Get("install_id") == "42"
-		w.Header().Set("Content-Type", "application/zip")
-		zw := zip.NewWriter(w)
-		fw, err := zw.Create("src/index.html")
-		if err != nil {
-			t.Fatal(err)
-		}
-		if _, err := fw.Write([]byte("<h1>ok</h1>")); err != nil {
-			t.Fatal(err)
-		}
-		if err := zw.Close(); err != nil {
-			t.Fatal(err)
-		}
-	}))
-	defer ts.Close()
-
-	dest := t.TempDir()
-	f := &codeFetcher{
-		httpClient:    ts.Client(),
-		gatewayURL:    ts.URL,
-		appToken:      "dev-7",
-		codeInstallID: 42,
-	}
-	if err := f.Fetch(&Deployment{ProjectID: "p1", SourceKind: "code", SourceRef: "site"}, dest); err != nil {
-		t.Fatalf("Fetch: %v", err)
-	}
-	if !sawAuth || !sawProject || !sawInstall {
-		t.Fatalf("request did not carry expected auth/project/install: auth=%v project=%v install=%v", sawAuth, sawProject, sawInstall)
-	}
-	body, err := os.ReadFile(filepath.Join(dest, "src", "index.html"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(body) != "<h1>ok</h1>" {
-		t.Fatalf("unpacked body = %q", body)
-	}
-}
-
-func TestReconcileReleasesRestartsBootOrphanFromSavedBuild(t *testing.T) {
-	db := openSchemaDB(t)
-	defer db.Close()
-
-	d, err := dbCreateDeployment(db, "p1", CreateDeploymentInput{
-		Name: "site", SourceKind: "local", SourceRef: "/tmp/src", Framework: "static",
-		Domain: "site.example.com",
-	})
-	if err != nil {
-		t.Fatalf("create deployment: %v", err)
-	}
-	b, err := dbCreateBuild(db, d.ID, "static", "")
-	if err != nil {
-		t.Fatalf("create build: %v", err)
-	}
-	artifactDir := t.TempDir()
-	if err := dbUpdateBuild(db, b.ID, map[string]any{
-		"status": "succeeded", "artifact_path": artifactDir, "artifact_size": int64(12),
-	}); err != nil {
-		t.Fatalf("update build: %v", err)
-	}
-	b, _ = dbGetBuild(db, b.ID)
-	oldRel, err := dbCreateRelease(db, d.ID, b.ID)
-	if err != nil {
-		t.Fatalf("create release: %v", err)
-	}
-	if err := dbUpdateRelease(db, oldRel.ID, map[string]any{
-		"status": "live", "port": 7200, "pid": 99999, "started_at": nowUTC(),
-	}); err != nil {
-		t.Fatalf("mark old release live: %v", err)
-	}
-	if ok, err := dbAcquirePortLease(db, 7200, oldRel.ID); err != nil || !ok {
-		t.Fatalf("acquire old lease ok=%v err=%v", ok, err)
-	}
-	if err := dbSetCurrentRelease(db, d.ID, &oldRel.ID); err != nil {
-		t.Fatalf("set current: %v", err)
-	}
-
-	rt := &bootRecoveryRuntime{adoptErr: errors.New("process gone")}
-	app := &App{
-		dataDir:          t.TempDir(),
-		runtime:          rt,
-		registry:         NewSupervisorRegistry(),
-		portRangeStart:   7200,
-		portRangeEnd:     7205,
-		buildSem:         make(chan struct{}, 1),
-		autoRestartState: map[int64]autoRestartInfo{},
-	}
-	manifest := app.Manifest()
-	oldCtx := globalCtx
-	globalCtx = sdk.NewAppCtxForTest(&manifest, db, nil, nil, nil)
-	defer func() { globalCtx = oldCtx }()
-
-	if err := app.reconcileReleases(); err != nil {
-		t.Fatalf("reconcile: %v", err)
-	}
-	if rt.adoptCalls != 1 {
-		t.Fatalf("adopt calls = %d, want 1", rt.adoptCalls)
-	}
-	if len(rt.starts) != 1 {
-		t.Fatalf("starts = %d, want 1", len(rt.starts))
-	}
-	if rt.starts[0].ReleaseID == oldRel.ID {
-		t.Fatalf("boot recovery reused old release id")
-	}
-	if rt.starts[0].ArtifactDir != artifactDir {
-		t.Fatalf("artifact dir = %q, want %q", rt.starts[0].ArtifactDir, artifactDir)
-	}
-	if rt.starts[0].Framework != "static" {
-		t.Fatalf("framework = %q", rt.starts[0].Framework)
-	}
-	oldAfter, _ := dbGetRelease(db, oldRel.ID)
-	if oldAfter.Status != "stopped" {
-		t.Fatalf("old release status = %q, want stopped", oldAfter.Status)
-	}
-	rels, err := dbListReleases(db, d.ID, 10)
-	if err != nil {
-		t.Fatalf("list releases: %v", err)
-	}
-	if len(rels) != 2 {
-		t.Fatalf("release count = %d, want 2", len(rels))
-	}
-	newRel := rels[0]
-	if newRel.ID == oldRel.ID || newRel.BuildID != b.ID {
-		t.Fatalf("new release mismatch: %+v old=%d build=%d", newRel, oldRel.ID, b.ID)
-	}
-	if newRel.Status != "starting" || newRel.PID != 4242 || newRel.Port == 0 {
-		t.Fatalf("new release not started correctly: %+v", newRel)
-	}
-	if app.registry.Get(newRel.ID) == nil {
-		t.Fatalf("new release was not added to registry")
-	}
-}
-
-type bootRecoveryRuntime struct {
-	adoptErr   error
-	adoptCalls int
-	starts     []ReleaseSpec
-}
-
-func (r *bootRecoveryRuntime) Start(spec ReleaseSpec) (*RunningRelease, error) {
-	r.starts = append(r.starts, spec)
-	return &RunningRelease{
-		ReleaseID: spec.ReleaseID,
-		Port:      spec.Port,
-		PID:       4242,
-		stopCh:    make(chan struct{}),
-	}, nil
-}
-
-func (r *bootRecoveryRuntime) Stop(*RunningRelease) error { return nil }
-
-func (r *bootRecoveryRuntime) Adopt(int64, int, int) (*RunningRelease, error) {
-	r.adoptCalls++
-	return nil, r.adoptErr
-}
-
-func (r *bootRecoveryRuntime) LogPath(releaseID int64) string {
-	return filepath.Join(os.TempDir(), "release-"+itoa(int(releaseID))+".log")
-}
-
-func TestPublicPortRuntimeConfig(t *testing.T) {
-	if got := bindHost(false); got != "127.0.0.1" {
-		t.Fatalf("bindHost(false) = %q", got)
-	}
-	if got := bindHost(true); got != "0.0.0.0" {
-		t.Fatalf("bindHost(true) = %q", got)
-	}
-	env := mergeEnv(map[string]string{"APP_ENV": "test"}, 7345, true)
-	joined := "\n" + strings.Join(env, "\n") + "\n"
-	for _, want := range []string{"\nPORT=7345\n", "\nHOST=0.0.0.0\n", "\nHOSTNAME=0.0.0.0\n", "\nBUN_HOST=0.0.0.0\n", "\nAPP_ENV=test\n"} {
-		if !strings.Contains(joined, want) {
-			t.Fatalf("mergeEnv missing %q in %q", want, joined)
-		}
 	}
 }
 
@@ -671,7 +474,7 @@ func openSchemaDB(t *testing.T) *sql.DB {
 	if _, err := db.Exec("PRAGMA foreign_keys = ON"); err != nil {
 		t.Fatal(err)
 	}
-	for _, mig := range []string{"migrations/001_init.sql", "migrations/002_domain_link.sql", "migrations/003_public_port.sql"} {
+	for _, mig := range []string{"migrations/001_init.sql", "migrations/002_domain_link.sql"} {
 		body, err := os.ReadFile(mig)
 		if err != nil {
 			t.Fatal(err)
@@ -951,6 +754,108 @@ func TestDbListDeploymentsWithDomain(t *testing.T) {
 	if len(got) != 1 || got[0].Domain != "app.acme.com" {
 		t.Fatalf("got %d rows %+v; want 1 with app.acme.com", len(got), got)
 	}
+}
+
+func TestBuildRetentionPrunesOldArtifactsKeepsLiveAndRollback(t *testing.T) {
+	db := openSchemaDB(t)
+	defer db.Close()
+
+	dataDir := t.TempDir()
+	if err := os.MkdirAll(filepath.Join(dataDir, "builds"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	app := &App{dataDir: dataDir, retainRollbacks: 2}
+	d, err := dbCreateDeployment(db, "p1", CreateDeploymentInput{
+		Name: "site", SourceKind: "local", SourceRef: "/src", Framework: "static",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	builds := make([]*Build, 0, 5)
+	for i := 1; i <= 5; i++ {
+		builds = append(builds, createSucceededBuildArtifact(t, db, dataDir, d.ID, byte('0'+i)))
+	}
+	rel, err := dbCreateRelease(db, d.ID, builds[1].ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := dbUpdateRelease(db, rel.ID, map[string]any{"status": "live"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := dbSetCurrentRelease(db, d.ID, &rel.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	orphan := filepath.Join(dataDir, "builds", "999", "dist")
+	if err := os.MkdirAll(orphan, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(orphan, "orphan.txt"), []byte("x"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	summary, err := app.pruneBuildArtifacts(db, "test")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if summary.ArtifactsPruned != 2 {
+		t.Fatalf("ArtifactsPruned = %d, want 2", summary.ArtifactsPruned)
+	}
+	if summary.OrphanDirsPruned != 1 {
+		t.Fatalf("OrphanDirsPruned = %d, want 1", summary.OrphanDirsPruned)
+	}
+
+	wantKept := map[int64]bool{
+		builds[1].ID: true, // current/live release, outside latest rollback window
+		builds[3].ID: true, // latest two succeeded builds
+		builds[4].ID: true,
+	}
+	for _, b := range builds {
+		dist := filepath.Join(dataDir, "builds", itoa(int(b.ID)), "dist")
+		exists := pathExists(dist)
+		if exists != wantKept[b.ID] {
+			t.Fatalf("build %d dist exists=%v, want %v", b.ID, exists, wantKept[b.ID])
+		}
+		got, err := dbGetBuild(db, b.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if !wantKept[b.ID] && got.ArtifactPath != "" {
+			t.Fatalf("build %d artifact_path = %q, want pruned", b.ID, got.ArtifactPath)
+		}
+	}
+	if pathExists(filepath.Join(dataDir, "builds", "999")) {
+		t.Fatal("orphan build dir still exists")
+	}
+}
+
+func createSucceededBuildArtifact(t *testing.T, db *sql.DB, dataDir string, deploymentID int64, marker byte) *Build {
+	t.Helper()
+	b, err := dbCreateBuild(db, deploymentID, "static", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	dist := filepath.Join(dataDir, "builds", itoa(int(b.ID)), "dist")
+	if err := os.MkdirAll(dist, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dist, "index.html"), []byte{marker}, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	size, _ := dirSize(dist)
+	if err := dbUpdateBuild(db, b.ID, map[string]any{
+		"status":        "succeeded",
+		"artifact_path": dist,
+		"artifact_size": size,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	out, err := dbGetBuild(db, b.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return out
 }
 
 // stripSQLComments removes -- line comments. The migration has no

@@ -10,14 +10,10 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net/http"
-	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
-	"time"
 
 	sdk "github.com/apteva/app-sdk"
 )
@@ -37,7 +33,7 @@ func fetchSource(ctx *sdk.AppCtx, d *Deployment, destDir string, cfg sourceConfi
 	}
 	switch d.SourceKind {
 	case "code":
-		return newCodeFetcher(ctx).Fetch(d, destDir)
+		return (&codeFetcher{platform: ctx.PlatformAPI()}).Fetch(d, destDir)
 	case "local":
 		return (&localFetcher{}).Fetch(d, destDir)
 	default:
@@ -53,105 +49,21 @@ type sourceConfig struct {
 // ─── code source ──────────────────────────────────────────────────
 
 type codeFetcher struct {
-	platform      sdk.PlatformClient
-	httpClient    *http.Client
-	gatewayURL    string
-	appToken      string
-	codeInstallID int64
+	platform sdk.PlatformClient
 }
 
 func (f *codeFetcher) Kind() string { return "code" }
 
-func newCodeFetcher(ctx *sdk.AppCtx) *codeFetcher {
-	f := &codeFetcher{
-		httpClient: &http.Client{Timeout: 10 * time.Minute},
-		gatewayURL: strings.TrimRight(os.Getenv("APTEVA_GATEWAY_URL"), "/"),
-		appToken:   os.Getenv("APTEVA_APP_TOKEN"),
-	}
-	if ctx != nil {
-		f.platform = ctx.PlatformAPI()
-		if bound := ctx.IntegrationFor("code"); bound != nil && bound.Kind == "app" {
-			f.codeInstallID = bound.InstallID
-		}
-	}
-	return f
-}
-
-// Fetch streams the Code app's REST zip export through the platform
-// proxy. The older app-to-app MCP path returned the whole zip as
-// base64 JSON and hit the callback response cap for medium repos.
-// Keep that path only as a no-gateway fallback for tests/legacy envs.
+// Fetch reaches the Code app over the platform's cross-app RPC
+// (PlatformClient.CallApp → /api/apps/callback/apps/code/call), which
+// proxies an MCP tools/call to the bound code install with the right
+// token swapped in. The repo zip comes back base64-encoded inside the
+// tool result; we decode and unpack it into destDir. SourceRef is the
+// repo slug.
 func (f *codeFetcher) Fetch(d *Deployment, destDir string) error {
 	if d.SourceRef == "" {
 		return errors.New("source_ref (repo slug) required for kind=code")
 	}
-	if f.canStreamExport() {
-		return f.fetchViaHTTPExport(d, destDir)
-	}
-	return f.fetchViaMCPExport(d, destDir)
-}
-
-func (f *codeFetcher) canStreamExport() bool {
-	return strings.TrimSpace(f.gatewayURL) != "" && strings.TrimSpace(f.appToken) != ""
-}
-
-func (f *codeFetcher) fetchViaHTTPExport(d *Deployment, destDir string) error {
-	tmp, err := os.CreateTemp("", "apteva-deploy-code-*.zip")
-	if err != nil {
-		return err
-	}
-	tmpPath := tmp.Name()
-	defer os.Remove(tmpPath)
-
-	req, err := http.NewRequest(http.MethodGet, f.exportURL(d), nil)
-	if err != nil {
-		tmp.Close()
-		return err
-	}
-	req.Header.Set("Authorization", "Bearer "+f.appToken)
-	resp, err := f.httpClient.Do(req)
-	if err != nil {
-		tmp.Close()
-		return fmt.Errorf("stream code export: %w", err)
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode/100 != 2 {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
-		tmp.Close()
-		return fmt.Errorf("stream code export: http %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
-	}
-	if _, err := io.Copy(tmp, resp.Body); err != nil {
-		tmp.Close()
-		return fmt.Errorf("stream code export: %w", err)
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	zr, err := zip.OpenReader(tmpPath)
-	if err != nil {
-		return fmt.Errorf("code export: not a valid zip: %w", err)
-	}
-	defer zr.Close()
-	return unpackZip(&zr.Reader, destDir)
-}
-
-func (f *codeFetcher) exportURL(d *Deployment) string {
-	base := strings.TrimRight(f.gatewayURL, "/")
-	q := url.Values{}
-	if d.ProjectID != "" {
-		q.Set("project_id", d.ProjectID)
-	}
-	if f.codeInstallID > 0 {
-		q.Set("install_id", strconv.FormatInt(f.codeInstallID, 10))
-	}
-	u := base + "/api/apps/code/api/repos/" + url.PathEscape(d.SourceRef) + "/export"
-	if encoded := q.Encode(); encoded != "" {
-		u += "?" + encoded
-	}
-	return u
-}
-
-func (f *codeFetcher) fetchViaMCPExport(d *Deployment, destDir string) error {
 	if f.platform == nil {
 		return errors.New("platform client unavailable; deploy app not fully mounted")
 	}
