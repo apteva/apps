@@ -3134,7 +3134,7 @@ function BacktestPerformancePanel({ run, performance }: {
   run: BacktestRun;
   performance: BacktestPerformance | null;
 }) {
-  if (!run.environment_id) {
+  if (!run.environment_id && run.run_kind !== "strategy") {
     return (
       <div className="border border-border rounded bg-bg-card overflow-hidden">
         <div className="px-3 py-2 border-b border-border text-xs font-semibold uppercase tracking-wide text-text-dim">

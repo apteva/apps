@@ -742,6 +742,12 @@ func backtestPerformance(run *BacktestRun) (*BacktestPerformance, error) {
 	if perf.Current == nil && len(perf.Series) > 0 {
 		perf.Current = perf.Series[len(perf.Series)-1]
 	}
+	if len(perf.Positions) == 0 && perf.Current != nil && len(perf.Current.Positions) > 0 {
+		perf.Positions = perf.Current.Positions
+	}
+	if len(perf.Orders) == 0 && perf.Current != nil && len(perf.Current.Orders) > 0 {
+		perf.Orders = perf.Current.Orders
+	}
 	if perf.Positions == nil {
 		perf.Positions = []*Position{}
 	}

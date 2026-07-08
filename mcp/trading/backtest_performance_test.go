@@ -108,3 +108,77 @@ func TestBacktestPerformance_RepricesPositionsFromReplayMarks(t *testing.T) {
 		t.Fatalf("exposure=%v, want positive", exposure)
 	}
 }
+
+func TestBacktestPerformance_UsesSnapshotPositionsAndOrders(t *testing.T) {
+	ctx := newTestCtx(t)
+	pid := mustCreatePortfolio(t, ctx, "Strategy BT", []string{"crypto"})
+	runID, err := dbCreateBacktestRun(ctx.AppDB(), &BacktestRun{
+		ProjectID:     "test-proj",
+		PortfolioID:   pid,
+		SourceAgentID: 7,
+		StrategyID:    11,
+		RunKind:       "strategy",
+		Name:          "Strategy replay",
+		Status:        "running",
+		Symbols:       []string{"BTC-USD"},
+		StartAt:       "2026-01-01",
+		EndAt:         "2026-01-03",
+		Interval:      "1d",
+		StartingCash:  100000,
+		CurrentStep:   1,
+		TotalSteps:    3,
+		Summary:       map[string]any{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := dbGetBacktestRun(ctx.AppDB(), "test-proj", runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snap := &BacktestSnapshot{
+		RunID:       runID,
+		Step:        1,
+		Equity:      100500,
+		Cash:        80500,
+		BuyingPower: 80500,
+		Positions: []*Position{{
+			Symbol:      "BTC-USD",
+			AssetClass:  "crypto",
+			Qty:         0.2888,
+			AvgCost:     69000,
+			MarketPrice: 69263.7251,
+			MarketValue: 19991.36,
+		}},
+		Orders: []*Order{{
+			ID:           "bt-test",
+			PortfolioID:  pid,
+			Symbol:       "BTC-USD",
+			AssetClass:   "crypto",
+			Side:         "buy",
+			Type:         "market",
+			Qty:          0.2888,
+			FilledQty:    0.2888,
+			AvgFillPrice: 69000,
+			Status:       "filled",
+			Source:       "strategy",
+		}},
+	}
+	if err := dbUpsertBacktestSnapshot(ctx.AppDB(), snap); err != nil {
+		t.Fatal(err)
+	}
+
+	perf, err := backtestPerformance(run)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if perf.Current == nil || perf.Current.Step != 1 {
+		t.Fatalf("current=%#v, want step 1 snapshot", perf.Current)
+	}
+	if len(perf.Positions) != 1 || perf.Positions[0].Symbol != "BTC-USD" {
+		t.Fatalf("positions=%#v, want latest snapshot position", perf.Positions)
+	}
+	if len(perf.Orders) != 1 || perf.Orders[0].ID != "bt-test" {
+		t.Fatalf("orders=%#v, want latest snapshot order", perf.Orders)
+	}
+}
