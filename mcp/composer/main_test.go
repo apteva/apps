@@ -9,7 +9,9 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"image/color"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -1275,7 +1277,7 @@ func TestV2ValidateAndConvertScenes(t *testing.T) {
 	}
 }
 
-func TestV2ValidationMarksAdvancedSceneAsWebRequired(t *testing.T) {
+func TestV2ValidationMarksAdvancedSceneAsNativeV2(t *testing.T) {
 	body := `{
 		"version":"composer/v2",
 		"output":{"format":"mp4","width":1920,"height":1080,"fps":30},
@@ -1288,11 +1290,84 @@ func TestV2ValidationMarksAdvancedSceneAsWebRequired(t *testing.T) {
 	if !validation.Valid {
 		t.Fatalf("expected v2 valid, got errors: %v", validation.Errors)
 	}
-	if validation.Renderer != "web_required" {
-		t.Fatalf("renderer = %q, want web_required", validation.Renderer)
+	if validation.Renderer != "native-v2" {
+		t.Fatalf("renderer = %q, want native-v2", validation.Renderer)
 	}
 	if len(validation.Warnings) == 0 {
-		t.Fatalf("expected a warning explaining why web renderer is required")
+		t.Fatalf("expected a warning explaining native-v2 support level")
+	}
+}
+
+func TestV2NativeRenderShapeAndText(t *testing.T) {
+	if _, err := exec.LookPath(ffmpegPath()); err != nil {
+		t.Skip("ffmpeg not available")
+	}
+	if _, err := exec.LookPath(ffprobePath()); err != nil {
+		t.Skip("ffprobe not available")
+	}
+	spec, err := parseV2CompositionJSON(`{
+		"version":"composer/v2",
+		"name":"Native vector render",
+		"output":{"format":"mp4","width":320,"height":180,"fps":24,"background":"#05070c"},
+		"scenes":[{
+			"duration":1,
+			"elements":[
+				{"type":"shape","x":"8%","y":"16%","width":"84%","height":"68%","style":{"fill":"#101827","stroke":"#ff7a1a","stroke_width":2,"radius":18},"enter":{"type":"scale_pop","duration":0.2}},
+				{"type":"text","text":"Native V2","x":"12%","y":"28%","width":"76%","height":"28%","style":{"font_size":34,"color":"#ffffff","weight":800,"align":"center"},"enter":{"type":"fade_up","duration":0.25}},
+				{"type":"text","text":"shape + text + animation","x":"12%","y":"58%","width":"76%","height":"18%","style":{"font_size":17,"color":"#ffb36b","align":"center"},"enter":{"type":"typewriter","duration":0.5}}
+			]
+		}]
+	}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, warnings, err := renderV2Native(context.Background(), nil, spec, "")
+	if err != nil {
+		t.Fatalf("renderV2Native: %v", err)
+	}
+	defer result.Cleanup()
+	if result.LocalPath == "" {
+		t.Fatal("missing render path")
+	}
+	if got := probeRenderDuration(result.LocalPath); got < 0.8 || got > 1.4 {
+		t.Fatalf("duration = %v, want about 1s; warnings=%v", got, warnings)
+	}
+}
+
+func TestV2RevealTextLinesHonorsDelayAndKeepsLayoutStable(t *testing.T) {
+	lines := []string{"Applications", "open now"}
+	before := revealTextLines(lines, -0.1, 1, "typewriter")
+	if len(before) != len(lines) {
+		t.Fatalf("line count before reveal = %d, want %d", len(before), len(lines))
+	}
+	for _, line := range before {
+		if line != "" {
+			t.Fatalf("text revealed before delay: %#v", before)
+		}
+	}
+	during := revealTextLines(lines, 0.25, 1, "typewriter")
+	if len(during) != len(lines) {
+		t.Fatalf("line count during reveal = %d, want %d", len(during), len(lines))
+	}
+	if during[0] == "" {
+		t.Fatalf("expected first line to reveal, got %#v", during)
+	}
+	if during[1] != "" {
+		t.Fatalf("second line should remain blank early in reveal, got %#v", during)
+	}
+	after := revealTextLines(lines, 1.2, 1, "typewriter")
+	if strings.Join(after, "\x00") != strings.Join(lines, "\x00") {
+		t.Fatalf("after reveal = %#v, want %#v", after, lines)
+	}
+}
+
+func TestV2ParseRGBAUsesPremultipliedAlpha(t *testing.T) {
+	got := parseColor("rgba(255,255,255,0.5)", color.RGBA{})
+	if got.A < 126 || got.A > 128 {
+		t.Fatalf("alpha = %d, want about 127", got.A)
+	}
+	if got.R > got.A || got.G > got.A || got.B > got.A {
+		t.Fatalf("RGBA should be premultiplied, got %+v", got)
 	}
 }
 
