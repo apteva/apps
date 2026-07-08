@@ -315,6 +315,8 @@ func (r *v2NativeRender) drawElement(dst *image.RGBA, el V2Element, elements map
 		duration = sceneDuration - el.Start
 	}
 	box := r.elementBox(el)
+	parentScale := 1.0
+	parentOpacity := 1.0
 	if el.Parent != "" {
 		if parent, ok := elements[el.Parent]; ok {
 			parentBox := r.elementBox(parent)
@@ -324,19 +326,12 @@ func (r *v2NativeRender) drawElement(dst *image.RGBA, el V2Element, elements map
 			}
 			parentMotion := r.elementMotion(parent, sceneLocal-parent.Start, parentDuration)
 			box = transformBoxAround(box, parentBox, parentMotion.xOff, parentMotion.yOff, parentMotion.scale)
+			parentScale = parentMotion.scale
+			parentOpacity = parentMotion.opacity
 		}
 	}
 	state := r.elementState(el, box, t, duration)
-	if el.Parent != "" {
-		if parent, ok := elements[el.Parent]; ok {
-			parentDuration := parent.Duration
-			if parentDuration <= 0 {
-				parentDuration = sceneDuration - parent.Start
-			}
-			parentMotion := r.elementMotion(parent, sceneLocal-parent.Start, parentDuration)
-			state.opacity *= parentMotion.opacity
-		}
-	}
+	state.opacity *= parentOpacity
 	if state.opacity <= 0 {
 		return
 	}
@@ -347,7 +342,7 @@ func (r *v2NativeRender) drawElement(dst *image.RGBA, el V2Element, elements map
 	case "image":
 		r.drawImage(dst, el, box, state.opacity)
 	case "text":
-		r.drawText(dst, el, box, state.opacity, t)
+		r.drawText(dst, el, box, state.opacity, t, parentScale*state.scale)
 	case "group":
 		return
 	}
@@ -356,6 +351,7 @@ func (r *v2NativeRender) drawElement(dst *image.RGBA, el V2Element, elements map
 type v2ElementState struct {
 	box     image.Rectangle
 	opacity float64
+	scale   float64
 }
 
 type v2ElementMotion struct {
@@ -368,7 +364,7 @@ type v2ElementMotion struct {
 func (r *v2NativeRender) elementState(el V2Element, box image.Rectangle, t, duration float64) v2ElementState {
 	motion := r.elementMotion(el, t, duration)
 	box = transformBox(box, motion.xOff, motion.yOff, motion.scale)
-	return v2ElementState{box: box, opacity: clamp01(motion.opacity)}
+	return v2ElementState{box: box, opacity: clamp01(motion.opacity), scale: motion.scale}
 }
 
 func (r *v2NativeRender) elementMotion(el V2Element, t, duration float64) v2ElementMotion {
@@ -401,15 +397,38 @@ func (r *v2NativeRender) elementMotion(el V2Element, t, duration float64) v2Elem
 		case "fade_down":
 			opacity *= eased
 			yOff -= (1 - eased) * 48 * r.scaleY
+		case "slide_up":
+			opacity *= eased
+			yOff += (1 - eased) * 110 * r.scaleY
+		case "slide_down":
+			opacity *= eased
+			yOff -= (1 - eased) * 110 * r.scaleY
 		case "slide_left":
 			opacity *= eased
 			xOff += (1 - eased) * 140 * r.scaleX
 		case "slide_right":
 			opacity *= eased
 			xOff -= (1 - eased) * 140 * r.scaleX
+		case "zoom_in":
+			opacity *= eased
+			scale *= 0.94 + 0.06*eased
+		case "zoom_out":
+			opacity *= eased
+			scale *= 1.06 - 0.06*eased
+		case "rise":
+			opacity *= eased
+			yOff += (1 - eased) * 28 * r.scaleY
+			scale *= 0.98 + 0.02*eased
+		case "drop":
+			opacity *= eased
+			yOff -= (1 - eased) * 28 * r.scaleY
+			scale *= 0.98 + 0.02*eased
 		case "scale_pop":
 			opacity *= eased
 			scale *= 0.88 + 0.12*eased
+		case "pop":
+			opacity *= eased
+			scale *= 0.82 + 0.18*eased
 		}
 	}
 	applyPreset(el.Enter, true)
@@ -467,21 +486,29 @@ func (r *v2NativeRender) drawImage(dst *image.RGBA, el V2Element, box image.Rect
 	compositeRect(dst, layer, box, opacity)
 }
 
-func (r *v2NativeRender) drawText(dst *image.RGBA, el V2Element, box image.Rectangle, opacity float64, t float64) {
-	size := styleFloat(el.Style, "font_size", styleFloat(el.Style, "fontSize", 48)) * r.scale
+func (r *v2NativeRender) drawText(dst *image.RGBA, el V2Element, box image.Rectangle, opacity float64, t, textScale float64) {
+	if textScale <= 0 {
+		textScale = 1
+	}
+	size := styleFloat(el.Style, "font_size", styleFloat(el.Style, "fontSize", 48)) * r.scale * textScale
 	if size < 1 {
 		size = 1
 	}
-	face := r.fontFace(styleBool(el.Style, "bold", styleFloat(el.Style, "weight", 400) >= 700), size)
+	bold := styleBool(el.Style, "bold", styleFloat(el.Style, "weight", 400) >= 700)
+	face := r.fontFace(bold, size)
 	col := parseColor(styleString(el.Style, "color", "#ffffff"), color.RGBA{255, 255, 255, 255})
 	align := strings.ToLower(styleString(el.Style, "align", "left"))
 	fullLines := wrapText(el.Text, face, box.Dx())
+	autoFit := styleBool(el.Style, "auto_fit", styleBool(el.Style, "fit_text", true))
+	if autoFit {
+		size, face, fullLines = r.fitText(el.Text, bold, size, box)
+	}
 	lines := fullLines
 	if reveal := strings.ToLower(mapString(el.Enter, "type", "")); reveal == "typewriter" || reveal == "word_by_word" {
 		delay := mapFloat(el.Enter, "delay", 0)
 		lines = revealTextLines(fullLines, t-delay, mapFloat(el.Enter, "duration", 1.2), reveal)
 	}
-	lineH := int(size * 1.22)
+	lineH := maxInt(1, int(size*1.22))
 	totalH := lineH * len(fullLines)
 	y := box.Min.Y + (box.Dy()-totalH)/2 + int(size)
 	if strings.ToLower(styleString(el.Style, "vertical_align", "")) == "top" {
@@ -506,7 +533,8 @@ func (r *v2NativeRender) drawText(dst *image.RGBA, el V2Element, box image.Recta
 		d.DrawString(line)
 		y += lineH
 	}
-	compositeRect(dst, layer, box, opacity)
+	pad := maxInt(2, int(math.Ceil(size*0.75)))
+	compositeRect(dst, layer, box.Inset(-pad), opacity)
 }
 
 func (r *v2NativeRender) fontFace(bold bool, size float64) font.Face {
@@ -517,6 +545,24 @@ func (r *v2NativeRender) fontFace(bold bool, size float64) font.Face {
 	face := loadFontFace(bold, size)
 	r.faces[key] = face
 	return face
+}
+
+func (r *v2NativeRender) fitText(text string, bold bool, size float64, box image.Rectangle) (float64, font.Face, []string) {
+	minSize := math.Max(8*r.scale, size*0.62)
+	for i := 0; i < 12; i++ {
+		face := r.fontFace(bold, size)
+		lines := wrapText(text, face, box.Dx())
+		lineH := math.Max(1, size*1.22)
+		if float64(len(lines))*lineH <= float64(box.Dy())*0.94 || size <= minSize {
+			return size, face, lines
+		}
+		size *= 0.92
+		if size < minSize {
+			size = minSize
+		}
+	}
+	face := r.fontFace(bold, size)
+	return size, face, wrapText(text, face, box.Dx())
 }
 
 func buildV2NativeFFmpegArgs(app *sdk.AppCtx, spec *V2Composition, output Output, projectID, framePattern, outFile string, duration float64, fps int) ([]string, error) {

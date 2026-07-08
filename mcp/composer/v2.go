@@ -722,7 +722,7 @@ func validateCompositionJSON(s string) CompositionValidation {
 				Version:         composerV2Version,
 				DurationSeconds: v2DurationSeconds(spec),
 				Renderer:        "native-v2",
-				Warnings:        []string{"native composer/v2 renderer supports image, shape, text, layout, opacity, enter/exit presets, and x/y/scale/opacity keyframes"},
+				Warnings:        []string{"native composer/v2 renderer supports image, shape, text, parented component motion, design-size scaling, opacity, enter/exit presets, and x/y/scale/opacity keyframes"},
 			}
 		}
 		_, _, warnings, convErr := v2ToV1FFmpeg(spec)
@@ -744,24 +744,30 @@ func composerV2Examples() []map[string]any {
 	raw := `[
 	  {
 	    "id": "v2-scenes-with-text",
-	    "title": "Scene sequence with animated-ready text",
-	    "description": "Three storage-backed scenes with text overlays and one soundtrack. Renders today through ffmpeg; richer animation metadata is kept for the web renderer.",
+	    "title": "Native scene graph with grouped motion",
+	    "description": "Native V2 scene graph with design-size scaling, parented text labels, shape cards, fast enter presets, and a soundtrack.",
 	    "spec": {
 	      "version": "composer/v2",
-	      "output": {"format": "mp4", "width": 1920, "height": 1080, "fps": 30, "background": "#050505"},
+	      "output": {"format": "mp4", "width": 1920, "height": 1080, "design_width": 1920, "design_height": 1080, "fps": 30, "background": "#05070c"},
 	      "assets": [
-	        {"id": "scene-1", "type": "image", "src": "storage:101"},
-	        {"id": "scene-2", "type": "image", "src": "storage:102"},
 	        {"id": "music", "type": "audio", "src": "storage:201"}
 	      ],
 	      "scenes": [
 	        {"id": "open", "duration": 4, "elements": [
-	          {"type": "image", "asset": "scene-1"},
-	          {"type": "text", "text": "A clear promise", "style": {"position": "center", "font_size": 54}}
+	          {"id": "bg", "type": "shape", "x": "0%", "y": "0%", "width": "100%", "height": "100%", "style": {"fill": "#05070c"}},
+	          {"id": "glow", "type": "shape", "x": "60%", "y": "-8%", "width": "46%", "height": "38%", "style": {"fill": "rgba(255,122,26,0.14)", "radius": 260}, "animate": {"scale": [{"start": 0, "duration": 4, "from": 1, "to": 1.06}]}},
+	          {"id": "h", "type": "text", "text": "Launch a sharper\\nAI service offer.", "x": "7%", "y": "22%", "width": "44%", "height": "24%", "style": {"font_size": 76, "weight": 800, "color": "#f7f8fb", "align": "left"}, "enter": {"type": "rise", "duration": 0.36}},
+	          {"id": "sub", "type": "text", "text": "Package outcomes, proof, and delivery into a pitch clients understand.", "x": "7%", "y": "49%", "width": "40%", "height": "10%", "style": {"font_size": 30, "color": "#a8b0bd", "align": "left"}, "enter": {"type": "fade", "delay": 0.12, "duration": 0.32}},
+	          {"id": "card", "type": "shape", "x": "57%", "y": "20%", "width": "31%", "height": "45%", "style": {"fill": "#111827", "stroke": "#2d3a4f", "stroke_width": 2, "radius": 28}, "enter": {"type": "zoom_in", "delay": 0.12, "duration": 0.34}, "animate": {"scale": [{"start": 0.8, "duration": 3.2, "from": 1, "to": 1.018}]}},
+	          {"id": "card-title", "parent": "card", "type": "text", "text": "Offer Engine", "x": "60%", "y": "25%", "width": "18%", "height": "5%", "style": {"font_size": 30, "weight": 800, "color": "#ffffff", "align": "left"}},
+	          {"id": "metric", "parent": "card", "type": "text", "text": "+31% qualified calls", "x": "60%", "y": "43%", "width": "24%", "height": "7%", "style": {"font_size": 42, "weight": 800, "color": "#37e6ad", "align": "left"}}
 	        ]},
 	        {"id": "proof", "duration": 5, "elements": [
-	          {"type": "image", "asset": "scene-2"},
-	          {"type": "text", "text": "Proof that builds trust", "style": {"position": "bottom", "font_size": 42}}
+	          {"id": "bg", "type": "shape", "x": "0%", "y": "0%", "width": "100%", "height": "100%", "style": {"fill": "#05070c"}},
+	          {"id": "h", "type": "text", "text": "Proof beats promises.", "x": "7%", "y": "18%", "width": "48%", "height": "12%", "style": {"font_size": 72, "weight": 800, "color": "#f7f8fb", "align": "left"}, "enter": {"type": "rise", "duration": 0.34}},
+	          {"id": "proof-card", "type": "shape", "x": "7%", "y": "42%", "width": "22%", "height": "18%", "style": {"fill": "#121927", "stroke": "#ff7a1a", "stroke_width": 2, "radius": 22}, "enter": {"type": "slide_up", "delay": 0.1, "duration": 0.32}},
+	          {"id": "proof-v", "parent": "proof-card", "type": "text", "text": "18%", "x": "9%", "y": "45%", "width": "12%", "height": "7%", "style": {"font_size": 54, "weight": 800, "color": "#37e6ad", "align": "left"}},
+	          {"id": "proof-l", "parent": "proof-card", "type": "text", "text": "faster onboarding", "x": "9%", "y": "54%", "width": "17%", "height": "4%", "style": {"font_size": 24, "color": "#a8b0bd", "align": "left"}}
 	        ]}
 	      ],
 	      "audio": [{"asset": "music", "volume": 0.25}]

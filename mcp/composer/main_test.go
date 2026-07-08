@@ -18,6 +18,7 @@ import (
 	"testing"
 
 	tk "github.com/apteva/app-sdk/testkit"
+	"golang.org/x/image/font"
 )
 
 // --- validator ----------------------------------------------------
@@ -1420,6 +1421,36 @@ func TestV2NativeRenderParentMotionAppliesAroundParent(t *testing.T) {
 	}
 	if motion.opacity <= 0 || motion.opacity >= 1 {
 		t.Fatalf("expected parent enter opacity to be mid-animation, got %+v", motion)
+	}
+}
+
+func TestV2NativeRenderTextScaleTracksElementScale(t *testing.T) {
+	r := &v2NativeRender{width: 1000, height: 1000, designW: 1000, designH: 1000, scaleX: 1, scaleY: 1, scale: 1}
+	el := V2Element{
+		Type:     "text",
+		X:        float64(100),
+		Y:        float64(100),
+		Width:    float64(400),
+		Height:   float64(120),
+		Duration: 1,
+		Style:    map[string]any{"font_size": float64(48)},
+		Enter:    map[string]any{"type": "zoom_in", "duration": 1.0},
+	}
+	state := r.elementState(el, r.elementBox(el), 0.5, 1)
+	if state.scale <= 0.94 || state.scale >= 1 {
+		t.Fatalf("expected zoom_in to expose mid-animation scale, got %+v", state)
+	}
+}
+
+func TestV2NativeRenderFitTextShrinksTightBoxes(t *testing.T) {
+	r := &v2NativeRender{width: 400, height: 300, designW: 400, designH: 300, scaleX: 1, scaleY: 1, scale: 1, faces: map[string]font.Face{}}
+	box := image.Rect(0, 0, 180, 44)
+	size, _, lines := r.fitText("This label is deliberately too long for the card", true, 34, box)
+	if size >= 34 {
+		t.Fatalf("expected fitText to shrink, got size=%v lines=%v", size, lines)
+	}
+	if size < 8 {
+		t.Fatalf("fitText shrank below the minimum, got %v", size)
 	}
 }
 

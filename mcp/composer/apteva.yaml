@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: composer
 display_name: Composer
-version: 0.5.2
+version: 0.5.3
 description: |
   Multi-clip video composition. Stitch generated or uploaded assets
   into a single video — one visual track, timed audio tracks, optional
@@ -10,6 +10,11 @@ description: |
   default, on a render host via instances when render_host_id is
   set, or against a SaaS render backend (Shotstack et al) when one
   is bound to the render_executor role.
+
+  v0.5.3 improves native V2 polish: parented scale animations now scale text
+  layout with the element to avoid reflow wobble, text auto-fits tight boxes
+  with safer overflow margins, and the renderer adds faster rise/drop/zoom/pop
+  animation presets for more modern scene motion.
 
   v0.5.2 adds Composer V2 component-style motion and design-size scaling.
   Native scene elements can now inherit a parent element's enter/animate
