@@ -513,26 +513,21 @@ func strategyCadenceDuration(cadence string) (time.Duration, bool) {
 	}
 }
 
+type strategyBarsProvider interface {
+	StrategyBars(symbol, interval string, limit int) ([]Bar, error)
+}
+
 func liveStrategyMarket(ctx *sdk.AppCtx, def *StrategyDefinition) strategyMarket {
 	market := strategyMarket{prices: map[string]float64{}, history: map[string][]float64{}, asOf: time.Now().UTC()}
+	interval := strategyHistoryInterval(def)
+	limit := strategyRequiredBars(def)
 	for _, symbol := range def.Universe {
 		if mark, err := dbGetMark(ctx.AppDB(), symbol); err == nil && mark != nil {
 			market.prices[symbol] = mark.Price
 		}
 		if globalEngine != nil {
-			if bars, err := globalEngine.provider.Bars(symbol, "3M"); err == nil {
-				for _, b := range bars {
-					price := b.C
-					if price <= 0 {
-						price = b.Yes
-					}
-					if price <= 0 {
-						price = b.O
-					}
-					if price > 0 {
-						market.history[symbol] = append(market.history[symbol], price)
-					}
-				}
+			if bars, err := loadLiveStrategyBars(globalEngine.provider, symbol, interval, limit); err == nil {
+				appendStrategyHistory(market.history, symbol, bars)
 			}
 		}
 		if len(market.history[symbol]) > 0 && market.prices[symbol] == 0 {
@@ -541,6 +536,90 @@ func liveStrategyMarket(ctx *sdk.AppCtx, def *StrategyDefinition) strategyMarket
 		}
 	}
 	return market
+}
+
+func loadLiveStrategyBars(provider Provider, symbol, interval string, limit int) ([]Bar, error) {
+	if provider == nil {
+		return nil, errors.New("provider not ready")
+	}
+	if limit <= 0 {
+		limit = 1
+	}
+	if limit > 1000 {
+		limit = 1000
+	}
+	if sp, ok := provider.(strategyBarsProvider); ok {
+		return sp.StrategyBars(symbol, interval, limit)
+	}
+	return provider.Bars(symbol, "3M")
+}
+
+func appendStrategyHistory(history map[string][]float64, symbol string, bars []Bar) {
+	for _, b := range bars {
+		price := b.C
+		if price <= 0 {
+			price = b.Yes
+		}
+		if price <= 0 {
+			price = b.O
+		}
+		if price > 0 {
+			history[symbol] = append(history[symbol], price)
+		}
+	}
+}
+
+func strategyHistoryInterval(def *StrategyDefinition) string {
+	if def == nil {
+		return "1d"
+	}
+	cadence := strings.ToLower(strings.TrimSpace(def.Cadence))
+	if _, ok := strategyCadenceDuration(cadence); ok {
+		return cadence
+	}
+	return "1d"
+}
+
+func strategyRequiredBars(def *StrategyDefinition) int {
+	maxBars := 1
+	if def != nil {
+		for _, rule := range def.Rules {
+			if rule.When != nil {
+				maxBars = max(maxBars, indicatorRequiredBars(rule.When.Indicator))
+				maxBars = max(maxBars, indicatorRequiredBars(rule.When.Compare))
+			}
+			if rule.Rank != nil {
+				maxBars = max(maxBars, indicatorRequiredBars(rule.Rank.By))
+			}
+		}
+	}
+	if maxBars < 1 {
+		return 1
+	}
+	if maxBars > 1000 {
+		return 1000
+	}
+	return maxBars
+}
+
+func indicatorRequiredBars(indicator string) int {
+	indicator = strings.ToLower(strings.TrimSpace(indicator))
+	switch {
+	case indicator == "", indicator == "price":
+		return 1
+	case strings.HasPrefix(indicator, "sma_"):
+		return parseMetricWindow(indicator, "sma", 20)
+	case strings.HasPrefix(indicator, "ema_"):
+		return parseMetricWindow(indicator, "ema", 20)
+	case strings.HasPrefix(indicator, "rsi_") || indicator == "rsi":
+		return parseMetricWindow(indicator, "rsi", 14) + 1
+	case strings.HasPrefix(indicator, "return_") || indicator == "return":
+		return parseMetricWindow(indicator, "return", 20) + 1
+	case strings.HasPrefix(indicator, "volatility_") || indicator == "volatility":
+		return parseMetricWindow(indicator, "volatility", 20) + 1
+	default:
+		return 1
+	}
 }
 
 func backtestStrategyMarket(run *BacktestRun, step int) (strategyMarket, error) {

@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: trading
 display_name: Trading
-version: 0.4.32
+version: 0.4.33
 description: |
   Trading desk for Apteva agents. Multi-portfolio, multi-asset (equity,
   etf, crypto, polymarket prediction markets). Each portfolio runs in
@@ -12,7 +12,7 @@ description: |
             real money. The default. Useful for strategy work and dry
             runs.
     live  — orders route through a per-portfolio broker. v0.3 ships
-            with Binance (crypto) and Alpaca (equity/etf/crypto); each
+            with Binance/Kraken/Coinbase/OKX/Bybit/Bitstamp (crypto) and Alpaca (equity/etf/crypto); each
             portfolio names its broker at creation via broker_slug.
             Bind a broker via Settings → Integrations to enable
             mode=live. Without any binding, every portfolio stays paper.
@@ -51,7 +51,7 @@ requires:
     - role: broker
       kind: integration
       required: false
-      compatible_slugs: [binance-trading, alpaca-trading, polymarket-clob]
+      compatible_slugs: [binance-trading, kraken, coinbase, okx, bybit, bitstamp, alpaca-trading, polymarket-clob]
       capabilities:
         - order.place
         - order.cancel
@@ -63,9 +63,9 @@ requires:
         order.cancel:    cancel_order
         order.status:    get_order
         account.summary: get_account
-        positions.list:  list_positions  # alpaca-only; binance returns holdings in get_account; polymarket-clob has no positions endpoint
+        positions.list:  list_positions  # alpaca-only; crypto spot exchanges usually return holdings in account/balance; polymarket-clob has no positions endpoint
       label: "Broker (optional — enables live trading)"
-      hint: "Bind Binance (crypto), Alpaca (equity/etf/crypto), or Polymarket-CLOB (prediction markets). Portfolios pick a broker at creation."
+      hint: "Bind Binance, Kraken, Coinbase, OKX, Bybit, or Bitstamp (crypto), Alpaca (equity/etf/crypto), or Polymarket-CLOB (prediction markets). Portfolios pick a broker at creation."
     # Optional market-data integration. Required to trade equity/etf live
     # with real-time prices (pre-trade cash check + position MTM). Same
     # API key as alpaca-trading; bind both for a fully-live equity

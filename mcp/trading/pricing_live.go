@@ -12,6 +12,7 @@ package main
 // per-class health counters surfaced via /healthz/details.
 
 import (
+	"strings"
 	"sync"
 	"time"
 
@@ -19,9 +20,9 @@ import (
 )
 
 const (
-	cacheTTL              = 30 * time.Second
-	healthRecentWindow    = 60 * time.Second
-	staleAfter            = 90 * time.Second
+	cacheTTL           = 30 * time.Second
+	healthRecentWindow = 60 * time.Second
+	staleAfter         = 90 * time.Second
 )
 
 type liveProvider struct {
@@ -237,6 +238,33 @@ func (p *liveProvider) Bars(symbol, rng string) ([]Bar, error) {
 	}
 }
 
+func (p *liveProvider) StrategyBars(symbol, interval string, limit int) ([]Bar, error) {
+	if limit <= 0 {
+		limit = 1
+	}
+	if limit > 1000 {
+		limit = 1000
+	}
+	if inferAssetClass(symbol) == "crypto" {
+		interval = strings.ToLower(strings.TrimSpace(interval))
+		dur, ok := strategyCadenceDuration(interval)
+		if !ok {
+			interval = "1h"
+			dur = time.Hour
+		}
+		end := time.Now().UTC()
+		start := end.Add(-dur * time.Duration(limit+2))
+		bars, err := p.crypto.BacktestBars(symbol, interval, start, end, limit)
+		if err != nil {
+			p.health.note("crypto", err)
+			return nil, err
+		}
+		p.health.ok("crypto", "binance-public")
+		return bars, nil
+	}
+	return p.Bars(symbol, "3M")
+}
+
 // Health — read-only snapshot of per-class status.
 func (p *liveProvider) Health() map[string]any { return p.health.snapshot() }
 
@@ -301,9 +329,9 @@ func (c *markCache) put(m *Mark) {
 // ─── Per-class health ─────────────────────────────────────────────
 
 type classHealth struct {
-	Name      string
-	LastOKAt  time.Time
-	Errors    []time.Time // sliding 60s window of failure timestamps
+	Name     string
+	LastOKAt time.Time
+	Errors   []time.Time // sliding 60s window of failure timestamps
 }
 
 type providerHealth struct {
@@ -365,10 +393,10 @@ func (h *providerHealth) snapshot() map[string]any {
 			stale = true
 		}
 		out[class] = map[string]any{
-			"name":        c.Name,
-			"last_ok_at":  c.LastOKAt,
-			"errors_60s":  len(c.Errors),
-			"stale":       stale,
+			"name":       c.Name,
+			"last_ok_at": c.LastOKAt,
+			"errors_60s": len(c.Errors),
+			"stale":      stale,
 		}
 	}
 	return out

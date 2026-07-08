@@ -20,7 +20,7 @@ import (
 func (a *App) MCPTools() []sdk.Tool {
 	return []sdk.Tool{
 		// ─── Lifecycle ────────────────────────────────────────────
-		{Name: "portfolio_create", Description: "Create a new portfolio. Args: name, mandate, allowed_classes, starting_cash (paper only — live pulls from broker), mode (paper|live; default paper), broker_slug (live only — e.g. binance-trading, alpaca-trading; optional if exactly one broker is bound). Use brokers_list first to see what's available.",
+		{Name: "portfolio_create", Description: "Create a new portfolio. Args: name, mandate, allowed_classes, starting_cash (paper only — live pulls from broker), mode (paper|live; default paper), broker_slug (live only — e.g. binance-trading, kraken, coinbase, okx, bybit, bitstamp, alpaca-trading; optional if exactly one broker is bound). Use brokers_list first to see what's available.",
 			InputSchema: schemaObject(map[string]any{
 				"name":            map[string]any{"type": "string"},
 				"mandate":         map[string]any{"type": "string"},
@@ -1080,7 +1080,7 @@ func (a *App) toolOrderPlace(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 			return rejectStruct("translate_failed", terr.Error()), nil
 		}
 		res, callErr := ctx.PlatformAPI().ExecuteIntegrationTool(
-			bb.ConnectionID, bb.toolFor("order.place"), brokerArgs,
+			bb.ConnectionID, bb.placeToolFor(o), brokerArgs,
 		)
 		// Ambiguous broker outcomes (network error, non-success response,
 		// parse failure of a successful response) leave the local order in

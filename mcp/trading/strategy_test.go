@@ -7,6 +7,32 @@ import (
 	sdk "github.com/apteva/app-sdk"
 )
 
+type recordingStrategyProvider struct {
+	interval string
+	limit    int
+	symbols  []string
+	bars     bool
+}
+
+func (p *recordingStrategyProvider) Quote(symbol string) (*Mark, error) {
+	return &Mark{Symbol: symbol, AssetClass: inferAssetClass(symbol), Price: 100}, nil
+}
+func (p *recordingStrategyProvider) Universe() []*Mark { return nil }
+func (p *recordingStrategyProvider) Bars(symbol, rng string) ([]Bar, error) {
+	p.bars = true
+	return []Bar{{T: 1, C: 100}}, nil
+}
+func (p *recordingStrategyProvider) StrategyBars(symbol, interval string, limit int) ([]Bar, error) {
+	p.interval = interval
+	p.limit = limit
+	p.symbols = append(p.symbols, symbol)
+	out := make([]Bar, 0, limit)
+	for i := 0; i < limit; i++ {
+		out = append(out, Bar{T: int64(i + 1), C: 100 + float64(i)})
+	}
+	return out, nil
+}
+
 func testStrategyDefinition() map[string]any {
 	return map[string]any{
 		"universe": []any{"BTC-USD", "ETH-USD"},
@@ -61,6 +87,54 @@ func TestStrategyValidateAndEvaluate(t *testing.T) {
 	}
 	if len(eval.Decisions) == 0 {
 		t.Fatal("missing decision explanation")
+	}
+}
+
+func TestLiveStrategyMarketUsesCadenceBarsForIndicatorWindow(t *testing.T) {
+	ctx := newTestCtx(t)
+	provider := &recordingStrategyProvider{}
+	globalEngine.provider = provider
+	def := &StrategyDefinition{
+		Universe: []string{"BTC-USD", "ETH-USD", "SOL-USD"},
+		Cadence:  "1h",
+		Rules: []StrategyRule{{
+			Name: "top 120h momentum",
+			Rank: &StrategyRank{
+				Symbols: []string{"BTC-USD", "ETH-USD", "SOL-USD"},
+				By:      "return_120",
+				Top:     1,
+			},
+		}},
+	}
+
+	market := liveStrategyMarket(ctx, def)
+	if provider.bars {
+		t.Fatal("liveStrategyMarket used chart Bars fallback; want StrategyBars")
+	}
+	if provider.interval != "1h" {
+		t.Fatalf("interval = %q, want 1h", provider.interval)
+	}
+	if provider.limit != 121 {
+		t.Fatalf("limit = %d, want 121 for return_120", provider.limit)
+	}
+	if len(provider.symbols) != 3 {
+		t.Fatalf("symbols fetched = %v", provider.symbols)
+	}
+	if got := len(market.history["BTC-USD"]); got != 121 {
+		t.Fatalf("BTC history len = %d, want 121", got)
+	}
+	if ret, err := strategyMetric("BTC-USD", "return_120", market); err != nil || ret <= 0 {
+		t.Fatalf("return_120 = %v, %v", ret, err)
+	}
+}
+
+func TestStrategyRequiredBars(t *testing.T) {
+	def := &StrategyDefinition{Rules: []StrategyRule{{
+		When: &StrategyCondition{Indicator: "rsi_14", Compare: "sma_50"},
+		Rank: &StrategyRank{By: "return_120"},
+	}}}
+	if got := strategyRequiredBars(def); got != 121 {
+		t.Fatalf("strategyRequiredBars = %d, want 121", got)
 	}
 }
 

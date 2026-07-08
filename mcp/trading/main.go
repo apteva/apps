@@ -43,7 +43,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: trading
 display_name: Trading
-version: 0.4.32
+version: 0.4.33
 description: Trading desk for Apteva agents (paper + live via per-portfolio broker integration).
 author: Apteva
 scopes: [project, global]
@@ -61,7 +61,7 @@ requires:
     - role: broker
       kind: integration
       required: false
-      compatible_slugs: [binance-trading, alpaca-trading, polymarket-clob]
+      compatible_slugs: [binance-trading, kraken, coinbase, okx, bybit, bitstamp, alpaca-trading, polymarket-clob]
       capabilities:
         - order.place
         - order.cancel

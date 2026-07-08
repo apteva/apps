@@ -116,6 +116,13 @@ type brokerAdapter interface {
 	ErrText(res *sdk.ExecuteResult, err error) (code, detail string)
 }
 
+// brokerPlaceTooler is optional for exchanges whose order placement
+// endpoint is split by side/type instead of one create_order endpoint
+// (Bitstamp: buy_limit_order, sell_market_order, ...).
+type brokerPlaceTooler interface {
+	PlaceOrderTool(o *Order) string
+}
+
 // brokerHistoricOrder — flattened order shape used by the backfill
 // path. Every adapter normalises into this so the backfill code in
 // tools.go is broker-agnostic.
@@ -254,4 +261,16 @@ func (b *boundBroker) toolFor(capability string) string {
 		}
 	}
 	return capability
+}
+
+func (b *boundBroker) placeToolFor(o *Order) string {
+	if b != nil && b.Adapter != nil {
+		if p, ok := b.Adapter.(brokerPlaceTooler); ok {
+			if tool := p.PlaceOrderTool(o); tool != "" {
+				return tool
+			}
+		}
+		return b.toolFor("order.place")
+	}
+	return "order.place"
 }
