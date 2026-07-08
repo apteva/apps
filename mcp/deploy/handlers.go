@@ -163,7 +163,6 @@ func (a *App) httpCreateDeployment(w http.ResponseWriter, r *http.Request) {
 		BuildCmd    string `json:"build_cmd"`
 		StartCmd    string `json:"start_cmd"`
 		PortHint    int    `json:"port_hint"`
-		PublicPort  bool   `json:"public_port"`
 		EnvJSON     string `json:"env_json"`
 		Domain      string `json:"domain"`
 	}
@@ -182,7 +181,7 @@ func (a *App) httpCreateDeployment(w http.ResponseWriter, r *http.Request) {
 		SourceKind: body.SourceKind, SourceRef: body.SourceRef,
 		Framework: body.Framework,
 		BuildCmd:  body.BuildCmd, StartCmd: body.StartCmd,
-		PortHint: body.PortHint, PublicPort: body.PublicPort, EnvJSON: body.EnvJSON,
+		PortHint: body.PortHint, EnvJSON: body.EnvJSON,
 	}
 	if !domainsOn {
 		in.Domain = domainArg
@@ -232,7 +231,9 @@ func (a *App) httpDeploymentDetail(w http.ResponseWriter, r *http.Request, d *De
 			}
 			a.markStopped(*d.CurrentReleaseID)
 		}
+		builds, _ := dbListBuilds(globalCtx.AppDB(), d.ID, 100000)
 		_ = dbDeleteDeployment(globalCtx.AppDB(), d.ProjectID, d.ID)
+		a.removeBuildDirs(builds)
 		emit("deploy.destroyed", map[string]any{"deployment_id": d.ID, "name": d.Name})
 		httpJSON(w, map[string]any{"destroyed": true, "id": d.ID})
 	case http.MethodPatch:
@@ -337,7 +338,7 @@ func patchBodyFromRequest(r *http.Request) (map[string]any, error) {
 	allow := map[string]bool{
 		"description": true, "framework": true,
 		"build_cmd": true, "start_cmd": true,
-		"port_hint": true, "public_port": true, "env_json": true,
+		"port_hint": true, "env_json": true,
 		"source_extra_json": true,
 	}
 	out := map[string]any{}
@@ -348,12 +349,6 @@ func patchBodyFromRequest(r *http.Request) (map[string]any, error) {
 		if k == "port_hint" {
 			if f, ok := v.(float64); ok {
 				out[k] = int(f)
-				continue
-			}
-		}
-		if k == "public_port" {
-			if b, ok := v.(bool); ok {
-				out[k] = boolToInt(b)
 				continue
 			}
 		}
