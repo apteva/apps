@@ -483,7 +483,8 @@ func (a *App) toolCompositionRender(ctx *sdk.AppCtx, args map[string]any) (any, 
 		return nil, err
 	}
 	pid := row["project_id"].(string)
-	mat, err := materializeAIAssets(ctx.WithProject(pid), edit, id, pid)
+	persistMaterializedEdit := renderVersion != composerV2Version
+	mat, err := materializeAIAssets(ctx.WithProject(pid), edit, id, pid, persistMaterializedEdit)
 	if err != nil {
 		return nil, err
 	}

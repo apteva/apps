@@ -18,7 +18,7 @@ type materializeResult struct {
 	Pending []string
 }
 
-func materializeAIAssets(ctx *sdk.AppCtx, edit *Edit, compositionID int64, projectID string) (materializeResult, error) {
+func materializeAIAssets(ctx *sdk.AppCtx, edit *Edit, compositionID int64, projectID string, persist bool) (materializeResult, error) {
 	var out materializeResult
 	if edit == nil {
 		return out, nil
@@ -97,7 +97,7 @@ func materializeAIAssets(ctx *sdk.AppCtx, edit *Edit, compositionID int64, proje
 	if finalizeTimelineTiming(edit) {
 		out.Changed = true
 	}
-	if out.Changed {
+	if out.Changed && persist {
 		b, _ := json.Marshal(edit)
 		_, _ = ctx.AppDB().Exec(
 			`UPDATE compositions SET edit_json=?, duration_seconds=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`,
