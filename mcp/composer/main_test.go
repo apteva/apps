@@ -9,6 +9,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"image/color"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1330,6 +1331,43 @@ func TestV2NativeRenderShapeAndText(t *testing.T) {
 	}
 	if got := probeRenderDuration(result.LocalPath); got < 0.8 || got > 1.4 {
 		t.Fatalf("duration = %v, want about 1s; warnings=%v", got, warnings)
+	}
+}
+
+func TestV2RevealTextLinesHonorsDelayAndKeepsLayoutStable(t *testing.T) {
+	lines := []string{"Applications", "open now"}
+	before := revealTextLines(lines, -0.1, 1, "typewriter")
+	if len(before) != len(lines) {
+		t.Fatalf("line count before reveal = %d, want %d", len(before), len(lines))
+	}
+	for _, line := range before {
+		if line != "" {
+			t.Fatalf("text revealed before delay: %#v", before)
+		}
+	}
+	during := revealTextLines(lines, 0.25, 1, "typewriter")
+	if len(during) != len(lines) {
+		t.Fatalf("line count during reveal = %d, want %d", len(during), len(lines))
+	}
+	if during[0] == "" {
+		t.Fatalf("expected first line to reveal, got %#v", during)
+	}
+	if during[1] != "" {
+		t.Fatalf("second line should remain blank early in reveal, got %#v", during)
+	}
+	after := revealTextLines(lines, 1.2, 1, "typewriter")
+	if strings.Join(after, "\x00") != strings.Join(lines, "\x00") {
+		t.Fatalf("after reveal = %#v, want %#v", after, lines)
+	}
+}
+
+func TestV2ParseRGBAUsesPremultipliedAlpha(t *testing.T) {
+	got := parseColor("rgba(255,255,255,0.5)", color.RGBA{})
+	if got.A < 126 || got.A > 128 {
+		t.Fatalf("alpha = %d, want about 127", got.A)
+	}
+	if got.R > got.A || got.G > got.A || got.B > got.A {
+		t.Fatalf("RGBA should be premultiplied, got %+v", got)
 	}
 }
 

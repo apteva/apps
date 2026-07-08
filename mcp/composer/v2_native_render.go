@@ -35,6 +35,7 @@ type v2NativeRender struct {
 	duration float64
 	assets   map[string]V2Asset
 	images   map[string]image.Image
+	faces    map[string]font.Face
 	regular  font.Face
 	bold     font.Face
 }
@@ -87,6 +88,7 @@ func renderV2Native(ctx context.Context, app *sdk.AppCtx, spec *V2Composition, p
 		duration: duration,
 		assets:   map[string]V2Asset{},
 		images:   map[string]image.Image{},
+		faces:    map[string]font.Face{},
 		regular:  loadFontFace(false, 36),
 		bold:     loadFontFace(true, 36),
 	}
@@ -360,7 +362,7 @@ func (r *v2NativeRender) drawShape(dst *image.RGBA, el V2Element, box image.Rect
 	} else {
 		fillRoundRect(layer, box, radius, fill)
 	}
-	composite(dst, layer, opacity)
+	compositeRect(dst, layer, box, opacity)
 }
 
 func (r *v2NativeRender) drawImage(dst *image.RGBA, el V2Element, box image.Rectangle, opacity float64) {
@@ -388,29 +390,34 @@ func (r *v2NativeRender) drawImage(dst *image.RGBA, el V2Element, box image.Rect
 	target := image.Rect(box.Min.X+(dw-tw)/2, box.Min.Y+(dh-th)/2, box.Min.X+(dw-tw)/2+tw, box.Min.Y+(dh-th)/2+th)
 	layer := image.NewRGBA(dst.Bounds())
 	xdraw.CatmullRom.Scale(layer, target, img, src, stddraw.Over, nil)
-	composite(dst, layer, opacity)
+	compositeRect(dst, layer, box, opacity)
 }
 
 func (r *v2NativeRender) drawText(dst *image.RGBA, el V2Element, box image.Rectangle, opacity float64, t float64) {
-	body := el.Text
-	if reveal := strings.ToLower(mapString(el.Enter, "type", "")); reveal == "typewriter" || reveal == "word_by_word" {
-		body = revealText(body, t, mapFloat(el.Enter, "duration", 1.2), reveal)
-	}
 	size := styleFloat(el.Style, "font_size", styleFloat(el.Style, "fontSize", 48))
-	face := loadFontFace(styleBool(el.Style, "bold", styleFloat(el.Style, "weight", 400) >= 700), size)
+	face := r.fontFace(styleBool(el.Style, "bold", styleFloat(el.Style, "weight", 400) >= 700), size)
 	col := parseColor(styleString(el.Style, "color", "#ffffff"), color.RGBA{255, 255, 255, 255})
 	align := strings.ToLower(styleString(el.Style, "align", "left"))
-	lines := wrapText(body, face, box.Dx())
+	fullLines := wrapText(el.Text, face, box.Dx())
+	lines := fullLines
+	if reveal := strings.ToLower(mapString(el.Enter, "type", "")); reveal == "typewriter" || reveal == "word_by_word" {
+		delay := mapFloat(el.Enter, "delay", 0)
+		lines = revealTextLines(fullLines, t-delay, mapFloat(el.Enter, "duration", 1.2), reveal)
+	}
 	lineH := int(size * 1.22)
-	totalH := lineH * len(lines)
+	totalH := lineH * len(fullLines)
 	y := box.Min.Y + (box.Dy()-totalH)/2 + int(size)
 	if strings.ToLower(styleString(el.Style, "vertical_align", "")) == "top" {
 		y = box.Min.Y + int(size)
 	}
 	layer := image.NewRGBA(dst.Bounds())
 	d := &font.Drawer{Dst: layer, Src: image.NewUniform(col), Face: face}
-	for _, line := range lines {
-		lineW := d.MeasureString(line).Ceil()
+	for i, line := range lines {
+		measureLine := line
+		if i < len(fullLines) {
+			measureLine = fullLines[i]
+		}
+		lineW := d.MeasureString(measureLine).Ceil()
 		x := box.Min.X
 		switch align {
 		case "center":
@@ -422,7 +429,17 @@ func (r *v2NativeRender) drawText(dst *image.RGBA, el V2Element, box image.Recta
 		d.DrawString(line)
 		y += lineH
 	}
-	composite(dst, layer, opacity)
+	compositeRect(dst, layer, box, opacity)
+}
+
+func (r *v2NativeRender) fontFace(bold bool, size float64) font.Face {
+	key := fmt.Sprintf("%t:%0.2f", bold, size)
+	if face := r.faces[key]; face != nil {
+		return face
+	}
+	face := loadFontFace(bold, size)
+	r.faces[key] = face
+	return face
 }
 
 func buildV2NativeFFmpegArgs(app *sdk.AppCtx, spec *V2Composition, output Output, projectID, framePattern, outFile string, duration float64, fps int) ([]string, error) {
@@ -632,6 +649,20 @@ func composite(dst, src *image.RGBA, opacity float64) {
 	stddraw.DrawMask(dst, dst.Bounds(), src, image.Point{}, mask, image.Point{}, stddraw.Over)
 }
 
+func compositeRect(dst, src *image.RGBA, rect image.Rectangle, opacity float64) {
+	rect = rect.Intersect(dst.Bounds())
+	if rect.Empty() {
+		return
+	}
+	if opacity >= 0.999 {
+		stddraw.Draw(dst, rect, src, rect.Min, stddraw.Over)
+		return
+	}
+	op := uint8(clamp01(opacity) * 255)
+	mask := image.NewUniform(color.Alpha{A: op})
+	stddraw.DrawMask(dst, rect, src, rect.Min, mask, image.Point{}, stddraw.Over)
+}
+
 func parseColor(s string, fallback color.RGBA) color.RGBA {
 	s = strings.TrimSpace(s)
 	if s == "" {
@@ -644,7 +675,7 @@ func parseColor(s string, fallback color.RGBA) color.RGBA {
 			g, _ := strconv.ParseFloat(strings.TrimSpace(parts[1]), 64)
 			b, _ := strconv.ParseFloat(strings.TrimSpace(parts[2]), 64)
 			a, _ := strconv.ParseFloat(strings.TrimSpace(parts[3]), 64)
-			return color.RGBA{uint8(r), uint8(g), uint8(b), uint8(clamp01(a) * 255)}
+			return premultipliedRGBA(r, g, b, clamp01(a))
 		}
 	}
 	if strings.HasPrefix(s, "#") {
@@ -656,7 +687,24 @@ func parseColor(s string, fallback color.RGBA) color.RGBA {
 			return color.RGBA{uint8(v >> 16), uint8(v >> 8), uint8(v), 255}
 		}
 	}
+	if len(s) == 8 {
+		v, err := strconv.ParseUint(s, 16, 32)
+		if err == nil {
+			a := float64(uint8(v)) / 255
+			return premultipliedRGBA(float64(uint8(v>>24)), float64(uint8(v>>16)), float64(uint8(v>>8)), a)
+		}
+	}
 	return fallback
+}
+
+func premultipliedRGBA(r, g, b, a float64) color.RGBA {
+	a = clamp01(a)
+	return color.RGBA{
+		R: uint8(clampFloat(r, 0, 255) * a),
+		G: uint8(clampFloat(g, 0, 255) * a),
+		B: uint8(clampFloat(b, 0, 255) * a),
+		A: uint8(a * 255),
+	}
 }
 
 func wrapText(s string, face font.Face, maxWidth int) []string {
@@ -705,6 +753,56 @@ func revealText(s string, t, dur float64, mode string) string {
 		n = 1
 	}
 	return string(runes[:minInt(n, len(runes))])
+}
+
+func revealTextLines(lines []string, t, dur float64, mode string) []string {
+	out := make([]string, len(lines))
+	if t < 0 {
+		return out
+	}
+	if dur <= 0 || t >= dur {
+		copy(out, lines)
+		return out
+	}
+	p := clamp01(t / dur)
+	if mode == "word_by_word" {
+		total := 0
+		for _, line := range lines {
+			total += len(strings.Fields(line))
+		}
+		remaining := int(math.Ceil(p * float64(total)))
+		if remaining < 1 && total > 0 {
+			remaining = 1
+		}
+		for i, line := range lines {
+			words := strings.Fields(line)
+			if remaining <= 0 {
+				continue
+			}
+			take := minInt(remaining, len(words))
+			out[i] = strings.Join(words[:take], " ")
+			remaining -= take
+		}
+		return out
+	}
+	total := 0
+	for _, line := range lines {
+		total += len([]rune(line))
+	}
+	remaining := int(math.Ceil(p * float64(total)))
+	if remaining < 1 && total > 0 {
+		remaining = 1
+	}
+	for i, line := range lines {
+		runes := []rune(line)
+		if remaining <= 0 {
+			continue
+		}
+		take := minInt(remaining, len(runes))
+		out[i] = string(runes[:take])
+		remaining -= take
+	}
+	return out
 }
 
 func applyKeyframe(anim map[string]any, key string, t, current float64) float64 {
@@ -835,6 +933,16 @@ func clamp01(v float64) float64 {
 	}
 	if v > 1 {
 		return 1
+	}
+	return v
+}
+
+func clampFloat(v, lo, hi float64) float64 {
+	if v < lo {
+		return lo
+	}
+	if v > hi {
+		return hi
 	}
 	return v
 }
