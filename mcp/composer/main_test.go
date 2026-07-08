@@ -9,6 +9,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"image"
 	"image/color"
 	"os"
 	"os/exec"
@@ -1368,6 +1369,57 @@ func TestV2ParseRGBAUsesPremultipliedAlpha(t *testing.T) {
 	}
 	if got.R > got.A || got.G > got.A || got.B > got.A {
 		t.Fatalf("RGBA should be premultiplied, got %+v", got)
+	}
+}
+
+func TestV2NativeRenderScalesDesignCoordinates(t *testing.T) {
+	r := &v2NativeRender{width: 960, height: 540, designW: 1920, designH: 1080, scaleX: 0.5, scaleY: 0.5, scale: 0.5}
+	box := r.elementBox(V2Element{
+		X:      float64(200),
+		Y:      float64(100),
+		Width:  float64(400),
+		Height: float64(220),
+	})
+	want := image.Rect(100, 50, 300, 160)
+	if box != want {
+		t.Fatalf("scaled box = %v, want %v", box, want)
+	}
+	if got := parseMeasure("80px", 1000, 0); got != 80 {
+		t.Fatalf("plain parseMeasure should remain unscaled, got %v", got)
+	}
+}
+
+func TestV2NativeRenderParentMotionAppliesAroundParent(t *testing.T) {
+	r := &v2NativeRender{width: 1000, height: 1000, designW: 1000, designH: 1000, scaleX: 1, scaleY: 1, scale: 1}
+	parent := V2Element{
+		ID:       "card",
+		Type:     "group",
+		X:        float64(100),
+		Y:        float64(100),
+		Width:    float64(300),
+		Height:   float64(160),
+		Duration: 1,
+		Enter:    map[string]any{"type": "slide_left", "duration": 1.0},
+	}
+	child := V2Element{
+		ID:       "label",
+		Parent:   "card",
+		Type:     "text",
+		X:        float64(130),
+		Y:        float64(130),
+		Width:    float64(120),
+		Height:   float64(40),
+		Duration: 1,
+	}
+	base := r.elementBox(child)
+	parentBox := r.elementBox(parent)
+	motion := r.elementMotion(parent, 0.5, 1)
+	moved := transformBoxAround(base, parentBox, motion.xOff, motion.yOff, motion.scale)
+	if moved.Min.X <= base.Min.X {
+		t.Fatalf("child did not inherit parent slide motion: base=%v moved=%v motion=%+v", base, moved, motion)
+	}
+	if motion.opacity <= 0 || motion.opacity >= 1 {
+		t.Fatalf("expected parent enter opacity to be mid-animation, got %+v", motion)
 	}
 }
 

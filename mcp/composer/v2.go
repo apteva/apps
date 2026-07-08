@@ -28,14 +28,16 @@ type V2Composition struct {
 }
 
 type V2Output struct {
-	Format     string  `json:"format,omitempty"`
-	Width      int     `json:"width,omitempty"`
-	Height     int     `json:"height,omitempty"`
-	FPS        int     `json:"fps,omitempty"`
-	Duration   float64 `json:"duration,omitempty"`
-	Resolution string  `json:"resolution,omitempty"`
-	Aspect     string  `json:"aspect,omitempty"`
-	Background string  `json:"background,omitempty"`
+	Format       string  `json:"format,omitempty"`
+	Width        int     `json:"width,omitempty"`
+	Height       int     `json:"height,omitempty"`
+	DesignWidth  int     `json:"design_width,omitempty"`
+	DesignHeight int     `json:"design_height,omitempty"`
+	FPS          int     `json:"fps,omitempty"`
+	Duration     float64 `json:"duration,omitempty"`
+	Resolution   string  `json:"resolution,omitempty"`
+	Aspect       string  `json:"aspect,omitempty"`
+	Background   string  `json:"background,omitempty"`
 }
 
 type V2Asset struct {
@@ -79,6 +81,7 @@ type V2Clip struct {
 type V2Element struct {
 	ID       string         `json:"id,omitempty"`
 	Type     string         `json:"type"`
+	Parent   string         `json:"parent,omitempty"`
 	Asset    string         `json:"asset,omitempty"`
 	Src      string         `json:"src,omitempty"`
 	Text     string         `json:"text,omitempty"`

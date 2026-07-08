@@ -31,6 +31,11 @@ type v2NativeRender struct {
 	output   Output
 	width    int
 	height   int
+	designW  int
+	designH  int
+	scaleX   float64
+	scaleY   float64
+	scale    float64
 	fps      int
 	duration float64
 	assets   map[string]V2Asset
@@ -55,6 +60,24 @@ func renderV2Native(ctx context.Context, app *sdk.AppCtx, spec *V2Composition, p
 	w, h := spec.Output.Width, spec.Output.Height
 	if w <= 0 || h <= 0 {
 		w, h = resolutionWH(out.Resolution, out.Aspect)
+	}
+	designW, designH := spec.Output.DesignWidth, spec.Output.DesignHeight
+	if designW <= 0 {
+		designW = w
+	}
+	if designH <= 0 {
+		designH = h
+	}
+	scaleX, scaleY := 1.0, 1.0
+	if designW > 0 {
+		scaleX = float64(w) / float64(designW)
+	}
+	if designH > 0 {
+		scaleY = float64(h) / float64(designH)
+	}
+	styleScale := math.Min(scaleX, scaleY)
+	if styleScale <= 0 {
+		styleScale = 1
 	}
 	fps := spec.Output.FPS
 	if fps <= 0 {
@@ -84,6 +107,11 @@ func renderV2Native(ctx context.Context, app *sdk.AppCtx, spec *V2Composition, p
 		output:   out,
 		width:    w,
 		height:   h,
+		designW:  designW,
+		designH:  designH,
+		scaleX:   scaleX,
+		scaleY:   scaleY,
+		scale:    styleScale,
 		fps:      fps,
 		duration: duration,
 		assets:   map[string]V2Asset{},
@@ -237,6 +265,12 @@ func (r *v2NativeRender) renderFrame(t float64) *image.RGBA {
 			stddraw.Draw(fill, fill.Bounds(), &image.Uniform{parseColor(scene.Background, bg)}, image.Point{}, stddraw.Src)
 			composite(canvas, fill, 1)
 		}
+		elements := map[string]V2Element{}
+		for _, el := range scene.Elements {
+			if el.ID != "" {
+				elements[el.ID] = el
+			}
+		}
 		for _, el := range scene.Elements {
 			start := el.Start
 			dur := el.Duration
@@ -246,7 +280,7 @@ func (r *v2NativeRender) renderFrame(t float64) *image.RGBA {
 			if local+0.0001 < start || local > start+dur+0.0001 {
 				continue
 			}
-			r.drawElement(canvas, el, local-start, dur)
+			r.drawElement(canvas, el, elements, local, scene.Duration)
 		}
 	}
 	return canvas
@@ -274,9 +308,35 @@ func (r *v2NativeRender) activeScenes(t float64) []activeV2Scene {
 	return out
 }
 
-func (r *v2NativeRender) drawElement(dst *image.RGBA, el V2Element, t, duration float64) {
+func (r *v2NativeRender) drawElement(dst *image.RGBA, el V2Element, elements map[string]V2Element, sceneLocal, sceneDuration float64) {
+	t := sceneLocal - el.Start
+	duration := el.Duration
+	if duration <= 0 {
+		duration = sceneDuration - el.Start
+	}
 	box := r.elementBox(el)
+	if el.Parent != "" {
+		if parent, ok := elements[el.Parent]; ok {
+			parentBox := r.elementBox(parent)
+			parentDuration := parent.Duration
+			if parentDuration <= 0 {
+				parentDuration = sceneDuration - parent.Start
+			}
+			parentMotion := r.elementMotion(parent, sceneLocal-parent.Start, parentDuration)
+			box = transformBoxAround(box, parentBox, parentMotion.xOff, parentMotion.yOff, parentMotion.scale)
+		}
+	}
 	state := r.elementState(el, box, t, duration)
+	if el.Parent != "" {
+		if parent, ok := elements[el.Parent]; ok {
+			parentDuration := parent.Duration
+			if parentDuration <= 0 {
+				parentDuration = sceneDuration - parent.Start
+			}
+			parentMotion := r.elementMotion(parent, sceneLocal-parent.Start, parentDuration)
+			state.opacity *= parentMotion.opacity
+		}
+	}
 	if state.opacity <= 0 {
 		return
 	}
@@ -288,6 +348,8 @@ func (r *v2NativeRender) drawElement(dst *image.RGBA, el V2Element, t, duration 
 		r.drawImage(dst, el, box, state.opacity)
 	case "text":
 		r.drawText(dst, el, box, state.opacity, t)
+	case "group":
+		return
 	}
 }
 
@@ -296,7 +358,20 @@ type v2ElementState struct {
 	opacity float64
 }
 
+type v2ElementMotion struct {
+	xOff    float64
+	yOff    float64
+	scale   float64
+	opacity float64
+}
+
 func (r *v2NativeRender) elementState(el V2Element, box image.Rectangle, t, duration float64) v2ElementState {
+	motion := r.elementMotion(el, t, duration)
+	box = transformBox(box, motion.xOff, motion.yOff, motion.scale)
+	return v2ElementState{box: box, opacity: clamp01(motion.opacity)}
+}
+
+func (r *v2NativeRender) elementMotion(el V2Element, t, duration float64) v2ElementMotion {
 	opacity := styleFloat(el.Style, "opacity", 1)
 	xOff, yOff := 0.0, 0.0
 	scale := 1.0
@@ -322,16 +397,16 @@ func (r *v2NativeRender) elementState(el V2Element, box image.Rectangle, t, dura
 			opacity *= eased
 		case "fade_up":
 			opacity *= eased
-			yOff += (1 - eased) * 48
+			yOff += (1 - eased) * 48 * r.scaleY
 		case "fade_down":
 			opacity *= eased
-			yOff -= (1 - eased) * 48
+			yOff -= (1 - eased) * 48 * r.scaleY
 		case "slide_left":
 			opacity *= eased
-			xOff += (1 - eased) * 140
+			xOff += (1 - eased) * 140 * r.scaleX
 		case "slide_right":
 			opacity *= eased
-			xOff -= (1 - eased) * 140
+			xOff -= (1 - eased) * 140 * r.scaleX
 		case "scale_pop":
 			opacity *= eased
 			scale *= 0.88 + 0.12*eased
@@ -341,19 +416,18 @@ func (r *v2NativeRender) elementState(el V2Element, box image.Rectangle, t, dura
 	applyPreset(el.Exit, false)
 	if el.Animate != nil {
 		opacity = applyKeyframe(el.Animate, "opacity", t, opacity)
-		xOff += applyKeyframe(el.Animate, "x", t, 0)
-		yOff += applyKeyframe(el.Animate, "y", t, 0)
+		xOff += applyKeyframe(el.Animate, "x", t, 0) * r.scaleX
+		yOff += applyKeyframe(el.Animate, "y", t, 0) * r.scaleY
 		scale *= applyKeyframe(el.Animate, "scale", t, 1)
 	}
-	box = transformBox(box, xOff, yOff, scale)
-	return v2ElementState{box: box, opacity: clamp01(opacity)}
+	return v2ElementMotion{xOff: xOff, yOff: yOff, scale: scale, opacity: clamp01(opacity)}
 }
 
 func (r *v2NativeRender) drawShape(dst *image.RGBA, el V2Element, box image.Rectangle, opacity float64) {
 	fill := parseColor(styleString(el.Style, "fill", styleString(el.Style, "background", "#ffffff")), color.RGBA{255, 255, 255, 255})
 	stroke := parseColor(styleString(el.Style, "stroke", ""), color.RGBA{})
-	radius := int(styleFloat(el.Style, "radius", 0))
-	strokeW := int(styleFloat(el.Style, "stroke_width", styleFloat(el.Style, "strokeWidth", 0)))
+	radius := int(styleFloat(el.Style, "radius", 0) * r.scale)
+	strokeW := int(styleFloat(el.Style, "stroke_width", styleFloat(el.Style, "strokeWidth", 0)) * r.scale)
 	layer := image.NewRGBA(dst.Bounds())
 	if strokeW > 0 && stroke.A > 0 {
 		fillRoundRect(layer, box, radius, stroke)
@@ -394,7 +468,10 @@ func (r *v2NativeRender) drawImage(dst *image.RGBA, el V2Element, box image.Rect
 }
 
 func (r *v2NativeRender) drawText(dst *image.RGBA, el V2Element, box image.Rectangle, opacity float64, t float64) {
-	size := styleFloat(el.Style, "font_size", styleFloat(el.Style, "fontSize", 48))
+	size := styleFloat(el.Style, "font_size", styleFloat(el.Style, "fontSize", 48)) * r.scale
+	if size < 1 {
+		size = 1
+	}
 	face := r.fontFace(styleBool(el.Style, "bold", styleFloat(el.Style, "weight", 400) >= 700), size)
 	col := parseColor(styleString(el.Style, "color", "#ffffff"), color.RGBA{255, 255, 255, 255})
 	align := strings.ToLower(styleString(el.Style, "align", "left"))
@@ -566,21 +643,21 @@ func loadFontFace(bold bool, size float64) font.Face {
 }
 
 func (r *v2NativeRender) elementBox(el V2Element) image.Rectangle {
-	x := parseMeasure(el.X, r.width, math.NaN())
-	y := parseMeasure(el.Y, r.height, math.NaN())
-	w := parseMeasure(el.Width, r.width, math.NaN())
-	h := parseMeasure(el.Height, r.height, math.NaN())
+	x := r.parseMeasureX(el.X, math.NaN())
+	y := r.parseMeasureY(el.Y, math.NaN())
+	w := r.parseMeasureX(el.Width, math.NaN())
+	h := r.parseMeasureY(el.Height, math.NaN())
 	if math.IsNaN(x) {
-		x = parseMeasure(styleAny(el.Style, "x"), r.width, 0)
+		x = r.parseMeasureX(styleAny(el.Style, "x"), 0)
 	}
 	if math.IsNaN(y) {
-		y = parseMeasure(styleAny(el.Style, "y"), r.height, 0)
+		y = r.parseMeasureY(styleAny(el.Style, "y"), 0)
 	}
 	if math.IsNaN(w) {
-		w = parseMeasure(styleAny(el.Style, "width"), r.width, float64(r.width))
+		w = r.parseMeasureX(styleAny(el.Style, "width"), float64(r.width))
 	}
 	if math.IsNaN(h) {
-		h = parseMeasure(styleAny(el.Style, "height"), r.height, float64(r.height))
+		h = r.parseMeasureY(styleAny(el.Style, "height"), float64(r.height))
 	}
 	pos := strings.ToLower(styleString(el.Style, "position", ""))
 	if pos != "" && el.X == nil && el.Y == nil {
@@ -588,22 +665,34 @@ func (r *v2NativeRender) elementBox(el V2Element) image.Rectangle {
 		case "center":
 			x, y = (float64(r.width)-w)/2, (float64(r.height)-h)/2
 		case "top":
-			x, y = (float64(r.width)-w)/2, 80
+			x, y = (float64(r.width)-w)/2, 80*r.scaleY
 		case "bottom":
-			x, y = (float64(r.width)-w)/2, float64(r.height)-h-80
+			x, y = (float64(r.width)-w)/2, float64(r.height)-h-80*r.scaleY
 		}
 	}
 	return image.Rect(int(math.Round(x)), int(math.Round(y)), int(math.Round(x+w)), int(math.Round(y+h)))
 }
 
+func (r *v2NativeRender) parseMeasureX(v any, fallback float64) float64 {
+	return parseMeasureScaled(v, r.width, fallback, r.scaleX)
+}
+
+func (r *v2NativeRender) parseMeasureY(v any, fallback float64) float64 {
+	return parseMeasureScaled(v, r.height, fallback, r.scaleY)
+}
+
 func parseMeasure(v any, base int, fallback float64) float64 {
+	return parseMeasureScaled(v, base, fallback, 1)
+}
+
+func parseMeasureScaled(v any, base int, fallback, scale float64) float64 {
 	switch x := v.(type) {
 	case nil:
 		return fallback
 	case float64:
-		return x
+		return x * scale
 	case int:
-		return float64(x)
+		return float64(x) * scale
 	case string:
 		s := strings.TrimSpace(x)
 		if strings.HasSuffix(s, "%") {
@@ -612,7 +701,7 @@ func parseMeasure(v any, base int, fallback float64) float64 {
 		}
 		s = strings.TrimSuffix(s, "px")
 		if n, err := strconv.ParseFloat(s, 64); err == nil {
-			return n
+			return n * scale
 		}
 	}
 	return fallback
@@ -841,6 +930,21 @@ func transformBox(box image.Rectangle, xOff, yOff, scale float64) image.Rectangl
 		int(math.Round(cy-h/2+yOff)),
 		int(math.Round(cx+w/2+xOff)),
 		int(math.Round(cy+h/2+yOff)),
+	)
+}
+
+func transformBoxAround(box, origin image.Rectangle, xOff, yOff, scale float64) image.Rectangle {
+	cx := float64(origin.Min.X+origin.Max.X) / 2
+	cy := float64(origin.Min.Y+origin.Max.Y) / 2
+	minX := cx + (float64(box.Min.X)-cx)*scale + xOff
+	minY := cy + (float64(box.Min.Y)-cy)*scale + yOff
+	maxX := cx + (float64(box.Max.X)-cx)*scale + xOff
+	maxY := cy + (float64(box.Max.Y)-cy)*scale + yOff
+	return image.Rect(
+		int(math.Round(minX)),
+		int(math.Round(minY)),
+		int(math.Round(maxX)),
+		int(math.Round(maxY)),
 	)
 }
 
