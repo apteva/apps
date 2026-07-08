@@ -1,0 +1,80 @@
+schema: apteva-app/v1
+
+name: testimonials
+display_name: Testimonials
+version: 0.1.0
+description: |
+  Lightweight customer proof store for Apteva. Keep text testimonials,
+  reviews, ratings, attribution, consent, publication status, and an
+  optional media reference for later video/audio/image testimonials.
+
+author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/testimonials
+icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/testimonials/icon.svg
+tags: [testimonials, reviews, social-proof, marketing]
+
+scopes: [project, global]
+min_apteva_version: "0.11.0"
+
+requires:
+  permissions:
+    - db.write.app
+  apps:
+    - name: storage
+      optional: true
+      reason: Store optional media files for testimonials.
+
+provides:
+  http_routes:
+    - prefix: /
+  mcp_tools:
+    - { name: testimonials_create, description: "Create a testimonial or review. Args: title?, quote?, body?, rating?, author fields?, status?, kind?, source?, media_file_id?, media_url?, tags?, metadata?." }
+    - { name: testimonials_list, description: "List testimonials. Args: status?, kind?, source?, tag?, published_only?, q?, limit?." }
+    - { name: testimonials_get, description: "Fetch one testimonial. Args: id." }
+    - { name: testimonials_update, description: "Patch testimonial fields. Args: id plus editable fields." }
+    - { name: testimonials_set_status, description: "Set lifecycle status. Args: id, status (draft|submitted|approved|rejected|published|archived)." }
+    - { name: testimonials_delete, description: "Archive a testimonial by default. Args: id, hard?." }
+  ui_panels:
+    - slot: project.page
+      label: Testimonials
+      icon: message-square-quote
+      entry: /ui/TestimonialsPanel.mjs
+  publishes:
+    - name: testimonial.created
+      description: A testimonial was created.
+      payload:
+        id: integer
+        status: string
+        kind: string
+    - name: testimonial.updated
+      description: A testimonial was updated.
+      payload:
+        id: integer
+        status: string
+        kind: string
+    - name: testimonial.status_changed
+      description: A testimonial status changed.
+      payload:
+        id: integer
+        status: string
+    - name: testimonial.deleted
+      description: A testimonial was archived or hard-deleted.
+      payload:
+        id: integer
+        hard: boolean
+
+runtime:
+  kind: source
+  source:
+    repo: github.com/apteva/apps
+    ref: main
+    entry: mcp/testimonials
+  port: 8080
+  health_check: /health
+
+db:
+  driver: sqlite
+  path: /data/testimonials.db
+  migrations: migrations/
+
+upgrade_policy: auto-patch
