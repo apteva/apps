@@ -310,6 +310,83 @@ func TestStrategyValidationCreatesOutOfSampleRuns(t *testing.T) {
 	}
 }
 
+func TestStrategyBacktestRebalanceCadenceAndRankThreshold(t *testing.T) {
+	ctx := newTestCtx(t)
+	pid := mustCreatePortfolio(t, ctx, "Winner Shape", []string{"crypto"})
+	strategyID, err := dbCreateStrategy(ctx.AppDB(), &Strategy{
+		ProjectID: "test-proj",
+		Name:      "Hourly gated momentum",
+		Status:    "active",
+		Definition: map[string]any{
+			"universe":        []any{"BTC-USD", "ETH-USD"},
+			"cadence":         "1h",
+			"rebalance_every": float64(3),
+			"rules": []any{
+				map[string]any{
+					"name": "top gated momentum",
+					"rank": map[string]any{
+						"symbols": []any{"BTC-USD", "ETH-USD"},
+						"by":      "return_3",
+						"top":     float64(1),
+						"min":     float64(2),
+					},
+				},
+			},
+		},
+		Version: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	runID, err := dbCreateBacktestRun(ctx.AppDB(), &BacktestRun{
+		ProjectID:       "test-proj",
+		PortfolioID:     pid,
+		StrategyID:      strategyID,
+		RunKind:         "strategy",
+		StrategyVersion: 1,
+		Name:            "cadence gated momentum",
+		Status:          "queued",
+		Symbols:         []string{"BTC-USD", "ETH-USD"},
+		StartAt:         "2026-01-01",
+		EndAt:           "2026-01-01",
+		Interval:        "1h",
+		StartingCash:    100000,
+		FeeBps:          1,
+		SlippageBps:     5,
+		TotalSteps:      8,
+		Summary:         map[string]any{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	run, err := dbGetBacktestRun(ctx.AppDB(), "test-proj", runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := seedGatedMomentumBars(ctx, run.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runStrategyBacktestToEnd(run); err != nil {
+		t.Fatal(err)
+	}
+	snaps, err := dbListBacktestSnapshots(ctx.AppDB(), run.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snaps) != 9 {
+		t.Fatalf("snapshots=%d, want baseline + 8 steps", len(snaps))
+	}
+	if len(snaps[4].Orders) != 1 {
+		t.Fatalf("step 4 orders=%d, want first buy after return_3 crosses threshold", len(snaps[4].Orders))
+	}
+	if len(snaps[5].Orders) != 1 || len(snaps[5].Positions) != 1 {
+		t.Fatalf("step 5 should hold without a new order; orders=%d positions=%d", len(snaps[5].Orders), len(snaps[5].Positions))
+	}
+	if len(snaps[7].Orders) <= len(snaps[4].Orders) {
+		t.Fatalf("step 7 should rebalance again; orders=%d earlier=%d", len(snaps[7].Orders), len(snaps[4].Orders))
+	}
+}
+
 func mustCreateStrategyBacktestRun(t *testing.T, ctx *sdk.AppCtx, portfolioID, strategyID int64, name string) *BacktestRun {
 	t.Helper()
 	id, err := dbCreateBacktestRun(ctx.AppDB(), &BacktestRun{
@@ -357,6 +434,24 @@ func assertClose(t *testing.T, label string, got, want float64) {
 	if math.Abs(got-want) > 0.0001 {
 		t.Fatalf("%s=%v, want %v", label, got, want)
 	}
+}
+
+func seedGatedMomentumBars(ctx *sdk.AppCtx, runID int64) error {
+	btc := []float64{100, 101, 102, 105, 106, 107, 108, 109}
+	eth := []float64{100, 100, 100, 100, 100, 100, 104, 108}
+	rows := []*BacktestMarketBar{}
+	for i := range btc {
+		step := i + 1
+		for symbol, price := range map[string]float64{"BTC-USD": btc[i], "ETH-USD": eth[i]} {
+			rows = append(rows, &BacktestMarketBar{
+				Step: step, Symbol: symbol, AssetClass: "crypto",
+				T: int64(1704067200 + step*3600),
+				O: price, H: price, L: price, C: price, V: 1000,
+				Source: "fixture",
+			})
+		}
+	}
+	return dbReplaceBacktestMarketBars(ctx.AppDB(), runID, rows)
 }
 
 func validationFixtureBars(symbols []string, steps int) []*BacktestMarketBar {

@@ -16,10 +16,11 @@ import (
 )
 
 type StrategyDefinition struct {
-	Universe []string       `json:"universe"`
-	Cadence  string         `json:"cadence,omitempty"`
-	Rules    []StrategyRule `json:"rules"`
-	Risk     StrategyRisk   `json:"risk,omitempty"`
+	Universe       []string       `json:"universe"`
+	Cadence        string         `json:"cadence,omitempty"`
+	RebalanceEvery int            `json:"rebalance_every,omitempty"`
+	Rules          []StrategyRule `json:"rules"`
+	Risk           StrategyRisk   `json:"risk,omitempty"`
 }
 
 type StrategyRule struct {
@@ -47,6 +48,7 @@ type StrategyRank struct {
 	By      string   `json:"by"`
 	Top     int      `json:"top"`
 	Weight  string   `json:"weight,omitempty"`
+	Min     float64  `json:"min,omitempty"`
 }
 
 type StrategyRisk struct {
@@ -262,6 +264,18 @@ func evalStrategyRank(rank StrategyRank, market strategyMarket) ([]StrategyAlloc
 		return nil, "", fmt.Errorf("rank %s has no computable symbols", rank.By)
 	}
 	sort.Slice(rows, func(i, j int) bool { return rows[i].value > rows[j].value })
+	if rank.Min != 0 {
+		filtered := rows[:0]
+		for _, r := range rows {
+			if r.value >= rank.Min {
+				filtered = append(filtered, r)
+			}
+		}
+		rows = filtered
+		if len(rows) == 0 {
+			return []StrategyAllocation{}, fmt.Sprintf("ranked by %s: no symbol met min %.4f", rank.By, rank.Min), nil
+		}
+	}
 	top := rank.Top
 	if top > len(rows) {
 		top = len(rows)
@@ -441,6 +455,62 @@ func capAllocations(in []StrategyAllocation, maxWeight float64) []StrategyAlloca
 		}
 	}
 	return in
+}
+
+func shouldRebalanceStrategy(def *StrategyDefinition, interval string, step int) bool {
+	if step <= 1 {
+		return true
+	}
+	every := strategyRebalanceEvery(def, interval)
+	return every <= 1 || (step-1)%every == 0
+}
+
+func strategyRebalanceEvery(def *StrategyDefinition, interval string) int {
+	if def == nil {
+		return 1
+	}
+	if def.RebalanceEvery > 1 {
+		return def.RebalanceEvery
+	}
+	cadence := strings.ToLower(strings.TrimSpace(def.Cadence))
+	if cadence == "" {
+		return 1
+	}
+	if n, err := strconv.Atoi(cadence); err == nil && n > 0 {
+		return n
+	}
+	cadenceDuration, ok := strategyCadenceDuration(cadence)
+	if !ok {
+		return 1
+	}
+	intervalDuration := backtestIntervalDuration(interval)
+	if intervalDuration <= 0 {
+		return 1
+	}
+	every := int(math.Round(float64(cadenceDuration) / float64(intervalDuration)))
+	if every < 1 {
+		return 1
+	}
+	return every
+}
+
+func strategyCadenceDuration(cadence string) (time.Duration, bool) {
+	switch cadence {
+	case "5m":
+		return 5 * time.Minute, true
+	case "15m":
+		return 15 * time.Minute, true
+	case "1h":
+		return time.Hour, true
+	case "4h":
+		return 4 * time.Hour, true
+	case "1d":
+		return 24 * time.Hour, true
+	case "1w":
+		return 7 * 24 * time.Hour, true
+	default:
+		return 0, false
+	}
 }
 
 func liveStrategyMarket(ctx *sdk.AppCtx, def *StrategyDefinition) strategyMarket {
@@ -1204,6 +1274,10 @@ func stepStrategyBacktestRun(run *BacktestRun) (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
+	def, _, err := validateStrategyDefinition(strategy.Definition)
+	if err != nil {
+		return nil, err
+	}
 	state, err := loadStrategyBacktestState(run)
 	if err != nil {
 		return nil, err
@@ -1212,7 +1286,7 @@ func stepStrategyBacktestRun(run *BacktestRun) (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
-	eval, err := evaluateStrategy(strategy, market)
+	eval, rebalance, err := evaluateStrategyBacktestStep(strategy, def, run, step, market)
 	if err != nil {
 		return nil, err
 	}
@@ -1220,8 +1294,11 @@ func stepStrategyBacktestRun(run *BacktestRun) (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
-	orders := applyStrategyTargets(run, state, eval.TargetAllocations, prices)
-	state.Orders = append(state.Orders, orders...)
+	orders := []*Order{}
+	if rebalance {
+		orders = applyStrategyTargets(run, state, eval.TargetAllocations, prices)
+		state.Orders = append(state.Orders, orders...)
+	}
 	snap := strategySnapshot(run, step, state, prices)
 	if err := dbUpsertBacktestSnapshot(globalCtx.AppDB(), snap); err != nil {
 		return nil, err
@@ -1236,6 +1313,7 @@ func stepStrategyBacktestRun(run *BacktestRun) (map[string]any, error) {
 	summary := map[string]any{
 		"last_step":          step,
 		"prices":             prices,
+		"rebalance":          rebalance,
 		"strategy_id":        strategy.ID,
 		"strategy_name":      strategy.Name,
 		"target_allocations": eval.TargetAllocations,
@@ -1280,14 +1358,21 @@ func runStrategyBacktestStep(run *BacktestRun, strategy *Strategy, state *strate
 	if err != nil {
 		return nil, err
 	}
-	eval, err := evaluateStrategy(strategy, *market)
+	def, _, err := validateStrategyDefinition(strategy.Definition)
+	if err != nil {
+		return nil, err
+	}
+	eval, rebalance, err := evaluateStrategyBacktestStep(strategy, def, run, step, *market)
 	if err != nil {
 		return nil, err
 	}
 	stepRun := *run
 	stepRun.CurrentStep = step - 1
-	orders := applyStrategyTargets(&stepRun, state, eval.TargetAllocations, prices)
-	state.Orders = append(state.Orders, orders...)
+	orders := []*Order{}
+	if rebalance {
+		orders = applyStrategyTargets(&stepRun, state, eval.TargetAllocations, prices)
+		state.Orders = append(state.Orders, orders...)
+	}
 	snap := strategySnapshot(&stepRun, step, state, prices)
 	if err := dbUpsertBacktestSnapshot(globalCtx.AppDB(), snap); err != nil {
 		return nil, err
@@ -1302,6 +1387,7 @@ func runStrategyBacktestStep(run *BacktestRun, strategy *Strategy, state *strate
 	summary := map[string]any{
 		"last_step":          step,
 		"prices":             prices,
+		"rebalance":          rebalance,
 		"strategy_id":        strategy.ID,
 		"strategy_name":      strategy.Name,
 		"target_allocations": eval.TargetAllocations,
@@ -1326,6 +1412,21 @@ func runStrategyBacktestStep(run *BacktestRun, strategy *Strategy, state *strate
 	next.Status = status
 	next.Summary = summary
 	return &next, nil
+}
+
+func evaluateStrategyBacktestStep(strategy *Strategy, def *StrategyDefinition, run *BacktestRun, step int, market strategyMarket) (*StrategyEvaluation, bool, error) {
+	if shouldRebalanceStrategy(def, run.Interval, step) {
+		eval, err := evaluateStrategy(strategy, market)
+		return eval, true, err
+	}
+	every := strategyRebalanceEvery(def, run.Interval)
+	return &StrategyEvaluation{
+		StrategyID:        strategy.ID,
+		StrategyVersion:   strategy.Version,
+		AsOf:              market.asOf.Format(time.RFC3339),
+		TargetAllocations: nil,
+		Decisions:         []string{fmt.Sprintf("holding existing allocation; next rebalance every %d step(s)", every)},
+	}, false, nil
 }
 
 func loadStrategyBacktestState(run *BacktestRun) (*strategyBacktestState, error) {
