@@ -62,6 +62,23 @@ type StrategyEvaluation struct {
 	Warnings          []string             `json:"warnings,omitempty"`
 }
 
+type StrategyValidationResult struct {
+	StrategyID      int64                     `json:"strategy_id"`
+	StrategyVersion int                       `json:"strategy_version"`
+	SplitPct        float64                   `json:"split_pct"`
+	MarketSource    string                    `json:"market_source"`
+	Train           *StrategyValidationPeriod `json:"train"`
+	Test            *StrategyValidationPeriod `json:"test"`
+	Verdict         string                    `json:"verdict"`
+}
+
+type StrategyValidationPeriod struct {
+	Label       string               `json:"label"`
+	Run         *BacktestRun         `json:"run"`
+	Performance *BacktestPerformance `json:"performance,omitempty"`
+	Metrics     map[string]float64   `json:"metrics,omitempty"`
+}
+
 type strategyMarket struct {
 	prices  map[string]float64
 	history map[string][]float64
@@ -700,6 +717,228 @@ func (a *App) toolStrategyBacktestCreate(ctx *sdk.AppCtx, args map[string]any) (
 	return map[string]any{"backtest": run}, nil
 }
 
+func (a *App) toolStrategyValidateBacktest(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	result, err := a.createStrategyValidation(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"validation": result}, nil
+}
+
+func (a *App) createStrategyValidation(ctx *sdk.AppCtx, args map[string]any) (*StrategyValidationResult, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	portfolioID := int64Arg(args, "portfolio_id", 0)
+	strategyID := int64Arg(args, "strategy_id", 0)
+	if portfolioID <= 0 || strategyID <= 0 {
+		return nil, errors.New("portfolio_id and strategy_id required")
+	}
+	pf, err := dbGetPortfolio(ctx.AppDB(), pid, portfolioID)
+	if err != nil {
+		return nil, err
+	}
+	strategy, err := dbGetStrategy(ctx.AppDB(), pid, strategyID)
+	if err != nil {
+		return nil, err
+	}
+	def, _, err := validateStrategyDefinition(strategy.Definition)
+	if err != nil {
+		return nil, err
+	}
+	interval, err := normalizeBacktestInterval(strArg(args, "interval"))
+	if err != nil {
+		return nil, err
+	}
+	startAt, endAt := defaultBacktestRange(strArg(args, "start_at"), strArg(args, "end_at"))
+	marketBars, steps, marketSource, err := captureBacktestMarketBars(def.Universe, interval, startAt, endAt)
+	if err != nil {
+		return nil, err
+	}
+	splitPct := floatArg(args, "split_pct", 0.7)
+	if splitPct <= 0 {
+		splitPct = 0.7
+	}
+	if splitPct >= 1 {
+		return nil, errors.New("split_pct must be between 0 and 1")
+	}
+	trainSteps := int(math.Floor(float64(steps) * splitPct))
+	testSteps := steps - trainSteps
+	if trainSteps < 2 || testSteps < 2 {
+		return nil, fmt.Errorf("validation needs at least 2 train and 2 test steps; got %d/%d", trainSteps, testSteps)
+	}
+	startingCash := floatArg(args, "starting_cash", 0)
+	if startingCash <= 0 {
+		startingCash = pf.StartingCash
+	}
+	name := strArg(args, "name")
+	if name == "" {
+		name = fmt.Sprintf("%s validation", strategy.Name)
+	}
+	feeBps := floatArg(args, "fee_bps", 0)
+	slippageBps := floatArg(args, "slippage_bps", defaultSlippageBps)
+	train, err := a.createCompletedStrategyValidationRun(ctx, pf, strategy, def, strategyValidationRunSpec{
+		Label:        "in_sample",
+		Name:         name + " · in sample",
+		Interval:     interval,
+		StartingCash: startingCash,
+		FeeBps:       feeBps,
+		SlippageBps:  slippageBps,
+		MarketSource: marketSource,
+		Bars:         reindexBacktestMarketBars(marketBars, 1, trainSteps),
+	})
+	if err != nil {
+		return nil, err
+	}
+	test, err := a.createCompletedStrategyValidationRun(ctx, pf, strategy, def, strategyValidationRunSpec{
+		Label:        "out_of_sample",
+		Name:         name + " · out of sample",
+		Interval:     interval,
+		StartingCash: startingCash,
+		FeeBps:       feeBps,
+		SlippageBps:  slippageBps,
+		MarketSource: marketSource,
+		Bars:         reindexBacktestMarketBars(marketBars, trainSteps+1, steps),
+	})
+	if err != nil {
+		return nil, err
+	}
+	result := &StrategyValidationResult{
+		StrategyID:      strategy.ID,
+		StrategyVersion: strategy.Version,
+		SplitPct:        splitPct,
+		MarketSource:    marketSource,
+		Train:           train,
+		Test:            test,
+	}
+	result.Verdict = strategyValidationVerdict(train.Metrics, test.Metrics)
+	return result, nil
+}
+
+type strategyValidationRunSpec struct {
+	Label        string
+	Name         string
+	Interval     string
+	StartingCash float64
+	FeeBps       float64
+	SlippageBps  float64
+	MarketSource string
+	Bars         []*BacktestMarketBar
+}
+
+func (a *App) createCompletedStrategyValidationRun(ctx *sdk.AppCtx, pf *Portfolio, strategy *Strategy, def *StrategyDefinition, spec strategyValidationRunSpec) (*StrategyValidationPeriod, error) {
+	if len(spec.Bars) == 0 {
+		return nil, fmt.Errorf("%s validation period has no market bars", spec.Label)
+	}
+	startAt, endAt := marketBarDateRange(spec.Bars)
+	steps := maxBacktestMarketStep(spec.Bars)
+	id, err := dbCreateBacktestRun(ctx.AppDB(), &BacktestRun{
+		ProjectID:       pf.ProjectID,
+		PortfolioID:     pf.ID,
+		StrategyID:      strategy.ID,
+		RunKind:         "strategy",
+		StrategyVersion: strategy.Version,
+		Name:            spec.Name,
+		Status:          "queued",
+		Symbols:         def.Universe,
+		StartAt:         startAt,
+		EndAt:           endAt,
+		Interval:        spec.Interval,
+		StartingCash:    spec.StartingCash,
+		FeeBps:          spec.FeeBps,
+		SlippageBps:     spec.SlippageBps,
+		TotalSteps:      steps,
+		Summary: map[string]any{
+			"portfolio_name":    pf.Name,
+			"strategy_name":     strategy.Name,
+			"market_source":     spec.MarketSource,
+			"validation_period": spec.Label,
+		},
+	})
+	if err != nil {
+		return nil, err
+	}
+	if err := dbReplaceBacktestMarketBars(ctx.AppDB(), id, spec.Bars); err != nil {
+		_ = dbSetBacktestStatus(ctx.AppDB(), id, "failed", err.Error())
+		return nil, err
+	}
+	run, err := dbGetBacktestRun(ctx.AppDB(), pf.ProjectID, id)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := runStrategyBacktestToEnd(run); err != nil {
+		_ = dbSetBacktestStatus(ctx.AppDB(), id, "failed", err.Error())
+		return nil, err
+	}
+	run, err = dbGetBacktestRun(ctx.AppDB(), pf.ProjectID, id)
+	if err != nil {
+		return nil, err
+	}
+	perf, err := backtestPerformance(run)
+	if err != nil {
+		return nil, err
+	}
+	_, _ = dbInsertBacktestEvent(ctx.AppDB(), id, "validation", fmt.Sprintf("%s validation completed", spec.Label), map[string]any{"period": spec.Label})
+	return &StrategyValidationPeriod{Label: spec.Label, Run: run, Performance: perf, Metrics: perf.Metrics}, nil
+}
+
+func reindexBacktestMarketBars(rows []*BacktestMarketBar, fromStep, toStep int) []*BacktestMarketBar {
+	out := []*BacktestMarketBar{}
+	for _, row := range rows {
+		if row == nil || row.Step < fromStep || row.Step > toStep {
+			continue
+		}
+		cp := *row
+		cp.Step = row.Step - fromStep + 1
+		out = append(out, &cp)
+	}
+	return out
+}
+
+func marketBarDateRange(rows []*BacktestMarketBar) (string, string) {
+	var minT, maxT int64
+	for _, row := range rows {
+		if row == nil || row.T <= 0 {
+			continue
+		}
+		if minT == 0 || row.T < minT {
+			minT = row.T
+		}
+		if row.T > maxT {
+			maxT = row.T
+		}
+	}
+	if minT == 0 {
+		today := time.Now().UTC().Format("2006-01-02")
+		return today, today
+	}
+	return time.Unix(minT, 0).UTC().Format("2006-01-02"), time.Unix(maxT, 0).UTC().Format("2006-01-02")
+}
+
+func maxBacktestMarketStep(rows []*BacktestMarketBar) int {
+	maxStep := 0
+	for _, row := range rows {
+		if row != nil && row.Step > maxStep {
+			maxStep = row.Step
+		}
+	}
+	return maxStep
+}
+
+func strategyValidationVerdict(train, test map[string]float64) string {
+	testReturn := test["return_pct"]
+	testSharpe, hasTestSharpe := test["sharpe_ratio"]
+	if testReturn > 0 && (!hasTestSharpe || testSharpe > 0) {
+		return "pass"
+	}
+	trainReturn := train["return_pct"]
+	if trainReturn > 0 && testReturn <= 0 {
+		return "overfit_risk"
+	}
+	return "fail"
+}
+
 // ─── Strategy REST handlers ────────────────────────────────────────
 
 func (a *App) handleHTTPStrategies(w http.ResponseWriter, r *http.Request) {
@@ -796,6 +1035,40 @@ func (a *App) handleHTTPStrategies(w http.ResponseWriter, r *http.Request) {
 		httpJSON(w, 200, out)
 	case action == "evaluate" && r.Method == http.MethodPost:
 		out, err := a.toolStrategyEvaluate(globalCtx, map[string]any{"_project_id": pid, "strategy_id": id})
+		if err != nil {
+			httpErr(w, 400, err.Error())
+			return
+		}
+		httpJSON(w, 200, out)
+	case action == "validate" && r.Method == http.MethodPost:
+		var body struct {
+			PortfolioID  int64   `json:"portfolio_id"`
+			Name         string  `json:"name"`
+			StartAt      string  `json:"start_at"`
+			EndAt        string  `json:"end_at"`
+			Interval     string  `json:"interval"`
+			SplitPct     float64 `json:"split_pct"`
+			StartingCash float64 `json:"starting_cash"`
+			FeeBps       float64 `json:"fee_bps"`
+			SlippageBps  float64 `json:"slippage_bps"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+			httpErr(w, 400, err.Error())
+			return
+		}
+		out, err := a.toolStrategyValidateBacktest(globalCtx, map[string]any{
+			"_project_id":   pid,
+			"strategy_id":   id,
+			"portfolio_id":  body.PortfolioID,
+			"name":          body.Name,
+			"start_at":      body.StartAt,
+			"end_at":        body.EndAt,
+			"interval":      body.Interval,
+			"split_pct":     body.SplitPct,
+			"starting_cash": body.StartingCash,
+			"fee_bps":       body.FeeBps,
+			"slippage_bps":  body.SlippageBps,
+		})
 		if err != nil {
 			httpErr(w, 400, err.Error())
 			return

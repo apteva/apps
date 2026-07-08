@@ -226,6 +226,21 @@ func (a *App) MCPTools() []sdk.Tool {
 			}, []string{"portfolio_id", "strategy_id"}),
 			Handler: a.toolStrategyBacktestCreate},
 
+		{Name: "strategy_validate_backtest", Description: "Run fixed-parameter strategy validation with in-sample and out-of-sample backtests.",
+			InputSchema: schemaObject(map[string]any{
+				"portfolio_id":  map[string]any{"type": "integer"},
+				"strategy_id":   map[string]any{"type": "integer"},
+				"name":          map[string]any{"type": "string"},
+				"start_at":      map[string]any{"type": "string"},
+				"end_at":        map[string]any{"type": "string"},
+				"interval":      map[string]any{"type": "string"},
+				"split_pct":     map[string]any{"type": "number"},
+				"starting_cash": map[string]any{"type": "number"},
+				"fee_bps":       map[string]any{"type": "number"},
+				"slippage_bps":  map[string]any{"type": "number"},
+			}, []string{"portfolio_id", "strategy_id"}),
+			Handler: a.toolStrategyValidateBacktest},
+
 		{Name: "backtest_market_step", Description: "Internal runner tool: load replay prices into an isolated backtest environment.",
 			InputSchema: schemaObject(map[string]any{
 				"portfolio_id": map[string]any{"type": "integer"},

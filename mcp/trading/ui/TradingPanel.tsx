@@ -334,6 +334,21 @@ interface StrategyEvaluation {
   decisions: string[];
   warnings?: string[];
 }
+interface StrategyValidationPeriod {
+  label: string;
+  run: BacktestRun;
+  performance?: BacktestPerformance;
+  metrics?: Record<string, number>;
+}
+interface StrategyValidation {
+  strategy_id: number;
+  strategy_version: number;
+  split_pct: number;
+  market_source: string;
+  train: StrategyValidationPeriod;
+  test: StrategyValidationPeriod;
+  verdict: string;
+}
 interface BacktestRun {
   id: number;
   portfolio_id: number;
@@ -2517,6 +2532,7 @@ function StrategiesTab({ portfolio, api, setError }: {
   const [description, setDescription] = useState("");
   const [definitionText, setDefinitionText] = useState("");
   const [evaluation, setEvaluation] = useState<StrategyEvaluation | null>(null);
+  const [validation, setValidation] = useState<StrategyValidation | null>(null);
   const [busy, setBusy] = useState(false);
 
   const load = useCallback(async () => {
@@ -2552,6 +2568,7 @@ function StrategiesTab({ portfolio, api, setError }: {
       });
       setSelectedId(r.strategy.id);
       setEvaluation(null);
+      setValidation(null);
       await load();
     } catch (e) { setError((e as Error).message); }
     finally { setBusy(false); }
@@ -2562,6 +2579,7 @@ function StrategiesTab({ portfolio, api, setError }: {
     try {
       const r = await api<{ evaluation: StrategyEvaluation }>("POST", `/strategies/${strategy.id}/evaluate`);
       setEvaluation(r.evaluation);
+      setValidation(null);
     } catch (e) { setError((e as Error).message); }
     finally { setBusy(false); }
   };
@@ -2575,6 +2593,28 @@ function StrategiesTab({ portfolio, api, setError }: {
         control_mode: "strategy",
         cadence: strategy.definition?.cadence || "1d",
       });
+      setError(null);
+    } catch (e) { setError((e as Error).message); }
+    finally { setBusy(false); }
+  };
+
+  const validate = async (strategy: Strategy) => {
+    if (!portfolio) return;
+    setBusy(true);
+    try {
+      const r = await api<{ validation: StrategyValidation }>("POST", `/strategies/${strategy.id}/validate`, undefined, {
+        portfolio_id: portfolio.id,
+        name: `${strategy.name} validation`,
+        start_at: defaultDate(-90),
+        end_at: defaultDate(0),
+        interval: strategy.definition?.cadence || "1d",
+        split_pct: 0.7,
+        starting_cash: portfolio.starting_cash || portfolio.cash || 100000,
+        fee_bps: 1,
+        slippage_bps: 5,
+      });
+      setValidation(r.validation);
+      setEvaluation(null);
       setError(null);
     } catch (e) { setError((e as Error).message); }
     finally { setBusy(false); }
@@ -2638,6 +2678,9 @@ function StrategiesTab({ portfolio, api, setError }: {
             <button disabled={busy} onClick={() => createBacktest(selected)} className="px-2 py-1 text-xs rounded border border-border text-text-muted hover:bg-bg-hover disabled:opacity-50">
               Backtest
             </button>
+            <button disabled={busy} onClick={() => validate(selected)} className="px-2 py-1 text-xs rounded border border-border text-text-muted hover:bg-bg-hover disabled:opacity-50">
+              Validate
+            </button>
           </div>
         )}
       </Section>
@@ -2671,9 +2714,9 @@ function StrategiesTab({ portfolio, api, setError }: {
         </Section>
 
         <Section title="Evaluation">
-          {!evaluation ? (
-            <EmptyState title="No evaluation" hint="Select a saved strategy and evaluate it." />
-          ) : (
+          {validation ? (
+            <StrategyValidationPanel validation={validation} />
+          ) : evaluation ? (
             <div className="grid gap-3">
               <div className="grid gap-2" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))" }}>
                 {evaluation.target_allocations.length === 0 ? (
@@ -2692,8 +2735,51 @@ function StrategiesTab({ portfolio, api, setError }: {
                 <div className="text-xs text-amber">{evaluation.warnings.join(" · ")}</div>
               )}
             </div>
+          ) : (
+            <EmptyState title="No evaluation" hint="Select a saved strategy and evaluate or validate it." />
           )}
         </Section>
+      </div>
+    </div>
+  );
+}
+
+function StrategyValidationPanel({ validation }: { validation: StrategyValidation }) {
+  return (
+    <div className="grid gap-3">
+      <div className="flex flex-wrap items-center gap-2 text-xs">
+        <span className={`px-2 py-0.5 rounded font-semibold uppercase tracking-wide ${validation.verdict === "pass" ? "bg-green/10 text-green" : validation.verdict === "overfit_risk" ? "bg-amber/10 text-amber" : "bg-red/10 text-red"}`}>
+          {validation.verdict.replace(/_/g, " ")}
+        </span>
+        <span className="text-text-dim">
+          {Math.round(validation.split_pct * 100)}% in sample · {Math.round((1 - validation.split_pct) * 100)}% out of sample
+        </span>
+        <span className="text-text-dim">{validation.market_source}</span>
+      </div>
+      <div className="grid gap-2" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(210px, 1fr))" }}>
+        <StrategyValidationPeriodCard title="In sample" period={validation.train} />
+        <StrategyValidationPeriodCard title="Out of sample" period={validation.test} />
+      </div>
+    </div>
+  );
+}
+
+function StrategyValidationPeriodCard({ title, period }: { title: string; period: StrategyValidationPeriod }) {
+  const metrics = period.metrics || period.performance?.metrics || {};
+  return (
+    <div className="rounded border border-border bg-bg-input p-3">
+      <div className="flex items-center gap-2 mb-2">
+        <div className="text-xs font-semibold uppercase tracking-wide text-text-dim">{title}</div>
+        <span className="ml-auto text-xs text-text-dim">run #{period.run.id}</span>
+      </div>
+      <div className="grid grid-cols-2 gap-2 text-xs">
+        <Metric label="Return" value={formatPct(metrics.return_pct)} colorClass={pnlClass(metrics.return_pct)} />
+        <Metric label="Sharpe" value={formatRatio(metrics.sharpe_ratio)} colorClass={pnlClass(metrics.sharpe_ratio)} />
+        <Metric label="Max DD" value={formatPct(metrics.max_drawdown_pct)} colorClass={pnlClass(metrics.max_drawdown_pct)} />
+        <Metric label="Equity" value={formatUSD(metrics.equity ?? period.run.starting_cash)} />
+      </div>
+      <div className="mt-2 text-xs text-text-dim">
+        {period.run.start_at} to {period.run.end_at} · {period.run.current_step}/{period.run.total_steps}
       </div>
     </div>
   );

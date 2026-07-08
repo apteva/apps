@@ -228,6 +228,88 @@ func TestStrategyBacktestRunMatchesManualSteps(t *testing.T) {
 	}
 }
 
+func TestStrategyValidationCreatesOutOfSampleRuns(t *testing.T) {
+	ctx := newTestCtx(t)
+	pid := mustCreatePortfolio(t, ctx, "Strategy Validation", []string{"crypto"})
+	pf, err := dbGetPortfolio(ctx.AppDB(), "test-proj", pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	strategyID, err := dbCreateStrategy(ctx.AppDB(), &Strategy{
+		ProjectID: "test-proj",
+		Name:      "Validation momentum",
+		Status:    "active",
+		Definition: map[string]any{
+			"universe": []any{"BTC-USD", "ETH-USD"},
+			"rules": []any{
+				map[string]any{
+					"name": "top one",
+					"rank": map[string]any{
+						"symbols": []any{"BTC-USD", "ETH-USD"},
+						"by":      "return_3",
+						"top":     float64(1),
+					},
+				},
+			},
+		},
+		Version: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	strategy, err := dbGetStrategy(ctx.AppDB(), "test-proj", strategyID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	def, _, err := validateStrategyDefinition(strategy.Definition)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bars := validationFixtureBars(def.Universe, 30)
+	app := &App{}
+	train, err := app.createCompletedStrategyValidationRun(ctx, pf, strategy, def, strategyValidationRunSpec{
+		Label:        "in_sample",
+		Name:         "validation train",
+		Interval:     "1d",
+		StartingCash: 100000,
+		FeeBps:       1,
+		SlippageBps:  5,
+		MarketSource: "fixture",
+		Bars:         reindexBacktestMarketBars(bars, 1, 21),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	test, err := app.createCompletedStrategyValidationRun(ctx, pf, strategy, def, strategyValidationRunSpec{
+		Label:        "out_of_sample",
+		Name:         "validation test",
+		Interval:     "1d",
+		StartingCash: 100000,
+		FeeBps:       1,
+		SlippageBps:  5,
+		MarketSource: "fixture",
+		Bars:         reindexBacktestMarketBars(bars, 22, 30),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if train.Run.Status != "completed" || test.Run.Status != "completed" {
+		t.Fatalf("statuses train/test=%s/%s, want completed/completed", train.Run.Status, test.Run.Status)
+	}
+	if train.Run.ID == test.Run.ID {
+		t.Fatal("train and test should be separate backtest runs")
+	}
+	if train.Metrics["return_pct"] == 0 || test.Metrics["return_pct"] == 0 {
+		t.Fatalf("missing validation returns: train=%v test=%v", train.Metrics["return_pct"], test.Metrics["return_pct"])
+	}
+	if train.Metrics["sharpe_ratio"] == 0 || test.Metrics["sharpe_ratio"] == 0 {
+		t.Fatalf("missing validation Sharpe: train=%v test=%v", train.Metrics["sharpe_ratio"], test.Metrics["sharpe_ratio"])
+	}
+	if verdict := strategyValidationVerdict(train.Metrics, test.Metrics); verdict == "" {
+		t.Fatal("missing validation verdict")
+	}
+}
+
 func mustCreateStrategyBacktestRun(t *testing.T, ctx *sdk.AppCtx, portfolioID, strategyID int64, name string) *BacktestRun {
 	t.Helper()
 	id, err := dbCreateBacktestRun(ctx.AppDB(), &BacktestRun{
@@ -275,6 +357,24 @@ func assertClose(t *testing.T, label string, got, want float64) {
 	if math.Abs(got-want) > 0.0001 {
 		t.Fatalf("%s=%v, want %v", label, got, want)
 	}
+}
+
+func validationFixtureBars(symbols []string, steps int) []*BacktestMarketBar {
+	rows := []*BacktestMarketBar{}
+	for step := 1; step <= steps; step++ {
+		for i, symbol := range symbols {
+			base := 100.0 + float64(i*20)
+			trend := 1.0 + float64(i)*0.4
+			close := base + float64(step)*trend + math.Sin(float64(step))*0.5
+			rows = append(rows, &BacktestMarketBar{
+				Step: step, Symbol: symbol, AssetClass: inferAssetClass(symbol),
+				T: int64(1704067200 + step*86400),
+				O: close * 0.999, H: close * 1.002, L: close * 0.998, C: close, V: 1000,
+				Source: "fixture",
+			})
+		}
+	}
+	return rows
 }
 
 func seedBacktestMarketBars(t *testing.T, ctx *sdk.AppCtx, runID int64, symbols []string, steps int) {

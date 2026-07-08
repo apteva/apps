@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: trading
 display_name: Trading
-version: 0.4.29
+version: 0.4.30
 description: |
   Trading desk for Apteva agents. Multi-portfolio, multi-asset (equity,
   etf, crypto, polymarket prediction markets). Each portfolio runs in
@@ -138,6 +138,8 @@ provides:
       description: "Assign a saved strategy to a portfolio for strategy or hybrid control."
     - name: strategy_backtest_create
       description: "Create a deterministic strategy backtest using the existing backtest tables."
+    - name: strategy_validate_backtest
+      description: "Run fixed-parameter strategy validation with in-sample and out-of-sample backtests."
     - name: backtest_market_step
       description: "Internal backtest runner tool: load replay prices into an isolated environment."
   # Same shape as crm + storage: a panel mounted in the dashboard's

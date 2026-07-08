@@ -43,7 +43,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: trading
 display_name: Trading
-version: 0.4.25
+version: 0.4.30
 description: Trading desk for Apteva agents (paper + live via per-portfolio broker integration).
 author: Apteva
 scopes: [project, global]
@@ -140,6 +140,8 @@ provides:
       description: "Assign a saved strategy to a portfolio."
     - name: strategy_backtest_create
       description: "Create a deterministic strategy backtest."
+    - name: strategy_validate_backtest
+      description: "Run fixed-parameter strategy validation with in-sample and out-of-sample backtests."
     - name: backtest_market_step
       description: "Internal backtest runner tool: load replay prices into an isolated environment."
   ui_panels:
