@@ -416,6 +416,10 @@ function formatPct(n: number | undefined | null, digits = 2): string {
   const sign = n > 0 ? "+" : "";
   return `${sign}${n.toFixed(digits)}%`;
 }
+function formatRatio(n: number | undefined | null, digits = 2): string {
+  if (n == null || !isFinite(n)) return "—";
+  return n.toFixed(digits);
+}
 function formatQty(n: number | undefined | null, digits = 4): string {
   if (n == null || !isFinite(n)) return "—";
   if (Math.abs(n) >= 100) return n.toFixed(2);
@@ -3164,6 +3168,7 @@ function BacktestPerformancePanel({ run, performance }: {
           <Metric label="P&L" value={formatUSD(pnl)} sub={formatPct(ret)} colorClass={pnlClass(pnl)} />
           <Metric label="Cash" value={formatUSD(metrics.cash ?? current?.cash)} />
           <Metric label="Max DD" value={formatPct(metrics.max_drawdown_pct)} colorClass={pnlClass(metrics.max_drawdown_pct)} />
+          <Metric label="Sharpe" value={formatRatio(metrics.sharpe_ratio)} colorClass={pnlClass(metrics.sharpe_ratio)} />
           <Metric label="Open P&L" value={formatUSD(metrics.open_pnl)} sub={formatPct(metrics.open_pnl_pct)} colorClass={pnlClass(metrics.open_pnl)} />
           <Metric label="Exposure" value={formatPct(metrics.exposure)} />
           <Metric label="Positions" value={String(positions.length)} />

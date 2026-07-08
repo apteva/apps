@@ -70,6 +70,13 @@ func TestBacktestSnapshots_UpsertAndMetrics(t *testing.T) {
 	if metrics["max_drawdown_pct"] >= -2.45 || metrics["max_drawdown_pct"] <= -2.46 {
 		t.Fatalf("max_drawdown_pct=%v, want about -2.45", metrics["max_drawdown_pct"])
 	}
+	sharpe, ok := metrics["sharpe_ratio"]
+	if !ok {
+		t.Fatal("missing sharpe_ratio")
+	}
+	if math.Abs(sharpe+1.3688) > 0.0001 {
+		t.Fatalf("sharpe_ratio=%v, want about -1.3688", sharpe)
+	}
 }
 
 func TestBacktestPerformance_RepricesPositionsFromReplayMarks(t *testing.T) {

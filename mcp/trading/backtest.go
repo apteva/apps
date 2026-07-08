@@ -958,7 +958,59 @@ func backtestPerformanceMetrics(run *BacktestRun, series []*BacktestSnapshot, cu
 		}
 	}
 	metrics["max_drawdown_pct"] = maxDD
+	if sharpe, ok := backtestSharpeRatio(series, run.Interval); ok {
+		metrics["sharpe_ratio"] = sharpe
+	}
 	return metrics
+}
+
+func backtestSharpeRatio(series []*BacktestSnapshot, interval string) (float64, bool) {
+	returns := make([]float64, 0, len(series)-1)
+	var prev float64
+	for _, point := range series {
+		if point == nil || point.Equity <= 0 {
+			continue
+		}
+		if prev > 0 {
+			returns = append(returns, point.Equity/prev-1)
+		}
+		prev = point.Equity
+	}
+	if len(returns) < 2 {
+		return 0, false
+	}
+	mean := 0.0
+	for _, r := range returns {
+		mean += r
+	}
+	mean /= float64(len(returns))
+	variance := 0.0
+	for _, r := range returns {
+		d := r - mean
+		variance += d * d
+	}
+	variance /= float64(len(returns) - 1)
+	if variance <= 0 {
+		return 0, false
+	}
+	return mean / math.Sqrt(variance) * math.Sqrt(backtestPeriodsPerYear(interval)), true
+}
+
+func backtestPeriodsPerYear(interval string) float64 {
+	switch strings.ToLower(strings.TrimSpace(interval)) {
+	case "5m":
+		return 365 * 24 * 12
+	case "15m":
+		return 365 * 24 * 4
+	case "1h":
+		return 365 * 24
+	case "4h":
+		return 365 * 6
+	case "1w":
+		return 365.0 / 7.0
+	default:
+		return 365
+	}
 }
 
 func backtestSummaryPrices(run *BacktestRun) []map[string]any {
