@@ -1,0 +1,79 @@
+schema: apteva-app/v1
+
+name: recipes
+display_name: Recipes
+version: 0.1.0
+description: |
+  Recipe library, nutrition estimates, meal planning, and pantry-aware
+  shopping lists. Agents can create structured recipes, scale servings,
+  estimate macros, plan meals, generate merged shopping lists, and suggest
+  meals from available ingredients.
+
+author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/recipes
+icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/recipes/icon.svg
+tags: [recipes, nutrition, meal-planning, food, cooking]
+
+scopes: [project, global]
+min_apteva_version: "0.10.0"
+
+requires:
+  permissions:
+    - db.write.app
+    - platform.apps.call
+  integrations:
+    - role: pantry
+      kind: app
+      compatible_app_names: [pantry]
+      capabilities: [inventory.read]
+      required: false
+      label: "Pantry (optional)"
+      hint: "When bound or installed, Recipes can subtract pantry stock from shopping lists and suggest meals from available ingredients."
+
+provides:
+  http_routes:
+    - prefix: /
+  mcp_tools:
+    - name: recipes_create
+      description: Create a structured recipe with ingredients, steps, tags, and optional nutrition overrides.
+    - name: recipes_update
+      description: Patch a recipe. Ingredients, steps, and tags are replaced when supplied.
+    - name: recipes_get
+      description: Fetch one recipe with ingredients, steps, tags, and nutrition.
+    - name: recipes_search
+      description: Search recipes by title, ingredient, tag, cuisine, meal_type, or max_total_minutes.
+    - name: recipes_archive
+      description: Archive a recipe.
+    - name: recipes_scale
+      description: Scale a recipe to a target serving count.
+    - name: recipes_estimate_nutrition
+      description: Estimate nutrition for a recipe_id or ad-hoc ingredients.
+    - name: recipes_meal_plan_add
+      description: Add a recipe to the meal plan. Args date, slot, recipe_id, servings, notes.
+    - name: recipes_meal_plan_list
+      description: List meal plan entries between from and to dates.
+    - name: recipes_shopping_list
+      description: Generate a merged shopping list from recipe_ids or a meal-plan window; optionally subtract pantry stock.
+    - name: recipes_suggest_from_ingredients
+      description: Rank recipes by matching available ingredient names.
+  ui_panels:
+    - slot: project.page
+      label: Recipes
+      icon: chef-hat
+      entry: /ui/RecipesPanel.mjs
+
+runtime:
+  kind: source
+  source:
+    repo: github.com/apteva/apps
+    ref: main
+    entry: mcp/recipes
+  port: 8080
+  health_check: /health
+
+db:
+  driver: sqlite
+  path: /data/recipes.db
+  migrations: migrations/
+
+upgrade_policy: auto-patch
