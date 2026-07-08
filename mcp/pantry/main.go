@@ -25,7 +25,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: pantry
 display_name: Pantry
-version: 0.2.0
+version: 0.2.1
 description: Food inventory for pantry, fridge, and freezer.
 author: Apteva
 scopes: [project, global]
@@ -142,7 +142,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "pantry_locations_create", Description: "Create a location. Args: name, kind?.", InputSchema: schemaObject(map[string]any{"name": typ("string"), "kind": typ("string")}, []string{"name"}), Handler: a.toolLocationsCreate},
 		{Name: "pantry_expiring", Description: "Lots expiring soon. Args: days? default 14, limit?.", InputSchema: schemaObject(map[string]any{"days": typ("integer"), "limit": typ("integer")}, nil), Handler: a.toolExpiring},
 		{Name: "pantry_low_stock", Description: "Items at or below min_quantity.", InputSchema: schemaObject(map[string]any{}, nil), Handler: a.toolLowStock},
-		{Name: "pantry_shopping_items_create", Description: "Create a manual shopping-list item. Args: name, quantity?, unit?, category?, store?, notes?, item_id?, source?. Does not create pantry stock.", InputSchema: schemaObject(shoppingItemProps(), []string{"name"}), Handler: a.toolShoppingItemsCreate},
+		{Name: "pantry_shopping_items_create", Description: "Create a manual shopping-list item. Args: name, quantity?, unit?, category?, store?, notes?, item_id?, create_item? (default true), source?. Creates/links an item definition by default but never creates pantry stock. Pass create_item=false for one-off purchases.", InputSchema: schemaObject(shoppingItemProps(), []string{"name"}), Handler: a.toolShoppingItemsCreate},
 		{Name: "pantry_shopping_items_list", Description: "List manual shopping-list items. Args: status? (open|checked|dismissed|purchased|all; default open), limit?.", InputSchema: schemaObject(map[string]any{"status": typ("string"), "limit": typ("integer")}, nil), Handler: a.toolShoppingItemsList},
 		{Name: "pantry_shopping_items_update", Description: "Patch a manual shopping-list item. Args: id, patch.", InputSchema: schemaObject(map[string]any{"id": typ("integer"), "patch": typ("object")}, []string{"id", "patch"}), Handler: a.toolShoppingItemsUpdate},
 		{Name: "pantry_shopping_items_check", Description: "Mark a shopping-list item checked or open. Args: id, checked? default true.", InputSchema: schemaObject(map[string]any{"id": typ("integer"), "checked": typ("boolean")}, []string{"id"}), Handler: a.toolShoppingItemsCheck},
@@ -851,6 +851,16 @@ func createShoppingItem(db *sql.DB, pid string, in map[string]any) (*ShoppingIte
 		if unit == "each" && item.DefaultUnit != "" {
 			unit = item.DefaultUnit
 		}
+	} else if boolArg(in, "create_item", true) {
+		item, err := createItem(db, pid, map[string]any{
+			"name":         name,
+			"default_unit": unit,
+			"category":     strings.TrimSpace(strArg(in, "category", "")),
+		})
+		if err != nil {
+			return nil, err
+		}
+		itemID = item.ID
 	}
 	source := normaliseShoppingSource(strArg(in, "source", "manual"))
 	status := normaliseShoppingStatus(strArg(in, "status", "open"))
@@ -1611,15 +1621,16 @@ func stockAddProps() map[string]any {
 
 func shoppingItemProps() map[string]any {
 	return map[string]any{
-		"item_id":  typ("integer"),
-		"name":     typ("string"),
-		"quantity": typ("number"),
-		"unit":     typ("string"),
-		"category": typ("string"),
-		"store":    typ("string"),
-		"source":   typ("string"),
-		"status":   typ("string"),
-		"notes":    typ("string"),
+		"item_id":     typ("integer"),
+		"name":        typ("string"),
+		"quantity":    typ("number"),
+		"unit":        typ("string"),
+		"category":    typ("string"),
+		"store":       typ("string"),
+		"source":      typ("string"),
+		"status":      typ("string"),
+		"notes":       typ("string"),
+		"create_item": typ("boolean"),
 	}
 }
 

@@ -102,7 +102,7 @@ func TestLowStockShoppingListUsesTargetQuantity(t *testing.T) {
 	}
 }
 
-func TestManualShoppingItemsDoNotCreateInventory(t *testing.T) {
+func TestManualShoppingItemCreatesItemDefinitionButNoStock(t *testing.T) {
 	db := openTestDB(t)
 	const pid = "project-test"
 
@@ -116,16 +116,23 @@ func TestManualShoppingItemsDoNotCreateInventory(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if row.ItemID != nil {
-		t.Fatalf("manual row linked item_id = %v, want nil for unknown item", *row.ItemID)
+	if row.ItemID == nil {
+		t.Fatal("manual row did not link a created pantry item")
 	}
 
 	items, err := listItems(db, pid, "", "", true, 20, "", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(items) != 0 {
-		t.Fatalf("manual shopping row created %d pantry items, want 0", len(items))
+	if len(items) != 1 || items[0].Name != "Basil" {
+		t.Fatalf("pantry items = %#v, want Basil definition", items)
+	}
+	lots, err := listLots(db, pid, map[string]any{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(lots) != 0 {
+		t.Fatalf("manual shopping row created %d stock lots, want 0", len(lots))
 	}
 
 	list, err := shoppingList(db, pid)
@@ -144,6 +151,30 @@ func TestManualShoppingItemsDoNotCreateInventory(t *testing.T) {
 	}
 	if len(open) != 0 {
 		t.Fatalf("open items after check = %d, want 0", len(open))
+	}
+}
+
+func TestManualShoppingItemCanSkipItemDefinition(t *testing.T) {
+	db := openTestDB(t)
+	const pid = "project-test"
+	row, err := createShoppingItem(db, pid, map[string]any{
+		"name":        "Birthday candles",
+		"quantity":    1.0,
+		"unit":        "pack",
+		"create_item": false,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if row.ItemID != nil {
+		t.Fatalf("item link = %v, want nil", *row.ItemID)
+	}
+	items, err := listItems(db, pid, "", "", true, 20, "", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(items) != 0 {
+		t.Fatalf("pantry items = %d, want 0", len(items))
 	}
 }
 
