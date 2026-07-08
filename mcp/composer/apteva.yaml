@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: composer
 display_name: Composer
-version: 0.4.0
+version: 0.4.1
 description: |
   Multi-clip video composition. Stitch generated or uploaded assets
   into a single video — one visual track, timed audio tracks, optional
@@ -10,6 +10,10 @@ description: |
   default, on a render host via instances when render_host_id is
   set, or against a SaaS render backend (Shotstack et al) when one
   is bound to the render_executor role.
+
+  v0.4.1 keeps Composer V2 specs intact during render: the ffmpeg
+  compatibility timeline is now used only as a render snapshot, so scenes,
+  elements, and animation metadata are not overwritten by materialization.
 
   v0.4.0 introduces the Composer V2 JSON foundation: a renderer-neutral
   scene/asset/audio schema, validation tools, canonical examples for agents,
