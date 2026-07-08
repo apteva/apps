@@ -1337,6 +1337,44 @@ func TestV2ParsePreservesComponentField(t *testing.T) {
 	}
 }
 
+func TestV2PublicSurfaceDisabledByDefault(t *testing.T) {
+	t.Setenv("COMPOSER_V2_ENABLED", "0")
+	args := map[string]any{
+		"spec": map[string]any{
+			"version": "composer/v2",
+			"output":  map[string]any{"format": "mp4", "width": 640, "height": 360, "fps": 24},
+			"scenes": []any{
+				map[string]any{"duration": 1, "elements": []any{
+					map[string]any{"type": "text", "text": "Hidden"},
+				}},
+			},
+		},
+	}
+	_, _, _, _, ok, err := compositionPayloadFromV2Args(args)
+	if !ok {
+		t.Fatal("expected v2 payload to be detected")
+	}
+	if err == nil || !strings.Contains(err.Error(), "disabled") {
+		t.Fatalf("expected disabled error, got %v", err)
+	}
+	out, err := (&App{}).toolCompositionValidate(nil, args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	validation := out.(CompositionValidation)
+	if validation.Valid || validation.Renderer != "disabled" {
+		t.Fatalf("validation = %+v, want disabled invalid result", validation)
+	}
+	examplesOut, err := (&App{}).toolCompositionExamples(nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	examples := examplesOut.(map[string]any)["examples"].([]map[string]any)
+	if len(examples) != 0 {
+		t.Fatalf("public examples should be hidden, got %d", len(examples))
+	}
+}
+
 func TestV2NativeRenderShapeAndText(t *testing.T) {
 	if _, err := exec.LookPath(ffmpegPath()); err != nil {
 		t.Skip("ffmpeg not available")
@@ -1524,6 +1562,7 @@ func TestV2AudioOnlyConvertsToAudioTrack(t *testing.T) {
 }
 
 func TestV2SpecFromArgs(t *testing.T) {
+	t.Setenv("COMPOSER_V2_ENABLED", "1")
 	args := map[string]any{
 		"name": "V2 Example",
 		"spec": map[string]any{

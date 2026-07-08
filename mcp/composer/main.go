@@ -28,7 +28,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: composer
 display_name: Composer
-version: 0.5.4
+version: 0.5.5
 description: |
   Multi-clip video compositions with a structured timeline panel,
   universal generated-asset clip editing, first-class AI avatar clips,
@@ -58,11 +58,7 @@ description: |
   concatenation. Typewriter and word-by-word overlay presets render as real
   time-gated reveal steps instead of a full-text fade.
   Renders locally via ffmpeg, on a render host via instances, or against a
-  bound render_executor integration. Composer V2 also has an opt-in browser
-  renderer for high-polish HTML/CSS scene graphs, component elements,
-  browser/phone/laptop/task-list mockups, generic HTML components,
-  shadows/glow/blur/patterns, scene camera keyframes, and Chrome-captured
-  frames before the normal ffmpeg audio/encode stage.
+  bound render_executor integration.
 author: Apteva
 scopes: [project, global]
 requires:
@@ -140,16 +136,6 @@ config_schema:
     type: text
     default: "ffprobe"
     label: ffprobe binary
-  - name: browser_chrome_path
-    type: text
-    default: ""
-    label: Browser renderer Chrome binary
-    description: Optional Chrome/Chromium path for Composer V2 browser renders.
-  - name: browser_node_path
-    type: text
-    default: "node"
-    label: Browser renderer Node binary
-    description: Node.js binary used for Chrome DevTools frame capture when output.renderer is browser.
 upgrade_policy: auto-patch
 `
 
@@ -230,15 +216,15 @@ func browserChromePath() string {
 }
 
 func browserNodePath() string {
-	if globalCtx != nil {
-		if v := strings.TrimSpace(globalCtx.Config().Get("browser_node_path")); v != "" {
-			return v
-		}
-	}
 	if v := strings.TrimSpace(os.Getenv("NODE_BIN")); v != "" {
 		return v
 	}
 	return "node"
+}
+
+func composerV2Enabled() bool {
+	v := strings.ToLower(strings.TrimSpace(os.Getenv("COMPOSER_V2_ENABLED")))
+	return v == "1" || v == "true" || v == "yes" || v == "on"
 }
 
 // renderHostID reads the optional install-config field. When > 0,

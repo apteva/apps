@@ -21,14 +21,9 @@ func (a *App) MCPTools() []sdk.Tool {
 	return []sdk.Tool{
 		{
 			Name:        "composition_create",
-			Description: "Create a composition. Supports v1 args (name?, tracks, soundtrack?, output?) or composer/v2 args via spec:{version:'composer/v2', assets?, scenes? or tracks?, audio?, output?}. Existing v1 clips still support AI generation, source_images, audio tracks, overlays, and audio-only outputs. Returns {id, version, duration_seconds}.",
+			Description: "Create a V1 timeline composition. Args: name?, tracks, soundtrack?, background?, output?. Clips support AI generation, source_images, audio tracks, overlays, and audio-only outputs. Returns {id, version, duration_seconds}.",
 			InputSchema: schemaObject(map[string]any{
 				"name":       map[string]any{"type": "string"},
-				"spec":       map[string]any{"type": "object"},
-				"version":    map[string]any{"type": "string"},
-				"assets":     map[string]any{"type": "array"},
-				"scenes":     map[string]any{"type": "array"},
-				"audio":      map[string]any{"type": "array"},
 				"tracks":     map[string]any{"type": "array"},
 				"soundtrack": map[string]any{"type": "object"},
 				"background": map[string]any{"type": "string"},
@@ -38,7 +33,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "composition_update",
-			Description: "Patch a composition. Args: id, patch. For composer/v2, send patch.spec or a full composer/v2 payload; for v1, send subset of {name, tracks, soundtrack, background, output}.",
+			Description: "Patch a V1 composition. Args: id, patch. Send subset of {name, tracks, soundtrack, background, output}.",
 			InputSchema: schemaObject(map[string]any{
 				"id":    map[string]any{"type": "integer"},
 				"patch": map[string]any{"type": "object"},
@@ -47,7 +42,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "composition_validate",
-			Description: "Validate a composition before saving/rendering. Args: spec? (composer/v2 object) or edit_json? (string). Returns version, duration_seconds, renderer ('ffmpeg', 'native-v2', 'browser-v2', or 'web_required'), warnings, errors.",
+			Description: "Validate a V1 composition before saving/rendering. Args: edit_json? (string) or V1 fields. Returns version, duration_seconds, renderer ('ffmpeg'), warnings, errors.",
 			InputSchema: schemaObject(map[string]any{
 				"spec":      map[string]any{"type": "object"},
 				"edit_json": map[string]any{"type": "string"},
@@ -56,7 +51,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "composition_examples",
-			Description: "Return canonical composer/v2 example specs agents can adapt.",
+			Description: "Return composition examples agents can adapt. Experimental V2 examples are hidden in public installs.",
 			InputSchema: schemaObject(map[string]any{}, nil),
 			Handler:     a.toolCompositionExamples,
 		},

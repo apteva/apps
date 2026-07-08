@@ -109,6 +109,9 @@ func (a *App) toolCompositionUpdate(ctx *sdk.AppCtx, args map[string]any) (any, 
 		return nil, fmt.Errorf("load: %w", err)
 	}
 	currentIsV2 := isV2EditJSON(editJSON)
+	if currentIsV2 && !composerV2Enabled() {
+		return nil, errors.New("composer/v2 is disabled in this public release")
+	}
 	if v := strArg(patch, "name", ""); v != "" {
 		name = v
 	}
@@ -206,6 +209,9 @@ func compositionPayloadFromV2Args(args map[string]any) (editJSON string, outputJ
 	spec, isV2, err := v2SpecFromArgs(args)
 	if !isV2 {
 		return "", "", 0, "", false, nil
+	}
+	if !composerV2Enabled() {
+		return "", "", 0, composerV2Version, true, errors.New("composer/v2 is disabled in this public release")
 	}
 	if err != nil {
 		return "", "", 0, composerV2Version, true, err
@@ -390,10 +396,24 @@ func (a *App) toolCompositionValidate(ctx *sdk.AppCtx, args map[string]any) (any
 	} else {
 		return nil, errors.New("spec or edit_json required")
 	}
+	if isV2EditJSON(editJSON) && !composerV2Enabled() {
+		return CompositionValidation{
+			Valid:    false,
+			Version:  composerV2Version,
+			Renderer: "disabled",
+			Errors:   []string{"composer/v2 is disabled in this public release"},
+		}, nil
+	}
 	return validateCompositionJSON(editJSON), nil
 }
 
 func (a *App) toolCompositionExamples(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	if !composerV2Enabled() {
+		return map[string]any{
+			"examples": []map[string]any{},
+			"note":     "Experimental composer/v2 examples are hidden in this public release.",
+		}, nil
+	}
 	return map[string]any{"examples": composerV2Examples()}, nil
 }
 
@@ -477,6 +497,9 @@ func (a *App) toolCompositionRender(ctx *sdk.AppCtx, args map[string]any) (any, 
 	rawEditJSON := row["edit_json"].(string)
 	pid := row["project_id"].(string)
 	if isV2EditJSON(rawEditJSON) {
+		if !composerV2Enabled() {
+			return nil, errors.New("composer/v2 rendering is disabled in this public release")
+		}
 		if spec, specErr := parseV2CompositionJSON(rawEditJSON); specErr == nil {
 			output := v2OutputToOutput(spec.Output)
 			if output.Format == "mp4" && v2UseDirectRenderer(spec) {
@@ -1051,6 +1074,13 @@ func (a *App) handleValidate(w http.ResponseWriter, r *http.Request) {
 func (a *App) handleExamples(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "GET only", http.StatusMethodNotAllowed)
+		return
+	}
+	if !composerV2Enabled() {
+		jsonResp(w, map[string]any{
+			"examples": []map[string]any{},
+			"note":     "Experimental composer/v2 examples are hidden in this public release.",
+		})
 		return
 	}
 	jsonResp(w, map[string]any{"examples": composerV2Examples()})
