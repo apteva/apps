@@ -97,7 +97,6 @@ export default function PantryPanel({}: NativePanelProps) {
     unit: "each",
     category: "",
     store: "",
-    create_item: true,
   });
 
   const loadItems = useCallback(async () => {
@@ -251,17 +250,30 @@ export default function PantryPanel({}: NativePanelProps) {
   const submitShoppingItem = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!shoppingForm.name.trim()) return;
-    const res = await fetch(`${API}/shopping/items`, {
+    const itemRes = await fetch(`${API}/items`, {
       method: "POST",
       credentials: "same-origin",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         name: shoppingForm.name,
+        default_unit: shoppingForm.unit || "each",
+        category: shoppingForm.category,
+      }),
+    });
+    if (!itemRes.ok) {
+      setStatus(await itemRes.text());
+      return;
+    }
+    const item: Item = await itemRes.json();
+    const res = await fetch(`${API}/shopping/items`, {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        item_id: item.id,
         quantity: Number(shoppingForm.quantity || "1"),
         unit: shoppingForm.unit || "each",
-        category: shoppingForm.category,
         store: shoppingForm.store,
-        create_item: shoppingForm.create_item,
       }),
     });
     if (!res.ok) {
@@ -420,16 +432,12 @@ export default function PantryPanel({}: NativePanelProps) {
 
           {view === "shopping" && (
             <div className="p-4 flex flex-col gap-4">
-              <form onSubmit={submitShoppingItem} className="border border-border rounded p-3 grid md:grid-cols-[1fr_80px_90px_120px_1fr_110px_80px] gap-2">
+              <form onSubmit={submitShoppingItem} className="border border-border rounded p-3 grid md:grid-cols-[1fr_80px_90px_120px_1fr_80px] gap-2">
                 <input value={shoppingForm.name} onChange={(e) => setShoppingForm({ ...shoppingForm, name: e.target.value })} placeholder="Item" className="bg-bg-input border border-border rounded px-2 py-1.5 text-sm" />
                 <input value={shoppingForm.quantity} onChange={(e) => setShoppingForm({ ...shoppingForm, quantity: e.target.value })} placeholder="Qty" className="bg-bg-input border border-border rounded px-2 py-1.5 text-sm" />
                 <input value={shoppingForm.unit} onChange={(e) => setShoppingForm({ ...shoppingForm, unit: e.target.value })} placeholder="Unit" className="bg-bg-input border border-border rounded px-2 py-1.5 text-sm" />
                 <input value={shoppingForm.category} onChange={(e) => setShoppingForm({ ...shoppingForm, category: e.target.value })} placeholder="Category" className="bg-bg-input border border-border rounded px-2 py-1.5 text-sm" />
                 <input value={shoppingForm.store} onChange={(e) => setShoppingForm({ ...shoppingForm, store: e.target.value })} placeholder="Store" className="bg-bg-input border border-border rounded px-2 py-1.5 text-sm" />
-                <label className="flex items-center gap-2 text-xs text-text-muted px-1">
-                  <input type="checkbox" checked={shoppingForm.create_item} onChange={(e) => setShoppingForm({ ...shoppingForm, create_item: e.target.checked })} />
-                  Track item
-                </label>
                 <button className="bg-accent text-bg rounded px-3 py-1.5 text-sm" type="submit">Add</button>
               </form>
 

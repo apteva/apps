@@ -102,22 +102,31 @@ func TestLowStockShoppingListUsesTargetQuantity(t *testing.T) {
 	}
 }
 
-func TestManualShoppingItemCreatesItemDefinitionButNoStock(t *testing.T) {
+func TestManualShoppingItemRequiresItemDefinitionAndCreatesNoStock(t *testing.T) {
 	db := openTestDB(t)
 	const pid = "project-test"
 
+	if _, err := createShoppingItem(db, pid, map[string]any{"name": "Basil", "quantity": 1.0}); err == nil {
+		t.Fatal("shopping item without item_id succeeded, want error")
+	}
+	item, err := createItem(db, pid, map[string]any{
+		"name":         "Basil",
+		"default_unit": "bunch",
+		"category":     "Produce",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 	row, err := createShoppingItem(db, pid, map[string]any{
-		"name":     "Basil",
+		"item_id":  item.ID,
 		"quantity": 1.0,
-		"unit":     "bunch",
-		"category": "Produce",
 		"notes":    "For pasta",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if row.ItemID == nil {
-		t.Fatal("manual row did not link a created pantry item")
+	if row.ItemID == nil || *row.ItemID != item.ID {
+		t.Fatalf("item link = %v, want %d", row.ItemID, item.ID)
 	}
 
 	items, err := listItems(db, pid, "", "", true, 20, "", nil)
@@ -154,38 +163,14 @@ func TestManualShoppingItemCreatesItemDefinitionButNoStock(t *testing.T) {
 	}
 }
 
-func TestManualShoppingItemCanSkipItemDefinition(t *testing.T) {
-	db := openTestDB(t)
-	const pid = "project-test"
-	row, err := createShoppingItem(db, pid, map[string]any{
-		"name":        "Birthday candles",
-		"quantity":    1.0,
-		"unit":        "pack",
-		"create_item": false,
-	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	if row.ItemID != nil {
-		t.Fatalf("item link = %v, want nil", *row.ItemID)
-	}
-	items, err := listItems(db, pid, "", "", true, 20, "", nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(items) != 0 {
-		t.Fatalf("pantry items = %d, want 0", len(items))
-	}
-}
-
-func TestManualShoppingItemLinksExistingItem(t *testing.T) {
+func TestManualShoppingItemUsesReferencedItemDefaults(t *testing.T) {
 	db := openTestDB(t)
 	const pid = "project-test"
 	item, err := createItem(db, pid, map[string]any{"name": "Eggs", "default_unit": "dozen"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	row, err := createShoppingItem(db, pid, map[string]any{"name": "Eggs", "quantity": 1.0})
+	row, err := createShoppingItem(db, pid, map[string]any{"item_id": item.ID, "quantity": 1.0})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -204,7 +189,7 @@ func openTestDB(t *testing.T) *sql.DB {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { db.Close() })
-	for _, path := range []string{"migrations/001_init.sql", "migrations/002_shopping_list.sql"} {
+	for _, path := range []string{"migrations/001_init.sql", "migrations/002_shopping_list.sql", "migrations/003_backfill_shopping_item_refs.sql"} {
 		raw, err := os.ReadFile(path)
 		if err != nil {
 			t.Fatal(err)

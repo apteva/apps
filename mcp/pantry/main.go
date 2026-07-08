@@ -25,7 +25,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: pantry
 display_name: Pantry
-version: 0.2.1
+version: 0.3.0
 description: Food inventory for pantry, fridge, and freezer.
 author: Apteva
 scopes: [project, global]
@@ -142,7 +142,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "pantry_locations_create", Description: "Create a location. Args: name, kind?.", InputSchema: schemaObject(map[string]any{"name": typ("string"), "kind": typ("string")}, []string{"name"}), Handler: a.toolLocationsCreate},
 		{Name: "pantry_expiring", Description: "Lots expiring soon. Args: days? default 14, limit?.", InputSchema: schemaObject(map[string]any{"days": typ("integer"), "limit": typ("integer")}, nil), Handler: a.toolExpiring},
 		{Name: "pantry_low_stock", Description: "Items at or below min_quantity.", InputSchema: schemaObject(map[string]any{}, nil), Handler: a.toolLowStock},
-		{Name: "pantry_shopping_items_create", Description: "Create a manual shopping-list item. Args: name, quantity?, unit?, category?, store?, notes?, item_id?, create_item? (default true), source?. Creates/links an item definition by default but never creates pantry stock. Pass create_item=false for one-off purchases.", InputSchema: schemaObject(shoppingItemProps(), []string{"name"}), Handler: a.toolShoppingItemsCreate},
+		{Name: "pantry_shopping_items_create", Description: "Create a manual shopping-list item from an existing item definition. Args: item_id (required), quantity?, unit?, store?, notes?, source?. Agents should call pantry_items_create first when the item definition does not exist. This never creates pantry stock.", InputSchema: schemaObject(shoppingItemProps(), []string{"item_id"}), Handler: a.toolShoppingItemsCreate},
 		{Name: "pantry_shopping_items_list", Description: "List manual shopping-list items. Args: status? (open|checked|dismissed|purchased|all; default open), limit?.", InputSchema: schemaObject(map[string]any{"status": typ("string"), "limit": typ("integer")}, nil), Handler: a.toolShoppingItemsList},
 		{Name: "pantry_shopping_items_update", Description: "Patch a manual shopping-list item. Args: id, patch.", InputSchema: schemaObject(map[string]any{"id": typ("integer"), "patch": typ("object")}, []string{"id", "patch"}), Handler: a.toolShoppingItemsUpdate},
 		{Name: "pantry_shopping_items_check", Description: "Mark a shopping-list item checked or open. Args: id, checked? default true.", InputSchema: schemaObject(map[string]any{"id": typ("integer"), "checked": typ("boolean")}, []string{"id"}), Handler: a.toolShoppingItemsCheck},
@@ -831,9 +831,13 @@ func lowStockItems(db *sql.DB, pid string) ([]ShoppingLine, error) {
 }
 
 func createShoppingItem(db *sql.DB, pid string, in map[string]any) (*ShoppingItem, error) {
-	name := cleanName(strArg(in, "name", ""))
-	if name == "" {
-		return nil, errors.New("name required")
+	itemID := intArg(in, "item_id", 0)
+	if itemID <= 0 {
+		return nil, errors.New("item_id required; create or find the pantry item first")
+	}
+	item, err := getItem(db, pid, int64(itemID))
+	if err != nil {
+		return nil, fmt.Errorf("item_id %d not found", itemID)
 	}
 	qty := floatArg(in, "quantity", 1)
 	if qty <= 0 {
@@ -841,33 +845,17 @@ func createShoppingItem(db *sql.DB, pid string, in map[string]any) (*ShoppingIte
 	}
 	unit := strings.TrimSpace(strArg(in, "unit", ""))
 	if unit == "" {
-		unit = "each"
+		unit = item.DefaultUnit
 	}
-	var itemID any
-	if id := intArg(in, "item_id", 0); id > 0 {
-		itemID = id
-	} else if item, err := getItemByName(db, pid, name); err == nil {
-		itemID = item.ID
-		if unit == "each" && item.DefaultUnit != "" {
-			unit = item.DefaultUnit
-		}
-	} else if boolArg(in, "create_item", true) {
-		item, err := createItem(db, pid, map[string]any{
-			"name":         name,
-			"default_unit": unit,
-			"category":     strings.TrimSpace(strArg(in, "category", "")),
-		})
-		if err != nil {
-			return nil, err
-		}
-		itemID = item.ID
+	if unit == "" {
+		unit = "each"
 	}
 	source := normaliseShoppingSource(strArg(in, "source", "manual"))
 	status := normaliseShoppingStatus(strArg(in, "status", "open"))
 	res, err := db.Exec(
 		`INSERT INTO shopping_list_items (project_id, item_id, name, quantity, unit, category, store, source, status, notes)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		pid, itemID, name, qty, unit, strings.TrimSpace(strArg(in, "category", "")),
+		pid, item.ID, item.Name, qty, unit, item.Category,
 		strings.TrimSpace(strArg(in, "store", "")), source, status, strings.TrimSpace(strArg(in, "notes", "")),
 	)
 	if err != nil {
@@ -959,10 +947,15 @@ func updateShoppingItem(db *sql.DB, pid string, id int64, patch map[string]any) 
 	}
 	if _, ok := patch["item_id"]; ok {
 		if id := intArg(patch, "item_id", 0); id > 0 {
-			v := int64(id)
-			fields["item_id"] = &v
+			ref, err := getItem(db, pid, int64(id))
+			if err != nil {
+				return nil, fmt.Errorf("item_id %d not found", id)
+			}
+			fields["item_id"] = ref.ID
+			fields["name"] = ref.Name
+			fields["category"] = ref.Category
 		} else {
-			fields["item_id"] = (*int64)(nil)
+			return nil, errors.New("item_id cannot be cleared")
 		}
 	}
 	for _, key := range []string{"name", "unit", "category", "store", "notes"} {
@@ -992,7 +985,7 @@ func updateShoppingItem(db *sql.DB, pid string, id int64, patch map[string]any) 
 	itemID := fields["item_id"]
 	if p, ok := itemID.(*int64); ok {
 		if p == nil {
-			itemID = nil
+			return nil, errors.New("item_id required")
 		} else {
 			itemID = *p
 		}
@@ -1621,16 +1614,13 @@ func stockAddProps() map[string]any {
 
 func shoppingItemProps() map[string]any {
 	return map[string]any{
-		"item_id":     typ("integer"),
-		"name":        typ("string"),
-		"quantity":    typ("number"),
-		"unit":        typ("string"),
-		"category":    typ("string"),
-		"store":       typ("string"),
-		"source":      typ("string"),
-		"status":      typ("string"),
-		"notes":       typ("string"),
-		"create_item": typ("boolean"),
+		"item_id":  typ("integer"),
+		"quantity": typ("number"),
+		"unit":     typ("string"),
+		"store":    typ("string"),
+		"source":   typ("string"),
+		"status":   typ("string"),
+		"notes":    typ("string"),
 	}
 }
 
