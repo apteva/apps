@@ -131,10 +131,35 @@ func (b *binancePublic) Bars(symbol, rng string) ([]Bar, error) {
 		return nil, fmt.Errorf("binancePublic: unknown internal symbol %q", symbol)
 	}
 	interval, limit := binanceIntervalForRange(rng)
+	return b.klines(wire, interval, limit, time.Time{}, time.Time{})
+}
+
+func (b *binancePublic) BacktestBars(symbol, interval string, start, end time.Time, limit int) ([]Bar, error) {
+	wire, ok := binanceUSDPairs[symbol]
+	if !ok {
+		return nil, fmt.Errorf("binancePublic: unknown internal symbol %q", symbol)
+	}
+	binanceInterval, err := binanceIntervalForBacktest(interval)
+	if err != nil {
+		return nil, err
+	}
+	if limit <= 0 || limit > 1000 {
+		limit = 1000
+	}
+	return b.klines(wire, binanceInterval, limit, start, end)
+}
+
+func (b *binancePublic) klines(wire, interval string, limit int, start, end time.Time) ([]Bar, error) {
 	q := url.Values{}
 	q.Set("symbol", wire)
 	q.Set("interval", interval)
 	q.Set("limit", strconv.Itoa(limit))
+	if !start.IsZero() {
+		q.Set("startTime", strconv.FormatInt(start.UTC().UnixMilli(), 10))
+	}
+	if !end.IsZero() {
+		q.Set("endTime", strconv.FormatInt(end.UTC().UnixMilli(), 10))
+	}
 	raw, err := b.fetch(b.base + "/klines?" + q.Encode())
 	if err != nil {
 		return nil, err
@@ -171,6 +196,15 @@ func (b *binancePublic) Bars(symbol, rng string) ([]Bar, error) {
 	return out, nil
 }
 
+func binanceIntervalForBacktest(interval string) (string, error) {
+	switch strings.ToLower(strings.TrimSpace(interval)) {
+	case "5m", "15m", "1h", "4h", "1d", "1w":
+		return strings.ToLower(strings.TrimSpace(interval)), nil
+	default:
+		return "", fmt.Errorf("unsupported Binance backtest interval %q", interval)
+	}
+}
+
 func parseKlineFloat(v any) float64 {
 	if s, ok := v.(string); ok {
 		if f, err := strconv.ParseFloat(s, 64); err == nil {
@@ -185,13 +219,20 @@ func parseKlineFloat(v any) float64 {
 // + mock paths show the same chart resolution.
 func binanceIntervalForRange(rng string) (string, int) {
 	switch strings.ToUpper(rng) {
-	case "1D":  return "5m",  78
-	case "5D":  return "30m", 130
-	case "1M":  return "4h",  220
-	case "3M":  return "8h",  320
-	case "1Y":  return "1d",  540
-	case "ALL": return "1d",  720
-	default:    return "5m",  78
+	case "1D":
+		return "5m", 78
+	case "5D":
+		return "30m", 130
+	case "1M":
+		return "4h", 220
+	case "3M":
+		return "8h", 320
+	case "1Y":
+		return "1d", 540
+	case "ALL":
+		return "1d", 720
+	default:
+		return "5m", 78
 	}
 }
 
@@ -224,8 +265,8 @@ type binanceTicker struct {
 	PrevClosePrice     string `json:"prevClosePrice"`
 	PriceChange        string `json:"priceChange"`
 	PriceChangePercent string `json:"priceChangePercent"`
-	Volume             string `json:"volume"`        // base-asset volume
-	QuoteVolume        string `json:"quoteVolume"`   // USD-side volume; better for our 24h indicator
+	Volume             string `json:"volume"`      // base-asset volume
+	QuoteVolume        string `json:"quoteVolume"` // USD-side volume; better for our 24h indicator
 }
 
 func (t binanceTicker) toMark(internalSymbol string) (*Mark, error) {

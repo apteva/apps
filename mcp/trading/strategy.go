@@ -456,10 +456,14 @@ func liveStrategyMarket(ctx *sdk.AppCtx, def *StrategyDefinition) strategyMarket
 	return market
 }
 
-func backtestStrategyMarket(run *BacktestRun, step int) strategyMarket {
+func backtestStrategyMarket(run *BacktestRun, step int) (strategyMarket, error) {
 	market := strategyMarket{prices: map[string]float64{}, history: map[string][]float64{}, asOf: backtestReplayTime(run, step)}
 	for i := 1; i <= step; i++ {
-		for _, row := range backtestMarks(run, i) {
+		prices, err := backtestMarks(run, i)
+		if err != nil {
+			return market, err
+		}
+		for _, row := range prices {
 			symbol := strings.ToUpper(strings.TrimSpace(fmt.Sprint(row["symbol"])))
 			price := anyFloat(row["price"])
 			if symbol == "" || price <= 0 {
@@ -471,7 +475,7 @@ func backtestStrategyMarket(run *BacktestRun, step int) strategyMarket {
 			}
 		}
 	}
-	return market
+	return market, nil
 }
 
 // ─── Strategy MCP tools ────────────────────────────────────────────
@@ -646,9 +650,12 @@ func (a *App) toolStrategyBacktestCreate(ctx *sdk.AppCtx, args map[string]any) (
 		return nil, err
 	}
 	startAt, endAt := defaultBacktestRange(strArg(args, "start_at"), strArg(args, "end_at"))
-	steps := estimateBacktestSteps(startAt, endAt, interval)
+	marketBars, steps, marketSource, err := captureBacktestMarketBars(def.Universe, interval, startAt, endAt)
+	if err != nil {
+		return nil, err
+	}
 	if steps <= 0 {
-		return nil, errors.New("date range must contain at least one step")
+		return nil, errors.New("market data range must contain at least one step")
 	}
 	startingCash := floatArg(args, "starting_cash", 0)
 	if startingCash <= 0 {
@@ -677,13 +684,18 @@ func (a *App) toolStrategyBacktestCreate(ctx *sdk.AppCtx, args map[string]any) (
 		Summary: map[string]any{
 			"portfolio_name": pf.Name,
 			"strategy_name":  strategy.Name,
+			"market_source":  marketSource,
 		},
 	})
 	if err != nil {
 		return nil, err
 	}
+	if err := dbReplaceBacktestMarketBars(ctx.AppDB(), id, marketBars); err != nil {
+		_ = dbSetBacktestStatus(ctx.AppDB(), id, "failed", err.Error())
+		return nil, err
+	}
 	run, _ := dbGetBacktestRun(ctx.AppDB(), pid, id)
-	_, _ = dbInsertBacktestEvent(ctx.AppDB(), id, "created", "Strategy backtest created", map[string]any{"strategy_id": strategyID, "symbols": def.Universe})
+	_, _ = dbInsertBacktestEvent(ctx.AppDB(), id, "created", "Strategy backtest created", map[string]any{"strategy_id": strategyID, "symbols": def.Universe, "market_source": marketSource, "bars": len(marketBars)})
 	emitBacktest("trading.backtest.created", id, map[string]any{"portfolio_id": pf.ID, "strategy_id": strategyID, "run_kind": "strategy"})
 	return map[string]any{"backtest": run}, nil
 }
@@ -885,7 +897,10 @@ func runStrategyBacktestToEnd(run *BacktestRun) (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
-	market := backtestStrategyMarket(next, next.CurrentStep)
+	market, err := backtestStrategyMarket(next, next.CurrentStep)
+	if err != nil {
+		return nil, err
+	}
 	for {
 		if next.Status != "running" || next.CurrentStep >= next.TotalSteps {
 			if fresh, err := dbGetBacktestRun(globalCtx.AppDB(), next.ProjectID, next.ID); err == nil && fresh != nil {
@@ -920,12 +935,18 @@ func stepStrategyBacktestRun(run *BacktestRun) (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
-	market := backtestStrategyMarket(run, step)
+	market, err := backtestStrategyMarket(run, step)
+	if err != nil {
+		return nil, err
+	}
 	eval, err := evaluateStrategy(strategy, market)
 	if err != nil {
 		return nil, err
 	}
-	prices := backtestMarks(run, step)
+	prices, err := backtestMarks(run, step)
+	if err != nil {
+		return nil, err
+	}
 	orders := applyStrategyTargets(run, state, eval.TargetAllocations, prices)
 	state.Orders = append(state.Orders, orders...)
 	snap := strategySnapshot(run, step, state, prices)
@@ -982,7 +1003,10 @@ func runStrategyBacktestStep(run *BacktestRun, strategy *Strategy, state *strate
 		next.Status = "completed"
 		return &next, nil
 	}
-	prices := advanceBacktestStrategyMarket(run, step, market)
+	prices, err := advanceBacktestStrategyMarket(run, step, market)
+	if err != nil {
+		return nil, err
+	}
 	eval, err := evaluateStrategy(strategy, *market)
 	if err != nil {
 		return nil, err
@@ -1052,10 +1076,13 @@ func loadStrategyBacktestState(run *BacktestRun) (*strategyBacktestState, error)
 	return state, nil
 }
 
-func advanceBacktestStrategyMarket(run *BacktestRun, step int, market *strategyMarket) []map[string]any {
-	prices := backtestMarks(run, step)
+func advanceBacktestStrategyMarket(run *BacktestRun, step int, market *strategyMarket) ([]map[string]any, error) {
+	prices, err := backtestMarks(run, step)
+	if err != nil {
+		return nil, err
+	}
 	if market == nil {
-		return prices
+		return prices, nil
 	}
 	if market.history == nil {
 		market.history = map[string][]float64{}
@@ -1071,7 +1098,7 @@ func advanceBacktestStrategyMarket(run *BacktestRun, step int, market *strategyM
 		market.history[symbol] = append(market.history[symbol], price)
 		market.prices[symbol] = price
 	}
-	return prices
+	return prices, nil
 }
 
 func applyStrategyTargets(run *BacktestRun, state *strategyBacktestState, targets []StrategyAllocation, prices []map[string]any) []*Order {

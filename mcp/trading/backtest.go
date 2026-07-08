@@ -2,8 +2,6 @@ package main
 
 import (
 	"context"
-	"crypto/sha1"
-	"encoding/binary"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -12,6 +10,7 @@ import (
 	"net/http"
 	"net/url"
 	"os"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -219,9 +218,13 @@ func (a *App) handleHTTPPortfolioBacktests(w http.ResponseWriter, r *http.Reques
 			return
 		}
 		startAt, endAt := defaultBacktestRange(body.StartAt, body.EndAt)
-		steps := estimateBacktestSteps(startAt, endAt, interval)
+		marketBars, steps, marketSource, err := captureBacktestMarketBars(symbols, interval, startAt, endAt)
+		if err != nil {
+			httpErr(w, 400, err.Error())
+			return
+		}
 		if steps <= 0 {
-			httpErr(w, 400, "date range must contain at least one step")
+			httpErr(w, 400, "market data range must contain at least one step")
 			return
 		}
 		name := strings.TrimSpace(body.Name)
@@ -255,6 +258,7 @@ func (a *App) handleHTTPPortfolioBacktests(w http.ResponseWriter, r *http.Reques
 			TotalSteps:      steps,
 			Summary: map[string]any{
 				"portfolio_name": pf.Name,
+				"market_source":  marketSource,
 				"strategy_name": func() string {
 					if strategy != nil {
 						return strategy.Name
@@ -267,8 +271,13 @@ func (a *App) handleHTTPPortfolioBacktests(w http.ResponseWriter, r *http.Reques
 			httpErr(w, 500, err.Error())
 			return
 		}
+		if err := dbReplaceBacktestMarketBars(globalCtx.AppDB(), id, marketBars); err != nil {
+			_ = dbSetBacktestStatus(globalCtx.AppDB(), id, "failed", err.Error())
+			httpErr(w, 500, err.Error())
+			return
+		}
 		run, _ := dbGetBacktestRun(globalCtx.AppDB(), projectID, id)
-		_, _ = dbInsertBacktestEvent(globalCtx.AppDB(), id, "created", "Backtest created", map[string]any{"symbols": symbols, "run_kind": runKind, "strategy_id": body.StrategyID})
+		_, _ = dbInsertBacktestEvent(globalCtx.AppDB(), id, "created", "Backtest created", map[string]any{"symbols": symbols, "run_kind": runKind, "strategy_id": body.StrategyID, "market_source": marketSource, "bars": len(marketBars)})
 		emitBacktest("trading.backtest.created", id, map[string]any{"portfolio_id": pf.ID, "agent_id": agentID, "strategy_id": body.StrategyID, "symbols": symbols, "run_kind": runKind})
 		httpJSON(w, 201, map[string]any{"backtest": run})
 	default:
@@ -654,7 +663,10 @@ func stepBacktestRun(run *BacktestRun) (map[string]any, error) {
 		_ = dbSetBacktestStatus(globalCtx.AppDB(), run.ID, "completed", "")
 		return map[string]any{"status": "completed", "backtest": run}, nil
 	}
-	prices := backtestMarks(run, step)
+	prices, err := backtestMarks(run, step)
+	if err != nil {
+		return nil, err
+	}
 	var ignored map[string]any
 	if err := globalCtx.PlatformAPI().CallEnvironmentAppResult(run.EnvironmentID, "trading", "backtest_market_step", map[string]any{
 		"_project_id":  run.ProjectID,
@@ -1034,51 +1046,116 @@ func backtestStepPrompt(run *BacktestRun, step int, prices []map[string]any) str
 		step, run.TotalSteps, run.EnvironmentPortfolioID, run.Interval, replayAt.Format(time.RFC3339), prices)
 }
 
-func backtestMarks(run *BacktestRun, step int) []map[string]any {
-	out := make([]map[string]any, 0, len(run.Symbols))
-	replayAt := backtestReplayTime(run, step)
-	for _, symbol := range run.Symbols {
-		cls := inferAssetClass(symbol)
-		base := backtestAnchor(symbol)
-		intervalScale := backtestIntervalVolatilityScale(run.Interval)
-		wave := math.Sin(float64(step+hashSymbol(symbol)%17)/4.0) * 0.018 * intervalScale
-		trend := (float64((hashSymbol(symbol)%7)-3) * 0.0015) * float64(step) * intervalScale
-		price := base * (1 + wave + trend)
-		if cls == "polymarket" {
-			if price < 0.01 {
-				price = 0.01
-			}
-			if price > 0.99 {
-				price = 0.99
-			}
-		}
-		prev := base
-		out = append(out, map[string]any{
-			"symbol": symbol, "asset_class": cls, "price": round4(price), "prev_close": prev, "time": replayAt.Format(time.RFC3339),
-		})
+func backtestMarks(run *BacktestRun, step int) ([]map[string]any, error) {
+	if run == nil {
+		return nil, errors.New("backtest run required")
 	}
-	return out
+	if step <= 0 {
+		return nil, fmt.Errorf("backtest step must be positive, got %d", step)
+	}
+	return dbBacktestMarketMarks(globalCtx.AppDB(), run.ID, step, run.Symbols)
 }
 
-func backtestAnchor(symbol string) float64 {
-	for _, seed := range mockUniverse {
-		if strings.EqualFold(seed.symbol, symbol) {
-			return seed.anchor
+func captureBacktestMarketBars(symbols []string, interval string, startAt, endAt time.Time) ([]*BacktestMarketBar, int, string, error) {
+	symbols = cleanSymbols(symbols)
+	if len(symbols) == 0 {
+		return nil, 0, "", errors.New("at least one symbol required")
+	}
+	for _, symbol := range symbols {
+		if inferAssetClass(symbol) != "crypto" {
+			return nil, 0, "", fmt.Errorf("real backtest bars currently require crypto symbols via Binance; %s is %s", symbol, inferAssetClass(symbol))
 		}
 	}
-	switch inferAssetClass(symbol) {
-	case "crypto":
-		return 1000 + float64(hashSymbol(symbol)%90000)
-	case "polymarket":
-		return 0.5
+	limit := estimateBacktestBarsLimit(startAt, endAt, interval)
+	if limit <= 0 {
+		return nil, 0, "", errors.New("date range must contain at least one market bar")
+	}
+	if limit > 1000 {
+		return nil, 0, "", fmt.Errorf("backtest real market data is capped at 1000 bars per symbol for now; requested %d", limit)
+	}
+	source := "binance-public"
+	provider := newBinancePublic()
+	bySymbol := map[string]map[int64]Bar{}
+	commonTimes := map[int64]bool{}
+	for i, symbol := range symbols {
+		bars, err := provider.BacktestBars(symbol, interval, startAt, inclusiveBacktestEnd(endAt, interval), limit)
+		if err != nil {
+			return nil, 0, source, fmt.Errorf("fetch %s bars: %w", symbol, err)
+		}
+		if len(bars) == 0 {
+			return nil, 0, source, fmt.Errorf("fetch %s bars: no bars returned", symbol)
+		}
+		rows := map[int64]Bar{}
+		for _, bar := range bars {
+			if bar.C <= 0 {
+				continue
+			}
+			rows[bar.T] = bar
+		}
+		if len(rows) == 0 {
+			return nil, 0, source, fmt.Errorf("fetch %s bars: no priced bars returned", symbol)
+		}
+		bySymbol[symbol] = rows
+		if i == 0 {
+			for t := range rows {
+				commonTimes[t] = true
+			}
+			continue
+		}
+		for t := range commonTimes {
+			if _, ok := rows[t]; !ok {
+				delete(commonTimes, t)
+			}
+		}
+	}
+	times := make([]int64, 0, len(commonTimes))
+	for t := range commonTimes {
+		times = append(times, t)
+	}
+	sort.Slice(times, func(i, j int) bool { return times[i] < times[j] })
+	if len(times) == 0 {
+		return nil, 0, source, errors.New("market bars have no common timestamps across symbols")
+	}
+	out := make([]*BacktestMarketBar, 0, len(times)*len(symbols))
+	for step, t := range times {
+		for _, symbol := range symbols {
+			bar := bySymbol[symbol][t]
+			out = append(out, &BacktestMarketBar{
+				Step: step + 1, Symbol: symbol, AssetClass: inferAssetClass(symbol), T: t,
+				O: nonZeroBarPrice(bar.O, bar.C), H: nonZeroBarPrice(bar.H, bar.C),
+				L: nonZeroBarPrice(bar.L, bar.C), C: bar.C, V: bar.V, Source: source,
+			})
+		}
+	}
+	return out, len(times), source, nil
+}
+
+func estimateBacktestBarsLimit(startAt, endAt time.Time, interval string) int {
+	if endAt.Before(startAt) {
+		return 0
+	}
+	duration := backtestIntervalDuration(interval)
+	if duration <= 0 {
+		duration = 24 * time.Hour
+	}
+	end := inclusiveBacktestEnd(endAt, interval)
+	return int(end.Sub(startAt)/duration) + 1
+}
+
+func inclusiveBacktestEnd(endAt time.Time, interval string) time.Time {
+	switch strings.ToLower(strings.TrimSpace(interval)) {
+	case "5m", "15m", "1h", "4h":
+		return time.Date(endAt.Year(), endAt.Month(), endAt.Day(), 23, 59, 59, 0, time.UTC)
 	default:
-		return 50 + float64(hashSymbol(symbol)%450)
+		return endAt
 	}
 }
 
-func hashSymbol(symbol string) int {
-	sum := sha1.Sum([]byte(strings.ToUpper(symbol)))
-	return int(binary.BigEndian.Uint32(sum[:4]))
+func nonZeroBarPrice(value, fallback float64) float64 {
+	if value > 0 {
+		return value
+	}
+	return fallback
 }
 
 func defaultBacktestRange(start, end string) (time.Time, time.Time) {
@@ -1175,21 +1252,6 @@ func backtestIntervalDuration(interval string) time.Duration {
 		return 7 * 24 * time.Hour
 	default:
 		return 24 * time.Hour
-	}
-}
-
-func backtestIntervalVolatilityScale(interval string) float64 {
-	switch strings.ToLower(strings.TrimSpace(interval)) {
-	case "5m":
-		return 0.12
-	case "15m":
-		return 0.2
-	case "1h":
-		return 0.45
-	case "4h":
-		return 0.75
-	default:
-		return 1
 	}
 }
 

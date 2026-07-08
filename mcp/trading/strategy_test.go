@@ -109,6 +109,7 @@ func TestStrategyBacktestUsesExistingSnapshots(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	seedBacktestMarketBars(t, ctx, run.ID, run.Symbols, run.TotalSteps)
 	if _, err := startStrategyBacktestRun(run); err != nil {
 		t.Fatal(err)
 	}
@@ -181,6 +182,8 @@ func TestStrategyBacktestRunMatchesManualSteps(t *testing.T) {
 
 	slowRun := mustCreateStrategyBacktestRun(t, ctx, pid, strategyID, "manual steps")
 	fastRun := mustCreateStrategyBacktestRun(t, ctx, pid, strategyID, "fast run")
+	seedBacktestMarketBars(t, ctx, slowRun.ID, slowRun.Symbols, slowRun.TotalSteps)
+	seedBacktestMarketBars(t, ctx, fastRun.ID, fastRun.Symbols, fastRun.TotalSteps)
 
 	if _, err := startStrategyBacktestRun(slowRun); err != nil {
 		t.Fatal(err)
@@ -271,5 +274,25 @@ func assertClose(t *testing.T, label string, got, want float64) {
 	t.Helper()
 	if math.Abs(got-want) > 0.0001 {
 		t.Fatalf("%s=%v, want %v", label, got, want)
+	}
+}
+
+func seedBacktestMarketBars(t *testing.T, ctx *sdk.AppCtx, runID int64, symbols []string, steps int) {
+	t.Helper()
+	rows := []*BacktestMarketBar{}
+	for step := 1; step <= steps; step++ {
+		for i, symbol := range symbols {
+			base := 100.0 + float64(i*50)
+			close := base + float64(step)*(1+float64(i)*0.3)
+			rows = append(rows, &BacktestMarketBar{
+				Step: step, Symbol: symbol, AssetClass: inferAssetClass(symbol),
+				T: int64(1704067200 + step*3600),
+				O: close * 0.999, H: close * 1.002, L: close * 0.998, C: close, V: 1000,
+				Source: "fixture",
+			})
+		}
+	}
+	if err := dbReplaceBacktestMarketBars(ctx.AppDB(), runID, rows); err != nil {
+		t.Fatal(err)
 	}
 }

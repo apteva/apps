@@ -1378,6 +1378,85 @@ func dbListBacktestSnapshots(db *sql.DB, runID int64) ([]*BacktestSnapshot, erro
 	return out, rows.Err()
 }
 
+type BacktestMarketBar struct {
+	RunID      int64
+	Step       int
+	Symbol     string
+	AssetClass string
+	T          int64
+	O          float64
+	H          float64
+	L          float64
+	C          float64
+	V          float64
+	Source     string
+}
+
+func dbReplaceBacktestMarketBars(db *sql.DB, runID int64, bars []*BacktestMarketBar) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`DELETE FROM backtest_market_bars WHERE run_id = ?`, runID); err != nil {
+		return err
+	}
+	stmt, err := tx.Prepare(`
+		INSERT INTO backtest_market_bars (
+			run_id, step, symbol, asset_class, t, o, h, l, c, v, source
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+	for _, b := range bars {
+		if b == nil {
+			continue
+		}
+		if _, err := stmt.Exec(runID, b.Step, b.Symbol, b.AssetClass, b.T, b.O, b.H, b.L, b.C, b.V, b.Source); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
+func dbBacktestMarketMarks(db *sql.DB, runID int64, step int, symbols []string) ([]map[string]any, error) {
+	rows, err := db.Query(`
+		SELECT symbol, asset_class, t, o, h, l, c, v, source
+		FROM backtest_market_bars
+		WHERE run_id = ? AND step = ?
+		ORDER BY symbol ASC`, runID, step)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	bySymbol := map[string]map[string]any{}
+	for rows.Next() {
+		var symbol, cls, source string
+		var t int64
+		var o, h, l, c, v float64
+		if err := rows.Scan(&symbol, &cls, &t, &o, &h, &l, &c, &v, &source); err != nil {
+			return nil, err
+		}
+		bySymbol[strings.ToUpper(symbol)] = map[string]any{
+			"symbol": symbol, "asset_class": cls, "time": time.Unix(t, 0).UTC().Format(time.RFC3339),
+			"open": o, "high": h, "low": l, "price": c, "close": c, "volume": v, "source": source,
+		}
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	out := make([]map[string]any, 0, len(symbols))
+	for _, symbol := range cleanSymbols(symbols) {
+		row := bySymbol[strings.ToUpper(symbol)]
+		if row == nil {
+			return nil, fmt.Errorf("missing real market bar for %s at step %d", symbol, step)
+		}
+		out = append(out, row)
+	}
+	return out, nil
+}
+
 // ─── Watchlist ─────────────────────────────────────────────────────
 
 func dbWatchlistAdd(db *sql.DB, projectID string, portfolioID int64, symbol string) (bool, error) {
