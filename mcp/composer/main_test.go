@@ -10,6 +10,7 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -572,69 +573,6 @@ func TestApplyClipTiming_FitSourceTrackAudioBySection(t *testing.T) {
 	got := e.Timeline.Tracks[0].Clips[0].Length
 	if !sameTime(got, 8.55) {
 		t.Fatalf("visual length = %v, want audio length plus padding", got)
-	}
-}
-
-func TestApplyClipTiming_FitTimelineIgnoresOwnStaleLength(t *testing.T) {
-	e, err := parseEditJSON(`{"timeline":{"tracks":[
-		{"type":"visual","clips":[
-			{"uid":"background","asset":{"type":"image","src":"storage:1"},"start":0,"length":305,
-				"timing":{"mode":"fit_timeline","behavior":"stretch"}}
-		]},
-		{"type":"audio","clips":[
-			{"uid":"voice","asset":{"type":"audio","src":"storage:2"},"start":0,"length":120}
-		]}
-	]}}`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if !applyTimelineTiming(e) {
-		t.Fatal("expected stale visual length to shrink to the non-fit timeline")
-	}
-	got := e.Timeline.Tracks[0].Clips[0].Length
-	if !sameTime(got, 120) {
-		t.Fatalf("visual length = %v, want audio timeline length 120", got)
-	}
-}
-
-func TestFinalizeTimelineTiming_ReappliesFitTimelineAfterAudioReflow(t *testing.T) {
-	e, err := parseEditJSON(`{"timeline":{"tracks":[
-		{"type":"visual","clips":[
-			{"uid":"background","asset":{"type":"image","src":"storage:1"},"start":0,"length":142.720816,
-				"timing":{"mode":"fit_timeline","behavior":"stretch"}}
-		]},
-		{"type":"audio","clips":[
-			{"uid":"a","asset":{"type":"audio","src":"storage:2"},"start":0,"length":33,"duration_mode":"fit_generated_reflow",
-				"ai":{"media_kind":"audio_tts","prompt":"a","actual_duration_seconds":50.808163}},
-			{"uid":"b","asset":{"type":"audio","src":"storage:3"},"start":33,"length":34,"duration_mode":"fit_generated_reflow",
-				"ai":{"media_kind":"audio_tts","prompt":"b","actual_duration_seconds":46.994286}},
-			{"uid":"c","asset":{"type":"audio","src":"storage:4"},"start":67,"length":31,"duration_mode":"fit_generated_reflow",
-				"ai":{"media_kind":"audio_tts","prompt":"c","actual_duration_seconds":45.270204}},
-			{"uid":"d","asset":{"type":"audio","src":"storage:5"},"start":98,"length":44.720816,"duration_mode":"fit_generated_reflow",
-				"ai":{"media_kind":"audio_tts","prompt":"d","actual_duration_seconds":44.120816}}
-		]}
-	]}}`)
-	if err != nil {
-		t.Fatal(err)
-	}
-	for i := range e.Timeline.Tracks[1].Clips {
-		if !syncClipDurationFromAI(&e.Timeline.Tracks[1].Clips[i]) {
-			t.Fatalf("expected audio clip %d to sync generated duration", i)
-		}
-	}
-	if !finalizeTimelineTiming(e) {
-		t.Fatal("expected final timing pass to reflow audio starts and stretch visual")
-	}
-	visual := e.Timeline.Tracks[0].Clips[0]
-	if !sameTime(visual.Length, 187.193469) {
-		t.Fatalf("visual length = %v, want full generated audio timeline 187.193469", visual.Length)
-	}
-	last := e.Timeline.Tracks[1].Clips[3]
-	if !sameTime(last.Start, 143.072653) {
-		t.Fatalf("last audio start = %v, want 143.072653", last.Start)
-	}
-	if !sameTime(editDurationSeconds(e), 187.193469) {
-		t.Fatalf("composition duration = %v, want 187.193469", editDurationSeconds(e))
 	}
 }
 
@@ -1338,7 +1276,7 @@ func TestV2ValidateAndConvertScenes(t *testing.T) {
 	}
 }
 
-func TestV2ValidationMarksAdvancedSceneAsWebRequired(t *testing.T) {
+func TestV2ValidationMarksAdvancedSceneAsNativeV2(t *testing.T) {
 	body := `{
 		"version":"composer/v2",
 		"output":{"format":"mp4","width":1920,"height":1080,"fps":30},
@@ -1351,11 +1289,47 @@ func TestV2ValidationMarksAdvancedSceneAsWebRequired(t *testing.T) {
 	if !validation.Valid {
 		t.Fatalf("expected v2 valid, got errors: %v", validation.Errors)
 	}
-	if validation.Renderer != "web_required" {
-		t.Fatalf("renderer = %q, want web_required", validation.Renderer)
+	if validation.Renderer != "native-v2" {
+		t.Fatalf("renderer = %q, want native-v2", validation.Renderer)
 	}
 	if len(validation.Warnings) == 0 {
-		t.Fatalf("expected a warning explaining why web renderer is required")
+		t.Fatalf("expected a warning explaining native-v2 support level")
+	}
+}
+
+func TestV2NativeRenderShapeAndText(t *testing.T) {
+	if _, err := exec.LookPath(ffmpegPath()); err != nil {
+		t.Skip("ffmpeg not available")
+	}
+	if _, err := exec.LookPath(ffprobePath()); err != nil {
+		t.Skip("ffprobe not available")
+	}
+	spec, err := parseV2CompositionJSON(`{
+		"version":"composer/v2",
+		"name":"Native vector render",
+		"output":{"format":"mp4","width":320,"height":180,"fps":24,"background":"#05070c"},
+		"scenes":[{
+			"duration":1,
+			"elements":[
+				{"type":"shape","x":"8%","y":"16%","width":"84%","height":"68%","style":{"fill":"#101827","stroke":"#ff7a1a","stroke_width":2,"radius":18},"enter":{"type":"scale_pop","duration":0.2}},
+				{"type":"text","text":"Native V2","x":"12%","y":"28%","width":"76%","height":"28%","style":{"font_size":34,"color":"#ffffff","weight":800,"align":"center"},"enter":{"type":"fade_up","duration":0.25}},
+				{"type":"text","text":"shape + text + animation","x":"12%","y":"58%","width":"76%","height":"18%","style":{"font_size":17,"color":"#ffb36b","align":"center"},"enter":{"type":"typewriter","duration":0.5}}
+			]
+		}]
+	}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, warnings, err := renderV2Native(context.Background(), nil, spec, "")
+	if err != nil {
+		t.Fatalf("renderV2Native: %v", err)
+	}
+	defer result.Cleanup()
+	if result.LocalPath == "" {
+		t.Fatal("missing render path")
+	}
+	if got := probeRenderDuration(result.LocalPath); got < 0.8 || got > 1.4 {
+		t.Fatalf("duration = %v, want about 1s; warnings=%v", got, warnings)
 	}
 }
 

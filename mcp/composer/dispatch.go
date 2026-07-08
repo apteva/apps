@@ -475,6 +475,73 @@ func (a *App) toolCompositionRender(ctx *sdk.AppCtx, args map[string]any) (any, 
 		return nil, err
 	}
 	rawEditJSON := row["edit_json"].(string)
+	pid := row["project_id"].(string)
+	if isV2EditJSON(rawEditJSON) {
+		if spec, specErr := parseV2CompositionJSON(rawEditJSON); specErr == nil {
+			output := v2OutputToOutput(spec.Output)
+			if output.Format == "mp4" && !v2HasVideoElements(spec) {
+				insertRes, err := ctx.AppDB().Exec(
+					`INSERT INTO renders (composition_id, project_id, executor, status, edit_snapshot)
+				 VALUES (?, ?, ?, 'rendering', ?)`,
+					id, pid, "native-v2", rawEditJSON,
+				)
+				if err != nil {
+					return nil, fmt.Errorf("insert render: %w", err)
+				}
+				renderID, _ := insertRes.LastInsertId()
+				rctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+				defer cancel()
+				result, nativeWarnings, err := renderV2Native(rctx, ctx.WithProject(pid), spec, pid)
+				if err != nil {
+					ctx.AppDB().Exec(
+						`UPDATE renders SET status='failed', error=?, ffmpeg_command=?, updated_at=CURRENT_TIMESTAMP WHERE id=?`,
+						err.Error(), result.FFmpegCommand, renderID,
+					)
+					ctx.EmitWithProject("composition.failed", pid, map[string]any{
+						"composition_id": id, "render_id": renderID, "error": err.Error(),
+					})
+					return nil, err
+				}
+				if result.Cleanup != nil {
+					defer result.Cleanup()
+				}
+				qa := analyzeRender(result.LocalPath, nil)
+				qa.Warnings = append(qa.Warnings, nativeWarnings...)
+				storageID := saveRenderOutput(ctx, result.LocalPath, output.Format, pid, id)
+				if storageID == 0 {
+					if cacheErr := writeLocalCacheFromPath(renderID, result.LocalPath, output.Format); cacheErr != nil {
+						ctx.Logger().Warn("local cache write failed", "render_id", renderID, "err", cacheErr)
+					}
+				}
+				ctx.AppDB().Exec(
+					`UPDATE renders
+				 SET status='complete', storage_id=?, duration_ms=?, cost_usd=?,
+				     ffmpeg_command=?, qa_json=?, updated_at=CURRENT_TIMESTAMP
+				 WHERE id=?`,
+					storageID, result.DurationMS, result.CostUSD, result.FFmpegCommand, encodeRenderQA(qa), renderID,
+				)
+				ctx.EmitWithProject("composition.rendered", pid, map[string]any{
+					"composition_id": id,
+					"render_id":      renderID,
+					"executor":       "native-v2",
+					"storage_id":     storageID,
+					"duration_ms":    result.DurationMS,
+					"qa":             qa,
+				})
+				return map[string]any{
+					"render_id":   renderID,
+					"status":      "complete",
+					"storage_id":  storageID,
+					"executor":    "native-v2",
+					"version":     composerV2Version,
+					"warnings":    nativeWarnings,
+					"duration_ms": result.DurationMS,
+					"cost_usd":    result.CostUSD,
+					"qa":          qa,
+				}, nil
+			}
+		}
+	}
 	edit, output, renderVersion, renderWarnings, err := renderEditFromStoredJSON(rawEditJSON, row["output_json"].(string))
 	if err != nil {
 		return nil, fmt.Errorf("composition.edit_json invalid: %w", err)
@@ -482,7 +549,6 @@ func (a *App) toolCompositionRender(ctx *sdk.AppCtx, args map[string]any) (any, 
 	if err := validateEditOutput(edit, output); err != nil {
 		return nil, err
 	}
-	pid := row["project_id"].(string)
 	persistMaterializedEdit := renderVersion != composerV2Version
 	mat, err := materializeAIAssets(ctx.WithProject(pid), edit, id, pid, persistMaterializedEdit)
 	if err != nil {

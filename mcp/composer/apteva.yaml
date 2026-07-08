@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: composer
 display_name: Composer
-version: 0.4.1
+version: 0.5.0
 description: |
   Multi-clip video composition. Stitch generated or uploaded assets
   into a single video — one visual track, timed audio tracks, optional
@@ -10,6 +10,12 @@ description: |
   default, on a render host via instances when render_host_id is
   set, or against a SaaS render backend (Shotstack et al) when one
   is bound to the render_executor role.
+
+  v0.5.0 adds the first native Composer V2 renderer. V2 scene graphs with
+  image, shape, and text elements now render directly with percent/pixel
+  layout, cover/contain image fitting, rounded/stroked shapes, opacity,
+  enter/exit animation presets, typewriter/word reveal text, and x/y/scale/
+  opacity keyframes. ffmpeg remains the encoder and audio mixer.
 
   v0.4.1 keeps Composer V2 specs intact during render: the ffmpeg
   compatibility timeline is now used only as a render snapshot, so scenes,
@@ -20,10 +26,6 @@ description: |
   and a compatibility path that renders simple V2 scene/timeline specs through
   the existing ffmpeg executor while advanced animated layouts are explicitly
   marked for the upcoming web renderer.
-
-  v0.3.48 re-applies timeline-fit timing after AI duration reflow, so
-  stretched still/video backgrounds and fitted soundtracks track the final
-  generated audio timeline instead of stale estimates.
 
   v0.3.45 adds first-class overlay/text tracks with rich text styling,
   timeline/UI editing, animation presets, and ffmpeg rendering after

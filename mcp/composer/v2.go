@@ -713,6 +713,15 @@ func validateCompositionJSON(s string) CompositionValidation {
 		if err != nil {
 			return CompositionValidation{Valid: false, Version: composerV2Version, Renderer: "none", Errors: []string{err.Error()}}
 		}
+		if spec.Output.Format == "mp4" && len(spec.Scenes) > 0 && !v2HasVideoElements(spec) {
+			return CompositionValidation{
+				Valid:           true,
+				Version:         composerV2Version,
+				DurationSeconds: v2DurationSeconds(spec),
+				Renderer:        "native-v2",
+				Warnings:        []string{"native composer/v2 renderer supports image, shape, text, layout, opacity, enter/exit presets, and x/y/scale/opacity keyframes"},
+			}
+		}
 		_, _, warnings, convErr := v2ToV1FFmpeg(spec)
 		renderer := "ffmpeg"
 		if convErr != nil {
