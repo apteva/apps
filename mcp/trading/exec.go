@@ -15,12 +15,14 @@ import (
 	"database/sql"
 	"errors"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
 	sdk "github.com/apteva/app-sdk"
+	"github.com/google/uuid"
 )
 
 // engine bundles everything the tick loops need. Instantiated once
@@ -117,6 +119,11 @@ func markTick(ctx context.Context, app *sdk.AppCtx) error {
 			e.logger.Warn("mark batch begin failed", "err", err)
 		}
 	}
+
+	// 1.5 Strategy assignments. App ticks stay fast for fresh marks and
+	// fills, but deterministic strategies only rebalance when their
+	// assignment cadence says they are due.
+	strategyOrders := evaluateLiveStrategyAssignments(e, app, tickStart)
 
 	// 2. Working orders — dispatch per portfolio mode.
 	//    paper → in-process tryFill against the marks we just refreshed.
@@ -217,6 +224,7 @@ func markTick(ctx context.Context, app *sdk.AppCtx) error {
 	e.mu.Unlock()
 	e.logger.Info("tick",
 		"n", tickN, "marks", marksOK, "working", len(working),
+		"strategy_orders", strategyOrders,
 		"fills_this_tick", fillsThisTick, "fills_total", e.fillsThisRun)
 
 	// 5. App-event: one slim payload per tick. Carries the providers
@@ -230,9 +238,230 @@ func markTick(ctx context.Context, app *sdk.AppCtx) error {
 		"providers":       providerHealthSnapshot(),
 		"marks":           delta,
 		"working":         len(working),
+		"strategy_orders": strategyOrders,
 		"fills_this_tick": fillsThisTick,
 	})
 	return nil
+}
+
+func evaluateLiveStrategyAssignments(e *engine, app *sdk.AppCtx, now time.Time) int {
+	assignments, err := dbActiveStrategyAssignments(e.db)
+	if err != nil {
+		e.logger.Warn("query strategy assignments failed", "err", err)
+		return 0
+	}
+	totalOrders := 0
+	for _, a := range assignments {
+		control := strings.ToLower(strings.TrimSpace(a.ControlMode))
+		if control != "" && control != "strategy" && control != "hybrid" {
+			continue
+		}
+		pf, err := dbGetPortfolioAnyProject(e.db, a.PortfolioID)
+		if err != nil {
+			e.logger.Warn("strategy portfolio lookup failed", "assignment_id", a.ID, "err", err)
+			continue
+		}
+		if pf.Status != "active" || strings.ToLower(strings.TrimSpace(pf.Mode)) != "paper" {
+			continue
+		}
+		if portfolioUsesBacktestPricing(e.db, pf.ID) {
+			continue
+		}
+		strategy, err := dbGetStrategy(e.db, a.ProjectID, a.StrategyID)
+		if err != nil {
+			e.logger.Warn("strategy lookup failed", "assignment_id", a.ID, "strategy_id", a.StrategyID, "err", err)
+			continue
+		}
+		if strategy.Status != "active" {
+			continue
+		}
+		def, _, err := validateStrategyDefinition(strategy.Definition)
+		if err != nil {
+			e.logger.Warn("strategy definition invalid", "assignment_id", a.ID, "strategy_id", a.StrategyID, "err", err)
+			continue
+		}
+		if !strategyAssignmentDue(a, def, now) {
+			continue
+		}
+		eval, err := evaluateStrategy(strategy, liveStrategyMarket(app, def))
+		if err != nil {
+			e.logger.Warn("strategy evaluation failed", "assignment_id", a.ID, "strategy_id", a.StrategyID, "err", err)
+			continue
+		}
+		created, err := placeStrategyPaperOrders(e, pf, strategy, a, eval)
+		if err != nil {
+			e.logger.Warn("strategy order placement failed", "assignment_id", a.ID, "strategy_id", a.StrategyID, "err", err)
+			continue
+		}
+		if err := dbSetStrategyAssignmentEvaluated(e.db, a.ID, now); err != nil {
+			e.logger.Warn("strategy assignment timestamp update failed", "assignment_id", a.ID, "err", err)
+		}
+		totalOrders += created
+	}
+	return totalOrders
+}
+
+func portfolioUsesBacktestPricing(db *sql.DB, portfolioID int64) bool {
+	cfg, err := dbPortfolioConfig(db, portfolioID)
+	if err != nil {
+		return false
+	}
+	return fmt.Sprint(cfg["source_override"]) == "backtest" ||
+		fmt.Sprint(cfg["pricing_mode"]) == "backtest" ||
+		fmt.Sprint(cfg["source"]) == "backtest"
+}
+
+func strategyAssignmentDue(a *StrategyAssignment, def *StrategyDefinition, now time.Time) bool {
+	if strings.TrimSpace(a.LastEvaluatedAt) == "" {
+		return true
+	}
+	last, err := time.Parse(time.RFC3339, strings.TrimSpace(a.LastEvaluatedAt))
+	if err != nil {
+		return true
+	}
+	return !now.Before(last.Add(strategyAssignmentInterval(a, def)))
+}
+
+func strategyAssignmentInterval(a *StrategyAssignment, def *StrategyDefinition) time.Duration {
+	cadence := strings.ToLower(strings.TrimSpace(a.Cadence))
+	if cadence == "" && def != nil {
+		cadence = strings.ToLower(strings.TrimSpace(def.Cadence))
+	}
+	if cadence == "" {
+		cadence = "1d"
+	}
+	d, ok := strategyCadenceDuration(cadence)
+	if !ok {
+		d = 24 * time.Hour
+	}
+	every := 1
+	if def != nil && def.RebalanceEvery > 1 {
+		every = def.RebalanceEvery
+	}
+	return d * time.Duration(every)
+}
+
+func placeStrategyPaperOrders(e *engine, pf *Portfolio, strategy *Strategy, assignment *StrategyAssignment, eval *StrategyEvaluation) (int, error) {
+	equity, err := computeEquity(e.db, pf)
+	if err != nil {
+		return 0, err
+	}
+	if equity <= 0 {
+		return 0, nil
+	}
+	positions, err := dbListPositions(e.db, pf.ID)
+	if err != nil {
+		return 0, err
+	}
+	working, err := dbListOrders(e.db, pf.ID, "working", 200)
+	if err != nil {
+		return 0, err
+	}
+	workingBySymbol := map[string]bool{}
+	for _, o := range working {
+		workingBySymbol[strings.ToUpper(o.Symbol)] = true
+	}
+
+	targets := map[string]float64{}
+	for _, a := range eval.TargetAllocations {
+		symbol := strings.ToUpper(strings.TrimSpace(a.Symbol))
+		if symbol == "" || a.Weight <= 0 {
+			continue
+		}
+		targets[symbol] += a.Weight
+	}
+	symbols := map[string]bool{}
+	for symbol := range targets {
+		symbols[symbol] = true
+	}
+	currentQty := map[string]float64{}
+	for _, p := range positions {
+		symbol := strings.ToUpper(p.Symbol)
+		symbols[symbol] = true
+		currentQty[symbol] += p.Qty
+	}
+
+	type plan struct {
+		symbol string
+		side   string
+		qty    float64
+		price  float64
+	}
+	sells := []plan{}
+	buys := []plan{}
+	threshold := math.Max(1, equity*0.001)
+	for symbol := range symbols {
+		if workingBySymbol[symbol] {
+			continue
+		}
+		mark, err := dbGetMark(e.db, symbol)
+		if err != nil || mark == nil || mark.Price <= 0 {
+			continue
+		}
+		curValue := currentQty[symbol] * mark.Price
+		targetValue := equity * targets[symbol]
+		diff := targetValue - curValue
+		if math.Abs(diff) < threshold {
+			continue
+		}
+		if diff > 0 {
+			qty := round4(diff / mark.Price)
+			if qty > 0 {
+				buys = append(buys, plan{symbol: symbol, side: "buy", qty: qty, price: mark.Price})
+			}
+			continue
+		}
+		qty := round4(math.Min(currentQty[symbol], -diff/mark.Price))
+		if qty > 0 {
+			sells = append(sells, plan{symbol: symbol, side: "sell", qty: qty, price: mark.Price})
+		}
+	}
+	plans := append(sells, buys...)
+	created := 0
+	for _, p := range plans {
+		rationale := fmt.Sprintf("Strategy %s assignment #%d rebalance: %s", strategy.Name, assignment.ID, strings.Join(eval.Decisions, "; "))
+		order := &Order{
+			ID:          "o-" + uuid.NewString()[:8],
+			PortfolioID: pf.ID,
+			Symbol:      p.symbol,
+			AssetClass:  inferAssetClass(p.symbol),
+			Side:        p.side,
+			Type:        "market",
+			Qty:         p.qty,
+			TIF:         "day",
+			Status:      "working",
+			Rationale:   rationale,
+			Source:      "strategy",
+		}
+		if err := dbInsertOrder(e.db, order, pf.ProjectID); err != nil {
+			return created, err
+		}
+		created++
+		emit("order.placed", map[string]any{
+			"order_id":      order.ID,
+			"portfolio_id":  pf.ID,
+			"strategy_id":   strategy.ID,
+			"assignment_id": assignment.ID,
+			"symbol":        order.Symbol,
+			"asset_class":   order.AssetClass,
+			"side":          order.Side,
+			"type":          order.Type,
+			"qty":           order.Qty,
+			"status":        "working",
+			"rationale":     rationale,
+			"mode":          "paper",
+			"source":        "strategy",
+		})
+		if entryID, err := dbInsertJournal(e.db, pf.ProjectID, pf.ID, "rationale", rationale, map[string]any{
+			"order_id": order.ID, "symbol": order.Symbol, "side": order.Side, "qty": order.Qty,
+			"strategy_id": strategy.ID, "assignment_id": assignment.ID, "target_weight": targets[p.symbol],
+		}); err == nil {
+			emit("journal.appended", map[string]any{
+				"id": entryID, "portfolio_id": pf.ID, "kind": "rationale", "body": rationale,
+			})
+		}
+	}
+	return created, nil
 }
 
 // significantMarkDeltas filters the universe to symbols whose mark

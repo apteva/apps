@@ -694,13 +694,20 @@ func (a *App) toolStrategyAssign(ctx *sdk.AppCtx, args map[string]any) (any, err
 	if _, err := dbGetPortfolio(ctx.AppDB(), pid, portfolioID); err != nil {
 		return nil, err
 	}
-	if _, err := dbGetStrategy(ctx.AppDB(), pid, strategyID); err != nil {
+	strategy, err := dbGetStrategy(ctx.AppDB(), pid, strategyID)
+	if err != nil {
 		return nil, err
+	}
+	cadence := strings.TrimSpace(strArg(args, "cadence"))
+	if cadence == "" {
+		if def, _, err := validateStrategyDefinition(strategy.Definition); err == nil {
+			cadence = strings.TrimSpace(def.Cadence)
+		}
 	}
 	id, err := dbAssignStrategy(ctx.AppDB(), &StrategyAssignment{
 		ProjectID: pid, PortfolioID: portfolioID, StrategyID: strategyID,
 		ControlMode: nonEmpty(strArg(args, "control_mode"), "strategy"),
-		Cadence:     nonEmpty(strArg(args, "cadence"), "1d"),
+		Cadence:     nonEmpty(cadence, "1d"),
 	})
 	if err != nil {
 		return nil, err

@@ -1114,6 +1114,38 @@ func dbActiveStrategyAssignment(db *sql.DB, projectID string, portfolioID int64)
 	return &a, nil
 }
 
+func dbActiveStrategyAssignments(db *sql.DB) ([]*StrategyAssignment, error) {
+	rows, err := db.Query(`
+		SELECT id, project_id, portfolio_id, strategy_id, control_mode, status,
+		       COALESCE(assigned_agent_id, 0), cadence, COALESCE(last_evaluated_at, ''),
+		       created_at, updated_at
+		FROM portfolio_strategy_assignments
+		WHERE status = 'active'
+		ORDER BY id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*StrategyAssignment
+	for rows.Next() {
+		var a StrategyAssignment
+		if err := rows.Scan(&a.ID, &a.ProjectID, &a.PortfolioID, &a.StrategyID, &a.ControlMode,
+			&a.Status, &a.AssignedAgentID, &a.Cadence, &a.LastEvaluatedAt, &a.CreatedAt, &a.UpdatedAt); err != nil {
+			return nil, err
+		}
+		out = append(out, &a)
+	}
+	return out, rows.Err()
+}
+
+func dbSetStrategyAssignmentEvaluated(db *sql.DB, id int64, at time.Time) error {
+	_, err := db.Exec(`
+		UPDATE portfolio_strategy_assignments
+		   SET last_evaluated_at = ?, updated_at = CURRENT_TIMESTAMP
+		 WHERE id = ?`, at.UTC().Format(time.RFC3339), id)
+	return err
+}
+
 func dbUnassignStrategy(db *sql.DB, projectID string, portfolioID int64) error {
 	_, err := db.Exec(`
 		UPDATE portfolio_strategy_assignments
