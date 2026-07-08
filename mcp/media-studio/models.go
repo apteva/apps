@@ -133,7 +133,15 @@ func providerScopedModels(provider string, models []modelEntry, namespace bool) 
 	return out
 }
 
+func normalizeImageModelCapability(capability string) string {
+	if strings.TrimSpace(capability) == "" {
+		return "image.generate"
+	}
+	return capability
+}
+
 func loadImageModelsForAllProviders(ctx *sdk.AppCtx, capability string) ([]modelEntry, []string, error) {
+	capability = normalizeImageModelCapability(capability)
 	h, ok := handlers[KindImage]
 	if !ok {
 		return nil, nil, nil
@@ -857,7 +865,7 @@ func (a *App) handleListModels(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unknown kind", http.StatusBadRequest)
 		return
 	}
-	if capability != "" && !(kind == KindImage && capability == "image.edit") {
+	if capability != "" && !(kind == KindImage && (capability == "image.generate" || capability == "image.edit")) {
 		http.Error(w, "unsupported capability", http.StatusBadRequest)
 		return
 	}

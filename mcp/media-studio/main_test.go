@@ -1328,6 +1328,40 @@ func TestFilterModelsForImageEditCapability(t *testing.T) {
 	}
 }
 
+func TestModelCatalogForImageDefaultUsesGenerateCapability(t *testing.T) {
+	pf := newRecordingPlatform()
+	pf.appSlug = "venice-ai"
+	pf.identity.Bindings["image_provider"] = float64(4242)
+	pf.perExecuteResults = map[string]*sdk.ExecuteResult{
+		"list_models": {
+			Success: true,
+			Status:  200,
+			Data: json.RawMessage(`{"data":[
+				{"id":"grok-imagine-image","model_spec":{"constraints":{"aspectRatios":["1:1","16:9"],"defaultAspectRatio":"1:1"}}}
+			]}`),
+		},
+	}
+	ctx := newMediaStudioCtx(t, pf)
+
+	out, err := modelCatalogForKind(ctx, KindImage, "")
+	if err != nil {
+		t.Fatalf("modelCatalogForKind: %v", err)
+	}
+	if out["bound"] != true {
+		t.Fatalf("bound = %v, want true; out=%+v", out["bound"], out)
+	}
+	models, ok := out["models"].([]modelEntry)
+	if !ok || len(models) != 1 || models[0].ID != "grok-imagine-image" {
+		t.Fatalf("models = %#v, want grok-imagine-image", out["models"])
+	}
+	if len(pf.executeCalls) != 1 {
+		t.Fatalf("ExecuteIntegrationTool calls = %d, want 1", len(pf.executeCalls))
+	}
+	if pf.executeCalls[0].Tool != "list_models" || pf.executeCalls[0].Input["type"] != "image" {
+		t.Fatalf("provider call = %+v, want list_models type=image", pf.executeCalls[0])
+	}
+}
+
 func TestBuildVeniceImageEditArgs_DropsUnsupportedModelResolution(t *testing.T) {
 	for _, model := range []string{
 		"qwen-edit",
