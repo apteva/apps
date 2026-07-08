@@ -825,18 +825,29 @@ func startStrategyBacktestRun(run *BacktestRun) (map[string]any, error) {
 	if run.Status != "queued" && run.Status != "failed" {
 		return map[string]any{"backtest": run}, nil
 	}
+	if err := initializeStrategyBacktestRun(run); err != nil {
+		return nil, err
+	}
+	next, _ := dbGetBacktestRun(globalCtx.AppDB(), run.ProjectID, run.ID)
+	return stepStrategyBacktestRun(next)
+}
+
+func initializeStrategyBacktestRun(run *BacktestRun) error {
+	if run == nil {
+		return errors.New("backtest run required")
+	}
 	if run.StrategyID <= 0 {
-		return nil, errors.New("strategy_id required")
+		return errors.New("strategy_id required")
 	}
 	strategy, err := dbGetStrategy(globalCtx.AppDB(), run.ProjectID, run.StrategyID)
 	if err != nil {
-		return nil, err
+		return err
 	}
 	if _, _, err := validateStrategyDefinition(strategy.Definition); err != nil {
-		return nil, err
+		return err
 	}
 	if err := dbSetBacktestStatus(globalCtx.AppDB(), run.ID, "running", ""); err != nil {
-		return nil, err
+		return err
 	}
 	_ = dbUpsertBacktestSnapshot(globalCtx.AppDB(), &BacktestSnapshot{
 		RunID: run.ID, Step: 0, Equity: run.StartingCash, Cash: run.StartingCash,
@@ -844,13 +855,12 @@ func startStrategyBacktestRun(run *BacktestRun) (map[string]any, error) {
 	})
 	_, _ = dbInsertBacktestEvent(globalCtx.AppDB(), run.ID, "started", "Strategy replay started", map[string]any{"strategy_id": run.StrategyID})
 	emitBacktest("trading.backtest.started", run.ID, map[string]any{"portfolio_id": run.PortfolioID, "strategy_id": run.StrategyID, "run_kind": "strategy"})
-	next, _ := dbGetBacktestRun(globalCtx.AppDB(), run.ProjectID, run.ID)
-	return stepStrategyBacktestRun(next)
+	return nil
 }
 
 func runStrategyBacktestToEnd(run *BacktestRun) (map[string]any, error) {
 	if run.Status == "queued" || run.Status == "failed" {
-		if _, err := startStrategyBacktestRun(run); err != nil {
+		if err := initializeStrategyBacktestRun(run); err != nil {
 			return nil, err
 		}
 	} else if run.Status == "paused" {
@@ -860,15 +870,31 @@ func runStrategyBacktestToEnd(run *BacktestRun) (map[string]any, error) {
 	} else if run.Status != "running" {
 		return nil, fmt.Errorf("backtest is %s; cannot run", run.Status)
 	}
+	next, err := dbGetBacktestRun(globalCtx.AppDB(), run.ProjectID, run.ID)
+	if err != nil {
+		return nil, err
+	}
+	strategy, err := dbGetStrategy(globalCtx.AppDB(), next.ProjectID, next.StrategyID)
+	if err != nil {
+		return nil, err
+	}
+	if _, _, err := validateStrategyDefinition(strategy.Definition); err != nil {
+		return nil, err
+	}
+	state, err := loadStrategyBacktestState(next)
+	if err != nil {
+		return nil, err
+	}
+	market := backtestStrategyMarket(next, next.CurrentStep)
 	for {
-		next, err := dbGetBacktestRun(globalCtx.AppDB(), run.ProjectID, run.ID)
-		if err != nil {
-			return nil, err
-		}
 		if next.Status != "running" || next.CurrentStep >= next.TotalSteps {
+			if fresh, err := dbGetBacktestRun(globalCtx.AppDB(), next.ProjectID, next.ID); err == nil && fresh != nil {
+				next = fresh
+			}
 			return map[string]any{"backtest": next, "status": next.Status}, nil
 		}
-		if _, err := stepStrategyBacktestRun(next); err != nil {
+		next, err = runStrategyBacktestStep(next, strategy, state, &market)
+		if err != nil {
 			return nil, err
 		}
 	}
@@ -939,6 +965,72 @@ func stepStrategyBacktestRun(run *BacktestRun) (map[string]any, error) {
 	return map[string]any{"backtest": next}, nil
 }
 
+func runStrategyBacktestStep(run *BacktestRun, strategy *Strategy, state *strategyBacktestState, market *strategyMarket) (*BacktestRun, error) {
+	if run == nil {
+		return nil, errors.New("backtest run required")
+	}
+	if strategy == nil {
+		return nil, errors.New("strategy required")
+	}
+	if state == nil {
+		return nil, errors.New("strategy backtest state required")
+	}
+	step := run.CurrentStep + 1
+	if step > run.TotalSteps {
+		_ = dbSetBacktestStatus(globalCtx.AppDB(), run.ID, "completed", "")
+		next := *run
+		next.Status = "completed"
+		return &next, nil
+	}
+	prices := advanceBacktestStrategyMarket(run, step, market)
+	eval, err := evaluateStrategy(strategy, *market)
+	if err != nil {
+		return nil, err
+	}
+	stepRun := *run
+	stepRun.CurrentStep = step - 1
+	orders := applyStrategyTargets(&stepRun, state, eval.TargetAllocations, prices)
+	state.Orders = append(state.Orders, orders...)
+	snap := strategySnapshot(&stepRun, step, state, prices)
+	if err := dbUpsertBacktestSnapshot(globalCtx.AppDB(), snap); err != nil {
+		return nil, err
+	}
+	status := run.Status
+	if status == "" {
+		status = "running"
+	}
+	if step >= run.TotalSteps {
+		status = "completed"
+	}
+	summary := map[string]any{
+		"last_step":          step,
+		"prices":             prices,
+		"strategy_id":        strategy.ID,
+		"strategy_name":      strategy.Name,
+		"target_allocations": eval.TargetAllocations,
+		"decisions":          eval.Decisions,
+	}
+	if err := dbAdvanceBacktestStep(globalCtx.AppDB(), run.ID, step, summary, status); err != nil {
+		return nil, err
+	}
+	_, _ = dbInsertBacktestEvent(globalCtx.AppDB(), run.ID, "step", fmt.Sprintf("Strategy step %d/%d evaluated", step, run.TotalSteps), summary)
+	if len(orders) > 0 {
+		_, _ = dbInsertBacktestEvent(globalCtx.AppDB(), run.ID, "orders", fmt.Sprintf("Strategy generated %d order(s)", len(orders)), map[string]any{"orders": orders})
+	}
+	emitBacktest("trading.backtest.tick", run.ID, map[string]any{
+		"portfolio_id": run.PortfolioID, "step": step, "total_steps": run.TotalSteps, "prices": prices, "run_kind": "strategy",
+	})
+	if status == "completed" {
+		_, _ = dbInsertBacktestEvent(globalCtx.AppDB(), run.ID, "completed", "Strategy backtest completed", summary)
+		emitBacktest("trading.backtest.completed", run.ID, map[string]any{"portfolio_id": run.PortfolioID, "run_kind": "strategy"})
+	}
+	next := *run
+	next.CurrentStep = step
+	next.Status = status
+	next.Summary = summary
+	return &next, nil
+}
+
 func loadStrategyBacktestState(run *BacktestRun) (*strategyBacktestState, error) {
 	state := &strategyBacktestState{Cash: run.StartingCash, Positions: map[string]*Position{}, Orders: []*Order{}}
 	snaps, err := dbListBacktestSnapshots(globalCtx.AppDB(), run.ID)
@@ -958,6 +1050,28 @@ func loadStrategyBacktestState(run *BacktestRun) (*strategyBacktestState, error)
 	}
 	state.Orders = append(state.Orders, last.Orders...)
 	return state, nil
+}
+
+func advanceBacktestStrategyMarket(run *BacktestRun, step int, market *strategyMarket) []map[string]any {
+	prices := backtestMarks(run, step)
+	if market == nil {
+		return prices
+	}
+	if market.history == nil {
+		market.history = map[string][]float64{}
+	}
+	market.prices = map[string]float64{}
+	market.asOf = backtestReplayTime(run, step)
+	for _, row := range prices {
+		symbol := strings.ToUpper(strings.TrimSpace(fmt.Sprint(row["symbol"])))
+		price := anyFloat(row["price"])
+		if symbol == "" || price <= 0 {
+			continue
+		}
+		market.history[symbol] = append(market.history[symbol], price)
+		market.prices[symbol] = price
+	}
+	return prices
 }
 
 func applyStrategyTargets(run *BacktestRun, state *strategyBacktestState, targets []StrategyAllocation, prices []map[string]any) []*Order {
