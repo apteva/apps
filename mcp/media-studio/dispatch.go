@@ -323,6 +323,8 @@ func (a *App) toolMediaGenerate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 			ctx.Logger().Warn("fetch media bytes failed", "url", item.UpstreamURL, "err", err)
 			continue
 		}
+		item = withSniffedImageMediaType(item, body)
+		media[i] = item
 		if h.MakeThumbnail && i == 0 {
 			if thumb := makeThumbnail(body, 256); thumb != nil {
 				firstThumbB64 = base64.StdEncoding.EncodeToString(thumb)

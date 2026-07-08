@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"image"
+	"image/jpeg"
 	"image/png"
 	"net/http"
 	"net/http/httptest"
@@ -191,6 +192,15 @@ func fakePNG() []byte {
 	img := image.NewRGBA(image.Rect(0, 0, 4, 4))
 	var buf strings.Builder
 	if err := png.Encode(&stringWriter{&buf}, img); err != nil {
+		panic(err)
+	}
+	return []byte(buf.String())
+}
+
+func fakeJPEG() []byte {
+	img := image.NewRGBA(image.Rect(0, 0, 4, 4))
+	var buf strings.Builder
+	if err := jpeg.Encode(&stringWriter{&buf}, img, &jpeg.Options{Quality: 80}); err != nil {
 		panic(err)
 	}
 	return []byte(buf.String())
@@ -1083,6 +1093,71 @@ func TestToolMediaGenerate_GPTImage_B64_StorageUpload(t *testing.T) {
 	ids := meta["storage_ids"].([]int64)
 	if len(ids) != 1 || ids[0] != 7777 {
 		t.Errorf("storage_ids = %+v", ids)
+	}
+}
+
+func TestToolMediaGenerate_VeniceB64_SniffsJPEGDespitePNGFormat(t *testing.T) {
+	jpegB64 := base64.StdEncoding.EncodeToString(fakeJPEG())
+
+	pf := newRecordingPlatform()
+	pf.appSlug = "venice-ai"
+	pf.nextExecuteResult = &sdk.ExecuteResult{
+		Success: true,
+		Status:  200,
+		Data: json.RawMessage(fmt.Sprintf(
+			`{"id":"venice-1","images":[%q],"request":{"success":true,"data":{"format":"png","model":"grok-imagine-image"}}}`,
+			jpegB64,
+		)),
+	}
+	pf.nextCallResult = json.RawMessage(
+		`{"result":{"content":[{"type":"text","text":"{\"id\":4818,\"url\":\"/files/4818\"}"}]}}`,
+	)
+
+	ctx := newMediaStudioCtx(t, pf)
+	app := &App{}
+	out, err := app.toolMediaGenerate(ctx, map[string]any{
+		"kind":   "image",
+		"prompt": "studio portrait",
+		"model":  "grok-imagine-image",
+		"options": map[string]any{
+			"format": "png",
+		},
+	})
+	if err != nil {
+		t.Fatalf("toolMediaGenerate: %v", err)
+	}
+
+	if len(pf.callAppCalls) != 1 {
+		t.Fatalf("expected 1 storage call, got %d", len(pf.callAppCalls))
+	}
+	got := pf.callAppCalls[0]
+	if got.Tool != "files_upload" {
+		t.Fatalf("storage tool = %q, want files_upload", got.Tool)
+	}
+	if ct, _ := got.Input["content_type"].(string); ct != "image/jpeg" {
+		t.Fatalf("content_type = %q, want image/jpeg; input=%+v", ct, got.Input)
+	}
+	if name, _ := got.Input["name"].(string); !strings.HasSuffix(name, ".jpg") {
+		t.Fatalf("name = %q, want .jpg suffix", name)
+	}
+	if cb, _ := got.Input["content_base64"].(string); cb != jpegB64 {
+		t.Fatalf("content_base64 changed")
+	}
+
+	res := out.(map[string]any)
+	content := res["content"].([]map[string]any)
+	var foundJPEGResource bool
+	for _, block := range content {
+		if block["type"] != "resource" {
+			continue
+		}
+		resource := block["resource"].(map[string]any)
+		if resource["mimeType"] == "image/jpeg" {
+			foundJPEGResource = true
+		}
+	}
+	if !foundJPEGResource {
+		t.Fatalf("expected image/jpeg resource block, got %+v", content)
 	}
 }
 

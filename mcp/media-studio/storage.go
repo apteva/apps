@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -38,6 +39,45 @@ func mediaBytes(m generatedMedia) ([]byte, error) {
 		return fetchBytes(m.UpstreamURL)
 	}
 	return nil, errors.New("media has neither b64 nor URL")
+}
+
+func withSniffedImageMediaType(m generatedMedia, data []byte) generatedMedia {
+	mime, ext, ok := sniffImageMediaType(data)
+	if !ok || !shouldSniffImageMediaType(m) {
+		return m
+	}
+	m.MimeType = mime
+	m.Ext = ext
+	return m
+}
+
+func shouldSniffImageMediaType(m generatedMedia) bool {
+	mt := strings.ToLower(strings.TrimSpace(m.MimeType))
+	ext := strings.ToLower(strings.TrimPrefix(strings.TrimSpace(m.Ext), "."))
+	if mt == "" || strings.HasPrefix(mt, "image/") {
+		return true
+	}
+	switch ext {
+	case "png", "jpg", "jpeg", "webp", "gif":
+		return true
+	default:
+		return false
+	}
+}
+
+func sniffImageMediaType(data []byte) (string, string, bool) {
+	switch {
+	case bytes.HasPrefix(data, []byte{0x89, 'P', 'N', 'G', 0x0d, 0x0a, 0x1a, 0x0a}):
+		return "image/png", "png", true
+	case len(data) >= 3 && data[0] == 0xff && data[1] == 0xd8 && data[2] == 0xff:
+		return "image/jpeg", "jpg", true
+	case len(data) >= 12 && bytes.Equal(data[0:4], []byte("RIFF")) && bytes.Equal(data[8:12], []byte("WEBP")):
+		return "image/webp", "webp", true
+	case bytes.HasPrefix(data, []byte("GIF87a")) || bytes.HasPrefix(data, []byte("GIF89a")):
+		return "image/gif", "gif", true
+	default:
+		return "", "", false
+	}
 }
 
 // saveToStorage hands a generated item off to the storage app. For URL

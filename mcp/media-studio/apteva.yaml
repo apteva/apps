@@ -2,12 +2,16 @@ schema: apteva-app/v1
 
 name: media-studio
 display_name: Media Studio
-version: 0.10.35
+version: 0.10.36
 description: |
   Generate images, video, audio, music, and avatars via compatible
   providers. ElevenLabs powers audio TTS, sound effects, and music.
   Optionally saves outputs to the Storage app for permanent, shareable
-  references. v0.10.35 restores default image model discovery for
+  references. v0.10.36 sniffs generated image bytes before saving so
+  provider responses that declare one format but return another are
+  stored with matching MIME metadata and filename extensions.
+
+  v0.10.35 restores default image model discovery for
   bound providers by treating an omitted image model capability as
   image.generate, so Venice and other image providers appear in the
   panel and media_models without requiring an explicit capability.
