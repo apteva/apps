@@ -41,7 +41,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: deploy
 display_name: Deploy
-version: 0.14.6
+version: 0.15.0
 description: Local-first builds and runtime supervision for Apteva projects.
 author: Apteva
 scopes: [project, global]
@@ -70,8 +70,13 @@ provides:
     - { name: deploy_init,    description: "Bind a source to a new deployment." }
     - { name: deploy_list,    description: "List deployments in this project." }
     - { name: deploy_get,     description: "Full deployment detail + builds + current release." }
+    - { name: deploy_env_list, description: "List environments for a deployment." }
+    - { name: deploy_env_create, description: "Create a staging/dev environment for a deployment." }
+    - { name: deploy_env_update, description: "Update one environment's source, env vars, build config, or domain." }
+    - { name: deploy_env_destroy, description: "Archive a non-production environment." }
     - { name: deploy_build,   description: "Fetch source, run the framework build; returns build_id." }
     - { name: deploy_release, description: "Promote a build to live." }
+    - { name: deploy_promote, description: "Promote a tested build from one environment to another." }
     - { name: deploy_status,  description: "Current build + release state, URL, last 10 builds." }
     - { name: deploy_logs,    description: "Tail build or runtime logs." }
     - { name: deploy_stop,    description: "Stop the live release." }
@@ -284,7 +289,7 @@ func (a *App) reconcileReleases() error {
 			// of the marcoschwartz.com incident — the route survived
 			// the orphan's death and pointed the domain at a port that
 			// another instance later bound.
-			a.cascadeUnregisterRoute(r.DeploymentID)
+			a.cascadeUnregisterRouteForRelease(&r)
 			continue
 		}
 		a.registry.Put(rr)
@@ -458,7 +463,7 @@ func (a *App) runBuild(d *Deployment) (*Build, error) {
 
 	// First persist a pending build row so the panel can render it
 	// while source fetch happens.
-	build, err := dbCreateBuild(globalCtx.AppDB(), d.ID, fw, d.BuildCmd)
+	build, err := dbCreateBuildForEnv(globalCtx.AppDB(), d.ID, d.EnvironmentID, fw, d.BuildCmd)
 	if err != nil {
 		return nil, err
 	}
@@ -467,7 +472,7 @@ func (a *App) runBuild(d *Deployment) (*Build, error) {
 	a.buildSem <- struct{}{}
 	defer func() { <-a.buildSem }()
 
-	emit("deploy.build.started", map[string]any{"deployment_id": d.ID, "build_id": build.ID})
+	emit("deploy.build.started", map[string]any{"deployment_id": d.ID, "environment": d.EnvironmentName, "build_id": build.ID})
 
 	buildDir := filepath.Join(a.dataDir, "builds", strconv.FormatInt(build.ID, 10))
 	srcDir := filepath.Join(buildDir, "src")
@@ -560,7 +565,7 @@ func (a *App) runBuild(d *Deployment) (*Build, error) {
 	// release time. Fastest path: re-derive at release time from
 	// the artifact (binary at dist/app, or empty for static).
 	emit("deploy.build.succeeded", map[string]any{
-		"deployment_id": d.ID, "build_id": build.ID,
+		"deployment_id": d.ID, "environment": d.EnvironmentName, "build_id": build.ID,
 		"framework": fw, "duration_ms": durMs, "size": size,
 	})
 	a.pruneBuildArtifactsAsync("build_succeeded")
@@ -574,7 +579,7 @@ func (a *App) failBuild(b *Build, msg string) *Build {
 		"error":       msg,
 	})
 	emit("deploy.build.failed", map[string]any{
-		"deployment_id": b.DeploymentID, "build_id": b.ID, "error": msg,
+		"deployment_id": b.DeploymentID, "environment_id": b.EnvironmentID, "build_id": b.ID, "error": msg,
 	})
 	out, _ := dbGetBuild(globalCtx.AppDB(), b.ID)
 	return out
@@ -613,7 +618,7 @@ func (a *App) runRelease(d *Deployment, b *Build) (*Release, error) {
 		}
 	}
 
-	rel, err := dbCreateRelease(globalCtx.AppDB(), d.ID, b.ID)
+	rel, err := dbCreateReleaseForEnv(globalCtx.AppDB(), d.ID, d.EnvironmentID, b.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -628,7 +633,7 @@ func (a *App) runRelease(d *Deployment, b *Build) (*Release, error) {
 	// EXPLICIT hints.
 	effectiveHint := d.PortHint
 	if effectiveHint == 0 {
-		if prev := a.previousReleasePort(d.ID); prev > 0 {
+		if prev := a.previousReleasePort(d.ID, d.EnvironmentID); prev > 0 {
 			effectiveHint = prev
 		}
 	}
@@ -694,7 +699,7 @@ func (a *App) runRelease(d *Deployment, b *Build) (*Release, error) {
 	})
 	_ = dbAppendReleaseEvent(globalCtx.AppDB(), rel.ID, "start", "{}")
 	emit("deploy.release.started", map[string]any{
-		"deployment_id": d.ID, "release_id": rel.ID, "port": port, "pid": rr.PID,
+		"deployment_id": d.ID, "environment": d.EnvironmentName, "release_id": rel.ID, "port": port, "pid": rr.PID,
 	})
 	a.pruneBuildArtifactsAsync("release_started")
 	return dbGetRelease(globalCtx.AppDB(), rel.ID)
@@ -725,11 +730,11 @@ func (a *App) markCrashed(releaseID int64, cause error) {
 		// Cascade: a crashed release's route would otherwise stay live
 		// in the routes-app DB pointing at a now-freed port — the next
 		// allocator pick lands on it and the wrong site is served.
-		a.cascadeUnregisterRoute(rel.DeploymentID)
+		a.cascadeUnregisterRouteForRelease(rel)
 		// Try to bring the deployment back up; autoRestart respects
 		// its own backoff + cap so a crash-loop can't stampede the
 		// supervisor.
-		go a.autoRestart(rel.DeploymentID, "process_exit")
+		go a.autoRestart(rel.DeploymentID, rel.EnvironmentID, "process_exit")
 	}
 	a.registry.Delete(releaseID)
 }
@@ -820,7 +825,7 @@ func (a *App) markStopped(releaseID int64) {
 		emit("deploy.release.stopped", map[string]any{
 			"deployment_id": rel.DeploymentID, "release_id": releaseID,
 		})
-		a.cascadeUnregisterRoute(rel.DeploymentID)
+		a.cascadeUnregisterRouteForRelease(rel)
 	}
 	a.registry.Delete(releaseID)
 }
@@ -831,11 +836,11 @@ func (a *App) markStopped(releaseID int64) {
 // re-allocatable) port — feeding straight into the cross-bleed bug
 // the routes cross-check in allocatePort guards against. Best-effort
 // — routes app missing → no-op.
-func (a *App) cascadeUnregisterRoute(deploymentID int64) {
+func (a *App) cascadeUnregisterRouteForRelease(rel *Release) {
 	if globalCtx == nil || globalCtx.AppDB() == nil {
 		return
 	}
-	d, _ := dbGetDeploymentByID(globalCtx.AppDB(), deploymentID)
+	d, _ := a.deploymentForRelease(rel)
 	if d == nil || d.Domain == "" {
 		return
 	}
@@ -961,14 +966,18 @@ func (a *App) promoteToLive(releaseID int64, pid, port int) {
 		"last_health_at": nowUTC(),
 	})
 	_ = dbAppendReleaseEvent(globalCtx.AppDB(), releaseID, "health_ok", "{}")
-	_ = dbSetCurrentRelease(globalCtx.AppDB(), rel.DeploymentID, &releaseID)
+	if rel.EnvironmentID > 0 {
+		_ = dbSetEnvironmentCurrentRelease(globalCtx.AppDB(), rel.EnvironmentID, &releaseID)
+	} else {
+		_ = dbSetCurrentRelease(globalCtx.AppDB(), rel.DeploymentID, &releaseID)
+	}
 	emit("deploy.release.live", map[string]any{
-		"deployment_id": rel.DeploymentID, "release_id": releaseID, "port": port, "pid": pid,
+		"deployment_id": rel.DeploymentID, "environment_id": rel.EnvironmentID, "release_id": releaseID, "port": port, "pid": pid,
 	})
 	// Release is healthy — clear any auto-restart backoff so the next
 	// crash starts from a fresh attempts budget.
-	a.resetAutoRestart(rel.DeploymentID)
-	d, _ := dbGetDeploymentByID(globalCtx.AppDB(), rel.DeploymentID)
+	a.resetAutoRestart(rel.DeploymentID, rel.EnvironmentID)
+	d, _ := a.deploymentForRelease(rel)
 	if d != nil && d.Domain != "" {
 		registerRouteForDeployment(globalCtx, a, d)
 	}
@@ -1045,12 +1054,12 @@ func (a *App) markPortOwnerChanged(rel *Release) {
 	_ = dbAppendReleaseEvent(globalCtx.AppDB(), rel.ID, "crash", `{"reason":"port_owner_changed"}`)
 	emit("deploy.release.crashed", a.crashEventPayload(rel, "port_owner_changed"))
 	a.registry.Delete(rel.ID)
-	a.cascadeUnregisterRoute(rel.DeploymentID)
+	a.cascadeUnregisterRouteForRelease(rel)
 	// Try to bring the deployment back up. Async so the caller (the
 	// watchdog tick) returns immediately; auto-restart respects its
 	// own backoff/cap so a tight loop on the watchdog can't pile up
 	// concurrent restart attempts for the same deployment.
-	go a.autoRestart(rel.DeploymentID, "port_owner_changed")
+	go a.autoRestart(rel.DeploymentID, rel.EnvironmentID, "port_owner_changed")
 }
 
 // ─── Auto-restart ─────────────────────────────────────────────────
@@ -1084,23 +1093,24 @@ var autoRestartBackoff = []time.Duration{5 * time.Second, 30 * time.Second, 5 * 
 //
 // Fires runRelease against the last succeeded build. Promotion to
 // "live" by the normal probe path then resets the counter.
-func (a *App) autoRestart(deploymentID int64, reason string) {
+func (a *App) autoRestart(deploymentID, environmentID int64, reason string) {
 	if globalCtx == nil || globalCtx.AppDB() == nil {
 		return
 	}
+	stateKey := autoRestartStateKey(deploymentID, environmentID)
 	a.autoRestartMu.Lock()
-	st := a.autoRestartState[deploymentID]
+	st := a.autoRestartState[stateKey]
 	if st.Paused {
 		a.autoRestartMu.Unlock()
 		return
 	}
 	if st.Attempts >= autoRestartMaxAttempts {
 		st.Paused = true
-		a.autoRestartState[deploymentID] = st
+		a.autoRestartState[stateKey] = st
 		a.autoRestartMu.Unlock()
 		_ = dbAppendReleaseEvent(globalCtx.AppDB(), 0, "auto_restart_paused", fmt.Sprintf(`{"deployment_id":%d,"attempts":%d}`, deploymentID, st.Attempts))
 		emit("deploy.auto_restart_paused", map[string]any{
-			"deployment_id": deploymentID, "attempts": st.Attempts,
+			"deployment_id": deploymentID, "environment_id": environmentID, "attempts": st.Attempts,
 			"reason": "max_attempts_reached",
 		})
 		return
@@ -1115,13 +1125,13 @@ func (a *App) autoRestart(deploymentID int64, reason string) {
 		a.autoRestartMu.Unlock()
 		go func() {
 			time.Sleep(remaining)
-			a.autoRestart(deploymentID, reason+"+backoff")
+			a.autoRestart(deploymentID, environmentID, reason+"+backoff")
 		}()
 		return
 	}
 	st.Attempts++
 	st.LastAt = time.Now().UTC()
-	a.autoRestartState[deploymentID] = st
+	a.autoRestartState[stateKey] = st
 	a.autoRestartMu.Unlock()
 
 	// Find the deployment + last succeeded build. project_id from
@@ -1131,11 +1141,18 @@ func (a *App) autoRestart(deploymentID int64, reason string) {
 	if err != nil || d == nil {
 		return
 	}
+	if environmentID > 0 {
+		env, err := dbGetEnvironment(globalCtx.AppDB(), environmentID)
+		if err != nil || env == nil {
+			return
+		}
+		d = effectiveDeploymentForEnvironment(d, env)
+	}
 	if d.Domain == "" && d.CurrentReleaseID == nil {
 		// Operator-cleared deployment; nothing to restart toward.
 		return
 	}
-	builds, err := dbListBuilds(globalCtx.AppDB(), deploymentID, 5)
+	builds, err := dbListBuildsForEnv(globalCtx.AppDB(), deploymentID, environmentID, 5)
 	if err != nil {
 		return
 	}
@@ -1150,7 +1167,7 @@ func (a *App) autoRestart(deploymentID int64, reason string) {
 		return
 	}
 	emit("deploy.auto_restart_attempted", map[string]any{
-		"deployment_id": deploymentID, "build_id": lastBuild.ID,
+		"deployment_id": deploymentID, "environment_id": environmentID, "build_id": lastBuild.ID,
 		"attempt": st.Attempts, "reason": reason,
 	})
 	_, err = a.runRelease(d, lastBuild)
@@ -1158,7 +1175,7 @@ func (a *App) autoRestart(deploymentID int64, reason string) {
 		_ = dbAppendReleaseEvent(globalCtx.AppDB(), 0, "auto_restart_failed",
 			fmt.Sprintf(`{"deployment_id":%d,"error":%q,"attempt":%d}`, deploymentID, err.Error(), st.Attempts))
 		emit("deploy.auto_restart_failed", map[string]any{
-			"deployment_id": deploymentID, "attempt": st.Attempts, "error": err.Error(),
+			"deployment_id": deploymentID, "environment_id": environmentID, "attempt": st.Attempts, "error": err.Error(),
 		})
 	}
 	// Success/failure of runRelease doesn't reset Attempts here —
@@ -1169,10 +1186,17 @@ func (a *App) autoRestart(deploymentID int64, reason string) {
 // resetAutoRestart clears the counter for a deployment. Called from
 // promoteToLive when a release reaches live, signalling the
 // deployment is healthy again.
-func (a *App) resetAutoRestart(deploymentID int64) {
+func (a *App) resetAutoRestart(deploymentID, environmentID int64) {
 	a.autoRestartMu.Lock()
 	defer a.autoRestartMu.Unlock()
-	delete(a.autoRestartState, deploymentID)
+	delete(a.autoRestartState, autoRestartStateKey(deploymentID, environmentID))
+}
+
+func autoRestartStateKey(deploymentID, environmentID int64) int64 {
+	if environmentID > 0 {
+		return -environmentID
+	}
+	return deploymentID
 }
 
 // crashEventPayload builds a richer event for downstream subscribers
@@ -1185,12 +1209,14 @@ func (a *App) crashEventPayload(rel *Release, reason string) map[string]any {
 		"release_id":    rel.ID,
 		"reason":        reason,
 	}
-	if d, err := dbGetDeploymentByID(globalCtx.AppDB(), rel.DeploymentID); err == nil && d != nil {
+	if d, err := a.deploymentForRelease(rel); err == nil && d != nil {
 		out["deployment_name"] = d.Name
 		out["domain"] = d.Domain
+		out["environment"] = d.EnvironmentName
+		out["environment_id"] = d.EnvironmentID
 	}
 	a.autoRestartMu.Lock()
-	st := a.autoRestartState[rel.DeploymentID]
+	st := a.autoRestartState[autoRestartStateKey(rel.DeploymentID, rel.EnvironmentID)]
 	a.autoRestartMu.Unlock()
 	out["auto_restart_attempts"] = st.Attempts
 	out["auto_restart_paused"] = st.Paused
@@ -1204,15 +1230,33 @@ func (a *App) crashEventPayload(rel *Release, reason string) map[string]any {
 // re-release so a deployment with no explicit PortHint still keeps
 // the same port across releases (sticky port without operator
 // having to think about it).
-func (a *App) previousReleasePort(deploymentID int64) int {
+func (a *App) previousReleasePort(deploymentID, environmentID int64) int {
 	if globalCtx == nil || globalCtx.AppDB() == nil {
 		return 0
 	}
-	rels, err := dbListReleases(globalCtx.AppDB(), deploymentID, 1)
+	rels, err := dbListReleasesForEnv(globalCtx.AppDB(), deploymentID, environmentID, 1)
 	if err != nil || len(rels) == 0 {
 		return 0
 	}
 	return rels[0].Port
+}
+
+func (a *App) deploymentForRelease(rel *Release) (*Deployment, error) {
+	if rel == nil {
+		return nil, errors.New("release required")
+	}
+	d, err := dbGetDeploymentByID(globalCtx.AppDB(), rel.DeploymentID)
+	if err != nil || d == nil {
+		return d, err
+	}
+	if rel.EnvironmentID == 0 {
+		return d, nil
+	}
+	env, err := dbGetEnvironment(globalCtx.AppDB(), rel.EnvironmentID)
+	if err != nil || env == nil {
+		return nil, err
+	}
+	return effectiveDeploymentForEnvironment(d, env), nil
 }
 
 var portMu sync.Mutex // serialise probes; the lease table is the durable claim

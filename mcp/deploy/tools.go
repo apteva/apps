@@ -49,36 +49,122 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name: "deploy_get", Handler: a.toolGet,
-			Description: "Full detail for one deployment. Args: name OR id.",
+			Description: "Full detail for one deployment environment. Args: name OR id, environment? (default production).",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"name": map[string]any{"type": "string"},
-					"id":   map[string]any{"type": "integer"},
+					"name":        map[string]any{"type": "string"},
+					"id":          map[string]any{"type": "integer"},
+					"environment": map[string]any{"type": "string"},
 				},
 			},
 		},
 		{
-			Name: "deploy_build", Handler: a.toolBuild,
-			Description: "Fetch source, run the framework build, return build_id. Args: name OR id, release? (auto-release on success).",
+			Name: "deploy_env_list", Handler: a.toolEnvList,
+			Description: "List environments for a deployment. Args: name OR id, include_archived?",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"name":    map[string]any{"type": "string"},
-					"id":      map[string]any{"type": "integer"},
-					"release": map[string]any{"type": "boolean"},
+					"name":             map[string]any{"type": "string"},
+					"id":               map[string]any{"type": "integer"},
+					"include_archived": map[string]any{"type": "boolean"},
+				},
+			},
+		},
+		{
+			Name: "deploy_env_create", Handler: a.toolEnvCreate,
+			Description: "Create a deployment environment, copying config from production unless from_environment is supplied. Args: name OR id, environment, from_environment?, source_ref?, env_json?, build_cmd?, start_cmd?, framework?, port_hint?, domain?, description?",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"name":              map[string]any{"type": "string"},
+					"id":                map[string]any{"type": "integer"},
+					"environment":       map[string]any{"type": "string"},
+					"from_environment":  map[string]any{"type": "string"},
+					"description":       map[string]any{"type": "string"},
+					"source_ref":        map[string]any{"type": "string"},
+					"source_extra_json": map[string]any{"type": "string"},
+					"framework":         map[string]any{"type": "string"},
+					"build_cmd":         map[string]any{"type": "string"},
+					"start_cmd":         map[string]any{"type": "string"},
+					"port_hint":         map[string]any{"type": "integer"},
+					"env_json":          map[string]any{"type": "string"},
+					"domain":            map[string]any{"type": "string"},
+				},
+				"required": []string{"environment"},
+			},
+		},
+		{
+			Name: "deploy_env_update", Handler: a.toolEnvUpdate,
+			Description: "Update one environment's config. Args: name OR id, environment, plus mutable fields.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"name":              map[string]any{"type": "string"},
+					"id":                map[string]any{"type": "integer"},
+					"environment":       map[string]any{"type": "string"},
+					"description":       map[string]any{"type": "string"},
+					"source_ref":        map[string]any{"type": "string"},
+					"source_extra_json": map[string]any{"type": "string"},
+					"framework":         map[string]any{"type": "string"},
+					"build_cmd":         map[string]any{"type": "string"},
+					"start_cmd":         map[string]any{"type": "string"},
+					"port_hint":         map[string]any{"type": "integer"},
+					"env_json":          map[string]any{"type": "string"},
+				},
+				"required": []string{"environment"},
+			},
+		},
+		{
+			Name: "deploy_env_destroy", Handler: a.toolEnvDestroy,
+			Description: "Archive a non-production environment and stop its live release. Args: name OR id, environment.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"name":        map[string]any{"type": "string"},
+					"id":          map[string]any{"type": "integer"},
+					"environment": map[string]any{"type": "string"},
+				},
+				"required": []string{"environment"},
+			},
+		},
+		{
+			Name: "deploy_build", Handler: a.toolBuild,
+			Description: "Fetch source, run the framework build, return build_id. Args: name OR id, environment? (default production), release? (auto-release on success).",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"name":        map[string]any{"type": "string"},
+					"id":          map[string]any{"type": "integer"},
+					"environment": map[string]any{"type": "string"},
+					"release":     map[string]any{"type": "boolean"},
 				},
 			},
 		},
 		{
 			Name: "deploy_release", Handler: a.toolRelease,
-			Description: "Promote a build_id to live. Args: build_id.",
+			Description: "Promote a build_id to live in its environment, or in the supplied target environment. Args: build_id, environment?",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"build_id": map[string]any{"type": "integer"},
+					"build_id":    map[string]any{"type": "integer"},
+					"environment": map[string]any{"type": "string"},
 				},
 				"required": []string{"build_id"},
+			},
+		},
+		{
+			Name: "deploy_promote", Handler: a.toolPromote,
+			Description: "Promote a tested build from one environment to another, usually staging -> production. Args: name OR id, source_environment? (default staging), target_environment? (default production), build_id?",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"name":               map[string]any{"type": "string"},
+					"id":                 map[string]any{"type": "integer"},
+					"source_environment": map[string]any{"type": "string"},
+					"target_environment": map[string]any{"type": "string"},
+					"build_id":           map[string]any{"type": "integer"},
+				},
 			},
 		},
 		{
@@ -87,8 +173,9 @@ func (a *App) MCPTools() []sdk.Tool {
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"name": map[string]any{"type": "string"},
-					"id":   map[string]any{"type": "integer"},
+					"name":        map[string]any{"type": "string"},
+					"id":          map[string]any{"type": "integer"},
+					"environment": map[string]any{"type": "string"},
 				},
 			},
 		},
@@ -110,8 +197,9 @@ func (a *App) MCPTools() []sdk.Tool {
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"name": map[string]any{"type": "string"},
-					"id":   map[string]any{"type": "integer"},
+					"name":        map[string]any{"type": "string"},
+					"id":          map[string]any{"type": "integer"},
+					"environment": map[string]any{"type": "string"},
 				},
 			},
 		},
@@ -121,8 +209,9 @@ func (a *App) MCPTools() []sdk.Tool {
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"name": map[string]any{"type": "string"},
-					"id":   map[string]any{"type": "integer"},
+					"name":        map[string]any{"type": "string"},
+					"id":          map[string]any{"type": "integer"},
+					"environment": map[string]any{"type": "string"},
 				},
 			},
 		},
@@ -132,12 +221,13 @@ func (a *App) MCPTools() []sdk.Tool {
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"name":   map[string]any{"type": "string"},
-					"id":     map[string]any{"type": "integer"},
-					"fqdn":   map[string]any{"type": "string"},
-					"target": map[string]any{"type": "string"},
-					"type":   map[string]any{"type": "string", "enum": []string{"CNAME", "A"}},
-					"ttl":    map[string]any{"type": "integer"},
+					"name":        map[string]any{"type": "string"},
+					"id":          map[string]any{"type": "integer"},
+					"environment": map[string]any{"type": "string"},
+					"fqdn":        map[string]any{"type": "string"},
+					"target":      map[string]any{"type": "string"},
+					"type":        map[string]any{"type": "string", "enum": []string{"CNAME", "A"}},
+					"ttl":         map[string]any{"type": "integer"},
 				},
 				"required": []string{"fqdn"},
 			},
@@ -148,8 +238,9 @@ func (a *App) MCPTools() []sdk.Tool {
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"name": map[string]any{"type": "string"},
-					"id":   map[string]any{"type": "integer"},
+					"name":        map[string]any{"type": "string"},
+					"id":          map[string]any{"type": "integer"},
+					"environment": map[string]any{"type": "string"},
 				},
 			},
 		},
@@ -177,7 +268,9 @@ func (a *App) MCPTools() []sdk.Tool {
 				"properties": map[string]any{
 					"name":              map[string]any{"type": "string"},
 					"id":                map[string]any{"type": "integer"},
+					"environment":       map[string]any{"type": "string"},
 					"description":       map[string]any{"type": "string"},
+					"source_ref":        map[string]any{"type": "string"},
 					"framework":         map[string]any{"type": "string"},
 					"build_cmd":         map[string]any{"type": "string"},
 					"start_cmd":         map[string]any{"type": "string"},
@@ -193,8 +286,9 @@ func (a *App) MCPTools() []sdk.Tool {
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"name": map[string]any{"type": "string"},
-					"id":   map[string]any{"type": "integer"},
+					"name":        map[string]any{"type": "string"},
+					"id":          map[string]any{"type": "integer"},
+					"environment": map[string]any{"type": "string"},
 				},
 			},
 		},
@@ -204,10 +298,11 @@ func (a *App) MCPTools() []sdk.Tool {
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"name":    map[string]any{"type": "string"},
-					"id":      map[string]any{"type": "integer"},
-					"env":     map[string]any{"type": "object"},
-					"restart": map[string]any{"type": "boolean"},
+					"name":        map[string]any{"type": "string"},
+					"id":          map[string]any{"type": "integer"},
+					"environment": map[string]any{"type": "string"},
+					"env":         map[string]any{"type": "object"},
+					"restart":     map[string]any{"type": "boolean"},
 				},
 			},
 		},
@@ -248,11 +343,16 @@ func (a *App) toolInit(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	env, err := dbEnsureProductionEnvironment(ctx.AppDB(), d)
+	if err != nil {
+		return nil, err
+	}
+	effective := effectiveDeploymentForEnvironment(d, env)
 	emit("deploy.created", map[string]any{
 		"deployment_id": d.ID, "name": d.Name, "source_kind": d.SourceKind,
 	})
 	if domainsOn {
-		attachRes, err := a.attachDomain(ctx, d, attachDomainSpec{FQDN: domainArg})
+		attachRes, err := a.attachDomain(ctx, effective, attachDomainSpec{FQDN: domainArg})
 		if err != nil {
 			// Don't roll back the deployment — the user can fix the
 			// domain wiring (or detach) without losing the binding.
@@ -282,19 +382,115 @@ func (a *App) toolGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	builds, _ := dbListBuilds(ctx.AppDB(), d.ID, 10)
-	releases, _ := dbListReleases(ctx.AppDB(), d.ID, 10)
+	builds, _ := dbListBuildsForEnv(ctx.AppDB(), d.ID, d.EnvironmentID, 10)
+	releases, _ := dbListReleasesForEnv(ctx.AppDB(), d.ID, d.EnvironmentID, 10)
 	var current *Release
 	if d.CurrentReleaseID != nil {
 		current, _ = dbGetRelease(ctx.AppDB(), *d.CurrentReleaseID)
 	}
+	envs, _ := dbListEnvironments(ctx.AppDB(), d.ID, false)
 	return map[string]any{
 		"deployment":      d,
+		"environments":    envs,
 		"builds":          builds,
 		"releases":        releases,
 		"current_release": current,
 		"url":             a.deploymentURL(d, current),
 	}, nil
+}
+
+func (a *App) toolEnvList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	d, err := a.lookupBaseDeployment(args)
+	if err != nil {
+		return nil, err
+	}
+	envs, err := dbListEnvironments(ctx.AppDB(), d.ID, boolArg(args, "include_archived"))
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"deployment": d, "environments": envs, "count": len(envs)}, nil
+}
+
+func (a *App) toolEnvCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	d, err := a.lookupBaseDeployment(args)
+	if err != nil {
+		return nil, err
+	}
+	name := normalizeEnvironmentName(strArg(args, "environment"))
+	if name == "" || name == defaultEnvironmentName {
+		return nil, errors.New("environment must be a non-production name")
+	}
+	fromName := normalizeEnvironmentName(strArg(args, "from_environment"))
+	from, err := dbGetEnvironmentByName(ctx.AppDB(), d.ID, fromName)
+	if err != nil {
+		return nil, err
+	}
+	if from == nil && fromName == defaultEnvironmentName {
+		from, err = dbEnsureProductionEnvironment(ctx.AppDB(), d)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if from == nil {
+		return nil, fmt.Errorf("source environment %q not found", fromName)
+	}
+	in := CreateEnvironmentInput{
+		Name: name, Description: from.Description,
+		SourceRef: from.SourceRef, SourceExtraJSON: from.SourceExtraJSON,
+		Framework: from.Framework, BuildCmd: from.BuildCmd, StartCmd: from.StartCmd,
+		PortHint: from.PortHint, EnvJSON: from.EnvJSON,
+	}
+	applyEnvironmentInputOverrides(&in, args)
+	env, err := dbCreateEnvironment(ctx.AppDB(), d.ID, in)
+	if err != nil {
+		return nil, err
+	}
+	emit("deploy.environment.created", map[string]any{"deployment_id": d.ID, "environment_id": env.ID, "environment": env.Name})
+	return map[string]any{"environment": env, "deployment": effectiveDeploymentForEnvironment(d, env)}, nil
+}
+
+func (a *App) toolEnvUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	d, env, err := a.lookupEnvironment(args)
+	if err != nil {
+		return nil, err
+	}
+	fields := environmentFieldsFromArgs(args)
+	if len(fields) == 0 {
+		return nil, errors.New("no mutable fields supplied")
+	}
+	if err := dbUpdateEnvironment(ctx.AppDB(), env.ID, fields); err != nil {
+		return nil, err
+	}
+	if env.Name == defaultEnvironmentName {
+		_ = dbUpdateDeployment(ctx.AppDB(), d.ProjectID, d.ID, fields)
+	}
+	freshEnv, _ := dbGetEnvironment(ctx.AppDB(), env.ID)
+	emit("deploy.environment.updated", map[string]any{"deployment_id": d.ID, "environment_id": env.ID, "environment": env.Name, "fields": keysOf(fields)})
+	return map[string]any{"environment": freshEnv, "deployment": effectiveDeploymentForEnvironment(d, freshEnv), "applied": keysOf(fields)}, nil
+}
+
+func (a *App) toolEnvDestroy(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	d, env, err := a.lookupEnvironment(args)
+	if err != nil {
+		return nil, err
+	}
+	if env.Name == defaultEnvironmentName {
+		return nil, errors.New("production environment cannot be destroyed")
+	}
+	effective := effectiveDeploymentForEnvironment(d, env)
+	if effective.DomainRecordID != "" || effective.Domain != "" {
+		_ = a.detachDomain(ctx, effective)
+	}
+	if env.CurrentReleaseID != nil {
+		rel, _ := dbGetRelease(ctx.AppDB(), *env.CurrentReleaseID)
+		_ = a.stopReleaseAuthoritative(rel, 5*time.Second)
+		a.markStopped(*env.CurrentReleaseID)
+	}
+	if err := dbUpdateEnvironment(ctx.AppDB(), env.ID, map[string]any{"archived_at": nowUTC(), "current_release_id": nil}); err != nil {
+		return nil, err
+	}
+	emit("deploy.environment.destroyed", map[string]any{"deployment_id": d.ID, "environment_id": env.ID, "environment": env.Name})
+	return map[string]any{"destroyed": true, "environment": env.Name, "environment_id": env.ID}, nil
 }
 
 func (a *App) toolBuild(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -336,6 +532,21 @@ func (a *App) toolRelease(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil || d == nil {
 		return nil, errors.New("deployment not found for that build")
 	}
+	if envName := strArg(args, "environment"); envName != "" {
+		env, err := dbGetEnvironmentByName(ctx.AppDB(), d.ID, envName)
+		if err != nil || env == nil {
+			return nil, fmt.Errorf("environment %q not found", normalizeEnvironmentName(envName))
+		}
+		d = effectiveDeploymentForEnvironment(d, env)
+	} else if build.EnvironmentID > 0 {
+		env, err := dbGetEnvironment(ctx.AppDB(), build.EnvironmentID)
+		if err != nil || env == nil {
+			return nil, errors.New("environment not found for that build")
+		}
+		d = effectiveDeploymentForEnvironment(d, env)
+	} else if env, err := dbEnsureProductionEnvironment(ctx.AppDB(), d); err == nil && env != nil {
+		d = effectiveDeploymentForEnvironment(d, env)
+	}
 	rel, err := a.runRelease(d, build)
 	if err != nil {
 		return nil, err
@@ -343,12 +554,76 @@ func (a *App) toolRelease(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	return map[string]any{"release": rel, "url": a.deploymentURL(d, rel)}, nil
 }
 
+func (a *App) toolPromote(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	base, err := a.lookupBaseDeployment(args)
+	if err != nil {
+		return nil, err
+	}
+	sourceName := normalizeEnvironmentName(defaultStr(strArg(args, "source_environment"), "staging"))
+	targetName := normalizeEnvironmentName(defaultStr(strArg(args, "target_environment"), defaultEnvironmentName))
+	targetEnv, err := dbGetEnvironmentByName(ctx.AppDB(), base.ID, targetName)
+	if err != nil {
+		return nil, err
+	}
+	if targetEnv == nil && targetName == defaultEnvironmentName {
+		targetEnv, err = dbEnsureProductionEnvironment(ctx.AppDB(), base)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if targetEnv == nil {
+		return nil, fmt.Errorf("target environment %q not found", targetName)
+	}
+
+	var build *Build
+	if bid := int64(intArg(args, "build_id")); bid != 0 {
+		build, err = dbGetBuild(ctx.AppDB(), bid)
+		if err != nil || build == nil || build.DeploymentID != base.ID {
+			return nil, fmt.Errorf("build %d not found for deployment", bid)
+		}
+	} else {
+		sourceEnv, err := dbGetEnvironmentByName(ctx.AppDB(), base.ID, sourceName)
+		if err != nil || sourceEnv == nil {
+			return nil, fmt.Errorf("source environment %q not found", sourceName)
+		}
+		if sourceEnv.CurrentReleaseID != nil {
+			rel, _ := dbGetRelease(ctx.AppDB(), *sourceEnv.CurrentReleaseID)
+			if rel != nil {
+				build, _ = dbGetBuild(ctx.AppDB(), rel.BuildID)
+			}
+		}
+		if build == nil {
+			builds, _ := dbListBuildsForEnv(ctx.AppDB(), base.ID, sourceEnv.ID, 10)
+			for i := range builds {
+				if builds[i].Status == "succeeded" {
+					build = &builds[i]
+					break
+				}
+			}
+		}
+	}
+	if build == nil {
+		return nil, errors.New("no succeeded source build found to promote")
+	}
+	target := effectiveDeploymentForEnvironment(base, targetEnv)
+	rel, err := a.runRelease(target, build)
+	if err != nil {
+		return nil, err
+	}
+	emit("deploy.promoted", map[string]any{
+		"deployment_id": base.ID, "build_id": build.ID,
+		"source_environment": sourceName, "target_environment": targetName,
+		"release_id": rel.ID,
+	})
+	return map[string]any{"build": build, "release": rel, "deployment": target, "url": a.deploymentURL(target, rel)}, nil
+}
+
 func (a *App) toolStatus(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	d, err := a.lookupDeployment(args)
 	if err != nil {
 		return nil, err
 	}
-	builds, _ := dbListBuilds(ctx.AppDB(), d.ID, 10)
+	builds, _ := dbListBuildsForEnv(ctx.AppDB(), d.ID, d.EnvironmentID, 10)
 	var current *Release
 	if d.CurrentReleaseID != nil {
 		current, _ = dbGetRelease(ctx.AppDB(), *d.CurrentReleaseID)
@@ -406,7 +681,11 @@ func (a *App) toolStop(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return nil, err
 	}
 	a.markStopped(rid)
-	_ = dbSetCurrentRelease(ctx.AppDB(), d.ID, nil)
+	if d.EnvironmentID > 0 {
+		_ = dbSetEnvironmentCurrentRelease(ctx.AppDB(), d.EnvironmentID, nil)
+	} else {
+		_ = dbSetCurrentRelease(ctx.AppDB(), d.ID, nil)
+	}
 	return map[string]any{"stopped": true, "release_id": rid}, nil
 }
 
@@ -414,6 +693,9 @@ func (a *App) toolDestroy(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	pid, err := resolveProjectFromArgs(args)
 	if err != nil {
 		return nil, err
+	}
+	if envName := normalizeEnvironmentName(strArg(args, "environment")); envName != defaultEnvironmentName {
+		return a.toolEnvDestroy(ctx, args)
 	}
 	d, err := a.lookupDeployment(args)
 	if err != nil {
@@ -459,7 +741,16 @@ func (a *App) toolAttachDomain(ctx *sdk.AppCtx, args map[string]any) (any, error
 		return nil, err
 	}
 	pid, _ := resolveProjectFromArgs(args)
-	out, _ := dbGetDeployment(ctx.AppDB(), pid, d.ID)
+	out := d
+	if d.EnvironmentID > 0 {
+		base, _ := dbGetDeployment(ctx.AppDB(), pid, d.ID)
+		env, _ := dbGetEnvironment(ctx.AppDB(), d.EnvironmentID)
+		if base != nil && env != nil {
+			out = effectiveDeploymentForEnvironment(base, env)
+		}
+	} else {
+		out, _ = dbGetDeployment(ctx.AppDB(), pid, d.ID)
+	}
 	return map[string]any{"deployment": out, "attach": attachRes}, nil
 }
 
@@ -494,19 +785,13 @@ func (a *App) toolListRoutes(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	}
 	out := make([]RouteEntry, 0, len(releases))
 	for _, r := range releases {
-		// Cross-project lookup: fetch the deployment without scoping.
-		// Cheap because we only have a handful of live releases.
-		row := ctx.AppDB().QueryRow(
-			`SELECT id, project_id, name, domain FROM deployments WHERE id = ?`,
-			r.DeploymentID)
-		var id int64
-		var projectID, name, domain string
-		if err := row.Scan(&id, &projectID, &name, &domain); err != nil {
+		d, err := a.deploymentForRelease(&r)
+		if err != nil || d == nil {
 			continue
 		}
 		out = append(out, RouteEntry{
-			Slug: name, ProjectID: projectID, Port: r.Port,
-			Domain: domain, Status: r.Status,
+			Slug: d.Name, ProjectID: d.ProjectID, Port: r.Port,
+			Domain: d.Domain, Status: r.Status,
 		})
 	}
 	return map[string]any{"routes": out, "count": len(out)}, nil
@@ -532,6 +817,8 @@ func (a *App) toolHealth(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	}
 	type unhealthyEntry struct {
 		DeploymentID  int64           `json:"deployment_id"`
+		EnvironmentID int64           `json:"environment_id,omitempty"`
+		Environment   string          `json:"environment,omitempty"`
 		Name          string          `json:"name"`
 		Domain        string          `json:"domain,omitempty"`
 		Status        string          `json:"status"` // crashed | failed | starting_stuck | auto_restart_paused
@@ -543,51 +830,63 @@ func (a *App) toolHealth(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	out := []unhealthyEntry{}
 	now := time.Now().UTC()
 	for _, d := range deps {
-		a.autoRestartMu.Lock()
-		ar := a.autoRestartState[d.ID]
-		a.autoRestartMu.Unlock()
-		if ar.Paused {
-			out = append(out, unhealthyEntry{
-				DeploymentID: d.ID, Name: d.Name, Domain: d.Domain,
-				Status: "auto_restart_paused", Reason: "max attempts reached",
-				AutoRestart: ar,
-			})
-			continue
-		}
-		if d.CurrentReleaseID == nil {
-			continue // no release ever → not unhealthy, just unbooted
-		}
-		rel, _ := dbGetRelease(ctx.AppDB(), *d.CurrentReleaseID)
-		if rel == nil {
-			continue
-		}
-		var entry *unhealthyEntry
-		switch rel.Status {
-		case "crashed", "failed":
-			since := 0
-			if t, err := time.Parse(time.RFC3339, rel.StoppedAt); err == nil {
-				since = int(now.Sub(t).Seconds())
+		envs, err := dbListEnvironments(ctx.AppDB(), d.ID, false)
+		if err != nil || len(envs) == 0 {
+			if env, err := dbEnsureProductionEnvironment(ctx.AppDB(), &d); err == nil && env != nil {
+				envs = []DeploymentEnvironment{*env}
 			}
-			entry = &unhealthyEntry{
-				DeploymentID: d.ID, Name: d.Name, Domain: d.Domain,
-				Status: rel.Status, ReleaseID: rel.ID,
-				Reason: rel.Error, UnhealthyForS: since,
-				AutoRestart: ar,
+		}
+		for _, env := range envs {
+			effective := effectiveDeploymentForEnvironment(&d, &env)
+			a.autoRestartMu.Lock()
+			ar := a.autoRestartState[autoRestartStateKey(d.ID, env.ID)]
+			a.autoRestartMu.Unlock()
+			if ar.Paused {
+				out = append(out, unhealthyEntry{
+					DeploymentID: d.ID, EnvironmentID: env.ID, Environment: env.Name,
+					Name: d.Name, Domain: effective.Domain,
+					Status: "auto_restart_paused", Reason: "max attempts reached",
+					AutoRestart: ar,
+				})
+				continue
 			}
-		case "starting":
-			startedAt, _ := time.Parse(time.RFC3339, rel.StartedAt)
-			if !startedAt.IsZero() && now.Sub(startedAt) > 2*time.Minute {
+			if effective.CurrentReleaseID == nil {
+				continue // no release ever → not unhealthy, just unbooted
+			}
+			rel, _ := dbGetRelease(ctx.AppDB(), *effective.CurrentReleaseID)
+			if rel == nil {
+				continue
+			}
+			var entry *unhealthyEntry
+			switch rel.Status {
+			case "crashed", "failed":
+				since := 0
+				if t, err := time.Parse(time.RFC3339, rel.StoppedAt); err == nil {
+					since = int(now.Sub(t).Seconds())
+				}
 				entry = &unhealthyEntry{
-					DeploymentID: d.ID, Name: d.Name, Domain: d.Domain,
-					Status: "starting_stuck", ReleaseID: rel.ID,
-					Reason:        "release in starting state > 2min — pid never owned port",
-					UnhealthyForS: int(now.Sub(startedAt).Seconds()),
-					AutoRestart:   ar,
+					DeploymentID: d.ID, EnvironmentID: env.ID, Environment: env.Name,
+					Name: d.Name, Domain: effective.Domain,
+					Status: rel.Status, ReleaseID: rel.ID,
+					Reason: rel.Error, UnhealthyForS: since,
+					AutoRestart: ar,
+				}
+			case "starting":
+				startedAt, _ := time.Parse(time.RFC3339, rel.StartedAt)
+				if !startedAt.IsZero() && now.Sub(startedAt) > 2*time.Minute {
+					entry = &unhealthyEntry{
+						DeploymentID: d.ID, EnvironmentID: env.ID, Environment: env.Name,
+						Name: d.Name, Domain: effective.Domain,
+						Status: "starting_stuck", ReleaseID: rel.ID,
+						Reason:        "release in starting state > 2min — pid never owned port",
+						UnhealthyForS: int(now.Sub(startedAt).Seconds()),
+						AutoRestart:   ar,
+					}
 				}
 			}
-		}
-		if entry != nil {
-			out = append(out, *entry)
+			if entry != nil {
+				out = append(out, *entry)
+			}
 		}
 	}
 	retention, _ := a.retentionStatus(ctx.AppDB())
@@ -607,34 +906,25 @@ func (a *App) toolUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	fields := map[string]any{}
-	for _, k := range []string{
-		"description", "framework", "build_cmd", "start_cmd",
-		"env_json", "source_extra_json",
-	} {
-		if v, ok := args[k].(string); ok {
-			fields[k] = v
-		}
-	}
-	if v, ok := args["port_hint"]; ok {
-		switch n := v.(type) {
-		case float64:
-			fields["port_hint"] = int(n)
-		case int:
-			fields["port_hint"] = n
-		}
-	}
+	fields := environmentFieldsFromArgs(args)
 	if len(fields) == 0 {
 		return nil, errors.New("no mutable fields supplied (allowed: description, framework, build_cmd, start_cmd, port_hint, env_json, source_extra_json)")
 	}
-	if err := dbUpdateDeployment(ctx.AppDB(), d.ProjectID, d.ID, fields); err != nil {
+	if d.EnvironmentID > 0 {
+		if err := dbUpdateEnvironment(ctx.AppDB(), d.EnvironmentID, fields); err != nil {
+			return nil, err
+		}
+		if d.EnvironmentName == defaultEnvironmentName {
+			_ = dbUpdateDeployment(ctx.AppDB(), d.ProjectID, d.ID, fields)
+		}
+	} else if err := dbUpdateDeployment(ctx.AppDB(), d.ProjectID, d.ID, fields); err != nil {
 		return nil, err
 	}
 	emit("deploy.updated", map[string]any{
 		"deployment_id": d.ID, "name": d.Name,
 		"fields": keysOf(fields),
 	})
-	fresh, _ := dbGetDeployment(ctx.AppDB(), d.ProjectID, d.ID)
+	fresh, _ := a.lookupDeployment(args)
 	return map[string]any{
 		"deployment": fresh,
 		"applied":    keysOf(fields),
@@ -665,7 +955,7 @@ func (a *App) toolRestart(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return nil, fmt.Errorf("stop: %w", err)
 	}
 	a.markStopped(rel.ID)
-	fresh, _ := dbGetDeployment(ctx.AppDB(), d.ProjectID, d.ID)
+	fresh, _ := a.lookupDeployment(args)
 	if fresh == nil {
 		fresh = d
 	}
@@ -712,7 +1002,14 @@ func (a *App) toolSetEnv(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := dbUpdateDeployment(ctx.AppDB(), d.ProjectID, d.ID, map[string]any{
+	if d.EnvironmentID > 0 {
+		if err := dbUpdateEnvironment(ctx.AppDB(), d.EnvironmentID, map[string]any{"env_json": string(merged)}); err != nil {
+			return nil, err
+		}
+		if d.EnvironmentName == defaultEnvironmentName {
+			_ = dbUpdateDeployment(ctx.AppDB(), d.ProjectID, d.ID, map[string]any{"env_json": string(merged)})
+		}
+	} else if err := dbUpdateDeployment(ctx.AppDB(), d.ProjectID, d.ID, map[string]any{
 		"env_json": string(merged),
 	}); err != nil {
 		return nil, err
@@ -752,6 +1049,28 @@ func keysOfMap(m map[string]any) []string {
 // ─── helpers ──────────────────────────────────────────────────────
 
 func (a *App) lookupDeployment(args map[string]any) (*Deployment, error) {
+	d, err := a.lookupBaseDeployment(args)
+	if err != nil {
+		return nil, err
+	}
+	envName := normalizeEnvironmentName(strArg(args, "environment"))
+	env, err := dbGetEnvironmentByName(globalCtx.AppDB(), d.ID, envName)
+	if err != nil {
+		return nil, err
+	}
+	if env == nil && envName == defaultEnvironmentName {
+		env, err = dbEnsureProductionEnvironment(globalCtx.AppDB(), d)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if env == nil {
+		return nil, fmt.Errorf("environment %q not found", envName)
+	}
+	return effectiveDeploymentForEnvironment(d, env), nil
+}
+
+func (a *App) lookupBaseDeployment(args map[string]any) (*Deployment, error) {
 	pid, err := resolveProjectFromArgs(args)
 	if err != nil {
 		return nil, err
@@ -774,6 +1093,84 @@ func (a *App) lookupDeployment(args map[string]any) (*Deployment, error) {
 		return d, nil
 	}
 	return nil, errors.New("name or id required")
+}
+
+func (a *App) lookupEnvironment(args map[string]any) (*Deployment, *DeploymentEnvironment, error) {
+	d, err := a.lookupBaseDeployment(args)
+	if err != nil {
+		return nil, nil, err
+	}
+	envName := normalizeEnvironmentName(strArg(args, "environment"))
+	env, err := dbGetEnvironmentByName(globalCtx.AppDB(), d.ID, envName)
+	if err != nil {
+		return nil, nil, err
+	}
+	if env == nil && envName == defaultEnvironmentName {
+		env, err = dbEnsureProductionEnvironment(globalCtx.AppDB(), d)
+	}
+	if err != nil {
+		return nil, nil, err
+	}
+	if env == nil {
+		return nil, nil, fmt.Errorf("environment %q not found", envName)
+	}
+	return d, env, nil
+}
+
+func applyEnvironmentInputOverrides(in *CreateEnvironmentInput, args map[string]any) {
+	if v, ok := args["description"].(string); ok {
+		in.Description = v
+	}
+	if v, ok := args["source_ref"].(string); ok {
+		in.SourceRef = v
+	}
+	if v, ok := args["source_extra_json"].(string); ok {
+		in.SourceExtraJSON = v
+	}
+	if v, ok := args["framework"].(string); ok {
+		in.Framework = v
+	}
+	if v, ok := args["build_cmd"].(string); ok {
+		in.BuildCmd = v
+	}
+	if v, ok := args["start_cmd"].(string); ok {
+		in.StartCmd = v
+	}
+	if v, ok := args["env_json"].(string); ok {
+		in.EnvJSON = v
+	}
+	if v, ok := args["domain"].(string); ok {
+		in.Domain = v
+	}
+	if v, ok := args["port_hint"]; ok {
+		switch n := v.(type) {
+		case float64:
+			in.PortHint = int(n)
+		case int:
+			in.PortHint = n
+		}
+	}
+}
+
+func environmentFieldsFromArgs(args map[string]any) map[string]any {
+	fields := map[string]any{}
+	for _, k := range []string{
+		"description", "source_ref", "source_extra_json",
+		"framework", "build_cmd", "start_cmd", "env_json",
+	} {
+		if v, ok := args[k].(string); ok {
+			fields[k] = v
+		}
+	}
+	if v, ok := args["port_hint"]; ok {
+		switch n := v.(type) {
+		case float64:
+			fields["port_hint"] = int(n)
+		case int:
+			fields["port_hint"] = n
+		}
+	}
+	return fields
 }
 
 func (a *App) deploymentURL(d *Deployment, current *Release) string {

@@ -50,6 +50,11 @@ func (a *App) handleDeploymentItem(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusNotFound, err.Error())
 		return
 	}
+	d, err = deploymentWithEnvironmentFromRequest(d, r)
+	if err != nil {
+		httpErr(w, http.StatusNotFound, err.Error())
+		return
+	}
 
 	switch {
 	case tail == "":
@@ -191,10 +196,16 @@ func (a *App) httpCreateDeployment(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	env, err := dbEnsureProductionEnvironment(globalCtx.AppDB(), d)
+	if err != nil {
+		httpErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	effective := effectiveDeploymentForEnvironment(d, env)
 	emit("deploy.created", map[string]any{"deployment_id": d.ID, "name": d.Name, "source_kind": d.SourceKind})
 	resp := map[string]any{"deployment": d}
 	if domainsOn {
-		attachRes, err := a.attachDomain(globalCtx, d, attachDomainSpec{FQDN: domainArg})
+		attachRes, err := a.attachDomain(globalCtx, effective, attachDomainSpec{FQDN: domainArg})
 		if err != nil {
 			resp["domain_error"] = err.Error()
 		} else {
@@ -211,8 +222,8 @@ func (a *App) httpCreateDeployment(w http.ResponseWriter, r *http.Request) {
 func (a *App) httpDeploymentDetail(w http.ResponseWriter, r *http.Request, d *Deployment) {
 	switch r.Method {
 	case http.MethodGet:
-		builds, _ := dbListBuilds(globalCtx.AppDB(), d.ID, 10)
-		releases, _ := dbListReleases(globalCtx.AppDB(), d.ID, 10)
+		builds, _ := dbListBuildsForEnv(globalCtx.AppDB(), d.ID, d.EnvironmentID, 10)
+		releases, _ := dbListReleasesForEnv(globalCtx.AppDB(), d.ID, d.EnvironmentID, 10)
 		var current *Release
 		if d.CurrentReleaseID != nil {
 			current, _ = dbGetRelease(globalCtx.AppDB(), *d.CurrentReleaseID)
@@ -225,6 +236,25 @@ func (a *App) httpDeploymentDetail(w http.ResponseWriter, r *http.Request, d *De
 			"url":             a.deploymentURL(d, current),
 		})
 	case http.MethodDelete:
+		if d.EnvironmentID > 0 && d.EnvironmentName != defaultEnvironmentName {
+			if d.Domain != "" || d.DomainRecordID != "" {
+				_ = a.detachDomain(globalCtx, d)
+			}
+			if d.CurrentReleaseID != nil {
+				rel, _ := dbGetRelease(globalCtx.AppDB(), *d.CurrentReleaseID)
+				_ = a.stopReleaseAuthoritative(rel, 5*time.Second)
+				a.markStopped(*d.CurrentReleaseID)
+			}
+			if err := dbUpdateEnvironment(globalCtx.AppDB(), d.EnvironmentID, map[string]any{"archived_at": nowUTC(), "current_release_id": nil}); err != nil {
+				httpErr(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			emit("deploy.environment.destroyed", map[string]any{
+				"deployment_id": d.ID, "environment_id": d.EnvironmentID, "environment": d.EnvironmentName,
+			})
+			httpJSON(w, map[string]any{"destroyed": true, "environment": d.EnvironmentName, "environment_id": d.EnvironmentID})
+			return
+		}
 		if d.CurrentReleaseID != nil {
 			if rr := a.registry.Get(*d.CurrentReleaseID); rr != nil {
 				_ = a.runtime.Stop(rr)
@@ -260,7 +290,15 @@ func (a *App) httpDeploymentPatch(w http.ResponseWriter, r *http.Request, d *Dep
 		httpErr(w, http.StatusBadRequest, "no mutable fields in body")
 		return
 	}
-	if err := dbUpdateDeployment(globalCtx.AppDB(), d.ProjectID, d.ID, body); err != nil {
+	if d.EnvironmentID > 0 {
+		if err := dbUpdateEnvironment(globalCtx.AppDB(), d.EnvironmentID, body); err != nil {
+			httpErr(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if d.EnvironmentName == defaultEnvironmentName {
+			_ = dbUpdateDeployment(globalCtx.AppDB(), d.ProjectID, d.ID, body)
+		}
+	} else if err := dbUpdateDeployment(globalCtx.AppDB(), d.ProjectID, d.ID, body); err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -268,7 +306,7 @@ func (a *App) httpDeploymentPatch(w http.ResponseWriter, r *http.Request, d *Dep
 		"deployment_id": d.ID, "name": d.Name,
 		"fields": keysOf(body),
 	})
-	fresh, _ := dbGetDeployment(globalCtx.AppDB(), d.ProjectID, d.ID)
+	fresh, _ := deploymentWithEnvironmentFromRequest(d, r)
 	httpJSON(w, map[string]any{
 		"deployment": fresh,
 		"applied":    keysOf(body),
@@ -310,7 +348,7 @@ func (a *App) httpDeploymentRestart(w http.ResponseWriter, r *http.Request, d *D
 	a.markStopped(rel.ID)
 	// Re-fetch the deployment so runRelease sees the latest env_json /
 	// port_hint / start_cmd / etc. — that's the whole point of restart.
-	fresh, _ := dbGetDeployment(globalCtx.AppDB(), d.ProjectID, d.ID)
+	fresh, _ := deploymentWithEnvironmentFromRequest(d, r)
 	if fresh == nil {
 		fresh = d
 	}
@@ -338,7 +376,7 @@ func patchBodyFromRequest(r *http.Request) (map[string]any, error) {
 	allow := map[string]bool{
 		"description": true, "framework": true,
 		"build_cmd": true, "start_cmd": true,
-		"port_hint": true, "env_json": true,
+		"port_hint": true, "env_json": true, "source_ref": true,
 		"source_extra_json": true,
 	}
 	out := map[string]any{}
@@ -440,7 +478,11 @@ func (a *App) httpDeploymentStop(w http.ResponseWriter, r *http.Request, d *Depl
 		return
 	}
 	a.markStopped(rid)
-	_ = dbSetCurrentRelease(globalCtx.AppDB(), d.ID, nil)
+	if d.EnvironmentID > 0 {
+		_ = dbSetEnvironmentCurrentRelease(globalCtx.AppDB(), d.EnvironmentID, nil)
+	} else {
+		_ = dbSetCurrentRelease(globalCtx.AppDB(), d.ID, nil)
+	}
 	httpJSON(w, map[string]any{"stopped": true, "release_id": rid})
 }
 
@@ -537,6 +579,27 @@ func lookupDeploymentByKey(projectID, key string) (*Deployment, error) {
 		return nil, errNotFound("deployment", key)
 	}
 	return d, nil
+}
+
+func deploymentWithEnvironmentFromRequest(d *Deployment, r *http.Request) (*Deployment, error) {
+	if d == nil {
+		return nil, errNotFound("deployment", "")
+	}
+	envName := normalizeEnvironmentName(r.URL.Query().Get("environment"))
+	env, err := dbGetEnvironmentByName(globalCtx.AppDB(), d.ID, envName)
+	if err != nil {
+		return nil, err
+	}
+	if env == nil && envName == defaultEnvironmentName {
+		env, err = dbEnsureProductionEnvironment(globalCtx.AppDB(), d)
+	}
+	if err != nil {
+		return nil, err
+	}
+	if env == nil {
+		return nil, errNotFound("environment", envName)
+	}
+	return effectiveDeploymentForEnvironment(d, env), nil
 }
 
 type notFoundErr struct{ kind, key string }

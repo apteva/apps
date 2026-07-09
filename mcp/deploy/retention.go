@@ -145,6 +145,11 @@ func retainedBuildIDs(db *sql.DB, rollbackCount int) (map[int64]bool, error) {
 		  JOIN releases r ON r.id = d.current_release_id
 		 WHERE r.build_id > 0
 		UNION
+		SELECT r.build_id
+		  FROM deployment_environments e
+		  JOIN releases r ON r.id = e.current_release_id
+		 WHERE r.build_id > 0
+		UNION
 		SELECT build_id
 		  FROM releases
 		 WHERE status IN ('starting','live') AND build_id > 0
@@ -164,20 +169,21 @@ func retainedBuildIDs(db *sql.DB, rollbackCount int) (map[int64]bool, error) {
 		return nil, err
 	}
 
-	rows, err = db.Query(`SELECT id, deployment_id FROM builds WHERE status = 'succeeded' ORDER BY deployment_id, id DESC`)
+	rows, err = db.Query(`SELECT id, deployment_id, COALESCE(environment_id,0) FROM builds WHERE status = 'succeeded' ORDER BY deployment_id, COALESCE(environment_id,0), id DESC`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	perDeployment := map[int64]int{}
+	perEnvironment := map[string]int{}
 	for rows.Next() {
-		var id, deploymentID int64
-		if err := rows.Scan(&id, &deploymentID); err != nil {
+		var id, deploymentID, environmentID int64
+		if err := rows.Scan(&id, &deploymentID, &environmentID); err != nil {
 			return nil, err
 		}
-		if perDeployment[deploymentID] < rollbackCount {
+		key := fmt.Sprintf("%d/%d", deploymentID, environmentID)
+		if perEnvironment[key] < rollbackCount {
 			keep[id] = true
-			perDeployment[deploymentID]++
+			perEnvironment[key]++
 		}
 	}
 	return keep, rows.Err()

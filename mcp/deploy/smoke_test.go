@@ -474,7 +474,7 @@ func openSchemaDB(t *testing.T) *sql.DB {
 	if _, err := db.Exec("PRAGMA foreign_keys = ON"); err != nil {
 		t.Fatal(err)
 	}
-	for _, mig := range []string{"migrations/001_init.sql", "migrations/002_domain_link.sql"} {
+	for _, mig := range []string{"migrations/001_init.sql", "migrations/002_domain_link.sql", "migrations/003_environments.sql"} {
 		body, err := os.ReadFile(mig)
 		if err != nil {
 			t.Fatal(err)
@@ -753,6 +753,84 @@ func TestDbListDeploymentsWithDomain(t *testing.T) {
 	}
 	if len(got) != 1 || got[0].Domain != "app.acme.com" {
 		t.Fatalf("got %d rows %+v; want 1 with app.acme.com", len(got), got)
+	}
+}
+
+func TestDeploymentEnvironmentsIsolateConfigAndReleasePointers(t *testing.T) {
+	db := openSchemaDB(t)
+	defer db.Close()
+
+	d, err := dbCreateDeployment(db, "p1", CreateDeploymentInput{
+		Name: "site", SourceKind: "local", SourceRef: "main", EnvJSON: `{"DB":"prod"}`, Domain: "mysite.com",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	prod, err := dbEnsureProductionEnvironment(db, d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	staging, err := dbCreateEnvironment(db, d.ID, CreateEnvironmentInput{
+		Name: "staging", SourceRef: "feature", EnvJSON: `{"DB":"staging"}`, Domain: "test.mysite.com",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	prodBuild, err := dbCreateBuildForEnv(db, d.ID, prod.ID, "static", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	stagingBuild, err := dbCreateBuildForEnv(db, d.ID, staging.ID, "static", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	prodRel, err := dbCreateReleaseForEnv(db, d.ID, prod.ID, prodBuild.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stagingRel, err := dbCreateReleaseForEnv(db, d.ID, staging.ID, stagingBuild.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := dbSetEnvironmentCurrentRelease(db, prod.ID, &prodRel.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := dbSetEnvironmentCurrentRelease(db, staging.ID, &stagingRel.ID); err != nil {
+		t.Fatal(err)
+	}
+
+	freshProd, _ := dbGetEnvironment(db, prod.ID)
+	freshStaging, _ := dbGetEnvironment(db, staging.ID)
+	prodDeploy := effectiveDeploymentForEnvironment(d, freshProd)
+	stagingDeploy := effectiveDeploymentForEnvironment(d, freshStaging)
+
+	if prodDeploy.SourceRef != "main" || stagingDeploy.SourceRef != "feature" {
+		t.Fatalf("source refs crossed: prod=%q staging=%q", prodDeploy.SourceRef, stagingDeploy.SourceRef)
+	}
+	if prodDeploy.Domain != "mysite.com" || stagingDeploy.Domain != "test.mysite.com" {
+		t.Fatalf("domains crossed: prod=%q staging=%q", prodDeploy.Domain, stagingDeploy.Domain)
+	}
+	if prodDeploy.CurrentReleaseID == nil || *prodDeploy.CurrentReleaseID != prodRel.ID {
+		t.Fatalf("prod current release = %v, want %d", prodDeploy.CurrentReleaseID, prodRel.ID)
+	}
+	if stagingDeploy.CurrentReleaseID == nil || *stagingDeploy.CurrentReleaseID != stagingRel.ID {
+		t.Fatalf("staging current release = %v, want %d", stagingDeploy.CurrentReleaseID, stagingRel.ID)
+	}
+
+	prodBuilds, err := dbListBuildsForEnv(db, d.ID, prod.ID, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stagingBuilds, err := dbListBuildsForEnv(db, d.ID, staging.ID, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(prodBuilds) != 1 || prodBuilds[0].ID != prodBuild.ID {
+		t.Fatalf("prod builds = %+v, want only %d", prodBuilds, prodBuild.ID)
+	}
+	if len(stagingBuilds) != 1 || stagingBuilds[0].ID != stagingBuild.ID {
+		t.Fatalf("staging builds = %+v, want only %d", stagingBuilds, stagingBuild.ID)
 	}
 }
 

@@ -354,7 +354,14 @@ func (a *App) attachDomain(ctx *sdk.AppCtx, d *Deployment, spec attachDomainSpec
 	// Persist the link. recordID stays empty when DNS was skipped or
 	// failed — detach checks for that and skips the registrar delete;
 	// re-attaching re-attempts the DNS write idempotently.
-	if err := dbSetDeploymentDomain(globalCtx.AppDB(), d.ID, fqdn, recordID, nowUTC()); err != nil {
+	if d.EnvironmentID > 0 {
+		if err := dbSetEnvironmentDomain(globalCtx.AppDB(), d.EnvironmentID, fqdn, recordID, nowUTC()); err != nil {
+			return res, err
+		}
+		if d.EnvironmentName == defaultEnvironmentName {
+			_ = dbSetDeploymentDomain(globalCtx.AppDB(), d.ID, fqdn, recordID, nowUTC())
+		}
+	} else if err := dbSetDeploymentDomain(globalCtx.AppDB(), d.ID, fqdn, recordID, nowUTC()); err != nil {
 		return res, err
 	}
 	emit("deploy.domain.attached", map[string]any{
@@ -370,9 +377,15 @@ func (a *App) attachDomain(ctx *sdk.AppCtx, d *Deployment, spec attachDomainSpec
 	// Register the hostname with platform ingress regardless of DNS
 	// state. The route only registers if a release is live
 	// (registerRouteForDeployment gates on rel.Status == "live").
-	fresh, _ := dbGetDeployment(globalCtx.AppDB(), d.ProjectID, d.ID)
-	if fresh == nil {
-		fresh = d
+	fresh := d
+	if d.EnvironmentID > 0 {
+		base, _ := dbGetDeployment(globalCtx.AppDB(), d.ProjectID, d.ID)
+		env, _ := dbGetEnvironment(globalCtx.AppDB(), d.EnvironmentID)
+		if base != nil && env != nil {
+			fresh = effectiveDeploymentForEnvironment(base, env)
+		}
+	} else if base, _ := dbGetDeployment(globalCtx.AppDB(), d.ProjectID, d.ID); base != nil {
+		fresh = base
 	}
 	if fresh.CurrentReleaseID == nil {
 		res.RouteStatus = "skipped" // No live release; registers on next deploy_release.
@@ -410,7 +423,14 @@ func (a *App) detachDomain(ctx *sdk.AppCtx, d *Deployment) error {
 			}, nil)
 		}
 	}
-	if err := dbSetDeploymentDomain(globalCtx.AppDB(), d.ID, "", "", ""); err != nil {
+	if d.EnvironmentID > 0 {
+		if err := dbSetEnvironmentDomain(globalCtx.AppDB(), d.EnvironmentID, "", "", ""); err != nil {
+			return err
+		}
+		if d.EnvironmentName == defaultEnvironmentName {
+			_ = dbSetDeploymentDomain(globalCtx.AppDB(), d.ID, "", "", "")
+		}
+	} else if err := dbSetDeploymentDomain(globalCtx.AppDB(), d.ID, "", "", ""); err != nil {
 		return err
 	}
 	// Drop the route entry so apteva-server stops proxying to a
