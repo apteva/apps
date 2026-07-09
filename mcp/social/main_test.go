@@ -666,6 +666,22 @@ func TestPostCreate_FansOutAndPublishes(t *testing.T) {
 	}
 	res := out.(map[string]any)
 	postID := res["post_id"].(int64)
+	if res["status"] != "published" {
+		t.Fatalf("post_create status = %v, want published", res["status"])
+	}
+	if res["target_count"] != 1 {
+		t.Fatalf("post_create target_count = %v, want 1", res["target_count"])
+	}
+	targets, ok := res["targets"].([]map[string]any)
+	if !ok || len(targets) != 1 {
+		t.Fatalf("post_create targets = %#v, want one detailed target", res["targets"])
+	}
+	if targets[0]["platform_post_id"] != "123" {
+		t.Fatalf("post_create target platform_post_id = %v, want 123", targets[0]["platform_post_id"])
+	}
+	if purl, _ := targets[0]["platform_url"].(string); !strings.Contains(purl, "/status/123") {
+		t.Fatalf("post_create target platform_url = %q, want twitter status URL", purl)
+	}
 
 	// post_tweet was called with text=body (Twitter's BodyField is "text").
 	var found bool

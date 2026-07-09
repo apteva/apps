@@ -719,6 +719,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"Facebook accepts {body, thumbnail_storage_id} for video posts; Instagram accepts {body, thumbnail_storage_id, thumbnail_frame_ms} for Reels; TikTok accepts videos with {body, thumbnail_frame_ms} or photo posts with {body, title, auto_add_music, photo_cover_index}. " +
 				"Use plain platform text, not Markdown formatting; most social platforms do not render Markdown. " +
 				"Body resolution per target: target.body if set, else post-level body. Top-level body may be omitted only when every target has its own non-empty body. " +
+				"Immediate publishes return targets[] with per-platform status, platform_post_id, and platform_url when available. Scheduled publishes return a local scheduled post; call post_list after it runs to get platform_url. " +
 				"Scheduled creates are idempotent: if the same profile/account/media/body/options/time already exists, the existing post is returned or its failed scheduling is retried instead of creating a duplicate. " +
 				"If scheduling fails, retry that existing post with post_retry; do not create a second post with the same args. " +
 				"Args: body? or targets[].body, schedule_at? (RFC3339; omit = post now), media_storage_ids? (file ids), media_project_id? (Storage project scope for those ids).",
@@ -1866,11 +1867,26 @@ func (a *App) toolPostCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		"status":   status,
 		"accounts": acctIDs,
 	})
-	return map[string]any{
-		"post_id": postID,
-		"status":  status,
-		"targets": len(acctIDs),
-	}, nil
+	out := map[string]any{
+		"post_id":      postID,
+		"status":       status,
+		"target_count": len(acctIDs),
+	}
+	if scheduleAt == "" {
+		if finalStatus := a.postStatus(ctx, postID); finalStatus != "" {
+			out["status"] = finalStatus
+		}
+		out["targets"] = a.loadTargets(ctx, postID)
+	} else {
+		out["targets"] = len(acctIDs)
+	}
+	return out, nil
+}
+
+func (a *App) postStatus(ctx *sdk.AppCtx, postID int64) string {
+	var status string
+	_ = ctx.AppDB().QueryRow(`SELECT status FROM posts WHERE id=?`, postID).Scan(&status)
+	return status
 }
 
 type duplicatePost struct {
