@@ -1,0 +1,63 @@
+schema: apteva-app/v1
+
+name: notes
+display_name: Notes
+version: 0.1.0
+description: |
+  Simple searchable notes for Apteva agents and human teams. Capture
+  customer ideas, meeting notes, research snippets, decisions, and
+  follow-ups with lightweight kinds, tags, source metadata, and a
+  practical project page.
+
+author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/notes
+tags: [notes, knowledge, productivity]
+
+scopes: [project, global]
+min_apteva_version: "0.10.0"
+
+requires:
+  permissions:
+    - db.write.app
+  integrations: []
+
+provides:
+  http_routes:
+    - prefix: /
+  mcp_tools:
+    - { name: notes_create, description: "Create a note. Args: title, body?, kind?, tags?, source?, metadata?." }
+    - { name: notes_get, description: "Fetch one note by id. Args: id." }
+    - { name: notes_update, description: "Patch a note. Args: id, title?, body?, kind?, tags?, source?, metadata?." }
+    - { name: notes_append, description: "Append text to a note body. Args: id, text." }
+    - { name: notes_search, description: "Search/list notes. Args: q?, kind?, tag?, status?, limit?." }
+    - { name: notes_archive, description: "Archive a note. Args: id." }
+  ui_panels:
+    - slot: project.page
+      label: Notes
+      icon: sticky-note
+      entry: /ui/NotesPanel.mjs
+  publishes:
+    - name: note.created
+      description: A note was created.
+    - name: note.updated
+      description: A note was updated.
+    - name: note.appended
+      description: Text was appended to a note.
+    - name: note.archived
+      description: A note was archived.
+
+runtime:
+  kind: source
+  source:
+    repo: github.com/apteva/apps
+    ref: main
+    entry: mcp/notes
+  port: 8080
+  health_check: /health
+
+db:
+  driver: sqlite
+  path: /data/notes.db
+  migrations: migrations/
+
+upgrade_policy: auto-patch
