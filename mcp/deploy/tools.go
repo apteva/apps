@@ -481,10 +481,8 @@ func (a *App) toolEnvDestroy(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	if effective.DomainRecordID != "" || effective.Domain != "" {
 		_ = a.detachDomain(ctx, effective)
 	}
-	if env.CurrentReleaseID != nil {
-		rel, _ := dbGetRelease(ctx.AppDB(), *env.CurrentReleaseID)
-		_ = a.stopReleaseAuthoritative(rel, 5*time.Second)
-		a.markStopped(*env.CurrentReleaseID)
+	if err := a.stopRunningReleasesForDeployment(d.ID, env.ID, 5*time.Second); err != nil {
+		return nil, err
 	}
 	if err := dbUpdateEnvironment(ctx.AppDB(), env.ID, map[string]any{"archived_at": nowUTC(), "current_release_id": nil}); err != nil {
 		return nil, err
@@ -706,12 +704,10 @@ func (a *App) toolDestroy(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if d.DomainRecordID != "" {
 		_ = a.detachDomain(ctx, d)
 	}
-	// Stop any live release first — authoritative, so the port is
-	// guaranteed free before we delete the row.
-	if d.CurrentReleaseID != nil {
-		rel, _ := dbGetRelease(ctx.AppDB(), *d.CurrentReleaseID)
-		_ = a.stopReleaseAuthoritative(rel, 5*time.Second)
-		a.markStopped(*d.CurrentReleaseID)
+	// Stop every live/starting release across every environment first
+	// so deleting the DB row cannot strand an environment process.
+	if err := a.stopRunningReleasesForDeployment(d.ID, 0, 5*time.Second); err != nil {
+		return nil, err
 	}
 	// Capture build rows before the CASCADE wipes them so artifact
 	// directories can still be deleted from disk.

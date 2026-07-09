@@ -41,7 +41,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: deploy
 display_name: Deploy
-version: 0.15.0
+version: 0.15.1
 description: Local-first builds and runtime supervision for Apteva projects.
 author: Apteva
 scopes: [project, global]
@@ -807,6 +807,28 @@ func (a *App) stopReleaseAuthoritative(rel *Release, grace time.Duration) error 
 		time.Sleep(200 * time.Millisecond)
 	}
 	return fmt.Errorf("port %d still bound after SIGKILL (pid %d, pgrp %d)", rel.Port, pid, pgid)
+}
+
+func (a *App) stopRunningReleasesForDeployment(deploymentID, environmentID int64, grace time.Duration) error {
+	if globalCtx == nil || globalCtx.AppDB() == nil {
+		return nil
+	}
+	releases, err := dbListReleasesForEnv(globalCtx.AppDB(), deploymentID, environmentID, 100000)
+	if err != nil {
+		return err
+	}
+	var firstErr error
+	for i := range releases {
+		rel := &releases[i]
+		if rel.Status != "live" && rel.Status != "starting" {
+			continue
+		}
+		if err := a.stopReleaseAuthoritative(rel, grace); err != nil && firstErr == nil {
+			firstErr = err
+		}
+		a.markStopped(rel.ID)
+	}
+	return firstErr
 }
 
 func (a *App) markStopped(releaseID int64) {

@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	tk "github.com/apteva/app-sdk/testkit"
 	_ "modernc.org/sqlite"
 )
 
@@ -831,6 +832,64 @@ func TestDeploymentEnvironmentsIsolateConfigAndReleasePointers(t *testing.T) {
 	}
 	if len(stagingBuilds) != 1 || stagingBuilds[0].ID != stagingBuild.ID {
 		t.Fatalf("staging builds = %+v, want only %d", stagingBuilds, stagingBuild.ID)
+	}
+}
+
+func TestStopRunningReleasesForDeploymentStopsAllEnvironments(t *testing.T) {
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("p1"))
+	oldGlobal := globalCtx
+	globalCtx = ctx
+	t.Cleanup(func() { globalCtx = oldGlobal })
+
+	app := &App{registry: NewSupervisorRegistry()}
+	d, err := dbCreateDeployment(ctx.AppDB(), "p1", CreateDeploymentInput{
+		Name: "site", SourceKind: "local", SourceRef: "/src", Framework: "static",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	prod, err := dbEnsureProductionEnvironment(ctx.AppDB(), d)
+	if err != nil {
+		t.Fatal(err)
+	}
+	staging, err := dbCreateEnvironment(ctx.AppDB(), d.ID, CreateEnvironmentInput{
+		Name: "staging", SourceRef: "/src", Framework: "static",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	for _, env := range []*DeploymentEnvironment{prod, staging} {
+		b, err := dbCreateBuildForEnv(ctx.AppDB(), d.ID, env.ID, "static", "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		rel, err := dbCreateReleaseForEnv(ctx.AppDB(), d.ID, env.ID, b.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := dbUpdateRelease(ctx.AppDB(), rel.ID, map[string]any{"status": "live"}); err != nil {
+			t.Fatal(err)
+		}
+		if err := dbSetEnvironmentCurrentRelease(ctx.AppDB(), env.ID, &rel.ID); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := app.stopRunningReleasesForDeployment(d.ID, 0, 5*time.Second); err != nil {
+		t.Fatal(err)
+	}
+	releases, err := dbListReleases(ctx.AppDB(), d.ID, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(releases) != 2 {
+		t.Fatalf("got %d releases, want 2", len(releases))
+	}
+	for _, rel := range releases {
+		if rel.Status != "stopped" {
+			t.Fatalf("release %d environment %d status=%q, want stopped", rel.ID, rel.EnvironmentID, rel.Status)
+		}
 	}
 }
 

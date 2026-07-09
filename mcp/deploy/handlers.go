@@ -240,10 +240,9 @@ func (a *App) httpDeploymentDetail(w http.ResponseWriter, r *http.Request, d *De
 			if d.Domain != "" || d.DomainRecordID != "" {
 				_ = a.detachDomain(globalCtx, d)
 			}
-			if d.CurrentReleaseID != nil {
-				rel, _ := dbGetRelease(globalCtx.AppDB(), *d.CurrentReleaseID)
-				_ = a.stopReleaseAuthoritative(rel, 5*time.Second)
-				a.markStopped(*d.CurrentReleaseID)
+			if err := a.stopRunningReleasesForDeployment(d.ID, d.EnvironmentID, 5*time.Second); err != nil {
+				httpErr(w, http.StatusInternalServerError, err.Error())
+				return
 			}
 			if err := dbUpdateEnvironment(globalCtx.AppDB(), d.EnvironmentID, map[string]any{"archived_at": nowUTC(), "current_release_id": nil}); err != nil {
 				httpErr(w, http.StatusInternalServerError, err.Error())
@@ -255,11 +254,9 @@ func (a *App) httpDeploymentDetail(w http.ResponseWriter, r *http.Request, d *De
 			httpJSON(w, map[string]any{"destroyed": true, "environment": d.EnvironmentName, "environment_id": d.EnvironmentID})
 			return
 		}
-		if d.CurrentReleaseID != nil {
-			if rr := a.registry.Get(*d.CurrentReleaseID); rr != nil {
-				_ = a.runtime.Stop(rr)
-			}
-			a.markStopped(*d.CurrentReleaseID)
+		if err := a.stopRunningReleasesForDeployment(d.ID, 0, 5*time.Second); err != nil {
+			httpErr(w, http.StatusInternalServerError, err.Error())
+			return
 		}
 		builds, _ := dbListBuilds(globalCtx.AppDB(), d.ID, 100000)
 		_ = dbDeleteDeployment(globalCtx.AppDB(), d.ProjectID, d.ID)
