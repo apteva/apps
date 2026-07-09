@@ -939,6 +939,8 @@ function AccountsView({
       {adding && (
         <AddAccountDialog
           platforms={platforms}
+          activeProfile={activeProfile}
+          projectId={projectId}
           onClose={() => setAdding(false)}
           setStatus={setStatus}
           onReuseExisting={(pendingId, connId) => {
@@ -2123,9 +2125,11 @@ function HealthPill({ account }: { account: SocialAccount }) {
 }
 
 function AddAccountDialog({
-  platforms, onClose, setStatus, onReuseExisting,
+  platforms, activeProfile, projectId, onClose, setStatus, onReuseExisting,
 }: {
   platforms: PlatformInfo[];
+  activeProfile: Profile | null;
+  projectId?: string | null;
   onClose: () => void;
   setStatus: (s: string) => void;
   onReuseExisting: (pendingId: number, connectionId: number) => void;
@@ -2136,6 +2140,8 @@ function AddAccountDialog({
   // sits on top of the header — so users never saw the message and
   // it looked like 'popup flashed and closed for no reason'.
   const [err, setErr] = useState<string>("");
+  const zernioConnected = platforms.some((p) => !!p.zernio_available);
+  const visiblePlatforms = zernioConnected ? platforms : platforms.filter((p) => !p.provider_only);
 
   const start = (p: PlatformInfo, provider: "native" | "zernio" = "native") => {
     const canStart = provider === "zernio" ? !!p.zernio_available : p.available;
@@ -2173,13 +2179,15 @@ function AddAccountDialog({
         try { popup.close(); } catch {}
       };
       try {
-        const res = await fetch(appURL("/accounts/start"), {
+        const payload: Record<string, any> = provider === "zernio"
+          ? { platform: p.platform, provider: "zernio" }
+          : { platform: p.platform };
+        if (activeProfile?.id) payload.profile_id = activeProfile.id;
+        const res = await fetch(appURL("/accounts/start", projectId), {
           method: "POST",
           credentials: "same-origin",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(provider === "zernio"
-            ? { platform: p.platform, provider: "zernio" }
-            : { platform: p.platform }),
+          body: JSON.stringify(payload),
         });
         if (!res.ok) {
           fail(`Start failed (HTTP ${res.status}): ${await res.text()}`);
@@ -2245,7 +2253,7 @@ function AddAccountDialog({
           </div>
         )}
         <div className="flex flex-col gap-1">
-          {platforms.map((p) => {
+          {visiblePlatforms.map((p) => {
             const directDisabled = !p.available || !!busy;
             const zernioDisabled = !p.zernio_available || !!busy;
             return (
@@ -2274,14 +2282,16 @@ function AddAccountDialog({
                       Direct
                     </button>
                   )}
-                  <button
-                    onClick={() => start(p, "zernio")}
-                    disabled={zernioDisabled}
-                    title={!p.zernio_available ? "Connect Zernio in Settings → Integrations to enable provider-backed accounts." : undefined}
-                    className="px-2.5 py-1 border border-border rounded text-xs text-text hover:border-accent disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:border-border"
-                  >
-                    Zernio
-                  </button>
+                  {zernioConnected && (
+                    <button
+                      onClick={() => start(p, "zernio")}
+                      disabled={zernioDisabled}
+                      title={!p.zernio_available ? "Connect Zernio in Settings → Integrations to enable provider-backed accounts." : undefined}
+                      className="px-2.5 py-1 border border-border rounded text-xs text-text hover:border-accent disabled:opacity-40 disabled:cursor-not-allowed disabled:hover:border-border"
+                    >
+                      Zernio
+                    </button>
+                  )}
                 </div>
               </div>
             );

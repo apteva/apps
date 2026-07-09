@@ -264,6 +264,105 @@ func TestAccountAdd_RollsBackPendingOnStartOAuthError(t *testing.T) {
 	}
 }
 
+func TestAccountAdd_ReusedPickerConnectionPreservesProfileID(t *testing.T) {
+	ctx := newSocialCtx(t, newRecordingPlatform())
+	app := &App{}
+
+	defaultOut, err := app.toolProfileCreate(ctx, map[string]any{"name": "Default Brand"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defaultProfile := defaultOut.(map[string]any)["profile"].(*Profile)
+	selectedOut, err := app.toolProfileCreate(ctx, map[string]any{"name": "Selected Brand"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	selectedProfile := selectedOut.(map[string]any)["profile"].(*Profile)
+
+	_, err = ctx.AppDB().Exec(
+		`INSERT INTO social_accounts (project_id, platform, connection_id, display_name, status, profile_id)
+		 VALUES ('test-proj', 'facebook', 42, 'Existing Page', 'active', ?)`,
+		defaultProfile.ID,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := app.toolAccountAdd(ctx, map[string]any{
+		"platform":   "facebook",
+		"profile_id": selectedProfile.ID,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res := out.(map[string]any)
+	if res["reused_connection"] != int64(42) {
+		t.Fatalf("expected reused connection 42, got %+v", res)
+	}
+	pendingID := res["pending_account_id"].(int64)
+
+	var gotProfileID int64
+	if err := ctx.AppDB().QueryRow(
+		`SELECT profile_id FROM pending_accounts WHERE id=?`,
+		pendingID,
+	).Scan(&gotProfileID); err != nil {
+		t.Fatal(err)
+	}
+	if gotProfileID != selectedProfile.ID {
+		t.Fatalf("pending profile_id = %d, want selected profile %d", gotProfileID, selectedProfile.ID)
+	}
+}
+
+func TestHandleAccountsStart_ForwardsProfileID(t *testing.T) {
+	ctx := newSocialCtx(t, newRecordingPlatform())
+	app := &App{}
+
+	defaultOut, err := app.toolProfileCreate(ctx, map[string]any{"name": "Default Brand"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defaultProfile := defaultOut.(map[string]any)["profile"].(*Profile)
+	selectedOut, err := app.toolProfileCreate(ctx, map[string]any{"name": "Selected Brand"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	selectedProfile := selectedOut.(map[string]any)["profile"].(*Profile)
+
+	_, err = ctx.AppDB().Exec(
+		`INSERT INTO social_accounts (project_id, platform, connection_id, display_name, status, profile_id)
+		 VALUES ('test-proj', 'facebook', 42, 'Existing Page', 'active', ?)`,
+		defaultProfile.ID,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	body := fmt.Sprintf(`{"platform":"facebook","profile_id":%d}`, selectedProfile.ID)
+	req := httptest.NewRequest(http.MethodPost, "/accounts/start?project_id=test-proj", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rr := httptest.NewRecorder()
+	app.handleAccountsStart(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatalf("status = %d, body = %s", rr.Code, rr.Body.String())
+	}
+
+	var res map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &res); err != nil {
+		t.Fatal(err)
+	}
+	pendingID := int64(res["pending_account_id"].(float64))
+	var gotProfileID int64
+	if err := ctx.AppDB().QueryRow(
+		`SELECT profile_id FROM pending_accounts WHERE id=?`,
+		pendingID,
+	).Scan(&gotProfileID); err != nil {
+		t.Fatal(err)
+	}
+	if gotProfileID != selectedProfile.ID {
+		t.Fatalf("pending profile_id = %d, want selected profile %d", gotProfileID, selectedProfile.ID)
+	}
+}
+
 // --- account_list_pending_pages ------------------------------------
 
 func TestListPendingPages_RequiresOAuthComplete(t *testing.T) {
@@ -567,6 +666,22 @@ func TestPostCreate_FansOutAndPublishes(t *testing.T) {
 	}
 	res := out.(map[string]any)
 	postID := res["post_id"].(int64)
+	if res["status"] != "published" {
+		t.Fatalf("post_create status = %v, want published", res["status"])
+	}
+	if res["target_count"] != 1 {
+		t.Fatalf("post_create target_count = %v, want 1", res["target_count"])
+	}
+	targets, ok := res["targets"].([]map[string]any)
+	if !ok || len(targets) != 1 {
+		t.Fatalf("post_create targets = %#v, want one detailed target", res["targets"])
+	}
+	if targets[0]["platform_post_id"] != "123" {
+		t.Fatalf("post_create target platform_post_id = %v, want 123", targets[0]["platform_post_id"])
+	}
+	if purl, _ := targets[0]["platform_url"].(string); !strings.Contains(purl, "/status/123") {
+		t.Fatalf("post_create target platform_url = %q, want twitter status URL", purl)
+	}
 
 	// post_tweet was called with text=body (Twitter's BodyField is "text").
 	var found bool
