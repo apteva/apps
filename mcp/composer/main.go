@@ -28,7 +28,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: composer
 display_name: Composer
-version: 0.5.5
+version: 0.5.6
 description: |
   Multi-clip video compositions with a structured timeline panel,
   universal generated-asset clip editing, first-class AI avatar clips,
@@ -57,6 +57,12 @@ description: |
   styling, UI editing, and animation presets rendered after visual
   concatenation. Typewriter and word-by-word overlay presets render as real
   time-gated reveal steps instead of a full-text fade.
+  The stable V1 renderer supports Shotstack-style layered visual tracks:
+  the first visual track is the fullscreen base track, and additional visual
+  tracks render timed image/video PIP or B-roll layers using clip-level fit,
+  position, offset, width, height, scale, opacity, z_index, and layout alias
+  fields. Overlay/PIP video audio is muted by default unless source_audio is
+  explicitly set to keep.
   Renders locally via ffmpeg, on a render host via instances, or against a
   bound render_executor integration.
 author: Apteva

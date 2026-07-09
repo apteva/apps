@@ -4,15 +4,15 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 )
 
-// Canonical Edit JSON. The renderer supports one visual track and any
-// number of timed audio tracks. Visual clips are concatenated in track
-// order; audio clips use their start offsets and are mixed over the
-// visual track audio. The schema intentionally stays close to SaaS
-// render APIs (Shotstack/Creatomate-style tracks and clips) while
-// keeping unsupported features explicit in validation.
+// Canonical Edit JSON. The renderer supports a primary visual track, optional
+// additional visual tracks as timed layers, and any number of timed audio
+// tracks. The schema intentionally stays close to SaaS render APIs
+// (Shotstack/Creatomate-style tracks and clips) while keeping unsupported
+// features explicit in validation.
 
 type Edit struct {
 	Timeline Timeline `json:"timeline"`
@@ -45,6 +45,16 @@ type Clip struct {
 	Start           float64     `json:"start"`  // seconds from composition start
 	Length          float64     `json:"length"` // seconds
 	Duration        float64     `json:"duration,omitempty"`
+	Fit             string      `json:"fit,omitempty"`     // crop|contain|cover|stretch|none
+	Width           float64     `json:"width,omitempty"`   // pixels; values 0..1 are treated as viewport-relative
+	Height          float64     `json:"height,omitempty"`  // pixels; values 0..1 are treated as viewport-relative
+	Scale           float64     `json:"scale,omitempty"`   // multiplier after fit sizing
+	Opacity         float64     `json:"opacity,omitempty"` // 0..1, default 1
+	Offset          *Offset     `json:"offset,omitempty"`  // Shotstack-style viewport-relative offset
+	Layout          *ClipLayout `json:"layout,omitempty"`  // Composer convenience alias, normalized at render time
+	ZIndex          int         `json:"z_index,omitempty"` // optional per-track ordering hint
+	BorderRadius    float64     `json:"border_radius,omitempty"`
+	Shadow          bool        `json:"shadow,omitempty"`
 	DurationMode    string      `json:"duration_mode,omitempty"` // fixed_trim_pad | fit_generated | fit_generated_keep_start | fit_generated_reflow
 	EstimatedLength float64     `json:"estimated_length,omitempty"`
 	ActualLength    float64     `json:"actual_length,omitempty"`
@@ -178,9 +188,49 @@ type TextAlign struct {
 }
 
 type Position struct {
+	Name   string `json:"-"`
 	X      string `json:"x,omitempty"`      // percent or pixels, e.g. 50%
 	Y      string `json:"y,omitempty"`      // percent or pixels, e.g. 50%
 	Anchor string `json:"anchor,omitempty"` // top-left|top|top-right|left|center|right|bottom-left|bottom|bottom-right
+}
+
+func (p *Position) UnmarshalJSON(b []byte) error {
+	var s string
+	if err := json.Unmarshal(b, &s); err == nil {
+		p.Name = s
+		p.Anchor = s
+		return nil
+	}
+	type rawPosition Position
+	var raw rawPosition
+	if err := json.Unmarshal(b, &raw); err != nil {
+		return err
+	}
+	*p = Position(raw)
+	return nil
+}
+
+type Offset struct {
+	X float64 `json:"x,omitempty"`
+	Y float64 `json:"y,omitempty"`
+}
+
+type ClipLayout struct {
+	Fit          string   `json:"fit,omitempty"`
+	X            *float64 `json:"x,omitempty"`
+	Y            *float64 `json:"y,omitempty"`
+	Width        float64  `json:"width,omitempty"`
+	Height       float64  `json:"height,omitempty"`
+	Anchor       string   `json:"anchor,omitempty"`
+	Position     string   `json:"position,omitempty"`
+	Margin       float64  `json:"margin,omitempty"`
+	MarginX      float64  `json:"margin_x,omitempty"`
+	MarginY      float64  `json:"margin_y,omitempty"`
+	Opacity      float64  `json:"opacity,omitempty"`
+	Scale        float64  `json:"scale,omitempty"`
+	BorderRadius float64  `json:"border_radius,omitempty"`
+	Shadow       bool     `json:"shadow,omitempty"`
+	ZIndex       int      `json:"z_index,omitempty"`
 }
 
 type Animation struct {
@@ -246,9 +296,6 @@ func validateEdit(e *Edit) error {
 		tt := trackKind(*track)
 		if tt == "visual" {
 			visualTracks++
-			if visualTracks > 1 {
-				return errors.New("composer currently renders one visual track plus optional audio tracks")
-			}
 		} else if tt != "audio" && tt != "overlay" {
 			return fmt.Errorf("track[%d]: unsupported track.type %q (use visual, audio, or overlay/text)", ti, track.Type)
 		}
@@ -287,6 +334,12 @@ func validateEdit(e *Edit) error {
 			}
 			if c.Volume < 0 || c.Volume > 1 {
 				return fmt.Errorf("track[%d].clip[%d]: volume must be 0..1", ti, i)
+			}
+			if c.Opacity < 0 || c.Opacity > 1 {
+				return fmt.Errorf("track[%d].clip[%d]: opacity must be 0..1", ti, i)
+			}
+			if err := validateClipLayout(c); err != nil {
+				return fmt.Errorf("track[%d].clip[%d]: %w", ti, i, err)
 			}
 			switch strings.ToLower(strings.TrimSpace(c.SourceAudio)) {
 			case "", "auto", "keep", "mute":
@@ -443,8 +496,8 @@ func validateTextStyle(c *Clip) error {
 		}
 	}
 	if c.Position != nil {
-		switch strings.ToLower(strings.TrimSpace(c.Position.Anchor)) {
-		case "", "top-left", "top", "top-right", "left", "center", "right", "bottom-left", "bottom", "bottom-right":
+		switch normalizePositionName(c.Position.Anchor) {
+		case "", "topleft", "top", "topright", "left", "center", "right", "bottomleft", "bottom", "bottomright":
 		default:
 			return fmt.Errorf("position.anchor must be one of top-left|top|top-right|left|center|right|bottom-left|bottom|bottom-right (got %q)", c.Position.Anchor)
 		}
@@ -567,8 +620,9 @@ func resolutionWH(resolution, aspect string) (w, h int) {
 	return
 }
 
-// editDurationSeconds returns the visible composition duration. The
-// visual track duration is concatenated; timed audio tracks can extend it.
+// editDurationSeconds returns the visible composition duration. The primary
+// visual track duration is concatenated; timed visual overlays, timed audio
+// tracks, and text overlays can extend it.
 func editDurationSeconds(e *Edit) float64 {
 	if e == nil || len(e.Timeline.Tracks) == 0 {
 		return 0
@@ -577,6 +631,11 @@ func editDurationSeconds(e *Edit) float64 {
 	if vt := primaryVisualTrack(e); vt != nil {
 		for _, c := range vt.Clips {
 			d += clipDuration(c)
+		}
+	}
+	for _, ref := range visualOverlayClipRefs(e) {
+		if end := ref.clip.Start + clipDuration(ref.clip); end > d {
+			d = end
 		}
 	}
 	for _, c := range audioTimelineClips(e) {
@@ -592,16 +651,25 @@ func editDurationSeconds(e *Edit) float64 {
 	return d
 }
 
-func primaryVisualTrack(e *Edit) *Track {
+func visualTracks(e *Edit) []*Track {
 	if e == nil {
 		return nil
 	}
+	out := []*Track{}
 	for i := range e.Timeline.Tracks {
 		if trackKind(e.Timeline.Tracks[i]) == "visual" {
-			return &e.Timeline.Tracks[i]
+			out = append(out, &e.Timeline.Tracks[i])
 		}
 	}
-	return nil
+	return out
+}
+
+func primaryVisualTrack(e *Edit) *Track {
+	tracks := visualTracks(e)
+	if len(tracks) == 0 {
+		return nil
+	}
+	return tracks[0]
 }
 
 func audioTimelineClips(e *Edit) []Clip {
@@ -632,6 +700,66 @@ func textOverlayClips(e *Edit) []Clip {
 	return out
 }
 
+type visualClipRef struct {
+	trackIndex int
+	clipIndex  int
+	inputIndex int
+	base       bool
+	clip       Clip
+}
+
+func visualClipRefs(e *Edit) []visualClipRef {
+	tracks := visualTracks(e)
+	refs := []visualClipRef{}
+	inputIdx := 0
+	for ti, t := range tracks {
+		for ci, c := range t.Clips {
+			refs = append(refs, visualClipRef{
+				trackIndex: ti,
+				clipIndex:  ci,
+				inputIndex: inputIdx,
+				base:       ti == 0,
+				clip:       c,
+			})
+			inputIdx++
+		}
+	}
+	return refs
+}
+
+func visualOverlayClipRefs(e *Edit) []visualClipRef {
+	refs := visualClipRefs(e)
+	out := []visualClipRef{}
+	for _, ref := range refs {
+		if !ref.base {
+			out = append(out, ref)
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		zi := clipZIndex(out[i].clip)
+		zj := clipZIndex(out[j].clip)
+		if zi != zj {
+			return zi < zj
+		}
+		if out[i].trackIndex != out[j].trackIndex {
+			return out[i].trackIndex < out[j].trackIndex
+		}
+		return out[i].clipIndex < out[j].clipIndex
+	})
+	return out
+}
+
+func totalVisualClipCount(e *Edit) int {
+	return len(visualClipRefs(e))
+}
+
+func clipZIndex(c Clip) int {
+	if c.Layout != nil && c.Layout.ZIndex != 0 {
+		return c.Layout.ZIndex
+	}
+	return c.ZIndex
+}
+
 func trackKind(t Track) string {
 	switch strings.ToLower(strings.TrimSpace(t.Type)) {
 	case "", "visual", "video":
@@ -655,6 +783,39 @@ func trackKind(t Track) string {
 		return "overlay"
 	default:
 		return strings.ToLower(strings.TrimSpace(t.Type))
+	}
+}
+
+func validateClipLayout(c *Clip) error {
+	if c == nil {
+		return nil
+	}
+	if err := validateFit(c.Fit); err != nil {
+		return err
+	}
+	if c.Width < 0 || c.Height < 0 || c.Scale < 0 || c.BorderRadius < 0 {
+		return errors.New("layout width/height/scale/border_radius must be >= 0")
+	}
+	if c.Layout != nil {
+		if err := validateFit(c.Layout.Fit); err != nil {
+			return err
+		}
+		if c.Layout.Width < 0 || c.Layout.Height < 0 || c.Layout.Margin < 0 || c.Layout.MarginX < 0 || c.Layout.MarginY < 0 || c.Layout.Scale < 0 || c.Layout.BorderRadius < 0 {
+			return errors.New("layout width/height/margin/scale/border_radius must be >= 0")
+		}
+		if c.Layout.Opacity < 0 || c.Layout.Opacity > 1 {
+			return errors.New("layout.opacity must be 0..1")
+		}
+	}
+	return nil
+}
+
+func validateFit(fit string) error {
+	switch strings.ToLower(strings.TrimSpace(fit)) {
+	case "", "crop", "contain", "cover", "stretch", "none":
+		return nil
+	default:
+		return fmt.Errorf("fit must be crop|contain|cover|stretch|none (got %q)", fit)
 	}
 }
 

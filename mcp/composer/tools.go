@@ -21,7 +21,7 @@ func (a *App) MCPTools() []sdk.Tool {
 	return []sdk.Tool{
 		{
 			Name:        "composition_create",
-			Description: "Create a V1 timeline composition. Args: name?, tracks, soundtrack?, background?, output?. Clips support AI generation, source_images, audio tracks, overlays, and audio-only outputs. Returns {id, version, duration_seconds}.",
+			Description: "Create a V1 timeline composition. Args: name?, tracks, soundtrack?, background?, output?. The first visual track is the fullscreen base layer; additional visual tracks render timed image/video layers with clip-level fit, position, offset, width, height, scale, opacity, z_index, or layout. Clips also support AI generation, source_images, audio tracks, text overlays, and audio-only outputs. Returns {id, version, duration_seconds}.",
 			InputSchema: schemaObject(map[string]any{
 				"name":       map[string]any{"type": "string"},
 				"tracks":     map[string]any{"type": "array"},
@@ -33,7 +33,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "composition_update",
-			Description: "Patch a V1 composition. Args: id, patch. Send subset of {name, tracks, soundtrack, background, output}.",
+			Description: "Patch a V1 composition. Args: id, patch. Send subset of {name, tracks, soundtrack, background, output}. Visual clips may use Shotstack-style layout fields or Composer's layout alias.",
 			InputSchema: schemaObject(map[string]any{
 				"id":    map[string]any{"type": "integer"},
 				"patch": map[string]any{"type": "object"},

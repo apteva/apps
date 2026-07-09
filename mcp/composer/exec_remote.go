@@ -58,8 +58,10 @@ func (e *remoteFFmpegExecutor) Render(
 	audioClips := audioTimelineClips(edit)
 	urls := []string{}
 	if track != nil {
-		urls = make([]string, 0, len(track.Clips)+len(audioClips)+1)
-		for i, c := range track.Clips {
+		visualRefs := visualClipRefs(edit)
+		urls = make([]string, 0, len(visualRefs)+len(audioClips)+1)
+		for i, ref := range visualRefs {
+			c := ref.clip
 			url, err := resolveAssetURL(app, c.Asset.Src)
 			if err != nil {
 				return Result{}, fmt.Errorf("visual clip[%d]: resolve %q: %w", i, c.Asset.Src, err)
@@ -95,7 +97,7 @@ func (e *remoteFFmpegExecutor) Render(
 	soundtrackIdx := -1
 	if edit.Timeline.Soundtrack != nil {
 		if track != nil {
-			soundtrackIdx = len(track.Clips) + remoteAudioCount
+			soundtrackIdx = totalVisualClipCount(edit) + remoteAudioCount
 		} else {
 			soundtrackIdx = remoteAudioCount
 		}
@@ -108,7 +110,7 @@ func (e *remoteFFmpegExecutor) Render(
 	if track == nil {
 		args = buildLocalAudioFFmpegArgs(edit, output, localPaths, soundtrackIdx, "./out."+output.Format)
 	} else {
-		args = buildLocalFFmpegArgsWithAudioInfo(edit, output, localPaths, soundtrackIdx, "./out."+output.Format, remoteVisualAudioDefaults(track))
+		args = buildLocalFFmpegArgsWithAudioInfo(edit, output, localPaths, soundtrackIdx, "./out."+output.Format, remoteVisualAudioDefaults(edit))
 	}
 	cmd := shellEcho("ffmpeg", args)
 
@@ -143,13 +145,14 @@ func (e *remoteFFmpegExecutor) Render(
 	}, nil
 }
 
-func remoteVisualAudioDefaults(track *Track) []bool {
-	if track == nil {
+func remoteVisualAudioDefaults(edit *Edit) []bool {
+	refs := visualClipRefs(edit)
+	if len(refs) == 0 {
 		return nil
 	}
-	out := make([]bool, len(track.Clips))
-	for i, c := range track.Clips {
-		out[i] = clipAssetType(c, "visual") == "video" && visualClipMayUseSourceAudio(c)
+	out := make([]bool, len(refs))
+	for i, ref := range refs {
+		out[i] = clipAssetType(ref.clip, "visual") == "video" && visualClipMayUseSourceAudioForLayer(ref.clip, ref.base)
 	}
 	return out
 }

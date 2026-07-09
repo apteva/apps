@@ -40,14 +40,17 @@ func TestValidateEdit_AcceptsAudioTrack(t *testing.T) {
 	}
 }
 
-func TestValidateEdit_RejectsSecondVisualTrack(t *testing.T) {
+func TestValidateEdit_AcceptsLayeredVisualTracks(t *testing.T) {
 	body := `{"timeline":{"tracks":[
 		{"type":"visual","clips":[{"asset":{"type":"video","src":"storage:1"},"start":0,"length":1}]},
-		{"type":"visual","clips":[{"asset":{"type":"video","src":"storage:2"},"start":0,"length":1}]}
+		{"type":"visual","clips":[{"asset":{"type":"video","src":"storage:2"},"start":0,"length":1,"position":"bottomLeft","width":0.25}]}
 	]}}`
-	_, err := parseEditJSON(body)
-	if err == nil || !strings.Contains(err.Error(), "one visual track") {
-		t.Fatalf("want second visual track rejection, got %v", err)
+	edit, err := parseEditJSON(body)
+	if err != nil {
+		t.Fatalf("expected layered visual tracks to validate, got %v", err)
+	}
+	if got := len(visualOverlayClipRefs(edit)); got != 1 {
+		t.Fatalf("overlay visual refs = %d, want 1", got)
 	}
 }
 
@@ -179,6 +182,28 @@ func TestEditDuration_Sum(t *testing.T) {
 	}
 }
 
+func TestEditDuration_IncludesVisualOverlayEnd(t *testing.T) {
+	e, _ := parseEditJSON(`{"timeline":{"tracks":[
+		{"type":"visual","clips":[{"asset":{"src":"x","type":"image"},"start":0,"length":2}]},
+		{"type":"visual","clips":[{"asset":{"src":"y","type":"video"},"start":3,"length":4,"source_audio":"mute"}]}
+	]}}`)
+	if got := editDurationSeconds(e); got != 7 {
+		t.Errorf("duration = %v, want overlay end 7", got)
+	}
+}
+
+func TestVisualOverlayClipRefsSortByZIndex(t *testing.T) {
+	e, _ := parseEditJSON(`{"timeline":{"tracks":[
+		{"type":"visual","clips":[{"uid":"base","asset":{"src":"x","type":"image"},"start":0,"length":5}]},
+		{"type":"visual","clips":[{"uid":"top","asset":{"src":"y","type":"image"},"start":0,"length":5,"z_index":20}]},
+		{"type":"visual","clips":[{"uid":"under","asset":{"src":"z","type":"image"},"start":0,"length":5,"z_index":10}]}
+	]}}`)
+	refs := visualOverlayClipRefs(e)
+	if len(refs) != 2 || refs[0].clip.UID != "under" || refs[1].clip.UID != "top" {
+		t.Fatalf("overlay order = %+v, want under then top", refs)
+	}
+}
+
 // --- ffmpeg cmd builder ------------------------------------------
 
 func TestBuildLocalFFmpegArgs_TwoClipsBasic(t *testing.T) {
@@ -212,6 +237,51 @@ func TestBuildLocalFFmpegArgs_ImageClipUsesLoop(t *testing.T) {
 	}
 	if !strings.Contains(cmd, "anullsrc") {
 		t.Errorf("image clip should synthesize silent audio: %s", cmd)
+	}
+}
+
+func TestBuildLocalFFmpegArgs_LayeredVisualOverlay(t *testing.T) {
+	e, err := parseEditJSON(`{"timeline":{"tracks":[
+		{"type":"visual","clips":[{"asset":{"src":"https://bg","type":"image"},"start":0,"length":10,"fit":"crop"}]},
+		{"type":"visual","clips":[{"asset":{"src":"https://pip","type":"video"},"start":2,"length":5,"position":"bottomLeft","offset":{"x":0.05,"y":0.05},"width":320,"height":180,"fit":"crop"}]}
+	]}}`)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	args := buildLocalFFmpegArgsWithAudioInfo(e, defaultOutput(), []string{"https://bg", "https://pip"}, -1, "out.mp4", []bool{false, true})
+	cmd := strings.Join(args, " ")
+	if !strings.Contains(cmd, "-loop 1 -t 10 -i https://bg") {
+		t.Fatalf("base image should be looped for its duration: %s", cmd)
+	}
+	if !strings.Contains(cmd, "[1:v]format=rgba,scale=320:180:force_original_aspect_ratio=increase,crop=320:180") {
+		t.Fatalf("overlay video should be scaled/cropped to requested box: %s", cmd)
+	}
+	if !strings.Contains(cmd, "overlay=x=64:y=504:enable='between(t\\,2\\,7)'") {
+		t.Fatalf("overlay should be positioned and time-gated: %s", cmd)
+	}
+	if strings.Contains(cmd, "[1:a]") {
+		t.Fatalf("overlay video should default to muted audio: %s", cmd)
+	}
+}
+
+func TestBuildLocalFFmpegArgs_LayeredVisualOverlayKeepsExplicitAudio(t *testing.T) {
+	e, err := parseEditJSON(`{"timeline":{"tracks":[
+		{"type":"visual","clips":[{"asset":{"src":"https://bg","type":"image"},"start":0,"length":6}]},
+		{"type":"visual","clips":[{"asset":{"src":"https://pip","type":"video"},"start":1,"length":3,"source_audio":"keep","layout":{"fit":"contain","width":0.25,"anchor":"bottom-right","margin":36,"opacity":0.5}}]}
+	]}}`)
+	if err != nil {
+		t.Fatalf("parse: %v", err)
+	}
+	args := buildLocalFFmpegArgsWithAudioInfo(e, defaultOutput(), []string{"https://bg", "https://pip"}, -1, "out.mp4", []bool{false, true})
+	cmd := strings.Join(args, " ")
+	if !strings.Contains(cmd, "[1:a]apad,atrim=duration=3") || !strings.Contains(cmd, "adelay=1000|1000") {
+		t.Fatalf("explicit overlay source_audio keep should mix timed overlay audio: %s", cmd)
+	}
+	if !strings.Contains(cmd, "colorchannelmixer=aa=0.5") {
+		t.Fatalf("layout opacity should apply to visual overlay: %s", cmd)
+	}
+	if !strings.Contains(cmd, "overlay=x=924:y=504:enable='between(t\\,1\\,4)'") {
+		t.Fatalf("layout anchor/margin/width should position bottom-right: %s", cmd)
 	}
 }
 
@@ -372,7 +442,7 @@ func TestBuildLocalFFmpegArgs_TextOverlayTrack(t *testing.T) {
 	if !strings.Contains(cmd, "alpha='(if(lt(t\\,1)") {
 		t.Fatalf("fade animation should emit alpha expression: %s", cmd)
 	}
-	if !strings.Contains(cmd, "[vcat]drawtext") || !strings.Contains(cmd, "[vtxt0];[vtxt0]null[vout]") {
+	if !strings.Contains(cmd, "[vbase]drawtext") || !strings.Contains(cmd, "[vtxt0];[vtxt0]null[vout]") {
 		t.Fatalf("text overlay should apply after visual concat: %s", cmd)
 	}
 }

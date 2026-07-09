@@ -81,15 +81,17 @@ func (e *localFFmpegExecutor) Render(
 
 	// Resolve every clip's asset to a URL. ffmpeg accepts https:// inputs
 	// natively (movflags+frag work); no need to download first.
-	inputs := make([]string, 0, len(visual.Clips)+len(audioClips)+1)
-	visualHasAudio := make([]bool, len(visual.Clips))
-	for i, c := range visual.Clips {
+	visualRefs := visualClipRefs(edit)
+	inputs := make([]string, 0, len(visualRefs)+len(audioClips)+1)
+	visualHasAudio := make([]bool, len(visualRefs))
+	for i, ref := range visualRefs {
+		c := ref.clip
 		url, err := resolveAssetLocal(app, c.Asset.Src)
 		if err != nil {
 			cleanup()
 			return Result{}, fmt.Errorf("visual clip[%d]: resolve %q: %w", i, c.Asset.Src, err)
 		}
-		visualHasAudio[i] = visualClipMayUseSourceAudio(c) && probeMediaHasAudio(url)
+		visualHasAudio[i] = visualClipMayUseSourceAudioForLayer(c, ref.base) && probeMediaHasAudio(url)
 		inputs = append(inputs, url)
 	}
 	for i, c := range audioClips {
@@ -170,11 +172,29 @@ func buildLocalFFmpegArgsWithAudioInfo(edit *Edit, output Output, inputs []strin
 	}
 	audioClips := audioTimelineClips(edit)
 	visualCount := len(track.Clips)
+	visualRefs := visualClipRefs(edit)
+	totalVisuals := len(visualRefs)
 
 	args := []string{"-y", "-loglevel", "error"}
 
 	// One -i per input.
 	for i, src := range inputs {
+		if i < totalVisuals {
+			ref := visualRefs[i]
+			if clipAssetType(ref.clip, "visual") == "image" {
+				args = append(args,
+					"-loop", "1",
+					"-t", trimFloat(clipDuration(ref.clip)),
+					"-i", src,
+				)
+				continue
+			}
+			if visualClipLoopsForSlot(ref.clip) {
+				args = append(args, "-stream_loop", "-1")
+			}
+			args = append(args, "-i", src)
+			continue
+		}
 		// Images need -loop 1 + -t to behave as fixed-length stills.
 		if i < visualCount && clipAssetType(track.Clips[i], "visual") == "image" {
 			args = append(args,
@@ -245,9 +265,29 @@ func buildLocalFFmpegArgsWithAudioInfo(edit *Edit, output Output, inputs []strin
 		fmt.Fprintf(&filter, "[v%d][a%d]", i, i)
 	}
 	fmt.Fprintf(&filter, "concat=n=%d:v=1:a=1[vcat][acat];", n)
+	baseDuration := baseVisualDuration(track)
+	totalDuration := editDurationSeconds(edit)
+	if totalDuration > baseDuration+0.001 {
+		fmt.Fprintf(&filter, "[vcat]tpad=stop_mode=clone:stop_duration=%s[vbase];", trimFloat(totalDuration-baseDuration))
+	} else {
+		filter.WriteString("[vcat]null[vbase];")
+	}
 
 	mixLabels := []string{"[acat]"}
-	audioInputCursor := visualCount
+	audioInputCursor := totalVisuals
+	for oi, ref := range visualOverlayClipRefs(edit) {
+		idx := ref.inputIndex
+		c := ref.clip
+		if !visualClipUsesSourceAudioForLayer(c, visualHasAudioAt(visualHasAudio, idx, c), false) {
+			continue
+		}
+		delayMS := int(c.Start * 1000)
+		if delayMS < 0 {
+			delayMS = 0
+		}
+		writeTimedAudioFilter(&filter, idx, c, delayMS, fmt.Sprintf("ova%d", oi))
+		mixLabels = append(mixLabels, fmt.Sprintf("[ova%d]", oi))
+	}
 	for i, c := range audioClips {
 		delayMS := int(c.Start * 1000)
 		if delayMS < 0 {
@@ -282,7 +322,12 @@ func buildLocalFFmpegArgsWithAudioInfo(edit *Edit, output Output, inputs []strin
 	} else {
 		filter.WriteString("[acat]anull[aout];")
 	}
-	videoLabel := "vcat"
+	videoLabel := "vbase"
+	for i, ref := range visualOverlayClipRefs(edit) {
+		outLabel := fmt.Sprintf("vov%d", i)
+		filter.WriteString(buildVisualOverlayChain(ref.inputIndex, videoLabel, outLabel, ref.clip, w, h, output.FPS))
+		videoLabel = outLabel
+	}
 	for i, c := range textOverlayClips(edit) {
 		outLabel := fmt.Sprintf("vtxt%d", i)
 		filter.WriteString(buildTimedDrawTextChain(videoLabel, outLabel, c, w, h))
@@ -319,6 +364,29 @@ func visualClipUsesSourceAudio(c Clip, hasAudio bool) bool {
 	return visualClipMayUseSourceAudio(c)
 }
 
+func visualClipUsesSourceAudioForLayer(c Clip, hasAudio bool, base bool) bool {
+	if !hasAudio || clipAssetType(c, "visual") != "video" {
+		return false
+	}
+	return visualClipMayUseSourceAudioForLayer(c, base)
+}
+
+func visualClipMayUseSourceAudioForLayer(c Clip, base bool) bool {
+	if c.AI != nil && boolOption(c.AI.Options, "no_sound") {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(c.SourceAudio)) {
+	case "mute":
+		return false
+	case "keep":
+		return true
+	case "auto", "":
+		return base
+	default:
+		return false
+	}
+}
+
 func visualClipMayUseSourceAudio(c Clip) bool {
 	switch strings.ToLower(strings.TrimSpace(c.SourceAudio)) {
 	case "mute":
@@ -330,6 +398,183 @@ func visualClipMayUseSourceAudio(c Clip) bool {
 		return false
 	}
 	return true
+}
+
+func baseVisualDuration(track *Track) float64 {
+	if track == nil {
+		return 0
+	}
+	var out float64
+	for _, c := range track.Clips {
+		out += clipDuration(c)
+	}
+	return out
+}
+
+type resolvedClipLayout struct {
+	fit     string
+	x       int
+	y       int
+	width   int
+	height  int
+	opacity float64
+}
+
+func buildVisualOverlayChain(inputIdx int, baseLabel, outLabel string, c Clip, canvasW, canvasH, fps int) string {
+	layout := resolveClipLayout(c, canvasW, canvasH)
+	d := trimFloat(clipDuration(c))
+	start := trimFloat(c.Start)
+	end := trimFloat(c.Start + clipDuration(c))
+	chain := visualFitFilter(layout, fps)
+	if layout.opacity < 1 {
+		chain += ",colorchannelmixer=aa=" + trimFloat(layout.opacity)
+	}
+	return fmt.Sprintf("[%d:v]%s,trim=duration=%s,setpts=PTS-STARTPTS+%s/TB[ov%d];[%s][ov%d]overlay=x=%d:y=%d:enable='between(t\\,%s\\,%s)':eof_action=pass[%s];",
+		inputIdx, chain, d, start, inputIdx, baseLabel, inputIdx, layout.x, layout.y, start, end, outLabel)
+}
+
+func visualFitFilter(layout resolvedClipLayout, fps int) string {
+	w := layout.width
+	h := layout.height
+	switch layout.fit {
+	case "contain":
+		return fmt.Sprintf("format=rgba,scale=%d:%d:force_original_aspect_ratio=decrease,pad=%d:%d:(ow-iw)/2:(oh-ih)/2:color=black@0,setsar=1,fps=%d", w, h, w, h, fps)
+	case "cover", "stretch":
+		return fmt.Sprintf("format=rgba,scale=%d:%d,setsar=1,fps=%d", w, h, fps)
+	case "none":
+		return fmt.Sprintf("format=rgba,scale=%d:%d:force_original_aspect_ratio=decrease,setsar=1,fps=%d", w, h, fps)
+	default: // crop
+		return fmt.Sprintf("format=rgba,scale=%d:%d:force_original_aspect_ratio=increase,crop=%d:%d,setsar=1,fps=%d", w, h, w, h, fps)
+	}
+}
+
+func resolveClipLayout(c Clip, canvasW, canvasH int) resolvedClipLayout {
+	width := measureClipLayoutValue(c.Width, canvasW)
+	height := measureClipLayoutValue(c.Height, canvasH)
+	fit := strings.ToLower(strings.TrimSpace(c.Fit))
+	opacity := c.Opacity
+	scale := c.Scale
+	position := clipPositionName(c.Position)
+	marginX, marginY := 0, 0
+	var explicitX, explicitY *float64
+	if l := c.Layout; l != nil {
+		if l.Fit != "" {
+			fit = strings.ToLower(strings.TrimSpace(l.Fit))
+		}
+		if l.Width > 0 {
+			width = measureClipLayoutValue(l.Width, canvasW)
+		}
+		if l.Height > 0 {
+			height = measureClipLayoutValue(l.Height, canvasH)
+		}
+		if l.Scale > 0 {
+			scale = l.Scale
+		}
+		if l.Opacity > 0 {
+			opacity = l.Opacity
+		}
+		if l.Anchor != "" {
+			position = l.Anchor
+		}
+		if l.Position != "" {
+			position = l.Position
+		}
+		margin := int(l.Margin + 0.5)
+		marginX, marginY = margin, margin
+		if l.MarginX > 0 {
+			marginX = int(l.MarginX + 0.5)
+		}
+		if l.MarginY > 0 {
+			marginY = int(l.MarginY + 0.5)
+		}
+		explicitX, explicitY = l.X, l.Y
+	}
+	if fit == "" {
+		fit = "crop"
+	}
+	if opacity <= 0 {
+		opacity = 1
+	}
+	if scale <= 0 {
+		scale = 1
+	}
+	if width <= 0 && height <= 0 {
+		width, height = canvasW, canvasH
+	} else if width <= 0 {
+		width = int(float64(height) * 16.0 / 9.0)
+	} else if height <= 0 {
+		height = int(float64(width) * 9.0 / 16.0)
+	}
+	width = int(float64(width)*scale + 0.5)
+	height = int(float64(height)*scale + 0.5)
+	if width < 2 {
+		width = 2
+	}
+	if height < 2 {
+		height = 2
+	}
+	x, y := anchorPosition(position, canvasW, canvasH, width, height, marginX, marginY)
+	if c.Offset != nil {
+		x += int(c.Offset.X * float64(canvasW))
+		y -= int(c.Offset.Y * float64(canvasH))
+	}
+	if explicitX != nil {
+		x = measureClipLayoutValue(*explicitX, canvasW)
+	}
+	if explicitY != nil {
+		y = measureClipLayoutValue(*explicitY, canvasH)
+	}
+	return resolvedClipLayout{fit: fit, x: x, y: y, width: width, height: height, opacity: opacity}
+}
+
+func measureClipLayoutValue(v float64, viewport int) int {
+	if v <= 0 {
+		return 0
+	}
+	if v <= 1 {
+		return int(v*float64(viewport) + 0.5)
+	}
+	return int(v + 0.5)
+}
+
+func clipPositionName(pos *Position) string {
+	if pos == nil {
+		return ""
+	}
+	if strings.TrimSpace(pos.Name) != "" {
+		return pos.Name
+	}
+	return pos.Anchor
+}
+
+func normalizePositionName(s string) string {
+	s = strings.ToLower(strings.TrimSpace(s))
+	s = strings.ReplaceAll(s, "-", "")
+	s = strings.ReplaceAll(s, "_", "")
+	return s
+}
+
+func anchorPosition(position string, canvasW, canvasH, boxW, boxH, marginX, marginY int) (int, int) {
+	switch normalizePositionName(position) {
+	case "topleft":
+		return marginX, marginY
+	case "top":
+		return (canvasW - boxW) / 2, marginY
+	case "topright":
+		return canvasW - boxW - marginX, marginY
+	case "left":
+		return marginX, (canvasH - boxH) / 2
+	case "right":
+		return canvasW - boxW - marginX, (canvasH - boxH) / 2
+	case "bottomleft":
+		return marginX, canvasH - boxH - marginY
+	case "bottom":
+		return (canvasW - boxW) / 2, canvasH - boxH - marginY
+	case "bottomright":
+		return canvasW - boxW - marginX, canvasH - boxH - marginY
+	default:
+		return (canvasW - boxW) / 2, (canvasH - boxH) / 2
+	}
 }
 
 func boolOption(options map[string]any, key string) bool {
