@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	sdk "github.com/apteva/app-sdk"
 )
@@ -35,6 +36,9 @@ func buildVeniceVideoQueueArgs(args map[string]any) (map[string]any, error) {
 		return nil, errors.New("model required (call list_models?type=video for the live set)")
 	}
 	prompt := strArg(args, "prompt", "")
+	if count := utf8.RuneCountInString(prompt); count > veniceVideoPromptCharLimit {
+		return nil, fmt.Errorf("%d characters exceeds Venice's %d-character video prompt limit", count, veniceVideoPromptCharLimit)
+	}
 	duration := strArg(args, "duration", "")
 	if duration == "" {
 		// Default to a short clip if the agent didn't specify.
@@ -134,13 +138,13 @@ func normalizeVideoResponse(slug, capability string, raw json.RawMessage) ([]gen
 // inserts a video_jobs row tagged with the kind + role, emits a
 // queued event, and shapes the MCP response. The worker (worker.go)
 // takes it from here, routing the poll by kind.
-func (a *App) handleAsyncQueueResponse(ctx *sdk.AppCtx, kind, role, providerSlug string, args map[string]any, queueID, model string) any {
+func (a *App) handleAsyncQueueResponse(ctx *sdk.AppCtx, kind, role, providerSlug string, connectionID int64, args map[string]any, queueID, model string) any {
 	if globalCtx == nil {
 		return mcpError("app not mounted")
 	}
 	pid := projectScopeFromArgs(ctx, args)
 	prompt := strArg(args, "prompt", "")
-	sourceRef := strArg(args, "_source_image_ref", "")
+	sourceRef := persistedMediaRef(strArg(args, "_source_image_ref", ""))
 	cacheKey := strArg(args, "cache_key", "")
 	storageFolder := strArg(args, "_storage_folder", "")
 	estimatedSeconds := estimatedDurationSeconds(kind, args)
@@ -160,10 +164,10 @@ func (a *App) handleAsyncQueueResponse(ctx *sdk.AppCtx, kind, role, providerSlug
 
 	result, err := globalCtx.AppDB().Exec(
 		`INSERT INTO video_jobs
-			(project_id, kind, role, queue_id, provider, model, prompt,
+			(project_id, kind, role, connection_id, queue_id, provider, model, prompt,
 			 source_image_ref, request_json, status, cost_usd, cache_key, estimated_duration_seconds, generation_id)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?)`,
-		pid, kind, role, queueID, providerSlug, model, prompt, sourceRef, requestJSON, costUSD, cacheKey, estimatedSeconds, draftID,
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?, ?, ?)`,
+		pid, kind, role, connectionID, queueID, providerSlug, model, prompt, sourceRef, requestJSON, costUSD, cacheKey, estimatedSeconds, draftID,
 	)
 	if err != nil {
 		ctx.Logger().Warn("video_jobs insert failed", "err", err)
@@ -210,8 +214,9 @@ func (a *App) handleAsyncQueueResponse(ctx *sdk.AppCtx, kind, role, providerSlug
 		"estimated_duration_seconds": estimatedSeconds,
 	}
 	if refs, ok := args["_source_image_refs"].([]string); ok && len(refs) > 0 {
-		meta["source_image_refs"] = refs
-		meta["source_image_ref"] = refs[0]
+		safeRefs := persistedMediaRefs(refs)
+		meta["source_image_refs"] = safeRefs
+		meta["source_image_ref"] = safeRefs[0]
 	} else if sourceRef != "" {
 		meta["source_image_ref"] = sourceRef
 		meta["source_image_refs"] = []string{sourceRef}
@@ -411,7 +416,7 @@ func (a *App) handleListVideoJobs(w http.ResponseWriter, r *http.Request) {
 		args = append(args, statusFilter)
 	} else {
 		// Default: in-flight + recently-failed (last 24h).
-		q += ` AND (status IN ('queued','polling','failed') OR updated_at > datetime('now','-1 day'))`
+		q += ` AND (status IN ('queued','polling','finalizing','failed') OR updated_at > datetime('now','-1 day'))`
 	}
 	q += ` ORDER BY id DESC LIMIT 100`
 
@@ -470,3 +475,5 @@ func videoJobMarkComplete(ctx *sdk.AppCtx, jobID, storageID, generationID int64,
 		ctx.Logger().Warn("video_jobs complete update failed", "id", jobID, "err", err)
 	}
 }
+
+const veniceVideoPromptCharLimit = 2500

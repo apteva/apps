@@ -1,9 +1,11 @@
 package main
 
 import (
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"os"
 	"strconv"
@@ -182,6 +184,11 @@ func (a *App) toolMediaGenerate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	estimatedSeconds := estimatedDurationSeconds(kind, args)
 	pid := projectScope(ctx)
 	if wantsDraft(args) {
+		for _, ref := range sourceImageRefs(args) {
+			if isInlineMediaRef(ref) {
+				return mcpError("draft source images must use storage:N or an HTTP(S) URL"), nil
+			}
+		}
 		return a.createDraftGeneration(ctx, args, kind, prompt, estimatedSeconds), nil
 	}
 	cacheKey := strings.TrimSpace(strArg(args, "cache_key", ""))
@@ -220,6 +227,9 @@ func (a *App) toolMediaGenerate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	if kind == KindVideo && bound.AppSlug == "venice-ai" {
 		normalizeVeniceVideoDurationForModel(ctx, args, capability)
 		estimatedSeconds = estimatedDurationSeconds(kind, args)
+	}
+	if err := validateProviderPrompt(ctx, bound, kind, capability, args); err != nil {
+		return mcpError("prompt: " + err.Error()), nil
 	}
 	requestJSON := generationRequestJSON(args)
 
@@ -298,7 +308,7 @@ func (a *App) toolMediaGenerate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 		}
 		args["_draft_generation_id"] = draftID
 		args["_request_json"] = requestJSON
-		return a.handleAsyncQueueResponse(ctx, kind, h.Role, bound.AppSlug, args, queueID, modelEcho), nil
+		return a.handleAsyncQueueResponse(ctx, kind, h.Role, bound.AppSlug, bound.ConnectionID, args, queueID, modelEcho), nil
 	}
 
 	model := strArg(args, "model", "")
@@ -310,6 +320,10 @@ func (a *App) toolMediaGenerate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	storageIDs := make([]int64, 0, len(media))
 	upstreamURLs := make([]string, 0, len(media))
 	var firstThumbB64 string
+	var firstBody []byte
+	var firstExt string
+	firstStored := false
+	storageWarnings := []string{}
 	var totalDurationMs int64
 	var totalActualSeconds float64
 
@@ -325,6 +339,10 @@ func (a *App) toolMediaGenerate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 		}
 		item = withSniffedImageMediaType(item, body)
 		media[i] = item
+		if i == 0 {
+			firstBody = append([]byte(nil), body...)
+			firstExt = item.Ext
+		}
 		if h.MakeThumbnail && i == 0 {
 			if thumb := makeThumbnail(body, 256); thumb != nil {
 				firstThumbB64 = base64.StdEncoding.EncodeToString(thumb)
@@ -335,10 +353,14 @@ func (a *App) toolMediaGenerate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 			id, err := saveToStorage(ctx, item, storageFolder, bound.AppSlug, i)
 			if err != nil {
 				ctx.Logger().Warn("storage save failed", "err", err)
+				storageWarnings = append(storageWarnings, fmt.Sprintf("item %d: %v", i, err))
 				continue
 			}
 			if id != 0 {
 				storageIDs = append(storageIDs, id)
+				if i == 0 {
+					firstStored = true
+				}
 			}
 		}
 	}
@@ -347,6 +369,9 @@ func (a *App) toolMediaGenerate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	extraJSON := encodeExtras(kind, args)
 	if providerRequestID != "" {
 		extraJSON = addExtraJSONField(extraJSON, "provider_request_id", providerRequestID)
+	}
+	if len(storageWarnings) > 0 {
+		extraJSON = addExtraJSONField(extraJSON, "storage_warning", strings.Join(storageWarnings, "; "))
 	}
 	costUSD := computeGenerationCost(ctx, bound, kind, capability, model, args)
 	record := generationRecord{
@@ -380,13 +405,11 @@ func (a *App) toolMediaGenerate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 		genID = a.dbInsertGeneration(record)
 	}
 
-	// When storage is unbound, persist the full first-item bytes to
-	// the sidecar's local cache so the panel can render them at native
-	// resolution (instead of falling back to the lossy thumbnail).
+	// Keep a full local copy whenever the first item did not reach Storage.
 	// Only the first item — multi-variant cases will need a richer
 	// cache key if/when we render more than one image per row.
-	if storage == nil && genID > 0 && len(media) > 0 && media[0].B64 != "" {
-		if err := writeLocalCache(genID, media[0].B64, media[0].Ext); err != nil {
+	if !firstStored && genID > 0 && len(firstBody) > 0 {
+		if err := writeLocalCache(genID, base64.StdEncoding.EncodeToString(firstBody), firstExt); err != nil {
 			ctx.Logger().Warn("writeLocalCache failed", "gen_id", genID, "err", err)
 		}
 	}
@@ -584,7 +607,7 @@ func generationRequestJSON(args map[string]any) string {
 		case "mode", "defer", "draft_id", "generation_id":
 			continue
 		}
-		req[k] = v
+		req[k] = persistedRequestValue(k, v)
 	}
 	if _, ok := req["project_id"]; !ok {
 		if v := strArg(args, "_project_id", ""); v != "" {
@@ -596,6 +619,66 @@ func generationRequestJSON(args map[string]any) string {
 		return "{}"
 	}
 	return string(b)
+}
+
+func persistedRequestValue(key string, value any) any {
+	switch v := value.(type) {
+	case string:
+		if isMediaReferenceKey(key) && isInlineMediaRef(v) {
+			sum := sha256.Sum256([]byte(v))
+			return fmt.Sprintf("inline:sha256:%x:chars:%d", sum[:8], len(v))
+		}
+		return v
+	case []string:
+		out := make([]string, len(v))
+		for i, item := range v {
+			out[i] = fmt.Sprint(persistedRequestValue(key, item))
+		}
+		return out
+	case []any:
+		out := make([]any, len(v))
+		for i, item := range v {
+			out[i] = persistedRequestValue(key, item)
+		}
+		return out
+	case map[string]any:
+		out := make(map[string]any, len(v))
+		for childKey, child := range v {
+			out[childKey] = persistedRequestValue(childKey, child)
+		}
+		return out
+	default:
+		return value
+	}
+}
+
+func isMediaReferenceKey(key string) bool {
+	key = strings.ToLower(strings.TrimSpace(key))
+	return strings.Contains(key, "image") || strings.Contains(key, "video") ||
+		strings.Contains(key, "audio") || strings.Contains(key, "file")
+}
+
+func isInlineMediaRef(ref string) bool {
+	ref = strings.TrimSpace(ref)
+	if strings.HasPrefix(ref, "data:") {
+		return true
+	}
+	if strings.HasPrefix(ref, "storage:") || strings.HasPrefix(ref, "http://") || strings.HasPrefix(ref, "https://") {
+		return false
+	}
+	return len(ref) > 256
+}
+
+func persistedMediaRef(ref string) string {
+	return fmt.Sprint(persistedRequestValue("source_image", ref))
+}
+
+func persistedMediaRefs(refs []string) []string {
+	out := make([]string, len(refs))
+	for i, ref := range refs {
+		out[i] = persistedMediaRef(ref)
+	}
+	return out
 }
 
 func cachedGenerationResult(row map[string]any) map[string]any {
@@ -741,20 +824,22 @@ func encodeExtras(kind string, args map[string]any) string {
 		extras["storage_folder"] = v
 	}
 	if opts, ok := args["options"].(map[string]any); ok && len(opts) > 0 {
-		extras["options"] = opts
+		extras["options"] = persistedRequestValue("options", opts)
 	}
 	// Edit-flow lineage: the original source image references (e.g.
 	// "storage:1234") + the capability so history can render edit
 	// provenance without re-deriving from the resolved bytes.
 	if refs, ok := args["_source_image_refs"].([]string); ok && len(refs) > 0 {
-		extras["source_image_refs"] = refs
+		safeRefs := persistedMediaRefs(refs)
+		extras["source_image_refs"] = safeRefs
 		if len(refs) == 1 {
-			extras["source_image_ref"] = refs[0]
+			extras["source_image_ref"] = safeRefs[0]
 		}
 		extras["capability"] = "image.edit"
 	} else if ref, ok := args["_source_image_ref"].(string); ok && ref != "" {
-		extras["source_image_ref"] = ref
-		extras["source_image_refs"] = []string{ref}
+		safeRef := persistedMediaRef(ref)
+		extras["source_image_ref"] = safeRef
+		extras["source_image_refs"] = []string{safeRef}
 		extras["capability"] = "image.edit"
 	}
 	if len(extras) == 0 {
@@ -1008,13 +1093,18 @@ func (a *App) handleBindings(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "app not mounted", http.StatusServiceUnavailable)
 		return
 	}
+	ctx, _, err := projectContextFromRequest(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	out := map[string]any{}
 	for kind, h := range handlers {
 		entry := map[string]any{"bound": false}
 		var b *sdk.BoundIntegration
 		if kind == KindImage {
 			providers := []map[string]any{}
-			for i, bound := range boundIntegrationsFor(globalCtx, h.Role) {
+			for i, bound := range boundIntegrationsFor(ctx, h.Role) {
 				if bound == nil {
 					continue
 				}
@@ -1031,7 +1121,7 @@ func (a *App) handleBindings(w http.ResponseWriter, r *http.Request) {
 				entry["providers"] = providers
 			}
 		} else {
-			b = globalCtx.IntegrationFor(h.Role)
+			b = ctx.IntegrationFor(h.Role)
 		}
 		if b != nil {
 			entry["bound"] = true
@@ -1050,7 +1140,7 @@ func (a *App) handleBindings(w http.ResponseWriter, r *http.Request) {
 	}
 	// Storage doesn't have a kind row — surface separately.
 	storageEntry := map[string]any{"bound": false}
-	if b := globalCtx.IntegrationFor("storage"); b != nil {
+	if b := ctx.IntegrationFor("storage"); b != nil {
 		storageEntry["bound"] = true
 		storageEntry["app"] = b.AppName
 	}

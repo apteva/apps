@@ -1,6 +1,7 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -35,10 +36,11 @@ type generationRecord struct {
 	RequestJSON              string
 }
 
-func (a *App) dbInsertGeneration(r generationRecord) int64 {
-	if globalCtx == nil {
-		return 0
-	}
+type generationExecer interface {
+	Exec(query string, args ...any) (sql.Result, error)
+}
+
+func insertGenerationWith(exec generationExecer, r generationRecord) (int64, error) {
 	sj, _ := json.Marshal(r.StorageIDs)
 	uj, _ := json.Marshal(r.UpstreamURLs)
 	if r.ExtraJSON == "" {
@@ -50,7 +52,7 @@ func (a *App) dbInsertGeneration(r generationRecord) int64 {
 	if r.RequestJSON == "" {
 		r.RequestJSON = "{}"
 	}
-	res, err := globalCtx.AppDB().Exec(
+	res, err := exec.Exec(
 		`INSERT INTO generations
 			(project_id, kind, prompt, revised_prompt, provider, model,
 			 size, duration_ms, storage_ids, upstream_urls, thumbnail_b64,
@@ -63,17 +65,12 @@ func (a *App) dbInsertGeneration(r generationRecord) int64 {
 		r.ActualDurationSeconds, r.Status, r.RequestJSON,
 	)
 	if err != nil {
-		globalCtx.Logger().Warn("dbInsertGeneration failed", "err", err)
-		return 0
+		return 0, err
 	}
-	id, _ := res.LastInsertId()
-	return id
+	return res.LastInsertId()
 }
 
-func (a *App) dbUpdateGeneration(r generationRecord, id int64) bool {
-	if globalCtx == nil || id == 0 {
-		return false
-	}
+func updateGenerationWith(exec generationExecer, r generationRecord, id int64) (bool, error) {
 	sj, _ := json.Marshal(r.StorageIDs)
 	uj, _ := json.Marshal(r.UpstreamURLs)
 	if r.ExtraJSON == "" {
@@ -85,7 +82,7 @@ func (a *App) dbUpdateGeneration(r generationRecord, id int64) bool {
 	if r.RequestJSON == "" {
 		r.RequestJSON = "{}"
 	}
-	_, err := globalCtx.AppDB().Exec(
+	res, err := exec.Exec(
 		`UPDATE generations
 		 SET kind=?, prompt=?, revised_prompt=?, provider=?, model=?, size=?,
 		     duration_ms=?, storage_ids=?, upstream_urls=?, thumbnail_b64=?,
@@ -100,10 +97,34 @@ func (a *App) dbUpdateGeneration(r generationRecord, id int64) bool {
 		r.Status, r.RequestJSON, id, r.ProjectID,
 	)
 	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n > 0, err
+}
+
+func (a *App) dbInsertGeneration(r generationRecord) int64 {
+	if globalCtx == nil {
+		return 0
+	}
+	id, err := insertGenerationWith(globalCtx.AppDB(), r)
+	if err != nil {
+		globalCtx.Logger().Warn("dbInsertGeneration failed", "err", err)
+		return 0
+	}
+	return id
+}
+
+func (a *App) dbUpdateGeneration(r generationRecord, id int64) bool {
+	if globalCtx == nil || id == 0 {
+		return false
+	}
+	ok, err := updateGenerationWith(globalCtx.AppDB(), r, id)
+	if err != nil {
 		globalCtx.Logger().Warn("dbUpdateGeneration failed", "id", id, "err", err)
 		return false
 	}
-	return true
+	return ok
 }
 
 func updateGenerationStatus(ctx *sdk.AppCtx, pid string, id int64, status string) {
@@ -240,7 +261,7 @@ func generationMap(pid string, id, count, durationMs int64, kind, prompt, revise
 	}
 	localURL := ""
 	if len(storageIDs) == 0 {
-		localURL = localCacheURL(id)
+		localURL = localCacheURL(id, pid)
 	}
 	out := map[string]any{
 		"id":                         id,
@@ -309,4 +330,15 @@ func resolveProjectFromRequest(r *http.Request) (string, error) {
 		return v, nil
 	}
 	return "", errors.New("project_id required")
+}
+
+func projectContextFromRequest(r *http.Request) (*sdk.AppCtx, string, error) {
+	if globalCtx == nil {
+		return nil, "", errors.New("app not mounted")
+	}
+	pid, err := resolveProjectFromRequest(r)
+	if err != nil {
+		return nil, "", err
+	}
+	return globalCtx.WithProject(pid), pid, nil
 }

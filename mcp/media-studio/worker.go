@@ -34,6 +34,7 @@ const (
 
 type pendingJob struct {
 	ID                       int64
+	ConnectionID             int64
 	Kind                     string
 	Role                     string
 	ProjectID                string
@@ -47,15 +48,21 @@ type pendingJob struct {
 	EstimatedDurationSeconds float64
 	GenerationID             int64
 	Attempts                 int
+	Status                   string
 }
 
 func (a *App) videoPollWorker(ctx context.Context, app *sdk.AppCtx) error {
+	pid := projectScope(app)
+	if pid == "" {
+		app.Logger().Warn("video poll skipped without project context")
+		return nil
+	}
 	rows, err := app.AppDB().Query(
-		`SELECT id, kind, role, project_id, queue_id, provider, model, prompt,
-		        source_image_ref, cache_key, request_json, estimated_duration_seconds, generation_id, attempts
+		`SELECT id, connection_id, kind, role, project_id, queue_id, provider, model, prompt,
+		        source_image_ref, cache_key, request_json, estimated_duration_seconds, generation_id, attempts, status
 		 FROM video_jobs
-		 WHERE status IN ('queued', 'polling')
-		 ORDER BY id ASC`,
+		 WHERE project_id=? AND status IN ('queued', 'polling', 'finalizing')
+		 ORDER BY id ASC`, pid,
 	)
 	if err != nil {
 		return err
@@ -63,9 +70,9 @@ func (a *App) videoPollWorker(ctx context.Context, app *sdk.AppCtx) error {
 	var jobs []pendingJob
 	for rows.Next() {
 		var p pendingJob
-		if err := rows.Scan(&p.ID, &p.Kind, &p.Role, &p.ProjectID, &p.QueueID,
+		if err := rows.Scan(&p.ID, &p.ConnectionID, &p.Kind, &p.Role, &p.ProjectID, &p.QueueID,
 			&p.Provider, &p.Model, &p.Prompt, &p.SourceImageRef, &p.CacheKey,
-			&p.RequestJSON, &p.EstimatedDurationSeconds, &p.GenerationID, &p.Attempts); err != nil {
+			&p.RequestJSON, &p.EstimatedDurationSeconds, &p.GenerationID, &p.Attempts, &p.Status); err != nil {
 			continue
 		}
 		jobs = append(jobs, p)
@@ -79,11 +86,9 @@ func (a *App) videoPollWorker(ctx context.Context, app *sdk.AppCtx) error {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		// Resolve the provider per the job's own role — a video job
-		// polls the video_provider, an avatar job the avatar_provider.
-		bound := app.IntegrationFor(p.Role)
+		bound := boundForPendingJob(app, p.Role, p.Provider, p.ConnectionID)
 		if bound == nil {
-			app.Logger().Warn("poll: no provider bound for role; skipping", "role", p.Role, "job_id", p.ID)
+			app.Logger().Warn("poll: original provider connection unavailable", "role", p.Role, "job_id", p.ID, "connection_id", p.ConnectionID)
 			continue
 		}
 		a.pollOneJob(app, bound, p)
@@ -91,12 +96,30 @@ func (a *App) videoPollWorker(ctx context.Context, app *sdk.AppCtx) error {
 	return nil
 }
 
+func boundForPendingJob(app *sdk.AppCtx, role, provider string, connectionID int64) *sdk.BoundIntegration {
+	if connectionID > 0 {
+		return &sdk.BoundIntegration{Role: role, Kind: "integration", ConnectionID: connectionID, AppSlug: provider}
+	}
+	bound := app.IntegrationFor(role)
+	if bound == nil || (provider != "" && bound.AppSlug != provider) {
+		return nil
+	}
+	return bound
+}
+
 func (a *App) pollOneJob(app *sdk.AppCtx, bound *sdk.BoundIntegration, p pendingJob) {
+	if p.Status == "finalizing" {
+		if b64, mime, _, err := readPendingJobCache(p.ID); err == nil {
+			a.finalizeJob(app, p, b64, mime)
+			return
+		}
+	}
 	attempts := p.Attempts + 1
 
 	if attempts > maxVideoPollAttempts {
 		errMsg := fmt.Sprintf("gave up after %d polls (~%s)", maxVideoPollAttempts, time.Duration(maxVideoPollAttempts)*videoPollInterval)
 		videoJobUpdateStatus(app, p.ID, "failed", errMsg)
+		updateGenerationStatus(app, p.ProjectID, p.GenerationID, "failed")
 		app.EmitWithProject("media.failed", p.ProjectID, map[string]any{
 			"kind": p.Kind, "job_id": p.ID, "queue_id": p.QueueID, "error": errMsg,
 		})
@@ -299,6 +322,11 @@ func (a *App) finalizeJob(app *sdk.AppCtx, p pendingJob, base64Bytes, mime strin
 	}
 	media := generatedMedia{B64: base64Bytes, MimeType: mime, Ext: ext}
 	actualSeconds := 0.0
+	if err := writePendingJobCache(p.ID, base64Bytes, ext); err != nil {
+		bumpPolling(app, p.ID, p.Attempts+1)
+		app.Logger().Warn("stage async result failed", "job_id", p.ID, "err", err)
+		return
+	}
 
 	storageDir := "videos"
 	capability := "video.generate"
@@ -316,17 +344,6 @@ func (a *App) finalizeJob(app *sdk.AppCtx, p pendingJob, base64Bytes, mime strin
 		}
 	}
 
-	storage := app.IntegrationFor("storage")
-	var storageIDs []int64
-	if storage != nil {
-		id, err := saveToStorage(scopedApp, media, storageFolder, p.Provider, 0)
-		if err != nil {
-			app.Logger().Warn("save-to-storage failed", "job_id", p.ID, "err", err)
-		} else if id != 0 {
-			storageIDs = append(storageIDs, id)
-		}
-	}
-
 	extras := map[string]any{"queue_id": p.QueueID, "capability": capability}
 	extras["storage_folder"] = storageFolder
 	if p.CacheKey != "" {
@@ -341,10 +358,45 @@ func (a *App) finalizeJob(app *sdk.AppCtx, p pendingJob, base64Bytes, mime strin
 			extras["source_image_ref"] = refs[0]
 		}
 	}
-	extraJSON, _ := json.Marshal(extras)
-
 	var costUSD float64
-	app.AppDB().QueryRow(`SELECT cost_usd FROM video_jobs WHERE id=?`, p.ID).Scan(&costUSD)
+	_ = app.AppDB().QueryRow(`SELECT cost_usd FROM video_jobs WHERE id=? AND project_id=?`, p.ID, p.ProjectID).Scan(&costUSD)
+	initialExtraJSON, _ := json.Marshal(extras)
+	initial := generationRecord{
+		ProjectID: p.ProjectID, Kind: p.Kind, Prompt: p.Prompt, Provider: p.Provider,
+		Model: p.Model, StorageIDs: []int64{}, UpstreamURLs: []string{},
+		ExtraJSON: string(initialExtraJSON), Count: 1, CostUSD: costUSD,
+		CacheKey: p.CacheKey, EstimatedDurationSeconds: p.EstimatedDurationSeconds,
+		ActualDurationSeconds: actualSeconds, Status: "generating", RequestJSON: p.RequestJSON,
+	}
+	generationID, err := ensureAsyncGeneration(app, p, initial)
+	if err != nil {
+		app.Logger().Warn("prepare async generation failed", "job_id", p.ID, "err", err)
+		return
+	}
+
+	storage := scopedApp.IntegrationFor("storage")
+	var storageIDs []int64
+	storageWarning := ""
+	if storage != nil {
+		stableName := fmt.Sprintf("media-job-%d-0", p.ID)
+		id, err := saveToStorageNamed(scopedApp, media, storageFolder, p.Provider, 0, stableName)
+		if err != nil {
+			storageWarning = "Storage upload failed; retained in Media Studio local cache: " + err.Error()
+			app.Logger().Warn("save-to-storage failed; using local cache", "job_id", p.ID, "err", err)
+		} else if id != 0 {
+			storageIDs = append(storageIDs, id)
+		}
+	}
+	if len(storageIDs) == 0 {
+		if err := writeLocalCache(generationID, base64Bytes, ext); err != nil {
+			app.Logger().Warn("writeLocalCache failed", "gen_id", generationID, "err", err)
+			return
+		}
+	}
+	if storageWarning != "" {
+		extras["storage_warning"] = storageWarning
+	}
+	extraJSON, _ := json.Marshal(extras)
 
 	record := generationRecord{
 		ProjectID:                p.ProjectID,
@@ -363,28 +415,17 @@ func (a *App) finalizeJob(app *sdk.AppCtx, p pendingJob, base64Bytes, mime strin
 		Status:                   "ready",
 		RequestJSON:              p.RequestJSON,
 	}
-	generationID := p.GenerationID
-	if generationID > 0 {
-		if !a.dbUpdateGeneration(record, generationID) {
-			generationID = 0
-		}
-	}
-	if generationID == 0 {
-		generationID = a.dbInsertGeneration(record)
-	}
-	if storage == nil && generationID > 0 {
-		if err := writeLocalCache(generationID, base64Bytes, ext); err != nil {
-			app.Logger().Warn("writeLocalCache failed", "gen_id", generationID, "err", err)
-		}
-	}
-
 	var storageID int64
 	if len(storageIDs) > 0 {
 		storageID = storageIDs[0]
 	}
-	videoJobMarkComplete(app, p.ID, storageID, generationID, actualSeconds)
+	if err := completeAsyncGeneration(app, p, generationID, record, storageID, storageWarning); err != nil {
+		app.Logger().Warn("complete async generation failed", "job_id", p.ID, "err", err)
+		return
+	}
+	_ = deletePendingJobCache(p.ID)
 
-	app.EmitWithProject("media.generated", p.ProjectID, map[string]any{
+	event := map[string]any{
 		"kind":                       p.Kind,
 		"job_id":                     p.ID,
 		"queue_id":                   p.QueueID,
@@ -393,7 +434,87 @@ func (a *App) finalizeJob(app *sdk.AppCtx, p pendingJob, base64Bytes, mime strin
 		"storage_folder":             storageFolder,
 		"estimated_duration_seconds": p.EstimatedDurationSeconds,
 		"actual_duration_seconds":    actualSeconds,
-	})
+		"generation_id":              generationID,
+		"storage_id":                 storageID,
+	}
+	if storageWarning != "" {
+		event["warning"] = storageWarning
+	}
+	app.EmitWithProject("media.generated", p.ProjectID, event)
+}
+
+func ensureAsyncGeneration(app *sdk.AppCtx, p pendingJob, record generationRecord) (int64, error) {
+	tx, err := app.AppDB().Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	var generationID int64
+	if err := tx.QueryRow(
+		`SELECT generation_id FROM video_jobs WHERE id=? AND project_id=?`, p.ID, p.ProjectID,
+	).Scan(&generationID); err != nil {
+		return 0, err
+	}
+	if generationID > 0 {
+		updated, err := updateGenerationWith(tx, record, generationID)
+		if err != nil {
+			return 0, err
+		}
+		if !updated {
+			generationID = 0
+		}
+	}
+	if generationID == 0 {
+		generationID, err = insertGenerationWith(tx, record)
+		if err != nil {
+			return 0, err
+		}
+	}
+	res, err := tx.Exec(
+		`UPDATE video_jobs SET generation_id=?, status='finalizing', updated_at=?
+		 WHERE id=? AND project_id=? AND status IN ('queued','polling','finalizing')`,
+		generationID, time.Now(), p.ID, p.ProjectID,
+	)
+	if err != nil {
+		return 0, err
+	}
+	if n, _ := res.RowsAffected(); n != 1 {
+		return 0, fmt.Errorf("job %d is no longer finalizable", p.ID)
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return generationID, nil
+}
+
+func completeAsyncGeneration(app *sdk.AppCtx, p pendingJob, generationID int64, record generationRecord, storageID int64, warning string) error {
+	tx, err := app.AppDB().Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	updated, err := updateGenerationWith(tx, record, generationID)
+	if err != nil {
+		return err
+	}
+	if !updated {
+		return fmt.Errorf("generation %d disappeared during finalization", generationID)
+	}
+	res, err := tx.Exec(
+		`UPDATE video_jobs
+		 SET status='complete', error=?, result_storage_id=?, generation_id=?,
+		     actual_duration_seconds=?, last_poll_at=?, updated_at=?
+		 WHERE id=? AND project_id=? AND status='finalizing'`,
+		warning, storageID, generationID, record.ActualDurationSeconds,
+		time.Now(), time.Now(), p.ID, p.ProjectID,
+	)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n != 1 {
+		return fmt.Errorf("job %d finalization state changed", p.ID)
+	}
+	return tx.Commit()
 }
 
 func sourceImageRefsFromRequestJSON(raw string) []string {

@@ -599,7 +599,7 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
   // Poll in-flight video jobs every 5s while the Videos tab is active.
   // 5s is finer than the sidecar's 15s worker tick so the user sees the
   // failed→cleared transition promptly when the worker gives up. When
-  // a job transitions queued|polling → complete we also force a
+  // a job transitions queued|polling|finalizing → complete we also force a
   // gallery refresh — belt-and-suspenders for the rare case where the
   // media.generated event was dropped or missed by the EventSource.
   useEffect(() => {
@@ -617,7 +617,10 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
           setVideoJobs(jobs);
           const nowInFlight = new Set<number>(
             jobs
-              .filter((j: { status: string }) => j.status === "queued" || j.status === "polling")
+              .filter(
+                (j: { status: string }) =>
+                  j.status === "queued" || j.status === "polling" || j.status === "finalizing",
+              )
               .map((j: { id: number }) => j.id),
           );
           // Any job that was in-flight last tick and isn't now → either
@@ -788,6 +791,11 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
   const currentModelList = activeKind === "image" && isEditMode ? editLiveModels : liveModels;
   const currentModel: LiveModel | undefined =
     currentModelList?.find((m) => m.id === currentModelId);
+  const promptLength = Array.from(prompt).length;
+  const promptLimit =
+    currentModel?.prompt_char_limit ||
+    (activeKind === "video" && currentBinding?.slug === "venice-ai" ? 2500 : 0);
+  const promptTooLong = promptLimit > 0 && promptLength > promptLimit;
   const activeGeneratingModel =
     activeKind === "image"
       ? (isEditMode ? editModel : imageModel)
@@ -802,7 +810,7 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
               : selectedAvatar;
   const pendingVideoJobs =
     activeKind === "video" || activeKind === "avatar"
-      ? videoJobs.filter((j) => j.status === "queued" || j.status === "polling")
+      ? videoJobs.filter((j) => j.status === "queued" || j.status === "polling" || j.status === "finalizing")
       : [];
   // Video reference-image is allowed for both standard (text-to-video)
   // and image-to-video models — required for the latter, optional
@@ -1094,7 +1102,7 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
   };
 
   useEffect(() => {
-    if (!prompt.trim() || !isBound) {
+    if (!prompt.trim() || !isBound || promptTooLong) {
       setEstimate(null);
       setEstimateLoading(false);
       return;
@@ -1133,6 +1141,7 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
   }, [
     projectId,
     prompt,
+    promptTooLong,
     isBound,
     activeKind,
     isEditMode,
@@ -1161,6 +1170,10 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
 
   const submitGeneration = async (mode: "generate" | "draft") => {
     if (!prompt.trim() || generating || creatingDraft) return;
+    if (promptTooLong) {
+      setStatus(`Error: prompt is ${promptLength} characters; this model allows ${promptLimit}.`);
+      return;
+    }
     if (mode === "generate") {
       setGenerating(true);
       setStatus("Generating…");
@@ -1413,6 +1426,9 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
             kind={activeKind}
             prompt={prompt}
             setPrompt={setPrompt}
+            promptLength={promptLength}
+            promptLimit={promptLimit}
+            promptTooLong={promptTooLong}
             generate={generate}
             createDraft={createDraft}
             generating={generating}
@@ -1636,6 +1652,9 @@ interface ComposerProps {
   kind: Kind;
   prompt: string;
   setPrompt: (v: string) => void;
+  promptLength: number;
+  promptLimit: number;
+  promptTooLong: boolean;
   generate: () => void;
   createDraft: () => void;
   generating: boolean;
@@ -1751,16 +1770,23 @@ function Composer(p: ComposerProps) {
   return (
     <div className="flex items-end gap-3 flex-wrap">
       <div className="flex-1" style={{ minWidth: 240 }}>
-        <label className="text-text-muted text-xs">Prompt</label>
-        <input
-          type="text"
+        <label className="text-text-muted text-xs flex items-center justify-between gap-2">
+          <span>Prompt</span>
+          {p.promptLimit > 0 && (
+            <span className={p.promptTooLong ? "text-red" : "text-text-dim"}>
+              {p.promptLength}/{p.promptLimit}
+            </span>
+          )}
+        </label>
+        <textarea
+          rows={2}
           value={p.prompt}
           onChange={(e) => p.setPrompt(e.target.value)}
           onKeyDown={(e) => {
-            if (e.key === "Enter") p.generate();
+            if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) p.generate();
           }}
           placeholder={promptPlaceholder}
-          className="w-full bg-bg-input border border-border rounded px-2 py-1.5 text-sm"
+          className={`w-full bg-bg-input border rounded px-2 py-1.5 text-sm resize-y ${p.promptTooLong ? "border-red" : "border-border"}`}
         />
       </div>
       {p.kind === "image" && p.isEditMode && (
@@ -1935,7 +1961,7 @@ function Composer(p: ComposerProps) {
       <EstimateBadge estimate={p.estimate} loading={p.estimateLoading} />
       <button
         onClick={p.generate}
-        disabled={!p.prompt.trim() || p.generating || p.creatingDraft || p.disabled || avatarVBlocked}
+        disabled={!p.prompt.trim() || p.promptTooLong || p.generating || p.creatingDraft || p.disabled || avatarVBlocked}
         className="px-3 py-1.5 text-sm bg-accent text-bg rounded font-bold disabled:opacity-50"
         title={avatarVBlocked ? "Selected avatar does not advertise Avatar V support" : undefined}
       >
@@ -1943,7 +1969,7 @@ function Composer(p: ComposerProps) {
       </button>
       <button
         onClick={p.createDraft}
-        disabled={!p.prompt.trim() || p.generating || p.creatingDraft}
+        disabled={!p.prompt.trim() || p.promptTooLong || p.generating || p.creatingDraft}
         className="px-3 py-1.5 text-sm border border-border rounded text-text-muted hover:text-text hover:border-accent disabled:opacity-50"
       >
         {p.creatingDraft ? "Saving…" : "Create draft"}

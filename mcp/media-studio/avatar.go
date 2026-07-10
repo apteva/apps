@@ -310,12 +310,17 @@ func (a *App) handleListAvatars(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "app not mounted", http.StatusServiceUnavailable)
 		return
 	}
+	ctx, _, err := projectContextFromRequest(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	resp := map[string]any{"bound": false, "avatars": []avatarEntry{}}
-	bound := globalCtx.IntegrationFor("avatar_provider")
+	bound := ctx.IntegrationFor("avatar_provider")
 	if bound != nil {
 		resp["bound"] = true
 		resp["provider"] = bound.AppSlug
-		avatars, err := listAvatarsFor(globalCtx, bound)
+		avatars, err := listAvatarsFor(ctx, bound)
 		if err != nil {
 			resp["error"] = err.Error()
 		} else {
@@ -537,15 +542,20 @@ func (a *App) handleListVoices(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "app not mounted", http.StatusServiceUnavailable)
 		return
 	}
+	ctx, _, err := projectContextFromRequest(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	resp := map[string]any{"voices": []voiceEntry{}}
 	role := "avatar_provider"
 	if r.URL.Query().Get("kind") == KindAudioTTS {
 		role = "audio_provider"
 	}
-	bound := globalCtx.IntegrationFor(role)
+	bound := ctx.IntegrationFor(role)
 	if bound != nil {
 		resp["provider"] = bound.AppSlug
-		voices, err := listVoicesFor(globalCtx, bound)
+		voices, err := listVoicesFor(ctx, bound)
 		if err != nil {
 			resp["error"] = err.Error()
 		} else {

@@ -6,6 +6,7 @@ import (
 	"io"
 	"mime"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -28,12 +29,9 @@ func cacheDir() (string, error) {
 	if globalCtx == nil {
 		return "", errors.New("app not mounted")
 	}
-	// Derive from DB_PATH (the per-install path apteva-server pins —
-	// always co-located with the sidecar's writable data dir). Fall
-	// back to the manifest's /data path when env is missing.
-	base := "/data"
-	if env := os.Getenv("DB_PATH"); env != "" {
-		base = filepath.Dir(env)
+	base := globalCtx.DataDir()
+	if base == "" {
+		base = filepath.Join(os.TempDir(), "apteva-media-studio-"+strconv.Itoa(os.Getpid()))
 	}
 	dir := filepath.Join(base, "cache")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
@@ -65,13 +63,14 @@ func writeLocalCache(genID int64, b64, ext string) error {
 
 // localCacheURL returns the panel-visible URL for a given gen id,
 // or "" if no cache file exists.
-func localCacheURL(genID int64) string {
+func localCacheURL(genID int64, projectID string) string {
 	if genID == 0 {
 		return ""
 	}
 	if path, ok := localCachePath(genID); ok {
 		_ = path
-		return "/api/apps/media-studio/cache/" + strconv.FormatInt(genID, 10)
+		return "/api/apps/media-studio/cache/" + strconv.FormatInt(genID, 10) +
+			"?project_id=" + url.QueryEscape(projectID)
 	}
 	return ""
 }
@@ -104,6 +103,59 @@ func deleteLocalCache(genID int64) error {
 	return nil
 }
 
+func writePendingJobCache(jobID int64, b64, ext string) error {
+	if jobID <= 0 || b64 == "" {
+		return errors.New("pending job cache requires job id and bytes")
+	}
+	bytes, err := base64.StdEncoding.DecodeString(b64)
+	if err != nil {
+		return err
+	}
+	dir, err := cacheDir()
+	if err != nil {
+		return err
+	}
+	if ext == "" {
+		ext = "bin"
+	}
+	return os.WriteFile(filepath.Join(dir, "job-"+strconv.FormatInt(jobID, 10)+"."+ext), bytes, 0o600)
+}
+
+func readPendingJobCache(jobID int64) (string, string, string, error) {
+	dir, err := cacheDir()
+	if err != nil {
+		return "", "", "", err
+	}
+	matches, _ := filepath.Glob(filepath.Join(dir, "job-"+strconv.FormatInt(jobID, 10)+".*"))
+	if len(matches) == 0 {
+		return "", "", "", os.ErrNotExist
+	}
+	bytes, err := os.ReadFile(matches[0])
+	if err != nil {
+		return "", "", "", err
+	}
+	ext := strings.TrimPrefix(filepath.Ext(matches[0]), ".")
+	mt := mime.TypeByExtension("." + ext)
+	if mt == "" {
+		mt = "application/octet-stream"
+	}
+	return base64.StdEncoding.EncodeToString(bytes), mt, ext, nil
+}
+
+func deletePendingJobCache(jobID int64) error {
+	dir, err := cacheDir()
+	if err != nil {
+		return err
+	}
+	matches, _ := filepath.Glob(filepath.Join(dir, "job-"+strconv.FormatInt(jobID, 10)+".*"))
+	for _, match := range matches {
+		if err := os.Remove(match); err != nil && !os.IsNotExist(err) {
+			return err
+		}
+	}
+	return nil
+}
+
 // HTTP /cache/<id> — serves the cached bytes for one generation.
 // Pattern is registered as "/cache/" (trailing slash) so net/http's
 // mux routes everything under it here.
@@ -117,6 +169,18 @@ func (a *App) handleCacheGet(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.ParseInt(idStr, 10, 64)
 	if err != nil || id <= 0 {
 		http.Error(w, "bad id", http.StatusBadRequest)
+		return
+	}
+	ctx, pid, err := projectContextFromRequest(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	var owned int
+	if err := ctx.AppDB().QueryRow(
+		`SELECT 1 FROM generations WHERE id=? AND project_id=?`, id, pid,
+	).Scan(&owned); err != nil {
+		http.Error(w, "not found", http.StatusNotFound)
 		return
 	}
 	path, ok := localCachePath(id)

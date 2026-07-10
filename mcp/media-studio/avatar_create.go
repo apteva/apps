@@ -19,6 +19,7 @@ const (
 
 type avatarCreateJob struct {
 	ID               int64  `json:"id"`
+	ConnectionID     int64  `json:"connection_id"`
 	ProjectID        string `json:"project_id"`
 	Provider         string `json:"provider"`
 	SourceType       string `json:"source_type"`
@@ -125,6 +126,7 @@ func (a *App) toolMediaAvatarCreate(ctx *sdk.AppCtx, args map[string]any) (any, 
 	}
 	job := avatarCreateJob{
 		ProjectID:        pid,
+		ConnectionID:     bound.ConnectionID,
 		Provider:         bound.AppSlug,
 		SourceType:       sourceType,
 		Name:             name,
@@ -354,7 +356,12 @@ func (a *App) handleAvatarCapabilities(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "app not mounted", http.StatusServiceUnavailable)
 		return
 	}
-	bound := globalCtx.IntegrationFor("avatar_provider")
+	ctx, _, err := projectContextFromRequest(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	bound := ctx.IntegrationFor("avatar_provider")
 	resp := map[string]any{"bound": false, "source_types": []string{}}
 	if bound != nil {
 		resp["bound"] = true
@@ -419,11 +426,11 @@ func (a *App) handleListAvatarCreateJobs(w http.ResponseWriter, r *http.Request)
 func insertAvatarCreateJob(ctx *sdk.AppCtx, j avatarCreateJob, requestJSON string) (int64, error) {
 	res, err := ctx.AppDB().Exec(
 		`INSERT INTO avatar_create_jobs
-		 (project_id, provider, source_type, name, provider_job_id,
-		  provider_avatar_id, provider_group_id, source_ref, consent_ref,
-		  request_json, status, error)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		j.ProjectID, j.Provider, j.SourceType, j.Name, j.ProviderJobID,
+			 (project_id, connection_id, provider, source_type, name, provider_job_id,
+			  provider_avatar_id, provider_group_id, source_ref, consent_ref,
+			  request_json, status, error)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		j.ProjectID, j.ConnectionID, j.Provider, j.SourceType, j.Name, j.ProviderJobID,
 		j.ProviderAvatarID, j.ProviderGroupID, j.SourceRef, j.ConsentRef,
 		requestJSON, j.Status, j.Error,
 	)
@@ -467,12 +474,17 @@ func queryAvatarCreateJobs(ctx *sdk.AppCtx, pid, statusFilter string) ([]avatarC
 }
 
 func (a *App) avatarCreatePollWorker(ctx context.Context, app *sdk.AppCtx) error {
+	pid := projectScope(app)
+	if pid == "" {
+		app.Logger().Warn("avatar create poll skipped without project context")
+		return nil
+	}
 	rows, err := app.AppDB().Query(
-		`SELECT id, project_id, provider, source_type, name, provider_job_id,
+		`SELECT id, connection_id, project_id, provider, source_type, name, provider_job_id,
 		        provider_avatar_id, provider_group_id, attempts
 		 FROM avatar_create_jobs
-		 WHERE status IN ('queued', 'training')
-		 ORDER BY id ASC`,
+		 WHERE project_id=? AND status IN ('queued', 'training')
+		 ORDER BY id ASC`, pid,
 	)
 	if err != nil {
 		return err
@@ -480,7 +492,7 @@ func (a *App) avatarCreatePollWorker(ctx context.Context, app *sdk.AppCtx) error
 	var jobs []avatarCreateJob
 	for rows.Next() {
 		var j avatarCreateJob
-		if err := rows.Scan(&j.ID, &j.ProjectID, &j.Provider, &j.SourceType, &j.Name,
+		if err := rows.Scan(&j.ID, &j.ConnectionID, &j.ProjectID, &j.Provider, &j.SourceType, &j.Name,
 			&j.ProviderJobID, &j.ProviderAvatarID, &j.ProviderGroupID, &j.Attempts); err != nil {
 			continue
 		}
@@ -491,9 +503,9 @@ func (a *App) avatarCreatePollWorker(ctx context.Context, app *sdk.AppCtx) error
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		bound := app.IntegrationFor("avatar_provider")
-		if bound == nil || bound.AppSlug != j.Provider {
-			app.Logger().Warn("avatar create poll: bound provider mismatch", "job_id", j.ID, "provider", j.Provider)
+		bound := boundForPendingJob(app, "avatar_provider", j.Provider, j.ConnectionID)
+		if bound == nil {
+			app.Logger().Warn("avatar create poll: original provider connection unavailable", "job_id", j.ID, "provider", j.Provider, "connection_id", j.ConnectionID)
 			continue
 		}
 		a.pollOneAvatarCreateJob(app, bound, j)

@@ -2,10 +2,12 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	sdk "github.com/apteva/app-sdk"
 )
@@ -51,6 +53,38 @@ type modelEntry struct {
 	// price for edit models. The panel uses this for the dropdown
 	// label so the user sees what each model costs upfront.
 	PriceUSD float64 `json:"price_usd,omitempty"`
+}
+
+func validateProviderPrompt(_ *sdk.AppCtx, bound *sdk.BoundIntegration, kind, capability string, args map[string]any) error {
+	prompt := strArg(args, "prompt", "")
+	limit := cachedPromptLimit(bound, kind, capability, strArg(args, "model", ""))
+	if limit == 0 && kind == KindVideo && bound.AppSlug == "venice-ai" {
+		limit = veniceVideoPromptCharLimit
+	}
+	if count := utf8.RuneCountInString(prompt); limit > 0 && count > limit {
+		return fmt.Errorf("%d characters exceeds the %d-character limit for %s", count, limit, strArg(args, "model", "selected model"))
+	}
+	return nil
+}
+
+func cachedPromptLimit(bound *sdk.BoundIntegration, kind, capability, modelID string) int {
+	if bound == nil || strings.TrimSpace(modelID) == "" {
+		return 0
+	}
+	cacheKind := kind
+	if capability != "" {
+		cacheKind = kind + ":" + capability
+	}
+	modelCacheMu.RLock()
+	defer modelCacheMu.RUnlock()
+	for _, candidateKind := range []string{cacheKind, kind} {
+		for _, model := range modelCache[modelCacheKey{ConnectionID: bound.ConnectionID, Kind: candidateKind}].Models {
+			if model.ID == modelID {
+				return model.PromptCharLimit
+			}
+		}
+	}
+	return 0
 }
 
 type modelCacheKey struct {
@@ -855,6 +889,11 @@ func (a *App) handleListModels(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "app not mounted", http.StatusServiceUnavailable)
 		return
 	}
+	ctx, _, err := projectContextFromRequest(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 	kind := r.URL.Query().Get("kind")
 	if kind == "" {
 		http.Error(w, "kind required", http.StatusBadRequest)
@@ -870,13 +909,13 @@ func (a *App) handleListModels(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.URL.Query().Get("refresh") == "1" {
-		for _, bound := range boundIntegrationsFor(globalCtx, handlers[kind].Role) {
+		for _, bound := range boundIntegrationsFor(ctx, handlers[kind].Role) {
 			if bound != nil {
 				invalidateModelCacheForConnection(bound.ConnectionID)
 			}
 		}
 	}
-	resp, err := modelCatalogForKind(globalCtx, kind, capability)
+	resp, err := modelCatalogForKind(ctx, kind, capability)
 	if capability != "" {
 		resp["capability"] = capability
 	}

@@ -2,12 +2,17 @@ schema: apteva-app/v1
 
 name: media-studio
 display_name: Media Studio
-version: 0.10.36
+version: 0.10.37
 description: |
   Generate images, video, audio, music, and avatars via compatible
   providers. ElevenLabs powers audio TTS, sound effects, and music.
   Optionally saves outputs to the Storage app for permanent, shareable
-  references. v0.10.36 sniffs generated image bytes before saving so
+  references. v0.10.37 hardens project isolation, async job recovery,
+  Storage fallback, provider prompt limits, and oversized downloads.
+  Queued jobs now retain their original provider connection and can
+  resume finalization safely after a restart or binding change.
+
+  v0.10.36 sniffs generated image bytes before saving so
   provider responses that declare one format but return another are
   stored with matching MIME metadata and filename extensions.
 
@@ -63,6 +68,7 @@ requires:
   integrations:
     - role: image_provider
       kind: integration
+      mode: multiple
       compatible_slugs: [openai-api, openai-codex, venice-ai, gemini]
       capabilities: [image.generate, image.edit]
       tools:

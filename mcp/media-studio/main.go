@@ -19,6 +19,7 @@ import (
 	"bytes"
 	"database/sql"
 	"errors"
+	"fmt"
 	"image"
 	"image/jpeg"
 	_ "image/png"
@@ -35,12 +36,16 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: media-studio
 display_name: Media Studio
-version: 0.10.36
+version: 0.10.37
 description: |
   Generate images, video, audio, music, and avatars via compatible
   providers. Optionally saves outputs to Storage, supports stable
   cache keys for app-to-app generation reuse, and can use OpenAI Codex
-  as a subscription-backed image provider. v0.10.36 sniffs generated
+  as a subscription-backed image provider. v0.10.37 hardens project
+  isolation, async job recovery, Storage fallback, provider prompt
+  limits, and oversized downloads. Queued jobs retain their original
+  provider connection and safely resume finalization after restarts.
+  v0.10.36 sniffs generated
   image bytes before saving so mismatched provider format metadata
   does not create Storage files with the wrong MIME type or extension.
   v0.10.35 restores default
@@ -67,6 +72,7 @@ requires:
   integrations:
     - role: image_provider
       kind: integration
+      mode: multiple
       compatible_slugs: [openai-api, openai-codex, venice-ai, gemini]
       capabilities: [image.generate, image.edit]
       tools:
@@ -575,6 +581,8 @@ func boolArg(m map[string]any, key string, def bool) bool {
 	return def
 }
 
+const maxFetchedMediaBytes int64 = 200 << 20
+
 func fetchBytes(url string) ([]byte, error) {
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
@@ -590,8 +598,21 @@ func fetchBytes(url string) ([]byte, error) {
 	if resp.StatusCode >= 400 {
 		return nil, errors.New("upstream non-2xx")
 	}
-	// 200MB limit — video can be large; storage handles the heavy hand-off.
-	return io.ReadAll(io.LimitReader(resp.Body, 200<<20))
+	return readLimitedMedia(resp.Body, resp.ContentLength, maxFetchedMediaBytes)
+}
+
+func readLimitedMedia(reader io.Reader, contentLength, maxBytes int64) ([]byte, error) {
+	if contentLength > maxBytes {
+		return nil, fmt.Errorf("upstream media exceeds %d MiB limit", maxBytes>>20)
+	}
+	bytes, err := io.ReadAll(io.LimitReader(reader, maxBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(bytes)) > maxBytes {
+		return nil, fmt.Errorf("upstream media exceeds %d MiB limit", maxBytes>>20)
+	}
+	return bytes, nil
 }
 
 // makeThumbnail JPEG-compresses image bytes to ~30KB at the given max

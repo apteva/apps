@@ -46,7 +46,8 @@ type recordingPlatform struct {
 	identity          *sdk.InstallIdentity
 	// appSlug is what GetConnection echoes back. Default openai-api so
 	// existing tests keep passing; venice tests override to "venice-ai".
-	appSlug string
+	appSlug         string
+	connectionSlugs map[int64]string
 	// perAppCallResults: when set, CallApp returns the response keyed by
 	// (appName, tool); falls back to nextCallResult otherwise. Lets edit
 	// tests pre-load both files_get_content + files_upload responses.
@@ -81,10 +82,26 @@ func newRecordingPlatform() *recordingPlatform {
 
 func (p *recordingPlatform) GetConnection(id int64) (*sdk.PlatformConnection, error) {
 	slug := p.appSlug
+	if p.connectionSlugs != nil && p.connectionSlugs[id] != "" {
+		slug = p.connectionSlugs[id]
+	}
 	if slug == "" {
 		slug = "openai-api"
 	}
 	return &sdk.PlatformConnection{ID: id, AppSlug: slug, ProjectID: "test-proj"}, nil
+}
+
+func TestBoundIntegrationsFor_UsesSDKMultipleBindingDefault(t *testing.T) {
+	pf := newRecordingPlatform()
+	pf.identity.Bindings["image_provider"] = map[string]any{
+		"ids": []any{float64(42), float64(43)}, "default_id": float64(43),
+	}
+	pf.connectionSlugs = map[int64]string{42: "venice-ai", 43: "gemini"}
+	ctx := newMediaStudioCtx(t, pf)
+	bounds := boundIntegrationsFor(ctx, "image_provider")
+	if len(bounds) != 2 || bounds[0].ConnectionID != 43 || !bounds[0].IsDefault || bounds[1].ConnectionID != 42 {
+		t.Fatalf("bounds = %+v", bounds)
+	}
 }
 func (p *recordingPlatform) ListConnections(filter sdk.ConnectionFilter) ([]sdk.PlatformConnection, error) {
 	return nil, nil
@@ -2259,6 +2276,231 @@ func TestVideoPollWorker_NoJobsNoOp(t *testing.T) {
 	app := &App{}
 	if err := app.videoPollWorker(context.Background(), ctx); err != nil {
 		t.Fatalf("unexpected error on empty queue: %v", err)
+	}
+}
+
+func TestVideoPollWorker_ScopesJobsAndUsesOriginalConnection(t *testing.T) {
+	pf := newRecordingPlatform()
+	pf.appSlug = "venice-ai"
+	pf.nextExecuteResult = &sdk.ExecuteResult{
+		Success: true, Status: 200,
+		Data: json.RawMessage(`{"status":"PROCESSING"}`),
+	}
+	ctx := newGlobalMediaStudioCtx(t, pf)
+	app := &App{}
+	for _, row := range []struct {
+		project, queue string
+		connection     int64
+	}{{"project-a", "q-a", 701}, {"project-b", "q-b", 702}} {
+		if _, err := ctx.AppDB().Exec(
+			`INSERT INTO video_jobs (project_id, connection_id, queue_id, provider, model, prompt, status)
+			 VALUES (?, ?, ?, 'venice-ai', 'kling-2', 'p', 'queued')`,
+			row.project, row.connection, row.queue,
+		); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := app.videoPollWorker(context.Background(), ctx.WithProject("project-a")); err != nil {
+		t.Fatal(err)
+	}
+	if len(pf.executeCalls) != 1 || pf.executeCalls[0].ConnID != 701 {
+		t.Fatalf("execute calls = %+v, want only original connection 701", pf.executeCalls)
+	}
+	var statusA, statusB string
+	var attemptsA, attemptsB int
+	_ = ctx.AppDB().QueryRow(`SELECT status, attempts FROM video_jobs WHERE queue_id='q-a'`).Scan(&statusA, &attemptsA)
+	_ = ctx.AppDB().QueryRow(`SELECT status, attempts FROM video_jobs WHERE queue_id='q-b'`).Scan(&statusB, &attemptsB)
+	if statusA != "polling" || attemptsA != 1 || statusB != "queued" || attemptsB != 0 {
+		t.Fatalf("project isolation failed: A=%s/%d B=%s/%d", statusA, attemptsA, statusB, attemptsB)
+	}
+}
+
+func TestAvatarCreatePollWorker_ScopesJobsAndUsesOriginalConnection(t *testing.T) {
+	pf := newRecordingPlatform()
+	pf.appSlug = "heygen"
+	pf.nextExecuteResult = &sdk.ExecuteResult{
+		Success: true, Status: 200,
+		Data: json.RawMessage(`{"data":{"id":"look-a","status":"processing"}}`),
+	}
+	ctx := newGlobalMediaStudioCtx(t, pf)
+	app := &App{}
+	for _, row := range []struct {
+		project, avatar string
+		connection      int64
+	}{{"project-a", "look-a", 801}, {"project-b", "look-b", 802}} {
+		if _, err := ctx.AppDB().Exec(
+			`INSERT INTO avatar_create_jobs
+			 (project_id, connection_id, provider, source_type, name, provider_avatar_id, status)
+			 VALUES (?, ?, 'heygen', 'photo', 'avatar', ?, 'training')`,
+			row.project, row.connection, row.avatar,
+		); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := app.avatarCreatePollWorker(context.Background(), ctx.WithProject("project-a")); err != nil {
+		t.Fatal(err)
+	}
+	if len(pf.executeCalls) != 1 || pf.executeCalls[0].ConnID != 801 {
+		t.Fatalf("execute calls = %+v, want only original connection 801", pf.executeCalls)
+	}
+	var attemptsB int
+	_ = ctx.AppDB().QueryRow(`SELECT attempts FROM avatar_create_jobs WHERE project_id='project-b'`).Scan(&attemptsB)
+	if attemptsB != 0 {
+		t.Fatalf("project-b attempts = %d, want 0", attemptsB)
+	}
+}
+
+func TestVideoPollWorker_StorageFailureFallsBackToLocalCache(t *testing.T) {
+	t.Setenv("APTEVA_DATA_DIR", t.TempDir())
+	pf := newRecordingPlatform()
+	pf.appSlug = "venice-ai"
+	pf.identity.Bindings["video_provider"] = float64(77)
+	pf.nextExecuteResult = &sdk.ExecuteResult{
+		Success: true, Status: 200,
+		Data: json.RawMessage(`{"_binary":true,"base64":"VklERU8=","mimeType":"video/mp4","size":5}`),
+	}
+	pf.nextCallErr = errors.New("storage unavailable")
+	ctx := newMediaStudioCtx(t, pf)
+	app := &App{}
+	if _, err := ctx.AppDB().Exec(
+		`INSERT INTO video_jobs (project_id, connection_id, queue_id, provider, model, prompt, status)
+		 VALUES ('test-proj', 77, 'q-storage-fail', 'venice-ai', 'kling-2', 'p', 'queued')`,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.videoPollWorker(context.Background(), ctx); err != nil {
+		t.Fatal(err)
+	}
+	var status, warning string
+	var generationID int64
+	if err := ctx.AppDB().QueryRow(
+		`SELECT status, error, generation_id FROM video_jobs WHERE queue_id='q-storage-fail'`,
+	).Scan(&status, &warning, &generationID); err != nil {
+		t.Fatal(err)
+	}
+	if status != "complete" || generationID == 0 || !strings.Contains(warning, "local cache") {
+		t.Fatalf("status=%q generation=%d warning=%q", status, generationID, warning)
+	}
+	if _, ok := localCachePath(generationID); !ok {
+		t.Fatal("completed generation has no local fallback")
+	}
+}
+
+func TestImageGeneration_StorageFailureFallsBackToLocalCache(t *testing.T) {
+	t.Setenv("APTEVA_DATA_DIR", t.TempDir())
+	pf := newRecordingPlatform()
+	pf.appSlug = "venice-ai"
+	pngB64 := base64.StdEncoding.EncodeToString(fakePNG())
+	pf.nextExecuteResult = &sdk.ExecuteResult{
+		Success: true, Status: 200,
+		Data: json.RawMessage(fmt.Sprintf(
+			`{"images":[%q],"request":{"data":{"format":"png","model":"grok-imagine-image"}}}`,
+			pngB64,
+		)),
+	}
+	pf.nextCallErr = errors.New("storage unavailable")
+	ctx := newMediaStudioCtx(t, pf)
+	app := &App{}
+	if _, err := app.toolMediaGenerate(ctx, map[string]any{
+		"kind": KindImage, "prompt": "p", "model": "grok-imagine-image",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	var generationID int64
+	var storageIDs string
+	if err := ctx.AppDB().QueryRow(
+		`SELECT id, storage_ids FROM generations ORDER BY id DESC LIMIT 1`,
+	).Scan(&generationID, &storageIDs); err != nil {
+		t.Fatal(err)
+	}
+	if storageIDs != "[]" {
+		t.Fatalf("storage_ids = %s", storageIDs)
+	}
+	if _, ok := localCachePath(generationID); !ok {
+		t.Fatal("image generation has no local fallback")
+	}
+}
+
+func TestFinalizeJob_IsIdempotentAfterCompletion(t *testing.T) {
+	t.Setenv("APTEVA_DATA_DIR", t.TempDir())
+	pf := newRecordingPlatform()
+	pf.appSlug = "venice-ai"
+	pf.nextCallResult = json.RawMessage(
+		`{"result":{"content":[{"type":"text","text":"{\"id\":5150}"}]}}`,
+	)
+	ctx := newMediaStudioCtx(t, pf)
+	app := &App{}
+	res, err := ctx.AppDB().Exec(
+		`INSERT INTO video_jobs (project_id, connection_id, queue_id, provider, model, prompt, status)
+		 VALUES ('test-proj', 77, 'q-idempotent', 'venice-ai', 'kling-2', 'p', 'polling')`,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	jobID, _ := res.LastInsertId()
+	p := pendingJob{ID: jobID, ProjectID: "test-proj", Provider: "venice-ai", Kind: KindVideo, Role: "video_provider", QueueID: "q-idempotent", Model: "kling-2", Prompt: "p"}
+	app.finalizeJob(ctx, p, "VklERU8=", "video/mp4")
+	app.finalizeJob(ctx, p, "VklERU8=", "video/mp4")
+	var generations int
+	_ = ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM generations WHERE project_id='test-proj'`).Scan(&generations)
+	if generations != 1 || len(pf.callAppCalls) != 1 {
+		t.Fatalf("generations=%d storage calls=%d", generations, len(pf.callAppCalls))
+	}
+}
+
+func TestCacheHandler_RequiresOwningProject(t *testing.T) {
+	t.Setenv("APTEVA_DATA_DIR", t.TempDir())
+	ctx := newMediaStudioCtx(t, newRecordingPlatform())
+	app := &App{}
+	id := app.dbInsertGeneration(generationRecord{ProjectID: "owner-project", Kind: KindImage, Prompt: "p", Provider: "venice-ai", Count: 1})
+	if err := writeLocalCache(id, base64.StdEncoding.EncodeToString(fakePNG()), "png"); err != nil {
+		t.Fatal(err)
+	}
+
+	denied := httptest.NewRecorder()
+	app.handleCacheGet(denied, httptest.NewRequest(http.MethodGet, fmt.Sprintf("/cache/%d?project_id=other-project", id), nil))
+	if denied.Code != http.StatusNotFound {
+		t.Fatalf("cross-project cache response = %d, want 404", denied.Code)
+	}
+	allowed := httptest.NewRecorder()
+	app.handleCacheGet(allowed, httptest.NewRequest(http.MethodGet, fmt.Sprintf("/cache/%d?project_id=owner-project", id), nil))
+	if allowed.Code != http.StatusOK || allowed.Body.Len() == 0 {
+		t.Fatalf("owner cache response = %d bytes=%d", allowed.Code, allowed.Body.Len())
+	}
+	_ = ctx
+}
+
+func TestVeniceVideoPromptLimit(t *testing.T) {
+	base := map[string]any{"model": "veo3.1-fast-text-to-video", "duration": "5s"}
+	base["prompt"] = strings.Repeat("a", veniceVideoPromptCharLimit)
+	if _, err := buildVeniceVideoQueueArgs(base); err != nil {
+		t.Fatalf("limit-sized prompt rejected: %v", err)
+	}
+	base["prompt"] = strings.Repeat("a", veniceVideoPromptCharLimit+1)
+	if _, err := buildVeniceVideoQueueArgs(base); err == nil || !strings.Contains(err.Error(), "2500") {
+		t.Fatalf("over-limit prompt error = %v", err)
+	}
+}
+
+func TestGenerationRequestJSON_RedactsInlineMedia(t *testing.T) {
+	inline := strings.Repeat("A", 2048)
+	raw := generationRequestJSON(map[string]any{
+		"kind": "video", "prompt": "p", "source_image": inline,
+		"options": map[string]any{"reference_video_urls": []any{"data:video/mp4;base64," + inline}},
+	})
+	if strings.Contains(raw, inline) || !strings.Contains(raw, "inline:sha256:") {
+		t.Fatalf("request JSON was not redacted: %s", raw)
+	}
+}
+
+func TestReadLimitedMediaRejectsOverflow(t *testing.T) {
+	if _, err := readLimitedMedia(strings.NewReader("12345"), -1, 4); err == nil {
+		t.Fatal("expected overflow error")
+	}
+	got, err := readLimitedMedia(strings.NewReader("1234"), 4, 4)
+	if err != nil || string(got) != "1234" {
+		t.Fatalf("exact limit: got=%q err=%v", got, err)
 	}
 }
 

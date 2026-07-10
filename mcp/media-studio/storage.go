@@ -89,6 +89,10 @@ func sniffImageMediaType(data []byte) (string, string, bool) {
 // dotted-folder convention so storage panels hide app-internal output by
 // default. Callers may override this with storage_folder.
 func saveToStorage(ctx *sdk.AppCtx, m generatedMedia, folder, providerSlug string, idx int) (int64, error) {
+	return saveToStorageNamed(ctx, m, folder, providerSlug, idx, "")
+}
+
+func saveToStorageNamed(ctx *sdk.AppCtx, m generatedMedia, folder, providerSlug string, idx int, stableName string) (int64, error) {
 	ext := m.Ext
 	if ext == "" {
 		ext = "bin"
@@ -97,7 +101,12 @@ func saveToStorage(ctx *sdk.AppCtx, m generatedMedia, folder, providerSlug strin
 	if contentType == "" {
 		contentType = "application/octet-stream"
 	}
-	name := fmt.Sprintf("media-%d-%d.%s", time.Now().Unix(), idx, ext)
+	name := stableName
+	if name == "" {
+		name = fmt.Sprintf("media-%d-%d.%s", time.Now().Unix(), idx, ext)
+	} else if path.Ext(name) == "" {
+		name += "." + ext
+	}
 	tags := []string{"ai", "generated", providerSlug}
 
 	var got struct {
