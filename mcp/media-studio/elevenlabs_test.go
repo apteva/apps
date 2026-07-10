@@ -47,6 +47,49 @@ func TestBuildElevenLabsTTSArgsRequiresVoice(t *testing.T) {
 	}
 }
 
+func TestBuildElevenLabsTTSArgsFiltersContinuityForV3(t *testing.T) {
+	got, err := buildAudioTTSArgs(map[string]any{
+		"prompt": "hello",
+		"voice":  "voice-123",
+		"model":  "eleven_v3",
+		"options": map[string]any{
+			"previous_text":        "before",
+			"next_text":            "after",
+			"previous_request_ids": []any{"req-prev"},
+			"next_request_ids":     []any{"req-next"},
+		},
+	}, "elevenlabs", "audio.tts")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, key := range []string{"previous_text", "next_text", "previous_request_ids", "next_request_ids"} {
+		if _, exists := got[key]; exists {
+			t.Fatalf("%s must be filtered for eleven_v3: %+v", key, got)
+		}
+	}
+}
+
+func TestBuildElevenLabsTTSArgsZeroRetentionUsesTextNotRequestIDs(t *testing.T) {
+	got, err := buildAudioTTSArgs(map[string]any{
+		"prompt": "hello",
+		"voice":  "voice-123",
+		"options": map[string]any{
+			"enable_logging":       false,
+			"previous_text":        "before",
+			"previous_request_ids": []any{"req-prev"},
+		},
+	}, "elevenlabs", "audio.tts")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got["previous_text"] != "before" {
+		t.Fatalf("text context should remain available: %+v", got)
+	}
+	if _, exists := got["previous_request_ids"]; exists {
+		t.Fatalf("request IDs must be filtered in zero-retention mode: %+v", got)
+	}
+}
+
 func TestBuildElevenLabsSFXArgs(t *testing.T) {
 	got, err := buildAudioSFXArgs(map[string]any{
 		"prompt":   "rain on a tin roof",

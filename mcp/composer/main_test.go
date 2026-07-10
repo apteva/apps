@@ -884,10 +884,10 @@ func TestTTSContinuityOptions_UsesNeighboringSameVoiceText(t *testing.T) {
 
 func TestTTSContinuityOptions_PrefersRequestIDs(t *testing.T) {
 	edit := `{"timeline":{"tracks":[{"type":"audio","clips":[
-		{"uid":"a","asset":{"type":"audio","src":""},"start":0,"length":5,"ai":{"media_kind":"audio_tts","prompt":"First part.","voice":"voice-1","model":"eleven_multilingual_v2","provider_request_id":"req-a"}},
+		{"uid":"a","asset":{"type":"audio","src":"storage:1"},"start":0,"length":5,"ai":{"media_kind":"audio_tts","prompt":"First part.","voice":"voice-1","model":"eleven_multilingual_v2","provider_request_id":"req-a","storage_id":1,"status":"ready"}},
 		{"uid":"gap","asset":{"type":"silence","src":""},"start":5,"length":1},
 		{"uid":"b","asset":{"type":"audio","src":""},"start":6,"length":5,"ai":{"media_kind":"audio_tts","prompt":"Second part.","voice":"voice-1","model":"eleven_multilingual_v2"}},
-		{"uid":"c","asset":{"type":"audio","src":""},"start":11,"length":5,"ai":{"media_kind":"audio_tts","prompt":"Third part.","voice":"voice-1","model":"eleven_multilingual_v2","provider_request_id":"req-c"}}
+		{"uid":"c","asset":{"type":"audio","src":"storage:3"},"start":11,"length":5,"ai":{"media_kind":"audio_tts","prompt":"Third part.","voice":"voice-1","model":"eleven_multilingual_v2","provider_request_id":"req-c","storage_id":3,"status":"ready"}}
 	]}]}}`
 	got, err := parseEditJSON(edit)
 	if err != nil {
@@ -907,6 +907,117 @@ func TestTTSContinuityOptions_PrefersRequestIDs(t *testing.T) {
 	}
 	if _, ok := opts["next_text"]; ok {
 		t.Fatalf("next_text should be omitted when request IDs are available: %+v", opts)
+	}
+}
+
+func TestTTSContinuityOptions_RequestIDsCrossSFX(t *testing.T) {
+	edit := `{"timeline":{"tracks":[{"type":"audio","clips":[
+		{"uid":"a","asset":{"type":"audio","src":"storage:1"},"start":0,"length":5,"ai":{"media_kind":"audio_tts","prompt":"First.","voice":"voice-1","model":"eleven_multilingual_v2","provider_request_id":"req-a","storage_id":1,"status":"ready"}},
+		{"uid":"snap","asset":{"type":"audio","src":"storage:2"},"start":5,"length":1,"ai":{"media_kind":"audio_sfx","prompt":"finger snap","storage_id":2,"status":"ready"}},
+		{"uid":"b","asset":{"type":"audio","src":""},"start":6,"length":5,"ai":{"media_kind":"audio_tts","prompt":"Second.","voice":"voice-1","model":"eleven_multilingual_v2"}}
+	]}]}}`
+	got, err := parseEditJSON(edit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	opts := ttsContinuityOptions(&got.Timeline.Tracks[0], 2)
+	ids, _ := opts["previous_request_ids"].([]string)
+	if len(ids) != 1 || ids[0] != "req-a" {
+		t.Fatalf("previous_request_ids = %+v, want req-a across SFX", ids)
+	}
+}
+
+func TestTTSContinuityOptions_UsesTimelineOrder(t *testing.T) {
+	edit := `{"timeline":{"tracks":[{"type":"audio","clips":[
+		{"uid":"late","asset":{"type":"audio","src":""},"start":10,"length":5,"ai":{"media_kind":"audio_tts","prompt":"Third.","voice":"voice-1"}},
+		{"uid":"early","asset":{"type":"audio","src":""},"start":0,"length":5,"ai":{"media_kind":"audio_tts","prompt":"First.","voice":"voice-1","model":"eleven_multilingual_v2"}},
+		{"uid":"middle","asset":{"type":"audio","src":""},"start":5,"length":5,"ai":{"media_kind":"audio_tts","prompt":"Second.","voice":"voice-1"}}
+	]}]}}`
+	got, err := parseEditJSON(edit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	opts := ttsContinuityOptions(&got.Timeline.Tracks[0], 2)
+	if opts["previous_text"] != "First." || opts["next_text"] != "Third." {
+		t.Fatalf("timeline context = %+v, want First/Third", opts)
+	}
+}
+
+func TestTTSContinuityOptions_MissingImmediateRequestIDFallsBackToText(t *testing.T) {
+	edit := `{"timeline":{"tracks":[{"type":"audio","clips":[
+		{"uid":"a","asset":{"type":"audio","src":"storage:1"},"start":0,"length":5,"ai":{"media_kind":"audio_tts","prompt":"First.","voice":"voice-1","provider_request_id":"req-a","storage_id":1,"status":"ready"}},
+		{"uid":"b","asset":{"type":"audio","src":"storage:2"},"start":5,"length":5,"ai":{"media_kind":"audio_tts","prompt":"Second.","voice":"voice-1","storage_id":2,"status":"ready"}},
+		{"uid":"c","asset":{"type":"audio","src":""},"start":10,"length":5,"ai":{"media_kind":"audio_tts","prompt":"Third.","voice":"voice-1"}}
+	]}]}}`
+	got, err := parseEditJSON(edit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	opts := ttsContinuityOptions(&got.Timeline.Tracks[0], 2)
+	if _, exists := opts["previous_request_ids"]; exists {
+		t.Fatalf("stale non-contiguous request IDs should not be used: %+v", opts)
+	}
+	if opts["previous_text"] != "Second." {
+		t.Fatalf("previous_text = %v, want immediate Second.", opts["previous_text"])
+	}
+}
+
+func TestTTSContinuityCacheContextIgnoresProviderRequestIDs(t *testing.T) {
+	edit := `{"timeline":{"tracks":[{"type":"audio","clips":[
+		{"uid":"a","asset":{"type":"audio","src":""},"start":0,"length":5,"ai":{"media_kind":"audio_tts","prompt":"First.","voice":"voice-1"}},
+		{"uid":"b","asset":{"type":"audio","src":""},"start":5,"length":5,"ai":{"media_kind":"audio_tts","prompt":"Second.","voice":"voice-1"}},
+		{"uid":"c","asset":{"type":"audio","src":""},"start":10,"length":5,"ai":{"media_kind":"audio_tts","prompt":"Third.","voice":"voice-1"}}
+	]}]}}`
+	got, err := parseEditJSON(edit)
+	if err != nil {
+		t.Fatal(err)
+	}
+	track := &got.Timeline.Tracks[0]
+	before := planTTSContinuity(track, 1)
+	beforeKey := aiCacheKeyWithOptions(track.Clips[1].AI, before.CacheOptions)
+	track.Clips[0].AI.ProviderRequestID = "req-a"
+	track.Clips[0].AI.StorageID = 1
+	track.Clips[0].AI.Status = "ready"
+	track.Clips[2].AI.ProviderRequestID = "req-c"
+	track.Clips[2].AI.StorageID = 3
+	track.Clips[2].AI.Status = "ready"
+	after := planTTSContinuity(track, 1)
+	afterKey := aiCacheKeyWithOptions(track.Clips[1].AI, after.CacheOptions)
+	if beforeKey != afterKey {
+		t.Fatalf("request IDs changed stable cache key: %s != %s", beforeKey, afterKey)
+	}
+	if _, ok := after.ProviderOptions["previous_request_ids"]; !ok {
+		t.Fatalf("provider request IDs missing after neighbors became ready: %+v", after.ProviderOptions)
+	}
+}
+
+func TestApplyDefaultAIOptions_MergesPartialVoiceSettings(t *testing.T) {
+	ai := &AIAsset{MediaKind: "audio_tts", Options: map[string]any{
+		"voice_settings": map[string]any{"stability": 0.9},
+	}}
+	applyDefaultAIOptions(ai)
+	settings := ai.Options["voice_settings"].(map[string]any)
+	if settings["stability"] != 0.9 || settings["similarity_boost"] != 0.95 || settings["style"] != 0 || settings["use_speaker_boost"] != true {
+		t.Fatalf("partial settings were not completed correctly: %+v", settings)
+	}
+}
+
+func TestDefaultGeneratedAudioFX_NormalizesTTSWithoutTrimming(t *testing.T) {
+	clip := Clip{AI: &AIAsset{MediaKind: "audio_tts"}}
+	defaultGeneratedAudioFX(&clip)
+	if clip.Audio == nil || !clip.Audio.Normalize || clip.Audio.LoudnessTarget != -16 || clip.Audio.PeakLimitDB != -2 {
+		t.Fatalf("TTS normalization defaults missing: %+v", clip.Audio)
+	}
+	if clip.Audio.TrimSilence {
+		t.Fatal("TTS default must preserve natural leading/trailing silence")
+	}
+}
+
+func TestResetAIGeneratedStateClearsProviderMetadata(t *testing.T) {
+	ai := &AIAsset{StorageID: 1, GenerationID: 2, ProviderRequestID: "old", JobID: 3, Status: "ready", ActualDurationSeconds: 4, AudioAnalysis: &AudioAnalysis{}, PeakDB: -1, RMSDB: -10, Error: "old"}
+	resetAIGeneratedState(ai)
+	if ai.StorageID != 0 || ai.GenerationID != 0 || ai.ProviderRequestID != "" || ai.JobID != 0 || ai.Status != "draft" || ai.ActualDurationSeconds != 0 || ai.AudioAnalysis != nil || ai.Error != "" {
+		t.Fatalf("generated state not fully cleared: %+v", ai)
 	}
 }
 

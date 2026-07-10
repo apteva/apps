@@ -89,9 +89,12 @@ interface AIAsset {
   source_images?: string[];
   options?: Record<string, unknown>;
   cache_key?: string;
+  input_fingerprint?: string;
+  continuity_fingerprint?: string;
   cache_policy?: "reuse" | "refresh";
   status?: "draft" | "generating" | "ready" | "failed";
   generation_id?: number;
+  provider_request_id?: string;
   storage_id?: number;
   job_id?: number;
   estimated_duration_seconds?: number;
@@ -747,12 +750,15 @@ function defaultOptionsForAI(kind: MediaKind): Record<string, unknown> | undefin
 function withDefaultAIOptions(ai: AIAsset): AIAsset {
   if (ai.media_kind !== "audio_tts") return ai;
   const options = ai.options || {};
-  if (options.voice_settings) return ai;
+  const defaults = (defaultOptionsForAI("audio_tts")?.voice_settings || {}) as Record<string, unknown>;
+  const settings = options.voice_settings && typeof options.voice_settings === "object" && !Array.isArray(options.voice_settings)
+    ? options.voice_settings as Record<string, unknown>
+    : {};
   return {
     ...ai,
     options: {
       ...options,
-      ...defaultOptionsForAI("audio_tts"),
+      voice_settings: { ...defaults, ...settings },
     },
   };
 }
@@ -887,27 +893,6 @@ function withDurationEstimate(ai: AIAsset): AIAsset {
   return { ...ai, estimated_duration_seconds: ai.estimated_duration_seconds || estimate };
 }
 
-function cacheKeyForAI(ai: AIAsset): string {
-  const stable = JSON.stringify({
-    media_kind: ai.media_kind,
-    prompt: ai.prompt,
-    model: ai.model || "",
-    size: ai.size || "",
-    duration: ai.duration || 0,
-    aspect: ai.aspect || "",
-    voice: ai.voice || "",
-    avatar: ai.avatar || "",
-    source_images: aiSourceImages(ai),
-    options: ai.options || {},
-  });
-  let h = 2166136261;
-  for (let i = 0; i < stable.length; i += 1) {
-    h ^= stable.charCodeAt(i);
-    h = Math.imul(h, 16777619);
-  }
-  return `composer:${(h >>> 0).toString(16)}`;
-}
-
 function aiSourceImages(ai: Pick<AIAsset, "source_image" | "source_images"> | undefined): string[] {
   const out: string[] = [];
   const seen = new Set<string>();
@@ -920,36 +905,6 @@ function aiSourceImages(ai: Pick<AIAsset, "source_image" | "source_images"> | un
   for (const ref of ai?.source_images || []) add(ref);
   add(ai?.source_image);
   return out;
-}
-
-function storageIDFromMeta(meta: any): number {
-  const ids = Array.isArray(meta?.storage_ids) ? meta.storage_ids : [];
-  const n = Number(ids[0] || 0);
-  return Number.isFinite(n) ? n : 0;
-}
-
-function generationIDFromMeta(meta: any): number {
-  const n = Number(meta?.generation_id || 0);
-  return Number.isFinite(n) ? n : 0;
-}
-
-function aiFromMeta(ai: AIAsset, meta: any, cacheKey: string): AIAsset {
-  const estimated = Number(meta?.estimated_duration_seconds || ai.estimated_duration_seconds || 0) || undefined;
-  const actual = Number(meta?.actual_duration_seconds || ai.actual_duration_seconds || 0) || undefined;
-  const analysis = meta?.audio_analysis || ai.audio_analysis;
-  return {
-    ...ai,
-    cache_key: cacheKey,
-    status: "ready",
-    storage_id: storageIDFromMeta(meta),
-    generation_id: generationIDFromMeta(meta),
-    estimated_duration_seconds: estimated,
-    actual_duration_seconds: actual,
-    audio_analysis: analysis,
-    peak_db: Number(meta?.peak_db || ai.peak_db || analysis?.peak_db || 0) || undefined,
-    rms_db: Number(meta?.rms_db || ai.rms_db || analysis?.rms_db || 0) || undefined,
-    error: "",
-  };
 }
 
 function parseJSONRecord(raw: string | undefined): Record<string, any> {
@@ -1633,32 +1588,12 @@ export default function ComposerPanel({ projectId, installId }: NativePanelProps
     setPickerTarget(null);
   };
 
-  const callMediaStudioGenerate = async (ai: AIAsset) => {
+  const callComposerGenerate = async (ai: AIAsset, track?: Record<string, unknown>, clipUID?: string) => {
     const nextAI = withDurationEstimate(ai);
-    const cache_key = nextAI.cache_key || cacheKeyForAI(nextAI);
-    const body: Record<string, unknown> = {
-      kind: nextAI.media_kind,
-      prompt: nextAI.prompt,
-      cache_key,
-      cache_policy: nextAI.cache_policy || "reuse",
-    };
-    if (nextAI.model) body.model = nextAI.model;
-    if (nextAI.size) body.size = nextAI.size;
-    if (nextAI.duration) body.duration = nextAI.duration;
-    if (nextAI.aspect) body.aspect = nextAI.aspect;
-    if (nextAI.voice) body.voice = nextAI.voice;
-    if (nextAI.avatar) body.avatar = nextAI.avatar;
-    const sourceImages = aiSourceImages(nextAI);
-    if (sourceImages.length > 0) {
-      body.source_images = sourceImages;
-      body.source_image = sourceImages[0];
-    }
-    const options = { ...(nextAI.options || {}) };
-    if (nextAI.estimated_duration_seconds && !options.estimated_duration_seconds) {
-      options.estimated_duration_seconds = nextAI.estimated_duration_seconds;
-    }
-    if (Object.keys(options).length > 0) body.options = options;
-    const res = await fetch(`/api/apps/media-studio/generate?project_id=${encodeURIComponent(projectId)}`, {
+    const body: Record<string, unknown> = track && clipUID
+      ? { track, clip_uid: clipUID, project_id: projectId }
+      : { ai: nextAI, project_id: projectId };
+    const res = await fetch(`/api/apps/composer/ai/generate?project_id=${encodeURIComponent(projectId)}`, {
       method: "POST",
       credentials: "same-origin",
       headers: { "Content-Type": "application/json" },
@@ -1667,7 +1602,8 @@ export default function ComposerPanel({ projectId, installId }: NativePanelProps
     const text = await res.text();
     if (!res.ok) throw new Error(`${res.status}: ${text.slice(0, 400)}`);
     const data = JSON.parse(text || "{}");
-    return { data, meta: data._meta || {}, cache_key };
+    if (!data.ai) throw new Error("Composer returned no AI asset metadata.");
+    return { ai: data.ai as AIAsset, pending: String(data.pending || "") };
   };
 
   const generateClipAI = async (clip: ClipDraft) => {
@@ -1679,20 +1615,19 @@ export default function ComposerPanel({ projectId, installId }: NativePanelProps
     setAIBusy(clip.id);
     setStatus("Generating AI clip...");
     try {
-      const { meta, cache_key } = await callMediaStudioGenerate(clip.ai);
-      if (meta.status === "queued" || meta.status === "polling") {
-        const estimated = Number(meta.estimated_duration_seconds || clip.ai.estimated_duration_seconds || estimateForAI(clip.ai) || 0) || undefined;
+      const { ai: nextAI, pending } = await callComposerGenerate(clip.ai);
+      if (nextAI.status === "generating") {
+        const estimated = Number(nextAI.estimated_duration_seconds || clip.ai.estimated_duration_seconds || estimateForAI(clip.ai) || 0) || undefined;
         updateClip(clip.id, {
           duration_mode: clip.duration_mode || defaultDurationMode(clip.ai.media_kind),
           estimated_length: estimated,
-          ai: { ...clip.ai, cache_key, estimated_duration_seconds: estimated, status: "generating", job_id: Number(meta.job_id || 0), error: "" },
+          ai: nextAI,
         });
-        setStatus(`AI clip queued as job #${meta.job_id}.`);
+        setStatus(pending || `AI clip queued as job #${nextAI.job_id}.`);
         return;
       }
-      const storageId = storageIDFromMeta(meta);
+      const storageId = Number(nextAI.storage_id || 0);
       if (!storageId) throw new Error("Media Studio returned no storage id. Make sure Storage is linked to Media Studio.");
-      const nextAI = aiFromMeta(clip.ai, meta, cache_key);
       updateClip(clip.id, {
         asset: { type: clip.ai.media_kind === "image" ? "image" : "video", src: `storage:${storageId}` },
         ai: nextAI,
@@ -1722,10 +1657,9 @@ export default function ComposerPanel({ projectId, installId }: NativePanelProps
     setAIBusy("soundtrack");
     setStatus("Generating AI soundtrack...");
     try {
-      const { meta, cache_key } = await callMediaStudioGenerate(ai);
-      const storageId = storageIDFromMeta(meta);
+      const { ai: nextAI } = await callComposerGenerate(ai);
+      const storageId = Number(nextAI.storage_id || 0);
       if (!storageId) throw new Error("Media Studio returned no storage id. Make sure Storage is linked to Media Studio.");
-      const nextAI = aiFromMeta(ai, meta, cache_key);
       updateDraft((cur) => ({
         ...cur,
         soundtrack: {
@@ -1755,20 +1689,21 @@ export default function ComposerPanel({ projectId, installId }: NativePanelProps
     setAIBusy(clip.id);
     setStatus("Generating AI audio...");
     try {
-      const { meta, cache_key } = await callMediaStudioGenerate(clip.ai);
-      if (meta.status === "queued" || meta.status === "polling") {
-        const estimated = Number(meta.estimated_duration_seconds || clip.ai.estimated_duration_seconds || estimateForAI(clip.ai) || 0) || undefined;
+      const draftBody = draftToBody(draft);
+      const audioTrack = ((draftBody.tracks as Record<string, unknown>[]) || []).find((track) => track.type === "audio");
+      const { ai: nextAI, pending } = await callComposerGenerate(clip.ai, audioTrack, clip.id);
+      if (nextAI.status === "generating") {
+        const estimated = Number(nextAI.estimated_duration_seconds || clip.ai.estimated_duration_seconds || estimateForAI(clip.ai) || 0) || undefined;
         updateAudioClip(clip.id, {
           duration_mode: clip.duration_mode || defaultDurationMode(clip.ai.media_kind),
           estimated_length: estimated,
-          ai: { ...clip.ai, cache_key, estimated_duration_seconds: estimated, status: "generating", job_id: Number(meta.job_id || 0), error: "" },
+          ai: nextAI,
         });
-        setStatus(`AI audio queued as job #${meta.job_id}.`);
+        setStatus(pending || `AI audio queued as job #${nextAI.job_id}.`);
         return;
       }
-      const storageId = storageIDFromMeta(meta);
+      const storageId = Number(nextAI.storage_id || 0);
       if (!storageId) throw new Error("Media Studio returned no storage id. Make sure Storage is linked to Media Studio.");
-      const nextAI = aiFromMeta(clip.ai, meta, cache_key);
       updateAudioClip(clip.id, {
         asset: { type: "audio", src: `storage:${storageId}` },
         ai: nextAI,
@@ -3542,8 +3477,11 @@ function AIAssetEditor({
       ...patch,
       status: resetGeneratedState ? "draft" : patch.status || ai.status || "draft",
       cache_key: resetGeneratedState ? undefined : ai.cache_key,
+      input_fingerprint: resetGeneratedState ? undefined : ai.input_fingerprint,
+      continuity_fingerprint: resetGeneratedState ? undefined : ai.continuity_fingerprint,
       storage_id: resetGeneratedState ? undefined : ai.storage_id,
       generation_id: resetGeneratedState ? undefined : ai.generation_id,
+      provider_request_id: resetGeneratedState ? undefined : ai.provider_request_id,
       job_id: resetGeneratedState ? undefined : ai.job_id,
       actual_duration_seconds: resetGeneratedState ? undefined : ai.actual_duration_seconds,
       audio_analysis: resetGeneratedState ? undefined : ai.audio_analysis,

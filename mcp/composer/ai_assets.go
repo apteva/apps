@@ -24,8 +24,8 @@ func materializeAIAssets(ctx *sdk.AppCtx, edit *Edit, compositionID int64, proje
 		return out, nil
 	}
 	for ti := range edit.Timeline.Tracks {
-		for i := range edit.Timeline.Tracks[ti].Clips {
-			track := &edit.Timeline.Tracks[ti]
+		track := &edit.Timeline.Tracks[ti]
+		for _, i := range timelineOrderedClipIndices(track) {
 			clip := &edit.Timeline.Tracks[ti].Clips[i]
 			normalizeGeneratedAsset(clip)
 			if clip.UID == "" {
@@ -38,8 +38,8 @@ func materializeAIAssets(ctx *sdk.AppCtx, edit *Edit, compositionID int64, proje
 			if prepareAIVideoDurationForTiming(edit, clip) {
 				out.Changed = true
 			}
-			continuityOptions := ttsContinuityOptions(track, i)
-			changed, pending, err := materializeOneAIAsset(ctx, clip.AI, "clip "+clip.UID, projectID, continuityOptions)
+			continuity := planTTSContinuity(track, i)
+			changed, pending, err := materializeOneAIAsset(ctx, clip.AI, "clip "+clip.UID, projectID, continuity.ProviderOptions, continuity.CacheOptions)
 			if err != nil {
 				return out, err
 			}
@@ -74,7 +74,7 @@ func materializeAIAssets(ctx *sdk.AppCtx, edit *Edit, compositionID int64, proje
 		}
 	}
 	if s := edit.Timeline.Soundtrack; s != nil && s.AI != nil {
-		changed, pending, err := materializeOneAIAsset(ctx, s.AI, "soundtrack", projectID, nil)
+		changed, pending, err := materializeOneAIAsset(ctx, s.AI, "soundtrack", projectID, nil, nil)
 		if err != nil {
 			return out, err
 		}
@@ -176,7 +176,7 @@ func resolveRelativeClipStarts(edit *Edit) bool {
 	return changed
 }
 
-func materializeOneAIAsset(ctx *sdk.AppCtx, ai *AIAsset, label, projectID string, contextualOptions map[string]any) (bool, string, error) {
+func materializeOneAIAsset(ctx *sdk.AppCtx, ai *AIAsset, label, projectID string, providerOptions, cacheOptions map[string]any) (bool, string, error) {
 	if ai == nil {
 		return false, "", nil
 	}
@@ -185,17 +185,33 @@ func materializeOneAIAsset(ctx *sdk.AppCtx, ai *AIAsset, label, projectID string
 		ai.CachePolicy = "reuse"
 		changed = true
 	}
-	expectedCacheKey := aiCacheKeyWithOptions(ai, contextualOptions)
-	if ai.CacheKey == "" {
+	inputFingerprint := aiCacheKeyWithOptions(ai, nil)
+	continuityFingerprint := continuityOptionsFingerprint(cacheOptions)
+	expectedCacheKey := aiCacheKeyWithOptions(ai, cacheOptions)
+	legacyReady := ai.StorageID > 0 && ai.Status == "ready" && ai.InputFingerprint == "" && ai.ContinuityFingerprint == ""
+	inputChanged := ai.InputFingerprint != "" && ai.InputFingerprint != inputFingerprint
+	continuityChanged := ai.ContinuityFingerprint != "" && ai.ContinuityFingerprint != continuityFingerprint
+	if inputChanged || continuityChanged {
+		resetAIGeneratedState(ai)
+		changed = true
+	}
+	if ai.InputFingerprint != inputFingerprint {
+		ai.InputFingerprint = inputFingerprint
+		changed = true
+	}
+	if ai.ContinuityFingerprint != continuityFingerprint {
+		ai.ContinuityFingerprint = continuityFingerprint
+		changed = true
+	}
+	if ai.CacheKey != expectedCacheKey {
 		ai.CacheKey = expectedCacheKey
 		changed = true
-	} else if strings.HasPrefix(ai.CacheKey, "composer:") && ai.CacheKey != expectedCacheKey {
-		ai.CacheKey = expectedCacheKey
-		ai.StorageID = 0
-		ai.GenerationID = 0
-		ai.JobID = 0
-		ai.Status = "draft"
-		changed = true
+	}
+	// Existing ready clips predate fingerprints and may carry either the old
+	// backend key or the panel's former FNV key. Adopt the stable fingerprints
+	// once without charging for a migration-time regeneration.
+	if legacyReady {
+		return changed, "", nil
 	}
 	if ai.StorageID > 0 && ai.Status == "ready" {
 		return changed, "", nil
@@ -234,7 +250,7 @@ func materializeOneAIAsset(ctx *sdk.AppCtx, ai *AIAsset, label, projectID string
 		args["source_images"] = refs
 		args["source_image"] = refs[0]
 	}
-	if opts := mediaGenerateOptions(ai, contextualOptions); len(opts) > 0 {
+	if opts := mediaGenerateOptions(ai, providerOptions); len(opts) > 0 {
 		args["options"] = opts
 	}
 	var got map[string]any
@@ -300,46 +316,72 @@ func materializeOneAIAsset(ctx *sdk.AppCtx, ai *AIAsset, label, projectID string
 	return true, "", errors.New(label + ": Media Studio returned no storage id")
 }
 
-func ttsContinuityOptions(track *Track, clipIndex int) map[string]any {
+type ttsContinuityPlan struct {
+	ProviderOptions map[string]any
+	CacheOptions    map[string]any
+}
+
+func planTTSContinuity(track *Track, clipIndex int) ttsContinuityPlan {
 	if track == nil || clipIndex < 0 || clipIndex >= len(track.Clips) {
-		return nil
+		return ttsContinuityPlan{}
 	}
 	current := &track.Clips[clipIndex]
 	if !isAudioTTS(current.AI) {
-		return nil
+		return ttsContinuityPlan{}
 	}
 	if !ttsModelSupportsContinuity(current.AI) {
-		return nil
+		return ttsContinuityPlan{}
 	}
-	out := map[string]any{}
-	if !hasAIOption(current.AI, "previous_request_ids") {
-		if ids := neighboringCompatibleTTSRequestIDs(track, clipIndex, -1); len(ids) > 0 {
-			out["previous_request_ids"] = ids
+	provider := map[string]any{}
+	cache := map[string]any{}
+	prev := neighboringCompatibleTTS(track, clipIndex, -1)
+	next := neighboringCompatibleTTS(track, clipIndex, 1)
+	if prev != nil && !hasAIOption(current.AI, "previous_text") && !hasAIOption(current.AI, "previous_request_ids") {
+		if text := strings.TrimSpace(prev.AI.Prompt); text != "" {
+			cache["previous_text"] = text
 		}
 	}
-	if _, hasRequestIDs := out["previous_request_ids"]; !hasRequestIDs && !hasAIOption(current.AI, "previous_text") {
-		if prev := neighboringCompatibleTTS(track, clipIndex, -1); prev != nil {
+	if next != nil && !hasAIOption(current.AI, "next_text") && !hasAIOption(current.AI, "next_request_ids") {
+		if text := strings.TrimSpace(next.AI.Prompt); text != "" {
+			cache["next_text"] = text
+		}
+	}
+	useRequestIDs := !optionIsFalse(current.AI.Options, "enable_logging")
+	if !hasAIOption(current.AI, "previous_request_ids") {
+		if ids := neighboringCompatibleTTSRequestIDs(track, clipIndex, -1); useRequestIDs && len(ids) > 0 {
+			provider["previous_request_ids"] = ids
+		}
+	}
+	if _, hasRequestIDs := provider["previous_request_ids"]; !hasRequestIDs && !hasAIOption(current.AI, "previous_text") {
+		if prev != nil {
 			if text := strings.TrimSpace(prev.AI.Prompt); text != "" {
-				out["previous_text"] = text
+				provider["previous_text"] = text
 			}
 		}
 	}
 	if !hasAIOption(current.AI, "next_request_ids") {
-		if ids := neighboringCompatibleTTSRequestIDs(track, clipIndex, 1); len(ids) > 0 {
-			out["next_request_ids"] = ids
+		if ids := neighboringCompatibleTTSRequestIDs(track, clipIndex, 1); useRequestIDs && len(ids) > 0 {
+			provider["next_request_ids"] = ids
 		}
 	}
-	if _, hasRequestIDs := out["next_request_ids"]; !hasRequestIDs && !hasAIOption(current.AI, "next_text") {
-		if next := neighboringCompatibleTTS(track, clipIndex, 1); next != nil {
+	if _, hasRequestIDs := provider["next_request_ids"]; !hasRequestIDs && !hasAIOption(current.AI, "next_text") {
+		if next != nil {
 			if text := strings.TrimSpace(next.AI.Prompt); text != "" {
-				out["next_text"] = text
+				provider["next_text"] = text
 			}
 		}
 	}
-	if len(out) == 0 {
-		return nil
+	if len(provider) == 0 {
+		provider = nil
 	}
-	return out
+	if len(cache) == 0 {
+		cache = nil
+	}
+	return ttsContinuityPlan{ProviderOptions: provider, CacheOptions: cache}
+}
+
+func ttsContinuityOptions(track *Track, clipIndex int) map[string]any {
+	return planTTSContinuity(track, clipIndex).ProviderOptions
 }
 
 func neighboringCompatibleTTSRequestIDs(track *Track, clipIndex, direction int) []string {
@@ -348,7 +390,7 @@ func neighboringCompatibleTTSRequestIDs(track *Track, clipIndex, direction int) 
 	}
 	current := &track.Clips[clipIndex]
 	ids := []string{}
-	for i := clipIndex + direction; i >= 0 && i < len(track.Clips); i += direction {
+	for _, i := range neighboringClipIndices(track, clipIndex, direction) {
 		candidate := &track.Clips[i]
 		if !isAudioTTS(candidate.AI) {
 			continue
@@ -356,11 +398,13 @@ func neighboringCompatibleTTSRequestIDs(track *Track, clipIndex, direction int) 
 		if !compatibleTTSContext(current.AI, candidate.AI) {
 			break
 		}
-		if id := strings.TrimSpace(candidate.AI.ProviderRequestID); id != "" {
-			ids = append(ids, id)
-			if len(ids) == 3 {
-				break
-			}
+		id := usableTTSRequestID(candidate.AI)
+		if id == "" {
+			break
+		}
+		ids = append(ids, id)
+		if len(ids) == 3 {
+			break
 		}
 	}
 	if direction < 0 {
@@ -376,7 +420,7 @@ func neighboringCompatibleTTS(track *Track, clipIndex, direction int) *Clip {
 		return nil
 	}
 	current := &track.Clips[clipIndex]
-	for i := clipIndex + direction; i >= 0 && i < len(track.Clips); i += direction {
+	for _, i := range neighboringClipIndices(track, clipIndex, direction) {
 		candidate := &track.Clips[i]
 		if !isAudioTTS(candidate.AI) {
 			continue
@@ -387,6 +431,52 @@ func neighboringCompatibleTTS(track *Track, clipIndex, direction int) *Clip {
 		return nil
 	}
 	return nil
+}
+
+func timelineOrderedClipIndices(track *Track) []int {
+	if track == nil {
+		return nil
+	}
+	indices := make([]int, len(track.Clips))
+	for i := range track.Clips {
+		indices[i] = i
+	}
+	sort.SliceStable(indices, func(i, j int) bool {
+		return track.Clips[indices[i]].Start < track.Clips[indices[j]].Start
+	})
+	return indices
+}
+
+func neighboringClipIndices(track *Track, clipIndex, direction int) []int {
+	if track == nil || direction == 0 {
+		return nil
+	}
+	ordered := timelineOrderedClipIndices(track)
+	position := -1
+	for i, index := range ordered {
+		if index == clipIndex {
+			position = i
+			break
+		}
+	}
+	if position < 0 {
+		return nil
+	}
+	out := []int{}
+	for i := position + direction; i >= 0 && i < len(ordered); i += direction {
+		out = append(out, ordered[i])
+	}
+	return out
+}
+
+func usableTTSRequestID(ai *AIAsset) string {
+	if ai == nil || (ai.StorageID <= 0 && strings.ToLower(strings.TrimSpace(ai.Status)) != "ready") {
+		return ""
+	}
+	if optionIsFalse(ai.Options, "enable_logging") {
+		return ""
+	}
+	return strings.TrimSpace(ai.ProviderRequestID)
 }
 
 func isAudioTTS(ai *AIAsset) bool {
@@ -406,8 +496,13 @@ func compatibleTTSContext(a, b *AIAsset) bool {
 	if effectiveTTSModelID(a) != effectiveTTSModelID(b) {
 		return false
 	}
-	if optionJSONKey(a.Options, "voice_settings") != optionJSONKey(b.Options, "voice_settings") {
-		return false
+	for _, key := range []string{
+		"voice_settings", "language_code", "pronunciation_dictionary_locators",
+		"apply_text_normalization", "apply_language_text_normalization", "seed", "use_pvc_as_ivc",
+	} {
+		if optionJSONKey(a.Options, key) != optionJSONKey(b.Options, key) {
+			return false
+		}
 	}
 	return true
 }
@@ -419,7 +514,45 @@ func effectiveTTSModelID(ai *AIAsset) string {
 	if modelID := strings.TrimSpace(optionString(ai.Options, "model_id")); modelID != "" {
 		return modelID
 	}
-	return strings.TrimSpace(ai.Model)
+	model := strings.TrimSpace(ai.Model)
+	if model == "" {
+		return "eleven_multilingual_v2"
+	}
+	return model
+}
+
+func optionIsFalse(opts map[string]any, key string) bool {
+	v, ok := opts[key]
+	if !ok {
+		return false
+	}
+	b, ok := v.(bool)
+	return ok && !b
+}
+
+func continuityOptionsFingerprint(options map[string]any) string {
+	if len(options) == 0 {
+		return ""
+	}
+	b, _ := json.Marshal(sortedStableOptions(options))
+	sum := sha256.Sum256(b)
+	return hex.EncodeToString(sum[:16])
+}
+
+func resetAIGeneratedState(ai *AIAsset) {
+	if ai == nil {
+		return
+	}
+	ai.StorageID = 0
+	ai.GenerationID = 0
+	ai.ProviderRequestID = ""
+	ai.JobID = 0
+	ai.Status = "draft"
+	ai.ActualDurationSeconds = 0
+	ai.AudioAnalysis = nil
+	ai.PeakDB = 0
+	ai.RMSDB = 0
+	ai.Error = ""
 }
 
 func ttsModelSupportsContinuity(ai *AIAsset) bool {

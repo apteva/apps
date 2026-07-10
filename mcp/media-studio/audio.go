@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"strings"
 )
 
 // Audio (TTS + SFX) is sync for ElevenLabs: the integration executor
@@ -44,14 +45,30 @@ func buildElevenLabsTTSArgs(args map[string]any) (map[string]any, error) {
 			"model_id", "language_code", "voice_settings",
 			"pronunciation_dictionary_locators", "seed", "previous_text",
 			"next_text", "previous_request_ids", "next_request_ids",
-			"apply_text_normalization", "output_format", "optimize_streaming_latency",
-			"enable_logging",
+			"apply_text_normalization", "apply_language_text_normalization",
+			"use_pvc_as_ivc", "output_format", "optimize_streaming_latency", "enable_logging",
 		}
 		for _, k := range passThrough {
 			if v, exists := opts[k]; exists {
 				out[k] = v
 			}
 		}
+	}
+	modelID, _ := out["model_id"].(string)
+	if modelID == "" {
+		modelID = "eleven_multilingual_v2"
+	}
+	if strings.EqualFold(strings.TrimSpace(modelID), "eleven_v3") {
+		delete(out, "previous_text")
+		delete(out, "next_text")
+		delete(out, "previous_request_ids")
+		delete(out, "next_request_ids")
+	}
+	if enableLogging, ok := out["enable_logging"].(bool); ok && !enableLogging {
+		// Zero-retention requests do not retain the history required for
+		// request-id stitching. Text context remains valid.
+		delete(out, "previous_request_ids")
+		delete(out, "next_request_ids")
 	}
 	return out, nil
 }

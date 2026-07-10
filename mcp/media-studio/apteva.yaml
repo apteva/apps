@@ -2,12 +2,17 @@ schema: apteva-app/v1
 
 name: media-studio
 display_name: Media Studio
-version: 0.10.38
+version: 0.10.39
 description: |
   Generate images, video, audio, music, and avatars via compatible
   providers. ElevenLabs powers audio TTS, sound effects, and music.
   Optionally saves outputs to the Storage app for permanent, shareable
-  references. v0.10.38 makes image output_format an enforced final-file
+  references. v0.10.39 filters unsupported ElevenLabs request-stitching
+  fields for Eleven v3 and zero-retention requests while retaining text
+  continuity where supported, and forwards current language-normalization
+  voice options.
+
+  v0.10.38 makes image output_format an enforced final-file
   contract: mismatched provider bytes are converted before Storage, with
   transparent images flattened onto white for JPEG output.
 

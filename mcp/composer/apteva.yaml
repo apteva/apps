@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: composer
 display_name: Composer
-version: 0.5.6
+version: 0.5.7
 description: |
   Multi-clip video composition. Stitch generated or uploaded assets
   into a single video — layered visual tracks, timed audio tracks, optional
@@ -10,6 +10,14 @@ description: |
   default, on a render host via instances when render_host_id is
   set, or against a SaaS render backend (Shotstack et al) when one
   is bound to the render_executor role.
+
+  v0.5.7 hardens multi-clip ElevenLabs narration. Composer now plans TTS
+  continuity in timeline order, carries request IDs across silence and SFX,
+  falls back to immediate neighboring text when an ID is unavailable, and
+  uses stable text context rather than volatile provider IDs for cache
+  identity. The panel and renderer share one server-side generation path;
+  edits clear stale IDs, partial voice settings inherit conservative defaults,
+  and generated TTS receives consistent loudness normalization.
 
   v0.5.6 adds Shotstack-style visual layering to the stable V1 renderer.
   The first visual track remains the fullscreen base track for backwards

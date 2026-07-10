@@ -1002,6 +1002,73 @@ func (a *App) handleRender(w http.ResponseWriter, r *http.Request) {
 	jsonResp(w, out)
 }
 
+// handleAIGenerate materializes one draft AI asset through Composer so the
+// panel and render path share cache and ElevenLabs continuity semantics.
+func (a *App) handleAIGenerate(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		http.Error(w, "POST only", http.StatusMethodNotAllowed)
+		return
+	}
+	if globalCtx == nil {
+		http.Error(w, "app not mounted", http.StatusServiceUnavailable)
+		return
+	}
+	var body struct {
+		AI        *AIAsset `json:"ai"`
+		Track     *Track   `json:"track"`
+		ClipUID   string   `json:"clip_uid"`
+		ProjectID string   `json:"project_id"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+	pid := strings.TrimSpace(body.ProjectID)
+	if pid == "" {
+		pid = strings.TrimSpace(r.URL.Query().Get("project_id"))
+	}
+	if pid == "" {
+		pid = projectScope(globalCtx)
+	}
+	ctx := globalCtx.WithProject(pid)
+
+	var ai *AIAsset
+	var continuity ttsContinuityPlan
+	if body.Track != nil {
+		for i := range body.Track.Clips {
+			normalizeGeneratedAsset(&body.Track.Clips[i])
+			normalizeClipDurationMetadata(&body.Track.Clips[i])
+		}
+		for i := range body.Track.Clips {
+			if body.Track.Clips[i].UID == body.ClipUID {
+				ai = body.Track.Clips[i].AI
+				continuity = planTTSContinuity(body.Track, i)
+				break
+			}
+		}
+		if ai == nil {
+			http.Error(w, "clip_uid not found in track", http.StatusBadRequest)
+			return
+		}
+	} else {
+		ai = body.AI
+		applyDefaultAIOptions(ai)
+	}
+	if ai == nil {
+		http.Error(w, "ai or track+clip_uid required", http.StatusBadRequest)
+		return
+	}
+	_, pending, err := materializeOneAIAsset(ctx, ai, "AI asset", pid, continuity.ProviderOptions, continuity.CacheOptions)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadGateway)
+		return
+	}
+	jsonResp(w, map[string]any{
+		"ai":      ai,
+		"pending": pending,
+	})
+}
+
 func (a *App) handleRenderStatus(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "GET only", http.StatusMethodNotAllowed)

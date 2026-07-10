@@ -8,6 +8,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/composition/", Handler: a.handleCompositionByID},
 		{Pattern: "/render", Handler: a.handleRender},
 		{Pattern: "/render-status/", Handler: a.handleRenderStatus},
+		{Pattern: "/ai/generate", Handler: a.handleAIGenerate},
 		{Pattern: "/cache/", Handler: a.handleCacheGet},
 		{Pattern: "/bindings", Handler: a.handleBindings},
 		{Pattern: "/validate", Handler: a.handleValidate},

@@ -109,6 +109,8 @@ type AIAsset struct {
 	SourceImages             []string       `json:"source_images,omitempty"`
 	Options                  map[string]any `json:"options,omitempty"`
 	CacheKey                 string         `json:"cache_key,omitempty"`
+	InputFingerprint         string         `json:"input_fingerprint,omitempty"`
+	ContinuityFingerprint    string         `json:"continuity_fingerprint,omitempty"`
 	CachePolicy              string         `json:"cache_policy,omitempty"`
 	Status                   string         `json:"status,omitempty"` // draft | generating | ready | failed
 	GenerationID             int64          `json:"generation_id,omitempty"`
@@ -915,14 +917,22 @@ func defaultGeneratedAudioFX(c *Clip) {
 	if c == nil || c.AI == nil || c.Audio != nil {
 		return
 	}
-	if strings.ToLower(strings.TrimSpace(c.AI.MediaKind)) != "audio_sfx" {
+	switch strings.ToLower(strings.TrimSpace(c.AI.MediaKind)) {
+	case "audio_tts":
+		c.Audio = &AudioFX{
+			Normalize:      true,
+			LoudnessTarget: -16,
+			PeakLimitDB:    -2,
+		}
+	case "audio_sfx":
+		c.Audio = &AudioFX{
+			Normalize:      true,
+			LoudnessTarget: -16,
+			PeakLimitDB:    -2,
+			TrimSilence:    true,
+		}
+	default:
 		return
-	}
-	c.Audio = &AudioFX{
-		Normalize:      true,
-		LoudnessTarget: -16,
-		PeakLimitDB:    -2,
-		TrimSilence:    true,
 	}
 }
 
@@ -947,9 +957,17 @@ func applyDefaultAIOptions(ai *AIAsset) {
 	if ai.Options == nil {
 		ai.Options = map[string]any{}
 	}
-	if _, ok := ai.Options["voice_settings"]; !ok {
-		ai.Options["voice_settings"] = defaultTTSVoiceSettings()
+	defaults := defaultTTSVoiceSettings()
+	settings, _ := ai.Options["voice_settings"].(map[string]any)
+	if settings == nil {
+		settings = map[string]any{}
 	}
+	for key, value := range defaults {
+		if _, exists := settings[key]; !exists {
+			settings[key] = value
+		}
+	}
+	ai.Options["voice_settings"] = settings
 }
 
 func defaultTTSVoiceSettings() map[string]any {
