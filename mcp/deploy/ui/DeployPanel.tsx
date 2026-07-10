@@ -90,6 +90,7 @@ interface NativePanelProps {
 interface Deployment {
   id: number;
   name: string;
+  target_kind: "service" | "android" | "ios";
   description?: string;
   source_kind: string;
   source_ref: string;
@@ -98,6 +99,7 @@ interface Deployment {
   start_cmd: string;
   port_hint: number;
   env_json: string;
+  target_config_json: string;
   domain: string;
   domain_record_id?: string;
   domain_attached_at?: string;
@@ -130,6 +132,7 @@ interface Build {
   exit_code: number;
   artifact_path: string;
   artifact_size: number;
+  artifact_manifest_json: string;
   log_path: string;
   error: string;
   created_at: string;
@@ -149,6 +152,11 @@ interface Release {
   restart_count: number;
   log_path: string;
   error: string;
+  channel?: string;
+  provider?: string;
+  external_id?: string;
+  external_status?: string;
+  release_meta_json?: string;
   created_at: string;
 }
 
@@ -179,8 +187,9 @@ interface UnhealthyEntry {
 
 const API = "/api/apps/deploy/api";
 
-const FRAMEWORKS = ["", "go", "node", "bun", "static", "blank"] as const;
+const FRAMEWORKS = ["", "go", "node", "bun", "static", "blank", "android", "ios"] as const;
 const SOURCE_KINDS = ["code", "local"] as const;
+const TARGET_KINDS = ["service", "android", "ios"] as const;
 
 function statusColor(s: string): string {
   if (s === "live" || s === "succeeded") return "text-green";
@@ -216,6 +225,8 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
   const [showAttachDomain, setShowAttachDomain] = useState(false);
   const [showEditConfig, setShowEditConfig] = useState(false);
   const [health, setHealth] = useState<Record<number, UnhealthyEntry>>({});
+  const [mobileChannel, setMobileChannel] = useState("internal");
+  const [submitForReview, setSubmitForReview] = useState(false);
 
   const withParams = useCallback(
     (extra: Record<string, string> = {}) =>
@@ -273,6 +284,9 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
         if (d.current_release) {
           setLogKind("release");
           setLogTargetId(d.current_release.id);
+        } else if (d.deployment.target_kind !== "service" && d.releases?.[0]) {
+          setLogKind("release");
+          setLogTargetId(d.releases[0].id);
         } else if (d.builds && d.builds[0]) {
           setLogKind("build");
           setLogTargetId(d.builds[0].id);
@@ -294,7 +308,7 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
     let cancelled = false;
     api<MetaInfo>("GET", "/_meta")
       .then((m) => { if (!cancelled) setMeta(m); })
-      .catch(() => { if (!cancelled) setMeta({ domains_available: false, domains: [], public_host: "" }); });
+      .catch(() => { if (!cancelled) setMeta({ domains_available: false, certs_available: false, domains: [], public_host: "", certs: {} }); });
     return () => { cancelled = true; };
   }, [api]);
 
@@ -378,7 +392,11 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
     setBusy(true);
     try {
       const r = await api<{ build: Build; release?: Release; release_error?: string }>(
-        "POST", `/deployments/${detail.deployment.id}/build`, { release },
+        "POST", `/deployments/${detail.deployment.id}/build`, {
+          release,
+          channel: detail.deployment.target_kind === "service" ? undefined : mobileChannel,
+          submit_for_review: detail.deployment.target_kind === "ios" && mobileChannel === "production" && submitForReview,
+        },
       );
       // Switch log target to the freshly-created build first.
       setLogKind("build");
@@ -395,12 +413,35 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
     if (!detail) return;
     try {
       const r = await api<{ release: Release }>(
-        "POST", `/deployments/${detail.deployment.id}/release`, { build_id: buildId },
+        "POST", `/deployments/${detail.deployment.id}/release`, {
+          build_id: buildId,
+          channel: detail.deployment.target_kind === "service" ? undefined : mobileChannel,
+          submit_for_review: detail.deployment.target_kind === "ios" && mobileChannel === "production" && submitForReview,
+        },
       );
       setLogKind("release");
       setLogTargetId(r.release.id);
     } catch (e) {
       setError("Release failed: " + (e as Error).message);
+    }
+  };
+
+  const handlePromoteMobile = async (releaseId: number) => {
+    if (!detail) return;
+    setBusy(true);
+    try {
+      const r = await api<{ release: Release }>("POST", `/deployments/${detail.deployment.id}/promote`, {
+        release_id: releaseId,
+        target_channel: mobileChannel,
+        submit_for_review: detail.deployment.target_kind === "ios" && mobileChannel === "production" && submitForReview,
+      });
+      setLogKind("release");
+      setLogTargetId(r.release.id);
+      loadDetail(detail.deployment.id);
+    } catch (e) {
+      setError("Promotion failed: " + (e as Error).message);
+    } finally {
+      setBusy(false);
     }
   };
 
@@ -477,6 +518,9 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
     });
   };
 
+  const mobile = detail?.deployment.target_kind === "android" || detail?.deployment.target_kind === "ios";
+  const latestMobileRelease = mobile ? detail?.releases[0] : null;
+
   return (
     <div className="h-full flex">
       {/* Deployments list */}
@@ -507,7 +551,7 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
                     <span className="text-sm text-text font-medium truncate flex-1">{d.name}</span>
                     {d.framework && (
                       <span className="text-[10px] px-1 py-0.5 rounded bg-blue/15 text-blue">
-                        {d.framework}
+                        {d.target_kind || d.framework}
                       </span>
                     )}
                     {health[d.id] ? (
@@ -569,7 +613,7 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
                   className="text-xs text-accent hover:underline truncate max-w-[260px]"
                 >{detail.url} ↗</a>
               )}
-              {detail.deployment.domain ? (
+              {!mobile && (detail.deployment.domain ? (
                 <div className="flex items-center gap-2">
                   <button
                     type="button"
@@ -587,20 +631,52 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
                   onClick={() => setShowAttachDomain(true)}
                   className="px-2 py-1 text-xs border border-border rounded hover:bg-bg-input"
                 >+ Attach domain</button>
+              ))}
+              {mobile && (
+                <select
+                  value={mobileChannel}
+                  onChange={(e) => {
+                    setMobileChannel(e.target.value);
+                    if (e.target.value !== "production") setSubmitForReview(false);
+                  }}
+                  className="bg-bg-input border border-border rounded px-2 py-1 text-xs"
+                  title="Store release channel"
+                >
+                  {detail.deployment.target_kind === "android" ? (
+                    <>
+                      <option value="internal">Internal</option>
+                      <option value="alpha">Alpha</option>
+                      <option value="beta">Beta</option>
+                      <option value="production">Production</option>
+                    </>
+                  ) : (
+                    <>
+                      <option value="internal">TestFlight internal</option>
+                      <option value="external">TestFlight external</option>
+                      <option value="production">App Store</option>
+                    </>
+                  )}
+                </select>
+              )}
+              {detail.deployment.target_kind === "ios" && mobileChannel === "production" && (
+                <label className="flex items-center gap-1 text-xs text-text-muted">
+                  <input type="checkbox" checked={submitForReview} onChange={(e) => setSubmitForReview(e.target.checked)} />
+                  Submit review
+                </label>
               )}
               <button
                 type="button"
                 onClick={() => handleBuild(true)}
                 disabled={busy}
                 className="px-3 py-1 text-sm border border-accent text-accent rounded hover:bg-accent hover:text-bg disabled:opacity-40"
-              >{busy ? "Building…" : "Build & Release"}</button>
+              >{busy ? "Building…" : mobile ? "Build & Publish" : "Build & Release"}</button>
               <button
                 type="button"
                 onClick={() => handleBuild(false)}
                 disabled={busy}
                 className="px-2 py-1 text-xs border border-border rounded hover:bg-bg-input disabled:opacity-40"
               >Build only</button>
-              {detail.current_release && (
+              {!mobile && detail.current_release && (
                 <button
                   type="button"
                   onClick={handleRestart}
@@ -615,7 +691,7 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
                 className="px-2 py-1 text-xs border border-border rounded hover:bg-bg-input"
                 title="Edit env, build/start commands, framework, port hint. Restart to apply without rebuilding."
               >Edit config</button>
-              {detail.current_release && detail.current_release.status === "live" && (
+              {!mobile && detail.current_release && detail.current_release.status === "live" && (
                 <button
                   type="button"
                   onClick={handleStop}
@@ -638,32 +714,39 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
 
             <section className="grid grid-cols-2 gap-4 p-4 border-b border-border text-xs">
               <div>
-                <div className="text-text-dim uppercase mb-1">Current release</div>
-                {detail.current_release ? (
+                <div className="text-text-dim uppercase mb-1">{mobile ? "Latest store release" : "Current release"}</div>
+                {(mobile ? latestMobileRelease : detail.current_release) ? (
                   <div className="space-y-1">
                     <div>
-                      <span className={statusColor(detail.current_release.status) + " font-medium"}>
-                        {detail.current_release.status}
+                      <span className={statusColor((mobile ? latestMobileRelease! : detail.current_release!).status) + " font-medium"}>
+                        {(mobile ? latestMobileRelease! : detail.current_release!).status}
                       </span>
-                      <span className="text-text-dim"> · port {detail.current_release.port} · pid {detail.current_release.pid}</span>
+                      {mobile ? (
+                        <span className="text-text-dim">
+                          {` · ${latestMobileRelease!.provider || detail.deployment.target_kind} · ${latestMobileRelease!.channel || "-"}`}
+                          {latestMobileRelease!.external_status ? ` · ${latestMobileRelease!.external_status}` : ""}
+                        </span>
+                      ) : (
+                        <span className="text-text-dim"> · port {detail.current_release!.port} · pid {detail.current_release!.pid}</span>
+                      )}
                     </div>
                     <div className="text-text-dim">
-                      build #{detail.current_release.build_id}
-                      {detail.current_release.started_at && ` · started ${detail.current_release.started_at}`}
-                      {detail.current_release.restart_count > 0 && (
+                      build #{(mobile ? latestMobileRelease! : detail.current_release!).build_id}
+                      {(mobile ? latestMobileRelease! : detail.current_release!).started_at && ` · started ${(mobile ? latestMobileRelease! : detail.current_release!).started_at}`}
+                      {!mobile && detail.current_release!.restart_count > 0 && (
                         <span className="text-yellow/80">
-                          {" · restarts: "}{detail.current_release.restart_count}
+                          {" · restarts: "}{detail.current_release!.restart_count}
                         </span>
                       )}
                     </div>
-                    {detail.current_release.error && (
-                      <div className="text-red truncate" title={detail.current_release.error}>
-                        {detail.current_release.error}
+                    {(mobile ? latestMobileRelease! : detail.current_release!).error && (
+                      <div className="text-red truncate" title={(mobile ? latestMobileRelease! : detail.current_release!).error}>
+                        {(mobile ? latestMobileRelease! : detail.current_release!).error}
                       </div>
                     )}
                   </div>
                 ) : (
-                  <div className="text-text-muted">No live release.</div>
+                  <div className="text-text-muted">{mobile ? "No store release." : "No live release."}</div>
                 )}
               </div>
               <div>
@@ -678,13 +761,13 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
                         · {formatDuration(detail.builds[0].duration_ms)} · {formatSize(detail.builds[0].artifact_size)}
                       </span>
                       {detail.builds[0].status === "succeeded"
-                        && detail.current_release?.build_id !== detail.builds[0].id && (
+                        && (mobile || detail.current_release?.build_id !== detail.builds[0].id) && (
                         <button
                           type="button"
                           onClick={() => handleReleaseBuild(detail.builds[0].id)}
                           className="ml-auto px-2 py-0.5 text-[11px] border border-accent text-accent rounded hover:bg-accent hover:text-bg"
                           title="Promote this build to a live release"
-                        >Release this build →</button>
+                        >{mobile ? `Publish to ${mobileChannel}` : "Release this build →"}</button>
                       )}
                     </div>
                     <div className="text-text-dim truncate">
@@ -713,9 +796,12 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
               <span className="text-text-dim uppercase">logs</span>
               <button
                 type="button"
-                onClick={() => detail.current_release && (setLogKind("release"), setLogTargetId(detail.current_release!.id))}
+                onClick={() => {
+                  const rel = mobile ? latestMobileRelease : detail.current_release;
+                  if (rel) { setLogKind("release"); setLogTargetId(rel.id); }
+                }}
                 className={`px-2 py-0.5 rounded border ${logKind === "release" ? "border-accent text-accent" : "border-border text-text-dim hover:bg-bg-input"}`}
-              >Runtime</button>
+              >{mobile ? "Store" : "Runtime"}</button>
               <button
                 type="button"
                 onClick={() => detail.builds[0] && (setLogKind("build"), setLogTargetId(detail.builds[0].id))}
@@ -731,6 +817,41 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
                 {logs || (logTargetId == null ? "(no log target — build something)" : "(empty)")}
               </pre>
             </div>
+
+            {mobile && (
+              <section className="border-t border-border p-3 max-h-44 overflow-auto">
+                <div className="text-xs text-text-dim uppercase mb-2">Store releases</div>
+                <table className="w-full text-xs">
+                  <thead className="text-text-dim">
+                    <tr>
+                      <th className="text-left font-normal">#</th>
+                      <th className="text-left font-normal">Channel</th>
+                      <th className="text-left font-normal">Status</th>
+                      <th className="text-left font-normal">Store state</th>
+                      <th className="text-left font-normal">Build</th>
+                      <th className="text-right font-normal">Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {detail.releases.map((rel) => (
+                      <tr key={rel.id} className="border-t border-border/40">
+                        <td className="py-1">{rel.id}</td>
+                        <td>{rel.channel || "-"}</td>
+                        <td className={statusColor(rel.status)}>{rel.status}</td>
+                        <td className="text-text-dim">{rel.external_status || "-"}</td>
+                        <td>{rel.build_id}</td>
+                        <td className="text-right space-x-2">
+                          <button type="button" onClick={() => { setLogKind("release"); setLogTargetId(rel.id); }} className="text-text-dim hover:text-text">log</button>
+                          {rel.status !== "failed" && rel.channel !== mobileChannel && (
+                            <button type="button" onClick={() => handlePromoteMobile(rel.id)} className="text-accent hover:underline">promote</button>
+                          )}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </section>
+            )}
 
             <section className="border-t border-border p-3 max-h-44 overflow-auto">
               <div className="text-xs text-text-dim uppercase mb-2">Builds</div>
@@ -764,7 +885,7 @@ export default function DeployPanel({ projectId, installId }: NativePanelProps) 
                             type="button"
                             onClick={() => handleReleaseBuild(b.id)}
                             className="text-accent hover:underline"
-                          >release</button>
+                          >{mobile ? "publish" : "release"}</button>
                         )}
                       </td>
                     </tr>
@@ -914,12 +1035,14 @@ function CreateDeploymentDialog({
   meta: MetaInfo | null;
 }) {
   const [name, setName] = useState("");
+  const [targetKind, setTargetKind] = useState<(typeof TARGET_KINDS)[number]>("service");
   const [sourceKind, setSourceKind] = useState<(typeof SOURCE_KINDS)[number]>("code");
   const [sourceRef, setSourceRef] = useState("");
   const [framework, setFramework] = useState<(typeof FRAMEWORKS)[number]>("");
   const [buildCmd, setBuildCmd] = useState("");
   const [startCmd, setStartCmd] = useState("");
   const [env, setEnv] = useState("");
+  const [targetConfig, setTargetConfig] = useState("");
   const [domainApex, setDomainApex] = useState("");
   const [domainSub, setDomainSub] = useState("");
   const [domainText, setDomainText] = useState("");
@@ -968,13 +1091,15 @@ function CreateDeploymentDialog({
       }
       const r = await api<{ deployment: Deployment; domain_error?: string }>("POST", "/deployments", {
         name: name.trim(),
+        target_kind: targetKind,
         source_kind: sourceKind,
         source_ref: sourceRef.trim(),
         framework,
         build_cmd: buildCmd.trim(),
         start_cmd: startCmd.trim(),
         env_json: env.trim() || "{}",
-        domain,
+        target_config_json: targetConfig.trim() || "{}",
+        domain: targetKind === "service" ? domain : "",
       });
       if (r.domain_error) {
         // Deployment was created; only the DNS step failed. Surface
@@ -1011,6 +1136,20 @@ function CreateDeploymentDialog({
             />
           </div>
           <div>
+            <label className="text-xs text-text-muted block mb-1">Target</label>
+            <select
+              value={targetKind}
+              onChange={(e) => {
+                const next = e.target.value as (typeof TARGET_KINDS)[number];
+                setTargetKind(next);
+                setFramework(next === "service" ? "" : next);
+              }}
+              className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm"
+            >
+              {TARGET_KINDS.map((kind) => <option key={kind} value={kind}>{kind}</option>)}
+            </select>
+          </div>
+          <div>
             <label className="text-xs text-text-muted block mb-1">Source</label>
             <select
               value={sourceKind}
@@ -1020,11 +1159,12 @@ function CreateDeploymentDialog({
               {SOURCE_KINDS.map((k) => <option key={k} value={k}>{k}</option>)}
             </select>
           </div>
-          <div>
+          <div className="col-span-2">
             <label className="text-xs text-text-muted block mb-1">Framework</label>
             <select
               value={framework}
               onChange={(e) => setFramework(e.target.value as (typeof FRAMEWORKS)[number])}
+              disabled={targetKind !== "service"}
               className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm"
             >
               {FRAMEWORKS.map((f) => (
@@ -1079,7 +1219,7 @@ function CreateDeploymentDialog({
               />
             )}
           </div>
-          <div>
+          <div className={targetKind === "service" ? "" : "col-span-2"}>
             <label className="text-xs text-text-muted block mb-1">Build cmd (optional)</label>
             <input
               type="text"
@@ -1088,7 +1228,7 @@ function CreateDeploymentDialog({
               className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm font-mono"
             />
           </div>
-          <div>
+          {targetKind === "service" && <div>
             <label className="text-xs text-text-muted block mb-1">Start cmd (optional)</label>
             <input
               type="text"
@@ -1096,7 +1236,7 @@ function CreateDeploymentDialog({
               onChange={(e) => setStartCmd(e.target.value)}
               className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm font-mono"
             />
-          </div>
+          </div>}
           <div className="col-span-2">
             <label className="text-xs text-text-muted block mb-1">Env (JSON object, optional)</label>
             <textarea
@@ -1107,7 +1247,21 @@ function CreateDeploymentDialog({
               className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm font-mono"
             />
           </div>
-          <div className="col-span-2">
+          {targetKind !== "service" && (
+            <div className="col-span-2">
+              <label className="text-xs text-text-muted block mb-1">Mobile target config (JSON)</label>
+              <textarea
+                value={targetConfig}
+                onChange={(e) => setTargetConfig(e.target.value)}
+                placeholder={targetKind === "android"
+                  ? '{"package_name":"com.example.app","module":"app","variant":"release"}'
+                  : '{"bundle_id":"com.example.app","scheme":"App","team_id":"TEAMID"}'}
+                rows={3}
+                className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm font-mono"
+              />
+            </div>
+          )}
+          {targetKind === "service" && <div className="col-span-2">
             <label className="text-xs text-text-muted block mb-1">
               Domain (optional)
               {meta?.domains_available
@@ -1150,7 +1304,7 @@ function CreateDeploymentDialog({
                 className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm font-mono"
               />
             )}
-          </div>
+          </div>}
         </div>
         {err && <div className="text-red text-xs">{err}</div>}
         <div className="flex items-center justify-end gap-2 pt-2">
@@ -1429,6 +1583,7 @@ function EditConfigDialog({
     deployment.port_hint ? String(deployment.port_hint) : "",
   );
   const [envJSON, setEnvJSON] = useState(deployment.env_json ?? "");
+  const [targetConfigJSON, setTargetConfigJSON] = useState(deployment.target_config_json ?? "{}");
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
 
@@ -1471,6 +1626,18 @@ function EditConfigDialog({
       if (startCmd !== (deployment.start_cmd ?? "")) body.start_cmd = startCmd;
       if (portN !== deployment.port_hint) body.port_hint = portN;
       if (env !== (deployment.env_json ?? "")) body.env_json = env;
+      const targetConfig = targetConfigJSON.trim() || "{}";
+      try {
+        const parsed = JSON.parse(targetConfig);
+        if (typeof parsed !== "object" || Array.isArray(parsed) || parsed === null) {
+          setErr("target_config_json must be a JSON object");
+          return;
+        }
+      } catch (e) {
+        setErr("target_config_json: " + (e as Error).message);
+        return;
+      }
+      if (targetConfig !== (deployment.target_config_json ?? "{}")) body.target_config_json = targetConfig;
 
       if (Object.keys(body).length > 0) {
         await api("PATCH", `/deployments/${deployment.id}`, body);
@@ -1564,6 +1731,17 @@ function EditConfigDialog({
               className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm font-mono"
             />
           </div>
+          {deployment.target_kind !== "service" && (
+            <div className="col-span-2">
+              <label className="text-xs text-text-muted block mb-1">Mobile target config</label>
+              <textarea
+                value={targetConfigJSON}
+                onChange={(e) => setTargetConfigJSON(e.target.value)}
+                rows={5}
+                className="w-full bg-bg-input border border-border rounded px-2 py-1 text-sm font-mono"
+              />
+            </div>
+          )}
         </div>
         {err && <div className="text-red text-xs">{err}</div>}
         <div className="flex items-center justify-end gap-2 pt-2">

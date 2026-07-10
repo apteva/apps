@@ -63,6 +63,8 @@ func (a *App) handleDeploymentItem(w http.ResponseWriter, r *http.Request) {
 		a.httpDeploymentBuild(w, r, d)
 	case tail == "release":
 		a.httpDeploymentRelease(w, r, d)
+	case tail == "promote":
+		a.httpDeploymentPromote(w, r, d)
 	case tail == "stop":
 		a.httpDeploymentStop(w, r, d)
 	case tail == "restart":
@@ -76,6 +78,26 @@ func (a *App) handleDeploymentItem(w http.ResponseWriter, r *http.Request) {
 	default:
 		httpErr(w, http.StatusNotFound, "no such resource")
 	}
+}
+
+func (a *App) httpDeploymentPromote(w http.ResponseWriter, r *http.Request, d *Deployment) {
+	if r.Method != http.MethodPost {
+		httpErr(w, http.StatusMethodNotAllowed, "POST")
+		return
+	}
+	var body map[string]any
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		httpErr(w, http.StatusBadRequest, "invalid JSON")
+		return
+	}
+	body["id"] = float64(d.ID)
+	body["_project_id"] = d.ProjectID
+	out, err := a.toolPromote(globalCtx, body)
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	httpJSON(w, out)
 }
 
 func (a *App) handleBuildItem(w http.ResponseWriter, r *http.Request) {
@@ -131,6 +153,35 @@ func (a *App) handleReleaseItem(w http.ResponseWriter, r *http.Request) {
 		body, _ := tailFile(rel.LogPath, queryInt(r, "tail", 200))
 		w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 		_, _ = w.Write([]byte(body))
+	case "rollout":
+		if r.Method != http.MethodPost {
+			httpErr(w, http.StatusMethodNotAllowed, "POST")
+			return
+		}
+		var body struct {
+			Fraction float64 `json:"fraction"`
+		}
+		if json.NewDecoder(r.Body).Decode(&body) != nil {
+			httpErr(w, http.StatusBadRequest, "invalid JSON")
+			return
+		}
+		out, err := a.toolRollout(globalCtx, map[string]any{"release_id": float64(rel.ID), "fraction": body.Fraction})
+		if err != nil {
+			httpErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		httpJSON(w, out)
+	case "halt":
+		if r.Method != http.MethodPost {
+			httpErr(w, http.StatusMethodNotAllowed, "POST")
+			return
+		}
+		out, err := a.toolHalt(globalCtx, map[string]any{"release_id": float64(rel.ID)})
+		if err != nil {
+			httpErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		httpJSON(w, out)
 	default:
 		httpErr(w, http.StatusNotFound, "no such resource")
 	}
@@ -160,16 +211,18 @@ func (a *App) httpCreateDeployment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body struct {
-		Name        string `json:"name"`
-		Description string `json:"description"`
-		SourceKind  string `json:"source_kind"`
-		SourceRef   string `json:"source_ref"`
-		Framework   string `json:"framework"`
-		BuildCmd    string `json:"build_cmd"`
-		StartCmd    string `json:"start_cmd"`
-		PortHint    int    `json:"port_hint"`
-		EnvJSON     string `json:"env_json"`
-		Domain      string `json:"domain"`
+		Name             string `json:"name"`
+		TargetKind       string `json:"target_kind"`
+		Description      string `json:"description"`
+		SourceKind       string `json:"source_kind"`
+		SourceRef        string `json:"source_ref"`
+		Framework        string `json:"framework"`
+		BuildCmd         string `json:"build_cmd"`
+		StartCmd         string `json:"start_cmd"`
+		PortHint         int    `json:"port_hint"`
+		EnvJSON          string `json:"env_json"`
+		TargetConfigJSON string `json:"target_config_json"`
+		Domain           string `json:"domain"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		httpErr(w, http.StatusBadRequest, "invalid JSON")
@@ -182,11 +235,28 @@ func (a *App) httpCreateDeployment(w http.ResponseWriter, r *http.Request) {
 	domainArg := strings.TrimSpace(body.Domain)
 	domainsOn := domainArg != "" && a.domainsAvailable(globalCtx)
 	in := CreateDeploymentInput{
-		Name: body.Name, Description: body.Description,
+		Name: body.Name, TargetKind: normalizeTargetKind(body.TargetKind), Description: body.Description,
 		SourceKind: body.SourceKind, SourceRef: body.SourceRef,
 		Framework: body.Framework,
 		BuildCmd:  body.BuildCmd, StartCmd: body.StartCmd,
-		PortHint: body.PortHint, EnvJSON: body.EnvJSON,
+		PortHint: body.PortHint, EnvJSON: body.EnvJSON, TargetConfigJSON: body.TargetConfigJSON,
+	}
+	if in.TargetKind != "service" && in.TargetKind != "android" && in.TargetKind != "ios" {
+		httpErr(w, http.StatusBadRequest, "target_kind must be service, android, or ios")
+		return
+	}
+	if in.TargetKind == "android" || in.TargetKind == "ios" {
+		if in.Framework == "" {
+			in.Framework = in.TargetKind
+		}
+		if in.Framework != in.TargetKind {
+			httpErr(w, http.StatusBadRequest, "mobile target_kind must match framework")
+			return
+		}
+		if domainArg != "" {
+			httpErr(w, http.StatusBadRequest, "domains apply to service deployments")
+			return
+		}
 	}
 	if !domainsOn {
 		in.Domain = domainArg
@@ -374,7 +444,8 @@ func patchBodyFromRequest(r *http.Request) (map[string]any, error) {
 		"description": true, "framework": true,
 		"build_cmd": true, "start_cmd": true,
 		"port_hint": true, "env_json": true, "source_ref": true,
-		"source_extra_json": true,
+		"source_extra_json":  true,
+		"target_config_json": true,
 	}
 	out := map[string]any{}
 	for k, v := range raw {
@@ -405,9 +476,7 @@ func (a *App) httpDeploymentBuild(w http.ResponseWriter, r *http.Request, d *Dep
 		httpErr(w, http.StatusMethodNotAllowed, "POST")
 		return
 	}
-	var body struct {
-		Release bool `json:"release"`
-	}
+	var body map[string]any
 	_ = json.NewDecoder(r.Body).Decode(&body)
 	build, err := a.runBuild(d)
 	if err != nil {
@@ -415,8 +484,8 @@ func (a *App) httpDeploymentBuild(w http.ResponseWriter, r *http.Request, d *Dep
 		return
 	}
 	res := map[string]any{"build": build}
-	if body.Release && build.Status == "succeeded" {
-		rel, err := a.runRelease(d, build)
+	if boolArg(body, "release") && build.Status == "succeeded" {
+		rel, err := a.runReleaseWithOptions(d, build, releaseOptionsFromArgs(body))
 		if err != nil {
 			res["release_error"] = err.Error()
 		} else {
@@ -432,23 +501,22 @@ func (a *App) httpDeploymentRelease(w http.ResponseWriter, r *http.Request, d *D
 		httpErr(w, http.StatusMethodNotAllowed, "POST")
 		return
 	}
-	var body struct {
-		BuildID int64 `json:"build_id"`
-	}
+	var body map[string]any
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		httpErr(w, http.StatusBadRequest, "invalid JSON")
 		return
 	}
-	if body.BuildID == 0 {
+	buildID := int64(intArg(body, "build_id"))
+	if buildID == 0 {
 		httpErr(w, http.StatusBadRequest, "build_id required")
 		return
 	}
-	build, err := dbGetBuild(globalCtx.AppDB(), body.BuildID)
+	build, err := dbGetBuild(globalCtx.AppDB(), buildID)
 	if err != nil || build == nil || build.DeploymentID != d.ID {
 		httpErr(w, http.StatusBadRequest, "build does not belong to deployment")
 		return
 	}
-	rel, err := a.runRelease(d, build)
+	rel, err := a.runReleaseWithOptions(d, build, releaseOptionsFromArgs(body))
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -518,6 +586,10 @@ func (a *App) httpDeploymentLogs(w http.ResponseWriter, r *http.Request, d *Depl
 func (a *App) httpDeploymentAttachDomain(w http.ResponseWriter, r *http.Request, d *Deployment) {
 	if r.Method != http.MethodPost {
 		httpErr(w, http.StatusMethodNotAllowed, "POST")
+		return
+	}
+	if d.TargetKind != "service" {
+		httpErr(w, http.StatusBadRequest, "domains apply to service deployments, not mobile binaries")
 		return
 	}
 	var body struct {

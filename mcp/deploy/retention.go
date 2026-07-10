@@ -152,7 +152,10 @@ func retainedBuildIDs(db *sql.DB, rollbackCount int) (map[int64]bool, error) {
 		UNION
 		SELECT build_id
 		  FROM releases
-		 WHERE status IN ('starting','live') AND build_id > 0
+		 WHERE (
+		       (status = 'starting' AND (provider = '' OR external_id = '' OR external_id LIKE 'uploaded-%'))
+		       OR (status = 'live' AND provider = '')
+		 ) AND build_id > 0
 	`)
 	if err != nil {
 		return nil, err

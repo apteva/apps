@@ -1,6 +1,6 @@
-# Deploy (v0.1)
+# Deploy
 
-Local-first builds and runtime supervision for Apteva projects.
+Build and release services, Android apps, and iOS apps for Apteva projects.
 
 Takes a code repo (from the **Code** app, a local path, or — later —
 git/zip) and turns it into a built, supervised, URL-addressable
@@ -9,9 +9,8 @@ no Docker required.
 
 ## Surfaces
 
-- **9 MCP tools** — `deploy_init`, `deploy_list`, `deploy_get`,
-  `deploy_build`, `deploy_release`, `deploy_status`, `deploy_logs`,
-  `deploy_stop`, `deploy_destroy`
+- **MCP tools** for deployments, environments, builds, releases,
+  promotions, rollouts, domains, logs, retention, and health
 - **REST surface** at `/api/apps/deploy/api/*` for the dashboard panel
 - **Deploy panel** — list of deployments, status cards, log tail,
   build/release/stop/destroy buttons
@@ -36,12 +35,63 @@ no Docker required.
 | `node`    | `<pm> install` + `<pm> run build` (if defined)         | `<pm> run start` (override via start_cmd) |
 | `static`  | (none) or `build_cmd` → `dist/`                        | in-process `http.FileServer`             |
 | `blank`   | optional `build_cmd`                                   | requires `start_cmd`                     |
+| `android` | Gradle bundle task or `build_cmd` -> signed `.aab`       | Google Play track                        |
+| `ios`     | Xcode archive/export or `build_cmd` -> `.ipa`            | TestFlight or App Store                  |
 
 Auto-detected from the source tree (`go.mod` → `go`, `package.json` →
 `node`, `index.html` → `static`, etc.) when `framework` is empty. The
 node builder picks `<pm>` from lockfiles in priority order:
 `bun.lockb` → bun, `pnpm-lock.yaml` → pnpm, `yarn.lock` → yarn,
 otherwise npm.
+
+## Mobile releases
+
+Set `target_kind` and `framework` to `android` or `ios`. Mobile targets
+reuse the existing deployment -> environment -> build -> release records;
+they do not create a parallel deployment model.
+
+Android `target_config_json` supports:
+
+```json
+{
+  "package_name": "com.example.app",
+  "module": "app",
+  "variant": "release",
+  "gradle_args": []
+}
+```
+
+The default build runs `:app:bundleRelease`. Bind `play_store` to a
+Google Play Developer connection for publishing. Gradle may sign the
+bundle itself; otherwise bind `android_signing` to an Android Upload
+Signing connection containing the encrypted base64 keystore, passwords,
+and key alias. AAB uploads stream from disk and retry once after a
+platform-managed OAuth refresh.
+
+iOS `target_config_json` supports:
+
+```json
+{
+  "bundle_id": "com.example.app",
+  "scheme": "App",
+  "team_id": "TEAMID",
+  "version_name": "1.2.3",
+  "build_number": "42",
+  "app_store_app_id": "123456789"
+}
+```
+
+Bind `app_store` to an App Store Connect connection containing Issuer ID,
+Key ID, and the `.p8` private key. The default build requires macOS and
+Xcode and uses automatic provisioning. Release channels are `internal`
+or `external` TestFlight and `production` App Store. Deploy polls App
+Store processing, assigns the processed build to a TestFlight group or
+App Store version, and can submit the production version for review.
+
+Use `deploy_promote` to move the same Android version code or iOS build
+from a test channel to production without rebuilding. `deploy_rollout`
+changes a staged Google Play production fraction; `deploy_halt` halts a
+Play rollout or expires a TestFlight build.
 
 ## Runtime targets (pluggable)
 
@@ -84,7 +134,7 @@ PATH (the build step shells out to it).
 /data/builds/<build_id>/src/                   unpacked source
 /data/builds/<build_id>/dist/                  build output
 /data/builds/<build_id>/build.log              build stdout/stderr
-/data/releases/<release_id>/runtime.log        runtime stdout/stderr
+/data/releases/<release_id>/runtime.log        runtime or store release log
 ```
 
 ## Configuration
@@ -103,9 +153,6 @@ The `code` source kind reaches the Code app over `PlatformClient.CallApp`
 
 - Docker / container builds — `LocalRuntime` only
 - Remote deploy targets — `SSHRuntime` lives in v0.2
-- Custom domains — deployments are reachable via the auto-allocated
-  port; routing under `/_deploy/<name>/` lands in a follow-up
 - Build caches — every `deploy_build` is a cold build
-- Preview environments — one live release per deployment
 - Resource caps (CPU/mem) — supervised process inherits the host's
   limits; add via `setrlimit` when it matters

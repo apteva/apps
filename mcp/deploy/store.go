@@ -15,6 +15,7 @@ type Deployment struct {
 	ID               int64  `json:"id"`
 	ProjectID        string `json:"project_id"`
 	Name             string `json:"name"`
+	TargetKind       string `json:"target_kind"`
 	Description      string `json:"description"`
 	SourceKind       string `json:"source_kind"`
 	SourceRef        string `json:"source_ref"`
@@ -24,6 +25,7 @@ type Deployment struct {
 	StartCmd         string `json:"start_cmd"`
 	PortHint         int    `json:"port_hint"`
 	EnvJSON          string `json:"env_json"`
+	TargetConfigJSON string `json:"target_config_json"`
 	Domain           string `json:"domain"`
 	DomainRecordID   string `json:"domain_record_id,omitempty"`
 	DomainAttachedAt string `json:"domain_attached_at,omitempty"`
@@ -48,6 +50,7 @@ type DeploymentEnvironment struct {
 	StartCmd         string `json:"start_cmd"`
 	PortHint         int    `json:"port_hint"`
 	EnvJSON          string `json:"env_json"`
+	TargetConfigJSON string `json:"target_config_json"`
 	Domain           string `json:"domain"`
 	DomainRecordID   string `json:"domain_record_id,omitempty"`
 	DomainAttachedAt string `json:"domain_attached_at,omitempty"`
@@ -58,66 +61,75 @@ type DeploymentEnvironment struct {
 }
 
 type Build struct {
-	ID            int64  `json:"id"`
-	DeploymentID  int64  `json:"deployment_id"`
-	EnvironmentID int64  `json:"environment_id,omitempty"`
-	SourceSHA     string `json:"source_sha"`
-	Framework     string `json:"framework"`
-	BuildCmd      string `json:"build_cmd"`
-	Status        string `json:"status"`
-	StartedAt     string `json:"started_at,omitempty"`
-	FinishedAt    string `json:"finished_at,omitempty"`
-	DurationMs    int64  `json:"duration_ms"`
-	ExitCode      int    `json:"exit_code"`
-	ArtifactPath  string `json:"artifact_path"`
-	ArtifactSize  int64  `json:"artifact_size"`
-	LogPath       string `json:"log_path"`
-	Error         string `json:"error"`
-	CreatedAt     string `json:"created_at"`
+	ID                   int64  `json:"id"`
+	DeploymentID         int64  `json:"deployment_id"`
+	EnvironmentID        int64  `json:"environment_id,omitempty"`
+	SourceSHA            string `json:"source_sha"`
+	Framework            string `json:"framework"`
+	BuildCmd             string `json:"build_cmd"`
+	Status               string `json:"status"`
+	StartedAt            string `json:"started_at,omitempty"`
+	FinishedAt           string `json:"finished_at,omitempty"`
+	DurationMs           int64  `json:"duration_ms"`
+	ExitCode             int    `json:"exit_code"`
+	ArtifactPath         string `json:"artifact_path"`
+	ArtifactSize         int64  `json:"artifact_size"`
+	ArtifactManifestJSON string `json:"artifact_manifest_json"`
+	LogPath              string `json:"log_path"`
+	Error                string `json:"error"`
+	CreatedAt            string `json:"created_at"`
 }
 
 type Release struct {
-	ID            int64  `json:"id"`
-	DeploymentID  int64  `json:"deployment_id"`
-	EnvironmentID int64  `json:"environment_id,omitempty"`
-	BuildID       int64  `json:"build_id"`
-	Status        string `json:"status"`
-	Port          int    `json:"port"`
-	PID           int    `json:"pid"`
-	StartedAt     string `json:"started_at,omitempty"`
-	StoppedAt     string `json:"stopped_at,omitempty"`
-	RestartCount  int    `json:"restart_count"`
-	LastHealthAt  string `json:"last_health_at,omitempty"`
-	LogPath       string `json:"log_path"`
-	Error         string `json:"error"`
-	CreatedAt     string `json:"created_at"`
+	ID              int64  `json:"id"`
+	DeploymentID    int64  `json:"deployment_id"`
+	EnvironmentID   int64  `json:"environment_id,omitempty"`
+	BuildID         int64  `json:"build_id"`
+	Status          string `json:"status"`
+	Port            int    `json:"port"`
+	PID             int    `json:"pid"`
+	StartedAt       string `json:"started_at,omitempty"`
+	StoppedAt       string `json:"stopped_at,omitempty"`
+	RestartCount    int    `json:"restart_count"`
+	LastHealthAt    string `json:"last_health_at,omitempty"`
+	LogPath         string `json:"log_path"`
+	Error           string `json:"error"`
+	Channel         string `json:"channel,omitempty"`
+	Provider        string `json:"provider,omitempty"`
+	ExternalID      string `json:"external_id,omitempty"`
+	ExternalStatus  string `json:"external_status,omitempty"`
+	ReleaseMetaJSON string `json:"release_meta_json,omitempty"`
+	CreatedAt       string `json:"created_at"`
 }
 
 type CreateDeploymentInput struct {
-	Name            string
-	Description     string
-	SourceKind      string
-	SourceRef       string
-	SourceExtraJSON string
-	Framework       string
-	BuildCmd        string
-	StartCmd        string
-	PortHint        int
-	EnvJSON         string
-	Domain          string
+	Name             string
+	TargetKind       string
+	Description      string
+	SourceKind       string
+	SourceRef        string
+	SourceExtraJSON  string
+	Framework        string
+	BuildCmd         string
+	StartCmd         string
+	PortHint         int
+	EnvJSON          string
+	TargetConfigJSON string
+	Domain           string
 }
 
 type CreateEnvironmentInput struct {
-	Name            string
-	Description     string
-	SourceRef       string
-	SourceExtraJSON string
-	Framework       string
-	BuildCmd        string
-	StartCmd        string
-	PortHint        int
-	EnvJSON         string
-	Domain          string
+	Name             string
+	Description      string
+	SourceRef        string
+	SourceExtraJSON  string
+	Framework        string
+	BuildCmd         string
+	StartCmd         string
+	PortHint         int
+	EnvJSON          string
+	TargetConfigJSON string
+	Domain           string
 }
 
 func nowUTC() string { return time.Now().UTC().Format(time.RFC3339) }
@@ -134,15 +146,15 @@ func dbCreateDeployment(db *sql.DB, projectID string, in CreateDeploymentInput) 
 	now := nowUTC()
 	res, err := db.Exec(`
 		INSERT INTO deployments (
-			project_id, name, description,
+			project_id, name, target_kind, description,
 			source_kind, source_ref, source_extra_json,
-			framework, build_cmd, start_cmd, port_hint, env_json, domain,
+			framework, build_cmd, start_cmd, port_hint, env_json, target_config_json, domain,
 			created_at, updated_at
-		) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+		) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 	`,
-		projectID, in.Name, in.Description,
+		projectID, in.Name, defaultStr(in.TargetKind, "service"), in.Description,
 		in.SourceKind, in.SourceRef, defaultStr(in.SourceExtraJSON, "{}"),
-		in.Framework, in.BuildCmd, in.StartCmd, in.PortHint, defaultStr(in.EnvJSON, "{}"), in.Domain,
+		in.Framework, in.BuildCmd, in.StartCmd, in.PortHint, defaultStr(in.EnvJSON, "{}"), defaultStr(in.TargetConfigJSON, "{}"), in.Domain,
 		now, now,
 	)
 	if err != nil {
@@ -228,9 +240,9 @@ func dbListDeploymentsWithDomain(db *sql.DB) ([]Deployment, error) {
 	}
 
 	rows, err = db.Query(`
-		SELECT d.id, d.project_id, d.name,
+		SELECT d.id, d.project_id, d.name, d.target_kind,
 		       e.description, d.source_kind, e.source_ref, e.source_extra_json,
-		       e.framework, e.build_cmd, e.start_cmd, e.port_hint, e.env_json, e.domain,
+		       e.framework, e.build_cmd, e.start_cmd, e.port_hint, e.env_json, e.target_config_json, e.domain,
 		       e.domain_record_id, COALESCE(e.domain_attached_at,''),
 		       e.current_release_id, COALESCE(e.archived_at,''), e.created_at, e.updated_at,
 		       e.id, e.name
@@ -303,13 +315,13 @@ func dbCreateEnvironment(db *sql.DB, deploymentID int64, in CreateEnvironmentInp
 		INSERT INTO deployment_environments (
 			deployment_id, name, description,
 			source_ref, source_extra_json,
-			framework, build_cmd, start_cmd, port_hint, env_json, domain,
+			framework, build_cmd, start_cmd, port_hint, env_json, target_config_json, domain,
 			created_at, updated_at
-		) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)
+		) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 	`,
 		deploymentID, name, in.Description,
 		in.SourceRef, defaultStr(in.SourceExtraJSON, "{}"),
-		in.Framework, in.BuildCmd, in.StartCmd, in.PortHint, defaultStr(in.EnvJSON, "{}"), in.Domain,
+		in.Framework, in.BuildCmd, in.StartCmd, in.PortHint, defaultStr(in.EnvJSON, "{}"), defaultStr(in.TargetConfigJSON, "{}"), in.Domain,
 		now, now,
 	)
 	if err != nil {
@@ -334,7 +346,7 @@ func dbEnsureProductionEnvironment(db *sql.DB, d *Deployment) (*DeploymentEnviro
 		Name: defaultEnvironmentName, Description: d.Description,
 		SourceRef: d.SourceRef, SourceExtraJSON: d.SourceExtraJSON,
 		Framework: d.Framework, BuildCmd: d.BuildCmd, StartCmd: d.StartCmd,
-		PortHint: d.PortHint, EnvJSON: d.EnvJSON, Domain: d.Domain,
+		PortHint: d.PortHint, EnvJSON: d.EnvJSON, TargetConfigJSON: d.TargetConfigJSON, Domain: d.Domain,
 	})
 	if err != nil {
 		return nil, err
@@ -404,7 +416,7 @@ func dbUpdateEnvironment(db *sql.DB, id int64, fields map[string]any) error {
 	args := []any{}
 	for _, k := range []string{
 		"description", "source_ref", "source_extra_json",
-		"framework", "build_cmd", "start_cmd", "port_hint", "env_json",
+		"framework", "build_cmd", "start_cmd", "port_hint", "env_json", "target_config_json",
 		"domain", "domain_record_id", "domain_attached_at", "current_release_id", "archived_at",
 	} {
 		if v, ok := fields[k]; ok {
@@ -453,6 +465,7 @@ func effectiveDeploymentForEnvironment(d *Deployment, env *DeploymentEnvironment
 	out.StartCmd = env.StartCmd
 	out.PortHint = env.PortHint
 	out.EnvJSON = env.EnvJSON
+	out.TargetConfigJSON = env.TargetConfigJSON
 	out.Domain = env.Domain
 	out.DomainRecordID = env.DomainRecordID
 	out.DomainAttachedAt = env.DomainAttachedAt
@@ -464,7 +477,7 @@ func effectiveDeploymentForEnvironment(d *Deployment, env *DeploymentEnvironment
 
 const environmentColumns = `id, deployment_id, name, description,
 		source_ref, source_extra_json, framework, build_cmd, start_cmd,
-		port_hint, env_json, domain, domain_record_id,
+		port_hint, env_json, target_config_json, domain, domain_record_id,
 		COALESCE(domain_attached_at,''), current_release_id,
 		COALESCE(archived_at,''), created_at, updated_at`
 
@@ -474,7 +487,7 @@ func scanEnvironment(r rowScanner) (*DeploymentEnvironment, error) {
 	if err := r.Scan(
 		&env.ID, &env.DeploymentID, &env.Name, &env.Description,
 		&env.SourceRef, &env.SourceExtraJSON, &env.Framework, &env.BuildCmd, &env.StartCmd,
-		&env.PortHint, &env.EnvJSON, &env.Domain, &env.DomainRecordID,
+		&env.PortHint, &env.EnvJSON, &env.TargetConfigJSON, &env.Domain, &env.DomainRecordID,
 		&env.DomainAttachedAt, &current, &env.ArchivedAt, &env.CreatedAt, &env.UpdatedAt,
 	); err != nil {
 		return nil, err
@@ -493,8 +506,8 @@ func normalizeEnvironmentName(s string) string {
 	return s
 }
 
-const deploymentColumns = `id, project_id, name, description, source_kind, source_ref, source_extra_json,
-		framework, build_cmd, start_cmd, port_hint, env_json, domain,
+const deploymentColumns = `id, project_id, name, target_kind, description, source_kind, source_ref, source_extra_json,
+		framework, build_cmd, start_cmd, port_hint, env_json, target_config_json, domain,
 		domain_record_id, COALESCE(domain_attached_at,''),
 		current_release_id, COALESCE(archived_at,''), created_at, updated_at`
 
@@ -504,8 +517,8 @@ func scanDeployment(r rowScanner) (*Deployment, error) {
 	var d Deployment
 	var current sql.NullInt64
 	if err := r.Scan(
-		&d.ID, &d.ProjectID, &d.Name, &d.Description, &d.SourceKind, &d.SourceRef, &d.SourceExtraJSON,
-		&d.Framework, &d.BuildCmd, &d.StartCmd, &d.PortHint, &d.EnvJSON, &d.Domain,
+		&d.ID, &d.ProjectID, &d.Name, &d.TargetKind, &d.Description, &d.SourceKind, &d.SourceRef, &d.SourceExtraJSON,
+		&d.Framework, &d.BuildCmd, &d.StartCmd, &d.PortHint, &d.EnvJSON, &d.TargetConfigJSON, &d.Domain,
 		&d.DomainRecordID, &d.DomainAttachedAt,
 		&current, &d.ArchivedAt, &d.CreatedAt, &d.UpdatedAt,
 	); err != nil {
@@ -521,8 +534,8 @@ func scanDeploymentWithEnvironmentIdentity(r rowScanner) (*Deployment, error) {
 	var d Deployment
 	var current sql.NullInt64
 	if err := r.Scan(
-		&d.ID, &d.ProjectID, &d.Name, &d.Description, &d.SourceKind, &d.SourceRef, &d.SourceExtraJSON,
-		&d.Framework, &d.BuildCmd, &d.StartCmd, &d.PortHint, &d.EnvJSON, &d.Domain,
+		&d.ID, &d.ProjectID, &d.Name, &d.TargetKind, &d.Description, &d.SourceKind, &d.SourceRef, &d.SourceExtraJSON,
+		&d.Framework, &d.BuildCmd, &d.StartCmd, &d.PortHint, &d.EnvJSON, &d.TargetConfigJSON, &d.Domain,
 		&d.DomainRecordID, &d.DomainAttachedAt,
 		&current, &d.ArchivedAt, &d.CreatedAt, &d.UpdatedAt,
 		&d.EnvironmentID, &d.EnvironmentName,
@@ -569,7 +582,7 @@ func dbUpdateDeployment(db *sql.DB, projectID string, id int64, fields map[strin
 	args := []any{}
 	for _, k := range []string{
 		"description", "framework", "build_cmd", "start_cmd",
-		"port_hint", "env_json", "source_extra_json",
+		"port_hint", "env_json", "source_extra_json", "target_config_json",
 	} {
 		if v, ok := fields[k]; ok {
 			cols = append(cols, k+" = ?")
@@ -593,7 +606,7 @@ func dbUpdateBuild(db *sql.DB, id int64, fields map[string]any) error {
 	}
 	cols := []string{}
 	args := []any{}
-	for _, k := range []string{"source_sha", "status", "started_at", "finished_at", "duration_ms", "exit_code", "artifact_path", "artifact_size", "log_path", "error", "framework"} {
+	for _, k := range []string{"source_sha", "status", "started_at", "finished_at", "duration_ms", "exit_code", "artifact_path", "artifact_size", "artifact_manifest_json", "log_path", "error", "framework"} {
 		if v, ok := fields[k]; ok {
 			cols = append(cols, k+" = ?")
 			args = append(args, v)
@@ -658,14 +671,14 @@ func dbListBuildsForEnv(db *sql.DB, deploymentID, environmentID int64, limit int
 
 const buildColumns = `id, deployment_id, COALESCE(environment_id,0), source_sha, framework, build_cmd, status,
 		COALESCE(started_at,''), COALESCE(finished_at,''), duration_ms, exit_code,
-		artifact_path, artifact_size, log_path, error, created_at`
+		artifact_path, artifact_size, artifact_manifest_json, log_path, error, created_at`
 
 func scanBuild(r rowScanner) (*Build, error) {
 	var b Build
 	if err := r.Scan(
 		&b.ID, &b.DeploymentID, &b.EnvironmentID, &b.SourceSHA, &b.Framework, &b.BuildCmd, &b.Status,
 		&b.StartedAt, &b.FinishedAt, &b.DurationMs, &b.ExitCode,
-		&b.ArtifactPath, &b.ArtifactSize, &b.LogPath, &b.Error, &b.CreatedAt,
+		&b.ArtifactPath, &b.ArtifactSize, &b.ArtifactManifestJSON, &b.LogPath, &b.Error, &b.CreatedAt,
 	); err != nil {
 		return nil, err
 	}
@@ -696,7 +709,7 @@ func dbUpdateRelease(db *sql.DB, id int64, fields map[string]any) error {
 	}
 	cols := []string{}
 	args := []any{}
-	for _, k := range []string{"status", "port", "pid", "started_at", "stopped_at", "restart_count", "last_health_at", "log_path", "error"} {
+	for _, k := range []string{"status", "port", "pid", "started_at", "stopped_at", "restart_count", "last_health_at", "log_path", "error", "channel", "provider", "external_id", "external_status", "release_meta_json"} {
 		if v, ok := fields[k]; ok {
 			cols = append(cols, k+" = ?")
 			args = append(args, v)
@@ -760,7 +773,7 @@ func dbListReleasesForEnv(db *sql.DB, deploymentID, environmentID int64, limit i
 }
 
 func dbListLiveReleases(db *sql.DB) ([]Release, error) {
-	rows, err := db.Query(`SELECT ` + releaseColumns + ` FROM releases WHERE status IN ('starting','live') ORDER BY id`)
+	rows, err := db.Query(`SELECT ` + releaseColumns + ` FROM releases WHERE provider = '' AND status IN ('starting','live') ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
@@ -776,16 +789,36 @@ func dbListLiveReleases(db *sql.DB) ([]Release, error) {
 	return out, nil
 }
 
+func dbListPendingMobileReleases(db *sql.DB, limit int) ([]Release, error) {
+	if limit <= 0 {
+		limit = 100
+	}
+	rows, err := db.Query(`SELECT `+releaseColumns+` FROM releases WHERE provider != '' AND status = 'starting' ORDER BY id LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []Release{}
+	for rows.Next() {
+		rel, err := scanRelease(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, *rel)
+	}
+	return out, rows.Err()
+}
+
 const releaseColumns = `id, deployment_id, COALESCE(environment_id,0), build_id, status, port, pid,
 		COALESCE(started_at,''), COALESCE(stopped_at,''), restart_count,
-		COALESCE(last_health_at,''), log_path, error, created_at`
+		COALESCE(last_health_at,''), log_path, error, channel, provider, external_id, external_status, release_meta_json, created_at`
 
 func scanRelease(r rowScanner) (*Release, error) {
 	var rl Release
 	if err := r.Scan(
 		&rl.ID, &rl.DeploymentID, &rl.EnvironmentID, &rl.BuildID, &rl.Status, &rl.Port, &rl.PID,
 		&rl.StartedAt, &rl.StoppedAt, &rl.RestartCount, &rl.LastHealthAt,
-		&rl.LogPath, &rl.Error, &rl.CreatedAt,
+		&rl.LogPath, &rl.Error, &rl.Channel, &rl.Provider, &rl.ExternalID, &rl.ExternalStatus, &rl.ReleaseMetaJSON, &rl.CreatedAt,
 	); err != nil {
 		return nil, err
 	}

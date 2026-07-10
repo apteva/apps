@@ -2,9 +2,9 @@ schema: apteva-app/v1
 
 name: deploy
 display_name: Deploy
-version: 0.15.1
+version: 0.16.0
 description: |
-  Local-first builds and runtime supervision for Apteva projects.
+  Build and release services, Android apps, and iOS apps.
   Takes a code repo (from the Code app, a local path, or a git URL),
   builds it with the framework's toolchain, and runs the result as
   a supervised child process bound to a local port. The Apteva
@@ -17,7 +17,7 @@ description: |
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/deploy
 icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/deploy/icon.png
-tags: [deploy, build, runtime, agent]
+tags: [deploy, build, runtime, android, ios, app-store, google-play, agent]
 
 scopes: [project, global]
 min_apteva_version: "0.10.0"
@@ -27,6 +27,8 @@ requires:
     - db.write.app
     - platform.apps.call
     - platform.ingress.write
+    - platform.connections.execute
+    - platform.connections.read_credentials
   integrations:
     - role: code
       kind: app
@@ -40,21 +42,56 @@ requires:
       compatible_app_names: [domains]
       label: Domains app
       hint: Install the Domains app to attach a custom domain to a deployment. Without it, the `domain` field on a deployment is free-text and no DNS is written.
+    - role: play_store
+      kind: integration
+      required: false
+      compatible_slugs: [google-play-developer]
+      capabilities: []
+      label: Google Play Developer
+      hint: Required to publish signed Android App Bundles to Google Play tracks.
+    - role: android_signing
+      kind: integration
+      required: false
+      compatible_slugs: [android-upload-signing]
+      capabilities: []
+      label: Android Upload Signing
+      hint: Required only when Deploy must sign an Android App Bundle that the project did not sign during its Gradle build.
+    - role: app_store
+      kind: integration
+      required: false
+      compatible_slugs: [app-store-connect]
+      capabilities: []
+      label: App Store Connect
+      hint: Required to sign, upload, publish, and monitor iOS releases.
 
 provides:
   http_routes:
     - prefix: /
   mcp_tools:
     - name: deploy_init
-      description: Bind a source (code repo / local path / git URL) to a new deployment.
+      description: Bind a source to a service, Android, or iOS deployment.
     - name: deploy_list
       description: List deployments in this project with current build/release status.
     - name: deploy_get
       description: Full detail for one deployment — last builds, current release, URL.
+    - name: deploy_env_list
+      description: List environments for a deployment.
+    - name: deploy_env_create
+      description: Create a staging/dev environment for a deployment.
+    - name: deploy_env_update
+      description: Update an environment's source, variables, or build configuration.
+    - name: deploy_env_destroy
+      description: Archive a non-production environment.
     - name: deploy_build
-      description: Fetch source, run the framework build; returns a build_id.
+      description: Build a service artifact, Android AAB, or iOS IPA.
     - name: deploy_release
-      description: Promote a build to live (starts the supervised process, swaps the proxy route).
+      description: Start a service release or publish a mobile build to a store channel.
+    - name: deploy_promote
+      description: Promote a service build between environments or a mobile release between store channels.
+    - name: deploy_rollout
+      description: Change a Google Play production rollout fraction.
+    - name: deploy_halt
+      description: Halt a Google Play rollout or expire a TestFlight build.
     - name: deploy_status
       description: Current build + release state, URL, last 10 builds.
     - name: deploy_logs
@@ -69,11 +106,22 @@ provides:
       description: "Clear a deployment's domain. Deletes the DNS record via the Domains app (if known) and clears the link. Args: name OR id."
     - name: deploy_list_routes
       description: "Server-side: live deployments as a route table {slug, port, domain, status} for the host-based proxy. Polled by apteva-server's host-router on a 5s tick — not intended for agent calls."
+    - name: deploy_health
+      description: Deployment health and artifact retention status.
+    - name: deploy_update
+      description: Update deployment or environment configuration.
+    - name: deploy_restart
+      description: Restart a service release without rebuilding.
+    - name: deploy_set_env
+      description: Merge environment variables into a deployment environment.
   ui_panels:
     - slot: project.page
       label: Deploy
       icon: rocket
       entry: /ui/DeployPanel.mjs
+  workers:
+    - name: mobile_release_sync
+      schedule: "@every 1m"
 
 runtime:
   kind: source

@@ -19,20 +19,22 @@ func (a *App) MCPTools() []sdk.Tool {
 	return []sdk.Tool{
 		{
 			Name: "deploy_init", Handler: a.toolInit,
-			Description: "Bind a source to a new deployment. Args: name (slug), source_kind (code|local), source_ref (slug or path), framework? (go|node|bun|static|blank|''), build_cmd?, start_cmd?, port_hint?, env_json?, domain?, description?",
+			Description: "Bind a source to a new service, Android, or iOS deployment. Args: name, source_kind, source_ref, target_kind? (service|android|ios), framework?, target_config_json?, build_cmd?, start_cmd?, port_hint?, env_json?, domain?, description?",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"name":        map[string]any{"type": "string"},
-					"source_kind": map[string]any{"type": "string", "enum": []string{"code", "local"}},
-					"source_ref":  map[string]any{"type": "string"},
-					"framework":   map[string]any{"type": "string"},
-					"build_cmd":   map[string]any{"type": "string"},
-					"start_cmd":   map[string]any{"type": "string"},
-					"port_hint":   map[string]any{"type": "integer"},
-					"env_json":    map[string]any{"type": "string"},
-					"domain":      map[string]any{"type": "string"},
-					"description": map[string]any{"type": "string"},
+					"name":               map[string]any{"type": "string"},
+					"source_kind":        map[string]any{"type": "string", "enum": []string{"code", "local"}},
+					"source_ref":         map[string]any{"type": "string"},
+					"target_kind":        map[string]any{"type": "string", "enum": []string{"service", "android", "ios"}},
+					"framework":          map[string]any{"type": "string"},
+					"target_config_json": map[string]any{"type": "string"},
+					"build_cmd":          map[string]any{"type": "string"},
+					"start_cmd":          map[string]any{"type": "string"},
+					"port_hint":          map[string]any{"type": "integer"},
+					"env_json":           map[string]any{"type": "string"},
+					"domain":             map[string]any{"type": "string"},
+					"description":        map[string]any{"type": "string"},
 				},
 				"required": []string{"name", "source_kind", "source_ref"},
 			},
@@ -77,19 +79,20 @@ func (a *App) MCPTools() []sdk.Tool {
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"name":              map[string]any{"type": "string"},
-					"id":                map[string]any{"type": "integer"},
-					"environment":       map[string]any{"type": "string"},
-					"from_environment":  map[string]any{"type": "string"},
-					"description":       map[string]any{"type": "string"},
-					"source_ref":        map[string]any{"type": "string"},
-					"source_extra_json": map[string]any{"type": "string"},
-					"framework":         map[string]any{"type": "string"},
-					"build_cmd":         map[string]any{"type": "string"},
-					"start_cmd":         map[string]any{"type": "string"},
-					"port_hint":         map[string]any{"type": "integer"},
-					"env_json":          map[string]any{"type": "string"},
-					"domain":            map[string]any{"type": "string"},
+					"name":               map[string]any{"type": "string"},
+					"id":                 map[string]any{"type": "integer"},
+					"environment":        map[string]any{"type": "string"},
+					"from_environment":   map[string]any{"type": "string"},
+					"description":        map[string]any{"type": "string"},
+					"source_ref":         map[string]any{"type": "string"},
+					"source_extra_json":  map[string]any{"type": "string"},
+					"framework":          map[string]any{"type": "string"},
+					"build_cmd":          map[string]any{"type": "string"},
+					"start_cmd":          map[string]any{"type": "string"},
+					"port_hint":          map[string]any{"type": "integer"},
+					"env_json":           map[string]any{"type": "string"},
+					"target_config_json": map[string]any{"type": "string"},
+					"domain":             map[string]any{"type": "string"},
 				},
 				"required": []string{"environment"},
 			},
@@ -100,17 +103,18 @@ func (a *App) MCPTools() []sdk.Tool {
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"name":              map[string]any{"type": "string"},
-					"id":                map[string]any{"type": "integer"},
-					"environment":       map[string]any{"type": "string"},
-					"description":       map[string]any{"type": "string"},
-					"source_ref":        map[string]any{"type": "string"},
-					"source_extra_json": map[string]any{"type": "string"},
-					"framework":         map[string]any{"type": "string"},
-					"build_cmd":         map[string]any{"type": "string"},
-					"start_cmd":         map[string]any{"type": "string"},
-					"port_hint":         map[string]any{"type": "integer"},
-					"env_json":          map[string]any{"type": "string"},
+					"name":               map[string]any{"type": "string"},
+					"id":                 map[string]any{"type": "integer"},
+					"environment":        map[string]any{"type": "string"},
+					"description":        map[string]any{"type": "string"},
+					"source_ref":         map[string]any{"type": "string"},
+					"source_extra_json":  map[string]any{"type": "string"},
+					"framework":          map[string]any{"type": "string"},
+					"build_cmd":          map[string]any{"type": "string"},
+					"start_cmd":          map[string]any{"type": "string"},
+					"port_hint":          map[string]any{"type": "integer"},
+					"env_json":           map[string]any{"type": "string"},
+					"target_config_json": map[string]any{"type": "string"},
 				},
 				"required": []string{"environment"},
 			},
@@ -130,32 +134,42 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name: "deploy_build", Handler: a.toolBuild,
-			Description: "Fetch source, run the framework build, return build_id. Args: name OR id, environment? (default production), release? (auto-release on success).",
+			Description: "Fetch source and build a service binary/site, Android AAB, or iOS IPA. Args: name OR id, environment?, release?, channel? (mobile auto-release default internal).",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"name":        map[string]any{"type": "string"},
-					"id":          map[string]any{"type": "integer"},
-					"environment": map[string]any{"type": "string"},
-					"release":     map[string]any{"type": "boolean"},
+					"name":              map[string]any{"type": "string"},
+					"id":                map[string]any{"type": "integer"},
+					"environment":       map[string]any{"type": "string"},
+					"release":           map[string]any{"type": "boolean"},
+					"channel":           map[string]any{"type": "string"},
+					"rollout_fraction":  map[string]any{"type": "number"},
+					"release_notes":     map[string]any{"type": "object"},
+					"submit_for_review": map[string]any{"type": "boolean"},
+					"beta_group_id":     map[string]any{"type": "string"},
 				},
 			},
 		},
 		{
 			Name: "deploy_release", Handler: a.toolRelease,
-			Description: "Promote a build_id to live in its environment, or in the supplied target environment. Args: build_id, environment?",
+			Description: "Release a build. Services start a process; mobile builds publish to a store channel. Args: build_id, environment?, channel?, rollout_fraction?, release_notes?, submit_for_review?, beta_group_id?",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"build_id":    map[string]any{"type": "integer"},
-					"environment": map[string]any{"type": "string"},
+					"build_id":          map[string]any{"type": "integer"},
+					"environment":       map[string]any{"type": "string"},
+					"channel":           map[string]any{"type": "string"},
+					"rollout_fraction":  map[string]any{"type": "number"},
+					"release_notes":     map[string]any{"type": "object"},
+					"submit_for_review": map[string]any{"type": "boolean"},
+					"beta_group_id":     map[string]any{"type": "string"},
 				},
 				"required": []string{"build_id"},
 			},
 		},
 		{
 			Name: "deploy_promote", Handler: a.toolPromote,
-			Description: "Promote a tested build from one environment to another, usually staging -> production. Args: name OR id, source_environment? (default staging), target_environment? (default production), build_id?",
+			Description: "Promote a tested service build between environments, or a mobile store release between channels without rebuilding/re-uploading. Mobile args: release_id or build_id, target_channel. Service args: source_environment?, target_environment?, build_id?",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
@@ -164,8 +178,26 @@ func (a *App) MCPTools() []sdk.Tool {
 					"source_environment": map[string]any{"type": "string"},
 					"target_environment": map[string]any{"type": "string"},
 					"build_id":           map[string]any{"type": "integer"},
+					"release_id":         map[string]any{"type": "integer"},
+					"target_channel":     map[string]any{"type": "string"},
+					"rollout_fraction":   map[string]any{"type": "number"},
+					"release_notes":      map[string]any{"type": "object"},
+					"submit_for_review":  map[string]any{"type": "boolean"},
+					"beta_group_id":      map[string]any{"type": "string"},
 				},
 			},
+		},
+		{
+			Name: "deploy_rollout", Handler: a.toolRollout,
+			Description: "Change an Android production staged rollout. Args: release_id, fraction (0 < fraction <= 1).",
+			InputSchema: map[string]any{"type": "object", "properties": map[string]any{
+				"release_id": map[string]any{"type": "integer"}, "fraction": map[string]any{"type": "number"},
+			}, "required": []string{"release_id", "fraction"}},
+		},
+		{
+			Name: "deploy_halt", Handler: a.toolHalt,
+			Description: "Halt an Android staged rollout or expire an iOS TestFlight build. Args: release_id.",
+			InputSchema: map[string]any{"type": "object", "properties": map[string]any{"release_id": map[string]any{"type": "integer"}}, "required": []string{"release_id"}},
 		},
 		{
 			Name: "deploy_status", Handler: a.toolStatus,
@@ -266,17 +298,18 @@ func (a *App) MCPTools() []sdk.Tool {
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"name":              map[string]any{"type": "string"},
-					"id":                map[string]any{"type": "integer"},
-					"environment":       map[string]any{"type": "string"},
-					"description":       map[string]any{"type": "string"},
-					"source_ref":        map[string]any{"type": "string"},
-					"framework":         map[string]any{"type": "string"},
-					"build_cmd":         map[string]any{"type": "string"},
-					"start_cmd":         map[string]any{"type": "string"},
-					"port_hint":         map[string]any{"type": "integer"},
-					"env_json":          map[string]any{"type": "string"},
-					"source_extra_json": map[string]any{"type": "string"},
+					"name":               map[string]any{"type": "string"},
+					"id":                 map[string]any{"type": "integer"},
+					"environment":        map[string]any{"type": "string"},
+					"description":        map[string]any{"type": "string"},
+					"source_ref":         map[string]any{"type": "string"},
+					"framework":          map[string]any{"type": "string"},
+					"build_cmd":          map[string]any{"type": "string"},
+					"start_cmd":          map[string]any{"type": "string"},
+					"port_hint":          map[string]any{"type": "integer"},
+					"env_json":           map[string]any{"type": "string"},
+					"source_extra_json":  map[string]any{"type": "string"},
+					"target_config_json": map[string]any{"type": "string"},
 				},
 			},
 		},
@@ -323,15 +356,31 @@ func (a *App) toolInit(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	// installs without Domains still work.
 	domainsOn := domainArg != "" && a.domainsAvailable(ctx)
 	in := CreateDeploymentInput{
-		Name:        strArg(args, "name"),
-		Description: strArg(args, "description"),
-		SourceKind:  strArg(args, "source_kind"),
-		SourceRef:   strArg(args, "source_ref"),
-		Framework:   strArg(args, "framework"),
-		BuildCmd:    strArg(args, "build_cmd"),
-		StartCmd:    strArg(args, "start_cmd"),
-		PortHint:    intArg(args, "port_hint"),
-		EnvJSON:     strArg(args, "env_json"),
+		Name:             strArg(args, "name"),
+		TargetKind:       normalizeTargetKind(strArg(args, "target_kind")),
+		Description:      strArg(args, "description"),
+		SourceKind:       strArg(args, "source_kind"),
+		SourceRef:        strArg(args, "source_ref"),
+		Framework:        strArg(args, "framework"),
+		BuildCmd:         strArg(args, "build_cmd"),
+		StartCmd:         strArg(args, "start_cmd"),
+		PortHint:         intArg(args, "port_hint"),
+		EnvJSON:          strArg(args, "env_json"),
+		TargetConfigJSON: strArg(args, "target_config_json"),
+	}
+	if in.TargetKind != "service" && in.TargetKind != "android" && in.TargetKind != "ios" {
+		return nil, fmt.Errorf("target_kind %q not supported (service|android|ios)", in.TargetKind)
+	}
+	if in.TargetKind == "android" || in.TargetKind == "ios" {
+		if in.Framework == "" {
+			in.Framework = in.TargetKind
+		}
+		if in.Framework != in.TargetKind {
+			return nil, fmt.Errorf("target_kind %q requires framework %q", in.TargetKind, in.TargetKind)
+		}
+		if domainArg != "" {
+			return nil, errors.New("domains apply to service deployments; put the backend URL in the mobile environment config")
+		}
 	}
 	if !domainsOn {
 		in.Domain = domainArg
@@ -438,7 +487,7 @@ func (a *App) toolEnvCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		Name: name, Description: from.Description,
 		SourceRef: from.SourceRef, SourceExtraJSON: from.SourceExtraJSON,
 		Framework: from.Framework, BuildCmd: from.BuildCmd, StartCmd: from.StartCmd,
-		PortHint: from.PortHint, EnvJSON: from.EnvJSON,
+		PortHint: from.PortHint, EnvJSON: from.EnvJSON, TargetConfigJSON: from.TargetConfigJSON,
 	}
 	applyEnvironmentInputOverrides(&in, args)
 	env, err := dbCreateEnvironment(ctx.AppDB(), d.ID, in)
@@ -502,7 +551,7 @@ func (a *App) toolBuild(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	}
 	res := map[string]any{"build": build}
 	if boolArg(args, "release") && build.Status == "succeeded" {
-		rel, err := a.runRelease(d, build)
+		rel, err := a.runReleaseWithOptions(d, build, releaseOptionsFromArgs(args))
 		if err != nil {
 			res["release_error"] = err.Error()
 		} else {
@@ -545,7 +594,7 @@ func (a *App) toolRelease(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	} else if env, err := dbEnsureProductionEnvironment(ctx.AppDB(), d); err == nil && env != nil {
 		d = effectiveDeploymentForEnvironment(d, env)
 	}
-	rel, err := a.runRelease(d, build)
+	rel, err := a.runReleaseWithOptions(d, build, releaseOptionsFromArgs(args))
 	if err != nil {
 		return nil, err
 	}
@@ -556,6 +605,9 @@ func (a *App) toolPromote(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	base, err := a.lookupBaseDeployment(args)
 	if err != nil {
 		return nil, err
+	}
+	if base.TargetKind == "android" || base.TargetKind == "ios" {
+		return a.toolPromoteMobile(ctx, base, args)
 	}
 	sourceName := normalizeEnvironmentName(defaultStr(strArg(args, "source_environment"), "staging"))
 	targetName := normalizeEnvironmentName(defaultStr(strArg(args, "target_environment"), defaultEnvironmentName))
@@ -622,6 +674,7 @@ func (a *App) toolStatus(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return nil, err
 	}
 	builds, _ := dbListBuildsForEnv(ctx.AppDB(), d.ID, d.EnvironmentID, 10)
+	releases, _ := dbListReleasesForEnv(ctx.AppDB(), d.ID, d.EnvironmentID, 20)
 	var current *Release
 	if d.CurrentReleaseID != nil {
 		current, _ = dbGetRelease(ctx.AppDB(), *d.CurrentReleaseID)
@@ -629,6 +682,7 @@ func (a *App) toolStatus(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	return map[string]any{
 		"deployment":      d,
 		"builds":          builds,
+		"releases":        releases,
 		"current_release": current,
 		"url":             a.deploymentURL(d, current),
 	}, nil
@@ -725,6 +779,9 @@ func (a *App) toolAttachDomain(ctx *sdk.AppCtx, args map[string]any) (any, error
 	d, err := a.lookupDeployment(args)
 	if err != nil {
 		return nil, err
+	}
+	if d.TargetKind != "service" {
+		return nil, errors.New("domains apply to service deployments, not mobile binaries")
 	}
 	spec := attachDomainSpec{
 		FQDN:   strArg(args, "fqdn"),
@@ -1135,6 +1192,9 @@ func applyEnvironmentInputOverrides(in *CreateEnvironmentInput, args map[string]
 	if v, ok := args["env_json"].(string); ok {
 		in.EnvJSON = v
 	}
+	if v, ok := args["target_config_json"].(string); ok {
+		in.TargetConfigJSON = v
+	}
 	if v, ok := args["domain"].(string); ok {
 		in.Domain = v
 	}
@@ -1152,7 +1212,7 @@ func environmentFieldsFromArgs(args map[string]any) map[string]any {
 	fields := map[string]any{}
 	for _, k := range []string{
 		"description", "source_ref", "source_extra_json",
-		"framework", "build_cmd", "start_cmd", "env_json",
+		"framework", "build_cmd", "start_cmd", "env_json", "target_config_json",
 	} {
 		if v, ok := args[k].(string); ok {
 			fields[k] = v
@@ -1167,6 +1227,14 @@ func environmentFieldsFromArgs(args map[string]any) map[string]any {
 		}
 	}
 	return fields
+}
+
+func normalizeTargetKind(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "" {
+		return "service"
+	}
+	return value
 }
 
 func (a *App) deploymentURL(d *Deployment, current *Release) string {

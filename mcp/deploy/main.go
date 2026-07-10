@@ -19,6 +19,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -41,8 +42,8 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: deploy
 display_name: Deploy
-version: 0.15.1
-description: Local-first builds and runtime supervision for Apteva projects.
+version: 0.16.0
+description: Build and release services, Android apps, and iOS apps.
 author: Apteva
 scopes: [project, global]
 requires:
@@ -50,6 +51,8 @@ requires:
     - db.write.app
     - platform.apps.call
     - platform.ingress.write
+    - platform.connections.execute
+    - platform.connections.read_credentials
   integrations:
     - role: code
       kind: app
@@ -63,6 +66,24 @@ requires:
       compatible_app_names: [domains]
       label: Domains app
       hint: Install the Domains app to attach a custom domain to a deployment.
+    - role: play_store
+      kind: integration
+      required: false
+      compatible_slugs: [google-play-developer]
+      label: Google Play Developer
+      hint: Required to publish Android App Bundles to Google Play.
+    - role: android_signing
+      kind: integration
+      required: false
+      compatible_slugs: [android-upload-signing]
+      label: Android Upload Signing
+      hint: Required only when Deploy must sign an Android App Bundle that Gradle did not sign.
+    - role: app_store
+      kind: integration
+      required: false
+      compatible_slugs: [app-store-connect]
+      label: App Store Connect
+      hint: Required to sign, upload, and publish iOS apps.
 provides:
   http_routes:
     - prefix: /
@@ -77,6 +98,8 @@ provides:
     - { name: deploy_build,   description: "Fetch source, run the framework build; returns build_id." }
     - { name: deploy_release, description: "Promote a build to live." }
     - { name: deploy_promote, description: "Promote a tested build from one environment to another." }
+    - { name: deploy_rollout, description: "Change a Google Play production rollout fraction." }
+    - { name: deploy_halt, description: "Halt a mobile rollout or expire a TestFlight build." }
     - { name: deploy_status,  description: "Current build + release state, URL, last 10 builds." }
     - { name: deploy_logs,    description: "Tail build or runtime logs." }
     - { name: deploy_stop,    description: "Stop the live release." }
@@ -84,8 +107,14 @@ provides:
     - { name: deploy_attach_domain, description: "Attach an FQDN to a deployment via the Domains app." }
     - { name: deploy_detach_domain, description: "Clear a deployment's domain link." }
     - { name: deploy_list_routes, description: "Server-side: live deployments as a route table for the host-based proxy. Polled by apteva-server's host-router; not for agents." }
+    - { name: deploy_health, description: "Deployment health and artifact retention status." }
+    - { name: deploy_update, description: "Update deployment or environment configuration." }
+    - { name: deploy_restart, description: "Restart a service release without rebuilding." }
+    - { name: deploy_set_env, description: "Merge environment variables into a deployment environment." }
   ui_panels:
     - { slot: project.page, label: "Deploy", icon: rocket, entry: /ui/DeployPanel.mjs }
+  workers:
+    - { name: mobile_release_sync, schedule: "@every 1m" }
 runtime:
   kind: source
   source:
@@ -257,8 +286,13 @@ func (a *App) OnUnmount(*sdk.AppCtx) error {
 	}
 	return nil
 }
-func (a *App) Channels() []sdk.ChannelFactory    { return nil }
-func (a *App) Workers() []sdk.Worker             { return nil }
+func (a *App) Channels() []sdk.ChannelFactory { return nil }
+func (a *App) Workers() []sdk.Worker {
+	return []sdk.Worker{{
+		Name: "mobile_release_sync", Schedule: "@every 1m",
+		Run: func(ctx context.Context, _ *sdk.AppCtx) error { return a.syncPendingMobileReleases(ctx) },
+	}}
+}
 func (a *App) EventHandlers() []sdk.EventHandler { return nil }
 
 // reconcileReleases runs on boot. For every release the DB still
@@ -534,9 +568,10 @@ func (a *App) runBuild(d *Deployment) (*Build, error) {
 	}
 
 	entrypoint, err := builder.Build(srcDir, distDir, BuildOverrides{
-		BuildCmd: d.BuildCmd,
-		StartCmd: d.StartCmd,
-		Env:      parseEnvJSON(d.EnvJSON),
+		BuildCmd:         d.BuildCmd,
+		StartCmd:         d.StartCmd,
+		Env:              parseEnvJSON(d.EnvJSON),
+		TargetConfigJSON: d.TargetConfigJSON,
 	}, logF)
 	if err != nil {
 		return a.failBuild(build, err.Error()), nil
@@ -544,16 +579,21 @@ func (a *App) runBuild(d *Deployment) (*Build, error) {
 
 	durMs := time.Since(startTime).Milliseconds()
 	size, _ := dirSize(distDir)
+	artifactManifestJSON := "{}"
+	if body, err := os.ReadFile(filepath.Join(distDir, artifactManifestFilename)); err == nil && json.Valid(body) {
+		artifactManifestJSON = string(body)
+	}
 	fmt.Fprintf(logF, "=== build succeeded in %dms, artifact=%s, entrypoint=%q ===\n", durMs, distDir, entrypoint)
 
 	_ = dbUpdateBuild(globalCtx.AppDB(), build.ID, map[string]any{
-		"status":        "succeeded",
-		"finished_at":   nowUTC(),
-		"duration_ms":   durMs,
-		"exit_code":     0,
-		"source_sha":    sha,
-		"artifact_path": distDir,
-		"artifact_size": size,
+		"status":                 "succeeded",
+		"finished_at":            nowUTC(),
+		"duration_ms":            durMs,
+		"exit_code":              0,
+		"source_sha":             sha,
+		"artifact_path":          distDir,
+		"artifact_size":          size,
+		"artifact_manifest_json": artifactManifestJSON,
 		// fw may have been auto-detected after the row was created
 		// with the deployment's empty framework field — without
 		// persisting it here, runRelease's resolveCommand falls into
@@ -585,9 +625,22 @@ func (a *App) failBuild(b *Build, msg string) *Build {
 	return out
 }
 
-// runRelease starts a supervised process for the build and atomically
-// stops the deployment's previous current release.
+// runRelease uses default release settings. Service builds start a
+// supervised process; mobile builds publish to their internal channel.
 func (a *App) runRelease(d *Deployment, b *Build) (*Release, error) {
+	return a.runReleaseWithOptions(d, b, releaseOptions{})
+}
+
+func (a *App) runReleaseWithOptions(d *Deployment, b *Build, opts releaseOptions) (*Release, error) {
+	if isMobileDeployment(d, b) {
+		return a.runMobileRelease(d, b, opts)
+	}
+	return a.runServiceRelease(d, b)
+}
+
+// runServiceRelease starts a supervised process for the build and
+// atomically stops the deployment's previous current release.
+func (a *App) runServiceRelease(d *Deployment, b *Build) (*Release, error) {
 	if b.Status != "succeeded" {
 		return nil, fmt.Errorf("build %d not succeeded (status=%s)", b.ID, b.Status)
 	}

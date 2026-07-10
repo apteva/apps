@@ -25,9 +25,10 @@ type Builder interface {
 }
 
 type BuildOverrides struct {
-	BuildCmd string            // explicit override; if non-empty, runs as `sh -c <build_cmd>` in srcDir
-	StartCmd string            // (used by runtime, not builder; passed through for context)
-	Env      map[string]string // user-provided env from the deployment's env_json (e.g. VITE_*, NEXT_PUBLIC_*); applied to every build process
+	BuildCmd         string            // explicit override; if non-empty, runs as `sh -c <build_cmd>` in srcDir
+	StartCmd         string            // (used by runtime, not builder; passed through for context)
+	Env              map[string]string // user-provided env from the deployment's env_json (e.g. VITE_*, NEXT_PUBLIC_*); applied to every build process
+	TargetConfigJSON string            // target-specific, non-secret mobile build settings
 }
 
 // buildEnv composes the env each builder hands to exec.Cmd. Starts
@@ -67,6 +68,12 @@ func detectFramework(srcDir string) string {
 	if exists(filepath.Join(srcDir, "index.html")) {
 		return "static"
 	}
+	if looksLikeAndroidProject(srcDir) {
+		return "android"
+	}
+	if looksLikeIOSProject(srcDir) {
+		return "ios"
+	}
 	return ""
 }
 
@@ -82,10 +89,14 @@ func builderFor(framework string) (Builder, error) {
 		return &bunBuilder{}, nil
 	case "blank":
 		return &blankBuilder{}, nil
+	case "android":
+		return &androidBuilder{}, nil
+	case "ios":
+		return &iosBuilder{}, nil
 	case "":
 		return nil, errors.New("framework not detected; set framework explicitly on the deployment")
 	default:
-		return nil, fmt.Errorf("framework %q not supported (supported: go, node, bun, static, blank)", framework)
+		return nil, fmt.Errorf("framework %q not supported (supported: go, node, bun, static, blank, android, ios)", framework)
 	}
 }
 
