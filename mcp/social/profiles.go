@@ -108,7 +108,13 @@ func projectDefaultProfileID(ctx *sdk.AppCtx, projectID string) int64 {
 // 404 rather than silently widening to project-wide.
 func resolveProfileArg(ctx *sdk.AppCtx, projectID string, args map[string]any) int64 {
 	if id := intArg(args, "profile_id", 0); id > 0 {
-		return int64(id)
+		var found int64
+		if err := ctx.AppDB().QueryRow(
+			`SELECT id FROM profiles WHERE id=? AND project_id=?`, id, projectID,
+		).Scan(&found); err != nil {
+			return -1
+		}
+		return found
 	}
 	slug, _ := args["profile"].(string)
 	slug = strings.TrimSpace(slug)
@@ -463,6 +469,12 @@ func (a *App) toolProfileDelete(ctx *sdk.AppCtx, args map[string]any) (any, erro
 		reassignTo, pid, id,
 	); err != nil {
 		return nil, fmt.Errorf("reassign posts: %w", err)
+	}
+	if _, err := tx.Exec(
+		`UPDATE pending_accounts SET profile_id=? WHERE project_id=? AND profile_id=? AND status!='finalized'`,
+		reassignTo, pid, id,
+	); err != nil {
+		return nil, fmt.Errorf("reassign pending accounts: %w", err)
 	}
 	if _, err := tx.Exec(
 		`DELETE FROM profiles WHERE id=? AND project_id=?`, id, pid,

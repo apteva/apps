@@ -120,7 +120,7 @@ func (a *App) handleProviderAccountsImport(w http.ResponseWriter, r *http.Reques
 		http.Error(w, "POST only", http.StatusMethodNotAllowed)
 		return
 	}
-	args := projectArgsFromRequest(r)
+	args := map[string]any{}
 	if r.Body != nil {
 		defer r.Body.Close()
 		var body map[string]any
@@ -132,6 +132,7 @@ func (a *App) handleProviderAccountsImport(w http.ResponseWriter, r *http.Reques
 			args[k] = v
 		}
 	}
+	copyProjectArgs(args, projectArgsFromRequest(r))
 	out, err := a.toolAccountImportProvider(globalCtx, args)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -317,7 +318,9 @@ func (a *App) startZernioAccountConnect(ctx *sdk.AppCtx, args map[string]any) (a
 	}
 	returnTo := strings.TrimSpace(toString(args["return_to"]))
 	if returnTo == "" {
-		returnTo = "/api/apps/social/accounts/oauth_done"
+		returnTo = "/api/apps/social/accounts/oauth_done?project_id=" + url.QueryEscape(pid)
+	} else if !strings.HasPrefix(returnTo, "/") || strings.HasPrefix(returnTo, "//") {
+		return mcpError("return_to must be a same-origin absolute path"), nil
 	}
 	now := time.Now().UTC()
 	res, err := ctx.AppDB().Exec(
@@ -430,15 +433,23 @@ func (a *App) completeZernioOAuth(ctx *sdk.AppCtx, r *http.Request, row *pending
 		if state == "" {
 			state = firstDeepStringRaw(raw, "state")
 		}
-		_, _ = ctx.AppDB().Exec(
-			`UPDATE pending_accounts SET status='ready', provider_state=?, provider_data=? WHERE id=?`,
-			state, string(raw), row.id,
+		updateRes, _ := ctx.AppDB().Exec(
+			`UPDATE pending_accounts SET status='ready', provider_state=?, provider_data=?
+			  WHERE id=? AND project_id=? AND status='pending_oauth' AND datetime(expires_at) > CURRENT_TIMESTAMP`,
+			state, string(raw), row.id, row.projectID,
 		)
+		if n, _ := updateRes.RowsAffected(); n != 1 {
+			return row.connectionID, false
+		}
 	} else {
-		_, _ = ctx.AppDB().Exec(
-			`UPDATE pending_accounts SET status='ready', provider_state=? WHERE id=?`,
-			state, row.id,
+		updateRes, _ := ctx.AppDB().Exec(
+			`UPDATE pending_accounts SET status='ready', provider_state=?
+			  WHERE id=? AND project_id=? AND status='pending_oauth' AND datetime(expires_at) > CURRENT_TIMESTAMP`,
+			state, row.id, row.projectID,
 		)
+		if n, _ := updateRes.RowsAffected(); n != 1 {
+			return row.connectionID, false
+		}
 	}
 	ctx.Emit("account.oauth_ready", map[string]any{
 		"pending_account_id": row.id,
@@ -477,14 +488,31 @@ func (a *App) listZernioPendingPages(ctx *sdk.AppCtx, row *pendingRow) (any, err
 	}, nil
 }
 
-func (a *App) finalizeZernioAccount(ctx *sdk.AppCtx, args map[string]any, row *pendingRow) (any, error) {
+func (a *App) finalizeZernioAccount(ctx *sdk.AppCtx, args map[string]any, row *pendingRow) (result any, resultErr error) {
 	if row.connectionID == 0 {
 		return mcpError("OAuth not yet complete"), nil
 	}
 	pid := row.projectID
-	if pid == "" {
-		pid = projectScope(ctx, args)
+	claim, err := ctx.AppDB().Exec(
+		`UPDATE pending_accounts SET status='finalizing'
+		  WHERE id=? AND project_id=? AND status='ready' AND datetime(expires_at) > CURRENT_TIMESTAMP`,
+		row.id, pid,
+	)
+	if err != nil {
+		return nil, err
 	}
+	if n, _ := claim.RowsAffected(); n != 1 {
+		return mcpError("pending account is not ready, expired, or was already finalized"), nil
+	}
+	finalized := false
+	defer func() {
+		if !finalized {
+			_, _ = ctx.AppDB().Exec(
+				`UPDATE pending_accounts SET status='ready' WHERE id=? AND project_id=? AND status='finalizing'`,
+				row.id, pid,
+			)
+		}
+	}()
 	pageID := strings.TrimSpace(toString(args["page_id"]))
 	profileID := row.profileID
 	if profileID == 0 {
@@ -552,7 +580,13 @@ func (a *App) finalizeZernioAccount(ctx *sdk.AppCtx, args map[string]any, row *p
 	if err != nil {
 		return nil, err
 	}
-	_, _ = ctx.AppDB().Exec(`UPDATE pending_accounts SET status='finalized' WHERE id=?`, row.id)
+	if _, err := ctx.AppDB().Exec(
+		`UPDATE pending_accounts SET status='finalized' WHERE id=? AND project_id=? AND status='finalizing'`,
+		row.id, pid,
+	); err != nil {
+		return nil, err
+	}
+	finalized = true
 	ctx.Emit("account.added", map[string]any{
 		"social_account_id": rowOut.ID,
 		"platform":          rowOut.Platform,

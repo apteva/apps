@@ -40,7 +40,7 @@ func TestProfileCreate_FirstAutoDefaults(t *testing.T) {
 	}
 }
 
-func TestProfileCreate_UsesInjectedProjectScope(t *testing.T) {
+func TestProfileCreate_TrustedContextOverridesSpoofedProjectScope(t *testing.T) {
 	ctx := newSocialCtx(t, newRecordingPlatform())
 	app := &App{}
 
@@ -49,8 +49,8 @@ func TestProfileCreate_UsesInjectedProjectScope(t *testing.T) {
 		t.Fatal(err)
 	}
 	p := out.(map[string]any)["profile"].(*Profile)
-	if p.ProjectID != "global-panel-project" {
-		t.Fatalf("project_id = %q, want injected project", p.ProjectID)
+	if p.ProjectID != "test-proj" {
+		t.Fatalf("project_id = %q, want trusted context project", p.ProjectID)
 	}
 
 	listOut, err := app.toolProfileList(ctx, map[string]any{"_project_id": "global-panel-project"})
@@ -59,15 +59,15 @@ func TestProfileCreate_UsesInjectedProjectScope(t *testing.T) {
 	}
 	rows := listOut.(map[string]any)["profiles"].([]Profile)
 	if len(rows) != 1 || rows[0].ID != p.ID {
-		t.Fatalf("injected list returned %+v, want only profile %d", rows, p.ID)
+		t.Fatalf("trusted project list returned %+v, want only profile %d", rows, p.ID)
 	}
 
 	otherOut, err := app.toolProfileList(ctx, map[string]any{"_project_id": "other-project"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if rows := otherOut.(map[string]any)["profiles"].([]Profile); len(rows) != 0 {
-		t.Fatalf("other project should not see profile, got %+v", rows)
+	if rows := otherOut.(map[string]any)["profiles"].([]Profile); len(rows) != 1 || rows[0].ID != p.ID {
+		t.Fatalf("spoofed project argument must not change scope, got %+v", rows)
 	}
 }
 
@@ -128,9 +128,14 @@ func TestResolveProfileArg(t *testing.T) {
 	if got := resolveProfileArg(ctx, "test-proj", map[string]any{"profile": "nope"}); got != -1 {
 		t.Errorf("unknown slug: got %d, want -1", got)
 	}
-	// Numeric id wins over slug.
-	if got := resolveProfileArg(ctx, "test-proj", map[string]any{"profile_id": 42}); got != 42 {
-		t.Errorf("numeric arg: got %d, want 42", got)
+	// Numeric ids are also project-scoped.
+	var profileID int64
+	_ = ctx.AppDB().QueryRow(`SELECT id FROM profiles WHERE project_id='test-proj' AND slug='acme'`).Scan(&profileID)
+	if got := resolveProfileArg(ctx, "test-proj", map[string]any{"profile_id": profileID}); got != profileID {
+		t.Errorf("numeric arg: got %d, want %d", got, profileID)
+	}
+	if got := resolveProfileArg(ctx, "test-proj", map[string]any{"profile_id": 9999}); got != -1 {
+		t.Errorf("foreign/missing numeric arg: got %d, want -1", got)
 	}
 }
 

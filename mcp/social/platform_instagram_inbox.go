@@ -15,7 +15,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"os"
 	"strconv"
 	"time"
 
@@ -94,8 +93,10 @@ type instagramSyncReport struct {
 // on one post doesn't abort the run; the failure surfaces in
 // Warnings. Cursors get bumped at the end so the next sync only
 // fetches deltas where Meta's pagination supports it.
-func syncInstagramAccount(ctx *sdk.AppCtx, accountID int64) (*instagramSyncReport, error) {
-	pid := os.Getenv("APTEVA_PROJECT_ID")
+func syncInstagramAccount(ctx *sdk.AppCtx, pid string, accountID int64) (*instagramSyncReport, error) {
+	if pid == "" {
+		return nil, errors.New("project_id required")
+	}
 	creds, err := loadIGAccountCreds(ctx.AppDB(), pid, accountID)
 	if err != nil {
 		return nil, err
@@ -422,18 +423,18 @@ func syncInstagramMentions(ctx *sdk.AppCtx, projectID string, creds *igAccountCr
 		}
 		occurred := parseIGTimestamp(t.Timestamp)
 		_, inserted, err := upsertInboxItem(ctx.AppDB(), inboxUpsertInput{
-			ProjectID:        projectID,
-			SocialAccountID:  creds.AccountID,
-			Platform:         "instagram",
-			Kind:             inboxKindMention,
-			ExternalID:       t.ID,
-			ExternalPostID:   t.ID,
-			AuthorHandle:     t.Username,
-			AuthorName:       t.Username,
-			Body:             t.Caption,
-			Permalink:        t.Permalink,
-			OccurredAt:       occurred,
-			RawJSON:          marshalSafe(t),
+			ProjectID:       projectID,
+			SocialAccountID: creds.AccountID,
+			Platform:        "instagram",
+			Kind:            inboxKindMention,
+			ExternalID:      t.ID,
+			ExternalPostID:  t.ID,
+			AuthorHandle:    t.Username,
+			AuthorName:      t.Username,
+			Body:            t.Caption,
+			Permalink:       t.Permalink,
+			OccurredAt:      occurred,
+			RawJSON:         marshalSafe(t),
 		})
 		if err != nil {
 			ctx.Logger().Warn("ig mention upsert failed", "external_id", t.ID, "err", err)
@@ -461,8 +462,7 @@ func instagramInboxReply(ctx *sdk.AppCtx, item *inboxItem, body string) inboxOut
 		out.Status, out.Error = "failed", "body required"
 		return out
 	}
-	pid := os.Getenv("APTEVA_PROJECT_ID")
-	creds, err := loadIGAccountCreds(ctx.AppDB(), pid, item.SocialAccountID)
+	creds, err := loadIGAccountCreds(ctx.AppDB(), item.ProjectID, item.SocialAccountID)
 	if err != nil {
 		out.Status, out.Error = "failed", err.Error()
 		return out
@@ -567,8 +567,7 @@ func instagramInboxPrivateReply(ctx *sdk.AppCtx, item *inboxItem, body string) i
 		out.Status, out.Error = "failed", "private_reply target must be a comment"
 		return out
 	}
-	pid := os.Getenv("APTEVA_PROJECT_ID")
-	creds, err := loadIGAccountCreds(ctx.AppDB(), pid, item.SocialAccountID)
+	creds, err := loadIGAccountCreds(ctx.AppDB(), item.ProjectID, item.SocialAccountID)
 	if err != nil {
 		out.Status, out.Error = "failed", err.Error()
 		return out
@@ -607,8 +606,7 @@ func instagramInboxHide(ctx *sdk.AppCtx, item *inboxItem, hide bool) inboxOutcom
 		out.Status, out.Error = "failed", "hide/unhide target must be a comment"
 		return out
 	}
-	pid := os.Getenv("APTEVA_PROJECT_ID")
-	creds, err := loadIGAccountCreds(ctx.AppDB(), pid, item.SocialAccountID)
+	creds, err := loadIGAccountCreds(ctx.AppDB(), item.ProjectID, item.SocialAccountID)
 	if err != nil {
 		out.Status, out.Error = "failed", err.Error()
 		return out
@@ -647,8 +645,7 @@ func instagramInboxDelete(ctx *sdk.AppCtx, item *inboxItem) inboxOutcome {
 		out.Status, out.Error = "failed", "delete target must be a comment"
 		return out
 	}
-	pid := os.Getenv("APTEVA_PROJECT_ID")
-	creds, err := loadIGAccountCreds(ctx.AppDB(), pid, item.SocialAccountID)
+	creds, err := loadIGAccountCreds(ctx.AppDB(), item.ProjectID, item.SocialAccountID)
 	if err != nil {
 		out.Status, out.Error = "failed", err.Error()
 		return out
