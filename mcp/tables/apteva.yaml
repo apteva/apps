@@ -2,15 +2,15 @@ schema: apteva-app/v1
 
 name: tables
 display_name: Tables
-version: 0.1.10
+version: 0.1.11
 description: |
   Typed-row database for Apteva agents and human teams. The row-shaped
   sibling to the storage app: define typed tables, insert rows, query
   with typed predicates, paginate. Strict schemas — every row's keys
   and value types are validated against the table's column definitions
   before insert. Columns can reference storage files via the file_id
-  type. Project-scoped by default; opt-in global tables for shared
-  lookup data.
+  type. A global app installation can serve many projects, while every
+  table and row remains strictly confined to its owning project.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/tables
@@ -29,7 +29,7 @@ provides:
     - prefix: /
   mcp_tools:
     - name: tables_create
-      description: 'Create a new table with typed columns. Args: name, columns (array of {name, type, nullable?, default?}). Returns the created table''s id + name.'
+      description: 'Create a project-confined table with typed columns. Args: name, columns (array of {name, type, nullable?, default?}). Returns the created table''s id + name.'
     - name: tables_list
       description: 'List tables visible to this install. No args. Returns [{id, name, scope, columns, row_count, created_at}].'
     - name: tables_describe

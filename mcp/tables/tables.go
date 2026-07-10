@@ -24,12 +24,8 @@ func (a *App) toolTablesCreate(ctx *sdk.AppCtx, args map[string]any) (any, error
 	if scope == "" {
 		scope = "project"
 	}
-	if scope != "project" && scope != "global" {
-		return nil, errf("scope must be 'project' or 'global', got %q", scope)
-	}
-	ownerProjectID := pid
-	if scope == "global" {
-		ownerProjectID = ""
+	if scope != "project" {
+		return nil, errf("table scope must be 'project'; install the app globally to serve multiple projects while keeping each project's tables isolated")
 	}
 
 	rawCols := sliceArg(args, "columns")
@@ -58,19 +54,13 @@ func (a *App) toolTablesCreate(ctx *sdk.AppCtx, args map[string]any) (any, error
 	defer tx.Rollback()
 
 	var existing int64
-	existingSQL := `SELECT id FROM tables_meta WHERE project_id = ? AND name = ?`
-	existingArgs := []any{ownerProjectID, name}
-	if scope == "global" {
-		existingSQL = `SELECT id FROM tables_meta WHERE scope = 'global' AND name = ? LIMIT 1`
-		existingArgs = []any{name}
-	}
-	if err := tx.QueryRow(existingSQL, existingArgs...).Scan(&existing); err == nil {
+	if err := tx.QueryRow(`SELECT id FROM tables_meta WHERE project_id = ? AND name = ?`, pid, name).Scan(&existing); err == nil {
 		return nil, errf("table %q already exists", name)
 	} else if err != sql.ErrNoRows {
 		return nil, err
 	}
 
-	res, err := tx.Exec(`INSERT INTO tables_meta(project_id, scope, name, physical_name, row_count) VALUES (?, ?, ?, '', 0)`, ownerProjectID, scope, name)
+	res, err := tx.Exec(`INSERT INTO tables_meta(project_id, scope, name, physical_name, row_count) VALUES (?, 'project', ?, '', 0)`, pid, name)
 	if err != nil {
 		return nil, err
 	}
@@ -534,9 +524,8 @@ func loadTable(db *sql.DB, projectID, name string) (*Table, error) {
 	var rowCount sql.NullInt64
 	err := db.QueryRow(`SELECT id, scope, physical_name, created_at, row_count
 		FROM tables_meta
-		WHERE name = ? AND (project_id = ? OR scope = 'global')
-		ORDER BY CASE WHEN project_id = ? AND scope = 'project' THEN 0 WHEN project_id = '' THEN 1 ELSE 2 END, id
-		LIMIT 1`, name, projectID, projectID).
+		WHERE name = ? AND project_id = ?
+		LIMIT 1`, name, projectID).
 		Scan(&t.ID, &t.Scope, &t.PhysicalName, &t.CreatedAt, &rowCount)
 	if err == sql.ErrNoRows {
 		return nil, errf("table %q not found", name)
@@ -560,25 +549,20 @@ func loadTable(db *sql.DB, projectID, name string) (*Table, error) {
 func loadTables(db *sql.DB, projectID string) ([]Table, error) {
 	rows, err := db.Query(`SELECT id, name, scope, physical_name, created_at, row_count
 		FROM tables_meta
-		WHERE project_id = ? OR scope = 'global'
-		ORDER BY name, CASE WHEN project_id = ? AND scope = 'project' THEN 0 WHEN project_id = '' THEN 1 ELSE 2 END, id`, projectID, projectID)
+		WHERE project_id = ?
+		ORDER BY name`, projectID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	var out []Table
 	unknownCounts := map[int64]bool{}
-	seenNames := map[string]bool{}
 	for rows.Next() {
 		var t Table
 		var rowCount sql.NullInt64
 		if err := rows.Scan(&t.ID, &t.Name, &t.Scope, &t.PhysicalName, &t.CreatedAt, &rowCount); err != nil {
 			return nil, err
 		}
-		if seenNames[t.Name] {
-			continue
-		}
-		seenNames[t.Name] = true
 		if rowCount.Valid {
 			t.RowCount = rowCount.Int64
 		} else {
@@ -596,7 +580,7 @@ func loadTables(db *sql.DB, projectID string) ([]Table, error) {
 	colRows, err := db.Query(`SELECT c.table_id, c.name, c.type, c.nullable, c.default_value
 		FROM columns_meta c
 		JOIN tables_meta t ON t.id = c.table_id
-		WHERE t.project_id = ? OR t.scope = 'global'
+		WHERE t.project_id = ?
 		ORDER BY c.table_id, c.position`, projectID)
 	if err != nil {
 		return nil, err

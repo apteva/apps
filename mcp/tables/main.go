@@ -24,7 +24,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: tables
 display_name: Tables
-version: 0.1.10
+version: 0.1.11
 description: Typed-row database for Apteva agents and human teams.
 author: Apteva
 scopes: [project, global]
@@ -201,11 +201,11 @@ func (a *App) MCPTools() []sdk.Tool {
 	return []sdk.Tool{
 		{
 			Name:        "tables_create",
-			Description: "Create a new typed table. Args: name, columns ([{name, type, nullable?, default?}]), scope? (project|global, default project). Reserved column names: id, created_at, updated_at. Returns {id, name, columns}.",
+			Description: "Create a new project-confined typed table. Args: name, columns ([{name, type, nullable?, default?}]). Reserved column names: id, created_at, updated_at. Returns {id, name, columns}.",
 			InputSchema: schemaObject(map[string]any{
 				"name":    map[string]any{"type": "string"},
 				"columns": map[string]any{"type": "array", "items": colSchema},
-				"scope":   map[string]any{"type": "string", "enum": []string{"project", "global"}},
+				"scope":   map[string]any{"type": "string", "enum": []string{"project"}, "description": "Deprecated compatibility field; tables are always project-confined."},
 			}, []string{"name", "columns"}),
 			Handler: a.toolTablesCreate,
 		},

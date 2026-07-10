@@ -3,6 +3,9 @@
 Typed-row database for Apteva agents and human teams. The row-shaped
 sibling to the `storage` app.
 
+The app may be installed globally, but its data is never global: every
+table and row is resolved against the calling project_id.
+
 ## Surfaces
 
 - **14 MCP tools** — `tables_create`, `tables_list`, `tables_describe`,

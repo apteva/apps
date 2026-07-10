@@ -3,6 +3,7 @@ package main
 import (
 	"bytes"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"testing"
 
@@ -58,38 +59,76 @@ func TestTablesQuery_BlocksInternalAndPhysicalTables(t *testing.T) {
 	}
 }
 
-func TestGlobalTables_AreSharedAndProjectTablesStayPrivate(t *testing.T) {
+func TestGlobalInstall_KeepsEveryTableProjectConfined(t *testing.T) {
 	t.Setenv("APTEVA_PROJECT_ID", "")
 	ctx := tk.NewAppCtx(t, "apteva.yaml")
 	app := &App{}
-	p1 := map[string]any{"_project_id": "p1"}
 
+	for _, project := range []string{"p1", "p2"} {
+		mustCall(t, app, ctx, "tables_create", map[string]any{
+			"_project_id": project, "name": "rows",
+			"columns": []any{map[string]any{"name": "value", "type": "text"}},
+		})
+		mustCall(t, app, ctx, "rows_insert", map[string]any{
+			"_project_id": project, "table": "rows",
+			"rows": []any{map[string]any{"value": project}},
+		})
+	}
+	for _, project := range []string{"p1", "p2"} {
+		out := mustCall(t, app, ctx, "rows_search", map[string]any{"_project_id": project, "table": "rows"})
+		rows := out["rows"].([]map[string]any)
+		if len(rows) != 1 || rows[0]["value"] != project {
+			t.Fatalf("%s rows leaked or missing: %+v", project, rows)
+		}
+	}
+	if tables := mustCall(t, app, ctx, "tables_list", map[string]any{"_project_id": "p3"})["tables"].([]map[string]any); len(tables) != 0 {
+		t.Fatalf("p3 can see another project's tables: %+v", tables)
+	}
+	if _, err := callTool(app, ctx, "tables_create", map[string]any{
+		"_project_id": "p1", "name": "shared", "scope": "global",
+		"columns": []any{map[string]any{"name": "value", "type": "text"}},
+	}); err == nil || !strings.Contains(err.Error(), "project") {
+		t.Fatalf("per-table global scope should be rejected, got %v", err)
+	}
+}
+
+func TestGlobalInstall_QuarantinesV010UnownedGlobalTables(t *testing.T) {
+	t.Setenv("APTEVA_PROJECT_ID", "")
+	ctx := tk.NewAppCtx(t, "apteva.yaml")
+	app := &App{}
 	mustCall(t, app, ctx, "tables_create", map[string]any{
-		"_project_id": "p1", "name": "private_rows",
+		"_project_id": "p1", "name": "orphaned",
 		"columns": []any{map[string]any{"name": "value", "type": "text"}},
 	})
-	mustCall(t, app, ctx, "tables_create", map[string]any{
-		"_project_id": "p1", "name": "shared_rows", "scope": "global",
-		"columns": []any{map[string]any{"name": "value", "type": "text"}},
-	})
-	mustCall(t, app, ctx, "rows_insert", map[string]any{
-		"_project_id": "p1", "table": "shared_rows",
-		"rows": []any{map[string]any{"value": "visible"}},
-	})
+	if _, err := ctx.AppDB().Exec(`UPDATE tables_meta SET project_id='', scope='global' WHERE name='orphaned'`); err != nil {
+		t.Fatal(err)
+	}
+	if tables := mustCall(t, app, ctx, "tables_list", map[string]any{"_project_id": "p1"})["tables"].([]map[string]any); len(tables) != 0 {
+		t.Fatalf("unowned v0.1.10 table should be quarantined, got %+v", tables)
+	}
+}
 
-	listed := mustCall(t, app, ctx, "tables_list", map[string]any{"_project_id": "p2"})
-	tables := listed["tables"].([]map[string]any)
-	if len(tables) != 1 || tables[0]["name"] != "shared_rows" {
-		t.Fatalf("p2 visible tables = %+v, want only shared_rows", tables)
+func TestProjectGateMigration_NormalizesOwnedLegacyTables(t *testing.T) {
+	ctx := newTestCtx(t)
+	app := &App{}
+	booksTable(t, app, ctx)
+	if _, err := ctx.AppDB().Exec(`UPDATE tables_meta SET scope='global' WHERE name='books'`); err != nil {
+		t.Fatal(err)
 	}
-	count := mustCall(t, app, ctx, "rows_count", map[string]any{"_project_id": "p2", "table": "shared_rows"})
-	if count["count"] != int64(1) {
-		t.Fatalf("shared count from p2 = %v", count["count"])
+	migration, err := os.ReadFile("migrations/003_project_gate_tables.sql")
+	if err != nil {
+		t.Fatal(err)
 	}
-	if _, err := callTool(app, ctx, "rows_count", map[string]any{"_project_id": "p2", "table": "private_rows"}); err == nil {
-		t.Fatal("p2 should not see p1 private table")
+	if _, err := ctx.AppDB().Exec(string(migration)); err != nil {
+		t.Fatal(err)
 	}
-	_ = p1
+	var scope, projectID string
+	if err := ctx.AppDB().QueryRow(`SELECT scope, project_id FROM tables_meta WHERE name='books'`).Scan(&scope, &projectID); err != nil {
+		t.Fatal(err)
+	}
+	if scope != "project" || projectID != "test-proj" {
+		t.Fatalf("normalized metadata scope=%q project_id=%q", scope, projectID)
+	}
 }
 
 func TestRowCountMetadata_TracksMutationsAndBackfillsLegacyRows(t *testing.T) {
