@@ -4,6 +4,7 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Card, CardHeader, StatusDot, StatusPill, DataList } from "@apteva/ui-kit";
+import Hls from "hls.js";
 
 interface AppEventEnvelope<T = unknown> {
   topic: string;
@@ -79,6 +80,9 @@ interface SessionRow {
   session_id: string;
   backend_session_id?: string;
   backend: "local" | "browserbase" | "steel" | string;
+  status?: "active" | "closed" | "reaped" | "failed" | "interrupted" | string;
+  recording_supported?: boolean;
+  recording_status?: "recording" | "processing" | "ready" | "unavailable" | "unsupported" | "failed" | string;
   context_id?: string;
   app_context_id?: string;
   context_name?: string;
@@ -93,8 +97,26 @@ interface SessionRow {
   tab_count?: number;
   opened_at: string;
   last_used_at: string;
+  closed_at?: string;
   width?: number;
   height?: number;
+}
+
+interface RecordingStream {
+  id: string;
+  start_ms?: number;
+  end_ms?: number;
+  playlist_url: string;
+}
+
+interface RecordingMetadata {
+  session_id: string;
+  backend: string;
+  status: "recording" | "processing" | "ready" | "unavailable" | "unsupported" | "failed" | string;
+  recording_supported: boolean;
+  streams: RecordingStream[];
+  message?: string;
+  error?: string;
 }
 
 interface BrowserTab {
@@ -138,8 +160,7 @@ interface SettingsResponse {
   error?: string;
 }
 
-interface ComputerEventData {
-  session_id?: string;
+interface ComputerEventData extends Partial<SessionRow> {
   id?: string;
   default_backend?: string;
   lock_backend?: boolean;
@@ -189,6 +210,7 @@ export default function ComputerPanel({ projectId }: NativePanelProps) {
   const [showOpen, setShowOpen] = useState(false);
   const [pendingClose, setPendingClose] = useState<string | null>(null);
   const [pendingContextDelete, setPendingContextDelete] = useState<string | null>(null);
+  const [closedSession, setClosedSession] = useState<SessionRow | null>(null);
 
   const refresh = useCallback(async () => {
     try {
@@ -229,6 +251,7 @@ export default function ComputerPanel({ projectId }: NativePanelProps) {
   useAppEvents<ComputerEventData>("computer", projectId, (ev) => {
     switch (ev.topic) {
       case "session.opened":
+        if (ev.data?.session_id && closedSession?.session_id === ev.data.session_id) setClosedSession(null);
         if (!selected && ev.data?.session_id) setSelected(ev.data.session_id);
         void refresh();
         break;
@@ -238,6 +261,32 @@ export default function ComputerPanel({ projectId }: NativePanelProps) {
         break;
       case "session.closed":
       case "session.reaped":
+        if (ev.data?.session_id) {
+          const active = rows.find((row) => row.session_id === ev.data.session_id);
+          if (active || selected === ev.data.session_id) {
+            setClosedSession({
+              ...(active ?? closedSession ?? ({} as SessionRow)),
+              ...ev.data,
+              session_id: ev.data.session_id,
+              backend: ev.data.backend ?? active?.backend ?? closedSession?.backend ?? "",
+              current_url: ev.data.current_url ?? active?.current_url ?? closedSession?.current_url ?? "",
+              opened_at: ev.data.opened_at ?? active?.opened_at ?? closedSession?.opened_at ?? ev.time,
+              last_used_at: ev.data.last_used_at ?? active?.last_used_at ?? closedSession?.last_used_at ?? ev.time,
+              status: ev.data.status ?? (ev.topic === "session.reaped" ? "reaped" : "closed"),
+              recording_status: ev.data.recording_status ?? "processing",
+            });
+            setSelected(ev.data.session_id);
+          }
+        }
+        void refresh();
+        break;
+      case "recording.ready":
+      case "recording.failed":
+        if (ev.data?.session_id && closedSession?.session_id === ev.data.session_id) {
+          setClosedSession((current) => current ? { ...current, recording_status: ev.data.recording_status } : current);
+        }
+        setEventPreviewTick((n) => n + 1);
+        break;
       case "context.created":
       case "context.updated":
       case "context.deleted":
@@ -249,13 +298,14 @@ export default function ComputerPanel({ projectId }: NativePanelProps) {
 
   useEffect(() => {
     if (!selected && rows.length > 0) setSelected(rows[0].session_id);
-    if (selected && !rows.some((r) => r.session_id === selected)) {
+    if (selected && !rows.some((r) => r.session_id === selected) && closedSession?.session_id !== selected) {
       setSelected(rows[0]?.session_id ?? null);
     }
-  }, [rows, selected]);
+  }, [rows, selected, closedSession]);
 
   const onClose = useCallback(
     async (id: string) => {
+      const active = rows.find((row) => row.session_id === id);
       const r = await fetch(appURL(`${SESSIONS_URL}/${encodeURIComponent(id)}`, projectId), {
         method: "DELETE",
         credentials: "include",
@@ -264,12 +314,22 @@ export default function ComputerPanel({ projectId }: NativePanelProps) {
         setErr(`close failed: HTTP ${r.status}`);
         return;
       }
+      const body = await r.json();
+      if (active) {
+        setClosedSession({
+          ...active,
+          status: body.status ?? "closed",
+          recording_status: body.recording_status ?? (active.recording_supported ? "processing" : "unsupported"),
+          closed_at: new Date().toISOString(),
+        });
+        setSelected(id);
+      }
       void refresh();
     },
-    [projectId, refresh],
+    [projectId, refresh, rows],
   );
 
-  const sel = rows.find((r) => r.session_id === selected) ?? null;
+  const sel = rows.find((r) => r.session_id === selected) ?? (closedSession?.session_id === selected ? closedSession : null);
   const closeTarget = rows.find((r) => r.session_id === pendingClose) ?? null;
   const contextDeleteTarget = contexts.find((c) => c.id === pendingContextDelete) ?? null;
 
@@ -857,12 +917,30 @@ function SessionDetail({
   const currentURL = session.current_url || "-";
   const viewport = `${session.width ?? 0} x ${session.height ?? 0}`;
   const providerLife = providerLifetimeLabel(session, now);
+  const isActive = !session.status || session.status === "active";
+
+  if (!isActive) {
+    return (
+      <RecordingSessionDetail
+        session={session}
+        projectId={projectId}
+        externalRefreshKey={externalRefreshKey}
+      />
+    );
+  }
 
   return (
     <Card fullWidth className="h-full min-h-0 flex flex-col overflow-hidden">
       <CardHeader
         title={host || "Session"}
-        right={<StatusPill variant="neutral" label={BACKEND_LABEL[session.backend] ?? session.backend} />}
+        right={
+          <div style={{ display: "flex", gap: "6px", alignItems: "center" }}>
+            {session.recording_supported && (
+              <StatusPill variant="neutral" label={recordingStatusLabel(session.recording_status ?? "recording")} />
+            )}
+            <StatusPill variant="neutral" label={BACKEND_LABEL[session.backend] ?? session.backend} />
+          </div>
+        }
       />
       <div
         style={{
@@ -1056,6 +1134,7 @@ function SessionDetail({
             { label: "Backend session", value: session.backend_session_id || "-" },
             { label: "App context", value: session.context_name || session.app_context_id || "-" },
             { label: "Provider context", value: session.context_id || "-" },
+            { label: "Recording", value: recordingStatusLabel(session.recording_status ?? (session.recording_supported ? "recording" : "unsupported")) },
             { label: "Persist changes", value: session.persist ? "yes" : "no" },
             { label: "Provider timeout", value: session.timeout_seconds ? formatDurationSeconds(session.timeout_seconds) : "provider default" },
             { label: "Provider expires", value: session.provider_expires_at ? `${providerLife} (${formatTime(session.provider_expires_at)})` : providerLife },
@@ -1067,6 +1146,180 @@ function SessionDetail({
         />
       </div>
     </Card>
+  );
+}
+
+function RecordingSessionDetail({
+  session,
+  projectId,
+  externalRefreshKey,
+}: {
+  session: SessionRow;
+  projectId?: string;
+  externalRefreshKey: number;
+}) {
+  const [metadata, setMetadata] = useState<RecordingMetadata | null>(null);
+  const [selectedStream, setSelectedStream] = useState("");
+  const [err, setErr] = useState<string | null>(null);
+
+  const refreshRecording = useCallback(async () => {
+    try {
+      const response = await fetch(
+        appURL(`${SESSIONS_URL}/${encodeURIComponent(session.session_id)}/recording`, projectId),
+        { credentials: "include" },
+      );
+      const body = (await response.json()) as RecordingMetadata;
+      if (!response.ok || body.error) throw new Error(body.error ?? `HTTP ${response.status}`);
+      setMetadata(body);
+      setSelectedStream((current) => {
+        if (body.streams.some((stream) => stream.id === current)) return current;
+        return body.streams[0]?.id ?? "";
+      });
+      setErr(null);
+    } catch (e: any) {
+      setErr(String(e?.message ?? e));
+    }
+  }, [projectId, session.session_id]);
+
+  useEffect(() => {
+    setMetadata(null);
+    setSelectedStream("");
+    setErr(null);
+    void refreshRecording();
+  }, [refreshRecording, externalRefreshKey]);
+
+  useEffect(() => {
+    const status = metadata?.status ?? session.recording_status;
+    if (status !== "processing" && status !== "recording") return;
+    const timer = window.setInterval(refreshRecording, POLL_MS);
+    return () => window.clearInterval(timer);
+  }, [metadata?.status, refreshRecording, session.recording_status]);
+
+  const status = metadata?.status ?? session.recording_status ?? (session.recording_supported ? "processing" : "unsupported");
+  const streams = metadata?.streams ?? [];
+  const stream = streams.find((item) => item.id === selectedStream) ?? streams[0];
+  const host = hostFor(session.current_url);
+
+  return (
+    <Card fullWidth className="h-full min-h-0 flex flex-col overflow-hidden">
+      <CardHeader
+        title={host || "Recording"}
+        right={
+          <div style={{ display: "flex", gap: "6px", alignItems: "center" }}>
+            <StatusPill variant="neutral" label={recordingStatusLabel(status)} />
+            <StatusPill variant="neutral" label={BACKEND_LABEL[session.backend] ?? session.backend} />
+          </div>
+        }
+      />
+      <div
+        style={{
+          flex: 1,
+          minHeight: 0,
+          padding: "0 16px 16px",
+          display: "grid",
+          gridTemplateRows: "minmax(360px, 1fr) auto",
+          gap: "12px",
+        }}
+      >
+        <div style={{ minHeight: 0, display: "flex", flexDirection: "column", gap: "8px" }}>
+          {streams.length > 1 && (
+            <div role="tablist" aria-label="Recording streams" style={{ display: "flex", gap: "4px", flexWrap: "wrap" }}>
+              {streams.map((item, index) => (
+                <button
+                  key={item.id}
+                  type="button"
+                  role="tab"
+                  aria-selected={item.id === stream?.id}
+                  onClick={() => setSelectedStream(item.id)}
+                  className={item.id === stream?.id ? "border-accent bg-bg-subtle text-text" : "border-border bg-bg text-text-muted"}
+                  style={{ borderWidth: "1px", borderStyle: "solid", borderRadius: "5px", padding: "5px 9px", fontSize: "12px", cursor: "pointer" }}
+                >
+                  Tab {index + 1}
+                </button>
+              ))}
+            </div>
+          )}
+          {status === "ready" && stream ? (
+            <RecordingPlayer
+              key={`${session.session_id}:${stream.id}`}
+              stream={stream}
+              width={session.width}
+              height={session.height}
+            />
+          ) : (
+            <div
+              className="border border-border bg-bg-subtle text-text-muted"
+              style={{ ...browserViewportStyle, display: "flex", alignItems: "center", justifyContent: "center", gap: "8px", fontSize: "13px" }}
+            >
+              {status === "processing" || status === "recording" ? <StatusDot variant="active" /> : <StatusDot variant={status === "failed" ? "error" : "muted"} />}
+              {err || metadata?.message || recordingStatusLabel(status)}
+            </div>
+          )}
+        </div>
+        <DataList
+          items={[
+            { label: "App session", value: session.session_id },
+            { label: "Backend session", value: session.backend_session_id || "-" },
+            { label: "Recording", value: recordingStatusLabel(status) },
+            { label: "Current URL", value: session.current_url || "-" },
+            { label: "Opened", value: formatTime(session.opened_at) },
+            { label: "Closed", value: session.closed_at ? formatTime(session.closed_at) : "-" },
+          ]}
+        />
+      </div>
+    </Card>
+  );
+}
+
+function RecordingPlayer({ stream, width, height }: { stream: RecordingStream; width?: number; height?: number }) {
+  const videoRef = useRef<HTMLVideoElement | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+
+  useEffect(() => {
+    const video = videoRef.current;
+    if (!video) return;
+    let hls: Hls | null = null;
+    setErr(null);
+
+    if (Hls.isSupported()) {
+      hls = new Hls({ enableWorker: true });
+      hls.loadSource(stream.playlist_url);
+      hls.attachMedia(video);
+      hls.on(Hls.Events.ERROR, (_event, data) => {
+        if (data.fatal) setErr(data.details || "Playback failed");
+      });
+    } else if (video.canPlayType("application/vnd.apple.mpegurl")) {
+      video.src = stream.playlist_url;
+      video.load();
+    } else {
+      setErr("HLS playback is unavailable in this browser");
+    }
+
+    return () => {
+      hls?.destroy();
+      video.removeAttribute("src");
+      video.load();
+    };
+  }, [stream.playlist_url]);
+
+  return (
+    <div
+      className="border border-border bg-black"
+      style={{
+        ...browserViewportStyle,
+        position: "relative",
+        aspectRatio: width && height ? `${width} / ${height}` : "2 / 1",
+      }}
+    >
+      <video
+        ref={videoRef}
+        controls
+        playsInline
+        preload="metadata"
+        style={{ width: "100%", height: "100%", display: "block", objectFit: "contain" }}
+      />
+      {err && <div className="text-text-muted" style={previewOverlayStyle}>{err}</div>}
+    </div>
   );
 }
 
@@ -1572,6 +1825,18 @@ function hostFor(raw: string): string {
     return new URL(raw).host;
   } catch {
     return raw || "-";
+  }
+}
+
+function recordingStatusLabel(status: string): string {
+  switch (status) {
+    case "recording": return "Recording";
+    case "processing": return "Processing recording";
+    case "ready": return "Recording ready";
+    case "unavailable": return "Recording unavailable";
+    case "unsupported": return "Recording unsupported";
+    case "failed": return "Recording failed";
+    default: return status || "Recording unavailable";
   }
 }
 

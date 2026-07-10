@@ -52,9 +52,10 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: computer
 display_name: Computer
-version: 0.7.45
+version: 0.7.46
 description: |
-  Watch and steer browser sessions. v0.7.45 adds opt-in structured Set-of-Mark targets in screenshot responses.
+  Watch, steer, and replay hosted browser sessions. v0.7.46 adds durable
+  Browserbase and Steel recording retrieval.
 scopes: [project, global]
 requires:
   permissions:
@@ -100,6 +101,8 @@ provides:
       description: "Capture a clean PNG of the session viewport. Args: session_id, annotate? (default false; set true for Set-of-Mark labels), include_som? (default false; returns structured SoM targets only when true)."
     - name: browser_extract
       description: "Infrastructure-only rendered DOM extraction for advanced browser integrations. General agents should usually prefer higher-level browsing tools instead of calling this directly. Args: session_id, formats?, max_chars?, readability?, wait_ms?. formats may include text, markdown, html, metadata, structured_data, json, links, images, regions."
+    - name: browser_recording
+      description: "Retrieve recording metadata for active or historical app-owned sessions. Browserbase and Steel return app-owned HLS playback URLs; other backends return status=unsupported. Args: session_id."
     - name: browser_close
       description: "Close a session opened by this app and release browser/provider resources. Use this when finished unless the user explicitly wants the session left open. Compatibility alias for browser_session(action=close)."
   ui_panels:
@@ -137,6 +140,9 @@ provides:
       payload:
         session_id: string
         backend: string
+        backend_session_id: string
+        recording_status: string
+        close_reason: string
         app_context_id: string
         context_name: string
         persist: boolean
@@ -145,6 +151,9 @@ provides:
       payload:
         session_id: string
         backend: string
+        backend_session_id: string
+        recording_status: string
+        close_reason: string
         idle_seconds: integer
         app_context_id: string
         context_name: string
@@ -160,6 +169,21 @@ provides:
         text_length: integer
         key: string
         current_url: string
+    - name: recording.ready
+      description: A hosted browser session recording became playable.
+      payload:
+        session_id: string
+        backend: string
+        backend_session_id: string
+        recording_status: string
+    - name: recording.failed
+      description: Hosted browser session recording retrieval failed.
+      payload:
+        session_id: string
+        backend: string
+        backend_session_id: string
+        recording_status: string
+        error: string
     - name: context.created
       description: An app-managed browser context was created or imported.
       payload:
@@ -218,6 +242,7 @@ var newBackend = backends.New
 const idleTTL = 30 * time.Minute
 const reapInterval = 5 * time.Minute
 const maxUploadBytes = 100 * 1024 * 1024
+const recordingProcessingWindow = 15 * time.Minute
 
 var sourceURLHTTPClient = http.DefaultClient
 var sourceURLIPv4HTTPClient = &http.Client{Transport: ipv4OnlyTransport()}
@@ -225,14 +250,16 @@ var sourceURLPublicDNSHTTPClient = &http.Client{Transport: publicDNSTransport()}
 
 // session is one open browser, owned by this sidecar.
 type session struct {
-	comp         backends.Computer
-	backend      string
-	appContextID string
-	contextName  string
-	persist      bool
-	timeout      int
-	openedAt     time.Time
-	lastUsed     time.Time
+	comp             backends.Computer
+	backend          string
+	backendSessionID string
+	appContextID     string
+	contextName      string
+	initialURL       string
+	persist          bool
+	timeout          int
+	openedAt         time.Time
+	lastUsed         time.Time
 }
 
 type reapedSession struct {
@@ -250,6 +277,7 @@ type reapedSession struct {
 	OpenedAt         time.Time
 	LastUsedAt       time.Time
 	Idle             time.Duration
+	sess             *session
 }
 
 // registry holds open sessions across all callers in this sidecar
@@ -289,8 +317,9 @@ func (r *registry) remove(id string) (*session, bool) {
 	return s, ok
 }
 
-// reapIdle closes and removes any session not touched within ttl.
-// Returns the ids it reaped so the caller can log them.
+// reapIdle removes sessions that have exceeded ttl. Closing and persistence
+// belong to the app lifecycle layer because provider Close may clear metadata
+// needed for historical recording lookup.
 func (r *registry) reapIdle(ttl time.Duration) []string {
 	reaped := r.reapIdleDetails(ttl)
 	ids := make([]string, 0, len(reaped))
@@ -323,7 +352,7 @@ func (r *registry) reapIdleDetails(ttl time.Duration) []reapedSession {
 		reaped = append(reaped, reapedSession{
 			ID:               entry.id,
 			Backend:          s.backend,
-			BackendSessionID: backendSessionID(s.comp),
+			BackendSessionID: sessionBackendID(s),
 			ContextID:        contextID(s.comp),
 			AppContextID:     s.appContextID,
 			ContextName:      s.contextName,
@@ -335,8 +364,8 @@ func (r *registry) reapIdleDetails(ttl time.Duration) []reapedSession {
 			OpenedAt:         s.openedAt,
 			LastUsedAt:       s.lastUsed,
 			Idle:             now.Sub(s.lastUsed),
+			sess:             s,
 		})
-		_ = s.comp.Close()
 	}
 	return reaped
 }
@@ -367,12 +396,16 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	}
 	a.reg = &registry{m: map[string]*session{}}
 	globalCtx = ctx
+	interrupted, err := dbInterruptActiveSessions(ctx.AppDB(), time.Now())
+	if err != nil {
+		return fmt.Errorf("interrupt orphaned computer sessions: %w", err)
+	}
 	go a.reaper(ctx)
-	ctx.Logger().Info("computer mounted", "tools", len(a.MCPTools()), "idle_ttl", idleTTL.String())
+	ctx.Logger().Info("computer mounted", "tools", len(a.MCPTools()), "idle_ttl", idleTTL.String(), "interrupted_sessions", interrupted)
 	return nil
 }
 
-func (a *App) OnUnmount(*sdk.AppCtx) error {
+func (a *App) OnUnmount(ctx *sdk.AppCtx) error {
 	// Best-effort close on shutdown. We don't lock for the whole sweep
 	// — we're shutting down, racing is fine.
 	if a.reg == nil {
@@ -382,8 +415,10 @@ func (a *App) OnUnmount(*sdk.AppCtx) error {
 	sessions := a.reg.m
 	a.reg.m = map[string]*session{}
 	a.reg.mu.Unlock()
-	for _, s := range sessions {
-		_ = s.comp.Close()
+	for id, s := range sessions {
+		if _, err := a.finalizeSession(ctx, id, s, "interrupted", "app_unmount", "session.closed"); err != nil && ctx != nil {
+			ctx.Logger().Warn("computer session shutdown failed", "session_id", id, "err", err.Error())
+		}
 	}
 	return nil
 }
@@ -413,6 +448,9 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Method: http.MethodPost, Pattern: "/sessions/{id}/tabs/{tab_id}/switch", Handler: a.handleSwitchTab},
 		{Method: http.MethodDelete, Pattern: "/sessions/{id}/tabs/{tab_id}", Handler: a.handleCloseTab},
 		{Method: http.MethodPost, Pattern: "/sessions/{id}/use", Handler: a.handleComputerUse},
+		{Method: http.MethodGet, Pattern: "/sessions/{id}/recording", Handler: a.handleRecordingMetadata},
+		{Method: http.MethodGet, Pattern: "/sessions/{id}/recording/{stream_id}", Handler: a.handleRecordingPlaylist},
+		{Method: http.MethodGet, Pattern: "/sessions/{id}/recording/{stream_id}/asset", Handler: a.handleRecordingAsset},
 		// /sessions/{id}/screenshot returns the raw PNG inline (not the
 		// base64-wrapped MCP-tool shape) so the panel's <img src> can
 		// poll it directly for a cheap "live" view.
@@ -624,6 +662,14 @@ func (a *App) MCPTools() []sdk.Tool {
 				"wait_ms":     map[string]any{"type": "integer", "description": "Optional wait before reading the DOM, useful for client-rendered pages."},
 			}, []string{"session_id"}),
 			Handler: a.toolBrowserExtract,
+		},
+		{
+			Name:        "browser_recording",
+			Description: "Retrieve provider-neutral playback metadata for an active or historical app-owned browser session. Browserbase and Steel recordings become playable after the session closes; recently closed sessions may return status=processing. Returns app-owned playlist URLs and never provider credentials or provider API URLs. Args: session_id.",
+			InputSchema: schemaObject(map[string]any{
+				"session_id": map[string]any{"type": "string", "description": "Durable app-owned br_* session id returned by browser_session(open)."},
+			}, []string{"session_id"}),
+			Handler: a.toolBrowserRecording,
 		},
 		{
 			Name:        "browser_close",
@@ -1137,11 +1183,11 @@ func (a *App) openBrowserSession(ctx *sdk.AppCtx, args map[string]any, resume bo
 		backend = rc.Backend
 	}
 
-	backendSessionID := firstNonEmpty(
+	requestedBackendSessionID := firstNonEmpty(
 		stringArg(args, "backend_session_id"),
 		stringArg(args, "provider_session_id"),
 	)
-	if resume && backendSessionID == "" {
+	if resume && requestedBackendSessionID == "" {
 		return nil, fmt.Errorf("backend_session_id required for provider attach; to continue saved browser state, call browser_session(action=\"open\", context_id=...) or context_name=...")
 	}
 
@@ -1164,7 +1210,7 @@ func (a *App) openBrowserSession(ctx *sdk.AppCtx, args map[string]any, resume bo
 		ContextID:     rc.ProviderContextID,
 		CreateContext: rc.CreateProviderOnOpen,
 		Persist:       rc.Persist,
-		SessionID:     backendSessionID,
+		SessionID:     requestedBackendSessionID,
 		Timeout:       intArg(args, "timeout"),
 		Proxy:         boolPtrArg(args, "proxy"),
 		ProxyCountry:  stringArg(args, "proxy_country"),
@@ -1172,8 +1218,8 @@ func (a *App) openBrowserSession(ctx *sdk.AppCtx, args map[string]any, resume bo
 	if opener, ok := comp.(backends.SessionOpener); ok {
 		if err := opener.OpenSession(openOpts); err != nil {
 			_ = comp.Close()
-			if resume && backendSessionID != "" {
-				return nil, providerAttachError(backend, backendSessionID, err)
+			if resume && requestedBackendSessionID != "" {
+				return nil, providerAttachError(backend, requestedBackendSessionID, err)
 			}
 			return nil, fmt.Errorf("OpenSession: %w", err)
 		}
@@ -1190,12 +1236,39 @@ func (a *App) openBrowserSession(ctx *sdk.AppCtx, args map[string]any, resume bo
 		}
 	}
 
+	id := newSessionID()
+	now := time.Now()
+	sess := &session{
+		comp:             comp,
+		backend:          backend,
+		backendSessionID: backendSessionID(comp),
+		appContextID:     rc.AppContextID,
+		contextName:      rc.ContextName,
+		initialURL:       openOpts.URL,
+		persist:          rc.Persist,
+		timeout:          intArg(args, "timeout"),
+		openedAt:         now,
+		lastUsed:         now,
+	}
+	if recordingSupported(backend) && sess.backendSessionID == "" && usingProductionBackendFactory() {
+		_ = comp.Close()
+		return nil, fmt.Errorf("backend %q did not return a provider session id", backend)
+	}
+	if ctx == nil || ctx.AppDB() == nil {
+		_ = comp.Close()
+		return nil, errors.New("computer session history is unavailable")
+	}
+	if err := dbPutSession(ctx.AppDB(), sessionRecord(id, sess, "active", "", nil)); err != nil {
+		_ = comp.Close()
+		return nil, err
+	}
+
 	if rc.AppContextID != "" {
 		providerID := contextID(comp)
 		if providerID != "" && providerID != rc.ProviderContextID && ctx != nil && ctx.AppDB() != nil {
 			updated, err := dbUpdateContext(ctx.AppDB(), rc.AppContextID, map[string]any{"provider_context_id": providerID})
 			if err != nil {
-				_ = comp.Close()
+				_, _ = a.finalizeSession(ctx, id, sess, "failed", "context_update_failed", "session.closed")
 				return nil, fmt.Errorf("update context provider id: %w", err)
 			}
 			rc.ProviderContextID = updated.ProviderContextID
@@ -1203,19 +1276,6 @@ func (a *App) openBrowserSession(ctx *sdk.AppCtx, args map[string]any, resume bo
 		if ctx != nil {
 			dbTouchContext(ctx.AppDB(), rc.AppContextID)
 		}
-	}
-
-	id := newSessionID()
-	now := time.Now()
-	sess := &session{
-		comp:         comp,
-		backend:      backend,
-		appContextID: rc.AppContextID,
-		contextName:  rc.ContextName,
-		persist:      rc.Persist,
-		timeout:      intArg(args, "timeout"),
-		openedAt:     now,
-		lastUsed:     now,
 	}
 	a.reg.put(id, sess)
 
@@ -1256,25 +1316,28 @@ func (a *App) resolveBackend(ctx *sdk.AppCtx, args map[string]any) (string, erro
 // reports. Kept tight: session_id + provenance + the URLs the
 // operator needs to identify or open the session.
 type sessionInfo struct {
-	SessionID         string             `json:"session_id"`
-	BackendSessionID  string             `json:"backend_session_id,omitempty"`
-	Backend           string             `json:"backend"`
-	ContextID         string             `json:"context_id,omitempty"`
-	AppContextID      string             `json:"app_context_id,omitempty"`
-	ContextName       string             `json:"context_name,omitempty"`
-	Persist           bool               `json:"persist"`
-	TimeoutSeconds    int                `json:"timeout_seconds,omitempty"`
-	ProviderExpiresAt string             `json:"provider_expires_at,omitempty"`
-	CurrentURL        string             `json:"current_url"`
-	DebugURL          string             `json:"debug_url,omitempty"`
-	StreamURL         string             `json:"stream_url,omitempty"`
-	ActiveTabID       string             `json:"active_tab_id,omitempty"`
-	Tabs              []backends.TabInfo `json:"tabs,omitempty"`
-	TabCount          int                `json:"tab_count,omitempty"`
-	Width             int                `json:"width"`
-	Height            int                `json:"height"`
-	OpenedAt          string             `json:"opened_at"`
-	LastUsedAt        string             `json:"last_used_at"`
+	SessionID          string             `json:"session_id"`
+	BackendSessionID   string             `json:"backend_session_id,omitempty"`
+	Backend            string             `json:"backend"`
+	Status             string             `json:"status"`
+	RecordingSupported bool               `json:"recording_supported"`
+	RecordingStatus    string             `json:"recording_status"`
+	ContextID          string             `json:"context_id,omitempty"`
+	AppContextID       string             `json:"app_context_id,omitempty"`
+	ContextName        string             `json:"context_name,omitempty"`
+	Persist            bool               `json:"persist"`
+	TimeoutSeconds     int                `json:"timeout_seconds,omitempty"`
+	ProviderExpiresAt  string             `json:"provider_expires_at,omitempty"`
+	CurrentURL         string             `json:"current_url"`
+	DebugURL           string             `json:"debug_url,omitempty"`
+	StreamURL          string             `json:"stream_url,omitempty"`
+	ActiveTabID        string             `json:"active_tab_id,omitempty"`
+	Tabs               []backends.TabInfo `json:"tabs,omitempty"`
+	TabCount           int                `json:"tab_count,omitempty"`
+	Width              int                `json:"width"`
+	Height             int                `json:"height"`
+	OpenedAt           string             `json:"opened_at"`
+	LastUsedAt         string             `json:"last_used_at"`
 }
 
 func (a *App) toolBrowserList(ctx *sdk.AppCtx, _ map[string]any) (any, error) {
@@ -1320,25 +1383,28 @@ func (a *App) sessionInfo(id string, s *session) sessionInfo {
 	}
 	tabs := tabsFor(s.comp)
 	return sessionInfo{
-		SessionID:         id,
-		BackendSessionID:  backendSessionID(s.comp),
-		Backend:           s.backend,
-		ContextID:         contextID(s.comp),
-		AppContextID:      s.appContextID,
-		ContextName:       s.contextName,
-		Persist:           s.persist,
-		TimeoutSeconds:    s.timeout,
-		ProviderExpiresAt: providerExpiresAt,
-		CurrentURL:        currentURL(s.comp),
-		DebugURL:          debugURL(s.comp),
-		StreamURL:         streamURL(s.comp),
-		ActiveTabID:       activeTabID(s.comp),
-		Tabs:              tabs,
-		TabCount:          len(tabs),
-		Width:             disp.Width,
-		Height:            disp.Height,
-		OpenedAt:          s.openedAt.UTC().Format(time.RFC3339),
-		LastUsedAt:        s.lastUsed.UTC().Format(time.RFC3339),
+		SessionID:          id,
+		BackendSessionID:   sessionBackendID(s),
+		Backend:            s.backend,
+		Status:             "active",
+		RecordingSupported: recordingSupported(s.backend),
+		RecordingStatus:    activeRecordingStatus(s.backend),
+		ContextID:          contextID(s.comp),
+		AppContextID:       s.appContextID,
+		ContextName:        s.contextName,
+		Persist:            s.persist,
+		TimeoutSeconds:     s.timeout,
+		ProviderExpiresAt:  providerExpiresAt,
+		CurrentURL:         currentURL(s.comp),
+		DebugURL:           debugURL(s.comp),
+		StreamURL:          streamURL(s.comp),
+		ActiveTabID:        activeTabID(s.comp),
+		Tabs:               tabs,
+		TabCount:           len(tabs),
+		Width:              disp.Width,
+		Height:             disp.Height,
+		OpenedAt:           s.openedAt.UTC().Format(time.RFC3339),
+		LastUsedAt:         s.lastUsed.UTC().Format(time.RFC3339),
 	}
 }
 
@@ -1348,6 +1414,9 @@ func (a *App) sessionOutput(id string, s *session) map[string]any {
 		"session_id":          info.SessionID,
 		"backend_session_id":  info.BackendSessionID,
 		"backend":             info.Backend,
+		"status":              info.Status,
+		"recording_supported": info.RecordingSupported,
+		"recording_status":    info.RecordingStatus,
 		"context_id":          info.ContextID,
 		"app_context_id":      info.AppContextID,
 		"context_name":        info.ContextName,
@@ -1687,10 +1756,14 @@ func (a *App) toolComputerUse(ctx *sdk.AppCtx, args map[string]any) (any, error)
 }
 
 func (a *App) closeUnhealthySession(ctx *sdk.AppCtx, id string, sess *session, action string, cause error) error {
-	payload := sessionUnhealthyEventPayload(id, sess, action, cause)
 	a.reg.remove(id)
-	_ = sess.comp.Close()
-	emitEvent(ctx, "session.closed", payload)
+	extra := map[string]any{"action": action}
+	if cause != nil {
+		extra["error"] = cause.Error()
+	}
+	if _, err := a.finalizeSession(ctx, id, sess, "failed", "session_unhealthy", "session.closed", extra); err != nil && ctx != nil {
+		ctx.Logger().Warn("persist unhealthy browser session", "session_id", id, "err", err.Error())
+	}
 	return computerUseFailure("session_unhealthy", id, sess, action,
 		"browser session is no longer usable",
 		reopenSessionRecoverHint(sess),
@@ -1722,14 +1795,16 @@ func (a *App) toolBrowserClose(ctx *sdk.AppCtx, args map[string]any) (any, error
 	if !ok {
 		return map[string]any{"closed": false}, nil
 	}
-	payload := a.sessionEventPayload(id, sess)
-	if err := sess.comp.Close(); err != nil {
-		if ctx != nil {
-			ctx.Logger().Warn("browser_close underlying Close error", "session_id", id, "err", err.Error())
-		}
+	row, err := a.finalizeSession(ctx, id, sess, "closed", "explicit_close", "session.closed")
+	if err != nil {
+		return nil, err
 	}
-	emitEvent(ctx, "session.closed", payload)
-	return map[string]any{"closed": true}, nil
+	return map[string]any{
+		"closed":           true,
+		"session_id":       id,
+		"status":           row.Status,
+		"recording_status": row.RecordingStatus,
+	}, nil
 }
 
 type tabFollowResult struct {
@@ -1969,7 +2044,11 @@ func (a *App) reaper(ctx *sdk.AppCtx) {
 func (a *App) reapIdleSessions(ctx *sdk.AppCtx, ttl time.Duration) []reapedSession {
 	rows := a.reg.reapIdleDetails(ttl)
 	for _, row := range rows {
-		emitEvent(ctx, "session.reaped", reapedSessionEventPayload(row))
+		if _, err := a.finalizeSession(ctx, row.ID, row.sess, "reaped", "idle_timeout", "session.reaped", map[string]any{
+			"idle_seconds": int(row.Idle.Seconds()),
+		}); err != nil && ctx != nil {
+			ctx.Logger().Warn("persist reaped browser session", "session_id", row.ID, "err", err.Error())
+		}
 	}
 	return rows
 }
@@ -1983,12 +2062,113 @@ func emitEvent(ctx *sdk.AppCtx, topic string, data map[string]any) {
 	ctx.Emit(topic, data)
 }
 
+func recordingSupported(backend string) bool {
+	return backend == "browserbase" || backend == "steel"
+}
+
+func activeRecordingStatus(backend string) string {
+	if recordingSupported(backend) {
+		return "recording"
+	}
+	return "unsupported"
+}
+
+func sessionBackendID(s *session) string {
+	if s == nil {
+		return ""
+	}
+	if s.backendSessionID != "" {
+		return s.backendSessionID
+	}
+	return backendSessionID(s.comp)
+}
+
+func sessionRecord(id string, s *session, status, closeReason string, closedAt *time.Time) *ComputerSession {
+	now := time.Now().UTC()
+	row := &ComputerSession{
+		ID:               id,
+		Backend:          s.backend,
+		BackendSessionID: sessionBackendID(s),
+		AppContextID:     s.appContextID,
+		ContextName:      s.contextName,
+		InitialURL:       s.initialURL,
+		CurrentURL:       currentURL(s.comp),
+		Status:           status,
+		CloseReason:      closeReason,
+		RecordingStatus:  activeRecordingStatus(s.backend),
+		OpenedAt:         s.openedAt.UTC().Format(time.RFC3339Nano),
+		UpdatedAt:        now.Format(time.RFC3339Nano),
+	}
+	if s.comp != nil {
+		display := s.comp.DisplaySize()
+		row.Width = display.Width
+		row.Height = display.Height
+	}
+	if closedAt != nil {
+		value := closedAt.UTC().Format(time.RFC3339Nano)
+		row.ClosedAt = &value
+		if recordingSupported(s.backend) {
+			row.RecordingStatus = "processing"
+		}
+	}
+	return row
+}
+
+func (a *App) finalizeSession(ctx *sdk.AppCtx, id string, s *session, status, closeReason, event string, extras ...map[string]any) (*ComputerSession, error) {
+	if s == nil {
+		return nil, fmt.Errorf("session %s is unavailable", id)
+	}
+	payload := a.sessionEventPayload(id, s)
+	active := sessionRecord(id, s, "active", "", nil)
+	var persistErr error
+	if ctx == nil || ctx.AppDB() == nil {
+		persistErr = errors.New("computer session history is unavailable")
+	} else {
+		persistErr = dbPutSession(ctx.AppDB(), active)
+	}
+	if err := s.comp.Close(); err != nil && ctx != nil {
+		ctx.Logger().Warn("browser_close underlying Close error", "session_id", id, "err", err.Error())
+	}
+	closedAt := time.Now().UTC()
+	row := *active
+	row.Status = status
+	row.CloseReason = closeReason
+	row.UpdatedAt = closedAt.Format(time.RFC3339Nano)
+	closedValue := closedAt.Format(time.RFC3339Nano)
+	row.ClosedAt = &closedValue
+	if recordingSupported(row.Backend) {
+		row.RecordingStatus = "processing"
+	} else {
+		row.RecordingStatus = "unsupported"
+	}
+	if ctx != nil && ctx.AppDB() != nil {
+		if err := dbPutSession(ctx.AppDB(), &row); err != nil {
+			persistErr = errors.Join(persistErr, err)
+		}
+	}
+	payload["status"] = row.Status
+	payload["close_reason"] = row.CloseReason
+	payload["recording_supported"] = recordingSupported(row.Backend)
+	payload["recording_status"] = row.RecordingStatus
+	payload["closed_at"] = closedValue
+	for _, extra := range extras {
+		for key, value := range extra {
+			payload[key] = value
+		}
+	}
+	emitEvent(ctx, event, payload)
+	return &row, persistErr
+}
+
 func (a *App) sessionEventPayload(id string, s *session) map[string]any {
 	info := a.sessionInfo(id, s)
 	return map[string]any{
 		"session_id":          info.SessionID,
 		"backend_session_id":  info.BackendSessionID,
 		"backend":             info.Backend,
+		"status":              info.Status,
+		"recording_supported": info.RecordingSupported,
+		"recording_status":    info.RecordingStatus,
 		"context_id":          info.ContextID,
 		"app_context_id":      info.AppContextID,
 		"context_name":        info.ContextName,

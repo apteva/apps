@@ -26,8 +26,8 @@ import (
 	"github.com/chromedp/chromedp"
 )
 
-// apiBase is the Steel REST API root.
-const apiBase = "https://api.steel.dev/v1"
+// apiBase is the Steel REST API root. Tests override this.
+var apiBase = "https://api.steel.dev/v1"
 
 // Options extends what New accepts beyond apiKey/display. All fields are
 // optional. Field names match Steel's POST /v1/sessions payload

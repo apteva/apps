@@ -2,10 +2,10 @@ schema: apteva-app/v1
 
 name: computer
 display_name: Computer
-version: 0.7.45
+version: 0.7.46
 description: |
-  Watch and steer browser sessions. v0.7.45 adds opt-in structured Set-of-Mark
-  targets in screenshot responses. v0.7.44 adds rendered DOM regions to browser_extract for smart screenshots.
+  Watch, steer, and replay hosted browser sessions. v0.7.46 adds durable
+  Browserbase and Steel recording retrieval.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/computer
@@ -154,6 +154,13 @@ provides:
         images, regions), max_chars?, readability?, wait_ms?. Returns rendered
         page text, markdown, metadata, structured data, links, images, DOM
         regions with rendered coordinates, and browser/session metadata.
+    - name: browser_recording
+      description: |
+        Retrieve provider-neutral playback metadata for an active or historical
+        app-owned browser session. Browserbase and Steel recordings become
+        playable after the session closes; recently closed sessions may return
+        status=processing. Returns app-owned playlist URLs and never provider
+        credentials or provider API URLs. Args: session_id.
     - name: browser_close
       description: |
         Close a session opened by this app and release browser/provider
@@ -275,6 +282,9 @@ provides:
       payload:
         session_id: string
         backend: string
+        backend_session_id: string
+        recording_status: string
+        close_reason: string
         app_context_id: string
         context_name: string
         persist: boolean
@@ -283,6 +293,9 @@ provides:
       payload:
         session_id: string
         backend: string
+        backend_session_id: string
+        recording_status: string
+        close_reason: string
         idle_seconds: integer
         app_context_id: string
         context_name: string
@@ -298,6 +311,21 @@ provides:
         text_length: integer
         key: string
         current_url: string
+    - name: recording.ready
+      description: A hosted browser session recording became playable.
+      payload:
+        session_id: string
+        backend: string
+        backend_session_id: string
+        recording_status: string
+    - name: recording.failed
+      description: Hosted browser session recording retrieval failed.
+      payload:
+        session_id: string
+        backend: string
+        backend_session_id: string
+        recording_status: string
+        error: string
     - name: context.created
       description: An app-managed browser context was created or imported.
       payload:

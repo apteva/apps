@@ -6,6 +6,7 @@ triggers:
   - computer_context_create
   - computer_context_list
   - computer_context_get
+  - browser_recording
   - dialog
   - modal
   - embed
@@ -71,6 +72,11 @@ Treat browser sessions like resources you open and close.
   still needs the same session.
 - For persisted contexts, closing is the clean handoff point for saving
   provider/browser state.
+- Browserbase and Steel record hosted sessions automatically. After closing,
+  call `browser_recording(session_id=...)`; retry while its status is
+  `processing`, then use the returned app-owned playlist URL when `ready`.
+- Local, Browser Engine, and service sessions currently return
+  `status="unsupported"` for recordings.
 
 ## Web-browsing patterns
 
