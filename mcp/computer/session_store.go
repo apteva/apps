@@ -64,14 +64,52 @@ func dbGetSession(db *sql.DB, id string) (*ComputerSession, error) {
 	if db == nil {
 		return nil, errors.New("computer session store is unavailable")
 	}
-	row := &ComputerSession{}
-	var appContextID, contextName, initialURL, currentURL, closeReason sql.NullString
-	var closedAt sql.NullString
-	err := db.QueryRow(`
+	return scanComputerSession(db.QueryRow(`
 		SELECT id, backend, backend_session_id, app_context_id, context_name,
 		       initial_url, current_url, width, height, status, close_reason,
 		       recording_status, opened_at, closed_at, updated_at
-		FROM computer_sessions WHERE id=?`, id).Scan(
+		FROM computer_sessions WHERE id=?`, id))
+}
+
+func dbListSessions(db *sql.DB, limit int) ([]*ComputerSession, error) {
+	if db == nil {
+		return nil, errors.New("computer session store is unavailable")
+	}
+	if limit <= 0 || limit > 500 {
+		limit = 100
+	}
+	rows, err := db.Query(`
+		SELECT id, backend, backend_session_id, app_context_id, context_name,
+		       initial_url, current_url, width, height, status, close_reason,
+		       recording_status, opened_at, closed_at, updated_at
+		FROM computer_sessions
+		ORDER BY opened_at DESC
+		LIMIT ?`, limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	out := make([]*ComputerSession, 0, limit)
+	for rows.Next() {
+		row, err := scanComputerSession(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, row)
+	}
+	return out, rows.Err()
+}
+
+type computerSessionScanner interface {
+	Scan(dest ...any) error
+}
+
+func scanComputerSession(scanner computerSessionScanner) (*ComputerSession, error) {
+	row := &ComputerSession{}
+	var appContextID, contextName, initialURL, currentURL, closeReason sql.NullString
+	var closedAt sql.NullString
+	err := scanner.Scan(
 		&row.ID, &row.Backend, &row.BackendSessionID, &appContextID, &contextName,
 		&initialURL, &currentURL, &row.Width, &row.Height, &row.Status, &closeReason,
 		&row.RecordingStatus, &row.OpenedAt, &closedAt, &row.UpdatedAt,

@@ -171,6 +171,46 @@ func TestBrowserRecordingStatusesAndReadyEvent(t *testing.T) {
 	}
 }
 
+func TestUISessionListIncludesHistoryWithoutChangingAgentList(t *testing.T) {
+	ctx := tk.NewAppCtx(t, "apteva.yaml")
+	now := time.Now().UTC()
+	app := &App{reg: &registry{m: map[string]*session{
+		"br_live": {
+			comp:     &historyFakeComp{sessionID: "provider-live", url: "https://live.test"},
+			backend:  "browserbase",
+			openedAt: now,
+			lastUsed: now,
+		},
+	}}}
+	liveStamp := now.Format(time.RFC3339Nano)
+	if err := dbPutSession(ctx.AppDB(), &ComputerSession{
+		ID: "br_live", Backend: "browserbase", BackendSessionID: "provider-live",
+		Status: "active", RecordingStatus: "recording", OpenedAt: liveStamp, UpdatedAt: liveStamp,
+	}); err != nil {
+		t.Fatalf("put active history: %v", err)
+	}
+	past := putRecordingHistory(t, ctx, "br_past", "browserbase", now.Add(-time.Minute))
+	past.RecordingStatus = "ready"
+	if err := dbPutSession(ctx.AppDB(), past); err != nil {
+		t.Fatalf("update past history: %v", err)
+	}
+
+	uiRows, err := app.listUISessions(ctx, 100)
+	if err != nil {
+		t.Fatalf("list UI sessions: %v", err)
+	}
+	if len(uiRows) != 2 || uiRows[0].SessionID != "br_live" || uiRows[1].SessionID != "br_past" {
+		t.Fatalf("UI sessions = %+v", uiRows)
+	}
+	if uiRows[1].Status != "closed" || uiRows[1].RecordingStatus != "ready" || uiRows[1].ClosedAt == "" {
+		t.Fatalf("past UI session = %+v", uiRows[1])
+	}
+	agentRows := app.listSessions()
+	if len(agentRows) != 1 || agentRows[0].SessionID != "br_live" {
+		t.Fatalf("agent sessions = %+v", agentRows)
+	}
+}
+
 func TestRecordingHTTPRoutesProxyPlaylistsWithoutCredentials(t *testing.T) {
 	previous := newReplayResolver
 	previousGlobal := globalCtx
@@ -183,9 +223,12 @@ func TestRecordingHTTPRoutesProxyPlaylistsWithoutCredentials(t *testing.T) {
 	globalCtx = ctx
 	app := &App{reg: &registry{m: map[string]*session{}}}
 	row := putRecordingHistory(t, ctx, "br_http", "browserbase", time.Now().Add(-time.Minute))
-	resolver := &fakeReplayResolver{
-		metadata: replay.Recording{Supported: true, Status: "ready", Streams: []replay.RecordingStream{{ID: "0"}}},
-		playlist: []byte("#EXTM3U\nhttps://cdn.browserbase.test/segment.ts?signature=signed\n"),
+	resolver := &fakeResourceReplayResolver{
+		fakeReplayResolver: fakeReplayResolver{
+			metadata: replay.Recording{Supported: true, Status: "ready", Streams: []replay.RecordingStream{{ID: "0"}}},
+			playlist: []byte("#EXTM3U\nhttps://cdn.browserbase.test/segment.ts?signature=signed\n"),
+		},
+		proxyContains: "cdn.browserbase.test",
 	}
 	newReplayResolver = func(*sdk.AppCtx, string) (replay.Resolver, error) { return resolver, nil }
 
@@ -202,7 +245,7 @@ func TestRecordingHTTPRoutesProxyPlaylistsWithoutCredentials(t *testing.T) {
 	if playlistResponse.Code != http.StatusOK || playlistResponse.Header().Get("Content-Type") != "application/vnd.apple.mpegurl" || playlistResponse.Header().Get("Cache-Control") != "private, no-store" {
 		t.Fatalf("playlist status=%d headers=%v body=%s", playlistResponse.Code, playlistResponse.Header(), playlistResponse.Body.String())
 	}
-	if strings.Contains(playlistResponse.Body.String(), "secret") || !strings.Contains(playlistResponse.Body.String(), "signature=signed") {
+	if strings.Contains(playlistResponse.Body.String(), "secret") || strings.Contains(playlistResponse.Body.String(), "cdn.browserbase.test") || !strings.Contains(playlistResponse.Body.String(), "/recording/0/asset?") {
 		t.Fatalf("playlist body = %s", playlistResponse.Body.String())
 	}
 }
@@ -219,7 +262,7 @@ func TestHTTPRoutePatternsRegister(t *testing.T) {
 }
 
 func TestRewriteAuthenticatedPlaylistUsesAppOwnedTokens(t *testing.T) {
-	resolver := &fakeResourceReplayResolver{fakeReplayResolver: fakeReplayResolver{}}
+	resolver := &fakeResourceReplayResolver{fakeReplayResolver: fakeReplayResolver{}, proxyContains: "api.steel.test"}
 	body, err := rewriteAuthenticatedPlaylist(
 		[]byte("#EXTM3U\nhttps://api.steel.test/v1/media/child.m3u8\n#EXT-X-KEY:METHOD=AES-128,URI=\"https://api.steel.test/v1/media/key\"\nhttps://cdn.steel.test/signed.ts\n"),
 		resolver,
@@ -320,10 +363,11 @@ func (f *fakeReplayResolver) Playlist(context.Context, string, string) ([]byte, 
 
 type fakeResourceReplayResolver struct {
 	fakeReplayResolver
+	proxyContains string
 }
 
 func (f *fakeResourceReplayResolver) SignResource(_ string, resourceURL string) (string, error) {
-	if strings.Contains(resourceURL, "api.steel.test") {
+	if strings.Contains(resourceURL, f.proxyContains) {
 		return "opaque-" + fmt.Sprint(len(resourceURL)), nil
 	}
 	return "", replay.ErrExternalResource

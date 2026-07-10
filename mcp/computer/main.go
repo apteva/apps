@@ -52,10 +52,10 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: computer
 display_name: Computer
-version: 0.7.46
+version: 0.7.47
 description: |
-  Watch, steer, and replay hosted browser sessions. v0.7.46 adds durable
-  Browserbase and Steel recording retrieval.
+  Watch, steer, and replay hosted browser sessions. v0.7.47 fixes recording
+  playback, restores past sessions in the UI, and enlarges the browser view.
 scopes: [project, global]
 requires:
   permissions:
@@ -1338,6 +1338,8 @@ type sessionInfo struct {
 	Height             int                `json:"height"`
 	OpenedAt           string             `json:"opened_at"`
 	LastUsedAt         string             `json:"last_used_at"`
+	ClosedAt           string             `json:"closed_at,omitempty"`
+	CloseReason        string             `json:"close_reason,omitempty"`
 }
 
 func (a *App) toolBrowserList(ctx *sdk.AppCtx, _ map[string]any) (any, error) {
@@ -1372,7 +1374,60 @@ func (a *App) listSessions() []sessionInfo {
 	for _, r := range rows {
 		out = append(out, a.sessionInfo(r.id, &session{comp: r.comp, backend: r.backend, appContextID: r.appContextID, contextName: r.contextName, persist: r.persist, timeout: r.timeout, openedAt: r.opened, lastUsed: r.used}))
 	}
+	sort.Slice(out, func(i, j int) bool { return out[i].OpenedAt > out[j].OpenedAt })
 	return out
+}
+
+func (a *App) listUISessions(ctx *sdk.AppCtx, limit int) ([]sessionInfo, error) {
+	active := a.listSessions()
+	if ctx == nil || ctx.AppDB() == nil {
+		return active, nil
+	}
+	history, err := dbListSessions(ctx.AppDB(), limit)
+	if err != nil {
+		return nil, err
+	}
+	seen := make(map[string]struct{}, len(active))
+	for _, row := range active {
+		seen[row.SessionID] = struct{}{}
+	}
+	out := make([]sessionInfo, 0, len(active)+len(history))
+	out = append(out, active...)
+	for _, row := range history {
+		if _, ok := seen[row.ID]; ok || row.Status == "active" {
+			continue
+		}
+		out = append(out, historicalSessionInfo(row))
+	}
+	return out, nil
+}
+
+func historicalSessionInfo(row *ComputerSession) sessionInfo {
+	currentURL := row.CurrentURL
+	if currentURL == "" {
+		currentURL = row.InitialURL
+	}
+	closedAt := ""
+	if row.ClosedAt != nil {
+		closedAt = *row.ClosedAt
+	}
+	return sessionInfo{
+		SessionID:          row.ID,
+		BackendSessionID:   row.BackendSessionID,
+		Backend:            row.Backend,
+		Status:             row.Status,
+		RecordingSupported: recordingSupported(row.Backend),
+		RecordingStatus:    row.RecordingStatus,
+		AppContextID:       row.AppContextID,
+		ContextName:        row.ContextName,
+		CurrentURL:         currentURL,
+		Width:              row.Width,
+		Height:             row.Height,
+		OpenedAt:           row.OpenedAt,
+		LastUsedAt:         row.UpdatedAt,
+		ClosedAt:           closedAt,
+		CloseReason:        row.CloseReason,
+	}
 }
 
 func (a *App) sessionInfo(id string, s *session) sessionInfo {
@@ -3474,9 +3529,13 @@ func (a *App) handleSettings(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (a *App) handleListSessions(w http.ResponseWriter, _ *http.Request) {
-	w.Header().Set("Content-Type", "application/json")
-	_ = json.NewEncoder(w).Encode(map[string]any{"sessions": a.listSessions()})
+func (a *App) handleListSessions(w http.ResponseWriter, r *http.Request) {
+	rows, err := a.listUISessions(appCtxForRequest(r, nil), 100)
+	if err != nil {
+		httpErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	writeJSON(w, map[string]any{"sessions": rows})
 }
 
 func (a *App) handleOpenSession(w http.ResponseWriter, r *http.Request) {

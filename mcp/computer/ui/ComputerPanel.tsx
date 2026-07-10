@@ -372,21 +372,8 @@ export default function ComputerPanel({ projectId }: NativePanelProps) {
   );
 
   return (
-    <div
-      className="bg-bg"
-      style={{
-        display: "grid",
-        gridTemplateColumns: "320px minmax(0, 1fr)",
-        gap: "12px",
-        width: "100%",
-        height: "100%",
-        minHeight: "680px",
-        minWidth: 0,
-        boxSizing: "border-box",
-        overflow: "hidden",
-        padding: "12px",
-      }}
-    >
+    <div className="computer-panel-layout bg-bg">
+      <style>{computerPanelLayoutCSS}</style>
       <BrowsersList
         rows={rows}
         err={err}
@@ -476,6 +463,9 @@ function BrowsersList({
   settings: ComputerSettings;
   onUpdateSettings: (patch: Partial<ComputerSettings>) => void;
 }) {
+  const activeRows = rows.filter((row) => !row.status || row.status === "active");
+  const pastRows = rows.filter((row) => row.status && row.status !== "active");
+
   return (
     <Card fullWidth className="overflow-hidden flex flex-col h-full min-h-0">
       <CardHeader
@@ -495,7 +485,7 @@ function BrowsersList({
             {err}
           </p>
         )}
-        {!err && rows.length === 0 && (
+        {!err && activeRows.length === 0 && (
           <div
             className="text-text-muted"
             style={{ fontSize: "12px", padding: "12px 4px", textAlign: "center" }}
@@ -507,7 +497,7 @@ function BrowsersList({
           </div>
         )}
         <ul style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
-          {rows.map((r) => (
+          {activeRows.map((r) => (
             <BrowserListItem
               key={r.session_id}
               row={r}
@@ -518,6 +508,27 @@ function BrowsersList({
             />
           ))}
         </ul>
+        {pastRows.length > 0 && (
+          <div className="border-t border-border" style={{ marginTop: "12px", paddingTop: "10px" }}>
+            <div
+              className="text-text-muted"
+              style={{ fontSize: "11px", fontWeight: 600, textTransform: "uppercase", marginBottom: "8px" }}
+            >
+              Past sessions
+            </div>
+            <ul style={{ display: "flex", flexDirection: "column", gap: "6px" }}>
+              {pastRows.map((row) => (
+                <BrowserListItem
+                  key={row.session_id}
+                  row={row}
+                  selected={row.session_id === selected}
+                  now={now}
+                  onSelect={() => onSelect(row.session_id)}
+                />
+              ))}
+            </ul>
+          </div>
+        )}
         <div className="border-t border-border" style={{ marginTop: "12px", paddingTop: "10px" }}>
           <div
             className="text-text-muted"
@@ -617,8 +628,9 @@ function BrowserListItem({
   selected: boolean;
   now: number;
   onSelect: () => void;
-  onClose: () => void;
+  onClose?: () => void;
 }) {
+  const isActive = !row.status || row.status === "active";
   const host = hostFor(row.current_url);
   const contextLabel = row.context_name || row.app_context_id || row.context_id || "";
   const openedAgo = relativeAge(row.opened_at, now);
@@ -664,25 +676,27 @@ function BrowserListItem({
             {host}
           </span>
           <div style={{ display: "flex", alignItems: "center", gap: "4px" }}>
-            <StatusPill variant="success" label="active" />
-            <button
-              onClick={(e) => {
-                e.stopPropagation();
-                onClose();
-              }}
-              title="Close session"
-              className="text-text-muted hover:text-text"
-              style={{
-                background: "transparent",
-                border: 0,
-                padding: "2px 4px",
-                borderRadius: "4px",
-                cursor: "pointer",
-                display: "inline-flex",
-              }}
-            >
-              <XIcon />
-            </button>
+            <StatusPill variant={isActive ? "success" : "neutral"} label={row.status || "active"} />
+            {isActive && onClose && (
+              <button
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onClose();
+                }}
+                title="Close session"
+                className="text-text-muted hover:text-text"
+                style={{
+                  background: "transparent",
+                  border: 0,
+                  padding: "2px 4px",
+                  borderRadius: "4px",
+                  cursor: "pointer",
+                  display: "inline-flex",
+                }}
+              >
+                <XIcon />
+              </button>
+            )}
           </div>
         </div>
         <div
@@ -731,17 +745,17 @@ function BrowserListItem({
             style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", minWidth: 0 }}
           >
             {contextLabel || "none"}
-            {contextLabel && row.persist === false ? " (read-only)" : ""}
+            {isActive && contextLabel && row.persist === false ? " (read-only)" : ""}
           </span>
-          <span>Last used</span>
-          <span title={formatTime(row.last_used_at)}>
-            {lastUsedAgo}
-            {viewport ? ` | ${viewport}` : ""}
-            {row.tab_count && row.tab_count > 1 ? ` | ${row.tab_count} tabs` : ""}
+          <span>{isActive ? "Last used" : "Closed"}</span>
+          <span title={formatTime(isActive ? row.last_used_at : row.closed_at || row.last_used_at)}>
+            {isActive ? lastUsedAgo : relativeAge(row.closed_at || row.last_used_at, now)}
+            {isActive && viewport ? ` | ${viewport}` : ""}
+            {isActive && row.tab_count && row.tab_count > 1 ? ` | ${row.tab_count} tabs` : ""}
           </span>
-          <span>Provider</span>
-          <span title={row.provider_expires_at ? formatTime(row.provider_expires_at) : "Provider default timeout"}>
-            {providerLife}
+          <span>{isActive ? "Provider" : "Recording"}</span>
+          <span title={isActive && row.provider_expires_at ? formatTime(row.provider_expires_at) : undefined}>
+            {isActive ? providerLife : recordingStatusLabel(row.recording_status ?? "unavailable")}
           </span>
         </div>
       </button>
@@ -946,9 +960,10 @@ function SessionDetail({
         style={{
           flex: 1,
           minHeight: 0,
+          overflowY: "auto",
           padding: "0 16px 16px",
-          display: "grid",
-          gridTemplateRows: "auto minmax(360px, 1fr) auto auto auto",
+          display: "flex",
+          flexDirection: "column",
           gap: "12px",
         }}
       >
@@ -993,9 +1008,9 @@ function SessionDetail({
           }}
         />
 
-        <div style={{ minHeight: 0 }}>
+        <div style={{ flex: "0 0 auto", minHeight: 0 }}>
           {session.stream_url && embedLive ? (
-            <div className="border border-border bg-bg-subtle" style={browserViewportStyle}>
+            <div className="border border-border bg-bg-subtle" style={browserViewportFrameStyle}>
               <iframe
                 src={session.stream_url}
                 title="Live browser stream"
@@ -1013,7 +1028,7 @@ function SessionDetail({
           )}
         </div>
 
-        <div style={{ display: "flex", gap: "8px", flexWrap: "wrap" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: "8px", flexWrap: "wrap", flex: "0 0 auto" }}>
           {session.stream_url && (
             <IconButton onClick={() => setEmbedLive((v) => !v)} title="Toggle stream">
               <MonitorIcon /> {embedLive ? "Snapshot" : "Stream"}
@@ -1040,14 +1055,14 @@ function SessionDetail({
 
         <div
           className="border border-border bg-bg-subtle"
-          style={{ borderRadius: "6px", padding: "10px", display: "grid", gap: "10px" }}
+          style={{ borderRadius: "6px", padding: "10px", display: "flex", flexDirection: "column", gap: "10px", flex: "0 0 auto" }}
         >
-          <div style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: "8px" }}>
+          <div style={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: "8px" }}>
             <input
               value={typeText}
               onChange={(e) => setTypeText(e.target.value)}
               className="border border-border bg-bg text-text"
-              style={inputStyle}
+              style={{ ...inputStyle, flex: "1 1 280px", minWidth: 0 }}
               placeholder="Text"
             />
             <IconButton
@@ -1058,12 +1073,12 @@ function SessionDetail({
               Type
             </IconButton>
           </div>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr auto auto auto auto auto auto", gap: "8px" }}>
+          <div style={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: "8px" }}>
             <input
               value={keyText}
               onChange={(e) => setKeyText(e.target.value)}
               className="border border-border bg-bg text-text"
-              style={inputStyle}
+              style={{ ...inputStyle, flex: "1 1 240px", minWidth: 0 }}
               placeholder="Key"
             />
             <IconButton disabled={!keyText || Boolean(busy)} onClick={() => sendUse("key", { key: keyText })} title="Send key">
@@ -1085,12 +1100,12 @@ function SessionDetail({
               Wait
             </IconButton>
           </div>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr auto auto", gap: "8px" }}>
+          <div style={{ display: "flex", alignItems: "center", flexWrap: "wrap", gap: "8px" }}>
             <input
               value={manualX}
               onChange={(e) => setManualX(e.target.value)}
               className="border border-border bg-bg text-text"
-              style={inputStyle}
+              style={{ ...inputStyle, flex: "1 1 180px", minWidth: 0 }}
               placeholder="X"
               inputMode="numeric"
             />
@@ -1098,7 +1113,7 @@ function SessionDetail({
               value={manualY}
               onChange={(e) => setManualY(e.target.value)}
               className="border border-border bg-bg text-text"
-              style={inputStyle}
+              style={{ ...inputStyle, flex: "1 1 180px", minWidth: 0 }}
               placeholder="Y"
               inputMode="numeric"
             />
@@ -1215,13 +1230,14 @@ function RecordingSessionDetail({
         style={{
           flex: 1,
           minHeight: 0,
+          overflowY: "auto",
           padding: "0 16px 16px",
-          display: "grid",
-          gridTemplateRows: "minmax(360px, 1fr) auto",
+          display: "flex",
+          flexDirection: "column",
           gap: "12px",
         }}
       >
-        <div style={{ minHeight: 0, display: "flex", flexDirection: "column", gap: "8px" }}>
+        <div style={{ flex: "0 0 auto", minHeight: 0, display: "flex", flexDirection: "column", gap: "8px" }}>
           {streams.length > 1 && (
             <div role="tablist" aria-label="Recording streams" style={{ display: "flex", gap: "4px", flexWrap: "wrap" }}>
               {streams.map((item, index) => (
@@ -1243,13 +1259,11 @@ function RecordingSessionDetail({
             <RecordingPlayer
               key={`${session.session_id}:${stream.id}`}
               stream={stream}
-              width={session.width}
-              height={session.height}
             />
           ) : (
             <div
               className="border border-border bg-bg-subtle text-text-muted"
-              style={{ ...browserViewportStyle, display: "flex", alignItems: "center", justifyContent: "center", gap: "8px", fontSize: "13px" }}
+              style={{ ...browserViewportFrameStyle, display: "flex", alignItems: "center", justifyContent: "center", gap: "8px", fontSize: "13px" }}
             >
               {status === "processing" || status === "recording" ? <StatusDot variant="active" /> : <StatusDot variant={status === "failed" ? "error" : "muted"} />}
               {err || metadata?.message || recordingStatusLabel(status)}
@@ -1271,7 +1285,7 @@ function RecordingSessionDetail({
   );
 }
 
-function RecordingPlayer({ stream, width, height }: { stream: RecordingStream; width?: number; height?: number }) {
+function RecordingPlayer({ stream }: { stream: RecordingStream }) {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const [err, setErr] = useState<string | null>(null);
 
@@ -1306,9 +1320,8 @@ function RecordingPlayer({ stream, width, height }: { stream: RecordingStream; w
     <div
       className="border border-border bg-black"
       style={{
-        ...browserViewportStyle,
+        ...browserViewportFrameStyle,
         position: "relative",
-        aspectRatio: width && height ? `${width} / ${height}` : "2 / 1",
       }}
     >
       <video
@@ -1368,7 +1381,7 @@ function InteractivePreview({
     <div
       className="border border-border bg-bg-subtle"
       style={{
-        ...browserViewportStyle,
+        ...browserViewportFrameStyle,
         position: "relative",
       }}
     >
@@ -1724,11 +1737,16 @@ function IconButton({
         display: "inline-flex",
         alignItems: "center",
         justifyContent: "center",
+        flex: "0 0 auto",
         gap: "6px",
+        height: "32px",
         padding: "6px 10px",
         borderRadius: "6px",
         fontSize: "13px",
         fontWeight: 500,
+        lineHeight: 1,
+        whiteSpace: "nowrap",
+        boxSizing: "border-box",
         cursor: disabled ? "not-allowed" : "pointer",
         opacity: disabled ? 0.55 : 1,
       }}
@@ -1786,20 +1804,55 @@ const inputStyle = {
 const linkButtonStyle = {
   display: "inline-flex",
   alignItems: "center",
+  justifyContent: "center",
+  flex: "0 0 auto",
   gap: "6px",
+  height: "32px",
   padding: "6px 10px",
   borderRadius: "6px",
   fontSize: "13px",
   fontWeight: 500,
+  lineHeight: 1,
+  whiteSpace: "nowrap",
+  boxSizing: "border-box",
 } as const;
 
 const browserViewportStyle = {
   width: "100%",
   height: "100%",
-  minHeight: "360px",
+  minHeight: 0,
   borderRadius: "6px",
   overflow: "hidden",
 } as const;
+
+const browserViewportFrameStyle = {
+  ...browserViewportStyle,
+  height: "clamp(480px, min(68vh, 50vw), 820px)",
+  minHeight: "480px",
+} as const;
+
+const computerPanelLayoutCSS = `
+  .computer-panel-layout {
+    display: grid;
+    grid-template-columns: minmax(260px, 300px) minmax(0, 1fr);
+    gap: 12px;
+    width: 100%;
+    height: 100%;
+    min-height: 720px;
+    min-width: 0;
+    box-sizing: border-box;
+    overflow: hidden;
+    padding: 12px;
+  }
+
+  @media (max-width: 900px) {
+    .computer-panel-layout {
+      grid-template-columns: minmax(0, 1fr);
+      height: auto;
+      overflow: visible;
+    }
+  }
+`;
 
 const actionStatusStyle = {
   minHeight: "16px",

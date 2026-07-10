@@ -2,10 +2,10 @@ schema: apteva-app/v1
 
 name: computer
 display_name: Computer
-version: 0.7.46
+version: 0.7.47
 description: |
-  Watch, steer, and replay hosted browser sessions. v0.7.46 adds durable
-  Browserbase and Steel recording retrieval.
+  Watch, steer, and replay hosted browser sessions. v0.7.47 fixes recording
+  playback, restores past sessions in the UI, and enlarges the browser view.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/computer
