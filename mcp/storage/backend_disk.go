@@ -64,6 +64,22 @@ func (d *diskBackend) Put(_ context.Context, key, _ string, r io.Reader, size in
 	return nil
 }
 
+// CommitTemp atomically promotes an already-written temporary file into the
+// blob tree. Resumable disk uploads hash while assembling, so using rename
+// here avoids rereading the complete upload merely to copy it into place.
+func (d *diskBackend) CommitTemp(tmpPath, key string) error {
+	abs := d.absPath(key)
+	if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpPath, abs); err == nil {
+		return nil
+	}
+	// STORAGE_UPLOADS_DIR and STORAGE_BLOBS_DIR may live on different
+	// filesystems. Preserve compatibility in that configuration.
+	return copyAndRemove(tmpPath, abs)
+}
+
 func (d *diskBackend) Delete(_ context.Context, key string) error {
 	abs := d.absPath(key)
 	if err := os.Remove(abs); err != nil && !os.IsNotExist(err) {

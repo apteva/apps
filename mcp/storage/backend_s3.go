@@ -36,7 +36,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 
@@ -46,9 +48,11 @@ import (
 )
 
 type s3Backend struct {
-	client *minio.Client
-	bucket string
-	region string
+	client        *minio.Client
+	bucket        string
+	region        string
+	partSize      uint64
+	uploadThreads uint
 }
 
 // newS3Backend reads the bound connection's credentials, resolves the
@@ -88,7 +92,12 @@ func newS3Backend(ctx *sdk.AppCtx, bound *sdk.BoundIntegration, bucket string) (
 	if err != nil {
 		return nil, fmt.Errorf("s3 backend: minio.New: %w", err)
 	}
-	return &s3Backend{client: client, bucket: bucket, region: resolved.region}, nil
+	partSizeMB := configUintClamped(ctx.Config().Get("s3_part_size_mb"), 16, 5, 128)
+	uploadThreads := configIntClamped(ctx.Config().Get("s3_upload_concurrency"), 4, 1, 8)
+	return &s3Backend{
+		client: client, bucket: bucket, region: resolved.region,
+		partSize: partSizeMB * 1024 * 1024, uploadThreads: uint(uploadThreads),
+	}, nil
 }
 
 // s3ResolvedConnection is the post-slug-resolution form of a bound
@@ -194,25 +203,11 @@ func (s *s3Backend) Put(ctx context.Context, key, contentType string, r io.Reade
 	}
 	// Tuning notes:
 	//
-	//   PartSize  — 32 MB. Larger parts mean fewer round trips, more
-	//               throughput per concurrent upload, and lower
-	//               total latency on R2 / S3 over residential links.
-	//               minio-go's default of ~16 MB is conservative for
-	//               small objects; storage handles uploads up to GBs
-	//               so 32 MB pays for itself the moment we cross the
-	//               5-MB single-PUT threshold. R2's max part size is
-	//               5 GB, AWS S3 is 5 GB — well within the cap.
-	//
-	//   NumThreads — 8 concurrent part uploads. Default 4 leaves
-	//               throughput on the table on anything faster than
-	//               ~50 Mbps. 8 saturates a typical residential up
-	//               without overshooting the connection budget.
-	//
-	// These are hints — minio-go falls back to a single PUT below
-	// the multipart threshold (5 MB) and won't spawn unnecessary
-	// goroutines for tiny payloads.
-	opts.PartSize = 32 * 1024 * 1024
-	opts.NumThreads = 8
+	// Defaults (16 MiB × 4 workers) bound per-upload buffer/connection
+	// pressure while retaining parallel multipart throughput. Operators
+	// can tune both within conservative clamps via install config.
+	opts.PartSize = s.partSize
+	opts.NumThreads = s.uploadThreads
 	// minio-go needs a known size for non-multipart uploads; -1 falls
 	// back to multipart with PartSize hints.
 	if size <= 0 {
@@ -293,6 +288,32 @@ func (s *s3Backend) PresignPut(ctx context.Context, key, contentType string, ttl
 	return u.String(), nil
 }
 
+func (s *s3Backend) PresignPutConstrained(ctx context.Context, key, contentType string, size int64, ttl time.Duration) (string, map[string]string, error) {
+	if ttl <= 0 {
+		ttl = time.Hour
+	}
+	if ttl > 7*24*time.Hour {
+		ttl = 7 * 24 * time.Hour
+	}
+	headers := http.Header{}
+	headers.Set("Content-Length", strconv.FormatInt(size, 10))
+	if contentType != "" {
+		headers.Set("Content-Type", contentType)
+	}
+	u, err := s.client.PresignHeader(ctx, http.MethodPut, s.bucket, key, ttl, url.Values{}, headers)
+	if err != nil {
+		return "", nil, fmt.Errorf("s3 constrained presign put %s: %w", key, err)
+	}
+	// Browsers set Content-Length automatically and forbid JavaScript from
+	// assigning it. Keep it in the signature, but don't tell clients to set
+	// the forbidden header explicitly.
+	outHeaders := map[string]string{}
+	if contentType != "" {
+		outHeaders["Content-Type"] = contentType
+	}
+	return u.String(), outHeaders, nil
+}
+
 // ─── small helpers ─────────────────────────────────────────────────
 
 func configBool(s string, def bool) bool {
@@ -303,6 +324,34 @@ func configBool(s string, def bool) bool {
 		return false
 	}
 	return def
+}
+
+func configIntClamped(raw string, def, min, max int) int {
+	n, err := strconv.Atoi(strings.TrimSpace(raw))
+	if err != nil || n == 0 {
+		n = def
+	}
+	if n < min {
+		return min
+	}
+	if n > max {
+		return max
+	}
+	return n
+}
+
+func configUintClamped(raw string, def, min, max uint64) uint64 {
+	n, err := strconv.ParseUint(strings.TrimSpace(raw), 10, 64)
+	if err != nil || n == 0 {
+		n = def
+	}
+	if n < min {
+		return min
+	}
+	if n > max {
+		return max
+	}
+	return n
 }
 
 // sanitiseFilename strips characters that would break a quoted

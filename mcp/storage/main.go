@@ -27,6 +27,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"mime"
 	"net/http"
 	"net/url"
 	"os"
@@ -588,11 +589,15 @@ func (a *App) toolUpload(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if b64 == "" {
 		return nil, errors.New("content_base64 required")
 	}
+	maxBytes := maxUploadBytes(ctx)
+	if int64(len(b64)) > maxUploadRequestBytes(maxBytes) {
+		return nil, fmt.Errorf("encoded upload exceeds max_upload_size_mb")
+	}
 	body, err := decodeUploadPayload(b64)
 	if err != nil {
 		return nil, err
 	}
-	if maxBytes := maxUploadBytes(ctx); int64(len(body)) > maxBytes {
+	if int64(len(body)) > maxBytes {
 		return nil, fmt.Errorf("upload exceeds max_upload_size_mb (%d bytes > %d)", len(body), maxBytes)
 	}
 	in := uploadInput{
@@ -965,9 +970,13 @@ func (a *App) toolFromURL(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if resp.StatusCode >= 400 {
 		return nil, fmt.Errorf("fetch %s: status %d", url, resp.StatusCode)
 	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, maxUploadBytes(ctx)))
+	maxBytes := maxUploadBytes(ctx)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBytes+1))
 	if err != nil {
 		return nil, err
+	}
+	if int64(len(body)) > maxBytes {
+		return nil, fmt.Errorf("remote response exceeds max_upload_size_mb (%d bytes > %d)", len(body), maxBytes)
 	}
 	name := strArg(args, "name")
 	if name == "" {
@@ -1300,12 +1309,10 @@ func (a *App) httpListOrSearch(w http.ResponseWriter, r *http.Request) {
 			httpErr(w, http.StatusBadRequest, "ids exceeds 500 — chunk and retry")
 			return
 		}
-		out := make([]*File, 0, len(ids))
-		for _, id := range ids {
-			f, err := dbGetByID(ctx.AppDB(), pid, id)
-			if err == nil && f != nil {
-				out = append(out, f)
-			}
+		out, err := dbGetByIDs(ctx.AppDB(), pid, ids)
+		if err != nil {
+			httpErr(w, http.StatusInternalServerError, err.Error())
+			return
 		}
 		httpJSON(w, map[string]any{"files": out})
 		return
@@ -1372,7 +1379,14 @@ func (a *App) httpUpload(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if err := r.ParseMultipartForm(maxUploadBytes(ctx)); err != nil {
+	maxBytes := maxUploadBytes(ctx)
+	// Bound the encoded request before parsing. JSON/base64 needs roughly
+	// 4/3 of the decoded file size; multipart needs a small allowance for
+	// boundaries and form fields. This is a request cap, not the file cap
+	// below, so a file exactly maxBytes remains valid.
+	r.Body = http.MaxBytesReader(w, r.Body, maxUploadRequestBytes(maxBytes))
+	mediaType, _, _ := mime.ParseMediaType(r.Header.Get("Content-Type"))
+	if mediaType != "multipart/form-data" {
 		// Fallback: JSON body with content_base64. Used by sibling
 		// apps like media that upload derivations (thumbnails,
 		// waveforms) via the HTTP path because building a multipart
@@ -1386,21 +1400,44 @@ func (a *App) httpUpload(w http.ResponseWriter, r *http.Request) {
 		// error even though the caller did pass project_id (just in
 		// the query string, not the body).
 		var body map[string]any
-		if jerr := json.NewDecoder(r.Body).Decode(&body); jerr == nil {
+		jerr := json.NewDecoder(r.Body).Decode(&body)
+		if jerr == nil {
 			if body == nil {
 				body = map[string]any{}
 			}
 			body["_project_id"] = pid
 			out, err := a.toolUpload(ctx, body)
 			if err != nil {
+				if strings.Contains(err.Error(), "exceeds max_upload_size_mb") {
+					httpErr(w, http.StatusRequestEntityTooLarge, err.Error())
+					return
+				}
 				httpErr(w, http.StatusBadRequest, err.Error())
 				return
 			}
 			httpJSON(w, out)
 			return
 		}
+		var maxErr *http.MaxBytesError
+		if errors.As(jerr, &maxErr) {
+			httpErr(w, http.StatusRequestEntityTooLarge, "upload request exceeds configured limit")
+			return
+		}
 		httpErr(w, http.StatusBadRequest, "expected multipart/form-data or JSON body")
 		return
+	}
+	// #nosec G120 -- r.Body is bounded by MaxBytesReader above.
+	if err := r.ParseMultipartForm(1 << 20); err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			httpErr(w, http.StatusRequestEntityTooLarge, "upload request exceeds configured limit")
+			return
+		}
+		httpErr(w, http.StatusBadRequest, "invalid multipart upload: "+err.Error())
+		return
+	}
+	if r.MultipartForm != nil {
+		defer r.MultipartForm.RemoveAll()
 	}
 	file, header, err := r.FormFile("file")
 	if err != nil {
@@ -1408,7 +1445,6 @@ func (a *App) httpUpload(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer file.Close()
-	maxBytes := maxUploadBytes(ctx)
 	body, err := io.ReadAll(io.LimitReader(file, maxBytes+1))
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
@@ -1756,26 +1792,77 @@ func dbFindBySHA(db *sql.DB, pid, hash string) (*File, error) {
 
 func dbGetByID(db *sql.DB, pid string, id int64) (*File, error) {
 	row := db.QueryRow(
-		`SELECT id, project_id, name, folder, storage_key, COALESCE(content_type,''),
-			COALESCE(size_bytes,0), COALESCE(sha256,''), COALESCE(uploaded_by,''),
-			COALESCE(source,''), COALESCE(tags,'[]'), visibility,
-			COALESCE(created_at,''), COALESCE(updated_at,'')
+		`SELECT `+fileSelectColumns+`
 		 FROM files WHERE id = ? AND project_id = ? AND deleted_at IS NULL`,
 		id, pid)
-	return scanFile(row)
+	return scanFile(row, true)
 }
 
 func dbGetByIDAnyProject(db *sql.DB, id int64) (*File, error) {
 	row := db.QueryRow(
-		`SELECT id, project_id, name, folder, storage_key, COALESCE(content_type,''),
-			COALESCE(size_bytes,0), COALESCE(sha256,''), COALESCE(uploaded_by,''),
-			COALESCE(source,''), COALESCE(tags,'[]'), visibility,
-			COALESCE(created_at,''), COALESCE(updated_at,'')
+		`SELECT `+fileSelectColumns+`
 		 FROM files WHERE id = ? AND deleted_at IS NULL`, id)
-	return scanFile(row)
+	return scanFile(row, true)
 }
 
-func scanFile(row *sql.Row) (*File, error) {
+// dbGetByIDs resolves a batch in one query while preserving the caller's ID
+// order (including duplicates) and the historical missing-row omission.
+func dbGetByIDs(db *sql.DB, pid string, ids []int64) ([]*File, error) {
+	if len(ids) == 0 {
+		return []*File{}, nil
+	}
+	unique := make(map[int64]struct{}, len(ids))
+	queryArgs := make([]any, 0, len(ids)+1)
+	queryArgs = append(queryArgs, pid)
+	placeholders := make([]string, 0, len(ids))
+	for _, id := range ids {
+		if _, ok := unique[id]; ok {
+			continue
+		}
+		unique[id] = struct{}{}
+		placeholders = append(placeholders, "?")
+		queryArgs = append(queryArgs, id)
+	}
+	q := `SELECT ` + fileSelectColumns + ` FROM files
+		WHERE project_id = ? AND deleted_at IS NULL AND id IN (` + strings.Join(placeholders, ",") + `)`
+	rows, err := db.Query(q, queryArgs...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	byID := make(map[int64]*File, len(unique))
+	for rows.Next() {
+		f, err := scanFile(rows, false)
+		if err != nil {
+			return nil, err
+		}
+		byID[f.ID] = f
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	out := make([]*File, 0, len(ids))
+	for _, id := range ids {
+		if f := byID[id]; f != nil {
+			out = append(out, populateFileURL(f))
+		}
+	}
+	return out, nil
+}
+
+const fileSelectColumns = `id, project_id, name, folder, storage_key,
+	COALESCE(content_type,''), COALESCE(size_bytes,0), COALESCE(sha256,''),
+	COALESCE(uploaded_by,''), COALESCE(source,''), COALESCE(tags,'[]'),
+	visibility, COALESCE(created_at,''), COALESCE(updated_at,'')`
+
+type fileRowScanner interface {
+	Scan(dest ...any) error
+}
+
+// scanFile accepts both *sql.Row and *sql.Rows. Bulk list/search paths
+// leave withURL=false until after permission filtering, avoiding CDN work
+// for rows the caller will never receive.
+func scanFile(row fileRowScanner, withURL bool) (*File, error) {
 	f := &File{}
 	var tagsRaw string
 	err := row.Scan(&f.ID, &f.ProjectID, &f.Name, &f.Folder, &f.StorageKey,
@@ -1797,8 +1884,17 @@ func scanFile(row *sql.Row) (*File, error) {
 	// URL shape is used regardless of visibility — public files just
 	// don't require auth at the platform layer (see the GET-app-route
 	// carve-out in authMiddleware).
-	f.URL = absoluteContentURL(globalCtx, f)
+	if withURL {
+		f.URL = absoluteContentURL(globalCtx, f)
+	}
 	return f, nil
+}
+
+func populateFileURL(f *File) *File {
+	if f != nil && f.URL == "" {
+		f.URL = absoluteContentURL(globalCtx, f)
+	}
+	return f
 }
 
 type searchOpts struct {
@@ -1807,6 +1903,14 @@ type searchOpts struct {
 }
 
 func dbSearch(db *sql.DB, pid string, opts searchOpts) ([]*File, error) {
+	return dbSearchFiltered(db, pid, opts, nil)
+}
+
+// dbSearchFiltered scans one SQL rowset and stops after opts.Limit accepted
+// rows. When allow is non-nil the SQL limit is intentionally omitted: applying
+// LIMIT before permission filtering can return an empty/short page even when
+// later matching rows are authorized.
+func dbSearchFiltered(db *sql.DB, pid string, opts searchOpts, allow func(*File) bool) ([]*File, error) {
 	where := []string{"project_id = ?", "deleted_at IS NULL"}
 	args := []any{pid}
 	if opts.Q != "" {
@@ -1838,63 +1942,93 @@ func dbSearch(db *sql.DB, pid string, opts searchOpts) ([]*File, error) {
 	if limit <= 0 {
 		limit = 50
 	}
-	q := `SELECT id FROM files WHERE ` + strings.Join(where, " AND ") +
-		` ORDER BY updated_at DESC LIMIT ?`
-	args = append(args, limit)
+	q := `SELECT ` + fileSelectColumns + ` FROM files WHERE ` + strings.Join(where, " AND ") +
+		` ORDER BY updated_at DESC`
+	if allow == nil {
+		q += ` LIMIT ?`
+		args = append(args, limit)
+	}
 	rows, err := db.Query(q, args...)
 	if err != nil {
 		return nil, err
 	}
-	ids := []int64{}
+	defer rows.Close()
+	out := make([]*File, 0, limit)
 	for rows.Next() {
-		var id int64
-		if err := rows.Scan(&id); err == nil {
-			ids = append(ids, id)
+		f, err := scanFile(rows, false)
+		if err != nil {
+			return nil, err
+		}
+		if allow != nil && !allow(f) {
+			continue
+		}
+		out = append(out, f)
+		if len(out) >= limit {
+			break
 		}
 	}
-	rows.Close()
-	out := []*File{}
-	for _, id := range ids {
-		f, err := dbGetByID(db, pid, id)
-		if err == nil && f != nil {
-			out = append(out, f)
-		}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for _, f := range out {
+		populateFileURL(f)
 	}
 	return out, nil
 }
 
 func dbListFolder(db *sql.DB, pid, folder string, recursive bool, limit int) ([]*File, error) {
+	return dbListFolderFiltered(db, pid, folder, recursive, limit, nil)
+}
+
+func dbListFolderFiltered(db *sql.DB, pid, folder string, recursive bool, limit int, allow func(*File) bool) ([]*File, error) {
 	folder = normaliseFolder(folder)
+	if limit <= 0 {
+		limit = 200
+	}
 	var rows *sql.Rows
 	var err error
 	if recursive {
-		rows, err = db.Query(
-			`SELECT id FROM files WHERE project_id = ? AND folder LIKE ?
-			 AND deleted_at IS NULL ORDER BY folder, name LIMIT ?`,
-			pid, folder+"%", limit)
+		q := `SELECT ` + fileSelectColumns + ` FROM files WHERE project_id = ? AND folder LIKE ?
+			 AND deleted_at IS NULL ORDER BY folder, name`
+		args := []any{pid, folder + "%"}
+		if allow == nil {
+			q += ` LIMIT ?`
+			args = append(args, limit)
+		}
+		rows, err = db.Query(q, args...)
 	} else {
-		rows, err = db.Query(
-			`SELECT id FROM files WHERE project_id = ? AND folder = ?
-			 AND deleted_at IS NULL ORDER BY name LIMIT ?`,
-			pid, folder, limit)
+		q := `SELECT ` + fileSelectColumns + ` FROM files WHERE project_id = ? AND folder = ?
+			 AND deleted_at IS NULL ORDER BY name`
+		args := []any{pid, folder}
+		if allow == nil {
+			q += ` LIMIT ?`
+			args = append(args, limit)
+		}
+		rows, err = db.Query(q, args...)
 	}
 	if err != nil {
 		return nil, err
 	}
-	ids := []int64{}
+	defer rows.Close()
+	out := make([]*File, 0, limit)
 	for rows.Next() {
-		var id int64
-		if err := rows.Scan(&id); err == nil {
-			ids = append(ids, id)
+		f, err := scanFile(rows, false)
+		if err != nil {
+			return nil, err
+		}
+		if allow != nil && !allow(f) {
+			continue
+		}
+		out = append(out, f)
+		if len(out) >= limit {
+			break
 		}
 	}
-	rows.Close()
-	out := []*File{}
-	for _, id := range ids {
-		f, err := dbGetByID(db, pid, id)
-		if err == nil && f != nil {
-			out = append(out, f)
-		}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	for _, f := range out {
+		populateFileURL(f)
 	}
 	return out, nil
 }
@@ -2024,65 +2158,47 @@ func dbUpdate(db *sql.DB, pid string, id int64, updates map[string]any) (*File, 
 func dbRenameFolder(db *sql.DB, pid, from, to string) ([]*File, error) {
 	from = normaliseFolder(from)
 	to = normaliseFolder(to)
-	rows, err := db.Query(
-		`SELECT id, folder FROM files
-		 WHERE project_id = ? AND deleted_at IS NULL
-		   AND (folder = ? OR substr(folder, 1, ?) = ?)
-		 ORDER BY id`,
-		pid, from, len(from), from,
-	)
-	if err != nil {
-		return nil, err
-	}
-	type moveRow struct {
-		id     int64
-		folder string
-	}
-	moves := []moveRow{}
-	for rows.Next() {
-		var row moveRow
-		if err := rows.Scan(&row.id, &row.folder); err != nil {
-			rows.Close()
-			return nil, err
-		}
-		moves = append(moves, row)
-	}
-	if err := rows.Close(); err != nil {
-		return nil, err
-	}
-	if len(moves) == 0 {
-		return []*File{}, nil
-	}
-
 	tx, err := db.Begin()
 	if err != nil {
 		return nil, err
 	}
 	defer tx.Rollback()
-	for _, row := range moves {
-		suffix := strings.TrimPrefix(row.folder, from)
-		next := to + suffix
-		if _, err := tx.Exec(
-			`UPDATE files SET folder = ?, updated_at = CURRENT_TIMESTAMP
-			 WHERE id = ? AND project_id = ?`,
-			next, row.id, pid,
-		); err != nil {
+	// One set-based update replaces the former SELECT + one UPDATE per
+	// file + one reload per file. RETURNING preserves the response/event
+	// payload without additional database round trips.
+	rows, err := tx.Query(
+		`UPDATE files
+		 SET folder = ? || substr(folder, ?), updated_at = CURRENT_TIMESTAMP
+		 WHERE project_id = ? AND deleted_at IS NULL
+		   AND (folder = ? OR substr(folder, 1, ?) = ?)
+		 RETURNING `+fileSelectColumns,
+		to, len(from)+1, pid, from, len(from), from,
+	)
+	if err != nil {
+		return nil, err
+	}
+	out := []*File{}
+	for rows.Next() {
+		f, err := scanFile(rows, false)
+		if err != nil {
+			rows.Close()
 			return nil, err
 		}
+		out = append(out, f)
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
 	}
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
-
-	out := make([]*File, 0, len(moves))
-	for _, row := range moves {
-		f, err := dbGetByID(db, pid, row.id)
-		if err != nil {
-			return nil, err
-		}
-		if f != nil {
-			out = append(out, f)
-		}
+	sort.Slice(out, func(i, j int) bool { return out[i].ID < out[j].ID })
+	for _, f := range out {
+		populateFileURL(f)
 	}
 	return out, nil
 }
@@ -2300,11 +2416,27 @@ func maxUploadBytes(ctx *sdk.AppCtx) int64 {
 	if v == "" {
 		return 100 * 1024 * 1024
 	}
-	mb, _ := strconv.Atoi(v)
+	mb, _ := strconv.ParseInt(v, 10, 64)
 	if mb <= 0 {
 		mb = 100
 	}
-	return int64(mb) * 1024 * 1024
+	const maxInt64 = int64(^uint64(0) >> 1)
+	if mb > maxInt64/(1024*1024) {
+		return maxInt64
+	}
+	return mb * 1024 * 1024
+}
+
+// maxUploadRequestBytes caps the encoded HTTP request. Base64 JSON is
+// ~4/3 the decoded payload size; one MiB leaves ample room for JSON keys,
+// multipart boundaries, filenames, tags, and other small form fields.
+func maxUploadRequestBytes(maxFileBytes int64) int64 {
+	const overhead = int64(1 << 20)
+	const maxInt64 = int64(^uint64(0) >> 1)
+	if maxFileBytes >= (maxInt64-overhead)/4*3 {
+		return maxInt64
+	}
+	return ((maxFileBytes + 2) / 3 * 4) + overhead
 }
 
 func callerLabel() string {

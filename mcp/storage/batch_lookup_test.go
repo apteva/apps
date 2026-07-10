@@ -63,6 +63,19 @@ func TestListByIDs_SilentlyDropsMissing(t *testing.T) {
 	}
 }
 
+func TestListByIDs_PreservesOrderAndDuplicates(t *testing.T) {
+	ctx := newTestCtx(t)
+	a := mustUpload(t, ctx, "a.txt", "/", "A")
+	b := mustUpload(t, ctx, "b.txt", "/", "B")
+	out, err := dbGetByIDs(ctx.AppDB(), "test-proj", []int64{b.ID, a.ID, b.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(out) != 3 || out[0].ID != b.ID || out[1].ID != a.ID || out[2].ID != b.ID {
+		t.Fatalf("batch order changed: got ids [%d %d %d]", out[0].ID, out[1].ID, out[2].ID)
+	}
+}
+
 func TestListByIDs_EmptyIDsParsedSafely(t *testing.T) {
 	// Trailing/inner commas, whitespace, garbage — all silently dropped.
 	got := parseIDList(" 1,, ,2 ,abc, ,3,")

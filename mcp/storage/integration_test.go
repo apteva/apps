@@ -7,6 +7,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"testing"
@@ -54,6 +55,10 @@ func TestSidecar_UploadDownloadRoundtrip(t *testing.T) {
 	// the sidecar's withTokenAuth expects.
 	req, _ := http.NewRequest("GET", sc.URL()+"/files/"+itoa(id)+"/content", nil)
 	req.Header.Set("Authorization", "Bearer "+sc.Token())
+	// In production apteva-server injects this after authenticating the
+	// browser/app token. Tier 2 bypasses that proxy, so mirror the trusted
+	// identity signal explicitly.
+	req.Header.Set("X-User-ID", "1")
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		t.Fatal(err)
@@ -114,7 +119,8 @@ func TestSidecar_SignedURL(t *testing.T) {
 	}
 
 	// Anonymous fetch (no Authorization) — should succeed via signature.
-	resp, err := http.Get(sc.URL() + signedPath)
+	directURL := sidecarContentURL(t, sc.URL(), signedPath)
+	resp, err := http.Get(directURL)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -124,14 +130,31 @@ func TestSidecar_SignedURL(t *testing.T) {
 	}
 
 	// Tamper with the sig — should fail.
-	tampered := strings.Replace(signedPath, "sig=", "sig=00", 1)
-	resp2, _ := http.Get(sc.URL() + tampered)
+	tampered := strings.Replace(directURL, "sig=", "sig=00", 1)
+	resp2, _ := http.Get(tampered)
 	if resp2 != nil {
 		defer resp2.Body.Close()
 		if resp2.StatusCode != http.StatusForbidden {
 			t.Errorf("tampered sig status=%d, want 403", resp2.StatusCode)
 		}
 	}
+}
+
+func sidecarContentURL(t *testing.T, sidecarBase, minted string) string {
+	t.Helper()
+	u, err := url.Parse(minted)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := u.EscapedPath()
+	path = strings.TrimPrefix(path, "/api/apps/storage")
+	if path == "" || !strings.HasPrefix(path, "/") {
+		t.Fatalf("unexpected minted storage URL: %q", minted)
+	}
+	if u.RawQuery != "" {
+		path += "?" + u.RawQuery
+	}
+	return strings.TrimRight(sidecarBase, "/") + path
 }
 
 func TestSidecar_DedupeMCP(t *testing.T) {

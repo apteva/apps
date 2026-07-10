@@ -15,7 +15,7 @@ import (
 // withCaller stamps a Caller onto a ctx for the *Ctx tool variants.
 func withCaller(grants ...sdk.Grant) context.Context {
 	c := &sdk.Caller{
-		AgentID:    7,
+		AgentID:       7,
 		DefaultEffect: "deny",
 		Grants:        grants,
 		Resources: []sdk.ResourceDecl{
@@ -109,6 +109,34 @@ func TestScope_FilesList_Recursive_FiltersToScope(t *testing.T) {
 	}
 }
 
+func TestScope_SearchAppliesLimitAfterPermissionFiltering(t *testing.T) {
+	ctx := newTestCtx(t)
+	unauthorized1 := mustUpload(t, ctx, "secret-1", "/salaries/", "x")
+	unauthorized2 := mustUpload(t, ctx, "secret-2", "/salaries/", "x")
+	authorized1 := mustUpload(t, ctx, "invoice-1", "/invoices/", "x")
+	authorized2 := mustUpload(t, ctx, "invoice-2", "/invoices/", "x")
+	// Make unauthorized rows the first rows the SQL ordering encounters.
+	_, _ = ctx.AppDB().Exec(`UPDATE files SET updated_at='2030-01-01 00:00:00' WHERE id IN (?, ?)`, unauthorized1.ID, unauthorized2.ID)
+	_, _ = ctx.AppDB().Exec(`UPDATE files SET updated_at='2020-01-01 00:00:00' WHERE id IN (?, ?)`, authorized1.ID, authorized2.ID)
+
+	callCtx := withCaller(sdk.Grant{
+		Effect: "allow", Permission: "files.read", Resource: "folder/invoices/**",
+	})
+	out, err := (&App{}).toolSearchCtx(callCtx, ctx, map[string]any{"limit": 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	files := out.(map[string]any)["files"].([]*File)
+	if len(files) != 2 {
+		t.Fatalf("authorized page length = %d, want 2: %+v", len(files), files)
+	}
+	for _, f := range files {
+		if f.Folder != "/invoices/" {
+			t.Fatalf("unauthorized row leaked: %+v", f)
+		}
+	}
+}
+
 // files_get on an out-of-scope file returns Forbidden — this is the
 // confused-deputy guard for id-based reads.
 func TestScope_FilesGet_OutOfScope_Forbidden(t *testing.T) {
@@ -189,7 +217,7 @@ func TestScope_DefaultAllowEmptyGrants_SeesEverything(t *testing.T) {
 
 	app := &App{}
 	c := &sdk.Caller{
-		AgentID:    7,
+		AgentID:       7,
 		DefaultEffect: "allow",
 		// no grants
 		Resources: []sdk.ResourceDecl{

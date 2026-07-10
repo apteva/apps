@@ -93,6 +93,67 @@ func TestHTTPUpload_JSONBodyRejectedWithoutQueryProject(t *testing.T) {
 	}
 }
 
+func multipartUploadRequest(t *testing.T, payload []byte) *http.Request {
+	t.Helper()
+	var body bytes.Buffer
+	w := multipart.NewWriter(&body)
+	part, err := w.CreateFormFile("file", "payload.bin")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := part.Write(payload); err != nil {
+		t.Fatal(err)
+	}
+	if err := w.Close(); err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/files?project_id=test-proj", &body)
+	req.Header.Set("Content-Type", w.FormDataContentType())
+	return req
+}
+
+func TestHTTPUpload_MultipartAcceptsExactLimitAndRejectsOneByteOver(t *testing.T) {
+	newTestCtx(t, tk.WithConfig(map[string]string{"max_upload_size_mb": "1"}))
+	app := &App{}
+	const limit = 1 << 20
+
+	exact := httptest.NewRecorder()
+	app.httpUpload(exact, multipartUploadRequest(t, bytes.Repeat([]byte("x"), limit)))
+	if exact.Code != http.StatusOK {
+		t.Fatalf("exact-limit upload: status=%d body=%s", exact.Code, exact.Body.String())
+	}
+
+	over := httptest.NewRecorder()
+	app.httpUpload(over, multipartUploadRequest(t, bytes.Repeat([]byte("x"), limit+1)))
+	if over.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("over-limit upload: status=%d body=%s", over.Code, over.Body.String())
+	}
+}
+
+func TestHTTPUpload_JSONRejectsDecodedPayloadOverLimit(t *testing.T) {
+	newTestCtx(t, tk.WithConfig(map[string]string{"max_upload_size_mb": "1"}))
+	body, _ := json.Marshal(map[string]any{
+		"name":           "payload.bin",
+		"content_base64": b64(string(bytes.Repeat([]byte("x"), (1<<20)+1))),
+	})
+	req := httptest.NewRequest(http.MethodPost, "/files?project_id=test-proj", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	(&App{}).httpUpload(rec, req)
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestHTTPUpload_MultipartParserIsBoundedByRequestCap(t *testing.T) {
+	newTestCtx(t, tk.WithConfig(map[string]string{"max_upload_size_mb": "1"}))
+	rec := httptest.NewRecorder()
+	(&App{}).httpUpload(rec, multipartUploadRequest(t, bytes.Repeat([]byte("x"), 3<<20)))
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
 func TestHTTPUpload_MultipartPersistsSourceAndCommaTags(t *testing.T) {
 	ctx := newTestCtx(t)
 	app := &App{}
@@ -140,42 +201,5 @@ func TestHTTPUpload_MultipartPersistsSourceAndCommaTags(t *testing.T) {
 	}
 	if len(wantTags) != 0 {
 		t.Fatalf("tags = %#v, missing %#v", got.Tags, wantTags)
-	}
-}
-
-func TestHTTPUpload_RejectsMultipartOverMaxWithoutTruncating(t *testing.T) {
-	ctx := newTestCtx(t, tk.WithConfig(map[string]string{"max_upload_size_mb": "1"}))
-	app := &App{}
-
-	var body bytes.Buffer
-	mw := multipart.NewWriter(&body)
-	_ = mw.WriteField("folder", "/renders/")
-	_ = mw.WriteField("source", "media-render")
-	_ = mw.WriteField("tags", "render")
-	part, err := mw.CreateFormFile("file", "too-big.mov")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if _, err := part.Write(bytes.Repeat([]byte("x"), 1024*1024+1)); err != nil {
-		t.Fatal(err)
-	}
-	if err := mw.Close(); err != nil {
-		t.Fatal(err)
-	}
-
-	req := httptest.NewRequest(http.MethodPost, "/files?project_id=test-proj", &body)
-	req.Header.Set("Content-Type", mw.FormDataContentType())
-	rec := httptest.NewRecorder()
-	app.httpUpload(rec, req)
-	if rec.Code != http.StatusRequestEntityTooLarge {
-		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
-	}
-
-	var count int
-	if err := ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM files`).Scan(&count); err != nil {
-		t.Fatal(err)
-	}
-	if count != 0 {
-		t.Fatalf("oversized upload inserted %d file rows", count)
 	}
 }

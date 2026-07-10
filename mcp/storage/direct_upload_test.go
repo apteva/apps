@@ -30,6 +30,7 @@ import (
 type fakeS3Backend struct {
 	objects   map[string][]byte
 	presigned int32 // count of PresignPut calls — assert clients hit it
+	putSize   int64
 }
 
 func newFakeS3() *fakeS3Backend { return &fakeS3Backend{objects: map[string][]byte{}} }
@@ -71,6 +72,14 @@ func (f *fakeS3Backend) PresignGet(_ context.Context, key, _, _ string, _ time.D
 func (f *fakeS3Backend) PresignPut(_ context.Context, key, _ string, _ time.Duration) (string, error) {
 	atomic.AddInt32(&f.presigned, 1)
 	return "https://fake-s3.example.com/" + key + "?presigned=put", nil
+}
+
+func (f *fakeS3Backend) PresignPutConstrained(_ context.Context, key, contentType string, size int64, _ time.Duration) (string, map[string]string, error) {
+	atomic.AddInt32(&f.presigned, 1)
+	f.putSize = size
+	return "https://fake-s3.example.com/" + key + "?presigned=put", map[string]string{
+		"Content-Type": contentType,
+	}, nil
 }
 
 // ─── tests ─────────────────────────────────────────────────────────
@@ -131,6 +140,33 @@ func TestDirectUpload_S3InitReturnsPresignedURL(t *testing.T) {
 	}
 	if atomic.LoadInt32(&stub.presigned) != 1 {
 		t.Errorf("PresignPut should have been called once, got %d", stub.presigned)
+	}
+	if stub.putSize != 1234 {
+		t.Errorf("signed content length = %d, want 1234", stub.putSize)
+	}
+}
+
+func TestDirectUpload_InitEnforcesConfiguredLimitBeforePresign(t *testing.T) {
+	dir := t.TempDir()
+	ctx := tk.NewAppCtx(t, "apteva.yaml",
+		tk.WithProjectID("p1"),
+		tk.WithEnv("STORAGE_BLOBS_DIR", dir),
+		tk.WithConfig(map[string]string{"max_upload_size_mb": "1"}),
+	)
+	globalCtx = ctx
+	stub := newFakeS3()
+	globalBackend = stub
+	t.Cleanup(func() { globalBackend = nil })
+
+	body := strings.NewReader(`{"name":"huge.bin","size_bytes":1048577,"sha256":"` + repeat64Hex("a") + `"}`)
+	req := httptest.NewRequest(http.MethodPost, "/files/init?project_id=p1", body)
+	rec := httptest.NewRecorder()
+	(&App{}).handleFilesItem(rec, req)
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if atomic.LoadInt32(&stub.presigned) != 0 {
+		t.Fatal("oversize direct upload must not mint a presigned URL")
 	}
 }
 
@@ -313,6 +349,11 @@ func TestDirectUpload_FinalizeMissingObject(t *testing.T) {
 
 func TestSweepStalePendingUploads_DeletesExpired(t *testing.T) {
 	ctx := newTestStorageCtx(t)
+	stub := newFakeS3()
+	globalBackend = stub
+	t.Cleanup(func() { globalBackend = nil })
+	stub.objects[objectKey("sha", "k")] = []byte("stale")
+	stub.objects[objectKey("sha", "k2")] = []byte("fresh")
 
 	// Insert one expired + one fresh row.
 	if _, err := ctx.AppDB().Exec(`
@@ -338,6 +379,12 @@ func TestSweepStalePendingUploads_DeletesExpired(t *testing.T) {
 	}
 	if stale != 0 {
 		t.Error("STALE should be reaped")
+	}
+	if _, ok := stub.objects[objectKey("sha", "k")]; ok {
+		t.Error("expired presigned object should be removed")
+	}
+	if _, ok := stub.objects[objectKey("sha", "k2")]; !ok {
+		t.Error("fresh presigned object should remain")
 	}
 }
 

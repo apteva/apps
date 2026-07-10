@@ -79,6 +79,13 @@ type Backend interface {
 	PresignPut(ctx context.Context, key, contentType string, ttl time.Duration) (string, error)
 }
 
+// constrainedPutPresigner is an optional S3 capability used by direct
+// uploads. Signing Content-Length prevents a presigned URL declared for a
+// small upload from being used to store an arbitrarily large object.
+type constrainedPutPresigner interface {
+	PresignPutConstrained(ctx context.Context, key, contentType string, size int64, ttl time.Duration) (string, map[string]string, error)
+}
+
 // objectKey is the canonical key for a blob: <sha256[:2]>/<storage_key>.
 // Both backends agree on this — disk treats it as a relative path
 // under blobsDir, S3 uses it as the object key in the bucket.

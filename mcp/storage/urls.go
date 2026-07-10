@@ -37,6 +37,8 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"sync"
+	"time"
 
 	sdk "github.com/apteva/app-sdk"
 )
@@ -79,7 +81,7 @@ func envPublicURL() string {
 func absoluteContentURL(ctx *sdk.AppCtx, f *File) string {
 	rel := buildContentURL(f) // "/files/<id>/content"
 	if f != nil && f.Visibility == "public" {
-		if u := cdnURLFor(ctx, rel); u != "" {
+		if u := cdnURLFor(ctx, rel, f.ProjectID); u != "" {
 			return u
 		}
 	}
@@ -98,7 +100,21 @@ func absoluteContentURL(ctx *sdk.AppCtx, f *File) string {
 //
 // All failure modes fall through to publicBase silently — a cdn
 // outage must never produce broken file URLs.
-func cdnURLFor(ctx *sdk.AppCtx, rel string) string {
+type cdnBaseEntry struct {
+	base      string
+	expiresAt time.Time
+}
+
+var cdnBases = struct {
+	sync.Mutex
+	entries map[string]cdnBaseEntry
+}{entries: map[string]cdnBaseEntry{}}
+
+// cdnURLFor resolves the zone once, then assembles file URLs locally. The CDN
+// tool itself performs a DB lookup per call even though every file in a zone
+// shares the same scheme + hostname. Caching the root URL removes a cross-app
+// HTTP call per public row while keeping zone changes fresh within one minute.
+func cdnURLFor(ctx *sdk.AppCtx, rel, projectID string) string {
 	if ctx == nil || ctx.PlatformAPI() == nil {
 		return ""
 	}
@@ -106,20 +122,48 @@ func cdnURLFor(ctx *sdk.AppCtx, rel string) string {
 	if zoneID == 0 {
 		return ""
 	}
+	pid := strings.TrimSpace(os.Getenv("APTEVA_PROJECT_ID"))
+	if pid == "" {
+		pid = strings.TrimSpace(projectID)
+	}
+	cacheKey := fmt.Sprintf("%d\x00%s", zoneID, pid)
+	now := time.Now()
+	cdnBases.Lock()
+	defer cdnBases.Unlock()
+	if cached, ok := cdnBases.entries[cacheKey]; ok && now.Before(cached.expiresAt) {
+		if cached.base == "" {
+			return ""
+		}
+		return cached.base + rel
+	}
+
 	args := map[string]any{
 		"zone_id":     zoneID,
-		"origin_path": rel,
+		"origin_path": "/",
 	}
-	if pid := strings.TrimSpace(os.Getenv("APTEVA_PROJECT_ID")); pid != "" {
+	if pid != "" {
 		args["_project_id"] = pid
 	}
 	var out struct {
 		URL string `json:"url"`
 	}
 	if err := ctx.PlatformAPI().CallAppResult("cdn", "cdn_url_for", args, &out); err != nil {
+		cdnBases.entries[cacheKey] = cdnBaseEntry{expiresAt: now.Add(5 * time.Second)}
 		return ""
 	}
-	return out.URL
+	base := strings.TrimRight(out.URL, "/")
+	if base == "" {
+		cdnBases.entries[cacheKey] = cdnBaseEntry{expiresAt: now.Add(5 * time.Second)}
+		return ""
+	}
+	cdnBases.entries[cacheKey] = cdnBaseEntry{base: base, expiresAt: now.Add(time.Minute)}
+	return base + rel
+}
+
+func resetCDNBaseCache() {
+	cdnBases.Lock()
+	cdnBases.entries = map[string]cdnBaseEntry{}
+	cdnBases.Unlock()
 }
 
 // cdnZoneForInstall reads the cdn_zone_id install config; "0" or

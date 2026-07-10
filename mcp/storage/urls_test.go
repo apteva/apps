@@ -12,6 +12,7 @@ package main
 import (
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	sdk "github.com/apteva/app-sdk"
@@ -21,6 +22,23 @@ import (
 type urlPlatform struct {
 	tk.BasePlatformClient
 	publicURL string
+}
+
+type cdnCountingPlatform struct {
+	tk.BasePlatformClient
+	calls int
+}
+
+func (p *cdnCountingPlatform) CallAppResult(app, tool string, input map[string]any, out any) error {
+	p.calls++
+	if app != "cdn" || tool != "cdn_url_for" || input["origin_path"] != "/" {
+		return nil
+	}
+	dst := out.(*struct {
+		URL string `json:"url"`
+	})
+	dst.URL = "https://cdn.example.com/"
+	return nil
 }
 
 func (p *urlPlatform) PlatformInfo() (*sdk.PlatformInfo, error) {
@@ -66,6 +84,27 @@ func TestAbsoluteContentURL_PrefersPlatformInfo(t *testing.T) {
 	want := "https://fresh.example.com/api/apps/storage/files/7/content/x.png"
 	if got != want {
 		t.Fatalf("got %q, want %q", got, want)
+	}
+}
+
+func TestAbsoluteContentURL_CachesCDNBaseAcrossFileRows(t *testing.T) {
+	resetCDNBaseCache()
+	t.Cleanup(resetCDNBaseCache)
+	platform := &cdnCountingPlatform{}
+	ctx := newTestCtx(t,
+		tk.WithPlatform(platform),
+		tk.WithConfig(map[string]string{"cdn_zone_id": "7"}),
+	)
+	for i := int64(1); i <= 100; i++ {
+		got := absoluteContentURL(ctx, &File{
+			ID: i, Name: "x.png", ProjectID: "test-proj", Visibility: "public",
+		})
+		if !strings.HasPrefix(got, "https://cdn.example.com/files/") {
+			t.Fatalf("file %d URL = %q", i, got)
+		}
+	}
+	if platform.calls != 1 {
+		t.Fatalf("cdn_url_for calls = %d, want 1 for 100 files", platform.calls)
 	}
 }
 

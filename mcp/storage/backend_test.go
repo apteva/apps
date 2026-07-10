@@ -129,7 +129,7 @@ func TestDiskBackend_AbsPathDoesNotEscapeRoot(t *testing.T) {
 
 func TestSanitiseFilename_StripsTroublesomeBytes(t *testing.T) {
 	cases := map[string]string{
-		`hello.mp4`:       `hello.mp4`,
+		`hello.mp4`:        `hello.mp4`,
 		"weird\"quote.mp4": "weird_quote.mp4",
 		"slash\\name.mp4":  "slash_name.mp4",
 		"newline\nhere":    "newline_here",
@@ -153,6 +153,32 @@ func TestConfigBool_Defaults(t *testing.T) {
 	}
 	if configBool("garbage", false) {
 		t.Error("unknown should fall to default")
+	}
+}
+
+func TestConfigIntClamped(t *testing.T) {
+	for _, tc := range []struct {
+		raw  string
+		want int
+	}{
+		{"", 4}, {"bad", 4}, {"0", 4}, {"1", 1}, {"6", 6}, {"99", 8}, {"-2", 1},
+	} {
+		if got := configIntClamped(tc.raw, 4, 1, 8); got != tc.want {
+			t.Errorf("configIntClamped(%q)=%d want %d", tc.raw, got, tc.want)
+		}
+	}
+}
+
+func TestConfigUintClamped(t *testing.T) {
+	for _, tc := range []struct {
+		raw  string
+		want uint64
+	}{
+		{"", 16}, {"bad", 16}, {"0", 16}, {"5", 5}, {"64", 64}, {"999", 128},
+	} {
+		if got := configUintClamped(tc.raw, 16, 5, 128); got != tc.want {
+			t.Errorf("configUintClamped(%q)=%d want %d", tc.raw, got, tc.want)
+		}
 	}
 }
 

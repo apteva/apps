@@ -22,6 +22,7 @@ package main
 // upload won't be accepted.
 
 import (
+	"context"
 	"crypto/rand"
 	"database/sql"
 	"encoding/hex"
@@ -110,6 +111,11 @@ func (a *App) handleDirectInit(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusBadRequest, "size_bytes must be > 0")
 		return
 	}
+	if maxBytes := maxUploadBytes(ctx); body.SizeBytes > maxBytes {
+		httpErr(w, http.StatusRequestEntityTooLarge,
+			fmt.Sprintf("upload exceeds max_upload_size_mb (%d bytes > %d)", body.SizeBytes, maxBytes))
+		return
+	}
 	if body.SHA256 == "" {
 		// Client trust is the whole point of the direct path; if we
 		// can't dedup or verify on finalize, the protocol is moot.
@@ -140,7 +146,15 @@ func (a *App) handleDirectInit(w http.ResponseWriter, r *http.Request) {
 	storageKey := uuid.NewString() + extOf(body.Name, body.ContentType)
 	objKey := objectKey(body.SHA256, storageKey)
 
-	uploadURL, err := be.PresignPut(r.Context(), objKey, body.ContentType, presignTTL)
+	effectiveContentType := ifEmpty(body.ContentType, "application/octet-stream")
+	uploadHeaders := map[string]string{"Content-Type": effectiveContentType}
+	var uploadURL string
+	if constrained, ok := be.(constrainedPutPresigner); ok {
+		uploadURL, uploadHeaders, err = constrained.PresignPutConstrained(
+			r.Context(), objKey, effectiveContentType, body.SizeBytes, presignTTL)
+	} else {
+		uploadURL, err = be.PresignPut(r.Context(), objKey, body.ContentType, presignTTL)
+	}
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, "presign: "+err.Error())
 		return
@@ -165,13 +179,7 @@ func (a *App) handleDirectInit(w http.ResponseWriter, r *http.Request) {
 		"upload_id":  uploadID,
 		"upload_url": uploadURL,
 		"method":     "PUT",
-		"headers": map[string]any{
-			// Soft hint — clients should set Content-Type so the
-			// resulting object is browser-friendly. Backends that
-			// require this in the signature (B2 in some modes) will
-			// reject mismatches.
-			"Content-Type": ifEmpty(body.ContentType, "application/octet-stream"),
-		},
+		"headers":    uploadHeaders,
 		"expires_at": expiresAt,
 		"mode":       "presigned",
 	})
@@ -330,23 +338,55 @@ func ifEmpty(v, fallback string) string {
 
 // ─── stale session sweeper ────────────────────────────────────────
 
-// sweepStalePendingUploads runs hourly alongside sweepStaleUploads.
-// Removes pending_uploads rows whose presigned URL is past expiry —
-// the bucket-side object (if any) is left as a tombstone for a
-// future bucket-lifecycle rule to reap. Doing the cleanup ourselves
-// would mean N Stat+Delete round-trips per sweep; bucket lifecycle
-// is the right tool for that job.
+// sweepStalePendingUploads runs alongside sweepStaleUploads. It removes both
+// the pending row and any object uploaded through the expired presigned URL;
+// otherwise abandoned direct uploads become permanent, unmetered bucket
+// usage. Failed deletes retain their row so the next sweep retries.
 func sweepStalePendingUploads(ctx *sdk.AppCtx) {
 	if ctx == nil || ctx.AppDB() == nil {
 		return
 	}
 	now := time.Now().Unix()
-	res, err := ctx.AppDB().Exec(`DELETE FROM pending_uploads WHERE expires_at < ?`, now)
+	rows, err := ctx.AppDB().Query(
+		`SELECT upload_id, storage_key, declared_sha256
+		 FROM pending_uploads WHERE expires_at < ?`, now)
 	if err != nil {
 		ctx.Logger().Warn("pending uploads sweep failed", "err", err)
 		return
 	}
-	if n, _ := res.RowsAffected(); n > 0 {
-		ctx.Logger().Info("pending uploads swept", "rows", n)
+	type staleUpload struct{ id, storageKey, sha256 string }
+	var stale []staleUpload
+	for rows.Next() {
+		var item staleUpload
+		if err := rows.Scan(&item.id, &item.storageKey, &item.sha256); err != nil {
+			rows.Close()
+			ctx.Logger().Warn("pending uploads sweep scan failed", "err", err)
+			return
+		}
+		stale = append(stale, item)
+	}
+	if err := rows.Close(); err != nil {
+		ctx.Logger().Warn("pending uploads sweep close failed", "err", err)
+		return
+	}
+	removed := 0
+	for _, item := range stale {
+		key := objectKey(item.sha256, item.storageKey)
+		if err := backend().Delete(context.Background(), key); err != nil {
+			ctx.Logger().Warn("pending upload object cleanup failed", "upload_id", item.id, "key", key, "err", err)
+			continue
+		}
+		res, err := ctx.AppDB().Exec(
+			`DELETE FROM pending_uploads WHERE upload_id = ? AND expires_at < ?`, item.id, now)
+		if err != nil {
+			ctx.Logger().Warn("pending upload row cleanup failed", "upload_id", item.id, "err", err)
+			continue
+		}
+		if n, _ := res.RowsAffected(); n > 0 {
+			removed++
+		}
+	}
+	if removed > 0 {
+		ctx.Logger().Info("pending uploads swept", "rows", removed)
 	}
 }

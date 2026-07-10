@@ -294,6 +294,11 @@ func (a *App) handleUploadInit(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusBadRequest, "size must be > 0")
 		return
 	}
+	if maxBytes := maxUploadBytes(ctx); body.Size > maxBytes {
+		httpErr(w, http.StatusRequestEntityTooLarge,
+			fmt.Sprintf("upload exceeds max_upload_size_mb (%d bytes > %d)", body.Size, maxBytes))
+		return
+	}
 
 	// Pre-dedup short-circuit.
 	if body.SHA256 != "" {
@@ -417,6 +422,9 @@ func (a *App) handleUploadStatus(w http.ResponseWriter, r *http.Request, id stri
 func (a *App) handleUploadPart(w http.ResponseWriter, r *http.Request, id string, n int) {
 	ctx := globalCtx
 	uid, _ := strconv.ParseInt(r.Header.Get("X-User-ID"), 10, 64)
+	mu := sessionLock(id)
+	mu.Lock()
+	defer mu.Unlock()
 
 	dir := uploadSessionDir(ctx, id)
 	meta, err := loadUploadMeta(dir)
@@ -427,6 +435,26 @@ func (a *App) handleUploadPart(w http.ResponseWriter, r *http.Request, id string
 	if meta.UserID != uid {
 		httpErr(w, http.StatusForbidden, "not your upload")
 		return
+	}
+	parts, err := listParts(ctx, id)
+	if err != nil {
+		httpErr(w, http.StatusInternalServerError, "list parts: "+err.Error())
+		return
+	}
+	var existingBytes int64
+	for _, p := range parts {
+		if p.N != n {
+			existingBytes += p.Size
+		}
+	}
+	remaining := meta.DeclaredSize - existingBytes
+	if remaining <= 0 {
+		httpErr(w, http.StatusRequestEntityTooLarge, "uploaded parts already reach declared size")
+		return
+	}
+	partLimit := int64(maxPartSize)
+	if remaining < partLimit {
+		partLimit = remaining
 	}
 
 	// Stream straight to a temp sibling; rename atomically. The
@@ -440,7 +468,7 @@ func (a *App) handleUploadPart(w http.ResponseWriter, r *http.Request, id string
 		httpErr(w, http.StatusInternalServerError, "create part: "+err.Error())
 		return
 	}
-	written, copyErr := io.Copy(f, io.LimitReader(r.Body, maxPartSize+1))
+	written, copyErr := io.Copy(f, io.LimitReader(r.Body, partLimit+1))
 	cerr := f.Close()
 	if copyErr != nil {
 		_ = os.Remove(tmp)
@@ -452,10 +480,10 @@ func (a *App) handleUploadPart(w http.ResponseWriter, r *http.Request, id string
 		httpErr(w, http.StatusInternalServerError, "close: "+cerr.Error())
 		return
 	}
-	if written > maxPartSize {
+	if written > partLimit {
 		_ = os.Remove(tmp)
 		httpErr(w, http.StatusRequestEntityTooLarge,
-			fmt.Sprintf("part exceeds %d bytes", maxPartSize))
+			fmt.Sprintf("part exceeds remaining upload allowance of %d bytes", partLimit))
 		return
 	}
 	if written == 0 {
@@ -485,7 +513,12 @@ func (a *App) handleUploadComplete(w http.ResponseWriter, r *http.Request, id st
 
 	mu := sessionLock(id)
 	mu.Lock()
-	defer mu.Unlock()
+	locked := true
+	defer func() {
+		if locked {
+			mu.Unlock()
+		}
+	}()
 
 	dir := uploadSessionDir(ctx, id)
 	meta, err := loadUploadMeta(dir)
@@ -529,7 +562,11 @@ func (a *App) handleUploadComplete(w http.ResponseWriter, r *http.Request, id st
 
 	tmpKey := newUploadID() + extOf(meta.Filename, meta.ContentType)
 
-	// Pass 1: hash the concatenated parts in place.
+	// Pass 1: hash the concatenated parts. On disk-backed installs we
+	// simultaneously assemble the final bytes into a temporary file, then
+	// atomically move it into the blob tree after the hash is known. That
+	// avoids reading every part a second time. S3 still uses a hash pass
+	// followed by a parallel ReaderAt upload so network throughput stays high.
 	//
 	// The earlier implementation stream-stitched parts into a local
 	// scratch file, then re-opened that file and uploaded it to the
@@ -537,29 +574,43 @@ func (a *App) handleUploadComplete(w http.ResponseWriter, r *http.Request, id st
 	// network upload could even start, which on S3-backed installs
 	// dominated complete() latency for large uploads.
 	//
-	// New flow: read parts twice. First pass computes sha256 against
-	// the on-disk bytes (~free — kernel page cache holds the parts
-	// from the recent PUTs anyway). Second pass uses io.MultiReader
-	// to stream parts directly into backend.Put without a scratch
-	// file. The second read also hits page cache, so the only real
-	// cost is the network upload.
-	//
-	// Skipping the scratch write removes ~totalSize of local disk
-	// I/O entirely AND lets S3's multipart-upload start immediately
-	// rather than waiting for stitch to finish.
 	h := sha256.New()
+	var assembledPath string
+	var assembled *os.File
+	if _, ok := backend().(*diskBackend); ok {
+		assembledPath = filepath.Join(dir, "assembled.tmp."+randHex(8))
+		assembled, err = os.Create(assembledPath)
+		if err != nil {
+			httpErr(w, http.StatusInternalServerError, "create assembled upload: "+err.Error())
+			return
+		}
+		defer os.Remove(assembledPath)
+	}
 	for _, p := range parts {
 		f, err := os.Open(partPath(ctx, id, p.N))
 		if err != nil {
 			httpErr(w, http.StatusInternalServerError, "open part "+strconv.Itoa(p.N)+": "+err.Error())
 			return
 		}
-		if _, err := io.Copy(h, f); err != nil {
+		var dst io.Writer = h
+		if assembled != nil {
+			dst = io.MultiWriter(h, assembled)
+		}
+		if _, err := io.Copy(dst, f); err != nil {
 			f.Close()
+			if assembled != nil {
+				assembled.Close()
+			}
 			httpErr(w, http.StatusInternalServerError, "hash part "+strconv.Itoa(p.N)+": "+err.Error())
 			return
 		}
 		f.Close()
+	}
+	if assembled != nil {
+		if err := assembled.Close(); err != nil {
+			httpErr(w, http.StatusInternalServerError, "close assembled upload: "+err.Error())
+			return
+		}
 	}
 	finalSHA := hex.EncodeToString(h.Sum(nil))
 
@@ -578,12 +629,14 @@ func (a *App) handleUploadComplete(w http.ResponseWriter, r *http.Request, id st
 	// project already has these bytes, drop everything and return.
 	if existing, err := dbFindBySHA(ctx.AppDB(), meta.ProjectID, finalSHA); err == nil && existing != nil {
 		_ = os.RemoveAll(dir)
+		mu.Unlock()
+		locked = false
 		releaseSessionLock(id)
 		httpJSON(w, map[string]any{"file": existing, "was_existing": true})
 		return
 	}
 
-	// Pass 2: stream parts → backend without a scratch file.
+	// Pass 2 on remote backends: stream parts → backend without a scratch file.
 	//
 	// We hand the backend a partsReaderAt instead of an io.MultiReader.
 	// The difference matters: minio-go's parallel multipart upload
@@ -598,16 +651,24 @@ func (a *App) handleUploadComplete(w http.ResponseWriter, r *http.Request, id st
 	// virtual offset to (part_index, part_offset). Parallel goroutines
 	// inside minio-go each call ReadAt with their own offsets and
 	// race the bytes onto S3 without local stitching.
-	pr, err := newPartsReaderAt(ctx, id, parts)
-	if err != nil {
-		httpErr(w, http.StatusInternalServerError, "open parts: "+err.Error())
-		return
-	}
-	defer pr.Close()
 	finalKey := objectKey(finalSHA, tmpKey)
-	if err := backend().Put(r.Context(), finalKey, meta.ContentType, pr, totalSize); err != nil {
-		httpErr(w, http.StatusInternalServerError, "backend put: "+err.Error())
-		return
+	if disk, ok := backend().(*diskBackend); ok {
+		if err := disk.CommitTemp(assembledPath, finalKey); err != nil {
+			httpErr(w, http.StatusInternalServerError, "commit disk upload: "+err.Error())
+			return
+		}
+		assembledPath = ""
+	} else {
+		pr, err := newPartsReaderAt(ctx, id, parts)
+		if err != nil {
+			httpErr(w, http.StatusInternalServerError, "open parts: "+err.Error())
+			return
+		}
+		defer pr.Close()
+		if err := backend().Put(r.Context(), finalKey, meta.ContentType, pr, totalSize); err != nil {
+			httpErr(w, http.StatusInternalServerError, "backend put: "+err.Error())
+			return
+		}
 	}
 
 	tagsJSON, _ := json.Marshal(meta.Tags)
@@ -637,6 +698,8 @@ func (a *App) handleUploadComplete(w http.ResponseWriter, r *http.Request, id st
 	emitFileEvent(ctx, "file.added", row, false)
 
 	_ = os.RemoveAll(dir)
+	mu.Unlock()
+	locked = false
 	releaseSessionLock(id)
 
 	httpJSON(w, map[string]any{"file": row, "was_existing": false})
@@ -762,11 +825,9 @@ var (
 // separate files) and io.MultiReader doesn't implement ReadAt, so
 // we map a virtual byte offset across the part files ourselves.
 //
-// Internally we open each part file lazily on first access and keep
-// the handle for the lifetime of the upload. Parallel ReadAt calls
-// from minio-go's worker goroutines safely share the open handles
-// because *os.File's pread (the syscall ReadAt uses on POSIX) is
-// position-independent — it doesn't advance the file's seek pointer.
+// Each ReadAt opens only the part files it spans and closes them
+// immediately. Descriptor usage is therefore bounded by active S3
+// workers instead of total part count; pread keeps offsets independent.
 
 type partRange struct {
 	path  string
@@ -778,15 +839,13 @@ type partsReaderAt struct {
 	ranges []partRange
 	total  int64
 
-	mu    sync.Mutex
-	files map[int]*os.File // indexed by ranges[]
-	pos   int64            // for sequential Read()
+	mu  sync.Mutex
+	pos int64 // for sequential Read()
 }
 
 func newPartsReaderAt(ctx *sdk.AppCtx, sessionID string, parts []partInfo) (*partsReaderAt, error) {
 	pr := &partsReaderAt{
 		ranges: make([]partRange, 0, len(parts)),
-		files:  map[int]*os.File{},
 	}
 	var off int64
 	for _, p := range parts {
@@ -801,37 +860,14 @@ func newPartsReaderAt(ctx *sdk.AppCtx, sessionID string, parts []partInfo) (*par
 	return pr, nil
 }
 
-// Close releases every open part-file handle. Idempotent.
-func (pr *partsReaderAt) Close() error {
-	pr.mu.Lock()
-	defer pr.mu.Unlock()
-	for i, f := range pr.files {
-		_ = f.Close()
-		delete(pr.files, i)
-	}
-	return nil
-}
-
-// fileForRange returns a cached or newly-opened file handle for the
-// given range index. Caller does NOT hold the mutex.
-func (pr *partsReaderAt) fileForRange(idx int) (*os.File, error) {
-	pr.mu.Lock()
-	defer pr.mu.Unlock()
-	if f, ok := pr.files[idx]; ok {
-		return f, nil
-	}
-	f, err := os.Open(pr.ranges[idx].path)
-	if err != nil {
-		return nil, err
-	}
-	pr.files[idx] = f
-	return f, nil
-}
+// Close is retained for io.Closer compatibility. ReadAt opens only the part
+// it is actively reading and closes it immediately, so a 10,000-part upload
+// can no longer consume 10,000 process file descriptors.
+func (pr *partsReaderAt) Close() error { return nil }
 
 // ReadAt fills p starting at virtual offset off. May span multiple
-// part files. Safe for concurrent calls — pread doesn't share state
-// with the file's seek pointer, so multiple goroutines can ReadAt
-// the same *os.File at different offsets without locking.
+// part files. Safe for concurrent calls because each call owns its
+// file descriptors and uses position-independent ReadAt operations.
 func (pr *partsReaderAt) ReadAt(p []byte, off int64) (int, error) {
 	if off >= pr.total {
 		return 0, io.EOF
@@ -840,7 +876,7 @@ func (pr *partsReaderAt) ReadAt(p []byte, off int64) (int, error) {
 	idx := pr.findRange(off)
 	for total < len(p) && idx < len(pr.ranges) {
 		rng := pr.ranges[idx]
-		f, err := pr.fileForRange(idx)
+		f, err := os.Open(rng.path)
 		if err != nil {
 			return total, err
 		}
@@ -853,9 +889,13 @@ func (pr *partsReaderAt) ReadAt(p []byte, off int64) (int, error) {
 			want = remainingInPart
 		}
 		n, err := f.ReadAt(p[total:total+int(want)], partOff)
+		closeErr := f.Close()
 		total += n
 		if err != nil && err != io.EOF {
 			return total, err
+		}
+		if closeErr != nil {
+			return total, closeErr
 		}
 		if int64(n) < want {
 			// Short read — bail; caller decides what to do.

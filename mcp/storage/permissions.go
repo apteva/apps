@@ -126,41 +126,59 @@ func (a *App) toolRenameFolderCtx(ctx context.Context, app *sdk.AppCtx, args map
 // in the handler — run the query, filter the result.
 
 func (a *App) toolListCtx(ctx context.Context, app *sdk.AppCtx, args map[string]any) (any, error) {
-	resp, err := a.toolList(app, args)
+	caller := sdk.CallerFrom(ctx)
+	if caller == nil {
+		return a.toolList(app, args)
+	}
+	pid, err := resolveProjectFromArgs(args)
 	if err != nil {
 		return nil, err
 	}
-	caller := sdk.CallerFrom(ctx)
-	if caller == nil {
-		return resp, nil
+	folder := normaliseFolder(strArg(args, "folder"))
+	recursive, _ := args["recursive"].(bool)
+	limit := intArg(args, "limit", 200)
+	if limit <= 0 || limit > 500 {
+		limit = 200
 	}
-	m := resp.(map[string]any)
-	files, _ := m["files"].([]*File)
-	filtered := sdk.Filter(caller, "files.read", files, func(f *File) string {
-		return fileResource(f.Folder)
+	files, err := dbListFolderFiltered(app.AppDB(), pid, folder, recursive, limit, func(f *File) bool {
+		return caller.Allows("files.read", fileResource(f.Folder))
 	})
-	m["files"] = filtered
-	m["count"] = len(filtered)
-	return m, nil
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{
+		"files": files, "count": len(files), "folder": folder, "recursive": recursive,
+	}, nil
 }
 
 func (a *App) toolSearchCtx(ctx context.Context, app *sdk.AppCtx, args map[string]any) (any, error) {
-	resp, err := a.toolSearch(app, args)
+	caller := sdk.CallerFrom(ctx)
+	if caller == nil {
+		return a.toolSearch(app, args)
+	}
+	pid, err := resolveProjectFromArgs(args)
 	if err != nil {
 		return nil, err
 	}
-	caller := sdk.CallerFrom(ctx)
-	if caller == nil {
-		return resp, nil
+	limit := intArg(args, "limit", 50)
+	if limit <= 0 || limit > 200 {
+		limit = 50
 	}
-	m := resp.(map[string]any)
-	files, _ := m["files"].([]*File)
-	filtered := sdk.Filter(caller, "files.read", files, func(f *File) string {
-		return fileResource(f.Folder)
+	files, err := dbSearchFiltered(app.AppDB(), pid, searchOpts{
+		Q:           strArg(args, "q"),
+		Folder:      strArg(args, "folder"),
+		ContentType: strArg(args, "content_type"),
+		SHA256:      strArg(args, "sha256"),
+		Tag:         strArg(args, "tag"),
+		Source:      strArg(args, "source"),
+		Limit:       limit,
+	}, func(f *File) bool {
+		return caller.Allows("files.read", fileResource(f.Folder))
 	})
-	m["files"] = filtered
-	m["count"] = len(filtered)
-	return m, nil
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"files": files, "count": len(files)}, nil
 }
 
 func (a *App) toolListFoldersCtx(ctx context.Context, app *sdk.AppCtx, args map[string]any) (any, error) {
