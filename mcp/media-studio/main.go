@@ -36,12 +36,15 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: media-studio
 display_name: Media Studio
-version: 0.10.37
+version: 0.10.38
 description: |
   Generate images, video, audio, music, and avatars via compatible
   providers. Optionally saves outputs to Storage, supports stable
   cache keys for app-to-app generation reuse, and can use OpenAI Codex
-  as a subscription-backed image provider. v0.10.37 hardens project
+  as a subscription-backed image provider. v0.10.38 enforces image
+  output_format on final stored bytes, converting provider mismatches
+  before Storage and flattening transparency onto white for JPEG.
+  v0.10.37 hardens project
   isolation, async job recovery, Storage fallback, provider prompt
   limits, and oversized downloads. Queued jobs retain their original
   provider connection and safely resume finalization after restarts.
@@ -302,7 +305,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				},
 				"options": map[string]any{
 					"type":        "object",
-					"description": "Per-provider extras passed through (background, output_format, lyrics, style, seed, image_storage_id, background_url, fast, …).",
+					"description": "Per-provider extras. For images, output_format (png|jpeg|webp) guarantees the final stored format even when the provider returns different bytes. Other extras include background, lyrics, style, seed, image_storage_id, background_url, fast, …",
 				},
 			}, []string{"kind", "prompt"}),
 			Handler: a.toolMediaGenerate,

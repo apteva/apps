@@ -13,6 +13,7 @@ package main
 // so no real OpenAI calls fly out.
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
@@ -1113,7 +1114,7 @@ func TestToolMediaGenerate_GPTImage_B64_StorageUpload(t *testing.T) {
 	}
 }
 
-func TestToolMediaGenerate_VeniceB64_SniffsJPEGDespitePNGFormat(t *testing.T) {
+func TestToolMediaGenerate_VeniceB64_SniffsJPEGWithoutRequestedFormat(t *testing.T) {
 	jpegB64 := base64.StdEncoding.EncodeToString(fakeJPEG())
 
 	pf := newRecordingPlatform()
@@ -1136,9 +1137,6 @@ func TestToolMediaGenerate_VeniceB64_SniffsJPEGDespitePNGFormat(t *testing.T) {
 		"kind":   "image",
 		"prompt": "studio portrait",
 		"model":  "grok-imagine-image",
-		"options": map[string]any{
-			"format": "png",
-		},
 	})
 	if err != nil {
 		t.Fatalf("toolMediaGenerate: %v", err)
@@ -1175,6 +1173,134 @@ func TestToolMediaGenerate_VeniceB64_SniffsJPEGDespitePNGFormat(t *testing.T) {
 	}
 	if !foundJPEGResource {
 		t.Fatalf("expected image/jpeg resource block, got %+v", content)
+	}
+}
+
+func TestToolMediaGenerate_VeniceB64_EnforcesRequestedJPEG(t *testing.T) {
+	pngB64 := base64.StdEncoding.EncodeToString(fakePNG())
+
+	pf := newRecordingPlatform()
+	pf.appSlug = "venice-ai"
+	pf.nextExecuteResult = &sdk.ExecuteResult{
+		Success: true,
+		Status:  200,
+		Data: json.RawMessage(fmt.Sprintf(
+			`{"id":"venice-2","images":[%q],"request":{"success":true,"data":{"format":"jpeg","model":"grok-imagine-image"}}}`,
+			pngB64,
+		)),
+	}
+	pf.nextCallResult = json.RawMessage(
+		`{"result":{"content":[{"type":"text","text":"{\"id\":4820,\"url\":\"/files/4820\"}"}]}}`,
+	)
+
+	ctx := newMediaStudioCtx(t, pf)
+	app := &App{}
+	_, err := app.toolMediaGenerate(ctx, map[string]any{
+		"kind":   "image",
+		"prompt": "studio portrait",
+		"model":  "grok-imagine-image",
+		"options": map[string]any{
+			"output_format": "jpeg",
+		},
+	})
+	if err != nil {
+		t.Fatalf("toolMediaGenerate: %v", err)
+	}
+
+	if got := pf.executeCalls[0].Input["format"]; got != "jpeg" {
+		t.Fatalf("Venice format = %v, want jpeg", got)
+	}
+	if len(pf.callAppCalls) != 1 {
+		t.Fatalf("expected 1 storage call, got %d", len(pf.callAppCalls))
+	}
+	got := pf.callAppCalls[0]
+	if got.Tool != "files_upload" {
+		t.Fatalf("storage tool = %q, want files_upload", got.Tool)
+	}
+	if ct, _ := got.Input["content_type"].(string); ct != "image/jpeg" {
+		t.Fatalf("content_type = %q, want image/jpeg", ct)
+	}
+	if name, _ := got.Input["name"].(string); !strings.HasSuffix(name, ".jpg") {
+		t.Fatalf("name = %q, want .jpg suffix", name)
+	}
+	stored, err := base64.StdEncoding.DecodeString(got.Input["content_base64"].(string))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, _, ok := sniffImageMediaType(stored); !ok || bytes.Equal(stored, fakePNG()) {
+		t.Fatalf("Storage did not receive converted image bytes")
+	}
+	if mime, ext, _ := sniffImageMediaType(stored); mime != "image/jpeg" || ext != "jpg" {
+		t.Fatalf("stored bytes = %q/%q, want image/jpeg/jpg", mime, ext)
+	}
+}
+
+func TestToolMediaGenerate_URLImage_EnforcesRequestedJPEGBeforeStorage(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "image/png")
+		_, _ = w.Write(fakePNG())
+	}))
+	defer upstream.Close()
+
+	pf := newRecordingPlatform()
+	pf.nextExecuteResult = &sdk.ExecuteResult{
+		Success: true,
+		Status:  200,
+		Data:    json.RawMessage(fmt.Sprintf(`{"data":[{"url":"%s/image.png"}],"model":"gpt-image-2"}`, upstream.URL)),
+	}
+	pf.nextCallResult = json.RawMessage(
+		`{"result":{"content":[{"type":"text","text":"{\"id\":4821,\"url\":\"/files/4821\"}"}]}}`,
+	)
+
+	ctx := newMediaStudioCtx(t, pf)
+	app := &App{}
+	_, err := app.toolMediaGenerate(ctx, map[string]any{
+		"kind":   "image",
+		"prompt": "URL conversion",
+		"model":  "gpt-image-2",
+		"options": map[string]any{
+			"output_format": "jpeg",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pf.callAppCalls) != 1 || pf.callAppCalls[0].Tool != "files_upload" {
+		t.Fatalf("converted URL response must use files_upload: %+v", pf.callAppCalls)
+	}
+	input := pf.callAppCalls[0].Input
+	if input["content_type"] != "image/jpeg" || !strings.HasSuffix(input["name"].(string), ".jpg") {
+		t.Fatalf("storage metadata = %+v", input)
+	}
+	stored, err := base64.StdEncoding.DecodeString(input["content_base64"].(string))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mime, ext, ok := sniffImageMediaType(stored); !ok || mime != "image/jpeg" || ext != "jpg" {
+		t.Fatalf("stored bytes = %q/%q ok=%v", mime, ext, ok)
+	}
+}
+
+func TestToolMediaGenerate_RejectsUnsupportedOutputFormatBeforeProviderCall(t *testing.T) {
+	pf := newRecordingPlatform()
+	ctx := newMediaStudioCtx(t, pf)
+	app := &App{}
+	out, err := app.toolMediaGenerate(ctx, map[string]any{
+		"kind":   "image",
+		"prompt": "unsupported output",
+		"model":  "gpt-image-2",
+		"options": map[string]any{
+			"output_format": "tiff",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pf.executeCalls) != 0 {
+		t.Fatalf("provider was called for invalid output format: %+v", pf.executeCalls)
+	}
+	if res, ok := out.(map[string]any); !ok || res["isError"] != true {
+		t.Fatalf("expected MCP error result, got %+v", out)
 	}
 }
 

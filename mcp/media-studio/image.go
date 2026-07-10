@@ -305,7 +305,7 @@ func buildVeniceImageArgs(args map[string]any) map[string]any {
 		// makeThumbnail) can read the bytes. Venice's own default
 		// is webp which Go's image package doesn't understand —
 		// thumbnails would silently fall back to no-preview.
-		// User can override via options.format.
+		// User can override via the provider-neutral options.output_format.
 		"format": "png",
 		// Quality defaults — SD / Flux / Qwen models honour these,
 		// resolution-tier models (gpt-image-2, nano-banana) silently
@@ -336,6 +336,10 @@ func buildVeniceImageArgs(args map[string]any) map[string]any {
 			}
 		}
 		if v, exists := opts["output_format"]; exists {
+			out["format"] = v
+		} else if v, exists := opts["format"]; exists {
+			// Backward compatibility for callers that used the old
+			// Venice-specific option name.
 			out["format"] = v
 		}
 	}

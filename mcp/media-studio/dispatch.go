@@ -231,6 +231,14 @@ func (a *App) toolMediaGenerate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	if err := validateProviderPrompt(ctx, bound, kind, capability, args); err != nil {
 		return mcpError("prompt: " + err.Error()), nil
 	}
+	requestedOutputFormat := ""
+	if kind == KindImage {
+		requestedOutputFormat, err = requestedImageOutputFormat(args)
+		if err != nil {
+			return mcpError(err.Error()), nil
+		}
+		canonicalizeImageOutputFormat(args, requestedOutputFormat)
+	}
 	requestJSON := generationRequestJSON(args)
 
 	// Source images — resolve "storage:N" / URL / base64 into the
@@ -337,7 +345,15 @@ func (a *App) toolMediaGenerate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 			ctx.Logger().Warn("fetch media bytes failed", "url", item.UpstreamURL, "err", err)
 			continue
 		}
-		item = withSniffedImageMediaType(item, body)
+		if kind == KindImage {
+			item, body, err = enforceImageOutputFormat(item, body, requestedOutputFormat)
+			if err != nil {
+				updateGenerationStatus(ctx, pid, draftID, "failed")
+				return mcpError("output_format: " + err.Error()), nil
+			}
+		} else {
+			item = withSniffedImageMediaType(item, body)
+		}
 		media[i] = item
 		if i == 0 {
 			firstBody = append([]byte(nil), body...)

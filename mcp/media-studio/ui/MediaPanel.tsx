@@ -1053,7 +1053,7 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
           if (imageModel !== "dall-e-2") options.quality = imageQuality;
           if (isGptImage(imageModel)) options.output_format = imageFormat;
         } else if (liveProvider === "venice-ai") {
-          options.format = imageFormat;
+          options.output_format = imageFormat;
         }
         body.options = options;
       }
