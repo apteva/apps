@@ -3,27 +3,25 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"regexp"
 	"strings"
 	"time"
 
 	sdk "github.com/apteva/app-sdk"
+	sqlite "modernc.org/sqlite"
 )
 
 // toolTablesQuery is the read-only SELECT escape hatch. Not pretty,
 // but sometimes the agent needs aggregations or joins the typed tools
 // can't express. Three guard rails keep this safe enough for v0.1:
 //
-//   1. Statement must start with SELECT or WITH (CTE) — this is the
-//      only check that prevents writes; everything else is defence in
-//      depth.
-//   2. No semicolons in the body (defeats simple statement-stacking).
-//   3. Hard timeout via context.WithTimeout, hard row cap, hard byte
-//      budget on each cell.
+//  1. The dedicated sqlite connection runs with PRAGMA query_only=ON.
+//  2. Raw internal/physical names are blocked; project-visible tables
+//     are reached only through {table_name} placeholders.
+//  3. Statement count, duration, result rows, and result bytes are capped.
 //
-// Cross-table joins work as long as the agent uses physical names —
-// which it can't introspect through any tool we expose. To make the
-// hatch actually useful, we substitute "{table_name}" placeholders
-// with the corresponding physical names before execution.
+// Cross-table joins use {table_name} placeholders, which are resolved
+// against the current project plus globally shared tables.
 func (a *App) toolTablesQuery(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	pid, err := resolveProjectFromArgs(args)
 	if err != nil {
@@ -32,6 +30,9 @@ func (a *App) toolTablesQuery(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	rawSQL := strings.TrimSpace(strArg(args, "sql"))
 	if rawSQL == "" {
 		return nil, errf("sql is required")
+	}
+	if len(rawSQL) > 64<<10 {
+		return nil, errf("sql exceeds 65536 bytes")
 	}
 	if err := validateReadOnlySQL(rawSQL); err != nil {
 		return nil, err
@@ -42,14 +43,38 @@ func (a *App) toolTablesQuery(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	}
 
 	params := sliceArg(args, "params")
+	if len(params) > 1000 {
+		return nil, errf("params exceeds 1000 values")
+	}
 	bound := make([]any, len(params))
 	copy(bound, params)
 
-	timeout := time.Duration(maxQueryMs(ctx)) * time.Millisecond
-	qctx, cancel := context.WithTimeout(context.Background(), timeout)
+	qctx, cancel := queryTimeoutContext(ctx)
 	defer cancel()
 
-	rows, err := ctx.AppDB().QueryContext(qctx, resolved, bound...)
+	conn, err := ctx.AppDB().Conn(qctx)
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+	if _, err := conn.ExecContext(qctx, "PRAGMA query_only = ON"); err != nil {
+		return nil, errf("enable sqlite query_only: %v", err)
+	}
+	previousLengthLimit := -1
+	defer func() {
+		resetCtx, resetCancel := context.WithTimeout(context.Background(), time.Second)
+		defer resetCancel()
+		if previousLengthLimit >= 0 {
+			_, _ = sqlite.Limit(conn, 0, previousLengthLimit)
+		}
+		_, _ = conn.ExecContext(resetCtx, "PRAGMA query_only = OFF")
+	}()
+	previousLengthLimit, err = sqlite.Limit(conn, 0, int(maxQueryBytes(ctx))) // SQLITE_LIMIT_LENGTH
+	if err != nil {
+		return nil, errf("set sqlite result length limit: %v", err)
+	}
+
+	rows, err := conn.QueryContext(qctx, resolved, bound...)
 	if err != nil {
 		return nil, err
 	}
@@ -59,7 +84,12 @@ func (a *App) toolTablesQuery(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	if err != nil {
 		return nil, err
 	}
+	if len(cols) > 256 {
+		return nil, errf("query result exceeds maximum of 256 columns")
+	}
 	cap := maxQueryRows(ctx)
+	byteCap := maxQueryBytes(ctx)
+	var usedBytes int64
 	out := make([]map[string]any, 0)
 	truncated := false
 	for rows.Next() {
@@ -77,7 +107,16 @@ func (a *App) toolTablesQuery(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		}
 		row := map[string]any{}
 		for i, c := range cols {
-			row[c] = normaliseScanValue(dest[i])
+			v := normaliseScanValue(dest[i])
+			usedBytes += int64(len(c)) + valueSize(v)
+			if usedBytes > byteCap {
+				truncated = true
+				break
+			}
+			row[c] = v
+		}
+		if truncated {
+			break
 		}
 		out = append(out, row)
 	}
@@ -91,6 +130,11 @@ func (a *App) toolTablesQuery(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	}, nil
 }
 
+var (
+	queryPlaceholderRe = regexp.MustCompile(`\{[a-z][a-z0-9_]*\}`)
+	internalSQLNameRe  = regexp.MustCompile(`(?i)(?:\b(?:t_[0-9]+|tables_meta|columns_meta|sqlite_[a-z0-9_]*|pragma_[a-z0-9_]*|dbstat)\b|\b_migrations\b)`)
+)
+
 // validateReadOnlySQL rejects anything but a single SELECT or WITH
 // statement. It does not try to defend against truly hostile input —
 // the agent operates inside the install's permission scope already.
@@ -101,9 +145,11 @@ func validateReadOnlySQL(s string) error {
 	}
 	lower := strings.ToLower(strings.TrimSpace(s))
 	switch {
-	case strings.HasPrefix(lower, "select"):
-		return nil
-	case strings.HasPrefix(lower, "with"):
+	case strings.HasPrefix(lower, "select"), strings.HasPrefix(lower, "with"):
+		withoutPlaceholders := queryPlaceholderRe.ReplaceAllString(lower, "")
+		if name := internalSQLNameRe.FindString(withoutPlaceholders); name != "" {
+			return errf("direct access to internal or physical table %q is not allowed; use {table_name}", name)
+		}
 		return nil
 	}
 	return errf("only SELECT and WITH (CTE) statements allowed")
@@ -152,4 +198,3 @@ func normaliseScanValue(v any) any {
 	}
 	return v
 }
-

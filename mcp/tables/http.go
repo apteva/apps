@@ -2,6 +2,7 @@ package main
 
 import (
 	"encoding/json"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -33,6 +34,8 @@ import (
 // AppCtx parameter.
 var globalCtx *sdk.AppCtx
 
+const maxHTTPBodyBytes int64 = 4 << 20
+
 // ─── handlers ──────────────────────────────────────────────────────
 
 func (a *App) handleTablesCollection(w http.ResponseWriter, r *http.Request) {
@@ -42,7 +45,7 @@ func (a *App) handleTablesCollection(w http.ResponseWriter, r *http.Request) {
 	}
 	switch r.Method {
 	case http.MethodGet:
-		out, err := a.toolTablesList(globalCtx, injectProject(r, nil))
+		out, err := a.toolTablesList(requestAppCtx(r), injectProject(r, nil))
 		writeToolResult(w, out, err)
 	case http.MethodPost:
 		body, err := readJSONBody(r)
@@ -50,7 +53,7 @@ func (a *App) handleTablesCollection(w http.ResponseWriter, r *http.Request) {
 			httpErr(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		out, err := a.toolTablesCreate(globalCtx, injectProject(r, body))
+		out, err := a.toolTablesCreate(requestAppCtx(r), injectProject(r, body))
 		writeToolResult(w, out, err)
 	default:
 		httpErr(w, http.StatusMethodNotAllowed, "GET or POST")
@@ -73,7 +76,7 @@ func (a *App) handleTablesItem(w http.ResponseWriter, r *http.Request) {
 	if len(parts) == 1 {
 		switch r.Method {
 		case http.MethodGet:
-			out, err := a.toolTablesDescribe(globalCtx, injectProject(r, map[string]any{"name": tableName}))
+			out, err := a.toolTablesDescribe(requestAppCtx(r), injectProject(r, map[string]any{"name": tableName}))
 			writeToolResult(w, out, err)
 		case http.MethodPatch:
 			body, err := readJSONBody(r)
@@ -82,11 +85,11 @@ func (a *App) handleTablesItem(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			body["name"] = tableName
-			out, err := a.toolTablesAlter(globalCtx, injectProject(r, body))
+			out, err := a.toolTablesAlter(requestAppCtx(r), injectProject(r, body))
 			writeToolResult(w, out, err)
 		case http.MethodDelete:
 			confirm := r.URL.Query().Get("confirm") == "true"
-			out, err := a.toolTablesDrop(globalCtx, injectProject(r, map[string]any{"name": tableName, "confirm": confirm}))
+			out, err := a.toolTablesDrop(requestAppCtx(r), injectProject(r, map[string]any{"name": tableName, "confirm": confirm}))
 			writeToolResult(w, out, err)
 		default:
 			httpErr(w, http.StatusMethodNotAllowed, "GET, PATCH, or DELETE")
@@ -125,7 +128,7 @@ func (a *App) handleTablesItem(w http.ResponseWriter, r *http.Request) {
 			httpErr(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		out, err := a.toolTablesQuery(globalCtx, injectProject(r, body))
+		out, err := a.toolTablesQuery(requestAppCtx(r), injectProject(r, body))
 		writeToolResult(w, out, err)
 		return
 	}
@@ -142,7 +145,7 @@ func (a *App) handleRowsCollection(w http.ResponseWriter, r *http.Request, table
 			"offset":   parseIntQuery(r, "offset", 0),
 			"order_by": r.URL.Query().Get("order_by"),
 		}
-		out, err := a.toolRowsSearch(globalCtx, injectProject(r, args))
+		out, err := a.toolRowsSearch(requestAppCtx(r), injectProject(r, args))
 		writeToolResult(w, out, err)
 	case http.MethodPost:
 		body, err := readJSONBody(r)
@@ -158,7 +161,7 @@ func (a *App) handleRowsCollection(w http.ResponseWriter, r *http.Request, table
 			}
 		}
 		body["table"] = tableName
-		out, err := a.toolRowsInsert(globalCtx, injectProject(r, body))
+		out, err := a.toolRowsInsert(requestAppCtx(r), injectProject(r, body))
 		writeToolResult(w, out, err)
 	default:
 		httpErr(w, http.StatusMethodNotAllowed, "GET or POST")
@@ -176,14 +179,14 @@ func (a *App) handleRowsSearch(w http.ResponseWriter, r *http.Request, tableName
 		return
 	}
 	body["table"] = tableName
-	out, err := a.toolRowsSearch(globalCtx, injectProject(r, body))
+	out, err := a.toolRowsSearch(requestAppCtx(r), injectProject(r, body))
 	writeToolResult(w, out, err)
 }
 
 func (a *App) handleRowsItem(w http.ResponseWriter, r *http.Request, tableName string, id int64) {
 	switch r.Method {
 	case http.MethodGet:
-		out, err := a.toolRowsGet(globalCtx, injectProject(r, map[string]any{
+		out, err := a.toolRowsGet(requestAppCtx(r), injectProject(r, map[string]any{
 			"table":         tableName,
 			"id":            id,
 			"hydrate_files": r.URL.Query().Get("hydrate_files") == "true",
@@ -200,10 +203,10 @@ func (a *App) handleRowsItem(w http.ResponseWriter, r *http.Request, tableName s
 			"id":     id,
 			"fields": body,
 		})
-		out, err := a.toolRowsUpdate(globalCtx, args)
+		out, err := a.toolRowsUpdate(requestAppCtx(r), args)
 		writeToolResult(w, out, err)
 	case http.MethodDelete:
-		out, err := a.toolRowsDelete(globalCtx, injectProject(r, map[string]any{"table": tableName, "id": id}))
+		out, err := a.toolRowsDelete(requestAppCtx(r), injectProject(r, map[string]any{"table": tableName, "id": id}))
 		writeToolResult(w, out, err)
 	default:
 		httpErr(w, http.StatusMethodNotAllowed, "GET, PATCH, or DELETE")
@@ -216,7 +219,9 @@ func readJSONBody(r *http.Request) (map[string]any, error) {
 	if r.Body == nil {
 		return map[string]any{}, nil
 	}
-	dec := json.NewDecoder(r.Body)
+	lr := &io.LimitedReader{R: r.Body, N: maxHTTPBodyBytes + 1}
+	dec := json.NewDecoder(lr)
+	dec.UseNumber()
 	var raw any
 	if err := dec.Decode(&raw); err != nil {
 		if err.Error() == "EOF" {
@@ -224,10 +229,27 @@ func readJSONBody(r *http.Request) (map[string]any, error) {
 		}
 		return nil, err
 	}
+	if lr.N <= 0 {
+		return nil, errf("body exceeds %d bytes", maxHTTPBodyBytes)
+	}
+	var trailing any
+	if err := dec.Decode(&trailing); err != io.EOF {
+		return nil, errf("body must contain one JSON object")
+	}
 	if m, ok := raw.(map[string]any); ok {
 		return m, nil
 	}
 	return nil, errf("body must be a JSON object")
+}
+
+func requestAppCtx(r *http.Request) *sdk.AppCtx {
+	if globalCtx == nil || globalCtx.CurrentProject() != "" {
+		return globalCtx
+	}
+	if pid := strings.TrimSpace(r.URL.Query().Get("project_id")); pid != "" {
+		return globalCtx.WithProject(pid)
+	}
+	return globalCtx
 }
 
 // injectProject overlays the request's project_id onto the args map

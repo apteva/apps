@@ -2,6 +2,7 @@ package main
 
 import (
 	"database/sql"
+	"encoding/json"
 	"fmt"
 	"strings"
 
@@ -26,6 +27,10 @@ func (a *App) toolTablesCreate(ctx *sdk.AppCtx, args map[string]any) (any, error
 	if scope != "project" && scope != "global" {
 		return nil, errf("scope must be 'project' or 'global', got %q", scope)
 	}
+	ownerProjectID := pid
+	if scope == "global" {
+		ownerProjectID = ""
+	}
 
 	rawCols := sliceArg(args, "columns")
 	if len(rawCols) == 0 {
@@ -34,6 +39,15 @@ func (a *App) toolTablesCreate(ctx *sdk.AppCtx, args map[string]any) (any, error
 	cols, err := parseColumnDefs(rawCols)
 	if err != nil {
 		return nil, err
+	}
+	for _, c := range cols {
+		if c.Default == nil {
+			continue
+		}
+		v, _ := coerceForStorage(c, c.Default)
+		if err := validateStoredValueSize(ctx, c, v); err != nil {
+			return nil, errf("column %q default: %v", c.Name, err)
+		}
 	}
 
 	db := ctx.AppDB()
@@ -44,13 +58,19 @@ func (a *App) toolTablesCreate(ctx *sdk.AppCtx, args map[string]any) (any, error
 	defer tx.Rollback()
 
 	var existing int64
-	if err := tx.QueryRow(`SELECT id FROM tables_meta WHERE project_id = ? AND name = ?`, pid, name).Scan(&existing); err == nil {
+	existingSQL := `SELECT id FROM tables_meta WHERE project_id = ? AND name = ?`
+	existingArgs := []any{ownerProjectID, name}
+	if scope == "global" {
+		existingSQL = `SELECT id FROM tables_meta WHERE scope = 'global' AND name = ? LIMIT 1`
+		existingArgs = []any{name}
+	}
+	if err := tx.QueryRow(existingSQL, existingArgs...).Scan(&existing); err == nil {
 		return nil, errf("table %q already exists", name)
 	} else if err != sql.ErrNoRows {
 		return nil, err
 	}
 
-	res, err := tx.Exec(`INSERT INTO tables_meta(project_id, scope, name, physical_name) VALUES (?, ?, ?, '')`, pid, scope, name)
+	res, err := tx.Exec(`INSERT INTO tables_meta(project_id, scope, name, physical_name, row_count) VALUES (?, ?, ?, '', 0)`, ownerProjectID, scope, name)
 	if err != nil {
 		return nil, err
 	}
@@ -101,6 +121,9 @@ func (a *App) toolTablesCreate(ctx *sdk.AppCtx, args map[string]any) (any, error
 }
 
 func parseColumnDefs(raw []any) ([]Column, error) {
+	if len(raw) > 256 {
+		return nil, errf("columns exceeds maximum of 256")
+	}
 	out := make([]Column, 0, len(raw))
 	seen := map[string]bool{}
 	for i, r := range raw {
@@ -137,6 +160,11 @@ func parseColumnDefs(raw []any) ([]Column, error) {
 			c.Nullable = true
 		}
 		c.Default = obj["default"]
+		if c.Default != nil {
+			if _, err := coerceForStorage(c, c.Default); err != nil {
+				return nil, errf("columns[%d] default: %v", i, err)
+			}
+		}
 		if !c.Nullable && c.Default == nil {
 			// Allowed: agent must supply a value on every insert.
 		}
@@ -270,11 +298,20 @@ func (a *App) toolTablesAlter(ctx *sdk.AppCtx, args map[string]any) (any, error)
 
 	switch {
 	case add != nil:
+		if len(t.Columns) >= 256 {
+			return nil, errf("table already has the maximum of 256 user columns")
+		}
 		cols, err := parseColumnDefs([]any{add})
 		if err != nil {
 			return nil, err
 		}
 		c := cols[0]
+		if c.Default != nil {
+			v, _ := coerceForStorage(c, c.Default)
+			if err := validateStoredValueSize(ctx, c, v); err != nil {
+				return nil, errf("column %q default: %v", c.Name, err)
+			}
+		}
 		if columnIndex(t.Columns, c.Name) >= 0 {
 			return nil, errf("column %q already exists", c.Name)
 		}
@@ -288,13 +325,13 @@ func (a *App) toolTablesAlter(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		ddl := fmt.Sprintf("ALTER TABLE %s ADD COLUMN %s %s", quote(t.PhysicalName), quote(c.Name), st)
 		if !c.Nullable {
 			ddl += " NOT NULL"
-			if c.Default != nil {
-				lit, err := sqlLiteral(c.Type, c.Default)
-				if err != nil {
-					return nil, err
-				}
-				ddl += " DEFAULT " + lit
+		}
+		if c.Default != nil {
+			lit, err := sqlLiteral(c.Type, c.Default)
+			if err != nil {
+				return nil, err
 			}
+			ddl += " DEFAULT " + lit
 		}
 		if _, err := tx.Exec(ddl); err != nil {
 			return nil, err
@@ -410,6 +447,13 @@ func sqlLiteral(t string, v any) (string, error) {
 			return fmt.Sprintf("%v", n), nil
 		case int:
 			return fmt.Sprintf("%d", n), nil
+		case int64:
+			return fmt.Sprintf("%d", n), nil
+		case json.Number:
+			if _, err := n.Float64(); err != nil {
+				return "", errf("default for number must be numeric")
+			}
+			return n.String(), nil
 		}
 		return "", errf("default for number must be numeric")
 	case "bool":
@@ -427,6 +471,14 @@ func sqlLiteral(t string, v any) (string, error) {
 			return fmt.Sprintf("%d", int64(n)), nil
 		case int:
 			return fmt.Sprintf("%d", n), nil
+		case int64:
+			return fmt.Sprintf("%d", n), nil
+		case json.Number:
+			i, err := n.Int64()
+			if err != nil {
+				return "", errf("default for file_id must be integer")
+			}
+			return fmt.Sprintf("%d", i), nil
 		}
 		return "", errf("default for file_id must be integer")
 	}
@@ -479,8 +531,13 @@ func (a *App) toolTablesDrop(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 
 func loadTable(db *sql.DB, projectID, name string) (*Table, error) {
 	t := &Table{Name: name}
-	err := db.QueryRow(`SELECT id, scope, physical_name, created_at FROM tables_meta WHERE project_id = ? AND name = ?`, projectID, name).
-		Scan(&t.ID, &t.Scope, &t.PhysicalName, &t.CreatedAt)
+	var rowCount sql.NullInt64
+	err := db.QueryRow(`SELECT id, scope, physical_name, created_at, row_count
+		FROM tables_meta
+		WHERE name = ? AND (project_id = ? OR scope = 'global')
+		ORDER BY CASE WHEN project_id = ? AND scope = 'project' THEN 0 WHEN project_id = '' THEN 1 ELSE 2 END, id
+		LIMIT 1`, name, projectID, projectID).
+		Scan(&t.ID, &t.Scope, &t.PhysicalName, &t.CreatedAt, &rowCount)
 	if err == sql.ErrNoRows {
 		return nil, errf("table %q not found", name)
 	}
@@ -492,40 +549,99 @@ func loadTable(db *sql.DB, projectID, name string) (*Table, error) {
 		return nil, err
 	}
 	t.Columns = cols
-	if err := db.QueryRow(fmt.Sprintf("SELECT COUNT(*) FROM %s", quote(t.PhysicalName))).Scan(&t.RowCount); err != nil {
+	if rowCount.Valid {
+		t.RowCount = rowCount.Int64
+	} else if err := initialiseRowCount(db, t); err != nil {
 		return nil, err
 	}
 	return t, nil
 }
 
 func loadTables(db *sql.DB, projectID string) ([]Table, error) {
-	rows, err := db.Query(`SELECT id, name, scope, physical_name, created_at FROM tables_meta WHERE project_id = ? ORDER BY name`, projectID)
+	rows, err := db.Query(`SELECT id, name, scope, physical_name, created_at, row_count
+		FROM tables_meta
+		WHERE project_id = ? OR scope = 'global'
+		ORDER BY name, CASE WHEN project_id = ? AND scope = 'project' THEN 0 WHEN project_id = '' THEN 1 ELSE 2 END, id`, projectID, projectID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	var out []Table
+	unknownCounts := map[int64]bool{}
+	seenNames := map[string]bool{}
 	for rows.Next() {
 		var t Table
-		if err := rows.Scan(&t.ID, &t.Name, &t.Scope, &t.PhysicalName, &t.CreatedAt); err != nil {
+		var rowCount sql.NullInt64
+		if err := rows.Scan(&t.ID, &t.Name, &t.Scope, &t.PhysicalName, &t.CreatedAt, &rowCount); err != nil {
 			return nil, err
+		}
+		if seenNames[t.Name] {
+			continue
+		}
+		seenNames[t.Name] = true
+		if rowCount.Valid {
+			t.RowCount = rowCount.Int64
+		} else {
+			unknownCounts[t.ID] = true
 		}
 		out = append(out, t)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
+	indexByID := make(map[int64]int, len(out))
 	for i := range out {
-		cols, err := loadColumns(db, out[i].ID)
-		if err != nil {
+		indexByID[out[i].ID] = i
+	}
+	colRows, err := db.Query(`SELECT c.table_id, c.name, c.type, c.nullable, c.default_value
+		FROM columns_meta c
+		JOIN tables_meta t ON t.id = c.table_id
+		WHERE t.project_id = ? OR t.scope = 'global'
+		ORDER BY c.table_id, c.position`, projectID)
+	if err != nil {
+		return nil, err
+	}
+	for colRows.Next() {
+		var tableID int64
+		var c Column
+		var nullable int
+		var defaultRaw sql.NullString
+		if err := colRows.Scan(&tableID, &c.Name, &c.Type, &nullable, &defaultRaw); err != nil {
 			return nil, err
 		}
-		out[i].Columns = cols
-		if err := db.QueryRow(fmt.Sprintf("SELECT COUNT(*) FROM %s", quote(out[i].PhysicalName))).Scan(&out[i].RowCount); err != nil {
-			return nil, err
+		i, ok := indexByID[tableID]
+		if !ok {
+			continue
+		}
+		c.Nullable = nullable != 0
+		if defaultRaw.Valid && defaultRaw.String != "" {
+			c.Default, _ = jsonParse(defaultRaw.String)
+		}
+		out[i].Columns = append(out[i].Columns, c)
+	}
+	if err := colRows.Err(); err != nil {
+		colRows.Close()
+		return nil, err
+	}
+	if err := colRows.Close(); err != nil {
+		return nil, err
+	}
+	for i := range out {
+		if unknownCounts[out[i].ID] {
+			if err := initialiseRowCount(db, &out[i]); err != nil {
+				return nil, err
+			}
 		}
 	}
 	return out, nil
+}
+
+func initialiseRowCount(db *sql.DB, t *Table) error {
+	if err := db.QueryRow(fmt.Sprintf("SELECT COUNT(*) FROM %s", quote(t.PhysicalName))).Scan(&t.RowCount); err != nil {
+		return err
+	}
+	_, err := db.Exec(`UPDATE tables_meta SET row_count = ? WHERE id = ? AND row_count IS NULL`, t.RowCount, t.ID)
+	return err
 }
 
 func loadColumns(db *sql.DB, tableID int64) ([]Column, error) {

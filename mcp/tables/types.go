@@ -1,8 +1,10 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
 	"os"
 	"regexp"
@@ -101,6 +103,9 @@ func coerceForStorage(col Column, v any) (any, error) {
 	case "number":
 		switch n := v.(type) {
 		case float64:
+			if math.IsNaN(n) || math.IsInf(n, 0) {
+				return nil, errf("column %q: number must be finite", col.Name)
+			}
 			return n, nil
 		case int:
 			return float64(n), nil
@@ -110,6 +115,9 @@ func coerceForStorage(col Column, v any) (any, error) {
 			f, err := n.Float64()
 			if err != nil {
 				return nil, errf("column %q: %w", col.Name, err)
+			}
+			if math.IsNaN(f) || math.IsInf(f, 0) {
+				return nil, errf("column %q: number must be finite", col.Name)
 			}
 			return f, nil
 		}
@@ -132,7 +140,7 @@ func coerceForStorage(col Column, v any) (any, error) {
 		if err != nil {
 			return nil, errf("column %q: invalid datetime %q: %w", col.Name, s, err)
 		}
-		return t.UTC().Format(time.RFC3339), nil
+		return t.UTC().Format(time.RFC3339Nano), nil
 	case "json":
 		b, err := json.Marshal(v)
 		if err != nil {
@@ -142,6 +150,9 @@ func coerceForStorage(col Column, v any) (any, error) {
 	case "file_id":
 		switch n := v.(type) {
 		case float64:
+			if math.IsNaN(n) || math.IsInf(n, 0) || math.Trunc(n) != n || n < math.MinInt64 || n >= math.MaxInt64 {
+				return nil, errf("column %q: file_id must be an integer", col.Name)
+			}
 			return int64(n), nil
 		case int:
 			return int64(n), nil
@@ -247,6 +258,11 @@ func int64Arg(args map[string]any, key string) int64 {
 		if err == nil {
 			return n
 		}
+	case json.Number:
+		n, err := v.Int64()
+		if err == nil {
+			return n
+		}
 	}
 	return 0
 }
@@ -259,6 +275,11 @@ func intArg(args map[string]any, key string, def int) int {
 		return v
 	case string:
 		n, err := strconv.Atoi(strings.TrimSpace(v))
+		if err == nil {
+			return n
+		}
+	case json.Number:
+		n, err := strconv.Atoi(v.String())
 		if err == nil {
 			return n
 		}
@@ -295,27 +316,80 @@ func resolveProjectFromArgs(args map[string]any) (string, error) {
 // ─── config getters ────────────────────────────────────────────────
 
 func maxRowsPerTable(ctx *sdk.AppCtx) int64 {
-	return cfgInt64(ctx, "max_rows_per_table", 1_000_000)
+	return cfgInt64Range(ctx, "max_rows_per_table", 1_000_000, 0, 1_000_000_000)
 }
 
 func maxQueryRows(ctx *sdk.AppCtx) int {
-	return int(cfgInt64(ctx, "max_query_rows", 1000))
+	return int(cfgInt64Range(ctx, "max_query_rows", 1000, 1, 10_000))
 }
 
 func maxQueryMs(ctx *sdk.AppCtx) int {
-	return int(cfgInt64(ctx, "max_query_ms", 2000))
+	return int(cfgInt64Range(ctx, "max_query_ms", 2000, 1, 60_000))
 }
 
-func cfgInt64(ctx *sdk.AppCtx, key string, def int64) int64 {
+func maxQueryBytes(ctx *sdk.AppCtx) int64 {
+	return cfgInt64Range(ctx, "max_query_bytes", 4<<20, 1024, 64<<20)
+}
+
+func maxValueBytes(ctx *sdk.AppCtx) int64 {
+	return cfgInt64Range(ctx, "max_value_bytes", 1<<20, 1024, 16<<20)
+}
+
+func maxBatchRows(ctx *sdk.AppCtx) int {
+	return int(cfgInt64Range(ctx, "max_batch_rows", 1000, 1, 10_000))
+}
+
+func cfgInt64Range(ctx *sdk.AppCtx, key string, def, min, max int64) int64 {
 	v := ctx.Config().Get(key)
 	if v == "" {
 		return def
 	}
 	n, err := strconv.ParseInt(strings.TrimSpace(v), 10, 64)
-	if err != nil {
+	if err != nil || n < min || n > max {
 		return def
 	}
 	return n
+}
+
+func queryTimeoutContext(ctx *sdk.AppCtx) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.Background(), time.Duration(maxQueryMs(ctx))*time.Millisecond)
+}
+
+func validateStoredValueSize(ctx *sdk.AppCtx, col Column, v any) error {
+	var n int64
+	switch x := v.(type) {
+	case string:
+		n = int64(len(x))
+	case []byte:
+		n = int64(len(x))
+	default:
+		return nil
+	}
+	if n > maxValueBytes(ctx) {
+		return errf("column %q exceeds max_value_bytes (%d)", col.Name, maxValueBytes(ctx))
+	}
+	return nil
+}
+
+func valueSize(v any) int64 {
+	switch x := v.(type) {
+	case nil:
+		return 4
+	case string:
+		return int64(len(x))
+	case []byte:
+		return int64(len(x))
+	case bool:
+		return 5
+	case int64, float64, int:
+		return 24
+	default:
+		b, err := json.Marshal(x)
+		if err != nil {
+			return 0
+		}
+		return int64(len(b))
+	}
 }
 
 // ─── HTTP small helpers ────────────────────────────────────────────

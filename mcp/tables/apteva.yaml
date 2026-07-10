@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: tables
 display_name: Tables
-version: 0.1.9
+version: 0.1.10
 description: |
   Typed-row database for Apteva agents and human teams. The row-shaped
   sibling to the storage app: define typed tables, insert rows, query
@@ -55,7 +55,7 @@ provides:
     - name: rows_aggregate
       description: 'Single-table grouped aggregations. Args: table, where?, group_by? (column names or {col, bucket: day|week|month|year, name?}), metrics ([{name, op, col?, distinct?, numerator?, denominator?}]), order_by?, limit?. Ops: count, sum, avg, min, max, avg_ratio. Returns {rows, truncated}.'
     - name: tables_query
-      description: 'Read-only SELECT escape hatch. Args: sql, params? (array of bound values). Refused on any non-SELECT keyword; row + bytes caps enforced. Returns {columns, rows, truncated}.'
+      description: 'Read-only SELECT escape hatch. Args: sql, params? (array of bound values). User tables must use {table_name}; internal and physical tables are inaccessible. SQLite read-only mode plus row, byte, and duration caps are enforced.'
   ui_panels:
     - slot: project.page
       label: Tables
@@ -132,13 +132,28 @@ config_schema:
   - name: max_query_rows
     type: text
     default: "1000"
-    label: Max rows returned by tables_query
-    description: Read-only SELECT escape hatch row cap. Results past this point are truncated and the response sets truncated=true.
+    label: Max query result rows
+    description: Row cap shared by tables_query and rows_aggregate. Results past this point are truncated.
   - name: max_query_ms
     type: text
     default: "2000"
-    label: Max tables_query duration (ms)
-    description: tables_query timeout. The query is cancelled and an error returned if it runs longer.
+    label: Max query duration (ms)
+    description: Timeout for raw SQL, filtered search/count, and aggregate queries.
+  - name: max_query_bytes
+    type: text
+    default: "4194304"
+    label: Max query result bytes
+    description: Approximate serialized result budget for query, search, and aggregate responses.
+  - name: max_value_bytes
+    type: text
+    default: "1048576"
+    label: Max stored value bytes
+    description: Maximum UTF-8 text or encoded JSON bytes accepted in one cell.
+  - name: max_batch_rows
+    type: text
+    default: "1000"
+    label: Max rows per write batch
+    description: Maximum rows accepted by rows_insert or rows_upsert in one atomic call.
 
 imports:
   sources:

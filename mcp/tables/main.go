@@ -24,7 +24,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: tables
 display_name: Tables
-version: 0.1.9
+version: 0.1.10
 description: Typed-row database for Apteva agents and human teams.
 author: Apteva
 scopes: [project, global]
@@ -96,6 +96,13 @@ db:
   driver: sqlite
   path: /data/tables.db
   migrations: migrations/
+config_schema:
+  - { name: max_rows_per_table, type: text, default: "1000000" }
+  - { name: max_query_rows, type: text, default: "1000" }
+  - { name: max_query_ms, type: text, default: "2000" }
+  - { name: max_query_bytes, type: text, default: "4194304" }
+  - { name: max_value_bytes, type: text, default: "1048576" }
+  - { name: max_batch_rows, type: text, default: "1000" }
 upgrade_policy: auto-patch
 `
 
@@ -117,7 +124,10 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	ctx.Logger().Info("tables mounted",
 		"max_rows_per_table", maxRowsPerTable(ctx),
 		"max_query_rows", maxQueryRows(ctx),
-		"max_query_ms", maxQueryMs(ctx))
+		"max_query_ms", maxQueryMs(ctx),
+		"max_query_bytes", maxQueryBytes(ctx),
+		"max_value_bytes", maxValueBytes(ctx),
+		"max_batch_rows", maxBatchRows(ctx))
 	return nil
 }
 
@@ -319,7 +329,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "tables_query",
-			Description: "Read-only SELECT escape hatch. Args: sql, params? (array). Refused on anything other than a single SELECT or WITH ... SELECT. Row + duration caps enforced. Returns {columns, rows, truncated}.",
+			Description: "Read-only SELECT escape hatch. Args: sql, params? (array). User tables must use {table_name}; internal and physical tables are inaccessible. SQLite read-only mode plus row, byte, and duration caps are enforced. Returns {columns, rows, truncated}.",
 			InputSchema: schemaObject(map[string]any{
 				"sql":    map[string]any{"type": "string"},
 				"params": map[string]any{"type": "array"},

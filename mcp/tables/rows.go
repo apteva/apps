@@ -1,8 +1,10 @@
 package main
 
 import (
+	"crypto/sha256"
 	"database/sql"
 	"fmt"
+	"sort"
 	"strings"
 
 	sdk "github.com/apteva/app-sdk"
@@ -23,15 +25,13 @@ func (a *App) toolRowsInsert(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	if len(rawRows) == 0 {
 		return nil, errf("rows is required and must be non-empty")
 	}
+	if len(rawRows) > maxBatchRows(ctx) {
+		return nil, errf("rows exceeds max_batch_rows (%d)", maxBatchRows(ctx))
+	}
 	t, err := loadTable(ctx.AppDB(), pid, tableName)
 	if err != nil {
 		return nil, err
 	}
-	if cap := maxRowsPerTable(ctx); cap > 0 && t.RowCount+int64(len(rawRows)) > cap {
-		return nil, errf("would exceed max_rows_per_table (%d): table %q has %d rows, inserting %d",
-			cap, tableName, t.RowCount, len(rawRows))
-	}
-
 	prepared := make([][]any, len(rawRows))
 	colsUsed := make([][]string, len(rawRows))
 	for i, r := range rawRows {
@@ -68,6 +68,9 @@ func (a *App) toolRowsInsert(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 			if err != nil {
 				return nil, errf("rows[%d]: %v", i, err)
 			}
+			if err := validateStoredValueSize(ctx, col, coerced); err != nil {
+				return nil, errf("rows[%d]: %v", i, err)
+			}
 			usedCols = append(usedCols, col.Name)
 			usedVals = append(usedVals, coerced)
 		}
@@ -80,6 +83,9 @@ func (a *App) toolRowsInsert(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		return nil, err
 	}
 	defer tx.Rollback()
+	if err := reserveRows(tx, t, int64(len(rawRows)), maxRowsPerTable(ctx)); err != nil {
+		return nil, err
+	}
 
 	ids := make([]int64, 0, len(rawRows))
 	for i, vals := range prepared {
@@ -133,6 +139,9 @@ func (a *App) toolRowsUpsert(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	if len(rawKey) == 0 {
 		return nil, errf("key is required and must be non-empty")
 	}
+	if len(rawKey) > 32 {
+		return nil, errf("key exceeds maximum of 32 columns")
+	}
 	keyCols := make([]string, 0, len(rawKey))
 	seenKey := map[string]bool{}
 	for i, v := range rawKey {
@@ -152,9 +161,13 @@ func (a *App) toolRowsUpsert(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		seenKey[name] = true
 		keyCols = append(keyCols, name)
 	}
+	sort.Strings(keyCols)
 	rawRows := sliceArg(args, "rows")
 	if len(rawRows) == 0 {
 		return nil, errf("rows is required and must be non-empty")
+	}
+	if len(rawRows) > maxBatchRows(ctx) {
+		return nil, errf("rows exceeds max_batch_rows (%d)", maxBatchRows(ctx))
 	}
 	t, err := loadTable(ctx.AppDB(), pid, tableName)
 	if err != nil {
@@ -198,6 +211,9 @@ func (a *App) toolRowsUpsert(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 			if err != nil {
 				return nil, errf("rows[%d] key %q: %v", i, key, err)
 			}
+			if err := validateStoredValueSize(ctx, colByName[key], coerced); err != nil {
+				return nil, errf("rows[%d] key %q: %v", i, key, err)
+			}
 			keyVals = append(keyVals, coerced)
 		}
 		prepared[i] = preparedRow{obj: obj, keyVals: keyVals}
@@ -208,6 +224,12 @@ func (a *App) toolRowsUpsert(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		return nil, err
 	}
 	defer tx.Rollback()
+	if _, err := tx.Exec(`UPDATE tables_meta SET updated_at = updated_at WHERE id = ?`, t.ID); err != nil {
+		return nil, err
+	}
+	if err := ensureUniqueUpsertIndex(tx, t, keyCols); err != nil {
+		return nil, err
+	}
 
 	var whereParts []string
 	for _, key := range keyCols {
@@ -238,6 +260,9 @@ func (a *App) toolRowsUpsert(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 				if err != nil {
 					return nil, errf("rows[%d]: %v", i, err)
 				}
+				if err := validateStoredValueSize(ctx, col, coerced); err != nil {
+					return nil, errf("rows[%d]: %v", i, err)
+				}
 				setCols = append(setCols, quote(col.Name)+" = ?")
 				vals = append(vals, coerced)
 			}
@@ -254,10 +279,6 @@ func (a *App) toolRowsUpsert(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 			continue
 		}
 
-		if cap := maxRowsPerTable(ctx); cap > 0 && t.RowCount+int64(inserted+1) > cap {
-			return nil, errf("would exceed max_rows_per_table (%d): table %q has %d rows, inserting at least %d",
-				cap, tableName, t.RowCount, inserted+1)
-		}
 		usedCols := make([]string, 0, len(t.Columns))
 		usedVals := make([]any, 0, len(t.Columns))
 		for _, col := range t.Columns {
@@ -276,6 +297,9 @@ func (a *App) toolRowsUpsert(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 			if err != nil {
 				return nil, errf("rows[%d]: %v", i, err)
 			}
+			if err := validateStoredValueSize(ctx, col, coerced); err != nil {
+				return nil, errf("rows[%d]: %v", i, err)
+			}
 			usedCols = append(usedCols, col.Name)
 			usedVals = append(usedVals, coerced)
 		}
@@ -291,6 +315,9 @@ func (a *App) toolRowsUpsert(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 			}
 			sqlText = fmt.Sprintf("INSERT INTO %s (%s) VALUES (%s)",
 				quote(t.PhysicalName), strings.Join(cols, ", "), placeholders)
+		}
+		if err := reserveRows(tx, t, 1, maxRowsPerTable(ctx)); err != nil {
+			return nil, err
 		}
 		res, err := tx.Exec(sqlText, usedVals...)
 		if err != nil {
@@ -319,6 +346,21 @@ func (a *App) toolRowsUpsert(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		})
 	}
 	return map[string]any{"ids": ids, "inserted": inserted, "updated": updated}, nil
+}
+
+func ensureUniqueUpsertIndex(tx *sql.Tx, t *Table, keyCols []string) error {
+	sum := sha256.Sum256([]byte(strings.Join(keyCols, "\x00")))
+	indexName := fmt.Sprintf("ux_%s_%x", t.PhysicalName, sum[:8])
+	quotedCols := make([]string, len(keyCols))
+	for i, col := range keyCols {
+		quotedCols[i] = quote(col)
+	}
+	stmt := fmt.Sprintf("CREATE UNIQUE INDEX IF NOT EXISTS %s ON %s (%s)",
+		quote(indexName), quote(t.PhysicalName), strings.Join(quotedCols, ", "))
+	if _, err := tx.Exec(stmt); err != nil {
+		return errf("cannot enforce upsert key (%s); remove duplicate key rows first: %v", strings.Join(keyCols, ", "), err)
+	}
+	return nil
 }
 
 // ─── rows_get ──────────────────────────────────────────────────────
@@ -395,6 +437,9 @@ func (a *App) toolRowsUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		if err != nil {
 			return nil, err
 		}
+		if err := validateStoredValueSize(ctx, t.Columns[idx], coerced); err != nil {
+			return nil, err
+		}
 		setCols = append(setCols, fmt.Sprintf("%s = ?", quote(k)))
 		vals = append(vals, coerced)
 	}
@@ -449,19 +494,8 @@ func (a *App) toolRowsDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	}
 
 	if id != 0 {
-		res, err := ctx.AppDB().Exec(fmt.Sprintf("DELETE FROM %s WHERE id = ?", quote(t.PhysicalName)), id)
-		if err != nil {
-			return nil, err
-		}
-		n, _ := res.RowsAffected()
-		if n > 0 {
-			emit(ctx, topicRowDeleted, map[string]any{
-				"table":   tableName,
-				"id":      id,
-				"deleted": n,
-			})
-		}
-		return map[string]any{"deleted": n}, nil
+		return deleteRows(ctx, t, tableName, id,
+			fmt.Sprintf("DELETE FROM %s WHERE id = ?", quote(t.PhysicalName)), []any{id})
 	}
 
 	if !boolArg(args, "confirm") {
@@ -475,16 +509,37 @@ func (a *App) toolRowsDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	if clause != "" {
 		stmt += " " + clause
 	}
-	res, err := ctx.AppDB().Exec(stmt, vals...)
+	return deleteRows(ctx, t, tableName, 0, stmt, vals)
+}
+
+func deleteRows(ctx *sdk.AppCtx, t *Table, tableName string, id int64, stmt string, vals []any) (any, error) {
+	tx, err := ctx.AppDB().Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	res, err := tx.Exec(stmt, vals...)
 	if err != nil {
 		return nil, err
 	}
 	n, _ := res.RowsAffected()
 	if n > 0 {
-		emit(ctx, topicRowDeleted, map[string]any{
+		if _, err := tx.Exec(`UPDATE tables_meta SET row_count = MAX(0, row_count - ?) WHERE id = ?`, n, t.ID); err != nil {
+			return nil, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	if n > 0 {
+		data := map[string]any{
 			"table":   tableName,
 			"deleted": n,
-		})
+		}
+		if id != 0 {
+			data["id"] = id
+		}
+		emit(ctx, topicRowDeleted, data)
 	}
 	return map[string]any{"deleted": n}, nil
 }
@@ -513,15 +568,6 @@ func (a *App) toolRowsSearch(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		return nil, err
 	}
 
-	var total int64
-	totalSQL := "SELECT COUNT(*) FROM " + quote(t.PhysicalName)
-	if clause != "" {
-		totalSQL += " " + clause
-	}
-	if err := ctx.AppDB().QueryRow(totalSQL, vals...).Scan(&total); err != nil {
-		return nil, err
-	}
-
 	limit := intArg(args, "limit", 50)
 	if limit <= 0 {
 		limit = 50
@@ -533,6 +579,17 @@ func (a *App) toolRowsSearch(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	if offset < 0 {
 		offset = 0
 	}
+	qctx, cancel := queryTimeoutContext(ctx)
+	defer cancel()
+	var total int64
+	if clause == "" {
+		total = t.RowCount
+	} else {
+		totalSQL := "SELECT COUNT(*) FROM " + quote(t.PhysicalName) + " " + clause
+		if err := ctx.AppDB().QueryRowContext(qctx, totalSQL, vals...).Scan(&total); err != nil {
+			return nil, err
+		}
+	}
 
 	selectClause, err := parseSelect(args, t)
 	if err != nil {
@@ -543,17 +600,17 @@ func (a *App) toolRowsSearch(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		stmt += " " + clause
 	}
 	stmt += " " + orderBy
-	stmt += fmt.Sprintf(" LIMIT %d OFFSET %d", limit, offset)
-	rows, err := ctx.AppDB().Query(stmt, vals...)
+	stmt += fmt.Sprintf(" LIMIT %d OFFSET %d", limit+1, offset)
+	rows, err := ctx.AppDB().QueryContext(qctx, stmt, vals...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	out, err := scanRows(rows, t)
+	out, truncated, err := scanRowsBudget(rows, t, maxQueryBytes(ctx), limit)
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"rows": out, "total": total}, nil
+	return map[string]any{"rows": out, "total": total, "truncated": truncated}, nil
 }
 
 // ─── rows_count ────────────────────────────────────────────────────
@@ -575,12 +632,17 @@ func (a *App) toolRowsCount(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	if clause == "" {
+		return map[string]any{"count": t.RowCount}, nil
+	}
 	stmt := "SELECT COUNT(*) FROM " + quote(t.PhysicalName)
 	if clause != "" {
 		stmt += " " + clause
 	}
 	var n int64
-	if err := ctx.AppDB().QueryRow(stmt, vals...).Scan(&n); err != nil {
+	qctx, cancel := queryTimeoutContext(ctx)
+	defer cancel()
+	if err := ctx.AppDB().QueryRowContext(qctx, stmt, vals...).Scan(&n); err != nil {
 		return nil, err
 	}
 	return map[string]any{"count": n}, nil
@@ -655,16 +717,18 @@ func (a *App) toolRowsAggregate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	}
 	stmt += fmt.Sprintf(" LIMIT %d", limit+1)
 
-	rows, err := ctx.AppDB().Query(stmt, vals...)
+	qctx, cancel := queryTimeoutContext(ctx)
+	defer cancel()
+	rows, err := ctx.AppDB().QueryContext(qctx, stmt, vals...)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	out, err := scanAggregateRows(rows)
+	out, truncatedByBytes, err := scanAggregateRows(rows, maxQueryBytes(ctx))
 	if err != nil {
 		return nil, err
 	}
-	truncated := false
+	truncated := truncatedByBytes
 	if len(out) > limit {
 		truncated = true
 		out = out[:limit]
@@ -735,23 +799,34 @@ func parseSelect(args map[string]any, t *Table) (string, error) {
 }
 
 func scanRows(rows *sql.Rows, t *Table) ([]map[string]any, error) {
+	out, _, err := scanRowsBudget(rows, t, 0, 0)
+	return out, err
+}
+
+func scanRowsBudget(rows *sql.Rows, t *Table, byteCap int64, rowCap int) ([]map[string]any, bool, error) {
 	out := []map[string]any{}
+	var usedBytes int64
+	truncated := false
 	cols, err := rows.Columns()
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	colIdx := map[string]int{}
 	for i, c := range cols {
 		colIdx[c] = i
 	}
 	for rows.Next() {
+		if rowCap > 0 && len(out) >= rowCap {
+			truncated = true
+			break
+		}
 		dest := make([]any, len(cols))
 		ptrs := make([]any, len(cols))
 		for i := range dest {
 			ptrs[i] = &dest[i]
 		}
 		if err := rows.Scan(ptrs...); err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		row := map[string]any{}
 		// Reserved columns are populated only if actually present in
@@ -774,9 +849,16 @@ func scanRows(rows *sql.Rows, t *Table) ([]map[string]any, error) {
 			}
 			row[c.Name] = hydrateForResult(c, dest[i])
 		}
+		for k, v := range row {
+			usedBytes += int64(len(k)) + valueSize(v)
+		}
+		if byteCap > 0 && usedBytes > byteCap {
+			truncated = true
+			break
+		}
 		out = append(out, row)
 	}
-	return out, rows.Err()
+	return out, truncated, rows.Err()
 }
 
 func scalarOrInt(v any) any {
@@ -871,6 +953,9 @@ func buildWhere(t *Table, raw []any) (string, []any, error) {
 	if len(raw) == 0 {
 		return "", nil, nil
 	}
+	if len(raw) > 100 {
+		return "", nil, errf("where exceeds maximum of 100 predicates")
+	}
 	allowed := map[string]Column{
 		"id":         {Name: "id", Type: "number"},
 		"created_at": {Name: "created_at", Type: "datetime"},
@@ -916,6 +1001,9 @@ func buildWhere(t *Table, raw []any) (string, []any, error) {
 			arr, ok := p.Value.([]any)
 			if !ok || len(arr) == 0 {
 				return "", nil, errf("where[%d]: op in needs non-empty array", i)
+			}
+			if len(arr) > 1000 {
+				return "", nil, errf("where[%d]: op in exceeds maximum of 1000 values", i)
 			}
 			placeholders := strings.Repeat("?,", len(arr))
 			placeholders = placeholders[:len(placeholders)-1]
@@ -965,6 +1053,9 @@ type aggregateMetric struct {
 }
 
 func buildAggregateGroups(t *Table, raw []any) ([]aggregateGroup, error) {
+	if len(raw) > 16 {
+		return nil, errf("group_by exceeds maximum of 16 columns")
+	}
 	groups := make([]aggregateGroup, 0, len(raw))
 	seen := map[string]bool{}
 	for i, item := range raw {
@@ -1018,6 +1109,9 @@ func buildAggregateGroups(t *Table, raw []any) ([]aggregateGroup, error) {
 func buildAggregateMetrics(t *Table, raw []any) ([]aggregateMetric, error) {
 	if len(raw) == 0 {
 		return nil, errf("metrics is required and must be non-empty")
+	}
+	if len(raw) > 32 {
+		return nil, errf("metrics exceeds maximum of 32")
 	}
 	metrics := make([]aggregateMetric, 0, len(raw))
 	seen := map[string]bool{}
@@ -1131,7 +1225,7 @@ func bucketExpr(col, bucket string) (string, error) {
 	case "day":
 		return "strftime('%Y-%m-%d', " + q + ")", nil
 	case "week":
-		return "strftime('%Y-W%W', " + q + ")", nil
+		return "strftime('%G-W%V', " + q + ")", nil
 	case "month":
 		return "strftime('%Y-%m', " + q + ")", nil
 	case "year":
@@ -1174,11 +1268,12 @@ func buildAggregateOrderBy(groups []aggregateGroup, metrics []aggregateMetric, r
 	return "ORDER BY " + quote(name) + " " + dir, nil
 }
 
-func scanAggregateRows(rows *sql.Rows) ([]map[string]any, error) {
+func scanAggregateRows(rows *sql.Rows, byteCap int64) ([]map[string]any, bool, error) {
 	out := []map[string]any{}
+	var usedBytes int64
 	cols, err := rows.Columns()
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	for rows.Next() {
 		dest := make([]any, len(cols))
@@ -1187,15 +1282,49 @@ func scanAggregateRows(rows *sql.Rows) ([]map[string]any, error) {
 			ptrs[i] = &dest[i]
 		}
 		if err := rows.Scan(ptrs...); err != nil {
-			return nil, err
+			return nil, false, err
 		}
 		row := map[string]any{}
 		for i, c := range cols {
-			row[c] = normaliseScanValue(dest[i])
+			v := normaliseScanValue(dest[i])
+			usedBytes += int64(len(c)) + valueSize(v)
+			if byteCap > 0 && usedBytes > byteCap {
+				return out, true, nil
+			}
+			row[c] = v
 		}
 		out = append(out, row)
 	}
-	return out, rows.Err()
+	return out, false, rows.Err()
+}
+
+func reserveRows(tx *sql.Tx, t *Table, delta, cap int64) error {
+	if delta <= 0 {
+		return nil
+	}
+	stmt := `UPDATE tables_meta SET row_count = row_count + ? WHERE id = ?`
+	args := []any{delta, t.ID}
+	if cap > 0 {
+		stmt += ` AND row_count + ? <= ?`
+		args = append(args, delta, cap)
+	}
+	res, err := tx.Exec(stmt, args...)
+	if err != nil {
+		return err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n == 1 {
+		t.RowCount += delta
+		return nil
+	}
+	var current int64
+	if err := tx.QueryRow(`SELECT row_count FROM tables_meta WHERE id = ?`, t.ID).Scan(&current); err != nil {
+		return err
+	}
+	return errf("would exceed max_rows_per_table (%d): table %q has %d rows, inserting %d", cap, t.Name, current, delta)
 }
 
 func sqlOp(op string) string {
