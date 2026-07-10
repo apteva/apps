@@ -7,6 +7,8 @@ package main
 // bounded chunk, which fits the poll model better.
 
 import (
+	"bufio"
+	"bytes"
 	"context"
 	"fmt"
 	"os/exec"
@@ -15,27 +17,68 @@ import (
 )
 
 func iosLogs(udid string, lines int) (string, error) {
-	if lines <= 0 {
-		lines = 200
-	}
+	lines = normalizeLogLines(lines)
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
 	// `log show --last 2m` over the booted device's log store. We cap
 	// the window rather than the line count (log show has no -n), then
 	// tail client-side to `lines`.
-	out, err := exec.CommandContext(ctx, "xcrun", "simctl", "spawn", udid,
-		"log", "show", "--last", "2m", "--style", "compact").CombinedOutput()
+	cmd := exec.CommandContext(ctx, "xcrun", "simctl", "spawn", udid,
+		"log", "show", "--last", "2m", "--style", "compact")
+	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		return "", fmt.Errorf("simctl log show: %w (%s)", err, strings.TrimSpace(string(out)))
+		return "", err
 	}
-	return tailLines(string(out), lines), nil
+	stderr := &cappedBuffer{limit: 64 << 10}
+	cmd.Stderr = stderr
+	if err := cmd.Start(); err != nil {
+		return "", err
+	}
+	ring := make([]string, lines)
+	count := 0
+	scanner := bufio.NewScanner(stdout)
+	scanner.Buffer(make([]byte, 64<<10), 1<<20)
+	for scanner.Scan() {
+		ring[count%lines] = scanner.Text()
+		count++
+	}
+	scanErr := scanner.Err()
+	err = cmd.Wait()
+	if err != nil {
+		return "", fmt.Errorf("simctl log show: %w (%s)", err, strings.TrimSpace(stderr.String()))
+	}
+	if scanErr != nil {
+		return "", fmt.Errorf("read simctl logs: %w", scanErr)
+	}
+	if count == 0 {
+		return "", nil
+	}
+	kept := count
+	if kept > lines {
+		kept = lines
+	}
+	out := make([]string, 0, kept)
+	start := count - kept
+	for i := start; i < count; i++ {
+		out = append(out, ring[i%lines])
+	}
+	return strings.Join(out, "\n"), nil
 }
 
-// tailLines returns the last n lines of s.
-func tailLines(s string, n int) string {
-	all := strings.Split(strings.TrimRight(s, "\n"), "\n")
-	if len(all) <= n {
-		return s
+type cappedBuffer struct {
+	bytes.Buffer
+	limit int
+}
+
+func (b *cappedBuffer) Write(p []byte) (int, error) {
+	written := len(p)
+	remaining := b.limit - b.Len()
+	if remaining <= 0 {
+		return written, nil
 	}
-	return strings.Join(all[len(all)-n:], "\n")
+	if len(p) > remaining {
+		p = p[:remaining]
+	}
+	_, err := b.Buffer.Write(p)
+	return written, err
 }

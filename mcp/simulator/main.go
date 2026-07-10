@@ -22,10 +22,13 @@
 package main
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"sync"
+	"time"
 
 	sdk "github.com/apteva/app-sdk"
 	_ "modernc.org/sqlite"
@@ -42,7 +45,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: simulator
 display_name: Apteva Simulator
-version: 0.1.18
+version: 0.1.19
 description: |
   iOS and Android simulators on demand. Boot a device, build a repo's
   source into an artifact, install + launch on a headless emulator or
@@ -138,6 +141,7 @@ config_schema:
   - { name: ios_runtime,           type: text, label: "Default iOS runtime",    description: "simctl runtime id (e.g. iOS-17-5). Empty = newest installed.", default: "" }
   - { name: ios_device_type,       type: text, label: "Default iOS device",     description: "simctl device-type id.", default: "iPhone-15-Pro" }
   - { name: xcodebuild_extra_args, type: text, label: "Extra xcodebuild args",  description: "Appended to every xcodebuild invocation.", default: "" }
+  - { name: build_env_allowlist,    type: text, label: "Build secret env allowlist", description: "Comma-separated sensitive environment variable names explicitly allowed in project build processes. APTEVA_* variables are always blocked.", default: "" }
   - { name: idb_companion_path,    type: text, label: "idb_companion path",     description: "Override the PATH lookup. Empty = use PATH.", default: "" }
   - { name: max_concurrent_sims,   type: text, label: "Max booted sims",        description: "Global cap across android + ios.", default: "2" }
   - { name: stream_codec,          type: text, label: "Stream codec",           description: "h264 is the only supported value in v0.1.", default: "h264" }
@@ -155,7 +159,19 @@ type App struct {
 	// appCtx is stashed at OnMount so the NoAuth /stream/ WebSocket
 	// route — which the SDK invokes without a per-call AppCtx — can
 	// reach the DB + platform client.
-	appCtx *sdk.AppCtx
+	appCtx      *sdk.AppCtx
+	bootMu      sync.Mutex
+	streamMu    sync.Mutex
+	streams     map[string]activeStream
+	runMu       sync.Mutex
+	runLocks    map[string]*sync.Mutex
+	cleanupMu   sync.Mutex
+	lastCleanup time.Time
+}
+
+type activeStream struct {
+	id     string
+	cancel context.CancelFunc
 }
 
 func (a *App) Manifest() sdk.Manifest {
@@ -193,8 +209,13 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 
 	a.appCtx = ctx
 	a.sup = newSimSupervisor(a, dataDir)
+	a.streams = make(map[string]activeStream)
+	a.runLocks = make(map[string]*sync.Mutex)
 	if err := a.sup.reconcileOrphans(ctx); err != nil {
 		ctx.Logger().Warn("sim orphan reconcile failed", "err", err)
+	}
+	if err := a.cleanupStorage(ctx.AppDB()); err != nil {
+		ctx.Logger().Warn("sim storage cleanup failed", "err", err)
 	}
 
 	ctx.Logger().Info("simulator mounted",
@@ -205,6 +226,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 }
 
 func (a *App) OnUnmount(*sdk.AppCtx) error {
+	a.stopAllStreams()
 	if a.sup != nil {
 		a.sup.stopAll()
 	}
@@ -230,10 +252,10 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		// validates it before upgrading. See stream.go.
 		{Pattern: "/stream/", Handler: a.handleStream, NoAuth: true},
 		// Standalone-panel read/action endpoints. See handlers.go.
-		{Pattern: "/api/capabilities", Handler: a.handleCapabilities},
-		{Pattern: "/api/run", Handler: a.handleRunHTTP},
-		{Pattern: "/api/sims", Handler: a.handleSimsList},
-		{Pattern: "/api/sims/boot", Handler: a.handleSimsBootHTTP},
+		{Method: "GET", Pattern: "/api/capabilities", Handler: a.handleCapabilities},
+		{Method: "POST", Pattern: "/api/run", Handler: a.handleRunHTTP},
+		{Method: "GET", Pattern: "/api/sims", Handler: a.handleSimsList},
+		{Method: "POST", Pattern: "/api/sims/boot", Handler: a.handleSimsBootHTTP},
 		{Pattern: "/api/sims/", Handler: a.handleSimItem},
 	}
 }

@@ -19,6 +19,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -51,6 +52,7 @@ func (a *App) handleSimsList(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleSimsBootHTTP(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
 	var body struct {
 		Platform   string `json:"platform"`
 		Image      string `json:"image"`
@@ -60,21 +62,26 @@ func (a *App) handleSimsBootHTTP(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
-	if err := capabilityCheckFor(a.appCtx, body.Platform); err != nil {
+	projectID, err := resolveProjectFromRequest(r)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	requestCtx := a.appCtx.WithProject(projectID)
+	if err := capabilityCheckFor(requestCtx, body.Platform); err != nil {
 		writeErr(w, http.StatusConflict, err)
 		return
 	}
 	var sim *Sim
-	var err error
 	switch body.Platform {
 	case "android":
-		img := orConfig(a.appCtx, body.Image, "android_image")
-		dt := orConfig(a.appCtx, body.DeviceType, "android_device_type")
-		sim, err = a.bootAndroid(a.appCtx, img, dt)
+		img := orConfig(requestCtx, body.Image, "android_image")
+		dt := orConfig(requestCtx, body.DeviceType, "android_device_type")
+		sim, err = a.bootAndroid(requestCtx, img, dt)
 	case "ios":
-		rt := orConfig(a.appCtx, body.Image, "ios_runtime")
-		dt := orConfig(a.appCtx, body.DeviceType, "ios_device_type")
-		sim, err = a.bootIOS(a.appCtx, rt, dt)
+		rt := orConfig(requestCtx, body.Image, "ios_runtime")
+		dt := orConfig(requestCtx, body.DeviceType, "ios_device_type")
+		sim, err = a.bootIOS(requestCtx, rt, dt)
 	default:
 		writeErr(w, http.StatusBadRequest, errBadPlatform)
 		return
@@ -88,26 +95,26 @@ func (a *App) handleSimsBootHTTP(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) handleRunHTTP(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, maxSourceArchiveBytes+(10<<20))
-	if err := r.ParseMultipartForm(maxSourceArchiveBytes); err != nil {
+	if err := r.ParseMultipartForm(32 << 20); err != nil {
 		writeErr(w, http.StatusBadRequest, fmt.Errorf("parse multipart upload: %w", err))
 		return
+	}
+	if r.MultipartForm != nil {
+		defer r.MultipartForm.RemoveAll()
 	}
 	framework := strings.TrimSpace(r.FormValue("framework"))
 	if framework != "android" && framework != "ios" {
 		writeErr(w, http.StatusBadRequest, errBadPlatform)
 		return
 	}
-	if err := capabilityCheckFor(a.appCtx, framework); err != nil {
-		writeErr(w, http.StatusConflict, err)
-		return
-	}
-	if err := streamingCapabilityCheckFor(a.appCtx, framework); err != nil {
-		writeErr(w, http.StatusConflict, err)
-		return
-	}
 	proj, err := resolveProjectFromRequest(r)
 	if err != nil {
 		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	requestCtx := a.appCtx.WithProject(proj)
+	if err := capabilityCheckForNeeds(requestCtx, framework, true, true); err != nil {
+		writeErr(w, http.StatusConflict, err)
 		return
 	}
 	file, header, err := r.FormFile("source")
@@ -116,22 +123,36 @@ func (a *App) handleRunHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer file.Close()
-	raw, err := io.ReadAll(io.LimitReader(file, maxSourceArchiveBytes+1))
+	upload, err := os.CreateTemp("", "apteva-sim-source-*")
 	if err != nil {
-		writeErr(w, http.StatusBadRequest, fmt.Errorf("read source archive: %w", err))
+		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
-	if len(raw) > maxSourceArchiveBytes {
+	uploadPath := upload.Name()
+	defer os.Remove(uploadPath)
+	n, copyErr := io.Copy(upload, io.LimitReader(file, maxSourceArchiveBytes+1))
+	closeErr := upload.Close()
+	if copyErr != nil || closeErr != nil {
+		writeErr(w, http.StatusBadRequest, fmt.Errorf("read source archive: %w", errors.Join(copyErr, closeErr)))
+		return
+	}
+	if n > maxSourceArchiveBytes {
 		writeErr(w, http.StatusRequestEntityTooLarge, fmt.Errorf("source archive exceeds %d bytes", maxSourceArchiveBytes))
 		return
 	}
 
-	sim, err := a.ensureBootedSim(a.appCtx, framework)
+	sim, err := a.ensureBootedSim(requestCtx, framework)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, fmt.Errorf("boot: %w", err))
 		return
 	}
-	run, err := dbInsertSimRun(a.appCtx.AppDB(), SimRun{
+	unlockRun := a.lockSimRun(sim.ID)
+	defer unlockRun()
+	if err := dbStopActiveSimRuns(requestCtx.AppDB(), sim.ID); err != nil {
+		writeErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	run, err := dbInsertSimRun(requestCtx.AppDB(), SimRun{
 		SimID: sim.ID, ProjectID: proj, SourceApp: "panel",
 		SourceRef: header.Filename, Framework: framework, Status: "building",
 		StartedAt: time.Now().UTC().Format(time.RFC3339),
@@ -143,19 +164,19 @@ func (a *App) handleRunHTTP(w http.ResponseWriter, r *http.Request) {
 
 	srcDir := filepath.Join(os.TempDir(), "apteva-sim-upload-"+randHex(8))
 	if err := os.MkdirAll(srcDir, 0o755); err != nil {
-		a.failRun(a.appCtx, run.ID, "extract: "+err.Error())
+		a.failRun(requestCtx, run.ID, "extract: "+err.Error())
 		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
 	defer os.RemoveAll(srcDir)
-	buildRoot, _, err := extractSourceUpload(raw, header.Filename, srcDir)
+	buildRoot, _, err := extractSourceUploadFile(uploadPath, header.Filename, srcDir)
 	if err != nil {
-		a.failRun(a.appCtx, run.ID, "extract: "+err.Error())
+		a.failRun(requestCtx, run.ID, "extract: "+err.Error())
 		writeErr(w, http.StatusBadRequest, err)
 		return
 	}
 
-	br, err := a.runBuildFromSourceDir(a.appCtx, buildRoot, buildParams{
+	br, err := a.runBuildFromSourceDir(r.Context(), requestCtx, buildRoot, buildParams{
 		Framework: framework,
 		Module:    r.FormValue("android_module"),
 		Scheme:    r.FormValue("ios_scheme"),
@@ -164,23 +185,24 @@ func (a *App) handleRunHTTP(w http.ResponseWriter, r *http.Request) {
 		SimRunID:  run.ID,
 	})
 	if err != nil {
-		a.failRun(a.appCtx, run.ID, "build: "+err.Error())
+		a.failRun(requestCtx, run.ID, "build: "+err.Error())
 		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
-	_ = dbUpdateSimRun(a.appCtx.AppDB(), run.ID, map[string]any{
+	_ = dbUpdateSimRun(requestCtx.AppDB(), run.ID, map[string]any{
 		"status":        "installing",
 		"bundle_id":     br.BundleID,
 		"artifact_path": br.ArtifactPath,
 		"log_path":      fmt.Sprintf("%d.log", run.ID),
 	})
 	if err := a.installAndLaunch(sim, br); err != nil {
-		a.failRun(a.appCtx, run.ID, "install/launch: "+err.Error())
+		a.failRun(requestCtx, run.ID, "install/launch: "+err.Error())
 		writeErr(w, http.StatusInternalServerError, err)
 		return
 	}
-	_ = dbUpdateSimRun(a.appCtx.AppDB(), run.ID, map[string]any{"status": "running"})
-	stream, err := dbMintStreamToken(a.appCtx.AppDB(), sim.ID, time.Hour)
+	_ = dbUpdateSimRun(requestCtx.AppDB(), run.ID, map[string]any{"status": "running"})
+	_ = a.cleanupStorage(requestCtx.AppDB())
+	stream, err := dbMintStreamToken(requestCtx.AppDB(), sim.ID, time.Hour)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, err)
 		return
@@ -191,7 +213,7 @@ func (a *App) handleRunHTTP(w http.ResponseWriter, r *http.Request) {
 		"platform":      sim.Platform,
 		"bundle_id":     br.BundleID,
 		"artifact_path": br.ArtifactPath,
-		"stream_url":    a.streamURL(a.appCtx, sim.ID, stream.WSToken),
+		"stream_url":    a.streamURL(requestCtx, sim.ID, stream.WSToken),
 		"status":        "running",
 	})
 }
@@ -214,10 +236,24 @@ func (a *App) handleSimItem(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotFound, errNotFound)
 		return
 	}
+	projectID, err := resolveProjectFromRequest(r)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, err)
+		return
+	}
+	if sim.ProjectID != projectID {
+		writeErr(w, http.StatusNotFound, errNotFound)
+		return
+	}
 	sim = a.refreshSimStatus(sim)
 
 	switch action {
 	case "shutdown":
+		if r.Method != http.MethodPost {
+			writeErr(w, http.StatusMethodNotAllowed, errBadMethod)
+			return
+		}
+		a.stopStream(simID)
 		if p := a.sup.get(simID); p != nil {
 			a.sup.shutdownProcess(p)
 			a.sup.drop(simID)
@@ -232,9 +268,14 @@ func (a *App) handleSimItem(w http.ResponseWriter, r *http.Request) {
 		}
 		_ = dbUpdateSim(a.appCtx.AppDB(), simID, map[string]any{"status": "shutdown", "pid": 0})
 		_ = dbDeleteStreamToken(a.appCtx.AppDB(), simID)
+		_ = dbStopActiveSimRuns(a.appCtx.AppDB(), simID)
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 
 	case "screenshot":
+		if r.Method != http.MethodGet {
+			writeErr(w, http.StatusMethodNotAllowed, errBadMethod)
+			return
+		}
 		if sim.Status != "booted" {
 			writeErr(w, http.StatusConflict, errNotBooted)
 			return
@@ -255,6 +296,10 @@ func (a *App) handleSimItem(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write(png)
 
 	case "stream-url":
+		if r.Method != http.MethodPost {
+			writeErr(w, http.StatusMethodNotAllowed, errBadMethod)
+			return
+		}
 		if sim.Status != "booted" {
 			writeErr(w, http.StatusConflict, errNotBooted)
 			return
@@ -279,9 +324,10 @@ func (a *App) handleSimItem(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if r.Method != http.MethodPost {
-			writeErr(w, http.StatusMethodNotAllowed, errBadPath)
+			writeErr(w, http.StatusMethodNotAllowed, errBadMethod)
 			return
 		}
+		r.Body = http.MaxBytesReader(w, r.Body, 64<<10)
 		var ev inputEvent
 		if err := json.NewDecoder(r.Body).Decode(&ev); err != nil {
 			writeErr(w, http.StatusBadRequest, err)
@@ -294,10 +340,14 @@ func (a *App) handleSimItem(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 
 	case "logs":
+		if r.Method != http.MethodGet {
+			writeErr(w, http.StatusMethodNotAllowed, errBadMethod)
+			return
+		}
 		lines := 200
 		if v := r.URL.Query().Get("lines"); v != "" {
 			if n, e := strconv.Atoi(v); e == nil {
-				lines = n
+				lines = normalizeLogLines(n)
 			}
 		}
 		var content string
@@ -384,6 +434,7 @@ func writeErr(w http.ResponseWriter, code int, err error) {
 var (
 	errBadPlatform = &simError{"platform must be android or ios"}
 	errBadPath     = &simError{"bad path"}
+	errBadMethod   = &simError{"method not allowed"}
 	errNotFound    = &simError{"sim not found"}
 	errNotBooted   = &simError{"sim not booted"}
 	errNoProject   = &simError{"project_id required in query string when install scope=global"}

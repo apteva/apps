@@ -25,10 +25,10 @@ import (
 type Sim struct {
 	ID         string `json:"id"`
 	ProjectID  string `json:"project_id"`
-	Platform   string `json:"platform"`     // "android" | "ios"
+	Platform   string `json:"platform"` // "android" | "ios"
 	Runtime    string `json:"runtime"`
 	DeviceType string `json:"device_type"`
-	Status     string `json:"status"`       // shutdown | booting | booted | crashed
+	Status     string `json:"status"` // shutdown | booting | booted | crashed
 	PID        int64  `json:"pid"`
 	Serial     string `json:"serial"`
 	CreatedAt  string `json:"created_at,omitempty"`
@@ -40,12 +40,12 @@ type SimRun struct {
 	ID           int64  `json:"id"`
 	SimID        string `json:"sim_id"`
 	ProjectID    string `json:"project_id"`
-	SourceApp    string `json:"source_app"`     // "code" | "manual"
+	SourceApp    string `json:"source_app"` // "code" | "manual"
 	SourceRef    string `json:"source_ref"`
-	Framework    string `json:"framework"`      // "android" | "ios"
+	Framework    string `json:"framework"` // "android" | "ios"
 	BundleID     string `json:"bundle_id"`
 	ArtifactPath string `json:"artifact_path"`
-	Status       string `json:"status"`         // building | installing | running | stopped | crashed
+	Status       string `json:"status"` // building | installing | running | stopped | crashed
 	LogPath      string `json:"log_path"`
 	StartedAt    string `json:"started_at,omitempty"`
 	StoppedAt    string `json:"stopped_at,omitempty"`
@@ -189,6 +189,15 @@ func dbInsertSimRun(db *sql.DB, r SimRun) (*SimRun, error) {
 	return &r, nil
 }
 
+func dbStopActiveSimRuns(db *sql.DB, simID string) error {
+	_, err := db.Exec(`
+		UPDATE sim_runs
+		SET status = 'stopped', stopped_at = ?
+		WHERE sim_id = ? AND status IN ('building','installing','running')
+	`, time.Now().UTC().Format(time.RFC3339), simID)
+	return err
+}
+
 func dbUpdateSimRun(db *sql.DB, id int64, fields map[string]any) error {
 	if len(fields) == 0 {
 		return nil
@@ -258,7 +267,10 @@ func dbResolveStreamToken(db *sql.DB, token string) (string, error) {
 		return "", err
 	}
 	t, err := time.Parse(time.RFC3339, expires)
-	if err == nil && time.Now().UTC().After(t) {
+	if err != nil {
+		return "", errors.New("token expiry is invalid")
+	}
+	if time.Now().UTC().After(t) {
 		return "", errors.New("token expired")
 	}
 	return simID, nil

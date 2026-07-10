@@ -39,7 +39,7 @@ type buildResult struct {
 
 // runBuild extracts the source archive and dispatches to the platform
 // builder. Writes the combined build output to the sim_run's log file.
-func (a *App) runBuild(ctx *sdk.AppCtx, p buildParams) (*buildResult, error) {
+func (a *App) runBuild(callCtx context.Context, ctx *sdk.AppCtx, p buildParams) (*buildResult, error) {
 	if strings.TrimSpace(p.SourceTGZB64) == "" {
 		return nil, fmt.Errorf("source_tgz_b64 required")
 	}
@@ -55,10 +55,12 @@ func (a *App) runBuild(ctx *sdk.AppCtx, p buildParams) (*buildResult, error) {
 	if err != nil {
 		return nil, err
 	}
-	return a.runBuildFromSourceDir(ctx, buildRoot, p)
+	return a.runBuildFromSourceDir(callCtx, ctx, buildRoot, p)
 }
 
-func (a *App) runBuildFromSourceDir(ctx *sdk.AppCtx, srcDir string, p buildParams) (*buildResult, error) {
+func (a *App) runBuildFromSourceDir(callCtx context.Context, ctx *sdk.AppCtx, srcDir string, p buildParams) (*buildResult, error) {
+	buildCtx, cancel := buildContext(callCtx)
+	defer cancel()
 	logPath := filepath.Join(a.simLogsDir, fmt.Sprintf("%d.log", p.SimRunID))
 	logW, err := os.OpenFile(logPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
 	if err != nil {
@@ -66,10 +68,11 @@ func (a *App) runBuildFromSourceDir(ctx *sdk.AppCtx, srcDir string, p buildParam
 	}
 	defer logW.Close()
 	fmt.Fprintf(logW, "=== build %s at %s ===\n", p.Framework, time.Now().UTC().Format(time.RFC3339))
+	allowedEnv := buildEnvAllowlist(ctx.Config().Get("build_env_allowlist"))
 
 	switch p.Framework {
 	case "android":
-		res, err := a.buildAndroid(srcDir, p.Module, p.BuildCmd, splitArgs(ctx.Config().Get("gradle_extra_args")), logW)
+		res, err := a.buildAndroid(buildCtx, srcDir, p.Module, p.BuildCmd, splitArgs(ctx.Config().Get("gradle_extra_args")), allowedEnv, logW)
 		if err != nil {
 			return nil, err
 		}
@@ -79,7 +82,7 @@ func (a *App) runBuildFromSourceDir(ctx *sdk.AppCtx, srcDir string, p buildParam
 		if p.SimUDID == "" {
 			return nil, fmt.Errorf("ios build requires a booted sim udid as destination")
 		}
-		res, err := a.buildIOS(srcDir, p.Scheme, p.BuildCmd, p.SimUDID, splitArgs(ctx.Config().Get("xcodebuild_extra_args")), logW)
+		res, err := a.buildIOS(buildCtx, srcDir, p.Scheme, p.BuildCmd, p.SimUDID, splitArgs(ctx.Config().Get("xcodebuild_extra_args")), allowedEnv, logW)
 		if err != nil {
 			return nil, err
 		}
@@ -91,6 +94,11 @@ func (a *App) runBuildFromSourceDir(ctx *sdk.AppCtx, srcDir string, p buildParam
 // installAndLaunch installs a built artifact onto the sim and launches
 // it. Platform dispatch on the sim row.
 func (a *App) installAndLaunch(sim *Sim, br *buildResult) error {
+	artifact, err := a.validateArtifactPath(br.ArtifactPath, sim.Platform)
+	if err != nil {
+		return err
+	}
+	br.ArtifactPath = artifact
 	switch sim.Platform {
 	case "android":
 		if err := installAndroidAPK(sim.Serial, br.ArtifactPath); err != nil {
@@ -154,11 +162,4 @@ func (a *App) streamURL(ctx *sdk.AppCtx, simID, token string) string {
 		wsBase = "ws://" + strings.TrimPrefix(base, "http://")
 	}
 	return wsBase + rel
-}
-
-// runContext bounds the whole sims_run orchestration so a hung gradle /
-// xcodebuild can't wedge the handler forever. 20 minutes is generous
-// for a cold first build (gradle dependency download, Xcode index).
-func runContext() (context.Context, context.CancelFunc) {
-	return context.WithTimeout(context.Background(), 20*time.Minute)
 }

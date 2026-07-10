@@ -1,6 +1,11 @@
 package main
 
-import "testing"
+import (
+	"os"
+	"testing"
+
+	sdk "github.com/apteva/app-sdk"
+)
 
 // The embedded manifest must always parse and round-trip the surface
 // the binary exposes. If this drifts the binary won't survive sdk.Run's
@@ -30,6 +35,21 @@ func TestEmbeddedManifest_Valid(t *testing.T) {
 	wantTools := 12
 	if got := len(m.Provides.MCPTools); got != wantTools {
 		t.Errorf("expected %d MCP tools in manifest, got %d", wantTools, got)
+	}
+}
+
+func TestDiskManifestParsesAndMatchesVersion(t *testing.T) {
+	body, err := os.ReadFile("apteva.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	disk, err := sdk.ParseManifest(body)
+	if err != nil {
+		t.Fatalf("parse apteva.yaml: %v", err)
+	}
+	embedded := (&App{}).Manifest()
+	if disk.Version != embedded.Version {
+		t.Fatalf("disk version %q != embedded version %q", disk.Version, embedded.Version)
 	}
 }
 

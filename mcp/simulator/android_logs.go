@@ -14,9 +14,7 @@ import (
 )
 
 func androidLogs(serial string, lines int) (string, error) {
-	if lines <= 0 {
-		lines = 200
-	}
+	lines = normalizeLogLines(lines)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	// -d dumps and exits; -t <n> limits to the last n lines; -v brief
@@ -26,4 +24,14 @@ func androidLogs(serial string, lines int) (string, error) {
 		return "", fmt.Errorf("adb logcat: %w (%s)", err, strings.TrimSpace(string(out)))
 	}
 	return string(out), nil
+}
+
+func normalizeLogLines(lines int) int {
+	if lines <= 0 {
+		return 200
+	}
+	if lines > 5000 {
+		return 5000
+	}
+	return lines
 }

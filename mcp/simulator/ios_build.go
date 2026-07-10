@@ -33,7 +33,7 @@ type iosBuildResult struct {
 
 // buildIOS runs xcodebuild for the booted simulator (identified by
 // udid) and returns the stashed .app + its bundle id.
-func (a *App) buildIOS(srcDir, scheme, buildCmd, udid string, extraArgs []string, logW *os.File) (*iosBuildResult, error) {
+func (a *App) buildIOS(ctx context.Context, srcDir, scheme, buildCmd, udid string, extraArgs, allowedEnv []string, logW *os.File) (*iosBuildResult, error) {
 	derived := filepath.Join(os.TempDir(), "apteva-sim-derived-"+randHex(8))
 	defer os.RemoveAll(derived)
 
@@ -43,12 +43,7 @@ func (a *App) buildIOS(srcDir, scheme, buildCmd, udid string, extraArgs []string
 	}
 	fmt.Fprintf(logW, "+ %s %s (cwd=%s)\n", bin, strings.Join(args, " "), srcDir)
 
-	cmd := exec.Command(bin, args...)
-	cmd.Dir = srcDir
-	cmd.Stdout = logW
-	cmd.Stderr = logW
-	cmd.Env = os.Environ()
-	if err := cmd.Run(); err != nil {
+	if err := runBuildProcess(ctx, bin, args, srcDir, logW, allowedEnv); err != nil {
 		return nil, fmt.Errorf("xcodebuild failed: %w (see build log)", err)
 	}
 
@@ -166,8 +161,12 @@ func firstScheme(srcDir, projFlag, projValue string) (string, error) {
 		return "", fmt.Errorf("xcodebuild -list: %w", err)
 	}
 	var parsed struct {
-		Project   struct{ Schemes []string `json:"schemes"` } `json:"project"`
-		Workspace struct{ Schemes []string `json:"schemes"` } `json:"workspace"`
+		Project struct {
+			Schemes []string `json:"schemes"`
+		} `json:"project"`
+		Workspace struct {
+			Schemes []string `json:"schemes"`
+		} `json:"workspace"`
 	}
 	if err := json.Unmarshal(out, &parsed); err != nil {
 		return "", fmt.Errorf("decode xcodebuild -list json: %w", err)

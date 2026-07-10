@@ -44,18 +44,31 @@ const (
 // adbPortMu serializes port allocation against concurrent sims_boot
 // calls. The emulator binds the port itself; we just pick a free pair.
 var adbPortMu sync.Mutex
+var reservedEmulatorPorts = map[int]struct{}{}
 
 // allocateEmulatorPorts picks the lowest free (console, adb) port
 // pair. emulator-<console_port> becomes the adb serial.
-func allocateEmulatorPorts() (consolePort, adbPort int, err error) {
+func allocateEmulatorPorts() (consolePort, adbPort int, release func(), err error) {
 	adbPortMu.Lock()
 	defer adbPortMu.Unlock()
 	for p := androidConsolePortStart; p <= androidConsolePortEnd; p += 2 {
+		if _, reserved := reservedEmulatorPorts[p]; reserved {
+			continue
+		}
 		if portFree(p) && portFree(p+1) {
-			return p, p + 1, nil
+			reservedEmulatorPorts[p] = struct{}{}
+			var once sync.Once
+			release = func() {
+				once.Do(func() {
+					adbPortMu.Lock()
+					delete(reservedEmulatorPorts, p)
+					adbPortMu.Unlock()
+				})
+			}
+			return p, p + 1, release, nil
 		}
 	}
-	return 0, 0, fmt.Errorf("no free emulator port pair in %d-%d", androidConsolePortStart, androidConsolePortEnd)
+	return 0, 0, nil, fmt.Errorf("no free emulator port pair in %d-%d", androidConsolePortStart, androidConsolePortEnd)
 }
 
 func portFree(p int) bool {
@@ -76,16 +89,18 @@ func portFree(p int) bool {
 // the supervisor. Returns the resulting *Sim row.
 //
 // The DB row transitions:
-//   shutdown → booting → booted (success)
-//                     → crashed (boot probe timeout / emulator exited)
+//
+//	shutdown → booting → booted (success)
+//	                  → crashed (boot probe timeout / emulator exited)
 //
 // Boot timeout default 120s — first-boot cold-start of a freshly
 // created AVD can take that long; subsequent boots usually under 30s.
 func bootAndroidSim(ctx *sdk.AppCtx, sup *simSupervisor, avdName, deviceType, systemImage string, extraArgs []string) (*Sim, error) {
-	consolePort, _, err := allocateEmulatorPorts()
+	consolePort, _, releasePort, err := allocateEmulatorPorts()
 	if err != nil {
 		return nil, err
 	}
+	defer releasePort()
 	serial := fmt.Sprintf("emulator-%d", consolePort)
 
 	// Persist the booting row before spawning so reconciliation can

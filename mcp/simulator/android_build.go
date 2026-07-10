@@ -11,6 +11,7 @@ package main
 // dev runtime's run_cmd behavior in the code app.
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"os/exec"
@@ -27,20 +28,14 @@ type androidBuildResult struct {
 // buildAndroid runs the gradle build in srcDir and returns the stashed
 // APK + its package id. logW receives the combined gradle output so
 // the panel's log tail shows progress live.
-func (a *App) buildAndroid(srcDir, module, buildCmd string, extraArgs []string, logW *os.File) (*androidBuildResult, error) {
+func (a *App) buildAndroid(ctx context.Context, srcDir, module, buildCmd string, extraArgs, allowedEnv []string, logW *os.File) (*androidBuildResult, error) {
 	bin, args, err := resolveGradleCommand(srcDir, module, buildCmd, extraArgs)
 	if err != nil {
 		return nil, err
 	}
 	fmt.Fprintf(logW, "+ %s %s (cwd=%s)\n", bin, strings.Join(args, " "), srcDir)
 
-	cmd := exec.Command(bin, args...)
-	cmd.Dir = srcDir
-	cmd.Stdout = logW
-	cmd.Stderr = logW
-	// Gradle wants JAVA_HOME or java on PATH; inherit the sidecar env.
-	cmd.Env = os.Environ()
-	if err := cmd.Run(); err != nil {
+	if err := runBuildProcess(ctx, bin, args, srcDir, logW, allowedEnv); err != nil {
 		return nil, fmt.Errorf("gradle build failed: %w (see build log)", err)
 	}
 
