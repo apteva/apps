@@ -1031,7 +1031,7 @@ async function enrichCompositionsWithMediaStudio(projectId: string, rows: Compos
 }
 
 function fitsGenerated(mode: DurationMode | undefined): boolean {
-  return mode === "fit_generated" || mode === "fit_generated_keep_start" || mode === "fit_generated_reflow";
+  return mode === "fit_generated" || mode === "fit_generated_reflow";
 }
 
 export default function ComposerPanel({ projectId, installId }: NativePanelProps) {

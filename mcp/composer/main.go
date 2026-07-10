@@ -28,7 +28,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: composer
 display_name: Composer
-version: 0.5.7
+version: 0.5.8
 description: |
   Multi-clip video compositions with a structured timeline panel,
   universal generated-asset clip editing, first-class AI avatar clips,
@@ -69,6 +69,11 @@ description: |
   IDs are persisted and cleared with edited generation state, partial voice
   settings inherit conservative defaults, and generated TTS clips receive
   consistent loudness normalization without trimming natural pauses.
+  Reserved fit_generated_keep_start visual slots retain their planned length
+  while actual generated duration is recorded separately. Base visual tracks
+  honor explicit clip starts on an absolute background canvas whenever gaps,
+  overlaps, or out-of-order clips prevent safe concatenation; contiguous and
+  legacy implicit tracks keep the efficient concat path.
   Renders locally via ffmpeg, on a render host via instances, or against a
   bound render_executor integration.
 author: Apteva

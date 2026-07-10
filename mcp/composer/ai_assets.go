@@ -843,11 +843,20 @@ func timelineFitDurationSeconds(edit *Edit) float64 {
 	var d float64
 	if vt := primaryVisualTrack(edit); vt != nil {
 		var visualDuration float64
-		for _, c := range vt.Clips {
-			if timingMode(c.Timing) == "fit_timeline" {
-				continue
+		if baseTrackNeedsTimedComposition(vt) {
+			for _, c := range vt.Clips {
+				if timingMode(c.Timing) == "fit_timeline" {
+					continue
+				}
+				visualDuration = maxFloat(visualDuration, maxFloat(0, c.Start)+clipDuration(c))
 			}
-			visualDuration += clipDuration(c)
+		} else {
+			for _, c := range vt.Clips {
+				if timingMode(c.Timing) == "fit_timeline" {
+					continue
+				}
+				visualDuration += clipDuration(c)
+			}
 		}
 		d = maxFloat(d, visualDuration)
 	}
@@ -967,7 +976,7 @@ func maxFloat(a, b float64) float64 {
 
 func durationModeFitsGenerated(mode string) bool {
 	switch strings.ToLower(strings.TrimSpace(mode)) {
-	case "fit_generated", "fit_generated_keep_start", "fit_generated_reflow":
+	case "fit_generated", "fit_generated_reflow":
 		return true
 	default:
 		return false

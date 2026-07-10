@@ -631,9 +631,7 @@ func editDurationSeconds(e *Edit) float64 {
 	}
 	var d float64
 	if vt := primaryVisualTrack(e); vt != nil {
-		for _, c := range vt.Clips {
-			d += clipDuration(c)
-		}
+		d = baseVisualDuration(vt)
 	}
 	for _, ref := range visualOverlayClipRefs(e) {
 		if end := ref.clip.Start + clipDuration(ref.clip); end > d {

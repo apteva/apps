@@ -259,18 +259,22 @@ func buildLocalFFmpegArgsWithAudioInfo(edit *Edit, output Output, inputs []strin
 		}
 	}
 
-	// concat all clips
-	n := len(track.Clips)
-	for i := 0; i < n; i++ {
-		fmt.Fprintf(&filter, "[v%d][a%d]", i, i)
-	}
-	fmt.Fprintf(&filter, "concat=n=%d:v=1:a=1[vcat][acat];", n)
-	baseDuration := baseVisualDuration(track)
-	totalDuration := editDurationSeconds(edit)
-	if totalDuration > baseDuration+0.001 {
-		fmt.Fprintf(&filter, "[vcat]tpad=stop_mode=clone:stop_duration=%s[vbase];", trimFloat(totalDuration-baseDuration))
+	if baseTrackNeedsTimedComposition(track) {
+		writeTimedBaseTrack(&filter, edit, track, w, h, output.FPS)
 	} else {
-		filter.WriteString("[vcat]null[vbase];")
+		// Legacy and contiguous base tracks stay on the efficient concat path.
+		n := len(track.Clips)
+		for i := 0; i < n; i++ {
+			fmt.Fprintf(&filter, "[v%d][a%d]", i, i)
+		}
+		fmt.Fprintf(&filter, "concat=n=%d:v=1:a=1[vcat][acat];", n)
+		baseDuration := baseVisualDuration(track)
+		totalDuration := editDurationSeconds(edit)
+		if totalDuration > baseDuration+0.001 {
+			fmt.Fprintf(&filter, "[vcat]tpad=stop_mode=clone:stop_duration=%s[vbase];", trimFloat(totalDuration-baseDuration))
+		} else {
+			filter.WriteString("[vcat]null[vbase];")
+		}
 	}
 
 	mixLabels := []string{"[acat]"}
@@ -404,11 +408,87 @@ func baseVisualDuration(track *Track) float64 {
 	if track == nil {
 		return 0
 	}
+	if baseTrackNeedsTimedComposition(track) {
+		var out float64
+		for _, c := range track.Clips {
+			if end := maxFloat(0, c.Start) + clipDuration(c); end > out {
+				out = end
+			}
+		}
+		return out
+	}
 	var out float64
 	for _, c := range track.Clips {
 		out += clipDuration(c)
 	}
 	return out
+}
+
+// baseTrackNeedsTimedComposition preserves the historical implicit-concat
+// shape (all starts omitted/zero) and the fast path for explicitly contiguous
+// clips. Any gap, overlap, or out-of-order clip requires timestamp-aware
+// composition so each declared start remains authoritative.
+func baseTrackNeedsTimedComposition(track *Track) bool {
+	if track == nil || len(track.Clips) < 2 {
+		return track != nil && len(track.Clips) == 1 && track.Clips[0].Start > 0.001
+	}
+	allZero := true
+	for _, c := range track.Clips {
+		if c.Start > 0.001 {
+			allZero = false
+			break
+		}
+	}
+	if allZero {
+		return false
+	}
+	cursor := 0.0
+	for _, c := range track.Clips {
+		if !sameTime(maxFloat(0, c.Start), cursor) {
+			return true
+		}
+		cursor += clipDuration(c)
+	}
+	return false
+}
+
+func writeTimedBaseTrack(filter *strings.Builder, edit *Edit, track *Track, w, h, fps int) {
+	totalDuration := editDurationSeconds(edit)
+	if totalDuration <= 0 {
+		totalDuration = baseVisualDuration(track)
+	}
+	if totalDuration <= 0 {
+		totalDuration = 0.1
+	}
+	fmt.Fprintf(filter, "color=c=%s:s=%dx%d:r=%d:d=%s[vbg];",
+		escFFmpegColor(edit.Timeline.Background), w, h, fps, trimFloat(totalDuration))
+
+	baseLabel := "vbg"
+	ordered := timelineOrderedClipIndices(track)
+	for position, index := range ordered {
+		c := track.Clips[index]
+		start := maxFloat(0, c.Start)
+		end := start + clipDuration(c)
+		shifted := fmt.Sprintf("vbt%d", index)
+		out := fmt.Sprintf("vbase%d", position)
+		fmt.Fprintf(filter, "[v%d]setpts=PTS-STARTPTS+%s/TB[%s];[%s][%s]overlay=x=0:y=0:enable='between(t\\,%s\\,%s)':eof_action=pass[%s];",
+			index, trimFloat(start), shifted, baseLabel, shifted, trimFloat(start), trimFloat(end), out)
+		baseLabel = out
+	}
+	fmt.Fprintf(filter, "[%s]null[vbase];", baseLabel)
+
+	// Delay and mix base-clip audio on the same absolute timeline. A silent
+	// canvas track keeps audio duration aligned through visual gaps.
+	fmt.Fprintf(filter, "anullsrc=channel_layout=stereo:sample_rate=44100,atrim=duration=%s[abase];", trimFloat(totalDuration))
+	for _, index := range ordered {
+		delayMS := int(maxFloat(0, track.Clips[index].Start) * 1000)
+		fmt.Fprintf(filter, "[a%d]adelay=%d|%d[abt%d];", index, delayMS, delayMS, index)
+	}
+	filter.WriteString("[abase]")
+	for _, index := range ordered {
+		fmt.Fprintf(filter, "[abt%d]", index)
+	}
+	fmt.Fprintf(filter, "amix=inputs=%d:duration=longest:normalize=0[acat];", len(ordered)+1)
 }
 
 type resolvedClipLayout struct {

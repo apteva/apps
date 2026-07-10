@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: composer
 display_name: Composer
-version: 0.5.7
+version: 0.5.8
 description: |
   Multi-clip video composition. Stitch generated or uploaded assets
   into a single video — layered visual tracks, timed audio tracks, optional
@@ -10,6 +10,15 @@ description: |
   default, on a render host via instances when render_host_id is
   set, or against a SaaS render backend (Shotstack et al) when one
   is bound to the render_executor role.
+
+  v0.5.8 preserves reserved visual slots for fit_generated_keep_start:
+  generated avatar/video actual duration is recorded without replacing the
+  planned clip length. Base visual tracks now honor explicit start timestamps;
+  gaps, overlaps, and out-of-order clips render on an absolute background
+  canvas instead of collapsing through concat, while legacy implicit and
+  explicitly contiguous tracks retain the efficient concat path. The panel
+  uses the same keep-start semantics, and local and remote ffmpeg renders share
+  the corrected timeline graph.
 
   v0.5.7 hardens multi-clip ElevenLabs narration. Composer now plans TTS
   continuity in timeline order, carries request IDs across silence and SFX,

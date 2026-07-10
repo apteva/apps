@@ -182,6 +182,16 @@ func TestEditDuration_Sum(t *testing.T) {
 	}
 }
 
+func TestEditDuration_BaseTrackHonorsExplicitGap(t *testing.T) {
+	e, _ := parseEditJSON(`{"timeline":{"tracks":[{"clips":[
+		{"asset":{"src":"x","type":"video"},"start":0,"length":2},
+		{"asset":{"src":"y","type":"video"},"start":5,"length":3}
+	]}]}}`)
+	if got := editDurationSeconds(e); got != 8 {
+		t.Errorf("duration = %v, want explicit timeline end 8", got)
+	}
+}
+
 func TestEditDuration_IncludesVisualOverlayEnd(t *testing.T) {
 	e, _ := parseEditJSON(`{"timeline":{"tracks":[
 		{"type":"visual","clips":[{"asset":{"src":"x","type":"image"},"start":0,"length":2}]},
@@ -222,6 +232,27 @@ func TestBuildLocalFFmpegArgs_TwoClipsBasic(t *testing.T) {
 	}
 	if !strings.Contains(cmd, "libx264") || !strings.Contains(cmd, "aac") {
 		t.Errorf("missing codec flags: %s", cmd)
+	}
+}
+
+func TestBuildLocalFFmpegArgs_BaseTrackHonorsExplicitGap(t *testing.T) {
+	e, _ := parseEditJSON(`{"timeline":{"background":"#101010","tracks":[{"clips":[
+		{"asset":{"src":"https://a","type":"video"},"start":0,"length":2,"source_audio":"mute"},
+		{"asset":{"src":"https://b","type":"video"},"start":5,"length":3,"source_audio":"mute"}
+	]}]}}`)
+	args := buildLocalFFmpegArgsWithAudioInfo(e, defaultOutput(), []string{"https://a", "https://b"}, -1, "out.mp4", []bool{false, false})
+	cmd := strings.Join(args, " ")
+	if strings.Contains(cmd, "concat=n=2") {
+		t.Fatalf("gapped base track must not collapse through concat: %s", cmd)
+	}
+	if !strings.Contains(cmd, "color=c=0x101010:s=1280x720:r=30:d=8[vbg]") {
+		t.Fatalf("missing full-duration background canvas: %s", cmd)
+	}
+	if !strings.Contains(cmd, "setpts=PTS-STARTPTS+5/TB") || !strings.Contains(cmd, "between(t\\,5\\,8)") {
+		t.Fatalf("second base clip must retain start=5: %s", cmd)
+	}
+	if !strings.Contains(cmd, "[a1]adelay=5000|5000") {
+		t.Fatalf("second base audio must retain start=5: %s", cmd)
 	}
 }
 
@@ -602,6 +633,59 @@ func TestSyncClipDurationFromAI_FitGeneratedUpdatesLength(t *testing.T) {
 	}
 	if c.Length != 7.25 || c.ActualLength != 7.25 || c.EstimatedLength != 5 {
 		t.Fatalf("clip duration metadata = %+v", c)
+	}
+}
+
+func TestSyncClipDurationFromAI_KeepStartPreservesReservedLength(t *testing.T) {
+	c := Clip{
+		Asset:           Asset{Type: "video", Src: "storage:1"},
+		Start:           0,
+		Length:          30,
+		EstimatedLength: 30,
+		DurationMode:    "fit_generated_keep_start",
+		AI: &AIAsset{
+			MediaKind:                "avatar",
+			Prompt:                   "hello",
+			ActualDurationSeconds:    22.099,
+			EstimatedDurationSeconds: 30,
+		},
+	}
+	if !syncClipDurationFromAI(&c) {
+		t.Fatal("expected actual duration metadata to sync")
+	}
+	if c.Length != 30 || c.ActualLength != 22.099 || c.EstimatedLength != 30 {
+		t.Fatalf("reserved slot collapsed: %+v", c)
+	}
+}
+
+func TestBuildLocalFFmpegArgs_ShortReservedAvatarWithLaterPIP(t *testing.T) {
+	e, err := parseEditJSON(`{"timeline":{"tracks":[
+		{"type":"visual","clips":[
+			{"uid":"avatar","asset":{"src":"https://avatar","type":"video"},"start":0,"length":5,"actual_length":2,"duration_mode":"fit_generated_keep_start","source_audio":"keep","ai":{"media_kind":"avatar","prompt":"intro","actual_duration_seconds":2}},
+			{"uid":"screen","asset":{"src":"https://screen","type":"image"},"start":5,"length":5}
+		]},
+		{"type":"visual","clips":[
+			{"uid":"pip","asset":{"src":"https://pip","type":"video"},"start":5,"length":3,"position":"bottomRight","width":320,"height":180,"source_audio":"mute"}
+		]}
+	]}}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	avatar := &e.Timeline.Tracks[0].Clips[0]
+	avatar.ActualLength = 0
+	if !syncClipDurationFromAI(avatar) {
+		t.Fatal("expected avatar actual length to sync")
+	}
+	if avatar.Length != 5 {
+		t.Fatalf("avatar reserved slot = %v, want 5", avatar.Length)
+	}
+	args := buildLocalFFmpegArgsWithAudioInfo(e, defaultOutput(), []string{"https://avatar", "https://screen", "https://pip"}, -1, "out.mp4", []bool{true, false, false})
+	cmd := strings.Join(args, " ")
+	if !strings.Contains(cmd, "tpad=stop_mode=clone:stop_duration=5,trim=duration=5") {
+		t.Fatalf("short avatar must pad inside its five-second slot: %s", cmd)
+	}
+	if !strings.Contains(cmd, "overlay=x=960:y=540:enable='between(t\\,5\\,8)'") {
+		t.Fatalf("later PIP must remain at absolute start=5: %s", cmd)
 	}
 }
 
