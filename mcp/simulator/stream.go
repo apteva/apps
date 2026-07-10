@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"net/url"
 	"os/exec"
 	"strings"
 	"sync"
@@ -29,15 +30,6 @@ import (
 
 	"github.com/gorilla/websocket"
 )
-
-var wsUpgrader = websocket.Upgrader{
-	ReadBufferSize:  4096,
-	WriteBufferSize: 1 << 16,
-	// The platform proxies same-origin dashboard traffic; the ws_token
-	// in the URL is the actual auth. Accept any Origin so the proxy
-	// hop doesn't get rejected on header rewriting.
-	CheckOrigin: func(r *http.Request) bool { return true },
-}
 
 // handleStream is registered at /stream/<sim_id> (NoAuth — the
 // ws_token query param is the bearer). Validates the token, resolves
@@ -73,7 +65,11 @@ func (a *App) handleStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	conn, err := wsUpgrader.Upgrade(w, r, nil)
+	upgrader := websocket.Upgrader{
+		ReadBufferSize: 4096, WriteBufferSize: 1 << 16,
+		CheckOrigin: a.streamOriginAllowed,
+	}
+	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		return // Upgrade already wrote the error
 	}
@@ -85,14 +81,18 @@ func (a *App) handleStream(w http.ResponseWriter, r *http.Request) {
 // events. Returns when either side closes.
 func (a *App) runStreamSession(sim *Sim, conn *websocket.Conn) {
 	defer conn.Close()
+	conn.SetReadLimit(64 << 10)
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
+	endSession := a.beginStream(sim.ID, cancel)
+	defer endSession()
 
 	var writeMu sync.Mutex
 	writeJSON := func(v any) error {
 		writeMu.Lock()
 		defer writeMu.Unlock()
+		_ = conn.SetWriteDeadline(time.Now().Add(10 * time.Second))
 		return conn.WriteJSON(v)
 	}
 	writeBinary := func(b []byte) error {
@@ -109,12 +109,6 @@ func (a *App) runStreamSession(sim *Sim, conn *websocket.Conn) {
 		_ = writeJSON(map[string]any{"type": "error", "message": err.Error()})
 		return
 	}
-	defer func() {
-		if source.Cmd != nil && source.Cmd.Process != nil {
-			_ = source.Cmd.Process.Kill()
-		}
-	}()
-
 	// Meta frame first so the client can size the canvas + choose the
 	// decode path. Dimensions are best-effort; for H.264 the decoder
 	// also reads real dimensions from the in-band SPS.
@@ -151,22 +145,52 @@ func (a *App) runStreamSession(sim *Sim, conn *websocket.Conn) {
 		return
 	}
 
-	// Writer: frame raw H.264 stdout into access units and ship each as
-	// one binary message.
-	framer := newAnnexBFramer(func(au []byte, _ bool) {
-		if err := writeBinary(au); err != nil {
-			cancel()
+	a.runH264StreamLoop(ctx, sim, source, writeBinary, cancel)
+}
+
+// runH264StreamLoop reaps every adb screenrecord child and immediately starts
+// a replacement after Android's hard 180-second limit. The WebSocket and token
+// remain stable, so both the Simulator and Code panels keep working without a
+// coordinated client reconnect.
+func (a *App) runH264StreamLoop(ctx context.Context, sim *Sim, source *streamSource, write func([]byte) error, cancel context.CancelFunc) {
+	for source != nil {
+		framer := newAnnexBFramer(func(au []byte, _ bool) {
+			if err := write(au); err != nil {
+				cancel()
+			}
+		})
+		_ = framer.feed(bufio.NewReaderSize(source.Stdout, 1<<20))
+		if source.Cmd != nil {
+			// Wait is mandatory after Start even when CommandContext killed
+			// the child; otherwise each reconnect leaves process resources.
+			if source.Cmd.Process != nil {
+				_ = source.Cmd.Process.Kill()
+			}
+			_ = source.Cmd.Wait()
 		}
-	})
-	_ = framer.feed(bufio.NewReaderSize(source.Stdout, 1<<20))
-	// feed returns on EOF (source exited) or write failure. For android
-	// screenrecord's time-limit exits we could loop+respawn here; v0.1
-	// ends the session and the client reconnects.
+		if ctx.Err() != nil {
+			return
+		}
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(200 * time.Millisecond):
+		}
+		next, err := startStreamSource(ctx, sim)
+		if err != nil {
+			cancel()
+			return
+		}
+		source = next
+	}
 }
 
 // handleInputMessage parses an inbound control message and routes it
 // to the platform input backend. Malformed messages are ignored.
 func (a *App) handleInputMessage(sim *Sim, data []byte) {
+	if len(data) > 64<<10 {
+		return
+	}
 	var msg struct {
 		Type string  `json:"type"`
 		Kind string  `json:"kind"`
@@ -185,12 +209,18 @@ func (a *App) handleInputMessage(sim *Sim, data []byte) {
 		Kind: msg.Kind, X: msg.X, Y: msg.Y, X2: msg.X2, Y2: msg.Y2,
 		DurationMS: msg.MS, Key: msg.Key, Text: msg.Text,
 	}
+	if validateInputEvent(ev) != nil {
+		return
+	}
 	_ = a.sendInput(sim, ev)
 }
 
 func (a *App) sendInput(sim *Sim, ev inputEvent) error {
 	if sim == nil {
 		return errNotFound
+	}
+	if err := validateInputEvent(ev); err != nil {
+		return err
 	}
 	switch sim.Platform {
 	case "android":
@@ -235,6 +265,75 @@ func deviceDimensions(sim *Sim) (int, int) {
 
 func errUnknownPlatform(p string) error {
 	return &simError{"unknown platform: " + p}
+}
+
+func (a *App) beginStream(simID string, cancel context.CancelFunc) func() {
+	id := randHex(12)
+	a.streamMu.Lock()
+	previous := a.streams[simID]
+	if a.streams == nil {
+		a.streams = make(map[string]activeStream)
+	}
+	a.streams[simID] = activeStream{id: id, cancel: cancel}
+	a.streamMu.Unlock()
+	if previous.cancel != nil {
+		previous.cancel()
+	}
+	return func() {
+		a.streamMu.Lock()
+		if current, ok := a.streams[simID]; ok && current.id == id {
+			delete(a.streams, simID)
+		}
+		a.streamMu.Unlock()
+	}
+}
+
+func (a *App) stopStream(simID string) {
+	a.streamMu.Lock()
+	stream := a.streams[simID]
+	delete(a.streams, simID)
+	a.streamMu.Unlock()
+	if stream.cancel != nil {
+		stream.cancel()
+	}
+}
+
+func (a *App) stopAllStreams() {
+	a.streamMu.Lock()
+	streams := a.streams
+	a.streams = make(map[string]activeStream)
+	a.streamMu.Unlock()
+	for _, stream := range streams {
+		if stream.cancel != nil {
+			stream.cancel()
+		}
+	}
+}
+
+func (a *App) streamOriginAllowed(r *http.Request) bool {
+	origin := strings.TrimSpace(r.Header.Get("Origin"))
+	if origin == "" {
+		return true // non-browser MCP/client
+	}
+	u, err := url.Parse(origin)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") {
+		return false
+	}
+	originHost := strings.ToLower(u.Host)
+	allowed := []string{r.Host, r.Header.Get("X-Forwarded-Host")}
+	if a != nil && a.appCtx != nil {
+		if info, err := a.appCtx.PlatformInfo(); err == nil && info != nil && info.PublicURL != "" {
+			if public, err := url.Parse(info.PublicURL); err == nil {
+				allowed = append(allowed, public.Host)
+			}
+		}
+	}
+	for _, host := range allowed {
+		if strings.EqualFold(originHost, strings.TrimSpace(host)) {
+			return true
+		}
+	}
+	return false
 }
 
 type simError struct{ msg string }

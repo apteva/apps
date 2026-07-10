@@ -40,6 +40,8 @@ type Capabilities struct {
 type PlatformCapability struct {
 	Available          bool                 `json:"available"`
 	Reasons            []string             `json:"reasons"`
+	BuildAvailable     bool                 `json:"build_available"`
+	BuildReasons       []string             `json:"build_reasons"`
 	StreamingAvailable bool                 `json:"streaming_available"`
 	StreamingReasons   []string             `json:"streaming_reasons"`
 	Tools              map[string]ToolProbe `json:"tools"`
@@ -72,8 +74,9 @@ func probeCapabilities(ctx *sdk.AppCtx) Capabilities {
 
 func probeAndroid(ctx *sdk.AppCtx) PlatformCapability {
 	out := PlatformCapability{
-		Reasons: []string{},
-		Tools:   map[string]ToolProbe{},
+		Reasons:      []string{},
+		BuildReasons: []string{},
+		Tools:        map[string]ToolProbe{},
 	}
 	probes := []struct {
 		name string
@@ -92,8 +95,13 @@ func probeAndroid(ctx *sdk.AppCtx) PlatformCapability {
 	for _, p := range probes {
 		tp := lookupAndVersion(p.name, p.versionArg)
 		out.Tools[p.name] = tp
-		if !tp.Found && p.name != "gradle" {
-			out.Reasons = append(out.Reasons, p.name+" not found on PATH. "+p.hint)
+		if !tp.Found {
+			switch p.name {
+			case "adb", "emulator", "avdmanager":
+				out.Reasons = append(out.Reasons, p.name+" not found on PATH. "+p.hint)
+			case "aapt", "java":
+				out.BuildReasons = append(out.BuildReasons, p.name+" not found on PATH. "+p.hint)
+			}
 		}
 	}
 	if !out.Tools["gradle"].Found {
@@ -107,8 +115,12 @@ func probeAndroid(ctx *sdk.AppCtx) PlatformCapability {
 	// not strictly required; the emulator falls back to software
 	// rendering, which is slow but functional.)
 	out.Available = len(out.Reasons) == 0
-	out.StreamingAvailable = out.Available
-	out.StreamingReasons = append([]string{}, out.Reasons...)
+	out.BuildReasons = append(out.BuildReasons, out.Reasons...)
+	out.BuildAvailable = len(out.BuildReasons) == 0
+	if !out.Tools["adb"].Found {
+		out.StreamingReasons = append(out.StreamingReasons, "adb not found on PATH")
+	}
+	out.StreamingAvailable = len(out.StreamingReasons) == 0
 	return out
 }
 
@@ -117,6 +129,7 @@ func probeAndroid(ctx *sdk.AppCtx) PlatformCapability {
 func probeIOS(ctx *sdk.AppCtx) PlatformCapability {
 	out := PlatformCapability{
 		Reasons:          []string{},
+		BuildReasons:     []string{},
 		StreamingReasons: []string{},
 		Tools:            map[string]ToolProbe{},
 	}
@@ -126,6 +139,8 @@ func probeIOS(ctx *sdk.AppCtx) PlatformCapability {
 	if runtime.GOOS != "darwin" {
 		out.Available = false
 		out.Reasons = []string{"iOS Simulator requires macOS (this host is " + runtime.GOOS + ")."}
+		out.BuildAvailable = false
+		out.BuildReasons = append([]string{}, out.Reasons...)
 		return out
 	}
 
@@ -154,6 +169,8 @@ func probeIOS(ctx *sdk.AppCtx) PlatformCapability {
 		}
 	}
 	out.Available = len(out.Reasons) == 0
+	out.BuildAvailable = out.Available
+	out.BuildReasons = append([]string{}, out.Reasons...)
 	out.StreamingAvailable = out.Available
 
 	// iOS live view has a native fallback: a low-FPS screenshot stream
@@ -280,6 +297,29 @@ func capabilityCheckFor(ctx *sdk.AppCtx, platform string) error {
 		return nil
 	}
 	return errors.New("host_unsupported: " + strings.Join(pc.Reasons, "; "))
+}
+
+func capabilityCheckForNeeds(ctx *sdk.AppCtx, platform string, needBuild, needStream bool) error {
+	caps := probeCapabilities(ctx)
+	var pc PlatformCapability
+	switch platform {
+	case "android":
+		pc = caps.Android
+	case "ios":
+		pc = caps.IOS
+	default:
+		return errors.New("unknown platform: " + platform)
+	}
+	if !pc.Available {
+		return errors.New("host_unsupported: " + strings.Join(pc.Reasons, "; "))
+	}
+	if needBuild && !pc.BuildAvailable {
+		return errors.New("build_unsupported: " + strings.Join(pc.BuildReasons, "; "))
+	}
+	if needStream && !pc.StreamingAvailable {
+		return errors.New("streaming_unsupported: " + strings.Join(pc.StreamingReasons, "; "))
+	}
+	return nil
 }
 
 func streamingCapabilityCheckFor(ctx *sdk.AppCtx, platform string) error {

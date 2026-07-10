@@ -25,6 +25,8 @@ interface ToolProbe {
 interface PlatformCapability {
   available: boolean;
   reasons: string[];
+  build_available?: boolean;
+  build_reasons?: string[];
   streaming_available?: boolean;
   streaming_reasons?: string[];
   tools: Record<string, ToolProbe>;
@@ -135,8 +137,9 @@ export default function SimulatorPanel({ projectId }: NativePanelProps) {
       return;
     }
     const platformCaps = runFramework === "ios" ? caps?.ios : caps?.android;
-    if (!platformCaps?.available) {
-      setError(`${runFramework} unavailable: ${(platformCaps?.reasons ?? []).join("; ")}`);
+    if (!platformCaps?.available || platformCaps.build_available === false) {
+      const reasons = platformCaps?.build_available === false ? platformCaps.build_reasons : platformCaps?.reasons;
+      setError(`${runFramework} unavailable: ${(reasons ?? []).join("; ")}`);
       return;
     }
     setBusy(true);

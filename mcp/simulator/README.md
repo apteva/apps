@@ -84,9 +84,23 @@ The browser (`ui/components/DeviceFrame.tsx`) draws to canvas and
 forwards pointer + keyboard as JSON control messages. Input also has
 discrete tool form (`sims_input`) for headless agent flows.
 
-`screenrecord` has a 180s hard cap per invocation — when it elapses the
-stream ends and the panel reconnects (tokens last an hour). Seamless
-in-process respawn is a future enhancement.
+`screenrecord` has a 180s hard cap per invocation. The sidecar reaps and
+restarts it behind the same WebSocket, so Code and Simulator panels keep a
+continuous session without reconnecting.
+
+## Build and stream safety
+
+Source archives are streamed into bounded extraction: 512 MiB compressed,
+2 GiB expanded, 512 MiB per file, and 100,000 entries. Builds time out after
+20 minutes, terminate their whole process group, and do not inherit Apteva or
+common secret environment variables. Operators can explicitly pass named
+project secrets with `build_env_allowlist`; `APTEVA_*` credentials are never
+forwarded. The sidecar/container remains the filesystem and network isolation
+boundary for project-controlled Gradle and Xcode build logic.
+
+Only one live stream encoder is allowed per simulator. Browser WebSockets are
+same-origin, input messages and log reads are bounded, and stored artifacts may
+only be installed from this app's content-addressed artifact directory.
 
 ## Disk layout (per-install data dir)
 
@@ -97,6 +111,9 @@ artifacts/<sha>.app/            built .app bundles
 sim-logs/<sim_run_id>.log       per-run build/install log
 boot-logs/<sim_id>.log          per-sim emulator boot log
 ```
+
+Inactive run history, unreferenced artifacts, and logs are retained for 30
+days and cleaned at mount and periodically after builds.
 
 ## Build & test
 

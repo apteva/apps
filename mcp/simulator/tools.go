@@ -62,6 +62,13 @@ func strArg(args map[string]any, k string) string {
 	return ""
 }
 
+func rawStringArg(args map[string]any, k string) string {
+	if v, ok := args[k].(string); ok {
+		return v
+	}
+	return ""
+}
+
 // projectIDFor resolves the project the call is scoped to. Prefers
 // the SDK-managed current project (set by APTEVA_PROJECT_ID for
 // project-scoped installs, or per-call _project_id for global-scoped
@@ -75,6 +82,21 @@ func projectIDFor(ctx *sdk.AppCtx, args map[string]any) (string, error) {
 		return v, nil
 	}
 	return "", errors.New("project_id missing — pass _project_id when calling from a global scope")
+}
+
+func dbGetProjectSim(ctx *sdk.AppCtx, args map[string]any, simID string) (*Sim, error) {
+	projectID, err := projectIDFor(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	sim, err := dbGetSim(ctx.AppDB(), simID)
+	if err != nil || sim == nil {
+		return sim, err
+	}
+	if sim.ProjectID != projectID {
+		return nil, nil
+	}
+	return sim, nil
 }
 
 // ─── sims_capabilities ──────────────────────────────────────────────
@@ -181,6 +203,9 @@ func (a *App) handleSimsBoot(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 // bootAndroid's idempotent semantics — already-booted returns the
 // existing row.
 func (a *App) bootIOS(ctx *sdk.AppCtx, runtime, deviceType string) (*Sim, error) {
+	a.bootMu.Lock()
+	defer a.bootMu.Unlock()
+
 	cctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	udid, err := ensureIOSDevice(cctx, deviceType, runtime)
@@ -188,7 +213,13 @@ func (a *App) bootIOS(ctx *sdk.AppCtx, runtime, deviceType string) (*Sim, error)
 		return nil, err
 	}
 	if existing, _ := dbGetSim(ctx.AppDB(), udid); existing != nil && existing.Status == "booted" {
-		return existing, nil
+		if a.sup.probeAlive(*existing) {
+			return existing, nil
+		}
+		_ = dbUpdateSim(ctx.AppDB(), udid, map[string]any{"status": "shutdown", "pid": 0})
+	}
+	if err := a.enforceSimCapacity(ctx, udid); err != nil {
+		return nil, err
 	}
 	resolvedRuntime, _ := resolveIOSRuntime(cctx, runtime)
 	return bootIOSSim(ctx, a.sup, udid, deviceType, resolvedRuntime)
@@ -197,15 +228,26 @@ func (a *App) bootIOS(ctx *sdk.AppCtx, runtime, deviceType string) (*Sim, error)
 // bootAndroid: ensure an AVD exists, boot it, return the Sim row.
 // Reuses an already-booted sim for the same AVD if found.
 func (a *App) bootAndroid(ctx *sdk.AppCtx, image, deviceType string) (*Sim, error) {
-	cctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	a.bootMu.Lock()
+	defer a.bootMu.Unlock()
+
+	// AVD creation legitimately takes longer than listing existing devices.
+	// The previous five-second parent context accidentally truncated
+	// ensureAVD's own 60-second creation timeout.
+	cctx, cancel := context.WithTimeout(context.Background(), 75*time.Second)
 	defer cancel()
 	avd, err := ensureAVD(cctx, deviceType, image)
 	if err != nil {
 		return nil, err
 	}
 	if existing, _ := dbGetSim(ctx.AppDB(), avd); existing != nil && existing.Status == "booted" {
-		// Idempotent — sims_boot on a live sim just returns it.
-		return existing, nil
+		if a.sup.probeAlive(*existing) {
+			return existing, nil
+		}
+		_ = dbUpdateSim(ctx.AppDB(), avd, map[string]any{"status": "shutdown", "pid": 0})
+	}
+	if err := a.enforceSimCapacity(ctx, avd); err != nil {
+		return nil, err
 	}
 	extraArgs := splitArgs(configOrDefault(ctx, "emulator_extra_args"))
 	return bootAndroidSim(ctx, a.sup, avd, deviceType, image, extraArgs)
@@ -228,7 +270,7 @@ func (a *App) toolSimsShutdown() sdk.Tool {
 			if simID == "" {
 				return nil, errors.New("sim_id required")
 			}
-			row, err := dbGetSim(ctx.AppDB(), simID)
+			row, err := dbGetProjectSim(ctx, args, simID)
 			if err != nil {
 				return nil, err
 			}
@@ -236,6 +278,7 @@ func (a *App) toolSimsShutdown() sdk.Tool {
 				// Unknown sim — idempotent success rather than an error.
 				return map[string]any{"ok": true, "note": "sim not known to this project"}, nil
 			}
+			a.stopStream(simID)
 			if p := a.sup.get(simID); p != nil {
 				a.sup.shutdownProcess(p)
 				a.sup.drop(simID)
@@ -256,6 +299,7 @@ func (a *App) toolSimsShutdown() sdk.Tool {
 				"status": "shutdown", "pid": 0,
 			})
 			_ = dbDeleteStreamToken(ctx.AppDB(), simID)
+			_ = dbStopActiveSimRuns(ctx.AppDB(), simID)
 			return map[string]any{"ok": true}, nil
 		},
 	}
@@ -278,7 +322,7 @@ func (a *App) toolSimsScreenshot() sdk.Tool {
 			if simID == "" {
 				return nil, errors.New("sim_id required")
 			}
-			row, err := dbGetSim(ctx.AppDB(), simID)
+			row, err := dbGetProjectSim(ctx, args, simID)
 			if err != nil {
 				return nil, err
 			}

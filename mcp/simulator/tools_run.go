@@ -5,6 +5,7 @@ package main
 // shared build/install/launch logic lives in run.go.
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"time"
@@ -27,19 +28,16 @@ func (a *App) toolSimsRun() sdk.Tool {
 			"android_module": map[string]any{"type": "string", "description": "Android only. Gradle module producing the APK. Empty = app."},
 			"build_cmd":      map[string]any{"type": "string", "description": "Shell override for the build step. Wins over scheme/module."},
 		}, []string{"framework", "source_tgz_b64"}),
-		Handler: a.handleSimsRun,
+		HandlerCtx: a.handleSimsRun,
 	}
 }
 
-func (a *App) handleSimsRun(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+func (a *App) handleSimsRun(callCtx context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	framework := strArg(args, "framework")
 	if framework != "android" && framework != "ios" {
 		return nil, fmt.Errorf("framework must be android or ios, got %q", framework)
 	}
-	if err := capabilityCheckFor(ctx, framework); err != nil {
-		return nil, err // host_unsupported: ...
-	}
-	if err := streamingCapabilityCheckFor(ctx, framework); err != nil {
+	if err := capabilityCheckForNeeds(ctx, framework, true, true); err != nil {
 		return nil, err
 	}
 	proj, err := projectIDFor(ctx, args)
@@ -51,6 +49,11 @@ func (a *App) handleSimsRun(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	sim, err := a.ensureBootedSim(ctx, framework)
 	if err != nil {
 		return nil, fmt.Errorf("boot: %w", err)
+	}
+	unlockRun := a.lockSimRun(sim.ID)
+	defer unlockRun()
+	if err := dbStopActiveSimRuns(ctx.AppDB(), sim.ID); err != nil {
+		return nil, err
 	}
 
 	// 2. Open a sim_runs row up front so the build log path is known
@@ -73,7 +76,7 @@ func (a *App) handleSimsRun(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	}
 
 	// 3. Build.
-	br, err := a.runBuild(ctx, buildParams{
+	br, err := a.runBuild(callCtx, ctx, buildParams{
 		Framework:    framework,
 		SourceTGZB64: strArg(args, "source_tgz_b64"),
 		Module:       strArg(args, "android_module"),
@@ -99,6 +102,7 @@ func (a *App) handleSimsRun(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return nil, err
 	}
 	_ = dbUpdateSimRun(ctx.AppDB(), run.ID, map[string]any{"status": "running"})
+	_ = a.cleanupStorage(ctx.AppDB())
 
 	// 5. Mint the stream token.
 	stream, err := dbMintStreamToken(ctx.AppDB(), sim.ID, 1*time.Hour)
@@ -138,9 +142,9 @@ func (a *App) toolSimsBuild() sdk.Tool {
 			"android_module": map[string]any{"type": "string", "description": "Android only."},
 			"build_cmd":      map[string]any{"type": "string", "description": "Shell override."},
 		}, []string{"framework", "source_tgz_b64"}),
-		Handler: func(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+		HandlerCtx: func(callCtx context.Context, ctx *sdk.AppCtx, args map[string]any) (any, error) {
 			framework := strArg(args, "framework")
-			if err := capabilityCheckFor(ctx, framework); err != nil {
+			if err := capabilityCheckForNeeds(ctx, framework, true, false); err != nil {
 				return nil, err
 			}
 			// Resolve a destination sim. A specific sim_id wins; else
@@ -149,7 +153,7 @@ func (a *App) toolSimsBuild() sdk.Tool {
 			// destination.
 			var sim *Sim
 			if id := strArg(args, "sim_id"); id != "" {
-				s, err := dbGetSim(ctx.AppDB(), id)
+				s, err := dbGetProjectSim(ctx, args, id)
 				if err != nil {
 					return nil, err
 				}
@@ -164,6 +168,11 @@ func (a *App) toolSimsBuild() sdk.Tool {
 				}
 				sim = s
 			}
+			unlockRun := a.lockSimRun(sim.ID)
+			defer unlockRun()
+			if err := dbStopActiveSimRuns(ctx.AppDB(), sim.ID); err != nil {
+				return nil, err
+			}
 			run, err := dbInsertSimRun(ctx.AppDB(), SimRun{
 				SimID: sim.ID, ProjectID: ctx.CurrentProject(),
 				SourceApp: "manual", Framework: framework, Status: "building",
@@ -172,7 +181,7 @@ func (a *App) toolSimsBuild() sdk.Tool {
 			if err != nil {
 				return nil, err
 			}
-			br, err := a.runBuild(ctx, buildParams{
+			br, err := a.runBuild(callCtx, ctx, buildParams{
 				Framework: framework, SourceTGZB64: strArg(args, "source_tgz_b64"),
 				Module: strArg(args, "android_module"), Scheme: strArg(args, "ios_scheme"),
 				BuildCmd: strArg(args, "build_cmd"), SimUDID: sim.ID, SimRunID: run.ID,
@@ -183,8 +192,9 @@ func (a *App) toolSimsBuild() sdk.Tool {
 			}
 			_ = dbUpdateSimRun(ctx.AppDB(), run.ID, map[string]any{
 				"status": "stopped", "bundle_id": br.BundleID, "artifact_path": br.ArtifactPath,
-				"log_path": fmt.Sprintf("%d.log", run.ID),
+				"log_path": fmt.Sprintf("%d.log", run.ID), "stopped_at": time.Now().UTC().Format(time.RFC3339),
 			})
+			_ = a.cleanupStorage(ctx.AppDB())
 			return map[string]any{
 				"sim_id":        sim.ID,
 				"sim_run_id":    run.ID,
@@ -211,12 +221,16 @@ func (a *App) toolSimsInstall() sdk.Tool {
 			if simID == "" || artifact == "" {
 				return nil, errors.New("sim_id and artifact_path required")
 			}
-			sim, err := dbGetSim(ctx.AppDB(), simID)
+			sim, err := dbGetProjectSim(ctx, args, simID)
 			if err != nil {
 				return nil, err
 			}
 			if sim == nil || sim.Status != "booted" {
 				return nil, fmt.Errorf("sim %q not booted", simID)
+			}
+			artifact, err = a.validateArtifactPath(artifact, sim.Platform)
+			if err != nil {
+				return nil, err
 			}
 			switch sim.Platform {
 			case "android":
@@ -249,7 +263,7 @@ func (a *App) toolSimsLaunch() sdk.Tool {
 			if simID == "" || bundleID == "" {
 				return nil, errors.New("sim_id and bundle_id required")
 			}
-			sim, err := dbGetSim(ctx.AppDB(), simID)
+			sim, err := dbGetProjectSim(ctx, args, simID)
 			if err != nil {
 				return nil, err
 			}

@@ -147,4 +147,10 @@ func TestStreamTokenMintResolveExpire(t *testing.T) {
 	if _, err := dbResolveStreamToken(db, exp.WSToken); err == nil {
 		t.Error("expired token resolved")
 	}
+
+	bad, _ := dbMintStreamToken(db, "avd-1", time.Hour)
+	_, _ = db.Exec(`UPDATE sim_streams SET expires_at = 'not-a-time' WHERE sim_id = ?`, "avd-1")
+	if _, err := dbResolveStreamToken(db, bad.WSToken); err == nil {
+		t.Error("token with malformed expiry resolved")
+	}
 }

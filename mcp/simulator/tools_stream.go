@@ -35,7 +35,7 @@ func (a *App) toolSimsInput() sdk.Tool {
 			if simID == "" {
 				return nil, errors.New("sim_id required")
 			}
-			sim, err := dbGetSim(ctx.AppDB(), simID)
+			sim, err := dbGetProjectSim(ctx, args, simID)
 			if err != nil {
 				return nil, err
 			}
@@ -47,7 +47,10 @@ func (a *App) toolSimsInput() sdk.Tool {
 				X:    floatArg(args, "x"), Y: floatArg(args, "y"),
 				X2: floatArg(args, "x2"), Y2: floatArg(args, "y2"),
 				DurationMS: int(floatArg(args, "ms")),
-				Key:        strArg(args, "key"), Text: strArg(args, "text"),
+				Key:        strArg(args, "key"), Text: rawStringArg(args, "text"),
+			}
+			if err := validateInputEvent(ev); err != nil {
+				return nil, err
 			}
 			switch sim.Platform {
 			case "android":
@@ -80,14 +83,14 @@ func (a *App) toolSimsLogs() sdk.Tool {
 			if simID == "" {
 				return nil, errors.New("sim_id required")
 			}
-			sim, err := dbGetSim(ctx.AppDB(), simID)
+			sim, err := dbGetProjectSim(ctx, args, simID)
 			if err != nil {
 				return nil, err
 			}
 			if sim == nil {
 				return nil, fmt.Errorf("sim %q not known", simID)
 			}
-			lines := int(floatArg(args, "lines"))
+			lines := normalizeLogLines(int(floatArg(args, "lines")))
 			var content string
 			switch sim.Platform {
 			case "android":
@@ -119,7 +122,7 @@ func (a *App) toolSimsStreamURL() sdk.Tool {
 			if simID == "" {
 				return nil, errors.New("sim_id required")
 			}
-			sim, err := dbGetSim(ctx.AppDB(), simID)
+			sim, err := dbGetProjectSim(ctx, args, simID)
 			if err != nil {
 				return nil, err
 			}

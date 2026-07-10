@@ -16,6 +16,7 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os/exec"
 	"strconv"
@@ -42,13 +43,63 @@ func (a *App) iosScreenPoints(udid string) (int, int) {
 	}
 	iosSizeMu.Unlock()
 
-	// Default to a common iPhone point size; idb clamps out-of-bounds
-	// taps to the screen, so a slight mismatch degrades gracefully.
-	w, h := 393, 852
+	w, h := iosScreenPointsFromIDB(udid)
+	if w <= 0 || h <= 0 {
+		// idb describe can be temporarily unavailable while its companion
+		// starts. Use a device-family-aware fallback rather than treating
+		// every configurable simulator as an iPhone 15 Pro.
+		w, h = a.iosFallbackScreenPoints(udid)
+	}
 	iosSizeMu.Lock()
 	iosSizeCache[udid] = [2]int{w, h}
 	iosSizeMu.Unlock()
 	return w, h
+}
+
+func iosScreenPointsFromIDB(udid string) (int, int) {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, "idb", "describe", "--udid", udid, "--json").Output()
+	if err != nil {
+		return 0, 0
+	}
+	var description struct {
+		ScreenDimensions *struct {
+			Width        int     `json:"width"`
+			Height       int     `json:"height"`
+			WidthPoints  int     `json:"width_points"`
+			HeightPoints int     `json:"height_points"`
+			Density      float64 `json:"density"`
+		} `json:"screen_dimensions"`
+	}
+	if json.Unmarshal(out, &description) != nil || description.ScreenDimensions == nil {
+		return 0, 0
+	}
+	d := description.ScreenDimensions
+	if d.WidthPoints > 0 && d.HeightPoints > 0 {
+		return d.WidthPoints, d.HeightPoints
+	}
+	if d.Density > 0 && d.Width > 0 && d.Height > 0 {
+		return int(float64(d.Width) / d.Density), int(float64(d.Height) / d.Density)
+	}
+	return 0, 0
+}
+
+func (a *App) iosFallbackScreenPoints(udid string) (int, int) {
+	deviceType := ""
+	if a != nil && a.appCtx != nil && a.appCtx.AppDB() != nil {
+		if sim, _ := dbGetSim(a.appCtx.AppDB(), udid); sim != nil {
+			deviceType = strings.ToLower(sim.DeviceType)
+		}
+	}
+	switch {
+	case strings.Contains(deviceType, "ipad"):
+		return 1024, 1366
+	case strings.Contains(deviceType, "se") || strings.Contains(deviceType, "iphone-8"):
+		return 375, 667
+	default:
+		return 393, 852
+	}
 }
 
 func (a *App) iosSendInput(udid string, ev inputEvent) error {
