@@ -203,7 +203,10 @@ func (a *App) toolMediaGenerate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	}
 
 	capability := h.ResolveCapability(args)
-	bound := selectBoundProvider(ctx, h, args, capability)
+	bound, err := selectBoundProvider(ctx, h, args, capability)
+	if err != nil {
+		return mcpError(err.Error()), nil
+	}
 	if bound == nil {
 		return mcpError("no " + h.Role + " bound — pick one in app settings"), nil
 	}
@@ -455,30 +458,61 @@ func (a *App) toolMediaGenerate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	}), nil
 }
 
-func selectBoundProvider(ctx *sdk.AppCtx, h kindHandler, args map[string]any, capability string) *sdk.BoundIntegration {
-	if h.Role != "image_provider" {
-		return ctx.IntegrationFor(h.Role)
+func selectBoundProvider(ctx *sdk.AppCtx, h kindHandler, args map[string]any, capability string) (*sdk.BoundIntegration, error) {
+	if h.Role != "image_provider" && h.Role != "audio_provider" {
+		return ctx.IntegrationFor(h.Role), nil
 	}
 	bounds := boundIntegrationsFor(ctx, h.Role)
 	if len(bounds) == 0 {
-		return nil
+		return nil, nil
 	}
-	model := strArg(args, "model", "")
-	if provider, stripped, ok := splitProviderModel(model); ok {
+	provider := ""
+	if h.Role == "audio_provider" {
+		var err error
+		provider, err = normalizeAudioProviderArgs(args)
+		if err != nil {
+			return nil, err
+		}
+	} else if parsed, stripped, ok := splitProviderModel(strArg(args, "model", "")); ok {
+		provider = parsed
 		args["model"] = stripped
+	}
+	if provider != "" {
 		for _, bound := range bounds {
-			if bound != nil && bound.AppSlug == provider && imageProviderSupports(bound.AppSlug, capability) {
-				return bound
+			if bound != nil && bound.AppSlug == provider && providerSupportsCapability(bound.AppSlug, capability) {
+				return bound, nil
 			}
 		}
-		return nil
+		return nil, fmt.Errorf("provider %s is not bound for %s or does not support %s", provider, h.Role, capability)
 	}
 	for _, bound := range bounds {
-		if bound != nil && imageProviderSupports(bound.AppSlug, capability) {
-			return bound
+		if bound != nil && providerSupportsCapability(bound.AppSlug, capability) {
+			return bound, nil
 		}
 	}
-	return nil
+	if h.Role == "audio_provider" {
+		return nil, fmt.Errorf("bound audio providers do not support %s", capability)
+	}
+	return nil, nil
+}
+
+func normalizeAudioProviderArgs(args map[string]any) (string, error) {
+	provider := strings.TrimSpace(strArg(args, "provider", ""))
+	selectedBy := "provider"
+	for _, key := range []string{"model", "voice", "voice_id"} {
+		value := strArg(args, key, "")
+		parsed, stripped, ok := splitProviderModel(value)
+		if !ok || (parsed != "elevenlabs" && parsed != "fish-audio") {
+			continue
+		}
+		if provider != "" && provider != parsed {
+			return "", fmt.Errorf("provider mismatch: %s selects %s but %s selects %s", key, parsed, selectedBy, provider)
+		}
+		provider = parsed
+		selectedBy = key
+		args[key] = stripped
+	}
+	return provider, nil
 }
 
 func splitProviderModel(model string) (string, string, bool) {
@@ -492,11 +526,28 @@ func splitProviderModel(model string) (string, string, bool) {
 			continue
 		}
 		switch parts[0] {
-		case "openai-api", "openai-codex", "venice-ai", "gemini":
+		case "openai-api", "openai-codex", "venice-ai", "gemini", "elevenlabs", "fish-audio":
 			return parts[0], parts[1], true
 		}
 	}
 	return "", model, false
+}
+
+func providerSupportsCapability(provider, capability string) bool {
+	if strings.HasPrefix(capability, "image.") {
+		return imageProviderSupports(provider, capability)
+	}
+	return audioProviderSupports(provider, capability)
+}
+
+func audioProviderSupports(provider, capability string) bool {
+	switch capability {
+	case "audio.tts", "voice.create":
+		return provider == "elevenlabs" || provider == "fish-audio"
+	case "audio.sfx":
+		return provider == "elevenlabs"
+	}
+	return false
 }
 
 func imageProviderSupports(provider, capability string) bool {
@@ -1118,16 +1169,17 @@ func (a *App) handleBindings(w http.ResponseWriter, r *http.Request) {
 	for kind, h := range handlers {
 		entry := map[string]any{"bound": false}
 		var b *sdk.BoundIntegration
-		if kind == KindImage {
+		defaultCap := h.ResolveCapability(map[string]any{})
+		if kind == KindImage || h.Role == "audio_provider" {
 			providers := []map[string]any{}
-			for i, bound := range boundIntegrationsFor(ctx, h.Role) {
-				if bound == nil {
+			for _, bound := range boundIntegrationsFor(ctx, h.Role) {
+				if bound == nil || !providerSupportsCapability(bound.AppSlug, defaultCap) {
 					continue
 				}
 				providers = append(providers, map[string]any{
 					"connection_id": bound.ConnectionID,
 					"slug":          bound.AppSlug,
-					"default":       i == 0,
+					"default":       b == nil,
 				})
 				if b == nil {
 					b = bound
@@ -1144,9 +1196,12 @@ func (a *App) handleBindings(w http.ResponseWriter, r *http.Request) {
 			entry["slug"] = b.AppSlug
 			// Default-capability support — what an empty-args call would
 			// route to (image.generate for the image kind, etc).
-			defaultCap := h.ResolveCapability(map[string]any{})
 			entry["default_capability"] = defaultCap
-			entry["capability_supported"] = b.ToolFor(defaultCap) != ""
+			capabilitySupported := b.ToolFor(defaultCap) != ""
+			if kind == KindImage || h.Role == "audio_provider" {
+				capabilitySupported = capabilitySupported && providerSupportsCapability(b.AppSlug, defaultCap)
+			}
+			entry["capability_supported"] = capabilitySupported
 			// For the image kind, also surface whether edit is bound.
 			if kind == KindImage {
 				entry["edit_supported"] = b.ToolFor("image.edit") != ""

@@ -92,15 +92,18 @@ func (a *App) createVoiceIdentity(ctx *sdk.AppCtx, pid string, args map[string]a
 	if sourceType != "prompt" && sourceType != "audio" {
 		return mcpError("unsupported voice source_type: " + sourceType), nil
 	}
-	bound := ctx.IntegrationFor("audio_provider")
-	if bound == nil {
-		return mcpError("no audio_provider bound — pick ElevenLabs in app settings"), nil
+	bound, err := selectVoiceIdentityProvider(ctx, args, sourceType)
+	if err != nil {
+		return mcpError(err.Error()), nil
 	}
-	if bound.AppSlug != "elevenlabs" {
-		return mcpError("voice identity creation is not wired for provider " + bound.AppSlug), nil
+	if bound == nil {
+		return mcpError("no compatible audio_provider bound — bind ElevenLabs and/or Fish Audio in app settings"), nil
 	}
 	if sourceType == "audio" {
-		return mcpError("ElevenLabs voice cloning is declared in the integration catalog, but requires multipart executor support before Media Studio can call it safely"), nil
+		return a.createAudioCloneIdentity(ctx, pid, bound, args)
+	}
+	if bound.AppSlug != "elevenlabs" {
+		return mcpError("prompt-based voice design is supported by ElevenLabs; use source_type=audio for Fish Audio"), nil
 	}
 
 	description := strings.TrimSpace(firstNonEmpty(
@@ -313,13 +316,12 @@ func (a *App) toolMediaVoiceList(ctx *sdk.AppCtx, args map[string]any) (any, err
 	m := out.(map[string]any)
 	ctx = withProjectScope(ctx, args)
 	if ctx != nil {
-		if bound := ctx.IntegrationFor("audio_provider"); bound != nil {
-			if voices, err := listVoicesFor(ctx, bound); err == nil {
-				m["provider"] = bound.AppSlug
-				m["provider_voices"] = voices
-			} else {
-				m["provider_error"] = err.Error()
-			}
+		voices, providers, providerErrors := listAudioVoicesForAllProviders(ctx)
+		m["providers"] = providers
+		m["provider"] = strings.Join(providers, ",")
+		m["provider_voices"] = voices
+		if len(providerErrors) > 0 {
+			m["provider_errors"] = providerErrors
 		}
 	}
 	return m, nil
@@ -544,9 +546,9 @@ func (a *App) handleListIdentities(w http.ResponseWriter, r *http.Request) {
 
 func sanitizedIdentityCreateJSON(args map[string]any) string {
 	cp := copyMap(args)
-	for _, k := range []string{"files", "source_audio", "source_image", "source_video", "consent_video"} {
-		if v, ok := cp[k].(string); ok && len(v) > 160 {
-			cp[k] = v[:80] + "…" + v[len(v)-40:]
+	for key, value := range cp {
+		if isMediaReferenceKey(key) {
+			cp[key] = persistedRequestValue(key, value)
 		}
 	}
 	b, err := json.Marshal(cp)

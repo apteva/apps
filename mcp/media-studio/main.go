@@ -36,12 +36,15 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: media-studio
 display_name: Media Studio
-version: 0.10.39
+version: 0.10.40
 description: |
   Generate images, video, audio, music, and avatars via compatible
   providers. Optionally saves outputs to Storage, supports stable
   cache keys for app-to-app generation reuse, and can use OpenAI Codex
-  as a subscription-backed image provider. v0.10.39 filters unsupported
+  as a subscription-backed image provider. v0.10.40 adds multiple audio
+  providers, Fish Audio TTS and voice catalogs, and provider-neutral
+  voice cloning from uploads, Storage references, URLs, and inline audio.
+  v0.10.39 filters unsupported
   ElevenLabs request-stitching fields for Eleven v3 and zero-retention
   requests while retaining text continuity where supported, and forwards
   current language-normalization voice options. v0.10.38 enforces image
@@ -95,7 +98,8 @@ requires:
       label: "Video provider"
     - role: audio_provider
       kind: integration
-      compatible_slugs: [elevenlabs]
+      mode: multiple
+      compatible_slugs: [elevenlabs, fish-audio]
       capabilities: [audio.tts, audio.sfx, voice.create]
       tools:
         audio.tts: text_to_speech
@@ -127,14 +131,14 @@ provides:
   http_routes:
     - prefix: /
   mcp_tools:
-    - { name: media_models, description: "List available media models for a kind. Args: kind? (default image). Use returned model ids in media_generate; image ids may include a provider prefix when multiple image providers are bound." }
-    - { name: media_generate, description: "Generate media (image/video/audio/music/avatar). Args: kind, prompt, model? (use a model id returned by media_models; image ids may include a provider prefix when multiple image providers are bound), size?, duration?, voice?, aspect?, avatar?, storage_folder?, n?, options?, cache_key?, cache_policy?." }
+    - { name: media_models, description: "List available media models for a kind. Args: kind? (default image). Use returned model ids in media_generate; image and audio ids may include a provider prefix when multiple providers are bound." }
+    - { name: media_generate, description: "Generate media (image/video/audio/music/avatar). Args: kind, prompt, provider?, model? (use a model id returned by media_models), size?, duration?, voice?, aspect?, avatar?, storage_folder?, n?, options?, cache_key?, cache_policy?." }
     - { name: media_estimate, description: "Estimate generation cost without creating media. Args match media_generate." }
     - { name: media_delete, description: "Delete a media generation and, by default, its linked Storage files. Args: id, delete_storage?." }
-    - { name: media_identity_create, description: "Create a reusable provider-side identity such as a voice or avatar. Args: kind (voice|avatar), name, source_type (prompt|audio|photo|video), prompt?/voice_description?, source_image?, source_video?, options?." }
+    - { name: media_identity_create, description: "Create a reusable provider-side identity such as a voice or avatar. Voice creation is provider-neutral: source_type=prompt designs an ElevenLabs voice; source_type=audio clones through Fish Audio or ElevenLabs from source_audio/source_audios. Args also include provider?, name, transcripts?, source_image?, source_video?, labels?, options?." }
     - { name: media_identity_list, description: "List Media Studio tracked reusable identities. Args: kind? (voice|avatar), limit?." }
     - { name: media_identity_get, description: "Fetch one tracked reusable identity by id." }
-    - { name: media_voice_create, description: "Alias for media_identity_create with kind=voice. Supports ElevenLabs prompt-based Voice Design now; audio cloning requires multipart executor support." }
+    - { name: media_voice_create, description: "Alias for media_identity_create with kind=voice. Use source_type=prompt for ElevenLabs Voice Design or source_type=audio plus source_audio/source_audios for provider-neutral Fish Audio or ElevenLabs cloning." }
     - { name: media_voice_list, description: "List tracked voice identities and, when bound, provider voice catalog entries." }
     - { name: media_avatar_create, description: "Create/train a reusable avatar from a photo or prompt. Args: name, source_type, source_image?/prompt?, options?." }
     - { name: media_avatar_list, description: "List tracked avatar identities and provider avatar catalog entries." }
@@ -254,6 +258,7 @@ func (a *App) MCPTools() []sdk.Tool {
 					"description": "Discriminates which provider to invoke.",
 					"enum":        []string{"image", "video", "audio_tts", "audio_sfx", "music", "avatar"},
 				},
+				"provider": map[string]any{"type": "string", "description": "Optional provider slug when multiple compatible providers are bound, for example elevenlabs or fish-audio. Provider-prefixed model and voice ids are also accepted."},
 				"prompt": map[string]any{
 					"type":        "string",
 					"description": "Text prompt (or text-to-speak when kind=audio_tts; the spoken script when kind=avatar).",
@@ -318,6 +323,7 @@ func (a *App) MCPTools() []sdk.Tool {
 			Description: "Estimate media generation cost without creating media. Args match media_generate: kind, prompt?, model?, size?, duration?, voice?, aspect?, avatar?, source_image?, source_images?, n?, options?. Returns cost_usd when the bound provider exposes pricing or Media Studio can derive it.",
 			InputSchema: schemaObject(map[string]any{
 				"kind":         map[string]any{"type": "string", "enum": []string{"image", "video", "audio_tts", "audio_sfx", "music", "avatar"}},
+				"provider":     map[string]any{"type": "string"},
 				"prompt":       map[string]any{"type": "string"},
 				"model":        map[string]any{"type": "string"},
 				"size":         map[string]any{"type": "string"},
@@ -353,9 +359,10 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "media_identity_create",
-			Description: "Create a reusable provider-side identity such as a voice or avatar. Args: kind (voice|avatar), name, source_type (voice: prompt|audio; avatar: photo|prompt|video), prompt?/voice_description?, model_id? (ElevenLabs Voice Design: eleven_ttv_v3|eleven_multilingual_ttv_v2), generated_voice_id?, preview_index?, source_image?, source_video?, consent_video?, labels?, options?. Voice prompt creation uses ElevenLabs Voice Design when audio_provider is ElevenLabs.",
+			Description: "Create a reusable provider-side identity such as a voice or avatar. Voice creation is provider-neutral: use source_type=prompt for ElevenLabs Voice Design or source_type=audio with source_audio/source_audios for Fish Audio or ElevenLabs cloning. Args include provider?, name, prompt?/voice_description?, model_id?, source_audio?, source_audios?, transcripts?, source_image?, source_video?, labels?, options?.",
 			InputSchema: schemaObject(map[string]any{
 				"kind":              map[string]any{"type": "string", "enum": []string{"voice", "avatar"}},
+				"provider":          map[string]any{"type": "string", "enum": []string{"elevenlabs", "fish-audio"}},
 				"name":              map[string]any{"type": "string"},
 				"source_type":       map[string]any{"type": "string", "enum": []string{"prompt", "audio", "photo", "video"}},
 				"prompt":            map[string]any{"type": "string"},
@@ -375,7 +382,22 @@ func (a *App) MCPTools() []sdk.Tool {
 					"default":     0,
 					"description": "Which generated preview to save when the provider returns multiple candidates.",
 				},
-				"source_image":  map[string]any{"type": "string"},
+				"source_image": map[string]any{"type": "string"},
+				"source_audio": map[string]any{
+					"type":        "string",
+					"description": "One consented voice sample as storage:N, HTTP(S) URL, data URL, base64, or runtime blob reference.",
+				},
+				"source_audios": map[string]any{
+					"type":        "array",
+					"items":       map[string]any{"type": "string"},
+					"description": "Multiple consented voice samples in the same formats as source_audio.",
+				},
+				"source_audio_filename": map[string]any{"type": "string"},
+				"transcripts": map[string]any{
+					"type":        "array",
+					"items":       map[string]any{"type": "string"},
+					"description": "Optional transcripts corresponding to Fish Audio samples; Fish runs ASR when omitted.",
+				},
 				"source_video":  map[string]any{"type": "string"},
 				"consent_video": map[string]any{"type": "string"},
 				"labels":        map[string]any{"type": "object"},
@@ -402,9 +424,10 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "media_voice_create",
-			Description: "Create a reusable voice identity. Alias for media_identity_create with kind=voice. Supports ElevenLabs prompt-based Voice Design now, including model_id eleven_ttv_v3 or eleven_multilingual_ttv_v2; source_type=audio cloning is declared in the provider catalog but waits for multipart executor support.",
+			Description: "Create a reusable voice identity through any bound voice provider. Use source_type=prompt for ElevenLabs Voice Design, or source_type=audio plus source_audio/source_audios for generic Fish Audio or ElevenLabs instant cloning.",
 			InputSchema: schemaObject(map[string]any{
 				"name":              map[string]any{"type": "string"},
+				"provider":          map[string]any{"type": "string", "enum": []string{"elevenlabs", "fish-audio"}},
 				"source_type":       map[string]any{"type": "string", "enum": []string{"prompt", "audio"}},
 				"prompt":            map[string]any{"type": "string"},
 				"voice_description": map[string]any{"type": "string"},
@@ -414,10 +437,14 @@ func (a *App) MCPTools() []sdk.Tool {
 					"default":     "eleven_ttv_v3",
 					"description": "ElevenLabs Voice Design model for prompt-created voices.",
 				},
-				"generated_voice_id": map[string]any{"type": "string"},
-				"preview_index":      map[string]any{"type": "integer", "default": 0},
-				"labels":             map[string]any{"type": "object"},
-				"options":            map[string]any{"type": "object"},
+				"generated_voice_id":    map[string]any{"type": "string"},
+				"preview_index":         map[string]any{"type": "integer", "default": 0},
+				"source_audio":          map[string]any{"type": "string"},
+				"source_audios":         map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+				"source_audio_filename": map[string]any{"type": "string"},
+				"transcripts":           map[string]any{"type": "array", "items": map[string]any{"type": "string"}},
+				"labels":                map[string]any{"type": "object"},
+				"options":               map[string]any{"type": "object"},
 			}, []string{"name", "source_type"}),
 			Handler: a.toolMediaVoiceCreate,
 		},

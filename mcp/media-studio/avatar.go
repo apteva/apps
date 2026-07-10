@@ -525,6 +525,7 @@ func firstNonEmpty(values ...string) string {
 type voiceEntry struct {
 	ID       string `json:"id"`
 	Name     string `json:"name"`
+	Provider string `json:"provider,omitempty"`
 	Language string `json:"language,omitempty"`
 	Gender   string `json:"gender,omitempty"`
 	Preview  string `json:"preview,omitempty"`
@@ -552,8 +553,15 @@ func (a *App) handleListVoices(w http.ResponseWriter, r *http.Request) {
 	if r.URL.Query().Get("kind") == KindAudioTTS {
 		role = "audio_provider"
 	}
-	bound := ctx.IntegrationFor(role)
-	if bound != nil {
+	if role == "audio_provider" {
+		voices, providers, providerErrors := listAudioVoicesForAllProviders(ctx)
+		resp["voices"] = voices
+		resp["providers"] = providers
+		resp["provider"] = strings.Join(providers, ",")
+		if len(providerErrors) > 0 {
+			resp["errors"] = providerErrors
+		}
+	} else if bound := ctx.IntegrationFor(role); bound != nil {
 		resp["provider"] = bound.AppSlug
 		voices, err := listVoicesFor(ctx, bound)
 		if err != nil {
@@ -564,6 +572,36 @@ func (a *App) handleListVoices(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(resp)
+}
+
+func listAudioVoicesForAllProviders(ctx *sdk.AppCtx) ([]voiceEntry, []string, map[string]string) {
+	bounds := boundIntegrationsFor(ctx, "audio_provider")
+	supported := make([]*sdk.BoundIntegration, 0, len(bounds))
+	for _, bound := range bounds {
+		if bound != nil && audioProviderSupports(bound.AppSlug, "audio.tts") {
+			supported = append(supported, bound)
+		}
+	}
+	namespace := len(supported) > 1
+	voices := []voiceEntry{}
+	providers := []string{}
+	errorsByProvider := map[string]string{}
+	for _, bound := range supported {
+		providers = append(providers, bound.AppSlug)
+		items, err := listVoicesFor(ctx, bound)
+		if err != nil {
+			errorsByProvider[bound.AppSlug] = err.Error()
+			continue
+		}
+		for _, item := range items {
+			item.Provider = bound.AppSlug
+			if namespace {
+				item.ID = bound.AppSlug + ":" + item.ID
+			}
+			voices = append(voices, item)
+		}
+	}
+	return voices, providers, errorsByProvider
 }
 
 func listVoicesFor(ctx *sdk.AppCtx, bound *sdk.BoundIntegration) ([]voiceEntry, error) {
@@ -640,6 +678,44 @@ func listVoicesFor(ctx *sdk.AppCtx, bound *sdk.BoundIntegration) ([]voiceEntry, 
 			out = append(out, voiceEntry{
 				ID: v.VoiceID, Name: v.Name, Language: language,
 				Gender: gender, Preview: v.PreviewURL,
+			})
+		}
+		return out, nil
+	case "fish-audio":
+		res, err := ctx.PlatformAPI().ExecuteIntegrationTool(bound.ConnectionID, "list_voice_models",
+			map[string]any{"page_size": 100, "page_number": 1, "self": true, "sort_by": "created_at"})
+		if err != nil {
+			return nil, err
+		}
+		if res == nil || !res.Success {
+			return nil, errors.New("fish-audio list_voice_models non-2xx")
+		}
+		var body struct {
+			Items []struct {
+				ID        string   `json:"_id"`
+				Title     string   `json:"title"`
+				State     string   `json:"state"`
+				Languages []string `json:"languages"`
+				Samples   []struct {
+					Audio string `json:"audio"`
+				} `json:"samples"`
+			} `json:"items"`
+		}
+		if err := json.Unmarshal(res.Data, &body); err != nil {
+			return nil, err
+		}
+		out := make([]voiceEntry, 0, len(body.Items))
+		for _, model := range body.Items {
+			if model.ID == "" || strings.EqualFold(model.State, "failed") {
+				continue
+			}
+			preview := ""
+			if len(model.Samples) > 0 {
+				preview = model.Samples[0].Audio
+			}
+			out = append(out, voiceEntry{
+				ID: model.ID, Name: firstNonEmpty(model.Title, model.ID),
+				Language: strings.Join(model.Languages, ", "), Preview: preview,
 			})
 		}
 		return out, nil

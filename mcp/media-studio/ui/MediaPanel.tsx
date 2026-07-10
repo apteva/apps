@@ -132,6 +132,7 @@ interface VideoJob {
 interface LiveModel {
   id: string;
   label: string;
+  provider?: string;
   size_modes?: string[];
   model_type?: string;
   pixel_sizes?: string[];
@@ -160,13 +161,26 @@ function formatCost(n: number): string {
 }
 
 interface BindingsStatus {
-  image: { bound: boolean; slug?: string };
-  video: { bound: boolean; slug?: string };
-  audio_tts: { bound: boolean; slug?: string };
-  audio_sfx: { bound: boolean; slug?: string };
+  image: BindingStatus;
+  video: BindingStatus;
+  audio_tts: BindingStatus;
+  audio_sfx: BindingStatus;
   music: { bound: boolean; slug?: string };
   avatar: { bound: boolean; slug?: string };
   storage: { bound: boolean; app?: string };
+}
+
+interface ProviderBinding {
+  connection_id: number;
+  slug: string;
+  default?: boolean;
+}
+
+interface BindingStatus {
+  bound: boolean;
+  slug?: string;
+  providers?: ProviderBinding[];
+  capability_supported?: boolean;
 }
 
 interface AvatarEntry {
@@ -204,6 +218,7 @@ interface AvatarCapabilities {
 interface VoiceEntry {
   id: string;
   name: string;
+  provider?: string;
   language?: string;
   gender?: string;
   preview?: string;
@@ -280,6 +295,17 @@ function modelLabel(m: LiveModel): string {
   const price = formatCost(m.price_usd || 0);
   if (price) bits.push(price);
   return bits.join(" · ");
+}
+
+function providerFromQualifiedId(value: string): string {
+  const provider = value.split(":", 1)[0];
+  return provider === "elevenlabs" || provider === "fish-audio" ? provider : "";
+}
+
+function providerLabel(provider: string): string {
+  if (provider === "fish-audio") return "Fish Audio";
+  if (provider === "elevenlabs") return "ElevenLabs";
+  return provider;
 }
 
 // Edit-capable models (Venice). Used when the user supplies a reference
@@ -409,11 +435,18 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
   const [voiceIdentities, setVoiceIdentities] = useState<MediaIdentity[]>([]);
   const [voiceCreateOpen, setVoiceCreateOpen] = useState(false);
   const [voiceCreateName, setVoiceCreateName] = useState("");
+  const [voiceCreateProvider, setVoiceCreateProvider] = useState("");
+  const [voiceCreateSourceType, setVoiceCreateSourceType] = useState<"prompt" | "audio">("prompt");
   const [voiceCreateDescription, setVoiceCreateDescription] = useState("");
   const [voiceCreateModel, setVoiceCreateModel] = useState("eleven_ttv_v3");
   const [voiceCreatePreviewText, setVoiceCreatePreviewText] = useState("");
   const [voiceCreateEnhance, setVoiceCreateEnhance] = useState(true);
+  const [voiceCreateAudio, setVoiceCreateAudio] = useState("");
+  const [voiceCreateAudioFilename, setVoiceCreateAudioFilename] = useState("");
+  const [voiceCreateTranscript, setVoiceCreateTranscript] = useState("");
   const [voiceCreating, setVoiceCreating] = useState(false);
+  const [audioFormat, setAudioFormat] = useState("mp3");
+  const [audioSpeed, setAudioSpeed] = useState(1);
   // Reference-image state. When one or more source images are present,
   // image generation routes through image.edit. Models expose a max source
   // image count; the panel enforces that before submit.
@@ -791,6 +824,19 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
   const currentModelList = activeKind === "image" && isEditMode ? editLiveModels : liveModels;
   const currentModel: LiveModel | undefined =
     currentModelList?.find((m) => m.id === currentModelId);
+  const audioProviders: ProviderBinding[] = bindings?.audio_tts.providers?.length
+    ? bindings.audio_tts.providers
+    : bindings?.audio_tts.slug
+      ? [{ connection_id: 0, slug: bindings.audio_tts.slug, default: true }]
+      : [];
+  const selectedAudioProvider = currentModel?.provider || providerFromQualifiedId(audioModel) || audioProviders[0]?.slug || "";
+  useEffect(() => {
+    if (activeKind !== "audio_tts" || !selectedAudioProvider) return;
+    const candidates = voices.filter((item) => !item.provider || item.provider === selectedAudioProvider);
+    if (candidates.length > 0 && !candidates.some((item) => item.id === voice)) {
+      setVoice(candidates[0].id);
+    }
+  }, [activeKind, selectedAudioProvider, voices, voice]);
   const promptLength = Array.from(prompt).length;
   const promptLimit =
     currentModel?.prompt_char_limit ||
@@ -945,44 +991,62 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
     if (voiceCreating) return;
     const name = voiceCreateName.trim();
     const description = voiceCreateDescription.trim();
+    const provider = voiceCreateProvider || selectedAudioProvider || audioProviders[0]?.slug;
+    const sourceType = provider === "fish-audio" ? "audio" : voiceCreateSourceType;
     if (!name) {
       setStatus("Voice name required.");
       return;
     }
-    if (description.length < 20) {
+    if (!provider) {
+      setStatus("Voice provider required.");
+      return;
+    }
+    if (sourceType === "prompt" && description.length < 20) {
       setStatus("Voice description must be at least 20 characters.");
+      return;
+    }
+    if (sourceType === "audio" && !voiceCreateAudio.trim()) {
+      setStatus("Voice audio sample required.");
       return;
     }
     setVoiceCreating(true);
     setStatus("Creating voice…");
     try {
-      const options: Record<string, unknown> = {
-        model_id: voiceCreateModel,
-        auto_generate_text: !voiceCreatePreviewText.trim(),
-        should_enhance: voiceCreateEnhance,
-        quality: 0.9,
-        loudness: 0.5,
-        output_format: "mp3_44100_128",
+      const options: Record<string, unknown> = sourceType === "prompt"
+        ? {
+          model_id: voiceCreateModel,
+          auto_generate_text: !voiceCreatePreviewText.trim(),
+          should_enhance: voiceCreateEnhance,
+          quality: 0.9,
+          loudness: 0.5,
+          output_format: "mp3_44100_128",
+        }
+        : provider === "fish-audio"
+          ? { visibility: "private", enhance_audio_quality: voiceCreateEnhance, generate_sample: true }
+          : { remove_background_noise: voiceCreateEnhance };
+      if (sourceType === "prompt" && voiceCreatePreviewText.trim()) options.text = voiceCreatePreviewText.trim();
+      const request: Record<string, unknown> = {
+        project_id: projectId,
+        kind: "voice",
+        provider,
+        name,
+        source_type: sourceType,
+        voice_description: description,
+        labels: { created_in: "media-studio" },
+        options,
       };
-      if (voiceCreatePreviewText.trim()) options.text = voiceCreatePreviewText.trim();
+      if (sourceType === "audio") {
+        request.source_audio = voiceCreateAudio.trim();
+        if (voiceCreateAudioFilename.trim()) request.source_audio_filename = voiceCreateAudioFilename.trim();
+        if (voiceCreateTranscript.trim()) request.transcripts = [voiceCreateTranscript.trim()];
+      }
       const res = await fetch(
         `${API}/identity-create?project_id=${encodeURIComponent(projectId)}`,
         {
           method: "POST",
           credentials: "same-origin",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            project_id: projectId,
-            kind: "voice",
-            name,
-            source_type: "prompt",
-            voice_description: description,
-            labels: {
-              use_case: "hypnosis",
-              created_in: "media-studio",
-            },
-            options,
-          }),
+          body: JSON.stringify(request),
         },
       );
       const text = await res.text();
@@ -1004,15 +1068,19 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
         return;
       }
       const providerVoiceID = result._meta?.provider_identity_id || result._meta?.identity?.provider_identity_id || "";
-      if (providerVoiceID) setVoice(providerVoiceID);
+      const routedVoiceID = providerVoiceID && audioProviders.length > 1 ? `${provider}:${providerVoiceID}` : providerVoiceID;
+      if (routedVoiceID) setVoice(routedVoiceID);
       setVoiceCreateName("");
       setVoiceCreateDescription("");
       setVoiceCreatePreviewText("");
+      setVoiceCreateAudio("");
+      setVoiceCreateAudioFilename("");
+      setVoiceCreateTranscript("");
       setVoiceCreateOpen(false);
       setStatus("Voice created.");
       await loadVoiceIdentities();
       await loadVoices();
-      if (providerVoiceID) setVoice(providerVoiceID);
+      if (routedVoiceID) setVoice(routedVoiceID);
     } catch (e) {
       setStatus("Error: " + (e as Error).message);
     } finally {
@@ -1076,6 +1144,12 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
     } else if (activeKind === "audio_tts") {
       if (audioModel) body.model = audioModel;
       if (voice) body.voice = voice;
+      if (selectedAudioProvider === "fish-audio") {
+        body.options = {
+          output_format: audioFormat,
+          prosody: { speed: audioSpeed, normalize_loudness: true },
+        };
+      }
     } else if (activeKind === "audio_sfx") {
       if (sfxModel) body.model = sfxModel;
       body.duration = duration;
@@ -1157,6 +1231,9 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
     aspect,
     videoNoSound,
     audioModel,
+    audioFormat,
+    audioSpeed,
+    selectedAudioProvider,
     sfxModel,
     musicModel,
     voice,
@@ -1500,6 +1577,10 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
             setVoiceCreateOpen={setVoiceCreateOpen}
             voiceCreateName={voiceCreateName}
             setVoiceCreateName={setVoiceCreateName}
+            voiceCreateProvider={voiceCreateProvider}
+            setVoiceCreateProvider={setVoiceCreateProvider}
+            voiceCreateSourceType={voiceCreateSourceType}
+            setVoiceCreateSourceType={setVoiceCreateSourceType}
             voiceCreateDescription={voiceCreateDescription}
             setVoiceCreateDescription={setVoiceCreateDescription}
             voiceCreateModel={voiceCreateModel}
@@ -1508,9 +1589,19 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
             setVoiceCreatePreviewText={setVoiceCreatePreviewText}
             voiceCreateEnhance={voiceCreateEnhance}
             setVoiceCreateEnhance={setVoiceCreateEnhance}
+            voiceCreateAudio={voiceCreateAudio}
+            setVoiceCreateAudio={setVoiceCreateAudio}
+            voiceCreateAudioFilename={voiceCreateAudioFilename}
+            setVoiceCreateAudioFilename={setVoiceCreateAudioFilename}
+            voiceCreateTranscript={voiceCreateTranscript}
+            setVoiceCreateTranscript={setVoiceCreateTranscript}
             voiceCreating={voiceCreating}
             createVoice={createVoice}
-            audioProvider={currentBinding?.slug || ""}
+            audioProviders={audioProviders}
+            audioFormat={audioFormat}
+            setAudioFormat={setAudioFormat}
+            audioSpeed={audioSpeed}
+            setAudioSpeed={setAudioSpeed}
             storageBound={!!bindings?.storage?.bound}
             storageFolder={storageFolder}
             setStorageFolder={setStorageFolder}
@@ -1726,6 +1817,10 @@ interface ComposerProps {
   setVoiceCreateOpen: (v: boolean) => void;
   voiceCreateName: string;
   setVoiceCreateName: (v: string) => void;
+  voiceCreateProvider: string;
+  setVoiceCreateProvider: (v: string) => void;
+  voiceCreateSourceType: "prompt" | "audio";
+  setVoiceCreateSourceType: (v: "prompt" | "audio") => void;
   voiceCreateDescription: string;
   setVoiceCreateDescription: (v: string) => void;
   voiceCreateModel: string;
@@ -1734,9 +1829,19 @@ interface ComposerProps {
   setVoiceCreatePreviewText: (v: string) => void;
   voiceCreateEnhance: boolean;
   setVoiceCreateEnhance: (v: boolean) => void;
+  voiceCreateAudio: string;
+  setVoiceCreateAudio: (v: string) => void;
+  voiceCreateAudioFilename: string;
+  setVoiceCreateAudioFilename: (v: string) => void;
+  voiceCreateTranscript: string;
+  setVoiceCreateTranscript: (v: string) => void;
   voiceCreating: boolean;
   createVoice: () => void;
-  audioProvider: string;
+  audioProviders: ProviderBinding[];
+  audioFormat: string;
+  setAudioFormat: (v: string) => void;
+  audioSpeed: number;
+  setAudioSpeed: (v: number) => void;
   storageBound: boolean;
   storageFolder: string;
   setStorageFolder: (v: string) => void;
@@ -1761,6 +1866,8 @@ function Composer(p: ComposerProps) {
             ? "A door creaking open"
             : "a cat in a hat";
   const selectedAvatar = p.avatars.find((av) => av.id === p.selectedAvatar);
+  const ttsProvider = p.currentModel?.provider || providerFromQualifiedId(p.audioModel) || p.audioProviders[0]?.slug || "";
+  const ttsVoices = ttsProvider ? p.voices.filter((item) => !item.provider || item.provider === ttsProvider) : p.voices;
   const avatarVBlocked =
     p.kind === "avatar" &&
     p.avatarProvider === "heygen" &&
@@ -1852,7 +1959,11 @@ function Composer(p: ComposerProps) {
       {p.kind === "audio_tts" && (
         <>
           <VoiceCreatePanel
-            provider={p.audioProvider}
+            providers={p.audioProviders}
+            provider={p.voiceCreateProvider || ttsProvider}
+            setProvider={p.setVoiceCreateProvider}
+            sourceType={p.voiceCreateSourceType}
+            setSourceType={p.setVoiceCreateSourceType}
             identities={p.voiceIdentities}
             open={p.voiceCreateOpen}
             setOpen={p.setVoiceCreateOpen}
@@ -1866,6 +1977,12 @@ function Composer(p: ComposerProps) {
             setPreviewText={p.setVoiceCreatePreviewText}
             enhance={p.voiceCreateEnhance}
             setEnhance={p.setVoiceCreateEnhance}
+            audio={p.voiceCreateAudio}
+            setAudio={p.setVoiceCreateAudio}
+            audioFilename={p.voiceCreateAudioFilename}
+            setAudioFilename={p.setVoiceCreateAudioFilename}
+            transcript={p.voiceCreateTranscript}
+            setTranscript={p.setVoiceCreateTranscript}
             creating={p.voiceCreating}
             createVoice={p.createVoice}
             selectedVoice={p.voice}
@@ -1877,8 +1994,22 @@ function Composer(p: ComposerProps) {
             liveModels={p.liveModels}
             liveProvider={p.liveProvider}
           />
-          {p.voices.length > 0 ? (
-            <VoiceSelect voice={p.voice} setVoice={p.setVoice} voices={p.voices} />
+          {ttsProvider === "fish-audio" && (
+            <>
+              <div>
+                <label className="text-text-muted text-xs block">Format</label>
+                <select value={p.audioFormat} onChange={(e) => p.setAudioFormat(e.target.value)} className="bg-bg-input border border-border rounded px-2 py-1.5 text-sm">
+                  <option value="mp3">MP3</option>
+                  <option value="wav">WAV</option>
+                  <option value="opus">Opus</option>
+                  <option value="pcm">PCM</option>
+                </select>
+              </div>
+              <NumberField label="Speed" value={p.audioSpeed} onChange={p.setAudioSpeed} min={0.5} max={2} step={0.1} />
+            </>
+          )}
+          {ttsVoices.length > 0 ? (
+            <VoiceSelect voice={p.voice} setVoice={p.setVoice} voices={ttsVoices} />
           ) : (
             <TextField label="Voice" value={p.voice} onChange={p.setVoice} placeholder="voice_id" />
           )}
@@ -2005,7 +2136,11 @@ function EstimateBadge({
 }
 
 function VoiceCreatePanel({
+  providers,
   provider,
+  setProvider,
+  sourceType,
+  setSourceType,
   identities,
   open,
   setOpen,
@@ -2019,12 +2154,22 @@ function VoiceCreatePanel({
   setPreviewText,
   enhance,
   setEnhance,
+  audio,
+  setAudio,
+  audioFilename,
+  setAudioFilename,
+  transcript,
+  setTranscript,
   creating,
   createVoice,
   selectedVoice,
   setSelectedVoice,
 }: {
+  providers: ProviderBinding[];
   provider: string;
+  setProvider: (v: string) => void;
+  sourceType: "prompt" | "audio";
+  setSourceType: (v: "prompt" | "audio") => void;
   identities: MediaIdentity[];
   open: boolean;
   setOpen: (v: boolean) => void;
@@ -2038,30 +2183,79 @@ function VoiceCreatePanel({
   setPreviewText: (v: string) => void;
   enhance: boolean;
   setEnhance: (v: boolean) => void;
+  audio: string;
+  setAudio: (v: string) => void;
+  audioFilename: string;
+  setAudioFilename: (v: string) => void;
+  transcript: string;
+  setTranscript: (v: string) => void;
   creating: boolean;
   createVoice: () => void;
   selectedVoice: string;
   setSelectedVoice: (v: string) => void;
 }) {
-  const readyVoices = identities.filter((x) => x.status === "ready" && x.provider_identity_id);
-  const selectedTracked = readyVoices.some((x) => x.provider_identity_id === selectedVoice);
+  const activeProvider = provider || providers[0]?.slug || "";
+  const activeSourceType =
+    activeProvider === "fish-audio" ? "audio" : sourceType;
+  const readyVoices = identities.filter(
+    (x) =>
+      x.status === "ready" &&
+      x.provider_identity_id &&
+      (!activeProvider || x.provider === activeProvider),
+  );
+  const routedIdentityID = (identity: MediaIdentity) =>
+    providers.length > 1
+      ? `${identity.provider}:${identity.provider_identity_id}`
+      : identity.provider_identity_id;
+  const selectedTracked = readyVoices.some(
+    (x) => routedIdentityID(x) === selectedVoice,
+  );
+  const cloneReady = !!audio.trim();
+  const designReady = description.trim().length >= 20;
+  const onAudioFile = (file?: File) => {
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      setAudio(String(reader.result || ""));
+      setAudioFilename(file.name);
+    };
+    reader.readAsDataURL(file);
+  };
   return (
-    <div style={{ flexBasis: "100%" }} className="border border-border rounded p-2 bg-bg-card">
+    <div
+      style={{ flexBasis: "100%" }}
+      className="border border-border rounded p-2 bg-bg-card"
+    >
       <div className="flex items-center gap-2 flex-wrap">
         <button
           onClick={() => setOpen(!open)}
           className="text-xs px-2 py-1 border border-border rounded text-accent hover:border-accent disabled:opacity-50"
-          disabled={provider !== "elevenlabs"}
+          disabled={providers.length === 0}
         >
           {open ? "Close voice creator" : "Create voice"}
         </button>
-        <span className="text-text-dim" style={{ fontSize: 10 }}>
-          {provider === "elevenlabs"
-            ? "ElevenLabs Voice Design"
-            : provider
-              ? `voice creation not wired for ${provider}`
-              : "bind ElevenLabs audio"}
-        </span>
+        {providers.length > 1 ? (
+          <select
+            value={activeProvider}
+            onChange={(e) => {
+              setProvider(e.target.value);
+              if (e.target.value === "fish-audio") setSourceType("audio");
+            }}
+            className="bg-bg-input border border-border rounded px-2 py-1 text-xs"
+          >
+            {providers.map((item) => (
+              <option key={item.slug} value={item.slug}>
+                {providerLabel(item.slug)}
+              </option>
+            ))}
+          </select>
+        ) : (
+          <span className="text-text-dim" style={{ fontSize: 10 }}>
+            {activeProvider
+              ? providerLabel(activeProvider)
+              : "No voice provider"}
+          </span>
+        )}
         {readyVoices.length > 0 && (
           <>
             <span className="text-text-dim" style={{ fontSize: 10 }}>
@@ -2077,7 +2271,7 @@ function VoiceCreatePanel({
             >
               <option value="">Tracked voices</option>
               {readyVoices.map((identity) => (
-                <option key={identity.id} value={identity.provider_identity_id}>
+                <option key={identity.id} value={routedIdentityID(identity)}>
                   {identity.name || identity.provider_identity_id}
                 </option>
               ))}
@@ -2088,18 +2282,44 @@ function VoiceCreatePanel({
       {open && (
         <div className="mt-2 flex flex-col gap-2">
           <div className="flex items-end gap-2 flex-wrap">
-            <TextField label="Name" value={name} onChange={setName} placeholder="Hypno Mistress" />
-            <div>
-              <label className="text-text-muted text-xs block">Design model</label>
-              <select
-                value={model}
-                onChange={(e) => setModel(e.target.value)}
-                className="bg-bg-input border border-border rounded px-2 py-1.5 text-sm"
-              >
-                <option value="eleven_ttv_v3">Eleven v3</option>
-                <option value="eleven_multilingual_ttv_v2">Multilingual v2</option>
-              </select>
-            </div>
+            <TextField
+              label="Name"
+              value={name}
+              onChange={setName}
+              placeholder="Narrator"
+            />
+            {activeProvider === "elevenlabs" && (
+              <div>
+                <label className="text-text-muted text-xs block">Mode</label>
+                <select
+                  value={activeSourceType}
+                  onChange={(e) =>
+                    setSourceType(e.target.value as "prompt" | "audio")
+                  }
+                  className="bg-bg-input border border-border rounded px-2 py-1.5 text-sm"
+                >
+                  <option value="prompt">Design</option>
+                  <option value="audio">Clone</option>
+                </select>
+              </div>
+            )}
+            {activeSourceType === "prompt" && (
+              <div>
+                <label className="text-text-muted text-xs block">
+                  Design model
+                </label>
+                <select
+                  value={model}
+                  onChange={(e) => setModel(e.target.value)}
+                  className="bg-bg-input border border-border rounded px-2 py-1.5 text-sm"
+                >
+                  <option value="eleven_ttv_v3">Eleven v3</option>
+                  <option value="eleven_multilingual_ttv_v2">
+                    Multilingual v2
+                  </option>
+                </select>
+              </div>
+            )}
             <label className="flex items-center gap-1.5 text-xs text-text-muted cursor-pointer select-none pb-2">
               <input
                 type="checkbox"
@@ -2107,51 +2327,119 @@ function VoiceCreatePanel({
                 onChange={(e) => setEnhance(e.target.checked)}
                 style={{ accentColor: "var(--apteva-accent, #4ade80)" }}
               />
-              Enhance prompt
+              {activeSourceType === "audio"
+                ? activeProvider === "elevenlabs"
+                  ? "Clean audio"
+                  : "Enhance audio"
+                : "Enhance prompt"}
             </label>
             <button
               onClick={createVoice}
-              disabled={creating || !name.trim() || description.trim().length < 20 || provider !== "elevenlabs"}
+              disabled={
+                creating ||
+                !name.trim() ||
+                !activeProvider ||
+                (activeSourceType === "audio" ? !cloneReady : !designReady)
+              }
               className="px-3 py-1.5 text-sm bg-accent text-bg rounded font-bold disabled:opacity-50"
             >
               {creating ? "…" : "Create"}
             </button>
           </div>
+          {activeSourceType === "audio" && (
+            <>
+              <div className="flex items-end gap-2 flex-wrap">
+                <label className="text-xs px-2 py-1.5 border border-border rounded text-accent cursor-pointer hover:border-accent">
+                  Choose audio
+                  <input
+                    type="file"
+                    accept="audio/*"
+                    className="hidden"
+                    onChange={(e) => onAudioFile(e.target.files?.[0])}
+                  />
+                </label>
+                <TextField
+                  label="Storage / URL"
+                  value={audio.startsWith("data:") ? "" : audio}
+                  onChange={(value) => {
+                    setAudio(value);
+                    setAudioFilename("");
+                  }}
+                  placeholder="storage:123 or https://…"
+                />
+                {audioFilename && (
+                  <span className="text-text-dim text-xs pb-2">
+                    {audioFilename}
+                  </span>
+                )}
+              </div>
+              <div>
+                <label className="text-text-muted text-xs block">
+                  Transcript
+                </label>
+                <textarea
+                  value={transcript}
+                  onChange={(e) => setTranscript(e.target.value)}
+                  rows={2}
+                  className="w-full bg-bg-input border border-border rounded px-2 py-1.5 text-sm"
+                />
+              </div>
+            </>
+          )}
           <div>
-            <label className="text-text-muted text-xs block">Voice description</label>
+            <label className="text-text-muted text-xs block">Description</label>
             <textarea
               value={description}
               onChange={(e) => setDescription(e.target.value)}
-              placeholder="Adult feminine voice, intimate and composed, low warm tone, slow confident pacing, polished studio recording."
+              placeholder={
+                activeSourceType === "prompt"
+                  ? "Warm, composed narrator with clear pacing and a polished studio tone."
+                  : "Optional voice description"
+              }
               rows={3}
               className="w-full bg-bg-input border border-border rounded px-2 py-1.5 text-sm"
             />
           </div>
-          <div>
-            <label className="text-text-muted text-xs block">Preview text</label>
-            <textarea
-              value={previewText}
-              onChange={(e) => setPreviewText(e.target.value)}
-              placeholder="Optional. Leave empty to let ElevenLabs generate preview text."
-              rows={2}
-              className="w-full bg-bg-input border border-border rounded px-2 py-1.5 text-sm"
-            />
-          </div>
+          {activeSourceType === "prompt" && (
+            <div>
+              <label className="text-text-muted text-xs block">
+                Preview text
+              </label>
+              <textarea
+                value={previewText}
+                onChange={(e) => setPreviewText(e.target.value)}
+                placeholder="Optional. Leave empty to let ElevenLabs generate preview text."
+                rows={2}
+                className="w-full bg-bg-input border border-border rounded px-2 py-1.5 text-sm"
+              />
+            </div>
+          )}
         </div>
       )}
       {identities.some((x) => x.status === "failed") && (
         <div className="flex gap-2 flex-wrap mt-2">
-          {identities.filter((x) => x.status === "failed").slice(0, 4).map((identity) => (
-            <div
-              key={identity.id}
-              className="border rounded px-2 py-1 bg-bg-input"
-              style={{ borderColor: "var(--apteva-danger, #ef4444)", fontSize: 10, maxWidth: 220 }}
-              title={identity.error || identity.prompt || identity.name}
-            >
-              <span className="text-text truncate block">{identity.name || `#${identity.id}`}</span>
-              <span className="text-text-dim truncate block">{identity.error || identity.status}</span>
-            </div>
-          ))}
+          {identities
+            .filter((x) => x.status === "failed")
+            .slice(0, 4)
+            .map((identity) => (
+              <div
+                key={identity.id}
+                className="border rounded px-2 py-1 bg-bg-input"
+                style={{
+                  borderColor: "var(--apteva-danger, #ef4444)",
+                  fontSize: 10,
+                  maxWidth: 220,
+                }}
+                title={identity.error || identity.prompt || identity.name}
+              >
+                <span className="text-text truncate block">
+                  {identity.name || `#${identity.id}`}
+                </span>
+                <span className="text-text-dim truncate block">
+                  {identity.error || identity.status}
+                </span>
+              </div>
+            ))}
         </div>
       )}
     </div>
@@ -2191,9 +2479,13 @@ function AvatarCreatePanel({
   creating: boolean;
   createAvatar: () => void;
 }) {
-  const sourceTypes = (caps?.source_types || ["photo"]).filter((x) => x === "photo" || x === "prompt" || x === "video") as Array<"photo" | "prompt" | "video">;
+  const sourceTypes = (caps?.source_types || ["photo"]).filter(
+    (x) => x === "photo" || x === "prompt" || x === "video",
+  ) as Array<"photo" | "prompt" | "video">;
   const shownTypes = sourceTypes.length > 0 ? sourceTypes : ["photo"];
-  const activeJobs = jobs.filter((j) => j.status === "queued" || j.status === "training");
+  const activeJobs = jobs.filter(
+    (j) => j.status === "queued" || j.status === "training",
+  );
   const failedJobs = jobs.filter((j) => j.status === "failed");
   const readFile = (file: File) => {
     const reader = new FileReader();
@@ -2201,7 +2493,10 @@ function AvatarCreatePanel({
     reader.readAsDataURL(file);
   };
   return (
-    <div style={{ flexBasis: "100%" }} className="border border-border rounded p-2 bg-bg-card">
+    <div
+      style={{ flexBasis: "100%" }}
+      className="border border-border rounded p-2 bg-bg-card"
+    >
       <div className="flex items-center gap-2">
         <button
           onClick={() => setOpen(!open)}
@@ -2216,24 +2511,37 @@ function AvatarCreatePanel({
           </span>
         )}
         {failedJobs.length > 0 && (
-          <span style={{ fontSize: 10, color: "var(--apteva-danger, #ef4444)" }}>
+          <span
+            style={{ fontSize: 10, color: "var(--apteva-danger, #ef4444)" }}
+          >
             {failedJobs.length} failed
           </span>
         )}
       </div>
       {open && (
         <div className="flex items-end gap-2 flex-wrap mt-2">
-          <TextField label="Name" value={name} onChange={setName} placeholder="Avatar name" />
+          <TextField
+            label="Name"
+            value={name}
+            onChange={setName}
+            placeholder="Avatar name"
+          />
           <div>
             <label className="text-text-muted text-xs block">Source</label>
             <select
               value={sourceType}
-              onChange={(e) => setSourceType(e.target.value as "photo" | "prompt" | "video")}
+              onChange={(e) =>
+                setSourceType(e.target.value as "photo" | "prompt" | "video")
+              }
               className="bg-bg-input border border-border rounded px-2 py-1.5 text-sm"
             >
               {shownTypes.map((t) => (
                 <option key={t} value={t}>
-                  {t === "photo" ? "Photo" : t === "prompt" ? "Prompt" : "Video"}
+                  {t === "photo"
+                    ? "Photo"
+                    : t === "prompt"
+                      ? "Prompt"
+                      : "Video"}
                 </option>
               ))}
             </select>
@@ -2290,7 +2598,13 @@ function AvatarCreatePanel({
           )}
           <button
             onClick={createAvatar}
-            disabled={creating || !name.trim() || ((sourceType === "photo" || sourceType === "video") && !source.trim()) || (sourceType === "prompt" && !prompt.trim())}
+            disabled={
+              creating ||
+              !name.trim() ||
+              ((sourceType === "photo" || sourceType === "video") &&
+                !source.trim()) ||
+              (sourceType === "prompt" && !prompt.trim())
+            }
             className="px-3 py-1.5 text-sm bg-accent text-bg rounded font-bold disabled:opacity-50"
           >
             {creating ? "…" : "Create"}
@@ -3163,12 +3477,14 @@ function NumberField({
   onChange,
   min,
   max,
+  step,
 }: {
   label: string;
   value: number;
   onChange: (v: number) => void;
   min?: number;
   max?: number;
+  step?: number;
 }) {
   return (
     <div>
@@ -3178,6 +3494,7 @@ function NumberField({
         value={value}
         min={min}
         max={max}
+        step={step}
         onChange={(e) => onChange(Number(e.target.value) || 0)}
         className="bg-bg-input border border-border rounded px-2 py-1.5 text-sm"
         style={{ width: 96 }}

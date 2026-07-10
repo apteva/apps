@@ -6,15 +6,63 @@ import (
 	"strings"
 )
 
-// Audio (TTS + SFX) is sync for ElevenLabs: the integration executor
-// buffers the upstream binary response into {_binary, base64, mimeType}.
+// Audio (TTS + SFX) is synchronous. Provider integrations buffer upstream
+// binary responses into {_binary, base64, mimeType}.
 
 func buildAudioTTSArgs(args map[string]any, providerSlug, capability string) (map[string]any, error) {
 	switch providerSlug {
 	case "elevenlabs":
 		return buildElevenLabsTTSArgs(args)
+	case "fish-audio":
+		return buildFishAudioTTSArgs(args)
 	}
 	return nil, fmt.Errorf("unsupported audio TTS provider slug: %q", providerSlug)
+}
+
+func buildFishAudioTTSArgs(args map[string]any) (map[string]any, error) {
+	out := map[string]any{
+		"model": strArg(args, "model", "s2.1-pro"),
+		"text":  strArg(args, "prompt", ""),
+	}
+	if voiceID := firstNonEmpty(strArg(args, "voice", ""), strArg(args, "voice_id", "")); voiceID != "" {
+		out["reference_id"] = voiceID
+	}
+	if opts, ok := args["options"].(map[string]any); ok {
+		for _, key := range []string{
+			"reference_id", "prosody", "temperature", "top_p", "chunk_length",
+			"normalize", "format", "sample_rate", "mp3_bitrate", "opus_bitrate",
+			"latency", "max_new_tokens", "repetition_penalty", "min_chunk_length",
+			"condition_on_previous_chunks", "early_stop_threshold",
+		} {
+			if value, exists := opts[key]; exists {
+				out[key] = value
+			}
+		}
+		// output_format is Media Studio's provider-neutral spelling.
+		if value, exists := opts["output_format"]; exists {
+			out["format"] = normalizeFishAudioFormat(fmt.Sprint(value))
+		}
+	}
+	if format, ok := out["format"].(string); ok {
+		out["format"] = normalizeFishAudioFormat(format)
+	}
+	return out, nil
+}
+
+func normalizeFishAudioFormat(format string) string {
+	format = strings.ToLower(strings.TrimSpace(format))
+	switch {
+	case strings.HasPrefix(format, "mp3"):
+		return "mp3"
+	case strings.HasPrefix(format, "pcm"):
+		return "pcm"
+	case strings.HasPrefix(format, "wav"):
+		return "wav"
+	case strings.HasPrefix(format, "opus"):
+		return "opus"
+	default:
+		return format
+	}
 }
 
 func buildAudioSFXArgs(args map[string]any, providerSlug, capability string) (map[string]any, error) {
@@ -98,7 +146,7 @@ func buildElevenLabsSFXArgs(args map[string]any) (map[string]any, error) {
 
 func normalizeAudioResponse(slug, capability string, raw json.RawMessage) ([]generatedMedia, string, string, error) {
 	switch slug {
-	case "elevenlabs":
+	case "elevenlabs", "fish-audio":
 		return normalizeBinaryAudioResponse(raw)
 	}
 	return nil, "", "", fmt.Errorf("unsupported audio provider slug: %q", slug)

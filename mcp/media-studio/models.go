@@ -201,6 +201,32 @@ func loadImageModelsForAllProviders(ctx *sdk.AppCtx, capability string) ([]model
 	return out, providers, nil
 }
 
+func loadAudioModelsForAllProviders(ctx *sdk.AppCtx, kind, capability string) ([]modelEntry, []string, error) {
+	h, ok := handlers[kind]
+	if !ok || h.Role != "audio_provider" {
+		return nil, nil, nil
+	}
+	bounds := boundIntegrationsFor(ctx, h.Role)
+	supported := make([]*sdk.BoundIntegration, 0, len(bounds))
+	for _, bound := range bounds {
+		if bound != nil && audioProviderSupports(bound.AppSlug, capability) {
+			supported = append(supported, bound)
+		}
+	}
+	namespace := len(supported) > 1
+	out := []modelEntry{}
+	providers := []string{}
+	for _, bound := range supported {
+		providers = append(providers, bound.AppSlug)
+		models, err := loadModelsForBoundCapability(ctx, kind, capability, bound)
+		if err != nil {
+			return out, providers, err
+		}
+		out = append(out, providerScopedModels(bound.AppSlug, models, namespace)...)
+	}
+	return out, providers, nil
+}
+
 func loadModelsForBoundCapability(ctx *sdk.AppCtx, kind, capability string, bound *sdk.BoundIntegration) ([]modelEntry, error) {
 	if bound == nil {
 		return nil, nil
@@ -223,6 +249,12 @@ func loadModelsForCapabilityBound(ctx *sdk.AppCtx, kind, capability string, boun
 			PixelSizes:         []string{"1024x1024", "1024x1536", "1536x1024"},
 			DefaultAspectRatio: "1:1",
 		}}, nil
+	}
+	if bound.AppSlug == "fish-audio" {
+		if kind == KindAudioTTS {
+			return fishAudioDefaultModels(), nil
+		}
+		return []modelEntry{}, nil
 	}
 	cacheKind := kind
 	if capability != "" {
@@ -276,6 +308,17 @@ func modelCatalogForKind(ctx *sdk.AppCtx, kind, capability string) (map[string]a
 	}
 	if kind == KindImage {
 		models, providers, err := loadImageModelsForAllProviders(ctx, capability)
+		return map[string]any{
+			"kind":      kind,
+			"bound":     len(providers) > 0,
+			"providers": providers,
+			"provider":  strings.Join(providers, ","),
+			"models":    models,
+		}, err
+	}
+	if kind == KindAudioTTS || kind == KindAudioSFX {
+		capability = handlers[kind].ResolveCapability(map[string]any{})
+		models, providers, err := loadAudioModelsForAllProviders(ctx, kind, capability)
 		return map[string]any{
 			"kind":      kind,
 			"bound":     len(providers) > 0,
@@ -588,6 +631,15 @@ func elevenLabsDefaultModels(kind string) []modelEntry {
 		return []modelEntry{{ID: "music_v1", Label: "music_v1"}}
 	}
 	return nil
+}
+
+func fishAudioDefaultModels() []modelEntry {
+	return []modelEntry{
+		{ID: "s2.1-pro", Label: "S2.1 Pro"},
+		{ID: "s2.1-pro-free", Label: "S2.1 Pro Free"},
+		{ID: "s2-pro", Label: "S2 Pro"},
+		{ID: "s1", Label: "S1"},
+	}
 }
 
 // buildModelEntryFromVeniceSpec parses a Venice model object into the

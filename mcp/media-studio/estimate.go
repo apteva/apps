@@ -81,10 +81,14 @@ func (a *App) estimateGeneration(ctx *sdk.AppCtx, args map[string]any) (generati
 		EstimatedDurationSeconds: estimatedDurationSeconds(kind, args),
 		Source:                   "unknown",
 	}
-	bound := ctx.IntegrationFor(h.Role)
+	bound, err := selectBoundProvider(ctx, h, args, capability)
+	if err != nil {
+		return out, err
+	}
 	if bound == nil {
 		return out, nil
 	}
+	out.Model = strArg(args, "model", "")
 	out.Provider = bound.AppSlug
 
 	switch kind {
