@@ -1,6 +1,6 @@
 // inbox — comments, DMs, mentions and reviews pulled from connected
-// social accounts. v1 is poll-only: a background worker (not yet
-// wired) pages each account's APIs on a cadence and upserts here.
+// social accounts. A background worker pages each account's APIs on
+// a cadence and upserts here; manual inbox_sync uses the same path.
 // Tool handlers in main.go consume this layer; nothing here touches
 // the SDK, HTTP or platform integrations.
 package main

@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: social
 display_name: Social
-version: 0.14.63
+version: 0.14.64
 description: |
   Schedule and publish posts to your social media accounts: X (Twitter),
   Facebook Pages, Instagram Business, LinkedIn, TikTok, YouTube, Reddit,
@@ -62,6 +62,10 @@ provides:
   http_routes:
     - prefix: /
   workers:
+    - name: scheduled_publisher
+      schedule: "@every 1m"
+    - name: inbox_collector
+      schedule: "@every 5m"
     - name: analytics_collector
       schedule: "@every 6h"
   mcp_tools:
@@ -71,7 +75,7 @@ provides:
     - { name: account_import_provider,     description: "Import provider-backed accounts such as Zernio into Social without changing Social's posting tools." }
     - { name: account_list,                description: "List connected social accounts in this project." }
     - { name: account_check,               description: "Check that one or more connected social accounts still work; refreshes Meta page credentials when possible." }
-    - { name: account_disconnect,          description: "Revoke a social account (deletes underlying connection too)." }
+    - { name: account_disconnect,          description: "Disconnect an account while preserving history; explicit confirmed hard delete can remove local history." }
     - { name: post_create,                 description: "Create + publish (or schedule) a post across N social accounts. Scheduled creates are idempotent; retry failed scheduling via post_retry, do not create a duplicate. Args: body or targets[].body, social_account_ids[] or targets[], schedule_at?, media_storage_ids?." }
     - { name: post_list,                   description: "List recent posts with per-target status. Args: limit?, status?." }
     - { name: post_retry,                  description: "Re-attempt a failed post. Failed scheduled posts retry job creation on the same post; failed publish targets are re-published. Args: post_id." }
@@ -86,7 +90,7 @@ provides:
     - { name: inbox_unhide,                description: "Reverse inbox_hide." }
     - { name: inbox_like,                  description: "Like a comment on the platform side (Facebook, Instagram)." }
     - { name: inbox_delete,                description: "Delete a comment where the platform permits it." }
-    - { name: inbox_sync,                  description: "Trigger an out-of-cycle inbox poll for one or more accounts (or all active accounts when omitted)." }
+    - { name: inbox_sync,                  description: "Trigger an out-of-cycle inbox poll; the same project-scoped sync also runs automatically." }
   ui_panels:
     - slot: project.page
       label: Social

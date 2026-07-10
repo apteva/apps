@@ -1,6 +1,6 @@
 -- Inbox: comments, DMs, mentions, and reviews pulled from each
--- connected social account. v1 is polling-only — a background worker
--- pages platform APIs on a cadence and upserts here. Webhooks land
+-- connected social account. A background worker pages platform APIs
+-- on a cadence and upserts here. Webhooks land
 -- in a later iteration; the unique constraint below makes both paths
 -- idempotent.
 --

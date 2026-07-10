@@ -472,7 +472,7 @@ func (a *App) toolInboxSync(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 				Report:          report,
 			})
 		case "instagram":
-			report, err := syncInstagramAccount(ctx, id)
+			report, err := syncInstagramAccount(ctx, pid, id)
 			if err != nil {
 				results = append(results, syncResult{
 					SocialAccountID: id,

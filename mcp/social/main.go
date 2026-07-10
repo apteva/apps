@@ -44,7 +44,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: social
 display_name: Social
-version: 0.14.62
+version: 0.14.64
 description: |
   Schedule and publish posts to your social accounts (X, Facebook,
   Instagram, LinkedIn, TikTok, YouTube, Reddit, Pinterest, Threads).
@@ -87,6 +87,8 @@ provides:
   http_routes:
     - prefix: /
   workers:
+    - { name: scheduled_publisher, schedule: "@every 1m" }
+    - { name: inbox_collector, schedule: "@every 5m" }
     - { name: analytics_collector, schedule: "@every 6h" }
   mcp_tools:
     - { name: account_add,                description: "Begin OAuth for a platform." }
@@ -534,7 +536,7 @@ var platforms = map[string]platformDef{
 				Help: "Shown on the video page. Falls back to the post body when blank."},
 			{Name: "visibility", Type: "select", Label: "Visibility",
 				Options: []string{"public", "unlisted", "private"},
-				Help:    "Defaults to private if blank — safer for first-pass uploads."},
+				Help:    "Defaults to public when blank."},
 			{Name: "category", Type: "text", Label: "Category ID",
 				Help: "YouTube numeric category id (e.g. 22 = People & Blogs, 27 = Education). Optional."},
 			{Name: "thumbnail_storage_id", Type: "media", Label: "Thumbnail",
@@ -573,6 +575,16 @@ func (a *App) OnUnmount(*sdk.AppCtx) error    { return nil }
 func (a *App) Channels() []sdk.ChannelFactory { return nil }
 func (a *App) Workers() []sdk.Worker {
 	return []sdk.Worker{
+		{
+			Name:     "scheduled_publisher",
+			Schedule: "@every 1m",
+			Run:      a.runScheduledPublisher,
+		},
+		{
+			Name:     "inbox_collector",
+			Schedule: "@every 5m",
+			Run:      a.runInboxCollector,
+		},
 		{
 			Name:     "analytics_collector",
 			Schedule: "@every 6h",
@@ -680,7 +692,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "account_list",
-			Description: "List connected social accounts in this project. Args: platform? (filter), status? (active|needs_reauth).",
+			Description: "List connected social accounts in this project. Disconnected history-only rows are hidden unless status='disconnected' is requested. Args: platform? (filter), status? (active|needs_reauth|disconnected).",
 			InputSchema: schemaObject(map[string]any{
 				"platform": map[string]any{"type": "string"},
 				"status":   map[string]any{"type": "string"},
@@ -702,9 +714,11 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "account_disconnect",
-			Description: "Revoke a social account, deleting both the social_accounts row and the underlying connection. Args: id.",
+			Description: "Disconnect a social account while preserving historical posts and inbox rows. Pass hard_delete=true and delete_posts=true together to permanently remove the account and its local-only history; upstream posts are never deleted by this tool. Args: id, hard_delete?, delete_posts?.",
 			InputSchema: schemaObject(map[string]any{
-				"id": map[string]any{"type": "integer"},
+				"id":           map[string]any{"type": "integer"},
+				"hard_delete":  map[string]any{"type": "boolean"},
+				"delete_posts": map[string]any{"type": "boolean", "description": "Required confirmation when hard_delete=true."},
 			}, []string{"id"}),
 			Handler: a.toolAccountDisconnect,
 		},
@@ -913,7 +927,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "inbox_sync",
-			Description: "Trigger an out-of-cycle poll of the named social accounts (or all active accounts when omitted). Returns one {status, reason?, error?} per account. v1 status: poll worker not yet wired, so every account returns `unsupported`. Args: social_account_ids?.",
+			Description: "Trigger an out-of-cycle poll of the named social accounts (or all active accounts when omitted). The same sync path runs automatically every five minutes. Returns one {status, reason?, error?} per account. Args: social_account_ids?.",
 			InputSchema: schemaObject(map[string]any{
 				"social_account_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}},
 			}, nil),
@@ -927,13 +941,16 @@ func (a *App) MCPTools() []sdk.Tool {
 func main() { sdk.Run(&App{}) }
 
 func projectScope(ctx *sdk.AppCtx, argSets ...map[string]any) string {
-	for _, args := range argSets {
-		if pid := strings.TrimSpace(stringArgAny(args, "_project_id", "project_id")); pid != "" {
+	// The SDK dispatch context is pinned by the authenticated gateway and
+	// is authoritative. HTTP panel handlers use the argument fallback below
+	// because their Route signature does not receive a per-request AppCtx.
+	if ctx != nil {
+		if pid := strings.TrimSpace(ctx.CurrentProject()); pid != "" {
 			return pid
 		}
 	}
-	if ctx != nil {
-		if pid := strings.TrimSpace(ctx.CurrentProject()); pid != "" {
+	for _, args := range argSets {
+		if pid := strings.TrimSpace(stringArgAny(args, "_project_id", "project_id")); pid != "" {
 			return pid
 		}
 	}
@@ -1056,7 +1073,9 @@ func (a *App) toolAccountAdd(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	// finalizes immediately (no page-selection) or shows the picker.
 	returnTo, _ := args["return_to"].(string)
 	if returnTo == "" {
-		returnTo = "/api/apps/social/accounts/oauth_done"
+		returnTo = "/api/apps/social/accounts/oauth_done?project_id=" + url.QueryEscape(pid)
+	} else if !strings.HasPrefix(returnTo, "/") || strings.HasPrefix(returnTo, "//") {
+		return mcpError("return_to must be a same-origin absolute path"), nil
 	}
 
 	// Pre-create the pending row so we have a stable id we can hand
@@ -1112,10 +1131,16 @@ func (a *App) toolAccountListPendingPages(ctx *sdk.AppCtx, args map[string]any) 
 	if pendingID <= 0 {
 		return nil, errors.New("pending_account_id required")
 	}
-	row, err := a.getPending(int64(pendingID))
+	row, err := a.getPendingScoped(ctx, args, int64(pendingID))
 	if err != nil {
 		ctx.Logger().Warn("list_pending_pages: pending row missing", "pending_id", pendingID, "err", err)
 		return mcpError("pending account not found: " + err.Error()), nil
+	}
+	if row.expired {
+		return mcpError("pending account expired — start account_add again"), nil
+	}
+	if row.status != "ready" {
+		return mcpError("OAuth not yet complete — open the authorize_url first, then re-call this tool"), nil
 	}
 	if row.providerSlug == zernioProviderSlug {
 		return a.listZernioPendingPages(ctx, row)
@@ -1159,9 +1184,15 @@ func (a *App) toolAccountFinalize(ctx *sdk.AppCtx, args map[string]any) (any, er
 	if pendingID <= 0 {
 		return nil, errors.New("pending_account_id required")
 	}
-	row, err := a.getPending(int64(pendingID))
+	row, err := a.getPendingScoped(ctx, args, int64(pendingID))
 	if err != nil {
 		return mcpError("pending account not found: " + err.Error()), nil
+	}
+	if row.expired {
+		return mcpError("pending account expired — start account_add again"), nil
+	}
+	if row.status != "ready" {
+		return mcpError("pending account is not ready or was already finalized"), nil
 	}
 	if row.providerSlug == zernioProviderSlug {
 		return a.finalizeZernioAccount(ctx, args, row)
@@ -1233,9 +1264,6 @@ func (a *App) toolAccountFinalize(ctx *sdk.AppCtx, args map[string]any) (any, er
 	// created the pending OAuth row. This matters for global installs:
 	// the OAuth callback itself has no active dashboard project.
 	pid := row.projectID
-	if pid == "" {
-		pid = projectScope(ctx, args)
-	}
 	// Profile assignment: use the value the operator set on the
 	// pending row at account_add time, falling back to the project's
 	// current default if 0. Resolves the case where the default was
@@ -1244,7 +1272,58 @@ func (a *App) toolAccountFinalize(ctx *sdk.AppCtx, args map[string]any) (any, er
 	if profileID == 0 {
 		profileID = projectDefaultProfileID(ctx, pid)
 	}
-	res, err := ctx.AppDB().Exec(
+	tx, err := ctx.AppDB().Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	claim, err := tx.Exec(
+		`UPDATE pending_accounts SET status='finalizing'
+		  WHERE id=? AND project_id=? AND status='ready' AND datetime(expires_at) > CURRENT_TIMESTAMP`,
+		pendingID, pid,
+	)
+	if err != nil {
+		return nil, err
+	}
+	if n, _ := claim.RowsAffected(); n != 1 {
+		return mcpError("pending account is not ready, expired, or was already finalized"), nil
+	}
+	var existingID int64
+	err = tx.QueryRow(
+		`SELECT id FROM social_accounts
+		  WHERE project_id=? AND platform=? AND connection_id=?
+		    AND COALESCE(external_account_id,'')=?
+		  ORDER BY id DESC LIMIT 1`,
+		pid, def.Platform, row.connectionID, pageID,
+	).Scan(&existingID)
+	if err != nil && err != sql.ErrNoRows {
+		return nil, err
+	}
+	if existingID > 0 {
+		if _, err := tx.Exec(
+			`UPDATE social_accounts
+			    SET display_name=?, avatar_url=?, status='active', page_credentials=?, profile_id=?
+			  WHERE id=? AND project_id=?`,
+			displayName, nullable(avatar), pageCredsJSON, profileID, existingID, pid,
+		); err != nil {
+			return nil, err
+		}
+		if _, err := tx.Exec(`UPDATE pending_accounts SET status='finalized' WHERE id=?`, pendingID); err != nil {
+			return nil, err
+		}
+		if err := tx.Commit(); err != nil {
+			return nil, err
+		}
+		return map[string]any{
+			"social_account_id":   existingID,
+			"platform":            def.Platform,
+			"display_name":        displayName,
+			"avatar_url":          avatar,
+			"external_account_id": pageID,
+			"reconnected":         true,
+		}, nil
+	}
+	res, err := tx.Exec(
 		`INSERT INTO social_accounts (project_id, platform, connection_id, external_account_id, display_name, avatar_url, status, page_credentials, profile_id)
 		 VALUES (?, ?, ?, ?, ?, ?, 'active', ?, ?)`,
 		pid, def.Platform, row.connectionID, nullable(pageID), displayName, nullable(avatar), pageCredsJSON, profileID,
@@ -1253,7 +1332,12 @@ func (a *App) toolAccountFinalize(ctx *sdk.AppCtx, args map[string]any) (any, er
 		return nil, fmt.Errorf("insert social_account: %w", err)
 	}
 	id, _ := res.LastInsertId()
-	_, _ = ctx.AppDB().Exec(`UPDATE pending_accounts SET status='finalized' WHERE id=?`, pendingID)
+	if _, err := tx.Exec(`UPDATE pending_accounts SET status='finalized' WHERE id=?`, pendingID); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
 
 	ctx.Emit("account.added", map[string]any{
 		"social_account_id": id,
@@ -1295,6 +1379,8 @@ func (a *App) toolAccountList(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	if statusFilter != "" {
 		q += " AND status=?"
 		qArgs = append(qArgs, statusFilter)
+	} else {
+		q += " AND status!='disconnected'"
 	}
 	if profileID > 0 {
 		q += " AND profile_id=?"
@@ -1589,16 +1675,30 @@ func (a *App) toolAccountDisconnect(ctx *sdk.AppCtx, args map[string]any) (any, 
 		return mcpError("account not found"), nil
 	}
 
-	// Delete the social_accounts row first so the panel reflects it
-	// immediately even if the platform-side disconnect lags. If any
-	// other social_accounts rows share this connection_id (multi-page
-	// FB grant), keep the connection alive.
-	if _, err := ctx.AppDB().Exec(`DELETE FROM social_accounts WHERE id=?`, id); err != nil {
+	if boolArg(args, "hard_delete", false) {
+		if !boolArg(args, "delete_posts", false) {
+			return mcpError("hard_delete requires delete_posts=true to confirm local history removal"), nil
+		}
+		return a.hardDeleteAccount(ctx, pid, id, connID, providerSlug)
+	}
+
+	// Keep the destination row so historical post targets and inbox
+	// entries continue to render with their original account identity.
+	if _, err := ctx.AppDB().Exec(
+		`UPDATE social_accounts SET status='disconnected' WHERE id=? AND project_id=?`,
+		id, pid,
+	); err != nil {
 		return nil, err
 	}
+	_, _ = ctx.AppDB().Exec(
+		`UPDATE post_targets
+		    SET status='failed', last_error='account disconnected before publish'
+		  WHERE social_account_id=? AND status='pending'`,
+		id,
+	)
 	var siblings int
 	_ = ctx.AppDB().QueryRow(
-		`SELECT COUNT(*) FROM social_accounts WHERE connection_id=?`, connID,
+		`SELECT COUNT(*) FROM social_accounts WHERE connection_id=? AND status!='disconnected'`, connID,
 	).Scan(&siblings)
 	if siblings == 0 && providerSlug != zernioProviderSlug {
 		// Last reference — release the underlying OAuth connection.
@@ -1608,8 +1708,162 @@ func (a *App) toolAccountDisconnect(ctx *sdk.AppCtx, args map[string]any) (any, 
 			// connection will be reaped on uninstall via cascade.
 		}
 	}
-	ctx.Emit("account.removed", map[string]any{"social_account_id": id})
-	return map[string]any{"deleted": id}, nil
+	ctx.Emit("account.disconnected", map[string]any{"social_account_id": id})
+	return map[string]any{"disconnected": id, "history_preserved": true}, nil
+}
+
+func (a *App) hardDeleteAccount(ctx *sdk.AppCtx, pid string, id, connID int64, providerSlug string) (any, error) {
+	postIDs := []int64{}
+	rows, err := ctx.AppDB().Query(
+		`SELECT DISTINCT p.id FROM posts p
+		  JOIN post_targets t ON t.post_id=p.id
+		 WHERE p.project_id=? AND t.social_account_id=?`,
+		pid, id,
+	)
+	if err != nil {
+		return nil, err
+	}
+	for rows.Next() {
+		var postID int64
+		if rows.Scan(&postID) == nil {
+			postIDs = append(postIDs, postID)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return nil, err
+	}
+	rows.Close()
+
+	tx, err := ctx.AppDB().Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	inboxRes, err := tx.Exec(`DELETE FROM inbox_items WHERE social_account_id=? AND project_id=?`, id, pid)
+	if err != nil {
+		return nil, fmt.Errorf("delete inbox items: %w", err)
+	}
+	cursorRes, err := tx.Exec(`DELETE FROM inbox_cursors WHERE social_account_id=?`, id)
+	if err != nil {
+		return nil, fmt.Errorf("delete inbox cursors: %w", err)
+	}
+	metricRes, err := tx.Exec(`DELETE FROM social_metric_points WHERE social_account_id=? AND project_id=?`, id, pid)
+	if err != nil {
+		return nil, fmt.Errorf("delete metric history: %w", err)
+	}
+	targetRes, err := tx.Exec(`DELETE FROM post_targets WHERE social_account_id=?`, id)
+	if err != nil {
+		return nil, fmt.Errorf("delete post targets: %w", err)
+	}
+
+	orphanPostIDs := []int64{}
+	if len(postIDs) > 0 {
+		qArgs := int64SliceToAny(postIDs)
+		rows, err := tx.Query(
+			`SELECT p.id FROM posts p
+			 WHERE p.id IN (`+placeholders(len(postIDs))+`) AND p.project_id=?
+			   AND NOT EXISTS (SELECT 1 FROM post_targets t WHERE t.post_id=p.id)`,
+			append(qArgs, pid)...,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("find orphan posts: %w", err)
+		}
+		for rows.Next() {
+			var postID int64
+			if rows.Scan(&postID) == nil {
+				orphanPostIDs = append(orphanPostIDs, postID)
+			}
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		rows.Close()
+	}
+
+	jobIDs := []int64{}
+	var postInboxDeleted, postsDeleted int64
+	if len(orphanPostIDs) > 0 {
+		qArgs := int64SliceToAny(orphanPostIDs)
+		jobRows, err := tx.Query(
+			`SELECT job_id FROM posts WHERE id IN (`+placeholders(len(orphanPostIDs))+`) AND job_id > 0`,
+			qArgs...,
+		)
+		if err != nil {
+			return nil, err
+		}
+		for jobRows.Next() {
+			var jobID int64
+			if jobRows.Scan(&jobID) == nil {
+				jobIDs = append(jobIDs, jobID)
+			}
+		}
+		jobRows.Close()
+		res, err := tx.Exec(`DELETE FROM inbox_items WHERE post_id IN (`+placeholders(len(orphanPostIDs))+`)`, qArgs...)
+		if err != nil {
+			return nil, fmt.Errorf("delete post inbox items: %w", err)
+		}
+		postInboxDeleted, _ = res.RowsAffected()
+		if _, err := tx.Exec(`DELETE FROM social_metric_points WHERE post_id IN (`+placeholders(len(orphanPostIDs))+`)`, qArgs...); err != nil {
+			return nil, fmt.Errorf("delete post metric history: %w", err)
+		}
+		res, err = tx.Exec(
+			`DELETE FROM posts WHERE id IN (`+placeholders(len(orphanPostIDs))+`) AND project_id=?`,
+			append(qArgs, pid)...,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("delete posts: %w", err)
+		}
+		postsDeleted, _ = res.RowsAffected()
+	}
+	acctRes, err := tx.Exec(`DELETE FROM social_accounts WHERE id=? AND project_id=?`, id, pid)
+	if err != nil {
+		return nil, fmt.Errorf("delete account: %w", err)
+	}
+	if n, _ := acctRes.RowsAffected(); n != 1 {
+		return mcpError("account not found"), nil
+	}
+	var siblings int
+	_ = tx.QueryRow(
+		`SELECT COUNT(*) FROM social_accounts WHERE connection_id=? AND status!='disconnected'`,
+		connID,
+	).Scan(&siblings)
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	for _, jobID := range jobIDs {
+		a.cancelJob(ctx, jobID)
+	}
+	connectionDisconnected := false
+	if siblings == 0 && providerSlug != zernioProviderSlug {
+		if err := ctx.PlatformAPI().DisconnectConnection(connID); err != nil {
+			ctx.Logger().Warn("DisconnectConnection failed", "conn", connID, "err", err)
+		} else {
+			connectionDisconnected = true
+		}
+	}
+	inboxDeleted, _ := inboxRes.RowsAffected()
+	cursorsDeleted, _ := cursorRes.RowsAffected()
+	metricsDeleted, _ := metricRes.RowsAffected()
+	targetsDeleted, _ := targetRes.RowsAffected()
+	ctx.Emit("account.deleted", map[string]any{
+		"social_account_id": id,
+		"hard_delete":       true,
+		"posts_deleted":     postsDeleted,
+	})
+	return map[string]any{
+		"deleted":                  id,
+		"hard_delete":              true,
+		"posts_deleted":            postsDeleted,
+		"post_targets_deleted":     targetsDeleted,
+		"inbox_items_deleted":      inboxDeleted + postInboxDeleted,
+		"inbox_cursors_deleted":    cursorsDeleted,
+		"metric_points_deleted":    metricsDeleted,
+		"connection_disconnected":  connectionDisconnected,
+		"upstream_posts_untouched": true,
+		"multi_account_posts_kept": len(postIDs) - int(postsDeleted),
+	}, nil
 }
 
 // ─── post_create ──────────────────────────────────────────────────
@@ -1659,6 +1913,39 @@ func (a *App) validateTargetOptions(ctx *sdk.AppCtx, pid string, targets []targe
 type targetSpec struct {
 	SocialAccountID int64
 	Options         map[string]any // verbatim — body, title, visibility, etc.
+}
+
+func validatePostTargets(ctx *sdk.AppCtx, pid string, targets []targetSpec) (map[int64]int64, error) {
+	if strings.TrimSpace(pid) == "" {
+		return nil, errors.New("project_id required")
+	}
+	profiles := make(map[int64]int64, len(targets))
+	seen := make(map[int64]struct{}, len(targets))
+	for _, target := range targets {
+		if _, exists := seen[target.SocialAccountID]; exists {
+			return nil, fmt.Errorf("social_account_id %d is duplicated in this post", target.SocialAccountID)
+		}
+		seen[target.SocialAccountID] = struct{}{}
+		var profileID int64
+		var status string
+		err := ctx.AppDB().QueryRow(
+			`SELECT COALESCE(profile_id,0), status
+			   FROM social_accounts
+			  WHERE id=? AND project_id=?`,
+			target.SocialAccountID, pid,
+		).Scan(&profileID, &status)
+		if err == sql.ErrNoRows {
+			return nil, fmt.Errorf("social account %d not found in this project", target.SocialAccountID)
+		}
+		if err != nil {
+			return nil, err
+		}
+		if status != "active" {
+			return nil, fmt.Errorf("social account %d is %s; reconnect it before posting", target.SocialAccountID, status)
+		}
+		profiles[target.SocialAccountID] = profileID
+	}
+	return profiles, nil
 }
 
 func (a *App) toolPostCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -1726,6 +2013,10 @@ func (a *App) toolPostCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	// the call (forward-compat: an agent passing a field that lands
 	// in a future version still works).
 	pid := projectScope(ctx, args)
+	targetProfiles, err := validatePostTargets(ctx, pid, targets)
+	if err != nil {
+		return mcpError(err.Error()), nil
+	}
 	a.validateTargetOptions(ctx, pid, targets)
 	// Flat list of just the account ids — used by profile-spanning
 	// resolution below, same shape the prior code path relied on.
@@ -1769,12 +2060,7 @@ func (a *App) toolPostCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	if profileID == 0 {
 		spanned := map[int64]bool{}
 		for _, aid := range acctIDs {
-			var p int64
-			_ = ctx.AppDB().QueryRow(
-				`SELECT COALESCE(profile_id,0) FROM social_accounts WHERE id=? AND project_id=?`,
-				aid, pid,
-			).Scan(&p)
-			spanned[p] = true
+			spanned[targetProfiles[aid]] = true
 		}
 		switch len(spanned) {
 		case 0:
@@ -1808,7 +2094,12 @@ func (a *App) toolPostCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		}
 	}
 
-	res, err := ctx.AppDB().Exec(
+	tx, err := ctx.AppDB().Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	res, err := tx.Exec(
 		`INSERT INTO posts (project_id, body, media_storage_ids, media_project_id, schedule_at, status, profile_id)
 		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
 		pid, body, string(mediaJSON), mediaProjectID, nullable(scheduleAt), status, profileID,
@@ -1826,29 +2117,32 @@ func (a *App) toolPostCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 			b, _ := json.Marshal(t.Options)
 			optsJSON = sql.NullString{String: string(b), Valid: true}
 		}
-		_, err := ctx.AppDB().Exec(
+		_, err := tx.Exec(
 			`INSERT INTO post_targets (post_id, social_account_id, options) VALUES (?, ?, ?)`,
 			postID, t.SocialAccountID, optsJSON,
 		)
 		if err != nil {
-			ctx.Logger().Warn("create post_target failed",
-				"post", postID, "account", t.SocialAccountID, "err", err)
+			return nil, fmt.Errorf("create post target for account %d: %w", t.SocialAccountID, err)
 		}
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
 	}
 
 	// Two execution paths:
 	//   - schedule_at empty → publish inline now.
 	//   - schedule_at set → schedule a job via the jobs app (when bound)
 	//     so the publish is durable. If jobs isn't bound, fall back to
-	//     inline now-publish with a clear message in the response.
+	//     the app's minute worker publishes it at the requested time.
 	if scheduleAt == "" {
 		a.publishPostTargets(ctx, postID)
+	} else if ctx.IntegrationFor("jobs") == nil {
+		ctx.Logger().Info("post scheduled for worker fallback", "post", postID, "run_at", scheduleAt)
 	} else {
 		jobID, err := a.scheduleJob(ctx, postID, scheduleAt)
 		if err != nil {
-			ctx.Logger().Warn("schedule via jobs failed", "post", postID, "err", err)
-			a.markScheduleFailed(ctx, postID, err)
-			return mcpError("scheduling failed (is the jobs app bound?): " + err.Error()), nil
+			ctx.Logger().Warn("schedule via jobs failed; using worker fallback", "post", postID, "err", err)
+			_, _ = ctx.AppDB().Exec(`UPDATE posts SET job_id=0, status='scheduled' WHERE id=?`, postID)
 		}
 		// Persist the jobs.id so post_reschedule + post_delete can
 		// cancel the right job later. Failure here is non-fatal —
@@ -1879,6 +2173,11 @@ func (a *App) toolPostCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		out["targets"] = a.loadTargets(ctx, postID)
 	} else {
 		out["targets"] = len(acctIDs)
+		var jobID int64
+		_ = ctx.AppDB().QueryRow(`SELECT COALESCE(job_id,0) FROM posts WHERE id=?`, postID).Scan(&jobID)
+		if jobID == 0 {
+			out["worker_fallback"] = true
+		}
 	}
 	return out, nil
 }
@@ -2014,34 +2313,37 @@ func canonicalOptionsJSONRaw(raw string) string {
 	return canonicalOptionsJSON(opts)
 }
 
-func (a *App) markScheduleFailed(ctx *sdk.AppCtx, postID int64, cause error) {
-	msg := "scheduling failed"
-	if cause != nil {
-		msg += ": " + cause.Error()
-	}
-	_, _ = ctx.AppDB().Exec(
-		`UPDATE posts SET status='failed', job_id=0 WHERE id=?`,
-		postID,
-	)
-	_, _ = ctx.AppDB().Exec(
-		`UPDATE post_targets
-		    SET status='failed', last_error=?
-		  WHERE post_id=? AND status IN ('pending','failed') AND attempts=0`,
-		msg, postID,
-	)
-	ctx.Emit("post.schedule_failed", map[string]any{
-		"post_id": postID,
-		"error":   msg,
-	})
-}
-
 func (a *App) retryFailedSchedule(ctx *sdk.AppCtx, pid string, postID int64, scheduleAt string) (any, error) {
-	jobID, err := a.scheduleJob(ctx, postID, scheduleAt)
+	rfc, err := normaliseScheduleAt(scheduleAt)
 	if err != nil {
-		a.markScheduleFailed(ctx, postID, err)
-		return mcpError("scheduling retry failed: " + err.Error()), nil
+		return mcpError("invalid schedule_at: " + err.Error()), nil
 	}
-	rfc, _ := normaliseScheduleAt(scheduleAt)
+	if ctx.IntegrationFor("jobs") == nil {
+		_, err = ctx.AppDB().Exec(
+			`UPDATE posts SET status='scheduled', schedule_at=?, job_id=0, published_at=NULL WHERE id=? AND project_id=?`,
+			rfc, postID, pid,
+		)
+		if err != nil {
+			return nil, err
+		}
+		_, _ = ctx.AppDB().Exec(
+			`UPDATE post_targets SET status='pending', last_error=NULL WHERE post_id=? AND status='failed' AND attempts=0`,
+			postID,
+		)
+		return map[string]any{
+			"post_id":              postID,
+			"status":               "scheduled",
+			"job_id":               int64(0),
+			"worker_fallback":      true,
+			"retried_scheduling":   true,
+			"reused_existing_post": true,
+		}, nil
+	}
+	jobID, err := a.scheduleJob(ctx, postID, rfc)
+	if err != nil {
+		ctx.Logger().Warn("scheduling retry via jobs failed; using worker fallback", "post", postID, "err", err)
+		jobID = 0
+	}
 	_, _ = ctx.AppDB().Exec(
 		`UPDATE posts SET status='scheduled', schedule_at=?, job_id=?, published_at=NULL WHERE id=? AND project_id=?`,
 		rfc, jobID, postID, pid,
@@ -2057,13 +2359,17 @@ func (a *App) retryFailedSchedule(ctx *sdk.AppCtx, pid string, postID int64, sch
 		"job_id":  jobID,
 		"run_at":  rfc,
 	})
-	return map[string]any{
+	out := map[string]any{
 		"post_id":              postID,
 		"status":               "scheduled",
 		"job_id":               jobID,
 		"retried_scheduling":   true,
 		"reused_existing_post": true,
-	}, nil
+	}
+	if jobID == 0 {
+		out["worker_fallback"] = true
+	}
+	return out, nil
 }
 
 // publishJob is the unit of work for one (post, social_account)
@@ -2094,6 +2400,19 @@ type publishJob struct {
 // (single, instagram_two_step, tiktok, …). Media URLs are resolved up
 // front via storage.files_get_url so each strategy gets a flat list.
 func (a *App) publishPostTargets(ctx *sdk.AppCtx, postID int64) {
+	// A queued post must not revive an account the user disconnected
+	// after scheduling. Mark those destinations terminal before loading
+	// publish jobs so Jobs can finish cleanly instead of retrying forever.
+	_, _ = ctx.AppDB().Exec(
+		`UPDATE post_targets
+		    SET status='failed', last_error='social account is not active'
+		  WHERE post_id=? AND status='pending'
+		    AND EXISTS (
+		      SELECT 1 FROM social_accounts a
+		       WHERE a.id=post_targets.social_account_id AND a.status!='active'
+		    )`,
+		postID,
+	)
 	// Load the post's media ids once — every target gets the same media.
 	mediaIDs, mediaProjectID := a.loadPostMedia(ctx, postID)
 	media, mediaErr := a.resolveMedia(ctx, mediaIDs, mediaProjectID)
@@ -2153,6 +2472,14 @@ func (a *App) publishPostTargets(ctx *sdk.AppCtx, postID int64) {
 		return
 	}
 	for _, j := range jobs {
+		claimed, err := claimPostTarget(ctx, j.targetID)
+		if err != nil {
+			ctx.Logger().Warn("claim target", "target", j.targetID, "err", err)
+			continue
+		}
+		if !claimed {
+			continue
+		}
 		if j.providerSlug == zernioProviderSlug {
 			if len(mediaIDs) > 0 && (mediaErr != nil || len(j.media) == 0) {
 				msg := "attached media could not be resolved"
@@ -2163,10 +2490,6 @@ func (a *App) publishPostTargets(ctx *sdk.AppCtx, postID int64) {
 				failures++
 				continue
 			}
-			_, _ = ctx.AppDB().Exec(
-				`UPDATE post_targets SET status='publishing', attempts=attempts+1, last_attempt_at=CURRENT_TIMESTAMP WHERE id=?`,
-				j.targetID,
-			)
 			platformPostID, platformURL, err := a.publishZernio(ctx, j)
 			if err != nil {
 				a.markTargetFailed(ctx, j.targetID, err.Error())
@@ -2208,12 +2531,22 @@ func (a *App) publishPostTargets(ctx *sdk.AppCtx, postID int64) {
 			failures++
 			continue
 		}
-		_, _ = ctx.AppDB().Exec(
-			`UPDATE post_targets SET status='publishing', attempts=attempts+1, last_attempt_at=CURRENT_TIMESTAMP WHERE id=?`,
-			j.targetID,
-		)
 		platformPostID, platformURL, err := a.runStrategy(ctx, def, j)
 		if err != nil {
+			var warning *publishedWarningError
+			if errors.As(err, &warning) && platformPostID != "" {
+				_, _ = ctx.AppDB().Exec(
+					`UPDATE post_targets SET status='published', platform_post_id=?, platform_url=?, published_at=CURRENT_TIMESTAMP, last_error=? WHERE id=?`,
+					nullable(platformPostID), nullable(platformURL), warning.Error(), j.targetID,
+				)
+				ctx.Emit("target.published_warning", map[string]any{
+					"target_id": j.targetID,
+					"platform":  j.platform,
+					"warning":   warning.Error(),
+				})
+				successes++
+				continue
+			}
 			a.markTargetFailed(ctx, j.targetID, err.Error())
 			failures++
 			continue
@@ -2238,6 +2571,24 @@ func (a *App) publishPostTargets(ctx *sdk.AppCtx, postID int64) {
 		"success":  successes,
 		"failures": failures,
 	})
+}
+
+type publishedWarningError struct{ warning string }
+
+func (e *publishedWarningError) Error() string { return e.warning }
+
+func claimPostTarget(ctx *sdk.AppCtx, targetID int64) (bool, error) {
+	res, err := ctx.AppDB().Exec(
+		`UPDATE post_targets
+		    SET status='publishing', attempts=attempts+1, last_attempt_at=CURRENT_TIMESTAMP
+		  WHERE id=? AND status='pending'`,
+		targetID,
+	)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n == 1, err
 }
 
 func (a *App) rollupPostStatus(ctx *sdk.AppCtx, postID int64) string {
@@ -2827,11 +3178,40 @@ func (a *App) publishInstagram(ctx *sdk.AppCtx, def platformDef, j publishJob) (
 		return "", "", upstreamError(out2)
 	}
 	id, _ := extractPostIdentity("instagram", out2.Data)
-	url := ""
-	if id != "" {
-		url = "https://www.instagram.com/p/" + id // best-effort; real shortcode may differ
+	return id, a.instagramPermalink(ctx, j, id, pageToken), nil
+}
+
+func (a *App) instagramPermalink(ctx *sdk.AppCtx, j publishJob, mediaID, pageToken string) string {
+	if mediaID == "" {
+		return ""
 	}
-	return id, url, nil
+	input := map[string]any{
+		"instagramAccountId": j.extID,
+		"fields":             "id,permalink",
+		"limit":              25,
+	}
+	if pageToken != "" {
+		input["access_token"] = pageToken
+	}
+	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(j.connID, "get_account_media", input)
+	if err != nil || res == nil || !res.Success {
+		return ""
+	}
+	var payload struct {
+		Data []struct {
+			ID        string `json:"id"`
+			Permalink string `json:"permalink"`
+		} `json:"data"`
+	}
+	if json.Unmarshal(res.Data, &payload) != nil {
+		return ""
+	}
+	for _, item := range payload.Data {
+		if item.ID == mediaID {
+			return item.Permalink
+		}
+	}
+	return ""
 }
 
 // publishYoutube drives YouTube's resumable upload protocol.
@@ -2877,9 +3257,8 @@ func (a *App) publishYoutube(ctx *sdk.AppCtx, def platformDef, j publishJob) (st
 	//   body        — already merged into j.body upstream, so the
 	//                 description below uses j.body directly.
 	//   visibility  — status.privacyStatus (public|unlisted|private).
-	//                 Defaults to private — safer for first-pass
-	//                 uploads, matches what most users want when
-	//                 they didn't explicitly set it.
+	//                 Defaults to public so a successful Social publish
+	//                 is visible without a second manual YouTube step.
 	//   category    — snippet.categoryId (numeric string).
 	//   tags        — snippet.tags (array of strings).
 	title := strOption(j.options, "title")
@@ -2891,7 +3270,7 @@ func (a *App) publishYoutube(ctx *sdk.AppCtx, def platformDef, j publishJob) (st
 	}
 	visibility := strOption(j.options, "visibility")
 	if visibility == "" {
-		visibility = "private"
+		visibility = "public"
 	}
 	snippet := map[string]any{
 		"title":       title,
@@ -2913,7 +3292,10 @@ func (a *App) publishYoutube(ctx *sdk.AppCtx, def platformDef, j publishJob) (st
 	}
 	initInput := map[string]any{
 		"snippet": snippet,
-		"status":  map[string]any{"privacyStatus": visibility},
+		"status": map[string]any{
+			"privacyStatus":           visibility,
+			"selfDeclaredMadeForKids": false,
+		},
 	}
 	ctx.Logger().Info("publishYoutube: init upload session",
 		"title", title, "visibility", visibility, "media_url", first.URL)
@@ -2992,6 +3374,7 @@ func (a *App) publishYoutube(ctx *sdk.AppCtx, def platformDef, j publishJob) (st
 			// only the thumbnail later.
 			ctx.Logger().Warn("publishYoutube: thumbnail set failed",
 				"video_id", resource.ID, "thumbnail_id", thumbnail.ID, "err", err)
+			return resource.ID, url, &publishedWarningError{warning: "video published, but custom thumbnail failed: " + err.Error()}
 		}
 	}
 	ctx.Logger().Info("publishYoutube: upload complete",
@@ -3125,7 +3508,7 @@ func (a *App) publishTikTokPhotos(ctx *sdk.AppCtx, j publishJob) (string, string
 	if pubID == "" {
 		return "", "", fmt.Errorf("post_photo: missing publish_id in response: %s", string(out.Data))
 	}
-	return pubID, "", nil
+	return a.waitTikTokPublish(ctx, j.connID, pubID)
 }
 
 // publishTikTokVideo drives TikTok's video publish flow.
@@ -3297,7 +3680,53 @@ func (a *App) publishTikTokVideo(ctx *sdk.AppCtx, def platformDef, j publishJob)
 	// the published URL isn't known until the worker polls
 	// get_publish_status. v0.1 records the publish_id; v0.2 schedules
 	// a follow-up status check.
-	return publishID, "", nil
+	return a.waitTikTokPublish(ctx, j.connID, publishID)
+}
+
+func (a *App) waitTikTokPublish(ctx *sdk.AppCtx, connID int64, publishID string) (string, string, error) {
+	if publishID == "" {
+		return "", "", errors.New("TikTok returned no publish_id")
+	}
+	deadline := time.Now().Add(5 * time.Minute)
+	for {
+		res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "get_publish_status", map[string]any{"publish_id": publishID})
+		if err != nil || res == nil || !res.Success {
+			message := "TikTok accepted the upload, but publish status could not be verified"
+			if err != nil {
+				message += ": " + err.Error()
+			} else if res != nil {
+				message += ": " + upstreamError(res).Error()
+			}
+			return publishID, "", &publishedWarningError{warning: message}
+		}
+		var payload struct {
+			Data struct {
+				Status  string   `json:"status"`
+				Fail    string   `json:"fail_reason"`
+				PostIDs []string `json:"publicaly_available_post_id"`
+			} `json:"data"`
+		}
+		if err := json.Unmarshal(res.Data, &payload); err != nil {
+			return publishID, "", &publishedWarningError{warning: "TikTok accepted the upload, but returned an unreadable publish status"}
+		}
+		switch payload.Data.Status {
+		case "PUBLISH_COMPLETE":
+			if len(payload.Data.PostIDs) > 0 && payload.Data.PostIDs[0] != "" {
+				return payload.Data.PostIDs[0], "", nil
+			}
+			return publishID, "", nil
+		case "FAILED":
+			return "", "", fmt.Errorf("TikTok publish failed: %s", payload.Data.Fail)
+		case "PROCESSING_UPLOAD", "PROCESSING_DOWNLOAD":
+			// Keep polling below.
+		default:
+			return publishID, "", &publishedWarningError{warning: "TikTok accepted the upload, but returned unexpected publish status " + strconv.Quote(payload.Data.Status)}
+		}
+		if time.Now().After(deadline) {
+			return publishID, "", &publishedWarningError{warning: "TikTok accepted the upload, but it was still processing after 5 minutes"}
+		}
+		time.Sleep(5 * time.Second)
+	}
 }
 
 // publishTikTokPullFromURL is the original PULL_FROM_URL implementation,
@@ -3881,7 +4310,10 @@ func (a *App) toolPostRetry(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	res, err := ctx.AppDB().Exec(
 		`UPDATE post_targets
 		    SET status='pending', last_error=NULL
-		  WHERE post_id=? AND status='failed'
+		  WHERE post_id=? AND (
+		        status='failed' OR
+		        (status='publishing' AND last_attempt_at < datetime('now','-1 hour'))
+		      )
 		    AND EXISTS (SELECT 1 FROM posts p WHERE p.id=post_targets.post_id AND p.project_id=?)`,
 		postID, pid,
 	)
@@ -3894,6 +4326,60 @@ func (a *App) toolPostRetry(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	}
 	a.publishPostTargets(ctx, postID)
 	return map[string]any{"retried": n}, nil
+}
+
+func (a *App) runScheduledPublisher(runCtx context.Context, ctx *sdk.AppCtx) error {
+	pid := projectScope(ctx)
+	if pid == "" {
+		return nil
+	}
+	rows, err := ctx.AppDB().Query(
+		`SELECT id FROM posts
+		  WHERE project_id=? AND status='scheduled' AND job_id=0
+		    AND schedule_at IS NOT NULL AND datetime(schedule_at) <= CURRENT_TIMESTAMP
+		  ORDER BY schedule_at, id LIMIT 25`,
+		pid,
+	)
+	if err != nil {
+		return err
+	}
+	var ids []int64
+	for rows.Next() {
+		var id int64
+		if rows.Scan(&id) == nil {
+			ids = append(ids, id)
+		}
+	}
+	rows.Close()
+	for _, id := range ids {
+		if runCtx.Err() != nil {
+			return runCtx.Err()
+		}
+		res, err := ctx.AppDB().Exec(
+			`UPDATE posts SET status='publishing' WHERE id=? AND project_id=? AND status='scheduled' AND job_id=0`,
+			id, pid,
+		)
+		if err != nil {
+			return err
+		}
+		if n, _ := res.RowsAffected(); n != 1 {
+			continue
+		}
+		a.publishPostTargets(ctx, id)
+	}
+	return nil
+}
+
+func (a *App) runInboxCollector(runCtx context.Context, ctx *sdk.AppCtx) error {
+	if runCtx.Err() != nil || projectScope(ctx) == "" {
+		return runCtx.Err()
+	}
+	result, err := a.toolInboxSync(ctx, map[string]any{})
+	if err != nil {
+		return err
+	}
+	ctx.Logger().Info("scheduled inbox sync complete", "result", result)
+	return nil
 }
 
 // ─── post_reschedule ──────────────────────────────────────────────
@@ -3922,18 +4408,36 @@ func (a *App) toolPostReschedule(ctx *sdk.AppCtx, args map[string]any) (any, err
 			"post status=%q can't be rescheduled (only 'scheduled' posts are reschedulable)", status,
 		)), nil
 	}
+	rfc, err := normaliseScheduleAt(scheduleAt)
+	if err != nil {
+		return mcpError("invalid schedule_at: " + err.Error()), nil
+	}
+	if ctx.IntegrationFor("jobs") == nil {
+		_, err = ctx.AppDB().Exec(
+			`UPDATE posts SET schedule_at=?, job_id=0 WHERE id=? AND project_id=?`,
+			rfc, postID, pid,
+		)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{
+			"post_id":         postID,
+			"schedule_at":     rfc,
+			"job_id":          int64(0),
+			"worker_fallback": true,
+		}, nil
+	}
 	// Cancel the old job FIRST. If the new schedule fails we end up
 	// with a post in 'scheduled' but no job — caught by the rollback
 	// below: the post status is flipped to 'failed' so the operator
 	// notices.
 	a.cancelJob(ctx, jobID)
 
-	newJobID, err := a.scheduleJob(ctx, postID, scheduleAt)
+	newJobID, err := a.scheduleJob(ctx, postID, rfc)
 	if err != nil {
-		a.markScheduleFailed(ctx, postID, err)
-		return mcpError("reschedule failed: " + err.Error()), nil
+		ctx.Logger().Warn("reschedule via jobs failed; using worker fallback", "post", postID, "err", err)
+		newJobID = 0
 	}
-	rfc, _ := normaliseScheduleAt(scheduleAt)
 	_, _ = ctx.AppDB().Exec(
 		`UPDATE posts SET schedule_at=?, job_id=? WHERE id=?`,
 		rfc, newJobID, postID,
@@ -3943,11 +4447,15 @@ func (a *App) toolPostReschedule(ctx *sdk.AppCtx, args map[string]any) (any, err
 		"job_id":  newJobID,
 		"run_at":  rfc,
 	})
-	return map[string]any{
+	out := map[string]any{
 		"post_id":     postID,
 		"schedule_at": rfc,
 		"job_id":      newJobID,
-	}, nil
+	}
+	if newJobID == 0 {
+		out["worker_fallback"] = true
+	}
+	return out, nil
 }
 
 // ─── metrics ──────────────────────────────────────────────────────
@@ -5539,7 +6047,7 @@ func (a *App) handleImportsRun(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 		return
 	}
-	args := projectArgsFromRequest(r)
+	args := map[string]any{}
 	if r.Body != nil {
 		defer r.Body.Close()
 		var body map[string]any
@@ -5551,6 +6059,7 @@ func (a *App) handleImportsRun(w http.ResponseWriter, r *http.Request) {
 			args[k] = v
 		}
 	}
+	copyProjectArgs(args, projectArgsFromRequest(r))
 	pid := projectScope(globalCtx, args)
 	out, err := a.runImport(globalCtx, pid, args)
 	if err != nil {
@@ -6213,6 +6722,9 @@ func (a *App) toolPostEdit(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		if id <= 0 {
 			return mcpError(fmt.Sprintf("targets[%d].social_account_id required", i)), nil
 		}
+		if _, duplicate := overrides[id]; duplicate {
+			return mcpError(fmt.Sprintf("targets[%d] duplicates social_account_id %d", i, id)), nil
+		}
 		opts := make(map[string]any, len(m))
 		for k, v := range m {
 			if k == "social_account_id" {
@@ -6223,18 +6735,7 @@ func (a *App) toolPostEdit(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		overrides[id] = opts
 	}
 
-	// Update local body if a new one was provided. Take the post-level
-	// body as the new default that target-specific overrides extend.
 	resolvedPostBody := currentBody
-	if hasBody {
-		resolvedPostBody = newBody
-		if _, err := ctx.AppDB().Exec(
-			`UPDATE posts SET body=? WHERE id=? AND project_id=?`,
-			resolvedPostBody, postID, pid,
-		); err != nil {
-			return nil, fmt.Errorf("update post body: %w", err)
-		}
-	}
 
 	// Fan out across the post's targets.
 	rows, err := ctx.AppDB().Query(
@@ -6281,9 +6782,40 @@ func (a *App) toolPostEdit(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 			trs = append(trs, r)
 		}
 	}
+	postAccounts := map[int64]bool{}
+	for _, r := range trs {
+		postAccounts[r.SocialAccountID] = true
+	}
+	for accountID := range overrides {
+		if !postAccounts[accountID] {
+			return mcpError(fmt.Sprintf("social account %d is not a target of post %d", accountID, postID)), nil
+		}
+	}
+
+	// Validate the requested target set before mutating the local post.
+	// This keeps a typo in targets[] from partially changing posts.body.
+	if hasBody {
+		resolvedPostBody = newBody
+		if _, err := ctx.AppDB().Exec(
+			`UPDATE posts SET body=? WHERE id=? AND project_id=?`,
+			resolvedPostBody, postID, pid,
+		); err != nil {
+			return nil, fmt.Errorf("update post body: %w", err)
+		}
+	}
 
 	outcomes := make([]targetEditOutcome, 0, len(trs))
 	for _, r := range trs {
+		requested, targeted := overrides[r.SocialAccountID]
+		if !hasBody && !targeted {
+			continue
+		}
+		if requested == nil {
+			requested = map[string]any{}
+		}
+		if hasBody {
+			requested["body"] = resolvedPostBody
+		}
 		out := targetEditOutcome{
 			TargetID:        r.TargetID,
 			SocialAccountID: r.SocialAccountID,
@@ -6311,8 +6843,8 @@ func (a *App) toolPostEdit(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		}
 		// Body resolution: this target's override → existing target body
 		// → resolvedPostBody (post-level after body update).
-		if newOpts, ok := overrides[r.SocialAccountID]; ok {
-			for k, v := range newOpts {
+		if targeted {
+			for k, v := range requested {
 				eff[k] = v
 			}
 		}
@@ -6343,7 +6875,7 @@ func (a *App) toolPostEdit(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		case "twitter":
 			out = a.editTwitterPost(ctx, out, r.ConnID, eff)
 		case "youtube":
-			out = a.editYoutubePost(ctx, out, r.ConnID, eff, r.MediaProjectID)
+			out = a.editYoutubePost(ctx, out, r.ConnID, eff, requested, r.MediaProjectID)
 		case "tiktok", "instagram":
 			out.Status = "unsupported"
 			out.Reason = platformEditReason(r.Platform)
@@ -6446,58 +6978,30 @@ func (a *App) editFacebookPost(ctx *sdk.AppCtx, out targetEditOutcome, connID in
 // defaults, so we pass through what we have. Body becomes description;
 // title comes from eff.title (or first line of body if missing — since
 // title is required by the upstream resource).
-func (a *App) editYoutubePost(ctx *sdk.AppCtx, out targetEditOutcome, connID int64, eff map[string]any, mediaProjectID string) targetEditOutcome {
+func (a *App) editYoutubePost(ctx *sdk.AppCtx, out targetEditOutcome, connID int64, eff, requested map[string]any, mediaProjectID string) targetEditOutcome {
 	def := platforms["youtube"]
 	thumbnail, err := a.resolveThumbnailOption(ctx, eff, mediaProjectID)
 	if err != nil {
 		out.Status, out.Error = "failed", err.Error()
 		return out
 	}
-	title := strOption(eff, "title")
-	body, _ := eff["body"].(string)
-	if title == "" {
-		title = firstChars(strings.TrimSpace(body), 80)
+	metadataRequested := false
+	for _, key := range []string{"title", "body", "category", "visibility", "tags"} {
+		if _, ok := requested[key]; ok {
+			metadataRequested = true
+			break
+		}
 	}
-	metadataRequested := strings.TrimSpace(title) != "" ||
-		strings.TrimSpace(body) != "" ||
-		strOption(eff, "category") != "" ||
-		strOption(eff, "visibility") != "" ||
-		len(anySliceOption(eff, "tags")) > 0
 	if !metadataRequested && thumbnail == nil {
 		out.Status = "skipped"
 		out.Reason = "youtube edit needs metadata or thumbnail_storage_id"
 		return out
 	}
 	if metadataRequested {
-		if title == "" {
-			out.Status = "skipped"
-			out.Reason = "youtube metadata edit needs a title or non-empty body"
+		input, err := a.youtubeMergedUpdateInput(ctx, connID, out.PlatformPostID, eff, requested)
+		if err != nil {
+			out.Status, out.Error = "failed", err.Error()
 			return out
-		}
-		snippet := map[string]any{"title": title}
-		if body != "" {
-			snippet["description"] = body
-		}
-		if cat := strOption(eff, "category"); cat != "" {
-			snippet["categoryId"] = cat
-		}
-		if tags := anySliceOption(eff, "tags"); len(tags) > 0 {
-			ts := make([]string, 0, len(tags))
-			for _, t := range tags {
-				if s, ok := t.(string); ok && s != "" {
-					ts = append(ts, s)
-				}
-			}
-			if len(ts) > 0 {
-				snippet["tags"] = ts
-			}
-		}
-		input := map[string]any{
-			"id":      out.PlatformPostID,
-			"snippet": snippet,
-		}
-		if vis := strOption(eff, "visibility"); vis != "" {
-			input["status"] = map[string]any{"privacyStatus": vis}
 		}
 		res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "update_video", input)
 		if err != nil {
@@ -6517,6 +7021,70 @@ func (a *App) editYoutubePost(ctx *sdk.AppCtx, out targetEditOutcome, connID int
 	}
 	out.Status = "ok"
 	return out
+}
+
+func (a *App) youtubeMergedUpdateInput(ctx *sdk.AppCtx, connID int64, videoID string, eff, requested map[string]any) (map[string]any, error) {
+	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "get_video", map[string]any{
+		"id":   videoID,
+		"part": "snippet,status",
+	})
+	if err != nil {
+		return nil, fmt.Errorf("get current YouTube metadata: %w", err)
+	}
+	if res == nil || !res.Success {
+		return nil, fmt.Errorf("get current YouTube metadata: %w", upstreamError(res))
+	}
+	var current struct {
+		Items []struct {
+			Snippet map[string]any `json:"snippet"`
+			Status  map[string]any `json:"status"`
+		} `json:"items"`
+	}
+	if err := json.Unmarshal(res.Data, &current); err != nil || len(current.Items) == 0 {
+		if err == nil {
+			err = errors.New("video not found")
+		}
+		return nil, fmt.Errorf("decode current YouTube metadata: %w", err)
+	}
+	snippet := map[string]any{}
+	for _, key := range []string{"title", "description", "tags", "categoryId", "defaultLanguage", "defaultAudioLanguage"} {
+		if v, ok := current.Items[0].Snippet[key]; ok {
+			snippet[key] = v
+		}
+	}
+	if _, ok := requested["title"]; ok {
+		snippet["title"] = strOption(eff, "title")
+	}
+	if _, ok := requested["body"]; ok {
+		snippet["description"] = toString(eff["body"])
+	}
+	if _, ok := requested["category"]; ok {
+		snippet["categoryId"] = strOption(eff, "category")
+	}
+	if _, ok := requested["tags"]; ok {
+		tags := []string{}
+		for _, value := range anySliceOption(eff, "tags") {
+			if tag, ok := value.(string); ok && strings.TrimSpace(tag) != "" {
+				tags = append(tags, tag)
+			}
+		}
+		snippet["tags"] = tags
+	}
+	if strings.TrimSpace(toString(snippet["title"])) == "" {
+		return nil, errors.New("YouTube metadata update requires a non-empty title")
+	}
+	input := map[string]any{"id": videoID, "snippet": snippet}
+	if _, ok := requested["visibility"]; ok {
+		status := map[string]any{}
+		for _, key := range []string{"privacyStatus", "publishAt", "license", "embeddable", "publicStatsViewable", "selfDeclaredMadeForKids"} {
+			if v, exists := current.Items[0].Status[key]; exists {
+				status[key] = v
+			}
+		}
+		status["privacyStatus"] = strOption(eff, "visibility")
+		input["status"] = status
+	}
+	return input, nil
 }
 
 // ─── post_delete ───────────────────────────────────────────────────
@@ -6962,18 +7530,30 @@ func (a *App) handleOAuthDone(w http.ResponseWriter, r *http.Request) {
 	status := r.URL.Query().Get("status")
 	pendingID, _ := strconv.ParseInt(pendingStr, 10, 64)
 	connID, _ := strconv.ParseInt(connStr, 10, 64)
-	if pendingID > 0 {
-		if row, err := a.getPending(pendingID); err == nil && row.providerSlug == zernioProviderSlug {
-			if doneConnID, ok := a.completeZernioOAuth(globalCtx, r, row); ok {
-				connID = doneConnID
+	ready := false
+	row, rowErr := a.getPending(pendingID)
+	if rowErr == nil && !row.expired && row.status == "pending_oauth" {
+		requestProject := strings.TrimSpace(r.URL.Query().Get("project_id"))
+		if requestProject == "" || requestProject == row.projectID {
+			if row.providerSlug == zernioProviderSlug {
+				if doneConnID, ok := a.completeZernioOAuth(globalCtx, r, row); ok {
+					connID = doneConnID
+					ready = true
+				}
+			} else if connID > 0 && status == "ok" && a.pendingConnectionAllowed(globalCtx, row, connID) {
+				res, err := globalCtx.AppDB().Exec(
+					`UPDATE pending_accounts SET connection_id=?, status='ready'
+					  WHERE id=? AND project_id=? AND status='pending_oauth' AND datetime(expires_at) > CURRENT_TIMESTAMP`,
+					connID, pendingID, row.projectID,
+				)
+				if err == nil {
+					n, _ := res.RowsAffected()
+					ready = n == 1
+				}
 			}
 		}
 	}
-	if pendingID > 0 && connID > 0 && status == "ok" {
-		_, _ = globalCtx.AppDB().Exec(
-			`UPDATE pending_accounts SET connection_id=?, status='ready' WHERE id=?`,
-			connID, pendingID,
-		)
+	if ready {
 		globalCtx.Emit("account.oauth_ready", map[string]any{
 			"pending_account_id": pendingID,
 			"connection_id":      connID,
@@ -6983,14 +7563,46 @@ func (a *App) handleOAuthDone(w http.ResponseWriter, r *http.Request) {
 	// closes itself. Works whether the OAuth happened in a popup
 	// (postMessage to opener) or a top-level redirect (just navigate
 	// the user back to the panel).
+	eventType := "social.oauth_error"
+	heading := "Authorization failed"
+	detail := "The connection did not match this request or the request expired. Close this window and try again."
+	if ready {
+		eventType = "social.oauth_ready"
+		heading = "Authorization complete"
+		detail = "You can close this window."
+	}
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	fmt.Fprintf(w, `<!doctype html><html><body style="font-family:system-ui;background:#111;color:#eee;display:grid;place-items:center;height:100vh;margin:0">
-<div style="text-align:center"><div style="font-size:20px">Authorization complete</div>
-<div style="opacity:.7;margin-top:8px">You can close this window.</div></div>
+<div style="text-align:center"><div style="font-size:20px">%s</div>
+<div style="opacity:.7;margin-top:8px">%s</div></div>
 <script>
-try { if (window.opener) { window.opener.postMessage({type:"social.oauth_ready",pending_account_id:%d,connection_id:%d}, "*"); window.close(); } } catch(e){}
+try { if (window.opener) { window.opener.postMessage({type:%q,pending_account_id:%d,connection_id:%d}, window.location.origin); window.close(); } } catch(e){}
 setTimeout(function(){ window.location.href = "/" }, 1500);
-</script></body></html>`, pendingID, connID)
+</script></body></html>`, heading, detail, eventType, pendingID, connID)
+}
+
+func (a *App) pendingConnectionAllowed(ctx *sdk.AppCtx, row *pendingRow, connID int64) bool {
+	if row == nil || connID <= 0 {
+		return false
+	}
+	if row.providerSlug == zernioProviderSlug {
+		return row.connectionID == connID
+	}
+	conns, err := ctx.PlatformAPI().ListConnections(sdk.ConnectionFilter{
+		ProjectID: row.projectID,
+		AppSlug:   row.integrationSlug,
+	})
+	if err != nil {
+		ctx.Logger().Warn("oauth callback connection lookup failed", "pending_id", row.id, "err", err)
+		return false
+	}
+	for _, conn := range conns {
+		if conn.ID == connID && conn.Status == "active" {
+			return true
+		}
+	}
+	ctx.Logger().Warn("oauth callback rejected unrelated connection", "pending_id", row.id, "connection_id", connID)
+	return false
 }
 
 func (a *App) handleAccountsFinalize(w http.ResponseWriter, r *http.Request) {
@@ -7084,7 +7696,7 @@ func (a *App) handleAccountsItem(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Method == http.MethodDelete {
-		args := projectArgsFromRequest(r)
+		args := scopedQueryArgs(r, "hard_delete", "delete_posts")
 		args["id"] = id
 		out, err := a.toolAccountDisconnect(globalCtx, args)
 		if err != nil {
@@ -7239,12 +7851,53 @@ func (a *App) handleJobPublishPost(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "post_id required", http.StatusBadRequest)
 		return
 	}
+	var postProject string
+	if err := globalCtx.AppDB().QueryRow(`SELECT project_id FROM posts WHERE id=?`, body.PostID).Scan(&postProject); err != nil {
+		http.Error(w, "post not found", http.StatusNotFound)
+		return
+	}
+	if requestProject := strings.TrimSpace(r.URL.Query().Get("project_id")); requestProject != "" && requestProject != postProject {
+		http.Error(w, "post not found", http.StatusNotFound)
+		return
+	}
 	// Move from 'scheduled' → 'publishing' before fanning out.
 	_, _ = globalCtx.AppDB().Exec(
 		`UPDATE posts SET status='publishing' WHERE id=? AND status='scheduled'`,
 		body.PostID,
 	)
 	a.publishPostTargets(globalCtx, body.PostID)
+	// Requeue failed targets that have attempts left, then return a
+	// non-2xx response so Jobs applies its configured backoff. The target
+	// claim is conditional, so an overlapping callback cannot publish it
+	// twice. After four attempts failures remain terminal and the callback
+	// acknowledges completion.
+	res, err := globalCtx.AppDB().Exec(
+		`UPDATE post_targets
+		    SET status='pending'
+		  WHERE post_id=? AND status='failed' AND attempts < 4`,
+		body.PostID,
+	)
+	if err != nil {
+		http.Error(w, "prepare retry: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if n, _ := res.RowsAffected(); n > 0 {
+		_, _ = globalCtx.AppDB().Exec(`UPDATE posts SET status='publishing' WHERE id=?`, body.PostID)
+		http.Error(w, "publish failed; retry queued", http.StatusBadGateway)
+		return
+	}
+	var active int
+	if err := globalCtx.AppDB().QueryRow(
+		`SELECT COUNT(*) FROM post_targets WHERE post_id=? AND status IN ('pending','publishing')`,
+		body.PostID,
+	).Scan(&active); err != nil {
+		http.Error(w, "check publish state: "+err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if active > 0 {
+		http.Error(w, "publish still in progress", http.StatusConflict)
+		return
+	}
 	writeJSON(w, map[string]any{"published": body.PostID})
 }
 
@@ -7331,6 +7984,7 @@ type pendingRow struct {
 	providerProfileID string
 	providerState     string
 	providerData      string
+	expired           bool
 }
 
 func (a *App) getPending(id int64) (*pendingRow, error) {
@@ -7338,13 +7992,26 @@ func (a *App) getPending(id int64) (*pendingRow, error) {
 	err := globalCtx.AppDB().QueryRow(
 		`SELECT id, project_id, platform, integration_slug, COALESCE(connection_id,0), status,
 		        COALESCE(profile_id,0), COALESCE(provider_slug,''), COALESCE(provider_profile_id,''),
-		        COALESCE(provider_state,''), COALESCE(provider_data,'')
+		        COALESCE(provider_state,''), COALESCE(provider_data,''),
+		        CASE WHEN datetime(expires_at) <= CURRENT_TIMESTAMP THEN 1 ELSE 0 END
 		 FROM pending_accounts WHERE id=?`, id,
-	).Scan(&row.id, &row.projectID, &row.platform, &row.integrationSlug, &row.connectionID, &row.status, &row.profileID, &row.providerSlug, &row.providerProfileID, &row.providerState, &row.providerData)
+	).Scan(&row.id, &row.projectID, &row.platform, &row.integrationSlug, &row.connectionID, &row.status, &row.profileID, &row.providerSlug, &row.providerProfileID, &row.providerState, &row.providerData, &row.expired)
 	if err != nil {
 		return nil, err
 	}
 	return &row, nil
+}
+
+func (a *App) getPendingScoped(ctx *sdk.AppCtx, args map[string]any, id int64) (*pendingRow, error) {
+	row, err := a.getPending(id)
+	if err != nil {
+		return nil, err
+	}
+	pid := projectScope(ctx, args)
+	if pid == "" || row.projectID != pid {
+		return nil, sql.ErrNoRows
+	}
+	return row, nil
 }
 
 type pageEntry struct {

@@ -10,8 +10,7 @@ package main
 //   - account_list_pending_pages: requires_picker=false for Twitter
 //   - account_finalize: writes social_accounts row and emits event
 //   - account_finalize: refuses without page_id when picker required
-//   - account_disconnect: removes social_accounts + DisconnectConnection
-//                          when last sibling
+//   - account_disconnect: preserves history + releases the last connection
 //   - account_disconnect: keeps connection alive when siblings exist
 //   - post_create: writes posts + post_targets, fans out, calls
 //                   post_tweet, marks status=published
@@ -19,6 +18,7 @@ package main
 //   - post_retry: resets failed → pending and re-publishes
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -1921,6 +1921,10 @@ func TestPublishTikTok_PhotoPostInput(t *testing.T) {
 		Success: true,
 		Data:    json.RawMessage(`{"data":{"publish_id":"photo_pub_1"}}`),
 	}
+	pf.executeResponses["get_publish_status"] = &sdk.ExecuteResult{
+		Success: true,
+		Data:    json.RawMessage(`{"data":{"status":"PUBLISH_COMPLETE","publicaly_available_post_id":["photo_post_1"]}}`),
+	}
 	ctx := newSocialCtx(t, pf)
 	r, _ := ctx.AppDB().Exec(
 		`INSERT INTO social_accounts (project_id, platform, connection_id, display_name, status)
@@ -1943,8 +1947,8 @@ func TestPublishTikTok_PhotoPostInput(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if len(pf.executeCalls) != 1 || pf.executeCalls[0].Tool != "post_photo" {
-		t.Fatalf("expected one post_photo call: %+v", pf.executeCalls)
+	if len(pf.executeCalls) != 2 || pf.executeCalls[0].Tool != "post_photo" || pf.executeCalls[1].Tool != "get_publish_status" {
+		t.Fatalf("expected post_photo followed by get_publish_status: %+v", pf.executeCalls)
 	}
 	in := pf.executeCalls[0].Input
 	if in["post_mode"] != "DIRECT_POST" || in["media_type"] != "PHOTO" {
@@ -1975,7 +1979,7 @@ func TestPublishTikTok_PhotoPostInput(t *testing.T) {
 	ctx.AppDB().QueryRow(
 		`SELECT status, COALESCE(platform_post_id,'') FROM post_targets WHERE social_account_id=? ORDER BY id DESC LIMIT 1`, acctID,
 	).Scan(&status, &platformPostID)
-	if status != "published" || platformPostID != "photo_pub_1" {
+	if status != "published" || platformPostID != "photo_post_1" {
 		t.Fatalf("target = status %q platform_post_id %q", status, platformPostID)
 	}
 }
@@ -2067,8 +2071,11 @@ func TestPublishYouTube_InitCallShape(t *testing.T) {
 				t.Errorf("snippet.title = %v, want body", snippet["title"])
 			}
 			status, _ := c.Input["status"].(map[string]any)
-			if status["privacyStatus"] != "private" {
-				t.Errorf("default privacyStatus should be private, got %v", status["privacyStatus"])
+			if status["privacyStatus"] != "public" {
+				t.Errorf("default privacyStatus should be public, got %v", status["privacyStatus"])
+			}
+			if status["selfDeclaredMadeForKids"] != false {
+				t.Errorf("selfDeclaredMadeForKids should default false, got %v", status["selfDeclaredMadeForKids"])
 			}
 		}
 	}
@@ -2208,7 +2215,7 @@ func TestSchedule_DedupesIdenticalScheduledPost(t *testing.T) {
 	}
 }
 
-func TestSchedule_FailureMarksTargetAndDuplicateRetriesSamePost(t *testing.T) {
+func TestSchedule_JobsFailureFallsBackWithoutDuplicatingPost(t *testing.T) {
 	pf := newRecordingPlatform()
 	pf.identity.Bindings = map[string]any{"jobs": float64(101)}
 	pf.callAppResponses["jobs:jobs_schedule"] = json.RawMessage(`not-json`)
@@ -2229,8 +2236,9 @@ func TestSchedule_FailureMarksTargetAndDuplicateRetriesSamePost(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if out.(map[string]any)["isError"] != true {
-		t.Fatalf("expected scheduling error, got %+v", out)
+	first := out.(map[string]any)
+	if first["status"] != "scheduled" || first["worker_fallback"] != true {
+		t.Fatalf("expected worker fallback, got %+v", first)
 	}
 	var postID int64
 	var postStatus, targetStatus, lastErr string
@@ -2246,11 +2254,10 @@ func TestSchedule_FailureMarksTargetAndDuplicateRetriesSamePost(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if postStatus != "failed" || targetStatus != "failed" || attempts != 0 || !strings.Contains(lastErr, "scheduling failed") {
-		t.Fatalf("post=%q target=%q attempts=%d err=%q; want failed/failed/0 scheduling error", postStatus, targetStatus, attempts, lastErr)
+	if postStatus != "scheduled" || targetStatus != "pending" || attempts != 0 || lastErr != "" {
+		t.Fatalf("post=%q target=%q attempts=%d err=%q; want scheduled/pending/0", postStatus, targetStatus, attempts, lastErr)
 	}
 
-	pf.callAppResponses["jobs:jobs_schedule"] = json.RawMessage(`{"job":{"id":200}}`)
 	retry, err := app.toolPostCreate(ctx, args)
 	if err != nil {
 		t.Fatal(err)
@@ -2259,20 +2266,21 @@ func TestSchedule_FailureMarksTargetAndDuplicateRetriesSamePost(t *testing.T) {
 	if res["post_id"].(int64) != postID {
 		t.Fatalf("retry created post %v, want existing %d", res["post_id"], postID)
 	}
-	if res["retried_scheduling"] != true {
-		t.Fatalf("retry should report scheduling retry, got %+v", res)
+	if res["deduped"] != true {
+		t.Fatalf("duplicate create should reuse worker-scheduled post, got %+v", res)
 	}
 	var count, jobID int
-	var retriedPostStatus, retriedTargetStatus, retriedErr string
 	_ = ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM posts`).Scan(&count)
-	_ = ctx.AppDB().QueryRow(`SELECT status, job_id FROM posts WHERE id=?`, postID).Scan(&retriedPostStatus, &jobID)
-	_ = ctx.AppDB().QueryRow(`SELECT status, COALESCE(last_error,'') FROM post_targets WHERE post_id=?`, postID).Scan(&retriedTargetStatus, &retriedErr)
-	if count != 1 || retriedPostStatus != "scheduled" || jobID != 200 || retriedTargetStatus != "pending" || retriedErr != "" {
-		t.Fatalf("count=%d post=%q job=%d target=%q err=%q; want same scheduled post with pending target", count, retriedPostStatus, jobID, retriedTargetStatus, retriedErr)
+	_ = ctx.AppDB().QueryRow(`SELECT job_id FROM posts WHERE id=?`, postID).Scan(&jobID)
+	if count != 1 || jobID != 0 {
+		t.Fatalf("count=%d job=%d; want one worker-scheduled post", count, jobID)
+	}
+	if len(pf.callAppCalls) != 1 {
+		t.Fatalf("duplicate create retried jobs scheduling: %+v", pf.callAppCalls)
 	}
 }
 
-func TestSchedule_FailsWhenJobsUnbound(t *testing.T) {
+func TestSchedule_UsesWorkerFallbackWhenJobsUnbound(t *testing.T) {
 	pf := newRecordingPlatform()
 	// No jobs binding.
 	pf.identity.Bindings = map[string]any{}
@@ -2290,12 +2298,446 @@ func TestSchedule_FailsWhenJobsUnbound(t *testing.T) {
 		"schedule_at":        "2026-05-01T10:00:00Z",
 	})
 	res := out.(map[string]any)
-	if res["isError"] != true {
-		t.Errorf("expected isError when jobs unbound; got %+v", res)
+	if res["status"] != "scheduled" {
+		t.Errorf("expected scheduled worker fallback when jobs unbound; got %+v", res)
+	}
+	var jobID int64
+	if err := ctx.AppDB().QueryRow(`SELECT job_id FROM posts WHERE id=?`, res["post_id"]).Scan(&jobID); err != nil {
+		t.Fatal(err)
+	}
+	if jobID != 0 || len(pf.callAppCalls) != 0 {
+		t.Fatalf("worker fallback should not create a jobs row: job_id=%d calls=%+v", jobID, pf.callAppCalls)
 	}
 }
 
 // --- helpers -------------------------------------------------------
+
+func TestPostCreateRejectsCrossProjectAndDuplicateTargets(t *testing.T) {
+	ctx := newSocialCtx(t, newRecordingPlatform())
+	app := &App{}
+	res, _ := ctx.AppDB().Exec(
+		`INSERT INTO social_accounts (project_id, platform, connection_id, display_name, status)
+		 VALUES ('victim-project', 'twitter', 42, 'victim', 'active')`,
+	)
+	foreignID, _ := res.LastInsertId()
+	out, err := app.toolPostCreate(ctx, map[string]any{
+		"_project_id":        "victim-project",
+		"body":               "must not publish",
+		"social_account_ids": []any{foreignID},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.(map[string]any)["isError"] != true {
+		t.Fatalf("cross-project target should be rejected: %+v", out)
+	}
+	var posts int
+	_ = ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM posts`).Scan(&posts)
+	if posts != 0 {
+		t.Fatalf("cross-project request created %d posts", posts)
+	}
+
+	res, _ = ctx.AppDB().Exec(
+		`INSERT INTO social_accounts (project_id, platform, connection_id, display_name, status)
+		 VALUES ('test-proj', 'twitter', 43, 'local', 'active')`,
+	)
+	localID, _ := res.LastInsertId()
+	out, err = app.toolPostCreate(ctx, map[string]any{
+		"body":               "duplicate",
+		"social_account_ids": []any{localID, localID},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.(map[string]any)["isError"] != true {
+		t.Fatalf("duplicate target should be rejected: %+v", out)
+	}
+}
+
+func TestClaimPostTargetIsAtomic(t *testing.T) {
+	ctx := newSocialCtx(t, newRecordingPlatform())
+	acct, _ := ctx.AppDB().Exec(
+		`INSERT INTO social_accounts (project_id, platform, connection_id, display_name, status)
+		 VALUES ('test-proj', 'twitter', 42, 'local', 'active')`,
+	)
+	acctID, _ := acct.LastInsertId()
+	post, _ := ctx.AppDB().Exec(`INSERT INTO posts (project_id, body, status) VALUES ('test-proj', 'x', 'publishing')`)
+	postID, _ := post.LastInsertId()
+	target, _ := ctx.AppDB().Exec(`INSERT INTO post_targets (post_id, social_account_id) VALUES (?, ?)`, postID, acctID)
+	targetID, _ := target.LastInsertId()
+
+	const callers = 16
+	var wg sync.WaitGroup
+	wins := make(chan bool, callers)
+	errs := make(chan error, callers)
+	for i := 0; i < callers; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			claimed, err := claimPostTarget(ctx, targetID)
+			if err != nil {
+				errs <- err
+				return
+			}
+			wins <- claimed
+		}()
+	}
+	wg.Wait()
+	close(wins)
+	close(errs)
+	for err := range errs {
+		t.Fatalf("claim returned error: %v", err)
+	}
+	claimed := 0
+	for won := range wins {
+		if won {
+			claimed++
+		}
+	}
+	if claimed != 1 {
+		t.Fatalf("atomic claims won=%d, want 1", claimed)
+	}
+	var attempts int
+	_ = ctx.AppDB().QueryRow(`SELECT attempts FROM post_targets WHERE id=?`, targetID).Scan(&attempts)
+	if attempts != 1 {
+		t.Fatalf("attempts=%d, want 1", attempts)
+	}
+}
+
+func TestScheduledWorkerFallbackPublishesDuePost(t *testing.T) {
+	pf := newRecordingPlatform()
+	pf.executeResponses["post_tweet"] = &sdk.ExecuteResult{Success: true, Status: 201, Data: json.RawMessage(`{"data":{"id":"worker_tweet"}}`)}
+	ctx := newSocialCtx(t, pf)
+	acct, _ := ctx.AppDB().Exec(
+		`INSERT INTO social_accounts (project_id, platform, connection_id, display_name, status)
+		 VALUES ('test-proj', 'twitter', 42, 'local', 'active')`,
+	)
+	acctID, _ := acct.LastInsertId()
+	app := &App{}
+	out, err := app.toolPostCreate(ctx, map[string]any{
+		"body":               "worker post",
+		"social_account_ids": []any{acctID},
+		"schedule_at":        time.Now().UTC().Add(-time.Minute).Format(time.RFC3339),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	postID := out.(map[string]any)["post_id"].(int64)
+	if err := app.runScheduledPublisher(context.Background(), ctx); err != nil {
+		t.Fatal(err)
+	}
+	var status, platformID string
+	_ = ctx.AppDB().QueryRow(`SELECT status, COALESCE(platform_post_id,'') FROM post_targets WHERE post_id=?`, postID).Scan(&status, &platformID)
+	if status != "published" || platformID != "worker_tweet" {
+		t.Fatalf("worker target status=%q id=%q", status, platformID)
+	}
+}
+
+func TestWorkersIncludeSchedulingInboxAndAnalytics(t *testing.T) {
+	names := map[string]string{}
+	for _, worker := range (&App{}).Workers() {
+		names[worker.Name] = worker.Schedule
+	}
+	for name, schedule := range map[string]string{
+		"scheduled_publisher": "@every 1m",
+		"inbox_collector":     "@every 5m",
+		"analytics_collector": "@every 6h",
+	} {
+		if names[name] != schedule {
+			t.Fatalf("worker %q schedule=%q, want %q; all=%+v", name, names[name], schedule, names)
+		}
+	}
+}
+
+func TestJobCallbackReturnsRetryableFailureWithoutCreatingJobs(t *testing.T) {
+	pf := newRecordingPlatform()
+	pf.executeResponses["post_tweet"] = &sdk.ExecuteResult{Success: false, Status: 503, Data: json.RawMessage(`{"error":"temporary"}`)}
+	ctx := newSocialCtx(t, pf)
+	acct, _ := ctx.AppDB().Exec(
+		`INSERT INTO social_accounts (project_id, platform, connection_id, display_name, status)
+		 VALUES ('test-proj', 'twitter', 42, 'local', 'active')`,
+	)
+	acctID, _ := acct.LastInsertId()
+	post, _ := ctx.AppDB().Exec(`INSERT INTO posts (project_id, body, status, job_id) VALUES ('test-proj', 'x', 'scheduled', 88)`)
+	postID, _ := post.LastInsertId()
+	_, _ = ctx.AppDB().Exec(`INSERT INTO post_targets (post_id, social_account_id) VALUES (?, ?)`, postID, acctID)
+	app := &App{}
+	req := httptest.NewRequest(http.MethodPost, "/jobs/publish_post", strings.NewReader(fmt.Sprintf(`{"post_id":%d}`, postID)))
+	rr := httptest.NewRecorder()
+	app.handleJobPublishPost(rr, req)
+	if rr.Code != http.StatusBadGateway {
+		t.Fatalf("first callback status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	var targetStatus string
+	_ = ctx.AppDB().QueryRow(`SELECT status FROM post_targets WHERE post_id=?`, postID).Scan(&targetStatus)
+	if targetStatus != "pending" {
+		t.Fatalf("failed target should be pending for Jobs retry, got %q", targetStatus)
+	}
+	if len(pf.callAppCalls) != 0 {
+		t.Fatalf("publish callback must not create jobs: %+v", pf.callAppCalls)
+	}
+	pf.executeResponses["post_tweet"] = &sdk.ExecuteResult{Success: true, Status: 201, Data: json.RawMessage(`{"data":{"id":"retry_ok"}}`)}
+	rr = httptest.NewRecorder()
+	app.handleJobPublishPost(rr, httptest.NewRequest(http.MethodPost, "/jobs/publish_post", strings.NewReader(fmt.Sprintf(`{"post_id":%d}`, postID))))
+	if rr.Code != http.StatusOK {
+		t.Fatalf("retry callback status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	_ = ctx.AppDB().QueryRow(`SELECT status FROM post_targets WHERE post_id=?`, postID).Scan(&targetStatus)
+	if targetStatus != "published" {
+		t.Fatalf("retried target=%q, want published", targetStatus)
+	}
+}
+
+func TestJobCallbackDoesNotAcknowledgeOverlappingPublisher(t *testing.T) {
+	ctx := newSocialCtx(t, newRecordingPlatform())
+	acct, _ := ctx.AppDB().Exec(
+		`INSERT INTO social_accounts (project_id, platform, connection_id, display_name, status)
+		 VALUES ('test-proj', 'twitter', 42, 'local', 'active')`,
+	)
+	acctID, _ := acct.LastInsertId()
+	post, _ := ctx.AppDB().Exec(`INSERT INTO posts (project_id, body, status, job_id) VALUES ('test-proj', 'x', 'publishing', 88)`)
+	postID, _ := post.LastInsertId()
+	_, _ = ctx.AppDB().Exec(
+		`INSERT INTO post_targets (post_id, social_account_id, status, attempts, last_attempt_at)
+		 VALUES (?, ?, 'publishing', 1, CURRENT_TIMESTAMP)`,
+		postID, acctID,
+	)
+	rr := httptest.NewRecorder()
+	(&App{}).handleJobPublishPost(rr, httptest.NewRequest(http.MethodPost, "/jobs/publish_post", strings.NewReader(fmt.Sprintf(`{"post_id":%d}`, postID))))
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("overlapping callback status=%d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestPendingAccountsAreScopedExpiredAndSingleUse(t *testing.T) {
+	pf := newRecordingPlatform()
+	ctx := newSocialCtx(t, pf)
+	app := &App{}
+	foreign, _ := ctx.AppDB().Exec(
+		`INSERT INTO pending_accounts (project_id, platform, integration_slug, connection_id, status, expires_at)
+		 VALUES ('other-project', 'twitter', 'twitter-api', 42, 'ready', datetime('now','+10 minutes'))`,
+	)
+	foreignID, _ := foreign.LastInsertId()
+	out, _ := app.toolAccountListPendingPages(ctx, map[string]any{"pending_account_id": foreignID, "_project_id": "other-project"})
+	if out.(map[string]any)["isError"] != true {
+		t.Fatalf("foreign pending row was visible: %+v", out)
+	}
+	expired, _ := ctx.AppDB().Exec(
+		`INSERT INTO pending_accounts (project_id, platform, integration_slug, connection_id, status, expires_at)
+		 VALUES ('test-proj', 'twitter', 'twitter-api', 42, 'ready', datetime('now','-1 minute'))`,
+	)
+	expiredID, _ := expired.LastInsertId()
+	out, _ = app.toolAccountFinalize(ctx, map[string]any{"pending_account_id": expiredID})
+	if out.(map[string]any)["isError"] != true {
+		t.Fatalf("expired pending row finalized: %+v", out)
+	}
+	ready, _ := ctx.AppDB().Exec(
+		`INSERT INTO pending_accounts (project_id, platform, integration_slug, connection_id, status, expires_at)
+		 VALUES ('test-proj', 'twitter', 'twitter-api', 42, 'ready', datetime('now','+10 minutes'))`,
+	)
+	readyID, _ := ready.LastInsertId()
+	first, err := app.toolAccountFinalize(ctx, map[string]any{"pending_account_id": readyID})
+	if err != nil || first.(map[string]any)["social_account_id"] == nil {
+		t.Fatalf("first finalize failed: out=%+v err=%v", first, err)
+	}
+	second, _ := app.toolAccountFinalize(ctx, map[string]any{"pending_account_id": readyID})
+	if second.(map[string]any)["isError"] != true {
+		t.Fatalf("pending row replay succeeded: %+v", second)
+	}
+	var accounts int
+	_ = ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM social_accounts WHERE project_id='test-proj'`).Scan(&accounts)
+	if accounts != 1 {
+		t.Fatalf("finalize replay created %d accounts", accounts)
+	}
+}
+
+func TestOAuthCallbackRejectsUnrelatedConnection(t *testing.T) {
+	pf := newRecordingPlatform()
+	pf.connections = []sdk.PlatformConnection{{ID: 7, AppSlug: "twitter-api", ProjectID: "test-proj", Status: "active"}}
+	ctx := newSocialCtx(t, pf)
+	res, _ := ctx.AppDB().Exec(
+		`INSERT INTO pending_accounts (project_id, platform, integration_slug, status, expires_at)
+		 VALUES ('test-proj', 'twitter', 'twitter-api', 'pending_oauth', datetime('now','+10 minutes'))`,
+	)
+	id, _ := res.LastInsertId()
+	app := &App{}
+	rr := httptest.NewRecorder()
+	app.handleOAuthDone(rr, httptest.NewRequest(http.MethodGet,
+		fmt.Sprintf("/accounts/oauth_done?pending=%d&conn_id=99&status=ok&project_id=test-proj", id), nil))
+	if !strings.Contains(rr.Body.String(), "social.oauth_error") {
+		t.Fatalf("callback did not report rejection: %s", rr.Body.String())
+	}
+	var status string
+	_ = ctx.AppDB().QueryRow(`SELECT status FROM pending_accounts WHERE id=?`, id).Scan(&status)
+	if status != "pending_oauth" {
+		t.Fatalf("unrelated connection changed pending status to %q", status)
+	}
+}
+
+func TestAccountDisconnectPreservesHistoryAndHardDeleteRemovesIt(t *testing.T) {
+	pf := newRecordingPlatform()
+	ctx := newSocialCtx(t, pf)
+	acct, _ := ctx.AppDB().Exec(
+		`INSERT INTO social_accounts (project_id, platform, connection_id, display_name, status)
+		 VALUES ('test-proj', 'twitter', 42, 'local', 'active')`,
+	)
+	acctID, _ := acct.LastInsertId()
+	post, _ := ctx.AppDB().Exec(`INSERT INTO posts (project_id, body, status) VALUES ('test-proj', 'history', 'published')`)
+	postID, _ := post.LastInsertId()
+	_, _ = ctx.AppDB().Exec(`INSERT INTO post_targets (post_id, social_account_id, status, platform_post_id) VALUES (?, ?, 'published', 'tweet')`, postID, acctID)
+	app := &App{}
+	if _, err := app.toolAccountDisconnect(ctx, map[string]any{"id": acctID}); err != nil {
+		t.Fatal(err)
+	}
+	var status string
+	var targets int
+	_ = ctx.AppDB().QueryRow(`SELECT status FROM social_accounts WHERE id=?`, acctID).Scan(&status)
+	_ = ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM post_targets WHERE social_account_id=?`, acctID).Scan(&targets)
+	if status != "disconnected" || targets != 1 {
+		t.Fatalf("soft disconnect status=%q targets=%d", status, targets)
+	}
+	out, err := app.toolAccountDisconnect(ctx, map[string]any{"id": acctID, "hard_delete": true, "delete_posts": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if out.(map[string]any)["hard_delete"] != true {
+		t.Fatalf("hard delete response: %+v", out)
+	}
+	var accounts, posts int
+	_ = ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM social_accounts WHERE id=?`, acctID).Scan(&accounts)
+	_ = ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM posts WHERE id=?`, postID).Scan(&posts)
+	if accounts != 0 || posts != 0 {
+		t.Fatalf("hard delete left account=%d post=%d", accounts, posts)
+	}
+}
+
+func TestInstagramInboxUsesRequestProjectNotEnvironment(t *testing.T) {
+	t.Setenv("APTEVA_PROJECT_ID", "wrong-project")
+	pf := newRecordingPlatform()
+	pf.executeResponses["list_conversations"] = &sdk.ExecuteResult{Success: true, Status: 200, Data: json.RawMessage(`{"data":[]}`)}
+	pf.executeResponses["list_my_tags"] = &sdk.ExecuteResult{Success: true, Status: 200, Data: json.RawMessage(`{"data":[]}`)}
+	ctx := newSocialCtx(t, pf)
+	res, _ := ctx.AppDB().Exec(
+		`INSERT INTO social_accounts (project_id, platform, connection_id, external_account_id, display_name, status, page_credentials)
+		 VALUES ('test-proj', 'instagram', 42, 'ig-user', 'IG', 'active', '{"access_token":"page-token"}')`,
+	)
+	accountID, _ := res.LastInsertId()
+	out, err := (&App{}).toolInboxSync(ctx, map[string]any{"social_account_ids": []any{accountID}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := json.Marshal(out)
+	if !strings.Contains(string(raw), `"status":"ok"`) {
+		t.Fatalf("Instagram sync used wrong project scope: %s", raw)
+	}
+}
+
+func TestPostEditOnlyTouchesRequestedTarget(t *testing.T) {
+	pf := newRecordingPlatform()
+	pf.executeResponses["facebook_update_post"] = &sdk.ExecuteResult{Success: true, Status: 200, Data: json.RawMessage(`{"success":true}`)}
+	ctx := newSocialCtx(t, pf)
+	acct1, _ := ctx.AppDB().Exec(
+		`INSERT INTO social_accounts (project_id, platform, connection_id, display_name, status, page_credentials)
+		 VALUES ('test-proj', 'facebook', 41, 'one', 'active', '{"access_token":"token-1"}')`,
+	)
+	id1, _ := acct1.LastInsertId()
+	acct2, _ := ctx.AppDB().Exec(
+		`INSERT INTO social_accounts (project_id, platform, connection_id, display_name, status, page_credentials)
+		 VALUES ('test-proj', 'facebook', 42, 'two', 'active', '{"access_token":"token-2"}')`,
+	)
+	id2, _ := acct2.LastInsertId()
+	post, _ := ctx.AppDB().Exec(`INSERT INTO posts (project_id, body, status) VALUES ('test-proj', 'old', 'published')`)
+	postID, _ := post.LastInsertId()
+	_, _ = ctx.AppDB().Exec(`INSERT INTO post_targets (post_id, social_account_id, status, platform_post_id) VALUES (?, ?, 'published', 'post-1')`, postID, id1)
+	_, _ = ctx.AppDB().Exec(`INSERT INTO post_targets (post_id, social_account_id, status, platform_post_id) VALUES (?, ?, 'published', 'post-2')`, postID, id2)
+	out, err := (&App{}).toolPostEdit(ctx, map[string]any{
+		"post_id": postID,
+		"targets": []any{map[string]any{"social_account_id": id2, "body": "only two"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pf.executeCalls) != 1 || pf.executeCalls[0].ConnID != 42 {
+		t.Fatalf("edit fan-out touched unrequested targets: %+v; out=%+v", pf.executeCalls, out)
+	}
+	priorCalls := len(pf.executeCalls)
+	out, _ = (&App{}).toolPostEdit(ctx, map[string]any{
+		"post_id": postID,
+		"body":    "must not persist",
+		"targets": []any{map[string]any{"social_account_id": int64(9999), "body": "bad"}},
+	})
+	if out.(map[string]any)["isError"] != true || len(pf.executeCalls) != priorCalls {
+		t.Fatalf("unknown target should fail before edits: out=%+v calls=%+v", out, pf.executeCalls)
+	}
+	var body string
+	_ = ctx.AppDB().QueryRow(`SELECT body FROM posts WHERE id=?`, postID).Scan(&body)
+	if body != "old" {
+		t.Fatalf("invalid targeted edit changed local body to %q", body)
+	}
+}
+
+func TestYouTubeMetadataMergePreservesUnspecifiedFields(t *testing.T) {
+	pf := newRecordingPlatform()
+	pf.executeResponses["get_video"] = &sdk.ExecuteResult{Success: true, Status: 200, Data: json.RawMessage(`{
+		"items":[{"snippet":{"title":"Keep title","description":"Keep description","tags":["one"],"categoryId":"22"},
+		"status":{"privacyStatus":"public","license":"youtube","embeddable":true,"selfDeclaredMadeForKids":false}}]}`)}
+	ctx := newSocialCtx(t, pf)
+	input, err := (&App{}).youtubeMergedUpdateInput(ctx, 42, "video-1",
+		map[string]any{"visibility": "unlisted"}, map[string]any{"visibility": "unlisted"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	snippet := input["snippet"].(map[string]any)
+	status := input["status"].(map[string]any)
+	if snippet["title"] != "Keep title" || snippet["description"] != "Keep description" || snippet["categoryId"] != "22" {
+		t.Fatalf("snippet fields were not preserved: %+v", snippet)
+	}
+	if status["privacyStatus"] != "unlisted" || status["selfDeclaredMadeForKids"] != false || status["embeddable"] != true {
+		t.Fatalf("status merge lost fields: %+v", status)
+	}
+}
+
+func TestYouTubeThumbnailOnlyEditDoesNotRewriteMetadata(t *testing.T) {
+	imageServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "image/png")
+		_, _ = w.Write([]byte("small-png"))
+	}))
+	defer imageServer.Close()
+	pf := newRecordingPlatform()
+	pf.callAppResponses["storage:files_get"] = json.RawMessage(
+		`{"id":4903,"content_type":"image/png","size_bytes":9}`,
+	)
+	pf.callAppResponses["storage:files_get_url"] = json.RawMessage(fmt.Sprintf(`{"url":%q}`, imageServer.URL))
+	pf.executeResponses["set_thumbnail"] = &sdk.ExecuteResult{Success: true, Status: 200, Data: json.RawMessage(`{"items":[]}`)}
+	ctx := newSocialCtx(t, pf)
+	acct, _ := ctx.AppDB().Exec(
+		`INSERT INTO social_accounts (project_id, platform, connection_id, display_name, status)
+		 VALUES ('test-proj', 'youtube', 42, 'channel', 'active')`,
+	)
+	acctID, _ := acct.LastInsertId()
+	post, _ := ctx.AppDB().Exec(
+		`INSERT INTO posts (project_id, body, status, media_project_id) VALUES ('test-proj', 'description', 'published', 'test-proj')`,
+	)
+	postID, _ := post.LastInsertId()
+	_, _ = ctx.AppDB().Exec(
+		`INSERT INTO post_targets (post_id, social_account_id, status, platform_post_id, options)
+		 VALUES (?, ?, 'published', 'video-1', '{"title":"Keep title","body":"Keep description"}')`,
+		postID, acctID,
+	)
+	out, err := (&App{}).toolPostEdit(ctx, map[string]any{
+		"post_id": postID,
+		"targets": []any{map[string]any{
+			"social_account_id":    acctID,
+			"thumbnail_storage_id": int64(4903),
+		}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(pf.executeCalls) != 1 || pf.executeCalls[0].Tool != "set_thumbnail" {
+		t.Fatalf("thumbnail-only edit rewrote metadata: calls=%+v out=%+v", pf.executeCalls, out)
+	}
+}
 
 func TestExtractContainerID(t *testing.T) {
 	if got := extractContainerID(json.RawMessage(`{"id":"c_1"}`)); got != "c_1" {
