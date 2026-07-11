@@ -30,24 +30,44 @@ func installAndroidAPK(serial, apkPath string) error {
 }
 
 // launchAndroid starts the app. Prefer an explicit component when we
-// resolved a launchable activity from aapt; otherwise use monkey to
-// fire the package's LAUNCHER intent (works without knowing the
-// activity name).
+// resolved a launchable activity from aapt. Otherwise ask Android's
+// package manager for the LAUNCHER activity before falling back to
+// monkey for compatibility with older devices.
 func launchAndroid(serial, pkg, activity string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
+	run := func(args ...string) ([]byte, error) {
+		return exec.CommandContext(ctx, "adb", append([]string{"-s", serial}, args...)...).CombinedOutput()
+	}
+	return launchAndroidWithADB(pkg, activity, run)
+}
+
+type adbCommand func(args ...string) ([]byte, error)
+
+func launchAndroidWithADB(pkg, activity string, run adbCommand) error {
+	start := func(component string) bool {
+		out, err := run("shell", "am", "start", "-n", component,
+			"-a", "android.intent.action.MAIN", "-c", "android.intent.category.LAUNCHER")
+		return err == nil && !strings.Contains(string(out), "Error")
+	}
+
 	if activity != "" {
-		component := pkg + "/" + activity
-		out, err := exec.CommandContext(ctx, "adb", "-s", serial, "shell", "am", "start",
-			"-n", component, "-a", "android.intent.action.MAIN", "-c", "android.intent.category.LAUNCHER").CombinedOutput()
-		if err == nil && !strings.Contains(string(out), "Error") {
+		if start(pkg + "/" + activity) {
 			return nil
 		}
-		// Fall through to monkey on error — some activities aren't
-		// directly start-able via am start with these flags.
+		// The APK metadata can occasionally name an activity that is not
+		// directly startable, so resolve the device's actual launcher next.
 	}
-	out, err := exec.CommandContext(ctx, "adb", "-s", serial, "shell", "monkey",
-		"-p", pkg, "-c", "android.intent.category.LAUNCHER", "1").CombinedOutput()
+
+	resolved, resolveErr := run("shell", "cmd", "package", "resolve-activity", "--brief",
+		"-a", "android.intent.action.MAIN", "-c", "android.intent.category.LAUNCHER", pkg)
+	if resolveErr == nil {
+		if component := resolvedActivity(string(resolved)); component != "" && start(component) {
+			return nil
+		}
+	}
+
+	out, err := run("shell", "monkey", "-p", pkg, "-c", "android.intent.category.LAUNCHER", "1")
 	if err != nil {
 		return fmt.Errorf("adb monkey launch: %w (output: %s)", err, strings.TrimSpace(string(out)))
 	}
@@ -55,4 +75,15 @@ func launchAndroid(serial, pkg, activity string) error {
 		return fmt.Errorf("no launchable activity for package %s", pkg)
 	}
 	return nil
+}
+
+func resolvedActivity(output string) string {
+	lines := strings.Split(strings.TrimSpace(output), "\n")
+	for i := len(lines) - 1; i >= 0; i-- {
+		candidate := strings.TrimSpace(lines[i])
+		if !strings.ContainsAny(candidate, " \t") && strings.Contains(candidate, "/") {
+			return candidate
+		}
+	}
+	return ""
 }
