@@ -127,6 +127,9 @@ interface ContentOpportunity {
   top10_count?: number;
   latest_ts?: number;
   example_titles?: string[];
+  reason?: string;
+  volume?: number | null;
+  difficulty?: number | null;
 }
 
 interface PageRankingSummary {
@@ -237,7 +240,7 @@ export default function SeoPanel({ projectId, installId }: NativePanelProps) {
   const [domainRankings, setDomainRankings] = useState<Ranking[]>([]);
   const [entityRankings, setEntityRankings] = useState<SearchRanking[]>([]);
   const [selectedRankURL, setSelectedRankURL] = useState<string | null>(null);
-  const [pageSerpRows, setPageSerpRows] = useState<Ranking[]>([]);
+  const [pageSerpRows, setPageSerpRows] = useState<SearchRanking[]>([]);
   const [serpResults, setSerpResults] = useState<SearchRanking[]>([]);
   const [keywordIdeas, setKeywordIdeas] = useState<KeywordIdea[]>([]);
   const [opportunities, setOpportunities] = useState<ContentOpportunity[]>([]);
@@ -368,25 +371,23 @@ export default function SeoPanel({ projectId, installId }: NativePanelProps) {
       setPageSerpRows([]);
       return;
     }
-    Promise.all(ids.map((id) => callTool<Ranking[]>("rankings_for_keyword", { keyword_id: id, limit: 100 })))
-      .then((groups) => setPageSerpRows(groups.flat()))
+    callTool<SearchRanking[]>("rankings_for_keywords", { keyword_ids: ids, limit: 1000 })
+      .then((rows) => setPageSerpRows(rows || []))
       .catch((e) => setErr((e as Error).message));
   }, [callTool, domainRankings, selectedRankURL]);
 
   useEffect(() => {
     if (!selectedKeyword) {
       setKeywordMetrics(null);
-      if (searchEngine === "youtube") setSerpResults([]);
+      setSerpResults([]);
       return;
     }
     callTool<{ keyword: Keyword; metrics: KeywordMetrics | null }>("keywords_get", { id: selectedKeyword.id })
       .then((r) => setKeywordMetrics(r.metrics || null))
       .catch((e) => setErr((e as Error).message));
-    if ((selectedKeyword.search_engine || searchEngine) === "youtube") {
-      callTool<SearchRanking[]>("rankings_for_keyword", { keyword_id: selectedKeyword.id, limit: 100 })
-        .then((rows) => setSerpResults(rows || []))
-        .catch((e) => setErr((e as Error).message));
-    }
+    callTool<SearchRanking[]>("rankings_for_keyword", { keyword_id: selectedKeyword.id, limit: 100 })
+      .then((rows) => setSerpResults(rows || []))
+      .catch((e) => setErr((e as Error).message));
   }, [callTool, searchEngine, selectedKeyword]);
 
   useEffect(() => {
@@ -445,6 +446,14 @@ export default function SeoPanel({ projectId, installId }: NativePanelProps) {
       );
       await reloadDomains();
       setSelectedDomain(domain);
+      if (!backlinks) {
+        const [detail, rows] = await Promise.all([
+          callTool<{ domain: Domain; metrics: DomainMetrics | null }>("domains_get", { id: domain.id }),
+          callTool<Ranking[]>("rankings_for_domain", { domain_id: domain.id, limit: 500 }),
+        ]);
+        setDomainMetrics(detail.metrics || null);
+        setDomainRankings(rows || []);
+      }
       setStatus(backlinks ? "Backlinks refreshed" : "Domain metrics refreshed");
       pushActivity(`${backlinks ? "Backlinks" : "Domain metrics"} refreshed for ${domain.host}`);
     } catch (e) {
@@ -463,6 +472,8 @@ export default function SeoPanel({ projectId, installId }: NativePanelProps) {
       });
       await reloadKeywords();
       setSelectedKeyword(keyword);
+      const detail = await callTool<{ keyword: Keyword; metrics: KeywordMetrics | null }>("keywords_get", { id: keyword.id });
+      setKeywordMetrics(detail.metrics || null);
       setStatus("Keyword refreshed");
       pushActivity(`Keyword refreshed: ${keyword.text}`);
     } catch (e) {
@@ -637,7 +648,6 @@ export default function SeoPanel({ projectId, installId }: NativePanelProps) {
           selectedRankURL={selectedRankURL}
           onSelectRankURL={setSelectedRankURL}
           keywords={keywords}
-          allDomains={domains}
           onSelect={setSelectedDomain}
           onAdd={async (host, label, locationId) => {
             const d = await callTool<Domain>("domains_add", { host, label, location_id: locationId, search_engine: "google" });
@@ -900,7 +910,10 @@ function OpportunitiesTable({ rows }: { rows: ContentOpportunity[] }) {
                 <td className="px-3 py-2 font-medium">{row.keyword}</td>
                 <td className="px-3 py-2 tabular-nums">{fmt(row.opportunity_score)}</td>
                 <td className="px-3 py-2 tabular-nums">{fmt(row.top10_count)} / {fmt(row.result_count)}</td>
-                <td className="px-3 py-2 text-text-dim">{(row.example_titles || []).slice(0, 3).join(" / ") || "-"}</td>
+                <td className="px-3 py-2 text-text-dim">
+                  <div>{(row.example_titles || []).slice(0, 3).join(" / ") || "-"}</div>
+                  {row.reason && <div className="mt-1 text-xs">{row.reason}</div>}
+                </td>
               </tr>
             ))}
           </tbody>
@@ -1049,13 +1062,12 @@ function EntitiesView(props: {
 
 function DomainsView(props: {
   domains: Domain[];
-  allDomains: Domain[];
   keywords: Keyword[];
   locations: SEOLocation[];
   selected: Domain | null;
   metrics: DomainMetrics | null;
   rankings: Ranking[];
-  pageSerpRows: Ranking[];
+  pageSerpRows: SearchRanking[];
   selectedRankURL: string | null;
   onSelectRankURL(url: string): void;
   onSelect(d: Domain): void;
@@ -1072,7 +1084,6 @@ function DomainsView(props: {
     ? props.locationById.get(props.selected.default_location_id)
     : undefined;
   const keywordById = useMemo(() => new Map(props.keywords.map((k) => [k.id, k])), [props.keywords]);
-  const domainById = useMemo(() => new Map(props.allDomains.map((d) => [d.id, d])), [props.allDomains]);
   return (
     <div className="flex-1 min-h-0 flex">
       <div className="w-80 border-r border-border flex flex-col min-h-0">
@@ -1140,7 +1151,6 @@ function DomainsView(props: {
               pageSerpRows={props.pageSerpRows}
               onSelectURL={props.onSelectRankURL}
               keywordById={keywordById}
-              domainById={domainById}
             />
           </div>
         ) : (
@@ -1154,18 +1164,17 @@ function DomainsView(props: {
 function RankingExplorer(props: {
   rankings: Ranking[];
   selectedURL: string | null;
-  pageSerpRows: Ranking[];
+  pageSerpRows: SearchRanking[];
   onSelectURL(url: string): void;
   keywordById: Map<number, Keyword>;
-  domainById: Map<number, Domain>;
 }) {
   const pages = useMemo(() => pageSummaries(props.rankings), [props.rankings]);
   const selected = pages.find((p) => p.url === props.selectedURL) || pages[0];
   const selectedKeywordIds = new Set(selected?.keywordIds || []);
   const selectedRows = selected?.rows || [];
   const competingRows = props.pageSerpRows
-    .filter((r) => selectedKeywordIds.has(r.keyword_id))
-    .sort((a, b) => (a.keyword_id - b.keyword_id) || ((a.rank || 9999) - (b.rank || 9999)));
+    .filter((r) => r.keyword_id !== undefined && selectedKeywordIds.has(r.keyword_id))
+    .sort((a, b) => ((a.keyword_id || 0) - (b.keyword_id || 0)) || ((a.rank || 9999) - (b.rank || 9999)));
 
   if (pages.length === 0) {
     return (
@@ -1232,10 +1241,10 @@ function RankingExplorer(props: {
                           ) : (
                             <div className="space-y-1">
                               {serpRows.map((r) => (
-                                <div key={r.id} className={r.rank_url === row.rank_url ? "text-text" : "text-text-dim"}>
+                                <div key={r.id} className={cleanURL(r.url) === cleanURL(row.rank_url) ? "text-text" : "text-text-dim"}>
                                   <span className="tabular-nums">#{r.rank || "-"}</span>{" "}
-                                  <span>{props.domainById.get(r.domain_id)?.host || hostFromURL(r.rank_url) || `Domain #${r.domain_id}`}</span>{" "}
-                                  <span className="truncate inline-block max-w-[360px] align-bottom">{pagePath(r.rank_url)}</span>
+                                  <span>{hostFromURL(r.url) || r.channel_title || r.identifier || "Result"}</span>{" "}
+                                  <span className="truncate inline-block max-w-[360px] align-bottom">{pagePath(r.url)}</span>
                                 </div>
                               ))}
                             </div>
@@ -1414,11 +1423,10 @@ function KeywordsView(props: {
                 <div className="text-sm text-text-dim">{localeLabel(selectedLoc)}</div>
               </div>
               <div className="flex gap-2">
-                {props.searchEngine === "google" ? (
+                {props.searchEngine === "google" && (
                   <button className={buttonCls} disabled={props.busy} onClick={() => props.onRefresh(props.selected!)}>Refresh Metrics</button>
-                ) : (
-                  <button className={buttonCls} disabled={props.busy} onClick={() => props.onRefreshSERP(props.selected!)}>Refresh SERP</button>
                 )}
+                <button className={buttonCls} disabled={props.busy} onClick={() => props.onRefreshSERP(props.selected!)}>Refresh SERP</button>
                 <button className={buttonCls} disabled={props.busy} onClick={() => props.onRemove(props.selected!.id)}>Remove</button>
               </div>
             </div>
@@ -1432,7 +1440,8 @@ function KeywordsView(props: {
                     ["Provider", props.metrics?.provider || "-"],
                   ]}
                 />
-                <div className="text-xs text-text-dim">Last refresh: {date(props.metrics?.ts)}</div>
+                <div className="text-xs text-text-dim">Last metrics refresh: {date(props.metrics?.ts)}</div>
+                <SERPResultsTable rows={selectedSerpRows} />
               </>
             ) : (
               <SERPResultsTable rows={selectedSerpRows} />

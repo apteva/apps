@@ -35,7 +35,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: seo
 display_name: SEO
-version: 0.4.7
+version: 0.4.8
 description: Generic SEO research workbench — locale-aware domains, keywords, rankings, backlinks behind one pluggable provider integration.
 author: Apteva
 scopes: [project, global]
@@ -61,7 +61,8 @@ provides:
     - { name: serp_search, description: "Run a paid provider SERP search and cache ranked results. Args: search_engine? (google default or youtube), keyword or keyword_id, location_id or country_iso+language_code, depth?. YouTube stores video results only." }
     - { name: keyword_ideas, description: "Find keyword/content ideas. Args: search_engine? (google default or youtube), seed_keywords or keywords, location_id or country_iso+language_code, limit?, refresh?." }
     - { name: rankings_for_entity, description: "List cached ranking rows for a generic search entity. Args: entity_id, since?, limit?." }
-    - { name: content_opportunities, description: "Summarize cached SERP snapshots into content opportunities. Args: search_engine? (youtube default), limit?. YouTube uses video results only." }
+    - { name: rankings_for_keywords, description: "List cached SERP rankings for multiple keywords. Args: keyword_ids, since?, limit?, history?." }
+    - { name: content_opportunities, description: "Summarize latest cached SERP snapshots into content opportunities. Args: search_engine? (google default), limit?. YouTube uses video results only." }
     - { name: locations_list, description: "List active SEO provider locations." }
     - { name: domains_add,    description: "Add a domain (hostname) to track; accepts location_id or country_iso+language_code for the default locale." }
     - { name: domains_list,   description: "List tracked domains in this scope." }
@@ -72,7 +73,7 @@ provides:
     - { name: keywords_get,    description: "Read one keyword plus latest metrics." }
     - { name: keywords_remove, description: "Remove a keyword (cascades to children)." }
     - { name: rankings_for_domain,    description: "Cached current rankings for a domain; pass history=true for daily observations." }
-    - { name: rankings_for_keyword,   description: "Cached current rankings/results for a keyword; Google returns tracked-domain rankings, YouTube returns ranked videos." }
+    - { name: rankings_for_keyword,   description: "Cached SERP rankings for a keyword with one uniform Google/YouTube result shape." }
     - { name: backlinks_list,         description: "Cached backlinks pointing at a domain." }
     - { name: keyword_volume_history, description: "Monthly search-volume series (cached)." }
   ui_panels:
@@ -128,12 +129,9 @@ func (a *App) EventHandlers() []sdk.EventHandler { return nil }
 
 // ─── HTTP routes (refresh lives here, NOT in MCPTools) ───────────
 //
-// Refresh costs money — it calls the bound provider (DataForSEO etc.)
-// which bills per request. Keeping it off the MCP surface means the
-// agent can never trigger a paid action; only the human can, via the
-// SeoPanel button or curl. The agent reads cached rows via the
-// MCP read-only tools and surfaces last_refreshed_at as a staleness
-// signal in its answers.
+// Domain, keyword-metric, and backlink refreshes live on HTTP routes for the
+// panel. Explicit SERP searches and refreshed keyword ideas are paid MCP tools;
+// cached ranking and opportunity tools remain read-only.
 
 func (a *App) HTTPRoutes() []sdk.Route {
 	return []sdk.Route{
@@ -216,8 +214,17 @@ func (a *App) MCPTools() []sdk.Tool {
 				"limit":     map[string]any{"type": "integer"},
 			}, []string{"entity_id"}),
 			Handler: a.toolRankingsForEntity},
+		{Name: "rankings_for_keywords",
+			Description: "List cached SERP rankings for multiple keywords in one call. Returns the latest snapshot for each keyword by default, or retained snapshots with history=true. Args: keyword_ids, since?, limit?, history?.",
+			InputSchema: schemaObject(map[string]any{
+				"keyword_ids": map[string]any{"type": "array", "items": map[string]any{"type": "integer"}},
+				"since":       map[string]any{"type": "integer"},
+				"limit":       map[string]any{"type": "integer"},
+				"history":     map[string]any{"type": "boolean"},
+			}, []string{"keyword_ids"}),
+			Handler: a.toolRankingsForKeywords},
 		{Name: "content_opportunities",
-			Description: "Summarize cached SERP snapshots into content opportunities. Args: search_engine? (youtube default for this tool), limit?. YouTube uses video results only.",
+			Description: "Summarize latest cached SERP snapshots into content opportunities. Args: search_engine? (google default), limit?. YouTube uses video results only.",
 			InputSchema: schemaObject(map[string]any{
 				"search_engine": map[string]any{"type": "string"},
 				"limit":         map[string]any{"type": "integer"},
@@ -286,7 +293,7 @@ func (a *App) MCPTools() []sdk.Tool {
 			}, []string{"domain_id"}),
 			Handler: a.toolRankingsForDomain},
 		{Name: "rankings_for_keyword",
-			Description: "List current rankings/results for a keyword. Google returns tracked-domain rankings; YouTube returns ranked video results from the latest SERP snapshot by default, or all cached video results with history=true. Args: keyword_id (required), since? (unix seconds), limit? (default 200), history? (default false).",
+			Description: "List cached SERP rankings for a keyword using the same result shape for Google and YouTube. Returns the latest snapshot by default, or retained snapshots with history=true. Args: keyword_id, since?, limit?, history?.",
 			InputSchema: schemaObject(map[string]any{
 				"keyword_id": map[string]any{"type": "integer"},
 				"since":      map[string]any{"type": "integer"},
@@ -542,14 +549,26 @@ func getLocation(db *sql.DB, id int64) (*SEOLocation, error) {
 }
 
 func resolveLocationFromArgs(db *sql.DB, args map[string]any, defaultID *int64) (*SEOLocation, error) {
+	requestedEngine, err := normalizeSearchEngine(strArg(args, "search_engine", "google"))
+	if err != nil {
+		return nil, err
+	}
+	validate := func(loc *SEOLocation, err error) (*SEOLocation, error) {
+		if err != nil || loc == nil {
+			return loc, err
+		}
+		if loc.SearchEngine != requestedEngine {
+			return nil, fmt.Errorf("location %d belongs to search_engine %s, not %s", loc.ID, loc.SearchEngine, requestedEngine)
+		}
+		return loc, nil
+	}
 	if id := toInt64(args["location_id"]); id != 0 {
-		return getLocation(db, id)
+		return validate(getLocation(db, id))
 	}
 	if defaultID != nil && *defaultID != 0 {
-		return getLocation(db, *defaultID)
+		return validate(getLocation(db, *defaultID))
 	}
 	provider := strings.ToLower(strings.TrimSpace(strArg(args, "provider", "dataforseo")))
-	searchEngine := strings.ToLower(strings.TrimSpace(strArg(args, "search_engine", "google")))
 	country := strings.ToUpper(strings.TrimSpace(strArg(args, "country_iso", "")))
 	lang := strings.ToLower(strings.TrimSpace(strArg(args, "language_code", strArg(args, "language_iso", ""))))
 	if country == "" || lang == "" {
@@ -562,12 +581,12 @@ func resolveLocationFromArgs(db *sql.DB, args map[string]any, defaultID *int64) 
 		    AND language_code = ? AND is_active = 1
 		  ORDER BY CASE WHEN location_name = country_iso THEN 0 ELSE 1 END, location_name
 		  LIMIT 1`,
-		provider, searchEngine, country, lang))
+		provider, requestedEngine, country, lang))
 	if err != nil {
 		return nil, err
 	}
 	if l == nil {
-		return nil, fmt.Errorf("no active %s/%s location for %s/%s; sync locations before creating or refreshing SEO data", provider, searchEngine, country, lang)
+		return nil, fmt.Errorf("no active %s/%s location for %s/%s; sync locations before creating or refreshing SEO data", provider, requestedEngine, country, lang)
 	}
 	return l, nil
 }
@@ -714,7 +733,7 @@ func listKeywords(db *sql.DB, pid, countryISO string, limit int) ([]Keyword, err
 }
 
 func listKeywordsWithSearchEngine(db *sql.DB, pid, searchEngine, countryISO string, limit int) ([]Keyword, error) {
-	if limit <= 0 {
+	if limit <= 0 || limit > 500 {
 		limit = 200
 	}
 	sqlText := `SELECT k.id, k.project_id, COALESCE(NULLIF(l.search_engine, ''), NULLIF(k.search_engine, ''), 'google') AS search_engine,
@@ -973,7 +992,7 @@ func (a *App) toolRankingsForDomain(ctx *sdk.AppCtx, args map[string]any) (any, 
 	}
 	since := toInt64(args["since"])
 	limit := int(toInt64(args["limit"]))
-	if limit <= 0 {
+	if limit <= 0 || limit > 2000 {
 		limit = 200
 	}
 	var rows *sql.Rows
@@ -986,23 +1005,32 @@ func (a *App) toolRankingsForDomain(ctx *sdk.AppCtx, args map[string]any) (any, 
 			   WHERE domain_id = ? AND ts >= ?
 			   ORDER BY ts DESC, rank ASC LIMIT ?`, id, since, limit)
 	} else {
-		rows, err = ctx.AppDB().Query(
-			`WITH current_rankings AS (
-		    SELECT id, domain_id, keyword_id, location_id, provider, ts, observed_date, rank, rank_url,
-		           device, serp_features_json,
-		           ROW_NUMBER() OVER (
-		             PARTITION BY domain_id, keyword_id, location_id, provider, rank_url, device
-		             ORDER BY ts DESC, id DESC
-		           ) AS rn
-		      FROM rankings
-		     WHERE domain_id = ? AND ts >= ?
-		  )
-		  SELECT id, domain_id, keyword_id, location_id, provider, ts, observed_date, rank, rank_url,
-		         device, serp_features_json
-		    FROM current_rankings
-		   WHERE rn = 1
-		   ORDER BY ts DESC, rank ASC LIMIT ?`, id, since, limit)
+		return currentRankingsForDomain(ctx.AppDB(), id, since, limit)
 	}
+	if err != nil {
+		return nil, err
+	}
+	return scanRankings(rows)
+}
+
+func currentRankingsForDomain(db *sql.DB, domainID, since int64, limit int) ([]Ranking, error) {
+	rows, err := db.Query(
+		`WITH latest_observations AS (
+			    SELECT domain_id, location_id, provider, device, MAX(observed_date) AS observed_date
+			      FROM ranking_observations
+			     WHERE domain_id = ? AND ts >= ?
+			     GROUP BY domain_id, location_id, provider, device
+			  )
+			  SELECT r.id, r.domain_id, r.keyword_id, r.location_id, r.provider, r.ts, r.observed_date,
+			         r.rank, r.rank_url, r.device, r.serp_features_json
+			    FROM rankings r
+			    JOIN latest_observations latest
+			      ON latest.domain_id = r.domain_id
+			     AND latest.location_id = r.location_id
+			     AND latest.provider = r.provider
+			     AND latest.device = r.device
+			     AND latest.observed_date = r.observed_date
+			   ORDER BY r.ts DESC, r.rank ASC LIMIT ?`, domainID, since, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -1015,83 +1043,133 @@ func (a *App) toolRankingsForKeyword(ctx *sdk.AppCtx, args map[string]any) (any,
 		return nil, errors.New("keyword_id required")
 	}
 	pid := projectScopeFromArgs(ctx, args)
-	k, err := getKeyword(ctx.AppDB(), pid, id)
-	if err != nil {
+	if _, err := getKeyword(ctx.AppDB(), pid, id); err != nil {
 		return nil, err
 	}
 	since := toInt64(args["since"])
 	limit := int(toInt64(args["limit"]))
-	if limit <= 0 {
+	if limit <= 0 || limit > 500 {
 		limit = 200
 	}
-	if k.SearchEngine == "youtube" {
-		return youtubeRankingsForKeyword(ctx.AppDB(), pid, k, since, limit, boolArg(args, "history", false))
+	return searchRankingsForKeywords(ctx.AppDB(), pid, []int64{id}, since, limit, boolArg(args, "history", false))
+}
+
+func (a *App) toolRankingsForKeywords(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	ids := int64SliceArg(args, "keyword_ids")
+	if len(ids) == 0 {
+		return nil, errors.New("keyword_ids required")
 	}
-	var rows *sql.Rows
-	if boolArg(args, "history", false) {
-		rows, err = ctx.AppDB().Query(
-			`SELECT id, domain_id, keyword_id, location_id, provider, ts, observed_date,
-			        rank, rank_url, device, serp_features_json
-			   FROM rankings
-			   WHERE keyword_id = ? AND ts >= ?
-			   ORDER BY ts DESC, rank ASC LIMIT ?`, id, since, limit)
-	} else {
-		rows, err = ctx.AppDB().Query(
-			`WITH current_rankings AS (
-		    SELECT id, domain_id, keyword_id, location_id, provider, ts, observed_date, rank, rank_url,
-		           device, serp_features_json,
-		           ROW_NUMBER() OVER (
-		             PARTITION BY domain_id, keyword_id, location_id, provider, rank_url, device
-		             ORDER BY ts DESC, id DESC
-		           ) AS rn
-		      FROM rankings
-		     WHERE keyword_id = ? AND ts >= ?
-		  )
-		  SELECT id, domain_id, keyword_id, location_id, provider, ts, observed_date, rank, rank_url,
-		         device, serp_features_json
-		    FROM current_rankings
-		   WHERE rn = 1
-		   ORDER BY ts DESC, rank ASC LIMIT ?`, id, since, limit)
+	if len(ids) > 200 {
+		return nil, errors.New("keyword_ids supports at most 200 ids per call")
 	}
+	pid := projectScopeFromArgs(ctx, args)
+	limit := int(toInt64(args["limit"]))
+	if limit <= 0 || limit > 2000 {
+		limit = 1000
+	}
+	return searchRankingsForKeywords(ctx.AppDB(), pid, ids, toInt64(args["since"]), limit, boolArg(args, "history", false))
+}
+
+func searchRankingsForKeywords(db *sql.DB, pid string, keywordIDs []int64, since int64, limit int, history bool) ([]SearchRanking, error) {
+	if len(keywordIDs) == 0 {
+		return []SearchRanking{}, nil
+	}
+	ids := make([]any, 0, len(keywordIDs))
+	for _, id := range keywordIDs {
+		ids = append(ids, id)
+	}
+	args := []any{pid}
+	args = append(args, ids...)
+	args = append(args, since)
+	latestFilter := ""
+	if !history {
+		latestFilter = " AND snapshot_rank = 1"
+	}
+	q := `WITH matched_snapshots AS (
+		SELECT k.id AS resolved_keyword_id, s.id AS snapshot_id, s.search_engine, s.keyword_text,
+		       s.location_id, s.provider, s.ts,
+		       ROW_NUMBER() OVER (PARTITION BY k.id ORDER BY s.ts DESC, s.id DESC) AS snapshot_rank
+		  FROM keywords k
+		  JOIN search_serp_snapshots s
+		    ON s.project_id = k.project_id
+		   AND (s.keyword_id = k.id OR
+		       (s.keyword_id IS NULL AND s.keyword_text = k.text AND s.location_id = k.location_id))
+		 WHERE k.project_id = ? AND k.id IN (` + placeholders(len(keywordIDs)) + `) AND s.ts >= ?
+	), selected_snapshots AS (
+		SELECT * FROM matched_snapshots WHERE 1 = 1` + latestFilter + `
+	)
+	SELECT r.id, r.snapshot_id, r.entity_id, s.search_engine, s.resolved_keyword_id, s.keyword_text,
+	       s.location_id, s.provider, s.ts, r.rank, r.result_type, r.title, r.url,
+	       r.identifier, r.channel_identifier, r.channel_title, r.snippet, r.published_at
+	  FROM selected_snapshots s
+	  JOIN search_serp_results r ON r.snapshot_id = s.snapshot_id
+	 WHERE s.search_engine != 'youtube' OR r.result_type = 'video'
+	 ORDER BY s.ts DESC, s.resolved_keyword_id, r.rank ASC
+	 LIMIT ?`
+	args = append(args, limit)
+	rows, err := db.Query(q, args...)
 	if err != nil {
 		return nil, err
 	}
-	return scanRankings(rows)
+	out, err := scanSearchRankings(rows)
+	if err != nil {
+		return nil, err
+	}
+	found := map[int64]bool{}
+	for _, row := range out {
+		if row.KeywordID != nil {
+			found[*row.KeywordID] = true
+		}
+	}
+	missing := make([]int64, 0, len(keywordIDs))
+	for _, id := range keywordIDs {
+		if !found[id] {
+			missing = append(missing, id)
+		}
+	}
+	if len(missing) == 0 || len(out) >= limit {
+		return out, nil
+	}
+	fallback, err := legacyGoogleRankingsAsSearchResults(db, pid, missing, since, limit-len(out), history)
+	if err != nil {
+		return nil, err
+	}
+	return append(out, fallback...), nil
 }
 
-func youtubeRankingsForKeyword(db *sql.DB, pid string, k *Keyword, since int64, limit int, history bool) ([]SearchRanking, error) {
-	baseSelect := `SELECT r.id, r.snapshot_id, r.entity_id, s.search_engine, s.keyword_id, s.keyword_text,
-	             s.location_id, s.provider, s.ts, r.rank, r.result_type, r.title, r.url,
-	             r.identifier, r.channel_identifier, r.channel_title, r.snippet, r.published_at
-	        FROM search_serp_results r
-	        JOIN search_serp_snapshots s ON s.id = r.snapshot_id
-	       WHERE s.project_id = ?
-	         AND s.search_engine = 'youtube'
-	         AND COALESCE(NULLIF(r.result_type, ''), 'video') = 'video'
-	         AND s.ts >= ?`
-	args := []any{pid, since}
-	if k.ID != 0 {
-		baseSelect += ` AND (s.keyword_id = ? OR (s.keyword_id IS NULL AND s.keyword_text = ? AND s.location_id = ?))`
-		args = append(args, k.ID, k.Text, k.LocationID)
-	} else {
-		baseSelect += ` AND s.keyword_text = ? AND s.location_id = ?`
-		args = append(args, k.Text, k.LocationID)
+func legacyGoogleRankingsAsSearchResults(db *sql.DB, pid string, keywordIDs []int64, since int64, limit int, history bool) ([]SearchRanking, error) {
+	if len(keywordIDs) == 0 || limit <= 0 {
+		return []SearchRanking{}, nil
 	}
+	args := []any{pid}
+	for _, id := range keywordIDs {
+		args = append(args, id)
+	}
+	args = append(args, since)
+	observationJoin := ""
 	if !history {
-		baseSelect += ` AND s.id = (
-			SELECT s2.id
-			  FROM search_serp_snapshots s2
-			 WHERE s2.project_id = ?
-			   AND s2.search_engine = 'youtube'
-			   AND (s2.keyword_id = ? OR (s2.keyword_id IS NULL AND s2.keyword_text = ? AND s2.location_id = ?))
-			 ORDER BY s2.ts DESC, s2.id DESC
-			 LIMIT 1
-		)`
-		args = append(args, pid, k.ID, k.Text, k.LocationID)
+		observationJoin = `JOIN (
+		    SELECT domain_id, location_id, provider, device, MAX(observed_date) AS observed_date
+		      FROM ranking_observations
+		     GROUP BY domain_id, location_id, provider, device
+		  ) latest
+		    ON latest.domain_id = r.domain_id AND latest.location_id = r.location_id
+		   AND latest.provider = r.provider AND latest.device = r.device
+		   AND latest.observed_date = r.observed_date`
 	}
-	baseSelect += ` ORDER BY s.ts DESC, r.rank ASC LIMIT ?`
+	q := `SELECT r.id, 0, NULL, 'google', r.keyword_id, k.text,
+	             r.location_id, r.provider, r.ts, r.rank, 'tracked_domain',
+	             CASE WHEN d.label != '' THEN d.label ELSE d.host END,
+	             r.rank_url, d.host, '', '', '', ''
+	        FROM rankings r
+	        JOIN keywords k ON k.id = r.keyword_id
+	        JOIN domains d ON d.id = r.domain_id
+	        ` + observationJoin + `
+	       WHERE k.project_id = ? AND k.id IN (` + placeholders(len(keywordIDs)) + `) AND r.ts >= ?
+	       ORDER BY r.ts DESC, r.keyword_id, r.rank ASC
+	       LIMIT ?`
 	args = append(args, limit)
-	rows, err := db.Query(baseSelect, args...)
+	rows, err := db.Query(q, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1637,6 +1715,9 @@ func (a *App) toolSERPSearch(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 			ChannelTitle: item.ChannelTitle, Snippet: item.Snippet, PublishedAt: item.PublishedAt,
 		})
 	}
+	if err := pruneSERPSnapshots(tx, pid, search_engine, keywordText, loc.ID, 30); err != nil {
+		return nil, err
+	}
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
@@ -1650,6 +1731,25 @@ func (a *App) toolSERPSearch(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		"results":       stored,
 		"count":         len(stored),
 	}, nil
+}
+
+func pruneSERPSnapshots(tx *sql.Tx, pid, searchEngine, keywordText string, locationID int64, keep int) error {
+	if keep <= 0 {
+		return nil
+	}
+	_, err := tx.Exec(
+		`DELETE FROM search_serp_snapshots
+		  WHERE id IN (
+		        SELECT id
+		          FROM search_serp_snapshots
+		         WHERE project_id = ? AND search_engine = ? AND keyword_text = ? AND location_id = ?
+		         ORDER BY ts DESC, id DESC
+		         LIMIT -1 OFFSET ?
+		  )`, pid, searchEngine, keywordText, locationID, keep)
+	if err != nil {
+		return fmt.Errorf("prune SERP snapshots: %w", err)
+	}
+	return nil
 }
 
 func serpSearchViaProvider(ctx *sdk.AppCtx, search_engine, keyword string, loc *SEOLocation, depth int, device string) ([]byte, []byte, string, error) {
@@ -1732,13 +1832,15 @@ func normalizeSERPItem(search_engine string, raw map[string]any) normalizedSERPI
 		case "playlist":
 			item.EntityType = ""
 			item.Identifier = youtubePlaylistID(firstString(raw, "playlist_id", "playlist_url", "url", "link"))
-		default:
-			item.ResultType = "video"
+		case "video":
 			item.EntityType = "video"
 			item.Identifier = firstString(raw, "video_id")
 			if item.Identifier == "" {
 				item.Identifier = youtubeVideoID(item.URL)
 			}
+		default:
+			item.EntityType = ""
+			item.Identifier = ""
 		}
 	case "google":
 		item.EntityType = "page"
@@ -1762,7 +1864,9 @@ func normalizeYouTubeResultType(rawType, rawURL string, raw map[string]any) stri
 		return "channel"
 	case "playlist":
 		return "playlist"
-	case "video", "organic", "":
+	case "video":
+		return "video"
+	case "organic", "":
 		// Fall through to URL/field checks below.
 	default:
 		if strings.Contains(t, "channel") {
@@ -1790,7 +1894,7 @@ func normalizeYouTubeResultType(rawType, rawURL string, raw map[string]any) stri
 	case strings.Contains(u, "/@"), strings.Contains(u, "/channel/"), strings.Contains(u, "/c/"), strings.Contains(u, "/user/"):
 		return "channel"
 	default:
-		return "video"
+		return "unknown"
 	}
 }
 
@@ -1873,6 +1977,12 @@ func (a *App) toolKeywordIdeas(ctx *sdk.AppCtx, args map[string]any) (any, error
 	if search_engine == "google" {
 		return googleKeywordIdeasViaProvider(ctx, args, seeds, limit)
 	}
+	locArgs := copyArgs(args)
+	locArgs["search_engine"] = "youtube"
+	loc, err := resolveLocationFromArgs(ctx.AppDB(), locArgs, nil)
+	if err != nil {
+		return nil, err
+	}
 	if boolArg(args, "refresh", true) {
 		for _, seed := range seeds {
 			searchArgs := copyArgs(args)
@@ -1886,7 +1996,7 @@ func (a *App) toolKeywordIdeas(ctx *sdk.AppCtx, args map[string]any) (any, error
 			}
 		}
 	}
-	return youtubeIdeasFromCachedSERPs(ctx.AppDB(), projectScopeFromArgs(ctx, args), seeds, limit)
+	return youtubeIdeasFromCachedSERPs(ctx.AppDB(), projectScopeFromArgs(ctx, args), seeds, loc.ID, limit)
 }
 
 func googleKeywordIdeasViaProvider(ctx *sdk.AppCtx, args map[string]any, seeds []string, limit int) (any, error) {
@@ -1930,16 +2040,21 @@ func googleKeywordIdeasViaProvider(ctx *sdk.AppCtx, args map[string]any, seeds [
 	}, nil
 }
 
-func youtubeIdeasFromCachedSERPs(db *sql.DB, pid string, seeds []string, limit int) (any, error) {
+func youtubeIdeasFromCachedSERPs(db *sql.DB, pid string, seeds []string, locationID int64, limit int) (any, error) {
 	rows, err := db.Query(
-		`SELECT s.keyword_text, r.title, r.channel_title, r.published_at, r.rank, r.url
+		`WITH latest_snapshots AS (
+		    SELECT id, keyword_text,
+		           ROW_NUMBER() OVER (PARTITION BY keyword_text ORDER BY ts DESC, id DESC) AS rn
+		      FROM search_serp_snapshots
+		     WHERE project_id = ? AND search_engine = 'youtube' AND location_id = ?
+		       AND keyword_text IN (`+placeholders(len(seeds))+`)
+		)
+		 SELECT s.keyword_text, r.title, r.channel_title, r.published_at, r.rank, r.url
 		   FROM search_serp_results r
-		   JOIN search_serp_snapshots s ON s.id = r.snapshot_id
-		  WHERE s.project_id = ? AND s.search_engine = 'youtube'
-		    AND s.keyword_text IN (`+placeholders(len(seeds))+`)
-		    AND COALESCE(NULLIF(r.result_type, ''), 'video') = 'video'
-		  ORDER BY s.ts DESC, r.rank ASC`,
-		append([]any{pid}, stringsToAny(seeds)...)...)
+		   JOIN latest_snapshots s ON s.id = r.snapshot_id AND s.rn = 1
+		  WHERE r.result_type = 'video'
+		  ORDER BY s.keyword_text, r.rank ASC`,
+		append([]any{pid, locationID}, stringsToAny(seeds)...)...)
 	if err != nil {
 		return nil, err
 	}
@@ -1990,13 +2105,14 @@ func youtubeIdeasFromCachedSERPs(db *sql.DB, pid string, seeds []string, limit i
 		"provider":      "dataforseo",
 		"search_engine": "youtube",
 		"capability":    "keyword_ideas",
+		"location_id":   locationID,
 		"items":         out,
 		"cached":        true,
 	}, rows.Err()
 }
 
 func (a *App) toolContentOpportunities(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	search_engine, err := normalizeSearchEngine(strArg(args, "search_engine", "youtube"))
+	search_engine, err := normalizeSearchEngine(strArg(args, "search_engine", "google"))
 	if err != nil {
 		return nil, err
 	}
@@ -2004,20 +2120,40 @@ func (a *App) toolContentOpportunities(ctx *sdk.AppCtx, args map[string]any) (an
 	if limit <= 0 || limit > 100 {
 		limit = 25
 	}
-	where := `s.project_id = ? AND s.search_engine = ?`
-	qargs := []any{projectScopeFromArgs(ctx, args), search_engine}
-	if search_engine == "youtube" {
-		where += ` AND COALESCE(NULLIF(r.result_type, ''), 'video') = 'video'`
+	return contentOpportunities(ctx.AppDB(), projectScopeFromArgs(ctx, args), search_engine, limit)
+}
+
+func contentOpportunities(db *sql.DB, pid, searchEngine string, limit int) (any, error) {
+	where := `s.snapshot_rank = 1`
+	qargs := []any{pid, searchEngine}
+	if searchEngine == "youtube" {
+		where += ` AND r.result_type = 'video'`
 	}
 	qargs = append(qargs, limit)
-	rows, err := ctx.AppDB().Query(
-		`SELECT s.keyword_text,
+	rows, err := db.Query(
+		`WITH ranked_snapshots AS (
+		    SELECT s.*,
+		           ROW_NUMBER() OVER (
+		             PARTITION BY s.project_id, s.search_engine, s.keyword_text, s.location_id
+		             ORDER BY s.ts DESC, s.id DESC
+		           ) AS snapshot_rank
+		      FROM search_serp_snapshots s
+		     WHERE s.project_id = ? AND s.search_engine = ?
+		), latest_keyword_metrics AS (
+		    SELECT keyword_id, volume, difficulty,
+		           ROW_NUMBER() OVER (PARTITION BY keyword_id ORDER BY ts DESC, id DESC) AS metric_rank
+		      FROM keyword_metrics
+		)
+		 SELECT s.keyword_text,
 		        COUNT(*) AS result_count,
 		        SUM(CASE WHEN r.rank <= 10 THEN 1 ELSE 0 END) AS top10_count,
 		        MAX(s.ts) AS latest_ts,
-		        GROUP_CONCAT(CASE WHEN r.rank <= 5 THEN r.title ELSE NULL END, ' || ') AS titles
-		   FROM search_serp_snapshots s
+		        GROUP_CONCAT(CASE WHEN r.rank <= 5 THEN r.title ELSE NULL END, ' || ') AS titles,
+		        MAX(km.volume) AS volume,
+		        MAX(km.difficulty) AS difficulty
+		   FROM ranked_snapshots s
 		   JOIN search_serp_results r ON r.snapshot_id = s.id
+		   LEFT JOIN latest_keyword_metrics km ON km.keyword_id = s.keyword_id AND km.metric_rank = 1
 		  WHERE `+where+`
 		  GROUP BY s.keyword_text
 		  ORDER BY latest_ts DESC
@@ -2032,30 +2168,52 @@ func (a *App) toolContentOpportunities(ctx *sdk.AppCtx, args map[string]any) (an
 		var keyword, titles string
 		var titlesNull sql.NullString
 		var resultCount, top10Count, latestTS int64
-		if err := rows.Scan(&keyword, &resultCount, &top10Count, &latestTS, &titlesNull); err != nil {
+		var volume, difficulty sql.NullInt64
+		if err := rows.Scan(&keyword, &resultCount, &top10Count, &latestTS, &titlesNull, &volume, &difficulty); err != nil {
 			return nil, err
 		}
 		if titlesNull.Valid {
 			titles = titlesNull.String
 		}
 		score := int64(50)
-		if resultCount >= 10 {
-			score += 15
-		}
-		if top10Count >= 5 {
-			score += 10
+		reason := "Latest cached SERP; no volume or difficulty metrics are available for this search engine."
+		if volume.Valid || difficulty.Valid {
+			reason = "Score combines current search volume and keyword difficulty from the latest cached metrics."
+			if volume.Valid {
+				switch {
+				case volume.Int64 >= 10000:
+					score += 20
+				case volume.Int64 >= 1000:
+					score += 15
+				case volume.Int64 >= 100:
+					score += 8
+				}
+			}
+			if difficulty.Valid {
+				switch {
+				case difficulty.Int64 <= 30:
+					score += 20
+				case difficulty.Int64 <= 50:
+					score += 10
+				case difficulty.Int64 >= 80:
+					score -= 15
+				}
+			}
 		}
 		out = append(out, map[string]any{
-			"search_engine":     search_engine,
+			"search_engine":     searchEngine,
 			"keyword":           keyword,
 			"opportunity_score": minInt64(score, 100),
 			"result_count":      resultCount,
 			"top10_count":       top10Count,
 			"latest_ts":         latestTS,
 			"example_titles":    splitLimited(titles, " || ", 5),
+			"reason":            reason,
+			"volume":            nullableInt64(volume),
+			"difficulty":        nullableInt64(difficulty),
 		})
 	}
-	return map[string]any{"search_engine": search_engine, "items": out}, rows.Err()
+	return map[string]any{"search_engine": searchEngine, "items": out}, rows.Err()
 }
 
 func copyArgs(args map[string]any) map[string]any {
@@ -2094,6 +2252,43 @@ func stringSliceArg(args map[string]any, key string) []string {
 	default:
 		return nil
 	}
+}
+
+func int64SliceArg(args map[string]any, key string) []int64 {
+	v, ok := args[key]
+	if !ok {
+		return nil
+	}
+	out := []int64{}
+	seen := map[int64]bool{}
+	appendID := func(id int64) {
+		if id > 0 && !seen[id] {
+			seen[id] = true
+			out = append(out, id)
+		}
+	}
+	switch xs := v.(type) {
+	case []int64:
+		for _, id := range xs {
+			appendID(id)
+		}
+	case []int:
+		for _, id := range xs {
+			appendID(int64(id))
+		}
+	case []any:
+		for _, raw := range xs {
+			appendID(toInt64(raw))
+		}
+	}
+	return out
+}
+
+func nullableInt64(v sql.NullInt64) any {
+	if !v.Valid {
+		return nil
+	}
+	return v.Int64
 }
 
 func nonEmptyStrings(in []string) []string {
@@ -2334,9 +2529,8 @@ func (a *App) handleToolsCall(w http.ResponseWriter, r *http.Request) {
 //   POST /domains/{id}/backlinks/refresh   → refreshBacklinks
 //   POST /keywords/{id}/refresh            → refreshKeyword
 //
-// Each route is a thin wrapper around an internal Go func. The funcs
-// are unexported and never registered as MCP tools — paid actions
-// stay off the agent's surface.
+// Each route is a thin wrapper around an internal Go func. These particular
+// refreshes are unexported and are not registered as MCP tools.
 
 func (a *App) handleDomainsItem(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {

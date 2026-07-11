@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: seo
 display_name: SEO
-version: 0.4.7
+version: 0.4.8
 description: |
   Generic SEO research workbench. Track domains, keywords, rankings,
   and backlinks; pull metrics from any provider behind one pluggable
@@ -49,6 +49,10 @@ description: |
         SEO views do not include channels or playlists.
   v0.4.7: backfills existing installs into the uniform search-engine keyword
         model and cleans legacy YouTube channel/playlist SERP rows.
+  v0.4.8: unifies Google and YouTube keyword SERP reads, replaces stale
+        current-ranking observations atomically, scores only latest SERP
+        snapshots, batches UI ranking reads, validates engine locales, and
+        adds bounded SERP retention.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/seo
@@ -95,7 +99,8 @@ provides:
     - { name: serp_search, description: "Run a paid provider SERP search and cache ranked results. Args: search_engine? (google default or youtube), keyword or keyword_id, location_id or country_iso+language_code, depth?. YouTube stores video results only." }
     - { name: keyword_ideas, description: "Find keyword/content ideas. Args: search_engine? (google default or youtube), seed_keywords or keywords, location_id or country_iso+language_code, limit?, refresh?." }
     - { name: rankings_for_entity, description: "List cached ranking rows for a generic search entity. Args: entity_id, since?, limit?." }
-    - { name: content_opportunities, description: "Summarize cached SERP snapshots into content opportunities. Args: search_engine? (youtube default), limit?. YouTube uses video results only." }
+    - { name: rankings_for_keywords, description: "List cached SERP rankings for multiple keywords. Args: keyword_ids, since?, limit?, history?." }
+    - { name: content_opportunities, description: "Summarize latest cached SERP snapshots into content opportunities. Args: search_engine? (google default), limit?. YouTube uses video results only." }
     - { name: locations_list, description: "List active SEO provider locations. Args: provider?, search_engine?, country_iso?, language_code?, q?, limit?. Sync locations from the SEO panel first." }
     # ── domain CRUD (v0.1) ──────────────────────────────────────────
     - { name: domains_add,    description: "Add a domain (hostname) to track. Args: host (required), label?, location_id? or country_iso+language_code? for the default locale." }
@@ -112,7 +117,7 @@ provides:
     # reads cached rows here and uses last_refreshed_at to flag
     # staleness; the human triggers refresh via the panel.
     - { name: rankings_for_domain,   description: "List a domain's current rankings by default, or daily observations with history=true. Args: domain_id (required), since? (unix), limit? (default 200), history?." }
-    - { name: rankings_for_keyword,  description: "List current rankings/results for a keyword. Google returns tracked-domain rankings; YouTube returns ranked videos. Args: keyword_id (required), since? (unix), limit? (default 200), history?." }
+    - { name: rankings_for_keyword,  description: "List cached SERP rankings for a keyword with one uniform Google/YouTube result shape. Args: keyword_id (required), since? (unix), limit? (default 200), history?." }
     - { name: backlinks_list,        description: "List backlinks pointing at a domain (cached). Args: domain_id (required), lost? (bool, default false), dofollow? (bool, optional filter), limit? (default 200)." }
     - { name: keyword_volume_history, description: "Monthly search-volume series for a keyword (cached). Args: keyword_id (required)." }
   ui_panels:

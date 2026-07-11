@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.4.8
+
+- Unified `rankings_for_keyword` on the generic SERP result model for Google
+  and YouTube, and added `rankings_for_keywords` for efficient batch reads.
+- Replaced same-day domain ranking observations atomically so disappeared
+  rankings no longer remain current.
+- Limited opportunity and YouTube idea analysis to the latest snapshot per
+  keyword and locale, with metric-aware Google opportunity scores.
+- Added search-engine/location validation, strict YouTube video detection,
+  residual legacy-row cleanup, supporting indexes, and 30-snapshot retention.
+
 ## 0.4.7
 
 - Added an install migration that backfills keyword search-engine metadata,

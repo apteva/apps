@@ -233,15 +233,14 @@ func refreshRankedKeywordsViaDataForSEO(ctx *sdk.AppCtx, connID int64, d *Domain
 	if err != nil {
 		return rankedKeywordRefreshSummary{}, err
 	}
-	if rowRaw == nil {
-		return rankedKeywordRefreshSummary{Note: "ranked_keywords returned no rows"}, nil
-	}
 	var parsed dfsRankedKeywordsResult
-	if err := json.Unmarshal(rowRaw, &parsed); err != nil {
-		return rankedKeywordRefreshSummary{}, fmt.Errorf("parse ranked_keywords: %w", err)
+	if rowRaw != nil {
+		if err := json.Unmarshal(rowRaw, &parsed); err != nil {
+			return rankedKeywordRefreshSummary{}, fmt.Errorf("parse ranked_keywords: %w", err)
+		}
 	}
-	if len(parsed.Items) == 0 {
-		return rankedKeywordRefreshSummary{Note: "ranked_keywords returned zero items"}, nil
+	if rowRaw == nil {
+		parsed.Items = nil
 	}
 	now := time.Now().Unix()
 	observedDate := time.Unix(now, 0).UTC().Format("2006-01-02")
@@ -252,6 +251,9 @@ func refreshRankedKeywordsViaDataForSEO(ctx *sdk.AppCtx, connID int64, d *Domain
 	defer tx.Rollback()
 
 	summary := rankedKeywordRefreshSummary{}
+	if err := replaceRankingObservation(tx, d.ID, loc.ID, "dataforseo", "desktop", observedDate, now); err != nil {
+		return rankedKeywordRefreshSummary{}, fmt.Errorf("replace current ranking observation: %w", err)
+	}
 	for _, item := range parsed.Items {
 		keywordText := normaliseKeyword(item.KeywordData.Keyword)
 		rankURL := strings.TrimSpace(item.RankedSERPElement.SerpItem.URL)
@@ -287,10 +289,39 @@ func refreshRankedKeywordsViaDataForSEO(ctx *sdk.AppCtx, connID int64, d *Domain
 		}
 		summary.RankingRows++
 	}
+	if _, err := tx.Exec(
+		`UPDATE ranking_observations
+		    SET result_count = ?, ts = ?
+		  WHERE domain_id = ? AND location_id = ? AND provider = 'dataforseo'
+		    AND device = 'desktop' AND observed_date = ?`,
+		summary.RankingRows, now, d.ID, loc.ID, observedDate); err != nil {
+		return rankedKeywordRefreshSummary{}, fmt.Errorf("finalize ranking observation: %w", err)
+	}
+	if len(parsed.Items) == 0 {
+		summary.Note = "ranked_keywords returned zero items"
+	}
 	if err := tx.Commit(); err != nil {
 		return rankedKeywordRefreshSummary{}, err
 	}
 	return summary, nil
+}
+
+func replaceRankingObservation(tx *sql.Tx, domainID, locationID int64, provider, device, observedDate string, ts int64) error {
+	if _, err := tx.Exec(
+		`DELETE FROM rankings
+		  WHERE domain_id = ? AND location_id = ? AND provider = ?
+		    AND device = ? AND observed_date = ?`,
+		domainID, locationID, provider, device, observedDate); err != nil {
+		return err
+	}
+	_, err := tx.Exec(
+		`INSERT INTO ranking_observations
+		    (domain_id, location_id, provider, device, ts, observed_date, result_count)
+		 VALUES (?, ?, ?, ?, ?, ?, 0)
+		 ON CONFLICT(domain_id, location_id, provider, device, observed_date)
+		 DO UPDATE SET ts = excluded.ts, result_count = 0`,
+		domainID, locationID, provider, device, ts, observedDate)
+	return err
 }
 
 func upsertRankedKeyword(tx *sql.Tx, projectID, text string, loc *SEOLocation, volume *int64, difficulty *int64, cpc *float64, raw any) (id int64, created bool, err error) {
@@ -299,8 +330,8 @@ func upsertRankedKeyword(tx *sql.Tx, projectID, text string, loc *SEOLocation, v
 		country = strings.ToUpper(*loc.CountryISO)
 	}
 	res, err := tx.Exec(
-		`INSERT INTO keywords (project_id, text, location_id, country_iso, language_iso)
-		   VALUES (?, ?, ?, ?, ?)
+		`INSERT INTO keywords (project_id, search_engine, text, location_id, country_iso, language_iso)
+		   VALUES (?, 'google', ?, ?, ?, ?)
 		   ON CONFLICT(project_id, text, location_id) DO NOTHING`,
 		projectID, text, loc.ID, country, strings.ToLower(loc.LanguageCode))
 	if err != nil {

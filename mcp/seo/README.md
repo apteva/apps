@@ -5,7 +5,7 @@ and backlinks; pull metrics from any provider behind one pluggable role.
 
 ## Schema (v0.4)
 
-Thirteen tables, grounded in the convergent shape across DataForSEO / Ahrefs / Moz and extended with generic search-engine entities:
+Fourteen tables, grounded in the convergent shape across DataForSEO / Ahrefs / Moz and extended with generic search-engine entities:
 
 - `seo_locations` — provider/search-engine/language/location catalog used to
   make every paid refresh locale-explicit
@@ -18,6 +18,8 @@ Thirteen tables, grounded in the convergent shape across DataForSEO / Ahrefs / M
 - `keyword_volume_history` — monthly volume series, all three providers expose
   ~24 months of this inline so it gets its own table
 - `rankings` — `(domain, keyword, ts) → rank, rank_url, device, serp_features`
+- `ranking_observations` — successful domain ranking refreshes, including
+  empty observations, used to distinguish current rows from retained history
 - `backlinks` — `(domain, source_url, target_url) → anchor, follow flags,
   first_seen, last_seen, is_lost`
 - `search_entities` — generic Google/YouTube entities such as domains, pages,
@@ -32,10 +34,12 @@ DataForSEO `pos_*` counts, Moz link-count forest) survive without schema churn.
 
 ## Status
 
-v0.4 adds generic `search_engine` support for Google and YouTube. Google keeps
-the existing domain/keyword workflow and v0.3.7 ranking-history fixes, while
-YouTube uses the shared locale, keyword, SERP, entity, and opportunity tooling.
+v0.4 adds generic `search_engine` support for Google and YouTube. Both engines
+use the shared locale, keyword, SERP result, entity, and opportunity tooling;
+Google additionally keeps domain metrics, tracked-domain ranking history, and
+backlinks.
 If DataForSEO's full YouTube location catalog is unavailable, sync seeds
 YouTube locales from active DataForSEO Google locations so YouTube SERP refresh
-still has explicit country/language rows. Refresh actions for expensive
-provider calls remain UI/HTTP-driven.
+still has explicit country/language rows. Domain, keyword-metric, and backlink
+refreshes remain UI/HTTP-driven; `serp_search` and refreshed keyword ideas are
+explicit paid MCP actions.
