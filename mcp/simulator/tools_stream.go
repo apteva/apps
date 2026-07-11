@@ -113,7 +113,7 @@ func (a *App) toolSimsLogs() sdk.Tool {
 func (a *App) toolSimsStreamURL() sdk.Tool {
 	return sdk.Tool{
 		Name:        "sims_stream_url",
-		Description: "Mint a fresh short-lived WebSocket URL for live screen streaming + input on a booted sim. Each call rotates the token, invalidating the previous URL.",
+		Description: "Mint a fresh short-lived WebSocket URL for live screen streaming + input on a booted sim. Existing URLs for the same sim remain valid until their own expiry.",
 		InputSchema: schemaObject(map[string]any{
 			"sim_id": map[string]any{"type": "string", "description": "Required. Target sim."},
 		}, []string{"sim_id"}),

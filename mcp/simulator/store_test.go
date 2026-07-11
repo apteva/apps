@@ -133,13 +133,18 @@ func TestStreamTokenMintResolveExpire(t *testing.T) {
 		t.Fatalf("resolve: %q / %v", resolved, err)
 	}
 
-	// Re-mint rotates the token: the old one no longer resolves.
+	// Re-mint creates a second token: Code and Simulator panels may both
+	// keep watching the same sim without invalidating one another.
 	old := st.WSToken
-	if _, err := dbMintStreamToken(db, "avd-1", time.Hour); err != nil {
+	second, err := dbMintStreamToken(db, "avd-1", time.Hour)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := dbResolveStreamToken(db, old); err == nil {
-		t.Error("old token still resolves after rotation")
+	if second.WSToken == old {
+		t.Fatal("re-mint returned the same token")
+	}
+	if resolved, err := dbResolveStreamToken(db, old); err != nil || resolved != "avd-1" {
+		t.Errorf("first token stopped resolving after second mint: %q / %v", resolved, err)
 	}
 
 	// An already-expired token is rejected.
@@ -149,8 +154,15 @@ func TestStreamTokenMintResolveExpire(t *testing.T) {
 	}
 
 	bad, _ := dbMintStreamToken(db, "avd-1", time.Hour)
-	_, _ = db.Exec(`UPDATE sim_streams SET expires_at = 'not-a-time' WHERE sim_id = ?`, "avd-1")
+	_, _ = db.Exec(`UPDATE sim_streams SET expires_at = 'not-a-time' WHERE ws_token = ?`, bad.WSToken)
 	if _, err := dbResolveStreamToken(db, bad.WSToken); err == nil {
 		t.Error("token with malformed expiry resolved")
+	}
+
+	if err := dbDeleteStreamToken(db, "avd-1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := dbResolveStreamToken(db, second.WSToken); err == nil {
+		t.Error("sim token deletion left another token active")
 	}
 }

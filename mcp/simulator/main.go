@@ -45,7 +45,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: simulator
 display_name: Apteva Simulator
-version: 0.1.19
+version: 0.1.20
 description: |
   iOS and Android simulators on demand. Boot a device, build a repo's
   source into an artifact, install + launch on a headless emulator or
@@ -162,7 +162,7 @@ type App struct {
 	appCtx      *sdk.AppCtx
 	bootMu      sync.Mutex
 	streamMu    sync.Mutex
-	streams     map[string]activeStream
+	streams     map[string][]activeStream
 	runMu       sync.Mutex
 	runLocks    map[string]*sync.Mutex
 	cleanupMu   sync.Mutex
@@ -209,7 +209,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 
 	a.appCtx = ctx
 	a.sup = newSimSupervisor(a, dataDir)
-	a.streams = make(map[string]activeStream)
+	a.streams = make(map[string][]activeStream)
 	a.runLocks = make(map[string]*sync.Mutex)
 	if err := a.sup.reconcileOrphans(ctx); err != nil {
 		ctx.Logger().Warn("sim orphan reconcile failed", "err", err)
