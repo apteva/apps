@@ -41,7 +41,7 @@ export function DeviceFrame({
 }) {
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const wsRef = useRef<WebSocket | null>(null);
-  const [status, setStatus] = useState<"connecting" | "live" | "error" | "unsupported" | "closed">("connecting");
+  const [status, setStatus] = useState<"connecting" | "reconnecting" | "live" | "error" | "unsupported" | "closed">("connecting");
   const [errMsg, setErrMsg] = useState("");
   const [inputNotice, setInputNotice] = useState("");
   const dims = useRef<{ w: number; h: number }>({ w: 0, h: 0 });
@@ -52,6 +52,8 @@ export function DeviceFrame({
     let decoder: VideoDecoder | null = null;
     let configured = false;
     let streamCodec = "h264";
+    let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+    let reconnectAttempt = 0;
 
     const canvas = canvasRef.current;
     const ctx2d = canvas?.getContext("2d") ?? null;
@@ -133,66 +135,8 @@ export function DeviceFrame({
     };
 
     let sawKeyframe = false;
-    const ws = new WebSocket(resolveStreamUrl(streamUrl));
-    ws.binaryType = "arraybuffer";
-    wsRef.current = ws;
 
-    ws.onopen = () => setStatus("live");
-    ws.onclose = () => {
-      if (!closed) setStatus("closed");
-    };
-    ws.onerror = () => {
-      if (!closed) {
-        setStatus("error");
-        setErrMsg("WebSocket error");
-      }
-    };
-    ws.onmessage = (ev) => {
-      if (typeof ev.data === "string") {
-        try {
-          const msg = JSON.parse(ev.data) as MetaMsg;
-          if (msg.type === "meta") {
-            dims.current = { w: msg.width, h: msg.height };
-            streamCodec = msg.codec || "h264";
-            if (streamCodec === "h264" || streamCodec.startsWith("avc1.")) {
-              ensureDecoder(streamCodec);
-            }
-          }
-        } catch {
-          /* ignore non-JSON text */
-        }
-        return;
-      }
-      const data = new Uint8Array(ev.data as ArrayBuffer);
-      if (streamCodec === "png" || streamCodec === "jpeg") {
-        void drawImageFrame(data);
-        return;
-      }
-      if (!decoder) ensureDecoder("avc1.42E01E");
-      if (!decoder || !configured) return;
-      const key = isKeyframe(data);
-      if (key) sawKeyframe = true;
-      if (!sawKeyframe) return; // decoder must start on a keyframe
-      try {
-        decoder.decode(
-          new EncodedVideoChunk({
-            type: key ? "key" : "delta",
-            timestamp: performance.now() * 1000,
-            data,
-          }),
-        );
-      } catch (e) {
-        setErrMsg("decode: " + String(e));
-      }
-    };
-
-    return () => {
-      closed = true;
-      try {
-        ws.close();
-      } catch {
-        /* noop */
-      }
+    const closeDecoder = () => {
       if (decoder && decoder.state !== "closed") {
         try {
           decoder.close();
@@ -200,6 +144,93 @@ export function DeviceFrame({
           /* noop */
         }
       }
+      decoder = null;
+      configured = false;
+      sawKeyframe = false;
+      streamCodec = "h264";
+    };
+
+    const connect = () => {
+      if (closed) return;
+      closeDecoder();
+      setStatus(reconnectAttempt === 0 ? "connecting" : "reconnecting");
+      setErrMsg("");
+
+      const ws = new WebSocket(resolveStreamUrl(streamUrl));
+      ws.binaryType = "arraybuffer";
+      wsRef.current = ws;
+
+      ws.onopen = () => {
+        reconnectAttempt = 0;
+        setStatus("live");
+      };
+      ws.onclose = () => {
+        if (closed || wsRef.current !== ws) return;
+        wsRef.current = null;
+        closeDecoder();
+        reconnectAttempt += 1;
+        const delay = Math.min(500 * 2 ** (reconnectAttempt - 1), 5000);
+        setStatus("reconnecting");
+        reconnectTimer = setTimeout(connect, delay);
+      };
+      ws.onerror = () => {
+        if (!closed && wsRef.current === ws) {
+          setErrMsg("WebSocket connection failed; retrying…");
+        }
+      };
+      ws.onmessage = (ev) => {
+        if (wsRef.current !== ws) return;
+        if (typeof ev.data === "string") {
+          try {
+            const msg = JSON.parse(ev.data) as MetaMsg;
+            if (msg.type === "meta") {
+              dims.current = { w: msg.width, h: msg.height };
+              streamCodec = msg.codec || "h264";
+              if (streamCodec === "h264" || streamCodec.startsWith("avc1.")) {
+                ensureDecoder(streamCodec);
+              }
+            }
+          } catch {
+            /* ignore non-JSON text */
+          }
+          return;
+        }
+        const data = new Uint8Array(ev.data as ArrayBuffer);
+        if (streamCodec === "png" || streamCodec === "jpeg") {
+          void drawImageFrame(data);
+          return;
+        }
+        if (!decoder) ensureDecoder("avc1.42E01E");
+        if (!decoder || !configured) return;
+        const key = isKeyframe(data);
+        if (key) sawKeyframe = true;
+        if (!sawKeyframe) return; // decoder must start on a keyframe
+        try {
+          decoder.decode(
+            new EncodedVideoChunk({
+              type: key ? "key" : "delta",
+              timestamp: performance.now() * 1000,
+              data,
+            }),
+          );
+        } catch (e) {
+          setErrMsg("decode: " + String(e));
+        }
+      };
+    };
+
+    connect();
+
+    return () => {
+      closed = true;
+      if (reconnectTimer) clearTimeout(reconnectTimer);
+      try {
+        wsRef.current?.close();
+      } catch {
+        /* noop */
+      }
+      wsRef.current = null;
+      closeDecoder();
     };
   }, [streamUrl]);
 
@@ -295,6 +326,7 @@ export function DeviceFrame({
         {status !== "live" && (
           <div className="absolute inset-0 flex items-center justify-center text-xs text-text-muted bg-black/60 text-center px-4">
             {status === "connecting" && "Connecting to device…"}
+            {status === "reconnecting" && (errMsg || "Stream interrupted; reconnecting…")}
             {status === "closed" && "Stream closed"}
             {status === "error" && `Stream error: ${errMsg}`}
             {status === "unsupported" &&
