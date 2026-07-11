@@ -4,7 +4,9 @@ import (
 	"bytes"
 	"crypto/hmac"
 	"crypto/sha1"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -35,6 +37,11 @@ type stubPlatform struct {
 	callAppReply     json.RawMessage
 	callAppErr       error
 	connectionCreds  map[int64]map[string]string
+	domainGrants     []sdk.DomainGrant
+	domainGrantsErr  error
+	dnsRequests      []sdk.DNSRecordRequest
+	dnsResult        *sdk.DNSRecordResult
+	dnsErr           error
 	bindingsOverride map[string]any       // when non-nil, replaces the default email_provider binding
 	whoAmIOverride   *sdk.InstallIdentity // when non-nil, replaces the default identity
 	// executeOverride: when non-nil, called per ExecuteIntegrationTool
@@ -252,6 +259,18 @@ func (s *stubPlatform) GetConnectionCredentials(id int64) (*sdk.ConnectionCreden
 	}
 	return &sdk.ConnectionCredentials{ConnectionID: id, Slug: "twilio", Fields: fields}, nil
 }
+func (s *stubPlatform) ListDomainGrants() ([]sdk.DomainGrant, error) {
+	return s.domainGrants, s.domainGrantsErr
+}
+func (s *stubPlatform) UpsertDNSRecord(req sdk.DNSRecordRequest) (*sdk.DNSRecordResult, error) {
+	s.mu.Lock()
+	s.dnsRequests = append(s.dnsRequests, req)
+	s.mu.Unlock()
+	if s.dnsResult != nil || s.dnsErr != nil {
+		return s.dnsResult, s.dnsErr
+	}
+	return &sdk.DNSRecordResult{OK: true, Action: "created"}, nil
+}
 func (s *stubPlatform) ListConnections(sdk.ConnectionFilter) ([]sdk.PlatformConnection, error) {
 	return nil, nil
 }
@@ -301,6 +320,11 @@ func newTestCtx(t *testing.T, plat *stubPlatform, opts ...tk.Option) *sdk.AppCtx
 	t.Helper()
 	full := append([]tk.Option{
 		tk.WithProjectID("test-proj"),
+		tk.WithConfig(map[string]string{
+			"webhook_signing_secret": testSNSSecret,
+			"ses_bounce_topic_arn":   testSNSTopicARN,
+			"ses_inbound_topic_arn":  testSNSTopicARN,
+		}),
 	}, opts...)
 	if plat != nil {
 		full = append(full, tk.WithPlatform(plat))
@@ -308,6 +332,15 @@ func newTestCtx(t *testing.T, plat *stubPlatform, opts ...tk.Option) *sdk.AppCtx
 	ctx := tk.NewAppCtx(t, "apteva.yaml", full...)
 	globalCtx = ctx
 	return ctx
+}
+
+const testSNSSecret = "messaging-test-sns-secret"
+const testSNSTopicARN = "arn:aws:sns:eu-west-1:111111111111:messaging-test"
+
+func signTestSNSRequest(r *http.Request, body []byte) {
+	mac := hmac.New(sha256.New, []byte(testSNSSecret))
+	_, _ = mac.Write(body)
+	r.Header.Set("X-Apteva-Webhook-HMAC", hex.EncodeToString(mac.Sum(nil)))
 }
 
 // fromAcme is a stable test sender to keep send_message calls terse.
@@ -351,6 +384,223 @@ func TestMessagesList_PaginatesAndReturnsTotal(t *testing.T) {
 	}
 	if len(out.Messages) != 2 || out.Messages[0].Subject != "msg-3" || out.Messages[1].Subject != "msg-2" {
 		t.Fatalf("page order wrong: %+v", out.Messages)
+	}
+}
+
+func TestMessagesList_AddressFilterUsesExactJSONValues(t *testing.T) {
+	ctx := newTestCtx(t, nil)
+	for _, recipient := range []string{"percent%tag@example.com", "percentXtag@example.com"} {
+		toJSON, _ := json.Marshal([]string{recipient})
+		if _, err := ctx.AppDB().Exec(
+			`INSERT INTO messages (project_id, channel, direction, from_addr, to_addrs, status)
+			 VALUES ('test-proj', 'email', 'out', 'sender@example.com', ?, 'sent')`, string(toJSON)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rows, total, err := dbMessageListPage(ctx.AppDB(), "test-proj", messageListOpts{
+		Direction: "out",
+		Address:   "percent%tag@example.com",
+		Limit:     10,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if total != 1 || len(rows) != 1 || rows[0].To[0] != "percent%tag@example.com" {
+		t.Fatalf("total=%d rows=%+v", total, rows)
+	}
+}
+
+func TestValidatePublicHTTPURLRejectsLocalTargets(t *testing.T) {
+	for _, raw := range []string{
+		"http://127.0.0.1/private",
+		"http://[::1]/private",
+		"http://169.254.169.254/latest/meta-data/",
+		"http://10.0.0.1/private",
+		"http://user:pass@example.com/file",
+	} {
+		u, err := url.Parse(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := validatePublicHTTPURL(u); err == nil {
+			t.Errorf("expected %s to be rejected", raw)
+		}
+	}
+	u, _ := url.Parse("https://example.com/file.pdf")
+	if err := validatePublicHTTPURL(u); err != nil {
+		t.Fatalf("public URL rejected: %v", err)
+	}
+}
+
+func TestBootstrapPublishDNSRecordUsesPlatformGrant(t *testing.T) {
+	plat := &stubPlatform{
+		domainGrants: []sdk.DomainGrant{{Domain: "example.com", Status: "active"}},
+		dnsResult:    &sdk.DNSRecordResult{OK: true, Action: "updated"},
+	}
+	ctx := newTestCtx(t, plat)
+	step := bootstrapPublishDNSRecord(ctx, "test-proj", "publish_dmarc", "example.com", "_dmarc", "TXT", "v=DMARC1; p=none")
+	if !step.OK || step.Detail != "updated" {
+		t.Fatalf("step=%+v", step)
+	}
+	if len(plat.dnsRequests) != 1 {
+		t.Fatalf("DNS requests=%d", len(plat.dnsRequests))
+	}
+	req := plat.dnsRequests[0]
+	if req.ProjectID != "test-proj" || req.Domain != "example.com" || req.Name != "_dmarc" || req.Type != "TXT" {
+		t.Fatalf("request=%+v", req)
+	}
+}
+
+func TestPlatformDNSGrantWildcardOnlyCoversSubdomains(t *testing.T) {
+	plat := &stubPlatform{domainGrants: []sdk.DomainGrant{{Domain: "example.com", Wildcard: true}}}
+	ctx := newTestCtx(t, plat)
+	if !platformDNSGrantCovers(ctx, "example.com") || !platformDNSGrantCovers(ctx, "mail.example.com") {
+		t.Fatal("wildcard grant should cover its apex and subdomains")
+	}
+	if platformDNSGrantCovers(ctx, "notexample.com") {
+		t.Fatal("grant matched an unrelated suffix")
+	}
+}
+
+func TestGlobalSenderMustBelongToProject(t *testing.T) {
+	ctx := newTestCtx(t, nil)
+	if _, err := validateOutboundSender(ctx.AppDB(), "test-proj", channelEmail, "other@example.com", true); err == nil {
+		t.Fatal("expected unregistered sender to be rejected")
+	}
+	preseedSender(t, ctx, senderUpsert{
+		ProjectID: "test-proj", Channel: channelEmail, Address: "owned@example.com",
+		Kind: "email_mailbox", Provider: "aws-ses", Verified: true, SendingEnabled: true,
+	})
+	if _, err := validateOutboundSender(ctx.AppDB(), "test-proj", channelEmail, "owned@example.com", true); err != nil {
+		t.Fatalf("registered sender rejected: %v", err)
+	}
+}
+
+func TestInboundOwnershipRejectsAmbiguousProjects(t *testing.T) {
+	ctx := newTestCtx(t, nil)
+	for _, projectID := range []string{"project-a", "project-b"} {
+		_, err := dbUpsertSender(ctx.AppDB(), &senderUpsert{
+			ProjectID: projectID, Channel: channelWhatsApp, Address: "+15551234567",
+			Kind: "whatsapp_number", Provider: "twilio", Verified: true, SendingEnabled: true, MarkSyncedNow: true,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if projectID, err := dbResolveSenderProjectByAddress(ctx.AppDB(), channelWhatsApp, "+15551234567"); err == nil || projectID != "" {
+		t.Fatalf("ambiguous sender resolved to %q, err=%v", projectID, err)
+	}
+}
+
+func TestInboundEmailRejectsRecipientsAcrossProjects(t *testing.T) {
+	ctx := newTestCtx(t, nil)
+	for projectID, domain := range map[string]string{
+		"project-a": "alpha.example",
+		"project-b": "beta.example",
+	} {
+		if _, err := dbUpsertIdentity(ctx.AppDB(), &identityUpsert{
+			ProjectID: projectID, Kind: "email_domain", Address: domain,
+			Provider: "aws-ses", Verified: true, VerificationStatus: "verified",
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	projectID := resolveProjectFromInboundEmail(ctx, &parsedInbound{
+		To: []string{"one@alpha.example", "two@beta.example"},
+	}, nil)
+	if projectID != "" {
+		t.Fatalf("cross-project recipients resolved to %q", projectID)
+	}
+}
+
+func TestSNSTopicAuthorizationFallsBackToProjectIdentity(t *testing.T) {
+	ctx := newTestCtx(t, nil, tk.WithConfig(map[string]string{
+		"webhook_signing_secret": testSNSSecret,
+		"ses_inbound_topic_arn":  "",
+	}))
+	if _, err := dbUpsertIdentity(ctx.AppDB(), &identityUpsert{
+		ProjectID: "project-a", Kind: "email_domain", Address: "alpha.example",
+		Provider: "aws-ses", InboundConfig: `{"topic_arn":"arn:aws:sns:eu-west-1:111:authorized"}`,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if !snsTopicAuthorized(ctx, "project-a", "arn:aws:sns:eu-west-1:111:authorized", "ses_inbound_topic_arn") {
+		t.Fatal("stored topic was not authorized for its project")
+	}
+	if snsTopicAuthorized(ctx, "project-b", "arn:aws:sns:eu-west-1:111:authorized", "ses_inbound_topic_arn") {
+		t.Fatal("stored topic was authorized for another project")
+	}
+	if snsTopicAuthorized(ctx, "project-a", "arn:aws:sns:eu-west-1:111:attacker", "ses_inbound_topic_arn") {
+		t.Fatal("unrecognized topic was authorized")
+	}
+}
+
+func TestPersistSNSTopicAuthorizationPreservesInboundSetup(t *testing.T) {
+	ctx := newTestCtx(t, nil)
+	if _, err := dbUpsertIdentity(ctx.AppDB(), &identityUpsert{
+		ProjectID: "test-proj", Kind: "email_domain", Address: "example.com", Provider: "aws-ses",
+		InboundBootstrapped: true,
+		InboundConfig:       `{"bucket":"existing-bucket","webhook_url":"https://old.example/hook","topic_arn":"arn:old"}`,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	resp := &sendersCreateResp{Inbound: &sendersCreateInbound{
+		TopicARN: "arn:new", AccountID: "111", Region: "eu-west-1",
+	}}
+	persistSNSTopicAuthorization(ctx, "test-proj", "example.com", resp)
+	identity, err := dbFindIdentity(ctx.AppDB(), "test-proj", "email_domain", "example.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if identity == nil || !identity.InboundBootstrapped {
+		t.Fatalf("wired state was cleared: %+v", identity)
+	}
+	var config map[string]any
+	if err := json.Unmarshal([]byte(identity.InboundConfig), &config); err != nil {
+		t.Fatal(err)
+	}
+	if config["bucket"] != "existing-bucket" || config["webhook_url"] != "https://old.example/hook" || config["topic_arn"] != "arn:new" {
+		t.Fatalf("config was not merged: %v", config)
+	}
+}
+
+func TestSendMessagePhoneRejectsMultipleRecipients(t *testing.T) {
+	ctx := newTestCtx(t, nil)
+	app := &App{}
+	_, err := app.toolSendMessage(ctx, map[string]any{
+		"channel": channelWhatsApp,
+		"from":    "+15550000001",
+		"to":      []any{"+15550000002", "+15550000003"},
+		"body":    "hello",
+	})
+	if err == nil || !strings.Contains(err.Error(), "exactly one recipient") {
+		t.Fatalf("expected one-recipient error, got %v", err)
+	}
+}
+
+func TestExtractBodiesNestedMultipartAndCharset(t *testing.T) {
+	body := strings.Join([]string{
+		"--outer",
+		"Content-Type: multipart/alternative; boundary=inner",
+		"",
+		"--inner",
+		"Content-Type: text/plain; charset=iso-8859-1",
+		"Content-Transfer-Encoding: quoted-printable",
+		"",
+		"caf=E9",
+		"--inner",
+		"Content-Type: text/html; charset=utf-8",
+		"",
+		"<p>caf&eacute;</p>",
+		"--inner--",
+		"--outer--",
+	}, "\r\n")
+	textBody, htmlBody := extractBodies("multipart/mixed; boundary=outer", "", []byte(body))
+	if textBody != "café" {
+		t.Fatalf("text=%q", textBody)
+	}
+	if !strings.Contains(htmlBody, "caf&eacute;") {
+		t.Fatalf("html=%q", htmlBody)
 	}
 }
 
@@ -1855,7 +2105,7 @@ func TestSendersCreate_Domain_InboundRuleNameIsInstallScoped(t *testing.T) {
 			AppName: "messaging", ProjectID: "test-proj", InstallID: 47,
 		},
 		replyByTool: map[string]*sdk.ExecuteResult{
-			"create_sns_topic":            {Success: true, Status: 200, Data: json.RawMessage(`{"CreateTopicResponse":{"CreateTopicResult":{"TopicArn":"arn:aws:sns:eu-west-1:111:apteva-ses-inbound-47"}}}`)},
+			"create_topic":                {Success: true, Status: 200, Data: json.RawMessage(`{"CreateTopicResponse":{"CreateTopicResult":{"TopicArn":"arn:aws:sns:eu-west-1:111:apteva-ses-inbound-47"}}}`)},
 			"set_topic_attributes":        {Success: true, Status: 200, Data: json.RawMessage(`{}`)},
 			"create_s3_bucket":            {Success: true, Status: 200, Data: json.RawMessage(`{}`)},
 			"put_s3_bucket_policy":        {Success: true, Status: 200, Data: json.RawMessage(`{}`)},
@@ -1912,7 +2162,7 @@ func TestSendersCreate_Domain_SubscribeWebhookURLsAreProjectScoped(t *testing.T)
 			PublicURL: "https://test.public.example",
 		},
 		replyByTool: map[string]*sdk.ExecuteResult{
-			"create_sns_topic":            {Success: true, Status: 200, Data: json.RawMessage(`{"CreateTopicResponse":{"CreateTopicResult":{"TopicArn":"arn:aws:sns:eu-west-1:111:apteva-ses-inbound-47"}}}`)},
+			"create_topic":                {Success: true, Status: 200, Data: json.RawMessage(`{"CreateTopicResponse":{"CreateTopicResult":{"TopicArn":"arn:aws:sns:eu-west-1:111:apteva-ses-inbound-47"}}}`)},
 			"set_topic_attributes":        {Success: true, Status: 200, Data: json.RawMessage(`{}`)},
 			"create_s3_bucket":            {Success: true, Status: 200, Data: json.RawMessage(`{}`)},
 			"put_s3_bucket_policy":        {Success: true, Status: 200, Data: json.RawMessage(`{}`)},
@@ -1972,7 +2222,7 @@ func TestSendersCreate_Domain_GlobalInstallWebhookURLsOmitProject(t *testing.T) 
 			PublicURL: "https://test.public.example",
 		},
 		replyByTool: map[string]*sdk.ExecuteResult{
-			"create_sns_topic":            {Success: true, Status: 200, Data: json.RawMessage(`{"CreateTopicResponse":{"CreateTopicResult":{"TopicArn":"arn:aws:sns:eu-west-1:111:apteva-ses-inbound-47"}}}`)},
+			"create_topic":                {Success: true, Status: 200, Data: json.RawMessage(`{"CreateTopicResponse":{"CreateTopicResult":{"TopicArn":"arn:aws:sns:eu-west-1:111:apteva-ses-inbound-47"}}}`)},
 			"set_topic_attributes":        {Success: true, Status: 200, Data: json.RawMessage(`{}`)},
 			"create_s3_bucket":            {Success: true, Status: 200, Data: json.RawMessage(`{}`)},
 			"put_s3_bucket_policy":        {Success: true, Status: 200, Data: json.RawMessage(`{}`)},
@@ -2012,6 +2262,80 @@ func TestSendersCreate_Domain_GlobalInstallWebhookURLsOmitProject(t *testing.T) 
 	}
 }
 
+func TestMessagingWebhookPublicURLUsesConfiguredOrigin(t *testing.T) {
+	ctx := newTestCtx(t, nil, tk.WithConfig(map[string]string{
+		"webhook_public_url": "https://mail.example.com/",
+	}))
+	got, err := messagingWebhookPublicURL(ctx, &sdk.InstallIdentity{PublicURL: "https://platform.example.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "https://mail.example.com" {
+		t.Fatalf("public URL=%q", got)
+	}
+	if _, err := normaliseWebhookPublicURL("https://mail.example.com/callback"); err == nil || !strings.Contains(err.Error(), "origin only") {
+		t.Fatalf("expected path-bearing override to fail, got %v", err)
+	}
+}
+
+func TestCleanupStaleMessagingSNSSubscriptionsPaginatesAndScopes(t *testing.T) {
+	t.Setenv("APTEVA_APP_TOKEN", "dev-47")
+	firstPage := json.RawMessage(`{
+		"ListSubscriptionsByTopicResponse":{"ListSubscriptionsByTopicResult":{
+			"Subscriptions":{"member":[
+				{"Endpoint":"https://mail.example.com/api/apps/messaging/webhooks/ses-bounces?api_key=dev-47&project_id=test-proj","SubscriptionArn":"arn:keep"},
+				{"Endpoint":"https://old.example.com/api/apps/messaging/webhooks/ses-inbound?api_key=other&project_id=test-proj","SubscriptionArn":"arn:other-install"}
+			]},"NextToken":"page-2"
+		}}
+	}`)
+	secondPage := json.RawMessage(`{
+		"ListSubscriptionsByTopicResponse":{"ListSubscriptionsByTopicResult":{
+			"Subscriptions":{"member":[
+				{"Endpoint":"https://old.example.com/api/apps/messaging/webhooks/ses-inbound?api_key=dev-47&project_id=test-proj","SubscriptionArn":"arn:old"},
+				{"Endpoint":"https://old.example.com/api/apps/messaging/webhooks/ses-inbound?api_key=dev-47&project_id=other-project","SubscriptionArn":"arn:other-project"}
+			]}
+		}}
+	}`)
+	plat := &stubPlatform{
+		replyByTool: map[string]*sdk.ExecuteResult{
+			"unsubscribe": {Success: true, Status: 200, Data: json.RawMessage(`{}`)},
+		},
+		executeOverride: func(tool string, priorCalls int) *sdk.ExecuteResult {
+			if tool != "list_subscriptions_by_topic" {
+				return nil
+			}
+			if priorCalls == 0 {
+				return &sdk.ExecuteResult{Success: true, Status: 200, Data: firstPage}
+			}
+			return &sdk.ExecuteResult{Success: true, Status: 200, Data: secondPage}
+		},
+	}
+	ctx := newTestCtx(t, plat)
+	expected := []string{"https://mail.example.com/api/apps/messaging/webhooks/ses-bounces?api_key=dev-47&project_id=test-proj"}
+	removed, err := cleanupStaleMessagingSNSSubscriptions(ctx, 3, "arn:topic", expected, "test-proj", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(removed) != 1 || !strings.Contains(removed[0], "old.example.com") {
+		t.Fatalf("removed=%v", removed)
+	}
+	var listCalls, unsubscribeCalls []executeCall
+	for _, call := range plat.executeCalls {
+		switch call.Tool {
+		case "list_subscriptions_by_topic":
+			listCalls = append(listCalls, call)
+		case "unsubscribe":
+			unsubscribeCalls = append(unsubscribeCalls, call)
+		}
+	}
+	if len(listCalls) != 2 || listCalls[1].Input["NextToken"] != "page-2" {
+		t.Fatalf("pagination calls=%+v", listCalls)
+	}
+	if len(unsubscribeCalls) != 1 || unsubscribeCalls[0].Input["SubscriptionArn"] != "arn:old" {
+		t.Fatalf("unsubscribe calls=%+v", unsubscribeCalls)
+	}
+}
+
 // Same install adding a second domain: AlreadyExists must trigger
 // describe → merge → delete → recreate-with-both, not the pre-v0.12.5
 // silent no-op.
@@ -2036,7 +2360,7 @@ func TestSendersCreate_Domain_AlreadyExists_MergesRecipients(t *testing.T) {
 			AppName: "messaging", ProjectID: "test-proj", InstallID: 47,
 		},
 		replyByTool: map[string]*sdk.ExecuteResult{
-			"create_sns_topic":        {Success: true, Status: 200, Data: json.RawMessage(`{"CreateTopicResponse":{"CreateTopicResult":{"TopicArn":"arn:aws:sns:eu-west-1:111:apteva-ses-inbound-47"}}}`)},
+			"create_topic":            {Success: true, Status: 200, Data: json.RawMessage(`{"CreateTopicResponse":{"CreateTopicResult":{"TopicArn":"arn:aws:sns:eu-west-1:111:apteva-ses-inbound-47"}}}`)},
 			"set_topic_attributes":    {Success: true, Status: 200, Data: json.RawMessage(`{}`)},
 			"create_s3_bucket":        {Success: true, Status: 200, Data: json.RawMessage(`{}`)},
 			"put_s3_bucket_policy":    {Success: true, Status: 200, Data: json.RawMessage(`{}`)},
@@ -3623,6 +3947,76 @@ func TestTwilioInboundWebhook_UsesBoundConnectionCredentials(t *testing.T) {
 	}
 }
 
+func TestTwilioInboundWebhook_FailsClosedWithoutAuthToken(t *testing.T) {
+	plat := newPhoneStub(nil)
+	ctx := newTestCtx(t, plat)
+	app := &App{}
+	form := url.Values{
+		"From":       []string{"+15551112222"},
+		"To":         []string{"+15553334444"},
+		"Body":       []string{"unverified"},
+		"MessageSid": []string{"SMunverified"},
+	}
+	r := httptest.NewRequest("POST", "/webhooks/twilio-inbound?project_id=test-proj", strings.NewReader(form.Encode()))
+	r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	r.Header.Set("X-Twilio-Signature", "forged")
+	w := httptest.NewRecorder()
+	app.handleTwilioInboundWebhook(w, r)
+	if w.Code != http.StatusServiceUnavailable {
+		t.Fatalf("status=%d body=%s", w.Code, w.Body.String())
+	}
+	rows, err := dbMessageList(ctx.AppDB(), "test-proj", messageListOpts{Direction: "in", Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 0 {
+		t.Fatalf("unverified webhook persisted %d messages", len(rows))
+	}
+}
+
+func TestTwilioInboundWebhook_DeduplicatesMessageSid(t *testing.T) {
+	plat := newPhoneStub(nil)
+	ctx := newTestCtx(t, plat, tk.WithConfig(map[string]string{"twilio_auth_token": "secret"}))
+	app := &App{}
+	form := url.Values{
+		"From":       []string{"+15551112222"},
+		"To":         []string{"+15553334444"},
+		"Body":       []string{"only once"},
+		"MessageSid": []string{"SMduplicate"},
+	}
+	publicURL := "https://test.apteva.ai/webhooks/twilio-inbound?project_id=test-proj"
+	var signed strings.Builder
+	signed.WriteString(publicURL)
+	for _, key := range []string{"Body", "From", "MessageSid", "To"} {
+		signed.WriteString(key)
+		signed.WriteString(form.Get(key))
+	}
+	mac := hmac.New(sha1.New, []byte("secret"))
+	mac.Write([]byte(signed.String()))
+	signature := base64.StdEncoding.EncodeToString(mac.Sum(nil))
+
+	for i := 0; i < 2; i++ {
+		r := httptest.NewRequest("POST", "/webhooks/twilio-inbound?project_id=test-proj", strings.NewReader(form.Encode()))
+		r.Host = "test.apteva.ai"
+		r.Header.Set("X-Forwarded-Proto", "https")
+		r.Header.Set("X-Forwarded-Host", "test.apteva.ai")
+		r.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		r.Header.Set("X-Twilio-Signature", signature)
+		w := httptest.NewRecorder()
+		app.handleTwilioInboundWebhook(w, r)
+		if w.Code != http.StatusOK {
+			t.Fatalf("attempt %d status=%d body=%s", i+1, w.Code, w.Body.String())
+		}
+	}
+	rows, err := dbMessageList(ctx.AppDB(), "test-proj", messageListOpts{Direction: "in", Limit: 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("expected one persisted message, got %d", len(rows))
+	}
+}
+
 func TestTwilioInboundWebhook_DetectsWhatsAppByPrefix(t *testing.T) {
 	plat := newPhoneStub(nil)
 	ctx := newTestCtx(t, plat, tk.WithConfig(map[string]string{
@@ -3915,13 +4309,15 @@ func TestSESInbound_PersistsVerdicts(t *testing.T) {
 	innerJSON, _ := json.Marshal(innerSES)
 	envelope := map[string]any{
 		"Type":           "Notification",
+		"MessageId":      "test-sns-message",
+		"TopicArn":       testSNSTopicARN,
 		"Message":        string(innerJSON),
 		"SigningCertURL": "https://sns.us-east-1.amazonaws.com/cert.pem",
 	}
 	body, _ := json.Marshal(envelope)
 
 	r := httptest.NewRequest("POST", "/webhooks/ses-inbound?project_id=test-proj", strings.NewReader(string(body)))
-	r.Header.Set("X-Amz-Sns-Message-Type", "Notification")
+	signTestSNSRequest(r, body)
 	w := httptest.NewRecorder()
 	app.handleInboundWebhook(w, r)
 

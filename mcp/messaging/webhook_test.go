@@ -43,13 +43,15 @@ func TestBounceWebhook_HardBounceSuppresses(t *testing.T) {
 	innerJSON, _ := json.Marshal(innerSES)
 	envelope := map[string]any{
 		"Type":           "Notification",
+		"MessageId":      "test-sns-message",
+		"TopicArn":       testSNSTopicARN,
 		"Message":        string(innerJSON),
 		"SigningCertURL": "https://sns.us-east-1.amazonaws.com/cert.pem",
 	}
 	body, _ := json.Marshal(envelope)
 
 	r := httptest.NewRequest("POST", "/webhooks/ses-bounces?project_id=test-proj", strings.NewReader(string(body)))
-	r.Header.Set("X-Amz-Sns-Message-Type", "Notification")
+	signTestSNSRequest(r, body)
 	w := httptest.NewRecorder()
 	app.handleBounceWebhook(w, r)
 
@@ -103,13 +105,15 @@ func TestBounceWebhook_ComplaintSuppresses(t *testing.T) {
 	innerJSON, _ := json.Marshal(innerSES)
 	envelope := map[string]any{
 		"Type":           "Notification",
+		"MessageId":      "test-sns-message",
+		"TopicArn":       testSNSTopicARN,
 		"Message":        string(innerJSON),
 		"SigningCertURL": "https://sns.us-east-1.amazonaws.com/cert.pem",
 	}
 	body, _ := json.Marshal(envelope)
 
 	r := httptest.NewRequest("POST", "/webhooks/ses-bounces?project_id=test-proj", strings.NewReader(string(body)))
-	r.Header.Set("X-Amz-Sns-Message-Type", "Notification")
+	signTestSNSRequest(r, body)
 	w := httptest.NewRecorder()
 	app.handleBounceWebhook(w, r)
 
@@ -152,13 +156,15 @@ func TestSESEventPublishing_ClickPersistsAndEmitsSpecificTopic(t *testing.T) {
 	innerJSON, _ := json.Marshal(innerSES)
 	envelope := map[string]any{
 		"Type":           "Notification",
+		"MessageId":      "test-sns-message",
+		"TopicArn":       testSNSTopicARN,
 		"Message":        string(innerJSON),
 		"SigningCertURL": "https://sns.us-east-1.amazonaws.com/cert.pem",
 	}
 	body, _ := json.Marshal(envelope)
 
 	r := httptest.NewRequest("POST", "/webhooks/ses-bounces?project_id=test-proj", strings.NewReader(string(body)))
-	r.Header.Set("X-Amz-Sns-Message-Type", "Notification")
+	signTestSNSRequest(r, body)
 	w := httptest.NewRecorder()
 	app.handleBounceWebhook(w, r)
 	if w.Code != http.StatusOK {
@@ -226,6 +232,40 @@ func TestProviderEvent_GlobalInstallEmitsForMessageProject(t *testing.T) {
 	}
 }
 
+func TestSNSRejectsForgedAWSLookingCertificateURL(t *testing.T) {
+	ctx := newTestCtx(t, nil, tk.WithConfig(map[string]string{"webhook_signing_secret": ""}))
+	body := []byte(`{"Type":"Notification","Message":"{}","MessageId":"m1","TopicArn":"arn:aws:sns:eu-west-1:1:test","Timestamp":"2026-01-01T00:00:00Z","Signature":"ZmFrZQ==","SignatureVersion":"1","SigningCertURL":"https://evil.example/amazonaws.com/cert.pem"}`)
+	r := httptest.NewRequest(http.MethodPost, "/webhooks/ses-bounces", strings.NewReader(string(body)))
+	if verifySNS(r, body, ctx, "ses_bounce_topic_arn") {
+		t.Fatal("forged SNS envelope was accepted")
+	}
+}
+
+func TestProviderEventIsIdempotent(t *testing.T) {
+	ctx := newTestCtx(t, nil)
+	res, err := ctx.AppDB().Exec(`INSERT INTO messages
+		(project_id, channel, direction, from_addr, to_addrs, status)
+		VALUES ('test-proj', 'email', 'out', 'a@example.com', '["b@example.com"]', 'sent')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, _ := res.LastInsertId()
+	message, _ := dbMessageGet(ctx.AppDB(), "test-proj", id)
+	event := providerEvent{
+		ProviderEventID: "sns:event-1:0", Provider: "ses", ProviderMessageID: "ses-1",
+		Kind: "delivered", Recipient: "b@example.com", Raw: json.RawMessage(`{"event":"delivery"}`),
+	}
+	if !persistAndEmitProviderEvent(ctx, message, event) {
+		t.Fatal("first event was not persisted")
+	}
+	if persistAndEmitProviderEvent(ctx, message, event) {
+		t.Fatal("duplicate event was persisted")
+	}
+	if events, _ := dbDeliveryEvents(ctx.AppDB(), id); len(events) != 1 {
+		t.Fatalf("events=%d", len(events))
+	}
+}
+
 func TestSESEventPublishing_OpenPromotesStatus(t *testing.T) {
 	ctx := newTestCtx(t, nil)
 	app := &App{}
@@ -255,13 +295,15 @@ func TestSESEventPublishing_OpenPromotesStatus(t *testing.T) {
 	innerJSON, _ := json.Marshal(innerSES)
 	envelope := map[string]any{
 		"Type":           "Notification",
+		"MessageId":      "test-sns-message",
+		"TopicArn":       testSNSTopicARN,
 		"Message":        string(innerJSON),
 		"SigningCertURL": "https://sns.us-east-1.amazonaws.com/cert.pem",
 	}
 	body, _ := json.Marshal(envelope)
 
 	r := httptest.NewRequest("POST", "/webhooks/ses-bounces?project_id=test-proj", strings.NewReader(string(body)))
-	r.Header.Set("X-Amz-Sns-Message-Type", "Notification")
+	signTestSNSRequest(r, body)
 	w := httptest.NewRecorder()
 	app.handleBounceWebhook(w, r)
 	if w.Code != http.StatusOK {
@@ -376,13 +418,15 @@ func TestInboundWebhook_PersistsAndDispatches(t *testing.T) {
 	innerJSON, _ := json.Marshal(innerSES)
 	envelope := map[string]any{
 		"Type":           "Notification",
+		"MessageId":      "test-sns-message",
+		"TopicArn":       testSNSTopicARN,
 		"Message":        string(innerJSON),
 		"SigningCertURL": "https://sns.us-east-1.amazonaws.com/cert.pem",
 	}
 	body, _ := json.Marshal(envelope)
 
 	r := httptest.NewRequest("POST", "/webhooks/ses-inbound?project_id=test-proj", strings.NewReader(string(body)))
-	r.Header.Set("X-Amz-Sns-Message-Type", "Notification")
+	signTestSNSRequest(r, body)
 	w := httptest.NewRecorder()
 	app.handleInboundWebhook(w, r)
 
@@ -444,13 +488,15 @@ func TestInboundWebhook_NoMatchSetsNoMatch(t *testing.T) {
 	innerJSON, _ := json.Marshal(innerSES)
 	envelope := map[string]any{
 		"Type":           "Notification",
+		"MessageId":      "test-sns-message",
+		"TopicArn":       testSNSTopicARN,
 		"Message":        string(innerJSON),
 		"SigningCertURL": "https://sns.us-east-1.amazonaws.com/cert.pem",
 	}
 	body, _ := json.Marshal(envelope)
 
 	r := httptest.NewRequest("POST", "/webhooks/ses-inbound?project_id=test-proj", strings.NewReader(string(body)))
-	r.Header.Set("X-Amz-Sns-Message-Type", "Notification")
+	signTestSNSRequest(r, body)
 	w := httptest.NewRecorder()
 	app.handleInboundWebhook(w, r)
 

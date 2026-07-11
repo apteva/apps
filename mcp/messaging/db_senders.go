@@ -288,6 +288,37 @@ func dbFindSenderByAddress(db *sql.DB, channel, address string) (*senderRow, err
 	return s, nil
 }
 
+func dbResolveSenderProjectByAddress(db *sql.DB, channel, address string) (string, error) {
+	rows, err := db.Query(
+		`SELECT DISTINCT project_id FROM senders
+		 WHERE channel = ? AND address = ? AND deleted_at IS NULL
+		 ORDER BY project_id LIMIT 2`,
+		channel, strings.ToLower(strings.TrimSpace(address)),
+	)
+	if err != nil {
+		return "", err
+	}
+	defer rows.Close()
+	projects := []string{}
+	for rows.Next() {
+		var projectID string
+		if err := rows.Scan(&projectID); err != nil {
+			return "", err
+		}
+		projects = append(projects, projectID)
+	}
+	if err := rows.Err(); err != nil {
+		return "", err
+	}
+	if len(projects) == 0 {
+		return "", nil
+	}
+	if len(projects) > 1 {
+		return "", fmt.Errorf("sender %s is assigned to multiple projects", address)
+	}
+	return projects[0], nil
+}
+
 // dbUpdateSenderLocal updates only fields the operator owns locally
 // (no provider round-trip). Currently scoped to display_name + notes;
 // add more fields here as inline-edit surfaces them. Empty strings

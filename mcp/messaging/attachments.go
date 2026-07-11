@@ -8,6 +8,7 @@ import (
 	"io"
 	"mime"
 	"net/http"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"time"
@@ -15,7 +16,11 @@ import (
 	sdk "github.com/apteva/app-sdk"
 )
 
-const maxAttachmentInlineBytes int64 = 25 << 20
+const (
+	maxAttachmentCount       = 20
+	maxAttachmentInlineBytes = int64(25 << 20)
+	maxAttachmentTotalBytes  = int64(25 << 20)
+)
 
 type MessageAttachment struct {
 	ID          int64  `json:"id"`
@@ -59,12 +64,22 @@ func prepareMessageAttachments(ctx *sdk.AppCtx, pid, channel string, args map[st
 	if len(inputs) == 0 {
 		return nil, nil, nil
 	}
+	if len(inputs) > maxAttachmentCount {
+		return nil, nil, fmt.Errorf("at most %d attachments are allowed", maxAttachmentCount)
+	}
 	out := make([]providerAttachment, 0, len(inputs))
 	storageIDs := int64ArrayArg(args, "attachment_storage_ids")
+	var totalBytes int64
 	for _, in := range inputs {
 		att, err := resolveAttachment(ctx, pid, channel, in)
 		if err != nil {
 			return nil, nil, err
+		}
+		if len(att.Data) > 0 {
+			totalBytes += int64(len(att.Data))
+			if totalBytes > maxAttachmentTotalBytes {
+				return nil, nil, fmt.Errorf("attachments exceed %d bytes in total", maxAttachmentTotalBytes)
+			}
 		}
 		out = append(out, att)
 		if att.StorageID > 0 && !int64SliceContains(storageIDs, att.StorageID) {
@@ -324,11 +339,15 @@ func uploadAttachmentToStorage(ctx *sdk.AppCtx, pid string, att providerAttachme
 }
 
 func fetchURLAttachment(rawURL string) ([]byte, string, int64, error) {
-	if !strings.HasPrefix(strings.ToLower(rawURL), "http://") && !strings.HasPrefix(strings.ToLower(rawURL), "https://") {
-		return nil, "", 0, errors.New("attachment url must be http or https")
+	u, err := url.Parse(strings.TrimSpace(rawURL))
+	if err != nil {
+		return nil, "", 0, errors.New("invalid attachment URL")
 	}
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Get(rawURL)
+	if err := validatePublicHTTPURL(u); err != nil {
+		return nil, "", 0, fmt.Errorf("attachment URL: %w", err)
+	}
+	client := newPublicHTTPClient(30 * time.Second)
+	resp, err := client.Get(u.String())
 	if err != nil {
 		return nil, "", 0, fmt.Errorf("fetch attachment url: %w", err)
 	}
@@ -389,6 +408,38 @@ func dbMessageAttachments(db *sql.DB, pid string, messageID int64) []MessageAtta
 		if err := rows.Scan(&a.ID, &a.ProjectID, &a.MessageID, &a.StorageID, &a.URL, &a.Filename,
 			&a.ContentType, &a.SizeBytes, &a.ContentID, &a.Disposition, &a.Source, &a.ProviderRef, &a.CreatedAt); err == nil {
 			out = append(out, a)
+		}
+	}
+	return out
+}
+
+func dbMessageAttachmentsBatch(db *sql.DB, pid string, messageIDs []int64) map[int64][]MessageAttachment {
+	out := map[int64][]MessageAttachment{}
+	if len(messageIDs) == 0 {
+		return out
+	}
+	placeholders := strings.TrimRight(strings.Repeat("?,", len(messageIDs)), ",")
+	args := make([]any, 0, len(messageIDs)+2)
+	for _, id := range messageIDs {
+		args = append(args, id)
+	}
+	args = append(args, pid, pid)
+	rows, err := db.Query(`SELECT id, project_id, message_id, COALESCE(storage_id,0), COALESCE(url,''),
+		filename, COALESCE(content_type,''), COALESCE(size_bytes,0), COALESCE(content_id,''),
+		disposition, source, COALESCE(provider_ref,''), COALESCE(created_at,'')
+		FROM message_attachments
+		WHERE message_id IN (`+placeholders+`) AND (? = '' OR project_id = ?)
+		ORDER BY message_id, id`, args...)
+	if err != nil {
+		return out
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var attachment MessageAttachment
+		if rows.Scan(&attachment.ID, &attachment.ProjectID, &attachment.MessageID, &attachment.StorageID, &attachment.URL,
+			&attachment.Filename, &attachment.ContentType, &attachment.SizeBytes, &attachment.ContentID, &attachment.Disposition,
+			&attachment.Source, &attachment.ProviderRef, &attachment.CreatedAt) == nil {
+			out[attachment.MessageID] = append(out[attachment.MessageID], attachment)
 		}
 	}
 	return out

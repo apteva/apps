@@ -1276,7 +1276,16 @@ function ComposeView({
     if (!files || files.length === 0) return;
     setErr("");
     try {
-      const next = await Promise.all(Array.from(files).map(fileToComposeAttachment));
+      const selectedFiles = Array.from(files);
+      if (attachments.length + selectedFiles.length > 20) {
+        throw new Error("You can attach at most 20 files.");
+      }
+      const totalBytes = attachments.reduce((sum, att) => sum + att.size_bytes, 0) +
+        selectedFiles.reduce((sum, file) => sum + file.size, 0);
+      if (totalBytes > 25 * 1024 * 1024) {
+        throw new Error("Attachments cannot exceed 25 MB in total.");
+      }
+      const next = await Promise.all(selectedFiles.map(fileToComposeAttachment));
       setAttachments((prev) => [...prev, ...next]);
     } catch (e) {
       setErr((e as Error).message);
@@ -1294,6 +1303,11 @@ function ComposeView({
     try {
       if (recipients.length === 0) {
         setErr("Enter at least one recipient.");
+        setBusy(false);
+        return;
+      }
+      if (channel !== "email" && recipients.length !== 1) {
+        setErr("SMS and WhatsApp messages must have exactly one recipient.");
         setBusy(false);
         return;
       }
@@ -1356,7 +1370,11 @@ function ComposeView({
       {draft ? (
         <p className="text-xs text-text-dim mb-3">Replying to message #{draft.key}</p>
       ) : (
-        <p className="text-xs text-text-dim mb-3">Pick a verified sender; the channel comes from the sender. Comma-separate recipients.</p>
+        <p className="text-xs text-text-dim mb-3">
+          {channel === "email"
+            ? "Pick a verified sender. Separate multiple recipients with commas."
+            : "Pick a verified sender and enter one recipient."}
+        </p>
       )}
 
       {noVerifiedSenders ? (

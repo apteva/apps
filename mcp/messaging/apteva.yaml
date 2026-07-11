@@ -2,10 +2,10 @@ schema: apteva-app/v1
 
 name: messaging
 display_name: Messaging
-version: 0.13.36
+version: 0.13.37
 description: |
-  Send and receive messages across channels. v0.1 ships email via
-  AWS SES; SMS and push are reserved channel namespaces. Tracks
+  Send and receive email through AWS SES and SMS/WhatsApp through
+  Twilio. Tracks
   delivery state, maintains a per-channel suppression list from
   bounces and complaints, and routes inbound mail/SMS/WhatsApp to
   other app tools via a small pattern table.
@@ -19,7 +19,7 @@ description: |
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/messaging
 icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/messaging/icon.png
-tags: [messaging, email, ses, inbox]
+tags: [messaging, email, ses, sms, whatsapp, twilio, inbox]
 
 scopes: [project, global]
 min_apteva_version: "0.10.0"
@@ -31,6 +31,8 @@ requires:
     - platform.connections.execute
     - platform.connections.read_credentials
     - platform.apps.call
+    - platform.dns.read
+    - platform.dns.write
   # Messaging routes inbound messages to whichever installed app the
   # operator configured in inbound_routes. Targets are data, not a
   # fixed install-time dependency, so use the official-app dynamic
@@ -87,6 +89,8 @@ requires:
       tools:
         topic.manage: set_topic_attributes
         topic.subscribe: subscribe
+        topic.list_subscriptions: list_subscriptions_by_topic
+        topic.unsubscribe: unsubscribe
       required: false
       label: "Inbound notifications (AWS SNS)"
       hint: "Topic SES publishes inbound notifications to. Required for /senders/bootstrap-inbound — without it, inbound setup is manual via the AWS console."
@@ -150,6 +154,10 @@ db:
   migrations: migrations/
 
 config_schema:
+  - name: webhook_public_url
+    type: text
+    label: Webhook public URL override
+    description: Optional HTTPS origin used for provider callbacks instead of the Apteva instance Public URL, for example https://mail.example.com. Must route to this Apteva instance.
   - name: ses_bounce_topic_arn
     type: text
     label: SES bounce/complaint SNS topic ARN
@@ -163,11 +171,11 @@ config_schema:
     label: SES inbound S3 bucket
     description: Bucket name where SES stores raw .eml for inbound mail. Required if ses_inbound_topic_arn is set.
   - name: webhook_signing_secret
-    type: text
+    type: secret
     label: Webhook shared secret
-    description: Optional shared secret for HMAC-validating SNS posts in addition to the standard SNS signature check.
+    description: Optional HMAC-SHA256 secret for deployments that authenticate SNS through a trusted proxy. Direct AWS SNS callbacks use AWS certificate signatures.
   - name: twilio_auth_token
-    type: text
+    type: secret
     label: Twilio Auth Token fallback
     description: Optional fallback for Twilio webhook signature verification. Normal installs read auth_token from the bound Twilio connection via platform.connections.read_credentials; set this only for older platform builds or emergency override.
 
