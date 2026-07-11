@@ -9,6 +9,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -148,7 +149,11 @@ func (a *App) ensureBootedSim(ctx *sdk.AppCtx, framework string) (*Sim, error) {
 // Prefers the platform's configured public URL; falls back to a
 // relative path the panel resolves against its own origin.
 func (a *App) streamURL(ctx *sdk.AppCtx, simID, token string) string {
-	rel := fmt.Sprintf("/api/apps/simulator/stream/%s?t=%s", simID, token)
+	query := url.Values{"t": []string{token}}
+	if projectID := ctx.CurrentProject(); projectID != "" {
+		query.Set("project_id", projectID)
+	}
+	rel := fmt.Sprintf("/api/apps/simulator/stream/%s?%s", simID, query.Encode())
 	info, err := ctx.PlatformInfo()
 	if err != nil || info == nil || info.PublicURL == "" {
 		return rel

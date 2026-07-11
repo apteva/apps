@@ -270,19 +270,34 @@ func errUnknownPlatform(p string) error {
 func (a *App) beginStream(simID string, cancel context.CancelFunc) func() {
 	id := randHex(12)
 	a.streamMu.Lock()
-	previous := a.streams[simID]
 	if a.streams == nil {
-		a.streams = make(map[string]activeStream)
+		a.streams = make(map[string][]activeStream)
 	}
-	a.streams[simID] = activeStream{id: id, cancel: cancel}
+	streams := a.streams[simID]
+	var evicted context.CancelFunc
+	if len(streams) >= 2 {
+		evicted = streams[0].cancel
+		streams = streams[1:]
+	}
+	a.streams[simID] = append(streams, activeStream{id: id, cancel: cancel})
 	a.streamMu.Unlock()
-	if previous.cancel != nil {
-		previous.cancel()
+	if evicted != nil {
+		evicted()
 	}
 	return func() {
 		a.streamMu.Lock()
-		if current, ok := a.streams[simID]; ok && current.id == id {
+		streams := a.streams[simID]
+		for i, stream := range streams {
+			if stream.id != id {
+				continue
+			}
+			streams = append(streams[:i], streams[i+1:]...)
+			break
+		}
+		if len(streams) == 0 {
 			delete(a.streams, simID)
+		} else {
+			a.streams[simID] = streams
 		}
 		a.streamMu.Unlock()
 	}
@@ -290,22 +305,26 @@ func (a *App) beginStream(simID string, cancel context.CancelFunc) func() {
 
 func (a *App) stopStream(simID string) {
 	a.streamMu.Lock()
-	stream := a.streams[simID]
+	streams := a.streams[simID]
 	delete(a.streams, simID)
 	a.streamMu.Unlock()
-	if stream.cancel != nil {
-		stream.cancel()
+	for _, stream := range streams {
+		if stream.cancel != nil {
+			stream.cancel()
+		}
 	}
 }
 
 func (a *App) stopAllStreams() {
 	a.streamMu.Lock()
 	streams := a.streams
-	a.streams = make(map[string]activeStream)
+	a.streams = make(map[string][]activeStream)
 	a.streamMu.Unlock()
-	for _, stream := range streams {
-		if stream.cancel != nil {
-			stream.cancel()
+	for _, simStreams := range streams {
+		for _, stream := range simStreams {
+			if stream.cancel != nil {
+				stream.cancel()
+			}
 		}
 	}
 }

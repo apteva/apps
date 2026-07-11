@@ -4,11 +4,14 @@ import (
 	"context"
 	"io"
 	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
+
+	sdk "github.com/apteva/app-sdk"
 )
 
 func TestSanitizedBuildEnv(t *testing.T) {
@@ -83,8 +86,23 @@ func TestStreamOriginPolicy(t *testing.T) {
 	}
 }
 
-func TestOnlyOneActiveStreamPerSim(t *testing.T) {
-	app := &App{streams: map[string]activeStream{}}
+func TestStreamURLIncludesProjectScope(t *testing.T) {
+	t.Setenv("APTEVA_PROJECT_ID", "project-a")
+	raw := (&App{}).streamURL(new(sdk.AppCtx), "sim-a", "secret-token")
+	u, err := url.Parse(raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := u.Query().Get("project_id"); got != "project-a" {
+		t.Fatalf("project_id=%q, want project-a in %q", got, raw)
+	}
+	if got := u.Query().Get("t"); got != "secret-token" {
+		t.Fatalf("token=%q, want secret-token", got)
+	}
+}
+
+func TestActiveStreamsPerSimAreCappedAtTwo(t *testing.T) {
+	app := &App{streams: map[string][]activeStream{}}
 	firstCtx, firstCancel := context.WithCancel(context.Background())
 	defer firstCancel()
 	endFirst := app.beginStream("sim", firstCancel)
@@ -95,12 +113,32 @@ func TestOnlyOneActiveStreamPerSim(t *testing.T) {
 	defer endSecond()
 	select {
 	case <-firstCtx.Done():
-	case <-time.After(time.Second):
-		t.Fatal("starting a replacement stream did not cancel the old encoder")
+		t.Fatal("second viewer cancelled the first viewer")
+	default:
 	}
 	select {
 	case <-secondCtx.Done():
-		t.Fatal("replacement stream was cancelled unexpectedly")
+		t.Fatal("second viewer was cancelled unexpectedly")
+	default:
+	}
+
+	thirdCtx, thirdCancel := context.WithCancel(context.Background())
+	defer thirdCancel()
+	endThird := app.beginStream("sim", thirdCancel)
+	defer endThird()
+	select {
+	case <-firstCtx.Done():
+	case <-time.After(time.Second):
+		t.Fatal("third viewer did not evict the oldest stream")
+	}
+	select {
+	case <-secondCtx.Done():
+		t.Fatal("third viewer cancelled the second viewer")
+	default:
+	}
+	select {
+	case <-thirdCtx.Done():
+		t.Fatal("third viewer was cancelled unexpectedly")
 	default:
 	}
 }

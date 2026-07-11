@@ -232,24 +232,43 @@ func dbLatestSimRun(db *sql.DB, simID string) (*SimRun, error) {
 
 // ─── sim_streams ────────────────────────────────────────────────────
 
-// dbMintStreamToken creates (or replaces) the stream token for a sim.
-// Each call rotates the token — calling sims_stream_url twice in a row
-// invalidates the first URL, which is the desired behavior.
+// dbMintStreamToken creates an independent stream token for a sim. Multiple
+// panels may watch the same device, so minting a URL must not invalidate URLs
+// already held by Code or another Simulator panel. Expired rows are reaped and
+// a small per-sim cap prevents abandoned browser tabs growing the table forever.
 func dbMintStreamToken(db *sql.DB, simID string, ttl time.Duration) (*SimStream, error) {
 	tok, err := randomToken(32)
 	if err != nil {
 		return nil, err
 	}
-	expires := time.Now().UTC().Add(ttl).Format(time.RFC3339)
-	_, err = db.Exec(`
+	now := time.Now().UTC()
+	expires := now.Add(ttl).Format(time.RFC3339)
+	tx, err := db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	if _, err = tx.Exec(`DELETE FROM sim_streams WHERE expires_at <= ?`, now.Format(time.RFC3339)); err != nil {
+		return nil, err
+	}
+	if _, err = tx.Exec(`
 		INSERT INTO sim_streams (sim_id, ws_token, expires_at)
 		VALUES (?, ?, ?)
-		ON CONFLICT(sim_id) DO UPDATE SET
-		  ws_token   = excluded.ws_token,
-		  created_at = CURRENT_TIMESTAMP,
-		  expires_at = excluded.expires_at
-	`, simID, tok, expires)
-	if err != nil {
+	`, simID, tok, expires); err != nil {
+		return nil, err
+	}
+	if _, err = tx.Exec(`
+		DELETE FROM sim_streams
+		WHERE sim_id = ? AND ws_token NOT IN (
+			SELECT ws_token FROM sim_streams
+			WHERE sim_id = ?
+			ORDER BY created_at DESC, rowid DESC
+			LIMIT 8
+		)
+	`, simID, simID); err != nil {
+		return nil, err
+	}
+	if err = tx.Commit(); err != nil {
 		return nil, err
 	}
 	return &SimStream{SimID: simID, WSToken: tok, ExpiresAt: expires}, nil
