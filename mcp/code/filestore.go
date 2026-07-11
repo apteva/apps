@@ -67,7 +67,7 @@ type FileStore interface {
 // do with a file. ContentType is left empty by LocalFileStore; the
 // editing engine sniffs when needed.
 type FileMeta struct {
-	Path    string `json:"path"`     // repo-relative, forward slashes
+	Path    string `json:"path"` // repo-relative, forward slashes
 	Size    int64  `json:"size"`
 	SHA256  string `json:"sha256,omitempty"`
 	ModTime int64  `json:"mod_time"` // unix seconds
@@ -129,6 +129,32 @@ func (s *LocalFileStore) resolve(slug, relPath string) (string, error) {
 	}
 	if rootAbs != fullAbs && !strings.HasPrefix(fullAbs, rootAbs+string(filepath.Separator)) {
 		return "", fmt.Errorf("path escapes repository: %q", relPath)
+	}
+	rootReal, err := filepath.EvalSymlinks(rootAbs)
+	if err != nil {
+		return "", err
+	}
+	// Resolve the nearest existing ancestor. This catches both a final
+	// symlink used for reads and a symlinked parent used for writes.
+	ancestor := fullAbs
+	for {
+		if _, statErr := os.Lstat(ancestor); statErr == nil {
+			break
+		} else if !errors.Is(statErr, os.ErrNotExist) {
+			return "", statErr
+		}
+		parent := filepath.Dir(ancestor)
+		if parent == ancestor {
+			return "", fmt.Errorf("cannot resolve repository path %q", relPath)
+		}
+		ancestor = parent
+	}
+	ancestorReal, err := filepath.EvalSymlinks(ancestor)
+	if err != nil {
+		return "", err
+	}
+	if rootReal != ancestorReal && !strings.HasPrefix(ancestorReal, rootReal+string(filepath.Separator)) {
+		return "", fmt.Errorf("path escapes repository through symlink: %q", relPath)
 	}
 	return full, nil
 }
@@ -279,6 +305,14 @@ func (s *LocalFileStore) Move(slug, src, dst string) ([]string, error) {
 }
 
 func (s *LocalFileStore) List(slug, relPrefix string, recursive bool) ([]FileMeta, error) {
+	return s.list(slug, relPrefix, recursive, false)
+}
+
+func (s *LocalFileStore) ListSource(slug, relPrefix string, recursive, includeGenerated bool) ([]FileMeta, error) {
+	return s.list(slug, relPrefix, recursive, !includeGenerated)
+}
+
+func (s *LocalFileStore) list(slug, relPrefix string, recursive, skipGenerated bool) ([]FileMeta, error) {
 	root := s.repoRoot(slug)
 	var base string
 	if relPrefix == "" {
@@ -299,11 +333,18 @@ func (s *LocalFileStore) List(slug, relPrefix string, recursive bool) ([]FileMet
 			if err != nil {
 				return err
 			}
-			if d.IsDir() {
-				return nil
-			}
 			rel, e := filepath.Rel(root, p)
 			if e != nil {
+				return nil
+			}
+			rel = filepath.ToSlash(rel)
+			if skipGenerated && rel != "." && shouldSkipGenerated(rel) {
+				if d.IsDir() {
+					return fs.SkipDir
+				}
+				return nil
+			}
+			if d.IsDir() {
 				return nil
 			}
 			info, e := d.Info()
@@ -326,13 +367,16 @@ func (s *LocalFileStore) List(slug, relPrefix string, recursive bool) ([]FileMet
 			return nil, err
 		}
 		for _, e := range entries {
-			info, err := e.Info()
-			if err != nil {
-				continue
-			}
 			rel := e.Name()
 			if relPrefix != "" {
 				rel = relPrefix + "/" + e.Name()
+			}
+			if skipGenerated && shouldSkipGenerated(rel) {
+				continue
+			}
+			info, err := e.Info()
+			if err != nil {
+				continue
 			}
 			out = append(out, FileMeta{
 				Path:    rel,

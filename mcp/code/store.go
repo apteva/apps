@@ -31,7 +31,7 @@ type Repo struct {
 	ArchivedAt     string `json:"archived_at,omitempty"`
 
 	IsTemplate      bool   `json:"is_template,omitempty"`
-	TemplateScope   string `json:"template_scope,omitempty"`   // 'private' | 'project' | 'global'
+	TemplateScope   string `json:"template_scope,omitempty"` // 'private' | 'project' | 'global'
 	TemplateTagline string `json:"template_tagline,omitempty"`
 	TemplateIcon    string `json:"template_icon,omitempty"`
 }
@@ -107,7 +107,9 @@ func dbCreateRepo(db *sql.DB, projectID string, in CreateRepoInput) (*Repo, erro
 	if !validFramework(in.Framework) {
 		return nil, fmt.Errorf("framework %q not supported", in.Framework)
 	}
-	storageRoot := "/repos/" + slug + "/"
+	// The final root includes the row id and is filled immediately after
+	// insert. Keeping this column populated preserves the existing API shape.
+	storageRoot := "/repos/pending/"
 
 	res, err := db.Exec(`
 		INSERT INTO repositories (project_id, slug, name, description, framework, storage_root, owner)
@@ -122,6 +124,11 @@ func dbCreateRepo(db *sql.DB, projectID string, in CreateRepoInput) (*Repo, erro
 		return nil, err
 	}
 	id, _ := res.LastInsertId()
+	storageRoot = repoStorageRoot(id)
+	if _, err := db.Exec(`UPDATE repositories SET storage_root = ? WHERE id = ?`, storageRoot, id); err != nil {
+		_, _ = db.Exec(`DELETE FROM repositories WHERE id = ?`, id)
+		return nil, err
+	}
 	return dbGetRepoByID(db, projectID, id)
 }
 
@@ -384,26 +391,26 @@ func dbGetFork(db *sql.DB, childID int64) (*ForkInfo, error) {
 // DevRun is one row in the dev_runs table — the supervisor's durable
 // view of a per-repo dev process. status transitions:
 //
-//   stopped → starting → live → stopped (clean Stop)
-//                              → crashed (non-zero exit)
+//	stopped → starting → live → stopped (clean Stop)
+//	                           → crashed (non-zero exit)
 //
 // The supervisor lives inside the code sidecar; on a sidecar restart
 // the reconcile pass at OnMount checks whether the recorded pid is
 // still alive and demotes orphans to stopped.
 type DevRun struct {
-	ID         int64  `json:"id"`
-	ProjectID  string `json:"project_id"`
-	RepoID     int64  `json:"repo_id"`
-	Status     string `json:"status"`
-	Port       int    `json:"port"`
-	PID        int    `json:"pid"`
-	Framework  string `json:"framework"`
-	RunCmd     string `json:"run_cmd,omitempty"`
-	EnvJSON    string `json:"env_json,omitempty"`
-	LogPath    string `json:"log_path,omitempty"`
-	StartedAt  string `json:"started_at,omitempty"`
-	StoppedAt  string `json:"stopped_at,omitempty"`
-	Error      string `json:"error,omitempty"`
+	ID        int64  `json:"id"`
+	ProjectID string `json:"project_id"`
+	RepoID    int64  `json:"repo_id"`
+	Status    string `json:"status"`
+	Port      int    `json:"port"`
+	PID       int    `json:"pid"`
+	Framework string `json:"framework"`
+	RunCmd    string `json:"run_cmd,omitempty"`
+	EnvJSON   string `json:"env_json,omitempty"`
+	LogPath   string `json:"log_path,omitempty"`
+	StartedAt string `json:"started_at,omitempty"`
+	StoppedAt string `json:"stopped_at,omitempty"`
+	Error     string `json:"error,omitempty"`
 
 	// Remote-runner fields (mobile repos delegated to the Simulator
 	// app). Empty for local dev runs. See migration 004.
@@ -533,7 +540,7 @@ func dbListLiveDevRuns(db *sql.DB) ([]*DevRun, error) {
 }
 
 // nullableTS returns sql.NullString for empty strings so timestamp
-// columns get NULL rather than '', which sqlite would otherwise store
+// columns get NULL rather than an empty string, which sqlite would otherwise store
 // as a literal empty string and surprise downstream readers.
 func nullableTS(s string) any {
 	if s == "" {

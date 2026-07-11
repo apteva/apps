@@ -76,7 +76,7 @@ func TestCreateRepo_AndGet(t *testing.T) {
 	if r.Framework != "nextjs" {
 		t.Errorf("framework = %q", r.Framework)
 	}
-	if r.StorageRoot != "/repos/marketing-site/" {
+	if r.StorageRoot != "/repos/by-id/1/" {
 		t.Errorf("storage_root = %q", r.StorageRoot)
 	}
 

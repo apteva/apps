@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"net"
 	"os"
 	"path/filepath"
@@ -189,7 +190,7 @@ func TestInstallNodeDeps_UsesFrozenBunAndRecordsFingerprint(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := installNodeDeps(dir, logF, plan); err != nil {
+	if err := installNodeDeps(context.Background(), dir, logF, plan, os.Environ()); err != nil {
 		_ = logF.Close()
 		t.Fatal(err)
 	}

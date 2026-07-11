@@ -103,15 +103,6 @@ func importGitHub(ctx *sdk.AppCtx, store FileStore, in importGitHubInput) (*impo
 		framework = "blank"
 	}
 
-	if err := store.CreateRepo(slug); err != nil {
-		return nil, fmt.Errorf("create repo storage: %w", err)
-	}
-	for path, body := range files {
-		if _, err := store.Write(slug, path, body); err != nil {
-			return nil, fmt.Errorf("write %s: %w", path, err)
-		}
-	}
-
 	repo, err := dbCreateRepo(ctx.AppDB(), pid, CreateRepoInput{
 		Name:        in.Owner + "/" + in.Repo,
 		Slug:        slug,
@@ -120,6 +111,18 @@ func importGitHub(ctx *sdk.AppCtx, store FileStore, in importGitHubInput) (*impo
 	})
 	if err != nil {
 		return nil, fmt.Errorf("create repo row: %w", err)
+	}
+	repoStore := bindRepoStore(store, repo)
+	if err := repoStore.CreateRepo(slug); err != nil {
+		_ = dbHardDeleteRepo(ctx.AppDB(), pid, slug)
+		return nil, fmt.Errorf("create repo storage: %w", err)
+	}
+	for path, body := range files {
+		if _, err := repoStore.Write(slug, path, body); err != nil {
+			_ = repoStore.DropRepo(slug)
+			_ = dbHardDeleteRepo(ctx.AppDB(), pid, slug)
+			return nil, fmt.Errorf("write %s: %w", path, err)
+		}
 	}
 
 	bytesWritten := 0
@@ -183,7 +186,18 @@ func decodeBinaryEnvelope(raw json.RawMessage) ([]byte, error) {
 		// upstream's Content-Type isn't in the binary prefix list.
 		return nil, errors.New("response was not a binary envelope; check Content-Type from upstream")
 	}
-	return base64.StdEncoding.DecodeString(env.Base64)
+	limits := currentImportLimits()
+	if env.Size < 0 || int64(env.Size) > limits.CompressedBytes || int64(base64.StdEncoding.DecodedLen(len(env.Base64))) > limits.CompressedBytes+2 {
+		return nil, fmt.Errorf("archive exceeds compressed limit of %d bytes", limits.CompressedBytes)
+	}
+	decoded, err := base64.StdEncoding.DecodeString(env.Base64)
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(decoded)) > limits.CompressedBytes {
+		return nil, fmt.Errorf("archive exceeds compressed limit of %d bytes", limits.CompressedBytes)
+	}
+	return decoded, nil
 }
 
 // readGitHubTarball walks a gzipped tar produced by GitHub's
@@ -200,6 +214,9 @@ func readGitHubTarball(body []byte) (map[string][]byte, error) {
 	defer gz.Close()
 	tr := tar.NewReader(gz)
 	out := map[string][]byte{}
+	limits := currentImportLimits()
+	var total int64
+	count := 0
 	for {
 		hdr, err := tr.Next()
 		if errors.Is(err, io.EOF) {
@@ -222,11 +239,16 @@ func readGitHubTarball(body []byte) (map[string][]byte, error) {
 		if filepath.IsAbs(clean) || strings.HasPrefix(clean, "..") || strings.Contains(clean, "/../") {
 			return nil, fmt.Errorf("tar entry escapes root: %q", hdr.Name)
 		}
+		count++
+		if err := checkImportEntry(limits, clean, hdr.Size, total, count); err != nil {
+			return nil, err
+		}
 		buf := make([]byte, hdr.Size)
 		if _, err := io.ReadFull(tr, buf); err != nil {
 			return nil, fmt.Errorf("read %s: %w", clean, err)
 		}
 		out[clean] = buf
+		total += hdr.Size
 	}
 	return out, nil
 }

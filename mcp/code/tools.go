@@ -76,20 +76,23 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "code_list_files",
-			Description: "List files in a repo. Args: slug, path? (sub-tree prefix), recursive? (default true).",
+			Description: "List source files in a repo. Generated/vendor trees are skipped by default; pass include_generated=true to include them. Args: slug, path? (sub-tree prefix), recursive? (default true), include_generated?",
 			InputSchema: schemaObject(map[string]any{
-				"slug":      map[string]any{"type": "string"},
-				"path":      map[string]any{"type": "string"},
-				"recursive": map[string]any{"type": "boolean"},
+				"slug":              map[string]any{"type": "string"},
+				"path":              map[string]any{"type": "string"},
+				"recursive":         map[string]any{"type": "boolean"},
+				"include_generated": map[string]any{"type": "boolean"},
 			}, []string{"slug"}),
 			Handler: a.toolListFiles,
 		},
 		{
 			Name:        "code_glob",
-			Description: `Find files by glob (e.g. "**/*.tsx", "app/**/*.ts"). Args: slug, pattern.`,
+			Description: `Find source files by glob (e.g. "**/*.tsx", "app/**/*.ts"). Generated/vendor trees are skipped by default. Args: slug, pattern, limit? (default 2000), include_generated?.`,
 			InputSchema: schemaObject(map[string]any{
-				"slug":    map[string]any{"type": "string"},
-				"pattern": map[string]any{"type": "string"},
+				"slug":              map[string]any{"type": "string"},
+				"pattern":           map[string]any{"type": "string"},
+				"limit":             map[string]any{"type": "integer"},
+				"include_generated": map[string]any{"type": "boolean"},
 			}, []string{"slug", "pattern"}),
 			Handler: a.toolGlob,
 		},
@@ -97,18 +100,19 @@ func (a *App) MCPTools() []sdk.Tool {
 			Name: "code_grep",
 			Description: "Search file contents compactly. Defaults to output_mode=files and limit=50; use " +
 				"output_mode=content only when matching lines are needed. Narrow with path, file_pattern, " +
-				"matches_per_file, and small context.",
+				"matches_per_file, and small context. Generated/vendor trees are skipped unless include_generated=true.",
 			InputSchema: schemaObject(map[string]any{
-				"slug":             map[string]any{"type": "string"},
-				"pattern":          map[string]any{"type": "string"},
-				"regex":            map[string]any{"type": "boolean"},
-				"path":             map[string]any{"type": "string"},
-				"file_pattern":     map[string]any{"type": "string"},
-				"output_mode":      map[string]any{"type": "string", "enum": []string{"files", "content", "count"}},
-				"context":          map[string]any{"type": "integer"},
-				"matches_per_file": map[string]any{"type": "integer"},
-				"ignore_case":      map[string]any{"type": "boolean"},
-				"limit":            map[string]any{"type": "integer"},
+				"slug":              map[string]any{"type": "string"},
+				"pattern":           map[string]any{"type": "string"},
+				"regex":             map[string]any{"type": "boolean"},
+				"path":              map[string]any{"type": "string"},
+				"file_pattern":      map[string]any{"type": "string"},
+				"output_mode":       map[string]any{"type": "string", "enum": []string{"files", "content", "count"}},
+				"context":           map[string]any{"type": "integer"},
+				"matches_per_file":  map[string]any{"type": "integer"},
+				"ignore_case":       map[string]any{"type": "boolean"},
+				"limit":             map[string]any{"type": "integer"},
+				"include_generated": map[string]any{"type": "boolean"},
 			}, []string{"slug", "pattern"}),
 			Handler: a.toolGrep,
 		},
@@ -575,7 +579,7 @@ func (a *App) toolRunCommand(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	if err != nil {
 		return nil, err
 	}
-	pp, ok := a.store.(FileStoreLocalPath)
+	pp, ok := a.storeFor(repo).(FileStoreLocalPath)
 	if !ok {
 		return nil, errors.New("repo command runner requires a local filesystem store")
 	}
@@ -940,7 +944,7 @@ func (a *App) toolTemplatesList(ctx *sdk.AppCtx, args map[string]any) (any, erro
 		return nil, err
 	}
 	for _, r := range repos {
-		files, _ := a.store.List(r.Slug, "", true)
+		files, _ := a.storeFor(r).List(r.Slug, "", true)
 		out = append(out, TemplateEntry{
 			Kind: "user", Name: r.Name, Slug: r.Slug,
 			Tagline: r.TemplateTagline, Icon: r.TemplateIcon,
@@ -996,7 +1000,7 @@ func (a *App) toolReposFork(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 			}
 			parent = gp
 		}
-		src = storeReader{s: a.store}
+		src = storeReader{s: a.storeFor(parent)}
 		srcID = parent.Slug
 		parentKind = "user"
 	} else {
@@ -1016,15 +1020,16 @@ func (a *App) toolReposFork(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := a.store.CreateRepo(r.Slug); err != nil {
+	dstStore := a.storeFor(r)
+	if err := dstStore.CreateRepo(r.Slug); err != nil {
 		_ = dbHardDeleteRepo(ctx.AppDB(), pid, r.Slug)
 		return nil, fmt.Errorf("create repo dir: %w", err)
 	}
-	count, err := fork(src, srcID, a.store, r.Slug)
+	count, err := fork(src, srcID, dstStore, r.Slug)
 	if err != nil {
 		// Roll back so the user doesn't end up with a half-copied repo
 		// that they then have to clean up manually.
-		_ = a.store.DropRepo(r.Slug)
+		_ = dstStore.DropRepo(r.Slug)
 		_ = dbHardDeleteRepo(ctx.AppDB(), pid, r.Slug)
 		return nil, fmt.Errorf("copy from %s: %w", parentKind, err)
 	}
@@ -1082,12 +1087,13 @@ func (a *App) toolReposCreate(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	if err != nil {
 		return nil, err
 	}
-	if err := a.store.CreateRepo(r.Slug); err != nil {
+	repoStore := a.storeFor(r)
+	if err := repoStore.CreateRepo(r.Slug); err != nil {
 		// Roll back the row to keep DB and disk consistent.
 		_ = dbHardDeleteRepo(ctx.AppDB(), pid, r.Slug)
 		return nil, fmt.Errorf("create repo dir: %w", err)
 	}
-	count, err := applyTemplate(a.store, r.Slug, r.Framework)
+	count, err := applyTemplate(repoStore, r.Slug, r.Framework)
 	if err != nil {
 		ctx.Logger().Warn("template apply failed", "slug", r.Slug, "framework", r.Framework, "err", err)
 	}
@@ -1118,8 +1124,9 @@ func (a *App) toolReposGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if r == nil {
 		return map[string]any{"repository": nil, "found": false}, nil
 	}
-	files, _ := a.store.List(slug, "", true)
-	totalSize, _ := a.store.TotalSize(slug)
+	repoStore := a.storeFor(r)
+	files, _ := repoStore.List(slug, "", true)
+	totalSize, _ := repoStore.TotalSize(slug)
 	return map[string]any{
 		"repository": r,
 		"found":      true,
@@ -1139,10 +1146,14 @@ func (a *App) toolReposArchive(ctx *sdk.AppCtx, args map[string]any) (any, error
 	}
 	force := boolArg(args, "force")
 	if force {
-		if err := dbHardDeleteRepo(ctx.AppDB(), pid, slug); err != nil {
+		repo, err := requireRepo(ctx, pid, slug)
+		if err != nil {
 			return nil, err
 		}
-		if err := a.store.DropRepo(slug); err != nil {
+		if err := a.storeFor(repo).DropRepo(slug); err != nil {
+			return nil, err
+		}
+		if err := dbHardDeleteRepo(ctx.AppDB(), pid, slug); err != nil {
 			return nil, err
 		}
 		if ctx != nil {
@@ -1204,11 +1215,12 @@ func (a *App) toolReposExport(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	if slug == "" {
 		return nil, errors.New("slug required")
 	}
-	if _, err := requireRepoSlug(ctx, pid, slug); err != nil {
+	repo, err := requireRepo(ctx, pid, slug)
+	if err != nil {
 		return nil, err
 	}
 	var buf bytes.Buffer
-	if err := zipRepo(&buf, a.store, slug); err != nil {
+	if err := zipRepo(&buf, a.storeFor(repo), slug); err != nil {
 		return nil, fmt.Errorf("zip repo: %w", err)
 	}
 	sum := sha256.Sum256(buf.Bytes())
@@ -1227,7 +1239,8 @@ func (a *App) toolListFiles(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	if _, err := requireRepo(ctx, pid, strArg(args, "slug")); err != nil {
+	repo, err := requireRepo(ctx, pid, strArg(args, "slug"))
+	if err != nil {
 		return nil, err
 	}
 	prefix := strArg(args, "path")
@@ -1242,7 +1255,7 @@ func (a *App) toolListFiles(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if v, ok := args["recursive"].(bool); ok {
 		recursive = v
 	}
-	files, err := a.store.List(strArg(args, "slug"), prefix, recursive)
+	files, err := listSourceFiles(a.storeFor(repo), strArg(args, "slug"), prefix, recursive, boolArg(args, "include_generated"))
 	if err != nil {
 		return nil, err
 	}
@@ -1254,11 +1267,13 @@ func (a *App) toolGlob(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	if _, err := requireRepo(ctx, pid, strArg(args, "slug")); err != nil {
+	repo, err := requireRepo(ctx, pid, strArg(args, "slug"))
+	if err != nil {
 		return nil, err
 	}
 	pattern := strArg(args, "pattern")
-	matches, err := globRepo(a.store, strArg(args, "slug"), pattern)
+	matches, err := globRepoWithOptions(a.storeFor(repo), strArg(args, "slug"), pattern,
+		boolArg(args, "include_generated"), intArg(args, "limit", 2000))
 	if err != nil {
 		return nil, err
 	}
@@ -1270,19 +1285,21 @@ func (a *App) toolGrep(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	if _, err := requireRepo(ctx, pid, strArg(args, "slug")); err != nil {
+	repo, err := requireRepo(ctx, pid, strArg(args, "slug"))
+	if err != nil {
 		return nil, err
 	}
 	o := GrepOptions{
-		Pattern:        strArg(args, "pattern"),
-		Path:           strArg(args, "path"),
-		FilePattern:    strArg(args, "file_pattern"),
-		OutputMode:     strArg(args, "output_mode"),
-		Regex:          boolArg(args, "regex"),
-		IgnoreCase:     boolArg(args, "ignore_case"),
-		Context:        intArg(args, "context", 0),
-		Limit:          intArg(args, "limit", 0),
-		MatchesPerFile: intArg(args, "matches_per_file", 0),
+		Pattern:          strArg(args, "pattern"),
+		Path:             strArg(args, "path"),
+		FilePattern:      strArg(args, "file_pattern"),
+		OutputMode:       strArg(args, "output_mode"),
+		Regex:            boolArg(args, "regex"),
+		IgnoreCase:       boolArg(args, "ignore_case"),
+		Context:          intArg(args, "context", 0),
+		Limit:            intArg(args, "limit", 0),
+		MatchesPerFile:   intArg(args, "matches_per_file", 0),
+		IncludeGenerated: boolArg(args, "include_generated"),
 	}
 	if o.Path != "" {
 		clean, err := normalisePath(o.Path)
@@ -1291,7 +1308,7 @@ func (a *App) toolGrep(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		}
 		o.Path = clean
 	}
-	res, err := grepRepo(a.store, strArg(args, "slug"), o)
+	res, err := grepRepo(a.storeFor(repo), strArg(args, "slug"), o)
 	if err != nil {
 		return nil, err
 	}
@@ -1303,14 +1320,15 @@ func (a *App) toolReadFile(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	if _, err := requireRepo(ctx, pid, strArg(args, "slug")); err != nil {
+	repo, err := requireRepo(ctx, pid, strArg(args, "slug"))
+	if err != nil {
 		return nil, err
 	}
 	rel, err := normalisePath(strArg(args, "path"))
 	if err != nil {
 		return nil, err
 	}
-	res, err := readWithLineNumbers(a.store, strArg(args, "slug"), rel,
+	res, err := readWithLineNumbers(a.storeFor(repo), strArg(args, "slug"), rel,
 		intArg(args, "offset", 0), intArg(args, "limit", 0))
 	if err != nil {
 		return nil, err
@@ -1323,14 +1341,15 @@ func (a *App) toolReadExcerpt(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	if err != nil {
 		return nil, err
 	}
-	if _, err := requireRepo(ctx, pid, strArg(args, "slug")); err != nil {
+	repo, err := requireRepo(ctx, pid, strArg(args, "slug"))
+	if err != nil {
 		return nil, err
 	}
 	rel, err := normalisePath(strArg(args, "path"))
 	if err != nil {
 		return nil, err
 	}
-	return readExcerpt(a.store, strArg(args, "slug"), rel, ExcerptOptions{
+	return readExcerpt(a.storeFor(repo), strArg(args, "slug"), rel, ExcerptOptions{
 		StartLine: intArg(args, "start_line", 0),
 		EndLine:   intArg(args, "end_line", 0),
 		Around:    intArg(args, "around", 0),
@@ -1346,14 +1365,15 @@ func (a *App) toolFileOutline(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	if err != nil {
 		return nil, err
 	}
-	if _, err := requireRepo(ctx, pid, strArg(args, "slug")); err != nil {
+	repo, err := requireRepo(ctx, pid, strArg(args, "slug"))
+	if err != nil {
 		return nil, err
 	}
 	rel, err := normalisePath(strArg(args, "path"))
 	if err != nil {
 		return nil, err
 	}
-	return fileOutline(a.store, strArg(args, "slug"), rel, intArg(args, "limit", 0))
+	return fileOutline(a.storeFor(repo), strArg(args, "slug"), rel, intArg(args, "limit", 0))
 }
 
 func (a *App) toolWriteFile(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -1361,7 +1381,8 @@ func (a *App) toolWriteFile(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	if _, err := requireRepo(ctx, pid, strArg(args, "slug")); err != nil {
+	repo, err := requireRepo(ctx, pid, strArg(args, "slug"))
+	if err != nil {
 		return nil, err
 	}
 	rel, err := normalisePath(strArg(args, "path"))
@@ -1370,7 +1391,7 @@ func (a *App) toolWriteFile(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	}
 	content := strArg(args, "content")
 	slug := strArg(args, "slug")
-	meta, err := a.store.Write(slug, rel, []byte(content))
+	meta, err := a.storeFor(repo).Write(slug, rel, []byte(content))
 	if err != nil {
 		return nil, err
 	}
@@ -1384,7 +1405,8 @@ func (a *App) toolApplyPatch(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		return nil, err
 	}
 	slug := strArg(args, "slug")
-	if _, err := requireRepo(ctx, pid, slug); err != nil {
+	repo, err := requireRepo(ctx, pid, slug)
+	if err != nil {
 		return nil, err
 	}
 	patch := strArg(args, "patch")
@@ -1393,7 +1415,7 @@ func (a *App) toolApplyPatch(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 			return nil, errors.New("patch_id applies an existing dry run; omit dry_run or set it false")
 		}
 		var err error
-		patch, err = loadPatchPreview(patchID, slug)
+		patch, err = loadPatchPreview(patchID, repoStoreKey(repo))
 		if err != nil {
 			return nil, err
 		}
@@ -1401,7 +1423,7 @@ func (a *App) toolApplyPatch(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	if patch == "" {
 		return nil, errors.New("patch or patch_id required")
 	}
-	res, err := applyUnifiedPatch(a.store, slug, patch, boolArg(args, "dry_run"))
+	res, err := applyUnifiedPatch(a.storeFor(repo), repoStoreKey(repo), patch, boolArg(args, "dry_run"))
 	if err != nil {
 		return nil, err
 	}
@@ -1431,7 +1453,8 @@ func (a *App) toolEditFile(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	if _, err := requireRepo(ctx, pid, strArg(args, "slug")); err != nil {
+	repo, err := requireRepo(ctx, pid, strArg(args, "slug"))
+	if err != nil {
 		return nil, err
 	}
 	rel, err := normalisePath(strArg(args, "path"))
@@ -1439,7 +1462,7 @@ func (a *App) toolEditFile(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return nil, err
 	}
 	slug := strArg(args, "slug")
-	res, err := editFile(a.store, slug, rel,
+	res, err := editFile(a.storeFor(repo), slug, rel,
 		strArg(args, "old_string"), strArg(args, "new_string"), boolArg(args, "replace_all"))
 	if err != nil {
 		return nil, err
@@ -1453,7 +1476,8 @@ func (a *App) toolMultiEdit(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	if _, err := requireRepo(ctx, pid, strArg(args, "slug")); err != nil {
+	repo, err := requireRepo(ctx, pid, strArg(args, "slug"))
+	if err != nil {
 		return nil, err
 	}
 	rel, err := normalisePath(strArg(args, "path"))
@@ -1480,7 +1504,7 @@ func (a *App) toolMultiEdit(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		ops = append(ops, op)
 	}
 	slug := strArg(args, "slug")
-	res, err := multiEditFile(a.store, slug, rel, ops)
+	res, err := multiEditFile(a.storeFor(repo), slug, rel, ops)
 	if err != nil {
 		return nil, err
 	}
@@ -1493,7 +1517,8 @@ func (a *App) toolRename(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	if _, err := requireRepo(ctx, pid, strArg(args, "slug")); err != nil {
+	repo, err := requireRepo(ctx, pid, strArg(args, "slug"))
+	if err != nil {
 		return nil, err
 	}
 	from, err := normalisePath(strArg(args, "from"))
@@ -1505,7 +1530,7 @@ func (a *App) toolRename(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return nil, fmt.Errorf("to: %w", err)
 	}
 	slug := strArg(args, "slug")
-	moved, err := a.store.Move(slug, from, to)
+	moved, err := a.storeFor(repo).Move(slug, from, to)
 	if err != nil {
 		return nil, err
 	}
@@ -1522,7 +1547,8 @@ func (a *App) toolDeleteFile(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	if err != nil {
 		return nil, err
 	}
-	if _, err := requireRepo(ctx, pid, strArg(args, "slug")); err != nil {
+	repo, err := requireRepo(ctx, pid, strArg(args, "slug"))
+	if err != nil {
 		return nil, err
 	}
 	rel, err := normalisePath(strArg(args, "path"))
@@ -1533,7 +1559,7 @@ func (a *App) toolDeleteFile(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	// and DeleteTree handles both safely (RemoveAll on a single file
 	// works, RemoveAll on a missing path is nil).
 	slug := strArg(args, "slug")
-	if err := a.store.DeleteTree(slug, rel); err != nil {
+	if err := a.storeFor(repo).DeleteTree(slug, rel); err != nil {
 		return nil, err
 	}
 	emitFileChange(ctx, "file.deleted", slug, rel)

@@ -34,7 +34,7 @@ var templatesFS embed.FS
 const manifestYAML = `schema: apteva-app/v1
 name: code
 display_name: Apteva Code
-version: 0.5.22
+version: 0.5.23
 description: |
   Repositories — code workspaces scoped to Apteva projects, with
   first-class editing tools modelled on Claude Code. Optionally
@@ -43,6 +43,7 @@ description: |
   manages native repo issues for bugs, feature requests, and tasks,
   makes grep/read/patch tools more compact for agents with reusable
   patch previews, targeted rejected-hunk context, and stale-hunk recovery,
+  isolates global repository storage and hardens command/import boundaries,
   runs finite build/test/lint/generator commands through repos_run_command,
   unifies project navigation with a Repositories tab,
   gives the project-wide Issues inbox the full panel width,
@@ -142,9 +143,10 @@ upgrade_policy: auto-patch
 // ─── App ───────────────────────────────────────────────────────────
 
 type App struct {
-	store   FileStore
-	dataDir string
-	dev     *devSupervisor
+	store    FileStore
+	dataDir  string
+	dev      *devSupervisor
+	commands commandCoordinator
 }
 
 var globalCtx *sdk.AppCtx
@@ -181,7 +183,11 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	if err := os.MkdirAll(root, 0o755); err != nil {
 		return fmt.Errorf("mkdir repos root: %w", err)
 	}
-	a.store = NewLocalFileStore(root)
+	localStore := NewLocalFileStore(root)
+	if err := migrateLegacyRepoStorage(ctx.AppDB(), localStore); err != nil {
+		return fmt.Errorf("migrate repository storage: %w", err)
+	}
+	a.store = localStore
 
 	// Dev runtime — live "Run" surface for repos. Lives inside this
 	// sidecar process; one supervised child per (project, repo). The
@@ -234,6 +240,11 @@ func resolveProjectFromArgs(args map[string]any) (string, error) {
 func resolveProjectFromRequest(r *http.Request) (string, error) {
 	if env := strings.TrimSpace(os.Getenv("APTEVA_PROJECT_ID")); env != "" {
 		return env, nil
+	}
+	// The platform-injected header is authoritative. Query fallback remains
+	// for older dashboards that predate header propagation.
+	if v := r.Header.Get("X-Apteva-Project-ID"); v != "" {
+		return v, nil
 	}
 	if v := r.URL.Query().Get("project_id"); v != "" {
 		return v, nil
@@ -325,9 +336,55 @@ func shouldSkipForExport(rel string) bool {
 	return false
 }
 
+func shouldSkipGenerated(rel string) bool {
+	for _, seg := range strings.Split(filepath.ToSlash(rel), "/") {
+		switch seg {
+		case "node_modules", ".git", ".next", ".nuxt", ".cache", ".turbo",
+			"dist", "build", "coverage", "vendor", "Pods", "DerivedData":
+			return true
+		}
+	}
+	return false
+}
+
+func filterGenerated(files []FileMeta, include bool) []FileMeta {
+	if include {
+		return files
+	}
+	out := files[:0]
+	for _, file := range files {
+		if !shouldSkipGenerated(file.Path) {
+			out = append(out, file)
+		}
+	}
+	return out
+}
+
+type sourceFileLister interface {
+	ListSource(slug, path string, recursive, includeGenerated bool) ([]FileMeta, error)
+}
+
+func listSourceFiles(store FileStore, slug, path string, recursive, includeGenerated bool) ([]FileMeta, error) {
+	if source, ok := store.(sourceFileLister); ok {
+		return source.ListSource(slug, path, recursive, includeGenerated)
+	}
+	files, err := store.List(slug, path, recursive)
+	if err != nil {
+		return nil, err
+	}
+	return filterGenerated(files, includeGenerated), nil
+}
+
 // readZipInto unpacks a zip into a repo via the store. Used by import.
 func readZipInto(store FileStore, slug string, zr *zip.Reader) (int, error) {
 	count := 0
+	var total int64
+	limits := currentImportLimits()
+	type pendingFile struct {
+		path string
+		body []byte
+	}
+	pending := make([]pendingFile, 0, len(zr.File))
 	for _, f := range zr.File {
 		if f.FileInfo().IsDir() {
 			continue
@@ -345,20 +402,31 @@ func readZipInto(store FileStore, slug string, zr *zip.Reader) (int, error) {
 		if err != nil {
 			return count, fmt.Errorf("zip entry %q: %w", f.Name, err)
 		}
+		count++
+		size := int64(f.UncompressedSize64)
+		if err := checkImportEntry(limits, clean, size, total, count); err != nil {
+			return count - 1, err
+		}
 		rc, err := f.Open()
 		if err != nil {
 			return count, err
 		}
-		body := make([]byte, f.UncompressedSize64)
-		if _, err := readFull(rc, body); err != nil {
+		body, err := io.ReadAll(io.LimitReader(rc, size+1))
+		if err != nil {
 			rc.Close()
 			return count, err
 		}
 		rc.Close()
-		if _, err := store.Write(slug, clean, body); err != nil {
-			return count, err
+		if int64(len(body)) != size {
+			return count - 1, fmt.Errorf("zip entry %q size mismatch", clean)
 		}
-		count++
+		pending = append(pending, pendingFile{path: clean, body: body})
+		total += size
+	}
+	for _, file := range pending {
+		if _, err := store.Write(slug, file.path, file.body); err != nil {
+			return 0, err
+		}
 	}
 	return count, nil
 }

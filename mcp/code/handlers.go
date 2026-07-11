@@ -136,12 +136,13 @@ func (a *App) httpCreateRepo(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if err := a.store.CreateRepo(repo.Slug); err != nil {
+	repoStore := a.storeFor(repo)
+	if err := repoStore.CreateRepo(repo.Slug); err != nil {
 		_ = dbHardDeleteRepo(globalCtx.AppDB(), pid, repo.Slug)
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	count, err := applyTemplate(a.store, repo.Slug, repo.Framework)
+	count, err := applyTemplate(repoStore, repo.Slug, repo.Framework)
 	if err != nil {
 		globalCtx.Logger().Warn("template apply failed", "slug", repo.Slug, "err", err)
 	}
@@ -175,8 +176,9 @@ func (a *App) httpRepoMeta(w http.ResponseWriter, r *http.Request, slug string) 
 			httpErr(w, http.StatusNotFound, "repo not found")
 			return
 		}
-		files, _ := a.store.List(slug, "", true)
-		size, _ := a.store.TotalSize(slug)
+		repoStore := a.storeFor(repo)
+		files, _ := repoStore.List(slug, "", true)
+		size, _ := repoStore.TotalSize(slug)
 		httpJSON(w, map[string]any{
 			"repository": repo, "file_count": len(files), "total_size": size,
 		})
@@ -209,10 +211,18 @@ func (a *App) httpRepoMeta(w http.ResponseWriter, r *http.Request, slug string) 
 		repo, _ := dbGetRepoBySlug(globalCtx.AppDB(), pid, slug)
 		httpJSON(w, map[string]any{"repository": repo})
 	case http.MethodDelete:
+		repo, err := requireRepoSlug(globalCtx, pid, slug)
+		if err != nil {
+			httpErr(w, http.StatusNotFound, err.Error())
+			return
+		}
 		force := r.URL.Query().Get("force") == "1"
 		if force {
+			if err := a.storeFor(repo).DropRepo(slug); err != nil {
+				httpErr(w, http.StatusInternalServerError, err.Error())
+				return
+			}
 			_ = dbHardDeleteRepo(globalCtx.AppDB(), pid, slug)
-			_ = a.store.DropRepo(slug)
 			if globalCtx != nil {
 				globalCtx.Emit("repo.deleted", map[string]any{"slug": slug})
 			}
@@ -241,11 +251,12 @@ func (a *App) httpRepoTree(w http.ResponseWriter, r *http.Request, slug string) 
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if _, err := requireRepoSlug(globalCtx, pid, slug); err != nil {
+	repo, err := requireRepoSlug(globalCtx, pid, slug)
+	if err != nil {
 		httpErr(w, http.StatusNotFound, err.Error())
 		return
 	}
-	files, err := a.store.List(slug, "", true)
+	files, err := listSourceFiles(a.storeFor(repo), slug, "", true, r.URL.Query().Get("include_generated") == "1")
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -261,7 +272,8 @@ func (a *App) httpRepoFile(w http.ResponseWriter, r *http.Request, slug, rawPath
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if _, err := requireRepoSlug(globalCtx, pid, slug); err != nil {
+	repo, err := requireRepoSlug(globalCtx, pid, slug)
+	if err != nil {
 		httpErr(w, http.StatusNotFound, err.Error())
 		return
 	}
@@ -270,16 +282,17 @@ func (a *App) httpRepoFile(w http.ResponseWriter, r *http.Request, slug, rawPath
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	repoStore := a.storeFor(repo)
 	switch r.Method {
 	case http.MethodGet:
-		body, err := a.store.Read(slug, rel)
+		body, err := repoStore.Read(slug, rel)
 		if err != nil {
 			httpErr(w, http.StatusNotFound, err.Error())
 			return
 		}
 		// Lines + line numbers if ?annotated=1, else raw bytes.
 		if r.URL.Query().Get("annotated") == "1" {
-			res, err := readWithLineNumbers(a.store, slug, rel,
+			res, err := readWithLineNumbers(repoStore, slug, rel,
 				atoiOr(r.URL.Query().Get("offset"), 0),
 				atoiOr(r.URL.Query().Get("limit"), 0))
 			if err != nil {
@@ -298,7 +311,7 @@ func (a *App) httpRepoFile(w http.ResponseWriter, r *http.Request, slug, rawPath
 			httpErr(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		meta, err := a.store.Write(slug, rel, body)
+		meta, err := repoStore.Write(slug, rel, body)
 		if err != nil {
 			httpErr(w, http.StatusInternalServerError, err.Error())
 			return
@@ -307,7 +320,7 @@ func (a *App) httpRepoFile(w http.ResponseWriter, r *http.Request, slug, rawPath
 		httpJSON(w, map[string]any{"file": meta})
 
 	case http.MethodDelete:
-		if err := a.store.DeleteTree(slug, rel); err != nil {
+		if err := repoStore.DeleteTree(slug, rel); err != nil {
 			httpErr(w, http.StatusInternalServerError, err.Error())
 			return
 		}
@@ -331,7 +344,8 @@ func (a *App) httpRepoEdit(w http.ResponseWriter, r *http.Request, slug string) 
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if _, err := requireRepoSlug(globalCtx, pid, slug); err != nil {
+	repo, err := requireRepoSlug(globalCtx, pid, slug)
+	if err != nil {
 		httpErr(w, http.StatusNotFound, err.Error())
 		return
 	}
@@ -350,7 +364,7 @@ func (a *App) httpRepoEdit(w http.ResponseWriter, r *http.Request, slug string) 
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	res, err := editFile(a.store, slug, rel, body.OldString, body.NewString, body.ReplaceAll)
+	res, err := editFile(a.storeFor(repo), slug, rel, body.OldString, body.NewString, body.ReplaceAll)
 	if err != nil {
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
@@ -369,7 +383,8 @@ func (a *App) httpRepoMultiEdit(w http.ResponseWriter, r *http.Request, slug str
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if _, err := requireRepoSlug(globalCtx, pid, slug); err != nil {
+	repo, err := requireRepoSlug(globalCtx, pid, slug)
+	if err != nil {
 		httpErr(w, http.StatusNotFound, err.Error())
 		return
 	}
@@ -386,7 +401,7 @@ func (a *App) httpRepoMultiEdit(w http.ResponseWriter, r *http.Request, slug str
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	res, err := multiEditFile(a.store, slug, rel, body.Edits)
+	res, err := multiEditFile(a.storeFor(repo), slug, rel, body.Edits)
 	if err != nil {
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
@@ -407,7 +422,8 @@ func (a *App) httpRepoMove(w http.ResponseWriter, r *http.Request, slug string) 
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if _, err := requireRepoSlug(globalCtx, pid, slug); err != nil {
+	repo, err := requireRepoSlug(globalCtx, pid, slug)
+	if err != nil {
 		httpErr(w, http.StatusNotFound, err.Error())
 		return
 	}
@@ -426,7 +442,7 @@ func (a *App) httpRepoMove(w http.ResponseWriter, r *http.Request, slug string) 
 		httpErr(w, http.StatusBadRequest, "to: "+err.Error())
 		return
 	}
-	moved, err := a.store.Move(slug, from, to)
+	moved, err := a.storeFor(repo).Move(slug, from, to)
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
@@ -444,12 +460,26 @@ func (a *App) httpRepoGlob(w http.ResponseWriter, r *http.Request, slug string) 
 		httpErr(w, http.StatusMethodNotAllowed, "POST")
 		return
 	}
-	var body struct{ Pattern string }
+	pid, err := resolveProjectFromRequest(r)
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	repo, err := requireRepoSlug(globalCtx, pid, slug)
+	if err != nil {
+		httpErr(w, http.StatusNotFound, err.Error())
+		return
+	}
+	var body struct {
+		Pattern          string
+		Limit            int
+		IncludeGenerated bool
+	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		httpErr(w, http.StatusBadRequest, "invalid JSON")
 		return
 	}
-	matches, err := globRepo(a.store, slug, body.Pattern)
+	matches, err := globRepoWithOptions(a.storeFor(repo), slug, body.Pattern, body.IncludeGenerated, body.Limit)
 	if err != nil {
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
@@ -462,31 +492,43 @@ func (a *App) httpRepoGrep(w http.ResponseWriter, r *http.Request, slug string) 
 		httpErr(w, http.StatusMethodNotAllowed, "POST")
 		return
 	}
+	pid, err := resolveProjectFromRequest(r)
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	repo, err := requireRepoSlug(globalCtx, pid, slug)
+	if err != nil {
+		httpErr(w, http.StatusNotFound, err.Error())
+		return
+	}
 	var body struct {
-		Pattern        string `json:"pattern"`
-		Path           string `json:"path"`
-		FilePattern    string `json:"file_pattern"`
-		Regex          bool   `json:"regex"`
-		IgnoreCase     bool   `json:"ignore_case"`
-		Context        int    `json:"context"`
-		Limit          int    `json:"limit"`
-		OutputMode     string `json:"output_mode"`
-		MatchesPerFile int    `json:"matches_per_file"`
+		Pattern          string `json:"pattern"`
+		Path             string `json:"path"`
+		FilePattern      string `json:"file_pattern"`
+		Regex            bool   `json:"regex"`
+		IgnoreCase       bool   `json:"ignore_case"`
+		Context          int    `json:"context"`
+		Limit            int    `json:"limit"`
+		OutputMode       string `json:"output_mode"`
+		MatchesPerFile   int    `json:"matches_per_file"`
+		IncludeGenerated bool   `json:"include_generated"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		httpErr(w, http.StatusBadRequest, "invalid JSON")
 		return
 	}
 	o := GrepOptions{
-		Pattern:        body.Pattern,
-		Path:           body.Path,
-		FilePattern:    body.FilePattern,
-		Regex:          body.Regex,
-		IgnoreCase:     body.IgnoreCase,
-		Context:        body.Context,
-		Limit:          body.Limit,
-		OutputMode:     body.OutputMode,
-		MatchesPerFile: body.MatchesPerFile,
+		Pattern:          body.Pattern,
+		Path:             body.Path,
+		FilePattern:      body.FilePattern,
+		Regex:            body.Regex,
+		IgnoreCase:       body.IgnoreCase,
+		Context:          body.Context,
+		Limit:            body.Limit,
+		OutputMode:       body.OutputMode,
+		MatchesPerFile:   body.MatchesPerFile,
+		IncludeGenerated: body.IncludeGenerated,
 	}
 	if o.Path != "" {
 		clean, err := normalisePath(o.Path)
@@ -496,7 +538,7 @@ func (a *App) httpRepoGrep(w http.ResponseWriter, r *http.Request, slug string) 
 		}
 		o.Path = clean
 	}
-	res, err := grepRepo(a.store, slug, o)
+	res, err := grepRepo(a.storeFor(repo), slug, o)
 	if err != nil {
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
@@ -516,11 +558,12 @@ func (a *App) httpRepoExport(w http.ResponseWriter, r *http.Request, slug string
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if _, err := requireRepoSlug(globalCtx, pid, slug); err != nil {
+	repo, err := requireRepoSlug(globalCtx, pid, slug)
+	if err != nil {
 		httpErr(w, http.StatusNotFound, err.Error())
 		return
 	}
-	if err := writeZip(w, a.store, slug); err != nil {
+	if err := writeZip(w, a.storeFor(repo), slug); err != nil {
 		// Headers already written; the client gets a truncated zip
 		// which they'll catch via CRC. Log + move on.
 		globalCtx.Logger().Warn("export zip", "slug", slug, "err", err)
@@ -542,6 +585,8 @@ func (a *App) httpRepoImport(w http.ResponseWriter, r *http.Request, slug string
 		httpErr(w, http.StatusNotFound, err.Error())
 		return
 	}
+	limits := currentImportLimits()
+	r.Body = http.MaxBytesReader(w, r.Body, limits.CompressedBytes)
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		httpErr(w, http.StatusBadRequest, err.Error())
@@ -552,7 +597,7 @@ func (a *App) httpRepoImport(w http.ResponseWriter, r *http.Request, slug string
 		httpErr(w, http.StatusBadRequest, "not a valid zip")
 		return
 	}
-	count, err := readZipInto(a.store, slug, zr)
+	count, err := readZipInto(a.storeFor(repo), slug, zr)
 	if err != nil {
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
@@ -871,7 +916,7 @@ func (a *App) handleTemplatesList(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	for _, repo := range repos {
-		files, _ := a.store.List(repo.Slug, "", true)
+		files, _ := a.storeFor(repo).List(repo.Slug, "", true)
 		out = append(out, TemplateEntry{
 			Kind: "user", Name: repo.Name, Slug: repo.Slug,
 			Tagline: repo.TemplateTagline, Icon: repo.TemplateIcon,

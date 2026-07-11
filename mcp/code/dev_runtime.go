@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/http"
 	"os"
@@ -393,7 +394,17 @@ func (s *devSupervisor) startDevRun(ctx *sdk.AppCtx, in startDevInput) (*DevRun,
 	if in.Repo == nil {
 		return nil, errors.New("repo required")
 	}
-	pp, ok := s.store.(FileStoreLocalPath)
+	startCtx, cancelStart := context.WithTimeout(context.Background(), 10*time.Minute)
+	defer cancelStart()
+	if s.app != nil {
+		release, err := s.app.commands.acquire(startCtx, in.Repo.ID)
+		if err != nil {
+			return nil, err
+		}
+		defer release()
+	}
+	repoStore := bindRepoStore(s.store, in.Repo)
+	pp, ok := repoStore.(FileStoreLocalPath)
 	if !ok {
 		return nil, errors.New("dev runtime requires a local filesystem store; remote storage backends aren't supported yet")
 	}
@@ -412,7 +423,7 @@ func (s *devSupervisor) startDevRun(ctx *sdk.AppCtx, in startDevInput) (*DevRun,
 
 	fw := in.Framework
 	if fw == "" {
-		fw = detectDevFramework(s.store, in.Repo.Slug)
+		fw = detectDevFramework(repoStore, in.Repo.Slug)
 	}
 	if fw == "" {
 		return nil, errors.New(`could not detect framework — pass framework="blank" with a run_cmd, or add a marker file (package.json, go.mod, index.html)`)
@@ -437,11 +448,12 @@ func (s *devSupervisor) startDevRun(ctx *sdk.AppCtx, in startDevInput) (*DevRun,
 	}
 	// Truncate on each start — dev runs aren't archived; the file
 	// stays small and the user sees only the current session's output.
-	logF, err := os.OpenFile(logPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o644)
+	logF, err := os.OpenFile(logPath, os.O_CREATE|os.O_TRUNC|os.O_WRONLY, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("open log: %w", err)
 	}
-	fmt.Fprintf(logF, "=== dev run for %s/%d (%s) at %s ===\n",
+	logOut := newCappedWriter(logF, maxProcessLogBytes)
+	fmt.Fprintf(logOut, "=== dev run for %s/%d (%s) at %s ===\n",
 		in.ProjectID, in.Repo.ID, in.Repo.Slug, time.Now().UTC().Format(time.RFC3339))
 
 	dr, err := dbUpsertDevRun(ctx.AppDB(), DevRun{
@@ -461,11 +473,19 @@ func (s *devSupervisor) startDevRun(ctx *sdk.AppCtx, in startDevInput) (*DevRun,
 	// bootstraps local CLIs such as Tailwind, Vite, Astro, Next, and
 	// TypeScript on a clean workspace. Code's dev runner remains a
 	// test/preview path; production releases still belong to Deploy.
+	processEnv, err := commandEnvironment(s.dataDir, in.EnvJSON)
+	if err != nil {
+		logF.Close()
+		return nil, err
+	}
+	if in.ProjectID != "" {
+		processEnv = append(processEnv, "APTEVA_PROJECT_ID="+in.ProjectID)
+	}
 	if plan, err := nodeDepsInstallPlan(srcDir); err != nil {
 		logF.Close()
 		return nil, err
 	} else if plan.Needed {
-		if err := installNodeDeps(srcDir, logF, plan); err != nil {
+		if err := installNodeDeps(startCtx, srcDir, logOut, plan, processEnv); err != nil {
 			_ = dbUpdateDevRun(ctx.AppDB(), dr.ID, map[string]any{
 				"status":     "crashed",
 				"stopped_at": time.Now().UTC().Format(time.RFC3339),
@@ -476,7 +496,7 @@ func (s *devSupervisor) startDevRun(ctx *sdk.AppCtx, in startDevInput) (*DevRun,
 		}
 	}
 
-	if err := s.spawn(ctx, dr, srcDir, fw, in.RunCmd, in.EnvJSON, port, logF); err != nil {
+	if err := s.spawn(ctx, dr, srcDir, fw, in.RunCmd, in.EnvJSON, port, logF, logOut); err != nil {
 		_ = dbUpdateDevRun(ctx.AppDB(), dr.ID, map[string]any{
 			"status":     "crashed",
 			"stopped_at": time.Now().UTC().Format(time.RFC3339),
@@ -588,7 +608,7 @@ func nodeDepsStatePath(srcDir string) string {
 // installNodeDeps runs the selected package-manager install
 // synchronously, streaming stdout/stderr into the dev log so the panel
 // shows progress live.
-func installNodeDeps(srcDir string, logF *os.File, plan nodeDepsInstall) error {
+func installNodeDeps(ctx context.Context, srcDir string, logF io.Writer, plan nodeDepsInstall, env []string) error {
 	pm := plan.PM
 	if pm == "" {
 		pm = detectPackageManagerInDir(srcDir)
@@ -608,9 +628,10 @@ func installNodeDeps(srcDir string, logF *os.File, plan nodeDepsInstall) error {
 	fmt.Fprintf(logF, "+ %s %s (cwd=%s)\n", pm, strings.Join(args, " "), srcDir)
 	cmd := exec.Command(pm, args...)
 	cmd.Dir = srcDir
+	cmd.Env = env
 	cmd.Stdout = logF
 	cmd.Stderr = logF
-	if err := cmd.Run(); err != nil {
+	if err := runProcessGroup(ctx, cmd); err != nil {
 		return fmt.Errorf("%s %s: %w (see dev log for details)", pm, strings.Join(args, " "), err)
 	}
 	hash := plan.Hash
@@ -635,16 +656,16 @@ func installNodeDeps(srcDir string, logF *os.File, plan nodeDepsInstall) error {
 // path (no child process; in-process FileServer) from the process
 // path (exec.Cmd + supervisor goroutine). Both end up in s.all so
 // stopDevRun can shut them down uniformly.
-func (s *devSupervisor) spawn(ctx *sdk.AppCtx, dr *DevRun, srcDir, framework, runCmd, envJSON string, port int, logF *os.File) error {
+func (s *devSupervisor) spawn(ctx *sdk.AppCtx, dr *DevRun, srcDir, framework, runCmd, envJSON string, port int, logF *os.File, logOut io.Writer) error {
 	if framework == "static" {
-		return s.spawnStatic(ctx, dr, srcDir, port, logF)
+		return s.spawnStatic(ctx, dr, srcDir, port, logF, logOut)
 	}
-	return s.spawnProcess(ctx, dr, srcDir, framework, runCmd, envJSON, port, logF)
+	return s.spawnProcess(ctx, dr, srcDir, framework, runCmd, envJSON, port, logF, logOut)
 }
 
-func (s *devSupervisor) spawnStatic(ctx *sdk.AppCtx, dr *DevRun, srcDir string, port int, logF *os.File) error {
+func (s *devSupervisor) spawnStatic(ctx *sdk.AppCtx, dr *DevRun, srcDir string, port int, logF *os.File, logOut io.Writer) error {
 	mux := http.NewServeMux()
-	mux.Handle("/", http.FileServer(http.Dir(srcDir)))
+	mux.Handle("/", staticPreviewHandler(srcDir))
 	srv := &http.Server{Addr: fmt.Sprintf("127.0.0.1:%d", port), Handler: mux}
 	ln, err := net.Listen("tcp", srv.Addr)
 	if err != nil {
@@ -653,13 +674,13 @@ func (s *devSupervisor) spawnStatic(ctx *sdk.AppCtx, dr *DevRun, srcDir string, 
 	stop := make(chan struct{})
 	go func() {
 		defer close(stop)
-		fmt.Fprintf(logF, "+ in-process FileServer (cwd=%s, port=%d)\n", srcDir, port)
+		fmt.Fprintf(logOut, "+ in-process FileServer (cwd=%s, port=%d)\n", srcDir, port)
 		err := srv.Serve(ln)
 		if err != nil && !errors.Is(err, http.ErrServerClosed) {
-			fmt.Fprintf(logF, "static server error: %v\n", err)
+			fmt.Fprintf(logOut, "static server error: %v\n", err)
 			s.markCrashed(ctx, dr.ID, err.Error())
 		} else {
-			fmt.Fprintf(logF, "=== static server stopped at %s ===\n", time.Now().UTC().Format(time.RFC3339))
+			fmt.Fprintf(logOut, "=== static server stopped at %s ===\n", time.Now().UTC().Format(time.RFC3339))
 		}
 		_ = logF.Close()
 	}()
@@ -675,7 +696,7 @@ func (s *devSupervisor) spawnStatic(ctx *sdk.AppCtx, dr *DevRun, srcDir string, 
 	return nil
 }
 
-func (s *devSupervisor) spawnProcess(ctx *sdk.AppCtx, dr *DevRun, srcDir, framework, runCmd, envJSON string, port int, logF *os.File) error {
+func (s *devSupervisor) spawnProcess(ctx *sdk.AppCtx, dr *DevRun, srcDir, framework, runCmd, envJSON string, port int, logF *os.File, logOut io.Writer) error {
 	bin, args, err := resolveDevCommand(framework, runCmd, srcDir)
 	if err != nil {
 		return err
@@ -683,15 +704,19 @@ func (s *devSupervisor) spawnProcess(ctx *sdk.AppCtx, dr *DevRun, srcDir, framew
 	cctx, cancel := context.WithCancel(context.Background())
 	cmd := exec.CommandContext(cctx, bin, args...)
 	cmd.Dir = srcDir
-	cmd.Stdout = logF
-	cmd.Stderr = logF
-	cmd.Env = mergeDevEnv(envJSON, port)
+	cmd.Stdout = logOut
+	cmd.Stderr = logOut
+	cmd.Env, err = mergeDevEnv(s.dataDir, envJSON, port, dr.ProjectID)
+	if err != nil {
+		cancel()
+		return err
+	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	if strings.TrimSpace(runCmd) != "" {
-		fmt.Fprintf(logF, "+ %s (cwd=%s, port=%d)\n", strings.TrimSpace(runCmd), srcDir, port)
+		fmt.Fprintf(logOut, "+ %s (cwd=%s, port=%d)\n", strings.TrimSpace(runCmd), srcDir, port)
 	} else {
-		fmt.Fprintf(logF, "+ %s %s (cwd=%s, port=%d)\n", bin, strings.Join(args, " "), srcDir, port)
+		fmt.Fprintf(logOut, "+ %s %s (cwd=%s, port=%d)\n", bin, strings.Join(args, " "), srcDir, port)
 	}
 	if err := cmd.Start(); err != nil {
 		cancel()
@@ -718,7 +743,7 @@ func (s *devSupervisor) spawnProcess(ctx *sdk.AppCtx, dr *DevRun, srcDir, framew
 		if cmd.ProcessState != nil {
 			exit = cmd.ProcessState.ExitCode()
 		}
-		fmt.Fprintf(logF, "=== exited at %s (exit=%d, err=%v) ===\n",
+		fmt.Fprintf(logOut, "=== exited at %s (exit=%d, err=%v) ===\n",
 			time.Now().UTC().Format(time.RFC3339), exit, err)
 		_ = logF.Close()
 		if cctx.Err() != nil {
@@ -774,19 +799,17 @@ func resolveDevCommand(framework, runCmd, srcDir string) (string, []string, erro
 	return fw.Command(srcDir)
 }
 
-func mergeDevEnv(envJSON string, port int) []string {
-	out := append([]string{}, os.Environ()...)
+func mergeDevEnv(dataDir, envJSON string, port int, projectID string) ([]string, error) {
+	out, err := commandEnvironment(dataDir, envJSON)
+	if err != nil {
+		return nil, err
+	}
 	out = append(out, fmt.Sprintf("PORT=%d", port))
 	out = append(out, "NODE_ENV=development")
-	if envJSON != "" {
-		var m map[string]string
-		if json.Unmarshal([]byte(envJSON), &m) == nil {
-			for k, v := range m {
-				out = append(out, k+"="+v)
-			}
-		}
+	if projectID != "" {
+		out = append(out, "APTEVA_PROJECT_ID="+projectID)
 	}
-	return out
+	return out, nil
 }
 
 // stopDevRun terminates the supervised process / static server, marks
@@ -964,14 +987,36 @@ func tailFile(path string, lines int) (string, error) {
 	if lines <= 0 {
 		lines = 200
 	}
-	body, err := os.ReadFile(path)
+	if lines > 2000 {
+		lines = 2000
+	}
+	f, err := os.Open(path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return "", nil
 		}
 		return "", err
 	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return "", err
+	}
+	const maxTailBytes int64 = 1 << 20
+	start := info.Size() - maxTailBytes
+	if start < 0 {
+		start = 0
+	}
+	body := make([]byte, info.Size()-start)
+	if _, err := f.ReadAt(body, start); err != nil && !errors.Is(err, io.EOF) {
+		return "", err
+	}
 	s := string(body)
+	if start > 0 {
+		if newline := strings.IndexByte(s, '\n'); newline >= 0 {
+			s = s[newline+1:]
+		}
+	}
 	// Walk from the end counting newlines.
 	count := 0
 	for i := len(s) - 1; i >= 0; i-- {

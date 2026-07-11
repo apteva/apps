@@ -47,10 +47,17 @@ const (
 )
 
 func readWithLineNumbers(store FileStore, slug, p string, offset, limit int) (*ReadResult, error) {
+	if paged, ok := store.(pagedFileReader); ok {
+		return paged.ReadPage(slug, p, offset, limit)
+	}
 	body, sha, err := readWithSHA(store, slug, p)
 	if err != nil {
 		return nil, err
 	}
+	return renderReadResult(p, body, sha, offset, limit), nil
+}
+
+func renderReadResult(p string, body []byte, sha string, offset, limit int) *ReadResult {
 	lines := strings.Split(string(body), "\n")
 	// strings.Split appends a trailing empty entry when the file ends
 	// with \n — drop it so TotalLines matches what `wc -l + 1` says
@@ -110,7 +117,7 @@ func readWithLineNumbers(store FileStore, slug, p string, offset, limit int) (*R
 		Truncated:          truncated,
 		LongLinesTruncated: longLinesTruncated,
 		Hint:               hint,
-	}, nil
+	}
 }
 
 func truncateLine(line string, max int) (string, bool) {
@@ -132,12 +139,6 @@ type ExcerptOptions struct {
 }
 
 func readExcerpt(store FileStore, slug, p string, o ExcerptOptions) (*ReadResult, error) {
-	body, _, err := readWithSHA(store, slug, p)
-	if err != nil {
-		return nil, err
-	}
-	lines := splitVisibleLines(body)
-	total := len(lines)
 	limit := o.Limit
 	if limit <= 0 {
 		limit = defaultReadLimit
@@ -164,11 +165,16 @@ func readExcerpt(store FileStore, slug, p string, o ExcerptOptions) (*ReadResult
 		return readWithLineNumbers(store, slug, p, start, limit)
 	}
 	if o.Tail {
+		body, sha, err := readWithSHA(store, slug, p)
+		if err != nil {
+			return nil, err
+		}
+		total := len(splitVisibleLines(body))
 		start := total - limit + 1
 		if start < 1 {
 			start = 1
 		}
-		return readWithLineNumbers(store, slug, p, start, limit)
+		return renderReadResult(p, body, sha, start, limit), nil
 	}
 	start := o.StartLine
 	if start <= 0 {
@@ -456,22 +462,39 @@ func multiEditFile(store FileStore, slug, p string, ops []EditOp) (*MultiEditRes
 // globRepo matches paths in a repo against a doublestar glob (e.g.
 // "**/*.tsx", "app/**/*.ts"). Uses the doublestar library so "**"
 // crosses directory boundaries the way agents expect.
+
 func globRepo(store FileStore, slug, pattern string) ([]string, error) {
+	return globRepoWithOptions(store, slug, pattern, false, 2000)
+}
+
+func globRepoWithOptions(store FileStore, slug, pattern string, includeGenerated bool, limit int) ([]string, error) {
 	if pattern == "" {
 		return nil, errors.New("pattern required")
 	}
-	files, err := store.List(slug, "", true)
+	files, err := listSourceFiles(store, slug, "", true, includeGenerated)
 	if err != nil {
 		return nil, err
 	}
 	var out []string
+	if limit <= 0 {
+		limit = 2000
+	}
+	if limit > 10000 {
+		limit = 10000
+	}
 	for _, f := range files {
+		if !includeGenerated && shouldSkipGenerated(f.Path) {
+			continue
+		}
 		ok, err := doublestar.PathMatch(pattern, f.Path)
 		if err != nil {
 			return nil, fmt.Errorf("invalid glob: %w", err)
 		}
 		if ok {
 			out = append(out, f.Path)
+			if len(out) >= limit {
+				break
+			}
 		}
 	}
 	sort.Strings(out)
@@ -507,15 +530,16 @@ type GrepResult struct {
 
 // GrepOptions mirrors what callers can configure.
 type GrepOptions struct {
-	Pattern        string
-	Path           string // sub-tree prefix
-	FilePattern    string // glob; empty = all files
-	Regex          bool   // false = literal, true = regex
-	Context        int    // lines of before/after context
-	IgnoreCase     bool
-	Limit          int // max matches
-	OutputMode     string
-	MatchesPerFile int
+	Pattern          string
+	Path             string // sub-tree prefix
+	FilePattern      string // glob; empty = all files
+	Regex            bool   // false = literal, true = regex
+	Context          int    // lines of before/after context
+	IgnoreCase       bool
+	Limit            int // max matches
+	OutputMode       string
+	MatchesPerFile   int
+	IncludeGenerated bool
 }
 
 const (
@@ -550,7 +574,7 @@ func grepRepo(store FileStore, slug string, o GrepOptions) (*GrepResult, error) 
 	if o.Context > grepMaxContext {
 		o.Context = grepMaxContext
 	}
-	files, err := store.List(slug, o.Path, true)
+	files, err := listSourceFiles(store, slug, o.Path, true, o.IncludeGenerated)
 	if err != nil {
 		return nil, err
 	}
@@ -576,6 +600,9 @@ func grepRepo(store FileStore, slug string, o GrepOptions) (*GrepResult, error) 
 		if result.Count >= o.Limit {
 			result.Truncated = true
 			break
+		}
+		if !o.IncludeGenerated && shouldSkipGenerated(f.Path) {
+			continue
 		}
 		if o.FilePattern != "" {
 			ok, err := doublestar.PathMatch(o.FilePattern, f.Path)
