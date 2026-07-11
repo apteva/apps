@@ -2,12 +2,13 @@ schema: apteva-app/v1
 
 name: jobs
 display_name: Jobs
-version: 0.1.10
+version: 0.1.11
 description: |
   Scheduled-job runner. Other apps (and agents) enqueue work to be
   delivered later — once at a future time, on an interval, or on a
-  cron expression. Targets are HTTP routes on other apps or instance
-  events; jobs is the connective tissue that lets every other app
+  cron expression. Targets are platform-mediated tools on other apps,
+  external HTTP endpoints, or instance events; jobs is the connective
+  tissue that lets every other app
   schedule without reimplementing a scheduler. At-least-once delivery
   with idempotency keys, exponential backoff, and a runs log.
 
@@ -23,15 +24,17 @@ requires:
   permissions:
     - db.write.app
     - net.egress
+    - platform.apps.call
     - platform.instances.read
     - platform.instances.write
+  dynamic_app_calls: true
 
 provides:
   http_routes:
     - prefix: /
   mcp_tools:
     - name: jobs_schedule
-      description: Schedule a job (once / every / cron) with an HTTP or event target.
+      description: Schedule a job (once / every / cron) with an app-tool, external HTTP, or event target.
     - name: jobs_cancel
       description: Cancel a scheduled job. Idempotent.
     - name: jobs_list
@@ -76,6 +79,11 @@ config_schema:
     default: "20"
     label: Dispatch batch size
     description: Maximum jobs claimed per ticker tick. Tune up for very high schedule density.
+  - name: dispatch_concurrency
+    type: text
+    default: "8"
+    label: Dispatch concurrency
+    description: Maximum jobs executed concurrently within one dispatcher tick. Max 50.
   - name: http_dispatch_timeout_seconds
     type: text
     default: "180"

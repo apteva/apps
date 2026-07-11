@@ -102,7 +102,8 @@ func TestComputeNextRun_Once(t *testing.T) {
 func TestValidateTarget(t *testing.T) {
 	good := []map[string]any{
 		{"kind": "http", "url": "https://example.com/x"},
-		{"kind": "http", "app": "crm", "path": "/cron/x"},
+		{"kind": "app_tool", "app": "crm", "tool": "crm_sync", "input": map[string]any{}},
+		{"kind": "http", "app": "functions", "path": "/fn/daily-report"}, // legacy compatibility
 		{"kind": "event", "instance_id": float64(7), "message": "hi"},
 	}
 	for _, g := range good {
@@ -111,11 +112,12 @@ func TestValidateTarget(t *testing.T) {
 		}
 	}
 	bad := []map[string]any{
-		{"kind": "http"},              // no url, no app/path
-		{"kind": "http", "app": "x"},  // app without path
-		{"kind": "event"},             // no instance / message
+		{"kind": "http"},             // no url, no app/path
+		{"kind": "http", "app": "x"}, // app-relative HTTP is no longer authorized
+		{"kind": "app_tool", "app": "x"},
+		{"kind": "event"}, // no instance / message
 		{"kind": "event", "instance_id": float64(7)},
-		{"kind": "smtp", "url": "x"},  // unknown kind
+		{"kind": "smtp", "url": "x"}, // unknown kind
 	}
 	for _, b := range bad {
 		if err := validateTarget(b); err == nil {

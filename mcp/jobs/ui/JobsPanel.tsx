@@ -90,10 +90,10 @@ interface NativePanelProps {
 }
 
 type ScheduleKind = "once" | "every" | "cron";
-type Status = "scheduled" | "running" | "succeeded" | "failed" | "cancelled" | "paused";
+type Status = "pending" | "running" | "done" | "failed" | "cancelled";
 
 interface Job {
-  id: string;
+  id: number;
   name: string;
   schedule_kind: ScheduleKind;
   every_seconds?: number;
@@ -107,10 +107,10 @@ interface Job {
 }
 
 interface JobRun {
-  id: string;
+  id: number;
   started_at: string;
   duration_ms: number;
-  status: "succeeded" | "failed" | "skipped";
+  status: "ok" | "error" | "timeout";
   http_status?: number;
   error?: string;
 }
@@ -146,10 +146,9 @@ function relTime(s?: string): string {
 function statusTone(s: Status): string {
   switch (s) {
     case "running":   return "bg-accent/15 text-accent";
-    case "succeeded": return "bg-green/15 text-green";
+    case "done":      return "bg-green/15 text-green";
     case "failed":    return "bg-red/15 text-red";
     case "cancelled": return "bg-border text-text-muted";
-    case "paused":    return "bg-blue/15 text-blue";
     default:          return "bg-border text-text-muted";
   }
 }
@@ -157,7 +156,7 @@ function statusTone(s: Status): string {
 export default function JobsPanel({ projectId, installId }: NativePanelProps) {
   const [jobs, setJobs] = useState<Job[]>([]);
   const [statusFilter, setStatusFilter] = useState<Status | "">("");
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [selectedId, setSelectedId] = useState<number | null>(null);
   const [detail, setDetail] = useState<Job | null>(null);
   const [runs, setRuns] = useState<JobRun[]>([]);
   const [error, setError] = useState("");
@@ -202,7 +201,7 @@ export default function JobsPanel({ projectId, installId }: NativePanelProps) {
   }, [api, statusFilter]);
 
   const loadDetail = useCallback(
-    async (id: string) => {
+    async (id: number) => {
       try {
         const j = await api<{ job: Job }>("GET", `/jobs/${id}`);
         const r = await api<{ runs?: JobRun[] }>("GET", `/jobs/${id}/runs`);
@@ -216,14 +215,14 @@ export default function JobsPanel({ projectId, installId }: NativePanelProps) {
     [api],
   );
 
-  // Initial load + soft refresh every 5s so "running" / "next run"
-  // stay current. The selected job's detail is reloaded too.
+  // Events drive normal refreshes. A slower poll handles missed events and
+  // keeps relative timestamps current without multiplying dashboard traffic.
   useEffect(() => { loadList(); }, [loadList]);
   useEffect(() => {
     const id = setInterval(() => {
       loadList();
       if (selectedId) loadDetail(selectedId);
-    }, 5000);
+    }, 30000);
     return () => clearInterval(id);
   }, [loadList, loadDetail, selectedId]);
 
@@ -234,7 +233,8 @@ export default function JobsPanel({ projectId, installId }: NativePanelProps) {
     if (
       ev.topic === "job.scheduled" ||
       ev.topic === "job.cancelled" ||
-      ev.topic === "job.queued"
+      ev.topic === "job.queued" ||
+      ev.topic === "job.updated"
     ) {
       loadList();
       if (selectedId) loadDetail(selectedId);
@@ -263,7 +263,7 @@ export default function JobsPanel({ projectId, installId }: NativePanelProps) {
     }
   };
 
-  const select = (id: string) => {
+  const select = (id: number) => {
     setSelectedId(id);
     loadDetail(id);
   };
@@ -288,11 +288,10 @@ export default function JobsPanel({ projectId, installId }: NativePanelProps) {
           className="bg-bg-input border border-border rounded px-2 py-1 text-sm ml-4"
         >
           <option value="">all</option>
-          <option value="scheduled">scheduled</option>
+          <option value="pending">pending</option>
           <option value="running">running</option>
-          <option value="succeeded">succeeded</option>
+          <option value="done">done</option>
           <option value="failed">failed</option>
-          <option value="paused">paused</option>
           <option value="cancelled">cancelled</option>
         </select>
         <button
@@ -400,6 +399,7 @@ function DetailDialog({
   const [confirming, setConfirming] = useState(false);
   const [cancelling, setCancelling] = useState(false);
   const cancelled = job.status === "cancelled";
+  const terminal = cancelled || job.status === "done" || job.status === "failed";
   const handleConfirmCancel = async () => {
     setCancelling(true);
     try { await onCancel(); }
@@ -444,11 +444,11 @@ function DetailDialog({
           <button
             type="button"
             onClick={onRunNow}
-            disabled={cancelled || cancelling}
+            disabled={terminal || job.status === "running" || cancelling}
             className="px-3 py-1 text-sm border border-accent text-accent rounded disabled:opacity-50"
           >Run now</button>
-          {cancelled ? (
-            <span className="ml-auto text-text-dim text-xs">Job cancelled</span>
+          {terminal ? (
+            <span className="ml-auto text-text-dim text-xs">Job is {job.status}</span>
           ) : confirming ? (
             <div className="ml-auto flex items-center gap-2">
               <span className="text-text-muted text-xs">Cancel this job?</span>
@@ -498,8 +498,8 @@ function DetailDialog({
                     <td className="px-3 py-2 text-text-muted">{r.duration_ms} ms</td>
                     <td className="px-3 py-2">
                       <span className={`text-[10px] px-1.5 py-0.5 rounded ${
-                        r.status === "succeeded" ? "bg-green/15 text-green" :
-                        r.status === "failed" ? "bg-red/15 text-red" :
+                        r.status === "ok" ? "bg-green/15 text-green" :
+                        r.status === "error" || r.status === "timeout" ? "bg-red/15 text-red" :
                         "bg-border text-text-muted"
                       }`}>{r.status}</span>
                     </td>
@@ -548,14 +548,15 @@ function CreateJobDialog({
   const [everyUnit, setEveryUnit] = useState<"s" | "m" | "h">("m");
   const [cronExpr, setCronExpr] = useState("*/5 * * * *");
 
-  const [targetKind, setTargetKind] = useState<"event" | "http">("event");
-  const [agentId, setAgentId] = useState("self");
+  const [targetKind, setTargetKind] = useState<"event" | "http" | "app_tool">("event");
+  const [agentId, setAgentId] = useState("");
   const [eventMessage, setEventMessage] = useState("");
-  const [httpApp, setHttpApp] = useState("");
-  const [httpPath, setHttpPath] = useState("");
   const [httpUrl, setHttpUrl] = useState("");
   const [httpMethod, setHttpMethod] = useState("POST");
   const [httpBodyText, setHttpBodyText] = useState("");
+  const [appName, setAppName] = useState("functions");
+  const [toolName, setToolName] = useState("functions_invoke");
+  const [toolInputText, setToolInputText] = useState('{"name":"my-function","event":{}}');
 
   const [submitting, setSubmitting] = useState(false);
   const [err, setErr] = useState("");
@@ -581,20 +582,14 @@ function CreateJobDialog({
 
     const target: Record<string, unknown> = { kind: targetKind };
     if (targetKind === "event") {
+      const id = Number(agentId);
+      if (!Number.isInteger(id) || id <= 0) { setErr("Agent ID must be a positive integer."); return; }
       if (!eventMessage.trim()) { setErr("Event message required."); return; }
-      target.agent_id = agentId.trim() || "self";
+      target.agent_id = id;
       target.message = eventMessage;
-    } else {
-      // http: either {app, path} or {url}
-      if (httpUrl.trim()) {
-        target.url = httpUrl.trim();
-      } else if (httpApp.trim() && httpPath.trim()) {
-        target.app = httpApp.trim();
-        target.path = httpPath.trim().startsWith("/") ? httpPath.trim() : "/" + httpPath.trim();
-      } else {
-        setErr("HTTP target needs either url, or both app and path.");
-        return;
-      }
+    } else if (targetKind === "http") {
+      if (!httpUrl.trim()) { setErr("HTTP target requires an absolute URL."); return; }
+      target.url = httpUrl.trim();
       target.method = httpMethod;
       if (httpBodyText.trim()) {
         try {
@@ -603,6 +598,18 @@ function CreateJobDialog({
           setErr("Body must be valid JSON (or leave blank).");
           return;
         }
+      }
+    } else {
+      if (!appName.trim() || !toolName.trim()) { setErr("App and tool are required."); return; }
+      target.app = appName.trim();
+      target.tool = toolName.trim();
+      try {
+        const input = toolInputText.trim() ? JSON.parse(toolInputText) : {};
+        if (!input || Array.isArray(input) || typeof input !== "object") throw new Error();
+        target.input = input;
+      } catch {
+        setErr("Tool input must be a JSON object.");
+        return;
       }
     }
 
@@ -702,7 +709,7 @@ function CreateJobDialog({
         <div className="flex flex-col gap-1">
           <label className={labelCls}>Target</label>
           <div className="flex gap-1">
-            {(["event", "http"] as const).map((k) => (
+            {(["event", "app_tool", "http"] as const).map((k) => (
               <button
                 key={k}
                 type="button"
@@ -712,7 +719,7 @@ function CreateJobDialog({
                     ? "border-accent text-accent bg-accent/10"
                     : "border-border text-text-muted hover:bg-bg-input"
                 }`}
-              >{k}</button>
+              >{k === "app_tool" ? "app tool" : k}</button>
             ))}
           </div>
           {targetKind === "event" ? (
@@ -721,7 +728,7 @@ function CreateJobDialog({
                 type="text"
                 value={agentId}
                 onChange={(e) => setAgentId(e.target.value)}
-                placeholder="agent id (or 'self')"
+                placeholder="agent ID"
                 className={inputCls}
               />
               <textarea
@@ -731,33 +738,15 @@ function CreateJobDialog({
                 className={inputCls + " min-h-[64px]"}
               />
             </div>
-          ) : (
+          ) : targetKind === "http" ? (
             <div className="flex flex-col gap-2 mt-1">
               <input
                 type="text"
                 value={httpUrl}
                 onChange={(e) => setHttpUrl(e.target.value)}
-                placeholder="absolute URL (requires net.egress) — leave blank to use app+path"
+                placeholder="absolute HTTP(S) URL"
                 className={inputCls}
               />
-              <div className="flex gap-2">
-                <input
-                  type="text"
-                  value={httpApp}
-                  onChange={(e) => setHttpApp(e.target.value)}
-                  placeholder="app slug (e.g. crm)"
-                  className="flex-1 min-w-0 bg-bg-input border border-border rounded px-2 py-1.5 text-sm"
-                  disabled={!!httpUrl.trim()}
-                />
-                <input
-                  type="text"
-                  value={httpPath}
-                  onChange={(e) => setHttpPath(e.target.value)}
-                  placeholder="/path"
-                  className="flex-1 min-w-0 bg-bg-input border border-border rounded px-2 py-1.5 text-sm"
-                  disabled={!!httpUrl.trim()}
-                />
-              </div>
               <div className="flex gap-2">
                 <select
                   value={httpMethod}
@@ -777,6 +766,19 @@ function CreateJobDialog({
                   className="flex-1 min-w-0 bg-bg-input border border-border rounded px-2 py-1.5 text-sm font-mono"
                 />
               </div>
+            </div>
+          ) : (
+            <div className="flex flex-col gap-2 mt-1">
+              <div className="flex gap-2">
+                <input value={appName} onChange={(e) => setAppName(e.target.value)} placeholder="app slug" className={inputCls} />
+                <input value={toolName} onChange={(e) => setToolName(e.target.value)} placeholder="tool name" className={inputCls} />
+              </div>
+              <textarea
+                value={toolInputText}
+                onChange={(e) => setToolInputText(e.target.value)}
+                placeholder='Tool input JSON, e.g. {"name":"daily-report","event":{}}'
+                className={inputCls + " min-h-[80px] font-mono"}
+              />
             </div>
           )}
         </div>

@@ -1,28 +1,28 @@
-# Jobs (v0.1)
+# Jobs
 
 Scheduled-job runner for Apteva. The connective tissue every other
 app uses to schedule work without reimplementing a scheduler.
 
-## What's in v0.1
+## Capabilities
 
 - **Three schedule kinds:** `once` (run at a specific time), `every`
   (interval in seconds), `cron` (5-field expression in a chosen tz).
-- **Two target kinds:** `http` (call another app's route, or an
-  absolute URL gated by `net.egress`) and `event` (call
-  `PlatformAPI.SendEvent` on an instance).
+- **Three target kinds:** `app_tool` (platform-authorized sibling app
+  call), `http` (absolute external URL gated by `net.egress`), and
+  `event` (`PlatformAPI.SendEvent` to an agent).
 - **6 MCP tools:** `jobs_schedule`, `jobs_cancel`, `jobs_list`,
   `jobs_get`, `jobs_runs`, `jobs_run_now`.
 - **REST surface** at `/api/apps/jobs/*` for the dashboard panel and
   for other apps to enqueue without going through MCP.
-- **Jobs panel** (vanilla HTML+JS) in `project.page` slot, embeddable
-  by other apps with `?owner_app=<slug>` to scope the list.
+- **Native React Jobs panel** in the `project.page` slot.
 - **At-least-once delivery** with idempotency keys forwarded to HTTP
   targets, exponential backoff, configurable `max_retries`.
 - **Configurable HTTP dispatch deadlines**: default `180s` via
   `http_dispatch_timeout_seconds`, with per-job `target.timeout_seconds`
   or `target.timeout_ms` overrides, capped at 300 seconds.
-- **Single-replica dispatcher** with a row-level lease so a crashed
-  tick doesn't strand a job.
+- **Bounded concurrent dispatcher** with uniquely owned, reclaimable
+  row leases for safe crash recovery and multi-replica execution.
+- **Run retention** controlled by `history_retention_days`.
 - **Two install scopes**: `project` (one install per Apteva project)
   or `global` (one install across projects, isolated by `project_id`).
 
@@ -36,10 +36,10 @@ POST /api/apps/jobs/jobs?project_id=proj-1
   "owner_app": "crm",
   "schedule": { "kind": "once", "run_at": "2026-05-02T09:00:00Z" },
   "target": {
-    "kind": "http",
+    "kind": "app_tool",
     "app":  "crm",
-    "path": "/cron/send-followup",
-    "body": { "contact_id": 42 }
+    "tool": "crm_send_followup",
+    "input": { "contact_id": 42 }
   },
   "idempotency_key": "followup:42:2026-05-02"
 }
@@ -52,22 +52,25 @@ POST /api/apps/jobs/jobs?project_id=proj-1
   "name": "nightly cleanup",
   "owner_app": "storage",
   "schedule": { "kind": "cron", "cron": "0 3 * * *" },
-  "target":  { "kind": "http", "app": "storage", "path": "/cron/cleanup-orphans" }
+  "target":  { "kind": "app_tool", "app": "storage", "tool": "files_cleanup_orphans", "input": {} }
 }
 ```
 
 ```bash
-# A long-running function/app route can opt into a longer dispatch wait.
+# Invoke a Function through the platform app-call broker.
 POST /api/apps/jobs/jobs?project_id=proj-1
 {
   "name": "sync local google data",
   "owner_app": "flexylead",
   "schedule": { "kind": "cron", "cron": "0 * * * *" },
   "target": {
-    "kind": "http",
+    "kind": "app_tool",
     "app": "functions",
-    "path": "/fn/flexylead-sync-local-google",
-    "timeout_seconds": 180
+    "tool": "functions_invoke",
+    "input": {
+      "name": "flexylead-sync-local-google",
+      "event": {}
+    }
   }
 }
 ```
@@ -81,16 +84,6 @@ POST /api/apps/jobs/jobs?project_id=proj-1
 }
 ```
 
-## What's deliberately deferred
-
-- Direct MCP-tool dispatch (target kind `mcp_tool`) — needs a stable
-  handle to a running core instance and the tool's auth scope. v0.2.
-- Distributed multi-replica dispatcher — the lease column is in place
-  so adding it is purely a runtime concern.
-- Webhooks app for arbitrary external URLs — `net.egress` lets that
-  through today, but a dedicated app (with retries, signing,
-  per-domain limits) is a cleaner home.
-
 ## Local development
 
 ```bash
@@ -100,5 +93,5 @@ APTEVA_PROJECT_ID=test ./jobs        # binds to :8080
 curl http://localhost:8080/health
 ```
 
-See `migrations/001_init.sql` for the full schema and `main.go`'s
+See `migrations/` for the schema and `main.go`'s
 `MCPTools()` for the tool surface.

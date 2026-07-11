@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -16,6 +17,25 @@ import (
 	sdk "github.com/apteva/app-sdk"
 	tk "github.com/apteva/app-sdk/testkit"
 )
+
+type recordingAppPlatform struct {
+	tk.BasePlatformClient
+	mu    sync.Mutex
+	app   string
+	tool  string
+	input map[string]any
+	out   any
+}
+
+func (p *recordingAppPlatform) CallAppResult(app, tool string, input map[string]any, out any) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.app, p.tool, p.input = app, tool, input
+	if dst, ok := out.(*any); ok {
+		*dst = p.out
+	}
+	return nil
+}
 
 // ─── Helpers ────────────────────────────────────────────────────────
 
@@ -521,5 +541,192 @@ func TestDispatchClient_Substitution(t *testing.T) {
 	setDispatchClient(stub)
 	if getDispatchClient() != stub {
 		t.Errorf("setDispatchClient/getDispatchClient mismatch")
+	}
+}
+
+func TestHTTPTarget_DoesNotLeakAppToken(t *testing.T) {
+	t.Setenv("APTEVA_APP_TOKEN", "install-secret")
+	seenAuth := ""
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		seenAuth = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	j := &Job{ID: 7, Target: map[string]any{"kind": "http", "url": srv.URL}}
+	status, _, _, err := runHTTPTarget(context.Background(), j, sdk.Config{})
+	if err != nil || status != "ok" {
+		t.Fatalf("dispatch status=%q err=%v", status, err)
+	}
+	if seenAuth != "" {
+		t.Fatalf("external target received platform Authorization header %q", seenAuth)
+	}
+}
+
+func TestDispatcher_AppToolUsesPlatformBroker(t *testing.T) {
+	platform := &recordingAppPlatform{out: map[string]any{"status": "ok", "response": "done"}}
+	ctx := newTestCtx(t, tk.WithPlatform(platform))
+	j := mustSchedule(t, ctx, map[string]any{
+		"name":        "daily-function",
+		"schedule":    map[string]any{"kind": "once", "run_at": time.Now().Add(-time.Minute).UTC().Format(time.RFC3339)},
+		"target":      map[string]any{"kind": "app_tool", "app": "functions", "tool": "functions_invoke", "input": map[string]any{"name": "daily", "event": map[string]any{"x": 1}}},
+		"max_retries": float64(0),
+	})
+	if err := dispatchTick(context.Background(), ctx); err != nil {
+		t.Fatal(err)
+	}
+	if platform.app != "functions" || platform.tool != "functions_invoke" || platform.input["name"] != "daily" {
+		t.Fatalf("unexpected app call: app=%q tool=%q input=%v", platform.app, platform.tool, platform.input)
+	}
+	got, _ := dbGetJob(ctx.AppDB(), "test-proj", j.ID)
+	if got.Status != "done" {
+		t.Fatalf("status=%q, want done", got.Status)
+	}
+}
+
+func TestDispatcher_LegacyFunctionsHTTPUsesPlatformBroker(t *testing.T) {
+	platform := &recordingAppPlatform{out: map[string]any{"status": "ok"}}
+	ctx := newTestCtx(t, tk.WithPlatform(platform))
+	mustSchedule(t, ctx, map[string]any{
+		"name":     "legacy-function",
+		"schedule": map[string]any{"kind": "once", "run_at": time.Now().Add(-time.Minute).UTC().Format(time.RFC3339)},
+		"target":   map[string]any{"kind": "http", "app": "functions", "path": "/fn/legacy", "body": map[string]any{"x": 1}},
+	})
+	if err := dispatchTick(context.Background(), ctx); err != nil {
+		t.Fatal(err)
+	}
+	if platform.tool != "functions_invoke" || platform.input["name"] != "legacy" {
+		t.Fatalf("legacy target was not translated: tool=%q input=%v", platform.tool, platform.input)
+	}
+}
+
+func TestDispatcher_ReclaimsExpiredLease(t *testing.T) {
+	ctx := newTestCtx(t)
+	j := mustSchedule(t, ctx, map[string]any{
+		"name":     "abandoned",
+		"schedule": map[string]any{"kind": "once", "run_at": time.Now().Add(-time.Minute).UTC().Format(time.RFC3339)},
+		"target":   map[string]any{"kind": "event", "instance_id": float64(7), "message": "resume"},
+	})
+	_, err := ctx.AppDB().Exec(`UPDATE jobs SET status='running', lease_until=?, lease_token='dead-worker' WHERE id=?`,
+		time.Now().Add(-time.Minute).UTC().Format(time.RFC3339), j.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := dispatchTick(context.Background(), ctx); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := dbGetJob(ctx.AppDB(), "test-proj", j.ID)
+	if got.Status != "done" {
+		t.Fatalf("reclaimed job status=%q, want done", got.Status)
+	}
+}
+
+func TestDispatcher_CancelDuringRunIsPreserved(t *testing.T) {
+	ctx := newTestCtx(t)
+	started := make(chan struct{})
+	release := make(chan struct{})
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		close(started)
+		<-release
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+	j := mustSchedule(t, ctx, map[string]any{
+		"name":     "cancel-race",
+		"schedule": map[string]any{"kind": "once", "run_at": time.Now().Add(-time.Minute).UTC().Format(time.RFC3339)},
+		"target":   map[string]any{"kind": "http", "url": srv.URL},
+	})
+	done := make(chan error, 1)
+	go func() { done <- dispatchTick(context.Background(), ctx) }()
+	<-started
+	if err := dbCancelJob(ctx.AppDB(), "test-proj", j.ID); err != nil {
+		t.Fatal(err)
+	}
+	close(release)
+	if err := <-done; err != nil {
+		t.Fatal(err)
+	}
+	got, _ := dbGetJob(ctx.AppDB(), "test-proj", j.ID)
+	if got.Status != "cancelled" {
+		t.Fatalf("completion overwrote cancellation: status=%q", got.Status)
+	}
+}
+
+func TestDispatcher_ExecutesBatchConcurrently(t *testing.T) {
+	ctx := newTestCtx(t, tk.WithConfig(map[string]string{"dispatch_concurrency": "3"}))
+	var active, maxActive int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		n := atomic.AddInt32(&active, 1)
+		for {
+			old := atomic.LoadInt32(&maxActive)
+			if n <= old || atomic.CompareAndSwapInt32(&maxActive, old, n) {
+				break
+			}
+		}
+		time.Sleep(50 * time.Millisecond)
+		atomic.AddInt32(&active, -1)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+	for i := 0; i < 3; i++ {
+		mustSchedule(t, ctx, map[string]any{
+			"name":     "parallel-" + string(rune('a'+i)),
+			"schedule": map[string]any{"kind": "once", "run_at": time.Now().Add(-time.Minute).UTC().Format(time.RFC3339)},
+			"target":   map[string]any{"kind": "http", "url": srv.URL},
+		})
+	}
+	if err := dispatchTick(context.Background(), ctx); err != nil {
+		t.Fatal(err)
+	}
+	if atomic.LoadInt32(&maxActive) < 2 {
+		t.Fatalf("max concurrent dispatches=%d, want at least 2", maxActive)
+	}
+}
+
+func TestDispatcher_IsolatesCurrentProject(t *testing.T) {
+	t.Setenv("APTEVA_PROJECT_ID", "")
+	ctx := tk.NewAppCtx(t, "apteva.yaml")
+	for _, pid := range []string{"project-a", "project-b"} {
+		if _, err := dbScheduleJob(ctx.AppDB(), pid, map[string]any{
+			"name":     pid,
+			"schedule": map[string]any{"kind": "once", "run_at": time.Now().Add(-time.Minute).UTC().Format(time.RFC3339)},
+			"target":   map[string]any{"kind": "event", "instance_id": float64(1), "message": pid},
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := dispatchTick(context.Background(), ctx.WithProject("project-a")); err != nil {
+		t.Fatal(err)
+	}
+	a, _ := dbListJobs(ctx.AppDB(), "project-a", JobFilter{Limit: 10})
+	b, _ := dbListJobs(ctx.AppDB(), "project-b", JobFilter{Limit: 10})
+	if a[0].Status != "done" || b[0].Status != "pending" {
+		t.Fatalf("cross-project dispatch: project-a=%q project-b=%q", a[0].Status, b[0].Status)
+	}
+}
+
+func TestPruneRunHistoryHonorsRetention(t *testing.T) {
+	ctx := newTestCtx(t)
+	j := mustSchedule(t, ctx, map[string]any{
+		"name":     "history",
+		"schedule": map[string]any{"kind": "once", "run_at": time.Now().Add(time.Hour).UTC().Format(time.RFC3339)},
+		"target":   map[string]any{"kind": "event", "instance_id": float64(1), "message": "x"},
+	})
+	for _, started := range []time.Time{time.Now().AddDate(0, 0, -40), time.Now()} {
+		_, err := ctx.AppDB().Exec(`INSERT INTO job_runs(project_id,job_id,started_at,status,attempt) VALUES(?,?,?,?,1)`,
+			"test-proj", j.ID, started.UTC().Format(time.RFC3339), "ok")
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := pruneRunHistory(ctx.AppDB(), "test-proj", sdk.Config{"history_retention_days": "30"}, time.Now().UTC()); err != nil {
+		t.Fatal(err)
+	}
+	var count int
+	if err := ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM job_runs WHERE project_id='test-proj'`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("remaining history rows=%d, want 1", count)
 	}
 }

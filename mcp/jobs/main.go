@@ -1,11 +1,9 @@
 // Jobs v0.1 — scheduled-job runner.
 //
 // Other apps and agents enqueue work to be delivered later: at a fixed
-// time, on an interval, or on a cron expression. Targets are HTTP
-// routes (on another app, or absolute URLs gated by net.egress) or
-// instance events (PlatformAPI.SendEvent). Jobs never knows what the
-// work is — it only knows how to deliver a payload to one of two
-// well-defined endpoints.
+// time, on an interval, or on a cron expression. Targets are sibling
+// app tools, external HTTP endpoints, or instance events. Jobs never
+// knows what the work is; it only knows how to deliver the payload.
 //
 // At-least-once delivery with idempotency keys forwarded to HTTP
 // targets, exponential backoff on failure, configurable max_retries.
@@ -17,12 +15,15 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
 	"database/sql"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"sort"
 	"strconv"
@@ -40,24 +41,27 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: jobs
 display_name: Jobs
-version: 0.1.10
+version: 0.1.11
 description: |
   Scheduled-job runner. Other apps and agents enqueue work; jobs
-  delivers it later via HTTP or instance events.
+  delivers it later via platform-mediated app tools, external HTTP,
+  or instance events.
 author: Apteva
 scopes: [project, global]
 requires:
   permissions:
     - db.write.app
     - net.egress
+    - platform.apps.call
     - platform.instances.read
     - platform.instances.write
+  dynamic_app_calls: true
 provides:
   http_routes:
     - prefix: /
   mcp_tools:
     - name: jobs_schedule
-      description: Schedule a job (once / every / cron) with an HTTP or event target.
+      description: Schedule a job with an app-tool, external HTTP, or event target.
     - name: jobs_cancel
       description: Cancel a scheduled job. Idempotent.
     - name: jobs_list
@@ -99,6 +103,11 @@ config_schema:
     default: "20"
     label: Dispatch batch size
     description: Maximum jobs claimed per ticker tick. Tune up for very high schedule density.
+  - name: dispatch_concurrency
+    type: text
+    default: "8"
+    label: Dispatch concurrency
+    description: Maximum jobs executed concurrently within one dispatcher tick. Max 50.
   - name: http_dispatch_timeout_seconds
     type: text
     default: "180"
@@ -233,6 +242,7 @@ func (a *App) handleHTTPCreate(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusBadRequest, "invalid json")
 		return
 	}
+	normalizeTargetArgs(body, 0)
 	job, err := dbScheduleJob(ctx.AppDB(), pid, body)
 	if err != nil {
 		httpErr(w, http.StatusBadRequest, err.Error())
@@ -359,7 +369,7 @@ func (a *App) MCPTools() []sdk.Tool {
 	return []sdk.Tool{
 		{
 			Name:        "jobs_schedule",
-			Description: "Schedule a job to run later (once, on an interval, or on a cron expression). Use schedule.kind=once with run_at for one-shot, schedule.kind=every with every_seconds for intervals, schedule.kind=cron with cron='M H DOM MON DOW' for cron. Use target.kind=event with agent_id=<id> to wake an agent with a message, or target.kind=http with {app, path, body?, timeout_seconds?} to call another app's HTTP route, or target.kind=http with url=<absolute> for an external webhook.",
+			Description: "Schedule a job to run later (once, on an interval, or on a cron expression). Use target.kind=event to wake an agent, target.kind=app_tool with {app, tool, input?} to invoke a sibling app through the platform, or target.kind=http with url=<absolute> for an external webhook. Functions use app_tool with app=functions, tool=functions_invoke, input={name,event}.",
 			InputSchema: schemaObject(map[string]any{
 				"name": map[string]any{"type": "string", "description": "Human-readable job name."},
 				"schedule": map[string]any{
@@ -375,14 +385,16 @@ func (a *App) MCPTools() []sdk.Tool {
 				"target": map[string]any{
 					"type": "object",
 					"properties": map[string]any{
-						"kind":     map[string]any{"type": "string", "enum": []any{"event", "http"}},
+						"kind":     map[string]any{"type": "string", "enum": []any{"event", "http", "app_tool"}},
 						"agent_id": map[string]any{"description": "For kind=event: numeric agent id (instance) to wake. Pass 'self' to target the calling agent."},
 						"message":  map[string]any{"type": "string", "description": "For kind=event: the message to deliver."},
 						"url":      map[string]any{"type": "string", "description": "For kind=http: absolute URL (requires net.egress)."},
-						"app":      map[string]any{"type": "string", "description": "For kind=http: target app slug (e.g. 'crm')."},
-						"path":     map[string]any{"type": "string", "description": "For kind=http: path on the target app (e.g. '/cron/foo')."},
+						"app":      map[string]any{"type": "string", "description": "For kind=app_tool: target app slug."},
+						"tool":     map[string]any{"type": "string", "description": "For kind=app_tool: MCP tool name."},
+						"input":    map[string]any{"description": "For kind=app_tool: tool input object."},
 						"method":   map[string]any{"type": "string", "description": "For kind=http: HTTP method (default POST)."},
 						"body":     map[string]any{"description": "For kind=http: JSON body to POST."},
+						"headers":  map[string]any{"type": "object", "description": "For kind=http: explicit request headers. Platform credentials are never added."},
 						"timeout_seconds": map[string]any{
 							"type":        "integer",
 							"description": "For kind=http: request timeout in seconds. Default comes from app config, max 300.",
@@ -509,6 +521,7 @@ type Job struct {
 	CreatedAt      string         `json:"created_at,omitempty"`
 	UpdatedAt      string         `json:"updated_at,omitempty"`
 	CancelledAt    string         `json:"cancelled_at,omitempty"`
+	LeaseToken     string         `json:"-"`
 }
 
 type JobRun struct {
@@ -545,13 +558,18 @@ func (a *App) toolSchedule(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if _, has := args["owner_instance"]; !has && callerInstance != 0 {
 		args["owner_instance"] = callerInstance
 	}
-	// Translate the agent_id surface (LLM-facing) to instance_id (wire
-	// format used by PlatformAPI.SendEvent + the rest of the SDK).
-	// Scheduling agents typically want reminders sent to themselves;
-	// accept agent_id="self" or 0 and substitute the caller's
-	// _instance_id (when the platform injects it). When neither side
-	// supplies an id the dispatcher will still fail at validation —
-	// but with a clearer error than "missing instance_id".
+	normalizeTargetArgs(args, callerInstance)
+	job, err := dbScheduleJob(ctx.AppDB(), pid, args)
+	if err != nil {
+		return nil, err
+	}
+	emitJob(ctx, "job.scheduled", job)
+	return map[string]any{"job": job}, nil
+}
+
+// normalizeTargetArgs translates the LLM/UI-facing event target into the
+// stable wire shape shared by MCP and HTTP scheduling.
+func normalizeTargetArgs(args map[string]any, callerInstance int64) {
 	if t, ok := args["target"].(map[string]any); ok {
 		if strings.EqualFold(strKey(t, "kind"), "event") {
 			// Pull agent_id (preferred) or instance_id (legacy).
@@ -575,12 +593,6 @@ func (a *App) toolSchedule(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 			delete(t, "agent_id")
 		}
 	}
-	job, err := dbScheduleJob(ctx.AppDB(), pid, args)
-	if err != nil {
-		return nil, err
-	}
-	emitJob(ctx, "job.scheduled", job)
-	return map[string]any{"job": job}, nil
 }
 
 func (a *App) toolCancel(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -926,11 +938,26 @@ func dbCancelJob(db *sql.DB, pid string, id int64) error {
 
 func dbRunNow(db *sql.DB, pid string, id int64) error {
 	now := time.Now().UTC().Format(time.RFC3339)
-	_, err := db.Exec(
-		`UPDATE jobs SET next_run_at = ?, status = 'pending', updated_at = ?
-		 WHERE id = ? AND project_id = ? AND status NOT IN ('cancelled', 'done', 'failed')`,
+	res, err := db.Exec(
+		`UPDATE jobs SET next_run_at = ?, updated_at = ?
+		 WHERE id = ? AND project_id = ? AND status = 'pending'`,
 		now, now, id, pid)
-	return err
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n > 0 {
+		return nil
+	}
+	var status string
+	if err := db.QueryRow(`SELECT status FROM jobs WHERE id = ? AND project_id = ?`, id, pid).Scan(&status); err == sql.ErrNoRows {
+		return errors.New("job not found")
+	} else if err != nil {
+		return err
+	}
+	if status == "running" {
+		return errors.New("job is already running")
+	}
+	return fmt.Errorf("cannot run job with terminal status %q", status)
 }
 
 func dbJobRuns(db *sql.DB, pid string, jobID int64, limit int) ([]*JobRun, error) {
@@ -987,14 +1014,12 @@ func dbRecentRuns(db *sql.DB, pid string, limit int) ([]*JobRun, error) {
 // reschedules (every/cron) or marks done/failed (once / retries
 // exhausted).
 //
-// Single-replica today; the lease column is there so we can scale to
-// N workers in the future without a migration. This dispatcher only
-// claims pending jobs, so the TTL is defensive metadata rather than
-// active reclaim logic; keep it at least as long as the max HTTP
-// dispatch timeout before adding running-job reclaim.
+// Lease tokens make claims safe across replicas and let a later worker
+// reclaim rows whose prior owner crashed. The TTL exceeds every supported
+// HTTP/function timeout.
 
 const (
-	leaseTTL                   = 5 * time.Minute
+	leaseTTL                   = 10 * time.Minute
 	defaultHTTPDispatchTimeout = 180 * time.Second
 	minHTTPDispatchTimeout     = 1 * time.Millisecond
 	maxHTTPDispatchTimeout     = 300 * time.Second
@@ -1004,6 +1029,8 @@ const (
 // Package-level so tests can substitute a stub via setDispatchClient.
 var dispatchClient = &http.Client{}
 var dispatchClientMu sync.RWMutex
+var retentionMu sync.Mutex
+var retentionLastRun = map[string]time.Time{}
 
 func setDispatchClient(c *http.Client) {
 	dispatchClientMu.Lock()
@@ -1023,22 +1050,32 @@ func dispatchTick(ctx context.Context, app *sdk.AppCtx) error {
 		return nil
 	}
 	now := time.Now().UTC()
+	pid := app.CurrentProject()
 	batch := atoiDefault(app.Config().Get("dispatch_batch_size"), 20, 200)
+	concurrency := atoiDefault(app.Config().Get("dispatch_concurrency"), 8, 50)
+	if err := maybePruneRunHistory(db, pid, app.Config(), now); err != nil {
+		app.Logger().Warn("prune run history", "project_id", pid, "err", err)
+	}
 
-	// Claim due jobs in one query. Lease prevents the next tick from
-	// re-picking the same row while we're working.
+	// A unique token distinguishes this claim from every other worker's
+	// claim, even when their lease timestamps happen to match.
+	leaseToken, err := newLeaseToken()
+	if err != nil {
+		return fmt.Errorf("lease token: %w", err)
+	}
 	leaseUntil := now.Add(leaseTTL).Format(time.RFC3339)
 	res, err := db.Exec(
-		`UPDATE jobs SET status = 'running', lease_until = ?, updated_at = ?
+		`UPDATE jobs SET status = 'running', lease_until = ?, lease_token = ?, updated_at = ?
 		 WHERE id IN (
 			SELECT id FROM jobs
-			WHERE status = 'pending' AND next_run_at <= ?
-				AND (lease_until IS NULL OR lease_until < ?)
-			ORDER BY next_run_at ASC LIMIT ?
+			WHERE project_id = ? AND (
+				(status = 'pending' AND next_run_at <= ?)
+				OR (status = 'running' AND (lease_until IS NULL OR lease_until < ?))
+			)
+			ORDER BY next_run_at ASC, id ASC LIMIT ?
 		 )`,
-		leaseUntil, now.Format(time.RFC3339),
-		now.Format(time.RFC3339), now.Format(time.RFC3339),
-		batch)
+		leaseUntil, leaseToken, now.Format(time.RFC3339),
+		pid, now.Format(time.RFC3339), now.Format(time.RFC3339), batch)
 	if err != nil {
 		return fmt.Errorf("claim: %w", err)
 	}
@@ -1054,8 +1091,8 @@ func dispatchTick(ctx context.Context, app *sdk.AppCtx) error {
 			COALESCE(idempotency_key,''), max_retries, backoff_seconds,
 			status, next_run_at, last_run_at, COALESCE(last_status,''), COALESCE(last_error,''),
 			attempt, created_at, updated_at, cancelled_at
-		 FROM jobs WHERE status = 'running' AND lease_until = ?`,
-		leaseUntil)
+		 FROM jobs WHERE project_id = ? AND status = 'running' AND lease_token = ?`,
+		pid, leaseToken)
 	if err != nil {
 		return err
 	}
@@ -1063,18 +1100,32 @@ func dispatchTick(ctx context.Context, app *sdk.AppCtx) error {
 	for rows.Next() {
 		j, err := scanJob(rows)
 		if err == nil {
+			j.LeaseToken = leaseToken
 			jobs = append(jobs, j)
 		}
 	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return err
+	}
 	rows.Close()
 
+	sem := make(chan struct{}, concurrency)
+	var wg sync.WaitGroup
 	for _, j := range jobs {
 		if ctx.Err() != nil {
-			return ctx.Err()
+			break
 		}
-		dispatchOne(ctx, app, j)
+		sem <- struct{}{}
+		wg.Add(1)
+		go func(job *Job) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			dispatchOne(ctx, app, job)
+		}(j)
 	}
-	return nil
+	wg.Wait()
+	return ctx.Err()
 }
 
 // dispatchOne runs a single job target, records a run row, then
@@ -1095,8 +1146,43 @@ func dispatchOne(ctx context.Context, app *sdk.AppCtx, j *Job) {
 	}
 	respBody := truncate(body, 2048)
 
-	// Record the run row regardless of outcome.
-	if _, err := db.Exec(
+	loc, _ := time.LoadLocation(j.Timezone)
+	if loc == nil {
+		loc = time.UTC
+	}
+	nextStatus := "pending"
+	nextRun := time.Time{}
+	nextAttempt := 0
+	lastStatus := "error"
+	if status == "ok" {
+		lastStatus = "ok"
+		nextRun = computeNextRunAfter(j, loc, finished)
+		if nextRun.IsZero() {
+			nextStatus = "done"
+		}
+	} else if attempt <= j.MaxRetries {
+		delay := time.Duration(j.BackoffSeconds) * time.Second
+		for i := 1; i < attempt; i++ {
+			delay *= 2
+		}
+		nextRun = finished.Add(delay)
+		nextAttempt = attempt
+	} else if j.ScheduleKind == "once" {
+		nextStatus = "failed"
+	} else {
+		nextRun = computeNextRunAfter(j, loc, finished)
+		if nextRun.IsZero() {
+			nextStatus = "failed"
+		}
+	}
+
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		app.Logger().Warn("begin run transaction", "job_id", j.ID, "err", err)
+		return
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(
 		`INSERT INTO job_runs (project_id, job_id, started_at, finished_at, duration_ms,
 			status, http_status, response_body, error, attempt)
 		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
@@ -1104,87 +1190,78 @@ func dispatchOne(ctx context.Context, app *sdk.AppCtx, j *Job) {
 		started.Format(time.RFC3339Nano), finished.Format(time.RFC3339Nano), duration,
 		status, httpCode, respBody, errStr, attempt); err != nil {
 		app.Logger().Warn("record run", "job_id", j.ID, "err", err)
-	}
-
-	// Decide what's next.
-	loc, _ := time.LoadLocation(j.Timezone)
-	if loc == nil {
-		loc = time.UTC
-	}
-
-	if status == "ok" {
-		// Reset attempt counter and reschedule (or terminate for once).
-		next := computeNextRunAfter(j, loc, finished)
-		if next.IsZero() {
-			db.Exec(
-				`UPDATE jobs SET status = 'done', last_run_at = ?, last_status = 'ok',
-					last_error = NULL, attempt = 0, lease_until = NULL,
-					next_run_at = NULL, updated_at = ?
-				 WHERE id = ?`,
-				finished.Format(time.RFC3339), finished.Format(time.RFC3339), j.ID)
-		} else {
-			db.Exec(
-				`UPDATE jobs SET status = 'pending', last_run_at = ?, last_status = 'ok',
-					last_error = NULL, attempt = 0, lease_until = NULL,
-					next_run_at = ?, updated_at = ?
-				 WHERE id = ?`,
-				finished.Format(time.RFC3339),
-				next.Format(time.RFC3339), finished.Format(time.RFC3339), j.ID)
-		}
 		return
 	}
-
-	// Failure path. Retry up to max_retries with exponential backoff;
-	// once exhausted, mark the job failed (or reschedule if it's a
-	// recurring job — we don't want a transient outage to wipe out a
-	// daily cron's future fires).
-	if attempt <= j.MaxRetries {
-		// Exponential: backoff_seconds * 2^(attempt-1).
-		delay := time.Duration(j.BackoffSeconds) * time.Second
-		for i := 1; i < attempt; i++ {
-			delay *= 2
-		}
-		next := finished.Add(delay)
-		db.Exec(
-			`UPDATE jobs SET status = 'pending', last_run_at = ?, last_status = 'error',
-				last_error = ?, attempt = ?, lease_until = NULL,
-				next_run_at = ?, updated_at = ?
-			 WHERE id = ?`,
-			finished.Format(time.RFC3339), errStr, attempt,
-			next.Format(time.RFC3339), finished.Format(time.RFC3339), j.ID)
-		return
+	var nextValue any
+	if !nextRun.IsZero() {
+		nextValue = nextRun.Format(time.RFC3339)
 	}
-
-	// Retries exhausted. Recurring jobs continue on their schedule
-	// from the next due fire; one-shot jobs end as failed.
-	if j.ScheduleKind == "once" {
-		db.Exec(
-			`UPDATE jobs SET status = 'failed', last_run_at = ?, last_status = 'error',
-				last_error = ?, attempt = 0, lease_until = NULL,
-				next_run_at = NULL, updated_at = ?
-			 WHERE id = ?`,
-			finished.Format(time.RFC3339), errStr,
-			finished.Format(time.RFC3339), j.ID)
-		return
+	var lastError any
+	if errStr != "" {
+		lastError = errStr
 	}
-	next := computeNextRunAfter(j, loc, finished)
-	if next.IsZero() {
-		db.Exec(
-			`UPDATE jobs SET status = 'failed', last_run_at = ?, last_status = 'error',
-				last_error = ?, attempt = 0, lease_until = NULL,
-				next_run_at = NULL, updated_at = ?
-			 WHERE id = ?`,
-			finished.Format(time.RFC3339), errStr,
-			finished.Format(time.RFC3339), j.ID)
-		return
-	}
-	db.Exec(
-		`UPDATE jobs SET status = 'pending', last_run_at = ?, last_status = 'error',
-			last_error = ?, attempt = 0, lease_until = NULL,
+	res, err := tx.Exec(
+		`UPDATE jobs SET status = ?, last_run_at = ?, last_status = ?,
+			last_error = ?, attempt = ?, lease_until = NULL, lease_token = NULL,
 			next_run_at = ?, updated_at = ?
-		 WHERE id = ?`,
-		finished.Format(time.RFC3339), errStr,
-		next.Format(time.RFC3339), finished.Format(time.RFC3339), j.ID)
+		 WHERE id = ? AND project_id = ? AND status = 'running' AND lease_token = ?`,
+		nextStatus, finished.Format(time.RFC3339Nano), lastStatus,
+		lastError, nextAttempt, nextValue, finished.Format(time.RFC3339Nano),
+		j.ID, j.ProjectID, j.LeaseToken)
+	if err != nil {
+		app.Logger().Warn("finalize run", "job_id", j.ID, "err", err)
+		return
+	}
+	if err := tx.Commit(); err != nil {
+		app.Logger().Warn("commit run", "job_id", j.ID, "err", err)
+		return
+	}
+	if n, _ := res.RowsAffected(); n > 0 {
+		app.Emit("job.updated", map[string]any{"id": j.ID, "status": nextStatus, "last_status": lastStatus})
+	}
+}
+
+func newLeaseToken() (string, error) {
+	buf := make([]byte, 16)
+	if _, err := rand.Read(buf); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(buf), nil
+}
+
+func pruneRunHistory(db *sql.DB, pid string, cfg sdk.Config, now time.Time) error {
+	days := 30
+	if raw := strings.TrimSpace(cfg.Get("history_retention_days")); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil {
+			return fmt.Errorf("history_retention_days: %w", err)
+		}
+		if n <= 0 {
+			return nil
+		}
+		days = n
+	}
+	_, err := db.Exec(`DELETE FROM job_runs WHERE project_id = ? AND started_at < ?`,
+		pid, now.AddDate(0, 0, -days).Format(time.RFC3339Nano))
+	return err
+}
+
+func maybePruneRunHistory(db *sql.DB, pid string, cfg sdk.Config, now time.Time) error {
+	retentionMu.Lock()
+	last := retentionLastRun[pid]
+	if now.Sub(last) < time.Hour {
+		retentionMu.Unlock()
+		return nil
+	}
+	retentionLastRun[pid] = now
+	retentionMu.Unlock()
+	if err := pruneRunHistory(db, pid, cfg, now); err != nil {
+		retentionMu.Lock()
+		delete(retentionLastRun, pid)
+		retentionMu.Unlock()
+		return err
+	}
+	return nil
 }
 
 // runTarget dispatches one job's target. Returns (status, http_code,
@@ -1192,7 +1269,12 @@ func dispatchOne(ctx context.Context, app *sdk.AppCtx, j *Job) {
 func runTarget(ctx context.Context, app *sdk.AppCtx, j *Job) (string, int, string, error) {
 	switch strings.ToLower(strKey(j.Target, "kind")) {
 	case "http":
+		if target, ok := legacyFunctionsTarget(j.Target); ok {
+			return runAppToolTarget(app, target)
+		}
 		return runHTTPTarget(ctx, j, app.Config())
+	case "app_tool":
+		return runAppToolTarget(app, j.Target)
 	case "event":
 		return runEventTarget(app, j)
 	default:
@@ -1200,10 +1282,8 @@ func runTarget(ctx context.Context, app *sdk.AppCtx, j *Job) (string, int, strin
 	}
 }
 
-// runHTTPTarget POSTs / GETs to the target URL. Two URL forms are
-// supported: an absolute URL (gated by net.egress at the platform
-// level) or app-relative {"app":"crm","path":"/cron/..."} which the
-// platform routes through its own gateway.
+// runHTTPTarget sends to an absolute external URL gated by net.egress.
+// Sibling apps use runAppToolTarget so the platform can authorize them.
 func runHTTPTarget(ctx context.Context, j *Job, cfg sdk.Config) (string, int, string, error) {
 	method := strings.ToUpper(strKey(j.Target, "method"))
 	if method == "" {
@@ -1237,11 +1317,6 @@ func runHTTPTarget(ctx context.Context, j *Job, cfg sdk.Config) (string, int, st
 	}
 	req.Header.Set("X-Apteva-Job-ID", strconv.FormatInt(j.ID, 10))
 	req.Header.Set("X-Apteva-Job-Attempt", strconv.Itoa(j.Attempt+1))
-	// Inherit the install token so app-relative dispatches reach the
-	// target sidecar with the platform's bearer.
-	if t := os.Getenv("APTEVA_APP_TOKEN"); t != "" {
-		req.Header.Set("Authorization", "Bearer "+t)
-	}
 	if hdrs, ok := j.Target["headers"].(map[string]any); ok {
 		for k, v := range hdrs {
 			if s, ok := v.(string); ok {
@@ -1258,12 +1333,66 @@ func runHTTPTarget(ctx context.Context, j *Job, cfg sdk.Config) (string, int, st
 		return "error", 0, "", err
 	}
 	defer resp.Body.Close()
-	respBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
+	respBytes, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
 	if resp.StatusCode/100 != 2 {
 		return "error", resp.StatusCode, string(respBytes),
 			fmt.Errorf("non-2xx: %d", resp.StatusCode)
 	}
 	return "ok", resp.StatusCode, string(respBytes), nil
+}
+
+func runAppToolTarget(app *sdk.AppCtx, target map[string]any) (string, int, string, error) {
+	appName := strKey(target, "app")
+	tool := strKey(target, "tool")
+	input, _ := target["input"].(map[string]any)
+	if input == nil {
+		input = map[string]any{}
+	}
+	if app == nil || app.PlatformAPI() == nil {
+		return "error", 0, "", errors.New("app_tool target requires platform API")
+	}
+	var out any
+	if err := app.PlatformAPI().CallAppResult(appName, tool, input, &out); err != nil {
+		return "error", 0, "", err
+	}
+	body, _ := json.Marshal(out)
+	if result, ok := out.(map[string]any); ok {
+		switch strings.ToLower(strKey(result, "status")) {
+		case "error", "failed", "timeout":
+			msg := strKey(result, "error")
+			if msg == "" {
+				msg = "app tool returned status " + strKey(result, "status")
+			}
+			return "error", 0, string(body), errors.New(msg)
+		}
+	}
+	return "ok", 0, string(body), nil
+}
+
+// Existing Jobs versions documented Functions as an app-relative HTTP route.
+// Preserve those stored schedules while routing them through the platform's
+// authorized app-call broker.
+func legacyFunctionsTarget(target map[string]any) (map[string]any, bool) {
+	if !strings.EqualFold(strKey(target, "app"), "functions") {
+		return nil, false
+	}
+	rawPath := strKey(target, "path")
+	if !strings.HasPrefix(rawPath, "/fn/") {
+		return nil, false
+	}
+	path := strings.TrimPrefix(rawPath, "/fn/")
+	if path == "" || strings.Contains(path, "/") {
+		return nil, false
+	}
+	return map[string]any{
+		"kind": "app_tool",
+		"app":  "functions",
+		"tool": "functions_invoke",
+		"input": map[string]any{
+			"name":  path,
+			"event": target["body"],
+		},
+	}, true
 }
 
 func httpTargetTimeout(target map[string]any, cfg sdk.Config) time.Duration {
@@ -1304,26 +1433,18 @@ func runEventTarget(app *sdk.AppCtx, j *Job) (string, int, string, error) {
 	return "ok", 0, "", nil
 }
 
-// resolveTargetURL builds the dispatch URL from a target spec. Either
-// "url" (absolute) or {"app":"<slug>","path":"/..."} (relative,
-// routed through the platform gateway).
+// resolveTargetURL accepts external HTTP(S) URLs only. Cross-app calls must
+// use app_tool so authorization stays inside the platform broker.
 func resolveTargetURL(target map[string]any) (string, error) {
-	if u := strKey(target, "url"); u != "" {
-		return u, nil
+	raw := strKey(target, "url")
+	if raw == "" {
+		return "", errors.New("http target requires an absolute url; use app_tool for sibling apps")
 	}
-	app := strKey(target, "app")
-	path := strKey(target, "path")
-	if app == "" || path == "" {
-		return "", errors.New("http target needs either url or {app, path}")
+	u, err := url.Parse(raw)
+	if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+		return "", errors.New("http target url must be an absolute http or https URL")
 	}
-	if !strings.HasPrefix(path, "/") {
-		path = "/" + path
-	}
-	gateway := os.Getenv("APTEVA_GATEWAY_URL")
-	if gateway == "" {
-		return "", errors.New("APTEVA_GATEWAY_URL not set; cannot resolve app-relative target")
-	}
-	return strings.TrimRight(gateway, "/") + "/api/apps/" + app + path, nil
+	return u.String(), nil
 }
 
 // ─── Schedule arithmetic ───────────────────────────────────────────
@@ -1510,13 +1631,18 @@ func validateTarget(t map[string]any) error {
 	kind := strings.ToLower(strKey(t, "kind"))
 	switch kind {
 	case "http":
-		if _, err := resolveTargetURL(t); err != nil {
-			// resolveTargetURL needs APTEVA_GATEWAY_URL when using
-			// app-relative form; we don't fail hard on that here —
-			// the dispatcher does. We only reject if both url and
-			// app/path are missing.
-			if strKey(t, "url") == "" && (strKey(t, "app") == "" || strKey(t, "path") == "") {
-				return errors.New("http target needs url or {app, path}")
+		if _, ok := legacyFunctionsTarget(t); ok {
+			return nil
+		}
+		_, err := resolveTargetURL(t)
+		return err
+	case "app_tool":
+		if strKey(t, "app") == "" || strKey(t, "tool") == "" {
+			return errors.New("app_tool target needs app and tool")
+		}
+		if input, ok := t["input"]; ok && input != nil {
+			if _, ok := input.(map[string]any); !ok {
+				return errors.New("app_tool target input must be an object")
 			}
 		}
 		return nil
@@ -1526,7 +1652,7 @@ func validateTarget(t map[string]any) error {
 		}
 		return nil
 	default:
-		return fmt.Errorf("target.kind %q must be http or event", kind)
+		return fmt.Errorf("target.kind %q must be http, app_tool, or event", kind)
 	}
 }
 
