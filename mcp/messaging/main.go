@@ -1,10 +1,9 @@
-// Messaging v0.1 — channel-agnostic send/receive built on a unified
-// `messages` table. v0.1 ships email via AWS SES; SMS/push reserved.
+// Messaging provides channel-agnostic send/receive over a unified
+// messages table. Email uses AWS SES; SMS and WhatsApp use Twilio.
 //
 // Architecture:
-//   - Manifest declares one required integration (role=email_provider,
-//     compatible_slugs=[aws-ses], capability=email.send→send_email)
-//     and one optional app dependency (storage, for attachments).
+//   - Email and phone providers are optional so installs can enable only
+//     the channels they need. Storage optionally backs attachments.
 //   - send_message resolves recipient URIs to channels (mailto: → email),
 //     checks suppression + idempotency, calls the bound provider via
 //     ctx.PlatformAPI().ExecuteIntegrationTool, and persists a row.
@@ -12,7 +11,7 @@
 //     update the message row, append delivery_events, and auto-add
 //     to the suppression list for hard bounces and complaints.
 //   - Inbound SNS webhooks land at /webhooks/ses-inbound, parse the
-//     embedded MIME (SES "Content" action; S3-action fetch is v0.2),
+//     embedded MIME or the referenced S3 object,
 //     persist a `direction='in'` row, look up `inbound_routes` by
 //     recipient URI, and dispatch a normalized JSON payload to the
 //     target app via ctx.PlatformAPI().CallApp.
@@ -21,18 +20,23 @@ package main
 import (
 	"bytes"
 	"context"
+	"crypto"
 	"crypto/hmac"
+	"crypto/rsa"
 	"crypto/sha1"
 	"crypto/sha256"
+	"crypto/x509"
 	"database/sql"
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"encoding/pem"
 	"errors"
 	"fmt"
 	"html"
 	"io"
 	"mime"
+	"mime/multipart"
 	"mime/quotedprintable"
 	"net/http"
 	"net/mail"
@@ -46,7 +50,14 @@ import (
 	"time"
 
 	sdk "github.com/apteva/app-sdk"
+	"golang.org/x/net/html/charset"
 	_ "modernc.org/sqlite"
+)
+
+const (
+	maxControlRequestBytes int64 = 1 << 20
+	maxToolsRequestBytes   int64 = 40 << 20
+	maxInboundRequestBytes int64 = 30 << 20
 )
 
 // ─── Manifest (also lives in apteva.yaml) ──────────────────────────
@@ -54,10 +65,9 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: messaging
 display_name: Messaging
-version: 0.13.36
+version: 0.13.37
 description: |
-  Send and receive messages across channels. v0.1 ships email via
-  AWS SES.
+  Send and receive email through AWS SES and SMS/WhatsApp through Twilio.
 author: Apteva
 scopes: [project, global]
 requires:
@@ -67,6 +77,8 @@ requires:
     - platform.connections.execute
     - platform.connections.read_credentials
     - platform.apps.call
+    - platform.dns.read
+    - platform.dns.write
   dynamic_app_calls: true
   integrations:
     - role: email_provider
@@ -114,6 +126,8 @@ requires:
       tools:
         topic.manage: set_topic_attributes
         topic.subscribe: subscribe
+        topic.list_subscriptions: list_subscriptions_by_topic
+        topic.unsubscribe: unsubscribe
       required: false
       label: "Inbound notifications (AWS SNS)"
 provides:
@@ -166,6 +180,26 @@ db:
   driver: sqlite
   path: /data/messaging.db
   migrations: migrations/
+config_schema:
+  - name: webhook_public_url
+    type: text
+    label: Webhook public URL override
+    description: Optional HTTPS origin used for provider callbacks instead of the Apteva instance Public URL, for example https://mail.example.com. Must route to this Apteva instance.
+  - name: ses_bounce_topic_arn
+    type: text
+    label: SES bounce/complaint SNS topic ARN
+  - name: ses_inbound_topic_arn
+    type: text
+    label: SES inbound SNS topic ARN
+  - name: ses_inbound_bucket
+    type: text
+    label: SES inbound S3 bucket
+  - name: webhook_signing_secret
+    type: secret
+    label: Webhook shared secret
+  - name: twilio_auth_token
+    type: secret
+    label: Twilio Auth Token fallback
 upgrade_policy: auto-patch
 `
 
@@ -870,16 +904,18 @@ type Suppression struct {
 }
 
 type DeliveryEvent struct {
-	ID         int64           `json:"id"`
-	MessageID  int64           `json:"message_id"`
-	Kind       string          `json:"kind"`
-	Recipient  string          `json:"recipient,omitempty"`
-	Reason     string          `json:"reason,omitempty"`
-	Raw        json.RawMessage `json:"raw"`
-	OccurredAt string          `json:"occurred_at,omitempty"`
+	ID              int64           `json:"id"`
+	MessageID       int64           `json:"message_id"`
+	ProviderEventID string          `json:"provider_event_id,omitempty"`
+	Kind            string          `json:"kind"`
+	Recipient       string          `json:"recipient,omitempty"`
+	Reason          string          `json:"reason,omitempty"`
+	Raw             json.RawMessage `json:"raw"`
+	OccurredAt      string          `json:"occurred_at,omitempty"`
 }
 
 type providerEvent struct {
+	ProviderEventID   string
 	Provider          string
 	ProviderMessageID string
 	Kind              string
@@ -920,6 +956,9 @@ func (a *App) toolSendMessage(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	}
 	if len(to) == 0 {
 		return nil, errors.New("to: at least one recipient required")
+	}
+	if (channel == channelSMS || channel == channelWhatsApp) && len(to) != 1 {
+		return nil, errors.New("SMS/WhatsApp sends require exactly one recipient per message so delivery status remains unambiguous")
 	}
 	cc, err := normaliseAddressList(channel, args["cc"])
 	if err != nil {
@@ -1019,6 +1058,10 @@ func (a *App) toolSendMessage(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	if err != nil {
 		return nil, fmt.Errorf("from: %w", err)
 	}
+	sender, err := validateOutboundSender(ctx.AppDB(), pid, channel, from, os.Getenv("APTEVA_PROJECT_ID") == "")
+	if err != nil {
+		return nil, err
+	}
 	// Compose RFC 5322 friendly-form From for email: "Display Name"
 	// <addr>. Precedence: explicit from_name arg > sender.display_name
 	// looked up from the local senders row > none (raw address).
@@ -1027,8 +1070,8 @@ func (a *App) toolSendMessage(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	if channel == "email" {
 		fromName := strArg(args, "from_name")
 		if fromName == "" {
-			if s, _ := dbFindSender(ctx.AppDB(), pid, "email", from); s != nil {
-				fromName = s.DisplayName
+			if sender != nil {
+				fromName = sender.DisplayName
 			}
 		}
 		if fromName != "" {
@@ -1149,6 +1192,23 @@ func (a *App) toolSendMessage(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	})
 	m, _ := dbMessageGet(ctx.AppDB(), pid, id)
 	return sendResponse(m), nil
+}
+
+func validateOutboundSender(db *sql.DB, pid, channel, address string, requireRegistered bool) (*senderRow, error) {
+	sender, err := dbFindSender(db, pid, channel, address)
+	if err != nil {
+		return nil, fmt.Errorf("lookup sender: %w", err)
+	}
+	if sender == nil || sender.DeletedAt != nil {
+		if requireRegistered {
+			return nil, fmt.Errorf("from %q is not registered to project %q", address, pid)
+		}
+		return nil, nil
+	}
+	if !sender.Verified || !sender.SendingEnabled {
+		return nil, fmt.Errorf("from %q is not verified and enabled for project %q", address, pid)
+	}
+	return sender, nil
 }
 
 func sendResponse(m *Message) map[string]any {
@@ -1664,10 +1724,13 @@ func twilioWebhookURL(ctx *sdk.AppCtx, routePath, projectID string) string {
 		return ""
 	}
 	id, _ := ctx.PlatformAPI().WhoAmI()
-	if id == nil || strings.TrimSpace(id.PublicURL) == "" {
+	if id == nil {
 		return ""
 	}
-	base := strings.TrimSuffix(strings.TrimSpace(id.PublicURL), "/")
+	base, err := messagingWebhookPublicURL(ctx, id)
+	if err != nil {
+		return ""
+	}
 	q := url.Values{}
 	if token := strings.TrimSpace(os.Getenv("APTEVA_APP_TOKEN")); token != "" {
 		q.Set("api_key", token)
@@ -3096,12 +3159,12 @@ func (a *App) handleBounceWebhook(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusMethodNotAllowed, "POST only")
 		return
 	}
-	body, err := io.ReadAll(io.LimitReader(r.Body, 1<<20))
+	body, err := readRequestBody(w, r, maxControlRequestBytes)
 	if err != nil {
-		httpErr(w, http.StatusBadRequest, "read body")
+		httpRequestBodyError(w, err)
 		return
 	}
-	if !verifySNS(r, body, globalCtx) {
+	if !verifySNS(r, body, globalCtx, "ses_bounce_topic_arn") {
 		httpErr(w, http.StatusForbidden, "signature failed")
 		return
 	}
@@ -3118,6 +3181,11 @@ func (a *App) handleBounceWebhook(w http.ResponseWriter, r *http.Request) {
 		httpJSON(w, map[string]any{"confirmed": true})
 		return
 	}
+	requestPID, _ := resolveProjectFromRequest(r)
+	if requestPID != "" && !snsTopicAuthorized(globalCtx, requestPID, env.TopicARN, "ses_bounce_topic_arn") {
+		httpErr(w, http.StatusForbidden, "SNS topic is not authorized for this project")
+		return
+	}
 
 	events, err := parseSESProviderEvents(env.Message)
 	if err != nil {
@@ -3128,7 +3196,7 @@ func (a *App) handleBounceWebhook(w http.ResponseWriter, r *http.Request) {
 		httpJSON(w, map[string]any{"ok": true, "matched": false, "skipped": "no SES event"})
 		return
 	}
-	pid, _ := resolveProjectFromRequest(r)
+	pid := requestPID
 	if pid == "" {
 		// Webhook came in without a project query param — fall back to
 		// looking up the message across all projects via provider id.
@@ -3136,6 +3204,10 @@ func (a *App) handleBounceWebhook(w http.ResponseWriter, r *http.Request) {
 	}
 	msg, err := dbMessageByProviderID(globalCtx.AppDB(), pid, events[0].ProviderMessageID)
 	if err != nil || msg == nil {
+		if !snsTopicAuthorized(globalCtx, pid, env.TopicARN, "ses_bounce_topic_arn") {
+			httpErr(w, http.StatusForbidden, "SNS topic is not authorized")
+			return
+		}
 		// Unknown SES message — store the event with a NULL
 		// message_id-attached row would violate FK, so we just log.
 		globalCtx.Logger().Warn("webhook: unknown provider message id",
@@ -3144,8 +3216,14 @@ func (a *App) handleBounceWebhook(w http.ResponseWriter, r *http.Request) {
 		httpJSON(w, map[string]any{"ok": true, "matched": false})
 		return
 	}
+	if !snsTopicAuthorized(globalCtx, msg.ProjectID, env.TopicARN, "ses_bounce_topic_arn") {
+		httpErr(w, http.StatusForbidden, "SNS topic is not authorized for this project")
+		return
+	}
 
-	for _, ev := range events {
+	for i := range events {
+		events[i].ProviderEventID = fmt.Sprintf("sns:%s:%d", env.MessageID, i)
+		ev := events[i]
 		persistAndEmitProviderEvent(globalCtx, msg, ev)
 	}
 	httpJSON(w, map[string]any{
@@ -3226,12 +3304,12 @@ func (a *App) handleInboundWebhook(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusMethodNotAllowed, "POST only")
 		return
 	}
-	body, err := io.ReadAll(io.LimitReader(r.Body, 30<<20))
+	body, err := readRequestBody(w, r, maxInboundRequestBytes)
 	if err != nil {
-		httpErr(w, http.StatusBadRequest, "read body")
+		httpRequestBodyError(w, err)
 		return
 	}
-	if !verifySNS(r, body, globalCtx) {
+	if !verifySNS(r, body, globalCtx, "ses_inbound_topic_arn") {
 		httpErr(w, http.StatusForbidden, "signature failed")
 		return
 	}
@@ -3268,6 +3346,10 @@ func (a *App) handleInboundWebhook(w http.ResponseWriter, r *http.Request) {
 			httpErr(w, http.StatusBadRequest, "project_id required: not in URL and could not derive from recipients")
 			return
 		}
+	}
+	if !snsTopicAuthorized(globalCtx, pid, env.TopicARN, "ses_inbound_topic_arn") {
+		httpErr(w, http.StatusForbidden, "SNS topic is not authorized for this project")
+		return
 	}
 	// S3-action mode: no inline content, but receipt.action.bucketName +
 	// objectKey tell us where to fetch the .eml from.
@@ -3315,13 +3397,20 @@ func (a *App) handleInboundWebhook(w http.ResponseWriter, r *http.Request) {
 	ccJSON, _ := json.Marshal(cc)
 	refsJSON, _ := json.Marshal(parsed.References)
 	now := time.Now().UTC().Format(time.RFC3339)
+	if existingID, duplicate, err := findExistingInboundMessage(globalCtx.AppDB(), pid, s3Key, parsed.MessageID); err != nil {
+		httpErr(w, http.StatusInternalServerError, "dedupe lookup: "+err.Error())
+		return
+	} else if duplicate {
+		httpJSON(w, map[string]any{"ok": true, "id": existingID, "duplicate": true})
+		return
+	}
 
 	var s3KeyArg any
 	if s3Key != "" {
 		s3KeyArg = s3Key
 	}
 	res, err := globalCtx.AppDB().Exec(
-		`INSERT INTO messages
+		`INSERT OR IGNORE INTO messages
 			(project_id, channel, direction, from_addr, to_addrs, cc_addrs,
 			 subject, body_text, body_html, headers,
 			 message_id_header, in_reply_to, references_json,
@@ -3338,6 +3427,11 @@ func (a *App) handleInboundWebhook(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusInternalServerError, "persist: "+err.Error())
 		return
 	}
+	if affected, _ := res.RowsAffected(); affected == 0 {
+		existingID, _, _ := findExistingInboundMessage(globalCtx.AppDB(), pid, s3Key, parsed.MessageID)
+		httpJSON(w, map[string]any{"ok": true, "id": existingID, "duplicate": true})
+		return
+	}
 	id, _ := res.LastInsertId()
 	m, _ := dbMessageGet(globalCtx.AppDB(), pid, id)
 
@@ -3350,6 +3444,27 @@ func (a *App) handleInboundWebhook(w http.ResponseWriter, r *http.Request) {
 		"from":    from,
 	})
 	httpJSON(w, map[string]any{"ok": true, "id": id})
+}
+
+func findExistingInboundMessage(db *sql.DB, projectID, s3Key, messageID string) (int64, bool, error) {
+	checks := []struct {
+		column string
+		value  string
+	}{{"s3_key", s3Key}, {"message_id_header", messageID}}
+	for _, check := range checks {
+		if check.value == "" {
+			continue
+		}
+		var id int64
+		err := db.QueryRow(`SELECT id FROM messages WHERE project_id = ? AND direction = 'in' AND `+check.column+` = ? ORDER BY id LIMIT 1`, projectID, check.value).Scan(&id)
+		if err == nil {
+			return id, true, nil
+		}
+		if err != sql.ErrNoRows {
+			return 0, false, err
+		}
+	}
+	return 0, false, nil
 }
 
 // ─── Twilio inbound webhook ────────────────────────────────────────
@@ -3371,7 +3486,12 @@ func (a *App) handleTwilioInboundWebhook(w http.ResponseWriter, r *http.Request)
 		httpErr(w, http.StatusMethodNotAllowed, "POST only")
 		return
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxControlRequestBytes)
 	if err := r.ParseForm(); err != nil {
+		if isRequestTooLarge(err) {
+			httpErr(w, http.StatusRequestEntityTooLarge, "request body too large")
+			return
+		}
 		httpErr(w, http.StatusBadRequest, "form parse: "+err.Error())
 		return
 	}
@@ -3403,8 +3523,10 @@ func (a *App) handleTwilioInboundWebhook(w http.ResponseWriter, r *http.Request)
 	// the auth_token, signature check is skipped with a logged warning.
 	authToken := lookupConnectionCredential(globalCtx, bound.ConnectionID, "auth_token")
 	if authToken == "" {
-		globalCtx.Logger().Warn("twilio inbound: auth_token not retrievable, signature NOT verified", "url", signedURL)
-	} else if !verifyTwilioSignature(signedURL, form, authToken, gotSig) {
+		httpErr(w, http.StatusServiceUnavailable, "twilio signature verification unavailable")
+		return
+	}
+	if !verifyTwilioSignature(signedURL, form, authToken, gotSig) {
 		httpErr(w, http.StatusForbidden, "twilio signature failed")
 		return
 	}
@@ -3413,6 +3535,10 @@ func (a *App) handleTwilioInboundWebhook(w http.ResponseWriter, r *http.Request)
 	rawTo := form.Get("To")
 	body := form.Get("Body")
 	messageSid := form.Get("MessageSid")
+	if messageSid == "" {
+		httpErr(w, http.StatusBadRequest, "MessageSid required")
+		return
+	}
 
 	// Channel detection: WhatsApp messages have "whatsapp:+1..." on From.
 	channel := channelSMS
@@ -3439,6 +3565,11 @@ func (a *App) handleTwilioInboundWebhook(w http.ResponseWriter, r *http.Request)
 			return
 		}
 	}
+	if existing, _ := dbMessageByProviderID(globalCtx.AppDB(), pid, messageSid); existing != nil && existing.Direction == "in" {
+		w.Header().Set("Content-Type", "text/xml")
+		w.Write([]byte(`<?xml version="1.0" encoding="UTF-8"?><Response/>`))
+		return
+	}
 
 	toJSON, _ := json.Marshal([]string{to})
 	hdrs := map[string]string{
@@ -3452,7 +3583,7 @@ func (a *App) handleTwilioInboundWebhook(w http.ResponseWriter, r *http.Request)
 	now := time.Now().UTC().Format(time.RFC3339)
 
 	res, err := globalCtx.AppDB().Exec(
-		`INSERT INTO messages
+		`INSERT OR IGNORE INTO messages
 			(project_id, channel, direction, from_addr, to_addrs, cc_addrs,
 			 subject, body_text, body_html, headers,
 			 message_id_header, in_reply_to, references_json,
@@ -3468,6 +3599,11 @@ func (a *App) handleTwilioInboundWebhook(w http.ResponseWriter, r *http.Request)
 	)
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, "persist: "+err.Error())
+		return
+	}
+	if affected, _ := res.RowsAffected(); affected == 0 {
+		w.Header().Set("Content-Type", "text/xml")
+		w.Write([]byte(`<?xml version="1.0" encoding="UTF-8"?><Response/>`))
 		return
 	}
 	id, _ := res.LastInsertId()
@@ -3503,7 +3639,12 @@ func (a *App) handleTwilioStatusWebhook(w http.ResponseWriter, r *http.Request) 
 		httpErr(w, http.StatusMethodNotAllowed, "POST only")
 		return
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, maxControlRequestBytes)
 	if err := r.ParseForm(); err != nil {
+		if isRequestTooLarge(err) {
+			httpErr(w, http.StatusRequestEntityTooLarge, "request body too large")
+			return
+		}
 		httpErr(w, http.StatusBadRequest, "form parse: "+err.Error())
 		return
 	}
@@ -3522,8 +3663,10 @@ func (a *App) handleTwilioStatusWebhook(w http.ResponseWriter, r *http.Request) 
 	signedURL := reconstructPublicURL(r)
 	authToken := lookupConnectionCredential(globalCtx, bound.ConnectionID, "auth_token")
 	if authToken == "" {
-		globalCtx.Logger().Warn("twilio status: auth_token not retrievable, signature NOT verified", "url", signedURL)
-	} else if !verifyTwilioSignature(signedURL, form, authToken, r.Header.Get("X-Twilio-Signature")) {
+		httpErr(w, http.StatusServiceUnavailable, "twilio signature verification unavailable")
+		return
+	}
+	if !verifyTwilioSignature(signedURL, form, authToken, r.Header.Get("X-Twilio-Signature")) {
 		httpErr(w, http.StatusForbidden, "twilio signature failed")
 		return
 	}
@@ -3563,6 +3706,7 @@ func (a *App) handleTwilioStatusWebhook(w http.ResponseWriter, r *http.Request) 
 		reason = strings.TrimSpace(reason + " " + msgText)
 	}
 	ev := providerEvent{
+		ProviderEventID:   "twilio:" + messageSID + ":" + status,
 		Provider:          "twilio",
 		ProviderMessageID: messageSID,
 		Kind:              kind,
@@ -3632,12 +3776,14 @@ func verifyTwilioSignature(fullURL string, form url.Values, authToken, expected 
 // Twilio signs the *external* URL, not the per-pod forwarded form.
 func reconstructPublicURL(r *http.Request) string {
 	if globalCtx != nil {
-		if id, err := globalCtx.PlatformAPI().WhoAmI(); err == nil && id != nil && strings.TrimSpace(id.PublicURL) != "" {
+		if id, err := globalCtx.PlatformAPI().WhoAmI(); err == nil && id != nil {
 			path := r.URL.RequestURI()
 			if !strings.HasPrefix(path, "/api/apps/") {
 				path = "/api/apps/messaging" + path
 			}
-			return strings.TrimRight(strings.TrimSpace(id.PublicURL), "/") + path
+			if base, err := messagingWebhookPublicURL(globalCtx, id); err == nil {
+				return base + path
+			}
 		}
 	}
 	scheme := r.Header.Get("X-Forwarded-Proto")
@@ -3900,6 +4046,7 @@ type snsEnvelope struct {
 	MessageID        string          `json:"MessageId"`
 	TopicARN         string          `json:"TopicArn"`
 	Message          string          `json:"Message"`
+	Subject          string          `json:"Subject"`
 	Timestamp        string          `json:"Timestamp"`
 	Signature        string          `json:"Signature"`
 	SignatureVersion string          `json:"SignatureVersion"`
@@ -3918,48 +4065,172 @@ func parseSNSEnvelope(body []byte) (*snsEnvelope, error) {
 	return &env, nil
 }
 
-// verifySNS does the cheap-but-reasonable v0.1 check:
-//   - SigningCertURL host must be on amazonaws.com
-//   - Optional shared HMAC secret in header X-Apteva-Webhook-HMAC must
-//     match HMAC(secret, body) when the secret is configured.
-//
-// Full X.509 cert-chain verification is v0.2; documented in README.
-func verifySNS(r *http.Request, body []byte, ctx *sdk.AppCtx) bool {
-	if ctx != nil {
-		secret := strings.TrimSpace(ctx.Config().Get("webhook_signing_secret"))
-		if secret != "" {
-			got := r.Header.Get("X-Apteva-Webhook-HMAC")
-			want := hmacHex(secret, body)
-			if got != want {
-				return false
-			}
-			return true
-		}
-	}
-	// Without a configured secret, fall back to "looks like AWS".
-	var env snsEnvelope
-	if err := json.Unmarshal(body, &env); err != nil {
+func verifySNS(r *http.Request, body []byte, ctx *sdk.AppCtx, topicConfigKey string) bool {
+	env, err := parseSNSEnvelope(body)
+	if err != nil {
 		return false
 	}
-	if env.SigningCertURL == "" {
-		// Allow if header marker present (test mode) — production
-		// installs should set webhook_signing_secret.
-		return r.Header.Get("X-Amz-Sns-Message-Type") != ""
+	if env.MessageID == "" || env.TopicARN == "" {
+		return false
 	}
-	low := strings.ToLower(env.SigningCertURL)
-	return strings.Contains(low, "amazonaws.com")
+	if ctx != nil && topicConfigKey != "" {
+		if expected := strings.TrimSpace(ctx.Config().Get(topicConfigKey)); expected != "" && env.TopicARN != expected {
+			return false
+		}
+		if secret := strings.TrimSpace(ctx.Config().Get("webhook_signing_secret")); secret != "" {
+			got, err := hex.DecodeString(strings.TrimSpace(r.Header.Get("X-Apteva-Webhook-HMAC")))
+			if err != nil {
+				return false
+			}
+			mac := hmac.New(sha256.New, []byte(secret))
+			_, _ = mac.Write(body)
+			return hmac.Equal(got, mac.Sum(nil))
+		}
+	}
+	return verifyAWSSNSSignature(env) == nil
 }
 
-func hmacHex(secret string, body []byte) string {
-	h := sha256.New()
-	h.Write([]byte(secret))
-	h.Write(body)
-	return hex.EncodeToString(h.Sum(nil))
+func snsTopicAuthorized(ctx *sdk.AppCtx, projectID, topicARN, configKey string) bool {
+	if ctx == nil || topicARN == "" {
+		return false
+	}
+	if expected := strings.TrimSpace(ctx.Config().Get(configKey)); expected != "" {
+		return hmac.Equal([]byte(expected), []byte(topicARN))
+	}
+	query := `SELECT 1 FROM identities
+		WHERE kind = 'email_domain' AND deleted_at IS NULL
+		  AND json_valid(COALESCE(inbound_config,''))
+		  AND json_extract(inbound_config, '$.topic_arn') = ?`
+	args := []any{topicARN}
+	if projectID != "" {
+		query += ` AND project_id = ?`
+		args = append(args, projectID)
+	}
+	query += ` LIMIT 1`
+	var one int
+	return ctx.AppDB().QueryRow(query, args...).Scan(&one) == nil
 }
 
-func confirmSNSSubscription(url string) {
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Get(url)
+func verifyAWSSNSSignature(env *snsEnvelope) error {
+	if env == nil || env.Signature == "" || env.SigningCertURL == "" {
+		return errors.New("SNS signature fields missing")
+	}
+	cert, err := fetchSNSCertificate(env.SigningCertURL)
+	if err != nil {
+		return err
+	}
+	sig, err := base64.StdEncoding.DecodeString(env.Signature)
+	if err != nil {
+		return fmt.Errorf("decode SNS signature: %w", err)
+	}
+	canonical, err := canonicalSNSMessage(env)
+	if err != nil {
+		return err
+	}
+	pub, ok := cert.PublicKey.(*rsa.PublicKey)
+	if !ok {
+		return errors.New("SNS signing certificate is not RSA")
+	}
+	switch env.SignatureVersion {
+	case "1":
+		digest := sha1.Sum([]byte(canonical))
+		return rsa.VerifyPKCS1v15(pub, crypto.SHA1, digest[:], sig)
+	case "2":
+		digest := sha256.Sum256([]byte(canonical))
+		return rsa.VerifyPKCS1v15(pub, crypto.SHA256, digest[:], sig)
+	default:
+		return fmt.Errorf("unsupported SNS signature version %q", env.SignatureVersion)
+	}
+}
+
+func canonicalSNSMessage(env *snsEnvelope) (string, error) {
+	fields := [][2]string{{"Message", env.Message}, {"MessageId", env.MessageID}}
+	switch env.Type {
+	case "Notification":
+		if env.Subject != "" {
+			fields = append(fields, [2]string{"Subject", env.Subject})
+		}
+	case "SubscriptionConfirmation", "UnsubscribeConfirmation":
+		fields = append(fields, [2]string{"SubscribeURL", env.SubscribeURL})
+		fields = append(fields, [2]string{"Timestamp", env.Timestamp}, [2]string{"Token", env.Token}, [2]string{"TopicArn", env.TopicARN}, [2]string{"Type", env.Type})
+		return joinSNSFields(fields), nil
+	default:
+		return "", fmt.Errorf("unsupported SNS message type %q", env.Type)
+	}
+	fields = append(fields, [2]string{"Timestamp", env.Timestamp}, [2]string{"TopicArn", env.TopicARN}, [2]string{"Type", env.Type})
+	return joinSNSFields(fields), nil
+}
+
+func joinSNSFields(fields [][2]string) string {
+	var b strings.Builder
+	for _, field := range fields {
+		b.WriteString(field[0])
+		b.WriteByte('\n')
+		b.WriteString(field[1])
+		b.WriteByte('\n')
+	}
+	return b.String()
+}
+
+var snsCertCache = struct {
+	sync.Mutex
+	items map[string]*x509.Certificate
+}{items: map[string]*x509.Certificate{}}
+
+func fetchSNSCertificate(rawURL string) (*x509.Certificate, error) {
+	u, err := validSNSURL(rawURL)
+	if err != nil {
+		return nil, err
+	}
+	if u.RawQuery != "" || !strings.HasPrefix(u.Path, "/SimpleNotificationService-") || !strings.HasSuffix(u.Path, ".pem") {
+		return nil, errors.New("invalid SNS certificate path")
+	}
+	snsCertCache.Lock()
+	if cert := snsCertCache.items[u.String()]; cert != nil && time.Now().After(cert.NotBefore) && time.Now().Before(cert.NotAfter) {
+		snsCertCache.Unlock()
+		return cert, nil
+	}
+	snsCertCache.Unlock()
+	client := &http.Client{
+		Timeout:       10 * time.Second,
+		CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
+	}
+	resp, err := client.Get(u.String())
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("SNS certificate fetch returned %d", resp.StatusCode)
+	}
+	data, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
+	if err != nil {
+		return nil, err
+	}
+	block, _ := pem.Decode(data)
+	if block == nil || block.Type != "CERTIFICATE" {
+		return nil, errors.New("SNS certificate response is not PEM")
+	}
+	cert, err := x509.ParseCertificate(block.Bytes)
+	if err != nil {
+		return nil, err
+	}
+	if now := time.Now(); now.Before(cert.NotBefore) || now.After(cert.NotAfter) {
+		return nil, errors.New("SNS signing certificate is expired or not yet valid")
+	}
+	snsCertCache.Lock()
+	snsCertCache.items[u.String()] = cert
+	snsCertCache.Unlock()
+	return cert, nil
+}
+
+func confirmSNSSubscription(rawURL string) {
+	u, err := validSNSURL(rawURL)
+	if err != nil || u.Query().Get("Action") != "ConfirmSubscription" || u.Query().Get("Token") == "" {
+		return
+	}
+	client := &http.Client{Timeout: 10 * time.Second, CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }}
+	resp, err := client.Get(u.String())
 	if err != nil {
 		return
 	}
@@ -4248,9 +4519,9 @@ func isPermanentBounce(raw map[string]json.RawMessage) bool {
 	return false
 }
 
-func persistAndEmitProviderEvent(ctx *sdk.AppCtx, msg *Message, ev providerEvent) {
+func persistAndEmitProviderEvent(ctx *sdk.AppCtx, msg *Message, ev providerEvent) bool {
 	if ctx == nil || msg == nil {
-		return
+		return false
 	}
 	raw := ev.Raw
 	if len(ev.Metadata) > 0 {
@@ -4263,18 +4534,27 @@ func persistAndEmitProviderEvent(ctx *sdk.AppCtx, msg *Message, ev providerEvent
 	if occurred == "" {
 		occurred = time.Now().UTC().Format(time.RFC3339)
 	}
-	_, _ = ctx.AppDB().Exec(
-		`INSERT INTO delivery_events (message_id, kind, recipient, reason, raw, occurred_at)
-		 VALUES (?, ?, ?, ?, ?, ?)`,
-		msg.ID, ev.Kind, ev.Recipient, ev.Reason, string(raw), occurred,
+	res, err := ctx.AppDB().Exec(
+		`INSERT OR IGNORE INTO delivery_events (message_id, provider_event_id, kind, recipient, reason, raw, occurred_at)
+		 VALUES (?, NULLIF(?, ''), ?, ?, ?, ?, ?)`,
+		msg.ID, ev.ProviderEventID, ev.Kind, ev.Recipient, ev.Reason, string(raw), occurred,
 	)
+	if err != nil {
+		ctx.Logger().Warn("persist provider event failed", "message_id", msg.ID, "err", err)
+		return false
+	}
+	if affected, _ := res.RowsAffected(); affected == 0 {
+		return false
+	}
 	if (ev.Kind == "bounced" && ev.Permanent) || ev.Kind == "complained" {
 		suppressionReason := "hard-bounce"
 		if ev.Kind == "complained" {
 			suppressionReason = "complaint"
 		}
 		canonical := canonicalAddrForChannel(msg.Channel, ev.Recipient)
-		_ = dbSuppressionUpsert(ctx.AppDB(), msg.ProjectID, msg.Channel, canonical, suppressionReason, "auto")
+		if canonical != "" {
+			_ = dbSuppressionUpsert(ctx.AppDB(), msg.ProjectID, msg.Channel, canonical, suppressionReason, "auto")
+		}
 	}
 	if status := mapSESKindToStatus(ev.Kind); status != "" && shouldPromoteMessageStatus(msg.Status, status) {
 		_, _ = ctx.AppDB().Exec(
@@ -4299,6 +4579,7 @@ func persistAndEmitProviderEvent(ctx *sdk.AppCtx, msg *Message, ev providerEvent
 	}
 	emitMessagingEvent(ctx, msg.ProjectID, "message."+ev.Kind, payload)
 	emitMessagingEvent(ctx, msg.ProjectID, "message.event", payload)
+	return true
 }
 
 // ─── SES inbound parsing ───────────────────────────────────────────
@@ -4349,9 +4630,9 @@ type sesInboundEnvelope struct {
 // the recipient list when the SNS subscription URL didn't carry one
 // (global-scope installs where multiple projects can share a single
 // SNS topic). Walks the candidate recipients, strips each to its
-// parent domain, looks the domain up against the identities table —
-// the first match wins. Returns "" when nothing matches; caller
-// surfaces a clean error in that case.
+// parent domain, and requires every owned recipient to resolve to one
+// project. Returns "" when nothing matches or ownership spans projects;
+// caller surfaces a clean error in either case.
 //
 // Order of trust:
 //  1. sesEnv.Receipt.Recipients (what the SES rule matched on —
@@ -4372,19 +4653,41 @@ func resolveProjectFromInboundEmail(ctx *sdk.AppCtx, parsed *parsedInbound, sesE
 		candidates = append(candidates, parsed.To...)
 	}
 	seen := map[string]bool{}
+	projects := map[string]bool{}
 	for _, addr := range candidates {
 		clean := normaliseEmailFromHeader(addr)
 		if clean == "" {
 			clean = strings.TrimSpace(strings.ToLower(addr))
+		}
+		if projectID, err := dbResolveSenderProjectByAddress(ctx.AppDB(), channelEmail, clean); err != nil {
+			ctx.Logger().Warn("inbound email sender ownership is ambiguous", "recipient", clean, "err", err)
+			return ""
+		} else if projectID != "" {
+			projects[projectID] = true
+			if len(projects) > 1 {
+				ctx.Logger().Warn("inbound email recipients span projects", "recipient", clean)
+				return ""
+			}
+			continue
 		}
 		domain := parentDomainOf(clean)
 		if domain == "" || seen[domain] {
 			continue
 		}
 		seen[domain] = true
-		if id, _ := dbFindIdentityByAddress(ctx.AppDB(), "email_domain", domain); id != nil {
-			return id.ProjectID
+		if projectID, err := dbResolveIdentityProjectByAddress(ctx.AppDB(), "email_domain", domain); err != nil {
+			ctx.Logger().Warn("inbound email domain ownership is ambiguous", "domain", domain, "err", err)
+			return ""
+		} else if projectID != "" {
+			projects[projectID] = true
+			if len(projects) > 1 {
+				ctx.Logger().Warn("inbound email recipients span projects", "domain", domain)
+				return ""
+			}
 		}
+	}
+	for projectID := range projects {
+		return projectID
 	}
 	return ""
 }
@@ -4404,8 +4707,11 @@ func resolveProjectFromInboundPhone(ctx *sdk.AppCtx, channel, to string) string 
 	if strings.HasPrefix(strings.ToLower(addr), "whatsapp:") {
 		addr = strings.TrimSpace(addr[len("whatsapp:"):])
 	}
-	if s, _ := dbFindSenderByAddress(ctx.AppDB(), channel, addr); s != nil {
-		return s.ProjectID
+	if projectID, err := dbResolveSenderProjectByAddress(ctx.AppDB(), channel, addr); err != nil {
+		ctx.Logger().Warn("inbound phone ownership is ambiguous", "channel", channel, "address", addr, "err", err)
+		return ""
+	} else if projectID != "" {
+		return projectID
 	}
 	// Channel may have been mis-detected (e.g., Twilio routed a WA
 	// number through the SMS handler). Try the other channel as a
@@ -4414,8 +4720,11 @@ func resolveProjectFromInboundPhone(ctx *sdk.AppCtx, channel, to string) string 
 	if channel == "sms" {
 		otherChannel = "whatsapp"
 	}
-	if s, _ := dbFindSenderByAddress(ctx.AppDB(), otherChannel, addr); s != nil {
-		return s.ProjectID
+	if projectID, err := dbResolveSenderProjectByAddress(ctx.AppDB(), otherChannel, addr); err != nil {
+		ctx.Logger().Warn("inbound phone ownership is ambiguous", "channel", otherChannel, "address", addr, "err", err)
+		return ""
+	} else if projectID != "" {
+		return projectID
 	}
 	return ""
 }
@@ -4482,7 +4791,7 @@ func parseRawEml(rawBytes []byte, fallbackMessageID string) (*parsedInbound, err
 		From:       hdrs["From"],
 		To:         splitAddrList(hdrs["To"]),
 		Cc:         splitAddrList(hdrs["Cc"]),
-		Subject:    hdrs["Subject"],
+		Subject:    decodeMIMEHeader(hdrs["Subject"]),
 		BodyText:   bodyText,
 		BodyHTML:   bodyHTML,
 		MessageID:  hdrs["Message-Id"],
@@ -4568,67 +4877,105 @@ func resolveInboundStorageTool(ctx *sdk.AppCtx) (int64, string, error) {
 	return 0, "", errors.New("no S3 binding for inbound — bind the aws-s3 integration to the inbound_storage role")
 }
 
-// extractBodies handles single-part text/* directly and multipart by
-// pulling the first text/plain and text/html parts. Decodes
-// Content-Transfer-Encoding (base64, quoted-printable) on each part —
-// pre-v0.12.7 it stored the raw transfer-encoded bytes, which made
-// Proton mail (always base64-encodes) render as opaque blobs in the
-// inbox.
-//
-// Single-part path takes the top-level Content-Transfer-Encoding;
-// multipart path reads each part's own header (top-level is
-// "multipart/mixed" with no real encoding, parts carry their own).
-//
-// Best-effort: nested multiparts beyond one level fall through;
-// charset decoding (Content-Type: text/plain; charset=ISO-8859-1)
-// isn't done here — a separate quality issue.
 func extractBodies(contentType, topEncoding string, body []byte) (text string, html string) {
-	ct := strings.ToLower(contentType)
-	switch {
-	case strings.HasPrefix(ct, "text/plain"):
-		return decodeTransferEncoding(topEncoding, string(body)), ""
-	case strings.HasPrefix(ct, "text/html"):
-		return "", decodeTransferEncoding(topEncoding, string(body))
+	return extractMIMEBodies(contentType, topEncoding, "", body, 0)
+}
+
+func extractMIMEBodies(contentType, encoding, disposition string, body []byte, depth int) (text, html string) {
+	if depth > 12 {
+		return "", ""
 	}
-	// Naive multipart split — finds boundary= and walks parts. For
-	// production we'd swap to mime/multipart but keeping the import
-	// surface tiny here.
-	if !strings.HasPrefix(ct, "multipart/") {
-		return decodeTransferEncoding(topEncoding, string(body)), ""
+	mediaType, params, err := mime.ParseMediaType(contentType)
+	if err != nil || mediaType == "" {
+		mediaType = "text/plain"
+		params = map[string]string{}
 	}
-	boundary := boundaryFromContentType(contentType)
-	if boundary == "" {
-		return decodeTransferEncoding(topEncoding, string(body)), ""
+	mediaType = strings.ToLower(mediaType)
+	if strings.HasPrefix(mediaType, "multipart/") {
+		boundary := params["boundary"]
+		if boundary == "" {
+			return "", ""
+		}
+		reader := multipart.NewReader(bytes.NewReader(body), boundary)
+		for {
+			part, err := reader.NextPart()
+			if err == io.EOF {
+				break
+			}
+			if err != nil {
+				return text, html
+			}
+			partBody, err := io.ReadAll(part)
+			if err != nil {
+				continue
+			}
+			partText, partHTML := extractMIMEBodies(
+				part.Header.Get("Content-Type"),
+				part.Header.Get("Content-Transfer-Encoding"),
+				part.Header.Get("Content-Disposition"),
+				partBody,
+				depth+1,
+			)
+			if text == "" {
+				text = partText
+			}
+			if html == "" {
+				html = partHTML
+			}
+		}
+		return text, html
 	}
-	parts := strings.Split(string(body), "--"+boundary)
-	for _, p := range parts {
-		p = strings.TrimSpace(p)
-		if p == "" || p == "--" {
-			continue
+	if disp, _, _ := mime.ParseMediaType(disposition); strings.EqualFold(disp, "attachment") {
+		return "", ""
+	}
+	decoded, err := decodeTransferBytes(encoding, body)
+	if err != nil {
+		decoded = body
+	}
+	if mediaType == "message/rfc822" {
+		msg, err := mail.ReadMessage(bytes.NewReader(decoded))
+		if err != nil {
+			return "", ""
 		}
-		// split headers from body inside the part
-		hdrEnd := strings.Index(p, "\r\n\r\n")
-		if hdrEnd < 0 {
-			hdrEnd = strings.Index(p, "\n\n")
+		nested, err := io.ReadAll(msg.Body)
+		if err != nil {
+			return "", ""
 		}
-		if hdrEnd < 0 {
-			continue
-		}
-		head := strings.ToLower(p[:hdrEnd])
-		bodyPart := p[hdrEnd+2:]
-		// trim doubled newline depending on which separator hit
-		if strings.HasPrefix(p[hdrEnd:], "\r\n\r\n") {
-			bodyPart = p[hdrEnd+4:]
-		}
-		partEncoding := headerValueFromBlock(head, "content-transfer-encoding")
-		switch {
-		case strings.Contains(head, "content-type: text/plain") && text == "":
-			text = decodeTransferEncoding(partEncoding, bodyPart)
-		case strings.Contains(head, "content-type: text/html") && html == "":
-			html = decodeTransferEncoding(partEncoding, bodyPart)
+		return extractMIMEBodies(msg.Header.Get("Content-Type"), msg.Header.Get("Content-Transfer-Encoding"), msg.Header.Get("Content-Disposition"), nested, depth+1)
+	}
+	if mediaType != "text/plain" && mediaType != "text/html" {
+		return "", ""
+	}
+	if label := strings.TrimSpace(params["charset"]); label != "" && !strings.EqualFold(label, "utf-8") && !strings.EqualFold(label, "us-ascii") {
+		if reader, err := charset.NewReaderLabel(label, bytes.NewReader(decoded)); err == nil {
+			if converted, err := io.ReadAll(reader); err == nil {
+				decoded = converted
+			}
 		}
 	}
-	return text, html
+	if mediaType == "text/html" {
+		return "", string(decoded)
+	}
+	return string(decoded), ""
+}
+
+func decodeTransferBytes(encoding string, body []byte) ([]byte, error) {
+	switch strings.ToLower(strings.TrimSpace(encoding)) {
+	case "base64":
+		return io.ReadAll(base64.NewDecoder(base64.StdEncoding, bytes.NewReader(body)))
+	case "quoted-printable":
+		return io.ReadAll(quotedprintable.NewReader(bytes.NewReader(body)))
+	default:
+		return body, nil
+	}
+}
+
+func decodeMIMEHeader(value string) string {
+	decoded, err := new(mime.WordDecoder).DecodeHeader(value)
+	if err != nil {
+		return value
+	}
+	return decoded
 }
 
 // decodeTransferEncoding turns transfer-encoded body bytes into the
@@ -4929,8 +5276,8 @@ func (a *App) handleSendersEdit(w http.ResponseWriter, r *http.Request) {
 		DisplayName string `json:"display_name"`
 		Notes       string `json:"notes"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		httpErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+	if err := decodeJSONRequest(w, r, &body, maxControlRequestBytes); err != nil {
+		httpJSONDecodeError(w, err)
 		return
 	}
 	if body.Address == "" {
@@ -5199,7 +5546,10 @@ func (a *App) handleTemplatesImport(w http.ResponseWriter, r *http.Request) {
 		ApprovedOnly   bool     `json:"approved_only"`
 		UpdateExisting bool     `json:"update_existing"`
 	}
-	_ = json.NewDecoder(r.Body).Decode(&req)
+	if err := decodeJSONRequest(w, r, &req, maxControlRequestBytes); err != nil {
+		httpJSONDecodeError(w, err)
+		return
+	}
 	if req.Channel == "" {
 		req.Channel = channelWhatsApp
 	}
@@ -5354,7 +5704,10 @@ func (a *App) handleTemplateItem(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		var body map[string]any
-		_ = json.NewDecoder(r.Body).Decode(&body)
+		if err := decodeJSONRequest(w, r, &body, maxControlRequestBytes); err != nil {
+			httpJSONDecodeError(w, err)
+			return
+		}
 		if body == nil {
 			body = map[string]any{}
 		}
@@ -5374,7 +5727,10 @@ func (a *App) handleTemplateItem(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		var body map[string]any
-		_ = json.NewDecoder(r.Body).Decode(&body)
+		if err := decodeJSONRequest(w, r, &body, maxControlRequestBytes); err != nil {
+			httpJSONDecodeError(w, err)
+			return
+		}
 		if body == nil {
 			body = map[string]any{}
 		}
@@ -5411,8 +5767,8 @@ func (a *App) handleToolsCall(w http.ResponseWriter, r *http.Request) {
 		Tool string         `json:"tool"`
 		Args map[string]any `json:"args"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		httpErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+	if err := decodeJSONRequest(w, r, &body, maxToolsRequestBytes); err != nil {
+		httpJSONDecodeError(w, err)
 		return
 	}
 	if body.Tool == "" {
@@ -5448,20 +5804,20 @@ func (a *App) handleToolsCall(w http.ResponseWriter, r *http.Request) {
 
 // ─── DB helpers ────────────────────────────────────────────────────
 
+const messageSelectColumns = `id, project_id, channel, direction, from_addr, to_addrs, cc_addrs, bcc_addrs,
+	COALESCE(subject,''), COALESCE(body_text,''), COALESCE(body_html,''),
+	headers, attachment_storage_ids,
+	COALESCE(message_id_header,''), COALESCE(in_reply_to,''), references_json,
+	status, COALESCE(status_reason,''), COALESCE(provider_message_id,''),
+	COALESCE(idempotency_key,''),
+	COALESCE(route_target_app,''), COALESCE(route_target_route,''),
+	COALESCE(route_status,''), COALESCE(route_error,''), COALESCE(route_attempts,0),
+	COALESCE(matched_recipient,''), COALESCE(matched_pattern,''), COALESCE(to_subaddress,''),
+	COALESCE(template_id,0), COALESCE(verdicts,'{}'), COALESCE(s3_key,''),
+	COALESCE(created_at,''), COALESCE(sent_at,''), COALESCE(received_at,''), COALESCE(last_event_at,'')`
+
 func dbMessageGet(db *sql.DB, pid string, id int64) (*Message, error) {
-	q := `SELECT id, project_id, channel, direction, from_addr, to_addrs, cc_addrs, bcc_addrs,
-		COALESCE(subject,''), COALESCE(body_text,''), COALESCE(body_html,''),
-		headers, attachment_storage_ids,
-		COALESCE(message_id_header,''), COALESCE(in_reply_to,''), references_json,
-		status, COALESCE(status_reason,''), COALESCE(provider_message_id,''),
-		COALESCE(idempotency_key,''),
-		COALESCE(route_target_app,''), COALESCE(route_target_route,''),
-		COALESCE(route_status,''), COALESCE(route_error,''), COALESCE(route_attempts,0),
-		COALESCE(matched_recipient,''), COALESCE(matched_pattern,''), COALESCE(to_subaddress,''),
-		COALESCE(template_id,0),
-		COALESCE(verdicts,'{}'), COALESCE(s3_key,''),
-		COALESCE(created_at,''), COALESCE(sent_at,''), COALESCE(received_at,''), COALESCE(last_event_at,'')
-	FROM messages WHERE id = ?`
+	q := `SELECT ` + messageSelectColumns + ` FROM messages WHERE id = ?`
 	args := []any{id}
 	if pid != "" {
 		q += ` AND project_id = ?`
@@ -5534,12 +5890,12 @@ func whatsAppRecipientsOutsideSession(db *sql.DB, pid, from string, recipients [
 		        AND direction = 'in'
 		        AND from_addr = ?
 		        AND datetime(COALESCE(NULLIF(received_at,''), created_at)) >= datetime(?)
-		        AND (to_addrs LIKE ? OR matched_recipient = ?)
+		        AND (EXISTS (SELECT 1 FROM json_each(messages.to_addrs) WHERE json_each.value = ?)
+		             OR matched_recipient = ?)
 		      ORDER BY created_at DESC
 		      LIMIT 1`
-		likeFrom := `%"` + from + `"%`
 		var id int64
-		err := db.QueryRow(q, pid, recipient, since, likeFrom, from).Scan(&id)
+		err := db.QueryRow(q, pid, recipient, since, from, from).Scan(&id)
 		if err == sql.ErrNoRows {
 			missing = append(missing, recipient)
 			continue
@@ -5581,40 +5937,48 @@ func dbMessageListPage(db *sql.DB, pid string, opts messageListOpts) ([]*Message
 		args = append(args, opts.Since)
 	}
 	if opts.Address != "" {
-		where = append(where, "(from_addr = ? OR to_addrs LIKE ? OR cc_addrs LIKE ?)")
-		args = append(args, opts.Address, `%"`+opts.Address+`"%`, `%"`+opts.Address+`"%`)
+		where = append(where, `(from_addr = ?
+			OR EXISTS (SELECT 1 FROM json_each(messages.to_addrs) WHERE json_each.value = ?)
+			OR EXISTS (SELECT 1 FROM json_each(messages.cc_addrs) WHERE json_each.value = ?))`)
+		args = append(args, opts.Address, opts.Address, opts.Address)
 	}
 	whereSQL := strings.Join(where, " AND ")
 	var total int
 	if err := db.QueryRow(`SELECT COUNT(*) FROM messages WHERE `+whereSQL, args...).Scan(&total); err != nil {
 		return nil, 0, err
 	}
-	q := `SELECT id FROM messages WHERE ` + strings.Join(where, " AND ") +
+	q := `SELECT ` + messageSelectColumns + ` FROM messages WHERE ` + strings.Join(where, " AND ") +
 		` ORDER BY created_at DESC, id DESC LIMIT ? OFFSET ?`
 	args = append(args, opts.Limit, opts.Offset)
 	rows, err := db.Query(q, args...)
 	if err != nil {
 		return nil, 0, err
 	}
+	out := []*Message{}
 	ids := []int64{}
 	for rows.Next() {
-		var id int64
-		if err := rows.Scan(&id); err == nil {
-			ids = append(ids, id)
+		message, err := scanMessage(rows)
+		if err != nil {
+			rows.Close()
+			return nil, 0, err
 		}
+		out = append(out, message)
+		ids = append(ids, message.ID)
 	}
-	rows.Close()
-	out := []*Message{}
-	for _, id := range ids {
-		m, err := dbMessageGet(db, pid, id)
-		if err == nil && m != nil {
-			out = append(out, m)
-		}
+	if err := rows.Close(); err != nil {
+		return nil, 0, err
+	}
+	eventCounts := dbDeliveryEventCountsBatch(db, ids)
+	attachments := dbMessageAttachmentsBatch(db, pid, ids)
+	for _, message := range out {
+		message.EventCounts = eventCounts[message.ID]
+		message.Status = effectiveMessageStatus(message.Status, message.EventCounts)
+		message.Attachments = attachments[message.ID]
 	}
 	return out, total, nil
 }
 
-func scanMessage(row *sql.Row) (*Message, error) {
+func scanMessage(row interface{ Scan(...any) error }) (*Message, error) {
 	m := &Message{}
 	var to, cc, bcc, headers, attachIDs, refs, verdicts string
 	var templateID sql.NullInt64
@@ -5673,9 +6037,38 @@ func scanMessage(row *sql.Row) (*Message, error) {
 	return m, nil
 }
 
+func dbDeliveryEventCountsBatch(db *sql.DB, messageIDs []int64) map[int64]map[string]int {
+	out := map[int64]map[string]int{}
+	if len(messageIDs) == 0 {
+		return out
+	}
+	placeholders := strings.TrimRight(strings.Repeat("?,", len(messageIDs)), ",")
+	args := make([]any, len(messageIDs))
+	for i, id := range messageIDs {
+		args[i] = id
+	}
+	rows, err := db.Query(`SELECT message_id, kind, COUNT(*) FROM delivery_events WHERE message_id IN (`+placeholders+`) GROUP BY message_id, kind`, args...)
+	if err != nil {
+		return out
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var messageID int64
+		var kind string
+		var count int
+		if rows.Scan(&messageID, &kind, &count) == nil {
+			if out[messageID] == nil {
+				out[messageID] = map[string]int{}
+			}
+			out[messageID][kind] = count
+		}
+	}
+	return out
+}
+
 func dbDeliveryEvents(db *sql.DB, msgID int64) ([]*DeliveryEvent, error) {
 	rows, err := db.Query(
-		`SELECT id, message_id, kind, COALESCE(recipient,''), COALESCE(reason,''),
+		`SELECT id, message_id, COALESCE(provider_event_id,''), kind, COALESCE(recipient,''), COALESCE(reason,''),
 		        raw, COALESCE(occurred_at,'')
 		 FROM delivery_events WHERE message_id = ? ORDER BY id`,
 		msgID,
@@ -5688,7 +6081,7 @@ func dbDeliveryEvents(db *sql.DB, msgID int64) ([]*DeliveryEvent, error) {
 	for rows.Next() {
 		e := &DeliveryEvent{}
 		var raw string
-		if err := rows.Scan(&e.ID, &e.MessageID, &e.Kind, &e.Recipient, &e.Reason, &raw, &e.OccurredAt); err == nil {
+		if err := rows.Scan(&e.ID, &e.MessageID, &e.ProviderEventID, &e.Kind, &e.Recipient, &e.Reason, &raw, &e.OccurredAt); err == nil {
 			e.Raw = json.RawMessage(raw)
 			out = append(out, e)
 		}
@@ -6577,6 +6970,37 @@ func schemaObject(props map[string]any, required []string) map[string]any {
 func httpJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+func readRequestBody(w http.ResponseWriter, r *http.Request, maxBytes int64) ([]byte, error) {
+	r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
+	return io.ReadAll(r.Body)
+}
+
+func decodeJSONRequest(w http.ResponseWriter, r *http.Request, dst any, maxBytes int64) error {
+	r.Body = http.MaxBytesReader(w, r.Body, maxBytes)
+	return json.NewDecoder(r.Body).Decode(dst)
+}
+
+func isRequestTooLarge(err error) bool {
+	var maxErr *http.MaxBytesError
+	return errors.As(err, &maxErr)
+}
+
+func httpRequestBodyError(w http.ResponseWriter, err error) {
+	if isRequestTooLarge(err) {
+		httpErr(w, http.StatusRequestEntityTooLarge, "request body too large")
+		return
+	}
+	httpErr(w, http.StatusBadRequest, "read body")
+}
+
+func httpJSONDecodeError(w http.ResponseWriter, err error) {
+	if isRequestTooLarge(err) {
+		httpErr(w, http.StatusRequestEntityTooLarge, "request body too large")
+		return
+	}
+	httpErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
 }
 
 func httpErr(w http.ResponseWriter, code int, msg string) {

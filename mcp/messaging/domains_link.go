@@ -6,15 +6,13 @@ package main
 // from the list is safer than free-text (no typos, no asking SES to
 // verify a domain the operator can't actually put DNS records on).
 //
-// Domains is global-scoped on prod, so every call must inject
-// _project_id; without it a global Domains install rejects the request
-// with "project_id missing". senders_create's bootstrapPublishDNSRecord
-// path predates that rule and may need the same treatment — out of
-// scope for this file.
+// Domains may be global-scoped, so every app call injects _project_id.
+// Platform DNS grants are merged with Domains inventory when available.
 
 import (
 	"errors"
 	"fmt"
+	"strings"
 
 	sdk "github.com/apteva/app-sdk"
 )
@@ -23,6 +21,7 @@ type domainRow struct {
 	Name            string `json:"name"`
 	RegistrarSlug   string `json:"registrar_slug,omitempty"`
 	DNSProviderSlug string `json:"dns_provider_slug,omitempty"`
+	Source          string `json:"source,omitempty"`
 }
 
 type domainListResp struct {
@@ -37,8 +36,24 @@ func listDomainsForProject(ctx *sdk.AppCtx, projectID string) ([]domainRow, erro
 	if ctx == nil || ctx.PlatformAPI() == nil {
 		return nil, errors.New("platform unavailable")
 	}
+	rows := []domainRow{}
+	seen := map[string]bool{}
+	if grants, err := ctx.PlatformAPI().ListDomainGrants(); err == nil {
+		for _, grant := range grants {
+			name := strings.ToLower(strings.Trim(strings.TrimPrefix(grant.Domain, "*."), "."))
+			if name == "" || seen[name] {
+				continue
+			}
+			seen[name] = true
+			source := grant.Source
+			if source == "" {
+				source = "platform"
+			}
+			rows = append(rows, domainRow{Name: name, Source: source})
+		}
+	}
 	if !isAppDepBound(ctx, "domains") {
-		return nil, nil
+		return rows, nil
 	}
 	var resp domainListResp
 	err := ctx.PlatformAPI().CallAppResult("domains", "domain_list", map[string]any{
@@ -47,5 +62,14 @@ func listDomainsForProject(ctx *sdk.AppCtx, projectID string) ([]domainRow, erro
 	if err != nil {
 		return nil, fmt.Errorf("domains.domain_list: %w", err)
 	}
-	return resp.Domains, nil
+	for _, domain := range resp.Domains {
+		domain.Name = strings.ToLower(strings.Trim(domain.Name, "."))
+		if domain.Name == "" || seen[domain.Name] {
+			continue
+		}
+		seen[domain.Name] = true
+		domain.Source = "domains"
+		rows = append(rows, domain)
+	}
+	return rows, nil
 }

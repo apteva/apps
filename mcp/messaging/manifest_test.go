@@ -1,6 +1,14 @@
 package main
 
-import "testing"
+import (
+	"os"
+	"reflect"
+	"sort"
+	"strconv"
+	"testing"
+
+	sdk "github.com/apteva/app-sdk"
+)
 
 func TestEmbeddedManifest_Valid(t *testing.T) {
 	app := &App{}
@@ -39,12 +47,67 @@ func TestMCPTools_DeclaredMatchHandlers(t *testing.T) {
 }
 
 func TestManifestAndYAMLAgree(t *testing.T) {
-	// The embedded YAML and the on-disk apteva.yaml should declare
-	// the same number of MCP tools — keeping them in sync is manual,
-	// this test catches drift.
-	app := &App{}
-	embedded := len(app.Manifest().Provides.MCPTools)
-	if embedded < 16 {
-		t.Errorf("expected at least 16 mcp_tools in embedded manifest, got %d", embedded)
+	diskBytes, err := os.ReadFile("apteva.yaml")
+	if err != nil {
+		t.Fatal(err)
 	}
+	disk, err := sdk.ParseManifest(diskBytes)
+	if err != nil {
+		t.Fatalf("parse disk manifest: %v", err)
+	}
+	embedded, err := sdk.ParseManifest([]byte(manifestYAML))
+	if err != nil {
+		t.Fatalf("parse embedded manifest: %v", err)
+	}
+	if disk.Name != embedded.Name || disk.Version != embedded.Version {
+		t.Fatalf("identity drift: disk=%s@%s embedded=%s@%s", disk.Name, disk.Version, embedded.Name, embedded.Version)
+	}
+	if !reflect.DeepEqual(sortedToolNames(disk.Provides.MCPTools), sortedToolNames(embedded.Provides.MCPTools)) {
+		t.Fatalf("MCP tool drift: disk=%v embedded=%v", sortedToolNames(disk.Provides.MCPTools), sortedToolNames(embedded.Provides.MCPTools))
+	}
+	if !reflect.DeepEqual(sortedPermissions(disk), sortedPermissions(embedded)) {
+		t.Fatalf("permission drift: disk=%v embedded=%v", sortedPermissions(disk), sortedPermissions(embedded))
+	}
+	if !reflect.DeepEqual(integrationContracts(disk), integrationContracts(embedded)) {
+		t.Fatalf("integration drift: disk=%v embedded=%v", integrationContracts(disk), integrationContracts(embedded))
+	}
+	if !reflect.DeepEqual(configContracts(disk), configContracts(embedded)) {
+		t.Fatalf("config drift: disk=%v embedded=%v", configContracts(disk), configContracts(embedded))
+	}
+}
+
+func sortedToolNames(tools []sdk.MCPToolSpec) []string {
+	names := make([]string, 0, len(tools))
+	for _, tool := range tools {
+		names = append(names, tool.Name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+func sortedPermissions(manifest *sdk.Manifest) []string {
+	permissions := make([]string, 0, len(manifest.Requires.Permissions))
+	for _, permission := range manifest.Requires.Permissions {
+		permissions = append(permissions, string(permission))
+	}
+	sort.Strings(permissions)
+	return permissions
+}
+
+func integrationContracts(manifest *sdk.Manifest) []string {
+	contracts := make([]string, 0, len(manifest.Requires.Integrations))
+	for _, integration := range manifest.Requires.Integrations {
+		contracts = append(contracts, integration.Role+"|"+integration.Kind+"|"+strconv.FormatBool(integration.Required))
+	}
+	sort.Strings(contracts)
+	return contracts
+}
+
+func configContracts(manifest *sdk.Manifest) []string {
+	contracts := make([]string, 0, len(manifest.ConfigSchema))
+	for _, field := range manifest.ConfigSchema {
+		contracts = append(contracts, field.Name+"|"+field.Type)
+	}
+	sort.Strings(contracts)
+	return contracts
 }

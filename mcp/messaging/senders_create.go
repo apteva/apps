@@ -30,6 +30,7 @@ package main
 
 import (
 	"encoding/json"
+	"encoding/xml"
 	"errors"
 	"fmt"
 	"net/http"
@@ -104,8 +105,8 @@ func (a *App) handleSendersCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body sendersCreateReq
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		httpErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
+	if err := decodeJSONRequest(w, r, &body, maxControlRequestBytes); err != nil {
+		httpJSONDecodeError(w, err)
 		return
 	}
 	// Global-scope installs have no APTEVA_PROJECT_ID env; resolve
@@ -475,6 +476,10 @@ func (a *App) sendersCreateDomain(ctx *sdk.AppCtx, pid string, sesConnID int64, 
 			return resp, nil
 		}
 		resp.Steps = append(resp.Steps, bootstrapStep{Step: "set_sns_topic_policy", OK: true})
+		// Persist the authorized topic before later setup steps. If S3,
+		// SES identity, DNS, or subscription work fails, signed callbacks
+		// from any unrelated SNS topic must still be rejected.
+		persistSNSTopicAuthorization(ctx, pid, domain, resp)
 	}
 
 	if doInbound {
@@ -567,7 +572,7 @@ func (a *App) sendersCreateDomain(ctx *sdk.AppCtx, pid string, sesConnID int64, 
 	}
 
 	if publishDNS {
-		if isAppDepBound(ctx, "domains") {
+		if resolveDNSPublisher(ctx, domain) != "" {
 			for i, tok := range dkimTokens {
 				st := bootstrapPublishDNSRecord(
 					ctx, pid,
@@ -651,7 +656,11 @@ func (a *App) sendersCreateDomain(ctx *sdk.AppCtx, pid string, sesConnID int64, 
 	publicURL := ""
 	includeWebhookProjectID := false
 	if id != nil {
-		publicURL = strings.TrimSuffix(strings.TrimSpace(id.PublicURL), "/")
+		publicURL, err = messagingWebhookPublicURL(ctx, id)
+		if err != nil {
+			resp.Steps = append(resp.Steps, bootstrapStep{Step: "resolve_webhook_public_url", OK: false, Error: err.Error()})
+			publicURL = ""
+		}
 		includeWebhookProjectID = strings.TrimSpace(id.ProjectID) != ""
 	}
 
@@ -720,6 +729,28 @@ func (a *App) sendersCreateDomain(ctx *sdk.AppCtx, pid string, sesConnID int64, 
 		resp.Inbound.Bootstrapped = true
 	}
 
+	if snsBound != nil && publicURL != "" && topicArn != "" {
+		expected := []string{}
+		if doEvents {
+			expected = append(expected, messagingWebhookURL(publicURL, "/webhooks/ses-bounces", pid, includeWebhookProjectID))
+		}
+		if doInbound {
+			expected = append(expected, messagingWebhookURL(publicURL, "/webhooks/ses-inbound", pid, includeWebhookProjectID))
+		}
+		if len(expected) > 0 {
+			removed, err := cleanupStaleMessagingSNSSubscriptions(ctx, snsBound.ConnectionID, topicArn, expected, pid, includeWebhookProjectID)
+			step := bootstrapStep{Step: "sns_cleanup_stale_webhooks", OK: err == nil}
+			if err != nil {
+				step.Error = err.Error()
+			} else if len(removed) == 0 {
+				step.Skipped = "no stale Messaging subscriptions"
+			} else {
+				step.Detail = fmt.Sprintf("removed %d stale subscription(s)", len(removed))
+			}
+			resp.Steps = append(resp.Steps, step)
+		}
+	}
+
 	resp.NextStep = sendersCreateNextStep(doInbound, isAppDepBound(ctx, "domains"))
 	if resp.DnsPublishPartial {
 		resp.NextStep = "Some DNS records failed to publish — review the dns_* steps and re-run senders_create. " + resp.NextStep
@@ -737,6 +768,55 @@ func (a *App) sendersCreateDomain(ctx *sdk.AppCtx, pid string, sesConnID int64, 
 // a verified parent domain when DKIM is already SUCCESS.
 func persistDomainIdentity(ctx *sdk.AppCtx, pid, domain string, resp *sendersCreateResp, includeInbound bool, stepName string) {
 	persistDomainIdentityWithMetadata(ctx, pid, domain, resp, includeInbound, "", stepName)
+}
+
+func persistSNSTopicAuthorization(ctx *sdk.AppCtx, pid, domain string, resp *sendersCreateResp) {
+	if resp == nil {
+		return
+	}
+	step := bootstrapStep{Step: "persist_sns_topic", OK: true}
+	if resp.Inbound == nil || resp.Inbound.TopicARN == "" {
+		step.OK = false
+		step.Error = "SNS topic ARN is empty"
+		resp.Steps = append(resp.Steps, step)
+		return
+	}
+	existing, err := dbFindIdentity(ctx.AppDB(), pid, "email_domain", domain)
+	if err != nil {
+		step.OK = false
+		step.Error = err.Error()
+		resp.Steps = append(resp.Steps, step)
+		return
+	}
+	config := map[string]any{}
+	if existing != nil && existing.InboundConfig != "" {
+		_ = json.Unmarshal([]byte(existing.InboundConfig), &config)
+	}
+	config["topic_arn"] = resp.Inbound.TopicARN
+	config["account_id"] = resp.Inbound.AccountID
+	config["region"] = resp.Inbound.Region
+	encoded, err := json.Marshal(config)
+	if err != nil {
+		step.OK = false
+		step.Error = err.Error()
+		resp.Steps = append(resp.Steps, step)
+		return
+	}
+	if existing != nil {
+		_, err = ctx.AppDB().Exec(`UPDATE identities SET inbound_config = ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, string(encoded), existing.ID)
+	} else {
+		_, err = dbUpsertIdentity(ctx.AppDB(), &identityUpsert{
+			ProjectID: pid, Kind: "email_domain", Address: domain,
+			Provider: "aws-ses", ProviderIdentityID: domain, InboundConfig: string(encoded),
+		})
+	}
+	if err != nil {
+		step.OK = false
+		step.Error = err.Error()
+	} else {
+		step.Detail = resp.Inbound.TopicARN
+	}
+	resp.Steps = append(resp.Steps, step)
 }
 
 func persistDomainIdentityWithMetadata(ctx *sdk.AppCtx, pid, domain string, resp *sendersCreateResp, includeInbound bool, metadata string, stepName string) {
@@ -807,10 +887,10 @@ func domainVerificationStatus(dkimStatus string) string {
 }
 
 // inboundConfigJSON serialises the panel-friendly Inbound block into
-// the JSON shape we store in senders.inbound_config. Returns "" when
-// not bootstrapped.
+// the JSON shape stored on the domain identity. The SNS topic is saved
+// as soon as it is created, even before inbound receipt setup completes.
 func inboundConfigJSON(inb *sendersCreateInbound) string {
-	if inb == nil || !inb.Bootstrapped {
+	if inb == nil || (inb.TopicARN == "" && !inb.Bootstrapped) {
 		return ""
 	}
 	cfg := map[string]any{
@@ -937,7 +1017,7 @@ func (a *App) sendersCreatePhone(ctx *sdk.AppCtx, pid, channel, addr string, req
 	id, _ := ctx.PlatformAPI().WhoAmI()
 	publicURL := ""
 	if id != nil {
-		publicURL = strings.TrimSuffix(strings.TrimSpace(id.PublicURL), "/")
+		publicURL, _ = messagingWebhookPublicURL(ctx, id)
 	}
 	mode := strings.ToLower(strings.TrimSpace(req.Inbound))
 	doInbound := false
@@ -1064,7 +1144,7 @@ func (a *App) sendersCreateWhatsApp(ctx *sdk.AppCtx, pid, addr string, req sende
 	id, _ := ctx.PlatformAPI().WhoAmI()
 	publicURL := ""
 	if id != nil {
-		publicURL = strings.TrimSuffix(strings.TrimSpace(id.PublicURL), "/")
+		publicURL, _ = messagingWebhookPublicURL(ctx, id)
 	}
 	mode := strings.ToLower(strings.TrimSpace(req.Inbound))
 	doInbound := false
@@ -1284,7 +1364,11 @@ func bootstrapCreateSNSTopic(ctx *sdk.AppCtx, connID int64, name string) (string
 	if res == nil || !res.Success {
 		return "", fmt.Errorf("create_topic non-2xx: %s", truncateResData(res))
 	}
-	return parseFirstSNSARN(string(res.Data), "TopicArn"), nil
+	arn := parseFirstSNSARN(string(res.Data), "TopicArn")
+	if arn == "" {
+		return "", errors.New("create_topic response missing TopicArn")
+	}
+	return arn, nil
 }
 
 // parseFirstSNSARN walks either parsed-XML-as-JSON or raw text looking
@@ -1662,6 +1746,28 @@ func getDomainDKIM(ctx *sdk.AppCtx, connID int64, domain string) ([]string, stri
 }
 
 func bootstrapPublishDNSRecord(ctx *sdk.AppCtx, pid, step, domain, name, recType, value string) bootstrapStep {
+	publisher := resolveDNSPublisher(ctx, domain)
+	if publisher == "platform" {
+		result, err := ctx.PlatformAPI().UpsertDNSRecord(sdk.DNSRecordRequest{
+			ProjectID: pid,
+			Domain:    domain,
+			Name:      name,
+			Type:      recType,
+			Value:     value,
+			TTL:       1800,
+		})
+		if err != nil {
+			return bootstrapStep{Step: step, Error: err.Error()}
+		}
+		if result == nil || !result.OK {
+			errText := "platform DNS update failed"
+			if result != nil && result.Error != "" {
+				errText = result.Error
+			}
+			return bootstrapStep{Step: step, Error: errText}
+		}
+		return bootstrapStep{Step: step, OK: true, Detail: result.Action}
+	}
 	// Global-scope domains installs reject calls without _project_id —
 	// the inject is the same convention every cross-app helper in this
 	// codebase already follows (see domains_link.go, certs/domain_link.go,
@@ -1687,6 +1793,34 @@ func bootstrapPublishDNSRecord(ctx *sdk.AppCtx, pid, step, domain, name, recType
 		return bootstrapStep{Step: step, Error: probe.Error}
 	}
 	return bootstrapStep{Step: step, OK: true, Detail: probe.Action}
+}
+
+func resolveDNSPublisher(ctx *sdk.AppCtx, domain string) string {
+	if platformDNSGrantCovers(ctx, domain) {
+		return "platform"
+	}
+	if isAppDepBound(ctx, "domains") {
+		return "domains"
+	}
+	return ""
+}
+
+func platformDNSGrantCovers(ctx *sdk.AppCtx, domain string) bool {
+	if ctx == nil || ctx.PlatformAPI() == nil {
+		return false
+	}
+	domain = strings.ToLower(strings.Trim(domain, "."))
+	grants, err := ctx.PlatformAPI().ListDomainGrants()
+	if err != nil {
+		return false
+	}
+	for _, grant := range grants {
+		granted := strings.ToLower(strings.Trim(strings.TrimPrefix(grant.Domain, "*."), "."))
+		if granted == domain || (grant.Wildcard && strings.HasSuffix(domain, "."+granted)) {
+			return true
+		}
+	}
+	return false
 }
 
 func bootstrapCreateRuleSet(ctx *sdk.AppCtx, connID int64, name string) error {
@@ -1944,12 +2078,46 @@ func messagingWebhookURL(publicURL, webhookPath, projectID string, includeProjec
 	return strings.TrimSuffix(publicURL, "/") + "/api/apps/messaging" + webhookPath + "?" + q.Encode()
 }
 
+func messagingWebhookPublicURL(ctx *sdk.AppCtx, id *sdk.InstallIdentity) (string, error) {
+	if ctx != nil {
+		if raw := strings.TrimSpace(ctx.Config().Get("webhook_public_url")); raw != "" {
+			return normaliseWebhookPublicURL(raw)
+		}
+	}
+	if id == nil || strings.TrimSpace(id.PublicURL) == "" {
+		return "", errors.New("platform Public URL is unset and webhook_public_url is not configured")
+	}
+	return normaliseWebhookPublicURL(id.PublicURL)
+}
+
+func normaliseWebhookPublicURL(raw string) (string, error) {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || u == nil {
+		return "", errors.New("webhook_public_url is invalid")
+	}
+	if u.Scheme != "https" {
+		return "", errors.New("webhook_public_url must start with https://")
+	}
+	if u.Host == "" || u.User != nil {
+		return "", errors.New("webhook_public_url must include a host and no credentials")
+	}
+	if u.Path != "" && u.Path != "/" {
+		return "", errors.New("webhook_public_url must be an origin only, without a path")
+	}
+	if u.RawQuery != "" || u.Fragment != "" {
+		return "", errors.New("webhook_public_url must not include query string or fragment")
+	}
+	return u.Scheme + "://" + u.Host, nil
+}
+
 func bootstrapSubscribeWebhook(ctx *sdk.AppCtx, connID int64, topicArn, endpoint string) (string, bool, error) {
-	listRes, listErr := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "list_subscriptions_by_topic", map[string]any{
-		"TopicArn": topicArn,
-	})
-	if listErr == nil && listRes != nil && listRes.Success && strings.Contains(string(listRes.Data), endpoint) {
-		return "", true, nil
+	subscriptions, listErr := listSNSSubscriptions(ctx, connID, topicArn)
+	if listErr == nil {
+		for _, sub := range subscriptions {
+			if sub.Endpoint == endpoint {
+				return sub.SubscriptionARN, true, nil
+			}
+		}
 	}
 	subRes, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "subscribe", map[string]any{
 		"TopicArn":              topicArn,
@@ -1964,6 +2132,143 @@ func bootstrapSubscribeWebhook(ctx *sdk.AppCtx, connID int64, topicArn, endpoint
 		return "", false, fmt.Errorf("subscribe non-2xx: %s", truncateResData(subRes))
 	}
 	return parseFirstSNSARN(string(subRes.Data), "SubscriptionArn"), false, nil
+}
+
+type snsSubscription struct {
+	Endpoint        string
+	SubscriptionARN string
+}
+
+func cleanupStaleMessagingSNSSubscriptions(ctx *sdk.AppCtx, connID int64, topicARN string, expected []string, projectID string, includeProjectID bool) ([]string, error) {
+	subscriptions, err := listSNSSubscriptions(ctx, connID, topicARN)
+	if err != nil {
+		return nil, err
+	}
+	expectedSet := map[string]bool{}
+	for _, endpoint := range expected {
+		expectedSet[endpoint] = true
+	}
+	removed := []string{}
+	for _, sub := range subscriptions {
+		if sub.Endpoint == "" || sub.SubscriptionARN == "" || expectedSet[sub.Endpoint] ||
+			!isStaleMessagingWebhookEndpoint(sub.Endpoint, os.Getenv("APTEVA_APP_TOKEN"), projectID, includeProjectID) {
+			continue
+		}
+		result, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "unsubscribe", map[string]any{"SubscriptionArn": sub.SubscriptionARN})
+		if err != nil || result == nil || !result.Success {
+			if err != nil {
+				return removed, err
+			}
+			return removed, fmt.Errorf("unsubscribe non-2xx: %s", truncateResData(result))
+		}
+		removed = append(removed, sub.Endpoint)
+	}
+	return removed, nil
+}
+
+func listSNSSubscriptions(ctx *sdk.AppCtx, connID int64, topicARN string) ([]snsSubscription, error) {
+	var all []snsSubscription
+	nextToken := ""
+	seenTokens := map[string]bool{}
+	for page := 0; page < 100; page++ {
+		input := map[string]any{"TopicArn": topicARN}
+		if nextToken != "" {
+			input["NextToken"] = nextToken
+		}
+		res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "list_subscriptions_by_topic", input)
+		if err != nil {
+			return nil, fmt.Errorf("list subscriptions: %w", err)
+		}
+		if res == nil || !res.Success {
+			return nil, fmt.Errorf("list subscriptions non-2xx: %s", truncateResData(res))
+		}
+		all = append(all, parseSNSSubscriptions(res.Data)...)
+		nextToken = parseSNSNextToken(res.Data)
+		if nextToken == "" {
+			return all, nil
+		}
+		if seenTokens[nextToken] {
+			return nil, errors.New("list subscriptions returned a repeated NextToken")
+		}
+		seenTokens[nextToken] = true
+	}
+	return nil, errors.New("list subscriptions exceeded 100 pages")
+}
+
+func parseSNSNextToken(data []byte) string {
+	var root any
+	if json.Unmarshal(data, &root) == nil {
+		return walkForString(root, "NextToken")
+	}
+	var envelope struct {
+		NextToken string `xml:"ListSubscriptionsByTopicResult>NextToken"`
+	}
+	if xml.Unmarshal(data, &envelope) == nil {
+		return strings.TrimSpace(envelope.NextToken)
+	}
+	return ""
+}
+
+func isStaleMessagingWebhookEndpoint(endpoint, token, projectID string, includeProjectID bool) bool {
+	u, err := url.Parse(endpoint)
+	if err != nil || (u.Path != "/api/apps/messaging/webhooks/ses-bounces" && u.Path != "/api/apps/messaging/webhooks/ses-inbound") {
+		return false
+	}
+	query := u.Query()
+	if token == "" || query.Get("api_key") != token {
+		return false
+	}
+	return !includeProjectID || projectID == "" || query.Get("project_id") == projectID
+}
+
+func parseSNSSubscriptions(data []byte) []snsSubscription {
+	var root any
+	out := []snsSubscription{}
+	if json.Unmarshal(data, &root) == nil {
+		walkSNSSubscriptions(root, &out)
+	} else {
+		var envelope struct {
+			Members []struct {
+				Endpoint        string `xml:"Endpoint"`
+				SubscriptionARN string `xml:"SubscriptionArn"`
+			} `xml:"ListSubscriptionsByTopicResult>Subscriptions>member"`
+		}
+		if xml.Unmarshal(data, &envelope) != nil {
+			return nil
+		}
+		for _, member := range envelope.Members {
+			out = append(out, snsSubscription{Endpoint: member.Endpoint, SubscriptionARN: member.SubscriptionARN})
+		}
+	}
+	seen := map[string]bool{}
+	unique := out[:0]
+	for _, sub := range out {
+		key := sub.Endpoint + "\x00" + sub.SubscriptionARN
+		if key == "\x00" || seen[key] {
+			continue
+		}
+		seen[key] = true
+		unique = append(unique, sub)
+	}
+	return unique
+}
+
+func walkSNSSubscriptions(value any, out *[]snsSubscription) {
+	switch current := value.(type) {
+	case map[string]any:
+		endpoint, _ := current["Endpoint"].(string)
+		arn, _ := current["SubscriptionArn"].(string)
+		if endpoint != "" || arn != "" {
+			*out = append(*out, snsSubscription{Endpoint: endpoint, SubscriptionARN: arn})
+		}
+		for _, child := range current {
+			walkSNSSubscriptions(child, out)
+		}
+	case []any:
+		for _, child := range current {
+			walkSNSSubscriptions(child, out)
+		}
+	}
 }
 
 func truncateResData(res *sdk.ExecuteResult) string {

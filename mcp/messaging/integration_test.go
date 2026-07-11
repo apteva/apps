@@ -168,7 +168,10 @@ func TestSidecar_HTTPListEndpoints(t *testing.T) {
 // ─── Bounce webhook — unknown provider id ─────────────────────────
 
 func TestSidecar_BounceWebhook_UnknownProviderID(t *testing.T) {
-	sc := tk.SpawnSidecar(t, ".", tk.WithProjectID("test-proj"))
+	sc := tk.SpawnSidecar(t, ".", tk.WithProjectID("test-proj"), tk.WithConfig(map[string]string{
+		"webhook_signing_secret": testSNSSecret,
+		"ses_bounce_topic_arn":   testSNSTopicARN,
+	}))
 
 	innerSES := map[string]any{
 		"notificationType": "Bounce",
@@ -183,6 +186,8 @@ func TestSidecar_BounceWebhook_UnknownProviderID(t *testing.T) {
 	innerJSON, _ := json.Marshal(innerSES)
 	envelope := map[string]any{
 		"Type":           "Notification",
+		"MessageId":      "test-sns-message",
+		"TopicArn":       testSNSTopicARN,
 		"Message":        string(innerJSON),
 		"SigningCertURL": "https://sns.us-east-1.amazonaws.com/cert.pem",
 	}
@@ -190,7 +195,7 @@ func TestSidecar_BounceWebhook_UnknownProviderID(t *testing.T) {
 
 	req, _ := http.NewRequest("POST", sc.URL()+"/webhooks/ses-bounces?project_id=test-proj", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Amz-Sns-Message-Type", "Notification")
+	signTestSNSRequest(req, body)
 	req.Header.Set("Authorization", "Bearer "+sc.Token())
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -218,7 +223,10 @@ const inboundEml = "From: customer@example.com\r\n" +
 	"Where is my package?\r\n"
 
 func TestSidecar_InboundWebhook_PersistsAndAttemptsDispatch(t *testing.T) {
-	sc := tk.SpawnSidecar(t, ".", tk.WithProjectID("test-proj"))
+	sc := tk.SpawnSidecar(t, ".", tk.WithProjectID("test-proj"), tk.WithConfig(map[string]string{
+		"webhook_signing_secret": testSNSSecret,
+		"ses_inbound_topic_arn":  testSNSTopicARN,
+	}))
 
 	// Register a route first so the dispatcher has a target.
 	sc.MCP("inbound_route_set", map[string]any{
@@ -235,6 +243,8 @@ func TestSidecar_InboundWebhook_PersistsAndAttemptsDispatch(t *testing.T) {
 	innerJSON, _ := json.Marshal(innerSES)
 	envelope := map[string]any{
 		"Type":           "Notification",
+		"MessageId":      "test-sns-message",
+		"TopicArn":       testSNSTopicARN,
 		"Message":        string(innerJSON),
 		"SigningCertURL": "https://sns.us-east-1.amazonaws.com/cert.pem",
 	}
@@ -242,7 +252,7 @@ func TestSidecar_InboundWebhook_PersistsAndAttemptsDispatch(t *testing.T) {
 
 	req, _ := http.NewRequest("POST", sc.URL()+"/webhooks/ses-inbound?project_id=test-proj", bytes.NewReader(body))
 	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("X-Amz-Sns-Message-Type", "Notification")
+	signTestSNSRequest(req, body)
 	req.Header.Set("Authorization", "Bearer "+sc.Token())
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -287,22 +297,24 @@ func TestSidecar_InboundWebhook_PersistsAndAttemptsDispatch(t *testing.T) {
 
 // ─── senders + send_message contract ──────────────────────────────
 //
-// Without a real SES binding we can't roundtrip through the provider,
-// but we can assert the pre-provider contract: "no provider bound"
-// and "from required" surface as MCP errors before any HTTP call.
+// Without a real provider binding we can't roundtrip through a provider,
+// but sender discovery must still work for phone-only or newly installed apps.
 
 func TestSidecar_Senders_NoProviderBound(t *testing.T) {
 	sc := tk.SpawnSidecar(t, ".", tk.WithProjectID("test-proj"))
-	_, err := sc.MCPRaw("tools/call", map[string]any{
+	out, err := sc.MCPRaw("tools/call", map[string]any{
 		"name":      "senders_list",
 		"arguments": map[string]any{},
 	})
-	if err == nil {
-		t.Fatalf("expected error from senders_list with no provider bound")
+	if err != nil {
+		t.Fatalf("senders_list should work without a provider binding: %v", err)
 	}
-	low := strings.ToLower(err.Error())
-	if !strings.Contains(low, "no email_provider") && !strings.Contains(low, "unbound") {
-		t.Errorf("unexpected error message: %v", err)
+	senders, ok := out["senders"].([]any)
+	if !ok {
+		t.Fatalf("senders_list returned an invalid sender collection: %#v", out["senders"])
+	}
+	if len(senders) != 0 {
+		t.Fatalf("expected no senders, got %d", len(senders))
 	}
 }
 
