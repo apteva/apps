@@ -146,7 +146,7 @@ func (a *App) handleHTTPCreateFunction(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusBadRequest, "invalid json")
 		return
 	}
-	fn, err := buildAndCreateFunction(globalCtx, pid, body)
+	fn, err := buildAndCreateFunction(globalCtx.WithProject(pid), pid, body)
 	if err != nil {
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
@@ -203,7 +203,7 @@ func (a *App) handleHTTPDeployFunction(w http.ResponseWriter, r *http.Request, i
 		httpErr(w, http.StatusBadRequest, "invalid json")
 		return
 	}
-	fn, ver, err := deployFromArgs(globalCtx, pid, id, body)
+	fn, ver, err := deployFromArgs(globalCtx.WithProject(pid), pid, id, body)
 	if err != nil {
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
@@ -262,6 +262,9 @@ func (a *App) handleHTTPDeleteFunction(w http.ResponseWriter, r *http.Request, i
 	if err := dbDeleteFunction(globalCtx.AppDB(), pid, id); err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
+	}
+	if globalPool != nil {
+		globalPool.removeFunction(id)
 	}
 	httpJSON(w, map[string]any{"deleted": true, "id": id})
 }
@@ -325,7 +328,7 @@ func (a *App) handleHTTPInvokeByName(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	event := decodeEventBody(r)
-	a.runAndWriteResponse(w, r, fn, event, "http")
+	a.runAndWriteResponse(globalCtx.WithProject(pid), w, r, fn, event, "http")
 }
 
 func (a *App) handleHTTPInvokeByID(w http.ResponseWriter, r *http.Request, id int64) {
@@ -344,7 +347,7 @@ func (a *App) handleHTTPInvokeByID(w http.ResponseWriter, r *http.Request, id in
 		return
 	}
 	event := decodeEventBody(r)
-	a.runAndWriteResponse(w, r, fn, event, "http")
+	a.runAndWriteResponse(globalCtx.WithProject(pid), w, r, fn, event, "http")
 }
 
 // handleHTTPInvokeByFunctionURL powers the optional public
@@ -396,7 +399,7 @@ func (a *App) handleHTTPInvokeByFunctionURL(w http.ResponseWriter, r *http.Reque
 	}
 	raw, truncated := readRequestBody(r)
 	event := buildFunctionURLEvent(r, raw, truncated)
-	a.runAndWriteFunctionURLResponse(w, r, fn, event, cfg)
+	a.runAndWriteFunctionURLResponse(globalCtx.WithProject(pid), w, r, fn, event, cfg)
 }
 
 // runAndWriteResponse is the shared tail for both /fn/<name> and
@@ -404,9 +407,13 @@ func (a *App) handleHTTPInvokeByFunctionURL(w http.ResponseWriter, r *http.Reque
 // HTTP response body when the run succeeds; on error / timeout
 // returns 500 with the error message — callers reading from jobs
 // see the non-2xx and retry on schedule.
-func (a *App) runAndWriteResponse(w http.ResponseWriter, r *http.Request, fn *Function, event any, trigger string) {
-	res, err := invokeFunction(globalCtx, r.Context(), fn, event, trigger)
+func (a *App) runAndWriteResponse(ctx *sdk.AppCtx, w http.ResponseWriter, r *http.Request, fn *Function, event any, trigger string) {
+	res, err := invokeFunction(ctx, r.Context(), fn, event, trigger)
 	if err != nil {
+		if errors.Is(err, errFunctionBusy) {
+			httpErr(w, http.StatusServiceUnavailable, err.Error())
+			return
+		}
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -434,9 +441,13 @@ func (a *App) runAndWriteResponse(w http.ResponseWriter, r *http.Request, fn *Fu
 	_, _ = w.Write([]byte(res.Response))
 }
 
-func (a *App) runAndWriteFunctionURLResponse(w http.ResponseWriter, r *http.Request, fn *Function, event any, cfg *FunctionURLConfig) {
-	res, err := invokeFunction(globalCtx, r.Context(), fn, event, "function_url")
+func (a *App) runAndWriteFunctionURLResponse(ctx *sdk.AppCtx, w http.ResponseWriter, r *http.Request, fn *Function, event any, cfg *FunctionURLConfig) {
+	res, err := invokeFunction(ctx, r.Context(), fn, event, "function_url")
 	if err != nil {
+		if errors.Is(err, errFunctionBusy) {
+			httpErr(w, http.StatusServiceUnavailable, err.Error())
+			return
+		}
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -780,6 +791,9 @@ func (a *App) toolDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err := dbDeleteFunction(ctx.AppDB(), pid, id); err != nil {
 		return nil, err
 	}
+	if globalPool != nil {
+		globalPool.removeFunction(id)
+	}
 	if ctx != nil {
 		ctx.Emit("function.deleted", map[string]any{"id": id})
 	}
@@ -978,7 +992,11 @@ func updateFunctionMeta(ctx *sdk.AppCtx, pid string, id int64, patch map[string]
 	if cur == nil {
 		return nil, errors.New("function not found")
 	}
-	return dbUpdateFunction(dbFor(ctx), pid, id, patch, "")
+	updated, err := dbUpdateFunction(dbFor(ctx), pid, id, patch, "")
+	if err == nil && updated != nil && updated.Status == "disabled" && globalPool != nil {
+		globalPool.activateVersion(updated.ID, -1)
+	}
+	return updated, err
 }
 
 // resolveFunctionID accepts either id or name and returns the row's

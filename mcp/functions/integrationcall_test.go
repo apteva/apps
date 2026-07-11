@@ -78,6 +78,9 @@ func TestContextIntegrationByID(t *testing.T) {
 	if stub.lastTool != "pushover_send_notification" {
 		t.Errorf("tool = %q, want pushover_send_notification", stub.lastTool)
 	}
+	if stub.lastInput["_project_id"] != testProj {
+		t.Errorf("project context = %v, want %q", stub.lastInput["_project_id"], testProj)
+	}
 	if !strings.Contains(res.Response, `"sent":true`) {
 		t.Errorf("response = %q, want sent:true", res.Response)
 	}

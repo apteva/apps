@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	tk "github.com/apteva/app-sdk/testkit"
 )
@@ -18,6 +20,35 @@ type stubPlatform struct {
 	lastTool  string
 	lastInput map[string]any
 	result    json.RawMessage
+}
+
+type slowParallelPlatform struct {
+	tk.BasePlatformClient
+	inFlight    atomic.Int32
+	maxInFlight atomic.Int32
+}
+
+type hangingPlatform struct{ tk.BasePlatformClient }
+
+func (hangingPlatform) CallAppResult(_, _ string, _ map[string]any, _ any) error {
+	time.Sleep(500 * time.Millisecond)
+	return nil
+}
+
+func (s *slowParallelPlatform) CallAppResult(_, _ string, _ map[string]any, out any) error {
+	n := s.inFlight.Add(1)
+	defer s.inFlight.Add(-1)
+	for {
+		old := s.maxInFlight.Load()
+		if n <= old || s.maxInFlight.CompareAndSwap(old, n) {
+			break
+		}
+	}
+	time.Sleep(100 * time.Millisecond)
+	if raw, ok := out.(*json.RawMessage); ok {
+		*raw = json.RawMessage(`{"ok":true}`)
+	}
+	return nil
 }
 
 func (s *stubPlatform) CallAppResult(app, tool string, input map[string]any, out any) error {
@@ -133,5 +164,67 @@ func TestContextCallSuccess(t *testing.T) {
 	}
 	if stub.lastInput["table"] != "leads" {
 		t.Errorf("call input table = %v, want leads", stub.lastInput["table"])
+	}
+	if stub.lastInput["_project_id"] != testProj {
+		t.Errorf("project context = %v, want %q", stub.lastInput["_project_id"], testProj)
+	}
+}
+
+func TestContextCallCannotOverrideProject(t *testing.T) {
+	stub := &stubPlatform{result: json.RawMessage(`{"ok":true}`)}
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID(testProj), tk.WithPlatform(stub))
+	ans := servicePlatformCall(ctx, wireResponse{
+		Type: "call", CallID: 1, App: "tables", Tool: "rows_list",
+		Input: json.RawMessage(`{"_project_id":"other-project"}`),
+	})
+	if !ans.OK {
+		t.Fatalf("call failed: %s", ans.Error)
+	}
+	if got := stub.lastInput["_project_id"]; got != testProj {
+		t.Fatalf("handler overrode project: got %v, want %q", got, testProj)
+	}
+}
+
+func TestContextCallsFanOutConcurrently(t *testing.T) {
+	requireBin(t, "node")
+	stub := &slowParallelPlatform{}
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID(testProj), tk.WithPlatform(stub))
+	app := mountApp(t, ctx)
+	fn := createFn(t, app, ctx, map[string]any{
+		"name": "fanout", "source": `export default async (_event, context) => {
+			await Promise.all([
+				context.call("tables", "one", {}),
+				context.call("tables", "two", {}),
+			]);
+			return "ok";
+		};`,
+	})
+	res, err := invokeFunction(ctx, context.Background(), fn, nil, "manual")
+	if err != nil || res.Status != "ok" {
+		t.Fatalf("invoke: res=%+v err=%v", res, err)
+	}
+	if stub.maxInFlight.Load() < 2 {
+		t.Fatalf("downstream calls were serialized; max in flight = %d", stub.maxInFlight.Load())
+	}
+}
+
+func TestInvocationTimeoutIncludesDownstreamCalls(t *testing.T) {
+	requireBin(t, "node")
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID(testProj), tk.WithPlatform(hangingPlatform{}))
+	app := mountApp(t, ctx)
+	fn := createFn(t, app, ctx, map[string]any{
+		"name": "downstream-timeout", "timeout_ms": 200,
+		"source": `export default async (_event, context) => context.call("tables", "slow", {});`,
+	})
+	started := time.Now()
+	res, err := invokeFunction(ctx, context.Background(), fn, nil, "manual")
+	if err != nil {
+		t.Fatalf("invoke: %v", err)
+	}
+	if res.Status != "timeout" {
+		t.Fatalf("status = %q, want timeout", res.Status)
+	}
+	if elapsed := time.Since(started); elapsed > 400*time.Millisecond {
+		t.Fatalf("downstream call bypassed invocation timeout: %s", elapsed)
 	}
 }

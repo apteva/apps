@@ -12,9 +12,10 @@ import (
 //
 // inline — the bytes already live on the version row.
 // repo   — fetch via CallAppResult("code","code_read_file",...) per
-//          the project's cross-app convention. Cached in-memory by
-//          (repo_id, repo_path, source_hash) so a fresh boot pays the
-//          round-trip once and subsequent reads reuse.
+//
+//	the project's cross-app convention. Cached in-memory by
+//	(repo_id, repo_path, source_hash) so a fresh boot pays the
+//	round-trip once and subsequent reads reuse.
 func resolveVersionSource(ctx *sdk.AppCtx, v *FunctionVersion) ([]byte, error) {
 	if v.SourceKind == "inline" {
 		return []byte(v.Source), nil
@@ -83,6 +84,12 @@ func (c *repoSourceCache) put(repoID int64, path, hash string, bytes []byte) {
 		c.m = map[repoKey]repoEntry{}
 	}
 	c.m[repoKey{repoID, path}] = repoEntry{hash, bytes}
+}
+
+func (c *repoSourceCache) clear() {
+	c.mu.Lock()
+	c.m = map[repoKey]repoEntry{}
+	c.mu.Unlock()
 }
 
 var sourceCache = &repoSourceCache{}

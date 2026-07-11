@@ -42,6 +42,8 @@ type worker struct {
 	cmd       *exec.Cmd
 	conn      net.Conn
 	stderr    *capBuffer
+	tempDir   string
+	writeMu   sync.Mutex
 
 	mu       sync.Mutex // serialises call(); guards dead + lastUsed + seq
 	dead     bool
@@ -110,9 +112,24 @@ func startWorker(spec runtimeSpec, buildDir string, fn *Function, versionID int6
 	}
 
 	stderr := newCapBuffer(stderrCap)
-	cmd := exec.Command(resolvedBin, args...)
+	tempDir, err := os.MkdirTemp("", fmt.Sprintf("apteva-fn-%d-", fn.ID))
+	if err != nil {
+		_ = parentFile.Close()
+		_ = childFile.Close()
+		return nil, fmt.Errorf("worker temp dir: %w", err)
+	}
+	cmd, err := sandboxCommand(resolvedBin, args, sandboxSpec{
+		Mode: sandboxWorker, Root: buildDir, TempDir: tempDir,
+		MemoryMB: clampInt(fn.MaxMemoryMB, defaultMemoryMB, 16, maxMemoryMB),
+	})
+	if err != nil {
+		_ = os.RemoveAll(tempDir)
+		_ = parentFile.Close()
+		_ = childFile.Close()
+		return nil, err
+	}
 	cmd.Dir = buildDir
-	cmd.Env = workerEnv(fn, filepath.Join(buildDir, spec.EntryFile))
+	cmd.Env = workerEnv(fn, filepath.Join(buildDir, spec.EntryFile), tempDir)
 	cmd.ExtraFiles = []*os.File{childFile} // becomes fd 3 in the child
 	cmd.Stdout = stderr
 	cmd.Stderr = stderr
@@ -121,6 +138,7 @@ func startWorker(spec runtimeSpec, buildDir string, fn *Function, versionID int6
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 
 	if err := cmd.Start(); err != nil {
+		_ = os.RemoveAll(tempDir)
 		_ = parentFile.Close()
 		_ = childFile.Close()
 		return nil, fmt.Errorf("start worker: %w", err)
@@ -136,7 +154,7 @@ func startWorker(spec runtimeSpec, buildDir string, fn *Function, versionID int6
 
 	w := &worker{
 		fnID: fn.ID, fnName: fn.Name, versionID: versionID,
-		cmd: cmd, conn: conn, stderr: stderr, lastUsed: time.Now(),
+		cmd: cmd, conn: conn, stderr: stderr, tempDir: tempDir, lastUsed: time.Now(),
 	}
 
 	// Wait for the ready frame — handler module imported successfully.
@@ -188,11 +206,27 @@ func (w *worker) call(ctx *sdk.AppCtx, parent context.Context, event any, timeou
 	}
 
 	started := time.Now().UTC()
+	cancelWatch := make(chan struct{})
+	defer close(cancelWatch)
+	go func() {
+		select {
+		case <-parent.Done():
+			_ = w.conn.SetReadDeadline(time.Now())
+			_ = w.conn.SetWriteDeadline(time.Now())
+		case <-cancelWatch:
+		}
+	}()
 	_ = w.conn.SetWriteDeadline(deadline)
-	if err := writeFrame(w.conn, reqBytes); err != nil {
+	if err := w.writeFrame(reqBytes); err != nil {
 		w.killLocked()
+		var ne net.Error
+		if errors.As(err, &ne) && ne.Timeout() {
+			return &invokeResult{Status: "timeout", ExitCode: -1, DurationMS: time.Since(started).Milliseconds(), Error: "deadline exceeded"}, nil
+		}
 		return nil, fmt.Errorf("write request: %w", err)
 	}
+	var callWG sync.WaitGroup
+	callSlots := make(chan struct{}, envInt("APTEVA_FUNCTIONS_MAX_DOWNSTREAM_CALLS", 16, 1, 256))
 
 	for {
 		_ = w.conn.SetReadDeadline(deadline)
@@ -228,26 +262,40 @@ func (w *worker) call(ctx *sdk.AppCtx, parent context.Context, event any, timeou
 		// service it and keep reading; the invocation result is still
 		// to come. Both kinds reply through the same callResult shape.
 		if msg.Type == "call" || msg.Type == "integration" {
-			var ans callResult
-			if msg.Type == "call" {
-				ans = servicePlatformCall(ctx, msg)
-			} else {
-				ans = servicePlatformIntegration(ctx, msg)
+			select {
+			case callSlots <- struct{}{}:
+			default:
+				ansBytes, _ := json.Marshal(callResult{
+					Type: "call_result", CallID: msg.CallID,
+					Error: "too many concurrent downstream calls",
+				})
+				_ = w.writeFrame(ansBytes)
+				continue
 			}
-			ansBytes, _ := json.Marshal(ans)
-			_ = w.conn.SetWriteDeadline(deadline)
-			if err := writeFrame(w.conn, ansBytes); err != nil {
-				w.killLocked()
-				return &invokeResult{
-					Status: "error", ExitCode: -1,
-					DurationMS: time.Since(started).Milliseconds(),
-					Error:      fmt.Sprintf("write call_result: %v", err),
-				}, nil
-			}
+			callWG.Add(1)
+			go func(frame wireResponse) {
+				defer callWG.Done()
+				defer func() { <-callSlots }()
+				w.serviceCallFrame(ctx, parent, deadline, frame)
+			}(msg)
 			continue
 		}
 
 		// Invocation result.
+		callsDone := make(chan struct{})
+		go func() {
+			callWG.Wait()
+			close(callsDone)
+		}()
+		select {
+		case <-callsDone:
+		case <-parent.Done():
+			w.killLocked()
+			return &invokeResult{
+				Status: "timeout", ExitCode: -1,
+				DurationMS: time.Since(started).Milliseconds(), Error: "deadline exceeded",
+			}, nil
+		}
 		finished := time.Now().UTC()
 		w.lastUsed = time.Now()
 		res := &invokeResult{
@@ -265,6 +313,35 @@ func (w *worker) call(ctx *sdk.AppCtx, parent context.Context, event any, timeou
 		}
 		return res, nil
 	}
+}
+
+func (w *worker) writeFrame(payload []byte) error {
+	w.writeMu.Lock()
+	defer w.writeMu.Unlock()
+	return writeFrame(w.conn, payload)
+}
+
+func (w *worker) serviceCallFrame(ctx *sdk.AppCtx, parent context.Context, deadline time.Time, msg wireResponse) {
+	answer := make(chan callResult, 1)
+	go func() {
+		if msg.Type == "call" {
+			answer <- servicePlatformCall(ctx, msg)
+		} else {
+			answer <- servicePlatformIntegration(ctx, msg)
+		}
+	}()
+	var ans callResult
+	select {
+	case ans = <-answer:
+	case <-parent.Done():
+		ans = callResult{Type: "call_result", CallID: msg.CallID, Error: "invocation deadline exceeded"}
+	}
+	ansBytes, err := json.Marshal(ans)
+	if err != nil {
+		return
+	}
+	_ = w.conn.SetWriteDeadline(deadline)
+	_ = w.writeFrame(ansBytes)
 }
 
 // servicePlatformCall executes a worker's cross-app call request
@@ -287,6 +364,11 @@ func servicePlatformCall(ctx *sdk.AppCtx, msg wireResponse) callResult {
 			ans.Error = fmt.Sprintf("context.call input must be a JSON object: %v", err)
 			return ans
 		}
+	}
+	if pid := strings.TrimSpace(ctx.CurrentProject()); pid != "" {
+		// Project context is dispatcher-owned. Never let function code
+		// override it when calling a global downstream app.
+		input["_project_id"] = pid
 	}
 	var out json.RawMessage
 	if err := ctx.PlatformAPI().CallAppResult(msg.App, msg.Tool, input, &out); err != nil {
@@ -329,6 +411,9 @@ func servicePlatformIntegration(ctx *sdk.AppCtx, msg wireResponse) callResult {
 			ans.Error = fmt.Sprintf("context.integration input must be a JSON object: %v", err)
 			return ans
 		}
+	}
+	if pid := strings.TrimSpace(ctx.CurrentProject()); pid != "" {
+		input["_project_id"] = pid
 	}
 	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, msg.Tool, input)
 	if err != nil {
@@ -476,6 +561,10 @@ func (w *worker) killLocked() {
 	w.dead = true
 	_ = w.conn.Close()
 	_ = killGroup(w.cmd)
+	if w.cmd != nil && w.cmd.Process != nil {
+		cleanupSandboxProcess(w.cmd.Process.Pid, sandboxWorker)
+	}
+	_ = os.RemoveAll(w.tempDir)
 }
 
 func (w *worker) shutdown() {
@@ -487,13 +576,29 @@ func (w *worker) shutdown() {
 // ── framing ───────────────────────────────────────────────────────
 
 func writeFrame(w io.Writer, payload []byte) error {
+	if len(payload) > maxFrame {
+		return fmt.Errorf("frame too large: %d bytes", len(payload))
+	}
 	var hdr [4]byte
 	binary.BigEndian.PutUint32(hdr[:], uint32(len(payload)))
-	if _, err := w.Write(hdr[:]); err != nil {
+	if err := writeAll(w, hdr[:]); err != nil {
 		return err
 	}
-	_, err := w.Write(payload)
-	return err
+	return writeAll(w, payload)
+}
+
+func writeAll(w io.Writer, payload []byte) error {
+	for len(payload) > 0 {
+		n, err := w.Write(payload)
+		if err != nil {
+			return err
+		}
+		if n <= 0 {
+			return io.ErrShortWrite
+		}
+		payload = payload[n:]
+	}
+	return nil
 }
 
 func readFrame(r io.Reader) ([]byte, error) {
@@ -528,28 +633,55 @@ func killGroup(cmd *exec.Cmd) error {
 // Everything else — notably APTEVA_APP_TOKEN and APTEVA_GATEWAY_URL —
 // is withheld: handler code is untrusted and reaches the platform
 // only through context.call, which the sidecar mediates.
-var envPassthrough = []string{"PATH", "HOME", "TMPDIR", "TMP", "TEMP", "LANG", "LC_ALL", "TZ"}
+var envPassthrough = []string{"PATH", "LANG", "LC_ALL", "TZ", "SSL_CERT_FILE", "SSL_CERT_DIR", "NODE_EXTRA_CA_CERTS"}
 
 // workerEnv builds the worker's scrubbed environment: the allowlisted
 // host vars, the function's own env map, the entry path, and the
 // per-function hints.
-func workerEnv(fn *Function, entryPath string) []string {
-	out := make([]string, 0, len(envPassthrough)+len(fn.Env)+4)
+func workerEnv(fn *Function, entryPath, tempDir string) []string {
+	out := make([]string, 0, len(envPassthrough)+len(fn.Env)+10)
 	for _, k := range envPassthrough {
 		if v, ok := os.LookupEnv(k); ok {
 			out = append(out, k+"="+v)
 		}
 	}
 	for k, v := range fn.Env {
+		if !safeFunctionEnvKey(k) {
+			continue
+		}
 		out = append(out, k+"="+v)
 	}
+	memoryMB := clampInt(fn.MaxMemoryMB, defaultMemoryMB, 16, maxMemoryMB)
 	out = append(out,
+		"HOME="+tempDir,
+		"TMPDIR="+tempDir,
+		"TMP="+tempDir,
+		"TEMP="+tempDir,
+		"XDG_CACHE_HOME="+tempDir,
+		fmt.Sprintf("GOMEMLIMIT=%dMiB", memoryMB),
+		fmt.Sprintf("NODE_OPTIONS=--max-old-space-size=%d", memoryMB),
 		"APTEVA_FN_ENTRY="+entryPath,
 		"APTEVA_FUNCTION_NAME="+fn.Name,
 		"APTEVA_FUNCTION_ID="+fmt.Sprintf("%d", fn.ID),
 		"APTEVA_FUNCTION_RUNTIME="+fn.Runtime,
 	)
 	return out
+}
+
+func safeFunctionEnvKey(key string) bool {
+	key = strings.TrimSpace(key)
+	if key == "" || strings.ContainsAny(key, "=\x00") {
+		return false
+	}
+	upper := strings.ToUpper(key)
+	if strings.HasPrefix(upper, "APTEVA_") || strings.HasPrefix(upper, "LD_") || strings.HasPrefix(upper, "DYLD_") {
+		return false
+	}
+	switch upper {
+	case "HOME", "TMPDIR", "TMP", "TEMP", "XDG_CACHE_HOME", "NODE_OPTIONS", "GOMEMLIMIT", "GODEBUG":
+		return false
+	}
+	return true
 }
 
 // ── capped output buffer ──────────────────────────────────────────

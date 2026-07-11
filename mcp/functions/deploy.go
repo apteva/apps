@@ -59,6 +59,10 @@ func deployVersion(ctx *sdk.AppCtx, fn *Function, sourceKind, source string, rep
 	if err := dbSetActiveVersion(db, fn.ProjectID, fn.ID, ver); err != nil {
 		return nil, err
 	}
+	if globalPool != nil {
+		globalPool.cacheVersion(ver)
+		globalPool.activateVersion(fn.ID, ver.ID)
+	}
 	return ver, nil
 }
 
@@ -78,6 +82,10 @@ func rollbackFunction(ctx *sdk.AppCtx, pid string, fnID int64, version int) (*Fu
 	}
 	if err := dbSetActiveVersion(db, pid, fnID, ver); err != nil {
 		return nil, err
+	}
+	if globalPool != nil {
+		globalPool.cacheVersion(ver)
+		globalPool.activateVersion(fnID, ver.ID)
 	}
 	return ver, nil
 }

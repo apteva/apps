@@ -49,7 +49,8 @@ Either way, `context` / `ctx` gives you:
   match exactly one connection (multi-match returns the candidate
   ids — pass the explicit id to disambiguate).
 - **`context.env`** — a *scrubbed* environment: your function's own
-  `env` map plus a small host allowlist (`PATH`, `HOME`, …). The
+  `env` map plus a small host allowlist (`PATH`, locale and TLS
+  certificate settings). `HOME` and temporary directories are private. The
   sidecar's secrets (`APTEVA_APP_TOKEN`, gateway URL) are **not** here.
 - **`context.log(...)`**, **`context.functionName/functionId/runtime`**.
 
@@ -155,14 +156,37 @@ interaction — live in [`examples/`](./examples).
 { "name": "hello-world", "version": 1 }
 ```
 
+## Isolation and capacity
+
+On Linux, dependency builds and warm workers pass through the binary's
+credential-free sandbox helper. It applies Landlock filesystem rules,
+`no_new_privs`, a deny-list seccomp filter, process/file limits, private
+HOME/tmp directories, and read-only artifacts. Cgroup v2 CPU, process and
+memory limits are applied when the service has a delegated writable cgroup
+root; Node and Go runtime memory limits remain active as a fallback.
+
+Useful operator settings:
+
+- `APTEVA_FUNCTIONS_CGROUP_ROOT` — delegated cgroup v2 directory.
+- `APTEVA_FUNCTIONS_REQUIRE_CGROUP=true` — fail closed without hard cgroups.
+- `APTEVA_FUNCTIONS_REQUIRE_SANDBOX=false` — emergency Linux compatibility
+  escape hatch; Linux otherwise fails closed if Landlock/seccomp cannot load.
+- `APTEVA_FUNCTIONS_MAX_WORKERS=32`, `APTEVA_FUNCTIONS_MAX_QUEUE=256`,
+  `APTEVA_FUNCTIONS_MAX_QUEUE_PER_FUNCTION=64`, and
+  `APTEVA_FUNCTIONS_MAX_BUILDS=2` — process-wide backpressure.
+- `APTEVA_FUNCTIONS_MAX_DOWNSTREAM_CALLS=16` — concurrent
+  `context.call`/`context.integration` fan-out per invocation.
+- `APTEVA_FUNCTIONS_INVOCATION_RETENTION_DAYS=30` — audit-log retention.
+
+macOS local development keeps the same Node/Go contracts and resource/env
+scrubbing, but does not provide Linux kernel isolation.
+
 ## What's deferred
 
 - **python runtime** — needs its own harness; same socketpair
   protocol, so it's additive.
 - **third-party Go modules** — go functions are stdlib-only for now;
   a future version takes a user-supplied `go.mod`.
-- **memory enforcement** — `max_memory_mb` is stored but not yet
-  applied to the worker process (`prlimit`/cgroup).
 - **Per-function `allowed_apps` allowlist** — `context.call` reaches
   any installed app the platform identifies functions as authorised
   to call (via the dynamic-call bypass in apteva-server). A

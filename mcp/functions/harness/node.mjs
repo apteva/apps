@@ -35,6 +35,9 @@ const FD = 3;
 // ── framing ───────────────────────────────────────────────────────
 function encodeFrame(obj) {
   const payload = Buffer.from(JSON.stringify(obj), "utf8");
+  if (payload.length > MAX_INBOUND_FRAME) {
+    throw new Error(`frame too large (${payload.length})`);
+  }
   const len = Buffer.allocUnsafe(4);
   len.writeUInt32BE(payload.length, 0);
   return Buffer.concat([len, payload]);
@@ -45,6 +48,9 @@ function encodeFrame(obj) {
 // response frame. Outside a call (e.g. module top-level on import),
 // it falls through to real stderr.
 let currentLogs = null;
+const MAX_LOG_BYTES = 16 * 1024;
+const MAX_INBOUND_FRAME = 128 * 1024 * 1024;
+let currentLogBytes = 0;
 const realErr = console.error.bind(console);
 function fmt(args) {
   return args
@@ -61,7 +67,16 @@ function fmt(args) {
 for (const m of ["log", "info", "warn", "error", "debug"]) {
   console[m] = (...args) => {
     const line = fmt(args);
-    if (currentLogs) currentLogs.push(line);
+    if (currentLogs) {
+      if (currentLogBytes < MAX_LOG_BYTES) {
+        const remaining = MAX_LOG_BYTES - currentLogBytes;
+        const clipped = Buffer.byteLength(line) > remaining
+          ? Buffer.from(line).subarray(0, remaining).toString("utf8")
+          : line;
+        currentLogs.push(clipped);
+        currentLogBytes += Buffer.byteLength(clipped) + 1;
+      }
+    }
     else realErr(line);
   };
 }
@@ -147,6 +162,7 @@ async function main() {
     const { id, event } = req;
     const logs = [];
     currentLogs = logs;
+    currentLogBytes = 0;
     const context = {
       functionName: process.env.APTEVA_FUNCTION_NAME || "",
       functionId: process.env.APTEVA_FUNCTION_ID || "",
@@ -173,18 +189,64 @@ async function main() {
   }
 
   // ── read loop ───────────────────────────────────────────────────
-  let buf = Buffer.alloc(0);
+  const chunks = [];
+  let bufferedBytes = 0;
   let draining = false;
+
+  function peekLength() {
+    if (chunks[0].length >= 4) return chunks[0].readUInt32BE(0);
+    const header = Buffer.allocUnsafe(4);
+    let offset = 0;
+    for (const chunk of chunks) {
+      const n = Math.min(chunk.length, 4 - offset);
+      chunk.copy(header, offset, 0, n);
+      offset += n;
+      if (offset === 4) break;
+    }
+    return header.readUInt32BE(0);
+  }
+
+  function takeBytes(n) {
+    if (n === 0) return Buffer.alloc(0);
+    const first = chunks[0];
+    if (first.length === n) {
+      chunks.shift();
+      bufferedBytes -= n;
+      return first;
+    }
+    if (first.length > n) {
+      const out = first.subarray(0, n);
+      chunks[0] = first.subarray(n);
+      bufferedBytes -= n;
+      return out;
+    }
+    const out = Buffer.allocUnsafe(n);
+    let offset = 0;
+    while (offset < n) {
+      const chunk = chunks[0];
+      const take = Math.min(chunk.length, n - offset);
+      chunk.copy(out, offset, 0, take);
+      offset += take;
+      if (take === chunk.length) chunks.shift();
+      else chunks[0] = chunk.subarray(take);
+    }
+    bufferedBytes -= n;
+    return out;
+  }
 
   function drain() {
     if (draining) return;
     draining = true;
     try {
-      while (buf.length >= 4) {
-        const len = buf.readUInt32BE(0);
-        if (buf.length < 4 + len) break;
-        const payload = buf.subarray(4, 4 + len);
-        buf = buf.subarray(4 + len);
+      while (bufferedBytes >= 4) {
+        const len = peekLength();
+        if (len > MAX_INBOUND_FRAME) {
+          realErr(`harness: inbound frame too large (${len})`);
+          process.exit(1);
+        }
+        if (bufferedBytes < 4 + len) break;
+        takeBytes(4);
+        const payload = takeBytes(len);
         let msg;
         try {
           msg = JSON.parse(payload.toString("utf8"));
@@ -211,7 +273,8 @@ async function main() {
   }
 
   sock.on("data", (chunk) => {
-    buf = Buffer.concat([buf, chunk]);
+    chunks.push(chunk);
+    bufferedBytes += chunk.length;
     drain();
   });
   sock.on("close", () => process.exit(0));

@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
+	"path/filepath"
 	"time"
 
 	sdk "github.com/apteva/app-sdk"
@@ -51,9 +53,13 @@ func invokeFunction(ctx *sdk.AppCtx, parent context.Context, fn *Function, event
 		return nil, err
 	}
 
-	ver, err := dbGetVersion(ctx.AppDB(), fn.ProjectID, *fn.ActiveVersionID)
-	if err != nil {
-		return nil, err
+	ver := globalPool.cachedVersion(*fn.ActiveVersionID)
+	if ver == nil {
+		ver, err = dbGetVersion(ctx.AppDB(), fn.ProjectID, *fn.ActiveVersionID)
+		if err != nil {
+			return nil, err
+		}
+		globalPool.cacheVersion(ver)
 	}
 	if ver == nil {
 		return nil, fmt.Errorf("active version %d missing", *fn.ActiveVersionID)
@@ -62,20 +68,21 @@ func invokeFunction(ctx *sdk.AppCtx, parent context.Context, fn *Function, event
 		return nil, fmt.Errorf("active version v%d build_status=%s", ver.Version, ver.BuildStatus)
 	}
 
-	// Resolve + ensure the artifact dir. Cheap when the version is
-	// already built (a stat of the .ready marker); rebuilds lazily if
-	// an ephemeral build base was cleared by a restart.
-	src, err := resolveVersionSource(ctx, ver)
-	if err != nil {
-		return nil, fmt.Errorf("resolve source: %w", err)
-	}
 	base, err := poolBuildBase()
 	if err != nil {
 		return nil, err
 	}
-	dir, err := ensureBuilt(base, ver, spec, src)
-	if err != nil {
-		return nil, fmt.Errorf("build: %w", err)
+	dir := versionDir(base, ver)
+	marker, markerErr := os.ReadFile(filepath.Join(dir, ".ready"))
+	if markerErr != nil || string(marker) != ver.SourceHash {
+		src, resolveErr := resolveVersionSource(ctx, ver)
+		if resolveErr != nil {
+			return nil, fmt.Errorf("resolve source: %w", resolveErr)
+		}
+		dir, err = ensureBuilt(base, ver, spec, src)
+		if err != nil {
+			return nil, fmt.Errorf("build: %w", err)
+		}
 	}
 
 	timeout := time.Duration(fn.TimeoutMS) * time.Millisecond
@@ -84,7 +91,9 @@ func invokeFunction(ctx *sdk.AppCtx, parent context.Context, fn *Function, event
 	}
 
 	started := time.Now().UTC()
-	res, err := globalPool.invoke(ctx, parent, fn, ver, spec, dir, event, timeout)
+	invokeCtx, cancel := context.WithTimeout(parent, timeout)
+	defer cancel()
+	res, err := globalPool.invoke(ctx, invokeCtx, fn, ver, spec, dir, event, timeout)
 	if err != nil {
 		return nil, err
 	}

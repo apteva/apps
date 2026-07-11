@@ -413,29 +413,36 @@ func scanVersion(row scanRow) (*FunctionVersion, error) {
 // version number for the function. Caller resolves the source bytes
 // and computes source_hash; build_status starts at "building".
 func dbCreateVersion(db *sql.DB, pid string, v *FunctionVersion) (*FunctionVersion, error) {
-	var next int
-	if err := db.QueryRow(
-		`SELECT COALESCE(MAX(version),0)+1 FROM function_versions WHERE function_id = ?`,
-		v.FunctionID).Scan(&next); err != nil {
-		return nil, err
-	}
-	v.Version = next
 	if v.BuildStatus == "" {
 		v.BuildStatus = "pending"
 	}
-	res, err := db.Exec(
-		`INSERT INTO function_versions (
-			project_id, function_id, version, source_kind, source,
-			repo_id, repo_path, source_hash, package_json, build_status
-		 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		pid, v.FunctionID, v.Version, v.SourceKind, nullStr(v.Source),
-		nullableInt64Ptr(v.RepoID), nullStr(v.RepoPath), v.SourceHash,
-		nullStr(v.PackageJSON), v.BuildStatus)
-	if err != nil {
-		return nil, err
+	for attempt := 0; attempt < 8; attempt++ {
+		var next int
+		if err := db.QueryRow(
+			`SELECT COALESCE(MAX(version),0)+1 FROM function_versions WHERE function_id = ?`,
+			v.FunctionID).Scan(&next); err != nil {
+			return nil, err
+		}
+		v.Version = next
+		res, err := db.Exec(
+			`INSERT INTO function_versions (
+				project_id, function_id, version, source_kind, source,
+				repo_id, repo_path, source_hash, package_json, build_status
+			 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			pid, v.FunctionID, v.Version, v.SourceKind, nullStr(v.Source),
+			nullableInt64Ptr(v.RepoID), nullStr(v.RepoPath), v.SourceHash,
+			nullStr(v.PackageJSON), v.BuildStatus)
+		if err == nil {
+			id, _ := res.LastInsertId()
+			return dbGetVersion(db, pid, id)
+		}
+		lower := strings.ToLower(err.Error())
+		if !strings.Contains(lower, "unique") && !strings.Contains(lower, "locked") && !strings.Contains(lower, "busy") {
+			return nil, err
+		}
+		time.Sleep(time.Duration(attempt+1) * 5 * time.Millisecond)
 	}
-	id, _ := res.LastInsertId()
-	return dbGetVersion(db, pid, id)
+	return nil, errors.New("concurrent deploy contention; retry")
 }
 
 func dbGetVersion(db *sql.DB, pid string, id int64) (*FunctionVersion, error) {

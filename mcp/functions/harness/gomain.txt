@@ -17,6 +17,7 @@
 package main
 
 import (
+	"bytes"
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
@@ -26,6 +27,9 @@ import (
 	"runtime/debug"
 	"sync"
 )
+
+const maxHarnessFrame = 128 << 20
+const maxHarnessLogs = 16 << 10
 
 // Context is handed to Handle. Call reaches other Apteva apps through
 // the sidecar — the worker never holds a platform token itself.
@@ -69,6 +73,7 @@ type harness struct {
 	seq     int64
 	pending map[int64]chan callAnswer
 	logs    []string
+	logBytes int
 }
 
 type callAnswer struct {
@@ -92,14 +97,17 @@ func (h *harness) writeFrame(v any) error {
 	if err != nil {
 		return err
 	}
+	if len(payload) > maxHarnessFrame {
+		return fmt.Errorf("frame too large: %d", len(payload))
+	}
 	h.writeMu.Lock()
 	defer h.writeMu.Unlock()
 	var hdr [4]byte
 	binary.BigEndian.PutUint32(hdr[:], uint32(len(payload)))
-	if _, err := h.conn.Write(hdr[:]); err != nil {
+	if _, err := io.Copy(h.conn, bytes.NewReader(hdr[:])); err != nil {
 		return err
 	}
-	_, err = h.conn.Write(payload)
+	_, err = io.Copy(h.conn, bytes.NewReader(payload))
 	return err
 }
 
@@ -109,6 +117,9 @@ func readFrame(r io.Reader) ([]byte, error) {
 		return nil, err
 	}
 	n := binary.BigEndian.Uint32(hdr[:])
+	if n > maxHarnessFrame {
+		return nil, fmt.Errorf("frame too large: %d", n)
+	}
 	buf := make([]byte, n)
 	if _, err := io.ReadFull(r, buf); err != nil {
 		return nil, err
@@ -136,6 +147,9 @@ func (h *harness) call(app, tool string, input any) (json.RawMessage, error) {
 		"type": "call", "callId": id, "app": app, "tool": tool,
 		"input": json.RawMessage(inputJSON),
 	}); err != nil {
+		h.mu.Lock()
+		delete(h.pending, id)
+		h.mu.Unlock()
 		return nil, err
 	}
 	ans := <-ch
@@ -180,6 +194,9 @@ func (h *harness) integration(conn any, tool string, input any) (json.RawMessage
 		"conn":  json.RawMessage(connJSON),
 		"input": json.RawMessage(inputJSON),
 	}); err != nil {
+		h.mu.Lock()
+		delete(h.pending, id)
+		h.mu.Unlock()
 		return nil, err
 	}
 	ans := <-ch
@@ -194,7 +211,14 @@ func (h *harness) integration(conn any, tool string, input any) (json.RawMessage
 
 func (h *harness) appendLog(line string) {
 	h.mu.Lock()
-	h.logs = append(h.logs, line)
+	if h.logBytes < maxHarnessLogs {
+		remaining := maxHarnessLogs - h.logBytes
+		if len(line) > remaining {
+			line = line[:remaining]
+		}
+		h.logs = append(h.logs, line)
+		h.logBytes += len(line)
+	}
 	h.mu.Unlock()
 }
 
@@ -203,6 +227,7 @@ func (h *harness) takeLogs() []string {
 	defer h.mu.Unlock()
 	logs := h.logs
 	h.logs = nil
+	h.logBytes = 0
 	return logs
 }
 

@@ -54,7 +54,7 @@ var examplesFS embed.FS
 const manifestYAML = `schema: apteva-app/v1
 name: functions
 display_name: Functions
-version: 1.5.5
+version: 1.6.0
 description: |
   Lambda-style serverless functions in node or Go. Each function is
   an immutable, built version served by a pool of warm worker
@@ -305,7 +305,12 @@ func (a *App) MCPTools() []sdk.Tool {
 	}
 }
 
-func main() { sdk.Run(&App{}) }
+func main() {
+	if maybeRunSandboxHelper() {
+		return
+	}
+	sdk.Run(&App{})
+}
 
 // ─── Project resolution ────────────────────────────────────────────
 //

@@ -38,8 +38,8 @@ type runtimeSpec struct {
 //
 //   - node — interpreted; Node 18+ ships a global fetch.
 //   - go   — compiled; `go build` at deploy. apteva-server already
-//            needs a Go toolchain on PATH to build kind:source apps,
-//            so the runtime is guaranteed present.
+//     needs a Go toolchain on PATH to build kind:source apps,
+//     so the runtime is guaranteed present.
 //
 // bun is out (its node:net can't adopt the inherited socket fd);
 // python is a planned follow-on.

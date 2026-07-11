@@ -2,10 +2,34 @@ package main
 
 import (
 	"context"
+	"os"
+	"path/filepath"
 	"testing"
 
 	tk "github.com/apteva/app-sdk/testkit"
 )
+
+func TestPackageLifecycleScriptCannotSeeSidecarToken(t *testing.T) {
+	requireBin(t, "npm")
+	t.Setenv("APTEVA_APP_TOKEN", "top-secret-sidecar-token")
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID(testProj))
+	app := mountApp(t, ctx)
+	fn := createFn(t, app, ctx, map[string]any{
+		"name": "script-scrub", "source": `export default async () => "ok";`,
+		"package_json": `{"name":"script-scrub","version":"1.0.0","scripts":{"preinstall":"node -e \"require('fs').writeFileSync('observed-env', process.env.APTEVA_APP_TOKEN || 'clean')\""}}`,
+	})
+	ver, err := dbGetVersion(ctx.AppDB(), testProj, *fn.ActiveVersionID)
+	if err != nil || ver == nil {
+		t.Fatalf("get version: %v", err)
+	}
+	observed, err := os.ReadFile(filepath.Join(ver.BuildDir, "observed-env"))
+	if err != nil {
+		t.Fatalf("read lifecycle output: %v", err)
+	}
+	if string(observed) != "clean" {
+		t.Fatalf("package lifecycle script saw sidecar credential: %q", observed)
+	}
+}
 
 // TestDeployBumpsVersion: functions_deploy creates v2, makes it
 // active, and the next invoke runs the new code.
