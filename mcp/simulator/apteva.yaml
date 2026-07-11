@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: simulator
 display_name: Apteva Simulator
-version: 0.1.20
+version: 0.1.21
 description: |
   iOS and Android simulators on demand. Boot a device, build a repo's
   source into a .apk or .app, install + launch on a headless emulator
@@ -18,6 +18,9 @@ description: |
 
   v0.1.20 fixes project-scoped live-stream URLs and allows Code and Simulator
   to watch the same device concurrently without rotating each other's tokens.
+
+  v0.1.21 makes the panel's Boot actions honor the install's configured runtime
+  and device type instead of overriding them with host-incompatible defaults.
 
   Per-platform capability gating — Android works on Linux/macOS hosts
   with the Android SDK; iOS boot/view requires macOS with Xcode.

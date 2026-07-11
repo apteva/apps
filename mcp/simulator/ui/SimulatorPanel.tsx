@@ -47,10 +47,6 @@ interface Sim {
 }
 
 const API = "/api/apps/simulator/api";
-const DEFAULT_ANDROID_IMAGE = "system-images;android-34;google_apis;x86_64";
-const DEFAULT_ANDROID_DEVICE_TYPE = "pixel_6";
-const DEFAULT_IOS_RUNTIME = "";
-const DEFAULT_IOS_DEVICE_TYPE = "iPhone-15-Pro";
 
 export default function SimulatorPanel({ projectId }: NativePanelProps) {
   const [caps, setCaps] = useState<Capabilities | null>(null);
@@ -106,14 +102,10 @@ export default function SimulatorPanel({ projectId }: NativePanelProps) {
     setError("");
     setScreenshotUrl(null);
     try {
-      const payload =
-        platform === "ios"
-          ? { platform, image: DEFAULT_IOS_RUNTIME, device_type: DEFAULT_IOS_DEVICE_TYPE }
-          : {
-              platform,
-              image: DEFAULT_ANDROID_IMAGE,
-              device_type: DEFAULT_ANDROID_DEVICE_TYPE,
-            };
+      // Omit image/device_type so the backend applies the operator's install
+      // configuration. Hardcoded panel defaults can target the wrong host
+      // architecture and override a valid configured system image.
+      const payload = { platform };
       const r = await fetch(`${API}/sims/boot?${withParams()}`, {
         method: "POST",
         credentials: "same-origin",
