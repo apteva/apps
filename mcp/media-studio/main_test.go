@@ -47,6 +47,20 @@ func TestPanelBundleUsesProductionJSXRuntime(t *testing.T) {
 	}
 }
 
+func TestPanelProjectScopedWritesIncludeProjectQuery(t *testing.T) {
+	source, err := os.ReadFile("ui/MediaPanel.tsx")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(source)
+	for _, route := range []string{"generate", "avatar-create"} {
+		forbidden := "fetch(`${API}/" + route + "`,"
+		if strings.Contains(text, forbidden) {
+			t.Fatalf("MediaPanel.tsx calls project-scoped /%s without project_id in the URL", route)
+		}
+	}
+}
+
 // --- stub PlatformClient -------------------------------------------
 
 type recordingPlatform struct {

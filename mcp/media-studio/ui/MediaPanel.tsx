@@ -954,7 +954,7 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
       if (avatarCreateSourceType === "photo") body.source_image = avatarCreateSource.trim();
       if (avatarCreateSourceType === "prompt") body.prompt = avatarCreatePrompt.trim();
       if (avatarCreateSourceType === "video") body.source_video = avatarCreateSource.trim();
-      const res = await fetch(`${API}/avatar-create`, {
+      const res = await fetch(`${API}/avatar-create?project_id=${encodeURIComponent(projectId)}`, {
         method: "POST",
         credentials: "same-origin",
         headers: { "Content-Type": "application/json" },
@@ -1262,7 +1262,7 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
       const body = buildGenerationBody();
       if (!body) return;
       if (mode === "draft") body.mode = "draft";
-      const res = await fetch(`${API}/generate`, {
+      const res = await fetch(`${API}/generate?project_id=${encodeURIComponent(projectId)}`, {
         method: "POST",
         credentials: "same-origin",
         headers: { "Content-Type": "application/json" },
@@ -1338,7 +1338,7 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
     setGeneratingDraftId(g.id);
     setStatus("Generating draft…");
     try {
-      const res = await fetch(`${API}/generate`, {
+      const res = await fetch(`${API}/generate?project_id=${encodeURIComponent(projectId)}`, {
         method: "POST",
         credentials: "same-origin",
         headers: { "Content-Type": "application/json" },
