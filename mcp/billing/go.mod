@@ -1,6 +1,6 @@
 module github.com/apteva/apps/mcp/billing
 
-go 1.25.0
+go 1.25.12
 
 require (
 	github.com/apteva/app-sdk v0.36.4
