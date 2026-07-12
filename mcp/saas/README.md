@@ -32,9 +32,11 @@ they do not need SaaS-specific hooks.
 
 - creates or links the Billing customer;
 - resolves the Catalog price;
-- creates the Subscription and first invoice;
-- either records a manual payment and activates the SaaS account, or
-  returns a payment/setup link and leaves the account `past_due`;
+- creates an idempotent Subscription and durable checkout record;
+- creates the first subscription cycle and prepares its lines through
+  Subscriptions before asking Billing to create the invoice;
+- returns a payment link and leaves the account `past_due`, or returns a
+  setup link for a card-required trial without creating an invoice;
 - grants Entitlements during provisioning, while access checks only allow
   `active` accounts.
 
@@ -47,11 +49,31 @@ start as no-card trials. SaaS creates a `trialing` Subscription, activates
 the account, runs fulfillment immediately, and does not call Billing until
 payment is required at trial end.
 
+When Subscriptions publishes `subscription.cycle_due`, SaaS prepares the
+period lines through Subscriptions, creates and finalizes the Billing invoice,
+links the invoice to the subscription cycle, and creates its payment link. The
+operation is checkpointed by subscription cycle so delivery retries resume at
+the last completed step. When Billing publishes `invoice.paid`, SaaS marks the
+cycle paid and asks Subscriptions to transition to `active`; the resulting
+`subscription.active` event activates and fulfills the SaaS account.
+
+`saas_checkout_get` returns the durable status and current payment/setup URL.
+Administrative manual payments use the separately permission-gated
+`saas_checkout_mark_paid` tool. Public checkout cannot override plan pricing,
+trial policy, provider, billing/auth IDs, lifecycle dates, or payment state.
+
+SaaS exposes `saas.read`, `saas.checkout`, and `saas.admin` permissions. Plan,
+fulfillment, account-management, usage-write, and manual-payment tools require
+`saas.admin`; customer checkout requires `saas.checkout`.
+
 ## Fulfillment Actions
 
 Plans can define generic lifecycle actions. SaaS calls the configured
 app/tool, expands `{{...}}` templates from the account/customer/plan
-context, and stores selected output fields in account metadata.
+context, and stores selected output fields in account metadata. Actions
+default to `once_per_transition`; set `execution_policy` to `always` only
+for operations that are explicitly safe to repeat. SaaS reserves each run
+before calling the target and passes a deterministic `idempotency_key`.
 
 ```json
 {
@@ -120,3 +142,9 @@ For apps that already expose gauges, the compatibility format is still:
 `saas_usage_sync` stores those values as current snapshots. It does not
 write them to Entitlements' additive `usage_record` stream, because live
 gauges such as contact count or storage size can go down.
+
+Each source is synchronized independently with bounded concurrency and a
+timeout. Successful complete responses replace the source's prior
+generation; failed responses preserve the last good gauges and update the
+source failure state. Access checks return `usage_unknown` when a configured
+source has never succeeded or is older than its freshness threshold.

@@ -15,6 +15,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	sdk "github.com/apteva/app-sdk"
@@ -31,11 +32,20 @@ const (
 	StatusSuspended    = "suspended"
 	StatusCancelled    = "cancelled"
 	StatusFailed       = "failed"
+
+	defaultUsageConcurrency = 8
+	defaultUsagePageSize    = 100
+	defaultUsageTimeout     = 30 * time.Second
+	defaultUsageFreshness   = 5 * time.Minute
+	fulfillmentClaimTimeout = 15 * time.Minute
+	commerceClaimTimeout    = 15 * time.Minute
 )
 
 type App struct{}
 
 var globalCtx *sdk.AppCtx
+var usageCallSlots = make(chan struct{}, defaultUsageConcurrency)
+var errFulfillmentInProgress = errors.New("fulfillment already in progress")
 
 func (a *App) Manifest() sdk.Manifest {
 	m, err := sdk.ParseManifest([]byte(manifestYAML))
@@ -56,7 +66,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 			return err
 		}
 	}
-	ctx.Logger().Info("saas mounted", "version", "0.1.8", "scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
+	ctx.Logger().Info("saas mounted", "version", "0.3.0", "scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
 	return nil
 }
 
@@ -70,6 +80,11 @@ func (a *App) EventHandlers() []sdk.EventHandler {
 		{Topic: "subscription.paused", Handler: a.handleSubscriptionLifecycle},
 		{Topic: "subscription.cancelled", Handler: a.handleSubscriptionLifecycle},
 		{Topic: "subscription.ended", Handler: a.handleSubscriptionLifecycle},
+		{Topic: "subscription.cycle_due", Handler: a.handleSubscriptionCycleDue},
+		{Topic: "invoice.paid", Handler: a.handleInvoicePaid},
+		{Topic: "invoice.voided", Handler: a.handleInvoiceCollectionFailed},
+		{Topic: "invoice.refunded", Handler: a.handleInvoiceCollectionFailed},
+		{Topic: "payment_method.attached", Handler: a.handlePaymentMethodAttached},
 	}
 }
 
@@ -83,6 +98,12 @@ func (a *App) Workers() []sdk.Worker {
 			}
 			_, err := a.toolUsageSync(ctx, map[string]any{})
 			return err
+		},
+	}, {
+		Name:     "checkout-recovery",
+		Schedule: "@every 60s",
+		Run: func(_ context.Context, ctx *sdk.AppCtx) error {
+			return a.recoverExpiredCheckouts(ctx)
 		},
 	}}
 }
@@ -113,19 +134,21 @@ func (a *App) MCPTools() []sdk.Tool {
 		}, []string{"plan_key", "app_name", "tool_name"}), Handler: a.toolPlanUsageSourceAdd},
 		{Name: "saas_plan_action_add", Description: "Register a generic fulfillment action for a SaaS plan lifecycle event.", InputSchema: schemaObject(map[string]any{
 			"plan_key": strSchema(), "event": strSchema(), "app_name": strSchema(), "tool_name": strSchema(),
-			"args": objSchema(), "store": objSchema(), "failure_mode": strSchema(), "enabled": boolSchema(), "metadata": objSchema(),
+			"args": objSchema(), "store": objSchema(), "failure_mode": strSchema(), "execution_policy": strSchema(), "enabled": boolSchema(), "metadata": objSchema(),
 		}, []string{"plan_key", "event", "app_name", "tool_name"}), Handler: a.toolPlanActionAdd},
 		{Name: "saas_plan_action_update", Description: "Update a generic fulfillment action by id.", InputSchema: schemaObject(map[string]any{
-			"id": intSchema(), "args": objSchema(), "store": objSchema(), "failure_mode": strSchema(), "enabled": boolSchema(), "metadata": objSchema(),
+			"id": intSchema(), "args": objSchema(), "store": objSchema(), "failure_mode": strSchema(), "execution_policy": strSchema(), "enabled": boolSchema(), "metadata": objSchema(),
 		}, []string{"id"}), Handler: a.toolPlanActionUpdate},
 		{Name: "saas_plan_action_list", Description: "List generic fulfillment actions for a SaaS plan.", InputSchema: schemaObject(map[string]any{"plan_key": strSchema(), "event": strSchema()}, []string{"plan_key"}), Handler: a.toolPlanActionList},
 		{Name: "saas_customer_create", Description: "Find or create a SaaS customer by email.", InputSchema: schemaObject(map[string]any{"email": strSchema(), "name": strSchema(), "billing_customer_id": intSchema(), "auth_user_id": intSchema(), "metadata": objSchema()}, []string{"email"}), Handler: a.toolCustomerCreate},
 		{Name: "saas_checkout_create", Description: "Create a SaaS checkout: free activation, no-card trials, or paid Billing/Subscription checkout.", InputSchema: schemaObject(map[string]any{
-			"owner_email": strSchema(), "customer_id": intSchema(), "customer_email": strSchema(), "customer_name": strSchema(), "slug": strSchema(), "plan_key": strSchema(),
-			"billing_customer_id": intSchema(), "auth_org_id": intSchema(), "auth_user_id": intSchema(), "create_owner_user": boolSchema(), "send_password_reset": boolSchema(),
-			"payment_mode": strSchema(), "record_payment": boolSchema(), "manual_payment_method": strSchema(), "activate_without_payment": boolSchema(),
-			"success_url": strSchema(), "cancel_url": strSchema(), "period_start": strSchema(), "period_end": strSchema(), "provider": strSchema(), "metadata": objSchema(),
+			"owner_email": strSchema(), "customer_name": strSchema(), "slug": strSchema(), "plan_key": strSchema(),
+			"create_owner_user": boolSchema(), "send_password_reset": boolSchema(),
+			"idempotency_key": strSchema(), "payment_mode": strSchema(),
+			"success_url": strSchema(), "cancel_url": strSchema(),
 		}, []string{"owner_email", "slug"}), Handler: a.toolCheckoutCreate},
+		{Name: "saas_checkout_get", Description: "Fetch durable checkout status and payment/setup URL.", InputSchema: schemaObject(map[string]any{"checkout_id": strSchema()}, []string{"checkout_id"}), Handler: a.toolCheckoutGet},
+		{Name: "saas_checkout_mark_paid", Description: "Administratively record a manual checkout payment through Billing.", InputSchema: schemaObject(map[string]any{"checkout_id": strSchema(), "amount_cents": intSchema(), "method": strSchema(), "notes": strSchema()}, []string{"checkout_id"}), Handler: a.toolCheckoutMarkPaid},
 		{Name: "saas_fulfillment_run", Description: "Run or retry configured fulfillment actions for a SaaS account lifecycle event.", InputSchema: schemaObject(map[string]any{"account_id": strSchema(), "event": strSchema()}, []string{"account_id", "event"}), Handler: a.toolFulfillmentRun},
 		{Name: "saas_account_create", Description: "Create a SaaS account and apply plan access.", InputSchema: schemaObject(map[string]any{
 			"customer_id": intSchema(), "customer_email": strSchema(), "customer_name": strSchema(), "owner_email": strSchema(), "slug": strSchema(), "plan_key": strSchema(),
@@ -136,7 +159,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "saas_account_suspend", Description: "Suspend a SaaS account.", InputSchema: accountIDSchema(), Handler: a.toolAccountSuspend},
 		{Name: "saas_account_resume", Description: "Resume a SaaS account.", InputSchema: accountIDSchema(), Handler: a.toolAccountResume},
 		{Name: "saas_account_cancel", Description: "Cancel a SaaS account.", InputSchema: accountIDSchema(), Handler: a.toolAccountCancel},
-		{Name: "saas_subscription_sync", Description: "Apply subscription status to a SaaS account.", InputSchema: schemaObject(map[string]any{"account_id": strSchema(), "subscription_id": intSchema(), "subscription_status": strSchema(), "actor": strSchema()}, []string{"subscription_status"}), Handler: a.toolSubscriptionSync},
+		{Name: "saas_subscription_sync", Description: "Apply subscription status to a SaaS account.", InputSchema: schemaObject(map[string]any{"account_id": strSchema(), "subscription_id": intSchema(), "subscription_status": strSchema(), "actor": strSchema(), "allow_cancelled_reactivation": boolSchema()}, []string{"subscription_status"}), Handler: a.toolSubscriptionSync},
 		{Name: "saas_usage_sync", Description: "Pull live usage gauges from configured sources.", InputSchema: schemaObject(map[string]any{"account_id": strSchema(), "status": strSchema()}, nil), Handler: a.toolUsageSync},
 		{Name: "saas_usage_record", Description: "Upsert one live usage gauge.", InputSchema: schemaObject(map[string]any{"account_id": strSchema(), "feature_key": strSchema(), "quantity": intSchema(), "source_app": strSchema(), "metadata": objSchema()}, []string{"account_id", "feature_key"}), Handler: a.toolUsageRecord},
 		{Name: "saas_usage_get", Description: "Return live usage totals and plan limits.", InputSchema: schemaObject(map[string]any{"account_id": strSchema(), "customer_id": intSchema(), "feature_key": strSchema()}, nil), Handler: a.toolUsageGet},
@@ -211,19 +234,20 @@ type UsageSource struct {
 }
 
 type PlanAction struct {
-	ID          int64           `json:"id"`
-	ProjectID   string          `json:"project_id"`
-	PlanKey     string          `json:"plan_key"`
-	Event       string          `json:"event"`
-	AppName     string          `json:"app_name"`
-	ToolName    string          `json:"tool_name"`
-	Args        json.RawMessage `json:"args,omitempty"`
-	Store       json.RawMessage `json:"store,omitempty"`
-	FailureMode string          `json:"failure_mode"`
-	Enabled     bool            `json:"enabled"`
-	Metadata    json.RawMessage `json:"metadata,omitempty"`
-	CreatedAt   string          `json:"created_at"`
-	UpdatedAt   string          `json:"updated_at"`
+	ID              int64           `json:"id"`
+	ProjectID       string          `json:"project_id"`
+	PlanKey         string          `json:"plan_key"`
+	Event           string          `json:"event"`
+	AppName         string          `json:"app_name"`
+	ToolName        string          `json:"tool_name"`
+	Args            json.RawMessage `json:"args,omitempty"`
+	Store           json.RawMessage `json:"store,omitempty"`
+	FailureMode     string          `json:"failure_mode"`
+	ExecutionPolicy string          `json:"execution_policy"`
+	Enabled         bool            `json:"enabled"`
+	Metadata        json.RawMessage `json:"metadata,omitempty"`
+	CreatedAt       string          `json:"created_at"`
+	UpdatedAt       string          `json:"updated_at"`
 }
 
 type FulfillmentRun struct {
@@ -231,6 +255,7 @@ type FulfillmentRun struct {
 	ProjectID    string          `json:"project_id"`
 	AccountID    string          `json:"account_id"`
 	PlanActionID int64           `json:"plan_action_id"`
+	TransitionID string          `json:"transition_id"`
 	Event        string          `json:"event"`
 	AppName      string          `json:"app_name"`
 	ToolName     string          `json:"tool_name"`
@@ -238,8 +263,41 @@ type FulfillmentRun struct {
 	Input        json.RawMessage `json:"input,omitempty"`
 	Output       json.RawMessage `json:"output,omitempty"`
 	Error        string          `json:"error,omitempty"`
+	AttemptCount int64           `json:"attempt_count"`
+	StartedAt    string          `json:"started_at,omitempty"`
+	CompletedAt  string          `json:"completed_at,omitempty"`
 	CreatedAt    string          `json:"created_at"`
 	UpdatedAt    string          `json:"updated_at"`
+}
+
+type LifecycleTransition struct {
+	ID          string `json:"id"`
+	ProjectID   string `json:"project_id"`
+	AccountID   string `json:"account_id"`
+	Sequence    int64  `json:"sequence"`
+	Event       string `json:"event"`
+	FromStatus  string `json:"from_status"`
+	ToStatus    string `json:"to_status"`
+	SourceKey   string `json:"source_key,omitempty"`
+	Status      string `json:"status"`
+	CreatedAt   string `json:"created_at"`
+	CompletedAt string `json:"completed_at,omitempty"`
+}
+
+type ProvisioningStep struct {
+	Step         string          `json:"step"`
+	Status       string          `json:"status"`
+	AttemptCount int64           `json:"attempt_count"`
+	Output       json.RawMessage `json:"output,omitempty"`
+	LastError    string          `json:"last_error,omitempty"`
+}
+
+type UsageSourceState struct {
+	UsageSourceID    int64  `json:"usage_source_id"`
+	LastGenerationID string `json:"last_generation_id,omitempty"`
+	LastSuccessAt    string `json:"last_success_at,omitempty"`
+	LastError        string `json:"last_error,omitempty"`
+	FailureCount     int64  `json:"failure_count"`
 }
 
 type Account struct {
@@ -258,6 +316,61 @@ type Account struct {
 	Metadata        json.RawMessage `json:"metadata,omitempty"`
 	CreatedAt       string          `json:"created_at"`
 	UpdatedAt       string          `json:"updated_at"`
+}
+
+type CommerceOperation struct {
+	ID                int64           `json:"id"`
+	ProjectID         string          `json:"project_id"`
+	OperationKey      string          `json:"operation_key"`
+	AccountID         string          `json:"account_id"`
+	SubscriptionID    int64           `json:"subscription_id"`
+	CycleID           int64           `json:"cycle_id"`
+	CheckoutID        string          `json:"checkout_id,omitempty"`
+	BillingCustomerID *int64          `json:"billing_customer_id,omitempty"`
+	InvoiceID         *int64          `json:"invoice_id,omitempty"`
+	Status            string          `json:"status"`
+	Stage             string          `json:"stage"`
+	AttemptCount      int64           `json:"attempt_count"`
+	Prepared          json.RawMessage `json:"prepared,omitempty"`
+	PaymentLink       json.RawMessage `json:"payment_link,omitempty"`
+	LastError         string          `json:"last_error,omitempty"`
+	LeaseUntil        string          `json:"lease_until,omitempty"`
+	StartedAt         string          `json:"started_at,omitempty"`
+	CompletedAt       string          `json:"completed_at,omitempty"`
+	CreatedAt         string          `json:"created_at"`
+	UpdatedAt         string          `json:"updated_at"`
+}
+
+type Checkout struct {
+	ID                 string          `json:"id"`
+	ProjectID          string          `json:"project_id"`
+	IdempotencyKey     string          `json:"idempotency_key"`
+	RequestFingerprint string          `json:"-"`
+	CustomerID         int64           `json:"customer_id"`
+	AccountID          string          `json:"account_id,omitempty"`
+	PlanKey            string          `json:"plan_key"`
+	Slug               string          `json:"slug"`
+	OwnerEmail         string          `json:"owner_email"`
+	SubscriptionID     *int64          `json:"subscription_id,omitempty"`
+	CycleID            *int64          `json:"cycle_id,omitempty"`
+	BillingCustomerID  *int64          `json:"billing_customer_id,omitempty"`
+	InvoiceID          *int64          `json:"invoice_id,omitempty"`
+	PaymentMethodID    *int64          `json:"payment_method_id,omitempty"`
+	Status             string          `json:"status"`
+	Stage              string          `json:"stage"`
+	PaymentMode        string          `json:"payment_mode,omitempty"`
+	PaymentURL         string          `json:"payment_url,omitempty"`
+	ProviderSessionID  string          `json:"provider_session_id,omitempty"`
+	TrialEndsAt        string          `json:"trial_ends_at,omitempty"`
+	SessionExpiresAt   string          `json:"session_expires_at,omitempty"`
+	AttemptCount       int64           `json:"attempt_count"`
+	Result             json.RawMessage `json:"result,omitempty"`
+	LastError          string          `json:"last_error,omitempty"`
+	LeaseUntil         string          `json:"lease_until,omitempty"`
+	StartedAt          string          `json:"started_at,omitempty"`
+	CompletedAt        string          `json:"completed_at,omitempty"`
+	CreatedAt          string          `json:"created_at"`
+	UpdatedAt          string          `json:"updated_at"`
 }
 
 type UsageTotal struct {
@@ -573,6 +686,59 @@ func (a *App) toolCheckoutCreate(ctx *sdk.AppCtx, args map[string]any) (any, err
 	return out, nil
 }
 
+func (a *App) toolCheckoutGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := requireProject(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	checkout, err := dbCheckoutGet(ctx.AppDB(), pid, strArg(args, "checkout_id"))
+	if err != nil || checkout == nil {
+		return nil, firstErr(err, errors.New("checkout not found"))
+	}
+	return a.checkoutResponse(ctx, checkout)
+}
+
+func (a *App) toolCheckoutMarkPaid(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := requireProject(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	checkout, err := dbCheckoutGet(ctx.AppDB(), pid, strArg(args, "checkout_id"))
+	if err != nil || checkout == nil {
+		return nil, firstErr(err, errors.New("checkout not found"))
+	}
+	invoiceID := int64PtrValue(checkout.InvoiceID)
+	if invoiceID == 0 {
+		return nil, errors.New("checkout has no invoice")
+	}
+	amount := int64Arg(args, "amount_cents")
+	if amount <= 0 {
+		return nil, errors.New("amount_cents must be greater than zero")
+	}
+	var paymentOut map[string]any
+	if err := ctx.PlatformAPI().CallAppResult("billing", "payments_record", map[string]any{
+		"_project_id": pid, "invoice_id": invoiceID, "amount_cents": amount,
+		"method": firstNonEmpty(strArg(args, "method"), "wire"),
+		"notes":  firstNonEmpty(strArg(args, "notes"), "SaaS administrative payment"),
+	}, &paymentOut); err != nil {
+		return nil, fmt.Errorf("record checkout payment: %w", err)
+	}
+	invoice := unwrapMap(paymentOut, "invoice")
+	if strArg(invoice, "status") == "paid" {
+		if err := a.handleInvoicePaid(ctx, sdk.Event{Event: "invoice.paid", ProjectID: pid, Data: map[string]any{"id": invoiceID, "status": "paid"}}); err != nil {
+			return nil, err
+		}
+	}
+	checkout, _ = dbCheckoutGet(ctx.AppDB(), pid, checkout.ID)
+	response, err := a.checkoutResponse(ctx, checkout)
+	if err != nil {
+		return nil, err
+	}
+	response["payment"] = unwrapMap(paymentOut, "payment")
+	response["invoice"] = invoice
+	return response, nil
+}
+
 func (a *App) toolFulfillmentRun(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	pid, err := requireProject(ctx, args)
 	if err != nil {
@@ -591,11 +757,25 @@ func (a *App) toolFulfillmentRun(ctx *sdk.AppCtx, args map[string]any) (any, err
 }
 
 func (a *App) toolAccountCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	acct, err := a.createAccount(ctx, args)
+	pid, err := requireProject(ctx, args)
 	if err != nil {
 		return nil, err
 	}
-	ctx.Emit("saas.account.active", map[string]any{"account_id": acct.ID, "customer_id": acct.CustomerID, "plan_key": acct.PlanKey})
+	planKey := firstNonEmpty(strArg(args, "plan_key"), "free")
+	plan, err := dbPlanGet(ctx.AppDB(), pid, planKey)
+	if err != nil {
+		return nil, err
+	}
+	if plan != nil && (plan.BillingMode != "free" || plan.SubscriptionRequired) {
+		return nil, errors.New("paid and subscription plans must be created through saas_checkout_create")
+	}
+	acct, activated, err := a.createAccount(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	if activated && acct.Status == StatusActive {
+		ctx.Emit("saas.account.active", map[string]any{"account_id": acct.ID, "customer_id": acct.CustomerID, "plan_key": acct.PlanKey})
+	}
 	return map[string]any{"account": acct}, nil
 }
 
@@ -651,7 +831,7 @@ func (a *App) toolSubscriptionSync(ctx *sdk.AppCtx, args map[string]any) (any, e
 		}
 		var updated []*Account
 		for _, acct := range accts {
-			out, err := a.toolSubscriptionSync(ctx, map[string]any{"_project_id": pid, "account_id": acct.ID, "subscription_status": status, "actor": actor(args)})
+			out, err := a.toolSubscriptionSync(ctx, map[string]any{"_project_id": pid, "account_id": acct.ID, "subscription_id": int64Arg(args, "subscription_id"), "subscription_status": status, "actor": actor(args), "allow_cancelled_reactivation": boolArg(args, "allow_cancelled_reactivation")})
 			if err != nil {
 				return nil, err
 			}
@@ -664,8 +844,10 @@ func (a *App) toolSubscriptionSync(ctx *sdk.AppCtx, args map[string]any) (any, e
 		return a.setAccountStatus(ctx, args, StatusActive, "subscription."+status)
 	case "past_due":
 		return a.setAccountStatus(ctx, args, StatusPastDue, "subscription.past_due")
-	case "paused", "cancelled", "ended":
-		return a.setAccountStatus(ctx, args, StatusSuspended, "subscription."+status)
+	case "paused":
+		return a.setAccountStatus(ctx, args, StatusSuspended, "subscription.paused")
+	case "cancelled", "ended":
+		return a.setAccountStatus(ctx, args, StatusCancelled, "subscription."+status)
 	default:
 		return nil, fmt.Errorf("unsupported subscription_status %q", status)
 	}
@@ -676,80 +858,159 @@ func (a *App) toolUsageSync(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	var accounts []*Account
+	concurrency := configInt(ctx, "usage_sync_concurrency", defaultUsageConcurrency)
+	if concurrency < 1 {
+		concurrency = 1
+	}
+	if concurrency > defaultUsageConcurrency {
+		concurrency = defaultUsageConcurrency
+	}
+	timeout := time.Duration(configInt(ctx, "usage_sync_timeout_seconds", int(defaultUsageTimeout/time.Second))) * time.Second
+	syncedAccounts, records, failed := 0, 0, 0
+	var syncErrors []string
 	if id := strArg(args, "account_id"); id != "" {
 		acct, err := dbAccountGet(ctx.AppDB(), pid, id)
 		if err != nil || acct == nil {
 			return nil, firstErr(err, errors.New("account not found"))
 		}
-		accounts = []*Account{acct}
+		records, failed, syncErrors = a.syncAccountBatch(ctx, pid, []*Account{acct}, concurrency, timeout)
+		syncedAccounts = 1
 	} else {
+		statuses := []string{StatusActive, StatusPastDue}
 		if status := strArg(args, "status"); status != "" {
-			accounts, err = dbAccountList(ctx.AppDB(), pid, map[string]any{"status": status})
-			if err != nil {
-				return nil, err
+			statuses = []string{status}
+		}
+		for offset := 0; ; offset += defaultUsagePageSize {
+			page, pageErr := dbAccountPage(ctx.AppDB(), pid, statuses, defaultUsagePageSize, offset)
+			if pageErr != nil {
+				return nil, pageErr
 			}
-		} else {
-			accounts, err = dbAccountList(ctx.AppDB(), pid, map[string]any{"status": StatusActive})
-			if err != nil {
-				return nil, err
+			pageRecords, pageFailed, pageErrors := a.syncAccountBatch(ctx, pid, page, concurrency, timeout)
+			syncedAccounts += len(page)
+			records += pageRecords
+			failed += pageFailed
+			syncErrors = append(syncErrors, pageErrors...)
+			if len(page) < defaultUsagePageSize {
+				break
 			}
-			pastDue, err := dbAccountList(ctx.AppDB(), pid, map[string]any{"status": StatusPastDue})
-			if err != nil {
-				return nil, err
-			}
-			accounts = append(accounts, pastDue...)
 		}
 	}
-	records := 0
-	for _, acct := range accounts {
-		sources, err := dbUsageSources(ctx.AppDB(), pid, acct.PlanKey)
-		if err != nil {
-			return nil, err
-		}
-		for _, src := range sources {
-			cfg := parseUsageSourceConfig(src.Metadata)
-			var out map[string]any
-			input := map[string]any{
-				"_project_id": pid,
-				"account_id":  acct.ID,
-				"customer_id": acct.CustomerID,
-				"auth_org_id": int64PtrValue(acct.AuthOrgID),
-				"plan_key":    acct.PlanKey,
-			}
-			for k, v := range expandUsageArgs(cfg.CallArgs, pid, acct) {
-				input[k] = v
-			}
-			if err := ctx.PlatformAPI().CallAppResult(src.AppName, src.ToolName, input, &out); err != nil {
-				_, _ = dbAccountSetStatus(ctx.AppDB(), pid, acct.ID, acct.Status, err.Error())
-				_ = recordEvent(ctx.AppDB(), pid, acct.ID, "usage_sync.failed", src.AppName, map[string]any{"tool": src.ToolName, "error": err.Error()})
-				return nil, err
-			}
-			gauges, err := usageGaugesFromResponse(src, cfg, out)
-			if err != nil {
-				_, _ = dbAccountSetStatus(ctx.AppDB(), pid, acct.ID, acct.Status, err.Error())
-				_ = recordEvent(ctx.AppDB(), pid, acct.ID, "usage_sync.failed", src.AppName, map[string]any{"tool": src.ToolName, "error": err.Error()})
-				return nil, err
-			}
-			for _, gauge := range gauges {
-				feature := firstNonEmpty(gauge.FeatureKey, src.FeaturePrefix)
-				if feature == "" {
-					continue
-				}
-				if src.FeaturePrefix != "" && !strings.Contains(feature, ":") {
-					feature = strings.TrimRight(src.FeaturePrefix, ":") + ":" + feature
-				}
-				if err := dbUsageSnapshotUpsert(ctx.AppDB(), pid, acct, src.AppName, feature, gauge.Quantity, gauge.Metadata); err != nil {
-					return nil, err
-				}
-				records++
-			}
-		}
-		if err := dbAccountUsageSynced(ctx.AppDB(), pid, acct.ID); err != nil {
-			return nil, err
-		}
+	return map[string]any{"synced_accounts": syncedAccounts, "records": records, "failed_sources": failed, "errors": syncErrors}, nil
+}
+
+func (a *App) syncAccountBatch(ctx *sdk.AppCtx, pid string, accounts []*Account, concurrency int, timeout time.Duration) (int, int, []string) {
+	type syncResult struct {
+		records int
+		failed  int
+		errors  []string
 	}
-	return map[string]any{"synced_accounts": len(accounts), "records": records}, nil
+	if len(accounts) == 0 {
+		return 0, 0, nil
+	}
+	if concurrency > len(accounts) {
+		concurrency = len(accounts)
+	}
+	jobs := make(chan *Account)
+	results := make(chan syncResult, len(accounts))
+	var wg sync.WaitGroup
+	for i := 0; i < concurrency; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for acct := range jobs {
+				records, failed, errs := a.syncAccountUsage(ctx, pid, acct, timeout)
+				results <- syncResult{records: records, failed: failed, errors: errs}
+			}
+		}()
+	}
+	go func() {
+		for _, acct := range accounts {
+			jobs <- acct
+		}
+		close(jobs)
+		wg.Wait()
+		close(results)
+	}()
+	records, failed := 0, 0
+	var syncErrors []string
+	for result := range results {
+		records += result.records
+		failed += result.failed
+		syncErrors = append(syncErrors, result.errors...)
+	}
+	return records, failed, syncErrors
+}
+
+func (a *App) syncAccountUsage(ctx *sdk.AppCtx, pid string, acct *Account, timeout time.Duration) (int, int, []string) {
+	sources, err := dbUsageSources(ctx.AppDB(), pid, acct.PlanKey)
+	if err != nil {
+		return 0, 1, []string{acct.ID + ": " + err.Error()}
+	}
+	records, failed := 0, 0
+	var syncErrors []string
+	for _, src := range sources {
+		cfg := parseUsageSourceConfig(src.Metadata)
+		input := map[string]any{"_project_id": pid, "account_id": acct.ID, "customer_id": acct.CustomerID, "auth_org_id": int64PtrValue(acct.AuthOrgID), "plan_key": acct.PlanKey}
+		for k, v := range expandUsageArgs(cfg.CallArgs, pid, acct) {
+			input[k] = v
+		}
+		out, callErr := callAppResultWithTimeout(ctx, src.AppName, src.ToolName, input, timeout)
+		var gauges []usageGauge
+		if callErr == nil {
+			gauges, callErr = usageGaugesFromResponse(src, cfg, out)
+		}
+		if callErr != nil {
+			failed++
+			_ = dbUsageSourceFailure(ctx.AppDB(), pid, acct.ID, src.ID, callErr.Error())
+			_ = recordEvent(ctx.AppDB(), pid, acct.ID, "usage_sync.failed", src.AppName, map[string]any{"tool": src.ToolName, "error": callErr.Error()})
+			syncErrors = append(syncErrors, fmt.Sprintf("%s/%s.%s: %v", acct.ID, src.AppName, src.ToolName, callErr))
+			continue
+		}
+		generation := newID("usg")
+		if err := dbUsageSourceReplace(ctx.AppDB(), pid, acct, src, generation, gauges); err != nil {
+			failed++
+			_ = dbUsageSourceFailure(ctx.AppDB(), pid, acct.ID, src.ID, err.Error())
+			syncErrors = append(syncErrors, fmt.Sprintf("%s/%s.%s: %v", acct.ID, src.AppName, src.ToolName, err))
+			continue
+		}
+		records += len(gauges)
+	}
+	if failed == 0 {
+		_ = dbAccountUsageSynced(ctx.AppDB(), pid, acct.ID)
+	} else if len(syncErrors) > 0 {
+		_ = dbAccountSetLastError(ctx.AppDB(), pid, acct.ID, strings.Join(syncErrors, "; "))
+	}
+	return records, failed, syncErrors
+}
+
+func callAppResultWithTimeout(ctx *sdk.AppCtx, appName, toolName string, input map[string]any, timeout time.Duration) (map[string]any, error) {
+	if timeout <= 0 {
+		timeout = defaultUsageTimeout
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case usageCallSlots <- struct{}{}:
+	case <-timer.C:
+		return nil, fmt.Errorf("usage source %s.%s concurrency wait timed out", appName, toolName)
+	}
+	type result struct {
+		out map[string]any
+		err error
+	}
+	done := make(chan result, 1)
+	go func() {
+		defer func() { <-usageCallSlots }()
+		var out map[string]any
+		err := ctx.PlatformAPI().CallAppResult(appName, toolName, input, &out)
+		done <- result{out: out, err: err}
+	}()
+	select {
+	case result := <-done:
+		return result.out, result.err
+	case <-timer.C:
+		return nil, fmt.Errorf("usage source %s.%s timed out after %s", appName, toolName, timeout)
+	}
 }
 
 func (a *App) toolUsageRecord(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -814,97 +1075,226 @@ func (a *App) toolAccessCheck(ctx *sdk.AppCtx, args map[string]any) (any, error)
 			break
 		}
 	}
+	freshness := time.Duration(configInt(ctx, "usage_freshness_seconds", int(defaultUsageFreshness/time.Second))) * time.Second
+	staleSources, err := dbUsageStaleSources(ctx.AppDB(), pid, acct, time.Now().UTC(), freshness)
+	if err != nil {
+		return nil, err
+	}
+	usageUnknown := len(staleSources) > 0
 	return map[string]any{
-		"allowed":    allowedStatus && entitlement.Allowed && !overLimit,
-		"entitled":   entitlement.Allowed,
-		"status":     acct.Status,
-		"over_limit": overLimit,
-		"usage":      usage,
+		"allowed":       allowedStatus && entitlement.Allowed && !overLimit && !usageUnknown,
+		"entitled":      entitlement.Allowed,
+		"status":        acct.Status,
+		"over_limit":    overLimit,
+		"usage_unknown": usageUnknown,
+		"stale_sources": staleSources,
+		"usage":         usage,
 	}, nil
 }
 
-func (a *App) createAccount(ctx *sdk.AppCtx, args map[string]any) (*Account, error) {
+func (a *App) createAccount(ctx *sdk.AppCtx, args map[string]any) (*Account, bool, error) {
 	pid, err := requireProject(ctx, args)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	planKey := firstNonEmpty(strArg(args, "plan_key"), "free")
 	plan, err := dbPlanGet(ctx.AppDB(), pid, planKey)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	if plan == nil {
-		return nil, fmt.Errorf("plan %q not found", planKey)
+		return nil, false, fmt.Errorf("plan %q not found", planKey)
 	}
 	slug, err := normalizeSlug(strArg(args, "slug"))
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
 	owner := strings.ToLower(strings.TrimSpace(strArg(args, "owner_email")))
 	if owner == "" {
-		return nil, errors.New("owner_email required")
-	}
-	if existing, _ := dbAccountBySlug(ctx.AppDB(), pid, slug); existing != nil {
-		if strings.EqualFold(existing.OwnerEmail, owner) && existing.PlanKey == plan.Key {
-			return existing, nil
-		}
-		return nil, fmt.Errorf("slug %q already belongs to another SaaS account", slug)
+		return nil, false, errors.New("owner_email required")
 	}
 	customer, err := resolveCustomer(ctx.AppDB(), pid, args)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
-	authOrgID := nullableInt64(int64Arg(args, "auth_org_id"))
-	if authOrgID == nil {
-		authOrgID, err = createAuthOrg(ctx, pid, slug, firstNonEmpty(customer.Name, slug))
-		if err != nil {
-			return nil, err
-		}
-	}
-	authUserID := nullableInt64(firstNonZero(int64Arg(args, "auth_user_id"), int64PtrValue(customer.AuthUserID)))
-	if boolArg(args, "create_owner_user") && authUserID == nil {
-		authUserID, err = createAuthUser(ctx, pid, authOrgID, owner, firstNonEmpty(customer.Name, owner), boolArg(args, "send_password_reset"))
-		if err != nil {
-			return nil, err
-		}
-	}
-	acct := &Account{
-		ID:             newID("sac"),
-		ProjectID:      pid,
-		CustomerID:     customer.ID,
-		AuthOrgID:      authOrgID,
-		AuthUserID:     authUserID,
-		SubscriptionID: nullableInt64(int64Arg(args, "subscription_id")),
-		Slug:           slug,
-		OwnerEmail:     owner,
-		PlanKey:        plan.Key,
-		Status:         StatusProvisioning,
-		Metadata:       jsonRaw(args["metadata"]),
-	}
-	if err := dbAccountInsert(ctx.AppDB(), acct); err != nil {
-		return nil, err
-	}
-	_ = recordEvent(ctx.AppDB(), pid, acct.ID, "provisioning.started", actor(args), map[string]any{"plan_key": plan.Key})
-	if err := a.applyPlanAccess(ctx, pid, acct, plan); err != nil {
-		_, _ = dbAccountSetStatus(ctx.AppDB(), pid, acct.ID, StatusFailed, err.Error())
-		_ = recordEvent(ctx.AppDB(), pid, acct.ID, "provisioning.failed", "entitlements", map[string]any{"error": err.Error()})
-		return nil, err
-	}
-	acct, err = dbAccountSetStatus(ctx.AppDB(), pid, acct.ID, StatusActive, "")
+
+	acct, err := dbAccountBySlug(ctx.AppDB(), pid, slug)
 	if err != nil {
-		return nil, err
+		return nil, false, err
 	}
-	_ = recordEvent(ctx.AppDB(), pid, acct.ID, "provisioning.active", actor(args), nil)
-	if !boolArg(args, "skip_fulfillment") {
-		if _, err := a.runFulfillment(ctx, pid, acct, "account_active"); err != nil {
-			_, _ = dbAccountSetStatus(ctx.AppDB(), pid, acct.ID, StatusFailed, err.Error())
-			_ = recordEvent(ctx.AppDB(), pid, acct.ID, "fulfillment.failed", "fulfillment", map[string]any{"event": "account_active", "error": err.Error()})
-			return nil, err
+	if acct != nil {
+		if !strings.EqualFold(acct.OwnerEmail, owner) || acct.PlanKey != plan.Key || acct.CustomerID != customer.ID {
+			return nil, false, fmt.Errorf("slug %q already belongs to another SaaS account", slug)
+		}
+		if err := dbAccountMergeProvisioningInput(ctx.AppDB(), pid, acct.ID, args); err != nil {
+			return nil, false, err
 		}
 		acct, _ = dbAccountGet(ctx.AppDB(), pid, acct.ID)
+		if acct.Status == StatusActive || (acct.Status != StatusProvisioning && acct.Status != StatusFailed) {
+			return acct, false, nil
+		}
+		if acct.Status == StatusFailed {
+			acct, err = dbAccountSetStatus(ctx.AppDB(), pid, acct.ID, StatusProvisioning, "")
+			if err != nil {
+				return nil, false, err
+			}
+		}
+	} else {
+		meta := mergeMetadata(args["metadata"], map[string]any{
+			"provisioning": map[string]any{
+				"create_owner_user":   boolArg(args, "create_owner_user"),
+				"send_password_reset": boolArg(args, "send_password_reset"),
+				"skip_fulfillment":    boolArg(args, "skip_fulfillment"),
+			},
+		})
+		acct = &Account{
+			ID:             newID("sac"),
+			ProjectID:      pid,
+			CustomerID:     customer.ID,
+			AuthOrgID:      nullableInt64(int64Arg(args, "auth_org_id")),
+			AuthUserID:     nullableInt64(firstNonZero(int64Arg(args, "auth_user_id"), int64PtrValue(customer.AuthUserID))),
+			SubscriptionID: nullableInt64(int64Arg(args, "subscription_id")),
+			Slug:           slug,
+			OwnerEmail:     owner,
+			PlanKey:        plan.Key,
+			Status:         StatusProvisioning,
+			Metadata:       jsonRaw(meta),
+		}
+		if err := dbAccountInsert(ctx.AppDB(), acct); err != nil {
+			return nil, false, err
+		}
+		_ = recordEvent(ctx.AppDB(), pid, acct.ID, "provisioning.started", actor(args), map[string]any{"plan_key": plan.Key})
 	}
+
+	activated, err := a.resumeProvisioning(ctx, pid, acct, customer, plan)
+	if err != nil {
+		if errors.Is(err, errFulfillmentInProgress) {
+			acct, _ = dbAccountGet(ctx.AppDB(), pid, acct.ID)
+			return acct, false, nil
+		}
+		_, _ = dbAccountSetStatus(ctx.AppDB(), pid, acct.ID, StatusFailed, err.Error())
+		_ = recordEvent(ctx.AppDB(), pid, acct.ID, "provisioning.failed", "provisioning", map[string]any{"error": err.Error()})
+		return nil, false, err
+	}
+	acct, err = dbAccountGet(ctx.AppDB(), pid, acct.ID)
+	return acct, activated, err
+}
+
+func (a *App) resumeProvisioning(ctx *sdk.AppCtx, pid string, acct *Account, customer *Customer, plan *Plan) (bool, error) {
+	transition, err := dbLifecycleTransitionReserve(ctx.AppDB(), pid, acct.ID, "account_active", acct.Status, StatusActive, "provisioning:activation")
+	if err != nil {
+		return false, err
+	}
+	if transition.Status == "completed" && acct.Status == StatusActive {
+		return false, nil
+	}
+	meta := mapFromAny(acct.Metadata)
+	provisioning := mapFromAny(meta["provisioning"])
+
+	if err := runProvisioningStep(ctx.AppDB(), pid, acct.ID, "auth_org", func() (any, error) {
+		if acct.AuthOrgID != nil {
+			return map[string]any{"auth_org_id": *acct.AuthOrgID}, nil
+		}
+		id, err := createAuthOrg(ctx, pid, acct.Slug, firstNonEmpty(customer.Name, acct.Slug))
+		if err != nil {
+			return nil, err
+		}
+		if err := dbAccountSetAuthOrg(ctx.AppDB(), pid, acct.ID, *id); err != nil {
+			return nil, err
+		}
+		acct.AuthOrgID = id
+		return map[string]any{"auth_org_id": *id}, nil
+	}); err != nil {
+		return false, err
+	}
+
+	if err := runProvisioningStep(ctx.AppDB(), pid, acct.ID, "auth_user", func() (any, error) {
+		if !boolArg(provisioning, "create_owner_user") || acct.AuthUserID != nil {
+			return map[string]any{"auth_user_id": int64PtrValue(acct.AuthUserID), "skipped": !boolArg(provisioning, "create_owner_user")}, nil
+		}
+		id, err := createAuthUser(ctx, pid, acct.AuthOrgID, acct.OwnerEmail, firstNonEmpty(customer.Name, acct.OwnerEmail), boolArg(provisioning, "send_password_reset"))
+		if err != nil {
+			return nil, err
+		}
+		if err := dbAccountSetAuthUser(ctx.AppDB(), pid, acct.ID, *id); err != nil {
+			return nil, err
+		}
+		acct.AuthUserID = id
+		return map[string]any{"auth_user_id": *id}, nil
+	}); err != nil {
+		return false, err
+	}
+
+	if err := runProvisioningStep(ctx.AppDB(), pid, acct.ID, "entitlement_grants", func() (any, error) {
+		return nil, a.applyPlanGrants(ctx, pid, acct, plan)
+	}); err != nil {
+		return false, err
+	}
+	if err := runProvisioningStep(ctx.AppDB(), pid, acct.ID, "entitlement_limits", func() (any, error) {
+		return nil, a.applyPlanLimits(ctx, pid, acct, plan)
+	}); err != nil {
+		return false, err
+	}
+	if err := runProvisioningStep(ctx.AppDB(), pid, acct.ID, "fulfillment", func() (any, error) {
+		if boolArg(provisioning, "skip_fulfillment") {
+			return map[string]any{"skipped": true}, nil
+		}
+		runs, err := a.runFulfillment(ctx, pid, acct, "account_active", transition.ID)
+		return map[string]any{"runs": runs}, err
+	}); err != nil {
+		return false, err
+	}
+	if err := runProvisioningStep(ctx.AppDB(), pid, acct.ID, "activation", func() (any, error) {
+		if err := dbLifecycleTransitionComplete(ctx.AppDB(), pid, transition, StatusActive); err != nil {
+			return nil, err
+		}
+		return map[string]any{"status": StatusActive}, nil
+	}); err != nil {
+		return false, err
+	}
+	transition, err = dbLifecycleTransitionGet(ctx.AppDB(), pid, transition.ID)
+	if err != nil {
+		return false, err
+	}
+	if transition.Status != "completed" {
+		if err := dbLifecycleTransitionComplete(ctx.AppDB(), pid, transition, StatusActive); err != nil {
+			return false, err
+		}
+	}
+	current, err := dbAccountGet(ctx.AppDB(), pid, acct.ID)
+	if err != nil {
+		return false, err
+	}
+	if current.Status != StatusActive {
+		if _, err := dbAccountSetStatus(ctx.AppDB(), pid, acct.ID, StatusActive, ""); err != nil {
+			return false, err
+		}
+	}
+	_ = recordEvent(ctx.AppDB(), pid, acct.ID, "provisioning.active", "provisioning", nil)
 	_, _ = a.toolUsageSync(ctx, map[string]any{"_project_id": pid, "account_id": acct.ID})
-	return dbAccountGet(ctx.AppDB(), pid, acct.ID)
+	return true, nil
+}
+
+func runProvisioningStep(db *sql.DB, pid, accountID, step string, run func() (any, error)) error {
+	state, err := dbProvisioningStepGet(db, pid, accountID, step)
+	if err != nil {
+		return err
+	}
+	if state != nil && state.Status == "succeeded" {
+		return nil
+	}
+	if err := dbProvisioningStepStart(db, pid, accountID, step); err != nil {
+		return err
+	}
+	out, runErr := run()
+	if runErr != nil {
+		if errors.Is(runErr, errFulfillmentInProgress) {
+			return runErr
+		}
+		_ = dbProvisioningStepFinish(db, pid, accountID, step, "failed", out, runErr.Error())
+		return runErr
+	}
+	return dbProvisioningStepFinish(db, pid, accountID, step, "succeeded", out, "")
 }
 
 func (a *App) createCheckout(ctx *sdk.AppCtx, args map[string]any) (map[string]any, error) {
@@ -912,6 +1302,20 @@ func (a *App) createCheckout(ctx *sdk.AppCtx, args map[string]any) (map[string]a
 	if err != nil {
 		return nil, err
 	}
+	for _, unsafe := range []string{
+		"activate_without_payment", "record_payment", "manual_payment_method",
+		"customer_id", "billing_customer_id", "auth_org_id", "auth_user_id", "subscription_id",
+		"provider", "period_start", "period_end", "unit_amount_cents", "currency", "interval", "interval_count", "title",
+		"metadata", "subscription_metadata", "trial_start", "trial_end", "trial_days", "trial_requires_payment_method",
+	} {
+		if _, ok := args[unsafe]; ok {
+			return nil, fmt.Errorf("%s is not accepted by public checkout", unsafe)
+		}
+	}
+	paymentMode := strings.ToLower(strings.TrimSpace(strArg(args, "payment_mode")))
+	if paymentMode == "manual" || paymentMode == "none" {
+		return nil, errors.New("manual activation requires saas_checkout_mark_paid")
+	}
 	planKey := firstNonEmpty(strArg(args, "plan_key"), "free")
 	plan, err := dbPlanGet(ctx.AppDB(), pid, planKey)
 	if err != nil {
@@ -924,141 +1328,317 @@ func (a *App) createCheckout(ctx *sdk.AppCtx, args map[string]any) (map[string]a
 	if err != nil {
 		return nil, err
 	}
-	out := map[string]any{"customer": customer, "plan": plan}
+	slug := strings.ToLower(strings.TrimSpace(strArg(args, "slug")))
+	idempotencyKey := firstNonEmpty(strArg(args, "idempotency_key"), "slug:"+slug)
+	fingerprint := checkoutFingerprint(customer, plan, slug)
+	checkout, claimed, err := dbCheckoutClaim(ctx.AppDB(), pid, idempotencyKey, fingerprint, customer, plan, slug, firstNonEmpty(paymentMode, "plan_policy"))
+	if err != nil {
+		return nil, err
+	}
+	if !claimed {
+		if checkout.Status == "processing" {
+			return nil, errors.New("checkout is already in progress")
+		}
+		return a.checkoutResponse(ctx, checkout)
+	}
+	fail := func(cause error) (map[string]any, error) {
+		if persistErr := dbCheckoutFail(ctx.AppDB(), pid, checkout.ID, cause.Error()); persistErr != nil {
+			return nil, fmt.Errorf("%w; persist checkout failure: %v", cause, persistErr)
+		}
+		return nil, cause
+	}
 	requiresCommerce := plan.BillingMode != "free" || plan.SubscriptionRequired
 	if !requiresCommerce {
-		acct, err := a.createAccount(ctx, args)
+		acct, _, err := a.ensureCheckoutAccount(ctx, checkout, customer, plan, 0, false, args)
 		if err != nil {
-			return nil, err
+			return fail(err)
 		}
-		out["account"] = acct
-		out["status"] = "active"
-		out["requires_payment"] = false
-		return out, nil
+		if err := dbCheckoutComplete(ctx.AppDB(), pid, checkout.ID, "active", map[string]any{"account_id": acct.ID}); err != nil {
+			return fail(err)
+		}
+		checkout, _ = dbCheckoutGet(ctx.AppDB(), pid, checkout.ID)
+		return a.checkoutResponse(ctx, checkout)
 	}
 
 	price, err := a.resolveCheckoutPrice(ctx, pid, plan, args)
 	if err != nil {
-		return nil, err
+		return fail(err)
 	}
-	out["price"] = price.asMap()
-
-	periodStart := firstNonEmpty(strArg(args, "period_start"), time.Now().UTC().Format(time.RFC3339))
-	periodEnd := firstNonEmpty(strArg(args, "period_end"), periodEndFrom(periodStart, price.Interval, price.IntervalCount))
-	trialDays, trialRequiresPaymentMethod := checkoutTrialConfig(plan, price, args)
-	if plan.BillingMode == "paid" && trialDays > 0 && !trialRequiresPaymentMethod {
-		return a.createNoCardTrialCheckout(ctx, pid, customer, plan, price, periodStart, trialDays, args, out)
+	periodStart := time.Now().UTC().Format(time.RFC3339)
+	periodEnd := periodEndFrom(periodStart, price.Interval, price.IntervalCount)
+	trialDays, trialRequiresPaymentMethod := checkoutTrialConfig(plan, price)
+	trialStart, trialEnd := periodStart, ""
+	if trialDays > 0 {
+		trialEnd = periodEndFrom(trialStart, "day", trialDays)
+		if err := dbCheckoutSetTrial(ctx.AppDB(), pid, checkout.ID, trialEnd); err != nil {
+			return fail(err)
+		}
+		checkout.TrialEndsAt = trialEnd
 	}
-
-	billingCustomerID, billingCustomer, err := a.ensureBillingCustomer(ctx, pid, customer, args)
+	subStatus := StatusPastDue
+	if plan.BillingMode == "free" {
+		subStatus = StatusActive
+	}
+	if trialDays > 0 {
+		subStatus = "trialing"
+	}
+	subID, _, err := a.ensureCheckoutSubscription(ctx, checkout, customer, plan, price, subStatus, periodStart, periodEnd, trialStart, trialEnd, trialRequiresPaymentMethod, args)
 	if err != nil {
-		return nil, err
+		return fail(err)
 	}
-	out["billing_customer"] = billingCustomer
-	customer, _ = dbCustomerGet(ctx.AppDB(), pid, customer.ID)
-	out["customer"] = customer
+	if plan.BillingMode == "free" {
+		acct, _, err := a.ensureCheckoutAccount(ctx, checkout, customer, plan, subID, false, args)
+		if err != nil {
+			return fail(err)
+		}
+		if err := dbCheckoutComplete(ctx.AppDB(), pid, checkout.ID, "active", map[string]any{"account_id": acct.ID, "subscription_id": subID}); err != nil {
+			return fail(err)
+		}
+		checkout, _ = dbCheckoutGet(ctx.AppDB(), pid, checkout.ID)
+		return a.checkoutResponse(ctx, checkout)
+	}
+	if trialDays > 0 && !trialRequiresPaymentMethod {
+		acct, _, err := a.ensureCheckoutAccount(ctx, checkout, customer, plan, subID, false, args)
+		if err != nil {
+			return fail(err)
+		}
+		if err := dbCheckoutSetTrial(ctx.AppDB(), pid, checkout.ID, trialEnd); err != nil {
+			return fail(err)
+		}
+		if err := dbCheckoutComplete(ctx.AppDB(), pid, checkout.ID, "trialing", map[string]any{"account_id": acct.ID, "subscription_id": subID}); err != nil {
+			return fail(err)
+		}
+		checkout, _ = dbCheckoutGet(ctx.AppDB(), pid, checkout.ID)
+		return a.checkoutResponse(ctx, checkout)
+	}
 
-	paymentMode := strings.ToLower(firstNonEmpty(strArg(args, "payment_mode"), "payment_link"))
-	recordPayment := boolArg(args, "record_payment")
-	paidNow := boolArg(args, "activate_without_payment") || (paymentMode == "manual" && recordPayment)
-	if paidNow && strArg(args, "payment_mode") == "" {
-		paymentMode = "none"
-	}
-	subStatus := StatusActive
-	if !paidNow {
-		subStatus = StatusPastDue
-	}
-
-	subOut, err := a.createSubscription(ctx, pid, customer, billingCustomerID, plan, price, subStatus, periodStart, periodEnd, args)
+	billingCustomerID, _, err := a.ensureBillingCustomer(ctx, pid, customer, args)
 	if err != nil {
-		return nil, err
+		return fail(err)
 	}
-	out["subscription"] = unwrapMap(subOut, "subscription")
-	subID := int64FromResult(subOut, "subscription", "id")
-	if subID == 0 {
-		return nil, errors.New("subscriptions_create returned no subscription id")
+	if err := dbCheckoutSetBillingCustomer(ctx.AppDB(), pid, checkout.ID, billingCustomerID); err != nil {
+		return fail(err)
 	}
-
-	invOut, err := a.createSubscriptionInvoice(ctx, pid, subID, periodStart, periodEnd, args)
+	acct, _, err := a.ensureCheckoutAccount(ctx, checkout, customer, plan, subID, true, args)
 	if err != nil {
-		return nil, err
-	}
-	out["invoice"] = unwrapMap(invOut, "invoice")
-	if cycle := unwrapMap(invOut, "cycle"); cycle != nil {
-		out["cycle"] = cycle
-	}
-	invoiceID := int64FromResult(invOut, "invoice", "id")
-	if invoiceID == 0 {
-		return nil, errors.New("subscriptions_invoice_create returned no invoice id")
+		return fail(err)
 	}
 
-	switch paymentMode {
-	case "manual":
-		if recordPayment {
-			paymentOut, err := a.recordCheckoutPayment(ctx, pid, invoiceID, price, args)
-			if err != nil {
-				return nil, err
+	if trialDays > 0 {
+		if acct.Status != StatusSuspended {
+			statusOut, statusErr := a.setAccountStatus(ctx, map[string]any{"_project_id": pid, "account_id": acct.ID, "subscription_id": subID, "actor": "checkout"}, StatusSuspended, "checkout.awaiting_payment_method")
+			if statusErr != nil {
+				return fail(statusErr)
 			}
-			out["payment"] = unwrapMap(paymentOut, "payment")
-			out["invoice"] = unwrapMap(paymentOut, "invoice")
+			acct = statusOut.(map[string]any)["account"].(*Account)
 		}
-	case "payment_link", "stripe", "":
-		linkOut, err := a.createPaymentLink(ctx, pid, invoiceID, args)
-		if err != nil {
-			return nil, err
+		checkout, _ = dbCheckoutGet(ctx.AppDB(), pid, checkout.ID)
+		if checkout.PaymentURL == "" {
+			setupArgs := copyMap(args)
+			setupArgs["metadata"] = map[string]any{"source_app": "saas", "saas_checkout_id": checkout.ID, "saas_account_id": acct.ID, "subscription_id": subID}
+			setupOut, err := a.createPaymentSetupSession(ctx, pid, billingCustomerID, setupArgs)
+			if err != nil {
+				return fail(err)
+			}
+			if err := dbCheckoutSetSetup(ctx.AppDB(), pid, checkout.ID, setupOut); err != nil {
+				return fail(err)
+			}
 		}
-		out["payment_link"] = linkOut
-	case "setup_session":
-		setupOut, err := a.createPaymentSetupSession(ctx, pid, billingCustomerID, args)
-		if err != nil {
-			return nil, err
+		if err := dbCheckoutSetTrial(ctx.AppDB(), pid, checkout.ID, trialEnd); err != nil {
+			return fail(err)
 		}
-		out["setup_session"] = unwrapMap(setupOut, "setup_session")
-		if url := strArg(setupOut, "url"); url != "" {
-			out["url"] = url
+		if err := dbCheckoutComplete(ctx.AppDB(), pid, checkout.ID, "awaiting_payment_method", map[string]any{"account_id": acct.ID, "subscription_id": subID}); err != nil {
+			return fail(err)
 		}
-	case "none":
-	default:
-		return nil, fmt.Errorf("unsupported payment_mode %q", paymentMode)
+		checkout, _ = dbCheckoutGet(ctx.AppDB(), pid, checkout.ID)
+		return a.checkoutResponse(ctx, checkout)
 	}
 
-	accountArgs := copyMap(args)
-	accountArgs["skip_fulfillment"] = true
-	accountArgs["customer_id"] = customer.ID
-	accountArgs["billing_customer_id"] = billingCustomerID
-	accountArgs["subscription_id"] = subID
-	accountArgs["metadata"] = mergeMetadata(args["metadata"], map[string]any{
-		"billing_customer_id": billingCustomerID,
-		"subscription_id":     subID,
-		"invoice_id":          invoiceID,
-		"checkout_status":     map[bool]string{true: "paid", false: "awaiting_payment"}[paidNow],
-	})
-	acct, err := a.createAccount(ctx, accountArgs)
-	if err != nil {
-		return nil, err
+	if acct.Status != StatusPastDue {
+		statusOut, statusErr := a.setAccountStatus(ctx, map[string]any{"_project_id": pid, "account_id": acct.ID, "subscription_id": subID, "actor": "checkout"}, StatusPastDue, "checkout.awaiting_payment")
+		if statusErr != nil {
+			return fail(statusErr)
+		}
+		acct = statusOut.(map[string]any)["account"].(*Account)
 	}
-	if !paidNow {
-		acct, err = dbAccountSetStatus(ctx.AppDB(), pid, acct.ID, StatusPastDue, "")
+	cycleID, err := a.ensureCheckoutCycle(ctx, checkout, subID, periodStart, periodEnd)
+	if err != nil {
+		return fail(err)
+	}
+	cycleEvent := sdk.Event{Event: "subscription.cycle_due", ProjectID: pid, Data: map[string]any{
+		"subscription_id": subID, "cycle_id": cycleID, "currency": price.Currency,
+		"period_start": periodStart, "period_end": periodEnd,
+		"checkout_id": checkout.ID,
+		"success_url": strArg(args, "success_url"), "cancel_url": strArg(args, "cancel_url"),
+	}}
+	if err := a.handleSubscriptionCycleDue(ctx, cycleEvent); err != nil {
+		return fail(err)
+	}
+	op, err := dbCommerceOperationByKey(ctx.AppDB(), pid, fmt.Sprintf("subscription:%d:cycle:%d", subID, cycleID))
+	if err != nil || op == nil {
+		return fail(firstErr(err, errors.New("checkout billing operation not found")))
+	}
+	if err := dbCommerceOperationSetCheckout(ctx.AppDB(), pid, op.ID, checkout.ID); err != nil {
+		return fail(err)
+	}
+	if err := dbCheckoutSetInvoice(ctx.AppDB(), pid, checkout.ID, cycleID, int64PtrValue(op.InvoiceID), mapFromAny(op.PaymentLink)); err != nil {
+		return fail(err)
+	}
+	if err := dbCheckoutComplete(ctx.AppDB(), pid, checkout.ID, "awaiting_payment", map[string]any{"account_id": acct.ID, "subscription_id": subID, "cycle_id": cycleID, "invoice_id": int64PtrValue(op.InvoiceID)}); err != nil {
+		return fail(err)
+	}
+	checkout, _ = dbCheckoutGet(ctx.AppDB(), pid, checkout.ID)
+	return a.checkoutResponse(ctx, checkout)
+}
+
+func checkoutFingerprint(customer *Customer, plan *Plan, slug string) string {
+	return strings.Join([]string{strings.ToLower(customer.Email), slug, plan.Key, strconv.FormatInt(customer.ID, 10)}, "|")
+}
+
+func (a *App) checkoutResponse(ctx *sdk.AppCtx, checkout *Checkout) (map[string]any, error) {
+	if checkout == nil {
+		return nil, errors.New("checkout not found")
+	}
+	out := map[string]any{
+		"checkout": checkout, "status": checkout.Status,
+		"requires_payment": checkout.Status == "awaiting_payment" || checkout.Status == "awaiting_payment_method",
+	}
+	if checkout.PaymentURL != "" {
+		out["url"] = checkout.PaymentURL
+		if checkout.Status == "awaiting_payment_method" {
+			out["setup_session"] = map[string]any{"url": checkout.PaymentURL, "provider_session_id": checkout.ProviderSessionID, "expires_at": checkout.SessionExpiresAt}
+		} else {
+			out["payment_link"] = map[string]any{"url": checkout.PaymentURL, "stripe_session_id": checkout.ProviderSessionID, "expires_at": checkout.SessionExpiresAt}
+		}
+	}
+	if subscriptionID := int64PtrValue(checkout.SubscriptionID); subscriptionID != 0 {
+		out["subscription"] = map[string]any{"id": subscriptionID, "status": checkout.Status}
+	}
+	if checkout.TrialEndsAt != "" {
+		out["trial"] = map[string]any{"trial_ends_at": checkout.TrialEndsAt, "payment_required_at": checkout.TrialEndsAt}
+	}
+	if customer, err := dbCustomerGet(ctx.AppDB(), checkout.ProjectID, checkout.CustomerID); err != nil {
+		return nil, err
+	} else if customer != nil {
+		out["customer"] = customer
+	}
+	if checkout.AccountID != "" {
+		account, err := dbAccountGet(ctx.AppDB(), checkout.ProjectID, checkout.AccountID)
 		if err != nil {
 			return nil, err
 		}
-		_ = recordEvent(ctx.AppDB(), pid, acct.ID, "checkout.awaiting_payment", actor(args), map[string]any{"invoice_id": invoiceID, "subscription_id": subID})
-	} else {
-		if _, err := a.runFulfillment(ctx, pid, acct, "account_active"); err != nil {
-			_, _ = dbAccountSetStatus(ctx.AppDB(), pid, acct.ID, StatusFailed, err.Error())
-			return nil, err
-		}
-		acct, _ = dbAccountGet(ctx.AppDB(), pid, acct.ID)
+		out["account"] = account
 	}
-	out["account"] = acct
-	if paidNow {
-		out["status"] = "active"
-		out["requires_payment"] = false
-	} else {
-		out["status"] = "awaiting_payment"
-		out["requires_payment"] = true
+	if plan, err := dbPlanGet(ctx.AppDB(), checkout.ProjectID, checkout.PlanKey); err != nil {
+		return nil, err
+	} else if plan != nil {
+		out["plan"] = plan
 	}
 	return out, nil
+}
+
+func (a *App) ensureCheckoutSubscription(ctx *sdk.AppCtx, checkout *Checkout, customer *Customer, plan *Plan, price checkoutPrice, status, periodStart, periodEnd, trialStart, trialEnd string, trialRequiresPaymentMethod bool, args map[string]any) (int64, map[string]any, error) {
+	if id := int64PtrValue(checkout.SubscriptionID); id != 0 {
+		return id, map[string]any{"id": id, "status": status}, nil
+	}
+	var searchOut map[string]any
+	if err := ctx.PlatformAPI().CallAppResult("subscriptions", "subscriptions_search", map[string]any{
+		"_project_id": checkout.ProjectID, "q": checkout.ID, "kind": "saas", "limit": 10,
+	}, &searchOut); err == nil {
+		for _, raw := range sliceFromAny(searchOut["subscriptions"]) {
+			sub := mapFromAny(raw)
+			if strArg(sub, "external_id") == checkout.ID || strArg(sub, "source_ref") == checkout.ID {
+				id := int64Arg(sub, "id")
+				if id != 0 {
+					if err := dbCheckoutSetSubscription(ctx.AppDB(), checkout.ProjectID, checkout.ID, id); err != nil {
+						return 0, nil, err
+					}
+					checkout.SubscriptionID = &id
+					return id, sub, nil
+				}
+			}
+		}
+	}
+	subArgs := copyMap(args)
+	subArgs["checkout_id"] = checkout.ID
+	subArgs["trial_requires_payment_method"] = trialRequiresPaymentMethod
+	if trialStart != "" {
+		subArgs["trial_start"] = trialStart
+	}
+	if trialEnd != "" {
+		subArgs["trial_end"] = trialEnd
+		subArgs["subscription_metadata"] = mergeMetadata(args["subscription_metadata"], map[string]any{
+			"trial_started_at": trialStart, "trial_ends_at": trialEnd, "payment_required_at": trialEnd,
+			"trial_requires_payment_method": trialRequiresPaymentMethod,
+			"payment_method_missing":        true,
+			"catalog_product_id":            price.ProductID, "catalog_price_id": price.PriceID,
+		})
+	}
+	subOut, err := a.createSubscription(ctx, checkout.ProjectID, customer, customer.ID, plan, price, status, periodStart, periodEnd, subArgs)
+	if err != nil {
+		return 0, nil, err
+	}
+	sub := unwrapMap(subOut, "subscription")
+	id := int64FromResult(subOut, "subscription", "id")
+	if id == 0 {
+		return 0, nil, errors.New("subscriptions_create returned no subscription id")
+	}
+	if err := dbCheckoutSetSubscription(ctx.AppDB(), checkout.ProjectID, checkout.ID, id); err != nil {
+		return 0, nil, err
+	}
+	checkout.SubscriptionID = &id
+	return id, sub, nil
+}
+
+func (a *App) ensureCheckoutAccount(ctx *sdk.AppCtx, checkout *Checkout, customer *Customer, plan *Plan, subscriptionID int64, skipFulfillment bool, args map[string]any) (*Account, bool, error) {
+	if checkout.AccountID != "" {
+		account, err := dbAccountGet(ctx.AppDB(), checkout.ProjectID, checkout.AccountID)
+		return account, false, err
+	}
+	accountArgs := copyMap(args)
+	accountArgs["customer_id"] = customer.ID
+	accountArgs["subscription_id"] = subscriptionID
+	accountArgs["skip_fulfillment"] = skipFulfillment
+	accountMeta := map[string]any{"checkout_id": checkout.ID, "subscription_id": subscriptionID, "checkout_status": checkout.Status}
+	if checkout.TrialEndsAt != "" {
+		accountMeta["trial_ends_at"] = checkout.TrialEndsAt
+		accountMeta["payment_required_at"] = checkout.TrialEndsAt
+		accountMeta["payment_method_missing"] = true
+	}
+	accountArgs["metadata"] = mergeMetadata(args["metadata"], accountMeta)
+	account, activated, err := a.createAccount(ctx, accountArgs)
+	if err != nil {
+		return nil, false, err
+	}
+	if err := dbCheckoutSetAccount(ctx.AppDB(), checkout.ProjectID, checkout.ID, account.ID); err != nil {
+		return nil, false, err
+	}
+	checkout.AccountID = account.ID
+	return account, activated, nil
+}
+
+func (a *App) ensureCheckoutCycle(ctx *sdk.AppCtx, checkout *Checkout, subscriptionID int64, periodStart, periodEnd string) (int64, error) {
+	if id := int64PtrValue(checkout.CycleID); id != 0 {
+		return id, nil
+	}
+	var out map[string]any
+	if err := ctx.PlatformAPI().CallAppResult("subscriptions", "subscription_cycles_create", map[string]any{
+		"_project_id": checkout.ProjectID, "subscription_id": subscriptionID,
+		"period_start": periodStart, "period_end": periodEnd, "due_at": periodStart,
+		"payment_status": "pending", "fulfillment_status": "none",
+		"metadata": map[string]any{"source_app": "saas", "saas_checkout_id": checkout.ID},
+	}, &out); err != nil {
+		return 0, fmt.Errorf("create subscription cycle: %w", err)
+	}
+	id := int64FromResult(out, "cycle", "id")
+	if id == 0 {
+		return 0, errors.New("subscription_cycles_create returned no cycle id")
+	}
+	if err := dbCheckoutSetCycle(ctx.AppDB(), checkout.ProjectID, checkout.ID, id); err != nil {
+		return 0, err
+	}
+	checkout.CycleID = &id
+	return id, nil
 }
 
 type checkoutPrice struct {
@@ -1102,8 +1682,10 @@ func (a *App) ensureBillingCustomer(ctx *sdk.AppCtx, pid string, customer *Custo
 	input := map[string]any{
 		"_project_id": pid,
 		"email":       customer.Email,
-		"name":        customer.Name,
-		"metadata":    map[string]any{"source": "saas", "saas_customer_id": customer.ID},
+		"defaults": map[string]any{
+			"name":     customer.Name,
+			"metadata": map[string]any{"source": "saas", "saas_customer_id": customer.ID},
+		},
 	}
 	var out map[string]any
 	if err := ctx.PlatformAPI().CallAppResult("billing", "customers_upsert_by_email", input, &out); err != nil {
@@ -1122,14 +1704,13 @@ func (a *App) ensureBillingCustomer(ctx *sdk.AppCtx, pid string, customer *Custo
 
 func (a *App) resolveCheckoutPrice(ctx *sdk.AppCtx, pid string, plan *Plan, args map[string]any) (checkoutPrice, error) {
 	price := checkoutPrice{
-		ProductID:       int64PtrValue(plan.CatalogProductID),
-		PriceID:         int64PtrValue(plan.CatalogPriceID),
-		Title:           firstNonEmpty(strArg(args, "title"), plan.Name),
-		UnitAmountCents: int64Arg(args, "unit_amount_cents"),
-		Currency:        strings.ToUpper(firstNonEmpty(strArg(args, "currency"), "USD")),
-		Interval:        firstNonEmpty(strArg(args, "interval"), "month"),
-		IntervalCount:   firstNonZero(int64Arg(args, "interval_count"), 1),
-		Metadata:        mapFromAny(plan.Metadata),
+		ProductID:     int64PtrValue(plan.CatalogProductID),
+		PriceID:       int64PtrValue(plan.CatalogPriceID),
+		Title:         plan.Name,
+		Currency:      "USD",
+		Interval:      "month",
+		IntervalCount: 1,
+		Metadata:      mapFromAny(plan.Metadata),
 	}
 	if price.Metadata == nil {
 		price.Metadata = map[string]any{}
@@ -1151,8 +1732,8 @@ func (a *App) resolveCheckoutPrice(ctx *sdk.AppCtx, pid string, plan *Plan, args
 		}
 	}
 	price.TrialDays = firstNonZero(price.TrialDays, int64Arg(price.Metadata, "trial_days"))
-	if price.UnitAmountCents == 0 {
-		return price, errors.New("paid SaaS checkout requires catalog_price_id or unit_amount_cents")
+	if plan.BillingMode == "paid" && price.UnitAmountCents == 0 {
+		return price, errors.New("paid SaaS checkout requires a configured Catalog price")
 	}
 	if price.ProductID == 0 && price.PriceID != 0 {
 		return price, errors.New("catalog price response missing product_id")
@@ -1160,7 +1741,7 @@ func (a *App) resolveCheckoutPrice(ctx *sdk.AppCtx, pid string, plan *Plan, args
 	return price, nil
 }
 
-func checkoutTrialConfig(plan *Plan, price checkoutPrice, args map[string]any) (int64, bool) {
+func checkoutTrialConfig(plan *Plan, price checkoutPrice) (int64, bool) {
 	planMeta := mapFromAny(plan.Metadata)
 	trialDays := firstNonZero(price.TrialDays, int64Arg(price.Metadata, "trial_days"), int64Arg(planMeta, "trial_days"))
 	requiresPaymentMethod := true
@@ -1169,73 +1750,16 @@ func checkoutTrialConfig(plan *Plan, price checkoutPrice, args map[string]any) (
 	return trialDays, requiresPaymentMethod
 }
 
-func (a *App) createNoCardTrialCheckout(ctx *sdk.AppCtx, pid string, customer *Customer, plan *Plan, price checkoutPrice, periodStart string, trialDays int64, args map[string]any, out map[string]any) (map[string]any, error) {
-	trialStart := periodStart
-	trialEnd := periodEndFrom(trialStart, "day", trialDays)
-	trialMeta := map[string]any{
-		"saas_plan_key":                 plan.Key,
-		"saas_customer_id":              customer.ID,
-		"trial_started_at":              trialStart,
-		"trial_ends_at":                 trialEnd,
-		"payment_required_at":           trialEnd,
-		"trial_requires_payment_method": false,
-		"payment_method_missing":        true,
-		"catalog_product_id":            price.ProductID,
-		"catalog_price_id":              price.PriceID,
-	}
-	subArgs := copyMap(args)
-	subArgs["trial_start"] = trialStart
-	subArgs["trial_end"] = trialEnd
-	subArgs["subscription_metadata"] = mergeMetadata(args["subscription_metadata"], trialMeta)
-	subOut, err := a.createSubscription(ctx, pid, customer, 0, plan, price, "trialing", trialStart, trialEnd, subArgs)
-	if err != nil {
-		return nil, err
-	}
-	subscription := unwrapMap(subOut, "subscription")
-	out["subscription"] = subscription
-	subID := int64FromResult(subOut, "subscription", "id")
-	if subID == 0 {
-		return nil, errors.New("subscriptions_create returned no subscription id")
-	}
-
-	accountArgs := copyMap(args)
-	accountArgs["skip_fulfillment"] = true
-	accountArgs["customer_id"] = customer.ID
-	accountArgs["subscription_id"] = subID
-	accountArgs["metadata"] = mergeMetadata(args["metadata"], mergeMetadata(trialMeta, map[string]any{
-		"subscription_id": subID,
-		"checkout_status": "trialing",
-	}))
-	acct, err := a.createAccount(ctx, accountArgs)
-	if err != nil {
-		return nil, err
-	}
-	if _, err := a.runFulfillment(ctx, pid, acct, "account_active"); err != nil {
-		_, _ = dbAccountSetStatus(ctx.AppDB(), pid, acct.ID, StatusFailed, err.Error())
-		return nil, err
-	}
-	acct, _ = dbAccountGet(ctx.AppDB(), pid, acct.ID)
-	out["account"] = acct
-	out["trial"] = map[string]any{
-		"trial_started_at":    trialStart,
-		"trial_ends_at":       trialEnd,
-		"payment_required_at": trialEnd,
-		"trial_days":          trialDays,
-	}
-	out["status"] = "trialing"
-	out["requires_payment"] = false
-	return out, nil
-}
-
-func (a *App) createSubscription(ctx *sdk.AppCtx, pid string, customer *Customer, billingCustomerID int64, plan *Plan, price checkoutPrice, status, periodStart, periodEnd string, args map[string]any) (map[string]any, error) {
+func (a *App) createSubscription(ctx *sdk.AppCtx, pid string, customer *Customer, subscriptionCustomerID int64, plan *Plan, price checkoutPrice, status, periodStart, periodEnd string, args map[string]any) (map[string]any, error) {
+	checkoutID := strArg(args, "checkout_id")
 	input := map[string]any{
 		"_project_id":          pid,
-		"customer_id":          billingCustomerID,
+		"customer_id":          subscriptionCustomerID,
 		"customer_email":       customer.Email,
 		"customer_name":        customer.Name,
 		"kind":                 "saas",
 		"status":               status,
-		"billing_provider":     firstNonEmpty(strArg(args, "provider"), "local"),
+		"billing_provider":     "local",
 		"currency":             price.Currency,
 		"interval":             price.Interval,
 		"interval_count":       price.IntervalCount,
@@ -1243,7 +1767,7 @@ func (a *App) createSubscription(ctx *sdk.AppCtx, pid string, customer *Customer
 		"current_period_end":   periodEnd,
 		"next_renewal_at":      periodEnd,
 		"source":               "saas",
-		"source_ref":           plan.Key,
+		"source_ref":           firstNonEmpty(checkoutID, plan.Key),
 		"metadata":             map[string]any{"saas_plan_key": plan.Key, "saas_customer_id": customer.ID},
 		"items": []any{map[string]any{
 			"catalog_product_id": price.ProductID,
@@ -1254,6 +1778,13 @@ func (a *App) createSubscription(ctx *sdk.AppCtx, pid string, customer *Customer
 			"currency":           price.Currency,
 			"metadata":           map[string]any{"saas_plan_key": plan.Key},
 		}},
+	}
+	if checkoutID != "" {
+		input["external_id"] = checkoutID
+		input["metadata"] = mergeMetadata(input["metadata"], map[string]any{"saas_checkout_id": checkoutID})
+	}
+	if status == "trialing" {
+		input["trial_end_behavior"] = "collect"
 	}
 	if v := strArg(args, "trial_start"); v != "" {
 		input["trial_start"] = v
@@ -1267,26 +1798,6 @@ func (a *App) createSubscription(ctx *sdk.AppCtx, pid string, customer *Customer
 	var out map[string]any
 	if err := ctx.PlatformAPI().CallAppResult("subscriptions", "subscriptions_create", input, &out); err != nil {
 		return nil, fmt.Errorf("create subscription: %w", err)
-	}
-	return out, nil
-}
-
-func (a *App) createSubscriptionInvoice(ctx *sdk.AppCtx, pid string, subID int64, periodStart, periodEnd string, args map[string]any) (map[string]any, error) {
-	input := map[string]any{
-		"_project_id":        pid,
-		"subscription_id":    subID,
-		"period_start":       periodStart,
-		"period_end":         periodEnd,
-		"include_flat":       true,
-		"include_metered":    true,
-		"finalize":           true,
-		"provider":           firstNonEmpty(strArg(args, "provider"), "local"),
-		"invoice_zero_usage": true,
-		"metadata":           map[string]any{"source": "saas_checkout"},
-	}
-	var out map[string]any
-	if err := ctx.PlatformAPI().CallAppResult("subscriptions", "subscriptions_invoice_create", input, &out); err != nil {
-		return nil, fmt.Errorf("create subscription invoice: %w", err)
 	}
 	return out, nil
 }
@@ -1308,6 +1819,9 @@ func (a *App) createPaymentLink(ctx *sdk.AppCtx, pid string, invoiceID int64, ar
 
 func (a *App) createPaymentSetupSession(ctx *sdk.AppCtx, pid string, billingCustomerID int64, args map[string]any) (map[string]any, error) {
 	input := map[string]any{"_project_id": pid, "customer_id": billingCustomerID, "set_default": true}
+	if metadata := mapFromAny(args["metadata"]); len(metadata) > 0 {
+		input["metadata"] = metadata
+	}
 	if v := strArg(args, "success_url"); v != "" {
 		input["success_url"] = v
 	}
@@ -1321,26 +1835,27 @@ func (a *App) createPaymentSetupSession(ctx *sdk.AppCtx, pid string, billingCust
 	return out, nil
 }
 
-func (a *App) recordCheckoutPayment(ctx *sdk.AppCtx, pid string, invoiceID int64, price checkoutPrice, args map[string]any) (map[string]any, error) {
-	amount := firstNonZero(int64Arg(args, "amount_cents"), price.UnitAmountCents)
-	input := map[string]any{
-		"_project_id":  pid,
-		"invoice_id":   invoiceID,
-		"amount_cents": amount,
-		"method":       firstNonEmpty(strArg(args, "manual_payment_method"), "wire"),
-		"notes":        firstNonEmpty(strArg(args, "payment_notes"), "SaaS checkout payment"),
-	}
-	var out map[string]any
-	if err := ctx.PlatformAPI().CallAppResult("billing", "payments_record", input, &out); err != nil {
-		return nil, fmt.Errorf("record payment: %w", err)
-	}
-	return out, nil
-}
-
-func (a *App) runFulfillment(ctx *sdk.AppCtx, pid string, acct *Account, event string) ([]*FulfillmentRun, error) {
+func (a *App) runFulfillment(ctx *sdk.AppCtx, pid string, acct *Account, event string, transitionIDs ...string) ([]*FulfillmentRun, error) {
 	event = normalizeFulfillmentEvent(event)
 	if event == "" {
 		return nil, errors.New("fulfillment event required")
+	}
+	transitionID := ""
+	if len(transitionIDs) > 0 {
+		transitionID = strings.TrimSpace(transitionIDs[0])
+	}
+	if transitionID == "" {
+		transition, err := dbLatestLifecycleTransition(ctx.AppDB(), pid, acct.ID, event)
+		if err != nil {
+			return nil, err
+		}
+		if transition == nil {
+			transition, err = dbLifecycleTransitionReserve(ctx.AppDB(), pid, acct.ID, event, acct.Status, acct.Status, "manual:"+event)
+			if err != nil {
+				return nil, err
+			}
+		}
+		transitionID = transition.ID
 	}
 	actions, err := dbPlanActions(ctx.AppDB(), pid, acct.PlanKey, event, true)
 	if err != nil || len(actions) == 0 {
@@ -1364,38 +1879,66 @@ func (a *App) runFulfillment(ctx *sdk.AppCtx, pid string, acct *Account, event s
 			args = map[string]any{}
 		}
 		args["_project_id"] = pid
-		var out map[string]any
-		callErr := ctx.PlatformAPI().CallAppResult(action.AppName, action.ToolName, args, &out)
-		status := "succeeded"
-		errText := ""
-		if callErr != nil {
-			status = "failed"
-			errText = callErr.Error()
+		runTransitionID := transitionID
+		if action.ExecutionPolicy == "always" {
+			runTransitionID = transitionID + ":" + newID("inv")
 		}
-		run, recErr := dbFulfillmentRunInsert(ctx.AppDB(), pid, acct.ID, &action, status, args, out, errText)
+		args["idempotency_key"] = fulfillmentIdempotencyKey(pid, acct.ID, action.ID, runTransitionID)
+		run, phase, recErr := dbFulfillmentRunReserve(ctx.AppDB(), pid, acct.ID, &action, runTransitionID, args, fulfillmentClaimTimeout)
 		if recErr != nil {
 			return runs, recErr
 		}
 		runs = append(runs, run)
-		if callErr != nil {
-			_ = recordEvent(ctx.AppDB(), pid, acct.ID, "fulfillment.failed", action.AppName, map[string]any{"event": event, "tool": action.ToolName, "error": errText})
-			switch action.FailureMode {
-			case "ignore":
-				continue
-			case "mark_degraded":
-				_, _ = dbAccountSetStatus(ctx.AppDB(), pid, acct.ID, acct.Status, errText)
-				continue
-			default:
-				return runs, fmt.Errorf("fulfillment %s.%s failed: %w", action.AppName, action.ToolName, callErr)
+		if phase == "skip" {
+			continue
+		}
+		if phase == "in_progress" {
+			return runs, errFulfillmentInProgress
+		}
+		var out map[string]any
+		if phase == "store" {
+			out = mapFromAny(run.Output)
+		} else {
+			callErr := ctx.PlatformAPI().CallAppResult(action.AppName, action.ToolName, args, &out)
+			if callErr != nil {
+				errText := callErr.Error()
+				run, _ = dbFulfillmentRunFinish(ctx.AppDB(), pid, run.ID, "failed", out, errText)
+				runs[len(runs)-1] = run
+				_ = recordEvent(ctx.AppDB(), pid, acct.ID, "fulfillment.failed", action.AppName, map[string]any{"event": event, "tool": action.ToolName, "error": errText})
+				switch action.FailureMode {
+				case "ignore":
+					continue
+				case "mark_degraded":
+					_, _ = dbAccountSetStatus(ctx.AppDB(), pid, acct.ID, acct.Status, errText)
+					continue
+				default:
+					return runs, fmt.Errorf("fulfillment %s.%s failed: %w", action.AppName, action.ToolName, callErr)
+				}
 			}
+			run, recErr = dbFulfillmentRunFinish(ctx.AppDB(), pid, run.ID, "call_succeeded", out, "")
+			if recErr != nil {
+				return runs, recErr
+			}
+			runs[len(runs)-1] = run
 		}
 		if err := a.applyFulfillmentStore(ctx, pid, acct, action, out); err != nil {
+			run, _ = dbFulfillmentRunFinish(ctx.AppDB(), pid, run.ID, "call_succeeded", out, err.Error())
+			runs[len(runs)-1] = run
 			return runs, err
 		}
+		run, recErr = dbFulfillmentRunFinish(ctx.AppDB(), pid, run.ID, "succeeded", out, "")
+		if recErr != nil {
+			return runs, recErr
+		}
+		runs[len(runs)-1] = run
 		_ = recordEvent(ctx.AppDB(), pid, acct.ID, "fulfillment.succeeded", action.AppName, map[string]any{"event": event, "tool": action.ToolName, "run_id": run.ID})
 		acct, _ = dbAccountGet(ctx.AppDB(), pid, acct.ID)
 	}
 	return runs, nil
+}
+
+func fulfillmentIdempotencyKey(pid, accountID string, actionID int64, transitionID string) string {
+	return fmt.Sprintf("saas:%s:%s:%d:%s", pid, accountID, actionID, transitionID)
 }
 
 func (a *App) applyFulfillmentStore(ctx *sdk.AppCtx, pid string, acct *Account, action PlanAction, out map[string]any) error {
@@ -1556,8 +2099,10 @@ func fulfillmentEventFromLifecycle(event, status string) string {
 		return "account_resumed"
 	case "subscription.past_due":
 		return "account_past_due"
-	case "subscription.paused", "subscription.cancelled", "subscription.ended", "cancelled":
+	case "subscription.cancelled", "subscription.ended", "cancelled":
 		return "account_cancelled"
+	case "subscription.paused":
+		return "account_suspended"
 	case "suspended":
 		return "account_suspended"
 	case "resumed":
@@ -1606,7 +2151,32 @@ func setPathValue(m map[string]any, parts []string, value any) {
 }
 
 func (a *App) applyPlanAccess(ctx *sdk.AppCtx, pid string, acct *Account, plan *Plan) error {
+	if err := a.applyPlanGrants(ctx, pid, acct, plan); err != nil {
+		return err
+	}
+	return a.applyPlanLimits(ctx, pid, acct, plan)
+}
+
+func (a *App) applyPlanGrants(ctx *sdk.AppCtx, pid string, acct *Account, plan *Plan) error {
 	for _, f := range plan.Features {
+		var existing map[string]any
+		if err := ctx.PlatformAPI().CallAppResult("entitlements", "entitlement_grants_list", map[string]any{
+			"_project_id": pid, "subject_type": "saas_account", "subject_id": acct.ID,
+			"feature_key": f.FeatureKey, "status": "active", "limit": 100,
+		}, &existing); err != nil {
+			return fmt.Errorf("list grant %s: %w", f.FeatureKey, err)
+		}
+		found := false
+		for _, raw := range sliceFromAny(existing["grants"]) {
+			grant := mapFromAny(raw)
+			if strArg(grant, "source_type") == "saas" && strArg(grant, "source_id") == acct.ID {
+				found = true
+				break
+			}
+		}
+		if found {
+			continue
+		}
 		var out map[string]any
 		input := map[string]any{
 			"_project_id":  pid,
@@ -1621,6 +2191,10 @@ func (a *App) applyPlanAccess(ctx *sdk.AppCtx, pid string, acct *Account, plan *
 			return fmt.Errorf("grant %s: %w", f.FeatureKey, err)
 		}
 	}
+	return nil
+}
+
+func (a *App) applyPlanLimits(ctx *sdk.AppCtx, pid string, acct *Account, plan *Plan) error {
 	for _, l := range plan.Limits {
 		var out map[string]any
 		input := map[string]any{
@@ -1645,22 +2219,51 @@ func (a *App) setAccountStatus(ctx *sdk.AppCtx, args map[string]any, status, eve
 	if err != nil {
 		return nil, err
 	}
-	acct, err := dbAccountSetStatus(ctx.AppDB(), pid, strArg(args, "account_id"), status, "")
+	acct, err := dbAccountGet(ctx.AppDB(), pid, strArg(args, "account_id"))
+	if err != nil || acct == nil {
+		return nil, firstErr(err, errors.New("account not found"))
+	}
+	if acct.Status == status {
+		return map[string]any{"account": acct, "changed": false}, nil
+	}
+	if acct.Status == StatusCancelled && status == StatusActive && !boolArg(args, "allow_cancelled_reactivation") {
+		return nil, errors.New("cancelled account requires explicit reactivation policy")
+	}
+	sourceKey := event + ":" + status
+	if subID := firstNonZero(int64Arg(args, "subscription_id"), int64PtrValue(acct.SubscriptionID)); subID != 0 && strings.HasPrefix(event, "subscription.") {
+		sourceKey = fmt.Sprintf("subscription:%d:%s", subID, status)
+	}
+	fe := fulfillmentEventFromLifecycle(event, status)
+	transition, err := dbLifecycleTransitionReserve(ctx.AppDB(), pid, acct.ID, fe, acct.Status, status, sourceKey)
 	if err != nil {
 		return nil, err
 	}
-	_ = recordEvent(ctx.AppDB(), pid, acct.ID, event, actor(args), nil)
-	if fe := fulfillmentEventFromLifecycle(event, status); fe != "" {
-		if _, err := a.runFulfillment(ctx, pid, acct, fe); err != nil {
+	if transition.Status != "completed" && fe != "" {
+		if _, err := a.runFulfillment(ctx, pid, acct, fe, transition.ID); err != nil {
+			if errors.Is(err, errFulfillmentInProgress) {
+				return map[string]any{"account": acct, "changed": false, "in_progress": true, "transition_id": transition.ID}, nil
+			}
 			_, _ = dbAccountSetStatus(ctx.AppDB(), pid, acct.ID, StatusFailed, err.Error())
 			return nil, err
 		}
-		acct, _ = dbAccountGet(ctx.AppDB(), pid, acct.ID)
 	}
-	return map[string]any{"account": acct}, nil
+	if transition.Status != "completed" {
+		if err := dbLifecycleTransitionComplete(ctx.AppDB(), pid, transition, status); err != nil {
+			return nil, err
+		}
+	}
+	acct, err = dbAccountGet(ctx.AppDB(), pid, acct.ID)
+	if err != nil {
+		return nil, err
+	}
+	_ = recordEvent(ctx.AppDB(), pid, acct.ID, event, actor(args), map[string]any{"transition_id": transition.ID})
+	return map[string]any{"account": acct, "changed": true, "transition_id": transition.ID}, nil
 }
 
 func (a *App) handleSubscriptionLifecycle(ctx *sdk.AppCtx, event sdk.Event) error {
+	if event.SourceApp != "" && event.SourceApp != "subscriptions" {
+		return nil
+	}
 	subID := int64FromAny(event.Data["subscription_id"])
 	if subID <= 0 {
 		subID = int64FromAny(event.Data["id"])
@@ -1672,6 +2275,31 @@ func (a *App) handleSubscriptionLifecycle(ctx *sdk.AppCtx, event sdk.Event) erro
 	if s := strFromAny(event.Data["status"]); s != "" {
 		status = s
 	}
+	if status == "past_due" {
+		metadata := mapFromAny(event.Data["metadata"])
+		graceDays := int64Arg(metadata, "unpaid_grace_days")
+		pastDueSince := strArg(metadata, "past_due_since")
+		if graceDays > 0 && pastDueSince != "" {
+			if since, parseErr := time.Parse(time.RFC3339, pastDueSince); parseErr == nil {
+				graceUntil := since.AddDate(0, 0, int(graceDays))
+				if time.Now().UTC().Before(graceUntil) {
+					accounts, listErr := dbAccountList(ctx.AppDB(), firstNonEmpty(event.ProjectID, projectID(ctx, nil)), map[string]any{"subscription_id": subID})
+					if listErr != nil {
+						return listErr
+					}
+					for _, account := range accounts {
+						meta := mapFromAny(account.Metadata)
+						meta["past_due_since"] = pastDueSince
+						meta["unpaid_grace_until"] = graceUntil.Format(time.RFC3339)
+						if err := dbAccountSetMetadata(ctx.AppDB(), account.ProjectID, account.ID, meta); err != nil {
+							return err
+						}
+					}
+					return nil
+				}
+			}
+		}
+	}
 	body := map[string]any{
 		"_project_id":         firstNonEmpty(event.ProjectID, projectID(ctx, nil)),
 		"subscription_id":     subID,
@@ -1680,6 +2308,432 @@ func (a *App) handleSubscriptionLifecycle(ctx *sdk.AppCtx, event sdk.Event) erro
 	}
 	_, err := a.toolSubscriptionSync(ctx, body)
 	return err
+}
+
+func (a *App) handleSubscriptionCycleDue(ctx *sdk.AppCtx, event sdk.Event) error {
+	if event.SourceApp != "" && event.SourceApp != "subscriptions" {
+		return nil
+	}
+	pid := firstNonEmpty(event.ProjectID, projectID(ctx, nil))
+	subID := int64FromAny(event.Data["subscription_id"])
+	cycleID := int64FromAny(event.Data["cycle_id"])
+	periodStart := strFromAny(event.Data["period_start"])
+	periodEnd := strFromAny(event.Data["period_end"])
+	if pid == "" || subID <= 0 || cycleID <= 0 || periodStart == "" || periodEnd == "" {
+		return nil
+	}
+
+	accounts, err := dbAccountList(ctx.AppDB(), pid, map[string]any{"subscription_id": subID})
+	if err != nil {
+		return err
+	}
+	if len(accounts) == 0 {
+		return fmt.Errorf("no SaaS account found for subscription %d", subID)
+	}
+	if len(accounts) > 1 {
+		return fmt.Errorf("subscription %d is linked to multiple SaaS accounts", subID)
+	}
+	acct := accounts[0]
+	op, claimed, err := dbCommerceCycleClaim(ctx.AppDB(), pid, acct.ID, subID, cycleID)
+	if err != nil || !claimed {
+		return err
+	}
+	checkoutID := strFromAny(event.Data["checkout_id"])
+	if checkoutID == "" {
+		if trialCheckout, lookupErr := dbCheckoutTrialBySubscription(ctx.AppDB(), pid, subID); lookupErr != nil {
+			return lookupErr
+		} else if trialCheckout != nil {
+			checkoutID = trialCheckout.ID
+		}
+	}
+	if checkoutID != "" {
+		if err := dbCommerceOperationSetCheckout(ctx.AppDB(), pid, op.ID, checkoutID); err != nil {
+			return err
+		}
+		op.CheckoutID = checkoutID
+	}
+	fail := func(cause error) error {
+		if persistErr := dbCommerceOperationFail(ctx.AppDB(), pid, op.ID, "failed_billing", cause.Error()); persistErr != nil {
+			return fmt.Errorf("%w; persist commerce failure: %v", cause, persistErr)
+		}
+		return cause
+	}
+
+	customer, err := dbCustomerGet(ctx.AppDB(), pid, acct.CustomerID)
+	if err != nil || customer == nil {
+		return fail(firstErr(err, errors.New("SaaS customer not found")))
+	}
+	billingCustomerID, _, err := a.ensureBillingCustomer(ctx, pid, customer, map[string]any{})
+	if err != nil {
+		return fail(err)
+	}
+	if err := dbCommerceOperationSetCustomer(ctx.AppDB(), pid, op.ID, billingCustomerID); err != nil {
+		return fail(err)
+	}
+
+	prepared := mapFromAny(op.Prepared)
+	if len(prepared) == 0 {
+		input := map[string]any{
+			"_project_id":        pid,
+			"subscription_id":    subID,
+			"period_start":       periodStart,
+			"period_end":         periodEnd,
+			"include_flat":       true,
+			"include_metered":    true,
+			"invoice_zero_usage": true,
+		}
+		if err := ctx.PlatformAPI().CallAppResult("subscriptions", "subscriptions_invoice_prepare", input, &prepared); err != nil {
+			return fail(fmt.Errorf("prepare subscription invoice: %w", err))
+		}
+		if len(sliceFromAny(prepared["line_items"])) == 0 {
+			return fail(errors.New("subscriptions_invoice_prepare returned no line items"))
+		}
+		if err := dbCommerceOperationSetPrepared(ctx.AppDB(), pid, op.ID, prepared); err != nil {
+			return fail(err)
+		}
+	}
+
+	op, err = dbCommerceOperationGet(ctx.AppDB(), pid, op.ID)
+	if err != nil {
+		return fail(err)
+	}
+	invoiceID := int64PtrValue(op.InvoiceID)
+	if invoiceID == 0 {
+		existingInvoiceID, reconcileErr := findBillingInvoiceByOperation(ctx, pid, billingCustomerID, op.OperationKey)
+		if reconcileErr != nil {
+			return fail(reconcileErr)
+		}
+		if existingInvoiceID != 0 {
+			invoiceID = existingInvoiceID
+			if err := dbCommerceOperationSetInvoice(ctx.AppDB(), pid, op.ID, invoiceID); err != nil {
+				return fail(err)
+			}
+		}
+	}
+	if invoiceID == 0 {
+		invoiceInput := map[string]any{
+			"_project_id": pid,
+			"customer_id": billingCustomerID,
+			"currency":    firstNonEmpty(strArg(prepared, "currency"), strFromAny(event.Data["currency"]), "USD"),
+			"provider":    "local",
+			"line_items":  sliceFromAny(prepared["line_items"]),
+			"finalize":    true,
+			"metadata": map[string]any{
+				"source_app": "saas", "saas_account_id": acct.ID,
+				"subscription_id": subID, "cycle_id": cycleID,
+				"operation_key": op.OperationKey,
+			},
+		}
+		var invoiceOut map[string]any
+		if err := ctx.PlatformAPI().CallAppResult("billing", "invoices_create_from_prepared_lines", invoiceInput, &invoiceOut); err != nil {
+			return fail(fmt.Errorf("create billing invoice: %w", err))
+		}
+		invoiceID = int64FromResult(invoiceOut, "invoice", "id")
+		if invoiceID == 0 {
+			return fail(errors.New("Billing invoice response missing id"))
+		}
+		if err := dbCommerceOperationSetInvoice(ctx.AppDB(), pid, op.ID, invoiceID); err != nil {
+			return fail(err)
+		}
+	}
+
+	if op.Stage != "cycle_linked" && op.Stage != "payment_link_created" {
+		var cycleOut map[string]any
+		if err := ctx.PlatformAPI().CallAppResult("subscriptions", "subscription_cycles_update", map[string]any{
+			"_project_id": pid, "id": cycleID, "invoice_id": invoiceID, "payment_status": "pending",
+		}, &cycleOut); err != nil {
+			return fail(fmt.Errorf("link invoice to subscription cycle: %w", err))
+		}
+		if err := dbCommerceOperationSetStage(ctx.AppDB(), pid, op.ID, "cycle_linked"); err != nil {
+			return fail(err)
+		}
+	}
+
+	op, err = dbCommerceOperationGet(ctx.AppDB(), pid, op.ID)
+	if err != nil {
+		return fail(err)
+	}
+	if len(mapFromAny(op.PaymentLink)) == 0 {
+		linkOut, err := a.createPaymentLink(ctx, pid, invoiceID, map[string]any{
+			"success_url": strFromAny(event.Data["success_url"]),
+			"cancel_url":  strFromAny(event.Data["cancel_url"]),
+		})
+		if err != nil {
+			return fail(err)
+		}
+		if err := dbCommerceOperationCompleteBilling(ctx.AppDB(), pid, op.ID, linkOut); err != nil {
+			return fail(err)
+		}
+	} else if err := dbCommerceOperationCompleteBilling(ctx.AppDB(), pid, op.ID, mapFromAny(op.PaymentLink)); err != nil {
+		return fail(err)
+	}
+	if checkoutID != "" {
+		op, err = dbCommerceOperationGet(ctx.AppDB(), pid, op.ID)
+		if err != nil {
+			return fail(err)
+		}
+		if err := dbCheckoutSetInvoice(ctx.AppDB(), pid, checkoutID, cycleID, invoiceID, mapFromAny(op.PaymentLink)); err != nil {
+			return fail(err)
+		}
+		if err := dbCheckoutComplete(ctx.AppDB(), pid, checkoutID, "awaiting_payment", map[string]any{"subscription_id": subID, "cycle_id": cycleID, "invoice_id": invoiceID}); err != nil {
+			return fail(err)
+		}
+	}
+	_ = recordEvent(ctx.AppDB(), pid, acct.ID, "subscription.cycle_billed", "subscription", map[string]any{
+		"subscription_id": subID, "cycle_id": cycleID, "invoice_id": invoiceID,
+	})
+	return nil
+}
+
+func findBillingInvoiceByOperation(ctx *sdk.AppCtx, pid string, billingCustomerID int64, operationKey string) (int64, error) {
+	var out map[string]any
+	if err := ctx.PlatformAPI().CallAppResult("billing", "invoices_search", map[string]any{
+		"_project_id": pid, "customer_id": billingCustomerID, "limit": 200,
+	}, &out); err != nil {
+		return 0, fmt.Errorf("reconcile billing invoice: %w", err)
+	}
+	for _, raw := range sliceFromAny(out["invoices"]) {
+		invoice := mapFromAny(raw)
+		metadata := mapFromAny(invoice["metadata"])
+		if strArg(metadata, "operation_key") == operationKey {
+			return int64Arg(invoice, "id"), nil
+		}
+	}
+	return 0, nil
+}
+
+func (a *App) handleInvoicePaid(ctx *sdk.AppCtx, event sdk.Event) error {
+	if event.SourceApp != "" && event.SourceApp != "billing" {
+		return nil
+	}
+	pid := firstNonEmpty(event.ProjectID, projectID(ctx, nil))
+	invoiceID := int64FromAny(event.Data["id"])
+	if invoiceID <= 0 {
+		invoiceID = int64FromAny(event.Data["invoice_id"])
+	}
+	if pid == "" || invoiceID <= 0 {
+		return nil
+	}
+	op, claimed, err := dbCommercePaymentClaim(ctx.AppDB(), pid, invoiceID)
+	if err != nil || op == nil {
+		return err
+	}
+	if !claimed {
+		if op.Status == "paid" {
+			return nil
+		}
+		return fmt.Errorf("invoice %d payment operation is already in progress", invoiceID)
+	}
+	fail := func(cause error) error {
+		if persistErr := dbCommerceOperationFail(ctx.AppDB(), pid, op.ID, "failed_payment", cause.Error()); persistErr != nil {
+			return fmt.Errorf("%w; persist payment failure: %v", cause, persistErr)
+		}
+		return cause
+	}
+
+	var cycleOut map[string]any
+	if err := ctx.PlatformAPI().CallAppResult("subscriptions", "subscription_cycles_update", map[string]any{
+		"_project_id": pid, "id": op.CycleID, "invoice_id": invoiceID, "payment_status": "paid",
+	}, &cycleOut); err != nil {
+		return fail(fmt.Errorf("mark subscription cycle paid: %w", err))
+	}
+	prepared := mapFromAny(op.Prepared)
+	statusInput := map[string]any{
+		"_project_id": pid, "id": op.SubscriptionID, "status": "active",
+		"actor": "saas", "note": fmt.Sprintf("Billing invoice %d paid", invoiceID),
+	}
+	if v := strArg(prepared, "period_start"); v != "" {
+		statusInput["current_period_start"] = v
+	}
+	if v := strArg(prepared, "period_end"); v != "" {
+		statusInput["current_period_end"] = v
+		statusInput["next_renewal_at"] = v
+	}
+	var statusOut map[string]any
+	if err := ctx.PlatformAPI().CallAppResult("subscriptions", "subscriptions_update_status", statusInput, &statusOut); err != nil {
+		return fail(fmt.Errorf("activate paid subscription: %w", err))
+	}
+	if _, err := a.toolSubscriptionSync(ctx, map[string]any{
+		"_project_id": pid, "account_id": op.AccountID, "subscription_id": op.SubscriptionID,
+		"subscription_status": "active", "actor": "billing",
+	}); err != nil {
+		return fail(err)
+	}
+	if err := dbCommerceOperationCompletePayment(ctx.AppDB(), pid, op.ID); err != nil {
+		return fail(err)
+	}
+	if op.CheckoutID != "" {
+		if err := dbCheckoutComplete(ctx.AppDB(), pid, op.CheckoutID, "active", map[string]any{"invoice_id": invoiceID, "subscription_id": op.SubscriptionID, "cycle_id": op.CycleID}); err != nil {
+			return fail(err)
+		}
+	}
+	_ = recordEvent(ctx.AppDB(), pid, op.AccountID, "invoice.paid", "billing", map[string]any{
+		"subscription_id": op.SubscriptionID, "cycle_id": op.CycleID, "invoice_id": invoiceID,
+	})
+	return nil
+}
+
+func (a *App) handlePaymentMethodAttached(ctx *sdk.AppCtx, event sdk.Event) error {
+	if event.SourceApp != "" && event.SourceApp != "billing" {
+		return nil
+	}
+	pid := firstNonEmpty(event.ProjectID, projectID(ctx, nil))
+	metadata := mapFromAny(event.Data["metadata"])
+	checkoutID := strArg(metadata, "saas_checkout_id")
+	if pid == "" || checkoutID == "" {
+		return nil
+	}
+	checkout, err := dbCheckoutGet(ctx.AppDB(), pid, checkoutID)
+	if err != nil || checkout == nil {
+		return err
+	}
+	if checkout.Status == "trialing" || checkout.Status == "active" {
+		return nil
+	}
+	if checkout.Status != "awaiting_payment_method" && checkout.Status != "setup_expired" {
+		return fmt.Errorf("checkout %s is not awaiting a payment method", checkout.ID)
+	}
+	if expected := int64PtrValue(checkout.BillingCustomerID); expected != 0 && int64FromAny(event.Data["customer_id"]) != expected {
+		return errors.New("payment method customer does not match checkout")
+	}
+	paymentMethodID := int64FromAny(event.Data["id"])
+	if err := dbCheckoutSetPaymentMethod(ctx.AppDB(), pid, checkout.ID, paymentMethodID); err != nil {
+		return err
+	}
+	subID := int64PtrValue(checkout.SubscriptionID)
+	if subID == 0 || checkout.AccountID == "" {
+		return errors.New("checkout is missing subscription or account")
+	}
+	var statusOut map[string]any
+	if err := ctx.PlatformAPI().CallAppResult("subscriptions", "subscriptions_update_status", map[string]any{
+		"_project_id": pid, "id": subID, "status": "trialing", "actor": "saas", "note": "Required payment method attached",
+	}, &statusOut); err != nil {
+		return fmt.Errorf("activate card-required trial: %w", err)
+	}
+	if _, err := a.toolSubscriptionSync(ctx, map[string]any{
+		"_project_id": pid, "account_id": checkout.AccountID, "subscription_id": subID,
+		"subscription_status": "trialing", "actor": "billing",
+	}); err != nil {
+		return err
+	}
+	account, _ := dbAccountGet(ctx.AppDB(), pid, checkout.AccountID)
+	if account != nil {
+		meta := mapFromAny(account.Metadata)
+		meta["payment_method_missing"] = false
+		meta["payment_method_id"] = paymentMethodID
+		_ = dbAccountSetMetadata(ctx.AppDB(), pid, account.ID, meta)
+	}
+	return dbCheckoutComplete(ctx.AppDB(), pid, checkout.ID, "trialing", map[string]any{"payment_method_id": paymentMethodID})
+}
+
+func (a *App) handleInvoiceCollectionFailed(ctx *sdk.AppCtx, event sdk.Event) error {
+	if event.SourceApp != "" && event.SourceApp != "billing" {
+		return nil
+	}
+	pid := firstNonEmpty(event.ProjectID, projectID(ctx, nil))
+	invoiceID := int64FromAny(event.Data["id"])
+	if pid == "" || invoiceID == 0 {
+		return nil
+	}
+	op, err := dbCommerceOperationByInvoice(ctx.AppDB(), pid, invoiceID)
+	if err != nil || op == nil {
+		return err
+	}
+	eventName := event.Name()
+	behavior := "past_due"
+	if eventName == "invoice.refunded" {
+		behavior = strings.ToLower(firstNonEmpty(ctx.Config().Get("refund_behavior"), "past_due"))
+	}
+	if behavior == "ignore" {
+		return nil
+	}
+	cycleStatus := "failed"
+	if eventName == "invoice.voided" || eventName == "invoice.void" {
+		cycleStatus = "voided"
+	}
+	if eventName == "invoice.refunded" {
+		cycleStatus = "refunded"
+	}
+	var cycleOut map[string]any
+	if err := ctx.PlatformAPI().CallAppResult("subscriptions", "subscription_cycles_update", map[string]any{
+		"_project_id": pid, "id": op.CycleID, "invoice_id": invoiceID, "payment_status": cycleStatus,
+	}, &cycleOut); err != nil {
+		return err
+	}
+	target := "past_due"
+	if behavior == "cancel" {
+		target = "cancelled"
+	}
+	var statusOut map[string]any
+	if err := ctx.PlatformAPI().CallAppResult("subscriptions", "subscriptions_update_status", map[string]any{
+		"_project_id": pid, "id": op.SubscriptionID, "status": target, "actor": "saas", "note": eventName,
+	}, &statusOut); err != nil {
+		return err
+	}
+	if _, err := a.toolSubscriptionSync(ctx, map[string]any{
+		"_project_id": pid, "account_id": op.AccountID, "subscription_id": op.SubscriptionID,
+		"subscription_status": target, "actor": "billing",
+	}); err != nil {
+		return err
+	}
+	if op.CheckoutID != "" {
+		_ = dbCheckoutSetStatus(ctx.AppDB(), pid, op.CheckoutID, "payment_failed", eventName)
+	}
+	return dbCommerceOperationFail(ctx.AppDB(), pid, op.ID, "failed_payment", eventName)
+}
+
+func (a *App) recoverExpiredCheckouts(ctx *sdk.AppCtx) error {
+	pid := projectID(ctx, nil)
+	if pid == "" {
+		return nil
+	}
+	checkouts, err := dbCheckoutExpiredSetups(ctx.AppDB(), pid, time.Now().UTC())
+	if err != nil {
+		return err
+	}
+	for _, checkout := range checkouts {
+		_ = dbCheckoutSetStatus(ctx.AppDB(), pid, checkout.ID, "setup_expired", "payment method setup session expired")
+		if subID := int64PtrValue(checkout.SubscriptionID); subID != 0 {
+			var out map[string]any
+			_ = ctx.PlatformAPI().CallAppResult("subscriptions", "subscriptions_update_status", map[string]any{
+				"_project_id": pid, "id": subID, "status": "paused", "actor": "saas", "note": "payment method setup expired",
+			}, &out)
+		}
+	}
+	return a.reconcilePendingInvoices(ctx, pid)
+}
+
+func (a *App) reconcilePendingInvoices(ctx *sdk.AppCtx, pid string) error {
+	operations, err := dbCommerceOperationsForReconciliation(ctx.AppDB(), pid, time.Now().UTC().Add(-5*time.Minute), 20)
+	if err != nil {
+		return err
+	}
+	for _, operation := range operations {
+		invoiceID := int64PtrValue(operation.InvoiceID)
+		if invoiceID == 0 {
+			continue
+		}
+		var out map[string]any
+		if err := ctx.PlatformAPI().CallAppResult("billing", "invoices_get", map[string]any{"_project_id": pid, "id": invoiceID}, &out); err != nil {
+			ctx.Logger().Warn("reconcile SaaS invoice", "invoice_id", invoiceID, "err", err)
+			continue
+		}
+		invoice := unwrapMap(out, "invoice")
+		status := strArg(invoice, "status")
+		switch status {
+		case "paid":
+			if err := a.handleInvoicePaid(ctx, sdk.Event{Event: "invoice.paid", ProjectID: pid, Data: map[string]any{"id": invoiceID, "status": status}}); err != nil {
+				return err
+			}
+		case "void", "uncollectible":
+			if err := a.handleInvoiceCollectionFailed(ctx, sdk.Event{Event: "invoice." + status, ProjectID: pid, Data: map[string]any{"id": invoiceID, "status": status}}); err != nil {
+				return err
+			}
+		default:
+			_ = dbCommerceOperationTouch(ctx.AppDB(), pid, operation.ID)
+		}
+	}
+	return nil
 }
 
 func createAuthOrg(ctx *sdk.AppCtx, pid, slug, name string) (*int64, error) {
@@ -1790,12 +2844,54 @@ func dbPlanList(db *sql.DB, pid string) ([]*Plan, error) {
 	if err := rows.Close(); err != nil {
 		return nil, err
 	}
-	for _, p := range out {
-		if err := hydratePlan(db, p); err != nil {
-			return nil, err
-		}
+	if err := hydratePlanList(db, pid, out); err != nil {
+		return nil, err
 	}
 	return out, nil
+}
+
+func hydratePlanList(db *sql.DB, pid string, plans []*Plan) error {
+	byKey := make(map[string]*Plan, len(plans))
+	for _, plan := range plans {
+		byKey[plan.Key] = plan
+	}
+	features, err := dbPlanFeatures(db, pid, "")
+	if err != nil {
+		return err
+	}
+	for _, feature := range features {
+		if plan := byKey[feature.PlanKey]; plan != nil {
+			plan.Features = append(plan.Features, feature)
+		}
+	}
+	limits, err := dbPlanLimits(db, pid, "")
+	if err != nil {
+		return err
+	}
+	for _, limit := range limits {
+		if plan := byKey[limit.PlanKey]; plan != nil {
+			plan.Limits = append(plan.Limits, limit)
+		}
+	}
+	sources, err := dbUsageSources(db, pid, "")
+	if err != nil {
+		return err
+	}
+	for _, source := range sources {
+		if plan := byKey[source.PlanKey]; plan != nil {
+			plan.UsageSources = append(plan.UsageSources, source)
+		}
+	}
+	actions, err := dbPlanActions(db, pid, "", "", false)
+	if err != nil {
+		return err
+	}
+	for _, action := range actions {
+		if plan := byKey[action.PlanKey]; plan != nil {
+			plan.Actions = append(plan.Actions, action)
+		}
+	}
+	return nil
 }
 
 func dbPlanGet(db *sql.DB, pid, key string) (*Plan, error) {
@@ -1902,7 +2998,14 @@ func dbPlanFeatureGet(db *sql.DB, pid, planKey, feature string) (*PlanFeature, e
 }
 
 func dbPlanFeatures(db *sql.DB, pid, planKey string) ([]PlanFeature, error) {
-	rows, err := db.Query(`SELECT id, project_id, plan_key, feature_key, grant_type, metadata_json, created_at, updated_at FROM saas_plan_features WHERE project_id=? AND plan_key=? ORDER BY feature_key`, pid, planKey)
+	query := `SELECT id, project_id, plan_key, feature_key, grant_type, metadata_json, created_at, updated_at FROM saas_plan_features WHERE project_id=?`
+	args := []any{pid}
+	if planKey != "" {
+		query += ` AND plan_key=?`
+		args = append(args, planKey)
+	}
+	query += ` ORDER BY plan_key, feature_key`
+	rows, err := db.Query(query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -1960,7 +3063,14 @@ func dbPlanLimitGet(db *sql.DB, pid, planKey, feature string) (*PlanLimit, error
 }
 
 func dbPlanLimits(db *sql.DB, pid, planKey string) ([]PlanLimit, error) {
-	rows, err := db.Query(`SELECT id, project_id, plan_key, feature_key, limit_value, reset_interval, metadata_json, created_at, updated_at FROM saas_plan_limits WHERE project_id=? AND plan_key=? ORDER BY feature_key`, pid, planKey)
+	query := `SELECT id, project_id, plan_key, feature_key, limit_value, reset_interval, metadata_json, created_at, updated_at FROM saas_plan_limits WHERE project_id=?`
+	args := []any{pid}
+	if planKey != "" {
+		query += ` AND plan_key=?`
+		args = append(args, planKey)
+	}
+	query += ` ORDER BY plan_key, feature_key`
+	rows, err := db.Query(query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -2029,7 +3139,14 @@ func dbUsageSourceGet(db *sql.DB, pid, planKey, app, tool string) (*UsageSource,
 }
 
 func dbUsageSources(db *sql.DB, pid, planKey string) ([]UsageSource, error) {
-	rows, err := db.Query(`SELECT id, project_id, plan_key, app_name, tool_name, feature_prefix, metadata_json, created_at, updated_at FROM saas_usage_sources WHERE project_id=? AND plan_key=? ORDER BY app_name, tool_name`, pid, planKey)
+	query := `SELECT id, project_id, plan_key, app_name, tool_name, feature_prefix, metadata_json, created_at, updated_at FROM saas_usage_sources WHERE project_id=?`
+	args := []any{pid}
+	if planKey != "" {
+		query += ` AND plan_key=?`
+		args = append(args, planKey)
+	}
+	query += ` ORDER BY plan_key, app_name, tool_name`
+	rows, err := db.Query(query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -2069,15 +3186,19 @@ func dbPlanActionInsert(db *sql.DB, pid string, args map[string]any) (*PlanActio
 	default:
 		return nil, fmt.Errorf("unsupported failure_mode %q", failureMode)
 	}
+	executionPolicy := firstNonEmpty(strArg(args, "execution_policy"), "once_per_transition")
+	if executionPolicy != "once_per_transition" && executionPolicy != "always" {
+		return nil, fmt.Errorf("unsupported execution_policy %q", executionPolicy)
+	}
 	enabled := 1
 	if _, ok := args["enabled"]; ok {
 		enabled = boolInt(boolArg(args, "enabled"))
 	}
 	res, err := db.Exec(`
 		INSERT INTO saas_plan_actions
-			(project_id, plan_key, event, app_name, tool_name, args_json, store_json, failure_mode, enabled, metadata_json)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		pid, planKey, event, app, tool, jsonOrEmpty(args["args"], "{}"), jsonOrEmpty(args["store"], "{}"), failureMode, enabled, jsonOrEmpty(args["metadata"], "{}"))
+			(project_id, plan_key, event, app_name, tool_name, args_json, store_json, failure_mode, execution_policy, enabled, metadata_json)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		pid, planKey, event, app, tool, jsonOrEmpty(args["args"], "{}"), jsonOrEmpty(args["store"], "{}"), failureMode, executionPolicy, enabled, jsonOrEmpty(args["metadata"], "{}"))
 	if err != nil {
 		return nil, err
 	}
@@ -2116,6 +3237,14 @@ func dbPlanActionUpdate(db *sql.DB, pid string, args map[string]any) (*PlanActio
 		sets = append(sets, "failure_mode=?")
 		vals = append(vals, failureMode)
 	}
+	if _, ok := args["execution_policy"]; ok {
+		executionPolicy := firstNonEmpty(strArg(args, "execution_policy"), "once_per_transition")
+		if executionPolicy != "once_per_transition" && executionPolicy != "always" {
+			return nil, fmt.Errorf("unsupported execution_policy %q", executionPolicy)
+		}
+		sets = append(sets, "execution_policy=?")
+		vals = append(vals, executionPolicy)
+	}
 	if _, ok := args["enabled"]; ok {
 		sets = append(sets, "enabled=?")
 		vals = append(vals, boolInt(boolArg(args, "enabled")))
@@ -2137,7 +3266,7 @@ func dbPlanActionUpdate(db *sql.DB, pid string, args map[string]any) (*PlanActio
 
 func dbPlanActionGet(db *sql.DB, pid string, id int64) (*PlanAction, error) {
 	rows, err := db.Query(`
-		SELECT id, project_id, plan_key, event, app_name, tool_name, args_json, store_json, failure_mode, enabled, metadata_json, created_at, updated_at
+		SELECT id, project_id, plan_key, event, app_name, tool_name, args_json, store_json, failure_mode, execution_policy, enabled, metadata_json, created_at, updated_at
 		FROM saas_plan_actions WHERE project_id=? AND id=?`, pid, id)
 	if err != nil {
 		return nil, err
@@ -2150,8 +3279,12 @@ func dbPlanActionGet(db *sql.DB, pid string, id int64) (*PlanAction, error) {
 }
 
 func dbPlanActions(db *sql.DB, pid, planKey, event string, enabledOnly bool) ([]PlanAction, error) {
-	where := []string{"project_id=?", "plan_key=?"}
-	vals := []any{pid, planKey}
+	where := []string{"project_id=?"}
+	vals := []any{pid}
+	if planKey != "" {
+		where = append(where, "plan_key=?")
+		vals = append(vals, planKey)
+	}
 	if event != "" {
 		where = append(where, "event=?")
 		vals = append(vals, event)
@@ -2160,8 +3293,8 @@ func dbPlanActions(db *sql.DB, pid, planKey, event string, enabledOnly bool) ([]
 		where = append(where, "enabled=1")
 	}
 	rows, err := db.Query(`
-		SELECT id, project_id, plan_key, event, app_name, tool_name, args_json, store_json, failure_mode, enabled, metadata_json, created_at, updated_at
-		FROM saas_plan_actions WHERE `+strings.Join(where, " AND ")+` ORDER BY id`, vals...)
+		SELECT id, project_id, plan_key, event, app_name, tool_name, args_json, store_json, failure_mode, execution_policy, enabled, metadata_json, created_at, updated_at
+		FROM saas_plan_actions WHERE `+strings.Join(where, " AND ")+` ORDER BY plan_key,id`, vals...)
 	if err != nil {
 		return nil, err
 	}
@@ -2181,7 +3314,7 @@ func scanPlanAction(row rowScanner) (*PlanAction, error) {
 	var a PlanAction
 	var enabled int
 	var args, store, meta string
-	if err := row.Scan(&a.ID, &a.ProjectID, &a.PlanKey, &a.Event, &a.AppName, &a.ToolName, &args, &store, &a.FailureMode, &enabled, &meta, &a.CreatedAt, &a.UpdatedAt); err != nil {
+	if err := row.Scan(&a.ID, &a.ProjectID, &a.PlanKey, &a.Event, &a.AppName, &a.ToolName, &args, &store, &a.FailureMode, &a.ExecutionPolicy, &enabled, &meta, &a.CreatedAt, &a.UpdatedAt); err != nil {
 		return nil, err
 	}
 	a.Args = json.RawMessage(args)
@@ -2273,6 +3406,80 @@ func dbAccountInsert(db *sql.DB, a *Account) error {
 	return err
 }
 
+func dbAccountMergeProvisioningInput(db *sql.DB, pid, id string, args map[string]any) error {
+	acct, err := dbAccountGet(db, pid, id)
+	if err != nil || acct == nil {
+		return firstErr(err, errors.New("account not found"))
+	}
+	requestedSubID := int64Arg(args, "subscription_id")
+	if requestedSubID != 0 && acct.SubscriptionID != nil && *acct.SubscriptionID != requestedSubID {
+		return errors.New("existing account belongs to a different subscription")
+	}
+	meta := mapFromAny(acct.Metadata)
+	for k, v := range mapFromAny(args["metadata"]) {
+		meta[k] = v
+	}
+	provisioning := mapFromAny(meta["provisioning"])
+	if provisioning == nil {
+		provisioning = map[string]any{}
+	}
+	for _, key := range []string{"create_owner_user", "send_password_reset", "skip_fulfillment"} {
+		if _, ok := args[key]; ok {
+			provisioning[key] = boolArg(args, key)
+		}
+	}
+	meta["provisioning"] = provisioning
+	_, err = db.Exec(`UPDATE saas_accounts SET
+		subscription_id=COALESCE(subscription_id, ?), auth_org_id=COALESCE(auth_org_id, ?), auth_user_id=COALESCE(auth_user_id, ?),
+		metadata_json=?, updated_at=CURRENT_TIMESTAMP WHERE project_id=? AND id=?`,
+		nullableInt64(requestedSubID), nullableInt64(int64Arg(args, "auth_org_id")), nullableInt64(int64Arg(args, "auth_user_id")),
+		jsonOrEmpty(meta, "{}"), pid, id)
+	return err
+}
+
+func dbAccountSetAuthOrg(db *sql.DB, pid, id string, authOrgID int64) error {
+	_, err := db.Exec(`UPDATE saas_accounts SET auth_org_id=?, updated_at=CURRENT_TIMESTAMP WHERE project_id=? AND id=?`, authOrgID, pid, id)
+	return err
+}
+
+func dbAccountSetAuthUser(db *sql.DB, pid, id string, authUserID int64) error {
+	_, err := db.Exec(`UPDATE saas_accounts SET auth_user_id=?, updated_at=CURRENT_TIMESTAMP WHERE project_id=? AND id=?`, authUserID, pid, id)
+	return err
+}
+
+func dbProvisioningStepGet(db *sql.DB, pid, accountID, step string) (*ProvisioningStep, error) {
+	var s ProvisioningStep
+	var output string
+	err := db.QueryRow(`SELECT step, status, attempt_count, output_json, last_error FROM saas_provisioning_steps
+		WHERE project_id=? AND account_id=? AND step=?`, pid, accountID, step).
+		Scan(&s.Step, &s.Status, &s.AttemptCount, &output, &s.LastError)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	s.Output = json.RawMessage(output)
+	return &s, nil
+}
+
+func dbProvisioningStepStart(db *sql.DB, pid, accountID, step string) error {
+	_, err := db.Exec(`INSERT INTO saas_provisioning_steps
+		(project_id, account_id, step, status, attempt_count, started_at, updated_at)
+		VALUES (?, ?, ?, 'running', 1, CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)
+		ON CONFLICT(project_id, account_id, step) DO UPDATE SET
+		status='running', attempt_count=attempt_count+1, last_error='', started_at=CURRENT_TIMESTAMP,
+		completed_at=NULL, updated_at=CURRENT_TIMESTAMP`, pid, accountID, step)
+	return err
+}
+
+func dbProvisioningStepFinish(db *sql.DB, pid, accountID, step, status string, output any, errText string) error {
+	_, err := db.Exec(`UPDATE saas_provisioning_steps SET status=?, output_json=?, last_error=?,
+		completed_at=CASE WHEN ?='succeeded' THEN CURRENT_TIMESTAMP ELSE completed_at END, updated_at=CURRENT_TIMESTAMP
+		WHERE project_id=? AND account_id=? AND step=?`, status, jsonOrEmpty(output, "{}"), errText, status, pid, accountID, step)
+	return err
+}
+
 func dbAccountSetStatus(db *sql.DB, pid, id, status, errMsg string) (*Account, error) {
 	res, err := db.Exec(`UPDATE saas_accounts SET status=?, last_error=?, updated_at=CURRENT_TIMESTAMP WHERE project_id=? AND id=?`, status, errMsg, pid, id)
 	if err != nil {
@@ -2297,6 +3504,11 @@ func dbAccountSetMetadata(db *sql.DB, pid, id string, meta map[string]any) error
 
 func dbAccountUsageSynced(db *sql.DB, pid, id string) error {
 	_, err := db.Exec(`UPDATE saas_accounts SET last_usage_sync_at=CURRENT_TIMESTAMP, last_error='', updated_at=CURRENT_TIMESTAMP WHERE project_id=? AND id=?`, pid, id)
+	return err
+}
+
+func dbAccountSetLastError(db *sql.DB, pid, id, errText string) error {
+	_, err := db.Exec(`UPDATE saas_accounts SET last_error=?, updated_at=CURRENT_TIMESTAMP WHERE project_id=? AND id=?`, errText, pid, id)
 	return err
 }
 
@@ -2354,6 +3566,37 @@ func dbAccountList(db *sql.DB, pid string, args map[string]any) ([]*Account, err
 	return out, rows.Err()
 }
 
+func dbAccountPage(db *sql.DB, pid string, statuses []string, limit, offset int) ([]*Account, error) {
+	if limit <= 0 {
+		limit = defaultUsagePageSize
+	}
+	where := []string{"project_id=?"}
+	vals := []any{pid}
+	if len(statuses) > 0 {
+		marks := make([]string, len(statuses))
+		for i, status := range statuses {
+			marks[i] = "?"
+			vals = append(vals, status)
+		}
+		where = append(where, "status IN ("+strings.Join(marks, ",")+")")
+	}
+	vals = append(vals, limit, offset)
+	rows, err := db.Query(accountSelect()+` WHERE `+strings.Join(where, " AND ")+` ORDER BY created_at,id LIMIT ? OFFSET ?`, vals...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*Account
+	for rows.Next() {
+		acct, err := scanAccount(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, acct)
+	}
+	return out, rows.Err()
+}
+
 func accountSelect() string {
 	return `SELECT id, project_id, customer_id, auth_org_id, auth_user_id, subscription_id, slug, owner_email, plan_key, status, COALESCE(last_usage_sync_at,''), last_error, metadata_json, created_at, updated_at FROM saas_accounts`
 }
@@ -2385,18 +3628,104 @@ func dbUsageSnapshotUpsert(db *sql.DB, pid string, acct *Account, source, featur
 	if strings.TrimSpace(feature) == "" {
 		return errors.New("feature_key required")
 	}
+	source = firstNonEmpty(source, "manual")
 	_, err := db.Exec(`
 		INSERT INTO saas_usage_snapshots
-			(project_id, account_id, customer_id, source_app, feature_key, quantity, metadata_json)
-		VALUES (?, ?, ?, ?, ?, ?, ?)
-		ON CONFLICT(project_id, account_id, source_app, feature_key) DO UPDATE SET
+			(project_id, account_id, customer_id, source_key, source_app, feature_key, quantity, generation_id, metadata_json)
+		VALUES (?, ?, ?, ?, ?, ?, ?, 'manual', ?)
+		ON CONFLICT(project_id, account_id, source_key, feature_key) DO UPDATE SET
 			quantity=excluded.quantity,
 			customer_id=excluded.customer_id,
 			metadata_json=excluded.metadata_json,
+			generation_id=excluded.generation_id,
 			observed_at=CURRENT_TIMESTAMP,
 			updated_at=CURRENT_TIMESTAMP`,
-		pid, acct.ID, acct.CustomerID, firstNonEmpty(source, "manual"), feature, qty, jsonOrEmpty(meta, "{}"))
+		pid, acct.ID, acct.CustomerID, source, source, feature, qty, jsonOrEmpty(meta, "{}"))
 	return err
+}
+
+func dbUsageSourceReplace(db *sql.DB, pid string, acct *Account, src UsageSource, generation string, gauges []usageGauge) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	sourceKey := fmt.Sprintf("%s:%s:%d", src.AppName, src.ToolName, src.ID)
+	for _, gauge := range gauges {
+		feature := firstNonEmpty(gauge.FeatureKey, src.FeaturePrefix)
+		if feature == "" {
+			continue
+		}
+		if src.FeaturePrefix != "" && !strings.Contains(feature, ":") {
+			feature = strings.TrimRight(src.FeaturePrefix, ":") + ":" + feature
+		}
+		if _, err := tx.Exec(`INSERT INTO saas_usage_snapshots
+			(project_id, account_id, customer_id, usage_source_id, source_key, source_app, feature_key, quantity, generation_id, metadata_json)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT(project_id, account_id, source_key, feature_key) DO UPDATE SET
+			customer_id=excluded.customer_id, usage_source_id=excluded.usage_source_id, source_app=excluded.source_app,
+			quantity=excluded.quantity, generation_id=excluded.generation_id, metadata_json=excluded.metadata_json,
+			observed_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP`,
+			pid, acct.ID, acct.CustomerID, src.ID, sourceKey, src.AppName, feature, gauge.Quantity, generation, jsonOrEmpty(gauge.Metadata, "{}")); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.Exec(`DELETE FROM saas_usage_snapshots WHERE project_id=? AND account_id=? AND source_key=? AND generation_id<>?`, pid, acct.ID, sourceKey, generation); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`INSERT INTO saas_usage_source_state
+		(project_id, account_id, usage_source_id, last_generation_id, last_success_at, last_error, failure_count, updated_at)
+		VALUES (?, ?, ?, ?, CURRENT_TIMESTAMP, '', 0, CURRENT_TIMESTAMP)
+		ON CONFLICT(project_id, account_id, usage_source_id) DO UPDATE SET
+		last_generation_id=excluded.last_generation_id, last_success_at=CURRENT_TIMESTAMP,
+		last_error='', failure_count=0, updated_at=CURRENT_TIMESTAMP`, pid, acct.ID, src.ID, generation); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func dbUsageSourceFailure(db *sql.DB, pid, accountID string, sourceID int64, errText string) error {
+	_, err := db.Exec(`INSERT INTO saas_usage_source_state
+		(project_id, account_id, usage_source_id, last_error, failure_count, updated_at)
+		VALUES (?, ?, ?, ?, 1, CURRENT_TIMESTAMP)
+		ON CONFLICT(project_id, account_id, usage_source_id) DO UPDATE SET
+		last_error=excluded.last_error, failure_count=failure_count+1, updated_at=CURRENT_TIMESTAMP`, pid, accountID, sourceID, errText)
+	return err
+}
+
+func dbUsageStaleSources(db *sql.DB, pid string, acct *Account, now time.Time, defaultFreshness time.Duration) ([]map[string]any, error) {
+	rows, err := db.Query(`SELECT s.id, s.app_name, s.tool_name, s.metadata_json,
+		COALESCE(st.last_success_at,''), COALESCE(st.last_error,''), COALESCE(st.failure_count,0)
+		FROM saas_usage_sources s
+		LEFT JOIN saas_usage_source_state st
+		  ON st.project_id=s.project_id AND st.account_id=? AND st.usage_source_id=s.id
+		WHERE s.project_id=? AND s.plan_key=? ORDER BY s.id`, acct.ID, pid, acct.PlanKey)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var stale []map[string]any
+	for rows.Next() {
+		var id, failures int64
+		var app, tool, metadata, lastSuccess, lastError string
+		if err := rows.Scan(&id, &app, &tool, &metadata, &lastSuccess, &lastError, &failures); err != nil {
+			return nil, err
+		}
+		freshness := defaultFreshness
+		meta := mapFromAny(metadata)
+		if seconds := int64Arg(meta, "freshness_seconds"); seconds > 0 {
+			freshness = time.Duration(seconds) * time.Second
+		}
+		successAt, ok := parseTimestamp(lastSuccess)
+		if ok && freshness > 0 && now.Sub(successAt) <= freshness {
+			continue
+		}
+		stale = append(stale, map[string]any{
+			"usage_source_id": id, "app_name": app, "tool_name": tool,
+			"last_success_at": lastSuccess, "last_error": lastError, "failure_count": failures,
+		})
+	}
+	return stale, rows.Err()
 }
 
 func dbUsageTotals(db *sql.DB, pid string, args map[string]any) ([]UsageTotal, error) {
@@ -2452,32 +3781,555 @@ func recordEvent(db *sql.DB, pid, accountID, eventType, actor string, payload an
 	return err
 }
 
-func dbFulfillmentRunInsert(db *sql.DB, pid, accountID string, action *PlanAction, status string, input, output any, errText string) (*FulfillmentRun, error) {
+func dbFulfillmentRunReserve(db *sql.DB, pid, accountID string, action *PlanAction, transitionID string, input any, staleAfter time.Duration) (*FulfillmentRun, string, error) {
 	res, err := db.Exec(`
 		INSERT INTO saas_fulfillment_runs
-			(project_id, account_id, plan_action_id, event, app_name, tool_name, status, input_json, output_json, error)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		pid, accountID, action.ID, action.Event, action.AppName, action.ToolName, status, jsonOrEmpty(input, "{}"), jsonOrEmpty(output, "{}"), errText)
+			(project_id, account_id, plan_action_id, transition_id, event, app_name, tool_name, status, input_json, output_json, error, attempt_count, started_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, 'pending', ?, '{}', '', 1, CURRENT_TIMESTAMP)
+		ON CONFLICT(project_id, account_id, plan_action_id, transition_id) DO NOTHING`,
+		pid, accountID, action.ID, transitionID, action.Event, action.AppName, action.ToolName, jsonOrEmpty(input, "{}"))
+	if err != nil {
+		return nil, "", err
+	}
+	if n, _ := res.RowsAffected(); n > 0 {
+		run, err := dbFulfillmentRunByTransition(db, pid, accountID, action.ID, transitionID)
+		return run, "call", err
+	}
+	run, err := dbFulfillmentRunByTransition(db, pid, accountID, action.ID, transitionID)
+	if err != nil || run == nil {
+		return nil, "", firstErr(err, errors.New("fulfillment run not found after claim"))
+	}
+	switch run.Status {
+	case "succeeded":
+		return run, "skip", nil
+	case "call_succeeded":
+		return run, "store", nil
+	case "pending":
+		started, ok := parseTimestamp(run.StartedAt)
+		if ok && time.Since(started) < staleAfter {
+			return run, "in_progress", nil
+		}
+	}
+	_, err = db.Exec(`
+		UPDATE saas_fulfillment_runs
+		SET status='pending', input_json=?, error='', attempt_count=attempt_count+1,
+		    started_at=CURRENT_TIMESTAMP, completed_at=NULL, updated_at=CURRENT_TIMESTAMP
+		WHERE project_id=? AND id=?`, jsonOrEmpty(input, "{}"), pid, run.ID)
+	if err != nil {
+		return nil, "", err
+	}
+	run, err = dbFulfillmentRunGet(db, pid, run.ID)
+	return run, "call", err
+}
+
+func dbFulfillmentRunFinish(db *sql.DB, pid string, id int64, status string, output any, errText string) (*FulfillmentRun, error) {
+	completed := "NULL"
+	if status == "succeeded" || status == "failed" {
+		completed = "CURRENT_TIMESTAMP"
+	}
+	_, err := db.Exec(`UPDATE saas_fulfillment_runs
+		SET status=?, output_json=?, error=?, completed_at=`+completed+`, updated_at=CURRENT_TIMESTAMP
+		WHERE project_id=? AND id=?`, status, jsonOrEmpty(output, "{}"), errText, pid, id)
 	if err != nil {
 		return nil, err
 	}
-	id, _ := res.LastInsertId()
+	return dbFulfillmentRunGet(db, pid, id)
+}
+
+func dbFulfillmentRunByTransition(db *sql.DB, pid, accountID string, actionID int64, transitionID string) (*FulfillmentRun, error) {
+	var id int64
+	err := db.QueryRow(`SELECT id FROM saas_fulfillment_runs WHERE project_id=? AND account_id=? AND plan_action_id=? AND transition_id=?`, pid, accountID, actionID, transitionID).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
 	return dbFulfillmentRunGet(db, pid, id)
 }
 
 func dbFulfillmentRunGet(db *sql.DB, pid string, id int64) (*FulfillmentRun, error) {
 	var r FulfillmentRun
 	var input, output string
+	var started, completed sql.NullString
 	err := db.QueryRow(`
-		SELECT id, project_id, account_id, plan_action_id, event, app_name, tool_name, status, input_json, output_json, error, created_at, updated_at
+		SELECT id, project_id, account_id, plan_action_id, transition_id, event, app_name, tool_name, status, input_json, output_json, error,
+		       attempt_count, started_at, completed_at, created_at, updated_at
 		FROM saas_fulfillment_runs WHERE project_id=? AND id=?`, pid, id).
-		Scan(&r.ID, &r.ProjectID, &r.AccountID, &r.PlanActionID, &r.Event, &r.AppName, &r.ToolName, &r.Status, &input, &output, &r.Error, &r.CreatedAt, &r.UpdatedAt)
+		Scan(&r.ID, &r.ProjectID, &r.AccountID, &r.PlanActionID, &r.TransitionID, &r.Event, &r.AppName, &r.ToolName, &r.Status, &input, &output, &r.Error,
+			&r.AttemptCount, &started, &completed, &r.CreatedAt, &r.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
 	r.Input = json.RawMessage(input)
 	r.Output = json.RawMessage(output)
+	if started.Valid {
+		r.StartedAt = started.String
+	}
+	if completed.Valid {
+		r.CompletedAt = completed.String
+	}
 	return &r, nil
+}
+
+func dbLifecycleTransitionReserve(db *sql.DB, pid, accountID, event, fromStatus, toStatus, sourceKey string) (*LifecycleTransition, error) {
+	if sourceKey != "" {
+		if existing, err := dbLifecycleTransitionBySource(db, pid, accountID, sourceKey); err != nil || existing != nil {
+			return existing, err
+		}
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	var seq int64
+	if err := tx.QueryRow(`SELECT COALESCE(MAX(sequence),0)+1 FROM saas_lifecycle_transitions WHERE project_id=? AND account_id=?`, pid, accountID).Scan(&seq); err != nil {
+		return nil, err
+	}
+	id := newID("trn")
+	_, err = tx.Exec(`INSERT INTO saas_lifecycle_transitions
+		(id, project_id, account_id, sequence, event, from_status, to_status, source_key, status)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending')`, id, pid, accountID, seq, event, fromStatus, toStatus, sourceKey)
+	if err != nil {
+		if sourceKey != "" {
+			_ = tx.Rollback()
+			return dbLifecycleTransitionBySource(db, pid, accountID, sourceKey)
+		}
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return dbLifecycleTransitionGet(db, pid, id)
+}
+
+func dbLifecycleTransitionComplete(db *sql.DB, pid string, transition *LifecycleTransition, status string) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`UPDATE saas_accounts SET status=?, last_error='', updated_at=CURRENT_TIMESTAMP WHERE project_id=? AND id=?`, status, pid, transition.AccountID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`UPDATE saas_lifecycle_transitions SET status='completed', completed_at=CURRENT_TIMESTAMP WHERE project_id=? AND id=?`, pid, transition.ID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func dbLifecycleTransitionGet(db *sql.DB, pid, id string) (*LifecycleTransition, error) {
+	var t LifecycleTransition
+	var completed sql.NullString
+	err := db.QueryRow(`SELECT id, project_id, account_id, sequence, event, from_status, to_status, source_key, status, created_at, completed_at
+		FROM saas_lifecycle_transitions WHERE project_id=? AND id=?`, pid, id).
+		Scan(&t.ID, &t.ProjectID, &t.AccountID, &t.Sequence, &t.Event, &t.FromStatus, &t.ToStatus, &t.SourceKey, &t.Status, &t.CreatedAt, &completed)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if completed.Valid {
+		t.CompletedAt = completed.String
+	}
+	return &t, err
+}
+
+func dbLifecycleTransitionBySource(db *sql.DB, pid, accountID, sourceKey string) (*LifecycleTransition, error) {
+	var id string
+	err := db.QueryRow(`SELECT id FROM saas_lifecycle_transitions
+		WHERE project_id=? AND account_id=? AND source_key=? AND status='pending'
+		ORDER BY sequence DESC LIMIT 1`, pid, accountID, sourceKey).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return dbLifecycleTransitionGet(db, pid, id)
+}
+
+func dbCheckoutClaim(db *sql.DB, pid, idempotencyKey, fingerprint string, customer *Customer, plan *Plan, slug, paymentMode string) (*Checkout, bool, error) {
+	id := newID("chk")
+	if _, err := db.Exec(`INSERT INTO saas_checkouts
+		(id, project_id, idempotency_key, request_fingerprint, customer_id, plan_key, slug, owner_email, payment_mode)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(project_id, idempotency_key) DO NOTHING`,
+		id, pid, idempotencyKey, fingerprint, customer.ID, plan.Key, slug, customer.Email, paymentMode); err != nil {
+		return nil, false, err
+	}
+	checkout, err := dbCheckoutByIdempotencyKey(db, pid, idempotencyKey)
+	if err != nil || checkout == nil {
+		return checkout, false, firstErr(err, errors.New("checkout reservation failed"))
+	}
+	if checkout.RequestFingerprint != fingerprint {
+		return nil, false, errors.New("idempotency key was already used for a different checkout")
+	}
+	now := time.Now().UTC()
+	res, err := db.Exec(`UPDATE saas_checkouts SET
+		status='processing', attempt_count=attempt_count+1, last_error='',
+		payment_url=CASE WHEN status='setup_expired' THEN '' ELSE payment_url END,
+		provider_session_id=CASE WHEN status='setup_expired' THEN '' ELSE provider_session_id END,
+		session_expires_at=CASE WHEN status='setup_expired' THEN NULL ELSE session_expires_at END,
+		lease_until=?, started_at=COALESCE(started_at, ?), updated_at=CURRENT_TIMESTAMP
+		WHERE project_id=? AND id=? AND (
+			status IN ('pending','failed','payment_failed','setup_expired') OR
+			(status='processing' AND (lease_until IS NULL OR lease_until < ?))
+		)`, now.Add(commerceClaimTimeout).Format(time.RFC3339), now.Format(time.RFC3339), pid, checkout.ID, now.Format(time.RFC3339))
+	if err != nil {
+		return nil, false, err
+	}
+	checkout, err = dbCheckoutGet(db, pid, checkout.ID)
+	if err != nil {
+		return nil, false, err
+	}
+	claimed, _ := res.RowsAffected()
+	return checkout, claimed == 1, nil
+}
+
+func dbCheckoutSetSubscription(db *sql.DB, pid, id string, subscriptionID int64) error {
+	_, err := db.Exec(`UPDATE saas_checkouts SET subscription_id=?, stage='subscription_created', updated_at=CURRENT_TIMESTAMP WHERE project_id=? AND id=?`, subscriptionID, pid, id)
+	return err
+}
+
+func dbCheckoutSetAccount(db *sql.DB, pid, id, accountID string) error {
+	_, err := db.Exec(`UPDATE saas_checkouts SET account_id=?, stage='account_created', updated_at=CURRENT_TIMESTAMP WHERE project_id=? AND id=?`, accountID, pid, id)
+	return err
+}
+
+func dbCheckoutSetBillingCustomer(db *sql.DB, pid, id string, billingCustomerID int64) error {
+	_, err := db.Exec(`UPDATE saas_checkouts SET billing_customer_id=?, updated_at=CURRENT_TIMESTAMP WHERE project_id=? AND id=?`, billingCustomerID, pid, id)
+	return err
+}
+
+func dbCheckoutSetCycle(db *sql.DB, pid, id string, cycleID int64) error {
+	_, err := db.Exec(`UPDATE saas_checkouts SET cycle_id=?, stage='cycle_created', updated_at=CURRENT_TIMESTAMP WHERE project_id=? AND id=?`, cycleID, pid, id)
+	return err
+}
+
+func dbCheckoutSetTrial(db *sql.DB, pid, id, trialEnd string) error {
+	_, err := db.Exec(`UPDATE saas_checkouts SET trial_ends_at=?, updated_at=CURRENT_TIMESTAMP WHERE project_id=? AND id=?`, nullString(trialEnd), pid, id)
+	return err
+}
+
+func dbCheckoutSetSetup(db *sql.DB, pid, id string, setupOut map[string]any) error {
+	setup := unwrapMap(setupOut, "setup_session")
+	url := firstNonEmpty(strArg(setupOut, "url"), strArg(setup, "url"))
+	sessionID := firstNonEmpty(strArg(setup, "provider_session_id"), strArg(setup, "stripe_session_id"), strArg(setup, "id"))
+	expiresAt := timeStringFromAny(setup["expires_at"])
+	_, err := db.Exec(`UPDATE saas_checkouts SET payment_url=?, provider_session_id=?, session_expires_at=?, stage='setup_session_created', updated_at=CURRENT_TIMESTAMP WHERE project_id=? AND id=?`, url, sessionID, nullString(expiresAt), pid, id)
+	return err
+}
+
+func dbCheckoutSetInvoice(db *sql.DB, pid, id string, cycleID, invoiceID int64, paymentLink map[string]any) error {
+	url := strArg(paymentLink, "url")
+	sessionID := firstNonEmpty(strArg(paymentLink, "stripe_session_id"), strArg(paymentLink, "provider_session_id"))
+	expiresAt := timeStringFromAny(paymentLink["expires_at"])
+	_, err := db.Exec(`UPDATE saas_checkouts SET cycle_id=?, invoice_id=?, payment_url=?, provider_session_id=?, session_expires_at=?, stage='payment_link_created', updated_at=CURRENT_TIMESTAMP WHERE project_id=? AND id=?`, cycleID, invoiceID, url, sessionID, nullString(expiresAt), pid, id)
+	return err
+}
+
+func dbCheckoutSetPaymentMethod(db *sql.DB, pid, id string, paymentMethodID int64) error {
+	_, err := db.Exec(`UPDATE saas_checkouts SET payment_method_id=?, stage='payment_method_attached', updated_at=CURRENT_TIMESTAMP WHERE project_id=? AND id=?`, paymentMethodID, pid, id)
+	return err
+}
+
+func dbCheckoutComplete(db *sql.DB, pid, id, status string, result map[string]any) error {
+	if _, err := db.Exec(`UPDATE saas_checkouts SET status=?, result_json=?, last_error='', lease_until=NULL, completed_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP WHERE project_id=? AND id=?`, status, jsonOrEmpty(result, "{}"), pid, id); err != nil {
+		return err
+	}
+	_, err := db.Exec(`UPDATE saas_accounts SET metadata_json=json_set(metadata_json, '$.checkout_status', ?), updated_at=CURRENT_TIMESTAMP
+		WHERE project_id=? AND id=(SELECT account_id FROM saas_checkouts WHERE project_id=? AND id=?)`, status, pid, pid, id)
+	return err
+}
+
+func dbCheckoutSetStatus(db *sql.DB, pid, id, status, message string) error {
+	_, err := db.Exec(`UPDATE saas_checkouts SET status=?, last_error=?, lease_until=NULL, updated_at=CURRENT_TIMESTAMP WHERE project_id=? AND id=?`, status, message, pid, id)
+	return err
+}
+
+func dbCheckoutFail(db *sql.DB, pid, id, message string) error {
+	return dbCheckoutSetStatus(db, pid, id, "failed", message)
+}
+
+func dbCheckoutLookup(db *sql.DB, pid string, args map[string]any) (*Checkout, error) {
+	if id := strArg(args, "checkout_id"); id != "" {
+		return dbCheckoutGet(db, pid, id)
+	}
+	if key := strArg(args, "idempotency_key"); key != "" {
+		return dbCheckoutByIdempotencyKey(db, pid, key)
+	}
+	if slug := strArg(args, "slug"); slug != "" {
+		return scanCheckout(db.QueryRow(checkoutSelect()+` WHERE project_id=? AND slug=?`, pid, slug))
+	}
+	return nil, errors.New("checkout_id, idempotency_key, or slug required")
+}
+
+func dbCheckoutGet(db *sql.DB, pid, id string) (*Checkout, error) {
+	return scanCheckout(db.QueryRow(checkoutSelect()+` WHERE project_id=? AND id=?`, pid, id))
+}
+
+func dbCheckoutByIdempotencyKey(db *sql.DB, pid, key string) (*Checkout, error) {
+	return scanCheckout(db.QueryRow(checkoutSelect()+` WHERE project_id=? AND idempotency_key=?`, pid, key))
+}
+
+func dbCheckoutTrialBySubscription(db *sql.DB, pid string, subscriptionID int64) (*Checkout, error) {
+	return scanCheckout(db.QueryRow(checkoutSelect()+` WHERE project_id=? AND subscription_id=? AND status='trialing' ORDER BY created_at DESC LIMIT 1`, pid, subscriptionID))
+}
+
+func dbCheckoutExpiredSetups(db *sql.DB, pid string, now time.Time) ([]*Checkout, error) {
+	rows, err := db.Query(checkoutSelect()+` WHERE project_id=? AND status='awaiting_payment_method' AND session_expires_at IS NOT NULL AND session_expires_at < ? ORDER BY id LIMIT 100`, pid, now.Format(time.RFC3339))
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*Checkout
+	for rows.Next() {
+		checkout, err := scanCheckout(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, checkout)
+	}
+	return out, rows.Err()
+}
+
+func checkoutSelect() string {
+	return `SELECT id, project_id, idempotency_key, request_fingerprint, customer_id, COALESCE(account_id,''), plan_key, slug, owner_email,
+		subscription_id, cycle_id, billing_customer_id, invoice_id, payment_method_id, status, stage, payment_mode,
+		payment_url, provider_session_id, trial_ends_at, session_expires_at, attempt_count, result_json, last_error,
+		lease_until, started_at, completed_at, created_at, updated_at FROM saas_checkouts`
+}
+
+func scanCheckout(row rowScanner) (*Checkout, error) {
+	var checkout Checkout
+	var subscriptionID, cycleID, billingCustomerID, invoiceID, paymentMethodID sql.NullInt64
+	var trialEnd, sessionExpiry, leaseUntil, startedAt, completedAt sql.NullString
+	var result string
+	err := row.Scan(&checkout.ID, &checkout.ProjectID, &checkout.IdempotencyKey, &checkout.RequestFingerprint, &checkout.CustomerID, &checkout.AccountID,
+		&checkout.PlanKey, &checkout.Slug, &checkout.OwnerEmail, &subscriptionID, &cycleID, &billingCustomerID, &invoiceID, &paymentMethodID,
+		&checkout.Status, &checkout.Stage, &checkout.PaymentMode, &checkout.PaymentURL, &checkout.ProviderSessionID,
+		&trialEnd, &sessionExpiry, &checkout.AttemptCount, &result, &checkout.LastError, &leaseUntil, &startedAt, &completedAt,
+		&checkout.CreatedAt, &checkout.UpdatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	checkout.SubscriptionID = ptrIfValid(subscriptionID)
+	checkout.CycleID = ptrIfValid(cycleID)
+	checkout.BillingCustomerID = ptrIfValid(billingCustomerID)
+	checkout.InvoiceID = ptrIfValid(invoiceID)
+	checkout.PaymentMethodID = ptrIfValid(paymentMethodID)
+	checkout.Result = json.RawMessage(result)
+	if trialEnd.Valid {
+		checkout.TrialEndsAt = trialEnd.String
+	}
+	if sessionExpiry.Valid {
+		checkout.SessionExpiresAt = sessionExpiry.String
+	}
+	if leaseUntil.Valid {
+		checkout.LeaseUntil = leaseUntil.String
+	}
+	if startedAt.Valid {
+		checkout.StartedAt = startedAt.String
+	}
+	if completedAt.Valid {
+		checkout.CompletedAt = completedAt.String
+	}
+	return &checkout, nil
+}
+
+func dbCommerceCycleClaim(db *sql.DB, pid, accountID string, subscriptionID, cycleID int64) (*CommerceOperation, bool, error) {
+	key := fmt.Sprintf("subscription:%d:cycle:%d", subscriptionID, cycleID)
+	if _, err := db.Exec(`INSERT INTO saas_commerce_operations
+		(project_id, operation_key, account_id, subscription_id, cycle_id)
+		VALUES (?, ?, ?, ?, ?)
+		ON CONFLICT(project_id, operation_key) DO NOTHING`, pid, key, accountID, subscriptionID, cycleID); err != nil {
+		return nil, false, err
+	}
+	now := time.Now().UTC()
+	leaseUntil := now.Add(commerceClaimTimeout).Format(time.RFC3339)
+	res, err := db.Exec(`UPDATE saas_commerce_operations SET
+		status='processing_billing', attempt_count=attempt_count+1, last_error='',
+		lease_until=?, started_at=COALESCE(started_at, ?), updated_at=CURRENT_TIMESTAMP
+		WHERE project_id=? AND operation_key=? AND (
+			status IN ('pending','failed_billing') OR
+			(status='processing_billing' AND (lease_until IS NULL OR lease_until < ?))
+		)`, leaseUntil, now.Format(time.RFC3339), pid, key, now.Format(time.RFC3339))
+	if err != nil {
+		return nil, false, err
+	}
+	op, err := dbCommerceOperationByKey(db, pid, key)
+	if err != nil {
+		return nil, false, err
+	}
+	claimed, _ := res.RowsAffected()
+	return op, claimed == 1, nil
+}
+
+func dbCommercePaymentClaim(db *sql.DB, pid string, invoiceID int64) (*CommerceOperation, bool, error) {
+	op, err := dbCommerceOperationByInvoice(db, pid, invoiceID)
+	if err != nil || op == nil || op.Status == "paid" {
+		return op, false, err
+	}
+	now := time.Now().UTC()
+	leaseUntil := now.Add(commerceClaimTimeout).Format(time.RFC3339)
+	res, err := db.Exec(`UPDATE saas_commerce_operations SET
+		status='processing_payment', attempt_count=attempt_count+1, last_error='', lease_until=?, updated_at=CURRENT_TIMESTAMP
+		WHERE project_id=? AND id=? AND (
+			status IN ('awaiting_payment','failed_billing','failed_payment') OR
+			(status='processing_payment' AND (lease_until IS NULL OR lease_until < ?))
+		)`, leaseUntil, pid, op.ID, now.Format(time.RFC3339))
+	if err != nil {
+		return nil, false, err
+	}
+	op, err = dbCommerceOperationGet(db, pid, op.ID)
+	if err != nil {
+		return nil, false, err
+	}
+	claimed, _ := res.RowsAffected()
+	return op, claimed == 1, nil
+}
+
+func dbCommerceOperationSetCheckout(db *sql.DB, pid string, id int64, checkoutID string) error {
+	_, err := db.Exec(`UPDATE saas_commerce_operations SET checkout_id=?, updated_at=CURRENT_TIMESTAMP WHERE project_id=? AND id=?`, checkoutID, pid, id)
+	return err
+}
+
+func dbCommerceOperationSetCustomer(db *sql.DB, pid string, id, billingCustomerID int64) error {
+	_, err := db.Exec(`UPDATE saas_commerce_operations SET billing_customer_id=?, updated_at=CURRENT_TIMESTAMP
+		WHERE project_id=? AND id=?`, billingCustomerID, pid, id)
+	return err
+}
+
+func dbCommerceOperationSetPrepared(db *sql.DB, pid string, id int64, prepared map[string]any) error {
+	_, err := db.Exec(`UPDATE saas_commerce_operations SET prepared_json=?, stage='prepared', updated_at=CURRENT_TIMESTAMP
+		WHERE project_id=? AND id=?`, jsonOrEmpty(prepared, "{}"), pid, id)
+	return err
+}
+
+func dbCommerceOperationSetInvoice(db *sql.DB, pid string, id, invoiceID int64) error {
+	_, err := db.Exec(`UPDATE saas_commerce_operations SET invoice_id=?, stage='invoice_created', updated_at=CURRENT_TIMESTAMP
+		WHERE project_id=? AND id=?`, invoiceID, pid, id)
+	return err
+}
+
+func dbCommerceOperationSetStage(db *sql.DB, pid string, id int64, stage string) error {
+	_, err := db.Exec(`UPDATE saas_commerce_operations SET stage=?, updated_at=CURRENT_TIMESTAMP
+		WHERE project_id=? AND id=?`, stage, pid, id)
+	return err
+}
+
+func dbCommerceOperationCompleteBilling(db *sql.DB, pid string, id int64, paymentLink map[string]any) error {
+	_, err := db.Exec(`UPDATE saas_commerce_operations SET
+		status='awaiting_payment', stage='payment_link_created', payment_link_json=?, last_error='',
+		lease_until=NULL, completed_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP
+		WHERE project_id=? AND id=?`, jsonOrEmpty(paymentLink, "{}"), pid, id)
+	return err
+}
+
+func dbCommerceOperationCompletePayment(db *sql.DB, pid string, id int64) error {
+	_, err := db.Exec(`UPDATE saas_commerce_operations SET
+		status='paid', stage='subscription_activated', last_error='', lease_until=NULL,
+		completed_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP
+		WHERE project_id=? AND id=?`, pid, id)
+	return err
+}
+
+func dbCommerceOperationFail(db *sql.DB, pid string, id int64, status, message string) error {
+	_, err := db.Exec(`UPDATE saas_commerce_operations SET status=?, last_error=?, lease_until=NULL, updated_at=CURRENT_TIMESTAMP
+		WHERE project_id=? AND id=?`, status, message, pid, id)
+	return err
+}
+
+func dbCommerceOperationByKey(db *sql.DB, pid, key string) (*CommerceOperation, error) {
+	return scanCommerceOperation(db.QueryRow(commerceOperationSelect()+` WHERE project_id=? AND operation_key=?`, pid, key))
+}
+
+func dbCommerceOperationByInvoice(db *sql.DB, pid string, invoiceID int64) (*CommerceOperation, error) {
+	return scanCommerceOperation(db.QueryRow(commerceOperationSelect()+` WHERE project_id=? AND invoice_id=?`, pid, invoiceID))
+}
+
+func dbCommerceOperationGet(db *sql.DB, pid string, id int64) (*CommerceOperation, error) {
+	return scanCommerceOperation(db.QueryRow(commerceOperationSelect()+` WHERE project_id=? AND id=?`, pid, id))
+}
+
+func dbCommerceOperationsForReconciliation(db *sql.DB, pid string, before time.Time, limit int) ([]*CommerceOperation, error) {
+	rows, err := db.Query(commerceOperationSelect()+` WHERE project_id=? AND status='awaiting_payment' AND updated_at < ? ORDER BY updated_at LIMIT ?`, pid, before.Format("2006-01-02 15:04:05"), limit)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*CommerceOperation
+	for rows.Next() {
+		operation, err := scanCommerceOperation(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, operation)
+	}
+	return out, rows.Err()
+}
+
+func dbCommerceOperationTouch(db *sql.DB, pid string, id int64) error {
+	_, err := db.Exec(`UPDATE saas_commerce_operations SET updated_at=CURRENT_TIMESTAMP WHERE project_id=? AND id=?`, pid, id)
+	return err
+}
+
+func commerceOperationSelect() string {
+	return `SELECT id, project_id, operation_key, account_id, subscription_id, cycle_id, COALESCE(checkout_id,''),
+		billing_customer_id, invoice_id, status, stage, attempt_count, prepared_json, payment_link_json,
+		last_error, lease_until, started_at, completed_at, created_at, updated_at
+		FROM saas_commerce_operations`
+}
+
+func scanCommerceOperation(row rowScanner) (*CommerceOperation, error) {
+	var op CommerceOperation
+	var billingCustomerID, invoiceID sql.NullInt64
+	var prepared, paymentLink string
+	var leaseUntil, startedAt, completedAt sql.NullString
+	err := row.Scan(
+		&op.ID, &op.ProjectID, &op.OperationKey, &op.AccountID, &op.SubscriptionID, &op.CycleID, &op.CheckoutID,
+		&billingCustomerID, &invoiceID, &op.Status, &op.Stage, &op.AttemptCount, &prepared, &paymentLink,
+		&op.LastError, &leaseUntil, &startedAt, &completedAt, &op.CreatedAt, &op.UpdatedAt,
+	)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if billingCustomerID.Valid {
+		op.BillingCustomerID = &billingCustomerID.Int64
+	}
+	if invoiceID.Valid {
+		op.InvoiceID = &invoiceID.Int64
+	}
+	op.Prepared = json.RawMessage(prepared)
+	op.PaymentLink = json.RawMessage(paymentLink)
+	if leaseUntil.Valid {
+		op.LeaseUntil = leaseUntil.String
+	}
+	if startedAt.Valid {
+		op.StartedAt = startedAt.String
+	}
+	if completedAt.Valid {
+		op.CompletedAt = completedAt.String
+	}
+	return &op, nil
+}
+
+func dbLatestLifecycleTransition(db *sql.DB, pid, accountID, event string) (*LifecycleTransition, error) {
+	var id string
+	err := db.QueryRow(`SELECT id FROM saas_lifecycle_transitions WHERE project_id=? AND account_id=? AND event=? ORDER BY sequence DESC LIMIT 1`, pid, accountID, event).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return dbLifecycleTransitionGet(db, pid, id)
 }
 
 func (a *App) handlePlans(w http.ResponseWriter, r *http.Request) {
@@ -2860,6 +4712,50 @@ func mapFromAny(v any) map[string]any {
 	return out
 }
 
+func sliceFromAny(v any) []any {
+	if v == nil {
+		return nil
+	}
+	if values, ok := v.([]any); ok {
+		return values
+	}
+	b, err := json.Marshal(v)
+	if err != nil {
+		return nil
+	}
+	var out []any
+	_ = json.Unmarshal(b, &out)
+	return out
+}
+
+func configInt(ctx *sdk.AppCtx, key string, fallback int) int {
+	if ctx == nil {
+		return fallback
+	}
+	value := strings.TrimSpace(ctx.Config().Get(key))
+	if value == "" {
+		return fallback
+	}
+	n, err := strconv.Atoi(value)
+	if err != nil {
+		return fallback
+	}
+	return n
+}
+
+func parseTimestamp(value string) (time.Time, bool) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return time.Time{}, false
+	}
+	for _, layout := range []string{time.RFC3339Nano, time.RFC3339, "2006-01-02 15:04:05"} {
+		if parsed, err := time.Parse(layout, value); err == nil {
+			return parsed.UTC(), true
+		}
+	}
+	return time.Time{}, false
+}
+
 func unwrapMap(m map[string]any, key string) map[string]any {
 	if m == nil {
 		return nil
@@ -2936,6 +4832,31 @@ func normalizeKey(s string) (string, error) {
 		return "", errors.New("key must be lowercase letters, digits, dots, underscores, or hyphens")
 	}
 	return s, nil
+}
+
+func ptrIfValid(value sql.NullInt64) *int64 {
+	if !value.Valid {
+		return nil
+	}
+	v := value.Int64
+	return &v
+}
+
+func nullString(value string) any {
+	if strings.TrimSpace(value) == "" {
+		return nil
+	}
+	return value
+}
+
+func timeStringFromAny(value any) string {
+	if unix := int64FromAny(value); unix > 0 {
+		return time.Unix(unix, 0).UTC().Format(time.RFC3339)
+	}
+	if parsed, ok := parseTimestamp(strFromAny(value)); ok {
+		return parsed.Format(time.RFC3339)
+	}
+	return ""
 }
 
 func newID(prefix string) string {

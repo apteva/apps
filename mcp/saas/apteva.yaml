@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: saas
 display_name: SaaS
-version: 0.1.8
+version: 0.3.0
 description: |
   Shared SaaS access control for Apteva apps. SaaS packages installed
   apps into sellable plans, creates customer accounts backed by Auth
@@ -27,8 +27,17 @@ requires:
     - name: catalog
       optional: false
     - name: billing
+      version: ">=0.8.17"
+      reason: durable invoices, Stripe payment links, reusable payment methods, and payment lifecycle events
       optional: false
+      events:
+        - invoice.paid
+        - invoice.voided
+        - invoice.refunded
+        - payment_method.attached
     - name: subscriptions
+      version: ">=0.3.1"
+      reason: durable trial expiration, generic invoice preparation, cycle updates, and cycle_due events
       optional: false
       events:
         - subscription.active
@@ -37,6 +46,7 @@ requires:
         - subscription.paused
         - subscription.cancelled
         - subscription.ended
+        - subscription.cycle_due
     - name: entitlements
       optional: false
     - name: auth
@@ -49,53 +59,89 @@ requires:
 provides:
   http_routes:
     - prefix: /
+  permissions:
+    - name: saas.read
+      description: Read SaaS plans, accounts, checkouts, usage, and access status.
+    - name: saas.checkout
+      description: Start customer checkouts using configured SaaS plans.
+    - name: saas.admin
+      description: Configure plans and fulfillment, manage accounts, and record administrative payments.
   mcp_tools:
     - name: saas_plan_list
       description: List SaaS plans and their features, limits, and usage sources.
+      requires: saas.read
     - name: saas_plan_get
       description: Fetch one SaaS plan.
+      requires: saas.read
     - name: saas_plan_upsert
       description: Create or update a SaaS plan linked to Catalog/Billing metadata.
+      requires: saas.admin
     - name: saas_plan_feature_add
       description: Add a feature grant to a SaaS plan.
+      requires: saas.admin
     - name: saas_plan_limit_set
       description: Set a live usage limit for a SaaS plan.
+      requires: saas.admin
     - name: saas_plan_usage_source_add
       description: Register an app/tool plus response extraction config for live usage.
+      requires: saas.admin
     - name: saas_plan_action_add
       description: Register a generic fulfillment action that calls another app/tool on a SaaS lifecycle event.
+      requires: saas.admin
     - name: saas_plan_action_update
       description: Update an existing generic fulfillment action by id.
+      requires: saas.admin
     - name: saas_plan_action_list
       description: List generic fulfillment actions for a plan.
+      requires: saas.read
     - name: saas_customer_create
       description: Find or create a SaaS customer by email.
+      requires: saas.admin
     - name: saas_fulfillment_run
       description: Run or retry configured fulfillment actions for a SaaS account lifecycle event.
+      requires: saas.admin
     - name: saas_checkout_create
       description: Orchestrate free activation, no-card trials, or paid Billing/Subscription checkout for a SaaS account.
+      requires: saas.checkout
+    - name: saas_checkout_get
+      description: Fetch durable checkout status and any payment or setup URL.
+      requires: saas.checkout
+    - name: saas_checkout_mark_paid
+      description: Administratively record a manual checkout payment through Billing.
+      requires: saas.admin
     - name: saas_account_create
       description: Create a SaaS account, Auth organization, Entitlement grants, and plan limits.
+      requires: saas.admin
     - name: saas_account_get
       description: Fetch one SaaS account.
+      requires: saas.read
     - name: saas_account_list
       description: List SaaS accounts by customer, status, or plan.
+      requires: saas.read
     - name: saas_account_suspend
       description: Suspend a SaaS account and record lifecycle state.
+      requires: saas.admin
     - name: saas_account_resume
       description: Resume a suspended, past-due, or cancelled SaaS account.
+      requires: saas.admin
     - name: saas_account_cancel
       description: Cancel a SaaS account.
+      requires: saas.admin
     - name: saas_subscription_sync
       description: Apply a subscription lifecycle status to a SaaS account.
+      requires: saas.admin
     - name: saas_usage_sync
       description: Pull live usage gauges from configured app usage sources.
+      requires: saas.admin
     - name: saas_usage_record
       description: Upsert one live usage gauge for a SaaS account.
+      requires: saas.admin
     - name: saas_usage_get
       description: Return current live usage totals and plan limits.
+      requires: saas.read
     - name: saas_access_check
       description: Check whether a SaaS account is active and within limit for a feature.
+      requires: saas.read
   ui_panels:
     - slot: project.page
       label: SaaS
@@ -115,5 +161,27 @@ db:
   driver: sqlite
   path: /data/saas.db
   migrations: migrations/
+
+config_schema:
+  - name: usage_sync_concurrency
+    type: number
+    default: 8
+    label: Usage sync concurrency
+    description: Maximum number of SaaS accounts synchronized concurrently.
+  - name: usage_sync_timeout_seconds
+    type: number
+    default: 30
+    label: Usage source timeout
+    description: Maximum time to wait for one live usage source call.
+  - name: usage_freshness_seconds
+    type: number
+    default: 300
+    label: Usage freshness
+    description: Age after which live usage is reported as unknown.
+  - name: refund_behavior
+    type: string
+    default: past_due
+    label: Refund behavior
+    description: Account transition after an invoice refund. Supported values are past_due, cancel, or ignore.
 
 upgrade_policy: auto-patch

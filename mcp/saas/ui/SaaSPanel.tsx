@@ -49,6 +49,23 @@ interface Account {
   updated_at: string;
 }
 
+interface Checkout {
+  id: string;
+  status: string;
+  payment_url?: string;
+  account_id?: string;
+  trial_ends_at?: string;
+  last_error?: string;
+}
+
+interface CheckoutResponse {
+  checkout: Checkout;
+  account?: Account;
+  status: string;
+  requires_payment: boolean;
+  url?: string;
+}
+
 interface UsageTotal {
   account_id: string;
   customer_id: number;
@@ -121,6 +138,7 @@ export default function SaaSPanel({ projectId }: NativePanelProps) {
   const [error, setError] = useState("");
   const [accessFeature, setAccessFeature] = useState("");
   const [accessResult, setAccessResult] = useState<AccessResult | null>(null);
+  const [checkout, setCheckout] = useState<CheckoutResponse | null>(null);
   const [form, setForm] = useState({
     owner_email: "",
     customer_name: "",
@@ -234,6 +252,21 @@ export default function SaaSPanel({ projectId }: NativePanelProps) {
     if (!accessFeature && features[0]) setAccessFeature(features[0]);
   }, [accessFeature, features]);
 
+  useEffect(() => {
+    if (!checkout?.checkout.id || !["processing", "awaiting_payment", "awaiting_payment_method"].includes(checkout.status)) return;
+    const timer = window.setInterval(async () => {
+      try {
+        const next = await callTool<CheckoutResponse>("saas_checkout_get", { checkout_id: checkout.checkout.id });
+        setCheckout(next);
+        if (next.account?.id) setSelectedId(next.account.id);
+        if (["active", "trialing"].includes(next.status)) await load();
+      } catch (e) {
+        setError((e as Error).message);
+      }
+    }, 3000);
+    return () => window.clearInterval(timer);
+  }, [callTool, checkout?.checkout.id, checkout?.status, load]);
+
   const createAccount = useCallback(async () => {
     setBusy("create");
     setError("");
@@ -241,16 +274,18 @@ export default function SaaSPanel({ projectId }: NativePanelProps) {
       const email = form.owner_email.trim();
       const slug = form.slug.trim();
       if (!email || !slug) throw new Error("owner email and slug are required");
-      const out = await callTool<{ account: Account }>("saas_account_create", {
+      const out = await callTool<CheckoutResponse>("saas_checkout_create", {
         owner_email: email,
         customer_name: form.customer_name.trim(),
         slug,
         plan_key: form.plan_key,
         create_owner_user: form.create_owner_user,
+        idempotency_key: `panel:${slug}`,
       });
-      setSelectedId(out.account.id);
+      setCheckout(out);
+      if (out.account?.id) setSelectedId(out.account.id);
       setForm((f) => ({ ...f, slug: "" }));
-      setStatus(`Created ${out.account.slug}`);
+      setStatus(out.status);
       await load();
     } catch (e) {
       setError((e as Error).message);
@@ -368,8 +403,18 @@ export default function SaaSPanel({ projectId }: NativePanelProps) {
             onClick={createAccount}
             className="w-full px-3 py-1.5 rounded bg-accent text-bg text-sm font-semibold disabled:opacity-50"
           >
-            {busy === "create" ? "Creating..." : "Create Account"}
+            {busy === "create" ? "Starting..." : "Start Checkout"}
           </button>
+          {checkout && (
+            <div className="border-t border-border pt-2 flex items-center gap-2">
+              <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${tone(checkout.status)}`}>{checkout.status}</span>
+              {checkout.url && (
+                <button type="button" onClick={() => window.open(checkout.url, "_blank", "noopener,noreferrer")} className="ml-auto px-2 py-1 rounded bg-bg-input text-xs hover:bg-bg-hover">
+                  Continue
+                </button>
+              )}
+            </div>
+          )}
         </section>
 
         <section className="p-3 border-b border-border">
@@ -429,10 +474,12 @@ export default function SaaSPanel({ projectId }: NativePanelProps) {
                 <Action label="Sync Usage" busy={busy === `sync:${selected.id}`} onClick={() => accountAction(selected, "sync")} />
                 {selected.status === "active" || selected.status === "past_due" ? (
                   <Action label="Suspend" busy={busy === `suspend:${selected.id}`} onClick={() => accountAction(selected, "suspend")} />
-                ) : (
+                ) : selected.status === "suspended" ? (
                   <Action label="Resume" busy={busy === `resume:${selected.id}`} onClick={() => accountAction(selected, "resume")} />
+                ) : null}
+                {selected.status !== "cancelled" && (
+                  <Action label="Cancel" tone="danger" busy={busy === `cancel:${selected.id}`} onClick={() => accountAction(selected, "cancel")} />
                 )}
-                <Action label="Cancel" tone="danger" busy={busy === `cancel:${selected.id}`} onClick={() => accountAction(selected, "cancel")} />
               </div>
             </header>
 
