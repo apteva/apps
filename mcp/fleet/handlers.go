@@ -393,7 +393,15 @@ func (a *App) toolGet(_ *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	return a.decorateView(t, events), nil
+	out := a.decorateView(t, events)
+	retained, err := a.store.getRetainedSource(id)
+	if err != nil {
+		return nil, err
+	}
+	if retained != nil {
+		out["retained_source"] = retained
+	}
+	return out, nil
 }
 
 // decorateView builds the operator-facing get response. For tenants
@@ -562,6 +570,13 @@ func (a *App) toolDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return nil, err
 	}
 	defer done()
+	retained, err := a.store.getRetainedSource(t.ID)
+	if err != nil {
+		return nil, fmt.Errorf("check retained migration source: %w", err)
+	}
+	if retained != nil {
+		return nil, errors.New("tenant has a retained migration source; run tenant_migrate_finalize before deleting the tenant")
+	}
 
 	if t.Kind == KindLocal {
 		port, _ := portFromBaseURL(t.BaseURL)
@@ -686,7 +701,16 @@ func (a *App) httpGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	events, _ := a.store.recentEvents(id, 20)
-	writeJSON(w, http.StatusOK, a.decorateView(t, events))
+	out := a.decorateView(t, events)
+	retained, retainedErr := a.store.getRetainedSource(id)
+	if retainedErr != nil {
+		writeJSONErr(w, http.StatusInternalServerError, retainedErr)
+		return
+	}
+	if retained != nil {
+		out["retained_source"] = retained
+	}
+	writeJSON(w, http.StatusOK, out)
 }
 
 // -- shared helpers ------------------------------------------------------

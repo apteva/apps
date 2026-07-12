@@ -17,7 +17,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: fleet
 display_name: Fleet
-version: 0.8.12
+version: 0.8.13
 description: Control plane for a local fleet of apteva tenants.
 author: Apteva
 scopes: [project, global]
@@ -107,6 +107,8 @@ provides:
       description: Revoke a delegated provider/integration grant.
     - name: tenant_migrate
       description: Move a Fleet tenant between local and Instances hosts — cold transfer of the data dir, re-spawn there, re-point the route.
+    - name: tenant_migrate_finalize
+      description: Permanently remove a source retained by tenant_migrate after explicit confirmation.
     - name: tenant_update
       description: Update a tenant's apteva version. Installs the requested version into a fleet-owned npm prefix, then respawns.
     - name: tenant_check_updates
@@ -132,7 +134,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: fleet/v0.8.12
+    ref: fleet/v0.8.13
     entry: mcp/fleet
   image: ghcr.io/apteva/fleet:0.1.0
   port: 8080
@@ -622,17 +624,31 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "tenant_migrate",
-			Description: "Move a Fleet-managed tenant between the local parent host and Instances VPS hosts. Cold migration: stops the source apteva-server, archives its data dir, transfers + extracts on the target host, boots apteva-server there against the moved DB (admin + api_key travel with the data), re-points the route, and removes the source copy after target health. On failure before commit, the source is restarted and the row remains unchanged. Args: tenant_id (required), instance_id (required; 0 = local parent, >0 = Instances row id), port? (target port; auto if omitted).",
+			Description: "Move a Fleet-managed tenant between the local parent host and Instances VPS hosts. Cold migration: stops the source apteva-server, transfers the data dir, boots and health-checks the target, then re-points the route. Set retain_source=true to leave the stopped source data intact until tenant_migrate_finalize. On failure before commit, the source is restarted and the row remains unchanged. Args: tenant_id, instance_id (0 = local parent, >0 = Instances row id), port?, retain_source?.",
 			InputSchema: map[string]any{
 				"type": "object",
 				"properties": map[string]any{
-					"tenant_id":   map[string]any{"type": "string"},
-					"instance_id": map[string]any{"type": "integer"},
-					"port":        map[string]any{"type": "integer"},
+					"tenant_id":     map[string]any{"type": "string"},
+					"instance_id":   map[string]any{"type": "integer"},
+					"port":          map[string]any{"type": "integer"},
+					"retain_source": map[string]any{"type": "boolean"},
 				},
 				"required": []string{"tenant_id", "instance_id"},
 			},
 			Handler: a.toolMigrate,
+		},
+		{
+			Name:        "tenant_migrate_finalize",
+			Description: "Inspect or permanently remove the stopped source retained by tenant_migrate. Omit confirm for a read-only preview; confirm=true permanently deletes only the recorded old host/path after verifying it is not the tenant's current location. Args: tenant_id, confirm?.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"tenant_id": map[string]any{"type": "string"},
+					"confirm":   map[string]any{"type": "boolean"},
+				},
+				"required": []string{"tenant_id"},
+			},
+			Handler: a.toolMigrateFinalize,
 		},
 		{
 			Name:        "tenant_detach_domain",

@@ -119,6 +119,17 @@ type Event struct {
 	CreatedAt time.Time `json:"created_at"`
 }
 
+// RetainedSource records a stopped source data directory left behind by a
+// successful cross-host migration. It can only be removed through the
+// explicit tenant_migrate_finalize confirmation path.
+type RetainedSource struct {
+	TenantID         string    `json:"tenant_id"`
+	SourceInstanceID int64     `json:"source_instance_id"`
+	SourceConfigDir  string    `json:"source_config_dir"`
+	SourceSlug       string    `json:"source_slug"`
+	CreatedAt        time.Time `json:"created_at"`
+}
+
 type store struct{ db *sql.DB }
 
 func newID() string {
@@ -412,6 +423,40 @@ func (s *store) setLocation(id string, instanceID int64, baseURL, configDir stri
 		`UPDATE fleet_tenants SET instance_id = ?, base_url = ?, config_dir = ?, updated_at = ? WHERE id = ?`,
 		instanceID, baseURL, configDir, time.Now().UTC(), id,
 	)
+	return err
+}
+
+func (s *store) createRetainedSource(r *RetainedSource) error {
+	if r == nil || strings.TrimSpace(r.TenantID) == "" {
+		return errors.New("retained source tenant_id required")
+	}
+	r.CreatedAt = time.Now().UTC()
+	_, err := s.db.Exec(`
+		INSERT INTO fleet_retained_sources
+			(tenant_id, source_instance_id, source_config_dir, source_slug, created_at)
+		VALUES (?, ?, ?, ?, ?)`,
+		r.TenantID, r.SourceInstanceID, r.SourceConfigDir, r.SourceSlug, r.CreatedAt,
+	)
+	return err
+}
+
+func (s *store) getRetainedSource(tenantID string) (*RetainedSource, error) {
+	r := &RetainedSource{}
+	err := s.db.QueryRow(`
+		SELECT tenant_id, source_instance_id, source_config_dir, source_slug, created_at
+		FROM fleet_retained_sources WHERE tenant_id = ?`, tenantID,
+	).Scan(&r.TenantID, &r.SourceInstanceID, &r.SourceConfigDir, &r.SourceSlug, &r.CreatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return r, nil
+}
+
+func (s *store) deleteRetainedSource(tenantID string) error {
+	_, err := s.db.Exec(`DELETE FROM fleet_retained_sources WHERE tenant_id = ?`, tenantID)
 	return err
 }
 

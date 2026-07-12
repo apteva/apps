@@ -232,6 +232,13 @@ interface CredentialsReveal {
 interface GetResp {
   tenant: Tenant;
   events: FleetEvent[] | null;
+  retained_source?: {
+    tenant_id: string;
+    source_instance_id: number;
+    source_config_dir: string;
+    source_slug: string;
+    created_at: string;
+  };
   // Only populated while tenant.status === "setup_pending"; surfaced
   // by handlers.go's decorateView so the operator can recover the
   // info on refresh without re-running tenant_create.
@@ -441,6 +448,7 @@ export default function FleetPanel({ projectId, installId }: NativePanelProps) {
       <TenantDetail
         tenant={selected}
         events={detail?.events ?? null}
+        retainedSource={detail?.retained_source ?? null}
         setupToken={detail?.setup_token ?? null}
         setupURL={detail?.setup_url ?? null}
         meta={meta}
@@ -566,12 +574,13 @@ export default function FleetPanel({ projectId, installId }: NativePanelProps) {
           tenant={showMigrate}
           meta={meta}
           onClose={() => setShowMigrate(null)}
-          onSubmit={async ({ instance_id, port }) => {
+          onSubmit={async ({ instance_id, port, retain_source }) => {
             try {
               await callTool("tenant_migrate", {
                 tenant_id: showMigrate.id,
                 instance_id,
                 ...(port ? { port } : {}),
+                retain_source,
               });
               await refreshList({ quiet: true });
               if (selectedId) await refreshDetail(selectedId);
@@ -794,6 +803,7 @@ function KindGlyph({ kind }: { kind: Tenant["kind"] }) {
 function TenantDetail({
   tenant,
   events,
+  retainedSource,
   setupToken,
   setupURL,
   meta,
@@ -808,6 +818,7 @@ function TenantDetail({
 }: {
   tenant: Tenant | null;
   events: FleetEvent[] | null;
+  retainedSource: GetResp["retained_source"] | null;
   setupToken: string | null;
   setupURL: string | null;
   meta: MetaResp | null;
@@ -823,6 +834,7 @@ function TenantDetail({
   const [busy, setBusy] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [confirmFinalize, setConfirmFinalize] = useState(false);
   const [supportURL, setSupportURL] = useState<{ url: string; expires_at?: string } | null>(null);
   const [supportDialog, setSupportDialog] = useState(false);
   const [supportReason, setSupportReason] = useState("");
@@ -833,6 +845,7 @@ function TenantDetail({
     setBusy(null);
     setErr(null);
     setConfirmDelete(false);
+    setConfirmFinalize(false);
     setSupportURL(null);
     setSupportDialog(false);
     setSupportReason("");
@@ -995,6 +1008,36 @@ function TenantDetail({
           </a>
           {supportURL.expires_at && (
             <span className="text-text-dim ml-auto">expires {formatTime(supportURL.expires_at)}</span>
+          )}
+        </div>
+      )}
+
+      {retainedSource && (
+        <div className="px-4 py-2 text-xs border-b border-border bg-warn/5 flex flex-wrap items-center gap-2">
+          <span className="text-text-dim">Stopped migration source retained</span>
+          <span className="font-mono text-text">
+            instance {retainedSource.source_instance_id} · {retainedSource.source_config_dir}
+          </span>
+          <span className="flex-1" />
+          {confirmFinalize ? (
+            <>
+              <span className="text-error">Permanently remove retained source?</span>
+              <ActionButton
+                label="Confirm removal"
+                tone="danger"
+                busy={busy === "finalize"}
+                onClick={async () => {
+                  await run("finalize", "tenant_migrate_finalize", {
+                    tenant_id: tenant.id,
+                    confirm: true,
+                  });
+                  setConfirmFinalize(false);
+                }}
+              />
+              <ActionButton label="Cancel" onClick={() => setConfirmFinalize(false)} />
+            </>
+          ) : (
+            <ActionButton label="Finalize source" onClick={() => setConfirmFinalize(true)} />
           )}
         </div>
       )}
@@ -1786,13 +1829,14 @@ function MoveTenantDialog({
   tenant: Tenant;
   meta: MetaResp;
   onClose: () => void;
-  onSubmit: (args: { instance_id: number; port?: number }) => Promise<{ ok: boolean; error?: string }>;
+  onSubmit: (args: { instance_id: number; port?: number; retain_source: boolean }) => Promise<{ ok: boolean; error?: string }>;
 }) {
   const currentID = tenant.instance_id ?? 0;
   const hostOptions = hostPickerOptions(meta, currentID);
   const defaultTarget = hostOptions.find((i) => i.id !== currentID)?.id ?? currentID;
   const [instanceID, setInstanceID] = useState(defaultTarget);
   const [port, setPort] = useState("");
+  const [retainSource, setRetainSource] = useState(true);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
@@ -1830,6 +1874,17 @@ function MoveTenantDialog({
           className="w-full px-2 py-1.5 text-sm rounded-md border border-border bg-bg-card text-text font-mono"
         />
       </Label>
+      {!sameHost && (
+        <label className="flex items-center gap-2 text-xs text-text">
+          <input
+            type="checkbox"
+            checked={retainSource}
+            onChange={(e) => setRetainSource(e.target.checked)}
+            className="h-3.5 w-3.5"
+          />
+          Retain stopped source until explicit finalization
+        </label>
+      )}
       {target && (
         <div className="text-xs text-text-dim font-mono">
           {tenant.base_url} → {target.id === 0 ? "local server" : `${target.name} (${target.public_ipv4})`}
@@ -1856,6 +1911,7 @@ function MoveTenantDialog({
             const r = await onSubmit({
               instance_id: instanceID,
               ...(port.trim() ? { port: Number(port) } : {}),
+              retain_source: !sameHost && retainSource,
             });
             setBusy(false);
             if (!r.ok) setErr(r.error || "failed");
