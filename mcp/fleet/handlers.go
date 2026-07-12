@@ -76,10 +76,13 @@ func (a *App) publicTenantView(t *Tenant) *Tenant {
 // tenant_attach_key to hand fleet the resulting api_key.
 
 func (a *App) toolCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	slug := strings.ToLower(strings.TrimSpace(getStr(args, "slug")))
+	slug, err := validatedTenantSlug(getStr(args, "slug"))
+	if err != nil {
+		return nil, err
+	}
 	owner := getStr(args, "owner_email")
-	if slug == "" || owner == "" {
-		return nil, errors.New("slug and owner_email are required")
+	if owner == "" {
+		return nil, errors.New("owner_email is required")
 	}
 	// Hosted dispatch: when instance_id > 0, fleet drives a remote
 	// VPS (via the Instances integration) instead of spawning a
@@ -242,18 +245,27 @@ func (a *App) toolAttachKey(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	done, err := a.beginTenantOperation(t.ID, "attach key")
+	if err != nil {
+		return nil, err
+	}
+	defer done()
 	if t.Status == StatusActive {
 		return nil, errors.New("tenant already linked; use a fresh tenant_create or rotate manually")
 	}
 	if t.Status != StatusSetupPending && t.Status != StatusStarting {
 		return nil, fmt.Errorf("tenant in status %q is not awaiting a key", t.Status)
 	}
+	baseURL, err := a.internalTenantBaseURL(ctx, t)
+	if err != nil {
+		return nil, fmt.Errorf("open tenant control channel: %w", err)
+	}
 
 	// Validate the key by hitting /api/health with auth. We accept
 	// any 200 — health is unauthenticated, so a wrong key still
 	// returns 200 with the version body. The real "is this an admin
 	// key?" check is /api/auth/status which 401s on bad keys.
-	if err := verifyAPIKey(context.Background(), t.BaseURL, apiKey); err != nil {
+	if err := verifyAPIKey(context.Background(), baseURL, apiKey); err != nil {
 		return nil, fmt.Errorf("verify api_key: %w", err)
 	}
 
@@ -270,7 +282,7 @@ func (a *App) toolAttachKey(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	// Best-effort: refresh last_seen + version now so the operator
 	// sees the row as live immediately rather than waiting up to 60s
 	// for the next health poller pass.
-	if ok, version, body, herr := probeHealth(context.Background(), t.BaseURL, apiKey); herr == nil && ok {
+	if ok, version, body, herr := probeHealth(context.Background(), baseURL, apiKey); herr == nil && ok {
 		_ = a.store.updateHealth(t.ID, true, version, body)
 	}
 
@@ -315,6 +327,11 @@ func (a *App) toolConnect(_ *sdk.AppCtx, args map[string]any) (any, error) {
 	}
 	if slug == "" {
 		slug = deriveSlug(baseURL)
+	}
+	var err error
+	slug, err = validatedTenantSlug(slug)
+	if err != nil {
+		return nil, err
 	}
 	if _, _, err := a.store.getBySlug(slug); err == nil {
 		return nil, fmt.Errorf("slug %q already in use", slug)
@@ -415,6 +432,11 @@ func (a *App) toolStart(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	done, err := a.beginTenantOperation(t.ID, "start")
+	if err != nil {
+		return nil, err
+	}
+	defer done()
 	if t.Kind != KindLocal {
 		return nil, fmt.Errorf("tenant %s is kind=%s; tenant_start is local-only (use tenant_run_remote against the remote endpoint)", id, t.Kind)
 	}
@@ -494,16 +516,21 @@ func (a *App) toolStop(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	done, err := a.beginTenantOperation(t.ID, "stop")
+	if err != nil {
+		return nil, err
+	}
+	defer done()
 	if t.Kind != KindLocal {
 		// Remote tenant — registry only.
 		_ = a.store.setStatus(t.ID, StatusSuspended, "user")
 		return map[string]any{"tenant_id": t.ID, "status": StatusSuspended}, nil
 	}
-	// Hosted: ask the VPS to stop. Same kill-by-port+pgrp semantics
-	// as local, just dispatched over SSH via instance_run_command.
+	// Hosted: stop only the process whose command line contains this
+	// tenant's exact managed data directory.
 	if t.IsHosted() {
 		port, _ := portFromBaseURL(t.BaseURL)
-		if err := stopHostedTenant(ctx, t.InstanceID, port, 10*time.Second); err != nil {
+		if err := stopHostedTenant(ctx, t.InstanceID, t.Slug, port, 10*time.Second); err != nil {
 			return nil, fmt.Errorf("stop hosted: %w", err)
 		}
 		_ = a.store.setStatus(t.ID, StatusStopped, "user")
@@ -530,14 +557,23 @@ func (a *App) toolDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	done, err := a.beginTenantOperation(t.ID, "delete")
+	if err != nil {
+		return nil, err
+	}
+	defer done()
 
 	if t.Kind == KindLocal {
 		port, _ := portFromBaseURL(t.BaseURL)
 		// Stop the process — branch on local vs hosted, same as toolStop.
 		if t.IsHosted() {
-			_ = stopHostedTenant(ctx, t.InstanceID, port, 10*time.Second)
+			if err := stopHostedTenant(ctx, t.InstanceID, t.Slug, port, 10*time.Second); err != nil {
+				return nil, fmt.Errorf("stop hosted tenant before delete: %w", err)
+			}
 		} else {
-			_ = a.stopTenantBy(t.Slug, t.ConfigDir, port, 10*time.Second)
+			if err := a.stopTenantBy(t.Slug, t.ConfigDir, port, 10*time.Second); err != nil {
+				return nil, fmt.Errorf("stop tenant before delete: %w", err)
+			}
 		}
 		if !confirm {
 			// Process stopped but data dir preserved — let the operator
@@ -549,18 +585,15 @@ func (a *App) toolDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 				"note":      "process stopped; data dir preserved at " + t.ConfigDir + ". Re-run with confirm=true to wipe and remove.",
 			}, nil
 		}
-		// Wipe data dir — local fs for local tenants, SSH rm for hosted.
+		// Wipe only the exact Fleet-managed data directory.
 		if t.ConfigDir != "" {
-			if t.IsHosted() {
-				if err := destroyHostedTenant(ctx, t.InstanceID, t.Slug); err != nil {
-					ctx.Logger().Error("fleet: rm remote config dir", "tenant", t.ID, "err", err)
-					return nil, fmt.Errorf("remove remote data dir: %w", err)
-				}
-			} else {
-				if err := os.RemoveAll(t.ConfigDir); err != nil {
-					ctx.Logger().Error("fleet: rm config dir", "tenant", t.ID, "err", err)
-					return nil, fmt.Errorf("remove data dir: %w", err)
-				}
+			host, hostErr := a.resolveFleetHost(ctx, t.InstanceID)
+			if hostErr != nil {
+				return nil, hostErr
+			}
+			if err := a.removeTenantData(ctx, host, t.Slug, t.ConfigDir); err != nil {
+				ctx.Logger().Error("fleet: remove tenant data", "tenant", t.ID, "err", err)
+				return nil, fmt.Errorf("remove tenant data: %w", err)
 			}
 		}
 	}
@@ -573,7 +606,7 @@ func (a *App) toolDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 
 // -- tenant_support_login ------------------------------------------------
 
-func (a *App) toolSupportLogin(_ *sdk.AppCtx, args map[string]any) (any, error) {
+func (a *App) toolSupportLogin(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	id := getStr(args, "tenant_id")
 	reason := getStr(args, "reason")
 	if reason == "" {
@@ -590,8 +623,12 @@ func (a *App) toolSupportLogin(_ *sdk.AppCtx, args map[string]any) (any, error) 
 	if err != nil {
 		return nil, fmt.Errorf("decrypt tenant api_key: %w", err)
 	}
+	baseURL, err := a.internalTenantBaseURL(ctx, t)
+	if err != nil {
+		return nil, fmt.Errorf("open tenant control channel: %w", err)
+	}
 	body, _ := json.Marshal(map[string]any{"reason": reason, "ttl_seconds": 900})
-	req, _ := http.NewRequest(http.MethodPost, t.BaseURL+"/api/admin/support_session", strings.NewReader(string(body)))
+	req, _ := http.NewRequest(http.MethodPost, baseURL+"/api/admin/support_session", strings.NewReader(string(body)))
 	req.Header.Set("Authorization", "Bearer "+string(key))
 	req.Header.Set("Content-Type", "application/json")
 	resp, err := httpClient.Do(req)
@@ -850,7 +887,7 @@ func (a *App) toolRevealAPIKey(_ *sdk.AppCtx, args map[string]any) (any, error) 
 	}, nil
 }
 
-func (a *App) toolResetAdminPassword(_ *sdk.AppCtx, args map[string]any) (any, error) {
+func (a *App) toolResetAdminPassword(appCtx *sdk.AppCtx, args map[string]any) (any, error) {
 	id := strings.TrimSpace(getStr(args, "tenant_id"))
 	if id == "" {
 		return nil, errors.New("tenant_id required")
@@ -859,18 +896,27 @@ func (a *App) toolResetAdminPassword(_ *sdk.AppCtx, args map[string]any) (any, e
 	if err != nil {
 		return nil, err
 	}
+	done, err := a.beginTenantOperation(t.ID, "reset admin password")
+	if err != nil {
+		return nil, err
+	}
+	defer done()
 	key, err := a.keys.open(enc)
 	if err != nil {
 		return nil, fmt.Errorf("decrypt key: %w", err)
 	}
 	apiKey := string(key)
+	baseURL, err := a.internalTenantBaseURL(appCtx, t)
+	if err != nil {
+		return nil, fmt.Errorf("open tenant control channel: %w", err)
+	}
 
 	// Resolve the user id via /api/auth/me — the api_key belongs to
 	// the admin we registered at tenant_create, so /me identifies the
 	// right target without us hardcoding a "primary admin" notion.
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	meReq, _ := http.NewRequestWithContext(ctx, http.MethodGet, t.BaseURL+"/api/auth/me", nil)
+	meReq, _ := http.NewRequestWithContext(ctx, http.MethodGet, baseURL+"/api/auth/me", nil)
 	meReq.Header.Set("Authorization", "Bearer "+apiKey)
 	meResp, err := httpClient.Do(meReq)
 	if err != nil {
@@ -895,7 +941,7 @@ func (a *App) toolResetAdminPassword(_ *sdk.AppCtx, args map[string]any) (any, e
 	newPassword := randomPassword()
 	body, _ := json.Marshal(map[string]string{"new_password": newPassword})
 	resetReq, _ := http.NewRequestWithContext(ctx, http.MethodPatch,
-		fmt.Sprintf("%s/api/users/%d/password", t.BaseURL, me.ID),
+		fmt.Sprintf("%s/api/users/%d/password", baseURL, me.ID),
 		strings.NewReader(string(body)))
 	resetReq.Header.Set("Authorization", "Bearer "+apiKey)
 	resetReq.Header.Set("Content-Type", "application/json")
@@ -1167,7 +1213,10 @@ func (a *App) toolSetTargetVersion(_ *sdk.AppCtx, args map[string]any) (any, err
 	if id == "" {
 		return nil, errors.New("tenant_id required")
 	}
-	version := strings.TrimSpace(getStr(args, "version"))
+	version, err := validateAptevaVersion(getStr(args, "version"), true)
+	if err != nil {
+		return nil, err
+	}
 	if err := a.store.setTargetVersion(id, version); err != nil {
 		return nil, err
 	}
@@ -1259,6 +1308,12 @@ func (a *App) httpDetachDomain(w http.ResponseWriter, r *http.Request) {
 // panel doesn't talk to domains/certs/routes/npm directly.
 func (a *App) httpMeta(w http.ResponseWriter, r *http.Request) {
 	projectID, _ := resolveProjectFromRequest(r) // soft — empty is OK
+	if body, ok := a.cachedMeta(projectID); ok {
+		w.Header().Set("Content-Type", "application/json")
+		w.Header().Set("Cache-Control", "private, max-age=30")
+		_, _ = w.Write(body)
+		return
+	}
 	out := map[string]any{
 		"domains_available": a.domainsAvailable(globalCtx),
 		"certs_available":   a.certsAvailable(globalCtx),
@@ -1340,7 +1395,42 @@ func (a *App) httpMeta(w http.ResponseWriter, r *http.Request) {
 	if v, err := npmLatestVersion(r.Context()); err == nil {
 		out["apteva_latest"] = v
 	}
-	writeJSON(w, http.StatusOK, out)
+	body, err := json.Marshal(out)
+	if err != nil {
+		writeJSONErr(w, http.StatusInternalServerError, err)
+		return
+	}
+	a.storeMeta(projectID, body)
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "private, max-age=30")
+	_, _ = w.Write(body)
+}
+
+const metaCacheTTL = 60 * time.Second
+
+type metaCacheEntry struct {
+	body      []byte
+	expiresAt time.Time
+}
+
+func (a *App) cachedMeta(projectID string) ([]byte, bool) {
+	a.metaMu.Lock()
+	defer a.metaMu.Unlock()
+	entry, ok := a.metaCache[projectID]
+	if !ok || time.Now().After(entry.expiresAt) {
+		delete(a.metaCache, projectID)
+		return nil, false
+	}
+	return append([]byte(nil), entry.body...), true
+}
+
+func (a *App) storeMeta(projectID string, body []byte) {
+	a.metaMu.Lock()
+	if a.metaCache == nil {
+		a.metaCache = map[string]metaCacheEntry{}
+	}
+	a.metaCache[projectID] = metaCacheEntry{body: append([]byte(nil), body...), expiresAt: time.Now().Add(metaCacheTTL)}
+	a.metaMu.Unlock()
 }
 
 // httpMigrate — POST /tenants/<id>/migrate?project_id=...

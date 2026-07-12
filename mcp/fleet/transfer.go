@@ -43,17 +43,23 @@ func tenantDataDirForHost(slug string, h fleetHost) (string, error) {
 	return remoteFleetRoot + "/" + slug, nil
 }
 
-func (a *App) pickTenantPort(h fleetHost, override int) (int, error) {
+func (a *App) pickTenantPort(ctx *sdk.AppCtx, h fleetHost, override int) (int, error) {
 	if override > 0 {
+		if err := validateTenantPort(override); err != nil {
+			return 0, err
+		}
 		if h.IsLocal() && portInUse(override) {
 			return 0, fmt.Errorf("port %d is already in use", override)
+		}
+		if !h.IsLocal() {
+			return a.pickHostedPort(ctx, h.InstanceID, override)
 		}
 		return override, nil
 	}
 	if h.IsLocal() {
 		return allocatePort()
 	}
-	return a.pickHostedPort(h.InstanceID, 0), nil
+	return a.pickHostedPort(ctx, h.InstanceID, 0)
 }
 
 func tenantVersion(t *Tenant) string {
@@ -73,17 +79,19 @@ func statusAfterRestart(prev string) string {
 	return StatusActive
 }
 
-func (a *App) stopTenantOnHost(ctx *sdk.AppCtx, t *Tenant, port int) {
+func (a *App) stopTenantOnHost(ctx *sdk.AppCtx, t *Tenant, port int) error {
 	if t.InstanceID > 0 {
-		_ = stopHostedTenant(ctx, t.InstanceID, port, 10*time.Second)
-		return
+		return stopHostedTenant(ctx, t.InstanceID, t.Slug, port, 10*time.Second)
 	}
 	if port > 0 {
-		_ = a.stopTenantBy(t.Slug, t.ConfigDir, port, 10*time.Second)
+		if err := a.stopTenantBy(t.Slug, t.ConfigDir, port, 10*time.Second); err != nil {
+			return err
+		}
 	}
 	a.procMu.Lock()
 	delete(a.procs, t.Slug)
 	a.procMu.Unlock()
+	return nil
 }
 
 func (a *App) startTenantOnHost(ctx *sdk.AppCtx, h fleetHost, tenantID, slug, dir, version string, port int, prevStatus string) (baseURL, newStatus string, err error) {
@@ -114,12 +122,17 @@ func (a *App) startTenantOnHost(ctx *sdk.AppCtx, h fleetHost, tenantID, slug, di
 	return baseURL, newStatus, nil
 }
 
-func (a *App) removeTenantData(ctx *sdk.AppCtx, h fleetHost, slug, dir string) {
+func (a *App) removeTenantData(ctx *sdk.AppCtx, h fleetHost, slug, dir string) error {
 	if h.IsLocal() {
-		_ = os.RemoveAll(dir)
-		return
+		if err := validateLocalTenantDir(slug, dir); err != nil {
+			return err
+		}
+		return os.RemoveAll(dir)
 	}
-	_ = destroyHostedTenant(ctx, h.InstanceID, slug)
+	if err := validateHostedTenantDir(slug, dir); err != nil {
+		return err
+	}
+	return destroyHostedTenant(ctx, h.InstanceID, slug)
 }
 
 func makeTenantArchiveLocal(srcDir string) ([]byte, error) {
@@ -317,17 +330,22 @@ func copyDirReadOnly(src, dst string) error {
 		if err != nil {
 			return err
 		}
-		defer in.Close()
 		out, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, info.Mode())
 		if err != nil {
+			_ = in.Close()
 			return err
 		}
-		if _, err := io.Copy(out, in); err != nil {
-			_ = out.Close()
-			return err
+		_, copyErr := io.Copy(out, in)
+		inErr := in.Close()
+		outErr := out.Close()
+		if copyErr != nil {
+			return copyErr
 		}
-		if err := out.Close(); err != nil {
-			return err
+		if inErr != nil {
+			return inErr
+		}
+		if outErr != nil {
+			return outErr
 		}
 		return os.Chtimes(target, info.ModTime(), info.ModTime())
 	})

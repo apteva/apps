@@ -157,16 +157,27 @@ func (a *App) spawnHostedTenant(ctx *sdk.AppCtx, spec hostedSpawnSpec) (setupTok
 	if spec.InstanceID == 0 || spec.InstanceIP == "" || spec.Slug == "" || spec.Port == 0 {
 		return "", "", errors.New("hosted spawn: instance_id, instance_ip, slug, port all required")
 	}
+	if _, err := validatedTenantSlug(spec.Slug); err != nil {
+		return "", "", err
+	}
+	if err := validateTenantPort(spec.Port); err != nil {
+		return "", "", err
+	}
 	if spec.AptevaVer == "" {
 		// Network-failure tolerant: fall back to "latest" string, the
 		// remote npm install will resolve it.
 		spec.AptevaVer = "latest"
+	}
+	spec.AptevaVer, err = validateAptevaVersion(spec.AptevaVer, false)
+	if err != nil {
+		return "", "", err
 	}
 
 	dataDir := remoteFleetRoot + "/" + spec.Slug
 	versionDir := remoteFleetRoot + "/versions/" + spec.AptevaVer
 	binPath := versionDir + "/node_modules/.bin/apteva"
 	logPath := dataDir + "/fleet-child.log"
+	pidPath := dataDir + "/fleet.pid"
 
 	// 1) mkdir + 2) npm install (idempotent — npm install is a no-op
 	//    if already present and we want the same version).
@@ -192,23 +203,43 @@ func (a *App) spawnHostedTenant(ctx *sdk.AppCtx, spec hostedSpawnSpec) (setupTok
 	}
 
 	// 3) Spawn under setsid so the process survives the SSH session
-	//    drop. Background it, redirect both fds to the log. apteva
-	//    binds *:port so it's reachable from the parent.
-	spawnCmd := fmt.Sprintf(
-		`setsid sh -c %s >/dev/null 2>&1 &`,
-		sh(fmt.Sprintf(
-			`%s --data-dir %s --port %d --no-browser >>%s 2>&1`,
-			binPath, dataDir, spec.Port, logPath,
-		)),
+	//    drop. It binds only to VPS loopback; Fleet reaches it through
+	//    the Instances SSH tunnel.
+	inner := fmt.Sprintf(
+		`exec env APTEVA_BIND=127.0.0.1 APTEVA_INGRESS_ENABLED=0 APTEVA_HTTP_LISTEN_ADDR= APTEVA_HTTPS_LISTEN_ADDR= %s --data-dir %s --port %d --no-browser >>%s 2>&1`,
+		sh(binPath), sh(dataDir), spec.Port, sh(logPath),
 	)
-	if _, _, err := instanceRunCommand(ctx, spec.InstanceID, spawnCmd, 10); err != nil {
-		return "", "", fmt.Errorf("spawn remote apteva: %w", err)
+	spawnCmd := fmt.Sprintf(`
+set -eu
+DATA_DIR=%s
+PID_FILE=%s
+PORT=%d
+if [ -f "$PID_FILE" ]; then
+  OLD_PID=$(cat "$PID_FILE" 2>/dev/null || true)
+  if [ -n "$OLD_PID" ] && kill -0 "$OLD_PID" 2>/dev/null; then
+    if tr '\000' '\n' < "/proc/$OLD_PID/cmdline" 2>/dev/null | grep -Fxq -- "$DATA_DIR"; then
+      echo "already running pid=$OLD_PID"; exit 0
+    fi
+    echo "refusing stale pid file owned by another process" >&2; exit 42
+  fi
+  rm -f "$PID_FILE"
+fi
+if ss -ltnH "sport = :$PORT" 2>/dev/null | grep -q . || lsof -i "tcp:$PORT" -sTCP:LISTEN >/dev/null 2>&1; then
+  echo "port $PORT is already in use" >&2
+  exit 73
+fi
+setsid sh -c %s >/dev/null 2>&1 &
+PID=$!
+echo "$PID" > "$PID_FILE"
+`, sh(dataDir), sh(pidPath), spec.Port, sh(inner))
+	if out, code, err := instanceRunCommand(ctx, spec.InstanceID, spawnCmd, 10); err != nil || code != 0 {
+		return "", "", fmt.Errorf("spawn remote apteva: %w (exit %d): %s", err, code, strings.TrimSpace(out))
 	}
 
 	baseURL = fmt.Sprintf("http://%s:%d", spec.InstanceIP, spec.Port)
 
 	// 4) Wait for /api/health to respond.
-	if err := waitForRemoteReady(ctx, baseURL, 60*time.Second); err != nil {
+	if err := a.waitForHostedReady(ctx, spec.InstanceID, spec.Port, 60*time.Second); err != nil {
 		// Capture log tail to make the failure useful.
 		tail, _, _ := instanceRunCommand(ctx, spec.InstanceID,
 			fmt.Sprintf(`tail -50 %s 2>/dev/null || true`, sh(logPath)), 5)
@@ -249,12 +280,18 @@ func (a *App) spawnHostedTenant(ctx *sdk.AppCtx, spec hostedSpawnSpec) (setupTok
 //
 // `port` is the local-to-VPS port (what's bound on the VPS, not what
 // fleet calls externally — they're the same number in v0.6).
-func stopHostedTenant(ctx *sdk.AppCtx, instanceID int64, port int, grace time.Duration) error {
+func stopHostedTenant(ctx *sdk.AppCtx, instanceID int64, slug string, port int, grace time.Duration) error {
 	if instanceID == 0 {
 		return errors.New("stopHostedTenant: instance_id required")
 	}
+	if _, err := validatedTenantSlug(slug); err != nil {
+		return err
+	}
 	if port == 0 {
 		return nil
+	}
+	if err := validateTenantPort(port); err != nil {
+		return err
 	}
 	// One round-trip: find pid+pgrp, kill -PGID, wait for port to
 	// free, escalate to SIGKILL on timeout.
@@ -262,30 +299,51 @@ func stopHostedTenant(ctx *sdk.AppCtx, instanceID int64, port int, grace time.Du
 	if graceSec <= 0 {
 		graceSec = 10
 	}
+	dataDir := remoteFleetRoot + "/" + slug
+	pidPath := dataDir + "/fleet.pid"
 	script := fmt.Sprintf(`
+set -u
 PORT=%d
 GRACE=%d
-PID=$( (lsof -ti tcp:$PORT -sTCP:LISTEN 2>/dev/null || ss -ltnpH "sport = :$PORT" 2>/dev/null | grep -oE 'pid=[0-9]+' | head -1 | cut -d= -f2) | head -1)
-if [ -z "$PID" ]; then echo "no listener"; exit 0; fi
+DATA_DIR=%s
+PID_FILE=%s
+PID=$(cat "$PID_FILE" 2>/dev/null || true)
+if [ -z "$PID" ] || ! kill -0 "$PID" 2>/dev/null; then
+  PID=$( (lsof -ti tcp:$PORT -sTCP:LISTEN 2>/dev/null || ss -ltnpH "sport = :$PORT" 2>/dev/null | grep -oE 'pid=[0-9]+' | head -1 | cut -d= -f2) | head -1)
+fi
+if [ -z "$PID" ]; then rm -f "$PID_FILE"; echo "no listener"; exit 0; fi
+case "$PID" in *[!0-9]*|'') echo "invalid tenant pid" >&2; exit 42;; esac
+if ! tr '\000' '\n' < "/proc/$PID/cmdline" 2>/dev/null | grep -Fxq -- "$DATA_DIR"; then
+  echo "refusing to stop pid=$PID: command has no exact $DATA_DIR argument" >&2
+  exit 42
+fi
 PGID=$(ps -o pgid= -p $PID 2>/dev/null | tr -d ' ')
 [ -z "$PGID" ] && PGID=$PID
+case "$PGID" in *[!0-9]*|'') echo "invalid tenant process group" >&2; exit 42;; esac
+if [ "$PGID" -le 1 ]; then echo "refusing unsafe process group $PGID" >&2; exit 42; fi
 kill -TERM -$PGID 2>/dev/null
 for i in $(seq 1 $GRACE); do
   sleep 1
   if ! ss -ltn "sport = :$PORT" 2>/dev/null | grep -q :$PORT && ! lsof -i tcp:$PORT -sTCP:LISTEN >/dev/null 2>&1; then
+    rm -f "$PID_FILE"
     echo "stopped pid=$PID pgrp=$PGID"
     exit 0
   fi
 done
 kill -KILL -$PGID 2>/dev/null
 kill -KILL $PID 2>/dev/null
+sleep 1
+if ss -ltnH "sport = :$PORT" 2>/dev/null | grep -q . || lsof -i "tcp:$PORT" -sTCP:LISTEN >/dev/null 2>&1; then
+  echo "tenant listener still active after SIGKILL" >&2
+  exit 1
+fi
+rm -f "$PID_FILE"
 echo "sigkilled pid=$PID pgrp=$PGID"
-`, port, graceSec)
-	out, _, err := instanceRunCommand(ctx, instanceID, script, graceSec+15)
-	if err != nil {
-		return fmt.Errorf("remote stop: %w", err)
+`, port, graceSec, sh(dataDir), sh(pidPath))
+	out, code, err := instanceRunCommand(ctx, instanceID, script, graceSec+15)
+	if err != nil || code != 0 {
+		return fmt.Errorf("remote stop: %w (exit %d): %s", err, code, strings.TrimSpace(out))
 	}
-	_ = out // useful in event payloads later
 	return nil
 }
 
@@ -296,7 +354,11 @@ func destroyHostedTenant(ctx *sdk.AppCtx, instanceID int64, slug string) error {
 	if instanceID == 0 || slug == "" {
 		return errors.New("destroyHostedTenant: instance_id and slug required")
 	}
-	dataDir := remoteFleetRoot + "/" + slug
+	valid, err := validatedTenantSlug(slug)
+	if err != nil {
+		return err
+	}
+	dataDir := remoteFleetRoot + "/" + valid
 	// Refuse paths that don't sit under the fleet root — paranoia
 	// against a slug containing path traversal (the slug validator
 	// already rejects '/' but belt and suspenders).
@@ -331,23 +393,85 @@ func waitForRemoteReady(_ *sdk.AppCtx, baseURL string, timeout time.Duration) er
 	}
 }
 
+func (a *App) waitForHostedReady(ctx *sdk.AppCtx, instanceID int64, port int, timeout time.Duration) error {
+	baseURL, err := a.hostedTunnelBaseURL(ctx, instanceID, port)
+	if err != nil {
+		return fmt.Errorf("open hosted readiness tunnel: %w", err)
+	}
+	return waitForRemoteReady(ctx, baseURL, timeout)
+}
+
+func hostedPortListening(ctx *sdk.AppCtx, instanceID int64, port int) (bool, error) {
+	if instanceID <= 0 {
+		return false, errors.New("hosted port check requires instance_id")
+	}
+	if err := validateTenantPort(port); err != nil {
+		return false, err
+	}
+	cmd := fmt.Sprintf(`PORT=%d; if ss -ltnH "sport = :$PORT" 2>/dev/null | grep -q . || lsof -i "tcp:$PORT" -sTCP:LISTEN >/dev/null 2>&1; then echo listening; else echo stopped; fi`, port)
+	out, code, err := instanceRunCommand(ctx, instanceID, cmd, 10)
+	if err != nil || code != 0 {
+		return false, fmt.Errorf("check hosted port: %w (exit %d): %s", err, code, strings.TrimSpace(out))
+	}
+	switch strings.TrimSpace(out) {
+	case "listening":
+		return true, nil
+	case "stopped":
+		return false, nil
+	default:
+		return false, fmt.Errorf("unexpected hosted port check response %q", strings.TrimSpace(out))
+	}
+}
+
 // pickHostedPort picks a port for a new hosted tenant. If the caller
 // passed one, use it; else default to defaultHostedTenantPort + (number
 // of existing tenants on this instance). Not race-free against a third
 // party binding that port between now and spawn, but good enough for
 // v0.6 (operator can pass an explicit port to dodge collisions).
-func (a *App) pickHostedPort(instanceID int64, override int) int {
-	if override > 0 {
-		return override
-	}
+func (a *App) pickHostedPort(ctx *sdk.AppCtx, instanceID int64, override int) (int, error) {
 	rows, _ := a.store.list(map[string]string{"kind": KindLocal}) // includes hosted (kind=local) too
-	count := 0
+	used := map[int]bool{}
 	for _, t := range rows {
 		if t.InstanceID == instanceID {
-			count++
+			if port, _ := portFromBaseURL(t.BaseURL); port > 0 {
+				used[port] = true
+			}
 		}
 	}
-	return defaultHostedTenantPort + count
+	check := func(port int) (bool, error) {
+		if err := validateTenantPort(port); err != nil {
+			return false, err
+		}
+		if used[port] {
+			return false, nil
+		}
+		cmd := fmt.Sprintf(`PORT=%d; if ss -ltnH "sport = :$PORT" 2>/dev/null | grep -q . || lsof -i "tcp:$PORT" -sTCP:LISTEN >/dev/null 2>&1; then echo used; else echo free; fi`, port)
+		out, _, err := instanceRunCommand(ctx, instanceID, cmd, 10)
+		if err != nil {
+			return false, err
+		}
+		return strings.TrimSpace(out) == "free", nil
+	}
+	if override > 0 {
+		free, err := check(override)
+		if err != nil {
+			return 0, err
+		}
+		if !free {
+			return 0, fmt.Errorf("hosted port %d is already reserved or in use", override)
+		}
+		return override, nil
+	}
+	for port := defaultHostedTenantPort; port <= 7999; port++ {
+		free, err := check(port)
+		if err != nil {
+			return 0, err
+		}
+		if free {
+			return port, nil
+		}
+	}
+	return 0, errors.New("no free hosted tenant port in range 7100-7999")
 }
 
 // sh wraps an argument in single quotes for safe shell interpolation.
@@ -366,6 +490,9 @@ func sh(s string) string {
 // stop, and the base_url differ.
 
 func (a *App) toolCreateHosted(ctx *sdk.AppCtx, args map[string]any, slug, owner string, instanceID int64) (any, error) {
+	if _, err := validatedTenantSlug(slug); err != nil {
+		return nil, err
+	}
 	if _, _, err := a.store.getBySlug(slug); err == nil {
 		return nil, fmt.Errorf("slug %q already in use", slug)
 	}
@@ -390,9 +517,16 @@ func (a *App) toolCreateHosted(ctx *sdk.AppCtx, args map[string]any, slug, owner
 			version = v
 		}
 	}
+	version, err = validateAptevaVersion(version, false)
+	if err != nil {
+		return nil, err
+	}
 
 	portOverride := intArg(args, "port", 0)
-	port := a.pickHostedPort(instanceID, portOverride)
+	port, err := a.pickHostedPort(ctx, instanceID, portOverride)
+	if err != nil {
+		return nil, err
+	}
 
 	t := &Tenant{
 		Slug: slug,
@@ -439,10 +573,13 @@ func (a *App) toolCreateHosted(ctx *sdk.AppCtx, args map[string]any, slug, owner
 	_ = a.store.recordEvent(t.ID, "spawned", "user",
 		map[string]any{"base_url": baseURL, "instance_id": instanceID, "port": port})
 
-	// Auto-setup orchestrator works against any baseURL — same code
-	// path as local. On failure, fall back to setup_pending and
-	// surface the setup_token for manual completion.
-	autoSetup, err := a.autoSetupTenant(context.Background(), baseURL, setupToken, owner, "")
+	controlURL, err := a.hostedTunnelBaseURL(ctx, instanceID, port)
+	if err != nil {
+		return nil, fmt.Errorf("open hosted setup tunnel: %w", err)
+	}
+	// Setup credentials stay inside the SSH tunnel; baseURL is only
+	// retained as the tenant's operator-facing location.
+	autoSetup, err := a.autoSetupTenant(context.Background(), controlURL, setupToken, owner, "")
 	if err != nil {
 		ctx.Logger().Warn("hosted: auto-setup failed, falling back to setup_pending",
 			"tenant", t.ID, "err", err)

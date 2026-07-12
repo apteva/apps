@@ -105,6 +105,7 @@ type ProviderGrant struct {
 	AllowedDomains     []string  `json:"allowed_domains,omitempty"`
 	AllowedFrom        []string  `json:"allowed_from,omitempty"`
 	Metadata           any       `json:"metadata,omitempty"`
+	TokenHash          string    `json:"-"`
 	CreatedAt          time.Time `json:"created_at"`
 	UpdatedAt          time.Time `json:"updated_at"`
 }

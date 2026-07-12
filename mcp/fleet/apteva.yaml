@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: fleet
 display_name: Fleet
-version: 0.8.10
+version: 0.8.12
 description: |
   Control plane for a fleet of client apteva instances. Spawns every
   tenant as a local apteva process on the parent host with admin-
@@ -58,6 +58,10 @@ requires:
 provides:
   http_routes:
     - prefix: /
+    - prefix: /transfers/
+      no_auth: true
+    - prefix: /provider-grants/
+      no_auth: true
   mcp_tools:
     # Descriptions are double-quoted because YAML disallows ": "
     # inside unquoted scalars — every "Args: …" suffix would trip the
@@ -145,7 +149,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: main
+    ref: fleet/v0.8.12
     entry: mcp/fleet
   image: ghcr.io/apteva/fleet:0.1.0
   port: 8080

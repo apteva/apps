@@ -75,6 +75,16 @@ func TestTenantTreeRoot_RejectsUnmarkedServiceAncestor(t *testing.T) {
 	}
 }
 
+func TestTenantTreeRootRejectsDataDirSubstring(t *testing.T) {
+	marker := "/var/lib/apteva-fleet/acme"
+	procs := map[int]procInfo{
+		100: {pid: 100, ppid: 1, cmdline: "unrelated --note prefix" + marker + "-other"},
+	}
+	if got, ok := tenantTreeRoot(100, marker, procs); ok {
+		t.Fatalf("substring-only process accepted as tenant root %d", got)
+	}
+}
+
 func TestProcTreePIDs_LeavesBeforeRoot(t *testing.T) {
 	procs := map[int]procInfo{
 		200: {pid: 200, ppid: 1},

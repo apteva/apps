@@ -3,7 +3,6 @@ package main
 import (
 	"errors"
 	"fmt"
-	"os"
 	"strings"
 	"time"
 
@@ -29,6 +28,11 @@ func (a *App) toolMigrate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	done, err := a.beginTenantOperation(t.ID, "migrate")
+	if err != nil {
+		return nil, err
+	}
+	defer done()
 	if t.Kind != KindLocal {
 		return nil, fmt.Errorf("only Fleet-managed local-kind tenants can be moved (this one is %q)", t.Kind)
 	}
@@ -56,7 +60,7 @@ func (a *App) toolMigrate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	targetPort, err := a.pickTenantPort(targetHost, portOverride)
+	targetPort, err := a.pickTenantPort(ctx, targetHost, portOverride)
 	if err != nil {
 		return nil, err
 	}
@@ -70,7 +74,9 @@ func (a *App) toolMigrate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		"to_port":          targetPort,
 	})
 
-	a.stopTenantOnHost(ctx, t, sourcePort)
+	if err := a.stopTenantOnHost(ctx, t, sourcePort); err != nil {
+		return nil, fmt.Errorf("stop source tenant: %w", err)
+	}
 	rollback := func(stage string, cause error) (any, error) {
 		_ = a.store.recordEvent(t.ID, "migrate_failed", "user",
 			map[string]any{"stage": stage, "error": cause.Error()})
@@ -90,13 +96,21 @@ func (a *App) toolMigrate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		if err != nil {
 			return rollback("restart on new port", err)
 		}
+		if t.Domain != "" {
+			routeTenant := *t
+			routeTenant.BaseURL = baseURL
+			if err := a.registerRouteForTenantHost(ctx, &routeTenant, t.Domain, t.Domain, "tool:tenant_migrate"); err != nil {
+				_ = a.stopTenantOnHost(ctx, &routeTenant, targetPort)
+				return rollback("route", err)
+			}
+		}
 		if err := a.store.setLocation(t.ID, targetID, baseURL, sourceDir); err != nil {
+			if t.Domain != "" {
+				_ = a.registerRouteForTenantHost(ctx, t, t.Domain, t.Domain, "tool:tenant_migrate_rollback")
+			}
 			return rollback("persist", err)
 		}
 		_ = a.store.setStatus(t.ID, newStatus, "user")
-		if t.Domain != "" {
-			a.registerRouteForTenant(ctx, t.ID, t.Domain)
-		}
 		_ = a.store.recordEvent(t.ID, "migrated", "user", map[string]any{
 			"from_instance_id": t.InstanceID,
 			"to_instance_id":   targetID,
@@ -108,53 +122,47 @@ func (a *App) toolMigrate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return map[string]any{"tenant": a.publicTenantView(out), "migrated": true, "instance_id": targetID, "base_url": baseURL}, nil
 	}
 
-	var raw []byte
-	if sourceHost.IsLocal() {
-		if _, err := os.Stat(sourceDir); err != nil {
-			return rollback("source stat", fmt.Errorf("local data dir %q not found: %w", sourceDir, err))
-		}
-		raw, err = makeTenantArchiveLocal(sourceDir)
-	} else {
-		raw, err = makeTenantArchiveRemoteCold(ctx, sourceHost.InstanceID, sourceDir, t.Slug)
-	}
-	if err != nil {
-		return rollback("archive", err)
-	}
-
-	if targetHost.IsLocal() {
-		if err := extractTenantArchiveLocal(raw, targetDir); err != nil {
-			return rollback("extract", err)
-		}
-	} else {
-		if err := extractTenantArchiveRemote(ctx, targetHost.InstanceID, raw, targetDir, t.Slug); err != nil {
-			return rollback("extract", err)
-		}
+	if err := a.transferTenantData(ctx, sourceHost, targetHost, sourceDir, targetDir, t.Slug, false); err != nil {
+		return rollback("transfer", err)
 	}
 	targetStarted := false
 	baseURL, newStatus, err := a.startTenantOnHost(ctx, targetHost, t.ID, t.Slug, targetDir, version, targetPort, prevStatus)
 	if err != nil {
-		a.removeTenantData(ctx, targetHost, t.Slug, targetDir)
+		_ = a.removeTenantData(ctx, targetHost, t.Slug, targetDir)
 		return rollback("target start", err)
 	}
 	targetStarted = true
+	if t.Domain != "" {
+		routeTenant := *t
+		routeTenant.InstanceID = targetID
+		routeTenant.BaseURL = baseURL
+		routeTenant.ConfigDir = targetDir
+		if err := a.registerRouteForTenantHost(ctx, &routeTenant, t.Domain, t.Domain, "tool:tenant_migrate"); err != nil {
+			_ = a.stopTenantOnHost(ctx, &routeTenant, targetPort)
+			_ = a.removeTenantData(ctx, targetHost, t.Slug, targetDir)
+			return rollback("route", err)
+		}
+	}
 
 	if err := a.store.setLocation(t.ID, targetID, baseURL, targetDir); err != nil {
 		if targetStarted {
 			if targetHost.IsLocal() {
 				_ = a.stopTenantBy(t.Slug, targetDir, targetPort, 10*time.Second)
 			} else {
-				_ = stopHostedTenant(ctx, targetHost.InstanceID, targetPort, 10*time.Second)
+				_ = stopHostedTenant(ctx, targetHost.InstanceID, t.Slug, targetPort, 10*time.Second)
 			}
-			a.removeTenantData(ctx, targetHost, t.Slug, targetDir)
+			_ = a.removeTenantData(ctx, targetHost, t.Slug, targetDir)
+		}
+		if t.Domain != "" {
+			_ = a.registerRouteForTenantHost(ctx, t, t.Domain, t.Domain, "tool:tenant_migrate_rollback")
 		}
 		return rollback("persist", err)
 	}
 	_ = a.store.setStatus(t.ID, newStatus, "user")
-	if t.Domain != "" {
-		a.registerRouteForTenant(ctx, t.ID, t.Domain)
-	}
 	if sourceHost.InstanceID != targetHost.InstanceID || sourceDir != targetDir {
-		a.removeTenantData(ctx, sourceHost, t.Slug, sourceDir)
+		if err := a.removeTenantData(ctx, sourceHost, t.Slug, sourceDir); err != nil {
+			return nil, fmt.Errorf("migration committed but source cleanup failed: %w", err)
+		}
 	}
 	_ = a.store.recordEvent(t.ID, "migrated", "user", map[string]any{
 		"from_instance_id": t.InstanceID,

@@ -18,8 +18,6 @@ package main
 import (
 	"context"
 	"encoding/json"
-	"fmt"
-	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -40,6 +38,7 @@ import (
 func newTestApp(t *testing.T, opts ...tk.Option) (*App, *sdk.AppCtx) {
 	t.Helper()
 	dataDir := t.TempDir()
+	t.Setenv("FLEET_DATA_ROOT", filepath.Join(dataDir, "fleet"))
 	full := append([]tk.Option{tk.WithEnv("APTEVA_DATA_DIR", dataDir)}, opts...)
 	ctx := tk.NewAppCtx(t, "apteva.yaml", full...)
 	app := &App{}
@@ -65,7 +64,7 @@ func seedTenant(t *testing.T, app *App, slug, status string) string {
 		Slug:       slug,
 		Kind:       KindLocal,
 		BaseURL:    "http://localhost:65535",
-		ConfigDir:  filepath.Join(t.TempDir(), slug),
+		ConfigDir:  filepath.Join(localDataRoot(), slug),
 		OwnerEmail: slug + "@example.com",
 		Status:     status,
 	}
@@ -177,81 +176,6 @@ func TestPortFromBaseURL(t *testing.T) {
 		if got != want {
 			t.Errorf("portFromBaseURL(%q)=%d want %d", url, got, want)
 		}
-	}
-}
-
-func TestOnMount_ReconcilePreservesRunningTenantDataAfterFleetRestart(t *testing.T) {
-	dataDir := t.TempDir()
-	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithEnv("APTEVA_DATA_DIR", dataDir))
-	app := &App{}
-	if err := app.OnMount(ctx); err != nil {
-		t.Fatalf("initial OnMount: %v", err)
-	}
-
-	tenantDir := filepath.Join(t.TempDir(), "tenant-data")
-	if err := os.MkdirAll(tenantDir, 0o700); err != nil {
-		t.Fatalf("mkdir tenant dir: %v", err)
-	}
-	markerPath := filepath.Join(tenantDir, "codex-upgrade-marker.txt")
-	marker := []byte("tenant data created before fleet restart\n")
-	if err := os.WriteFile(markerPath, marker, 0o600); err != nil {
-		t.Fatalf("write marker: %v", err)
-	}
-
-	listener, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatalf("listen tenant port: %v", err)
-	}
-	defer listener.Close()
-	port := listener.Addr().(*net.TCPAddr).Port
-
-	enc, err := app.keys.seal([]byte("sk-before-restart"))
-	if err != nil {
-		t.Fatalf("seal api key: %v", err)
-	}
-	tenant := &Tenant{
-		Slug:       "upgrade-safe",
-		Kind:       KindLocal,
-		BaseURL:    fmt.Sprintf("http://localhost:%d", port),
-		ConfigDir:  tenantDir,
-		OwnerEmail: "upgrade-safe@example.com",
-		Status:     StatusActive,
-	}
-	if err := app.store.insert(tenant, enc, nil); err != nil {
-		t.Fatalf("insert tenant: %v", err)
-	}
-	if err := app.store.bumpRespawn(tenant.ID); err != nil {
-		t.Fatalf("bump respawn: %v", err)
-	}
-
-	restarted := &App{}
-	if err := restarted.OnMount(ctx); err != nil {
-		t.Fatalf("restart OnMount: %v", err)
-	}
-	got, gotKey, err := restarted.store.get(tenant.ID)
-	if err != nil {
-		t.Fatalf("get tenant after restart: %v", err)
-	}
-	if got.Status != StatusActive {
-		t.Fatalf("status after restart = %q, want %q", got.Status, StatusActive)
-	}
-	if got.ConfigDir != tenantDir {
-		t.Fatalf("config dir after restart = %q, want %q", got.ConfigDir, tenantDir)
-	}
-	if got.RespawnAttempts != 0 {
-		t.Fatalf("respawn attempts after live-port reconcile = %d, want 0", got.RespawnAttempts)
-	}
-	opened, err := restarted.keys.open(gotKey)
-	if err != nil {
-		t.Fatalf("open api key after restart: %v", err)
-	}
-	if string(opened) != "sk-before-restart" {
-		t.Fatalf("api key changed after restart")
-	}
-	if gotMarker, err := os.ReadFile(markerPath); err != nil {
-		t.Fatalf("read marker after restart: %v", err)
-	} else if string(gotMarker) != string(marker) {
-		t.Fatalf("marker changed after restart: %q", string(gotMarker))
 	}
 }
 

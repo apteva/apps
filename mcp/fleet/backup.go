@@ -71,6 +71,11 @@ func (a *App) toolFleetTenantSnapshot(ctx *sdk.AppCtx, args map[string]any) (any
 	if err != nil {
 		return nil, err
 	}
+	done, err := a.beginTenantOperation(t.ID, "backup snapshot")
+	if err != nil {
+		return nil, err
+	}
+	defer done()
 	if t.Kind != KindLocal {
 		return nil, fmt.Errorf("tenant %s is kind=%s; only Fleet-managed local tenants can be snapshotted", id, t.Kind)
 	}
@@ -79,6 +84,9 @@ func (a *App) toolFleetTenantSnapshot(ctx *sdk.AppCtx, args map[string]any) (any
 	}
 	if t.ConfigDir == "" {
 		return nil, errors.New("tenant has no config_dir")
+	}
+	if err := validateLocalTenantDir(t.Slug, t.ConfigDir); err != nil {
+		return nil, err
 	}
 	if _, err := os.Stat(t.ConfigDir); err != nil {
 		return nil, fmt.Errorf("tenant data dir: %w", err)
@@ -90,7 +98,20 @@ func (a *App) toolFleetTenantSnapshot(ctx *sdk.AppCtx, args map[string]any) (any
 		if err := a.stopTenantBy(t.Slug, t.ConfigDir, port, 15*time.Second); err != nil {
 			return nil, fmt.Errorf("stop tenant for snapshot: %w", err)
 		}
-		defer a.restartTenantAfterBackup(ctx, t)
+	}
+	finish := func(result any, snapshotErr error) (any, error) {
+		if !wasRunning {
+			return result, snapshotErr
+		}
+		restartErr := a.restartTenantAfterBackup(ctx, t)
+		if restartErr != nil {
+			_ = a.store.setStatus(t.ID, StatusFailed, "backup")
+			if snapshotErr != nil {
+				return nil, fmt.Errorf("snapshot failed: %v; restart also failed: %w", snapshotErr, restartErr)
+			}
+			return nil, fmt.Errorf("snapshot created but tenant restart failed: %w", restartErr)
+		}
+		return result, snapshotErr
 	}
 
 	manifest := fleetTenantBackupManifest{
@@ -100,17 +121,40 @@ func (a *App) toolFleetTenantSnapshot(ctx *sdk.AppCtx, args map[string]any) (any
 		GeneratedAt:   time.Now().UTC(),
 		Tenant:        t,
 	}
+	if boolArg(args, "supports_streaming") {
+		stage, err := os.MkdirTemp(transferScratchRoot(), "backup-*")
+		if err != nil {
+			return finish(nil, err)
+		}
+		payload := filepath.Join(stage, "tenant")
+		if err := copyDirReadOnly(t.ConfigDir, payload); err != nil {
+			_ = os.RemoveAll(stage)
+			return finish(nil, err)
+		}
+		archiveURL, err := a.createBackupDownloadURL(ctx, payload, stage, manifest, tenantTransferTTL)
+		if err != nil {
+			_ = os.RemoveAll(stage)
+			return finish(nil, err)
+		}
+		mb, _ := json.Marshal(manifest)
+		_ = a.store.recordEvent(t.ID, "backup_snapshot_created", "backup", map[string]any{"mode": "stream"})
+		return finish(map[string]any{
+			"archive_url": archiveURL,
+			"manifest":    json.RawMessage(mb),
+			"streaming":   true,
+		}, nil)
+	}
 	var buf bytes.Buffer
 	if err := writeFleetTenantArchive(&buf, t.ConfigDir, manifest); err != nil {
-		return nil, err
+		return finish(nil, err)
 	}
 	mb, _ := json.Marshal(manifest)
 	_ = a.store.recordEvent(t.ID, "backup_snapshot_created", "backup", map[string]any{"bytes": buf.Len()})
-	return map[string]any{
+	return finish(map[string]any{
 		"archive_b64": base64.StdEncoding.EncodeToString(buf.Bytes()),
 		"manifest":    json.RawMessage(mb),
 		"bytes":       buf.Len(),
-	}, nil
+	}, nil)
 }
 
 func (a *App) toolFleetTenantRestore(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -121,39 +165,58 @@ func (a *App) toolFleetTenantRestore(ctx *sdk.AppCtx, args map[string]any) (any,
 	if id == "" {
 		return nil, errors.New("tenant_id required")
 	}
-	archiveB64 := getStr(args, "archive_b64")
-	if archiveB64 == "" {
-		return nil, errors.New("archive_b64 required")
-	}
 	t, _, err := a.store.get(id)
 	if err != nil {
 		return nil, err
 	}
-	if t.Kind != KindLocal {
-		return nil, fmt.Errorf("tenant %s is kind=%s; only Fleet-managed local tenants can be restored", id, t.Kind)
+	if err := validateRestorableFleetTenant(t); err != nil {
+		return nil, err
 	}
-	if t.IsHosted() {
-		return nil, errors.New("hosted tenant restore is not implemented yet")
+	if boolArg(args, "prepare_stream") {
+		uploadURL, err := a.createBackupRestoreURL(ctx, t.ID, tenantTransferTTL)
+		if err != nil {
+			return nil, err
+		}
+		return map[string]any{"upload_url": uploadURL, "streaming": true}, nil
 	}
-	if t.ConfigDir == "" {
-		return nil, errors.New("tenant has no config_dir")
+	archiveB64 := getStr(args, "archive_b64")
+	if archiveB64 == "" {
+		return nil, errors.New("archive_b64 required")
 	}
 	raw, err := base64.StdEncoding.DecodeString(archiveB64)
 	if err != nil {
 		return nil, fmt.Errorf("decode archive_b64: %w", err)
 	}
+	return a.restoreFleetTenantArchive(ctx, id, bytes.NewReader(raw))
+}
 
+func (a *App) restoreFleetTenantArchive(ctx *sdk.AppCtx, id string, archive io.Reader) (map[string]any, error) {
+	t, _, err := a.store.get(id)
+	if err != nil {
+		return nil, err
+	}
+	if err := validateRestorableFleetTenant(t); err != nil {
+		return nil, err
+	}
+	done, err := a.beginTenantOperation(t.ID, "backup restore")
+	if err != nil {
+		return nil, err
+	}
+	defer done()
 	stage, err := os.MkdirTemp("", "fleet-tenant-restore-*")
 	if err != nil {
 		return nil, err
 	}
 	defer os.RemoveAll(stage)
-	manifest, payloadDir, err := extractFleetTenantArchive(bytes.NewReader(raw), stage)
+	manifest, payloadDir, err := extractFleetTenantArchive(archive, stage)
 	if err != nil {
 		return nil, err
 	}
 	if manifest.ScopeKind != "fleet_tenant" || manifest.Provider != "fleet" {
 		return nil, errors.New("archive is not a Fleet tenant backup")
+	}
+	if manifest.Tenant == nil || manifest.Tenant.ID != t.ID || manifest.Tenant.Slug != t.Slug {
+		return nil, fmt.Errorf("backup belongs to a different tenant; expected id=%s slug=%s", t.ID, t.Slug)
 	}
 
 	port, _ := portFromBaseURL(t.BaseURL)
@@ -163,17 +226,26 @@ func (a *App) toolFleetTenantRestore(ctx *sdk.AppCtx, args map[string]any) (any,
 			return nil, fmt.Errorf("stop tenant for restore: %w", err)
 		}
 	}
+	restartAfterFailure := func(cause error) (map[string]any, error) {
+		if wasRunning {
+			if restartErr := a.restartTenantAfterBackup(ctx, t); restartErr != nil {
+				_ = a.store.setStatus(t.ID, StatusFailed, "backup")
+				return nil, fmt.Errorf("%v; restart after restore failure also failed: %w", cause, restartErr)
+			}
+		}
+		return nil, cause
+	}
 
 	backupDir := t.ConfigDir + ".prerestore-" + time.Now().UTC().Format("20060102-150405")
 	if _, err := os.Stat(t.ConfigDir); err == nil {
 		if err := os.Rename(t.ConfigDir, backupDir); err != nil {
-			return nil, fmt.Errorf("backup current data dir: %w", err)
+			return restartAfterFailure(fmt.Errorf("backup current data dir: %w", err))
 		}
 	}
 	if err := copyDir(payloadDir, t.ConfigDir); err != nil {
 		_ = os.RemoveAll(t.ConfigDir)
 		_ = os.Rename(backupDir, t.ConfigDir)
-		return nil, fmt.Errorf("restore data dir: %w", err)
+		return restartAfterFailure(fmt.Errorf("restore data dir: %w", err))
 	}
 	_ = a.store.recordEvent(t.ID, "backup_restored", "backup", map[string]any{"previous_data_dir": backupDir})
 	if wasRunning {
@@ -189,6 +261,22 @@ func (a *App) toolFleetTenantRestore(ctx *sdk.AppCtx, args map[string]any) (any,
 		"restarted":         wasRunning,
 		"manifest":          manifest,
 	}, nil
+}
+
+func validateRestorableFleetTenant(t *Tenant) error {
+	if t == nil {
+		return errors.New("tenant required")
+	}
+	if t.Kind != KindLocal {
+		return fmt.Errorf("tenant %s is kind=%s; only Fleet-managed local tenants can be restored", t.ID, t.Kind)
+	}
+	if t.IsHosted() {
+		return errors.New("hosted tenant restore is not implemented yet")
+	}
+	if t.ConfigDir == "" {
+		return errors.New("tenant has no config_dir")
+	}
+	return validateLocalTenantDir(t.Slug, t.ConfigDir)
 }
 
 func (a *App) restartTenantAfterBackup(ctx *sdk.AppCtx, t *Tenant) error {
@@ -235,7 +323,14 @@ func writeFleetTenantArchive(w io.Writer, dataDir string, manifest fleetTenantBa
 			return err
 		}
 		name := filepath.ToSlash(filepath.Join("tenant", rel))
-		h, err := tar.FileInfoHeader(info, "")
+		link := ""
+		if info.Mode()&os.ModeSymlink != 0 {
+			link, err = os.Readlink(path)
+			if err != nil {
+				return err
+			}
+		}
+		h, err := tar.FileInfoHeader(info, link)
 		if err != nil {
 			return err
 		}
@@ -243,16 +338,22 @@ func writeFleetTenantArchive(w io.Writer, dataDir string, manifest fleetTenantBa
 		if err := tw.WriteHeader(h); err != nil {
 			return err
 		}
-		if info.IsDir() {
+		if info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+			return nil
+		}
+		if !info.Mode().IsRegular() {
 			return nil
 		}
 		f, err := os.Open(path)
 		if err != nil {
 			return err
 		}
-		defer f.Close()
-		_, err = io.Copy(tw, f)
-		return err
+		_, copyErr := io.Copy(tw, f)
+		closeErr := f.Close()
+		if copyErr != nil {
+			return copyErr
+		}
+		return closeErr
 	}); err != nil {
 		_ = tw.Close()
 		_ = gz.Close()
@@ -274,6 +375,8 @@ func extractFleetTenantArchive(r io.Reader, stage string) (fleetTenantBackupMani
 	defer gz.Close()
 	tr := tar.NewReader(gz)
 	payloadDir := filepath.Join(stage, "tenant")
+	files := 0
+	var total int64
 	for {
 		h, err := tr.Next()
 		if err == io.EOF {
@@ -282,9 +385,17 @@ func extractFleetTenantArchive(r io.Reader, stage string) (fleetTenantBackupMani
 		if err != nil {
 			return manifest, "", err
 		}
-		clean := filepath.Clean(h.Name)
+		files++
+		if files > maxExtractedTenantFiles || h.Size < 0 || total+h.Size > maxExtractedTenantBytes {
+			return manifest, "", errors.New("fleet tenant backup exceeds extraction limits")
+		}
+		total += h.Size
+		clean := filepath.Clean(filepath.FromSlash(h.Name))
+		if filepath.IsAbs(clean) || clean == ".." || strings.HasPrefix(clean, ".."+string(filepath.Separator)) {
+			return manifest, "", fmt.Errorf("unsafe archive path %q", h.Name)
+		}
 		if clean == "manifest.json" {
-			b, err := io.ReadAll(tr)
+			b, err := io.ReadAll(io.LimitReader(tr, 1<<20))
 			if err != nil {
 				return manifest, "", err
 			}
@@ -296,14 +407,34 @@ func extractFleetTenantArchive(r io.Reader, stage string) (fleetTenantBackupMani
 		if clean == "tenant" || strings.HasPrefix(clean, "tenant"+string(filepath.Separator)) || strings.HasPrefix(clean, "tenant/") {
 			rel := strings.TrimPrefix(strings.TrimPrefix(clean, "tenant/"), "tenant"+string(filepath.Separator))
 			dst := filepath.Join(payloadDir, rel)
-			if !strings.HasPrefix(dst, payloadDir) {
+			if dst != payloadDir && !strings.HasPrefix(dst, payloadDir+string(filepath.Separator)) {
 				return manifest, "", fmt.Errorf("unsafe archive path %q", h.Name)
 			}
-			if h.FileInfo().IsDir() {
+			if h.Typeflag == tar.TypeDir {
 				if err := os.MkdirAll(dst, h.FileInfo().Mode()); err != nil {
 					return manifest, "", err
 				}
 				continue
+			}
+			if h.Typeflag == tar.TypeSymlink {
+				link := filepath.Clean(filepath.FromSlash(h.Linkname))
+				if filepath.IsAbs(link) {
+					return manifest, "", fmt.Errorf("unsafe absolute symlink %q", h.Linkname)
+				}
+				resolved := filepath.Clean(filepath.Join(filepath.Dir(dst), link))
+				if resolved != payloadDir && !strings.HasPrefix(resolved, payloadDir+string(filepath.Separator)) {
+					return manifest, "", fmt.Errorf("unsafe escaping symlink %q", h.Linkname)
+				}
+				if err := os.MkdirAll(filepath.Dir(dst), 0o700); err != nil {
+					return manifest, "", err
+				}
+				if err := os.Symlink(h.Linkname, dst); err != nil {
+					return manifest, "", err
+				}
+				continue
+			}
+			if h.Typeflag != tar.TypeReg && h.Typeflag != tar.TypeRegA {
+				return manifest, "", fmt.Errorf("unsupported backup archive entry type %d", h.Typeflag)
 			}
 			if err := os.MkdirAll(filepath.Dir(dst), 0o755); err != nil {
 				return manifest, "", err
@@ -350,15 +481,20 @@ func copyDir(src, dst string) error {
 		if err != nil {
 			return err
 		}
-		defer in.Close()
 		out, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, info.Mode())
 		if err != nil {
+			_ = in.Close()
 			return err
 		}
-		if _, err := io.Copy(out, in); err != nil {
-			out.Close()
-			return err
+		_, copyErr := io.Copy(out, in)
+		inErr := in.Close()
+		outErr := out.Close()
+		if copyErr != nil {
+			return copyErr
 		}
-		return out.Close()
+		if inErr != nil {
+			return inErr
+		}
+		return outErr
 	})
 }

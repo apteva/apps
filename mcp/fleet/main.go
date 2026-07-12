@@ -17,7 +17,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: fleet
 display_name: Fleet
-version: 0.8.10
+version: 0.8.12
 description: Control plane for a local fleet of apteva tenants.
 author: Apteva
 scopes: [project, global]
@@ -50,6 +50,10 @@ requires:
 provides:
   http_routes:
     - prefix: /
+    - prefix: /transfers/
+      no_auth: true
+    - prefix: /provider-grants/
+      no_auth: true
   mcp_tools:
     - name: tenant_create
       description: Spawn a new local apteva tenant.
@@ -128,7 +132,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: main
+    ref: fleet/v0.8.12
     entry: mcp/fleet
   image: ghcr.io/apteva/fleet:0.1.0
   port: 8080
@@ -147,8 +151,10 @@ type App struct {
 	// procs tracks PIDs of locally-spawned tenants in memory. Lost on
 	// fleet restart — the OnMount reconciler reattaches by probing
 	// each local tenant's port instead of trying to recover PIDs.
-	procMu sync.Mutex
-	procs  map[string]*tenantProc
+	procMu     sync.Mutex
+	procs      map[string]*tenantProc
+	opMu       sync.Mutex
+	operations map[string]string
 
 	// publicHost is the host name shown to operators in API responses
 	// and the panel. Determined once at OnMount via detectPublicHost
@@ -157,6 +163,15 @@ type App struct {
 	// outbound interface to change at runtime. Falls back to "localhost"
 	// when network detection fails (offline dev box, locked-down VPS).
 	publicHost string
+
+	transferMu     sync.Mutex
+	transfers      map[string]*tenantTransfer
+	transferSecret []byte
+	metaMu         sync.Mutex
+	metaCache      map[string]metaCacheEntry
+	hostedTunnelMu sync.Mutex
+	hostedTunnels  map[hostedTunnelKey]int
+	dirtyTunnels   map[hostedTunnelKey]bool
 }
 
 // globalCtx captures the platform context at OnMount so HTTP handlers
@@ -183,9 +198,16 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	a.keys = k
 	a.store = &store{db: ctx.AppDB()}
 	a.procs = map[string]*tenantProc{}
+	a.operations = map[string]string{}
+	a.metaCache = map[string]metaCacheEntry{}
+	a.hostedTunnels = map[hostedTunnelKey]int{}
+	a.dirtyTunnels = map[hostedTunnelKey]bool{}
+	if err := a.initTransferState(); err != nil {
+		return err
+	}
 	a.publicHost = detectPublicHost()
 	globalCtx = ctx
-	if err := a.reconcileOnBoot(); err != nil {
+	if err := a.reconcileOnBoot(ctx); err != nil {
 		ctx.Logger().Warn("fleet: reconcile on boot", "err", err)
 	}
 	ctx.Logger().Info("fleet mounted", "data_root", localDataRoot(), "public_host", a.publicHost)
@@ -196,7 +218,20 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 // tenant children on fleet shutdown — children are spawned with their
 // own process group so they survive a fleet restart. Operators stop
 // tenants explicitly via tenant_stop.
-func (a *App) OnUnmount(*sdk.AppCtx) error { return nil }
+func (a *App) OnUnmount(ctx *sdk.AppCtx) error {
+	a.hostedTunnelMu.Lock()
+	keys := make([]hostedTunnelKey, 0, len(a.hostedTunnels))
+	for key := range a.hostedTunnels {
+		keys = append(keys, key)
+	}
+	a.hostedTunnels = map[hostedTunnelKey]int{}
+	a.dirtyTunnels = map[hostedTunnelKey]bool{}
+	a.hostedTunnelMu.Unlock()
+	for _, key := range keys {
+		a.closeHostedTunnel(ctx, key.InstanceID, key.TargetPort)
+	}
+	return nil
+}
 
 func (a *App) HTTPRoutes() []sdk.Route {
 	// /health is registered by the SDK framework itself (see app-sdk
@@ -209,6 +244,8 @@ func (a *App) HTTPRoutes() []sdk.Route {
 	return []sdk.Route{
 		{Method: http.MethodGet, Pattern: "/tenants", Handler: a.httpList},
 		{Pattern: "/tenants/", Handler: a.httpTenantItem},
+		{Pattern: "/transfers/", Handler: a.httpTransfer, NoAuth: true},
+		{Method: http.MethodPost, Pattern: "/provider-grants/", Handler: a.httpProviderGrantExecute, NoAuth: true},
 		{Method: http.MethodGet, Pattern: "/_meta", Handler: a.httpMeta},
 	}
 }

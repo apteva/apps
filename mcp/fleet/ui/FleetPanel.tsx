@@ -241,6 +241,7 @@ interface GetResp {
 
 const API = "/api/apps/fleet";
 const REFRESH_MS = 8000;
+const META_REFRESH_MS = 60_000;
 
 // Status → pill variant. Same five-color semantic palette CRM/storage
 // use, so a list of mixed statuses reads as a coherent group.
@@ -400,17 +401,21 @@ export default function FleetPanel({ projectId, installId }: NativePanelProps) {
     refreshDetail(selectedId);
   }, [selectedId, refreshDetail]);
 
-  // Background polling. Quiet refresh so the spinner doesn't blink
-  // every 8s — the list updates in place. Detail + meta refresh in
-  // lockstep so the version-drift / cert badges don't lag the row data.
+  // Tenant state changes quickly; integration catalogs, npm latest,
+  // domains, and cert inventory do not. Poll them independently so
+  // the fast status refresh does not fan out across every dependency.
   useEffect(() => {
     const t = window.setInterval(() => {
       refreshList({ quiet: true });
-      refreshMeta();
       if (selectedId) refreshDetail(selectedId);
     }, REFRESH_MS);
     return () => window.clearInterval(t);
-  }, [refreshList, refreshDetail, refreshMeta, selectedId]);
+  }, [refreshList, refreshDetail, selectedId]);
+
+  useEffect(() => {
+    const t = window.setInterval(refreshMeta, META_REFRESH_MS);
+    return () => window.clearInterval(t);
+  }, [refreshMeta]);
 
   const selected = useMemo(
     () => tenants.find((t) => t.id === selectedId) || detail?.tenant || null,
@@ -428,7 +433,10 @@ export default function FleetPanel({ projectId, installId }: NativePanelProps) {
         onSelect={setSelectedId}
         onCreate={() => setShowCreate(true)}
         onConnect={() => setShowConnect(true)}
-        onRefresh={() => refreshList()}
+        onRefresh={() => {
+          refreshList();
+          refreshMeta();
+        }}
       />
       <TenantDetail
         tenant={selected}
@@ -816,6 +824,9 @@ function TenantDetail({
   const [err, setErr] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
   const [supportURL, setSupportURL] = useState<{ url: string; expires_at?: string } | null>(null);
+  const [supportDialog, setSupportDialog] = useState(false);
+  const [supportReason, setSupportReason] = useState("");
+  const [resetDialog, setResetDialog] = useState(false);
 
   // Reset transient detail state whenever the tenant changes.
   useEffect(() => {
@@ -823,6 +834,9 @@ function TenantDetail({
     setErr(null);
     setConfirmDelete(false);
     setSupportURL(null);
+    setSupportDialog(false);
+    setSupportReason("");
+    setResetDialog(false);
   }, [tenant?.id]);
 
   if (!tenant) {
@@ -861,6 +875,7 @@ function TenantDetail({
   const canClone = isLocal;
 
   return (
+    <>
     <Card className="h-full">
       <CardHeader
         title={tenant.slug}
@@ -913,23 +928,7 @@ function TenantDetail({
                 window.open(supportURL.url, "_blank", "noopener");
                 return;
               }
-              const reason = window.prompt("Reason for support login (audit trail):");
-              if (!reason) return;
-              setBusy("support");
-              setErr(null);
-              try {
-                const r = await callTool<{ url: string; expires_at?: string }>(
-                  "tenant_support_login",
-                  { tenant_id: tenant.id, reason },
-                );
-                setSupportURL(r);
-                if (r?.url) window.open(r.url, "_blank", "noopener");
-                await onAfterAction();
-              } catch (e) {
-                setErr((e as Error).message);
-              } finally {
-                setBusy(null);
-              }
+              setSupportDialog(true);
             }}
           />
         )}
@@ -1068,27 +1067,7 @@ function TenantDetail({
             }
           }}
           onReset={async () => {
-            // Reset is destructive (revokes sessions) — confirm first.
-            if (!window.confirm(
-              "Rotate the admin password and revoke every active session for this tenant?\n\n" +
-              "The new password is shown only once — you'll need to copy it before closing the dialog.",
-            )) return;
-            setBusy("reset-password");
-            setErr(null);
-            try {
-              const r = await callTool<{
-                slug: string;
-                base_url: string;
-                admin_email: string;
-                admin_password: string;
-              }>("tenant_reset_admin_password", { tenant_id: tenant.id });
-              onResetPassword(r);
-              await onAfterAction();
-            } catch (e) {
-              setErr((e as Error).message);
-            } finally {
-              setBusy(null);
-            }
+            setResetDialog(true);
           }}
         />
       )}
@@ -1143,6 +1122,83 @@ function TenantDetail({
         )}
       </div>
     </Card>
+    {supportDialog && (
+      <DialogFrame title={`Support login for ${tenant.slug}`} onClose={() => setSupportDialog(false)}>
+        <p className="text-xs text-text-dim">The reason is written to the tenant audit trail.</p>
+        <Label text="Reason">
+          <textarea
+            value={supportReason}
+            onChange={(e) => setSupportReason(e.target.value)}
+            rows={3}
+            autoFocus
+            className="w-full resize-none px-2 py-1.5 text-sm rounded-md border border-border bg-bg-card text-text"
+          />
+        </Label>
+        <DialogActions>
+          <ActionButton label="Cancel" onClick={() => setSupportDialog(false)} />
+          <ActionButton
+            label="Create support login"
+            busy={busy === "support"}
+            onClick={async () => {
+              const reason = supportReason.trim();
+              if (!reason) return;
+              setBusy("support");
+              setErr(null);
+              try {
+                const r = await callTool<{ url: string; expires_at?: string }>(
+                  "tenant_support_login",
+                  { tenant_id: tenant.id, reason },
+                );
+                setSupportURL(r);
+                setSupportDialog(false);
+                setSupportReason("");
+                if (r?.url) window.open(r.url, "_blank", "noopener");
+                await onAfterAction();
+              } catch (e) {
+                setErr((e as Error).message);
+              } finally {
+                setBusy(null);
+              }
+            }}
+          />
+        </DialogActions>
+      </DialogFrame>
+    )}
+    {resetDialog && (
+      <DialogFrame title={`Reset password for ${tenant.slug}`} onClose={() => setResetDialog(false)}>
+        <p className="text-xs text-text-dim">
+          This revokes every active session for the admin. The replacement password is shown once.
+        </p>
+        <DialogActions>
+          <ActionButton label="Cancel" onClick={() => setResetDialog(false)} />
+          <ActionButton
+            label="Reset password"
+            tone="danger"
+            busy={busy === "reset-password"}
+            onClick={async () => {
+              setBusy("reset-password");
+              setErr(null);
+              try {
+                const r = await callTool<{
+                  slug: string;
+                  base_url: string;
+                  admin_email: string;
+                  admin_password: string;
+                }>("tenant_reset_admin_password", { tenant_id: tenant.id });
+                setResetDialog(false);
+                onResetPassword(r);
+                await onAfterAction();
+              } catch (e) {
+                setErr((e as Error).message);
+              } finally {
+                setBusy(null);
+              }
+            }}
+          />
+        </DialogActions>
+      </DialogFrame>
+    )}
+    </>
   );
 }
 
@@ -1912,7 +1968,7 @@ function DialogFrame({
 }) {
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
-      <div className="w-full max-w-md rounded-xl border border-border bg-bg-card shadow-xl">
+      <div className="w-[min(100%,26rem)] max-h-[calc(100vh-2rem)] overflow-y-auto rounded-md border border-border bg-bg-card shadow-xl">
         <div className="flex items-center justify-between px-4 py-2.5 border-b border-border">
           <h2 className="text-sm font-semibold text-text">{title}</h2>
           <button

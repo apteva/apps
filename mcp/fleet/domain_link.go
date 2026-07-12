@@ -275,6 +275,14 @@ func (a *App) writeDomainRecord(ctx *sdk.AppCtx, projectID, fqdn, target, rtype 
 // it so global-scoped Domains (the prod default) resolve their
 // per-project data correctly.
 func (a *App) attachDomain(ctx *sdk.AppCtx, projectID string, t *Tenant, spec attachDomainSpec) error {
+	if t == nil {
+		return errors.New("tenant required")
+	}
+	done, err := a.beginTenantOperation(t.ID, "attach domain")
+	if err != nil {
+		return err
+	}
+	defer done()
 	fqdn := strings.ToLower(strings.TrimSpace(strings.TrimSuffix(spec.FQDN, ".")))
 	if fqdn == "" {
 		return errors.New("fqdn required")
@@ -335,14 +343,38 @@ func (a *App) attachDomain(ctx *sdk.AppCtx, projectID string, t *Tenant, spec at
 		})
 	}
 
-	if err := a.store.setDomain(t.ID, fqdn, recordID, nowUTC()); err != nil {
-		return err
-	}
-
 	// Register the hostname through server-native ingress. Certs for
 	// exact hostnames are owned by apteva-server once DNS points here.
-	a.registerRouteForTenant(ctx, t.ID, fqdn)
+	if err := a.registerRouteForTenantHost(ctx, t, fqdn, fqdn, "tool:attach_domain"); err != nil {
+		cleanupErr := a.deleteAttachedDNSRecord(ctx, projectID, fqdn, recordID)
+		if cleanupErr != nil {
+			return fmt.Errorf("register tenant ingress: %v; DNS rollback failed: %w", err, cleanupErr)
+		}
+		return fmt.Errorf("register tenant ingress: %w", err)
+	}
+	if err := a.store.setDomain(t.ID, fqdn, recordID, nowUTC()); err != nil {
+		a.unregisterRouteForTenant(ctx, fqdn)
+		_ = a.deleteAttachedDNSRecord(ctx, projectID, fqdn, recordID)
+		return err
+	}
 	return nil
+}
+
+func (a *App) deleteAttachedDNSRecord(ctx *sdk.AppCtx, projectID, fqdn, storedID string) error {
+	if storedID == "" {
+		return nil
+	}
+	apex, rtype, ok := splitRecordID(storedID)
+	if !ok {
+		return fmt.Errorf("invalid stored DNS record id %q", storedID)
+	}
+	sub := strings.TrimSuffix(strings.ToLower(strings.TrimSuffix(fqdn, ".")), "."+apex)
+	if strings.EqualFold(strings.TrimSuffix(fqdn, "."), apex) || sub == "" {
+		sub = "@"
+	}
+	return callDomainsTool(ctx, projectID, "domain_records_delete", map[string]any{
+		"domain": apex, "name": sub, "type": rtype,
+	}, nil)
 }
 
 // detachDomain best-effort deletes the DNS record, unregisters the
@@ -351,6 +383,14 @@ func (a *App) attachDomain(ctx *sdk.AppCtx, projectID string, t *Tenant, spec at
 // record is operator-recoverable via the Domains panel; a dangling
 // tenant row pointing at a domain that doesn't resolve is worse.
 func (a *App) detachDomain(ctx *sdk.AppCtx, projectID string, t *Tenant) error {
+	if t == nil {
+		return errors.New("tenant required")
+	}
+	done, err := a.beginTenantOperation(t.ID, "detach domain")
+	if err != nil {
+		return err
+	}
+	defer done()
 	if t.Domain == "" && t.DomainRecordID == "" {
 		return nil
 	}
@@ -397,6 +437,11 @@ func (a *App) grantDomain(ctx *sdk.AppCtx, projectID string, t *Tenant, spec att
 	if t == nil {
 		return nil, errors.New("tenant required")
 	}
+	done, err := a.beginTenantOperation(t.ID, "grant domain")
+	if err != nil {
+		return nil, err
+	}
+	defer done()
 	domain, err := normaliseGrantDomain(spec.FQDN)
 	if err != nil {
 		return nil, err
@@ -431,15 +476,26 @@ func (a *App) grantDomain(ctx *sdk.AppCtx, projectID string, t *Tenant, spec att
 		return nil, err
 	}
 	wildcardRecord := ""
+	cleanupDNS := func() {
+		for _, storedID := range []string{record, wildcardRecord} {
+			if apex, name, recordType, ok := splitGrantRecordID(storedID); ok {
+				_ = callDomainsTool(ctx, projectID, "domain_records_delete", map[string]any{
+					"domain": apex, "name": name, "type": recordType,
+				}, nil)
+			}
+		}
+	}
 	if spec.ManageDNS {
 		apex, _, err := resolveApex(ctx, projectID, domain)
 		if err != nil {
+			cleanupDNS()
 			return nil, err
 		}
 		wildcardName := wildcardSubArg(apex, domain)
 		if err := callDomainsTool(ctx, projectID, "domain_records_set", map[string]any{
 			"domain": apex, "name": wildcardName, "type": rtype, "value": target, "ttl": ttl,
 		}, nil); err != nil {
+			cleanupDNS()
 			return nil, err
 		}
 		wildcardRecord = recordID(apex, wildcardName, rtype)
@@ -453,7 +509,19 @@ func (a *App) grantDomain(ctx *sdk.AppCtx, projectID string, t *Tenant, spec att
 		DomainRecordID:   record,
 		WildcardRecordID: wildcardRecord,
 	}
+	if err := a.registerRouteForTenantHost(ctx, t, domain, domain, "tool:tenant_domain_grant"); err != nil {
+		cleanupDNS()
+		return nil, err
+	}
+	if err := a.registerRouteForTenantHost(ctx, t, wildcardHost(domain), wildcardHost(domain), "tool:tenant_domain_grant"); err != nil {
+		a.unregisterRouteForTenant(ctx, domain)
+		cleanupDNS()
+		return nil, err
+	}
 	if err := a.store.upsertDomainGrant(g); err != nil {
+		a.unregisterRouteForTenant(ctx, domain)
+		a.unregisterRouteForTenant(ctx, wildcardHost(domain))
+		cleanupDNS()
 		return nil, err
 	}
 	_ = a.store.recordEvent(t.ID, "domain_grant.granted", "tool:tenant_domain_grant", map[string]any{
@@ -464,8 +532,6 @@ func (a *App) grantDomain(ctx *sdk.AppCtx, projectID string, t *Tenant, spec att
 		a.issueGrantCert(ctx, projectID, t.ID, domain)
 		a.issueGrantCert(ctx, projectID, t.ID, wildcardHost(domain))
 	}
-	a.registerRouteForTenantHost(ctx, t, domain, domain, "tool:tenant_domain_grant")
-	a.registerRouteForTenantHost(ctx, t, wildcardHost(domain), wildcardHost(domain), "tool:tenant_domain_grant")
 	return g, nil
 }
 
@@ -484,7 +550,12 @@ func (a *App) revokeDomainGrant(ctx *sdk.AppCtx, projectID string, t *Tenant, do
 	if t == nil {
 		return nil, errors.New("tenant required")
 	}
-	domain, err := normaliseGrantDomain(domain)
+	done, err := a.beginTenantOperation(t.ID, "revoke domain")
+	if err != nil {
+		return nil, err
+	}
+	defer done()
+	domain, err = normaliseGrantDomain(domain)
 	if err != nil {
 		return nil, err
 	}
@@ -629,34 +700,35 @@ func (a *App) proxyTenantDomainRecordDelete(ctx *sdk.AppCtx, projectID string, t
 // registerRouteForTenant publishes (fqdn → tenant apteva-server port)
 // through server-native ingress. Idempotent — replaces an existing
 // route from the same owner.
-func (a *App) registerRouteForTenant(ctx *sdk.AppCtx, tenantID, fqdn string) {
+func (a *App) registerRouteForTenant(ctx *sdk.AppCtx, tenantID, fqdn string) error {
 	if fqdn == "" || ctx == nil || ctx.PlatformAPI() == nil {
-		return
+		return errors.New("platform ingress is unavailable")
 	}
 	t, _, err := a.store.get(tenantID)
 	if err != nil || t == nil {
-		return
+		if err != nil {
+			return err
+		}
+		return errors.New("tenant not found")
 	}
-	a.registerRouteForTenantHost(ctx, t, fqdn, fqdn, "tool:attach_domain")
+	return a.registerRouteForTenantHost(ctx, t, fqdn, fqdn, "tool:attach_domain")
 }
 
-func (a *App) registerRouteForTenantHost(ctx *sdk.AppCtx, t *Tenant, hostname, certFQDN, actor string) {
+func (a *App) registerRouteForTenantHost(ctx *sdk.AppCtx, t *Tenant, hostname, certFQDN, actor string) error {
 	if t == nil || hostname == "" || ctx == nil || ctx.PlatformAPI() == nil {
-		return
+		return errors.New("tenant, hostname, and platform ingress are required")
 	}
 	port, _ := portFromBaseURL(t.BaseURL)
 	if port == 0 {
 		_ = a.store.recordEvent(t.ID, "route.register_skipped", actor,
 			map[string]any{"reason": "no_port_in_base_url"})
-		return
+		return fmt.Errorf("tenant %s has no port in base_url", t.ID)
 	}
-	// Local-on-parent: route to loopback. Hosted-on-VPS: route to
-	// the VPS's public IP (the parent's reverse proxy reaches it
-	// directly). For hosted the BaseURL already carries the VPS IP
-	// in t.BaseURL, so we can re-use it as-is.
-	target := fmt.Sprintf("http://127.0.0.1:%d", port)
-	if t.IsHosted() {
-		target = t.BaseURL // already http://<vps-ip>:<port>
+	target, err := a.internalTenantBaseURL(ctx, t)
+	if err != nil {
+		_ = a.store.recordEvent(t.ID, "route.register_failed", actor,
+			map[string]any{"fqdn": hostname, "error": err.Error()})
+		return err
 	}
 	if _, err := ctx.PlatformAPI().ExposeIngress(sdk.IngressExposeRequest{
 		Hostname:  hostname,
@@ -666,10 +738,48 @@ func (a *App) registerRouteForTenantHost(ctx *sdk.AppCtx, t *Tenant, hostname, c
 	}); err != nil {
 		_ = a.store.recordEvent(t.ID, "route.register_failed", actor,
 			map[string]any{"fqdn": hostname, "error": err.Error()})
-		return
+		return err
 	}
 	_ = a.store.recordEvent(t.ID, "route.registered", actor,
 		map[string]any{"fqdn": hostname, "port": port})
+	return nil
+}
+
+func (a *App) refreshTenantIngressTargets(ctx *sdk.AppCtx, t *Tenant, target string) error {
+	if t == nil || !t.IsHosted() || ctx == nil || ctx.PlatformAPI() == nil {
+		return nil
+	}
+	target = strings.TrimRight(target, "/")
+	expose := func(hostname, certFQDN string) error {
+		if hostname == "" {
+			return nil
+		}
+		_, err := ctx.PlatformAPI().ExposeIngress(sdk.IngressExposeRequest{
+			Hostname: hostname, Target: target, OwnerKind: "fleet", CertFQDN: certFQDN,
+		})
+		return err
+	}
+	if err := expose(t.Domain, t.Domain); err != nil {
+		return err
+	}
+	grants, err := a.store.listDomainGrants(t.ID)
+	if err != nil {
+		return err
+	}
+	for _, grant := range grants {
+		if grant.Status != "active" {
+			continue
+		}
+		if err := expose(grant.Domain, grant.Domain); err != nil {
+			return err
+		}
+		if grant.Wildcard {
+			if err := expose(wildcardHost(grant.Domain), wildcardHost(grant.Domain)); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 // unregisterRouteForTenant — cleanup half. Safe when the route was
