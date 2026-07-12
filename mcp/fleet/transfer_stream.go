@@ -54,28 +54,48 @@ func (a *App) initTransferState() error {
 }
 
 func (a *App) transferTenantData(ctx *sdk.AppCtx, sourceHost, targetHost fleetHost, sourceDir, targetDir, slug string, snapshot bool) error {
+	var err error
 	if sourceHost.IsLocal() {
 		if _, err := os.Stat(sourceDir); err != nil {
 			return fmt.Errorf("local data dir %q not found: %w", sourceDir, err)
 		}
 		if targetHost.IsLocal() {
-			return streamLocalTenantToLocal(sourceDir, targetDir)
+			err = streamLocalTenantToLocal(sourceDir, targetDir)
+		} else {
+			err = a.streamLocalTenantToRemote(ctx, sourceDir, targetHost.InstanceID, targetDir, slug)
 		}
-		return a.streamLocalTenantToRemote(ctx, sourceDir, targetHost.InstanceID, targetDir, slug)
+	} else if targetHost.IsLocal() {
+		err = a.streamRemoteTenantToLocal(ctx, sourceHost.InstanceID, sourceDir, targetDir, slug, snapshot)
+	} else {
+		relay, relayErr := os.MkdirTemp(transferScratchRoot(), "relay-*")
+		if relayErr != nil {
+			return relayErr
+		}
+		defer os.RemoveAll(relay)
+		staged := filepath.Join(relay, "tenant")
+		if err = a.streamRemoteTenantToLocal(ctx, sourceHost.InstanceID, sourceDir, staged, slug, snapshot); err == nil {
+			err = a.streamLocalTenantToRemote(ctx, staged, targetHost.InstanceID, targetDir, slug)
+		}
 	}
-	if targetHost.IsLocal() {
-		return a.streamRemoteTenantToLocal(ctx, sourceHost.InstanceID, sourceDir, targetDir, slug, snapshot)
-	}
-	relay, err := os.MkdirTemp(transferScratchRoot(), "relay-*")
 	if err != nil {
 		return err
 	}
-	defer os.RemoveAll(relay)
-	staged := filepath.Join(relay, "tenant")
-	if err := a.streamRemoteTenantToLocal(ctx, sourceHost.InstanceID, sourceDir, staged, slug, snapshot); err != nil {
-		return err
+	return removeTransferredRuntimeArtifacts(ctx, targetHost, targetDir)
+}
+
+func removeTransferredRuntimeArtifacts(ctx *sdk.AppCtx, targetHost fleetHost, targetDir string) error {
+	pidPath := filepath.Join(targetDir, "fleet.pid")
+	if targetHost.IsLocal() {
+		if err := os.Remove(pidPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("remove transferred fleet pid: %w", err)
+		}
+		return nil
 	}
-	return a.streamLocalTenantToRemote(ctx, staged, targetHost.InstanceID, targetDir, slug)
+	out, code, err := instanceRunCommand(ctx, targetHost.InstanceID, fmt.Sprintf("rm -f %s", sh(pidPath)), 10)
+	if err != nil || code != 0 {
+		return fmt.Errorf("remove transferred fleet pid: %w (exit %d): %s", err, code, strings.TrimSpace(out))
+	}
+	return nil
 }
 
 func streamLocalTenantToLocal(sourceDir, targetDir string) error {
