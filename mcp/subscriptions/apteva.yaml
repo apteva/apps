@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: subscriptions
 display_name: Subscriptions
-version: 0.2.0
+version: 0.3.1
 description: |
   Generic recurring-commerce lifecycle for SaaS, physical product
   subscriptions, and services. Subscriptions owns recurrence, status,
@@ -12,6 +12,9 @@ description: |
   subscription.past_due for dependent apps. v0.2.0 adds generic flat
   and metered subscription items, idempotent usage records, usage
   summaries, and subscription-period invoice preparation/creation.
+  v0.3.1 adds project-scoped, durable trial-end processing that creates
+  pending subscription cycles and publishes subscription.cycle_due for
+  an external commerce workflow to collect.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/subscriptions
@@ -62,6 +65,8 @@ provides:
       description: Metered subscription usage was recorded.
     - name: subscription.invoice.requested
       description: A subscription period invoice was requested.
+    - name: subscription.cycle_due
+      description: A subscription cycle is due for external collection or fulfillment orchestration.
   mcp_tools:
     - name: subscriptions_create
       description: Create a SaaS, physical, or service subscription with catalog-backed items.
@@ -90,7 +95,7 @@ provides:
     - name: subscriptions_invoice_prepare
       description: Prepare generic Billing line items for a subscription period.
     - name: subscriptions_invoice_create
-      description: Create a Billing invoice from prepared subscription period lines.
+      description: Legacy convenience wrapper that sends prepared period lines to Billing; new orchestrators should call subscriptions_invoice_prepare and Billing separately.
     - name: subscription_cycles_create
       description: Record a renewal cycle and link invoice/order/entitlement outputs.
     - name: subscription_cycles_update

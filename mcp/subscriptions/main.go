@@ -21,8 +21,8 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: subscriptions
 display_name: Subscriptions
-version: 0.2.0
-description: Generic recurring-commerce lifecycle, subscription items, and metered usage for SaaS, physical subscriptions, and services.
+version: 0.3.1
+description: Generic recurring-commerce lifecycle, durable trial-end cycle creation, subscription items, and metered usage for SaaS, physical subscriptions, and services.
 author: Apteva
 scopes: [project, global]
 requires:
@@ -65,6 +65,8 @@ provides:
       description: Metered subscription usage was recorded.
     - name: subscription.invoice.requested
       description: A subscription period invoice was requested.
+    - name: subscription.cycle_due
+      description: A subscription cycle is due for external collection or fulfillment orchestration.
 runtime:
   kind: source
   source:
@@ -97,7 +99,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		return errors.New("subscriptions requires a db block")
 	}
 	globalCtx = ctx
-	ctx.Logger().Info("subscriptions mounted", "version", "0.2.0", "scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
+	ctx.Logger().Info("subscriptions mounted", "version", "0.3.1", "scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
 	return nil
 }
 
@@ -131,7 +133,8 @@ func (a *App) MCPTools() []sdk.Tool {
 	return []sdk.Tool{
 		{Name: "subscriptions_create", Description: "Create a subscription.", InputSchema: schemaObject(map[string]any{
 			"customer_id": map[string]any{"type": "integer"}, "customer_email": map[string]any{"type": "string"}, "customer_name": map[string]any{"type": "string"},
-			"kind": map[string]any{"type": "string"}, "status": map[string]any{"type": "string"}, "billing_provider": map[string]any{"type": "string"}, "external_id": map[string]any{"type": "string"},
+			"trial_end_behavior": map[string]any{"type": "string"},
+			"kind":               map[string]any{"type": "string"}, "status": map[string]any{"type": "string"}, "billing_provider": map[string]any{"type": "string"}, "external_id": map[string]any{"type": "string"},
 			"currency": map[string]any{"type": "string"}, "interval": map[string]any{"type": "string"}, "interval_count": map[string]any{"type": "integer"}, "quantity": map[string]any{"type": "number"},
 			"trial_start": map[string]any{"type": "string"}, "trial_end": map[string]any{"type": "string"}, "current_period_start": map[string]any{"type": "string"}, "current_period_end": map[string]any{"type": "string"}, "next_renewal_at": map[string]any{"type": "string"},
 			"source": map[string]any{"type": "string"}, "source_ref": map[string]any{"type": "string"}, "items": map[string]any{"type": "array"}, "metadata": map[string]any{"type": "object"},
@@ -164,7 +167,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "subscriptions_invoice_prepare", Description: "Prepare generic Billing line items for a subscription period, including flat items and metered overage.", InputSchema: schemaObject(map[string]any{
 			"subscription_id": map[string]any{"type": "integer"}, "period_start": map[string]any{"type": "string"}, "period_end": map[string]any{"type": "string"}, "include_flat": map[string]any{"type": "boolean"}, "include_metered": map[string]any{"type": "boolean"}, "invoice_zero_usage": map[string]any{"type": "boolean"},
 		}, []string{"subscription_id", "period_start", "period_end"}), Handler: a.toolSubscriptionsInvoicePrepare},
-		{Name: "subscriptions_invoice_create", Description: "Create a Billing invoice from prepared subscription period lines.", InputSchema: schemaObject(map[string]any{
+		{Name: "subscriptions_invoice_create", Description: "Legacy convenience wrapper that sends prepared period lines to Billing; new orchestrators should prepare and call Billing separately.", InputSchema: schemaObject(map[string]any{
 			"subscription_id": map[string]any{"type": "integer"}, "period_start": map[string]any{"type": "string"}, "period_end": map[string]any{"type": "string"}, "provider": map[string]any{"type": "string"}, "due_date": map[string]any{"type": "string"}, "notes": map[string]any{"type": "string"}, "finalize": map[string]any{"type": "boolean"}, "include_flat": map[string]any{"type": "boolean"}, "include_metered": map[string]any{"type": "boolean"}, "invoice_zero_usage": map[string]any{"type": "boolean"}, "metadata": map[string]any{"type": "object"},
 		}, []string{"subscription_id", "period_start", "period_end"}), Handler: a.toolSubscriptionsInvoiceCreate},
 		{Name: "subscription_cycles_create", Description: "Create a renewal cycle.", InputSchema: schemaObject(map[string]any{
@@ -194,6 +197,7 @@ type Subscription struct {
 	Quantity           float64         `json:"quantity"`
 	TrialStart         string          `json:"trial_start,omitempty"`
 	TrialEnd           string          `json:"trial_end,omitempty"`
+	TrialEndBehavior   string          `json:"trial_end_behavior"`
 	CurrentPeriodStart string          `json:"current_period_start,omitempty"`
 	CurrentPeriodEnd   string          `json:"current_period_end,omitempty"`
 	NextRenewalAt      string          `json:"next_renewal_at,omitempty"`
@@ -285,6 +289,17 @@ type Cycle struct {
 	UpdatedAt          string          `json:"updated_at"`
 	PaidAt             string          `json:"paid_at,omitempty"`
 	CompletedAt        string          `json:"completed_at,omitempty"`
+}
+
+type LifecycleAttempt struct {
+	ID             int64
+	ProjectID      string
+	SubscriptionID int64
+	Action         string
+	EffectiveAt    string
+	Status         string
+	AttemptCount   int64
+	CycleID        *int64
 }
 
 type Event struct {
@@ -538,46 +553,75 @@ func runSubscriptionLifecycle(ctx *sdk.AppCtx, now time.Time) error {
 	if ctx == nil || ctx.AppDB() == nil {
 		return nil
 	}
-	expiredTrials, err := dbSubscriptionsExpiredTrials(ctx.AppDB(), now)
+	pid := strings.TrimSpace(ctx.CurrentProject())
+	if pid == "" {
+		return nil
+	}
+	if err := dbSeedTrialAttempts(ctx.AppDB(), pid, now, 100); err != nil {
+		return err
+	}
+	attempts, err := dbClaimLifecycleAttempts(ctx.AppDB(), pid, now, 100)
 	if err != nil {
 		return err
 	}
-	nowStr := now.UTC().Format(time.RFC3339)
-	for _, sub := range expiredTrials {
-		meta := mapFromAny(sub.Metadata)
-		targetStatus := trialExpiredStatus(meta)
-		meta["trial_ended_at"] = nowStr
-		if targetStatus == "past_due" || targetStatus == "paused" {
-			meta["past_due_since"] = nowStr
+	for _, attempt := range attempts {
+		if err := processTrialEnd(ctx, attempt, now); err != nil {
+			ctx.Logger().Warn("subscription trial-end attempt failed", "project", pid, "subscription_id", attempt.SubscriptionID, "attempt_id", attempt.ID, "err", err)
+			if failErr := dbFailLifecycleAttempt(ctx.AppDB(), attempt, now, err); failErr != nil {
+				ctx.Logger().Warn("persist subscription trial-end failure", "attempt_id", attempt.ID, "err", failErr)
+			}
 		}
-		updated, err := dbSubscriptionSetStatusMetadata(ctx.AppDB(), sub.ProjectID, sub.ID, targetStatus, meta, "subscription.trial_expired", map[string]any{
-			"from_status": "trialing",
-			"to_status":   targetStatus,
-			"trial_end":   sub.TrialEnd,
-		}, now)
-		if err != nil {
-			return err
-		}
-		emitSubscriptionLifecycle(ctx, updated)
 	}
 
-	graceExpired, err := dbSubscriptionsGraceExpired(ctx.AppDB(), now)
+	graceExpired, err := dbSubscriptionsGraceExpired(ctx.AppDB(), pid, now, 100)
 	if err != nil {
 		return err
 	}
 	for _, sub := range graceExpired {
 		meta := mapFromAny(sub.Metadata)
-		meta["unpaid_grace_expired_at"] = nowStr
-		updated, err := dbSubscriptionSetStatusMetadata(ctx.AppDB(), sub.ProjectID, sub.ID, "ended", meta, "subscription.unpaid_grace_expired", map[string]any{
+		meta["unpaid_grace_expired_at"] = now.UTC().Format(time.RFC3339)
+		updated, setErr := dbSubscriptionSetStatusMetadata(ctx.AppDB(), pid, sub.ID, "ended", meta, "subscription.unpaid_grace_expired", map[string]any{
 			"from_status": sub.Status,
 			"to_status":   "ended",
 		}, now)
-		if err != nil {
-			return err
+		if setErr != nil {
+			ctx.Logger().Warn("subscription grace transition failed", "subscription_id", sub.ID, "err", setErr)
+			continue
 		}
 		emitSubscriptionLifecycle(ctx, updated)
 	}
 	return nil
+}
+
+func processTrialEnd(ctx *sdk.AppCtx, attempt *LifecycleAttempt, now time.Time) error {
+	sub, err := dbSubscriptionGet(ctx.AppDB(), attempt.ProjectID, attempt.SubscriptionID, true)
+	if err != nil || sub == nil {
+		return firstErr(err, errors.New("subscription not found"))
+	}
+	if sub.Status != "trialing" {
+		return dbCloseLifecycleAttempt(ctx.AppDB(), attempt, now)
+	}
+	meta := mapFromAny(sub.Metadata)
+	behavior := sub.TrialEndBehavior
+	if legacy := legacyTrialEndBehavior(meta); legacy != "collect" {
+		behavior = legacy
+	}
+	switch behavior {
+	case "pause":
+		return dbCompleteLifecycleAttempt(ctx, attempt, sub, "paused", nil, now)
+	case "end":
+		return dbCompleteLifecycleAttempt(ctx, attempt, sub, "ended", nil, now)
+	}
+	start, ok := parseTime(attempt.EffectiveAt)
+	if !ok {
+		return errors.New("trial lifecycle effective_at is invalid")
+	}
+	end := subscriptionPeriodEnd(start, sub.Interval, sub.IntervalCount)
+	cycle, err := dbEnsureLifecycleCycle(ctx.AppDB(), attempt, sub, start, end)
+	if err != nil {
+		return err
+	}
+	return dbCompleteLifecycleAttempt(ctx, attempt, sub, "past_due", cycle, now)
 }
 
 func (a *App) toolCyclesCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -641,6 +685,10 @@ func dbSubscriptionCreate(ctx *sdk.AppCtx, pid string, args map[string]any) (*Su
 	if !validSubStatus[status] {
 		return nil, fmt.Errorf("invalid status %q", status)
 	}
+	trialEndBehavior := firstNonEmpty(strArg(args, "trial_end_behavior"), legacyTrialEndBehavior(mapFromAny(args["metadata"])))
+	if !validTrialEndBehavior[trialEndBehavior] {
+		return nil, fmt.Errorf("invalid trial_end_behavior %q", trialEndBehavior)
+	}
 	currency := strings.ToUpper(firstNonEmpty(strArg(args, "currency"), configString(ctx, "default_currency", "USD")))
 	items := normalizeItems(itemsRaw, currency)
 	if len(items) == 0 {
@@ -655,12 +703,12 @@ func dbSubscriptionCreate(ctx *sdk.AppCtx, pid string, args map[string]any) (*Su
 	err = tx.QueryRow(
 		`INSERT INTO subscriptions
 		   (project_id, customer_id, customer_email, customer_name, kind, status, billing_provider,
-		    external_id, currency, interval, interval_count, quantity, trial_start, trial_end,
+		    trial_end_behavior, external_id, currency, interval, interval_count, quantity, trial_start, trial_end,
 		    current_period_start, current_period_end, next_renewal_at, source, source_ref, metadata)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 RETURNING id`,
 		pid, nullableInt64(int64Arg(args, "customer_id")), nullStr(strArg(args, "customer_email")), nullStr(strArg(args, "customer_name")),
-		kind, status, firstNonEmpty(strArg(args, "billing_provider"), "local"), nullStr(strArg(args, "external_id")),
+		kind, status, firstNonEmpty(strArg(args, "billing_provider"), "local"), trialEndBehavior, nullStr(strArg(args, "external_id")),
 		currency, firstNonEmpty(strArg(args, "interval"), "month"), firstNonZero(int64Arg(args, "interval_count"), 1),
 		float64Arg(args, "quantity", 1), nullStr(strArg(args, "trial_start")), nullStr(strArg(args, "trial_end")),
 		nullStr(strArg(args, "current_period_start")), nullStr(strArg(args, "current_period_end")), nullStr(strArg(args, "next_renewal_at")),
@@ -870,25 +918,76 @@ func dbSubscriptionUpdateStatus(db *sql.DB, pid string, args map[string]any) (*S
 	return dbSubscriptionGet(db, pid, id, true)
 }
 
-func dbSubscriptionsExpiredTrials(db *sql.DB, now time.Time) ([]*Subscription, error) {
-	rows, err := db.Query(`SELECT `+subCols()+` FROM subscriptions WHERE status='trialing' AND trial_end IS NOT NULL AND trial_end <= ? ORDER BY trial_end ASC`, now.UTC().Format(time.RFC3339))
+func dbSeedTrialAttempts(db *sql.DB, pid string, now time.Time, limit int) error {
+	_, err := db.Exec(`INSERT OR IGNORE INTO subscription_lifecycle_attempts
+		(project_id,subscription_id,action,effective_at,status,next_attempt_at)
+		SELECT project_id,id,'trial_end',trial_end,'pending',?
+		FROM subscriptions
+		WHERE project_id=? AND status='trialing' AND trial_end IS NOT NULL AND trial_end<=?
+		ORDER BY trial_end,id LIMIT ?`, now.UTC().Format(time.RFC3339), pid, now.UTC().Format(time.RFC3339), limit)
+	return err
+}
+
+func dbClaimLifecycleAttempts(db *sql.DB, pid string, now time.Time, limit int) ([]*LifecycleAttempt, error) {
+	nowStr := now.UTC().Format(time.RFC3339)
+	rows, err := db.Query(`SELECT id FROM subscription_lifecycle_attempts
+		WHERE project_id=? AND ((status IN ('pending','failed') AND (next_attempt_at IS NULL OR next_attempt_at<=?))
+		OR (status='processing' AND lease_until<=?)) ORDER BY effective_at,id LIMIT ?`, pid, nowStr, nowStr, limit)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	var out []*Subscription
+	var ids []int64
 	for rows.Next() {
-		sub, err := scanSub(rows)
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	lease := now.Add(10 * time.Minute).UTC().Format(time.RFC3339)
+	var out []*LifecycleAttempt
+	for _, id := range ids {
+		res, err := db.Exec(`UPDATE subscription_lifecycle_attempts SET status='processing',attempt_count=attempt_count+1,lease_until=?,updated_at=CURRENT_TIMESTAMP
+			WHERE id=? AND project_id=? AND ((status IN ('pending','failed') AND (next_attempt_at IS NULL OR next_attempt_at<=?)) OR (status='processing' AND lease_until<=?))`, lease, id, pid, nowStr, nowStr)
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, sub)
+		n, _ := res.RowsAffected()
+		if n == 0 {
+			continue
+		}
+		a, err := dbLifecycleAttemptGet(db, pid, id)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, a)
 	}
-	return out, rows.Err()
+	return out, nil
 }
 
-func dbSubscriptionsGraceExpired(db *sql.DB, now time.Time) ([]*Subscription, error) {
-	rows, err := db.Query(`SELECT ` + subCols() + ` FROM subscriptions WHERE status IN ('past_due','paused') ORDER BY updated_at ASC`)
+func dbLifecycleAttemptGet(db *sql.DB, pid string, id int64) (*LifecycleAttempt, error) {
+	var a LifecycleAttempt
+	var cycleID sql.NullInt64
+	err := db.QueryRow(`SELECT id,project_id,subscription_id,action,effective_at,status,attempt_count,cycle_id
+		FROM subscription_lifecycle_attempts WHERE id=? AND project_id=?`, id, pid).
+		Scan(&a.ID, &a.ProjectID, &a.SubscriptionID, &a.Action, &a.EffectiveAt, &a.Status, &a.AttemptCount, &cycleID)
+	if err != nil {
+		return nil, err
+	}
+	a.CycleID = ptrIfValid(cycleID)
+	return &a, nil
+}
+
+func dbSubscriptionsGraceExpired(db *sql.DB, pid string, now time.Time, limit int) ([]*Subscription, error) {
+	rows, err := db.Query(`SELECT `+subCols()+` FROM subscriptions
+		WHERE project_id=? AND status IN ('past_due','paused')
+		AND CAST(COALESCE(json_extract(metadata,'$.unpaid_grace_days'),0) AS INTEGER)>0
+		AND datetime(json_extract(metadata,'$.past_due_since'), '+' || CAST(json_extract(metadata,'$.unpaid_grace_days') AS INTEGER) || ' days')<=datetime(?)
+		ORDER BY updated_at ASC LIMIT ?`, pid, now.UTC().Format(time.RFC3339), limit)
 	if err != nil {
 		return nil, err
 	}
@@ -911,6 +1010,104 @@ func dbSubscriptionsGraceExpired(db *sql.DB, now time.Time) ([]*Subscription, er
 		out = append(out, sub)
 	}
 	return out, rows.Err()
+}
+
+func dbEnsureLifecycleCycle(db *sql.DB, attempt *LifecycleAttempt, sub *Subscription, start, end time.Time) (*Cycle, error) {
+	if id := derefInt64(attempt.CycleID); id != 0 {
+		return dbCycleGet(db, attempt.ProjectID, id)
+	}
+	var existing int64
+	err := db.QueryRow(`SELECT id FROM subscription_cycles WHERE lifecycle_attempt_id=?`, attempt.ID).Scan(&existing)
+	if err == nil {
+		attempt.CycleID = &existing
+		return dbCycleGet(db, attempt.ProjectID, existing)
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return nil, err
+	}
+	cycle, _, err := dbCycleCreate(db, attempt.ProjectID, map[string]any{
+		"subscription_id": sub.ID, "period_start": start.Format(time.RFC3339), "period_end": end.Format(time.RFC3339),
+		"due_at": start.Format(time.RFC3339), "payment_status": "pending", "lifecycle_attempt_id": attempt.ID,
+		"metadata": map[string]any{"source": "trial_end", "lifecycle_attempt_id": attempt.ID},
+	})
+	if err != nil {
+		return nil, err
+	}
+	if _, err := db.Exec(`UPDATE subscription_lifecycle_attempts SET cycle_id=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND project_id=?`, cycle.ID, attempt.ID, attempt.ProjectID); err != nil {
+		return nil, err
+	}
+	attempt.CycleID = &cycle.ID
+	return cycle, nil
+}
+
+func dbCompleteLifecycleAttempt(ctx *sdk.AppCtx, attempt *LifecycleAttempt, sub *Subscription, targetStatus string, cycle *Cycle, now time.Time) error {
+	if !validSubStatus[targetStatus] {
+		return fmt.Errorf("invalid lifecycle target status %q", targetStatus)
+	}
+	nowStr := now.UTC().Format(time.RFC3339)
+	meta := mapFromAny(sub.Metadata)
+	meta["trial_ended_at"] = nowStr
+	if targetStatus == "past_due" || targetStatus == "paused" {
+		meta["past_due_since"] = nowStr
+	}
+	cycleID := int64(0)
+	if cycle != nil {
+		cycleID = cycle.ID
+	}
+	details := map[string]any{"from_status": sub.Status, "to_status": targetStatus, "trial_end": sub.TrialEnd, "cycle_id": cycleID}
+	tx, err := ctx.AppDB().Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`UPDATE subscriptions SET status=?,metadata=?,ended_at=CASE WHEN ?='ended' THEN COALESCE(ended_at,?) ELSE ended_at END,updated_at=CURRENT_TIMESTAMP WHERE id=? AND project_id=?`, targetStatus, jsonOrEmpty(meta, "{}"), targetStatus, nowStr, sub.ID, attempt.ProjectID); err != nil {
+		return err
+	}
+	if err := writeEventTx(tx, attempt.ProjectID, sub.ID, "system", "subscription.trial_ended", details); err != nil {
+		return err
+	}
+	if cycle != nil {
+		if err := writeEventTx(tx, attempt.ProjectID, sub.ID, "system", "subscription.cycle_due", details); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.Exec(`UPDATE subscription_lifecycle_attempts SET status='completed',cycle_id=COALESCE(?,cycle_id),result=?,last_error=NULL,lease_until=NULL,completed_at=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND project_id=?`, nullableInt64(cycleID), jsonOrEmpty(details, "{}"), nowStr, attempt.ID, attempt.ProjectID); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	updated, err := dbSubscriptionGet(ctx.AppDB(), attempt.ProjectID, sub.ID, true)
+	if err != nil {
+		return err
+	}
+	emitSubscriptionLifecycle(ctx, updated)
+	if cycle != nil {
+		ctx.Emit("subscription.cycle_due", map[string]any{
+			"subscription_id": updated.ID, "cycle_id": cycle.ID, "customer_id": updated.CustomerID,
+			"customer_email": updated.CustomerEmail, "kind": updated.Kind, "currency": cycle.Currency,
+			"total_cents": cycle.TotalCents, "period_start": cycle.PeriodStart, "period_end": cycle.PeriodEnd,
+			"source": updated.Source, "source_ref": updated.SourceRef, "metadata": mapFromAny(updated.Metadata),
+		})
+	}
+	return nil
+}
+
+func dbCloseLifecycleAttempt(db *sql.DB, attempt *LifecycleAttempt, now time.Time) error {
+	_, err := db.Exec(`UPDATE subscription_lifecycle_attempts SET status='completed',last_error=NULL,lease_until=NULL,completed_at=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND project_id=?`, now.UTC().Format(time.RFC3339), attempt.ID, attempt.ProjectID)
+	return err
+}
+
+func dbFailLifecycleAttempt(db *sql.DB, attempt *LifecycleAttempt, now time.Time, cause error) error {
+	delay := 15 * time.Minute
+	for i := int64(1); i < attempt.AttemptCount && delay < 24*time.Hour; i++ {
+		delay *= 2
+	}
+	if delay > 24*time.Hour {
+		delay = 24 * time.Hour
+	}
+	_, err := db.Exec(`UPDATE subscription_lifecycle_attempts SET status='failed',last_error=?,next_attempt_at=?,lease_until=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=? AND project_id=?`, cause.Error(), now.Add(delay).UTC().Format(time.RFC3339), attempt.ID, attempt.ProjectID)
+	return err
 }
 
 func dbSubscriptionSetStatusMetadata(db *sql.DB, pid string, id int64, status string, metadata map[string]any, action string, details map[string]any, now time.Time) (*Subscription, error) {
@@ -1349,14 +1546,15 @@ func dbCycleCreate(db *sql.DB, pid string, args map[string]any) (*Cycle, *Subscr
 		`INSERT INTO subscription_cycles
 		   (project_id, subscription_id, cycle_number, period_start, period_end, due_at,
 		    invoice_id, order_id, entitlement_grant_id, payment_status, fulfillment_status,
-		    subtotal_cents, tax_cents, shipping_cents, total_cents, currency, metadata, paid_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		    subtotal_cents, tax_cents, shipping_cents, total_cents, currency, metadata, paid_at,lifecycle_attempt_id)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 RETURNING id`,
 		pid, subID, next, strArg(args, "period_start"), strArg(args, "period_end"), nullStr(strArg(args, "due_at")),
 		nullableInt64(int64Arg(args, "invoice_id")), nullableInt64(int64Arg(args, "order_id")), nullableInt64(int64Arg(args, "entitlement_grant_id")),
 		firstNonEmpty(strArg(args, "payment_status"), "pending"), firstNonEmpty(strArg(args, "fulfillment_status"), "none"),
 		subtotal, tax, ship, total, sub.Currency, jsonOrEmpty(args["metadata"], "{}"),
 		nullableTime(strArg(args, "payment_status") == "paid", time.Now().UTC().Format(time.RFC3339)),
+		nullableInt64(int64Arg(args, "lifecycle_attempt_id")),
 	).Scan(&id)
 	if err != nil {
 		return nil, nil, err
@@ -1477,7 +1675,7 @@ func sortMetricCurrencies(currencies []SubscriptionMetricCurrency) {
 }
 
 func subCols() string {
-	return `id, project_id, customer_id, COALESCE(customer_email,''), COALESCE(customer_name,''), kind, status, billing_provider, COALESCE(external_id,''), currency, interval, interval_count, quantity, trial_start, trial_end, current_period_start, current_period_end, next_renewal_at, cancel_at, cancelled_at, ended_at, source, COALESCE(source_ref,''), metadata, created_at, updated_at`
+	return `id, project_id, customer_id, COALESCE(customer_email,''), COALESCE(customer_name,''), kind, status, billing_provider, trial_end_behavior, COALESCE(external_id,''), currency, interval, interval_count, quantity, trial_start, trial_end, current_period_start, current_period_end, next_renewal_at, cancel_at, cancelled_at, ended_at, source, COALESCE(source_ref,''), metadata, created_at, updated_at`
 }
 
 func scanSub(row rowScanner) (*Subscription, error) {
@@ -1485,7 +1683,7 @@ func scanSub(row rowScanner) (*Subscription, error) {
 	var cid sql.NullInt64
 	var trialStart, trialEnd, curStart, curEnd, next, cancelAt, cancelledAt, endedAt sql.NullString
 	var meta string
-	err := row.Scan(&s.ID, &s.ProjectID, &cid, &s.CustomerEmail, &s.CustomerName, &s.Kind, &s.Status, &s.BillingProvider, &s.ExternalID, &s.Currency, &s.Interval, &s.IntervalCount, &s.Quantity, &trialStart, &trialEnd, &curStart, &curEnd, &next, &cancelAt, &cancelledAt, &endedAt, &s.Source, &s.SourceRef, &meta, &s.CreatedAt, &s.UpdatedAt)
+	err := row.Scan(&s.ID, &s.ProjectID, &cid, &s.CustomerEmail, &s.CustomerName, &s.Kind, &s.Status, &s.BillingProvider, &s.TrialEndBehavior, &s.ExternalID, &s.Currency, &s.Interval, &s.IntervalCount, &s.Quantity, &trialStart, &trialEnd, &curStart, &curEnd, &next, &cancelAt, &cancelledAt, &endedAt, &s.Source, &s.SourceRef, &meta, &s.CreatedAt, &s.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -1875,6 +2073,7 @@ func normalizeItemMap(m map[string]any, currency string) itemIn {
 
 var validKind = map[string]bool{"saas": true, "physical": true, "service": true}
 var validSubStatus = map[string]bool{"trialing": true, "active": true, "past_due": true, "paused": true, "cancelled": true, "ended": true}
+var validTrialEndBehavior = map[string]bool{"collect": true, "pause": true, "end": true}
 
 func resolveProjectFromArgs(args map[string]any) (string, error) {
 	pid := strings.TrimSpace(strArg(args, "_project_id"))
@@ -2019,6 +2218,31 @@ func trialExpiredStatus(meta map[string]any) string {
 		return "ended"
 	default:
 		return "past_due"
+	}
+}
+func legacyTrialEndBehavior(meta map[string]any) string {
+	switch strings.ToLower(firstNonEmpty(strArg(meta, "trial_end_behavior"), strArg(meta, "trial_end_status"), strArg(meta, "on_trial_end_unpaid"))) {
+	case "pause", "paused", "suspend", "suspended":
+		return "pause"
+	case "end", "ended":
+		return "end"
+	default:
+		return "collect"
+	}
+}
+func subscriptionPeriodEnd(start time.Time, interval string, count int64) time.Time {
+	if count <= 0 {
+		count = 1
+	}
+	switch strings.ToLower(strings.TrimSpace(interval)) {
+	case "day":
+		return start.AddDate(0, 0, int(count))
+	case "week":
+		return start.AddDate(0, 0, int(7*count))
+	case "year":
+		return start.AddDate(int(count), 0, 0)
+	default:
+		return start.AddDate(0, int(count), 0)
 	}
 }
 func parseTime(value string) (time.Time, bool) {

@@ -1,14 +1,40 @@
 package main
 
 import (
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
+	sdk "github.com/apteva/app-sdk"
 	tk "github.com/apteva/app-sdk/testkit"
 )
+
+type noCommercePlatform struct {
+	tk.BasePlatformClient
+	Calls int
+}
+
+func (p *noCommercePlatform) CallAppResult(string, string, map[string]any, any) error {
+	p.Calls++
+	return errors.New("subscriptions must not orchestrate another app")
+}
+
+func newCollectibleTrial(t *testing.T, ctx *sdk.AppCtx, pid, email string, trialEnd time.Time) *Subscription {
+	t.Helper()
+	sub, err := dbSubscriptionCreate(ctx, pid, map[string]any{
+		"customer_id": 42, "customer_email": email, "kind": "saas", "status": "trialing",
+		"trial_start": trialEnd.AddDate(0, 0, -7).Format(time.RFC3339), "trial_end": trialEnd.Format(time.RFC3339),
+		"trial_end_behavior": "collect",
+		"items":              []any{map[string]any{"title": "Pro plan", "quantity": 1, "unit_amount_cents": 2900, "currency": "USD"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return sub
+}
 
 func TestSubscriptionLifecycle(t *testing.T) {
 	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("proj-test"))
@@ -251,6 +277,138 @@ func TestLifecycleWorkerExpiresTrialAndGrace(t *testing.T) {
 	}
 	if meta := mapFromAny(data["metadata"]); meta["on_unpaid_grace_expired"] != "delete" {
 		t.Fatalf("ended event missing metadata policy: %+v", data)
+	}
+}
+
+func TestCollectibleTrialCreatesPendingCycleWithoutCommerceCalls(t *testing.T) {
+	pf := &noCommercePlatform{}
+	rec := tk.NewEmitRecorder()
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("proj-test"), tk.WithPlatform(pf), tk.WithEmitter(rec))
+	now := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
+	sub := newCollectibleTrial(t, ctx, "proj-test", "buyer@example.com", now.Add(-time.Minute))
+	rec.Reset()
+
+	if err := runSubscriptionLifecycle(ctx, now); err != nil {
+		t.Fatal(err)
+	}
+	got, err := dbSubscriptionGet(ctx.AppDB(), "proj-test", sub.ID, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != "past_due" {
+		t.Fatalf("status=%s, want past_due", got.Status)
+	}
+	if len(got.Cycles) != 1 || got.Cycles[0].PaymentStatus != "pending" || got.Cycles[0].TotalCents != 2900 {
+		t.Fatalf("unexpected due cycle: %+v", got.Cycles)
+	}
+	if pf.Calls != 0 {
+		t.Fatalf("Subscriptions made %d cross-app commerce calls", pf.Calls)
+	}
+	events := rec.EventsByTopic("subscription.cycle_due")
+	if len(events) != 1 {
+		t.Fatalf("cycle_due events=%d, want 1", len(events))
+	}
+	data, ok := events[0].Data.(map[string]any)
+	if !ok || data["subscription_id"] != sub.ID || data["cycle_id"] != got.Cycles[0].ID || data["total_cents"] != int64(2900) {
+		t.Fatalf("bad cycle_due payload: %+v", events[0].Data)
+	}
+
+	if err := runSubscriptionLifecycle(ctx, now.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	got, _ = dbSubscriptionGet(ctx.AppDB(), "proj-test", sub.ID, true)
+	if len(got.Cycles) != 1 || len(rec.EventsByTopic("subscription.cycle_due")) != 1 {
+		t.Fatalf("repeat worker duplicated cycle or event: cycles=%d events=%d", len(got.Cycles), len(rec.EventsByTopic("subscription.cycle_due")))
+	}
+}
+
+func TestTrialEndWorkerIsProjectScoped(t *testing.T) {
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("proj-a"))
+	now := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
+	a := newCollectibleTrial(t, ctx, "proj-a", "a@example.com", now.Add(-time.Minute))
+	b := newCollectibleTrial(t, ctx, "proj-b", "b@example.com", now.Add(-time.Minute))
+	if err := runSubscriptionLifecycle(ctx, now); err != nil {
+		t.Fatal(err)
+	}
+	gotA, _ := dbSubscriptionGet(ctx.AppDB(), "proj-a", a.ID, true)
+	gotB, _ := dbSubscriptionGet(ctx.AppDB(), "proj-b", b.ID, true)
+	if gotA.Status != "past_due" || len(gotA.Cycles) != 1 || gotB.Status != "trialing" || len(gotB.Cycles) != 0 {
+		t.Fatalf("cross-project processing: a=%s/%d b=%s/%d", gotA.Status, len(gotA.Cycles), gotB.Status, len(gotB.Cycles))
+	}
+}
+
+func TestTrialBeforeExpiryCreatesNoCycle(t *testing.T) {
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("proj-test"))
+	now := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
+	sub := newCollectibleTrial(t, ctx, "proj-test", "future@example.com", now.Add(time.Hour))
+	if err := runSubscriptionLifecycle(ctx, now); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := dbSubscriptionGet(ctx.AppDB(), "proj-test", sub.ID, true)
+	if got.Status != "trialing" || len(got.Cycles) != 0 {
+		t.Fatalf("future trial processed early: status=%s cycles=%d", got.Status, len(got.Cycles))
+	}
+}
+
+func TestSubscriptionSchemaKeepsDomainBoundary(t *testing.T) {
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("proj-test"))
+	rows, err := ctx.AppDB().Query(`PRAGMA table_info(subscriptions)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	columns := map[string]bool{}
+	for rows.Next() {
+		var cid int
+		var name, typ string
+		var notNull, pk int
+		var defaultValue any
+		if err := rows.Scan(&cid, &name, &typ, &notNull, &defaultValue, &pk); err != nil {
+			t.Fatal(err)
+		}
+		columns[name] = true
+	}
+	if !columns["trial_end_behavior"] {
+		t.Fatal("trial_end_behavior should remain subscription state")
+	}
+	for _, name := range []string{"billing_customer_id", "collection_method", "collection_status", "last_collection_error", "collection_invoice_id"} {
+		if columns[name] {
+			t.Fatalf("commercial column %q leaked into subscriptions", name)
+		}
+	}
+}
+
+func TestTrialEndFailureDoesNotBlockOtherSubscriptions(t *testing.T) {
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("proj-test"))
+	now := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
+	broken := newCollectibleTrial(t, ctx, "proj-test", "broken@example.com", now.Add(-2*time.Minute))
+	healthy := newCollectibleTrial(t, ctx, "proj-test", "healthy@example.com", now.Add(-time.Minute))
+	if err := dbSeedTrialAttempts(ctx.AppDB(), "proj-test", now, 100); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ctx.AppDB().Exec(`UPDATE subscription_lifecycle_attempts SET effective_at='not-a-time' WHERE subscription_id=?`, broken.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ctx.AppDB().Exec(`UPDATE subscriptions SET trial_end='not-a-time' WHERE id=?`, broken.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := runSubscriptionLifecycle(ctx, now); err != nil {
+		t.Fatal(err)
+	}
+	gotBroken, _ := dbSubscriptionGet(ctx.AppDB(), "proj-test", broken.ID, true)
+	gotHealthy, _ := dbSubscriptionGet(ctx.AppDB(), "proj-test", healthy.ID, true)
+	if gotBroken.Status != "trialing" || len(gotBroken.Cycles) != 0 {
+		t.Fatalf("broken subscription changed unexpectedly: %s/%d", gotBroken.Status, len(gotBroken.Cycles))
+	}
+	if gotHealthy.Status != "past_due" || len(gotHealthy.Cycles) != 1 {
+		t.Fatalf("healthy subscription was blocked: %s/%d", gotHealthy.Status, len(gotHealthy.Cycles))
+	}
+	var status string
+	if err := ctx.AppDB().QueryRow(`SELECT status FROM subscription_lifecycle_attempts WHERE subscription_id=?`, broken.ID).Scan(&status); err != nil {
+		t.Fatal(err)
+	}
+	if status != "failed" {
+		t.Fatalf("broken attempt status=%s, want failed", status)
 	}
 }
 
