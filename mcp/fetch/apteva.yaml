@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: fetch
 display_name: Fetch
-version: 0.1.0
+version: 0.1.1
 description: |
   Controlled HTTP client for agents and operators. Agents get one MCP
   tool for GET/POST/PUT/PATCH/DELETE-style HTTP requests with timeouts,
@@ -62,7 +62,12 @@ config_schema:
     type: bool
     default: false
     label: Allow private networks
-    description: Off by default to reduce SSRF risk. When false, loopback, private, link-local, multicast, and metadata IPs are blocked.
+    description: Allows RFC1918, ULA, CGNAT, and benchmark networks. Metadata, link-local, multicast, and reserved ranges remain blocked.
+  - name: allow_loopback
+    type: bool
+    default: false
+    label: Allow loopback
+    description: Allows 127.0.0.0/8 and ::1 for explicit local-development use. Cloud metadata ranges remain blocked.
   - name: default_timeout_ms
     type: number
     default: 15000
@@ -71,5 +76,10 @@ config_schema:
     type: number
     default: 1048576
     label: Max response bytes
+  - name: history_max_entries
+    type: number
+    default: 1000
+    label: History retention
+    description: Maximum retained executions per project. Capped at 10000.
 
 upgrade_policy: auto-patch

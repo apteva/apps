@@ -35,7 +35,7 @@ func TestManifestAndToolShape(t *testing.T) {
 }
 
 func TestFetchRequest_PostJSONAndParsesResponse(t *testing.T) {
-	ctx := newFetchCtx(t, map[string]string{"allow_private_networks": "true"})
+	ctx := newFetchCtx(t, map[string]string{"allow_loopback": "true"})
 	app := &App{}
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -79,14 +79,15 @@ func TestFetchRequest_BlocksPrivateNetworkByDefault(t *testing.T) {
 		"method": "GET",
 		"url":    "http://127.0.0.1:12345/",
 	})
-	if err == nil || !strings.Contains(err.Error(), "private") {
+	if err == nil || !strings.Contains(err.Error(), "loopback") {
 		t.Fatalf("expected private-network block, got %v", err)
 	}
 }
 
 func TestFetchRequest_RedactsSecretEnvironmentValuesInHistory(t *testing.T) {
-	ctx := newFetchCtx(t, map[string]string{"allow_private_networks": "true"})
+	ctx := newFetchCtx(t, map[string]string{"allow_loopback": "true"})
 	app := &App{}
+	codec := codecForTest(t, ctx)
 	env, err := dbEnvironmentCreate(ctx.AppDB(), "test-proj", &Environment{
 		Name: "Local",
 		Vars: []EnvironmentVar{{
@@ -94,7 +95,7 @@ func TestFetchRequest_RedactsSecretEnvironmentValuesInHistory(t *testing.T) {
 			Value:    "super-secret-token",
 			IsSecret: true,
 		}},
-	})
+	}, codec)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -133,6 +134,7 @@ func TestFetchRequest_RedactsSecretEnvironmentValuesInHistory(t *testing.T) {
 
 func TestEnvironmentUpdate_PreservesMaskedSecret(t *testing.T) {
 	ctx := newFetchCtx(t, nil)
+	codec := codecForTest(t, ctx)
 	env, err := dbEnvironmentCreate(ctx.AppDB(), "test-proj", &Environment{
 		Name: "Prod",
 		Vars: []EnvironmentVar{{
@@ -140,7 +142,7 @@ func TestEnvironmentUpdate_PreservesMaskedSecret(t *testing.T) {
 			Value:    "keep-me",
 			IsSecret: true,
 		}},
-	})
+	}, codec)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -154,14 +156,14 @@ func TestEnvironmentUpdate_PreservesMaskedSecret(t *testing.T) {
 				"has_value": true,
 			},
 		},
-	})
+	}, codec)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(updated.Vars) != 1 || updated.Vars[0].Value != "" || !updated.Vars[0].HasValue {
 		t.Fatalf("masked view malformed: %+v", updated.Vars)
 	}
-	revealed, _, err := dbEnvironmentVars(ctx.AppDB(), "test-proj", env.ID, true)
+	revealed, _, err := dbEnvironmentVars(ctx.AppDB(), "test-proj", env.ID, true, codec)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -171,7 +173,7 @@ func TestEnvironmentUpdate_PreservesMaskedSecret(t *testing.T) {
 }
 
 func TestHTTP_SavedRequestRunAndHistory(t *testing.T) {
-	ctx := newFetchCtx(t, map[string]string{"allow_private_networks": "true"})
+	ctx := newFetchCtx(t, map[string]string{"allow_loopback": "true"})
 	_ = ctx
 	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
@@ -221,6 +223,7 @@ func TestHTTP_SavedRequestRunAndHistory(t *testing.T) {
 
 func newFetchCtx(t *testing.T, cfg map[string]string) *sdk.AppCtx {
 	t.Helper()
+	t.Setenv("APTEVA_DATA_DIR", t.TempDir())
 	opts := []tk.Option{tk.WithProjectID("test-proj")}
 	if cfg != nil {
 		opts = append(opts, tk.WithConfig(cfg))
@@ -228,6 +231,15 @@ func newFetchCtx(t *testing.T, cfg map[string]string) *sdk.AppCtx {
 	ctx := tk.NewAppCtx(t, "apteva.yaml", opts...)
 	globalCtx = ctx
 	return ctx
+}
+
+func codecForTest(t *testing.T, ctx *sdk.AppCtx) *secretCodec {
+	t.Helper()
+	codec, err := loadSecretCodec(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return codec
 }
 
 func newHTTPServer(t *testing.T) *httptest.Server {

@@ -16,9 +16,9 @@ import (
 	"net/url"
 	"os"
 	"regexp"
-	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	sdk "github.com/apteva/app-sdk"
@@ -28,7 +28,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: fetch
 display_name: Fetch
-version: 0.1.0
+version: 0.1.1
 description: Controlled HTTP client for agents and operators.
 author: Apteva
 scopes: [project, global]
@@ -70,6 +70,10 @@ config_schema:
     type: bool
     default: false
     label: Allow private networks
+  - name: allow_loopback
+    type: bool
+    default: false
+    label: Allow loopback
   - name: default_timeout_ms
     type: number
     default: 15000
@@ -78,10 +82,48 @@ config_schema:
     type: number
     default: 1048576
     label: Max response bytes
+  - name: history_max_entries
+    type: number
+    default: 1000
+    label: History retention
 upgrade_policy: auto-patch
 `
 
-type App struct{}
+type App struct {
+	runtimeMu sync.Mutex
+	transport *http.Transport
+	secrets   *secretCodec
+	migrated  bool
+}
+
+const (
+	maxInboundJSONBytes  = 2 << 20
+	maxRequestBodyBytes  = 5 << 20
+	maxResponseBodyBytes = 5 << 20
+	maxURLBytes          = 16 << 10
+	maxHeaderBytes       = 64 << 10
+	maxHeaderCount       = 200
+	maxQueryBytes        = 64 << 10
+)
+
+var privateLikePrefixes = []netip.Prefix{
+	netip.MustParsePrefix("100.64.0.0/10"),
+	netip.MustParsePrefix("192.0.0.0/24"),
+	netip.MustParsePrefix("198.18.0.0/15"),
+}
+
+var alwaysBlockedPrefixes = []netip.Prefix{
+	netip.MustParsePrefix("0.0.0.0/8"),
+	netip.MustParsePrefix("169.254.0.0/16"),
+	netip.MustParsePrefix("224.0.0.0/4"),
+	netip.MustParsePrefix("240.0.0.0/4"),
+	netip.MustParsePrefix("192.0.2.0/24"),
+	netip.MustParsePrefix("198.51.100.0/24"),
+	netip.MustParsePrefix("203.0.113.0/24"),
+	netip.MustParsePrefix("fe80::/10"),
+	netip.MustParsePrefix("ff00::/8"),
+	netip.MustParsePrefix("2001:db8::/32"),
+}
 
 func (a *App) Manifest() sdk.Manifest {
 	m, err := sdk.ParseManifest([]byte(manifestYAML))
@@ -96,14 +138,46 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		return errors.New("fetch app requires a db block")
 	}
 	globalCtx = ctx
+	if err := a.ensureRuntime(ctx); err != nil {
+		return err
+	}
 	ctx.Logger().Info("fetch mounted", "scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
 	return nil
 }
 
-func (a *App) OnUnmount(*sdk.AppCtx) error       { return nil }
+func (a *App) OnUnmount(*sdk.AppCtx) error {
+	a.runtimeMu.Lock()
+	defer a.runtimeMu.Unlock()
+	if a.transport != nil {
+		a.transport.CloseIdleConnections()
+	}
+	return nil
+}
 func (a *App) Channels() []sdk.ChannelFactory    { return nil }
 func (a *App) Workers() []sdk.Worker             { return nil }
 func (a *App) EventHandlers() []sdk.EventHandler { return nil }
+
+func (a *App) ensureRuntime(ctx *sdk.AppCtx) error {
+	a.runtimeMu.Lock()
+	defer a.runtimeMu.Unlock()
+	if a.secrets == nil {
+		codec, err := loadSecretCodec(ctx)
+		if err != nil {
+			return err
+		}
+		a.secrets = codec
+	}
+	if a.transport == nil {
+		a.transport = newSafeTransport(ctx)
+	}
+	if !a.migrated {
+		if err := migrateLegacySecrets(ctx.AppDB(), a.secrets, ctx.Logger()); err != nil {
+			return err
+		}
+		a.migrated = true
+	}
+	return nil
+}
 
 func (a *App) HTTPRoutes() []sdk.Route {
 	return []sdk.Route{
@@ -180,6 +254,8 @@ type FetchResult struct {
 	Status        int               `json:"status"`
 	StatusText    string            `json:"status_text"`
 	Headers       map[string]string `json:"headers"`
+	ContentType   string            `json:"content_type,omitempty"`
+	BodyBytes     int               `json:"body_bytes,omitempty"`
 	BodyText      string            `json:"body_text,omitempty"`
 	BodyJSON      any               `json:"body_json,omitempty"`
 	BodyBase64    string            `json:"body_base64,omitempty"`
@@ -207,6 +283,8 @@ type executeOptions struct {
 	source         string
 	savedRequestID int64
 	defaultSave    bool
+	requestCtx     context.Context
+	historyMax     int
 }
 
 func (a *App) toolFetchRequest(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -218,16 +296,34 @@ func (a *App) toolFetchRequest(ctx *sdk.AppCtx, args map[string]any) (any, error
 }
 
 func (a *App) execute(ctx *sdk.AppCtx, pid string, args map[string]any, opts executeOptions) (*FetchResult, error) {
-	reqSpec, secretValues, err := normalizeRequestSpec(ctx, pid, args)
+	if err := a.ensureRuntime(ctx); err != nil {
+		return nil, err
+	}
+	if opts.historyMax <= 0 {
+		opts.historyMax = configInt(ctx, "history_max_entries", 1000)
+	}
+	if opts.historyMax <= 0 {
+		opts.historyMax = 1000
+	}
+	if opts.historyMax > 10000 {
+		opts.historyMax = 10000
+	}
+	reqSpec, secretValues, err := normalizeRequestSpec(ctx, pid, args, a.secrets)
 	if err != nil {
 		historyID := maybeRecordHistory(ctx.AppDB(), pid, opts, args, nil, 0, err, secretValues)
 		return &FetchResult{HistoryID: historyID}, err
 	}
 	start := time.Now()
-	result, err := doFetch(ctx, reqSpec)
+	requestCtx := opts.requestCtx
+	if requestCtx == nil {
+		requestCtx = context.Background()
+	}
+	result, err := a.doFetch(requestCtx, ctx, reqSpec)
 	duration := time.Since(start).Milliseconds()
+	err = sanitizeRunError(err, reqSpec.URL, reqSpec.SafeURL, secretValues)
 	if result != nil {
 		result.DurationMS = duration
+		result.FinalURL = redactURL(result.FinalURL, secretValues)
 	}
 	save := opts.defaultSave
 	if v, ok := args["save_history"].(bool); ok {
@@ -248,6 +344,7 @@ func (a *App) execute(ctx *sdk.AppCtx, pid string, args map[string]any, opts exe
 type requestSpec struct {
 	Method          string
 	URL             string
+	SafeURL         string
 	Headers         map[string]string
 	BodyBytes       []byte
 	Timeout         time.Duration
@@ -257,28 +354,37 @@ type requestSpec struct {
 
 func (r requestSpec) historyRequest() map[string]any {
 	return map[string]any{
-		"method":  r.Method,
-		"url":     r.URL,
-		"headers": r.Headers,
+		"method":     r.Method,
+		"url":        r.SafeURL,
+		"headers":    r.Headers,
+		"body_bytes": len(r.BodyBytes),
 	}
 }
 
-func normalizeRequestSpec(ctx *sdk.AppCtx, pid string, args map[string]any) (requestSpec, []string, error) {
+func normalizeRequestSpec(ctx *sdk.AppCtx, pid string, args map[string]any, codec *secretCodec) (requestSpec, []string, error) {
 	var secrets []string
 	vars := map[string]string{}
+	secretKeys := map[string]bool{}
 	if envID := int64Arg(args, "environment_id"); envID != 0 {
-		envVars, secretVals, err := dbEnvironmentVars(ctx.AppDB(), pid, envID, true)
+		envVars, secretVals, err := dbEnvironmentVars(ctx.AppDB(), pid, envID, true, codec)
 		if err != nil {
 			return requestSpec{}, nil, err
 		}
 		for _, v := range envVars {
 			vars[v.Key] = v.Value
+			if v.IsSecret {
+				secretKeys[v.Key] = true
+			}
 		}
 		secrets = append(secrets, secretVals...)
 	}
 	if raw, ok := args["variables"].(map[string]any); ok {
 		for k, v := range raw {
-			vars[k] = fmt.Sprint(v)
+			value := fmt.Sprint(v)
+			vars[k] = value
+			if secretKeys[k] || isSensitiveName(k) {
+				secrets = append(secrets, value)
+			}
 		}
 	}
 
@@ -290,6 +396,9 @@ func normalizeRequestSpec(ctx *sdk.AppCtx, pid string, args map[string]any) (req
 		return requestSpec{}, secrets, fmt.Errorf("unsupported method %q", method)
 	}
 	rawURL := interpolate(strArg(args, "url"), vars)
+	if len(rawURL) > maxURLBytes {
+		return requestSpec{}, secrets, fmt.Errorf("url exceeds %d bytes", maxURLBytes)
+	}
 	u, err := url.Parse(rawURL)
 	if err != nil || u == nil || u.Scheme == "" || u.Host == "" {
 		return requestSpec{}, secrets, errors.New("valid absolute http(s) url required")
@@ -307,15 +416,27 @@ func normalizeRequestSpec(ctx *sdk.AppCtx, pid string, args map[string]any) (req
 		}
 		u.RawQuery = query.Encode()
 	}
+	if len(u.RawQuery) > maxQueryBytes {
+		return requestSpec{}, secrets, fmt.Errorf("query exceeds %d bytes", maxQueryBytes)
+	}
 
 	headers := map[string]string{}
 	if h, ok := args["headers"].(map[string]any); ok {
+		if len(h) > maxHeaderCount {
+			return requestSpec{}, secrets, fmt.Errorf("header count exceeds %d", maxHeaderCount)
+		}
+		headerBytes := 0
 		for k, v := range h {
 			key := http.CanonicalHeaderKey(strings.TrimSpace(k))
 			if key == "" {
 				continue
 			}
-			headers[key] = interpolate(fmt.Sprint(v), vars)
+			value := interpolate(fmt.Sprint(v), vars)
+			headerBytes += len(key) + len(value)
+			if headerBytes > maxHeaderBytes {
+				return requestSpec{}, secrets, fmt.Errorf("headers exceed %d bytes", maxHeaderBytes)
+			}
+			headers[key] = value
 		}
 	}
 
@@ -337,12 +458,13 @@ func normalizeRequestSpec(ctx *sdk.AppCtx, pid string, args map[string]any) (req
 	if maxBytes <= 0 {
 		maxBytes = 1 << 20
 	}
-	if maxBytes > 10<<20 {
-		maxBytes = 10 << 20
+	if maxBytes > maxResponseBodyBytes {
+		maxBytes = maxResponseBodyBytes
 	}
 	return requestSpec{
 		Method:          method,
 		URL:             u.String(),
+		SafeURL:         redactURL(u.String(), secrets),
 		Headers:         headers,
 		BodyBytes:       body,
 		Timeout:         timeout,
@@ -351,10 +473,10 @@ func normalizeRequestSpec(ctx *sdk.AppCtx, pid string, args map[string]any) (req
 	}, secrets, nil
 }
 
-func doFetch(ctx *sdk.AppCtx, spec requestSpec) (*FetchResult, error) {
+func (a *App) doFetch(requestCtx context.Context, ctx *sdk.AppCtx, spec requestSpec) (*FetchResult, error) {
 	client := &http.Client{
 		Timeout:   spec.Timeout,
-		Transport: safeTransport(ctx),
+		Transport: a.transport,
 	}
 	if !spec.FollowRedirects {
 		client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
@@ -365,6 +487,19 @@ func doFetch(ctx *sdk.AppCtx, spec requestSpec) (*FetchResult, error) {
 			if len(via) >= 5 {
 				return errors.New("stopped after 5 redirects")
 			}
+			if len(via) > 0 {
+				previous := via[len(via)-1].URL
+				if previous.Scheme == "https" && req.URL.Scheme == "http" {
+					return errors.New("https to http redirect blocked")
+				}
+				if !sameOrigin(previous, req.URL) {
+					for key := range req.Header {
+						if !safeCrossOriginHeader(key) {
+							req.Header.Del(key)
+						}
+					}
+				}
+			}
 			return validateHostPolicy(ctx, req.URL.Hostname())
 		}
 	}
@@ -372,7 +507,7 @@ func doFetch(ctx *sdk.AppCtx, spec requestSpec) (*FetchResult, error) {
 	if len(spec.BodyBytes) > 0 {
 		body = bytes.NewReader(spec.BodyBytes)
 	}
-	req, err := http.NewRequestWithContext(context.Background(), spec.Method, spec.URL, body)
+	req, err := http.NewRequestWithContext(requestCtx, spec.Method, spec.URL, body)
 	if err != nil {
 		return nil, err
 	}
@@ -401,6 +536,8 @@ func doFetch(ctx *sdk.AppCtx, spec requestSpec) (*FetchResult, error) {
 		Status:        resp.StatusCode,
 		StatusText:    resp.Status,
 		Headers:       headers,
+		ContentType:   resp.Header.Get("Content-Type"),
+		BodyBytes:     len(data),
 		BodyTruncated: truncated,
 		FinalURL:      resp.Request.URL.String(),
 	}
@@ -420,10 +557,16 @@ func doFetch(ctx *sdk.AppCtx, spec requestSpec) (*FetchResult, error) {
 	return out, nil
 }
 
-func safeTransport(ctx *sdk.AppCtx) http.RoundTripper {
+func newSafeTransport(ctx *sdk.AppCtx) *http.Transport {
 	dialer := &net.Dialer{Timeout: 10 * time.Second, KeepAlive: 30 * time.Second}
 	return &http.Transport{
-		Proxy: http.ProxyFromEnvironment,
+		Proxy:                 nil,
+		ForceAttemptHTTP2:     true,
+		MaxIdleConns:          64,
+		MaxIdleConnsPerHost:   8,
+		IdleConnTimeout:       90 * time.Second,
+		TLSHandshakeTimeout:   10 * time.Second,
+		ExpectContinueTimeout: time.Second,
 		DialContext: func(c context.Context, network, addr string) (net.Conn, error) {
 			host, port, err := net.SplitHostPort(addr)
 			if err != nil {
@@ -461,6 +604,19 @@ func safeTransport(ctx *sdk.AppCtx) http.RoundTripper {
 	}
 }
 
+func sameOrigin(a, b *url.URL) bool {
+	return a != nil && b != nil && strings.EqualFold(a.Scheme, b.Scheme) && strings.EqualFold(a.Host, b.Host)
+}
+
+func safeCrossOriginHeader(key string) bool {
+	switch http.CanonicalHeaderKey(key) {
+	case "Accept", "Accept-Language", "Content-Type", "User-Agent":
+		return true
+	default:
+		return false
+	}
+}
+
 func validateHostPolicy(ctx *sdk.AppCtx, host string) error {
 	host = strings.Trim(strings.ToLower(host), "[]")
 	if host == "" {
@@ -479,17 +635,35 @@ func validateHostPolicy(ctx *sdk.AppCtx, host string) error {
 }
 
 func validateIPPolicy(ctx *sdk.AppCtx, ip netip.Addr) error {
-	if configBool(ctx, "allow_private_networks", false) {
-		return nil
+	ip = ip.Unmap()
+	if !ip.IsValid() || ip.IsUnspecified() || ip.IsMulticast() || prefixContains(alwaysBlockedPrefixes, ip) {
+		return fmt.Errorf("blocked non-routable or special-use address %s", ip)
 	}
-	if ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast() || ip.IsLinkLocalMulticast() ||
-		ip.IsMulticast() || ip.IsUnspecified() {
-		return fmt.Errorf("blocked private or non-public address %s", ip)
+	if ip.IsLoopback() {
+		if configBool(ctx, "allow_loopback", false) {
+			return nil
+		}
+		return fmt.Errorf("blocked loopback address %s", ip)
 	}
-	if ip.Is4() && ip.String() == "169.254.169.254" {
+	if ip == netip.MustParseAddr("fd00:ec2::254") {
 		return errors.New("blocked metadata address")
 	}
+	if ip.IsPrivate() || prefixContains(privateLikePrefixes, ip) {
+		if configBool(ctx, "allow_private_networks", false) {
+			return nil
+		}
+		return fmt.Errorf("blocked private address %s", ip)
+	}
 	return nil
+}
+
+func prefixContains(prefixes []netip.Prefix, ip netip.Addr) bool {
+	for _, prefix := range prefixes {
+		if prefix.Contains(ip) {
+			return true
+		}
+	}
+	return false
 }
 
 func buildBody(raw any, vars map[string]string) ([]byte, string, error) {
@@ -504,12 +678,16 @@ func buildBody(raw any, vars map[string]string) ([]byte, string, error) {
 	case body["json"] != nil:
 		resolved := interpolateAny(body["json"], vars)
 		b, err := json.Marshal(resolved)
-		return b, "application/json", err
+		return boundedRequestBody(b, "application/json", err)
 	case body["text"] != nil:
-		return []byte(interpolate(fmt.Sprint(body["text"]), vars)), "text/plain; charset=utf-8", nil
+		return boundedRequestBody([]byte(interpolate(fmt.Sprint(body["text"]), vars)), "text/plain; charset=utf-8", nil)
 	case body["base64"] != nil:
-		b, err := base64.StdEncoding.DecodeString(fmt.Sprint(body["base64"]))
-		return b, "application/octet-stream", err
+		encoded := fmt.Sprint(body["base64"])
+		if len(encoded) > base64.StdEncoding.EncodedLen(maxRequestBodyBytes) {
+			return nil, "", fmt.Errorf("request body exceeds %d bytes", maxRequestBodyBytes)
+		}
+		b, err := base64.StdEncoding.DecodeString(encoded)
+		return boundedRequestBody(b, "application/octet-stream", err)
 	case body["form"] != nil:
 		form, ok := body["form"].(map[string]any)
 		if !ok {
@@ -519,10 +697,20 @@ func buildBody(raw any, vars map[string]string) ([]byte, string, error) {
 		for k, v := range form {
 			vals.Set(k, interpolate(fmt.Sprint(v), vars))
 		}
-		return []byte(vals.Encode()), "application/x-www-form-urlencoded", nil
+		return boundedRequestBody([]byte(vals.Encode()), "application/x-www-form-urlencoded", nil)
 	default:
 		return nil, "", nil
 	}
+}
+
+func boundedRequestBody(body []byte, contentType string, err error) ([]byte, string, error) {
+	if err != nil {
+		return nil, "", err
+	}
+	if len(body) > maxRequestBodyBytes {
+		return nil, "", fmt.Errorf("request body exceeds %d bytes", maxRequestBodyBytes)
+	}
+	return body, contentType, nil
 }
 
 func maybeRecordHistory(db *sql.DB, pid string, opts executeOptions, input map[string]any, result *FetchResult, duration int64, err error, secrets []string) int64 {
@@ -535,14 +723,14 @@ func maybeRecordHistory(db *sql.DB, pid string, opts executeOptions, input map[s
 	}
 	req := map[string]any{
 		"method": strArg(input, "method"),
-		"url":    strArg(input, "url"),
+		"url":    redactURL(strArg(input, "url"), secrets),
 	}
 	return recordHistory(db, pid, opts, req, result, duration, err, secrets)
 }
 
 func recordHistory(db *sql.DB, pid string, opts executeOptions, req map[string]any, result *FetchResult, duration int64, runErr error, secrets []string) int64 {
 	method := strings.ToUpper(fmt.Sprint(req["method"]))
-	rawURL := fmt.Sprint(req["url"])
+	rawURL := redactURL(fmt.Sprint(req["url"]), secrets)
 	reqJSON, _ := json.Marshal(redactAny(req, secrets))
 	var respJSON []byte
 	var status int
@@ -575,15 +763,40 @@ func recordHistory(db *sql.DB, pid string, opts executeOptions, req map[string]a
 		return 0
 	}
 	id, _ := res.LastInsertId()
+	if opts.historyMax > 0 {
+		_, _ = db.Exec(
+			`DELETE FROM fetch_history
+			 WHERE project_id=? AND id NOT IN (
+				SELECT id FROM fetch_history WHERE project_id=? ORDER BY id DESC LIMIT ?
+			 )`,
+			pid, pid, opts.historyMax,
+		)
+	}
 	return id
 }
 
-func dbSavedCreate(db *sql.DB, pid string, s *SavedRequest) (*SavedRequest, error) {
+func dbSavedCreate(db *sql.DB, pid string, s *SavedRequest, codec *secretCodec) (*SavedRequest, error) {
 	if s.Slug == "" {
 		s.Slug = slugify(s.Name)
 	}
 	if s.Slug == "" || s.Name == "" || s.Method == "" || s.URLTemplate == "" {
 		return nil, errors.New("slug/name/method/url_template required")
+	}
+	if !validMethod(strings.ToUpper(s.Method)) {
+		return nil, fmt.Errorf("unsupported method %q", s.Method)
+	}
+	if err := validateSavedURL(s.URLTemplate); err != nil {
+		return nil, err
+	}
+	var err error
+	if s.Headers, err = protectRawJSON(s.Headers, codec, savedAAD(pid, "headers")); err != nil {
+		return nil, err
+	}
+	if s.Query, err = protectRawJSON(s.Query, codec, savedAAD(pid, "query")); err != nil {
+		return nil, err
+	}
+	if s.Body, err = protectRawJSON(s.Body, codec, savedAAD(pid, "body")); err != nil {
+		return nil, err
 	}
 	res, err := db.Exec(
 		`INSERT INTO fetch_saved_requests
@@ -596,10 +809,10 @@ func dbSavedCreate(db *sql.DB, pid string, s *SavedRequest) (*SavedRequest, erro
 		return nil, err
 	}
 	id, _ := res.LastInsertId()
-	return dbSavedGet(db, pid, id)
+	return dbSavedGet(db, pid, id, codec, false)
 }
 
-func dbSavedList(db *sql.DB, pid string) ([]*SavedRequest, error) {
+func dbSavedList(db *sql.DB, pid string, codec *secretCodec) ([]*SavedRequest, error) {
 	rows, err := db.Query(
 		`SELECT id, slug, name, COALESCE(description,''), method, url_template,
 				COALESCE(headers_json,''), COALESCE(query_json,''), COALESCE(body_json,''),
@@ -619,12 +832,24 @@ func dbSavedList(db *sql.DB, pid string) ([]*SavedRequest, error) {
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, s)
+		public, err := transformSavedJSON(s, codec, pid, false)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, public)
 	}
 	return out, rows.Err()
 }
 
-func dbSavedGet(db *sql.DB, pid string, id int64) (*SavedRequest, error) {
+func dbSavedGet(db *sql.DB, pid string, id int64, codec *secretCodec, reveal bool) (*SavedRequest, error) {
+	s, err := dbSavedGetRaw(db, pid, id)
+	if err != nil || s == nil {
+		return s, err
+	}
+	return transformSavedJSON(s, codec, pid, reveal)
+}
+
+func dbSavedGetRaw(db *sql.DB, pid string, id int64) (*SavedRequest, error) {
 	row := db.QueryRow(
 		`SELECT id, slug, name, COALESCE(description,''), method, url_template,
 				COALESCE(headers_json,''), COALESCE(query_json,''), COALESCE(body_json,''),
@@ -640,7 +865,14 @@ func dbSavedGet(db *sql.DB, pid string, id int64) (*SavedRequest, error) {
 	return s, err
 }
 
-func dbSavedUpdate(db *sql.DB, pid string, id int64, patch map[string]any) (*SavedRequest, error) {
+func dbSavedUpdate(db *sql.DB, pid string, id int64, patch map[string]any, codec *secretCodec) (*SavedRequest, error) {
+	current, err := dbSavedGetRaw(db, pid, id)
+	if err != nil {
+		return nil, err
+	}
+	if current == nil {
+		return nil, errors.New("request not found")
+	}
 	sets := []string{}
 	args := []any{}
 	allowed := map[string]bool{
@@ -654,25 +886,92 @@ func dbSavedUpdate(db *sql.DB, pid string, id int64, patch map[string]any) (*Sav
 		col := k
 		if k == "headers" || k == "query" || k == "body" {
 			col = k + "_json"
-			b, _ := json.Marshal(v)
-			v = string(b)
+			b, err := json.Marshal(v)
+			if err != nil {
+				return nil, err
+			}
+			var old json.RawMessage
+			switch k {
+			case "headers":
+				old = current.Headers
+			case "query":
+				old = current.Query
+			case "body":
+				old = current.Body
+			}
+			protected, err := protectSavedPatch(b, old, codec, savedAAD(pid, k))
+			if err != nil {
+				return nil, err
+			}
+			v = rawOrNull(protected)
 		}
 		if k == "method" {
 			v = strings.ToUpper(fmt.Sprint(v))
+			if !validMethod(fmt.Sprint(v)) {
+				return nil, fmt.Errorf("unsupported method %q", v)
+			}
+		}
+		if k == "url_template" {
+			if err := validateSavedURL(fmt.Sprint(v)); err != nil {
+				return nil, err
+			}
 		}
 		sets = append(sets, col+"=?")
 		args = append(args, v)
 	}
 	if len(sets) == 0 {
-		return dbSavedGet(db, pid, id)
+		return dbSavedGet(db, pid, id, codec, false)
 	}
 	sets = append(sets, "updated_at=CURRENT_TIMESTAMP")
 	args = append(args, pid, id)
-	_, err := db.Exec(`UPDATE fetch_saved_requests SET `+strings.Join(sets, ", ")+` WHERE project_id=? AND id=?`, args...)
+	_, err = db.Exec(`UPDATE fetch_saved_requests SET `+strings.Join(sets, ", ")+` WHERE project_id=? AND id=?`, args...)
 	if err != nil {
 		return nil, err
 	}
-	return dbSavedGet(db, pid, id)
+	return dbSavedGet(db, pid, id, codec, false)
+}
+
+func savedAAD(pid, field string) string {
+	return "fetch/saved/" + pid + "/" + field
+}
+
+func protectSavedPatch(next, current json.RawMessage, codec *secretCodec, aad string) (json.RawMessage, error) {
+	var nextValue, currentValue any
+	if len(next) > 0 {
+		if err := json.Unmarshal(next, &nextValue); err != nil {
+			return nil, err
+		}
+	}
+	if len(current) > 0 {
+		_ = json.Unmarshal(current, &currentValue)
+	}
+	merged, err := json.Marshal(mergeSecretMasks(nextValue, currentValue))
+	if err != nil {
+		return nil, err
+	}
+	return protectRawJSON(merged, codec, aad)
+}
+
+func transformSavedJSON(s *SavedRequest, codec *secretCodec, pid string, reveal bool) (*SavedRequest, error) {
+	copy := *s
+	if reveal {
+		var err error
+		if copy.Headers, err = revealRawJSON(copy.Headers, codec, savedAAD(pid, "headers")); err != nil {
+			return nil, err
+		}
+		if copy.Query, err = revealRawJSON(copy.Query, codec, savedAAD(pid, "query")); err != nil {
+			return nil, err
+		}
+		if copy.Body, err = revealRawJSON(copy.Body, codec, savedAAD(pid, "body")); err != nil {
+			return nil, err
+		}
+	} else {
+		copy.Headers = publicRawJSON(copy.Headers)
+		copy.Query = publicRawJSON(copy.Query)
+		copy.Body = publicRawJSON(copy.Body)
+		copy.URLTemplate = publicSavedURL(copy.URLTemplate)
+	}
+	return &copy, nil
 }
 
 func scanSaved(row interface{ Scan(...any) error }) (*SavedRequest, error) {
@@ -693,7 +992,7 @@ func scanSaved(row interface{ Scan(...any) error }) (*SavedRequest, error) {
 	return s, nil
 }
 
-func dbEnvironmentCreate(db *sql.DB, pid string, e *Environment) (*Environment, error) {
+func dbEnvironmentCreate(db *sql.DB, pid string, e *Environment, codec *secretCodec) (*Environment, error) {
 	if e.Slug == "" {
 		e.Slug = slugify(e.Name)
 	}
@@ -710,16 +1009,16 @@ func dbEnvironmentCreate(db *sql.DB, pid string, e *Environment) (*Environment, 
 		return nil, err
 	}
 	id, _ := res.LastInsertId()
-	if err := replaceEnvVarsTx(tx, pid, id, e.Vars); err != nil {
+	if err := replaceEnvVarsTx(tx, pid, id, e.Vars, codec); err != nil {
 		return nil, err
 	}
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
-	return dbEnvironmentGet(db, pid, id, false)
+	return dbEnvironmentGet(db, pid, id, false, codec)
 }
 
-func dbEnvironmentList(db *sql.DB, pid string) ([]*Environment, error) {
+func dbEnvironmentList(db *sql.DB, pid string, codec *secretCodec) ([]*Environment, error) {
 	rows, err := db.Query(
 		`SELECT id, slug, name, created_at, updated_at
 		 FROM fetch_environments
@@ -737,14 +1036,22 @@ func dbEnvironmentList(db *sql.DB, pid string) ([]*Environment, error) {
 		if err := rows.Scan(&e.ID, &e.Slug, &e.Name, &e.CreatedAt, &e.UpdatedAt); err != nil {
 			return nil, err
 		}
-		vars, _, _ := dbEnvironmentVars(db, pid, e.ID, false)
-		e.Vars = vars
 		out = append(out, e)
 	}
-	return out, rows.Err()
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	for _, e := range out {
+		vars, _, err := dbEnvironmentVars(db, pid, e.ID, false, codec)
+		if err != nil {
+			return nil, err
+		}
+		e.Vars = vars
+	}
+	return out, nil
 }
 
-func dbEnvironmentGet(db *sql.DB, pid string, id int64, reveal bool) (*Environment, error) {
+func dbEnvironmentGet(db *sql.DB, pid string, id int64, reveal bool, codec *secretCodec) (*Environment, error) {
 	row := db.QueryRow(
 		`SELECT id, slug, name, created_at, updated_at
 		 FROM fetch_environments
@@ -758,7 +1065,7 @@ func dbEnvironmentGet(db *sql.DB, pid string, id int64, reveal bool) (*Environme
 		}
 		return nil, err
 	}
-	vars, _, err := dbEnvironmentVars(db, pid, id, reveal)
+	vars, _, err := dbEnvironmentVars(db, pid, id, reveal, codec)
 	if err != nil {
 		return nil, err
 	}
@@ -766,7 +1073,7 @@ func dbEnvironmentGet(db *sql.DB, pid string, id int64, reveal bool) (*Environme
 	return e, nil
 }
 
-func dbEnvironmentUpdate(db *sql.DB, pid string, id int64, patch map[string]any) (*Environment, error) {
+func dbEnvironmentUpdate(db *sql.DB, pid string, id int64, patch map[string]any, codec *secretCodec) (*Environment, error) {
 	tx, err := db.Begin()
 	if err != nil {
 		return nil, err
@@ -791,30 +1098,39 @@ func dbEnvironmentUpdate(db *sql.DB, pid string, id int64, patch map[string]any)
 				HasValue: boolArg(m, "has_value"),
 			})
 		}
-		if err := replaceEnvVarsTx(tx, pid, id, vars); err != nil {
+		if err := replaceEnvVarsTx(tx, pid, id, vars, codec); err != nil {
 			return nil, err
 		}
 	}
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
-	return dbEnvironmentGet(db, pid, id, false)
+	return dbEnvironmentGet(db, pid, id, false, codec)
 }
 
-func replaceEnvVarsTx(tx *sql.Tx, pid string, envID int64, vars []EnvironmentVar) error {
+func replaceEnvVarsTx(tx *sql.Tx, pid string, envID int64, vars []EnvironmentVar, codec *secretCodec) error {
 	existing := map[string]string{}
 	rows, err := tx.Query(
-		`SELECT key, COALESCE(value,'') FROM fetch_environment_vars WHERE project_id=? AND environment_id=?`,
+		`SELECT key, COALESCE(value,''), COALESCE(value_encrypted,''), is_secret FROM fetch_environment_vars WHERE project_id=? AND environment_id=?`,
 		pid, envID,
 	)
 	if err != nil {
 		return err
 	}
 	for rows.Next() {
-		var key, value string
-		if err := rows.Scan(&key, &value); err != nil {
+		var key, value, encrypted string
+		var isSecret int
+		if err := rows.Scan(&key, &value, &encrypted, &isSecret); err != nil {
 			rows.Close()
 			return err
+		}
+		if isSecret != 0 && encrypted != "" {
+			plain, err := codec.openString(encrypted, environmentAAD(pid, envID, key))
+			if err != nil {
+				rows.Close()
+				return err
+			}
+			value = plain
 		}
 		existing[key] = value
 	}
@@ -829,13 +1145,25 @@ func replaceEnvVarsTx(tx *sql.Tx, pid string, envID int64, vars []EnvironmentVar
 		if key == "" {
 			continue
 		}
-		if v.Value == "" && v.HasValue {
-			v.Value = existing[key]
+		if (v.Value == "" || v.Value == secretMask) && v.HasValue {
+			previous, ok := existing[key]
+			if !ok {
+				return fmt.Errorf("secret %q was renamed without a replacement value", key)
+			}
+			v.Value = previous
+		}
+		var value, encrypted any = v.Value, nil
+		if v.IsSecret {
+			sealed, err := codec.sealString(v.Value, environmentAAD(pid, envID, key))
+			if err != nil {
+				return err
+			}
+			value, encrypted = nil, sealed
 		}
 		if _, err := tx.Exec(
-			`INSERT INTO fetch_environment_vars(project_id, environment_id, key, value, is_secret)
-			 VALUES (?, ?, ?, ?, ?)`,
-			pid, envID, key, v.Value, boolToInt(v.IsSecret),
+			`INSERT INTO fetch_environment_vars(project_id, environment_id, key, value, value_encrypted, is_secret)
+			 VALUES (?, ?, ?, ?, ?, ?)`,
+			pid, envID, key, value, encrypted, boolToInt(v.IsSecret),
 		); err != nil {
 			return err
 		}
@@ -843,9 +1171,9 @@ func replaceEnvVarsTx(tx *sql.Tx, pid string, envID int64, vars []EnvironmentVar
 	return nil
 }
 
-func dbEnvironmentVars(db *sql.DB, pid string, envID int64, reveal bool) ([]EnvironmentVar, []string, error) {
+func dbEnvironmentVars(db *sql.DB, pid string, envID int64, reveal bool, codec *secretCodec) ([]EnvironmentVar, []string, error) {
 	rows, err := db.Query(
-		`SELECT key, COALESCE(value,''), is_secret, updated_at
+		`SELECT key, COALESCE(value,''), COALESCE(value_encrypted,''), is_secret, updated_at
 		 FROM fetch_environment_vars
 		 WHERE project_id=? AND environment_id=?
 		 ORDER BY key COLLATE NOCASE`,
@@ -859,11 +1187,19 @@ func dbEnvironmentVars(db *sql.DB, pid string, envID int64, reveal bool) ([]Envi
 	var secrets []string
 	for rows.Next() {
 		var v EnvironmentVar
+		var encrypted string
 		var secretInt int
-		if err := rows.Scan(&v.Key, &v.Value, &secretInt, &v.UpdatedAt); err != nil {
+		if err := rows.Scan(&v.Key, &v.Value, &encrypted, &secretInt, &v.UpdatedAt); err != nil {
 			return nil, nil, err
 		}
 		v.IsSecret = secretInt != 0
+		if v.IsSecret && encrypted != "" {
+			plain, err := codec.openString(encrypted, environmentAAD(pid, envID, v.Key))
+			if err != nil {
+				return nil, nil, err
+			}
+			v.Value = plain
+		}
 		v.HasValue = v.Value != ""
 		if v.IsSecret {
 			if v.Value != "" {
@@ -890,11 +1226,10 @@ func (a *App) handleExecute(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body map[string]any
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		httpErr(w, http.StatusBadRequest, "invalid json")
+	if !decodeJSONBody(w, r, &body) {
 		return
 	}
-	out, err := a.execute(ctx, pid, body, executeOptions{source: "human", defaultSave: true})
+	out, err := a.execute(ctx, pid, body, executeOptions{source: "human", defaultSave: true, requestCtx: r.Context()})
 	if err != nil {
 		httpJSONStatus(w, http.StatusBadGateway, map[string]any{"error": err.Error(), "result": out})
 		return
@@ -904,6 +1239,10 @@ func (a *App) handleExecute(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) handleRequests(w http.ResponseWriter, r *http.Request) {
 	ctx := getCtx()
+	if err := a.ensureRuntime(ctx); err != nil {
+		httpErr(w, 500, err.Error())
+		return
+	}
 	pid, err := resolveProjectFromRequest(r)
 	if err != nil {
 		httpErr(w, http.StatusBadRequest, err.Error())
@@ -911,7 +1250,7 @@ func (a *App) handleRequests(w http.ResponseWriter, r *http.Request) {
 	}
 	switch r.Method {
 	case http.MethodGet:
-		out, err := dbSavedList(ctx.AppDB(), pid)
+		out, err := dbSavedList(ctx.AppDB(), pid, a.secrets)
 		if err != nil {
 			httpErr(w, 500, err.Error())
 			return
@@ -919,11 +1258,10 @@ func (a *App) handleRequests(w http.ResponseWriter, r *http.Request) {
 		httpJSON(w, map[string]any{"requests": out})
 	case http.MethodPost:
 		var s SavedRequest
-		if err := json.NewDecoder(r.Body).Decode(&s); err != nil {
-			httpErr(w, 400, "invalid json")
+		if !decodeJSONBody(w, r, &s) {
 			return
 		}
-		out, err := dbSavedCreate(ctx.AppDB(), pid, &s)
+		out, err := dbSavedCreate(ctx.AppDB(), pid, &s, a.secrets)
 		if err != nil {
 			httpErr(w, 400, err.Error())
 			return
@@ -936,6 +1274,10 @@ func (a *App) handleRequests(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) handleRequestItem(w http.ResponseWriter, r *http.Request) {
 	ctx := getCtx()
+	if err := a.ensureRuntime(ctx); err != nil {
+		httpErr(w, 500, err.Error())
+		return
+	}
 	pid, err := resolveProjectFromRequest(r)
 	if err != nil {
 		httpErr(w, 400, err.Error())
@@ -952,14 +1294,18 @@ func (a *App) handleRequestItem(w http.ResponseWriter, r *http.Request) {
 			httpErr(w, 405, "POST only")
 			return
 		}
-		saved, err := dbSavedGet(ctx.AppDB(), pid, id)
+		saved, err := dbSavedGet(ctx.AppDB(), pid, id, a.secrets, true)
 		if err != nil || saved == nil {
 			httpErr(w, 404, "request not found")
 			return
 		}
 		args := savedToArgs(saved)
 		var overrides map[string]any
-		_ = json.NewDecoder(r.Body).Decode(&overrides)
+		if r.Body != nil && r.ContentLength != 0 {
+			if !decodeJSONBody(w, r, &overrides) {
+				return
+			}
+		}
 		for k, v := range overrides {
 			args[k] = v
 		}
@@ -973,7 +1319,7 @@ func (a *App) handleRequestItem(w http.ResponseWriter, r *http.Request) {
 	}
 	switch r.Method {
 	case http.MethodGet:
-		out, err := dbSavedGet(ctx.AppDB(), pid, id)
+		out, err := dbSavedGet(ctx.AppDB(), pid, id, a.secrets, false)
 		if err != nil {
 			httpErr(w, 500, err.Error())
 			return
@@ -985,11 +1331,10 @@ func (a *App) handleRequestItem(w http.ResponseWriter, r *http.Request) {
 		httpJSON(w, map[string]any{"request": out})
 	case http.MethodPatch:
 		var patch map[string]any
-		if err := json.NewDecoder(r.Body).Decode(&patch); err != nil {
-			httpErr(w, 400, "invalid json")
+		if !decodeJSONBody(w, r, &patch) {
 			return
 		}
-		out, err := dbSavedUpdate(ctx.AppDB(), pid, id, patch)
+		out, err := dbSavedUpdate(ctx.AppDB(), pid, id, patch, a.secrets)
 		if err != nil {
 			httpErr(w, 400, err.Error())
 			return
@@ -1009,6 +1354,10 @@ func (a *App) handleRequestItem(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) handleEnvironments(w http.ResponseWriter, r *http.Request) {
 	ctx := getCtx()
+	if err := a.ensureRuntime(ctx); err != nil {
+		httpErr(w, 500, err.Error())
+		return
+	}
 	pid, err := resolveProjectFromRequest(r)
 	if err != nil {
 		httpErr(w, 400, err.Error())
@@ -1016,7 +1365,7 @@ func (a *App) handleEnvironments(w http.ResponseWriter, r *http.Request) {
 	}
 	switch r.Method {
 	case http.MethodGet:
-		out, err := dbEnvironmentList(ctx.AppDB(), pid)
+		out, err := dbEnvironmentList(ctx.AppDB(), pid, a.secrets)
 		if err != nil {
 			httpErr(w, 500, err.Error())
 			return
@@ -1024,11 +1373,10 @@ func (a *App) handleEnvironments(w http.ResponseWriter, r *http.Request) {
 		httpJSON(w, map[string]any{"environments": out})
 	case http.MethodPost:
 		var e Environment
-		if err := json.NewDecoder(r.Body).Decode(&e); err != nil {
-			httpErr(w, 400, "invalid json")
+		if !decodeJSONBody(w, r, &e) {
 			return
 		}
-		out, err := dbEnvironmentCreate(ctx.AppDB(), pid, &e)
+		out, err := dbEnvironmentCreate(ctx.AppDB(), pid, &e, a.secrets)
 		if err != nil {
 			httpErr(w, 400, err.Error())
 			return
@@ -1041,6 +1389,10 @@ func (a *App) handleEnvironments(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) handleEnvironmentItem(w http.ResponseWriter, r *http.Request) {
 	ctx := getCtx()
+	if err := a.ensureRuntime(ctx); err != nil {
+		httpErr(w, 500, err.Error())
+		return
+	}
 	pid, err := resolveProjectFromRequest(r)
 	if err != nil {
 		httpErr(w, 400, err.Error())
@@ -1053,7 +1405,7 @@ func (a *App) handleEnvironmentItem(w http.ResponseWriter, r *http.Request) {
 	}
 	switch r.Method {
 	case http.MethodGet:
-		out, err := dbEnvironmentGet(ctx.AppDB(), pid, id, false)
+		out, err := dbEnvironmentGet(ctx.AppDB(), pid, id, false, a.secrets)
 		if err != nil {
 			httpErr(w, 500, err.Error())
 			return
@@ -1065,11 +1417,10 @@ func (a *App) handleEnvironmentItem(w http.ResponseWriter, r *http.Request) {
 		httpJSON(w, map[string]any{"environment": out})
 	case http.MethodPatch:
 		var patch map[string]any
-		if err := json.NewDecoder(r.Body).Decode(&patch); err != nil {
-			httpErr(w, 400, "invalid json")
+		if !decodeJSONBody(w, r, &patch) {
 			return
 		}
-		out, err := dbEnvironmentUpdate(ctx.AppDB(), pid, id, patch)
+		out, err := dbEnvironmentUpdate(ctx.AppDB(), pid, id, patch, a.secrets)
 		if err != nil {
 			httpErr(w, 400, err.Error())
 			return
@@ -1094,18 +1445,33 @@ func (a *App) handleHistory(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, 400, err.Error())
 		return
 	}
+	if r.Method == http.MethodDelete {
+		if _, err := ctx.AppDB().Exec(`DELETE FROM fetch_history WHERE project_id=?`, pid); err != nil {
+			httpErr(w, 500, err.Error())
+			return
+		}
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
+	if r.Method != http.MethodGet {
+		httpErr(w, 405, "GET or DELETE")
+		return
+	}
 	limit := intArgFromQuery(r, "limit", 100)
-	if limit <= 0 || limit > 500 {
-		limit = 100
+	if limit <= 0 || limit > 100 {
+		limit = 50
+	}
+	offset := intArgFromQuery(r, "offset", 0)
+	if offset < 0 {
+		offset = 0
 	}
 	rows, err := ctx.AppDB().Query(
 		`SELECT id, saved_request_id, COALESCE(source,''), method, url,
-				COALESCE(redacted_request_json,''), status,
-				COALESCE(redacted_response_json,''), duration_ms, COALESCE(error,''), created_at
+				status, duration_ms, COALESCE(error,''), created_at
 		 FROM fetch_history
 		 WHERE project_id=?
-		 ORDER BY id DESC LIMIT ?`,
-		pid, limit,
+		 ORDER BY id DESC LIMIT ? OFFSET ?`,
+		pid, limit+1, offset,
 	)
 	if err != nil {
 		httpErr(w, 500, err.Error())
@@ -1114,17 +1480,25 @@ func (a *App) handleHistory(w http.ResponseWriter, r *http.Request) {
 	defer rows.Close()
 	out := []HistoryRow{}
 	for rows.Next() {
-		row, err := scanHistory(rows)
+		row, err := scanHistorySummary(rows)
 		if err != nil {
 			httpErr(w, 500, err.Error())
 			return
 		}
 		out = append(out, *row)
 	}
-	httpJSON(w, map[string]any{"history": out})
+	hasMore := len(out) > limit
+	if hasMore {
+		out = out[:limit]
+	}
+	httpJSON(w, map[string]any{"history": out, "has_more": hasMore, "next_offset": offset + len(out)})
 }
 
 func (a *App) handleHistoryItem(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		httpErr(w, 405, "GET only")
+		return
+	}
 	ctx := getCtx()
 	pid, err := resolveProjectFromRequest(r)
 	if err != nil {
@@ -1150,6 +1524,19 @@ func (a *App) handleHistoryItem(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httpJSON(w, map[string]any{"entry": out})
+}
+
+func scanHistorySummary(row interface{ Scan(...any) error }) (*HistoryRow, error) {
+	h := &HistoryRow{}
+	var saved sql.NullInt64
+	if err := row.Scan(&h.ID, &saved, &h.Source, &h.Method, &h.URL, &h.Status, &h.DurationMS, &h.Error, &h.CreatedAt); err != nil {
+		return nil, err
+	}
+	if saved.Valid {
+		v := saved.Int64
+		h.SavedRequestID = &v
+	}
+	return h, nil
 }
 
 func scanHistory(row interface{ Scan(...any) error }) (*HistoryRow, error) {
@@ -1310,7 +1697,14 @@ func isSensitiveHeader(key string) bool {
 	case "authorization", "proxy-authorization", "cookie", "set-cookie", "x-api-key", "x-auth-token":
 		return true
 	default:
-		return strings.Contains(k, "token") || strings.Contains(k, "secret") || strings.Contains(k, "password")
+		normalized := strings.NewReplacer("-", "", "_", "", ".", "", " ", "").Replace(k)
+		return strings.Contains(normalized, "auth") ||
+			strings.Contains(normalized, "apikey") ||
+			strings.Contains(normalized, "credential") ||
+			strings.Contains(normalized, "signature") ||
+			strings.Contains(normalized, "token") ||
+			strings.Contains(normalized, "secret") ||
+			strings.Contains(normalized, "password")
 	}
 }
 
@@ -1401,6 +1795,21 @@ func httpJSONStatus(w http.ResponseWriter, status int, v any) {
 
 func httpErr(w http.ResponseWriter, status int, msg string) {
 	httpJSONStatus(w, status, map[string]any{"error": msg})
+}
+
+func decodeJSONBody(w http.ResponseWriter, r *http.Request, target any) bool {
+	r.Body = http.MaxBytesReader(w, r.Body, maxInboundJSONBytes)
+	decoder := json.NewDecoder(r.Body)
+	if err := decoder.Decode(target); err != nil {
+		var maxErr *http.MaxBytesError
+		if errors.As(err, &maxErr) {
+			httpErr(w, http.StatusRequestEntityTooLarge, fmt.Sprintf("json body exceeds %d bytes", maxInboundJSONBytes))
+		} else {
+			httpErr(w, http.StatusBadRequest, "invalid json")
+		}
+		return false
+	}
+	return true
 }
 
 func strArg(m map[string]any, key string) string {
@@ -1535,15 +1944,6 @@ func preview(s string, max int) string {
 		return s
 	}
 	return s[:max]
-}
-
-func sortedKeys(m map[string]string) []string {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	return keys
 }
 
 var globalCtx *sdk.AppCtx
