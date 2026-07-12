@@ -3,6 +3,19 @@
 // importmap; talks to the media-studio sidecar at /api/apps/media-studio/*.
 
 import { useCallback, useEffect, useRef, useState, type DragEvent } from "react";
+import {
+  clampDuration,
+  imageGenerationOptions,
+  isDurableMediaReference,
+  projectScopedStorageContentURL,
+  providerFromQualifiedId,
+  selectedModelProvider,
+  shouldClearSubmittedPrompt,
+  shouldCommitScopedResponse,
+  uploadValidationError,
+  videoSourceRequired,
+  type DurationKind,
+} from "./mediaPanelLogic";
 
 // Inlined SDK app-event subscription. Each app ships its own copy
 // because panels are bundled standalone and apps install independently.
@@ -297,11 +310,6 @@ function modelLabel(m: LiveModel): string {
   return bits.join(" · ");
 }
 
-function providerFromQualifiedId(value: string): string {
-  const provider = value.split(":", 1)[0];
-  return provider === "elevenlabs" || provider === "fish-audio" ? provider : "";
-}
-
 function providerLabel(provider: string): string {
   if (provider === "fish-audio") return "Fish Audio";
   if (provider === "elevenlabs") return "ElevenLabs";
@@ -333,7 +341,7 @@ const EDIT_MODEL_SOURCE_LIMITS: Record<string, number> = {
 // on the wrapping element if you need theming.
 function IconImage() {
   return (
-    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
+    <svg aria-hidden="true" width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
       <rect x="1.5" y="2.5" width="13" height="11" rx="1" />
       <circle cx="5.5" cy="6" r="1" />
       <path d="M2 12l3.5-3.5 3 3L11 7l3 3" />
@@ -342,7 +350,7 @@ function IconImage() {
 }
 function IconVideo() {
   return (
-    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
+    <svg aria-hidden="true" width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
       <rect x="1.5" y="3.5" width="10" height="9" rx="1" />
       <path d="M11.5 7l3-2v6l-3-2z" />
     </svg>
@@ -350,7 +358,7 @@ function IconVideo() {
 }
 function IconAudio() {
   return (
-    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
+    <svg aria-hidden="true" width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
       <path d="M3 6v4h2l3 2.5v-9L5 6H3z" />
       <path d="M10 5.5a3 3 0 010 5" />
       <path d="M12 3.5a6 6 0 010 9" />
@@ -359,7 +367,7 @@ function IconAudio() {
 }
 function IconMusic() {
   return (
-    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
+    <svg aria-hidden="true" width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
       <path d="M6 12V3l7-1.5v9" />
       <circle cx="4.5" cy="12" r="1.5" />
       <circle cx="11.5" cy="10.5" r="1.5" />
@@ -401,7 +409,11 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
   const [imageResolution, setImageResolution] = useState("1K");
   const [imageQuality, setImageQuality] = useState("auto");
   const [imageFormat, setImageFormat] = useState("png");
-  const [duration, setDuration] = useState(5); // video/audio/music
+  const [durations, setDurations] = useState<Record<DurationKind, number>>({
+    video: 5,
+    audio_sfx: 5,
+    music: 30,
+  });
   const [aspect, setAspect] = useState("16:9");
   const [videoNoSound, setVideoNoSound] = useState(false);
   const [voice, setVoice] = useState("");
@@ -460,6 +472,8 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
   const [liveModels, setLiveModels] = useState<LiveModel[] | null>(null);
   const [editLiveModels, setEditLiveModels] = useState<LiveModel[] | null>(null);
   const [liveProvider, setLiveProvider] = useState<string>("");
+  const [modelsLoading, setModelsLoading] = useState(false);
+  const [editModelsLoading, setEditModelsLoading] = useState(false);
   // In-flight video jobs (queued / polling). Shown as a small badge
   // above the video gallery so the user knows something is cooking
   // between submit and the eventual media.generated event.
@@ -475,6 +489,22 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
     avatar: "",
   });
   const [folderSuggestions, setFolderSuggestions] = useState<string[]>([]);
+  const activeKindRef = useRef<Kind>(activeKind);
+  const promptRef = useRef(prompt);
+  activeKindRef.current = activeKind;
+  promptRef.current = prompt;
+  const durationKind: DurationKind | null =
+    activeKind === "video" || activeKind === "audio_sfx" || activeKind === "music"
+      ? activeKind
+      : null;
+  const duration = durationKind ? durations[durationKind] : durations.video;
+  const setDuration = (value: number) => {
+    if (!durationKind) return;
+    setDurations((current) => ({
+      ...current,
+      [durationKind]: clampDuration(durationKind, value),
+    }));
+  };
   const storageFolder = storageFolders[activeKind] || "";
   const setStorageFolder = (v: string) =>
     setStorageFolders((cur) => ({ ...cur, [activeKind]: v }));
@@ -491,21 +521,26 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
   }, [projectId]);
 
   const loadGenerations = useCallback(async () => {
+    const requestedKind = activeKind;
     try {
       const res = await fetch(
         `${API}/generations?project_id=${encodeURIComponent(projectId)}&kind=${activeKind}`,
         { credentials: "same-origin" },
       );
+      if (!shouldCommitScopedResponse(requestedKind, activeKindRef.current)) return;
       if (!res.ok) {
         setStatus(`Error: ${res.status}`);
         return;
       }
       const data = await res.json();
+      if (!shouldCommitScopedResponse(requestedKind, activeKindRef.current)) return;
       setItems(data.generations || []);
       const n = (data.generations || []).length;
       setStatus(`${n} generation${n === 1 ? "" : "s"}`);
     } catch (e) {
-      setStatus("Error: " + (e as Error).message);
+      if (shouldCommitScopedResponse(requestedKind, activeKindRef.current)) {
+        setStatus("Error: " + (e as Error).message);
+      }
     }
   }, [projectId, activeKind]);
 
@@ -569,13 +604,16 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
   }, [projectId]);
 
   const loadVoices = useCallback(async () => {
+    const requestedKind = activeKind;
     try {
       const res = await fetch(
         `${API}/voices?project_id=${encodeURIComponent(projectId)}&kind=${encodeURIComponent(activeKind)}`,
         { credentials: "same-origin" },
       );
+      if (!shouldCommitScopedResponse(requestedKind, activeKindRef.current)) return;
       if (!res.ok) return;
       const data = await res.json();
+      if (!shouldCommitScopedResponse(requestedKind, activeKindRef.current)) return;
       const list: VoiceEntry[] = Array.isArray(data.voices) ? data.voices : [];
       setVoices(list);
       if (list.length > 0 && !list.some((x) => x.id === voice)) {
@@ -718,9 +756,14 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
       setLiveModels(null);
       setEditLiveModels(null);
       setLiveProvider("");
+      setModelsLoading(false);
+      setEditModelsLoading(false);
       return;
     }
     let cancelled = false;
+    setLiveModels(null);
+    setLiveProvider("");
+    setModelsLoading(true);
     fetch(
       `${API}/models?project_id=${encodeURIComponent(projectId)}&kind=${encodeURIComponent(activeKind)}`,
       { credentials: "same-origin" },
@@ -766,8 +809,13 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
       })
       .catch(() => {
         if (!cancelled) setLiveModels(null);
+      })
+      .finally(() => {
+        if (!cancelled) setModelsLoading(false);
       });
     if (activeKind === "image") {
+      setEditLiveModels(null);
+      setEditModelsLoading(true);
       fetch(
         `${API}/models?project_id=${encodeURIComponent(projectId)}&kind=image&capability=image.edit`,
         { credentials: "same-origin" },
@@ -783,9 +831,13 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
         })
         .catch(() => {
           if (!cancelled) setEditLiveModels(null);
+        })
+        .finally(() => {
+          if (!cancelled) setEditModelsLoading(false);
         });
     } else {
       setEditLiveModels(null);
+      setEditModelsLoading(false);
     }
     return () => {
       cancelled = true;
@@ -824,6 +876,11 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
   const currentModelList = activeKind === "image" && isEditMode ? editLiveModels : liveModels;
   const currentModel: LiveModel | undefined =
     currentModelList?.find((m) => m.id === currentModelId);
+  const selectedImageProvider = selectedModelProvider(
+    currentModel?.provider,
+    imageModel,
+    liveProvider,
+  );
   const audioProviders: ProviderBinding[] = bindings?.audio_tts.providers?.length
     ? bindings.audio_tts.providers
     : bindings?.audio_tts.slug
@@ -861,8 +918,12 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
   // Video reference-image is allowed for both standard (text-to-video)
   // and image-to-video models — required for the latter, optional
   // hint for the former (Venice's queue accepts image_url on most).
+  const videoNeedsSource =
+    activeKind === "video" && videoSourceRequired(currentModel?.model_type, videoModel);
   const showVideoRefInput =
-    activeKind === "video" && !!currentModel?.supports_image_to_video;
+    activeKind === "video" && (!!currentModel?.supports_image_to_video || videoNeedsSource);
+  const videoSourceMissing = videoNeedsSource && sourceImages.length === 0;
+  const draftHasInlineSource = sourceImages.some((source) => !isDurableMediaReference(source.value));
   const editSourceLimit =
     activeKind === "image"
       ? currentModel?.max_source_images || EDIT_MODEL_SOURCE_LIMITS[editModel] || 1
@@ -906,7 +967,7 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
           && !currentModel.aspect_ratios.includes(aspect)) {
         setAspect(currentModel.default_aspect_ratio || currentModel.aspect_ratios[0]);
       }
-      if (!liveProvider || liveProvider === "openai-api") {
+      if (!selectedImageProvider || selectedImageProvider === "openai-api" || selectedImageProvider === "openai-codex") {
         if (isGptImage(imageModel) && !GPT_IMAGE_QUALITIES.includes(imageQuality)) {
           setImageQuality("auto");
         } else if (imageModel === "dall-e-3" && !DALLE3_QUALITIES.includes(imageQuality)) {
@@ -930,6 +991,10 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
 
   const createAvatar = async () => {
     if (avatarCreating) return;
+    const requestedKind: Kind = "avatar";
+    const commitStatus = (message: string) => {
+      if (shouldCommitScopedResponse(requestedKind, activeKindRef.current)) setStatus(message);
+    };
     const name = avatarCreateName.trim();
     if (!name) {
       setStatus("Avatar name required.");
@@ -962,7 +1027,7 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
       });
       const text = await res.text();
       if (!res.ok) {
-        setStatus(`Error ${res.status}: ${text.slice(0, 300)}`);
+        commitStatus(`Error ${res.status}: ${text.slice(0, 300)}`);
         return;
       }
       let result: { isError?: boolean; content?: { type: string; text?: string }[]; _meta?: { status?: string } } = {};
@@ -971,17 +1036,17 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
       } catch {}
       if (result.isError) {
         const msg = result.content?.find((c) => c.type === "text")?.text || "avatar creation failed";
-        setStatus(`Error: ${msg}`);
+        commitStatus(`Error: ${msg}`);
         return;
       }
-      setStatus(result._meta?.status === "completed" ? "Avatar created." : "Avatar creation started.");
+      commitStatus(result._meta?.status === "completed" ? "Avatar created." : "Avatar creation started.");
       setAvatarCreateName("");
       setAvatarCreateSource("");
       setAvatarCreatePrompt("");
       await loadAvatarCreateJobs();
       await loadAvatars();
     } catch (e) {
-      setStatus("Error: " + (e as Error).message);
+      commitStatus("Error: " + (e as Error).message);
     } finally {
       setAvatarCreating(false);
     }
@@ -989,6 +1054,10 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
 
   const createVoice = async () => {
     if (voiceCreating) return;
+    const requestedKind: Kind = "audio_tts";
+    const commitStatus = (message: string) => {
+      if (shouldCommitScopedResponse(requestedKind, activeKindRef.current)) setStatus(message);
+    };
     const name = voiceCreateName.trim();
     const description = voiceCreateDescription.trim();
     const provider = voiceCreateProvider || selectedAudioProvider || audioProviders[0]?.slug;
@@ -1051,7 +1120,7 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
       );
       const text = await res.text();
       if (!res.ok) {
-        setStatus(`Error ${res.status}: ${text.slice(0, 300)}`);
+        commitStatus(`Error ${res.status}: ${text.slice(0, 300)}`);
         return;
       }
       let result: {
@@ -1064,7 +1133,7 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
       } catch {}
       if (result.isError) {
         const msg = result.content?.find((c) => c.type === "text")?.text || "voice creation failed";
-        setStatus(`Error: ${msg}`);
+        commitStatus(`Error: ${msg}`);
         return;
       }
       const providerVoiceID = result._meta?.provider_identity_id || result._meta?.identity?.provider_identity_id || "";
@@ -1077,12 +1146,12 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
       setVoiceCreateAudioFilename("");
       setVoiceCreateTranscript("");
       setVoiceCreateOpen(false);
-      setStatus("Voice created.");
+      commitStatus("Voice created.");
       await loadVoiceIdentities();
       await loadVoices();
       if (routedVoiceID) setVoice(routedVoiceID);
     } catch (e) {
-      setStatus("Error: " + (e as Error).message);
+      commitStatus("Error: " + (e as Error).message);
     } finally {
       setVoiceCreating(false);
     }
@@ -1116,14 +1185,13 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
         if (wantsPixelSize) body.size = imageSize;
         if (wantsAspect) body.aspect = aspect;
         if (wantsResolution) body.resolution = imageResolution;
-        const options: Record<string, unknown> = { safe_mode: safeMode };
-        if (!liveProvider || liveProvider === "openai-api") {
-          if (imageModel !== "dall-e-2") options.quality = imageQuality;
-          if (isGptImage(imageModel)) options.output_format = imageFormat;
-        } else if (liveProvider === "venice-ai") {
-          options.output_format = imageFormat;
-        }
-        body.options = options;
+        body.options = imageGenerationOptions(
+          selectedImageProvider,
+          imageModel,
+          imageQuality,
+          imageFormat,
+          safeMode,
+        );
       }
     } else if (activeKind === "video") {
       if (videoModel) body.model = videoModel;
@@ -1251,6 +1319,31 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
       setStatus(`Error: prompt is ${promptLength} characters; this model allows ${promptLimit}.`);
       return;
     }
+    if (videoSourceMissing) {
+      setStatus("Error: the selected video model requires at least one source image.");
+      return;
+    }
+    if (mode === "draft" && draftHasInlineSource) {
+      setStatus("Error: drafts require Storage references or HTTP(S) source URLs.");
+      return;
+    }
+    const submittedKind = activeKind;
+    const submittedPrompt = prompt;
+    const commitStatus = (message: string) => {
+      if (shouldCommitScopedResponse(submittedKind, activeKindRef.current)) {
+        setStatus(message);
+      }
+    };
+    const clearPromptIfUnchanged = () => {
+      if (shouldClearSubmittedPrompt(
+        submittedKind,
+        activeKindRef.current,
+        submittedPrompt,
+        promptRef.current,
+      )) {
+        setPrompt("");
+      }
+    };
     if (mode === "generate") {
       setGenerating(true);
       setStatus("Generating…");
@@ -1270,7 +1363,7 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
       });
       const text = await res.text();
       if (!res.ok) {
-        setStatus(`Error ${res.status}: ${text.slice(0, 300)}`);
+        commitStatus(`Error ${res.status}: ${text.slice(0, 300)}`);
         return;
       }
       let result: { isError?: boolean; content?: { type: string; text?: string }[] } = {};
@@ -1279,7 +1372,7 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
       } catch {}
       if (result.isError) {
         const msg = result.content?.find((c) => c.type === "text")?.text || "generation failed";
-        setStatus(`Error: ${msg}`);
+        commitStatus(`Error: ${msg}`);
         return;
       }
       // Async kinds (video today) return _meta.status === "queued".
@@ -1288,18 +1381,18 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
         _meta?: { status?: string; job_id?: number; generation_id?: number; cost_usd?: number };
       })._meta;
       if (meta?.status === "draft") {
-        setPrompt("");
+        clearPromptIfUnchanged();
         const costStr = meta.cost_usd ? ` · est. ${formatCost(meta.cost_usd)}` : "";
-        setStatus(`Draft saved.${costStr}`);
+        commitStatus(`Draft saved.${costStr}`);
         loadGenerations();
         return;
       }
       if (meta?.status === "queued") {
-        const queuedPrompt = prompt;
-        setPrompt("");
+        const queuedPrompt = submittedPrompt;
+        clearPromptIfUnchanged();
         const costStr = meta.cost_usd ? ` · est. ${formatCost(meta.cost_usd)}` : "";
-        setStatus(`Generating…${costStr}`);
-        if (meta.job_id && (activeKind === "video" || activeKind === "avatar")) {
+        commitStatus(`Generating…${costStr}`);
+        if (meta.job_id && (submittedKind === "video" || submittedKind === "avatar")) {
           setVideoJobs((cur) => {
             if (cur.some((j) => j.id === meta.job_id)) return cur;
             return [
@@ -1319,11 +1412,11 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
         }
         return;
       }
-      setPrompt("");
-      setStatus("Done.");
+      clearPromptIfUnchanged();
+      commitStatus("Done.");
       loadGenerations();
     } catch (e) {
-      setStatus("Error: " + (e as Error).message);
+      commitStatus("Error: " + (e as Error).message);
     } finally {
       setGenerating(false);
       setCreatingDraft(false);
@@ -1335,6 +1428,10 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
 
   const generateDraft = async (g: Generation) => {
     if (generatingDraftId || g.status !== "draft") return;
+    const requestedKind = g.kind;
+    const commitStatus = (message: string) => {
+      if (shouldCommitScopedResponse(requestedKind, activeKindRef.current)) setStatus(message);
+    };
     setGeneratingDraftId(g.id);
     setStatus("Generating draft…");
     try {
@@ -1346,7 +1443,7 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
       });
       const text = await res.text();
       if (!res.ok) {
-        setStatus(`Error ${res.status}: ${text.slice(0, 300)}`);
+        commitStatus(`Error ${res.status}: ${text.slice(0, 300)}`);
         return;
       }
       let result: { isError?: boolean; content?: { type: string; text?: string }[]; _meta?: { status?: string; job_id?: number; generation_id?: number; cost_usd?: number } } = {};
@@ -1355,13 +1452,13 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
       } catch {}
       if (result.isError) {
         const msg = result.content?.find((c) => c.type === "text")?.text || "generation failed";
-        setStatus(`Error: ${msg}`);
+        commitStatus(`Error: ${msg}`);
         return;
       }
       const meta = result._meta;
       if (meta?.status === "queued") {
         const costStr = meta.cost_usd ? ` · est. ${formatCost(meta.cost_usd)}` : "";
-        setStatus(`Generating…${costStr}`);
+        commitStatus(`Generating…${costStr}`);
         if (meta.job_id && (g.kind === "video" || g.kind === "avatar")) {
           setVideoJobs((cur) => {
             if (cur.some((j) => j.id === meta.job_id)) return cur;
@@ -1381,11 +1478,11 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
           });
         }
       } else {
-        setStatus("Done.");
+        commitStatus("Done.");
       }
       loadGenerations();
     } catch (e) {
-      setStatus("Error: " + (e as Error).message);
+      commitStatus("Error: " + (e as Error).message);
     } finally {
       setGeneratingDraftId(null);
     }
@@ -1398,6 +1495,10 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
       ? `Delete this generation and ${storageCount} linked Storage file${storageCount === 1 ? "" : "s"}?`
       : "Delete this generation?";
     if (!window.confirm(label)) return;
+    const requestedKind = g.kind;
+    const commitStatus = (message: string) => {
+      if (shouldCommitScopedResponse(requestedKind, activeKindRef.current)) setStatus(message);
+    };
     setDeletingId(g.id);
     setStatus("Deleting…");
     try {
@@ -1409,16 +1510,16 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
       });
       const data = await res.json().catch(() => ({}));
       if (!res.ok || data.error) {
-        setStatus(`Delete failed: ${data.error || res.status}`);
+        commitStatus(`Delete failed: ${data.error || res.status}`);
         return;
       }
       setItems((cur) => cur.filter((x) => x.id !== g.id));
       setSelected((cur) => (cur?.id === g.id ? null : cur));
       setLightbox((cur) => (cur?.id === g.id ? null : cur));
       setVideoJobs((cur) => cur.filter((x) => x.generation_id !== g.id));
-      setStatus("Deleted.");
+      commitStatus("Deleted.");
     } catch (e) {
-      setStatus("Delete failed: " + (e as Error).message);
+      commitStatus("Delete failed: " + (e as Error).message);
     } finally {
       setDeletingId(null);
     }
@@ -1426,8 +1527,28 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
 
   return (
     <div className="h-full flex flex-col">
+      <style>{`
+        .ms-media-main { flex-direction: row; overflow: hidden; }
+        .ms-media-content { padding: 24px; }
+        .ms-media-detail { width: 384px; border-left-width: 1px; border-left-style: solid; }
+        @media (max-width: 1023px) {
+          .ms-media-main { flex-direction: column; overflow: auto; }
+          .ms-media-content { padding: 12px; }
+          .ms-media-detail {
+            width: 100%;
+            max-height: 45vh;
+            border-left-width: 0;
+            border-top-width: 1px;
+            border-top-style: solid;
+          }
+        }
+      `}</style>
       {/* Kind tabs */}
-      <nav className="flex items-center border-b border-border px-4">
+      <nav
+        className="flex items-center flex-shrink-0 overflow-x-auto border-b border-border px-2 sm:px-4"
+        role="tablist"
+        aria-label="Media type"
+      >
         {(Object.keys(TAB_LABELS) as Array<"image" | "video" | "audio_tts" | "music" | "avatar">).map((k) => {
           const t: "image" | "video" | "audio" | "music" | "avatar" =
             k === "audio_tts" ? "audio" : (k as "image" | "video" | "music" | "avatar");
@@ -1438,8 +1559,11 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
             <button
               key={t}
               onClick={() => setTab(t)}
+              role="tab"
+              aria-selected={active}
+              aria-controls="media-studio-panel"
               className={
-                "flex items-center gap-1.5 px-3 py-2.5 text-sm border-b-2 transition-colors " +
+                "flex flex-shrink-0 items-center gap-1.5 px-3 py-2.5 text-sm border-b-2 transition-colors " +
                 (active
                   ? "border-accent text-text"
                   : "border-transparent text-text-muted hover:text-text")
@@ -1455,7 +1579,11 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
 
       {/* Audio sub-tabs (TTS / SFX) */}
       {tab === "audio" && (
-        <div className="flex items-center gap-1 px-4 py-1.5 border-b border-border bg-bg-card">
+        <div
+          className="flex items-center gap-1 px-4 py-1.5 border-b border-border bg-bg-card"
+          role="tablist"
+          aria-label="Audio type"
+        >
           <SubTabButton
             label="TTS"
             active={audioSubKind === "audio_tts"}
@@ -1480,15 +1608,21 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
       )}
 
       {/* Main area */}
-      <div className="flex-1 flex min-h-0">
-        <div className="flex-1 flex flex-col p-6 gap-4 min-w-0">
+      <div className="ms-media-main flex-1 flex min-h-0">
+        <div
+          id="media-studio-panel"
+          role="tabpanel"
+          className="ms-media-content flex-1 flex flex-col gap-4 min-w-0 min-h-0"
+        >
           {(activeKind === "image" || showVideoRefInput) && (
             <ReferenceImageInput
+              projectId={projectId}
               sources={sourceImages}
               maxSources={referenceInputMax}
               onAdd={addSourceImage}
               onRemove={removeSourceImage}
               onClear={() => setSourceImages([])}
+              onError={setStatus}
               hint={
                 showVideoRefInput
                   ? referenceInputMax > 1
@@ -1510,10 +1644,11 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
             createDraft={createDraft}
             generating={generating}
             creatingDraft={creatingDraft}
-            disabled={!isBound}
+            disabled={!isBound || modelsLoading || (isEditMode && editModelsLoading)}
             isEditMode={isEditMode}
             liveModels={liveModels}
             liveProvider={liveProvider}
+            imageProvider={selectedImageProvider}
             imageModel={imageModel}
             setImageModel={setImageModel}
             imageSize={imageSize}
@@ -1597,6 +1732,7 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
             setVoiceCreateTranscript={setVoiceCreateTranscript}
             voiceCreating={voiceCreating}
             createVoice={createVoice}
+            onError={setStatus}
             audioProviders={audioProviders}
             audioFormat={audioFormat}
             setAudioFormat={setAudioFormat}
@@ -1609,6 +1745,8 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
             folderSuggestions={folderSuggestions}
             estimate={estimate}
             estimateLoading={estimateLoading}
+            sourceRequiredMissing={videoSourceMissing}
+            draftBlocked={draftHasInlineSource}
           />
 
           {(activeKind === "video" || activeKind === "avatar") && videoJobs.some((j) => j.status === "failed") && (
@@ -1691,7 +1829,7 @@ function KindIcon({ kind }: { kind: Kind }) {
 
 function IconAvatar() {
   return (
-    <svg width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
+    <svg aria-hidden="true" width="14" height="14" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5">
       <circle cx="8" cy="5.5" r="2.5" />
       <path d="M3 13.5c0-2.8 2.2-4.5 5-4.5s5 1.7 5 4.5" />
     </svg>
@@ -1702,6 +1840,7 @@ function BoundDot({ bound }: { bound: boolean }) {
   // Tiny status dot. Green when bound, dim when not.
   return (
     <span
+      aria-hidden="true"
       className="rounded-full ml-1"
       style={{
         width: 6,
@@ -1726,6 +1865,8 @@ function SubTabButton({
   return (
     <button
       onClick={onClick}
+      role="tab"
+      aria-selected={active}
       className={
         "flex items-center gap-1.5 px-2.5 py-1 text-xs rounded transition-colors " +
         (active
@@ -1754,6 +1895,7 @@ interface ComposerProps {
   isEditMode: boolean;
   liveModels: LiveModel[] | null;
   liveProvider: string;
+  imageProvider: string;
   imageModel: ImageModel;
   setImageModel: (v: ImageModel) => void;
   imageSize: string;
@@ -1804,6 +1946,7 @@ interface ComposerProps {
   setAvatarCreatePrompt: (v: string) => void;
   avatarCreating: boolean;
   createAvatar: () => void;
+  onError: (message: string) => void;
   avatarProvider: string;
   avatarEngine: string;
   setAvatarEngine: (v: string) => void;
@@ -1849,6 +1992,8 @@ interface ComposerProps {
   folderSuggestions: string[];
   estimate: GenerationEstimate | null;
   estimateLoading: boolean;
+  sourceRequiredMissing: boolean;
+  draftBlocked: boolean;
 }
 
 function Composer(p: ComposerProps) {
@@ -1921,6 +2066,7 @@ function Composer(p: ComposerProps) {
           setFormat={p.setImageFormat}
           liveModels={p.liveModels}
           liveProvider={p.liveProvider}
+          selectedProvider={p.imageProvider}
           currentModel={p.currentModel}
           aspect={p.aspect}
           setAspect={p.setAspect}
@@ -1985,6 +2131,7 @@ function Composer(p: ComposerProps) {
             setTranscript={p.setVoiceCreateTranscript}
             creating={p.voiceCreating}
             createVoice={p.createVoice}
+            onError={p.onError}
             selectedVoice={p.voice}
             setSelectedVoice={p.setVoice}
           />
@@ -2054,6 +2201,7 @@ function Composer(p: ComposerProps) {
           setPrompt={p.setAvatarCreatePrompt}
           creating={p.avatarCreating}
           createAvatar={p.createAvatar}
+          onError={p.onError}
         />
       )}
       {p.kind === "avatar" && (
@@ -2092,15 +2240,28 @@ function Composer(p: ComposerProps) {
       <EstimateBadge estimate={p.estimate} loading={p.estimateLoading} />
       <button
         onClick={p.generate}
-        disabled={!p.prompt.trim() || p.promptTooLong || p.generating || p.creatingDraft || p.disabled || avatarVBlocked}
+        disabled={!p.prompt.trim() || p.promptTooLong || p.generating || p.creatingDraft || p.disabled || avatarVBlocked || p.sourceRequiredMissing}
         className="px-3 py-1.5 text-sm bg-accent text-bg rounded font-bold disabled:opacity-50"
-        title={avatarVBlocked ? "Selected avatar does not advertise Avatar V support" : undefined}
+        title={
+          avatarVBlocked
+            ? "Selected avatar does not advertise Avatar V support"
+            : p.sourceRequiredMissing
+              ? "The selected video model requires a source image"
+              : undefined
+        }
       >
         {p.generating ? "…" : p.isEditMode ? "Edit" : p.kind === "avatar" ? "Generate avatar" : "Generate"}
       </button>
       <button
         onClick={p.createDraft}
-        disabled={!p.prompt.trim() || p.promptTooLong || p.generating || p.creatingDraft}
+        disabled={!p.prompt.trim() || p.promptTooLong || p.generating || p.creatingDraft || p.sourceRequiredMissing || p.draftBlocked}
+        title={
+          p.sourceRequiredMissing
+            ? "The selected video model requires a source image"
+            : p.draftBlocked
+              ? "Drafts require Storage references or HTTP(S) source URLs"
+              : undefined
+        }
         className="px-3 py-1.5 text-sm border border-border rounded text-text-muted hover:text-text hover:border-accent disabled:opacity-50"
       >
         {p.creatingDraft ? "Saving…" : "Create draft"}
@@ -2162,6 +2323,7 @@ function VoiceCreatePanel({
   setTranscript,
   creating,
   createVoice,
+  onError,
   selectedVoice,
   setSelectedVoice,
 }: {
@@ -2191,6 +2353,7 @@ function VoiceCreatePanel({
   setTranscript: (v: string) => void;
   creating: boolean;
   createVoice: () => void;
+  onError: (message: string) => void;
   selectedVoice: string;
   setSelectedVoice: (v: string) => void;
 }) {
@@ -2214,11 +2377,17 @@ function VoiceCreatePanel({
   const designReady = description.trim().length >= 20;
   const onAudioFile = (file?: File) => {
     if (!file) return;
+    const validationError = uploadValidationError(file, "audio");
+    if (validationError) {
+      onError(validationError);
+      return;
+    }
     const reader = new FileReader();
     reader.onload = () => {
       setAudio(String(reader.result || ""));
       setAudioFilename(file.name);
     };
+    reader.onerror = () => onError(`Could not read ${file.name}.`);
     reader.readAsDataURL(file);
   };
   return (
@@ -2462,6 +2631,7 @@ function AvatarCreatePanel({
   setPrompt,
   creating,
   createAvatar,
+  onError,
 }: {
   provider: string;
   caps: AvatarCapabilities | null;
@@ -2478,6 +2648,7 @@ function AvatarCreatePanel({
   setPrompt: (v: string) => void;
   creating: boolean;
   createAvatar: () => void;
+  onError: (message: string) => void;
 }) {
   const sourceTypes = (caps?.source_types || ["photo"]).filter(
     (x) => x === "photo" || x === "prompt" || x === "video",
@@ -2488,8 +2659,14 @@ function AvatarCreatePanel({
   );
   const failedJobs = jobs.filter((j) => j.status === "failed");
   const readFile = (file: File) => {
+    const validationError = uploadValidationError(file, "image");
+    if (validationError) {
+      onError(validationError);
+      return;
+    }
     const reader = new FileReader();
     reader.onload = () => setSource(String(reader.result || ""));
+    reader.onerror = () => onError(`Could not read ${file.name}.`);
     reader.readAsDataURL(file);
   };
   return (
@@ -2990,18 +3167,22 @@ function EditOptions({
 // "storage:N" handles (set from DetailAside's "Use as reference"). When
 // non-empty, image generation flips to edit mode (image.edit capability).
 function ReferenceImageInput({
+  projectId,
   sources,
   maxSources,
   onAdd,
   onRemove,
   onClear,
+  onError,
   hint,
 }: {
+  projectId: string;
   sources: SourceImageRef[];
   maxSources: number;
   onAdd: (value: string, label: string) => void;
   onRemove: (index: number) => void;
   onClear: () => void;
+  onError: (message: string) => void;
   hint?: string;
 }) {
   const [urlInput, setUrlInput] = useState("");
@@ -3009,20 +3190,23 @@ function ReferenceImageInput({
   const atLimit = sources.length >= maxSources;
 
   const handleFile = (file: File) => {
+    const validationError = uploadValidationError(file, "image");
+    if (validationError) {
+      onError(validationError);
+      return;
+    }
     const reader = new FileReader();
     reader.onload = () => {
       const result = String(reader.result || "");
-      // FileReader.readAsDataURL gives us "data:image/png;base64,..."; strip the prefix.
-      const b64 = result.includes(",") ? result.split(",", 2)[1] : result;
-      onAdd(b64, `Upload (${file.name})`);
+      onAdd(result, `Upload (${file.name})`);
     };
+    reader.onerror = () => onError(`Could not read ${file.name}.`);
     reader.readAsDataURL(file);
   };
 
   const handleDrop = (e: DragEvent<HTMLDivElement>) => {
     e.preventDefault();
     const files = Array.from(e.dataTransfer.files || [])
-      .filter((file) => file.type.startsWith("image/"))
       .slice(0, Math.max(0, maxSources - sources.length));
     files.forEach(handleFile);
   };
@@ -3039,7 +3223,7 @@ function ReferenceImageInput({
       {sources.length > 0 && (
         <div className="flex gap-2 overflow-x-auto pb-1">
           {sources.map((src, index) => {
-            const previewSrc = sourceImagePreviewSrc(src.value);
+            const previewSrc = sourceImagePreviewSrc(src.value, projectId);
             return (
               <div
                 key={`${src.value}-${index}`}
@@ -3070,6 +3254,7 @@ function ReferenceImageInput({
                 </div>
                 <button
                   onClick={() => onRemove(index)}
+                  aria-label={`Remove reference ${index + 1}`}
                   className="text-text-muted hover:text-text text-xs px-1.5 py-0.5 border border-border rounded"
                   title="Remove reference"
                 >
@@ -3148,6 +3333,7 @@ function ImageOptions({
   setFormat,
   liveModels,
   liveProvider,
+  selectedProvider,
   currentModel,
   aspect,
   setAspect,
@@ -3164,6 +3350,7 @@ function ImageOptions({
   setFormat: (v: string) => void;
   liveModels: LiveModel[] | null;
   liveProvider: string;
+  selectedProvider: string;
   currentModel?: LiveModel;
   aspect: string;
   setAspect: (v: string) => void;
@@ -3179,8 +3366,11 @@ function ImageOptions({
   const showPixelSize = !usingLive || !currentModel?.aspect_ratios?.length || !!currentModel?.pixel_sizes?.length;
   const showAspect = !!currentModel?.aspect_ratios?.length;
   const showResolution = !!currentModel?.resolutions?.length;
-  const showOpenAIQuality = !usingLive || liveProvider === "openai-api";
-  const showFormat = !usingLive || liveProvider === "openai-api" || liveProvider === "venice-ai";
+  const showOpenAIQuality = !usingLive || selectedProvider === "openai-api" || selectedProvider === "openai-codex";
+  const showFormat = !usingLive ||
+    selectedProvider === "openai-api" ||
+    selectedProvider === "openai-codex" ||
+    selectedProvider === "venice-ai";
   return (
     <>
       <div>
@@ -3620,7 +3810,7 @@ function Gallery({
       <div
         style={{
           display: "grid",
-          gridTemplateColumns: "repeat(auto-fill, minmax(280px, 1fr))",
+          gridTemplateColumns: "repeat(auto-fill, minmax(min(280px, 100%), 1fr))",
           gap: 8,
           padding: 8,
           alignItems: "start",
@@ -3670,8 +3860,8 @@ function Gallery({
       style={{
         display: "grid",
         gridTemplateColumns: kind === "video" || kind === "avatar"
-          ? "repeat(auto-fill, minmax(360px, 1fr))"
-          : "repeat(auto-fill, minmax(280px, 1fr))",
+          ? "repeat(auto-fill, minmax(min(360px, 100%), 1fr))"
+          : "repeat(auto-fill, minmax(min(280px, 100%), 1fr))",
         gap: 8,
         padding: 8,
         alignItems: "start",
@@ -3718,7 +3908,6 @@ function Gallery({
             <div
               key={g.id}
               className="border border-border rounded overflow-hidden bg-bg-card"
-              onClick={() => onSelect(g)}
             >
               {draft ? (
                 <DraftPreview generation={g} busy={generatingDraftId === g.id} onGenerate={onGenerateDraft} />
@@ -3731,7 +3920,13 @@ function Gallery({
               ) : (
                 <div className="bg-bg-input py-6 text-center text-text-muted text-xs">no source</div>
               )}
-              <CardMeta g={g} />
+              <button
+                onClick={() => onSelect(g)}
+                className="block w-full text-left"
+                title="Show details"
+              >
+                <CardMeta g={g} />
+              </button>
             </div>
           );
         });
@@ -3851,14 +4046,13 @@ function DetailAside({
   onDelete: () => void;
   onUseAsReference?: () => void;
 }) {
-  const url = selected.storage_urls?.[0] || selected.upstream_urls?.[0] || "";
+  const url = selected.storage_urls?.[0] || selected.local_cache_url || selected.upstream_urls?.[0] || "";
   return (
     <aside
-      className="border-l border-border bg-bg-card flex flex-col"
-      style={{ width: 384 }}
+      className="ms-media-detail flex-shrink-0 border-border bg-bg-card flex flex-col"
     >
-      <header className="flex items-center gap-2 px-4 py-3 border-b border-border">
-        <span className="text-text font-medium truncate flex-1">{selected.prompt}</span>
+      <header className="flex flex-wrap items-center gap-2 px-4 py-3 border-b border-border">
+        <span className="w-full sm:w-auto text-text font-medium truncate flex-1" title={selected.prompt}>{selected.prompt}</span>
         {onUseAsReference && (
           <button
             onClick={onUseAsReference}
@@ -3878,6 +4072,7 @@ function DetailAside({
         </button>
         <button
           onClick={onClose}
+          aria-label="Close details"
           className="text-text-muted hover:text-text leading-none px-1"
           style={{ fontSize: 18 }}
         >
@@ -3960,13 +4155,13 @@ function VideoJobsBanner({
 // Handles three shapes: storage handle ("storage:N" → platform-proxy
 // URL), http(s) URL (pass-through), or base64 (assume PNG, wrap in
 // data: URL). Returns "" when none match (caller renders placeholder).
-function sourceImagePreviewSrc(value: string): string {
+function sourceImagePreviewSrc(value: string, projectId: string): string {
   const v = value.trim();
   if (!v) return "";
   if (v.startsWith("storage:")) {
     const id = v.slice("storage:".length);
     // Same routing the gallery uses for storage_urls.
-    return `/api/apps/storage/files/${id}/content`;
+    return projectScopedStorageContentURL(id, projectId);
   }
   if (v.startsWith("http://") || v.startsWith("https://") || v.startsWith("data:")) {
     return v;
@@ -3985,16 +4180,28 @@ function Lightbox({
   onUseAsReference?: () => void;
 }) {
   const url = item.storage_urls?.[0] || item.local_cache_url || item.upstream_urls?.[0] || imageSrc(item);
-  // Close on Esc.
+  const dialogRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
+    const previouslyFocused = document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : null;
     const onKey = (e: KeyboardEvent) => {
       if (e.key === "Escape") onClose();
     };
     window.addEventListener("keydown", onKey);
-    return () => window.removeEventListener("keydown", onKey);
+    dialogRef.current?.focus();
+    return () => {
+      window.removeEventListener("keydown", onKey);
+      previouslyFocused?.focus();
+    };
   }, [onClose]);
   return (
     <div
+      ref={dialogRef}
+      role="dialog"
+      aria-modal="true"
+      aria-label={`${item.kind} preview`}
+      tabIndex={-1}
       onClick={onClose}
       style={{
         position: "fixed",
@@ -4005,7 +4212,7 @@ function Lightbox({
         flexDirection: "column",
         alignItems: "center",
         justifyContent: "center",
-        padding: 24,
+        padding: "clamp(12px, 4vw, 24px)",
       }}
     >
       <div
@@ -4030,7 +4237,7 @@ function Lightbox({
           <video controls src={url} style={{ maxWidth: "92vw", maxHeight: "82vh" }} />
         )}
         {url && (item.kind === "audio_tts" || item.kind === "audio_sfx" || item.kind === "music") && (
-          <audio controls src={url} style={{ width: 480 }} />
+          <audio controls src={url} style={{ width: "min(480px, calc(100vw - 48px))", maxWidth: "100%" }} />
         )}
         <div className="text-text text-sm text-center" style={{ maxWidth: 700 }}>
           {item.prompt}

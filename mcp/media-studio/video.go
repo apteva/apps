@@ -35,6 +35,9 @@ func buildVeniceVideoQueueArgs(args map[string]any) (map[string]any, error) {
 	if model == "" {
 		return nil, errors.New("model required (call list_models?type=video for the live set)")
 	}
+	if videoModelRequiresSource(model) && len(resolvedSourceImages(args)) == 0 {
+		return nil, errors.New("selected video model requires at least one source image")
+	}
 	prompt := strArg(args, "prompt", "")
 	if count := utf8.RuneCountInString(prompt); count > veniceVideoPromptCharLimit {
 		return nil, fmt.Errorf("%d characters exceeds Venice's %d-character video prompt limit", count, veniceVideoPromptCharLimit)
@@ -85,6 +88,11 @@ func buildVeniceVideoQueueArgs(args map[string]any) (map[string]any, error) {
 		}
 	}
 	return out, nil
+}
+
+func videoModelRequiresSource(model string) bool {
+	model = strings.ToLower(strings.TrimSpace(model))
+	return strings.Contains(model, "image-to-video") || strings.Contains(model, "reference-to-video")
 }
 
 func isReferenceToVideoModel(model string) bool {

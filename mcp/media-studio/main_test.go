@@ -2638,6 +2638,23 @@ func TestVeniceVideoPromptLimit(t *testing.T) {
 	}
 }
 
+func TestVeniceImageVideoModelsRequireSourceImage(t *testing.T) {
+	for _, model := range []string{"seedance-image-to-video", "seedance-reference-to-video"} {
+		_, err := buildVeniceVideoQueueArgs(map[string]any{
+			"model": model, "prompt": "animate", "duration": "5s",
+		})
+		if err == nil || !strings.Contains(err.Error(), "requires at least one source image") {
+			t.Fatalf("model=%q err=%v", model, err)
+		}
+	}
+	if _, err := buildVeniceVideoQueueArgs(map[string]any{
+		"model": "seedance-image-to-video", "prompt": "animate", "duration": "5s",
+		"source_image": "data:image/jpeg;base64,/9j/",
+	}); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestGenerationRequestJSON_RedactsInlineMedia(t *testing.T) {
 	inline := strings.Repeat("A", 2048)
 	raw := generationRequestJSON(map[string]any{
