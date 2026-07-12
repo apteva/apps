@@ -1,6 +1,8 @@
 module github.com/apteva/apps/mcp/saas
 
-go 1.25.0
+go 1.26.0
+
+toolchain go1.26.5
 
 require (
 	github.com/apteva/app-sdk v0.36.1
