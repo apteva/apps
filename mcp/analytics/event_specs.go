@@ -33,14 +33,15 @@ type EventSpec struct {
 }
 
 type EventIngestPolicy struct {
-	TargetTopic    string   `json:"target_topic,omitempty"`
-	Bucket         string   `json:"bucket,omitempty"`
-	Timezone       string   `json:"timezone,omitempty"`
-	Operation      string   `json:"operation,omitempty"`
-	Value          any      `json:"value,omitempty"`
-	ValueKey       string   `json:"value_key,omitempty"`
-	OutputProperty string   `json:"output_property,omitempty"`
-	Dimensions     []string `json:"dimensions,omitempty"`
+	TargetTopic       string   `json:"target_topic,omitempty"`
+	Bucket            string   `json:"bucket,omitempty"`
+	Timezone          string   `json:"timezone,omitempty"`
+	TimestampProperty string   `json:"timestamp_property,omitempty"`
+	Operation         string   `json:"operation,omitempty"`
+	Value             any      `json:"value,omitempty"`
+	ValueKey          string   `json:"value_key,omitempty"`
+	OutputProperty    string   `json:"output_property,omitempty"`
+	Dimensions        []string `json:"dimensions,omitempty"`
 }
 
 type EventPropertySpec struct {
@@ -79,10 +80,14 @@ func (a *App) handleEventSpecs(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
+	projectID, ok := requireRequestProject(w, r)
+	if !ok {
+		return
+	}
 	switch r.Method {
 	case http.MethodGet:
 		specs, err := listEventSpecs(globalCtx.AppDB(), specFilter{
-			ProjectID: r.URL.Query().Get("project_id"),
+			ProjectID: projectID,
 			App:       r.URL.Query().Get("app"),
 			Status:    r.URL.Query().Get("status"),
 		})
@@ -97,9 +102,12 @@ func (a *App) handleEventSpecs(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "invalid json", http.StatusBadRequest)
 			return
 		}
-		if spec.ProjectID == "" {
-			spec.ProjectID = globalCtx.CurrentProject()
+		if _, err := assignRequestProject(spec.ProjectID, projectID); err != nil {
+			http.Error(w, err.Error(), http.StatusForbidden)
+			return
 		}
+		spec.ID = 0
+		spec.ProjectID = projectID
 		saved, err := upsertEventSpec(globalCtx.AppDB(), spec, true)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
@@ -116,6 +124,10 @@ func (a *App) handleEventSpecItem(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
+	projectID, ok := requireRequestProject(w, r)
+	if !ok {
+		return
+	}
 	parts := splitPath(strings.TrimPrefix(r.URL.Path, "/event-specs/"))
 	if len(parts) == 0 {
 		http.NotFound(w, r)
@@ -126,7 +138,7 @@ func (a *App) handleEventSpecItem(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "POST only", http.StatusMethodNotAllowed)
 			return
 		}
-		a.handleEventSpecValidate(w, r)
+		a.handleEventSpecValidate(w, r, projectID)
 		return
 	}
 	id, err := strconv.ParseInt(parts[0], 10, 64)
@@ -144,10 +156,10 @@ func (a *App) handleEventSpecItem(w http.ResponseWriter, r *http.Request) {
 				http.Error(w, "property key required", http.StatusBadRequest)
 				return
 			}
-			a.handleEventPropertyDelete(w, r, id, parts[2])
+			a.handleEventPropertyDelete(w, r, projectID, id, parts[2])
 			return
 		}
-		a.handleEventPropertyUpsert(w, r, id)
+		a.handleEventPropertyUpsert(w, r, projectID, id)
 		return
 	}
 	if len(parts) != 1 {
@@ -156,7 +168,7 @@ func (a *App) handleEventSpecItem(w http.ResponseWriter, r *http.Request) {
 	}
 	switch r.Method {
 	case http.MethodGet:
-		spec, err := getEventSpecByID(globalCtx.AppDB(), id)
+		spec, err := getEventSpecForProject(globalCtx.AppDB(), id, projectID)
 		if errors.Is(err, sql.ErrNoRows) {
 			http.NotFound(w, r)
 			return
@@ -167,12 +179,30 @@ func (a *App) handleEventSpecItem(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, spec)
 	case http.MethodPut:
+		existing, err := getEventSpecForProject(globalCtx.AppDB(), id, projectID)
+		if errors.Is(err, sql.ErrNoRows) {
+			http.NotFound(w, r)
+			return
+		}
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
 		var spec EventSpec
 		if err := json.NewDecoder(r.Body).Decode(&spec); err != nil {
 			http.Error(w, "invalid json", http.StatusBadRequest)
 			return
 		}
+		if _, err := assignRequestProject(spec.ProjectID, projectID); err != nil {
+			http.Error(w, err.Error(), http.StatusForbidden)
+			return
+		}
+		if strings.TrimSpace(spec.App) != existing.App || strings.TrimSpace(spec.Topic) != existing.Topic {
+			http.Error(w, "app and topic cannot be changed; create a new spec", http.StatusBadRequest)
+			return
+		}
 		spec.ID = id
+		spec.ProjectID = projectID
 		saved, err := upsertEventSpec(globalCtx.AppDB(), spec, true)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
@@ -180,8 +210,13 @@ func (a *App) handleEventSpecItem(w http.ResponseWriter, r *http.Request) {
 		}
 		writeJSON(w, saved)
 	case http.MethodDelete:
-		if _, err := globalCtx.AppDB().Exec(`DELETE FROM event_specs WHERE id=?`, id); err != nil {
+		result, err := globalCtx.AppDB().Exec(`DELETE FROM event_specs WHERE id=? AND project_id=?`, id, projectID)
+		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if changed, _ := result.RowsAffected(); changed == 0 {
+			http.NotFound(w, r)
 			return
 		}
 		writeJSON(w, map[string]any{"ok": true})
@@ -195,12 +230,16 @@ func (a *App) handleEventSpecViolations(w http.ResponseWriter, r *http.Request) 
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
+	projectID, ok := requireRequestProject(w, r)
+	if !ok {
+		return
+	}
 	if r.Method != http.MethodGet {
 		http.Error(w, "GET only", http.StatusMethodNotAllowed)
 		return
 	}
 	rows, err := listEventSpecViolations(globalCtx.AppDB(), Filter{
-		ProjectID: r.URL.Query().Get("project_id"),
+		ProjectID: projectID,
 		App:       r.URL.Query().Get("app"),
 		Topic:     r.URL.Query().Get("topic"),
 		Since:     parseInt64(r.URL.Query().Get("since")),
@@ -212,7 +251,7 @@ func (a *App) handleEventSpecViolations(w http.ResponseWriter, r *http.Request) 
 	writeJSON(w, map[string]any{"violations": rows})
 }
 
-func (a *App) handleEventSpecValidate(w http.ResponseWriter, r *http.Request) {
+func (a *App) handleEventSpecValidate(w http.ResponseWriter, r *http.Request, projectID string) {
 	var body struct {
 		App       string         `json:"app"`
 		Topic     string         `json:"topic"`
@@ -233,9 +272,11 @@ func (a *App) handleEventSpecValidate(w http.ResponseWriter, r *http.Request) {
 	if body.App == "" {
 		body.App = "_explicit"
 	}
-	if body.ProjectID == "" {
-		body.ProjectID = globalCtx.CurrentProject()
+	if _, err := assignRequestProject(body.ProjectID, projectID); err != nil {
+		http.Error(w, err.Error(), http.StatusForbidden)
+		return
 	}
+	body.ProjectID = projectID
 	propsJSON := "{}"
 	if body.Props != nil {
 		b, _ := json.Marshal(body.Props)
@@ -266,7 +307,15 @@ func (a *App) handleEventSpecValidate(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"valid": len(out.Violations) == 0, "reject": out.Reject, "violations": out.Violations, "ingest": previewEventIngest(globalCtx.AppDB(), ev)})
 }
 
-func (a *App) handleEventPropertyUpsert(w http.ResponseWriter, r *http.Request, specID int64) {
+func (a *App) handleEventPropertyUpsert(w http.ResponseWriter, r *http.Request, projectID string, specID int64) {
+	if _, err := getEventSpecForProject(globalCtx.AppDB(), specID, projectID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			http.NotFound(w, r)
+		} else {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+		return
+	}
 	var prop EventPropertySpec
 	if err := json.NewDecoder(r.Body).Decode(&prop); err != nil {
 		http.Error(w, "invalid json", http.StatusBadRequest)
@@ -285,12 +334,24 @@ func (a *App) handleEventPropertyUpsert(w http.ResponseWriter, r *http.Request, 
 	writeJSON(w, spec)
 }
 
-func (a *App) handleEventPropertyDelete(w http.ResponseWriter, r *http.Request, specID int64, key string) {
-	if _, err := globalCtx.AppDB().Exec(`DELETE FROM event_property_specs WHERE event_spec_id=? AND key=?`, specID, key); err != nil {
+func (a *App) handleEventPropertyDelete(w http.ResponseWriter, r *http.Request, projectID string, specID int64, key string) {
+	if _, err := globalCtx.AppDB().Exec(
+		`DELETE FROM event_property_specs WHERE event_spec_id=? AND key=?
+		 AND event_spec_id IN (SELECT id FROM event_specs WHERE project_id=?)`,
+		specID, key, projectID,
+	); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	writeJSON(w, map[string]any{"ok": true})
+}
+
+func getEventSpecForProject(db *sql.DB, id int64, projectID string) (*EventSpec, error) {
+	var found int
+	if err := db.QueryRow(`SELECT 1 FROM event_specs WHERE id=? AND project_id=?`, id, projectID).Scan(&found); err != nil {
+		return nil, err
+	}
+	return getEventSpecByID(db, id)
 }
 
 type specFilter struct {
@@ -400,6 +461,8 @@ func upsertEventSpec(db *sql.DB, spec EventSpec, replaceProperties bool) (*Event
 	spec.Status = normalizeChoice(spec.Status, "active", map[string]bool{"draft": true, "active": true, "deprecated": true, "blocked": true})
 	spec.ValidationMode = normalizeChoice(spec.ValidationMode, "observe", map[string]bool{"observe": true, "warn": true, "reject": true})
 	spec.IngestMode = normalizeChoice(spec.IngestMode, "raw", map[string]bool{"raw": true, "upsert": true, "raw_plus_rollup": true})
+	defaultTimestampProperty(spec.UpsertPolicy, spec.Properties)
+	defaultTimestampProperty(spec.RollupPolicy, spec.Properties)
 	normalizeIngestPolicy(spec.UpsertPolicy)
 	normalizeIngestPolicy(spec.RollupPolicy)
 	upsertPolicy, err := encodeIngestPolicy(spec.UpsertPolicy)
@@ -451,6 +514,18 @@ func upsertEventSpec(db *sql.DB, spec EventSpec, replaceProperties bool) (*Event
 	return getEventSpecByID(db, id)
 }
 
+func defaultTimestampProperty(policy *EventIngestPolicy, properties []EventPropertySpec) {
+	if policy == nil || strings.TrimSpace(policy.TimestampProperty) != "" || policy.Bucket == "" || policy.Bucket == "none" {
+		return
+	}
+	for _, property := range properties {
+		if property.Key == "props.date" {
+			policy.TimestampProperty = "props.date"
+			return
+		}
+	}
+}
+
 func decodeIngestPolicy(raw sql.NullString) *EventIngestPolicy {
 	if !raw.Valid || strings.TrimSpace(raw.String) == "" {
 		return nil
@@ -475,7 +550,7 @@ func encodeIngestPolicy(policy *EventIngestPolicy) (any, error) {
 }
 
 func policyEmpty(policy EventIngestPolicy) bool {
-	return policy.TargetTopic == "" && policy.Bucket == "" && policy.Timezone == "" &&
+	return policy.TargetTopic == "" && policy.Bucket == "" && policy.Timezone == "" && policy.TimestampProperty == "" &&
 		policy.Operation == "" && policy.Value == nil && policy.ValueKey == "" &&
 		policy.OutputProperty == "" && len(policy.Dimensions) == 0
 }
@@ -493,6 +568,7 @@ func normalizeIngestPolicy(policy *EventIngestPolicy) {
 	if strings.TrimSpace(policy.Timezone) == "" {
 		policy.Timezone = "UTC"
 	}
+	policy.TimestampProperty = strings.TrimSpace(policy.TimestampProperty)
 	if strings.TrimSpace(policy.OutputProperty) == "" {
 		if policy.Operation == "increment" || policy.Operation == "sum" {
 			policy.OutputProperty = "count"
@@ -641,7 +717,7 @@ func validateEventAgainstSpecs(db *sql.DB, ev EventInsert) (validationOutcome, e
 	return validationOutcome{Reject: reject, Violations: violations}, nil
 }
 
-func recordEventSpecViolations(db *sql.DB, eventID int64, violations []EventSpecViolation) {
+func recordEventSpecViolations(db sqlRunner, eventID int64, violations []EventSpecViolation) {
 	for _, v := range violations {
 		_, _ = db.Exec(
 			`INSERT INTO event_spec_violations (project_id, app, topic, event_id, violation_type, message, property_key, seen_at)

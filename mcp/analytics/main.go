@@ -19,7 +19,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: analytics
 display_name: Analytics
-version: 0.8.4
+version: 0.8.5
 description: |
   Generic event analytics for Apteva apps. Other apps call
   analytics_track to record typed events; analytics_query / count /
@@ -41,6 +41,8 @@ description: |
   v0.8.3 adds dashboard-level filters and the Patreon Overview template.
   v0.8.4 scopes agent MCP reads and writes to the platform-assigned
   current project and rejects mismatched project_id args.
+  v0.8.5 adds project-safe HTTP APIs, date-correct transactional
+  policy ingestion, strict numeric aggregates, and batched dashboards.
 author: Apteva
 tags: [analytics, events, observability]
 scopes: [global]
@@ -181,6 +183,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/dashboards/", Handler: a.handleDashboardItem},
 		{Pattern: "/widgets/", Handler: a.handleWidgetItem},
 		{Pattern: "/query-widget", Handler: a.handleWidgetQuery},
+		{Pattern: "/query-dashboard", Handler: a.handleDashboardQuery},
 		{Pattern: "/dashboard-filter-options", Handler: a.handleDashboardFilterOptions},
 
 		// Event catalog / tracking plan.

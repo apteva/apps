@@ -4,6 +4,7 @@ import (
 	"database/sql"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -15,7 +16,7 @@ func testDashboardDB(t *testing.T) *sql.DB {
 		t.Fatalf("open sqlite: %v", err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	for _, name := range []string{"001_init.sql", "004_dashboards.sql", "005_event_specs.sql", "006_dashboard_config.sql"} {
+	for _, name := range []string{"001_init.sql", "004_dashboards.sql", "005_event_specs.sql", "006_dashboard_config.sql", "007_integrity_performance.sql"} {
 		b, err := os.ReadFile(filepath.Join("migrations", name))
 		if err != nil {
 			t.Fatalf("read migration %s: %v", name, err)
@@ -25,6 +26,71 @@ func testDashboardDB(t *testing.T) *sql.DB {
 		}
 	}
 	return db
+}
+
+func TestDashboardNumericAggregationRejectsTextValues(t *testing.T) {
+	db := testDashboardDB(t)
+	if _, err := insertEvent(db, EventInsert{
+		TS: time.Now().UnixMilli(), App: "patreon", Topic: "revenue", ProjectID: "p1", Source: "test", Props: `{"amount":"$372"}`,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	_, err := evaluateWidget(db, "p1", DashboardWidget{
+		Type: "stat", Config: map[string]any{"app": "patreon", "topic": "revenue", "window": "all", "value": "props.amount"},
+	}, nil)
+	if err == nil || !strings.Contains(err.Error(), "non-numeric") {
+		t.Fatalf("numeric aggregation error = %v, want non-numeric error", err)
+	}
+}
+
+func TestDashboardCompositeIndexMigration(t *testing.T) {
+	db := testDashboardDB(t)
+	var name string
+	if err := db.QueryRow(`SELECT name FROM sqlite_master WHERE type='index' AND name='ix_events_project_app_topic_ts'`).Scan(&name); err != nil {
+		t.Fatalf("composite dashboard index missing: %v", err)
+	}
+}
+
+func TestIntegrityMigrationUpgradesExistingDateSpecsAndUSDWidgets(t *testing.T) {
+	db := testDashboardDB(t)
+	spec, err := upsertEventSpec(db, EventSpec{
+		ProjectID: "p1", App: "patreon", Topic: "daily_earnings_snapshot", IngestMode: "upsert",
+		UpsertPolicy: &EventIngestPolicy{Bucket: "day", Operation: "replace", Value: "props.amount"},
+		Properties:   []EventPropertySpec{{Key: "props.date", Type: "string", Required: true}},
+	}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE event_specs SET upsert_policy='{"bucket":"day","operation":"replace"}' WHERE id=?`, spec.ID); err != nil {
+		t.Fatal(err)
+	}
+	dashboard, err := createDashboard(db, "p1", "Finance", "", nil, []DashboardWidget{{
+		Type: "stat", Title: "Revenue / MRR Proxy", Config: map[string]any{"app": "patreon", "value": "props.mrr_proxy"},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	migration, err := os.ReadFile(filepath.Join("migrations", "007_integrity_performance.sql"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(string(migration)); err != nil {
+		t.Fatalf("reapply integrity migration: %v", err)
+	}
+	upgraded, err := getEventSpecByID(db, spec.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if upgraded.UpsertPolicy == nil || upgraded.UpsertPolicy.TimestampProperty != "props.date" {
+		t.Fatalf("upgraded policy=%#v want props.date timestamp", upgraded.UpsertPolicy)
+	}
+	dashboard, err = getDashboard(db, dashboard.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if dashboard.Widgets[0].Config["format"] != "currency" || dashboard.Widgets[0].Config["currency"] != "USD" {
+		t.Fatalf("upgraded widget config=%#v want USD currency", dashboard.Widgets[0].Config)
+	}
 }
 
 func TestWebsiteTrafficTemplateEvaluatesActiveSessions(t *testing.T) {

@@ -2,6 +2,8 @@ package main
 
 import (
 	"fmt"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -33,6 +35,130 @@ func TestEventSpecRejectsMissingRequiredProperty(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("expected missing required views to reject")
+	}
+}
+
+func TestPolicyTimestampPropertyControlsStoredDayAndUpsertKey(t *testing.T) {
+	db := testDashboardDB(t)
+	saved, err := upsertEventSpec(db, EventSpec{
+		ProjectID: "p1", App: "patreon", Topic: "daily_membership_snapshot",
+		Kind: "aggregate_observation", Status: "active", ValidationMode: "reject", IngestMode: "upsert",
+		UpsertPolicy: &EventIngestPolicy{
+			Bucket: "day", Timezone: "UTC", Operation: "replace",
+			Value: "props.paid_members", OutputProperty: "paid_members", Dimensions: []string{"props.page_id"},
+		},
+		Properties: []EventPropertySpec{
+			{Key: "props.date", Type: "string", Required: true},
+			{Key: "props.page_id", Type: "string", Required: true},
+			{Key: "props.paid_members", Type: "number", Required: true},
+		},
+	}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if saved.UpsertPolicy == nil || saved.UpsertPolicy.TimestampProperty != "props.date" {
+		t.Fatalf("default timestamp property = %#v, want props.date", saved.UpsertPolicy)
+	}
+	for i, paid := range []int{10, 12} {
+		_, err := insertEvent(db, EventInsert{
+			TS:  time.Date(2026, 7, 10+i, 15, 0, 0, 0, time.UTC).UnixMilli(),
+			App: "patreon", Topic: "daily_membership_snapshot", ProjectID: "p1", Source: "track",
+			Props: fmt.Sprintf(`{"date":"2026-06-16","page_id":"page-a","paid_members":%d}`, paid),
+		})
+		if err != nil {
+			t.Fatalf("insert delayed snapshot: %v", err)
+		}
+	}
+	rows, err := queryRows(db, Filter{ProjectID: "p1", App: "patreon", Topic: "daily_membership_snapshot"}, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("snapshot rows=%d want 1", len(rows))
+	}
+	wantTS := time.Date(2026, 6, 16, 0, 0, 0, 0, time.UTC).UnixMilli()
+	if rows[0].TS != wantTS || !strings.Contains(rows[0].UpsertKey, "day=2026-06-16") {
+		t.Fatalf("stored snapshot ts=%d key=%q, want date-controlled bucket", rows[0].TS, rows[0].UpsertKey)
+	}
+}
+
+func TestRawPlusRollupFailureRollsBackRawEvent(t *testing.T) {
+	db := testDashboardDB(t)
+	_, err := upsertEventSpec(db, EventSpec{
+		ProjectID: "p1", App: "site", Topic: "page_viewed", Status: "active", ValidationMode: "warn", IngestMode: "raw_plus_rollup",
+		RollupPolicy: &EventIngestPolicy{
+			TargetTopic: "page_viewed_rollup", Bucket: "day", Operation: "increment", Value: 1,
+			OutputProperty: "views", Dimensions: []string{"props.path"},
+		},
+	}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := insertEvent(db, EventInsert{
+		TS: time.Now().UnixMilli(), App: "site", Topic: "page_viewed", ProjectID: "p1", Source: "track", Props: `{}`,
+	}); err == nil {
+		t.Fatal("expected missing rollup dimension to fail")
+	}
+	count, err := countEvents(db, Filter{ProjectID: "p1"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("partial raw event remained after rollup failure: count=%d", count)
+	}
+	var violations int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM event_spec_violations`).Scan(&violations); err != nil {
+		t.Fatal(err)
+	}
+	if violations != 0 {
+		t.Fatalf("partial validation violations remained after rollup failure: count=%d", violations)
+	}
+}
+
+func TestConcurrentRollupIncrementsAreAtomic(t *testing.T) {
+	db := testDashboardDB(t)
+	db.SetMaxOpenConns(1)
+	_, err := upsertEventSpec(db, EventSpec{
+		ProjectID: "p1", App: "site", Topic: "page_viewed", Status: "active", ValidationMode: "reject", IngestMode: "raw_plus_rollup",
+		RollupPolicy: &EventIngestPolicy{
+			TargetTopic: "page_viewed_rollup", Bucket: "day", Operation: "increment", Value: 1,
+			OutputProperty: "views", Dimensions: []string{"props.path"},
+		},
+		Properties: []EventPropertySpec{{Key: "props.path", Type: "string", Required: true}},
+	}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const writes = 40
+	start := make(chan struct{})
+	errs := make(chan error, writes)
+	var wg sync.WaitGroup
+	for i := 0; i < writes; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			<-start
+			_, err := insertEvent(db, EventInsert{
+				TS:  time.Date(2026, 6, 16, 12, 0, 0, 0, time.UTC).UnixMilli(),
+				App: "site", Topic: "page_viewed", ProjectID: "p1", Source: "track", Props: `{"path":"/pricing"}`,
+			})
+			errs <- err
+		}()
+	}
+	close(start)
+	wg.Wait()
+	close(errs)
+	for err := range errs {
+		if err != nil {
+			t.Fatalf("concurrent insert: %v", err)
+		}
+	}
+	buckets, err := sumByValue(db, Filter{ProjectID: "p1", App: "site", Topic: "page_viewed_rollup"}, "props.views", nil, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(buckets) != 1 || buckets[0]["sum"] != float64(writes) {
+		t.Fatalf("rollup buckets=%#v want sum %d", buckets, writes)
 	}
 }
 

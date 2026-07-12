@@ -3,6 +3,7 @@ package main
 import (
 	"database/sql"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"strconv"
@@ -37,11 +38,15 @@ func (a *App) handleDashboards(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
+	projectID, ok := requireRequestProject(w, r)
+	if !ok {
+		return
+	}
 	switch r.Method {
 	case http.MethodGet:
-		a.handleDashboardsList(w, r)
+		a.handleDashboardsList(w, r, projectID)
 	case http.MethodPost:
-		a.handleDashboardsCreate(w, r)
+		a.handleDashboardsCreate(w, r, projectID)
 	default:
 		http.Error(w, "GET or POST only", http.StatusMethodNotAllowed)
 	}
@@ -50,6 +55,10 @@ func (a *App) handleDashboards(w http.ResponseWriter, r *http.Request) {
 func (a *App) handleDashboardItem(w http.ResponseWriter, r *http.Request) {
 	if !requireUser(r) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	projectID, ok := requireRequestProject(w, r)
+	if !ok {
 		return
 	}
 	parts := splitPath(strings.TrimPrefix(r.URL.Path, "/dashboards/"))
@@ -67,7 +76,7 @@ func (a *App) handleDashboardItem(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "POST only", http.StatusMethodNotAllowed)
 			return
 		}
-		a.handleWidgetCreate(w, r, id)
+		a.handleWidgetCreate(w, r, projectID, id)
 		return
 	}
 	if len(parts) != 1 {
@@ -76,11 +85,11 @@ func (a *App) handleDashboardItem(w http.ResponseWriter, r *http.Request) {
 	}
 	switch r.Method {
 	case http.MethodGet:
-		a.handleDashboardGet(w, r, id)
+		a.handleDashboardGet(w, r, projectID, id)
 	case http.MethodPut:
-		a.handleDashboardUpdate(w, r, id)
+		a.handleDashboardUpdate(w, r, projectID, id)
 	case http.MethodDelete:
-		a.handleDashboardDelete(w, r, id)
+		a.handleDashboardDelete(w, r, projectID, id)
 	default:
 		http.Error(w, "GET, PUT or DELETE only", http.StatusMethodNotAllowed)
 	}
@@ -89,6 +98,10 @@ func (a *App) handleDashboardItem(w http.ResponseWriter, r *http.Request) {
 func (a *App) handleWidgetItem(w http.ResponseWriter, r *http.Request) {
 	if !requireUser(r) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	projectID, ok := requireRequestProject(w, r)
+	if !ok {
 		return
 	}
 	parts := splitPath(strings.TrimPrefix(r.URL.Path, "/widgets/"))
@@ -103,9 +116,9 @@ func (a *App) handleWidgetItem(w http.ResponseWriter, r *http.Request) {
 	}
 	switch r.Method {
 	case http.MethodPut:
-		a.handleWidgetUpdate(w, r, id)
+		a.handleWidgetUpdate(w, r, projectID, id)
 	case http.MethodDelete:
-		a.handleWidgetDelete(w, r, id)
+		a.handleWidgetDelete(w, r, projectID, id)
 	default:
 		http.Error(w, "PUT or DELETE only", http.StatusMethodNotAllowed)
 	}
@@ -120,6 +133,10 @@ func (a *App) handleWidgetQuery(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "POST only", http.StatusMethodNotAllowed)
 		return
 	}
+	projectID, ok := requireRequestProject(w, r)
+	if !ok {
+		return
+	}
 	var body struct {
 		ProjectID string          `json:"project_id"`
 		Widget    DashboardWidget `json:"widget"`
@@ -129,10 +146,11 @@ func (a *App) handleWidgetQuery(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid json", http.StatusBadRequest)
 		return
 	}
-	if body.ProjectID == "" {
-		body.ProjectID = globalCtx.CurrentProject()
+	if _, err := assignRequestProject(body.ProjectID, projectID); err != nil {
+		http.Error(w, err.Error(), http.StatusForbidden)
+		return
 	}
-	result, err := evaluateWidget(globalCtx.AppDB(), body.ProjectID, body.Widget, body.Filters)
+	result, err := evaluateWidget(globalCtx.AppDB(), projectID, body.Widget, body.Filters)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -140,27 +158,101 @@ func (a *App) handleWidgetQuery(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, result)
 }
 
+type dashboardWidgetResult struct {
+	WidgetID int64          `json:"widget_id"`
+	Data     map[string]any `json:"data,omitempty"`
+	Error    string         `json:"error,omitempty"`
+}
+
+func (a *App) handleDashboardQuery(w http.ResponseWriter, r *http.Request) {
+	if !requireUser(r) {
+		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	if r.Method != http.MethodGet && r.Method != http.MethodPost {
+		http.Error(w, "GET or POST only", http.StatusMethodNotAllowed)
+		return
+	}
+	projectID, ok := requireRequestProject(w, r)
+	if !ok {
+		return
+	}
+	var body struct {
+		ProjectID   string         `json:"project_id"`
+		DashboardID int64          `json:"dashboard_id"`
+		Filters     map[string]any `json:"filters"`
+	}
+	if r.Method == http.MethodGet {
+		body.ProjectID = r.URL.Query().Get("project_id")
+		body.DashboardID = parseInt64(r.URL.Query().Get("dashboard_id"))
+		if raw := r.URL.Query().Get("filters"); raw != "" {
+			if err := json.Unmarshal([]byte(raw), &body.Filters); err != nil {
+				http.Error(w, "invalid filters", http.StatusBadRequest)
+				return
+			}
+		}
+	} else if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		http.Error(w, "invalid json", http.StatusBadRequest)
+		return
+	}
+	if _, err := assignRequestProject(body.ProjectID, projectID); err != nil {
+		http.Error(w, err.Error(), http.StatusForbidden)
+		return
+	}
+	dashboard, err := getDashboardForProject(globalCtx.AppDB(), body.DashboardID, projectID)
+	if errors.Is(err, sql.ErrNoRows) {
+		http.NotFound(w, r)
+		return
+	}
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	results := make([]dashboardWidgetResult, 0, len(dashboard.Widgets))
+	for _, widget := range dashboard.Widgets {
+		data, err := evaluateWidget(globalCtx.AppDB(), projectID, widget, body.Filters)
+		result := dashboardWidgetResult{WidgetID: widget.ID, Data: data}
+		if err != nil {
+			result.Data = nil
+			result.Error = err.Error()
+		}
+		results = append(results, result)
+	}
+	writeJSON(w, map[string]any{"dashboard_id": dashboard.ID, "widgets": results})
+}
+
 func (a *App) handleDashboardFilterOptions(w http.ResponseWriter, r *http.Request) {
 	if !requireUser(r) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
-	if r.Method != http.MethodPost {
-		http.Error(w, "POST only", http.StatusMethodNotAllowed)
+	if r.Method != http.MethodGet && r.Method != http.MethodPost {
+		http.Error(w, "GET or POST only", http.StatusMethodNotAllowed)
+		return
+	}
+	projectID, ok := requireRequestProject(w, r)
+	if !ok {
 		return
 	}
 	var body struct {
 		ProjectID string         `json:"project_id"`
 		Filter    map[string]any `json:"filter"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	if r.Method == http.MethodGet {
+		body.ProjectID = r.URL.Query().Get("project_id")
+		if err := json.Unmarshal([]byte(r.URL.Query().Get("filter")), &body.Filter); err != nil {
+			http.Error(w, "invalid filter", http.StatusBadRequest)
+			return
+		}
+	} else if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		http.Error(w, "invalid json", http.StatusBadRequest)
 		return
 	}
-	if body.ProjectID == "" {
-		body.ProjectID = globalCtx.CurrentProject()
+	if _, err := assignRequestProject(body.ProjectID, projectID); err != nil {
+		http.Error(w, err.Error(), http.StatusForbidden)
+		return
 	}
-	options, err := dashboardFilterOptions(globalCtx.AppDB(), body.ProjectID, body.Filter)
+	options, err := dashboardFilterOptions(globalCtx.AppDB(), projectID, body.Filter)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -168,8 +260,7 @@ func (a *App) handleDashboardFilterOptions(w http.ResponseWriter, r *http.Reques
 	writeJSON(w, map[string]any{"options": options})
 }
 
-func (a *App) handleDashboardsList(w http.ResponseWriter, r *http.Request) {
-	projectID := projectFromRequest(r)
+func (a *App) handleDashboardsList(w http.ResponseWriter, r *http.Request, projectID string) {
 	rows, err := globalCtx.AppDB().Query(
 		`SELECT id, project_id, name, description, COALESCE(config_json, '{}'), created_at, updated_at
 		 FROM dashboards WHERE project_id = ? ORDER BY updated_at DESC, id DESC`,
@@ -197,7 +288,7 @@ func (a *App) handleDashboardsList(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, map[string]any{"dashboards": out})
 }
 
-func (a *App) handleDashboardsCreate(w http.ResponseWriter, r *http.Request) {
+func (a *App) handleDashboardsCreate(w http.ResponseWriter, r *http.Request, projectID string) {
 	var body struct {
 		ProjectID   string         `json:"project_id"`
 		Name        string         `json:"name"`
@@ -209,8 +300,9 @@ func (a *App) handleDashboardsCreate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid json", http.StatusBadRequest)
 		return
 	}
-	if body.ProjectID == "" {
-		body.ProjectID = globalCtx.CurrentProject()
+	if _, err := assignRequestProject(body.ProjectID, projectID); err != nil {
+		http.Error(w, err.Error(), http.StatusForbidden)
+		return
 	}
 	body.Name = strings.TrimSpace(body.Name)
 	if body.Name == "" {
@@ -226,7 +318,7 @@ func (a *App) handleDashboardsCreate(w http.ResponseWriter, r *http.Request) {
 	if body.Template != "" && len(cfg) == 0 {
 		cfg = templateDashboardConfig(body.Template)
 	}
-	d, err := createDashboard(globalCtx.AppDB(), body.ProjectID, body.Name, body.Description, cfg, templateWidgets(body.Template))
+	d, err := createDashboard(globalCtx.AppDB(), projectID, body.Name, body.Description, cfg, templateWidgets(body.Template))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -234,8 +326,8 @@ func (a *App) handleDashboardsCreate(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, d)
 }
 
-func (a *App) handleDashboardGet(w http.ResponseWriter, r *http.Request, id int64) {
-	d, err := getDashboard(globalCtx.AppDB(), id)
+func (a *App) handleDashboardGet(w http.ResponseWriter, r *http.Request, projectID string, id int64) {
+	d, err := getDashboardForProject(globalCtx.AppDB(), id, projectID)
 	if err == sql.ErrNoRows {
 		http.NotFound(w, r)
 		return
@@ -247,7 +339,7 @@ func (a *App) handleDashboardGet(w http.ResponseWriter, r *http.Request, id int6
 	writeJSON(w, d)
 }
 
-func (a *App) handleDashboardUpdate(w http.ResponseWriter, r *http.Request, id int64) {
+func (a *App) handleDashboardUpdate(w http.ResponseWriter, r *http.Request, projectID string, id int64) {
 	var body struct {
 		Name        string         `json:"name"`
 		Description string         `json:"description"`
@@ -263,26 +355,43 @@ func (a *App) handleDashboardUpdate(w http.ResponseWriter, r *http.Request, id i
 		return
 	}
 	cfg, _ := json.Marshal(nonNilConfig(body.Config))
-	_, err := globalCtx.AppDB().Exec(
-		`UPDATE dashboards SET name=?, description=?, config_json=?, updated_at=? WHERE id=?`,
-		body.Name, body.Description, string(cfg), time.Now().UnixMilli(), id,
+	result, err := globalCtx.AppDB().Exec(
+		`UPDATE dashboards SET name=?, description=?, config_json=?, updated_at=? WHERE id=? AND project_id=?`,
+		body.Name, body.Description, string(cfg), time.Now().UnixMilli(), id, projectID,
 	)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	a.handleDashboardGet(w, r, id)
+	if changed, _ := result.RowsAffected(); changed == 0 {
+		http.NotFound(w, r)
+		return
+	}
+	a.handleDashboardGet(w, r, projectID, id)
 }
 
-func (a *App) handleDashboardDelete(w http.ResponseWriter, r *http.Request, id int64) {
-	if _, err := globalCtx.AppDB().Exec(`DELETE FROM dashboards WHERE id=?`, id); err != nil {
+func (a *App) handleDashboardDelete(w http.ResponseWriter, r *http.Request, projectID string, id int64) {
+	result, err := globalCtx.AppDB().Exec(`DELETE FROM dashboards WHERE id=? AND project_id=?`, id, projectID)
+	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if changed, _ := result.RowsAffected(); changed == 0 {
+		http.NotFound(w, r)
 		return
 	}
 	writeJSON(w, map[string]any{"ok": true})
 }
 
-func (a *App) handleWidgetCreate(w http.ResponseWriter, r *http.Request, dashboardID int64) {
+func (a *App) handleWidgetCreate(w http.ResponseWriter, r *http.Request, projectID string, dashboardID int64) {
+	if _, err := getDashboardForProject(globalCtx.AppDB(), dashboardID, projectID); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			http.NotFound(w, r)
+		} else {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+		}
+		return
+	}
 	var body DashboardWidget
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		http.Error(w, "invalid json", http.StatusBadRequest)
@@ -303,7 +412,7 @@ func (a *App) handleWidgetCreate(w http.ResponseWriter, r *http.Request, dashboa
 	writeJSON(w, widget)
 }
 
-func (a *App) handleWidgetUpdate(w http.ResponseWriter, r *http.Request, id int64) {
+func (a *App) handleWidgetUpdate(w http.ResponseWriter, r *http.Request, projectID string, id int64) {
 	var body DashboardWidget
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		http.Error(w, "invalid json", http.StatusBadRequest)
@@ -317,20 +426,33 @@ func (a *App) handleWidgetUpdate(w http.ResponseWriter, r *http.Request, id int6
 		body.Title = defaultWidgetTitle(body.Type)
 	}
 	cfg, _ := json.Marshal(nonNilConfig(body.Config))
-	_, err := globalCtx.AppDB().Exec(
-		`UPDATE dashboard_widgets SET type=?, title=?, position=?, config_json=?, updated_at=? WHERE id=?`,
-		body.Type, body.Title, body.Position, string(cfg), time.Now().UnixMilli(), id,
+	result, err := globalCtx.AppDB().Exec(
+		`UPDATE dashboard_widgets SET type=?, title=?, position=?, config_json=?, updated_at=?
+		 WHERE id=? AND dashboard_id IN (SELECT id FROM dashboards WHERE project_id=?)`,
+		body.Type, body.Title, body.Position, string(cfg), time.Now().UnixMilli(), id, projectID,
 	)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+	if changed, _ := result.RowsAffected(); changed == 0 {
+		http.NotFound(w, r)
+		return
+	}
 	writeJSON(w, map[string]any{"ok": true})
 }
 
-func (a *App) handleWidgetDelete(w http.ResponseWriter, r *http.Request, id int64) {
-	if _, err := globalCtx.AppDB().Exec(`DELETE FROM dashboard_widgets WHERE id=?`, id); err != nil {
+func (a *App) handleWidgetDelete(w http.ResponseWriter, r *http.Request, projectID string, id int64) {
+	result, err := globalCtx.AppDB().Exec(
+		`DELETE FROM dashboard_widgets WHERE id=? AND dashboard_id IN (SELECT id FROM dashboards WHERE project_id=?)`,
+		id, projectID,
+	)
+	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if changed, _ := result.RowsAffected(); changed == 0 {
+		http.NotFound(w, r)
 		return
 	}
 	writeJSON(w, map[string]any{"ok": true})
@@ -385,6 +507,14 @@ func getDashboard(db *sql.DB, id int64) (*Dashboard, error) {
 	}
 	d.Widgets = widgets
 	return &d, nil
+}
+
+func getDashboardForProject(db *sql.DB, id int64, projectID string) (*Dashboard, error) {
+	var found int
+	if err := db.QueryRow(`SELECT 1 FROM dashboards WHERE id=? AND project_id=?`, id, projectID).Scan(&found); err != nil {
+		return nil, err
+	}
+	return getDashboard(db, id)
 }
 
 func insertWidget(db *sql.DB, dashboardID int64, w DashboardWidget) (*DashboardWidget, error) {
@@ -518,16 +648,17 @@ func seriesForWidget(db *sql.DB, f Filter, interval, valueKey string) ([]map[str
 		expr = "strftime('%Y-%m-%d', ts / 1000, 'unixepoch')"
 	}
 	valueExpr := ""
+	numericPredicate := ""
 	if valueKey != "" {
 		var ok bool
-		valueExpr, ok = valueExtract(valueKey)
+		valueExpr, numericPredicate, ok = numericValueExtract(valueKey)
 		if !ok {
 			return nil, fmt.Errorf("value must be a numeric event field or props.X")
 		}
 	}
 	q := "SELECT " + expr + " AS bucket, COUNT(*) AS count"
 	if valueExpr != "" {
-		q += ", SUM(CAST(" + valueExpr + " AS REAL)) AS value"
+		q += ", SUM(CASE WHEN " + numericPredicate + " THEN CAST(" + valueExpr + " AS REAL) END) AS value, SUM(CASE WHEN " + numericPredicate + " THEN 0 ELSE 1 END) AS invalid_count"
 	}
 	q += " FROM events"
 	if where != "" {
@@ -550,8 +681,12 @@ func seriesForWidget(db *sql.DB, f Filter, interval, valueKey string) ([]map[str
 		var count int64
 		if valueExpr != "" {
 			var value sql.NullFloat64
-			if err := rows.Scan(&bucket, &count, &value); err != nil {
+			var invalid int64
+			if err := rows.Scan(&bucket, &count, &value, &invalid); err != nil {
 				return nil, err
+			}
+			if invalid > 0 {
+				return nil, fmt.Errorf("value %q contains %d non-numeric row(s) in bucket %s", valueKey, invalid, bucket)
 			}
 			row := map[string]any{"bucket": bucket, "count": count, "value": 0.0}
 			if value.Valid {
@@ -569,12 +704,12 @@ func seriesForWidget(db *sql.DB, f Filter, interval, valueKey string) ([]map[str
 }
 
 func sumScalarForWidget(db *sql.DB, f Filter, valueKey string) (float64, int64, error) {
-	expr, ok := valueExtract(valueKey)
+	expr, numericPredicate, ok := numericValueExtract(valueKey)
 	if !ok {
 		return 0, 0, fmt.Errorf("value must be a numeric event field or props.X")
 	}
 	where, args := f.buildWhere()
-	q := "SELECT COALESCE(SUM(CAST(" + expr + " AS REAL)), 0), COUNT(*) FROM events"
+	q := "SELECT COALESCE(SUM(CASE WHEN " + numericPredicate + " THEN CAST(" + expr + " AS REAL) END), 0), COUNT(*), COALESCE(SUM(CASE WHEN " + numericPredicate + " THEN 0 ELSE 1 END), 0) FROM events"
 	if where != "" {
 		q += " WHERE " + where + " AND " + expr + " IS NOT NULL"
 	} else {
@@ -582,8 +717,12 @@ func sumScalarForWidget(db *sql.DB, f Filter, valueKey string) (float64, int64, 
 	}
 	var sum float64
 	var count int64
-	if err := db.QueryRow(q, args...).Scan(&sum, &count); err != nil {
+	var invalid int64
+	if err := db.QueryRow(q, args...).Scan(&sum, &count, &invalid); err != nil {
 		return 0, 0, err
+	}
+	if invalid > 0 {
+		return 0, count, fmt.Errorf("value %q contains %d non-numeric row(s)", valueKey, invalid)
 	}
 	return sum, count, nil
 }
@@ -790,7 +929,7 @@ func templateWidgets(name string) []DashboardWidget {
 			"props.page_id": "$filters.page_id",
 		}
 		return []DashboardWidget{
-			{Type: "timeseries", Title: "Net Earnings", Config: map[string]any{"app": "patreon", "topic": "daily_earnings_snapshot", "window": "$filters.window", "interval": "day", "value": "props.net_earnings_total", "where": map[string]any{"props.page_id": "$filters.page_id", "props.currency": "$filters.currency"}}},
+			{Type: "timeseries", Title: "Net Earnings", Config: map[string]any{"app": "patreon", "topic": "daily_earnings_snapshot", "window": "$filters.window", "interval": "day", "value": "props.net_earnings_total", "format": "currency", "currency": "USD", "where": map[string]any{"props.page_id": "$filters.page_id", "props.currency": "$filters.currency"}}},
 			{Type: "timeseries", Title: "Paid Members", Config: map[string]any{"app": "patreon", "topic": "daily_membership_snapshot", "window": "$filters.window", "interval": "day", "value": "props.paid_members", "where": filtered}},
 			{Type: "timeseries", Title: "Traffic Views", Config: map[string]any{"app": "patreon", "topic": "daily_traffic_snapshot", "window": "$filters.window", "interval": "day", "value": "props.total_views", "where": filtered}},
 			{Type: "feed", Title: "Latest Patreon Snapshots", Config: map[string]any{"app": "patreon", "window": "$filters.window", "limit": 25, "where": filtered}},
@@ -869,13 +1008,6 @@ func defaultWidgetTitle(typ string) string {
 	default:
 		return "Widget"
 	}
-}
-
-func projectFromRequest(r *http.Request) string {
-	if pid := r.URL.Query().Get("project_id"); pid != "" {
-		return pid
-	}
-	return globalCtx.CurrentProject()
 }
 
 func splitPath(s string) []string {

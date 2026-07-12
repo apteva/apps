@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: analytics
 display_name: Analytics
-version: 0.8.4
+version: 0.8.5
 description: |
   Generic event analytics for Apteva apps. Other apps call
   analytics_track to record typed events; analytics_query / count /
@@ -55,6 +55,11 @@ description: |
   v0.8.4 scopes agent MCP reads and writes to the platform-assigned
   current project, rejects mismatched project_id args, and adds
   current-project spec discovery / dry-run validation tools.
+
+  v0.8.5 enforces the same project scope across HTTP APIs, makes
+  policy upserts date-correct and transactional, rejects invalid
+  numeric aggregates, batches dashboard refreshes, and improves
+  responsive KPI/chart presentation with explicit errors and units.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/analytics

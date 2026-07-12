@@ -42,6 +42,11 @@ type EventInsert struct {
 	Props     string // JSON-encoded; "" → "{}"
 }
 
+type sqlRunner interface {
+	Exec(query string, args ...any) (sql.Result, error)
+	QueryRow(query string, args ...any) *sql.Row
+}
+
 func insertEvent(db *sql.DB, ev EventInsert) (int64, error) {
 	return insertEventWithPolicy(db, ev)
 }
@@ -57,6 +62,13 @@ func insertEventRaw(db *sql.DB, ev EventInsert, validate bool) (int64, error) {
 		if err != nil {
 			return 0, err
 		}
+	}
+	return insertEventRawValidated(db, ev, validation)
+}
+
+func insertEventRawValidated(db sqlRunner, ev EventInsert, validation validationOutcome) (int64, error) {
+	if ev.Props == "" {
+		ev.Props = "{}"
 	}
 	if ev.UpsertKey != "" {
 		_, err := db.Exec(`
@@ -374,7 +386,7 @@ func topByPropsKey(db *sql.DB, f Filter, by string, limit int) ([]map[string]any
 // observation events such as "post_views_daily_observed" where the
 // value lives in props.views.
 func sumByValue(db *sql.DB, f Filter, valueKey string, groupBy []string, limit int) ([]map[string]any, error) {
-	valueExpr, ok := valueExtract(valueKey)
+	valueExpr, numericPredicate, ok := numericValueExtract(valueKey)
 	if !ok {
 		return nil, fmt.Errorf("value must be a numeric column or props.X, got %q", valueKey)
 	}
@@ -410,7 +422,7 @@ func sumByValue(db *sql.DB, f Filter, valueKey string, groupBy []string, limit i
 	if len(selectExprs) > 0 {
 		selectSQL = strings.Join(selectExprs, ", ") + ", "
 	}
-	q := "SELECT " + selectSQL + "SUM(CAST(" + valueExpr + " AS REAL)) AS sum, COUNT(*) AS count FROM events"
+	q := "SELECT " + selectSQL + "SUM(CASE WHEN " + numericPredicate + " THEN CAST(" + valueExpr + " AS REAL) END) AS sum, COUNT(*) AS count, COALESCE(SUM(CASE WHEN " + numericPredicate + " THEN 0 ELSE 1 END), 0) AS invalid_count FROM events"
 	if where != "" {
 		q += " WHERE " + where + " AND " + valueExpr + " IS NOT NULL"
 	} else {
@@ -429,17 +441,22 @@ func sumByValue(db *sql.DB, f Filter, valueKey string, groupBy []string, limit i
 
 	var out []map[string]any
 	for rows.Next() {
-		vals := make([]any, len(labels)+2)
+		vals := make([]any, len(labels)+3)
 		for i := range labels {
 			var s sql.NullString
 			vals[i] = &s
 		}
 		var sum sql.NullFloat64
 		var count int64
+		var invalid int64
 		vals[len(labels)] = &sum
 		vals[len(labels)+1] = &count
+		vals[len(labels)+2] = &invalid
 		if err := rows.Scan(vals...); err != nil {
 			return nil, err
+		}
+		if invalid > 0 {
+			return nil, fmt.Errorf("value %q contains %d non-numeric row(s)", valueKey, invalid)
 		}
 		row := map[string]any{"sum": sum.Float64, "count": count}
 		for i, label := range labels {
@@ -462,6 +479,28 @@ func valueExtract(key string) (string, bool) {
 	default:
 		return propsExtract(key)
 	}
+}
+
+func numericValueExtract(key string) (expr, predicate string, ok bool) {
+	expr, ok = valueExtract(key)
+	if !ok {
+		return "", "", false
+	}
+	if key == "ts" || key == "install_id" {
+		return expr, "typeof(" + expr + ") IN ('integer','real')", true
+	}
+	path, ok := propsJSONPath(key)
+	if !ok {
+		return "", "", false
+	}
+	return expr, "json_type(props, '" + path + "') IN ('integer','real')", true
+}
+
+func propsJSONPath(key string) (string, bool) {
+	if _, ok := propsExtract(key); !ok {
+		return "", false
+	}
+	return "$." + strings.TrimPrefix(key, "props."), true
 }
 
 // listTopics returns one row per (app, topic) seen in a project, with

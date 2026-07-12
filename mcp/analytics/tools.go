@@ -227,7 +227,7 @@ func (a *App) toolEventSpecsForApp(ctx *sdk.AppCtx, args map[string]any) (any, e
 		"project_id": projectID,
 		"app":        app,
 		"specs":      specs,
-		"guidance":   "Use analytics_track with app and event/topic from one of these specs. Do not pass project_id; the platform assigns it automatically.",
+		"guidance":   "Use analytics_track with app and event/topic from one of these specs. Do not pass project_id; the platform assigns it automatically. For policy-managed upsert topics, omit upsert_key because the declared bucket and dimensions compute it.",
 	}, nil
 }
 

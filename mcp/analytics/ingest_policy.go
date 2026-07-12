@@ -22,15 +22,36 @@ func insertEventWithPolicy(db *sql.DB, ev EventInsert) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
+	validation, err := validateEventInsert(db, ev)
+	if err != nil {
+		return 0, err
+	}
 	switch spec.IngestMode {
 	case "upsert":
-		next, err := eventFromPolicy(db, ev, spec.Topic, spec.UpsertPolicy, false)
+		tx, err := db.Begin()
 		if err != nil {
 			return 0, err
 		}
-		return insertEventRaw(db, next, true)
+		defer tx.Rollback()
+		next, err := eventFromPolicy(tx, ev, spec.Topic, spec.UpsertPolicy, false)
+		if err != nil {
+			return 0, err
+		}
+		id, err := insertEventRawValidated(tx, next, validation)
+		if err != nil {
+			return 0, err
+		}
+		if err := tx.Commit(); err != nil {
+			return 0, err
+		}
+		return id, nil
 	case "raw_plus_rollup":
-		id, err := insertEventRaw(db, ev, true)
+		tx, err := db.Begin()
+		if err != nil {
+			return 0, err
+		}
+		defer tx.Rollback()
+		id, err := insertEventRawValidated(tx, ev, validation)
 		if err != nil {
 			return 0, err
 		}
@@ -40,11 +61,14 @@ func insertEventWithPolicy(db *sql.DB, ev EventInsert) (int64, error) {
 		} else if spec.RollupPolicy != nil && spec.RollupPolicy.Bucket != "" && spec.RollupPolicy.Bucket != "none" {
 			rollupTopic = spec.Topic + "_" + spec.RollupPolicy.Bucket + "_rollup"
 		}
-		rollup, err := eventFromPolicy(db, ev, rollupTopic, spec.RollupPolicy, true)
+		rollup, err := eventFromPolicy(tx, ev, rollupTopic, spec.RollupPolicy, true)
 		if err != nil {
 			return 0, err
 		}
-		if _, err := insertEventRaw(db, rollup, false); err != nil {
+		if _, err := insertEventRawValidated(tx, rollup, validationOutcome{}); err != nil {
+			return 0, err
+		}
+		if err := tx.Commit(); err != nil {
 			return 0, err
 		}
 		return id, nil
@@ -53,7 +77,7 @@ func insertEventWithPolicy(db *sql.DB, ev EventInsert) (int64, error) {
 	}
 }
 
-func eventFromPolicy(db *sql.DB, ev EventInsert, targetTopic string, policy *EventIngestPolicy, rollup bool) (EventInsert, error) {
+func eventFromPolicy(db sqlRunner, ev EventInsert, targetTopic string, policy *EventIngestPolicy, rollup bool) (EventInsert, error) {
 	if policy == nil || policyEmpty(*policy) {
 		return EventInsert{}, errors.New("ingest policy required")
 	}
@@ -62,6 +86,12 @@ func eventFromPolicy(db *sql.DB, ev EventInsert, targetTopic string, policy *Eve
 		targetTopic = ev.Topic
 	}
 	values := eventValueMap(ev)
+	policyTS, err := timestampForPolicy(ev.TS, values, policy)
+	if err != nil {
+		return EventInsert{}, err
+	}
+	ev.TS = policyTS
+	values["ts"] = policyTS
 	bucket, err := bucketForPolicy(ev.TS, policy)
 	if err != nil {
 		return EventInsert{}, err
@@ -167,7 +197,7 @@ func computedUpsertKey(ev EventInsert, targetTopic string, policy *EventIngestPo
 	return strings.Join(parts, "|"), nil
 }
 
-func aggregateProps(db *sql.DB, ev EventInsert, targetTopic string, policy *EventIngestPolicy, bucket policyBucket, values map[string]any, upsertKey string, rollup bool) (map[string]any, error) {
+func aggregateProps(db sqlRunner, ev EventInsert, targetTopic string, policy *EventIngestPolicy, bucket policyBucket, values map[string]any, upsertKey string, rollup bool) (map[string]any, error) {
 	props := map[string]any{}
 	if !rollup {
 		props = propsObject(ev.Props)
@@ -234,7 +264,7 @@ func aggregateProps(db *sql.DB, ev EventInsert, targetTopic string, policy *Even
 	return props, nil
 }
 
-func existingUpsertProps(db *sql.DB, projectID, app, topic, upsertKey string) map[string]any {
+func existingUpsertProps(db sqlRunner, projectID, app, topic, upsertKey string) map[string]any {
 	if upsertKey == "" {
 		return nil
 	}
@@ -247,6 +277,52 @@ func existingUpsertProps(db *sql.DB, projectID, app, topic, upsertKey string) ma
 		return nil
 	}
 	return propsObject(raw)
+}
+
+func timestampForPolicy(fallback int64, values map[string]any, policy *EventIngestPolicy) (int64, error) {
+	key := strings.TrimSpace(policy.TimestampProperty)
+	if key == "" {
+		return fallback, nil
+	}
+	if !validEventPropertyKey(key) {
+		return 0, fmt.Errorf("unsupported timestamp_property %q", key)
+	}
+	raw, ok := values[key]
+	if !ok || raw == nil || raw == "" {
+		return 0, fmt.Errorf("timestamp_property %q missing", key)
+	}
+	loc := time.UTC
+	if policy.Timezone != "" && policy.Timezone != "UTC" {
+		loaded, err := time.LoadLocation(policy.Timezone)
+		if err != nil {
+			return 0, fmt.Errorf("timezone %q: %w", policy.Timezone, err)
+		}
+		loc = loaded
+	}
+	if n, ok := numericValue(raw); ok {
+		if n <= 0 || n > math.MaxInt64 {
+			return 0, fmt.Errorf("timestamp_property %q must be a positive unix millisecond value", key)
+		}
+		return int64(n), nil
+	}
+	s, ok := raw.(string)
+	if !ok {
+		return 0, fmt.Errorf("timestamp_property %q must be a date, RFC3339 timestamp, or unix milliseconds", key)
+	}
+	s = strings.TrimSpace(s)
+	for _, layout := range []string{time.RFC3339Nano, "2006-01-02T15:04:05", "2006-01-02"} {
+		var parsed time.Time
+		var err error
+		if layout == time.RFC3339Nano {
+			parsed, err = time.Parse(layout, s)
+		} else {
+			parsed, err = time.ParseInLocation(layout, s, loc)
+		}
+		if err == nil {
+			return parsed.UnixMilli(), nil
+		}
+	}
+	return 0, fmt.Errorf("timestamp_property %q has invalid value %q", key, s)
 }
 
 func propsObject(raw string) map[string]any {

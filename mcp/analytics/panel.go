@@ -45,6 +45,16 @@ func filterFromQuery(r *http.Request) Filter {
 	return f
 }
 
+func scopedFilterFromRequest(r *http.Request) (Filter, error) {
+	projectID, err := requestProjectID(r)
+	if err != nil {
+		return Filter{}, err
+	}
+	f := filterFromQuery(r)
+	f.ProjectID = projectID
+	return f, nil
+}
+
 func parseInt64(s string) int64 {
 	n, _ := strconv.ParseInt(s, 10, 64)
 	return n
@@ -68,7 +78,11 @@ func (a *App) handleSummary(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	db := globalCtx.AppDB()
-	f := filterFromQuery(r)
+	f, err := scopedFilterFromRequest(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusForbidden)
+		return
+	}
 	ov, err := overview(db, f)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
@@ -89,7 +103,12 @@ func (a *App) handleSeries(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "GET only", http.StatusMethodNotAllowed)
 		return
 	}
-	series, err := dailySeries(globalCtx.AppDB(), filterFromQuery(r))
+	f, err := scopedFilterFromRequest(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusForbidden)
+		return
+	}
+	series, err := dailySeries(globalCtx.AppDB(), f)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -107,7 +126,12 @@ func (a *App) handleTop(w http.ResponseWriter, r *http.Request) {
 	if by == "" {
 		by = "props.platform"
 	}
-	rows, err := topByPropsKey(globalCtx.AppDB(), filterFromQuery(r), by, queryLimit(r, 10, 200))
+	f, err := scopedFilterFromRequest(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusForbidden)
+		return
+	}
+	rows, err := topByPropsKey(globalCtx.AppDB(), f, by, queryLimit(r, 10, 200))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -123,7 +147,12 @@ func (a *App) handleEvents(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "GET only", http.StatusMethodNotAllowed)
 		return
 	}
-	rows, err := queryRows(globalCtx.AppDB(), filterFromQuery(r), queryLimit(r, 50, 500))
+	f, err := scopedFilterFromRequest(r)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusForbidden)
+		return
+	}
+	rows, err := queryRows(globalCtx.AppDB(), f, queryLimit(r, 50, 500))
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -139,7 +168,11 @@ func (a *App) handleDimensions(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "GET only", http.StatusMethodNotAllowed)
 		return
 	}
-	apps, topics, err := distinctDimensions(globalCtx.AppDB(), r.URL.Query().Get("project_id"))
+	projectID, ok := requireRequestProject(w, r)
+	if !ok {
+		return
+	}
+	apps, topics, err := distinctDimensions(globalCtx.AppDB(), projectID)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return

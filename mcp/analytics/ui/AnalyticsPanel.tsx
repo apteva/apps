@@ -18,6 +18,7 @@
 // top,events,dimensions}.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { batchResultsByID, formatMetric, isCurrentRequest, partitionDashboardWidgets, resolvedWindow, scopedAppURL } from "./dashboard-ui";
 
 // Inlined SDK app-event subscription. Each app ships its own copy
 // because panels are bundled standalone and apps are independently
@@ -186,6 +187,7 @@ interface EventIngestPolicy {
   target_topic?: string;
   bucket?: "none" | "hour" | "day" | "week" | "month";
   timezone?: string;
+  timestamp_property?: string;
   operation?: "replace" | "increment" | "sum" | "min" | "max";
   value?: unknown;
   value_key?: string;
@@ -329,6 +331,45 @@ function BarSeries({ data }: { data: SeriesPoint[] }) {
   );
 }
 
+function TrendSeries({ data, config }: { data: SeriesPoint[]; config: Record<string, unknown> }) {
+  if (!data.length) return <Empty label="No observations in this window." />;
+  const W = 600;
+  const H = 132;
+  const padX = 14;
+  const padY = 12;
+  const values = data.map((d) => d.value ?? d.count);
+  const max = Math.max(...values, 1);
+  const min = Math.min(...values, 0);
+  const span = Math.max(max - min, 1);
+  const coords = data.map((d, i) => {
+    const x = data.length === 1 ? W / 2 : padX + (i / (data.length - 1)) * (W - padX * 2);
+    const y = H - padY - (((d.value ?? d.count) - min) / span) * (H - padY * 2);
+    return { x, y };
+  });
+  const points = coords.map(({ x, y }) => `${x},${y}`).join(" ");
+  return (
+    <div className="flex flex-col gap-1" role="img" aria-label={`Trend from ${data[0].day} to ${data[data.length - 1].day}`}>
+      <div className="flex items-center justify-between text-text-dim text-xs tabular-nums">
+        <span>{formatMetric(max, config)}</span>
+        <span>{formatMetric(values[values.length - 1], config)}</span>
+      </div>
+      <svg viewBox={`0 0 ${W} ${H}`} className="w-full text-accent" style={{ height: "132px" }} preserveAspectRatio="none">
+        <line x1={padX} y1={H - padY} x2={W - padX} y2={H - padY} stroke="currentColor" opacity="0.2" />
+        <polyline points={points} fill="none" stroke="currentColor" strokeWidth="3" vectorEffect="non-scaling-stroke" />
+        {data.map((d, i) => {
+          const { x, y } = coords[i];
+          const value = d.value ?? d.count;
+          return <circle key={d.day} cx={x} cy={y} r="4" fill="currentColor"><title>{`${d.day}: ${formatMetric(value, config)}`}</title></circle>;
+        })}
+      </svg>
+      <div className="flex items-center justify-between text-text-dim text-xs">
+        <span>{data[0].day}</span>
+        <span>{data[data.length - 1].day}</span>
+      </div>
+    </div>
+  );
+}
+
 function TopBars({ rows }: { rows: TopRow[] }) {
   if (!rows.length) return <Empty label="No values for this key in this window." />;
   const max = Math.max(...rows.map((r) => r.count), 1);
@@ -448,7 +489,7 @@ function TrackingTab({ projectId }: { projectId: string }) {
     setBusy(true);
     setErr("");
     try {
-      const r = await fetch(`${API}/keys`, {
+	  const r = await fetch(scopedAppURL(`${API}/keys`, projectId), {
         method: "POST",
         credentials: "same-origin",
         headers: { "Content-Type": "application/json" },
@@ -470,7 +511,7 @@ function TrackingTab({ projectId }: { projectId: string }) {
   const revoke = async (id: number) => {
     if (!confirm("Revoke this key? Sites using it stop tracking immediately.")) return;
     try {
-      await fetch(`${API}/keys/revoke`, {
+	  await fetch(scopedAppURL(`${API}/keys/revoke`, projectId), {
         method: "POST",
         credentials: "same-origin",
         headers: { "Content-Type": "application/json" },
@@ -529,7 +570,7 @@ function TrackingTab({ projectId }: { projectId: string }) {
 
       <section className="border border-border rounded p-4 flex flex-col gap-3">
         <div className="text-text-dim text-xs uppercase">Write keys</div>
-        <div className="flex items-center gap-2">
+			<div className="flex items-center gap-2 flex-wrap">
           <input
             type="text"
             value={site}
@@ -839,15 +880,17 @@ function widgetPreset(type: DashboardWidget["type"], position: number): Partial<
   }
 }
 
-function WidgetView({ widget, data }: { widget: DashboardWidget; data: any }) {
+function WidgetView({ widget, data, filters }: { widget: DashboardWidget; data: any; filters: Record<string, string> }) {
   const body = !data ? (
     <Empty label="Loading widget…" />
+  ) : data.error ? (
+    <div className="border border-error text-error rounded p-3 text-sm" role="alert">{String(data.error)}</div>
   ) : widget.type === "stat" ? (
     <div className="text-text font-semibold tabular-nums" style={{ fontSize: "34px", lineHeight: 1 }}>
-      {fmt(data.value ?? 0)}
+      {formatMetric(data.value ?? 0, widget.config)}
     </div>
   ) : widget.type === "timeseries" ? (
-    <BarSeries data={(data.series ?? []).map((p: any) => ({ day: p.bucket, count: p.count, value: p.value }))} />
+    <TrendSeries config={widget.config} data={(data.series ?? []).map((p: any) => ({ day: p.bucket, count: p.count, value: p.value }))} />
   ) : widget.type === "feed" ? (
     <EventFeed rows={data.events ?? []} />
   ) : (
@@ -857,7 +900,7 @@ function WidgetView({ widget, data }: { widget: DashboardWidget; data: any }) {
     <section className="border border-border rounded p-4 flex flex-col gap-3">
       <div className="flex items-center gap-2">
         <div className="text-text-dim text-xs uppercase truncate">{widget.title}</div>
-        <span className="ml-auto text-text-dim text-xs">{String(widget.config.window || "24h")}</span>
+        <span className="ml-auto text-text-dim text-xs">{resolvedWindow(widget.config, filters)}</span>
       </div>
       {body}
     </section>
@@ -900,10 +943,17 @@ function DashboardsTab({ projectId }: { projectId: string }) {
   const [filterOptions, setFilterOptions] = useState<Record<string, Array<{ value: string; label: string; count?: number }>>>({});
   const [status, setStatus] = useState("");
   const reloadTimer = useRef<number | null>(null);
+  const dashboardRequestRef = useRef(0);
+  const widgetRequestRef = useRef(0);
+  const filterRequestRef = useRef(0);
+  const scopedURL = useCallback(
+	(path: string) => scopedAppURL(path, projectId),
+    [projectId],
+  );
 
   const loadList = useCallback(async () => {
     try {
-      const r = await fetch(`${API}/dashboards?project_id=${encodeURIComponent(projectId)}`, {
+      const r = await fetch(scopedURL(`${API}/dashboards`), {
         credentials: "same-origin",
       });
       if (!r.ok) {
@@ -916,28 +966,33 @@ function DashboardsTab({ projectId }: { projectId: string }) {
     } catch (e) {
       setStatus((e as Error).message);
     }
-  }, [projectId, selectedId]);
+  }, [scopedURL, selectedId]);
 
   const loadDashboard = useCallback(async (id: number) => {
+	const sequence = ++dashboardRequestRef.current;
     if (!id) {
       setSelected(null);
+	  setWidgetData({});
       return;
     }
     try {
-      const r = await fetch(`${API}/dashboards/${id}`, { credentials: "same-origin" });
+      const r = await fetch(scopedURL(`${API}/dashboards/${id}`), { credentials: "same-origin" });
       if (!r.ok) {
-        setStatus(`dashboard ${r.status}`);
+		if (isCurrentRequest(sequence, dashboardRequestRef.current)) setStatus(`dashboard ${r.status}`);
         return;
       }
       const d = await r.json();
+	  if (!isCurrentRequest(sequence, dashboardRequestRef.current)) return;
       setSelected(d);
+	  setWidgetData({});
       setFilterValues(initialFilterValues(filterList(d)));
     } catch (e) {
-      setStatus((e as Error).message);
+	  if (isCurrentRequest(sequence, dashboardRequestRef.current)) setStatus((e as Error).message);
     }
-  }, []);
+	}, [scopedURL]);
 
   const loadFilterOptions = useCallback(async (d: Dashboard | null) => {
+	const sequence = ++filterRequestRef.current;
     const filters = filterList(d);
     if (!filters.length) {
       setFilterOptions({});
@@ -947,40 +1002,31 @@ function DashboardsTab({ projectId }: { projectId: string }) {
       const staticOptions = staticFilterOptions(filter);
       if (staticOptions.length) return [filter.key, staticOptions] as const;
       if (!filter.source) return [filter.key, []] as const;
-      const r = await fetch(`${API}/dashboard-filter-options`, {
-        method: "POST",
-        credentials: "same-origin",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ project_id: projectId, filter }),
-      });
+	  const filterURL = `${API}/dashboard-filter-options?filter=${encodeURIComponent(JSON.stringify(filter))}`;
+	  const r = await fetch(scopedURL(filterURL), { credentials: "same-origin" });
       if (!r.ok) return [filter.key, []] as const;
       const rows = (await r.json()).options ?? [];
       return [filter.key, rows] as const;
     }));
-    setFilterOptions(Object.fromEntries(pairs));
-  }, [projectId]);
+	if (isCurrentRequest(sequence, filterRequestRef.current)) setFilterOptions(Object.fromEntries(pairs));
+	}, [projectId, scopedURL]);
 
   const refreshWidgets = useCallback(async (d: Dashboard | null, filters: Record<string, string>) => {
     if (!d?.widgets?.length) return;
+	const sequence = ++widgetRequestRef.current;
     setStatus("refreshing…");
     try {
-      const pairs = await Promise.all(
-        d.widgets.map(async (widget) => {
-          const r = await fetch(`${API}/query-widget`, {
-            method: "POST",
-            credentials: "same-origin",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ project_id: projectId, widget, filters }),
-          });
-          return [widget.id, r.ok ? await r.json() : { error: await r.text() }] as const;
-        }),
-      );
-      setWidgetData(Object.fromEntries(pairs));
+	  const queryURL = `${API}/query-dashboard?dashboard_id=${d.id}&filters=${encodeURIComponent(JSON.stringify(filters))}`;
+	  const r = await fetch(scopedURL(queryURL), { credentials: "same-origin" });
+	  if (!r.ok) throw new Error(await r.text());
+	  const payload = await r.json();
+	  if (!isCurrentRequest(sequence, widgetRequestRef.current)) return;
+	  setWidgetData(batchResultsByID(Array.isArray(payload.widgets) ? payload.widgets : []));
       setStatus("");
     } catch (e) {
-      setStatus((e as Error).message);
+	  if (isCurrentRequest(sequence, widgetRequestRef.current)) setStatus((e as Error).message);
     }
-  }, [projectId]);
+	}, [projectId, scopedURL]);
 
   useEffect(() => {
     loadList();
@@ -1005,7 +1051,7 @@ function DashboardsTab({ projectId }: { projectId: string }) {
 
   const createTemplate = async (template: "website_traffic" | "patreon_overview") => {
     setStatus("creating…");
-    const r = await fetch(`${API}/dashboards`, {
+	const r = await fetch(scopedURL(`${API}/dashboards`), {
       method: "POST",
       credentials: "same-origin",
       headers: { "Content-Type": "application/json" },
@@ -1026,7 +1072,7 @@ function DashboardsTab({ projectId }: { projectId: string }) {
   const addWidget = async (type: DashboardWidget["type"]) => {
     if (!selected) return;
     const preset = widgetPreset(type, selected.widgets?.length ?? 0);
-    const r = await fetch(`${API}/dashboards/${selected.id}/widgets`, {
+	const r = await fetch(scopedURL(`${API}/dashboards/${selected.id}/widgets`), {
       method: "POST",
       credentials: "same-origin",
       headers: { "Content-Type": "application/json" },
@@ -1036,9 +1082,21 @@ function DashboardsTab({ projectId }: { projectId: string }) {
     else setStatus(await r.text());
   };
 
-  return (
-    <div className="flex-1 min-h-0 flex">
-      <aside className="border-r border-border p-3 flex flex-col gap-2" style={{ width: "230px" }}>
+	const { stats: statWidgets, charts: chartWidgets } = partitionDashboardWidgets(selected?.widgets ?? []);
+
+	return (
+	  <div className="analytics-dashboard-shell flex-1 min-h-0 flex">
+		<style>{`
+		  .analytics-dashboard-sidebar { width: 230px; }
+		  .analytics-stat-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+		  .analytics-chart-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+		  @media (max-width: 760px) {
+			.analytics-dashboard-shell { flex-direction: column; }
+			.analytics-dashboard-sidebar { width: 100%; max-height: 180px; border-right: 0; border-bottom-width: 1px; border-bottom-style: solid; }
+			.analytics-stat-grid, .analytics-chart-grid { grid-template-columns: minmax(0, 1fr); }
+		  }
+		`}</style>
+		<aside className="analytics-dashboard-sidebar border-r border-border p-3 flex flex-col gap-2">
         <button
           onClick={() => createTemplate("website_traffic")}
           className="px-3 py-1.5 text-sm bg-accent text-bg rounded font-bold"
@@ -1069,7 +1127,7 @@ function DashboardsTab({ projectId }: { projectId: string }) {
           ))}
         </div>
       </aside>
-      <main className="flex-1 overflow-auto p-4 flex flex-col gap-4">
+	  <main className="flex-1 min-w-0 overflow-auto p-4 flex flex-col gap-4">
         {!selected ? (
           <section className="border border-border rounded p-6">
             <div className="text-text font-medium">Create a live analytics dashboard</div>
@@ -1080,9 +1138,9 @@ function DashboardsTab({ projectId }: { projectId: string }) {
           </section>
         ) : (
           <>
-            <div className="flex items-center gap-2">
-              <div>
-                <div className="text-text font-medium">{selected.name}</div>
+			<div className="flex items-center gap-2 flex-wrap">
+			  <div>
+				<div className="text-text font-medium">{selected.name}</div>
                 <div className="text-text-dim text-xs">
                   {selected.widgets?.length ?? 0} widgets · live refresh
                 </div>
@@ -1135,11 +1193,16 @@ function DashboardsTab({ projectId }: { projectId: string }) {
               </div>
             )}
             {status && <div className="text-text-dim text-xs">{status}</div>}
-            <div className="grid gap-4" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(280px, 1fr))" }}>
-              {(selected.widgets ?? []).map((widget) => (
-                <WidgetView key={widget.id} widget={widget} data={widgetData[widget.id]} />
-              ))}
-            </div>
+			{statWidgets.length > 0 && <div className="analytics-stat-grid grid gap-4">
+			  {statWidgets.map((widget) => (
+				<WidgetView key={widget.id} widget={widget} data={widgetData[widget.id]} filters={filterValues} />
+			  ))}
+			</div>}
+			<div className="analytics-chart-grid grid gap-4">
+			  {chartWidgets.map((widget) => (
+				<WidgetView key={widget.id} widget={widget} data={widgetData[widget.id]} filters={filterValues} />
+			  ))}
+			</div>
           </>
         )}
       </main>
@@ -1158,9 +1221,10 @@ const DEFAULT_SPEC: EventSpec = {
   status: "active",
   validation_mode: "warn",
   ingest_mode: "upsert",
-  upsert_policy: {
-    bucket: "day",
-    timezone: "UTC",
+	upsert_policy: {
+	  bucket: "day",
+	  timezone: "UTC",
+	  timestamp_property: "props.date",
     operation: "replace",
     value: "props.views",
     output_property: "views",
@@ -1171,7 +1235,6 @@ const DEFAULT_SPEC: EventSpec = {
     { key: "props.post_id", type: "string", required: true, pii_classification: "identifier" },
     { key: "props.date", type: "string", required: true, example_value: "2026-06-16" },
     { key: "props.views", type: "number", required: true, example_value: "150" },
-    { key: "upsert_key", type: "string", required: true },
   ],
 };
 
@@ -1215,9 +1278,10 @@ const PATREON_TEMPLATE: EventSpec[] = [
     status: "active",
     validation_mode: "warn",
     ingest_mode: "upsert",
-    upsert_policy: {
-      bucket: "day",
-      timezone: "UTC",
+	upsert_policy: {
+	  bucket: "day",
+	  timezone: "UTC",
+	  timestamp_property: "props.date",
       operation: "replace",
       value: "props.members",
       output_property: "members",
@@ -1227,7 +1291,6 @@ const PATREON_TEMPLATE: EventSpec[] = [
       { key: "props.creator_id", type: "string", required: true, pii_classification: "identifier" },
       { key: "props.date", type: "string", required: true, example_value: "2026-06-16" },
       { key: "props.members", type: "number", required: true, example_value: "842" },
-      { key: "upsert_key", type: "string", required: true },
     ],
   },
 ];
@@ -1322,7 +1385,8 @@ function CatalogTab({ projectId }: { projectId: string }) {
       return;
     }
     const body = { ...selected, project_id: projectId, properties, upsert_policy: upsertPolicy, rollup_policy: rollupPolicy };
-    const url = selected.id ? `${API}/event-specs/${selected.id}` : `${API}/event-specs`;
+	const baseURL = selected.id ? `${API}/event-specs/${selected.id}` : `${API}/event-specs`;
+	const url = scopedAppURL(baseURL, projectId);
     const r = await fetch(url, {
       method: selected.id ? "PUT" : "POST",
       credentials: "same-origin",
@@ -1345,7 +1409,7 @@ function CatalogTab({ projectId }: { projectId: string }) {
   const installPatreon = async () => {
     setStatus("creating…");
     for (const spec of PATREON_TEMPLATE) {
-      const r = await fetch(`${API}/event-specs`, {
+	  const r = await fetch(scopedAppURL(`${API}/event-specs`, projectId), {
         method: "POST",
         credentials: "same-origin",
         headers: { "Content-Type": "application/json" },
@@ -1370,7 +1434,7 @@ function CatalogTab({ projectId }: { projectId: string }) {
       setValidation("sample json: " + (e as Error).message);
       return;
     }
-    const r = await fetch(`${API}/event-specs/validate`, {
+	const r = await fetch(scopedAppURL(`${API}/event-specs/validate`, projectId), {
       method: "POST",
       credentials: "same-origin",
       headers: { "Content-Type": "application/json" },
@@ -1656,14 +1720,14 @@ export default function AnalyticsPanel({ projectId }: NativePanelProps) {
 
   return (
     <div className="h-full flex flex-col">
-      <header className="flex items-center gap-3 border-b border-border px-4 py-2">
+	  <header className="flex items-center gap-3 border-b border-border px-4 py-2 overflow-x-auto whitespace-nowrap">
         <div className="flex items-center gap-2 text-text font-medium">
           <span className="text-accent">
             <ChartIcon />
           </span>
           Analytics
         </div>
-        <div className="flex items-center gap-1 ml-2">
+		<div className="flex items-center gap-1 ml-2 flex-shrink-0">
           {(["overview", "dashboards", "catalog", "tracking", "capture"] as const).map((v) => (
             <button
               key={v}
@@ -1777,7 +1841,7 @@ export default function AnalyticsPanel({ projectId }: NativePanelProps) {
       </div>
 
       <div className="flex-1 overflow-auto p-4 flex flex-col gap-4">
-        <div className="flex gap-3">
+		<div className="grid gap-3" style={{ gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))" }}>
           <Stat label="Events" value={summary?.total ?? 0} />
           <Stat label="Topics" value={summary?.topics ?? 0} />
           <Stat label="Apps" value={summary?.apps ?? 0} />

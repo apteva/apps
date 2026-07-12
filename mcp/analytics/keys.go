@@ -146,7 +146,11 @@ func (a *App) handleKeysList(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
-	keys, err := listWriteKeys(globalCtx.AppDB(), r.URL.Query().Get("project_id"))
+	projectID, ok := requireRequestProject(w, r)
+	if !ok {
+		return
+	}
+	keys, err := listWriteKeys(globalCtx.AppDB(), projectID)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -158,6 +162,10 @@ func (a *App) handleKeysList(w http.ResponseWriter, r *http.Request) {
 func (a *App) handleKeysCreate(w http.ResponseWriter, r *http.Request) {
 	if !requireUser(r) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
+		return
+	}
+	projectID, ok := requireRequestProject(w, r)
+	if !ok {
 		return
 	}
 	var body struct {
@@ -174,10 +182,11 @@ func (a *App) handleKeysCreate(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "site required", http.StatusBadRequest)
 		return
 	}
-	if body.ProjectID == "" {
-		body.ProjectID = globalCtx.CurrentProject()
+	if _, err := assignRequestProject(body.ProjectID, projectID); err != nil {
+		http.Error(w, err.Error(), http.StatusForbidden)
+		return
 	}
-	wk, err := createWriteKey(globalCtx.AppDB(), body.Site, body.ProjectID, body.AllowedOrigins)
+	wk, err := createWriteKey(globalCtx.AppDB(), body.Site, projectID, body.AllowedOrigins)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
@@ -191,6 +200,10 @@ func (a *App) handleKeysRevoke(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unauthorized", http.StatusUnauthorized)
 		return
 	}
+	projectID, ok := requireRequestProject(w, r)
+	if !ok {
+		return
+	}
 	var body struct {
 		ID        int64  `json:"id"`
 		ProjectID string `json:"project_id"`
@@ -199,10 +212,11 @@ func (a *App) handleKeysRevoke(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid json", http.StatusBadRequest)
 		return
 	}
-	if body.ProjectID == "" {
-		body.ProjectID = globalCtx.CurrentProject()
+	if _, err := assignRequestProject(body.ProjectID, projectID); err != nil {
+		http.Error(w, err.Error(), http.StatusForbidden)
+		return
 	}
-	if err := revokeWriteKey(globalCtx.AppDB(), body.ID, body.ProjectID); err != nil {
+	if err := revokeWriteKey(globalCtx.AppDB(), body.ID, projectID); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
