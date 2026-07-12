@@ -28,6 +28,7 @@ import (
 	"github.com/apteva/apps/mcp/computer/internal/browser/checkedinput"
 	"github.com/apteva/apps/mcp/computer/internal/browser/domextract"
 	"github.com/apteva/apps/mcp/computer/internal/browser/fileupload"
+	"github.com/apteva/apps/mcp/computer/internal/browser/navigation"
 	"github.com/apteva/apps/mcp/computer/internal/browser/selectinput"
 	"github.com/apteva/apps/mcp/computer/internal/browser/som"
 	"github.com/apteva/apps/mcp/computer/internal/browser/temporalinput"
@@ -689,9 +690,16 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 
 	case "navigate":
 		fmt.Fprintf(os.Stderr, "[BROWSER] navigate to %s\n", action.URL)
-		if err := chromedp.Run(c.ctx, chromedp.Navigate(action.URL)); err != nil {
-			fmt.Fprintf(os.Stderr, "[BROWSER] navigate ERROR: %v\n", err)
-			return nil, fmt.Errorf("navigate: %w", err)
+		navCtx, navCancel := context.WithTimeout(c.ctx, 30*time.Second)
+		err := chromedp.Run(navCtx, chromedp.Navigate(action.URL))
+		navCancel()
+		if err != nil {
+			if current, recovered := navigation.RecoverTimeout(c.ctx, err); recovered {
+				fmt.Fprintf(os.Stderr, "[BROWSER] navigate load timeout recovered at %s\n", current)
+			} else {
+				fmt.Fprintf(os.Stderr, "[BROWSER] navigate ERROR: %v\n", err)
+				return nil, fmt.Errorf("navigate: %w", err)
+			}
 		}
 		time.Sleep(500 * time.Millisecond)
 		var url, title string
@@ -1098,6 +1106,11 @@ func (c *Computer) ScreenshotWithOptions(options computer.ScreenshotOptions) ([]
 	if c.ctx == nil {
 		return nil, fmt.Errorf("screenshot: browser not open — call browser_session(action=open, ...) first")
 	}
+	if options.Annotate {
+		c.labelMu.Lock()
+		c.lastLabels = nil
+		c.labelMu.Unlock()
+	}
 	// VIEWPORT-ONLY screenshot. Previously we used chromedp.FullScreenshot
 	// which captures the entire scrollable page — on a long page this
 	// produced e.g. a 1600×1800 image, and scaleToDisplay then vertically
@@ -1439,16 +1452,19 @@ func (c *Computer) enumerate() ([]som.Element, error) {
 	if err != nil {
 		return nil, err
 	}
+	if !som.ShouldAugmentAX(jsEls) {
+		return jsEls, nil
+	}
 
 	// Complement: AX tree walk via CDP. Crosses CLOSED shadow DOM
 	// boundaries (Transcend cookie banners, OneTrust, browser
 	// internal UIs) that injected JS fundamentally cannot reach.
 	// Errors swallowed inside enumerateViaAX — never a failure path.
-	axEls := c.enumerateViaAX()
+	axEls := som.EnumerateViaAX(c.ctx, c.display.Width, c.display.Height)
 	if len(axEls) == 0 {
 		return jsEls, nil
 	}
-	return mergeAXIntoJS(jsEls, axEls), nil
+	return som.MergeAX(jsEls, axEls), nil
 }
 
 // resolveLabel looks up the bbox for a previously-issued label. Called

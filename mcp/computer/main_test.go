@@ -112,11 +112,12 @@ func TestRegistry(t *testing.T) {
 
 	// reapIdle closes only stale entries
 	r.put("stale", &session{comp: &fakeComp{}, backend: "local", openedAt: now, lastUsed: now.Add(-2 * time.Hour)})
+	r.put("provider-expired", &session{comp: &fakeComp{}, backend: "browserbase", timeout: 60, openedAt: now.Add(-2 * time.Minute), lastUsed: now})
 	r.put("fresh", &session{comp: &fakeComp{}, backend: "local", openedAt: now, lastUsed: time.Now()})
 	reaped := r.reapIdle(30 * time.Minute)
 	sort.Strings(reaped)
-	if len(reaped) != 1 || reaped[0] != "stale" {
-		t.Errorf("reapIdle: want [stale], got %v", reaped)
+	if len(reaped) != 2 || reaped[0] != "provider-expired" || reaped[1] != "stale" {
+		t.Errorf("reapIdle: want [provider-expired stale], got %v", reaped)
 	}
 	if _, ok := r.get("fresh"); !ok {
 		t.Errorf("fresh session was reaped")
@@ -234,7 +235,7 @@ func TestBrowserSessionComputerUseClose(t *testing.T) {
 	clickOut, err := app.toolComputerUse(ctx, map[string]any{
 		"session_id": sessionID,
 		"action":     "click",
-		"label":      "7",
+		"label":      "3",
 	})
 	if err != nil {
 		t.Fatalf("computer_use click with string label: %v", err)
@@ -242,8 +243,26 @@ func TestBrowserSessionComputerUseClose(t *testing.T) {
 	if clickOut.(map[string]any)["current_url"] != "https://example.com" {
 		t.Errorf("click current_url: want example.com, got %v", clickOut.(map[string]any)["current_url"])
 	}
-	if fake.lastAction.Type != "click" || fake.lastAction.Label != 7 {
-		t.Errorf("click action: want label 7, got %+v", fake.lastAction)
+	if fake.lastAction.Type != "click" || fake.lastAction.Label != 3 {
+		t.Errorf("click action: want label 3, got %+v", fake.lastAction)
+	}
+	if _, err := app.toolComputerUse(ctx, map[string]any{
+		"session_id": sessionID,
+		"action":     "click",
+		"label":      1,
+		"coordinate": "113,746",
+	}); err != nil {
+		t.Fatalf("computer_use coordinate with populated label: %v", err)
+	}
+	if fake.lastAction.Label != 0 || fake.lastAction.X != 113 || fake.lastAction.Y != 746 {
+		t.Errorf("explicit coordinate should override populated label: got %+v", fake.lastAction)
+	}
+	if _, err := app.toolComputerUse(ctx, map[string]any{
+		"session_id": sessionID,
+		"action":     "click",
+		"label":      999,
+	}); err == nil || !strings.Contains(err.Error(), "not present") {
+		t.Fatalf("stale/unknown label should fail before dispatch: %v", err)
 	}
 
 	// close
@@ -514,6 +533,7 @@ func TestComputerUseContextCanceledEvictsSession(t *testing.T) {
 	fake := &fakeComp{
 		display:    backends.DisplaySize{Width: 1024, Height: 768},
 		executeErr: context.Canceled,
+		somTargets: []backends.SetOfMarkTarget{{Label: 5}},
 	}
 	app := &App{reg: &registry{m: map[string]*session{}}}
 	rec := tk.NewEmitRecorder()
@@ -553,6 +573,7 @@ func TestComputerUseDeadlineExceededIsActionTimeout(t *testing.T) {
 	fake := &fakeComp{
 		display:    backends.DisplaySize{Width: 1024, Height: 768},
 		executeErr: context.DeadlineExceeded,
+		somTargets: []backends.SetOfMarkTarget{{Label: 5}},
 	}
 	app := &App{reg: &registry{m: map[string]*session{}}}
 	ctx := tk.NewAppCtx(t, "apteva.yaml")
@@ -1969,6 +1990,27 @@ func TestAppBusEventForReapedSession(t *testing.T) {
 	}
 	if idle, ok := payload["idle_seconds"].(int); !ok || idle < 3600 {
 		t.Fatalf("session.reaped idle_seconds = %#v", payload["idle_seconds"])
+	}
+}
+
+func TestAppBusEventForProviderExpiredSession(t *testing.T) {
+	app := &App{reg: &registry{m: map[string]*session{}}}
+	rec := tk.NewEmitRecorder()
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithEmitter(rec))
+	now := time.Now()
+	fake := &fakeComp{display: backends.DisplaySize{Width: 800, Height: 600}, url: "https://expired.example"}
+	app.reg.put("br_expired", &session{
+		comp: fake, backend: "browserbase", timeout: 60,
+		openedAt: now.Add(-2 * time.Minute), lastUsed: now,
+	})
+
+	rows := app.reapIdleSessions(ctx, 30*time.Minute)
+	if len(rows) != 1 || !rows[0].ProviderExpired {
+		t.Fatalf("provider-expired rows = %+v", rows)
+	}
+	payload := lastEventData(t, rec, "session.reaped")
+	if payload["close_reason"] != "provider_timeout" || payload["reap_reason"] != "provider_timeout" {
+		t.Fatalf("provider timeout payload = %#v", payload)
 	}
 }
 

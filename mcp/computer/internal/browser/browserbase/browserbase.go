@@ -24,6 +24,7 @@ import (
 	"github.com/apteva/apps/mcp/computer/internal/browser/domextract"
 	"github.com/apteva/apps/mcp/computer/internal/browser/fileupload"
 	"github.com/apteva/apps/mcp/computer/internal/browser/keyinput"
+	"github.com/apteva/apps/mcp/computer/internal/browser/navigation"
 	"github.com/apteva/apps/mcp/computer/internal/browser/selectinput"
 	"github.com/apteva/apps/mcp/computer/internal/browser/som"
 	"github.com/apteva/apps/mcp/computer/internal/browser/temporalinput"
@@ -316,6 +317,9 @@ func (c *Computer) requestRelease() error {
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("X-BB-API-Key", c.apiKey)
+	releaseCtx, releaseCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer releaseCancel()
+	req = req.WithContext(releaseCtx)
 
 	resp, err := c.http.Do(req)
 	if err != nil {
@@ -340,9 +344,14 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 
 	case "navigate":
 		ctx, cancel := c.actionContext("navigate")
-		defer cancel()
-		if err := chromedp.Run(ctx, chromedp.Navigate(action.URL)); err != nil {
-			return nil, fmt.Errorf("navigate: %w", err)
+		err := chromedp.Run(ctx, chromedp.Navigate(action.URL))
+		cancel()
+		if err != nil {
+			if current, recovered := navigation.RecoverTimeout(c.ctx, err); recovered {
+				fmt.Fprintf(os.Stderr, "[BROWSERBASE] navigate load timeout recovered at %s\n", current)
+			} else {
+				return nil, fmt.Errorf("navigate: %w", err)
+			}
 		}
 		time.Sleep(500 * time.Millisecond)
 		return c.Screenshot()
@@ -868,6 +877,11 @@ func (c *Computer) ScreenshotWithOptions(options computer.ScreenshotOptions) ([]
 	if c.ctx == nil {
 		return nil, fmt.Errorf("browserbase: no active session — call browser_session open first")
 	}
+	if options.Annotate {
+		c.labelMu.Lock()
+		c.lastLabels = nil
+		c.labelMu.Unlock()
+	}
 	c.setLastScreenshotRecovery(nil)
 	// Viewport-only screenshot. See local.go for the full rationale:
 	// FullScreenshot returns the entire scrollable page, which then
@@ -897,6 +911,9 @@ func (c *Computer) ScreenshotWithOptions(options computer.ScreenshotOptions) ([]
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "[BROWSERBASE] som parse failed: %v\n", err)
 			return buf, nil
+		}
+		if som.ShouldAugmentAX(elements) {
+			elements = som.MergeAX(elements, som.EnumerateViaAX(c.ctx, c.display.Width, c.display.Height))
 		}
 		m := make(map[int]som.Element, len(elements))
 		for _, e := range elements {
@@ -1179,19 +1196,72 @@ func (c *Computer) Resume(sessionID string) error {
 // establishCDP wires up the chromedp remote-allocator + context for the
 // given Browserbase connectURL. Tears down on failure.
 func (c *Computer) establishCDP(connectURL string) error {
-	allocCtx, allocCancel := chromedp.NewRemoteAllocator(context.Background(), connectURL,
+	remoteCtx, remoteCancel := chromedp.NewRemoteAllocator(context.Background(), connectURL,
 		chromedp.NoModifyURL)
-	ctx, cancel := chromedp.NewContext(allocCtx)
-	if err := chromedp.Run(ctx); err != nil {
-		cancel()
-		allocCancel()
+	browserCtx, browserCancel := chromedp.NewContext(remoteCtx)
+	state := chromedp.FromContext(browserCtx)
+	browser, err := state.Allocator.Allocate(browserCtx)
+	if err != nil {
+		browserCancel()
+		remoteCancel()
 		return err
 	}
-	c.allocCancel = allocCancel
-	c.allocCtx = allocCtx
+	state.Browser = browser
+
+	infos, err := target.GetTargets().Do(cdp.WithExecutor(browserCtx, browser))
+	if err != nil {
+		browserCancel()
+		remoteCancel()
+		return fmt.Errorf("discover existing page: %w", err)
+	}
+	pageID := pickInitialPageTarget(infos)
+	if pageID == "" {
+		browserCancel()
+		remoteCancel()
+		return fmt.Errorf("browserbase: session has no page target")
+	}
+
+	ctx, cancel := chromedp.NewContext(browserCtx, chromedp.WithTargetID(pageID))
+	if err := chromedp.Run(ctx); err != nil {
+		cancel()
+		browserCancel()
+		remoteCancel()
+		return err
+	}
+	c.allocCancel = func() {
+		browserCancel()
+		remoteCancel()
+	}
+	c.allocCtx = browserCtx
 	c.ctx = ctx
 	c.cancel = cancel
 	return nil
+}
+
+func pickInitialPageTarget(infos []*target.Info) target.ID {
+	var first, firstNonInternal target.ID
+	for _, info := range infos {
+		if info == nil || info.Type != "page" || info.Subtype != "" {
+			continue
+		}
+		if first == "" {
+			first = info.TargetID
+		}
+		lowerURL := strings.ToLower(strings.TrimSpace(info.URL))
+		if strings.HasPrefix(lowerURL, "http://") || strings.HasPrefix(lowerURL, "https://") {
+			return info.TargetID
+		}
+		if firstNonInternal == "" && lowerURL != "" &&
+			!strings.HasPrefix(lowerURL, "about:") &&
+			!strings.HasPrefix(lowerURL, "chrome:") &&
+			!strings.HasPrefix(lowerURL, "devtools:") {
+			firstNonInternal = info.TargetID
+		}
+	}
+	if firstNonInternal != "" {
+		return firstNonInternal
+	}
+	return first
 }
 
 // releaseCDP cancels the chromedp context + allocator. Safe to call

@@ -2,10 +2,10 @@ schema: apteva-app/v1
 
 name: computer
 display_name: Computer
-version: 0.7.47
+version: 0.7.48
 description: |
-  Watch, steer, and replay hosted browser sessions. v0.7.47 fixes recording
-  playback, restores past sessions in the UI, and enlarges the browser view.
+  Watch, steer, and replay hosted browser sessions. v0.7.48 improves Set-of-Mark
+  coverage across consent dialogs, modals, shadow DOM, and cross-origin frames.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/computer
@@ -73,7 +73,8 @@ provides:
         label=N from the latest screenshot. label must be >= 1; do not
         pass 0. Prefer label over coordinate;
         use coordinate only for targets with no badge such as canvas or
-        custom rendered widgets. If the page asks to Browse, choose, attach,
+        custom rendered widgets. Do not pass both; when both are present,
+        coordinate wins. If the page asks to Browse, choose, attach,
         upload, or drop a file, use action=upload_file with selector or label
         plus source_url/base64/file_path; do not operate the native OS file
         picker. For any native select, dropdown, combobox, listbox, or
@@ -145,15 +146,6 @@ provides:
         Capture a clean PNG of the session viewport. Args: session_id,
         annotate? (default false; set true for Set-of-Mark labels),
         include_som? (default false; returns structured SoM targets only when true).
-    - name: browser_extract
-      description: |
-        Infrastructure-only rendered DOM extraction for advanced browser
-        integrations. General agents should usually prefer higher-level
-        browsing tools instead of calling this directly. Args: session_id,
-        formats? (text, markdown, html, metadata, structured_data, json, links,
-        images, regions), max_chars?, readability?, wait_ms?. Returns rendered
-        page text, markdown, metadata, structured data, links, images, DOM
-        regions with rendered coordinates, and browser/session metadata.
     - name: browser_recording
       description: |
         Retrieve provider-neutral playback metadata for an active or historical

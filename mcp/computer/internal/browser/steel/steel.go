@@ -18,6 +18,7 @@ import (
 	"github.com/apteva/apps/mcp/computer/internal/browser/cdptabs"
 	"github.com/apteva/apps/mcp/computer/internal/browser/domextract"
 	"github.com/apteva/apps/mcp/computer/internal/browser/keyinput"
+	"github.com/apteva/apps/mcp/computer/internal/browser/navigation"
 	"github.com/apteva/apps/mcp/computer/internal/browser/selectinput"
 	"github.com/apteva/apps/mcp/computer/internal/browser/som"
 	"github.com/apteva/apps/mcp/computer/internal/browser/textinput"
@@ -229,6 +230,9 @@ func (c *Computer) requestRelease() error {
 		return err
 	}
 	req.Header.Set("Steel-Api-Key", c.apiKey)
+	releaseCtx, releaseCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer releaseCancel()
+	req = req.WithContext(releaseCtx)
 
 	resp, err := c.http.Do(req)
 	if err != nil {
@@ -369,8 +373,15 @@ func (c *Computer) Execute(action computer.Action) ([]byte, error) {
 		return c.Screenshot()
 
 	case "navigate":
-		if err := chromedp.Run(c.ctx, chromedp.Navigate(action.URL)); err != nil {
-			return nil, fmt.Errorf("navigate: %w", err)
+		navCtx, navCancel := context.WithTimeout(c.ctx, 30*time.Second)
+		err := chromedp.Run(navCtx, chromedp.Navigate(action.URL))
+		navCancel()
+		if err != nil {
+			if current, recovered := navigation.RecoverTimeout(c.ctx, err); recovered {
+				fmt.Fprintf(os.Stderr, "[STEEL] navigate load timeout recovered at %s\n", current)
+			} else {
+				return nil, fmt.Errorf("navigate: %w", err)
+			}
 		}
 		time.Sleep(500 * time.Millisecond)
 		return c.Screenshot()
@@ -541,6 +552,11 @@ func (c *Computer) ScreenshotWithOptions(options computer.ScreenshotOptions) ([]
 	if c.ctx == nil {
 		return nil, fmt.Errorf("steel: no active session — call browser_session open first")
 	}
+	if options.Annotate {
+		c.labelMu.Lock()
+		c.lastLabels = nil
+		c.labelMu.Unlock()
+	}
 	var buf []byte
 	err := chromedp.Run(c.ctx,
 		chromedp.ActionFunc(func(ctx context.Context) error {
@@ -569,6 +585,9 @@ func (c *Computer) ScreenshotWithOptions(options computer.ScreenshotOptions) ([]
 		if err != nil {
 			fmt.Fprintf(os.Stderr, "[STEEL] som parse failed: %v\n", err)
 			return buf, nil
+		}
+		if som.ShouldAugmentAX(elements) {
+			elements = som.MergeAX(elements, som.EnumerateViaAX(c.ctx, c.display.Width, c.display.Height))
 		}
 		m := make(map[int]som.Element, len(elements))
 		for _, e := range elements {

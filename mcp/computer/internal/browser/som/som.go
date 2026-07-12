@@ -291,13 +291,11 @@ const EnumScript = `
   if (activeModal) {
     var mb = activeModal.rect;
     candidates = candidates.filter(function(c) {
-      // Keep candidates whose center is inside the modal box. Also
-      // keep the modal element's descendants explicitly (defensive
-      // against tight-fitting modals where the math is off-by-a-pixel).
-      var cx = c.x + c.w / 2, cy = c.y + c.h / 2;
-      var insideBox = cx >= mb.left && cx <= mb.right && cy >= mb.top && cy <= mb.bottom;
-      var insideTree = activeModal.el.contains(c.el);
-      return insideBox || insideTree;
+      // DOM containment is the reliable ownership signal. Geometry alone is
+      // unsafe: large dialogs often overlap page controls beneath them, and
+      // those obscured controls must not receive labels merely because their
+      // centers fall inside the dialog rectangle.
+      return activeModal.el.contains(c.el);
     });
   }
 

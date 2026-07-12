@@ -11,7 +11,31 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/chromedp/cdproto/target"
 )
+
+func TestPickInitialPageTargetReusesExistingContentPage(t *testing.T) {
+	infos := []*target.Info{
+		{TargetID: "worker", Type: "service_worker", URL: "https://example.test/sw.js"},
+		{TargetID: "blank", Type: "page", URL: "about:blank"},
+		{TargetID: "prerender", Type: "page", Subtype: "prerender", URL: "https://future.test"},
+		{TargetID: "content", Type: "page", URL: "https://example.test/app"},
+	}
+	if got := pickInitialPageTarget(infos); got != target.ID("content") {
+		t.Fatalf("pickInitialPageTarget = %q, want content", got)
+	}
+}
+
+func TestPickInitialPageTargetKeepsProviderBlankPage(t *testing.T) {
+	infos := []*target.Info{{TargetID: "provider-page", Type: "page", URL: "about:blank"}}
+	if got := pickInitialPageTarget(infos); got != target.ID("provider-page") {
+		t.Fatalf("pickInitialPageTarget = %q, want provider-page", got)
+	}
+	if got := pickInitialPageTarget(nil); got != "" {
+		t.Fatalf("pickInitialPageTarget(nil) = %q", got)
+	}
+}
 
 func TestActionTimeoutsAreBounded(t *testing.T) {
 	cases := map[string]time.Duration{

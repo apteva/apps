@@ -52,10 +52,10 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: computer
 display_name: Computer
-version: 0.7.47
+version: 0.7.48
 description: |
-  Watch, steer, and replay hosted browser sessions. v0.7.47 fixes recording
-  playback, restores past sessions in the UI, and enlarges the browser view.
+  Watch, steer, and replay hosted browser sessions. v0.7.48 improves Set-of-Mark
+  coverage across consent dialogs, modals, shadow DOM, and cross-origin frames.
 scopes: [project, global]
 requires:
   permissions:
@@ -82,7 +82,7 @@ provides:
     - name: browser_session
       description: "Open, resume, list, inspect, close, or switch tabs in app-owned browser sessions. Args: action, session_id?, tab_id?, backend?, backend_session_id?, url?, context_id?, context_name?, auto_create_context?, persist?, timeout?, proxy?, proxy_country?, viewport?. Usually omit viewport to use Computer's default desktop viewport, 1600x800. Pass viewport when a specific resolution is needed, for example mobile/tablet testing or a site-specific requirement. session_id is the app-owned live br_* handle for status/close/computer_use only. To continue later, open a new session with context_id or context_name. Use backend_session_id only for an explicit provider-level attach. For tab control, call browser_session(action=tabs) to list open tabs, then browser_session(action=switch_tab, tab_id=...) or browser_session(action=close_tab, tab_id=...). Do not use keyboard shortcuts such as Ctrl+Tab, Ctrl+PageDown, or Ctrl+1-9 to switch browser tabs. Browserbase honors timeout as max session lifetime. Prefer context_id from computer_context_list to reopen saved state; context_name works across backends when unique. For a reusable saved context, pass context_name with auto_create_context=true; omitted names are only a fallback and are auto-generated. Sessions consume local or cloud resources. When browser work is complete and the user did not explicitly ask to keep the browser open, close it with browser_session(action=close, session_id=...). Closing is especially important for Browserbase/Steel sessions and persisted contexts because it releases provider resources and lets context state flush cleanly."
     - name: computer_use
-      description: "Drive an app-owned browser session. Default workflow: call action=screenshot first; screenshots contain Set-of-Mark numeric badges on interactive elements. To click, use action=click with label=N from the latest screenshot. label must be >= 1; do not pass 0. Prefer label over coordinate; use coordinate only for targets with no badge such as canvas or custom rendered widgets. If the page asks to Browse, choose, attach, upload, or drop a file, use action=upload_file with selector or label plus source_url/base64/file_path; do not operate the native OS file picker. For any native select, dropdown, combobox, listbox, or multiselect, use action=select_option first with label/selector plus text/value or texts/values and optional mode=replace|add|remove|toggle; do not click options one by one or use keyboard navigation unless select_option fails. For checkboxes, radio buttons, and ARIA switches, use action=set_checked with label/selector plus checked=true|false instead of blind clicking. For long text fields, textareas, contenteditable editors, or message/post composers, use action=set_text with label/selector plus text instead of click + Control+A + type; use newline_mode=compact for public messages when blank paragraph gaps are not desired. For native date/time/datetime-local fields or text-like scheduler fields, use action=set_temporal with label/selector plus value such as 2026-07-01 or 11:00 AM. If a click opens exactly one new tab, Computer automatically follows it and reports switched_tab=true. For explicit tab control, call browser_session(action=tabs) to list tabs, then browser_session(action=switch_tab, tab_id=...) or browser_session(action=close_tab, tab_id=...); do not use Ctrl+Tab, Ctrl+PageDown, or Ctrl+1-9 for browser tab switching. Use action=key for page/editor commands such as Tab, Backspace, Control+A, Control+Z; use action=type only for short literal text and full date/time values such as 2026-06-05 or 08:00 PM. For action=scroll, amount is CSS pixels; use 200-500 for a small viewport move and omit amount for the 300px default. After scrolling, tab switching, selection, upload, checked-state changes, text changes, temporal-field changes, or navigation, take a fresh screenshot because labels are re-enumerated. Args: session_id, action, tab_id?, coordinate?, label?, selector?, checked?, source_url?, base64?, filename?, mime_type?, file_path?, text?, value?, texts?, values?, mode?, newline_mode?, key?, direction?, amount?, duration?, annotate? (screenshot only, default true), include_som? (screenshot only, default false). Returns screenshot bytes for visual actions; structured som targets are returned only when include_som=true."
+      description: "Drive an app-owned browser session. Default workflow: call action=screenshot first; screenshots contain Set-of-Mark numeric badges on interactive elements. To click, use action=click with label=N from the latest screenshot. label must be >= 1; do not pass 0. Prefer label over coordinate; use coordinate only for targets with no badge such as canvas or custom rendered widgets. Do not pass both; when both are present, coordinate wins. If the page asks to Browse, choose, attach, upload, or drop a file, use action=upload_file with selector or label plus source_url/base64/file_path; do not operate the native OS file picker. For any native select, dropdown, combobox, listbox, or multiselect, use action=select_option first with label/selector plus text/value or texts/values and optional mode=replace|add|remove|toggle; do not click options one by one or use keyboard navigation unless select_option fails. For checkboxes, radio buttons, and ARIA switches, use action=set_checked with label/selector plus checked=true|false instead of blind clicking. For long text fields, textareas, contenteditable editors, or message/post composers, use action=set_text with label/selector plus text instead of click + Control+A + type; use newline_mode=compact for public messages when blank paragraph gaps are not desired. For native date/time/datetime-local fields or text-like scheduler fields, use action=set_temporal with label/selector plus value such as 2026-07-01 or 11:00 AM. If a click opens exactly one new tab, Computer automatically follows it and reports switched_tab=true. For explicit tab control, call browser_session(action=tabs) to list tabs, then browser_session(action=switch_tab, tab_id=...) or browser_session(action=close_tab, tab_id=...); do not use Ctrl+Tab, Ctrl+PageDown, or Ctrl+1-9 for browser tab switching. Use action=key for page/editor commands such as Tab, Backspace, Control+A, Control+Z; use action=type only for short literal text and full date/time values such as 2026-06-05 or 08:00 PM. For action=scroll, amount is CSS pixels; use 200-500 for a small viewport move and omit amount for the 300px default. After scrolling, tab switching, selection, upload, checked-state changes, text changes, temporal-field changes, or navigation, take a fresh screenshot because labels are re-enumerated. Args: session_id, action, tab_id?, coordinate?, label?, selector?, checked?, source_url?, base64?, filename?, mime_type?, file_path?, text?, value?, texts?, values?, mode?, newline_mode?, key?, direction?, amount?, duration?, annotate? (screenshot only, default true), include_som? (screenshot only, default false). Returns screenshot bytes for visual actions; structured som targets are returned only when include_som=true."
     - name: computer_context_create
       description: "Create or import an app-managed browser context. Args: name, backend?, provider_context_id?, persist_default?, metadata?, auto_create_provider?."
     - name: computer_context_list
@@ -99,8 +99,6 @@ provides:
       description: "Compatibility alias for browser_session(action=list)."
     - name: browser_screenshot
       description: "Capture a clean PNG of the session viewport. Args: session_id, annotate? (default false; set true for Set-of-Mark labels), include_som? (default false; returns structured SoM targets only when true)."
-    - name: browser_extract
-      description: "Infrastructure-only rendered DOM extraction for advanced browser integrations. General agents should usually prefer higher-level browsing tools instead of calling this directly. Args: session_id, formats?, max_chars?, readability?, wait_ms?. formats may include text, markdown, html, metadata, structured_data, json, links, images, regions."
     - name: browser_recording
       description: "Retrieve recording metadata for active or historical app-owned sessions. Browserbase and Steel return app-owned HLS playback URLs; other backends return status=unsupported. Args: session_id."
     - name: browser_close
@@ -250,6 +248,7 @@ var sourceURLPublicDNSHTTPClient = &http.Client{Transport: publicDNSTransport()}
 
 // session is one open browser, owned by this sidecar.
 type session struct {
+	actionMu         sync.Mutex
 	comp             backends.Computer
 	backend          string
 	backendSessionID string
@@ -277,6 +276,7 @@ type reapedSession struct {
 	OpenedAt         time.Time
 	LastUsedAt       time.Time
 	Idle             time.Duration
+	ProviderExpired  bool
 	sess             *session
 }
 
@@ -331,16 +331,18 @@ func (r *registry) reapIdle(ttl time.Duration) []string {
 
 func (r *registry) reapIdleDetails(ttl time.Duration) []reapedSession {
 	type staleEntry struct {
-		id string
-		s  *session
+		id              string
+		s               *session
+		providerExpired bool
 	}
 	r.mu.Lock()
 	now := time.Now()
 	cutoff := now.Add(-ttl)
 	var stale []staleEntry
 	for id, s := range r.m {
-		if s.lastUsed.Before(cutoff) {
-			stale = append(stale, staleEntry{id: id, s: s})
+		providerExpired := s.backend != "local" && s.timeout > 0 && !s.openedAt.IsZero() && !now.Before(s.openedAt.Add(time.Duration(s.timeout)*time.Second))
+		if s.lastUsed.Before(cutoff) || providerExpired {
+			stale = append(stale, staleEntry{id: id, s: s, providerExpired: providerExpired})
 			delete(r.m, id)
 		}
 	}
@@ -364,6 +366,7 @@ func (r *registry) reapIdleDetails(ttl time.Duration) []reapedSession {
 			OpenedAt:         s.openedAt,
 			LastUsedAt:       s.lastUsed,
 			Idle:             now.Sub(s.lastUsed),
+			ProviderExpired:  entry.providerExpired,
 			sess:             s,
 		})
 	}
@@ -416,9 +419,11 @@ func (a *App) OnUnmount(ctx *sdk.AppCtx) error {
 	a.reg.m = map[string]*session{}
 	a.reg.mu.Unlock()
 	for id, s := range sessions {
+		s.actionMu.Lock()
 		if _, err := a.finalizeSession(ctx, id, s, "interrupted", "app_unmount", "session.closed"); err != nil && ctx != nil {
 			ctx.Logger().Warn("computer session shutdown failed", "session_id", id, "err", err.Error())
 		}
+		s.actionMu.Unlock()
 	}
 	return nil
 }
@@ -508,7 +513,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		{
 			Name: "computer_use",
 			Description: "Drive a browser session opened by browser_session. Default workflow: call action=screenshot first; screenshots contain Set-of-Mark numeric badges on interactive elements. " +
-				"To click, use action=click with label=N from the latest screenshot. label must be >= 1; do not pass 0. Prefer label over coordinate; use coordinate only for targets with no badge such as canvas or custom rendered widgets. " +
+				"To click, use action=click with label=N from the latest screenshot. label must be >= 1; do not pass 0. Prefer label over coordinate; use coordinate only for targets with no badge such as canvas or custom rendered widgets. Do not pass both; when both are present, coordinate wins. " +
 				"If the page asks to Browse, choose, attach, upload, or drop a file, use action=upload_file with selector or label plus source_url/base64/file_path; do not operate the native OS file picker. " +
 				"For any native select, dropdown, combobox, listbox, or multiselect, use action=select_option first with label/selector plus text/value or texts/values and optional mode=replace|add|remove|toggle; do not click options one by one or use keyboard navigation unless select_option fails. " +
 				"For checkboxes, radio buttons, and ARIA switches, use action=set_checked with label/selector plus checked=true|false instead of blind clicking. For long text fields, textareas, contenteditable editors, or message/post composers, use action=set_text with label/selector plus text instead of click + Control+A + type; use newline_mode=compact for public messages when blank paragraph gaps are not desired. For native date/time/datetime-local fields or text-like scheduler fields, use action=set_temporal with label/selector plus value such as 2026-07-01 or 11:00 AM. If the UI shows separate date and time fields, call set_temporal separately on each field; do not put a combined date-time string into the date field. " +
@@ -648,20 +653,6 @@ func (a *App) MCPTools() []sdk.Tool {
 				"include_som": map[string]any{"type": "boolean", "description": "Opt-in structured Set-of-Mark targets in the response. Defaults false to keep MCP payloads small."},
 			}, []string{"session_id"}),
 			Handler: a.toolBrowserScreenshot,
-		},
-		{
-			Name: "browser_extract",
-			Description: "Infrastructure-only rendered DOM extraction for advanced browser integrations. General agents should usually prefer higher-level browsing tools instead of calling this directly. " +
-				"Args: session_id, formats? (text, markdown, html, metadata, structured_data, json, links, images, regions), max_chars?, readability?, wait_ms?. " +
-				"Returns {session_id, backend, current_url, title, description, text, markdown, html, metadata, structured_data, links, images, regions, rendered, extraction_backend}.",
-			InputSchema: schemaObject(map[string]any{
-				"session_id":  map[string]any{"type": "string"},
-				"formats":     map[string]any{"type": "array", "items": map[string]any{"type": "string", "enum": []string{"text", "markdown", "html", "metadata", "structured_data", "json", "links", "images", "regions"}}},
-				"max_chars":   map[string]any{"type": "integer", "description": "Maximum characters for text, markdown, and html fields. Default 50000."},
-				"readability": map[string]any{"type": "boolean", "description": "Prefer the largest article/main/content region when true. Defaults true."},
-				"wait_ms":     map[string]any{"type": "integer", "description": "Optional wait before reading the DOM, useful for client-rendered pages."},
-			}, []string{"session_id"}),
-			Handler: a.toolBrowserExtract,
 		},
 		{
 			Name:        "browser_recording",
@@ -1525,6 +1516,8 @@ func (a *App) toolBrowserExtract(_ *sdk.AppCtx, args map[string]any) (any, error
 	if !ok {
 		return nil, fmt.Errorf("session %s not found", id)
 	}
+	sess.actionMu.Lock()
+	defer sess.actionMu.Unlock()
 	extractor, ok := sess.comp.(backends.DOMExtractor)
 	if !ok {
 		return nil, fmt.Errorf("backend %q does not support browser_extract", sess.backend)
@@ -1600,6 +1593,8 @@ func (a *App) toolComputerUse(ctx *sdk.AppCtx, args map[string]any) (any, error)
 			"Open a new browser_session using context_id or context_name, then retry from a fresh screenshot.",
 			nil)
 	}
+	sess.actionMu.Lock()
+	defer sess.actionMu.Unlock()
 	if err := validateClickTargetArgs(action, args); err != nil {
 		return nil, computerUseFailure("invalid_target", id, sess, action,
 			err.Error(),
@@ -1659,6 +1654,19 @@ func (a *App) toolComputerUse(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		act.Checked = checked
 	}
 	act.X, act.Y = coordinateArg(args)
+	// Some model/tool serializers populate an omitted optional integer with its
+	// schema minimum (label=1). When the caller also supplied a coordinate, the
+	// coordinate is the unambiguous explicit target and must win over that
+	// synthetic label value.
+	if (action == "click" || action == "double_click") && strings.TrimSpace(stringArg(args, "coordinate")) != "" {
+		act.Label = 0
+	}
+	if (action == "click" || action == "double_click") && act.Label > 0 && !hasSetOfMarkLabel(sess.comp, act.Label) {
+		return nil, computerUseFailure("invalid_target", id, sess, action,
+			fmt.Sprintf("Set-of-Mark label %d is not present in the latest annotated screenshot", act.Label),
+			"Take a fresh screenshot with annotate=true, then use one of its current labels.",
+			nil)
+	}
 	var uploadMeta map[string]any
 	var uploadCleanup func()
 	if action == "upload_file" {
@@ -1850,6 +1858,8 @@ func (a *App) toolBrowserClose(ctx *sdk.AppCtx, args map[string]any) (any, error
 	if !ok {
 		return map[string]any{"closed": false}, nil
 	}
+	sess.actionMu.Lock()
+	defer sess.actionMu.Unlock()
 	row, err := a.finalizeSession(ctx, id, sess, "closed", "explicit_close", "session.closed")
 	if err != nil {
 		return nil, err
@@ -2058,6 +2068,18 @@ func setOfMarkFor(comp backends.Computer) []backends.SetOfMarkTarget {
 	return reporter.LastSetOfMark()
 }
 
+func hasSetOfMarkLabel(comp backends.Computer, label int) bool {
+	if label <= 0 {
+		return false
+	}
+	for _, target := range setOfMarkFor(comp) {
+		if target.Label == label {
+			return true
+		}
+	}
+	return false
+}
+
 func mergeScreenshotRecoveryPayload(payload map[string]any, info *backends.ScreenshotRecoveryInfo) {
 	if info == nil || !info.Recovered {
 		return
@@ -2090,7 +2112,11 @@ func (a *App) reaper(ctx *sdk.AppCtx) {
 		case <-t.C:
 			rows := a.reapIdleSessions(ctx, idleTTL)
 			for _, row := range rows {
-				ctx.Logger().Info("reaped idle session", "session_id", row.ID, "idle_ttl", idleTTL.String())
+				reason := "idle_timeout"
+				if row.ProviderExpired {
+					reason = "provider_timeout"
+				}
+				ctx.Logger().Info("reaped browser session", "session_id", row.ID, "reason", reason, "idle_ttl", idleTTL.String())
 			}
 		}
 	}
@@ -2099,9 +2125,17 @@ func (a *App) reaper(ctx *sdk.AppCtx) {
 func (a *App) reapIdleSessions(ctx *sdk.AppCtx, ttl time.Duration) []reapedSession {
 	rows := a.reg.reapIdleDetails(ttl)
 	for _, row := range rows {
-		if _, err := a.finalizeSession(ctx, row.ID, row.sess, "reaped", "idle_timeout", "session.reaped", map[string]any{
+		reason := "idle_timeout"
+		if row.ProviderExpired {
+			reason = "provider_timeout"
+		}
+		row.sess.actionMu.Lock()
+		_, err := a.finalizeSession(ctx, row.ID, row.sess, "reaped", reason, "session.reaped", map[string]any{
 			"idle_seconds": int(row.Idle.Seconds()),
-		}); err != nil && ctx != nil {
+			"reap_reason":  reason,
+		})
+		row.sess.actionMu.Unlock()
+		if err != nil && ctx != nil {
 			ctx.Logger().Warn("persist reaped browser session", "session_id", row.ID, "err", err.Error())
 		}
 	}
@@ -3658,6 +3692,8 @@ func (a *App) handleSessionScreenshot(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusNotFound, "session not found")
 		return
 	}
+	sess.actionMu.Lock()
+	defer sess.actionMu.Unlock()
 	annotate := boolArgDefault(map[string]any{
 		"annotate": r.URL.Query().Get("annotate"),
 		"som":      r.URL.Query().Get("som"),
