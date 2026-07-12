@@ -84,47 +84,90 @@ type metricsCacheEntry struct {
 	value *Metrics
 }
 
+type metricsCacheKey struct {
+	id         int64
+	provider   string
+	providerID string
+	host       string
+	port       int
+}
+
+type metricsFlight struct {
+	done  chan struct{}
+	value *Metrics
+	err   error
+}
+
 var (
-	metricsMu    sync.Mutex
-	metricsCache = map[int64]metricsCacheEntry{}
+	metricsMu       sync.Mutex
+	metricsCache    = map[metricsCacheKey]metricsCacheEntry{}
+	metricsInFlight = map[metricsCacheKey]*metricsFlight{}
 )
 
 const metricsTTL = 5 * time.Second
 
 func clearMetricsCache(id int64) {
 	metricsMu.Lock()
-	delete(metricsCache, id)
+	for key := range metricsCache {
+		if key.id == id {
+			delete(metricsCache, key)
+		}
+	}
 	metricsMu.Unlock()
+}
+
+func metricsKey(inst *Instance) metricsCacheKey {
+	host := inst.SSHHost
+	if host == "" {
+		host = inst.PublicIPv4
+	}
+	if host == "" {
+		host = inst.PublicIPv6
+	}
+	return metricsCacheKey{id: inst.ID, provider: inst.Provider, providerID: inst.ProviderID, host: host, port: inst.SSHPort}
 }
 
 // collectMetrics returns vitals for an instance. Cached 5s. Routes
 // to local (gopsutil) or remote (SSH-and-parse) based on provider.
 func collectMetrics(inst *Instance) (*Metrics, error) {
-	metricsMu.Lock()
-	if entry, ok := metricsCache[inst.ID]; ok && time.Since(entry.at) < metricsTTL {
-		metricsMu.Unlock()
-		return entry.value, nil
-	}
-	metricsMu.Unlock()
-
-	var m *Metrics
-	var err error
-	if inst.IsLocal() {
-		m, err = collectLocalMetrics()
-	} else {
+	return collectMetricsCached(inst, func() (*Metrics, error) {
+		if inst.IsLocal() {
+			return collectLocalMetrics()
+		}
 		if inst.Status != "ready" {
 			return nil, fmt.Errorf("instance not ready (status=%s)", inst.Status)
 		}
-		m, err = collectRemoteMetrics(inst)
-	}
-	if err != nil {
-		return nil, err
-	}
+		return collectRemoteMetrics(inst)
+	})
+}
 
+func collectMetricsCached(inst *Instance, collect func() (*Metrics, error)) (*Metrics, error) {
+	key := metricsKey(inst)
 	metricsMu.Lock()
-	metricsCache[inst.ID] = metricsCacheEntry{at: time.Now(), value: m}
+	if entry, ok := metricsCache[key]; ok && time.Since(entry.at) < metricsTTL {
+		metricsMu.Unlock()
+		return entry.value, nil
+	}
+	if flight, ok := metricsInFlight[key]; ok {
+		metricsMu.Unlock()
+		<-flight.done
+		return flight.value, flight.err
+	}
+	flight := &metricsFlight{done: make(chan struct{})}
+	metricsInFlight[key] = flight
 	metricsMu.Unlock()
-	return m, nil
+
+	m, err := collect()
+	metricsMu.Lock()
+	if err == nil {
+		metricsCache[key] = metricsCacheEntry{at: time.Now(), value: m}
+	}
+	flight.value = m
+	flight.err = err
+	delete(metricsInFlight, key)
+	close(flight.done)
+	metricsMu.Unlock()
+	return m, err
 }
 
 // ─── Local — via gopsutil ─────────────────────────────────────────

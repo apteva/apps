@@ -222,7 +222,16 @@ func runPodProvision(ctx *sdk.AppCtx, in CreateInstanceInput) (*Instance, error)
 		})
 		return nil, errors.New("runpod.create_pod response missing pod id")
 	}
-	updateRunPodInstanceFromPod(ctx, inst.ID, pod)
+	if err := updateRunPodInstanceFromPod(ctx, inst.ID, pod); err != nil {
+		orphan := *inst
+		orphan.ProviderID = pod.ID
+		cleanupErr := runPodDestroy(ctx, &orphan)
+		ctx.Logger().Error("instances: failed to persist RunPod identity", "id", inst.ID, "provider_id", pod.ID, "err", err, "cleanup_err", cleanupErr)
+		if cleanupErr != nil {
+			return nil, fmt.Errorf("persist created RunPod pod %s: %w; automatic cleanup also failed: %v", pod.ID, err, cleanupErr)
+		}
+		return nil, fmt.Errorf("persist created RunPod pod %s: %w; upstream pod was cleaned up", pod.ID, err)
+	}
 	kickRunPodReadinessProbe(ctx, inst.ID)
 	return dbGetInstance(ctx.AppDB(), inst.ID)
 }
@@ -257,6 +266,9 @@ func kickRunPodReadinessProbe(ctx *sdk.AppCtx, id int64) {
 		if err != nil {
 			return
 		}
+		if fresh.Status != "provisioning" {
+			return
+		}
 		if fresh.PublicIPv4 == "" || fresh.SSHPort <= 0 || fresh.SSHPort == 22 {
 			fresh, err = waitRunPodNetwork(ctx, fresh, 10*time.Minute)
 			if err != nil {
@@ -267,17 +279,14 @@ func kickRunPodReadinessProbe(ctx *sdk.AppCtx, id int64) {
 				return
 			}
 		}
-		if err := probeSSHReady(fresh, 10*time.Minute); err != nil {
+		if err := probeSSHReadyFn(fresh, 10*time.Minute); err != nil {
 			_, _ = updateInstanceAndEmit(ctx, id, map[string]any{
 				"status":        "error",
 				"error_message": fmt.Sprintf("ssh probe: %v", err),
 			})
 			return
 		}
-		_, _ = updateInstanceAndEmit(ctx, id, map[string]any{
-			"status":   "ready",
-			"ready_at": nowUTC(),
-		})
+		_, _, _ = transitionInstanceAndEmit(ctx, id, []string{"provisioning"}, "ready", map[string]any{"ready_at": nowUTC(), "error_message": ""})
 	}()
 }
 
@@ -298,7 +307,9 @@ func waitRunPodNetwork(ctx *sdk.AppCtx, inst *Instance, timeout time.Duration) (
 			return nil, fmt.Errorf("get_pod: %s", upstreamErrorString(res))
 		}
 		pod := parseRunPodPodResponse(res.Data)
-		updateRunPodInstanceFromPod(ctx, inst.ID, pod)
+		if err := updateRunPodInstanceFromPod(ctx, inst.ID, pod); err != nil {
+			return nil, err
+		}
 		if pod.PublicIP != "" && runPodSSHPort(pod.PortMappings) > 0 {
 			return dbGetInstance(ctx.AppDB(), inst.ID)
 		}
@@ -330,7 +341,7 @@ func reconcileRunPodProvisioning(ctx *sdk.AppCtx) {
 	}
 }
 
-func updateRunPodInstanceFromPod(ctx *sdk.AppCtx, id int64, pod runPodPod) {
+func updateRunPodInstanceFromPod(ctx *sdk.AppCtx, id int64, pod runPodPod) error {
 	fields := map[string]any{}
 	if pod.ID != "" {
 		fields["provider_id"] = pod.ID
@@ -354,7 +365,7 @@ func updateRunPodInstanceFromPod(ctx *sdk.AppCtx, id int64, pod runPodPod) {
 	if res := runPodResourcesFromPod(pod); res != "" && res != "{}" {
 		fields["resources_json"] = res
 	}
-	_ = dbUpdateInstance(ctx.AppDB(), id, fields)
+	return dbUpdateInstance(ctx.AppDB(), id, fields)
 }
 
 func parseRunPodSize(size string) (computeType, gpuType string, gpuCount int, vcpuCount int) {

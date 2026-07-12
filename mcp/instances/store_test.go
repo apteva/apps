@@ -11,6 +11,88 @@ import (
 	_ "modernc.org/sqlite"
 )
 
+func TestCreateRemote_AllowsMultipleRowsBeforeProviderID(t *testing.T) {
+	db := openTestDB(t)
+	for _, name := range []string{"first", "second"} {
+		if _, err := dbCreateInstance(db, CreateInstanceInput{Name: name, Provider: "hetzner", Status: "provisioning"}); err != nil {
+			t.Fatalf("create %s with empty provider id: %v", name, err)
+		}
+	}
+	if _, err := dbCreateInstance(db, CreateInstanceInput{Name: "known", Provider: "hetzner", ProviderID: "42"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := dbCreateInstance(db, CreateInstanceInput{Name: "duplicate", Provider: "hetzner", ProviderID: "42"}); err == nil {
+		t.Fatal("duplicate non-empty provider id was accepted")
+	}
+}
+
+func TestTransitionStatus_IsCompareAndSwap(t *testing.T) {
+	db := openTestDB(t)
+	inst, err := dbCreateInstance(db, CreateInstanceInput{Name: "host", Provider: "hetzner", Status: "ready"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ok, err := dbTransitionStatus(db, inst.ID, []string{"ready"}, "upgrading", map[string]any{"pending_size": "cx32"})
+	if err != nil || !ok {
+		t.Fatalf("first transition ok=%v err=%v", ok, err)
+	}
+	ok, err = dbTransitionStatus(db, inst.ID, []string{"ready"}, "destroying", nil)
+	if err != nil || ok {
+		t.Fatalf("stale transition ok=%v err=%v", ok, err)
+	}
+}
+
+func TestPinSSHHostKey_FirstKeyWins(t *testing.T) {
+	db := openTestDB(t)
+	inst, err := dbCreateInstance(db, CreateInstanceInput{Name: "host", Provider: "manual", Status: "ready"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := dbPinSSHHostKey(db, inst.ID, "key-a"); err != nil || got != "key-a" {
+		t.Fatalf("first pin=%q err=%v", got, err)
+	}
+	if got, err := dbPinSSHHostKey(db, inst.ID, "key-b"); err != nil || got != "key-a" {
+		t.Fatalf("repin=%q err=%v", got, err)
+	}
+}
+
+func TestLifecycleMigration_PreservesExistingRows(t *testing.T) {
+	db, err := sql.Open("sqlite", "file:"+filepath.Join(t.TempDir(), "upgrade.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	for _, name := range []string{"001_init.sql", "002_generic_runtime_fields.sql"} {
+		body, readErr := os.ReadFile(filepath.Join("migrations", name))
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		if _, execErr := db.Exec(string(body)); execErr != nil {
+			t.Fatalf("apply %s: %v", name, execErr)
+		}
+	}
+	if _, err := db.Exec(`INSERT INTO instances (id,name,provider,provider_id,status,ssh_host,ssh_port,resources_json) VALUES (7,'imported','manual','','ready','host.test',2202,'{"cpu":{"cores":2}}')`); err != nil {
+		t.Fatal(err)
+	}
+	body, err := os.ReadFile(filepath.Join("migrations", "003_lifecycle_safety.sql"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(string(body)); err != nil {
+		t.Fatal(err)
+	}
+	inst, err := dbGetInstance(db, 7)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if inst.Name != "imported" || inst.SSHHost != "host.test" || inst.SSHPort != 2202 || inst.ResourcesJSON == "" {
+		t.Fatalf("migrated row=%#v", inst)
+	}
+	if _, err := dbCreateInstance(db, CreateInstanceInput{Name: "another", Provider: "manual", Status: "ready"}); err != nil {
+		t.Fatalf("partial provider id uniqueness after migration: %v", err)
+	}
+}
+
 func openTestDB(t *testing.T) *sql.DB {
 	t.Helper()
 	dir := t.TempDir()

@@ -62,6 +62,19 @@ func TestLockedWriter_NoLostBytesUnderConcurrentWrites(t *testing.T) {
 	}
 }
 
+func TestLockedWriter_BoundsOutputWhileWriting(t *testing.T) {
+	w := &lockedWriter{max: 8}
+	if n, err := w.Write([]byte("0123456789abcdef")); err != nil || n != 16 {
+		t.Fatalf("write n=%d err=%v", n, err)
+	}
+	if got := w.String(); got != "01234567" {
+		t.Fatalf("bounded output=%q", got)
+	}
+	if !w.Truncated() {
+		t.Fatal("writer did not report truncation")
+	}
+}
+
 func TestIsSSHConnError_Classification(t *testing.T) {
 	// Connection-class errors should redial; exit-code errors should
 	// not (those are the user's command saying "no").

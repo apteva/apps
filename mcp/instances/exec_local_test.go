@@ -116,3 +116,14 @@ func TestDownloadLocal_ReadRoundTrip(t *testing.T) {
 		t.Errorf("download round-trip = %q, want %q", got, body)
 	}
 }
+
+func TestResolveLocalPath_RejectsSymlinkEscape(t *testing.T) {
+	root := t.TempDir()
+	outside := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(root, "escape")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := resolveLocalPath(root, "escape/owned.txt"); err == nil {
+		t.Fatal("symlink escape was accepted")
+	}
+}

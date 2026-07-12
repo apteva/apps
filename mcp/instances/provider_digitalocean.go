@@ -143,11 +143,20 @@ func digitalOceanProvision(ctx *sdk.AppCtx, in CreateInstanceInput) (*Instance, 
 		})
 		return nil, errors.New("digitalocean.create_droplet response missing droplet id")
 	}
-	_ = dbUpdateInstance(ctx.AppDB(), inst.ID, map[string]any{
+	if err := dbUpdateInstance(ctx.AppDB(), inst.ID, map[string]any{
 		"provider_id": provID,
 		"public_ipv4": ipv4,
 		"public_ipv6": ipv6,
-	})
+	}); err != nil {
+		orphan := *inst
+		orphan.ProviderID, orphan.PublicIPv4, orphan.PublicIPv6 = provID, ipv4, ipv6
+		cleanupErr := digitalOceanDestroy(ctx, &orphan)
+		ctx.Logger().Error("instances: failed to persist DigitalOcean identity", "id", inst.ID, "provider_id", provID, "err", err, "cleanup_err", cleanupErr)
+		if cleanupErr != nil {
+			return nil, fmt.Errorf("persist created DigitalOcean droplet %s: %w; automatic cleanup also failed: %v", provID, err, cleanupErr)
+		}
+		return nil, fmt.Errorf("persist created DigitalOcean droplet %s: %w; upstream droplet was cleaned up", provID, err)
+	}
 
 	kickDigitalOceanReadinessProbe(ctx, inst.ID)
 	return dbGetInstance(ctx.AppDB(), inst.ID)
@@ -182,6 +191,9 @@ func kickDigitalOceanReadinessProbe(ctx *sdk.AppCtx, id int64) {
 		if err != nil {
 			return
 		}
+		if fresh.Status != "provisioning" {
+			return
+		}
 		if fresh.PublicIPv4 == "" && fresh.PublicIPv6 == "" {
 			fresh, err = waitDigitalOceanDropletNetwork(ctx, fresh, 5*time.Minute)
 			if err != nil {
@@ -192,17 +204,14 @@ func kickDigitalOceanReadinessProbe(ctx *sdk.AppCtx, id int64) {
 				return
 			}
 		}
-		if err := probeSSHReady(fresh, 5*time.Minute); err != nil {
+		if err := probeSSHReadyFn(fresh, 5*time.Minute); err != nil {
 			_, _ = updateInstanceAndEmit(ctx, id, map[string]any{
 				"status":        "error",
 				"error_message": fmt.Sprintf("ssh probe: %v", err),
 			})
 			return
 		}
-		_, _ = updateInstanceAndEmit(ctx, id, map[string]any{
-			"status":   "ready",
-			"ready_at": nowUTC(),
-		})
+		_, _, _ = transitionInstanceAndEmit(ctx, id, []string{"provisioning"}, "ready", map[string]any{"ready_at": nowUTC(), "error_message": ""})
 	}()
 }
 

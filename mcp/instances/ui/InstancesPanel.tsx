@@ -37,6 +37,15 @@ interface Instance {
   error?: string;
   created_at?: string;
   ready_at?: string;
+  capabilities?: {
+    run: boolean;
+    upload: boolean;
+    download: boolean;
+    metrics: boolean;
+    tunnel: boolean;
+    destroy: boolean;
+    upgrade: boolean;
+  };
 }
 
 interface MetricsWire {
@@ -53,7 +62,7 @@ const API = "/api/apps/instances/api";
 
 function statusColor(s: string): string {
   if (s === "ready") return "text-green";
-  if (s === "provisioning" || s === "pending" || s === "upgrading") return "text-blue";
+  if (s === "provisioning" || s === "pending" || s === "upgrading" || s === "destroying") return "text-blue";
   if (s === "error") return "text-red";
   return "text-text-dim";
 }
@@ -391,7 +400,7 @@ export default function InstancesPanel({ projectId, installId }: NativePanelProp
         method: "POST",
         credentials: "same-origin",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ size, upgrade_disk: upgradeDisk, wait: true }),
+        body: JSON.stringify({ size, upgrade_disk: upgradeDisk }),
       });
       if (!r.ok) throw new Error(`${r.status}: ${await r.text().catch(() => "")}`);
       setPendingUpgrade(null);
@@ -784,45 +793,58 @@ function InstanceCard({
   const [metrics, setMetrics] = useState<MetricsWire | null>(null);
   const [history, setHistory] = useState<MetricsSample[]>([]);
   const [lastPollAt, setLastPollAt] = useState<number>(0);
+  const [metricsError, setMetricsError] = useState("");
   const [, setNowTick] = useState(0); // forces stale-badge re-render
 
   useEffect(() => {
     let cancelled = false;
-    const fetchMetrics = () => {
+    let inFlight = false;
+    const controller = new AbortController();
+    const fetchMetrics = async () => {
       if (inst.status !== "ready") return;
-      fetch(`${API}/instances/${inst.id}/metrics?${withParams()}`, { credentials: "same-origin" })
-        .then((r) => r.ok ? r.json() : null)
-        .then((j) => {
-          if (cancelled || !j?.metrics) return;
-          const m = j.metrics as MetricsWire;
-          setMetrics(m);
-          setLastPollAt(Date.now());
+      if (inFlight) return;
+      inFlight = true;
+      try {
+        const r = await fetch(`${API}/instances/${inst.id}/metrics?${withParams()}`, {
+          credentials: "same-origin",
+          signal: controller.signal,
+        });
+        if (!r.ok) throw new Error(`${r.status}: ${await r.text().catch(() => "metrics unavailable")}`);
+        const j = await r.json();
+        if (cancelled || !j?.metrics) return;
+        const m = j.metrics as MetricsWire;
+        setMetrics(m);
+        setMetricsError("");
+        setLastPollAt(Date.now());
           // Append to history. Memory % derived from used/total so
           // the chart can put cpu + mem on the same 0-100 scale.
           const memPct = m.mem.total_bytes > 0
             ? (m.mem.used_bytes / m.mem.total_bytes) * 100
             : 0;
-          setHistory((prev) => {
-            const next = [
-              ...prev,
-              { ts: Date.now(), cpuPct: m.cpu.total_pct, memPct, l1: m.load.l1 },
-            ];
-            return next.length > HISTORY_MAX ? next.slice(-HISTORY_MAX) : next;
-          });
-        })
-        .catch(() => {});
+        setHistory((prev) => {
+          const next = [...prev, { ts: Date.now(), cpuPct: m.cpu.total_pct, memPct, l1: m.load.l1 }];
+          return next.length > HISTORY_MAX ? next.slice(-HISTORY_MAX) : next;
+        });
+      } catch (e) {
+        if (!cancelled && (e as Error).name !== "AbortError") setMetricsError((e as Error).message);
+      } finally {
+        inFlight = false;
+      }
     };
     fetchMetrics();
     const t = setInterval(fetchMetrics, 10000);
     // Tick the clock every 5s so the "stale Ns ago" badge updates
     // without waiting on the next metrics fetch.
     const tick = setInterval(() => setNowTick((n) => n + 1), 5000);
-    return () => { cancelled = true; clearInterval(t); clearInterval(tick); };
+    return () => { cancelled = true; controller.abort(); clearInterval(t); clearInterval(tick); };
   }, [inst.id, inst.status, withParams]);
 
   const ip = inst.public_ipv4 || inst.public_ipv6 || "—";
-  const endpoint = inst.ssh_port && inst.ssh_port !== 22 && ip !== "—" ? `${ip}:${inst.ssh_port}` : ip;
+  const sshHost = inst.ssh_host || ip;
+  const endpoint = inst.ssh_port && inst.ssh_port !== 22 && sshHost !== "—" ? `${sshHost}:${inst.ssh_port}` : sshHost;
   const isLocal = inst.provider === "local";
+  const canUpgrade = inst.capabilities?.upgrade ?? inst.provider === "hetzner";
+  const canDestroy = inst.capabilities?.destroy ?? ["hetzner", "digitalocean", "runpod"].includes(inst.provider);
   const resources = resourceSummary(inst);
   const resourceModel = resources.toLowerCase().replace(/^[0-9]+x\s+/, "");
   const showResources = resources && (!resources.startsWith("1x ") || !inst.size?.toLowerCase().includes(resourceModel));
@@ -831,6 +853,7 @@ function InstanceCard({
     : 0;
   const staleAgeS = lastPollAt > 0 ? Math.floor((Date.now() - lastPollAt) / 1000) : 0;
   const stale = lastPollAt > 0 && (Date.now() - lastPollAt) > STALE_THRESHOLD_MS;
+  const loadPressurePct = metrics?.cpu.cores ? (metrics.load.l1 / metrics.cpu.cores) * 100 : 0;
 
   // Pick the most space-pressed mounts first when there are many
   // (local dev box has /dev, /System/Volumes/VM, etc.). Top 3 by
@@ -882,20 +905,20 @@ function InstanceCard({
         <span className={statusColor(inst.status) + " text-[11px] uppercase tracking-wider font-medium"}>
           {inst.status}
         </span>
-        {!isLocal && (
+        {(canUpgrade || canDestroy) && (
           <>
-            <button
+            {canUpgrade && <button
               type="button"
               onClick={onUpgrade}
               disabled={busy || inst.status !== "ready"}
               className="px-2 py-0.5 text-[11px] border border-blue/60 text-blue rounded hover:bg-blue hover:text-white disabled:opacity-50"
-            >Upgrade</button>
-            <button
+            >Upgrade</button>}
+            {canDestroy && <button
               type="button"
               onClick={onDestroy}
               disabled={busy}
               className="px-2 py-0.5 text-[11px] border border-red/60 text-red rounded hover:bg-red hover:text-white disabled:opacity-50"
-            >Destroy</button>
+            >Destroy</button>}
           </>
         )}
       </div>
@@ -915,12 +938,13 @@ function InstanceCard({
           className="p-4 space-y-4"
           style={stale ? { opacity: 0.55 } : undefined}
         >
+          {metricsError && <div className="text-[11px] text-red">Metrics refresh failed: {metricsError}</div>}
           {/* Vitals — bars + stat row. */}
           <div
             className="rounded-md p-4 space-y-4"
             style={{ backgroundColor: SUB_CARD_BG, border: `1px solid ${SUBTLE_BORDER}` }}
           >
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
               <div className="flex items-end gap-3">
                 <div className="flex-1 min-w-0">
                   <ProgressBar
@@ -950,6 +974,15 @@ function InstanceCard({
                   width={64}
                   height={22}
                 />
+              </div>
+              <div className="flex items-end gap-3">
+                <div className="flex-1 min-w-0">
+                  <ProgressBar
+                    label="Load pressure"
+                    sublabel={metrics.cpu.cores ? `${metrics.load.l1.toFixed(2)} / ${metrics.cpu.cores} vCPU · ${loadPressurePct.toFixed(0)}%` : metrics.load.l1.toFixed(2)}
+                    pct={loadPressurePct}
+                  />
+                </div>
               </div>
             </div>
 
@@ -1021,7 +1054,9 @@ function InstanceCard({
               above so re-enabling is one block of JSX away. */}
         </div>
       ) : inst.status === "ready" ? (
-        <div className="px-4 py-3 text-text-dim text-[11px]">Loading vitals…</div>
+        <div className={`px-4 py-3 text-[11px] ${metricsError ? "text-red" : "text-text-dim"}`}>
+          {metricsError ? `Vitals unavailable: ${metricsError}` : "Loading vitals…"}
+        </div>
       ) : null}
     </div>
   );

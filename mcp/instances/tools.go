@@ -49,12 +49,11 @@ func (a *App) MCPTools() []sdk.Tool {
 		{
 			Name: "instance_upgrade",
 			Description: "Change a remote instance to another server type in-place where the provider adapter supports it. Hetzner is implemented today. This shuts the server down, " +
-				"changes server_type, powers it back on, and waits for SSH by default. Args: id, size, upgrade_disk? (default false), wait? (default true).",
+				"changes server_type, powers it back on, and waits for SSH. Args: id, size, upgrade_disk? (default false).",
 			InputSchema: schemaObject(map[string]any{
 				"id":           map[string]any{"type": "integer"},
 				"size":         map[string]any{"type": "string"},
 				"upgrade_disk": map[string]any{"type": "boolean"},
-				"wait":         map[string]any{"type": "boolean"},
 			}, []string{"id", "size"}),
 			Handler: a.toolUpgrade,
 		},
@@ -89,6 +88,23 @@ func (a *App) MCPTools() []sdk.Tool {
 				"path": map[string]any{"type": "string"},
 			}, []string{"id", "path"}),
 			Handler: a.toolDownloadFile,
+		},
+		{
+			Name: "instance_open_tunnel",
+			Description: "Open or reuse a loopback-only TCP tunnel through a remote instance's SSH connection. " +
+				"Returns local_host and local_port. Args: id, target_port.",
+			InputSchema: schemaObject(map[string]any{
+				"id": map[string]any{"type": "integer"}, "target_port": map[string]any{"type": "integer"},
+			}, []string{"id", "target_port"}),
+			Handler: a.toolOpenTunnel,
+		},
+		{
+			Name:        "instance_close_tunnel",
+			Description: "Close a loopback TCP tunnel for an instance target port. Args: id, target_port.",
+			InputSchema: schemaObject(map[string]any{
+				"id": map[string]any{"type": "integer"}, "target_port": map[string]any{"type": "integer"},
+			}, []string{"id", "target_port"}),
+			Handler: a.toolCloseTunnel,
 		},
 		{
 			Name: "instance_wait_ready",
@@ -189,23 +205,15 @@ func (a *App) toolDestroy(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := destroyProviderInstance(ctx, inst); err != nil {
+	if err := destroyManagedInstance(ctx, inst); err != nil {
 		return nil, err
 	}
-	if err := deleteInstanceAndEmit(ctx, inst); err != nil {
-		return nil, err
-	}
-	// Release any pooled SSH connection to the now-dead host so we
-	// don't leak the TCP socket. Safe to call when no entry exists
-	// (e.g. instance was destroyed before any command ran).
-	globalSSHPool.evict(id)
 	return map[string]any{"destroyed": true, "id": id}, nil
 }
 
 func (a *App) toolUpgrade(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	id := int64Arg(args, "id")
 	size := strArg(args, "size")
-	wait := boolArg(args, "wait", true)
 	inst, err := dbGetInstance(ctx.AppDB(), id)
 	if err != nil {
 		return nil, err
@@ -213,7 +221,7 @@ func (a *App) toolUpgrade(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	res, err := upgradeProviderInstance(ctx, inst, UpgradeInstanceInput{
 		Size:        size,
 		UpgradeDisk: boolArg(args, "upgrade_disk", false),
-		Wait:        wait,
+		Wait:        true,
 	})
 	if err != nil {
 		return nil, err
@@ -315,7 +323,10 @@ func (a *App) toolWaitReady(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if inst.IsLocal() || inst.Status == "ready" {
 		return map[string]any{"ready": true, "id": id, "status": inst.Status}, nil
 	}
-	if err := probeSSHReady(inst, timeout); err != nil {
+	if inst.Status != "provisioning" {
+		return nil, fmt.Errorf("instance cannot be marked ready from status=%s", inst.Status)
+	}
+	if err := probeSSHReadyFn(inst, timeout); err != nil {
 		return nil, err
 	}
 	_, _ = updateInstanceAndEmit(ctx, id, map[string]any{"status": "ready", "ready_at": nowUTC()})

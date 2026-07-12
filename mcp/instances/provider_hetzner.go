@@ -112,11 +112,20 @@ func hetznerProvision(ctx *sdk.AppCtx, in CreateInstanceInput) (*Instance, error
 		})
 		return nil, errors.New("hetzner.server_create response missing server id (catalog/upstream mismatch)")
 	}
-	_ = dbUpdateInstance(ctx.AppDB(), inst.ID, map[string]any{
+	if err := dbUpdateInstance(ctx.AppDB(), inst.ID, map[string]any{
 		"provider_id": provID,
 		"public_ipv4": ipv4,
 		"public_ipv6": ipv6,
-	})
+	}); err != nil {
+		orphan := *inst
+		orphan.ProviderID, orphan.PublicIPv4, orphan.PublicIPv6 = provID, ipv4, ipv6
+		cleanupErr := hetznerDestroy(ctx, &orphan)
+		ctx.Logger().Error("instances: failed to persist Hetzner identity", "id", inst.ID, "provider_id", provID, "err", err, "cleanup_err", cleanupErr)
+		if cleanupErr != nil {
+			return nil, fmt.Errorf("persist created Hetzner server %s: %w; automatic cleanup also failed: %v", provID, err, cleanupErr)
+		}
+		return nil, fmt.Errorf("persist created Hetzner server %s: %w; upstream server was cleaned up", provID, err)
+	}
 
 	// Background readiness probe — let the caller's instance_create
 	// return immediately; a separate instance_wait_ready or polling
@@ -141,17 +150,17 @@ func kickReadinessProbe(ctx *sdk.AppCtx, id int64) {
 		if err != nil {
 			return
 		}
-		if err := probeSSHReady(fresh, 5*time.Minute); err != nil {
+		if fresh.Status != "provisioning" {
+			return
+		}
+		if err := probeSSHReadyFn(fresh, 5*time.Minute); err != nil {
 			_, _ = updateInstanceAndEmit(ctx, id, map[string]any{
 				"status":        "error",
 				"error_message": fmt.Sprintf("ssh probe: %v", err),
 			})
 			return
 		}
-		_, _ = updateInstanceAndEmit(ctx, id, map[string]any{
-			"status":   "ready",
-			"ready_at": nowUTC(),
-		})
+		_, _, _ = transitionInstanceAndEmit(ctx, id, []string{"provisioning"}, "ready", map[string]any{"ready_at": nowUTC(), "error_message": ""})
 	}()
 }
 
@@ -284,11 +293,13 @@ func hetznerUpgrade(ctx *sdk.AppCtx, inst *Instance, in UpgradeInstanceInput) (*
 	}
 
 	oldSize := inst.Size
-	if _, err := updateInstanceAndEmit(ctx, inst.ID, map[string]any{
-		"status":        "upgrading",
+	if _, ok, err := transitionInstanceAndEmit(ctx, inst.ID, []string{"ready"}, "upgrading", map[string]any{
+		"pending_size":  in.Size,
 		"error_message": "",
 	}); err != nil {
 		return nil, err
+	} else if !ok {
+		return nil, errors.New("instance lifecycle changed before upgrade could start")
 	}
 	globalSSHPool.evict(inst.ID)
 	clearMetricsCache(inst.ID)
@@ -333,7 +344,7 @@ func hetznerUpgrade(ctx *sdk.AppCtx, inst *Instance, in UpgradeInstanceInput) (*
 		if err != nil {
 			return nil, err
 		}
-		if err := probeSSHReady(fresh, 5*time.Minute); err != nil {
+		if err := probeSSHReadyFn(fresh, 5*time.Minute); err != nil {
 			return fail("ssh probe after upgrade: %v", err)
 		}
 	}
@@ -343,6 +354,7 @@ func hetznerUpgrade(ctx *sdk.AppCtx, inst *Instance, in UpgradeInstanceInput) (*
 		"size":               in.Size,
 		"monthly_cost_cents": priceEURToCents(targetType.MonthlyPriceEUR),
 		"error_message":      "",
+		"pending_size":       "",
 		"ready_at":           nowUTC(),
 	})
 	if err != nil {
@@ -358,6 +370,55 @@ func hetznerUpgrade(ctx *sdk.AppCtx, inst *Instance, in UpgradeInstanceInput) (*
 		Status:      after.Status,
 		UpgradeDisk: in.UpgradeDisk,
 	}, nil
+}
+
+func reconcileHetznerUpgrading(ctx *sdk.AppCtx) {
+	rows, err := dbListInstances(ctx.AppDB(), "hetzner", "upgrading")
+	if err != nil {
+		ctx.Logger().Warn("instances: reconcile upgrading list failed", "err", err)
+		return
+	}
+	for _, inst := range rows {
+		if err := recoverHetznerUpgrade(ctx, inst); err != nil {
+			_, _ = updateInstanceAndEmit(ctx, inst.ID, map[string]any{"status": "error", "error_message": "upgrade recovery: " + err.Error()})
+			ctx.Logger().Error("instances: upgrade recovery failed", "id", inst.ID, "err", err)
+		}
+	}
+}
+
+func recoverHetznerUpgrade(ctx *sdk.AppCtx, inst *Instance) error {
+	bound := ctx.IntegrationFor("provider")
+	if bound == nil || bound.ConnectionID == 0 {
+		return errors.New("no VPS provider bound")
+	}
+	providerID := normalizeHetznerID(inst.ProviderID)
+	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(bound.ConnectionID, "server_get", map[string]any{"id": providerID})
+	if err != nil || res == nil || !res.Success {
+		return fmt.Errorf("server_get: %v %s", err, upstreamErrorString(res))
+	}
+	status, err := parseHetznerServerStatus(res.Data)
+	if err != nil {
+		return err
+	}
+	if status == "off" {
+		if err := hetznerRunAction(ctx, bound.ConnectionID, "server_poweron", map[string]any{"id": providerID}, 90*time.Second, true); err != nil {
+			return err
+		}
+	}
+	fresh, err := dbGetInstance(ctx.AppDB(), inst.ID)
+	if err != nil {
+		return err
+	}
+	if err := probeSSHReadyFn(fresh, 5*time.Minute); err != nil {
+		return err
+	}
+	actualSize := parseHetznerServerType(res.Data)
+	fields := map[string]any{"status": "ready", "pending_size": "", "ready_at": nowUTC(), "error_message": ""}
+	if actualSize != "" {
+		fields["size"] = actualSize
+	}
+	_, err = updateInstanceAndEmit(ctx, inst.ID, fields)
+	return err
 }
 
 func validateHetznerUpgradeTarget(ctx *sdk.AppCtx, inst *Instance, size string) (*ServerType, error) {
@@ -474,6 +535,20 @@ func parseHetznerServerStatus(data json.RawMessage) (string, error) {
 		return "", errors.New("server_get response missing server.status")
 	}
 	return v.Server.Status, nil
+}
+
+func parseHetznerServerType(data json.RawMessage) string {
+	var v struct {
+		Server struct {
+			ServerType struct {
+				Name string `json:"name"`
+			} `json:"server_type"`
+		} `json:"server"`
+	}
+	if json.Unmarshal(data, &v) != nil {
+		return ""
+	}
+	return v.Server.ServerType.Name
 }
 
 func parseHetznerActionID(data json.RawMessage) int64 {

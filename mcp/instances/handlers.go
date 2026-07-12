@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"time"
@@ -15,7 +16,7 @@ import (
 //   POST   /api/instances                    create  {name, provider?, region?, size?, image?}
 //   GET    /api/instances/<id>               one
 //   DELETE /api/instances/<id>               destroy (local refused)
-//   POST   /api/instances/<id>/upgrade       {size, upgrade_disk?, wait?}
+//   POST   /api/instances/<id>/upgrade       {size, upgrade_disk?}
 //   POST   /api/instances/<id>/run           {cmd, timeout_s?}
 //   POST   /api/instances/<id>/upload        {path, content_b64}
 //   POST   /api/instances/<id>/download      {path}
@@ -202,15 +203,10 @@ func (a *App) httpDestroy(w http.ResponseWriter, r *http.Request, id int64) {
 		httpErr(w, http.StatusNotFound, "instance not found")
 		return
 	}
-	if err := destroyProviderInstance(ctx, inst); err != nil {
+	if err := destroyManagedInstance(ctx, inst); err != nil {
 		httpProviderErr(w, err)
 		return
 	}
-	if err := deleteInstanceAndEmit(ctx, inst); err != nil {
-		httpErr(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	globalSSHPool.evict(id)
 	httpJSON(w, map[string]any{"destroyed": true, "id": id})
 }
 
@@ -223,15 +219,10 @@ func (a *App) httpUpgrade(w http.ResponseWriter, r *http.Request, id int64) {
 	var body struct {
 		Size        string `json:"size"`
 		UpgradeDisk bool   `json:"upgrade_disk"`
-		Wait        *bool  `json:"wait"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		httpErr(w, http.StatusBadRequest, "invalid json: "+err.Error())
 		return
-	}
-	wait := true
-	if body.Wait != nil {
-		wait = *body.Wait
 	}
 	inst, err := dbGetInstance(ctx.AppDB(), id)
 	if err != nil {
@@ -241,7 +232,7 @@ func (a *App) httpUpgrade(w http.ResponseWriter, r *http.Request, id int64) {
 	res, err := upgradeProviderInstance(ctx, inst, UpgradeInstanceInput{
 		Size:        body.Size,
 		UpgradeDisk: body.UpgradeDisk,
-		Wait:        wait,
+		Wait:        true,
 	})
 	if err != nil {
 		httpProviderErr(w, err)
@@ -258,6 +249,10 @@ func httpProviderErr(w http.ResponseWriter, err error) {
 		strings.Contains(msg, "requested but this Instances install is bound to") ||
 		strings.Contains(msg, "adapter is not implemented yet") {
 		status = http.StatusBadRequest
+	} else if strings.Contains(msg, "lifecycle operation already in progress") ||
+		strings.Contains(msg, "lifecycle changed before upgrade") ||
+		strings.Contains(msg, "cannot be marked ready from status") {
+		status = http.StatusConflict
 	}
 	httpErr(w, status, msg)
 }
@@ -307,6 +302,7 @@ func (a *App) httpUpload(w http.ResponseWriter, r *http.Request, id int64) {
 		httpErr(w, http.StatusMethodNotAllowed, "POST")
 		return
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, int64(maxEncodedFileBytes+4096))
 	var body struct {
 		Path       string `json:"path"`
 		ContentB64 string `json:"content_b64"`
@@ -403,7 +399,11 @@ func (a *App) httpWaitReady(w http.ResponseWriter, r *http.Request, id int64) {
 		httpJSON(w, map[string]any{"ready": true, "id": id, "status": inst.Status})
 		return
 	}
-	if err := probeSSHReady(inst, timeout); err != nil {
+	if inst.Status != "provisioning" {
+		httpErr(w, http.StatusConflict, fmt.Sprintf("instance cannot be marked ready from status=%s", inst.Status))
+		return
+	}
+	if err := probeSSHReadyFn(inst, timeout); err != nil {
 		httpErr(w, http.StatusGatewayTimeout, err.Error())
 		return
 	}
@@ -412,6 +412,10 @@ func (a *App) httpWaitReady(w http.ResponseWriter, r *http.Request, id int64) {
 }
 
 func (a *App) httpMetrics(w http.ResponseWriter, r *http.Request, id int64) {
+	if r.Method != http.MethodGet {
+		httpErr(w, http.StatusMethodNotAllowed, "GET")
+		return
+	}
 	inst, err := dbGetInstance(globalCtx.AppDB(), id)
 	if err != nil {
 		httpErr(w, http.StatusNotFound, "instance not found")

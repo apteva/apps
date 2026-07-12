@@ -28,6 +28,12 @@ import (
 	"golang.org/x/crypto/ssh"
 )
 
+const (
+	maxCommandOutputBytes = 1 << 20
+	maxFileTransferBytes  = 16 << 20
+	maxEncodedFileBytes   = ((maxFileTransferBytes + 2) / 3) * 4
+)
+
 // generateSSHKeypair creates a fresh Ed25519 keypair. Private key is
 // PEM-encoded OpenSSH format; public key is OpenSSH authorized_keys
 // format ("ssh-ed25519 AAAA..."). Both safe to pass into cloud-init
@@ -79,21 +85,43 @@ func dialSSH(inst *Instance, timeout time.Duration) (*ssh.Client, error) {
 	if port <= 0 {
 		port = 22
 	}
+	var observedHostKey string
 	cfg := &ssh.ClientConfig{
 		User: user,
 		Auth: []ssh.AuthMethod{ssh.PublicKeys(signer)},
-		// First-time-trust on host keys. Pinning on first connection
-		// is a v0.2 polish — for v0.1 we accept whatever the VPS
-		// presents at provisioning time. The keypair itself is the
-		// security boundary; MITM at first connect would need a
-		// network attacker between Apteva and the VPS provider's
-		// edge, which is a different threat model than what apps
-		// usually defend against.
-		HostKeyCallback: ssh.InsecureIgnoreHostKey(),
-		Timeout:         timeout,
+		// Trust on first use: the first successful connection pins the
+		// server key in the instance row. Every reconnect verifies it.
+		HostKeyCallback: func(_ string, _ net.Addr, key ssh.PublicKey) error {
+			encoded := base64.StdEncoding.EncodeToString(key.Marshal())
+			if inst.SSHHostKey != "" && inst.SSHHostKey != encoded {
+				return fmt.Errorf("SSH host key changed for instance %d (received %s)", inst.ID, ssh.FingerprintSHA256(key))
+			}
+			observedHostKey = encoded
+			return nil
+		},
+		Timeout: timeout,
 	}
 	addr := net.JoinHostPort(host, fmt.Sprintf("%d", port))
-	return ssh.Dial("tcp", addr, cfg)
+	client, err := ssh.Dial("tcp", addr, cfg)
+	if err != nil {
+		return nil, err
+	}
+	if inst.SSHHostKey == "" && observedHostKey != "" {
+		pinned := observedHostKey
+		if globalCtx != nil && globalCtx.AppDB() != nil {
+			pinned, err = dbPinSSHHostKey(globalCtx.AppDB(), inst.ID, observedHostKey)
+			if err != nil {
+				_ = client.Close()
+				return nil, fmt.Errorf("pin SSH host key: %w", err)
+			}
+		}
+		if pinned != observedHostKey {
+			_ = client.Close()
+			return nil, fmt.Errorf("SSH host key changed while connecting to instance %d", inst.ID)
+		}
+		inst.SSHHostKey = pinned
+	}
+	return client, nil
 }
 
 // ─── SSH client pool ──────────────────────────────────────────────
@@ -187,6 +215,19 @@ func (p *sshPool) evict(instID int64) {
 	}
 }
 
+func (p *sshPool) closeAll() {
+	p.mu.Lock()
+	clients := make([]*ssh.Client, 0, len(p.clients))
+	for id, client := range p.clients {
+		clients = append(clients, client)
+		delete(p.clients, id)
+	}
+	p.mu.Unlock()
+	for _, client := range clients {
+		_ = client.Close()
+	}
+}
+
 // ─── combined-output writer ───────────────────────────────────────
 //
 // crypto/ssh delivers stdout and stderr via two separate goroutines.
@@ -204,14 +245,41 @@ func (p *sshPool) evict(instID int64) {
 // CombinedOutput from os/exec) but no bytes are lost.
 
 type lockedWriter struct {
-	mu sync.Mutex
-	b  bytes.Buffer
+	mu        sync.Mutex
+	b         bytes.Buffer
+	max       int
+	truncated bool
 }
 
 func (w *lockedWriter) Write(p []byte) (int, error) {
 	w.mu.Lock()
 	defer w.mu.Unlock()
-	return w.b.Write(p)
+	n := len(p)
+	if w.max > 0 {
+		remaining := w.max - w.b.Len()
+		if remaining <= 0 {
+			w.truncated = true
+			return n, nil
+		}
+		if len(p) > remaining {
+			p = p[:remaining]
+			w.truncated = true
+		}
+	}
+	_, _ = w.b.Write(p)
+	return n, nil
+}
+
+func (w *lockedWriter) Bytes() []byte {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return append([]byte(nil), w.b.Bytes()...)
+}
+
+func (w *lockedWriter) Truncated() bool {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.truncated
 }
 
 func (w *lockedWriter) String() string {
@@ -258,7 +326,7 @@ func runSSHOnce(client *ssh.Client, cmd string, timeout time.Duration) (string, 
 	}
 	defer session.Close()
 
-	writer := &lockedWriter{}
+	writer := &lockedWriter{max: maxCommandOutputBytes}
 	session.Stdout = writer
 	session.Stderr = writer
 
@@ -275,15 +343,9 @@ func runSSHOnce(client *ssh.Client, cmd string, timeout time.Duration) (string, 
 		_ = session.Signal(ssh.SIGTERM)
 		_ = session.Close()
 		out := writer.String()
-		if len(out) > 1<<20 {
-			out = out[:1<<20]
-		}
 		return out, -1, fmt.Errorf("command timed out after %s", timeout)
 	case runErr := <-done:
 		out := writer.String()
-		if len(out) > 1<<20 {
-			out = out[:1<<20]
-		}
 		exit := 0
 		if runErr != nil {
 			if exitErr, ok := runErr.(*ssh.ExitError); ok {
@@ -335,6 +397,9 @@ func isSSHConnError(err error) bool {
 // (e.g. media render workers staging multiple sources) reuse the
 // connection.
 func uploadSSH(inst *Instance, path, contentB64 string) (bytesWritten int, err error) {
+	if len(contentB64) > maxEncodedFileBytes {
+		return 0, fmt.Errorf("file exceeds %d byte upload limit", maxFileTransferBytes)
+	}
 	body, err := base64.StdEncoding.DecodeString(contentB64)
 	if err != nil {
 		return 0, fmt.Errorf("invalid base64: %w", err)
@@ -343,19 +408,22 @@ func uploadSSH(inst *Instance, path, contentB64 string) (bytesWritten int, err e
 	if err != nil {
 		return 0, fmt.Errorf("ssh dial: %w", err)
 	}
-	n, runErr := uploadSSHOnce(client, path, contentB64, body)
+	if len(body) > maxFileTransferBytes {
+		return 0, fmt.Errorf("file exceeds %d byte upload limit", maxFileTransferBytes)
+	}
+	n, runErr := uploadSSHOnce(client, path, contentB64, len(body))
 	if runErr != nil && !fresh && isSSHConnError(runErr) {
 		globalSSHPool.drop(inst.ID, client)
 		client, _, err = globalSSHPool.get(inst)
 		if err != nil {
 			return 0, fmt.Errorf("ssh redial after stale connection: %w", err)
 		}
-		n, runErr = uploadSSHOnce(client, path, contentB64, body)
+		n, runErr = uploadSSHOnce(client, path, contentB64, len(body))
 	}
 	return n, runErr
 }
 
-func uploadSSHOnce(client *ssh.Client, path, contentB64 string, decodedBody []byte) (int, error) {
+func uploadSSHOnce(client *ssh.Client, path, contentB64 string, decodedLen int) (int, error) {
 	session, err := client.NewSession()
 	if err != nil {
 		return 0, err
@@ -380,7 +448,7 @@ func uploadSSHOnce(client *ssh.Client, path, contentB64 string, decodedBody []by
 	if err := session.Wait(); err != nil {
 		return 0, fmt.Errorf("remote write failed: %w", err)
 	}
-	return len(decodedBody), nil
+	return decodedLen, nil
 }
 
 func downloadSSH(inst *Instance, path string) (contentB64 string, bytesRead int, err error) {
@@ -409,16 +477,19 @@ func downloadSSHOnce(client *ssh.Client, path string) ([]byte, error) {
 		return nil, err
 	}
 	defer session.Close()
-	var stdout bytes.Buffer
-	var stderr bytes.Buffer
-	session.Stdout = &stdout
-	session.Stderr = &stderr
+	stdout := &lockedWriter{max: maxFileTransferBytes + 1}
+	stderr := &lockedWriter{max: maxCommandOutputBytes}
+	session.Stdout = stdout
+	session.Stderr = stderr
 	if err := session.Run(fmt.Sprintf(`cat %q`, path)); err != nil {
 		msg := strings.TrimSpace(stderr.String())
 		if msg != "" {
 			return nil, fmt.Errorf("remote read failed: %w: %s", err, msg)
 		}
 		return nil, fmt.Errorf("remote read failed: %w", err)
+	}
+	if stdout.Truncated() || len(stdout.Bytes()) > maxFileTransferBytes {
+		return nil, fmt.Errorf("remote file exceeds %d byte download limit", maxFileTransferBytes)
 	}
 	return stdout.Bytes(), nil
 }
@@ -454,3 +525,5 @@ func probeSSHReady(inst *Instance, timeout time.Duration) error {
 	}
 	return lastErr
 }
+
+var probeSSHReadyFn = probeSSHReady

@@ -63,6 +63,23 @@ func providerAdapterUnavailable(provider, operation string) error {
 	return fmt.Errorf("provider %q is compatible at the integration-binding layer, but the Instances %s adapter is not implemented yet; implemented provider adapters: hetzner, digitalocean, runpod", provider, operation)
 }
 
+func instanceCapabilities(inst *Instance) InstanceCapabilities {
+	if inst == nil {
+		return InstanceCapabilities{}
+	}
+	if inst.IsLocal() {
+		return InstanceCapabilities{Run: true, Upload: true, Download: true, Metrics: true}
+	}
+	cap := InstanceCapabilities{Run: true, Upload: true, Download: true, Metrics: true, Tunnel: true}
+	switch normalizeProvider(inst.Provider) {
+	case "hetzner":
+		cap.Destroy, cap.Upgrade = true, true
+	case "digitalocean", "runpod":
+		cap.Destroy = true
+	}
+	return cap
+}
+
 func provisionInstance(ctx *sdk.AppCtx, in CreateInstanceInput) (*Instance, error) {
 	provider, err := resolveInstanceProvider(ctx, in.Provider)
 	if err != nil {
@@ -91,6 +108,60 @@ func destroyProviderInstance(ctx *sdk.AppCtx, inst *Instance) error {
 		return runPodDestroy(ctx, inst)
 	default:
 		return providerAdapterUnavailable(inst.Provider, "destroy")
+	}
+}
+
+func destroyManagedInstance(ctx *sdk.AppCtx, inst *Instance) error {
+	if inst == nil {
+		return ErrInstanceNotFound
+	}
+	if !instanceCapabilities(inst).Destroy {
+		return providerAdapterUnavailable(inst.Provider, "destroy")
+	}
+	previous := inst.Status
+	_, claimed, err := transitionInstanceAndEmit(ctx, inst.ID,
+		[]string{"pending", "provisioning", "ready", "error"}, "destroying", nil)
+	if err != nil {
+		return err
+	}
+	if !claimed {
+		return fmt.Errorf("instance lifecycle operation already in progress (status=%s)", previous)
+	}
+	claimedInst, err := dbGetInstance(ctx.AppDB(), inst.ID)
+	if err != nil {
+		return err
+	}
+	if err := destroyProviderInstance(ctx, claimedInst); err != nil {
+		_, _, _ = transitionInstanceAndEmit(ctx, inst.ID, []string{"destroying"}, previous, map[string]any{"error_message": err.Error()})
+		return err
+	}
+	if err := deleteInstanceAndEmit(ctx, claimedInst); err != nil {
+		return err
+	}
+	globalTunnelRegistry.closeInstance(inst.ID)
+	globalSSHPool.evict(inst.ID)
+	clearMetricsCache(inst.ID)
+	return nil
+}
+
+func reconcileDestroying(ctx *sdk.AppCtx) {
+	rows, err := dbListInstances(ctx.AppDB(), "", "destroying")
+	if err != nil {
+		ctx.Logger().Warn("instances: reconcile destroying list failed", "err", err)
+		return
+	}
+	for _, inst := range rows {
+		if err := destroyProviderInstance(ctx, inst); err != nil {
+			ctx.Logger().Error("instances: destroy recovery failed", "id", inst.ID, "err", err)
+			continue
+		}
+		if err := deleteInstanceAndEmit(ctx, inst); err != nil {
+			ctx.Logger().Error("instances: destroy recovery delete failed", "id", inst.ID, "err", err)
+			continue
+		}
+		globalTunnelRegistry.closeInstance(inst.ID)
+		globalSSHPool.evict(inst.ID)
+		clearMetricsCache(inst.ID)
 	}
 }
 

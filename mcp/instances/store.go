@@ -26,16 +26,29 @@ type Instance struct {
 	SSHPort    int    `json:"ssh_port,omitempty"`
 	// SSH keys are kept server-side only — never returned to MCP /
 	// REST callers. Cleared in API responses by stripSecrets().
-	SSHPrivateKey    string `json:"-"`
-	SSHPublicKey     string `json:"ssh_public_key,omitempty"`
-	TagsJSON         string `json:"tags_json,omitempty"`
-	ResourcesJSON    string `json:"resources_json,omitempty"`
-	PortsJSON        string `json:"ports_json,omitempty"`
-	MonthlyCostCents int    `json:"monthly_cost_cents"`
-	ErrorMessage     string `json:"error,omitempty"`
-	CreatedAt        string `json:"created_at,omitempty"`
-	ReadyAt          string `json:"ready_at,omitempty"`
-	DestroyedAt      string `json:"destroyed_at,omitempty"`
+	SSHPrivateKey    string               `json:"-"`
+	SSHPublicKey     string               `json:"ssh_public_key,omitempty"`
+	SSHHostKey       string               `json:"-"`
+	TagsJSON         string               `json:"tags_json,omitempty"`
+	ResourcesJSON    string               `json:"resources_json,omitempty"`
+	PortsJSON        string               `json:"ports_json,omitempty"`
+	MonthlyCostCents int                  `json:"monthly_cost_cents"`
+	PendingSize      string               `json:"pending_size,omitempty"`
+	Capabilities     InstanceCapabilities `json:"capabilities"`
+	ErrorMessage     string               `json:"error,omitempty"`
+	CreatedAt        string               `json:"created_at,omitempty"`
+	ReadyAt          string               `json:"ready_at,omitempty"`
+	DestroyedAt      string               `json:"destroyed_at,omitempty"`
+}
+
+type InstanceCapabilities struct {
+	Run      bool `json:"run"`
+	Upload   bool `json:"upload"`
+	Download bool `json:"download"`
+	Metrics  bool `json:"metrics"`
+	Tunnel   bool `json:"tunnel"`
+	Destroy  bool `json:"destroy"`
+	Upgrade  bool `json:"upgrade"`
 }
 
 // IsLocal returns true for the built-in localhost instance (id=0,
@@ -49,6 +62,8 @@ func (i *Instance) IsLocal() bool { return i.Provider == "local" }
 func (i *Instance) stripSecrets() *Instance {
 	c := *i
 	c.SSHPrivateKey = ""
+	c.SSHHostKey = ""
+	c.Capabilities = instanceCapabilities(&c)
 	return &c
 }
 
@@ -69,10 +84,12 @@ type CreateInstanceInput struct {
 	SSHPort          int
 	SSHPrivateKey    string
 	SSHPublicKey     string
+	SSHHostKey       string
 	TagsJSON         string
 	ResourcesJSON    string
 	PortsJSON        string
 	MonthlyCostCents int
+	PendingSize      string
 }
 
 // ─── Errors ────────────────────────────────────────────────────────
@@ -100,15 +117,15 @@ func ensureLocalInstance(db *sql.DB) error {
 // ─── DB ops ────────────────────────────────────────────────────────
 
 const instanceCols = `id, name, provider, provider_id, public_ipv4, public_ipv6,
-		status, region, size, image, ssh_user, ssh_host, ssh_port, ssh_private_key, ssh_public_key,
-		tags_json, resources_json, ports_json, monthly_cost_cents, error_message,
+		status, region, size, image, ssh_user, ssh_host, ssh_port, ssh_private_key, ssh_public_key, ssh_host_key,
+		tags_json, resources_json, ports_json, monthly_cost_cents, pending_size, error_message,
 		COALESCE(created_at,''), COALESCE(ready_at,''), COALESCE(destroyed_at,'')`
 
 func scanInstance(s rowScanner) (*Instance, error) {
 	var i Instance
 	if err := s.Scan(&i.ID, &i.Name, &i.Provider, &i.ProviderID, &i.PublicIPv4, &i.PublicIPv6,
-		&i.Status, &i.Region, &i.Size, &i.Image, &i.SSHUser, &i.SSHHost, &i.SSHPort, &i.SSHPrivateKey, &i.SSHPublicKey,
-		&i.TagsJSON, &i.ResourcesJSON, &i.PortsJSON, &i.MonthlyCostCents, &i.ErrorMessage,
+		&i.Status, &i.Region, &i.Size, &i.Image, &i.SSHUser, &i.SSHHost, &i.SSHPort, &i.SSHPrivateKey, &i.SSHPublicKey, &i.SSHHostKey,
+		&i.TagsJSON, &i.ResourcesJSON, &i.PortsJSON, &i.MonthlyCostCents, &i.PendingSize, &i.ErrorMessage,
 		&i.CreatedAt, &i.ReadyAt, &i.DestroyedAt,
 	); err != nil {
 		return nil, err
@@ -143,12 +160,12 @@ func dbCreateInstance(db *sql.DB, in CreateInstanceInput) (*Instance, error) {
 	res, err := db.Exec(`
 		INSERT INTO instances (
 			name, provider, provider_id, public_ipv4, public_ipv6, status,
-			region, size, image, ssh_user, ssh_host, ssh_port, ssh_private_key, ssh_public_key,
-			tags_json, resources_json, ports_json, monthly_cost_cents, created_at
-		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			region, size, image, ssh_user, ssh_host, ssh_port, ssh_private_key, ssh_public_key, ssh_host_key,
+			tags_json, resources_json, ports_json, monthly_cost_cents, pending_size, created_at
+		) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		in.Name, in.Provider, in.ProviderID, in.PublicIPv4, in.PublicIPv6, in.Status,
-		in.Region, in.Size, in.Image, in.SSHUser, in.SSHHost, in.SSHPort, in.SSHPrivateKey, in.SSHPublicKey,
-		nullStr(in.TagsJSON, "[]"), nullStr(in.ResourcesJSON, "{}"), nullStr(in.PortsJSON, "{}"), in.MonthlyCostCents, nowUTC(),
+		in.Region, in.Size, in.Image, in.SSHUser, in.SSHHost, in.SSHPort, in.SSHPrivateKey, in.SSHPublicKey, in.SSHHostKey,
+		nullStr(in.TagsJSON, "[]"), nullStr(in.ResourcesJSON, "{}"), nullStr(in.PortsJSON, "{}"), in.MonthlyCostCents, in.PendingSize, nowUTC(),
 	)
 	if err != nil {
 		return nil, err
@@ -175,7 +192,7 @@ func dbUpdateInstance(db *sql.DB, id int64, fields map[string]any) error {
 	for _, k := range []string{
 		"status", "provider_id", "public_ipv4", "public_ipv6",
 		"region", "size", "image", "ssh_user", "ssh_host", "ssh_port", "ssh_private_key",
-		"ssh_public_key", "tags_json", "resources_json", "ports_json", "monthly_cost_cents",
+		"ssh_public_key", "ssh_host_key", "tags_json", "resources_json", "ports_json", "monthly_cost_cents", "pending_size",
 		"error_message", "ready_at", "destroyed_at",
 	} {
 		if v, ok := fields[k]; ok {
@@ -189,6 +206,59 @@ func dbUpdateInstance(db *sql.DB, id int64, fields map[string]any) error {
 	args = append(args, id)
 	_, err := db.Exec(`UPDATE instances SET `+strings.Join(cols, ", ")+` WHERE id = ?`, args...)
 	return err
+}
+
+func dbTransitionStatus(db *sql.DB, id int64, from []string, to string, fields map[string]any) (bool, error) {
+	if id == 0 {
+		return false, ErrLocalInstanceImmutable
+	}
+	if len(from) == 0 {
+		return false, errors.New("source status required")
+	}
+	fields = cloneFields(fields)
+	fields["status"] = to
+	cols := make([]string, 0, len(fields))
+	args := make([]any, 0, len(fields)+len(from)+1)
+	for _, k := range []string{"status", "size", "pending_size", "error_message", "ready_at", "destroyed_at"} {
+		if v, ok := fields[k]; ok {
+			cols = append(cols, k+" = ?")
+			args = append(args, v)
+		}
+	}
+	args = append(args, id)
+	marks := make([]string, len(from))
+	for idx, status := range from {
+		marks[idx] = "?"
+		args = append(args, status)
+	}
+	res, err := db.Exec(`UPDATE instances SET `+strings.Join(cols, ", ")+` WHERE id = ? AND status IN (`+strings.Join(marks, ",")+`)`, args...)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n == 1, err
+}
+
+func dbPinSSHHostKey(db *sql.DB, id int64, encodedKey string) (string, error) {
+	if encodedKey == "" {
+		return "", errors.New("empty SSH host key")
+	}
+	if _, err := db.Exec(`UPDATE instances SET ssh_host_key = ? WHERE id = ? AND ssh_host_key = ''`, encodedKey, id); err != nil {
+		return "", err
+	}
+	var pinned string
+	if err := db.QueryRow(`SELECT ssh_host_key FROM instances WHERE id = ?`, id).Scan(&pinned); err != nil {
+		return "", err
+	}
+	return pinned, nil
+}
+
+func cloneFields(fields map[string]any) map[string]any {
+	out := make(map[string]any, len(fields)+1)
+	for k, v := range fields {
+		out[k] = v
+	}
+	return out
 }
 
 // dbDeleteInstance hard-removes the row. Caller is responsible for

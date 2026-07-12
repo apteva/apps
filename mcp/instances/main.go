@@ -40,7 +40,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: instances
 display_name: Instances
-version: 0.4.17
+version: 0.4.18
 description: |
   Compute-host inventory for Apteva. Manages local machine + VPS
   instances through a generic provider binding. Compatible provider
@@ -75,10 +75,12 @@ provides:
     - { name: instance_get,          description: "Fetch one instance by id." }
     - { name: instance_list,         description: "List instances. Args: provider? (filter), status? (filter)." }
     - { name: instance_destroy,      description: "Terminate the instance (refused for local id 0). Args: id." }
-    - { name: instance_upgrade,      description: "In-place resize of a remote instance where the provider adapter supports it. Hetzner is implemented today. Args: id, size, upgrade_disk?, wait?." }
+    - { name: instance_upgrade,      description: "In-place resize of a remote instance where the provider adapter supports it. Hetzner is implemented today. Args: id, size, upgrade_disk?. Always waits for SSH readiness." }
     - { name: instance_run_command,  description: "Execute a shell command. Local: exec; remote: SSH. Args: id, cmd, timeout_s?." }
     - { name: instance_upload_file,  description: "Write a file. Local: filesystem (path-allowlisted); remote: SCP. Args: id, path, content_b64." }
     - { name: instance_download_file, description: "Read a file. Local: filesystem (path-allowlisted); remote: SSH cat. Args: id, path." }
+    - { name: instance_open_tunnel,  description: "Open or reuse a loopback-only TCP tunnel through remote SSH. Args: id, target_port." }
+    - { name: instance_close_tunnel, description: "Close a loopback TCP tunnel. Args: id, target_port." }
     - { name: instance_wait_ready,   description: "Poll the instance until SSH accepts the key and can run a non-interactive command. Args: id, timeout_s?." }
     - { name: instance_metrics,      description: "CPU / memory / disk / network / load / uptime. Args: id." }
     - { name: instance_list_server_types, description: "Live list of active, non-deprecated VPS server types (sizes) from the bound provider — name, cores, memory_gb, disk_gb, price, available_in. Use to discover valid sizes for instance_create. Args: provider? (default: bound provider)." }
@@ -153,7 +155,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: main
+    ref: instances/v0.4.18
     entry: mcp/instances
   port: 8080
   health_check: /health
@@ -203,11 +205,17 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	go reconcileHetznerProvisioning(ctx)
 	go reconcileDigitalOceanProvisioning(ctx)
 	go reconcileRunPodProvisioning(ctx)
+	go reconcileHetznerUpgrading(ctx)
+	go reconcileDestroying(ctx)
 
 	return nil
 }
 
-func (a *App) OnUnmount(*sdk.AppCtx) error       { return nil }
+func (a *App) OnUnmount(*sdk.AppCtx) error {
+	globalTunnelRegistry.closeAll()
+	globalSSHPool.closeAll()
+	return nil
+}
 func (a *App) Channels() []sdk.ChannelFactory    { return nil }
 func (a *App) Workers() []sdk.Worker             { return nil }
 func (a *App) EventHandlers() []sdk.EventHandler { return nil }

@@ -145,6 +145,25 @@ func updateInstanceAndEmit(ctx *sdk.AppCtx, id int64, fields map[string]any) (*I
 	return after, nil
 }
 
+func transitionInstanceAndEmit(ctx *sdk.AppCtx, id int64, from []string, to string, fields map[string]any) (*Instance, bool, error) {
+	before, err := dbGetInstance(ctx.AppDB(), id)
+	if err != nil {
+		return nil, false, err
+	}
+	ok, err := dbTransitionStatus(ctx.AppDB(), id, from, to, fields)
+	if err != nil || !ok {
+		return before, ok, err
+	}
+	after, err := dbGetInstance(ctx.AppDB(), id)
+	if err != nil {
+		return nil, false, err
+	}
+	if before.Status != after.Status {
+		emitInstanceStatus(ctx, after)
+	}
+	return after, true, nil
+}
+
 func deleteInstanceAndEmit(ctx *sdk.AppCtx, inst *Instance) error {
 	if err := dbDeleteInstance(ctx.AppDB(), inst.ID); err != nil {
 		return err

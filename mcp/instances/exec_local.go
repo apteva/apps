@@ -46,10 +46,11 @@ func runLocal(cmd string, timeout time.Duration) (output string, exitCode int, e
 	defer cancel()
 
 	c := exec.CommandContext(ctx, "sh", "-c", cmd)
-	out, runErr := c.CombinedOutput()
-	if len(out) > 1<<20 {
-		out = out[:1<<20]
-	}
+	writer := &lockedWriter{max: maxCommandOutputBytes}
+	c.Stdout = writer
+	c.Stderr = writer
+	runErr := c.Run()
+	out := writer.String()
 	exit := -1
 	if c.ProcessState != nil {
 		exit = c.ProcessState.ExitCode()
@@ -65,6 +66,9 @@ func runLocal(cmd string, timeout time.Duration) (output string, exitCode int, e
 // (../) — even though sandboxes leak through symlinks anyway, both
 // guards together raise the bar enough for the MCP surface.
 func uploadLocal(ctx *sdk.AppCtx, path string, contentB64 string) (bytesWritten int, err error) {
+	if len(contentB64) > maxEncodedFileBytes {
+		return 0, fmt.Errorf("file exceeds %d byte upload limit", maxFileTransferBytes)
+	}
 	root := localFilesRoot(ctx)
 	cleaned, err := resolveLocalPath(root, path)
 	if err != nil {
@@ -73,6 +77,9 @@ func uploadLocal(ctx *sdk.AppCtx, path string, contentB64 string) (bytesWritten 
 	body, err := base64.StdEncoding.DecodeString(contentB64)
 	if err != nil {
 		return 0, fmt.Errorf("invalid base64: %w", err)
+	}
+	if len(body) > maxFileTransferBytes {
+		return 0, fmt.Errorf("file exceeds %d byte upload limit", maxFileTransferBytes)
 	}
 	if err := os.MkdirAll(filepath.Dir(cleaned), 0o755); err != nil {
 		return 0, err
@@ -89,6 +96,13 @@ func downloadLocal(ctx *sdk.AppCtx, path string) (contentB64 string, bytesRead i
 	if err != nil {
 		return "", 0, err
 	}
+	info, err := os.Stat(cleaned)
+	if err != nil {
+		return "", 0, err
+	}
+	if info.Size() > maxFileTransferBytes {
+		return "", 0, fmt.Errorf("file exceeds %d byte download limit", maxFileTransferBytes)
+	}
 	body, err := os.ReadFile(cleaned)
 	if err != nil {
 		return "", 0, err
@@ -96,9 +110,9 @@ func downloadLocal(ctx *sdk.AppCtx, path string) (contentB64 string, bytesRead i
 	return base64.StdEncoding.EncodeToString(body), len(body), nil
 }
 
-// resolveLocalPath joins the requested path under root, then verifies
-// the absolute result still sits under root. Catches both literal
-// "../" and symlink-target tricks (after Abs() resolves the link).
+// resolveLocalPath joins the requested path under root, verifies the
+// lexical path, then resolves the nearest existing ancestor so a
+// symlink cannot redirect writes or reads outside the data root.
 func resolveLocalPath(root, requested string) (string, error) {
 	if requested == "" {
 		return "", errors.New("path required")
@@ -118,6 +132,30 @@ func resolveLocalPath(root, requested string) (string, error) {
 	}
 	if abs != rootAbs && !strings.HasPrefix(abs, rootAbs+string(filepath.Separator)) {
 		return "", fmt.Errorf("path escapes data root")
+	}
+	rootResolved, err := filepath.EvalSymlinks(rootAbs)
+	if err != nil {
+		return "", err
+	}
+	ancestor := abs
+	for {
+		if _, statErr := os.Lstat(ancestor); statErr == nil {
+			break
+		} else if !errors.Is(statErr, os.ErrNotExist) {
+			return "", statErr
+		}
+		parent := filepath.Dir(ancestor)
+		if parent == ancestor {
+			return "", fmt.Errorf("cannot resolve path ancestor")
+		}
+		ancestor = parent
+	}
+	resolvedAncestor, err := filepath.EvalSymlinks(ancestor)
+	if err != nil {
+		return "", err
+	}
+	if resolvedAncestor != rootResolved && !strings.HasPrefix(resolvedAncestor, rootResolved+string(filepath.Separator)) {
+		return "", fmt.Errorf("path escapes data root through symlink")
 	}
 	return abs, nil
 }

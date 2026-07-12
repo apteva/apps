@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	sdk "github.com/apteva/app-sdk"
 	tk "github.com/apteva/app-sdk/testkit"
@@ -149,6 +150,9 @@ func (p *recordingUpgradePlatform) ExecuteIntegrationTool(_ int64, tool string, 
 }
 
 func TestToolUpgrade_HetznerInPlaceSequence(t *testing.T) {
+	previousProbe := probeSSHReadyFn
+	probeSSHReadyFn = func(*Instance, time.Duration) error { return nil }
+	t.Cleanup(func() { probeSSHReadyFn = previousProbe })
 	platform := &recordingUpgradePlatform{}
 	rec := tk.NewEmitRecorder()
 	ctx := tk.NewAppCtx(t, "apteva.yaml",
@@ -169,7 +173,6 @@ func TestToolUpgrade_HetznerInPlaceSequence(t *testing.T) {
 		"id":           inst.ID,
 		"size":         "cx32",
 		"upgrade_disk": false,
-		"wait":         false,
 	})
 	if err != nil {
 		t.Fatal(err)

@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: instances
 display_name: Instances
-version: 0.4.17
+version: 0.4.18
 description: |
   Compute-host inventory + lifecycle for Apteva. The local Apteva
   machine is always available as a built-in instance (id 0); remote
@@ -65,13 +65,17 @@ provides:
     - name: instance_destroy
       description: Terminate the upstream resource and remove the row. Refused for local (id 0).
     - name: instance_upgrade
-      description: In-place resize of a remote instance where the provider adapter supports it. Hetzner is implemented today.
+      description: In-place resize of a remote instance where the provider adapter supports it. Hetzner is implemented today and the operation always waits for SSH readiness.
     - name: instance_run_command
       description: Execute a shell command (local exec or remote SSH). Output capped at 1 MB.
     - name: instance_upload_file
       description: Write file content (local filesystem or remote SCP-equivalent over SSH).
     - name: instance_download_file
       description: Read file content (local filesystem or remote SSH) as base64.
+    - name: instance_open_tunnel
+      description: Open or reuse a loopback-only TCP tunnel through remote SSH.
+    - name: instance_close_tunnel
+      description: Close a loopback TCP tunnel for an instance target port.
     - name: instance_wait_ready
       description: Poll the instance until SSH accepts the key and can run a non-interactive command.
     - name: instance_metrics
@@ -164,7 +168,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: main
+    ref: instances/v0.4.18
     entry: mcp/instances
   port: 8080
   health_check: /health
