@@ -371,7 +371,7 @@ func stopTenantProcessTree(seedPID int, marker string, port int, grace time.Dura
 func readProcTable() (map[int]procInfo, error) {
 	entries, err := os.ReadDir("/proc")
 	if err != nil {
-		return nil, err
+		return readPSProcTable()
 	}
 	out := make(map[int]procInfo)
 	for _, entry := range entries {
@@ -396,6 +396,43 @@ func readProcTable() (map[int]procInfo, error) {
 		out[pid] = procInfo{pid: pid, ppid: ppid, cmdline: strings.TrimSpace(cmdline), args: parts}
 	}
 	return out, nil
+}
+
+// readPSProcTable is the conservative fallback for macOS and other systems
+// without procfs. It preserves argument boundaries only for paths without
+// whitespace; processHasExactTenantArg therefore refuses ambiguous data-dir
+// paths instead of falling back to substring matching.
+func readPSProcTable() (map[int]procInfo, error) {
+	ps, err := exec.LookPath("ps")
+	if err != nil {
+		return nil, err
+	}
+	raw, err := exec.Command(ps, "-ww", "-axo", "pid=,ppid=,command=").Output()
+	if err != nil {
+		return nil, fmt.Errorf("read process table: %w", err)
+	}
+	return parsePSProcTable(string(raw)), nil
+}
+
+func parsePSProcTable(raw string) map[int]procInfo {
+	out := make(map[int]procInfo)
+	for _, line := range strings.Split(raw, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 3 {
+			continue
+		}
+		pid, err := strconv.Atoi(fields[0])
+		if err != nil || pid <= 0 {
+			continue
+		}
+		ppid, err := strconv.Atoi(fields[1])
+		if err != nil || ppid < 0 {
+			continue
+		}
+		args := append([]string(nil), fields[2:]...)
+		out[pid] = procInfo{pid: pid, ppid: ppid, cmdline: strings.Join(args, " "), args: args}
+	}
+	return out
 }
 
 func parseProcPPID(stat string) (int, bool) {

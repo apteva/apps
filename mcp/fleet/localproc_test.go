@@ -47,6 +47,29 @@ func TestParseProcPPID(t *testing.T) {
 	}
 }
 
+func TestParsePSProcTableFindsExactTenantParent(t *testing.T) {
+	marker := "/Users/test/.apteva-fleet/acme"
+	procs := parsePSProcTable(`
+  100   50 /opt/apteva/apteva-server
+   50    1 /opt/apteva/apteva --data-dir /Users/test/.apteva-fleet/acme --port 7100 --no-browser
+  200    1 /opt/other --data-dir /Users/test/.apteva-fleet/acme-other
+`)
+	root, ok := tenantTreeRoot(100, marker, procs)
+	if !ok || root != 50 {
+		t.Fatalf("tenantTreeRoot = %d, %v; want 50, true", root, ok)
+	}
+	if got := procTreePIDs(root, procs); !reflect.DeepEqual(got, []int{100, 50}) {
+		t.Fatalf("procTreePIDs = %v, want [100 50]", got)
+	}
+}
+
+func TestParsePSProcTableRejectsPrefixOnlyMatch(t *testing.T) {
+	procs := parsePSProcTable(`100 1 /opt/apteva/apteva --data-dir /tmp/fleet/acme-other`)
+	if root, ok := tenantTreeRoot(100, "/tmp/fleet/acme", procs); ok || root != 0 {
+		t.Fatalf("prefix-only marker matched root %d", root)
+	}
+}
+
 func TestTenantTreeRoot_UsesOnlyMarkedAncestor(t *testing.T) {
 	procs := map[int]procInfo{
 		1:   {pid: 1, ppid: 0, cmdline: "/sbin/init"},
