@@ -124,6 +124,31 @@ func TestStreamTenantArchiveLocalCopiesSQLiteAndSkipsSidecars(t *testing.T) {
 	}
 }
 
+func TestTransferTenantDataRemovesCopiedFleetPID(t *testing.T) {
+	t.Setenv("FLEET_DATA_ROOT", t.TempDir())
+	src := filepath.Join(t.TempDir(), "source")
+	dst := filepath.Join(t.TempDir(), "target")
+	if err := os.MkdirAll(src, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(src, "fleet.pid"), []byte("4242\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(src, "state.txt"), []byte("preserved"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	app := &App{}
+	if err := app.transferTenantData(nil, fleetHost{}, fleetHost{}, src, dst, "target", true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(filepath.Join(dst, "fleet.pid")); !os.IsNotExist(err) {
+		t.Fatalf("transferred fleet.pid was not removed: %v", err)
+	}
+	if raw, err := os.ReadFile(filepath.Join(dst, "state.txt")); err != nil || string(raw) != "preserved" {
+		t.Fatalf("tenant state not preserved: value=%q err=%v", raw, err)
+	}
+}
+
 func TestTransferURLRequiresHTTPSAndDoesNotRegisterRejectedTransfer(t *testing.T) {
 	app := &App{}
 	if err := app.initTransferState(); err != nil {
