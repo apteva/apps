@@ -9,6 +9,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
 
 	sdk "github.com/apteva/app-sdk"
 	_ "modernc.org/sqlite"
@@ -17,7 +18,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: fleet
 display_name: Fleet
-version: 0.8.13
+version: 0.8.14
 description: Control plane for a local fleet of apteva tenants.
 author: Apteva
 scopes: [project, global]
@@ -134,7 +135,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: fleet/v0.8.13
+    ref: fleet/v0.8.14
     entry: mcp/fleet
   image: ghcr.io/apteva/fleet:0.1.0
   port: 8080
@@ -174,6 +175,8 @@ type App struct {
 	hostedTunnelMu sync.Mutex
 	hostedTunnels  map[hostedTunnelKey]int
 	dirtyTunnels   map[hostedTunnelKey]bool
+	runtimeMu      sync.Mutex
+	runtimeReady   map[int64]time.Time
 }
 
 // globalCtx captures the platform context at OnMount so HTTP handlers
@@ -204,6 +207,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	a.metaCache = map[string]metaCacheEntry{}
 	a.hostedTunnels = map[hostedTunnelKey]int{}
 	a.dirtyTunnels = map[hostedTunnelKey]bool{}
+	a.runtimeReady = map[int64]time.Time{}
 	if err := a.initTransferState(); err != nil {
 		return err
 	}

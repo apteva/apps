@@ -77,6 +77,19 @@ func (a *App) toolMigrate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	// Complete every remote prerequisite before stopping the source. A
+	// package, file-stream, disk, or tunnel failure must leave the running
+	// production tenant completely untouched.
+	if !sourceHost.IsLocal() {
+		if err := a.ensureHostedRuntime(ctx, sourceHost.InstanceID); err != nil {
+			return nil, fmt.Errorf("source host preflight: %w", err)
+		}
+	}
+	if !targetHost.IsLocal() {
+		if err := a.ensureHostedRuntime(ctx, targetHost.InstanceID); err != nil {
+			return nil, fmt.Errorf("target host preflight: %w", err)
+		}
+	}
 	version := tenantVersion(t)
 	prevStatus := t.Status
 

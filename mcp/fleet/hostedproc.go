@@ -163,6 +163,9 @@ func (a *App) spawnHostedTenant(ctx *sdk.AppCtx, spec hostedSpawnSpec) (setupTok
 	if err := validateTenantPort(spec.Port); err != nil {
 		return "", "", err
 	}
+	if err := a.ensureHostedRuntime(ctx, spec.InstanceID); err != nil {
+		return "", "", err
+	}
 	if spec.AptevaVer == "" {
 		// Network-failure tolerant: fall back to "latest" string, the
 		// remote npm install will resolve it.
