@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"time"
 
 	sdk "github.com/apteva/app-sdk"
 )
@@ -76,6 +77,10 @@ func (a *App) toolClone(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if v, ok := args["start"].(bool); ok {
 		start = v
 	}
+	cloneVersion := tenantVersion(source)
+	if start && !supportsCloneRuntimeRecovery(cloneVersion) {
+		return nil, fmt.Errorf("source tenant runs Apteva %q; clone rehearsal requires %s or newer — update the tenant before cloning", cloneVersion, cloneQuarantineMinAptevaVersion)
+	}
 	status := StatusStopped
 	if start {
 		status = StatusStarting
@@ -91,6 +96,13 @@ func (a *App) toolClone(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if sourceHost.IsLocal() {
 		if _, err := os.Stat(sourceDir); err != nil {
 			return nil, fmt.Errorf("source tenant data dir: %w", err)
+		}
+	}
+	var requiredApps []tenantAppRuntime
+	if start {
+		requiredApps, err = a.tenantAppRuntimes(ctx, sourceHost, sourceDir)
+		if err != nil {
+			return nil, fmt.Errorf("inventory source app runtimes: %w", err)
 		}
 	}
 	clone := &Tenant{
@@ -109,8 +121,12 @@ func (a *App) toolClone(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return nil, err
 	}
 	cleanup := true
+	targetStarted := false
 	defer func() {
 		if cleanup {
+			if targetStarted {
+				_ = a.stopTenantOnHost(ctx, clone, port)
+			}
 			_ = a.store.hardDelete(clone.ID)
 			_ = a.removeTenantData(ctx, targetHost, slug, targetDir)
 		}
@@ -140,28 +156,39 @@ func (a *App) toolClone(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 			"domains_copied":   false,
 		}, nil
 	}
-	baseURL, newStatus, err := a.startTenantOnHost(ctx, targetHost, clone.ID, slug, targetDir, tenantVersion(source), port, source.Status)
+	baseURL, _, err := a.startTenantOnHostMode(ctx, targetHost, clone.ID, slug, targetDir, cloneVersion, port, source.Status, true)
 	if err != nil {
 		_ = a.store.setStatus(clone.ID, StatusFailed, "user")
 		_ = a.store.recordEvent(clone.ID, "clone_start_failed", "user", map[string]any{"error": err.Error()})
 		return nil, fmt.Errorf("start cloned tenant: %w", err)
 	}
+	targetStarted = true
+	if err := a.waitForQuarantinedRuntimes(ctx, targetHost, targetDir, requiredApps, 10*time.Minute); err != nil {
+		_ = a.store.setStatus(clone.ID, StatusFailed, "user")
+		_ = a.store.recordEvent(clone.ID, "clone_validation_failed", "user", map[string]any{"error": err.Error()})
+		return nil, fmt.Errorf("validate cloned app runtimes: %w", err)
+	}
+	if err := a.stopTenantOnHost(ctx, clone, port); err != nil {
+		return nil, fmt.Errorf("stop validated rehearsal clone: %w", err)
+	}
+	targetStarted = false
 	if err := a.store.setLocation(clone.ID, targetID, baseURL, targetDir); err != nil {
 		return nil, err
 	}
-	_ = a.store.setStatus(clone.ID, newStatus, "user")
-	_ = a.store.recordEvent(clone.ID, "started", "user", map[string]any{"source_tenant_id": source.ID, "port": port})
+	_ = a.store.setStatus(clone.ID, StatusStopped, "user")
+	_ = a.store.recordEvent(clone.ID, "clone_rehearsal_validated", "user", map[string]any{"source_tenant_id": source.ID, "port": port})
 	cleanup = false
 	ctx.Logger().Info("fleet: tenant cloned", "source", source.ID, "clone", clone.ID, "slug", slug, "instance_id", targetID, "port", port)
 	return map[string]any{
-		"tenant_id":        clone.ID,
-		"source_tenant_id": source.ID,
-		"slug":             slug,
-		"base_url":         a.publicBaseURL(baseURL),
-		"status":           newStatus,
-		"started":          true,
-		"instance_id":      targetID,
-		"domains_copied":   false,
+		"tenant_id":           clone.ID,
+		"source_tenant_id":    source.ID,
+		"slug":                slug,
+		"base_url":            a.publicBaseURL(baseURL),
+		"status":              StatusStopped,
+		"started":             false,
+		"rehearsal_validated": true,
+		"instance_id":         targetID,
+		"domains_copied":      false,
 	}, nil
 }
 
