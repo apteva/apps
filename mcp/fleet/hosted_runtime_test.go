@@ -40,7 +40,7 @@ func (p *hostedRuntimePlatform) CallApp(appName, tool string, input map[string]a
 			return nil, p.commandErr
 		}
 		return wrappedToolResult(map[string]any{
-			"output":    "FLEET_RUNTIME_READY node=v20.1.0 npm=10.1.0 available_kb=9000000\n",
+			"output":    "FLEET_RUNTIME_READY node=v20.1.0 npm=10.1.0 go=go1.24.6 available_kb=9000000\n",
 			"exit_code": 0,
 		}), nil
 	case "instance_upload_file":
@@ -106,6 +106,7 @@ func TestEnsureHostedRuntimeStopsAfterCommandFailure(t *testing.T) {
 func TestHostedRuntimeBootstrapSupportsExpectedSystems(t *testing.T) {
 	for _, required := range []string{
 		"apt-get", "apk", "dnf", "yum", "setup_22.x", "python3", "setsid",
+		"go_ready", "go_minor", "golang-go", "go.dev/dl/?mode=json", "sha256sum", "/usr/local/go",
 		"available_kb", "2097152", "FLEET_RUNTIME_READY",
 	} {
 		if !strings.Contains(hostedRuntimeBootstrapScript, required) {

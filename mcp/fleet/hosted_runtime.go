@@ -17,12 +17,20 @@ const (
 )
 
 const hostedRuntimeBootstrapScript = `set -eu
+go_ready() {
+  command -v go >/dev/null 2>&1 || return 1
+  go_version=$(go env GOVERSION 2>/dev/null || true)
+  go_minor=$(printf '%s\n' "$go_version" | sed -n 's/^go[0-9][0-9]*\.\([0-9][0-9]*\).*/\1/p')
+  case "$go_minor" in ''|*[!0-9]*) return 1;; esac
+  [ "$go_minor" -ge 22 ]
+}
+
 required_ready() {
-  for cmd in node npm python3 tar gzip curl setsid base64 df tail dirname mktemp mv grep; do
+  for cmd in node npm python3 tar gzip curl setsid base64 df tail dirname mktemp mv grep sed; do
     command -v "$cmd" >/dev/null 2>&1 || return 1
   done
   major=$(node -p 'Number(process.versions.node.split(".")[0])' 2>/dev/null || echo 0)
-  [ "$major" -ge 18 ]
+  [ "$major" -ge 18 ] && go_ready
 }
 
 if ! required_ready; then
@@ -37,7 +45,8 @@ if ! required_ready; then
 
   if command -v apt-get >/dev/null 2>&1; then
     $SUDO apt-get update -qq
-    $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq ca-certificates curl python3 tar gzip util-linux coreutils grep bash
+    $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq ca-certificates curl python3 tar gzip util-linux coreutils grep sed bash
+    $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq golang-go || true
     if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1 || [ "$(node -p 'Number(process.versions.node.split(".")[0])' 2>/dev/null || echo 0)" -lt 18 ]; then
       setup=$(mktemp /tmp/fleet-nodesource-XXXXXX.sh)
       trap 'rm -f "$setup"' EXIT
@@ -48,25 +57,68 @@ if ! required_ready; then
       trap - EXIT
     fi
   elif command -v apk >/dev/null 2>&1; then
-    $SUDO apk add --no-cache nodejs npm python3 tar gzip curl ca-certificates util-linux coreutils grep
+    $SUDO apk add --no-cache nodejs npm python3 tar gzip curl ca-certificates util-linux coreutils grep sed
+    $SUDO apk add --no-cache go || true
   elif command -v dnf >/dev/null 2>&1; then
-    $SUDO dnf install -y nodejs npm python3 tar gzip curl ca-certificates util-linux coreutils grep
+    $SUDO dnf install -y nodejs npm python3 tar gzip curl ca-certificates util-linux coreutils grep sed
+    $SUDO dnf install -y golang || true
   elif command -v yum >/dev/null 2>&1; then
-    $SUDO yum install -y nodejs npm python3 tar gzip curl ca-certificates util-linux coreutils grep
+    $SUDO yum install -y nodejs npm python3 tar gzip curl ca-certificates util-linux coreutils grep sed
+    $SUDO yum install -y golang || true
   else
     echo "unsupported package manager; Fleet supports apt, apk, dnf, and yum" >&2
     exit 127
   fi
+
+  if ! go_ready; then
+    arch=$(uname -m)
+    case "$arch" in
+      x86_64|amd64) go_arch=amd64;;
+      aarch64|arm64) go_arch=arm64;;
+      *) echo "unsupported architecture for Go runtime: $arch" >&2; exit 127;;
+    esac
+    metadata=$(mktemp /tmp/fleet-go-metadata-XXXXXX.json)
+    archive=$(mktemp /tmp/fleet-go-XXXXXX.tar.gz)
+    trap 'rm -f "$metadata" "$archive"' EXIT
+    curl -fsSL --retry 3 --connect-timeout 15 'https://go.dev/dl/?mode=json' -o "$metadata"
+    go_fields=$(python3 - "$metadata" "$go_arch" <<'PY'
+import json, sys
+releases = json.load(open(sys.argv[1]))
+arch = sys.argv[2]
+for release in releases:
+    if not release.get("stable"):
+        continue
+    for item in release.get("files", []):
+        if item.get("os") == "linux" and item.get("arch") == arch and item.get("kind") == "archive":
+            print(release["version"], item["filename"], item["sha256"])
+            raise SystemExit(0)
+raise SystemExit("go.dev returned no stable Linux archive")
+PY
+)
+    set -- $go_fields
+    go_release=${1:-}
+    go_file=${2:-}
+    go_sha=${3:-}
+    [ -n "$go_release" ] && [ -n "$go_file" ] && [ -n "$go_sha" ] || { echo "invalid Go release metadata" >&2; exit 1; }
+    curl -fsSL --retry 3 --connect-timeout 15 "https://go.dev/dl/$go_file" -o "$archive"
+    printf '%s  %s\n' "$go_sha" "$archive" | sha256sum -c - >/dev/null
+    $SUDO rm -rf /usr/local/go
+    $SUDO tar -C /usr/local -xzf "$archive"
+    $SUDO ln -sf /usr/local/go/bin/go /usr/local/bin/go
+    $SUDO ln -sf /usr/local/go/bin/gofmt /usr/local/bin/gofmt
+    rm -f "$metadata" "$archive"
+    trap - EXIT
+  fi
 fi
 
-required_ready || { echo "Fleet runtime preparation did not provide Node >=18, npm, Python 3, and required transfer/process utilities" >&2; exit 127; }
+required_ready || { echo "Fleet runtime preparation did not provide Node >=18, npm, Go >=1.22, Python 3, and required transfer/process utilities" >&2; exit 127; }
 mkdir -p /var/lib/apteva-fleet
 disk_line=$(df -Pk /var/lib/apteva-fleet | tail -n 1)
 set -- $disk_line
 available_kb=${4:-}
 case "$available_kb" in ''|*[!0-9]*) echo "could not determine available disk" >&2; exit 1;; esac
 [ "$available_kb" -ge 2097152 ] || { echo "Fleet host requires at least 2 GiB free under /var/lib" >&2; exit 1; }
-printf 'FLEET_RUNTIME_READY node=%s npm=%s available_kb=%s\n' "$(node --version)" "$(npm --version)" "$available_kb"
+printf 'FLEET_RUNTIME_READY node=%s npm=%s go=%s available_kb=%s\n' "$(node --version)" "$(npm --version)" "$(go env GOVERSION)" "$available_kb"
 `
 
 func (a *App) ensureHostedRuntime(ctx *sdk.AppCtx, instanceID int64) error {
