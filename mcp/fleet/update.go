@@ -87,6 +87,9 @@ func tenantAptevaBin(targetVersion string) string {
 func (a *App) resolveSpawnBin(ctx context.Context, explicitBin, explicitVersion string) (binPath, resolvedVersion string, err error) {
 	// 1) Explicit binary path always wins.
 	if strings.TrimSpace(explicitBin) != "" {
+		if !allowCustomBinary() {
+			return "", "", errors.New("custom apteva_bin is disabled; set FLEET_ALLOW_CUSTOM_BINARY=1 for trusted local development")
+		}
 		bin, herr := resolveAptevaBin(explicitBin)
 		return bin, "", herr
 	}
@@ -98,6 +101,10 @@ func (a *App) resolveSpawnBin(ctx context.Context, explicitBin, explicitVersion 
 	}
 	if requested == "" {
 		requested = "latest"
+	}
+	requested, err = validateAptevaVersion(requested, true)
+	if err != nil {
+		return "", "", err
 	}
 	// Explicit opt-out: "host" or "system" → use whatever's on PATH.
 	if requested == "host" || requested == "system" {
@@ -170,6 +177,13 @@ func npmLatestVersion(ctx context.Context) (string, error) {
 // and .bin/), so the host's global node_modules is untouched. Each
 // version is fully isolated.
 func ensureVersionInstalled(ctx context.Context, version string) (binPath string, err error) {
+	version, err = validateAptevaVersion(version, false)
+	if err != nil || version == "" {
+		if err == nil {
+			err = errors.New("version required")
+		}
+		return "", err
+	}
 	versionInstallMu.Lock()
 	defer versionInstallMu.Unlock()
 
@@ -234,6 +248,11 @@ func (a *App) toolUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	done, err := a.beginTenantOperation(t.ID, "update")
+	if err != nil {
+		return nil, err
+	}
+	defer done()
 	// kind=remote (tenant_connect to an external apteva-server) is
 	// out of scope — fleet doesn't supervise the binary. kind=local
 	// covers both true-local (instance_id=0) and hosted-on-VPS
@@ -250,6 +269,10 @@ func (a *App) toolUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		}
 		requested = v
 	}
+	requested, err = validateAptevaVersion(requested, false)
+	if err != nil {
+		return nil, err
+	}
 	if requested == t.CurrentVersion && requested == t.TargetVersion {
 		return map[string]any{
 			"tenant":  a.publicTenantView(t),
@@ -257,6 +280,21 @@ func (a *App) toolUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 			"reason":  "already at requested version",
 		}, nil
 	}
+	if requested == t.CurrentVersion {
+		if err := a.store.setTargetVersion(t.ID, requested); err != nil {
+			return nil, err
+		}
+		updated, _, _ := a.store.get(t.ID)
+		return map[string]any{
+			"tenant":  a.publicTenantView(updated),
+			"updated": false,
+			"version": requested,
+			"reason":  "tenant already runs the requested version; target pin updated",
+		}, nil
+	}
+	oldTarget := t.TargetVersion
+	oldVersion := tenantVersion(t)
+	restoreTarget := func() { _ = a.store.setTargetVersion(t.ID, oldTarget) }
 
 	port, _ := portFromBaseURL(t.BaseURL)
 	if port == 0 || t.ConfigDir == "" {
@@ -275,7 +313,8 @@ func (a *App) toolUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		if err := a.store.setTargetVersion(t.ID, requested); err != nil {
 			return nil, err
 		}
-		if err := stopHostedTenant(ctx, t.InstanceID, port, 10*time.Second); err != nil {
+		if err := stopHostedTenant(ctx, t.InstanceID, t.Slug, port, 10*time.Second); err != nil {
+			restoreTarget()
 			_ = a.store.recordEvent(t.ID, "update_failed", "tool:tenant_update",
 				map[string]any{"version": requested, "stage": "stop", "error": err.Error()})
 			return nil, fmt.Errorf("stop hosted: %w", err)
@@ -289,9 +328,22 @@ func (a *App) toolUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 			FreshSetup: false,
 		})
 		if sErr != nil {
+			restoreTarget()
+			_, _, rollbackErr := a.spawnHostedTenant(ctx, hostedSpawnSpec{
+				InstanceID: t.InstanceID,
+				InstanceIP: info.PublicIPv4,
+				Slug:       t.Slug,
+				Port:       port,
+				AptevaVer:  oldVersion,
+				FreshSetup: false,
+			})
 			_ = a.store.recordEvent(t.ID, "update_failed", "tool:tenant_update",
-				map[string]any{"version": requested, "stage": "spawn", "error": sErr.Error()})
-			return nil, fmt.Errorf("respawn hosted with apteva@%s: %w", requested, sErr)
+				map[string]any{"version": requested, "stage": "spawn", "error": sErr.Error(), "rollback_error": errorString(rollbackErr)})
+			if rollbackErr != nil {
+				_ = a.store.setStatus(t.ID, StatusFailed, "tool:tenant_update")
+				return nil, fmt.Errorf("respawn hosted with apteva@%s: %v; rollback to %s also failed: %w", requested, sErr, oldVersion, rollbackErr)
+			}
+			return nil, fmt.Errorf("respawn hosted with apteva@%s: %w (previous version restored)", requested, sErr)
 		}
 		_ = a.store.recordEvent(t.ID, "updated", "tool:tenant_update",
 			map[string]any{"version": requested, "instance_id": t.InstanceID})
@@ -310,6 +362,16 @@ func (a *App) toolUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 			map[string]any{"version": requested, "stage": "install", "error": err.Error()})
 		return nil, err
 	}
+	oldBin := tenantAptevaBin(oldVersion)
+	if oldVersion != requested {
+		if prepared, prepErr := ensureVersionInstalled(context.Background(), oldVersion); prepErr == nil {
+			oldBin = prepared
+		} else if fallback, fallbackErr := resolveAptevaBin(""); fallbackErr == nil {
+			oldBin = fallback
+		} else {
+			return nil, fmt.Errorf("prepare update rollback binary for %s: %w", oldVersion, prepErr)
+		}
+	}
 
 	// Persist target_version BEFORE the spawn so an auto-respawn after
 	// a crash mid-update still picks the new binary.
@@ -322,13 +384,25 @@ func (a *App) toolUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	// process tree. It deliberately avoids broad process-group kills
 	// from a port lookup, which can cross the parent service boundary.
 	if err := a.stopTenantBy(t.Slug, t.ConfigDir, port, 10*time.Second); err != nil {
+		restoreTarget()
 		return nil, fmt.Errorf("stop tenant: %w", err)
 	}
 	_, proc, spawnErr := a.spawnTenant(context.Background(), t.ID, t.Slug, t.ConfigDir, bin, port, false)
 	if spawnErr != nil {
+		restoreTarget()
+		_, oldProc, rollbackErr := a.spawnTenant(context.Background(), t.ID, t.Slug, t.ConfigDir, oldBin, port, false)
+		if rollbackErr == nil {
+			a.procMu.Lock()
+			a.procs[t.Slug] = oldProc
+			a.procMu.Unlock()
+		}
 		_ = a.store.recordEvent(t.ID, "update_failed", "tool:tenant_update",
-			map[string]any{"version": requested, "stage": "spawn", "error": spawnErr.Error()})
-		return nil, fmt.Errorf("respawn with apteva@%s: %w", requested, spawnErr)
+			map[string]any{"version": requested, "stage": "spawn", "error": spawnErr.Error(), "rollback_error": errorString(rollbackErr)})
+		if rollbackErr != nil {
+			_ = a.store.setStatus(t.ID, StatusFailed, "tool:tenant_update")
+			return nil, fmt.Errorf("respawn with apteva@%s: %v; rollback to %s also failed: %w", requested, spawnErr, oldVersion, rollbackErr)
+		}
+		return nil, fmt.Errorf("respawn with apteva@%s: %w (previous version restored)", requested, spawnErr)
 	}
 	a.procMu.Lock()
 	a.procs[t.Slug] = proc
@@ -343,6 +417,13 @@ func (a *App) toolUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		"version": requested,
 		"note":    "process respawned; current_version will reflect once the next health poll runs",
 	}, nil
+}
+
+func errorString(err error) string {
+	if err == nil {
+		return ""
+	}
+	return err.Error()
 }
 
 // toolCheckUpdates returns the npm latest version + per-tenant drift

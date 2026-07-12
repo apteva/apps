@@ -2,12 +2,17 @@ package main
 
 import (
 	"archive/tar"
+	"bytes"
 	"compress/gzip"
 	"database/sql"
 	"io"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestStreamTenantArchiveLocalCopiesSQLiteAndSkipsSidecars(t *testing.T) {
@@ -116,5 +121,104 @@ func TestStreamTenantArchiveLocalCopiesSQLiteAndSkipsSidecars(t *testing.T) {
 	}
 	if value != "from stream" {
 		t.Fatalf("sqlite value = %q", value)
+	}
+}
+
+func TestTransferURLRequiresHTTPSAndDoesNotRegisterRejectedTransfer(t *testing.T) {
+	app := &App{}
+	if err := app.initTransferState(); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("APTEVA_PUBLIC_URL", "http://controller.example")
+	if _, err := app.createTransferURL(nil, t.TempDir(), time.Minute); err == nil {
+		t.Fatal("expected insecure public URL to be rejected")
+	}
+	app.transferMu.Lock()
+	count := len(app.transfers)
+	app.transferMu.Unlock()
+	if count != 0 {
+		t.Fatalf("rejected transfer was registered: count=%d", count)
+	}
+}
+
+func TestSignedTransferCanOnlyBeConsumedOnce(t *testing.T) {
+	app := &App{}
+	if err := app.initTransferState(); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("APTEVA_PUBLIC_URL", "https://controller.example")
+	source := t.TempDir()
+	if err := os.WriteFile(filepath.Join(source, "state.txt"), []byte("state"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rawURL, err := app.createTransferURL(nil, source, time.Minute)
+	if err != nil {
+		t.Fatal(err)
+	}
+	u, err := url.Parse(rawURL)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := filepath.Base(u.Path)
+	requestURL := "/transfers/" + id + "?" + u.RawQuery
+	first := httptest.NewRecorder()
+	app.httpTransfer(first, httptest.NewRequest(http.MethodGet, requestURL, nil))
+	if first.Code != http.StatusOK || first.Body.Len() == 0 {
+		t.Fatalf("first transfer status=%d bytes=%d body=%s", first.Code, first.Body.Len(), first.Body.String())
+	}
+	second := httptest.NewRecorder()
+	app.httpTransfer(second, httptest.NewRequest(http.MethodGet, requestURL, nil))
+	if second.Code != http.StatusNotFound {
+		t.Fatalf("second transfer status=%d want 404", second.Code)
+	}
+}
+
+func TestStreamLocalTenantToLocalDoesNotUseArchiveBuffer(t *testing.T) {
+	t.Setenv("FLEET_DATA_ROOT", t.TempDir())
+	src := filepath.Join(t.TempDir(), "source")
+	dst := filepath.Join(t.TempDir(), "target")
+	if err := os.MkdirAll(filepath.Join(src, "nested"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	payload := bytes.Repeat([]byte("streamed-state-"), 1<<15)
+	if err := os.WriteFile(filepath.Join(src, "nested", "state.bin"), payload, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := streamLocalTenantToLocal(src, dst); err != nil {
+		t.Fatalf("stream copy: %v", err)
+	}
+	got, err := os.ReadFile(filepath.Join(dst, "nested", "state.bin"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(got, payload) {
+		t.Fatal("streamed payload changed")
+	}
+}
+
+func TestExtractTenantArchiveStreamRejectsTraversal(t *testing.T) {
+	var archive bytes.Buffer
+	gz := gzip.NewWriter(&archive)
+	tw := tar.NewWriter(gz)
+	content := []byte("escape")
+	if err := tw.WriteHeader(&tar.Header{Name: "../outside", Mode: 0o600, Size: int64(len(content))}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := tw.Write(content); err != nil {
+		t.Fatal(err)
+	}
+	if err := tw.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := gz.Close(); err != nil {
+		t.Fatal(err)
+	}
+	root := t.TempDir()
+	err := extractTenantArchiveStream(bytes.NewReader(archive.Bytes()), filepath.Join(root, "tenant"))
+	if err == nil {
+		t.Fatal("expected traversal archive to be rejected")
+	}
+	if _, statErr := os.Stat(filepath.Join(root, "outside")); !os.IsNotExist(statErr) {
+		t.Fatalf("traversal file was created: %v", statErr)
 	}
 }

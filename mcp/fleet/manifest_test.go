@@ -149,3 +149,19 @@ func TestPanel_DeclaredInBothManifests(t *testing.T) {
 		t.Error("embedded manifest: no ui_panels declared")
 	}
 }
+
+func TestOnlySignedCallbackRoutesBypassPlatformAuth(t *testing.T) {
+	routes := (&App{}).HTTPRoutes()
+	for _, route := range routes {
+		switch route.Pattern {
+		case "/transfers/", "/provider-grants/":
+			if !route.NoAuth {
+				t.Errorf("%s must bypass platform auth because it uses a scoped signed credential", route.Pattern)
+			}
+		default:
+			if route.NoAuth {
+				t.Errorf("authenticated Fleet route %s unexpectedly has NoAuth", route.Pattern)
+			}
+		}
+	}
+}

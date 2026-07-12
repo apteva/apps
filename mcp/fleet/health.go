@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sync"
 
 	sdk "github.com/apteva/app-sdk"
 )
@@ -23,6 +24,8 @@ func (a *App) runHealthPoller(ctx context.Context, app *sdk.AppCtx) error {
 	if err != nil {
 		return err
 	}
+	sem := make(chan struct{}, 8)
+	var wg sync.WaitGroup
 	for _, t := range tenants {
 		select {
 		case <-ctx.Done():
@@ -39,9 +42,24 @@ func (a *App) runHealthPoller(ctx context.Context, app *sdk.AppCtx) error {
 		case StatusDeleted, StatusStopped, StatusSuspended, StatusFailed, StatusStarting, StatusSetupPending:
 			continue
 		}
-		a.probeOnce(ctx, app, t)
+		if a.tenantOperation(t.ID) != "" {
+			continue
+		}
+		tenant := t
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			select {
+			case sem <- struct{}{}:
+				defer func() { <-sem }()
+			case <-ctx.Done():
+				return
+			}
+			a.probeOnce(ctx, app, tenant)
+		}()
 	}
-	return nil
+	wg.Wait()
+	return ctx.Err()
 }
 
 func (a *App) probeOnce(ctx context.Context, app *sdk.AppCtx, t *Tenant) {
@@ -68,11 +86,25 @@ func (a *App) probeOnce(ctx context.Context, app *sdk.AppCtx, t *Tenant) {
 		app.Logger().Error("fleet: decrypt key", "tenant", t.ID, "err", err)
 		return
 	}
-	ok, version, body, err := probeHealth(ctx, t.BaseURL, string(key))
+	baseURL, err := a.internalTenantBaseURL(app, t)
+	if err != nil {
+		_ = a.store.updateHealth(t.ID, false, "", []byte(fmt.Sprintf(`{"error":%q}`, err.Error())))
+		a.maybeRespawnHosted(ctx, app, t)
+		return
+	}
+	if t.IsHosted() && a.takeHostedTunnelChanged(t.InstanceID, portFromTenant(t)) {
+		if err := a.refreshTenantIngressTargets(app, t, baseURL); err != nil {
+			a.markHostedTunnelDirty(t.InstanceID, portFromTenant(t))
+			app.Logger().Warn("fleet: refresh hosted ingress target", "tenant", t.ID, "err", err)
+		}
+	}
+	ok, version, body, err := probeHealth(ctx, baseURL, string(key))
 	if err != nil {
 		// Record the error in last_health so operators can see why.
 		_ = a.store.updateHealth(t.ID, false, "", []byte(fmt.Sprintf(`{"error":%q}`, err.Error())))
-		a.bumpFailures(app, t)
+		if !a.maybeRespawnHosted(ctx, app, t) {
+			a.bumpFailures(app, t)
+		}
 		return
 	}
 	if !ok {
@@ -87,6 +119,27 @@ func (a *App) probeOnce(ctx context.Context, app *sdk.AppCtx, t *Tenant) {
 	if t.Status == StatusDisconnected {
 		_ = a.store.setStatus(t.ID, StatusActive, "worker:health_poller")
 	}
+}
+
+func portFromTenant(t *Tenant) int {
+	if t == nil {
+		return 0
+	}
+	port, _ := portFromBaseURL(t.BaseURL)
+	return port
+}
+
+func (a *App) maybeRespawnHosted(ctx context.Context, app *sdk.AppCtx, t *Tenant) bool {
+	if t == nil || !t.IsHosted() {
+		return false
+	}
+	port, _ := portFromBaseURL(t.BaseURL)
+	alive, err := hostedPortListening(app, t.InstanceID, port)
+	if err != nil || alive {
+		return false
+	}
+	a.tryRespawnHosted(ctx, app, t)
+	return true
 }
 
 // bumpFailures counts consecutive failures by reading the recent

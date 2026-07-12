@@ -16,6 +16,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	sdk "github.com/apteva/app-sdk"
 )
 
 // tenantProc tracks the live OS process of a local tenant.
@@ -46,6 +48,15 @@ type tenantProc struct {
 // look for a token — the tenant already has a users table from its
 // first boot, registration is locked.
 func (a *App) spawnTenant(ctx context.Context, tenantID, slug, configDir, aptevaBin string, port int, freshSetup bool) (setupToken string, proc *tenantProc, err error) {
+	if _, err := validatedTenantSlug(slug); err != nil {
+		return "", nil, err
+	}
+	if err := validateLocalTenantDir(slug, configDir); err != nil {
+		return "", nil, err
+	}
+	if err := validateTenantPort(port); err != nil {
+		return "", nil, err
+	}
 	if err := os.MkdirAll(configDir, 0o700); err != nil {
 		return "", nil, fmt.Errorf("mkdir configDir: %w", err)
 	}
@@ -216,6 +227,19 @@ func stopProcess(p *tenantProc, grace time.Duration) error {
 // only when a listener remains but we cannot prove how to stop it
 // without risking unrelated processes.
 func (a *App) stopTenantBy(slug, configDir string, port int, grace time.Duration) error {
+	if _, err := validatedTenantSlug(slug); err != nil {
+		return err
+	}
+	if configDir != "" {
+		if err := validateLocalTenantDir(slug, configDir); err != nil {
+			return err
+		}
+	}
+	if port > 0 {
+		if err := validateTenantPort(port); err != nil {
+			return err
+		}
+	}
 	a.procMu.Lock()
 	p := a.procs[slug]
 	if p != nil {
@@ -317,6 +341,7 @@ type procInfo struct {
 	pid     int
 	ppid    int
 	cmdline string
+	args    []string
 }
 
 func stopTenantProcessTree(seedPID int, marker string, port int, grace time.Duration) (bool, error) {
@@ -366,8 +391,9 @@ func readProcTable() (map[int]procInfo, error) {
 			continue
 		}
 		rawCmd, _ := os.ReadFile(filepath.Join("/proc", entry.Name(), "cmdline"))
-		cmdline := strings.ReplaceAll(string(rawCmd), "\x00", " ")
-		out[pid] = procInfo{pid: pid, ppid: ppid, cmdline: strings.TrimSpace(cmdline)}
+		parts := strings.Split(strings.TrimSuffix(string(rawCmd), "\x00"), "\x00")
+		cmdline := strings.Join(parts, " ")
+		out[pid] = procInfo{pid: pid, ppid: ppid, cmdline: strings.TrimSpace(cmdline), args: parts}
 	}
 	return out, nil
 }
@@ -398,7 +424,7 @@ func tenantTreeRoot(seedPID int, marker string, procs map[int]procInfo) (int, bo
 		if !ok {
 			break
 		}
-		if strings.Contains(p.cmdline, marker) {
+		if processHasExactTenantArg(p, marker) {
 			root = pid
 		}
 		pid = p.ppid
@@ -407,6 +433,19 @@ func tenantTreeRoot(seedPID int, marker string, procs map[int]procInfo) (int, bo
 		return 0, false
 	}
 	return root, true
+}
+
+func processHasExactTenantArg(p procInfo, marker string) bool {
+	args := p.args
+	if len(args) == 0 {
+		args = strings.Fields(p.cmdline)
+	}
+	for _, arg := range args {
+		if arg == marker || arg == "--data-dir="+marker {
+			return true
+		}
+	}
+	return false
 }
 
 func procTreePIDs(root int, procs map[int]procInfo) []int {
@@ -494,15 +533,39 @@ func findPidOnPort(port int) (int, error) {
 //     restart, crash, oom). For active/starting tenants we ATTEMPT to
 //     respawn instead of flipping to stopped. setup_pending tenants
 //     also get respawned (toolStart preserves their status).
-func (a *App) reconcileOnBoot() error {
+func (a *App) reconcileOnBoot(app *sdk.AppCtx) error {
 	tenants, err := a.store.list(map[string]string{"kind": KindLocal})
 	if err != nil {
 		return err
 	}
 	ctx := context.Background()
 	for _, t := range tenants {
+		if a.tenantOperation(t.ID) != "" {
+			continue
+		}
 		port, err := portFromBaseURL(t.BaseURL)
 		if err != nil || port == 0 {
+			continue
+		}
+		if t.IsHosted() {
+			alive, checkErr := hostedPortListening(app, t.InstanceID, port)
+			if checkErr != nil {
+				app.Logger().Warn("fleet: hosted reconcile check", "tenant", t.ID, "err", checkErr)
+				continue
+			}
+			if alive {
+				if baseURL, tunnelErr := a.internalTenantBaseURL(app, t); tunnelErr == nil {
+					if routeErr := a.refreshTenantIngressTargets(app, t, baseURL); routeErr != nil {
+						app.Logger().Warn("fleet: hosted route reconcile", "tenant", t.ID, "err", routeErr)
+					}
+				}
+				if t.Status == StatusStopped {
+					_ = a.store.setStatus(t.ID, StatusActive, "worker:reconcile")
+				}
+				_ = a.store.resetRespawn(t.ID)
+			} else if t.Status == StatusActive || t.Status == StatusStarting || t.Status == StatusSetupPending {
+				a.tryRespawnHosted(ctx, app, t)
+			}
 			continue
 		}
 		alive := portInUse(port)
@@ -706,7 +769,7 @@ const (
 )
 
 func (a *App) tryRespawn(ctx context.Context, t *Tenant) {
-	if t.Kind != KindLocal {
+	if t.Kind != KindLocal || t.IsHosted() || a.tenantOperation(t.ID) != "" {
 		return
 	}
 	// Respect a small grace so we don't hammer a tenant that's mid-boot.
@@ -722,7 +785,7 @@ func (a *App) tryRespawn(ctx context.Context, t *Tenant) {
 		return
 	}
 	port, _ := portFromBaseURL(t.BaseURL)
-	if port == 0 || t.ConfigDir == "" {
+	if port == 0 || validateLocalTenantDir(t.Slug, t.ConfigDir) != nil {
 		// Can't respawn without these; surface and stop trying for now.
 		_ = a.store.setStatus(t.ID, StatusFailed, "worker:auto_respawn")
 		_ = a.store.recordEvent(t.ID, "auto_respawn_failed", "worker:auto_respawn",
@@ -746,19 +809,64 @@ func (a *App) tryRespawn(ctx context.Context, t *Tenant) {
 		map[string]any{"port": port})
 }
 
+func (a *App) tryRespawnHosted(ctx context.Context, app *sdk.AppCtx, t *Tenant) {
+	if t == nil || !t.IsHosted() {
+		return
+	}
+	done, err := a.beginTenantOperation(t.ID, "hosted auto-respawn")
+	if err != nil {
+		return
+	}
+	defer done()
+	if t.LastRespawnAt != nil && time.Since(*t.LastRespawnAt) < respawnGraceTime {
+		return
+	}
+	if t.RespawnAttempts >= maxRespawnAttempts {
+		_ = a.store.setStatus(t.ID, StatusFailed, "worker:auto_respawn")
+		_ = a.store.recordEvent(t.ID, "auto_respawn_gave_up", "worker:auto_respawn",
+			map[string]any{"attempts": t.RespawnAttempts, "instance_id": t.InstanceID})
+		return
+	}
+	port, _ := portFromBaseURL(t.BaseURL)
+	if port == 0 || validateHostedTenantDir(t.Slug, t.ConfigDir) != nil {
+		_ = a.store.setStatus(t.ID, StatusFailed, "worker:auto_respawn")
+		_ = a.store.recordEvent(t.ID, "auto_respawn_failed", "worker:auto_respawn",
+			map[string]any{"reason": "invalid port or config_dir", "instance_id": t.InstanceID})
+		return
+	}
+	info, err := a.getInstanceInfo(app, t.InstanceID)
+	if err != nil {
+		_ = a.store.recordEvent(t.ID, "auto_respawn_failed", "worker:auto_respawn", map[string]any{"error": err.Error()})
+		return
+	}
+	_ = a.store.bumpRespawn(t.ID)
+	_, _, err = a.spawnHostedTenant(app, hostedSpawnSpec{
+		InstanceID: t.InstanceID,
+		InstanceIP: info.PublicIPv4,
+		Slug:       t.Slug,
+		Port:       port,
+		AptevaVer:  tenantVersion(t),
+		FreshSetup: false,
+	})
+	if err != nil {
+		_ = a.store.recordEvent(t.ID, "auto_respawn_failed", "worker:auto_respawn", map[string]any{"error": err.Error()})
+		return
+	}
+	_ = a.store.setStatus(t.ID, statusAfterRestart(t.Status), "worker:auto_respawn")
+	_ = a.store.recordEvent(t.ID, "auto_respawn_ok", "worker:auto_respawn",
+		map[string]any{"port": port, "instance_id": t.InstanceID})
+	_ = ctx
+}
+
 // slugDataDir returns the per-tenant data directory under the fleet
 // data root. Slug is validated to filesystem-safe characters.
 func slugDataDir(slug string) (string, error) {
-	if slug == "" {
-		return "", errors.New("slug required")
+	valid, err := validatedTenantSlug(slug)
+	if err != nil {
+		return "", err
 	}
-	for _, r := range slug {
-		if !(r >= 'a' && r <= 'z') && !(r >= '0' && r <= '9') && r != '-' && r != '_' {
-			return "", fmt.Errorf("slug must be [a-z0-9_-], got %q", slug)
-		}
+	if slug != valid {
+		return "", errors.New("slug must already be in canonical lowercase form")
 	}
-	if strings.HasPrefix(slug, "-") || strings.HasPrefix(slug, "_") {
-		return "", errors.New("slug must not start with - or _")
-	}
-	return filepath.Join(localDataRoot(), slug), nil
+	return filepath.Join(localDataRoot(), valid), nil
 }

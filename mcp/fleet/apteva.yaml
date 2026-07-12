@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: fleet
 display_name: Fleet
-version: 0.8.11
+version: 0.8.13
 description: |
   Control plane for a fleet of client apteva instances. Spawns every
   tenant as a local apteva process on the parent host with admin-
@@ -58,6 +58,10 @@ requires:
 provides:
   http_routes:
     - prefix: /
+    - prefix: /transfers/
+      no_auth: true
+    - prefix: /provider-grants/
+      no_auth: true
   mcp_tools:
     # Descriptions are double-quoted because YAML disallows ": "
     # inside unquoted scalars — every "Args: …" suffix would trip the
@@ -113,7 +117,9 @@ provides:
     - name: tenant_provider_grant_revoke
       description: "Revoke a delegated provider/integration grant, unbind the tenant app role when known, and delete the tenant virtual connection. Args: tenant_id, grant_id."
     - name: tenant_migrate
-      description: "Move a Fleet-managed tenant between the local parent host and Instances VPS hosts. Cold migration: stop source, archive + transfer + extract the data dir, boot apteva-server on the target against the moved DB, re-point the route, remove the source copy after target health. Brief downtime; auto-rollback restarts the source on failure before commit. Args: tenant_id, instance_id (0 = local parent, >0 = Instances row id), port?."
+      description: "Move a Fleet-managed tenant between the local parent host and Instances VPS hosts. Cold migration: stop source, transfer the data dir, boot and health-check the target, then re-point the route. Set retain_source=true to leave the stopped source data intact until tenant_migrate_finalize. Auto-rollback restarts the source on failure before commit. Args: tenant_id, instance_id (0 = local parent, >0 = Instances row id), port?, retain_source?."
+    - name: tenant_migrate_finalize
+      description: "Inspect or permanently remove a stopped source retained by tenant_migrate. Omit confirm for a read-only preview; confirm=true deletes only the recorded old host/path after verifying it is not current. Args: tenant_id, confirm?."
     - name: tenant_update
       description: "Per-tenant apteva version update. Installs the requested version into a fleet-owned npm prefix at ~/.apteva-fleet/versions/<v>/, records target_version, stops the running tenant, respawns with the new binary. Other tenants are unaffected. Local-only. Args: tenant_id, version? (empty → npm latest)."
     - name: tenant_check_updates
@@ -145,7 +151,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: main
+    ref: fleet/v0.8.13
     entry: mcp/fleet
   image: ghcr.io/apteva/fleet:0.1.0
   port: 8080

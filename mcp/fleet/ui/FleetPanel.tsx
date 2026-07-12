@@ -232,6 +232,13 @@ interface CredentialsReveal {
 interface GetResp {
   tenant: Tenant;
   events: FleetEvent[] | null;
+  retained_source?: {
+    tenant_id: string;
+    source_instance_id: number;
+    source_config_dir: string;
+    source_slug: string;
+    created_at: string;
+  };
   // Only populated while tenant.status === "setup_pending"; surfaced
   // by handlers.go's decorateView so the operator can recover the
   // info on refresh without re-running tenant_create.
@@ -241,6 +248,7 @@ interface GetResp {
 
 const API = "/api/apps/fleet";
 const REFRESH_MS = 8000;
+const META_REFRESH_MS = 60_000;
 
 // Status → pill variant. Same five-color semantic palette CRM/storage
 // use, so a list of mixed statuses reads as a coherent group.
@@ -400,17 +408,21 @@ export default function FleetPanel({ projectId, installId }: NativePanelProps) {
     refreshDetail(selectedId);
   }, [selectedId, refreshDetail]);
 
-  // Background polling. Quiet refresh so the spinner doesn't blink
-  // every 8s — the list updates in place. Detail + meta refresh in
-  // lockstep so the version-drift / cert badges don't lag the row data.
+  // Tenant state changes quickly; integration catalogs, npm latest,
+  // domains, and cert inventory do not. Poll them independently so
+  // the fast status refresh does not fan out across every dependency.
   useEffect(() => {
     const t = window.setInterval(() => {
       refreshList({ quiet: true });
-      refreshMeta();
       if (selectedId) refreshDetail(selectedId);
     }, REFRESH_MS);
     return () => window.clearInterval(t);
-  }, [refreshList, refreshDetail, refreshMeta, selectedId]);
+  }, [refreshList, refreshDetail, selectedId]);
+
+  useEffect(() => {
+    const t = window.setInterval(refreshMeta, META_REFRESH_MS);
+    return () => window.clearInterval(t);
+  }, [refreshMeta]);
 
   const selected = useMemo(
     () => tenants.find((t) => t.id === selectedId) || detail?.tenant || null,
@@ -428,11 +440,15 @@ export default function FleetPanel({ projectId, installId }: NativePanelProps) {
         onSelect={setSelectedId}
         onCreate={() => setShowCreate(true)}
         onConnect={() => setShowConnect(true)}
-        onRefresh={() => refreshList()}
+        onRefresh={() => {
+          refreshList();
+          refreshMeta();
+        }}
       />
       <TenantDetail
         tenant={selected}
         events={detail?.events ?? null}
+        retainedSource={detail?.retained_source ?? null}
         setupToken={detail?.setup_token ?? null}
         setupURL={detail?.setup_url ?? null}
         meta={meta}
@@ -558,12 +574,13 @@ export default function FleetPanel({ projectId, installId }: NativePanelProps) {
           tenant={showMigrate}
           meta={meta}
           onClose={() => setShowMigrate(null)}
-          onSubmit={async ({ instance_id, port }) => {
+          onSubmit={async ({ instance_id, port, retain_source }) => {
             try {
               await callTool("tenant_migrate", {
                 tenant_id: showMigrate.id,
                 instance_id,
                 ...(port ? { port } : {}),
+                retain_source,
               });
               await refreshList({ quiet: true });
               if (selectedId) await refreshDetail(selectedId);
@@ -786,6 +803,7 @@ function KindGlyph({ kind }: { kind: Tenant["kind"] }) {
 function TenantDetail({
   tenant,
   events,
+  retainedSource,
   setupToken,
   setupURL,
   meta,
@@ -800,6 +818,7 @@ function TenantDetail({
 }: {
   tenant: Tenant | null;
   events: FleetEvent[] | null;
+  retainedSource: GetResp["retained_source"] | null;
   setupToken: string | null;
   setupURL: string | null;
   meta: MetaResp | null;
@@ -815,14 +834,22 @@ function TenantDetail({
   const [busy, setBusy] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState(false);
+  const [confirmFinalize, setConfirmFinalize] = useState(false);
   const [supportURL, setSupportURL] = useState<{ url: string; expires_at?: string } | null>(null);
+  const [supportDialog, setSupportDialog] = useState(false);
+  const [supportReason, setSupportReason] = useState("");
+  const [resetDialog, setResetDialog] = useState(false);
 
   // Reset transient detail state whenever the tenant changes.
   useEffect(() => {
     setBusy(null);
     setErr(null);
     setConfirmDelete(false);
+    setConfirmFinalize(false);
     setSupportURL(null);
+    setSupportDialog(false);
+    setSupportReason("");
+    setResetDialog(false);
   }, [tenant?.id]);
 
   if (!tenant) {
@@ -861,6 +888,7 @@ function TenantDetail({
   const canClone = isLocal;
 
   return (
+    <>
     <Card className="h-full">
       <CardHeader
         title={tenant.slug}
@@ -913,23 +941,7 @@ function TenantDetail({
                 window.open(supportURL.url, "_blank", "noopener");
                 return;
               }
-              const reason = window.prompt("Reason for support login (audit trail):");
-              if (!reason) return;
-              setBusy("support");
-              setErr(null);
-              try {
-                const r = await callTool<{ url: string; expires_at?: string }>(
-                  "tenant_support_login",
-                  { tenant_id: tenant.id, reason },
-                );
-                setSupportURL(r);
-                if (r?.url) window.open(r.url, "_blank", "noopener");
-                await onAfterAction();
-              } catch (e) {
-                setErr((e as Error).message);
-              } finally {
-                setBusy(null);
-              }
+              setSupportDialog(true);
             }}
           />
         )}
@@ -996,6 +1008,36 @@ function TenantDetail({
           </a>
           {supportURL.expires_at && (
             <span className="text-text-dim ml-auto">expires {formatTime(supportURL.expires_at)}</span>
+          )}
+        </div>
+      )}
+
+      {retainedSource && (
+        <div className="px-4 py-2 text-xs border-b border-border bg-warn/5 flex flex-wrap items-center gap-2">
+          <span className="text-text-dim">Stopped migration source retained</span>
+          <span className="font-mono text-text">
+            instance {retainedSource.source_instance_id} · {retainedSource.source_config_dir}
+          </span>
+          <span className="flex-1" />
+          {confirmFinalize ? (
+            <>
+              <span className="text-error">Permanently remove retained source?</span>
+              <ActionButton
+                label="Confirm removal"
+                tone="danger"
+                busy={busy === "finalize"}
+                onClick={async () => {
+                  await run("finalize", "tenant_migrate_finalize", {
+                    tenant_id: tenant.id,
+                    confirm: true,
+                  });
+                  setConfirmFinalize(false);
+                }}
+              />
+              <ActionButton label="Cancel" onClick={() => setConfirmFinalize(false)} />
+            </>
+          ) : (
+            <ActionButton label="Finalize source" onClick={() => setConfirmFinalize(true)} />
           )}
         </div>
       )}
@@ -1068,27 +1110,7 @@ function TenantDetail({
             }
           }}
           onReset={async () => {
-            // Reset is destructive (revokes sessions) — confirm first.
-            if (!window.confirm(
-              "Rotate the admin password and revoke every active session for this tenant?\n\n" +
-              "The new password is shown only once — you'll need to copy it before closing the dialog.",
-            )) return;
-            setBusy("reset-password");
-            setErr(null);
-            try {
-              const r = await callTool<{
-                slug: string;
-                base_url: string;
-                admin_email: string;
-                admin_password: string;
-              }>("tenant_reset_admin_password", { tenant_id: tenant.id });
-              onResetPassword(r);
-              await onAfterAction();
-            } catch (e) {
-              setErr((e as Error).message);
-            } finally {
-              setBusy(null);
-            }
+            setResetDialog(true);
           }}
         />
       )}
@@ -1143,6 +1165,83 @@ function TenantDetail({
         )}
       </div>
     </Card>
+    {supportDialog && (
+      <DialogFrame title={`Support login for ${tenant.slug}`} onClose={() => setSupportDialog(false)}>
+        <p className="text-xs text-text-dim">The reason is written to the tenant audit trail.</p>
+        <Label text="Reason">
+          <textarea
+            value={supportReason}
+            onChange={(e) => setSupportReason(e.target.value)}
+            rows={3}
+            autoFocus
+            className="w-full resize-none px-2 py-1.5 text-sm rounded-md border border-border bg-bg-card text-text"
+          />
+        </Label>
+        <DialogActions>
+          <ActionButton label="Cancel" onClick={() => setSupportDialog(false)} />
+          <ActionButton
+            label="Create support login"
+            busy={busy === "support"}
+            onClick={async () => {
+              const reason = supportReason.trim();
+              if (!reason) return;
+              setBusy("support");
+              setErr(null);
+              try {
+                const r = await callTool<{ url: string; expires_at?: string }>(
+                  "tenant_support_login",
+                  { tenant_id: tenant.id, reason },
+                );
+                setSupportURL(r);
+                setSupportDialog(false);
+                setSupportReason("");
+                if (r?.url) window.open(r.url, "_blank", "noopener");
+                await onAfterAction();
+              } catch (e) {
+                setErr((e as Error).message);
+              } finally {
+                setBusy(null);
+              }
+            }}
+          />
+        </DialogActions>
+      </DialogFrame>
+    )}
+    {resetDialog && (
+      <DialogFrame title={`Reset password for ${tenant.slug}`} onClose={() => setResetDialog(false)}>
+        <p className="text-xs text-text-dim">
+          This revokes every active session for the admin. The replacement password is shown once.
+        </p>
+        <DialogActions>
+          <ActionButton label="Cancel" onClick={() => setResetDialog(false)} />
+          <ActionButton
+            label="Reset password"
+            tone="danger"
+            busy={busy === "reset-password"}
+            onClick={async () => {
+              setBusy("reset-password");
+              setErr(null);
+              try {
+                const r = await callTool<{
+                  slug: string;
+                  base_url: string;
+                  admin_email: string;
+                  admin_password: string;
+                }>("tenant_reset_admin_password", { tenant_id: tenant.id });
+                setResetDialog(false);
+                onResetPassword(r);
+                await onAfterAction();
+              } catch (e) {
+                setErr((e as Error).message);
+              } finally {
+                setBusy(null);
+              }
+            }}
+          />
+        </DialogActions>
+      </DialogFrame>
+    )}
+    </>
   );
 }
 
@@ -1730,13 +1829,14 @@ function MoveTenantDialog({
   tenant: Tenant;
   meta: MetaResp;
   onClose: () => void;
-  onSubmit: (args: { instance_id: number; port?: number }) => Promise<{ ok: boolean; error?: string }>;
+  onSubmit: (args: { instance_id: number; port?: number; retain_source: boolean }) => Promise<{ ok: boolean; error?: string }>;
 }) {
   const currentID = tenant.instance_id ?? 0;
   const hostOptions = hostPickerOptions(meta, currentID);
   const defaultTarget = hostOptions.find((i) => i.id !== currentID)?.id ?? currentID;
   const [instanceID, setInstanceID] = useState(defaultTarget);
   const [port, setPort] = useState("");
+  const [retainSource, setRetainSource] = useState(true);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState<string | null>(null);
 
@@ -1774,6 +1874,17 @@ function MoveTenantDialog({
           className="w-full px-2 py-1.5 text-sm rounded-md border border-border bg-bg-card text-text font-mono"
         />
       </Label>
+      {!sameHost && (
+        <label className="flex items-center gap-2 text-xs text-text">
+          <input
+            type="checkbox"
+            checked={retainSource}
+            onChange={(e) => setRetainSource(e.target.checked)}
+            className="h-3.5 w-3.5"
+          />
+          Retain stopped source until explicit finalization
+        </label>
+      )}
       {target && (
         <div className="text-xs text-text-dim font-mono">
           {tenant.base_url} → {target.id === 0 ? "local server" : `${target.name} (${target.public_ipv4})`}
@@ -1800,6 +1911,7 @@ function MoveTenantDialog({
             const r = await onSubmit({
               instance_id: instanceID,
               ...(port.trim() ? { port: Number(port) } : {}),
+              retain_source: !sameHost && retainSource,
             });
             setBusy(false);
             if (!r.ok) setErr(r.error || "failed");
@@ -1912,7 +2024,7 @@ function DialogFrame({
 }) {
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 p-4">
-      <div className="w-full max-w-md rounded-xl border border-border bg-bg-card shadow-xl">
+      <div className="w-[min(100%,26rem)] max-h-[calc(100vh-2rem)] overflow-y-auto rounded-md border border-border bg-bg-card shadow-xl">
         <div className="flex items-center justify-between px-4 py-2.5 border-b border-border">
           <h2 className="text-sm font-semibold text-text">{title}</h2>
           <button

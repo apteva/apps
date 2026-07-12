@@ -18,7 +18,7 @@ import (
 
 const tenantControlMaxBody = 10 << 20
 
-func (a *App) toolTenantInventory(_ *sdk.AppCtx, args map[string]any) (any, error) {
+func (a *App) toolTenantInventory(appCtx *sdk.AppCtx, args map[string]any) (any, error) {
 	tenantID := getStr(args, "tenant_id")
 	if tenantID == "" {
 		return nil, errors.New("tenant_id is required")
@@ -44,6 +44,10 @@ func (a *App) toolTenantInventory(_ *sdk.AppCtx, args map[string]any) (any, erro
 	if err != nil {
 		return nil, fmt.Errorf("decrypt tenant api_key: %w", err)
 	}
+	baseURL, err := a.internalTenantBaseURL(appCtx, t)
+	if err != nil {
+		return nil, fmt.Errorf("open tenant control channel: %w", err)
+	}
 	projectID := strings.TrimSpace(getStr(args, "project_id"))
 	includeUsers := boolArg(args, "include_users")
 	includeCatalog := boolArg(args, "include_catalog")
@@ -54,7 +58,7 @@ func (a *App) toolTenantInventory(_ *sdk.AppCtx, args map[string]any) (any, erro
 	defer cancel()
 	fetch := func(name, path string) {
 		var v any
-		if err := tenantJSON(ctx, t.BaseURL, string(key), http.MethodGet, path, nil, &v); err != nil {
+		if err := tenantJSON(ctx, baseURL, string(key), http.MethodGet, path, nil, &v); err != nil {
 			errs[name] = err.Error()
 			return
 		}
@@ -84,7 +88,7 @@ func (a *App) toolTenantInventory(_ *sdk.AppCtx, args map[string]any) (any, erro
 	return out, nil
 }
 
-func (a *App) toolTenantAppTools(_ *sdk.AppCtx, args map[string]any) (any, error) {
+func (a *App) toolTenantAppTools(appCtx *sdk.AppCtx, args map[string]any) (any, error) {
 	tenantID := getStr(args, "tenant_id")
 	if tenantID == "" {
 		return nil, errors.New("tenant_id is required")
@@ -99,7 +103,11 @@ func (a *App) toolTenantAppTools(_ *sdk.AppCtx, args map[string]any) (any, error
 	if installID > 0 && appName == "" {
 		var tools any
 		path := fmt.Sprintf("/api/apps/installs/%d/tools", installID)
-		if err := tenantJSON(context.Background(), t.BaseURL, key, http.MethodGet, path, nil, &tools); err != nil {
+		baseURL, err := a.internalTenantBaseURL(appCtx, t)
+		if err != nil {
+			return nil, err
+		}
+		if err := tenantJSON(context.Background(), baseURL, key, http.MethodGet, path, nil, &tools); err != nil {
 			return nil, err
 		}
 		return map[string]any{"tenant_id": tenantID, "install_id": installID, "tools": tools}, nil
@@ -107,7 +115,7 @@ func (a *App) toolTenantAppTools(_ *sdk.AppCtx, args map[string]any) (any, error
 	if appName == "" {
 		return nil, errors.New("app is required unless install_id is provided")
 	}
-	result, err := a.tenantAppRPC(t, key, appName, installID, projectID, "tools/list", map[string]any{})
+	result, err := a.tenantAppRPC(appCtx, t, key, appName, installID, projectID, "tools/list", map[string]any{})
 	if err != nil {
 		return nil, err
 	}
@@ -125,7 +133,7 @@ func (a *App) toolTenantAppTools(_ *sdk.AppCtx, args map[string]any) (any, error
 	return result, nil
 }
 
-func (a *App) toolTenantAppCall(_ *sdk.AppCtx, args map[string]any) (any, error) {
+func (a *App) toolTenantAppCall(appCtx *sdk.AppCtx, args map[string]any) (any, error) {
 	tenantID := getStr(args, "tenant_id")
 	appName := strings.TrimSpace(getStr(args, "app"))
 	tool := strings.TrimSpace(getStr(args, "tool"))
@@ -145,7 +153,7 @@ func (a *App) toolTenantAppCall(_ *sdk.AppCtx, args map[string]any) (any, error)
 	if err != nil {
 		return nil, err
 	}
-	result, err := a.tenantAppRPC(t, key, appName, installID, projectID, "tools/call", map[string]any{
+	result, err := a.tenantAppRPC(appCtx, t, key, appName, installID, projectID, "tools/call", map[string]any{
 		"name":      tool,
 		"arguments": input,
 	})
@@ -161,7 +169,7 @@ func (a *App) toolTenantAppCall(_ *sdk.AppCtx, args map[string]any) (any, error)
 	return result, nil
 }
 
-func (a *App) toolTenantPlatformCall(_ *sdk.AppCtx, args map[string]any) (any, error) {
+func (a *App) toolTenantPlatformCall(appCtx *sdk.AppCtx, args map[string]any) (any, error) {
 	tenantID := getStr(args, "tenant_id")
 	resource := normalizeControlToken(getStr(args, "resource"))
 	action := normalizeControlToken(getStr(args, "action"))
@@ -181,7 +189,11 @@ func (a *App) toolTenantPlatformCall(_ *sdk.AppCtx, args map[string]any) (any, e
 		return nil, err
 	}
 	var result any
-	if err := tenantJSON(context.Background(), t.BaseURL, key, method, path, body, &result); err != nil {
+	baseURL, err := a.internalTenantBaseURL(appCtx, t)
+	if err != nil {
+		return nil, err
+	}
+	if err := tenantJSON(context.Background(), baseURL, key, method, path, body, &result); err != nil {
 		return nil, err
 	}
 	_ = a.store.recordEvent(tenantID, "platform_call", "user", map[string]any{
@@ -213,7 +225,7 @@ func (a *App) tenantControlAuth(tenantID string) (*Tenant, string, error) {
 	return t, string(key), nil
 }
 
-func (a *App) tenantAppRPC(t *Tenant, key, appName string, installID int64, projectID, method string, params map[string]any) (any, error) {
+func (a *App) tenantAppRPC(appCtx *sdk.AppCtx, t *Tenant, key, appName string, installID int64, projectID, method string, params map[string]any) (any, error) {
 	if params == nil {
 		params = map[string]any{}
 	}
@@ -234,7 +246,11 @@ func (a *App) tenantAppRPC(t *Tenant, key, appName string, installID int64, proj
 		"method":  method,
 		"params":  params,
 	})
-	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, strings.TrimRight(t.BaseURL, "/")+path, bytes.NewReader(payload))
+	baseURL, err := a.internalTenantBaseURL(appCtx, t)
+	if err != nil {
+		return nil, err
+	}
+	req, err := http.NewRequestWithContext(context.Background(), http.MethodPost, baseURL+path, bytes.NewReader(payload))
 	if err != nil {
 		return nil, err
 	}
