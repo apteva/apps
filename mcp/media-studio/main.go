@@ -36,12 +36,14 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: media-studio
 display_name: Media Studio
-version: 0.10.40
+version: 0.10.41
 description: |
   Generate images, video, audio, music, and avatars via compatible
   providers. Optionally saves outputs to Storage, supports stable
   cache keys for app-to-app generation reuse, and can use OpenAI Codex
-  as a subscription-backed image provider. v0.10.40 adds multiple audio
+  as a subscription-backed image provider. v0.10.41 rebuilds the panel
+  with the production JSX runtime and rejects development-only jsxDEV
+  imports in the committed artifact. v0.10.40 adds multiple audio
   providers, Fish Audio TTS and voice catalogs, and provider-neutral
   voice cloning from uploads, Storage references, URLs, and inline audio.
   v0.10.39 filters unsupported

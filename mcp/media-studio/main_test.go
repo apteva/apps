@@ -24,6 +24,7 @@ import (
 	"image/png"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strings"
 	"sync"
 	"testing"
@@ -31,6 +32,20 @@ import (
 	sdk "github.com/apteva/app-sdk"
 	tk "github.com/apteva/app-sdk/testkit"
 )
+
+func TestPanelBundleUsesProductionJSXRuntime(t *testing.T) {
+	bundle, err := os.ReadFile("ui/MediaPanel.mjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	text := string(bundle)
+	if strings.Contains(text, "jsxDEV") || strings.Contains(text, "jsx-dev-runtime") {
+		t.Fatal("MediaPanel.mjs contains the development JSX transform")
+	}
+	if !strings.Contains(text, "react/jsx-runtime") {
+		t.Fatal("MediaPanel.mjs does not import the production JSX runtime")
+	}
+}
 
 // --- stub PlatformClient -------------------------------------------
 
