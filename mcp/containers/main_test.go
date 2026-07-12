@@ -6,11 +6,14 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	sdk "github.com/apteva/app-sdk"
 	tk "github.com/apteva/app-sdk/testkit"
@@ -44,6 +47,7 @@ func testDB(t *testing.T) *sql.DB {
 	if err != nil {
 		t.Fatalf("open sqlite: %v", err)
 	}
+	db.SetMaxOpenConns(1)
 	files, err := filepath.Glob("migrations/*.sql")
 	if err != nil {
 		t.Fatalf("glob migrations: %v", err)
@@ -155,13 +159,71 @@ func TestNormalizeRunSpecRejectsUnsafeInputs(t *testing.T) {
 	}
 }
 
+func TestNormalizeRunSpecRejectsDuplicateAndOversizedInputs(t *testing.T) {
+	base := RunSpec{Name: "demo", Image: "nginx", Volumes: []VolumeSpec{{Name: "data", MountPath: "/data"}}}
+	cases := []RunSpec{
+		{Name: "demo", Image: "nginx", Resources: ResourceSpec{MemoryMB: -1}},
+		{Name: "demo", Image: "nginx", Ports: []PortSpec{{ContainerPort: 80}, {ContainerPort: 80}}},
+		{Name: "demo", Image: "nginx", Volumes: []VolumeSpec{{Name: "data", MountPath: "/data"}, {Name: "data", MountPath: "/other"}}},
+		{Name: "demo", Image: "nginx", Ports: []PortSpec{{ContainerPort: 80, BindAddr: "metadata.internal"}}},
+	}
+	tooLarge := base
+	tooLarge.Files = []FileSpec{{Path: "/data/large", Content: strings.Repeat("x", maxInjectedFileBytes+1)}}
+	cases = append(cases, tooLarge)
+	tooMany := base
+	for i := 0; i <= maxInjectedFiles; i++ {
+		tooMany.Files = append(tooMany.Files, FileSpec{Path: fmt.Sprintf("/data/file-%d", i), Content: "x"})
+	}
+	cases = append(cases, tooMany)
+	for i, spec := range cases {
+		if _, err := normalizeRunSpec(spec); err == nil {
+			t.Fatalf("case %d should fail: %+v", i, spec)
+		}
+	}
+}
+
+func TestExpandBlueprintPreservesTargetAndPullPolicyOverrides(t *testing.T) {
+	db := testDB(t)
+	if err := seedBlueprints(db); err != nil {
+		t.Fatalf("seed blueprints: %v", err)
+	}
+	app := &App{}
+	spec, err := app.expandBlueprint(db, RunSpec{
+		Name:          "customer",
+		BlueprintSlug: "apteva",
+		InstanceID:    9,
+		PullPolicy:    "always",
+	})
+	if err != nil {
+		t.Fatalf("expand blueprint: %v", err)
+	}
+	if spec.HostID != 9 || spec.InstanceID != 9 || spec.PullPolicy != "always" {
+		t.Fatalf("blueprint overrides lost: %+v", spec)
+	}
+}
+
+func TestPrepareWorkloadCanExplicitlyUseLocalInsteadOfDefaultHost(t *testing.T) {
+	db := testDB(t)
+	manifest := (&App{}).Manifest()
+	ctx := sdk.NewAppCtxForTest(&manifest, db, sdk.Config{"default_host_id": "7"}, nil, nil)
+	app := &App{backend: fakeDockerBackend{}}
+	w, spec, err := app.prepareWorkload(ctx, db, RunSpec{Name: "local", Image: "nginx", UseLocal: true})
+	if err != nil {
+		t.Fatalf("prepare local workload: %v", err)
+	}
+	if w.HostID != 0 || w.InstanceID != 0 || spec.HostID != 0 || spec.InstanceID != 0 {
+		t.Fatalf("explicit local target replaced by default: workload=%+v spec=%+v", w, spec)
+	}
+}
+
 func TestDockerRunArgsIncludesPullPolicy(t *testing.T) {
 	args, err := dockerRunArgs(RunSpec{
-		Name:          "demo",
-		Image:         "ghcr.io/apteva/apteva:latest",
-		RestartPolicy: "unless-stopped",
-		PullPolicy:    "always",
-		Ports:         []PortSpec{{BindAddr: "127.0.0.1", HostPort: 18080, ContainerPort: 5280, Protocol: "tcp"}},
+		Name:              "demo",
+		Image:             "ghcr.io/apteva/apteva:latest",
+		RestartPolicy:     "unless-stopped",
+		PullPolicy:        "always",
+		Ports:             []PortSpec{{BindAddr: "127.0.0.1", HostPort: 18080, ContainerPort: 5280, Protocol: "tcp"}},
+		runtimeWorkloadID: "wrk_demo",
 	}, "containers-demo", "containers-demo")
 	if err != nil {
 		t.Fatalf("docker run args: %v", err)
@@ -169,6 +231,9 @@ func TestDockerRunArgsIncludesPullPolicy(t *testing.T) {
 	joined := strings.Join(args, " ")
 	if !strings.Contains(joined, "--pull always") {
 		t.Fatalf("run args missing pull policy: %v", args)
+	}
+	if !strings.Contains(joined, "--label com.apteva.workload-id=wrk_demo") {
+		t.Fatalf("run args missing ownership label: %v", args)
 	}
 	if args[len(args)-1] != "ghcr.io/apteva/apteva:latest" {
 		t.Fatalf("image should remain final arg: %v", args)
@@ -306,6 +371,45 @@ func TestDestroyedWorkloadNameCanBeReused(t *testing.T) {
 	}
 }
 
+func TestInsertWorkloadRollsBackOnChildFailure(t *testing.T) {
+	db := testDB(t)
+	w := testWorkload("wrk_atomic", "atomic", StatusCreating)
+	ports := []PortSpec{
+		{Protocol: "tcp", ContainerPort: 80, HostPort: 18080, BindAddr: "127.0.0.1"},
+		{Protocol: "tcp", ContainerPort: 80, HostPort: 18081, BindAddr: "127.0.0.1"},
+	}
+	if err := insertWorkload(db, w, ports, nil); err == nil {
+		t.Fatal("expected duplicate port insert to fail")
+	}
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM containers_workloads WHERE id=?`, w.ID).Scan(&count); err != nil {
+		t.Fatalf("count workload: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("partial workload row remained after rollback: count=%d", count)
+	}
+}
+
+func TestScrubStoredSecretsRedactsExistingRows(t *testing.T) {
+	db := testDB(t)
+	w := testWorkload("wrk_secret", "secret", StatusRunning)
+	w.ConfigJSON = `{"name":"secret","image":"nginx","env":{"TOKEN":"plain-secret"}}`
+	w.EnvJSON = `{"TOKEN":"plain-secret"}`
+	if err := insertWorkload(db, w, nil, nil); err != nil {
+		t.Fatalf("insert workload: %v", err)
+	}
+	if err := scrubStoredSecrets(db); err != nil {
+		t.Fatalf("scrub secrets: %v", err)
+	}
+	got, err := getWorkload(db, w.ID)
+	if err != nil {
+		t.Fatalf("get workload: %v", err)
+	}
+	if strings.Contains(got.ConfigJSON, "plain-secret") || got.Env["TOKEN"] != redactedValue {
+		t.Fatalf("stored environment was not redacted: %+v", got)
+	}
+}
+
 func TestDestroyDoesNotHideWorkloadWhenDockerCleanupFails(t *testing.T) {
 	db := testDB(t)
 	w := testWorkload("wrk_running", "demo", StatusRunning)
@@ -375,6 +479,27 @@ func TestHealthPollRetriesErrorWorkloads(t *testing.T) {
 	}
 }
 
+func TestHealthPollUsesBoundedConcurrency(t *testing.T) {
+	db := testDB(t)
+	for i := 0; i < 6; i++ {
+		w := testWorkload(fmt.Sprintf("wrk_%d", i), fmt.Sprintf("demo-%d", i), StatusRunning)
+		if err := insertWorkload(db, w, nil, nil); err != nil {
+			t.Fatalf("insert workload %d: %v", i, err)
+		}
+	}
+	tracker := &healthProbeTracker{}
+	app := &App{backend: fakeDockerBackend{inspectState: &ContainerState{ID: "cid", Running: true}, probeTracker: tracker}}
+	if err := app.pollHealth(context.Background(), nil, db); err != nil {
+		t.Fatalf("poll health: %v", err)
+	}
+	tracker.mu.Lock()
+	maxActive := tracker.maxActive
+	tracker.mu.Unlock()
+	if maxActive < 2 || maxActive > 4 {
+		t.Fatalf("health probe concurrency=%d, want 2..4", maxActive)
+	}
+}
+
 func TestWorkloadUsageMeasuresVolumeStorage(t *testing.T) {
 	db := testDB(t)
 	w := testWorkload("wrk_usage", "usage", StatusRunning)
@@ -424,6 +549,32 @@ func TestDockerErrorRedactsEnvValues(t *testing.T) {
 		if !strings.Contains(msg, redacted) {
 			t.Fatalf("missing redaction %q in %q", redacted, msg)
 		}
+	}
+}
+
+func TestRemoteDockerBootstrapUsesPackageManagersOnly(t *testing.T) {
+	if strings.Contains(remoteDockerBootstrapScript, "curl") || strings.Contains(remoteDockerBootstrapScript, "get.docker.com") {
+		t.Fatal("remote bootstrap must not execute a mutable downloaded script as root")
+	}
+	for _, manager := range []string{"apt-get", "dnf", "yum", "apk"} {
+		if !strings.Contains(remoteDockerBootstrapScript, manager) {
+			t.Fatalf("remote bootstrap missing package manager %q", manager)
+		}
+	}
+}
+
+func TestDockerOutputIsBounded(t *testing.T) {
+	buf := newLimitedBuffer(8)
+	input := []byte("1234567890")
+	n, err := buf.Write(input)
+	if err != nil || n != len(input) {
+		t.Fatalf("write = %d, %v", n, err)
+	}
+	if got := buf.String(); got != "12345678\n[output truncated]" {
+		t.Fatalf("limited output = %q", got)
+	}
+	if got := truncateOutput("1234567890", 8); got != "12345678\n[output truncated]" {
+		t.Fatalf("remote limited output = %q", got)
 	}
 }
 
@@ -577,10 +728,12 @@ func TestStartRuntimeCleansNetworkAndVolumesWhenRunFails(t *testing.T) {
 	ctx := sdk.NewAppCtxForTest(&manifest, db, sdk.Config{}, nil, nil)
 	var removedNetworks []string
 	var removedVolumes []string
+	var removedContainers []string
 	app := &App{backend: fakeDockerBackend{
-		runErr:          errors.New("docker run: no matching manifest for linux/amd64"),
-		removedNetworks: &removedNetworks,
-		removedVolumes:  &removedVolumes,
+		runErr:            errors.New("docker run: no matching manifest for linux/amd64"),
+		removedNetworks:   &removedNetworks,
+		removedVolumes:    &removedVolumes,
+		removedContainers: &removedContainers,
 	}}
 	w := &Workload{
 		ID:            "w1",
@@ -609,6 +762,9 @@ func TestStartRuntimeCleansNetworkAndVolumesWhenRunFails(t *testing.T) {
 	if len(removedNetworks) != 1 || removedNetworks[0] != "containers-demo-w1" {
 		t.Fatalf("removedNetworks=%v", removedNetworks)
 	}
+	if len(removedContainers) != 1 || removedContainers[0] != w.ContainerName {
+		t.Fatalf("removedContainers=%v", removedContainers)
+	}
 	got, err := getWorkload(db, w.ID)
 	if err != nil {
 		t.Fatalf("get workload: %v", err)
@@ -624,12 +780,49 @@ func TestStartRuntimeCleansNetworkAndVolumesWhenRunFails(t *testing.T) {
 	}
 }
 
+func TestFailedStartPreservesPreexistingResourcesAndUsesFreshCleanupContext(t *testing.T) {
+	db := testDB(t)
+	manifest := (&App{}).Manifest()
+	appCtx := sdk.NewAppCtxForTest(&manifest, db, sdk.Config{}, nil, nil)
+	w := testWorkload("wrk_reuse", "reuse", StatusCreating)
+	w.ContainerName = "containers-reuse"
+	w.NetworkName = "containers-reuse"
+	volumes := []VolumeSpec{{Name: "data", DockerVolumeName: "containers-reuse-data", MountPath: "/data"}}
+	if err := insertWorkload(db, w, nil, volumes); err != nil {
+		t.Fatalf("insert workload: %v", err)
+	}
+	var removedNetworks, removedVolumes, removedContainers []string
+	var cleanupContextErr error
+	app := &App{backend: fakeDockerBackend{
+		runErr:            errors.New("run failed"),
+		existingNetworks:  map[string]bool{w.NetworkName: true},
+		existingVolumes:   map[string]bool{volumes[0].DockerVolumeName: true},
+		removedNetworks:   &removedNetworks,
+		removedVolumes:    &removedVolumes,
+		removedContainers: &removedContainers,
+		cleanupContextErr: &cleanupContextErr,
+	}}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err := app.startWorkloadRuntime(ctx, appCtx, db, w.ID, RunSpec{Name: w.Name, Image: w.Image, Volumes: volumes}, w.ContainerName, w.NetworkName)
+	if err == nil {
+		t.Fatal("expected start failure")
+	}
+	if len(removedNetworks) != 0 || len(removedVolumes) != 0 {
+		t.Fatalf("preexisting resources were removed: networks=%v volumes=%v", removedNetworks, removedVolumes)
+	}
+	if cleanupContextErr != nil {
+		t.Fatalf("cleanup reused canceled operation context: %v", cleanupContextErr)
+	}
+}
+
 func TestPrepareWorkloadSanitizesFileContentsFromConfigJSON(t *testing.T) {
 	db := testDB(t)
 	app := &App{backend: fakeDockerBackend{}}
 	w, _, err := app.prepareWorkload(nil, db, RunSpec{
 		Name:    "demo",
 		Image:   "nginx:alpine",
+		Env:     map[string]string{"API_TOKEN": "environment-secret"},
 		Volumes: []VolumeSpec{{Name: "data", MountPath: "/data"}},
 		Files: []FileSpec{{
 			Path:    "/data/apteva.yaml",
@@ -641,8 +834,11 @@ func TestPrepareWorkloadSanitizesFileContentsFromConfigJSON(t *testing.T) {
 	if err != nil {
 		t.Fatalf("prepare: %v", err)
 	}
-	if strings.Contains(w.ConfigJSON, "top-secret-config") || strings.Contains(w.ConfigJSON, "content") {
+	if strings.Contains(w.ConfigJSON, "top-secret-config") || strings.Contains(w.ConfigJSON, "environment-secret") || strings.Contains(w.ConfigJSON, "content") {
 		t.Fatalf("config_json leaked file content: %s", w.ConfigJSON)
+	}
+	if w.Env["API_TOKEN"] != redactedValue {
+		t.Fatalf("workload response leaked environment: %+v", w.Env)
 	}
 	if !strings.Contains(w.ConfigJSON, "/data/apteva.yaml") || !strings.Contains(w.ConfigJSON, `"secret":true`) {
 		t.Fatalf("config_json missing file metadata: %s", w.ConfigJSON)
@@ -651,7 +847,7 @@ func TestPrepareWorkloadSanitizesFileContentsFromConfigJSON(t *testing.T) {
 	if err != nil {
 		t.Fatalf("get workload: %v", err)
 	}
-	if strings.Contains(got.ConfigJSON, "top-secret-config") || strings.Contains(got.ConfigJSON, "content") {
+	if strings.Contains(got.ConfigJSON, "top-secret-config") || strings.Contains(got.ConfigJSON, "environment-secret") || strings.Contains(got.ConfigJSON, "content") {
 		t.Fatalf("stored config_json leaked file content: %s", got.ConfigJSON)
 	}
 }
@@ -826,32 +1022,43 @@ func (p *containersPlatformStub) CallAppResult(appName, tool string, input map[s
 }
 
 type fakeDockerBackend struct {
-	removeErr        error
-	removeNetworkErr error
-	removeVolumeErr  error
-	runErr           error
-	writeErr         error
-	removedNetworks  *[]string
-	removedVolumes   *[]string
-	inspectState     *ContainerState
-	inspectErr       error
-	volumeUsage      map[string]int64
-	ops              *[]string
-	writes           *[]VolumeFileWrite
+	removeErr         error
+	removeNetworkErr  error
+	removeVolumeErr   error
+	runErr            error
+	writeErr          error
+	removedNetworks   *[]string
+	removedVolumes    *[]string
+	removedContainers *[]string
+	cleanupContextErr *error
+	existingNetworks  map[string]bool
+	existingVolumes   map[string]bool
+	inspectState      *ContainerState
+	inspectErr        error
+	volumeUsage       map[string]int64
+	ops               *[]string
+	writes            *[]VolumeFileWrite
+	probeTracker      *healthProbeTracker
+}
+
+type healthProbeTracker struct {
+	mu        sync.Mutex
+	active    int
+	maxActive int
 }
 
 func (f fakeDockerBackend) Probe(context.Context) error { return nil }
-func (f fakeDockerBackend) CreateNetwork(_ context.Context, name string) error {
+func (f fakeDockerBackend) EnsureNetwork(_ context.Context, name string) (bool, error) {
 	if f.ops != nil {
 		*f.ops = append(*f.ops, "network:"+name)
 	}
-	return nil
+	return !f.existingNetworks[name], nil
 }
-func (f fakeDockerBackend) CreateVolume(_ context.Context, name string) error {
+func (f fakeDockerBackend) EnsureVolume(_ context.Context, name string) (bool, error) {
 	if f.ops != nil {
 		*f.ops = append(*f.ops, "volume:"+name)
 	}
-	return nil
+	return !f.existingVolumes[name], nil
 }
 func (f fakeDockerBackend) WriteVolumeFile(_ context.Context, volumeName, relPath string, content []byte, mode string) error {
 	if f.ops != nil {
@@ -877,13 +1084,28 @@ func (f fakeDockerBackend) Restart(context.Context, string) error { return nil }
 func (f fakeDockerBackend) Remove(context.Context, string, bool) error {
 	return f.removeErr
 }
-func (f fakeDockerBackend) RemoveNetwork(_ context.Context, name string) error {
+func (f fakeDockerBackend) RemoveManagedContainer(ctx context.Context, name, _ string) error {
+	if f.cleanupContextErr != nil {
+		*f.cleanupContextErr = ctx.Err()
+	}
+	if f.removedContainers != nil {
+		*f.removedContainers = append(*f.removedContainers, name)
+	}
+	return f.removeErr
+}
+func (f fakeDockerBackend) RemoveNetwork(ctx context.Context, name string) error {
+	if f.cleanupContextErr != nil {
+		*f.cleanupContextErr = ctx.Err()
+	}
 	if f.removedNetworks != nil {
 		*f.removedNetworks = append(*f.removedNetworks, name)
 	}
 	return f.removeNetworkErr
 }
-func (f fakeDockerBackend) RemoveVolume(_ context.Context, name string) error {
+func (f fakeDockerBackend) RemoveVolume(ctx context.Context, name string) error {
+	if f.cleanupContextErr != nil {
+		*f.cleanupContextErr = ctx.Err()
+	}
 	if f.removedVolumes != nil {
 		*f.removedVolumes = append(*f.removedVolumes, name)
 	}
@@ -899,6 +1121,18 @@ func (f fakeDockerBackend) Logs(context.Context, string, int) (string, error) {
 	return "", nil
 }
 func (f fakeDockerBackend) Inspect(context.Context, string) (*ContainerState, error) {
+	if f.probeTracker != nil {
+		f.probeTracker.mu.Lock()
+		f.probeTracker.active++
+		if f.probeTracker.active > f.probeTracker.maxActive {
+			f.probeTracker.maxActive = f.probeTracker.active
+		}
+		f.probeTracker.mu.Unlock()
+		time.Sleep(20 * time.Millisecond)
+		f.probeTracker.mu.Lock()
+		f.probeTracker.active--
+		f.probeTracker.mu.Unlock()
+	}
 	if f.inspectErr != nil {
 		return nil, f.inspectErr
 	}

@@ -7,10 +7,20 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"path"
 	"regexp"
 	"strconv"
 	"strings"
+)
+
+const (
+	maxInjectedFiles      = 32
+	maxInjectedFileBytes  = 1 << 20
+	maxInjectedTotalBytes = 4 << 20
+	maxRunRequestBytes    = 6 << 20
+	maxEnvironmentBytes   = 1 << 20
+	redactedValue         = "<redacted>"
 )
 
 const (
@@ -96,19 +106,21 @@ type WorkloadUsage struct {
 }
 
 type RunSpec struct {
-	Name          string            `json:"name"`
-	Image         string            `json:"image"`
-	BlueprintSlug string            `json:"blueprint_slug,omitempty"`
-	HostID        int64             `json:"host_id,omitempty"`
-	InstanceID    int64             `json:"instance_id,omitempty"`
-	Ports         []PortSpec        `json:"ports,omitempty"`
-	Env           map[string]string `json:"env,omitempty"`
-	Volumes       []VolumeSpec      `json:"volumes,omitempty"`
-	Files         []FileSpec        `json:"files,omitempty"`
-	PullPolicy    string            `json:"pull_policy,omitempty"`
-	HealthPath    string            `json:"health_path,omitempty"`
-	Resources     ResourceSpec      `json:"resources,omitempty"`
-	RestartPolicy string            `json:"restart_policy,omitempty"`
+	Name              string            `json:"name"`
+	Image             string            `json:"image"`
+	BlueprintSlug     string            `json:"blueprint_slug,omitempty"`
+	HostID            int64             `json:"host_id,omitempty"`
+	InstanceID        int64             `json:"instance_id,omitempty"`
+	UseLocal          bool              `json:"use_local,omitempty"`
+	Ports             []PortSpec        `json:"ports,omitempty"`
+	Env               map[string]string `json:"env,omitempty"`
+	Volumes           []VolumeSpec      `json:"volumes,omitempty"`
+	Files             []FileSpec        `json:"files,omitempty"`
+	PullPolicy        string            `json:"pull_policy,omitempty"`
+	HealthPath        string            `json:"health_path,omitempty"`
+	Resources         ResourceSpec      `json:"resources,omitempty"`
+	RestartPolicy     string            `json:"restart_policy,omitempty"`
+	runtimeWorkloadID string            `json:"-"`
 }
 
 type Blueprint struct {
@@ -129,8 +141,30 @@ func normalizeRunSpec(in RunSpec) (RunSpec, error) {
 	if in.Image == "" {
 		return in, errors.New("image is required")
 	}
+	if len(in.Image) > 512 {
+		return in, errors.New("image must be at most 512 characters")
+	}
+	if in.Resources.MemoryMB < 0 || in.Resources.CPU < 0 {
+		return in, errors.New("resources.memory_mb and resources.cpu must be >= 0")
+	}
+	if len(in.Ports) > 64 || len(in.Volumes) > 32 || len(in.Env) > 256 {
+		return in, errors.New("run spec exceeds the maximum of 64 ports, 32 volumes, or 256 environment variables")
+	}
+	envBytes := 0
+	for key, value := range in.Env {
+		if !validEnvKey(key) {
+			return in, fmt.Errorf("invalid env key %q", key)
+		}
+		envBytes += len(key) + len(value)
+		if envBytes > maxEnvironmentBytes {
+			return in, fmt.Errorf("environment exceeds %d bytes total", maxEnvironmentBytes)
+		}
+	}
 	if in.HostID < 0 || in.InstanceID < 0 {
 		return in, errors.New("host_id and instance_id must be >= 0")
+	}
+	if in.UseLocal && (in.HostID != 0 || in.InstanceID != 0) {
+		return in, errors.New("use_local cannot be combined with host_id or instance_id")
 	}
 	targetID := in.InstanceID
 	if targetID == 0 {
@@ -163,9 +197,13 @@ func normalizeRunSpec(in RunSpec) (RunSpec, error) {
 	if in.HealthPath == "" {
 		in.HealthPath = "/"
 	}
+	if len(in.HealthPath) > 2048 {
+		return in, errors.New("health_path must be at most 2048 characters")
+	}
 	if !strings.HasPrefix(in.HealthPath, "/") {
 		in.HealthPath = "/" + in.HealthPath
 	}
+	seenPorts := map[string]struct{}{}
 	for i := range in.Ports {
 		p := &in.Ports[i]
 		if p.Protocol == "" {
@@ -187,7 +225,21 @@ func normalizeRunSpec(in RunSpec) (RunSpec, error) {
 				p.BindAddr = "127.0.0.1"
 			}
 		}
+		bindIP := net.ParseIP(strings.Trim(p.BindAddr, "[]"))
+		if bindIP == nil {
+			return in, fmt.Errorf("ports[%d].bind_addr must be an IP address", i)
+		}
+		if bindIP.To4() == nil {
+			p.BindAddr = "[" + strings.Trim(p.BindAddr, "[]") + "]"
+		}
+		portKey := fmt.Sprintf("%d/%s", p.ContainerPort, p.Protocol)
+		if _, exists := seenPorts[portKey]; exists {
+			return in, fmt.Errorf("ports[%d] duplicates container port %s", i, portKey)
+		}
+		seenPorts[portKey] = struct{}{}
 	}
+	seenVolumeNames := map[string]struct{}{}
+	seenMountPaths := map[string]struct{}{}
 	for i := range in.Volumes {
 		v := &in.Volumes[i]
 		v.Name = strings.ToLower(strings.TrimSpace(v.Name))
@@ -201,36 +253,67 @@ func normalizeRunSpec(in RunSpec) (RunSpec, error) {
 		if !strings.HasPrefix(v.MountPath, "/") {
 			return in, fmt.Errorf("volumes[%d].mount_path must be absolute", i)
 		}
+		if _, exists := seenVolumeNames[v.Name]; exists {
+			return in, fmt.Errorf("volumes[%d].name duplicates %q", i, v.Name)
+		}
+		if _, exists := seenMountPaths[v.MountPath]; exists {
+			return in, fmt.Errorf("volumes[%d].mount_path duplicates %q", i, v.MountPath)
+		}
+		seenVolumeNames[v.Name] = struct{}{}
+		seenMountPaths[v.MountPath] = struct{}{}
 	}
+	if len(in.Files) > maxInjectedFiles {
+		return in, fmt.Errorf("files supports at most %d entries", maxInjectedFiles)
+	}
+	seenFilePaths := map[string]struct{}{}
+	totalFileBytes := 0
 	for i := range in.Files {
-		if err := normalizeFileSpec(&in.Files[i], i, in.Volumes); err != nil {
+		size, err := normalizeFileSpec(&in.Files[i], i, in.Volumes)
+		if err != nil {
 			return in, err
+		}
+		if _, exists := seenFilePaths[in.Files[i].Path]; exists {
+			return in, fmt.Errorf("files[%d].path duplicates %q", i, in.Files[i].Path)
+		}
+		seenFilePaths[in.Files[i].Path] = struct{}{}
+		totalFileBytes += size
+		if totalFileBytes > maxInjectedTotalBytes {
+			return in, fmt.Errorf("files content exceeds %d bytes total", maxInjectedTotalBytes)
 		}
 	}
 	return in, nil
 }
 
-func normalizeFileSpec(f *FileSpec, i int, volumes []VolumeSpec) error {
+func normalizeFileSpec(f *FileSpec, i int, volumes []VolumeSpec) (int, error) {
 	f.Path = path.Clean(strings.TrimSpace(f.Path))
 	if f.Path == "." || f.Path == "" {
-		return fmt.Errorf("files[%d].path required", i)
+		return 0, fmt.Errorf("files[%d].path required", i)
 	}
 	if !strings.HasPrefix(f.Path, "/") {
-		return fmt.Errorf("files[%d].path must be absolute", i)
+		return 0, fmt.Errorf("files[%d].path must be absolute", i)
 	}
 	if f.Path == "/" {
-		return fmt.Errorf("files[%d].path must target a file", i)
+		return 0, fmt.Errorf("files[%d].path must target a file", i)
 	}
 	if f.Content != "" && f.ContentBase64 != "" {
-		return fmt.Errorf("files[%d] must set only one of content or content_base64", i)
+		return 0, fmt.Errorf("files[%d] must set only one of content or content_base64", i)
 	}
 	if f.Content == "" && f.ContentBase64 == "" {
-		return fmt.Errorf("files[%d] content or content_base64 required", i)
+		return 0, fmt.Errorf("files[%d] content or content_base64 required", i)
 	}
+	contentSize := len(f.Content)
 	if f.ContentBase64 != "" {
-		if _, err := base64.StdEncoding.DecodeString(f.ContentBase64); err != nil {
-			return fmt.Errorf("files[%d].content_base64 invalid: %w", i, err)
+		if len(f.ContentBase64) > base64.StdEncoding.EncodedLen(maxInjectedFileBytes) {
+			return 0, fmt.Errorf("files[%d] content exceeds %d bytes", i, maxInjectedFileBytes)
 		}
+		decoded, err := base64.StdEncoding.DecodeString(f.ContentBase64)
+		if err != nil {
+			return 0, fmt.Errorf("files[%d].content_base64 invalid: %w", i, err)
+		}
+		contentSize = len(decoded)
+	}
+	if contentSize > maxInjectedFileBytes {
+		return 0, fmt.Errorf("files[%d] content exceeds %d bytes", i, maxInjectedFileBytes)
 	}
 	mode := strings.TrimSpace(f.Mode)
 	if mode == "" {
@@ -238,13 +321,13 @@ func normalizeFileSpec(f *FileSpec, i int, volumes []VolumeSpec) error {
 	}
 	n, err := strconv.ParseUint(mode, 8, 32)
 	if err != nil || n > 0o777 {
-		return fmt.Errorf("files[%d].mode must be an octal permission from 0000 to 0777", i)
+		return 0, fmt.Errorf("files[%d].mode must be an octal permission from 0000 to 0777", i)
 	}
 	f.Mode = fmt.Sprintf("%04o", n)
 	if _, _, err := resolveVolumeFileTarget(volumes, f.Path); err != nil {
-		return fmt.Errorf("files[%d].path: %w", i, err)
+		return 0, fmt.Errorf("files[%d].path: %w", i, err)
 	}
-	return nil
+	return contentSize, nil
 }
 
 type VolumeFileWrite struct {
@@ -334,13 +417,22 @@ func fileContentBytes(f FileSpec) ([]byte, error) {
 
 func sanitizeRunSpecForStorage(spec RunSpec) RunSpec {
 	out := spec
-	if len(out.Files) == 0 {
-		return out
-	}
+	out.Env = redactEnvironment(out.Env)
 	out.Files = append([]FileSpec(nil), out.Files...)
 	for i := range out.Files {
 		out.Files[i].Content = ""
 		out.Files[i].ContentBase64 = ""
+	}
+	return out
+}
+
+func redactEnvironment(env map[string]string) map[string]string {
+	if len(env) == 0 {
+		return map[string]string{}
+	}
+	out := make(map[string]string, len(env))
+	for key := range env {
+		out[key] = redactedValue
 	}
 	return out
 }

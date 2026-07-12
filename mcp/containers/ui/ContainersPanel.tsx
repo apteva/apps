@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState, type CSSProperties } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties } from "react";
 
 interface NativePanelProps {
   projectId: string;
@@ -27,6 +27,19 @@ interface Blueprint {
   slug: string;
   name: string;
   description: string;
+  spec?: {
+    image?: string;
+    ports?: Array<{ container_port: number; host_port?: number }>;
+    health_path?: string;
+    resources?: { memory_mb?: number; cpu?: number };
+  };
+}
+
+interface FileDraft {
+  path: string;
+  content: string;
+  mode: string;
+  secret: boolean;
 }
 
 interface HostOption {
@@ -87,6 +100,30 @@ function portLabel(w: Workload): string {
   return `${p.bind_addr}:${p.host_port} -> ${p.container_port}/${p.protocol}`;
 }
 
+function parseEnvironment(value: string): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const raw of value.split("\n")) {
+    const line = raw.trim();
+    if (!line) continue;
+    const split = line.indexOf("=");
+    if (split <= 0) throw new Error(`Invalid environment entry: ${line}`);
+    env[line.slice(0, split).trim()] = line.slice(split + 1);
+  }
+  return env;
+}
+
+function parseVolumes(value: string): Array<{ name: string; mount_path: string }> {
+  const volumes: Array<{ name: string; mount_path: string }> = [];
+  for (const raw of value.split("\n")) {
+    const line = raw.trim();
+    if (!line) continue;
+    const split = line.indexOf(":");
+    if (split <= 0) throw new Error(`Invalid volume entry: ${line}`);
+    volumes.push({ name: line.slice(0, split).trim(), mount_path: line.slice(split + 1).trim() });
+  }
+  return volumes;
+}
+
 async function api<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${API}${path}`, {
     credentials: "same-origin",
@@ -104,17 +141,23 @@ export default function ContainersPanel(_props: NativePanelProps) {
   const [error, setError] = useState("");
   const [status, setStatus] = useState("Loading containers...");
   const [busy, setBusy] = useState("");
+  const loadingRef = useRef(false);
   const [logs, setLogs] = useState<{ name: string; body: string } | null>(null);
-  const [pendingDestroy, setPendingDestroy] = useState<{ id: string; name: string } | null>(null);
+  const [pendingDestroy, setPendingDestroy] = useState<{ id: string; name: string; deleteVolumes: boolean } | null>(null);
   const [form, setForm] = useState({
     name: "test-nginx",
     image: "nginx:alpine",
+    blueprintSlug: "",
+    pullPolicy: "missing",
     containerPort: "80",
     hostPort: "",
     healthPath: "/",
     memoryMB: "256",
     cpu: "0.5",
     hostId: "0",
+    environment: "",
+    volumes: "",
+    files: [] as FileDraft[],
   });
 
   const runningCount = useMemo(() => workloads.filter((w) => w.status === "running").length, [workloads]);
@@ -138,6 +181,8 @@ export default function ContainersPanel(_props: NativePanelProps) {
   }, []);
 
   const load = useCallback(async () => {
+    if (loadingRef.current) return;
+    loadingRef.current = true;
     try {
       const [w, b] = await Promise.all([
         api<{ workloads: Workload[]; count?: number }>("/workloads"),
@@ -151,6 +196,8 @@ export default function ContainersPanel(_props: NativePanelProps) {
     } catch (e) {
       setError((e as Error).message);
       setStatus("Load failed");
+    } finally {
+      loadingRef.current = false;
     }
   }, []);
 
@@ -160,6 +207,16 @@ export default function ContainersPanel(_props: NativePanelProps) {
     const timer = window.setInterval(load, 5000);
     return () => window.clearInterval(timer);
   }, [load, loadHosts]);
+
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key !== "Escape" || busy) return;
+      setLogs(null);
+      setPendingDestroy(null);
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [busy]);
 
   const runSpec = useCallback(async (next: typeof form) => {
     setBusy("run");
@@ -175,13 +232,24 @@ export default function ContainersPanel(_props: NativePanelProps) {
           }]
         : [];
       const instanceID = Number(next.hostId || 0);
+      const env = parseEnvironment(next.environment);
+      const volumes = parseVolumes(next.volumes);
+      const files = next.files
+        .filter((file) => file.path.trim() || file.content)
+        .map((file) => ({ path: file.path.trim(), content: file.content, mode: file.mode.trim() || "0600", secret: file.secret }));
       await api("/workloads", {
         method: "POST",
         body: JSON.stringify({
           name,
           image: next.image.trim(),
+          blueprint_slug: next.blueprintSlug || undefined,
           instance_id: Number.isFinite(instanceID) && instanceID > 0 ? instanceID : 0,
+          use_local: instanceID === 0,
+          pull_policy: next.pullPolicy,
           ports,
+          env,
+          volumes,
+          files,
           health_path: next.healthPath || "/",
           resources: {
             memory_mb: Number(next.memoryMB || 0),
@@ -213,11 +281,11 @@ export default function ContainersPanel(_props: NativePanelProps) {
     }
   }, [load]);
 
-  const destroy = useCallback(async (id: string) => {
+  const destroy = useCallback(async (id: string, deleteVolumes: boolean) => {
     setBusy(`destroy:${id}`);
     setError("");
     try {
-      await api(`/workloads/${encodeURIComponent(id)}`, { method: "DELETE" });
+      await api(`/workloads/${encodeURIComponent(id)}${deleteVolumes ? "?delete_volumes=1" : ""}`, { method: "DELETE" });
       setPendingDestroy(null);
       await load();
     } catch (e) {
@@ -244,21 +312,50 @@ export default function ContainersPanel(_props: NativePanelProps) {
     setForm({
       name: autoName(preset.image),
       image: preset.image,
+      blueprintSlug: "",
+      pullPolicy: form.pullPolicy,
       containerPort: preset.containerPort,
       hostPort: "",
       healthPath: preset.healthPath,
       memoryMB: preset.memoryMB,
       cpu: preset.cpu,
       hostId: form.hostId,
+      environment: form.environment,
+      volumes: form.volumes,
+      files: form.files,
     });
+  };
+
+  const useBlueprint = (blueprint: Blueprint) => {
+    const spec = blueprint.spec || {};
+    const port = spec.ports?.[0];
+    setForm((current) => ({
+      ...current,
+      blueprintSlug: blueprint.slug,
+      image: spec.image || current.image,
+      containerPort: port?.container_port ? String(port.container_port) : current.containerPort,
+      hostPort: port?.host_port ? String(port.host_port) : "",
+      healthPath: spec.health_path || current.healthPath,
+      memoryMB: spec.resources?.memory_mb ? String(spec.resources.memory_mb) : current.memoryMB,
+      cpu: spec.resources?.cpu ? String(spec.resources.cpu) : current.cpu,
+      name: autoName(spec.image || current.image),
+    }));
+  };
+
+  const updateFile = (index: number, patch: Partial<FileDraft>) => {
+    setForm((current) => ({
+      ...current,
+      files: current.files.map((file, fileIndex) => fileIndex === index ? { ...file, ...patch } : file),
+    }));
   };
 
   return (
     <div style={styles.root}>
-      <header style={styles.header}>
+      <style>{responsiveCSS}</style>
+      <header className="containers-header" style={styles.header}>
         <div>
           <h1 style={styles.title}>Containers</h1>
-          <div style={styles.subtitle}>Local Docker workloads</div>
+          <div style={styles.subtitle}>Docker workloads across connected hosts</div>
         </div>
         <div style={styles.headerRight}>
           <span style={styles.statusText}>{status}</span>
@@ -268,7 +365,7 @@ export default function ContainersPanel(_props: NativePanelProps) {
 
       {error && <div style={styles.error}>{error}</div>}
 
-      <main style={styles.main}>
+      <main className="containers-main" style={styles.main}>
         <section style={styles.workloads}>
           <div style={styles.sectionHeader}>
             <div>
@@ -283,7 +380,7 @@ export default function ContainersPanel(_props: NativePanelProps) {
             <div style={styles.list}>
               {workloads.map((w) => (
                 <article key={w.id} style={styles.row}>
-                  <div style={styles.rowTop}>
+                  <div className="containers-row-top" style={styles.rowTop}>
                     <div style={styles.rowMain}>
                       <div style={styles.nameLine}>
                         <span style={styles.workloadName}>{w.name}</span>
@@ -294,12 +391,12 @@ export default function ContainersPanel(_props: NativePanelProps) {
                     </div>
                     <div style={styles.actions}>
                       {w.public_url && <a style={styles.primaryLink} href={w.public_url} target="_blank" rel="noreferrer">Open</a>}
-                      <button type="button" style={styles.button} disabled={!!busy} onClick={() => action(w.id, "restart")}>Restart</button>
+                      <button type="button" style={styles.button} disabled={!!busy || w.status !== "running"} onClick={() => action(w.id, "restart")}>Restart</button>
                       <button type="button" style={styles.button} disabled={!!busy} onClick={() => showLogs(w)}>Logs</button>
                     </div>
                   </div>
 
-                  <div style={styles.metaGrid}>
+                  <div className="containers-meta-grid" style={styles.metaGrid}>
                     <Meta label="URL" value={w.public_url || "-"} />
                     <Meta label="Host" value={hostLabels.get(w.instance_id || w.host_id || 0) || `Host ${w.instance_id || w.host_id || 0}`} />
                     <Meta label="Port" value={portLabel(w)} />
@@ -310,10 +407,10 @@ export default function ContainersPanel(_props: NativePanelProps) {
                   {w.last_error && <div style={styles.errorSmall}>{w.last_error}</div>}
 
                   <div style={styles.secondaryActions}>
-                    <button type="button" style={styles.linkButton} disabled={!!busy} onClick={() => action(w.id, "start")}>Start</button>
-                    <button type="button" style={styles.linkButton} disabled={!!busy} onClick={() => action(w.id, "stop")}>Stop</button>
+                    <button type="button" style={styles.linkButton} disabled={!!busy || w.status !== "stopped"} onClick={() => action(w.id, "start")}>Start</button>
+                    <button type="button" style={styles.linkButton} disabled={!!busy || w.status !== "running"} onClick={() => action(w.id, "stop")}>Stop</button>
                     <button type="button" style={styles.linkButton} disabled={!!busy} onClick={() => action(w.id, "health")}>Health check</button>
-                    <button type="button" style={{ ...styles.linkButton, color: "var(--error, #ef4444)" }} disabled={!!busy} onClick={() => setPendingDestroy({ id: w.id, name: w.name })}>Destroy</button>
+                    <button type="button" style={{ ...styles.linkButton, color: "var(--error, #ef4444)" }} disabled={!!busy} onClick={() => setPendingDestroy({ id: w.id, name: w.name, deleteVolumes: false })}>Destroy</button>
                   </div>
                 </article>
               ))}
@@ -337,12 +434,17 @@ export default function ContainersPanel(_props: NativePanelProps) {
                     <button type="button" style={styles.primaryButton} disabled={!!busy} onClick={() => runSpec({
                       name: autoName(preset.image),
                       image: preset.image,
+                      blueprintSlug: "",
+                      pullPolicy: form.pullPolicy,
                       containerPort: preset.containerPort,
                       hostPort: "",
                       healthPath: preset.healthPath,
                       memoryMB: preset.memoryMB,
                       cpu: preset.cpu,
                       hostId: form.hostId,
+                      environment: form.environment,
+                      volumes: form.volumes,
+                      files: form.files,
                     })}>Run</button>
                   </div>
                 </div>
@@ -353,25 +455,57 @@ export default function ContainersPanel(_props: NativePanelProps) {
           <section style={styles.card}>
             <h2 style={styles.sectionTitle}>Run Image</h2>
             <div style={styles.form}>
-              <input style={styles.input} placeholder="name" value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} />
-              <select style={styles.input} value={form.hostId} onChange={(e) => setForm({ ...form, hostId: e.target.value })}>
+              <label style={styles.fieldLabel}>Name<input style={styles.input} value={form.name} onChange={(e) => setForm((current) => ({ ...current, name: e.target.value }))} /></label>
+              <label style={styles.fieldLabel}>Host<select style={styles.input} value={form.hostId} onChange={(e) => setForm((current) => ({ ...current, hostId: e.target.value }))}>
                 {hosts.map((host) => (
                   <option key={host.id} value={String(host.id)}>
                     {host.label || host.name}{host.status !== "ready" ? ` · ${host.status}` : ""}
                   </option>
                 ))}
-              </select>
-              <input style={styles.input} placeholder="image, e.g. nginx:alpine" value={form.image} onChange={(e) => setForm({ ...form, image: e.target.value })} />
-              <div style={styles.twoCols}>
-                <input style={styles.input} placeholder="container port" value={form.containerPort} onChange={(e) => setForm({ ...form, containerPort: e.target.value })} />
-                <input style={styles.input} placeholder="host port auto" value={form.hostPort} onChange={(e) => setForm({ ...form, hostPort: e.target.value })} />
+              </select></label>
+              <label style={styles.fieldLabel}>Blueprint<select style={styles.input} value={form.blueprintSlug} onChange={(e) => {
+                const blueprint = blueprints.find((item) => item.slug === e.target.value);
+                if (blueprint) useBlueprint(blueprint);
+                else setForm((current) => ({ ...current, blueprintSlug: "" }));
+              }}>
+                <option value="">None</option>
+                {blueprints.map((blueprint) => <option key={blueprint.slug} value={blueprint.slug}>{blueprint.name}</option>)}
+              </select></label>
+              <label style={styles.fieldLabel}>Image<input style={styles.input} placeholder="nginx:alpine" value={form.image} onChange={(e) => setForm((current) => ({ ...current, image: e.target.value }))} /></label>
+              <label style={styles.fieldLabel}>Pull policy<select style={styles.input} value={form.pullPolicy} onChange={(e) => setForm((current) => ({ ...current, pullPolicy: e.target.value }))}>
+                <option value="missing">When missing</option>
+                <option value="always">Always</option>
+                <option value="never">Never</option>
+              </select></label>
+              <div className="containers-two-cols" style={styles.twoCols}>
+                <label style={styles.fieldLabel}>Container port<input inputMode="numeric" style={styles.input} value={form.containerPort} onChange={(e) => setForm((current) => ({ ...current, containerPort: e.target.value }))} /></label>
+                <label style={styles.fieldLabel}>Host port<input inputMode="numeric" style={styles.input} placeholder="Auto" value={form.hostPort} onChange={(e) => setForm((current) => ({ ...current, hostPort: e.target.value }))} /></label>
               </div>
-              <div style={styles.threeCols}>
-                <input style={styles.input} placeholder="/health" value={form.healthPath} onChange={(e) => setForm({ ...form, healthPath: e.target.value })} />
-                <input style={styles.input} placeholder="MB" value={form.memoryMB} onChange={(e) => setForm({ ...form, memoryMB: e.target.value })} />
-                <input style={styles.input} placeholder="CPU" value={form.cpu} onChange={(e) => setForm({ ...form, cpu: e.target.value })} />
+              <div className="containers-three-cols" style={styles.threeCols}>
+                <label style={styles.fieldLabel}>Health path<input style={styles.input} value={form.healthPath} onChange={(e) => setForm((current) => ({ ...current, healthPath: e.target.value }))} /></label>
+                <label style={styles.fieldLabel}>Memory MB<input inputMode="numeric" style={styles.input} value={form.memoryMB} onChange={(e) => setForm((current) => ({ ...current, memoryMB: e.target.value }))} /></label>
+                <label style={styles.fieldLabel}>CPU<input inputMode="decimal" style={styles.input} value={form.cpu} onChange={(e) => setForm((current) => ({ ...current, cpu: e.target.value }))} /></label>
               </div>
-              <button type="button" style={styles.primaryButtonWide} onClick={() => runSpec(form)} disabled={busy === "run" || !form.image.trim()}>
+              <label style={styles.fieldLabel}>Environment<textarea style={styles.textarea} placeholder="PORT=8080" value={form.environment} onChange={(e) => setForm((current) => ({ ...current, environment: e.target.value }))} /></label>
+              <label style={styles.fieldLabel}>Volumes<textarea style={styles.textarea} placeholder="data:/data" value={form.volumes} onChange={(e) => setForm((current) => ({ ...current, volumes: e.target.value }))} /></label>
+              <div style={styles.filesHeader}>
+                <span style={styles.fieldTitle}>Files</span>
+                <button type="button" style={styles.button} onClick={() => setForm((current) => ({ ...current, files: [...current.files, { path: "", content: "", mode: "0600", secret: false }] }))}>Add file</button>
+              </div>
+              {form.files.map((file, index) => (
+                <div key={index} style={styles.fileEditor}>
+                  <div className="containers-two-cols" style={styles.twoCols}>
+                    <label style={styles.fieldLabel}>Path<input style={styles.input} placeholder="/data/config.yaml" value={file.path} onChange={(e) => updateFile(index, { path: e.target.value })} /></label>
+                    <label style={styles.fieldLabel}>Mode<input style={styles.input} value={file.mode} onChange={(e) => updateFile(index, { mode: e.target.value })} /></label>
+                  </div>
+                  <label style={styles.fieldLabel}>Content<textarea style={styles.fileContent} value={file.content} onChange={(e) => updateFile(index, { content: e.target.value })} /></label>
+                  <div style={styles.fileFooter}>
+                    <label style={styles.checkboxLabel}><input type="checkbox" checked={file.secret} onChange={(e) => updateFile(index, { secret: e.target.checked })} /> Secret</label>
+                    <button type="button" style={styles.linkButton} onClick={() => setForm((current) => ({ ...current, files: current.files.filter((_, fileIndex) => fileIndex !== index) }))}>Remove</button>
+                  </div>
+                </div>
+              ))}
+              <button type="button" style={styles.primaryButtonWide} onClick={() => runSpec(form)} disabled={busy === "run" || (!form.image.trim() && !form.blueprintSlug)}>
                 {busy === "run" ? "Starting..." : "Run container"}
               </button>
             </div>
@@ -382,7 +516,7 @@ export default function ContainersPanel(_props: NativePanelProps) {
             <div style={styles.blueprints}>
               {blueprints.map((b) => (
                 <div key={b.slug} style={styles.blueprint}>
-                  <div style={styles.quickTitle}>{b.name}</div>
+                  <div style={styles.blueprintTop}><div style={styles.quickTitle}>{b.name}</div><button type="button" style={styles.button} onClick={() => useBlueprint(b)}>Use</button></div>
                   <div style={styles.muted}>{b.description}</div>
                 </div>
               ))}
@@ -393,10 +527,10 @@ export default function ContainersPanel(_props: NativePanelProps) {
 
       {logs && (
         <div style={styles.modalBackdrop} onClick={() => setLogs(null)}>
-          <div style={styles.modal} onClick={(e) => e.stopPropagation()}>
+          <div role="dialog" aria-modal="true" aria-label={`Logs for ${logs.name}`} style={styles.modal} onClick={(e) => e.stopPropagation()}>
             <div style={styles.modalHeader}>
               <div style={styles.sectionTitle}>Logs: {logs.name}</div>
-              <button type="button" style={styles.button} onClick={() => setLogs(null)}>Close</button>
+              <button autoFocus type="button" style={styles.button} onClick={() => setLogs(null)}>Close</button>
             </div>
             <pre style={styles.pre}>{logs.body || "(no logs)"}</pre>
           </div>
@@ -405,18 +539,18 @@ export default function ContainersPanel(_props: NativePanelProps) {
 
       {pendingDestroy && (
         <div style={styles.confirmBackdrop} onClick={() => !busy && setPendingDestroy(null)}>
-          <div style={styles.confirmModal} onClick={(e) => e.stopPropagation()}>
+          <div role="alertdialog" aria-modal="true" aria-label={`Destroy ${pendingDestroy.name}`} style={styles.confirmModal} onClick={(e) => e.stopPropagation()}>
             <div style={styles.modalHeader}>
               <div style={styles.sectionTitle}>Destroy container</div>
-              <button type="button" style={styles.button} disabled={!!busy} onClick={() => setPendingDestroy(null)}>Close</button>
+              <button autoFocus type="button" style={styles.button} disabled={!!busy} onClick={() => setPendingDestroy(null)}>Close</button>
             </div>
             <div style={styles.modalBody}>
               <div style={styles.confirmName}>{pendingDestroy.name}</div>
-              <div style={styles.muted}>This removes the Docker container and its network. Docker volumes are preserved.</div>
+              <label style={styles.checkboxLabel}><input type="checkbox" checked={pendingDestroy.deleteVolumes} onChange={(e) => setPendingDestroy({ ...pendingDestroy, deleteVolumes: e.target.checked })} /> Delete volumes</label>
             </div>
             <div style={styles.modalFooter}>
               <button type="button" style={styles.button} disabled={!!busy} onClick={() => setPendingDestroy(null)}>Cancel</button>
-              <button type="button" style={styles.dangerButton} disabled={!!busy} onClick={() => destroy(pendingDestroy.id)}>
+              <button type="button" style={styles.dangerButton} disabled={!!busy} onClick={() => destroy(pendingDestroy.id, pendingDestroy.deleteVolumes)}>
                 {busy === `destroy:${pendingDestroy.id}` ? "Destroying..." : "Destroy"}
               </button>
             </div>
@@ -435,6 +569,26 @@ function Meta({ label, value }: { label: string; value: string }) {
     </div>
   );
 }
+
+const responsiveCSS = `
+.containers-main, .containers-header, .containers-row-top, .containers-meta-grid, .containers-two-cols, .containers-three-cols { min-width: 0; }
+button:disabled { cursor: not-allowed !important; opacity: .45; }
+@media (max-width: 980px) {
+  .containers-main { display: flex !important; flex-direction: column; }
+  .containers-main > * { flex-shrink: 0; width: 100%; box-sizing: border-box; }
+}
+@media (max-width: 640px) {
+  .containers-header { align-items: flex-start !important; flex-direction: column; padding: 14px 16px !important; }
+  .containers-main { padding: 12px !important; }
+  .containers-row-top { flex-direction: column; }
+  .containers-meta-grid { grid-template-columns: repeat(2, minmax(0, 1fr)) !important; }
+  .containers-three-cols { grid-template-columns: minmax(0, 1fr) !important; }
+}
+@media (max-width: 400px) {
+  .containers-meta-grid { grid-template-columns: minmax(0, 1fr) !important; }
+  .containers-two-cols { grid-template-columns: minmax(0, 1fr) !important; }
+}
+`;
 
 const styles: Record<string, CSSProperties> = {
   root: { height: "100%", minHeight: 0, display: "flex", flexDirection: "column", color: "var(--text, #e5e7eb)", background: "var(--bg, #0b0b0c)" },
@@ -462,7 +616,7 @@ const styles: Record<string, CSSProperties> = {
   pill: { display: "inline-flex", alignItems: "center", minHeight: 20, padding: "2px 7px", borderRadius: 999, border: "1px solid var(--border, #2a2a2d)", color: "var(--text-muted, #a1a1aa)", fontSize: 11, textTransform: "uppercase" },
   actions: { display: "flex", alignItems: "center", gap: 8, flexShrink: 0 },
   secondaryActions: { display: "flex", flexWrap: "wrap", gap: 12 },
-  metaGrid: { display: "grid", gridTemplateColumns: "repeat(4, minmax(0, 1fr))", gap: 8 },
+  metaGrid: { display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 8 },
   metaItem: { minWidth: 0, padding: "8px 10px", border: "1px solid var(--border, #2a2a2d)", borderRadius: 6, background: "var(--bg, #0b0b0c)" },
   metaLabel: { fontSize: 10, textTransform: "uppercase", color: "var(--text-dim, #8a8a8f)", marginBottom: 4 },
   metaValue: { fontSize: 12, color: "var(--text, #e5e7eb)", overflowWrap: "anywhere" },
@@ -472,9 +626,17 @@ const styles: Record<string, CSSProperties> = {
   quickTitle: { fontSize: 13, fontWeight: 650 },
   quickActions: { display: "flex", gap: 8, flexShrink: 0 },
   form: { marginTop: 12, display: "flex", flexDirection: "column", gap: 10 },
+  fieldLabel: { display: "flex", flexDirection: "column", gap: 5, minWidth: 0, fontSize: 11, color: "var(--text-dim, #8a8a8f)" },
+  fieldTitle: { fontSize: 11, color: "var(--text-dim, #8a8a8f)" },
   twoCols: { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 },
   threeCols: { display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 8 },
   input: { width: "100%", boxSizing: "border-box", border: "1px solid var(--border, #2a2a2d)", borderRadius: 6, background: "var(--bg-input, #17171a)", color: "var(--text, #e5e7eb)", padding: "8px 10px", fontSize: 13, outline: "none" },
+  textarea: { width: "100%", minHeight: 66, resize: "vertical", boxSizing: "border-box", border: "1px solid var(--border, #2a2a2d)", borderRadius: 6, background: "var(--bg-input, #17171a)", color: "var(--text, #e5e7eb)", padding: "8px 10px", fontSize: 12, fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace", outline: "none" },
+  fileContent: { width: "100%", minHeight: 100, resize: "vertical", boxSizing: "border-box", border: "1px solid var(--border, #2a2a2d)", borderRadius: 6, background: "var(--bg-input, #17171a)", color: "var(--text, #e5e7eb)", padding: "8px 10px", fontSize: 12, fontFamily: "ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace", outline: "none" },
+  filesHeader: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 },
+  fileEditor: { display: "flex", flexDirection: "column", gap: 8, padding: 10, border: "1px solid var(--border, #2a2a2d)", borderRadius: 6, background: "var(--bg, #0b0b0c)" },
+  fileFooter: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8 },
+  checkboxLabel: { display: "inline-flex", alignItems: "center", gap: 7, fontSize: 12, color: "var(--text-muted, #a1a1aa)" },
   button: { border: "1px solid var(--border, #2a2a2d)", borderRadius: 6, background: "transparent", color: "var(--text-muted, #a1a1aa)", padding: "6px 10px", fontSize: 12, cursor: "pointer" },
   primaryButton: { border: "1px solid var(--accent, #38bdf8)", borderRadius: 6, background: "var(--accent, #38bdf8)", color: "var(--bg, #0b0b0c)", padding: "6px 10px", fontSize: 12, fontWeight: 650, cursor: "pointer" },
   primaryButtonWide: { border: "1px solid var(--accent, #38bdf8)", borderRadius: 6, background: "var(--accent, #38bdf8)", color: "var(--bg, #0b0b0c)", padding: "9px 10px", fontSize: 13, fontWeight: 650, cursor: "pointer", width: "100%" },
@@ -482,6 +644,7 @@ const styles: Record<string, CSSProperties> = {
   linkButton: { border: 0, background: "transparent", color: "var(--text-muted, #a1a1aa)", padding: 0, fontSize: 12, cursor: "pointer" },
   blueprints: { marginTop: 12, display: "grid", gap: 8 },
   blueprint: { padding: 10, border: "1px solid var(--border, #2a2a2d)", borderRadius: 6 },
+  blueprintTop: { display: "flex", alignItems: "center", justifyContent: "space-between", gap: 8, marginBottom: 4 },
   modalBackdrop: { position: "fixed", inset: 0, background: "rgba(0,0,0,.62)", display: "flex", alignItems: "flex-end", justifyContent: "center", padding: 24, zIndex: 80 },
   confirmBackdrop: { position: "fixed", inset: 0, background: "rgba(0,0,0,.62)", display: "flex", alignItems: "center", justifyContent: "center", padding: 24, zIndex: 80 },
   modal: { width: "min(100%, 980px)", maxHeight: "76vh", display: "flex", flexDirection: "column", border: "1px solid var(--border, #2a2a2d)", borderRadius: 8, background: "var(--bg-card, #111114)", overflow: "hidden" },

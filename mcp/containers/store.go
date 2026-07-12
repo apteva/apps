@@ -72,6 +72,40 @@ func seedBlueprints(db *sql.DB) error {
 	return nil
 }
 
+func scrubStoredSecrets(db *sql.DB) error {
+	rows, err := db.Query(`SELECT id, config_json, env_json FROM containers_workloads`)
+	if err != nil {
+		return err
+	}
+	type storedWorkload struct {
+		id, configJSON, envJSON string
+	}
+	var stored []storedWorkload
+	for rows.Next() {
+		var item storedWorkload
+		if err := rows.Scan(&item.id, &item.configJSON, &item.envJSON); err != nil {
+			_ = rows.Close()
+			return err
+		}
+		stored = append(stored, item)
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	for _, item := range stored {
+		var spec RunSpec
+		configJSON := "{}"
+		if json.Unmarshal([]byte(item.configJSON), &spec) == nil {
+			configJSON = encodeJSON(sanitizeRunSpecForStorage(spec))
+		}
+		envJSON := encodeJSON(redactEnvironment(decodeMap(item.envJSON)))
+		if _, err := db.Exec(`UPDATE containers_workloads SET config_json=?, env_json=? WHERE id=?`, configJSON, envJSON, item.id); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func listBlueprints(db *sql.DB) ([]Blueprint, error) {
 	rows, err := db.Query(`SELECT slug, name, description, spec_json FROM containers_blueprints WHERE status='active' ORDER BY slug`)
 	if err != nil {
@@ -109,7 +143,14 @@ func getBlueprint(db *sql.DB, slug string) (*Blueprint, error) {
 func insertWorkload(db *sql.DB, w *Workload, ports []PortSpec, volumes []VolumeSpec) error {
 	now := nowUTC()
 	log.Printf("[containers] db insert workload begin workload_id=%s name=%q image=%q", w.ID, w.Name, w.Image)
-	_, err := execDB(db, "insert workload", `
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	tx, err := db.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
+	_, err = tx.ExecContext(ctx, `
 		INSERT INTO containers_workloads (
 			id, name, blueprint_slug, host_id, instance_id, kind, image, status,
 			desired_status, container_id, container_name, network_name, public_url,
@@ -128,7 +169,7 @@ func insertWorkload(db *sql.DB, w *Workload, ports []PortSpec, volumes []VolumeS
 	for _, p := range ports {
 		log.Printf("[containers] db insert port begin workload_id=%s host_port=%d container_port=%d protocol=%s",
 			w.ID, p.HostPort, p.ContainerPort, p.Protocol)
-		if _, err := execDB(db, "insert port", `INSERT INTO containers_ports (workload_id, protocol, container_port, host_port, bind_addr) VALUES (?, ?, ?, ?, ?)`,
+		if _, err := tx.ExecContext(ctx, `INSERT INTO containers_ports (workload_id, protocol, container_port, host_port, bind_addr) VALUES (?, ?, ?, ?, ?)`,
 			w.ID, p.Protocol, p.ContainerPort, p.HostPort, p.BindAddr); err != nil {
 			log.Printf("[containers] db insert port error workload_id=%s err=%q", w.ID, err.Error())
 			return err
@@ -136,14 +177,18 @@ func insertWorkload(db *sql.DB, w *Workload, ports []PortSpec, volumes []VolumeS
 	}
 	for _, v := range volumes {
 		log.Printf("[containers] db insert volume begin workload_id=%s volume=%q mount=%q", w.ID, v.DockerVolumeName, v.MountPath)
-		if _, err := execDB(db, "insert volume", `INSERT INTO containers_volumes (workload_id, name, docker_volume_name, mount_path) VALUES (?, ?, ?, ?)`,
+		if _, err := tx.ExecContext(ctx, `INSERT INTO containers_volumes (workload_id, name, docker_volume_name, mount_path) VALUES (?, ?, ?, ?)`,
 			w.ID, v.Name, v.DockerVolumeName, v.MountPath); err != nil {
 			log.Printf("[containers] db insert volume error workload_id=%s err=%q", w.ID, err.Error())
 			return err
 		}
 	}
 	log.Printf("[containers] db record created event begin workload_id=%s", w.ID)
-	return recordEvent(db, w.ID, "created", "tool", map[string]any{"image": w.Image})
+	if _, err := tx.ExecContext(ctx, `INSERT INTO containers_events (workload_id, kind, actor, payload_json) VALUES (?, 'created', 'tool', ?)`,
+		w.ID, encodeJSON(map[string]any{"image": w.Image})); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func execDB(db *sql.DB, label, query string, args ...any) (sql.Result, error) {
@@ -223,7 +268,11 @@ func getWorkloadBase(db *sql.DB, where string, arg any) (*Workload, error) {
 }
 
 func listWorkloads(db *sql.DB, status string) ([]*Workload, error) {
-	q := `SELECT id FROM containers_workloads`
+	q := `SELECT id, name, blueprint_slug, host_id, instance_id, kind, image, status,
+		desired_status, container_id, container_name, network_name, public_url,
+		health_status, health_path, health_url, config_json, env_json, resources_json,
+		restart_policy, COALESCE(last_health_at,''), last_error, created_at, updated_at
+		FROM containers_workloads`
 	args := []any{}
 	if status != "" {
 		q += ` WHERE status=?`
@@ -239,15 +288,15 @@ func listWorkloads(db *sql.DB, status string) ([]*Workload, error) {
 		log.Printf("[containers] db list workloads query error status=%q err=%q", status, err.Error())
 		return nil, err
 	}
-	var ids []string
+	out := make([]*Workload, 0)
 	for rows.Next() {
-		var id string
-		if err := rows.Scan(&id); err != nil {
+		w, err := scanWorkload(rows)
+		if err != nil {
 			_ = rows.Close()
 			log.Printf("[containers] db list workloads scan error status=%q err=%q", status, err.Error())
 			return nil, err
 		}
-		ids = append(ids, id)
+		out = append(out, w)
 	}
 	if err := rows.Err(); err != nil {
 		_ = rows.Close()
@@ -258,20 +307,82 @@ func listWorkloads(db *sql.DB, status string) ([]*Workload, error) {
 		log.Printf("[containers] db list workloads close error status=%q err=%q", status, err.Error())
 		return nil, err
 	}
-	log.Printf("[containers] db list workloads ids=%d status=%q", len(ids), status)
-	out := make([]*Workload, 0, len(ids))
-	for _, id := range ids {
-		w, err := getWorkload(db, id)
-		if err != nil {
-			log.Printf("[containers] db list workloads hydrate error workload_id=%s err=%q", id, err.Error())
-			return nil, err
-		}
-		if w != nil {
-			out = append(out, w)
-		}
+	if err := hydrateWorkloads(db, out); err != nil {
+		return nil, err
 	}
 	log.Printf("[containers] db list workloads done count=%d status=%q", len(out), status)
 	return out, nil
+}
+
+type rowScanner interface {
+	Scan(dest ...any) error
+}
+
+func scanWorkload(scanner rowScanner) (*Workload, error) {
+	var w Workload
+	var envRaw, resRaw string
+	if err := scanner.Scan(
+		&w.ID, &w.Name, &w.BlueprintSlug, &w.HostID, &w.InstanceID, &w.Kind, &w.Image, &w.Status,
+		&w.DesiredStatus, &w.ContainerID, &w.ContainerName, &w.NetworkName, &w.PublicURL,
+		&w.HealthStatus, &w.HealthPath, &w.HealthURL, &w.ConfigJSON, &envRaw, &resRaw,
+		&w.RestartPolicy, &w.LastHealthAt, &w.LastError, &w.CreatedAt, &w.UpdatedAt,
+	); err != nil {
+		return nil, err
+	}
+	w.EnvJSON = envRaw
+	w.ResourcesJSON = resRaw
+	w.Env = decodeMap(envRaw)
+	w.Resources = decodeResources(resRaw)
+	return &w, nil
+}
+
+func hydrateWorkloads(db *sql.DB, workloads []*Workload) error {
+	byID := make(map[string]*Workload, len(workloads))
+	for _, w := range workloads {
+		byID[w.ID] = w
+	}
+	portRows, err := db.Query(`SELECT workload_id, protocol, container_port, host_port, bind_addr FROM containers_ports ORDER BY id`)
+	if err != nil {
+		return err
+	}
+	for portRows.Next() {
+		var workloadID string
+		var p PortSpec
+		if err := portRows.Scan(&workloadID, &p.Protocol, &p.ContainerPort, &p.HostPort, &p.BindAddr); err != nil {
+			_ = portRows.Close()
+			return err
+		}
+		if w := byID[workloadID]; w != nil {
+			w.Ports = append(w.Ports, p)
+		}
+	}
+	if err := portRows.Err(); err != nil {
+		_ = portRows.Close()
+		return err
+	}
+	if err := portRows.Close(); err != nil {
+		return err
+	}
+	volumeRows, err := db.Query(`SELECT workload_id, name, docker_volume_name, mount_path, size_bytes FROM containers_volumes ORDER BY id`)
+	if err != nil {
+		return err
+	}
+	for volumeRows.Next() {
+		var workloadID string
+		var v VolumeSpec
+		if err := volumeRows.Scan(&workloadID, &v.Name, &v.DockerVolumeName, &v.MountPath, &v.SizeBytes); err != nil {
+			_ = volumeRows.Close()
+			return err
+		}
+		if w := byID[workloadID]; w != nil {
+			w.Volumes = append(w.Volumes, v)
+		}
+	}
+	if err := volumeRows.Err(); err != nil {
+		_ = volumeRows.Close()
+		return err
+	}
+	return volumeRows.Close()
 }
 
 func hydrateWorkload(db *sql.DB, w *Workload) error {
@@ -279,13 +390,19 @@ func hydrateWorkload(db *sql.DB, w *Workload) error {
 	if err != nil {
 		return err
 	}
-	defer portRows.Close()
 	for portRows.Next() {
 		var p PortSpec
 		if err := portRows.Scan(&p.Protocol, &p.ContainerPort, &p.HostPort, &p.BindAddr); err != nil {
 			return err
 		}
 		w.Ports = append(w.Ports, p)
+	}
+	if err := portRows.Err(); err != nil {
+		_ = portRows.Close()
+		return err
+	}
+	if err := portRows.Close(); err != nil {
+		return err
 	}
 	volRows, err := db.Query(`SELECT name, docker_volume_name, mount_path, size_bytes FROM containers_volumes WHERE workload_id=? ORDER BY id`, w.ID)
 	if err != nil {
@@ -299,7 +416,7 @@ func hydrateWorkload(db *sql.DB, w *Workload) error {
 		}
 		w.Volumes = append(w.Volumes, v)
 	}
-	return nil
+	return volRows.Err()
 }
 
 func updateVolumeSize(db *sql.DB, workloadID, volumeName string, sizeBytes int64) error {
@@ -308,6 +425,11 @@ func updateVolumeSize(db *sql.DB, workloadID, volumeName string, sizeBytes int64
 }
 
 func deleteWorkloadRows(db *sql.DB, id string) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback() }()
 	for _, q := range []string{
 		`DELETE FROM containers_ports WHERE workload_id=?`,
 		`DELETE FROM containers_volumes WHERE workload_id=?`,
@@ -316,16 +438,19 @@ func deleteWorkloadRows(db *sql.DB, id string) error {
 		 WHERE id=?`,
 	} {
 		if strings.Contains(q, "updated_at=?") {
-			if _, err := db.Exec(q, nowUTC(), id); err != nil {
+			if _, err := tx.Exec(q, nowUTC(), id); err != nil {
 				return err
 			}
 			continue
 		}
-		if _, err := db.Exec(q, id); err != nil {
+		if _, err := tx.Exec(q, id); err != nil {
 			return err
 		}
 	}
-	return recordEvent(db, id, "destroyed", "tool", map[string]any{})
+	if _, err := tx.Exec(`INSERT INTO containers_events (workload_id, kind, actor, payload_json) VALUES (?, 'destroyed', 'tool', '{}')`, id); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func recordEvent(db *sql.DB, workloadID, kind, actor string, payload map[string]any) error {

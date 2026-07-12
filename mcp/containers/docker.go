@@ -14,6 +14,7 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	sdk "github.com/apteva/app-sdk"
@@ -21,14 +22,15 @@ import (
 
 type DockerBackend interface {
 	Probe(ctx context.Context) error
-	CreateNetwork(ctx context.Context, name string) error
-	CreateVolume(ctx context.Context, name string) error
+	EnsureNetwork(ctx context.Context, name string) (bool, error)
+	EnsureVolume(ctx context.Context, name string) (bool, error)
 	WriteVolumeFile(ctx context.Context, volumeName, relPath string, content []byte, mode string) error
 	Run(ctx context.Context, spec RunSpec, containerName, networkName string) (string, error)
 	Start(ctx context.Context, containerName string) error
 	Stop(ctx context.Context, containerName string) error
 	Restart(ctx context.Context, containerName string) error
 	Remove(ctx context.Context, containerName string, force bool) error
+	RemoveManagedContainer(ctx context.Context, containerName, workloadID string) error
 	RemoveNetwork(ctx context.Context, name string) error
 	RemoveVolume(ctx context.Context, name string) error
 	VolumeUsage(ctx context.Context, name string) (int64, error)
@@ -41,7 +43,14 @@ type LocalDocker struct{}
 type RemoteDocker struct {
 	app        *sdk.AppCtx
 	instanceID int64
+	ensureOnce sync.Once
+	ensureErr  error
 }
+
+const (
+	maxDockerOutputBytes = 2 << 20
+	maxDockerErrorBytes  = 256 << 10
+)
 
 type ContainerState struct {
 	ID      string `json:"id"`
@@ -55,20 +64,20 @@ func (d LocalDocker) Probe(ctx context.Context) error {
 	return err
 }
 
-func (d LocalDocker) CreateNetwork(ctx context.Context, name string) error {
+func (d LocalDocker) EnsureNetwork(ctx context.Context, name string) (bool, error) {
 	if _, err := docker(ctx, "network", "inspect", name); err == nil {
-		return nil
+		return false, nil
 	}
 	_, err := docker(ctx, "network", "create", name)
-	return err
+	return err == nil, err
 }
 
-func (d LocalDocker) CreateVolume(ctx context.Context, name string) error {
+func (d LocalDocker) EnsureVolume(ctx context.Context, name string) (bool, error) {
 	if _, err := docker(ctx, "volume", "inspect", name); err == nil {
-		return nil
+		return false, nil
 	}
 	_, err := docker(ctx, "volume", "create", name)
-	return err
+	return err == nil, err
 }
 
 func (d LocalDocker) WriteVolumeFile(ctx context.Context, volumeName, relPath string, content []byte, mode string) error {
@@ -120,6 +129,17 @@ func (d LocalDocker) Remove(ctx context.Context, containerName string, force boo
 	args = append(args, containerName)
 	_, err := docker(ctx, args...)
 	return err
+}
+
+func (d LocalDocker) RemoveManagedContainer(ctx context.Context, containerName, workloadID string) error {
+	owner, err := docker(ctx, "container", "inspect", "--format", `{{ index .Config.Labels "com.apteva.workload-id" }}`, containerName)
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(owner) != workloadID {
+		return nil
+	}
+	return d.Remove(ctx, containerName, true)
 }
 
 func (d LocalDocker) RemoveNetwork(ctx context.Context, name string) error {
@@ -179,30 +199,32 @@ func (d LocalDocker) Inspect(ctx context.Context, containerName string) (*Contai
 	return st, nil
 }
 
-func (d RemoteDocker) Probe(ctx context.Context) error {
+func (d *RemoteDocker) Probe(ctx context.Context) error {
 	_, err := d.remoteDocker(ctx, 15, "version", "--format", "{{.Server.Version}}")
 	return err
 }
 
-func (d RemoteDocker) CreateNetwork(ctx context.Context, name string) error {
+func (d *RemoteDocker) EnsureNetwork(ctx context.Context, name string) (bool, error) {
 	if err := d.ensureDocker(ctx); err != nil {
-		return err
+		return false, err
 	}
-	cmd := "docker network inspect " + shellQuote(name) + " >/dev/null 2>&1 || docker network create " + shellQuote(name)
-	_, _, err := d.runRemote(ctx, cmd, 30)
-	return err
+	quoted := shellQuote(name)
+	cmd := "if docker network inspect " + quoted + " >/dev/null 2>&1; then printf existing; else docker network create " + quoted + " >/dev/null && printf created; fi"
+	out, _, err := d.runRemote(ctx, cmd, 30)
+	return strings.TrimSpace(out) == "created", err
 }
 
-func (d RemoteDocker) CreateVolume(ctx context.Context, name string) error {
+func (d *RemoteDocker) EnsureVolume(ctx context.Context, name string) (bool, error) {
 	if err := d.ensureDocker(ctx); err != nil {
-		return err
+		return false, err
 	}
-	cmd := "docker volume inspect " + shellQuote(name) + " >/dev/null 2>&1 || docker volume create " + shellQuote(name)
-	_, _, err := d.runRemote(ctx, cmd, 30)
-	return err
+	quoted := shellQuote(name)
+	cmd := "if docker volume inspect " + quoted + " >/dev/null 2>&1; then printf existing; else docker volume create " + quoted + " >/dev/null && printf created; fi"
+	out, _, err := d.runRemote(ctx, cmd, 30)
+	return strings.TrimSpace(out) == "created", err
 }
 
-func (d RemoteDocker) WriteVolumeFile(ctx context.Context, volumeName, relPath string, content []byte, mode string) error {
+func (d *RemoteDocker) WriteVolumeFile(ctx context.Context, volumeName, relPath string, content []byte, mode string) error {
 	if d.app == nil || d.app.PlatformAPI() == nil {
 		return errors.New("platform API unavailable")
 	}
@@ -219,7 +241,9 @@ func (d RemoteDocker) WriteVolumeFile(ctx context.Context, volumeName, relPath s
 		return fmt.Errorf("stage remote volume file: %w", err)
 	}
 	defer func() {
-		_, _, _ = d.runRemote(context.Background(), "rm -f "+shellQuote(hostPath), 15)
+		cleanupCtx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		defer cancel()
+		_, _, _ = d.runRemote(cleanupCtx, "rm -f "+shellQuote(hostPath), 15)
 	}()
 	target := "/target/" + strings.TrimLeft(relPath, "/")
 	script := `set -eu
@@ -238,7 +262,7 @@ mv "$tmp" "$dest"`
 	return nil
 }
 
-func (d RemoteDocker) Run(ctx context.Context, spec RunSpec, containerName, networkName string) (string, error) {
+func (d *RemoteDocker) Run(ctx context.Context, spec RunSpec, containerName, networkName string) (string, error) {
 	args, err := dockerRunArgs(spec, containerName, networkName)
 	if err != nil {
 		return "", err
@@ -252,6 +276,9 @@ func (d RemoteDocker) Run(ctx context.Context, spec RunSpec, containerName, netw
 
 func dockerRunArgs(spec RunSpec, containerName, networkName string) ([]string, error) {
 	args := []string{"run", "-d", "--name", containerName, "--restart", spec.RestartPolicy, "--network", networkName}
+	if spec.runtimeWorkloadID != "" {
+		args = append(args, "--label", "com.apteva.workload-id="+spec.runtimeWorkloadID)
+	}
 	if spec.PullPolicy != "" {
 		args = append(args, "--pull", spec.PullPolicy)
 	}
@@ -285,22 +312,22 @@ func dockerRunArgs(spec RunSpec, containerName, networkName string) ([]string, e
 	return args, nil
 }
 
-func (d RemoteDocker) Start(ctx context.Context, containerName string) error {
+func (d *RemoteDocker) Start(ctx context.Context, containerName string) error {
 	_, err := d.remoteDocker(ctx, 30, "start", containerName)
 	return err
 }
 
-func (d RemoteDocker) Stop(ctx context.Context, containerName string) error {
+func (d *RemoteDocker) Stop(ctx context.Context, containerName string) error {
 	_, err := d.remoteDocker(ctx, 30, "stop", "-t", "10", containerName)
 	return err
 }
 
-func (d RemoteDocker) Restart(ctx context.Context, containerName string) error {
+func (d *RemoteDocker) Restart(ctx context.Context, containerName string) error {
 	_, err := d.remoteDocker(ctx, 45, "restart", "-t", "10", containerName)
 	return err
 }
 
-func (d RemoteDocker) Remove(ctx context.Context, containerName string, force bool) error {
+func (d *RemoteDocker) Remove(ctx context.Context, containerName string, force bool) error {
 	args := []string{"rm"}
 	if force {
 		args = append(args, "-f")
@@ -310,17 +337,28 @@ func (d RemoteDocker) Remove(ctx context.Context, containerName string, force bo
 	return err
 }
 
-func (d RemoteDocker) RemoveNetwork(ctx context.Context, name string) error {
+func (d *RemoteDocker) RemoveManagedContainer(ctx context.Context, containerName, workloadID string) error {
+	owner, err := d.remoteDocker(ctx, 30, "container", "inspect", "--format", `{{ index .Config.Labels "com.apteva.workload-id" }}`, containerName)
+	if err != nil {
+		return err
+	}
+	if strings.TrimSpace(owner) != workloadID {
+		return nil
+	}
+	return d.Remove(ctx, containerName, true)
+}
+
+func (d *RemoteDocker) RemoveNetwork(ctx context.Context, name string) error {
 	_, err := d.remoteDocker(ctx, 30, "network", "rm", name)
 	return err
 }
 
-func (d RemoteDocker) RemoveVolume(ctx context.Context, name string) error {
+func (d *RemoteDocker) RemoveVolume(ctx context.Context, name string) error {
 	_, err := d.remoteDocker(ctx, 30, "volume", "rm", name)
 	return err
 }
 
-func (d RemoteDocker) VolumeUsage(ctx context.Context, name string) (int64, error) {
+func (d *RemoteDocker) VolumeUsage(ctx context.Context, name string) (int64, error) {
 	out, err := d.remoteDocker(ctx, 120, "run", "--rm", "-v", name+":/volume:ro", "alpine:3.20", "sh", "-c", "du -sk /volume | awk '{print $1 * 1024}'")
 	if err != nil {
 		return 0, err
@@ -332,14 +370,21 @@ func (d RemoteDocker) VolumeUsage(ctx context.Context, name string) (int64, erro
 	return n, nil
 }
 
-func (d RemoteDocker) Logs(ctx context.Context, containerName string, tail int) (string, error) {
+func (d *RemoteDocker) Logs(ctx context.Context, containerName string, tail int) (string, error) {
 	if tail <= 0 || tail > 2000 {
 		tail = 200
 	}
-	return d.remoteDocker(ctx, 30, "logs", "--tail", strconv.Itoa(tail), containerName)
+	if err := d.ensureDocker(ctx); err != nil {
+		return "", err
+	}
+	inspect := shellJoin("docker", "container", "inspect", containerName) + " >/dev/null 2>&1"
+	logs := shellJoin("docker", "logs", "--tail", strconv.Itoa(tail), containerName) + " 2>&1"
+	cmd := inspect + " && " + logs + " | tail -c " + strconv.Itoa(maxDockerOutputBytes)
+	out, _, err := d.runRemote(ctx, cmd, 30)
+	return out, err
 }
 
-func (d RemoteDocker) Inspect(ctx context.Context, containerName string) (*ContainerState, error) {
+func (d *RemoteDocker) Inspect(ctx context.Context, containerName string) (*ContainerState, error) {
 	raw, err := d.remoteDocker(ctx, 30, "container", "inspect", containerName)
 	if err != nil {
 		return nil, err
@@ -367,7 +412,7 @@ func (d RemoteDocker) Inspect(ctx context.Context, containerName string) (*Conta
 	return st, nil
 }
 
-func (d RemoteDocker) remoteDocker(ctx context.Context, timeoutS int, args ...string) (string, error) {
+func (d *RemoteDocker) remoteDocker(ctx context.Context, timeoutS int, args ...string) (string, error) {
 	if err := d.ensureDocker(ctx); err != nil {
 		return "", err
 	}
@@ -379,15 +424,17 @@ func (d RemoteDocker) remoteDocker(ctx context.Context, timeoutS int, args ...st
 	return out, nil
 }
 
-func (d RemoteDocker) ensureDocker(ctx context.Context) error {
-	_, _, err := d.runRemote(ctx, remoteDockerBootstrapScript, 360)
-	if err != nil {
-		return fmt.Errorf("bootstrap remote docker: %w", err)
-	}
-	return nil
+func (d *RemoteDocker) ensureDocker(ctx context.Context) error {
+	d.ensureOnce.Do(func() {
+		_, _, err := d.runRemote(ctx, remoteDockerBootstrapScript, 360)
+		if err != nil {
+			d.ensureErr = fmt.Errorf("bootstrap remote docker: %w", err)
+		}
+	})
+	return d.ensureErr
 }
 
-func (d RemoteDocker) runRemote(ctx context.Context, cmd string, timeoutS int) (string, int, error) {
+func (d *RemoteDocker) runRemote(ctx context.Context, cmd string, timeoutS int) (string, int, error) {
 	if d.app == nil || d.app.PlatformAPI() == nil {
 		return "", 0, errors.New("platform API unavailable")
 	}
@@ -412,6 +459,7 @@ func (d RemoteDocker) runRemote(ctx context.Context, cmd string, timeoutS int) (
 	case <-ctx.Done():
 		return resp.Output, resp.ExitCode, ctx.Err()
 	case err := <-done:
+		resp.Output = truncateOutput(resp.Output, maxDockerOutputBytes)
 		if err != nil {
 			return resp.Output, resp.ExitCode, fmt.Errorf("instance_run_command instance_id=%d: %w", d.instanceID, err)
 		}
@@ -442,10 +490,7 @@ fi
 if ! command -v docker >/dev/null 2>&1; then
   if command -v apt-get >/dev/null 2>&1; then
     $SUDO env DEBIAN_FRONTEND=noninteractive apt-get update -y
-    $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y docker.io || (
-      $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y ca-certificates curl &&
-      curl -fsSL https://get.docker.com | $SUDO sh
-    )
+    $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y docker.io
   elif command -v dnf >/dev/null 2>&1; then
     $SUDO dnf install -y docker || $SUDO dnf install -y moby-engine
   elif command -v yum >/dev/null 2>&1; then
@@ -473,9 +518,10 @@ func dockerWithInput(ctx context.Context, stdin []byte, args ...string) (string,
 	start := time.Now()
 	log.Printf("[containers] docker start args=%s", redactDockerArgs(args))
 	cmd := exec.CommandContext(ctx, "docker", args...)
-	var out, stderr bytes.Buffer
-	cmd.Stdout = &out
-	cmd.Stderr = &stderr
+	out := newLimitedBuffer(maxDockerOutputBytes)
+	stderr := newLimitedBuffer(maxDockerErrorBytes)
+	cmd.Stdout = out
+	cmd.Stderr = stderr
 	if stdin != nil {
 		cmd.Stdin = bytes.NewReader(stdin)
 	}
@@ -491,6 +537,48 @@ func dockerWithInput(ctx context.Context, stdin []byte, args ...string) (string,
 	log.Printf("[containers] docker ok args=%s duration=%s stdout_bytes=%d",
 		redactDockerArgs(args), time.Since(start).Round(time.Millisecond), out.Len())
 	return out.String(), nil
+}
+
+type limitedBuffer struct {
+	buf       bytes.Buffer
+	limit     int
+	truncated bool
+}
+
+func newLimitedBuffer(limit int) *limitedBuffer {
+	return &limitedBuffer{limit: limit}
+}
+
+func (b *limitedBuffer) Write(p []byte) (int, error) {
+	originalLen := len(p)
+	remaining := b.limit - b.buf.Len()
+	if remaining <= 0 {
+		b.truncated = b.truncated || originalLen > 0
+		return originalLen, nil
+	}
+	if len(p) > remaining {
+		p = p[:remaining]
+		b.truncated = true
+	}
+	_, _ = b.buf.Write(p)
+	return originalLen, nil
+}
+
+func (b *limitedBuffer) String() string {
+	out := b.buf.String()
+	if b.truncated {
+		out += "\n[output truncated]"
+	}
+	return out
+}
+
+func (b *limitedBuffer) Len() int { return b.buf.Len() }
+
+func truncateOutput(value string, limit int) string {
+	if len(value) <= limit {
+		return value
+	}
+	return value[:limit] + "\n[output truncated]"
 }
 
 func formatDockerError(args []string, msg string) error {

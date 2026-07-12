@@ -13,6 +13,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	sdk "github.com/apteva/app-sdk"
@@ -48,6 +49,9 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		return err
 	}
 	if err := seedBlueprints(ctx.AppDB()); err != nil {
+		return err
+	}
+	if err := scrubStoredSecrets(ctx.AppDB()); err != nil {
 		return err
 	}
 	if n, err := markInterruptedWorkloads(ctx.AppDB()); err != nil {
@@ -152,7 +156,7 @@ func (a *App) prepareWorkload(appCtx *sdk.AppCtx, db *sql.DB, in RunSpec) (*Work
 		log.Printf("[containers] prepare expand failed name=%q err=%q", in.Name, err.Error())
 		return nil, spec, err
 	}
-	if runSpecTargetID(spec) == 0 {
+	if runSpecTargetID(spec) == 0 && !spec.UseLocal {
 		if defaultID := defaultHostID(appCtx); defaultID > 0 {
 			spec.HostID = defaultID
 			spec.InstanceID = defaultID
@@ -176,6 +180,7 @@ func (a *App) prepareWorkload(appCtx *sdk.AppCtx, db *sql.DB, in RunSpec) (*Work
 		}
 	}
 	id := newWorkloadID()
+	spec.runtimeWorkloadID = id
 	containerName := "containers-" + dockerSafeName(spec.Name)
 	networkName := containerName
 	for i := range spec.Volumes {
@@ -186,8 +191,8 @@ func (a *App) prepareWorkload(appCtx *sdk.AppCtx, db *sql.DB, in RunSpec) (*Work
 		ID: id, Name: spec.Name, BlueprintSlug: spec.BlueprintSlug, HostID: targetID, InstanceID: targetID,
 		Kind: "container", Image: spec.Image, Status: StatusCreating, DesiredStatus: StatusRunning,
 		ContainerName: containerName, NetworkName: networkName, HealthStatus: "unknown",
-		HealthPath: spec.HealthPath, ConfigJSON: encodeJSON(sanitizeRunSpecForStorage(spec)), Env: spec.Env,
-		EnvJSON: encodeJSON(spec.Env), Resources: spec.Resources, ResourcesJSON: encodeJSON(spec.Resources),
+		HealthPath: spec.HealthPath, ConfigJSON: encodeJSON(sanitizeRunSpecForStorage(spec)), Env: redactEnvironment(spec.Env),
+		EnvJSON: encodeJSON(redactEnvironment(spec.Env)), Resources: spec.Resources, ResourcesJSON: encodeJSON(spec.Resources),
 		RestartPolicy: spec.RestartPolicy,
 	}
 	if len(spec.Ports) > 0 {
@@ -211,6 +216,7 @@ func (a *App) prepareWorkload(appCtx *sdk.AppCtx, db *sql.DB, in RunSpec) (*Work
 }
 
 func (a *App) startWorkloadRuntime(ctx context.Context, appCtx *sdk.AppCtx, db *sql.DB, id string, spec RunSpec, containerName, networkName string) error {
+	spec.runtimeWorkloadID = id
 	start := time.Now()
 	log.Printf("[containers] runtime start workload_id=%s name=%q image=%q container=%q network=%q ports=%s volumes=%s",
 		id, spec.Name, spec.Image, containerName, networkName, describePorts(spec.Ports), describeVolumes(spec.Volumes))
@@ -225,20 +231,28 @@ func (a *App) startWorkloadRuntime(ctx context.Context, appCtx *sdk.AppCtx, db *
 	if err != nil {
 		return fail(err)
 	}
+	createdNetwork := false
+	createdVolumes := make([]string, 0, len(spec.Volumes))
+	runAttempted := false
 	cleanupRuntime := func(cause error) error {
-		if err := cleanupFailedRuntime(ctx, db, id, backend, networkName, spec.Volumes); err != nil {
+		if err := cleanupFailedRuntime(db, id, backend, containerName, runAttempted, networkName, createdNetwork, createdVolumes); err != nil {
 			log.Printf("[containers] runtime cleanup failed workload_id=%s err=%q", id, err.Error())
 		}
 		return fail(cause)
 	}
 	log.Printf("[containers] runtime create_network workload_id=%s network=%q", id, networkName)
-	if err := backend.CreateNetwork(ctx, networkName); err != nil {
+	createdNetwork, err = backend.EnsureNetwork(ctx, networkName)
+	if err != nil {
 		return fail(err)
 	}
 	for _, v := range spec.Volumes {
 		log.Printf("[containers] runtime create_volume workload_id=%s volume=%q mount=%q", id, v.DockerVolumeName, v.MountPath)
-		if err := backend.CreateVolume(ctx, v.DockerVolumeName); err != nil {
+		created, err := backend.EnsureVolume(ctx, v.DockerVolumeName)
+		if err != nil {
 			return cleanupRuntime(err)
+		}
+		if created {
+			createdVolumes = append(createdVolumes, v.DockerVolumeName)
 		}
 	}
 	writes, err := resolveFileWrites(spec)
@@ -253,12 +267,15 @@ func (a *App) startWorkloadRuntime(ctx context.Context, appCtx *sdk.AppCtx, db *
 		}
 	}
 	log.Printf("[containers] runtime docker_run workload_id=%s container=%q image=%q", id, containerName, spec.Image)
+	runAttempted = true
 	cid, err := backend.Run(ctx, spec, containerName, networkName)
 	if err != nil {
 		return cleanupRuntime(err)
 	}
 	log.Printf("[containers] runtime docker_run ok workload_id=%s container_id=%s", id, cid)
-	_ = updateWorkload(db, id, map[string]any{"status": StatusRunning, "container_id": cid, "last_error": "", "updated_at": nowUTC()})
+	if err := updateWorkload(db, id, map[string]any{"status": StatusRunning, "container_id": cid, "last_error": "", "updated_at": nowUTC()}); err != nil {
+		return cleanupRuntime(fmt.Errorf("record running workload: %w", err))
+	}
 	_ = recordEvent(db, id, "started", "tool", map[string]any{"container_id": cid})
 	log.Printf("[containers] runtime probe workload_id=%s", id)
 	_ = a.probeWorkload(ctx, appCtx, db, id)
@@ -266,17 +283,21 @@ func (a *App) startWorkloadRuntime(ctx context.Context, appCtx *sdk.AppCtx, db *
 	return nil
 }
 
-func cleanupFailedRuntime(ctx context.Context, db *sql.DB, id string, backend DockerBackend, networkName string, volumes []VolumeSpec) error {
+func cleanupFailedRuntime(db *sql.DB, id string, backend DockerBackend, containerName string, removeContainer bool, networkName string, removeNetwork bool, volumes []string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
 	var errs []error
-	for _, v := range volumes {
-		if strings.TrimSpace(v.DockerVolumeName) == "" {
-			continue
-		}
-		if err := backend.RemoveVolume(ctx, v.DockerVolumeName); err != nil && !isDockerMissingResourceError(err, "volume") {
-			errs = append(errs, fmt.Errorf("remove volume %s: %w", v.DockerVolumeName, err))
+	if removeContainer && strings.TrimSpace(containerName) != "" {
+		if err := backend.RemoveManagedContainer(ctx, containerName, id); err != nil && !isDockerMissingResourceError(err, "container") {
+			errs = append(errs, fmt.Errorf("remove container %s: %w", containerName, err))
 		}
 	}
-	if strings.TrimSpace(networkName) != "" {
+	for _, volumeName := range volumes {
+		if err := backend.RemoveVolume(ctx, volumeName); err != nil && !isDockerMissingResourceError(err, "volume") {
+			errs = append(errs, fmt.Errorf("remove volume %s: %w", volumeName, err))
+		}
+	}
+	if removeNetwork && strings.TrimSpace(networkName) != "" {
 		if err := backend.RemoveNetwork(ctx, networkName); err != nil && !isDockerMissingResourceError(err, "network") {
 			errs = append(errs, fmt.Errorf("remove network %s: %w", networkName, err))
 		}
@@ -302,6 +323,14 @@ func (a *App) expandBlueprint(db *sql.DB, in RunSpec) (RunSpec, error) {
 	}
 	base := bp.Spec
 	base.BlueprintSlug = bp.Slug
+	base.UseLocal = in.UseLocal
+	if targetID := runSpecTargetID(in); targetID != 0 {
+		base.HostID = targetID
+		base.InstanceID = targetID
+	} else if in.UseLocal {
+		base.HostID = 0
+		base.InstanceID = 0
+	}
 	if in.Name != "" {
 		base.Name = in.Name
 	}
@@ -324,6 +353,9 @@ func (a *App) expandBlueprint(db *sql.DB, in RunSpec) (RunSpec, error) {
 	}
 	if len(in.Files) > 0 {
 		base.Files = in.Files
+	}
+	if in.PullPolicy != "" {
+		base.PullPolicy = in.PullPolicy
 	}
 	if in.HealthPath != "" {
 		base.HealthPath = in.HealthPath
@@ -478,16 +510,25 @@ func (a *App) pollHealth(ctx context.Context, appCtx *sdk.AppCtx, db *sql.DB) er
 	if err != nil {
 		return err
 	}
+	sem := make(chan struct{}, 4)
+	var wg sync.WaitGroup
 	for _, w := range rows {
 		if w.Status == StatusDestroyed {
 			continue
 		}
 		if ctx.Err() != nil {
-			return ctx.Err()
+			break
 		}
-		_ = a.probeWorkload(ctx, appCtx, db, w.ID)
+		sem <- struct{}{}
+		wg.Add(1)
+		go func(id string) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			_ = a.probeWorkload(ctx, appCtx, db, id)
+		}(w.ID)
 	}
-	return nil
+	wg.Wait()
+	return ctx.Err()
 }
 
 func (a *App) workloadUsage(ctx context.Context, appCtx *sdk.AppCtx, db *sql.DB, id string) (*WorkloadUsage, error) {
@@ -549,7 +590,7 @@ func (a *App) backendForTarget(appCtx *sdk.AppCtx, targetID int64) (DockerBacken
 	if appCtx == nil || appCtx.PlatformAPI() == nil {
 		return nil, errors.New("remote container target requires platform app calls")
 	}
-	return RemoteDocker{app: appCtx, instanceID: targetID}, nil
+	return &RemoteDocker{app: appCtx, instanceID: targetID}, nil
 }
 
 func runSpecTargetID(spec RunSpec) int64 {
@@ -771,6 +812,7 @@ func (a *App) handleWorkloads(w http.ResponseWriter, r *http.Request) {
 		rows, err := listWorkloads(globalCtx.AppDB(), r.URL.Query().Get("status"))
 		writeResult(w, map[string]any{"workloads": rows, "count": len(rows)}, err)
 	case http.MethodPost:
+		r.Body = http.MaxBytesReader(w, r.Body, maxRunRequestBytes)
 		var spec RunSpec
 		if err := json.NewDecoder(r.Body).Decode(&spec); err != nil {
 			http.Error(w, "invalid json: "+err.Error(), http.StatusBadRequest)
@@ -1063,6 +1105,7 @@ func runSchema() map[string]any {
 		"blueprint_slug": map[string]any{"type": "string"},
 		"host_id":        map[string]any{"type": "integer"},
 		"instance_id":    map[string]any{"type": "integer"},
+		"use_local":      map[string]any{"type": "boolean"},
 		"ports":          map[string]any{"type": "array"},
 		"env":            map[string]any{"type": "object"},
 		"volumes":        map[string]any{"type": "array"},

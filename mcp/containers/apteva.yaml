@@ -2,13 +2,14 @@ schema: apteva-app/v1
 
 name: containers
 display_name: Containers
-version: 0.1.25
+version: 0.1.26
 description: |
   Generic Docker workload runtime for Apteva. Runs container images on
   the local host or remote Instances hosts, bootstraps Docker when
   needed, manages isolated networks, Docker volumes, ports, health
-  checks, logs, and lifecycle actions. Routes, backups, and
-  multi-container blueprints build on the same surface.
+  checks, bounded logs, pre-start files and secrets, pull policies,
+  and lifecycle actions with ownership-aware cleanup. Routes, backups,
+  and multi-container blueprints build on the same surface.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/containers
@@ -60,7 +61,7 @@ provides:
     - prefix: /
   mcp_tools:
     - name: containers_run
-      description: "Run a Docker image as a managed workload on the local Docker host or an Instances host. Args: name, image, host_id?/instance_id?, ports?, env?, volumes?, files?, pull_policy?, health_path?, resources?, restart_policy?. files may write pre-start content under declared volume mount paths. pull_policy controls Docker image pulls: missing, always, or never."
+      description: "Run a Docker image as a managed workload on the local Docker host or an Instances host. Args: name, image, host_id?/instance_id?, use_local?, ports?, env?, volumes?, files?, pull_policy?, health_path?, resources?, restart_policy?. files may write up to 32 pre-start files under declared volume mount paths (1 MiB each, 4 MiB total). secret file contents and environment values are not persisted. pull_policy controls Docker image pulls: missing, always, or never."
     - name: containers_create
       description: Alias of containers_run.
     - name: containers_get
