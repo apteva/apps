@@ -47,6 +47,16 @@ func (a *App) toolClone(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, fmt.Errorf("target host: %w", err)
 	}
+	if !sourceHost.IsLocal() {
+		if err := a.ensureHostedRuntime(ctx, sourceHost.InstanceID); err != nil {
+			return nil, fmt.Errorf("source host preflight: %w", err)
+		}
+	}
+	if !targetHost.IsLocal() {
+		if err := a.ensureHostedRuntime(ctx, targetHost.InstanceID); err != nil {
+			return nil, fmt.Errorf("target host preflight: %w", err)
+		}
+	}
 	sourceDir := source.ConfigDir
 	if sourceDir == "" {
 		sourceDir, err = tenantDataDirForHost(source.Slug, sourceHost)
