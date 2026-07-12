@@ -21,8 +21,8 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: subscriptions
 display_name: Subscriptions
-version: 0.2.0
-description: Generic recurring-commerce lifecycle, subscription items, and metered usage for SaaS, physical subscriptions, and services.
+version: 0.3.0
+description: Generic recurring-commerce lifecycle, durable paid-trial conversion, subscription items, and metered usage for SaaS, physical subscriptions, and services.
 author: Apteva
 scopes: [project, global]
 requires:
@@ -34,6 +34,8 @@ requires:
       optional: false
     - name: billing
       optional: true
+      events:
+        - invoice.paid
     - name: orders
       optional: true
     - name: entitlements
@@ -65,6 +67,8 @@ provides:
       description: Metered subscription usage was recorded.
     - name: subscription.invoice.requested
       description: A subscription period invoice was requested.
+    - name: subscription.collection_updated
+      description: A trial or renewal collection attempt changed state.
 runtime:
   kind: source
   source:
@@ -97,7 +101,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		return errors.New("subscriptions requires a db block")
 	}
 	globalCtx = ctx
-	ctx.Logger().Info("subscriptions mounted", "version", "0.2.0", "scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
+	ctx.Logger().Info("subscriptions mounted", "version", "0.3.0", "scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
 	return nil
 }
 
@@ -115,7 +119,9 @@ func (a *App) Workers() []sdk.Worker {
 		},
 	}}
 }
-func (a *App) EventHandlers() []sdk.EventHandler { return nil }
+func (a *App) EventHandlers() []sdk.EventHandler {
+	return []sdk.EventHandler{{Event: "invoice.paid", Handler: a.handleInvoicePaid}}
+}
 
 func (a *App) HTTPRoutes() []sdk.Route {
 	return []sdk.Route{
@@ -131,6 +137,7 @@ func (a *App) MCPTools() []sdk.Tool {
 	return []sdk.Tool{
 		{Name: "subscriptions_create", Description: "Create a subscription.", InputSchema: schemaObject(map[string]any{
 			"customer_id": map[string]any{"type": "integer"}, "customer_email": map[string]any{"type": "string"}, "customer_name": map[string]any{"type": "string"},
+			"billing_customer_id": map[string]any{"type": "integer"}, "collection_method": map[string]any{"type": "string"}, "trial_end_behavior": map[string]any{"type": "string"},
 			"kind": map[string]any{"type": "string"}, "status": map[string]any{"type": "string"}, "billing_provider": map[string]any{"type": "string"}, "external_id": map[string]any{"type": "string"},
 			"currency": map[string]any{"type": "string"}, "interval": map[string]any{"type": "string"}, "interval_count": map[string]any{"type": "integer"}, "quantity": map[string]any{"type": "number"},
 			"trial_start": map[string]any{"type": "string"}, "trial_end": map[string]any{"type": "string"}, "current_period_start": map[string]any{"type": "string"}, "current_period_end": map[string]any{"type": "string"}, "next_renewal_at": map[string]any{"type": "string"},
@@ -179,35 +186,41 @@ func (a *App) MCPTools() []sdk.Tool {
 func main() { sdk.Run(&App{}) }
 
 type Subscription struct {
-	ID                 int64           `json:"id"`
-	ProjectID          string          `json:"project_id"`
-	CustomerID         *int64          `json:"customer_id,omitempty"`
-	CustomerEmail      string          `json:"customer_email,omitempty"`
-	CustomerName       string          `json:"customer_name,omitempty"`
-	Kind               string          `json:"kind"`
-	Status             string          `json:"status"`
-	BillingProvider    string          `json:"billing_provider"`
-	ExternalID         string          `json:"external_id,omitempty"`
-	Currency           string          `json:"currency"`
-	Interval           string          `json:"interval"`
-	IntervalCount      int64           `json:"interval_count"`
-	Quantity           float64         `json:"quantity"`
-	TrialStart         string          `json:"trial_start,omitempty"`
-	TrialEnd           string          `json:"trial_end,omitempty"`
-	CurrentPeriodStart string          `json:"current_period_start,omitempty"`
-	CurrentPeriodEnd   string          `json:"current_period_end,omitempty"`
-	NextRenewalAt      string          `json:"next_renewal_at,omitempty"`
-	CancelAt           string          `json:"cancel_at,omitempty"`
-	CancelledAt        string          `json:"cancelled_at,omitempty"`
-	EndedAt            string          `json:"ended_at,omitempty"`
-	Source             string          `json:"source"`
-	SourceRef          string          `json:"source_ref,omitempty"`
-	Metadata           json.RawMessage `json:"metadata,omitempty"`
-	CreatedAt          string          `json:"created_at"`
-	UpdatedAt          string          `json:"updated_at"`
-	Items              []*SubItem      `json:"items,omitempty"`
-	Cycles             []*Cycle        `json:"cycles,omitempty"`
-	Events             []*Event        `json:"events,omitempty"`
+	ID                  int64           `json:"id"`
+	ProjectID           string          `json:"project_id"`
+	CustomerID          *int64          `json:"customer_id,omitempty"`
+	BillingCustomerID   *int64          `json:"billing_customer_id,omitempty"`
+	CustomerEmail       string          `json:"customer_email,omitempty"`
+	CustomerName        string          `json:"customer_name,omitempty"`
+	Kind                string          `json:"kind"`
+	Status              string          `json:"status"`
+	BillingProvider     string          `json:"billing_provider"`
+	CollectionMethod    string          `json:"collection_method"`
+	CollectionStatus    string          `json:"collection_status"`
+	TrialEndBehavior    string          `json:"trial_end_behavior"`
+	LastCollectionError string          `json:"last_collection_error,omitempty"`
+	CollectionInvoiceID *int64          `json:"collection_invoice_id,omitempty"`
+	ExternalID          string          `json:"external_id,omitempty"`
+	Currency            string          `json:"currency"`
+	Interval            string          `json:"interval"`
+	IntervalCount       int64           `json:"interval_count"`
+	Quantity            float64         `json:"quantity"`
+	TrialStart          string          `json:"trial_start,omitempty"`
+	TrialEnd            string          `json:"trial_end,omitempty"`
+	CurrentPeriodStart  string          `json:"current_period_start,omitempty"`
+	CurrentPeriodEnd    string          `json:"current_period_end,omitempty"`
+	NextRenewalAt       string          `json:"next_renewal_at,omitempty"`
+	CancelAt            string          `json:"cancel_at,omitempty"`
+	CancelledAt         string          `json:"cancelled_at,omitempty"`
+	EndedAt             string          `json:"ended_at,omitempty"`
+	Source              string          `json:"source"`
+	SourceRef           string          `json:"source_ref,omitempty"`
+	Metadata            json.RawMessage `json:"metadata,omitempty"`
+	CreatedAt           string          `json:"created_at"`
+	UpdatedAt           string          `json:"updated_at"`
+	Items               []*SubItem      `json:"items,omitempty"`
+	Cycles              []*Cycle        `json:"cycles,omitempty"`
+	Events              []*Event        `json:"events,omitempty"`
 }
 
 type SubItem struct {
@@ -285,6 +298,20 @@ type Cycle struct {
 	UpdatedAt          string          `json:"updated_at"`
 	PaidAt             string          `json:"paid_at,omitempty"`
 	CompletedAt        string          `json:"completed_at,omitempty"`
+}
+
+type LifecycleAttempt struct {
+	ID                int64
+	ProjectID         string
+	SubscriptionID    int64
+	Action            string
+	EffectiveAt       string
+	Status            string
+	AttemptCount      int64
+	BillingCustomerID *int64
+	InvoiceID         *int64
+	CycleID           *int64
+	CollectionRef     string
 }
 
 type Event struct {
@@ -485,7 +512,11 @@ func (a *App) toolSubscriptionsInvoiceCreate(ctx *sdk.AppCtx, args map[string]an
 		return nil, err
 	}
 	sub := prepared["subscription"].(*Subscription)
-	if sub.CustomerID == nil || *sub.CustomerID == 0 {
+	billingCustomerID := derefInt64(sub.BillingCustomerID)
+	if billingCustomerID == 0 {
+		billingCustomerID = derefInt64(sub.CustomerID) // v0.2 compatibility
+	}
+	if billingCustomerID == 0 {
 		return nil, errors.New("subscription has no billing customer_id")
 	}
 	lineItems, _ := prepared["line_items"].([]any)
@@ -499,7 +530,7 @@ func (a *App) toolSubscriptionsInvoiceCreate(ctx *sdk.AppCtx, args map[string]an
 	meta["period_end"] = prepared["period_end"]
 	invoiceArgs := map[string]any{
 		"_project_id": pid,
-		"customer_id": *sub.CustomerID,
+		"customer_id": billingCustomerID,
 		"currency":    sub.Currency,
 		"provider":    firstNonEmpty(strArg(args, "provider"), "local"),
 		"due_date":    strArg(args, "due_date"),
@@ -519,18 +550,26 @@ func emitSubscriptionLifecycle(ctx *sdk.AppCtx, sub *Subscription) {
 	if ctx == nil || sub == nil || !validSubStatus[sub.Status] {
 		return
 	}
+	meta := mapFromAny(sub.Metadata)
 	ctx.Emit("subscription."+sub.Status, map[string]any{
-		"id":              sub.ID,
-		"subscription_id": sub.ID,
-		"status":          sub.Status,
-		"customer_id":     sub.CustomerID,
-		"customer_email":  sub.CustomerEmail,
-		"kind":            sub.Kind,
-		"source":          sub.Source,
-		"source_ref":      sub.SourceRef,
-		"trial_start":     sub.TrialStart,
-		"trial_end":       sub.TrialEnd,
-		"metadata":        mapFromAny(sub.Metadata),
+		"id":                    sub.ID,
+		"subscription_id":       sub.ID,
+		"status":                sub.Status,
+		"customer_id":           sub.CustomerID,
+		"billing_customer_id":   sub.BillingCustomerID,
+		"customer_email":        sub.CustomerEmail,
+		"kind":                  sub.Kind,
+		"source":                sub.Source,
+		"source_ref":            sub.SourceRef,
+		"trial_start":           sub.TrialStart,
+		"trial_end":             sub.TrialEnd,
+		"invoice_id":            sub.CollectionInvoiceID,
+		"collection_method":     sub.CollectionMethod,
+		"collection_status":     sub.CollectionStatus,
+		"requires_payment":      sub.CollectionStatus == "requires_payment",
+		"payment_url":           strArg(meta, "collection_ref"),
+		"last_collection_error": sub.LastCollectionError,
+		"metadata":              meta,
 	})
 }
 
@@ -538,46 +577,386 @@ func runSubscriptionLifecycle(ctx *sdk.AppCtx, now time.Time) error {
 	if ctx == nil || ctx.AppDB() == nil {
 		return nil
 	}
-	expiredTrials, err := dbSubscriptionsExpiredTrials(ctx.AppDB(), now)
+	pid := strings.TrimSpace(ctx.CurrentProject())
+	if pid == "" {
+		return nil // global workers must never scan another project's rows
+	}
+	if err := dbSeedTrialAttempts(ctx.AppDB(), pid, now, 100); err != nil {
+		return err
+	}
+	attempts, err := dbClaimLifecycleAttempts(ctx.AppDB(), pid, now, 100)
 	if err != nil {
 		return err
 	}
-	nowStr := now.UTC().Format(time.RFC3339)
-	for _, sub := range expiredTrials {
-		meta := mapFromAny(sub.Metadata)
-		targetStatus := trialExpiredStatus(meta)
-		meta["trial_ended_at"] = nowStr
-		if targetStatus == "past_due" || targetStatus == "paused" {
-			meta["past_due_since"] = nowStr
+	for _, attempt := range attempts {
+		if err := processTrialCollection(ctx, attempt, now); err != nil {
+			ctx.Logger().Warn("subscription lifecycle attempt failed", "project", pid, "subscription_id", attempt.SubscriptionID, "attempt_id", attempt.ID, "err", err)
+			if failErr := dbFailLifecycleAttempt(ctx, attempt, now, err); failErr != nil {
+				ctx.Logger().Warn("persist subscription lifecycle failure", "attempt_id", attempt.ID, "err", failErr)
+			}
 		}
-		updated, err := dbSubscriptionSetStatusMetadata(ctx.AppDB(), sub.ProjectID, sub.ID, targetStatus, meta, "subscription.trial_expired", map[string]any{
-			"from_status": "trialing",
-			"to_status":   targetStatus,
-			"trial_end":   sub.TrialEnd,
-		}, now)
-		if err != nil {
-			return err
-		}
-		emitSubscriptionLifecycle(ctx, updated)
 	}
 
-	graceExpired, err := dbSubscriptionsGraceExpired(ctx.AppDB(), now)
+	graceExpired, err := dbSubscriptionsGraceExpired(ctx.AppDB(), pid, now, 100)
 	if err != nil {
 		return err
 	}
 	for _, sub := range graceExpired {
 		meta := mapFromAny(sub.Metadata)
-		meta["unpaid_grace_expired_at"] = nowStr
-		updated, err := dbSubscriptionSetStatusMetadata(ctx.AppDB(), sub.ProjectID, sub.ID, "ended", meta, "subscription.unpaid_grace_expired", map[string]any{
+		meta["unpaid_grace_expired_at"] = now.UTC().Format(time.RFC3339)
+		updated, setErr := dbSubscriptionSetStatusMetadata(ctx.AppDB(), pid, sub.ID, "ended", meta, "subscription.unpaid_grace_expired", map[string]any{
 			"from_status": sub.Status,
 			"to_status":   "ended",
 		}, now)
-		if err != nil {
-			return err
+		if setErr != nil {
+			ctx.Logger().Warn("subscription grace transition failed", "subscription_id", sub.ID, "err", setErr)
+			continue
 		}
 		emitSubscriptionLifecycle(ctx, updated)
 	}
 	return nil
+}
+
+func processTrialCollection(ctx *sdk.AppCtx, attempt *LifecycleAttempt, now time.Time) error {
+	sub, err := dbSubscriptionGet(ctx.AppDB(), attempt.ProjectID, attempt.SubscriptionID, true)
+	if err != nil || sub == nil {
+		return firstErr(err, errors.New("subscription not found"))
+	}
+	if sub.Status == "cancelled" || sub.Status == "ended" || sub.Status == "active" {
+		return dbCompleteLifecycleAttempt(ctx, attempt, sub, sub.Status, sub.CollectionStatus, nil, "", now)
+	}
+	meta := mapFromAny(sub.Metadata)
+	behavior := sub.TrialEndBehavior
+	if legacy := legacyTrialEndBehavior(meta); legacy != "collect" {
+		behavior = legacy // preserve v0.2 metadata policy after migration
+	}
+	if behavior == "pause" || behavior == "end" {
+		target := map[string]string{"pause": "paused", "end": "ended"}[behavior]
+		return dbCompleteLifecycleAttempt(ctx, attempt, sub, target, "skipped", nil, "", now)
+	}
+	if sub.CollectionMethod == "manual" || sub.CollectionMethod == "none" {
+		return dbCompleteLifecycleAttempt(ctx, attempt, sub, trialExpiredStatus(meta), "requires_payment", nil, "", now)
+	}
+
+	billingCustomerID, err := ensureTrialBillingCustomer(ctx, attempt, sub)
+	if err != nil {
+		return err
+	}
+	periodStart, ok := parseTime(attempt.EffectiveAt)
+	if !ok {
+		return errors.New("trial lifecycle effective_at is invalid")
+	}
+	periodEnd := subscriptionPeriodEnd(periodStart, sub.Interval, sub.IntervalCount)
+	prepared, err := prepareSubscriptionInvoice(ctx.AppDB(), attempt.ProjectID, map[string]any{
+		"subscription_id": sub.ID, "period_start": periodStart.Format(time.RFC3339), "period_end": periodEnd.Format(time.RFC3339),
+		"include_flat": true, "include_metered": true, "invoice_zero_usage": true,
+	})
+	if err != nil {
+		return err
+	}
+	lines, _ := prepared["line_items"].([]any)
+	if len(lines) == 0 {
+		return dbCompleteLifecycleAttempt(ctx, attempt, sub, "active", "not_required", nil, "", now)
+	}
+	invoiceID := derefInt64(attempt.InvoiceID)
+	invoiceStatus := ""
+	if invoiceID == 0 {
+		invoiceOut, callErr := callBillingInvoiceCreate(ctx, map[string]any{
+			"_project_id": attempt.ProjectID, "customer_id": billingCustomerID, "currency": sub.Currency,
+			"provider": firstNonEmpty(sub.BillingProvider, "local"), "line_items": lines,
+			"metadata":        map[string]any{"source_app": "subscriptions", "subscription_id": sub.ID, "lifecycle_attempt_id": attempt.ID, "idempotency_key": lifecycleIdempotencyKey(attempt, "invoice")},
+			"idempotency_key": lifecycleIdempotencyKey(attempt, "invoice"),
+		}, true)
+		if callErr != nil {
+			return callErr
+		}
+		invoice := mapFromAny(invoiceOut["invoice"])
+		invoiceID = int64Arg(invoice, "id")
+		invoiceStatus = strArg(invoice, "status")
+		if invoiceID == 0 {
+			return errors.New("billing invoice response missing id")
+		}
+		if err := dbPersistLifecycleInvoice(ctx.AppDB(), attempt, billingCustomerID, invoiceID); err != nil {
+			return err
+		}
+		attempt.InvoiceID = &invoiceID
+	}
+	cycle, err := dbEnsureLifecycleCycle(ctx.AppDB(), attempt, sub, periodStart, periodEnd, invoiceID)
+	if err != nil {
+		return err
+	}
+	if invoiceStatus == "paid" {
+		return dbCompleteLifecycleAttempt(ctx, attempt, sub, "active", "paid", cycle, "", now)
+	}
+
+	if sub.CollectionMethod == "auto_charge" {
+		var charged map[string]any
+		chargeErr := callBillingTool(ctx, attempt.ProjectID, "invoices_charge_default_payment_method", map[string]any{
+			"invoice_id": invoiceID, "idempotency_key": lifecycleIdempotencyKey(attempt, "charge"),
+		}, &charged)
+		if chargeErr == nil {
+			invoice := mapFromAny(charged["invoice"])
+			if strArg(invoice, "status") == "paid" || strArg(charged, "status") == "paid" {
+				return dbCompleteLifecycleAttempt(ctx, attempt, sub, "active", "paid", cycle, strArg(charged, "payment_id"), now)
+			}
+		}
+	}
+
+	var link map[string]any
+	if err := callBillingTool(ctx, attempt.ProjectID, "invoices_send_payment_link", map[string]any{
+		"invoice_id": invoiceID, "idempotency_key": lifecycleIdempotencyKey(attempt, "payment-link"),
+	}, &link); err != nil {
+		return err
+	}
+	ref := firstNonEmpty(strArg(link, "url"), strArg(link, "stripe_session_id"))
+	return dbCompleteLifecycleAttempt(ctx, attempt, sub, "past_due", "requires_payment", cycle, ref, now)
+}
+
+func ensureTrialBillingCustomer(ctx *sdk.AppCtx, attempt *LifecycleAttempt, sub *Subscription) (int64, error) {
+	if id := derefInt64(sub.BillingCustomerID); id != 0 {
+		return id, nil
+	}
+	// v0.2 stored Billing's customer id in customer_id. Preserve that
+	// contract for existing rows while new writers use billing_customer_id.
+	if id := derefInt64(sub.CustomerID); id != 0 {
+		if _, err := ctx.AppDB().Exec(`UPDATE subscriptions SET billing_customer_id=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND project_id=?`, id, sub.ID, attempt.ProjectID); err != nil {
+			return 0, err
+		}
+		return id, nil
+	}
+	if strings.TrimSpace(sub.CustomerEmail) == "" {
+		return 0, errors.New("paid trial has no customer email for Billing customer creation")
+	}
+	var out map[string]any
+	err := callBillingTool(ctx, attempt.ProjectID, "customers_upsert_by_email", map[string]any{
+		"email": sub.CustomerEmail,
+		"defaults": map[string]any{
+			"name": sub.CustomerName, "currency": sub.Currency,
+			"metadata": map[string]any{"source_app": "subscriptions", "subscription_id": sub.ID},
+		},
+	}, &out)
+	if err != nil {
+		return 0, err
+	}
+	customer := mapFromAny(out["customer"])
+	id := firstNonZero(int64Arg(customer, "id"), int64Arg(out, "id"))
+	if id == 0 {
+		return 0, errors.New("billing customer response missing id")
+	}
+	if _, err := ctx.AppDB().Exec(`UPDATE subscriptions SET billing_customer_id=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND project_id=?`, id, sub.ID, attempt.ProjectID); err != nil {
+		return 0, err
+	}
+	if _, err := ctx.AppDB().Exec(`UPDATE subscription_lifecycle_attempts SET billing_customer_id=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND project_id=?`, id, attempt.ID, attempt.ProjectID); err != nil {
+		return 0, err
+	}
+	attempt.BillingCustomerID = &id
+	return id, nil
+}
+
+func callBillingTool(ctx *sdk.AppCtx, pid, tool string, args map[string]any, out any) error {
+	if ctx == nil || ctx.PlatformAPI() == nil {
+		return errors.New("billing app call requires platform API")
+	}
+	if err := ctx.PlatformAPI().CallAppResult("billing", tool, withProject(pid, args), out); err != nil {
+		return fmt.Errorf("billing %s: %w", tool, err)
+	}
+	return nil
+}
+
+func dbPersistLifecycleInvoice(db *sql.DB, attempt *LifecycleAttempt, billingCustomerID, invoiceID int64) error {
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`UPDATE subscription_lifecycle_attempts SET billing_customer_id=?,invoice_id=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND project_id=?`, billingCustomerID, invoiceID, attempt.ID, attempt.ProjectID); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`UPDATE subscriptions SET billing_customer_id=?,collection_invoice_id=?,collection_status='processing',last_collection_error=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=? AND project_id=?`, billingCustomerID, invoiceID, attempt.SubscriptionID, attempt.ProjectID); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func dbEnsureLifecycleCycle(db *sql.DB, attempt *LifecycleAttempt, sub *Subscription, start, end time.Time, invoiceID int64) (*Cycle, error) {
+	if id := derefInt64(attempt.CycleID); id != 0 {
+		return dbCycleGet(db, attempt.ProjectID, id)
+	}
+	var existing int64
+	err := db.QueryRow(`SELECT id FROM subscription_cycles WHERE lifecycle_attempt_id=?`, attempt.ID).Scan(&existing)
+	if err == nil {
+		attempt.CycleID = &existing
+		return dbCycleGet(db, attempt.ProjectID, existing)
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return nil, err
+	}
+	cycle, _, err := dbCycleCreate(db, attempt.ProjectID, map[string]any{
+		"subscription_id": sub.ID, "period_start": start.Format(time.RFC3339), "period_end": end.Format(time.RFC3339),
+		"due_at": start.Format(time.RFC3339), "invoice_id": invoiceID, "payment_status": "pending",
+		"lifecycle_attempt_id": attempt.ID, "metadata": map[string]any{"source": "trial_conversion", "lifecycle_attempt_id": attempt.ID},
+	})
+	if err != nil {
+		return nil, err
+	}
+	if _, err := db.Exec(`UPDATE subscription_lifecycle_attempts SET cycle_id=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND project_id=?`, cycle.ID, attempt.ID, attempt.ProjectID); err != nil {
+		return nil, err
+	}
+	attempt.CycleID = &cycle.ID
+	return cycle, nil
+}
+
+func dbCompleteLifecycleAttempt(ctx *sdk.AppCtx, attempt *LifecycleAttempt, sub *Subscription, targetStatus, collectionStatus string, cycle *Cycle, collectionRef string, now time.Time) error {
+	if !validSubStatus[targetStatus] {
+		return fmt.Errorf("invalid lifecycle target status %q", targetStatus)
+	}
+	nowStr := now.UTC().Format(time.RFC3339)
+	meta := mapFromAny(sub.Metadata)
+	meta["trial_ended_at"] = nowStr
+	meta["collection_status"] = collectionStatus
+	if targetStatus == "past_due" || targetStatus == "paused" {
+		if strArg(meta, "past_due_since") == "" {
+			meta["past_due_since"] = nowStr
+		}
+	}
+	if collectionRef != "" {
+		meta["collection_ref"] = collectionRef
+	}
+	periodStart, _ := parseTime(attempt.EffectiveAt)
+	periodEnd := subscriptionPeriodEnd(periodStart, sub.Interval, sub.IntervalCount)
+	invoiceID := derefInt64(attempt.InvoiceID)
+	cycleID := int64(0)
+	if cycle != nil {
+		cycleID = cycle.ID
+	}
+	tx, err := ctx.AppDB().Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`UPDATE subscriptions SET status=?,collection_status=?,last_collection_error=NULL,
+		collection_invoice_id=COALESCE(?,collection_invoice_id),metadata=?,
+		current_period_start=CASE WHEN ?='active' THEN ? ELSE current_period_start END,
+		current_period_end=CASE WHEN ?='active' THEN ? ELSE current_period_end END,
+		next_renewal_at=CASE WHEN ?='active' THEN ? ELSE next_renewal_at END,
+		ended_at=CASE WHEN ?='ended' THEN COALESCE(ended_at,?) ELSE ended_at END,updated_at=CURRENT_TIMESTAMP
+		WHERE id=? AND project_id=?`, targetStatus, collectionStatus, nullableInt64(invoiceID), jsonOrEmpty(meta, "{}"),
+		targetStatus, nullStr(periodStart.Format(time.RFC3339)), targetStatus, nullStr(periodEnd.Format(time.RFC3339)), targetStatus, nullStr(periodEnd.Format(time.RFC3339)),
+		targetStatus, nowStr, sub.ID, attempt.ProjectID); err != nil {
+		return err
+	}
+	if cycleID != 0 && collectionStatus == "paid" {
+		if _, err := tx.Exec(`UPDATE subscription_cycles SET payment_status='paid',paid_at=COALESCE(paid_at,?),updated_at=CURRENT_TIMESTAMP WHERE id=? AND project_id=?`, nowStr, cycleID, attempt.ProjectID); err != nil {
+			return err
+		}
+	}
+	details := map[string]any{"from_status": sub.Status, "to_status": targetStatus, "trial_end": sub.TrialEnd, "invoice_id": invoiceID, "cycle_id": cycleID, "collection_status": collectionStatus, "requires_payment": collectionStatus == "requires_payment"}
+	if err := writeEventTx(tx, attempt.ProjectID, sub.ID, "system", "subscription.trial_converted", details); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`UPDATE subscription_lifecycle_attempts SET status='completed',cycle_id=COALESCE(?,cycle_id),collection_ref=?,result=?,last_error=NULL,lease_until=NULL,completed_at=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND project_id=?`, nullableInt64(cycleID), nullStr(collectionRef), jsonOrEmpty(details, "{}"), nowStr, attempt.ID, attempt.ProjectID); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	updated, err := dbSubscriptionGet(ctx.AppDB(), attempt.ProjectID, sub.ID, true)
+	if err != nil {
+		return err
+	}
+	emitSubscriptionLifecycle(ctx, updated)
+	ctx.Emit("subscription.collection_updated", lifecycleEventData(updated))
+	return nil
+}
+
+func dbFailLifecycleAttempt(ctx *sdk.AppCtx, attempt *LifecycleAttempt, now time.Time, cause error) error {
+	sub, err := dbSubscriptionGet(ctx.AppDB(), attempt.ProjectID, attempt.SubscriptionID, false)
+	if err != nil || sub == nil {
+		return firstErr(err, errors.New("subscription not found while recording lifecycle failure"))
+	}
+	meta := mapFromAny(sub.Metadata)
+	meta["trial_ended_at"] = now.UTC().Format(time.RFC3339)
+	meta["collection_status"] = "failed"
+	meta["last_collection_error"] = cause.Error()
+	target := sub.Status
+	statusChanged := false
+	if sub.Status == "trialing" {
+		target = trialExpiredStatus(meta)
+		statusChanged = true
+		if target == "past_due" || target == "paused" {
+			meta["past_due_since"] = now.UTC().Format(time.RFC3339)
+		}
+	}
+	delay := 15 * time.Minute
+	for i := int64(1); i < attempt.AttemptCount && delay < 24*time.Hour; i++ {
+		delay *= 2
+	}
+	if delay > 24*time.Hour {
+		delay = 24 * time.Hour
+	}
+	tx, err := ctx.AppDB().Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(`UPDATE subscriptions SET status=?,collection_status='failed',last_collection_error=?,metadata=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND project_id=?`, target, cause.Error(), jsonOrEmpty(meta, "{}"), sub.ID, attempt.ProjectID); err != nil {
+		return err
+	}
+	if statusChanged {
+		if err := writeEventTx(tx, attempt.ProjectID, sub.ID, "system", "subscription.trial_collection_failed", map[string]any{"from_status": sub.Status, "to_status": target, "collection_status": "failed", "error": cause.Error()}); err != nil {
+			return err
+		}
+	}
+	if _, err := tx.Exec(`UPDATE subscription_lifecycle_attempts SET status='failed',last_error=?,next_attempt_at=?,lease_until=NULL,updated_at=CURRENT_TIMESTAMP WHERE id=? AND project_id=?`, cause.Error(), now.Add(delay).UTC().Format(time.RFC3339), attempt.ID, attempt.ProjectID); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	updated, err := dbSubscriptionGet(ctx.AppDB(), attempt.ProjectID, sub.ID, true)
+	if err != nil {
+		return err
+	}
+	if statusChanged {
+		emitSubscriptionLifecycle(ctx, updated)
+	}
+	ctx.Emit("subscription.collection_updated", lifecycleEventData(updated))
+	return nil
+}
+
+func (a *App) handleInvoicePaid(ctx *sdk.AppCtx, event sdk.Event) error {
+	pid := firstNonEmpty(event.ProjectID, ctx.CurrentProject())
+	invoiceID := firstNonZero(int64Arg(event.Data, "invoice_id"), int64Arg(event.Data, "id"))
+	if pid == "" || invoiceID == 0 {
+		return nil
+	}
+	var attemptID, subID, cycleID int64
+	err := ctx.AppDB().QueryRow(`SELECT id,subscription_id,COALESCE(cycle_id,0) FROM subscription_lifecycle_attempts WHERE project_id=? AND invoice_id=? ORDER BY id DESC LIMIT 1`, pid, invoiceID).Scan(&attemptID, &subID, &cycleID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	sub, err := dbSubscriptionGet(ctx.AppDB(), pid, subID, false)
+	if err != nil || sub == nil || sub.Status == "active" {
+		return err
+	}
+	now := time.Now().UTC()
+	attempt, err := dbLifecycleAttemptGet(ctx.AppDB(), pid, attemptID)
+	if err != nil {
+		return err
+	}
+	var cycle *Cycle
+	if cycleID != 0 {
+		cycle, _ = dbCycleGet(ctx.AppDB(), pid, cycleID)
+	}
+	return dbCompleteLifecycleAttempt(ctx, attempt, sub, "active", "paid", cycle, fmt.Sprintf("invoice:%d", invoiceID), now)
+}
+
+func lifecycleEventData(sub *Subscription) map[string]any {
+	meta := mapFromAny(sub.Metadata)
+	return map[string]any{"subscription_id": sub.ID, "project_id": sub.ProjectID, "status": sub.Status, "billing_customer_id": sub.BillingCustomerID, "invoice_id": sub.CollectionInvoiceID, "collection_method": sub.CollectionMethod, "collection_status": sub.CollectionStatus, "requires_payment": sub.CollectionStatus == "requires_payment", "payment_url": strArg(meta, "collection_ref"), "last_collection_error": sub.LastCollectionError}
 }
 
 func (a *App) toolCyclesCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -641,6 +1020,14 @@ func dbSubscriptionCreate(ctx *sdk.AppCtx, pid string, args map[string]any) (*Su
 	if !validSubStatus[status] {
 		return nil, fmt.Errorf("invalid status %q", status)
 	}
+	collectionMethod := firstNonEmpty(strArg(args, "collection_method"), "invoice")
+	if !validCollectionMethod[collectionMethod] {
+		return nil, fmt.Errorf("invalid collection_method %q", collectionMethod)
+	}
+	trialEndBehavior := firstNonEmpty(strArg(args, "trial_end_behavior"), legacyTrialEndBehavior(mapFromAny(args["metadata"])))
+	if !validTrialEndBehavior[trialEndBehavior] {
+		return nil, fmt.Errorf("invalid trial_end_behavior %q", trialEndBehavior)
+	}
 	currency := strings.ToUpper(firstNonEmpty(strArg(args, "currency"), configString(ctx, "default_currency", "USD")))
 	items := normalizeItems(itemsRaw, currency)
 	if len(items) == 0 {
@@ -654,13 +1041,14 @@ func dbSubscriptionCreate(ctx *sdk.AppCtx, pid string, args map[string]any) (*Su
 	var id int64
 	err = tx.QueryRow(
 		`INSERT INTO subscriptions
-		   (project_id, customer_id, customer_email, customer_name, kind, status, billing_provider,
+		   (project_id, customer_id, billing_customer_id, customer_email, customer_name, kind, status, billing_provider,
+		    collection_method, collection_status, trial_end_behavior,
 		    external_id, currency, interval, interval_count, quantity, trial_start, trial_end,
 		    current_period_start, current_period_end, next_renewal_at, source, source_ref, metadata)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 RETURNING id`,
-		pid, nullableInt64(int64Arg(args, "customer_id")), nullStr(strArg(args, "customer_email")), nullStr(strArg(args, "customer_name")),
-		kind, status, firstNonEmpty(strArg(args, "billing_provider"), "local"), nullStr(strArg(args, "external_id")),
+		pid, nullableInt64(int64Arg(args, "customer_id")), nullableInt64(int64Arg(args, "billing_customer_id")), nullStr(strArg(args, "customer_email")), nullStr(strArg(args, "customer_name")),
+		kind, status, firstNonEmpty(strArg(args, "billing_provider"), "local"), collectionMethod, "pending", trialEndBehavior, nullStr(strArg(args, "external_id")),
 		currency, firstNonEmpty(strArg(args, "interval"), "month"), firstNonZero(int64Arg(args, "interval_count"), 1),
 		float64Arg(args, "quantity", 1), nullStr(strArg(args, "trial_start")), nullStr(strArg(args, "trial_end")),
 		nullStr(strArg(args, "current_period_start")), nullStr(strArg(args, "current_period_end")), nullStr(strArg(args, "next_renewal_at")),
@@ -870,25 +1258,84 @@ func dbSubscriptionUpdateStatus(db *sql.DB, pid string, args map[string]any) (*S
 	return dbSubscriptionGet(db, pid, id, true)
 }
 
-func dbSubscriptionsExpiredTrials(db *sql.DB, now time.Time) ([]*Subscription, error) {
-	rows, err := db.Query(`SELECT `+subCols()+` FROM subscriptions WHERE status='trialing' AND trial_end IS NOT NULL AND trial_end <= ? ORDER BY trial_end ASC`, now.UTC().Format(time.RFC3339))
+func dbSeedTrialAttempts(db *sql.DB, pid string, now time.Time, limit int) error {
+	_, err := db.Exec(`INSERT OR IGNORE INTO subscription_lifecycle_attempts
+		(project_id, subscription_id, action, effective_at, status, next_attempt_at)
+		SELECT project_id, id, 'trial_end', trial_end, 'pending', ?
+		  FROM subscriptions
+		 WHERE project_id=? AND status='trialing' AND trial_end IS NOT NULL AND trial_end<=?
+		 ORDER BY trial_end ASC LIMIT ?`, now.UTC().Format(time.RFC3339), pid, now.UTC().Format(time.RFC3339), limit)
+	return err
+}
+
+func dbClaimLifecycleAttempts(db *sql.DB, pid string, now time.Time, limit int) ([]*LifecycleAttempt, error) {
+	nowStr := now.UTC().Format(time.RFC3339)
+	rows, err := db.Query(`SELECT id FROM subscription_lifecycle_attempts
+		 WHERE project_id=?
+		   AND ((status IN ('pending','failed') AND (next_attempt_at IS NULL OR next_attempt_at<=?))
+		     OR (status='processing' AND lease_until<=?))
+		 ORDER BY effective_at,id LIMIT ?`, pid, nowStr, nowStr, limit)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
-	var out []*Subscription
+	var ids []int64
 	for rows.Next() {
-		sub, err := scanSub(rows)
+		var id int64
+		if err := rows.Scan(&id); err != nil {
+			rows.Close()
+			return nil, err
+		}
+		ids = append(ids, id)
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	var out []*LifecycleAttempt
+	lease := now.Add(10 * time.Minute).UTC().Format(time.RFC3339)
+	for _, id := range ids {
+		res, err := db.Exec(`UPDATE subscription_lifecycle_attempts
+			SET status='processing', attempt_count=attempt_count+1, lease_until=?, updated_at=CURRENT_TIMESTAMP
+			WHERE id=? AND project_id=?
+			  AND ((status IN ('pending','failed') AND (next_attempt_at IS NULL OR next_attempt_at<=?))
+			    OR (status='processing' AND lease_until<=?))`, lease, id, pid, nowStr, nowStr)
 		if err != nil {
 			return nil, err
 		}
-		out = append(out, sub)
+		n, _ := res.RowsAffected()
+		if n == 0 {
+			continue
+		}
+		a, err := dbLifecycleAttemptGet(db, pid, id)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, a)
 	}
-	return out, rows.Err()
+	return out, nil
 }
 
-func dbSubscriptionsGraceExpired(db *sql.DB, now time.Time) ([]*Subscription, error) {
-	rows, err := db.Query(`SELECT ` + subCols() + ` FROM subscriptions WHERE status IN ('past_due','paused') ORDER BY updated_at ASC`)
+func dbLifecycleAttemptGet(db *sql.DB, pid string, id int64) (*LifecycleAttempt, error) {
+	var a LifecycleAttempt
+	var billingID, invoiceID, cycleID sql.NullInt64
+	err := db.QueryRow(`SELECT id,project_id,subscription_id,action,effective_at,status,attempt_count,
+		billing_customer_id,invoice_id,cycle_id,COALESCE(collection_ref,'')
+		FROM subscription_lifecycle_attempts WHERE id=? AND project_id=?`, id, pid).
+		Scan(&a.ID, &a.ProjectID, &a.SubscriptionID, &a.Action, &a.EffectiveAt, &a.Status, &a.AttemptCount, &billingID, &invoiceID, &cycleID, &a.CollectionRef)
+	if err != nil {
+		return nil, err
+	}
+	a.BillingCustomerID = ptrIfValid(billingID)
+	a.InvoiceID = ptrIfValid(invoiceID)
+	a.CycleID = ptrIfValid(cycleID)
+	return &a, nil
+}
+
+func dbSubscriptionsGraceExpired(db *sql.DB, pid string, now time.Time, limit int) ([]*Subscription, error) {
+	rows, err := db.Query(`SELECT `+subCols()+` FROM subscriptions
+		WHERE project_id=? AND status IN ('past_due','paused')
+		  AND CAST(COALESCE(json_extract(metadata,'$.unpaid_grace_days'),0) AS INTEGER)>0
+		  AND datetime(json_extract(metadata,'$.past_due_since'), '+' || CAST(json_extract(metadata,'$.unpaid_grace_days') AS INTEGER) || ' days')<=datetime(?)
+		ORDER BY updated_at ASC LIMIT ?`, pid, now.UTC().Format(time.RFC3339), limit)
 	if err != nil {
 		return nil, err
 	}
@@ -1349,14 +1796,15 @@ func dbCycleCreate(db *sql.DB, pid string, args map[string]any) (*Cycle, *Subscr
 		`INSERT INTO subscription_cycles
 		   (project_id, subscription_id, cycle_number, period_start, period_end, due_at,
 		    invoice_id, order_id, entitlement_grant_id, payment_status, fulfillment_status,
-		    subtotal_cents, tax_cents, shipping_cents, total_cents, currency, metadata, paid_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		    subtotal_cents, tax_cents, shipping_cents, total_cents, currency, metadata, paid_at,lifecycle_attempt_id)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 RETURNING id`,
 		pid, subID, next, strArg(args, "period_start"), strArg(args, "period_end"), nullStr(strArg(args, "due_at")),
 		nullableInt64(int64Arg(args, "invoice_id")), nullableInt64(int64Arg(args, "order_id")), nullableInt64(int64Arg(args, "entitlement_grant_id")),
 		firstNonEmpty(strArg(args, "payment_status"), "pending"), firstNonEmpty(strArg(args, "fulfillment_status"), "none"),
 		subtotal, tax, ship, total, sub.Currency, jsonOrEmpty(args["metadata"], "{}"),
 		nullableTime(strArg(args, "payment_status") == "paid", time.Now().UTC().Format(time.RFC3339)),
+		nullableInt64(int64Arg(args, "lifecycle_attempt_id")),
 	).Scan(&id)
 	if err != nil {
 		return nil, nil, err
@@ -1477,19 +1925,21 @@ func sortMetricCurrencies(currencies []SubscriptionMetricCurrency) {
 }
 
 func subCols() string {
-	return `id, project_id, customer_id, COALESCE(customer_email,''), COALESCE(customer_name,''), kind, status, billing_provider, COALESCE(external_id,''), currency, interval, interval_count, quantity, trial_start, trial_end, current_period_start, current_period_end, next_renewal_at, cancel_at, cancelled_at, ended_at, source, COALESCE(source_ref,''), metadata, created_at, updated_at`
+	return `id, project_id, customer_id, billing_customer_id, COALESCE(customer_email,''), COALESCE(customer_name,''), kind, status, billing_provider, collection_method, collection_status, trial_end_behavior, COALESCE(last_collection_error,''), collection_invoice_id, COALESCE(external_id,''), currency, interval, interval_count, quantity, trial_start, trial_end, current_period_start, current_period_end, next_renewal_at, cancel_at, cancelled_at, ended_at, source, COALESCE(source_ref,''), metadata, created_at, updated_at`
 }
 
 func scanSub(row rowScanner) (*Subscription, error) {
 	var s Subscription
-	var cid sql.NullInt64
+	var cid, billingCID, invoiceID sql.NullInt64
 	var trialStart, trialEnd, curStart, curEnd, next, cancelAt, cancelledAt, endedAt sql.NullString
 	var meta string
-	err := row.Scan(&s.ID, &s.ProjectID, &cid, &s.CustomerEmail, &s.CustomerName, &s.Kind, &s.Status, &s.BillingProvider, &s.ExternalID, &s.Currency, &s.Interval, &s.IntervalCount, &s.Quantity, &trialStart, &trialEnd, &curStart, &curEnd, &next, &cancelAt, &cancelledAt, &endedAt, &s.Source, &s.SourceRef, &meta, &s.CreatedAt, &s.UpdatedAt)
+	err := row.Scan(&s.ID, &s.ProjectID, &cid, &billingCID, &s.CustomerEmail, &s.CustomerName, &s.Kind, &s.Status, &s.BillingProvider, &s.CollectionMethod, &s.CollectionStatus, &s.TrialEndBehavior, &s.LastCollectionError, &invoiceID, &s.ExternalID, &s.Currency, &s.Interval, &s.IntervalCount, &s.Quantity, &trialStart, &trialEnd, &curStart, &curEnd, &next, &cancelAt, &cancelledAt, &endedAt, &s.Source, &s.SourceRef, &meta, &s.CreatedAt, &s.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
 	s.CustomerID = ptrIfValid(cid)
+	s.BillingCustomerID = ptrIfValid(billingCID)
+	s.CollectionInvoiceID = ptrIfValid(invoiceID)
 	s.Metadata = json.RawMessage(meta)
 	if trialStart.Valid {
 		s.TrialStart = trialStart.String
@@ -1875,6 +2325,8 @@ func normalizeItemMap(m map[string]any, currency string) itemIn {
 
 var validKind = map[string]bool{"saas": true, "physical": true, "service": true}
 var validSubStatus = map[string]bool{"trialing": true, "active": true, "past_due": true, "paused": true, "cancelled": true, "ended": true}
+var validCollectionMethod = map[string]bool{"invoice": true, "auto_charge": true, "manual": true, "none": true}
+var validTrialEndBehavior = map[string]bool{"collect": true, "pause": true, "end": true}
 
 func resolveProjectFromArgs(args map[string]any) (string, error) {
 	pid := strings.TrimSpace(strArg(args, "_project_id"))
@@ -2020,6 +2472,35 @@ func trialExpiredStatus(meta map[string]any) string {
 	default:
 		return "past_due"
 	}
+}
+func legacyTrialEndBehavior(meta map[string]any) string {
+	switch strings.ToLower(firstNonEmpty(strArg(meta, "trial_end_behavior"), strArg(meta, "trial_end_status"), strArg(meta, "on_trial_end_unpaid"))) {
+	case "pause", "paused", "suspend", "suspended":
+		return "pause"
+	case "end", "ended":
+		return "end"
+	default:
+		return "collect"
+	}
+}
+func subscriptionPeriodEnd(start time.Time, interval string, count int64) time.Time {
+	if count <= 0 {
+		count = 1
+	}
+	switch strings.ToLower(strings.TrimSpace(interval)) {
+	case "day":
+		return start.AddDate(0, 0, int(count))
+	case "week":
+		return start.AddDate(0, 0, int(7*count))
+	case "year":
+		return start.AddDate(int(count), 0, 0)
+	default:
+		return start.AddDate(0, int(count), 0)
+	}
+}
+func lifecycleIdempotencyKey(attempt *LifecycleAttempt, step string) string {
+	effective := strings.NewReplacer(":", "", "-", "", ".", "").Replace(attempt.EffectiveAt)
+	return fmt.Sprintf("subscriptions:%s:%d:%s:%s:%s", attempt.ProjectID, attempt.SubscriptionID, attempt.Action, effective, step)
 }
 func parseTime(value string) (time.Time, bool) {
 	value = strings.TrimSpace(value)

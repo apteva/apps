@@ -1,14 +1,83 @@
 package main
 
 import (
+	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
+	sdk "github.com/apteva/app-sdk"
 	tk "github.com/apteva/app-sdk/testkit"
 )
+
+type lifecycleBillingCall struct {
+	Tool  string
+	Input map[string]any
+}
+
+type lifecycleBillingStub struct {
+	tk.BasePlatformClient
+	Calls           []lifecycleBillingCall
+	FailNextInvoice bool
+	ChargePaid      bool
+}
+
+func (p *lifecycleBillingStub) CallAppResult(appName, tool string, input map[string]any, out any) error {
+	p.Calls = append(p.Calls, lifecycleBillingCall{Tool: tool, Input: input})
+	if appName != "billing" {
+		return errors.New("unexpected app call")
+	}
+	var result map[string]any
+	switch tool {
+	case "customers_upsert_by_email":
+		result = map[string]any{"customer": map[string]any{"id": int64(501)}}
+	case "invoices_create_from_prepared_lines":
+		if p.FailNextInvoice {
+			p.FailNextInvoice = false
+			return errors.New("temporary billing outage")
+		}
+		result = map[string]any{"invoice": map[string]any{"id": int64(701), "status": "open"}}
+	case "invoices_send_payment_link":
+		result = map[string]any{"url": "https://pay.example/701", "stripe_session_id": "cs_701"}
+	case "invoices_charge_default_payment_method":
+		if p.ChargePaid {
+			result = map[string]any{"status": "paid", "payment_id": "pay_701", "invoice": map[string]any{"id": int64(701), "status": "paid"}}
+			break
+		}
+		return errors.New("automatic charge primitive unavailable")
+	default:
+		return errors.New("unexpected billing tool: " + tool)
+	}
+	b, _ := json.Marshal(result)
+	return json.Unmarshal(b, out)
+}
+
+func countBillingCalls(p *lifecycleBillingStub, tool string) int {
+	n := 0
+	for _, call := range p.Calls {
+		if call.Tool == tool {
+			n++
+		}
+	}
+	return n
+}
+
+func newTrial(t *testing.T, ctx *sdk.AppCtx, pid, email string, trialEnd time.Time) *Subscription {
+	t.Helper()
+	sub, err := dbSubscriptionCreate(ctx, pid, map[string]any{
+		"customer_email": email, "customer_name": "Trial Buyer", "kind": "saas", "status": "trialing",
+		"trial_start": trialEnd.AddDate(0, 0, -7).Format(time.RFC3339), "trial_end": trialEnd.Format(time.RFC3339),
+		"collection_method": "invoice", "trial_end_behavior": "collect",
+		"items": []any{map[string]any{"title": "Pro plan", "quantity": 1, "unit_amount_cents": 2900, "currency": "USD"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return sub
+}
 
 func TestSubscriptionLifecycle(t *testing.T) {
 	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("proj-test"))
@@ -251,6 +320,147 @@ func TestLifecycleWorkerExpiresTrialAndGrace(t *testing.T) {
 	}
 	if meta := mapFromAny(data["metadata"]); meta["on_unpaid_grace_expired"] != "delete" {
 		t.Fatalf("ended event missing metadata policy: %+v", data)
+	}
+}
+
+func TestTrialCollectionCreatesBillingArtifactsOnce(t *testing.T) {
+	pf := &lifecycleBillingStub{}
+	rec := tk.NewEmitRecorder()
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("proj-test"), tk.WithPlatform(pf), tk.WithEmitter(rec))
+	now := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
+	sub := newTrial(t, ctx, "proj-test", "buyer@example.com", now.Add(-time.Minute))
+	rec.Reset()
+
+	if err := runSubscriptionLifecycle(ctx, now); err != nil {
+		t.Fatal(err)
+	}
+	got, err := dbSubscriptionGet(ctx.AppDB(), "proj-test", sub.ID, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != "past_due" || got.CollectionStatus != "requires_payment" {
+		t.Fatalf("status=%s collection=%s", got.Status, got.CollectionStatus)
+	}
+	if derefInt64(got.BillingCustomerID) != 501 || derefInt64(got.CollectionInvoiceID) != 701 {
+		t.Fatalf("billing refs missing: %+v", got)
+	}
+	if len(got.Cycles) != 1 || derefInt64(got.Cycles[0].InvoiceID) != 701 {
+		t.Fatalf("cycle not linked to invoice: %+v", got.Cycles)
+	}
+	if countBillingCalls(pf, "customers_upsert_by_email") != 1 || countBillingCalls(pf, "invoices_create_from_prepared_lines") != 1 || countBillingCalls(pf, "invoices_send_payment_link") != 1 {
+		t.Fatalf("unexpected calls: %+v", pf.Calls)
+	}
+	if events := rec.EventsByTopic("subscription.past_due"); len(events) != 1 {
+		t.Fatalf("past_due events=%d, want 1", len(events))
+	} else if data, ok := events[0].Data.(map[string]any); !ok || data["payment_url"] != "https://pay.example/701" || data["requires_payment"] != true {
+		t.Fatalf("past_due event missing payment path: %+v", events[0].Data)
+	}
+
+	if err := runSubscriptionLifecycle(ctx, now.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if countBillingCalls(pf, "invoices_create_from_prepared_lines") != 1 || countBillingCalls(pf, "invoices_send_payment_link") != 1 {
+		t.Fatalf("repeat worker duplicated Billing calls: %+v", pf.Calls)
+	}
+}
+
+func TestTrialCollectionBeforeExpiryMakesNoBillingCalls(t *testing.T) {
+	pf := &lifecycleBillingStub{}
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("proj-test"), tk.WithPlatform(pf))
+	now := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
+	newTrial(t, ctx, "proj-test", "future@example.com", now.Add(time.Hour))
+	if err := runSubscriptionLifecycle(ctx, now); err != nil {
+		t.Fatal(err)
+	}
+	if len(pf.Calls) != 0 {
+		t.Fatalf("Billing called before trial expiration: %+v", pf.Calls)
+	}
+}
+
+func TestTrialCollectionIsProjectScoped(t *testing.T) {
+	pf := &lifecycleBillingStub{}
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("proj-a"), tk.WithPlatform(pf))
+	now := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
+	a := newTrial(t, ctx, "proj-a", "a@example.com", now.Add(-time.Minute))
+	b := newTrial(t, ctx, "proj-b", "b@example.com", now.Add(-time.Minute))
+	if err := runSubscriptionLifecycle(ctx, now); err != nil {
+		t.Fatal(err)
+	}
+	gotA, _ := dbSubscriptionGet(ctx.AppDB(), "proj-a", a.ID, false)
+	gotB, _ := dbSubscriptionGet(ctx.AppDB(), "proj-b", b.ID, false)
+	if gotA.Status != "past_due" || gotB.Status != "trialing" {
+		t.Fatalf("cross-project processing: a=%s b=%s", gotA.Status, gotB.Status)
+	}
+	for _, call := range pf.Calls {
+		if call.Input["_project_id"] != "proj-a" {
+			t.Fatalf("Billing call used wrong project: %+v", call)
+		}
+	}
+}
+
+func TestTrialCollectionFailureDoesNotBlockAndRetries(t *testing.T) {
+	pf := &lifecycleBillingStub{FailNextInvoice: true}
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("proj-test"), tk.WithPlatform(pf))
+	now := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
+	first := newTrial(t, ctx, "proj-test", "first@example.com", now.Add(-2*time.Minute))
+	second := newTrial(t, ctx, "proj-test", "second@example.com", now.Add(-time.Minute))
+	if err := runSubscriptionLifecycle(ctx, now); err != nil {
+		t.Fatal(err)
+	}
+	gotFirst, _ := dbSubscriptionGet(ctx.AppDB(), "proj-test", first.ID, false)
+	gotSecond, _ := dbSubscriptionGet(ctx.AppDB(), "proj-test", second.ID, false)
+	if gotFirst.CollectionStatus != "failed" || gotSecond.CollectionStatus != "requires_payment" {
+		t.Fatalf("failure blocked batch: first=%s second=%s", gotFirst.CollectionStatus, gotSecond.CollectionStatus)
+	}
+	if err := runSubscriptionLifecycle(ctx, now.Add(16*time.Minute)); err != nil {
+		t.Fatal(err)
+	}
+	gotFirst, _ = dbSubscriptionGet(ctx.AppDB(), "proj-test", first.ID, true)
+	if gotFirst.CollectionStatus != "requires_payment" || len(gotFirst.Cycles) != 1 {
+		t.Fatalf("failed attempt was not retried: %+v", gotFirst)
+	}
+}
+
+func TestInvoicePaidActivatesCollectedTrial(t *testing.T) {
+	pf := &lifecycleBillingStub{}
+	rec := tk.NewEmitRecorder()
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("proj-test"), tk.WithPlatform(pf), tk.WithEmitter(rec))
+	now := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
+	sub := newTrial(t, ctx, "proj-test", "paid@example.com", now.Add(-time.Minute))
+	if err := runSubscriptionLifecycle(ctx, now); err != nil {
+		t.Fatal(err)
+	}
+	rec.Reset()
+	app := &App{}
+	if err := app.handleInvoicePaid(ctx, sdk.Event{Event: "invoice.paid", ProjectID: "proj-test", Data: map[string]any{"id": int64(701)}}); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := dbSubscriptionGet(ctx.AppDB(), "proj-test", sub.ID, true)
+	if got.Status != "active" || got.CollectionStatus != "paid" || got.Cycles[0].PaymentStatus != "paid" {
+		t.Fatalf("invoice payment not reconciled: %+v cycles=%+v", got, got.Cycles)
+	}
+	if events := rec.EventsByTopic("subscription.active"); len(events) != 1 {
+		t.Fatalf("active events=%d, want 1", len(events))
+	}
+}
+
+func TestTrialAutoChargeActivatesWhenBillingCollects(t *testing.T) {
+	pf := &lifecycleBillingStub{ChargePaid: true}
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("proj-test"), tk.WithPlatform(pf))
+	now := time.Date(2026, 7, 12, 12, 0, 0, 0, time.UTC)
+	sub := newTrial(t, ctx, "proj-test", "autopay@example.com", now.Add(-time.Minute))
+	if _, err := ctx.AppDB().Exec(`UPDATE subscriptions SET collection_method='auto_charge' WHERE id=?`, sub.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := runSubscriptionLifecycle(ctx, now); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := dbSubscriptionGet(ctx.AppDB(), "proj-test", sub.ID, true)
+	if got.Status != "active" || got.CollectionStatus != "paid" || got.Cycles[0].PaymentStatus != "paid" {
+		t.Fatalf("automatic collection did not activate: %+v", got)
+	}
+	if countBillingCalls(pf, "invoices_charge_default_payment_method") != 1 || countBillingCalls(pf, "invoices_send_payment_link") != 0 {
+		t.Fatalf("unexpected automatic collection calls: %+v", pf.Calls)
 	}
 }
 
