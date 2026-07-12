@@ -95,11 +95,15 @@ func (a *App) stopTenantOnHost(ctx *sdk.AppCtx, t *Tenant, port int) error {
 }
 
 func (a *App) startTenantOnHost(ctx *sdk.AppCtx, h fleetHost, tenantID, slug, dir, version string, port int, prevStatus string) (baseURL, newStatus string, err error) {
+	return a.startTenantOnHostMode(ctx, h, tenantID, slug, dir, version, port, prevStatus, false)
+}
+
+func (a *App) startTenantOnHostMode(ctx *sdk.AppCtx, h fleetHost, tenantID, slug, dir, version string, port int, prevStatus string, quarantine bool) (baseURL, newStatus string, err error) {
 	newStatus = statusAfterRestart(prevStatus)
 	if h.IsLocal() {
 		spawnCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 		defer cancel()
-		_, proc, err := a.spawnTenant(spawnCtx, tenantID, slug, dir, tenantAptevaBin(version), port, false)
+		_, proc, err := a.spawnTenantWithMode(spawnCtx, tenantID, slug, dir, tenantAptevaBin(version), port, false, quarantine)
 		if err != nil {
 			return "", "", err
 		}
@@ -115,6 +119,7 @@ func (a *App) startTenantOnHost(ctx *sdk.AppCtx, h fleetHost, tenantID, slug, di
 		Port:       port,
 		AptevaVer:  version,
 		FreshSetup: false,
+		Quarantine: quarantine,
 	})
 	if err != nil {
 		return "", "", err

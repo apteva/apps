@@ -48,6 +48,10 @@ type tenantProc struct {
 // look for a token — the tenant already has a users table from its
 // first boot, registration is locked.
 func (a *App) spawnTenant(ctx context.Context, tenantID, slug, configDir, aptevaBin string, port int, freshSetup bool) (setupToken string, proc *tenantProc, err error) {
+	return a.spawnTenantWithMode(ctx, tenantID, slug, configDir, aptevaBin, port, freshSetup, false)
+}
+
+func (a *App) spawnTenantWithMode(ctx context.Context, tenantID, slug, configDir, aptevaBin string, port int, freshSetup, quarantine bool) (setupToken string, proc *tenantProc, err error) {
 	if _, err := validatedTenantSlug(slug); err != nil {
 		return "", nil, err
 	}
@@ -66,7 +70,7 @@ func (a *App) spawnTenant(ctx context.Context, tenantID, slug, configDir, apteva
 	}
 	cmd := buildSpawnCmd(slug, bin,
 		[]string{"--data-dir", configDir, "--port", strconv.Itoa(port), "--no-browser"})
-	cmd.Env = tenantSpawnEnv(configDir, port, tenantID)
+	cmd.Env = tenantSpawnEnvForMode(configDir, port, tenantID, quarantine)
 	// New process group: child survives if fleet itself restarts.
 	// (Setpgid is also set redundantly inside buildSpawnCmd; harmless.)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -145,6 +149,16 @@ func tenantSpawnEnv(configDir string, port int, tenantID string) []string {
 	}
 	if tenantID = strings.TrimSpace(tenantID); tenantID != "" {
 		env = setEnv(env, "APTEVA_DELEGATED_DNS_TENANT_ID", tenantID)
+	}
+	return env
+}
+
+func tenantSpawnEnvForMode(configDir string, port int, tenantID string, quarantine bool) []string {
+	env := tenantSpawnEnv(configDir, port, tenantID)
+	if quarantine {
+		env = setEnv(env, "APTEVA_CLONE_QUARANTINE", "1")
+	} else {
+		env = setEnv(env, "APTEVA_CLONE_QUARANTINE", "0")
 	}
 	return env
 }

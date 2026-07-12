@@ -61,6 +61,9 @@ func (a *App) toolMigrate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return nil, errors.New("retain_source is only supported for cross-host migrations")
 	}
 	if t.InstanceID != targetID {
+		if version := tenantVersion(t); !supportsCloneRuntimeRecovery(version) {
+			return nil, fmt.Errorf("tenant runs Apteva %q; cross-host migration requires %s or newer — update the tenant before migration", version, cloneQuarantineMinAptevaVersion)
+		}
 		retained, err := a.store.getRetainedSource(t.ID)
 		if err != nil {
 			return nil, fmt.Errorf("check retained source: %w", err)
@@ -92,6 +95,10 @@ func (a *App) toolMigrate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	}
 	version := tenantVersion(t)
 	prevStatus := t.Status
+	requiredApps, err := a.tenantAppRuntimes(ctx, sourceHost, sourceDir)
+	if err != nil {
+		return nil, fmt.Errorf("inventory source app runtimes: %w", err)
+	}
 
 	_ = a.store.recordEvent(t.ID, "migrate_start", "user", map[string]any{
 		"from_instance_id": t.InstanceID,
@@ -122,6 +129,10 @@ func (a *App) toolMigrate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		baseURL, newStatus, err := a.startTenantOnHost(ctx, sourceHost, t.ID, t.Slug, sourceDir, version, targetPort, prevStatus)
 		if err != nil {
 			return rollback("restart on new port", err)
+		}
+		if err := a.waitForTargetAppsHealthy(ctx, sourceHost, sourceDir, requiredApps, 10*time.Minute); err != nil {
+			_ = a.stopTenantOnHost(ctx, t, targetPort)
+			return rollback("validate target apps", err)
 		}
 		if t.Domain != "" {
 			routeTenant := *t
@@ -159,6 +170,11 @@ func (a *App) toolMigrate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return rollback("target start", err)
 	}
 	targetStarted = true
+	if err := a.waitForTargetAppsHealthy(ctx, targetHost, targetDir, requiredApps, 10*time.Minute); err != nil {
+		_ = a.stopTenantOnHost(ctx, &Tenant{Slug: t.Slug, ConfigDir: targetDir, InstanceID: targetID}, targetPort)
+		_ = a.removeTenantData(ctx, targetHost, t.Slug, targetDir)
+		return rollback("validate target apps", err)
+	}
 	if t.Domain != "" {
 		routeTenant := *t
 		routeTenant.InstanceID = targetID

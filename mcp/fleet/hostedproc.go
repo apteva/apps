@@ -135,6 +135,7 @@ type hostedSpawnSpec struct {
 	Port       int
 	AptevaVer  string // npm version, e.g. "0.17.3"
 	FreshSetup bool   // first boot → scrape setup_token from log
+	Quarantine bool   // management API only; do not activate copied workloads
 }
 
 // spawnHostedTenant boots a fresh apteva-server on the remote VPS.
@@ -208,9 +209,13 @@ func (a *App) spawnHostedTenant(ctx *sdk.AppCtx, spec hostedSpawnSpec) (setupTok
 	// 3) Spawn under setsid so the process survives the SSH session
 	//    drop. It binds only to VPS loopback; Fleet reaches it through
 	//    the Instances SSH tunnel.
+	quarantineEnv := "APTEVA_CLONE_QUARANTINE=0 "
+	if spec.Quarantine {
+		quarantineEnv = "APTEVA_CLONE_QUARANTINE=1 "
+	}
 	inner := fmt.Sprintf(
-		`exec env APTEVA_BIND=127.0.0.1 APTEVA_INGRESS_ENABLED=0 APTEVA_HTTP_LISTEN_ADDR= APTEVA_HTTPS_LISTEN_ADDR= %s --data-dir %s --port %d --no-browser >>%s 2>&1`,
-		sh(binPath), sh(dataDir), spec.Port, sh(logPath),
+		`exec env APTEVA_BIND=127.0.0.1 APTEVA_INGRESS_ENABLED=0 APTEVA_HTTP_LISTEN_ADDR= APTEVA_HTTPS_LISTEN_ADDR= %s%s --data-dir %s --port %d --no-browser >>%s 2>&1`,
+		quarantineEnv, sh(binPath), sh(dataDir), spec.Port, sh(logPath),
 	)
 	spawnCmd := fmt.Sprintf(`
 set -eu
