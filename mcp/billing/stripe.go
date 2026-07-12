@@ -507,22 +507,27 @@ func (a *App) toolInvoicesSendPaymentLink(ctx *sdk.AppCtx, args map[string]any) 
 		return nil, errors.New("invoice has no line items")
 	}
 
-	// Build Checkout line items. price_data=inline so we don't need
-	// a Stripe Product/Price pre-registered. unit_amount is integer
-	// cents — same shape we already use internally.
-	lineItems := make([]map[string]any, 0, len(inv.LineItems))
-	for _, li := range inv.LineItems {
-		lineItems = append(lineItems, map[string]any{
-			"price_data": map[string]any{
-				"currency":    strings.ToLower(inv.Currency),
-				"unit_amount": li.UnitPriceCents,
-				"product_data": map[string]any{
-					"name": li.Description,
-				},
-			},
-			"quantity": li.Quantity,
-		})
+	amountDue := inv.TotalCents - inv.AmountPaidCents
+	if amountDue <= 0 {
+		return nil, errors.New("invoice has no outstanding balance")
 	}
+	// Checkout requires integer quantities, while Billing deliberately allows
+	// fractional quantities and per-line tax. Charge one reconciled balance
+	// line so Checkout's amount is exactly the invoice's outstanding amount.
+	label := inv.Number
+	if label == "" {
+		label = fmt.Sprintf("Invoice #%d", inv.ID)
+	} else {
+		label = "Invoice " + label
+	}
+	lineItems := []map[string]any{{
+		"price_data": map[string]any{
+			"currency":     strings.ToLower(inv.Currency),
+			"unit_amount":  amountDue,
+			"product_data": map[string]any{"name": label},
+		},
+		"quantity": 1,
+	}}
 
 	successURL := strArg(args, "success_url")
 	if successURL == "" {
@@ -541,6 +546,12 @@ func (a *App) toolInvoicesSendPaymentLink(ctx *sdk.AppCtx, args map[string]any) 
 	}
 	if cancelURL == "" {
 		cancelURL = stripePublicBaseURL(ctx) + fmt.Sprintf("/dashboard?app=billing&invoice_id=%d", inv.ID)
+	}
+	for name, raw := range map[string]string{"success_url": successURL, "cancel_url": cancelURL} {
+		u, err := neturl.Parse(raw)
+		if err != nil || u.Scheme == "" || u.Host == "" || (u.Scheme != "https" && u.Scheme != "http") {
+			return nil, fmt.Errorf("%s must be an absolute http(s) URL", name)
+		}
 	}
 
 	// metadata.invoice_id is THE join key — the webhook handler reads
@@ -582,26 +593,45 @@ func (a *App) toolInvoicesSendPaymentLink(ctx *sdk.AppCtx, args map[string]any) 
 		return nil, errors.New("Stripe returned no payment URL")
 	}
 
-	// Stash the Stripe session id + url on the invoice so the panel
-	// can show "payment link active" without re-creating sessions.
-	// external_id / external_url are already in v0.1.0's schema
-	// (originally reserved for the v0.1.1 stripe-provider path).
+	// Persist the exact expected amount/currency before exposing the URL. The
+	// webhook resolves this row by the signed session id rather than trusting
+	// caller-controlled metadata from an arbitrary event in the Stripe account.
 	now := nowRFC3339()
-	if _, err := ctx.AppDB().Exec(
+	expiresAt := ""
+	if sess.ExpiresAt > 0 {
+		expiresAt = time.Unix(sess.ExpiresAt, 0).UTC().Format(time.RFC3339)
+	}
+	tx, err := ctx.AppDB().Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	if _, err := tx.Exec(
+		`INSERT INTO billing_checkout_sessions
+		   (project_id, invoice_id, provider, provider_session_id,
+		    amount_cents, currency, status, expires_at, created_at)
+		 VALUES (?, ?, 'stripe', ?, ?, ?, 'pending', ?, ?)`,
+		pid, inv.ID, sess.ID, amountDue, inv.Currency,
+		nullStr(expiresAt), now); err != nil {
+		return nil, fmt.Errorf("persist checkout session: %w", err)
+	}
+	if _, err := tx.Exec(
 		`UPDATE invoices
 		 SET external_id = ?, external_url = ?, last_synced_at = ?, updated_at = CURRENT_TIMESTAMP
 		 WHERE id = ? AND project_id = ?`,
 		sess.ID, sess.URL, now, inv.ID, pid); err != nil {
-		ctx.Logger().Warn("send_payment_link: persist external_id failed", "err", err)
+		return nil, fmt.Errorf("persist payment link: %w", err)
 	}
-
-	// Audit log entry — the agent's "I shared a link" leaves a trail.
-	if tx, txErr := ctx.AppDB().Begin(); txErr == nil {
-		_ = writeAuditTx(tx, inv.ID, callerActor(args), "payment_link_sent", map[string]any{
-			"stripe_session_id": sess.ID,
-			"stripe_url":        sess.URL,
-		})
-		_ = tx.Commit()
+	if err := writeAuditTx(tx, inv.ID, callerActor(args), "payment_link_sent", map[string]any{
+		"stripe_session_id": sess.ID,
+		"stripe_url":        sess.URL,
+		"amount_cents":      amountDue,
+		"currency":          inv.Currency,
+	}); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
 	}
 
 	return map[string]any{
@@ -625,14 +655,19 @@ func (a *App) toolInvoicesSendPaymentLink(ctx *sdk.AppCtx, args map[string]any) 
 // return 200 OK without side effects.
 func (a *App) handleStripeWebhook(w http.ResponseWriter, r *http.Request) {
 	ctx := getAppCtx(r)
+	if r.Method != http.MethodPost {
+		httpErr(w, http.StatusMethodNotAllowed, "method not allowed")
+		return
+	}
 	signature := r.Header.Get("Stripe-Signature")
 	if signature == "" {
 		httpErr(w, http.StatusBadRequest, "missing Stripe-Signature header")
 		return
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
-		httpErr(w, http.StatusBadRequest, "read body: "+err.Error())
+		httpErr(w, http.StatusRequestEntityTooLarge, "webhook body exceeds 1 MiB")
 		return
 	}
 
@@ -685,9 +720,8 @@ func (a *App) handleStripeWebhook(w http.ResponseWriter, r *http.Request) {
 	if err := a.dispatchStripeEvent(ctx, event.ID, event.Type, event.Data.Object); err != nil {
 		ctx.Logger().Warn("stripe webhook dispatch failed",
 			"event_id", event.ID, "type", event.Type, "err", err.Error())
-		// Return 200 anyway — Stripe retries non-200 responses, and a
-		// retry doesn't help if our DB call failed for a non-transient
-		// reason. We log the issue for operators to investigate.
+		httpErr(w, http.StatusInternalServerError, "webhook processing failed")
+		return
 	}
 
 	httpJSON(w, map[string]any{"received": true, "event_id": event.ID})
@@ -761,25 +795,20 @@ func (a *App) handleCheckoutCompleted(ctx *sdk.AppCtx, obj json.RawMessage) erro
 		return nil
 	}
 
-	// Find our invoice. Prefer metadata.apteva_invoice_id; fall back
-	// to client_reference_id (we set it to "inv_<id>").
-	invoiceID := int64(0)
-	if v := sess.Metadata["apteva_invoice_id"]; v != "" {
-		if n := atoi64(v); n > 0 {
-			invoiceID = n
-		}
+	var pid, expectedCurrency, sessionStatus string
+	var invoiceID, expectedAmount int64
+	if err := ctx.AppDB().QueryRow(
+		`SELECT project_id, invoice_id, amount_cents, currency, status
+		 FROM billing_checkout_sessions
+		 WHERE provider = 'stripe' AND provider_session_id = ?`, sess.ID).
+		Scan(&pid, &invoiceID, &expectedAmount, &expectedCurrency, &sessionStatus); err != nil {
+		return fmt.Errorf("unrecognized checkout session %s: %w", sess.ID, err)
 	}
-	if invoiceID == 0 && strings.HasPrefix(sess.ClientReferenceID, "inv_") {
-		if n := atoi64(strings.TrimPrefix(sess.ClientReferenceID, "inv_")); n > 0 {
-			invoiceID = n
-		}
+	if sess.AmountTotal != expectedAmount {
+		return fmt.Errorf("checkout session %s amount mismatch: got %d want %d", sess.ID, sess.AmountTotal, expectedAmount)
 	}
-	if invoiceID == 0 {
-		return fmt.Errorf("session %s has no apteva invoice metadata", sess.ID)
-	}
-	pid := sess.Metadata["apteva_project_id"]
-	if pid == "" {
-		return fmt.Errorf("session %s has no apteva_project_id metadata", sess.ID)
+	if !strings.EqualFold(sess.Currency, expectedCurrency) {
+		return fmt.Errorf("checkout session %s currency mismatch: got %s want %s", sess.ID, sess.Currency, expectedCurrency)
 	}
 
 	externalID := sess.PaymentIntent
@@ -794,6 +823,12 @@ func (a *App) handleCheckoutCompleted(ctx *sdk.AppCtx, obj json.RawMessage) erro
 		"system:stripe-webhook")
 	if err != nil {
 		return fmt.Errorf("record payment: %w", err)
+	}
+	if _, err := ctx.AppDB().Exec(
+		`UPDATE billing_checkout_sessions
+		 SET status = 'completed', completed_at = COALESCE(completed_at, ?)
+		 WHERE provider = 'stripe' AND provider_session_id = ?`, now, sess.ID); err != nil {
+		return fmt.Errorf("complete checkout session: %w", err)
 	}
 	emitInvoice(ctx, "invoice.paid", inv)
 	ctx.Logger().Info("stripe payment recorded",
@@ -969,6 +1004,13 @@ func (a *App) handleChargeRefunded(ctx *sdk.AppCtx, obj json.RawMessage) error {
 		AmountRefunded int64             `json:"amount_refunded"`
 		Currency       string            `json:"currency"`
 		Metadata       map[string]string `json:"metadata"`
+		Refunds        struct {
+			Data []struct {
+				ID     string `json:"id"`
+				Amount int64  `json:"amount"`
+				Status string `json:"status"`
+			} `json:"data"`
+		} `json:"refunds"`
 	}
 	if err := json.Unmarshal(obj, &charge); err != nil {
 		return fmt.Errorf("decode charge: %w", err)
@@ -982,24 +1024,60 @@ func (a *App) handleChargeRefunded(ctx *sdk.AppCtx, obj json.RawMessage) error {
 		return fmt.Errorf("charge %s has no payment_intent", charge.ID)
 	}
 	var invoiceID int64
-	var pid string
+	var pid, paymentCurrency string
 	if err := ctx.AppDB().QueryRow(
-		`SELECT invoice_id, project_id FROM payments
+		`SELECT invoice_id, project_id, currency FROM payments
 		 WHERE method = 'stripe' AND external_id = ?
 		 LIMIT 1`,
-		charge.PaymentIntent).Scan(&invoiceID, &pid); err != nil {
+		charge.PaymentIntent).Scan(&invoiceID, &pid, &paymentCurrency); err != nil {
 		return fmt.Errorf("no payment found for payment_intent %s: %w", charge.PaymentIntent, err)
 	}
+	if charge.Currency != "" && !strings.EqualFold(charge.Currency, paymentCurrency) {
+		return fmt.Errorf("refund currency mismatch: got %s want %s", charge.Currency, paymentCurrency)
+	}
 	now := time.Now().UTC().Format(time.RFC3339)
-	// Negative amount = refund record. external_id is the charge id
-	// + ":refund" to dedupe re-deliveries of the same refund event.
-	refundExtID := charge.ID + ":refund"
-	_, inv, err := dbPaymentRecord(ctx.AppDB(), pid, invoiceID, -charge.AmountRefunded,
-		"stripe", refundExtID, now,
-		fmt.Sprintf("Stripe refund on %s", charge.ID),
-		"system:stripe-webhook")
-	if err != nil {
-		return fmt.Errorf("record refund: %w", err)
+	var inv *Invoice
+	recordedIndividual := false
+	for _, refund := range charge.Refunds.Data {
+		if refund.ID == "" || refund.Amount <= 0 || (refund.Status != "" && refund.Status != "succeeded") {
+			continue
+		}
+		recordedIndividual = true
+		refundExternalID := charge.ID + ":refund:" + refund.ID
+		_, current, err := dbPaymentRecord(ctx.AppDB(), pid, invoiceID, -refund.Amount,
+			"stripe", refundExternalID, now,
+			fmt.Sprintf("Stripe refund %s on %s", refund.ID, charge.ID),
+			"system:stripe-webhook")
+		if err != nil {
+			return fmt.Errorf("record refund %s: %w", refund.ID, err)
+		}
+		inv = current
+	}
+	if !recordedIndividual {
+		// Some API versions omit the expanded refunds list. Reconcile the
+		// cumulative amount_refunded against refund rows already stored for
+		// this charge and record only the delta.
+		var already int64
+		if err := ctx.AppDB().QueryRow(
+			`SELECT COALESCE(-SUM(amount_cents), 0) FROM payments
+			 WHERE method = 'stripe' AND project_id = ? AND invoice_id = ?
+			   AND (external_id = ? OR external_id LIKE ?)`,
+			pid, invoiceID, charge.ID+":refund", charge.ID+":refund:%").Scan(&already); err != nil {
+			return err
+		}
+		delta := charge.AmountRefunded - already
+		if delta <= 0 {
+			return nil
+		}
+		extID := fmt.Sprintf("%s:refund:%d", charge.ID, charge.AmountRefunded)
+		_, current, err := dbPaymentRecord(ctx.AppDB(), pid, invoiceID, -delta,
+			"stripe", extID, now,
+			fmt.Sprintf("Stripe cumulative refund on %s", charge.ID),
+			"system:stripe-webhook")
+		if err != nil {
+			return fmt.Errorf("record refund: %w", err)
+		}
+		inv = current
 	}
 	emitInvoice(ctx, "invoice.refunded", inv)
 	return nil

@@ -37,7 +37,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: billing
 display_name: Billing
-version: 0.8.16
+version: 0.8.17
 description: |
   Customers, invoices, payments, and reusable customer payment methods.
   Per-invoice provider — local for internal/wire/cash, stripe for
@@ -117,7 +117,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	}
 
 	ctx.Logger().Info("billing mounted",
-		"version", "0.8.16",
+		"version", "0.8.17",
 		"scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
 	return nil
 }
@@ -831,7 +831,7 @@ func (a *App) toolInvoicesCreate(ctx *sdk.AppCtx, args map[string]any) (any, err
 		currency = strings.ToUpper(configString(ctx, "default_currency", "USD"))
 	}
 	if !looksLikeISO4217(currency) {
-		return nil, fmt.Errorf("currency %q not a 3-letter ISO 4217 code", currency)
+		return nil, fmt.Errorf("currency %q must be a supported 2-decimal ISO 4217 code", currency)
 	}
 
 	items, err := normaliseLineItems(rawItems, configIntBps(ctx, "tax_default_rate_bps"))
@@ -1160,7 +1160,7 @@ func (a *App) toolInvoicesRenderPDF(ctx *sdk.AppCtx, args map[string]any) (any, 
 	if inv == nil {
 		return nil, fmt.Errorf("invoice %d not found", id)
 	}
-	issuer, _ := dbIssuerGet(ctx.AppDB())
+	issuer, _ := dbIssuerGet(ctx.AppDB(), pid)
 	pdfBytes, err := renderInvoicePDF(inv, cust, issuer)
 	if err != nil {
 		return nil, err
@@ -1240,7 +1240,7 @@ func (a *App) handleHTTPInvoicePrint(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusNotFound, "not found")
 		return
 	}
-	issuer, _ := dbIssuerGet(ctx.AppDB())
+	issuer, _ := dbIssuerGet(ctx.AppDB(), pid)
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "private, no-store")
 	_, _ = w.Write([]byte(renderInvoiceHTML(inv, cust, issuer)))
@@ -1267,7 +1267,7 @@ func (a *App) handleHTTPInvoicePDF(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusNotFound, "not found")
 		return
 	}
-	issuer, _ := dbIssuerGet(ctx.AppDB())
+	issuer, _ := dbIssuerGet(ctx.AppDB(), pid)
 	pdfBytes, err := renderInvoicePDF(inv, cust, issuer)
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
@@ -1549,7 +1549,7 @@ func (a *App) handleHTTPInvoiceCreate(w http.ResponseWriter, r *http.Request) {
 		currency = strings.ToUpper(configString(ctx, "default_currency", "USD"))
 	}
 	if !looksLikeISO4217(currency) {
-		httpErr(w, http.StatusBadRequest, "currency must be 3-letter ISO 4217")
+		httpErr(w, http.StatusBadRequest, "currency must be a supported 2-decimal ISO 4217 code")
 		return
 	}
 	items, err := normaliseLineItems(rawItems, configIntBps(ctx, "tax_default_rate_bps"))
@@ -2001,6 +2001,23 @@ func dbCustomerMerge(db *sql.DB, pid string, loser, winner int64) error {
 	}
 	if _, err := tx.Exec(
 		`UPDATE payments SET customer_id = ?
+		 WHERE customer_id = ? AND project_id = ?`, winner, loser, pid); err != nil {
+		return err
+	}
+	// The winner may already have a default method; demote the loser's default
+	// before reassignment to preserve the one-default-per-customer index.
+	if _, err := tx.Exec(
+		`UPDATE billing_payment_methods SET is_default = 0, updated_at = CURRENT_TIMESTAMP
+		 WHERE customer_id = ? AND project_id = ? AND is_default = 1`, loser, pid); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(
+		`UPDATE billing_payment_methods SET customer_id = ?, updated_at = CURRENT_TIMESTAMP
+		 WHERE customer_id = ? AND project_id = ?`, winner, loser, pid); err != nil {
+		return err
+	}
+	if _, err := tx.Exec(
+		`UPDATE billing_setup_sessions SET customer_id = ?
 		 WHERE customer_id = ? AND project_id = ?`, winner, loser, pid); err != nil {
 		return err
 	}
@@ -2528,7 +2545,7 @@ func dbInvoiceUpdate(db *sql.DB, pid string, id int64, patch map[string]any, act
 		if v, ok := patch["currency"]; ok {
 			cur := strings.ToUpper(strings.TrimSpace(toString(v)))
 			if !looksLikeISO4217(cur) {
-				return nil, fmt.Errorf("currency %q not a 3-letter ISO 4217 code", cur)
+				return nil, fmt.Errorf("currency %q must be a supported 2-decimal ISO 4217 code", cur)
 			}
 			sets = append(sets, "currency = ?")
 			args = append(args, cur)
@@ -2693,7 +2710,7 @@ func recomputeInvoiceTotalsTx(tx *sql.Tx, id int64) error {
 			return err
 		}
 		subtotal += amount
-		tax += amount * int64(bps) / 10000
+		tax += taxForAmount(amount, bps)
 	}
 	total := subtotal + tax
 	_, err = tx.Exec(
@@ -2772,6 +2789,30 @@ func dbPaymentList(db *sql.DB, pid string, f paymentFilters) ([]*Payment, error)
 	return out, rows.Err()
 }
 
+func dbPaymentGetByID(db *sql.DB, pid string, id int64) (*Payment, error) {
+	row := db.QueryRow(
+		`SELECT id, project_id, invoice_id, customer_id, amount_cents, currency,
+		        method, external_id, received_at, notes, created_at
+		 FROM payments WHERE id = ? AND project_id = ?`, id, pid)
+	var p Payment
+	var iid sql.NullInt64
+	var ext, notes sql.NullString
+	if err := row.Scan(&p.ID, &p.ProjectID, &iid, &p.CustomerID, &p.AmountCents,
+		&p.Currency, &p.Method, &ext, &p.ReceivedAt, &notes, &p.CreatedAt); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	if iid.Valid {
+		v := iid.Int64
+		p.InvoiceID = &v
+	}
+	p.ExternalID = ext.String
+	p.Notes = notes.String
+	return &p, nil
+}
+
 // dbPaymentRecord inserts a non-Stripe payment and rolls forward the
 // invoice's amount_paid_cents + status. Single Tx so the invoice
 // state can never disagree with its payments.
@@ -2783,18 +2824,23 @@ func dbPaymentRecord(db *sql.DB, pid string, invID int64, amount int64,
 	// transaction. If a payment already exists with the same key,
 	// return it as a no-op rather than failing on constraint.
 	if externalID != "" {
-		var existingPayID int64
+		var existingPayID, existingInvID int64
+		var existingPID string
 		if err := db.QueryRow(
-			`SELECT id FROM payments WHERE method = ? AND external_id = ?`,
-			method, externalID).Scan(&existingPayID); err == nil {
+			`SELECT id, project_id, COALESCE(invoice_id, 0)
+			 FROM payments WHERE method = ? AND external_id = ?`,
+			method, externalID).Scan(&existingPayID, &existingPID, &existingInvID); err == nil {
+			if existingPID != pid || existingInvID != invID {
+				return nil, nil, fmt.Errorf("external payment %q already belongs to another invoice", externalID)
+			}
 			// Re-deliver — return current state.
-			pays, _ := dbPaymentList(db, pid, paymentFilters{invoiceID: invID, limit: 1})
+			pay, _ := dbPaymentGetByID(db, pid, existingPayID)
 			inv, _ := dbInvoiceGetByID(db, pid, invID)
 			if inv != nil {
 				_ = loadInvoiceChildren(db, pid, inv)
 			}
-			if len(pays) > 0 {
-				return pays[0], inv, nil
+			if pay != nil {
+				return pay, inv, nil
 			}
 		} else if !errors.Is(err, sql.ErrNoRows) {
 			return nil, nil, err
@@ -2822,8 +2868,14 @@ func dbPaymentRecord(db *sql.DB, pid string, invID int64, amount int64,
 		}
 		return nil, nil, err
 	}
-	if status != "open" && status != "uncollectible" {
+	if amount > 0 && status != "open" && status != "uncollectible" {
 		return nil, nil, fmt.Errorf("cannot record payment on %s invoice — only 'open' or 'uncollectible' accept payments", status)
+	}
+	if amount < 0 && status != "open" && status != "uncollectible" && status != "paid" {
+		return nil, nil, fmt.Errorf("cannot record refund on %s invoice", status)
+	}
+	if amount < 0 && paid+amount < 0 {
+		return nil, nil, fmt.Errorf("refund amount exceeds the invoice's recorded payments")
 	}
 	res, err := tx.Exec(
 		`INSERT INTO payments (project_id, invoice_id, customer_id, amount_cents,
@@ -2838,18 +2890,32 @@ func dbPaymentRecord(db *sql.DB, pid string, invID int64, amount int64,
 	newPaid := paid + amount
 	newStatus := status
 	action := "partial_payment"
-	if newPaid >= total && total > 0 {
+	if amount < 0 {
+		action = "refund"
+		if newPaid < total {
+			newStatus = "open"
+		}
+	} else if newPaid >= total && total > 0 {
 		newStatus = "paid"
 		action = "paid"
 	}
-	if _, err := tx.Exec(
+	result, err := tx.Exec(
 		`UPDATE invoices
 		 SET amount_paid_cents = ?,
 		     status = ?,
-		     paid_at = CASE WHEN ? = 'paid' AND paid_at IS NULL THEN CURRENT_TIMESTAMP ELSE paid_at END,
+		     paid_at = CASE
+		       WHEN ? = 'paid' AND paid_at IS NULL THEN CURRENT_TIMESTAMP
+		       WHEN ? <> 'paid' THEN NULL
+		       ELSE paid_at
+		     END,
 		     updated_at = CURRENT_TIMESTAMP
-		 WHERE id = ?`, newPaid, newStatus, newStatus, invID); err != nil {
+		 WHERE id = ? AND project_id = ? AND amount_paid_cents = ?`,
+		newPaid, newStatus, newStatus, newStatus, invID, pid, paid)
+	if err != nil {
 		return nil, nil, err
+	}
+	if n, err := result.RowsAffected(); err != nil || n != 1 {
+		return nil, nil, errors.New("invoice payment state changed concurrently; retry")
 	}
 	if err := writeAuditTx(tx, invID, actor, action, map[string]any{
 		"payment_id":   pid64,
@@ -2863,16 +2929,9 @@ func dbPaymentRecord(db *sql.DB, pid string, invID int64, amount int64,
 	if err := tx.Commit(); err != nil {
 		return nil, nil, err
 	}
-	pays, err := dbPaymentList(db, pid, paymentFilters{invoiceID: invID, limit: 1})
+	pay, err := dbPaymentGetByID(db, pid, pid64)
 	if err != nil {
 		return nil, nil, err
-	}
-	var pay *Payment
-	for _, p := range pays {
-		if p.ID == pid64 {
-			pay = p
-			break
-		}
 	}
 	inv, err := dbInvoiceGetByID(db, pid, invID)
 	if err != nil || inv == nil {
@@ -2987,12 +3046,19 @@ func renderSeqToken(in string, seq int64) string {
 func computeTotals(items []LineItem) (subtotal, tax, total int64) {
 	for _, li := range items {
 		subtotal += li.AmountCents
-		// Per-line round so total stays consistent with what the panel
-		// shows next to each line.
-		tax += li.AmountCents * int64(li.TaxRateBps) / 10000
+		tax += taxForAmount(li.AmountCents, li.TaxRateBps)
 	}
 	total = subtotal + tax
 	return
+}
+
+func taxForAmount(amount int64, bps int) int64 {
+	// Round each line to the nearest minor unit, half away from zero.
+	n := amount * int64(bps)
+	if n >= 0 {
+		return (n + 5000) / 10000
+	}
+	return (n - 5000) / 10000
 }
 
 func normaliseLineItems(raw []any, defaultBps int) ([]LineItem, error) {
@@ -3140,6 +3206,19 @@ func looksLikeISO4217(s string) bool {
 		if c < 'A' || c > 'Z' {
 			return false
 		}
+	}
+	// Billing's persisted/API contract is integer cents, so currencies whose
+	// ISO minor unit is not two decimals would be silently misrepresented.
+	// Reject them until the schema exposes generic minor units.
+	nonTwoDecimal := map[string]bool{
+		"BHD": true, "BIF": true, "CLF": true, "CLP": true, "DJF": true,
+		"GNF": true, "IQD": true, "JPY": true, "JOD": true, "KMF": true,
+		"KRW": true, "KWD": true, "LYD": true, "MGA": true, "OMR": true,
+		"PYG": true, "RWF": true, "TND": true, "UGX": true, "UYW": true,
+		"VND": true, "VUV": true, "XAF": true, "XOF": true, "XPF": true,
+	}
+	if nonTwoDecimal[s] {
+		return false
 	}
 	return true
 }
@@ -3537,30 +3616,43 @@ type Issuer struct {
 	Configured bool `json:"configured"`
 }
 
-func dbIssuerGet(db *sql.DB) (*Issuer, error) {
+func emptyIssuer() *Issuer {
+	return &Issuer{
+		Address:    json.RawMessage("{}"),
+		TaxIDs:     json.RawMessage("[]"),
+		Bank:       json.RawMessage("{}"),
+		Metadata:   json.RawMessage("{}"),
+		Configured: false,
+	}
+}
+
+func dbIssuerGet(db *sql.DB, pid string) (*Issuer, error) {
 	var iss Issuer
 	var addr, taxes, bank, meta string
-	err := db.QueryRow(
-		`SELECT display_name, COALESCE(legal_name,''), COALESCE(email,''),
+	load := func(projectID string) error {
+		return db.QueryRow(
+			`SELECT display_name, COALESCE(legal_name,''), COALESCE(email,''),
 		        COALESCE(phone,''), COALESCE(website,''), COALESCE(brand_color,''),
 		        address, tax_ids, bank,
 		        COALESCE(footer_text,''), COALESCE(default_terms,''), metadata,
 		        created_at, updated_at
-		 FROM issuer_settings WHERE id = 1`).Scan(
-		&iss.DisplayName, &iss.LegalName, &iss.Email,
-		&iss.Phone, &iss.Website, &iss.BrandColor,
-		&addr, &taxes, &bank,
-		&iss.FooterText, &iss.DefaultTerms, &meta,
-		&iss.CreatedAt, &iss.UpdatedAt,
-	)
+		 FROM issuer_settings WHERE project_id = ?`, projectID).Scan(
+			&iss.DisplayName, &iss.LegalName, &iss.Email,
+			&iss.Phone, &iss.Website, &iss.BrandColor,
+			&addr, &taxes, &bank,
+			&iss.FooterText, &iss.DefaultTerms, &meta,
+			&iss.CreatedAt, &iss.UpdatedAt,
+		)
+	}
+	err := load(pid)
+	// Migration 005 stores the old singleton under the empty key. Only a
+	// project-scoped process may inherit it; a global install must never expose
+	// one project's legal identity or bank details to another project.
+	if errors.Is(err, sql.ErrNoRows) && strings.TrimSpace(os.Getenv("APTEVA_PROJECT_ID")) != "" {
+		err = load("")
+	}
 	if err == sql.ErrNoRows {
-		return &Issuer{
-			Address:    json.RawMessage("{}"),
-			TaxIDs:     json.RawMessage("[]"),
-			Bank:       json.RawMessage("{}"),
-			Metadata:   json.RawMessage("{}"),
-			Configured: false,
-		}, nil
+		return emptyIssuer(), nil
 	}
 	if err != nil {
 		return nil, err
@@ -3573,7 +3665,10 @@ func dbIssuerGet(db *sql.DB) (*Issuer, error) {
 	return &iss, nil
 }
 
-func dbIssuerSet(db *sql.DB, patch map[string]any) (*Issuer, error) {
+func dbIssuerSet(db *sql.DB, pid string, patch map[string]any) (*Issuer, error) {
+	if strings.TrimSpace(pid) == "" {
+		return nil, errors.New("project_id required")
+	}
 	display := strings.TrimSpace(strArg(patch, "display_name"))
 	if display == "" {
 		return nil, errors.New("display_name required")
@@ -3585,11 +3680,11 @@ func dbIssuerSet(db *sql.DB, patch map[string]any) (*Issuer, error) {
 	now := nowRFC3339()
 	if _, err := db.Exec(
 		`INSERT INTO issuer_settings
-		     (id, display_name, legal_name, email, phone, website, brand_color,
+		     (project_id, display_name, legal_name, email, phone, website, brand_color,
 		      address, tax_ids, bank, footer_text, default_terms, metadata,
 		      created_at, updated_at)
-		 VALUES (1, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		 ON CONFLICT(id) DO UPDATE SET
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(project_id) DO UPDATE SET
 		     display_name  = excluded.display_name,
 		     legal_name    = excluded.legal_name,
 		     email         = excluded.email,
@@ -3603,7 +3698,7 @@ func dbIssuerSet(db *sql.DB, patch map[string]any) (*Issuer, error) {
 		     default_terms = excluded.default_terms,
 		     metadata      = excluded.metadata,
 		     updated_at    = excluded.updated_at`,
-		display,
+		pid, display,
 		strArg(patch, "legal_name"),
 		strArg(patch, "email"),
 		strArg(patch, "phone"),
@@ -3617,14 +3712,19 @@ func dbIssuerSet(db *sql.DB, patch map[string]any) (*Issuer, error) {
 	); err != nil {
 		return nil, err
 	}
-	return dbIssuerGet(db)
+	return dbIssuerGet(db, pid)
 }
 
 func (a *App) handleHTTPIssuer(w http.ResponseWriter, r *http.Request) {
 	ctx := getAppCtx(r)
+	pid, err := resolveProjectFromRequest(r)
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	switch r.Method {
 	case http.MethodGet:
-		iss, err := dbIssuerGet(ctx.AppDB())
+		iss, err := dbIssuerGet(ctx.AppDB(), pid)
 		if err != nil {
 			httpErr(w, http.StatusInternalServerError, err.Error())
 			return
@@ -3636,7 +3736,7 @@ func (a *App) handleHTTPIssuer(w http.ResponseWriter, r *http.Request) {
 			httpErr(w, http.StatusBadRequest, "invalid json")
 			return
 		}
-		iss, err := dbIssuerSet(ctx.AppDB(), body)
+		iss, err := dbIssuerSet(ctx.AppDB(), pid, body)
 		if err != nil {
 			httpErr(w, http.StatusBadRequest, err.Error())
 			return
@@ -3647,8 +3747,12 @@ func (a *App) handleHTTPIssuer(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
-func (a *App) toolIssuerGet(ctx *sdk.AppCtx, _ map[string]any) (any, error) {
-	iss, err := dbIssuerGet(ctx.AppDB())
+func (a *App) toolIssuerGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	iss, err := dbIssuerGet(ctx.AppDB(), pid)
 	if err != nil {
 		return nil, err
 	}
@@ -3656,7 +3760,11 @@ func (a *App) toolIssuerGet(ctx *sdk.AppCtx, _ map[string]any) (any, error) {
 }
 
 func (a *App) toolIssuerSet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	iss, err := dbIssuerSet(ctx.AppDB(), args)
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	iss, err := dbIssuerSet(ctx.AppDB(), pid, args)
 	if err != nil {
 		return nil, err
 	}

@@ -9,7 +9,7 @@
 // actions. v0.1.1 will add a "Pay link" button on stripe-provider
 // open invoices.
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 // ─── Inline app-events SSE hook ─────────────────────────────────────
 // Each app ships its own copy (see CrmPanel for the rationale).
@@ -421,7 +421,16 @@ function InvoicesTab({ projectId, apiCall }: { projectId: string; apiCall: ApiCa
   const [showFinalize, setShowFinalize] = useState<boolean>(false);
   const [showVoid, setShowVoid] = useState<boolean>(false);
   const [showPayment, setShowPayment] = useState<boolean>(false);
-  const [showPaymentLink, setShowPaymentLink] = useState<boolean>(false);
+	const [showPaymentLink, setShowPaymentLink] = useState<boolean>(false);
+	const visibleInvoices = useMemo(() => {
+		const f = filter.trim().toLowerCase();
+		if (!f) return list;
+		return list.filter((inv) =>
+			(inv.number || "").toLowerCase().includes(f) ||
+			String(inv.id).includes(f) ||
+			(inv.notes || "").toLowerCase().includes(f)
+		);
+	}, [filter, list]);
 
   const loadList = useCallback(
     async () => {
@@ -438,22 +447,14 @@ function InvoicesTab({ projectId, apiCall }: { projectId: string; apiCall: ApiCa
           undefined,
           query,
         );
-        const visible = (res.invoices || []).filter((inv) => {
-          if (!filter) return true;
-          const f = filter.toLowerCase();
-          return (
-            (inv.number || "").toLowerCase().includes(f) ||
-            String(inv.id).includes(f) ||
-            (inv.notes || "").toLowerCase().includes(f)
-          );
-        });
-        setList(visible);
-        setStatus(`${visible.length} invoice${visible.length === 1 ? "" : "s"}`);
+		const invoices = res.invoices || [];
+		setList(invoices);
+		setStatus(`${invoices.length} invoice${invoices.length === 1 ? "" : "s"}`);
       } catch (err) {
         setStatus(`Error: ${(err as Error).message}`);
       }
     },
-    [apiCall, customSince, customUntil, datePreset, filter, statusFilter],
+	[apiCall, customSince, customUntil, datePreset, statusFilter],
   );
 
   useEffect(() => {
@@ -608,11 +609,11 @@ function InvoicesTab({ projectId, apiCall }: { projectId: string; apiCall: ApiCa
           )}
         </div>
         <div className="flex-1 overflow-auto">
-          {list.length === 0 ? (
+		  {visibleInvoices.length === 0 ? (
             <div className="p-4 text-text-muted text-xs">No invoices.</div>
           ) : (
             <ul>
-              {list.map((inv) => (
+			  {visibleInvoices.map((inv) => (
                 <li
                   key={inv.id}
                   onClick={() => select(inv.id)}
@@ -1034,11 +1035,9 @@ async function fetchCatalogPriceOptions(
     throw new Error(`Catalog unreachable (HTTP ${r.status}).`);
   }
   const data = (await r.json()) as { products: CatalogProductWithPrices[] };
-  const out: CatalogPriceOption[] = [];
-  for (const p of data.products || []) {
-    // Inner products list endpoint doesn't include prices by default —
-    // fetch each product's prices for the picker. Tradeoff is one
-    // extra round-trip per product; for small catalogs this is fine.
+  const groups = await Promise.all((data.products || []).map(async (p) => {
+    // The products endpoint doesn't include prices, so fetch product details
+    // concurrently; latency stays near one round trip instead of N serial ones.
     // Larger catalogs would warrant a /products?include=prices flag
     // on the catalog side, but defer until the use case shows up.
     try {
@@ -1046,11 +1045,12 @@ async function fetchCatalogPriceOptions(
         `/api/apps/catalog/products/${p.id}?project_id=${encodeURIComponent(projectId)}`,
         { credentials: "same-origin", cache: "no-store" },
       );
-      if (!pr.ok) continue;
+      if (!pr.ok) return [] as CatalogPriceOption[];
       const detail = (await pr.json()) as { product: CatalogProductWithPrices };
+      const options: CatalogPriceOption[] = [];
       for (const price of detail.product.prices || []) {
         if (!price.active || price.archived_at) continue;
-        out.push({
+        options.push({
           price_id: price.id,
           product_id: p.id,
           product_name: p.name,
@@ -1061,11 +1061,13 @@ async function fetchCatalogPriceOptions(
           interval: price.interval,
         });
       }
+      return options;
     } catch {
       // skip; rest of the list still loads
+      return [] as CatalogPriceOption[];
     }
-  }
-  return out;
+  }));
+  return groups.flat();
 }
 
 interface CatalogProductWithPrices {
