@@ -162,6 +162,10 @@ const EnumScript = `
         var y = Math.max(0, Math.round(rTop));
         var w = Math.min(vw, Math.round(rRight)) - x;
         var h = Math.min(vh, Math.round(rBottom)) - y;
+        // Fractional rectangles can pass the raw visibility checks above but
+        // round down to a zero-sized viewport intersection. Do not spend SOM
+        // labels on controls that have no usable click area after clipping.
+        if (w < 4 || h < 4) continue;
         var text = (el.innerText || el.value ||
                     el.getAttribute('aria-label') ||
                     el.getAttribute('aria-placeholder') ||

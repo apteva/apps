@@ -69,6 +69,11 @@ func TestLocalNavigationLive(t *testing.T) {
 			t.Logf("post-scroll label=%d role=%s text=%q", target.Label, target.Role, target.Text)
 		}
 	}
+	for _, target := range c.LastSetOfMark() {
+		if target.W < 4 || target.H < 4 {
+			t.Fatalf("unusable clipped SOM target after navigation actions: %+v", target)
+		}
+	}
 	if expectedText := strings.ToLower(strings.TrimSpace(os.Getenv("COMPUTER_NAVIGATION_EXPECT_TEXT"))); expectedText != "" {
 		for _, target := range c.LastSetOfMark() {
 			if strings.Contains(strings.ToLower(target.Text), expectedText) {
@@ -181,6 +186,7 @@ func TestLocalOversizedRoleDialogKeepsPageControlsLive(t *testing.T) {
 <aside role="dialog" style="position:absolute;left:8px;top:-328px;width:262px;height:7811px">
   <a href="#filter" style="position:absolute;top:700px">Price filter</a>
 </aside>
+<button style="position:fixed;left:20px;top:-23.8px;width:80px;height:24px">Clipped size</button>
 <main style="margin-left:275px">
   <a href="#product" style="display:block;width:300px;height:80px">Gala heel product</a>
 </main>`))
@@ -197,12 +203,18 @@ func TestLocalOversizedRoleDialogKeepsPageControlsLive(t *testing.T) {
 	if _, err := c.ScreenshotWithOptions(computer.ScreenshotOptions{Annotate: true}); err != nil {
 		t.Fatal(err)
 	}
+	var productFound bool
 	for _, target := range c.LastSetOfMark() {
+		if target.W < 4 || target.H < 4 {
+			t.Fatalf("clipped control received an unusable SOM label: %+v", target)
+		}
 		if strings.Contains(target.Text, "Gala heel product") {
-			return
+			productFound = true
 		}
 	}
-	t.Fatalf("page control was suppressed by oversized role=dialog: %+v", c.LastSetOfMark())
+	if !productFound {
+		t.Fatalf("page control was suppressed by oversized role=dialog: %+v", c.LastSetOfMark())
+	}
 }
 
 func TestLocalClosedShadowConsentControlsLive(t *testing.T) {
