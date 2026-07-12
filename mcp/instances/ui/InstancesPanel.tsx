@@ -133,9 +133,7 @@ function formatRemoteTotal(instances: Instance[]): string {
   if (priced.length === 0) return "";
   const providers = new Set(priced.map((i) => i.provider));
   const total = priced.reduce((s, i) => s + (i.monthly_cost_cents || 0), 0);
-  return providers.size === 1
-    ? formatProviderPrice(total, priced[0]?.provider)
-    : `${(total / 100).toFixed(2)}`;
+  return providers.size === 1 ? formatProviderPrice(total, priced[0]?.provider) : "";
 }
 
 function resourceSummary(inst: Instance): string {
@@ -421,11 +419,12 @@ export default function InstancesPanel({ projectId, installId }: NativePanelProp
 
   return (
     <div className="h-full flex flex-col">
-      <header className="px-4 py-3 border-b border-border flex items-baseline gap-3">
+      <header className="px-4 py-3 border-b border-border flex flex-wrap items-baseline gap-3">
         <h1 className="text-text font-semibold">Instances</h1>
-        <span className="text-xs text-text-muted flex-1">
+        <span className="hidden md:inline text-xs text-text-muted">
           Host inventory — local + remote through a bound VPS provider.
         </span>
+        <span className="flex-1" />
         {remoteCount > 0 && (
           <span
             className="text-xs text-text-muted px-2 py-0.5 rounded bg-bg-input/40 border border-border/40"
@@ -456,7 +455,7 @@ export default function InstancesPanel({ projectId, installId }: NativePanelProp
 
       {error && <div className="px-4 py-2 text-red text-xs border-b border-border">{error}</div>}
 
-      <main className="flex-1 overflow-auto p-4 space-y-5">
+      <main className="flex-1 overflow-auto p-3 space-y-2">
         {instances === null ? (
           <div className="p-6 text-text-muted text-sm">Loading…</div>
         ) : instances.length === 0 ? (
@@ -782,6 +781,186 @@ const HISTORY_MAX = 360;          // 10s polling × 360 = 1 hour
 const STALE_THRESHOLD_MS = 30000; // 30s without a successful poll → "stale"
 
 function InstanceCard({
+  inst, withParams, busy, onUpgrade, onDestroy,
+}: {
+  inst: Instance;
+  withParams: () => string;
+  busy: boolean;
+  onUpgrade: () => void;
+  onDestroy: () => void;
+}) {
+  const [metrics, setMetrics] = useState<MetricsWire | null>(null);
+  const [metricsError, setMetricsError] = useState("");
+  const [lastPollAt, setLastPollAt] = useState(0);
+  const [expanded, setExpanded] = useState(false);
+  const [, setNowTick] = useState(0);
+
+  useEffect(() => {
+    let cancelled = false;
+    let inFlight = false;
+    const controller = new AbortController();
+    const fetchMetrics = async () => {
+      if (inst.status !== "ready" || inFlight) return;
+      inFlight = true;
+      try {
+        const response = await fetch(`${API}/instances/${inst.id}/metrics?${withParams()}`, {
+          credentials: "same-origin",
+          signal: controller.signal,
+        });
+        if (!response.ok) throw new Error(`${response.status}: ${await response.text().catch(() => "metrics unavailable")}`);
+        const payload = await response.json();
+        if (cancelled || !payload?.metrics) return;
+        const next = payload.metrics as MetricsWire;
+        setMetrics(next);
+        setMetricsError("");
+        setLastPollAt(Date.now());
+      } catch (error) {
+        if (!cancelled && (error as Error).name !== "AbortError") setMetricsError((error as Error).message);
+      } finally {
+        inFlight = false;
+      }
+    };
+    fetchMetrics();
+    const poll = setInterval(fetchMetrics, 10000);
+    const clock = setInterval(() => setNowTick((value) => value + 1), 5000);
+    return () => {
+      cancelled = true;
+      controller.abort();
+      clearInterval(poll);
+      clearInterval(clock);
+    };
+  }, [inst.id, inst.status, withParams]);
+
+  const ip = inst.public_ipv4 || inst.public_ipv6 || "—";
+  const sshHost = inst.ssh_host || ip;
+  const endpoint = inst.ssh_port && inst.ssh_port !== 22 && sshHost !== "—" ? `${sshHost}:${inst.ssh_port}` : sshHost;
+  const isLocal = inst.provider === "local";
+  const canUpgrade = inst.capabilities?.upgrade ?? inst.provider === "hetzner";
+  const canDestroy = inst.capabilities?.destroy ?? ["hetzner", "digitalocean", "runpod"].includes(inst.provider);
+  const resources = resourceSummary(inst);
+  const memPct = metrics?.mem.total_bytes ? (metrics.mem.used_bytes / metrics.mem.total_bytes) * 100 : 0;
+  const loadPct = metrics?.cpu.cores ? (metrics.load.l1 / metrics.cpu.cores) * 100 : 0;
+  const rootDisk = metrics?.disk.find((disk) => disk.mount === "/") || metrics?.disk[0];
+  const staleAge = lastPollAt ? Math.floor((Date.now() - lastPollAt) / 1000) : 0;
+  const stale = staleAge > STALE_THRESHOLD_MS / 1000;
+  const meta = [inst.provider, inst.size, inst.region, resources].filter(Boolean).join(" · ");
+
+  return (
+    <article
+      className="overflow-hidden rounded"
+      style={{ backgroundColor: "var(--bg-card, transparent)", border: `1px solid ${SUBTLE_BORDER}` }}
+    >
+      <div className="flex flex-wrap items-center gap-2 px-3 py-2 min-w-0" style={{ backgroundColor: HEADER_STRIP_BG }}>
+        <span className={statusColor(inst.status) + " text-sm leading-none"}>●</span>
+        <div className="min-w-0" style={{ minWidth: 180 }}>
+          <div className="flex items-baseline gap-2 min-w-0">
+            <span className="text-sm text-text font-semibold truncate">{inst.name}</span>
+            <span className="text-[11px] text-text-dim truncate">{meta}</span>
+          </div>
+          <div className="flex items-center gap-2 text-[10px] text-text-dim min-w-0">
+            <span className="font-mono truncate">{endpoint}</span>
+            {!isLocal && inst.monthly_cost_cents > 0 && (
+              <span className="font-mono">{formatProviderPrice(inst.monthly_cost_cents, inst.provider)}/mo</span>
+            )}
+            {stale && <span className="text-amber">stale {staleAge}s</span>}
+          </div>
+        </div>
+        <span className="flex-1" />
+        <span className={statusColor(inst.status) + " text-[10px] uppercase tracking-wider font-medium"}>{inst.status}</span>
+        {canUpgrade && (
+          <button type="button" onClick={onUpgrade} disabled={busy || inst.status !== "ready"}
+            className="px-2 py-0.5 text-[10px] border border-blue/60 text-blue rounded hover:bg-blue hover:text-white disabled:opacity-50">
+            Upgrade
+          </button>
+        )}
+        {canDestroy && (
+          <button type="button" onClick={onDestroy} disabled={busy}
+            className="px-2 py-0.5 text-[10px] border border-red/60 text-red rounded hover:bg-red hover:text-white disabled:opacity-50">
+            Destroy
+          </button>
+        )}
+        <button
+          type="button"
+          onClick={() => setExpanded((value) => !value)}
+          className="w-7 h-7 shrink-0 text-text-muted hover:text-text"
+          aria-label={expanded ? `Collapse ${inst.name}` : `Expand ${inst.name}`}
+          title={expanded ? "Hide details" : "Show details"}
+        >
+          {expanded ? "▾" : "›"}
+        </button>
+      </div>
+
+      {inst.error && <div className="px-3 py-1.5 text-[10px] text-red border-t border-red/20">{inst.error}</div>}
+
+      {metrics ? (
+        <div
+          className="grid grid-cols-2 md:grid-cols-5 px-3 py-2.5"
+          style={{ borderTop: `1px solid ${FAINT_DIVIDER}`, opacity: stale ? 0.6 : 1, columnGap: 24, rowGap: 10 }}
+        >
+          <CompactMetric label="CPU" value={formatCPUDetail(metrics.cpu)} pct={metrics.cpu.total_pct} />
+          <CompactMetric label="Memory" value={`${memPct.toFixed(0)}% · ${formatBytes(metrics.mem.used_bytes)}`} pct={memPct} />
+          <CompactMetric label="Root disk" value={rootDisk ? `${rootDisk.used_pct.toFixed(0)}% · ${formatBytes(rootDisk.used_bytes)}` : "—"} pct={rootDisk?.used_pct} />
+          <CompactMetric label="Load" value={metrics.cpu.cores ? `${metrics.load.l1.toFixed(2)} · ${loadPct.toFixed(0)}% cap` : metrics.load.l1.toFixed(2)} pct={loadPct} />
+          <CompactMetric label="Uptime" value={`${formatUptime(metrics.uptime_s)} · ${metrics.process_count} proc`} />
+        </div>
+      ) : inst.status === "ready" ? (
+        <div className={`px-3 py-2 text-[10px] border-t ${metricsError ? "text-red border-red/20" : "text-text-dim"}`}>
+          {metricsError ? `Vitals unavailable: ${metricsError}` : "Loading vitals…"}
+        </div>
+      ) : null}
+
+      {expanded && (
+        <div className="px-3 py-3 space-y-3" style={{ borderTop: `1px solid ${SUBTLE_BORDER}`, backgroundColor: SUB_CARD_BG }}>
+          {metricsError && metrics && <div className="text-[10px] text-red">Metrics refresh failed: {metricsError}</div>}
+          {metrics?.disk?.length ? (
+            <div className="grid grid-cols-1 md:grid-cols-2" style={{ columnGap: 24, rowGap: 10 }}>
+              {metrics.disk.map((disk) => (
+                <CompactMetric
+                  key={disk.mount}
+                  label={disk.mount}
+                  value={`${formatBytes(disk.used_bytes)} / ${formatBytes(disk.total_bytes)} · ${disk.used_pct.toFixed(0)}%`}
+                  pct={disk.used_pct}
+                />
+              ))}
+            </div>
+          ) : null}
+          <div className="flex flex-wrap text-[10px] text-text-dim" style={{ columnGap: 20, rowGap: 4 }}>
+            {inst.image && <span>Image <span className="text-text font-mono">{inst.image}</span></span>}
+            {inst.provider_id && <span>Provider ID <span className="text-text font-mono">{inst.provider_id}</span></span>}
+            {metrics && <span>Load 1/5/15 <span className="text-text font-mono">{metrics.load.l1.toFixed(2)} / {metrics.load.l5.toFixed(2)} / {metrics.load.l15.toFixed(2)}</span></span>}
+          </div>
+        </div>
+      )}
+    </article>
+  );
+}
+
+function CompactMetric({
+  label, value, pct, children,
+}: {
+  label: string;
+  value: string;
+  pct?: number;
+  children?: React.ReactNode;
+}) {
+  const clamped = pct === undefined ? undefined : Math.max(0, Math.min(100, pct));
+  return (
+    <div className="min-w-0" style={{ minHeight: 32 }}>
+      <div className="flex items-center justify-between gap-2 text-[10px] leading-4">
+        <span className="text-text-dim uppercase tracking-wider truncate">{label}</span>
+        <span className="text-text font-mono whitespace-nowrap">{value}</span>
+        {children}
+      </div>
+      {clamped !== undefined && (
+        <div className="h-1 rounded-full overflow-hidden mt-1" style={{ backgroundColor: "rgba(255,255,255,0.06)" }}>
+          <div className="h-full rounded-full transition-all duration-500" style={{ width: `${clamped}%`, backgroundColor: pctColor(clamped) }} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ExpandedInstanceCardLegacy({
   inst, withParams, busy, onUpgrade, onDestroy,
 }: {
   inst: Instance;
