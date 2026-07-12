@@ -8,6 +8,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	sdk "github.com/apteva/app-sdk"
 	tk "github.com/apteva/app-sdk/testkit"
@@ -23,7 +24,10 @@ type stubPlatform struct {
 	bindingsOverride map[string]any
 	// connSlug overrides the app_slug GetConnection reports. Empty
 	// keeps the legacy default ("porkbun") the existing tests rely on.
-	connSlug string
+	connSlug    string
+	connProject string
+	connStatus  string
+	executeFn   func(connID int64, tool string, input map[string]any) (*sdk.ExecuteResult, error)
 }
 
 type executeCall struct {
@@ -36,6 +40,9 @@ func (s *stubPlatform) ExecuteIntegrationTool(connID int64, tool string, input m
 	s.mu.Lock()
 	s.calls = append(s.calls, executeCall{ConnID: connID, Tool: tool, Input: input})
 	s.mu.Unlock()
+	if s.executeFn != nil {
+		return s.executeFn(connID, tool, input)
+	}
 	if r, ok := s.replyByTool[tool]; ok {
 		return r, nil
 	}
@@ -52,7 +59,11 @@ func (s *stubPlatform) GetConnection(id int64) (*sdk.PlatformConnection, error) 
 	if s.connSlug != "" {
 		slug = s.connSlug
 	}
-	return &sdk.PlatformConnection{ID: id, AppSlug: slug, Status: "active"}, nil
+	status := s.connStatus
+	if status == "" {
+		status = "active"
+	}
+	return &sdk.PlatformConnection{ID: id, AppSlug: slug, Status: status, ProjectID: s.connProject}, nil
 }
 func (s *stubPlatform) ListConnections(sdk.ConnectionFilter) ([]sdk.PlatformConnection, error) {
 	return nil, nil
@@ -126,11 +137,16 @@ func TestDomainAdd_Idempotent(t *testing.T) {
 	ctx := newTestCtx(t, &stubPlatform{})
 	app := &App{}
 	args := map[string]any{"name": "acme.com", "registrar": "porkbun"}
-	if _, err := app.toolDomainAdd(ctx, args); err != nil {
+	first, err := app.toolDomainAdd(ctx, args)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := app.toolDomainAdd(ctx, args); err != nil {
+	second, err := app.toolDomainAdd(ctx, args)
+	if err != nil {
 		t.Fatal(err)
+	}
+	if first.(map[string]any)["domain"].(*Domain).ID != second.(map[string]any)["domain"].(*Domain).ID {
+		t.Fatalf("idempotent upsert returned a different domain row")
 	}
 	listed, _ := app.toolDomainList(ctx, map[string]any{})
 	if listed.(map[string]any)["count"].(int) != 1 {
@@ -227,6 +243,20 @@ func TestDomainAdd_NoProviderSkipsValidation(t *testing.T) {
 	}
 }
 
+func TestDomainAdd_CanRemainUnboundDespiteDefaultRole(t *testing.T) {
+	ctx := newTestCtx(t, &stubPlatform{})
+	out, err := (&App{}).toolDomainAdd(ctx, map[string]any{
+		"name": "external.example", "skip_validation": true, "use_default_connection": false,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	domain := out.(map[string]any)["domain"].(*Domain)
+	if domain.ConnectionID != 0 {
+		t.Fatalf("connection_id=%d, want unbound", domain.ConnectionID)
+	}
+}
+
 // ─── Per-domain connection pinning ────────────────────────────────
 
 func TestDomainAdd_SnapshotsRoleBindingConnection(t *testing.T) {
@@ -262,6 +292,30 @@ func TestDomainAdd_HonorsExplicitConnectionID(t *testing.T) {
 	d := out.(map[string]any)["domain"].(*Domain)
 	if d.ConnectionID != 7 {
 		t.Errorf("expected explicit connection_id=7 stored, got %d", d.ConnectionID)
+	}
+}
+
+func TestDomainAdd_RejectsCrossProjectConnectionEvenWhenValidationSkipped(t *testing.T) {
+	ctx := newTestCtx(t, &stubPlatform{connProject: "other-project"})
+	app := &App{}
+
+	_, err := app.toolDomainAdd(ctx, map[string]any{
+		"name": "shop.example", "connection_id": 7, "skip_validation": true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "belongs to project") {
+		t.Fatalf("expected project isolation error, got %v", err)
+	}
+}
+
+func TestDomainAdd_RejectsInactiveConnection(t *testing.T) {
+	ctx := newTestCtx(t, &stubPlatform{connStatus: "disabled"})
+	app := &App{}
+
+	_, err := app.toolDomainAdd(ctx, map[string]any{
+		"name": "shop.example", "connection_id": 7, "skip_validation": true,
+	})
+	if err == nil || !strings.Contains(err.Error(), "not active") {
+		t.Fatalf("expected inactive connection error, got %v", err)
 	}
 }
 
@@ -427,13 +481,18 @@ func TestDomainRegister_ChecksAvailabilityThenRegistersAndAddsInventory(t *testi
 	ctx := newTestCtx(t, plat)
 	app := &App{}
 
-	out, err := app.toolDomainRegister(ctx, map[string]any{
+	prepared, err := app.toolDomainRegistrationPrepare(ctx, map[string]any{
 		"domain":        "fresh-example.com",
 		"years":         2,
 		"auto_renew":    false,
 		"whois_privacy": true,
 		"notes":         "new product",
 	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	token := prepared.(map[string]any)["confirmation_token"].(string)
+	out, err := app.toolDomainRegister(ctx, map[string]any{"confirmation_token": token})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -455,6 +514,24 @@ func TestDomainRegister_ChecksAvailabilityThenRegistersAndAddsInventory(t *testi
 	if listed.(map[string]any)["count"].(int) != 1 {
 		t.Fatalf("registered domain not added to inventory: %+v", listed)
 	}
+	replayed, err := app.toolDomainRegister(ctx, map[string]any{"confirmation_token": token})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !replayed.(map[string]any)["idempotent_replay"].(bool) {
+		t.Fatalf("expected idempotent replay: %+v", replayed)
+	}
+	if len(plat.calls) != 2 {
+		t.Fatalf("replay called provider again: %+v", plat.calls)
+	}
+}
+
+func TestDomainRegister_RequiresPreparedConfirmation(t *testing.T) {
+	ctx := newTestCtx(t, &stubPlatform{})
+	_, err := (&App{}).toolDomainRegister(ctx, map[string]any{"domain": "fresh-example.com"})
+	if err == nil || !strings.Contains(err.Error(), "confirmation_token required") {
+		t.Fatalf("expected confirmation requirement, got %v", err)
+	}
 }
 
 func TestDomainRegister_RejectsUnavailableDomain(t *testing.T) {
@@ -467,7 +544,7 @@ func TestDomainRegister_RejectsUnavailableDomain(t *testing.T) {
 	ctx := newTestCtx(t, plat)
 	app := &App{}
 
-	_, err := app.toolDomainRegister(ctx, map[string]any{"domain": "taken-example.com"})
+	_, err := app.toolDomainRegistrationPrepare(ctx, map[string]any{"domain": "taken-example.com"})
 	if err == nil || !strings.Contains(err.Error(), "not available") {
 		t.Fatalf("expected unavailable error, got %v", err)
 	}
@@ -561,7 +638,22 @@ func TestDomainRecordsSet_CreatesWhenAbsent(t *testing.T) {
 	}
 }
 
-func TestDomainRecordsSet_DeletesApexAliasBeforeARecord(t *testing.T) {
+func TestDomainRecordsSet_RejectsInvalidTTLAndName(t *testing.T) {
+	ctx := newTestCtx(t, newPorkbunStub(nil))
+	app := &App{}
+	if _, err := app.toolDomainRecordsSet(ctx, map[string]any{
+		"domain": "acme.com", "name": "www", "type": "A", "value": "1.2.3.4", "ttl": 1,
+	}); err == nil || !strings.Contains(err.Error(), "ttl must be") {
+		t.Fatalf("expected TTL validation error, got %v", err)
+	}
+	if _, err := app.toolDomainRecordsSet(ctx, map[string]any{
+		"domain": "acme.com", "name": "bad name", "type": "A", "value": "1.2.3.4",
+	}); err == nil || !strings.Contains(err.Error(), "invalid DNS record name") {
+		t.Fatalf("expected name validation error, got %v", err)
+	}
+}
+
+func TestDomainRecordsSet_RejectsApexAliasConflictWithoutDeleting(t *testing.T) {
 	const withAlias = `{
 		"status": "SUCCESS",
 		"records": [
@@ -577,34 +669,22 @@ func TestDomainRecordsSet_DeletesApexAliasBeforeARecord(t *testing.T) {
 	ctx := newTestCtx(t, plat)
 	app := &App{}
 
-	out, err := app.toolDomainRecordsSet(ctx, map[string]any{
+	_, err := app.toolDomainRecordsSet(ctx, map[string]any{
 		"domain": "acme.com",
 		"name":   "@",
 		"type":   "A",
 		"value":  "5.6.7.8",
 	})
-	if err != nil {
-		t.Fatal(err)
-	}
-	got := out.(map[string]any)
-	if got["action"] != "created" {
-		t.Errorf("expected create, got %+v", out)
-	}
-	conflicts, _ := got["deleted_conflicts"].([]string)
-	if len(conflicts) != 1 || conflicts[0] != "ALIAS" {
-		t.Fatalf("deleted_conflicts = %+v, want [ALIAS]", got["deleted_conflicts"])
+	if err == nil || !strings.Contains(err.Error(), "delete the conflicting record explicitly") {
+		t.Fatalf("expected explicit conflict error, got %v", err)
 	}
 	tools := []string{}
 	for _, c := range plat.calls {
 		tools = append(tools, c.Tool)
 	}
-	want := []string{"list_dns_records", "delete_dns_records_by_type", "list_dns_records", "create_dns_record"}
+	want := []string{"list_dns_records"}
 	if strings.Join(tools, ",") != strings.Join(want, ",") {
 		t.Fatalf("dispatch order = %v, want %v", tools, want)
-	}
-	deleteCall := plat.calls[1]
-	if deleteCall.Input["type"] != "ALIAS" || deleteCall.Input["subdomain"] != "" {
-		t.Fatalf("delete payload = %+v", deleteCall.Input)
 	}
 }
 
@@ -628,6 +708,44 @@ func TestDomainRecordsSet_EditsWhenPresent(t *testing.T) {
 	}
 	if out.(map[string]any)["action"] != "updated" {
 		t.Errorf("expected update, got %+v", out)
+	}
+}
+
+func TestDomainRecordsSet_RecordIDEditsOnlySelectedRecord(t *testing.T) {
+	plat := newPorkbunStub(map[string]*sdk.ExecuteResult{
+		"edit_dns_record": {Success: true, Status: 200, Data: json.RawMessage(`{"status":"SUCCESS"}`)},
+	})
+	ctx := newTestCtx(t, plat)
+
+	_, err := (&App{}).toolDomainRecordsSet(ctx, map[string]any{
+		"domain": "acme.com", "name": "www", "type": "CNAME",
+		"value": "newtarget.acme.com", "record_id": "101",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plat.calls) != 2 || plat.calls[1].Tool != "edit_dns_record" || plat.calls[1].Input["id"] != "101" {
+		t.Fatalf("exact edit did not use record ID: %+v", plat.calls)
+	}
+}
+
+func TestDomainRecordsSet_RejectsAmbiguousRRSet(t *testing.T) {
+	const duplicateA = `{"status":"SUCCESS","records":[
+		{"id":"1","name":"www.acme.com","type":"A","content":"1.1.1.1","ttl":"600","prio":"0"},
+		{"id":"2","name":"www.acme.com","type":"A","content":"2.2.2.2","ttl":"600","prio":"0"}
+	]}`
+	plat := newPorkbunStub(map[string]*sdk.ExecuteResult{
+		"list_dns_records": {Success: true, Status: 200, Data: json.RawMessage(duplicateA)},
+	})
+	ctx := newTestCtx(t, plat)
+	_, err := (&App{}).toolDomainRecordsSet(ctx, map[string]any{
+		"domain": "acme.com", "name": "www", "type": "A", "value": "3.3.3.3",
+	})
+	if err == nil || !strings.Contains(err.Error(), "pass record_id") {
+		t.Fatalf("expected ambiguous RRset error, got %v", err)
+	}
+	if len(plat.calls) != 1 {
+		t.Fatalf("ambiguous update mutated provider: %+v", plat.calls)
 	}
 }
 
@@ -695,6 +813,56 @@ func TestDomainRecordsDelete_CallsByType(t *testing.T) {
 	}
 	if dCall.Input["type"] != "TXT" || dCall.Input["subdomain"] != "old" {
 		t.Errorf("delete payload: %+v", dCall.Input)
+	}
+}
+
+func TestDomainRecordsDelete_RecordIDDeletesOnlySelectedRecord(t *testing.T) {
+	plat := newPorkbunStub(map[string]*sdk.ExecuteResult{
+		"delete_dns_record": {Success: true, Status: 200, Data: json.RawMessage(`{"status":"SUCCESS"}`)},
+	})
+	ctx := newTestCtx(t, plat)
+	_, err := (&App{}).toolDomainRecordsDelete(ctx, map[string]any{
+		"domain": "acme.com", "name": "@", "type": "MX", "record_id": "102",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(plat.calls) != 2 || plat.calls[1].Tool != "delete_dns_record" || plat.calls[1].Input["id"] != "102" {
+		t.Fatalf("exact delete did not use record ID: %+v", plat.calls)
+	}
+}
+
+func TestPorkbunHTTP200ErrorEnvelopeIsRejected(t *testing.T) {
+	plat := newPorkbunStub(map[string]*sdk.ExecuteResult{
+		"list_dns_records": {Success: true, Status: 200, Data: json.RawMessage(`{"status":"ERROR","message":"API access disabled"}`)},
+	})
+	ctx := newTestCtx(t, plat)
+	_, err := (&App{}).toolDomainRecordsList(ctx, map[string]any{"domain": "acme.com"})
+	if err == nil || !strings.Contains(err.Error(), "API access disabled") {
+		t.Fatalf("expected Porkbun envelope error, got %v", err)
+	}
+}
+
+func TestDNSMutationLockSerializesSameConnectionAndDomain(t *testing.T) {
+	unlock := lockDNSMutation(42, "acme.com")
+	acquired := make(chan struct{})
+	done := make(chan struct{})
+	go func() {
+		unlockSecond := lockDNSMutation(42, "acme.com")
+		close(acquired)
+		unlockSecond()
+		close(done)
+	}()
+	select {
+	case <-acquired:
+		t.Fatal("second mutation acquired lock before first released it")
+	case <-time.After(25 * time.Millisecond):
+	}
+	unlock()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("second mutation did not acquire lock after release")
 	}
 }
 

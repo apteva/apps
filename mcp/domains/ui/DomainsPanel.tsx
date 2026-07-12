@@ -61,6 +61,20 @@ interface DomainAvailability {
   raw?: unknown;
 }
 
+interface RegistrationIntent {
+  confirmation_token: string;
+  expires_at: string;
+  domain: string;
+  years: number;
+  auto_renew: boolean;
+  whois_privacy: boolean;
+  provider: string;
+  connection_id: number;
+  price?: string;
+  currency?: string;
+  premium?: boolean;
+}
+
 function providerLabel(slug: string): string {
   if (slug === "porkbun") return "Porkbun";
   if (slug === "namecheap") return "Namecheap";
@@ -87,6 +101,11 @@ export default function DomainsPanel({ projectId, installId }: NativePanelProps)
   const [err, setErr] = useState("");
   const [selected, setSelected] = useState<Domain | null>(null);
   const [view, setView] = useState<"inventory" | "register">("inventory");
+
+  const activeConnections = useMemo(
+    () => connections.filter((connection) => (connection.status || "").toLowerCase() === "active"),
+    [connections],
+  );
 
   const withParams = useCallback((extra: Record<string, string>) => {
     return new URLSearchParams({
@@ -151,8 +170,8 @@ export default function DomainsPanel({ projectId, installId }: NativePanelProps)
 
   return (
     <div className="h-full flex flex-col">
-      <div className="px-6 pt-6 pb-3 flex items-center justify-between border-b border-border">
-        <div className="flex items-center gap-4">
+      <div className="px-4 md:px-6 pt-5 md:pt-6 pb-3 flex flex-wrap items-center justify-between gap-3 border-b border-border">
+        <div className="flex flex-wrap items-center gap-4">
           <h1 className="text-lg font-semibold">Domains</h1>
           <div className="flex rounded border border-border overflow-hidden text-xs">
             <button
@@ -186,13 +205,13 @@ export default function DomainsPanel({ projectId, installId }: NativePanelProps)
       {view === "inventory" ? (
         <>
           <AddDomainForm
-            connections={connections}
+            connections={activeConnections}
             onAdded={(d) => { reload(); if (d) setSelected(d); }}
             callTool={callTool}
           />
 
-          <div className="flex-1 min-h-0 flex">
-            <div className="w-72 overflow-auto">
+          <div className="flex-1 min-h-0 flex flex-col md:flex-row">
+            <div className="w-full md:w-72 max-h-56 md:max-h-none overflow-auto border-b md:border-b-0 border-border">
               <DomainList
                 rows={domains}
                 onSelect={setSelected}
@@ -201,7 +220,7 @@ export default function DomainsPanel({ projectId, installId }: NativePanelProps)
                 selectedId={selected?.id}
               />
             </div>
-            <div className="flex-1 min-w-0 border-l border-border">
+            <div className="flex-1 min-w-0 md:border-l border-border">
               {selected ? (
                 <RecordsPane
                   domain={selected}
@@ -219,7 +238,7 @@ export default function DomainsPanel({ projectId, installId }: NativePanelProps)
         </>
       ) : (
         <RegisterDomainPane
-          connections={connections.filter((c) => c.app_slug === "porkbun" || c.app_slug === "spaceship")}
+          connections={activeConnections.filter((c) => c.app_slug === "porkbun" || c.app_slug === "spaceship")}
           callTool={callTool}
           onRegistered={(d) => {
             reload();
@@ -263,6 +282,7 @@ function AddDomainForm({
       };
       if (pick === "other") {
         args.skip_validation = true;
+        args.use_default_connection = false;
       } else if (pick !== "default") {
         args.connection_id = parseInt(pick, 10);
       }
@@ -341,6 +361,7 @@ function RegisterDomainPane({
   const [coupon, setCoupon] = useState("");
   const [notes, setNotes] = useState("");
   const [availability, setAvailability] = useState<DomainAvailability | null>(null);
+  const [intent, setIntent] = useState<RegistrationIntent | null>(null);
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState("");
 
@@ -375,28 +396,40 @@ function RegisterDomainPane({
     }
   };
 
-  const register = async () => {
+  const prepareRegistration = async () => {
     if (!availability?.available) return;
-    const price = availability.price ? ` for ${availability.price} ${availability.currency || "USD"}` : "";
-    const fallback = availability.source === "rdap";
-    const ok = confirm(`Register ${availability.domain} for ${years} year${years === 1 ? "" : "s"}${price}? This spends real money at Porkbun.${fallback ? "\n\nAvailability came from public RDAP fallback, so this will skip the Porkbun pre-check and let Porkbun's register endpoint make the final decision." : ""}`);
-    if (!ok) return;
     setBusy(true);
     setErr("");
     try {
-      const result = await callTool("domain_register", {
+      const result = await callTool("domain_registration_prepare", {
         ...argsForProvider(),
         years,
         auto_renew: autoRenew,
         whois_privacy: whoisPrivacy,
         coupon: coupon.trim(),
         notes: notes.trim(),
-        skip_availability_check: fallback,
+      });
+      setIntent(result as unknown as RegistrationIntent);
+    } catch (e) {
+      setErr((e as Error).message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const register = async () => {
+    if (!intent) return;
+    setBusy(true);
+    setErr("");
+    try {
+      const result = await callTool("domain_register", {
+        confirmation_token: intent.confirmation_token,
       });
       setName("");
       setCoupon("");
       setNotes("");
       setAvailability(null);
+      setIntent(null);
       onRegistered(result.domain as Domain | undefined);
     } catch (e) {
       setErr((e as Error).message);
@@ -525,15 +558,35 @@ function RegisterDomainPane({
                 <button
                   type="button"
                   disabled={busy}
-                  onClick={register}
+                  onClick={prepareRegistration}
                   className="px-3 py-1.5 bg-accent text-white rounded disabled:opacity-50"
                 >
-                  {busy ? "Registering..." : "Register domain"}
+                  {busy ? "Preparing..." : "Review purchase"}
                 </button>
               </div>
             )}
           </div>
         </div>
+      )}
+      {intent && (
+        <ConfirmDialog
+          title="Confirm domain registration"
+          confirmLabel={busy ? "Registering..." : "Register and pay"}
+          busy={busy}
+          onCancel={() => setIntent(null)}
+          onConfirm={register}
+        >
+          <div className="space-y-2 text-sm">
+            <div><span className="text-text-dim">Domain </span><span className="font-mono">{intent.domain}</span></div>
+            <div><span className="text-text-dim">Term </span>{intent.years} year{intent.years === 1 ? "" : "s"}</div>
+            <div><span className="text-text-dim">Provider </span>{providerLabel(intent.provider)}</div>
+            {intent.price && (
+              <div><span className="text-text-dim">Quoted price </span><span className="font-mono">{intent.price} {intent.currency || "USD"}</span></div>
+            )}
+            <p className="text-yellow-300">This action spends real money and cannot be undone.</p>
+            {err && <div className="text-xs text-red-400">{err}</div>}
+          </div>
+        </ConfirmDialog>
       )}
     </div>
   );
@@ -550,20 +603,29 @@ function DomainList({
   callTool: (tool: string, args: Record<string, unknown>) => Promise<Record<string, unknown>>;
   selectedId?: number;
 }) {
+  const [pendingRemove, setPendingRemove] = useState<Domain | null>(null);
+  const [removeError, setRemoveError] = useState("");
+  const [removing, setRemoving] = useState(false);
   if (rows.length === 0) {
     return <div className="p-6 text-text-dim text-sm">No domains yet. Add one above.</div>;
   }
-  const remove = async (d: Domain) => {
-    if (!confirm(`Remove ${d.name} from this app's inventory? (The actual registration at the provider is untouched.)`)) return;
+  const remove = async () => {
+    if (!pendingRemove) return;
+    setRemoving(true);
+    setRemoveError("");
     try {
-      await callTool("domain_remove", { name: d.name });
+      await callTool("domain_remove", { name: pendingRemove.name });
+      setPendingRemove(null);
       onRemoved();
     } catch (e) {
-      alert((e as Error).message);
+      setRemoveError((e as Error).message);
+    } finally {
+      setRemoving(false);
     }
   };
   return (
     <div className="text-sm">
+      {removeError && <div className="m-3 text-xs text-red-400">{removeError}</div>}
       {rows.map((d) => (
         <div
           key={d.id}
@@ -575,7 +637,7 @@ function DomainList({
             <button
               type="button"
               className="text-text-dim hover:text-red-400 text-xs"
-              onClick={(e) => { e.stopPropagation(); remove(d); }}
+              onClick={(e) => { e.stopPropagation(); setRemoveError(""); setPendingRemove(d); }}
             >Remove</button>
           </div>
           <div className="text-xs text-text-dim truncate">
@@ -584,6 +646,18 @@ function DomainList({
           </div>
         </div>
       ))}
+      {pendingRemove && (
+        <ConfirmDialog
+          title="Remove domain from inventory"
+          confirmLabel={removing ? "Removing..." : "Remove"}
+          danger
+          busy={removing}
+          onCancel={() => setPendingRemove(null)}
+          onConfirm={remove}
+        >
+          <p className="text-sm">Remove <span className="font-mono">{pendingRemove.name}</span> from this app? The registration and DNS records at the provider remain untouched.</p>
+        </ConfirmDialog>
+      )}
     </div>
   );
 }
@@ -672,11 +746,11 @@ function RecordsPane({
         )}
       </div>
 
-      <div className="flex-1 min-h-0 overflow-auto p-5">
+      <div className="flex-1 min-h-0 overflow-auto p-3 md:p-5">
         {visible.length === 0 && !err ? (
           <div className="text-text-dim text-xs">No records.</div>
         ) : (
-          <table className="w-full text-xs">
+          <table className="w-full min-w-[42rem] text-xs">
             <thead className="text-xs text-text-dim">
               <tr className="border-b border-border">
                 <th className="text-left px-2 py-1">Name</th>
@@ -743,7 +817,7 @@ function AddRecordForm({
   return (
     <form onSubmit={submit} className="p-2 rounded bg-surface-2/40 border border-border space-y-2">
       <div className="text-xs text-text-dim font-medium">Add or update record</div>
-      <div className="flex gap-2 items-end">
+      <div className="flex flex-wrap gap-2 items-end">
         <Field label="Name">
           <input
             className={inputCls + " w-24 py-1"}
@@ -763,7 +837,7 @@ function AddRecordForm({
         </Field>
         <Field label="Value">
           <input
-            className={inputCls + " py-1 min-w-[14rem]"}
+            className={inputCls + " py-1 w-full sm:min-w-[14rem]"}
             value={value}
             onChange={(e) => setValue(e.target.value)}
             placeholder={
@@ -773,6 +847,10 @@ function AddRecordForm({
                   ? "target.acme.com"
                   : type === "TXT"
                     ? "v=spf1 include:_spf.acme.com ~all"
+                    : type === "SRV"
+                      ? "10 5 443 service.acme.com"
+                      : type === "CAA"
+                        ? "0 issue letsencrypt.org"
                     : "1.2.3.4"
             }
             required
@@ -812,9 +890,16 @@ function RecordRow({
   callTool: ToolCaller;
 }) {
   const [editing, setEditing] = useState(false);
-  const [value, setValue] = useState(record.value);
+  const [value, setValue] = useState(editableRecordValue(record));
   const [ttl, setTtl] = useState(record.ttl || 600);
   const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState("");
+  const [confirmDelete, setConfirmDelete] = useState(false);
+
+  useEffect(() => {
+    setValue(editableRecordValue(record));
+    setTtl(record.ttl || 600);
+  }, [record.value, record.prio, record.ttl, record.type]);
 
   // Strip the FQDN suffix for display when the provider returns
   // fully-qualified names like "mail.acme.com" — show "mail" instead.
@@ -828,6 +913,7 @@ function RecordRow({
 
   const save = async () => {
     setBusy(true);
+    setErr("");
     try {
       await callTool("domain_records_set", {
         domain,
@@ -835,35 +921,39 @@ function RecordRow({
         type: record.type,
         value,
         ttl,
+        record_id: record.id,
       });
       setEditing(false);
       onChanged();
     } catch (e) {
-      alert((e as Error).message);
+      setErr((e as Error).message);
     } finally {
       setBusy(false);
     }
   };
 
   const remove = async () => {
-    if (!confirm(`Delete ${record.type} record for ${shortName}.${domain}?`)) return;
     setBusy(true);
+    setErr("");
     try {
       await callTool("domain_records_delete", {
         domain,
         name: shortName === "@" ? "" : shortName,
         type: record.type,
+        record_id: record.id,
       });
+      setConfirmDelete(false);
       onChanged();
     } catch (e) {
-      alert((e as Error).message);
+      setErr((e as Error).message);
     } finally {
       setBusy(false);
     }
   };
 
   return (
-    <tr className="border-b border-border align-top">
+    <>
+      <tr className="border-b border-border align-top">
       <td className="px-2 py-1 font-mono text-text break-all">{shortName}</td>
       <td className="px-2 py-1 text-text-dim">{record.type}</td>
       <td className="px-2 py-1">
@@ -875,7 +965,7 @@ function RecordRow({
           />
         ) : (
           <span className="font-mono break-all">
-            {record.type === "MX" && record.prio ? `${record.prio} ` : ""}
+            {(record.type === "MX" || record.type === "SRV") && record.prio !== undefined ? `${record.prio} ` : ""}
             {record.value}
           </span>
         )}
@@ -899,12 +989,39 @@ function RecordRow({
         ) : (
           <>
             <button type="button" disabled={busy} onClick={() => setEditing(true)} className="text-xs text-text-dim hover:text-text">Edit</button>
-            <button type="button" disabled={busy} onClick={remove} className="text-xs text-text-dim hover:text-red-400 ml-2">Delete</button>
+            <button type="button" disabled={busy} onClick={() => setConfirmDelete(true)} className="text-xs text-text-dim hover:text-red-400 ml-2">Delete</button>
           </>
         )}
       </td>
-    </tr>
+      </tr>
+      {err && (
+        <tr><td colSpan={5} className="px-2 py-1 text-xs text-red-400">{err}</td></tr>
+      )}
+      {confirmDelete && (
+        <tr>
+          <td colSpan={5} className="p-0">
+            <ConfirmDialog
+              title="Delete DNS record"
+              confirmLabel={busy ? "Deleting..." : "Delete record"}
+              danger
+              busy={busy}
+              onCancel={() => setConfirmDelete(false)}
+              onConfirm={remove}
+            >
+              <p className="text-sm">Delete only this <strong>{record.type}</strong> record for <span className="font-mono">{shortName === "@" ? domain : `${shortName}.${domain}`}</span>?</p>
+            </ConfirmDialog>
+          </td>
+        </tr>
+      )}
+    </>
   );
+}
+
+function editableRecordValue(record: DNSRecord): string {
+  if ((record.type === "MX" || record.type === "SRV") && record.prio !== undefined) {
+    return `${record.prio} ${record.value}`.trim();
+  }
+  return record.value;
 }
 
 // ─── Tiny shared primitives ──────────────────────────────────────
@@ -915,5 +1032,51 @@ function Field({ label, children }: { label: string; children: React.ReactNode }
       <div className="text-xs text-text-dim mb-1">{label}</div>
       {children}
     </label>
+  );
+}
+
+function ConfirmDialog({
+  title, confirmLabel, danger = false, busy = false, onCancel, onConfirm, children,
+}: {
+  title: string;
+  confirmLabel: string;
+  danger?: boolean;
+  busy?: boolean;
+  onCancel: () => void;
+  onConfirm: () => void;
+  children: React.ReactNode;
+}) {
+  useEffect(() => {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape" && !busy) onCancel();
+    };
+    window.addEventListener("keydown", onKeyDown);
+    return () => window.removeEventListener("keydown", onKeyDown);
+  }, [busy, onCancel]);
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4" role="presentation" onMouseDown={() => !busy && onCancel()}>
+      <div
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="domains-confirm-title"
+        className="w-full max-w-md rounded border border-border bg-surface p-5 shadow-xl"
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        <h2 id="domains-confirm-title" className="text-base font-semibold">{title}</h2>
+        <div className="mt-3 text-text-dim">{children}</div>
+        <div className="mt-5 flex justify-end gap-2">
+          <button type="button" disabled={busy} onClick={onCancel} className="px-3 py-1.5 rounded border border-border hover:bg-surface-2 disabled:opacity-50">Cancel</button>
+          <button
+            type="button"
+            disabled={busy}
+            onClick={onConfirm}
+            className={`px-3 py-1.5 rounded text-white disabled:opacity-50 ${danger ? "bg-red-600 hover:bg-red-500" : "bg-accent"}`}
+          >
+            {confirmLabel}
+          </button>
+        </div>
+      </div>
+    </div>
   );
 }

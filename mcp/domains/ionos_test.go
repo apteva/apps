@@ -86,7 +86,12 @@ func TestIonosUpsert_CreatesViaArrayBody(t *testing.T) {
 	plat := newIonosStub(nil)
 	ctx := newTestCtx(t, plat)
 
-	action, err := ionosTestProvider().Upsert(ctx, "acme.com", "mail", "A", "5.6.7.8", 3600)
+	prov := ionosTestProvider()
+	existing, err := prov.List(ctx, "acme.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	action, err := prov.Upsert(ctx, "acme.com", "mail", "A", "5.6.7.8", 3600, "", existing)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -124,7 +129,12 @@ func TestIonosUpsert_UpdatesWhenPresent(t *testing.T) {
 	ctx := newTestCtx(t, plat)
 
 	// www.acme.com CNAME exists pointing at acme.com; repoint it.
-	action, err := ionosTestProvider().Upsert(ctx, "acme.com", "www", "CNAME", "newtarget.acme.com", 3600)
+	prov := ionosTestProvider()
+	existing, err := prov.List(ctx, "acme.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	action, err := prov.Upsert(ctx, "acme.com", "www", "CNAME", "newtarget.acme.com", 3600, "", existing)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -146,12 +156,35 @@ func TestIonosUpsert_UpdatesWhenPresent(t *testing.T) {
 	}
 }
 
+func TestIonosExactMXEditPreservesPriorityWhenOmitted(t *testing.T) {
+	plat := newIonosStub(nil)
+	ctx := newTestCtx(t, plat)
+	prov := ionosTestProvider()
+	existing, err := prov.List(ctx, "acme.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = prov.Upsert(ctx, "acme.com", "", "MX", "newmail.acme.com", 3600, "rec-mx", existing)
+	if err != nil {
+		t.Fatal(err)
+	}
+	updates := plat.callsFor("update_record")
+	if len(updates) != 1 || updates[0].Input["prio"] != 10 {
+		t.Fatalf("MX priority was not preserved: %+v", updates)
+	}
+}
+
 func TestIonosUpsert_UnchangedShortCircuits(t *testing.T) {
 	plat := newIonosStub(nil)
 	ctx := newTestCtx(t, plat)
 
 	// Identical to the existing www CNAME (content acme.com, ttl 3600).
-	action, err := ionosTestProvider().Upsert(ctx, "acme.com", "www", "CNAME", "acme.com", 3600)
+	prov := ionosTestProvider()
+	existing, err := prov.List(ctx, "acme.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	action, err := prov.Upsert(ctx, "acme.com", "www", "CNAME", "acme.com", 3600, "", existing)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -170,7 +203,12 @@ func TestIonosDelete_ByRecordID(t *testing.T) {
 	plat := newIonosStub(nil)
 	ctx := newTestCtx(t, plat)
 
-	if err := ionosTestProvider().Delete(ctx, "acme.com", "www", "CNAME"); err != nil {
+	prov := ionosTestProvider()
+	existing, err := prov.List(ctx, "acme.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := prov.Delete(ctx, "acme.com", "www", "CNAME", "", existing); err != nil {
 		t.Fatal(err)
 	}
 	dr := plat.callsFor("delete_record")
@@ -220,7 +258,7 @@ func TestProviderFor_RoutesIonosSlug(t *testing.T) {
 	ctx := newTestCtx(t, plat)
 	app := &App{}
 
-	prov, _, err := app.providerFor(ctx, 1) // connID>0 → GetConnection → "ionos"
+	prov, _, err := app.providerFor(ctx, 1, "") // connID>0 → GetConnection → "ionos"
 	if err != nil {
 		t.Fatal(err)
 	}

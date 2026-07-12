@@ -19,6 +19,10 @@ func TestNormaliseDomainName(t *testing.T) {
 		{"double..dot.com", "", true},
 		{"with space.com", "", true},
 		{"foo@bar.com", "", true},
+		{"-leading.com", "", true},
+		{"trailing-.com", "", true},
+		{"example.123", "", true},
+		{"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.com", "", true},
 	}
 	for _, tc := range cases {
 		got, err := normaliseDomainName(tc.in)
@@ -34,6 +38,19 @@ func TestNormaliseDomainName(t *testing.T) {
 		}
 		if got != tc.want {
 			t.Errorf("normaliseDomainName(%q) = %q, want %q", tc.in, got, tc.want)
+		}
+	}
+}
+
+func TestValidateSubaddress(t *testing.T) {
+	for _, valid := range []string{"", "www", "_sip._tcp", "*.preview"} {
+		if err := validateSubaddress(valid); err != nil {
+			t.Errorf("validateSubaddress(%q): %v", valid, err)
+		}
+	}
+	for _, invalid := range []string{"bad name", "-bad", "bad-", "www/acme", "foo@bar"} {
+		if err := validateSubaddress(invalid); err == nil {
+			t.Errorf("validateSubaddress(%q) expected error", invalid)
 		}
 	}
 }

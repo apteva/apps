@@ -1,4 +1,4 @@
-// Domains v0.1 — DNS + domain inventory for Apteva projects.
+// Domains v0.5 — safe DNS, inventory, and registrar workflows for Apteva projects.
 //
 // Apps that need to write DNS records (messaging for SES MX/DKIM,
 // storage for CDN CNAMEs, future certs app for ACME challenges) call
@@ -17,15 +17,20 @@
 package main
 
 import (
+	"crypto/rand"
 	"database/sql"
+	_ "embed"
+	"encoding/hex"
 	"encoding/json"
 	"encoding/xml"
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	sdk "github.com/apteva/app-sdk"
@@ -34,76 +39,8 @@ import (
 
 // ─── Manifest ──────────────────────────────────────────────────────
 
-const manifestYAML = `schema: apteva-app/v1
-name: domains
-display_name: Domains
-version: 0.4.2
-description: |
-  DNS + domain inventory and registrar workflows. Other apps call
-  this for record CRUD instead of talking to registrars directly.
-  DNS providers: Porkbun, Namecheap, IONOS, Spaceship. Registration
-  purchases are Porkbun-only; Spaceship availability checks are read-only.
-author: Apteva
-scopes: [project, global]
-requires:
-  permissions:
-    - db.write.app
-    - net.egress
-    - platform.connections.execute
-    - platform.connections.read
-  integrations:
-    - role: dns_provider
-      kind: integration
-      compatible_slugs: [porkbun, namecheap, ionos, spaceship]
-      capabilities: [dns.list_records, dns.create_record, dns.edit_records_by_type, dns.delete_records_by_type]
-      tools:
-        dns.list_records: list_dns_records
-        dns.create_record: create_dns_record
-        dns.edit_records_by_type: edit_dns_records_by_type
-        dns.delete_records_by_type: delete_dns_records_by_type
-      required: true
-    - role: registrar_provider
-      kind: integration
-      compatible_slugs: [porkbun]
-      capabilities: [domains.check_availability, domains.register, domains.pricing]
-      tools:
-        domains.check_availability: check_availability
-        domains.register: register_domain
-        domains.pricing: get_pricing
-      required: false
-provides:
-  http_routes:
-    - prefix: /
-  mcp_tools:
-    - { name: domain_add,            description: "Register a domain with this app." }
-    - { name: domain_remove,         description: "Soft-delete a domain from local inventory." }
-    - { name: domain_list,           description: "List domains for the project." }
-    - { name: domain_get,            description: "Fetch one domain by name." }
-    - { name: domain_availability_check, description: "Check if a domain is available for registration." }
-    - { name: domain_pricing_get,    description: "Fetch registrar pricing, optionally for one TLD." }
-    - { name: domain_register,       description: "Register a new domain. Spends real money at the registrar." }
-    - { name: domain_records_list,   description: "List DNS records on a domain." }
-    - { name: domain_records_set,    description: "Upsert a DNS record." }
-    - { name: domain_records_delete, description: "Delete records matching (domain, name, type)." }
-  ui_panels:
-    - slot: project.page
-      label: Domains
-      icon: globe
-      entry: /ui/DomainsPanel.mjs
-runtime:
-  kind: source
-  source:
-    repo: github.com/apteva/apps
-    ref: main
-    entry: mcp/domains
-  port: 8080
-  health_check: /health
-db:
-  driver: sqlite
-  path: /data/domains.db
-  migrations: migrations/
-upgrade_policy: auto-patch
-`
+//go:embed apteva.yaml
+var manifestYAML string
 
 // ─── App ───────────────────────────────────────────────────────────
 
@@ -149,12 +86,13 @@ func (a *App) MCPTools() []sdk.Tool {
 			Name:        "domain_add",
 			Description: "Register a domain with this app. By default the bound DNS provider is probed to confirm the domain exists there before recording it locally — pass skip_validation:true to bypass (just-registered domains, provider outage, externally-hosted DNS). Args: name (e.g. 'acme.com'), connection_id? (specific provider connection; defaults to the install's role binding), registrar?, dns_provider?, notes?, skip_validation?.",
 			InputSchema: schemaObject(map[string]any{
-				"name":            map[string]any{"type": "string"},
-				"connection_id":   map[string]any{"type": "integer"},
-				"registrar":       map[string]any{"type": "string"},
-				"dns_provider":    map[string]any{"type": "string"},
-				"notes":           map[string]any{"type": "string"},
-				"skip_validation": map[string]any{"type": "boolean"},
+				"name":                   map[string]any{"type": "string"},
+				"connection_id":          map[string]any{"type": "integer"},
+				"registrar":              map[string]any{"type": "string"},
+				"dns_provider":           map[string]any{"type": "string"},
+				"notes":                  map[string]any{"type": "string"},
+				"skip_validation":        map[string]any{"type": "boolean"},
+				"use_default_connection": map[string]any{"type": "boolean"},
 			}, []string{"name"}),
 			Handler: a.toolDomainAdd,
 		},
@@ -186,6 +124,20 @@ func (a *App) MCPTools() []sdk.Tool {
 			Handler: a.toolDomainAvailabilityCheck,
 		},
 		{
+			Name:        "domain_registration_prepare",
+			Description: "Prepare a domain registration after checking availability. Returns an expiring confirmation_token; show the quoted details to the user and call domain_register only after explicit confirmation. Args: domain, years? (1-10), auto_renew?, whois_privacy?, coupon?, connection_id?, notes?.",
+			InputSchema: schemaObject(map[string]any{
+				"domain":        map[string]any{"type": "string"},
+				"years":         map[string]any{"type": "integer"},
+				"auto_renew":    map[string]any{"type": "boolean"},
+				"whois_privacy": map[string]any{"type": "boolean"},
+				"coupon":        map[string]any{"type": "string"},
+				"connection_id": map[string]any{"type": "integer"},
+				"notes":         map[string]any{"type": "string"},
+			}, []string{"domain"}),
+			Handler: a.toolDomainRegistrationPrepare,
+		},
+		{
 			Name:        "domain_pricing_get",
 			Description: "Fetch registrar pricing via the registrar provider. Args: tld? (e.g. com), connection_id?. Porkbun is supported; Spaceship pricing is not exposed because purchase flows are intentionally disabled.",
 			InputSchema: schemaObject(map[string]any{
@@ -195,19 +147,11 @@ func (a *App) MCPTools() []sdk.Tool {
 			Handler: a.toolDomainPricingGet,
 		},
 		{
-			Name: "domain_register",
-			Description: "Register a new domain through the registrar provider. This SPENDS REAL MONEY against the registrar account. " +
-				"Call domain_availability_check and confirm with the user first. Args: domain, years? (1-10, default 1), auto_renew? (default true), whois_privacy? (default true), coupon?, connection_id?, notes?, skip_availability_check?. Porkbun is supported for paid registration; Spaceship is availability-only.",
+			Name:        "domain_register",
+			Description: "Register a domain from a prepared intent. This SPENDS REAL MONEY. Call domain_registration_prepare, present its quote to the user, obtain explicit confirmation, then pass its confirmation_token. Retries with a completed token are idempotent. Args: confirmation_token.",
 			InputSchema: schemaObject(map[string]any{
-				"domain":                  map[string]any{"type": "string"},
-				"years":                   map[string]any{"type": "integer"},
-				"auto_renew":              map[string]any{"type": "boolean"},
-				"whois_privacy":           map[string]any{"type": "boolean"},
-				"coupon":                  map[string]any{"type": "string"},
-				"connection_id":           map[string]any{"type": "integer"},
-				"notes":                   map[string]any{"type": "string"},
-				"skip_availability_check": map[string]any{"type": "boolean"},
-			}, []string{"domain"}),
+				"confirmation_token": map[string]any{"type": "string"},
+			}, []string{"confirmation_token"}),
 			Handler: a.toolDomainRegister,
 		},
 		{
@@ -222,25 +166,27 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name: "domain_records_set",
-			Description: "Upsert a DNS record. Composes list-by-name+type, then edit if present or create if absent. " +
+			Description: "Create or update a DNS record. Pass record_id to update exactly one listed record; without it, a single name/type match is updated, no match is created, and ambiguous RRsets are rejected. " +
 				"Args: domain (e.g. 'acme.com'), name ('@' for apex, or subdomain like 'mail'), type (A|AAAA|CNAME|MX|TXT|NS|SRV|CAA), value, ttl? (default 600). " +
 				"For MX records, value should be 'priority host', e.g. '10 inbound-smtp.eu-west-1.amazonaws.com'.",
 			InputSchema: schemaObject(map[string]any{
-				"domain": map[string]any{"type": "string"},
-				"name":   map[string]any{"type": "string"},
-				"type":   map[string]any{"type": "string"},
-				"value":  map[string]any{"type": "string"},
-				"ttl":    map[string]any{"type": "integer"},
+				"domain":    map[string]any{"type": "string"},
+				"name":      map[string]any{"type": "string"},
+				"type":      map[string]any{"type": "string"},
+				"value":     map[string]any{"type": "string"},
+				"ttl":       map[string]any{"type": "integer"},
+				"record_id": map[string]any{"type": "string"},
 			}, []string{"domain", "name", "type", "value"}),
 			Handler: a.toolDomainRecordsSet,
 		},
 		{
 			Name:        "domain_records_delete",
-			Description: "Delete all records matching (domain, name, type). Args: domain, name, type.",
+			Description: "Delete DNS records. Pass record_id to delete exactly one listed record. Without record_id, all records matching (domain, name, type) are deleted. Args: domain, name, type, record_id?.",
 			InputSchema: schemaObject(map[string]any{
-				"domain": map[string]any{"type": "string"},
-				"name":   map[string]any{"type": "string"},
-				"type":   map[string]any{"type": "string"},
+				"domain":    map[string]any{"type": "string"},
+				"name":      map[string]any{"type": "string"},
+				"type":      map[string]any{"type": "string"},
+				"record_id": map[string]any{"type": "string"},
 			}, []string{"domain", "name", "type"}),
 			Handler: a.toolDomainRecordsDelete,
 		},
@@ -269,6 +215,13 @@ func resolveProjectFromRequest(r *http.Request) (string, error) {
 		return v, nil
 	}
 	return "", errors.New("project_id required in query string when install scope=global")
+}
+
+func connectionProject(_ *sdk.AppCtx, args map[string]any) string {
+	if pid, err := resolveProjectFromArgs(args); err == nil {
+		return pid
+	}
+	return ""
 }
 
 // ─── Domain types ──────────────────────────────────────────────────
@@ -327,6 +280,25 @@ type DomainRegistrationRequest struct {
 	Coupon       string
 }
 
+type RegistrationIntent struct {
+	Token        string
+	ProjectID    string
+	Domain       string
+	Years        int
+	AutoRenew    bool
+	WhoisPrivacy bool
+	Coupon       string
+	Notes        string
+	Provider     string
+	ConnectionID int64
+	Price        string
+	Currency     string
+	Status       string
+	Raw          json.RawMessage
+	Error        string
+	ExpiresAt    time.Time
+}
+
 // ─── Address normalisation ────────────────────────────────────────
 
 // normaliseDomainName strips the scheme/path and any trailing dot,
@@ -363,16 +335,26 @@ func looksLikeDomain(s string) bool {
 	if s[0] == '.' || s[len(s)-1] == '.' || strings.Contains(s, "..") {
 		return false
 	}
-	for _, c := range s {
-		if c == '.' || c == '-' {
-			continue
+	labels := strings.Split(s, ".")
+	for _, label := range labels {
+		if len(label) == 0 || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return false
 		}
-		if c >= 'a' && c <= 'z' {
-			continue
+		for _, c := range label {
+			if c == '-' || c >= 'a' && c <= 'z' || c >= '0' && c <= '9' {
+				continue
+			}
+			return false
 		}
-		if c >= '0' && c <= '9' {
-			continue
+	}
+	allNumeric := true
+	for _, c := range labels[len(labels)-1] {
+		if c < '0' || c > '9' {
+			allNumeric = false
+			break
 		}
+	}
+	if allNumeric {
 		return false
 	}
 	return true
@@ -398,6 +380,27 @@ func normaliseSubaddress(s string) string {
 	return s
 }
 
+func validateSubaddress(s string) error {
+	if s == "" {
+		return nil
+	}
+	if len(s) > 253 || strings.ContainsAny(s, " \t\r\n@/?#") {
+		return fmt.Errorf("invalid DNS record name %q", s)
+	}
+	for _, label := range strings.Split(s, ".") {
+		if label == "" || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return fmt.Errorf("invalid DNS record name %q", s)
+		}
+		for _, c := range label {
+			if c == '-' || c == '_' || c == '*' || c >= 'a' && c <= 'z' || c >= '0' && c <= '9' {
+				continue
+			}
+			return fmt.Errorf("invalid DNS record name %q", s)
+		}
+	}
+	return nil
+}
+
 // ─── Local domain CRUD ────────────────────────────────────────────
 
 func (a *App) toolDomainAdd(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -418,21 +421,25 @@ func (a *App) toolDomainAdd(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	// reroute existing domains. Zero means "no pin" — record ops
 	// will fall back to the role binding at call time.
 	connID := int64(intArg(args, "connection_id", 0))
-	if connID == 0 {
+	if connID == 0 && boolArg(args, "use_default_connection", true) {
 		if bound := ctx.IntegrationFor("dns_provider"); bound != nil {
 			connID = bound.ConnectionID
 		}
 	}
+	var validationProvider dnsProviderImpl
 
 	// If we have a connection, derive its slug and use that as the
 	// authoritative dns_provider_slug. The free-text dns_provider arg
 	// is now just a hint for the "Other / unknown" path.
 	if connID > 0 {
-		if conn, cerr := ctx.PlatformAPI().GetConnection(connID); cerr == nil && conn != nil && conn.AppSlug != "" {
-			dns = conn.AppSlug
-			if reg == "" {
-				reg = dns
-			}
+		var bound *sdk.BoundIntegration
+		validationProvider, bound, err = a.providerFor(ctx, connID, pid)
+		if err != nil {
+			return nil, fmt.Errorf("validate provider connection: %w", err)
+		}
+		dns = bound.AppSlug
+		if reg == "" {
+			reg = dns
 		}
 	}
 	if dns == "" {
@@ -446,7 +453,11 @@ func (a *App) toolDomainAdd(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	// pinned and no role bound), the slug is unsupported, or the
 	// caller opts out.
 	if !boolArg(args, "skip_validation", false) {
-		if prov, _, perr := a.providerFor(ctx, connID); perr == nil {
+		if validationProvider != nil {
+			if _, lerr := validationProvider.List(ctx, name); lerr != nil {
+				return nil, fmt.Errorf("validate %q at provider: %w (pass skip_validation:true to add anyway)", name, lerr)
+			}
+		} else if prov, _, perr := a.providerFor(ctx, connID, pid); perr == nil {
 			if _, lerr := prov.List(ctx, name); lerr != nil {
 				return nil, fmt.Errorf("validate %q at provider: %w (pass skip_validation:true to add anyway)", name, lerr)
 			}
@@ -521,15 +532,25 @@ func (a *App) toolDomainGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 
 type dnsProviderImpl interface {
 	List(ctx *sdk.AppCtx, domain string) ([]DNSRecord, error)
-	Upsert(ctx *sdk.AppCtx, domain, sub, rtype, value string, ttl int) (action string, err error)
-	Delete(ctx *sdk.AppCtx, domain, sub, rtype string) error
+	Upsert(ctx *sdk.AppCtx, domain, sub, rtype, value string, ttl int, recordID string, existing []DNSRecord) (action string, err error)
+	Delete(ctx *sdk.AppCtx, domain, sub, rtype, recordID string, existing []DNSRecord) error
+}
+
+var dnsMutationLocks sync.Map
+
+func lockDNSMutation(connectionID int64, domain string) func() {
+	key := fmt.Sprintf("%d:%s", connectionID, domain)
+	actual, _ := dnsMutationLocks.LoadOrStore(key, &sync.Mutex{})
+	mu := actual.(*sync.Mutex)
+	mu.Lock()
+	return mu.Unlock
 }
 
 // providerFor resolves the DNS provider to use for a given connection
 // id. When connID==0 it falls back to the install's role binding (the
 // pre-v0.3 path and the default for new domains added without an
 // explicit connection_id).
-func (a *App) providerFor(ctx *sdk.AppCtx, connID int64) (dnsProviderImpl, *sdk.BoundIntegration, error) {
+func (a *App) providerFor(ctx *sdk.AppCtx, connID int64, projectID string) (dnsProviderImpl, *sdk.BoundIntegration, error) {
 	if connID > 0 {
 		conn, err := ctx.PlatformAPI().GetConnection(connID)
 		if err != nil {
@@ -537,6 +558,12 @@ func (a *App) providerFor(ctx *sdk.AppCtx, connID int64) (dnsProviderImpl, *sdk.
 		}
 		if conn == nil {
 			return nil, nil, fmt.Errorf("connection %d not found", connID)
+		}
+		if conn.Status != "" && !strings.EqualFold(conn.Status, "active") {
+			return nil, nil, fmt.Errorf("connection %d is not active (status %q)", connID, conn.Status)
+		}
+		if projectID != "" && conn.ProjectID != "" && conn.ProjectID != projectID {
+			return nil, nil, fmt.Errorf("connection %d belongs to project %q, not %q", connID, conn.ProjectID, projectID)
 		}
 		bound := &sdk.BoundIntegration{
 			Role:         "dns_provider",
@@ -576,22 +603,91 @@ func (a *App) providerFor(ctx *sdk.AppCtx, connID int64) (dnsProviderImpl, *sdk.
 // provider is the legacy entry point — kept for callers that don't
 // yet have a domain row in hand. Equivalent to providerFor(ctx, 0).
 func (a *App) provider(ctx *sdk.AppCtx) (dnsProviderImpl, *sdk.BoundIntegration, error) {
-	return a.providerFor(ctx, 0)
+	return a.providerFor(ctx, 0, "")
 }
 
 func providerCall(ctx *sdk.AppCtx, bound *sdk.BoundIntegration, tool string, payload map[string]any) (json.RawMessage, error) {
 	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(bound.ConnectionID, tool, payload)
+	diag := providerCallDiagnostic(bound, tool, payload)
 	if err != nil {
-		return nil, fmt.Errorf("%s: %w", tool, err)
+		return nil, fmt.Errorf("%s: %w", diag, err)
 	}
 	if res == nil || !res.Success {
 		body := ""
+		status := 0
 		if res != nil {
 			body = string(res.Data)
+			status = res.Status
 		}
-		return nil, fmt.Errorf("provider non-2xx: %s", truncate(body, 400))
+		return nil, fmt.Errorf("%s non-2xx status %d: %s", diag, status, truncate(body, 400))
+	}
+	if bound != nil && bound.AppSlug == "porkbun" {
+		if err := porkbunResponseError(res.Data); err != nil {
+			return nil, fmt.Errorf("%s: %w", diag, err)
+		}
 	}
 	return res.Data, nil
+}
+
+func porkbunResponseError(raw json.RawMessage) error {
+	var body map[string]any
+	if err := json.Unmarshal(raw, &body); err != nil {
+		return fmt.Errorf("invalid Porkbun JSON response: %w", err)
+	}
+	status, _ := body["status"].(string)
+	if !strings.EqualFold(strings.TrimSpace(status), "ERROR") {
+		return nil
+	}
+	message := firstString([]map[string]any{body}, "message", "error", "detail")
+	if message == "" {
+		if errs, ok := body["errors"].([]any); ok {
+			parts := make([]string, 0, len(errs))
+			for _, item := range errs {
+				parts = append(parts, fmt.Sprint(item))
+			}
+			message = strings.Join(parts, "; ")
+		}
+	}
+	if message == "" {
+		message = "upstream returned status ERROR"
+	}
+	return errors.New(message)
+}
+
+func providerCallDiagnostic(bound *sdk.BoundIntegration, tool string, payload map[string]any) string {
+	if bound == nil {
+		return fmt.Sprintf("provider <nil> connection 0 tool %s", tool)
+	}
+	diag := fmt.Sprintf("provider %s connection %d tool %s", bound.AppSlug, bound.ConnectionID, tool)
+	if hint := providerRequestHint(bound.AppSlug, tool, payload); hint != "" {
+		diag += " endpoint " + hint
+	}
+	return diag
+}
+
+func providerRequestHint(provider, tool string, payload map[string]any) string {
+	domain := strings.TrimSuffix(strings.ToLower(strings.TrimSpace(strArg(payload, "domain"))), ".")
+	if domain == "" {
+		return ""
+	}
+	switch provider {
+	case "spaceship":
+		escapedDomain := url.PathEscape(domain)
+		switch tool {
+		case "list_dns_records":
+			q := url.Values{}
+			q.Set("take", strconv.Itoa(intArg(payload, "take", 0)))
+			q.Set("skip", strconv.Itoa(intArg(payload, "skip", 0)))
+			return "GET /v1/dns/records/" + escapedDomain + "?" + q.Encode()
+		case "save_dns_records":
+			return "PUT /v1/dns/records/" + escapedDomain
+		case "delete_dns_records":
+			return "DELETE /v1/dns/records/" + escapedDomain
+		case "check_single_domain_availability":
+			return "GET /v1/domains/" + escapedDomain + "/available"
+		}
+	}
+	return ""
 }
 
 // ─── Registrar provider abstraction ───────────────────────────────
@@ -602,7 +698,7 @@ type registrarProviderImpl interface {
 	Register(ctx *sdk.AppCtx, req DomainRegistrationRequest) (json.RawMessage, error)
 }
 
-func (a *App) registrarFor(ctx *sdk.AppCtx, connID int64) (registrarProviderImpl, *sdk.BoundIntegration, error) {
+func (a *App) registrarFor(ctx *sdk.AppCtx, connID int64, projectID string) (registrarProviderImpl, *sdk.BoundIntegration, error) {
 	if connID > 0 {
 		conn, err := ctx.PlatformAPI().GetConnection(connID)
 		if err != nil {
@@ -610,6 +706,12 @@ func (a *App) registrarFor(ctx *sdk.AppCtx, connID int64) (registrarProviderImpl
 		}
 		if conn == nil {
 			return nil, nil, fmt.Errorf("connection %d not found", connID)
+		}
+		if conn.Status != "" && !strings.EqualFold(conn.Status, "active") {
+			return nil, nil, fmt.Errorf("connection %d is not active (status %q)", connID, conn.Status)
+		}
+		if projectID != "" && conn.ProjectID != "" && conn.ProjectID != projectID {
+			return nil, nil, fmt.Errorf("connection %d belongs to project %q, not %q", connID, conn.ProjectID, projectID)
 		}
 		bound := &sdk.BoundIntegration{
 			Role:         "registrar_provider",
@@ -640,7 +742,7 @@ func (a *App) registrarFor(ctx *sdk.AppCtx, connID int64) (registrarProviderImpl
 		case "spaceship":
 			return &spaceshipRegistrar{bound: bound}, bound, nil
 		default:
-			return nil, bound, fmt.Errorf("dns_provider %q does not support registrar operations in domains v0.4 (compatible registrar: porkbun; spaceship availability only)", bound.AppSlug)
+			return nil, bound, fmt.Errorf("dns_provider %q does not support registrar operations in domains v0.5 (compatible registrar: porkbun; spaceship availability only)", bound.AppSlug)
 		}
 	}
 	return nil, nil, errors.New("no registrar_provider or compatible dns_provider bound - install/select a Porkbun connection, a Spaceship connection for availability, or pass connection_id explicitly")
@@ -651,7 +753,7 @@ func (a *App) toolDomainAvailabilityCheck(ctx *sdk.AppCtx, args map[string]any) 
 	if err != nil {
 		return nil, fmt.Errorf("domain: %w", err)
 	}
-	reg, _, err := a.registrarFor(ctx, int64(intArg(args, "connection_id", 0)))
+	reg, _, err := a.registrarFor(ctx, int64(intArg(args, "connection_id", 0)), connectionProject(ctx, args))
 	if err != nil {
 		avail, ferr := publicRDAPAvailability(domain, err)
 		if ferr != nil {
@@ -672,7 +774,7 @@ func (a *App) toolDomainAvailabilityCheck(ctx *sdk.AppCtx, args map[string]any) 
 
 func (a *App) toolDomainPricingGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	tld := strings.TrimPrefix(strings.ToLower(strings.TrimSpace(strArg(args, "tld"))), ".")
-	reg, bound, err := a.registrarFor(ctx, int64(intArg(args, "connection_id", 0)))
+	reg, bound, err := a.registrarFor(ctx, int64(intArg(args, "connection_id", 0)), connectionProject(ctx, args))
 	if err != nil {
 		return nil, err
 	}
@@ -688,7 +790,7 @@ func (a *App) toolDomainPricingGet(ctx *sdk.AppCtx, args map[string]any) (any, e
 	}, nil
 }
 
-func (a *App) toolDomainRegister(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+func (a *App) toolDomainRegistrationPrepare(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	pid, err := resolveProjectFromArgs(args)
 	if err != nil {
 		return nil, err
@@ -701,45 +803,122 @@ func (a *App) toolDomainRegister(ctx *sdk.AppCtx, args map[string]any) (any, err
 	if years < 1 || years > 10 {
 		return nil, fmt.Errorf("years must be between 1 and 10, got %d", years)
 	}
-	reg, bound, err := a.registrarFor(ctx, int64(intArg(args, "connection_id", 0)))
+	reg, bound, err := a.registrarFor(ctx, int64(intArg(args, "connection_id", 0)), pid)
 	if err != nil {
 		return nil, err
 	}
-	var availability *DomainAvailability
-	if !boolArg(args, "skip_availability_check", false) {
-		availability, err = reg.CheckAvailability(ctx, domain)
-		if err != nil {
-			return nil, fmt.Errorf("availability check: %w", err)
-		}
-		if !availability.Available {
-			return nil, fmt.Errorf("domain %q is not available for registration", domain)
-		}
+	if bound.AppSlug != "porkbun" {
+		return nil, fmt.Errorf("provider %q does not support paid registration", bound.AppSlug)
 	}
-	req := DomainRegistrationRequest{
-		Domain:       domain,
-		Years:        years,
-		AutoRenew:    boolArg(args, "auto_renew", true),
-		WhoisPrivacy: boolArg(args, "whois_privacy", true),
-		Coupon:       strArg(args, "coupon"),
-	}
-	raw, err := reg.Register(ctx, req)
+	availability, err := reg.CheckAvailability(ctx, domain)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("availability check: %w", err)
 	}
-	// Porkbun registrations also give us DNS control through the same
-	// connection, so pin the inventory row to the registrar connection.
-	d, err := upsertDomainInventory(ctx, pid, domain, bound.AppSlug, bound.AppSlug, strArg(args, "notes"), bound.ConnectionID)
+	if !availability.Available {
+		return nil, fmt.Errorf("domain %q is not available for registration", domain)
+	}
+	token, err := randomToken(32)
 	if err != nil {
+		return nil, fmt.Errorf("create confirmation token: %w", err)
+	}
+	intent := &RegistrationIntent{
+		Token: token, ProjectID: pid, Domain: domain, Years: years,
+		AutoRenew: boolArg(args, "auto_renew", true), WhoisPrivacy: boolArg(args, "whois_privacy", true),
+		Coupon: strArg(args, "coupon"), Notes: strArg(args, "notes"), Provider: bound.AppSlug,
+		ConnectionID: bound.ConnectionID, Price: availability.Price, Currency: availability.Currency,
+		Status: "prepared", ExpiresAt: time.Now().UTC().Add(10 * time.Minute),
+	}
+	if err := dbRegistrationIntentInsert(ctx.AppDB(), intent); err != nil {
 		return nil, err
 	}
 	return map[string]any{
-		"registered":    true,
-		"domain":        d,
-		"availability":  availability,
-		"provider":      bound.AppSlug,
-		"connection_id": bound.ConnectionID,
-		"raw":           raw,
+		"confirmation_token": token,
+		"expires_at":         intent.ExpiresAt.Format(time.RFC3339),
+		"domain":             domain,
+		"years":              years,
+		"auto_renew":         intent.AutoRenew,
+		"whois_privacy":      intent.WhoisPrivacy,
+		"provider":           bound.AppSlug,
+		"connection_id":      bound.ConnectionID,
+		"price":              availability.Price,
+		"currency":           availability.Currency,
+		"premium":            availability.Premium,
 	}, nil
+}
+
+func (a *App) toolDomainRegister(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	token := strings.TrimSpace(strArg(args, "confirmation_token"))
+	if token == "" {
+		return nil, errors.New("confirmation_token required; call domain_registration_prepare and obtain user confirmation first")
+	}
+	intent, err := dbRegistrationIntentGet(ctx.AppDB(), pid, token)
+	if err != nil {
+		return nil, err
+	}
+	if intent == nil {
+		return nil, errors.New("confirmation token not found")
+	}
+	if intent.Status == "succeeded" {
+		return a.registrationResult(ctx, intent, true), nil
+	}
+	if intent.Status != "prepared" {
+		return nil, fmt.Errorf("registration intent is %s; prepare a new intent before retrying", intent.Status)
+	}
+	if time.Now().UTC().After(intent.ExpiresAt) {
+		_ = dbRegistrationIntentStatus(ctx.AppDB(), token, "expired", nil, "confirmation token expired")
+		return nil, errors.New("confirmation token expired; prepare a new registration intent")
+	}
+	claimed, err := dbRegistrationIntentClaim(ctx.AppDB(), pid, token)
+	if err != nil {
+		return nil, err
+	}
+	if !claimed {
+		return nil, errors.New("registration is already in progress; do not retry automatically")
+	}
+	reg, bound, err := a.registrarFor(ctx, intent.ConnectionID, pid)
+	if err != nil {
+		_ = dbRegistrationIntentStatus(ctx.AppDB(), token, "failed", nil, err.Error())
+		return nil, err
+	}
+	req := DomainRegistrationRequest{
+		Domain: intent.Domain, Years: intent.Years, AutoRenew: intent.AutoRenew,
+		WhoisPrivacy: intent.WhoisPrivacy, Coupon: intent.Coupon,
+	}
+	raw, err := reg.Register(ctx, req)
+	if err != nil {
+		_ = dbRegistrationIntentStatus(ctx.AppDB(), token, "failed", nil, err.Error())
+		return nil, err
+	}
+	intent.Raw = raw
+	intent.Provider = bound.AppSlug
+	if err := dbRegistrationIntentStatus(ctx.AppDB(), token, "succeeded", raw, ""); err != nil {
+		return nil, fmt.Errorf("domain registered but intent persistence failed; do not retry: %w", err)
+	}
+	return a.registrationResult(ctx, intent, false), nil
+}
+
+func (a *App) registrationResult(ctx *sdk.AppCtx, intent *RegistrationIntent, replay bool) map[string]any {
+	d, err := upsertDomainInventory(ctx, intent.ProjectID, intent.Domain, intent.Provider, intent.Provider, intent.Notes, intent.ConnectionID)
+	out := map[string]any{
+		"registered": true, "domain": d, "provider": intent.Provider,
+		"connection_id": intent.ConnectionID, "raw": intent.Raw, "idempotent_replay": replay,
+	}
+	if err != nil {
+		out["inventory_warning"] = err.Error()
+	}
+	return out
+}
+
+func randomToken(bytes int) (string, error) {
+	b := make([]byte, bytes)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return hex.EncodeToString(b), nil
 }
 
 // ─── Porkbun provider ──────────────────────────────────────────────
@@ -798,14 +977,10 @@ func (p *porkbunProvider) List(ctx *sdk.AppCtx, domain string) ([]DNSRecord, err
 	if err != nil {
 		return nil, err
 	}
-	return parsePorkbunRecords(raw), nil
+	return parsePorkbunRecords(raw)
 }
 
-func (p *porkbunProvider) Upsert(ctx *sdk.AppCtx, domain, sub, rtype, value string, ttl int) (string, error) {
-	existing, err := p.List(ctx, domain)
-	if err != nil {
-		return "", fmt.Errorf("list before upsert: %w", err)
-	}
+func (p *porkbunProvider) Upsert(ctx *sdk.AppCtx, domain, sub, rtype, value string, ttl int, recordID string, existing []DNSRecord) (string, error) {
 	wantFQ := domain
 	if sub != "" {
 		wantFQ = sub + "." + domain
@@ -816,6 +991,15 @@ func (p *porkbunProvider) Upsert(ctx *sdk.AppCtx, domain, sub, rtype, value stri
 		}
 		return strings.EqualFold(r.Name, wantFQ) || strings.EqualFold(r.Name, sub)
 	})
+	if recordID != "" {
+		selected, err := selectedRecord(matches, recordID)
+		if err != nil {
+			return "", err
+		}
+		matches = []DNSRecord{*selected}
+	} else if len(matches) > 1 {
+		return "", ambiguousRRSetError(domain, sub, rtype, len(matches))
+	}
 
 	prio := ""
 	content := value
@@ -825,6 +1009,9 @@ func (p *porkbunProvider) Upsert(ctx *sdk.AppCtx, domain, sub, rtype, value stri
 			prio = parts[0]
 			content = parts[1]
 		}
+	}
+	if len(matches) == 1 && rtype == "MX" && prio == "" {
+		prio = strconv.Itoa(matches[0].Prio)
 	}
 
 	if len(matches) > 0 {
@@ -851,7 +1038,13 @@ func (p *porkbunProvider) Upsert(ctx *sdk.AppCtx, domain, sub, rtype, value stri
 		if prio != "" {
 			payload["prio"] = prio
 		}
-		if _, err := providerCall(ctx, p.bound, "edit_dns_records_by_type", payload); err != nil {
+		tool := "edit_dns_records_by_type"
+		if recordID != "" {
+			tool = "edit_dns_record"
+			payload["id"] = recordID
+			payload["name"] = sub
+		}
+		if _, err := providerCall(ctx, p.bound, tool, payload); err != nil {
 			return "", fmt.Errorf("edit: %w", err)
 		}
 		return "updated", nil
@@ -925,12 +1118,21 @@ func porkbunRecordUnchanged(existing DNSRecord, content string, ttl, prio int) b
 	return existing.Prio == prio
 }
 
-func (p *porkbunProvider) Delete(ctx *sdk.AppCtx, domain, sub, rtype string) error {
-	_, err := providerCall(ctx, p.bound, "delete_dns_records_by_type", map[string]any{
+func (p *porkbunProvider) Delete(ctx *sdk.AppCtx, domain, sub, rtype, recordID string, existing []DNSRecord) error {
+	tool := "delete_dns_records_by_type"
+	payload := map[string]any{
 		"domain":    domain,
 		"type":      rtype,
 		"subdomain": sub,
-	})
+	}
+	if recordID != "" {
+		if _, err := selectedRecord(recordsAtName(existing, domain, sub, rtype), recordID); err != nil {
+			return err
+		}
+		tool = "delete_dns_record"
+		payload = map[string]any{"domain": domain, "id": recordID}
+	}
+	_, err := providerCall(ctx, p.bound, tool, payload)
 	return err
 }
 
@@ -1055,17 +1257,17 @@ func (n *namecheapProvider) List(ctx *sdk.AppCtx, domain string) ([]DNSRecord, e
 			Value: h.Address,
 			TTL:   ttl,
 			Prio:  prio,
+			Raw: map[string]any{
+				"host_id": h.HostID, "name": h.Name, "type": h.Type,
+				"address": h.Address, "ttl": h.TTL, "mx_pref": h.MXPref,
+			},
 		})
 	}
 	return out, nil
 }
 
-func (n *namecheapProvider) Upsert(ctx *sdk.AppCtx, domain, sub, rtype, value string, ttl int) (string, error) {
-	parsed, err := n.callGetHosts(ctx, domain)
-	if err != nil {
-		return "", err
-	}
-	hosts := parsed.CommandResponse.Hosts.Hosts
+func (n *namecheapProvider) Upsert(ctx *sdk.AppCtx, domain, sub, rtype, value string, ttl int, recordID string, existing []DNSRecord) (string, error) {
+	hosts := namecheapHostsFromRecords(existing)
 	wantName := sub
 	if wantName == "" {
 		wantName = "@"
@@ -1081,14 +1283,23 @@ func (n *namecheapProvider) Upsert(ctx *sdk.AppCtx, domain, sub, rtype, value st
 		}
 	}
 
-	// Find matching host(s) by (Name, Type) — Namecheap allows multiple
-	// records under the same name+type (round-robin A records, multi-MX),
-	// but our upsert deliberately collapses to one canonical record per
-	// (name, type). v0.2 can split this if needed.
+	matches := recordsAtName(existing, domain, sub, rtype)
+	if recordID != "" {
+		if _, err := selectedRecord(matches, recordID); err != nil {
+			return "", err
+		}
+	} else if len(matches) > 1 {
+		return "", ambiguousRRSetError(domain, sub, rtype, len(matches))
+	}
+
 	keep := make([]namecheapHost, 0, len(hosts)+1)
 	matched := false
 	for _, h := range hosts {
-		if !matched && strings.EqualFold(h.Name, wantName) && strings.EqualFold(h.Type, rtype) {
+		matchesTarget := strings.EqualFold(h.Name, wantName) && strings.EqualFold(h.Type, rtype)
+		if recordID != "" {
+			matchesTarget = h.HostID == recordID
+		}
+		if !matched && matchesTarget {
 			matched = true
 			h.Address = content
 			h.TTL = fmt.Sprintf("%d", ttl)
@@ -1096,10 +1307,6 @@ func (n *namecheapProvider) Upsert(ctx *sdk.AppCtx, domain, sub, rtype, value st
 				h.MXPref = prio
 			}
 			keep = append(keep, h)
-			continue
-		}
-		// Drop additional duplicates so the canonical record wins.
-		if matched && strings.EqualFold(h.Name, wantName) && strings.EqualFold(h.Type, rtype) {
 			continue
 		}
 		keep = append(keep, h)
@@ -1130,24 +1337,47 @@ func (n *namecheapProvider) Upsert(ctx *sdk.AppCtx, domain, sub, rtype, value st
 	return action, nil
 }
 
-func (n *namecheapProvider) Delete(ctx *sdk.AppCtx, domain, sub, rtype string) error {
-	parsed, err := n.callGetHosts(ctx, domain)
-	if err != nil {
-		return err
-	}
-	hosts := parsed.CommandResponse.Hosts.Hosts
+func (n *namecheapProvider) Delete(ctx *sdk.AppCtx, domain, sub, rtype, recordID string, existing []DNSRecord) error {
+	hosts := namecheapHostsFromRecords(existing)
 	wantName := sub
 	if wantName == "" {
 		wantName = "@"
 	}
 	keep := make([]namecheapHost, 0, len(hosts))
+	removed := false
 	for _, h := range hosts {
-		if strings.EqualFold(h.Name, wantName) && strings.EqualFold(h.Type, rtype) {
+		matches := strings.EqualFold(h.Name, wantName) && strings.EqualFold(h.Type, rtype)
+		if recordID != "" {
+			matches = h.HostID == recordID
+		}
+		if matches {
+			removed = true
 			continue
 		}
 		keep = append(keep, h)
 	}
+	if recordID != "" && !removed {
+		return fmt.Errorf("record_id %q not found in %s %s RRset", recordID, wantName, rtype)
+	}
+	if !removed {
+		return nil
+	}
 	return n.writeHosts(ctx, domain, keep)
+}
+
+func namecheapHostsFromRecords(records []DNSRecord) []namecheapHost {
+	hosts := make([]namecheapHost, 0, len(records))
+	for _, r := range records {
+		host := namecheapHost{
+			HostID: r.ID, Name: r.Name, Type: r.Type, Address: r.Value,
+			TTL: strconv.Itoa(r.TTL), MXPref: strconv.Itoa(r.Prio),
+		}
+		if r.Prio == 0 {
+			host.MXPref = ""
+		}
+		hosts = append(hosts, host)
+	}
+	return hosts
 }
 
 // writeHosts replaces the entire DNS host list for a domain via
@@ -1195,9 +1425,8 @@ func (n *namecheapProvider) writeHosts(ctx *sdk.AppCtx, domain string, hosts []n
 // splitSLDTLD splits "acme.com" into ("acme", "com"). Subdomains are
 // rejected — Namecheap's API operates at the registered-domain level
 // and treats subdomains as host records (Name="mail" within domain
-// "acme.com"). For domains with multi-label TLDs ("acme.co.uk") this
-// splits at the first dot which is wrong — v0.1 returns an error
-// telling the operator to use the registered domain explicitly.
+// "acme.com"). Splitting at the first dot also preserves Namecheap's
+// expected multi-label TLD form, e.g. "acme.co.uk" -> ("acme", "co.uk").
 func splitSLDTLD(domain string) (sld, tld string) {
 	idx := strings.IndexByte(domain, '.')
 	if idx <= 0 {
@@ -1222,7 +1451,10 @@ func splitSLDTLD(domain string) (sld, tld string) {
 // declares body_root_param: "records" so the integration runner sends
 // the `records` array verbatim as the request body.
 
-type ionosProvider struct{ bound *sdk.BoundIntegration }
+type ionosProvider struct {
+	bound  *sdk.BoundIntegration
+	zoneID string
+}
 
 type ionosZoneRef struct {
 	ID   string `json:"id"`
@@ -1293,6 +1525,7 @@ func (p *ionosProvider) List(ctx *sdk.AppCtx, domain string) ([]DNSRecord, error
 	if err != nil {
 		return nil, err
 	}
+	p.zoneID = z.ID
 	out := make([]DNSRecord, 0, len(z.Records))
 	for _, r := range z.Records {
 		out = append(out, DNSRecord{
@@ -1326,10 +1559,9 @@ func ionosSplitMX(rtype, value string) (content string, prio int) {
 	return content, prio
 }
 
-func (p *ionosProvider) Upsert(ctx *sdk.AppCtx, domain, sub, rtype, value string, ttl int) (string, error) {
-	z, err := p.fetchZone(ctx, domain)
-	if err != nil {
-		return "", fmt.Errorf("list before upsert: %w", err)
+func (p *ionosProvider) Upsert(ctx *sdk.AppCtx, domain, sub, rtype, value string, ttl int, recordID string, existing []DNSRecord) (string, error) {
+	if p.zoneID == "" {
+		return "", errors.New("IONOS zone context missing; list records before mutation")
 	}
 	wantFQ := domain
 	if sub != "" {
@@ -1337,25 +1569,31 @@ func (p *ionosProvider) Upsert(ctx *sdk.AppCtx, domain, sub, rtype, value string
 	}
 	content, prio := ionosSplitMX(rtype, value)
 
-	var match *ionosRecord
-	for i := range z.Records {
-		r := &z.Records[i]
-		if !strings.EqualFold(r.Type, rtype) {
-			continue
+	matches := recordsAtName(existing, domain, sub, rtype)
+	var match *DNSRecord
+	if recordID != "" {
+		var err error
+		match, err = selectedRecord(matches, recordID)
+		if err != nil {
+			return "", err
 		}
-		if strings.EqualFold(r.Name, wantFQ) || strings.EqualFold(r.Name, sub) {
-			match = r
-			break
-		}
+	} else if len(matches) > 1 {
+		return "", ambiguousRRSetError(domain, sub, rtype, len(matches))
+	} else if len(matches) == 1 {
+		match = &matches[0]
+	}
+	if match != nil && (rtype == "MX" || rtype == "SRV") && !hasNumericPrefix(value) {
+		prio = match.Prio
+		content = strings.TrimSpace(value)
 	}
 
 	if match != nil {
-		if strings.EqualFold(strings.TrimSpace(match.Content), strings.TrimSpace(content)) &&
+		if strings.EqualFold(strings.TrimSpace(match.Value), strings.TrimSpace(content)) &&
 			match.TTL == ttl && match.Prio == prio {
 			return "unchanged", nil
 		}
 		payload := map[string]any{
-			"zoneId":   z.ID,
+			"zoneId":   p.zoneID,
 			"recordId": match.ID,
 			"content":  content,
 			"ttl":      ttl,
@@ -1379,7 +1617,7 @@ func (p *ionosProvider) Upsert(ctx *sdk.AppCtx, domain, sub, rtype, value string
 		rec["prio"] = prio
 	}
 	createPayload := map[string]any{
-		"zoneId":  z.ID,
+		"zoneId":  p.zoneID,
 		"records": []any{rec},
 	}
 	if _, err := providerCall(ctx, p.bound, "create_records", createPayload); err != nil {
@@ -1388,27 +1626,26 @@ func (p *ionosProvider) Upsert(ctx *sdk.AppCtx, domain, sub, rtype, value string
 	return "created", nil
 }
 
-func (p *ionosProvider) Delete(ctx *sdk.AppCtx, domain, sub, rtype string) error {
-	z, err := p.fetchZone(ctx, domain)
-	if err != nil {
-		return err
-	}
-	wantFQ := domain
-	if sub != "" {
-		wantFQ = sub + "." + domain
+func (p *ionosProvider) Delete(ctx *sdk.AppCtx, domain, sub, rtype, recordID string, existing []DNSRecord) error {
+	if p.zoneID == "" {
+		return errors.New("IONOS zone context missing; list records before mutation")
 	}
 	var ids []string
-	for _, r := range z.Records {
-		if !strings.EqualFold(r.Type, rtype) {
-			continue
+	matches := recordsAtName(existing, domain, sub, rtype)
+	if recordID != "" {
+		selected, err := selectedRecord(matches, recordID)
+		if err != nil {
+			return err
 		}
-		if strings.EqualFold(r.Name, wantFQ) || strings.EqualFold(r.Name, sub) {
+		ids = append(ids, selected.ID)
+	} else {
+		for _, r := range matches {
 			ids = append(ids, r.ID)
 		}
 	}
 	for _, id := range ids {
 		if _, err := providerCall(ctx, p.bound, "delete_record", map[string]any{
-			"zoneId":   z.ID,
+			"zoneId":   p.zoneID,
 			"recordId": id,
 		}); err != nil {
 			return fmt.Errorf("delete record %s: %w", id, err)
@@ -1446,33 +1683,44 @@ func (r *spaceshipRegistrar) Register(*sdk.AppCtx, DomainRegistrationRequest) (j
 }
 
 func (p *spaceshipProvider) List(ctx *sdk.AppCtx, domain string) ([]DNSRecord, error) {
-	raw, err := providerCall(ctx, p.bound, "list_dns_records", map[string]any{
-		"domain": domain,
-		"take":   500,
-		"skip":   0,
-	})
-	if err != nil {
-		return nil, err
+	const pageSize = 500
+	all := make([]DNSRecord, 0, pageSize)
+	for skip := 0; ; skip += pageSize {
+		raw, err := providerCall(ctx, p.bound, "list_dns_records", map[string]any{
+			"domain": domain, "take": pageSize, "skip": skip,
+		})
+		if err != nil {
+			return nil, err
+		}
+		page, err := parseSpaceshipRecords(domain, raw)
+		if err != nil {
+			return nil, err
+		}
+		all = append(all, page...)
+		if len(page) < pageSize {
+			return all, nil
+		}
 	}
-	return parseSpaceshipRecords(domain, raw), nil
 }
 
-func (p *spaceshipProvider) Upsert(ctx *sdk.AppCtx, domain, sub, rtype, value string, ttl int) (string, error) {
-	existing, err := p.List(ctx, domain)
-	if err != nil {
-		return "", fmt.Errorf("list before upsert: %w", err)
-	}
+func (p *spaceshipProvider) Upsert(ctx *sdk.AppCtx, domain, sub, rtype, value string, ttl int, recordID string, existing []DNSRecord) (string, error) {
 	content, prio := spaceshipCanonicalValuePrio(rtype, value)
+	matches := recordsAtName(existing, domain, sub, rtype)
 	var match *DNSRecord
-	for i := range existing {
-		r := &existing[i]
-		if !strings.EqualFold(r.Type, rtype) {
-			continue
+	if recordID != "" {
+		var err error
+		match, err = selectedRecord(matches, recordID)
+		if err != nil {
+			return "", err
 		}
-		if spaceshipRecordNameMatches(r.Name, domain, sub) {
-			match = r
-			break
-		}
+	} else if len(matches) > 1 {
+		return "", ambiguousRRSetError(domain, sub, rtype, len(matches))
+	} else if len(matches) == 1 {
+		match = &matches[0]
+	}
+	if match != nil && (rtype == "MX" || rtype == "SRV") && !hasNumericPrefix(value) {
+		value = fmt.Sprintf("%d %s", match.Prio, strings.TrimSpace(value))
+		content, prio = spaceshipCanonicalValuePrio(rtype, value)
 	}
 	if match != nil &&
 		strings.EqualFold(strings.TrimSpace(match.Value), strings.TrimSpace(content)) &&
@@ -1483,10 +1731,22 @@ func (p *spaceshipProvider) Upsert(ctx *sdk.AppCtx, domain, sub, rtype, value st
 	if err != nil {
 		return "", err
 	}
+	if recordID != "" && match != nil {
+		if _, err := providerCall(ctx, p.bound, "delete_dns_records", map[string]any{
+			"domain": domain, "records": []any{spaceshipDeleteItem(*match)},
+		}); err != nil {
+			return "", fmt.Errorf("delete previous record before exact update: %w", err)
+		}
+	}
 	if _, err := providerCall(ctx, p.bound, "save_dns_records", map[string]any{
 		"domain": domain,
 		"items":  []any{item},
 	}); err != nil {
+		if recordID != "" && match != nil {
+			_, _ = providerCall(ctx, p.bound, "save_dns_records", map[string]any{
+				"domain": domain, "items": []any{copyStringAnyMap(match.Raw)},
+			})
+		}
 		return "", fmt.Errorf("save: %w", err)
 	}
 	if match != nil {
@@ -1495,11 +1755,7 @@ func (p *spaceshipProvider) Upsert(ctx *sdk.AppCtx, domain, sub, rtype, value st
 	return "created", nil
 }
 
-func (p *spaceshipProvider) Delete(ctx *sdk.AppCtx, domain, sub, rtype string) error {
-	existing, err := p.List(ctx, domain)
-	if err != nil {
-		return err
-	}
+func (p *spaceshipProvider) Delete(ctx *sdk.AppCtx, domain, sub, rtype, recordID string, existing []DNSRecord) error {
 	records := make([]any, 0, 1)
 	for _, r := range existing {
 		if !strings.EqualFold(r.Type, rtype) {
@@ -1508,24 +1764,33 @@ func (p *spaceshipProvider) Delete(ctx *sdk.AppCtx, domain, sub, rtype string) e
 		if !spaceshipRecordNameMatches(r.Name, domain, sub) {
 			continue
 		}
+		if recordID != "" && r.ID != recordID {
+			continue
+		}
 		records = append(records, spaceshipDeleteItem(r))
+	}
+	if recordID != "" && len(records) == 0 {
+		return fmt.Errorf("record_id %q not found in %s %s RRset", recordID, sub, rtype)
 	}
 	if len(records) == 0 {
 		return nil
 	}
-	_, err = providerCall(ctx, p.bound, "delete_dns_records", map[string]any{
+	_, err := providerCall(ctx, p.bound, "delete_dns_records", map[string]any{
 		"domain":  domain,
 		"records": records,
 	})
 	return err
 }
 
-func parseSpaceshipRecords(domain string, raw json.RawMessage) []DNSRecord {
+func parseSpaceshipRecords(domain string, raw json.RawMessage) ([]DNSRecord, error) {
 	var root any
 	if err := json.Unmarshal(raw, &root); err != nil {
-		return nil
+		return nil, fmt.Errorf("parse Spaceship DNS records: %w", err)
 	}
 	items := spaceshipArrayFrom(root, "items", "records")
+	if items == nil {
+		return nil, errors.New("parse Spaceship DNS records: response contains no items or records array")
+	}
 	out := make([]DNSRecord, 0, len(items))
 	for _, item := range items {
 		m, ok := item.(map[string]any)
@@ -1545,7 +1810,7 @@ func parseSpaceshipRecords(domain string, raw json.RawMessage) []DNSRecord {
 			Raw:   copyStringAnyMap(m),
 		})
 	}
-	return out
+	return out, nil
 }
 
 func parseSpaceshipAvailability(domain string, bound *sdk.BoundIntegration, raw json.RawMessage) DomainAvailability {
@@ -1707,6 +1972,15 @@ func spaceshipCanonicalValuePrio(rtype, value string) (string, int) {
 	return value, 0
 }
 
+func hasNumericPrefix(value string) bool {
+	fields := strings.Fields(value)
+	if len(fields) < 2 {
+		return false
+	}
+	_, err := strconv.Atoi(fields[0])
+	return err == nil
+}
+
 func spaceshipRecordItem(domain, sub, rtype, value string, ttl int) (map[string]any, error) {
 	name := "@"
 	if sub != "" {
@@ -1832,15 +2106,16 @@ func copyStringAnyMap(in map[string]any) map[string]any {
 // domain row (when one exists) and returns the matching provider.
 // Falls back to the role binding for domains not in the inventory or
 // rows added before per-domain pinning landed.
-func (a *App) resolveProviderForDomain(ctx *sdk.AppCtx, args map[string]any, name string) (dnsProviderImpl, error) {
+func (a *App) resolveProviderForDomain(ctx *sdk.AppCtx, args map[string]any, name string) (dnsProviderImpl, *sdk.BoundIntegration, error) {
 	var connID int64
-	if pid, perr := resolveProjectFromArgs(args); perr == nil {
+	pid, perr := resolveProjectFromArgs(args)
+	if perr == nil {
 		if d, _ := dbDomainGetByName(ctx.AppDB(), pid, name); d != nil {
 			connID = d.ConnectionID
 		}
 	}
-	prov, _, err := a.providerFor(ctx, connID)
-	return prov, err
+	prov, bound, err := a.providerFor(ctx, connID, pid)
+	return prov, bound, err
 }
 
 func (a *App) toolDomainRecordsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -1848,7 +2123,7 @@ func (a *App) toolDomainRecordsList(ctx *sdk.AppCtx, args map[string]any) (any, 
 	if err != nil {
 		return nil, fmt.Errorf("domain: %w", err)
 	}
-	prov, err := a.resolveProviderForDomain(ctx, args, domain)
+	prov, _, err := a.resolveProviderForDomain(ctx, args, domain)
 	if err != nil {
 		return nil, err
 	}
@@ -1874,6 +2149,9 @@ func (a *App) toolDomainRecordsSet(ctx *sdk.AppCtx, args map[string]any) (any, e
 		return nil, fmt.Errorf("domain: %w", err)
 	}
 	sub := normaliseSubaddress(strArg(args, "name"))
+	if err := validateSubaddress(sub); err != nil {
+		return nil, err
+	}
 	rtype, err := normaliseRecordType(strArg(args, "type"))
 	if err != nil {
 		return nil, err
@@ -1883,16 +2161,25 @@ func (a *App) toolDomainRecordsSet(ctx *sdk.AppCtx, args map[string]any) (any, e
 		return nil, errors.New("value required")
 	}
 	ttl := intArg(args, "ttl", 600)
+	if ttl < 60 || ttl > 2147483647 {
+		return nil, fmt.Errorf("ttl must be between 60 and 2147483647 seconds, got %d", ttl)
+	}
+	recordID := strings.TrimSpace(strArg(args, "record_id"))
 
-	prov, err := a.resolveProviderForDomain(ctx, args, domain)
+	prov, bound, err := a.resolveProviderForDomain(ctx, args, domain)
 	if err != nil {
 		return nil, err
 	}
-	deletedConflicts, err := deleteApexAddressConflicts(ctx, prov, domain, sub, rtype)
+	unlock := lockDNSMutation(bound.ConnectionID, domain)
+	defer unlock()
+	existing, err := prov.List(ctx, domain)
 	if err != nil {
+		return nil, fmt.Errorf("list before mutation: %w", err)
+	}
+	if err := validateApexAddressConflicts(existing, domain, sub, rtype); err != nil {
 		return nil, err
 	}
-	action, err := prov.Upsert(ctx, domain, sub, rtype, value, ttl)
+	action, err := prov.Upsert(ctx, domain, sub, rtype, value, ttl, recordID, existing)
 	if err != nil {
 		return nil, err
 	}
@@ -1904,35 +2191,27 @@ func (a *App) toolDomainRecordsSet(ctx *sdk.AppCtx, args map[string]any) (any, e
 		"value":  value,
 		"ttl":    ttl,
 	}
-	if len(deletedConflicts) > 0 {
-		out["deleted_conflicts"] = deletedConflicts
+	if recordID != "" {
+		out["record_id"] = recordID
 	}
 	return out, nil
 }
 
-func deleteApexAddressConflicts(ctx *sdk.AppCtx, prov dnsProviderImpl, domain, sub, rtype string) ([]string, error) {
+func validateApexAddressConflicts(records []DNSRecord, domain, sub, rtype string) error {
 	if sub != "" {
-		return nil, nil
+		return nil
 	}
 	conflicts := apexAddressConflictTypes(rtype)
 	if len(conflicts) == 0 {
-		return nil, nil
+		return nil
 	}
-	records, err := prov.List(ctx, domain)
-	if err != nil {
-		return nil, fmt.Errorf("list before conflict cleanup: %w", err)
-	}
-	var deleted []string
 	for _, conflictType := range conflicts {
 		if !hasRecordAtName(records, domain, "", conflictType) {
 			continue
 		}
-		if err := prov.Delete(ctx, domain, "", conflictType); err != nil {
-			return deleted, fmt.Errorf("delete conflicting %s record: %w", conflictType, err)
-		}
-		deleted = append(deleted, conflictType)
+		return fmt.Errorf("cannot set apex %s while an apex %s record exists; delete the conflicting record explicitly first", rtype, conflictType)
 	}
-	return deleted, nil
+	return nil
 }
 
 func apexAddressConflictTypes(rtype string) []string {
@@ -1973,23 +2252,33 @@ func (a *App) toolDomainRecordsDelete(ctx *sdk.AppCtx, args map[string]any) (any
 		return nil, err
 	}
 	sub := normaliseSubaddress(strArg(args, "name"))
+	if err := validateSubaddress(sub); err != nil {
+		return nil, err
+	}
 	rtype, err := normaliseRecordType(strArg(args, "type"))
 	if err != nil {
 		return nil, err
 	}
-	prov, err := a.resolveProviderForDomain(ctx, args, domain)
+	recordID := strings.TrimSpace(strArg(args, "record_id"))
+	prov, bound, err := a.resolveProviderForDomain(ctx, args, domain)
 	if err != nil {
 		return nil, err
 	}
-	if err := prov.Delete(ctx, domain, sub, rtype); err != nil {
+	unlock := lockDNSMutation(bound.ConnectionID, domain)
+	defer unlock()
+	existing, err := prov.List(ctx, domain)
+	if err != nil {
+		return nil, fmt.Errorf("list before delete: %w", err)
+	}
+	if err := prov.Delete(ctx, domain, sub, rtype, recordID, existing); err != nil {
 		return nil, err
 	}
-	return map[string]any{"deleted": true, "domain": domain, "name": sub, "type": rtype}, nil
+	return map[string]any{"deleted": true, "domain": domain, "name": sub, "type": rtype, "record_id": recordID}, nil
 }
 
 // ─── Provider response normalisation ──────────────────────────────
 
-func parsePorkbunRecords(raw json.RawMessage) []DNSRecord {
+func parsePorkbunRecords(raw json.RawMessage) ([]DNSRecord, error) {
 	var probe struct {
 		Status  string `json:"status"`
 		Records []struct {
@@ -2002,7 +2291,12 @@ func parsePorkbunRecords(raw json.RawMessage) []DNSRecord {
 			Notes   string `json:"notes"`
 		} `json:"records"`
 	}
-	_ = json.Unmarshal(raw, &probe)
+	if err := json.Unmarshal(raw, &probe); err != nil {
+		return nil, fmt.Errorf("parse Porkbun DNS records: %w", err)
+	}
+	if !strings.EqualFold(probe.Status, "SUCCESS") {
+		return nil, fmt.Errorf("parse Porkbun DNS records: unexpected status %q", probe.Status)
+	}
 	out := make([]DNSRecord, 0, len(probe.Records))
 	for _, r := range probe.Records {
 		ttl, _ := strconv.Atoi(r.TTL)
@@ -2017,7 +2311,7 @@ func parsePorkbunRecords(raw json.RawMessage) []DNSRecord {
 			Notes: r.Notes,
 		})
 	}
-	return out
+	return out, nil
 }
 
 func parsePorkbunAvailability(domain string, bound *sdk.BoundIntegration, raw json.RawMessage) DomainAvailability {
@@ -2199,9 +2493,46 @@ func filterRecords(in []DNSRecord, keep func(DNSRecord) bool) []DNSRecord {
 	return out
 }
 
+func recordsAtName(records []DNSRecord, domain, sub, rtype string) []DNSRecord {
+	wantFQ := domain
+	if sub != "" {
+		wantFQ = sub + "." + domain
+	}
+	return filterRecords(records, func(r DNSRecord) bool {
+		if !strings.EqualFold(r.Type, rtype) {
+			return false
+		}
+		if strings.EqualFold(r.Name, wantFQ) || strings.EqualFold(r.Name, sub) {
+			return true
+		}
+		return sub == "" && (r.Name == "" || r.Name == "@")
+	})
+}
+
+func selectedRecord(records []DNSRecord, recordID string) (*DNSRecord, error) {
+	for i := range records {
+		if records[i].ID == recordID {
+			return &records[i], nil
+		}
+	}
+	return nil, fmt.Errorf("record_id %q was not found in the requested RRset", recordID)
+}
+
+func ambiguousRRSetError(domain, sub, rtype string, count int) error {
+	name := sub
+	if name == "" {
+		name = "@"
+	}
+	return fmt.Errorf("%s %s.%s has %d records; pass record_id from domain_records_list to update exactly one", rtype, name, domain, count)
+}
+
 // ─── HTTP routes (panel data + tool dispatch) ──────────────────────
 
 func (a *App) handleDomainsList(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		httpErr(w, http.StatusMethodNotAllowed, "GET only")
+		return
+	}
 	pid, err := resolveProjectFromRequest(r)
 	if err != nil {
 		httpErr(w, http.StatusBadRequest, err.Error())
@@ -2216,6 +2547,10 @@ func (a *App) handleDomainsList(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleDomainItem(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		httpErr(w, http.StatusMethodNotAllowed, "GET only")
+		return
+	}
 	pid, err := resolveProjectFromRequest(r)
 	if err != nil {
 		httpErr(w, http.StatusBadRequest, err.Error())
@@ -2258,6 +2593,10 @@ func (a *App) handleDomainItem(w http.ResponseWriter, r *http.Request) {
 // operator can pin one specifically when adding a domain. Not an MCP tool
 // because agents shouldn't be picking connections for users; operator UI.
 func (a *App) handleConnectionsList(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		httpErr(w, http.StatusMethodNotAllowed, "GET only")
+		return
+	}
 	pid, err := resolveProjectFromRequest(r)
 	if err != nil {
 		httpErr(w, http.StatusBadRequest, err.Error())
@@ -2294,6 +2633,7 @@ func (a *App) handleToolsCall(w http.ResponseWriter, r *http.Request) {
 		Tool string         `json:"tool"`
 		Args map[string]any `json:"args"`
 	}
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		httpErr(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
 		return
@@ -2350,7 +2690,7 @@ func scanDomain(s interface{ Scan(...any) error }) (*Domain, error) {
 func upsertDomainInventory(ctx *sdk.AppCtx, pid, name, reg, dns, notes string, connID int64) (*Domain, error) {
 	// SQLite NULLIF(?, 0) makes "no connection" NULL, so COALESCE
 	// preserves an existing pin on re-add instead of clobbering it.
-	res, err := ctx.AppDB().Exec(
+	_, err := ctx.AppDB().Exec(
 		`INSERT INTO domains (project_id, name, registrar_slug, dns_provider_slug, notes, connection_id)
 		 VALUES (?, ?, ?, ?, ?, NULLIF(?, 0))
 		 ON CONFLICT(project_id, name) WHERE deleted_at IS NULL
@@ -2365,11 +2705,11 @@ func upsertDomainInventory(ctx *sdk.AppCtx, pid, name, reg, dns, notes string, c
 	if err != nil {
 		return nil, fmt.Errorf("insert domain: %w", err)
 	}
-	id, _ := res.LastInsertId()
-	if id == 0 {
-		_ = ctx.AppDB().QueryRow(
-			`SELECT id FROM domains WHERE project_id = ? AND name = ? AND deleted_at IS NULL`,
-			pid, name).Scan(&id)
+	var id int64
+	if err := ctx.AppDB().QueryRow(
+		`SELECT id FROM domains WHERE project_id = ? AND name = ? AND deleted_at IS NULL`,
+		pid, name).Scan(&id); err != nil {
+		return nil, fmt.Errorf("read domain after upsert: %w", err)
 	}
 	return dbDomainGet(ctx.AppDB(), pid, id)
 }
@@ -2385,11 +2725,15 @@ func dbDomainList(db *sql.DB, pid string) ([]*Domain, error) {
 	defer rows.Close()
 	out := []*Domain{}
 	for rows.Next() {
-		if d, err := scanDomain(rows); err == nil && d != nil {
+		d, err := scanDomain(rows)
+		if err != nil {
+			return nil, err
+		}
+		if d != nil {
 			out = append(out, d)
 		}
 	}
-	return out, nil
+	return out, rows.Err()
 }
 
 func dbDomainGet(db *sql.DB, pid string, id int64) (*Domain, error) {
@@ -2406,6 +2750,67 @@ func dbDomainGetByName(db *sql.DB, pid, name string) (*Domain, error) {
 		 FROM domains WHERE project_id = ? AND name = ? AND deleted_at IS NULL`,
 		pid, name,
 	))
+}
+
+func dbRegistrationIntentInsert(db *sql.DB, in *RegistrationIntent) error {
+	_, _ = db.Exec(`DELETE FROM registration_intents
+		WHERE status IN ('prepared','expired','failed') AND expires_at < ?`, time.Now().UTC().Format(time.RFC3339))
+	_, err := db.Exec(`INSERT INTO registration_intents
+		(token, project_id, domain, years, auto_renew, whois_privacy, coupon, notes,
+		 provider_slug, connection_id, price, currency, status, expires_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'prepared', ?)`,
+		in.Token, in.ProjectID, in.Domain, in.Years, in.AutoRenew, in.WhoisPrivacy,
+		in.Coupon, in.Notes, in.Provider, in.ConnectionID, in.Price, in.Currency,
+		in.ExpiresAt.Format(time.RFC3339))
+	if err != nil {
+		return fmt.Errorf("store registration intent: %w", err)
+	}
+	return nil
+}
+
+func dbRegistrationIntentGet(db *sql.DB, pid, token string) (*RegistrationIntent, error) {
+	in := &RegistrationIntent{}
+	var autoRenew, privacy int
+	var raw, expires string
+	err := db.QueryRow(`SELECT token, project_id, domain, years, auto_renew, whois_privacy,
+		coupon, notes, provider_slug, connection_id, price, currency, status,
+		response_json, error_message, expires_at
+		FROM registration_intents WHERE project_id=? AND token=?`, pid, token).Scan(
+		&in.Token, &in.ProjectID, &in.Domain, &in.Years, &autoRenew, &privacy,
+		&in.Coupon, &in.Notes, &in.Provider, &in.ConnectionID, &in.Price, &in.Currency,
+		&in.Status, &raw, &in.Error, &expires)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	in.AutoRenew = autoRenew != 0
+	in.WhoisPrivacy = privacy != 0
+	in.Raw = json.RawMessage(raw)
+	in.ExpiresAt, err = time.Parse(time.RFC3339, expires)
+	if err != nil {
+		return nil, fmt.Errorf("parse registration intent expiry: %w", err)
+	}
+	return in, nil
+}
+
+func dbRegistrationIntentClaim(db *sql.DB, pid, token string) (bool, error) {
+	res, err := db.Exec(`UPDATE registration_intents
+		SET status='processing', updated_at=CURRENT_TIMESTAMP
+		WHERE project_id=? AND token=? AND status='prepared'`, pid, token)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n == 1, err
+}
+
+func dbRegistrationIntentStatus(db *sql.DB, token, status string, raw json.RawMessage, message string) error {
+	_, err := db.Exec(`UPDATE registration_intents
+		SET status=?, response_json=?, error_message=?, updated_at=CURRENT_TIMESTAMP WHERE token=?`,
+		status, string(raw), message, token)
+	return err
 }
 
 // ─── Tiny utilities ────────────────────────────────────────────────

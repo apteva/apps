@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: domains
 display_name: Domains
-version: 0.4.2
+version: 0.5.0
 description: |
   DNS + domain inventory and registrar workflows for Apteva projects.
   Other apps that need to write DNS records (messaging for SES
@@ -17,7 +17,7 @@ description: |
   body_root_param. Namecheap DNS uses XML read-modify-write semantics.
   Spaceship DNS uses batch save/delete tools and supports read-only
   availability checks. Registrar purchase flows are Porkbun-only in
-  v0.4.2; Namecheap and Spaceship registration need safer purchase-flow
+  v0.5.0; Namecheap and Spaceship registration need safer purchase-flow
   support before they should be exposed here.
 
 author: Apteva
@@ -71,18 +71,19 @@ provides:
     - prefix: /
   mcp_tools:
     # local inventory
-    - { name: domain_add,            description: "Register a domain with this app. By default the bound DNS provider is probed to confirm the domain exists there before recording it locally — pass skip_validation:true to bypass. Args: name (e.g. acme.com), registrar?, dns_provider?, notes?, skip_validation?." }
+    - { name: domain_add,            description: "Register a domain with this app. By default the bound DNS provider is probed and pinned; pass skip_validation:true to bypass the probe, and use_default_connection:false to keep an external domain unbound. Args: name, connection_id?, registrar?, dns_provider?, notes?, skip_validation?, use_default_connection?." }
     - { name: domain_remove,         description: "Soft-delete a domain from this app's inventory. Doesn't touch the actual registration. Args: name." }
     - { name: domain_list,           description: "List domains registered with this app for the current project." }
     - { name: domain_get,            description: "Fetch one domain's local record. Args: name." }
     # registrar operations
     - { name: domain_availability_check, description: "Check if a domain is available for registration through the registrar provider. Safe/read-only. Args: domain, connection_id?." }
+    - { name: domain_registration_prepare, description: "Prepare an expiring registration intent after a provider availability check. Present the returned quote to the user and obtain explicit confirmation before calling domain_register. Args: domain, years?, auto_renew?, whois_privacy?, coupon?, connection_id?, notes?." }
     - { name: domain_pricing_get,    description: "Fetch registrar pricing, optionally for one TLD. Args: tld?, connection_id?." }
-    - { name: domain_register,       description: "Register a new domain through the registrar provider. This spends real money. Args: domain, years?, auto_renew?, whois_privacy?, coupon?, connection_id?, notes?, skip_availability_check?." }
+    - { name: domain_register,       description: "Register a domain from a prepared intent. This spends real money. Requires confirmation_token from domain_registration_prepare after explicit user confirmation; completed-token retries are idempotent." }
     # DNS record CRUD via the bound provider
     - { name: domain_records_list,   description: "List DNS records on a domain via the bound dns_provider. Args: domain, type? (filter by record type)." }
-    - { name: domain_records_set,    description: "Upsert a DNS record. Composes list-then-create-or-edit since most providers' upsert is two-step. Args: domain, name (subdomain or @ for apex), type (A|AAAA|CNAME|MX|TXT|...), value, ttl?." }
-    - { name: domain_records_delete, description: "Delete all records matching (domain, name, type). Args: domain, name, type." }
+    - { name: domain_records_set,    description: "Create or update a DNS record. Pass record_id for an exact update; ambiguous multi-record RRsets are rejected without it. Args: domain, name, type, value, ttl?, record_id?." }
+    - { name: domain_records_delete, description: "Delete one record by record_id, or all records matching (domain, name, type) when record_id is omitted. Args: domain, name, type, record_id?." }
   ui_panels:
     - slot: project.page
       label: Domains

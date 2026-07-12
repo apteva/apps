@@ -2,6 +2,8 @@ package main
 
 import (
 	"encoding/json"
+	"fmt"
+	"strings"
 	"testing"
 
 	sdk "github.com/apteva/app-sdk"
@@ -60,11 +62,80 @@ func TestSpaceshipList_MapsRecords(t *testing.T) {
 	}
 }
 
+func TestSpaceshipList_ErrorIncludesProviderDiagnostics(t *testing.T) {
+	plat := newSpaceshipStub(map[string]*sdk.ExecuteResult{
+		"list_dns_records": {Success: false, Status: 422, Data: json.RawMessage(`{"code":"INVALID_DOMAIN","detail":"invalid domain"}`)},
+	})
+	ctx := newTestCtx(t, plat)
+
+	_, err := spaceshipTestProvider().List(ctx, "deskorareception.com")
+	if err == nil {
+		t.Fatal("expected list error")
+	}
+	msg := err.Error()
+	for _, want := range []string{
+		"provider spaceship connection 1 tool list_dns_records",
+		"GET /v1/dns/records/deskorareception.com?skip=0&take=500",
+		"non-2xx status 422",
+		"INVALID_DOMAIN",
+	} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("error %q missing %q", msg, want)
+		}
+	}
+}
+
+func TestSpaceshipList_RejectsMalformedSuccessResponse(t *testing.T) {
+	plat := newSpaceshipStub(map[string]*sdk.ExecuteResult{
+		"list_dns_records": {Success: true, Status: 200, Data: json.RawMessage(`{"unexpected":true}`)},
+	})
+	ctx := newTestCtx(t, plat)
+	_, err := spaceshipTestProvider().List(ctx, "acme.com")
+	if err == nil || !strings.Contains(err.Error(), "no items or records array") {
+		t.Fatalf("expected strict parse error, got %v", err)
+	}
+}
+
+func TestSpaceshipList_PaginatesPastFiveHundredRecords(t *testing.T) {
+	first := make([]map[string]any, 500)
+	for i := range first {
+		first[i] = map[string]any{"type": "TXT", "name": fmt.Sprintf("r%d", i), "value": "x", "ttl": 600}
+	}
+	plat := &stubPlatform{connSlug: "spaceship"}
+	plat.executeFn = func(_ int64, tool string, input map[string]any) (*sdk.ExecuteResult, error) {
+		if tool != "list_dns_records" {
+			return &sdk.ExecuteResult{Success: true, Status: 204}, nil
+		}
+		items := any(first)
+		if intArg(input, "skip", 0) == 500 {
+			items = []map[string]any{{"type": "A", "name": "@", "address": "1.2.3.4", "ttl": 600}}
+		}
+		body, _ := json.Marshal(map[string]any{"items": items})
+		return &sdk.ExecuteResult{Success: true, Status: 200, Data: body}, nil
+	}
+	ctx := newTestCtx(t, plat)
+	records, err := spaceshipTestProvider().List(ctx, "acme.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(records) != 501 {
+		t.Fatalf("records=%d, want 501", len(records))
+	}
+	if len(plat.calls) != 2 || intArg(plat.calls[1].Input, "skip", 0) != 500 {
+		t.Fatalf("pagination calls: %+v", plat.calls)
+	}
+}
+
 func TestSpaceshipUpsert_CreatesViaBatchSave(t *testing.T) {
 	plat := newSpaceshipStub(nil)
 	ctx := newTestCtx(t, plat)
 
-	action, err := spaceshipTestProvider().Upsert(ctx, "acme.com", "mail", "A", "5.6.7.8", 600)
+	prov := spaceshipTestProvider()
+	existing, err := prov.List(ctx, "acme.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	action, err := prov.Upsert(ctx, "acme.com", "mail", "A", "5.6.7.8", 600, "", existing)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -89,7 +160,12 @@ func TestSpaceshipUpsert_UnchangedShortCircuits(t *testing.T) {
 	plat := newSpaceshipStub(nil)
 	ctx := newTestCtx(t, plat)
 
-	action, err := spaceshipTestProvider().Upsert(ctx, "acme.com", "www", "CNAME", "acme.com", 600)
+	prov := spaceshipTestProvider()
+	existing, err := prov.List(ctx, "acme.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	action, err := prov.Upsert(ctx, "acme.com", "www", "CNAME", "acme.com", 600, "", existing)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -105,7 +181,12 @@ func TestSpaceshipDelete_UsesRawRecordShape(t *testing.T) {
 	plat := newSpaceshipStub(nil)
 	ctx := newTestCtx(t, plat)
 
-	if err := spaceshipTestProvider().Delete(ctx, "acme.com", "www", "CNAME"); err != nil {
+	prov := spaceshipTestProvider()
+	existing, err := prov.List(ctx, "acme.com")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := prov.Delete(ctx, "acme.com", "www", "CNAME", "", existing); err != nil {
 		t.Fatal(err)
 	}
 	calls := plat.callsFor("delete_dns_records")
@@ -145,7 +226,7 @@ func TestProviderFor_RoutesSpaceshipSlug(t *testing.T) {
 	ctx := newTestCtx(t, plat)
 	app := &App{}
 
-	prov, _, err := app.providerFor(ctx, 1)
+	prov, _, err := app.providerFor(ctx, 1, "")
 	if err != nil {
 		t.Fatal(err)
 	}
