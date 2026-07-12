@@ -79,8 +79,21 @@ func TestSnapshotModalMembersUsesDOMAncestry(t *testing.T) {
 		},
 	}}
 	boxes := snapshotBoxes(documents)
-	hasModal, members := snapshotModalMembers(documents, stringsTable, boxes)
+	hasModal, members := snapshotModalMembers(documents, stringsTable, boxes, 1600, 800)
 	if !hasModal || !members[200] || !members[300] || members[100] {
 		t.Fatalf("modal membership: has=%v members=%v", hasModal, members)
+	}
+}
+
+func TestSnapshotModalQualificationRejectsOversizedRoleDialog(t *testing.T) {
+	attrs := map[string]string{"role": "dialog"}
+	if snapshotNodeQualifiesAsModal(attrs, "aside", axBox{X: 8, Y: -328, W: 262, H: 7811}, 1600, 800) {
+		t.Fatal("oversized off-viewport role=dialog should not suppress page controls")
+	}
+	if !snapshotNodeQualifiesAsModal(attrs, "div", axBox{X: 300, Y: 180, W: 400, H: 220}, 1000, 600) {
+		t.Fatal("centered role=dialog should remain modal")
+	}
+	if !snapshotNodeQualifiesAsModal(map[string]string{"aria-modal": "true"}, "div", axBox{X: 0, Y: -500, W: 400, H: 1200}, 1000, 600) {
+		t.Fatal("aria-modal=true should remain authoritative")
 	}
 }

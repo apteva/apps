@@ -4,6 +4,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -54,6 +55,27 @@ func TestLocalNavigationLive(t *testing.T) {
 			t.Fatalf("target containing %q not found", clickText)
 		}
 		t.Logf("post-click url=%s som=%d", c.CurrentURL(), len(c.LastSetOfMark()))
+	}
+	if rawAmount := strings.TrimSpace(os.Getenv("COMPUTER_NAVIGATION_SCROLL_AMOUNT")); rawAmount != "" {
+		amount, err := strconv.Atoi(rawAmount)
+		if err != nil {
+			t.Fatalf("invalid COMPUTER_NAVIGATION_SCROLL_AMOUNT %q: %v", rawAmount, err)
+		}
+		if _, err := c.Execute(computer.Action{Type: "scroll", Direction: "down", Amount: amount}); err != nil {
+			t.Fatal(err)
+		}
+		targets = c.LastSetOfMark()
+		for _, target := range targets {
+			t.Logf("post-scroll label=%d role=%s text=%q", target.Label, target.Role, target.Text)
+		}
+	}
+	if expectedText := strings.ToLower(strings.TrimSpace(os.Getenv("COMPUTER_NAVIGATION_EXPECT_TEXT"))); expectedText != "" {
+		for _, target := range c.LastSetOfMark() {
+			if strings.Contains(strings.ToLower(target.Text), expectedText) {
+				return
+			}
+		}
+		t.Fatalf("target containing %q not found after navigation actions", expectedText)
 	}
 	t.Logf("url=%s bytes=%d som=%d", c.CurrentURL(), len(shot), len(targets))
 }
@@ -147,6 +169,40 @@ func TestLocalModalSuppressesOverlappingBackgroundControlLive(t *testing.T) {
 	if !modalButton {
 		t.Fatalf("modal action missing from SOM: %+v", c.LastSetOfMark())
 	}
+}
+
+func TestLocalOversizedRoleDialogKeepsPageControlsLive(t *testing.T) {
+	if os.Getenv("RUN_COMPUTER_NAVIGATION_TESTS") == "" {
+		t.Skip("set RUN_COMPUTER_NAVIGATION_TESTS=1")
+	}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		_, _ = w.Write([]byte(`
+<aside role="dialog" style="position:absolute;left:8px;top:-328px;width:262px;height:7811px">
+  <a href="#filter" style="position:absolute;top:700px">Price filter</a>
+</aside>
+<main style="margin-left:275px">
+  <a href="#product" style="display:block;width:300px;height:80px">Gala heel product</a>
+</main>`))
+	}))
+	defer server.Close()
+	c, err := New(computer.DisplaySize{Width: 1600, Height: 800})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	if err := c.OpenSession(computer.OpenOptions{URL: server.URL}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.ScreenshotWithOptions(computer.ScreenshotOptions{Annotate: true}); err != nil {
+		t.Fatal(err)
+	}
+	for _, target := range c.LastSetOfMark() {
+		if strings.Contains(target.Text, "Gala heel product") {
+			return
+		}
+	}
+	t.Fatalf("page control was suppressed by oversized role=dialog: %+v", c.LastSetOfMark())
 }
 
 func TestLocalClosedShadowConsentControlsLive(t *testing.T) {

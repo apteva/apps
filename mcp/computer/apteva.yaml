@@ -2,10 +2,10 @@ schema: apteva-app/v1
 
 name: computer
 display_name: Computer
-version: 0.7.48
+version: 0.7.49
 description: |
-  Watch, steer, and replay hosted browser sessions. v0.7.48 improves Set-of-Mark
-  coverage across consent dialogs, modals, shadow DOM, and cross-origin frames.
+  Watch, steer, and replay hosted browser sessions. v0.7.49 keeps Set-of-Mark
+  targets visible when sites mislabel persistent page regions as dialogs.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/computer

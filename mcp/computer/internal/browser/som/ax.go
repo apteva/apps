@@ -89,7 +89,7 @@ func EnumerateViaAX(ctx context.Context, viewportWidth, viewportHeight int) []El
 		return nil
 	}
 	boxes := snapshotBoxes(documents)
-	hasModal, modalMembers := snapshotModalMembers(documents, snapshotStrings, boxes)
+	hasModal, modalMembers := snapshotModalMembers(documents, snapshotStrings, boxes, viewportWidth, viewportHeight)
 
 	out := make([]Element, 0)
 	for _, node := range nodes {
@@ -221,7 +221,7 @@ func evaluateInFrame(ctx context.Context, frameID cdp.FrameID, expression string
 // snapshotModalMembers returns the backend IDs structurally contained by a
 // visible explicit modal. This prevents AX from reintroducing background page
 // controls that the JavaScript enumerator correctly suppressed.
-func snapshotModalMembers(documents []*domsnapshot.DocumentSnapshot, stringsTable []string, boxes map[cdp.BackendNodeID]axBox) (bool, map[cdp.BackendNodeID]bool) {
+func snapshotModalMembers(documents []*domsnapshot.DocumentSnapshot, stringsTable []string, boxes map[cdp.BackendNodeID]axBox, viewportWidth, viewportHeight int) (bool, map[cdp.BackendNodeID]bool) {
 	members := make(map[cdp.BackendNodeID]bool)
 	hasModal := false
 	for _, document := range documents {
@@ -232,10 +232,8 @@ func snapshotModalMembers(documents []*domsnapshot.DocumentSnapshot, stringsTabl
 		for index, backendID := range document.Nodes.BackendNodeID {
 			attrs := snapshotAttributes(document.Nodes, index, stringsTable)
 			name := strings.ToLower(snapshotString(document.Nodes.NodeName, index, stringsTable))
-			_, nativeOpen := attrs["open"]
-			isModal := attrs["role"] == "dialog" || attrs["aria-modal"] == "true" || (name == "dialog" && nativeOpen)
 			box, laidOut := boxes[backendID]
-			if isModal && laidOut && box.W >= 100 && box.H >= 80 {
+			if laidOut && box.W >= 100 && box.H >= 80 && snapshotNodeQualifiesAsModal(attrs, name, box, viewportWidth, viewportHeight) {
 				modalIndexes[index] = true
 				hasModal = true
 			}
@@ -257,6 +255,19 @@ func snapshotModalMembers(documents []*domsnapshot.DocumentSnapshot, stringsTabl
 		}
 	}
 	return hasModal, members
+}
+
+func snapshotNodeQualifiesAsModal(attrs map[string]string, name string, box axBox, viewportWidth, viewportHeight int) bool {
+	_, nativeOpen := attrs["open"]
+	if attrs["aria-modal"] == "true" || (name == "dialog" && nativeOpen) {
+		return true
+	}
+	if attrs["role"] != "dialog" {
+		return false
+	}
+	centerX := box.X + box.W/2
+	centerY := box.Y + box.H/2
+	return centerX >= 0 && centerX <= viewportWidth && centerY >= 0 && centerY <= viewportHeight
 }
 
 func snapshotAttributes(nodes *domsnapshot.NodeTreeSnapshot, index int, stringsTable []string) map[string]string {

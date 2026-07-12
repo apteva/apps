@@ -274,6 +274,18 @@ const EnumScript = `
       if (r.right <= 0 || r.bottom <= 0 || r.left >= vw || r.top >= vh) continue;
       var s = window.getComputedStyle(n);
       if (s.visibility === 'hidden' || s.display === 'none' || parseFloat(s.opacity) < 0.1) continue;
+      // Some sites use role=dialog for persistent page regions. Amazon's
+      // desktop search filters are one example: the sidebar is a 7,000px-tall
+      // dialog whose center is far below the viewport. Treat aria-modal and
+      // native dialogs as authoritative, but require a plain role=dialog to
+      // be centered in the viewport before suppressing the rest of the page.
+      var strongModal = n.getAttribute('aria-modal') === 'true' ||
+                        (n.tagName.toLowerCase() === 'dialog' && n.hasAttribute('open'));
+      if (!strongModal) {
+        var centerX = r.left + r.width / 2;
+        var centerY = r.top + r.height / 2;
+        if (centerX < 0 || centerX > vw || centerY < 0 || centerY > vh) continue;
+      }
       candidates.push({el: n, rect: r, area: r.width * r.height});
     }
     if (candidates.length === 0) return null;
