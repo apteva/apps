@@ -5,9 +5,9 @@ description: |
   customers, invoices, or payments — drafting an invoice, marking
   one paid, voiding, recording a wire payment, looking up balances.
   Covers invoice lifecycle (draft → open → paid / void / uncollectible),
-  picking provider AT CREATE (frozen after), currency conventions,
-  cents-not-dollars, void confirmation rules, and the v0.1.0 ⇄ stripe
-  gap. Triggers on: "invoice", "bill", "charge", "customer balance",
+  currency conventions, cents-not-dollars, Stripe payment links and
+  reusable methods, refunds, and void confirmation rules. Triggers on:
+  "invoice", "bill", "charge", "customer balance",
   "outstanding", "wire payment", "mark paid", "void invoice", or any
   billing tool call.
 command: /billing
@@ -25,50 +25,31 @@ conventions.
 
 ## Mental model
 
-- **SQLite is the source of truth.** Every read goes against the
-  local DB. Don't try to call Stripe directly to get fresh state —
-  v0.1.1's reconciler does that on a schedule.
+- **SQLite is the source of truth.** Every read goes against the local DB.
+  Verified Stripe webhooks append payment/refund rows and update invoice state.
 - **An invoice is a state machine.** `draft → open → paid | void |
   uncollectible`. Status transitions are explicit (`finalize`,
   `void`, payment events) — you don't write `status` directly.
 - **Money is integer cents.** `unit_price_cents`, `total_cents`,
   `amount_cents`. `1500` means $15.00. Never pass dollars or floats
   for money. Tax is **basis points** (`1000` = 10.00%).
-- **Provider is frozen at create.** Pick `local` or `stripe` when
-  you call `invoices_create`. To change after, delete the draft and
-  recreate. The agent's job is to get it right the first time.
+- **Invoice provider is frozen at create.** Current releases issue local
+  invoices; Stripe is a bound payment processor used for hosted Checkout
+  links and reusable payment methods.
 
-## v0.1.0 reality check
+## Stripe payment processing
 
-This install is on **v0.1.0**, which ships local-only. Provider must
-be `local`. The Stripe provider lands in **v0.1.1**:
+`invoices_send_payment_link` creates a Stripe-hosted Checkout Session for
+the invoice's exact outstanding balance. It requires either Billing's direct
+Stripe configuration or a bound `payment_processor` integration. The verified
+webhook records the payment idempotently.
 
-- `invoices_create(provider="stripe")` → returns an error.
-- `invoices_get_payment_link` → not in the tool list yet.
-- `customers_get_payment_methods` → not in the tool list yet.
-- `payments_record(method="stripe")` → returns an error.
+- Use `payment_method_setup_create` to create a hosted setup link.
+- Use `payment_methods_list` before an off-session charge workflow.
+- Never collect or store raw card/bank credentials in Billing metadata.
+- Reissuing a payment link creates a new tracked Session; previous links can
+  remain valid until Stripe expires them.
 
-If the user asks for a card-payable hosted invoice, say "v0.1.0
-ships local-only — the Stripe path lands in v0.1.1; for now I can
-draft a local invoice you'd send manually."
-
-## Picking a provider (when v0.1.1 lands)
-
-Every invoice is either `local` (record-only, no payment processing)
-or `stripe` (hosted invoice URL, card-payable, status updates from
-Stripe). Once `invoices_create` commits, the choice is locked.
-
-| Use **local** when…                       | Use **stripe** when…                       |
-|-------------------------------------------|--------------------------------------------|
-| Internal cost tracking                    | Customer needs to pay by card              |
-| Paid by wire / cash / check               | You want a hosted invoice URL to share     |
-| Free / zero-total                         | You want auto-updated payment status       |
-| Customer refuses card payment             | Customer is already in Stripe              |
-| Speculative draft you might void          | Recurring relationship                     |
-
-When v0.1.1 ships: before defaulting to `stripe`, run
-`customers_get_payment_methods(customer_id=…)`. If they have stored
-methods, default `stripe`. If they don't, ask the user.
 
 ## Lifecycle
 
@@ -92,9 +73,9 @@ tool — it takes care of timestamps and audit log entries.
 | `paid`        | no              | yes (refund only)* | no | n/a    | no     |
 | `void`        | no              | no          | (idemp.) | n/a    | no     |
 
-*v0.1.0 doesn't actually accept payments on `paid` invoices — for
-refunds, record a payment with `amount_cents < 0` while the invoice
-is still `open` or `uncollectible`. Refund-after-paid lands in v0.2.
+*A negative payment on a paid invoice records a refund and reopens it when
+the remaining paid amount falls below the total. A refund cannot exceed the
+invoice's recorded payments.
 
 ## Voiding requires confirmation
 
@@ -112,7 +93,9 @@ unless the user said "void", "void it", "cancel that invoice", or
 
 - **One currency per invoice.** Locked at `invoices_create`. To bill
   the same customer in two currencies, create two invoices.
-- Use **ISO 4217** codes (`USD`, `EUR`, `GBP`, `JPY`, `CAD`…).
+- Use supported **two-decimal ISO 4217** codes (`USD`, `EUR`, `GBP`, `CAD`…).
+  Zero/three/four-decimal currencies are rejected because the API contract is
+  explicitly integer cents.
 - The customer record has a `currency` preference — use it as the
   default on new invoices for that customer when the user doesn't
   specify.
@@ -124,10 +107,9 @@ unless the user said "void", "void it", "cancel that invoice", or
 - `tax_default_rate_bps` in the install config fills the gap when
   `invoices_create` / `invoices_add_line_item` don't set one. Many
   installs leave it at `0` and require explicit per-line tax.
-- Totals roll up: each line's `amount_cents = round(quantity *
-  unit_price_cents)`, line tax = `amount_cents * tax_rate_bps /
-  10000` (integer division per line — keeps the displayed
-  per-line subtotal consistent with the invoice total).
+- Totals roll up per line: `amount_cents = round(quantity *
+  unit_price_cents)` and tax is rounded to the nearest cent, half away from
+  zero.
 
 ## Customer first, then invoice
 
@@ -177,28 +159,24 @@ If the payment fully covers the invoice, status flips to `paid`
 automatically. Partial payments stay `open` and accumulate —
 `amount_paid_cents` adds up across rows.
 
-**Do not** pass `method="stripe"` to `payments_record`. v0.1.1's
-reconciler owns those rows; calling this tool with `method=stripe`
-is rejected.
+Stripe webhooks normally own `method="stripe"` rows. Manual Stripe recording
+is supported for reconciliation, but always include the provider's unique
+`external_id` so retries remain idempotent.
 
 ## Don'ts
 
-- Don't call `invoices_create(provider="stripe")` on v0.1.0.
-- Don't call `payments_record(method="stripe")` ever.
+- Don't pass `provider="stripe"` to `invoices_create`; Stripe processes
+  payment for locally issued invoices rather than issuing the invoice itself.
 - Don't render a PDF for a draft — finalize first so the file shows the real number.
 - Don't try to set `status` directly via `customers_update`-style
   patches — the lifecycle tools own status.
 - Don't void a paid invoice expecting a refund — record a payment
   with `amount_cents < 0` instead.
-- Don't loop `invoices_create` for batches before subscriptions
-  ship (v0.2). For repeating bills today, generate them one at a
-  time and tell the user it's a manual cycle.
 - Don't include sensitive data (card numbers, SSNs) in `notes` or
   `metadata`. Notes show in the dashboard panel; metadata is JSON
   the agent can read back.
 - Don't use `confirm` rules as a soft gate — they're the gate.
-  Ask before voiding. Ask before issuing a payment link in chat
-  channels (v0.1.1+).
+  Ask before voiding. Ask before issuing a payment link in chat channels.
 
 ## When in doubt
 

@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: billing
 display_name: Billing
-version: 0.8.16
+version: 0.8.17
 description: |
   Customers, invoices, and payments for Apteva agents and human teams.
   Per-invoice provider — local for internal/wire/cash records, stripe
@@ -14,6 +14,8 @@ description: |
   v0.8.16 includes reusable payment-method metadata in generic events
   so orchestrator apps can correlate provider-hosted setup flows.
   Billing remains product-agnostic.
+  v0.8.17 hardens tenant isolation, Checkout reconciliation, webhook
+  delivery, refunds, currency validation, and monetary rounding.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/billing
@@ -327,7 +329,7 @@ config_schema:
     type: text
     default: "USD"
     label: Default currency
-    description: ISO 4217 code used for new invoices when not specified.
+    description: Supported 2-decimal ISO 4217 code used for new invoices when not specified.
   - name: invoice_number_format
     type: text
     default: "INV-{yyyy}-{seq:04}"

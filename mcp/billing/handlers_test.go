@@ -847,6 +847,82 @@ func TestPayments_StripeIdempotent(t *testing.T) {
 	}
 }
 
+func TestPayments_RefundReopensPaidInvoice(t *testing.T) {
+	ctx := newTestCtx(t)
+	app := &App{}
+	c := mustCustomer(t, ctx, "refund@example.com", "Refund Buyer")
+	inv := mustFinalize(t, ctx, mustDraft(t, ctx, c.ID, []any{line("X", 1, 2000, 0)}).ID)
+	if _, err := app.toolPaymentsRecord(ctx, map[string]any{
+		"invoice_id": inv.ID, "amount_cents": int64(2000), "method": "stripe", "external_id": "pi_refund",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	out, err := app.toolPaymentsRecord(ctx, map[string]any{
+		"invoice_id": inv.ID, "amount_cents": int64(-500), "method": "stripe", "external_id": "re_1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := out.(map[string]any)["invoice"].(*Invoice)
+	if got.Status != "open" || got.AmountPaidCents != 1500 || got.PaidAt != "" {
+		t.Fatalf("refunded invoice = %+v, want open with 1500 paid and no paid_at", got)
+	}
+}
+
+func TestPayments_IdempotencyReturnsExactOriginalPayment(t *testing.T) {
+	ctx := newTestCtx(t)
+	app := &App{}
+	c := mustCustomer(t, ctx, "exact@example.com", "Exact Buyer")
+	inv := mustFinalize(t, ctx, mustDraft(t, ctx, c.ID, []any{line("X", 1, 3000, 0)}).ID)
+	args := map[string]any{
+		"invoice_id": inv.ID, "amount_cents": int64(1000), "method": "stripe", "external_id": "pi_exact",
+	}
+	first, err := app.toolPaymentsRecord(ctx, args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.toolPaymentsRecord(ctx, map[string]any{
+		"invoice_id": inv.ID, "amount_cents": int64(500), "method": "wire",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	replayed, err := app.toolPaymentsRecord(ctx, args)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wantID := first.(map[string]any)["payment"].(*Payment).ID
+	gotID := replayed.(map[string]any)["payment"].(*Payment).ID
+	if gotID != wantID {
+		t.Fatalf("idempotent replay returned payment %d, want original %d", gotID, wantID)
+	}
+}
+
+func TestIssuer_GlobalScopeIsProjectPartitioned(t *testing.T) {
+	ctx := newGlobalTestCtx(t)
+	app := &App{}
+	if _, err := app.toolIssuerSet(ctx, map[string]any{
+		"_project_id": "project-a", "display_name": "Company A",
+		"bank": map[string]any{"iban": "A-IBAN"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.toolIssuerSet(ctx, map[string]any{
+		"_project_id": "project-b", "display_name": "Company B",
+		"bank": map[string]any{"iban": "B-IBAN"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for pid, want := range map[string]string{"project-a": "Company A", "project-b": "Company B"} {
+		out, err := app.toolIssuerGet(ctx, map[string]any{"_project_id": pid})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := out.(map[string]any)["issuer"].(*Issuer).DisplayName; got != want {
+			t.Fatalf("issuer for %s = %q, want %q", pid, got, want)
+		}
+	}
+}
+
 func TestPayments_RejectsOnDraftInvoice(t *testing.T) {
 	ctx := newTestCtx(t)
 	app := &App{}

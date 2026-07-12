@@ -1,18 +1,19 @@
-# Billing (v0.8.1)
+# Billing (v0.8.17)
 
 Customers, invoices, and payments for Apteva agents and human teams.
 
-## What's in v0.1.0
+## Current capabilities
 
 - **Customers** with billing address, tax IDs, soft-delete + merge.
 - **Invoices** with line items and an explicit lifecycle
-  (draft → open → paid / void / uncollectible). Per-invoice
-  `provider` field (`local` only in v0.1.0; `stripe` lands in v0.1.1)
-  set at create time and frozen for the rest of the row's life.
-- **Payments** for non-Stripe methods — wire, cash, check, other.
+  (draft → open → paid / void / uncollectible). The invoice issuer remains
+  local; Stripe can process its outstanding balance through Checkout.
+- **Payments and refunds** for Stripe, wire, cash, check, and other methods,
+  with provider-ID idempotency and paid-invoice reopening after refunds.
 - **Append-only audit log** per invoice for status transitions.
-- **15 MCP tools** covering customer CRUD + invoice lifecycle +
-  payment recording + PDF/print rendering.
+- **Stripe Checkout payment links** reconciled against persisted expected
+  amount/currency/session records before invoice state changes.
+- **Reusable payment methods** through provider-hosted setup sessions.
 - **PDF + print view** at `GET /invoices/{id}/pdf` (server-rendered
   via gofpdf — Helvetica, A4, no font embedding) and
   `GET /invoices/{id}/print` (self-contained HTML for browser-driven
@@ -28,21 +29,11 @@ Customers, invoices, and payments for Apteva agents and human teams.
   - `global` — one install across all projects, isolation by
     `project_id` partition column.
 
-## What's deferred to v0.1.1+
-
-- **Stripe provider** — `requires.integrations.stripe` wiring,
-  push-at-finalize, periodic reconciler. `invoices_get_payment_link`
-  + `customers_get_payment_methods` tools.
-- **Webhooks** — strictly additive on the v0.1 schema (one new
-  table, one new manifest field). v0.1.0 already has the unique
-  index that will make webhook + reconciler writes idempotent.
-
-## What's deferred further (v0.2+)
+## Deferred
 
 - Subscriptions / recurring billing.
 - Stripe Tax / Avalara.
 - Multi-currency on a single invoice.
-- Refunds beyond `payments_record(amount<0)`.
 - Quotes.
 - Reporting (MRR / ARR / aging).
 
@@ -69,4 +60,4 @@ go test -tags integration ./...     # tier 2, ~2s — real binary, real HTTP
 apteva test ./scenarios/            # tier 3, ~3min — live agent + LLM
 ```
 
-Counts today: 48 tier 1 tests · 9 tier 2 tests · 5 tier 3 scenarios.
+The suite includes unit, real-sidecar integration, and live-agent scenarios.

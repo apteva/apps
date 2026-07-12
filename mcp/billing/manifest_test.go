@@ -40,6 +40,15 @@ func TestEmbeddedManifest_Valid(t *testing.T) {
 	if !foundProcessor {
 		t.Error("embedded manifest missing payment_processor integration role")
 	}
+	foundPublicWebhook := false
+	for _, route := range m.Provides.HTTPRoutes {
+		if route.Prefix == "/webhooks/stripe" && route.NoAuth {
+			foundPublicWebhook = true
+		}
+	}
+	if !foundPublicWebhook {
+		t.Error("embedded manifest must expose /webhooks/stripe with no_auth=true")
+	}
 	scopes := map[string]bool{}
 	for _, s := range m.Scopes {
 		scopes[string(s)] = true

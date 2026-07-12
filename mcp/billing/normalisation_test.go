@@ -46,13 +46,13 @@ func TestRoundCents(t *testing.T) {
 }
 
 func TestLooksLikeISO4217(t *testing.T) {
-	good := []string{"USD", "EUR", "GBP", "JPY", "CAD", "XYZ"}
+	good := []string{"USD", "EUR", "GBP", "CAD", "XYZ"}
 	for _, s := range good {
 		if !looksLikeISO4217(s) {
 			t.Errorf("expected %q to be valid", s)
 		}
 	}
-	bad := []string{"", "us", "USDS", "us d", "U5D", "usd", "Us-D"}
+	bad := []string{"", "us", "USDS", "us d", "U5D", "usd", "Us-D", "JPY", "KWD"}
 	for _, s := range bad {
 		if looksLikeISO4217(s) {
 			t.Errorf("expected %q to be invalid", s)
@@ -107,16 +107,14 @@ func TestComputeTotals_WithTax(t *testing.T) {
 	}
 }
 
-func TestComputeTotals_TaxRoundsDownPerLine(t *testing.T) {
-	// 7.25% tax on $13.37 = 96.93 cents. Per-line integer division
-	// truncates to 96, not 97. This is the "rounds down per line"
-	// invariant the panel relies on for displayed-total consistency.
+func TestComputeTotals_TaxRoundsToNearestPerLine(t *testing.T) {
+	// 7.25% tax on $13.37 = 96.93 cents, which rounds to 97.
 	items := []LineItem{
 		{AmountCents: 1337, TaxRateBps: 725},
 	}
 	_, tax, _ := computeTotals(items)
-	if tax != 96 {
-		t.Errorf("got tax=%d, want 96 (1337*725/10000 truncated)", tax)
+	if tax != 97 {
+		t.Errorf("got tax=%d, want 97", tax)
 	}
 }
 
