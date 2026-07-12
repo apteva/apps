@@ -14,9 +14,12 @@ package main
 // refactor that drops the mutex.
 
 import (
+	"errors"
 	"strings"
 	"sync"
 	"testing"
+
+	"golang.org/x/crypto/ssh"
 )
 
 func TestLockedWriter_NoLostBytesUnderConcurrentWrites(t *testing.T) {
@@ -93,6 +96,38 @@ func TestIsSSHConnError_Classification(t *testing.T) {
 		if got := isSSHConnError(c.err); got != c.want {
 			t.Errorf("%s: isSSHConnError(%v) = %v, want %v", c.name, c.err, got, c.want)
 		}
+	}
+}
+
+func TestResolveSSHRunResult_RecoversMissingExitStatusWithMarker(t *testing.T) {
+	marker := "__APTEVA_EXIT_0123456789abcdef__="
+	out, exit, err := resolveSSHRunResult("installed\n"+marker+"0\n", marker, &ssh.ExitMissingError{})
+	if err != nil || exit != 0 || out != "installed" {
+		t.Fatalf("out=%q exit=%d err=%v", out, exit, err)
+	}
+}
+
+func TestResolveSSHRunResult_DoesNotGuessWithoutMarker(t *testing.T) {
+	missing := &ssh.ExitMissingError{}
+	out, exit, err := resolveSSHRunResult("installed", "__APTEVA_EXIT_missing__=", missing)
+	if out != "installed" || exit != -1 || !errors.Is(err, missing) {
+		t.Fatalf("out=%q exit=%d err=%v", out, exit, err)
+	}
+}
+
+func TestResolveSSHRunResult_PreservesNonZeroExit(t *testing.T) {
+	marker := "__APTEVA_EXIT_0123456789abcdef__="
+	out, exit, err := resolveSSHRunResult("bad input\n"+marker+"42\n", marker, &ssh.ExitMissingError{})
+	if out != "bad input" || exit != 42 || err == nil || !strings.Contains(err.Error(), "42") {
+		t.Fatalf("out=%q exit=%d err=%v", out, exit, err)
+	}
+}
+
+func TestWrapSSHCommand_QuotesArbitraryCommand(t *testing.T) {
+	marker := "__APTEVA_EXIT_test__="
+	wrapped := wrapSSHCommand(`printf '%s' "$HOME"`, marker)
+	if !strings.Contains(wrapped, marker) || !strings.Contains(wrapped, `'"'"'`) {
+		t.Fatalf("wrapped command is not safely quoted: %q", wrapped)
 	}
 }
 

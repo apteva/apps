@@ -16,11 +16,13 @@ import (
 	"crypto/ed25519"
 	"crypto/rand"
 	"encoding/base64"
+	"encoding/hex"
 	"encoding/pem"
 	"errors"
 	"fmt"
 	"io"
 	"net"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -332,8 +334,12 @@ func runSSHOnce(client *ssh.Client, cmd string, timeout time.Duration) (string, 
 
 	ctx, cancel := context.WithTimeout(context.Background(), timeout)
 	defer cancel()
+	marker, err := newSSHExitMarker()
+	if err != nil {
+		return "", -1, err
+	}
 	done := make(chan error, 1)
-	go func() { done <- session.Run(cmd) }()
+	go func() { done <- session.Run(wrapSSHCommand(cmd, marker)) }()
 	select {
 	case <-ctx.Done():
 		// Best-effort kill — close the session, the connection will
@@ -345,17 +351,70 @@ func runSSHOnce(client *ssh.Client, cmd string, timeout time.Duration) (string, 
 		out := writer.String()
 		return out, -1, fmt.Errorf("command timed out after %s", timeout)
 	case runErr := <-done:
-		out := writer.String()
-		exit := 0
-		if runErr != nil {
-			if exitErr, ok := runErr.(*ssh.ExitError); ok {
-				exit = exitErr.ExitStatus()
-			} else {
-				exit = -1
-			}
-		}
-		return out, exit, runErr
+		return resolveSSHRunResult(writer.String(), marker, runErr)
 	}
+}
+
+func newSSHExitMarker() (string, error) {
+	var nonce [16]byte
+	if _, err := rand.Read(nonce[:]); err != nil {
+		return "", fmt.Errorf("generate SSH command marker: %w", err)
+	}
+	return "__APTEVA_EXIT_" + hex.EncodeToString(nonce[:]) + "__=", nil
+}
+
+func wrapSSHCommand(cmd, marker string) string {
+	return "sh -c " + quoteShellArg(cmd) +
+		"; rc=$?; printf '\\n" + marker + "%s\\n' \"$rc\"; exit \"$rc\""
+}
+
+func quoteShellArg(value string) string {
+	return "'" + strings.ReplaceAll(value, "'", `'"'"'`) + "'"
+}
+
+func resolveSSHRunResult(output, marker string, runErr error) (string, int, error) {
+	clean, markerExit, markerOK := stripSSHExitMarker(output, marker)
+	if runErr == nil {
+		if markerOK && markerExit != 0 {
+			return clean, markerExit, fmt.Errorf("remote command exited with status %d", markerExit)
+		}
+		return clean, 0, nil
+	}
+	if exitErr, ok := runErr.(*ssh.ExitError); ok {
+		return clean, exitErr.ExitStatus(), runErr
+	}
+	if _, missing := runErr.(*ssh.ExitMissingError); missing && markerOK {
+		if markerExit == 0 {
+			return clean, 0, nil
+		}
+		return clean, markerExit, fmt.Errorf("remote command exited with status %d", markerExit)
+	}
+	return clean, -1, runErr
+}
+
+func stripSSHExitMarker(output, marker string) (string, int, bool) {
+	prefix := "\n" + marker
+	start := strings.LastIndex(output, prefix)
+	if start < 0 {
+		return output, -1, false
+	}
+	codeStart := start + len(prefix)
+	codeEnd := codeStart
+	for codeEnd < len(output) && output[codeEnd] >= '0' && output[codeEnd] <= '9' {
+		codeEnd++
+	}
+	if codeEnd == codeStart || (codeEnd < len(output) && output[codeEnd] != '\n') {
+		return output, -1, false
+	}
+	exit, err := strconv.Atoi(output[codeStart:codeEnd])
+	if err != nil {
+		return output, -1, false
+	}
+	removeEnd := codeEnd
+	if removeEnd < len(output) && output[removeEnd] == '\n' {
+		removeEnd++
+	}
+	return output[:start] + output[removeEnd:], exit, true
 }
 
 // isSSHConnError flags errors that mean the cached client is no
