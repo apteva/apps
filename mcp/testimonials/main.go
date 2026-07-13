@@ -17,7 +17,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: testimonials
 display_name: Testimonials
-version: 0.1.2
+version: 0.1.3
 description: |
   Lightweight customer proof store for Apteva. Keep text testimonials,
   reviews, ratings, attribution, consent, publication status, and an
@@ -105,7 +105,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		return errors.New("testimonials requires a db block")
 	}
 	globalCtx = ctx
-	ctx.Logger().Info("testimonials mounted", "version", "0.1.2")
+	ctx.Logger().Info("testimonials mounted", "version", "0.1.3")
 	return nil
 }
 

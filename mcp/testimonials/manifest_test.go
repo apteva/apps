@@ -44,8 +44,8 @@ func TestEmbeddedManifestMatchesReleaseManifest(t *testing.T) {
 	if !reflect.DeepEqual(external, embedded) {
 		t.Fatal("embedded manifest differs from apteva.yaml")
 	}
-	if external.Version != "0.1.2" {
-		t.Fatalf("version = %q, want 0.1.2", external.Version)
+	if external.Version != "0.1.3" {
+		t.Fatalf("version = %q, want 0.1.3", external.Version)
 	}
 }
 

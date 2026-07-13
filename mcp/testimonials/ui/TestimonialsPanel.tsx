@@ -290,13 +290,14 @@ export default function TestimonialsPanel({ projectId }: NativePanelProps) {
     <div className="testimonials-shell h-full min-h-0 bg-bg text-text">
       <style>{`
         .testimonials-shell { display: block; }
+        .testimonials-editor-frame { width: 100%; max-width: 1400px; margin-inline: auto; }
         .testimonials-meta-grid, .testimonials-content-grid { display: grid; }
         @media (min-width: 1024px) {
-          .testimonials-shell { display: grid; grid-template-columns: 320px minmax(0, 1fr); }
+          .testimonials-shell { display: grid; grid-template-columns: 300px minmax(0, 1fr); }
         }
         @media (min-width: 1280px) {
-          .testimonials-meta-grid { grid-template-columns: minmax(0, 1fr) 150px 150px 170px; }
-          .testimonials-content-grid { grid-template-columns: minmax(0, 1fr) 300px; }
+          .testimonials-meta-grid { grid-template-columns: minmax(280px, 1fr) 150px 150px 170px; }
+          .testimonials-content-grid { grid-template-columns: minmax(0, 1fr) 320px; }
         }
       `}</style>
       <aside className={`${mobileView === "editor" ? "hidden lg:flex" : "flex"} h-full min-h-0 flex-col border-r border-border`}>
@@ -364,8 +365,8 @@ export default function TestimonialsPanel({ projectId }: NativePanelProps) {
       </aside>
 
       <main className={`${mobileView === "list" ? "hidden lg:flex" : "flex"} h-full min-h-0 flex-col`}>
-        <header className="min-h-14 border-b border-border px-3 py-2 sm:px-4">
-          <div className="flex min-w-0 items-center gap-2">
+        <header className="min-h-14 border-b border-border px-3 py-2 sm:px-5">
+          <div className="testimonials-editor-frame flex min-w-0 items-center gap-2">
             <button type="button" onClick={backToList} className="flex h-8 w-8 shrink-0 items-center justify-center rounded border border-border hover:bg-bg-input lg:hidden" aria-label="Back to testimonials" title="Back to testimonials">←</button>
             <div className="min-w-0 flex-1">
               <div className="flex items-center gap-2">
@@ -383,7 +384,8 @@ export default function TestimonialsPanel({ projectId }: NativePanelProps) {
           {notice && <div className={`mt-2 text-xs ${notice.tone === "error" ? "text-red" : notice.tone === "success" ? "text-green" : "text-text-muted"}`} role={notice.tone === "error" ? "alert" : "status"}>{notice.text}</div>}
         </header>
 
-        <div className="min-h-0 flex-1 overflow-auto p-3 sm:p-4">
+        <div className="min-h-0 flex-1 overflow-auto px-3 py-4 sm:px-5 sm:py-5">
+          <div className="testimonials-editor-frame">
           <div className="testimonials-meta-grid grid-cols-1 gap-3 sm:grid-cols-2">
             <Field label="Title" id="testimonial-title">
               <input id="testimonial-title" value={draft.title} maxLength={500} onChange={(event) => setDraft({ ...draft, title: event.target.value })} className={inputClass} />
@@ -405,7 +407,7 @@ export default function TestimonialsPanel({ projectId }: NativePanelProps) {
 
           {publishBlocked && <div className="mt-3 rounded border border-yellow/40 bg-yellow/10 px-3 py-2 text-sm text-yellow" role="alert">Publishing requires granted consent and public or marketing permission.</div>}
 
-          <div className="testimonials-content-grid mt-4 grid-cols-1 gap-5">
+          <div className="testimonials-content-grid mt-5 grid-cols-1 gap-6">
             <section className="min-w-0">
               <Field label="Quote" id="testimonial-quote">
                 <textarea id="testimonial-quote" value={draft.quote} maxLength={5000} onChange={(event) => setDraft({ ...draft, quote: event.target.value })} className={`${inputClass} h-28 resize-y p-3 leading-5`} />
@@ -438,7 +440,7 @@ export default function TestimonialsPanel({ projectId }: NativePanelProps) {
               </div>
             </section>
 
-            <aside className="min-w-0 border-t border-border pt-4 xl:border-l xl:border-t-0 xl:pl-5 xl:pt-0">
+            <aside className="min-w-0 border-t border-border pt-5 xl:border-l xl:border-t-0 xl:pl-6 xl:pt-0">
               <div>
                 <span className="block text-xs text-text-muted">Rating</span>
                 <div className="mt-1 flex items-center gap-1" role="group" aria-label="Rating">
@@ -473,6 +475,7 @@ export default function TestimonialsPanel({ projectId }: NativePanelProps) {
 
               <button type="button" onClick={archive} disabled={!draft.id || saving} className="mt-5 w-full rounded border border-red/50 px-3 py-2 text-sm text-red hover:bg-red/10 disabled:opacity-40 sm:hidden">Archive</button>
             </aside>
+          </div>
           </div>
         </div>
       </main>
