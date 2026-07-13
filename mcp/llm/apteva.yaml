@@ -2,12 +2,12 @@ schema: apteva-app/v1
 
 name: llm
 display_name: LLM Gateway
-version: 0.3.0
+version: 0.4.0
 description: |
   Managed AI API access for Apteva-hosted apps and agents. Provides an
   OpenAI-compatible tenant-safe gateway that routes requests to configured
-  model providers, enforces project policy and spend caps, tracks usage, and
-  exposes usage records for orchestration apps to consume.
+  model providers, enforces project and subject policy, tracks raw token and
+  request usage, and exposes idempotent usage records for orchestration apps.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/llm
@@ -43,6 +43,11 @@ requires:
       compatible_slugs: [openrouter]
       required: false
       label: "OpenRouter provider"
+    - role: opencode_go_provider
+      kind: integration
+      compatible_slugs: [opencode-go]
+      required: false
+      label: "OpenCode Go provider"
 
 provides:
   http_routes:
@@ -54,6 +59,10 @@ provides:
       description: OpenAI-compatible chat completion through the configured LLM gateway.
     - name: llm_models_list
       description: List models allowed by the current policy.
+    - name: llm_models_sync
+      description: Refresh discovered models from configured and bound providers.
+    - name: llm_embeddings_create
+      description: Create embeddings through an OpenAI-compatible configured provider.
     - name: llm_usage_get
       description: Return usage for a project, subject, or model in a monthly period.
     - name: llm_provider_configs_list
@@ -66,6 +75,8 @@ provides:
       description: Replace the project or subject policy.
     - name: llm_tokens_create
       description: Issue an OpenAI-compatible bearer token for app, agent, project, or system access.
+    - name: llm_tokens_list
+      description: List issued LLM tokens without exposing token secrets.
     - name: llm_tokens_revoke
       description: Revoke an issued LLM token by token id, token value, or subject.
     - name: llm_subject_suspend
@@ -84,8 +95,8 @@ provides:
       description: An LLM request failed before or during provider execution.
     - name: llm.usage.recorded
       description: LLM usage was recorded.
-    - name: llm.spend_cap.exceeded
-      description: A request was denied because a policy spend cap was exceeded.
+    - name: llm.policy.limit_exceeded
+      description: A request was denied because a project or subject usage limit was exceeded.
     - name: llm.provider.failed
       description: A provider route returned a retryable or terminal failure.
 
