@@ -15,24 +15,46 @@ func (a *App) handleTestimonialsCollection(w http.ResponseWriter, r *http.Reques
 	app := ctxForRequest(r)
 	switch r.Method {
 	case http.MethodGet:
-		limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
-		items, err := listTestimonials(app.AppDB(), app.CurrentProject(), TestimonialFilter{
-			Status:        r.URL.Query().Get("status"),
-			Kind:          r.URL.Query().Get("kind"),
-			Source:        r.URL.Query().Get("source"),
-			Tag:           r.URL.Query().Get("tag"),
-			Q:             r.URL.Query().Get("q"),
-			PublishedOnly: r.URL.Query().Get("published_only") == "1",
-			Limit:         limit,
+		limit, err := queryInt(r, "limit")
+		if err != nil {
+			httpErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		offset, err := queryInt(r, "offset")
+		if err != nil {
+			httpErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		publishedOnly := queryBool(r, "published_only")
+		items, total, err := listTestimonialsPage(app.AppDB(), app.CurrentProject(), TestimonialFilter{
+			Status:          r.URL.Query().Get("status"),
+			Kind:            r.URL.Query().Get("kind"),
+			Source:          r.URL.Query().Get("source"),
+			Tag:             r.URL.Query().Get("tag"),
+			Q:               r.URL.Query().Get("q"),
+			PublishedOnly:   publishedOnly,
+			IncludeArchived: queryBool(r, "include_archived"),
+			Limit:           limit,
+			Offset:          offset,
 		})
 		if err != nil {
 			httpErr(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		httpJSON(w, map[string]any{"testimonials": items})
+		var responseItems any = items
+		if publishedOnly {
+			responseItems = publicTestimonials(items)
+		}
+		httpJSON(w, map[string]any{
+			"testimonials": responseItems,
+			"total":        total,
+			"limit":        normalizedLimit(limit),
+			"offset":       offset,
+			"has_more":     offset+len(items) < total,
+		})
 	case http.MethodPost:
 		var t Testimonial
-		if err := decodeJSON(r, &t); err != nil {
+		if err := decodeJSON(w, r, &t); err != nil {
 			httpErr(w, http.StatusBadRequest, err.Error())
 			return
 		}
@@ -42,10 +64,9 @@ func (a *App) handleTestimonialsCollection(w http.ResponseWriter, r *http.Reques
 			return
 		}
 		app.Emit("testimonial.created", map[string]any{"id": created.ID, "status": created.Status, "kind": created.Kind})
-		w.WriteHeader(http.StatusCreated)
-		httpJSON(w, map[string]any{"testimonial": created})
+		httpJSONStatus(w, http.StatusCreated, map[string]any{"testimonial": created})
 	default:
-		httpErr(w, http.StatusMethodNotAllowed, "method not allowed")
+		methodNotAllowed(w, "GET, POST")
 	}
 }
 
@@ -78,8 +99,17 @@ func (a *App) handleTestimonialsItem(w http.ResponseWriter, r *http.Request) {
 			httpJSON(w, map[string]any{"testimonial": item})
 		case http.MethodPatch:
 			var fields map[string]any
-			if err := decodeJSON(r, &fields); err != nil {
+			if err := decodeJSON(w, r, &fields); err != nil {
 				httpErr(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			before, err := getTestimonial(app.AppDB(), app.CurrentProject(), id)
+			if err != nil {
+				writeStoreErr(w, err, "testimonial not found")
+				return
+			}
+			if before == nil {
+				httpErr(w, http.StatusNotFound, "testimonial not found")
 				return
 			}
 			item, err := updateTestimonial(app.AppDB(), app.CurrentProject(), id, fields)
@@ -88,6 +118,9 @@ func (a *App) handleTestimonialsItem(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			app.Emit("testimonial.updated", map[string]any{"id": item.ID, "status": item.Status, "kind": item.Kind})
+			if before.Status != item.Status {
+				app.Emit("testimonial.status_changed", map[string]any{"id": item.ID, "status": item.Status})
+			}
 			httpJSON(w, map[string]any{"testimonial": item})
 		case http.MethodDelete:
 			hard := r.URL.Query().Get("hard") == "1"
@@ -96,19 +129,22 @@ func (a *App) handleTestimonialsItem(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			app.Emit("testimonial.deleted", map[string]any{"id": id, "hard": hard})
+			if !hard {
+				app.Emit("testimonial.status_changed", map[string]any{"id": id, "status": "archived"})
+			}
 			httpJSON(w, map[string]any{"deleted": hard, "archived": !hard, "id": id})
 		default:
-			httpErr(w, http.StatusMethodNotAllowed, "method not allowed")
+			methodNotAllowed(w, "GET, PATCH, DELETE")
 		}
 	case "status":
 		if r.Method != http.MethodPost {
-			httpErr(w, http.StatusMethodNotAllowed, "POST only")
+			methodNotAllowed(w, "POST")
 			return
 		}
 		var body struct {
 			Status string `json:"status"`
 		}
-		if err := decodeJSON(r, &body); err != nil {
+		if err := decodeJSON(w, r, &body); err != nil {
 			httpErr(w, http.StatusBadRequest, err.Error())
 			return
 		}
@@ -134,12 +170,14 @@ func ctxForRequest(r *http.Request) *sdk.AppCtx {
 	return globalCtx
 }
 
-func decodeJSON(r *http.Request, dst any) error {
+func decodeJSON(w http.ResponseWriter, r *http.Request, dst any) error {
 	if r.Body == nil {
 		return nil
 	}
-	dec := json.NewDecoder(io.LimitReader(r.Body, 2<<20))
+	r.Body = http.MaxBytesReader(w, r.Body, 2<<20)
+	dec := json.NewDecoder(r.Body)
 	dec.UseNumber()
+	dec.DisallowUnknownFields()
 	err := dec.Decode(dst)
 	if errors.Is(err, io.EOF) {
 		return nil
@@ -147,19 +185,66 @@ func decodeJSON(r *http.Request, dst any) error {
 	if err != nil {
 		return errors.New("invalid json: " + err.Error())
 	}
+	if err := dec.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return errors.New("invalid json: expected one object")
+		}
+		return errors.New("invalid json: " + err.Error())
+	}
 	return nil
 }
 
 func httpJSON(w http.ResponseWriter, v any) {
+	httpJSONStatus(w, http.StatusOK, v)
+}
+
+func httpJSONStatus(w http.ResponseWriter, status int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.WriteHeader(status)
 	_ = json.NewEncoder(w).Encode(v)
 }
 
 func httpErr(w http.ResponseWriter, code int, msg string) {
 	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(map[string]string{"error": msg})
+}
+
+func methodNotAllowed(w http.ResponseWriter, allow string) {
+	w.Header().Set("Allow", allow)
+	httpErr(w, http.StatusMethodNotAllowed, "method not allowed")
+}
+
+func queryBool(r *http.Request, key string) bool {
+	switch strings.ToLower(strings.TrimSpace(r.URL.Query().Get(key))) {
+	case "1", "true", "yes":
+		return true
+	default:
+		return false
+	}
+}
+
+func queryInt(r *http.Request, key string) (int, error) {
+	raw := strings.TrimSpace(r.URL.Query().Get(key))
+	if raw == "" {
+		return 0, nil
+	}
+	value, err := strconv.Atoi(raw)
+	if err != nil {
+		return 0, errors.New(key + " must be an integer")
+	}
+	return value, nil
+}
+
+func normalizedLimit(limit int) int {
+	if limit <= 0 || limit > 200 {
+		return 50
+	}
+	return limit
 }
 
 func writeStoreErr(w http.ResponseWriter, err error, notFound string) {

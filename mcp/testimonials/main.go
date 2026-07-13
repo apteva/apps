@@ -17,7 +17,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: testimonials
 display_name: Testimonials
-version: 0.1.0
+version: 0.1.1
 description: |
   Lightweight customer proof store for Apteva. Keep text testimonials,
   reviews, ratings, attribution, consent, publication status, and an
@@ -40,7 +40,7 @@ provides:
     - prefix: /
   mcp_tools:
     - { name: testimonials_create, description: "Create a testimonial or review. Args: title?, quote?, body?, rating?, author fields?, status?, kind?, source?, media_file_id?, media_url?, tags?, metadata?." }
-    - { name: testimonials_list, description: "List testimonials. Args: status?, kind?, source?, tag?, published_only?, q?, limit?." }
+    - { name: testimonials_list, description: "List testimonials with exact tag filtering and pagination. Args: status?, kind?, source?, tag?, published_only?, include_archived?, q?, limit?, offset?. Published-only results omit private fields." }
     - { name: testimonials_get, description: "Fetch one testimonial. Args: id." }
     - { name: testimonials_update, description: "Patch testimonial fields. Args: id plus editable fields." }
     - { name: testimonials_set_status, description: "Set lifecycle status. Args: id, status (draft|submitted|approved|rejected|published|archived)." }
@@ -105,7 +105,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		return errors.New("testimonials requires a db block")
 	}
 	globalCtx = ctx
-	ctx.Logger().Info("testimonials mounted", "version", "0.1.0")
+	ctx.Logger().Info("testimonials mounted", "version", "0.1.1")
 	return nil
 }
 
@@ -125,13 +125,15 @@ func (a *App) MCPTools() []sdk.Tool {
 	return []sdk.Tool{
 		{Name: "testimonials_create", Description: "Create a testimonial or review.", InputSchema: schemaObject(testimonialCreateSchema(), nil), Handler: a.toolTestimonialsCreate},
 		{Name: "testimonials_list", Description: "List testimonials.", InputSchema: schemaObject(map[string]any{
-			"status":         enumSchema(statusValues()),
-			"kind":           enumSchema(kindValues()),
-			"source":         map[string]any{"type": "string"},
-			"tag":            map[string]any{"type": "string"},
-			"published_only": map[string]any{"type": "boolean"},
-			"q":              map[string]any{"type": "string"},
-			"limit":          map[string]any{"type": "integer"},
+			"status":           enumSchema(statusValues()),
+			"kind":             enumSchema(kindValues()),
+			"source":           map[string]any{"type": "string"},
+			"tag":              map[string]any{"type": "string"},
+			"published_only":   map[string]any{"type": "boolean"},
+			"include_archived": map[string]any{"type": "boolean"},
+			"q":                map[string]any{"type": "string"},
+			"limit":            map[string]any{"type": "integer"},
+			"offset":           map[string]any{"type": "integer", "minimum": 0},
 		}, nil), Handler: a.toolTestimonialsList},
 		{Name: "testimonials_get", Description: "Fetch one testimonial.", InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}}, []string{"id"}), Handler: a.toolTestimonialsGet},
 		{Name: "testimonials_update", Description: "Patch testimonial fields.", InputSchema: schemaObject(testimonialUpdateSchema(), []string{"id"}), Handler: a.toolTestimonialsUpdate},

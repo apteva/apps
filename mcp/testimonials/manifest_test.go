@@ -1,6 +1,8 @@
 package main
 
 import (
+	"os"
+	"reflect"
 	"testing"
 
 	sdk "github.com/apteva/app-sdk"
@@ -22,6 +24,27 @@ func TestEmbeddedManifestValid(t *testing.T) {
 	}
 	if len(m.Provides.UIPanels) != 1 {
 		t.Fatal("ui panel missing")
+	}
+}
+
+func TestEmbeddedManifestMatchesReleaseManifest(t *testing.T) {
+	externalBytes, err := os.ReadFile("apteva.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	external, err := sdk.ParseManifest(externalBytes)
+	if err != nil {
+		t.Fatalf("parse apteva.yaml: %v", err)
+	}
+	embedded, err := sdk.ParseManifest([]byte(manifestYAML))
+	if err != nil {
+		t.Fatalf("parse embedded manifest: %v", err)
+	}
+	if !reflect.DeepEqual(external, embedded) {
+		t.Fatal("embedded manifest differs from apteva.yaml")
+	}
+	if external.Version != "0.1.1" {
+		t.Fatalf("version = %q, want 0.1.1", external.Version)
 	}
 }
 

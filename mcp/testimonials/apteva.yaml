@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: testimonials
 display_name: Testimonials
-version: 0.1.0
+version: 0.1.1
 description: |
   Lightweight customer proof store for Apteva. Keep text testimonials,
   reviews, ratings, attribution, consent, publication status, and an
@@ -29,7 +29,7 @@ provides:
     - prefix: /
   mcp_tools:
     - { name: testimonials_create, description: "Create a testimonial or review. Args: title?, quote?, body?, rating?, author fields?, status?, kind?, source?, media_file_id?, media_url?, tags?, metadata?." }
-    - { name: testimonials_list, description: "List testimonials. Args: status?, kind?, source?, tag?, published_only?, q?, limit?." }
+    - { name: testimonials_list, description: "List testimonials with exact tag filtering and pagination. Args: status?, kind?, source?, tag?, published_only?, include_archived?, q?, limit?, offset?. Published-only results omit private fields." }
     - { name: testimonials_get, description: "Fetch one testimonial. Args: id." }
     - { name: testimonials_update, description: "Patch testimonial fields. Args: id plus editable fields." }
     - { name: testimonials_set_status, description: "Set lifecycle status. Args: id, status (draft|submitted|approved|rejected|published|archived)." }

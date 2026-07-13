@@ -3,7 +3,9 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"strconv"
+	"strings"
 )
 
 func strArg(args map[string]any, key string) string {
@@ -47,12 +49,21 @@ func intFromAny(v any) (int, bool) {
 	case int:
 		return x, true
 	case int64:
+		if int64(int(x)) != x {
+			return 0, false
+		}
 		return int(x), true
 	case float64:
+		if math.IsNaN(x) || math.IsInf(x, 0) || math.Trunc(x) != x || x > float64(math.MaxInt) || x < float64(math.MinInt) {
+			return 0, false
+		}
 		return int(x), true
 	case json.Number:
 		n, err := x.Int64()
-		return int(n), err == nil
+		if err != nil || int64(int(n)) != n {
+			return 0, false
+		}
+		return int(n), true
 	case string:
 		n, err := strconv.Atoi(x)
 		return n, err == nil
@@ -91,6 +102,7 @@ func cleanStrings(in []string) []string {
 	out := []string{}
 	seen := map[string]bool{}
 	for _, s := range in {
+		s = strings.TrimSpace(s)
 		if s == "" || seen[s] {
 			continue
 		}
@@ -111,29 +123,8 @@ func mapArg(args map[string]any, key string) (map[string]any, bool) {
 	return nil, false
 }
 
-func testimonialFromArgs(args map[string]any) Testimonial {
-	t := Testimonial{
-		Status:          strArg(args, "status"),
-		Kind:            strArg(args, "kind"),
-		Source:          strArg(args, "source"),
-		Title:           strArg(args, "title"),
-		Quote:           strArg(args, "quote"),
-		Body:            strArg(args, "body"),
-		AuthorName:      strArg(args, "author_name"),
-		AuthorRole:      strArg(args, "author_role"),
-		AuthorCompany:   strArg(args, "author_company"),
-		AuthorEmail:     strArg(args, "author_email"),
-		MediaFileID:     strArg(args, "media_file_id"),
-		MediaURL:        strArg(args, "media_url"),
-		ConsentStatus:   strArg(args, "consent_status"),
-		PermissionScope: strArg(args, "permission_scope"),
-		Tags:            stringSliceArg(args, "tags"),
-	}
-	if n, ok := intArg(args, "rating"); ok {
-		t.Rating = &n
-	}
-	if m, ok := mapArg(args, "metadata"); ok {
-		t.Metadata = m
-	}
-	return t
+func testimonialFromArgs(args map[string]any) (Testimonial, error) {
+	var t Testimonial
+	_, err := applyTestimonialPatch(&t, args)
+	return t, err
 }
