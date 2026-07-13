@@ -141,11 +141,11 @@ export default function TestimonialsPanel({ projectId }: NativePanelProps) {
     [projectId],
   );
 
-  const load = useCallback(async (preferredId?: number) => {
+  const load = useCallback(async (preferredId?: number, requestedPage = page) => {
     const seq = ++requestSeqRef.current;
     setLoading(true);
     try {
-      const params = new URLSearchParams({ limit: String(PAGE_SIZE), offset: String(page * PAGE_SIZE) });
+      const params = new URLSearchParams({ limit: String(PAGE_SIZE), offset: String(requestedPage * PAGE_SIZE) });
       if (statusFilter) params.set("status", statusFilter);
       if (kindFilter) params.set("kind", kindFilter);
       if (query) params.set("q", query);
@@ -163,7 +163,15 @@ export default function TestimonialsPanel({ projectId }: NativePanelProps) {
         if (list[0]) openLoadedItem(list[0], false);
       } else if (fresh && (!dirtyRef.current || preferredId !== undefined)) {
         openLoadedItem(fresh, false);
-      } else if (typeof currentId === "number" && !fresh && !dirtyRef.current && preferredId === undefined) {
+      } else if (
+        typeof currentId === "number" &&
+        !fresh &&
+        !dirtyRef.current &&
+        preferredId === undefined &&
+        !statusFilter &&
+        !kindFilter &&
+        !query
+      ) {
         if (list[0]) openLoadedItem(list[0], false);
         else resetToNew(false);
       }
@@ -253,7 +261,7 @@ export default function TestimonialsPanel({ projectId }: NativePanelProps) {
       openLoadedItem(data.testimonial);
       setNotice({ tone: "success", text: draft.id ? "Changes saved." : "Testimonial created." });
       setPage(0);
-      await load(data.testimonial.id);
+      await load(data.testimonial.id, 0);
     } catch (error) {
       setNotice({ tone: "error", text: (error as Error).message });
     } finally {
@@ -267,12 +275,10 @@ export default function TestimonialsPanel({ projectId }: NativePanelProps) {
     try {
       await api("DELETE", `/testimonials/${draft.id}`);
       initializedRef.current = false;
-      selectedIdRef.current = undefined;
-      dirtyRef.current = false;
-      setSelectedId(undefined);
+      resetToNew(false);
       setPage(0);
       setNotice({ tone: "success", text: "Testimonial archived." });
-      await load();
+      await load(undefined, 0);
       setMobileView("list");
     } catch (error) {
       setNotice({ tone: "error", text: (error as Error).message });
