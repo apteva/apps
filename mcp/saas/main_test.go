@@ -32,6 +32,11 @@ type platformStub struct {
 	emptyUsage                  bool
 	existingInvoiceOperationKey string
 	invoiceGetStatus            string
+	invoiceGetPaidAt            string
+	invoiceGetAmountPaid        int64
+	invoiceGetTotal             int64
+	invoiceGetCurrency          string
+	invoiceGetPayments          []map[string]any
 }
 
 type callAppCall struct {
@@ -122,7 +127,13 @@ func (p *platformStub) CallAppResult(appName, tool string, input map[string]any,
 		body = map[string]any{"invoices": invoices, "count": len(invoices)}
 	case "invoices_get":
 		status := firstNonEmpty(p.invoiceGetStatus, "open")
-		body = map[string]any{"invoice": map[string]any{"id": input["id"], "status": status, "customer_id": 501}, "found": true}
+		body = map[string]any{"invoice": map[string]any{
+			"id": input["id"], "status": status, "customer_id": 501,
+			"currency":    firstNonEmpty(p.invoiceGetCurrency, "USD"),
+			"total_cents": p.invoiceGetTotal, "amount_paid_cents": p.invoiceGetAmountPaid,
+			"paid_at": p.invoiceGetPaidAt, "created_at": "2026-05-01T10:00:00Z", "updated_at": "2026-07-01T10:00:00Z",
+			"payments": p.invoiceGetPayments,
+		}, "found": true}
 	case "subscription_cycles_update":
 		body = map[string]any{"cycle": map[string]any{"id": input["id"], "invoice_id": input["invoice_id"], "payment_status": input["payment_status"]}}
 	case "subscriptions_update_status":
@@ -190,8 +201,8 @@ func TestEmbeddedManifest_Valid(t *testing.T) {
 	if m.Name != "saas" {
 		t.Errorf("manifest.Name=%q, want saas", m.Name)
 	}
-	if m.Version != "0.3.1" {
-		t.Errorf("manifest.Version=%q, want 0.3.1", m.Version)
+	if m.Version != "0.3.2" {
+		t.Errorf("manifest.Version=%q, want 0.3.2", m.Version)
 	}
 	if !m.Requires.DynamicAppCalls {
 		t.Error("manifest should allow dynamic app calls for configured usage sources")
@@ -221,7 +232,7 @@ func TestEmbeddedManifest_Valid(t *testing.T) {
 	for _, tool := range m.Provides.MCPTools {
 		toolRequires[tool.Name] = tool.Requires
 	}
-	if toolRequires["saas_checkout_create"] != "saas.checkout" || toolRequires["saas_account_create"] != "saas.admin" || toolRequires["saas_plan_action_add"] != "saas.admin" {
+	if toolRequires["saas_checkout_create"] != "saas.checkout" || toolRequires["saas_account_create"] != "saas.admin" || toolRequires["saas_plan_action_add"] != "saas.admin" || toolRequires["saas_billing_sync"] != "saas.admin" {
 		t.Fatalf("sensitive tools are not permission-gated: %+v", toolRequires)
 	}
 	for _, name := range []string{"catalog", "billing", "subscriptions", "entitlements", "auth"} {
@@ -524,7 +535,7 @@ func TestCheckoutCreate_FreePlanActivatesWithoutCommerce(t *testing.T) {
 }
 
 func TestCheckoutCreate_AdminPaymentActivatesAccountAndStoresBillingRefs(t *testing.T) {
-	pf := &platformStub{}
+	pf := paidInvoicePlatformStub()
 	ctx, db := newTestCtx(t, pf)
 	defer db.Close()
 	app := &App{}
@@ -868,7 +879,9 @@ func TestPaymentMethodAttached_ActivatesCardRequiredTrial(t *testing.T) {
 }
 
 func TestTrialCycleDue_UpdatesCheckoutAndPaidEventActivates(t *testing.T) {
-	pf := &platformStub{priceTrialDays: 7, priceMetadata: map[string]any{"trial_requires_payment_method": false}}
+	pf := paidInvoicePlatformStub()
+	pf.priceTrialDays = 7
+	pf.priceMetadata = map[string]any{"trial_requires_payment_method": false}
 	ctx, db := newTestCtx(t, pf)
 	defer db.Close()
 	app := &App{}
@@ -972,7 +985,7 @@ func TestExpiredSetupSessionIsPaused(t *testing.T) {
 }
 
 func TestInvoiceRefundMovesPaidCheckoutPastDue(t *testing.T) {
-	pf := &platformStub{}
+	pf := paidInvoicePlatformStub()
 	ctx, db := newTestCtx(t, pf)
 	defer db.Close()
 	app := &App{}
@@ -985,6 +998,10 @@ func TestInvoiceRefundMovesPaidCheckoutPastDue(t *testing.T) {
 	if _, err := app.toolCheckoutMarkPaid(ctx, map[string]any{"checkout_id": checkout.ID, "amount_cents": 2900, "method": "wire"}); err != nil {
 		t.Fatal(err)
 	}
+	pf.invoiceGetStatus = "open"
+	pf.invoiceGetPaidAt = ""
+	pf.invoiceGetAmountPaid = 0
+	pf.invoiceGetPayments = []map[string]any{{"id": 901, "amount_cents": 2900, "currency": "USD", "method": "wire", "received_at": "2026-06-01T10:00:00Z"}, {"id": 902, "amount_cents": -2900, "currency": "USD", "method": "wire", "received_at": "2026-07-01T10:00:00Z"}}
 	if err := app.handleInvoiceCollectionFailed(ctx, sdk.Event{Event: "invoice.refunded", ProjectID: "proj-test", Data: map[string]any{"id": 702, "status": "paid"}}); err != nil {
 		t.Fatal(err)
 	}
@@ -1001,6 +1018,14 @@ func TestInvoiceRefundMovesPaidCheckoutPastDue(t *testing.T) {
 	}
 	if !refunded {
 		t.Fatal("refund did not update subscription cycle")
+	}
+	accountOut, err := app.toolAccountGet(ctx, map[string]any{"account_id": account.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	billing := accountOut.(map[string]any)["account"].(*Account).Billing
+	if billing == nil || !billing.HasPaid || billing.PaidInvoiceCount != 0 || billing.NetPaidByCurrency["USD"] != 0 {
+		t.Fatalf("refund was not reflected in Billing summary: %+v", billing)
 	}
 }
 
@@ -1914,7 +1939,7 @@ func TestSubscriptionCycleDue_RetryReusesInvoiceAndDuplicateIsIgnored(t *testing
 }
 
 func TestInvoicePaid_MarksCycleAndSubscriptionActiveOnce(t *testing.T) {
-	pf := &platformStub{}
+	pf := paidInvoicePlatformStub()
 	ctx, db := newTestCtx(t, pf)
 	defer db.Close()
 	app := &App{}
@@ -1981,6 +2006,193 @@ func TestInvoicePaid_MarksCycleAndSubscriptionActiveOnce(t *testing.T) {
 	}
 }
 
+func TestInvoicePaid_PartialPaymentProjectsButDoesNotActivate(t *testing.T) {
+	pf := &platformStub{
+		invoiceGetStatus: "open", invoiceGetAmountPaid: 1000, invoiceGetTotal: 2900, invoiceGetCurrency: "USD",
+		invoiceGetPayments: []map[string]any{{
+			"id": 911, "amount_cents": 1000, "currency": "USD", "method": "wire",
+			"received_at": "2026-07-02T10:00:00Z", "created_at": "2026-07-02T10:00:01Z",
+		}},
+	}
+	ctx, db := newTestCtx(t, pf)
+	defer db.Close()
+	app := &App{}
+	created, err := app.toolAccountCreate(ctx, map[string]any{
+		"owner_email": "partial@example.com", "slug": "partial-co", "plan_key": "free", "subscription_id": 612,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	account := created.(map[string]any)["account"].(*Account)
+	if err := app.handleSubscriptionCycleDue(ctx, sdk.Event{Event: "subscription.cycle_due", ProjectID: "proj-test", Data: map[string]any{
+		"subscription_id": 612, "cycle_id": 812, "currency": "USD",
+		"period_start": "2026-07-01T00:00:00Z", "period_end": "2026-08-01T00:00:00Z",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.toolSubscriptionSync(ctx, map[string]any{"account_id": account.ID, "subscription_id": 612, "subscription_status": "past_due"}); err != nil {
+		t.Fatal(err)
+	}
+	activationCalls := countCalls(pf.calls, "subscriptions", "subscriptions_update_status")
+	if err := app.handleInvoicePaid(ctx, sdk.Event{Event: "invoice.paid", ProjectID: "proj-test", Data: map[string]any{"id": 702, "status": "open"}}); err != nil {
+		t.Fatal(err)
+	}
+	if got := countCalls(pf.calls, "subscriptions", "subscriptions_update_status"); got != activationCalls {
+		t.Fatalf("partial payment activated subscription: calls before=%d after=%d", activationCalls, got)
+	}
+	account, err = dbAccountGet(db, "proj-test", account.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if account.Status != StatusPastDue {
+		t.Fatalf("partial payment account status=%s, want past_due", account.Status)
+	}
+	op, err := dbCommerceOperationByInvoice(db, "proj-test", 702)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if op.Status != "awaiting_payment" {
+		t.Fatalf("partial payment operation status=%s, want awaiting_payment", op.Status)
+	}
+	var amount int64
+	if err := db.QueryRow(`SELECT amount_cents FROM saas_billing_payments WHERE project_id='proj-test' AND payment_id=911`).Scan(&amount); err != nil {
+		t.Fatal(err)
+	}
+	if amount != 1000 {
+		t.Fatalf("projected payment amount=%d, want 1000", amount)
+	}
+}
+
+func TestAccountList_ReturnsCustomerBillingAndDateFilters(t *testing.T) {
+	pf := &platformStub{}
+	ctx, db := newTestCtx(t, pf)
+	defer db.Close()
+	app := &App{}
+	oldOut, err := app.toolAccountCreate(ctx, map[string]any{
+		"owner_email": "old@example.com", "customer_name": "Old Co", "billing_customer_id": 701,
+		"slug": "old-co", "plan_key": "free",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldAccount := oldOut.(map[string]any)["account"].(*Account)
+	newOut, err := app.toolAccountCreate(ctx, map[string]any{
+		"owner_email": "new@example.com", "customer_name": "New Co", "billing_customer_id": 702,
+		"slug": "new-co", "plan_key": "free",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	newAccount := newOut.(map[string]any)["account"].(*Account)
+	unknownOut, err := app.toolAccountCreate(ctx, map[string]any{
+		"owner_email": "unknown@example.com", "customer_name": "Unknown Co", "billing_customer_id": 703,
+		"slug": "unknown-co", "plan_key": "free", "subscription_id": 53,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	unknownAccount := unknownOut.(map[string]any)["account"].(*Account)
+	if _, err := db.Exec(`INSERT INTO saas_commerce_operations
+		(project_id, operation_key, account_id, subscription_id, cycle_id, billing_customer_id, invoice_id, status)
+		VALUES ('proj-test','subscription:53:cycle:63',?,53,63,703,1703,'awaiting_payment')`, unknownAccount.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE saas_accounts SET created_at='2026-03-01T09:00:00Z' WHERE id=?`, oldAccount.ID); err != nil {
+		t.Fatal(err)
+	}
+	if err := dbBillingProjectionReplace(db, "proj-test", &billingInvoiceProjection{
+		InvoiceID: 1701, AccountID: oldAccount.ID, BillingCustomerID: 701, SubscriptionID: 51, CycleID: 61,
+		Status: "paid", Currency: "EUR", TotalCents: 2900, AmountPaidCents: 2900,
+		PaidAt: "2026-05-02T10:00:00Z", SourceCreatedAt: "2026-05-01T10:00:00Z", SourceUpdatedAt: "2026-05-02T10:00:00Z",
+		Payments: []billingPaymentProjection{{PaymentID: 1801, AmountCents: 2900, Currency: "EUR", Method: "stripe", ReceivedAt: "2026-05-02T10:00:00Z"}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	callsBeforeList := len(pf.calls)
+	out, err := app.toolAccountList(ctx, map[string]any{
+		"created_before": "2026-05-01T00:00:00Z", "has_paid": true,
+		"paid_since": "2026-05-01T00:00:00Z", "paid_until": "2026-06-01T00:00:00Z",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := out.(map[string]any)
+	accounts := body["accounts"].([]*Account)
+	if len(accounts) != 1 || body["total"] != 1 || accounts[0].ID != oldAccount.ID {
+		t.Fatalf("filtered accounts are wrong: %+v", body)
+	}
+	account := accounts[0]
+	if account.CreatedAt != "2026-03-01T09:00:00Z" || account.Customer == nil || account.Customer.Email != "old@example.com" || account.Customer.Name != "Old Co" {
+		t.Fatalf("account customer/creation data missing: %+v", account)
+	}
+	if account.Billing == nil || !account.Billing.HasPaid || account.Billing.FirstPaidAt != "2026-05-02T10:00:00Z" || account.Billing.LastPaidAt != "2026-05-02T10:00:00Z" {
+		t.Fatalf("billing summary is wrong: %+v", account.Billing)
+	}
+	if account.Billing.NetPaidByCurrency["EUR"] != 2900 || !account.Billing.DataComplete {
+		t.Fatalf("billing totals/completeness are wrong: %+v", account.Billing)
+	}
+	if body["billing_sync_pending"] != int64(1) {
+		t.Fatalf("billing_sync_pending=%v, want 1", body["billing_sync_pending"])
+	}
+
+	unpaidOut, err := app.toolAccountList(ctx, map[string]any{"has_paid": false, "limit": 10})
+	if err != nil {
+		t.Fatal(err)
+	}
+	unpaid := unpaidOut.(map[string]any)["accounts"].([]*Account)
+	if len(unpaid) != 1 || unpaid[0].ID != newAccount.ID || unpaid[0].Billing.HasPaid {
+		t.Fatalf("unpaid customer filter is wrong: %+v", unpaidOut)
+	}
+	emailOut, err := app.toolAccountList(ctx, map[string]any{"customer_email": "new@example.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	byEmail := emailOut.(map[string]any)["accounts"].([]*Account)
+	if len(byEmail) != 1 || byEmail[0].ID != newAccount.ID {
+		t.Fatalf("customer_email filter is wrong: %+v", emailOut)
+	}
+	if len(pf.calls) != callsBeforeList {
+		t.Fatalf("account listing made remote app calls: before=%d after=%d", callsBeforeList, len(pf.calls))
+	}
+	if _, err := app.toolAccountList(ctx, map[string]any{"created_before": "two months ago"}); err == nil {
+		t.Fatal("invalid date filter should fail")
+	}
+}
+
+func TestBillingSync_BackfillsLinkedInvoice(t *testing.T) {
+	pf := paidInvoicePlatformStub()
+	ctx, db := newTestCtx(t, pf)
+	defer db.Close()
+	app := &App{}
+	created, err := app.toolAccountCreate(ctx, map[string]any{"owner_email": "backfill@example.com", "slug": "backfill", "plan_key": "free", "subscription_id": 620})
+	if err != nil {
+		t.Fatal(err)
+	}
+	account := created.(map[string]any)["account"].(*Account)
+	if _, err := db.Exec(`INSERT INTO saas_commerce_operations
+		(project_id, operation_key, account_id, subscription_id, cycle_id, billing_customer_id, invoice_id, status)
+		VALUES ('proj-test','subscription:620:cycle:820',?,620,820,501,702,'paid')`, account.ID); err != nil {
+		t.Fatal(err)
+	}
+	out, err := app.toolBillingSync(ctx, map[string]any{"account_id": account.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := out.(map[string]any)
+	if body["synced"] != 1 || body["failed"] != 0 || body["pending"] != int64(0) {
+		t.Fatalf("unexpected billing sync result: %+v", body)
+	}
+	getOut, err := app.toolAccountGet(ctx, map[string]any{"account_id": account.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := getOut.(map[string]any)["account"].(*Account)
+	if got.Customer == nil || int64PtrValue(got.Customer.BillingCustomerID) != 501 || got.Billing == nil || !got.Billing.HasPaid || !got.Billing.DataComplete {
+		t.Fatalf("backfilled account is incomplete: %+v", got)
+	}
+}
+
 func setupPaidCRMPlan(t *testing.T, app *App, ctx *sdk.AppCtx) {
 	t.Helper()
 	if _, err := app.toolPlanUpsert(ctx, map[string]any{
@@ -1998,6 +2210,17 @@ func setupPaidCRMPlan(t *testing.T, app *App, ctx *sdk.AppCtx) {
 	}
 	if _, err := app.toolPlanLimitSet(ctx, map[string]any{"plan_key": "crm-pro", "feature_key": "crm:contacts", "limit_value": 3}); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func paidInvoicePlatformStub() *platformStub {
+	return &platformStub{
+		invoiceGetStatus: "paid", invoiceGetPaidAt: "2026-06-01T10:00:00Z",
+		invoiceGetAmountPaid: 2900, invoiceGetTotal: 2900, invoiceGetCurrency: "USD",
+		invoiceGetPayments: []map[string]any{{
+			"id": 901, "amount_cents": 2900, "currency": "USD", "method": "wire",
+			"received_at": "2026-06-01T10:00:00Z", "created_at": "2026-06-01T10:00:01Z",
+		}},
 	}
 }
 

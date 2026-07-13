@@ -74,7 +74,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 			return err
 		}
 	}
-	ctx.Logger().Info("saas mounted", "version", "0.3.0", "scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
+	ctx.Logger().Info("saas mounted", "version", a.Manifest().Version, "scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
 	return nil
 }
 
@@ -162,8 +162,14 @@ func (a *App) MCPTools() []sdk.Tool {
 			"customer_id": intSchema(), "customer_email": strSchema(), "customer_name": strSchema(), "owner_email": strSchema(), "slug": strSchema(), "plan_key": strSchema(),
 			"billing_customer_id": intSchema(), "auth_org_id": intSchema(), "auth_user_id": intSchema(), "subscription_id": intSchema(), "create_owner_user": boolSchema(), "send_password_reset": boolSchema(), "metadata": objSchema(),
 		}, []string{"owner_email", "slug"}), Handler: a.toolAccountCreate},
-		{Name: "saas_account_get", Description: "Fetch one SaaS account.", InputSchema: accountIDSchema(), Handler: a.toolAccountGet},
-		{Name: "saas_account_list", Description: "List SaaS accounts.", InputSchema: schemaObject(map[string]any{"customer_id": intSchema(), "status": strSchema(), "plan_key": strSchema()}, nil), Handler: a.toolAccountList},
+		{Name: "saas_account_get", Description: "Fetch one SaaS account with customer and Billing summary.", InputSchema: accountIDSchema(), Handler: a.toolAccountGet},
+		{Name: "saas_account_list", Description: "List SaaS accounts with customer and Billing summaries.", InputSchema: schemaObject(map[string]any{
+			"customer_id": intSchema(), "customer_email": strSchema(), "subscription_id": intSchema(), "status": strSchema(), "plan_key": strSchema(),
+			"created_before": strSchema(), "created_after": strSchema(), "has_paid": boolSchema(),
+			"paid_since": strSchema(), "paid_until": strSchema(), "last_paid_before": strSchema(), "last_paid_after": strSchema(),
+			"limit": intSchema(), "offset": intSchema(),
+		}, nil), Handler: a.toolAccountList},
+		{Name: "saas_billing_sync", Description: "Refresh linked Billing invoice/payment projections.", InputSchema: schemaObject(map[string]any{"account_id": strSchema(), "limit": intSchema(), "offset": intSchema()}, nil), Handler: a.toolBillingSync},
 		{Name: "saas_account_suspend", Description: "Suspend a SaaS account.", InputSchema: accountIDSchema(), Handler: a.toolAccountSuspend},
 		{Name: "saas_account_resume", Description: "Resume a SaaS account.", InputSchema: accountIDSchema(), Handler: a.toolAccountResume},
 		{Name: "saas_account_cancel", Description: "Cancel a SaaS account.", InputSchema: accountIDSchema(), Handler: a.toolAccountCancel},
@@ -324,6 +330,46 @@ type Account struct {
 	Metadata        json.RawMessage `json:"metadata,omitempty"`
 	CreatedAt       string          `json:"created_at"`
 	UpdatedAt       string          `json:"updated_at"`
+	Customer        *Customer       `json:"customer,omitempty"`
+	Billing         *BillingSummary `json:"billing,omitempty"`
+}
+
+type BillingSummary struct {
+	BillingCustomerID *int64           `json:"billing_customer_id,omitempty"`
+	HasPaid           bool             `json:"has_paid"`
+	PaymentCount      int64            `json:"payment_count"`
+	PaidInvoiceCount  int64            `json:"paid_invoice_count"`
+	LatestInvoiceID   *int64           `json:"latest_invoice_id,omitempty"`
+	FirstPaidAt       string           `json:"first_paid_at,omitempty"`
+	LastPaidAt        string           `json:"last_paid_at,omitempty"`
+	NetPaidByCurrency map[string]int64 `json:"net_paid_by_currency,omitempty"`
+	DataComplete      bool             `json:"data_complete"`
+	SyncedAt          string           `json:"synced_at,omitempty"`
+}
+
+type billingInvoiceProjection struct {
+	InvoiceID         int64
+	AccountID         string
+	BillingCustomerID int64
+	SubscriptionID    int64
+	CycleID           int64
+	Status            string
+	Currency          string
+	TotalCents        int64
+	AmountPaidCents   int64
+	PaidAt            string
+	SourceCreatedAt   string
+	SourceUpdatedAt   string
+	Payments          []billingPaymentProjection
+}
+
+type billingPaymentProjection struct {
+	PaymentID       int64
+	AmountCents     int64
+	Currency        string
+	Method          string
+	ReceivedAt      string
+	SourceCreatedAt string
 }
 
 type CommerceOperation struct {
@@ -822,6 +868,9 @@ func (a *App) toolAccountGet(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	if acct == nil {
 		return nil, errors.New("account not found")
 	}
+	if err := dbHydrateAccounts(ctx.AppDB(), pid, []*Account{acct}); err != nil {
+		return nil, err
+	}
 	return map[string]any{"account": acct}, nil
 }
 
@@ -830,11 +879,66 @@ func (a *App) toolAccountList(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	if err != nil {
 		return nil, err
 	}
-	out, err := dbAccountList(ctx.AppDB(), pid, args)
+	if err := validateAccountSearchArgs(args); err != nil {
+		return nil, err
+	}
+	out, total, limit, offset, err := dbAccountSearch(ctx.AppDB(), pid, args)
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"accounts": out, "count": len(out)}, nil
+	pending, err := dbBillingProjectionPendingCount(ctx.AppDB(), pid, "")
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{
+		"accounts": out, "count": len(out), "total": total,
+		"limit": limit, "offset": offset, "has_more": offset+len(out) < total,
+		"billing_sync_pending": pending,
+	}, nil
+}
+
+func (a *App) toolBillingSync(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := requireProject(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	accountID := strArg(args, "account_id")
+	if accountID != "" {
+		account, err := dbAccountGet(ctx.AppDB(), pid, accountID)
+		if err != nil || account == nil {
+			return nil, firstErr(err, errors.New("account not found"))
+		}
+	}
+	limit := int64Arg(args, "limit")
+	if limit <= 0 || limit > 100 {
+		limit = 50
+	}
+	offset := int64Arg(args, "offset")
+	if offset < 0 {
+		return nil, errors.New("offset must be non-negative")
+	}
+	return a.syncBillingOperations(ctx, pid, accountID, accountID == "", int(limit), int(offset))
+}
+
+func validateAccountSearchArgs(args map[string]any) error {
+	for _, key := range []string{"created_before", "created_after", "paid_since", "paid_until", "last_paid_before", "last_paid_after"} {
+		value := strArg(args, key)
+		if value == "" {
+			continue
+		}
+		if _, err := time.Parse(time.RFC3339, value); err != nil {
+			return fmt.Errorf("%s must be an RFC3339 timestamp", key)
+		}
+	}
+	if _, ok := args["has_paid"]; ok && !boolArg(args, "has_paid") {
+		if strArg(args, "paid_since") != "" || strArg(args, "paid_until") != "" || strArg(args, "last_paid_before") != "" || strArg(args, "last_paid_after") != "" {
+			return errors.New("has_paid=false cannot be combined with payment date filters")
+		}
+	}
+	if int64Arg(args, "offset") < 0 {
+		return errors.New("offset must be non-negative")
+	}
+	return nil
 }
 
 func (a *App) toolAccountSuspend(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -2638,6 +2742,85 @@ func findBillingInvoiceByOperation(ctx *sdk.AppCtx, pid string, billingCustomerI
 	return 0, nil
 }
 
+func (a *App) syncBillingInvoiceProjection(ctx *sdk.AppCtx, pid string, op *CommerceOperation) (*billingInvoiceProjection, error) {
+	if op == nil || int64PtrValue(op.InvoiceID) == 0 {
+		return nil, errors.New("linked Billing invoice required")
+	}
+	invoiceID := int64PtrValue(op.InvoiceID)
+	var out map[string]any
+	if err := ctx.PlatformAPI().CallAppResult("billing", "invoices_get", map[string]any{"_project_id": pid, "id": invoiceID}, &out); err != nil {
+		return nil, fmt.Errorf("read Billing invoice %d: %w", invoiceID, err)
+	}
+	invoice := unwrapMap(out, "invoice")
+	if len(invoice) == 0 || int64Arg(invoice, "id") != invoiceID {
+		return nil, fmt.Errorf("Billing invoice %d not found", invoiceID)
+	}
+	projection := &billingInvoiceProjection{
+		InvoiceID: invoiceID, AccountID: op.AccountID,
+		BillingCustomerID: int64Arg(invoice, "customer_id"),
+		SubscriptionID:    op.SubscriptionID, CycleID: op.CycleID,
+		Status: strArg(invoice, "status"), Currency: strings.ToUpper(strArg(invoice, "currency")),
+		TotalCents: int64Arg(invoice, "total_cents"), AmountPaidCents: int64Arg(invoice, "amount_paid_cents"),
+		PaidAt: strArg(invoice, "paid_at"), SourceCreatedAt: strArg(invoice, "created_at"), SourceUpdatedAt: strArg(invoice, "updated_at"),
+	}
+	if projection.BillingCustomerID == 0 {
+		projection.BillingCustomerID = int64PtrValue(op.BillingCustomerID)
+	}
+	if projection.BillingCustomerID == 0 {
+		return nil, fmt.Errorf("Billing invoice %d has no customer", invoiceID)
+	}
+	if expected := int64PtrValue(op.BillingCustomerID); expected != 0 && projection.BillingCustomerID != expected {
+		return nil, fmt.Errorf("Billing invoice %d customer does not match SaaS operation", invoiceID)
+	}
+	for _, raw := range sliceFromAny(invoice["payments"]) {
+		payment := mapFromAny(raw)
+		paymentID := int64Arg(payment, "id")
+		receivedAt := strArg(payment, "received_at")
+		if paymentID <= 0 || receivedAt == "" {
+			return nil, fmt.Errorf("Billing invoice %d returned an invalid payment", invoiceID)
+		}
+		projection.Payments = append(projection.Payments, billingPaymentProjection{
+			PaymentID: paymentID, AmountCents: int64Arg(payment, "amount_cents"),
+			Currency: strings.ToUpper(firstNonEmpty(strArg(payment, "currency"), projection.Currency)),
+			Method:   strArg(payment, "method"), ReceivedAt: receivedAt, SourceCreatedAt: strArg(payment, "created_at"),
+		})
+	}
+	if err := dbBillingProjectionReplace(ctx.AppDB(), pid, projection); err != nil {
+		return nil, err
+	}
+	if err := dbCustomerSetBillingIDByAccount(ctx.AppDB(), pid, op.AccountID, projection.BillingCustomerID); err != nil {
+		return nil, err
+	}
+	return projection, nil
+}
+
+func (a *App) syncBillingOperations(ctx *sdk.AppCtx, pid, accountID string, missingOnly bool, limit, offset int) (map[string]any, error) {
+	operations, err := dbCommerceOperationsForBillingProjection(ctx.AppDB(), pid, accountID, missingOnly, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	synced, failed := 0, 0
+	errorsOut := []string{}
+	for _, operation := range operations {
+		if _, err := a.syncBillingInvoiceProjection(ctx, pid, operation); err != nil {
+			failed++
+			errorsOut = append(errorsOut, fmt.Sprintf("invoice %d: %v", int64PtrValue(operation.InvoiceID), err))
+			_ = dbCommerceOperationProjectionAttempt(ctx.AppDB(), pid, operation.ID, err.Error())
+			continue
+		}
+		_ = dbCommerceOperationProjectionAttempt(ctx.AppDB(), pid, operation.ID, "")
+		synced++
+	}
+	pending, err := dbBillingProjectionPendingCount(ctx.AppDB(), pid, accountID)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{
+		"synced": synced, "failed": failed, "pending": pending, "errors": errorsOut,
+		"limit": limit, "offset": offset, "has_more": len(operations) == limit,
+	}, nil
+}
+
 func (a *App) handleInvoicePaid(ctx *sdk.AppCtx, event sdk.Event) error {
 	if event.SourceApp != "" && event.SourceApp != "billing" {
 		return nil
@@ -2648,6 +2831,21 @@ func (a *App) handleInvoicePaid(ctx *sdk.AppCtx, event sdk.Event) error {
 		invoiceID = int64FromAny(event.Data["invoice_id"])
 	}
 	if pid == "" || invoiceID <= 0 {
+		return nil
+	}
+	op, err := dbCommerceOperationByInvoice(ctx.AppDB(), pid, invoiceID)
+	if err != nil || op == nil {
+		return err
+	}
+	invoice, err := a.syncBillingInvoiceProjection(ctx, pid, op)
+	if err != nil {
+		return err
+	}
+	if invoice.Status != "paid" {
+		_ = recordEvent(ctx.AppDB(), pid, op.AccountID, "invoice.payment_received", "billing", map[string]any{
+			"subscription_id": op.SubscriptionID, "cycle_id": op.CycleID, "invoice_id": invoiceID,
+			"invoice_status": invoice.Status, "amount_paid_cents": invoice.AmountPaidCents,
+		})
 		return nil
 	}
 	op, claimed, err := dbCommercePaymentClaim(ctx.AppDB(), pid, invoiceID)
@@ -2775,6 +2973,9 @@ func (a *App) handleInvoiceCollectionFailed(ctx *sdk.AppCtx, event sdk.Event) er
 	if err != nil || op == nil {
 		return err
 	}
+	if _, err := a.syncBillingInvoiceProjection(ctx, pid, op); err != nil {
+		return err
+	}
 	eventName := event.Name()
 	behavior := "past_due"
 	if eventName == "invoice.refunded" {
@@ -2836,7 +3037,14 @@ func (a *App) recoverExpiredCheckouts(ctx *sdk.AppCtx) error {
 			}, &out)
 		}
 	}
-	return a.reconcilePendingInvoices(ctx, pid)
+	if err := a.reconcilePendingInvoices(ctx, pid); err != nil {
+		return err
+	}
+	result, err := a.syncBillingOperations(ctx, pid, "", true, 20, 0)
+	if err == nil && int64FromAny(result["failed"]) > 0 {
+		ctx.Logger().Warn("backfill SaaS Billing projections", "failed", result["failed"], "errors", result["errors"])
+	}
+	return err
 }
 
 func (a *App) reconcilePendingInvoices(ctx *sdk.AppCtx, pid string) error {
@@ -3533,6 +3741,21 @@ func dbCustomerSetBillingID(db *sql.DB, pid string, customerID, billingID int64)
 	return nil
 }
 
+func dbCustomerSetBillingIDByAccount(db *sql.DB, pid, accountID string, billingID int64) error {
+	if billingID == 0 {
+		return nil
+	}
+	res, err := db.Exec(`UPDATE saas_customers SET billing_customer_id=?, updated_at=CURRENT_TIMESTAMP
+		WHERE project_id=? AND id=(SELECT customer_id FROM saas_accounts WHERE project_id=? AND id=?)`, billingID, pid, pid, accountID)
+	if err != nil {
+		return err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return errors.New("SaaS customer not found for account")
+	}
+	return nil
+}
+
 func dbAccountInsert(db *sql.DB, a *Account) error {
 	_, err := db.Exec(`
 		INSERT INTO saas_accounts
@@ -3700,6 +3923,235 @@ func dbAccountList(db *sql.DB, pid string, args map[string]any) ([]*Account, err
 		out = append(out, acct)
 	}
 	return out, rows.Err()
+}
+
+func dbAccountSearch(db *sql.DB, pid string, args map[string]any) ([]*Account, int, int, int, error) {
+	where := []string{"a.project_id=?"}
+	vals := []any{pid}
+	if id := int64Arg(args, "customer_id"); id != 0 {
+		where = append(where, "a.customer_id=?")
+		vals = append(vals, id)
+	}
+	if id := int64Arg(args, "subscription_id"); id != 0 {
+		where = append(where, "a.subscription_id=?")
+		vals = append(vals, id)
+	}
+	if status := strArg(args, "status"); status != "" {
+		where = append(where, "a.status=?")
+		vals = append(vals, status)
+	}
+	if plan := strArg(args, "plan_key"); plan != "" {
+		where = append(where, "a.plan_key=?")
+		vals = append(vals, plan)
+	}
+	if email := strings.ToLower(strArg(args, "customer_email")); email != "" {
+		where = append(where, "c.email=?")
+		vals = append(vals, email)
+	}
+	if value := strArg(args, "created_before"); value != "" {
+		where = append(where, "datetime(a.created_at)<datetime(?)")
+		vals = append(vals, value)
+	}
+	if value := strArg(args, "created_after"); value != "" {
+		where = append(where, "datetime(a.created_at)>=datetime(?)")
+		vals = append(vals, value)
+	}
+	paymentWhere := []string{"bp.project_id=a.project_id", "bp.account_id=a.id", "bp.amount_cents>0"}
+	paymentVals := []any{}
+	if value := strArg(args, "paid_since"); value != "" {
+		paymentWhere = append(paymentWhere, "datetime(bp.received_at)>=datetime(?)")
+		paymentVals = append(paymentVals, value)
+	}
+	if value := strArg(args, "paid_until"); value != "" {
+		paymentWhere = append(paymentWhere, "datetime(bp.received_at)<datetime(?)")
+		paymentVals = append(paymentVals, value)
+	}
+	hasPaymentDates := len(paymentVals) > 0
+	if _, ok := args["has_paid"]; ok {
+		if boolArg(args, "has_paid") {
+			where = append(where, "EXISTS (SELECT 1 FROM saas_billing_payments bp WHERE "+strings.Join(paymentWhere, " AND ")+")")
+			vals = append(vals, paymentVals...)
+		} else {
+			where = append(where, "NOT EXISTS (SELECT 1 FROM saas_billing_payments bp WHERE bp.project_id=a.project_id AND bp.account_id=a.id AND bp.amount_cents>0)")
+			where = append(where, `NOT EXISTS (
+				SELECT 1 FROM saas_commerce_operations co
+				WHERE co.project_id=a.project_id AND co.account_id=a.id AND co.invoice_id IS NOT NULL
+				  AND NOT EXISTS (SELECT 1 FROM saas_billing_invoices bi WHERE bi.project_id=co.project_id AND bi.invoice_id=co.invoice_id)
+			)`)
+		}
+	} else if hasPaymentDates {
+		where = append(where, "EXISTS (SELECT 1 FROM saas_billing_payments bp WHERE "+strings.Join(paymentWhere, " AND ")+")")
+		vals = append(vals, paymentVals...)
+	}
+	if value := strArg(args, "last_paid_before"); value != "" {
+		where = append(where, "datetime((SELECT MAX(bp.received_at) FROM saas_billing_payments bp WHERE bp.project_id=a.project_id AND bp.account_id=a.id AND bp.amount_cents>0))<datetime(?)")
+		vals = append(vals, value)
+	}
+	if value := strArg(args, "last_paid_after"); value != "" {
+		where = append(where, "datetime((SELECT MAX(bp.received_at) FROM saas_billing_payments bp WHERE bp.project_id=a.project_id AND bp.account_id=a.id AND bp.amount_cents>0))>=datetime(?)")
+		vals = append(vals, value)
+	}
+
+	from := ` FROM saas_accounts a JOIN saas_customers c ON c.project_id=a.project_id AND c.id=a.customer_id WHERE ` + strings.Join(where, " AND ")
+	var total int
+	if err := db.QueryRow(`SELECT COUNT(*)`+from, vals...).Scan(&total); err != nil {
+		return nil, 0, 0, 0, err
+	}
+	limit := int(int64Arg(args, "limit"))
+	if limit <= 0 || limit > 200 {
+		limit = 50
+	}
+	offset := int(int64Arg(args, "offset"))
+	queryVals := append(append([]any{}, vals...), limit, offset)
+	rows, err := db.Query(`SELECT a.id, a.project_id, a.customer_id, a.auth_org_id, a.auth_user_id, a.subscription_id,
+		a.slug, a.owner_email, a.plan_key, a.status, COALESCE(a.last_usage_sync_at,''), a.last_error,
+		a.metadata_json, a.created_at, a.updated_at`+from+` ORDER BY a.created_at DESC, a.id DESC LIMIT ? OFFSET ?`, queryVals...)
+	if err != nil {
+		return nil, 0, 0, 0, err
+	}
+	defer rows.Close()
+	accounts := []*Account{}
+	for rows.Next() {
+		account, err := scanAccount(rows)
+		if err != nil {
+			return nil, 0, 0, 0, err
+		}
+		accounts = append(accounts, account)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, 0, 0, 0, err
+	}
+	if err := dbHydrateAccounts(db, pid, accounts); err != nil {
+		return nil, 0, 0, 0, err
+	}
+	return accounts, total, limit, offset, nil
+}
+
+func dbHydrateAccounts(db *sql.DB, pid string, accounts []*Account) error {
+	if len(accounts) == 0 {
+		return nil
+	}
+	byID := map[string]*Account{}
+	customerIDs := map[int64]bool{}
+	accountIDs := make([]any, 0, len(accounts))
+	for _, account := range accounts {
+		byID[account.ID] = account
+		customerIDs[account.CustomerID] = true
+		accountIDs = append(accountIDs, account.ID)
+	}
+	customerVals := []any{pid}
+	customerMarks := make([]string, 0, len(customerIDs))
+	for id := range customerIDs {
+		customerMarks = append(customerMarks, "?")
+		customerVals = append(customerVals, id)
+	}
+	rows, err := db.Query(`SELECT id, project_id, email, name, billing_customer_id, auth_user_id, metadata_json, created_at, updated_at
+		FROM saas_customers WHERE project_id=? AND id IN (`+strings.Join(customerMarks, ",")+`)`, customerVals...)
+	if err != nil {
+		return err
+	}
+	customers := map[int64]*Customer{}
+	for rows.Next() {
+		var customer Customer
+		var billingID, authUserID sql.NullInt64
+		var metadata string
+		if err := rows.Scan(&customer.ID, &customer.ProjectID, &customer.Email, &customer.Name, &billingID, &authUserID, &metadata, &customer.CreatedAt, &customer.UpdatedAt); err != nil {
+			rows.Close()
+			return err
+		}
+		customer.BillingCustomerID = ptrIfValid(billingID)
+		customer.AuthUserID = ptrIfValid(authUserID)
+		customer.Metadata = json.RawMessage(metadata)
+		customers[customer.ID] = &customer
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	for _, account := range accounts {
+		account.Customer = customers[account.CustomerID]
+		summary := &BillingSummary{DataComplete: true, NetPaidByCurrency: map[string]int64{}}
+		if account.Customer != nil {
+			summary.BillingCustomerID = account.Customer.BillingCustomerID
+		}
+		account.Billing = summary
+	}
+
+	marks := strings.TrimSuffix(strings.Repeat("?,", len(accountIDs)), ",")
+	vals := append([]any{pid}, accountIDs...)
+	rows, err = db.Query(`SELECT bi.account_id, MAX(bi.billing_customer_id),
+		COUNT(DISTINCT CASE WHEN bi.status='paid' THEN bi.invoice_id END), MAX(bi.invoice_id),
+		COUNT(CASE WHEN bp.amount_cents>0 THEN 1 END),
+		MIN(CASE WHEN bp.amount_cents>0 THEN bp.received_at END), MAX(CASE WHEN bp.amount_cents>0 THEN bp.received_at END),
+		MAX(bi.synced_at)
+		FROM saas_billing_invoices bi
+		LEFT JOIN saas_billing_payments bp ON bp.project_id=bi.project_id AND bp.invoice_id=bi.invoice_id
+		WHERE bi.project_id=? AND bi.account_id IN (`+marks+`)
+		GROUP BY bi.account_id`, vals...)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var accountID string
+		var billingCustomerID, latestInvoiceID sql.NullInt64
+		var firstPaidAt, lastPaidAt, syncedAt sql.NullString
+		var paidInvoiceCount, paymentCount int64
+		if err := rows.Scan(&accountID, &billingCustomerID, &paidInvoiceCount, &latestInvoiceID, &paymentCount, &firstPaidAt, &lastPaidAt, &syncedAt); err != nil {
+			rows.Close()
+			return err
+		}
+		if account := byID[accountID]; account != nil {
+			account.Billing.BillingCustomerID = ptrIfValid(billingCustomerID)
+			account.Billing.PaidInvoiceCount = paidInvoiceCount
+			account.Billing.LatestInvoiceID = ptrIfValid(latestInvoiceID)
+			account.Billing.PaymentCount = paymentCount
+			account.Billing.HasPaid = paymentCount > 0
+			account.Billing.FirstPaidAt = firstPaidAt.String
+			account.Billing.LastPaidAt = lastPaidAt.String
+			account.Billing.SyncedAt = syncedAt.String
+		}
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	rows, err = db.Query(`SELECT account_id, currency, COALESCE(SUM(amount_cents),0)
+		FROM saas_billing_payments WHERE project_id=? AND account_id IN (`+marks+`)
+		GROUP BY account_id, currency`, vals...)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var accountID, currency string
+		var amount int64
+		if err := rows.Scan(&accountID, &currency, &amount); err != nil {
+			rows.Close()
+			return err
+		}
+		if account := byID[accountID]; account != nil {
+			account.Billing.NetPaidByCurrency[currency] = amount
+		}
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
+	rows, err = db.Query(`SELECT co.account_id, COUNT(*) FROM saas_commerce_operations co
+		WHERE co.project_id=? AND co.account_id IN (`+marks+`) AND co.invoice_id IS NOT NULL
+		  AND NOT EXISTS (SELECT 1 FROM saas_billing_invoices bi WHERE bi.project_id=co.project_id AND bi.invoice_id=co.invoice_id)
+		GROUP BY co.account_id`, vals...)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var accountID string
+		var missing int64
+		if err := rows.Scan(&accountID, &missing); err != nil {
+			rows.Close()
+			return err
+		}
+		if account := byID[accountID]; account != nil && missing > 0 {
+			account.Billing.DataComplete = false
+		}
+	}
+	return rows.Close()
 }
 
 func dbAccountPage(db *sql.DB, pid string, statuses []string, limit, offset int) ([]*Account, error) {
@@ -4472,6 +4924,113 @@ func dbCommerceOperationsForReconciliation(db *sql.DB, pid string, before time.T
 	return out, rows.Err()
 }
 
+func dbCommerceOperationsForBillingProjection(db *sql.DB, pid, accountID string, missingOnly bool, limit, offset int) ([]*CommerceOperation, error) {
+	where := []string{"co.project_id=?", "co.invoice_id IS NOT NULL"}
+	vals := []any{pid}
+	if accountID != "" {
+		where = append(where, "co.account_id=?")
+		vals = append(vals, accountID)
+	}
+	if missingOnly {
+		where = append(where, "NOT EXISTS (SELECT 1 FROM saas_billing_invoices bi WHERE bi.project_id=co.project_id AND bi.invoice_id=co.invoice_id)")
+	}
+	orderBy := "co.id"
+	if missingOnly {
+		orderBy = "CASE WHEN co.billing_projection_attempted_at IS NULL THEN 0 ELSE 1 END, co.billing_projection_attempted_at, co.id"
+	}
+	if limit <= 0 || limit > 100 {
+		limit = 50
+	}
+	if offset < 0 {
+		offset = 0
+	}
+	vals = append(vals, limit, offset)
+	rows, err := db.Query(`SELECT co.id, co.project_id, co.operation_key, co.account_id, co.subscription_id, co.cycle_id, COALESCE(co.checkout_id,''),
+		co.billing_customer_id, co.invoice_id, co.status, co.stage, co.attempt_count, co.prepared_json, co.payment_link_json,
+		co.last_error, co.lease_until, co.started_at, co.completed_at, co.created_at, co.updated_at
+		FROM saas_commerce_operations co WHERE `+strings.Join(where, " AND ")+` ORDER BY `+orderBy+` LIMIT ? OFFSET ?`, vals...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []*CommerceOperation{}
+	for rows.Next() {
+		operation, err := scanCommerceOperation(rows)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, operation)
+	}
+	return out, rows.Err()
+}
+
+func dbCommerceOperationProjectionAttempt(db *sql.DB, pid string, id int64, errText string) error {
+	_, err := db.Exec(`UPDATE saas_commerce_operations
+		SET billing_projection_attempted_at=CURRENT_TIMESTAMP, billing_projection_error=?
+		WHERE project_id=? AND id=?`, errText, pid, id)
+	return err
+}
+
+func dbBillingProjectionPendingCount(db *sql.DB, pid, accountID string) (int64, error) {
+	query := `SELECT COUNT(*) FROM saas_commerce_operations co
+		WHERE co.project_id=? AND co.invoice_id IS NOT NULL
+		  AND NOT EXISTS (SELECT 1 FROM saas_billing_invoices bi WHERE bi.project_id=co.project_id AND bi.invoice_id=co.invoice_id)`
+	vals := []any{pid}
+	if accountID != "" {
+		query += " AND co.account_id=?"
+		vals = append(vals, accountID)
+	}
+	var count int64
+	err := db.QueryRow(query, vals...).Scan(&count)
+	return count, err
+}
+
+func dbBillingProjectionReplace(db *sql.DB, pid string, projection *billingInvoiceProjection) error {
+	if projection == nil || projection.InvoiceID <= 0 || projection.AccountID == "" || projection.BillingCustomerID <= 0 {
+		return errors.New("complete Billing invoice projection required")
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	_, err = tx.Exec(`INSERT INTO saas_billing_invoices
+		(project_id, invoice_id, account_id, billing_customer_id, subscription_id, cycle_id, status, currency,
+		 total_cents, amount_paid_cents, paid_at, source_created_at, source_updated_at, synced_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+		ON CONFLICT(project_id, invoice_id) DO UPDATE SET
+		 account_id=excluded.account_id, billing_customer_id=excluded.billing_customer_id,
+		 subscription_id=excluded.subscription_id, cycle_id=excluded.cycle_id, status=excluded.status,
+		 currency=excluded.currency, total_cents=excluded.total_cents, amount_paid_cents=excluded.amount_paid_cents,
+		 paid_at=excluded.paid_at, source_created_at=excluded.source_created_at,
+		 source_updated_at=excluded.source_updated_at, synced_at=CURRENT_TIMESTAMP`,
+		pid, projection.InvoiceID, projection.AccountID, projection.BillingCustomerID,
+		projection.SubscriptionID, projection.CycleID, projection.Status, projection.Currency,
+		projection.TotalCents, projection.AmountPaidCents, nullString(projection.PaidAt),
+		nullString(projection.SourceCreatedAt), nullString(projection.SourceUpdatedAt))
+	if err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`DELETE FROM saas_billing_payments WHERE project_id=? AND invoice_id=?`, pid, projection.InvoiceID); err != nil {
+		return err
+	}
+	for _, payment := range projection.Payments {
+		_, err := tx.Exec(`INSERT INTO saas_billing_payments
+			(project_id, payment_id, invoice_id, account_id, billing_customer_id, amount_cents, currency, method, received_at, source_created_at, synced_at)
+			VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, CURRENT_TIMESTAMP)
+			ON CONFLICT(project_id, payment_id) DO UPDATE SET
+			 invoice_id=excluded.invoice_id, account_id=excluded.account_id, billing_customer_id=excluded.billing_customer_id,
+			 amount_cents=excluded.amount_cents, currency=excluded.currency, method=excluded.method,
+			 received_at=excluded.received_at, source_created_at=excluded.source_created_at, synced_at=CURRENT_TIMESTAMP`,
+			pid, payment.PaymentID, projection.InvoiceID, projection.AccountID, projection.BillingCustomerID,
+			payment.AmountCents, payment.Currency, payment.Method, payment.ReceivedAt, nullString(payment.SourceCreatedAt))
+		if err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
+}
+
 func dbCommerceOperationTouch(db *sql.DB, pid string, id int64) error {
 	_, err := db.Exec(`UPDATE saas_commerce_operations SET updated_at=CURRENT_TIMESTAMP WHERE project_id=? AND id=?`, pid, id)
 	return err
@@ -4580,9 +5139,30 @@ func (a *App) handleAccounts(w http.ResponseWriter, r *http.Request) {
 			httpErr(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		args := map[string]any{"status": r.URL.Query().Get("status"), "plan_key": r.URL.Query().Get("plan_key"), "customer_id": r.URL.Query().Get("customer_id")}
-		accounts, err := dbAccountList(ctx.AppDB(), pid, args)
-		handleJSONOrErr(w, map[string]any{"accounts": accounts, "count": len(accounts)}, err)
+		args := map[string]any{}
+		for _, key := range []string{"status", "plan_key", "customer_id", "customer_email", "subscription_id", "created_before", "created_after", "paid_since", "paid_until", "last_paid_before", "last_paid_after", "limit", "offset"} {
+			if value := r.URL.Query().Get(key); value != "" {
+				args[key] = value
+			}
+		}
+		if values, ok := r.URL.Query()["has_paid"]; ok && len(values) > 0 {
+			args["has_paid"] = values[0]
+		}
+		if err := validateAccountSearchArgs(args); err != nil {
+			httpErr(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		accounts, total, limit, offset, err := dbAccountSearch(ctx.AppDB(), pid, args)
+		if err != nil {
+			handleJSONOrErr(w, nil, err)
+			return
+		}
+		pending, err := dbBillingProjectionPendingCount(ctx.AppDB(), pid, "")
+		handleJSONOrErr(w, map[string]any{
+			"accounts": accounts, "count": len(accounts), "total": total,
+			"limit": limit, "offset": offset, "has_more": offset+len(accounts) < total,
+			"billing_sync_pending": pending,
+		}, err)
 	case http.MethodPost:
 		var body map[string]any
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -4611,6 +5191,8 @@ func (a *App) handleAccountItem(w http.ResponseWriter, r *http.Request) {
 		acct, err := dbAccountGet(ctx.AppDB(), pid, id)
 		if err == nil && acct == nil {
 			err = errors.New("account not found")
+		} else if err == nil {
+			err = dbHydrateAccounts(ctx.AppDB(), pid, []*Account{acct})
 		}
 		handleJSONOrErr(w, map[string]any{"account": acct}, err)
 		return
