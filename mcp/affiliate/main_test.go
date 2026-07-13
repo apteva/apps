@@ -230,6 +230,12 @@ func TestRedirectHitUsesRuleIDAndAbsoluteDailyCount(t *testing.T) {
 		t.Fatal(err)
 	}
 	result := out.(map[string]any)
+	if result["clicks"] != int64(7) {
+		t.Fatalf("top-level MCP clicks=%v", result["clicks"])
+	}
+	if _, exists := result["count"]; exists {
+		t.Fatalf("MCP response exposed ambiguous count: %+v", result)
+	}
 	unified := result["stats"].([]UnifiedStatRow)
 	if len(unified) != 1 || unified[0].Clicks != 7 {
 		t.Fatalf("unified MCP clicks=%+v", unified)

@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: affiliate
 display_name: Affiliate
-version: 0.1.10
+version: 0.1.11
 description: |
   Publisher-side affiliate manager. Connect affiliate networks, refresh
   offers and stats, create monetized links, and optionally wrap them
@@ -103,7 +103,7 @@ provides:
     - name: affiliate_links
       description: "Search managed links with total-count pagination. Args: q?, network?, offer_id?, status?, limit?, offset?."
     - name: affiliate_stats
-      description: "Read normalized affiliate stats with one unified clicks metric. Args: from?, to? (YYYY-MM-DD or RFC3339), network?, offer_id?, link_id?, group_by? (network|offer|link|day)."
+      description: "Read normalized affiliate stats. Top-level clicks is the total; stats contains the grouped breakdown. Args: from?, to? (YYYY-MM-DD or RFC3339), network?, offer_id?, link_id?, group_by? (network|offer|link|day)."
   ui_panels:
     - slot: project.page
       label: Affiliate

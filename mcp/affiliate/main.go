@@ -28,7 +28,7 @@ import (
 const legacyManifestYAML = `schema: apteva-app/v1
 name: affiliate
 display_name: Affiliate
-version: 0.1.10
+version: 0.1.11
 description: Publisher-side affiliate manager.
 author: Apteva
 scopes: [project, global]
@@ -104,7 +104,7 @@ provides:
     - name: affiliate_links
       description: Search managed links.
     - name: affiliate_stats
-      description: Read normalized affiliate stats with one unified clicks metric. Date ranges accept YYYY-MM-DD or RFC3339 values.
+      description: Read normalized affiliate stats. Top-level clicks is the total; stats contains the grouped breakdown. Date ranges accept YYYY-MM-DD or RFC3339 values.
 runtime:
   kind: source
   source:
@@ -298,7 +298,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name: "affiliate_stats",
-			Description: "Read normalized affiliate stats with one unified clicks metric. Args: from?, to? (YYYY-MM-DD or RFC3339), network?, offer_id?, link_id?, " +
+			Description: "Read normalized affiliate stats. Top-level clicks is the total; stats contains the grouped breakdown. Args: from?, to? (YYYY-MM-DD or RFC3339), network?, offer_id?, link_id?, " +
 				"group_by? (network|offer|link|day, default day).",
 			InputSchema: schemaObject(map[string]any{
 				"from":     map[string]any{"type": "string"},
@@ -1687,6 +1687,7 @@ func (a *App) toolStats(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return nil, err
 	}
 	unified := make([]UnifiedStatRow, 0, len(rows))
+	var totalClicks int64
 	for _, row := range rows {
 		rowNetwork := network
 		if rowNetwork == "" {
@@ -1696,13 +1697,14 @@ func (a *App) toolStats(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		if capability, ok := capabilityFor(rowNetwork); ok && capability.Clicks {
 			clicks = row.Clicks
 		}
+		totalClicks += clicks
 		unified = append(unified, UnifiedStatRow{
 			Date: row.Date, NetworkKey: row.NetworkKey, OfferID: row.OfferID, LinkID: row.LinkID,
 			Clicks: clicks, Conversions: row.Conversions, RevenueCents: row.RevenueCents,
 			CommissionCents: row.CommissionCents, Currency: row.Currency,
 		})
 	}
-	return map[string]any{"stats": unified, "count": len(unified)}, nil
+	return map[string]any{"clicks": totalClicks, "stats": unified}, nil
 }
 
 func (a *App) detailedStats(ctx *sdk.AppCtx, args map[string]any) (any, error) {
