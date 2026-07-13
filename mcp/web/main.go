@@ -1,4 +1,4 @@
-// Web v0.1.10 — browser-backed web intelligence.
+// Web v0.1.15 - browser-backed web intelligence.
 //
 // The app requires computer for session lifecycle, rendered extraction, and
 // screenshots. It opens a browser before search/extract/crawl/map/research page
@@ -29,7 +29,10 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	sdk "github.com/apteva/app-sdk"
 	"golang.org/x/net/html"
@@ -39,7 +42,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: web
 display_name: Web
-version: 0.1.14
+version: 0.1.15
 description: Browser-native web intelligence for agents.
 author: Apteva
 scopes: [project, global]
@@ -95,7 +98,6 @@ const (
 	defaultHTTPTimeout    = 20 * time.Second
 	defaultMaxChars       = 20000
 	maxFetchBytes         = 5 * 1024 * 1024
-	defaultCrawlPages     = 10
 	maxCrawlPages         = 50
 	defaultSearchLimit    = 10
 	maxSearchLimit        = 25
@@ -124,6 +126,9 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		return errors.New("web requires a db block")
 	}
 	globalCtx = ctx
+	if err := pruneCache(ctx); err != nil {
+		ctx.Logger().Warn("web cache prune failed", "err", err.Error())
+	}
 	ctx.Logger().Info("web mounted", "scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
 	return nil
 }
@@ -420,20 +425,28 @@ func (a *App) toolSearch(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if query == "" {
 		return nil, errors.New("query required")
 	}
-	runID, _ := startRun(ctx, "search", args)
-	defer failRunOnPanic(ctx, runID)
-
-	limit := boundedInt(intArg(args, "limit"), defaultSearchLimit, 1, maxSearchLimit)
 	engine := firstNonEmpty(stringArg(args, "engine"), configString(ctx, "default_search_engine"), "google")
 	if engine != "google" && engine != "duckduckgo" {
 		return nil, fmt.Errorf("unsupported engine %q", engine)
 	}
+	runID, err := startRun(ctx, "search", args)
+	if err != nil {
+		return nil, fmt.Errorf("start search run: %w", err)
+	}
+	defer failRunOnPanic(ctx, runID)
+
+	limit := boundedInt(intArg(args, "limit"), defaultSearchLimit, 1, maxSearchLimit)
 	policy, err := newCachePolicy("search", args)
 	if err != nil {
 		completeRun(ctx, runID, "failed", nil, err)
 		return nil, err
 	}
 	if cached, ok, err := loadCachedResponse(ctx, policy); ok {
+		stripCachedTransientFields(cached)
+		if err := a.applyResponseEffects(ctx, runID, "search", args, cached); err != nil {
+			completeRun(ctx, runID, "failed", cached, err)
+			return cached, err
+		}
 		completeRun(ctx, runID, "completed", cached, nil)
 		return cached, nil
 	} else if err != nil {
@@ -480,13 +493,21 @@ func (a *App) toolSearch(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		out["blocked"] = true
 		out["error"] = searchBlocked
 	}
-	applyCacheAfterFetch(ctx, policy, out)
-	if boolArg(args, "store") {
-		if art, err := storeJSONArtifact(ctx, runID, "search", searchURL, "search: "+query, out); err == nil {
-			out["artifact"] = art
-		} else {
-			ctx.Logger().Warn("store search artifact failed", "err", err.Error())
+	if boolArg(args, "visit_top") && len(results) > 0 && out["blocked"] != true {
+		topArgs := mapMerge(args, map[string]any{"store": false, "snapshot": false})
+		topPage := a.extractURL(ctx, runID, results[0].URL, topArgs, true)
+		out["top_page"] = topPage
+		if topPage.Description != "" {
+			results[0].Snippet = truncateString(topPage.Description, 500)
+		} else if topPage.Text != "" {
+			results[0].Snippet = truncateString(topPage.Text, 500)
 		}
+		out["results"] = results
+	}
+	applyCacheAfterFetch(ctx, policy, out)
+	if err := a.applyResponseEffects(ctx, runID, "search", args, out); err != nil {
+		completeRun(ctx, runID, "failed", out, err)
+		return out, err
 	}
 	completeRun(ctx, runID, "completed", out, nil)
 	return out, nil
@@ -497,7 +518,10 @@ func (a *App) toolExtract(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if target == "" {
 		return nil, errors.New("url required")
 	}
-	runID, _ := startRun(ctx, "extract", args)
+	runID, err := startRun(ctx, "extract", args)
+	if err != nil {
+		return nil, fmt.Errorf("start extract run: %w", err)
+	}
 	defer failRunOnPanic(ctx, runID)
 
 	policy, err := newCachePolicy("extract", args)
@@ -506,17 +530,26 @@ func (a *App) toolExtract(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return nil, err
 	}
 	if cached, ok, err := loadCachedResponse(ctx, policy); ok {
+		stripCachedTransientFields(cached)
+		if err := a.applyResponseEffects(ctx, runID, "extract", args, cached); err != nil {
+			completeRun(ctx, runID, "failed", cached, err)
+			return cached, err
+		}
 		completeRun(ctx, runID, "completed", cached, nil)
 		return cached, nil
 	} else if err != nil {
 		completeRun(ctx, runID, "failed", nil, err)
 		return nil, err
 	}
-	doc := a.extractURL(ctx, runID, target, args, true)
+	doc := a.extractURL(ctx, runID, target, mapMerge(args, map[string]any{"store": false, "snapshot": false}), true)
 	out := map[string]any{"page": doc}
 	applyCacheAfterFetch(ctx, policy, out)
 	if doc.Error != "" {
 		err := errors.New(doc.Error)
+		completeRun(ctx, runID, "failed", out, err)
+		return out, err
+	}
+	if err := a.applyResponseEffects(ctx, runID, "extract", args, out); err != nil {
 		completeRun(ctx, runID, "failed", out, err)
 		return out, err
 	}
@@ -529,7 +562,13 @@ func (a *App) toolCrawl(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if len(seeds) == 0 {
 		return nil, errors.New("url or urls required")
 	}
-	runID, _ := startRun(ctx, "crawl", args)
+	if err := validateSeedURLs(seeds); err != nil {
+		return nil, err
+	}
+	runID, err := startRun(ctx, "crawl", args)
+	if err != nil {
+		return nil, fmt.Errorf("start crawl run: %w", err)
+	}
 	defer failRunOnPanic(ctx, runID)
 
 	policy, err := newCachePolicy("crawl", args)
@@ -538,13 +577,19 @@ func (a *App) toolCrawl(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return nil, err
 	}
 	if cached, ok, err := loadCachedResponse(ctx, policy); ok {
+		stripCachedTransientFields(cached)
+		if err := a.applyResponseEffects(ctx, runID, "crawl", args, cached); err != nil {
+			completeRun(ctx, runID, "failed", cached, err)
+			return cached, err
+		}
 		completeRun(ctx, runID, "completed", cached, nil)
 		return cached, nil
 	} else if err != nil {
 		completeRun(ctx, runID, "failed", nil, err)
 		return nil, err
 	}
-	maxPages := boundedInt(intArg(args, "max_pages"), defaultCrawlPages, 1, maxCrawlPages)
+	configuredMaxPages := boundedInt(configInt(ctx, "max_pages"), 25, 1, maxCrawlPages)
+	maxPages := boundedInt(intArg(args, "max_pages"), configuredMaxPages, 1, configuredMaxPages)
 	maxDepth := boundedInt(intArg(args, "max_depth"), 1, 0, 5)
 	sameHost := boolArgDefault(args, "same_host", true)
 	pages, edges := a.crawl(ctx, runID, seeds, args, maxPages, maxDepth, sameHost, true)
@@ -553,13 +598,12 @@ func (a *App) toolCrawl(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		"pages":              pages,
 		"edges":              edges,
 		"count":              len(pages),
-		"extraction_backend": "http_after_browser_open",
+		"extraction_backend": aggregateExtractionBackend(pages),
 	}
 	applyCacheAfterFetch(ctx, policy, out)
-	if boolArgDefault(args, "store", storeDefault(ctx)) {
-		if art, err := storeJSONArtifact(ctx, runID, "crawl", seeds[0], "crawl", out); err == nil {
-			out["artifact"] = art
-		}
+	if err := a.applyResponseEffects(ctx, runID, "crawl", args, out); err != nil {
+		completeRun(ctx, runID, "failed", out, err)
+		return out, err
 	}
 	completeRun(ctx, runID, "completed", out, nil)
 	return out, nil
@@ -570,7 +614,13 @@ func (a *App) toolMap(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if len(seeds) == 0 {
 		return nil, errors.New("url or urls required")
 	}
-	runID, _ := startRun(ctx, "map", args)
+	if err := validateSeedURLs(seeds); err != nil {
+		return nil, err
+	}
+	runID, err := startRun(ctx, "map", args)
+	if err != nil {
+		return nil, fmt.Errorf("start map run: %w", err)
+	}
 	defer failRunOnPanic(ctx, runID)
 
 	policy, err := newCachePolicy("map", args)
@@ -579,13 +629,19 @@ func (a *App) toolMap(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return nil, err
 	}
 	if cached, ok, err := loadCachedResponse(ctx, policy); ok {
+		stripCachedTransientFields(cached)
+		if err := a.applyResponseEffects(ctx, runID, "map", args, cached); err != nil {
+			completeRun(ctx, runID, "failed", cached, err)
+			return cached, err
+		}
 		completeRun(ctx, runID, "completed", cached, nil)
 		return cached, nil
 	} else if err != nil {
 		completeRun(ctx, runID, "failed", nil, err)
 		return nil, err
 	}
-	maxPages := boundedInt(intArg(args, "max_pages"), defaultCrawlPages, 1, maxCrawlPages)
+	configuredMaxPages := boundedInt(configInt(ctx, "max_pages"), 25, 1, maxCrawlPages)
+	maxPages := boundedInt(intArg(args, "max_pages"), configuredMaxPages, 1, configuredMaxPages)
 	maxDepth := boundedInt(intArg(args, "max_depth"), 2, 0, 5)
 	sameHost := boolArgDefault(args, "same_host", true)
 	pages, edges := a.crawl(ctx, runID, seeds, args, maxPages, maxDepth, sameHost, false)
@@ -601,12 +657,11 @@ func (a *App) toolMap(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 			"error":      p.Error,
 		})
 	}
-	out := map[string]any{"seeds": seeds, "pages": mapPages, "edges": edges, "count": len(mapPages)}
+	out := map[string]any{"seeds": seeds, "pages": mapPages, "edges": edges, "count": len(mapPages), "extraction_backend": aggregateExtractionBackend(pages)}
 	applyCacheAfterFetch(ctx, policy, out)
-	if boolArgDefault(args, "store", storeDefault(ctx)) {
-		if art, err := storeJSONArtifact(ctx, runID, "map", seeds[0], "map", out); err == nil {
-			out["artifact"] = art
-		}
+	if err := a.applyResponseEffects(ctx, runID, "map", args, out); err != nil {
+		completeRun(ctx, runID, "failed", out, err)
+		return out, err
 	}
 	completeRun(ctx, runID, "completed", out, nil)
 	return out, nil
@@ -617,7 +672,10 @@ func (a *App) toolResearch(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if question == "" {
 		return nil, errors.New("question required")
 	}
-	runID, _ := startRun(ctx, "research", args)
+	runID, err := startRun(ctx, "research", args)
+	if err != nil {
+		return nil, fmt.Errorf("start research run: %w", err)
+	}
 	defer failRunOnPanic(ctx, runID)
 
 	policy, err := newCachePolicy("research", args)
@@ -626,6 +684,11 @@ func (a *App) toolResearch(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return nil, err
 	}
 	if cached, ok, err := loadCachedResponse(ctx, policy); ok {
+		stripCachedTransientFields(cached)
+		if err := a.applyResponseEffects(ctx, runID, "research", args, cached); err != nil {
+			completeRun(ctx, runID, "failed", cached, err)
+			return cached, err
+		}
 		completeRun(ctx, runID, "completed", cached, nil)
 		return cached, nil
 	} else if err != nil {
@@ -639,20 +702,35 @@ func (a *App) toolResearch(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	maxResults := boundedInt(intArg(args, "max_results"), 8, 1, maxSearchLimit)
 	maxSources := boundedInt(intArg(args, "max_sources"), 5, 1, 12)
 
+	searchBatches := make([][]searchResult, len(queries))
+	searchSem := make(chan struct{}, 3)
+	var searchWG sync.WaitGroup
+	for i, q := range queries {
+		searchWG.Add(1)
+		go func(i int, q string) {
+			defer searchWG.Done()
+			searchSem <- struct{}{}
+			defer func() { <-searchSem }()
+			searchOut, searchErr := a.toolSearch(ctx, mapMerge(args, map[string]any{
+				"query":     q,
+				"limit":     maxResults,
+				"store":     false,
+				"cache":     "bypass",
+				"visit_top": false,
+			}))
+			if searchErr != nil {
+				ctx.Logger().Warn("research search failed", "query", q, "err", searchErr.Error())
+				return
+			}
+			searchBatches[i] = searchResultsFromOutput(searchOut)
+		}(i, q)
+	}
+	searchWG.Wait()
+
 	allResults := make([]searchResult, 0, len(queries)*maxResults)
 	seen := map[string]bool{}
-	for _, q := range queries {
-		searchOut, err := a.toolSearch(ctx, mapMerge(args, map[string]any{
-			"query": q,
-			"limit": maxResults,
-			"store": false,
-			"cache": "bypass",
-		}))
-		if err != nil {
-			ctx.Logger().Warn("research search failed", "query", q, "err", err.Error())
-			continue
-		}
-		for _, r := range searchResultsFromOutput(searchOut) {
+	for _, batch := range searchBatches {
+		for _, r := range batch {
 			if !seen[r.URL] {
 				seen[r.URL] = true
 				allResults = append(allResults, r)
@@ -663,17 +741,28 @@ func (a *App) toolResearch(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		allResults = allResults[:maxSources]
 	}
 
-	sources := make([]pageDoc, 0, len(allResults))
+	sources := make([]pageDoc, len(allResults))
+	sourceSem := make(chan struct{}, 3)
+	var sourceWG sync.WaitGroup
+	for i, r := range allResults {
+		sourceWG.Add(1)
+		go func(i int, r searchResult) {
+			defer sourceWG.Done()
+			sourceSem <- struct{}{}
+			defer func() { <-sourceSem }()
+			extractArgs := mapMerge(args, map[string]any{
+				"store":    false,
+				"snapshot": boolArg(args, "snapshots"),
+				"label":    r.Title,
+			})
+			sources[i] = a.extractURL(ctx, runID, r.URL, extractArgs, true)
+		}(i, r)
+	}
+	sourceWG.Wait()
+
 	citations := make([]map[string]any, 0, len(allResults))
 	for i, r := range allResults {
-		doc := a.extractURL(ctx, runID, r.URL, args, true)
-		if boolArg(args, "snapshots") && doc.Error == "" {
-			shot, err := a.snapshot(ctx, runID, mapMerge(args, map[string]any{"url": r.URL, "label": r.Title, "store": true}))
-			if err == nil {
-				doc.Snapshot = shot
-			}
-		}
-		sources = append(sources, doc)
+		doc := sources[i]
 		excerpt := bestExcerpt(doc.Text, question)
 		citations = append(citations, map[string]any{
 			"id":      i + 1,
@@ -693,20 +782,22 @@ func (a *App) toolResearch(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		"search_results":     allResults,
 		"confidence":         confidenceForSources(sources),
 		"open_questions":     researchGaps(sources),
-		"extraction_backend": "http_after_browser_open",
+		"extraction_backend": aggregateExtractionBackend(sources),
 	}
 	applyCacheAfterFetch(ctx, policy, out)
-	if boolArgDefault(args, "store", storeDefault(ctx)) {
-		if art, err := storeJSONArtifact(ctx, runID, "research", "", "research: "+question, out); err == nil {
-			out["artifact"] = art
-		}
+	if err := a.applyResponseEffects(ctx, runID, "research", args, out); err != nil {
+		completeRun(ctx, runID, "failed", out, err)
+		return out, err
 	}
 	completeRun(ctx, runID, "completed", out, nil)
 	return out, nil
 }
 
 func (a *App) toolSnapshot(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	runID, _ := startRun(ctx, "snapshot", args)
+	runID, runErr := startRun(ctx, "snapshot", args)
+	if runErr != nil {
+		return nil, fmt.Errorf("start snapshot run: %w", runErr)
+	}
 	defer failRunOnPanic(ctx, runID)
 	policy, policyErr := newCachePolicy("snapshot", args)
 	if policyErr != nil {
@@ -754,8 +845,10 @@ func (a *App) extractURL(ctx *sdk.AppCtx, runID int64, target string, args map[s
 		doc.Images = extracted.Images
 		doc.Metadata = extracted.Metadata
 		doc.StructuredData = extracted.StructuredData
+		doc.Status = http.StatusOK
+		doc.ContentType = "text/html"
 		doc.ExtractionBackend = firstNonEmpty(extracted.ExtractionBackend, "browser_dom")
-		doc.Bytes = len(extracted.Text) + len(extracted.Markdown)
+		doc.Bytes = len(extracted.Text) + len(extracted.Markdown) + len(extracted.HTML)
 		doc.Truncated = false
 		if includeText {
 			maxChars := boundedInt(intArg(args, "max_chars"), defaultMaxChars, 1000, 200000)
@@ -834,12 +927,16 @@ func (a *App) extractURL(ctx *sdk.AppCtx, runID int64, target string, args map[s
 func (a *App) crawl(ctx *sdk.AppCtx, runID int64, seeds []string, args map[string]any, maxPages, maxDepth int, sameHost, includeText bool) ([]pageDoc, []crawlEdge) {
 	queue := make([]crawlNode, 0, len(seeds))
 	seedHosts := map[string]bool{}
+	queued := map[string]bool{}
 	for _, s := range seeds {
-		if err := validateHTTPURL(s); err == nil {
-			queue = append(queue, crawlNode{URL: s})
-			if u, err := url.Parse(s); err == nil {
-				seedHosts[strings.ToLower(u.Hostname())] = true
-			}
+		canon := canonicalURL(s)
+		if canon == "" || queued[canon] {
+			continue
+		}
+		queue = append(queue, crawlNode{URL: s})
+		queued[canon] = true
+		if u, err := url.Parse(s); err == nil {
+			seedHosts[strings.ToLower(u.Hostname())] = true
 		}
 	}
 	visited := map[string]bool{}
@@ -850,6 +947,7 @@ func (a *App) crawl(ctx *sdk.AppCtx, runID int64, seeds []string, args map[strin
 		node := queue[0]
 		queue = queue[1:]
 		canon := canonicalURL(node.URL)
+		delete(queued, canon)
 		if visited[canon] || node.Depth > maxDepth {
 			continue
 		}
@@ -863,11 +961,10 @@ func (a *App) crawl(ctx *sdk.AppCtx, runID int64, seeds []string, args map[strin
 			if len(edges) < maxPages*20 {
 				edges = append(edges, crawlEdge{From: doc.URL, To: l.URL, Text: l.Text})
 			}
-			if len(queue)+len(pages) >= maxPages {
-				continue
-			}
-			if shouldFollow(l.URL, seedHosts, sameHost) {
+			linkCanon := canonicalURL(l.URL)
+			if len(queue)+len(pages) < maxPages && linkCanon != "" && !visited[linkCanon] && !queued[linkCanon] && shouldFollow(l.URL, seedHosts, sameHost) {
 				queue = append(queue, crawlNode{URL: l.URL, Depth: node.Depth + 1})
+				queued[linkCanon] = true
 			}
 		}
 	}
@@ -934,7 +1031,7 @@ func (a *App) snapshot(ctx *sdk.AppCtx, runID int64, args map[string]any) (map[s
 	if err := ctx.PlatformAPI().CallAppResult("storage", "files_upload", upArgs, &up); err != nil {
 		return nil, fmt.Errorf("storage.files_upload: %w", err)
 	}
-	art, _ := insertArtifact(ctx, runID, "snapshot", shot.CurrentURL, stringArg(args, "label"), up.ID, up.URL, "image/png", 0, out)
+	art, _ := insertArtifact(ctx, runID, "snapshot", shot.CurrentURL, stringArg(args, "label"), up.ID, up.URL, "image/png", 0, compactArtifactMetadata("snapshot", shot.CurrentURL, stringArg(args, "label"), "image/png", 0))
 	out["stored"] = true
 	out["storage_id"] = up.ID
 	out["url"] = up.URL
@@ -981,15 +1078,18 @@ func (a *App) dismissCookieBanner(ctx *sdk.AppCtx, sessionID string, args map[st
 	}
 	region, strategy, ok := findCookieBannerRegion(extracted.Regions)
 	if !ok {
-		if a.dismissCookieBannerWithSOM(ctx, sessionID, args, extracted, out) {
+		if a.dismissCookieBannerWithSOM(ctx, sessionID, args, extracted, nil, out) {
 			return out, nil
 		}
 		out["reason"] = "no_cookie_banner_detected"
 		return out, nil
 	}
+	if a.dismissCookieBannerWithSOM(ctx, sessionID, args, extracted, &region, out) {
+		return out, nil
+	}
 	x, y := cookieAcceptCoordinate(region, strategy)
 	out["attempted"] = true
-	out["strategy"] = strategy
+	out["strategy"] = strategy + "_coordinate_fallback"
 	out["region_id"] = region.ID
 	out["selector"] = region.Selector
 	out["heading"] = region.Heading
@@ -1048,9 +1148,9 @@ func findCookieBannerRegion(regions []browserRegion) (browserRegion, string, boo
 	return browserRegion{}, "", false
 }
 
-func (a *App) dismissCookieBannerWithSOM(ctx *sdk.AppCtx, sessionID string, args map[string]any, extracted *browserExtractResult, out map[string]any) bool {
+func (a *App) dismissCookieBannerWithSOM(ctx *sdk.AppCtx, sessionID string, args map[string]any, extracted *browserExtractResult, region *browserRegion, out map[string]any) bool {
 	pageText := strings.Join([]string{extracted.Text, extracted.HTML}, " ")
-	if !hasGenericCookieBannerText(pageText) {
+	if region == nil && !hasGenericCookieBannerText(pageText) {
 		return false
 	}
 	var shot computerSOMScreenshot
@@ -1060,12 +1160,21 @@ func (a *App) dismissCookieBannerWithSOM(ctx *sdk.AppCtx, sessionID string, args
 		"som":         true,
 		"include_som": true,
 	}), &shot); err != nil {
+		if region != nil {
+			out["som_fallback_reason"] = "structured targets unavailable: " + err.Error()
+			return false
+		}
 		out["reason"] = "cookie_banner_text_detected_but_som_unavailable"
 		out["error"] = err.Error()
 		return true
 	}
-	target, ok := findCookieAcceptTarget(shot.SOM)
+	target, ok := findCookieAcceptTargetForRegion(shot.SOM, region)
 	if !ok {
+		if region != nil {
+			out["som_fallback_reason"] = "no accept target inside detected banner"
+			out["som_targets"] = len(shot.SOM)
+			return false
+		}
 		out["reason"] = "cookie_banner_text_detected_but_no_som_accept_target"
 		out["som_targets"] = len(shot.SOM)
 		return true
@@ -1099,7 +1208,7 @@ func (a *App) dismissCookieBannerWithSOM(ctx *sdk.AppCtx, sessionID string, args
 		"som":         true,
 		"include_som": true,
 	}), &verifyShot); err == nil {
-		stillVisible := hasVisibleCookieAcceptTarget(verifyShot.SOM)
+		stillVisible := hasVisibleCookieAcceptTarget(verifyShot.SOM, region)
 		out["dismissed"] = !stillVisible
 		if stillVisible {
 			out["reason"] = "som_accept_target_still_visible_after_click"
@@ -1141,38 +1250,91 @@ func hasGenericCookieBannerText(text string) bool {
 }
 
 func findCookieAcceptTarget(targets []setOfMarkTarget) (setOfMarkTarget, bool) {
+	return findCookieAcceptTargetForRegion(targets, nil)
+}
+
+func findCookieAcceptTargetForRegion(targets []setOfMarkTarget, region *browserRegion) (setOfMarkTarget, bool) {
+	bestScore := 0
+	var best setOfMarkTarget
 	for _, t := range targets {
-		if isCookieAcceptTarget(t) {
-			return t, true
+		if region != nil && !targetInsideRegion(t, *region) {
+			continue
+		}
+		if score := cookieAcceptTargetScore(t); score > bestScore {
+			bestScore = score
+			best = t
 		}
 	}
-	return setOfMarkTarget{}, false
+	return best, bestScore > 0
 }
 
 func isCookieAcceptTarget(t setOfMarkTarget) bool {
+	return cookieAcceptTargetScore(t) > 0
+}
+
+func cookieAcceptTargetScore(t setOfMarkTarget) int {
 	text := strings.ToLower(strings.TrimSpace(t.Text))
 	if text == "" {
-		return false
+		return 0
 	}
 	buttonish := strings.EqualFold(t.Tag, "button") ||
 		strings.EqualFold(t.Role, "button") ||
 		strings.EqualFold(t.Type, "button") ||
 		strings.EqualFold(t.Type, "submit")
 	if !buttonish {
-		return false
+		return 0
+	}
+	for _, reject := range []string{"reject", "decline", "deny", "settings", "preferences", "customize", "manage", "not accept"} {
+		if strings.Contains(text, reject) {
+			return 0
+		}
 	}
 	switch text {
-	case "accept", "i accept", "agree", "got it", "ok":
-		return true
+	case "accept all":
+		return 100
+	case "allow all":
+		return 95
+	case "accept cookies":
+		return 90
+	case "i accept":
+		return 85
+	case "accept":
+		return 80
+	case "agree":
+		return 70
+	case "got it":
+		return 60
+	case "ok":
+		return 20
 	}
-	return strings.Contains(text, "accept all") ||
-		strings.Contains(text, "accept cookies") ||
-		strings.Contains(text, "allow all") ||
-		strings.Contains(text, "i accept")
+	switch {
+	case strings.Contains(text, "accept all"):
+		return 95
+	case strings.Contains(text, "allow all"):
+		return 90
+	case strings.Contains(text, "accept cookies"):
+		return 85
+	case strings.Contains(text, "i accept"):
+		return 80
+	default:
+		return 0
+	}
 }
 
-func hasVisibleCookieAcceptTarget(targets []setOfMarkTarget) bool {
-	_, ok := findCookieAcceptTarget(targets)
+func targetInsideRegion(t setOfMarkTarget, region browserRegion) bool {
+	rect := region.ViewportRect
+	if rect.Width <= 0 || rect.Height <= 0 {
+		return true
+	}
+	cx := float64(t.X) + float64(t.W)/2
+	cy := float64(t.Y) + float64(t.H)/2
+	const tolerance = 12.0
+	return cx >= rect.X-tolerance && cx <= rect.X+rect.Width+tolerance &&
+		cy >= rect.Y-tolerance && cy <= rect.Y+rect.Height+tolerance
+}
+
+func hasVisibleCookieAcceptTarget(targets []setOfMarkTarget, region *browserRegion) bool {
+	_, ok := findCookieAcceptTargetForRegion(targets, region)
 	return ok
 }
 
@@ -1382,7 +1544,7 @@ func (a *App) storeSnapshotImage(ctx *sdk.AppCtx, runID int64, out map[string]an
 	if err := ctx.PlatformAPI().CallAppResult("storage", "files_upload", upArgs, &up); err != nil {
 		return fmt.Errorf("storage.files_upload: %w", err)
 	}
-	art, _ := insertArtifact(ctx, runID, "snapshot", stringFromAny(out["current_url"]), stringFromAny(out["heading"]), up.ID, up.URL, "image/png", size, out)
+	art, _ := insertArtifact(ctx, runID, "snapshot", stringFromAny(out["current_url"]), stringFromAny(out["heading"]), up.ID, up.URL, "image/png", size, compactArtifactMetadata("snapshot", stringFromAny(out["current_url"]), stringFromAny(out["heading"]), "image/png", size))
 	out["stored"] = true
 	out["storage_id"] = up.ID
 	out["url"] = up.URL
@@ -1618,7 +1780,7 @@ func overlapRatio(a, b browserRegion) float64 {
 
 func tokenizeQuery(query string) []string {
 	fields := strings.FieldsFunc(strings.ToLower(query), func(r rune) bool {
-		return !(r >= 'a' && r <= 'z' || r >= '0' && r <= '9' || r == '@')
+		return !(unicode.IsLetter(r) || unicode.IsNumber(r) || r == '@')
 	})
 	out := make([]string, 0, len(fields))
 	for _, f := range fields {
@@ -1923,7 +2085,10 @@ func applyCacheAfterFetch(ctx *sdk.AppCtx, p cachePolicy, out map[string]any) {
 }
 
 func storeCachedResponse(ctx *sdk.AppCtx, p cachePolicy, out map[string]any) error {
-	payload := cloneResponseForCache(out)
+	payload, err := cloneResponseForCache(out)
+	if err != nil {
+		return err
+	}
 	b, err := json.Marshal(payload)
 	if err != nil {
 		return err
@@ -1949,15 +2114,22 @@ func storeCachedResponse(ctx *sdk.AppCtx, p cachePolicy, out map[string]any) err
 			hit_count=0`,
 		projectID(ctx), p.Kind, p.Key, p.RequestJSON, string(b), nullIfEmpty(cacheURL), nullIfEmpty(title), now, expires, now,
 	)
-	return err
+	if err != nil {
+		return err
+	}
+	return pruneCache(ctx)
 }
 
 func cacheKey(kind string, args map[string]any) (string, string, error) {
 	cleaned := map[string]any{"kind": kind}
 	for k, v := range args {
 		switch k {
-		case "cache", "max_age", "cache_ttl", "store":
+		case "cache", "max_age", "cache_ttl":
 			continue
+		case "store":
+			if kind != "snapshot" {
+				continue
+			}
 		}
 		cleaned[k] = normalizeCacheValue(k, v)
 	}
@@ -1999,15 +2171,39 @@ func normalizeCacheValue(key string, v any) any {
 	}
 }
 
-func cloneResponseForCache(out map[string]any) map[string]any {
-	cp := make(map[string]any, len(out))
-	for k, v := range out {
-		if k == "cache" {
-			continue
-		}
-		cp[k] = v
+func cloneResponseForCache(out map[string]any) (map[string]any, error) {
+	b, err := json.Marshal(out)
+	if err != nil {
+		return nil, err
 	}
-	return cp
+	var cp map[string]any
+	if err := json.Unmarshal(b, &cp); err != nil {
+		return nil, err
+	}
+	delete(cp, "cache")
+	stripCachedTransientFields(cp)
+	return cp, nil
+}
+
+func stripCachedTransientFields(v any) {
+	switch x := v.(type) {
+	case map[string]any:
+		delete(x, "artifact")
+		delete(x, "browser")
+		delete(x, "snapshot")
+		delete(x, "session_id")
+		delete(x, "opened_session")
+		for key, child := range x {
+			if key == "metadata" || key == "structured_data" {
+				continue
+			}
+			stripCachedTransientFields(child)
+		}
+	case []any:
+		for _, child := range x {
+			stripCachedTransientFields(child)
+		}
+	}
 }
 
 func responseHasError(out map[string]any) bool {
@@ -2022,7 +2218,167 @@ func responseHasError(out map[string]any) bool {
 			return true
 		}
 	}
+	if confidence, _ := out["confidence"].(string); confidence == "none" {
+		return true
+	}
 	return false
+}
+
+func (a *App) applyResponseEffects(ctx *sdk.AppCtx, runID int64, kind string, args, out map[string]any) error {
+	delete(out, "artifact")
+	switch kind {
+	case "search":
+		if !boolArg(args, "store") {
+			return nil
+		}
+		query := stringFromAny(out["query"])
+		art, err := storeJSONArtifact(ctx, runID, "search", stringFromAny(out["search_url"]), "search: "+query, out)
+		if err != nil {
+			return fmt.Errorf("store search artifact: %w", err)
+		}
+		out["artifact"] = art
+		return nil
+
+	case "extract":
+		doc, err := pageDocFromAny(out["page"])
+		if err != nil {
+			return err
+		}
+		if boolArg(args, "snapshot") && doc.Error == "" {
+			shotArgs := mapMerge(args, map[string]any{
+				"url":        firstNonEmpty(doc.FinalURL, doc.URL),
+				"session_id": "",
+				"label":      firstNonEmpty(doc.Title, doc.URL),
+				"store":      true,
+			})
+			shot, shotErr := a.snapshot(ctx, runID, shotArgs)
+			if shotErr != nil {
+				return fmt.Errorf("capture extraction snapshot: %w", shotErr)
+			}
+			doc.Snapshot = shot
+		}
+		if boolArgDefault(args, "store", storeDefault(ctx)) {
+			art, storeErr := storePageArtifact(ctx, runID, &doc)
+			if storeErr != nil {
+				return fmt.Errorf("store page artifact: %w", storeErr)
+			}
+			doc.Artifact = art
+		}
+		out["page"] = doc
+		return nil
+
+	case "crawl", "map", "research":
+		if kind == "research" && boolArg(args, "snapshots") {
+			docs, err := pageDocsFromAny(out["sources"])
+			if err != nil {
+				return err
+			}
+			for i := range docs {
+				if docs[i].Error != "" || docs[i].Snapshot != nil {
+					continue
+				}
+				shotArgs := mapMerge(args, map[string]any{
+					"url":        firstNonEmpty(docs[i].FinalURL, docs[i].URL),
+					"session_id": "",
+					"label":      firstNonEmpty(docs[i].Title, docs[i].URL),
+					"store":      true,
+				})
+				shot, shotErr := a.snapshot(ctx, runID, shotArgs)
+				if shotErr != nil {
+					return fmt.Errorf("capture research snapshot for %s: %w", docs[i].URL, shotErr)
+				}
+				docs[i].Snapshot = shot
+			}
+			out["sources"] = docs
+		}
+		if !boolArgDefault(args, "store", storeDefault(ctx)) {
+			return nil
+		}
+		artifactURL := ""
+		title := kind
+		if seeds := stringSliceFromAny(out["seeds"]); len(seeds) > 0 {
+			artifactURL = seeds[0]
+		}
+		if kind == "research" {
+			title = "research: " + stringFromAny(out["question"])
+		}
+		art, err := storeJSONArtifact(ctx, runID, kind, artifactURL, title, out)
+		if err != nil {
+			return fmt.Errorf("store %s artifact: %w", kind, err)
+		}
+		out["artifact"] = art
+	}
+	return nil
+}
+
+func pageDocFromAny(v any) (pageDoc, error) {
+	if doc, ok := v.(pageDoc); ok {
+		return doc, nil
+	}
+	b, err := json.Marshal(v)
+	if err != nil {
+		return pageDoc{}, fmt.Errorf("encode cached page: %w", err)
+	}
+	var doc pageDoc
+	if err := json.Unmarshal(b, &doc); err != nil {
+		return pageDoc{}, fmt.Errorf("decode cached page: %w", err)
+	}
+	if doc.URL == "" {
+		return pageDoc{}, errors.New("cached response has no page URL")
+	}
+	return doc, nil
+}
+
+func pageDocsFromAny(v any) ([]pageDoc, error) {
+	if docs, ok := v.([]pageDoc); ok {
+		return docs, nil
+	}
+	b, err := json.Marshal(v)
+	if err != nil {
+		return nil, fmt.Errorf("encode cached pages: %w", err)
+	}
+	var docs []pageDoc
+	if err := json.Unmarshal(b, &docs); err != nil {
+		return nil, fmt.Errorf("decode cached pages: %w", err)
+	}
+	return docs, nil
+}
+
+func stringSliceFromAny(v any) []string {
+	switch x := v.(type) {
+	case []string:
+		return x
+	case []any:
+		out := make([]string, 0, len(x))
+		for _, item := range x {
+			if s := stringFromAny(item); s != "" {
+				out = append(out, s)
+			}
+		}
+		return out
+	default:
+		return nil
+	}
+}
+
+func pruneCache(ctx *sdk.AppCtx) error {
+	if ctx == nil || ctx.AppDB() == nil {
+		return nil
+	}
+	now := time.Now().UTC()
+	if _, err := ctx.AppDB().Exec(`DELETE FROM web_cache WHERE expires_at IS NOT NULL AND expires_at < ?`, now); err != nil {
+		return err
+	}
+	_, err := ctx.AppDB().Exec(
+		`DELETE FROM web_cache
+		  WHERE project_id=?
+		    AND id NOT IN (
+			SELECT id FROM web_cache WHERE project_id=?
+			 ORDER BY last_accessed_at DESC, id DESC LIMIT 1000
+		  )`,
+		projectID(ctx), projectID(ctx),
+	)
+	return err
 }
 
 func cacheResponseURLTitle(out map[string]any) (string, string) {
@@ -2405,17 +2761,18 @@ func completeRun(ctx *sdk.AppCtx, runID int64, status string, output any, runErr
 	}
 	var outText string
 	if output != nil {
-		if b, err := json.Marshal(output); err == nil {
+		if b, err := json.Marshal(compactRunOutput(output)); err == nil {
 			outText = string(b)
 		}
 	}
+	summary := runSummaryFromOutput(output)
 	errText := ""
 	if runErr != nil {
 		errText = runErr.Error()
 	}
 	_, _ = ctx.AppDB().Exec(
-		`UPDATE web_runs SET status=?, output_json=?, error=?, completed_at=? WHERE id=?`,
-		status, nullIfEmpty(outText), nullIfEmpty(errText), time.Now().UTC(), runID,
+		`UPDATE web_runs SET status=?, output_json=?, summary=?, error=?, completed_at=? WHERE id=?`,
+		status, nullIfEmpty(outText), nullIfEmpty(summary), nullIfEmpty(errText), time.Now().UTC(), runID,
 	)
 }
 
@@ -2447,7 +2804,7 @@ func storeJSONArtifact(ctx *sdk.AppCtx, runID int64, kind, artifactURL, title st
 }
 
 func storeArtifact(ctx *sdk.AppCtx, runID int64, kind, artifactURL, title, contentType string, payload any) (*artifactSummary, error) {
-	b, err := json.MarshalIndent(payload, "", "  ")
+	b, err := json.Marshal(payload)
 	if err != nil {
 		return nil, err
 	}
@@ -2467,7 +2824,17 @@ func storeArtifact(ctx *sdk.AppCtx, runID int64, kind, artifactURL, title, conte
 	if err := ctx.PlatformAPI().CallAppResult("storage", "files_upload", args, &up); err != nil {
 		return nil, fmt.Errorf("storage.files_upload: %w", err)
 	}
-	return insertArtifact(ctx, runID, kind, artifactURL, title, up.ID, up.URL, contentType, len(b), payload)
+	return insertArtifact(ctx, runID, kind, artifactURL, title, up.ID, up.URL, contentType, len(b), compactArtifactMetadata(kind, artifactURL, title, contentType, len(b)))
+}
+
+func compactArtifactMetadata(kind, artifactURL, title, contentType string, size int) map[string]any {
+	return map[string]any{
+		"kind":         kind,
+		"url":          artifactURL,
+		"title":        title,
+		"content_type": contentType,
+		"bytes":        size,
+	}
 }
 
 func insertArtifact(ctx *sdk.AppCtx, runID int64, kind, artifactURL, title string, storageID int64, storageURL, contentType string, size int, metadata any) (*artifactSummary, error) {
@@ -2486,7 +2853,7 @@ func insertArtifact(ctx *sdk.AppCtx, runID int64, kind, artifactURL, title strin
 
 func listRuns(ctx *sdk.AppCtx, limit int) ([]map[string]any, error) {
 	rows, err := ctx.AppDB().Query(
-		`SELECT id, kind, status, COALESCE(error,''), COALESCE(output_json,''), created_at
+		`SELECT id, kind, status, COALESCE(error,''), COALESCE(summary,''), created_at
 		 FROM web_runs
 		 WHERE project_id = ?
 		 ORDER BY created_at DESC
@@ -2500,9 +2867,9 @@ func listRuns(ctx *sdk.AppCtx, limit int) ([]map[string]any, error) {
 	var out []map[string]any
 	for rows.Next() {
 		var id int64
-		var kind, status, errText, outputText string
+		var kind, status, errText, summary string
 		var created time.Time
-		if err := rows.Scan(&id, &kind, &status, &errText, &outputText, &created); err != nil {
+		if err := rows.Scan(&id, &kind, &status, &errText, &summary, &created); err != nil {
 			return nil, err
 		}
 		out = append(out, map[string]any{
@@ -2510,7 +2877,7 @@ func listRuns(ctx *sdk.AppCtx, limit int) ([]map[string]any, error) {
 			"kind":       kind,
 			"status":     status,
 			"error":      errText,
-			"summary":    runSummary(outputText),
+			"summary":    summary,
 			"created_at": created.Format(time.RFC3339),
 		})
 	}
@@ -2520,13 +2887,21 @@ func listRuns(ctx *sdk.AppCtx, limit int) ([]map[string]any, error) {
 // ─── HTTP handlers ────────────────────────────────────────────────
 
 func (a *App) handleRuns(w http.ResponseWriter, r *http.Request) {
+	if globalCtx == nil {
+		httpErr(w, http.StatusServiceUnavailable, "web app is not mounted")
+		return
+	}
 	limit := 50
 	if v := r.URL.Query().Get("limit"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 200 {
 			limit = n
 		}
 	}
-	runs, err := listRuns(globalCtx, limit)
+	ctx := globalCtx
+	if pid := strings.TrimSpace(r.URL.Query().Get("project_id")); pid != "" {
+		ctx = globalCtx.WithProject(pid)
+	}
+	runs, err := listRuns(ctx, limit)
 	writeJSON(w, map[string]any{"runs": runs}, err)
 }
 
@@ -2755,6 +3130,34 @@ func seedURLs(args map[string]any) []string {
 	return dedupeStrings(out, 20)
 }
 
+func validateSeedURLs(seeds []string) error {
+	for _, seed := range seeds {
+		if err := validateHTTPURL(seed); err != nil {
+			return fmt.Errorf("invalid seed URL %q: %w", seed, err)
+		}
+	}
+	return nil
+}
+
+func aggregateExtractionBackend(pages []pageDoc) string {
+	seen := map[string]bool{}
+	for _, page := range pages {
+		if page.Error == "" && page.ExtractionBackend != "" {
+			seen[page.ExtractionBackend] = true
+		}
+	}
+	if len(seen) == 0 {
+		return "none"
+	}
+	if len(seen) > 1 {
+		return "mixed"
+	}
+	for backend := range seen {
+		return backend
+	}
+	return "none"
+}
+
 func nodeText(n *html.Node) string {
 	var parts []string
 	var walk func(*html.Node)
@@ -2825,7 +3228,7 @@ func synthesizeExtractiveAnswer(question string, citations []map[string]any) str
 	}
 	var b strings.Builder
 	fmt.Fprintf(&b, "Browser-backed research for %q reviewed %d source(s). ", question, len(citations))
-	b.WriteString("Key evidence is available in the citations array; v0.1.3 returns an extractive report rather than an LLM-written conclusion.")
+	b.WriteString("Key evidence is available in the citations array. The report is extractive rather than an LLM-written conclusion.")
 	return b.String()
 }
 
@@ -2998,7 +3401,11 @@ func truncateString(s string, max int) string {
 	if max <= 0 || len(s) <= max {
 		return s
 	}
-	return s[:max]
+	end := max
+	for end > 0 && !utf8.RuneStart(s[end]) {
+		end--
+	}
+	return s[:end]
 }
 
 func dedupeStrings(in []string, limit int) []string {
@@ -3070,6 +3477,15 @@ func configString(ctx *sdk.AppCtx, key string) string {
 	return strings.TrimSpace(ctx.Config().Get(key))
 }
 
+func configInt(ctx *sdk.AppCtx, key string) int {
+	v := configString(ctx, key)
+	if v == "" {
+		return 0
+	}
+	n, _ := strconv.Atoi(v)
+	return n
+}
+
 func storeDefault(ctx *sdk.AppCtx) bool {
 	v := configString(ctx, "store_artifacts_by_default")
 	if v == "" {
@@ -3135,23 +3551,86 @@ func safeFilename(s string) string {
 	return out
 }
 
-func runSummary(outputText string) string {
-	if outputText == "" {
-		return ""
-	}
-	var m map[string]any
-	if err := json.Unmarshal([]byte(outputText), &m); err != nil {
-		return ""
-	}
+func runSummaryFromOutput(output any) string {
+	m := mapFromAny(output)
 	for _, key := range []string{"query", "question"} {
-		if s, ok := m[key].(string); ok {
-			return s
+		if s := stringFromAny(m[key]); s != "" {
+			return truncateString(s, 500)
 		}
 	}
-	if c, ok := m["count"].(float64); ok {
-		return fmt.Sprintf("%.0f item(s)", c)
+	switch page := m["page"].(type) {
+	case pageDoc:
+		if page.Title != "" {
+			return truncateString(page.Title, 500)
+		}
+		if rawURL := firstNonEmpty(page.FinalURL, page.URL); rawURL != "" {
+			return truncateString(rawURL, 500)
+		}
+	case map[string]any:
+		if title := stringFromAny(page["title"]); title != "" {
+			return truncateString(title, 500)
+		}
+		if rawURL := stringFromAny(firstNonEmptyAny(page["final_url"], page["url"])); rawURL != "" {
+			return truncateString(rawURL, 500)
+		}
+	}
+	if count := intFromAny(m["count"]); count > 0 {
+		return fmt.Sprintf("%d item(s)", count)
+	}
+	if rawURL := stringFromAny(m["current_url"]); rawURL != "" {
+		return truncateString(rawURL, 500)
 	}
 	return ""
+}
+
+func compactRunOutput(output any) map[string]any {
+	m := mapFromAny(output)
+	out := make(map[string]any)
+	for _, key := range []string{"query", "question", "count", "current_url", "mode", "blocked", "extraction_backend", "fallback"} {
+		if v, ok := m[key]; ok {
+			out[key] = v
+		}
+	}
+	switch page := m["page"].(type) {
+	case pageDoc:
+		out["page"] = map[string]any{
+			"url":                page.URL,
+			"final_url":          page.FinalURL,
+			"title":              page.Title,
+			"status":             page.Status,
+			"extraction_backend": page.ExtractionBackend,
+		}
+	case map[string]any:
+		out["page"] = map[string]any{
+			"url":                page["url"],
+			"final_url":          page["final_url"],
+			"title":              page["title"],
+			"status":             page["status"],
+			"extraction_backend": page["extraction_backend"],
+		}
+	}
+	if cache, ok := m["cache"]; ok {
+		out["cache"] = cache
+	}
+	if artifact, ok := m["artifact"]; ok {
+		out["artifact"] = artifact
+	}
+	return out
+}
+
+func mapFromAny(v any) map[string]any {
+	if m, ok := v.(map[string]any); ok {
+		return m
+	}
+	b, err := json.Marshal(v)
+	if err != nil {
+		return map[string]any{}
+	}
+	var out map[string]any
+	if err := json.Unmarshal(b, &out); err != nil {
+		return map[string]any{}
+	}
+	return out
 }
 
 func writeJSON(w http.ResponseWriter, payload any, err error) {

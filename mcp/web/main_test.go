@@ -146,6 +146,21 @@ func TestSearchBlockedIsReportedAndNotCached(t *testing.T) {
 	}
 }
 
+func TestInvalidSearchEngineDoesNotLeaveRunningRun(t *testing.T) {
+	plat := newFakePlatform()
+	ctx, app := newTestCtx(t, plat)
+	if _, err := app.toolSearch(ctx, map[string]any{"query": "alpha", "engine": "invalid"}); err == nil {
+		t.Fatal("expected unsupported engine error")
+	}
+	var count int
+	if err := ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM web_runs`).Scan(&count); err != nil {
+		t.Fatalf("count runs: %v", err)
+	}
+	if count != 0 {
+		t.Fatalf("invalid request created %d run rows", count)
+	}
+}
+
 func TestExtractURLUsesComputerDOMParser(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html")
@@ -166,6 +181,9 @@ func TestExtractURLUsesComputerDOMParser(t *testing.T) {
 	}
 	if page.ExtractionBackend != "browser_dom" {
 		t.Fatalf("backend=%q", page.ExtractionBackend)
+	}
+	if page.Status != http.StatusOK || page.ContentType != "text/html" {
+		t.Fatalf("rendered page metadata status=%d content_type=%q", page.Status, page.ContentType)
 	}
 	if len(page.Links) != 1 || page.Links[0].URL != srv.URL+"/next" {
 		t.Fatalf("links=%#v", page.Links)
@@ -229,6 +247,107 @@ func TestExtractUsesResponseCache(t *testing.T) {
 	}
 	if got := len(plat.callLog()); got != 6 {
 		t.Fatalf("bypass call count=%d, want 6", got)
+	}
+}
+
+func TestCachedExtractStillHonorsStoreRequest(t *testing.T) {
+	plat := newFakePlatform()
+	ctx, app := newTestCtx(t, plat)
+	baseArgs := map[string]any{"url": "https://example.com/cache-store", "store": false, "max_age": 3600}
+
+	if _, err := app.toolExtract(ctx, baseArgs); err != nil {
+		t.Fatalf("prime extract cache: %v", err)
+	}
+	outAny, err := app.toolExtract(ctx, map[string]any{"url": baseArgs["url"], "store": true, "max_age": 3600})
+	if err != nil {
+		t.Fatalf("cached stored extract: %v", err)
+	}
+	out := outAny.(map[string]any)
+	if !out["cache"].(cacheInfo).Hit {
+		t.Fatalf("expected cache hit: %#v", out["cache"])
+	}
+	page := out["page"].(pageDoc)
+	if page.Artifact == nil || page.Artifact.StorageID == 0 {
+		t.Fatalf("store=true did not create artifact from cached content: %#v", page)
+	}
+	if got := countCalls(plat, "storage", "files_upload"); got != 1 {
+		t.Fatalf("storage uploads=%d, want 1", got)
+	}
+	if got := countCalls(plat, "computer", "browser_open"); got != 1 {
+		t.Fatalf("browser opens=%d, want cache hit without second open", got)
+	}
+}
+
+func TestCachedExtractDoesNotLeakArtifactToStoreFalse(t *testing.T) {
+	plat := newFakePlatform()
+	ctx, app := newTestCtx(t, plat)
+	url := "https://example.com/no-artifact-leak"
+	if _, err := app.toolExtract(ctx, map[string]any{"url": url, "store": true, "max_age": 3600}); err != nil {
+		t.Fatalf("stored extract: %v", err)
+	}
+	outAny, err := app.toolExtract(ctx, map[string]any{"url": url, "store": false, "max_age": 3600})
+	if err != nil {
+		t.Fatalf("unstored cached extract: %v", err)
+	}
+	page := outAny.(map[string]any)["page"].(pageDoc)
+	if page.Artifact != nil {
+		t.Fatalf("store=false leaked cached artifact: %#v", page.Artifact)
+	}
+}
+
+func TestSearchVisitTopExtractsLeadingResult(t *testing.T) {
+	plat := newFakePlatform()
+	ctx, app := newTestCtx(t, plat)
+	outAny, err := app.toolSearch(ctx, map[string]any{"query": "peer lending", "visit_top": true, "cache": "bypass"})
+	if err != nil {
+		t.Fatalf("search visit_top: %v", err)
+	}
+	out := outAny.(map[string]any)
+	top, ok := out["top_page"].(pageDoc)
+	if !ok || top.URL == "" || top.Title != "Readable Page" {
+		t.Fatalf("top_page=%#v", out["top_page"])
+	}
+	results := out["results"].([]searchResult)
+	if len(results) == 0 || results[0].Snippet == "" {
+		t.Fatalf("leading result snippet not enriched: %#v", results)
+	}
+	if got := countCalls(plat, "computer", "browser_open"); got != 2 {
+		t.Fatalf("browser opens=%d, want search page plus top result", got)
+	}
+}
+
+func TestCrawlUsesConfiguredPageLimit(t *testing.T) {
+	plat := newFakePlatform()
+	ctx, app := newTestCtx(t, plat, tk.WithConfig(map[string]string{"max_pages": "2"}))
+	outAny, err := app.toolCrawl(ctx, map[string]any{"url": "https://example.com/start", "store": false, "cache": "bypass", "max_depth": 4})
+	if err != nil {
+		t.Fatalf("crawl: %v", err)
+	}
+	out := outAny.(map[string]any)
+	if out["count"] != 2 {
+		t.Fatalf("count=%v, want configured default limit 2", out["count"])
+	}
+}
+
+func TestCrawlDoesNotLetDuplicateLinksStarveUniquePages(t *testing.T) {
+	plat := newFakePlatform()
+	plat.duplicateCrawlLinks = true
+	ctx, app := newTestCtx(t, plat)
+	outAny, err := app.toolCrawl(ctx, map[string]any{"url": "https://example.com/start", "max_pages": 3, "max_depth": 2, "store": false, "cache": "bypass"})
+	if err != nil {
+		t.Fatalf("crawl: %v", err)
+	}
+	out := outAny.(map[string]any)
+	pages := out["pages"].([]pageDoc)
+	if len(pages) != 3 {
+		t.Fatalf("pages=%d, want start and two unique children: %#v", len(pages), pages)
+	}
+	seen := map[string]bool{}
+	for _, page := range pages {
+		seen[page.URL] = true
+	}
+	if !seen["https://example.com/a"] || !seen["https://example.com/b"] {
+		t.Fatalf("unique pages were starved: %#v", seen)
 	}
 }
 
@@ -317,7 +436,7 @@ func TestSmartSnapshotDismissesCookieBanner(t *testing.T) {
 	}
 	out := outAny.(map[string]any)
 	cookie := out["cookie_handling"].(map[string]any)
-	if cookie["strategy"] != "onetrust" || cookie["dismissed"] != true {
+	if cookie["strategy"] != "onetrust_coordinate_fallback" || cookie["dismissed"] != true {
 		t.Fatalf("cookie_handling=%#v", cookie)
 	}
 	var cookieClick map[string]any
@@ -329,6 +448,27 @@ func TestSmartSnapshotDismissesCookieBanner(t *testing.T) {
 	}
 	if cookieClick == nil || cookieClick["coordinate"] == "" {
 		t.Fatalf("missing cookie coordinate click; calls=%#v", plat.calls)
+	}
+}
+
+func TestSmartSnapshotPrefersSOMTargetInsideRecognizedCookieBanner(t *testing.T) {
+	plat := newFakePlatform()
+	plat.cookieBanner = true
+	plat.cookieBannerSOM = true
+	ctx, app := newTestCtx(t, plat, tk.WithProjectID("proj-web"))
+
+	outAny, err := app.toolSnapshot(ctx, map[string]any{"url": "https://example.com", "query": "affiliate contact", "max_shots": 1})
+	if err != nil {
+		t.Fatalf("smart snapshot: %v", err)
+	}
+	cookie := outAny.(map[string]any)["cookie_handling"].(map[string]any)
+	if cookie["strategy"] != "som_accept_button" || cookie["label"] != 7 || cookie["dismissed"] != true {
+		t.Fatalf("cookie_handling=%#v", cookie)
+	}
+	for _, call := range plat.callsSnapshot() {
+		if call.app == "computer" && call.tool == "computer_use" && call.args["action"] == "click" && call.args["coordinate"] != nil {
+			t.Fatalf("recognized banner used coordinate despite SoM target: %#v", call.args)
+		}
 	}
 }
 
@@ -562,6 +702,40 @@ func TestRankRegionsPenalizesFooterNavigation(t *testing.T) {
 	}
 }
 
+func TestRankRegionsSupportsUnicodeQueries(t *testing.T) {
+	regions := []browserRegion{{
+		ID: "spanish", Tag: "section", Heading: "Inversión inmobiliaria",
+		Text: "Oportunidades de inversión inmobiliaria con préstamos garantizados.",
+		Rect: browserRect{X: 0, Y: 100, Width: 1000, Height: 400}, Visible: true,
+	}}
+	got := rankRegions(regions, "inversión inmobiliaria", 1)
+	if len(got) != 1 || got[0].Region.ID != "spanish" {
+		t.Fatalf("unicode query did not match: %#v", got)
+	}
+}
+
+func TestRunPersistenceStoresCompactSummary(t *testing.T) {
+	plat := newFakePlatform()
+	ctx, app := newTestCtx(t, plat)
+	if _, err := app.toolExtract(ctx, map[string]any{"url": "https://example.com/compact", "store": true, "cache": "bypass"}); err != nil {
+		t.Fatalf("extract: %v", err)
+	}
+	var outputBytes, metadataBytes int
+	var summary string
+	if err := ctx.AppDB().QueryRow(`SELECT LENGTH(output_json), COALESCE(summary,'') FROM web_runs ORDER BY id DESC LIMIT 1`).Scan(&outputBytes, &summary); err != nil {
+		t.Fatalf("read run: %v", err)
+	}
+	if outputBytes > 2048 || summary == "" {
+		t.Fatalf("run payload not compact: bytes=%d summary=%q", outputBytes, summary)
+	}
+	if err := ctx.AppDB().QueryRow(`SELECT LENGTH(metadata_json) FROM web_artifacts ORDER BY id DESC LIMIT 1`).Scan(&metadataBytes); err != nil {
+		t.Fatalf("read artifact: %v", err)
+	}
+	if metadataBytes > 1024 {
+		t.Fatalf("artifact metadata duplicated payload: bytes=%d", metadataBytes)
+	}
+}
+
 func TestCropScreenshotAcceptsJPEGInput(t *testing.T) {
 	img := image.NewRGBA(image.Rect(0, 0, 120, 80))
 	draw.Draw(img, img.Bounds(), &image.Uniform{C: color.RGBA{R: 12, G: 34, B: 56, A: 255}}, image.Point{}, draw.Src)
@@ -598,16 +772,18 @@ type fakeCall struct {
 
 type fakePlatform struct {
 	tk.BasePlatformClient
-	mu               sync.Mutex
-	calls            []fakeCall
-	storageID        int64
-	storageURL       string
-	openURL          string
-	searchBlocked    bool
-	cookieBanner     bool
-	cookieTextBanner bool
-	cookiePolicyText bool
-	cookieDismissed  bool
+	mu                  sync.Mutex
+	calls               []fakeCall
+	storageID           int64
+	storageURL          string
+	openURL             string
+	searchBlocked       bool
+	cookieBanner        bool
+	cookieBannerSOM     bool
+	cookieTextBanner    bool
+	cookiePolicyText    bool
+	cookieDismissed     bool
+	duplicateCrawlLinks bool
 }
 
 func newFakePlatform() *fakePlatform {
@@ -700,6 +876,18 @@ func (p *fakePlatform) respond(app, tool string, in map[string]any) map[string]a
 				"extraction_backend": "browser_dom",
 			}
 		}
+		links := []map[string]any{{"url": p.openURL + "/next", "text": "Next page"}}
+		if p.duplicateCrawlLinks {
+			if strings.HasSuffix(p.openURL, "/start") {
+				links = []map[string]any{
+					{"url": "https://example.com/a", "text": "A"},
+					{"url": "https://example.com/a", "text": "A duplicate"},
+					{"url": "https://example.com/b", "text": "B"},
+				}
+			} else {
+				links = []map[string]any{}
+			}
+		}
 		regions := []map[string]any{{
 			"id":       "r_contact",
 			"tag":      "section",
@@ -764,7 +952,7 @@ func (p *fakePlatform) respond(app, tool string, in map[string]any) map[string]a
 			"text":               text,
 			"markdown":           "# Hello\n\nThis page has useful text.",
 			"html":               html,
-			"links":              []map[string]any{{"url": p.openURL + "/next", "text": "Next page"}},
+			"links":              links,
 			"regions":            regions,
 			"metadata":           map[string]any{"description": "A page for extraction"},
 			"structured_data":    map[string]any{"json_ld": []any{map[string]any{"@type": "Article", "headline": "Readable Page"}}},
@@ -782,18 +970,27 @@ func (p *fakePlatform) respond(app, tool string, in map[string]any) map[string]a
 		if in["action"] == "click" && in["label"] != nil && p.cookieTextBanner {
 			p.cookieDismissed = true
 		}
+		if in["action"] == "click" && intFromAny(in["label"]) == 7 && p.cookieBanner {
+			p.cookieDismissed = true
+		}
 		out := map[string]any{"current_url": p.openURL, "width": 1280, "height": 720}
-		if in["action"] == "screenshot" && in["include_som"] == true && p.cookieTextBanner && !p.cookieDismissed {
-			out["som"] = []map[string]any{{
-				"label": 9,
-				"x":     1068,
-				"y":     740,
-				"w":     128,
-				"h":     44,
-				"tag":   "button",
-				"role":  "button",
-				"text":  "I accept",
-			}}
+		if in["action"] == "screenshot" && in["include_som"] == true && !p.cookieDismissed {
+			targets := []map[string]any{}
+			if p.cookieBannerSOM && p.cookieBanner {
+				targets = append(targets, map[string]any{
+					"label": 7, "x": 830, "y": 235, "w": 140, "h": 42,
+					"tag": "button", "role": "button", "text": "Accept all",
+				})
+			}
+			if p.cookieTextBanner {
+				targets = append(targets, map[string]any{
+					"label": 9, "x": 1068, "y": 740, "w": 128, "h": 44,
+					"tag": "button", "role": "button", "text": "I accept",
+				})
+			}
+			if len(targets) > 0 {
+				out["som"] = targets
+			}
 		}
 		return out
 	case "computer.browser_screenshot":
@@ -838,6 +1035,24 @@ func (p *fakePlatform) lastCall(app, tool string) map[string]any {
 		}
 	}
 	return nil
+}
+
+func (p *fakePlatform) callsSnapshot() []fakeCall {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	out := make([]fakeCall, len(p.calls))
+	copy(out, p.calls)
+	return out
+}
+
+func countCalls(p *fakePlatform, app, tool string) int {
+	count := 0
+	for _, call := range p.callsSnapshot() {
+		if call.app == app && call.tool == tool {
+			count++
+		}
+	}
+	return count
 }
 
 func newTestCtx(t *testing.T, plat *fakePlatform, extra ...tk.Option) (*sdk.AppCtx, *App) {
