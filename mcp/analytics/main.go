@@ -7,6 +7,7 @@
 package main
 
 import (
+	_ "embed"
 	"errors"
 
 	sdk "github.com/apteva/app-sdk"
@@ -19,7 +20,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: analytics
 display_name: Analytics
-version: 0.8.5
+version: 0.8.6
 description: |
   Generic event analytics for Apteva apps. Other apps call
   analytics_track to record typed events; analytics_query / count /
@@ -43,6 +44,8 @@ description: |
   current project and rejects mismatched project_id args.
   v0.8.5 adds project-safe HTTP APIs, date-correct transactional
   policy ingestion, strict numeric aggregates, and batched dashboards.
+  v0.8.6 restores anonymous static-site tracking under the server's
+  explicit public-route policy while preserving existing tag URLs.
 author: Apteva
 tags: [analytics, events, observability]
 scopes: [global]
@@ -53,6 +56,12 @@ requires:
 provides:
   http_routes:
     - prefix: /
+    - method: GET
+      prefix: /ui/tag.js
+      no_auth: true
+    - method: GET
+      prefix: /collect
+      no_auth: true
   permissions:
     - name: events.write
       description: Record events via analytics_track.
@@ -137,6 +146,9 @@ func (a *App) Manifest() sdk.Manifest {
 	return *m
 }
 
+//go:embed ui/tag.js
+var trackingTagJS []byte
+
 func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	if ctx.AppDB() == nil {
 		return errors.New("analytics requires a db block")
@@ -162,14 +174,15 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/feed", Handler: a.handleEvents},
 		{Pattern: "/dimensions", Handler: a.handleDimensions},
 
-		// Public static-site tag ingest. Rides the platform's anonymous
-		// GET fall-through; the ?k= write key is the credential.
-		{Pattern: "/collect", Handler: a.handleCollect},
+		// Public static-site tracking. Keep /ui/tag.js stable because existing
+		// customer sites already embed that URL. Both routes are also declared
+		// no_auth in the manifest so the platform gateway allows them through.
+		{Method: "GET", Pattern: "/ui/tag.js", Handler: a.handleTrackingTag, NoAuth: true},
+		{Method: "GET", Pattern: "/collect", Handler: a.handleCollect, NoAuth: true},
 
-		// Write-key management — operator-only (handlers require X-User-ID).
-		// GET /keys is reachable via the anonymous fall-through, so the
-		// handler itself rejects unauthenticated callers. Method-prefixed
-		// so GET + POST on /keys don't collide on the ServeMux.
+		// Write-key management is operator-only. The gateway requires auth and
+		// the handlers also require X-User-ID. Routes are method-prefixed so
+		// GET + POST on /keys don't collide on the ServeMux.
 		{Method: "GET", Pattern: "/keys", Handler: a.handleKeysList},
 		{Method: "POST", Pattern: "/keys", Handler: a.handleKeysCreate},
 		{Method: "POST", Pattern: "/keys/revoke", Handler: a.handleKeysRevoke},

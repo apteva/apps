@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: analytics
 display_name: Analytics
-version: 0.8.5
+version: 0.8.6
 description: |
   Generic event analytics for Apteva apps. Other apps call
   analytics_track to record typed events; analytics_query / count /
@@ -61,6 +61,9 @@ description: |
   numeric aggregates, batches dashboard refreshes, and improves
   responsive KPI/chart presentation with explicit errors and units.
 
+  v0.8.6 restores anonymous static-site tracking under the server's
+  explicit public-route policy while preserving existing tag URLs.
+
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/analytics
 tags: [analytics, events, observability]
@@ -75,6 +78,12 @@ requires:
 provides:
   http_routes:
     - prefix: /
+    - method: GET
+      prefix: /ui/tag.js
+      no_auth: true
+    - method: GET
+      prefix: /collect
+      no_auth: true
   permissions:
     - name: events.write
       description: Record events via analytics_track.

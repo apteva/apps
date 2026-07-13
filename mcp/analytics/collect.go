@@ -1,11 +1,11 @@
 package main
 
-// Public ingest for the static-site tag. GET /collect rides the
-// platform's anonymous-GET fall-through (auth.go) so a browser with no
-// session can reach it; the write key in ?k= is the credential. Always
-// responds with a 1x1 GIF so a bad key never breaks the page; events are
-// recorded only for a valid, non-revoked, rate-limited, origin-allowed
-// key. project_id is taken from the key — never the client.
+// Public ingest for the static-site tag. The manifest and SDK route both
+// explicitly expose GET /collect without platform authentication; the write
+// key in ?k= is the credential. Always responds with a 1x1 GIF so a bad key
+// never breaks the page; events are recorded only for a valid, non-revoked,
+// rate-limited, origin-allowed key. project_id is taken from the key, never
+// the client.
 
 import (
 	"encoding/json"
@@ -15,6 +15,13 @@ import (
 	"sync"
 	"time"
 )
+
+func (a *App) handleTrackingTag(w http.ResponseWriter, _ *http.Request) {
+	w.Header().Set("Content-Type", "text/javascript; charset=utf-8")
+	w.Header().Set("Cache-Control", "public, max-age=300")
+	w.WriteHeader(http.StatusOK)
+	_, _ = w.Write(trackingTagJS)
+}
 
 // 43-byte transparent 1x1 GIF.
 var pixelGIF = []byte{
@@ -38,7 +45,7 @@ func setCollectCORS(w http.ResponseWriter, r *http.Request) {
 		origin = "*"
 	}
 	w.Header().Set("Access-Control-Allow-Origin", origin)
-	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Methods", "GET")
 	w.Header().Set("Vary", "Origin")
 }
 
@@ -146,11 +153,6 @@ func collectProps(q url.Values) map[string]any {
 // GET /collect — public tag ingest. See file header.
 func (a *App) handleCollect(w http.ResponseWriter, r *http.Request) {
 	setCollectCORS(w, r)
-	if r.Method == http.MethodOptions {
-		w.WriteHeader(http.StatusNoContent)
-		return
-	}
-
 	q := r.URL.Query()
 	wk := lookupActiveWriteKey(globalCtx.AppDB(), q.Get("k"))
 	if wk != nil && originAllowed(wk, r) && collectLimiter.allow(wk.Key) {
