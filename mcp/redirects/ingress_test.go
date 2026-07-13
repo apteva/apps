@@ -209,7 +209,7 @@ func TestRedirectManifestUsesNativeIngress(t *testing.T) {
 
 func TestEmbeddedManifestUsesReleaseFile(t *testing.T) {
 	manifest := (&App{}).Manifest()
-	if manifest.Name != "redirects" || manifest.Version != "0.3.4" {
+	if manifest.Name != "redirects" || manifest.Version != "0.3.5" {
 		t.Fatalf("embedded manifest=%s@%s", manifest.Name, manifest.Version)
 	}
 	foundRead := false
@@ -271,7 +271,7 @@ func TestRuleEventsUseRuleProject(t *testing.T) {
 	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithEmitter(recorder))
 	rule := &Redirect{ID: 42, Hostname: "go.example.com", ProjectID: "project-a"}
 	emitRuleChange(ctx, "rule.updated", rule)
-	emitHit(ctx, rule)
+	emitHit(ctx, rule, "https://example.com/landing?source=email")
 	events := recorder.Events()
 	if len(events) != 2 {
 		t.Fatalf("events=%+v", events)
@@ -280,5 +280,9 @@ func TestRuleEventsUseRuleProject(t *testing.T) {
 		if event.ProjectID != "project-a" {
 			t.Fatalf("event %s project=%q", event.Topic, event.ProjectID)
 		}
+	}
+	hitData, ok := events[1].Data.(map[string]any)
+	if !ok || hitData["target"] != "https://example.com/landing?source=email" {
+		t.Fatalf("hit event target=%#v", events[1].Data)
 	}
 }

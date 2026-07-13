@@ -104,6 +104,46 @@ func TestHTTPListReturnsTotal(t *testing.T) {
 	}
 }
 
+func TestPublicRedirectHitEventIncludesResolvedTarget(t *testing.T) {
+	t.Setenv("APTEVA_PROJECT_ID", "")
+	recorder := tk.NewEmitRecorder()
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithEmitter(recorder))
+	globalCtx = ctx
+	rule, err := dbInsertRedirect(ctx.AppDB(), RedirectInput{
+		Hostname:      "go.example.com",
+		Path:          "/blog",
+		MatchMode:     "prefix",
+		Destination:   "https://new.example.com/articles",
+		PreservePath:  true,
+		PreserveQuery: true,
+		ProjectID:     "project-a",
+	})
+	if err != nil {
+		t.Fatalf("insert: %v", err)
+	}
+	hitLastEmit.Delete(rule.ID)
+	t.Cleanup(func() { hitLastEmit.Delete(rule.ID) })
+
+	req := httptest.NewRequest(http.MethodGet, "http://go.example.com/blog/launch?source=email", nil)
+	rec := httptest.NewRecorder()
+	(&App{}).handlePublicRedirect(rec, req)
+	if rec.Code != http.StatusFound {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	wantTarget := "https://new.example.com/articles/launch?source=email"
+	if got := rec.Header().Get("Location"); got != wantTarget {
+		t.Fatalf("location=%q want=%q", got, wantTarget)
+	}
+	events := recorder.EventsByTopic("rule.hit")
+	if len(events) != 1 {
+		t.Fatalf("hit events=%+v", events)
+	}
+	payload, ok := events[0].Data.(map[string]any)
+	if !ok || payload["target"] != wantTarget {
+		t.Fatalf("hit payload=%#v", events[0].Data)
+	}
+}
+
 func TestMCPListIgnoresSpoofedProjectID(t *testing.T) {
 	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("project-a"))
 	for _, input := range []RedirectInput{

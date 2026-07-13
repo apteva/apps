@@ -82,7 +82,7 @@ func (a *App) EventHandlers() []sdk.EventHandler { return nil }
 
 func main() { sdk.Run(&App{}) }
 
-func (a *App) enqueueHit(ctx *sdk.AppCtx, rule *Redirect) {
+func (a *App) enqueueHit(ctx *sdk.AppCtx, rule *Redirect, target string) {
 	if rule == nil {
 		return
 	}
@@ -94,7 +94,7 @@ func (a *App) enqueueHit(ctx *sdk.AppCtx, rule *Redirect) {
 		}
 	}
 	if shouldEmitHit(rule.ID) {
-		emitHit(ctx, rule)
+		emitHit(ctx, rule, target)
 	}
 }
 

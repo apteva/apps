@@ -262,7 +262,7 @@ func (a *App) handlePublicRedirect(w http.ResponseWriter, r *http.Request) {
 
 	// Bounded, batched analytics: redirect latency never waits on SQLite
 	// and traffic spikes cannot create an unbounded goroutine backlog.
-	a.enqueueHit(globalCtx, rule)
+	a.enqueueHit(globalCtx, rule, target)
 
 	w.Header().Set("Location", target)
 	w.Header().Set("Cache-Control", "no-store")
