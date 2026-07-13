@@ -79,7 +79,9 @@ function Row({ o }: { o: Order }) {
           </span>
         </div>
       </td>
-      <td className={`px-2 py-2.5 mono uppercase font-medium ${sideColor}`}>{o.side}</td>
+      <td className={`px-2 py-2.5 mono uppercase font-medium ${sideColor}`}>
+        {o.side}{o.side === "sell" && o.outcome ? ` ${o.outcome}` : ""}
+      </td>
       <td className="px-2 py-2.5 mono uppercase t-secondary text-[11px]">{o.type}</td>
       <td className="px-2 py-2.5 mono text-right tabular">
         {fmtQty(o.qty)}

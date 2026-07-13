@@ -190,16 +190,19 @@ func (coinbaseAdapter) ParseAccount(raw json.RawMessage) (*brokerAccount, error)
 			AvailableBalance struct {
 				Value string `json:"value"`
 			} `json:"available_balance"`
+			Hold struct {
+				Value string `json:"value"`
+			} `json:"hold"`
 		} `json:"accounts"`
 	}
 	if err := json.Unmarshal(raw, &resp); err != nil {
 		return nil, fmt.Errorf("decode coinbase accounts: %w", err)
 	}
-	out := &brokerAccount{Holdings: map[string]brokerBalance{}}
+	out := &brokerAccount{Holdings: map[string]brokerBalance{}, HoldingsComplete: true}
 	for _, a := range resp.Accounts {
 		asset := strings.ToUpper(a.Currency)
 		free := parseFloat(a.AvailableBalance.Value)
-		addCryptoBalance(out, asset, free)
+		addCryptoBalance(out, asset, free, free+parseFloat(a.Hold.Value))
 	}
 	return out, nil
 }
@@ -323,10 +326,12 @@ func (okxAdapter) ParseAccount(raw json.RawMessage) (*brokerAccount, error) {
 	if err := json.Unmarshal(data, &rows); err != nil {
 		return nil, fmt.Errorf("decode okx balance: %w", err)
 	}
-	out := &brokerAccount{Holdings: map[string]brokerBalance{}}
+	out := &brokerAccount{Holdings: map[string]brokerBalance{}, HoldingsComplete: true}
 	for _, row := range rows {
 		for _, d := range row.Details {
-			addCryptoBalance(out, d.Ccy, parseFloat(firstString(d.AvailBal, d.CashBal, d.Eq)))
+			available := parseFloat(firstString(d.AvailBal, d.CashBal, d.Eq))
+			total := parseFloat(firstString(d.CashBal, d.Eq, d.AvailBal))
+			addCryptoBalance(out, d.Ccy, available, total)
 		}
 	}
 	return out, nil
@@ -461,10 +466,12 @@ func (bybitAdapter) ParseAccount(raw json.RawMessage) (*brokerAccount, error) {
 	if err := json.Unmarshal(result, &resp); err != nil {
 		return nil, fmt.Errorf("decode bybit wallet: %w", err)
 	}
-	out := &brokerAccount{Holdings: map[string]brokerBalance{}}
+	out := &brokerAccount{Holdings: map[string]brokerBalance{}, HoldingsComplete: true}
 	for _, row := range resp.List {
 		for _, c := range row.Coin {
-			addCryptoBalance(out, c.Coin, parseFloat(firstString(c.AvailableToWithdraw, c.WalletBalance, c.Equity)))
+			available := parseFloat(firstString(c.AvailableToWithdraw, c.WalletBalance, c.Equity))
+			total := parseFloat(firstString(c.WalletBalance, c.Equity, c.AvailableToWithdraw))
+			addCryptoBalance(out, c.Coin, available, total)
 		}
 	}
 	return out, nil
@@ -593,7 +600,7 @@ func (bitstampAdapter) ParseAccount(raw json.RawMessage) (*brokerAccount, error)
 	if err := json.Unmarshal(raw, &m); err != nil {
 		return nil, fmt.Errorf("decode bitstamp balance: %w", err)
 	}
-	out := &brokerAccount{Holdings: map[string]brokerBalance{}}
+	out := &brokerAccount{Holdings: map[string]brokerBalance{}, HoldingsComplete: true}
 	keys := make([]string, 0, len(m))
 	for k := range m {
 		keys = append(keys, k)
@@ -604,7 +611,12 @@ func (bitstampAdapter) ParseAccount(raw json.RawMessage) (*brokerAccount, error)
 			continue
 		}
 		asset := strings.ToUpper(strings.TrimSuffix(k, "_available"))
-		addCryptoBalance(out, asset, anyFloat(m[k]))
+		available := anyFloat(m[k])
+		total := anyFloat(m[strings.ToLower(asset)+"_balance"])
+		if total <= 0 {
+			total = available
+		}
+		addCryptoBalance(out, asset, available, total)
 	}
 	return out, nil
 }
@@ -662,17 +674,21 @@ func toUSDTDashed(s string) string {
 	return strings.TrimSuffix(toDashUSD(s), "-USD") + "-USDT"
 }
 
-func addCryptoBalance(out *brokerAccount, asset string, free float64) {
-	if free <= 0 {
+func addCryptoBalance(out *brokerAccount, asset string, free, total float64) {
+	if total <= 0 {
+		total = free
+	}
+	if total <= 0 {
 		return
 	}
 	asset = strings.ToUpper(strings.TrimSpace(asset))
 	switch asset {
 	case "USD", "USDT", "USDC":
-		out.QuoteCash += free
+		out.QuoteCash += total
+		out.QuoteAvailable += free
 	default:
 		canonical := asset + "-USD"
-		out.Holdings[canonical] = brokerBalance{Asset: canonical, Free: free}
+		out.Holdings[canonical] = brokerBalance{Asset: canonical, Free: free, Total: total}
 	}
 }
 

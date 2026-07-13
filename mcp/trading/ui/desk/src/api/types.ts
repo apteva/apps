@@ -44,6 +44,7 @@ export type Order = {
   symbol: string;
   asset_class: AssetClass;
   side: "buy" | "sell" | "yes" | "no";
+  outcome?: "YES" | "NO";
   type: "market" | "limit" | "stop";
   qty: number;
   filled_qty: number;

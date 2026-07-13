@@ -1,7 +1,5 @@
-// Trading v0.1 — paper-only sidecar.
-//
-// Multi-portfolio, multi-asset (equity / crypto / polymarket).
-// Deterministic paper-execution engine — no broker, no real money.
+// Trading is a multi-portfolio, multi-asset sidecar for paper and
+// broker-backed live execution, deterministic strategies, and backtests.
 //
 // Routes the dashboard panel + the kiosk SPA call:
 //
@@ -43,7 +41,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: trading
 display_name: Trading
-version: 0.4.33
+version: 0.4.34
 description: Trading desk for Apteva agents (paper + live via per-portfolio broker integration).
 author: Apteva
 scopes: [project, global]
@@ -258,8 +256,8 @@ func (a *App) Workers() []sdk.Worker {
 
 // newProvider picks the pricing path. "live" composes public Binance
 // (crypto) + Polymarket gamma-api (polymarket) + Yahoo Finance
-// (equity/etf), each falling back to mock on failure. "mock" stays
-// for tests and air-gapped demos.
+// (equity/etf). "mock" is explicit and reserved for tests and air-gapped
+// demos; live mode never silently executes against synthetic data.
 //
 // Unset / empty string defaults to LIVE — the install's
 // pricing_provider field can be empty either because the operator
@@ -268,17 +266,16 @@ func (a *App) Workers() []sdk.Worker {
 // either case the right behavior is real prices, not synthesised
 // walks pegged to year-old anchors.
 func newProvider(name string) Provider {
-	mock := newMockProvider()
 	switch name {
 	case "live", "":
-		return newLiveProvider(mock)
+		return newLiveProvider()
 	case "mock":
-		return mock
+		return newMockProvider()
 	}
 	if globalCtx != nil {
-		globalCtx.Logger().Warn("unknown pricing_provider, falling back to mock", "requested", name)
+		globalCtx.Logger().Warn("unknown pricing_provider, using live", "requested", name)
 	}
-	return mock
+	return newLiveProvider()
 }
 
 // ─── HTTP routes — REST mirror for both UI surfaces ────────────────
@@ -549,8 +546,9 @@ func (a *App) httpListPortfolios(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	out := make([]map[string]any, 0, len(pfs))
+	marks, _ := dbMarksBySymbol(globalCtx.AppDB())
 	for _, p := range pfs {
-		snap, _ := snapshotPortfolio(globalCtx.AppDB(), p)
+		snap, _ := snapshotPortfolioWithMarks(globalCtx.AppDB(), p, marks)
 		out = append(out, map[string]any{
 			"id": snap.ID, "name": snap.Name, "agent_id": snap.AgentID, "mandate": snap.Mandate,
 			"allowed_classes": snap.AllowedClasses, "status": snap.Status, "mode": snap.Mode,
@@ -647,7 +645,12 @@ func (a *App) handleHTTPUniverse(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, 503, "engine warming")
 		return
 	}
-	httpJSON(w, 200, map[string]any{"symbols": globalEngine.provider.Universe()})
+	marks, err := dbListMarks(globalCtx.AppDB())
+	if err != nil {
+		httpErr(w, 500, err.Error())
+		return
+	}
+	httpJSON(w, 200, map[string]any{"symbols": marks})
 }
 
 func (a *App) handleHTTPHealthDetails(w http.ResponseWriter, r *http.Request) {

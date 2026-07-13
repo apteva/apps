@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 // Generic poll-with-error-state hook. Re-runs `fetcher` every
 // `intervalMs` (default 5s — matches the engine tick) and on each of
@@ -23,8 +23,8 @@ export function useFetch<T>(
   const fetcherRef = useRef(fetcher);
   fetcherRef.current = fetcher;
 
-  const tick = useRef(0);
-  const refresh = () => { tick.current++; };
+  const [refreshSeq, setRefreshSeq] = useState(0);
+  const refresh = useCallback(() => { setRefreshSeq((n) => n + 1); }, []);
 
   useEffect(() => {
     let cancelled = false;
@@ -52,7 +52,7 @@ export function useFetch<T>(
       if (timer) clearTimeout(timer);
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [...deps, tick.current]);
+  }, [...deps, refreshSeq]);
 
   return { data, error, loading, refresh };
 }

@@ -25,7 +25,7 @@ type Provider interface {
 }
 
 type Bar struct {
-	T int64   `json:"t"`              // unix seconds
+	T int64   `json:"t"` // unix seconds
 	O float64 `json:"o,omitempty"`
 	H float64 `json:"h,omitempty"`
 	L float64 `json:"l,omitempty"`
@@ -57,27 +57,27 @@ type seed struct {
 
 var mockUniverse = []seed{
 	// Equity
-	{"AAPL",     "equity", 224.31,  1, 0,        38_412_000},
-	{"NVDA",     "equity", 138.07,  2, 0,       211_900_000},
-	{"MSFT",     "equity", 421.18, -1, 0,        19_800_000},
-	{"TSLA",     "equity", 244.72, -2, 0,        88_710_000},
-	{"GOOGL",    "equity", 167.92,  1, 0,        22_100_000},
-	{"META",     "equity", 591.04,  1, 0,        14_200_000},
+	{"AAPL", "equity", 224.31, 1, 0, 38_412_000},
+	{"NVDA", "equity", 138.07, 2, 0, 211_900_000},
+	{"MSFT", "equity", 421.18, -1, 0, 19_800_000},
+	{"TSLA", "equity", 244.72, -2, 0, 88_710_000},
+	{"GOOGL", "equity", 167.92, 1, 0, 22_100_000},
+	{"META", "equity", 591.04, 1, 0, 14_200_000},
 	// ETF
-	{"SPY",      "etf",    567.41,  1, 0,        41_300_000},
+	{"SPY", "etf", 567.41, 1, 0, 41_300_000},
 	// Crypto
-	{"BTC-USD",  "crypto", 67_842.10, 2, 0,  28_400_000_000},
-	{"ETH-USD",  "crypto",  3_412.55,-1, 0,  12_700_000_000},
-	{"SOL-USD",  "crypto",    218.73, 3, 0,   3_900_000_000},
-	{"AVAX-USD", "crypto",     32.18, 1, 0,     402_000_000},
-	{"DOGE-USD", "crypto",      0.142,-2, 0,  1_120_000_000},
+	{"BTC-USD", "crypto", 67_842.10, 2, 0, 28_400_000_000},
+	{"ETH-USD", "crypto", 3_412.55, -1, 0, 12_700_000_000},
+	{"SOL-USD", "crypto", 218.73, 3, 0, 3_900_000_000},
+	{"AVAX-USD", "crypto", 32.18, 1, 0, 402_000_000},
+	{"DOGE-USD", "crypto", 0.142, -2, 0, 1_120_000_000},
 	// Polymarket — anchor = YES prob
-	{"POLY:fed-cut-march",     "polymarket", 0.32, -1, 0.68,   4_280_000},
-	{"POLY:recession-2026",    "polymarket", 0.41,  1, 0.59,   8_910_000},
-	{"POLY:btc-100k-2026",     "polymarket", 0.78,  3, 0.22,  14_220_000},
-	{"POLY:trump-approval-50", "polymarket", 0.34, -1, 0.66,   2_180_000},
-	{"POLY:openai-ipo-2026",   "polymarket", 0.18, -1, 0.82,     612_000},
-	{"POLY:gpt5-2026",         "polymarket", 0.62,  2, 0.38,   1_840_000},
+	{"POLY:fed-cut-march", "polymarket", 0.32, -1, 0.68, 4_280_000},
+	{"POLY:recession-2026", "polymarket", 0.41, 1, 0.59, 8_910_000},
+	{"POLY:btc-100k-2026", "polymarket", 0.78, 3, 0.22, 14_220_000},
+	{"POLY:trump-approval-50", "polymarket", 0.34, -1, 0.66, 2_180_000},
+	{"POLY:openai-ipo-2026", "polymarket", 0.18, -1, 0.82, 612_000},
+	{"POLY:gpt5-2026", "polymarket", 0.62, 2, 0.38, 1_840_000},
 }
 
 func (m *mockProvider) Universe() []*Mark {
@@ -97,8 +97,14 @@ func (m *mockProvider) Universe() []*Mark {
 		}
 		if s.assetClass == "polymarket" {
 			no := 1 - price
-			if price < 0.01 { price = 0.01; no = 0.99 }
-			if price > 0.99 { price = 0.99; no = 0.01 }
+			if price < 0.01 {
+				price = 0.01
+				no = 0.99
+			}
+			if price > 0.99 {
+				price = 0.99
+				no = 0.01
+			}
 			mk.Price = round4(price)
 			mk.NoPrice = ptr(round4(no))
 		}
@@ -175,8 +181,12 @@ func (m *mockProvider) Bars(symbol, rng string) ([]Bar, error) {
 		revert := (anchor - prev) * 0.02
 		next := prev + delta + revert
 		if class == "polymarket" {
-			if next < 0.01 { next = 0.01 }
-			if next > 0.99 { next = 0.99 }
+			if next < 0.01 {
+				next = 0.01
+			}
+			if next > 0.99 {
+				next = 0.99
+			}
 			out = append(out, Bar{T: t, Yes: round4(next)})
 		} else {
 			// OHLC: open at previous close, close at new; high/low
@@ -186,8 +196,12 @@ func (m *mockProvider) Bars(symbol, rng string) ([]Bar, error) {
 			c := next
 			hi := o
 			lo := o
-			if c > hi { hi = c }
-			if c < lo { lo = c }
+			if c > hi {
+				hi = c
+			}
+			if c < lo {
+				lo = c
+			}
 			hi *= 1.0008
 			lo *= 0.9992
 			out = append(out, Bar{T: t, O: o, H: hi, L: lo, C: c, V: 1_000_000})
@@ -200,25 +214,39 @@ func (m *mockProvider) Bars(symbol, rng string) ([]Bar, error) {
 
 func bucketsForRange(rng string) int {
 	switch strings.ToUpper(rng) {
-	case "1D":  return 78
-	case "5D":  return 130
-	case "1M":  return 220
-	case "3M":  return 320
-	case "1Y":  return 540
-	case "ALL": return 720
-	default:    return 78
+	case "1D":
+		return 78
+	case "5D":
+		return 130
+	case "1M":
+		return 220
+	case "3M":
+		return 320
+	case "1Y":
+		return 540
+	case "ALL":
+		return 720
+	default:
+		return 78
 	}
 }
 
 func stepForRange(rng string) int64 {
 	switch strings.ToUpper(rng) {
-	case "1D":  return 5 * 60       // 5m bars
-	case "5D":  return 30 * 60      // 30m
-	case "1M":  return 4 * 3600     // 4h
-	case "3M":  return 8 * 3600
-	case "1Y":  return 24 * 3600
-	case "ALL": return 24 * 3600
-	default:    return 5 * 60
+	case "1D":
+		return 5 * 60 // 5m bars
+	case "5D":
+		return 30 * 60 // 30m
+	case "1M":
+		return 4 * 3600 // 4h
+	case "3M":
+		return 8 * 3600
+	case "1Y":
+		return 24 * 3600
+	case "ALL":
+		return 24 * 3600
+	default:
+		return 5 * 60
 	}
 }
 
@@ -257,7 +285,24 @@ func round4(v float64) float64 {
 // default to equity.
 func inferAssetClass(symbol string) string {
 	s := strings.ToUpper(symbol)
-	if strings.HasPrefix(s, "POLY:") { return "polymarket" }
-	if strings.HasSuffix(s, "-USD")   { return "crypto" }
+	if strings.HasPrefix(s, "POLY:") {
+		return "polymarket"
+	}
+	if strings.HasSuffix(s, "-USD") {
+		return "crypto"
+	}
 	return "equity"
+}
+
+func canonicalSymbol(symbol string) string {
+	symbol = strings.TrimSpace(symbol)
+	upper := strings.ToUpper(symbol)
+	if strings.HasPrefix(upper, "POLY:") {
+		payload := strings.TrimSpace(symbol[len("POLY:"):])
+		if strings.HasPrefix(strings.ToLower(payload), "tokenid:") {
+			return "POLY:tokenid:" + strings.TrimSpace(payload[len("tokenid:"):])
+		}
+		return "POLY:" + strings.ToLower(payload)
+	}
+	return upper
 }

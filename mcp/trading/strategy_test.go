@@ -2,12 +2,14 @@ package main
 
 import (
 	"math"
+	"sync"
 	"testing"
 
 	sdk "github.com/apteva/app-sdk"
 )
 
 type recordingStrategyProvider struct {
+	mu       sync.Mutex
 	interval string
 	limit    int
 	symbols  []string
@@ -19,10 +21,14 @@ func (p *recordingStrategyProvider) Quote(symbol string) (*Mark, error) {
 }
 func (p *recordingStrategyProvider) Universe() []*Mark { return nil }
 func (p *recordingStrategyProvider) Bars(symbol, rng string) ([]Bar, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	p.bars = true
 	return []Bar{{T: 1, C: 100}}, nil
 }
 func (p *recordingStrategyProvider) StrategyBars(symbol, interval string, limit int) ([]Bar, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
 	p.interval = interval
 	p.limit = limit
 	p.symbols = append(p.symbols, symbol)
@@ -31,6 +37,12 @@ func (p *recordingStrategyProvider) StrategyBars(symbol, interval string, limit 
 		out = append(out, Bar{T: int64(i + 1), C: 100 + float64(i)})
 	}
 	return out, nil
+}
+
+func (p *recordingStrategyProvider) calls() (string, int, []string, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.interval, p.limit, append([]string(nil), p.symbols...), p.bars
 }
 
 func testStrategyDefinition() map[string]any {
@@ -108,17 +120,18 @@ func TestLiveStrategyMarketUsesCadenceBarsForIndicatorWindow(t *testing.T) {
 	}
 
 	market := liveStrategyMarket(ctx, def)
-	if provider.bars {
+	interval, limit, symbols, usedChartBars := provider.calls()
+	if usedChartBars {
 		t.Fatal("liveStrategyMarket used chart Bars fallback; want StrategyBars")
 	}
-	if provider.interval != "1h" {
-		t.Fatalf("interval = %q, want 1h", provider.interval)
+	if interval != "1h" {
+		t.Fatalf("interval = %q, want 1h", interval)
 	}
-	if provider.limit != 121 {
-		t.Fatalf("limit = %d, want 121 for return_120", provider.limit)
+	if limit != 121 {
+		t.Fatalf("limit = %d, want 121 for return_120", limit)
 	}
-	if len(provider.symbols) != 3 {
-		t.Fatalf("symbols fetched = %v", provider.symbols)
+	if len(symbols) != 3 {
+		t.Fatalf("symbols fetched = %v", symbols)
 	}
 	if got := len(market.history["BTC-USD"]); got != 121 {
 		t.Fatalf("BTC history len = %d, want 121", got)
@@ -453,11 +466,11 @@ func TestStrategyBacktestRebalanceCadenceAndRankThreshold(t *testing.T) {
 	if len(snaps[4].Orders) != 1 {
 		t.Fatalf("step 4 orders=%d, want first buy after return_3 crosses threshold", len(snaps[4].Orders))
 	}
-	if len(snaps[5].Orders) != 1 || len(snaps[5].Positions) != 1 {
+	if len(snaps[5].Orders) != 0 || len(snaps[5].Positions) != 1 {
 		t.Fatalf("step 5 should hold without a new order; orders=%d positions=%d", len(snaps[5].Orders), len(snaps[5].Positions))
 	}
-	if len(snaps[7].Orders) <= len(snaps[4].Orders) {
-		t.Fatalf("step 7 should rebalance again; orders=%d earlier=%d", len(snaps[7].Orders), len(snaps[4].Orders))
+	if len(snaps[7].Orders) == 0 {
+		t.Fatalf("step 7 should rebalance again; orders=%d", len(snaps[7].Orders))
 	}
 }
 

@@ -135,7 +135,7 @@ func (krakenAdapter) ParseAccount(raw json.RawMessage) (*brokerAccount, error) {
 	if err := json.Unmarshal(result, &balances); err != nil {
 		return nil, fmt.Errorf("decode kraken balance response: %w", err)
 	}
-	out := &brokerAccount{Holdings: map[string]brokerBalance{}}
+	out := &brokerAccount{Holdings: map[string]brokerBalance{}, HoldingsComplete: true}
 	for asset, amountText := range balances {
 		amount := parseFloat(amountText)
 		if amount <= 0 {
@@ -144,13 +144,16 @@ func (krakenAdapter) ParseAccount(raw json.RawMessage) (*brokerAccount, error) {
 		switch krakenAsset(asset) {
 		case "USD":
 			out.QuoteCash += amount
+			out.QuoteAvailable += amount
 		case "USDT", "USDC":
 			out.QuoteCash += amount
+			out.QuoteAvailable += amount
 		default:
 			canonical := fromKrakenAsset(asset) + "-USD"
 			out.Holdings[canonical] = brokerBalance{
 				Asset: canonical,
 				Free:  amount,
+				Total: amount,
 			}
 		}
 	}

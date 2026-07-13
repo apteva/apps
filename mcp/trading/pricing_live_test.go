@@ -157,8 +157,7 @@ func TestPolymarketPublic_RejectsNonBinaryMarket(t *testing.T) {
 
 // ─── liveProvider composition ─────────────────────────────────────
 
-// FailingBinance simulates an upstream that always errors. Used to
-// verify liveProvider falls back to mock data on every error path.
+// FailingBinance simulates an upstream that always errors.
 type failingBinance struct{}
 
 func (failingBinance) UniverseBatch(symbols []string) ([]*Mark, error) {
@@ -168,18 +167,14 @@ func (failingBinance) Quote(symbol string) (*Mark, error) {
 	return nil, http.ErrServerClosed
 }
 
-func TestLiveProvider_FallsBackToMockOnCryptoError(t *testing.T) {
-	mock := newMockProvider()
-	lp := newLiveProvider(mock)
+func TestLiveProvider_DoesNotSynthesizeCryptoOnError(t *testing.T) {
+	lp := newLiveProvider()
 	// Replace clients with failing stubs.
 	lp.crypto = &binancePublic{base: "http://127.0.0.1:0", client: &http.Client{Timeout: 50 * time.Millisecond}}
 
 	mark, err := lp.Quote("BTC-USD")
-	if err != nil {
-		t.Fatalf("quote should fall back, not error: %v", err)
-	}
-	if mark == nil || mark.Symbol != "BTC-USD" {
-		t.Errorf("fallback mark missing or wrong: %+v", mark)
+	if err == nil || mark != nil {
+		t.Fatalf("live provider returned synthetic mark=%+v err=%v", mark, err)
 	}
 	// Health surface should record the error.
 	snap := lp.Health()
@@ -193,9 +188,9 @@ func TestLiveProvider_FallsBackToMockOnCryptoError(t *testing.T) {
 }
 
 // stubUnreachableYahoo points the Yahoo client at a closed TCP port so
-// the equity dispatch falls through to mock predictably in tests. Tests
+// the equity dispatch fails predictably in tests. Tests
 // that exercise the live-Yahoo path itself would use a real httptest
-// server; these tests verify the mock-fallback path.
+// server; these tests verify explicit failure without synthetic fallback.
 func stubUnreachableYahoo(lp *liveProvider) {
 	lp.yahoo = &yahooPublic{
 		base:   "http://127.0.0.1:0",
@@ -204,31 +199,25 @@ func stubUnreachableYahoo(lp *liveProvider) {
 	}
 }
 
-func TestLiveProvider_EquityFallsBackToMockWhenYahooDown(t *testing.T) {
-	mock := newMockProvider()
-	lp := newLiveProvider(mock)
+func TestLiveProvider_DoesNotSynthesizeEquityWhenYahooDown(t *testing.T) {
+	lp := newLiveProvider()
 	// v0.4.9 onward Yahoo is the equity default — point it at an
-	// unreachable host so the equity path falls through to mock and
-	// this test exercises the fallback contract.
+	// unreachable host so this test exercises the no-synthetic-data contract.
 	stubUnreachableYahoo(lp)
 
 	mark, err := lp.Quote("AAPL")
-	if err != nil {
-		t.Fatal(err)
-	}
-	if mark.AssetClass != "equity" {
-		t.Errorf("asset_class=%q", mark.AssetClass)
+	if err == nil || mark != nil {
+		t.Fatalf("live provider returned synthetic mark=%+v err=%v", mark, err)
 	}
 	snap := lp.Health()
 	c, _ := snap["equity"].(map[string]any)
-	if c == nil || c["name"] != "mock" {
-		t.Errorf("equity class should be mock after yahoo failure, got %v", c)
+	if c == nil || c["stale"] != true {
+		t.Errorf("equity class should be stale after yahoo failure, got %v", c)
 	}
 }
 
 func TestLiveProvider_HealthSurfaceCoversAllClasses(t *testing.T) {
-	mock := newMockProvider()
-	lp := newLiveProvider(mock)
+	lp := newLiveProvider()
 	lp.crypto = &binancePublic{base: "http://127.0.0.1:0", client: &http.Client{Timeout: 50 * time.Millisecond}}
 	lp.poly = &polymarketPublic{base: "http://127.0.0.1:0", client: &http.Client{Timeout: 50 * time.Millisecond}}
 	stubUnreachableYahoo(lp)
@@ -240,8 +229,8 @@ func TestLiveProvider_HealthSurfaceCoversAllClasses(t *testing.T) {
 			t.Errorf("health snapshot missing class %q (got keys %v)", class, keys(snap))
 		}
 	}
-	if eq, _ := snap["equity"].(map[string]any); eq == nil || eq["name"] != "mock" {
-		t.Errorf("equity not stamped as mock after yahoo failure: %v", snap["equity"])
+	if eq, _ := snap["equity"].(map[string]any); eq == nil || eq["stale"] != true {
+		t.Errorf("equity not marked stale after yahoo failure: %v", snap["equity"])
 	}
 }
 
@@ -253,26 +242,26 @@ func keys(m map[string]any) []string {
 	return out
 }
 
-func TestLiveProvider_UniversePopulatesAllClassesEvenWhenLiveFails(t *testing.T) {
-	mock := newMockProvider()
-	lp := newLiveProvider(mock)
+func TestLiveProvider_UniverseOmitsFailedClasses(t *testing.T) {
+	lp := newLiveProvider()
 	// Both live clients point at unreachable hosts.
 	lp.crypto = &binancePublic{base: "http://127.0.0.1:0", client: &http.Client{Timeout: 50 * time.Millisecond}}
 	lp.poly = &polymarketPublic{base: "http://127.0.0.1:0", client: &http.Client{Timeout: 50 * time.Millisecond}}
+	stubUnreachableYahoo(lp)
 
 	got := lp.Universe()
 	classes := map[string]int{}
 	for _, m := range got {
 		classes[m.AssetClass]++
 	}
-	if classes["crypto"] == 0 {
-		t.Error("expected crypto marks via fallback")
+	if classes["crypto"] != 0 {
+		t.Error("crypto outage produced executable marks")
 	}
-	if classes["polymarket"] == 0 {
-		t.Error("expected polymarket marks via fallback")
+	if classes["polymarket"] != 0 {
+		t.Error("polymarket outage produced executable marks")
 	}
-	if classes["equity"] == 0 {
-		t.Error("expected equity marks (always mock)")
+	if classes["equity"] != 0 || classes["etf"] != 0 {
+		t.Error("equity outage produced executable marks")
 	}
 }
 

@@ -12,6 +12,7 @@ export const readJournal      = (id: number, opts: { kind?: string; limit?: numb
 export type PlaceOrderArgs = {
   symbol: string;
   side: "buy" | "sell" | "yes" | "no";
+  outcome?: "yes" | "no";
   type: "market" | "limit" | "stop";
   qty: number;
   limit_price?: number;

@@ -107,8 +107,9 @@ func (polymarketAdapter) ToBrokerSymbol(canonical string) string {
 // cache lands OR pass pre-resolved token ids in the symbol.
 //
 // Recognised forms accepted by TranslateOrder:
-//   POLY:tokenid:<id>     → use <id> directly
-//   POLY:<slug>           → reject with a clear error pointing at the cache
+//
+//	POLY:tokenid:<id>     → use <id> directly
+//	POLY:<slug>           → reject with a clear error pointing at the cache
 func splitPolySymbol(canonical string) (kind, payload string, err error) {
 	s := strings.TrimSpace(canonical)
 	if !strings.HasPrefix(s, "POLY:") {
@@ -254,12 +255,12 @@ func (polymarketAdapter) ParseOrder(raw json.RawMessage) (*brokerOrderResult, er
 
 	// Then get_order shape.
 	var status struct {
-		ID            string `json:"id"`
-		Status        string `json:"status"`
-		Side          string `json:"side"`
-		SizeMatched   string `json:"size_matched"`
-		AveragePrice  string `json:"average_price"`
-		OriginalSize  string `json:"original_size"`
+		ID           string `json:"id"`
+		Status       string `json:"status"`
+		Side         string `json:"side"`
+		SizeMatched  string `json:"size_matched"`
+		AveragePrice string `json:"average_price"`
+		OriginalSize string `json:"original_size"`
 	}
 	_ = json.Unmarshal(raw, &status)
 
@@ -318,8 +319,9 @@ func (polymarketAdapter) ParseAccount(raw json.RawMessage) (*brokerAccount, erro
 	// Balance is in 6-decimal atomic USDC; convert to whole-USDC.
 	atomic := parseFloat(resp.Balance)
 	return &brokerAccount{
-		QuoteCash: atomic / 1_000_000.0,
-		Holdings:  map[string]brokerBalance{}, // not surfaced by /balance-allowance
+		QuoteCash:      atomic / 1_000_000.0,
+		QuoteAvailable: atomic / 1_000_000.0,
+		Holdings:       map[string]brokerBalance{}, // not surfaced by /balance-allowance
 	}, nil
 }
 

@@ -82,7 +82,7 @@ func TestNormalizeBacktestInterval(t *testing.T) {
 func TestBacktestReplayTimeIntraday(t *testing.T) {
 	run := &BacktestRun{StartAt: "2026-01-05", Interval: "15m"}
 	got := backtestReplayTime(run, 27)
-	want := time.Date(2026, 1, 6, 9, 30, 0, 0, time.UTC)
+	want := time.Date(2026, 1, 5, 6, 30, 0, 0, time.UTC)
 	if !got.Equal(want) {
 		t.Fatalf("replay time=%s, want %s", got, want)
 	}

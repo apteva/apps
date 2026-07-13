@@ -157,7 +157,7 @@ export function App() {
               )}
               {symbol && allSyms.length > 0 && <SymbolPanel symbol={symbol} universe={allSyms} />}
               {portfolio.data && symbol && (
-                <OrderTicket symbol={symbol} portfolio={portfolio.data} universe={allSyms} />
+                <OrderTicket symbol={symbol} portfolio={portfolio.data} universe={allSyms} positions={positions.data ?? []} />
               )}
             </div>
 

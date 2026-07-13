@@ -1,5 +1,5 @@
 import { useEffect, useState } from "react";
-import type { Portfolio, Sym } from "../api/types.ts";
+import type { Portfolio, Position, Sym } from "../api/types.ts";
 import { money } from "../lib/format.ts";
 import { placeOrder, type PlaceOrderArgs, type PlaceOrderResult } from "../api/portfolios.ts";
 
@@ -11,16 +11,19 @@ export function OrderTicket({
   symbol,
   portfolio,
   universe,
+  positions,
 }: {
   symbol: string;
   portfolio: Portfolio;
   universe: Sym[];
+  positions: Position[];
 }) {
   const sym = universe.find((s) => s.symbol === symbol);
   const isPoly = sym?.asset_class === "polymarket";
   const allowed = sym ? portfolio.allowed_classes.includes(sym.asset_class) : false;
 
   const [side, setSide] = useState<Side>(isPoly ? "yes" : "buy");
+  const [outcome, setOutcome] = useState<"yes" | "no">("yes");
   const [type, setType] = useState<Type>("limit");
   const [tif, setTif] = useState<TIF>("day");
   const [qty, setQty] = useState(isPoly ? "100" : "10");
@@ -32,23 +35,39 @@ export function OrderTicket({
   // Reset when the symbol changes.
   useEffect(() => {
     setSide(isPoly ? "yes" : "buy");
+    setOutcome("yes");
     setType(isPoly ? "limit" : "limit");
     setQty(isPoly ? "100" : "10");
     setPrice(initialPrice(sym));
     setFeedback(null);
   }, [symbol]);
 
-  // Polymarket: keep the price snapped to the side (YES vs NO).
+  const heldOutcomes = positions
+    .filter((p) => p.symbol === symbol && p.asset_class === "polymarket" && p.qty > 0 && p.outcome)
+    .map((p) => p.outcome!.toLowerCase() as "yes" | "no");
+  const closeOutcomes: readonly ("yes" | "no")[] = heldOutcomes.length > 0
+    ? Array.from(new Set(heldOutcomes))
+    : ["yes", "no"];
+  const selectedOutcome = side === "sell" ? outcome : side === "no" ? "no" : "yes";
+
+  useEffect(() => {
+    if (side === "sell" && !closeOutcomes.includes(outcome)) setOutcome(closeOutcomes[0] ?? "yes");
+  }, [side, outcome, closeOutcomes.join(",")]);
+
+  // Polymarket: keep the price snapped to the selected outcome.
   useEffect(() => {
     if (!isPoly || !sym) return;
-    setPrice(((side === "yes" ? sym.yes_price : sym.no_price) ?? sym.price ?? 0).toFixed(2));
-  }, [side, isPoly, symbol]);
+    setPrice(((selectedOutcome === "yes" ? sym.yes_price : sym.no_price) ?? sym.price ?? 0).toFixed(2));
+  }, [selectedOutcome, isPoly, symbol]);
 
   if (!sym) return null;
 
   const qtyNum = parseFloat(qty) || 0;
   const priceNum = parseFloat(price) || 0;
-  const effectivePrice = type === "market" ? sym.price : priceNum;
+  const selectedMark = isPoly
+    ? ((selectedOutcome === "yes" ? sym.yes_price : sym.no_price) ?? sym.price)
+    : sym.price;
+  const effectivePrice = type === "market" ? selectedMark : priceNum;
   const notional = qtyNum * effectivePrice;
 
   const submit = async () => {
@@ -73,6 +92,7 @@ export function OrderTicket({
       tif,
       rationale,
     };
+    if (isPoly && side === "sell") args.outcome = outcome;
     if (type === "limit") args.limit_price = priceNum;
     if (type === "stop")  args.stop_price  = priceNum;
 
@@ -98,7 +118,7 @@ export function OrderTicket({
     return side === s ? (tone === "up" ? "btn-up" : "btn-down") : "";
   };
 
-  const sides: Side[] = isPoly ? ["yes", "no"] : ["buy", "sell"];
+  const sides: Side[] = isPoly ? ["yes", "no", "sell"] : ["buy", "sell"];
 
   return (
     <section className="glass rounded-2xl p-4 fade-up">
@@ -115,13 +135,23 @@ export function OrderTicket({
         </p>
       )}
 
-      <div className="grid grid-cols-2 gap-2 mb-3">
+      <div className={`grid ${isPoly ? "grid-cols-3" : "grid-cols-2"} gap-2 mb-3`}>
         {sides.map((s) => (
           <button key={s} onClick={() => setSide(s)} className={`btn ${sideButtonClass(s)} justify-center`} disabled={!allowed || busy}>
             {s.toUpperCase()}
           </button>
         ))}
       </div>
+
+      {isPoly && side === "sell" && (
+        <div className="mb-3">
+          <Field label="Outcome to close">
+            <select className="field" value={outcome} onChange={(e) => setOutcome(e.target.value as "yes" | "no")} disabled={!allowed || busy}>
+              {closeOutcomes.map((value) => <option key={value} value={value}>{value.toUpperCase()}</option>)}
+            </select>
+          </Field>
+        </div>
+      )}
 
       <div className="flex gap-1 mb-3">
         {(isPoly ? (["market", "limit"] as const) : (["market", "limit", "stop"] as const)).map((t) => (
@@ -170,8 +200,12 @@ export function OrderTicket({
       </div>
 
       <div className="grid grid-cols-2 gap-3 mt-3 pt-3 border-t border-[var(--border)]">
-        <Mini label={isPoly ? "Cost" : "Estimated cost"} value={money(notional)} />
-        <Mini label={isPoly ? "Max payout" : "Cash after"} value={money(isPoly ? qtyNum : portfolio.cash - (side === "buy" ? notional : -notional))} tone={isPoly ? "up" : undefined} />
+        <Mini label={isPoly && side === "sell" ? "Estimated proceeds" : isPoly ? "Cost" : "Estimated cost"} value={money(notional)} />
+        <Mini
+          label={isPoly && side === "sell" ? "Outcome" : isPoly ? "Max payout" : "Cash after"}
+          value={isPoly && side === "sell" ? selectedOutcome.toUpperCase() : money(isPoly ? qtyNum : portfolio.cash - (side === "buy" ? notional : -notional))}
+          tone={isPoly ? "up" : undefined}
+        />
       </div>
 
       <button

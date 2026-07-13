@@ -32,13 +32,6 @@ var binanceUSDPairs = map[string]string{
 	"DOGE-USD":  "DOGEUSDT",
 	"MATIC-USD": "MATICUSDT",
 }
-var binanceReverse = func() map[string]string {
-	m := map[string]string{}
-	for k, v := range binanceUSDPairs {
-		m[v] = k
-	}
-	return m
-}()
 
 type binancePublic struct {
 	base   string
@@ -53,12 +46,12 @@ func newBinancePublic() *binancePublic {
 }
 
 // Quote returns one Mark for the given internal symbol. Returns an
-// error on HTTP / decode failure; the caller (liveProvider) is
-// responsible for falling back to mock + bumping health counters.
+// error on HTTP / decode failure; the caller records the provider error
+// and leaves the previous persisted mark untouched.
 func (b *binancePublic) Quote(symbol string) (*Mark, error) {
-	wire, ok := binanceUSDPairs[symbol]
-	if !ok {
-		return nil, fmt.Errorf("binancePublic: unknown internal symbol %q", symbol)
+	wire, err := binanceWireSymbol(symbol)
+	if err != nil {
+		return nil, err
 	}
 	q := url.Values{}
 	q.Set("symbol", wire)
@@ -82,10 +75,14 @@ func (b *binancePublic) UniverseBatch(symbols []string) ([]*Mark, error) {
 		return nil, nil
 	}
 	wireSyms := make([]string, 0, len(symbols))
+	canonicalByWire := make(map[string]string, len(symbols))
 	for _, s := range symbols {
-		if w, ok := binanceUSDPairs[s]; ok {
-			wireSyms = append(wireSyms, w)
+		w, err := binanceWireSymbol(s)
+		if err != nil {
+			continue
 		}
+		wireSyms = append(wireSyms, w)
+		canonicalByWire[w] = strings.ToUpper(strings.TrimSpace(s))
 	}
 	if len(wireSyms) == 0 {
 		return nil, nil
@@ -104,7 +101,7 @@ func (b *binancePublic) UniverseBatch(symbols []string) ([]*Mark, error) {
 	}
 	out := make([]*Mark, 0, len(arrOut))
 	for _, t := range arrOut {
-		internal, ok := binanceReverse[t.Symbol]
+		internal, ok := canonicalByWire[t.Symbol]
 		if !ok {
 			continue
 		}
@@ -120,24 +117,20 @@ func (b *binancePublic) UniverseBatch(symbols []string) ([]*Mark, error) {
 // Bars returns OHLCV history via /api/v3/klines — Binance's
 // candlestick endpoint, free + no auth. Maps our ChartRange to
 // Binance's interval string + the bar count that matches the
-// engine's bucketsForRange (so the chart "1D" view shows the same
-// resolution as it would in mock mode).
-//
-// Returns ([]Bar, error). Caller falls back to mock on error so the
-// chart stays populated when Binance is down or rate-limiting.
+// engine's bucketsForRange.
 func (b *binancePublic) Bars(symbol, rng string) ([]Bar, error) {
-	wire, ok := binanceUSDPairs[symbol]
-	if !ok {
-		return nil, fmt.Errorf("binancePublic: unknown internal symbol %q", symbol)
+	wire, err := binanceWireSymbol(symbol)
+	if err != nil {
+		return nil, err
 	}
 	interval, limit := binanceIntervalForRange(rng)
 	return b.klines(wire, interval, limit, time.Time{}, time.Time{})
 }
 
 func (b *binancePublic) BacktestBars(symbol, interval string, start, end time.Time, limit int) ([]Bar, error) {
-	wire, ok := binanceUSDPairs[symbol]
-	if !ok {
-		return nil, fmt.Errorf("binancePublic: unknown internal symbol %q", symbol)
+	wire, err := binanceWireSymbol(symbol)
+	if err != nil {
+		return nil, err
 	}
 	binanceInterval, err := binanceIntervalForBacktest(interval)
 	if err != nil {
@@ -147,6 +140,21 @@ func (b *binancePublic) BacktestBars(symbol, interval string, start, end time.Ti
 		limit = 1000
 	}
 	return b.klines(wire, binanceInterval, limit, start, end)
+}
+
+func binanceWireSymbol(symbol string) (string, error) {
+	canonical := strings.ToUpper(strings.TrimSpace(symbol))
+	if wire, ok := binanceUSDPairs[canonical]; ok {
+		return wire, nil
+	}
+	if !strings.HasSuffix(canonical, "-USD") {
+		return "", fmt.Errorf("binancePublic: crypto symbol must use BASE-USD form, got %q", symbol)
+	}
+	base := strings.TrimSuffix(canonical, "-USD")
+	if base == "" || strings.ContainsAny(base, ":/ -") {
+		return "", fmt.Errorf("binancePublic: invalid crypto symbol %q", symbol)
+	}
+	return base + "USDT", nil
 }
 
 func (b *binancePublic) klines(wire, interval string, limit int, start, end time.Time) ([]Bar, error) {
@@ -291,10 +299,9 @@ func (t binanceTicker) toMark(internalSymbol string) (*Mark, error) {
 	return mk, nil
 }
 
-// cryptoSymbolsKnown — the canonical set the live universe iterates
-// over. We don't query Binance for the catalog; the integration JSON +
-// our own watchlist seed dictate what we care about. Anything outside
-// this set falls through to mock.
+// cryptoSymbolsKnown is the bootstrap set fetched in one batch. Symbols
+// added through quotes, watchlists, alerts, or positions are persisted and
+// refreshed separately by the engine.
 func cryptoSymbolsKnown() []string {
 	out := make([]string, 0, len(binanceUSDPairs))
 	for k := range binanceUSDPairs {

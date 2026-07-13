@@ -24,6 +24,7 @@ type Portfolio struct {
 	AllowedClasses []string `json:"allowed_classes"`
 	StartingCash   float64  `json:"starting_cash"`
 	Cash           float64  `json:"cash"`
+	AvailableCash  *float64 `json:"available_cash,omitempty"`
 	Status         string   `json:"status"`
 	Mode           string   `json:"mode"`
 	BrokerSlug     string   `json:"broker_slug,omitempty"` // "binance-trading", "alpaca-trading", … — NULL for paper
@@ -61,6 +62,7 @@ type Order struct {
 	Symbol          string   `json:"symbol"`
 	AssetClass      string   `json:"asset_class"`
 	Side            string   `json:"side"`
+	Outcome         string   `json:"outcome,omitempty"`
 	Type            string   `json:"type"`
 	Qty             float64  `json:"qty"`
 	FilledQty       float64  `json:"filled_qty"`
@@ -313,7 +315,7 @@ func dbHasBacktestPortfolio(db *sql.DB, projectID string) bool {
 func dbGetPortfolio(db *sql.DB, projectID string, id int64) (*Portfolio, error) {
 	row := db.QueryRow(`
 		SELECT id, project_id, name, COALESCE(agent_id, ''), mandate, allowed_classes,
-		       starting_cash, cash, status, mode, COALESCE(broker_slug, ''), created_at, updated_at
+		       starting_cash, cash, available_cash, status, mode, COALESCE(broker_slug, ''), created_at, updated_at
 		FROM portfolios WHERE id = ? AND project_id = ?`, id, projectID)
 	return scanPortfolio(row)
 }
@@ -323,7 +325,7 @@ func dbGetPortfolio(db *sql.DB, projectID string, id int64) (*Portfolio, error) 
 func dbGetPortfolioAnyProject(db *sql.DB, id int64) (*Portfolio, error) {
 	row := db.QueryRow(`
 		SELECT id, project_id, name, COALESCE(agent_id, ''), mandate, allowed_classes,
-		       starting_cash, cash, status, mode, COALESCE(broker_slug, ''), created_at, updated_at
+		       starting_cash, cash, available_cash, status, mode, COALESCE(broker_slug, ''), created_at, updated_at
 		FROM portfolios WHERE id = ?`, id)
 	return scanPortfolio(row)
 }
@@ -331,7 +333,7 @@ func dbGetPortfolioAnyProject(db *sql.DB, id int64) (*Portfolio, error) {
 func dbListPortfolios(db *sql.DB, projectID string) ([]*Portfolio, error) {
 	rows, err := db.Query(`
 		SELECT id, project_id, name, COALESCE(agent_id, ''), mandate, allowed_classes,
-		       starting_cash, cash, status, mode, COALESCE(broker_slug, ''), created_at, updated_at
+		       starting_cash, cash, available_cash, status, mode, COALESCE(broker_slug, ''), created_at, updated_at
 		FROM portfolios WHERE project_id = ? ORDER BY id`, projectID)
 	if err != nil {
 		return nil, err
@@ -352,7 +354,7 @@ func dbListPortfolios(db *sql.DB, projectID string) ([]*Portfolio, error) {
 func dbAllPortfolios(db *sql.DB) ([]*Portfolio, error) {
 	rows, err := db.Query(`
 		SELECT id, project_id, name, COALESCE(agent_id, ''), mandate, allowed_classes,
-		       starting_cash, cash, status, mode, COALESCE(broker_slug, ''), created_at, updated_at
+		       starting_cash, cash, available_cash, status, mode, COALESCE(broker_slug, ''), created_at, updated_at
 		FROM portfolios ORDER BY id`)
 	if err != nil {
 		return nil, err
@@ -372,13 +374,17 @@ func dbAllPortfolios(db *sql.DB) ([]*Portfolio, error) {
 func scanPortfolio(row *sql.Row) (*Portfolio, error) {
 	var p Portfolio
 	var classesJSON string
+	var availableCash sql.NullFloat64
 	if err := row.Scan(&p.ID, &p.ProjectID, &p.Name, &p.AgentID, &p.Mandate,
-		&classesJSON, &p.StartingCash, &p.Cash, &p.Status, &p.Mode, &p.BrokerSlug,
+		&classesJSON, &p.StartingCash, &p.Cash, &availableCash, &p.Status, &p.Mode, &p.BrokerSlug,
 		&p.CreatedAt, &p.UpdatedAt); err != nil {
 		return nil, err
 	}
 	if err := json.Unmarshal([]byte(classesJSON), &p.AllowedClasses); err != nil {
 		p.AllowedClasses = []string{"equity", "etf"}
+	}
+	if availableCash.Valid {
+		p.AvailableCash = ptr(availableCash.Float64)
 	}
 	return &p, nil
 }
@@ -386,13 +392,17 @@ func scanPortfolio(row *sql.Row) (*Portfolio, error) {
 func scanPortfolioRows(rows *sql.Rows) (*Portfolio, error) {
 	var p Portfolio
 	var classesJSON string
+	var availableCash sql.NullFloat64
 	if err := rows.Scan(&p.ID, &p.ProjectID, &p.Name, &p.AgentID, &p.Mandate,
-		&classesJSON, &p.StartingCash, &p.Cash, &p.Status, &p.Mode, &p.BrokerSlug,
+		&classesJSON, &p.StartingCash, &p.Cash, &availableCash, &p.Status, &p.Mode, &p.BrokerSlug,
 		&p.CreatedAt, &p.UpdatedAt); err != nil {
 		return nil, err
 	}
 	if err := json.Unmarshal([]byte(classesJSON), &p.AllowedClasses); err != nil {
 		p.AllowedClasses = []string{"equity", "etf"}
+	}
+	if availableCash.Valid {
+		p.AvailableCash = ptr(availableCash.Float64)
 	}
 	return &p, nil
 }
@@ -507,7 +517,7 @@ func dbGetPosition(db *sql.DB, portfolioID int64, symbol, outcome string) (*Posi
 func dbApplyFill(tx *sql.Tx, portfolioID int64, projectID string, o *Order, qty, price float64) error {
 	outcome := ""
 	if o.AssetClass == "polymarket" {
-		outcome = strings.ToUpper(o.Side) // YES or NO
+		outcome = polyOutcome(o)
 	}
 
 	// Read current position (if any).
@@ -587,17 +597,17 @@ func dbApplyFill(tx *sql.Tx, portfolioID int64, projectID string, o *Order, qty,
 
 func dbInsertOrder(db *sql.DB, o *Order, projectID string) error {
 	_, err := db.Exec(`
-		INSERT INTO orders (id, project_id, portfolio_id, symbol, asset_class, side, type,
+		INSERT INTO orders (id, project_id, portfolio_id, symbol, asset_class, side, outcome, type,
 		                    qty, limit_price, stop_price, tif, status, rationale, source)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		o.ID, projectID, o.PortfolioID, o.Symbol, o.AssetClass, o.Side, o.Type,
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		o.ID, projectID, o.PortfolioID, o.Symbol, o.AssetClass, o.Side, nullableString(o.Outcome), o.Type,
 		o.Qty, nullable(o.LimitPrice), nullable(o.StopPrice), o.TIF, o.Status, o.Rationale, o.Source)
 	return err
 }
 
 func dbGetOrder(db *sql.DB, projectID, id string) (*Order, error) {
 	row := db.QueryRow(`
-		SELECT id, portfolio_id, symbol, asset_class, side, type, qty, filled_qty, avg_fill_price,
+		SELECT id, portfolio_id, symbol, asset_class, side, COALESCE(outcome, ''), type, qty, filled_qty, avg_fill_price,
 		       limit_price, stop_price, tif, status, rationale, source,
 		       COALESCE(rejection_code, ''), COALESCE(rejection_detail, ''),
 		       placed_at, COALESCE(resolved_at, '')
@@ -606,7 +616,7 @@ func dbGetOrder(db *sql.DB, projectID, id string) (*Order, error) {
 }
 
 func dbListOrders(db *sql.DB, portfolioID int64, status string, limit int) ([]*Order, error) {
-	q := `SELECT id, portfolio_id, symbol, asset_class, side, type, qty, filled_qty, avg_fill_price,
+	q := `SELECT id, portfolio_id, symbol, asset_class, side, COALESCE(outcome, ''), type, qty, filled_qty, avg_fill_price,
 	             limit_price, stop_price, tif, status, rationale, source,
 	             COALESCE(rejection_code, ''), COALESCE(rejection_detail, ''),
 	             placed_at, COALESCE(resolved_at, '')
@@ -641,7 +651,7 @@ func dbListOrders(db *sql.DB, portfolioID int64, status string, limit int) ([]*O
 // dbWorkingOrders — engine-side, no project filter (the engine sees all).
 func dbWorkingOrders(db *sql.DB) ([]*Order, error) {
 	rows, err := db.Query(`
-		SELECT id, portfolio_id, symbol, asset_class, side, type, qty, filled_qty, avg_fill_price,
+		SELECT id, portfolio_id, symbol, asset_class, side, COALESCE(outcome, ''), type, qty, filled_qty, avg_fill_price,
 		       limit_price, stop_price, tif, status, rationale, source,
 		       COALESCE(rejection_code, ''), COALESCE(rejection_detail, ''),
 		       placed_at, COALESCE(resolved_at, '')
@@ -665,7 +675,7 @@ func scanOrder(row *sql.Row) (*Order, error) {
 	var o Order
 	var lp, sp sql.NullFloat64
 	var resolvedAt string
-	if err := row.Scan(&o.ID, &o.PortfolioID, &o.Symbol, &o.AssetClass, &o.Side, &o.Type,
+	if err := row.Scan(&o.ID, &o.PortfolioID, &o.Symbol, &o.AssetClass, &o.Side, &o.Outcome, &o.Type,
 		&o.Qty, &o.FilledQty, &o.AvgFillPrice, &lp, &sp, &o.TIF, &o.Status,
 		&o.Rationale, &o.Source, &o.RejectionCode, &o.RejectionDetail,
 		&o.PlacedAt, &resolvedAt); err != nil {
@@ -689,7 +699,7 @@ func scanOrderRows(rows *sql.Rows) (*Order, error) {
 	var o Order
 	var lp, sp sql.NullFloat64
 	var resolvedAt string
-	if err := rows.Scan(&o.ID, &o.PortfolioID, &o.Symbol, &o.AssetClass, &o.Side, &o.Type,
+	if err := rows.Scan(&o.ID, &o.PortfolioID, &o.Symbol, &o.AssetClass, &o.Side, &o.Outcome, &o.Type,
 		&o.Qty, &o.FilledQty, &o.AvgFillPrice, &lp, &sp, &o.TIF, &o.Status,
 		&o.Rationale, &o.Source, &o.RejectionCode, &o.RejectionDetail,
 		&o.PlacedAt, &resolvedAt); err != nil {
@@ -787,16 +797,16 @@ func dbInsertBackfilledOrder(
 	}
 	_, err := db.Exec(`
 		INSERT INTO orders (
-			id, project_id, portfolio_id, symbol, asset_class, side, type,
+			id, project_id, portfolio_id, symbol, asset_class, side, outcome, type,
 			qty, filled_qty, avg_fill_price, limit_price, stop_price,
 			tif, status, rationale, source, placed_at, resolved_at
 		) VALUES (
-			?, ?, ?, ?, ?, ?, ?,
+			?, ?, ?, ?, ?, ?, CASE WHEN ? IN ('yes','no') THEN UPPER(?) ELSE NULL END, ?,
 			?, ?, ?, ?, ?,
 			?, ?, ?, ?,
 			COALESCE(?, CURRENT_TIMESTAMP), ?
 		)`,
-		id, projectID, portfolioID, symbol, assetClass, side, otype,
+		id, projectID, portfolioID, symbol, assetClass, side, side, side, otype,
 		qty, filledQty, avgFillPrice, lp, sp,
 		tif, status, rationale, source, placed, resolved)
 	return err
@@ -850,11 +860,15 @@ func dbInsertFill(tx *sql.Tx, projectID, orderID string, portfolioID int64, qty,
 	return err
 }
 
-func dbMarkOrderFilled(tx *sql.Tx, orderID string, qty, avgFill float64) error {
-	_, err := tx.Exec(`
+func dbMarkOrderFilled(tx *sql.Tx, orderID string, qty, avgFill float64) (bool, error) {
+	res, err := tx.Exec(`
 		UPDATE orders SET status='filled', filled_qty=?, avg_fill_price=?,
-		                  resolved_at=CURRENT_TIMESTAMP WHERE id = ?`, qty, avgFill, orderID)
-	return err
+		                  resolved_at=CURRENT_TIMESTAMP WHERE id = ? AND status = 'working'`, qty, avgFill, orderID)
+	if err != nil {
+		return false, err
+	}
+	n, err := res.RowsAffected()
+	return n == 1, err
 }
 
 func dbInsertJournal(db *sql.DB, projectID string, portfolioID int64, kind, body string, metadata map[string]any) (int64, error) {
@@ -958,6 +972,35 @@ func dbGetMark(db *sql.DB, symbol string) (*Mark, error) {
 		m.Volume24h = &v
 	}
 	return &m, nil
+}
+
+func dbListMarks(db *sql.DB) ([]*Mark, error) {
+	rows, err := db.Query(`
+		SELECT symbol, asset_class, price, no_price, prev_close, volume_24h, marked_at
+		FROM marks ORDER BY symbol`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []*Mark{}
+	for rows.Next() {
+		var m Mark
+		var no, pc, vol sql.NullFloat64
+		if err := rows.Scan(&m.Symbol, &m.AssetClass, &m.Price, &no, &pc, &vol, &m.MarkedAt); err != nil {
+			return nil, err
+		}
+		if no.Valid {
+			m.NoPrice = ptr(no.Float64)
+		}
+		if pc.Valid {
+			m.PrevClose = ptr(pc.Float64)
+		}
+		if vol.Valid {
+			m.Volume24h = ptr(vol.Float64)
+		}
+		out = append(out, &m)
+	}
+	return out, rows.Err()
 }
 
 // ─── Strategies ────────────────────────────────────────────────────
@@ -1489,6 +1532,36 @@ func dbBacktestMarketMarks(db *sql.DB, runID int64, step int, symbols []string) 
 	return out, nil
 }
 
+func dbBacktestMarketStepTime(db *sql.DB, runID int64, step int) (time.Time, bool) {
+	var unixSeconds int64
+	if err := db.QueryRow(`SELECT MIN(t) FROM backtest_market_bars WHERE run_id = ? AND step = ?`, runID, step).Scan(&unixSeconds); err != nil || unixSeconds <= 0 {
+		return time.Time{}, false
+	}
+	return time.Unix(unixSeconds, 0).UTC(), true
+}
+
+func dbBacktestMarketHistory(db *sql.DB, runID int64, throughStep int) ([]*BacktestMarketBar, error) {
+	rows, err := db.Query(`
+		SELECT run_id, step, symbol, asset_class, t, o, h, l, c, v, source
+		FROM backtest_market_bars
+		WHERE run_id = ? AND step <= ?
+		ORDER BY step ASC, symbol ASC`, runID, throughStep)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []*BacktestMarketBar{}
+	for rows.Next() {
+		var bar BacktestMarketBar
+		if err := rows.Scan(&bar.RunID, &bar.Step, &bar.Symbol, &bar.AssetClass, &bar.T,
+			&bar.O, &bar.H, &bar.L, &bar.C, &bar.V, &bar.Source); err != nil {
+			return nil, err
+		}
+		out = append(out, &bar)
+	}
+	return out, rows.Err()
+}
+
 // ─── Watchlist ─────────────────────────────────────────────────────
 
 func dbWatchlistAdd(db *sql.DB, projectID string, portfolioID int64, symbol string) (bool, error) {
@@ -1603,6 +1676,13 @@ func nullable(p *float64) any {
 	return *p
 }
 
+func nullableString(v string) any {
+	if strings.TrimSpace(v) == "" {
+		return nil
+	}
+	return v
+}
+
 func maxInt(a, b int) int {
 	if a > b {
 		return a
@@ -1625,14 +1705,22 @@ func utcDay(t time.Time) string {
 // portfolio by joining current marks against open positions. Pure read,
 // no DB writes.
 func snapshotPortfolio(db *sql.DB, p *Portfolio) (*Portfolio, error) {
+	marks, err := dbMarksBySymbol(db)
+	if err != nil {
+		return nil, err
+	}
+	return snapshotPortfolioWithMarks(db, p, marks)
+}
+
+func snapshotPortfolioWithMarks(db *sql.DB, p *Portfolio, marks map[string]*Mark) (*Portfolio, error) {
 	pos, err := dbListPositions(db, p.ID)
 	if err != nil {
 		return nil, err
 	}
 	var openValue, openCost, openDay float64
 	for _, q := range pos {
-		mark, err := dbGetMark(db, q.Symbol)
-		if err != nil {
+		mark := marks[strings.ToUpper(q.Symbol)]
+		if mark == nil {
 			// No mark yet — use avg_cost (assume flat).
 			q.MarketPrice = q.AvgCost
 		} else {
@@ -1671,7 +1759,10 @@ func snapshotPortfolio(db *sql.DB, p *Portfolio) (*Portfolio, error) {
 	if openCost > 0 {
 		p.OpenPnLPct = p.OpenPnL / openCost * 100
 	}
-	p.BuyingPower = p.Cash // v0.1 — long-only, no margin
+	p.BuyingPower = p.Cash
+	if p.Mode == "live" && p.AvailableCash != nil {
+		p.BuyingPower = *p.AvailableCash
+	}
 	wl, _ := dbWatchlist(db, p.ID)
 	if wl == nil {
 		wl = []string{}
@@ -1697,12 +1788,30 @@ func computeEquity(db *sql.DB, p *Portfolio) (float64, error) {
 		return 0, err
 	}
 	value := p.Cash
+	marks, err := dbMarksBySymbol(db)
+	if err != nil {
+		return 0, err
+	}
 	for _, q := range pos {
-		mark, err := dbGetMark(db, q.Symbol)
-		if err != nil {
+		mark := marks[strings.ToUpper(q.Symbol)]
+		if mark == nil {
 			continue
 		}
 		value += markPriceForSide(mark, q.Outcome) * q.Qty
 	}
 	return value, nil
+}
+
+func dbMarksBySymbol(db *sql.DB) (map[string]*Mark, error) {
+	marks, err := dbListMarks(db)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]*Mark, len(marks))
+	for _, mark := range marks {
+		if mark != nil {
+			out[strings.ToUpper(mark.Symbol)] = mark
+		}
+	}
+	return out, nil
 }

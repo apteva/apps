@@ -1,8 +1,8 @@
 # Trading
 
-Paper trading desk for Apteva agents. Multi-portfolio, multi-asset
-(equity, crypto, polymarket prediction markets). Deterministic
-paper-execution engine — no broker, no real money.
+Multi-portfolio, multi-asset trading desk for Apteva agents, covering
+equity, ETF, crypto, and Polymarket prediction markets. It supports paper
+and broker-backed live execution, deterministic strategies, and backtests.
 
 Same canonical layout as `apps/mcp/crm` and `apps/mcp/storage`: a Go
 sidecar serving MCP tools + REST routes, with two UI surfaces under
@@ -18,7 +18,8 @@ apps/mcp/trading/
 ├── tools.go                # MCP tools (the agent's surface)
 ├── store.go                # DB layer
 ├── exec.go                 # Paper-execution + alert engine (Workers)
-├── pricing.go              # Pricing provider — mock by default, swappable
+├── pricing.go              # Explicit offline mock provider
+├── pricing_live.go         # Live market-data router
 ├── handlers_test.go        # Tier 1 — in-process handler tests
 ├── manifest_test.go        # Cross-check declared tools vs handlers
 ├── integration_test.go     # Tier 2 — //go:build integration; spawned-binary
@@ -51,7 +52,7 @@ go build .
 
 # Run with mock pricing, fast tick.
 APTEVA_APP_PORT=8080 APTEVA_PROJECT_ID=demo APTEVA_APP_TOKEN=dev \
-APTEVA_APP_CONFIG='{"starting_cash":"100000","tick_seconds":"3"}' \
+APTEVA_APP_CONFIG='{"starting_cash":"100000","tick_seconds":"3","pricing_provider":"mock"}' \
 DB_PATH=/tmp/trading-data/trading.db \
 ./trading
 
@@ -112,17 +113,14 @@ adjusts.
 | **2** real binary | Spawned sidecar talked to via JSON-RPC + REST; engine ticks for real | `go test -tags integration ./...` | ~8s |
 | **3** live agent | YAML scenarios run by `apteva test ./scenarios/` — real agent, real LLM | `apteva test ./scenarios/` | tens of seconds + LLM cost |
 
-Counts today: 14 Tier 1 handler tests + 2 manifest cross-checks · 4
-Tier 2 integration tests · 4 Tier 3 scenarios.
-
 ## Pricing provider
 
-Default `pricing_provider: mock` — deterministic walks anchored to the
-hand-picked universe in `pricing.go`. Same RNG as the desk-UI mockup
-so the visual story stays continuous. Swapping in a live provider
-(yfinance, coingecko, polymarket-clob) is a matter of implementing
-the `Provider` interface in another file and wiring it in `newProvider`
-inside `main.go` — no other file needs to change.
+The default `pricing_provider: live` routes crypto to Binance public REST,
+prediction markets to Polymarket Gamma, and equity/ETF quotes to a bound
+Alpaca market-data integration with Yahoo Finance as the unauthenticated
+real-data fallback. Live mode never substitutes synthetic prices: provider
+failures are surfaced and stale marks cannot fill orders. Set
+`pricing_provider: mock` explicitly for deterministic tests and offline demos.
 
 ## Approvals — by design, not in the sidecar
 

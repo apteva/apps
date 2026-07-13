@@ -4,14 +4,14 @@ package main
 //
 //   crypto      via binancePublic       (api.binance.com/api/v3)
 //   polymarket  via polymarketPublic    (gamma-api.polymarket.com)
-//   equity/etf  via the mock fallback   (no free no-auth feed worth depending on yet)
+//   equity/etf  via Alpaca market data or Yahoo Finance
 //
 // Every Quote / Universe call goes through a per-symbol cache to
-// keep the engine tick + the desk SPA from hammering Binance or
-// gamma-api. Failures fall back to mock automatically and bump
-// per-class health counters surfaced via /healthz/details.
+// keep the engine tick from hammering Binance or gamma-api. Provider
+// failures are surfaced and never converted into synthetic executable marks.
 
 import (
+	"fmt"
 	"strings"
 	"sync"
 	"time"
@@ -26,23 +26,21 @@ const (
 )
 
 type liveProvider struct {
-	crypto   *binancePublic
-	poly     *polymarketPublic
-	equity   *alpacaMarketData // nil until SetPlatform is called from OnMount
-	yahoo    *yahooPublic
-	fallback Provider
-	cache    *markCache
-	health   *providerHealth
+	crypto *binancePublic
+	poly   *polymarketPublic
+	equity *alpacaMarketData // nil until SetPlatform is called from OnMount
+	yahoo  *yahooPublic
+	cache  *markCache
+	health *providerHealth
 }
 
-func newLiveProvider(fallback Provider) *liveProvider {
+func newLiveProvider() *liveProvider {
 	return &liveProvider{
-		crypto:   newBinancePublic(),
-		poly:     newPolymarketPublic(),
-		yahoo:    newYahooPublic(),
-		fallback: fallback,
-		cache:    newMarkCache(cacheTTL),
-		health:   newProviderHealth(),
+		crypto: newBinancePublic(),
+		poly:   newPolymarketPublic(),
+		yahoo:  newYahooPublic(),
+		cache:  newMarkCache(cacheTTL),
+		health: newProviderHealth(),
 	}
 }
 
@@ -59,7 +57,7 @@ func (p *liveProvider) SetPlatform(platform sdk.PlatformClient, logger sdk.Logge
 	p.equity = newAlpacaMarketData(platform, logger)
 }
 
-// Quote — single-symbol fetch with cache + fallback.
+// Quote — single-symbol fetch with cache and explicit provider errors.
 func (p *liveProvider) Quote(symbol string) (*Mark, error) {
 	if m := p.cache.get(symbol); m != nil {
 		return m, nil
@@ -70,7 +68,7 @@ func (p *liveProvider) Quote(symbol string) (*Mark, error) {
 		m, err := p.crypto.Quote(symbol)
 		if err != nil {
 			p.health.note("crypto", err)
-			return p.fallback.Quote(symbol)
+			return nil, err
 		}
 		p.health.ok("crypto", "binance-public")
 		p.cache.put(m)
@@ -79,17 +77,18 @@ func (p *liveProvider) Quote(symbol string) (*Mark, error) {
 		m, err := p.poly.Quote(symbol)
 		if err != nil {
 			p.health.note("polymarket", err)
-			return p.fallback.Quote(symbol)
+			return nil, err
 		}
 		p.health.ok("polymarket", "polymarket-public")
 		p.cache.put(m)
 		return m, nil
 	case "equity", "etf":
-		// Equity routing: Alpaca > Yahoo > mock.
+		// Equity routing: Alpaca > Yahoo. A provider outage leaves the
+		// previous persisted mark untouched and blocks new symbol admission.
 		// Alpaca wins when bound (paid SLA, fresher data, includes
 		// pre/post-market). Otherwise Yahoo Finance — no auth, real
-		// prices, works on first boot. Mock only if Yahoo also fails
-		// (network down, Yahoo schema-changed, etc.).
+		// prices, works on first boot. If both providers fail, the quote
+		// remains unavailable rather than being replaced with synthetic data.
 		if p.equity != nil && p.equity.available() {
 			m, err := p.equity.Quote(symbol)
 			if err == nil {
@@ -98,8 +97,8 @@ func (p *liveProvider) Quote(symbol string) (*Mark, error) {
 				return m, nil
 			}
 			p.health.note(cls, err)
-			// Fall through to Yahoo instead of straight to mock
-			// when Alpaca errors — usually a transient network blip.
+			// Fall through to Yahoo when Alpaca errors — usually a
+			// transient network blip.
 		}
 		if m, err := p.yahoo.Quote(symbol); err == nil {
 			p.health.ok(cls, "yahoo-finance")
@@ -108,16 +107,15 @@ func (p *liveProvider) Quote(symbol string) (*Mark, error) {
 		} else {
 			p.health.note(cls, err)
 		}
-		p.health.ok(cls, "mock")
-		return p.fallback.Quote(symbol)
+		return nil, fmt.Errorf("no live equity quote available for %s", symbol)
 	default:
-		p.health.ok(cls, "mock")
-		return p.fallback.Quote(symbol)
+		return nil, fmt.Errorf("unsupported live asset class %q for %s", cls, symbol)
 	}
 }
 
-// Universe — one HTTP call per asset class (batched), plus the mock
-// universe for equity/etf. Errors per class fall back transparently.
+// Universe — one batched HTTP call per asset class over the bootstrap
+// symbols. Failed classes are omitted for this tick, leaving their last
+// persisted marks untouched.
 func (p *liveProvider) Universe() []*Mark {
 	out := make([]*Mark, 0, 24)
 
@@ -133,13 +131,10 @@ func (p *liveProvider) Universe() []*Mark {
 		if err != nil {
 			p.health.note("crypto", err)
 		}
-		// Fall back to mock for crypto on this tick.
-		out = append(out, filterByClass(p.fallback.Universe(), "crypto")...)
 	}
 
-	// Polymarket — single batched markets call. Both error and
-	// empty-result count as a soft fall-through; we still mark the
-	// class so /healthz/details reports a name.
+	// Polymarket — single batched markets call. Both error and an empty
+	// result mark this class unavailable for the refresh.
 	polySlugs := polymarketSymbolsKnown()
 	pMarks, perr := p.poly.UniverseBatch(polySlugs)
 	switch {
@@ -153,15 +148,11 @@ func (p *liveProvider) Universe() []*Mark {
 		if perr != nil {
 			p.health.note("polymarket", perr)
 		} else {
-			// "0 markets" is a non-fatal "live tried, fell back" —
-			// gamma-api occasionally returns nothing for slugs that
-			// aren't currently published.
-			p.health.ok("polymarket", "polymarket-public")
+			p.health.note("polymarket", fmt.Errorf("polymarket returned no active markets"))
 		}
-		out = append(out, filterByClass(p.fallback.Universe(), "polymarket")...)
 	}
 
-	// Equity / ETF — Alpaca > Yahoo > mock. Same dispatch order as
+	// Equity / ETF — Alpaca > Yahoo. Same dispatch order as
 	// the per-symbol Quote path. Alpaca + Yahoo both take a list of
 	// symbols and return marks; if either errors or returns fewer
 	// symbols than asked, we fall down to the next tier.
@@ -196,10 +187,8 @@ func (p *liveProvider) Universe() []*Mark {
 		}
 	}
 	if !gotEquity {
-		p.health.ok("equity", "mock")
-		p.health.ok("etf", "mock")
-		out = append(out, filterByClass(p.fallback.Universe(), "equity")...)
-		out = append(out, filterByClass(p.fallback.Universe(), "etf")...)
+		p.health.note("equity", fmt.Errorf("no live equity universe available"))
+		p.health.note("etf", fmt.Errorf("no live ETF universe available"))
 	}
 
 	return out
@@ -208,9 +197,9 @@ func (p *liveProvider) Universe() []*Mark {
 // Bars routes history fetches by asset class. Crypto = Binance klines.
 // Equity/etf = Yahoo Finance chart (no auth) — Alpaca stock_bars is a
 // follow-up (needs the alpaca-market-data connection to be threaded
-// through). Polymarket bars stay on mock until gamma prices-history
-// is wired. Errors anywhere fall back to mock so the chart pane never
-// goes blank.
+// through). Polymarket history remains unavailable until gamma
+// prices-history is wired. Errors are returned so callers can show unavailable/stale state
+// without presenting fabricated history.
 func (p *liveProvider) Bars(symbol, rng string) ([]Bar, error) {
 	cls := inferAssetClass(symbol)
 	switch cls {
@@ -218,7 +207,7 @@ func (p *liveProvider) Bars(symbol, rng string) ([]Bar, error) {
 		bars, err := p.crypto.Bars(symbol, rng)
 		if err != nil {
 			p.health.note("crypto", err)
-			return p.fallback.Bars(symbol, rng)
+			return nil, err
 		}
 		p.health.ok("crypto", "binance-public")
 		return bars, nil
@@ -228,13 +217,15 @@ func (p *liveProvider) Bars(symbol, rng string) ([]Bar, error) {
 			if err != nil {
 				p.health.note(cls, err)
 			}
-			return p.fallback.Bars(symbol, rng)
+			if err == nil {
+				err = fmt.Errorf("empty Yahoo history for %s", symbol)
+			}
+			return nil, err
 		}
 		p.health.ok(cls, "yahoo-finance")
 		return bars, nil
 	default:
-		// polymarket — mock for now.
-		return p.fallback.Bars(symbol, rng)
+		return nil, fmt.Errorf("live history is not available for asset class %q", cls)
 	}
 }
 
@@ -268,26 +259,15 @@ func (p *liveProvider) StrategyBars(symbol, interval string, limit int) ([]Bar, 
 // Health — read-only snapshot of per-class status.
 func (p *liveProvider) Health() map[string]any { return p.health.snapshot() }
 
-// polymarketSymbolsKnown — slugs that match the mock universe so the
-// live + mock paths stay symmetric. Real installs will accumulate
-// their own set via watchlists, but for the bootstrap demo + tests
-// these are the markets we expect to actually exist on gamma-api.
+// polymarketSymbolsKnown is the small bootstrap set refreshed on first
+// boot. Real installs accumulate additional persisted markets through
+// explicit quote and watchlist requests.
 func polymarketSymbolsKnown() []string {
 	return []string{
 		"POLY:btc-100k-2026",
 		"POLY:fed-cut-march",
 		"POLY:recession-2026",
 	}
-}
-
-func filterByClass(marks []*Mark, class string) []*Mark {
-	out := marks[:0:0]
-	for _, m := range marks {
-		if m.AssetClass == class {
-			out = append(out, m)
-		}
-	}
-	return out
 }
 
 // ─── Cache ─────────────────────────────────────────────────────────

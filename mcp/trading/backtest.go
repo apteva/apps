@@ -468,7 +468,7 @@ func stopBacktestRunner(runID int64) {
 func backtestRunnerLoop(ctx context.Context, projectID string, runID int64, waitBeforeFirstStep bool, firstWaitSince time.Time) {
 	if waitBeforeFirstStep {
 		run, err := dbGetBacktestRun(globalCtx.AppDB(), projectID, runID)
-		if err != nil || run.Status != "running" {
+		if err != nil || (run.Status != "running" && !(run.Status == "paused" && run.CurrentStep >= run.TotalSteps)) {
 			return
 		}
 		if !waitBacktestAgentSettled(ctx, run, firstWaitSince) {
@@ -481,12 +481,13 @@ func backtestRunnerLoop(ctx context.Context, projectID string, runID int64, wait
 			return
 		}
 		if run.Status != "running" {
+			if run.CurrentStep >= run.TotalSteps && run.Status == "paused" {
+				finalizeAgentBacktest(run)
+			}
 			return
 		}
 		if run.CurrentStep >= run.TotalSteps {
-			_ = dbSetBacktestStatus(globalCtx.AppDB(), run.ID, "completed", "")
-			_, _ = dbInsertBacktestEvent(globalCtx.AppDB(), run.ID, "completed", "Backtest completed", run.Summary)
-			emitBacktest("trading.backtest.completed", run.ID, map[string]any{"portfolio_id": run.PortfolioID})
+			finalizeAgentBacktest(run)
 			return
 		}
 		stepStartedAt := time.Now()
@@ -500,13 +501,35 @@ func backtestRunnerLoop(ctx context.Context, projectID string, runID int64, wait
 		if err != nil {
 			return
 		}
-		if next.Status != "running" || next.CurrentStep >= next.TotalSteps {
-			continue
+		if next.Status != "running" {
+			return
 		}
 		if !waitBacktestAgentSettled(ctx, next, stepStartedAt) {
 			return
 		}
+		if next.CurrentStep >= next.TotalSteps {
+			finalizeAgentBacktest(next)
+			return
+		}
 	}
+}
+
+func finalizeAgentBacktest(run *BacktestRun) {
+	if run == nil || run.Status == "completed" || run.Status == "cancelled" || run.Status == "failed" {
+		return
+	}
+	if run.Summary == nil {
+		run.Summary = map[string]any{}
+	}
+	// Pull the environment portfolio after the final quiet window so the last
+	// agent decision and its fill are included in the terminal snapshot.
+	if perf, err := backtestPerformance(run); err == nil && perf != nil && perf.Current != nil {
+		run.Summary["final_equity"] = perf.Current.Equity
+		run.Summary["last_step"] = run.CurrentStep
+	}
+	_ = dbAdvanceBacktestStep(globalCtx.AppDB(), run.ID, run.CurrentStep, run.Summary, "completed")
+	_, _ = dbInsertBacktestEvent(globalCtx.AppDB(), run.ID, "completed", "Backtest completed", run.Summary)
+	emitBacktest("trading.backtest.completed", run.ID, map[string]any{"portfolio_id": run.PortfolioID})
 }
 
 func waitBacktestFallback(ctx context.Context) bool {
@@ -678,15 +701,13 @@ func stepBacktestRun(run *BacktestRun) (map[string]any, error) {
 		return nil, fmt.Errorf("update environment marks: %w", err)
 	}
 	prompt := backtestStepPrompt(run, step, prices)
+	eventSentAt := time.Now().UTC()
 	if err := globalCtx.PlatformAPI().SendEvent(run.EnvironmentAgentID, prompt); err != nil {
 		return nil, fmt.Errorf("send environment agent event: %w", err)
 	}
 	status := run.Status
 	if status == "" {
 		status = "running"
-	}
-	if step >= run.TotalSteps {
-		status = "completed"
 	}
 	summary := map[string]any{
 		"last_step": step,
@@ -700,12 +721,11 @@ func stepBacktestRun(run *BacktestRun) (map[string]any, error) {
 	emitBacktest("trading.backtest.tick", run.ID, map[string]any{
 		"portfolio_id": run.PortfolioID, "step": step, "total_steps": run.TotalSteps, "prices": prices,
 	})
-	if status == "completed" {
-		_, _ = dbInsertBacktestEvent(globalCtx.AppDB(), run.ID, "completed", "Backtest completed", summary)
-		emitBacktest("trading.backtest.completed", run.ID, map[string]any{"portfolio_id": run.PortfolioID})
-	}
 	next, _ := dbGetBacktestRun(globalCtx.AppDB(), run.ProjectID, run.ID)
 	_, _ = backtestPerformance(next)
+	if step >= run.TotalSteps {
+		startBacktestRunner(next, true, eventSentAt)
+	}
 	return map[string]any{"backtest": next}, nil
 }
 
@@ -757,8 +777,16 @@ func backtestPerformance(run *BacktestRun) (*BacktestPerformance, error) {
 	if len(perf.Positions) == 0 && perf.Current != nil && len(perf.Current.Positions) > 0 {
 		perf.Positions = perf.Current.Positions
 	}
-	if len(perf.Orders) == 0 && perf.Current != nil && len(perf.Current.Orders) > 0 {
-		perf.Orders = perf.Current.Orders
+	if len(perf.Orders) == 0 {
+		seenOrders := map[string]bool{}
+		for _, snapshot := range perf.Series {
+			for _, order := range snapshot.Orders {
+				if order != nil && !seenOrders[order.ID] {
+					seenOrders[order.ID] = true
+					perf.Orders = append(perf.Orders, order)
+				}
+			}
+		}
 	}
 	if perf.Positions == nil {
 		perf.Positions = []*Position{}
@@ -1268,21 +1296,18 @@ func backtestStepsPerSession(interval string) int {
 }
 
 func backtestReplayTime(run *BacktestRun, step int) time.Time {
+	if run != nil && globalCtx != nil && globalCtx.AppDB() != nil {
+		if replayAt, ok := dbBacktestMarketStepTime(globalCtx.AppDB(), run.ID, step); ok {
+			return replayAt
+		}
+	}
 	start := parseDateOr(run.StartAt, time.Now().UTC())
 	if step < 1 {
 		step = 1
 	}
 	switch strings.ToLower(strings.TrimSpace(run.Interval)) {
 	case "5m", "15m", "1h", "4h":
-		sessionStep := step - 1
-		slots := backtestStepsPerSession(run.Interval)
-		if slots < 1 {
-			slots = 1
-		}
-		dayOffset := sessionStep / slots
-		slot := sessionStep % slots
-		sessionOpen := time.Date(start.Year(), start.Month(), start.Day(), 9, 30, 0, 0, time.UTC).AddDate(0, 0, dayOffset)
-		return sessionOpen.Add(time.Duration(slot) * backtestIntervalDuration(run.Interval))
+		return start.Add(time.Duration(step-1) * backtestIntervalDuration(run.Interval))
 	case "1w":
 		return time.Date(start.Year(), start.Month(), start.Day(), 0, 0, 0, 0, time.UTC).AddDate(0, 0, (step-1)*7)
 	default:

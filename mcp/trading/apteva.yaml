@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: trading
 display_name: Trading
-version: 0.4.33
+version: 0.4.34
 description: |
   Trading desk for Apteva agents. Multi-portfolio, multi-asset (equity,
   etf, crypto, polymarket prediction markets). Each portfolio runs in
@@ -11,8 +11,9 @@ description: |
     paper — deterministic in-process execution engine; no broker, no
             real money. The default. Useful for strategy work and dry
             runs.
-    live  — orders route through a per-portfolio broker. v0.3 ships
-            with Binance/Kraken/Coinbase/OKX/Bybit/Bitstamp (crypto) and Alpaca (equity/etf/crypto); each
+    live  — orders route through a per-portfolio broker. The app supports
+            Binance/Kraken/Coinbase/OKX/Bybit/Bitstamp (crypto), Alpaca (equity/etf/crypto),
+            and Polymarket CLOB; each
             portfolio names its broker at creation via broker_slug.
             Bind a broker via Settings → Integrations to enable
             mode=live. Without any binding, every portfolio stays paper.
@@ -69,8 +70,8 @@ requires:
     # Optional market-data integration. Required to trade equity/etf live
     # with real-time prices (pre-trade cash check + position MTM). Same
     # API key as alpaca-trading; bind both for a fully-live equity
-    # workflow. Without it, equity marks fall back to mock walks — fine
-    # for paper, NOT safe for live agents trading real money.
+    # workflow. Without it, Yahoo Finance is used as the unauthenticated
+    # real-data fallback. Provider failures never produce synthetic marks.
     - role: market_data_equity
       kind: integration
       required: false
@@ -196,7 +197,7 @@ config_schema:
     label: Pricing provider
     description: |
       live — Binance public REST for crypto + Polymarket gamma-api for prediction markets.
-             Equity/etf use deterministic mock walks (no free no-auth feed worth depending on yet).
+             Equity/ETF use bound Alpaca market data, then Yahoo Finance. Live mode never uses synthetic data.
       mock — fully offline; deterministic walks for everything. Used by tests + air-gapped demos.
   - name: bootstrap_demo
     type: text

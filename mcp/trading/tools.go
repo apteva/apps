@@ -101,6 +101,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				"portfolio_id": map[string]any{"type": "integer"},
 				"symbol":       map[string]any{"type": "string"},
 				"side":         map[string]any{"type": "string", "enum": []string{"buy", "sell", "yes", "no"}},
+				"outcome":      map[string]any{"type": "string", "enum": []string{"yes", "no"}, "description": "Polymarket outcome. Required when side=sell; inferred for side=yes|no."},
 				"type":         map[string]any{"type": "string", "enum": []string{"market", "limit", "stop"}},
 				"qty":          map[string]any{"type": "number"},
 				"limit_price":  map[string]any{"type": "number"},
@@ -362,6 +363,7 @@ func (a *App) toolPortfolioCreate(ctx *sdk.AppCtx, args map[string]any) (any, er
 		if err != nil {
 			return nil, err
 		}
+		_, _ = ctx.AppDB().Exec(`UPDATE portfolios SET available_cash = ? WHERE id = ?`, acct.QuoteAvailable, id)
 
 		// Seed positions from broker holdings. Symbols arrive in the
 		// adapter's canonical form (BTC-USD for binance, AAPL / BTC-USD
@@ -382,7 +384,7 @@ func (a *App) toolPortfolioCreate(ctx *sdk.AppCtx, args map[string]any) (any, er
 			} else {
 				seededWithCost++
 			}
-			_ = dbInsertPositionRaw(ctx.AppDB(), pid, id, canonical, cls, "", bal.Free, cost)
+			_ = dbInsertPositionRaw(ctx.AppDB(), pid, id, canonical, cls, "", brokerBalanceTotal(bal), cost)
 			seeded++
 		}
 		if seeded > 0 {
@@ -805,11 +807,14 @@ func (a *App) toolPositionsList(ctx *sdk.AppCtx, args map[string]any) (any, erro
 }
 
 func (a *App) toolOrdersList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	_, err := resolveProjectFromArgs(args)
+	pid, err := resolveProjectFromArgs(args)
 	if err != nil {
 		return nil, err
 	}
 	id := int64Arg(args, "portfolio_id", 0)
+	if _, err := dbGetPortfolio(ctx.AppDB(), pid, id); err != nil {
+		return nil, fmt.Errorf("portfolio %d not found", id)
+	}
 	status, _ := args["status"].(string)
 	if status == "" {
 		status = "working"
@@ -826,7 +831,7 @@ func (a *App) toolOrdersList(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 }
 
 func (a *App) toolMarketQuote(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	symbol, _ := args["symbol"].(string)
+	symbol := canonicalSymbol(strArg(args, "symbol"))
 	if symbol == "" {
 		return nil, errors.New("symbol required")
 	}
@@ -835,6 +840,9 @@ func (a *App) toolMarketQuote(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		// Fall back to live provider if engine hasn't ticked yet.
 		if globalEngine != nil {
 			mark, err = globalEngine.provider.Quote(symbol)
+			if err == nil && mark != nil {
+				err = dbUpsertMark(ctx.AppDB(), mark)
+			}
 		}
 		if err != nil {
 			return nil, err
@@ -866,7 +874,7 @@ func (a *App) toolMarketHistory(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	if globalEngine == nil {
 		return nil, errors.New("engine not ready")
 	}
-	symbol, _ := args["symbol"].(string)
+	symbol := canonicalSymbol(strArg(args, "symbol"))
 	rng, _ := args["range"].(string)
 	if rng == "" {
 		rng = "1D"
@@ -883,18 +891,22 @@ func (a *App) toolMarketSource(ctx *sdk.AppCtx, args map[string]any) (any, error
 		"providers": providerHealthSnapshot(),
 	}
 	if globalEngine != nil {
-		out["last_tick_at"] = globalEngine.lastTickAt
-		out["ticks"] = globalEngine.ticks
+		metrics := globalEngine.snapshotMetrics()
+		out["last_tick_at"] = metrics["last_tick_at"]
+		out["ticks"] = metrics["ticks"]
 	}
 	return out, nil
 }
 
 func (a *App) toolJournalRead(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	_, err := resolveProjectFromArgs(args)
+	pid, err := resolveProjectFromArgs(args)
 	if err != nil {
 		return nil, err
 	}
 	id := int64Arg(args, "portfolio_id", 0)
+	if _, err := dbGetPortfolio(ctx.AppDB(), pid, id); err != nil {
+		return nil, fmt.Errorf("portfolio %d not found", id)
+	}
 	kind, _ := args["kind"].(string)
 	since, _ := args["since"].(string)
 	limit := intArg(args, "limit", 50)
@@ -934,9 +946,9 @@ func (a *App) toolOrderPlace(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		return rejectStruct("portfolio_not_active",
 			fmt.Sprintf("portfolio status is %q", pf.Status)), nil
 	}
-	symbol, _ := args["symbol"].(string)
-	side, _ := args["side"].(string)
-	otype, _ := args["type"].(string)
+	symbol := canonicalSymbol(strArg(args, "symbol"))
+	side := strings.ToLower(strings.TrimSpace(strArg(args, "side")))
+	otype := strings.ToLower(strings.TrimSpace(strArg(args, "type")))
 	qty := floatArg(args, "qty", 0)
 	if symbol == "" || side == "" || otype == "" || qty <= 0 {
 		return rejectStruct("invalid_args", "symbol, side, type, qty are required and qty > 0"), nil
@@ -946,10 +958,19 @@ func (a *App) toolOrderPlace(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		return rejectStruct("asset_class_blocked",
 			fmt.Sprintf("class %q not in allowed_classes %v", class, pf.AllowedClasses)), nil
 	}
-	// Side / class consistency.
+	// Side / class consistency. Prediction-market outcome is independent
+	// from direction so SELL can close either an existing YES or NO leg.
+	outcome := strings.ToLower(strings.TrimSpace(strArg(args, "outcome")))
 	if class == "polymarket" {
-		if side != "yes" && side != "no" {
-			return rejectStruct("invalid_side", "polymarket side must be 'yes' or 'no'"), nil
+		if side == "yes" || side == "no" {
+			if outcome == "" {
+				outcome = side
+			}
+		} else if side != "sell" {
+			return rejectStruct("invalid_side", "polymarket side must be 'yes', 'no', or 'sell'"), nil
+		}
+		if outcome != "yes" && outcome != "no" {
+			return rejectStruct("invalid_outcome", "polymarket outcome must be 'yes' or 'no'; it is required for sell orders"), nil
 		}
 		if otype == "stop" {
 			return rejectStruct("invalid_type", "stop orders not supported on polymarket"), nil
@@ -981,6 +1002,9 @@ func (a *App) toolOrderPlace(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 			return rejectStruct("invalid_args", "polymarket limit_price must be in (0, 1)"), nil
 		}
 	}
+	if _, err := ensureExecutableMark(ctx, pf, symbol); err != nil {
+		return rejectStruct("market_data_unavailable", err.Error()), nil
+	}
 
 	// Source — "agent" by default; HTTP path overrides via source_override.
 	// Live mode appends ":live" so audit queries can split paper from live
@@ -1002,6 +1026,7 @@ func (a *App) toolOrderPlace(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		Symbol:      symbol,
 		AssetClass:  class,
 		Side:        side,
+		Outcome:     strings.ToUpper(outcome),
 		Type:        otype,
 		Qty:         qty,
 		LimitPrice:  lp,
@@ -1049,7 +1074,7 @@ func (a *App) toolOrderPlace(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 				fmt.Sprintf("%s adapter does not support %q", adapter.Slug(), class)), nil
 		}
 		// Pre-trade cash check (live). Mirrors the paper-engine check in
-		// tryFill. Uses local pf.Cash (broker-reconciled, ≤60s stale) and
+		// tryFill. Uses broker-reported available cash when present and
 		// the best price estimate we have. Broker will reject if we
 		// somehow get past this, but burning an API call on an obviously
 		// underfunded order isn't worth it.
@@ -1062,8 +1087,12 @@ func (a *App) toolOrderPlace(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 			}
 			if estPrice > 0 {
 				needed := qty * estPrice * 1.005 // 0.5% buffer for slippage + fees
-				if pf.Cash < needed {
-					detail := fmt.Sprintf("estimated need %.2f, local cash %.2f (broker-synced ≤60s ago)", needed, pf.Cash)
+				available := pf.Cash
+				if pf.AvailableCash != nil {
+					available = *pf.AvailableCash
+				}
+				if available < needed {
+					detail := fmt.Sprintf("estimated need %.2f, available cash %.2f (broker-synced ≤60s ago)", needed, available)
 					_ = dbRejectOrder(ctx.AppDB(), o.ID, "insufficient_cash", detail)
 					emit("order.rejected", map[string]any{
 						"order_id": o.ID, "portfolio_id": pf.ID,
@@ -1168,8 +1197,12 @@ func (a *App) toolOrderPlace(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 
 		// Apply any inline fills (e.g. Binance market orders return them
 		// synchronously) + reflect terminal status.
-		if _, ferr := applyBrokerProgress(ctx.AppDB(), pid, pf, o, br); ferr != nil {
+		previousFilled := o.FilledQty
+		changed, ferr := applyBrokerProgress(ctx.AppDB(), pid, pf, o, br)
+		if ferr != nil {
 			ctx.Logger().Warn("apply broker progress failed", "order_id", o.ID, "err", ferr)
+		} else if changed && br.ExecutedQty > previousFilled+1e-9 && globalEngine != nil {
+			globalEngine.bumpFillCounter()
 		}
 		return map[string]any{
 			"order_id":        o.ID,
@@ -1244,12 +1277,12 @@ func (a *App) toolOrderCancel(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		brokerOrderID, _ := dbBrokerOrderIDFor(ctx.AppDB(), id)
 		caps := adapter.Capabilities()
 		if brokerOrderID == "" && !caps.CancelByClientID {
-			// Adapter requires the broker id and we don't have one (order
-			// placed pre-binding, or rationale journal is missing). Best
-			// we can do is flip locally; reconciler will reconcile when
-			// it next polls.
-			ctx.Logger().Warn("live order missing broker_order_id and adapter requires it; local-cancel only",
+			// We cannot prove that the exchange order was cancelled. Keep it
+			// working locally so reconciliation continues supervising it.
+			ctx.Logger().Warn("live order missing broker_order_id; keeping order supervised",
 				"order_id", id, "broker", adapter.Slug())
+			return rejectStruct("broker_cancel_unverifiable",
+				"broker order id is missing and this broker cannot cancel by client id; order remains working"), nil
 		} else {
 			cancelArgs := adapter.CancelArgs(o, brokerOrderID)
 			res, cerr := ctx.PlatformAPI().ExecuteIntegrationTool(
@@ -1257,17 +1290,10 @@ func (a *App) toolOrderCancel(ctx *sdk.AppCtx, args map[string]any) (any, error)
 			)
 			if cerr != nil || res == nil || !res.Success {
 				code, detail := adapter.ErrText(res, cerr)
-				// "Already gone" cases (Binance -2011 / Alpaca 422 'order
-				// is not cancelable') are not failures from the local
-				// perspective — the order is already in a terminal state
-				// upstream; the reconciler will mirror it.
-				if !adapter.IsUnknownOrderError(code, detail) &&
-					!strings.Contains(strings.ToLower(detail), "not cancelable") &&
-					!strings.Contains(strings.ToLower(detail), "unknown order") {
-					return rejectStruct("broker_cancel_failed", code+": "+detail), nil
-				}
-				ctx.Logger().Info("broker reports order already resolved — proceeding with local cancel",
-					"order_id", id, "broker", adapter.Slug(), "broker_order_id", brokerOrderID)
+				// Unknown/not-cancelable does not prove whether the order filled,
+				// expired, or is still active under a different identifier. Leave
+				// the local row working; the status reconciler will resolve truth.
+				return rejectStruct("broker_cancel_unconfirmed", code+": "+detail), nil
 			}
 		}
 	}
@@ -1289,6 +1315,9 @@ func (a *App) toolJournalWrite(ctx *sdk.AppCtx, args map[string]any) (any, error
 		return nil, err
 	}
 	portfolioID := int64Arg(args, "portfolio_id", 0)
+	if _, err := dbGetPortfolio(ctx.AppDB(), pid, portfolioID); err != nil {
+		return nil, fmt.Errorf("portfolio %d not found", portfolioID)
+	}
 	kind, _ := args["kind"].(string)
 	body, _ := args["body"].(string)
 	if kind == "" || body == "" {
@@ -1311,7 +1340,7 @@ func (a *App) toolWatchlistAdd(ctx *sdk.AppCtx, args map[string]any) (any, error
 		return nil, err
 	}
 	id := int64Arg(args, "portfolio_id", 0)
-	symbol, _ := args["symbol"].(string)
+	symbol := canonicalSymbol(strArg(args, "symbol"))
 	pf, err := dbGetPortfolio(ctx.AppDB(), pid, id)
 	if err != nil {
 		return nil, fmt.Errorf("portfolio %d not found", id)
@@ -1319,6 +1348,9 @@ func (a *App) toolWatchlistAdd(ctx *sdk.AppCtx, args map[string]any) (any, error
 	class := inferAssetClass(symbol)
 	if !contains(pf.AllowedClasses, class) {
 		return nil, fmt.Errorf("asset class %q not in portfolio's allowed_classes", class)
+	}
+	if _, err := ensureExecutableMark(ctx, pf, symbol); err != nil {
+		return nil, err
 	}
 	added, err := dbWatchlistAdd(ctx.AppDB(), pid, id, symbol)
 	if err != nil {
@@ -1331,13 +1363,45 @@ func (a *App) toolWatchlistAdd(ctx *sdk.AppCtx, args map[string]any) (any, error
 	return map[string]any{"added": added, "watchlist": wl}, nil
 }
 
+func ensureExecutableMark(ctx *sdk.AppCtx, pf *Portfolio, symbol string) (*Mark, error) {
+	if strings.TrimSpace(symbol) == "" {
+		return nil, errors.New("symbol required")
+	}
+	// Isolated backtests receive immutable replay marks from the parent and
+	// must never contact the current live market.
+	if pf != nil && dbHasBacktestPortfolio(ctx.AppDB(), pf.ProjectID) {
+		mark, err := dbGetMark(ctx.AppDB(), symbol)
+		if err != nil {
+			return nil, fmt.Errorf("no replay mark available for %s", symbol)
+		}
+		return mark, nil
+	}
+	if globalEngine == nil || globalEngine.provider == nil {
+		return nil, errors.New("market data engine not ready")
+	}
+	mark, err := globalEngine.provider.Quote(symbol)
+	if err != nil {
+		return nil, fmt.Errorf("live quote for %s: %w", symbol, err)
+	}
+	if mark == nil || mark.Price <= 0 {
+		return nil, fmt.Errorf("live quote for %s is empty", symbol)
+	}
+	if err := dbUpsertMark(ctx.AppDB(), mark); err != nil {
+		return nil, err
+	}
+	return mark, nil
+}
+
 func (a *App) toolWatchlistRemove(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	_, err := resolveProjectFromArgs(args)
+	pid, err := resolveProjectFromArgs(args)
 	if err != nil {
 		return nil, err
 	}
 	id := int64Arg(args, "portfolio_id", 0)
-	symbol, _ := args["symbol"].(string)
+	if _, err := dbGetPortfolio(ctx.AppDB(), pid, id); err != nil {
+		return nil, fmt.Errorf("portfolio %d not found", id)
+	}
+	symbol := canonicalSymbol(strArg(args, "symbol"))
 	removed, err := dbWatchlistRemove(ctx.AppDB(), id, symbol)
 	if err != nil {
 		return nil, err
@@ -1359,6 +1423,14 @@ func (a *App) toolAlertCreate(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		Symbol:      strArg(args, "symbol"),
 		Rule:        strArg(args, "rule"),
 		Threshold:   floatArg(args, "threshold", 0),
+	}
+	pf, err := dbGetPortfolio(ctx.AppDB(), pid, a2.PortfolioID)
+	if err != nil {
+		return nil, fmt.Errorf("portfolio %d not found", a2.PortfolioID)
+	}
+	a2.Symbol = canonicalSymbol(a2.Symbol)
+	if _, err := ensureExecutableMark(ctx, pf, a2.Symbol); err != nil {
+		return nil, err
 	}
 	if exp, ok := args["expires_at"].(string); ok && exp != "" {
 		// Validate RFC3339; if it parses, store it verbatim.

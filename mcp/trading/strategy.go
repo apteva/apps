@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	sdk "github.com/apteva/app-sdk"
@@ -525,11 +526,35 @@ func liveStrategyMarket(ctx *sdk.AppCtx, def *StrategyDefinition) strategyMarket
 		if mark, err := dbGetMark(ctx.AppDB(), symbol); err == nil && mark != nil {
 			market.prices[symbol] = mark.Price
 		}
-		if globalEngine != nil {
-			if bars, err := loadLiveStrategyBars(globalEngine.provider, symbol, interval, limit); err == nil {
-				appendStrategyHistory(market.history, symbol, bars)
-			}
+	}
+	if globalEngine != nil {
+		type historyResult struct {
+			symbol string
+			bars   []Bar
 		}
+		results := make(chan historyResult, len(def.Universe))
+		sem := make(chan struct{}, 8)
+		var wg sync.WaitGroup
+		for _, symbol := range def.Universe {
+			symbol := symbol
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				sem <- struct{}{}
+				bars, err := loadLiveStrategyBars(globalEngine.provider, symbol, interval, limit)
+				<-sem
+				if err == nil {
+					results <- historyResult{symbol: symbol, bars: bars}
+				}
+			}()
+		}
+		wg.Wait()
+		close(results)
+		for result := range results {
+			appendStrategyHistory(market.history, result.symbol, result.bars)
+		}
+	}
+	for _, symbol := range def.Universe {
 		if len(market.history[symbol]) > 0 && market.prices[symbol] == 0 {
 			h := market.history[symbol]
 			market.prices[symbol] = h[len(h)-1]
@@ -624,21 +649,18 @@ func indicatorRequiredBars(indicator string) int {
 
 func backtestStrategyMarket(run *BacktestRun, step int) (strategyMarket, error) {
 	market := strategyMarket{prices: map[string]float64{}, history: map[string][]float64{}, asOf: backtestReplayTime(run, step)}
-	for i := 1; i <= step; i++ {
-		prices, err := backtestMarks(run, i)
-		if err != nil {
-			return market, err
+	bars, err := dbBacktestMarketHistory(globalCtx.AppDB(), run.ID, step)
+	if err != nil {
+		return market, err
+	}
+	for _, bar := range bars {
+		if bar == nil || bar.C <= 0 {
+			continue
 		}
-		for _, row := range prices {
-			symbol := strings.ToUpper(strings.TrimSpace(fmt.Sprint(row["symbol"])))
-			price := anyFloat(row["price"])
-			if symbol == "" || price <= 0 {
-				continue
-			}
-			market.history[symbol] = append(market.history[symbol], price)
-			if i == step {
-				market.prices[symbol] = price
-			}
+		symbol := strings.ToUpper(strings.TrimSpace(bar.Symbol))
+		market.history[symbol] = append(market.history[symbol], bar.C)
+		if bar.Step == step {
+			market.prices[symbol] = bar.C
 		}
 	}
 	return market, nil
@@ -955,7 +977,7 @@ func (a *App) createStrategyValidation(ctx *sdk.AppCtx, args map[string]any) (*S
 		FeeBps:       feeBps,
 		SlippageBps:  slippageBps,
 		MarketSource: marketSource,
-		Bars:         reindexBacktestMarketBars(marketBars, trainSteps+1, steps),
+		Bars:         reindexValidationMarketBars(marketBars, trainSteps+1, steps, strategyRequiredBars(def)-1),
 	})
 	if err != nil {
 		return nil, err
@@ -1052,10 +1074,27 @@ func reindexBacktestMarketBars(rows []*BacktestMarketBar, fromStep, toStep int) 
 	return out
 }
 
+func reindexValidationMarketBars(rows []*BacktestMarketBar, fromStep, toStep, warmupSteps int) []*BacktestMarketBar {
+	if warmupSteps < 0 {
+		warmupSteps = 0
+	}
+	warmupFrom := maxInt(1, fromStep-warmupSteps)
+	out := []*BacktestMarketBar{}
+	for _, row := range rows {
+		if row == nil || row.Step < warmupFrom || row.Step > toStep {
+			continue
+		}
+		cp := *row
+		cp.Step = row.Step - fromStep + 1
+		out = append(out, &cp)
+	}
+	return out
+}
+
 func marketBarDateRange(rows []*BacktestMarketBar) (string, string) {
 	var minT, maxT int64
 	for _, row := range rows {
-		if row == nil || row.T <= 0 {
+		if row == nil || row.T <= 0 || row.Step < 1 {
 			continue
 		}
 		if minT == 0 || row.T < minT {
@@ -1259,7 +1298,6 @@ func (a *App) handleHTTPStrategies(w http.ResponseWriter, r *http.Request) {
 type strategyBacktestState struct {
 	Cash      float64
 	Positions map[string]*Position
-	Orders    []*Order
 }
 
 func startStrategyBacktestRun(run *BacktestRun) (map[string]any, error) {
@@ -1383,9 +1421,8 @@ func stepStrategyBacktestRun(run *BacktestRun) (map[string]any, error) {
 	orders := []*Order{}
 	if rebalance {
 		orders = applyStrategyTargets(run, state, eval.TargetAllocations, prices)
-		state.Orders = append(state.Orders, orders...)
 	}
-	snap := strategySnapshot(run, step, state, prices)
+	snap := strategySnapshot(run, step, state, prices, orders)
 	if err := dbUpsertBacktestSnapshot(globalCtx.AppDB(), snap); err != nil {
 		return nil, err
 	}
@@ -1457,9 +1494,8 @@ func runStrategyBacktestStep(run *BacktestRun, strategy *Strategy, state *strate
 	orders := []*Order{}
 	if rebalance {
 		orders = applyStrategyTargets(&stepRun, state, eval.TargetAllocations, prices)
-		state.Orders = append(state.Orders, orders...)
 	}
-	snap := strategySnapshot(&stepRun, step, state, prices)
+	snap := strategySnapshot(&stepRun, step, state, prices, orders)
 	if err := dbUpsertBacktestSnapshot(globalCtx.AppDB(), snap); err != nil {
 		return nil, err
 	}
@@ -1516,7 +1552,7 @@ func evaluateStrategyBacktestStep(strategy *Strategy, def *StrategyDefinition, r
 }
 
 func loadStrategyBacktestState(run *BacktestRun) (*strategyBacktestState, error) {
-	state := &strategyBacktestState{Cash: run.StartingCash, Positions: map[string]*Position{}, Orders: []*Order{}}
+	state := &strategyBacktestState{Cash: run.StartingCash, Positions: map[string]*Position{}}
 	snaps, err := dbListBacktestSnapshots(globalCtx.AppDB(), run.ID)
 	if err != nil {
 		return nil, err
@@ -1532,7 +1568,6 @@ func loadStrategyBacktestState(run *BacktestRun) (*strategyBacktestState, error)
 			state.Positions[strings.ToUpper(p.Symbol)] = &cp
 		}
 	}
-	state.Orders = append(state.Orders, last.Orders...)
 	return state, nil
 }
 
@@ -1575,7 +1610,13 @@ func applyStrategyTargets(run *BacktestRun, state *strategyBacktestState, target
 		}
 		equity += pos.Qty * price
 	}
-	orders := []*Order{}
+	type plannedTrade struct {
+		symbol     string
+		price      float64
+		diff       float64
+		currentQty float64
+	}
+	plans := []plannedTrade{}
 	symbols := cleanSymbols(run.Symbols)
 	seen := map[string]bool{}
 	for _, target := range targets {
@@ -1601,6 +1642,20 @@ func applyStrategyTargets(run *BacktestRun, state *strategyBacktestState, target
 		if math.Abs(diff) < math.Max(1, equity*0.001) {
 			continue
 		}
+		plans = append(plans, plannedTrade{symbol: symbol, price: price, diff: diff, currentQty: currentQty})
+	}
+	// Execute reductions before additions. The target plan is based on the
+	// same pre-trade equity, while sell proceeds are available to fund buys.
+	sort.SliceStable(plans, func(i, j int) bool {
+		if (plans[i].diff < 0) != (plans[j].diff < 0) {
+			return plans[i].diff < 0
+		}
+		return plans[i].symbol < plans[j].symbol
+	})
+	orders := []*Order{}
+	for _, plan := range plans {
+		symbol, price, diff, currentQty := plan.symbol, plan.price, plan.diff, plan.currentQty
+		pos := state.Positions[symbol]
 		side := "buy"
 		qty := math.Abs(diff) / price
 		fillPrice := applySlippage(price, side, run.SlippageBps)
@@ -1614,11 +1669,13 @@ func applyStrategyTargets(run *BacktestRun, state *strategyBacktestState, target
 		if qty <= 0 {
 			continue
 		}
-		fee := fillFee(qty, fillPrice, run.FeeBps)
 		if side == "buy" {
+			fee := fillFee(qty, fillPrice, run.FeeBps)
 			cost := qty*fillPrice + fee
 			if cost > state.Cash && fillPrice > 0 {
-				qty = math.Max(0, (state.Cash-fee)/fillPrice)
+				feeRate := math.Max(0, run.FeeBps) / 10_000
+				qty = math.Max(0, state.Cash/(fillPrice*(1+feeRate)))
+				fee = fillFee(qty, fillPrice, run.FeeBps)
 				cost = qty*fillPrice + fee
 			}
 			if qty <= 0 {
@@ -1635,6 +1692,7 @@ func applyStrategyTargets(run *BacktestRun, state *strategyBacktestState, target
 			}
 			pos.Qty = newQty
 		} else {
+			fee := fillFee(qty, fillPrice, run.FeeBps)
 			proceeds := qty*fillPrice - fee
 			state.Cash += proceeds
 			if pos != nil {
@@ -1667,7 +1725,7 @@ func applyStrategyTargets(run *BacktestRun, state *strategyBacktestState, target
 	return orders
 }
 
-func strategySnapshot(run *BacktestRun, step int, state *strategyBacktestState, prices []map[string]any) *BacktestSnapshot {
+func strategySnapshot(run *BacktestRun, step int, state *strategyBacktestState, prices []map[string]any, orders []*Order) *BacktestSnapshot {
 	priceBySymbol := backtestPriceMap(prices)
 	positions := []*Position{}
 	for _, pos := range state.Positions {
@@ -1697,7 +1755,7 @@ func strategySnapshot(run *BacktestRun, step int, state *strategyBacktestState, 
 		RealizedPnL: realizedPnL,
 		Exposure:    exposure,
 		Positions:   positions,
-		Orders:      state.Orders,
+		Orders:      orders,
 		Prices:      prices,
 	}
 }

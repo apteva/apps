@@ -306,21 +306,23 @@ func mapBinanceStatus(s string) string {
 
 // brokerAccount — normalized view of get_account.
 type brokerAccount struct {
-	QuoteCash float64                  // free USDT
-	Holdings  map[string]brokerBalance // base-asset symbol → free balance
+	QuoteCash        float64                  // total quote balance, including funds locked by orders
+	QuoteAvailable   float64                  // immediately spendable quote balance
+	Holdings         map[string]brokerBalance // base-asset symbol → balance
+	HoldingsComplete bool                     // absent symbols are confirmed zero when true
 }
 
 type brokerBalance struct {
 	Asset   string  // canonical local form: "BTC-USD", "AAPL", …
 	Free    float64 // qty available
+	Total   float64 // free + locked; falls back to Free when omitted by a broker
 	AvgCost float64 // broker-reported cost basis (Alpaca's avg_entry_price);
-	                // 0 when the broker doesn't publish one (Binance get_account, polymarket).
+	// 0 when the broker doesn't publish one (Binance get_account, polymarket).
 }
 
 // parseBinanceAccount decodes the get_account response into a quote
-// (USDT) cash figure plus a per-base-asset holdings map. Locked
-// balances are ignored — they belong to working orders the reconciler
-// already tracks separately.
+// (USDT) cash figure plus a per-base-asset holdings map. Total balances
+// include locked funds so an open order cannot look like an economic loss.
 func parseBinanceAccount(raw json.RawMessage) (*brokerAccount, error) {
 	if len(raw) == 0 {
 		return nil, errors.New("empty account response")
@@ -335,14 +337,17 @@ func parseBinanceAccount(raw json.RawMessage) (*brokerAccount, error) {
 	if err := json.Unmarshal(raw, &resp); err != nil {
 		return nil, fmt.Errorf("decode account response: %w", err)
 	}
-	out := &brokerAccount{Holdings: map[string]brokerBalance{}}
+	out := &brokerAccount{Holdings: map[string]brokerBalance{}, HoldingsComplete: true}
 	for _, b := range resp.Balances {
 		free := parseFloat(b.Free)
-		if free <= 0 {
+		locked := parseFloat(b.Locked)
+		total := free + locked
+		if total <= 0 {
 			continue
 		}
 		if strings.EqualFold(b.Asset, "USDT") {
-			out.QuoteCash = free
+			out.QuoteCash = total
+			out.QuoteAvailable = free
 			continue
 		}
 		// Canonicalize to local form (BTC-USD) so reconcile code can
@@ -351,6 +356,7 @@ func parseBinanceAccount(raw json.RawMessage) (*brokerAccount, error) {
 		out.Holdings[canonical] = brokerBalance{
 			Asset: canonical,
 			Free:  free,
+			Total: total,
 		}
 	}
 	return out, nil

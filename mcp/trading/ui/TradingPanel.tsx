@@ -226,6 +226,7 @@ interface Order {
   symbol: string;
   asset_class: string;
   side: string;
+  outcome?: string;
   type: string;
   qty: number;
   filled_qty: number;
@@ -1806,6 +1807,7 @@ function PlaceOrderForm({ portfolio, api, onPlaced, setError, symbol, setSymbol,
   universe: Mark[];
 }) {
   const [side, setSide] = useState<string>("buy");
+  const [outcome, setOutcome] = useState<string>("yes");
   const [type, setType] = useState<string>("market");
   const [qty, setQty] = useState("");
   const [limitPrice, setLimitPrice] = useState("");
@@ -1814,6 +1816,12 @@ function PlaceOrderForm({ portfolio, api, onPlaced, setError, symbol, setSymbol,
   const [submitting, setSubmitting] = useState(false);
   const [quote, setQuote] = useState<Mark | null>(null);
   const isPoly = symbol.toUpperCase().startsWith("POLY:");
+
+  useEffect(() => {
+    setSide(isPoly ? "yes" : "buy");
+    setOutcome("yes");
+    if (isPoly && type === "stop") setType("market");
+  }, [isPoly]);
 
   // Refresh the inline quote whenever the committed symbol changes.
   // Effect-driven (not callback-driven) so click-a-chip / pick-from-
@@ -1835,6 +1843,7 @@ function PlaceOrderForm({ portfolio, api, onPlaced, setError, symbol, setSymbol,
         symbol: symbol.trim(), side, type,
         qty: Number(qty), rationale: rationale.trim(),
       };
+      if (isPoly && side === "sell") body.outcome = outcome;
       if (limitPrice) body.limit_price = Number(limitPrice);
       if (stopPrice) body.stop_price = Number(stopPrice);
       const r = await api<{ order_id?: string; status?: string; code?: string; detail?: string }>(
@@ -1878,6 +1887,7 @@ function PlaceOrderForm({ portfolio, api, onPlaced, setError, symbol, setSymbol,
                 <>
                   <option value="yes">YES (buy)</option>
                   <option value="no">NO (buy)</option>
+                  <option value="sell">Sell position</option>
                 </>
               ) : (
                 <>
@@ -1900,6 +1910,16 @@ function PlaceOrderForm({ portfolio, api, onPlaced, setError, symbol, setSymbol,
             <input value={qty} onChange={(e) => setQty(e.target.value)} type="number" step="any" className={inputClass} />
           </div>
         </div>
+
+        {isPoly && side === "sell" && (
+          <div className="mb-2 max-w-xs">
+            <FieldLabel>Outcome to close</FieldLabel>
+            <select value={outcome} onChange={(e) => setOutcome(e.target.value)} className={inputClass}>
+              <option value="yes">YES</option>
+              <option value="no">NO</option>
+            </select>
+          </div>
+        )}
 
         {(type === "limit" || type === "stop") && (
           <div className="grid grid-cols-2 gap-2 mb-2">
@@ -1957,7 +1977,9 @@ function OrdersTable({ orders, onCancel }: { orders: Order[]; onCancel?: (id: st
             <tr key={o.id} className="border-t border-border">
               <td className="px-3 py-2"><code className="text-xs">{o.id}</code></td>
               <td className="px-3 py-2 font-semibold">{o.symbol}</td>
-              <td className={`px-3 py-2 uppercase font-semibold ${o.side === "buy" || o.side === "yes" ? "text-green" : "text-red"}`}>{o.side}</td>
+              <td className={`px-3 py-2 uppercase font-semibold ${o.side === "buy" || o.side === "yes" ? "text-green" : "text-red"}`}>
+                {o.side}{o.side === "sell" && o.outcome ? ` ${o.outcome}` : ""}
+              </td>
               <td className="px-3 py-2">{o.type}{o.limit_price ? ` @ ${formatPrice(o.limit_price, o.asset_class)}` : ""}</td>
               <td className="px-3 py-2">{formatQty(o.qty)}{o.filled_qty > 0 && o.filled_qty < o.qty && ` (${formatQty(o.filled_qty)} filled)`}</td>
               <td className="px-3 py-2"><OrderStatusPill status={o.status} /></td>

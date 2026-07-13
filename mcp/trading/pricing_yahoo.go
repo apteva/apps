@@ -102,9 +102,9 @@ func (y *yahooPublic) UniverseBatch(symbols []string) ([]*Mark, error) {
 		return nil, nil
 	}
 	var (
-		mu   sync.Mutex
-		wg   sync.WaitGroup
-		out  = make([]*Mark, 0, len(symbols))
+		mu  sync.Mutex
+		wg  sync.WaitGroup
+		out = make([]*Mark, 0, len(symbols))
 	)
 	for _, sym := range symbols {
 		wg.Add(1)
@@ -149,8 +149,7 @@ func (y *yahooPublic) fetchChart(symbol, rng, interval string) ([]Bar, *yahooMet
 	// Yahoo silently drops calls with the Go default UA; the integration
 	// catalog declares a browser-ish UA + the client sets the same here
 	// for the direct-call path. If Yahoo tightens auth further (cookie
-	// + crumb), the parse will fail with a clean error and the caller
-	// falls back to mock — no silent corruption.
+	// + crumb), the parse fails explicitly and no synthetic data is used.
 	u := y.base + "/v8/finance/chart/" + url.PathEscape(strings.ToUpper(symbol)) + "?" + q.Encode()
 
 	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
@@ -244,12 +243,19 @@ func (y *yahooPublic) fetchChart(symbol, rng, interval string) ([]Bar, *yahooMet
 // matches whether you're on Yahoo, Alpaca, or mock.
 func yahooRangeFor(rng string) (string, string) {
 	switch strings.ToUpper(rng) {
-	case "1D":  return "1d",  "5m"
-	case "5D":  return "5d",  "30m"
-	case "1M":  return "1mo", "1h"
-	case "3M":  return "3mo", "1d"
-	case "1Y":  return "1y",  "1d"
-	case "ALL": return "5y",  "1wk"
-	default:    return "1d",  "5m"
+	case "1D":
+		return "1d", "5m"
+	case "5D":
+		return "5d", "30m"
+	case "1M":
+		return "1mo", "1h"
+	case "3M":
+		return "3mo", "1d"
+	case "1Y":
+		return "1y", "1d"
+	case "ALL":
+		return "5y", "1wk"
+	default:
+		return "1d", "5m"
 	}
 }

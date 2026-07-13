@@ -7,9 +7,8 @@ package main
 // so credentials stay in the platform; the trading sidecar never
 // handles raw keys.
 //
-// When the connection isn't bound, the liveProvider falls back to mock
-// equity walks. Pre-trade cash checks then use mock prices and we log
-// loudly — fine for paper, not safe for live agents trading real money.
+// When the connection isn't bound, liveProvider uses Yahoo Finance.
+// If neither real provider succeeds, the quote remains unavailable.
 
 import (
 	"encoding/json"
@@ -30,10 +29,10 @@ type alpacaMarketData struct {
 	// Lookup the connection once per TTL window — operator binds /
 	// unbinds rarely; the cost of a /connections list per quote is
 	// avoidable noise on the platform.
-	mu       sync.Mutex
-	connID   int64
-	connAt   time.Time
-	connTTL  time.Duration
+	mu      sync.Mutex
+	connID  int64
+	connAt  time.Time
+	connTTL time.Duration
 }
 
 func newAlpacaMarketData(platform sdk.PlatformClient, logger sdk.Logger) *alpacaMarketData {
@@ -205,10 +204,9 @@ func safeBytes(res *sdk.ExecuteResult) []byte {
 }
 
 // alpacaEquitySymbolsKnown — equity tickers we proactively fetch on
-// each tick. Pull from the mock universe so universe ∩ tracked stays
-// consistent across paper + live without a separate config knob. Real
-// installs will accumulate their own set via watchlists; that's
-// handled by liveProvider.Quote for symbols outside this list.
+// each tick. The explicit mock provider and live bootstrap share this
+// small seed, while real installs accumulate their own persisted set
+// through quotes and watchlists.
 func alpacaEquitySymbolsKnown() []string {
 	out := make([]string, 0, 8)
 	for _, s := range mockUniverse {

@@ -183,10 +183,10 @@ func (alpacaAdapter) ParseOrder(raw json.RawMessage) (*brokerOrderResult, error)
 		return nil, errors.New("empty broker response")
 	}
 	var resp struct {
-		ID            string `json:"id"`
-		ClientOrderID string `json:"client_order_id"`
-		Status        string `json:"status"`
-		FilledQty     string `json:"filled_qty"`
+		ID             string `json:"id"`
+		ClientOrderID  string `json:"client_order_id"`
+		Status         string `json:"status"`
+		FilledQty      string `json:"filled_qty"`
 		FilledAvgPrice string `json:"filled_avg_price"`
 		// Notional fills (dollar-amount orders) also report filled_qty.
 		Qty string `json:"qty"`
@@ -254,10 +254,10 @@ func (alpacaAdapter) ParseAccount(raw json.RawMessage) (*brokerAccount, error) {
 		return nil, errors.New("empty account response")
 	}
 	var resp struct {
-		Cash          string `json:"cash"`
-		BuyingPower   string `json:"buying_power"`
+		Cash           string `json:"cash"`
+		BuyingPower    string `json:"buying_power"`
 		PortfolioValue string `json:"portfolio_value"`
-		Status        string `json:"status"`
+		Status         string `json:"status"`
 	}
 	if err := json.Unmarshal(raw, &resp); err != nil {
 		return nil, fmt.Errorf("decode account response: %w", err)
@@ -266,9 +266,15 @@ func (alpacaAdapter) ParseAccount(raw json.RawMessage) (*brokerAccount, error) {
 		// SUBMITTED, ACCOUNT_UPDATED, APPROVAL_PENDING, REJECTED, etc.
 		return nil, fmt.Errorf("alpaca account status is %q (need ACTIVE)", resp.Status)
 	}
+	cash := parseFloat(resp.Cash)
+	available := cash
+	if buyingPower := parseFloat(resp.BuyingPower); buyingPower >= 0 && buyingPower < available {
+		available = buyingPower
+	}
 	return &brokerAccount{
-		QuoteCash: parseFloat(resp.Cash),
-		Holdings:  map[string]brokerBalance{}, // populated by reconciler via list_positions
+		QuoteCash:      cash,
+		QuoteAvailable: available,
+		Holdings:       map[string]brokerBalance{}, // populated by reconciler via list_positions
 	}, nil
 }
 
@@ -282,10 +288,10 @@ func alpacaParsePositions(raw json.RawMessage) (map[string]brokerBalance, error)
 		return map[string]brokerBalance{}, nil
 	}
 	var positions []struct {
-		Symbol         string `json:"symbol"`
-		Qty            string `json:"qty"`
-		Side           string `json:"side"` // "long" | "short"
-		AvgEntryPrice  string `json:"avg_entry_price"`
+		Symbol        string `json:"symbol"`
+		Qty           string `json:"qty"`
+		Side          string `json:"side"` // "long" | "short"
+		AvgEntryPrice string `json:"avg_entry_price"`
 	}
 	if err := json.Unmarshal(raw, &positions); err != nil {
 		return nil, fmt.Errorf("decode positions response: %w", err)
@@ -307,6 +313,7 @@ func alpacaParsePositions(raw json.RawMessage) (map[string]brokerBalance, error)
 		out[canonical] = brokerBalance{
 			Asset:   canonical,
 			Free:    qty,
+			Total:   qty,
 			AvgCost: parseFloat(p.AvgEntryPrice),
 		}
 	}

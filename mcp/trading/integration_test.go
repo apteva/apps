@@ -21,7 +21,7 @@ import (
 func TestSidecar_BootsAndHealthOK(t *testing.T) {
 	sc := tk.SpawnSidecar(t, ".",
 		tk.WithProjectID("test-proj"),
-		tk.WithConfig(map[string]string{"tick_seconds": "2"}),
+		tk.WithConfig(map[string]string{"pricing_provider": "mock", "tick_seconds": "2"}),
 	)
 	var got map[string]any
 	resp := sc.GET("/health", &got)
@@ -39,8 +39,9 @@ func TestSidecar_OrderFillRoundTrip(t *testing.T) {
 	sc := tk.SpawnSidecar(t, ".",
 		tk.WithProjectID("test-proj"),
 		tk.WithConfig(map[string]string{
-			"tick_seconds":   "1",
-			"bootstrap_demo": "false", // keep portfolio_id=1 deterministic for this test
+			"pricing_provider": "mock",
+			"tick_seconds":     "1",
+			"bootstrap_demo":   "false", // keep portfolio_id=1 deterministic for this test
 		}),
 	)
 
@@ -124,8 +125,9 @@ func TestSidecar_LimitDoesNotFillUnlessCrossed(t *testing.T) {
 	sc := tk.SpawnSidecar(t, ".",
 		tk.WithProjectID("test-proj"),
 		tk.WithConfig(map[string]string{
-			"tick_seconds":   "1",
-			"bootstrap_demo": "false",
+			"pricing_provider": "mock",
+			"tick_seconds":     "1",
+			"bootstrap_demo":   "false",
 		}),
 	)
 	var createOut map[string]any
@@ -161,8 +163,9 @@ func TestSidecar_PolymarketYesFlow(t *testing.T) {
 	sc := tk.SpawnSidecar(t, ".",
 		tk.WithProjectID("test-proj"),
 		tk.WithConfig(map[string]string{
-			"tick_seconds":   "1",
-			"bootstrap_demo": "false",
+			"pricing_provider": "mock",
+			"tick_seconds":     "1",
+			"bootstrap_demo":   "false",
 		}),
 	)
 	var createOut map[string]any
@@ -176,7 +179,7 @@ func TestSidecar_PolymarketYesFlow(t *testing.T) {
 		"portfolio_id": pfID,
 		"symbol":       "POLY:btc-100k-2026",
 		"side":         "yes", "type": "market", "qty": 100,
-		"rationale":    "small starter — confirming polymarket YES side fills end to end.",
+		"rationale": "small starter — confirming polymarket YES side fills end to end.",
 	})
 	if r["status"] != "working" {
 		t.Fatalf("expected working, got %v", r)
@@ -201,7 +204,7 @@ func TestSidecar_PolymarketYesFlow(t *testing.T) {
 func TestSidecar_HealthzDetailsShowsTicks(t *testing.T) {
 	sc := tk.SpawnSidecar(t, ".",
 		tk.WithProjectID("test-proj"),
-		tk.WithConfig(map[string]string{"tick_seconds": "1"}),
+		tk.WithConfig(map[string]string{"pricing_provider": "mock", "tick_seconds": "1"}),
 	)
 	// Give the engine ~3 ticks worth of wall time.
 	time.Sleep(3500 * time.Millisecond)
@@ -228,8 +231,9 @@ func TestSidecar_ConcurrentRESTOrderPlacement(t *testing.T) {
 	sc := tk.SpawnSidecar(t, ".",
 		tk.WithProjectID("test-proj"),
 		tk.WithConfig(map[string]string{
-			"tick_seconds":   "1",
-			"bootstrap_demo": "false",
+			"pricing_provider": "mock",
+			"tick_seconds":     "1",
+			"bootstrap_demo":   "false",
 		}),
 	)
 	var createOut map[string]any
@@ -285,7 +289,7 @@ func TestSidecar_ConcurrentRESTOrderPlacement(t *testing.T) {
 func TestSidecar_FillSurfacedInMetrics(t *testing.T) {
 	sc := tk.SpawnSidecar(t, ".",
 		tk.WithProjectID("test-proj"),
-		tk.WithConfig(map[string]string{"tick_seconds": "1"}),
+		tk.WithConfig(map[string]string{"pricing_provider": "mock", "tick_seconds": "1"}),
 	)
 	var createOut map[string]any
 	sc.POST("/portfolios", map[string]any{
@@ -296,7 +300,7 @@ func TestSidecar_FillSurfacedInMetrics(t *testing.T) {
 	r := sc.MCP("order_place", map[string]any{
 		"portfolio_id": pfID,
 		"symbol":       "NVDA", "side": "buy", "type": "market", "qty": 1,
-		"rationale":    "metrics regression — confirm fills_total increments after one tick on the live binary.",
+		"rationale": "metrics regression — confirm fills_total increments after one tick on the live binary.",
 	})
 	if r["status"] != "working" {
 		t.Fatalf("place: %v", r)
@@ -340,7 +344,7 @@ func TestSidecar_BootstrapAppliedAtFirstBoot(t *testing.T) {
 	sc := tk.SpawnSidecar(t, ".",
 		tk.WithProjectID("test-proj"),
 		tk.WithConfig(map[string]string{
-			"pricing_provider":    "mock",     // deterministic for tests
+			"pricing_provider":    "mock", // deterministic for tests
 			"tick_seconds":        "1",
 			"bootstrap_demo":      "true",
 			"bootstrap_watchlist": "BTC-USD,ETH-USD,SOL-USD",
@@ -470,7 +474,8 @@ func TestSidecar_HealthzIncludesProviders(t *testing.T) {
 // ─── Optional live-network smoke test ──────────────────────────────
 //
 // Gated on T2_LIVE=1 so CI without internet still passes. Run with:
-//   T2_LIVE=1 go test -tags integration -count=1 -run TestSidecar_LiveBinanceFetchesRealBTC ./...
+//
+//	T2_LIVE=1 go test -tags integration -count=1 -run TestSidecar_LiveBinanceFetchesRealBTC ./...
 func TestSidecar_LiveBinanceFetchesRealBTC(t *testing.T) {
 	if os.Getenv("T2_LIVE") != "1" {
 		t.Skip("set T2_LIVE=1 to enable live-network smoke test")
