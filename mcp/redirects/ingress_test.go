@@ -206,3 +206,79 @@ func TestRedirectManifestUsesNativeIngress(t *testing.T) {
 		}
 	}
 }
+
+func TestEmbeddedManifestUsesReleaseFile(t *testing.T) {
+	manifest := (&App{}).Manifest()
+	if manifest.Name != "redirects" || manifest.Version != "0.3.4" {
+		t.Fatalf("embedded manifest=%s@%s", manifest.Name, manifest.Version)
+	}
+	foundRead := false
+	for _, permission := range manifest.Requires.Permissions {
+		if permission == "platform.ingress.read" {
+			foundRead = true
+		}
+	}
+	if !foundRead {
+		t.Fatalf("embedded manifest missing platform.ingress.read")
+	}
+}
+
+func TestReconcilePreservesClaimProject(t *testing.T) {
+	t.Setenv("APTEVA_PROJECT_ID", "")
+	pf := &redirectsIngressPlatform{}
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithPlatform(pf))
+	if _, err := dbInsertRedirect(ctx.AppDB(), RedirectInput{
+		Hostname: "a.example.com", Destination: "https://example.com/a", ProjectID: "project-a",
+	}); err != nil {
+		t.Fatalf("insert a: %v", err)
+	}
+	if _, err := dbInsertRedirect(ctx.AppDB(), RedirectInput{
+		Hostname: "b.example.com", Destination: "https://example.com/b", ProjectID: "project-b",
+	}); err != nil {
+		t.Fatalf("insert b: %v", err)
+	}
+
+	reconcileRegisteredRoutes(ctx)
+	if len(pf.exposed) != 2 {
+		t.Fatalf("exposed=%d", len(pf.exposed))
+	}
+	projects := map[string]string{}
+	for _, route := range pf.exposed {
+		projects[route.Hostname] = route.ProjectID
+	}
+	if projects["a.example.com"] != "project-a" || projects["b.example.com"] != "project-b" {
+		t.Fatalf("project ownership lost: %+v", projects)
+	}
+}
+
+func TestIPv6PublicHostCreatesAAAARecord(t *testing.T) {
+	pf := &redirectsIngressPlatform{domains: []string{"example.com"}}
+	ctx := tk.NewAppCtx(t, "apteva.yaml",
+		tk.WithProjectID("proj-1"),
+		tk.WithConfig(map[string]string{"public_host": "2001:db8::1"}),
+		tk.WithPlatform(pf),
+	)
+	if warning := wireHostname(ctx, "proj-1", "go.example.com"); warning != "" {
+		t.Fatalf("warning=%q", warning)
+	}
+	if len(pf.domainSets) != 1 || pf.domainSets[0]["type"] != "AAAA" || pf.domainSets[0]["value"] != "2001:db8::1" {
+		t.Fatalf("domain sets=%+v", pf.domainSets)
+	}
+}
+
+func TestRuleEventsUseRuleProject(t *testing.T) {
+	recorder := tk.NewEmitRecorder()
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithEmitter(recorder))
+	rule := &Redirect{ID: 42, Hostname: "go.example.com", ProjectID: "project-a"}
+	emitRuleChange(ctx, "rule.updated", rule)
+	emitHit(ctx, rule)
+	events := recorder.Events()
+	if len(events) != 2 {
+		t.Fatalf("events=%+v", events)
+	}
+	for _, event := range events {
+		if event.ProjectID != "project-a" {
+			t.Fatalf("event %s project=%q", event.Topic, event.ProjectID)
+		}
+	}
+}

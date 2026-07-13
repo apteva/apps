@@ -2,7 +2,6 @@ package main
 
 import (
 	"errors"
-	"os"
 
 	sdk "github.com/apteva/app-sdk"
 )
@@ -29,14 +28,13 @@ func (a *App) MCPTools() []sdk.Tool {
 				"preserve_path":  map[string]any{"type": "boolean"},
 				"preserve_query": map[string]any{"type": "boolean"},
 				"notes":          map[string]any{"type": "string"},
-				"project_id":     map[string]any{"type": "string"},
 			}, []string{"hostname", "destination"}),
 			Handler: a.toolRedirectAdd,
 		},
 		{
 			Name: "redirect_update",
 			Description: "Update a redirect rule by id. Same fields as redirect_add; only fields you pass are changed. " +
-				"Set status_code to 0 to skip; empty strings on path/match leave the field alone.",
+				"Boolean false and an empty notes string are applied explicitly when provided.",
 			InputSchema: schemaObject(map[string]any{
 				"id":             map[string]any{"type": "integer"},
 				"hostname":       map[string]any{"type": "string"},
@@ -60,12 +58,11 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "redirect_list",
-			Description: "List redirect rules. Args: hostname? (filter), project_id?, limit? (default 100), offset? (default 0).",
+			Description: "List redirect rules in the current project. Args: hostname? (filter), limit? (default 50), offset? (default 0).",
 			InputSchema: schemaObject(map[string]any{
-				"hostname":   map[string]any{"type": "string"},
-				"project_id": map[string]any{"type": "string"},
-				"limit":      map[string]any{"type": "integer"},
-				"offset":     map[string]any{"type": "integer"},
+				"hostname": map[string]any{"type": "string"},
+				"limit":    map[string]any{"type": "integer"},
+				"offset":   map[string]any{"type": "integer"},
 			}, nil),
 			Handler: a.toolRedirectList,
 		},
@@ -95,9 +92,7 @@ func (a *App) MCPTools() []sdk.Tool {
 
 func (a *App) toolRedirectAdd(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	in := inputFromArgs(args)
-	if in.ProjectID == "" {
-		in.ProjectID = projectFromArgs(args)
-	}
+	in.ProjectID = ctx.CurrentProject()
 	rule, err := dbInsertRedirect(ctx.AppDB(), in)
 	if err != nil {
 		return nil, err
@@ -112,12 +107,12 @@ func (a *App) toolRedirectUpdate(ctx *sdk.AppCtx, args map[string]any) (any, err
 	if id == 0 {
 		return nil, errors.New("id required")
 	}
-	existing, err := dbGetRedirect(ctx.AppDB(), id)
+	projectID := ctx.CurrentProject()
+	existing, err := dbGetRedirect(ctx.AppDB(), id, projectID)
 	if err != nil {
 		return nil, err
 	}
-	in := inputFromArgs(args)
-	rule, err := dbUpdateRedirect(ctx.AppDB(), id, in)
+	rule, err := dbUpdateRedirect(ctx.AppDB(), id, projectID, patchFromArgs(args))
 	if err != nil {
 		return nil, err
 	}
@@ -134,13 +129,11 @@ func (a *App) toolRedirectRemove(ctx *sdk.AppCtx, args map[string]any) (any, err
 	if id == 0 {
 		return nil, errors.New("id required")
 	}
-	existing, err := dbGetRedirect(ctx.AppDB(), id)
+	existing, err := dbDeleteRedirect(ctx.AppDB(), id, ctx.CurrentProject())
 	if err != nil {
 		return nil, err
 	}
-	if err := dbDeleteRedirect(ctx.AppDB(), id); err != nil {
-		return nil, err
-	}
+	hitLastEmit.Delete(existing.ID)
 	maybeUnwireHostname(ctx, existing.Hostname, existing.ProjectID)
 	emitRuleChange(ctx, "rule.removed", existing)
 	return map[string]any{"removed": true}, nil
@@ -148,17 +141,18 @@ func (a *App) toolRedirectRemove(ctx *sdk.AppCtx, args map[string]any) (any, err
 
 func (a *App) toolRedirectList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	hostname := strArg(args, "hostname")
-	project := strArg(args, "project_id")
-	if project == "" {
-		project = projectFromArgs(args)
-	}
-	limit := intArg(args, "limit", 100)
+	project := ctx.CurrentProject()
+	limit := intArg(args, "limit", 50)
 	offset := intArg(args, "offset", 0)
 	rows, err := dbListRedirects(ctx.AppDB(), hostname, project, limit, offset)
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"redirects": rows, "count": len(rows)}, nil
+	total, err := dbCountRedirects(ctx.AppDB(), hostname, project)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"redirects": rows, "count": len(rows), "total": total, "limit": limit, "offset": offset}, nil
 }
 
 func (a *App) toolRedirectGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -166,7 +160,7 @@ func (a *App) toolRedirectGet(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	if id == 0 {
 		return nil, errors.New("id required")
 	}
-	r, err := dbGetRedirect(ctx.AppDB(), id)
+	r, err := dbGetRedirect(ctx.AppDB(), id, ctx.CurrentProject())
 	if err != nil {
 		return nil, err
 	}
@@ -183,7 +177,7 @@ func (a *App) toolRedirectTest(ctx *sdk.AppCtx, args map[string]any) (any, error
 		path = "/"
 	}
 	query := strArg(args, "query")
-	rule, err := matchRedirect(ctx.AppDB(), host, path)
+	rule, err := matchRedirectInProject(ctx.AppDB(), host, path, ctx.CurrentProject())
 	if err != nil {
 		return nil, err
 	}
@@ -209,7 +203,6 @@ func inputFromArgs(args map[string]any) RedirectInput {
 		MatchMode:   strArg(args, "match"),
 		Destination: strArg(args, "destination"),
 		StatusCode:  intArg(args, "status_code", 0),
-		ProjectID:   strArg(args, "project_id"),
 		Notes:       strArg(args, "notes"),
 	}
 	// preserve_path: default false; agent must opt in.
@@ -223,6 +216,43 @@ func inputFromArgs(args map[string]any) RedirectInput {
 		in.PreserveQuery = true
 	}
 	return in
+}
+
+func patchFromArgs(args map[string]any) RedirectPatch {
+	return RedirectPatch{
+		Hostname: stringPtrArg(args, "hostname"), Path: stringPtrArg(args, "path"),
+		MatchMode: stringPtrArg(args, "match"), Destination: stringPtrArg(args, "destination"),
+		StatusCode: intPtrArg(args, "status_code"), PreservePath: boolPtrArg(args, "preserve_path"),
+		PreserveQuery: boolPtrArg(args, "preserve_query"), Notes: stringPtrArg(args, "notes"),
+	}
+}
+
+func stringPtrArg(args map[string]any, key string) *string {
+	v, ok := args[key]
+	if !ok {
+		return nil
+	}
+	s, ok := v.(string)
+	if !ok {
+		return nil
+	}
+	return &s
+}
+
+func intPtrArg(args map[string]any, key string) *int {
+	if _, ok := args[key]; !ok {
+		return nil
+	}
+	v := intArg(args, key, 0)
+	return &v
+}
+
+func boolPtrArg(args map[string]any, key string) *bool {
+	set, value := boolArg(args, key)
+	if !set {
+		return nil
+	}
+	return &value
 }
 
 func strArg(args map[string]any, key string) string {
@@ -260,23 +290,11 @@ func boolArg(args map[string]any, key string) (bool, bool) {
 	return false, false
 }
 
-// projectFromArgs handles the global-scope case where the agent passes
-// _project_id explicitly. For project-scoped installs the platform
-// injects APTEVA_PROJECT_ID; we honour that first.
-func projectFromArgs(args map[string]any) string {
-	if v := os.Getenv("APTEVA_PROJECT_ID"); v != "" {
-		return v
-	}
-	if v, ok := args["_project_id"].(string); ok && v != "" {
-		return v
-	}
-	return ""
-}
-
 func schemaObject(props map[string]any, required []string) map[string]any {
 	out := map[string]any{
-		"type":       "object",
-		"properties": props,
+		"type":                 "object",
+		"properties":           props,
+		"additionalProperties": false,
 	}
 	if len(required) > 0 {
 		out["required"] = required

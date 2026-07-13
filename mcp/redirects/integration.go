@@ -23,7 +23,7 @@ func emitRuleChange(ctx *sdk.AppCtx, topic string, rule *Redirect) {
 	if ctx == nil || rule == nil {
 		return
 	}
-	ctx.Emit(topic, map[string]any{"redirect": rule})
+	ctx.EmitWithProject(topic, rule.ProjectID, map[string]any{"redirect": rule})
 }
 
 // emitHit publishes a "rule.hit" event. Payload is minimal — id and
@@ -34,7 +34,7 @@ func emitHit(ctx *sdk.AppCtx, rule *Redirect) {
 	if ctx == nil || rule == nil {
 		return
 	}
-	ctx.Emit("rule.hit", map[string]any{
+	ctx.EmitWithProject("rule.hit", rule.ProjectID, map[string]any{
 		"id":       rule.ID,
 		"hostname": rule.Hostname,
 		"path":     rule.Path,
@@ -110,24 +110,16 @@ func wireHostname(ctx *sdk.AppCtx, projectID, hostname string) string {
 }
 
 // maybeUnwireHostname unexposes ingress when no rules remain for
-// this hostname (within the same project_id). We never delete DNS —
+// this globally unique hostname. We never delete DNS —
 // records may be shared with other services on the same hostname.
-func maybeUnwireHostname(ctx *sdk.AppCtx, hostname, projectID string) {
-	remaining, err := dbListRedirects(ctx.AppDB(), hostname, projectID, 1, 0)
+func maybeUnwireHostname(ctx *sdk.AppCtx, hostname, _ string) {
+	remaining, err := dbCountHostRules(ctx.AppDB(), hostname)
 	if err != nil {
 		ctx.Logger().Warn("maybeUnwireHostname.list", "host", hostname, "err", err.Error())
 		return
 	}
-	if len(remaining) > 0 {
+	if remaining > 0 {
 		return
-	}
-	// Also check global scope — if we're project-scoped, the same
-	// hostname might still have install-level rules.
-	if projectID != "" {
-		globalRemaining, _ := dbListRedirects(ctx.AppDB(), hostname, "", 1, 0)
-		if len(globalRemaining) > 0 {
-			return
-		}
 	}
 	if err := unregisterRoute(ctx, hostname); err != nil {
 		ctx.Logger().Info("maybeUnwireHostname.unexpose", "host", hostname, "err", err.Error())
@@ -142,19 +134,19 @@ func reconcileRegisteredRoutes(ctx *sdk.AppCtx) {
 	if ctx == nil || ctx.AppDB() == nil {
 		return
 	}
-	hosts, err := dbDistinctHostnames(ctx.AppDB(), "")
+	claims, err := dbListHostClaims(ctx.AppDB())
 	if err != nil {
 		ctx.Logger().Warn("redirects ingress reconcile list failed", "err", err.Error())
 		return
 	}
-	if len(hosts) == 0 {
+	if len(claims) == 0 {
 		return
 	}
 	var refreshed, failed int
-	for _, host := range hosts {
-		if err := registerRoute(ctx, "", host); err != nil {
+	for _, claim := range claims {
+		if err := registerRoute(ctx, claim.ProjectID, claim.Hostname); err != nil {
 			failed++
-			ctx.Logger().Warn("redirects ingress reconcile failed", "host", host, "err", err.Error())
+			ctx.Logger().Warn("redirects ingress reconcile failed", "host", claim.Hostname, "project_id", claim.ProjectID, "err", err.Error())
 			continue
 		}
 		refreshed++
@@ -171,6 +163,7 @@ func registerRoute(ctx *sdk.AppCtx, projectID, hostname string) error {
 	if projectID == "" {
 		projectID = strings.TrimSpace(os.Getenv("APTEVA_PROJECT_ID"))
 	}
+	hostname = normaliseHostname(hostname)
 	_, err := ctx.PlatformAPI().ExposeIngress(sdk.IngressExposeRequest{
 		Hostname:  hostname,
 		Target:    sidecarTarget(),
@@ -276,12 +269,6 @@ func maybeUpsertDNS(ctx *sdk.AppCtx, projectID, hostname string) error {
 		return errors.New("public host unavailable; set redirects public_host, APTEVA_PUBLIC_HOST, APTEVA_PUBLIC_URL, or platform public URL")
 	}
 	recordType := inferRecordType(target)
-	if recordType == "A" {
-		ip := net.ParseIP(target)
-		if ip == nil || ip.To4() == nil {
-			return errors.New("IPv6 DNS targets are not supported yet; use a hostname target")
-		}
-	}
 	if recordType == "CNAME" && sub == "@" {
 		return errors.New("apex CNAME isn't allowed; set public_host to an IP or use a subdomain")
 	}
@@ -358,6 +345,9 @@ func normalizeDNSTarget(raw string) string {
 	if raw == "" {
 		return ""
 	}
+	if ip := net.ParseIP(strings.Trim(raw, "[]")); ip != nil {
+		return ip.String()
+	}
 	if u, err := url.Parse(raw); err == nil && u.Hostname() != "" {
 		raw = u.Hostname()
 	} else {
@@ -372,7 +362,10 @@ func normalizeDNSTarget(raw string) string {
 }
 
 func inferRecordType(target string) string {
-	if net.ParseIP(target) != nil {
+	if ip := net.ParseIP(target); ip != nil {
+		if ip.To4() == nil {
+			return "AAAA"
+		}
 		return "A"
 	}
 	return "CNAME"

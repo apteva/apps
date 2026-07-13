@@ -54,13 +54,63 @@ func (a *App) handleRedirectItem(w http.ResponseWriter, r *http.Request) {
 // apexes does it manage." Returns {domains_available, domains} plus
 // the public host/IP the DNS record would point at.
 func (a *App) handleMeta(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		httpErr(w, http.StatusMethodNotAllowed, "GET")
+		return
+	}
 	pid := projectFromRequest(r)
 	names := domainsList(globalCtx, pid)
+	ingress := map[string]string{}
+	if globalCtx != nil && globalCtx.PlatformAPI() != nil {
+		if routes, err := globalCtx.PlatformAPI().ListIngressRoutes(); err == nil {
+			for _, route := range routes {
+				if route.ProjectID == pid || route.ProjectID == "" {
+					status := route.Status
+					if status == "" {
+						status = "active"
+					}
+					ingress[normaliseHostname(route.Hostname)] = status
+				}
+			}
+		}
+	}
 	httpJSON(w, map[string]any{
 		"domains_available": len(names) > 0,
 		"domains":           names,
 		"public_host":       platformPublicHost(),
+		"ingress":           ingress,
 	})
+}
+
+func (a *App) handleRedirectTest(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		httpErr(w, http.StatusMethodNotAllowed, "POST")
+		return
+	}
+	var body struct {
+		Hostname string `json:"hostname"`
+		Path     string `json:"path"`
+		Query    string `json:"query"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		httpErr(w, http.StatusBadRequest, "invalid json: "+err.Error())
+		return
+	}
+	host := normaliseHostname(body.Hostname)
+	if err := validateHostname(host); err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	rule, err := matchRedirectInProject(globalCtx.AppDB(), host, body.Path, projectFromRequest(r))
+	if err != nil {
+		httpErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if rule == nil {
+		httpJSON(w, map[string]any{"matched": false})
+		return
+	}
+	httpJSON(w, map[string]any{"matched": true, "redirect": rule, "location": applyRule(rule, body.Path, body.Query), "status_code": rule.StatusCode})
 }
 
 // ─── REST handlers ─────────────────────────────────────────────────
@@ -70,29 +120,39 @@ func (a *App) httpListRedirects(w http.ResponseWriter, r *http.Request) {
 	project := projectFromRequest(r)
 	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
 	offset, _ := strconv.Atoi(r.URL.Query().Get("offset"))
+	if limit <= 0 || limit > 250 {
+		limit = 50
+	}
+	if offset < 0 {
+		offset = 0
+	}
 	rows, err := dbListRedirects(globalCtx.AppDB(), hostname, project, limit, offset)
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	httpJSON(w, map[string]any{"redirects": rows, "count": len(rows)})
+	total, err := dbCountRedirects(globalCtx.AppDB(), hostname, project)
+	if err != nil {
+		httpErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	httpJSON(w, map[string]any{"redirects": rows, "count": len(rows), "total": total, "limit": limit, "offset": offset})
 }
 
 func (a *App) httpCreateRedirect(w http.ResponseWriter, r *http.Request) {
-	var body redirectBody
+	var body redirectCreateBody
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		httpErr(w, http.StatusBadRequest, "invalid json: "+err.Error())
 		return
 	}
-	in := body.toInput()
-	if in.ProjectID == "" {
-		in.ProjectID = projectFromRequest(r)
-	}
+	in := body.toInput(projectFromRequest(r))
 	rule, err := dbInsertRedirect(globalCtx.AppDB(), in)
 	if err != nil {
 		switch {
 		case errors.Is(err, ErrConflict):
 			httpErr(w, http.StatusConflict, "conflict: a redirect already exists at this hostname+path+match")
+		case errors.Is(err, ErrHostnameOwned):
+			httpErr(w, http.StatusConflict, err.Error())
 		default:
 			httpErr(w, http.StatusBadRequest, err.Error())
 		}
@@ -107,7 +167,7 @@ func (a *App) httpCreateRedirect(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) httpGetRedirect(w http.ResponseWriter, r *http.Request, id int64) {
-	rule, err := dbGetRedirect(globalCtx.AppDB(), id)
+	rule, err := dbGetRedirect(globalCtx.AppDB(), id, projectFromRequest(r))
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
 			httpErr(w, http.StatusNotFound, "redirect not found")
@@ -120,12 +180,13 @@ func (a *App) httpGetRedirect(w http.ResponseWriter, r *http.Request, id int64) 
 }
 
 func (a *App) httpUpdateRedirect(w http.ResponseWriter, r *http.Request, id int64) {
-	var body redirectBody
+	var body redirectPatchBody
 	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
 		httpErr(w, http.StatusBadRequest, "invalid json: "+err.Error())
 		return
 	}
-	existing, err := dbGetRedirect(globalCtx.AppDB(), id)
+	projectID := projectFromRequest(r)
+	existing, err := dbGetRedirect(globalCtx.AppDB(), id, projectID)
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
 			httpErr(w, http.StatusNotFound, "redirect not found")
@@ -134,14 +195,15 @@ func (a *App) httpUpdateRedirect(w http.ResponseWriter, r *http.Request, id int6
 		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	in := body.toInput()
-	rule, err := dbUpdateRedirect(globalCtx.AppDB(), id, in)
+	rule, err := dbUpdateRedirect(globalCtx.AppDB(), id, projectID, body.toPatch())
 	if err != nil {
 		switch {
 		case errors.Is(err, ErrNotFound):
 			httpErr(w, http.StatusNotFound, "redirect not found")
 		case errors.Is(err, ErrConflict):
 			httpErr(w, http.StatusConflict, "conflict: a redirect already exists at this hostname+path+match")
+		case errors.Is(err, ErrHostnameOwned):
+			httpErr(w, http.StatusConflict, err.Error())
 		default:
 			httpErr(w, http.StatusBadRequest, err.Error())
 		}
@@ -158,19 +220,17 @@ func (a *App) httpUpdateRedirect(w http.ResponseWriter, r *http.Request, id int6
 func (a *App) httpDeleteRedirect(w http.ResponseWriter, r *http.Request, id int64) {
 	// Fetch first so we know which hostname we're touching (needed to
 	// decide whether the route should be unregistered).
-	existing, err := dbGetRedirect(globalCtx.AppDB(), id)
+	projectID := projectFromRequest(r)
+	existing, err := dbDeleteRedirect(globalCtx.AppDB(), id, projectID)
 	if err != nil {
 		if errors.Is(err, ErrNotFound) {
 			httpErr(w, http.StatusNotFound, "redirect not found")
-			return
+		} else {
+			httpErr(w, http.StatusInternalServerError, err.Error())
 		}
-		httpErr(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	if err := dbDeleteRedirect(globalCtx.AppDB(), id); err != nil {
-		httpErr(w, http.StatusInternalServerError, err.Error())
-		return
-	}
+	hitLastEmit.Delete(existing.ID)
 	maybeUnwireHostname(globalCtx, existing.Hostname, existing.ProjectID)
 	emitRuleChange(globalCtx, "rule.removed", existing)
 	httpJSON(w, map[string]any{"removed": true})
@@ -200,18 +260,9 @@ func (a *App) handlePublicRedirect(w http.ResponseWriter, r *http.Request) {
 	}
 	target := applyRule(rule, r.URL.Path, r.URL.RawQuery)
 
-	// Async hit counter + bus emit — never let a counter failure block
-	// the redirect itself. The emit is throttled to at most one per
-	// rule per second so a hammered link can't fill the platform's
-	// 256-event ring buffer and starve other apps' subscribers.
-	go func(rule *Redirect) {
-		if err := dbRecordHit(globalCtx.AppDB(), rule.ID); err != nil {
-			globalCtx.Logger().Info("record hit", "id", rule.ID, "err", err.Error())
-		}
-		if shouldEmitHit(rule.ID) {
-			emitHit(globalCtx, rule)
-		}
-	}(rule)
+	// Bounded, batched analytics: redirect latency never waits on SQLite
+	// and traffic spikes cannot create an unbounded goroutine backlog.
+	a.enqueueHit(globalCtx, rule)
 
 	w.Header().Set("Location", target)
 	w.Header().Set("Cache-Control", "no-store")
@@ -220,24 +271,22 @@ func (a *App) handlePublicRedirect(w http.ResponseWriter, r *http.Request) {
 
 // ─── request-body shape ────────────────────────────────────────────
 
-// redirectBody is the JSON shape for both POST and PUT. Pointer types
-// would have let PUT distinguish "leave field" vs "set empty" cleanly
-// — but in practice all the fields here have safe "zero means absent"
-// semantics (a status_code of 0 isn't valid; an empty hostname isn't
-// valid), so plain values keep the body shape simple.
-type redirectBody struct {
+type redirectCreateBody struct {
 	Hostname      string `json:"hostname"`
 	Path          string `json:"path"`
 	MatchMode     string `json:"match_mode"`
 	Destination   string `json:"destination"`
 	StatusCode    int    `json:"status_code"`
 	PreservePath  bool   `json:"preserve_path"`
-	PreserveQuery bool   `json:"preserve_query"`
-	ProjectID     string `json:"project_id"`
+	PreserveQuery *bool  `json:"preserve_query"`
 	Notes         string `json:"notes"`
 }
 
-func (b redirectBody) toInput() RedirectInput {
+func (b redirectCreateBody) toInput(projectID string) RedirectInput {
+	preserveQuery := true
+	if b.PreserveQuery != nil {
+		preserveQuery = *b.PreserveQuery
+	}
 	return RedirectInput{
 		Hostname:      b.Hostname,
 		Path:          b.Path,
@@ -245,9 +294,28 @@ func (b redirectBody) toInput() RedirectInput {
 		Destination:   b.Destination,
 		StatusCode:    b.StatusCode,
 		PreservePath:  b.PreservePath,
-		PreserveQuery: b.PreserveQuery,
-		ProjectID:     b.ProjectID,
+		PreserveQuery: preserveQuery,
+		ProjectID:     projectID,
 		Notes:         b.Notes,
+	}
+}
+
+type redirectPatchBody struct {
+	Hostname      *string `json:"hostname"`
+	Path          *string `json:"path"`
+	MatchMode     *string `json:"match_mode"`
+	Destination   *string `json:"destination"`
+	StatusCode    *int    `json:"status_code"`
+	PreservePath  *bool   `json:"preserve_path"`
+	PreserveQuery *bool   `json:"preserve_query"`
+	Notes         *string `json:"notes"`
+}
+
+func (b redirectPatchBody) toPatch() RedirectPatch {
+	return RedirectPatch{
+		Hostname: b.Hostname, Path: b.Path, MatchMode: b.MatchMode,
+		Destination: b.Destination, StatusCode: b.StatusCode,
+		PreservePath: b.PreservePath, PreserveQuery: b.PreserveQuery, Notes: b.Notes,
 	}
 }
 
@@ -271,17 +339,17 @@ func inboundHost(r *http.Request) string {
 }
 
 // projectFromRequest resolves the owning project_id for the request.
-// Order: APTEVA_PROJECT_ID env (set when scope=project) > ?project_id
-// query > X-Apteva-Project-ID header. Empty when scope=global with no
-// project supplied.
+// The proxy owns X-Apteva-Project-ID and strips client-supplied values.
+// Prefer it over the query string for global installs; direct local dev
+// can still use ?project_id when no trusted header is present.
 func projectFromRequest(r *http.Request) string {
 	if v := strings.TrimSpace(os.Getenv("APTEVA_PROJECT_ID")); v != "" {
 		return v
 	}
-	if v := r.URL.Query().Get("project_id"); v != "" {
+	if v := strings.TrimSpace(r.Header.Get("X-Apteva-Project-ID")); v != "" {
 		return v
 	}
-	if v := r.Header.Get("X-Apteva-Project-ID"); v != "" {
+	if v := strings.TrimSpace(r.URL.Query().Get("project_id")); v != "" {
 		return v
 	}
 	return ""

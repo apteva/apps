@@ -2,6 +2,7 @@ package main
 
 import (
 	"database/sql"
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -20,12 +21,18 @@ func freshDB(t *testing.T) *sql.DB {
 	}
 	t.Cleanup(func() { db.Close() })
 	wd, _ := os.Getwd()
-	schema, err := os.ReadFile(filepath.Join(wd, "migrations", "001_init.sql"))
+	migrations, err := filepath.Glob(filepath.Join(wd, "migrations", "*.sql"))
 	if err != nil {
-		t.Fatalf("read schema: %v", err)
+		t.Fatalf("list migrations: %v", err)
 	}
-	if _, err := db.Exec(string(schema)); err != nil {
-		t.Fatalf("apply schema: %v", err)
+	for _, migration := range migrations {
+		schema, err := os.ReadFile(migration)
+		if err != nil {
+			t.Fatalf("read migration %s: %v", migration, err)
+		}
+		if _, err := db.Exec(string(schema)); err != nil {
+			t.Fatalf("apply migration %s: %v", migration, err)
+		}
 	}
 	return db
 }
@@ -164,7 +171,7 @@ func TestMatch_PrefixBoundary(t *testing.T) {
 func TestApplyRule_PreservePath(t *testing.T) {
 	r := &Redirect{
 		Path: "/blog", MatchMode: "prefix",
-		Destination: "https://new.example.com/posts",
+		Destination:  "https://new.example.com/posts",
 		PreservePath: true, PreserveQuery: false,
 	}
 	got := applyRule(r, "/blog/2026/welcome", "")
@@ -177,7 +184,7 @@ func TestApplyRule_PreservePath(t *testing.T) {
 func TestApplyRule_PreserveQuery(t *testing.T) {
 	r := &Redirect{
 		Path: "/promo", MatchMode: "exact",
-		Destination: "https://example.com/landing?campaign=spring",
+		Destination:   "https://example.com/landing?campaign=spring",
 		PreserveQuery: true,
 	}
 	got := applyRule(r, "/promo", "src=email&campaign=summer")
@@ -197,6 +204,137 @@ func TestApplyRule_NoOpWhenFlagsOff(t *testing.T) {
 	got := applyRule(r, "/promo", "src=email")
 	if got != "https://example.com/landing" {
 		t.Fatalf("flags off should yield bare destination; got %q", got)
+	}
+}
+
+func TestUpdate_PreservesOmittedBooleansAndClearsNotes(t *testing.T) {
+	db := freshDB(t)
+	rule := mustInsert(t, db, RedirectInput{
+		Hostname: "go.example.com", Destination: "https://example.com/old",
+		MatchMode: "prefix", PreservePath: true, PreserveQuery: false,
+		ProjectID: "project-a", Notes: "remove me",
+	})
+	destination := "https://example.com/new"
+	emptyNotes := ""
+	updated, err := dbUpdateRedirect(db, rule.ID, "project-a", RedirectPatch{
+		Destination: &destination,
+		Notes:       &emptyNotes,
+	})
+	if err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	if !updated.PreservePath || updated.PreserveQuery {
+		t.Fatalf("omitted booleans changed: %+v", updated)
+	}
+	if updated.Notes != "" {
+		t.Fatalf("notes were not cleared: %q", updated.Notes)
+	}
+}
+
+func TestUpdate_NormalisesHostnameAndPath(t *testing.T) {
+	db := freshDB(t)
+	rule := mustInsert(t, db, RedirectInput{
+		Hostname: "go.example.com", Destination: "https://example.com", ProjectID: "project-a",
+	})
+	hostname := "GO2.Example.COM."
+	path := "promo/"
+	updated, err := dbUpdateRedirect(db, rule.ID, "project-a", RedirectPatch{Hostname: &hostname, Path: &path})
+	if err != nil {
+		t.Fatalf("update: %v", err)
+	}
+	if updated.Hostname != "go2.example.com" || updated.Path != "/promo/" {
+		t.Fatalf("not normalised: %+v", updated)
+	}
+	matched, err := matchRedirectInProject(db, "GO2.EXAMPLE.COM", "/promo/", "project-a")
+	if err != nil || matched == nil || matched.ID != rule.ID {
+		t.Fatalf("updated rule did not match: rule=%+v err=%v", matched, err)
+	}
+}
+
+func TestHostnameClaim_PreventsCrossProjectOwnership(t *testing.T) {
+	db := freshDB(t)
+	mustInsert(t, db, RedirectInput{
+		Hostname: "Go.Example.com.", Path: "/a", Destination: "https://example.com/a", ProjectID: "project-a",
+	})
+	_, err := dbInsertRedirect(db, RedirectInput{
+		Hostname: "go.example.com", Path: "/b", Destination: "https://example.com/b", ProjectID: "project-b",
+	})
+	if !errors.Is(err, ErrHostnameOwned) {
+		t.Fatalf("expected ErrHostnameOwned, got %v", err)
+	}
+}
+
+func TestScopedItemOperationsRejectOtherProject(t *testing.T) {
+	db := freshDB(t)
+	rule := mustInsert(t, db, RedirectInput{
+		Hostname: "go.example.com", Destination: "https://example.com", ProjectID: "project-b",
+	})
+	if _, err := dbGetRedirect(db, rule.ID, "project-a"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("cross-project get: %v", err)
+	}
+	if _, err := dbDeleteRedirect(db, rule.ID, "project-a"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("cross-project delete: %v", err)
+	}
+	if _, err := dbGetRedirect(db, rule.ID, "project-b"); err != nil {
+		t.Fatalf("owner rule disappeared: %v", err)
+	}
+}
+
+func TestExactMatch_PreservesTrailingSlash(t *testing.T) {
+	db := freshDB(t)
+	mustInsert(t, db, RedirectInput{
+		Hostname: "go.example.com", Path: "/promo/", Destination: "https://example.com/slash", ProjectID: "project-a",
+	})
+	if rule, _ := matchRedirectInProject(db, "go.example.com", "/promo", "project-a"); rule != nil {
+		t.Fatalf("/promo unexpectedly matched trailing-slash exact rule")
+	}
+	if rule, _ := matchRedirectInProject(db, "go.example.com", "/promo/", "project-a"); rule == nil {
+		t.Fatalf("/promo/ did not match")
+	}
+}
+
+func TestRecordHits_BatchesCounts(t *testing.T) {
+	db := freshDB(t)
+	rule := mustInsert(t, db, RedirectInput{Hostname: "go.example.com", Destination: "https://example.com"})
+	if err := dbRecordHits(db, map[int64]int64{rule.ID: 7}); err != nil {
+		t.Fatalf("record hits: %v", err)
+	}
+	got, err := dbGetRedirect(db, rule.ID, "")
+	if err != nil || got.Hits != 7 || got.LastHitAt == "" {
+		t.Fatalf("hits=%+v err=%v", got, err)
+	}
+}
+
+func TestHostnameClaimMigrationMakesLegacyDuplicatesDeterministic(t *testing.T) {
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer db.Close()
+	for _, name := range []string{"001_init.sql"} {
+		body, err := os.ReadFile(filepath.Join("migrations", name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(string(body)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, row := range []struct{ project, destination string }{{"project-a", "https://a.example"}, {"project-b", "https://b.example"}} {
+		if _, err := db.Exec(`INSERT INTO redirects (hostname,path,match_mode,destination,status_code,project_id) VALUES ('go.example.com','/','exact',?,302,?)`, row.destination, row.project); err != nil {
+			t.Fatal(err)
+		}
+	}
+	body, err := os.ReadFile(filepath.Join("migrations", "002_hostname_claims.sql"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(string(body)); err != nil {
+		t.Fatal(err)
+	}
+	rule, err := matchRedirect(db, "go.example.com", "/")
+	if err != nil || rule == nil || rule.ProjectID != "project-a" {
+		t.Fatalf("rule=%+v err=%v", rule, err)
 	}
 }
 

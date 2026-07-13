@@ -10,12 +10,11 @@ import (
 	"time"
 )
 
-// Redirect is the on-the-wire shape of a row in the redirects table.
 type Redirect struct {
 	ID            int64  `json:"id"`
 	Hostname      string `json:"hostname"`
 	Path          string `json:"path"`
-	MatchMode     string `json:"match_mode"` // "exact" | "prefix"
+	MatchMode     string `json:"match_mode"`
 	Destination   string `json:"destination"`
 	StatusCode    int    `json:"status_code"`
 	PreservePath  bool   `json:"preserve_path"`
@@ -28,9 +27,6 @@ type Redirect struct {
 	UpdatedAt     string `json:"updated_at,omitempty"`
 }
 
-// RedirectInput is the canonical write shape, shared by add/update.
-// Pointer fields on update let the handler distinguish "leave alone"
-// from "set to zero value."
 type RedirectInput struct {
 	Hostname      string
 	Path          string
@@ -43,37 +39,72 @@ type RedirectInput struct {
 	Notes         string
 }
 
-// ─── Validation ───────────────────────────────────────────────────
+// RedirectPatch preserves the distinction between an omitted field and an
+// explicit zero value. This is essential for booleans and for clearing notes.
+type RedirectPatch struct {
+	Hostname      *string
+	Path          *string
+	MatchMode     *string
+	Destination   *string
+	StatusCode    *int
+	PreservePath  *bool
+	PreserveQuery *bool
+	Notes         *string
+}
+
+type HostClaim struct {
+	Hostname  string
+	ProjectID string
+}
+
+var (
+	ErrConflict      = errors.New("a redirect already exists at this hostname+path+match")
+	ErrNotFound      = errors.New("redirect not found")
+	ErrHostnameOwned = errors.New("hostname is already owned by another project")
+)
+
+func normaliseHostname(h string) string {
+	return strings.ToLower(strings.TrimRight(strings.TrimSpace(h), "."))
+}
 
 func validateHostname(h string) error {
 	if h == "" {
 		return errors.New("hostname required")
 	}
-	if strings.ContainsAny(h, " \t\r\n") {
-		return errors.New("hostname must not contain whitespace")
-	}
-	if strings.Contains(h, "://") {
-		return errors.New("hostname must not include a scheme")
-	}
-	if strings.ContainsAny(h, "/?#") {
-		return errors.New("hostname must not include a path, query, or fragment")
-	}
-	if strings.Contains(h, ":") {
-		return errors.New("hostname must not include a port")
-	}
 	if len(h) > 253 {
 		return errors.New("hostname too long (>253 chars)")
+	}
+	if strings.Contains(h, "://") || strings.ContainsAny(h, "/?#[]@ :\t\r\n") {
+		return errors.New("hostname must be a DNS name without scheme, port, path, credentials, or whitespace")
+	}
+	labels := strings.Split(h, ".")
+	if len(labels) < 2 {
+		return errors.New("hostname must be a fully-qualified domain name")
+	}
+	for _, label := range labels {
+		if label == "" || len(label) > 63 || strings.HasPrefix(label, "-") || strings.HasSuffix(label, "-") {
+			return fmt.Errorf("invalid hostname label %q", label)
+		}
+		for _, r := range label {
+			if !((r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') || r == '-') {
+				return fmt.Errorf("invalid hostname character %q", r)
+			}
+		}
 	}
 	return nil
 }
 
-// validateDestination wants a parseable absolute URL with http/https
-// scheme. We allow schemeless mailto:/tel: — common short-link uses.
 func validateDestination(d string) error {
 	if d == "" {
 		return errors.New("destination required")
 	}
+	if strings.ContainsAny(d, "\r\n\x00") {
+		return errors.New("destination must not contain control characters")
+	}
 	if strings.HasPrefix(d, "mailto:") || strings.HasPrefix(d, "tel:") {
+		if strings.TrimSpace(strings.SplitN(d, ":", 2)[1]) == "" {
+			return errors.New("mailto/tel destination must include a value")
+		}
 		return nil
 	}
 	u, err := url.Parse(d)
@@ -93,38 +124,38 @@ func validateStatusCode(c int) error {
 	switch c {
 	case 301, 302, 307, 308:
 		return nil
+	default:
+		return fmt.Errorf("status_code must be 301, 302, 307, or 308 (got %d)", c)
 	}
-	return fmt.Errorf("status_code must be 301, 302, 307, or 308 (got %d)", c)
 }
 
 func validateMatchMode(m string) error {
-	switch m {
-	case "exact", "prefix":
-		return nil
+	if m != "exact" && m != "prefix" {
+		return fmt.Errorf("match must be 'exact' or 'prefix' (got %q)", m)
 	}
-	return fmt.Errorf("match must be 'exact' or 'prefix' (got %q)", m)
+	return nil
 }
 
-// normalisePath ensures every stored path starts with '/' and has no
-// trailing slash unless it's the root. Keeps matching predictable.
 func normalisePath(p string) string {
 	p = strings.TrimSpace(p)
-	if p == "" || p == "/" {
+	if p == "" {
 		return "/"
 	}
 	if !strings.HasPrefix(p, "/") {
 		p = "/" + p
 	}
-	for strings.HasSuffix(p, "/") && len(p) > 1 {
-		p = strings.TrimSuffix(p, "/")
-	}
 	return p
 }
 
-func defaultInput(in *RedirectInput) {
-	if in.Path == "" {
-		in.Path = "/"
+func validatePath(p string) error {
+	if strings.ContainsAny(p, "?#\r\n\x00") {
+		return errors.New("path must not contain a query, fragment, or control characters")
 	}
+	return nil
+}
+
+func defaultInput(in *RedirectInput) {
+	in.Hostname = normaliseHostname(in.Hostname)
 	in.Path = normalisePath(in.Path)
 	if in.MatchMode == "" {
 		in.MatchMode = "exact"
@@ -136,6 +167,9 @@ func defaultInput(in *RedirectInput) {
 
 func validateInput(in RedirectInput) error {
 	if err := validateHostname(in.Hostname); err != nil {
+		return err
+	}
+	if err := validatePath(in.Path); err != nil {
 		return err
 	}
 	if err := validateDestination(in.Destination); err != nil {
@@ -150,18 +184,17 @@ func validateInput(in RedirectInput) error {
 	if in.PreservePath && in.MatchMode != "prefix" {
 		return errors.New("preserve_path requires match='prefix'")
 	}
+	if in.PreservePath && (strings.HasPrefix(in.Destination, "mailto:") || strings.HasPrefix(in.Destination, "tel:")) {
+		return errors.New("preserve_path requires an http or https destination")
+	}
 	return nil
 }
-
-// ─── DB ops ────────────────────────────────────────────────────────
 
 const redirectCols = `id, hostname, path, match_mode, destination, status_code,
 		preserve_path, preserve_query, project_id, notes, hits, last_hit_at,
 		created_at, updated_at`
 
-type rowScanner interface {
-	Scan(dest ...any) error
-}
+type rowScanner interface{ Scan(dest ...any) error }
 
 func scanRedirect(s rowScanner) (*Redirect, error) {
 	var r Redirect
@@ -174,6 +207,7 @@ func scanRedirect(s rowScanner) (*Redirect, error) {
 	); err != nil {
 		return nil, err
 	}
+	r.Hostname = normaliseHostname(r.Hostname)
 	r.PreservePath = preservePath != 0
 	r.PreserveQuery = preserveQuery != 0
 	if lastHit.Valid {
@@ -182,118 +216,201 @@ func scanRedirect(s rowScanner) (*Redirect, error) {
 	return &r, nil
 }
 
-// ErrConflict — a rule already exists at this (hostname, path, match)
-// for the same project. The tool layer maps this to 409.
-var ErrConflict = errors.New("a redirect already exists at this hostname+path+match")
+func claimHostname(tx *sql.Tx, hostname, projectID string) error {
+	if _, err := tx.Exec(`INSERT OR IGNORE INTO redirect_hosts (hostname, project_id) VALUES (?, ?)`, hostname, projectID); err != nil {
+		return err
+	}
+	var owner string
+	if err := tx.QueryRow(`SELECT project_id FROM redirect_hosts WHERE hostname=?`, hostname).Scan(&owner); err != nil {
+		return err
+	}
+	if owner != projectID {
+		return fmt.Errorf("%w: %s belongs to project %q", ErrHostnameOwned, hostname, owner)
+	}
+	return nil
+}
 
-// ErrNotFound — the row asked for doesn't exist.
-var ErrNotFound = errors.New("redirect not found")
+func semanticConflict(tx *sql.Tx, id int64, in RedirectInput) (bool, error) {
+	var found int
+	err := tx.QueryRow(`SELECT 1 FROM redirects
+		WHERE lower(rtrim(trim(hostname), '.'))=? AND path=? AND match_mode=? AND project_id=? AND id<>?
+		LIMIT 1`, in.Hostname, in.Path, in.MatchMode, in.ProjectID, id).Scan(&found)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	return err == nil, err
+}
 
 func dbInsertRedirect(db *sql.DB, in RedirectInput) (*Redirect, error) {
 	defaultInput(&in)
 	if err := validateInput(in); err != nil {
 		return nil, err
 	}
+	tx, err := db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	if err := claimHostname(tx, in.Hostname, in.ProjectID); err != nil {
+		return nil, err
+	}
+	if conflict, err := semanticConflict(tx, 0, in); err != nil {
+		return nil, err
+	} else if conflict {
+		return nil, ErrConflict
+	}
 	now := time.Now().UTC().Format(time.RFC3339)
-	res, err := db.Exec(`INSERT INTO redirects
-		(hostname, path, match_mode, destination, status_code,
-		 preserve_path, preserve_query, project_id, notes,
-		 created_at, updated_at)
+	res, err := tx.Exec(`INSERT INTO redirects
+		(hostname, path, match_mode, destination, status_code, preserve_path,
+		 preserve_query, project_id, notes, created_at, updated_at)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		in.Hostname, in.Path, in.MatchMode, in.Destination, in.StatusCode,
-		boolInt(in.PreservePath), boolInt(in.PreserveQuery), in.ProjectID, in.Notes,
-		now, now)
+		boolInt(in.PreservePath), boolInt(in.PreserveQuery), in.ProjectID, in.Notes, now, now)
 	if err != nil {
-		// SQLite returns a UNIQUE constraint error string we surface as
-		// a clean conflict — saves the caller from sniffing the message.
 		if strings.Contains(err.Error(), "UNIQUE") {
 			return nil, ErrConflict
 		}
 		return nil, err
 	}
-	id, _ := res.LastInsertId()
-	return dbGetRedirect(db, id)
-}
-
-func dbUpdateRedirect(db *sql.DB, id int64, in RedirectInput) (*Redirect, error) {
-	existing, err := dbGetRedirect(db, id)
+	id, err := res.LastInsertId()
 	if err != nil {
 		return nil, err
 	}
-	// Merge: input fields override existing; empty strings on path/
-	// match_mode mean "leave alone." Status code 0 means leave alone.
-	merged := RedirectInput{
-		Hostname:      pickStr(in.Hostname, existing.Hostname),
-		Path:          pickStr(in.Path, existing.Path),
-		MatchMode:     pickStr(in.MatchMode, existing.MatchMode),
-		Destination:   pickStr(in.Destination, existing.Destination),
-		StatusCode:    pickInt(in.StatusCode, existing.StatusCode),
-		PreservePath:  in.PreservePath,
-		PreserveQuery: in.PreserveQuery,
-		ProjectID:     pickStr(in.ProjectID, existing.ProjectID),
-		Notes:         pickStr(in.Notes, existing.Notes),
+	if err := tx.Commit(); err != nil {
+		return nil, err
 	}
+	return dbGetRedirect(db, id, in.ProjectID)
+}
+
+func dbUpdateRedirect(db *sql.DB, id int64, projectID string, patch RedirectPatch) (*Redirect, error) {
+	existing, err := dbGetRedirect(db, id, projectID)
+	if err != nil {
+		return nil, err
+	}
+	merged := RedirectInput{
+		Hostname: existing.Hostname, Path: existing.Path, MatchMode: existing.MatchMode,
+		Destination: existing.Destination, StatusCode: existing.StatusCode,
+		PreservePath: existing.PreservePath, PreserveQuery: existing.PreserveQuery,
+		ProjectID: existing.ProjectID, Notes: existing.Notes,
+	}
+	if patch.Hostname != nil {
+		merged.Hostname = *patch.Hostname
+	}
+	if patch.Path != nil {
+		merged.Path = *patch.Path
+	}
+	if patch.MatchMode != nil {
+		merged.MatchMode = *patch.MatchMode
+	}
+	if patch.Destination != nil {
+		merged.Destination = *patch.Destination
+	}
+	if patch.StatusCode != nil {
+		merged.StatusCode = *patch.StatusCode
+	}
+	if patch.PreservePath != nil {
+		merged.PreservePath = *patch.PreservePath
+	}
+	if patch.PreserveQuery != nil {
+		merged.PreserveQuery = *patch.PreserveQuery
+	}
+	if patch.Notes != nil {
+		merged.Notes = *patch.Notes
+	}
+	merged.Hostname = normaliseHostname(merged.Hostname)
+	merged.Path = normalisePath(merged.Path)
 	if err := validateInput(merged); err != nil {
 		return nil, err
 	}
+	tx, err := db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	if err := claimHostname(tx, merged.Hostname, projectID); err != nil {
+		return nil, err
+	}
+	if conflict, err := semanticConflict(tx, id, merged); err != nil {
+		return nil, err
+	} else if conflict {
+		return nil, ErrConflict
+	}
 	now := time.Now().UTC().Format(time.RFC3339)
-	_, err = db.Exec(`UPDATE redirects
-		SET hostname = ?, path = ?, match_mode = ?, destination = ?, status_code = ?,
-		    preserve_path = ?, preserve_query = ?, project_id = ?, notes = ?,
-		    updated_at = ?
-		WHERE id = ?`,
-		merged.Hostname, merged.Path, merged.MatchMode, merged.Destination, merged.StatusCode,
-		boolInt(merged.PreservePath), boolInt(merged.PreserveQuery), merged.ProjectID, merged.Notes,
-		now, id)
+	res, err := tx.Exec(`UPDATE redirects SET hostname=?, path=?, match_mode=?, destination=?,
+		status_code=?, preserve_path=?, preserve_query=?, notes=?, updated_at=?
+		WHERE id=? AND project_id=?`, merged.Hostname, merged.Path, merged.MatchMode,
+		merged.Destination, merged.StatusCode, boolInt(merged.PreservePath),
+		boolInt(merged.PreserveQuery), merged.Notes, now, id, projectID)
 	if err != nil {
 		if strings.Contains(err.Error(), "UNIQUE") {
 			return nil, ErrConflict
 		}
 		return nil, err
 	}
-	return dbGetRedirect(db, id)
+	if n, _ := res.RowsAffected(); n == 0 {
+		return nil, ErrNotFound
+	}
+	if existing.Hostname != merged.Hostname {
+		if _, err := tx.Exec(`DELETE FROM redirect_hosts WHERE hostname=? AND project_id=?
+			AND NOT EXISTS (SELECT 1 FROM redirects WHERE lower(rtrim(trim(hostname), '.'))=? AND project_id=?)`,
+			existing.Hostname, projectID, existing.Hostname, projectID); err != nil {
+			return nil, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return dbGetRedirect(db, id, projectID)
 }
 
-func dbGetRedirect(db *sql.DB, id int64) (*Redirect, error) {
-	row := db.QueryRow(`SELECT `+redirectCols+` FROM redirects WHERE id = ?`, id)
-	r, err := scanRedirect(row)
+func dbGetRedirect(db *sql.DB, id int64, projectID string) (*Redirect, error) {
+	r, err := scanRedirect(db.QueryRow(`SELECT `+redirectCols+` FROM redirects WHERE id=? AND project_id=?`, id, projectID))
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, ErrNotFound
 	}
 	return r, err
 }
 
-func dbDeleteRedirect(db *sql.DB, id int64) error {
-	res, err := db.Exec(`DELETE FROM redirects WHERE id = ?`, id)
+func dbDeleteRedirect(db *sql.DB, id int64, projectID string) (*Redirect, error) {
+	existing, err := dbGetRedirect(db, id, projectID)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	n, _ := res.RowsAffected()
-	if n == 0 {
-		return ErrNotFound
+	tx, err := db.Begin()
+	if err != nil {
+		return nil, err
 	}
-	return nil
+	defer tx.Rollback()
+	res, err := tx.Exec(`DELETE FROM redirects WHERE id=? AND project_id=?`, id, projectID)
+	if err != nil {
+		return nil, err
+	}
+	if n, _ := res.RowsAffected(); n == 0 {
+		return nil, ErrNotFound
+	}
+	if _, err := tx.Exec(`DELETE FROM redirect_hosts WHERE hostname=? AND project_id=?
+		AND NOT EXISTS (SELECT 1 FROM redirects WHERE lower(rtrim(trim(hostname), '.'))=? AND project_id=?)`,
+		existing.Hostname, projectID, existing.Hostname, projectID); err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return existing, nil
 }
 
-// dbListRedirects supports optional filtering by hostname/project and
-// simple pagination. Sort by hostname then path so the panel can group
-// visually without client-side resorting.
 func dbListRedirects(db *sql.DB, hostname, projectID string, limit, offset int) ([]*Redirect, error) {
-	if limit <= 0 || limit > 1000 {
-		limit = 100
+	if limit <= 0 || limit > 250 {
+		limit = 50
 	}
 	if offset < 0 {
 		offset = 0
 	}
-	q := `SELECT ` + redirectCols + ` FROM redirects WHERE 1=1`
-	args := []any{}
+	q := `SELECT ` + redirectCols + ` FROM redirects WHERE project_id=?`
+	args := []any{projectID}
 	if hostname != "" {
-		q += ` AND hostname = ?`
-		args = append(args, hostname)
-	}
-	if projectID != "" {
-		q += ` AND project_id = ?`
-		args = append(args, projectID)
+		q += ` AND lower(rtrim(trim(hostname), '.'))=?`
+		args = append(args, normaliseHostname(hostname))
 	}
 	q += ` ORDER BY hostname ASC, length(path) DESC, path ASC LIMIT ? OFFSET ?`
 	args = append(args, limit, offset)
@@ -313,48 +430,65 @@ func dbListRedirects(db *sql.DB, hostname, projectID string, limit, offset int) 
 	return out, rows.Err()
 }
 
-// dbDistinctHostnames returns the set of hostnames that have at least
-// one rule, scoped to project_id when supplied. Used on redirect_remove
-// to decide whether the last rule for a hostname has just gone away so
-// we can unregister the route.
-func dbDistinctHostnames(db *sql.DB, projectID string) ([]string, error) {
-	q := `SELECT DISTINCT hostname FROM redirects`
-	args := []any{}
-	if projectID != "" {
-		q += ` WHERE project_id = ?`
-		args = append(args, projectID)
+func dbCountRedirects(db *sql.DB, hostname, projectID string) (int, error) {
+	q := `SELECT count(*) FROM redirects WHERE project_id=?`
+	args := []any{projectID}
+	if hostname != "" {
+		q += ` AND lower(rtrim(trim(hostname), '.'))=?`
+		args = append(args, normaliseHostname(hostname))
 	}
-	rows, err := db.Query(q, args...)
+	var n int
+	return n, db.QueryRow(q, args...).Scan(&n)
+}
+
+func dbCountHostRules(db *sql.DB, hostname string) (int, error) {
+	var n int
+	err := db.QueryRow(`SELECT count(*) FROM redirects WHERE lower(rtrim(trim(hostname), '.'))=?`, normaliseHostname(hostname)).Scan(&n)
+	return n, err
+}
+
+func dbListHostClaims(db *sql.DB) ([]HostClaim, error) {
+	rows, err := db.Query(`SELECT hostname, project_id FROM redirect_hosts ORDER BY hostname`)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
-	var out []string
+	var out []HostClaim
 	for rows.Next() {
-		var h string
-		if err := rows.Scan(&h); err != nil {
+		var c HostClaim
+		if err := rows.Scan(&c.Hostname, &c.ProjectID); err != nil {
 			return nil, err
 		}
-		out = append(out, h)
+		out = append(out, c)
 	}
 	return out, rows.Err()
 }
 
-// ─── Matching ─────────────────────────────────────────────────────
+func hostnameOwner(db *sql.DB, hostname string) (string, error) {
+	var projectID string
+	err := db.QueryRow(`SELECT project_id FROM redirect_hosts WHERE hostname=?`, normaliseHostname(hostname)).Scan(&projectID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", ErrNotFound
+	}
+	return projectID, err
+}
 
-// matchRedirect picks the best rule for an inbound (hostname, path).
-// Selection order:
-//   1. hostname must match exactly
-//   2. exact-path rules beat prefix-path rules
-//   3. among prefix rules, longest path wins
-//
-// Returns nil when nothing matches. ProjectID is filtered when non-
-// empty so installs with multiple project scopes don't bleed rules
-// between projects.
 func matchRedirect(db *sql.DB, hostname, path string) (*Redirect, error) {
+	projectID, err := hostnameOwner(db, hostname)
+	if errors.Is(err, ErrNotFound) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	return matchRedirectInProject(db, hostname, path, projectID)
+}
+
+func matchRedirectInProject(db *sql.DB, hostname, path, projectID string) (*Redirect, error) {
+	hostname = normaliseHostname(hostname)
 	path = normalisePath(path)
-	rows, err := db.Query(`SELECT `+redirectCols+`
-		FROM redirects WHERE hostname = ?`, hostname)
+	rows, err := db.Query(`SELECT `+redirectCols+` FROM redirects
+		WHERE lower(rtrim(trim(hostname), '.'))=? AND project_id=?`, hostname, projectID)
 	if err != nil {
 		return nil, err
 	}
@@ -370,77 +504,63 @@ func matchRedirect(db *sql.DB, hostname, path string) (*Redirect, error) {
 	if err := rows.Err(); err != nil {
 		return nil, err
 	}
-	// First pass: exact matches.
 	for _, r := range candidates {
 		if r.MatchMode == "exact" && r.Path == path {
 			return r, nil
 		}
 	}
-	// Second pass: prefix matches, longest first.
 	var prefixes []*Redirect
 	for _, r := range candidates {
 		if r.MatchMode != "prefix" {
 			continue
 		}
-		// Treat path '/' as "matches everything." Otherwise require the
-		// inbound path to start at a path-segment boundary so '/blog'
-		// matches '/blog' and '/blog/post' but not '/blogfoo'.
-		if r.Path == "/" || path == r.Path || strings.HasPrefix(path, r.Path+"/") {
+		matches := r.Path == "/" || path == r.Path
+		if strings.HasSuffix(r.Path, "/") {
+			matches = matches || strings.HasPrefix(path, r.Path)
+		} else {
+			matches = matches || strings.HasPrefix(path, r.Path+"/")
+		}
+		if matches {
 			prefixes = append(prefixes, r)
 		}
 	}
 	if len(prefixes) == 0 {
 		return nil, nil
 	}
-	sort.SliceStable(prefixes, func(i, j int) bool {
-		return len(prefixes[i].Path) > len(prefixes[j].Path)
-	})
+	sort.SliceStable(prefixes, func(i, j int) bool { return len(prefixes[i].Path) > len(prefixes[j].Path) })
 	return prefixes[0], nil
 }
 
-// applyRule turns a matched rule + the inbound request URL into the
-// final Location URL. Handles preserve_path (prefix-only) and
-// preserve_query (always honoured).
 func applyRule(r *Redirect, inboundPath, inboundQuery string) string {
 	dest := r.Destination
-
-	// preserve_path: append the inbound path's leftover (after the
-	// rule's prefix) onto the destination. Only valid for prefix rules.
 	if r.PreservePath && r.MatchMode == "prefix" {
 		inboundPath = normalisePath(inboundPath)
-		leftover := ""
-		if r.Path == "/" {
-			leftover = inboundPath
-		} else if strings.HasPrefix(inboundPath, r.Path) {
+		leftover := inboundPath
+		if r.Path != "/" {
 			leftover = strings.TrimPrefix(inboundPath, r.Path)
 		}
 		if leftover != "" && leftover != "/" {
+			if !strings.HasPrefix(leftover, "/") {
+				leftover = "/" + leftover
+			}
 			dest = joinPath(dest, leftover)
 		}
 	}
-
 	if r.PreserveQuery && inboundQuery != "" {
 		dest = joinQuery(dest, inboundQuery)
 	}
 	return dest
 }
 
-// joinPath appends a path segment to a destination URL, preserving
-// any existing path on the destination. URL parsing keeps query and
-// fragment intact.
 func joinPath(dest, extra string) string {
 	u, err := url.Parse(dest)
 	if err != nil {
-		// Fall back to string concat — better than dropping the leftover.
 		return strings.TrimRight(dest, "/") + extra
 	}
 	u.Path = strings.TrimRight(u.Path, "/") + extra
 	return u.String()
 }
 
-// joinQuery merges an inbound query string onto the destination's
-// existing query. Inbound keys win on conflict — that's the rule the
-// agent is most likely to want (caller intent overrides).
 func joinQuery(dest, inboundQuery string) string {
 	u, err := url.Parse(dest)
 	if err != nil {
@@ -450,8 +570,16 @@ func joinQuery(dest, inboundQuery string) string {
 		}
 		return dest + sep + inboundQuery
 	}
+	inbound, err := url.ParseQuery(inboundQuery)
+	if err != nil {
+		if u.RawQuery == "" {
+			u.RawQuery = inboundQuery
+		} else {
+			u.RawQuery += "&" + inboundQuery
+		}
+		return u.String()
+	}
 	existing := u.Query()
-	inbound, _ := url.ParseQuery(inboundQuery)
 	for k, vs := range inbound {
 		existing.Del(k)
 		for _, v := range vs {
@@ -462,33 +590,32 @@ func joinQuery(dest, inboundQuery string) string {
 	return u.String()
 }
 
-// dbRecordHit bumps the hit counter best-effort. Errors are logged by
-// the caller, never propagated — the redirect itself must succeed.
-func dbRecordHit(db *sql.DB, id int64) error {
+func dbRecordHits(db *sql.DB, hits map[int64]int64) error {
+	if len(hits) == 0 {
+		return nil
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
 	now := time.Now().UTC().Format(time.RFC3339)
-	_, err := db.Exec(`UPDATE redirects SET hits = hits + 1, last_hit_at = ? WHERE id = ?`, now, id)
-	return err
+	stmt, err := tx.Prepare(`UPDATE redirects SET hits=hits+?, last_hit_at=? WHERE id=?`)
+	if err != nil {
+		return err
+	}
+	defer stmt.Close()
+	for id, count := range hits {
+		if _, err := stmt.Exec(count, now, id); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
-
-// ─── tiny helpers ─────────────────────────────────────────────────
 
 func boolInt(b bool) int {
 	if b {
 		return 1
 	}
 	return 0
-}
-
-func pickStr(a, b string) string {
-	if a != "" {
-		return a
-	}
-	return b
-}
-
-func pickInt(a, b int) int {
-	if a != 0 {
-		return a
-	}
-	return b
 }
