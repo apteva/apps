@@ -7,6 +7,7 @@ import (
 	"os"
 	"strings"
 	"testing"
+	"time"
 
 	tk "github.com/apteva/app-sdk/testkit"
 )
@@ -109,7 +110,7 @@ func TestPublicRedirectEmitsEveryHitWithResolvedTarget(t *testing.T) {
 	recorder := tk.NewEmitRecorder()
 	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithEmitter(recorder))
 	globalCtx = ctx
-	_, err := dbInsertRedirect(ctx.AppDB(), RedirectInput{
+	rule, err := dbInsertRedirect(ctx.AppDB(), RedirectInput{
 		Hostname:      "go.example.com",
 		Path:          "/blog",
 		MatchMode:     "prefix",
@@ -146,9 +147,48 @@ func TestPublicRedirectEmitsEveryHitWithResolvedTarget(t *testing.T) {
 	}
 	for i, event := range events {
 		payload, ok := event.Data.(map[string]any)
-		if !ok || payload["target"] != requests[i].target {
+		if !ok || payload["id"] != rule.ID || payload["rule_id"] != rule.ID ||
+			payload["destination"] != rule.Destination || payload["target"] != requests[i].target ||
+			payload["hits_total"] != int64(i+1) || payload["day_hits"] != int64(i+1) {
 			t.Fatalf("hit payload %d=%#v", i, event.Data)
 		}
+		at, _ := payload["at"].(string)
+		if date, _ := payload["date"].(string); len(at) < 10 || date != at[:10] {
+			t.Fatalf("hit date/at mismatch: %#v", payload)
+		}
+	}
+	stored, err := dbGetRedirect(ctx.AppDB(), rule.ID, "project-a")
+	if err != nil || stored.Hits != int64(len(requests)) {
+		t.Fatalf("stored hits=%+v err=%v", stored, err)
+	}
+}
+
+func TestPublicRedirectDoesNotRedirectWhenCountersCannotPersist(t *testing.T) {
+	t.Setenv("APTEVA_PROJECT_ID", "")
+	recorder := tk.NewEmitRecorder()
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithEmitter(recorder))
+	globalCtx = ctx
+	rule, err := dbInsertRedirect(ctx.AppDB(), RedirectInput{
+		Hostname: "go.example.com", Destination: "https://example.com/landing", ProjectID: "project-a",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ctx.AppDB().Exec(`DROP TABLE redirect_daily_stats`); err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodGet, "http://go.example.com/", nil)
+	rec := httptest.NewRecorder()
+	(&App{}).handlePublicRedirect(rec, req)
+	if rec.Code != http.StatusServiceUnavailable || rec.Header().Get("Location") != "" {
+		t.Fatalf("status=%d location=%q body=%s", rec.Code, rec.Header().Get("Location"), rec.Body.String())
+	}
+	if events := recorder.EventsByTopic("rule.hit"); len(events) != 0 {
+		t.Fatalf("emitted unpersisted hit: %+v", events)
+	}
+	stored, err := dbGetRedirect(ctx.AppDB(), rule.ID, "project-a")
+	if err != nil || stored.Hits != 0 {
+		t.Fatalf("counter transaction did not roll back: rule=%+v err=%v", stored, err)
 	}
 }
 
@@ -169,5 +209,62 @@ func TestMCPListIgnoresSpoofedProjectID(t *testing.T) {
 	rows := result.(map[string]any)["redirects"].([]*Redirect)
 	if len(rows) != 1 || rows[0].ProjectID != "project-a" {
 		t.Fatalf("cross-project rows leaked: %+v", rows)
+	}
+}
+
+func TestRedirectStatsToolAndHTTPAreProjectScoped(t *testing.T) {
+	t.Setenv("APTEVA_PROJECT_ID", "")
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("project-a"))
+	globalCtx = ctx
+	ruleA, err := dbInsertRedirect(ctx.AppDB(), RedirectInput{
+		Hostname: "a.example.com", Destination: "https://example.com/a", ProjectID: "project-a",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	ruleB, err := dbInsertRedirect(ctx.AppDB(), RedirectInput{
+		Hostname: "b.example.com", Destination: "https://example.com/b", ProjectID: "project-b",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	at, err := time.Parse(time.RFC3339, "2026-07-13T12:10:00Z")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := dbRecordHit(ctx.AppDB(), ruleA.ID, "project-a", at); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := dbRecordHit(ctx.AppDB(), ruleB.ID, "project-b", at); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := (&App{}).toolRedirectStats(ctx, map[string]any{
+		"project_id": "project-b", "from": "2026-07-13", "to": "2026-07-13",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	toolStats := result.(map[string]any)["stats"].([]RedirectStat)
+	if len(toolStats) != 1 || toolStats[0].RuleID != ruleA.ID {
+		t.Fatalf("tool stats leaked project data: %+v", toolStats)
+	}
+
+	req := httptest.NewRequest(http.MethodGet, "/api/redirects/stats?project_id=project-b&from=2026-07-13&to=2026-07-13", nil)
+	req.Header.Set("X-Apteva-Project-ID", "project-a")
+	rec := httptest.NewRecorder()
+	(&App{}).handleRedirectStats(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var payload struct {
+		Stats []RedirectStat `json:"stats"`
+		Total int            `json:"total"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &payload); err != nil {
+		t.Fatal(err)
+	}
+	if payload.Total != 1 || len(payload.Stats) != 1 || payload.Stats[0].RuleID != ruleA.ID {
+		t.Fatalf("HTTP stats leaked project data: %+v", payload)
 	}
 }

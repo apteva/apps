@@ -57,10 +57,34 @@ type HostClaim struct {
 	ProjectID string
 }
 
+type HitCounts struct {
+	HitsTotal int64  `json:"hits_total"`
+	Date      string `json:"date"`
+	DayHits   int64  `json:"day_hits"`
+}
+
+type RedirectStat struct {
+	RuleID      int64  `json:"rule_id"`
+	Destination string `json:"destination"`
+	HitsTotal   int64  `json:"hits_total"`
+	Date        string `json:"date"`
+	DayHits     int64  `json:"day_hits"`
+}
+
+type RedirectStatsQuery struct {
+	ProjectID string
+	RuleID    int64
+	From      string
+	To        string
+	Limit     int
+	Offset    int
+}
+
 var (
 	ErrConflict      = errors.New("a redirect already exists at this hostname+path+match")
 	ErrNotFound      = errors.New("redirect not found")
 	ErrHostnameOwned = errors.New("hostname is already owned by another project")
+	ErrInvalidStats  = errors.New("invalid redirect stats query")
 )
 
 func normaliseHostname(h string) string {
@@ -388,6 +412,9 @@ func dbDeleteRedirect(db *sql.DB, id int64, projectID string) (*Redirect, error)
 	if n, _ := res.RowsAffected(); n == 0 {
 		return nil, ErrNotFound
 	}
+	if _, err := tx.Exec(`DELETE FROM redirect_daily_stats WHERE rule_id=? AND project_id=?`, id, projectID); err != nil {
+		return nil, err
+	}
 	if _, err := tx.Exec(`DELETE FROM redirect_hosts WHERE hostname=? AND project_id=?
 		AND NOT EXISTS (SELECT 1 FROM redirects WHERE lower(rtrim(trim(hostname), '.'))=? AND project_id=?)`,
 		existing.Hostname, projectID, existing.Hostname, projectID); err != nil {
@@ -590,27 +617,117 @@ func joinQuery(dest, inboundQuery string) string {
 	return u.String()
 }
 
-func dbRecordHits(db *sql.DB, hits map[int64]int64) error {
-	if len(hits) == 0 {
-		return nil
+func dbRecordHit(db *sql.DB, ruleID int64, projectID string, at time.Time) (*HitCounts, error) {
+	if at.IsZero() {
+		at = time.Now()
 	}
+	at = at.UTC()
+	date := at.Format("2006-01-02")
+	timestamp := at.Format(time.RFC3339)
 	tx, err := db.Begin()
 	if err != nil {
-		return err
+		return nil, err
 	}
 	defer tx.Rollback()
-	now := time.Now().UTC().Format(time.RFC3339)
-	stmt, err := tx.Prepare(`UPDATE redirects SET hits=hits+?, last_hit_at=? WHERE id=?`)
+	res, err := tx.Exec(`UPDATE redirects SET hits=hits+1, last_hit_at=? WHERE id=? AND project_id=?`, timestamp, ruleID, projectID)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	defer stmt.Close()
-	for id, count := range hits {
-		if _, err := stmt.Exec(count, now, id); err != nil {
-			return err
+	if n, _ := res.RowsAffected(); n == 0 {
+		return nil, ErrNotFound
+	}
+	_, err = tx.Exec(`INSERT INTO redirect_daily_stats (rule_id, project_id, date, hits, updated_at)
+		VALUES (?, ?, ?, 1, ?)
+		ON CONFLICT(rule_id, date) DO UPDATE SET hits=hits+1, updated_at=excluded.updated_at`,
+		ruleID, projectID, date, timestamp)
+	if err != nil {
+		return nil, err
+	}
+	counts := &HitCounts{Date: date}
+	err = tx.QueryRow(`SELECT r.hits, s.hits
+		FROM redirects r JOIN redirect_daily_stats s ON s.rule_id=r.id AND s.project_id=r.project_id
+		WHERE r.id=? AND r.project_id=? AND s.date=?`, ruleID, projectID, date).
+		Scan(&counts.HitsTotal, &counts.DayHits)
+	if err != nil {
+		return nil, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, err
+	}
+	return counts, nil
+}
+
+func normaliseStatsQuery(q RedirectStatsQuery) (RedirectStatsQuery, error) {
+	if q.RuleID < 0 {
+		return q, fmt.Errorf("%w: rule_id must be positive", ErrInvalidStats)
+	}
+	for _, field := range []struct{ label, value string }{{"from", q.From}, {"to", q.To}} {
+		if field.value == "" {
+			continue
+		}
+		parsed, err := time.Parse("2006-01-02", field.value)
+		if err != nil || parsed.Format("2006-01-02") != field.value {
+			return q, fmt.Errorf("%w: %s must be YYYY-MM-DD", ErrInvalidStats, field.label)
 		}
 	}
-	return tx.Commit()
+	if q.From != "" && q.To != "" && q.From > q.To {
+		return q, fmt.Errorf("%w: from must be on or before to", ErrInvalidStats)
+	}
+	if q.Limit <= 0 || q.Limit > 250 {
+		q.Limit = 50
+	}
+	if q.Offset < 0 {
+		q.Offset = 0
+	}
+	return q, nil
+}
+
+func redirectStatsWhere(q RedirectStatsQuery) (string, []any) {
+	where := ` WHERE r.project_id=?`
+	args := []any{q.ProjectID}
+	if q.RuleID > 0 {
+		where += ` AND r.id=?`
+		args = append(args, q.RuleID)
+	}
+	if q.From != "" {
+		where += ` AND s.date>=?`
+		args = append(args, q.From)
+	}
+	if q.To != "" {
+		where += ` AND s.date<=?`
+		args = append(args, q.To)
+	}
+	return where, args
+}
+
+func dbListRedirectStats(db *sql.DB, query RedirectStatsQuery) ([]RedirectStat, int, RedirectStatsQuery, error) {
+	q, err := normaliseStatsQuery(query)
+	if err != nil {
+		return nil, 0, q, err
+	}
+	where, args := redirectStatsWhere(q)
+	from := ` FROM redirect_daily_stats s
+		JOIN redirects r ON r.id=s.rule_id AND r.project_id=s.project_id`
+	var total int
+	if err := db.QueryRow(`SELECT count(*)`+from+where, args...).Scan(&total); err != nil {
+		return nil, 0, q, err
+	}
+	listArgs := append(append([]any{}, args...), q.Limit, q.Offset)
+	rows, err := db.Query(`SELECT r.id, r.destination, r.hits, s.date, s.hits`+from+where+
+		` ORDER BY s.date DESC, r.id ASC LIMIT ? OFFSET ?`, listArgs...)
+	if err != nil {
+		return nil, 0, q, err
+	}
+	defer rows.Close()
+	stats := make([]RedirectStat, 0)
+	for rows.Next() {
+		var stat RedirectStat
+		if err := rows.Scan(&stat.RuleID, &stat.Destination, &stat.HitsTotal, &stat.Date, &stat.DayHits); err != nil {
+			return nil, 0, q, err
+		}
+		stats = append(stats, stat)
+	}
+	return stats, total, q, rows.Err()
 }
 
 func boolInt(b bool) int {

@@ -5,7 +5,9 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
+	"time"
 
 	_ "modernc.org/sqlite"
 )
@@ -19,6 +21,7 @@ func freshDB(t *testing.T) *sql.DB {
 	if err != nil {
 		t.Fatalf("open: %v", err)
 	}
+	db.SetMaxOpenConns(1)
 	t.Cleanup(func() { db.Close() })
 	wd, _ := os.Getwd()
 	migrations, err := filepath.Glob(filepath.Join(wd, "migrations", "*.sql"))
@@ -35,6 +38,47 @@ func freshDB(t *testing.T) *sql.DB {
 		}
 	}
 	return db
+}
+
+func TestRecordHitIsAtomicUnderConcurrency(t *testing.T) {
+	db := freshDB(t)
+	rule := mustInsert(t, db, RedirectInput{
+		Hostname: "go.example.com", Destination: "https://example.com", ProjectID: "project-a",
+	})
+	at := time.Date(2026, 7, 13, 12, 10, 0, 0, time.UTC)
+	const requests = 20
+	results := make(chan *HitCounts, requests)
+	errs := make(chan error, requests)
+	var wg sync.WaitGroup
+	for range requests {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			counts, err := dbRecordHit(db, rule.ID, "project-a", at)
+			if err != nil {
+				errs <- err
+				return
+			}
+			results <- counts
+		}()
+	}
+	wg.Wait()
+	close(results)
+	close(errs)
+	for err := range errs {
+		t.Errorf("record hit: %v", err)
+	}
+	seenTotals := map[int64]bool{}
+	for counts := range results {
+		seenTotals[counts.HitsTotal] = true
+	}
+	if len(seenTotals) != requests {
+		t.Fatalf("unique absolute totals=%d want=%d (%v)", len(seenTotals), requests, seenTotals)
+	}
+	stats, total, _, err := dbListRedirectStats(db, RedirectStatsQuery{ProjectID: "project-a", RuleID: rule.ID})
+	if err != nil || total != 1 || len(stats) != 1 || stats[0].HitsTotal != requests || stats[0].DayHits != requests {
+		t.Fatalf("stats=%+v total=%d err=%v", stats, total, err)
+	}
 }
 
 func mustInsert(t *testing.T, db *sql.DB, in RedirectInput) *Redirect {
@@ -293,15 +337,72 @@ func TestExactMatch_PreservesTrailingSlash(t *testing.T) {
 	}
 }
 
-func TestRecordHits_BatchesCounts(t *testing.T) {
+func TestRecordHitReturnsAtomicTotalAndDailyCounts(t *testing.T) {
 	db := freshDB(t)
-	rule := mustInsert(t, db, RedirectInput{Hostname: "go.example.com", Destination: "https://example.com"})
-	if err := dbRecordHits(db, map[int64]int64{rule.ID: 7}); err != nil {
-		t.Fatalf("record hits: %v", err)
+	rule := mustInsert(t, db, RedirectInput{
+		Hostname: "go.example.com", Destination: "https://example.com", ProjectID: "project-a",
+	})
+	dayOne := time.Date(2026, 7, 13, 23, 59, 0, 0, time.UTC)
+	for i := int64(1); i <= 3; i++ {
+		counts, err := dbRecordHit(db, rule.ID, "project-a", dayOne)
+		if err != nil {
+			t.Fatalf("record hit %d: %v", i, err)
+		}
+		if counts.HitsTotal != i || counts.DayHits != i || counts.Date != "2026-07-13" {
+			t.Fatalf("counts %d=%+v", i, counts)
+		}
 	}
-	got, err := dbGetRedirect(db, rule.ID, "")
-	if err != nil || got.Hits != 7 || got.LastHitAt == "" {
+	counts, err := dbRecordHit(db, rule.ID, "project-a", dayOne.Add(2*time.Minute))
+	if err != nil {
+		t.Fatalf("record next-day hit: %v", err)
+	}
+	if counts.HitsTotal != 4 || counts.DayHits != 1 || counts.Date != "2026-07-14" {
+		t.Fatalf("next-day counts=%+v", counts)
+	}
+	got, err := dbGetRedirect(db, rule.ID, "project-a")
+	if err != nil || got.Hits != 4 || got.LastHitAt == "" {
 		t.Fatalf("hits=%+v err=%v", got, err)
+	}
+	stats, total, query, err := dbListRedirectStats(db, RedirectStatsQuery{
+		ProjectID: "project-a", RuleID: rule.ID, From: "2026-07-13", To: "2026-07-14",
+	})
+	if err != nil || total != 2 || len(stats) != 2 || query.Limit != 50 {
+		t.Fatalf("stats=%+v total=%d query=%+v err=%v", stats, total, query, err)
+	}
+	if stats[0].Date != "2026-07-14" || stats[0].DayHits != 1 || stats[0].HitsTotal != 4 ||
+		stats[1].Date != "2026-07-13" || stats[1].DayHits != 3 {
+		t.Fatalf("unexpected stats=%+v", stats)
+	}
+}
+
+func TestRedirectStatsAreProjectScopedAndDeletedWithRule(t *testing.T) {
+	db := freshDB(t)
+	ruleA := mustInsert(t, db, RedirectInput{
+		Hostname: "a.example.com", Destination: "https://example.com/a", ProjectID: "project-a",
+	})
+	ruleB := mustInsert(t, db, RedirectInput{
+		Hostname: "b.example.com", Destination: "https://example.com/b", ProjectID: "project-b",
+	})
+	at := time.Date(2026, 7, 13, 12, 0, 0, 0, time.UTC)
+	if _, err := dbRecordHit(db, ruleA.ID, "project-a", at); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := dbRecordHit(db, ruleB.ID, "project-b", at); err != nil {
+		t.Fatal(err)
+	}
+	stats, total, _, err := dbListRedirectStats(db, RedirectStatsQuery{ProjectID: "project-a"})
+	if err != nil || total != 1 || len(stats) != 1 || stats[0].RuleID != ruleA.ID {
+		t.Fatalf("project-a stats=%+v total=%d err=%v", stats, total, err)
+	}
+	if _, err := dbDeleteRedirect(db, ruleA.ID, "project-a"); err != nil {
+		t.Fatal(err)
+	}
+	var remaining int
+	if err := db.QueryRow(`SELECT count(*) FROM redirect_daily_stats WHERE rule_id=?`, ruleA.ID).Scan(&remaining); err != nil || remaining != 0 {
+		t.Fatalf("deleted rule stats remaining=%d err=%v", remaining, err)
+	}
+	if _, _, _, err := dbListRedirectStats(db, RedirectStatsQuery{ProjectID: "project-b", From: "07/13/2026"}); err == nil {
+		t.Fatalf("invalid date was accepted")
 	}
 }
 
@@ -335,6 +436,47 @@ func TestHostnameClaimMigrationMakesLegacyDuplicatesDeterministic(t *testing.T) 
 	rule, err := matchRedirect(db, "go.example.com", "/")
 	if err != nil || rule == nil || rule.ProjectID != "project-a" {
 		t.Fatalf("rule=%+v err=%v", rule, err)
+	}
+}
+
+func TestDailyStatsMigrationPreservesExistingTotal(t *testing.T) {
+	db, err := sql.Open("sqlite", ":memory:")
+	if err != nil {
+		t.Fatal(err)
+	}
+	db.SetMaxOpenConns(1)
+	defer db.Close()
+	for _, name := range []string{"001_init.sql", "002_hostname_claims.sql"} {
+		body, err := os.ReadFile(filepath.Join("migrations", name))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(string(body)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	result, err := db.Exec(`INSERT INTO redirects (hostname, path, match_mode, destination, status_code, project_id, hits)
+		VALUES ('go.example.com', '/', 'exact', 'https://example.com', 302, 'project-a', 840)`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ruleID, err := result.LastInsertId()
+	if err != nil {
+		t.Fatal(err)
+	}
+	body, err := os.ReadFile(filepath.Join("migrations", "003_daily_stats.sql"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(string(body)); err != nil {
+		t.Fatal(err)
+	}
+	counts, err := dbRecordHit(db, ruleID, "project-a", time.Date(2026, 7, 13, 12, 10, 0, 0, time.UTC))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if counts.HitsTotal != 841 || counts.DayHits != 1 || counts.Date != "2026-07-13" {
+		t.Fatalf("post-migration counts=%+v", counts)
 	}
 }
 

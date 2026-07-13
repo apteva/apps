@@ -15,6 +15,7 @@ import (
 // Path scheme:
 //   GET    /api/redirects                       list (optional ?hostname=, ?project_id=, ?limit, ?offset)
 //   POST   /api/redirects                       create  {hostname, destination, ...}
+//   GET    /api/redirects/stats                 durable daily counters
 //   GET    /api/redirects/<id>                  one rule
 //   PUT    /api/redirects/<id>                  update  {…fields to change}
 //   DELETE /api/redirects/<id>                  remove
@@ -111,6 +112,41 @@ func (a *App) handleRedirectTest(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	httpJSON(w, map[string]any{"matched": true, "redirect": rule, "location": applyRule(rule, body.Path, body.Query), "status_code": rule.StatusCode})
+}
+
+func (a *App) handleRedirectStats(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		httpErr(w, http.StatusMethodNotAllowed, "GET")
+		return
+	}
+	values := r.URL.Query()
+	var ruleID int64
+	if raw := values.Get("rule_id"); raw != "" {
+		parsed, err := strconv.ParseInt(raw, 10, 64)
+		if err != nil || parsed <= 0 {
+			httpErr(w, http.StatusBadRequest, "rule_id must be positive")
+			return
+		}
+		ruleID = parsed
+	}
+	limit, _ := strconv.Atoi(values.Get("limit"))
+	offset, _ := strconv.Atoi(values.Get("offset"))
+	stats, total, query, err := dbListRedirectStats(globalCtx.AppDB(), RedirectStatsQuery{
+		ProjectID: projectFromRequest(r), RuleID: ruleID,
+		From: values.Get("from"), To: values.Get("to"), Limit: limit, Offset: offset,
+	})
+	if err != nil {
+		if errors.Is(err, ErrInvalidStats) {
+			httpErr(w, http.StatusBadRequest, err.Error())
+		} else {
+			httpErr(w, http.StatusInternalServerError, "stats lookup failed")
+		}
+		return
+	}
+	httpJSON(w, map[string]any{
+		"stats": stats, "count": len(stats), "total": total,
+		"limit": query.Limit, "offset": query.Offset,
+	})
 }
 
 // ─── REST handlers ─────────────────────────────────────────────────
@@ -259,9 +295,13 @@ func (a *App) handlePublicRedirect(w http.ResponseWriter, r *http.Request) {
 	}
 	target := applyRule(rule, r.URL.Path, r.URL.RawQuery)
 
-	// Bounded, batched analytics: redirect latency never waits on SQLite
-	// and traffic spikes cannot create an unbounded goroutine backlog.
-	a.enqueueHit(globalCtx, rule, target)
+	// Persist both absolute counters atomically before publishing the hit
+	// contract, so consumers can detect and reconcile missed events.
+	if err := a.recordHit(globalCtx, rule, target); err != nil {
+		globalCtx.Logger().Warn("record redirect hit", "id", rule.ID, "err", err.Error())
+		httpErr(w, http.StatusServiceUnavailable, "redirect analytics temporarily unavailable")
+		return
+	}
 
 	w.Header().Set("Location", target)
 	w.Header().Set("Cache-Control", "no-store")

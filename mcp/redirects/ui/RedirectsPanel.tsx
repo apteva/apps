@@ -166,10 +166,10 @@ export default function RedirectsPanel({ projectId, installId }: NativePanelProp
   useEffect(() => { load(); }, [load]);
   useEffect(() => { loadMeta(); }, [loadMeta]);
 
-  useAppEvents<{ redirect?: Redirect; id?: number; at?: string }>("redirects", projectId, (event) => {
+  useAppEvents<{ redirect?: Redirect; id?: number; rule_id?: number; hits_total?: number; at?: string }>("redirects", projectId, (event) => {
     if (event.topic === "rule.hit") {
       setRules((current) => current?.map((rule) => rule.id === event.data?.id
-        ? { ...rule, hits: rule.hits + 1, last_hit_at: event.data.at || rule.last_hit_at }
+        ? { ...rule, hits: typeof event.data.hits_total === "number" ? Math.max(rule.hits, event.data.hits_total) : rule.hits + 1, last_hit_at: event.data.at || rule.last_hit_at }
         : rule) || current);
       return;
     }

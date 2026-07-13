@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	sdk "github.com/apteva/app-sdk"
 	tk "github.com/apteva/app-sdk/testkit"
@@ -209,7 +210,7 @@ func TestRedirectManifestUsesNativeIngress(t *testing.T) {
 
 func TestEmbeddedManifestUsesReleaseFile(t *testing.T) {
 	manifest := (&App{}).Manifest()
-	if manifest.Name != "redirects" || manifest.Version != "0.3.6" {
+	if manifest.Name != "redirects" || manifest.Version != "0.3.7" {
 		t.Fatalf("embedded manifest=%s@%s", manifest.Name, manifest.Version)
 	}
 	foundRead := false
@@ -220,6 +221,24 @@ func TestEmbeddedManifestUsesReleaseFile(t *testing.T) {
 	}
 	if !foundRead {
 		t.Fatalf("embedded manifest missing platform.ingress.read")
+	}
+	foundHit := false
+	for _, event := range manifest.Provides.Publishes {
+		if event.Name == "rule.hit" {
+			foundHit = event.Payload["rule_id"] == "integer" && event.Payload["hits_total"] == "integer" && event.Payload["day_hits"] == "integer"
+		}
+	}
+	if !foundHit {
+		t.Fatalf("embedded manifest missing rule.hit contract")
+	}
+	foundStats := false
+	for _, tool := range (&App{}).MCPTools() {
+		if tool.Name == "redirect_stats" {
+			foundStats = true
+		}
+	}
+	if !foundStats {
+		t.Fatalf("redirect_stats tool missing")
 	}
 }
 
@@ -269,9 +288,12 @@ func TestIPv6PublicHostCreatesAAAARecord(t *testing.T) {
 func TestRuleEventsUseRuleProject(t *testing.T) {
 	recorder := tk.NewEmitRecorder()
 	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithEmitter(recorder))
-	rule := &Redirect{ID: 42, Hostname: "go.example.com", ProjectID: "project-a"}
+	rule := &Redirect{ID: 42, Hostname: "go.example.com", Destination: "https://example.com/landing", ProjectID: "project-a"}
+	at := time.Date(2026, 7, 13, 12, 10, 0, 0, time.UTC)
 	emitRuleChange(ctx, "rule.updated", rule)
-	emitHit(ctx, rule, "https://example.com/landing?source=email")
+	emitHit(ctx, rule, "https://example.com/landing?source=email", &HitCounts{
+		HitsTotal: 841, Date: "2026-07-13", DayHits: 28,
+	}, at)
 	events := recorder.Events()
 	if len(events) != 2 {
 		t.Fatalf("events=%+v", events)
@@ -282,7 +304,11 @@ func TestRuleEventsUseRuleProject(t *testing.T) {
 		}
 	}
 	hitData, ok := events[1].Data.(map[string]any)
-	if !ok || hitData["target"] != "https://example.com/landing?source=email" {
+	if !ok || hitData["id"] != int64(42) || hitData["rule_id"] != int64(42) ||
+		hitData["destination"] != "https://example.com/landing" ||
+		hitData["target"] != "https://example.com/landing?source=email" ||
+		hitData["hits_total"] != int64(841) || hitData["date"] != "2026-07-13" ||
+		hitData["day_hits"] != int64(28) || hitData["at"] != "2026-07-13T12:10:00Z" {
 		t.Fatalf("hit event target=%#v", events[1].Data)
 	}
 }

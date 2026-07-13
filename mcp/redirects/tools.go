@@ -67,6 +67,20 @@ func (a *App) MCPTools() []sdk.Tool {
 			Handler: a.toolRedirectList,
 		},
 		{
+			Name: "redirect_stats",
+			Description: "List durable per-rule UTC daily hit counters for reconciliation. " +
+				"Each row includes rule_id, destination, hits_total, date, and day_hits. " +
+				"Args: rule_id?, from? (YYYY-MM-DD), to? (YYYY-MM-DD), limit? (default 50, max 250), offset?.",
+			InputSchema: schemaObject(map[string]any{
+				"rule_id": map[string]any{"type": "integer"},
+				"from":    map[string]any{"type": "string"},
+				"to":      map[string]any{"type": "string"},
+				"limit":   map[string]any{"type": "integer"},
+				"offset":  map[string]any{"type": "integer"},
+			}, nil),
+			Handler: a.toolRedirectStats,
+		},
+		{
 			Name:        "redirect_get",
 			Description: "Fetch one rule by id. Args: id.",
 			InputSchema: schemaObject(map[string]any{
@@ -152,6 +166,24 @@ func (a *App) toolRedirectList(ctx *sdk.AppCtx, args map[string]any) (any, error
 		return nil, err
 	}
 	return map[string]any{"redirects": rows, "count": len(rows), "total": total, "limit": limit, "offset": offset}, nil
+}
+
+func (a *App) toolRedirectStats(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	stats, total, query, err := dbListRedirectStats(ctx.AppDB(), RedirectStatsQuery{
+		ProjectID: ctx.CurrentProject(),
+		RuleID:    int64(intArg(args, "rule_id", 0)),
+		From:      strArg(args, "from"),
+		To:        strArg(args, "to"),
+		Limit:     intArg(args, "limit", 50),
+		Offset:    intArg(args, "offset", 0),
+	})
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{
+		"stats": stats, "count": len(stats), "total": total,
+		"limit": query.Limit, "offset": query.Offset,
+	}, nil
 }
 
 func (a *App) toolRedirectGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {

@@ -22,7 +22,6 @@ import (
 	"fmt"
 	"net/http"
 	"os"
-	"sync"
 	"time"
 
 	sdk "github.com/apteva/app-sdk"
@@ -36,12 +35,7 @@ var manifestYAML string
 
 // ─── App ───────────────────────────────────────────────────────────
 
-type App struct {
-	hitQueue chan int64
-	hitStop  chan struct{}
-	hitWG    sync.WaitGroup
-	stopOnce sync.Once
-}
+type App struct{}
 
 var globalCtx *sdk.AppCtx
 
@@ -58,80 +52,29 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		return errors.New("redirects requires a db block")
 	}
 	globalCtx = ctx
-	a.hitQueue = make(chan int64, 4096)
-	a.hitStop = make(chan struct{})
-	a.hitWG.Add(1)
-	go a.runHitCounter(ctx)
 	ctx.Logger().Info("redirects mounted", "data_dir", ctx.DataDir())
 	go reconcileRegisteredRoutes(ctx)
 	return nil
 }
 
-func (a *App) OnUnmount(*sdk.AppCtx) error {
-	a.stopOnce.Do(func() {
-		if a.hitStop != nil {
-			close(a.hitStop)
-		}
-	})
-	a.hitWG.Wait()
-	return nil
-}
+func (a *App) OnUnmount(*sdk.AppCtx) error       { return nil }
 func (a *App) Channels() []sdk.ChannelFactory    { return nil }
 func (a *App) Workers() []sdk.Worker             { return nil }
 func (a *App) EventHandlers() []sdk.EventHandler { return nil }
 
 func main() { sdk.Run(&App{}) }
 
-func (a *App) enqueueHit(ctx *sdk.AppCtx, rule *Redirect, target string) {
+func (a *App) recordHit(ctx *sdk.AppCtx, rule *Redirect, target string) error {
 	if rule == nil {
-		return
+		return errors.New("redirect rule required")
 	}
-	if a.hitQueue != nil {
-		select {
-		case a.hitQueue <- rule.ID:
-		default:
-			ctx.Logger().Warn("redirect hit queue full; dropping analytics increment", "id", rule.ID)
-		}
+	at := time.Now().UTC()
+	counts, err := dbRecordHit(ctx.AppDB(), rule.ID, rule.ProjectID, at)
+	if err != nil {
+		return err
 	}
-	emitHit(ctx, rule, target)
-}
-
-func (a *App) runHitCounter(ctx *sdk.AppCtx) {
-	defer a.hitWG.Done()
-	ticker := time.NewTicker(250 * time.Millisecond)
-	defer ticker.Stop()
-	pending := make(map[int64]int64)
-	flush := func() {
-		if len(pending) == 0 {
-			return
-		}
-		batch := pending
-		pending = make(map[int64]int64)
-		if err := dbRecordHits(ctx.AppDB(), batch); err != nil {
-			ctx.Logger().Warn("record redirect hits", "rules", len(batch), "err", err.Error())
-		}
-	}
-	for {
-		select {
-		case id := <-a.hitQueue:
-			pending[id]++
-			if len(pending) >= 256 {
-				flush()
-			}
-		case <-ticker.C:
-			flush()
-		case <-a.hitStop:
-			for {
-				select {
-				case id := <-a.hitQueue:
-					pending[id]++
-				default:
-					flush()
-					return
-				}
-			}
-		}
-	}
+	emitHit(ctx, rule, target, counts, at)
+	return nil
 }
 
 // ─── HTTP routes ───────────────────────────────────────────────────
@@ -141,6 +84,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		// Admin / panel surface — auth required.
 		{Pattern: "/api/_meta", Handler: a.handleMeta},
 		{Pattern: "/api/redirects", Handler: a.handleRedirectsCollection},
+		{Pattern: "/api/redirects/stats", Handler: a.handleRedirectStats},
 		{Pattern: "/api/redirects/test", Handler: a.handleRedirectTest},
 		{Pattern: "/api/redirects/", Handler: a.handleRedirectItem},
 

@@ -25,20 +25,25 @@ func emitRuleChange(ctx *sdk.AppCtx, topic string, rule *Redirect) {
 	ctx.EmitWithProject(topic, rule.ProjectID, map[string]any{"redirect": rule})
 }
 
-// emitHit publishes a "rule.hit" event. Target is the exact Location
-// returned for this request after applying path and query preservation.
-// We don't include the full Redirect since the panel already has it
-// cached from the lifecycle events.
-func emitHit(ctx *sdk.AppCtx, rule *Redirect, target string) {
-	if ctx == nil || rule == nil {
+// emitHit publishes a "rule.hit" event after its durable total and UTC daily
+// counters commit. Target is the exact Location for this request, while
+// destination is the stable configured value. The legacy id field remains
+// alongside rule_id for compatibility.
+func emitHit(ctx *sdk.AppCtx, rule *Redirect, target string, counts *HitCounts, at time.Time) {
+	if ctx == nil || rule == nil || counts == nil {
 		return
 	}
 	ctx.EmitWithProject("rule.hit", rule.ProjectID, map[string]any{
-		"id":       rule.ID,
-		"hostname": rule.Hostname,
-		"path":     rule.Path,
-		"target":   target,
-		"at":       time.Now().UTC().Format(time.RFC3339),
+		"id":          rule.ID,
+		"rule_id":     rule.ID,
+		"hostname":    rule.Hostname,
+		"path":        rule.Path,
+		"destination": rule.Destination,
+		"target":      target,
+		"hits_total":  counts.HitsTotal,
+		"date":        counts.Date,
+		"day_hits":    counts.DayHits,
+		"at":          at.UTC().Format(time.RFC3339),
 	})
 }
 
