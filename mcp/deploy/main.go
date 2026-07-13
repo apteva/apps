@@ -204,6 +204,17 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 			return fmt.Errorf("mkdir %s: %w", sub, err)
 		}
 	}
+	pathsRebased, err := rebaseLegacyPaths(ctx.AppDB(), a.dataDir)
+	if err != nil {
+		return fmt.Errorf("rebase legacy artifact/log paths: %w", err)
+	}
+	if pathsRebased.total() > 0 {
+		ctx.Logger().Info("rebased legacy artifact/log paths",
+			"build_artifacts", pathsRebased.BuildArtifacts,
+			"build_logs", pathsRebased.BuildLogs,
+			"release_logs", pathsRebased.ReleaseLogs,
+		)
+	}
 
 	a.cfg = sourceConfig{
 		ProjectID: os.Getenv("APTEVA_PROJECT_ID"),
