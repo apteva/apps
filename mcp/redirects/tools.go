@@ -133,7 +133,6 @@ func (a *App) toolRedirectRemove(ctx *sdk.AppCtx, args map[string]any) (any, err
 	if err != nil {
 		return nil, err
 	}
-	hitLastEmit.Delete(existing.ID)
 	maybeUnwireHostname(ctx, existing.Hostname, existing.ProjectID)
 	emitRuleChange(ctx, "rule.removed", existing)
 	return map[string]any{"removed": true}, nil

@@ -104,12 +104,12 @@ func TestHTTPListReturnsTotal(t *testing.T) {
 	}
 }
 
-func TestPublicRedirectHitEventIncludesResolvedTarget(t *testing.T) {
+func TestPublicRedirectEmitsEveryHitWithResolvedTarget(t *testing.T) {
 	t.Setenv("APTEVA_PROJECT_ID", "")
 	recorder := tk.NewEmitRecorder()
 	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithEmitter(recorder))
 	globalCtx = ctx
-	rule, err := dbInsertRedirect(ctx.AppDB(), RedirectInput{
+	_, err := dbInsertRedirect(ctx.AppDB(), RedirectInput{
 		Hostname:      "go.example.com",
 		Path:          "/blog",
 		MatchMode:     "prefix",
@@ -121,26 +121,34 @@ func TestPublicRedirectHitEventIncludesResolvedTarget(t *testing.T) {
 	if err != nil {
 		t.Fatalf("insert: %v", err)
 	}
-	hitLastEmit.Delete(rule.ID)
-	t.Cleanup(func() { hitLastEmit.Delete(rule.ID) })
-
-	req := httptest.NewRequest(http.MethodGet, "http://go.example.com/blog/launch?source=email", nil)
-	rec := httptest.NewRecorder()
-	(&App{}).handlePublicRedirect(rec, req)
-	if rec.Code != http.StatusFound {
-		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	requests := []struct {
+		url    string
+		target string
+	}{
+		{"http://go.example.com/blog/launch?source=email", "https://new.example.com/articles/launch?source=email"},
+		{"http://go.example.com/blog/sale?source=ads", "https://new.example.com/articles/sale?source=ads"},
+		{"http://go.example.com/blog/cart?source=social", "https://new.example.com/articles/cart?source=social"},
 	}
-	wantTarget := "https://new.example.com/articles/launch?source=email"
-	if got := rec.Header().Get("Location"); got != wantTarget {
-		t.Fatalf("location=%q want=%q", got, wantTarget)
+	for _, request := range requests {
+		req := httptest.NewRequest(http.MethodGet, request.url, nil)
+		rec := httptest.NewRecorder()
+		(&App{}).handlePublicRedirect(rec, req)
+		if rec.Code != http.StatusFound {
+			t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+		}
+		if got := rec.Header().Get("Location"); got != request.target {
+			t.Fatalf("location=%q want=%q", got, request.target)
+		}
 	}
 	events := recorder.EventsByTopic("rule.hit")
-	if len(events) != 1 {
+	if len(events) != len(requests) {
 		t.Fatalf("hit events=%+v", events)
 	}
-	payload, ok := events[0].Data.(map[string]any)
-	if !ok || payload["target"] != wantTarget {
-		t.Fatalf("hit payload=%#v", events[0].Data)
+	for i, event := range events {
+		payload, ok := event.Data.(map[string]any)
+		if !ok || payload["target"] != requests[i].target {
+			t.Fatalf("hit payload %d=%#v", i, event.Data)
+		}
 	}
 }
 

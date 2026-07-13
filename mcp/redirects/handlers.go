@@ -230,7 +230,6 @@ func (a *App) httpDeleteRedirect(w http.ResponseWriter, r *http.Request, id int6
 		}
 		return
 	}
-	hitLastEmit.Delete(existing.ID)
 	maybeUnwireHostname(globalCtx, existing.Hostname, existing.ProjectID)
 	emitRuleChange(globalCtx, "rule.removed", existing)
 	httpJSON(w, map[string]any{"removed": true})

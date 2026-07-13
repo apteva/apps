@@ -93,9 +93,7 @@ func (a *App) enqueueHit(ctx *sdk.AppCtx, rule *Redirect, target string) {
 			ctx.Logger().Warn("redirect hit queue full; dropping analytics increment", "id", rule.ID)
 		}
 	}
-	if shouldEmitHit(rule.ID) {
-		emitHit(ctx, rule, target)
-	}
+	emitHit(ctx, rule, target)
 }
 
 func (a *App) runHitCounter(ctx *sdk.AppCtx) {

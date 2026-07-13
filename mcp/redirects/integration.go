@@ -7,7 +7,6 @@ import (
 	"net/url"
 	"os"
 	"strings"
-	"sync"
 	"time"
 
 	sdk "github.com/apteva/app-sdk"
@@ -41,32 +40,6 @@ func emitHit(ctx *sdk.AppCtx, rule *Redirect, target string) {
 		"target":   target,
 		"at":       time.Now().UTC().Format(time.RFC3339),
 	})
-}
-
-// shouldEmitHit returns true at most once per rule per second. Public-
-// traffic redirects can run at hundreds of req/s on hot links; without
-// throttling the platform's 256-event ring buffer fills up in ~3s and
-// every other app's subscribers miss messages. The DB hit counter
-// still increments on every request — only the bus emit is sampled.
-//
-// A sync.Map keyed by ruleID is enough — entry value is the last emit
-// unix-second; we compare-and-swap to avoid two goroutines emitting
-// for the same rule in the same second.
-var hitLastEmit sync.Map // map[int64]int64 — ruleID → unix seconds
-
-func shouldEmitHit(ruleID int64) bool {
-	now := time.Now().Unix()
-	prev, loaded := hitLastEmit.LoadOrStore(ruleID, now)
-	if !loaded {
-		return true
-	}
-	prevSec, _ := prev.(int64)
-	if now > prevSec {
-		// Replace; if another goroutine raced and replaced first, that's
-		// fine — at most one of us returns true.
-		return hitLastEmit.CompareAndSwap(ruleID, prevSec, now)
-	}
-	return false
 }
 
 // integration.go — glue calling platform ingress and the Domains app.
