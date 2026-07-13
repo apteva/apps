@@ -105,12 +105,25 @@ func TestEnsureHostedRuntimeStopsAfterCommandFailure(t *testing.T) {
 
 func TestHostedRuntimeBootstrapSupportsExpectedSystems(t *testing.T) {
 	for _, required := range []string{
-		"apt-get", "apk", "dnf", "yum", "setup_22.x", "python3", "setsid",
+		"apt-get", "apk", "dnf", "yum", "setup_22.x", "python3", "git", "setsid",
 		"go_ready", "go_minor", "golang-go", "go.dev/dl/?mode=json", "sha256sum", "/usr/local/go",
 		"available_kb", "2097152", "FLEET_RUNTIME_READY",
 	} {
 		if !strings.Contains(hostedRuntimeBootstrapScript, required) {
 			t.Errorf("bootstrap script missing %q", required)
+		}
+	}
+}
+
+func TestHostedRuntimeBootstrapInstallsGitForEveryPackageManager(t *testing.T) {
+	for _, install := range []string{
+		"apt-get install -y -qq ca-certificates curl git ",
+		"apk add --no-cache nodejs npm python3 tar gzip curl git ",
+		"dnf install -y nodejs npm python3 tar gzip curl git ",
+		"yum install -y nodejs npm python3 tar gzip curl git ",
+	} {
+		if !strings.Contains(hostedRuntimeBootstrapScript, install) {
+			t.Errorf("bootstrap script missing Git install path %q", install)
 		}
 	}
 }
