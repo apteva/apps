@@ -82,6 +82,24 @@ func TestActiveThemeIsResolvedPerSite(t *testing.T) {
 	}
 }
 
+func TestRenderedThemeAssetsKeepProxyProjectAndSite(t *testing.T) {
+	if err := initializeThemes(); err != nil {
+		t.Fatal(err)
+	}
+	body, err := renderSingle(PageData{
+		Theme:         getTheme("default"),
+		URLPrefix:     "/api/apps/content/",
+		ResourceQuery: "?project_id=p1&site=one",
+		Post:          &Post{Kind: "page", BodyBlocks: Document{Version: 1}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(body, `_theme/default/2/style.css?project_id=p1&amp;site=one`) {
+		t.Fatalf("rendered stylesheet lost resource query: %s", body)
+	}
+}
+
 func TestCrossSiteIDsAreRejected(t *testing.T) {
 	db := hardeningTestDB(t)
 	s1, _ := dbCreateSite(db, "p1", "one", "One", "")
@@ -115,7 +133,7 @@ func TestHydratePostMediaPathsIsTenantScoped(t *testing.T) {
 		t.Fatal(err)
 	}
 	post := &Post{BodyBlocks: Document{Version: 1, Blocks: []Block{{Type: "core/image", Attrs: map[string]any{"media_id": media2.ID}}}}}
-	hydrated := hydratePostMediaPaths(db, "p1", s1.ID, post)
+	hydrated := hydratePostMediaPaths(db, "p1", s1.ID, post, "?project_id=p1&site=one")
 	if got := hydrated.BodyBlocks.Blocks[0].Attrs["media_id"]; got != "" {
 		t.Fatalf("cross-site media resolved to %v", got)
 	}

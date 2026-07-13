@@ -48,7 +48,7 @@ type Media struct {
 // numeric media references replaced by tenant-scoped storage paths.
 // Theme templates never query the database and cannot resolve an ID
 // belonging to another site.
-func hydratePostMediaPaths(db *sql.DB, projectID string, siteID int64, post *Post) *Post {
+func hydratePostMediaPaths(db *sql.DB, projectID string, siteID int64, post *Post, resourceQuery string) *Post {
 	if post == nil {
 		return nil
 	}
@@ -100,14 +100,18 @@ func hydratePostMediaPaths(db *sql.DB, projectID string, siteID int64, post *Pos
 			switch key {
 			case "media_id", "image_media_id":
 				if id, ok := asInt64(value); ok {
-					block.Attrs[key] = paths[id]
+					if paths[id] != "" {
+						block.Attrs[key] = paths[id] + resourceQuery
+					} else {
+						block.Attrs[key] = ""
+					}
 				}
 			case "media_ids":
 				if values, ok := value.([]any); ok {
 					resolved := make([]any, 0, len(values))
 					for _, item := range values {
 						if id, ok := asInt64(item); ok && paths[id] != "" {
-							resolved = append(resolved, paths[id])
+							resolved = append(resolved, paths[id]+resourceQuery)
 						}
 					}
 					block.Attrs[key] = resolved

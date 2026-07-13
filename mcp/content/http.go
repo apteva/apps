@@ -229,7 +229,7 @@ func (a *App) servePost(w http.ResponseWriter, r *http.Request, ctx *sdk.AppCtx,
 	})
 	terms, _ := dbListPostTerms(ctx.AppDB(), pid, siteID, post.ID)
 	data := basePageData(ctx, pid, siteID, settings, r)
-	data.Post = hydratePostMediaPaths(ctx.AppDB(), pid, siteID, post)
+	data.Post = hydratePostMediaPaths(ctx.AppDB(), pid, siteID, post, data.ResourceQuery)
 	data.Terms = terms
 	data.PageTitle = post.Title
 	if post.SEODescription != "" {
@@ -242,7 +242,7 @@ func (a *App) servePost(w http.ResponseWriter, r *http.Request, ctx *sdk.AppCtx,
 	}
 	if post.FeaturedMediaID != nil {
 		if m, err := dbGetMedia(ctx.AppDB(), pid, siteID, *post.FeaturedMediaID); err == nil {
-			data.FeaturedMediaURL = "/_media" + strings.TrimPrefix(m.StoragePath, "/.media")
+			data.FeaturedMediaURL = data.URLPrefix + "_media/" + strings.TrimPrefix(m.StoragePath, "/.media/") + data.ResourceQuery
 			data.FeaturedMediaAlt = m.Alt
 		}
 	}
@@ -453,7 +453,7 @@ func (a *App) handlePreview(w http.ResponseWriter, r *http.Request) {
 	settings, _ := effectiveSettings(ctx, pid, siteID)
 	terms, _ := dbListPostTerms(ctx.AppDB(), pid, siteID, post.ID)
 	data := basePageData(ctx, pid, siteID, settings, r)
-	data.Post = hydratePostMediaPaths(ctx.AppDB(), pid, siteID, post)
+	data.Post = hydratePostMediaPaths(ctx.AppDB(), pid, siteID, post, data.ResourceQuery)
 	data.Terms = terms
 	data.PageTitle = post.Title + " (preview)"
 	w.Header().Set("X-Robots-Tag", "noindex")
@@ -636,6 +636,7 @@ func basePageData(ctx *sdk.AppCtx, pid string, siteID int64, settings map[string
 		Locale:        firstNonEmpty(settings["default_locale"], "en"),
 		PublicBaseURL: settings["public_base_url"],
 		URLPrefix:     prefix,
+		ResourceQuery: proxiedRenderQuery(r),
 		SiteID:        siteID,
 		PrimaryMenu:   rendered,
 		Now:           time.Now().UTC().Format(time.RFC3339),
