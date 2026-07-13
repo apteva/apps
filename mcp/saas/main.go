@@ -41,6 +41,14 @@ const (
 	commerceClaimTimeout    = 15 * time.Minute
 )
 
+const (
+	quotaStateBelow       = "below"
+	quotaStateApproaching = "approaching"
+	quotaStateReached     = "reached"
+	quotaStateExceeded    = "exceeded"
+	defaultQuotaThreshold = int64(80)
+)
+
 type App struct{}
 
 var globalCtx *sdk.AppCtx
@@ -385,6 +393,21 @@ type UsageTotal struct {
 	SourceCount int64  `json:"source_count"`
 }
 
+type quotaMeasurement struct {
+	FeatureKey string
+	Quantity   int64
+	LimitValue int64
+	Metadata   json.RawMessage
+}
+
+type quotaTransition struct {
+	PreviousState    string
+	State            string
+	Quantity         int64
+	LimitValue       int64
+	ThresholdPercent int64
+}
+
 type usageSnapshotResponse struct {
 	Usage []usageGauge `json:"usage"`
 }
@@ -606,6 +629,14 @@ func (a *App) toolPlanLimitSet(ctx *sdk.AppCtx, args map[string]any) (any, error
 	pid, err := requireProject(ctx, args)
 	if err != nil {
 		return nil, err
+	}
+	if metadata := mapFromAny(args["metadata"]); metadata != nil {
+		if raw, ok := metadata["warning_threshold_percent"]; ok {
+			threshold := int64FromAny(raw)
+			if threshold < 1 || threshold > 99 {
+				return nil, errors.New("warning_threshold_percent must be between 1 and 99")
+			}
+		}
 	}
 	l, err := dbPlanLimitUpsert(ctx.AppDB(), pid, args)
 	if err != nil {
@@ -946,7 +977,7 @@ func (a *App) syncAccountUsage(ctx *sdk.AppCtx, pid string, acct *Account, timeo
 	if err != nil {
 		return 0, 1, []string{acct.ID + ": " + err.Error()}
 	}
-	records, failed := 0, 0
+	records, failed, succeeded := 0, 0, 0
 	var syncErrors []string
 	for _, src := range sources {
 		cfg := parseUsageSourceConfig(src.Metadata)
@@ -973,7 +1004,14 @@ func (a *App) syncAccountUsage(ctx *sdk.AppCtx, pid string, acct *Account, timeo
 			syncErrors = append(syncErrors, fmt.Sprintf("%s/%s.%s: %v", acct.ID, src.AppName, src.ToolName, err))
 			continue
 		}
+		succeeded++
 		records += len(gauges)
+	}
+	if succeeded > 0 {
+		if err := a.evaluateQuotaTransitions(ctx, pid, acct); err != nil {
+			failed++
+			syncErrors = append(syncErrors, fmt.Sprintf("%s/quota: %v", acct.ID, err))
+		}
 	}
 	if failed == 0 {
 		_ = dbAccountUsageSynced(ctx.AppDB(), pid, acct.ID)
@@ -1025,8 +1063,106 @@ func (a *App) toolUsageRecord(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	if err := dbUsageSnapshotUpsert(ctx.AppDB(), pid, acct, firstNonEmpty(strArg(args, "source_app"), "manual"), strArg(args, "feature_key"), int64Arg(args, "quantity"), mapFromAny(args["metadata"])); err != nil {
 		return nil, err
 	}
+	if err := a.evaluateQuotaTransitions(ctx, pid, acct); err != nil {
+		return nil, err
+	}
 	usage, err := dbUsageTotals(ctx.AppDB(), pid, map[string]any{"account_id": acct.ID, "feature_key": strArg(args, "feature_key")})
 	return map[string]any{"usage": usage}, err
+}
+
+func (a *App) evaluateQuotaTransitions(ctx *sdk.AppCtx, pid string, acct *Account) error {
+	measurements, err := dbQuotaMeasurements(ctx.AppDB(), pid, acct)
+	if err != nil {
+		return err
+	}
+	for _, measurement := range measurements {
+		threshold := quotaWarningThreshold(measurement.Metadata)
+		state := quotaStateFor(measurement.Quantity, measurement.LimitValue, threshold)
+		transition, changed, err := dbQuotaStateApply(ctx.AppDB(), pid, acct, measurement, threshold, state)
+		if err != nil {
+			return err
+		}
+		if !changed {
+			continue
+		}
+		topic := quotaEventForTransition(transition.PreviousState, transition.State)
+		if topic == "" {
+			continue
+		}
+		percentage := float64(0)
+		if transition.LimitValue > 0 {
+			percentage = float64(transition.Quantity) * 100 / float64(transition.LimitValue)
+		}
+		payload := map[string]any{
+			"account_id": acct.ID, "customer_id": acct.CustomerID,
+			"auth_org_id": int64PtrValue(acct.AuthOrgID), "auth_user_id": int64PtrValue(acct.AuthUserID),
+			"plan_key": acct.PlanKey, "feature_key": measurement.FeatureKey,
+			"quantity": transition.Quantity, "limit": transition.LimitValue, "percentage": percentage,
+			"threshold_percent": transition.ThresholdPercent,
+			"previous_state":    transition.PreviousState, "state": transition.State,
+		}
+		_ = recordEvent(ctx.AppDB(), pid, acct.ID, topic, "usage", payload)
+		ctx.Emit(topic, payload)
+	}
+	return nil
+}
+
+func quotaWarningThreshold(metadata json.RawMessage) int64 {
+	var values map[string]any
+	if len(metadata) > 0 && json.Unmarshal(metadata, &values) == nil {
+		if threshold := int64FromAny(values["warning_threshold_percent"]); threshold >= 1 && threshold <= 99 {
+			return threshold
+		}
+	}
+	return defaultQuotaThreshold
+}
+
+func quotaStateFor(quantity, limitValue, thresholdPercent int64) string {
+	if limitValue <= 0 {
+		return quotaStateBelow
+	}
+	if quantity > limitValue {
+		return quotaStateExceeded
+	}
+	if quantity == limitValue {
+		return quotaStateReached
+	}
+	if float64(quantity)*100 >= float64(limitValue)*float64(thresholdPercent) {
+		return quotaStateApproaching
+	}
+	return quotaStateBelow
+}
+
+func quotaStateSeverity(state string) int {
+	switch state {
+	case quotaStateApproaching:
+		return 1
+	case quotaStateReached:
+		return 2
+	case quotaStateExceeded:
+		return 3
+	default:
+		return 0
+	}
+}
+
+func quotaEventForTransition(previous, current string) string {
+	if previous == current {
+		return ""
+	}
+	if quotaStateSeverity(current) < quotaStateSeverity(previous) {
+		return "saas.quota.recovered"
+	}
+	switch current {
+	case quotaStateApproaching:
+		return "saas.quota.approaching"
+	case quotaStateReached:
+		return "saas.quota.reached"
+	case quotaStateExceeded:
+		return "saas.quota.exceeded"
+	default:
+		return ""
+	}
 }
 
 func (a *App) toolUsageGet(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -3773,6 +3909,70 @@ func dbUsageTotals(db *sql.DB, pid string, args map[string]any) ([]UsageTotal, e
 		out = append(out, u)
 	}
 	return out, rows.Err()
+}
+
+func dbQuotaMeasurements(db *sql.DB, pid string, acct *Account) ([]quotaMeasurement, error) {
+	rows, err := db.Query(`
+		SELECT l.feature_key, l.limit_value, l.metadata_json, COALESCE(SUM(u.quantity), 0)
+		FROM saas_plan_limits l
+		LEFT JOIN saas_usage_snapshots u
+		  ON u.project_id=l.project_id AND u.account_id=? AND u.feature_key=l.feature_key
+		WHERE l.project_id=? AND l.plan_key=?
+		GROUP BY l.feature_key, l.limit_value, l.metadata_json
+		ORDER BY l.feature_key`, acct.ID, pid, acct.PlanKey)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []quotaMeasurement
+	for rows.Next() {
+		var measurement quotaMeasurement
+		var metadata string
+		if err := rows.Scan(&measurement.FeatureKey, &measurement.LimitValue, &metadata, &measurement.Quantity); err != nil {
+			return nil, err
+		}
+		measurement.Metadata = json.RawMessage(metadata)
+		out = append(out, measurement)
+	}
+	return out, rows.Err()
+}
+
+func dbQuotaStateApply(db *sql.DB, pid string, acct *Account, measurement quotaMeasurement, threshold int64, state string) (*quotaTransition, bool, error) {
+	tx, err := db.Begin()
+	if err != nil {
+		return nil, false, err
+	}
+	defer tx.Rollback()
+	previous := quotaStateBelow
+	err = tx.QueryRow(`SELECT state FROM saas_quota_states WHERE project_id=? AND account_id=? AND feature_key=?`, pid, acct.ID, measurement.FeatureKey).Scan(&previous)
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return nil, false, err
+	}
+	changed := previous != state
+	changedAt := any(nil)
+	if changed {
+		changedAt = time.Now().UTC().Format("2006-01-02 15:04:05")
+	}
+	_, err = tx.Exec(`
+		INSERT INTO saas_quota_states
+			(project_id, account_id, plan_key, feature_key, state, quantity, limit_value, threshold_percent, changed_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+		ON CONFLICT(project_id, account_id, feature_key) DO UPDATE SET
+			plan_key=excluded.plan_key, state=excluded.state, quantity=excluded.quantity,
+			limit_value=excluded.limit_value, threshold_percent=excluded.threshold_percent,
+			changed_at=CASE WHEN saas_quota_states.state<>excluded.state THEN excluded.changed_at ELSE saas_quota_states.changed_at END,
+			updated_at=CURRENT_TIMESTAMP`,
+		pid, acct.ID, acct.PlanKey, measurement.FeatureKey, state, measurement.Quantity, measurement.LimitValue, threshold, changedAt)
+	if err != nil {
+		return nil, false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, false, err
+	}
+	return &quotaTransition{
+		PreviousState: previous, State: state, Quantity: measurement.Quantity,
+		LimitValue: measurement.LimitValue, ThresholdPercent: threshold,
+	}, changed, nil
 }
 
 func recordEvent(db *sql.DB, pid, accountID, eventType, actor string, payload any) error {

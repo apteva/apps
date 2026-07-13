@@ -190,8 +190,8 @@ func TestEmbeddedManifest_Valid(t *testing.T) {
 	if m.Name != "saas" {
 		t.Errorf("manifest.Name=%q, want saas", m.Name)
 	}
-	if m.Version != "0.3.0" {
-		t.Errorf("manifest.Version=%q, want 0.3.0", m.Version)
+	if m.Version != "0.3.1" {
+		t.Errorf("manifest.Version=%q, want 0.3.1", m.Version)
 	}
 	if !m.Requires.DynamicAppCalls {
 		t.Error("manifest should allow dynamic app calls for configured usage sources")
@@ -249,6 +249,15 @@ func TestEmbeddedManifest_Valid(t *testing.T) {
 	}
 	if required["messaging"] || required["analytics"] {
 		t.Error("messaging and analytics should be optional")
+	}
+	publishes := map[string]bool{}
+	for _, event := range m.Provides.Publishes {
+		publishes[event.Name] = true
+	}
+	for _, name := range []string{"saas.quota.approaching", "saas.quota.reached", "saas.quota.exceeded", "saas.quota.recovered"} {
+		if !publishes[name] {
+			t.Errorf("manifest missing published event %s", name)
+		}
 	}
 }
 
@@ -1133,6 +1142,140 @@ func TestUsageSync_StoresLiveGaugeNotAdditive(t *testing.T) {
 	}
 	if usage[0].OverLimit {
 		t.Fatal("usage should not be over limit after gauge dropped below 5")
+	}
+}
+
+func TestUsageSync_EmitsQuotaTransitionsWithoutDuplicates(t *testing.T) {
+	pf := &platformStub{contacts: 79}
+	ctx, db := newTestCtx(t, pf)
+	defer db.Close()
+	recorder := tk.NewEmitRecorder()
+	ctx.SetEmitter(recorder)
+	app := &App{}
+
+	if _, err := app.toolPlanUpsert(ctx, map[string]any{"key": "free", "name": "Free"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.toolPlanLimitSet(ctx, map[string]any{
+		"plan_key": "free", "feature_key": "crm:contacts", "limit_value": 100,
+		"metadata": map[string]any{"warning_threshold_percent": 80},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.toolPlanUsageSourceAdd(ctx, map[string]any{"plan_key": "free", "app_name": "crm", "tool_name": "crm_saas_usage_snapshot"}); err != nil {
+		t.Fatal(err)
+	}
+	created, err := app.toolAccountCreate(ctx, map[string]any{"owner_email": "owner@example.com", "slug": "quota-events", "plan_key": "free"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	acct := created.(map[string]any)["account"].(*Account)
+	recorder.Reset()
+
+	syncUsage := func() {
+		t.Helper()
+		if _, err := app.toolUsageSync(ctx, map[string]any{"account_id": acct.ID}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	syncUsage() // 79%, below
+	pf.contacts = 80
+	syncUsage() // approaching
+	pf.contacts = 90
+	syncUsage() // still approaching: no duplicate
+	pf.contacts = 100
+	syncUsage() // reached
+	pf.contacts = 101
+	syncUsage() // exceeded
+	pf.contacts = 120
+	syncUsage() // still exceeded: no duplicate
+	pf.contacts = 95
+	syncUsage() // recovered to approaching
+	syncUsage() // no duplicate recovery
+	pf.emptyUsage = true
+	syncUsage() // complete empty snapshot recovers to below
+
+	events := recorder.Events()
+	wantTopics := []string{
+		"saas.quota.approaching",
+		"saas.quota.reached",
+		"saas.quota.exceeded",
+		"saas.quota.recovered",
+		"saas.quota.recovered",
+	}
+	if len(events) != len(wantTopics) {
+		t.Fatalf("emitted events=%d, want %d: %+v", len(events), len(wantTopics), events)
+	}
+	for i, want := range wantTopics {
+		if events[i].Topic != want || events[i].ProjectID != "proj-test" {
+			t.Fatalf("event[%d]=%+v, want topic=%s project=proj-test", i, events[i], want)
+		}
+	}
+	payload := events[0].Data.(map[string]any)
+	if payload["account_id"] != acct.ID || payload["plan_key"] != "free" || payload["feature_key"] != "crm:contacts" {
+		t.Fatalf("approaching payload identity is incomplete: %+v", payload)
+	}
+	if payload["quantity"] != int64(80) || payload["limit"] != int64(100) || payload["threshold_percent"] != int64(80) || payload["state"] != quotaStateApproaching {
+		t.Fatalf("approaching payload has wrong quota values: %+v", payload)
+	}
+	lastPayload := events[len(events)-1].Data.(map[string]any)
+	if lastPayload["previous_state"] != quotaStateApproaching || lastPayload["state"] != quotaStateBelow || lastPayload["quantity"] != int64(0) {
+		t.Fatalf("empty-snapshot recovery payload is wrong: %+v", lastPayload)
+	}
+	var state string
+	var quantity int64
+	if err := db.QueryRow(`SELECT state, quantity FROM saas_quota_states WHERE project_id=? AND account_id=? AND feature_key=?`, "proj-test", acct.ID, "crm:contacts").Scan(&state, &quantity); err != nil {
+		t.Fatal(err)
+	}
+	if state != quotaStateBelow || quantity != 0 {
+		t.Fatalf("persisted quota state=%s quantity=%d, want below/0", state, quantity)
+	}
+}
+
+func TestUsageRecord_EmitsQuotaTransition(t *testing.T) {
+	pf := &platformStub{}
+	ctx, db := newTestCtx(t, pf)
+	defer db.Close()
+	recorder := tk.NewEmitRecorder()
+	ctx.SetEmitter(recorder)
+	app := &App{}
+
+	if _, err := app.toolPlanUpsert(ctx, map[string]any{"key": "free", "name": "Free"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.toolPlanLimitSet(ctx, map[string]any{"plan_key": "free", "feature_key": "storage:bytes", "limit_value": 10}); err != nil {
+		t.Fatal(err)
+	}
+	created, err := app.toolAccountCreate(ctx, map[string]any{"owner_email": "owner@example.com", "slug": "manual-quota", "plan_key": "free"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	acct := created.(map[string]any)["account"].(*Account)
+	recorder.Reset()
+	if _, err := app.toolUsageRecord(ctx, map[string]any{"account_id": acct.ID, "feature_key": "storage:bytes", "quantity": 8}); err != nil {
+		t.Fatal(err)
+	}
+	events := recorder.EventsByTopic("saas.quota.approaching")
+	if len(events) != 1 {
+		t.Fatalf("manual usage approaching events=%d, want 1: %+v", len(events), recorder.Events())
+	}
+}
+
+func TestPlanLimitSet_ValidatesWarningThreshold(t *testing.T) {
+	ctx, db := newTestCtx(t, &platformStub{})
+	defer db.Close()
+	app := &App{}
+	if _, err := app.toolPlanUpsert(ctx, map[string]any{"key": "free", "name": "Free"}); err != nil {
+		t.Fatal(err)
+	}
+	for _, threshold := range []int{0, 100} {
+		_, err := app.toolPlanLimitSet(ctx, map[string]any{
+			"plan_key": "free", "feature_key": "crm:contacts", "limit_value": 100,
+			"metadata": map[string]any{"warning_threshold_percent": threshold},
+		})
+		if err == nil || !strings.Contains(err.Error(), "between 1 and 99") {
+			t.Fatalf("threshold %d error=%v, want validation error", threshold, err)
+		}
 	}
 }
 

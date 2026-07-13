@@ -148,3 +148,19 @@ timeout. Successful complete responses replace the source's prior
 generation; failed responses preserve the last good gauges and update the
 source failure state. Access checks return `usage_unknown` when a configured
 source has never succeeded or is older than its freshness threshold.
+
+SaaS persists quota state per account and feature. The default warning
+threshold is 80%; set `metadata.warning_threshold_percent` on a plan limit
+to use another value from 1 through 99. Successful pulled or manually
+recorded usage updates emit transition-only events:
+
+- `saas.quota.approaching` when usage enters the warning range.
+- `saas.quota.reached` when usage equals the limit.
+- `saas.quota.exceeded` when usage is above the limit.
+- `saas.quota.recovered` when usage moves down to a less severe state.
+
+Repeated usage updates in the same state do not emit duplicate events. Event
+payloads include the account, customer, plan, feature, quantity, limit,
+percentage, threshold, and previous/current state. Quotas remain scoped to a
+SaaS account (tenant); `auth_user_id` identifies its owner but does not make
+the quota user-specific.
