@@ -28,7 +28,7 @@ import (
 const legacyManifestYAML = `schema: apteva-app/v1
 name: affiliate
 display_name: Affiliate
-version: 0.1.9
+version: 0.1.10
 description: Publisher-side affiliate manager.
 author: Apteva
 scopes: [project, global]
@@ -104,7 +104,7 @@ provides:
     - name: affiliate_links
       description: Search managed links.
     - name: affiliate_stats
-      description: Read normalized affiliate stats with one unified clicks metric.
+      description: Read normalized affiliate stats with one unified clicks metric. Date ranges accept YYYY-MM-DD or RFC3339 values.
 runtime:
   kind: source
   source:
@@ -298,7 +298,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name: "affiliate_stats",
-			Description: "Read normalized affiliate stats with one unified clicks metric. Args: from?, to?, network?, offer_id?, link_id?, " +
+			Description: "Read normalized affiliate stats with one unified clicks metric. Args: from?, to? (YYYY-MM-DD or RFC3339), network?, offer_id?, link_id?, " +
 				"group_by? (network|offer|link|day, default day).",
 			InputSchema: schemaObject(map[string]any{
 				"from":     map[string]any{"type": "string"},
@@ -1641,12 +1641,48 @@ func (a *App) toolLinks(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	return map[string]any{"links": rows, "count": len(rows), "total": total}, nil
 }
 
+func normalizedStatsRange(args map[string]any) (string, string, error) {
+	from, err := normalizeStatsDate("from", strArg(args, "from"))
+	if err != nil {
+		return "", "", err
+	}
+	to, err := normalizeStatsDate("to", strArg(args, "to"))
+	if err != nil {
+		return "", "", err
+	}
+	if from != "" && to != "" && from > to {
+		return "", "", errors.New("from must be on or before to")
+	}
+	return from, to, nil
+}
+
+func normalizeStatsDate(name, value string) (string, error) {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return "", nil
+	}
+	if len(value) == len("2006-01-02") {
+		if _, err := time.Parse("2006-01-02", value); err == nil {
+			return value, nil
+		}
+	}
+	parsed, err := time.Parse(time.RFC3339, value)
+	if err != nil {
+		return "", fmt.Errorf("%s must be YYYY-MM-DD or RFC3339", name)
+	}
+	return parsed.UTC().Format("2006-01-02"), nil
+}
+
 func (a *App) toolStats(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	network := strArg(args, "network")
 	if network != "" {
 		network = canonicalNetworkKey(network)
 	}
-	rows, err := dbStats(ctx.AppDB(), strArg(args, "from"), strArg(args, "to"), network, toInt64(args["offer_id"]), toInt64(args["link_id"]), strArg(args, "group_by"))
+	from, to, err := normalizedStatsRange(args)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := dbStats(ctx.AppDB(), from, to, network, toInt64(args["offer_id"]), toInt64(args["link_id"]), strArg(args, "group_by"))
 	if err != nil {
 		return nil, err
 	}
@@ -1674,7 +1710,11 @@ func (a *App) detailedStats(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if network != "" {
 		network = canonicalNetworkKey(network)
 	}
-	rows, err := dbStats(ctx.AppDB(), strArg(args, "from"), strArg(args, "to"), network, toInt64(args["offer_id"]), toInt64(args["link_id"]), strArg(args, "group_by"))
+	from, to, err := normalizedStatsRange(args)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := dbStats(ctx.AppDB(), from, to, network, toInt64(args["offer_id"]), toInt64(args["link_id"]), strArg(args, "group_by"))
 	if err != nil {
 		return nil, err
 	}

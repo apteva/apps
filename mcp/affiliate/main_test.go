@@ -223,7 +223,9 @@ func TestRedirectHitUsesRuleIDAndAbsoluteDailyCount(t *testing.T) {
 	if stats[0].Clicks != 9 || stats[0].RedirectClicks != 7 {
 		t.Fatalf("provider and redirect clicks were not kept separate: %+v", stats[0])
 	}
-	out, err := app.toolStats(ctx, map[string]any{"network": "target-circle", "from": "2026-07-13", "to": "2026-07-13"})
+	out, err := app.toolStats(ctx, map[string]any{
+		"network": "target-circle", "from": "2026-07-13T00:00:00Z", "to": "2026-07-13T23:59:59Z",
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -248,6 +250,24 @@ func TestRedirectHitUsesRuleIDAndAbsoluteDailyCount(t *testing.T) {
 	detailedResult := detailed.(map[string]any)
 	if detailedResult["provider_clicks_available"] != false || detailedResult["redirect_clicks_available"] != true {
 		t.Fatalf("unexpected internal click availability: %+v", detailedResult)
+	}
+}
+
+func TestStatsDateRangeValidation(t *testing.T) {
+	ctx := newTestCtx(t, nil, nil)
+	app := &App{}
+	if _, err := app.toolStats(ctx, map[string]any{"from": "July 13", "to": "2026-07-13"}); err == nil {
+		t.Fatal("invalid from date was accepted")
+	}
+	if _, err := app.toolStats(ctx, map[string]any{"from": "2026-07-14", "to": "2026-07-13"}); err == nil {
+		t.Fatal("reversed date range was accepted")
+	}
+	from, to, err := normalizedStatsRange(map[string]any{
+		"from": "2026-07-13T23:30:00-07:00",
+		"to":   "2026-07-14T23:00:00-07:00",
+	})
+	if err != nil || from != "2026-07-14" || to != "2026-07-15" {
+		t.Fatalf("UTC-normalized range=%s..%s err=%v", from, to, err)
 	}
 }
 
