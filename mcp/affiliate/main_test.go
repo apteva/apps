@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -227,8 +228,26 @@ func TestRedirectHitUsesRuleIDAndAbsoluteDailyCount(t *testing.T) {
 		t.Fatal(err)
 	}
 	result := out.(map[string]any)
-	if result["provider_clicks_available"] != false || result["redirect_clicks_available"] != true {
-		t.Fatalf("unexpected click availability: %+v", result)
+	unified := result["stats"].([]UnifiedStatRow)
+	if len(unified) != 1 || unified[0].Clicks != 7 {
+		t.Fatalf("unified MCP clicks=%+v", unified)
+	}
+	payload, err := json.Marshal(result)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, internal := range []string{"redirect_clicks", "provider_clicks", "clicks_available"} {
+		if strings.Contains(string(payload), internal) {
+			t.Fatalf("MCP response leaked internal field %q: %s", internal, payload)
+		}
+	}
+	detailed, err := app.detailedStats(ctx, map[string]any{"network": "target-circle", "from": "2026-07-13", "to": "2026-07-13"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	detailedResult := detailed.(map[string]any)
+	if detailedResult["provider_clicks_available"] != false || detailedResult["redirect_clicks_available"] != true {
+		t.Fatalf("unexpected internal click availability: %+v", detailedResult)
 	}
 }
 

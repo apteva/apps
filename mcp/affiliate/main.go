@@ -28,7 +28,7 @@ import (
 const legacyManifestYAML = `schema: apteva-app/v1
 name: affiliate
 display_name: Affiliate
-version: 0.1.8
+version: 0.1.9
 description: Publisher-side affiliate manager.
 author: Apteva
 scopes: [project, global]
@@ -104,7 +104,7 @@ provides:
     - name: affiliate_links
       description: Search managed links.
     - name: affiliate_stats
-      description: Read normalized provider stats and separate first-party redirect clicks.
+      description: Read normalized affiliate stats with one unified clicks metric.
 runtime:
   kind: source
   source:
@@ -298,7 +298,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name: "affiliate_stats",
-			Description: "Read normalized provider stats and separate first-party redirect clicks. Args: from?, to?, network?, offer_id?, link_id?, " +
+			Description: "Read normalized affiliate stats with one unified clicks metric. Args: from?, to?, network?, offer_id?, link_id?, " +
 				"group_by? (network|offer|link|day, default day).",
 			InputSchema: schemaObject(map[string]any{
 				"from":     map[string]any{"type": "string"},
@@ -611,6 +611,20 @@ type StatRow struct {
 	LinkID          int64  `json:"link_id,omitempty"`
 	Clicks          int64  `json:"clicks"`
 	RedirectClicks  int64  `json:"redirect_clicks"`
+	Conversions     int64  `json:"conversions"`
+	RevenueCents    int64  `json:"revenue_cents"`
+	CommissionCents int64  `json:"commission_cents"`
+	Currency        string `json:"currency"`
+}
+
+// UnifiedStatRow is the MCP-facing analytics contract. Source-specific click
+// counters stay internal so callers have exactly one click metric to consume.
+type UnifiedStatRow struct {
+	Date            string `json:"date,omitempty"`
+	NetworkKey      string `json:"network_key,omitempty"`
+	OfferID         int64  `json:"offer_id,omitempty"`
+	LinkID          int64  `json:"link_id,omitempty"`
+	Clicks          int64  `json:"clicks"`
 	Conversions     int64  `json:"conversions"`
 	RevenueCents    int64  `json:"revenue_cents"`
 	CommissionCents int64  `json:"commission_cents"`
@@ -1636,6 +1650,34 @@ func (a *App) toolStats(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	unified := make([]UnifiedStatRow, 0, len(rows))
+	for _, row := range rows {
+		rowNetwork := network
+		if rowNetwork == "" {
+			rowNetwork = row.NetworkKey
+		}
+		clicks := row.RedirectClicks
+		if capability, ok := capabilityFor(rowNetwork); ok && capability.Clicks {
+			clicks = row.Clicks
+		}
+		unified = append(unified, UnifiedStatRow{
+			Date: row.Date, NetworkKey: row.NetworkKey, OfferID: row.OfferID, LinkID: row.LinkID,
+			Clicks: clicks, Conversions: row.Conversions, RevenueCents: row.RevenueCents,
+			CommissionCents: row.CommissionCents, Currency: row.Currency,
+		})
+	}
+	return map[string]any{"stats": unified, "count": len(unified)}, nil
+}
+
+func (a *App) detailedStats(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	network := strArg(args, "network")
+	if network != "" {
+		network = canonicalNetworkKey(network)
+	}
+	rows, err := dbStats(ctx.AppDB(), strArg(args, "from"), strArg(args, "to"), network, toInt64(args["offer_id"]), toInt64(args["link_id"]), strArg(args, "group_by"))
+	if err != nil {
+		return nil, err
+	}
 	providerClicksAvailable := false
 	if network != "" {
 		if capability, ok := capabilityFor(network); ok {
@@ -1941,7 +1983,7 @@ func (a *App) handleStats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	q := r.URL.Query()
-	out, err := a.toolStats(globalCtx, map[string]any{
+	out, err := a.detailedStats(globalCtx, map[string]any{
 		"from":     q.Get("from"),
 		"to":       q.Get("to"),
 		"network":  q.Get("network"),
