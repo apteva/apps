@@ -35,7 +35,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: seo
 display_name: SEO
-version: 0.4.8
+version: 0.4.9
 description: Generic SEO research workbench — locale-aware domains, keywords, rankings, backlinks behind one pluggable provider integration.
 author: Apteva
 scopes: [project, global]
@@ -805,22 +805,30 @@ func (a *App) toolDomainsAdd(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		}
 		locID = loc.ID
 	}
-	res, err := db.Exec(
+	id, err := upsertDomainRecord(db, pid, host, label, locID)
+	if err != nil {
+		return nil, err
+	}
+	return getDomain(db, pid, id)
+}
+
+func upsertDomainRecord(db *sql.DB, pid, host, label string, locID any) (int64, error) {
+	_, err := db.Exec(
 		`INSERT INTO domains (project_id, host, label, default_location_id) VALUES (?, ?, ?, ?)
 		   ON CONFLICT(project_id, host) DO UPDATE SET
 		     label = CASE WHEN excluded.label != '' THEN excluded.label ELSE domains.label END,
 		     default_location_id = COALESCE(excluded.default_location_id, domains.default_location_id)`,
 		pid, host, label, locID)
 	if err != nil {
-		return nil, fmt.Errorf("insert domain: %w", err)
+		return 0, fmt.Errorf("insert domain: %w", err)
 	}
-	id, _ := res.LastInsertId()
-	if id == 0 {
-		// ON CONFLICT path: look up the existing row.
-		row := db.QueryRow(`SELECT id FROM domains WHERE project_id = ? AND host = ?`, pid, host)
-		_ = row.Scan(&id)
+	var id int64
+	if err := db.QueryRow(
+		`SELECT id FROM domains WHERE project_id = ? AND host = ?`,
+		pid, host).Scan(&id); err != nil {
+		return 0, fmt.Errorf("read domain after insert: %w", err)
 	}
-	return getDomain(db, pid, id)
+	return id, nil
 }
 
 func (a *App) toolDomainsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -877,23 +885,30 @@ func (a *App) toolKeywordsAdd(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		return nil, fmt.Errorf("location %d has no country_iso; choose a country-scoped location for keyword metrics", loc.ID)
 	}
 	lang := strings.ToLower(loc.LanguageCode)
-	res, err := db.Exec(
+	id, err := insertKeywordRecord(db, pid, loc.SearchEngine, text, loc.ID, country, lang)
+	if err != nil {
+		return nil, err
+	}
+	return getKeyword(db, pid, id)
+}
+
+func insertKeywordRecord(db *sql.DB, pid, searchEngine, text string, locID int64, country, lang string) (int64, error) {
+	_, err := db.Exec(
 		`INSERT INTO keywords (project_id, search_engine, text, location_id, country_iso, language_iso)
 		   VALUES (?, ?, ?, ?, ?, ?)
 		   ON CONFLICT(project_id, text, location_id) DO NOTHING`,
-		pid, loc.SearchEngine, text, loc.ID, country, lang)
+		pid, searchEngine, text, locID, country, lang)
 	if err != nil {
-		return nil, fmt.Errorf("insert keyword: %w", err)
+		return 0, fmt.Errorf("insert keyword: %w", err)
 	}
-	id, _ := res.LastInsertId()
-	if id == 0 {
-		row := db.QueryRow(
-			`SELECT id FROM keywords
-			   WHERE project_id = ? AND text = ? AND location_id = ?`,
-			pid, text, loc.ID)
-		_ = row.Scan(&id)
+	var id int64
+	if err := db.QueryRow(
+		`SELECT id FROM keywords
+		   WHERE project_id = ? AND text = ? AND location_id = ?`,
+		pid, text, locID).Scan(&id); err != nil {
+		return 0, fmt.Errorf("read keyword after insert: %w", err)
 	}
-	return getKeyword(db, pid, id)
+	return id, nil
 }
 
 func (a *App) toolKeywordsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {

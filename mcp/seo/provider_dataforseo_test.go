@@ -612,6 +612,73 @@ func TestAllSEOMigrationsApplyInOrder(t *testing.T) {
 	}
 }
 
+func TestInsertKeywordRecordReturnsCanonicalIDAfterConflict(t *testing.T) {
+	db := newSEOTestDB(t,
+		"migrations/001_init.sql",
+		"migrations/004_search_entities.sql",
+		"migrations/005_search_engine_keyword_backfill.sql",
+	)
+	locID := insertTestLocation(t, db, "google", 2840)
+
+	firstID, err := insertKeywordRecord(db, "project-a", "google", "browser automation api", locID, "US", "en")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := insertKeywordRecord(db, "project-a", "google", "social media scheduling api", locID, "US", "en"); err != nil {
+		t.Fatal(err)
+	}
+	repeatedID, err := insertKeywordRecord(db, "project-a", "google", "browser automation api", locID, "US", "en")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if repeatedID != firstID {
+		t.Fatalf("repeated keyword id = %d, want canonical id %d", repeatedID, firstID)
+	}
+}
+
+func TestUpsertDomainRecordReturnsCanonicalIDAfterConflict(t *testing.T) {
+	db := newSEOTestDB(t, "migrations/001_init.sql")
+
+	firstID, err := upsertDomainRecord(db, "project-a", "browserbase.com", "Browserbase", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := upsertDomainRecord(db, "project-a", "postiz.com", "Postiz", nil); err != nil {
+		t.Fatal(err)
+	}
+	repeatedID, err := upsertDomainRecord(db, "project-a", "browserbase.com", "Browserbase Cloud", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if repeatedID != firstID {
+		t.Fatalf("repeated domain id = %d, want canonical id %d", repeatedID, firstID)
+	}
+	var label string
+	if err := db.QueryRow(`SELECT label FROM domains WHERE id = ?`, firstID).Scan(&label); err != nil {
+		t.Fatal(err)
+	}
+	if label != "Browserbase Cloud" {
+		t.Fatalf("updated label = %q, want Browserbase Cloud", label)
+	}
+}
+
+func insertTestLocation(t *testing.T, db *sql.DB, searchEngine string, locationCode int64) int64 {
+	t.Helper()
+	res, err := db.Exec(
+		`INSERT INTO seo_locations
+		   (provider, search_engine, location_code, location_name, country_iso, language_code)
+		 VALUES ('dataforseo', ?, ?, 'United States', 'US', 'en')`,
+		searchEngine, locationCode)
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return id
+}
+
 func newSEOTestDB(t *testing.T, migrations ...string) *sql.DB {
 	t.Helper()
 	db, err := sql.Open("sqlite", ":memory:")

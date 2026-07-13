@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.9
+
+- Fixed duplicate `keywords_add` and `domains_add` calls returning stale SQLite
+  insert IDs instead of the canonical existing records.
+
 ## 0.4.8
 
 - Unified `rankings_for_keyword` on the generic SERP result model for Google
