@@ -160,6 +160,10 @@ func (s *service) createExperiment(suiteID, name, trigger string, targets []Targ
 }
 
 func (s *service) catalog() (map[string]any, error) {
+	var environmentCatalog map[string]any
+	if err := s.ctx.PlatformAPI().CallAppResult("environments", "environment_catalog", map[string]any{}, &environmentCatalog); err != nil {
+		return nil, err
+	}
 	var environments []EnvironmentDefinition
 	if err := s.ctx.PlatformAPI().CallAppResult("environments", "environment_list", map[string]any{}, &environments); err != nil {
 		return nil, err
@@ -168,11 +172,20 @@ func (s *service) catalog() (map[string]any, error) {
 	if err := s.ctx.PlatformAPI().CallAppResult("llm", "llm_models_list", map[string]any{}, &models); err != nil {
 		return nil, err
 	}
-	agents, err := s.ctx.RuntimeAPI().ListRuntimeCatalogAgents(s.ctx.CurrentProject())
-	if err != nil {
+	if environmentCatalog == nil {
+		environmentCatalog = map[string]any{}
+	}
+	environmentCatalog["environments"] = environments
+	environmentCatalog["models"] = models.Models
+	return environmentCatalog, nil
+}
+
+func (s *service) createEnvironment(input map[string]any) (*EnvironmentDefinition, error) {
+	var created EnvironmentDefinition
+	if err := s.ctx.PlatformAPI().CallAppResult("environments", "environment_create", input, &created); err != nil {
 		return nil, err
 	}
-	return map[string]any{"environments": environments, "models": models.Models, "agents": agents}, nil
+	return &created, nil
 }
 
 func (s *service) schedule(ctx context.Context) error {

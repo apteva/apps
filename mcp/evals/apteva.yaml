@@ -1,7 +1,7 @@
 schema: apteva-app/v1
 name: evals
 display_name: Evals
-version: 0.1.1
+version: 0.1.2
 description: Behavioral and continuous evaluation of agents inside isolated Environments.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/evals
@@ -52,7 +52,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: evals/v0.1.1
+    ref: evals/v0.1.2
     entry: mcp/evals
   port: 8080
   health_check: /health

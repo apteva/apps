@@ -51,6 +51,8 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/api/cases", Handler: a.handleCases}, {Pattern: "/api/cases/", Handler: a.handleCase},
 		{Pattern: "/api/experiments", Handler: a.handleExperiments}, {Pattern: "/api/experiments/", Handler: a.handleExperiment},
 		{Pattern: "/api/runs/", Handler: a.handleRun}, {Pattern: "/api/catalog", Handler: a.handleCatalog},
+		{Pattern: "/api/environments", Handler: a.handleEnvironments}, {Pattern: "/api/environment-tools/", Handler: a.handleEnvironmentTools},
+		{Pattern: "/api/agent-capabilities/", Handler: a.handleAgentCapabilities},
 		{Pattern: "/api/suggestions/", Handler: a.handleSuggestion},
 	}
 }

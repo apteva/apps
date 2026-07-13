@@ -271,6 +271,69 @@ func (a *App) handleCatalog(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 200, value)
 }
 
+func (a *App) handleEnvironments(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		httpError(w, 405, errors.New("POST only"))
+		return
+	}
+	var input map[string]any
+	if !decodeBody(w, r, &input) {
+		return
+	}
+	value, err := a.svc.createEnvironment(input)
+	if err != nil {
+		httpError(w, 400, err)
+		return
+	}
+	writeJSON(w, 201, value)
+}
+
+func (a *App) handleEnvironmentTools(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		httpError(w, 405, errors.New("GET only"))
+		return
+	}
+	parts := pathParts(r.URL.Path, "/api/environment-tools/")
+	if len(parts) != 1 {
+		http.NotFound(w, r)
+		return
+	}
+	installID, err := strconv.ParseInt(parts[0], 10, 64)
+	if err != nil || installID <= 0 {
+		httpError(w, 400, errors.New("valid app install id required"))
+		return
+	}
+	tools, err := a.svc.ctx.RuntimeAPI().ListRuntimeCatalogAppTools(installID)
+	if err != nil {
+		httpError(w, 502, err)
+		return
+	}
+	writeJSON(w, 200, tools)
+}
+
+func (a *App) handleAgentCapabilities(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		httpError(w, 405, errors.New("GET only"))
+		return
+	}
+	parts := pathParts(r.URL.Path, "/api/agent-capabilities/")
+	if len(parts) != 1 {
+		http.NotFound(w, r)
+		return
+	}
+	agentID, err := strconv.ParseInt(parts[0], 10, 64)
+	if err != nil || agentID <= 0 {
+		httpError(w, 400, errors.New("valid agent id required"))
+		return
+	}
+	capabilities, err := a.svc.ctx.RuntimeAPI().GetRuntimeAgentCapabilities(agentID)
+	if err != nil {
+		httpError(w, 502, err)
+		return
+	}
+	writeJSON(w, 200, capabilities)
+}
+
 func (a *App) handleSuggestion(w http.ResponseWriter, r *http.Request) {
 	parts := pathParts(r.URL.Path, "/api/suggestions/")
 	if len(parts) != 2 || parts[1] != "apply" || r.Method != http.MethodPost {
