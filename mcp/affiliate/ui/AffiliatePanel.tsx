@@ -18,10 +18,10 @@ interface Offer {
 interface Link {
   id: number; network_key: string; offer_id?: number; merchant_name?: string;
   offer_name?: string; destination_url: string; affiliate_url: string;
-  short_url?: string; campaign?: string; subid?: string; status: string;
+  short_url?: string; redirect_rule_id?: number; campaign?: string; subid?: string; status: string;
 }
 interface StatRow {
-  date?: string; network_key?: string; clicks: number; conversions: number;
+  date?: string; network_key?: string; clicks: number; redirect_clicks: number; conversions: number;
   revenue_cents: number; commission_cents: number; currency: string;
 }
 type Tab = "networks" | "offers" | "links" | "stats";
@@ -44,7 +44,8 @@ export default function AffiliatePanel({}: NativePanelProps) {
   const [offers, setOffers] = useState<Offer[]>([]);
   const [links, setLinks] = useState<Link[]>([]);
   const [stats, setStats] = useState<StatRow[]>([]);
-  const [clicksAvailable, setClicksAvailable] = useState(false);
+  const [providerClicksAvailable, setProviderClicksAvailable] = useState(false);
+  const [redirectClicksAvailable, setRedirectClicksAvailable] = useState(false);
   const [offerTotal, setOfferTotal] = useState(0);
   const [linkTotal, setLinkTotal] = useState(0);
   const [offerPage, setOfferPage] = useState(0);
@@ -90,8 +91,12 @@ export default function AffiliatePanel({}: NativePanelProps) {
     const request = ++statsRequest.current;
     const params = new URLSearchParams({ group_by: "day", from, to });
     if (network) params.set("network", network);
-    const data = await getJSON<{ stats: StatRow[]; clicks_available: boolean }>(`${API}/stats?${params}`);
-    if (request === statsRequest.current) { setStats(data.stats || []); setClicksAvailable(Boolean(data.clicks_available)); }
+    const data = await getJSON<{ stats: StatRow[]; provider_clicks_available: boolean; redirect_clicks_available: boolean }>(`${API}/stats?${params}`);
+    if (request === statsRequest.current) {
+      setStats(data.stats || []);
+      setProviderClicksAvailable(Boolean(data.provider_clicks_available));
+      setRedirectClicksAvailable(Boolean(data.redirect_clicks_available));
+    }
   }, [network, from, to]);
 
   const reload = useCallback(async (showStatus = true) => {
@@ -138,7 +143,7 @@ export default function AffiliatePanel({}: NativePanelProps) {
         {tab === "networks" && <NetworksView networks={networks} onRefresh={refreshNetwork} />}
         {tab === "offers" && <OffersView offers={offers} onCreateLink={setLinkingOffer} />}
         {tab === "links" && <LinksView links={links} />}
-        {tab === "stats" && <StatsView stats={stats} clicksAvailable={clicksAvailable} />}
+        {tab === "stats" && <StatsView stats={stats} providerClicksAvailable={providerClicksAvailable} redirectClicksAvailable={redirectClicksAvailable} />}
       </main>
       {tab === "offers" && <Pager page={offerPage} total={offerTotal} onPage={setOfferPage} />}
       {tab === "links" && <Pager page={linkPage} total={linkTotal} onPage={setLinkPage} />}
@@ -178,14 +183,14 @@ function URLCell({ value, onCopy }: { value: string; onCopy: (value: string) => 
   return <td className="px-3 py-2 max-w-[260px]"><div className="truncate text-text-dim" title={value}>{value}</div><div className="flex gap-2 mt-1 text-xs"><button title="Copy URL" onClick={() => void onCopy(value)} className="text-text-muted hover:text-text">Copy</button><a title="Open URL" href={value} target="_blank" rel="noreferrer" className="text-text-muted hover:text-text">Open</a></div></td>;
 }
 
-function StatsView({ stats, clicksAvailable }: { stats: StatRow[]; clicksAvailable: boolean }) {
+function StatsView({ stats, providerClicksAvailable, redirectClicksAvailable }: { stats: StatRow[]; providerClicksAvailable: boolean; redirectClicksAvailable: boolean }) {
   const ordered = [...stats].sort((a, b) => String(a.date || "").localeCompare(String(b.date || "")));
-  const totals = stats.reduce((acc, row) => ({ clicks: acc.clicks + row.clicks, conversions: acc.conversions + row.conversions }), { clicks: 0, conversions: 0 });
-  const moneyByCurrency = useMemo(() => stats.reduce<Record<string, { revenue: number; commission: number }>>((acc, row) => { const key = row.currency || "USD"; acc[key] ||= { revenue: 0, commission: 0 }; acc[key].revenue += row.revenue_cents; acc[key].commission += row.commission_cents; return acc; }, {}), [stats]);
+  const totals = stats.reduce((acc, row) => ({ providerClicks: acc.providerClicks + row.clicks, redirectClicks: acc.redirectClicks + row.redirect_clicks, conversions: acc.conversions + row.conversions }), { providerClicks: 0, redirectClicks: 0, conversions: 0 });
+  const moneyByCurrency = useMemo(() => stats.reduce<Record<string, { revenue: number; commission: number }>>((acc, row) => { if (!row.currency) return acc; const key = row.currency; acc[key] ||= { revenue: 0, commission: 0 }; acc[key].revenue += row.revenue_cents; acc[key].commission += row.commission_cents; return acc; }, {}), [stats]);
   const maxConversions = Math.max(1, ...ordered.map((row) => row.conversions));
   return <div className="p-3 sm:p-4 space-y-4">
-    {stats.length > 0 && <div className="border border-border rounded overflow-hidden"><div className="grid grid-cols-2 sm:grid-cols-4 border-b border-border text-xs"><Metric label="Clicks" value={clicksAvailable ? String(totals.clicks) : "Unavailable"} muted={!clicksAvailable} /><Metric label="Conversions" value={String(totals.conversions)} /><Metric label="Revenue" value={moneySummary(moneyByCurrency, "revenue")} /><Metric label="Commission" value={moneySummary(moneyByCurrency, "commission")} /></div><div className="h-44 px-3 py-4 flex items-end gap-1 overflow-x-auto">{ordered.map((row, index) => <div key={`${row.date}-${row.currency}-${index}`} className="flex-1 min-w-[12px] h-32 flex items-end" title={`${row.date}: ${row.conversions} conversions`}><div className="w-full max-w-[22px] mx-auto bg-accent rounded-t" style={{ height: Math.max(3, Math.round((row.conversions / maxConversions) * 120)) }} /></div>)}</div><div className="px-3 pb-3 text-xs text-text-dim">Conversions by day</div></div>}
-    <div className="overflow-x-auto border border-border rounded"><table className="w-full min-w-[620px] border-collapse"><thead><tr className="text-left text-xs text-text-dim border-b border-border"><th className="px-3 py-2">Date</th><th className="px-3 py-2 text-right">Clicks</th><th className="px-3 py-2 text-right">Conversions</th><th className="px-3 py-2 text-right">Revenue</th><th className="px-3 py-2 text-right">Commission</th></tr></thead><tbody>{stats.map((row, index) => <tr key={`${row.date}-${row.currency}-${index}`} className="border-b border-border last:border-b-0"><td className="px-3 py-2">{row.date || "-"}</td><td className="px-3 py-2 text-right text-text-dim">{clicksAvailable ? row.clicks : "-"}</td><td className="px-3 py-2 text-right">{row.conversions}</td><td className="px-3 py-2 text-right">{money(row.revenue_cents, row.currency)}</td><td className="px-3 py-2 text-right">{money(row.commission_cents, row.currency)}</td></tr>)}</tbody></table></div>
+    {stats.length > 0 && <div className="border border-border rounded overflow-hidden"><div className="grid grid-cols-2 lg:grid-cols-5 border-b border-border text-xs"><Metric label="Provider clicks" value={providerClicksAvailable ? String(totals.providerClicks) : "Unavailable"} muted={!providerClicksAvailable} /><Metric label="Redirect clicks" value={redirectClicksAvailable ? String(totals.redirectClicks) : "Unavailable"} muted={!redirectClicksAvailable} /><Metric label="Conversions" value={String(totals.conversions)} /><Metric label="Revenue" value={moneySummary(moneyByCurrency, "revenue")} /><Metric label="Commission" value={moneySummary(moneyByCurrency, "commission")} /></div><div className="h-44 px-3 py-4 flex items-end gap-1 overflow-x-auto">{ordered.map((row, index) => <div key={`${row.date}-${row.currency}-${index}`} className="flex-1 min-w-[12px] h-32 flex items-end" title={`${row.date}: ${row.conversions} conversions`}><div className="w-full max-w-[22px] mx-auto bg-accent rounded-t" style={{ height: Math.max(3, Math.round((row.conversions / maxConversions) * 120)) }} /></div>)}</div><div className="px-3 pb-3 text-xs text-text-dim">Conversions by day</div></div>}
+    <div className="overflow-x-auto border border-border rounded"><table className="w-full min-w-[720px] border-collapse"><thead><tr className="text-left text-xs text-text-dim border-b border-border"><th className="px-3 py-2">Date</th><th className="px-3 py-2 text-right">Provider clicks</th><th className="px-3 py-2 text-right">Redirect clicks</th><th className="px-3 py-2 text-right">Conversions</th><th className="px-3 py-2 text-right">Revenue</th><th className="px-3 py-2 text-right">Commission</th></tr></thead><tbody>{stats.map((row, index) => <tr key={`${row.date}-${row.currency}-${index}`} className="border-b border-border last:border-b-0"><td className="px-3 py-2">{row.date || "-"}</td><td className="px-3 py-2 text-right text-text-dim">{providerClicksAvailable ? row.clicks : "-"}</td><td className="px-3 py-2 text-right text-text-dim">{redirectClicksAvailable ? row.redirect_clicks : "-"}</td><td className="px-3 py-2 text-right">{row.conversions}</td><td className="px-3 py-2 text-right">{money(row.revenue_cents, row.currency)}</td><td className="px-3 py-2 text-right">{money(row.commission_cents, row.currency)}</td></tr>)}</tbody></table></div>
     {stats.length === 0 && <div className="text-center text-text-dim py-8">No stats imported for this date range.</div>}
   </div>;
 }
@@ -209,7 +214,7 @@ function Pager({ page, total, onPage }: { page: number; total: number; onPage: (
 function labelNetwork(key: string): string { const labels: Record<string, string> = { "target-circle": "Target Circle (Circlewise)", impact: "Impact", awin: "Awin", "cj-affiliate": "CJ Affiliate", "amazon-associates": "Amazon Associates", skimlinks: "Skimlinks", sovrn: "Sovrn", partnerstack: "PartnerStack", shareasale: "ShareASale" }; return labels[key] || key; }
 function statsCapabilityLabel(mode?: string): string { if (mode === "current-day") return "Stats (today)"; if (mode === "daily") return "Stats (daily)"; return "Stats"; }
 function timeAgo(value: string): string { const time = new Date(value).getTime(); if (!Number.isFinite(time)) return "-"; const seconds = Math.max(0, Math.floor((Date.now() - time) / 1000)); if (seconds < 60) return `${seconds}s ago`; if (seconds < 3600) return `${Math.floor(seconds / 60)}m ago`; if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ago`; return `${Math.floor(seconds / 86400)}d ago`; }
-function money(cents: number, currency: string): string { return `${currency || "USD"} ${(cents / 100).toFixed(2)}`; }
+function money(cents: number, currency: string): string { return currency ? `${currency} ${(cents / 100).toFixed(2)}` : "-"; }
 function moneySummary(values: Record<string, { revenue: number; commission: number }>, key: "revenue" | "commission"): string { const rows = Object.entries(values); if (!rows.length) return "-"; return rows.map(([currency, amounts]) => money(amounts[key], currency)).join(" + "); }
 function linkOfferTitle(link: Link): string { if (link.merchant_name && link.offer_name && link.merchant_name !== link.offer_name) return `${link.merchant_name} - ${link.offer_name}`; return link.merchant_name || link.offer_name || (link.offer_id ? `Offer #${link.offer_id}` : "Unassigned"); }
 function slug(value: string): string { return value.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/(^-|-$)/g, "") || "affiliate-link"; }

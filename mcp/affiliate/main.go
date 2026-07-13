@@ -6,6 +6,7 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	_ "embed"
 	"encoding/json"
@@ -17,6 +18,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	sdk "github.com/apteva/app-sdk"
@@ -26,7 +28,7 @@ import (
 const legacyManifestYAML = `schema: apteva-app/v1
 name: affiliate
 display_name: Affiliate
-version: 0.1.7
+version: 0.1.8
 description: Publisher-side affiliate manager.
 author: Apteva
 scopes: [project, global]
@@ -39,6 +41,8 @@ requires:
     - name: redirects
       optional: true
       reason: Creates branded short links for affiliate URLs.
+      events:
+        - rule.hit
   integrations:
     - role: target-circle
       kind: integration
@@ -100,7 +104,7 @@ provides:
     - name: affiliate_links
       description: Search managed links.
     - name: affiliate_stats
-      description: Read normalized stats.
+      description: Read normalized provider stats and separate first-party redirect clicks.
 runtime:
   kind: source
   source:
@@ -176,7 +180,15 @@ upgrade_policy: auto-patch
 //go:embed apteva.yaml
 var manifestYAML []byte
 
-type App struct{}
+const (
+	automaticStatsRefreshSchedule  = "@every 6h"
+	automaticOffersRefreshSchedule = "@every 24h"
+	automaticStatsWindowDays       = 7
+)
+
+type App struct {
+	refreshMu sync.Mutex
+}
 
 func (a *App) Manifest() sdk.Manifest {
 	m, err := sdk.ParseManifest(manifestYAML)
@@ -286,7 +298,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name: "affiliate_stats",
-			Description: "Read normalized stats. Args: from?, to?, network?, offer_id?, link_id?, " +
+			Description: "Read normalized provider stats and separate first-party redirect clicks. Args: from?, to?, network?, offer_id?, link_id?, " +
 				"group_by? (network|offer|link|day, default day).",
 			InputSchema: schemaObject(map[string]any{
 				"from":     map[string]any{"type": "string"},
@@ -301,9 +313,186 @@ func (a *App) MCPTools() []sdk.Tool {
 	}
 }
 
-func (a *App) Channels() []sdk.ChannelFactory    { return nil }
-func (a *App) Workers() []sdk.Worker             { return nil }
-func (a *App) EventHandlers() []sdk.EventHandler { return nil }
+func (a *App) Channels() []sdk.ChannelFactory { return nil }
+func (a *App) EventHandlers() []sdk.EventHandler {
+	return []sdk.EventHandler{
+		{Event: "rule.hit", Handler: a.handleRedirectHit},
+	}
+}
+
+func (a *App) Workers() []sdk.Worker {
+	return []sdk.Worker{
+		{
+			Name:     "affiliate-stats-refresh",
+			Schedule: automaticStatsRefreshSchedule,
+			Run: func(ctx context.Context, app *sdk.AppCtx) error {
+				from, to := automaticStatsWindow(time.Now().UTC())
+				providerErr := a.runAutomaticRefresh(ctx, app, "stats", from, to)
+				redirectErr := a.reconcileRedirectClicks(ctx, app, from, to)
+				return errors.Join(providerErr, redirectErr)
+			},
+		},
+		{
+			Name:     "affiliate-offers-refresh",
+			Schedule: automaticOffersRefreshSchedule,
+			Run: func(ctx context.Context, app *sdk.AppCtx) error {
+				return a.runAutomaticRefresh(ctx, app, "offers", "", "")
+			},
+		},
+	}
+}
+
+func automaticStatsWindow(now time.Time) (string, string) {
+	today := now.UTC()
+	from := today.AddDate(0, 0, -(automaticStatsWindowDays - 1))
+	return from.Format("2006-01-02"), today.Format("2006-01-02")
+}
+
+func (a *App) runAutomaticRefresh(ctx context.Context, app *sdk.AppCtx, kind, from, to string) error {
+	if app == nil || app.AppDB() == nil {
+		return errors.New("affiliate automatic refresh requires an app database")
+	}
+	stored, err := dbListNetworks(app.AppDB(), nil)
+	if err != nil {
+		return err
+	}
+	byKey := make(map[string]Network, len(stored))
+	for _, network := range stored {
+		byKey[network.Key] = network
+	}
+
+	var refreshErrors []error
+	for _, capability := range providerCapabilities {
+		if (kind == "stats" && !capability.Stats) || (kind == "offers" && !capability.Offers) {
+			continue
+		}
+		if network, exists := byKey[capability.Key]; exists && !network.Enabled {
+			continue
+		}
+		binding := app.IntegrationFor(capability.Key)
+		if binding == nil || binding.ConnectionID == 0 {
+			continue
+		}
+		if err := ctx.Err(); err != nil {
+			return errors.Join(append(refreshErrors, err)...)
+		}
+
+		summary, err := a.refreshNetwork(app, capability.Key, kind, from, to, map[string]any{})
+		if err != nil {
+			app.Logger().Warn("automatic affiliate refresh failed", "network", capability.Key, "kind", kind, "err", err)
+			refreshErrors = append(refreshErrors, fmt.Errorf("%s: %w", capability.Key, err))
+			continue
+		}
+		app.Logger().Info("automatic affiliate refresh completed",
+			"network", capability.Key,
+			"kind", kind,
+			"offers", summary.OffersUpserted,
+			"links", summary.LinksUpserted,
+			"stat_rows", summary.StatsDaysUpserted)
+	}
+	return errors.Join(refreshErrors...)
+}
+
+func (a *App) handleRedirectHit(ctx *sdk.AppCtx, event sdk.Event) error {
+	if event.SourceApp != "" && event.SourceApp != "redirects" {
+		return fmt.Errorf("rule.hit source %q is not redirects", event.SourceApp)
+	}
+	hit, err := redirectHitFromEvent(event)
+	if err != nil {
+		return err
+	}
+	link, matchedBy, err := dbFindLinkForRedirectHit(ctx.AppDB(), hit)
+	if err != nil {
+		return err
+	}
+	if link == nil {
+		ctx.Logger().Info("redirect hit did not match an affiliate link", "rule_id", hit.RuleID)
+		return nil
+	}
+	if link.RedirectRuleID == 0 {
+		if err := dbAttachRedirectRule(ctx.AppDB(), link.ID, hit.RuleID); err != nil {
+			return err
+		}
+	}
+	if err := dbUpsertRedirectClick(ctx.AppDB(), link.ID, hit, matchedBy); err != nil {
+		return err
+	}
+	ctx.Logger().Info("affiliate redirect click recorded", "link_id", link.ID, "rule_id", hit.RuleID, "matched_by", matchedBy)
+	return nil
+}
+
+func redirectHitFromEvent(event sdk.Event) (RedirectHit, error) {
+	data := event.Data
+	ruleID := toInt64(firstAny(data, "rule_id", "redirect_rule_id", "id"))
+	if ruleID == 0 {
+		return RedirectHit{}, errors.New("redirect rule.hit missing rule_id")
+	}
+	at := firstNonEmpty(firstString(data, "at", "occurred_at"), nowUTC())
+	date := normalizeStatDate(firstNonEmpty(firstString(data, "date", "day"), at))
+	dayValue := firstAny(data, "day_hits")
+	return RedirectHit{
+		RuleID:         ruleID,
+		Destination:    firstString(data, "destination"),
+		Target:         firstString(data, "target"),
+		Date:           date,
+		At:             at,
+		DayHits:        toInt64(dayValue),
+		HitsTotal:      toInt64(firstAny(data, "hits_total", "total_hits")),
+		HasDaySnapshot: dayValue != nil,
+		RawJSON:        mustJSON(redactSecrets(data)),
+	}, nil
+}
+
+func (a *App) reconcileRedirectClicks(ctx context.Context, app *sdk.AppCtx, from, to string) error {
+	if app == nil || app.AppDB() == nil || app.PlatformAPI() == nil {
+		return errors.New("redirect click reconciliation requires the platform API and app database")
+	}
+	rules, err := dbRedirectRuleLinks(app.AppDB())
+	if err != nil || len(rules) == 0 {
+		return err
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	const pageSize = 250
+	for offset := 0; ; offset += pageSize {
+		out := map[string]any{}
+		if err := app.PlatformAPI().CallAppResult("redirects", "redirect_stats", map[string]any{
+			"from": from, "to": to, "limit": pageSize, "offset": offset,
+		}, &out); err != nil {
+			return fmt.Errorf("redirect_stats: %w", err)
+		}
+		rows := collectMaps(out, "stats", "data", "items", "results")
+		for _, row := range rows {
+			ruleID := toInt64(firstAny(row, "rule_id", "redirect_rule_id", "id"))
+			linkID := rules[ruleID]
+			if linkID == 0 {
+				continue
+			}
+			dayValue := firstAny(row, "day_hits", "hits", "clicks")
+			hit := RedirectHit{
+				RuleID:         ruleID,
+				Date:           normalizeStatDate(firstString(row, "date", "day")),
+				At:             firstNonEmpty(firstString(row, "updated_at", "at"), nowUTC()),
+				DayHits:        toInt64(dayValue),
+				HitsTotal:      toInt64(firstAny(row, "hits_total", "total_hits")),
+				HasDaySnapshot: dayValue != nil,
+				RawJSON:        mustJSON(redactSecrets(row)),
+			}
+			if hit.Date == "" || !hit.HasDaySnapshot {
+				continue
+			}
+			if err := dbUpsertRedirectClick(app.AppDB(), linkID, hit, "reconcile"); err != nil {
+				return err
+			}
+		}
+		total := int(toInt64(firstAny(out, "total")))
+		if len(rows) < pageSize || total > 0 && offset+len(rows) >= total {
+			break
+		}
+	}
+	return nil
+}
 
 type Network struct {
 	ID              int64  `json:"id"`
@@ -421,10 +610,23 @@ type StatRow struct {
 	OfferID         int64  `json:"offer_id,omitempty"`
 	LinkID          int64  `json:"link_id,omitempty"`
 	Clicks          int64  `json:"clicks"`
+	RedirectClicks  int64  `json:"redirect_clicks"`
 	Conversions     int64  `json:"conversions"`
 	RevenueCents    int64  `json:"revenue_cents"`
 	CommissionCents int64  `json:"commission_cents"`
 	Currency        string `json:"currency"`
+}
+
+type RedirectHit struct {
+	RuleID         int64
+	Destination    string
+	Target         string
+	Date           string
+	At             string
+	DayHits        int64
+	HitsTotal      int64
+	HasDaySnapshot bool
+	RawJSON        string
 }
 
 type RefreshSummary struct {
@@ -735,6 +937,219 @@ func dbUpdateLinkShortURL(db *sql.DB, id, redirectRuleID int64, shortURL string)
 	return dbGetLink(db, id)
 }
 
+func dbFindLinkForRedirectHit(db *sql.DB, hit RedirectHit) (*Link, string, error) {
+	rows, err := db.Query(`SELECT `+linkCols+` FROM links WHERE redirect_rule_id = ? ORDER BY id`, hit.RuleID)
+	if err != nil {
+		return nil, "", err
+	}
+	linked, err := scanLinks(rows)
+	if err != nil {
+		return nil, "", err
+	}
+	if len(linked) > 1 {
+		return nil, "", fmt.Errorf("redirect rule %d is attached to multiple affiliate links", hit.RuleID)
+	}
+	if len(linked) == 1 {
+		return &linked[0], "rule_id", nil
+	}
+
+	for _, candidate := range []struct {
+		value           string
+		method          string
+		allowExtraQuery bool
+	}{{hit.Destination, "destination", false}, {hit.Target, "target", true}} {
+		if strings.TrimSpace(candidate.value) == "" {
+			continue
+		}
+		matches, err := dbLinksMatchingAffiliateURL(db, candidate.value, candidate.allowExtraQuery)
+		if err != nil {
+			return nil, "", err
+		}
+		if len(matches) > 1 {
+			return nil, "", fmt.Errorf("redirect rule %d %s matches multiple affiliate links", hit.RuleID, candidate.method)
+		}
+		if len(matches) == 1 {
+			if matches[0].RedirectRuleID != 0 && matches[0].RedirectRuleID != hit.RuleID {
+				return nil, "", fmt.Errorf("affiliate link %d is already attached to redirect rule %d", matches[0].ID, matches[0].RedirectRuleID)
+			}
+			return &matches[0], candidate.method, nil
+		}
+	}
+	return nil, "", nil
+}
+
+func dbLinksMatchingAffiliateURL(db *sql.DB, rawURL string, allowExtraQuery bool) ([]Link, error) {
+	rows, err := db.Query(`SELECT ` + linkCols + ` FROM links WHERE status = 'active' ORDER BY id`)
+	if err != nil {
+		return nil, err
+	}
+	links, err := scanLinks(rows)
+	if err != nil {
+		return nil, err
+	}
+	matches := make([]Link, 0, 1)
+	for _, link := range links {
+		if trackingURLMatches(link.AffiliateURL, rawURL, allowExtraQuery) {
+			matches = append(matches, link)
+		}
+	}
+	return matches, nil
+}
+
+func trackingURLMatches(affiliateURL, observedURL string, allowExtraQuery bool) bool {
+	affiliateCanonical, err := canonicalTrackingURL(affiliateURL)
+	if err != nil {
+		return false
+	}
+	observedCanonical, err := canonicalTrackingURL(observedURL)
+	if err != nil {
+		return false
+	}
+	if affiliateCanonical == observedCanonical {
+		return true
+	}
+	if !allowExtraQuery {
+		return false
+	}
+	affiliate, _ := url.Parse(affiliateCanonical)
+	observed, _ := url.Parse(observedCanonical)
+	if affiliate.Scheme != observed.Scheme || affiliate.Host != observed.Host || affiliate.Path != observed.Path {
+		return false
+	}
+	observedQuery := observed.Query()
+	for key, requiredValues := range affiliate.Query() {
+		available := append([]string(nil), observedQuery[key]...)
+		for _, required := range requiredValues {
+			matched := false
+			for i, value := range available {
+				if value == required {
+					available = append(available[:i], available[i+1:]...)
+					matched = true
+					break
+				}
+			}
+			if !matched {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+func scanLinks(rows *sql.Rows) ([]Link, error) {
+	defer rows.Close()
+	var links []Link
+	for rows.Next() {
+		link, err := scanLink(rows)
+		if err != nil {
+			return nil, err
+		}
+		links = append(links, *link)
+	}
+	return links, rows.Err()
+}
+
+func canonicalTrackingURL(raw string) (string, error) {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		return "", errors.New("invalid absolute URL")
+	}
+	u.Scheme = strings.ToLower(u.Scheme)
+	host := strings.ToLower(u.Hostname())
+	if port := u.Port(); port != "" && !((u.Scheme == "https" && port == "443") || (u.Scheme == "http" && port == "80")) {
+		host += ":" + port
+	}
+	u.Host = host
+	u.Fragment = ""
+	if u.Path == "" {
+		u.Path = "/"
+	}
+	u.RawQuery = u.Query().Encode()
+	return u.String(), nil
+}
+
+func dbAttachRedirectRule(db *sql.DB, linkID, ruleID int64) error {
+	if linkID == 0 || ruleID == 0 {
+		return errors.New("link_id and redirect_rule_id required")
+	}
+	var attachedLinkID int64
+	err := db.QueryRow(`SELECT id FROM links WHERE redirect_rule_id = ? AND id != ? LIMIT 1`, ruleID, linkID).Scan(&attachedLinkID)
+	if err == nil {
+		return fmt.Errorf("redirect rule %d is already attached to affiliate link %d", ruleID, attachedLinkID)
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	res, err := db.Exec(`UPDATE links SET redirect_rule_id = ?, updated_at = ? WHERE id = ? AND redirect_rule_id IN (0, ?)`, ruleID, nowUTC(), linkID, ruleID)
+	if err != nil {
+		return err
+	}
+	updated, _ := res.RowsAffected()
+	if updated != 1 {
+		return fmt.Errorf("affiliate link %d could not be attached to redirect rule %d", linkID, ruleID)
+	}
+	return nil
+}
+
+func dbUpsertRedirectClick(db *sql.DB, linkID int64, hit RedirectHit, matchedBy string) error {
+	if linkID == 0 || hit.RuleID == 0 || hit.Date == "" {
+		return errors.New("redirect click requires link_id, rule_id, and date")
+	}
+	if hit.HasDaySnapshot {
+		_, err := db.Exec(`
+			INSERT INTO redirect_clicks_daily (
+				date, redirect_rule_id, link_id, clicks, hits_total, matched_by,
+				last_event_at, raw_json, updated_at
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+			ON CONFLICT(date, redirect_rule_id) DO UPDATE SET
+				link_id = excluded.link_id,
+				clicks = MAX(redirect_clicks_daily.clicks, excluded.clicks),
+				hits_total = MAX(redirect_clicks_daily.hits_total, excluded.hits_total),
+				matched_by = excluded.matched_by,
+				last_event_at = excluded.last_event_at,
+				raw_json = excluded.raw_json,
+				updated_at = excluded.updated_at`,
+			hit.Date, hit.RuleID, linkID, hit.DayHits, hit.HitsTotal, matchedBy,
+			hit.At, hit.RawJSON, nowUTC())
+		return err
+	}
+	_, err := db.Exec(`
+		INSERT INTO redirect_clicks_daily (
+			date, redirect_rule_id, link_id, clicks, hits_total, matched_by,
+			last_event_at, raw_json, updated_at
+		) VALUES (?, ?, ?, 1, ?, ?, ?, ?, ?)
+		ON CONFLICT(date, redirect_rule_id) DO UPDATE SET
+			link_id = excluded.link_id,
+			clicks = redirect_clicks_daily.clicks + 1,
+			hits_total = MAX(redirect_clicks_daily.hits_total, excluded.hits_total),
+			matched_by = excluded.matched_by,
+			last_event_at = excluded.last_event_at,
+			raw_json = excluded.raw_json,
+			updated_at = excluded.updated_at`,
+		hit.Date, hit.RuleID, linkID, hit.HitsTotal, matchedBy, hit.At, hit.RawJSON, nowUTC())
+	return err
+}
+
+func dbRedirectRuleLinks(db *sql.DB) (map[int64]int64, error) {
+	rows, err := db.Query(`SELECT redirect_rule_id, id FROM links WHERE redirect_rule_id != 0 ORDER BY redirect_rule_id, id`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := map[int64]int64{}
+	for rows.Next() {
+		var ruleID, linkID int64
+		if err := rows.Scan(&ruleID, &linkID); err != nil {
+			return nil, err
+		}
+		if existing := out[ruleID]; existing != 0 && existing != linkID {
+			return nil, fmt.Errorf("redirect rule %d is attached to multiple affiliate links", ruleID)
+		}
+		out[ruleID] = linkID
+	}
+	return out, rows.Err()
+}
+
 func dbGetLink(db *sql.DB, id int64) (*Link, error) {
 	row := db.QueryRow(`SELECT `+linkCols+` FROM links WHERE id = ?`, id)
 	l, err := scanLink(row)
@@ -951,7 +1366,113 @@ func dbStats(db *sql.DB, from, to, network string, offerID, linkID int64, groupB
 		}
 		out = append(out, s)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+
+	redirectSelect := "r.date, '' AS network_key, 0 AS offer_id, 0 AS link_id"
+	redirectGroup := "r.date"
+	switch groupBy {
+	case "network":
+		redirectSelect = "'' AS date, l.network_key, 0 AS offer_id, 0 AS link_id"
+		redirectGroup = "l.network_key"
+	case "offer":
+		redirectSelect = "'' AS date, '' AS network_key, COALESCE(l.offer_id,0) AS offer_id, 0 AS link_id"
+		redirectGroup = "l.offer_id"
+	case "link":
+		redirectSelect = "'' AS date, '' AS network_key, 0 AS offer_id, r.link_id"
+		redirectGroup = "r.link_id"
+	}
+	redirectWhere := []string{"1=1"}
+	redirectArgs := []any{}
+	if from != "" {
+		redirectWhere = append(redirectWhere, "r.date >= ?")
+		redirectArgs = append(redirectArgs, from)
+	}
+	if to != "" {
+		redirectWhere = append(redirectWhere, "r.date <= ?")
+		redirectArgs = append(redirectArgs, to)
+	}
+	if network != "" {
+		redirectWhere = append(redirectWhere, "l.network_key = ?")
+		redirectArgs = append(redirectArgs, network)
+	}
+	if offerID != 0 {
+		redirectWhere = append(redirectWhere, "COALESCE(l.offer_id,0) = ?")
+		redirectArgs = append(redirectArgs, offerID)
+	}
+	if linkID != 0 {
+		redirectWhere = append(redirectWhere, "r.link_id = ?")
+		redirectArgs = append(redirectArgs, linkID)
+	}
+	redirectRows, err := db.Query(fmt.Sprintf(`
+		SELECT %s, SUM(r.clicks)
+		FROM redirect_clicks_daily r
+		JOIN links l ON l.id = r.link_id
+		WHERE %s
+		GROUP BY %s
+		ORDER BY %s`, redirectSelect, strings.Join(redirectWhere, " AND "), redirectGroup, redirectGroup), redirectArgs...)
+	if err != nil {
+		return nil, err
+	}
+	defer redirectRows.Close()
+	byGroup := map[string]int{}
+	for i := range out {
+		key := statRowGroupKey(out[i], groupBy)
+		if _, exists := byGroup[key]; !exists {
+			byGroup[key] = i
+		}
+	}
+	for redirectRows.Next() {
+		var redirect StatRow
+		if err := redirectRows.Scan(&redirect.Date, &redirect.NetworkKey, &redirect.OfferID, &redirect.LinkID, &redirect.RedirectClicks); err != nil {
+			return nil, err
+		}
+		key := statRowGroupKey(redirect, groupBy)
+		if index, exists := byGroup[key]; exists {
+			out[index].RedirectClicks += redirect.RedirectClicks
+			continue
+		}
+		byGroup[key] = len(out)
+		out = append(out, redirect)
+	}
+	if err := redirectRows.Err(); err != nil {
+		return nil, err
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		left := fmt.Sprintf("%s\x00%s\x00%020d\x00%020d\x00%s", out[i].Date, out[i].NetworkKey, out[i].OfferID, out[i].LinkID, out[i].Currency)
+		right := fmt.Sprintf("%s\x00%s\x00%020d\x00%020d\x00%s", out[j].Date, out[j].NetworkKey, out[j].OfferID, out[j].LinkID, out[j].Currency)
+		return left < right
+	})
+	return out, nil
+}
+
+func statRowGroupKey(row StatRow, groupBy string) string {
+	switch groupBy {
+	case "network":
+		return row.NetworkKey
+	case "offer":
+		return strconv.FormatInt(row.OfferID, 10)
+	case "link":
+		return strconv.FormatInt(row.LinkID, 10)
+	default:
+		return row.Date
+	}
+}
+
+func dbRedirectTrackingAvailable(db *sql.DB, network string) (bool, error) {
+	q := `SELECT EXISTS(SELECT 1 FROM links WHERE redirect_rule_id != 0`
+	args := []any{}
+	if network != "" {
+		q += ` AND network_key = ?`
+		args = append(args, network)
+	}
+	q += `)`
+	var available bool
+	if err := db.QueryRow(q, args...).Scan(&available); err != nil {
+		return false, err
+	}
+	return available, nil
 }
 
 // --- Tool handlers ---------------------------------------------------------
@@ -1115,16 +1636,29 @@ func (a *App) toolStats(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	clicksAvailable := false
+	providerClicksAvailable := false
 	if network != "" {
 		if capability, ok := capabilityFor(network); ok {
-			clicksAvailable = capability.Clicks
+			providerClicksAvailable = capability.Clicks
 		}
 	}
-	return map[string]any{"stats": rows, "count": len(rows), "clicks_available": clicksAvailable}, nil
+	redirectClicksAvailable, err := dbRedirectTrackingAvailable(ctx.AppDB(), network)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{
+		"stats":                     rows,
+		"count":                     len(rows),
+		"clicks_available":          providerClicksAvailable || redirectClicksAvailable,
+		"provider_clicks_available": providerClicksAvailable,
+		"redirect_clicks_available": redirectClicksAvailable,
+	}, nil
 }
 
 func (a *App) refreshNetwork(ctx *sdk.AppCtx, network, kind, from, to string, args map[string]any) (*RefreshSummary, error) {
+	a.refreshMu.Lock()
+	defer a.refreshMu.Unlock()
+
 	if ctx.PlatformAPI() == nil {
 		return nil, errors.New("platform API unavailable")
 	}

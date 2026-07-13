@@ -1,10 +1,12 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"sync"
 	"testing"
+	"time"
 
 	sdk "github.com/apteva/app-sdk"
 	tk "github.com/apteva/app-sdk/testkit"
@@ -146,6 +148,273 @@ func TestEmbeddedManifestMatchesToolSurface(t *testing.T) {
 	}
 	for name := range declared {
 		t.Errorf("apteva.yaml declares %q without a handler", name)
+	}
+}
+
+func TestWorkersMatchManifestAndSchedules(t *testing.T) {
+	app := &App{}
+	manifest := app.Manifest()
+	declared := map[string]string{}
+	for _, worker := range manifest.Provides.Workers {
+		declared[worker.Name] = worker.Schedule
+	}
+	workers := app.Workers()
+	if len(workers) != 2 {
+		t.Fatalf("workers=%d want 2", len(workers))
+	}
+	for _, worker := range workers {
+		if got := declared[worker.Name]; got != worker.Schedule {
+			t.Errorf("worker %q schedule=%q, manifest=%q", worker.Name, worker.Schedule, got)
+		}
+		delete(declared, worker.Name)
+	}
+	if len(declared) != 0 {
+		t.Fatalf("manifest has workers without implementations: %v", declared)
+	}
+}
+
+func TestRedirectHitSubscriptionMatchesManifest(t *testing.T) {
+	app := &App{}
+	manifest := app.Manifest()
+	var subscribed bool
+	for _, dep := range manifest.Requires.Apps {
+		if dep.Name == "redirects" && len(dep.Events) == 1 && dep.Events[0] == "rule.hit" {
+			subscribed = true
+		}
+	}
+	if !subscribed {
+		t.Fatal("manifest does not subscribe to redirects rule.hit")
+	}
+	handlers := app.EventHandlers()
+	if len(handlers) != 1 || handlers[0].Event != "rule.hit" {
+		t.Fatalf("event handlers=%+v", handlers)
+	}
+}
+
+func TestRedirectHitUsesRuleIDAndAbsoluteDailyCount(t *testing.T) {
+	ctx := newTestCtx(t, nil, nil)
+	link, err := dbInsertLink(ctx.AppDB(), LinkInput{
+		NetworkKey: "target-circle", DestinationURL: "https://merchant.example/product",
+		AffiliateURL: "https://track.example/click?a=one", RedirectRuleID: 318,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := dbUpsertStat(ctx.AppDB(), StatInput{
+		Date: "2026-07-13", NetworkKey: "target-circle", LinkID: link.ID,
+		Clicks: 9, Conversions: 1, Currency: "EUR",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	app := &App{}
+	for _, count := range []int64{5, 5, 7} {
+		err := app.handleRedirectHit(ctx, sdk.Event{SourceApp: "redirects", Data: map[string]any{
+			"rule_id": 318, "date": "2026-07-13", "day_hits": count, "hits_total": 100 + count,
+		}})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	stats, err := dbStats(ctx.AppDB(), "2026-07-13", "2026-07-13", "target-circle", 0, link.ID, "day")
+	if err != nil || len(stats) != 1 {
+		t.Fatalf("stats=%+v err=%v", stats, err)
+	}
+	if stats[0].Clicks != 9 || stats[0].RedirectClicks != 7 {
+		t.Fatalf("provider and redirect clicks were not kept separate: %+v", stats[0])
+	}
+	out, err := app.toolStats(ctx, map[string]any{"network": "target-circle", "from": "2026-07-13", "to": "2026-07-13"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := out.(map[string]any)
+	if result["provider_clicks_available"] != false || result["redirect_clicks_available"] != true {
+		t.Fatalf("unexpected click availability: %+v", result)
+	}
+}
+
+func TestRedirectHitAutoMatchesCanonicalDestination(t *testing.T) {
+	ctx := newTestCtx(t, nil, nil)
+	link, err := dbInsertLink(ctx.AppDB(), LinkInput{
+		NetworkKey: "target-circle", DestinationURL: "https://merchant.example/product",
+		AffiliateURL: "https://TRACK.example:443/click?b=two&a=one#ignored",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	app := &App{}
+	err = app.handleRedirectHit(ctx, sdk.Event{SourceApp: "redirects", Data: map[string]any{
+		"rule_id": 900, "destination": "https://track.example/click?a=one&b=two",
+		"target": "https://track.example/click?a=one&b=two&inbound=yes",
+		"date":   "2026-07-13", "day_hits": 3,
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := dbGetLink(ctx.AppDB(), link.ID)
+	if err != nil || got.RedirectRuleID != 900 {
+		t.Fatalf("auto match was not persisted: link=%+v err=%v", got, err)
+	}
+}
+
+func TestRedirectHitAutoMatchesTargetWithPreservedQuery(t *testing.T) {
+	ctx := newTestCtx(t, nil, nil)
+	link, err := dbInsertLink(ctx.AppDB(), LinkInput{
+		NetworkKey: "target-circle", DestinationURL: "https://merchant.example/product",
+		AffiliateURL: "https://track.example/click?a=campaign&i=inventory",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	err = (&App{}).handleRedirectHit(ctx, sdk.Event{SourceApp: "redirects", Data: map[string]any{
+		"id":     904,
+		"target": "https://track.example/click?utm_source=article&i=inventory&a=campaign",
+		"at":     "2026-07-13T12:00:00Z",
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	got, err := dbGetLink(ctx.AppDB(), link.ID)
+	if err != nil || got.RedirectRuleID != 904 {
+		t.Fatalf("target fallback was not persisted: link=%+v err=%v", got, err)
+	}
+}
+
+func TestRedirectHitRejectsAmbiguousURLMatch(t *testing.T) {
+	ctx := newTestCtx(t, nil, nil)
+	for i := 0; i < 2; i++ {
+		if _, err := dbInsertLink(ctx.AppDB(), LinkInput{
+			NetworkKey: "target-circle", DestinationURL: fmt.Sprintf("https://merchant.example/%d", i),
+			AffiliateURL: "https://track.example/shared",
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	err := (&App{}).handleRedirectHit(ctx, sdk.Event{SourceApp: "redirects", Data: map[string]any{
+		"rule_id": 901, "destination": "https://track.example/shared", "date": "2026-07-13", "day_hits": 1,
+	}})
+	if err == nil {
+		t.Fatal("expected ambiguous redirect target error")
+	}
+	var count int
+	if err := ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM redirect_clicks_daily`).Scan(&count); err != nil || count != 0 {
+		t.Fatalf("ambiguous hit was persisted: count=%d err=%v", count, err)
+	}
+}
+
+func TestRedirectHitWithoutSnapshotCountsEveryEvent(t *testing.T) {
+	ctx := newTestCtx(t, nil, nil)
+	link, err := dbInsertLink(ctx.AppDB(), LinkInput{
+		NetworkKey: "target-circle", DestinationURL: "https://merchant.example/product",
+		AffiliateURL: "https://track.example/click", RedirectRuleID: 902,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	app := &App{}
+	for i := 0; i < 2; i++ {
+		if err := app.handleRedirectHit(ctx, sdk.Event{SourceApp: "redirects", Data: map[string]any{
+			"rule_id": 902, "at": "2026-07-13T12:00:00Z",
+		}}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	stats, err := dbStats(ctx.AppDB(), "", "", "target-circle", 0, link.ID, "day")
+	if err != nil || len(stats) != 1 || stats[0].RedirectClicks != 2 {
+		t.Fatalf("per-event clicks=%+v err=%v", stats, err)
+	}
+}
+
+func TestRedirectStatsReconciliationUsesAbsoluteCounts(t *testing.T) {
+	platform := newRecordingPlatform()
+	platform.responses["redirects:redirect_stats"] = json.RawMessage(`{
+		"stats":[{"rule_id":903,"date":"2026-07-12","hits":8,"hits_total":40}]
+	}`)
+	ctx := newTestCtx(t, platform, nil)
+	link, err := dbInsertLink(ctx.AppDB(), LinkInput{
+		NetworkKey: "target-circle", DestinationURL: "https://merchant.example/product",
+		AffiliateURL: "https://track.example/click", RedirectRuleID: 903,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	app := &App{}
+	if err := app.reconcileRedirectClicks(context.Background(), ctx, "2026-07-07", "2026-07-13"); err != nil {
+		t.Fatal(err)
+	}
+	stats, err := dbStats(ctx.AppDB(), "", "", "target-circle", 0, link.ID, "day")
+	if err != nil || len(stats) != 1 || stats[0].RedirectClicks != 8 {
+		t.Fatalf("reconciled clicks=%+v err=%v", stats, err)
+	}
+	if len(platform.calls) != 1 || platform.calls[0].Tool != "redirect_stats" {
+		t.Fatalf("calls=%+v", platform.calls)
+	}
+	if platform.calls[0].Input["limit"] != 250 || platform.calls[0].Input["offset"] != 0 {
+		t.Fatalf("redirect_stats pagination=%+v", platform.calls[0].Input)
+	}
+}
+
+func TestAutomaticStatsWindowUsesSevenUTCDays(t *testing.T) {
+	from, to := automaticStatsWindow(time.Date(2026, time.July, 13, 23, 45, 0, 0, time.FixedZone("west", -7*60*60)))
+	if from != "2026-07-08" || to != "2026-07-14" {
+		t.Fatalf("window=%s..%s want 2026-07-08..2026-07-14", from, to)
+	}
+}
+
+func TestAutomaticStatsRefreshUsesBoundProviderAndRollingDates(t *testing.T) {
+	platform := newRecordingPlatform()
+	platform.bindings = map[string]int64{"target-circle": 101}
+	platform.responses["target-circle:transactions_list"] = json.RawMessage(`{"transactions":[]}`)
+	ctx := newTestCtx(t, platform, nil)
+	app := &App{}
+
+	if err := app.runAutomaticRefresh(context.Background(), ctx, "stats", "2026-07-07", "2026-07-13"); err != nil {
+		t.Fatal(err)
+	}
+	if len(platform.calls) != 1 {
+		t.Fatalf("provider calls=%d want 1: %+v", len(platform.calls), platform.calls)
+	}
+	call := platform.calls[0]
+	if call.App != "target-circle" || call.Tool != "transactions_list" {
+		t.Fatalf("unexpected provider call: %+v", call)
+	}
+	if call.Input["savedFrom"] != "2026-07-07" || call.Input["savedTo"] != "2026-07-14" {
+		t.Fatalf("provider dates=%v..%v", call.Input["savedFrom"], call.Input["savedTo"])
+	}
+}
+
+func TestAutomaticRefreshSkipsDisabledNetwork(t *testing.T) {
+	platform := newRecordingPlatform()
+	platform.bindings = map[string]int64{"target-circle": 101}
+	ctx := newTestCtx(t, platform, nil)
+	app := &App{}
+	if _, err := dbUpsertNetwork(ctx.AppDB(), "target-circle", "Target Circle", nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ctx.AppDB().Exec(`UPDATE networks SET enabled = 0 WHERE key = 'target-circle'`); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := app.runAutomaticRefresh(context.Background(), ctx, "stats", "2026-07-07", "2026-07-13"); err != nil {
+		t.Fatal(err)
+	}
+	if len(platform.calls) != 0 {
+		t.Fatalf("disabled network made provider calls: %+v", platform.calls)
+	}
+}
+
+func TestAutomaticRefreshContinuesAfterProviderFailure(t *testing.T) {
+	platform := newRecordingPlatform()
+	platform.bindings = map[string]int64{"target-circle": 101, "impact": 102}
+	platform.responses["impact:actions_list"] = json.RawMessage(`{"Actions":[]}`)
+	ctx := newTestCtx(t, platform, nil)
+	app := &App{}
+
+	err := app.runAutomaticRefresh(context.Background(), ctx, "stats", "2026-07-07", "2026-07-13")
+	if err == nil {
+		t.Fatal("expected aggregate error from target-circle")
+	}
+	if len(platform.calls) != 2 || platform.calls[1].App != "impact" {
+		t.Fatalf("later provider was not refreshed after failure: %+v", platform.calls)
 	}
 }
 
