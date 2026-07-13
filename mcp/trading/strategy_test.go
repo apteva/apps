@@ -1,9 +1,12 @@
 package main
 
 import (
+	"errors"
 	"math"
+	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	sdk "github.com/apteva/app-sdk"
 )
@@ -14,6 +17,8 @@ type recordingStrategyProvider struct {
 	limit    int
 	symbols  []string
 	bars     bool
+	errors   map[string]error
+	short    map[string]int
 }
 
 func (p *recordingStrategyProvider) Quote(symbol string) (*Mark, error) {
@@ -32,6 +37,12 @@ func (p *recordingStrategyProvider) StrategyBars(symbol, interval string, limit 
 	p.interval = interval
 	p.limit = limit
 	p.symbols = append(p.symbols, symbol)
+	if err := p.errors[symbol]; err != nil {
+		return nil, err
+	}
+	if n := p.short[symbol]; n > 0 && n < limit {
+		limit = n
+	}
 	out := make([]Bar, 0, limit)
 	for i := 0; i < limit; i++ {
 		out = append(out, Bar{T: int64(i + 1), C: 100 + float64(i)})
@@ -87,7 +98,11 @@ func TestStrategyValidateAndEvaluate(t *testing.T) {
 	if len(warnings) != 0 {
 		t.Fatalf("warnings=%v, want none", warnings)
 	}
-	eval, err := evaluateStrategy(strategy, liveStrategyMarket(ctx, def))
+	market, err := liveStrategyMarket(ctx, def)
+	if err != nil {
+		t.Fatal(err)
+	}
+	eval, err := evaluateStrategy(strategy, market)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -119,7 +134,10 @@ func TestLiveStrategyMarketUsesCadenceBarsForIndicatorWindow(t *testing.T) {
 		}},
 	}
 
-	market := liveStrategyMarket(ctx, def)
+	market, err := liveStrategyMarket(ctx, def)
+	if err != nil {
+		t.Fatal(err)
+	}
 	interval, limit, symbols, usedChartBars := provider.calls()
 	if usedChartBars {
 		t.Fatal("liveStrategyMarket used chart Bars fallback; want StrategyBars")
@@ -141,6 +159,74 @@ func TestLiveStrategyMarketUsesCadenceBarsForIndicatorWindow(t *testing.T) {
 	}
 }
 
+func TestLiveStrategyMarketFailsClosedOnPartialUniverse(t *testing.T) {
+	ctx := newTestCtx(t)
+	provider := &recordingStrategyProvider{errors: map[string]error{"ETH-USD": errors.New("upstream unavailable")}}
+	globalEngine.provider = provider
+	def := &StrategyDefinition{
+		Universe: []string{"BTC-USD", "ETH-USD"},
+		Cadence:  "1h",
+		Rules: []StrategyRule{{Rank: &StrategyRank{
+			Symbols: []string{"BTC-USD", "ETH-USD"}, By: "return_1", Top: 1,
+		}}},
+	}
+
+	_, err := liveStrategyMarket(ctx, def)
+	if err == nil || !strings.Contains(err.Error(), "ETH-USD") {
+		t.Fatalf("error = %v, want ETH-USD history failure", err)
+	}
+}
+
+func TestLiveStrategyMarketFailsClosedOnShortHistory(t *testing.T) {
+	ctx := newTestCtx(t)
+	provider := &recordingStrategyProvider{short: map[string]int{"BTC-USD": 1}}
+	globalEngine.provider = provider
+	def := &StrategyDefinition{
+		Universe: []string{"BTC-USD"},
+		Cadence:  "1h",
+		Rules: []StrategyRule{{Rank: &StrategyRank{
+			Symbols: []string{"BTC-USD"}, By: "return_2", Top: 1,
+		}}},
+	}
+
+	_, err := liveStrategyMarket(ctx, def)
+	if err == nil || !strings.Contains(err.Error(), "need 3 valid closed bars, got 1") {
+		t.Fatalf("error = %v, want incomplete-history detail", err)
+	}
+}
+
+func TestStrategyRankHoldIncludesComputedValues(t *testing.T) {
+	market := strategyMarket{
+		prices: map[string]float64{"BTC-USD": 104.98, "ETH-USD": 99},
+		history: map[string][]float64{
+			"BTC-USD": []float64{100, 104.98},
+			"ETH-USD": []float64{100, 99},
+		},
+	}
+	_, reason, err := evalStrategyRank(StrategyRank{
+		Symbols: []string{"BTC-USD", "ETH-USD"}, By: "return_1", Top: 1, Min: 5,
+	}, market)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(reason, "BTC-USD 4.9800") || !strings.Contains(reason, "ETH-USD -1.0000") {
+		t.Fatalf("reason = %q, want all computed rank values", reason)
+	}
+}
+
+func TestStrategyRankFailsWhenAnySymbolMetricIsUnavailable(t *testing.T) {
+	market := strategyMarket{
+		prices:  map[string]float64{"BTC-USD": 101},
+		history: map[string][]float64{"BTC-USD": []float64{100, 101}},
+	}
+	_, _, err := evalStrategyRank(StrategyRank{
+		Symbols: []string{"BTC-USD", "ETH-USD"}, By: "return_1", Top: 1,
+	}, market)
+	if err == nil || !strings.Contains(err.Error(), "ETH-USD") {
+		t.Fatalf("error = %v, want missing ETH-USD metric", err)
+	}
+}
+
 func TestStrategyRequiredBars(t *testing.T) {
 	def := &StrategyDefinition{Rules: []StrategyRule{{
 		When: &StrategyCondition{Indicator: "rsi_14", Compare: "sma_50"},
@@ -149,6 +235,177 @@ func TestStrategyRequiredBars(t *testing.T) {
 	if got := strategyRequiredBars(def); got != 121 {
 		t.Fatalf("strategyRequiredBars = %d, want 121", got)
 	}
+}
+
+func TestStrategyAssignmentUsesImmutableVersion(t *testing.T) {
+	ctx := newTestCtx(t)
+	portfolioID := mustCreatePortfolio(t, ctx, "Pinned strategy", []string{"crypto"})
+	v1 := map[string]any{
+		"universe": []any{"BTC-USD", "ETH-USD"},
+		"cadence":  "1h",
+		"rules": []any{map[string]any{
+			"name": "BTC allocation", "allocate": []any{map[string]any{"symbol": "BTC-USD", "weight": 0.5}},
+		}},
+	}
+	strategyID, err := dbCreateStrategy(ctx.AppDB(), &Strategy{
+		ProjectID: "test-proj", Name: "Pinned", Status: "active", Definition: v1, Version: 1,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := dbAssignStrategy(ctx.AppDB(), &StrategyAssignment{
+		ProjectID: "test-proj", PortfolioID: portfolioID, StrategyID: strategyID,
+		StrategyVersion: 1, ControlMode: "strategy", Cadence: "1h",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	v2 := map[string]any{
+		"universe": []any{"BTC-USD", "ETH-USD"},
+		"cadence":  "1h",
+		"rules": []any{map[string]any{
+			"name": "ETH allocation", "allocate": []any{map[string]any{"symbol": "ETH-USD", "weight": 0.5}},
+		}},
+	}
+	updated, err := dbUpdateStrategy(ctx.AppDB(), "test-proj", strategyID, &Strategy{Definition: v2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if updated.Version != 2 {
+		t.Fatalf("updated version = %d, want 2", updated.Version)
+	}
+	assignment, err := dbActiveStrategyAssignment(ctx.AppDB(), "test-proj", portfolioID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if assignment.StrategyVersion != 1 {
+		t.Fatalf("assignment version = %d, want 1", assignment.StrategyVersion)
+	}
+	pinned, err := dbGetStrategyVersion(ctx.AppDB(), "test-proj", strategyID, assignment.StrategyVersion)
+	if err != nil {
+		t.Fatal(err)
+	}
+	def, _, err := validateStrategyDefinition(pinned.Definition)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := def.Rules[0].Allocate[0].Symbol; got != "BTC-USD" {
+		t.Fatalf("pinned allocation = %s, want BTC-USD", got)
+	}
+}
+
+func TestStrategyAssignmentCadenceUsesAlignedSlots(t *testing.T) {
+	def := &StrategyDefinition{Cadence: "1h"}
+	a := &StrategyAssignment{Cadence: "1h", LastEvaluatedAt: "2026-07-13T10:00:00Z"}
+	if strategyAssignmentDue(a, def, time.Date(2026, 7, 13, 10, 59, 59, 0, time.UTC)) {
+		t.Fatal("assignment became due before the next hourly candle boundary")
+	}
+	next := time.Date(2026, 7, 13, 11, 0, 0, 0, time.UTC)
+	if !strategyAssignmentDue(a, def, next) {
+		t.Fatal("assignment was not due at the next hourly candle boundary")
+	}
+	if slot := strategyAssignmentSlot(a, def, next.Add(37*time.Minute)); !slot.Equal(next) {
+		t.Fatalf("slot = %s, want %s", slot, next)
+	}
+}
+
+func TestStrategyFullAllocationReservesFeesAndSlippage(t *testing.T) {
+	ctx := newTestCtx(t)
+	provider := &recordingStrategyProvider{}
+	globalEngine.provider = provider
+	portfolioID := mustCreatePortfolio(t, ctx, "Full allocation", []string{"crypto"})
+	if err := dbUpdatePortfolioConfig(ctx.AppDB(), portfolioID, map[string]any{
+		"fee_bps": 1.0, "slippage_bps": 5.0,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	strategyID := mustCreateFixedStrategy(t, ctx, "Full BTC", "BTC-USD", 1)
+	if _, err := dbAssignStrategy(ctx.AppDB(), &StrategyAssignment{
+		ProjectID: "test-proj", PortfolioID: portfolioID, StrategyID: strategyID,
+		StrategyVersion: 1, ControlMode: "strategy", Cadence: "1h",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := evaluateLiveStrategyAssignments(globalEngine, ctx, time.Date(2026, 7, 13, 10, 37, 0, 0, time.UTC)); got != 1 {
+		t.Fatalf("strategy orders = %d, want 1", got)
+	}
+	filled, err := dbListOrders(ctx.AppDB(), portfolioID, "filled", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(filled) != 1 {
+		t.Fatalf("filled orders = %d, want 1", len(filled))
+	}
+	pf, err := dbGetPortfolio(ctx.AppDB(), "test-proj", portfolioID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pf.Cash < -1e-6 || pf.Cash >= 100 {
+		t.Fatalf("cash = %.8f, want a non-negative near-full allocation remainder", pf.Cash)
+	}
+	assignment, err := dbActiveStrategyAssignment(ctx.AppDB(), "test-proj", portfolioID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if assignment.LastEvaluatedAt != "2026-07-13T10:00:00Z" {
+		t.Fatalf("last evaluated = %q, want aligned hourly slot", assignment.LastEvaluatedAt)
+	}
+}
+
+func TestRejectedStrategyOrderDoesNotConsumeCadenceSlot(t *testing.T) {
+	ctx := newTestCtx(t)
+	globalEngine.provider = &recordingStrategyProvider{}
+	portfolioID := mustCreatePortfolio(t, ctx, "Retry rejection", []string{"crypto"})
+	strategyID := mustCreateFixedStrategy(t, ctx, "Retry BTC", "BTC-USD", 1)
+	if _, err := dbAssignStrategy(ctx.AppDB(), &StrategyAssignment{
+		ProjectID: "test-proj", PortfolioID: portfolioID, StrategyID: strategyID,
+		StrategyVersion: 1, ControlMode: "strategy", Cadence: "1h",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ctx.AppDB().Exec(`
+		CREATE TRIGGER force_strategy_insufficient_cash
+		AFTER INSERT ON orders WHEN NEW.source = 'strategy'
+		BEGIN
+			UPDATE portfolios SET cash = 0 WHERE id = NEW.portfolio_id;
+		END`); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := evaluateLiveStrategyAssignments(globalEngine, ctx, time.Date(2026, 7, 13, 10, 37, 0, 0, time.UTC)); got != 1 {
+		t.Fatalf("strategy orders = %d, want 1", got)
+	}
+	rejected, err := dbListOrders(ctx.AppDB(), portfolioID, "rejected", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(rejected) != 1 || rejected[0].RejectionCode != "insufficient_cash" {
+		t.Fatalf("rejected orders = %#v, want one insufficient_cash rejection", rejected)
+	}
+	assignment, err := dbActiveStrategyAssignment(ctx.AppDB(), "test-proj", portfolioID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if assignment.LastEvaluatedAt != "" {
+		t.Fatalf("last evaluated = %q, want empty so the strategy retries", assignment.LastEvaluatedAt)
+	}
+}
+
+func mustCreateFixedStrategy(t *testing.T, ctx *sdk.AppCtx, name, symbol string, weight float64) int64 {
+	t.Helper()
+	id, err := dbCreateStrategy(ctx.AppDB(), &Strategy{
+		ProjectID: "test-proj", Name: name, Status: "active", Version: 1,
+		Definition: map[string]any{
+			"universe": []any{symbol}, "cadence": "1h",
+			"rules": []any{map[string]any{
+				"name": "fixed allocation", "allocate": []any{map[string]any{"symbol": symbol, "weight": weight}},
+			}},
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return id
 }
 
 func TestStrategyBacktestUsesExistingSnapshots(t *testing.T) {
@@ -223,6 +480,46 @@ func TestStrategyBacktestUsesExistingSnapshots(t *testing.T) {
 	}
 	if len(events) == 0 {
 		t.Fatal("expected strategy backtest events")
+	}
+}
+
+func TestStrategyBacktestUsesPinnedDefinitionAfterUpdate(t *testing.T) {
+	ctx := newTestCtx(t)
+	portfolioID := mustCreatePortfolio(t, ctx, "Pinned backtest", []string{"crypto"})
+	strategyID := mustCreateFixedStrategy(t, ctx, "Pinned replay", "BTC-USD", 0.5)
+	runID, err := dbCreateBacktestRun(ctx.AppDB(), &BacktestRun{
+		ProjectID: "test-proj", PortfolioID: portfolioID, StrategyID: strategyID,
+		RunKind: "strategy", StrategyVersion: 1, Name: "Pinned replay", Status: "queued",
+		Symbols: []string{"BTC-USD", "ETH-USD"}, StartAt: "2026-01-01", EndAt: "2026-01-03",
+		Interval: "1d", StartingCash: 100000, TotalSteps: 3, Summary: map[string]any{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	updatedDefinition := map[string]any{
+		"universe": []any{"ETH-USD"}, "cadence": "1h",
+		"rules": []any{map[string]any{
+			"name": "ETH allocation", "allocate": []any{map[string]any{"symbol": "ETH-USD", "weight": 0.5}},
+		}},
+	}
+	if _, err := dbUpdateStrategy(ctx.AppDB(), "test-proj", strategyID, &Strategy{Definition: updatedDefinition}); err != nil {
+		t.Fatal(err)
+	}
+	run, err := dbGetBacktestRun(ctx.AppDB(), "test-proj", runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	seedBacktestMarketBars(t, ctx, run.ID, run.Symbols, run.TotalSteps)
+	if _, err := startStrategyBacktestRun(run); err != nil {
+		t.Fatal(err)
+	}
+	snapshots, err := dbListBacktestSnapshots(ctx.AppDB(), runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	latest := snapshots[len(snapshots)-1]
+	if len(latest.Positions) != 1 || latest.Positions[0].Symbol != "BTC-USD" {
+		t.Fatalf("positions = %#v, want pinned v1 BTC allocation", latest.Positions)
 	}
 }
 

@@ -16,6 +16,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"sort"
 	"strconv"
 	"strings"
 	"sync"
@@ -326,7 +327,7 @@ func evaluateLiveStrategyAssignments(e *engine, app *sdk.AppCtx, now time.Time) 
 		if portfolioUsesBacktestPricing(e.db, pf.ID) {
 			continue
 		}
-		strategy, err := dbGetStrategy(e.db, a.ProjectID, a.StrategyID)
+		strategy, err := dbGetStrategyVersion(e.db, a.ProjectID, a.StrategyID, a.StrategyVersion)
 		if err != nil {
 			e.logger.Warn("strategy lookup failed", "assignment_id", a.ID, "strategy_id", a.StrategyID, "err", err)
 			continue
@@ -339,23 +340,44 @@ func evaluateLiveStrategyAssignments(e *engine, app *sdk.AppCtx, now time.Time) 
 			e.logger.Warn("strategy definition invalid", "assignment_id", a.ID, "strategy_id", a.StrategyID, "err", err)
 			continue
 		}
+		slot := strategyAssignmentSlot(a, def, now)
 		if !strategyAssignmentDue(a, def, now) {
 			continue
 		}
-		eval, err := evaluateStrategy(strategy, liveStrategyMarket(app, def))
+		market, err := liveStrategyMarket(app, def)
+		if err != nil {
+			e.logger.Warn("strategy market load failed", "assignment_id", a.ID, "strategy_id", a.StrategyID, "err", err)
+			continue
+		}
+		eval, err := evaluateStrategy(strategy, market)
 		if err != nil {
 			e.logger.Warn("strategy evaluation failed", "assignment_id", a.ID, "strategy_id", a.StrategyID, "err", err)
 			continue
 		}
-		created, err := placeStrategyPaperOrders(e, pf, strategy, a, eval)
+		created, pending, err := placeStrategyPaperOrders(e, pf, strategy, a, eval)
 		if err != nil {
 			e.logger.Warn("strategy order placement failed", "assignment_id", a.ID, "strategy_id", a.StrategyID, "err", err)
 			continue
 		}
-		if err := dbSetStrategyAssignmentEvaluated(e.db, a.ID, now); err != nil {
-			e.logger.Warn("strategy assignment timestamp update failed", "assignment_id", a.ID, "err", err)
+		resolved := !pending
+		for _, order := range created {
+			if err := tryFill(e, order); err != nil {
+				e.logger.Warn("strategy order execution failed", "assignment_id", a.ID, "order_id", order.ID, "err", err)
+				resolved = false
+				break
+			}
+			stored, err := dbGetOrder(e.db, pf.ProjectID, order.ID)
+			if err != nil || stored.Status != "filled" {
+				resolved = false
+				break
+			}
 		}
-		totalOrders += created
+		if resolved {
+			if err := dbSetStrategyAssignmentEvaluated(e.db, a.ID, slot); err != nil {
+				e.logger.Warn("strategy assignment timestamp update failed", "assignment_id", a.ID, "err", err)
+			}
+		}
+		totalOrders += len(created)
 	}
 	return totalOrders
 }
@@ -378,7 +400,29 @@ func strategyAssignmentDue(a *StrategyAssignment, def *StrategyDefinition, now t
 	if err != nil {
 		return true
 	}
-	return !now.Before(last.Add(strategyAssignmentInterval(a, def)))
+	return last.Before(strategyAssignmentSlot(a, def, now))
+}
+
+func strategyAssignmentSlot(a *StrategyAssignment, def *StrategyDefinition, now time.Time) time.Time {
+	cadence := strings.ToLower(strings.TrimSpace(a.Cadence))
+	if cadence == "" && def != nil {
+		cadence = strings.ToLower(strings.TrimSpace(def.Cadence))
+	}
+	if cadence == "" {
+		cadence = "1d"
+	}
+	interval := strategyAssignmentInterval(a, def)
+	if cadence == "1w" {
+		monday := strategyClosedCandleBoundary(now, "1w")
+		if interval <= 7*24*time.Hour {
+			return monday
+		}
+		epochMonday := time.Date(1970, 1, 5, 0, 0, 0, 0, time.UTC)
+		weeks := int64(monday.Sub(epochMonday) / (7 * 24 * time.Hour))
+		span := int64(interval / (7 * 24 * time.Hour))
+		return epochMonday.Add(time.Duration((weeks/span)*span) * 7 * 24 * time.Hour)
+	}
+	return now.UTC().Truncate(interval)
 }
 
 func strategyAssignmentInterval(a *StrategyAssignment, def *StrategyDefinition) time.Duration {
@@ -400,25 +444,24 @@ func strategyAssignmentInterval(a *StrategyAssignment, def *StrategyDefinition) 
 	return d * time.Duration(every)
 }
 
-func placeStrategyPaperOrders(e *engine, pf *Portfolio, strategy *Strategy, assignment *StrategyAssignment, eval *StrategyEvaluation) (int, error) {
+func placeStrategyPaperOrders(e *engine, pf *Portfolio, strategy *Strategy, assignment *StrategyAssignment, eval *StrategyEvaluation) ([]*Order, bool, error) {
 	equity, err := computeEquity(e.db, pf)
 	if err != nil {
-		return 0, err
+		return nil, false, err
 	}
 	if equity <= 0 {
-		return 0, nil
+		return nil, false, nil
 	}
 	positions, err := dbListPositions(e.db, pf.ID)
 	if err != nil {
-		return 0, err
+		return nil, false, err
 	}
 	working, err := dbListOrders(e.db, pf.ID, "working", 200)
 	if err != nil {
-		return 0, err
+		return nil, false, err
 	}
-	workingBySymbol := map[string]bool{}
-	for _, o := range working {
-		workingBySymbol[strings.ToUpper(o.Symbol)] = true
+	if len(working) > 0 {
+		return nil, true, nil
 	}
 
 	targets := map[string]float64{}
@@ -449,13 +492,15 @@ func placeStrategyPaperOrders(e *engine, pf *Portfolio, strategy *Strategy, assi
 	sells := []plan{}
 	buys := []plan{}
 	threshold := math.Max(1, equity*0.001)
+	orderedSymbols := make([]string, 0, len(symbols))
 	for symbol := range symbols {
-		if workingBySymbol[symbol] {
-			continue
-		}
+		orderedSymbols = append(orderedSymbols, symbol)
+	}
+	sort.Strings(orderedSymbols)
+	for _, symbol := range orderedSymbols {
 		mark, err := dbGetMark(e.db, symbol)
 		if err != nil || mark == nil || mark.Price <= 0 {
-			continue
+			return nil, false, fmt.Errorf("executable mark unavailable for %s", symbol)
 		}
 		curValue := currentQty[symbol] * mark.Price
 		targetValue := equity * targets[symbol]
@@ -464,20 +509,43 @@ func placeStrategyPaperOrders(e *engine, pf *Portfolio, strategy *Strategy, assi
 			continue
 		}
 		if diff > 0 {
-			qty := round4(diff / mark.Price)
+			qty := floor4(diff / mark.Price)
 			if qty > 0 {
 				buys = append(buys, plan{symbol: symbol, side: "buy", qty: qty, price: mark.Price})
 			}
 			continue
 		}
-		qty := round4(math.Min(currentQty[symbol], -diff/mark.Price))
+		qty := floor4(math.Min(currentQty[symbol], -diff/mark.Price))
 		if qty > 0 {
 			sells = append(sells, plan{symbol: symbol, side: "sell", qty: qty, price: mark.Price})
 		}
 	}
+	settings := dbPortfolioExecutionSettings(e.db, pf.ID)
+	budget := pf.Cash
+	if pf.AvailableCash != nil && *pf.AvailableCash < budget {
+		budget = *pf.AvailableCash
+	}
+	for _, p := range sells {
+		fillPrice := applySlippage(p.price, p.side, settings.SlippageBps)
+		budget += p.qty*fillPrice - fillFee(p.qty, fillPrice, settings.FeeBps)
+	}
+	var desiredBuyCost float64
+	for _, p := range buys {
+		fillPrice := applySlippage(p.price, p.side, settings.SlippageBps)
+		desiredBuyCost += p.qty*fillPrice + fillFee(p.qty, fillPrice, settings.FeeBps)
+	}
+	if desiredBuyCost > budget && desiredBuyCost > 0 {
+		scale := math.Max(0, budget/desiredBuyCost)
+		for i := range buys {
+			buys[i].qty = floor4(buys[i].qty * scale)
+		}
+	}
 	plans := append(sells, buys...)
-	created := 0
+	created := make([]*Order, 0, len(plans))
 	for _, p := range plans {
+		if p.qty <= 0 {
+			continue
+		}
 		rationale := fmt.Sprintf("Strategy %s assignment #%d rebalance: %s", strategy.Name, assignment.ID, strings.Join(eval.Decisions, "; "))
 		order := &Order{
 			ID:          "o-" + uuid.NewString()[:8],
@@ -493,9 +561,9 @@ func placeStrategyPaperOrders(e *engine, pf *Portfolio, strategy *Strategy, assi
 			Source:      "strategy",
 		}
 		if err := dbInsertOrder(e.db, order, pf.ProjectID); err != nil {
-			return created, err
+			return created, false, err
 		}
-		created++
+		created = append(created, order)
 		emit("order.placed", map[string]any{
 			"order_id":      order.ID,
 			"portfolio_id":  pf.ID,
@@ -520,7 +588,11 @@ func placeStrategyPaperOrders(e *engine, pf *Portfolio, strategy *Strategy, assi
 			})
 		}
 	}
-	return created, nil
+	return created, false, nil
+}
+
+func floor4(v float64) float64 {
+	return math.Floor(v*10_000+1e-9) / 10_000
 }
 
 // significantMarkDeltas filters the universe to symbols whose mark

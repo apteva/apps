@@ -142,6 +142,7 @@ type StrategyAssignment struct {
 	ProjectID       string `json:"project_id,omitempty"`
 	PortfolioID     int64  `json:"portfolio_id"`
 	StrategyID      int64  `json:"strategy_id"`
+	StrategyVersion int    `json:"strategy_version"`
 	ControlMode     string `json:"control_mode"`
 	Status          string `json:"status"`
 	AssignedAgentID int64  `json:"assigned_agent_id,omitempty"`
@@ -1014,21 +1015,48 @@ func dbCreateStrategy(db *sql.DB, s *Strategy) (int64, error) {
 	if status == "" {
 		status = "draft"
 	}
-	res, err := db.Exec(`
-		INSERT INTO strategies (project_id, name, description, status, definition_json, version, created_by_agent_id)
-		VALUES (?, ?, ?, ?, ?, ?, NULLIF(?, 0))`,
-		s.ProjectID, s.Name, s.Description, status, string(raw), maxInt(s.Version, 1), s.CreatedByAgentID)
+	tx, err := db.Begin()
 	if err != nil {
 		return 0, err
 	}
-	return res.LastInsertId()
+	defer tx.Rollback()
+	version := maxInt(s.Version, 1)
+	res, err := tx.Exec(`
+		INSERT INTO strategies (project_id, name, description, status, definition_json, version, created_by_agent_id)
+		VALUES (?, ?, ?, ?, ?, ?, NULLIF(?, 0))`,
+		s.ProjectID, s.Name, s.Description, status, string(raw), version, s.CreatedByAgentID)
+	if err != nil {
+		return 0, err
+	}
+	id, err := res.LastInsertId()
+	if err != nil {
+		return 0, err
+	}
+	if _, err := tx.Exec(`
+		INSERT INTO strategy_versions (strategy_id, version, definition_json)
+		VALUES (?, ?, ?)`, id, version, string(raw)); err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return id, nil
 }
 
 func dbUpdateStrategy(db *sql.DB, projectID string, id int64, patch *Strategy) (*Strategy, error) {
-	cur, err := dbGetStrategy(db, projectID, id)
+	tx, err := db.Begin()
 	if err != nil {
 		return nil, err
 	}
+	defer tx.Rollback()
+	cur, err := scanStrategy(tx.QueryRow(`
+		SELECT id, project_id, name, description, status, definition_json, version,
+		       COALESCE(created_by_agent_id, 0), created_at, updated_at
+		FROM strategies WHERE id = ? AND project_id = ?`, id, projectID))
+	if err != nil {
+		return nil, err
+	}
+	previousVersion := cur.Version
 	if strings.TrimSpace(patch.Name) != "" {
 		cur.Name = strings.TrimSpace(patch.Name)
 	}
@@ -1046,13 +1074,26 @@ func dbUpdateStrategy(db *sql.DB, projectID string, id int64, patch *Strategy) (
 	if err != nil {
 		return nil, err
 	}
-	_, err = db.Exec(`
+	res, err := tx.Exec(`
 		UPDATE strategies
 		   SET name = ?, description = ?, status = ?, definition_json = ?, version = ?,
 		       updated_at = CURRENT_TIMESTAMP
-		 WHERE id = ? AND project_id = ?`,
-		cur.Name, cur.Description, cur.Status, string(raw), cur.Version, id, projectID)
+		 WHERE id = ? AND project_id = ? AND version = ?`,
+		cur.Name, cur.Description, cur.Status, string(raw), cur.Version, id, projectID, previousVersion)
 	if err != nil {
+		return nil, err
+	}
+	if n, _ := res.RowsAffected(); n != 1 {
+		return nil, errors.New("strategy changed concurrently")
+	}
+	if patch.Definition != nil {
+		if _, err := tx.Exec(`
+			INSERT INTO strategy_versions (strategy_id, version, definition_json)
+			VALUES (?, ?, ?)`, id, cur.Version, string(raw)); err != nil {
+			return nil, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
 	return dbGetStrategy(db, projectID, id)
@@ -1063,6 +1104,19 @@ func dbGetStrategy(db *sql.DB, projectID string, id int64) (*Strategy, error) {
 		SELECT id, project_id, name, description, status, definition_json, version,
 		       COALESCE(created_by_agent_id, 0), created_at, updated_at
 		FROM strategies WHERE id = ? AND project_id = ?`, id, projectID)
+	return scanStrategy(row)
+}
+
+func dbGetStrategyVersion(db *sql.DB, projectID string, id int64, version int) (*Strategy, error) {
+	if version <= 0 {
+		return dbGetStrategy(db, projectID, id)
+	}
+	row := db.QueryRow(`
+		SELECT s.id, s.project_id, s.name, s.description, s.status, v.definition_json, v.version,
+		       COALESCE(s.created_by_agent_id, 0), s.created_at, s.updated_at
+		FROM strategies s
+		JOIN strategy_versions v ON v.strategy_id = s.id
+		WHERE s.id = ? AND s.project_id = ? AND v.version = ?`, id, projectID, version)
 	return scanStrategy(row)
 }
 
@@ -1127,14 +1181,30 @@ func dbAssignStrategy(db *sql.DB, a *StrategyAssignment) (int64, error) {
 	if cadence == "" {
 		cadence = "1d"
 	}
+	version := a.StrategyVersion
+	if version <= 0 {
+		if err := db.QueryRow(`SELECT version FROM strategies WHERE id = ? AND project_id = ?`,
+			a.StrategyID, a.ProjectID).Scan(&version); err != nil {
+			return 0, err
+		}
+	}
+	var exists int
+	if err := db.QueryRow(`
+		SELECT 1
+		  FROM strategy_versions v
+		  JOIN strategies s ON s.id = v.strategy_id
+		 WHERE s.id = ? AND s.project_id = ? AND v.version = ?`,
+		a.StrategyID, a.ProjectID, version).Scan(&exists); err != nil {
+		return 0, err
+	}
 	if err := dbUnassignStrategy(db, a.ProjectID, a.PortfolioID); err != nil {
 		return 0, err
 	}
 	res, err := db.Exec(`
 		INSERT INTO portfolio_strategy_assignments (
-			project_id, portfolio_id, strategy_id, control_mode, status, assigned_agent_id, cadence
-		) VALUES (?, ?, ?, ?, 'active', NULLIF(?, 0), ?)`,
-		a.ProjectID, a.PortfolioID, a.StrategyID, control, a.AssignedAgentID, cadence)
+			project_id, portfolio_id, strategy_id, strategy_version, control_mode, status, assigned_agent_id, cadence
+		) VALUES (?, ?, ?, ?, ?, 'active', NULLIF(?, 0), ?)`,
+		a.ProjectID, a.PortfolioID, a.StrategyID, version, control, a.AssignedAgentID, cadence)
 	if err != nil {
 		return 0, err
 	}
@@ -1143,14 +1213,14 @@ func dbAssignStrategy(db *sql.DB, a *StrategyAssignment) (int64, error) {
 
 func dbActiveStrategyAssignment(db *sql.DB, projectID string, portfolioID int64) (*StrategyAssignment, error) {
 	row := db.QueryRow(`
-		SELECT id, project_id, portfolio_id, strategy_id, control_mode, status,
+		SELECT id, project_id, portfolio_id, strategy_id, strategy_version, control_mode, status,
 		       COALESCE(assigned_agent_id, 0), cadence, COALESCE(last_evaluated_at, ''),
 		       created_at, updated_at
 		FROM portfolio_strategy_assignments
 		WHERE project_id = ? AND portfolio_id = ? AND status = 'active'
 		ORDER BY id DESC LIMIT 1`, projectID, portfolioID)
 	var a StrategyAssignment
-	if err := row.Scan(&a.ID, &a.ProjectID, &a.PortfolioID, &a.StrategyID, &a.ControlMode,
+	if err := row.Scan(&a.ID, &a.ProjectID, &a.PortfolioID, &a.StrategyID, &a.StrategyVersion, &a.ControlMode,
 		&a.Status, &a.AssignedAgentID, &a.Cadence, &a.LastEvaluatedAt, &a.CreatedAt, &a.UpdatedAt); err != nil {
 		return nil, err
 	}
@@ -1159,7 +1229,7 @@ func dbActiveStrategyAssignment(db *sql.DB, projectID string, portfolioID int64)
 
 func dbActiveStrategyAssignments(db *sql.DB) ([]*StrategyAssignment, error) {
 	rows, err := db.Query(`
-		SELECT id, project_id, portfolio_id, strategy_id, control_mode, status,
+		SELECT id, project_id, portfolio_id, strategy_id, strategy_version, control_mode, status,
 		       COALESCE(assigned_agent_id, 0), cadence, COALESCE(last_evaluated_at, ''),
 		       created_at, updated_at
 		FROM portfolio_strategy_assignments
@@ -1172,7 +1242,7 @@ func dbActiveStrategyAssignments(db *sql.DB) ([]*StrategyAssignment, error) {
 	var out []*StrategyAssignment
 	for rows.Next() {
 		var a StrategyAssignment
-		if err := rows.Scan(&a.ID, &a.ProjectID, &a.PortfolioID, &a.StrategyID, &a.ControlMode,
+		if err := rows.Scan(&a.ID, &a.ProjectID, &a.PortfolioID, &a.StrategyID, &a.StrategyVersion, &a.ControlMode,
 			&a.Status, &a.AssignedAgentID, &a.Cadence, &a.LastEvaluatedAt, &a.CreatedAt, &a.UpdatedAt); err != nil {
 			return nil, err
 		}

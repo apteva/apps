@@ -115,6 +115,9 @@ func parseStrategyDefinition(raw map[string]any) (*StrategyDefinition, error) {
 	}
 	if len(def.Universe) == 0 {
 		for _, r := range def.Rules {
+			if r.When != nil && strings.TrimSpace(r.When.Symbol) != "" {
+				def.Universe = append(def.Universe, r.When.Symbol)
+			}
 			for _, a := range r.Allocate {
 				def.Universe = append(def.Universe, a.Symbol)
 			}
@@ -156,12 +159,34 @@ func validateStrategyDefinition(raw map[string]any) (*StrategyDefinition, []stri
 		return nil, nil, err
 	}
 	warnings := []string{}
+	universe := make(map[string]bool, len(def.Universe))
+	for _, symbol := range def.Universe {
+		universe[symbol] = true
+	}
 	for _, rule := range def.Rules {
 		if len(rule.Allocate) == 0 && rule.Rank == nil {
 			warnings = append(warnings, fmt.Sprintf("rule %q has no allocation output", nonEmpty(rule.Name, "(unnamed)")))
 		}
 		if rule.When != nil && strings.TrimSpace(rule.When.Indicator) == "" {
 			return nil, nil, fmt.Errorf("rule %q condition indicator required", nonEmpty(rule.Name, "(unnamed)"))
+		}
+		if rule.When != nil {
+			symbol := strings.ToUpper(strings.TrimSpace(rule.When.Symbol))
+			if symbol != "" && !universe[symbol] {
+				return nil, nil, fmt.Errorf("rule %q condition symbol %s is outside the strategy universe", nonEmpty(rule.Name, "(unnamed)"), symbol)
+			}
+		}
+		for _, allocation := range rule.Allocate {
+			if !universe[allocation.Symbol] {
+				return nil, nil, fmt.Errorf("rule %q allocation symbol %s is outside the strategy universe", nonEmpty(rule.Name, "(unnamed)"), allocation.Symbol)
+			}
+		}
+		if rule.Rank != nil {
+			for _, symbol := range rule.Rank.Symbols {
+				if !universe[symbol] {
+					return nil, nil, fmt.Errorf("rule %q rank symbol %s is outside the strategy universe", nonEmpty(rule.Name, "(unnamed)"), symbol)
+				}
+			}
 		}
 	}
 	return def, warnings, nil
@@ -257,7 +282,7 @@ func evalStrategyRank(rank StrategyRank, market strategyMarket) ([]StrategyAlloc
 	for _, symbol := range symbols {
 		v, err := strategyMetric(symbol, rank.By, market)
 		if err != nil {
-			continue
+			return nil, "", fmt.Errorf("rank %s metric unavailable for %s: %w", rank.By, symbol, err)
 		}
 		rows = append(rows, row{symbol: symbol, value: v})
 	}
@@ -265,6 +290,10 @@ func evalStrategyRank(rank StrategyRank, market strategyMarket) ([]StrategyAlloc
 		return nil, "", fmt.Errorf("rank %s has no computable symbols", rank.By)
 	}
 	sort.Slice(rows, func(i, j int) bool { return rows[i].value > rows[j].value })
+	rankedValues := make([]string, 0, len(rows))
+	for _, r := range rows {
+		rankedValues = append(rankedValues, fmt.Sprintf("%s %.4f", r.symbol, r.value))
+	}
 	if rank.Min != 0 {
 		filtered := rows[:0]
 		for _, r := range rows {
@@ -274,7 +303,7 @@ func evalStrategyRank(rank StrategyRank, market strategyMarket) ([]StrategyAlloc
 		}
 		rows = filtered
 		if len(rows) == 0 {
-			return []StrategyAllocation{}, fmt.Sprintf("ranked by %s: no symbol met min %.4f", rank.By, rank.Min), nil
+			return []StrategyAllocation{}, fmt.Sprintf("ranked by %s: no symbol met min %.4f; values: %s", rank.By, rank.Min, strings.Join(rankedValues, ", ")), nil
 		}
 	}
 	top := rank.Top
@@ -518,49 +547,54 @@ type strategyBarsProvider interface {
 	StrategyBars(symbol, interval string, limit int) ([]Bar, error)
 }
 
-func liveStrategyMarket(ctx *sdk.AppCtx, def *StrategyDefinition) strategyMarket {
+func liveStrategyMarket(ctx *sdk.AppCtx, def *StrategyDefinition) (strategyMarket, error) {
 	market := strategyMarket{prices: map[string]float64{}, history: map[string][]float64{}, asOf: time.Now().UTC()}
 	interval := strategyHistoryInterval(def)
 	limit := strategyRequiredBars(def)
-	for _, symbol := range def.Universe {
-		if mark, err := dbGetMark(ctx.AppDB(), symbol); err == nil && mark != nil {
-			market.prices[symbol] = mark.Price
-		}
+	if globalEngine == nil || globalEngine.provider == nil {
+		return market, errors.New("live strategy market provider not ready")
 	}
-	if globalEngine != nil {
-		type historyResult struct {
-			symbol string
-			bars   []Bar
-		}
-		results := make(chan historyResult, len(def.Universe))
-		sem := make(chan struct{}, 8)
-		var wg sync.WaitGroup
-		for _, symbol := range def.Universe {
-			symbol := symbol
-			wg.Add(1)
-			go func() {
-				defer wg.Done()
-				sem <- struct{}{}
-				bars, err := loadLiveStrategyBars(globalEngine.provider, symbol, interval, limit)
-				<-sem
-				if err == nil {
-					results <- historyResult{symbol: symbol, bars: bars}
-				}
-			}()
-		}
-		wg.Wait()
-		close(results)
-		for result := range results {
-			appendStrategyHistory(market.history, result.symbol, result.bars)
-		}
+	type historyResult struct {
+		symbol string
+		bars   []Bar
+		err    error
+	}
+	results := make(chan historyResult, len(def.Universe))
+	sem := make(chan struct{}, 8)
+	var wg sync.WaitGroup
+	for _, symbol := range def.Universe {
+		symbol := symbol
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			sem <- struct{}{}
+			bars, err := loadLiveStrategyBars(globalEngine.provider, symbol, interval, limit)
+			<-sem
+			results <- historyResult{symbol: symbol, bars: bars, err: err}
+		}()
+	}
+	wg.Wait()
+	close(results)
+	loaded := make(map[string]historyResult, len(def.Universe))
+	for result := range results {
+		loaded[result.symbol] = result
 	}
 	for _, symbol := range def.Universe {
-		if len(market.history[symbol]) > 0 && market.prices[symbol] == 0 {
-			h := market.history[symbol]
-			market.prices[symbol] = h[len(h)-1]
+		result, ok := loaded[symbol]
+		if !ok || result.err != nil {
+			if ok {
+				return market, fmt.Errorf("strategy history unavailable for %s: %w", symbol, result.err)
+			}
+			return market, fmt.Errorf("strategy history unavailable for %s", symbol)
 		}
+		appendStrategyHistory(market.history, symbol, result.bars)
+		h := market.history[symbol]
+		if len(h) < limit {
+			return market, fmt.Errorf("strategy history incomplete for %s: need %d valid closed bars, got %d", symbol, limit, len(h))
+		}
+		market.prices[symbol] = h[len(h)-1]
 	}
-	return market
+	return market, nil
 }
 
 func loadLiveStrategyBars(provider Provider, symbol, interval string, limit int) ([]Bar, error) {
@@ -775,7 +809,11 @@ func (a *App) toolStrategyEvaluate(ctx *sdk.AppCtx, args map[string]any) (any, e
 	if err != nil {
 		return nil, err
 	}
-	eval, err := evaluateStrategy(strategy, liveStrategyMarket(ctx, def))
+	market, err := liveStrategyMarket(ctx, def)
+	if err != nil {
+		return nil, err
+	}
+	eval, err := evaluateStrategy(strategy, market)
 	if err != nil {
 		return nil, err
 	}
@@ -807,14 +845,15 @@ func (a *App) toolStrategyAssign(ctx *sdk.AppCtx, args map[string]any) (any, err
 	}
 	id, err := dbAssignStrategy(ctx.AppDB(), &StrategyAssignment{
 		ProjectID: pid, PortfolioID: portfolioID, StrategyID: strategyID,
-		ControlMode: nonEmpty(strArg(args, "control_mode"), "strategy"),
-		Cadence:     nonEmpty(cadence, "1d"),
+		StrategyVersion: strategy.Version,
+		ControlMode:     nonEmpty(strArg(args, "control_mode"), "strategy"),
+		Cadence:         nonEmpty(cadence, "1d"),
 	})
 	if err != nil {
 		return nil, err
 	}
 	assignment, _ := dbActiveStrategyAssignment(ctx.AppDB(), pid, portfolioID)
-	emit("strategy.assigned", map[string]any{"id": id, "portfolio_id": portfolioID, "strategy_id": strategyID})
+	emit("strategy.assigned", map[string]any{"id": id, "portfolio_id": portfolioID, "strategy_id": strategyID, "strategy_version": strategy.Version})
 	return map[string]any{"assignment": assignment}, nil
 }
 
@@ -1318,7 +1357,7 @@ func initializeStrategyBacktestRun(run *BacktestRun) error {
 	if run.StrategyID <= 0 {
 		return errors.New("strategy_id required")
 	}
-	strategy, err := dbGetStrategy(globalCtx.AppDB(), run.ProjectID, run.StrategyID)
+	strategy, err := dbGetStrategyVersion(globalCtx.AppDB(), run.ProjectID, run.StrategyID, run.StrategyVersion)
 	if err != nil {
 		return err
 	}
@@ -1353,7 +1392,7 @@ func runStrategyBacktestToEnd(run *BacktestRun) (map[string]any, error) {
 	if err != nil {
 		return nil, err
 	}
-	strategy, err := dbGetStrategy(globalCtx.AppDB(), next.ProjectID, next.StrategyID)
+	strategy, err := dbGetStrategyVersion(globalCtx.AppDB(), next.ProjectID, next.StrategyID, next.StrategyVersion)
 	if err != nil {
 		return nil, err
 	}
@@ -1394,7 +1433,7 @@ func stepStrategyBacktestRun(run *BacktestRun) (map[string]any, error) {
 		_ = dbSetBacktestStatus(globalCtx.AppDB(), run.ID, "completed", "")
 		return map[string]any{"status": "completed", "backtest": run}, nil
 	}
-	strategy, err := dbGetStrategy(globalCtx.AppDB(), run.ProjectID, run.StrategyID)
+	strategy, err := dbGetStrategyVersion(globalCtx.AppDB(), run.ProjectID, run.StrategyID, run.StrategyVersion)
 	if err != nil {
 		return nil, err
 	}

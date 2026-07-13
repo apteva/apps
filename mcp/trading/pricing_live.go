@@ -32,6 +32,7 @@ type liveProvider struct {
 	yahoo  *yahooPublic
 	cache  *markCache
 	health *providerHealth
+	now    func() time.Time
 }
 
 func newLiveProvider() *liveProvider {
@@ -41,6 +42,7 @@ func newLiveProvider() *liveProvider {
 		yahoo:  newYahooPublic(),
 		cache:  newMarkCache(cacheTTL),
 		health: newProviderHealth(),
+		now:    time.Now,
 	}
 }
 
@@ -243,8 +245,15 @@ func (p *liveProvider) StrategyBars(symbol, interval string, limit int) ([]Bar, 
 			interval = "1h"
 			dur = time.Hour
 		}
-		end := time.Now().UTC()
-		start := end.Add(-dur * time.Duration(limit+2))
+		now := time.Now
+		if p.now != nil {
+			now = p.now
+		}
+		end := strategyClosedCandleBoundary(now().UTC(), interval)
+		start := end.Add(-dur * time.Duration(limit))
+		// Binance treats endTime as inclusive. Stop one millisecond before
+		// the boundary so the currently forming candle can never be returned.
+		end = end.Add(-time.Millisecond)
 		bars, err := p.crypto.BacktestBars(symbol, interval, start, end, limit)
 		if err != nil {
 			p.health.note("crypto", err)
@@ -254,6 +263,20 @@ func (p *liveProvider) StrategyBars(symbol, interval string, limit int) ([]Bar, 
 		return bars, nil
 	}
 	return p.Bars(symbol, "3M")
+}
+
+func strategyClosedCandleBoundary(now time.Time, interval string) time.Time {
+	now = now.UTC()
+	if strings.EqualFold(strings.TrimSpace(interval), "1w") {
+		day := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, time.UTC)
+		daysSinceMonday := (int(day.Weekday()) + 6) % 7
+		return day.AddDate(0, 0, -daysSinceMonday)
+	}
+	dur, ok := strategyCadenceDuration(strings.ToLower(strings.TrimSpace(interval)))
+	if !ok || dur <= 0 {
+		dur = time.Hour
+	}
+	return now.Truncate(dur)
 }
 
 // Health — read-only snapshot of per-class status.
