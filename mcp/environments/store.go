@@ -28,12 +28,22 @@ func (s store) listDefinitions() ([]Definition, error) {
 		}
 		d.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
 		d.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updated)
-		if run, _ := s.activeRun(d.ID); run != nil {
-			d.ActiveRun = run
-		}
 		out = append(out, d)
 	}
-	return out, rows.Err()
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	for i := range out {
+		if run, err := s.activeRun(out[i].ID); err != nil {
+			return nil, err
+		} else if run != nil {
+			out[i].ActiveRun = run
+		}
+	}
+	return out, nil
 }
 
 func (s store) getDefinition(id string) (*Definition, error) {

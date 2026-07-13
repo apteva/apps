@@ -6,6 +6,7 @@ import (
 	"reflect"
 	"sort"
 	"testing"
+	"time"
 
 	sdk "github.com/apteva/app-sdk"
 	_ "modernc.org/sqlite"
@@ -61,6 +62,43 @@ func TestDefinitionAndRunPersistence(t *testing.T) {
 	active, err = s.activeRun(d.ID)
 	if err != nil || active != nil {
 		t.Fatalf("active=%#v err=%v", active, err)
+	}
+}
+
+func TestListDefinitionsWithSingleDatabaseConnection(t *testing.T) {
+	s := testStore(t)
+	s.db.SetMaxOpenConns(1)
+	d := &Definition{ID: "env-list", Name: "List", Spec: EnvironmentSpec{Version: 1, TTLSeconds: 3600}, DesiredState: "running"}
+	if err := s.saveDefinition(d); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.createRun(&Run{ID: "run-list", EnvironmentID: d.ID, RuntimeID: "rt-list", Kind: "interactive", Status: "running", StartedAt: time.Now().UTC()}); err != nil {
+		t.Fatal(err)
+	}
+
+	type result struct {
+		definitions []Definition
+		err         error
+	}
+	done := make(chan result, 1)
+	go func() {
+		definitions, err := s.listDefinitions()
+		done <- result{definitions: definitions, err: err}
+	}()
+
+	select {
+	case got := <-done:
+		if got.err != nil {
+			t.Fatal(got.err)
+		}
+		if len(got.definitions) != 1 || got.definitions[0].ActiveRun == nil || got.definitions[0].ActiveRun.ID != "run-list" {
+			t.Fatalf("definitions=%#v", got.definitions)
+		}
+	case <-time.After(time.Second):
+		// Release a nested-query implementation so test cleanup can complete.
+		s.db.SetMaxOpenConns(2)
+		<-done
+		t.Fatal("listDefinitions blocked on its own open result set")
 	}
 }
 
