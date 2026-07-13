@@ -40,7 +40,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: todo
 display_name: Todo
-version: 0.4.8
+version: 0.4.9
 description: Personal todo list — human-first, agent-helpful.
 author: Apteva
 scopes: [project, global]
@@ -382,6 +382,8 @@ type Todo struct {
 	UpdatedAt    string   `json:"updated_at"`
 }
 
+var errListNotFoundInScope = errors.New("list not found in scope")
+
 // ─── DB helpers ──────────────────────────────────────────────────
 
 func projectScope(ctxs ...*sdk.AppCtx) string {
@@ -693,6 +695,62 @@ func tagsFor(db *sql.DB, todoID int64) ([]string, error) {
 	return out, nil
 }
 
+func hydrateTodoTags(db *sql.DB, pid string, todos []Todo) error {
+	for i := range todos {
+		todos[i].Tags = []string{}
+	}
+	if len(todos) == 0 {
+		return nil
+	}
+
+	const batchSize = 400
+	indices := make(map[int64]int, len(todos))
+	for i := range todos {
+		indices[todos[i].ID] = i
+	}
+	for start := 0; start < len(todos); start += batchSize {
+		end := min(start+batchSize, len(todos))
+		placeholders := make([]string, end-start)
+		args := make([]any, 0, end-start+1)
+		args = append(args, pid)
+		for i := start; i < end; i++ {
+			placeholders[i-start] = "?"
+			args = append(args, todos[i].ID)
+		}
+		rows, err := db.Query(
+			`SELECT tt.todo_id, t.name
+			   FROM todo_tags tt
+			   JOIN tags t ON t.id = tt.tag_id
+			  WHERE t.project_id = ?
+			    AND tt.todo_id IN (`+strings.Join(placeholders, ",")+`)
+			  ORDER BY tt.todo_id, t.name`,
+			args...,
+		)
+		if err != nil {
+			return err
+		}
+		for rows.Next() {
+			var todoID int64
+			var name string
+			if err := rows.Scan(&todoID, &name); err != nil {
+				rows.Close()
+				return err
+			}
+			if index, ok := indices[todoID]; ok {
+				todos[index].Tags = append(todos[index].Tags, name)
+			}
+		}
+		if err := rows.Err(); err != nil {
+			rows.Close()
+			return err
+		}
+		if err := rows.Close(); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func scanTodo(db *sql.DB, row *sql.Row) (*Todo, error) {
 	var t Todo
 	var due, snz, comp sql.NullString
@@ -735,6 +793,14 @@ func insertTodo(db *sql.DB, pid string, t *Todo) (*Todo, error) {
 	}
 	if t.Priority == 0 {
 		t.Priority = 4
+	}
+	if t.ListID != nil {
+		if _, err := getList(db, pid, *t.ListID); err != nil {
+			if errors.Is(err, sql.ErrNoRows) {
+				return nil, fmt.Errorf("%w: %d", errListNotFoundInScope, *t.ListID)
+			}
+			return nil, err
+		}
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
 	res, err := db.Exec(
@@ -850,17 +916,25 @@ func listTodos(db *sql.DB, pid, view string, listID *int64, tag string, limit in
 		t.DueAt, t.SnoozedUntil, t.CompletedAt = due.String, snz.String, comp.String
 		out = append(out, t)
 	}
-	// Hydrate tags.
-	for i := range out {
-		tags, err := tagsFor(db, out[i].ID)
-		if err == nil {
-			out[i].Tags = tags
-		}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	if err := rows.Close(); err != nil {
+		return nil, err
+	}
+	if err := hydrateTodoTags(db, pid, out); err != nil {
+		return nil, err
 	}
 	return out, nil
 }
 
 func updateTodoFields(db *sql.DB, pid string, id int64, fields map[string]any) error {
+	var exists int
+	if err := db.QueryRow(
+		`SELECT 1 FROM todos WHERE id = ? AND project_id = ?`, id, pid,
+	).Scan(&exists); err != nil {
+		return err
+	}
 	cols := []string{}
 	args := []any{}
 	push := func(col string, v any) {
@@ -897,7 +971,10 @@ func updateTodoFields(db *sql.DB, pid string, id int64, fields map[string]any) e
 			push("list_id", nil)
 		} else {
 			if _, err := getList(db, pid, ref); err != nil {
-				return fmt.Errorf("list %d not found in scope", ref)
+				if errors.Is(err, sql.ErrNoRows) {
+					return fmt.Errorf("%w: %d", errListNotFoundInScope, ref)
+				}
+				return err
 			}
 			push("list_id", ref)
 		}
@@ -986,6 +1063,20 @@ func rollRecurring(rrule, currentDue string) string {
 }
 
 // ─── HTTP handlers ───────────────────────────────────────────────
+
+func writeTodoHTTPError(w http.ResponseWriter, err error) {
+	status := http.StatusInternalServerError
+	switch {
+	case errors.Is(err, sql.ErrNoRows):
+		status = http.StatusNotFound
+	case errors.Is(err, errListNotFoundInScope):
+		status = http.StatusBadRequest
+	case strings.HasPrefix(err.Error(), "priority must"),
+		strings.HasPrefix(err.Error(), "status must"):
+		status = http.StatusBadRequest
+	}
+	http.Error(w, err.Error(), status)
+}
 
 func (a *App) handleLists(w http.ResponseWriter, r *http.Request) {
 	ctx := mustCtx(r)
@@ -1157,7 +1248,7 @@ func (a *App) handleTodos(w http.ResponseWriter, r *http.Request) {
 		}
 		out, err := insertTodo(ctx.AppDB(), pid, t)
 		if err != nil {
-			http.Error(w, err.Error(), 500)
+			writeTodoHTTPError(w, err)
 			return
 		}
 		emitTodo(ctx, "todo.created", out)
@@ -1180,14 +1271,14 @@ func (a *App) handleTodosItem(w http.ResponseWriter, r *http.Request) {
 	case rest == "complete" && r.Method == http.MethodPost:
 		out, err := completeTodo(ctx.AppDB(), pid, id)
 		if err != nil {
-			http.Error(w, err.Error(), 500)
+			writeTodoHTTPError(w, err)
 			return
 		}
 		emitTodo(ctx, "todo.completed", out)
 		writeJSON(w, out)
 	case rest == "uncomplete" && r.Method == http.MethodPost:
 		if err := updateTodoFields(ctx.AppDB(), pid, id, map[string]any{"status": "open"}); err != nil {
-			http.Error(w, err.Error(), 500)
+			writeTodoHTTPError(w, err)
 			return
 		}
 		out, _ := getTodo(ctx.AppDB(), pid, id)
@@ -1204,7 +1295,7 @@ func (a *App) handleTodosItem(w http.ResponseWriter, r *http.Request) {
 		if err := updateTodoFields(ctx.AppDB(), pid, id, map[string]any{
 			"snoozed_until": until, "due_at": until,
 		}); err != nil {
-			http.Error(w, err.Error(), 500)
+			writeTodoHTTPError(w, err)
 			return
 		}
 		out, _ := getTodo(ctx.AppDB(), pid, id)
@@ -1221,7 +1312,7 @@ func (a *App) handleTodosItem(w http.ResponseWriter, r *http.Request) {
 		var fields map[string]any
 		json.NewDecoder(r.Body).Decode(&fields)
 		if err := updateTodoFields(ctx.AppDB(), pid, id, fields); err != nil {
-			http.Error(w, err.Error(), 500)
+			writeTodoHTTPError(w, err)
 			return
 		}
 		out, _ := getTodo(ctx.AppDB(), pid, id)

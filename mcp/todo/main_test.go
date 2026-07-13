@@ -2,6 +2,7 @@ package main
 
 import (
 	"database/sql"
+	"errors"
 	"os"
 	"testing"
 
@@ -75,6 +76,81 @@ func TestListTodosAllViewIsUnboundedByDefault(t *testing.T) {
 	}
 	if len(limited) != 50 {
 		t.Fatalf("limited all view returned %d todos, want 50", len(limited))
+	}
+}
+
+func TestListTodosHydratesTagsInBatches(t *testing.T) {
+	db := openTestDB(t)
+	const pid = "project-batched-tags"
+	for i := 0; i < 425; i++ {
+		tags := []string{}
+		if i == 0 {
+			tags = []string{"alpha", "beta"}
+		}
+		if _, err := insertTodo(db, pid, &Todo{Title: "todo", Tags: tags}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	all, err := listTodos(db, pid, "all", nil, "", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 425 {
+		t.Fatalf("all view returned %d todos, want 425", len(all))
+	}
+	for _, todo := range all {
+		if todo.ID == 1 {
+			if len(todo.Tags) != 2 || todo.Tags[0] != "alpha" || todo.Tags[1] != "beta" {
+				t.Fatalf("tag hydration returned %#v", todo.Tags)
+			}
+			continue
+		}
+		if todo.Tags == nil {
+			t.Fatalf("todo %d has nil tags; want an empty JSON array", todo.ID)
+		}
+	}
+}
+
+func TestInsertTodoRejectsListFromAnotherProject(t *testing.T) {
+	db := openTestDB(t)
+	list, err := insertList(db, "project-a", "Private", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = insertTodo(db, "project-b", &Todo{Title: "wrong scope", ListID: &list.ID})
+	if !errors.Is(err, errListNotFoundInScope) {
+		t.Fatalf("insertTodo error = %v, want errListNotFoundInScope", err)
+	}
+
+	var count int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM todos WHERE project_id = ?`, "project-b").Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 0 {
+		t.Fatalf("project-b has %d todos after rejected insert, want 0", count)
+	}
+}
+
+func TestUpdateTodoFieldsCannotModifyAnotherProjectTags(t *testing.T) {
+	db := openTestDB(t)
+	todo, err := insertTodo(db, "project-a", &Todo{Title: "private", Tags: []string{"original"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	err = updateTodoFields(db, "project-b", todo.ID, map[string]any{"tags": []string{"leaked"}})
+	if !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("updateTodoFields error = %v, want sql.ErrNoRows", err)
+	}
+
+	stored, err := getTodo(db, "project-a", todo.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(stored.Tags) != 1 || stored.Tags[0] != "original" {
+		t.Fatalf("tags after rejected cross-project update = %#v", stored.Tags)
 	}
 }
 

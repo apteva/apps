@@ -23,8 +23,22 @@
 // hit the "+" button beside quick-add to open a full create dialog.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { todoApiUrl } from "./api";
 
-const API = "/api/apps/todo";
+async function apiRequest<T>(url: string, init: RequestInit = {}): Promise<T> {
+  const response = await fetch(url, { credentials: "same-origin", ...init });
+  if (!response.ok) {
+    const detail = (await response.text()).trim();
+    throw new Error(detail || `HTTP ${response.status}`);
+  }
+  if (response.status === 204) return undefined as T;
+  return response.json() as Promise<T>;
+}
+
+function errorMessage(label: string, error: unknown): string {
+  const detail = error instanceof Error ? error.message : String(error);
+  return `${label}: ${detail}`;
+}
 
 interface NativePanelProps {
   appName: string;
@@ -179,12 +193,22 @@ export default function TodoPanel({ projectId }: NativePanelProps) {
   const [calendarTab, setCalendarTab] = useState<CalendarTab>("heatmap");
   const [quick, setQuick] = useState("");
   const [statusMsg, setStatusMsg] = useState("");
+  const [loadError, setLoadError] = useState("");
+  const [loadingTodos, setLoadingTodos] = useState(true);
+  const [addingQuick, setAddingQuick] = useState(false);
   const [editing, setEditing] = useState<Todo | null>(null);
   const [creating, setCreating] = useState(false);
   const [newListOpen, setNewListOpen] = useState(false);
   const [newGroupOpen, setNewGroupOpen] = useState(false);
   const [collapsedGroups, setCollapsedGroups] = useState<Record<number, boolean>>({});
   const [settlingTodos, setSettlingTodos] = useState<Record<number, "complete" | "uncomplete">>({});
+  const todoLoadSequence = useRef(0);
+  const refreshTimer = useRef<number | null>(null);
+  const pendingRefresh = useRef({ todos: false, lists: false, groups: false });
+
+  const apiUrl = useCallback((path: string) => {
+    return todoApiUrl(path, projectId);
+  }, [projectId]);
 
   const params = useMemo(() => {
     const p = new URLSearchParams();
@@ -195,64 +219,99 @@ export default function TodoPanel({ projectId }: NativePanelProps) {
   }, [view, pickedList, pickedTag]);
 
   const loadTodos = useCallback(async () => {
+    const sequence = ++todoLoadSequence.current;
+    if (!projectId) {
+      setLoadingTodos(false);
+      setLoadError("No project selected.");
+      return;
+    }
+    setLoadingTodos(true);
     try {
-      const res = await fetch(`${API}/todos?${params}`, { credentials: "same-origin" });
-      if (!res.ok) { setStatusMsg(`Load: ${res.status}`); return; }
-      const data: Todo[] = await res.json();
+      const data = await apiRequest<Todo[]>(apiUrl(`/todos?${params}`));
+      if (sequence !== todoLoadSequence.current) return;
       setTodos(data || []);
+      setLoadError("");
       setStatusMsg(`${(data || []).length} todos`);
     } catch (e) {
-      setStatusMsg("Load: " + (e as Error).message);
+      if (sequence !== todoLoadSequence.current) return;
+      const message = errorMessage("Unable to load todos", e);
+      setLoadError(message);
+      setStatusMsg(message);
+    } finally {
+      if (sequence === todoLoadSequence.current) setLoadingTodos(false);
     }
-  }, [params]);
+  }, [apiUrl, params, projectId]);
 
   const loadLists = useCallback(async () => {
     try {
-      const res = await fetch(`${API}/lists`, { credentials: "same-origin" });
-      if (res.ok) setLists(await res.json() || []);
-    } catch {}
-  }, []);
+      setLists(await apiRequest<List[]>(apiUrl("/lists")) || []);
+    } catch (e) {
+      setStatusMsg(errorMessage("Unable to load lists", e));
+    }
+  }, [apiUrl]);
 
   const loadGroups = useCallback(async () => {
     try {
-      const res = await fetch(`${API}/list_groups`, { credentials: "same-origin" });
-      if (res.ok) setGroups(await res.json() || []);
-    } catch {}
-  }, []);
+      setGroups(await apiRequest<ListGroup[]>(apiUrl("/list_groups")) || []);
+    } catch (e) {
+      setStatusMsg(errorMessage("Unable to load groups", e));
+    }
+  }, [apiUrl]);
 
   const loadTags = useCallback(async () => {
     try {
-      const res = await fetch(`${API}/tags`, { credentials: "same-origin" });
-      if (res.ok) setTags(await res.json() || []);
-    } catch {}
-  }, []);
+      setTags(await apiRequest<Tag[]>(apiUrl("/tags")) || []);
+    } catch (e) {
+      setStatusMsg(errorMessage("Unable to load tags", e));
+    }
+  }, [apiUrl]);
 
   const loadSummary = useCallback(async () => {
     try {
-      const res = await fetch(`${API}/todos?view=all`, { credentials: "same-origin" });
-      if (!res.ok) return;
-      const data: Todo[] = await res.json();
+      const data = await apiRequest<Todo[]>(apiUrl("/todos?view=all"));
       const items = data || [];
       setAllOpenTodos(items);
       setSummary(summarizeWork(items));
-    } catch {}
-  }, []);
+    } catch (e) {
+      setStatusMsg(errorMessage("Unable to load summary", e));
+    }
+  }, [apiUrl]);
 
   const loadDoneTodos = useCallback(async () => {
     try {
-      const res = await fetch(`${API}/todos?view=done`, { credentials: "same-origin" });
-      if (res.ok) setDoneTodos(await res.json() || []);
-    } catch {}
-  }, []);
+      setDoneTodos(await apiRequest<Todo[]>(apiUrl("/todos?view=done")) || []);
+    } catch (e) {
+      setStatusMsg(errorMessage("Unable to load completed todos", e));
+    }
+  }, [apiUrl]);
 
   useEffect(() => { loadTodos(); }, [loadTodos]);
   useEffect(() => { loadLists(); loadGroups(); loadTags(); loadSummary(); }, [loadLists, loadGroups, loadTags, loadSummary]);
   useEffect(() => { if (calendarIncludeDone) loadDoneTodos(); }, [calendarIncludeDone, loadDoneTodos]);
 
-  const refreshAll = useCallback(() => {
-    loadTodos(); loadLists(); loadGroups(); loadTags(); loadSummary();
-    if (calendarIncludeDone) loadDoneTodos();
-  }, [loadTodos, loadLists, loadGroups, loadTags, loadSummary, loadDoneTodos, calendarIncludeDone]);
+  const scheduleRefresh = useCallback((scope: "todos" | "lists" | "groups" | "all") => {
+    if (scope === "todos" || scope === "all") pendingRefresh.current.todos = true;
+    if (scope === "lists" || scope === "all") pendingRefresh.current.lists = true;
+    if (scope === "groups" || scope === "all") pendingRefresh.current.groups = true;
+    if (refreshTimer.current !== null) window.clearTimeout(refreshTimer.current);
+    refreshTimer.current = window.setTimeout(() => {
+      const pending = pendingRefresh.current;
+      pendingRefresh.current = { todos: false, lists: false, groups: false };
+      refreshTimer.current = null;
+      if (pending.todos) {
+        void loadTodos();
+        void loadTags();
+        void loadSummary();
+        if (calendarIncludeDone) void loadDoneTodos();
+      }
+      if (pending.lists) void loadLists();
+      if (pending.groups) void loadGroups();
+    }, 60);
+  }, [calendarIncludeDone, loadDoneTodos, loadGroups, loadLists, loadSummary, loadTags, loadTodos]);
+
+  useEffect(() => () => {
+    if (refreshTimer.current !== null) window.clearTimeout(refreshTimer.current);
+  }, []);
 
   useAppEvents("todo", projectId, (ev) => {
     switch (ev.topic) {
@@ -262,47 +321,57 @@ export default function TodoPanel({ projectId }: NativePanelProps) {
       case "todo.uncompleted":
       case "todo.snoozed":
       case "todo.deleted":
+      case "todo.tags.changed":
+        scheduleRefresh("todos");
+        break;
       case "todo.list.created":
       case "todo.list.updated":
+        scheduleRefresh("lists");
+        break;
       case "todo.list.deleted":
+        scheduleRefresh("lists");
+        scheduleRefresh("todos");
+        break;
       case "todo.list_group.created":
       case "todo.list_group.updated":
       case "todo.list_group.deleted":
-      case "todo.tags.changed":
-        refreshAll();
+        scheduleRefresh("groups");
+        scheduleRefresh("lists");
         break;
     }
   });
 
   const submitQuick = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!quick.trim()) return;
+    if (!quick.trim() || addingQuick) return;
+    setAddingQuick(true);
     try {
-      const res = await fetch(`${API}/quick_add`, {
+      await apiRequest<Todo>(apiUrl("/quick_add"), {
         method: "POST",
-        credentials: "same-origin",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ text: quick, source: "human" }),
       });
-      if (!res.ok) { setStatusMsg("Add: " + (await res.text())); return; }
       setQuick("");
-      refreshAll();
+      scheduleRefresh("todos");
     } catch (e) {
-      setStatusMsg("Add: " + (e as Error).message);
+      setStatusMsg(errorMessage("Unable to add todo", e));
+    } finally {
+      setAddingQuick(false);
     }
   };
 
   const toggle = async (t: Todo) => {
     const action = t.status === "done" ? "uncomplete" : "complete";
+    if (settlingTodos[t.id]) return;
     setSettlingTodos((s) => ({ ...s, [t.id]: action }));
+    let updated = false;
     try {
-      const res = await fetch(`${API}/todos/${t.id}/${action}`, {
+      await apiRequest<Todo>(apiUrl(`/todos/${t.id}/${action}`), {
         method: "POST",
-        credentials: "same-origin",
       });
-      if (!res.ok) setStatusMsg(`Update: ${res.status}`);
+      updated = true;
     } catch (e) {
-      setStatusMsg("Update: " + (e as Error).message);
+      setStatusMsg(errorMessage("Unable to update todo", e));
     } finally {
       window.setTimeout(() => {
         setSettlingTodos((s) => {
@@ -310,80 +379,107 @@ export default function TodoPanel({ projectId }: NativePanelProps) {
           delete next[t.id];
           return next;
         });
-        refreshAll();
+        if (updated) scheduleRefresh("todos");
       }, action === "complete" ? 220 : 120);
     }
   };
 
   const snooze = async (t: Todo, forKey: string) => {
-    await fetch(`${API}/todos/${t.id}/snooze`, {
-      method: "POST",
-      credentials: "same-origin",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ for: forKey }),
-    });
-    loadTodos();
+    try {
+      await apiRequest<Todo>(apiUrl(`/todos/${t.id}/snooze`), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ for: forKey }),
+      });
+      scheduleRefresh("todos");
+    } catch (e) {
+      setStatusMsg(errorMessage("Unable to snooze todo", e));
+    }
   };
 
   const remove = async (t: Todo) => {
     if (!confirm(`Delete "${t.title}"?`)) return;
-    await fetch(`${API}/todos/${t.id}`, { method: "DELETE", credentials: "same-origin" });
-    refreshAll();
+    try {
+      await apiRequest<void>(apiUrl(`/todos/${t.id}`), { method: "DELETE" });
+      scheduleRefresh("todos");
+    } catch (e) {
+      setStatusMsg(errorMessage("Unable to delete todo", e));
+    }
   };
 
   const createList = async (name: string, color: string) => {
-    const res = await fetch(`${API}/lists`, {
-      method: "POST",
-      credentials: "same-origin",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name, color }),
-    });
-    if (!res.ok) { setStatusMsg("New list: " + (await res.text())); return; }
-    setNewListOpen(false);
-    loadLists();
+    try {
+      await apiRequest<List>(apiUrl("/lists"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name, color }),
+      });
+      setNewListOpen(false);
+      scheduleRefresh("lists");
+    } catch (e) {
+      setStatusMsg(errorMessage("Unable to create list", e));
+    }
   };
 
   const updateList = async (id: number, fields: Record<string, unknown>) => {
-    await fetch(`${API}/lists/${id}`, {
-      method: "PUT",
-      credentials: "same-origin",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(fields),
-    });
-    loadLists();
+    try {
+      await apiRequest<List>(apiUrl(`/lists/${id}`), {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(fields),
+      });
+      scheduleRefresh("lists");
+    } catch (e) {
+      setStatusMsg(errorMessage("Unable to update list", e));
+    }
   };
 
   const deleteList = async (id: number) => {
-    await fetch(`${API}/lists/${id}`, { method: "DELETE", credentials: "same-origin" });
-    if (pickedList === id) setPickedList(null);
-    refreshAll();
+    try {
+      await apiRequest<void>(apiUrl(`/lists/${id}`), { method: "DELETE" });
+      if (pickedList === id) setPickedList(null);
+      scheduleRefresh("lists");
+      scheduleRefresh("todos");
+    } catch (e) {
+      setStatusMsg(errorMessage("Unable to delete list", e));
+    }
   };
 
   const createGroup = async (name: string, color: string) => {
-    const res = await fetch(`${API}/list_groups`, {
-      method: "POST",
-      credentials: "same-origin",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ name, color }),
-    });
-    if (!res.ok) { setStatusMsg("New group: " + (await res.text())); return; }
-    setNewGroupOpen(false);
-    loadGroups();
+    try {
+      await apiRequest<ListGroup>(apiUrl("/list_groups"), {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ name, color }),
+      });
+      setNewGroupOpen(false);
+      scheduleRefresh("groups");
+    } catch (e) {
+      setStatusMsg(errorMessage("Unable to create group", e));
+    }
   };
 
   const updateGroup = async (id: number, fields: Record<string, unknown>) => {
-    await fetch(`${API}/list_groups/${id}`, {
-      method: "PUT",
-      credentials: "same-origin",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(fields),
-    });
-    loadGroups();
+    try {
+      await apiRequest<ListGroup>(apiUrl(`/list_groups/${id}`), {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(fields),
+      });
+      scheduleRefresh("groups");
+    } catch (e) {
+      setStatusMsg(errorMessage("Unable to update group", e));
+    }
   };
 
   const deleteGroup = async (id: number) => {
-    await fetch(`${API}/list_groups/${id}`, { method: "DELETE", credentials: "same-origin" });
-    refreshAll();
+    try {
+      await apiRequest<void>(apiUrl(`/list_groups/${id}`), { method: "DELETE" });
+      scheduleRefresh("groups");
+      scheduleRefresh("lists");
+    } catch (e) {
+      setStatusMsg(errorMessage("Unable to delete group", e));
+    }
   };
 
   const toggleGroup = (id: number) =>
@@ -469,7 +565,7 @@ export default function TodoPanel({ projectId }: NativePanelProps) {
             list={l}
             groups={groups}
             active={mode === "tasks" && pickedList === l.id}
-            onClick={() => { setMode("tasks"); setPickedList(l.id); setView("today"); }}
+            onClick={() => { setMode("tasks"); setPickedList(l.id); setView("all"); }}
             onUpdate={(fields) => updateList(l.id, fields)}
             onDelete={() => deleteList(l.id)}
           />
@@ -496,7 +592,7 @@ export default function TodoPanel({ projectId }: NativePanelProps) {
                   groups={groups}
                   nested
                   active={mode === "tasks" && pickedList === l.id}
-                  onClick={() => { setMode("tasks"); setPickedList(l.id); setView("today"); }}
+                  onClick={() => { setMode("tasks"); setPickedList(l.id); setView("all"); }}
                   onUpdate={(fields) => updateList(l.id, fields)}
                   onDelete={() => deleteList(l.id)}
                 />
@@ -543,7 +639,7 @@ export default function TodoPanel({ projectId }: NativePanelProps) {
             activeView={mode === "tasks" ? view : undefined}
             onSelect={(next) => { setMode("tasks"); setView(next); setPickedList(null); }}
           />
-          <span className="ml-auto text-text-dim text-xs">{statusMsg}</span>
+          <span className="ml-auto text-text-dim text-xs" aria-live="polite">{statusMsg}</span>
         </header>
 
         <form onSubmit={submitQuick} className="px-4 py-3 border-b border-border flex gap-2">
@@ -551,8 +647,9 @@ export default function TodoPanel({ projectId }: NativePanelProps) {
             type="text"
             value={quick}
             onChange={(e) => setQuick(e.target.value)}
+            disabled={addingQuick || !projectId}
             placeholder="Add todo… (e.g. 'call plumber tomorrow p1 #home @errand')"
-            className="flex-1 bg-bg-input border border-border rounded px-3 py-1.5 text-sm"
+            className="flex-1 bg-bg-input border border-border rounded px-3 py-1.5 text-sm disabled:opacity-60"
           />
           <button
             type="button"
@@ -565,6 +662,18 @@ export default function TodoPanel({ projectId }: NativePanelProps) {
         </form>
 
         <div className="flex-1 overflow-y-auto overflow-x-hidden px-2 py-2">
+          {loadError && mode === "tasks" && (
+            <div className="mb-2 flex items-center gap-3 border-b border-error/30 px-2 py-2 text-sm text-error" role="alert">
+              <span className="min-w-0 flex-1">{loadError}</span>
+              <button
+                type="button"
+                onClick={() => void loadTodos()}
+                className="shrink-0 text-text-muted hover:text-text"
+              >
+                Retry
+              </button>
+            </div>
+          )}
           {mode === "calendar" ? (
             <CalendarView
               openTodos={allOpenTodos}
@@ -591,7 +700,11 @@ export default function TodoPanel({ projectId }: NativePanelProps) {
               onIncludeDoneChange={setCalendarIncludeDone}
               onEditTodo={setEditing}
             />
-          ) : todos.length === 0 ? (
+          ) : loadingTodos && todos.length === 0 ? (
+            <div className="py-12 text-center text-text-muted text-sm" aria-live="polite">
+              Loading todos…
+            </div>
+          ) : loadError && todos.length === 0 ? null : todos.length === 0 ? (
             <div className="py-12 text-center text-text-muted text-sm">
               Nothing here.
             </div>
@@ -620,11 +733,12 @@ export default function TodoPanel({ projectId }: NativePanelProps) {
           todo={editing ?? undefined}
           lists={lists}
           defaultListID={pickedList ?? undefined}
+          apiUrl={apiUrl}
           onClose={() => { setEditing(null); setCreating(false); }}
           onSaved={() => {
             setEditing(null);
             setCreating(false);
-            refreshAll();
+            scheduleRefresh("all");
           }}
         />
       )}
@@ -1192,9 +1306,10 @@ function TodoRow({
       <button
         type="button"
         onClick={onToggle}
+        disabled={isSettling}
         className={`relative mt-0.5 flex h-5 w-5 shrink-0 cursor-pointer items-center justify-center rounded-full border transition-all duration-150 ease-out hover:scale-110 hover:border-accent focus:outline-none focus:ring-2 focus:ring-accent/40 ${
           visuallyDone ? "border-success bg-success text-bg" : "border-text-dim bg-transparent text-transparent group-hover:border-text-muted"
-        }`}
+        } disabled:cursor-wait disabled:hover:scale-100`}
         aria-label={visuallyDone ? "Mark todo open" : "Mark todo complete"}
         title={visuallyDone ? "Mark open" : "Complete todo"}
       >
@@ -1506,12 +1621,21 @@ function NewListForm({
   );
 }
 
+function toDateTimeLocal(value?: string): string {
+  if (!value) return "";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "";
+  const local = new Date(date.getTime() - date.getTimezoneOffset() * 60_000);
+  return local.toISOString().slice(0, 16);
+}
+
 function TodoDialog({
-  todo, lists, defaultListID, onClose, onSaved,
+  todo, lists, defaultListID, apiUrl, onClose, onSaved,
 }: {
   todo?: Todo;
   lists: List[];
   defaultListID?: number;
+  apiUrl: (path: string) => string;
   onClose: () => void;
   onSaved: () => void;
 }) {
@@ -1519,14 +1643,17 @@ function TodoDialog({
   const [title, setTitle] = useState(todo?.title ?? "");
   const [notes, setNotes] = useState(todo?.notes ?? "");
   const [priority, setPriority] = useState(todo?.priority ?? 4);
-  const [dueAt, setDueAt] = useState(todo?.due_at?.slice(0, 16) ?? "");
+  const [dueAt, setDueAt] = useState(() => toDateTimeLocal(todo?.due_at));
   const [listID, setListID] = useState<number | "">(
     todo?.list_id ?? (defaultListID ?? "")
   );
   const [rrule, setRRule] = useState(todo?.rrule ?? "");
   const [tags, setTags] = useState((todo?.tags ?? []).join(" "));
+  const [saving, setSaving] = useState(false);
+  const [saveError, setSaveError] = useState("");
 
   const save = async () => {
+    if (saving || !title.trim()) return;
     const tagList = tags.split(/\s+/).filter(Boolean).map((s) => s.replace(/^@/, ""));
     const body: Record<string, unknown> = {
       title,
@@ -1538,22 +1665,20 @@ function TodoDialog({
       list_id: listID === "" ? 0 : listID,
     };
 
-    if (isCreate) {
-      await fetch(`${API}/todos`, {
-        method: "POST",
-        credentials: "same-origin",
+    setSaving(true);
+    setSaveError("");
+    try {
+      await apiRequest<Todo>(apiUrl(isCreate ? "/todos" : `/todos/${todo!.id}`), {
+        method: isCreate ? "POST" : "PUT",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ...body, source: "human" }),
+        body: JSON.stringify(isCreate ? { ...body, source: "human" } : body),
       });
-    } else {
-      await fetch(`${API}/todos/${todo!.id}`, {
-        method: "PUT",
-        credentials: "same-origin",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      });
+      onSaved();
+    } catch (error) {
+      setSaveError(errorMessage("Unable to save todo", error));
+    } finally {
+      setSaving(false);
     }
-    onSaved();
   };
 
   return (
@@ -1641,14 +1766,15 @@ function TodoDialog({
             className="bg-bg-input border border-border rounded px-2 py-1 text-sm"
           />
         </label>
+        {saveError && <div className="text-sm text-error" role="alert">{saveError}</div>}
         <div className="flex gap-2 justify-end">
-          <button onClick={onClose} className="px-3 py-1.5 text-sm text-text-muted">Cancel</button>
+          <button onClick={onClose} disabled={saving} className="px-3 py-1.5 text-sm text-text-muted disabled:opacity-50">Cancel</button>
           <button
             onClick={save}
-            disabled={!title.trim()}
+            disabled={!title.trim() || saving}
             className="px-3 py-1.5 text-sm bg-accent text-bg rounded font-bold disabled:opacity-50"
           >
-            {isCreate ? "Create" : "Save"}
+            {saving ? "Saving…" : isCreate ? "Create" : "Save"}
           </button>
         </div>
       </div>
