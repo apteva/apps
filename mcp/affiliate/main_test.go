@@ -15,6 +15,7 @@ type recordingPlatform struct {
 	mu        sync.Mutex
 	calls     []callAppCall
 	responses map[string]json.RawMessage
+	queues    map[string][]json.RawMessage
 	bindings  map[string]int64
 }
 
@@ -27,6 +28,7 @@ type callAppCall struct {
 func newRecordingPlatform() *recordingPlatform {
 	return &recordingPlatform{
 		responses: map[string]json.RawMessage{},
+		queues:    map[string][]json.RawMessage{},
 		bindings: map[string]int64{
 			"target-circle":     101,
 			"impact":            102,
@@ -39,6 +41,18 @@ func newRecordingPlatform() *recordingPlatform {
 			"shareasale":        109,
 		},
 	}
+}
+
+func (p *recordingPlatform) response(key string) (json.RawMessage, bool) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if queue := p.queues[key]; len(queue) > 0 {
+		raw := queue[0]
+		p.queues[key] = queue[1:]
+		return raw, true
+	}
+	raw, ok := p.responses[key]
+	return raw, ok
 }
 
 func (p *recordingPlatform) WhoAmI() (*sdk.InstallIdentity, error) {
@@ -76,7 +90,7 @@ func (p *recordingPlatform) ExecuteIntegrationTool(connID int64, tool string, in
 	p.mu.Lock()
 	p.calls = append(p.calls, callAppCall{App: role, Tool: tool, Input: input})
 	p.mu.Unlock()
-	if raw, ok := p.responses[role+":"+tool]; ok {
+	if raw, ok := p.response(role + ":" + tool); ok {
 		return &sdk.ExecuteResult{Success: true, Status: 200, Data: raw}, nil
 	}
 	return nil, fmt.Errorf("no stub response for %s:%s", role, tool)
@@ -86,7 +100,7 @@ func (p *recordingPlatform) CallApp(app, tool string, input map[string]any) (jso
 	p.mu.Lock()
 	p.calls = append(p.calls, callAppCall{App: app, Tool: tool, Input: input})
 	p.mu.Unlock()
-	if raw, ok := p.responses[app+":"+tool]; ok {
+	if raw, ok := p.response(app + ":" + tool); ok {
 		return raw, nil
 	}
 	return nil, fmt.Errorf("no stub response for %s:%s", app, tool)
@@ -112,6 +126,27 @@ func newTestCtx(t *testing.T, platform sdk.PlatformClient, cfg map[string]string
 	ctx := tk.NewAppCtx(t, "apteva.yaml", opts...)
 	globalCtx = ctx
 	return ctx
+}
+
+func TestEmbeddedManifestMatchesToolSurface(t *testing.T) {
+	app := &App{}
+	manifest := app.Manifest()
+	if manifest.Name != "affiliate" || manifest.Version == "" || manifest.DB == nil {
+		t.Fatalf("invalid embedded manifest: %+v", manifest)
+	}
+	declared := map[string]bool{}
+	for _, tool := range manifest.Provides.MCPTools {
+		declared[tool.Name] = true
+	}
+	for _, tool := range app.MCPTools() {
+		if !declared[tool.Name] {
+			t.Errorf("implemented tool %q is absent from apteva.yaml", tool.Name)
+		}
+		delete(declared, tool.Name)
+	}
+	for name := range declared {
+		t.Errorf("apteva.yaml declares %q without a handler", name)
+	}
 }
 
 func TestManualLinkCreate(t *testing.T) {
@@ -176,7 +211,7 @@ func TestRefreshOffersAndStatsFromProvider(t *testing.T) {
 	if summary.OffersUpserted != 1 || summary.StatsDaysUpserted != 1 {
 		t.Fatalf("bad summary: %+v", summary)
 	}
-	offers, err := dbListOffers(ctx.AppDB(), "mintos", "", "", 10)
+	offers, _, err := dbListOffers(ctx.AppDB(), "mintos", "", "", 10, 0)
 	if err != nil || len(offers) != 1 {
 		t.Fatalf("offers len=%d err=%v", len(offers), err)
 	}
@@ -230,7 +265,7 @@ func TestTargetCircleRefreshCreatesLinksAndStats(t *testing.T) {
 	if summary.OffersUpserted != 1 || summary.LinksUpserted != 1 || summary.StatsDaysUpserted != 1 {
 		t.Fatalf("bad summary: %+v", summary)
 	}
-	links, err := dbListLinks(ctx.AppDB(), "", "target-circle", 0, "", 10)
+	links, _, err := dbListLinks(ctx.AppDB(), "", "target-circle", 0, "", 10, 0)
 	if err != nil || len(links) != 1 {
 		t.Fatalf("links len=%d err=%v", len(links), err)
 	}
@@ -238,7 +273,7 @@ func TestTargetCircleRefreshCreatesLinksAndStats(t *testing.T) {
 	if err != nil || len(stats) != 1 {
 		t.Fatalf("stats len=%d err=%v", len(stats), err)
 	}
-	if stats[0].Date != "2026-04-30" || stats[0].Conversions != 2 || stats[0].RevenueCents != 9850 || stats[0].CommissionCents != 188 {
+	if stats[0].Date != "2026-04-30" || stats[0].Conversions != 2 || stats[0].RevenueCents != 9850 || stats[0].CommissionCents != 189 {
 		t.Fatalf("unexpected stats: %+v", stats[0])
 	}
 }
@@ -290,5 +325,114 @@ func TestLinkCreateCallsProviderAndRedirects(t *testing.T) {
 	}
 	if platform.calls[1].App != "redirects" || platform.calls[1].Tool != "redirect_add" {
 		t.Fatalf("redirect call wrong: %+v", platform.calls[1])
+	}
+}
+
+func TestMoneyConversionRoundsToNearestCent(t *testing.T) {
+	for _, value := range []any{153.85, "153.85", json.Number("153.85")} {
+		if got := moneyCentsFromAny(value); got != 15385 {
+			t.Fatalf("moneyCentsFromAny(%v) = %d, want 15385", value, got)
+		}
+	}
+}
+
+func TestTargetCircleClickRecordIsNotAConversion(t *testing.T) {
+	row := statInputFromMap("target-circle", map[string]any{
+		"saved": "2026-05-24 01:00:00", "transactionId": "click-1", "transactionType": "click",
+	})
+	if row.Clicks != 1 || row.Conversions != 0 {
+		t.Fatalf("click record normalized as %+v", row)
+	}
+}
+
+func TestTargetCircleUsesExclusiveSavedToBoundary(t *testing.T) {
+	calls, err := providerStatCalls("target-circle", "2026-05-18", "2026-05-24", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := calls[0].Input["savedTo"]; got != "2026-05-25" {
+		t.Fatalf("savedTo = %v, want 2026-05-25", got)
+	}
+}
+
+func TestPaginatedStatsAggregateBeforeUpsert(t *testing.T) {
+	platform := newRecordingPlatform()
+	platform.queues["target-circle:transactions_list"] = []json.RawMessage{
+		json.RawMessage(`{"next":"https://api.targetcircle.com/page/2","data":[{"saved":"2026-05-24 01:00:00","offerSid":"mintos","transactionId":"one","transactionAmount":100,"payout":1,"currency":"EUR"}]}`),
+		json.RawMessage(`{"next":null,"data":[{"saved":"2026-05-24 02:00:00","offerSid":"mintos","transactionId":"two","transactionAmount":200,"payout":2,"currency":"EUR"}]}`),
+	}
+	ctx := newTestCtx(t, platform, nil)
+	if _, err := dbUpsertOffer(ctx.AppDB(), OfferInput{NetworkKey: "target-circle", ExternalID: "mintos", MerchantName: "Mintos"}); err != nil {
+		t.Fatal(err)
+	}
+	app := &App{}
+	if _, err := app.toolRefresh(ctx, map[string]any{"network": "target-circle", "kind": "stats"}); err != nil {
+		t.Fatal(err)
+	}
+	stats, err := dbStats(ctx.AppDB(), "", "", "target-circle", 0, 0, "day")
+	if err != nil || len(stats) != 1 {
+		t.Fatalf("stats=%+v err=%v", stats, err)
+	}
+	if stats[0].Conversions != 2 || stats[0].RevenueCents != 30000 || stats[0].CommissionCents != 300 {
+		t.Fatalf("paginated values were not aggregated: %+v", stats[0])
+	}
+}
+
+func TestStatReferenceAttributesManagedLink(t *testing.T) {
+	platform := newRecordingPlatform()
+	platform.responses["target-circle:transactions_list"] = json.RawMessage(`{"data":[{"saved":"2026-05-24 01:00:00","offerSid":"mintos","transactionId":"one","transactionAmount":10,"payout":1,"currency":"EUR","reference":{"ref1":"guide","ref2":"article-7"}}]}`)
+	ctx := newTestCtx(t, platform, nil)
+	offer, err := dbUpsertOffer(ctx.AppDB(), OfferInput{NetworkKey: "target-circle", ExternalID: "mintos", MerchantName: "Mintos"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	link, err := dbInsertLink(ctx.AppDB(), LinkInput{NetworkKey: "target-circle", OfferID: offer.ID, DestinationURL: "https://mintos.com", AffiliateURL: "https://track.example/mintos", Campaign: "guide", SubID: "article-7"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := (&App{}).toolRefresh(ctx, map[string]any{"network": "target-circle", "kind": "stats"}); err != nil {
+		t.Fatal(err)
+	}
+	stats, err := dbStats(ctx.AppDB(), "", "", "target-circle", 0, link.ID, "link")
+	if err != nil || len(stats) != 1 || stats[0].LinkID != link.ID {
+		t.Fatalf("stats=%+v err=%v", stats, err)
+	}
+}
+
+func TestRefreshCapabilitiesPreventPartialOrUnsupportedSync(t *testing.T) {
+	platform := newRecordingPlatform()
+	ctx := newTestCtx(t, platform, nil)
+	app := &App{}
+	if _, err := app.toolRefresh(ctx, map[string]any{"network": "awin", "kind": "all"}); err == nil {
+		t.Fatal("expected Awin date validation error")
+	}
+	if _, err := app.toolRefresh(ctx, map[string]any{"network": "skimlinks", "kind": "all"}); err == nil {
+		t.Fatal("expected Skimlinks refresh capability error")
+	}
+	if len(platform.calls) != 0 {
+		t.Fatalf("validation must happen before provider writes/calls: %+v", platform.calls)
+	}
+}
+
+func TestLinkRejectsOfferNetworkMismatch(t *testing.T) {
+	ctx := newTestCtx(t, nil, nil)
+	offer, err := dbUpsertOffer(ctx.AppDB(), OfferInput{NetworkKey: "target-circle", ExternalID: "mintos", MerchantName: "Mintos"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = (&App{}).toolLinkCreate(ctx, map[string]any{"url": "https://mintos.com", "affiliate_url": "https://track.example", "offer_id": offer.ID, "network": "impact"})
+	if err == nil {
+		t.Fatal("expected offer/network mismatch error")
+	}
+}
+
+func TestNetworkMetadataRedactsProviderTokens(t *testing.T) {
+	ctx := newTestCtx(t, nil, nil)
+	network, err := dbUpsertNetwork(ctx.AppDB(), "target-circle", "", map[string]any{"token": "secret", "nested": map[string]any{"api_key": "also-secret", "value": "ok"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if network.LastRefreshedAt == "" || network.MetadataJSON != `{"nested":{"api_key":"[REDACTED]","value":"ok"},"token":"[REDACTED]"}` {
+		t.Fatalf("network metadata was not safely stored: %+v", network)
 	}
 }
