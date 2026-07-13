@@ -1,0 +1,67 @@
+schema: apteva-app/v1
+name: environments
+display_name: Environments
+version: 0.1.0
+description: Isolated test environments built from project apps, fake or selected connections, deterministic seed plans, agents, edge policies, and snapshots.
+author: Apteva
+homepage: https://github.com/apteva/apps/tree/main/mcp/environments
+tags: [environments, testing, agents, evals, mocks]
+scopes: [project]
+min_apteva_version: "0.18.0"
+requires:
+  permissions:
+    - db.write.app
+    - platform.runtimes.read
+    - platform.runtimes.call
+    - platform.runtimes.manage
+    - platform.runtime_catalog.read
+    - platform.connections.read
+provides:
+  http_routes:
+    - prefix: /
+  mcp_tools:
+    - { name: environment_list, description: "List environment definitions and active runs." }
+    - { name: environment_get, description: "Get one environment definition and live runtime state." }
+    - { name: environment_create, description: "Create a durable environment definition." }
+    - { name: environment_update, description: "Update a durable environment definition." }
+    - { name: environment_delete, description: "Delete a stopped environment definition." }
+    - { name: environment_start, description: "Start a defined environment and execute its seed plan." }
+    - { name: environment_stop, description: "Stop an environment and destroy its runtime." }
+    - { name: environment_run_create, description: "Create an inline ephemeral run for an eval or one-off test." }
+    - { name: environment_run_get, description: "Get a run and its live runtime state." }
+    - { name: environment_run_stop, description: "Stop an inline or definition-backed run." }
+    - { name: environment_catalog, description: "List project apps, connections, fake integration catalog, agents, and snapshots." }
+    - { name: environment_seed, description: "Call a runtime app tool to seed or mutate test state." }
+    - { name: environment_call, description: "Call any tool on an app cloned into a run." }
+    - { name: environment_inspect, description: "Inspect runtime apps, agents, edge calls, and telemetry." }
+    - { name: environment_assert, description: "Evaluate an app-state, edge-call, or telemetry assertion." }
+    - { name: environment_snapshot, description: "Capture a reusable snapshot of a running environment." }
+    - { name: environment_snapshot_list, description: "List snapshots owned by this Environments install." }
+    - { name: environment_snapshot_delete, description: "Delete a snapshot." }
+    - { name: environment_agent_spawn, description: "Spawn an agent inside a running environment." }
+    - { name: environment_agent_send, description: "Send a message to a runtime agent." }
+    - { name: environment_agent_control, description: "Pause, resume, or stop a runtime agent." }
+  publishes:
+    - { name: environment.created, description: "An environment definition was created." }
+    - { name: environment.started, description: "An environment runtime is running." }
+    - { name: environment.stopped, description: "An environment runtime stopped." }
+    - { name: environment.failed, description: "Environment startup or reconciliation failed." }
+    - { name: environment.expired, description: "A runtime disappeared or reached its TTL." }
+    - { name: snapshot.created, description: "A reusable environment snapshot was captured." }
+  ui_panels:
+    - { slot: project.page, label: "Environments", icon: boxes, entry: /ui/EnvironmentsPanel.mjs }
+  workers:
+    - { name: reconcile, schedule: "@every 15s" }
+runtime:
+  kind: source
+  source:
+    repo: github.com/apteva/apps
+    ref: environments/v0.1.0
+    entry: mcp/environments
+  port: 8080
+  health_check: /health
+db:
+  driver: sqlite
+  path: /data/environments.db
+  migrations: migrations/
+upgrade_policy: auto-patch
