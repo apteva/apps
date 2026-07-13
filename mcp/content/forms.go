@@ -156,7 +156,7 @@ func scanFormSubmission(row rowScanner) (*FormSubmission, error) {
 //
 // Scoped to non-deleted, non-archived posts so a deleted form can't
 // be re-submitted.
-func dbFindFormBlock(db *sql.DB, projectID, blockID string) (*Post, *Block, error) {
+func dbFindFormBlock(db *sql.DB, projectID string, siteID int64, blockID string) (*Post, *Block, error) {
 	if blockID == "" {
 		return nil, nil, errors.New("block id required")
 	}
@@ -164,9 +164,9 @@ func dbFindFormBlock(db *sql.DB, projectID, blockID string) (*Post, *Block, erro
 	rows, err := db.Query(`
         SELECT id, project_id, site_id, kind, slug, status, body_blocks
         FROM posts
-        WHERE project_id = ? AND deleted_at IS NULL AND status = 'published'
-          AND body_blocks LIKE ?
-    `, projectID, "%"+needle+"%")
+		WHERE project_id = ? AND site_id = ? AND deleted_at IS NULL AND status = 'published'
+		  AND body_blocks LIKE ?
+	`, projectID, siteID, "%"+needle+"%")
 	if err != nil {
 		return nil, nil, err
 	}

@@ -1,7 +1,5 @@
-// Theme bundle loader. v1 ships an embedded default theme (via
-// //go:embed). When a custom theme is installed in the bound storage
-// app under /.themes/<slug>/, loadActiveTheme replaces the embedded
-// templates with the storage-loaded ones at boot or on themes_set_active.
+// Theme bundle loader. Bundled themes are parsed once at startup and
+// selected per site at render time.
 //
 // Theme assets (CSS, fonts, images) are served by handleThemeAsset
 // at /_theme/<version>/<path> with long-lived cache headers.
@@ -68,77 +66,51 @@ type Theme struct {
 	// definition + all partials. Cloning these per request is unsafe
 	// post-Execute; we Execute against the master directly (which is
 	// concurrent-read-safe per the html/template docs).
-	singleTpl    *template.Template
-	listTpl      *template.Template
+	singleTpl     *template.Template
+	listTpl       *template.Template
 	pageTemplates map[string]*template.Template // posts.template name → built set
 }
 
 var (
-	themeMu       sync.RWMutex
-	currentTheme  *Theme
-	themeFuncMap  template.FuncMap
+	themeMu      sync.RWMutex
+	themeCatalog = map[string]*Theme{}
 )
 
-func currentThemeName() string {
-	themeMu.RLock()
-	defer themeMu.RUnlock()
-	if currentTheme == nil {
-		return ""
-	}
-	return currentTheme.Name
-}
-
-func getCurrentTheme() *Theme {
-	themeMu.RLock()
-	defer themeMu.RUnlock()
-	return currentTheme
-}
-
-// loadActiveTheme reads the active_theme setting (per-site) and loads
-// that bundled theme. Falls back to "default" when the setting is empty
-// or names an unknown slug. Storage-loaded custom themes (v2.3+) merge
-// in once that path is wired.
-//
-// Called at OnMount (no project context, picks default) and from
-// themes_set_active (with project + site context).
-func loadActiveTheme(ctx *sdk.AppCtx) error {
-	themeFuncMap = buildThemeFuncMap(ctx)
-	slug := resolveActiveThemeSlug(ctx)
-	t, err := loadEmbeddedTheme(slug)
-	if err != nil {
-		// Fall back to default if the configured theme is missing.
-		ctx.Logger().Warn("theme load failed; falling back to default", "slug", slug, "err", err.Error())
-		t, err = loadEmbeddedTheme("default")
-		if err != nil {
-			return err
-		}
-	}
+func initializeThemes() error {
 	themeMu.Lock()
-	currentTheme = t
-	themeMu.Unlock()
+	defer themeMu.Unlock()
+	if len(themeCatalog) == len(bundledThemes) {
+		return nil
+	}
+	catalog := make(map[string]*Theme, len(bundledThemes))
+	for slug := range bundledThemes {
+		t, err := loadEmbeddedTheme(slug)
+		if err != nil {
+			return fmt.Errorf("load theme %q: %w", slug, err)
+		}
+		catalog[slug] = t
+	}
+	themeCatalog = catalog
 	return nil
 }
 
-// resolveActiveThemeSlug reads the active_theme setting for the current
-// project + site. Project-scoped installs use APTEVA_PROJECT_ID + the
-// project's default site. Returns "default" when no setting exists.
-func resolveActiveThemeSlug(ctx *sdk.AppCtx) string {
-	if ctx == nil || ctx.AppDB() == nil {
-		return "default"
+func getTheme(slug string) *Theme {
+	themeMu.RLock()
+	defer themeMu.RUnlock()
+	return themeCatalog[slug]
+}
+
+func activeThemeForSite(ctx *sdk.AppCtx, projectID string, siteID int64) *Theme {
+	slug := "default"
+	if ctx != nil && ctx.AppDB() != nil {
+		if configured, err := dbGetSetting(ctx.AppDB(), projectID, siteID, "active_theme"); err == nil && configured != "" {
+			slug = configured
+		}
 	}
-	pid := strings.TrimSpace(getEnv("APTEVA_PROJECT_ID"))
-	if pid == "" {
-		return "default"
+	if t := getTheme(slug); t != nil {
+		return t
 	}
-	siteID, err := resolveOnlyOrDefaultSite(ctx.AppDB(), pid)
-	if err != nil {
-		return "default"
-	}
-	slug, _ := dbGetSetting(ctx.AppDB(), pid, siteID, "active_theme")
-	if slug == "" {
-		return "default"
-	}
-	return slug
+	return getTheme("default")
 }
 
 func loadEmbeddedTheme(slug string) (*Theme, error) {
@@ -150,14 +122,16 @@ func loadEmbeddedTheme(slug string) (*Theme, error) {
 	if err != nil {
 		return nil, err
 	}
+	theme := &Theme{Name: bt.Slug, Version: bt.Version, source: "embedded"}
+	funcs := buildThemeFuncMap(theme)
 
 	// Read every file once.
 	type fileBody struct{ name, body string }
 	var (
-		baseBody  string
-		layouts   = map[string]string{}  // "single", "list" — without the .html suffix
-		pageTpls  = map[string]string{}  // templates/<name>.html → name → body
-		partials  []fileBody             // header/footer/post_card + blocks/*
+		baseBody string
+		layouts  = map[string]string{} // "single", "list" — without the .html suffix
+		pageTpls = map[string]string{} // templates/<name>.html → name → body
+		partials []fileBody            // header/footer/post_card + blocks/*
 	)
 	err = fs.WalkDir(root, ".", func(p string, d fs.DirEntry, werr error) error {
 		if werr != nil {
@@ -203,7 +177,7 @@ func loadEmbeddedTheme(slug string) (*Theme, error) {
 	// rendered against directly thereafter (no per-request Clone, which
 	// html/template forbids after Execute).
 	buildSet := func(layoutName, layoutBody string) (*template.Template, error) {
-		t := template.New("").Funcs(themeFuncMap)
+		t := template.New("").Funcs(funcs)
 		if _, err := t.New("layouts/base.html").Parse(baseBody); err != nil {
 			return nil, fmt.Errorf("parse base.html: %w", err)
 		}
@@ -254,16 +228,12 @@ func loadEmbeddedTheme(slug string) (*Theme, error) {
 		return nil, err
 	}
 
-	return &Theme{
-		Name:          bt.Slug,
-		Version:       bt.Version,
-		AssetFS:       assets,
-		BlockTpls:     blockTpls,
-		source:        "embedded",
-		singleTpl:     singleSet,
-		listTpl:       listSet,
-		pageTemplates: pageSets,
-	}, nil
+	theme.AssetFS = assets
+	theme.BlockTpls = blockTpls
+	theme.singleTpl = singleSet
+	theme.listTpl = listSet
+	theme.pageTemplates = pageSets
+	return theme, nil
 }
 
 // ── MCP tools ─────────────────────────────────────────────────────
@@ -278,9 +248,6 @@ func (a *App) toolThemesList(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 				activeSlug, _ = dbGetSetting(ctx.AppDB(), pid, siteID, "active_theme")
 			}
 		}
-	}
-	if activeSlug == "" {
-		activeSlug = currentThemeName()
 	}
 	if activeSlug == "" {
 		activeSlug = "default"
@@ -339,10 +306,7 @@ func (a *App) toolThemesSetActive(ctx *sdk.AppCtx, args map[string]any) (any, er
 	if err := dbSetSetting(ctx.AppDB(), pid, siteID, "active_theme", slug); err != nil {
 		return nil, err
 	}
-	if err := loadActiveTheme(ctx); err != nil {
-		return nil, err
-	}
-	invalidatePageCache()
+	invalidatePageCacheForSite(siteID)
 	ctx.Emit("theme.changed", map[string]any{"slug": slug, "site_id": siteID})
 	return map[string]any{"ok": true, "active_theme": slug}, nil
 }
@@ -376,31 +340,22 @@ func (a *App) handleHTTPThemes(w http.ResponseWriter, r *http.Request) {
 
 // ── Asset serving ─────────────────────────────────────────────────
 
-// handleThemeAsset serves /_theme/<version>/<path> from the active
-// theme's asset filesystem. Long-lived cache headers since the version
-// segment naturally invalidates on swap.
+// handleThemeAsset serves /_theme/<slug>/<version>/<path>. Including
+// the slug prevents one site's active theme from changing another
+// site's immutable asset URL.
 func (a *App) handleThemeAsset(w http.ResponseWriter, r *http.Request) {
-	t := getCurrentTheme()
-	if t == nil {
-		http.NotFound(w, r)
-		return
-	}
 	rest := strings.TrimPrefix(r.URL.Path, "/_theme/")
-	// rest looks like "<version>/<path>"; strip the version and verify
-	// it matches the current theme to avoid stale-version serving from
-	// a previous theme.
-	parts := strings.SplitN(rest, "/", 2)
-	if len(parts) < 2 {
+	parts := strings.SplitN(rest, "/", 3)
+	if len(parts) < 3 {
 		http.NotFound(w, r)
 		return
 	}
-	// Allow either an exact version match or "current" as a convenience
-	// for the dashboard preview path.
-	if parts[0] != t.Version && parts[0] != "current" {
-		// Future versions live in storage; for v1 only "current" or
-		// the active version are valid.
+	t := getTheme(parts[0])
+	if t == nil || parts[1] != t.Version {
+		http.NotFound(w, r)
+		return
 	}
-	assetPath := path.Clean("/" + parts[1])[1:]
+	assetPath := path.Clean("/" + parts[2])[1:]
 	f, err := t.AssetFS.Open(assetPath)
 	if err != nil {
 		http.NotFound(w, r)

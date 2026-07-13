@@ -7,11 +7,11 @@
 //
 // Three delivery modes, all from the same database:
 //
-//   server   — themed HTML at /, /posts/:slug, /:slug, term archives,
-//              /feed.xml, /sitemap.xml. Uses the embedded default theme
-//              or a custom theme loaded from the bound storage app.
-//   headless — JSON REST under /api/* for external frontends.
-//   hybrid   — both, controlled by the `render_mode` config knob.
+//	server   — themed HTML at /, /posts/:slug, /:slug, term archives,
+//	           /feed.xml, /sitemap.xml. Uses the embedded default theme
+//	           or a custom theme loaded from the bound storage app.
+//	headless — JSON REST under /api/* for external frontends.
+//	hybrid   — both, controlled by the `render_mode` config knob.
 //
 // The agent's surface is structured block manipulation:
 // blocks_insert/update/move/delete reference blocks by stable id so
@@ -54,10 +54,8 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	}
 	globalCtx = ctx
 
-	// Load + cache the active theme. Falls back to embedded default
-	// when no storage app is bound or the configured theme is missing.
-	if err := loadActiveTheme(ctx); err != nil {
-		ctx.Logger().Warn("theme load failed; using embedded default", "err", err.Error())
+	if err := initializeThemes(); err != nil {
+		return fmt.Errorf("initialize themes: %w", err)
 	}
 
 	// Project-scoped installs: ensure a default site exists, then
@@ -72,9 +70,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		}
 	}
 
-	ctx.Logger().Info("content mounted",
-		"scope_project_id", os.Getenv("APTEVA_PROJECT_ID"),
-		"active_theme", currentThemeName())
+	ctx.Logger().Info("content mounted", "scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
 	return nil
 }
 
@@ -103,21 +99,21 @@ func (a *App) Workers() []sdk.Worker {
 // arrive here too.
 // HTTP routes split into three buckets:
 //
-//   /admin/*    — REST surface for the dashboard panel + headless
-//                 consumers. The platform proxy mounts the sidecar at
-//                 /api/apps/content/<path>; callers reach `/admin/posts`
-//                 as `/api/apps/content/admin/posts`. Namespacing under
-//                 /admin/ keeps the bare `/posts` URL free for public
-//                 rendering.
+//	/admin/*    — REST surface for the dashboard panel + headless
+//	              consumers. The platform proxy mounts the sidecar at
+//	              /api/apps/content/<path>; callers reach `/admin/posts`
+//	              as `/api/apps/content/admin/posts`. Namespacing under
+//	              /admin/ keeps the bare `/posts` URL free for public
+//	              rendering.
 //
-//   /_theme/*, /_media/*, /preview/, /feed.xml, /sitemap.xml — public
-//                 framework-internal endpoints (underscore-prefix flags
-//                 "not for editorial use as a post slug"). NoAuth so
-//                 visitors can reach them without an install token.
+//	/_theme/*, /_media/*, /preview/, /feed.xml, /sitemap.xml — public
+//	              framework-internal endpoints (underscore-prefix flags
+//	              "not for editorial use as a post slug"). NoAuth so
+//	              visitors can reach them without an install token.
 //
-//   /             — public catch-all that renders posts/pages/term
-//                 archives. Must register last; ServeMux longest-prefix
-//                 routing puts the others in front.
+//	/             — public catch-all that renders posts/pages/term
+//	              archives. Must register last; ServeMux longest-prefix
+//	              routing puts the others in front.
 func (a *App) HTTPRoutes() []sdk.Route {
 	return []sdk.Route{
 		// ── /admin/* REST surface ──────────────────────────────

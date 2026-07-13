@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: content
 display_name: Content
-version: 2.10.6
+version: 2.11.0
 description: |
   Block-based CMS for Apteva. Posts, pages, media, taxonomies, menus,
   revisions, redirects. Renders themed HTML and exposes a headless REST
@@ -100,7 +100,7 @@ provides:
     - name: sites_create
       description: Create a new site; first site is auto-promoted to default.
     - name: sites_update
-      description: Update a site's display name or hostname.
+      description: Update a site's display name. Use sites_attach_domain and sites_detach_domain for hostnames.
     - name: sites_archive
       description: Soft-delete a site (refuses if default).
     - name: sites_set_default

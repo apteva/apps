@@ -2,7 +2,7 @@
 //
 // One MCP tool (sites_attach_domain) coordinates three sibling apps:
 //
-//   1. routes        — registers hostname → http://127.0.0.1:<port>
+//   1. routes        — registers hostname → app://content
 //      (required: without routes the FQDN can't reach the sidecar)
 //
 //   2. domains       — optional, auto-provisions the A/CNAME record
@@ -41,10 +41,11 @@ import (
 // AttachDomainResult is the typed response shape — mirrors what the
 // JSON callers (panel, agent) see.
 type AttachDomainResult struct {
-	Site  AttachSite      `json:"site"`
-	Route AttachRoute     `json:"route"`
-	DNS   AttachDNSStatus `json:"dns"`
-	TLS   AttachTLSStatus `json:"tls"`
+	Site     AttachSite      `json:"site"`
+	Route    AttachRoute     `json:"route"`
+	DNS      AttachDNSStatus `json:"dns"`
+	TLS      AttachTLSStatus `json:"tls"`
+	Warnings []string        `json:"warnings,omitempty"`
 }
 
 type AttachSite struct {
@@ -144,27 +145,7 @@ func (a *App) toolSitesAttachDomain(ctx *sdk.AppCtx, args map[string]any) (any, 
 			return nil, errors.New("auto-DNS for a root domain requires an IP target; use a subdomain for CNAME-style targets or pass an IP target")
 		}
 	}
-	installID, err := myInstallID()
-	if err != nil {
-		return nil, err
-	}
-	appPort := os.Getenv("APTEVA_APP_PORT")
-	if appPort == "" {
-		return nil, errors.New("APTEVA_APP_PORT not set — the platform should inject this; without it the routes target can't be built")
-	}
-	myTarget := fmt.Sprintf("http://127.0.0.1:%s", appPort)
-
-	// 1. Update site hostname so resolveSiteIDFromRequest picks it up
-	//    on the next inbound request matching this hostname.
-	hostnamePtr := fqdn
-	updatedSite, err := dbUpdateSite(ctx.AppDB(), pid, site.ID, nil, &hostnamePtr)
-	if err != nil {
-		return nil, fmt.Errorf("update site hostname: %w", err)
-	}
-
-	out := AttachDomainResult{
-		Site: AttachSite{ID: updatedSite.ID, Slug: updatedSite.Slug, Hostname: updatedSite.Hostname},
-	}
+	myTarget := "app://content?project_id=" + url.QueryEscape(pid)
 
 	// 2. Routes — required and preflighted before mutating the site row.
 	// allow_http defaults to !auto_tls — if we aren't managing TLS,
@@ -179,12 +160,12 @@ func (a *App) toolSitesAttachDomain(ctx *sdk.AppCtx, args map[string]any) (any, 
 		}
 	}
 	routesArgs := map[string]any{
-		"hostname":         fqdn,
-		"target":           myTarget,
-		"owner_install_id": installID,
-		"owner_kind":       "content",
-		"cert_fqdn":        fqdn,
-		"allow_http":       allowHTTP,
+		"_project_id": pid,
+		"hostname":    fqdn,
+		"target":      myTarget,
+		"owner_kind":  "content",
+		"cert_fqdn":   fqdn,
+		"allow_http":  allowHTTP,
 	}
 	var routeOut struct {
 		Route  map[string]any `json:"route"`
@@ -193,18 +174,40 @@ func (a *App) toolSitesAttachDomain(ctx *sdk.AppCtx, args map[string]any) (any, 
 	if err := ctx.PlatformAPI().CallAppResult("routes", "routes_register", routesArgs, &routeOut); err != nil {
 		return nil, fmt.Errorf("routes_register failed: %w", err)
 	}
-	out.Route = AttachRoute{Hostname: fqdn, Target: myTarget, Registered: true}
+
+	// Commit the hostname only after the route exists. If the database
+	// write fails, unregister the route so no orphan hostname remains.
+	hostnamePtr := fqdn
+	updatedSite, err := dbUpdateSite(ctx.AppDB(), pid, site.ID, nil, &hostnamePtr)
+	if err != nil {
+		_ = unregisterContentRoute(ctx, pid, fqdn)
+		return nil, fmt.Errorf("update site hostname: %w", err)
+	}
+	if site.Hostname != "" && site.Hostname != fqdn {
+		if err := unregisterContentRoute(ctx, pid, site.Hostname); err != nil {
+			oldHostname := site.Hostname
+			_, _ = dbUpdateSite(ctx.AppDB(), pid, site.ID, nil, &oldHostname)
+			_ = unregisterContentRoute(ctx, pid, fqdn)
+			return nil, fmt.Errorf("unregister previous hostname %q: %w", site.Hostname, err)
+		}
+	}
+
+	out := AttachDomainResult{
+		Site:  AttachSite{ID: updatedSite.ID, Slug: updatedSite.Slug, Hostname: updatedSite.Hostname},
+		Route: AttachRoute{Hostname: fqdn, Target: myTarget, Registered: true},
+	}
 
 	// 3. DNS — optional. Either we have the domains role and an apex
 	//    on file → auto-provision; or we just emit the suggested
 	//    records so the user can set them manually.
 	if manageDNS && apex != "" {
 		dnsArgs := map[string]any{
-			"domain": apex,
-			"name":   firstNonEmpty(sub, "@"),
-			"type":   suggested.Type,
-			"value":  suggested.Value,
-			"ttl":    300,
+			"_project_id": pid,
+			"domain":      apex,
+			"name":        firstNonEmpty(sub, "@"),
+			"type":        suggested.Type,
+			"value":       suggested.Value,
+			"ttl":         300,
 		}
 		var dnsOut map[string]any
 		if err := ctx.PlatformAPI().CallAppResult("domains", "domain_records_set", dnsArgs, &dnsOut); err != nil {
@@ -232,7 +235,7 @@ func (a *App) toolSitesAttachDomain(ctx *sdk.AppCtx, args map[string]any) (any, 
 				Status string `json:"status"`
 			} `json:"cert"`
 		}
-		if err := ctx.PlatformAPI().CallAppResult("certs", "cert_issue", map[string]any{"fqdn": fqdn}, &certOut); err != nil {
+		if err := ctx.PlatformAPI().CallAppResult("certs", "cert_issue", map[string]any{"_project_id": pid, "fqdn": fqdn}, &certOut); err != nil {
 			out.TLS = AttachTLSStatus{Managed: false, Status: "error", CertID: ""}
 			out.DNS.Note = strings.TrimSpace(out.DNS.Note + " — cert_issue failed: " + err.Error())
 		} else {
@@ -252,7 +255,7 @@ func (a *App) toolSitesAttachDomain(ctx *sdk.AppCtx, args map[string]any) (any, 
 		"dns":      out.DNS.Managed,
 		"tls":      out.TLS.Managed,
 	})
-	invalidatePageCache()
+	invalidatePageCacheForSite(site.ID)
 	return out, nil
 }
 
@@ -275,11 +278,15 @@ func (a *App) toolSitesDetachDomain(ctx *sdk.AppCtx, args map[string]any) (any, 
 	}
 	fqdn := site.Hostname
 
-	// Clear the site row first so further requests at this hostname
-	// don't match this site even if the route unregister fails.
+	if ctx.IntegrationFor("routing") == nil {
+		return nil, errors.New("routing integration not bound — refusing to clear the hostname while its public route may still be active")
+	}
+	if err := unregisterContentRoute(ctx, pid, fqdn); err != nil {
+		return nil, fmt.Errorf("routes_unregister failed; hostname was not cleared: %w", err)
+	}
 	empty := ""
 	if _, err := dbUpdateSite(ctx.AppDB(), pid, site.ID, nil, &empty); err != nil {
-		return nil, fmt.Errorf("clear site hostname: %w", err)
+		return nil, fmt.Errorf("clear site hostname after route removal: %w", err)
 	}
 
 	out := map[string]any{
@@ -288,19 +295,7 @@ func (a *App) toolSitesDetachDomain(ctx *sdk.AppCtx, args map[string]any) (any, 
 		"hostname": fqdn,
 	}
 
-	// Routes — best-effort unregister.
-	if ctx.IntegrationFor("routing") != nil {
-		installID, _ := myInstallID()
-		var rOut map[string]any
-		if err := ctx.PlatformAPI().CallAppResult("routes", "routes_unregister", map[string]any{
-			"hostname":         fqdn,
-			"owner_install_id": installID,
-		}, &rOut); err != nil {
-			out["route_unregister_error"] = err.Error()
-		} else {
-			out["route_unregistered"] = true
-		}
-	}
+	out["route_unregistered"] = true
 
 	// DNS — opt-in. Most callers want to keep the DNS record on
 	// detach (commonly: repointing the FQDN elsewhere, or swapping
@@ -316,7 +311,7 @@ func (a *App) toolSitesDetachDomain(ctx *sdk.AppCtx, args map[string]any) (any, 
 			// "not found" responses on either.
 			for _, t := range []string{"A", "CNAME"} {
 				_ = ctx.PlatformAPI().CallAppResult("domains", "domain_records_delete", map[string]any{
-					"domain": apex, "name": subArg, "type": t,
+					"_project_id": pid, "domain": apex, "name": subArg, "type": t,
 				}, &dOut)
 			}
 			out["dns_records_removed"] = true
@@ -324,7 +319,7 @@ func (a *App) toolSitesDetachDomain(ctx *sdk.AppCtx, args map[string]any) (any, 
 	}
 
 	ctx.Emit("site.domain_detached", map[string]any{"site_id": site.ID, "hostname": fqdn})
-	invalidatePageCache()
+	invalidatePageCacheForSite(site.ID)
 	return out, nil
 }
 
@@ -446,20 +441,12 @@ func siteFromAttachArgs(ctx *sdk.AppCtx, pid string, args map[string]any) (*Site
 	return dbGetSite(ctx.AppDB(), pid, siteID)
 }
 
-// myInstallID reads APTEVA_INSTALL_ID — same env var the routes app
-// requires as owner_install_id on register. Reading it here keeps the
-// SDK surface unchanged (the platform doesn't yet forward caller
-// identity through CallApp, so we have to self-report).
-func myInstallID() (int64, error) {
-	v := strings.TrimSpace(os.Getenv("APTEVA_INSTALL_ID"))
-	if v == "" {
-		return 0, errors.New("APTEVA_INSTALL_ID not set — required to register routes")
-	}
-	n, err := strconv.ParseInt(v, 10, 64)
-	if err != nil {
-		return 0, fmt.Errorf("APTEVA_INSTALL_ID %q not an integer: %w", v, err)
-	}
-	return n, nil
+func unregisterContentRoute(ctx *sdk.AppCtx, projectID, hostname string) error {
+	var out map[string]any
+	return ctx.PlatformAPI().CallAppResult("routes", "routes_unregister", map[string]any{
+		"_project_id": projectID,
+		"hostname":    hostname,
+	}, &out)
 }
 
 // looksLikeFQDN is a lightweight sanity check — proper validation

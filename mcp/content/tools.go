@@ -458,21 +458,19 @@ func (a *App) mcpTools() []sdk.Tool {
 		},
 		{
 			Name:        "sites_create",
-			Description: "Create a new site in the current project. Args: slug, name, hostname (optional). The first site for a project is auto-promoted to default.",
+			Description: "Create a new site in the current project. Args: slug, name. The first site for a project is auto-promoted to default. Attach hostnames with sites_attach_domain.",
 			InputSchema: schemaObject(map[string]any{
-				"slug":     map[string]any{"type": "string"},
-				"name":     map[string]any{"type": "string"},
-				"hostname": map[string]any{"type": "string"},
+				"slug": map[string]any{"type": "string"},
+				"name": map[string]any{"type": "string"},
 			}, []string{"slug", "name"}),
 			Handler: a.toolSitesCreate,
 		},
 		{
 			Name:        "sites_update",
-			Description: "Update a site's display name or hostname. Args: id, name?, hostname?.",
+			Description: "Update a site's display name. Args: id, name?. Use sites_attach_domain or sites_detach_domain for hostnames.",
 			InputSchema: schemaObject(map[string]any{
-				"id":       map[string]any{"type": "integer"},
-				"name":     map[string]any{"type": "string"},
-				"hostname": map[string]any{"type": "string"},
+				"id":   map[string]any{"type": "integer"},
+				"name": map[string]any{"type": "string"},
 			}, []string{"id"}),
 			Handler: a.toolSitesUpdate,
 		},

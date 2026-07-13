@@ -27,14 +27,13 @@ import (
 
 	"github.com/microcosm-cc/bluemonday"
 	"github.com/yuin/goldmark"
-	sdk "github.com/apteva/app-sdk"
 )
 
 // ── sanitizers ───────────────────────────────────────────────────
 
 var (
-	mdEngine    goldmark.Markdown
-	htmlPolicy  *bluemonday.Policy
+	mdEngine     goldmark.Markdown
+	htmlPolicy   *bluemonday.Policy
 	inlinePolicy *bluemonday.Policy
 )
 
@@ -89,7 +88,7 @@ func sanitizeHTML(src string) template.HTML {
 // the base.html injects <base href="{{.URLPrefix}}"> so relative URLs
 // resolve against the app's mount point automatically. This same set
 // works for both dashboard-proxy mode and domain-link mode.
-func buildThemeFuncMap(_ *sdk.AppCtx) template.FuncMap {
+func buildThemeFuncMap(theme *Theme) template.FuncMap {
 	return template.FuncMap{
 		// int coerces JSON-derived numbers (float64) into int so
 		// per-block templates can `eq (int .Attrs.level) 1` cleanly.
@@ -101,41 +100,14 @@ func buildThemeFuncMap(_ *sdk.AppCtx) template.FuncMap {
 			return int(n)
 		},
 		"asset": func(path string) string {
-			t := getCurrentTheme()
-			v := "current"
-			if t != nil {
-				v = t.Version
-			}
-			return "_theme/" + v + "/" + strings.TrimPrefix(path, "/")
+			return "_theme/" + theme.Name + "/" + theme.Version + "/" + strings.TrimPrefix(path, "/")
 		},
-		"media": func(mediaID any) string {
-			// Media URLs are built without a site lookup — bytes live in
-			// the storage app at /.media/<uuid>.<ext>, identified by
-			// storage_path. We accept storage_path strings directly OR an
-			// int media_id (which we'd resolve via DB lookup, but per-
-			// template-call DB lookups have no site context here; the
-			// renderer should ideally pre-resolve and pass the URL).
-			// For v2.0 we keep the legacy id→path fallback but it now
-			// queries without site filtering (returns first match).
-			id, _ := asInt64(mediaID)
-			if id == 0 {
+		"media": func(value any) string {
+			storagePath, ok := value.(string)
+			if !ok || !strings.HasPrefix(storagePath, "/.media/") {
 				return ""
 			}
-			ctx := globalCtx
-			if ctx == nil {
-				return ""
-			}
-			// Best-effort lookup: find any media row with this id. Bytes
-			// are not site-scoped, so cross-site exposure here is
-			// limited to the URL, not the data. Multi-site sites that
-			// need strict separation should serve assets via a different
-			// origin or use signed URLs (future work).
-			row := ctx.AppDB().QueryRow(`SELECT storage_path FROM media WHERE id=? LIMIT 1`, id)
-			var path string
-			if err := row.Scan(&path); err != nil {
-				return ""
-			}
-			return "_media" + strings.TrimPrefix(path, "/.media")
+			return "_media/" + strings.TrimPrefix(storagePath, "/.media/")
 		},
 		"markdown": renderInlineMarkdown,
 		"safeHTML": sanitizeHTML,
@@ -147,12 +119,12 @@ func buildThemeFuncMap(_ *sdk.AppCtx) template.FuncMap {
 			return t.Format(layout)
 		},
 		"renderBlock": func(b Block) template.HTML {
-			return renderBlock(b)
+			return renderBlockWithTheme(theme, b)
 		},
 		"renderBlocks": func(bs []Block) template.HTML {
 			var out bytes.Buffer
 			for _, b := range bs {
-				out.WriteString(string(renderBlock(b)))
+				out.WriteString(string(renderBlockWithTheme(theme, b)))
 			}
 			return template.HTML(out.String())
 		},
@@ -171,14 +143,13 @@ func envLookup(k string) string {
 
 // renderBlock dispatches to the per-type template; falls back to the
 // fallback partial when no template exists.
-func renderBlock(b Block) template.HTML {
-	t := getCurrentTheme()
-	if t == nil {
+func renderBlockWithTheme(theme *Theme, b Block) template.HTML {
+	if theme == nil {
 		return template.HTML("<!-- no theme loaded -->")
 	}
-	tpl := t.BlockTpls[b.Type]
+	tpl := theme.BlockTpls[b.Type]
 	if tpl == nil {
-		tpl = t.BlockTpls["fallback"]
+		tpl = theme.BlockTpls["fallback"]
 	}
 	if tpl == nil {
 		return template.HTML("<!-- no template for " + template.HTMLEscapeString(b.Type) + " -->")
@@ -198,11 +169,12 @@ func renderBlock(b Block) template.HTML {
 // concrete fields rather than a map so templates can access them
 // without index calls.
 type PageData struct {
-	SiteID           int64
-	SiteTitle        string
-	SiteTagline      string
-	Locale           string
-	PublicBaseURL    string
+	Theme         *Theme
+	SiteID        int64
+	SiteTitle     string
+	SiteTagline   string
+	Locale        string
+	PublicBaseURL string
 	// URLPrefix is the path under which the app is currently mounted,
 	// with a trailing slash. Two cases:
 	//
@@ -247,7 +219,7 @@ type RenderedMenuItem struct {
 }
 
 type Pagination struct {
-	Prev, Next string
+	Prev, Next  string
 	Page, Total int
 }
 
@@ -257,7 +229,7 @@ type Pagination struct {
 // Each layout has its own pre-built template set (see themes.go) so
 // rendering is just an Execute — no cloning, no Race conditions.
 func renderSingle(data PageData) (string, error) {
-	t := getCurrentTheme()
+	t := data.Theme
 	if t == nil {
 		return "", fmt.Errorf("no theme loaded")
 	}
@@ -271,7 +243,7 @@ func renderSingle(data PageData) (string, error) {
 }
 
 func renderList(data PageData) (string, error) {
-	t := getCurrentTheme()
+	t := data.Theme
 	if t == nil {
 		return "", fmt.Errorf("no theme loaded")
 	}
@@ -349,17 +321,12 @@ var (
 // emits different <base href> and absolute URLs, so a cache hit across
 // the two would serve broken assets to one side.
 func cacheKey(host, path, locale, prefix string) string {
-	t := getCurrentTheme()
-	ver := ""
-	if t != nil {
-		ver = t.Version
-	}
-	return host + "|" + path + "|" + locale + "|" + prefix + "|" + ver
+	return host + "|" + path + "|" + locale + "|" + prefix
 }
 
 func cacheGet(key string) (cacheEntry, bool) {
-	pageCacheMu.RLock()
-	defer pageCacheMu.RUnlock()
+	pageCacheMu.Lock()
+	defer pageCacheMu.Unlock()
 	e, ok := pageCache[key]
 	if !ok {
 		return e, false
@@ -368,6 +335,7 @@ func cacheGet(key string) (cacheEntry, bool) {
 	// growth on long-lived sidecars. Real invalidation is push-based
 	// via invalidatePageCache().
 	if time.Since(e.storedAt) > time.Hour {
+		delete(pageCache, key)
 		return e, false
 	}
 	return e, true
@@ -376,7 +344,29 @@ func cacheGet(key string) (cacheEntry, bool) {
 func cacheSet(key, body, contentType, etag string) {
 	pageCacheMu.Lock()
 	defer pageCacheMu.Unlock()
+	const maxPageCacheEntries = 2048
+	if len(pageCache) >= maxPageCacheEntries {
+		var oldestKey string
+		var oldest time.Time
+		for k, entry := range pageCache {
+			if oldestKey == "" || entry.storedAt.Before(oldest) {
+				oldestKey, oldest = k, entry.storedAt
+			}
+		}
+		delete(pageCache, oldestKey)
+	}
 	pageCache[key] = cacheEntry{body: body, contentType: contentType, etag: etag, storedAt: time.Now()}
+}
+
+func invalidatePageCacheForSite(siteID int64) {
+	suffix := "|s:" + fmt.Sprint(siteID)
+	pageCacheMu.Lock()
+	defer pageCacheMu.Unlock()
+	for key := range pageCache {
+		if strings.HasSuffix(key, suffix) {
+			delete(pageCache, key)
+		}
+	}
 }
 
 func invalidatePageCache() {

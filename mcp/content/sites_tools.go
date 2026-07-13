@@ -23,10 +23,13 @@ func (a *App) toolSitesCreate(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	if err != nil {
 		return nil, err
 	}
+	if asString(args["hostname"]) != "" {
+		return nil, errors.New("hostname must be attached with sites_attach_domain")
+	}
 	site, err := dbCreateSite(ctx.AppDB(), pid,
 		asString(args["slug"]),
 		asString(args["name"]),
-		asString(args["hostname"]))
+		"")
 	if err != nil {
 		return nil, err
 	}
@@ -79,18 +82,18 @@ func (a *App) toolSitesUpdate(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	if !ok || id == 0 {
 		return nil, errors.New("id required")
 	}
-	var name, hostname *string
+	var name *string
 	if v, ok := args["name"].(string); ok {
 		name = &v
 	}
-	if v, ok := args["hostname"].(string); ok {
-		hostname = &v
+	if _, ok := args["hostname"]; ok {
+		return nil, errors.New("hostname must be changed with sites_attach_domain or sites_detach_domain")
 	}
-	s, err := dbUpdateSite(ctx.AppDB(), pid, id, name, hostname)
+	s, err := dbUpdateSite(ctx.AppDB(), pid, id, name, nil)
 	if err != nil {
 		return nil, err
 	}
-	invalidatePageCache()
+	invalidatePageCacheForSite(id)
 	ctx.Emit("site.updated", map[string]any{"id": s.ID, "slug": s.Slug, "hostname": s.Hostname})
 	return map[string]any{"site": s}, nil
 }
@@ -107,7 +110,7 @@ func (a *App) toolSitesArchive(ctx *sdk.AppCtx, args map[string]any) (any, error
 	if err := dbArchiveSite(ctx.AppDB(), pid, id); err != nil {
 		return nil, err
 	}
-	invalidatePageCache()
+	invalidatePageCacheForSite(id)
 	ctx.Emit("site.archived", map[string]any{"id": id})
 	return map[string]any{"ok": true, "id": id}, nil
 }

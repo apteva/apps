@@ -14,6 +14,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
@@ -56,6 +57,7 @@ func (a *App) handlePublic(w http.ResponseWriter, r *http.Request) {
 	prefix := computeURLPrefix(r)
 	key := cacheKeyMulti(r.Host, r.URL.Path, "", prefix, siteID)
 	if e, ok := cacheGet(key); ok {
+		trackCachedPageView(ctx, pid, siteID, r)
 		w.Header().Set("Content-Type", e.contentType)
 		w.Header().Set("ETag", e.etag)
 		if r.Header.Get("If-None-Match") == e.etag {
@@ -101,6 +103,12 @@ func publicProject(r *http.Request) (string, error) {
 	}
 	if v := r.URL.Query().Get("project_id"); v != "" {
 		return v, nil
+	}
+	if globalCtx != nil && globalCtx.AppDB() != nil {
+		host := strings.ToLower(stripPort(r.Host))
+		if site, err := dbGetSiteByHostname(globalCtx.AppDB(), host); err == nil && site != nil {
+			return site.ProjectID, nil
+		}
 	}
 	return "", fmt.Errorf("project_id required (host not bound to a project)")
 }
@@ -219,9 +227,9 @@ func (a *App) servePost(w http.ResponseWriter, r *http.Request, ctx *sdk.AppCtx,
 		UA:      r.Header.Get("User-Agent"),
 		IPHash:  extractIPHash(r),
 	})
-	terms, _ := dbListPostTerms(ctx.AppDB(), post.ID)
+	terms, _ := dbListPostTerms(ctx.AppDB(), pid, siteID, post.ID)
 	data := basePageData(ctx, pid, siteID, settings, r)
-	data.Post = post
+	data.Post = hydratePostMediaPaths(ctx.AppDB(), pid, siteID, post)
 	data.Terms = terms
 	data.PageTitle = post.Title
 	if post.SEODescription != "" {
@@ -328,13 +336,34 @@ func (a *App) handleSitemap(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	posts, _, err := dbSearchPosts(ctx.AppDB(), pid, siteID, PostSearch{Status: "published", Limit: 500})
-	if err != nil {
-		httpErr(w, http.StatusInternalServerError, err.Error())
-		return
+	var posts []Post
+	for offset := 0; ; offset += 200 {
+		batch, total, err := dbSearchPosts(ctx.AppDB(), pid, siteID, PostSearch{Status: "published", Limit: 200, Offset: offset})
+		if err != nil {
+			httpErr(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		posts = append(posts, batch...)
+		if len(posts) >= total || len(batch) == 0 {
+			break
+		}
 	}
 	settings, _ := effectiveSettings(ctx, pid, siteID)
-	base := settings["public_base_url"]
+	base := strings.TrimRight(settings["public_base_url"], "/")
+	if base == "" {
+		scheme := strings.TrimSpace(r.Header.Get("X-Forwarded-Proto"))
+		if i := strings.IndexByte(scheme, ','); i >= 0 {
+			scheme = strings.TrimSpace(scheme[:i])
+		}
+		if scheme != "http" && scheme != "https" {
+			if r.TLS != nil {
+				scheme = "https"
+			} else {
+				scheme = "http"
+			}
+		}
+		base = scheme + "://" + r.Host
+	}
 	var b strings.Builder
 	b.WriteString(`<?xml version="1.0" encoding="UTF-8"?>` + "\n")
 	b.WriteString(`<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">` + "\n")
@@ -350,9 +379,9 @@ func (a *App) handleSitemap(w http.ResponseWriter, r *http.Request) {
 		if mod == "" {
 			mod = p.PublishedAt
 		}
-		b.WriteString("<url><loc>" + loc + "</loc>")
+		b.WriteString("<url><loc>" + xmlEscape(loc) + "</loc>")
 		if mod != "" {
-			b.WriteString("<lastmod>" + mod + "</lastmod>")
+			b.WriteString("<lastmod>" + xmlEscape(mod) + "</lastmod>")
 		}
 		b.WriteString("</url>\n")
 	}
@@ -362,17 +391,42 @@ func (a *App) handleSitemap(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) handleMediaAsset(w http.ResponseWriter, r *http.Request) {
 	ctx := getAppCtx(r)
-	rest := strings.TrimPrefix(r.URL.Path, "/_media/")
-	path := "/.media/" + rest
-	data, mime, err := storageRead(ctx, path)
+	pid, err := publicProject(r)
 	if err != nil {
 		http.NotFound(w, r)
 		return
 	}
-	if mime == "" {
-		mime = http.DetectContentType(data)
+	siteID, err := resolveSiteIDFromRequest(ctx.AppDB(), pid, r)
+	if err != nil {
+		http.NotFound(w, r)
+		return
 	}
-	w.Header().Set("Content-Type", mime)
+	rest := strings.TrimPrefix(r.URL.Path, "/_media/")
+	storagePath := "/.media/" + rest
+	media, err := dbGetMediaByStoragePath(ctx.AppDB(), pid, siteID, storagePath)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	if media.StorageFileID > 0 {
+		signedURL, err := storageSignedURL(ctx, pid, media.StorageFileID)
+		if err != nil {
+			http.NotFound(w, r)
+			return
+		}
+		w.Header().Set("Cache-Control", "public, max-age=300")
+		http.Redirect(w, r, signedURL, http.StatusFound)
+		return
+	}
+	data, mimeType, err := storageReadLegacy(ctx, pid, storagePath)
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	if mimeType == "" {
+		mimeType = http.DetectContentType(data)
+	}
+	w.Header().Set("Content-Type", mimeType)
 	w.Header().Set("Cache-Control", "public, max-age=86400")
 	_, _ = w.Write(data)
 }
@@ -397,9 +451,9 @@ func (a *App) handlePreview(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	settings, _ := effectiveSettings(ctx, pid, siteID)
-	terms, _ := dbListPostTerms(ctx.AppDB(), post.ID)
+	terms, _ := dbListPostTerms(ctx.AppDB(), pid, siteID, post.ID)
 	data := basePageData(ctx, pid, siteID, settings, r)
-	data.Post = post
+	data.Post = hydratePostMediaPaths(ctx.AppDB(), pid, siteID, post)
 	data.Terms = terms
 	data.PageTitle = post.Title + " (preview)"
 	w.Header().Set("X-Robots-Tag", "noindex")
@@ -467,14 +521,37 @@ func verifyPreviewToken(token string) (int64, error) {
 // Runs in a goroutine so the render request isn't blocked on the
 // analytics_track round-trip.
 type pageViewInfo struct {
-	Path     string
-	Kind     string
-	Slug     string
-	Title    string
-	SiteID   int64
-	Referer  string
-	UA       string
-	IPHash   string // we don't store the real IP — use a salted hash for unique-visitor counts
+	Path    string
+	Kind    string
+	Slug    string
+	Title   string
+	SiteID  int64
+	Referer string
+	UA      string
+	IPHash  string // we don't store the real IP — use a salted hash for unique-visitor counts
+}
+
+var analyticsSlots = make(chan struct{}, 32)
+
+func trackCachedPageView(ctx *sdk.AppCtx, pid string, siteID int64, r *http.Request) {
+	path := strings.Trim(r.URL.Path, "/")
+	kind, slug := "page", path
+	switch {
+	case path == "":
+		kind, slug = "index", ""
+	case strings.HasPrefix(path, "posts/"):
+		kind, slug = "post", strings.TrimPrefix(path, "posts/")
+	case strings.HasPrefix(path, "category/"):
+		kind, slug = "term:category", strings.TrimPrefix(path, "category/")
+	case strings.HasPrefix(path, "tag/"):
+		kind, slug = "term:tag", strings.TrimPrefix(path, "tag/")
+	case strings.HasPrefix(path, "page/"):
+		kind, slug = "index", ""
+	}
+	trackPageView(ctx, pid, pageViewInfo{
+		Path: r.URL.Path, Kind: kind, Slug: slug, SiteID: siteID,
+		Referer: r.Referer(), UA: r.UserAgent(), IPHash: extractIPHash(r),
+	})
 }
 
 func trackPageView(ctx *sdk.AppCtx, pid string, info pageViewInfo) {
@@ -499,12 +576,19 @@ func trackPageView(ctx *sdk.AppCtx, pid string, info pageViewInfo) {
 	if ctx.IntegrationFor("analytics") == nil {
 		return
 	}
+	select {
+	case analyticsSlots <- struct{}{}:
+	default:
+		return
+	}
 	go func() {
+		defer func() { <-analyticsSlots }()
 		_ = ctx.PlatformAPI().CallAppResult("analytics", "analytics_track", map[string]any{
-			"event":      "page_view",
-			"app":        "content",
-			"project_id": pid,
-			"props":      props,
+			"event":       "page_view",
+			"app":         "content",
+			"project_id":  pid,
+			"_project_id": pid,
+			"props":       props,
 		}, &struct{}{})
 	}()
 }
@@ -513,16 +597,20 @@ func trackPageView(ctx *sdk.AppCtx, pid string, info pageViewInfo) {
 // raw IP is intentionally NOT stored so analytics stays GDPR-clean
 // out of the box.
 func extractIPHash(r *http.Request) string {
-	ip := r.Header.Get("X-Forwarded-For")
-	if i := strings.Index(ip, ","); i > 0 {
-		ip = ip[:i]
+	ip := ""
+	if forwarded := r.Header.Get("X-Forwarded-For"); forwarded != "" {
+		parts := strings.Split(forwarded, ",")
+		ip = strings.TrimSpace(parts[len(parts)-1])
 	}
-	ip = strings.TrimSpace(ip)
 	if ip == "" {
-		ip = r.RemoteAddr
-		if i := strings.LastIndex(ip, ":"); i > 0 {
-			ip = ip[:i]
+		if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
+			ip = host
+		} else {
+			ip = strings.TrimSpace(r.RemoteAddr)
 		}
+	}
+	if parsed := net.ParseIP(strings.Trim(ip, "[]")); parsed != nil {
+		ip = parsed.String()
 	}
 	if ip == "" {
 		return ""
@@ -542,6 +630,7 @@ func basePageData(ctx *sdk.AppCtx, pid string, siteID int64, settings map[string
 		rendered = renderMenuItems(mainMenu.Items, prefix, proxiedRenderQuery(r))
 	}
 	return PageData{
+		Theme:         activeThemeForSite(ctx, pid, siteID),
 		SiteTitle:     firstNonEmpty(settings["site_title"], "My Site"),
 		SiteTagline:   settings["site_tagline"],
 		Locale:        firstNonEmpty(settings["default_locale"], "en"),

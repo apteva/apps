@@ -360,7 +360,7 @@ func dbUpdatePost(db *sql.DB, projectID string, siteID int64, id int64, patch Po
 	if _, err := db.Exec(q, args...); err != nil {
 		return nil, fmt.Errorf("update post: %w", err)
 	}
-	invalidatePageCache()
+	invalidatePageCacheForSite(siteID)
 	return dbGetPost(db, projectID, siteID, id)
 }
 
@@ -377,12 +377,20 @@ func dbPublishPost(db *sql.DB, projectID string, siteID int64, id int64, schedul
 		event = "published"
 		q = `UPDATE posts SET status='published', published_at=COALESCE(published_at, ?), scheduled_at=NULL, updated_at=? WHERE project_id=? AND site_id=? AND id=?`
 		args = []any{now, now, projectID, siteID, id}
+		if source == "scheduler" {
+			q += ` AND status='scheduled' AND scheduled_at IS NOT NULL AND scheduled_at <= ?`
+			args = append(args, now)
+		}
 	}
-	if _, err := db.Exec(q, args...); err != nil {
+	result, err := db.Exec(q, args...)
+	if err != nil {
 		return nil, fmt.Errorf("publish: %w", err)
 	}
+	if changed, _ := result.RowsAffected(); changed == 0 {
+		return nil, fmt.Errorf("publish: post %d not found or no longer eligible", id)
+	}
 	logPublishEvent(db, id, event, source, nil)
-	invalidatePageCache()
+	invalidatePageCacheForSite(siteID)
 	return dbGetPost(db, projectID, siteID, id)
 }
 
@@ -392,7 +400,7 @@ func dbUnpublishPost(db *sql.DB, projectID string, siteID int64, id int64, sourc
 		return nil, err
 	}
 	logPublishEvent(db, id, "unpublished", source, nil)
-	invalidatePageCache()
+	invalidatePageCacheForSite(siteID)
 	return dbGetPost(db, projectID, siteID, id)
 }
 
@@ -402,7 +410,7 @@ func dbArchivePost(db *sql.DB, projectID string, siteID int64, id int64, source 
 		return nil, err
 	}
 	logPublishEvent(db, id, "archived", source, nil)
-	invalidatePageCache()
+	invalidatePageCacheForSite(siteID)
 	return dbGetPost(db, projectID, siteID, id)
 }
 
@@ -417,7 +425,7 @@ func dbDeletePost(db *sql.DB, projectID string, siteID int64, id int64, source s
 		return err
 	}
 	logPublishEvent(db, id, "deleted", source, nil)
-	invalidatePageCache()
+	invalidatePageCacheForSite(siteID)
 	return nil
 }
 
@@ -533,12 +541,14 @@ type Revision struct {
 	Note       string   `json:"note,omitempty"`
 }
 
-func dbListRevisions(db *sql.DB, postID int64, limit int) ([]Revision, error) {
+func dbListRevisions(db *sql.DB, projectID string, siteID, postID int64, limit int) ([]Revision, error) {
 	if limit <= 0 || limit > 200 {
 		limit = 50
 	}
-	rows, err := db.Query(`SELECT id, post_id, body_blocks, title, excerpt, snapshot_at, author, source, note
-		FROM revisions WHERE post_id=? ORDER BY snapshot_at DESC LIMIT ?`, postID, limit)
+	rows, err := db.Query(`SELECT r.id, r.post_id, r.body_blocks, r.title, r.excerpt, r.snapshot_at, r.author, r.source, r.note
+		FROM revisions r JOIN posts p ON p.id=r.post_id
+		WHERE r.post_id=? AND p.project_id=? AND p.site_id=? AND p.deleted_at IS NULL
+		ORDER BY r.snapshot_at DESC LIMIT ?`, postID, projectID, siteID, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -559,8 +569,10 @@ func dbListRevisions(db *sql.DB, postID int64, limit int) ([]Revision, error) {
 
 func dbRestoreRevision(db *sql.DB, projectID string, siteID int64, postID, revisionID int64, source string) (*Post, error) {
 	var bodyJSON, title, excerpt string
-	if err := db.QueryRow(`SELECT body_blocks, title, excerpt FROM revisions WHERE id=? AND post_id=?`,
-		revisionID, postID).Scan(&bodyJSON, &title, &excerpt); err != nil {
+	if err := db.QueryRow(`SELECT r.body_blocks, r.title, r.excerpt
+		FROM revisions r JOIN posts p ON p.id=r.post_id
+		WHERE r.id=? AND r.post_id=? AND p.project_id=? AND p.site_id=? AND p.deleted_at IS NULL`,
+		revisionID, postID, projectID, siteID).Scan(&bodyJSON, &title, &excerpt); err != nil {
 		return nil, fmt.Errorf("revision %d not found: %w", revisionID, err)
 	}
 	doc, err := parseDocument(bodyJSON)
@@ -568,17 +580,22 @@ func dbRestoreRevision(db *sql.DB, projectID string, siteID int64, postID, revis
 		return nil, err
 	}
 	patch := PostPatch{Blocks: &doc, Title: &title, Excerpt: &excerpt}
-	return dbUpdatePost(globalCtx.AppDB(), projectID, siteID, postID, patch, "", source, fmt.Sprintf("restored from revision %d", revisionID))
+	return dbUpdatePost(db, projectID, siteID, postID, patch, "", source, fmt.Sprintf("restored from revision %d", revisionID))
 }
 
 // ── scheduled-publisher worker ──────────────────────────────────────
 
 func runScheduledPublisher(ctx *sdk.AppCtx) error {
 	db := ctx.AppDB()
+	projectID := strings.TrimSpace(ctx.CurrentProject())
+	if projectID == "" {
+		ctx.Logger().Warn("scheduled publisher skipped without project context")
+		return nil
+	}
 	now := nowStamp()
 
 	rows, err := db.Query(`SELECT id, project_id, COALESCE(site_id, 0) FROM posts
-		WHERE status='scheduled' AND scheduled_at IS NOT NULL AND scheduled_at <= ? AND deleted_at IS NULL`, now)
+		WHERE project_id=? AND status='scheduled' AND scheduled_at IS NOT NULL AND scheduled_at <= ? AND deleted_at IS NULL`, projectID, now)
 	if err != nil {
 		return err
 	}
@@ -599,10 +616,14 @@ func runScheduledPublisher(ctx *sdk.AppCtx) error {
 	rows.Close()
 
 	for _, p := range batch {
-		if _, err := dbPublishPost(db, p.pid, p.siteID, p.id, "", "scheduler"); err != nil {
+		post, err := dbPublishPost(db, p.pid, p.siteID, p.id, "", "scheduler")
+		if err != nil {
 			ctx.Logger().Warn("scheduled publish failed", "post_id", p.id, "err", err.Error())
 			continue
 		}
+		ctx.EmitWithProject("post.published", p.pid, map[string]any{
+			"id": post.ID, "slug": post.Slug, "kind": post.Kind, "site_id": p.siteID, "source": "scheduler",
+		})
 		ctx.Logger().Info("scheduled publish", "post_id", p.id, "project_id", p.pid, "site_id", p.siteID)
 	}
 	return nil
@@ -824,8 +845,8 @@ func (a *App) toolPostsGetContext(ctx *sdk.AppCtx, args map[string]any) (any, er
 	if err != nil {
 		return nil, err
 	}
-	revs, _ := dbListRevisions(ctx.AppDB(), post.ID, 10)
-	terms, _ := dbListPostTerms(ctx.AppDB(), post.ID)
+	revs, _ := dbListRevisions(ctx.AppDB(), pid, siteID, post.ID, 10)
+	terms, _ := dbListPostTerms(ctx.AppDB(), pid, siteID, post.ID)
 	return map[string]any{"post": post, "revisions": revs, "terms": terms}, nil
 }
 
@@ -967,7 +988,12 @@ func (a *App) toolPostsSetHomepage(ctx *sdk.AppCtx, args map[string]any) (any, e
 }
 
 func (a *App) toolPostsRevisionsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	if _, err := resolveProjectFromArgs(args); err != nil {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	siteID, err := resolveSiteIDFromArgs(ctx.AppDB(), pid, args)
+	if err != nil {
 		return nil, err
 	}
 	id, ok := asInt64(args["id"])
@@ -978,7 +1004,7 @@ func (a *App) toolPostsRevisionsList(ctx *sdk.AppCtx, args map[string]any) (any,
 	if v, ok := asInt64(args["limit"]); ok {
 		limit = int(v)
 	}
-	revs, err := dbListRevisions(ctx.AppDB(), id, limit)
+	revs, err := dbListRevisions(ctx.AppDB(), pid, siteID, id, limit)
 	if err != nil {
 		return nil, err
 	}
@@ -1123,7 +1149,7 @@ func (a *App) handleHTTPPostItem(w http.ResponseWriter, r *http.Request) {
 			httpJSON(w, out)
 			return
 		case "revisions":
-			revs, err := dbListRevisions(ctx.AppDB(), id, 50)
+			revs, err := dbListRevisions(ctx.AppDB(), pid, siteID, id, 50)
 			if err != nil {
 				httpErr(w, http.StatusInternalServerError, err.Error())
 				return

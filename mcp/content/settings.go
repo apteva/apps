@@ -119,7 +119,7 @@ func (a *App) toolSettingsSet(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	if err := dbSetSetting(ctx.AppDB(), pid, siteID, key, val); err != nil {
 		return nil, err
 	}
-	invalidatePageCache()
+	invalidatePageCacheForSite(siteID)
 	return map[string]any{"ok": true, "key": key, "value": val}, nil
 }
 

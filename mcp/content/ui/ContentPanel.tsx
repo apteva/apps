@@ -447,9 +447,8 @@ function NewSiteDialog({
   onClose: () => void;
   onCreated: (slug: string) => void;
 }) {
-  const [slug, setSlug] = useState("");
-  const [name, setName] = useState("");
-  const [hostname, setHostname] = useState("");
+	const [slug, setSlug] = useState("");
+	const [name, setName] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -465,7 +464,7 @@ function NewSiteDialog({
       const r = await fetch(url, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ slug, name: name || slug, hostname }),
+		body: JSON.stringify({ slug, name: name || slug }),
       });
       if (!r.ok) {
         const body = await r.text();
@@ -513,16 +512,6 @@ function NewSiteDialog({
             value={name}
             onChange={(e) => setName(e.target.value)}
             placeholder="e.g. Blog"
-            className="block w-full mt-1 border border-border rounded px-2 py-1 bg-bg-input"
-          />
-        </label>
-        <label className="block mb-3">
-          <span className="text-xs text-text-muted">Hostname (optional)</span>
-          <input
-            type="text"
-            value={hostname}
-            onChange={(e) => setHostname(e.target.value)}
-            placeholder="e.g. blog.example.com"
             className="block w-full mt-1 border border-border rounded px-2 py-1 bg-bg-input"
           />
         </label>

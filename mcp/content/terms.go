@@ -111,16 +111,33 @@ func dbListTerms(db *sql.DB, projectID string, siteID int64, kind, q string) ([]
 	return out, nil
 }
 
-// dbAssignTerms / dbUnassignTerms don't need site_id directly — the
-// post_terms junction inherits siting from the parent post + term
-// rows, both of which are site-scoped. The caller is responsible for
-// passing post_ids and term_ids that belong to the same site.
-func dbAssignTerms(db *sql.DB, postID int64, termIDs []int64) error {
+func validatePostAndTerms(tx *sql.Tx, projectID string, siteID, postID int64, termIDs []int64) error {
+	var found int
+	if err := tx.QueryRow(`SELECT 1 FROM posts WHERE id=? AND project_id=? AND site_id=? AND deleted_at IS NULL`, postID, projectID, siteID).Scan(&found); err != nil {
+		return fmt.Errorf("post %d not found in site", postID)
+	}
+	seen := map[int64]struct{}{}
+	for _, termID := range termIDs {
+		if _, ok := seen[termID]; ok {
+			continue
+		}
+		seen[termID] = struct{}{}
+		if err := tx.QueryRow(`SELECT 1 FROM terms WHERE id=? AND project_id=? AND site_id=?`, termID, projectID, siteID).Scan(&found); err != nil {
+			return fmt.Errorf("term %d not found in site", termID)
+		}
+	}
+	return nil
+}
+
+func dbAssignTerms(db *sql.DB, projectID string, siteID, postID int64, termIDs []int64) error {
 	tx, err := db.Begin()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
+	if err := validatePostAndTerms(tx, projectID, siteID, postID, termIDs); err != nil {
+		return err
+	}
 	stmt, err := tx.Prepare(`INSERT OR IGNORE INTO post_terms (post_id, term_id) VALUES (?, ?)`)
 	if err != nil {
 		return err
@@ -134,9 +151,17 @@ func dbAssignTerms(db *sql.DB, postID int64, termIDs []int64) error {
 	return tx.Commit()
 }
 
-func dbUnassignTerms(db *sql.DB, postID int64, termIDs []int64) error {
+func dbUnassignTerms(db *sql.DB, projectID string, siteID, postID int64, termIDs []int64) error {
 	if len(termIDs) == 0 {
 		return nil
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := validatePostAndTerms(tx, projectID, siteID, postID, termIDs); err != nil {
+		return err
 	}
 	placeholders := strings.Repeat("?,", len(termIDs))
 	placeholders = placeholders[:len(placeholders)-1]
@@ -144,15 +169,20 @@ func dbUnassignTerms(db *sql.DB, postID int64, termIDs []int64) error {
 	for _, tid := range termIDs {
 		args = append(args, tid)
 	}
-	_, err := db.Exec(`DELETE FROM post_terms WHERE post_id=? AND term_id IN (`+placeholders+`)`, args...)
-	return err
+	if _, err := tx.Exec(`DELETE FROM post_terms WHERE post_id=? AND term_id IN (`+placeholders+`)`, args...); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // dbListPostTerms returns the terms attached to a post.
-func dbListPostTerms(db *sql.DB, postID int64) ([]Term, error) {
+func dbListPostTerms(db *sql.DB, projectID string, siteID, postID int64) ([]Term, error) {
 	rows, err := db.Query(`SELECT t.id, t.project_id, COALESCE(t.site_id, 0), t.kind, t.name, t.slug, t.parent_id, t.description, t.created_at
 		FROM terms t JOIN post_terms pt ON pt.term_id = t.id
-		WHERE pt.post_id = ? ORDER BY t.kind, t.name`, postID)
+			JOIN posts p ON p.id = pt.post_id
+			WHERE pt.post_id = ? AND p.project_id=? AND p.site_id=?
+			  AND t.project_id=? AND t.site_id=?
+			ORDER BY t.kind, t.name`, postID, projectID, siteID, projectID, siteID)
 	if err != nil {
 		return nil, err
 	}
@@ -212,7 +242,12 @@ func (a *App) toolTermsList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 }
 
 func (a *App) toolTermsAssign(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	if _, err := resolveProjectFromArgs(args); err != nil {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	siteID, err := resolveSiteIDFromArgs(ctx.AppDB(), pid, args)
+	if err != nil {
 		return nil, err
 	}
 	postID, ok := asInt64(args["post_id"])
@@ -223,15 +258,20 @@ func (a *App) toolTermsAssign(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	if err != nil {
 		return nil, err
 	}
-	if err := dbAssignTerms(ctx.AppDB(), postID, ids); err != nil {
+	if err := dbAssignTerms(ctx.AppDB(), pid, siteID, postID, ids); err != nil {
 		return nil, err
 	}
-	invalidatePageCache()
+	invalidatePageCacheForSite(siteID)
 	return map[string]any{"ok": true}, nil
 }
 
 func (a *App) toolTermsUnassign(ctx *sdk.AppCtx, args map[string]any) (any, error) {
-	if _, err := resolveProjectFromArgs(args); err != nil {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	siteID, err := resolveSiteIDFromArgs(ctx.AppDB(), pid, args)
+	if err != nil {
 		return nil, err
 	}
 	postID, ok := asInt64(args["post_id"])
@@ -242,10 +282,10 @@ func (a *App) toolTermsUnassign(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	if err != nil {
 		return nil, err
 	}
-	if err := dbUnassignTerms(ctx.AppDB(), postID, ids); err != nil {
+	if err := dbUnassignTerms(ctx.AppDB(), pid, siteID, postID, ids); err != nil {
 		return nil, err
 	}
-	invalidatePageCache()
+	invalidatePageCacheForSite(siteID)
 	return map[string]any{"ok": true}, nil
 }
 

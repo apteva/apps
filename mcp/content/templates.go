@@ -52,22 +52,22 @@ type Template struct {
 // TemplateBody is the parsed shape of the YAML body. Pages and posts
 // share the same shape but go to different `kind` values in posts.
 type TemplateBody struct {
-	Schema        string                 `yaml:"schema"`
-	Name          string                 `yaml:"name"`
-	DisplayName   string                 `yaml:"display_name"`
-	Version       string                 `yaml:"version"`
-	Description   string                 `yaml:"description"`
-	Tags          []string               `yaml:"tags"`
-	PreviewImage  string                 `yaml:"preview_image"`
-	RequiresApps  []string               `yaml:"requires_apps"`
-	OptionalApps  []string               `yaml:"optional_apps"`
-	Settings      map[string]string      `yaml:"settings"`
-	Terms         []TemplateTerm         `yaml:"terms"`
-	Pages         []TemplatePost         `yaml:"pages"`
-	Posts         []TemplatePost         `yaml:"posts"`
-	Menus         []TemplateMenu         `yaml:"menus"`
-	HomepageSlug  string                 `yaml:"homepage_slug"`
-	Redirects     []TemplateRedirect     `yaml:"redirects"`
+	Schema       string             `yaml:"schema"`
+	Name         string             `yaml:"name"`
+	DisplayName  string             `yaml:"display_name"`
+	Version      string             `yaml:"version"`
+	Description  string             `yaml:"description"`
+	Tags         []string           `yaml:"tags"`
+	PreviewImage string             `yaml:"preview_image"`
+	RequiresApps []string           `yaml:"requires_apps"`
+	OptionalApps []string           `yaml:"optional_apps"`
+	Settings     map[string]string  `yaml:"settings"`
+	Terms        []TemplateTerm     `yaml:"terms"`
+	Pages        []TemplatePost     `yaml:"pages"`
+	Posts        []TemplatePost     `yaml:"posts"`
+	Menus        []TemplateMenu     `yaml:"menus"`
+	HomepageSlug string             `yaml:"homepage_slug"`
+	Redirects    []TemplateRedirect `yaml:"redirects"`
 }
 
 type TemplateTerm struct {
@@ -94,11 +94,11 @@ type TemplateMenu struct {
 }
 
 type TemplateMenuItem struct {
-	Label       string             `yaml:"label"`
-	TargetKind  string             `yaml:"target_kind"`
-	TargetSlug  string             `yaml:"target_slug"`
-	TargetURL   string             `yaml:"target_url"`
-	Children    []TemplateMenuItem `yaml:"children"`
+	Label      string             `yaml:"label"`
+	TargetKind string             `yaml:"target_kind"`
+	TargetSlug string             `yaml:"target_slug"`
+	TargetURL  string             `yaml:"target_url"`
+	Children   []TemplateMenuItem `yaml:"children"`
 }
 
 type TemplateRedirect struct {
@@ -531,7 +531,7 @@ func applyTemplate(ctx *sdk.AppCtx, projectID string, siteID int64, name string,
 	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
-	invalidatePageCache()
+	invalidatePageCacheForSite(siteID)
 	return summary, nil
 }
 

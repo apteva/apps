@@ -14,11 +14,14 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"strings"
 	"time"
 )
+
+const maxFormBodyBytes int64 = 256 << 10
 
 func (a *App) handleFormSubmit(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
@@ -31,6 +34,11 @@ func (a *App) handleFormSubmit(w http.ResponseWriter, r *http.Request) {
 		respondFormError(w, r, http.StatusBadRequest, err.Error())
 		return
 	}
+	siteID, err := resolveSiteIDFromRequest(ctx.AppDB(), pid, r)
+	if err != nil {
+		respondFormError(w, r, http.StatusBadRequest, err.Error())
+		return
+	}
 
 	blockID := strings.TrimPrefix(r.URL.Path, "/_forms/submit/")
 	blockID = strings.Trim(blockID, "/")
@@ -39,30 +47,17 @@ func (a *App) handleFormSubmit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	r.Body = http.MaxBytesReader(w, r.Body, maxFormBodyBytes)
 	payload, err := readFormPayload(r)
 	if err != nil {
-		respondFormError(w, r, http.StatusBadRequest, "invalid payload")
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			respondFormError(w, r, http.StatusRequestEntityTooLarge, "payload too large")
+		} else {
+			respondFormError(w, r, http.StatusBadRequest, "invalid payload")
+		}
 		return
 	}
-
-	// Honeypot: if a bot filled the hidden 'website' field, drop the
-	// submission silently and respond with a synthetic success so the
-	// bot doesn't learn it was caught. Audit row records the rejection.
-	if hp, _ := payload["website"].(string); strings.TrimSpace(hp) != "" {
-		_, _ = dbInsertFormSubmission(ctx.AppDB(), FormSubmission{
-			ProjectID: pid,
-			BlockID:   blockID,
-			Payload:   payload,
-			IPHash:    extractIPHash(r),
-			UserAgent: r.UserAgent(),
-			Status:    "rejected_honeypot",
-			Results:   []ActionResult{},
-			CreatedAt: nowUnix(),
-		})
-		respondFormOK(w, r, nil, map[string]any{"kind": "inline", "message": "Thanks!"})
-		return
-	}
-	delete(payload, "website")
 
 	ipHash := extractIPHash(r)
 	if !formRateLimitOK(ipHash) {
@@ -70,7 +65,16 @@ func (a *App) handleFormSubmit(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	post, block, err := dbFindFormBlock(ctx.AppDB(), pid, blockID)
+	// Honeypot: if a bot filled the hidden 'website' field, drop the
+	// submission silently and respond with a synthetic success so the
+	// bot doesn't learn it was caught. Do not persist attacker payloads.
+	if hp, _ := payload["website"].(string); strings.TrimSpace(hp) != "" {
+		respondFormOK(w, r, nil, map[string]any{"kind": "inline", "message": "Thanks!"})
+		return
+	}
+	delete(payload, "website")
+
+	post, block, err := dbFindFormBlock(ctx.AppDB(), pid, siteID, blockID)
 	if err != nil || block == nil {
 		respondFormError(w, r, http.StatusNotFound, "form not found")
 		return
@@ -84,7 +88,7 @@ func (a *App) handleFormSubmit(w http.ResponseWriter, r *http.Request) {
 	if err := validateFormPayload(fields, payload); err != nil {
 		_, _ = dbInsertFormSubmission(ctx.AppDB(), FormSubmission{
 			ProjectID: pid, SiteID: post.SiteID, PostID: post.ID, BlockID: blockID,
-			Payload: payload, IPHash: ipHash, UserAgent: r.UserAgent(),
+			Payload: payload, IPHash: ipHash, UserAgent: limitedUserAgent(r),
 			Status: "rejected_validation", Results: []ActionResult{},
 			Error: err.Error(), CreatedAt: nowUnix(),
 		})
@@ -106,7 +110,7 @@ func (a *App) handleFormSubmit(w http.ResponseWriter, r *http.Request) {
 		BlockID:   blockID,
 		Payload:   payload,
 		IPHash:    ipHash,
-		UserAgent: r.UserAgent(),
+		UserAgent: limitedUserAgent(r),
 		Status:    status,
 		Results:   results,
 		CreatedAt: nowUnix(),
@@ -134,6 +138,14 @@ func (a *App) handleFormSubmit(w http.ResponseWriter, r *http.Request) {
 	respondFormOK(w, r, results, success)
 }
 
+func limitedUserAgent(r *http.Request) string {
+	ua := r.UserAgent()
+	if len(ua) > 512 {
+		ua = ua[:512]
+	}
+	return ua
+}
+
 // readFormPayload accepts either JSON or form-urlencoded bodies.
 // FormData submitted by the inline script comes as JSON; noscript
 // form-POSTs come as form-urlencoded.
@@ -141,12 +153,15 @@ func readFormPayload(r *http.Request) (map[string]any, error) {
 	ct := r.Header.Get("Content-Type")
 	if strings.HasPrefix(ct, "application/json") {
 		var out map[string]any
-		body, err := io.ReadAll(r.Body)
+		body, err := io.ReadAll(io.LimitReader(r.Body, maxFormBodyBytes+1))
 		if err != nil {
 			return nil, err
 		}
 		if len(body) == 0 {
 			return map[string]any{}, nil
+		}
+		if int64(len(body)) > maxFormBodyBytes {
+			return nil, &http.MaxBytesError{Limit: maxFormBodyBytes}
 		}
 		if err := json.Unmarshal(body, &out); err != nil {
 			return nil, err

@@ -27,12 +27,12 @@ type Menu struct {
 }
 
 type MenuItem struct {
-	ID         int64      `json:"id"`
-	MenuID     int64      `json:"menu_id"`
-	ParentID   *int64     `json:"parent_id,omitempty"`
-	Label      string     `json:"label"`
-	TargetKind string     `json:"target_kind"`
-	TargetID   *int64     `json:"target_id,omitempty"`
+	ID         int64  `json:"id"`
+	MenuID     int64  `json:"menu_id"`
+	ParentID   *int64 `json:"parent_id,omitempty"`
+	Label      string `json:"label"`
+	TargetKind string `json:"target_kind"`
+	TargetID   *int64 `json:"target_id,omitempty"`
 	// TargetSlug is the SLUG of the linked post / page / term, resolved
 	// at read time via a LEFT JOIN against posts/terms. Public render
 	// uses slug-based URLs (/posts/welcome, /about, /category/markets),
@@ -119,14 +119,19 @@ func dbListMenuItems(db *sql.DB, menuID int64) ([]MenuItem, error) {
 		         CASE WHEN mi.target_kind = 'term'           THEN t.slug END,
 		         ''
 		       ) AS target_slug
-		FROM menu_items mi
-		LEFT JOIN posts p
-		  ON p.id = mi.target_id
-		 AND mi.target_kind IN ('post','page')
-		 AND p.deleted_at IS NULL
-		LEFT JOIN terms t
-		  ON t.id = mi.target_id
-		 AND mi.target_kind = 'term'
+			FROM menu_items mi
+			JOIN menus m ON m.id = mi.menu_id
+			LEFT JOIN posts p
+			  ON p.id = mi.target_id
+			 AND mi.target_kind IN ('post','page')
+			 AND p.project_id = m.project_id
+			 AND p.site_id = m.site_id
+			 AND p.deleted_at IS NULL
+			LEFT JOIN terms t
+			  ON t.id = mi.target_id
+			 AND mi.target_kind = 'term'
+			 AND t.project_id = m.project_id
+			 AND t.site_id = m.site_id
 		WHERE mi.menu_id = ?
 		ORDER BY mi.position, mi.id`, menuID)
 	if err != nil {
@@ -171,12 +176,42 @@ func nestItems(items []MenuItem) []MenuItem {
 	return roots
 }
 
-func dbSetMenuItems(db *sql.DB, menuID int64, items []MenuItem) error {
+func dbSetMenuItems(db *sql.DB, projectID string, siteID, menuID int64, items []MenuItem) error {
 	tx, err := db.Begin()
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
+	var exists int
+	if err := tx.QueryRow(`SELECT 1 FROM menus WHERE id=? AND project_id=? AND site_id=?`, menuID, projectID, siteID).Scan(&exists); err != nil {
+		return fmt.Errorf("menu %d not found in site: %w", menuID, err)
+	}
+	var validateTargets func([]MenuItem) error
+	validateTargets = func(items []MenuItem) error {
+		for _, item := range items {
+			if item.TargetID != nil {
+				var found int
+				switch item.TargetKind {
+				case "post", "page":
+					err = tx.QueryRow(`SELECT 1 FROM posts WHERE id=? AND project_id=? AND site_id=? AND kind=? AND deleted_at IS NULL`,
+						*item.TargetID, projectID, siteID, item.TargetKind).Scan(&found)
+				case "term":
+					err = tx.QueryRow(`SELECT 1 FROM terms WHERE id=? AND project_id=? AND site_id=?`,
+						*item.TargetID, projectID, siteID).Scan(&found)
+				}
+				if err != nil {
+					return fmt.Errorf("menu target %s %d not found in site", item.TargetKind, *item.TargetID)
+				}
+			}
+			if err := validateTargets(item.Children); err != nil {
+				return err
+			}
+		}
+		return nil
+	}
+	if err := validateTargets(items); err != nil {
+		return err
+	}
 	if _, err := tx.Exec(`DELETE FROM menu_items WHERE menu_id=?`, menuID); err != nil {
 		return err
 	}
@@ -300,10 +335,10 @@ func (a *App) toolMenusSetItems(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	if err := json.Unmarshal(b, &items); err != nil {
 		return nil, fmt.Errorf("items: %w", err)
 	}
-	if err := dbSetMenuItems(ctx.AppDB(), menuID, items); err != nil {
+	if err := dbSetMenuItems(ctx.AppDB(), pid, siteID, menuID, items); err != nil {
 		return nil, err
 	}
-	invalidatePageCache()
+	invalidatePageCacheForSite(siteID)
 	m, err := dbGetMenu(ctx.AppDB(), pid, siteID, menuID)
 	if err != nil {
 		return nil, err
