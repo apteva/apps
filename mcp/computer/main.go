@@ -52,10 +52,10 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: computer
 display_name: Computer
-version: 0.7.50
+version: 0.7.51
 description: |
-  Watch, steer, and replay hosted browser sessions. v0.7.50 removes clipped,
-  unusable Set-of-Mark targets near viewport edges.
+  Watch, steer, and replay hosted browser sessions. v0.7.51 adds broker-only
+  rendered DOM extraction for bound apps without exposing another agent tool.
 scopes: [project, global]
 requires:
   permissions:
@@ -241,6 +241,26 @@ const idleTTL = 30 * time.Minute
 const reapInterval = 5 * time.Minute
 const maxUploadBytes = 100 * 1024 * 1024
 const recordingProcessingWindow = 15 * time.Minute
+const internalAppCallerHeader = "X-Apteva-Internal-App-Caller-ID"
+const maxExtractChars = 200000
+const maxExtractWaitMS = 10000
+
+var errExtractSessionNotFound = errors.New("extraction session not found")
+var errExtractUnsupported = errors.New("rendered DOM extraction unsupported")
+
+type extractOptions struct {
+	Formats     []string
+	MaxChars    int
+	Readability bool
+	WaitMS      int
+}
+
+type extractRequest struct {
+	Formats     []string `json:"formats,omitempty"`
+	MaxChars    *int     `json:"max_chars,omitempty"`
+	Readability *bool    `json:"readability,omitempty"`
+	WaitMS      *int     `json:"wait_ms,omitempty"`
+}
 
 var sourceURLHTTPClient = http.DefaultClient
 var sourceURLIPv4HTTPClient = &http.Client{Transport: ipv4OnlyTransport()}
@@ -453,6 +473,7 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Method: http.MethodPost, Pattern: "/sessions/{id}/tabs/{tab_id}/switch", Handler: a.handleSwitchTab},
 		{Method: http.MethodDelete, Pattern: "/sessions/{id}/tabs/{tab_id}", Handler: a.handleCloseTab},
 		{Method: http.MethodPost, Pattern: "/sessions/{id}/use", Handler: a.handleComputerUse},
+		{Method: http.MethodPost, Pattern: "/internal/sessions/{id}/extract", Handler: a.handleInternalSessionExtract},
 		{Method: http.MethodGet, Pattern: "/sessions/{id}/recording", Handler: a.handleRecordingMetadata},
 		{Method: http.MethodGet, Pattern: "/sessions/{id}/recording/{stream_id}", Handler: a.handleRecordingPlaylist},
 		{Method: http.MethodGet, Pattern: "/sessions/{id}/recording/{stream_id}/asset", Handler: a.handleRecordingAsset},
@@ -1507,47 +1528,32 @@ func (a *App) toolBrowserScreenshot(ctx *sdk.AppCtx, args map[string]any) (any, 
 	return res, nil
 }
 
-func (a *App) toolBrowserExtract(_ *sdk.AppCtx, args map[string]any) (any, error) {
-	id := stringArg(args, "session_id")
-	if id == "" {
-		return nil, fmt.Errorf("session_id required")
+func (a *App) extractSessionDOM(sessionID string, opts extractOptions) (map[string]any, error) {
+	if strings.TrimSpace(sessionID) == "" {
+		return nil, errors.New("session id required")
 	}
-	sess, ok := a.reg.get(id)
+	sess, ok := a.reg.get(sessionID)
 	if !ok {
-		return nil, fmt.Errorf("session %s not found", id)
+		return nil, fmt.Errorf("%w: %s", errExtractSessionNotFound, sessionID)
 	}
 	sess.actionMu.Lock()
 	defer sess.actionMu.Unlock()
 	extractor, ok := sess.comp.(backends.DOMExtractor)
 	if !ok {
-		return nil, fmt.Errorf("backend %q does not support browser_extract", sess.backend)
+		return nil, fmt.Errorf("%w for backend %q", errExtractUnsupported, sess.backend)
 	}
-	maxChars := intArg(args, "max_chars")
-	if maxChars < 0 {
-		maxChars = 0
-	}
-	if maxChars > 200000 {
-		maxChars = 200000
-	}
-	opts := backends.ExtractOptions{
-		Formats:     stringSliceArg(args, "formats"),
-		MaxChars:    maxChars,
-		Readability: boolArgDefault(args, "readability", true),
-		WaitMS:      intArg(args, "wait_ms"),
-	}
-	if opts.WaitMS < 0 {
-		opts.WaitMS = 0
-	}
-	if opts.WaitMS > 10000 {
-		opts.WaitMS = 10000
-	}
-	res, err := extractor.ExtractDOM(opts)
+	res, err := extractor.ExtractDOM(backends.ExtractOptions{
+		Formats:     opts.Formats,
+		MaxChars:    opts.MaxChars,
+		Readability: opts.Readability,
+		WaitMS:      opts.WaitMS,
+	})
 	if err != nil {
-		return nil, fmt.Errorf("browser_extract: %w", err)
+		return nil, fmt.Errorf("rendered DOM extraction: %w", err)
 	}
 	disp := sess.comp.DisplaySize()
 	out := map[string]any{
-		"session_id":         id,
+		"session_id":         sessionID,
 		"backend":            sess.backend,
 		"current_url":        firstNonEmpty(res.URL, currentURL(sess.comp)),
 		"title":              res.Title,
@@ -3676,6 +3682,88 @@ func (a *App) handleComputerUse(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, out)
 }
 
+func (a *App) handleInternalSessionExtract(w http.ResponseWriter, r *http.Request) {
+	if strings.TrimSpace(r.Header.Get(internalAppCallerHeader)) == "" {
+		httpErr(w, http.StatusForbidden, "internal app caller required")
+		return
+	}
+	sessionID := pathInternalExtractSessionID(r.URL.Path)
+	if sessionID == "" {
+		httpErr(w, http.StatusBadRequest, "session id required")
+		return
+	}
+
+	r.Body = http.MaxBytesReader(w, r.Body, 64*1024)
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	var body extractRequest
+	if err := decoder.Decode(&body); err != nil && !errors.Is(err, io.EOF) {
+		httpErr(w, http.StatusBadRequest, "bad JSON body: "+err.Error())
+		return
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		httpErr(w, http.StatusBadRequest, "bad JSON body: expected one JSON object")
+		return
+	}
+	opts, err := normalizeExtractOptions(body)
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	out, err := a.extractSessionDOM(sessionID, opts)
+	if err != nil {
+		switch {
+		case errors.Is(err, errExtractSessionNotFound):
+			httpErr(w, http.StatusNotFound, err.Error())
+		case errors.Is(err, errExtractUnsupported):
+			httpErr(w, http.StatusNotImplemented, err.Error())
+		default:
+			httpErr(w, http.StatusBadGateway, err.Error())
+		}
+		return
+	}
+	writeJSON(w, out)
+}
+
+func normalizeExtractOptions(body extractRequest) (extractOptions, error) {
+	opts := extractOptions{Readability: true}
+	if body.MaxChars != nil {
+		opts.MaxChars = *body.MaxChars
+	}
+	if opts.MaxChars < 0 {
+		opts.MaxChars = 0
+	} else if opts.MaxChars > maxExtractChars {
+		opts.MaxChars = maxExtractChars
+	}
+	if body.Readability != nil {
+		opts.Readability = *body.Readability
+	}
+	if body.WaitMS != nil {
+		opts.WaitMS = *body.WaitMS
+	}
+	if opts.WaitMS < 0 {
+		opts.WaitMS = 0
+	} else if opts.WaitMS > maxExtractWaitMS {
+		opts.WaitMS = maxExtractWaitMS
+	}
+
+	seen := make(map[string]struct{}, len(body.Formats))
+	for _, raw := range body.Formats {
+		format := strings.ToLower(strings.TrimSpace(raw))
+		switch format {
+		case "text", "markdown", "html", "links", "images", "regions", "metadata", "structured_data", "json":
+		default:
+			return extractOptions{}, fmt.Errorf("unsupported extraction format %q", raw)
+		}
+		if _, ok := seen[format]; ok {
+			continue
+		}
+		seen[format] = struct{}{}
+		opts.Formats = append(opts.Formats, format)
+	}
+	return opts, nil
+}
+
 // handleSessionScreenshot streams the session's current screenshot inline.
 // Path is /sessions/{id}/screenshot — strip the prefix + suffix to
 // get id. Returns 404 if the session is unknown; the panel will then
@@ -3718,6 +3806,19 @@ func pathSessionID(path, suffix string) string {
 	rest := strings.TrimPrefix(path, "/sessions/")
 	rest = strings.TrimSuffix(rest, suffix)
 	return strings.Trim(rest, "/")
+}
+
+func pathInternalExtractSessionID(path string) string {
+	const prefix = "/internal/sessions/"
+	const suffix = "/extract"
+	if !strings.HasPrefix(path, prefix) || !strings.HasSuffix(path, suffix) {
+		return ""
+	}
+	id := strings.TrimSuffix(strings.TrimPrefix(path, prefix), suffix)
+	if id == "" || strings.Contains(id, "/") {
+		return ""
+	}
+	return id
 }
 
 func pathSessionTabID(path, suffix string) (string, string) {

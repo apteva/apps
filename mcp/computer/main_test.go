@@ -11,6 +11,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"sort"
 	"strings"
 	"sync"
@@ -324,7 +325,7 @@ func TestComputerUseRejectsExplicitLabelZero(t *testing.T) {
 	}
 }
 
-func TestBrowserExtract(t *testing.T) {
+func TestInternalSessionExtractSuccessfulRenderedExtraction(t *testing.T) {
 	fake := &fakeComp{
 		display: backends.DisplaySize{Width: 1280, Height: 720},
 		url:     "https://example.com/rendered",
@@ -359,15 +360,17 @@ func TestBrowserExtract(t *testing.T) {
 		lastUsed: time.Now(),
 	})
 
-	outAny, err := app.toolBrowserExtract(nil, map[string]any{
-		"session_id": "br_test",
-		"formats":    []any{"text", "markdown", "metadata", "links", "regions"},
-		"max_chars":  float64(2000),
-	})
-	if err != nil {
-		t.Fatalf("browser_extract: %v", err)
+	w := internalExtractResponse(t, app, "br_test", `{
+		"formats":["text","markdown","metadata","links","regions"],
+		"max_chars":2000
+	}`, "web")
+	if w.Code != http.StatusOK {
+		t.Fatalf("extract status: want 200, got %d body=%s", w.Code, w.Body.String())
 	}
-	out := outAny.(map[string]any)
+	var out map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &out); err != nil {
+		t.Fatalf("decode extraction response: %v", err)
+	}
 	if out["session_id"] != "br_test" {
 		t.Errorf("session_id: got %v", out["session_id"])
 	}
@@ -383,8 +386,8 @@ func TestBrowserExtract(t *testing.T) {
 	if out["structured_data"] == nil {
 		t.Errorf("structured_data missing")
 	}
-	regions, ok := out["regions"].([]backends.ExtractRegion)
-	if !ok || len(regions) != 1 || regions[0].Heading != "Contact" {
+	regions, ok := out["regions"].([]any)
+	if !ok || len(regions) != 1 || regions[0].(map[string]any)["heading"] != "Contact" {
 		t.Fatalf("regions missing: %#v", out["regions"])
 	}
 	if got := fake.extractOptions.MaxChars; got != 2000 {
@@ -392,6 +395,98 @@ func TestBrowserExtract(t *testing.T) {
 	}
 	if len(fake.extractOptions.Formats) != 5 || fake.extractOptions.Formats[0] != "text" {
 		t.Errorf("formats forwarded: got %v", fake.extractOptions.Formats)
+	}
+	if !fake.extractOptions.Readability {
+		t.Error("readability should default to true")
+	}
+}
+
+func TestInternalSessionExtractErrorsAndBounds(t *testing.T) {
+	t.Run("missing internal caller header", func(t *testing.T) {
+		fake := &fakeComp{}
+		app := appWithSession("br_test", fake, "local")
+		w := internalExtractResponse(t, app, "br_test", `{}`, "")
+		if w.Code != http.StatusForbidden {
+			t.Fatalf("status: want 403, got %d body=%s", w.Code, w.Body.String())
+		}
+		if !reflect.DeepEqual(fake.extractOptions, backends.ExtractOptions{}) {
+			t.Fatalf("extractor called without internal header: %+v", fake.extractOptions)
+		}
+	})
+
+	t.Run("unknown session", func(t *testing.T) {
+		app := &App{reg: &registry{m: map[string]*session{}}}
+		w := internalExtractResponse(t, app, "br_missing", `{}`, "web")
+		if w.Code != http.StatusNotFound {
+			t.Fatalf("status: want 404, got %d body=%s", w.Code, w.Body.String())
+		}
+	})
+
+	t.Run("backend without DOM extractor", func(t *testing.T) {
+		app := appWithSession("br_test", &nonExtractComp{}, "service")
+		w := internalExtractResponse(t, app, "br_test", `{}`, "web")
+		if w.Code != http.StatusNotImplemented {
+			t.Fatalf("status: want 501, got %d body=%s", w.Code, w.Body.String())
+		}
+	})
+
+	t.Run("invalid options", func(t *testing.T) {
+		fake := &fakeComp{}
+		app := appWithSession("br_test", fake, "local")
+		w := internalExtractResponse(t, app, "br_test", `{"formats":["pdf"]}`, "web")
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("status: want 400, got %d body=%s", w.Code, w.Body.String())
+		}
+		w = internalExtractResponse(t, app, "br_test", `{"unknown":true}`, "web")
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("unknown field status: want 400, got %d body=%s", w.Code, w.Body.String())
+		}
+	})
+
+	t.Run("oversized options are clamped", func(t *testing.T) {
+		fake := &fakeComp{}
+		app := appWithSession("br_test", fake, "local")
+		w := internalExtractResponse(t, app, "br_test", `{
+			"formats":["TEXT","text","json"],
+			"max_chars":999999,
+			"readability":false,
+			"wait_ms":999999
+		}`, "web")
+		if w.Code != http.StatusOK {
+			t.Fatalf("status: want 200, got %d body=%s", w.Code, w.Body.String())
+		}
+		want := backends.ExtractOptions{
+			Formats:     []string{"text", "json"},
+			MaxChars:    maxExtractChars,
+			Readability: false,
+			WaitMS:      maxExtractWaitMS,
+		}
+		if !reflect.DeepEqual(fake.extractOptions, want) {
+			t.Fatalf("bounded options: want %+v, got %+v", want, fake.extractOptions)
+		}
+	})
+}
+
+func TestBrowserExtractRemainsInternalOnly(t *testing.T) {
+	app := &App{}
+	for _, tool := range app.MCPTools() {
+		if tool.Name == "browser_extract" {
+			t.Fatal("browser_extract must not be exposed through MCPTools")
+		}
+	}
+	for _, tool := range app.Manifest().Provides.MCPTools {
+		if tool.Name == "browser_extract" {
+			t.Fatal("browser_extract must not be declared in the manifest")
+		}
+	}
+	foundRoute := false
+	for _, route := range app.HTTPRoutes() {
+		if route.Method == http.MethodPost && route.Pattern == "/internal/sessions/{id}/extract" {
+			foundRoute = true
+		}
+	}
+	if !foundRoute {
+		t.Fatal("internal session extraction route is not registered")
 	}
 }
 
@@ -2226,7 +2321,39 @@ func (f *fakeComp) ExtractDOM(opts backends.ExtractOptions) (backends.ExtractRes
 	return f.extractResult, nil
 }
 
+type nonExtractComp struct{}
+
+func (*nonExtractComp) Execute(backends.Action) ([]byte, error) { return nil, nil }
+func (*nonExtractComp) Screenshot() ([]byte, error)             { return nil, nil }
+func (*nonExtractComp) DisplaySize() backends.DisplaySize {
+	return backends.DisplaySize{Width: 800, Height: 600}
+}
+func (*nonExtractComp) Close() error { return nil }
+
 // ─── helpers ───────────────────────────────────────────────────────
+
+func appWithSession(id string, comp backends.Computer, backend string) *App {
+	app := &App{reg: &registry{m: map[string]*session{}}}
+	app.reg.put(id, &session{
+		comp:     comp,
+		backend:  backend,
+		openedAt: time.Now(),
+		lastUsed: time.Now(),
+	})
+	return app
+}
+
+func internalExtractResponse(t *testing.T, app *App, sessionID, body, callerID string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodPost, "/internal/sessions/"+sessionID+"/extract", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	if callerID != "" {
+		req.Header.Set(internalAppCallerHeader, callerID)
+	}
+	w := httptest.NewRecorder()
+	app.handleInternalSessionExtract(w, req)
+	return w
+}
 
 func toolNames(tools []sdk.MCPToolSpec) []string {
 	out := make([]string, 0, len(tools))

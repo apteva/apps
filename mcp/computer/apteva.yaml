@@ -2,10 +2,10 @@ schema: apteva-app/v1
 
 name: computer
 display_name: Computer
-version: 0.7.50
+version: 0.7.51
 description: |
-  Watch, steer, and replay hosted browser sessions. v0.7.50 removes clipped,
-  unusable Set-of-Mark targets near viewport edges.
+  Watch, steer, and replay hosted browser sessions. v0.7.51 adds broker-only
+  rendered DOM extraction for bound apps without exposing another agent tool.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/computer
