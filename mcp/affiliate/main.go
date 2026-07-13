@@ -7,11 +7,14 @@ package main
 
 import (
 	"database/sql"
+	_ "embed"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net/http"
 	"net/url"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -20,10 +23,10 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const manifestYAML = `schema: apteva-app/v1
+const legacyManifestYAML = `schema: apteva-app/v1
 name: affiliate
 display_name: Affiliate
-version: 0.1.6
+version: 0.1.7
 description: Publisher-side affiliate manager.
 author: Apteva
 scopes: [project, global]
@@ -170,10 +173,13 @@ config_schema:
 upgrade_policy: auto-patch
 `
 
+//go:embed apteva.yaml
+var manifestYAML []byte
+
 type App struct{}
 
 func (a *App) Manifest() sdk.Manifest {
-	m, err := sdk.ParseManifest([]byte(manifestYAML))
+	m, err := sdk.ParseManifest(manifestYAML)
 	if err != nil {
 		panic("invalid embedded manifest: " + err.Error())
 	}
@@ -212,7 +218,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name: "affiliate_refresh",
-			Description: "Refresh offers and/or stats from a provider app dependency. " +
+			Description: "Refresh offers and/or stats from a bound provider integration. " +
 				"Args: network (req: target-circle|impact|awin|cj-affiliate|amazon-associates|skimlinks|sovrn|partnerstack|shareasale), " +
 				"kind? (offers|stats|all, default all), from?, to?, plus provider IDs such as publisherId, requestor-cid, website-id, partnerTag, campaignId, keywords.",
 			InputSchema: schemaObject(map[string]any{
@@ -231,12 +237,13 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "affiliate_offers",
-			Description: "Search normalized offers. Args: q?, network?, status?, limit? (default 50).",
+			Description: "Search normalized offers with total-count pagination. Args: q?, network?, status?, limit? (default 50), offset?.",
 			InputSchema: schemaObject(map[string]any{
 				"q":       map[string]any{"type": "string"},
 				"network": map[string]any{"type": "string"},
 				"status":  map[string]any{"type": "string"},
 				"limit":   map[string]any{"type": "integer"},
+				"offset":  map[string]any{"type": "integer"},
 			}, nil),
 			Handler: a.toolOffers,
 		},
@@ -266,13 +273,14 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "affiliate_links",
-			Description: "Search managed links. Args: q?, network?, offer_id?, status?, limit? (default 50).",
+			Description: "Search managed links with total-count pagination. Args: q?, network?, offer_id?, status?, limit? (default 50), offset?.",
 			InputSchema: schemaObject(map[string]any{
 				"q":        map[string]any{"type": "string"},
 				"network":  map[string]any{"type": "string"},
 				"offer_id": map[string]any{"type": "integer"},
 				"status":   map[string]any{"type": "string"},
 				"limit":    map[string]any{"type": "integer"},
+				"offset":   map[string]any{"type": "integer"},
 			}, nil),
 			Handler: a.toolLinks,
 		},
@@ -302,11 +310,71 @@ type Network struct {
 	Key             string `json:"key"`
 	Name            string `json:"name"`
 	Enabled         bool   `json:"enabled"`
+	Bound           bool   `json:"bound"`
+	SupportsOffers  bool   `json:"supports_offers"`
+	SupportsStats   bool   `json:"supports_stats"`
+	SupportsLinks   bool   `json:"supports_links"`
+	SupportsClicks  bool   `json:"supports_clicks"`
+	StatsNeedsDates bool   `json:"stats_needs_dates"`
+	StatsMode       string `json:"stats_mode,omitempty"`
+	LinkMode        string `json:"link_mode,omitempty"`
 	ConnectionRef   string `json:"connection_ref,omitempty"`
 	LastRefreshedAt string `json:"last_refreshed_at,omitempty"`
 	MetadataJSON    string `json:"metadata_json,omitempty"`
 	CreatedAt       string `json:"created_at,omitempty"`
 	UpdatedAt       string `json:"updated_at,omitempty"`
+}
+
+type providerCapability struct {
+	Key             string
+	Offers          bool
+	Stats           bool
+	Links           bool
+	Clicks          bool
+	StatsNeedsDates bool
+	StatsMode       string
+	LinkMode        string
+}
+
+var providerCapabilities = []providerCapability{
+	{Key: "target-circle", Offers: true, Stats: true, Links: true, StatsMode: "range", LinkMode: "provider"},
+	{Key: "impact", Offers: true, Stats: true, Links: true, StatsMode: "range", LinkMode: "provider"},
+	{Key: "awin", Offers: true, Stats: true, Links: true, StatsNeedsDates: true, StatsMode: "range", LinkMode: "provider"},
+	{Key: "cj-affiliate", Offers: true, Stats: true, Links: true, StatsMode: "range", LinkMode: "manual"},
+	{Key: "amazon-associates", Offers: true, Links: true, LinkMode: "provider"},
+	{Key: "skimlinks", Links: true, LinkMode: "provider"},
+	{Key: "sovrn", Offers: true, Stats: true, Links: true, StatsMode: "daily", LinkMode: "provider"},
+	{Key: "partnerstack", Offers: true, Stats: true, Links: true, StatsMode: "range", LinkMode: "manual"},
+	{Key: "shareasale", Offers: true, Stats: true, Links: true, StatsMode: "current-day", LinkMode: "manual"},
+}
+
+func capabilityFor(network string) (providerCapability, bool) {
+	network = canonicalNetworkKey(network)
+	for _, capability := range providerCapabilities {
+		if capability.Key == network {
+			return capability, true
+		}
+	}
+	return providerCapability{}, false
+}
+
+func enrichNetwork(ctx *sdk.AppCtx, network *Network, capability providerCapability) {
+	if network == nil {
+		return
+	}
+	network.SupportsOffers = capability.Offers
+	network.SupportsStats = capability.Stats
+	network.SupportsLinks = capability.Links
+	network.SupportsClicks = capability.Clicks
+	network.StatsNeedsDates = capability.StatsNeedsDates
+	network.StatsMode = capability.StatsMode
+	network.LinkMode = capability.LinkMode
+	if ctx != nil {
+		if bound := ctx.IntegrationFor(capability.Key); bound != nil && bound.ConnectionID != 0 {
+			network.Bound = true
+			network.ConnectionRef = strconv.FormatInt(bound.ConnectionID, 10)
+		}
+	}
 }
 
 type Offer struct {
@@ -403,16 +471,16 @@ func dbUpsertNetwork(db *sql.DB, key, name string, metadata any) (*Network, erro
 		name = displayNetworkName(key)
 	}
 	now := nowUTC()
-	meta := mustJSON(metadata)
+	meta := mustJSON(redactSecrets(metadata))
 	_, err := db.Exec(`
-		INSERT INTO networks (key, name, enabled, metadata_json, created_at, updated_at)
-		VALUES (?, ?, 1, ?, ?, ?)
+		INSERT INTO networks (key, name, enabled, last_refreshed_at, metadata_json, created_at, updated_at)
+		VALUES (?, ?, 1, ?, ?, ?, ?)
 		ON CONFLICT(key) DO UPDATE SET
 			name = excluded.name,
 			metadata_json = excluded.metadata_json,
 			last_refreshed_at = excluded.updated_at,
 			updated_at = excluded.updated_at`,
-		key, name, meta, now, now)
+		key, name, now, meta, now, now)
 	if err != nil {
 		return nil, err
 	}
@@ -520,7 +588,7 @@ const offerCols = `id, network_key, external_id, merchant_name, offer_name, stat
 	category, vertical, countries_json, commission_summary, cookie_window,
 	tracking_deeplink, raw_json, last_refreshed_at, created_at, updated_at`
 
-func dbListOffers(db *sql.DB, q, network, status string, limit int) ([]Offer, error) {
+func dbListOffers(db *sql.DB, q, network, status string, limit, offset int) ([]Offer, int, error) {
 	if limit <= 0 || limit > 500 {
 		limit = 50
 	}
@@ -539,21 +607,28 @@ func dbListOffers(db *sql.DB, q, network, status string, limit int) ([]Offer, er
 		where = append(where, "(merchant_name LIKE ? OR offer_name LIKE ? OR category LIKE ? OR vertical LIKE ?)")
 		args = append(args, like, like, like, like)
 	}
-	args = append(args, limit)
-	rows, err := db.Query(`SELECT `+offerCols+` FROM offers WHERE `+strings.Join(where, " AND ")+` ORDER BY merchant_name, offer_name LIMIT ?`, args...)
+	if offset < 0 {
+		offset = 0
+	}
+	var total int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM offers WHERE `+strings.Join(where, " AND "), args...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+	args = append(args, limit, offset)
+	rows, err := db.Query(`SELECT `+offerCols+` FROM offers WHERE `+strings.Join(where, " AND ")+` ORDER BY merchant_name, offer_name LIMIT ? OFFSET ?`, args...)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer rows.Close()
 	var out []Offer
 	for rows.Next() {
 		o, err := scanOffer(rows)
 		if err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		out = append(out, *o)
 	}
-	return out, rows.Err()
+	return out, total, rows.Err()
 }
 
 func scanOffer(s rowScanner) (*Offer, error) {
@@ -631,13 +706,13 @@ func dbUpsertDefaultLink(db *sql.DB, in LinkInput) (*Link, bool, error) {
 	var id int64
 	err := db.QueryRow(`
 		SELECT id FROM links
-		WHERE network_key = ? AND COALESCE(offer_id, 0) = ? AND affiliate_url = ?
-		LIMIT 1`, in.NetworkKey, in.OfferID, in.AffiliateURL).Scan(&id)
+		WHERE network_key = ? AND COALESCE(offer_id, 0) = ? AND campaign = '' AND subid = ''
+		ORDER BY id DESC LIMIT 1`, in.NetworkKey, in.OfferID).Scan(&id)
 	if err == nil {
 		_, err = db.Exec(`
 			UPDATE links
-			SET destination_url = ?, raw_json = ?, updated_at = ?
-			WHERE id = ?`, in.DestinationURL, in.RawJSON, nowUTC(), id)
+			SET destination_url = ?, affiliate_url = ?, status = ?, raw_json = ?, updated_at = ?
+			WHERE id = ?`, in.DestinationURL, in.AffiliateURL, in.Status, in.RawJSON, nowUTC(), id)
 		if err != nil {
 			return nil, false, err
 		}
@@ -677,7 +752,7 @@ const linkColsQualified = `l.id, l.network_key, COALESCE(l.offer_id,0), l.destin
 	l.short_url, l.redirect_rule_id, l.campaign, l.subid, l.status, l.raw_json, l.last_checked_at,
 	l.created_at, l.updated_at`
 
-func dbListLinks(db *sql.DB, q, network string, offerID int64, status string, limit int) ([]Link, error) {
+func dbListLinks(db *sql.DB, q, network string, offerID int64, status string, limit, offset int) ([]Link, int, error) {
 	if limit <= 0 || limit > 500 {
 		limit = 50
 	}
@@ -701,14 +776,21 @@ func dbListLinks(db *sql.DB, q, network string, offerID int64, status string, li
 			OR l.campaign LIKE ? OR l.subid LIKE ? OR o.merchant_name LIKE ? OR o.offer_name LIKE ?)`)
 		args = append(args, like, like, like, like, like, like, like)
 	}
-	args = append(args, limit)
+	if offset < 0 {
+		offset = 0
+	}
+	var total int
+	if err := db.QueryRow(`SELECT COUNT(*) FROM links l LEFT JOIN offers o ON o.id = l.offer_id WHERE `+strings.Join(where, " AND "), args...).Scan(&total); err != nil {
+		return nil, 0, err
+	}
+	args = append(args, limit, offset)
 	rows, err := db.Query(`SELECT `+linkColsQualified+`, COALESCE(o.merchant_name,''), COALESCE(o.offer_name,'')
 		FROM links l
 		LEFT JOIN offers o ON o.id = l.offer_id
 		WHERE `+strings.Join(where, " AND ")+`
-		ORDER BY l.id DESC LIMIT ?`, args...)
+		ORDER BY l.id DESC LIMIT ? OFFSET ?`, args...)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
 	}
 	defer rows.Close()
 	var out []Link
@@ -717,11 +799,44 @@ func dbListLinks(db *sql.DB, q, network string, offerID int64, status string, li
 		if err := rows.Scan(&l.ID, &l.NetworkKey, &l.OfferID, &l.DestinationURL, &l.AffiliateURL,
 			&l.ShortURL, &l.RedirectRuleID, &l.Campaign, &l.SubID, &l.Status, &l.RawJSON,
 			&l.LastCheckedAt, &l.CreatedAt, &l.UpdatedAt, &l.MerchantName, &l.OfferName); err != nil {
-			return nil, err
+			return nil, 0, err
 		}
 		out = append(out, l)
 	}
-	return out, rows.Err()
+	return out, total, rows.Err()
+}
+
+func dbFindLinkForStat(db *sql.DB, network string, offerID int64, raw map[string]any) (int64, error) {
+	references := []string{}
+	for _, key := range []string{
+		"subid", "subId", "clickref", "clickRef", "SubId1", "SubId2", "sourceId", "source_id", "clickId", "click_id",
+		"reference.ref1", "reference.ref2", "reference.ref3", "reference.ref4", "reference.ref5",
+	} {
+		if value := firstString(raw, key); value != "" {
+			references = append(references, value)
+		}
+	}
+	if len(references) == 0 {
+		return 0, nil
+	}
+	where := []string{"network_key = ?", "status = 'active'"}
+	args := []any{network}
+	if offerID != 0 {
+		where = append(where, "COALESCE(offer_id, 0) = ?")
+		args = append(args, offerID)
+	}
+	refs := make([]string, 0, len(references)*2)
+	for _, reference := range references {
+		refs = append(refs, "campaign = ?", "subid = ?")
+		args = append(args, reference, reference)
+	}
+	where = append(where, "("+strings.Join(refs, " OR ")+")")
+	var id int64
+	err := db.QueryRow(`SELECT id FROM links WHERE `+strings.Join(where, " AND ")+` ORDER BY id DESC LIMIT 1`, args...).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		return 0, nil
+	}
+	return id, err
 }
 
 func scanLink(s rowScanner) (*Link, error) {
@@ -847,7 +962,22 @@ func (a *App) toolNetworks(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"networks": rows, "count": len(rows)}, nil
+	byKey := make(map[string]*Network, len(rows))
+	for i := range rows {
+		byKey[rows[i].Key] = &rows[i]
+	}
+	result := make([]Network, 0, len(providerCapabilities))
+	for _, capability := range providerCapabilities {
+		network := byKey[capability.Key]
+		if network == nil {
+			network = &Network{Key: capability.Key, Name: displayNetworkName(capability.Key)}
+		}
+		enrichNetwork(ctx, network, capability)
+		if enabled == nil || network.Enabled == *enabled {
+			result = append(result, *network)
+		}
+	}
+	return map[string]any{"networks": result, "count": len(result)}, nil
 }
 
 func (a *App) toolRefresh(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -863,6 +993,22 @@ func (a *App) toolRefresh(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if kind != "offers" && kind != "stats" && kind != "all" {
 		return nil, fmt.Errorf("invalid kind %q", kind)
 	}
+	capability, ok := capabilityFor(network)
+	if !ok {
+		return nil, fmt.Errorf("unsupported affiliate network %q", network)
+	}
+	if kind == "offers" && !capability.Offers {
+		return nil, fmt.Errorf("%s does not expose offer refresh", network)
+	}
+	if kind == "stats" && !capability.Stats {
+		return nil, fmt.Errorf("%s does not expose stats refresh", network)
+	}
+	if kind == "all" && !capability.Offers && !capability.Stats {
+		return nil, fmt.Errorf("%s has no refreshable offer or stats data", network)
+	}
+	if (kind == "stats" || kind == "all") && capability.Stats && capability.StatsNeedsDates && (strArg(args, "from") == "" || strArg(args, "to") == "") {
+		return nil, fmt.Errorf("%s stats require from and to dates", network)
+	}
 	return a.refreshNetwork(ctx, network, kind, strArg(args, "from"), strArg(args, "to"), args)
 }
 
@@ -871,11 +1017,11 @@ func (a *App) toolOffers(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if network != "" {
 		network = canonicalNetworkKey(network)
 	}
-	rows, err := dbListOffers(ctx.AppDB(), strArg(args, "q"), network, strArg(args, "status"), intArg(args, "limit", 50))
+	rows, total, err := dbListOffers(ctx.AppDB(), strArg(args, "q"), network, strArg(args, "status"), intArg(args, "limit", 50), intArg(args, "offset", 0))
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"offers": rows, "count": len(rows)}, nil
+	return map[string]any{"offers": rows, "count": len(rows), "total": total}, nil
 }
 
 func (a *App) toolLinkCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -903,6 +1049,8 @@ func (a *App) toolLinkCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		}
 		if network == "" {
 			network = offer.NetworkKey
+		} else if network != offer.NetworkKey {
+			return nil, fmt.Errorf("offer_id %d belongs to %s, not %s", offerID, offer.NetworkKey, network)
 		}
 	}
 	if network == "" {
@@ -929,7 +1077,7 @@ func (a *App) toolLinkCreate(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 		Campaign:       strArg(args, "campaign"),
 		SubID:          strArg(args, "subid"),
 		Status:         "active",
-		RawJSON:        mustJSON(raw),
+		RawJSON:        mustJSON(redactSecrets(raw)),
 	})
 	if err != nil {
 		return nil, err
@@ -951,11 +1099,11 @@ func (a *App) toolLinks(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if network != "" {
 		network = canonicalNetworkKey(network)
 	}
-	rows, err := dbListLinks(ctx.AppDB(), strArg(args, "q"), network, toInt64(args["offer_id"]), strArg(args, "status"), intArg(args, "limit", 50))
+	rows, total, err := dbListLinks(ctx.AppDB(), strArg(args, "q"), network, toInt64(args["offer_id"]), strArg(args, "status"), intArg(args, "limit", 50), intArg(args, "offset", 0))
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"links": rows, "count": len(rows)}, nil
+	return map[string]any{"links": rows, "count": len(rows), "total": total}, nil
 }
 
 func (a *App) toolStats(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -967,7 +1115,13 @@ func (a *App) toolStats(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	return map[string]any{"stats": rows, "count": len(rows)}, nil
+	clicksAvailable := false
+	if network != "" {
+		if capability, ok := capabilityFor(network); ok {
+			clicksAvailable = capability.Clicks
+		}
+	}
+	return map[string]any{"stats": rows, "count": len(rows), "clicks_available": clicksAvailable}, nil
 }
 
 func (a *App) refreshNetwork(ctx *sdk.AppCtx, network, kind, from, to string, args map[string]any) (*RefreshSummary, error) {
@@ -975,78 +1129,94 @@ func (a *App) refreshNetwork(ctx *sdk.AppCtx, network, kind, from, to string, ar
 		return nil, errors.New("platform API unavailable")
 	}
 	network = canonicalNetworkKey(network)
+	capability, ok := capabilityFor(network)
+	if !ok {
+		return nil, fmt.Errorf("unsupported affiliate network %q", network)
+	}
 	summary := &RefreshSummary{Network: network, Kind: kind, RefreshedAt: nowUTC()}
-	if kind == "offers" || kind == "all" {
+	if capability.Offers && (kind == "offers" || kind == "all") {
 		calls, err := providerOfferCalls(network, args)
 		if err != nil {
 			return nil, err
 		}
 		for _, call := range calls {
-			out := map[string]any{}
-			if err := executeProviderCall(ctx, call, &out); err != nil {
+			pages, err := executeProviderPages(ctx, call, []string{"offers", "Campaigns", "campaigns", "programs", "partnerships", "advertisers", "data", "items", "results"})
+			if err != nil {
 				return nil, err
 			}
-			offers := collectMaps(out, "offers", "Campaigns", "campaigns", "programs", "partnerships", "advertisers", "data", "items", "results")
-			for _, m := range offers {
-				in := offerInputFromMap(network, m)
-				if in.ExternalID == "" || in.MerchantName == "" {
-					continue
+			for _, page := range pages {
+				for _, m := range page.Records {
+					in := offerInputFromMap(network, m)
+					if in.ExternalID == "" || in.MerchantName == "" {
+						continue
+					}
+					offer, err := dbUpsertOffer(ctx.AppDB(), in)
+					if err != nil {
+						return nil, err
+					}
+					summary.OffersUpserted++
+					if upserted, err := upsertDefaultLinkFromOffer(ctx.AppDB(), network, offer, m); err != nil {
+						return nil, err
+					} else if upserted {
+						summary.LinksUpserted++
+					}
 				}
-				offer, err := dbUpsertOffer(ctx.AppDB(), in)
-				if err != nil {
+				if _, err := dbUpsertNetwork(ctx.AppDB(), network, displayNetworkName(network), page.Output); err != nil {
 					return nil, err
-				}
-				summary.OffersUpserted++
-				if upserted, err := upsertDefaultLinkFromOffer(ctx.AppDB(), network, offer, m); err != nil {
-					return nil, err
-				} else if upserted {
-					summary.LinksUpserted++
 				}
 			}
-			_, _ = dbUpsertNetwork(ctx.AppDB(), network, displayNetworkName(network), out)
 		}
 	}
-	if kind == "stats" || kind == "all" {
+	if capability.Stats && (kind == "stats" || kind == "all") {
 		calls, err := providerStatCalls(network, from, to, args)
 		if err != nil {
 			return nil, err
 		}
+		aggregated := map[string]StatInput{}
 		for _, call := range calls {
-			out := map[string]any{}
-			if err := executeProviderCall(ctx, call, &out); err != nil {
+			pages, err := executeProviderPages(ctx, call, []string{"stats", "Actions", "actions", "transactions", "Transactions", "rewards", "records", "data", "items", "results"})
+			if err != nil {
 				return nil, err
 			}
-			stats := collectMaps(out, "stats", "Actions", "actions", "transactions", "Transactions", "rewards", "records", "data", "items", "results")
-			aggregated := map[string]StatInput{}
-			for _, m := range stats {
-				row := statInputFromMap(network, m)
-				if row.Date == "" {
-					continue
-				}
-				if ext := firstString(m, "offer_external_id", "offerSid", "offerId", "offer_id", "external_id", "CampaignId", "campaignId", "advertiserId", "merchantGroupId", "company_key"); ext != "" && row.OfferID == 0 {
-					if o, err := dbGetOfferByExternal(ctx.AppDB(), network, ext); err == nil && o != nil {
-						row.OfferID = o.ID
+			for _, page := range pages {
+				for _, m := range page.Records {
+					row := statInputFromMap(network, m)
+					if row.Date == "" {
+						continue
 					}
+					if ext := firstString(m, "offer_external_id", "offerSid", "offerId", "offer_id", "external_id", "offer.sid", "offer.slug", "CampaignId", "campaignId", "advertiserId", "advertiser.id", "merchantGroupId", "company_key"); ext != "" && row.OfferID == 0 {
+						if o, err := dbGetOfferByExternal(ctx.AppDB(), network, ext); err == nil && o != nil {
+							row.OfferID = o.ID
+						}
+					}
+					if row.LinkID == 0 {
+						row.LinkID, err = dbFindLinkForStat(ctx.AppDB(), network, row.OfferID, m)
+						if err != nil {
+							return nil, err
+						}
+					}
+					key := fmt.Sprintf("%s\x00%s\x00%d\x00%d\x00%s", row.Date, row.NetworkKey, row.OfferID, row.LinkID, row.Currency)
+					if existing, ok := aggregated[key]; ok {
+						existing.Clicks += row.Clicks
+						existing.Conversions += row.Conversions
+						existing.RevenueCents += row.RevenueCents
+						existing.CommissionCents += row.CommissionCents
+						existing.RawJSON = row.RawJSON
+						aggregated[key] = existing
+						continue
+					}
+					aggregated[key] = row
 				}
-				key := fmt.Sprintf("%s\x00%s\x00%d\x00%d\x00%s", row.Date, row.NetworkKey, row.OfferID, row.LinkID, row.Currency)
-				if existing, ok := aggregated[key]; ok {
-					existing.Clicks += row.Clicks
-					existing.Conversions += row.Conversions
-					existing.RevenueCents += row.RevenueCents
-					existing.CommissionCents += row.CommissionCents
-					existing.RawJSON = row.RawJSON
-					aggregated[key] = existing
-					continue
-				}
-				aggregated[key] = row
-			}
-			for _, row := range aggregated {
-				if err := dbUpsertStat(ctx.AppDB(), row); err != nil {
+				if _, err := dbUpsertNetwork(ctx.AppDB(), network, displayNetworkName(network), page.Output); err != nil {
 					return nil, err
 				}
-				summary.StatsDaysUpserted++
 			}
-			_, _ = dbUpsertNetwork(ctx.AppDB(), network, displayNetworkName(network), out)
+		}
+		for _, row := range aggregated {
+			if err := dbUpsertStat(ctx.AppDB(), row); err != nil {
+				return nil, err
+			}
+			summary.StatsDaysUpserted++
 		}
 	}
 	return summary, nil
@@ -1070,7 +1240,7 @@ func upsertDefaultLinkFromOffer(db *sql.DB, network string, offer *Offer, raw ma
 		DestinationURL: destinationURL,
 		AffiliateURL:   affiliateURL,
 		Status:         "active",
-		RawJSON:        mustJSON(raw),
+		RawJSON:        mustJSON(redactSecrets(raw)),
 	})
 	if err != nil || link == nil {
 		return false, err
@@ -1181,7 +1351,10 @@ func (a *App) handleRefresh(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var args map[string]any
-	_ = json.NewDecoder(r.Body).Decode(&args)
+	if err := json.NewDecoder(r.Body).Decode(&args); err != nil {
+		http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
+		return
+	}
 	out, err := a.toolRefresh(globalCtx, args)
 	writeToolResponse(w, out, err)
 }
@@ -1197,6 +1370,7 @@ func (a *App) handleOffers(w http.ResponseWriter, r *http.Request) {
 		"network": q.Get("network"),
 		"status":  q.Get("status"),
 		"limit":   q.Get("limit"),
+		"offset":  q.Get("offset"),
 	})
 	writeToolResponse(w, out, err)
 }
@@ -1211,11 +1385,15 @@ func (a *App) handleLinks(w http.ResponseWriter, r *http.Request) {
 			"offer_id": q.Get("offer_id"),
 			"status":   q.Get("status"),
 			"limit":    q.Get("limit"),
+			"offset":   q.Get("offset"),
 		})
 		writeToolResponse(w, out, err)
 	case http.MethodPost:
 		var args map[string]any
-		_ = json.NewDecoder(r.Body).Decode(&args)
+		if err := json.NewDecoder(r.Body).Decode(&args); err != nil {
+			http.Error(w, "invalid JSON body: "+err.Error(), http.StatusBadRequest)
+			return
+		}
 		out, err := a.toolLinkCreate(globalCtx, args)
 		writeToolResponse(w, out, err)
 	default:
@@ -1243,9 +1421,101 @@ func (a *App) handleStats(w http.ResponseWriter, r *http.Request) {
 // --- provider routing + normalization --------------------------------------
 
 type providerCall struct {
-	Role  string
-	Tool  string
-	Input map[string]any
+	Role       string
+	Tool       string
+	Input      map[string]any
+	Pagination *providerPagination
+}
+
+type providerPagination struct {
+	Mode       string
+	Param      string
+	PageSize   int
+	MaxPages   int
+	Start      int
+	CursorPath string
+}
+
+type providerPage struct {
+	Output  map[string]any
+	Records []map[string]any
+}
+
+func executeProviderPages(ctx *sdk.AppCtx, call providerCall, recordKeys []string) ([]providerPage, error) {
+	maxPages := 1
+	if call.Pagination != nil {
+		maxPages = call.Pagination.MaxPages
+		if maxPages <= 0 {
+			maxPages = 100
+		}
+	}
+	input := cloneMap(call.Input)
+	pages := make([]providerPage, 0, min(maxPages, 8))
+	hasMore := false
+	for pageIndex := 0; pageIndex < maxPages; pageIndex++ {
+		out := map[string]any{}
+		pageCall := call
+		pageCall.Input = input
+		if err := executeProviderCall(ctx, pageCall, &out); err != nil {
+			return nil, err
+		}
+		records := collectMaps(out, recordKeys...)
+		pages = append(pages, providerPage{Output: out, Records: records})
+		hasMore = responseHasNext(out)
+		if call.Pagination == nil || len(records) == 0 {
+			break
+		}
+		pagination := call.Pagination
+		switch pagination.Mode {
+		case "offset":
+			if !hasMore && len(records) < pagination.PageSize {
+				return pages, nil
+			}
+			input = cloneMap(input)
+			input[pagination.Param] = pagination.Start + (pageIndex+1)*pagination.PageSize
+		case "page":
+			if !hasMore && len(records) < pagination.PageSize {
+				return pages, nil
+			}
+			input = cloneMap(input)
+			input[pagination.Param] = pagination.Start + pageIndex + 1
+		case "cursor":
+			cursor := firstString(out, pagination.CursorPath, "next_cursor", "nextCursor", "meta.next_cursor", "pagination.next_cursor")
+			if cursor == "" {
+				return pages, nil
+			}
+			input = cloneMap(input)
+			input[pagination.Param] = cursor
+		default:
+			return nil, fmt.Errorf("unsupported pagination mode %q", pagination.Mode)
+		}
+	}
+	if call.Pagination != nil && hasMore {
+		return nil, fmt.Errorf("%s.%s exceeded the %d-page safety limit", call.Role, call.Tool, maxPages)
+	}
+	return pages, nil
+}
+
+func responseHasNext(out map[string]any) bool {
+	v := firstAny(out, "next", "links.next", "meta.next", "pagination.next", "has_more", "hasMore")
+	switch x := v.(type) {
+	case bool:
+		return x
+	case string:
+		return strings.TrimSpace(x) != ""
+	case map[string]any:
+		return len(x) > 0
+	default:
+		return v != nil
+	}
+}
+
+func cloneMap(in map[string]any) map[string]any {
+	out := make(map[string]any, len(in))
+	for key, value := range in {
+		out[key] = value
+	}
+	return out
 }
 
 func providerOfferCalls(network string, args map[string]any) ([]providerCall, error) {
@@ -1256,24 +1526,15 @@ func providerOfferCalls(network string, args map[string]any) ([]providerCall, er
 		if limit <= 0 || limit > 50 {
 			limit = 50
 		}
-		pages := intArg(args, "pages", 10)
-		if pages <= 0 || pages > 20 {
-			pages = 10
-		}
-		calls := make([]providerCall, 0, pages)
-		for page := 0; page < pages; page++ {
-			calls = append(calls, providerCall{Role: "target-circle", Tool: "offers_list", Input: compactMap(map[string]any{
-				"limit":  limit,
-				"offset": page * limit,
-				"status": strArg(args, "status"),
-			})})
-		}
-		return calls, nil
+		return []providerCall{{Role: "target-circle", Tool: "offers_list", Input: compactMap(map[string]any{
+			"limit": limit, "offset": 0, "status": strArg(args, "status"),
+		}), Pagination: &providerPagination{Mode: "offset", Param: "offset", PageSize: limit, MaxPages: maxPageArg(args), Start: 0}}}, nil
 	case "impact":
 		return []providerCall{{Role: "impact", Tool: "programs_list", Input: compactMap(map[string]any{
 			"InsertionOrderStatus": argOrConfig(args, "InsertionOrderStatus", "impact_insertion_order_status", "Active"),
-			"PageSize":             intArg(args, "limit", 100),
-		})}}, nil
+			"PageSize":             boundedLimit(args, 100, 1000),
+			"Page":                 1,
+		}), Pagination: &providerPagination{Mode: "page", Param: "Page", PageSize: boundedLimit(args, 100, 1000), MaxPages: maxPageArg(args), Start: 1}}}, nil
 	case "awin":
 		publisherID := requiredArgOrConfig(args, "publisherId", "awin_publisher_id")
 		if publisherID == "" {
@@ -1293,8 +1554,9 @@ func providerOfferCalls(network string, args map[string]any) ([]providerCall, er
 			"requestor-cid":    requestorCID,
 			"advertiser-ids":   argOrConfig(args, "advertiser-ids", "cj_advertiser_ids", "joined"),
 			"keywords":         strArg(args, "keywords"),
-			"records-per-page": intArg(args, "limit", 100),
-		})}}, nil
+			"records-per-page": boundedLimit(args, 100, 100),
+			"page-number":      1,
+		}), Pagination: &providerPagination{Mode: "page", Param: "page-number", PageSize: boundedLimit(args, 100, 100), MaxPages: maxPageArg(args), Start: 1}}}, nil
 	case "amazon-associates":
 		partnerTag := requiredArgOrConfig(args, "partnerTag", "amazon_partner_tag")
 		keywords := requiredArgOrConfig(args, "keywords", "amazon_keywords")
@@ -1306,9 +1568,10 @@ func providerOfferCalls(network string, args map[string]any) ([]providerCall, er
 			"marketplace": argOrConfig(args, "marketplace", "amazon_marketplace", "www.amazon.com"),
 			"keywords":    keywords,
 			"searchIndex": argOrConfig(args, "searchIndex", "amazon_search_index", "All"),
-			"itemCount":   intArg(args, "limit", 10),
+			"itemCount":   boundedLimit(args, 10, 10),
+			"itemPage":    1,
 			"resources":   defaultAmazonResources(),
-		})}}, nil
+		}), Pagination: &providerPagination{Mode: "page", Param: "itemPage", PageSize: boundedLimit(args, 10, 10), MaxPages: maxPageArg(args), Start: 1}}}, nil
 	case "sovrn":
 		campaignID := requiredArgOrConfig(args, "campaignId", "sovrn_campaign_id")
 		if campaignID == "" {
@@ -1316,16 +1579,16 @@ func providerOfferCalls(network string, args map[string]any) ([]providerCall, er
 		}
 		return []providerCall{{Role: "sovrn", Tool: "merchants_approved", Input: compactMap(map[string]any{
 			"campaignId": toInt64(campaignID),
-			"page":       intArg(args, "page", 1),
-			"pageSize":   intArg(args, "limit", 1000),
+			"page":       1,
+			"pageSize":   boundedLimit(args, 1000, 1000),
 			"filters":    firstAny(args, "filters"),
-		})}}, nil
+		}), Pagination: &providerPagination{Mode: "page", Param: "page", PageSize: boundedLimit(args, 1000, 1000), MaxPages: maxPageArg(args), Start: 1}}}, nil
 	case "partnerstack":
 		return []providerCall{{Role: "partnerstack", Tool: "partnerships_list", Input: compactMap(map[string]any{
 			"include_offers":   true,
 			"include_archived": boolArg(args, "include_archived", false),
-			"limit":            intArg(args, "limit", 100),
-		})}}, nil
+			"limit":            boundedLimit(args, 100, 100),
+		}), Pagination: &providerPagination{Mode: "cursor", Param: "starting_after", PageSize: boundedLimit(args, 100, 100), MaxPages: maxPageArg(args), CursorPath: "next"}}}, nil
 	case "shareasale":
 		return []providerCall{{Role: "shareasale", Tool: "merchants_search", Input: compactMap(map[string]any{
 			"keyword":   strArg(args, "keyword"),
@@ -1347,28 +1610,21 @@ func providerStatCalls(network, from, to string, args map[string]any) ([]provide
 		if limit <= 0 || limit > 25 {
 			limit = 25
 		}
-		pages := intArg(args, "pages", 4)
-		if pages <= 0 || pages > 20 {
-			pages = 4
-		}
-		calls := make([]providerCall, 0, pages)
-		for page := 0; page < pages; page++ {
-			calls = append(calls, providerCall{Role: "target-circle", Tool: "transactions_list", Input: compactMap(map[string]any{
-				"savedFrom": firstNonEmpty(from, strArg(args, "savedFrom")),
-				"savedTo":   firstNonEmpty(to, strArg(args, "savedTo")),
-				"offset":    page * limit,
-				"limit":     limit,
-			})})
-		}
-		return calls, nil
+		return []providerCall{{Role: "target-circle", Tool: "transactions_list", Input: compactMap(map[string]any{
+			"savedFrom": firstNonEmpty(from, strArg(args, "savedFrom")),
+			"savedTo":   exclusiveEndDate(firstNonEmpty(to, strArg(args, "savedTo"))),
+			"offset":    0,
+			"limit":     limit,
+		}), Pagination: &providerPagination{Mode: "offset", Param: "offset", PageSize: limit, MaxPages: maxPageArg(args), Start: 0}}}, nil
 	case "impact":
 		return []providerCall{{Role: "impact", Tool: "actions_list", Input: compactMap(map[string]any{
 			"ActionDateStart": firstNonEmpty(from, strArg(args, "ActionDateStart")),
 			"ActionDateEnd":   firstNonEmpty(to, strArg(args, "ActionDateEnd")),
 			"CampaignId":      strArg(args, "CampaignId"),
 			"State":           strArg(args, "State"),
-			"PageSize":        intArg(args, "limit", 100),
-		})}}, nil
+			"PageSize":        boundedLimit(args, 100, 1000),
+			"Page":            1,
+		}), Pagination: &providerPagination{Mode: "page", Param: "Page", PageSize: boundedLimit(args, 100, 1000), MaxPages: maxPageArg(args), Start: 1}}}, nil
 	case "awin":
 		publisherID := requiredArgOrConfig(args, "publisherId", "awin_publisher_id")
 		if publisherID == "" || from == "" || to == "" {
@@ -1393,19 +1649,31 @@ func providerStatCalls(network, from, to string, args map[string]any) ([]provide
 			},
 		})}}, nil
 	case "sovrn":
-		date := firstNonEmpty(strArg(args, "clickDate"), from, time.Now().UTC().Format("2006-01-02"))
-		return []providerCall{{Role: "sovrn", Tool: "transactions_report", Input: compactMap(map[string]any{
-			"clickDate":        date,
-			"campaignIds":      strArg(args, "campaignIds"),
-			"merchantGroupIds": strArg(args, "merchantGroupIds"),
-			"programType":      strArg(args, "programType"),
-		})}}, nil
+		dates, err := inclusiveDates(firstNonEmpty(strArg(args, "clickDate"), from, time.Now().UTC().Format("2006-01-02")), firstNonEmpty(to, from))
+		if err != nil {
+			return nil, err
+		}
+		calls := make([]providerCall, 0, len(dates))
+		for _, date := range dates {
+			calls = append(calls, providerCall{Role: "sovrn", Tool: "transactions_report", Input: compactMap(map[string]any{
+				"clickDate": date, "campaignIds": strArg(args, "campaignIds"), "merchantGroupIds": strArg(args, "merchantGroupIds"), "programType": strArg(args, "programType"),
+			})})
+		}
+		return calls, nil
 	case "partnerstack":
+		minCreated := toInt64(firstAny(args, "min_created"))
+		maxCreated := toInt64(firstAny(args, "max_created"))
+		if minCreated == 0 {
+			minCreated = unixDateBoundary(from, false)
+		}
+		if maxCreated == 0 {
+			maxCreated = unixDateBoundary(to, true)
+		}
 		return []providerCall{{Role: "partnerstack", Tool: "transactions_list", Input: compactMap(map[string]any{
-			"min_created": toInt64(firstAny(args, "min_created")),
-			"max_created": toInt64(firstAny(args, "max_created")),
-			"limit":       intArg(args, "limit", 100),
-		})}}, nil
+			"min_created": minCreated,
+			"max_created": maxCreated,
+			"limit":       boundedLimit(args, 100, 100),
+		}), Pagination: &providerPagination{Mode: "cursor", Param: "starting_after", PageSize: boundedLimit(args, 100, 100), MaxPages: maxPageArg(args), CursorPath: "next"}}}, nil
 	case "shareasale":
 		return []providerCall{{Role: "shareasale", Tool: "daily_activity", Input: compactMap(map[string]any{
 			"XMLFormat": 0,
@@ -1463,19 +1731,7 @@ func providerLinkCall(network, destination string, offer *Offer, args map[string
 			},
 		})}, nil
 	case "cj-affiliate":
-		websiteID := requiredArgOrConfig(args, "website-id", "cj_website_id")
-		if websiteID == "" {
-			return providerCall{}, errors.New("cj-affiliate link creation requires website-id or cj_website_id")
-		}
-		return providerCall{Role: "cj-affiliate", Tool: "links_search", Input: compactMap(map[string]any{
-			"website-id":           websiteID,
-			"advertiser-ids":       firstNonEmpty(strArg(args, "advertiser-ids"), offerExternalID, "joined"),
-			"keywords":             firstNonEmpty(strArg(args, "keywords"), strArg(args, "campaign")),
-			"allow-deep-linking":   "true",
-			"records-per-page":     1,
-			"promotion-end-date":   strArg(args, "promotion-end-date"),
-			"promotion-start-date": strArg(args, "promotion-start-date"),
-		})}, nil
+		return providerCall{}, errors.New("cj-affiliate link creation requires manual affiliate_url because links_search cannot generate a deeplink for the requested destination")
 	case "amazon-associates":
 		partnerTag := requiredArgOrConfig(args, "partnerTag", "amazon_partner_tag")
 		if partnerTag == "" {
@@ -1534,7 +1790,7 @@ func offerInputFromMap(network string, m map[string]any) OfferInput {
 		CommissionSummary: firstNonEmpty(firstString(m, "commission_summary", "commission", "payout", "payout_summary", "commissionRange", "defaultCommissionRate", "rate"), pricingSummaryFromMap(m)),
 		CookieWindow:      firstString(m, "cookie_window", "cookieWindow", "cookie_expiration", "cookieExpiration", "cookieDuration", "tracking.cookieExpiration"),
 		TrackingDeepLink:  firstBool(m, "tracking_deeplink", "deeplinking", "tracking.deeplinking", "deepLinking", "deeplink", "AllowsDeeplinking"),
-		RawJSON:           mustJSON(m),
+		RawJSON:           mustJSON(redactSecrets(m)),
 	}
 }
 
@@ -1582,8 +1838,14 @@ func pricingSummaryFromMap(m map[string]any) string {
 
 func statInputFromMap(network string, m map[string]any) StatInput {
 	date := normalizeStatDate(firstString(m, "date", "day", "ActionDate", "eventDate", "postingDate", "transactionDate", "saved", "clickSaved", "updatedAt", "validationDate", "click.clickDate", "commission.commissionDate", "commission.updateDate", "created_at"))
+	transactionType := strings.ToLower(firstString(m, "transactionType", "transaction_type", "type"))
+	clicks := toInt64(firstAny(m, "clicks", "Clicks"))
 	conversions := toInt64(firstAny(m, "conversions", "sales", "transactions", "Actions"))
-	if conversions == 0 && firstString(m, "transactionId", "transactionHash", "commissionId") != "" {
+	if transactionType == "click" || transactionType == "4" {
+		if clicks == 0 {
+			clicks = 1
+		}
+	} else if conversions == 0 && firstString(m, "transactionId", "transactionHash", "commissionId") != "" {
 		conversions = 1
 	}
 	revenueCents := centsFromAny(firstAny(m, "revenue_cents"))
@@ -1599,12 +1861,12 @@ func statInputFromMap(network string, m map[string]any) StatInput {
 		NetworkKey:      network,
 		OfferID:         toInt64(firstAny(m, "offer_id")),
 		LinkID:          toInt64(firstAny(m, "link_id")),
-		Clicks:          toInt64(firstAny(m, "clicks", "Clicks")),
+		Clicks:          clicks,
 		Conversions:     conversions,
 		RevenueCents:    revenueCents,
 		CommissionCents: commissionCents,
 		Currency:        firstNonEmpty(firstString(m, "currency", "Currency"), "USD"),
-		RawJSON:         mustJSON(m),
+		RawJSON:         mustJSON(redactSecrets(m)),
 	}
 }
 
@@ -1741,6 +2003,72 @@ func intArg(args map[string]any, key string, def int) int {
 	return def
 }
 
+func boundedLimit(args map[string]any, def, maxValue int) int {
+	value := intArg(args, "limit", def)
+	if value <= 0 || value > maxValue {
+		return def
+	}
+	return value
+}
+
+func maxPageArg(args map[string]any) int {
+	value := intArg(args, "pages", 100)
+	if value <= 0 || value > 500 {
+		return 100
+	}
+	return value
+}
+
+func inclusiveDates(from, to string) ([]string, error) {
+	if to == "" {
+		to = from
+	}
+	start, err := time.Parse("2006-01-02", from)
+	if err != nil {
+		return nil, fmt.Errorf("invalid from date %q", from)
+	}
+	end, err := time.Parse("2006-01-02", to)
+	if err != nil {
+		return nil, fmt.Errorf("invalid to date %q", to)
+	}
+	if end.Before(start) {
+		return nil, errors.New("to date must not be before from date")
+	}
+	if end.Sub(start) > 366*24*time.Hour {
+		return nil, errors.New("date range must not exceed 366 days")
+	}
+	result := []string{}
+	for date := start; !date.After(end); date = date.AddDate(0, 0, 1) {
+		result = append(result, date.Format("2006-01-02"))
+	}
+	return result, nil
+}
+
+func exclusiveEndDate(value string) string {
+	if value == "" {
+		return ""
+	}
+	date, err := time.Parse("2006-01-02", value)
+	if err != nil {
+		return value
+	}
+	return date.AddDate(0, 0, 1).Format("2006-01-02")
+}
+
+func unixDateBoundary(value string, endOfDay bool) int64 {
+	if value == "" {
+		return 0
+	}
+	date, err := time.Parse("2006-01-02", value)
+	if err != nil {
+		return 0
+	}
+	if endOfDay {
+		date = date.AddDate(0, 0, 1).Add(-time.Second)
+	}
+	return date.Unix()
+}
+
 func boolArg(args map[string]any, key string, def bool) bool {
 	if args == nil {
 		return def
@@ -1874,8 +2202,13 @@ func findURL(v any) string {
 				return s
 			}
 		}
-		for _, item := range x {
-			if s := findURL(item); s != "" {
+		keys := make([]string, 0, len(x))
+		for key := range x {
+			keys = append(keys, key)
+		}
+		sort.Strings(keys)
+		for _, key := range keys {
+			if s := findURL(x[key]); s != "" {
 				return s
 			}
 		}
@@ -1923,7 +2256,7 @@ func centsFromAny(v any) int64 {
 		}
 		if strings.Contains(s, ".") {
 			f, _ := strconv.ParseFloat(s, 64)
-			return int64(f * 100)
+			return int64(math.Round(f * 100))
 		}
 		return toInt64(s)
 	}
@@ -1933,21 +2266,21 @@ func centsFromAny(v any) int64 {
 func moneyCentsFromAny(v any) int64 {
 	switch x := v.(type) {
 	case float64:
-		return int64(x * 100)
+		return int64(math.Round(x * 100))
 	case int:
 		return int64(x * 100)
 	case int64:
 		return x * 100
 	case json.Number:
 		f, _ := strconv.ParseFloat(x.String(), 64)
-		return int64(f * 100)
+		return int64(math.Round(f * 100))
 	case string:
 		s := strings.TrimSpace(x)
 		if s == "" {
 			return 0
 		}
 		f, _ := strconv.ParseFloat(s, 64)
-		return int64(f * 100)
+		return int64(math.Round(f * 100))
 	}
 	return 0
 }
@@ -2049,6 +2382,30 @@ func mustJSON(v any) string {
 		return "{}"
 	}
 	return string(b)
+}
+
+func redactSecrets(v any) any {
+	switch value := v.(type) {
+	case map[string]any:
+		out := make(map[string]any, len(value))
+		for key, child := range value {
+			normalized := normalizeLookupKey(key)
+			if normalized == "token" || normalized == "apitoken" || normalized == "apikey" || normalized == "accesstoken" || normalized == "refreshtoken" || normalized == "authorization" {
+				out[key] = "[REDACTED]"
+				continue
+			}
+			out[key] = redactSecrets(child)
+		}
+		return out
+	case []any:
+		out := make([]any, len(value))
+		for i, child := range value {
+			out[i] = redactSecrets(child)
+		}
+		return out
+	default:
+		return v
+	}
 }
 
 func displayNetworkName(key string) string {
