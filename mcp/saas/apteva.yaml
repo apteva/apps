@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: saas
 display_name: SaaS
-version: 0.3.1
+version: 0.3.2
 description: |
   Shared SaaS access control for Apteva apps. SaaS packages installed
   apps into sellable plans, creates customer accounts backed by Auth
@@ -141,8 +141,11 @@ provides:
       description: Fetch one SaaS account.
       requires: saas.read
     - name: saas_account_list
-      description: List SaaS accounts by customer, status, or plan.
+      description: List SaaS accounts with customer and Billing summaries; filter by account age and payment dates.
       requires: saas.read
+    - name: saas_billing_sync
+      description: Refresh SaaS Billing projections from linked Billing invoices for backfill or repair.
+      requires: saas.admin
     - name: saas_account_suspend
       description: Suspend a SaaS account and record lifecycle state.
       requires: saas.admin

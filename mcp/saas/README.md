@@ -164,3 +164,31 @@ payloads include the account, customer, plan, feature, quantity, limit,
 percentage, threshold, and previous/current state. Quotas remain scoped to a
 SaaS account (tenant); `auth_user_id` identifies its owner but does not make
 the quota user-specific.
+
+## Account and Billing Reporting
+
+`saas_account_get` and `saas_account_list` return the account's nested SaaS
+customer and a generic Billing summary. The account and customer retain their
+own `created_at` dates. Billing summaries include first and last positive
+payment dates, payment and paid-invoice counts, net totals grouped by currency,
+the latest linked invoice, and projection freshness/completeness.
+
+Account listing supports `customer_email`, `plan_key`, `status`,
+`created_before`, `created_after`, `has_paid`, `paid_since`, `paid_until`,
+`last_paid_before`, and `last_paid_after`, plus `limit` and `offset`. Date
+filters are RFC3339. For example, callers identify accounts older than two
+calendar months by calculating that boundary and passing it as
+`created_before`.
+
+Billing remains authoritative. SaaS already consumes Billing invoice lifecycle
+events; on a linked invoice event it calls `billing.invoices_get` and replaces
+only its local query projection for that invoice and its payments. Listing is
+therefore a bounded local query rather than an N+1 set of Billing calls.
+`saas_billing_sync` repairs or backfills linked invoices, and the checkout
+recovery worker incrementally backfills projections missing after an upgrade.
+`billing_sync_pending` and each summary's `data_complete` flag expose unfinished
+backfill explicitly.
+
+An `invoice.paid` event activates access only after Billing confirms that the
+invoice status is actually `paid`. Partial payments update the reporting
+projection but leave the subscription and account payment state unchanged.
