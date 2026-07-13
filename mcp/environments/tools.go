@@ -49,6 +49,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "environment_agent_spawn", Description: "Spawn a runtime agent.", InputSchema: requiredSchema("run_id"), Handler: a.toolAgentSpawn},
 		{Name: "environment_agent_send", Description: "Send a message to a runtime agent.", InputSchema: requiredSchema("run_id", "agent", "message"), Handler: a.toolAgentSend},
 		{Name: "environment_agent_control", Description: "Pause, resume, or stop a runtime agent.", InputSchema: requiredSchema("run_id", "agent", "action"), Handler: a.toolAgentControl},
+		{Name: "environment_agent_wait", Description: "Wait for a runtime agent to finish and return its normalized trace and metrics.", InputSchema: requiredSchema("run_id", "agent"), Handler: a.toolAgentWait},
 	}
 }
 
@@ -242,4 +243,20 @@ func (a *App) toolAgentControl(_ *sdk.AppCtx, args map[string]any) (any, error) 
 	}
 	err = a.svc.runtime().ControlRuntimeAgent(r.RuntimeID, str(args, "agent"), action)
 	return map[string]bool{"ok": err == nil}, err
+}
+
+func (a *App) toolAgentWait(_ *sdk.AppCtx, args map[string]any) (any, error) {
+	r, err := a.runFor(args)
+	if err != nil {
+		return nil, err
+	}
+	var req sdk.RuntimeAgentWaitRequest
+	if raw, ok := args["wait"].(map[string]any); ok {
+		if err := decodeArgs(raw, &req); err != nil {
+			return nil, err
+		}
+	} else if err := decodeArgs(args, &req); err != nil {
+		return nil, err
+	}
+	return a.svc.runtime().WaitRuntimeAgent(r.RuntimeID, str(args, "agent"), req)
 }

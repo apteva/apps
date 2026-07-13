@@ -36,6 +36,8 @@ type AgentSpec struct {
 	Directive     string                 `json:"directive,omitempty"`
 	Alias         string                 `json:"alias,omitempty"`
 	StartPaused   bool                   `json:"start_paused,omitempty"`
+	Provider      string                 `json:"provider,omitempty"`
+	Model         string                 `json:"model,omitempty"`
 }
 
 type Definition struct {

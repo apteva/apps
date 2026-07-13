@@ -125,7 +125,7 @@ func (s *service) start(environmentID, kind string, spec EnvironmentSpec) (run *
 		}
 	}
 	for i, agent := range spec.Agents {
-		_, err = s.runtime().SpawnRuntimeAgent(runtimeID, sdk.RuntimeAgentSpawnRequest{SourceAgentID: agent.SourceAgentID, Draft: agent.Draft, Directive: agent.Directive, Alias: agent.Alias, StartPaused: agent.StartPaused})
+		_, err = s.runtime().SpawnRuntimeAgent(runtimeID, sdk.RuntimeAgentSpawnRequest{SourceAgentID: agent.SourceAgentID, Draft: agent.Draft, Directive: agent.Directive, Alias: agent.Alias, StartPaused: agent.StartPaused, Provider: agent.Provider, Model: agent.Model})
 		if err != nil {
 			return run, fmt.Errorf("agent %d: %w", i, err)
 		}

@@ -1,0 +1,222 @@
+package main
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"math"
+	"strings"
+	"time"
+
+	sdk "github.com/apteva/app-sdk"
+)
+
+func (s *service) executeRun(ctx context.Context, run *Run) (err error) {
+	started := time.Now().UTC()
+	run.StartedAt = &started
+	var environmentRun *EnvironmentRun
+	defer func() {
+		if environmentRun != nil {
+			var ignored map[string]any
+			_ = s.ctx.PlatformAPI().CallAppResult("environments", "environment_run_stop", map[string]any{"id": environmentRun.ID}, &ignored)
+		}
+		if recovered := recover(); recovered != nil {
+			err = fmt.Errorf("eval runner panic: %v", recovered)
+		}
+		if err != nil {
+			run.Status, run.Error = "error", err.Error()
+			finished := time.Now().UTC()
+			run.FinishedAt = &finished
+			_ = s.db.finishRun(run)
+			s.ctx.Emit("eval.run.failed", map[string]any{"run_id": run.ID, "experiment_id": run.ExperimentID, "error": err.Error()})
+		}
+	}()
+
+	spec := map[string]any{"version": 1, "ttl_seconds": run.CaseSnapshot.TimeoutSeconds + 300, "network_mode": "block", "integration_mode": "mock"}
+	if environmentID := strings.TrimSpace(run.CaseSnapshot.EnvironmentID); environmentID != "" {
+		var definition EnvironmentDefinition
+		if err = s.ctx.PlatformAPI().CallAppResult("environments", "environment_get", map[string]any{"id": environmentID}, &definition); err != nil {
+			return fmt.Errorf("load environment: %w", err)
+		}
+		if definition.ID == "" {
+			return errors.New("environment not found")
+		}
+		spec = cloneMap(definition.Spec)
+	}
+	delete(spec, "agents")
+	var created EnvironmentRun
+	if err = s.ctx.PlatformAPI().CallAppResult("environments", "environment_run_create", map[string]any{"kind": "eval", "spec": spec}, &created); err != nil {
+		return fmt.Errorf("start environment: %w", err)
+	}
+	environmentRun = &created
+	run.EnvironmentRunID = created.ID
+
+	var spawned sdk.RuntimeAgent
+	spawnArgs := map[string]any{"run_id": created.ID, "agent": map[string]any{"source_agent_id": run.TargetSnapshot.AgentID, "alias": "main", "start_paused": true, "provider": run.TargetSnapshot.Provider, "model": run.TargetSnapshot.Model}}
+	if err = s.ctx.PlatformAPI().CallAppResult("environments", "environment_agent_spawn", spawnArgs, &spawned); err != nil {
+		return fmt.Errorf("spawn agent: %w", err)
+	}
+	var accepted map[string]any
+	if err = s.ctx.PlatformAPI().CallAppResult("environments", "environment_agent_send", map[string]any{"run_id": created.ID, "agent": "main", "thread_id": "main", "message": run.CaseSnapshot.Prompt}, &accepted); err != nil {
+		return fmt.Errorf("send task: %w", err)
+	}
+	if err = s.ctx.PlatformAPI().CallAppResult("environments", "environment_agent_control", map[string]any{"run_id": created.ID, "agent": "main", "action": "run"}, &accepted); err != nil {
+		return fmt.Errorf("start agent: %w", err)
+	}
+
+	var execution sdk.RuntimeAgentExecution
+	wait := map[string]any{"timeout_seconds": run.CaseSnapshot.TimeoutSeconds, "idle_seconds": 5, "post_tool_idle_seconds": 30, "max_turns": run.CaseSnapshot.MaxTurns}
+	if err = s.ctx.PlatformAPI().CallAppResult("environments", "environment_agent_wait", map[string]any{"run_id": created.ID, "agent": "main", "wait": wait}, &execution); err != nil {
+		return fmt.Errorf("wait for agent: %w", err)
+	}
+	run.Execution = &execution
+	if execution.Status == "failed" || execution.Status == "timeout" {
+		return fmt.Errorf("agent execution %s: %s", execution.Status, execution.Reason)
+	}
+
+	for _, assertion := range run.CaseSnapshot.Assertions {
+		input := map[string]any{"run_id": created.ID, "name": assertion.Name, "type": assertion.Type, "app": assertion.App, "tool": assertion.Tool, "input": assertion.Input, "path": assertion.Path, "equals": assertion.Equals, "method": assertion.Method, "host": assertion.Host, "min_calls": assertion.MinCalls, "agent_alias": assertion.AgentAlias, "event_type": assertion.EventType}
+		var result AssertionResult
+		if callErr := s.ctx.PlatformAPI().CallAppResult("environments", "environment_assert", input, &result); callErr != nil {
+			result = AssertionResult{Name: assertion.Name, Passed: false, Message: callErr.Error()}
+		}
+		if result.Name == "" {
+			result.Name = assertion.Name
+		}
+		run.Assertions = append(run.Assertions, result)
+	}
+
+	experiment, err := s.db.getExperiment(run.ExperimentID)
+	if err != nil || experiment == nil {
+		return errors.New("experiment disappeared")
+	}
+	if experiment.JudgeModel != "" && len(run.CaseSnapshot.Goals) > 0 {
+		verdict, judgeErr := s.judge(ctx, experiment.JudgeModel, run)
+		if judgeErr != nil {
+			return fmt.Errorf("judge: %w", judgeErr)
+		}
+		run.Judge = verdict
+		if verdict.DirectiveSuggestion != nil && strings.TrimSpace(verdict.DirectiveSuggestion.Directive) != "" {
+			suggestion := &Suggestion{ID: "suggest_" + token(10), RunID: run.ID, AgentID: run.TargetSnapshot.AgentID, Directive: verdict.DirectiveSuggestion.Directive, ExpectedETag: run.TargetSnapshot.DirectiveETag, Reason: verdict.DirectiveSuggestion.Reason, Status: "proposed", CreatedAt: time.Now().UTC()}
+			_ = s.db.saveSuggestion(suggestion)
+		}
+	}
+
+	status, correctness, judgeScore, overall := scoreRun(run.Assertions, run.Judge)
+	run.Status, run.CorrectnessScore, run.JudgeScore, run.OverallScore = status, correctness, judgeScore, overall
+	finished := time.Now().UTC()
+	run.FinishedAt = &finished
+	if err = s.db.finishRun(run); err != nil {
+		return err
+	}
+	s.ctx.Emit("eval.run.completed", map[string]any{"run_id": run.ID, "experiment_id": run.ExperimentID, "status": status, "score": overall})
+	if experiment.TriggerType == "schedule" {
+		updated, _ := s.db.getExperiment(run.ExperimentID)
+		if updated != nil && updated.Status == "completed" && updated.Summary != nil {
+			suite, _ := s.db.getSuite(updated.SuiteID)
+			if suite != nil && updated.Summary.PassRate < suite.RequiredPassRate {
+				s.ctx.Emit("eval.regression.detected", map[string]any{"suite_id": suite.ID, "experiment_id": updated.ID, "pass_rate": updated.Summary.PassRate, "required_pass_rate": suite.RequiredPassRate})
+			}
+		}
+	}
+	return nil
+}
+
+func (s *service) judge(ctx context.Context, model string, run *Run) (*JudgeVerdict, error) {
+	payload := map[string]any{"task": run.CaseSnapshot.Prompt, "goals": run.CaseSnapshot.Goals, "agent_directive": run.TargetSnapshot.Directive, "trace": run.Execution.Trace, "deterministic_assertions": run.Assertions}
+	request := map[string]any{"model": model, "temperature": 0, "max_tokens": 2000, "messages": []map[string]string{{"role": "system", "content": judgePrompt}, {"role": "user", "content": encodeJSON(payload)}}, "subject_type": "app", "subject_id": "evals"}
+	var response struct {
+		Model   string `json:"model"`
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+		Usage map[string]any `json:"usage"`
+	}
+	if err := s.ctx.PlatformAPI().CallAppResult("llm", "llm_chat_complete", request, &response); err != nil {
+		return nil, err
+	}
+	if len(response.Choices) == 0 {
+		return nil, errors.New("judge returned no choices")
+	}
+	verdict, err := parseJudge(response.Choices[0].Message.Content)
+	if err != nil {
+		return nil, err
+	}
+	verdict.Model, verdict.Usage = response.Model, response.Usage
+	return verdict, nil
+}
+
+const judgePrompt = `You grade an autonomous agent execution. Use only evidence in the supplied trace and deterministic assertion results. Grade each goal independently. Return one JSON object with: passed (boolean), score (0-100), reasoning (concise string), per_goal ([{goal,passed,why}]), and directive_suggestion (null or {directive,reason}). A pass requires every goal and deterministic assertion to pass. Suggest a complete replacement directive only when a durable instruction would prevent this failure; otherwise return null. Return JSON only.`
+
+func parseJudge(raw string) (*JudgeVerdict, error) {
+	raw = strings.TrimSpace(raw)
+	start, end := strings.Index(raw, "{"), strings.LastIndex(raw, "}")
+	if start < 0 || end < start {
+		return nil, errors.New("judge did not return JSON")
+	}
+	var verdict JudgeVerdict
+	if err := json.Unmarshal([]byte(raw[start:end+1]), &verdict); err != nil {
+		return nil, err
+	}
+	verdict.Score = math.Max(0, math.Min(100, verdict.Score))
+	return &verdict, nil
+}
+
+func scoreRun(assertions []AssertionResult, judge *JudgeVerdict) (string, *float64, *float64, *float64) {
+	passed := true
+	var correctness *float64
+	if len(assertions) > 0 {
+		count := 0
+		for _, result := range assertions {
+			if result.Passed {
+				count++
+			} else {
+				passed = false
+			}
+		}
+		value := 100 * float64(count) / float64(len(assertions))
+		correctness = &value
+	}
+	var judgeScore *float64
+	if judge != nil {
+		value := judge.Score
+		judgeScore = &value
+		if !judge.Passed {
+			passed = false
+		}
+	}
+	if correctness == nil && judgeScore == nil {
+		value := 0.0
+		return "error", nil, nil, &value
+	}
+	overall := 0.0
+	switch {
+	case correctness != nil && judgeScore != nil:
+		overall = .7**correctness + .3**judgeScore
+	case correctness != nil:
+		overall = *correctness
+	default:
+		overall = *judgeScore
+	}
+	if correctness != nil && *correctness < 100 && overall > 49 {
+		overall = 49
+	}
+	status := "fail"
+	if passed {
+		status = "pass"
+	}
+	return status, correctness, judgeScore, &overall
+}
+
+func cloneMap(value map[string]any) map[string]any {
+	raw, _ := json.Marshal(value)
+	var cloned map[string]any
+	_ = json.Unmarshal(raw, &cloned)
+	if cloned == nil {
+		cloned = map[string]any{}
+	}
+	return cloned
+}

@@ -1,4 +1,4 @@
-module github.com/apteva/apps/mcp/environments
+module github.com/apteva/apps/mcp/evals
 
 go 1.25.0
 

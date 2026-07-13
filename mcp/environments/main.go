@@ -15,7 +15,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: environments
 display_name: Environments
-version: 0.1.2
+version: 0.1.3
 description: Isolated test environments built from project apps, fake or selected connections, deterministic seed plans, agents, edge policies, and snapshots.
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/environments
@@ -48,6 +48,7 @@ provides:
     - { name: environment_agent_spawn, description: "Spawn an agent inside a running environment." }
     - { name: environment_agent_send, description: "Send a message to a runtime agent." }
     - { name: environment_agent_control, description: "Pause, resume, or stop a runtime agent." }
+    - { name: environment_agent_wait, description: "Wait for a runtime agent and return its normalized trace and metrics." }
   publishes:
     - { name: environment.created, description: "An environment definition was created." }
     - { name: environment.started, description: "An environment runtime is running." }
@@ -59,7 +60,7 @@ provides:
   workers: [{ name: reconcile, schedule: "@every 15s" }]
 runtime:
   kind: source
-  source: { repo: github.com/apteva/apps, ref: environments/v0.1.2, entry: mcp/environments }
+  source: { repo: github.com/apteva/apps, ref: environments/v0.1.3, entry: mcp/environments }
   port: 8080
   health_check: /health
 db: { driver: sqlite, path: /data/environments.db, migrations: migrations/ }
