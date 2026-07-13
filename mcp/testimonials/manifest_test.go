@@ -3,6 +3,7 @@ package main
 import (
 	"os"
 	"reflect"
+	"strings"
 	"testing"
 
 	sdk "github.com/apteva/app-sdk"
@@ -43,8 +44,22 @@ func TestEmbeddedManifestMatchesReleaseManifest(t *testing.T) {
 	if !reflect.DeepEqual(external, embedded) {
 		t.Fatal("embedded manifest differs from apteva.yaml")
 	}
-	if external.Version != "0.1.1" {
-		t.Fatalf("version = %q, want 0.1.1", external.Version)
+	if external.Version != "0.1.2" {
+		t.Fatalf("version = %q, want 0.1.2", external.Version)
+	}
+}
+
+func TestPanelUsesProductionJSXRuntime(t *testing.T) {
+	bundle, err := os.ReadFile("ui/TestimonialsPanel.mjs")
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := string(bundle)
+	if strings.Contains(source, "react/jsx-dev-runtime") || strings.Contains(source, "jsxDEV") {
+		t.Fatal("panel bundle uses the development JSX runtime")
+	}
+	if !strings.Contains(source, "react/jsx-runtime") {
+		t.Fatal("panel bundle does not import the production JSX runtime")
 	}
 }
 

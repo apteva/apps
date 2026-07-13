@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: testimonials
 display_name: Testimonials
-version: 0.1.1
+version: 0.1.2
 description: |
   Lightweight customer proof store for Apteva. Keep text testimonials,
   reviews, ratings, attribution, consent, publication status, and an
