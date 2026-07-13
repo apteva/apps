@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: saas
 display_name: SaaS
-version: 0.3.0
+version: 0.3.1
 description: |
   Shared SaaS access control for Apteva apps. SaaS packages installed
   apps into sellable plans, creates customer accounts backed by Auth
@@ -66,6 +66,31 @@ provides:
       description: Start customer checkouts using configured SaaS plans.
     - name: saas.admin
       description: Configure plans and fulfillment, manage accounts, and record administrative payments.
+  publishes:
+    - name: saas.quota.approaching
+      description: Account usage entered the configured warning range below a plan quota.
+      payload: &quota_event_payload
+        account_id: string
+        customer_id: integer
+        auth_org_id: integer
+        auth_user_id: integer
+        plan_key: string
+        feature_key: string
+        quantity: integer
+        limit: integer
+        percentage: number
+        threshold_percent: integer
+        previous_state: string
+        state: string
+    - name: saas.quota.reached
+      description: Account usage reached a plan quota exactly.
+      payload: *quota_event_payload
+    - name: saas.quota.exceeded
+      description: Account usage exceeded a plan quota.
+      payload: *quota_event_payload
+    - name: saas.quota.recovered
+      description: Account usage moved down from its previous quota state.
+      payload: *quota_event_payload
   mcp_tools:
     - name: saas_plan_list
       description: List SaaS plans and their features, limits, and usage sources.
