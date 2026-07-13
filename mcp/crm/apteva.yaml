@@ -2,11 +2,11 @@ schema: apteva-app/v1
 
 name: crm
 display_name: CRM
-version: 0.8.20
+version: 0.8.21
 description: |
   Contacts store for Apteva agents and human teams. Multi-value channels
   (emails, phones, social), typed custom attributes with provenance,
-  append-only activity log, soft-delete + merge. Agents read/write via
+  append-only activity log, opportunities/pipelines, soft-delete + merge. Agents read/write via
   MCP tools (find-or-create, search, log activity, set attribute, merge);
   the dashboard panel renders the same data with a structured detail view.
 
@@ -76,11 +76,29 @@ provides:
     - name: contacts_list_conversations
       description: List a contact's recent conversations (each with status + priority); optional status filter.
     - name: contacts_get_conversation
-      description: Fetch one conversation with its full activity chain.
+      description: Fetch one conversation with a paged recent activity chain and Messaging delivery state.
     - name: contacts_set_conversation_status
       description: Set a conversation's workflow status (open/pending/closed/spam) and/or priority (low/normal/high/urgent). Spam marks the contact and best-effort adds a Messaging suppression for the sender or email domain.
     - name: conversations_inbox
       description: Cross-contact triage queue — open conversations across all contacts, newest first; supports channel/from/to/list/tag filters and paging.
+    - name: pipelines_list
+      description: List CRM sales pipelines and allowed stages.
+    - name: pipeline_create
+      description: Create a CRM sales pipeline with ordered stages.
+    - name: pipeline_stage_create
+      description: Create a stage in a pipeline.
+    - name: pipeline_stage_update
+      description: Update a pipeline stage.
+    - name: pipeline_stage_archive
+      description: Archive a pipeline stage.
+    - name: opportunities_create
+      description: Create a pipeline-tracked opportunity for a contact.
+    - name: opportunities_update
+      description: Update an opportunity or move it between stages.
+    - name: opportunities_search
+      description: Search opportunities by pipeline, stage, contact, status, offer, sender, list, or tag.
+    - name: opportunities_get
+      description: Fetch one opportunity with contact context and stage history.
     # Inbound routing rules — recipient/sender match -> add to list / tag.
     - name: routing_rules_create
       description: Create an inbound routing rule (match recipient and/or sender -> add_to_list / add_tag).
@@ -223,6 +241,60 @@ provides:
       payload:
         id: integer
         count: integer
+    - name: pipeline.created
+      description: A sales pipeline was created.
+      payload:
+        pipeline_id: integer
+    - name: pipeline.stage.created
+      description: A stage was added to a sales pipeline.
+      payload:
+        pipeline_id: integer
+        stage_id: integer
+    - name: pipeline.stage.updated
+      description: A pipeline stage was updated or archived.
+      payload:
+        pipeline_id: integer
+        stage_id: integer
+        archived: boolean
+    - name: opportunity.created
+      description: An opportunity was created for a contact.
+      payload:
+        opportunity_id: integer
+        contact_id: integer
+        pipeline_id: integer
+        stage_id: integer
+        status: string
+    - name: opportunity.updated
+      description: An opportunity was updated.
+      payload:
+        opportunity_id: integer
+        contact_id: integer
+        pipeline_id: integer
+        stage_id: integer
+        status: string
+    - name: opportunity.stage.changed
+      description: An opportunity moved to another pipeline stage.
+      payload:
+        opportunity_id: integer
+        contact_id: integer
+        previous_stage_id: integer
+        stage_id: integer
+    - name: opportunity.status.changed
+      description: An opportunity changed status.
+      payload:
+        opportunity_id: integer
+        contact_id: integer
+        status: string
+    - name: opportunity.won
+      description: An opportunity was marked won.
+      payload:
+        opportunity_id: integer
+        contact_id: integer
+    - name: opportunity.lost
+      description: An opportunity was marked lost.
+      payload:
+        opportunity_id: integer
+        contact_id: integer
 
 runtime:
   kind: source

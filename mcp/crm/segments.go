@@ -955,7 +955,7 @@ func (a *App) handleHTTPSegmentsCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body map[string]any
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	if err := decodeJSONBody(w, r, &body); err != nil {
 		httpErr(w, http.StatusBadRequest, "invalid json")
 		return
 	}
@@ -1005,7 +1005,7 @@ func (a *App) handleHTTPSegmentUpdate(w http.ResponseWriter, r *http.Request, id
 		return
 	}
 	var patch map[string]any
-	if err := json.NewDecoder(r.Body).Decode(&patch); err != nil {
+	if err := decodeJSONBody(w, r, &patch); err != nil {
 		httpErr(w, http.StatusBadRequest, "invalid json")
 		return
 	}

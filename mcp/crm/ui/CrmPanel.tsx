@@ -295,7 +295,7 @@ function extractPossibleMatchIds(activities: Activity[]): string[] {
   return [];
 }
 
-type Tab = "contacts" | "inbox" | "lists" | "segments" | "settings";
+type Tab = "contacts" | "inbox" | "opportunities" | "lists" | "segments" | "settings";
 
 interface List {
   id: number;
@@ -333,6 +333,53 @@ interface Segment {
   cached_count?: number;
   cached_at?: string;
   archived_at?: string;
+}
+
+interface PipelineStage {
+  id: number;
+  pipeline_id: number;
+  name: string;
+  position: number;
+  category: "open" | "won" | "lost";
+  probability?: number;
+  archived_at?: string;
+}
+
+interface Pipeline {
+  id: number;
+  name: string;
+  description?: string;
+  is_default?: boolean;
+  archived_at?: string;
+  stages?: PipelineStage[];
+}
+
+interface Opportunity {
+  id: number;
+  contact_id: number;
+  pipeline_id: number;
+  stage_id: number;
+  title: string;
+  status: "open" | "won" | "lost";
+  value?: number;
+  currency?: string;
+  offer_key?: string;
+  offer_name?: string;
+  source?: string;
+  source_site?: string;
+  sender_identity?: string;
+  owner?: string;
+  expected_close_date?: string;
+  closed_at?: string;
+  lost_reason?: string;
+  pipeline_name?: string;
+  stage_name?: string;
+  stage_category?: string;
+  contact_name?: string;
+  contact_email?: string;
+  contact_phone?: string;
+  updated_at?: string;
+  created_at?: string;
 }
 
 // ─── Contact filters ──────────────────────────────────────────────
@@ -444,6 +491,11 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
   const [segments, setSegments] = useState<Segment[]>([]);
   const [editSegmentId, setEditSegmentId] = useState<number | "new" | null>(null);
   const [segmentPreview, setSegmentPreview] = useState<{ id: number; contacts: Contact[]; total: number } | null>(null);
+  const [pipelines, setPipelines] = useState<Pipeline[]>([]);
+  const [opportunities, setOpportunities] = useState<Opportunity[]>([]);
+  const [contactOpportunities, setContactOpportunities] = useState<Opportunity[]>([]);
+  const [opportunityStatusFilter, setOpportunityStatusFilter] = useState("open");
+  const [newOpportunityOpen, setNewOpportunityOpen] = useState(false);
 
   // Auto-dismiss the error toast after 5s. Manual dismiss via the
   // X button is also wired up below; this prevents stale errors
@@ -533,6 +585,43 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
     }
   }, [api]);
 
+  const loadPipelines = useCallback(async () => {
+    try {
+      const r = await api<{ pipelines?: Pipeline[] }>("GET", "/pipelines");
+      setPipelines(r.pipelines || []);
+    } catch {
+      setPipelines([]);
+    }
+  }, [api]);
+
+  const loadOpportunities = useCallback(async () => {
+    try {
+      const r = await api<{ opportunities?: Opportunity[] }>(
+        "GET",
+        "/opportunities",
+        undefined,
+        { status: opportunityStatusFilter, limit: "200" },
+      );
+      setOpportunities(r.opportunities || []);
+    } catch {
+      setOpportunities([]);
+    }
+  }, [api, opportunityStatusFilter]);
+
+  const loadContactOpportunities = useCallback(async (id: string | number) => {
+    try {
+      const r = await api<{ opportunities?: Opportunity[] }>(
+        "GET",
+        `/contacts/${id}/opportunities`,
+        undefined,
+        { status: "all" },
+      );
+      setContactOpportunities(r.opportunities || []);
+    } catch {
+      setContactOpportunities([]);
+    }
+  }, [api]);
+
   // Turn the active filter set into a saved Segment (reuses the segment
   // engine + tab). Returns the created name on success.
   const saveFiltersAsSegment = useCallback(async (name: string) => {
@@ -547,6 +636,8 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
   useEffect(() => { loadAttrDefs(); }, [loadAttrDefs]);
   useEffect(() => { loadLists(); }, [loadLists]);
   useEffect(() => { loadSegments(); }, [loadSegments]);
+  useEffect(() => { loadPipelines(); }, [loadPipelines]);
+  useEffect(() => { loadOpportunities(); }, [loadOpportunities]);
   useEffect(() => {
     if (listFilterId && !lists.some((l) => !l.archived_at && String(l.id) === listFilterId)) {
       setListFilterId("");
@@ -623,6 +714,19 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
     ) {
       loadSegments();
     }
+    if (ev.topic.startsWith("pipeline.")) {
+      loadPipelines();
+      loadOpportunities();
+    }
+    if (ev.topic.startsWith("opportunity.")) {
+      loadOpportunities();
+      if (detail) {
+        const data = (ev.data || {}) as { contact_id?: number };
+        if (String(data.contact_id) === String(detail.id)) {
+          loadContactOpportunities(detail.id);
+        }
+      }
+    }
   });
 
   const loadContactLists = useCallback(async (id: string | number) => {
@@ -656,18 +760,22 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
     setActivities([]);
     setConversations([]);
     setContactLists([]);
+    setContactOpportunities([]);
     setEdits({});
     try {
-      const [c, a, conv, ls] = await Promise.all([
+      const [c, a, conv, ls, opps] = await Promise.all([
         api<{ contact: Contact }>("GET", `/contacts/${id}`),
         api<{ activities?: Activity[] }>("GET", `/contacts/${id}/activities`),
         api<{ conversations?: Conversation[] }>("GET", `/contacts/${id}/conversations`),
         api<{ lists?: List[] }>("GET", `/contacts/${id}/lists`).catch(() => ({ lists: [] })),
+        api<{ opportunities?: Opportunity[] }>("GET", `/contacts/${id}/opportunities`, undefined, { status: "all" })
+          .catch(() => ({ opportunities: [] })),
       ]);
       setDetail(c.contact);
       setActivities(a.activities || []);
       setConversations(conv.conversations || []);
       setContactLists(ls.lists || []);
+      setContactOpportunities(opps.opportunities || []);
     } catch (e) {
       setStatus("Detail error: " + (e as Error).message);
     }
@@ -821,6 +929,40 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
       setSegmentPreview({ id: s.id, contacts: r.contacts || [], total: r.count || 0 });
     } catch (e) {
       setErrorToast("Preview failed: " + (e as Error).message);
+    }
+  };
+
+  const handleCreateOpportunity = async (draft: Partial<Opportunity>) => {
+    try {
+      const r = await api<{ opportunity: Opportunity }>("POST", "/opportunities", draft);
+      await Promise.all([
+        loadOpportunities(),
+        detail ? loadContactOpportunities(detail.id) : Promise.resolve(),
+      ]);
+      setNewOpportunityOpen(false);
+      if (detail && String(r.opportunity.contact_id) === String(detail.id)) {
+        setContactOpportunities((prev) => [
+          r.opportunity,
+          ...prev.filter((o) => o.id !== r.opportunity.id),
+        ]);
+      }
+    } catch (e) {
+      setErrorToast("Create opportunity failed: " + (e as Error).message);
+    }
+  };
+
+  const handleMoveOpportunity = async (
+    opportunity: Opportunity,
+    patch: Partial<Opportunity> & { note?: string },
+  ) => {
+    try {
+      await api("PATCH", `/opportunities/${opportunity.id}`, patch);
+      await Promise.all([
+        loadOpportunities(),
+        detail ? loadContactOpportunities(detail.id) : Promise.resolve(),
+      ]);
+    } catch (e) {
+      setErrorToast("Opportunity update failed: " + (e as Error).message);
     }
   };
 
@@ -1053,6 +1195,7 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
       <nav className="flex gap-1 border-b border-border px-3 pt-2 text-xs">
         <TabButton active={tab === "contacts"} onClick={() => setTab("contacts")}>Contacts</TabButton>
         <TabButton active={tab === "inbox"} onClick={() => setTab("inbox")}>Inbox</TabButton>
+        <TabButton active={tab === "opportunities"} onClick={() => setTab("opportunities")}>Opportunities</TabButton>
         <TabButton active={tab === "lists"} onClick={() => setTab("lists")}>Lists</TabButton>
         <TabButton active={tab === "segments"} onClick={() => setTab("segments")}>Segments</TabButton>
         <TabButton active={tab === "settings"} onClick={() => setTab("settings")}>Settings</TabButton>
@@ -1216,6 +1359,12 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
                     onSet={handleSetAttribute}
                   />
 
+                  <ContactOpportunitiesSection
+                    opportunities={contactOpportunities}
+                    pipelines={pipelines}
+                    onCreate={() => setNewOpportunityOpen(true)}
+                    onMove={handleMoveOpportunity}
+                  />
 
                   <section>
                     <div className="flex items-center justify-between mb-2">
@@ -1292,6 +1441,16 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
               subject: conversation.subject,
               replyToActivityId: activity.id,
             }, contact, afterSend)}
+          />
+        ) : tab === "opportunities" ? (
+          <OpportunitiesTab
+            opportunities={opportunities}
+            pipelines={pipelines}
+            statusFilter={opportunityStatusFilter}
+            onStatusFilter={setOpportunityStatusFilter}
+            onRefresh={() => { loadPipelines(); loadOpportunities(); }}
+            onMove={handleMoveOpportunity}
+            onOpenContact={(id) => { setTab("contacts"); selectContact(String(id)); }}
           />
         ) : tab === "lists" ? (
           <ListsTab
@@ -1401,6 +1560,15 @@ export default function CrmPanel({ projectId, installId }: NativePanelProps) {
           segments={segments}
           onCancel={() => setEditSegmentId(null)}
           onSubmit={(patch) => handleSaveSegment(editSegmentId, patch)}
+        />
+      )}
+
+      {newOpportunityOpen && detail && (
+        <OpportunityEditorModal
+          contact={detail}
+          pipelines={pipelines}
+          onCancel={() => setNewOpportunityOpen(false)}
+          onSubmit={(draft) => handleCreateOpportunity({ ...draft, contact_id: Number(detail.id) })}
         />
       )}
 
@@ -1649,7 +1817,7 @@ function ConversationStatusControl({
   busy,
 }: {
   group: Extract<Group, { kind: "conversation" }>;
-  onSetStatus: (conversationId: string, patch: { status?: string; priority?: string }) => void;
+  onSetStatus: (conversationId: string, patch: { status?: string; priority?: string; spam_scope?: string; force?: boolean }) => void;
   busy: boolean;
 }) {
   const cid = group.conversationId;
@@ -2081,6 +2249,292 @@ function renderTemplatePreview(body: string, vars: Record<string, string>): stri
   return body.replace(/\{\{\s*([^{}\s]+)\s*\}\}/g, (_, key: string) => vars[key]?.trim() || `{{${key}}}`);
 }
 
+// ─── Opportunities ────────────────────────────────────────────────
+
+function defaultPipeline(pipelines: Pipeline[]): Pipeline | null {
+  return pipelines.find((p) => p.is_default && !p.archived_at)
+    || pipelines.find((p) => !p.archived_at)
+    || null;
+}
+
+function activeStages(pipeline: Pipeline | null | undefined): PipelineStage[] {
+  return (pipeline?.stages || [])
+    .filter((stage) => !stage.archived_at)
+    .sort((a, b) => a.position - b.position || a.id - b.id);
+}
+
+function formatMoney(value?: number, currency?: string): string {
+  if (typeof value !== "number") return "";
+  try {
+    return new Intl.NumberFormat(undefined, {
+      style: "currency",
+      currency: currency || "USD",
+      maximumFractionDigits: 0,
+    }).format(value);
+  } catch {
+    return `${value} ${currency || "USD"}`;
+  }
+}
+
+function opportunityStatusStyle(status: string): string {
+  if (status === "won") return "bg-accent/10 text-accent";
+  if (status === "lost") return "bg-red/10 text-red";
+  return "bg-border text-text-muted";
+}
+
+function OpportunityRow({ opportunity, stages, onMove, onOpenContact }: {
+  opportunity: Opportunity;
+  stages: PipelineStage[];
+  onMove: (opportunity: Opportunity, patch: Partial<Opportunity> & { note?: string }) => void;
+  onOpenContact?: (contactId: number) => void;
+}) {
+  return (
+    <li className="border-b border-border px-3 py-2 last:border-b-0">
+      <div className="flex items-start gap-2">
+        <div className="min-w-0 flex-1">
+          <div className="text-sm text-text font-medium truncate">{opportunity.title}</div>
+          <div className="text-xs text-text-muted truncate">
+            {opportunity.contact_name || opportunity.contact_email || `Contact #${opportunity.contact_id}`}
+          </div>
+        </div>
+        <span className={`text-[10px] px-1.5 py-0.5 rounded ${opportunityStatusStyle(opportunity.status)}`}>
+          {opportunity.status}
+        </span>
+      </div>
+      <div className="mt-2 flex items-center gap-2">
+        <select
+          value={String(opportunity.stage_id)}
+          onChange={(e) => onMove(opportunity, {
+            stage_id: Number(e.target.value),
+            note: "Stage changed from CRM panel",
+          })}
+          className="min-w-0 flex-1 bg-bg-input border border-border rounded px-1.5 py-0.5 text-xs"
+        >
+          {stages.map((stage) => (
+            <option key={stage.id} value={String(stage.id)}>{stage.name}</option>
+          ))}
+        </select>
+        {formatMoney(opportunity.value, opportunity.currency) && (
+          <span className="text-xs text-text-dim">{formatMoney(opportunity.value, opportunity.currency)}</span>
+        )}
+        {onOpenContact && (
+          <button
+            type="button"
+            onClick={() => onOpenContact(opportunity.contact_id)}
+            className="text-xs px-2 py-0.5 border border-border rounded hover:bg-bg-input"
+          >Contact</button>
+        )}
+      </div>
+    </li>
+  );
+}
+
+function ContactOpportunitiesSection({ opportunities, pipelines, onCreate, onMove }: {
+  opportunities: Opportunity[];
+  pipelines: Pipeline[];
+  onCreate: () => void;
+  onMove: (opportunity: Opportunity, patch: Partial<Opportunity> & { note?: string }) => void;
+}) {
+  const stagesByPipeline = useMemo(() => {
+    const out = new Map<number, PipelineStage[]>();
+    pipelines.forEach((pipeline) => out.set(pipeline.id, activeStages(pipeline)));
+    return out;
+  }, [pipelines]);
+  return (
+    <section>
+      <div className="flex items-center justify-between mb-2">
+        <h2 className="text-xs uppercase tracking-wide text-text-dim">Opportunities</h2>
+        <button
+          type="button"
+          onClick={onCreate}
+          className="text-xs px-2 py-1 border border-accent text-accent rounded hover:bg-accent hover:text-bg"
+        >New opportunity</button>
+      </div>
+      {opportunities.length === 0 ? (
+        <p className="text-text-muted text-sm">No opportunities yet.</p>
+      ) : (
+        <ul className="border border-border rounded">
+          {opportunities.map((opportunity) => (
+            <OpportunityRow
+              key={opportunity.id}
+              opportunity={opportunity}
+              stages={stagesByPipeline.get(opportunity.pipeline_id) || []}
+              onMove={onMove}
+            />
+          ))}
+        </ul>
+      )}
+    </section>
+  );
+}
+
+function OpportunitiesTab({ opportunities, pipelines, statusFilter, onStatusFilter, onRefresh, onMove, onOpenContact }: {
+  opportunities: Opportunity[];
+  pipelines: Pipeline[];
+  statusFilter: string;
+  onStatusFilter: (value: string) => void;
+  onRefresh: () => void;
+  onMove: (opportunity: Opportunity, patch: Partial<Opportunity> & { note?: string }) => void;
+  onOpenContact: (contactId: number) => void;
+}) {
+  const pipeline = defaultPipeline(pipelines);
+  const stages = activeStages(pipeline);
+  const byStage = useMemo(() => {
+    const out = new Map<number, Opportunity[]>();
+    stages.forEach((stage) => out.set(stage.id, []));
+    opportunities.forEach((opportunity) => {
+      const rows = out.get(opportunity.stage_id) || [];
+      rows.push(opportunity);
+      out.set(opportunity.stage_id, rows);
+    });
+    return out;
+  }, [opportunities, stages]);
+  return (
+    <div className="h-full flex flex-col">
+      <header className="p-3 border-b border-border flex items-center gap-2">
+        <div className="min-w-0 flex-1">
+          <h1 className="text-sm text-text font-medium">Opportunities</h1>
+          <p className="text-xs text-text-muted truncate">
+            {pipeline?.name || "No pipeline"} · {opportunities.length} shown
+          </p>
+        </div>
+        <select
+          value={statusFilter}
+          onChange={(e) => onStatusFilter(e.target.value)}
+          className="bg-bg-input border border-border rounded px-2 py-1 text-xs"
+        >
+          <option value="open">Open</option>
+          <option value="won">Won</option>
+          <option value="lost">Lost</option>
+          <option value="all">All</option>
+        </select>
+        <button type="button" onClick={onRefresh} className="text-xs px-2 py-1 border border-border rounded hover:bg-bg-input">
+          Refresh
+        </button>
+      </header>
+      <div className="flex-1 overflow-auto p-4">
+        {stages.length === 0 ? (
+          <p className="text-text-muted text-sm">No pipeline stages.</p>
+        ) : (
+          <div className="grid gap-3" style={{ gridTemplateColumns: `repeat(${Math.min(stages.length, 7)}, minmax(220px, 1fr))` }}>
+            {stages.map((stage) => {
+              const rows = byStage.get(stage.id) || [];
+              return (
+                <section key={stage.id} className="min-w-0">
+                  <div className="flex items-center gap-2 mb-2">
+                    <h2 className="text-xs uppercase tracking-wide text-text-dim truncate flex-1">{stage.name}</h2>
+                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-border text-text-muted">{rows.length}</span>
+                  </div>
+                  <ul className="border border-border rounded">
+                    {rows.length === 0 ? (
+                      <li className="p-3 text-xs text-text-dim">No opportunities.</li>
+                    ) : rows.map((opportunity) => (
+                      <OpportunityRow
+                        key={opportunity.id}
+                        opportunity={opportunity}
+                        stages={stages}
+                        onMove={onMove}
+                        onOpenContact={onOpenContact}
+                      />
+                    ))}
+                  </ul>
+                </section>
+              );
+            })}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function OpportunityEditorModal({ contact, pipelines, onCancel, onSubmit }: {
+  contact: Contact;
+  pipelines: Pipeline[];
+  onCancel: () => void;
+  onSubmit: (draft: Partial<Opportunity>) => void | Promise<void>;
+}) {
+  const pipeline = defaultPipeline(pipelines);
+  const stages = activeStages(pipeline);
+  const [title, setTitle] = useState("");
+  const [stageId, setStageId] = useState(stages[0]?.id ? String(stages[0].id) : "");
+  const [offerName, setOfferName] = useState("");
+  const [offerKey, setOfferKey] = useState("");
+  const [senderIdentity, setSenderIdentity] = useState("");
+  const [sourceSite, setSourceSite] = useState("");
+  const [value, setValue] = useState("");
+  const [currency, setCurrency] = useState("USD");
+  const [busy, setBusy] = useState(false);
+
+  useEffect(() => {
+    if (!stageId && stages[0]?.id) setStageId(String(stages[0].id));
+  }, [stageId, stages]);
+
+  const submit = async () => {
+    if (!pipeline || !stageId) return;
+    setBusy(true);
+    try {
+      await onSubmit({
+        pipeline_id: pipeline.id,
+        stage_id: Number(stageId),
+        title: title.trim() || `${offerName.trim() || "Opportunity"} for ${displayName(contact)}`,
+        offer_name: offerName.trim() || undefined,
+        offer_key: offerKey.trim() || undefined,
+        sender_identity: senderIdentity.trim() || undefined,
+        source_site: sourceSite.trim() || undefined,
+        value: value.trim() ? Number(value) : undefined,
+        currency: currency.trim().toUpperCase() || undefined,
+      });
+    } finally {
+      setBusy(false);
+    }
+  };
+  const fieldClass = "bg-bg-input border border-border rounded px-2 py-1 text-sm";
+  return (
+    <ModalShell
+      title={`New opportunity · ${displayName(contact)}`}
+      onCancel={onCancel}
+      footer={
+        <>
+          <button
+            type="button"
+            onClick={submit}
+            disabled={busy || !pipeline || !stageId}
+            className="px-3 py-1 text-sm border border-accent text-accent rounded hover:bg-accent hover:text-bg disabled:opacity-50"
+          >{busy ? "Creating…" : "Create"}</button>
+          <button type="button" onClick={onCancel} disabled={busy} className="px-3 py-1 text-sm border border-border rounded hover:bg-bg-input disabled:opacity-50">
+            Cancel
+          </button>
+        </>
+      }
+    >
+      <div className="grid grid-cols-[120px_1fr] gap-2 text-sm">
+        <label className="text-text-muted self-center">Pipeline</label>
+        <div className="text-text self-center">{pipeline?.name || "No pipeline"}</div>
+        <label className="text-text-muted self-center">Stage</label>
+        <select value={stageId} onChange={(e) => setStageId(e.target.value)} className={fieldClass}>
+          {stages.map((stage) => <option key={stage.id} value={String(stage.id)}>{stage.name}</option>)}
+        </select>
+        <label className="text-text-muted self-center">Title</label>
+        <input value={title} onChange={(e) => setTitle(e.target.value)} placeholder="Opportunity title" className={fieldClass} />
+        <label className="text-text-muted self-center">Offer</label>
+        <input value={offerName} onChange={(e) => setOfferName(e.target.value)} placeholder="Offer name" className={fieldClass} />
+        <label className="text-text-muted self-center">Offer key</label>
+        <input value={offerKey} onChange={(e) => setOfferKey(e.target.value)} placeholder="offer_key" className={fieldClass} />
+        <label className="text-text-muted self-center">Sender</label>
+        <input value={senderIdentity} onChange={(e) => setSenderIdentity(e.target.value)} placeholder="sender@example.com" className={fieldClass} />
+        <label className="text-text-muted self-center">Source site</label>
+        <input value={sourceSite} onChange={(e) => setSourceSite(e.target.value)} placeholder="example.com" className={fieldClass} />
+        <label className="text-text-muted self-center">Value</label>
+        <div className="flex gap-2">
+          <input value={value} onChange={(e) => setValue(e.target.value)} type="number" min="0" step="1" className={`${fieldClass} flex-1`} />
+          <input value={currency} onChange={(e) => setCurrency(e.target.value)} className={`${fieldClass} w-24`} />
+        </div>
+      </div>
+    </ModalShell>
+  );
+}
+
 // ─── Settings tab ─────────────────────────────────────────────────
 
 const CRM_INBOUND_TARGET_ROUTE = "messaging_inbound_receive";
@@ -2407,7 +2861,9 @@ function InboxTab({ api, projectId, lists, onOpenContact, onReply }: {
   const [threadContact, setThreadContact] = useState<Contact | null>(null);
   const [threadConversation, setThreadConversation] = useState<Conversation | null>(null);
   const [threadActivities, setThreadActivities] = useState<Activity[]>([]);
+  const [threadActivityTotal, setThreadActivityTotal] = useState(0);
   const [threadLoading, setThreadLoading] = useState(false);
+  const [threadLoadingMore, setThreadLoadingMore] = useState(false);
   const [threadErr, setThreadErr] = useState<string | null>(null);
   const [statusBusy, setStatusBusy] = useState(false);
   const [statusFilter, setStatusFilter] = useState("open");
@@ -2466,27 +2922,49 @@ function InboxTab({ api, projectId, lists, onOpenContact, onReply }: {
   }, [api, statusFilter, channelFilter, fromFilter, toFilter, listFilter, tagFilter]);
   useEffect(() => { load(); }, [load]);
 
-  const loadThreadFor = useCallback(async (item: InboxItem) => {
+  const loadThreadFor = useCallback(async (item: InboxItem, activityOffset = 0) => {
     const seq = ++threadLoadSeq.current;
-    setThreadLoading(true);
+    if (activityOffset > 0) setThreadLoadingMore(true);
+    else setThreadLoading(true);
     setThreadErr(null);
     try {
       const [contact, convo] = await Promise.all([
         api<{ contact: Contact }>("GET", `/contacts/${item.contact_id}`),
-        api<{ conversation?: Conversation; activities?: Activity[] }>("GET", `/contacts/${item.contact_id}/conversations/${item.id}`),
+        api<{
+          conversation?: Conversation;
+          activities?: Activity[];
+          activity_total?: number;
+        }>(
+          "GET",
+          `/contacts/${item.contact_id}/conversations/${item.id}`,
+          undefined,
+          {
+            activity_limit: "200",
+            activity_offset: String(activityOffset),
+          },
+        ),
       ]);
       if (seq !== threadLoadSeq.current) return;
       setThreadContact(contact.contact);
       setThreadConversation(convo.conversation || null);
-      setThreadActivities(convo.activities || []);
+      setThreadActivities((previous) => activityOffset > 0
+        ? [...(convo.activities || []), ...previous]
+        : (convo.activities || []));
+      setThreadActivityTotal(typeof convo.activity_total === "number"
+        ? convo.activity_total
+        : (convo.activities || []).length);
     } catch (e) {
       if (seq !== threadLoadSeq.current) return;
       setThreadErr((e as Error).message);
       setThreadContact(null);
       setThreadConversation(null);
       setThreadActivities([]);
+      setThreadActivityTotal(0);
     } finally {
-      if (seq === threadLoadSeq.current) setThreadLoading(false);
+      if (seq === threadLoadSeq.current) {
+        setThreadLoading(false);
+        setThreadLoadingMore(false);
+      }
     }
   }, [api]);
 
@@ -2496,6 +2974,7 @@ function InboxTab({ api, projectId, lists, onOpenContact, onReply }: {
       setThreadContact(null);
       setThreadConversation(null);
       setThreadActivities([]);
+      setThreadActivityTotal(0);
       setThreadErr(null);
       return;
     }
@@ -2717,6 +3196,18 @@ function InboxTab({ api, projectId, lists, onOpenContact, onReply }: {
                   >Refresh</button>
                 </div>
               </header>
+              {threadActivities.length < threadActivityTotal && (
+                <button
+                  type="button"
+                  onClick={() => loadThreadFor(selected, threadActivities.length)}
+                  disabled={threadLoadingMore}
+                  className="w-full px-3 py-1.5 text-xs text-accent border border-border rounded hover:bg-bg-input disabled:opacity-50"
+                >
+                  {threadLoadingMore
+                    ? "Loading older messages..."
+                    : `Load older messages (${threadActivities.length} of ${threadActivityTotal})`}
+                </button>
+              )}
               <ul>
                 <ActivityGroup
                   group={selectedGroup}

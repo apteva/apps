@@ -18,6 +18,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/url"
 	"os"
 	"strconv"
 	"strings"
@@ -33,7 +34,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: crm
 display_name: CRM
-version: 0.8.20
+version: 0.8.21
 description: |
   Contacts store for Apteva agents and human teams. Multi-value channels,
   typed custom attributes with provenance, append-only activity log,
@@ -101,6 +102,24 @@ provides:
       description: Set a conversation's status (open/pending/closed/spam) and/or priority.
     - name: conversations_inbox
       description: Cross-contact triage queue of conversations; supports status/channel/from/to/list/tag filters and paging.
+    - name: pipelines_list
+      description: List CRM sales pipelines and allowed stages.
+    - name: pipeline_create
+      description: Create a CRM sales pipeline with ordered stages.
+    - name: pipeline_stage_create
+      description: Create a stage in a pipeline.
+    - name: pipeline_stage_update
+      description: Update a pipeline stage.
+    - name: pipeline_stage_archive
+      description: Archive a pipeline stage.
+    - name: opportunities_create
+      description: Create a pipeline-tracked opportunity for a contact.
+    - name: opportunities_update
+      description: Update an opportunity or move it between stages.
+    - name: opportunities_search
+      description: Search opportunities by pipeline, stage, contact, status, offer, sender, list, or tag.
+    - name: opportunities_get
+      description: Fetch one opportunity with contact context and stage history.
     - name: routing_rules_create
       description: Create an inbound routing rule (recipient/sender -> add_to_list/add_tag).
     - name: routing_rules_list
@@ -240,6 +259,60 @@ provides:
       payload:
         id: integer
         count: integer
+    - name: pipeline.created
+      description: A sales pipeline was created.
+      payload:
+        pipeline_id: integer
+    - name: pipeline.stage.created
+      description: A stage was added to a sales pipeline.
+      payload:
+        pipeline_id: integer
+        stage_id: integer
+    - name: pipeline.stage.updated
+      description: A pipeline stage was updated or archived.
+      payload:
+        pipeline_id: integer
+        stage_id: integer
+        archived: boolean
+    - name: opportunity.created
+      description: An opportunity was created for a contact.
+      payload:
+        opportunity_id: integer
+        contact_id: integer
+        pipeline_id: integer
+        stage_id: integer
+        status: string
+    - name: opportunity.updated
+      description: An opportunity was updated.
+      payload:
+        opportunity_id: integer
+        contact_id: integer
+        pipeline_id: integer
+        stage_id: integer
+        status: string
+    - name: opportunity.stage.changed
+      description: An opportunity moved to another pipeline stage.
+      payload:
+        opportunity_id: integer
+        contact_id: integer
+        previous_stage_id: integer
+        stage_id: integer
+    - name: opportunity.status.changed
+      description: An opportunity changed status.
+      payload:
+        opportunity_id: integer
+        contact_id: integer
+        status: string
+    - name: opportunity.won
+      description: An opportunity was marked won.
+      payload:
+        opportunity_id: integer
+        contact_id: integer
+    - name: opportunity.lost
+      description: An opportunity was marked lost.
+      payload:
+        opportunity_id: integer
+        contact_id: integer
 runtime:
   kind: source
   source:
@@ -308,6 +381,11 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/messaging/senders", Handler: a.handleHTTPMessagingSenders},
 		{Pattern: "/messaging/templates", Handler: a.handleHTTPMessagingTemplates},
 		{Pattern: "/messaging/whatsapp-session", Handler: a.handleHTTPMessagingWhatsAppSession},
+		// Opportunities and sales pipelines.
+		{Pattern: "/pipelines", Handler: a.handleHTTPPipelines},
+		{Pattern: "/pipelines/", Handler: a.handleHTTPPipelineItem},
+		{Pattern: "/opportunities", Handler: a.handleHTTPOpportunities},
+		{Pattern: "/opportunities/", Handler: a.handleHTTPOpportunityItem},
 		// Inbound routing rules CRUD.
 		{Pattern: "/routing-rules", Handler: a.handleHTTPRoutingRules},
 		{Pattern: "/routing-rules/", Handler: a.handleHTTPRoutingRuleItem},
@@ -378,6 +456,9 @@ func (a *App) handleHTTPContactItem(w http.ResponseWriter, r *http.Request) {
 		case "lists":
 			a.handleHTTPContactLists(w, r)
 			return
+		case "opportunities":
+			a.handleHTTPContactOpportunities(w, r)
+			return
 		}
 	}
 	switch r.Method {
@@ -432,7 +513,7 @@ func (a *App) handleHTTPSetAttribute(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body map[string]any
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	if err := decodeJSONBody(w, r, &body); err != nil {
 		httpErr(w, http.StatusBadRequest, "invalid json")
 		return
 	}
@@ -469,7 +550,7 @@ func (a *App) handleHTTPPostActivity(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body map[string]any
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	if err := decodeJSONBody(w, r, &body); err != nil {
 		httpErr(w, http.StatusBadRequest, "invalid json")
 		return
 	}
@@ -749,10 +830,12 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "contacts_get_conversation",
-			Description: "Fetch one conversation with its full activity chain in chronological order. Args: id (contact id, optional safety check), conversation_id.",
+			Description: "Fetch one conversation with its most recent activity page in chronological order. Args: id (contact id, optional safety check), conversation_id, activity_limit? (default 200, max 500), activity_offset? (from newest). Returns activity_total for paging.",
 			InputSchema: schemaObject(map[string]any{
 				"id":              map[string]any{"type": "integer"},
 				"conversation_id": map[string]any{"type": "integer"},
+				"activity_limit":  map[string]any{"type": "integer"},
+				"activity_offset": map[string]any{"type": "integer"},
 			}, []string{"conversation_id"}),
 			Handler: a.toolGetConversation,
 		},
@@ -785,6 +868,123 @@ func (a *App) MCPTools() []sdk.Tool {
 				"priority": map[string]any{"type": "string"},
 			}, nil),
 			Handler: a.toolInbox,
+		},
+		{
+			Name:        "pipelines_list",
+			Description: "List CRM sales pipelines and their allowed stages. Agents should call this before creating or updating opportunities and use returned stage_id values. Args: include_archived? (default false).",
+			InputSchema: schemaObject(map[string]any{
+				"include_archived": map[string]any{"type": "boolean"},
+			}, nil),
+			Handler: a.toolPipelinesList,
+		},
+		{
+			Name:        "pipeline_create",
+			Description: "Create a sales pipeline. Args: name, description?, is_default?, stages? array of {name, position?, category? (open|won|lost), probability?}. If stages is omitted, CRM creates default sales stages.",
+			InputSchema: schemaObject(map[string]any{
+				"name":        map[string]any{"type": "string"},
+				"description": map[string]any{"type": "string"},
+				"is_default":  map[string]any{"type": "boolean"},
+				"stages":      map[string]any{"type": "array"},
+			}, []string{"name"}),
+			Handler: a.toolPipelineCreate,
+		},
+		{
+			Name:        "pipeline_stage_create",
+			Description: "Create a stage in a pipeline. Args: pipeline_id, name, position?, category? (open|won|lost, default open), probability?.",
+			InputSchema: schemaObject(map[string]any{
+				"pipeline_id": map[string]any{"type": "integer"},
+				"name":        map[string]any{"type": "string"},
+				"position":    map[string]any{"type": "integer"},
+				"category":    map[string]any{"type": "string"},
+				"probability": map[string]any{"type": "number"},
+			}, []string{"pipeline_id", "name"}),
+			Handler: a.toolPipelineStageCreate,
+		},
+		{
+			Name:        "pipeline_stage_update",
+			Description: "Update a pipeline stage. Args: id, patch. Mutable fields: name, position, category (open|won|lost), probability.",
+			InputSchema: schemaObject(map[string]any{
+				"id":    map[string]any{"type": "integer"},
+				"patch": map[string]any{"type": "object"},
+			}, []string{"id", "patch"}),
+			Handler: a.toolPipelineStageUpdate,
+		},
+		{
+			Name:        "pipeline_stage_archive",
+			Description: "Archive a pipeline stage. Fails if active opportunities still use the stage. Args: id.",
+			InputSchema: schemaObject(map[string]any{
+				"id": map[string]any{"type": "integer"},
+			}, []string{"id"}),
+			Handler: a.toolPipelineStageArchive,
+		},
+		{
+			Name:        "opportunities_create",
+			Description: "Create a pipeline-tracked opportunity for a contact. A contact can have multiple opportunities for different offers. Args: contact_id, title?, pipeline_id?, stage_id?, status? (open|won|lost), value?, currency?, offer_key?, offer_name?, source?, source_site?, sender_identity?, owner?, expected_close_date?, closed_at?, lost_reason?, note?.",
+			InputSchema: schemaObject(map[string]any{
+				"contact_id":          map[string]any{"type": "integer"},
+				"title":               map[string]any{"type": "string"},
+				"pipeline_id":         map[string]any{"type": "integer"},
+				"stage_id":            map[string]any{"type": "integer"},
+				"status":              map[string]any{"type": "string"},
+				"value":               map[string]any{"type": "number"},
+				"currency":            map[string]any{"type": "string"},
+				"offer_key":           map[string]any{"type": "string"},
+				"offer_name":          map[string]any{"type": "string"},
+				"source":              map[string]any{"type": "string"},
+				"source_site":         map[string]any{"type": "string"},
+				"sender_identity":     map[string]any{"type": "string"},
+				"owner":               map[string]any{"type": "string"},
+				"expected_close_date": map[string]any{"type": "string"},
+				"closed_at":           map[string]any{"type": "string"},
+				"lost_reason":         map[string]any{"type": "string"},
+				"note":                map[string]any{"type": "string"},
+			}, []string{"contact_id"}),
+			Handler: a.toolOpportunitiesCreate,
+		},
+		{
+			Name:        "opportunities_update",
+			Description: "Update an opportunity or move it to another stage. Args: opportunity_id or id, patch?; mutable fields may also be passed directly.",
+			InputSchema: schemaObject(map[string]any{
+				"opportunity_id": map[string]any{"type": "integer"},
+				"id":             map[string]any{"type": "integer"},
+				"patch":          map[string]any{"type": "object"},
+				"stage_id":       map[string]any{"type": "integer"},
+				"status":         map[string]any{"type": "string"},
+				"value":          map[string]any{"type": "number"},
+				"note":           map[string]any{"type": "string"},
+			}, nil),
+			Handler: a.toolOpportunitiesUpdate,
+		},
+		{
+			Name:        "opportunities_search",
+			Description: "Search opportunities. Args: q?, status? (open|won|lost|all), contact_id?, pipeline_id?, stage_id?, offer_key?, sender_identity?, source_site?, owner?, list_id?, tag?, limit?, offset?.",
+			InputSchema: schemaObject(map[string]any{
+				"q":               map[string]any{"type": "string"},
+				"status":          map[string]any{"type": "string"},
+				"contact_id":      map[string]any{"type": "integer"},
+				"pipeline_id":     map[string]any{"type": "integer"},
+				"stage_id":        map[string]any{"type": "integer"},
+				"offer_key":       map[string]any{"type": "string"},
+				"sender_identity": map[string]any{"type": "string"},
+				"source_site":     map[string]any{"type": "string"},
+				"owner":           map[string]any{"type": "string"},
+				"list_id":         map[string]any{"type": "integer"},
+				"tag":             map[string]any{"type": "string"},
+				"limit":           map[string]any{"type": "integer"},
+				"offset":          map[string]any{"type": "integer"},
+			}, nil),
+			Handler: a.toolOpportunitiesSearch,
+		},
+		{
+			Name:        "opportunities_get",
+			Description: "Fetch one opportunity with stage history, contact snapshot, recent activities, and recent conversations. Args: opportunity_id or id, activity_limit?, conversation_limit?.",
+			InputSchema: schemaObject(map[string]any{
+				"opportunity_id":     map[string]any{"type": "integer"},
+				"id":                 map[string]any{"type": "integer"},
+				"activity_limit":     map[string]any{"type": "integer"},
+				"conversation_limit": map[string]any{"type": "integer"},
+			}, nil),
+			Handler: a.toolOpportunitiesGet,
 		},
 		{
 			Name:        "routing_rules_create",
@@ -1208,11 +1408,20 @@ func (a *App) toolGetContext(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	if err != nil {
 		return nil, err
 	}
+	opportunities, _, err := dbOpportunitiesSearch(ctx.AppDB(), pid, map[string]any{
+		"contact_id": c.ID,
+		"status":     "all",
+		"limit":      20,
+	})
+	if err != nil {
+		return nil, err
+	}
 	return map[string]any{
 		"contact":       c,
 		"activities":    activities,
 		"conversations": conversations,
 		"lists":         lists,
+		"opportunities": opportunities,
 		"found":         true,
 	}, nil
 }
@@ -1514,7 +1723,7 @@ func (a *App) handleHTTPCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body map[string]any
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	if err := decodeJSONBody(w, r, &body); err != nil {
 		httpErr(w, http.StatusBadRequest, "invalid json")
 		return
 	}
@@ -1588,7 +1797,7 @@ func (a *App) handleHTTPUpdate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var patch map[string]any
-	if err := json.NewDecoder(r.Body).Decode(&patch); err != nil {
+	if err := decodeJSONBody(w, r, &patch); err != nil {
 		httpErr(w, http.StatusBadRequest, "invalid json")
 		return
 	}
@@ -1650,7 +1859,7 @@ func (a *App) handleHTTPCreateAttrDef(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body map[string]any
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	if err := decodeJSONBody(w, r, &body); err != nil {
 		httpErr(w, http.StatusBadRequest, "invalid json")
 		return
 	}
@@ -1747,21 +1956,26 @@ func dbCreate(db *sql.DB, pid string, args map[string]any) (*Contact, error) {
 }
 
 func dbGetByID(db *sql.DB, pid string, id int64) (*Contact, error) {
-	c := &Contact{}
-	var ownerID sql.NullInt64
-	var first, last, dn, pron, pe, pp, comp, jt, src, fc, lc sql.NullString
-	err := db.QueryRow(
+	c, err := scanContact(db.QueryRow(
 		`SELECT id, project_id, first_name, last_name, display_name, pronouns,
 			primary_email, primary_phone, company, job_title, owner_user_id,
 			status, source, first_contact_at, last_contact_at, created_at, updated_at
 		 FROM contacts WHERE id = ? AND project_id = ? AND deleted_at IS NULL`,
-		id, pid).Scan(
-		&c.ID, &c.ProjectID, &first, &last, &dn, &pron,
-		&pe, &pp, &comp, &jt, &ownerID,
-		&c.Status, &src, &fc, &lc, &c.CreatedAt, &c.UpdatedAt)
+		id, pid))
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
+	return c, err
+}
+
+func scanContact(row interface{ Scan(...any) error }) (*Contact, error) {
+	c := &Contact{}
+	var ownerID sql.NullInt64
+	var first, last, dn, pron, pe, pp, comp, jt, src, fc, lc sql.NullString
+	err := row.Scan(
+		&c.ID, &c.ProjectID, &first, &last, &dn, &pron,
+		&pe, &pp, &comp, &jt, &ownerID,
+		&c.Status, &src, &fc, &lc, &c.CreatedAt, &c.UpdatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -1914,34 +2128,27 @@ func dbSearch(db *sql.DB, pid, q string, filters []any, limit, offset int) ([]*C
 		offset = 0
 	}
 
-	q2 := `SELECT id FROM contacts WHERE ` + strings.Join(where, " AND ") +
+	q2 := `SELECT id, project_id, first_name, last_name, display_name, pronouns,
+		primary_email, primary_phone, company, job_title, owner_user_id,
+		status, source, first_contact_at, last_contact_at, created_at, updated_at
+		FROM contacts WHERE ` + strings.Join(where, " AND ") +
 		` ORDER BY updated_at DESC LIMIT ? OFFSET ?`
 	args = append(args, limit, offset)
 	rows, err := db.Query(q2, args...)
 	if err != nil {
 		return nil, err
 	}
-	// Drain ids first, THEN do the per-row dbGetByID calls. Holding
-	// rows open while issuing nested queries on the same *sql.DB
-	// stalls the modernc/sqlite driver — the outer iterator and the
-	// inner QueryRow contend for the same connection.
-	ids := []int64{}
+	defer rows.Close()
+	out := make([]*Contact, 0, limit)
 	for rows.Next() {
-		var id int64
-		if err := rows.Scan(&id); err != nil {
-			continue
-		}
-		ids = append(ids, id)
-	}
-	rows.Close()
-
-	out := []*Contact{}
-	for _, id := range ids {
-		c, err := dbGetByID(db, pid, id)
-		if err != nil || c == nil {
-			continue
+		c, err := scanContact(rows)
+		if err != nil {
+			return nil, err
 		}
 		out = append(out, c)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	return out, nil
 }
@@ -2297,12 +2504,20 @@ func dbUpsertByChannel(db *sql.DB, pid, kind, value string, defaults map[string]
 	}
 	c, err = dbCreate(db, pid, args)
 	if err != nil {
+		// Another request may have inserted the same unique channel between
+		// the lookup and create. Resolve that race as an idempotent upsert.
+		if existing, lookupErr := dbGetByPrimary(db, pid, kind, value); lookupErr == nil && existing != nil {
+			return existing, false, nil
+		}
 		return nil, false, err
 	}
 	return c, true, nil
 }
 
 func dbMerge(db *sql.DB, pid string, loserID, winnerID int64, notes, source string) error {
+	if loserID == winnerID {
+		return errors.New("loser_id and winner_id must be different")
+	}
 	tx, err := db.Begin()
 	if err != nil {
 		return err
@@ -2320,45 +2535,119 @@ func dbMerge(db *sql.DB, pid string, loserID, winnerID int64, notes, source stri
 		return errors.New("loser_id or winner_id not found in this project")
 	}
 
-	// Move channels (skip on dup-key conflicts — winner already has it).
-	tx.Exec(
-		`UPDATE OR IGNORE contact_channels SET contact_id = ? WHERE contact_id = ? AND project_id = ?`,
-		winnerID, loserID, pid)
-	tx.Exec(
-		`DELETE FROM contact_channels WHERE contact_id = ? AND project_id = ?`,
-		loserID, pid)
+	exec := func(query string, args ...any) error {
+		_, err := tx.Exec(query, args...)
+		return err
+	}
 
-	// Move attributes (winner wins on key collision via ON CONFLICT-style ignore).
-	tx.Exec(
+	// Move channels and attributes. Winner values take precedence when
+	// both contacts already carry the same unique value.
+	if err := exec(
+		`UPDATE OR IGNORE contact_channels SET contact_id = ? WHERE contact_id = ? AND project_id = ?`,
+		winnerID, loserID, pid); err != nil {
+		return err
+	}
+	if err := exec(
+		`DELETE FROM contact_channels WHERE contact_id = ? AND project_id = ?`,
+		loserID, pid); err != nil {
+		return err
+	}
+	if err := exec(
 		`UPDATE OR IGNORE contact_attributes SET contact_id = ? WHERE contact_id = ? AND project_id = ?`,
-		winnerID, loserID, pid)
-	tx.Exec(
+		winnerID, loserID, pid); err != nil {
+		return err
+	}
+	if err := exec(
 		`DELETE FROM contact_attributes WHERE contact_id = ? AND project_id = ?`,
-		loserID, pid)
+		loserID, pid); err != nil {
+		return err
+	}
 
 	// Move tags (winner inherits the union).
-	tx.Exec(
+	if err := exec(
 		`INSERT OR IGNORE INTO contact_tags (project_id, contact_id, tag_name)
 		 SELECT project_id, ?, tag_name FROM contact_tags
 		 WHERE contact_id = ? AND project_id = ?`,
-		winnerID, loserID, pid)
+		winnerID, loserID, pid); err != nil {
+		return err
+	}
+	if err := exec(`DELETE FROM contact_tags WHERE contact_id = ? AND project_id = ?`, loserID, pid); err != nil {
+		return err
+	}
 
-	// Move activities — preserved as winner's history.
-	tx.Exec(
+	// Move every contact-owned relation, not only the visible timeline.
+	if err := exec(
 		`UPDATE contact_activities SET contact_id = ? WHERE contact_id = ? AND project_id = ?`,
-		winnerID, loserID, pid)
+		winnerID, loserID, pid); err != nil {
+		return err
+	}
+	if err := exec(
+		`UPDATE contact_conversations SET contact_id = ? WHERE contact_id = ? AND project_id = ?`,
+		winnerID, loserID, pid); err != nil {
+		return err
+	}
+	if err := exec(
+		`UPDATE conversation_participants SET contact_id = ? WHERE contact_id = ? AND project_id = ?`,
+		winnerID, loserID, pid); err != nil {
+		return err
+	}
+	if err := exec(
+		`INSERT OR IGNORE INTO contact_list_members (list_id, contact_id, project_id, added_at, source)
+		 SELECT list_id, ?, project_id, added_at, source
+		 FROM contact_list_members WHERE contact_id = ? AND project_id = ?`,
+		winnerID, loserID, pid); err != nil {
+		return err
+	}
+	if err := exec(`DELETE FROM contact_list_members WHERE contact_id = ? AND project_id = ?`, loserID, pid); err != nil {
+		return err
+	}
+	if err := exec(
+		`INSERT OR IGNORE INTO contact_segment_snapshots (segment_id, contact_id, project_id, snapshotted_at)
+		 SELECT segment_id, ?, project_id, snapshotted_at
+		 FROM contact_segment_snapshots WHERE contact_id = ? AND project_id = ?`,
+		winnerID, loserID, pid); err != nil {
+		return err
+	}
+	if err := exec(`DELETE FROM contact_segment_snapshots WHERE contact_id = ? AND project_id = ?`, loserID, pid); err != nil {
+		return err
+	}
+	if err := exec(
+		`UPDATE crm_opportunities SET contact_id = ?, updated_at = CURRENT_TIMESTAMP
+		 WHERE contact_id = ? AND project_id = ?`,
+		winnerID, loserID, pid); err != nil {
+		return err
+	}
+
+	// Rebuild the denormalised primary-channel mirrors from the surviving rows.
+	if err := exec(
+		`UPDATE contacts SET
+			primary_email = (SELECT value FROM contact_channels
+			                 WHERE project_id = ? AND contact_id = ? AND kind = 'email'
+			                 ORDER BY is_primary DESC, id LIMIT 1),
+			primary_phone = (SELECT value FROM contact_channels
+			                 WHERE project_id = ? AND contact_id = ? AND kind = 'phone'
+			                 ORDER BY is_primary DESC, id LIMIT 1),
+			updated_at = CURRENT_TIMESTAMP
+		 WHERE id = ? AND project_id = ?`,
+		pid, winnerID, pid, winnerID, winnerID, pid); err != nil {
+		return err
+	}
 
 	// Mark loser as merged. Activities are kept; archive/soft-delete
 	// would lose timeline — explicit 'merged' status is clearer.
-	tx.Exec(
+	if err := exec(
 		`UPDATE contacts SET status='merged', updated_at = CURRENT_TIMESTAMP
 		 WHERE id = ? AND project_id = ?`,
-		loserID, pid)
+		loserID, pid); err != nil {
+		return err
+	}
 
-	tx.Exec(
+	if err := exec(
 		`INSERT INTO contact_merges (project_id, loser_id, winner_id, source, notes)
 		 VALUES (?, ?, ?, ?, ?)`,
-		pid, loserID, winnerID, source, notes)
+		pid, loserID, winnerID, source, notes); err != nil {
+		return err
+	}
 
 	return tx.Commit()
 }
@@ -2423,12 +2712,26 @@ func dbActivities(db *sql.DB, pid string, contactID int64, limit int) ([]*Activi
 }
 
 func dbSetAttribute(db *sql.DB, pid string, contactID int64, key string, value any, source string) error {
-	// Resolve def.
+	var contactExists int
+	if err := db.QueryRow(
+		`SELECT EXISTS(SELECT 1 FROM contacts
+		 WHERE id = ? AND project_id = ? AND deleted_at IS NULL AND status != 'merged')`,
+		contactID, pid,
+	).Scan(&contactExists); err != nil {
+		return err
+	}
+	if contactExists == 0 {
+		return errors.New("contact not found in this project")
+	}
+
+	// Resolve the project-owned definition and validate before writing.
 	var defID int64
-	var typ string
+	var typ, enumJSON string
+	var required int
 	err := db.QueryRow(
-		`SELECT id, type FROM contact_attribute_defs WHERE project_id = ? AND key = ?`,
-		pid, key).Scan(&defID, &typ)
+		`SELECT id, type, COALESCE(enum_values,''), required
+		 FROM contact_attribute_defs WHERE project_id = ? AND key = ?`,
+		pid, key).Scan(&defID, &typ, &enumJSON, &required)
 	if err == sql.ErrNoRows {
 		return fmt.Errorf("attribute %q not defined — call contacts_define_attribute first", key)
 	}
@@ -2439,9 +2742,18 @@ func dbSetAttribute(db *sql.DB, pid string, contactID int64, key string, value a
 	var vn sql.NullFloat64
 	var vd sql.NullString
 	var vb sql.NullBool
+	if value == nil {
+		if required != 0 {
+			return fmt.Errorf("attribute %q is required", key)
+		}
+	} else if err := validateAttributeValue(key, typ, enumJSON, value); err != nil {
+		return err
+	}
 	switch typ {
 	case "text", "url", "select":
-		vt = sql.NullString{String: fmt.Sprint(value), Valid: value != nil}
+		if value != nil {
+			vt = sql.NullString{String: value.(string), Valid: true}
+		}
 	case "number":
 		switch v := value.(type) {
 		case float64:
@@ -2452,15 +2764,20 @@ func dbSetAttribute(db *sql.DB, pid string, contactID int64, key string, value a
 			vn = sql.NullFloat64{Float64: float64(v), Valid: true}
 		}
 	case "date":
-		vd = sql.NullString{String: fmt.Sprint(value), Valid: value != nil}
+		if value != nil {
+			vd = sql.NullString{String: value.(string), Valid: true}
+		}
 	case "bool":
 		if v, ok := value.(bool); ok {
 			vb = sql.NullBool{Bool: v, Valid: true}
 		}
 	case "multi_select":
-		// Store as JSON in value_text for v0.1.
-		raw, _ := json.Marshal(value)
-		vt = sql.NullString{String: string(raw), Valid: true}
+		if value != nil {
+			raw, _ := json.Marshal(value)
+			vt = sql.NullString{String: string(raw), Valid: true}
+		}
+	default:
+		return fmt.Errorf("attribute %q has unsupported type %q", key, typ)
 	}
 	_, err = db.Exec(
 		`INSERT INTO contact_attributes
@@ -2477,13 +2794,116 @@ func dbSetAttribute(db *sql.DB, pid string, contactID int64, key string, value a
 	return err
 }
 
+func validateAttributeValue(key, typ, enumJSON string, value any) error {
+	allowed := map[string]bool{}
+	if enumJSON != "" {
+		var values []string
+		if err := json.Unmarshal([]byte(enumJSON), &values); err != nil {
+			return fmt.Errorf("attribute %q has invalid enum definition", key)
+		}
+		for _, item := range values {
+			allowed[item] = true
+		}
+	}
+	switch typ {
+	case "text":
+		if _, ok := value.(string); !ok {
+			return fmt.Errorf("attribute %q expects a string", key)
+		}
+	case "url":
+		s, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("attribute %q expects a URL string", key)
+		}
+		u, err := url.ParseRequestURI(s)
+		if err != nil || u.Host == "" || (u.Scheme != "http" && u.Scheme != "https") {
+			return fmt.Errorf("attribute %q expects an absolute http(s) URL", key)
+		}
+	case "select":
+		s, ok := value.(string)
+		if !ok || !allowed[s] {
+			return fmt.Errorf("attribute %q must be one of the declared enum values", key)
+		}
+	case "number":
+		switch value.(type) {
+		case float64, int, int64:
+		default:
+			return fmt.Errorf("attribute %q expects a number", key)
+		}
+	case "date":
+		s, ok := value.(string)
+		if !ok {
+			return fmt.Errorf("attribute %q expects a YYYY-MM-DD date", key)
+		}
+		if _, err := time.Parse("2006-01-02", s); err != nil {
+			return fmt.Errorf("attribute %q expects a YYYY-MM-DD date", key)
+		}
+	case "bool":
+		if _, ok := value.(bool); !ok {
+			return fmt.Errorf("attribute %q expects a boolean", key)
+		}
+	case "multi_select":
+		items, ok := value.([]any)
+		if !ok {
+			return fmt.Errorf("attribute %q expects an array", key)
+		}
+		for _, item := range items {
+			s, ok := item.(string)
+			if !ok || !allowed[s] {
+				return fmt.Errorf("attribute %q contains a value outside its declared enum", key)
+			}
+		}
+	default:
+		return fmt.Errorf("attribute %q has unsupported type %q", key, typ)
+	}
+	return nil
+}
+
 func dbDefineAttribute(db *sql.DB, pid, key, label, typ string, enumValues []any, required bool, sortOrder int) (map[string]any, error) {
+	validTypes := map[string]bool{
+		"text": true, "number": true, "date": true, "bool": true,
+		"select": true, "multi_select": true, "url": true,
+	}
+	if !validTypes[typ] {
+		return nil, fmt.Errorf("unsupported attribute type %q", typ)
+	}
+	if strings.TrimSpace(key) == "" || strings.TrimSpace(label) == "" {
+		return nil, errors.New("attribute key and label required")
+	}
+	if typ == "select" || typ == "multi_select" {
+		seen := map[string]bool{}
+		for i, raw := range enumValues {
+			value, ok := raw.(string)
+			value = strings.TrimSpace(value)
+			if !ok || value == "" || seen[value] {
+				return nil, fmt.Errorf("enum_values[%d] must be a unique non-empty string", i)
+			}
+			seen[value] = true
+			enumValues[i] = value
+		}
+		if len(enumValues) == 0 {
+			return nil, fmt.Errorf("%s attributes require enum_values", typ)
+		}
+	} else if len(enumValues) > 0 {
+		return nil, fmt.Errorf("enum_values are only valid for select and multi_select")
+	}
+	var existingType string
+	err := db.QueryRow(
+		`SELECT type FROM contact_attribute_defs WHERE project_id = ? AND key = ?`,
+		pid, key,
+	).Scan(&existingType)
+	if err != nil && err != sql.ErrNoRows {
+		return nil, err
+	}
+	if existingType != "" && existingType != typ {
+		return nil, fmt.Errorf("attribute %q type is %q and cannot be changed to %q", key, existingType, typ)
+	}
 	enumJSON := ""
 	if len(enumValues) > 0 {
 		raw, _ := json.Marshal(enumValues)
 		enumJSON = string(raw)
 	}
-	_, err := db.Exec(
+	_, err = db.Exec(
 		`INSERT INTO contact_attribute_defs (project_id, key, label, type, enum_values, required, sort_order)
 		 VALUES (?, ?, ?, ?, ?, ?, ?)
 		 ON CONFLICT(project_id, key) DO UPDATE SET
@@ -2535,8 +2955,10 @@ func dbListAttrDefs(db *sql.DB, pid string) ([]map[string]any, error) {
 func loadChannels(db *sql.DB, c *Contact) error {
 	rows, err := db.Query(
 		`SELECT id, kind, value, COALESCE(label,''), is_primary, COALESCE(verified_at,''), COALESCE(source,'')
-		 FROM contact_channels WHERE contact_id = ? ORDER BY is_primary DESC, kind, id`,
-		c.ID)
+		 FROM contact_channels
+		 WHERE contact_id = ? AND project_id = ?
+		 ORDER BY is_primary DESC, kind, id`,
+		c.ID, c.ProjectID)
 	if err != nil {
 		return err
 	}
@@ -2564,7 +2986,9 @@ func dbAddTag(db *sql.DB, pid string, contactID int64, tag string) error {
 
 func loadTags(db *sql.DB, c *Contact) error {
 	rows, err := db.Query(
-		`SELECT tag_name FROM contact_tags WHERE contact_id = ? ORDER BY tag_name`, c.ID)
+		`SELECT tag_name FROM contact_tags
+		 WHERE contact_id = ? AND project_id = ? ORDER BY tag_name`,
+		c.ID, c.ProjectID)
 	if err != nil {
 		return err
 	}
@@ -2585,10 +3009,11 @@ func loadAttributes(db *sql.DB, c *Contact) error {
 			a.value_text, a.value_number, a.value_date, a.value_bool,
 			COALESCE(a.source,''), COALESCE(a.set_at,'')
 		 FROM contact_attributes a
-		 JOIN contact_attribute_defs d ON d.id = a.def_id
-		 WHERE a.contact_id = ?
+		 JOIN contact_attribute_defs d
+		   ON d.id = a.def_id AND d.project_id = a.project_id
+		 WHERE a.contact_id = ? AND a.project_id = ?
 		 ORDER BY d.sort_order, d.key`,
-		c.ID)
+		c.ID, c.ProjectID)
 	if err != nil {
 		return err
 	}
@@ -2646,11 +3071,17 @@ func loadAttributes(db *sql.DB, c *Contact) error {
 // ─── Tiny utils ─────────────────────────────────────────────────────
 
 func intArg(args map[string]any, key string, def int) int {
-	if v, ok := args[key].(float64); ok {
+	switch v := args[key].(type) {
+	case float64:
 		return int(v)
-	}
-	if v, ok := args[key].(int); ok {
+	case int:
 		return v
+	case int64:
+		return int(v)
+	case string:
+		if n, err := strconv.Atoi(strings.TrimSpace(v)); err == nil {
+			return n
+		}
 	}
 	return def
 }
@@ -2747,6 +3178,13 @@ func normaliseChannel(kind, value string) string {
 func httpJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+const maxJSONBodyBytes int64 = 1 << 20
+
+func decodeJSONBody(w http.ResponseWriter, r *http.Request, dst any) error {
+	r.Body = http.MaxBytesReader(w, r.Body, maxJSONBodyBytes)
+	return json.NewDecoder(r.Body).Decode(dst)
 }
 
 func httpErr(w http.ResponseWriter, code int, msg string) {

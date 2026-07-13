@@ -1,8 +1,8 @@
 package main
 
-// Tests for automated/no-reply sender classification (v0.7.0):
-// the classifier, the inbound auto-tag wiring, and the default
-// exclusion of automated contacts from contacts_list_messageable.
+// Tests for automated/no-reply sender classification (v0.7.0+):
+// the classifier, inbound ignore-before-upsert wiring, and the default
+// exclusion of existing automated contacts from contacts_list_messageable.
 
 import (
 	"bytes"
@@ -27,6 +27,7 @@ func TestIsAutomatedSender(t *testing.T) {
 		{"no-reply hyphen", "no-reply@bank.com", nil, true},
 		{"mailer-daemon", "MAILER-DAEMON@mx.example.com", nil, true},
 		{"notifications", "notifications@github.com", nil, true},
+		{"ses generated local-part", "010001904fd6d83f-12345678@email.amazonses.com", nil, true},
 		{"auto-submitted header", "team@example.com", map[string]any{"Auto-Submitted": "auto-generated"}, true},
 		{"auto-submitted no (real reply)", "team@example.com", map[string]any{"Auto-Submitted": "no"}, false},
 		{"precedence bulk", "news@example.com", map[string]any{"Precedence": "bulk"}, true},
@@ -42,12 +43,12 @@ func TestIsAutomatedSender(t *testing.T) {
 	}
 }
 
-func TestInbound_AutoTagsAutomatedSender(t *testing.T) {
+func TestInbound_IgnoresAutomatedSenderBeforeContactCreate(t *testing.T) {
 	ctx := newTestCtx(t)
 	globalCtx = ctx
 	app := &App{}
 
-	post := func(payload string) int64 {
+	post := func(payload string) map[string]any {
 		t.Helper()
 		r := httptest.NewRequest("POST", "/inbound?project_id=test-proj", bytes.NewBufferString(payload))
 		w := httptest.NewRecorder()
@@ -57,17 +58,23 @@ func TestInbound_AutoTagsAutomatedSender(t *testing.T) {
 		}
 		var out map[string]any
 		_ = json.Unmarshal(w.Body.Bytes(), &out)
-		return int64(out["contact_id"].(float64))
+		return out
 	}
 
-	autoID := post(`{"channel":"email","from":"noreply@tiktok.com","to":["support@acme.com"],"body_text":"new follower"}`)
-	if !contactHasTag(t, ctx, autoID, tagAutomated) {
-		t.Errorf("expected noreply@tiktok.com contact to be tagged %q", tagAutomated)
+	auto := post(`{"channel":"email","from":"010001904fd6d83f-12345678@email.amazonses.com","to":["support@acme.com"],"body_text":"delivery failure"}`)
+	if auto["ignored"] != true {
+		t.Fatalf("expected SES inbound to be ignored, got %v", auto)
+	}
+	if got := countContacts(t, ctx); got != 0 {
+		t.Fatalf("automated inbound created %d contacts, want 0", got)
 	}
 
-	humanID := post(`{"channel":"email","from":"jane@startup.com","to":["support@acme.com"],"body_text":"hi, question about pricing"}`)
-	if contactHasTag(t, ctx, humanID, tagAutomated) {
-		t.Errorf("human sender should NOT be tagged automated")
+	human := post(`{"channel":"email","from":"jane@startup.com","to":["support@acme.com"],"body_text":"hi, question about pricing"}`)
+	if human["ignored"] == true || human["contact_id"] == nil {
+		t.Fatalf("expected human inbound to create a contact, got %v", human)
+	}
+	if got := countContacts(t, ctx); got != 1 {
+		t.Fatalf("human inbound contact count=%d, want 1", got)
 	}
 }
 
@@ -126,4 +133,13 @@ func contactHasTag(t *testing.T, ctx *sdk.AppCtx, contactID int64, tag string) b
 		`SELECT COUNT(*) FROM contact_tags WHERE contact_id = ? AND tag_name = ?`,
 		contactID, tag).Scan(&n)
 	return n > 0
+}
+
+func countContacts(t *testing.T, ctx *sdk.AppCtx) int {
+	t.Helper()
+	var n int
+	if err := ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM contacts`).Scan(&n); err != nil {
+		t.Fatal(err)
+	}
+	return n
 }

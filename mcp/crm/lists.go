@@ -14,7 +14,6 @@ package main
 
 import (
 	"database/sql"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -229,6 +228,23 @@ func dbListAddContact(db *sql.DB, pid string, listID, contactID int64, source st
 	if source == "" {
 		source = "human"
 	}
+	var listExists, contactExists int
+	if err := db.QueryRow(
+		`SELECT
+			EXISTS(SELECT 1 FROM contact_lists
+			       WHERE id = ? AND project_id = ? AND archived_at IS NULL),
+			EXISTS(SELECT 1 FROM contacts
+			       WHERE id = ? AND project_id = ? AND deleted_at IS NULL AND status != 'merged')`,
+		listID, pid, contactID, pid,
+	).Scan(&listExists, &contactExists); err != nil {
+		return err
+	}
+	if listExists == 0 {
+		return errors.New("list not found in this project")
+	}
+	if contactExists == 0 {
+		return errors.New("contact not found in this project")
+	}
 	_, err := db.Exec(
 		`INSERT OR IGNORE INTO contact_list_members
 			(list_id, contact_id, project_id, source)
@@ -256,7 +272,8 @@ func dbListsForContact(db *sql.DB, pid string, contactID int64) ([]*List, error)
 				COALESCE(cl.inbound_route_pattern,''),
 				COALESCE(cl.archived_at,''), cl.created_at, cl.updated_at
 		 FROM contact_lists cl
-		 JOIN contact_list_members m ON m.list_id = cl.id
+		 JOIN contact_list_members m
+		   ON m.list_id = cl.id AND m.project_id = cl.project_id
 		 WHERE cl.project_id = ? AND m.contact_id = ? AND cl.archived_at IS NULL
 		 ORDER BY cl.name COLLATE NOCASE`,
 		pid, contactID,
@@ -288,10 +305,15 @@ func dbListMembers(db *sql.DB, pid string, listID int64, limit int) ([]*Contact,
 				COALESCE(c.primary_phone,''), COALESCE(c.company,''),
 				COALESCE(c.job_title,''), COALESCE(c.status,'active')
 		 FROM contacts c
-		 JOIN contact_list_members m ON m.contact_id = c.id
-		 WHERE m.list_id = ? AND m.project_id = ? AND c.deleted_at IS NULL
+		 JOIN contact_list_members m
+		   ON m.contact_id = c.id AND m.project_id = c.project_id
+		 JOIN contact_lists l
+		   ON l.id = m.list_id AND l.project_id = m.project_id
+		 WHERE m.list_id = ? AND m.project_id = ?
+		   AND c.project_id = ? AND c.deleted_at IS NULL AND c.status != 'merged'
+		   AND l.archived_at IS NULL
 		 ORDER BY m.added_at DESC LIMIT ?`,
-		listID, pid, limit,
+		listID, pid, pid, limit,
 	)
 	if err != nil {
 		return nil, err
@@ -588,7 +610,7 @@ func (a *App) handleHTTPListsCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body map[string]any
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	if err := decodeJSONBody(w, r, &body); err != nil {
 		httpErr(w, http.StatusBadRequest, "invalid json")
 		return
 	}
@@ -638,7 +660,7 @@ func (a *App) handleHTTPListUpdate(w http.ResponseWriter, r *http.Request, id in
 		return
 	}
 	var patch map[string]any
-	if err := json.NewDecoder(r.Body).Decode(&patch); err != nil {
+	if err := decodeJSONBody(w, r, &patch); err != nil {
 		httpErr(w, http.StatusBadRequest, "invalid json")
 		return
 	}
@@ -687,7 +709,7 @@ func (a *App) handleHTTPListAddMember(w http.ResponseWriter, r *http.Request, li
 		return
 	}
 	var body map[string]any
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	if err := decodeJSONBody(w, r, &body); err != nil {
 		httpErr(w, http.StatusBadRequest, "invalid json")
 		return
 	}
@@ -733,7 +755,7 @@ func (a *App) handleHTTPContactLists(w http.ResponseWriter, r *http.Request) {
 		httpJSON(w, map[string]any{"lists": out, "count": len(out)})
 	case http.MethodPost:
 		var body map[string]any
-		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		if err := decodeJSONBody(w, r, &body); err != nil {
 			httpErr(w, http.StatusBadRequest, "invalid json")
 			return
 		}

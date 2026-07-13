@@ -21,6 +21,7 @@ import (
 	"net/mail"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	sdk "github.com/apteva/app-sdk"
@@ -364,15 +365,29 @@ func dbContactIsSpam(db *sql.DB, pid string, contactID int64) (bool, error) {
 // chronological order. ID is the tiebreaker so two messages timestamped
 // identically render in insertion order — fixes the audit's stability
 // concern for the conversation view.
-func dbConversationActivities(db *sql.DB, pid string, conversationID int64) ([]*Activity, error) {
+func dbConversationActivities(db *sql.DB, pid string, conversationID int64, limit, offset int) ([]*Activity, error) {
+	if limit <= 0 || limit > 500 {
+		limit = 200
+	}
+	if offset < 0 {
+		offset = 0
+	}
 	rows, err := db.Query(
-		`SELECT id, contact_id, kind, body, occurred_at, COALESCE(source,''),
-				COALESCE(source_detail, ''), COALESCE(conversation_id, 0),
-				COALESCE(message_id_header, ''), COALESCE(messaging_id, 0)
+		`SELECT id, contact_id, kind, body, occurred_at, source,
+				source_detail, conversation_id, message_id_header, messaging_id
+		 FROM (
+			SELECT id, contact_id, kind, body, occurred_at, COALESCE(source,'') AS source,
+				COALESCE(source_detail, '') AS source_detail,
+				COALESCE(conversation_id, 0) AS conversation_id,
+				COALESCE(message_id_header, '') AS message_id_header,
+				COALESCE(messaging_id, 0) AS messaging_id
 		 FROM contact_activities
 		 WHERE project_id = ? AND conversation_id = ?
+		 ORDER BY occurred_at DESC, id DESC
+		 LIMIT ? OFFSET ?
+		 ) recent
 		 ORDER BY occurred_at ASC, id ASC`,
-		pid, conversationID,
+		pid, conversationID, limit, offset,
 	)
 	if err != nil {
 		return nil, err
@@ -446,39 +461,59 @@ func enrichActivitiesWithMessagingStatus(ctx *sdk.AppCtx, pid string, activities
 		return
 	}
 	statuses := map[int64]*MessageStatus{}
-	for _, id := range ids {
-		var out messagingMessageGetResponse
-		err := callMessagingTool(ctx, "message_get", map[string]any{
-			"_project_id": pid,
-			"id":          id,
-		}, &out)
-		if err != nil || !out.Found || out.Message == nil {
-			continue
-		}
-		ms := &MessageStatus{
-			ID:                out.Message.ID,
-			Direction:         out.Message.Direction,
-			Status:            out.Message.Status,
-			StatusReason:      out.Message.StatusReason,
-			ProviderMessageID: out.Message.ProviderMessageID,
-			SentAt:            out.Message.SentAt,
-			ReceivedAt:        out.Message.ReceivedAt,
-			LastEventAt:       out.Message.LastEventAt,
-			EventCounts:       out.Message.EventCounts,
-		}
-		for _, ev := range out.Events {
-			if ev == nil {
-				continue
-			}
-			ms.Events = append(ms.Events, &MessageStatusEvent{
-				Kind:       ev.Kind,
-				Recipient:  ev.Recipient,
-				Reason:     ev.Reason,
-				OccurredAt: ev.OccurredAt,
-			})
-		}
-		statuses[id] = ms
+	var statusesMu sync.Mutex
+	jobs := make(chan int64)
+	var workers sync.WaitGroup
+	workerCount := 8
+	if len(ids) < workerCount {
+		workerCount = len(ids)
 	}
+	workers.Add(workerCount)
+	for i := 0; i < workerCount; i++ {
+		go func() {
+			defer workers.Done()
+			for id := range jobs {
+				var out messagingMessageGetResponse
+				err := callMessagingTool(ctx, "message_get", map[string]any{
+					"_project_id": pid,
+					"id":          id,
+				}, &out)
+				if err != nil || !out.Found || out.Message == nil {
+					continue
+				}
+				ms := &MessageStatus{
+					ID:                out.Message.ID,
+					Direction:         out.Message.Direction,
+					Status:            out.Message.Status,
+					StatusReason:      out.Message.StatusReason,
+					ProviderMessageID: out.Message.ProviderMessageID,
+					SentAt:            out.Message.SentAt,
+					ReceivedAt:        out.Message.ReceivedAt,
+					LastEventAt:       out.Message.LastEventAt,
+					EventCounts:       out.Message.EventCounts,
+				}
+				for _, ev := range out.Events {
+					if ev == nil {
+						continue
+					}
+					ms.Events = append(ms.Events, &MessageStatusEvent{
+						Kind:       ev.Kind,
+						Recipient:  ev.Recipient,
+						Reason:     ev.Reason,
+						OccurredAt: ev.OccurredAt,
+					})
+				}
+				statusesMu.Lock()
+				statuses[id] = ms
+				statusesMu.Unlock()
+			}
+		}()
+	}
+	for _, id := range ids {
+		jobs <- id
+	}
+	close(jobs)
+	workers.Wait()
 	for _, a := range activities {
 		if a != nil && a.MessagingID != 0 {
 			a.MessageStatus = statuses[a.MessagingID]
@@ -1596,14 +1631,27 @@ func (a *App) toolGetConversation(ctx *sdk.AppCtx, args map[string]any) (any, er
 	if convo == nil || (cid != 0 && convo.ContactID != cid) {
 		return nil, errors.New("conversation not found")
 	}
-	activities, err := dbConversationActivities(ctx.AppDB(), pid, convoID)
+	activityLimit := intArg(args, "activity_limit", 200)
+	activityOffset := intArg(args, "activity_offset", 0)
+	activities, err := dbConversationActivities(ctx.AppDB(), pid, convoID, activityLimit, activityOffset)
 	if err != nil {
+		return nil, err
+	}
+	var activityTotal int
+	if err := ctx.AppDB().QueryRow(
+		`SELECT COUNT(*) FROM contact_activities
+		 WHERE project_id = ? AND conversation_id = ?`,
+		pid, convoID,
+	).Scan(&activityTotal); err != nil {
 		return nil, err
 	}
 	enrichActivitiesWithMessagingStatus(ctx, pid, activities)
 	return map[string]any{
-		"conversation": convo,
-		"activities":   activities,
+		"conversation":    convo,
+		"activities":      activities,
+		"activity_total":  activityTotal,
+		"activity_limit":  activityLimit,
+		"activity_offset": activityOffset,
 	}, nil
 }
 
@@ -2118,7 +2166,7 @@ func (a *App) handleInbound(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var body inboundPayload
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	if err := decodeJSONBody(w, r, &body); err != nil {
 		httpErr(w, http.StatusBadRequest, "json: "+err.Error())
 		return
 	}
@@ -2200,6 +2248,38 @@ func ingestInbound(ctx *sdk.AppCtx, pid string, body inboundPayload) (map[string
 	body.From = canonicalAddress(body.Channel, body.From)
 
 	db := ctx.AppDB()
+	if body.MessageID != 0 {
+		var activityID, contactID, conversationID int64
+		err := db.QueryRow(
+			`SELECT id, contact_id, COALESCE(conversation_id,0)
+			 FROM contact_activities
+			 WHERE project_id = ? AND messaging_id = ?`,
+			pid, body.MessageID,
+		).Scan(&activityID, &contactID, &conversationID)
+		if err == nil {
+			return map[string]any{
+				"ok":              true,
+				"deduped":         true,
+				"activity_id":     activityID,
+				"contact_id":      contactID,
+				"conversation_id": conversationID,
+			}, nil
+		}
+		if err != sql.ErrNoRows {
+			return nil, fmt.Errorf("dedup lookup: %w", err)
+		}
+	}
+
+	// Delivery failures and other machine-generated provider mail should
+	// not materialise CRM leads. Classify before contact or thread creation.
+	automated, autoReason := isAutomatedSender(body.Channel, body.From, body.Headers)
+	if automated {
+		return map[string]any{
+			"ok":      true,
+			"ignored": true,
+			"reason":  autoReason,
+		}, nil
+	}
 
 	contact, fuzzyCandidates, err := matchInboundContact(db, pid, body.Channel, body.From)
 	if err != nil {
@@ -2229,17 +2309,6 @@ func ingestInbound(ctx *sdk.AppCtx, pid string, body inboundPayload) (map[string
 					"possible_match_ids": fuzzyCandidates,
 				},
 			})
-		}
-	}
-
-	// Classify the sender. Machine / no-reply senders still get the
-	// contact + activity (the message may matter) but are tagged
-	// `automated` so bulk sends / segments can exclude them. Idempotent —
-	// re-tagging on repeat inbound is a no-op.
-	automated, autoReason := isAutomatedSender(body.Channel, body.From, body.Headers)
-	if automated {
-		if err := dbAddTag(db, pid, contact.ID, tagAutomated); err != nil {
-			ctx.Logger().Warn("auto-tag automated sender", "contact_id", contact.ID, "err", err)
 		}
 	}
 
@@ -2426,6 +2495,11 @@ func resolveInboundConversation(db *sql.DB, pid string, contactID int64, p inbou
 		id, err := dbConversationCreate(tx, pid, contactID, p.Channel, "", "", now)
 		if err != nil {
 			tx.Rollback()
+			// The partial unique index serializes concurrent first messages for
+			// persistent SMS/WhatsApp conversations. Re-read the winner.
+			if existing, lookupErr := dbConversationForChannel(db, pid, contactID, p.Channel); lookupErr == nil && existing != nil {
+				return existing.ID, false, nil
+			}
 			return 0, false, err
 		}
 		if err := tx.Commit(); err != nil {
@@ -2651,7 +2725,11 @@ func (a *App) handleHTTPSendMessage(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusBadRequest, "id required")
 		return
 	}
-	args := mustReadJSONArgs(r)
+	args, err := mustReadJSONArgs(w, r)
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, "invalid json: "+err.Error())
+		return
+	}
 	args["id"] = parts[0]
 	if pid, _ := resolveProjectFromRequest(r); pid != "" {
 		args["_project_id"] = pid
@@ -2674,7 +2752,11 @@ func (a *App) handleHTTPReply(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, http.StatusBadRequest, "id required")
 		return
 	}
-	args := mustReadJSONArgs(r)
+	args, err := mustReadJSONArgs(w, r)
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, "invalid json: "+err.Error())
+		return
+	}
 	args["id"] = parts[0]
 	if pid, _ := resolveProjectFromRequest(r); pid != "" {
 		args["_project_id"] = pid
@@ -2880,6 +2962,12 @@ func (a *App) handleHTTPGetConversation(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	args := map[string]any{"id": parts[0], "conversation_id": parts[2]}
+	if value := r.URL.Query().Get("activity_limit"); value != "" {
+		args["activity_limit"] = value
+	}
+	if value := r.URL.Query().Get("activity_offset"); value != "" {
+		args["activity_offset"] = value
+	}
 	if pid, _ := resolveProjectFromRequest(r); pid != "" {
 		args["_project_id"] = pid
 	}
@@ -2904,7 +2992,11 @@ func (a *App) handleHTTPSetConversationStatus(w http.ResponseWriter, r *http.Req
 		httpErr(w, http.StatusBadRequest, "id and conversation_id required")
 		return
 	}
-	args := mustReadJSONArgs(r)
+	args, err := mustReadJSONArgs(w, r)
+	if err != nil {
+		httpErr(w, http.StatusBadRequest, "invalid json: "+err.Error())
+		return
+	}
 	args["id"] = parts[0]
 	args["conversation_id"] = parts[2]
 	if pid, _ := resolveProjectFromRequest(r); pid != "" {
@@ -2979,7 +3071,11 @@ func (a *App) handleHTTPRoutingRules(w http.ResponseWriter, r *http.Request) {
 		}
 		httpJSON(w, out)
 	case http.MethodPost:
-		args := mustReadJSONArgs(r)
+		args, err := mustReadJSONArgs(w, r)
+		if err != nil {
+			httpErr(w, http.StatusBadRequest, "invalid json: "+err.Error())
+			return
+		}
 		if pid != "" {
 			args["_project_id"] = pid
 		}
@@ -3017,11 +3113,13 @@ func (a *App) handleHTTPRoutingRuleItem(w http.ResponseWriter, r *http.Request) 
 	httpJSON(w, out)
 }
 
-func mustReadJSONArgs(r *http.Request) map[string]any {
+func mustReadJSONArgs(w http.ResponseWriter, r *http.Request) (map[string]any, error) {
 	out := map[string]any{}
-	_ = json.NewDecoder(r.Body).Decode(&out)
+	if err := decodeJSONBody(w, r, &out); err != nil {
+		return nil, err
+	}
 	if out == nil {
 		out = map[string]any{}
 	}
-	return out
+	return out, nil
 }

@@ -1,6 +1,11 @@
 package main
 
-import "testing"
+import (
+	"os"
+	"testing"
+
+	sdk "github.com/apteva/app-sdk"
+)
 
 // The embedded manifest must always parse — it's our single source of
 // truth for the manifest the binary advertises. If this test fails,
@@ -14,14 +19,14 @@ func TestEmbeddedManifest_Valid(t *testing.T) {
 	if m.Version == "" {
 		t.Error("manifest.Version is empty")
 	}
-	if len(m.Provides.MCPTools) != 42 {
-		t.Errorf("expected 42 MCP tools, got %d", len(m.Provides.MCPTools))
+	if len(m.Provides.MCPTools) != 51 {
+		t.Errorf("expected 51 MCP tools, got %d", len(m.Provides.MCPTools))
 	}
 	if m.DB == nil || m.DB.Migrations == "" {
 		t.Errorf("manifest.DB.Migrations missing")
 	}
-	if len(m.Provides.Publishes) != 16 {
-		t.Errorf("expected 16 published event declarations, got %d", len(m.Provides.Publishes))
+	if len(m.Provides.Publishes) != 25 {
+		t.Errorf("expected 25 published event declarations, got %d", len(m.Provides.Publishes))
 	}
 	// Surfaces the embedded scopes — should accept project + global.
 	gotScopes := map[string]bool{}
@@ -62,6 +67,15 @@ func TestEmbeddedManifest_PublishesCRMEvents(t *testing.T) {
 		"segment.updated",
 		"segment.archived",
 		"segment.materialised",
+		"pipeline.created",
+		"pipeline.stage.created",
+		"pipeline.stage.updated",
+		"opportunity.created",
+		"opportunity.updated",
+		"opportunity.stage.changed",
+		"opportunity.status.changed",
+		"opportunity.won",
+		"opportunity.lost",
 	} {
 		if !got[want] {
 			t.Errorf("manifest missing published event %q", want)
@@ -92,5 +106,26 @@ func TestMCPTools_ManifestMatchesHandlers(t *testing.T) {
 		if !declared[name] {
 			t.Errorf("handler implements %q but manifest doesn't declare it", name)
 		}
+	}
+}
+
+func TestDiskManifestParsesAndMatchesEmbeddedSurface(t *testing.T) {
+	body, err := os.ReadFile("apteva.yaml")
+	if err != nil {
+		t.Fatal(err)
+	}
+	disk, err := sdk.ParseManifest(body)
+	if err != nil {
+		t.Fatalf("parse apteva.yaml: %v", err)
+	}
+	embedded := (&App{}).Manifest()
+	if disk.Version != embedded.Version {
+		t.Fatalf("manifest version drift: disk=%s embedded=%s", disk.Version, embedded.Version)
+	}
+	if len(disk.Provides.MCPTools) != len(embedded.Provides.MCPTools) {
+		t.Fatalf("tool declaration drift: disk=%d embedded=%d", len(disk.Provides.MCPTools), len(embedded.Provides.MCPTools))
+	}
+	if len(disk.Provides.Publishes) != len(embedded.Provides.Publishes) {
+		t.Fatalf("event declaration drift: disk=%d embedded=%d", len(disk.Provides.Publishes), len(embedded.Provides.Publishes))
 	}
 }

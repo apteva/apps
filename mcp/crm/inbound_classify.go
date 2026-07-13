@@ -2,12 +2,10 @@ package main
 
 // Inbound sender classification.
 //
-// Automated / no-reply senders (noreply@…, mailer-daemon, list mail,
-// transactional notifications) still get ingested as contacts — the
-// message may carry something important (a receipt, a security alert).
-// But we tag them `automated` so segments and bulk sends can exclude
-// them without losing the record. This is the "capture + classify"
-// stance (vs Zendesk's "suspend and hide").
+// Automated / no-reply senders (noreply@..., mailer-daemon, list mail,
+// transactional notifications) are not human CRM leads. The inbound
+// handler uses this classifier before contact upsert so bounces and
+// automated provider mail do not pollute the CRM.
 //
 // Detection prefers RFC-standard headers (Auto-Submitted, Precedence,
 // List-*) — the same signals Zendesk uses — and falls back to address
@@ -30,6 +28,13 @@ var automatedLocalParts = []string{
 	"mailer-daemon", "mailerdaemon", "mailer",
 	"postmaster", "bounce", "bounces",
 	"notification", "notifications", "automated",
+}
+
+// automatedSenderDomains are provider domains that commonly send delivery
+// failures, complaints, and other machine mail from unpredictable local-parts.
+// Suffix matching handles subdomains such as email.amazonses.com.
+var automatedSenderDomains = []string{
+	"amazonses.com",
 }
 
 // isAutomatedSender classifies an inbound sender as machine/no-reply.
@@ -67,6 +72,13 @@ func isAutomatedSender(channel, from string, headers map[string]any) (bool, stri
 				strings.HasPrefix(local, pat+"_") ||
 				strings.HasPrefix(local, pat+"+") {
 				return true, "no-reply address: " + local
+			}
+		}
+	}
+	if domain := domainOf(from); domain != "" {
+		for _, pat := range automatedSenderDomains {
+			if domain == pat || strings.HasSuffix(domain, "."+pat) {
+				return true, "automated sender domain: " + domain
 			}
 		}
 	}
