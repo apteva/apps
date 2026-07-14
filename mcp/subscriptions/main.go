@@ -98,6 +98,9 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "subscriptions_update_status", Description: "Update subscription status/periods.", InputSchema: schemaObject(map[string]any{
 			"id": map[string]any{"type": "integer"}, "status": map[string]any{"type": "string"}, "current_period_start": map[string]any{"type": "string"}, "current_period_end": map[string]any{"type": "string"}, "next_renewal_at": map[string]any{"type": "string"}, "actor": map[string]any{"type": "string"}, "note": map[string]any{"type": "string"},
 		}, []string{"id"}), Handler: a.toolSubscriptionsUpdateStatus},
+		{Name: "subscriptions_update_metadata", Description: "Merge an opaque metadata patch into a subscription without changing lifecycle state.", InputSchema: schemaObject(map[string]any{
+			"id": map[string]any{"type": "integer"}, "metadata_patch": map[string]any{"type": "object"}, "actor": map[string]any{"type": "string"}, "note": map[string]any{"type": "string"},
+		}, []string{"id", "metadata_patch"}), Handler: a.toolSubscriptionsUpdateMetadata},
 		{Name: "subscriptions_cancel", Description: "Cancel a subscription.", InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}, "at_period_end": map[string]any{"type": "boolean"}, "reason": map[string]any{"type": "string"}, "actor": map[string]any{"type": "string"}}, []string{"id"}), Handler: a.toolSubscriptionsCancel},
 		{Name: "subscription_items_create", Description: "Add a flat or metered item to a subscription.", InputSchema: schemaObject(map[string]any{
 			"subscription_id": map[string]any{"type": "integer"}, "product_id": map[string]any{"type": "integer"}, "price_id": map[string]any{"type": "integer"}, "sku": map[string]any{"type": "string"}, "title": map[string]any{"type": "string"}, "quantity": map[string]any{"type": "number"}, "unit_amount_cents": map[string]any{"type": "integer"}, "currency": map[string]any{"type": "string"}, "billing_scheme": map[string]any{"type": "string"}, "meter_key": map[string]any{"type": "string"}, "included_units": map[string]any{"type": "integer"}, "unit_size": map[string]any{"type": "integer"}, "metadata": map[string]any{"type": "object"},
@@ -350,6 +353,21 @@ func (a *App) toolSubscriptionsUpdateStatus(ctx *sdk.AppCtx, args map[string]any
 	ctx.Emit("subscription.updated", map[string]any{"subscription_id": sub.ID, "status": sub.Status})
 	emitSubscriptionLifecycle(ctx, sub)
 	return map[string]any{"subscription": sub}, nil
+}
+
+func (a *App) toolSubscriptionsUpdateMetadata(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := resolveProjectFromArgs(args)
+	if err != nil {
+		return nil, err
+	}
+	sub, changed, err := dbSubscriptionUpdateMetadata(ctx.AppDB(), pid, args)
+	if err != nil {
+		return nil, err
+	}
+	if changed {
+		ctx.Emit("subscription.updated", map[string]any{"subscription_id": sub.ID, "status": sub.Status})
+	}
+	return map[string]any{"subscription": sub, "changed": changed}, nil
 }
 
 func (a *App) toolSubscriptionsCancel(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -892,6 +910,49 @@ func dbSubscriptionUpdateStatus(db *sql.DB, pid string, args map[string]any) (*S
 		return nil, err
 	}
 	return dbSubscriptionGet(db, pid, id, true)
+}
+
+func dbSubscriptionUpdateMetadata(db *sql.DB, pid string, args map[string]any) (*Subscription, bool, error) {
+	id := int64Arg(args, "id")
+	if id == 0 {
+		return nil, false, errors.New("id required")
+	}
+	tx, err := db.Begin()
+	if err != nil {
+		return nil, false, err
+	}
+	defer tx.Rollback()
+	var current string
+	if err := tx.QueryRow(`SELECT metadata FROM subscriptions WHERE id=? AND project_id=?`, id, pid).Scan(&current); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return nil, false, errors.New("subscription not found")
+		}
+		return nil, false, err
+	}
+	metadata, err := mergeMetadataPatch(json.RawMessage(current), args["metadata_patch"])
+	if err != nil {
+		return nil, false, err
+	}
+	if metadata == current {
+		if err := tx.Rollback(); err != nil {
+			return nil, false, err
+		}
+		sub, err := dbSubscriptionGet(db, pid, id, true)
+		return sub, false, err
+	}
+	if _, err := tx.Exec(`UPDATE subscriptions SET metadata=?,updated_at=CURRENT_TIMESTAMP WHERE id=? AND project_id=?`, metadata, id, pid); err != nil {
+		return nil, false, err
+	}
+	if err := writeEventTx(tx, pid, id, actorOrSystem(strArg(args, "actor")), "subscription.metadata_updated", map[string]any{
+		"metadata_patch": mapFromAny(args["metadata_patch"]), "note": strArg(args, "note"),
+	}); err != nil {
+		return nil, false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, false, err
+	}
+	sub, err := dbSubscriptionGet(db, pid, id, true)
+	return sub, true, err
 }
 
 func dbSeedTrialAttempts(db *sql.DB, pid string, now time.Time, limit int) error {

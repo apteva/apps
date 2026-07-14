@@ -172,6 +172,7 @@ func (a *App) MCPTools() []sdk.Tool {
 			"billing_customer_id": intSchema(), "auth_org_id": intSchema(), "auth_user_id": intSchema(), "subscription_id": intSchema(), "create_owner_user": boolSchema(), "send_password_reset": boolSchema(), "metadata": objSchema(),
 		}, []string{"owner_email", "slug"}), Handler: a.toolAccountCreate},
 		{Name: "saas_account_get", Description: "Fetch one SaaS account with customer and Billing summary.", InputSchema: accountIDSchema(), Handler: a.toolAccountGet},
+		{Name: "saas_account_reconcile", Description: "Repair Subscription and Entitlements projections from the account's authoritative SaaS plan.", InputSchema: accountIDSchema(), Handler: a.toolAccountReconcile},
 		{Name: "saas_account_change_plan", Description: "Upgrade or downgrade an active account within the same SaaS product, with durable proration and payment orchestration.", InputSchema: schemaObject(map[string]any{
 			"account_id": strSchema(), "target_plan_key": strSchema(), "effective_at": strSchema(), "proration_policy": strSchema(),
 			"discount_policy": strSchema(), "idempotency_key": strSchema(), "success_url": strSchema(), "cancel_url": strSchema(),
@@ -2493,24 +2494,6 @@ func (a *App) applyPlanAccess(ctx *sdk.AppCtx, pid string, acct *Account, plan *
 
 func (a *App) applyPlanGrants(ctx *sdk.AppCtx, pid string, acct *Account, plan *Plan) error {
 	for _, f := range plan.Features {
-		var existing map[string]any
-		if err := ctx.PlatformAPI().CallAppResult("entitlements", "entitlement_grants_list", map[string]any{
-			"_project_id": pid, "subject_type": "saas_account", "subject_id": acct.ID,
-			"feature_key": f.FeatureKey, "status": "active", "limit": 100,
-		}, &existing); err != nil {
-			return fmt.Errorf("list grant %s: %w", f.FeatureKey, err)
-		}
-		found := false
-		for _, raw := range sliceFromAny(existing["grants"]) {
-			grant := mapFromAny(raw)
-			if strArg(grant, "source_type") == "saas" && strArg(grant, "source_id") == acct.ID {
-				found = true
-				break
-			}
-		}
-		if found {
-			continue
-		}
 		var out map[string]any
 		input := map[string]any{
 			"_project_id":  pid,
@@ -2521,8 +2504,8 @@ func (a *App) applyPlanGrants(ctx *sdk.AppCtx, pid string, acct *Account, plan *
 			"source_id":    acct.ID,
 			"metadata":     map[string]any{"plan_key": plan.Key, "grant_type": f.GrantType},
 		}
-		if err := ctx.PlatformAPI().CallAppResult("entitlements", "entitlement_grants_create", input, &out); err != nil {
-			return fmt.Errorf("grant %s: %w", f.FeatureKey, err)
+		if err := ctx.PlatformAPI().CallAppResult("entitlements", "entitlement_grants_upsert", input, &out); err != nil {
+			return fmt.Errorf("upsert grant %s: %w", f.FeatureKey, err)
 		}
 	}
 	return nil

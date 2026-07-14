@@ -111,7 +111,7 @@ func (p *platformStub) CallAppResult(appName, tool string, input map[string]any,
 		body = map[string]any{"organization": map[string]any{"id": 101, "slug": input["slug"], "name": input["name"]}}
 	case "auth_users_create":
 		body = map[string]any{"user": map[string]any{"id": 202, "email": input["email"], "organization_id": input["organization_id"]}}
-	case "entitlement_grants_create":
+	case "entitlement_grants_upsert":
 		if p.failGrantOnce && strFromAny(input["feature_key"]) == p.failGrantFeature {
 			p.failGrantOnce = false
 			return fmt.Errorf("injected grant failure for %s", p.failGrantFeature)
@@ -120,7 +120,7 @@ func (p *platformStub) CallAppResult(appName, tool string, input map[string]any,
 			p.grants = map[string]bool{}
 		}
 		p.grants[strFromAny(input["feature_key"])] = true
-		body = map[string]any{"grant": map[string]any{"id": 301, "feature_key": input["feature_key"], "subject_id": input["subject_id"]}}
+		body = map[string]any{"grant": map[string]any{"id": 301, "feature_key": input["feature_key"], "subject_id": input["subject_id"], "metadata": input["metadata"]}, "created": true}
 	case "entitlement_grants_list":
 		var grants []any
 		if p.grants[strFromAny(input["feature_key"])] {
@@ -208,6 +208,8 @@ func (p *platformStub) CallAppResult(appName, tool string, input map[string]any,
 		body = map[string]any{"cycle": map[string]any{"id": input["id"], "invoice_id": input["invoice_id"], "payment_status": input["payment_status"]}}
 	case "subscriptions_update_status":
 		body = map[string]any{"subscription": map[string]any{"id": input["id"], "status": input["status"], "current_period_start": input["current_period_start"], "current_period_end": input["current_period_end"]}}
+	case "subscriptions_update_metadata":
+		body = map[string]any{"subscription": map[string]any{"id": input["id"], "metadata": input["metadata_patch"]}}
 	case "payments_record":
 		body = map[string]any{"payment": map[string]any{"id": 901, "method": input["method"], "amount_cents": input["amount_cents"]}, "invoice": map[string]any{"id": input["invoice_id"], "status": "paid", "total_cents": input["amount_cents"], "amount_paid_cents": input["amount_cents"]}}
 	case "invoices_send_payment_link":
@@ -274,8 +276,8 @@ func TestEmbeddedManifest_Valid(t *testing.T) {
 	if m.Name != "saas" {
 		t.Errorf("manifest.Name=%q, want saas", m.Name)
 	}
-	if m.Version != "0.5.0" {
-		t.Errorf("manifest.Version=%q, want 0.5.0", m.Version)
+	if m.Version != "0.6.0" {
+		t.Errorf("manifest.Version=%q, want 0.6.0", m.Version)
 	}
 	if !m.Requires.DynamicAppCalls {
 		t.Error("manifest should allow dynamic app calls for configured usage sources")
@@ -289,7 +291,7 @@ func TestEmbeddedManifest_Valid(t *testing.T) {
 		required[dep.Name] = !dep.Optional
 		versions[dep.Name] = dep.Version
 	}
-	if versions["catalog"] != ">=0.2.0" || versions["billing"] != ">=0.8.17" || versions["subscriptions"] != ">=0.5.0" {
+	if versions["catalog"] != ">=0.2.0" || versions["billing"] != ">=0.8.17" || versions["subscriptions"] != ">=0.6.0" || versions["entitlements"] != ">=0.2.0" {
 		t.Fatalf("dependency versions not enforced: %+v", versions)
 	}
 	permissions := map[string]bool{}
@@ -305,7 +307,7 @@ func TestEmbeddedManifest_Valid(t *testing.T) {
 	for _, tool := range m.Provides.MCPTools {
 		toolRequires[tool.Name] = tool.Requires
 	}
-	if toolRequires["saas_checkout_create"] != "saas.checkout" || toolRequires["saas_account_create"] != "saas.admin" || toolRequires["saas_plan_action_add"] != "saas.admin" || toolRequires["saas_billing_sync"] != "saas.admin" || toolRequires["saas_account_change_plan"] != "saas.admin" || toolRequires["saas_plan_change_get"] != "saas.read" {
+	if toolRequires["saas_checkout_create"] != "saas.checkout" || toolRequires["saas_account_create"] != "saas.admin" || toolRequires["saas_account_reconcile"] != "saas.admin" || toolRequires["saas_plan_action_add"] != "saas.admin" || toolRequires["saas_billing_sync"] != "saas.admin" || toolRequires["saas_account_change_plan"] != "saas.admin" || toolRequires["saas_plan_change_get"] != "saas.read" {
 		t.Fatalf("sensitive tools are not permission-gated: %+v", toolRequires)
 	}
 	for _, name := range []string{"catalog", "billing", "subscriptions", "entitlements", "auth"} {
@@ -540,7 +542,7 @@ func TestAccountCreate_AppliesAuthAndEntitlements(t *testing.T) {
 	for _, key := range []string{
 		"auth:auth_orgs_create",
 		"auth:auth_users_create",
-		"entitlements:entitlement_grants_create",
+		"entitlements:entitlement_grants_upsert",
 		"entitlements:entitlement_limits_set",
 	} {
 		if !got[key] {
@@ -668,7 +670,7 @@ func TestCheckoutCreate_AdminPaymentActivatesAccountAndStoresBillingRefs(t *test
 		"billing:invoices_create_from_prepared_lines",
 		"billing:payments_record",
 		"auth:auth_orgs_create",
-		"entitlements:entitlement_grants_create",
+		"entitlements:entitlement_grants_upsert",
 		"entitlements:entitlement_limits_set",
 		"containers:containers_create",
 	} {
@@ -2085,7 +2087,7 @@ func TestProvisioning_RetriesFailedFulfillmentWithoutDuplicateRun(t *testing.T) 
 	}
 }
 
-func TestProvisioning_RetrySkipsExistingEntitlementGrant(t *testing.T) {
+func TestProvisioning_RetryIdempotentlyRefreshesEntitlementGrant(t *testing.T) {
 	pf := &platformStub{failGrantFeature: "feature:b", failGrantOnce: true}
 	ctx, db := newTestCtx(t, pf)
 	defer db.Close()
@@ -2105,11 +2107,11 @@ func TestProvisioning_RetrySkipsExistingEntitlementGrant(t *testing.T) {
 	if _, err := app.toolAccountCreate(ctx, args); err != nil {
 		t.Fatal(err)
 	}
-	if got := countCallsWithFeature(pf.calls, "entitlements", "entitlement_grants_create", "feature:a"); got != 1 {
-		t.Fatalf("feature:a create calls=%d, want 1", got)
+	if got := countCallsWithFeature(pf.calls, "entitlements", "entitlement_grants_upsert", "feature:a"); got != 2 {
+		t.Fatalf("feature:a upsert calls=%d, want initial call plus retry", got)
 	}
-	if got := countCallsWithFeature(pf.calls, "entitlements", "entitlement_grants_create", "feature:b"); got != 2 {
-		t.Fatalf("feature:b create calls=%d, want failed call plus retry", got)
+	if got := countCallsWithFeature(pf.calls, "entitlements", "entitlement_grants_upsert", "feature:b"); got != 2 {
+		t.Fatalf("feature:b upsert calls=%d, want failed call plus retry", got)
 	}
 }
 

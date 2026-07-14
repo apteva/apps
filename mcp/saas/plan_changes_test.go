@@ -17,6 +17,7 @@ type planChangePlatformStub struct {
 	prorationCharge          int64
 	prorationCredit          int64
 	grants                   map[string]int64
+	grantMetadata            map[string]map[string]any
 	nextGrantID              int64
 }
 
@@ -25,6 +26,7 @@ func newPlanChangePlatformStub() *planChangePlatformStub {
 		platformStub:             &platformStub{},
 		subscriptionChangeStatus: "awaiting_approval",
 		grants:                   map[string]int64{},
+		grantMetadata:            map[string]map[string]any{},
 		nextGrantID:              1000,
 		prices: map[int64]map[string]any{
 			8101: {"id": int64(8101), "product_id": int64(7101), "unit_amount_cents": int64(1000), "currency": "USD", "interval": "month", "interval_count": int64(1)},
@@ -77,25 +79,35 @@ func (p *planChangePlatformStub) CallAppResult(appName, tool string, input map[s
 		rows := []any{}
 		for key, id := range p.grants {
 			if feature == "" || feature == key {
-				rows = append(rows, map[string]any{"id": id, "feature_key": key, "source_type": "saas", "source_id": input["subject_id"], "status": "active"})
+				rows = append(rows, map[string]any{"id": id, "feature_key": key, "source_type": "saas", "source_id": input["subject_id"], "status": "active", "metadata": p.grantMetadata[key]})
 			}
 		}
 		return p.respond(out, map[string]any{"grants": rows})
-	case "entitlements:entitlement_grants_create":
+	case "entitlements:entitlement_grants_upsert":
 		p.record(appName, tool, input)
 		feature := strFromAny(input["feature_key"])
-		p.nextGrantID++
-		p.grants[feature] = p.nextGrantID
-		return p.respond(out, map[string]any{"grant": map[string]any{"id": p.nextGrantID, "feature_key": feature}})
+		id := p.grants[feature]
+		created := id == 0
+		if created {
+			p.nextGrantID++
+			id = p.nextGrantID
+			p.grants[feature] = id
+		}
+		p.grantMetadata[feature] = mapFromAny(input["metadata"])
+		return p.respond(out, map[string]any{"grant": map[string]any{"id": id, "feature_key": feature, "metadata": input["metadata"]}, "created": created})
 	case "entitlements:entitlement_grants_revoke":
 		p.record(appName, tool, input)
 		id := int64FromAny(input["id"])
 		for feature, grantID := range p.grants {
 			if grantID == id {
 				delete(p.grants, feature)
+				delete(p.grantMetadata, feature)
 			}
 		}
 		return p.respond(out, map[string]any{"revoked": true})
+	case "subscriptions:subscriptions_update_metadata":
+		p.record(appName, tool, input)
+		return p.respond(out, map[string]any{"subscription": map[string]any{"id": input["id"], "metadata": input["metadata_patch"]}})
 	default:
 		return p.platformStub.CallAppResult(appName, tool, input, out)
 	}
@@ -117,6 +129,11 @@ func setupPlanChangeAccount(t *testing.T, app *App, ctx *sdk.AppCtx) *Account {
 	}
 	if _, err := app.toolPlanFeatureAdd(ctx, map[string]any{"plan_key": "crm-pro", "feature_key": "crm:pro"}); err != nil {
 		t.Fatal(err)
+	}
+	for _, planKey := range []string{"crm-basic", "crm-pro"} {
+		if _, err := app.toolPlanFeatureAdd(ctx, map[string]any{"plan_key": planKey, "feature_key": "crm:contacts", "grant_type": "included"}); err != nil {
+			t.Fatal(err)
+		}
 	}
 	if _, err := app.toolPlanLimitSet(ctx, map[string]any{"plan_key": "crm-basic", "feature_key": "crm:contacts", "limit_value": 100}); err != nil {
 		t.Fatal(err)
@@ -174,6 +191,10 @@ func TestPaidPlanUpgradeWaitsForPaymentAndIsIdempotent(t *testing.T) {
 	if createCall == nil || createCall.Input["defer_apply"] != true {
 		t.Fatalf("paid immediate change was not held for approval: %+v", createCall)
 	}
+	metadataPatch := mapFromAny(createCall.Input["subscription_metadata_patch"])
+	if strArg(metadataPatch, "saas_plan_key") != "crm-pro" || int64Arg(metadataPatch, "catalog_price_id") != 8102 {
+		t.Fatalf("subscription metadata patch=%v", metadataPatch)
+	}
 	if _, err := app.toolAccountChangePlan(ctx, args); err != nil {
 		t.Fatalf("idempotent in-progress retry: %v", err)
 	}
@@ -189,6 +210,9 @@ func TestPaidPlanUpgradeWaitsForPaymentAndIsIdempotent(t *testing.T) {
 	afterPayment, _ := dbAccountGet(db, "proj-test", account.ID)
 	if afterPayment.PlanKey != "crm-pro" || pf.grants["crm:pro"] == 0 || pf.grants["crm:basic"] != 0 {
 		t.Fatalf("upgrade access was not replaced: account=%+v grants=%+v", afterPayment, pf.grants)
+	}
+	if strArg(pf.grantMetadata["crm:contacts"], "plan_key") != "crm-pro" {
+		t.Fatalf("shared grant metadata=%v, want pro", pf.grantMetadata["crm:contacts"])
 	}
 	if got := countCalls(pf.calls, "subscriptions", "subscription_changes_apply"); got != 1 {
 		t.Fatalf("subscription applies=%d, want 1", got)
@@ -244,6 +268,63 @@ func TestNextCyclePlanChangeAppliesOnlyOnSubscriptionEvent(t *testing.T) {
 	}
 }
 
+func TestAccountReconcileRepairsSubscriptionAndSharedGrantMetadata(t *testing.T) {
+	pf := newPlanChangePlatformStub()
+	ctx, db := newTestCtx(t, pf)
+	defer db.Close()
+	app := &App{}
+	account := setupPlanChangeAccount(t, app, ctx)
+	metadata := mapFromAny(account.Metadata)
+	metadata["previous_plan_key"] = "crm-basic"
+	if err := dbAccountSetMetadata(db, "proj-test", account.ID, metadata); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`UPDATE saas_accounts SET plan_key='crm-pro' WHERE project_id='proj-test' AND id=?`, account.ID); err != nil {
+		t.Fatal(err)
+	}
+	if strArg(pf.grantMetadata["crm:contacts"], "plan_key") != "crm-basic" {
+		t.Fatalf("test setup did not create stale basic metadata: %v", pf.grantMetadata["crm:contacts"])
+	}
+
+	out, err := app.toolAccountReconcile(ctx, map[string]any{"account_id": account.ID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response := out.(map[string]any)
+	if response["reconciled"] != true {
+		t.Fatalf("response=%+v", response)
+	}
+	metadataCall := findCall(pf.calls, "subscriptions", "subscriptions_update_metadata")
+	if metadataCall == nil {
+		t.Fatal("subscription metadata was not reconciled")
+	}
+	patch := mapFromAny(metadataCall.Input["metadata_patch"])
+	if strArg(patch, "saas_plan_key") != "crm-pro" || int64Arg(patch, "catalog_product_id") != 7101 || int64Arg(patch, "catalog_price_id") != 8102 {
+		t.Fatalf("subscription metadata patch=%v", patch)
+	}
+	if strArg(pf.grantMetadata["crm:contacts"], "plan_key") != "crm-pro" || pf.grants["crm:basic"] != 0 || pf.grants["crm:pro"] == 0 {
+		t.Fatalf("grant projection was not repaired: grants=%v metadata=%v", pf.grants, pf.grantMetadata)
+	}
+	var proLimit map[string]any
+	for i := len(pf.calls) - 1; i >= 0; i-- {
+		call := pf.calls[i]
+		if call.App == "entitlements" && call.Tool == "entitlement_limits_set" && strArg(call.Input, "feature_key") == "crm:contacts" {
+			proLimit = call.Input
+			break
+		}
+	}
+	if int64Arg(proLimit, "limit_value") != 1000 {
+		t.Fatalf("reconciled limit=%v", proLimit)
+	}
+	grantCount := len(pf.grants)
+	if _, err := app.toolAccountReconcile(ctx, map[string]any{"account_id": account.ID}); err != nil {
+		t.Fatalf("idempotent reconcile: %v", err)
+	}
+	if len(pf.grants) != grantCount {
+		t.Fatalf("reconcile duplicated grants: before=%d after=%d", grantCount, len(pf.grants))
+	}
+}
+
 func TestPlanChangeRecoveryContinuesFailedFulfillment(t *testing.T) {
 	pf := newPlanChangePlatformStub()
 	pf.failures = map[string]int{"containers:containers_create": 1}
@@ -279,8 +360,8 @@ func TestPlanChangeRecoveryContinuesFailedFulfillment(t *testing.T) {
 	if after.PlanKey != "crm-pro" || pf.grants["crm:basic"] != 0 || pf.grants["crm:pro"] == 0 {
 		t.Fatalf("recovery did not complete access replacement: account=%+v grants=%+v", after, pf.grants)
 	}
-	if got := countCallsWithFeature(pf.calls, "entitlements", "entitlement_grants_create", "crm:pro"); got != 1 {
-		t.Fatalf("target grant creates=%d, want 1", got)
+	if got := countCallsWithFeature(pf.calls, "entitlements", "entitlement_grants_upsert", "crm:pro"); got != 2 {
+		t.Fatalf("target grant upserts=%d, want 2", got)
 	}
 	if got := countCalls(pf.calls, "containers", "containers_create"); got != 2 {
 		t.Fatalf("fulfillment attempts=%d, want 2", got)

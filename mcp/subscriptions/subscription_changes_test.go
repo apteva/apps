@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -10,8 +11,8 @@ import (
 func TestSubscriptionChangeManifestAndTools(t *testing.T) {
 	app := &App{}
 	manifest := app.Manifest()
-	if manifest.Version != "0.5.0" {
-		t.Fatalf("manifest version=%s, want 0.5.0", manifest.Version)
+	if manifest.Version != "0.6.0" {
+		t.Fatalf("manifest version=%s, want 0.6.0", manifest.Version)
 	}
 	publishesChange := false
 	for _, event := range manifest.Provides.Publishes {
@@ -24,10 +25,96 @@ func TestSubscriptionChangeManifestAndTools(t *testing.T) {
 	for _, tool := range app.MCPTools() {
 		tools[tool.Name] = true
 	}
-	for _, name := range []string{"subscription_changes_create", "subscription_changes_get", "subscription_changes_apply"} {
+	for _, name := range []string{"subscriptions_update_metadata", "subscription_changes_create", "subscription_changes_get", "subscription_changes_apply"} {
 		if !tools[name] {
 			t.Fatalf("runtime is missing %s", name)
 		}
+	}
+}
+
+func TestSubscriptionChangeAppliesMetadataPatchAtomically(t *testing.T) {
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("proj-metadata-change"))
+	now := time.Date(2026, 7, 14, 0, 0, 0, 0, time.UTC)
+	sub, err := dbSubscriptionCreate(ctx, "proj-metadata-change", map[string]any{
+		"currency": "EUR", "metadata": map[string]any{"saas_plan_key": "basic", "nested": map[string]any{"keep": true, "remove": true}},
+		"items": []any{map[string]any{"catalog_product_id": 8, "catalog_price_id": 11, "title": "Basic", "unit_amount_cents": 2900, "currency": "EUR"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	change, _, err := dbSubscriptionChangeCreate(ctx.AppDB(), "proj-metadata-change", map[string]any{
+		"subscription_id": sub.ID, "idempotency_key": "metadata-upgrade", "defer_apply": true,
+		"items": []any{map[string]any{"catalog_product_id": 8, "catalog_price_id": 12, "title": "Pro", "unit_amount_cents": 7900, "currency": "EUR"}},
+		"subscription_metadata_patch": map[string]any{
+			"saas_plan_key": "pro", "catalog_price_id": int64(12), "nested": map[string]any{"remove": nil, "added": "yes"},
+		},
+	}, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := applySubscriptionChange(ctx, change.ID, now); err != nil {
+		t.Fatal(err)
+	}
+	updated, err := dbSubscriptionGet(ctx.AppDB(), "proj-metadata-change", sub.ID, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var metadata map[string]any
+	if err := json.Unmarshal(updated.Metadata, &metadata); err != nil {
+		t.Fatal(err)
+	}
+	if metadata["saas_plan_key"] != "pro" || int64Arg(metadata, "catalog_price_id") != 12 {
+		t.Fatalf("metadata=%v", metadata)
+	}
+	nested := mapFromAny(metadata["nested"])
+	if nested["keep"] != true || nested["added"] != "yes" {
+		t.Fatalf("nested metadata=%v", nested)
+	}
+	if _, exists := nested["remove"]; exists {
+		t.Fatalf("null merge-patch key was not removed: %v", nested)
+	}
+	if len(updated.Items) != 2 || updated.Items[1].Status != "active" {
+		t.Fatalf("items=%+v", updated.Items)
+	}
+}
+
+func TestSubscriptionMetadataUpdateDoesNotChangeLifecycle(t *testing.T) {
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("proj-metadata-repair"))
+	sub, err := dbSubscriptionCreate(ctx, "proj-metadata-repair", map[string]any{
+		"status": "trialing", "metadata": map[string]any{"saas_plan_key": "basic"},
+		"items": []any{map[string]any{"title": "Basic", "currency": "USD"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	updated, changed, err := dbSubscriptionUpdateMetadata(ctx.AppDB(), "proj-metadata-repair", map[string]any{
+		"id": sub.ID, "metadata_patch": map[string]any{"saas_plan_key": "pro"}, "actor": "saas",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !changed {
+		t.Fatal("first metadata update was not reported as changed")
+	}
+	if updated.Status != "trialing" {
+		t.Fatalf("status=%s, want trialing", updated.Status)
+	}
+	if strArg(mapFromAny(updated.Metadata), "saas_plan_key") != "pro" {
+		t.Fatalf("metadata=%s", updated.Metadata)
+	}
+	if _, changed, err := dbSubscriptionUpdateMetadata(ctx.AppDB(), "proj-metadata-repair", map[string]any{
+		"id": sub.ID, "metadata_patch": map[string]any{"saas_plan_key": "pro"}, "actor": "saas",
+	}); err != nil {
+		t.Fatalf("idempotent metadata update: %v", err)
+	} else if changed {
+		t.Fatal("idempotent metadata update was reported as changed")
+	}
+	var events int
+	if err := ctx.AppDB().QueryRow(`SELECT COUNT(*) FROM subscription_events WHERE project_id=? AND subscription_id=? AND action='subscription.metadata_updated'`, "proj-metadata-repair", sub.ID).Scan(&events); err != nil {
+		t.Fatal(err)
+	}
+	if events != 1 {
+		t.Fatalf("metadata update events=%d, want 1", events)
 	}
 }
 

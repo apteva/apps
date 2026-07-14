@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: subscriptions
 display_name: Subscriptions
-version: 0.5.0
+version: 0.6.0
 description: |
   Generic recurring-commerce lifecycle for SaaS, physical product
   subscriptions, and services. Subscriptions owns recurrence, status,
@@ -19,6 +19,8 @@ description: |
   engines and applies once, repeating, or forever pricing by billing cycle.
   v0.5.0 adds durable immediate and next-cycle item changes with cycle-safe
   history and generic proration calculations for external orchestrators.
+  v0.6.0 applies opaque source metadata atomically with item changes and
+  supports idempotent metadata reconciliation without lifecycle transitions.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/subscriptions
@@ -89,6 +91,8 @@ provides:
       description: Return recurring subscription metrics such as MRR by currency.
     - name: subscriptions_update_status
       description: Update subscription status and period fields.
+    - name: subscriptions_update_metadata
+      description: Merge an opaque metadata patch without changing subscription lifecycle state.
     - name: subscriptions_cancel
       description: Cancel a subscription immediately or at period end.
     - name: subscription_items_create
@@ -122,7 +126,7 @@ provides:
     - name: subscription_events_list
       description: List subscription audit events.
     - name: subscription_changes_create
-      description: Create an idempotent immediate or next-cycle replacement of subscription items; deferred immediate changes await explicit approval.
+      description: Create an idempotent immediate or next-cycle replacement of subscription items and optional atomic subscription metadata projection; deferred immediate changes await explicit approval.
     - name: subscription_changes_get
       description: Fetch a durable subscription item change.
     - name: subscription_changes_apply

@@ -2,11 +2,13 @@ schema: apteva-app/v1
 
 name: entitlements
 display_name: Entitlements
-version: 0.1.1
+version: 0.2.0
 description: |
   Shared access-control and usage layer. Entitlements grants, revokes,
   checks, and meters access for SaaS plans, courses, memberships,
   digital downloads, paid content, manual grants, trials, and promos.
+  Source-scoped grants can be projected idempotently without losing
+  revoked grant history.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/entitlements
@@ -26,6 +28,8 @@ provides:
   mcp_tools:
     - name: entitlement_grants_create
       description: Grant a feature/key to a subject.
+    - name: entitlement_grants_upsert
+      description: Idempotently create or refresh one active grant identified by its subject, feature, and source.
     - name: entitlement_grants_revoke
       description: Revoke an entitlement grant.
     - name: entitlements_check

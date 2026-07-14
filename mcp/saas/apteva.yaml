@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: saas
 display_name: SaaS
-version: 0.5.0
+version: 0.6.0
 description: |
   Shared SaaS access control for Apteva apps. SaaS packages installed
   apps into sellable plans, creates customer accounts backed by Auth
@@ -41,7 +41,7 @@ requires:
         - invoice.refunded
         - payment_method.attached
     - name: subscriptions
-      version: ">=0.5.0"
+      version: ">=0.6.0"
       reason: durable trial expiration, cycle-aware discounts, invoice preparation, and cycle-safe subscription item changes
       optional: false
       events:
@@ -54,6 +54,7 @@ requires:
         - subscription.cycle_due
         - subscription.change.applied
     - name: entitlements
+      version: ">=0.2.0"
       optional: false
     - name: auth
       optional: false
@@ -155,6 +156,9 @@ provides:
     - name: saas_account_get
       description: Fetch one SaaS account.
       requires: saas.read
+    - name: saas_account_reconcile
+      description: Repair Subscription metadata and Entitlements projections from the account's authoritative SaaS plan.
+      requires: saas.admin
     - name: saas_account_change_plan
       description: Upgrade or downgrade an active account within one Catalog product, including proration and payment orchestration.
       requires: saas.admin
