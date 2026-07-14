@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: entitlements
 display_name: Entitlements
-version: 0.2.0
+version: 0.2.1
 description: |
   Shared access-control and usage layer. Entitlements grants, revokes,
   checks, and meters access for SaaS plans, courses, memberships,
