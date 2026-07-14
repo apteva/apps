@@ -115,6 +115,13 @@ func (a *App) toolMigrate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		_ = a.store.recordEvent(t.ID, "migrate_failed", "user",
 			map[string]any{"stage": stage, "error": cause.Error()})
 		if baseURL, status, rerr := a.startTenantOnHost(ctx, sourceHost, t.ID, t.Slug, sourceDir, version, sourcePort, prevStatus); rerr == nil {
+			sourceTenant := *t
+			sourceTenant.BaseURL = baseURL
+			if routeErr := a.refreshTenantIngress(ctx, &sourceTenant); routeErr != nil {
+				_ = a.store.recordEvent(t.ID, "migrate_rollback_route_failed", "user",
+					map[string]any{"error": routeErr.Error()})
+				cause = fmt.Errorf("%w; restore source ingress: %v", cause, routeErr)
+			}
 			_ = a.store.setStatus(t.ID, status, "user")
 			_ = a.store.recordEvent(t.ID, "migrate_rolled_back", "user",
 				map[string]any{"base_url": baseURL, "port": sourcePort, "instance_id": t.InstanceID})
@@ -134,18 +141,13 @@ func (a *App) toolMigrate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 			_ = a.stopTenantOnHost(ctx, t, targetPort)
 			return rollback("validate target apps", err)
 		}
-		if t.Domain != "" {
-			routeTenant := *t
-			routeTenant.BaseURL = baseURL
-			if err := a.registerRouteForTenantHost(ctx, &routeTenant, t.Domain, t.Domain, "tool:tenant_migrate"); err != nil {
-				_ = a.stopTenantOnHost(ctx, &routeTenant, targetPort)
-				return rollback("route", err)
-			}
+		routeTenant := *t
+		routeTenant.BaseURL = baseURL
+		if err := a.refreshTenantIngress(ctx, &routeTenant); err != nil {
+			_ = a.stopTenantOnHost(ctx, &routeTenant, targetPort)
+			return rollback("route", err)
 		}
 		if err := a.store.setLocation(t.ID, targetID, baseURL, sourceDir); err != nil {
-			if t.Domain != "" {
-				_ = a.registerRouteForTenantHost(ctx, t, t.Domain, t.Domain, "tool:tenant_migrate_rollback")
-			}
 			return rollback("persist", err)
 		}
 		_ = a.store.setStatus(t.ID, newStatus, "user")
@@ -175,16 +177,14 @@ func (a *App) toolMigrate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		_ = a.removeTenantData(ctx, targetHost, t.Slug, targetDir)
 		return rollback("validate target apps", err)
 	}
-	if t.Domain != "" {
-		routeTenant := *t
-		routeTenant.InstanceID = targetID
-		routeTenant.BaseURL = baseURL
-		routeTenant.ConfigDir = targetDir
-		if err := a.registerRouteForTenantHost(ctx, &routeTenant, t.Domain, t.Domain, "tool:tenant_migrate"); err != nil {
-			_ = a.stopTenantOnHost(ctx, &routeTenant, targetPort)
-			_ = a.removeTenantData(ctx, targetHost, t.Slug, targetDir)
-			return rollback("route", err)
-		}
+	routeTenant := *t
+	routeTenant.InstanceID = targetID
+	routeTenant.BaseURL = baseURL
+	routeTenant.ConfigDir = targetDir
+	if err := a.refreshTenantIngress(ctx, &routeTenant); err != nil {
+		_ = a.stopTenantOnHost(ctx, &routeTenant, targetPort)
+		_ = a.removeTenantData(ctx, targetHost, t.Slug, targetDir)
+		return rollback("route", err)
 	}
 
 	cleanupTarget := func() {
@@ -207,9 +207,6 @@ func (a *App) toolMigrate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		}
 		if err := a.store.createRetainedSource(retained); err != nil {
 			cleanupTarget()
-			if t.Domain != "" {
-				_ = a.registerRouteForTenantHost(ctx, t, t.Domain, t.Domain, "tool:tenant_migrate_rollback")
-			}
 			return rollback("record retained source", err)
 		}
 	}
@@ -219,9 +216,6 @@ func (a *App) toolMigrate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 			_ = a.store.deleteRetainedSource(t.ID)
 		}
 		cleanupTarget()
-		if t.Domain != "" {
-			_ = a.registerRouteForTenantHost(ctx, t, t.Domain, t.Domain, "tool:tenant_migrate_rollback")
-		}
 		return rollback("persist", err)
 	}
 	_ = a.store.setStatus(t.ID, newStatus, "user")

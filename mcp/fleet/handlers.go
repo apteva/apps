@@ -401,6 +401,11 @@ func (a *App) toolGet(_ *sdk.AppCtx, args map[string]any) (any, error) {
 	if retained != nil {
 		out["retained_source"] = retained
 	}
+	hosts, err := a.store.listTenantHosts(id)
+	if err != nil {
+		return nil, err
+	}
+	out["hosts"] = hosts
 	return out, nil
 }
 
@@ -600,6 +605,9 @@ func (a *App) toolDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 				"note":      "process stopped; data dir preserved at " + t.ConfigDir + ". Re-run with confirm=true to wipe and remove.",
 			}, nil
 		}
+		if err := a.unregisterTenantHostMappings(ctx, t.ID); err != nil {
+			return nil, fmt.Errorf("remove tenant host ingress before delete: %w", err)
+		}
 		// Wipe only the exact Fleet-managed data directory.
 		if t.ConfigDir != "" {
 			host, hostErr := a.resolveFleetHost(ctx, t.InstanceID)
@@ -611,6 +619,8 @@ func (a *App) toolDelete(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 				return nil, fmt.Errorf("remove tenant data: %w", err)
 			}
 		}
+	} else if err := a.unregisterTenantHostMappings(ctx, t.ID); err != nil {
+		return nil, fmt.Errorf("remove tenant host ingress before delete: %w", err)
 	}
 
 	if err := a.store.hardDelete(t.ID); err != nil {
@@ -710,6 +720,12 @@ func (a *App) httpGet(w http.ResponseWriter, r *http.Request) {
 	if retained != nil {
 		out["retained_source"] = retained
 	}
+	hosts, hostsErr := a.store.listTenantHosts(id)
+	if hostsErr != nil {
+		writeJSONErr(w, http.StatusInternalServerError, hostsErr)
+		return
+	}
+	out["hosts"] = hosts
 	writeJSON(w, http.StatusOK, out)
 }
 
@@ -1150,6 +1166,52 @@ func (a *App) toolDomainGrantList(_ *sdk.AppCtx, args map[string]any) (any, erro
 		return nil, err
 	}
 	return map[string]any{"grants": grants, "count": len(grants)}, nil
+}
+
+func (a *App) toolTenantHostAttach(_ *sdk.AppCtx, args map[string]any) (any, error) {
+	tenantID := strings.TrimSpace(getStr(args, "tenant_id"))
+	if tenantID == "" {
+		return nil, errors.New("tenant_id required")
+	}
+	tenant, _, err := a.store.get(tenantID)
+	if err != nil {
+		return nil, err
+	}
+	host, err := a.attachTenantHost(globalCtx, tenant, getStr(args, "hostname"), int64Arg(args, "domain_grant_id"))
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"host": host}, nil
+}
+
+func (a *App) toolTenantHostList(_ *sdk.AppCtx, args map[string]any) (any, error) {
+	tenantID := strings.TrimSpace(getStr(args, "tenant_id"))
+	if tenantID != "" {
+		if _, _, err := a.store.get(tenantID); err != nil {
+			return nil, err
+		}
+	}
+	hosts, err := a.store.listTenantHosts(tenantID)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"hosts": hosts, "count": len(hosts)}, nil
+}
+
+func (a *App) toolTenantHostRemove(_ *sdk.AppCtx, args map[string]any) (any, error) {
+	tenantID := strings.TrimSpace(getStr(args, "tenant_id"))
+	if tenantID == "" {
+		return nil, errors.New("tenant_id required")
+	}
+	tenant, _, err := a.store.get(tenantID)
+	if err != nil {
+		return nil, err
+	}
+	host, err := a.removeTenantHost(globalCtx, tenant, getStr(args, "hostname"))
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"removed": true, "host": host}, nil
 }
 
 func (a *App) toolDomainGrantRevoke(_ *sdk.AppCtx, args map[string]any) (any, error) {

@@ -198,6 +198,31 @@ func normaliseGrantDomain(s string) (string, error) {
 	return d, nil
 }
 
+func normaliseExactHostname(s string) (string, error) {
+	hostname := strings.ToLower(strings.TrimSpace(strings.TrimSuffix(s, ".")))
+	if hostname == "" {
+		return "", errors.New("hostname required")
+	}
+	if len(hostname) > 253 || strings.ContainsAny(hostname, " \t\r\n/?:#@*") || net.ParseIP(hostname) != nil {
+		return "", fmt.Errorf("invalid exact hostname %q", s)
+	}
+	labels := strings.Split(hostname, ".")
+	if len(labels) < 2 {
+		return "", fmt.Errorf("hostname %q must contain a dot", s)
+	}
+	for _, label := range labels {
+		if label == "" || len(label) > 63 || label[0] == '-' || label[len(label)-1] == '-' {
+			return "", fmt.Errorf("invalid exact hostname %q", s)
+		}
+		for _, ch := range label {
+			if (ch < 'a' || ch > 'z') && (ch < '0' || ch > '9') && ch != '-' {
+				return "", fmt.Errorf("invalid exact hostname %q", s)
+			}
+		}
+	}
+	return hostname, nil
+}
+
 func wildcardHost(domain string) string {
 	if domain == "" {
 		return ""
@@ -509,18 +534,7 @@ func (a *App) grantDomain(ctx *sdk.AppCtx, projectID string, t *Tenant, spec att
 		DomainRecordID:   record,
 		WildcardRecordID: wildcardRecord,
 	}
-	if err := a.registerRouteForTenantHost(ctx, t, domain, domain, "tool:tenant_domain_grant"); err != nil {
-		cleanupDNS()
-		return nil, err
-	}
-	if err := a.registerRouteForTenantHost(ctx, t, wildcardHost(domain), wildcardHost(domain), "tool:tenant_domain_grant"); err != nil {
-		a.unregisterRouteForTenant(ctx, domain)
-		cleanupDNS()
-		return nil, err
-	}
 	if err := a.store.upsertDomainGrant(g); err != nil {
-		a.unregisterRouteForTenant(ctx, domain)
-		a.unregisterRouteForTenant(ctx, wildcardHost(domain))
 		cleanupDNS()
 		return nil, err
 	}
@@ -528,22 +542,7 @@ func (a *App) grantDomain(ctx *sdk.AppCtx, projectID string, t *Tenant, spec att
 		"domain": domain, "wildcard": true, "target": target, "type": rtype,
 	})
 
-	if a.certsAvailable(ctx) {
-		a.issueGrantCert(ctx, projectID, t.ID, domain)
-		a.issueGrantCert(ctx, projectID, t.ID, wildcardHost(domain))
-	}
 	return g, nil
-}
-
-func (a *App) issueGrantCert(ctx *sdk.AppCtx, projectID, tenantID, fqdn string) {
-	if fqdn == "" || !a.certsAvailable(ctx) {
-		return
-	}
-	if cErr := callCertsTool(ctx, projectID, "cert_issue", map[string]any{"fqdn": fqdn}, nil); cErr != nil {
-		_ = a.store.recordEvent(tenantID, "domain_grant.cert_kickoff_failed", "tool:tenant_domain_grant", map[string]any{
-			"fqdn": fqdn, "error": cErr.Error(),
-		})
-	}
 }
 
 func (a *App) revokeDomainGrant(ctx *sdk.AppCtx, projectID string, t *Tenant, domain string) (*DomainGrant, error) {
@@ -565,6 +564,21 @@ func (a *App) revokeDomainGrant(ctx *sdk.AppCtx, projectID string, t *Tenant, do
 	}
 	if g == nil {
 		return nil, fmt.Errorf("domain grant not found: %s", domain)
+	}
+	hosts, err := a.store.listTenantHostsByGrant(t.ID, g.ID)
+	if err != nil {
+		return nil, err
+	}
+	for _, host := range hosts {
+		if err := a.unregisterTenantHost(ctx, host.Hostname); err != nil {
+			_ = a.store.setTenantHostStatus(t.ID, host.Hostname, "error", err.Error())
+			return nil, fmt.Errorf("remove ingress for %s: %w", host.Hostname, err)
+		}
+	}
+	for _, host := range hosts {
+		if err := a.store.deleteTenantHost(t.ID, host.Hostname); err != nil {
+			return nil, err
+		}
 	}
 	var deleteErr error
 	if a.domainsAvailable(ctx) {
@@ -746,8 +760,18 @@ func (a *App) registerRouteForTenantHost(ctx *sdk.AppCtx, t *Tenant, hostname, c
 }
 
 func (a *App) refreshTenantIngressTargets(ctx *sdk.AppCtx, t *Tenant, target string) error {
-	if t == nil || !t.IsHosted() || ctx == nil || ctx.PlatformAPI() == nil {
+	if t == nil {
+		return errors.New("tenant required")
+	}
+	hosts, err := a.store.listTenantHosts(t.ID)
+	if err != nil {
+		return err
+	}
+	if t.Domain == "" && len(hosts) == 0 {
 		return nil
+	}
+	if ctx == nil || ctx.PlatformAPI() == nil {
+		return errors.New("platform ingress is unavailable")
 	}
 	target = strings.TrimRight(target, "/")
 	expose := func(hostname, certFQDN string) error {
@@ -759,24 +783,161 @@ func (a *App) refreshTenantIngressTargets(ctx *sdk.AppCtx, t *Tenant, target str
 		})
 		return err
 	}
+	var firstErr error
 	if err := expose(t.Domain, t.Domain); err != nil {
-		return err
+		firstErr = err
 	}
-	grants, err := a.store.listDomainGrants(t.ID)
+	for _, host := range hosts {
+		if err := expose(host.Hostname, host.Hostname); err != nil {
+			_ = a.store.setTenantHostStatus(t.ID, host.Hostname, "error", err.Error())
+			if firstErr == nil {
+				firstErr = err
+			}
+			continue
+		}
+		if err := a.store.setTenantHostStatus(t.ID, host.Hostname, "active", ""); err != nil && firstErr == nil {
+			firstErr = err
+		}
+	}
+	return firstErr
+}
+
+func (a *App) refreshTenantIngress(ctx *sdk.AppCtx, t *Tenant) error {
+	if t == nil {
+		return errors.New("tenant required")
+	}
+	hosts, err := a.store.listTenantHosts(t.ID)
 	if err != nil {
 		return err
 	}
+	if t.Domain == "" && len(hosts) == 0 {
+		return nil
+	}
+	target, err := a.internalTenantBaseURL(ctx, t)
+	if err != nil {
+		return err
+	}
+	return a.refreshTenantIngressTargets(ctx, t, target)
+}
+
+func (a *App) resolveTenantHostGrant(tenantID, hostname string, grantID int64) (*DomainGrant, error) {
+	if grantID > 0 {
+		grant, err := a.store.getDomainGrantByID(grantID)
+		if err != nil {
+			return nil, err
+		}
+		if grant == nil || grant.TenantID != tenantID {
+			return nil, fmt.Errorf("domain grant %d not found for tenant", grantID)
+		}
+		if grant.Status != "active" || !grantCoversFQDN(grant.Domain, hostname, grant.Wildcard) {
+			return nil, fmt.Errorf("domain grant %d does not cover %s", grantID, hostname)
+		}
+		return grant, nil
+	}
+
+	grants, err := a.store.listDomainGrants(tenantID)
+	if err != nil {
+		return nil, err
+	}
+	var best *DomainGrant
 	for _, grant := range grants {
-		if grant.Status != "active" {
+		if grant.Status != "active" || !grantCoversFQDN(grant.Domain, hostname, grant.Wildcard) {
 			continue
 		}
-		if err := expose(grant.Domain, grant.Domain); err != nil {
-			return err
+		if best == nil || len(grant.Domain) > len(best.Domain) {
+			best = grant
 		}
-		if grant.Wildcard {
-			if err := expose(wildcardHost(grant.Domain), wildcardHost(grant.Domain)); err != nil {
-				return err
-			}
+	}
+	return best, nil
+}
+
+func (a *App) attachTenantHost(ctx *sdk.AppCtx, t *Tenant, rawHostname string, grantID int64) (*TenantHost, error) {
+	if t == nil {
+		return nil, errors.New("tenant required")
+	}
+	done, err := a.beginTenantOperation(t.ID, "attach hostname")
+	if err != nil {
+		return nil, err
+	}
+	defer done()
+
+	hostname, err := normaliseExactHostname(rawHostname)
+	if err != nil {
+		return nil, err
+	}
+	existing, err := a.store.getTenantHostByHostname(hostname)
+	if err != nil {
+		return nil, err
+	}
+	if existing != nil && existing.TenantID != t.ID {
+		return nil, fmt.Errorf("hostname %s is already assigned to another tenant", hostname)
+	}
+	grant, err := a.resolveTenantHostGrant(t.ID, hostname, grantID)
+	if err != nil {
+		return nil, err
+	}
+	host := &TenantHost{TenantID: t.ID, Hostname: hostname, Status: "pending"}
+	if grant != nil {
+		host.DomainGrantID = grant.ID
+	}
+	if err := a.store.upsertTenantHost(host); err != nil {
+		return nil, err
+	}
+	if err := a.registerRouteForTenantHost(ctx, t, hostname, hostname, "tool:tenant_host_attach"); err != nil {
+		_ = a.store.setTenantHostStatus(t.ID, hostname, "error", err.Error())
+		failed, _ := a.store.getTenantHost(t.ID, hostname)
+		return failed, err
+	}
+	if err := a.store.setTenantHostStatus(t.ID, hostname, "active", ""); err != nil {
+		return nil, err
+	}
+	_ = a.store.recordEvent(t.ID, "tenant_host.attached", "tool:tenant_host_attach", map[string]any{
+		"hostname": hostname, "domain_grant_id": host.DomainGrantID,
+	})
+	return a.store.getTenantHost(t.ID, hostname)
+}
+
+func (a *App) removeTenantHost(ctx *sdk.AppCtx, t *Tenant, rawHostname string) (*TenantHost, error) {
+	if t == nil {
+		return nil, errors.New("tenant required")
+	}
+	done, err := a.beginTenantOperation(t.ID, "remove hostname")
+	if err != nil {
+		return nil, err
+	}
+	defer done()
+
+	hostname, err := normaliseExactHostname(rawHostname)
+	if err != nil {
+		return nil, err
+	}
+	host, err := a.store.getTenantHost(t.ID, hostname)
+	if err != nil {
+		return nil, err
+	}
+	if host == nil {
+		return nil, fmt.Errorf("tenant hostname not found: %s", hostname)
+	}
+	if err := a.unregisterTenantHost(ctx, hostname); err != nil {
+		_ = a.store.setTenantHostStatus(t.ID, hostname, "error", err.Error())
+		return nil, err
+	}
+	if err := a.store.deleteTenantHost(t.ID, hostname); err != nil {
+		return nil, err
+	}
+	_ = a.store.recordEvent(t.ID, "tenant_host.removed", "tool:tenant_host_remove", map[string]any{"hostname": hostname})
+	return host, nil
+}
+
+func (a *App) unregisterTenantHostMappings(ctx *sdk.AppCtx, tenantID string) error {
+	hosts, err := a.store.listTenantHosts(tenantID)
+	if err != nil {
+		return err
+	}
+	for _, host := range hosts {
+		if err := a.unregisterTenantHost(ctx, host.Hostname); err != nil {
+			_ = a.store.setTenantHostStatus(tenantID, host.Hostname, "error", err.Error())
+			return fmt.Errorf("remove ingress for %s: %w", host.Hostname, err)
 		}
 	}
 	return nil
@@ -785,10 +946,14 @@ func (a *App) refreshTenantIngressTargets(ctx *sdk.AppCtx, t *Tenant, target str
 // unregisterRouteForTenant — cleanup half. Safe when the route was
 // never registered.
 func (a *App) unregisterRouteForTenant(ctx *sdk.AppCtx, fqdn string) {
-	if fqdn == "" || ctx == nil || ctx.PlatformAPI() == nil {
-		return
+	_ = a.unregisterTenantHost(ctx, fqdn)
+}
+
+func (a *App) unregisterTenantHost(ctx *sdk.AppCtx, hostname string) error {
+	if hostname == "" || ctx == nil || ctx.PlatformAPI() == nil {
+		return errors.New("hostname and platform ingress are required")
 	}
-	_ = ctx.PlatformAPI().UnexposeIngress(fqdn)
+	return ctx.PlatformAPI().UnexposeIngress(hostname)
 }
 
 // myInstallID reads APTEVA_INSTALL_ID — the platform injects it at

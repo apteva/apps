@@ -87,6 +87,20 @@ type DomainGrant struct {
 	UpdatedAt        time.Time `json:"updated_at"`
 }
 
+// TenantHost is one exact hostname routed through the parent ingress to a
+// managed tenant. DomainGrantID is optional: client-managed DNS and adopted
+// legacy routes still need Fleet-owned tunnel refreshes without a grant.
+type TenantHost struct {
+	ID            int64     `json:"id"`
+	TenantID      string    `json:"tenant_id"`
+	Hostname      string    `json:"hostname"`
+	DomainGrantID int64     `json:"domain_grant_id,omitempty"`
+	Status        string    `json:"status"`
+	LastError     string    `json:"last_error,omitempty"`
+	CreatedAt     time.Time `json:"created_at"`
+	UpdatedAt     time.Time `json:"updated_at"`
+}
+
 // ProviderGrant exposes a parent integration connection as a
 // tenant-local virtual connection. Apps in the tenant see a normal
 // connection id; the tenant server proxies allowed calls back to the
@@ -579,12 +593,178 @@ func (s *store) getDomainGrant(tenantID, domain string) (*DomainGrant, error) {
 	))
 }
 
+func (s *store) getDomainGrantByID(id int64) (*DomainGrant, error) {
+	return scanDomainGrant(s.db.QueryRow(
+		`SELECT `+domainGrantCols+`
+		   FROM fleet_domain_grants
+		  WHERE id = ?`,
+		id,
+	))
+}
+
 func (s *store) deleteDomainGrant(tenantID, domain string) error {
 	_, err := s.db.Exec(
 		`DELETE FROM fleet_domain_grants WHERE tenant_id = ? AND domain = ?`,
 		tenantID, domain,
 	)
 	return err
+}
+
+func (s *store) upsertTenantHost(h *TenantHost) error {
+	if h == nil {
+		return errors.New("tenant host required")
+	}
+	now := time.Now().UTC()
+	status := strings.TrimSpace(h.Status)
+	if status == "" {
+		status = "pending"
+	}
+	_, err := s.db.Exec(
+		`INSERT INTO fleet_tenant_hosts
+			(tenant_id, hostname, domain_grant_id, status, last_error, created_at, updated_at)
+		 VALUES (?, ?, ?, ?, ?, ?, ?)
+		 ON CONFLICT(tenant_id, hostname) DO UPDATE SET
+		   domain_grant_id = excluded.domain_grant_id,
+		   status = excluded.status,
+		   last_error = excluded.last_error,
+		   updated_at = excluded.updated_at`,
+		h.TenantID, h.Hostname, nullInt64(h.DomainGrantID), status, nullStr(h.LastError), now, now,
+	)
+	if err != nil {
+		return err
+	}
+	stored, err := s.getTenantHost(h.TenantID, h.Hostname)
+	if err != nil {
+		return err
+	}
+	if stored == nil {
+		return errors.New("tenant host was not persisted")
+	}
+	*h = *stored
+	return nil
+}
+
+func (s *store) setTenantHostStatus(tenantID, hostname, status, lastError string) error {
+	res, err := s.db.Exec(
+		`UPDATE fleet_tenant_hosts
+		    SET status = ?, last_error = ?, updated_at = ?
+		  WHERE tenant_id = ? AND hostname = ?`,
+		status, nullStr(lastError), time.Now().UTC(), tenantID, hostname,
+	)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return errors.New("tenant host not found")
+	}
+	return nil
+}
+
+const tenantHostCols = `id, tenant_id, hostname, domain_grant_id, status,
+	COALESCE(last_error, ''), created_at, updated_at`
+
+func scanTenantHost(s interface{ Scan(...any) error }) (*TenantHost, error) {
+	var (
+		h       TenantHost
+		grantID sql.NullInt64
+	)
+	err := s.Scan(&h.ID, &h.TenantID, &h.Hostname, &grantID, &h.Status,
+		&h.LastError, &h.CreatedAt, &h.UpdatedAt)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	if grantID.Valid {
+		h.DomainGrantID = grantID.Int64
+	}
+	return &h, nil
+}
+
+func (s *store) getTenantHost(tenantID, hostname string) (*TenantHost, error) {
+	return scanTenantHost(s.db.QueryRow(
+		`SELECT `+tenantHostCols+`
+		   FROM fleet_tenant_hosts
+		  WHERE tenant_id = ? AND hostname = ?`,
+		tenantID, hostname,
+	))
+}
+
+func (s *store) getTenantHostByHostname(hostname string) (*TenantHost, error) {
+	return scanTenantHost(s.db.QueryRow(
+		`SELECT `+tenantHostCols+`
+		   FROM fleet_tenant_hosts
+		  WHERE hostname = ?`,
+		hostname,
+	))
+}
+
+func (s *store) listTenantHosts(tenantID string) ([]*TenantHost, error) {
+	query := `SELECT ` + tenantHostCols + ` FROM fleet_tenant_hosts`
+	args := []any{}
+	if tenantID != "" {
+		query += ` WHERE tenant_id = ?`
+		args = append(args, tenantID)
+	}
+	query += ` ORDER BY tenant_id, hostname`
+	rows, err := s.db.Query(query, args...)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []*TenantHost{}
+	for rows.Next() {
+		h, err := scanTenantHost(rows)
+		if err != nil {
+			return nil, err
+		}
+		if h != nil {
+			out = append(out, h)
+		}
+	}
+	return out, rows.Err()
+}
+
+func (s *store) listTenantHostsByGrant(tenantID string, grantID int64) ([]*TenantHost, error) {
+	rows, err := s.db.Query(
+		`SELECT `+tenantHostCols+`
+		   FROM fleet_tenant_hosts
+		  WHERE tenant_id = ? AND domain_grant_id = ?
+		  ORDER BY hostname`,
+		tenantID, grantID,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	out := []*TenantHost{}
+	for rows.Next() {
+		h, err := scanTenantHost(rows)
+		if err != nil {
+			return nil, err
+		}
+		if h != nil {
+			out = append(out, h)
+		}
+	}
+	return out, rows.Err()
+}
+
+func (s *store) deleteTenantHost(tenantID, hostname string) error {
+	res, err := s.db.Exec(
+		`DELETE FROM fleet_tenant_hosts WHERE tenant_id = ? AND hostname = ?`,
+		tenantID, hostname,
+	)
+	if err != nil {
+		return err
+	}
+	n, _ := res.RowsAffected()
+	if n == 0 {
+		return errors.New("tenant host not found")
+	}
+	return nil
 }
 
 // bumpRespawn records an auto-respawn attempt. The counter caps in code
@@ -613,6 +793,13 @@ func nullStr(s string) any {
 		return nil
 	}
 	return s
+}
+
+func nullInt64(v int64) any {
+	if v == 0 {
+		return nil
+	}
+	return v
 }
 
 var ErrNotFound = errors.New("tenant not found")

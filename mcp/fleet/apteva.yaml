@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: fleet
 display_name: Fleet
-version: 0.8.19
+version: 0.8.20
 description: |
   Control plane for a fleet of client apteva instances. Spawns every
   tenant as a local apteva process on the parent host with admin-
@@ -101,11 +101,17 @@ provides:
     - name: tenant_detach_domain
       description: "Clear a tenant's domain link — DNS delete when Fleet owns the record, ingress unregister, local clear. Local clear runs even on remote failure. Args: tenant_id."
     - name: tenant_domain_grant
-      description: "Delegate a base domain to a tenant for tenant-local apps. Fleet writes base + wildcard DNS and registers parent ingress to the tenant server. Args: tenant_id, domain, target?, type? (A|CNAME), ttl?."
+      description: "Delegate a base domain to a tenant for tenant-local apps. Fleet writes base + wildcard DNS; application hostnames are registered individually with tenant_host_attach. Args: tenant_id, domain, target?, type? (A|CNAME), ttl?."
     - name: tenant_domain_list
       description: "List Fleet domain grants. Args: tenant_id? (optional filter)."
     - name: tenant_domain_revoke
-      description: "Revoke a Fleet domain grant: unregister parent ingress, delete DNS records, and remove the grant. Args: tenant_id, domain."
+      description: "Revoke a Fleet domain grant: remove linked exact-host ingress, delete DNS records, and remove the grant. Args: tenant_id, domain."
+    - name: tenant_host_attach
+      description: "Register one exact application hostname against a tenant's current ingress target. DNS is not modified. Args: tenant_id, hostname, domain_grant_id?."
+    - name: tenant_host_list
+      description: "List exact tenant host mappings and reconciliation status. Args: tenant_id? (optional filter)."
+    - name: tenant_host_remove
+      description: "Remove one exact tenant hostname from ingress and Fleet persistence without changing DNS or tenant data. Args: tenant_id, hostname."
     - name: tenant_domain_record_set
       description: "Proxy a DNS upsert for a tenant-owned inherited domain. Intended for the tenant Domains facade. Args: tenant_id, domain, name, type, value, ttl?."
     - name: tenant_domain_record_delete
@@ -151,7 +157,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: fleet/v0.8.19
+    ref: fleet/v0.8.20
     entry: mcp/fleet
   image: ghcr.io/apteva/fleet:0.1.0
   port: 8080

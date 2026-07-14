@@ -198,6 +198,17 @@ interface FleetEvent {
   created_at: string;
 }
 
+interface TenantHost {
+  id: number;
+  tenant_id: string;
+  hostname: string;
+  domain_grant_id?: number;
+  status: "pending" | "active" | "error";
+  last_error?: string;
+  created_at: string;
+  updated_at: string;
+}
+
 interface ListResp {
   tenants: Tenant[] | null;
   count: number;
@@ -232,6 +243,7 @@ interface CredentialsReveal {
 interface GetResp {
   tenant: Tenant;
   events: FleetEvent[] | null;
+  hosts?: TenantHost[];
   retained_source?: {
     tenant_id: string;
     source_instance_id: number;
@@ -283,6 +295,7 @@ export default function FleetPanel({ projectId, installId }: NativePanelProps) {
   // them, which is less jumpy.
   const [meta, setMeta] = useState<MetaResp | null>(null);
   const [showAttachDomain, setShowAttachDomain] = useState<Tenant | null>(null);
+  const [showAttachHost, setShowAttachHost] = useState<Tenant | null>(null);
   const [showUpdate, setShowUpdate] = useState<Tenant | null>(null);
   const [showMigrate, setShowMigrate] = useState<Tenant | null>(null);
   const [showClone, setShowClone] = useState<Tenant | null>(null);
@@ -448,12 +461,14 @@ export default function FleetPanel({ projectId, installId }: NativePanelProps) {
       <TenantDetail
         tenant={selected}
         events={detail?.events ?? null}
+        hosts={detail?.hosts ?? []}
         retainedSource={detail?.retained_source ?? null}
         setupToken={detail?.setup_token ?? null}
         setupURL={detail?.setup_url ?? null}
         meta={meta}
         callTool={callTool}
         onOpenAttachDomain={(t) => setShowAttachDomain(t)}
+        onOpenAttachHost={(t) => setShowAttachHost(t)}
         onOpenUpdate={(t) => setShowUpdate(t)}
         onOpenMigrate={(t) => setShowMigrate(t)}
         onOpenClone={(t) => setShowClone(t)}
@@ -541,6 +556,25 @@ export default function FleetPanel({ projectId, installId }: NativePanelProps) {
               await refreshMeta();
               if (selectedId) await refreshDetail(selectedId);
               setShowAttachDomain(null);
+              return { ok: true };
+            } catch (e) {
+              return { ok: false, error: (e as Error).message };
+            }
+          }}
+        />
+      )}
+      {showAttachHost && (
+        <AttachTenantHostDialog
+          tenant={showAttachHost}
+          onClose={() => setShowAttachHost(null)}
+          onSubmit={async (hostname) => {
+            try {
+              await callTool("tenant_host_attach", {
+                tenant_id: showAttachHost.id,
+                hostname,
+              });
+              if (selectedId) await refreshDetail(selectedId);
+              setShowAttachHost(null);
               return { ok: true };
             } catch (e) {
               return { ok: false, error: (e as Error).message };
@@ -803,12 +837,14 @@ function KindGlyph({ kind }: { kind: Tenant["kind"] }) {
 function TenantDetail({
   tenant,
   events,
+  hosts,
   retainedSource,
   setupToken,
   setupURL,
   meta,
   callTool,
   onOpenAttachDomain,
+  onOpenAttachHost,
   onOpenUpdate,
   onOpenMigrate,
   onOpenClone,
@@ -818,12 +854,14 @@ function TenantDetail({
 }: {
   tenant: Tenant | null;
   events: FleetEvent[] | null;
+  hosts: TenantHost[];
   retainedSource: GetResp["retained_source"] | null;
   setupToken: string | null;
   setupURL: string | null;
   meta: MetaResp | null;
   callTool: <T>(tool: string, args: Record<string, unknown>) => Promise<T>;
   onOpenAttachDomain: (t: Tenant) => void;
+  onOpenAttachHost: (t: Tenant) => void;
   onOpenUpdate: (t: Tenant) => void;
   onOpenMigrate: (t: Tenant) => void;
   onOpenClone: (t: Tenant) => void;
@@ -1076,6 +1114,20 @@ function TenantDetail({
           onAttach={() => onOpenAttachDomain(tenant)}
           onDetach={() =>
             run("detach-domain", "tenant_detach_domain", { tenant_id: tenant.id })
+          }
+        />
+      )}
+
+      {!isSetupPending && (
+        <TenantHostsBlock
+          hosts={hosts}
+          busyHostname={busy?.startsWith("remove-host:") ? busy.slice("remove-host:".length) : null}
+          onAttach={() => onOpenAttachHost(tenant)}
+          onRemove={(hostname) =>
+            run(`remove-host:${hostname}`, "tenant_host_remove", {
+              tenant_id: tenant.id,
+              hostname,
+            })
           }
         />
       )}
@@ -2139,6 +2191,69 @@ function DomainBlock({
   );
 }
 
+function TenantHostsBlock({
+  hosts,
+  busyHostname,
+  onAttach,
+  onRemove,
+}: {
+  hosts: TenantHost[];
+  busyHostname: string | null;
+  onAttach: () => void;
+  onRemove: (hostname: string) => void;
+}) {
+  return (
+    <div className="border-b border-border">
+      <div className="flex items-center gap-2 px-4 py-2">
+        <span className="text-[11px] uppercase tracking-wider text-text-dim font-semibold">
+          Application hostnames
+        </span>
+        <span className="text-xs text-text-dim">{hosts.length}</span>
+        <span className="flex-1" />
+        <ActionButton label="Add hostname" onClick={onAttach} />
+      </div>
+      {hosts.map((host) => {
+        const variant: PillVariant =
+          host.status === "active" ? "success" : host.status === "error" ? "error" : "info";
+        return (
+          <div
+            key={host.id}
+            className="flex items-center gap-2 px-4 py-2 border-t border-border bg-bg-input/30"
+          >
+            <a
+              href={`https://${host.hostname}`}
+              target="_blank"
+              rel="noopener"
+              className="min-w-0 truncate font-mono text-xs text-accent hover:underline"
+              title={host.hostname}
+            >
+              {host.hostname}
+            </a>
+            <span title={host.last_error || ""}>
+              <StatusPill variant={variant}>{host.status}</StatusPill>
+            </span>
+            {host.domain_grant_id ? (
+              <span className="text-[10px] text-text-dim font-mono">
+                grant {host.domain_grant_id}
+              </span>
+            ) : null}
+            <span className="flex-1" />
+            <ActionButton
+              label={busyHostname === host.hostname ? "Removing…" : "Remove"}
+              tone="danger"
+              busy={busyHostname === host.hostname}
+              onClick={() => onRemove(host.hostname)}
+            />
+          </div>
+        );
+      })}
+      {hosts.length === 0 && (
+        <div className="px-4 pb-2 text-xs text-text-dim">No application hostnames assigned.</div>
+      )}
+    </div>
+  );
+}
+
 // ─── Version block ──────────────────────────────────────────────────
 
 function VersionBlock({
@@ -2370,6 +2485,58 @@ function AttachDomainDialog({
             });
             setBusy(false);
             if (!r.ok) setErr(r.error || "failed");
+          }}
+        />
+      </DialogActions>
+    </DialogFrame>
+  );
+}
+
+function AttachTenantHostDialog({
+  tenant,
+  onClose,
+  onSubmit,
+}: {
+  tenant: Tenant;
+  onClose: () => void;
+  onSubmit: (hostname: string) => Promise<{ ok: boolean; error?: string }>;
+}) {
+  const [hostname, setHostname] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState<string | null>(null);
+
+  return (
+    <DialogFrame title={`Add hostname to ${tenant.slug}`} onClose={onClose}>
+      <Label text="Hostname (FQDN)">
+        <input
+          type="text"
+          value={hostname}
+          onChange={(e) => setHostname(e.target.value)}
+          placeholder="app.client.com"
+          className="w-full px-2 py-1.5 text-sm rounded-md border border-border bg-bg-card text-text font-mono"
+          autoFocus
+        />
+      </Label>
+      <p className="text-xs text-text-dim">
+        Fleet registers this exact hostname and keeps its tunnel target current. DNS is not changed.
+      </p>
+      {err && <p className="text-xs text-error">{err}</p>}
+      <DialogActions>
+        <ActionButton label="Cancel" onClick={onClose} />
+        <ActionButton
+          label={busy ? "Adding…" : "Add hostname"}
+          busy={busy}
+          onClick={async () => {
+            const exact = hostname.trim().replace(/\.$/, "").toLowerCase();
+            if (!exact) {
+              setErr("enter a hostname");
+              return;
+            }
+            setBusy(true);
+            setErr(null);
+            const result = await onSubmit(exact);
+            setBusy(false);
+            if (!result.ok) setErr(result.error || "failed");
           }}
         />
       </DialogActions>
