@@ -310,7 +310,8 @@ func (a *App) EventHandlers() []sdk.EventHandler { return nil }
 // considers running, try to re-adopt the underlying process: if it
 // survived (an app upgrade left it running in its own process group),
 // pull it back into the registry so stop/destroy/route still work.
-// If the process is gone, mark the release stopped.
+// If the process is gone, mark the release stopped and recover the current
+// deployment environment from the exact build that was previously live.
 func (a *App) reconcileReleases() error {
 	rows, err := dbListLiveReleases(globalCtx.AppDB())
 	if err != nil {
@@ -335,6 +336,20 @@ func (a *App) reconcileReleases() error {
 			// the orphan's death and pointed the domain at a port that
 			// another instance later bound.
 			a.cascadeUnregisterRouteForRelease(&r)
+			recovered, recoverErr := a.recoverBootOrphan(&r)
+			if recoverErr != nil {
+				globalCtx.Logger().Warn("boot orphan recovery failed",
+					"release_id", r.ID,
+					"build_id", r.BuildID,
+					"err", recoverErr,
+				)
+			} else if recovered != nil {
+				globalCtx.Logger().Info("boot orphan recovery started",
+					"orphan_release_id", r.ID,
+					"release_id", recovered.ID,
+					"build_id", r.BuildID,
+				)
+			}
 			continue
 		}
 		a.registry.Put(rr)
@@ -351,6 +366,78 @@ func (a *App) reconcileReleases() error {
 		globalCtx.Logger().Info("re-adopted release", "release_id", r.ID, "pid", r.PID, "port", r.Port)
 	}
 	return nil
+}
+
+// recoverBootOrphan starts a replacement for a current release whose process
+// did not survive a supervisor restart. It deliberately uses rel.BuildID
+// rather than the generic auto-restart lookup: a newer successful build may
+// exist but not have been promoted to this environment yet.
+//
+// The replacement remains "starting" and the current-release pointer remains
+// on the stopped orphan until probeReady verifies PID ownership of the port.
+// promoteToLive then updates the pointer and restores ingress.
+func (a *App) recoverBootOrphan(rel *Release) (*Release, error) {
+	if rel == nil {
+		return nil, errors.New("release required")
+	}
+	d, err := a.deploymentForRelease(rel)
+	if err != nil {
+		return nil, err
+	}
+	if d == nil || d.CurrentReleaseID == nil || *d.CurrentReleaseID != rel.ID {
+		// A stale row can still say "live" after a newer release became
+		// current. Never let it roll the environment back during boot.
+		return nil, nil
+	}
+
+	_ = dbAppendReleaseEvent(globalCtx.AppDB(), rel.ID, "boot_recovery_attempted",
+		fmt.Sprintf(`{"build_id":%d}`, rel.BuildID))
+	b, err := dbGetBuild(globalCtx.AppDB(), rel.BuildID)
+	if err != nil {
+		a.recordBootRecoveryFailure(rel, err)
+		return nil, err
+	}
+	if b == nil || b.DeploymentID != rel.DeploymentID || b.EnvironmentID != rel.EnvironmentID {
+		err := fmt.Errorf("build %d does not belong to release environment", rel.BuildID)
+		a.recordBootRecoveryFailure(rel, err)
+		return nil, err
+	}
+	if b.Status != "succeeded" {
+		err := fmt.Errorf("build %d not succeeded (status=%s)", b.ID, b.Status)
+		a.recordBootRecoveryFailure(rel, err)
+		return nil, err
+	}
+	if !buildArtifactAvailable(b) {
+		err := fmt.Errorf("build %d artifact unavailable", b.ID)
+		a.recordBootRecoveryFailure(rel, err)
+		return nil, err
+	}
+
+	emit("deploy.boot_recovery_attempted", map[string]any{
+		"deployment_id": rel.DeploymentID, "environment_id": rel.EnvironmentID,
+		"release_id": rel.ID, "build_id": b.ID,
+	})
+	recovered, err := a.runServiceRelease(d, b)
+	if err != nil {
+		a.recordBootRecoveryFailure(rel, err)
+		return nil, err
+	}
+	_ = dbAppendReleaseEvent(globalCtx.AppDB(), rel.ID, "boot_recovery_started",
+		fmt.Sprintf(`{"build_id":%d,"release_id":%d}`, b.ID, recovered.ID))
+	emit("deploy.boot_recovery_started", map[string]any{
+		"deployment_id": rel.DeploymentID, "environment_id": rel.EnvironmentID,
+		"orphan_release_id": rel.ID, "release_id": recovered.ID, "build_id": b.ID,
+	})
+	return recovered, nil
+}
+
+func (a *App) recordBootRecoveryFailure(rel *Release, cause error) {
+	_ = dbAppendReleaseEvent(globalCtx.AppDB(), rel.ID, "boot_recovery_failed",
+		fmt.Sprintf(`{"build_id":%d,"error":%q}`, rel.BuildID, cause.Error()))
+	emit("deploy.boot_recovery_failed", map[string]any{
+		"deployment_id": rel.DeploymentID, "environment_id": rel.EnvironmentID,
+		"release_id": rel.ID, "build_id": rel.BuildID, "error": cause.Error(),
+	})
 }
 
 // ─── Routes ────────────────────────────────────────────────────────
