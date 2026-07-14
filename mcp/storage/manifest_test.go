@@ -16,6 +16,9 @@ func TestEmbeddedManifest_Valid(t *testing.T) {
 	if m.Version == "" {
 		t.Error("version empty")
 	}
+	if m.Version != "0.10.19" {
+		t.Errorf("version=%q", m.Version)
+	}
 	if m.DB == nil || m.DB.Migrations == "" {
 		t.Error("db.migrations missing")
 	}
@@ -24,6 +27,15 @@ func TestEmbeddedManifest_Valid(t *testing.T) {
 	}
 	if len(m.Provides.UISurfaces) != 1 || m.Provides.UISurfaces[0].ID != "files" {
 		t.Fatalf("expected files native surface, got %#v", m.Provides.UISurfaces)
+	}
+	publicDownload := false
+	for _, route := range m.Provides.HTTPRoutes {
+		if route.Prefix == "/public/files/" && route.NoAuth {
+			publicDownload = true
+		}
+	}
+	if !publicDownload {
+		t.Fatalf("public download route must be declared no-auth: %#v", m.Provides.HTTPRoutes)
 	}
 }
 

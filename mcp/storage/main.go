@@ -138,6 +138,10 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		// /files/* dispatches in-handler by method + path tail.
 		{Pattern: "/files", Handler: a.handleFilesCollection},
 		{Pattern: "/files/", Handler: a.handleFilesItem},
+		// Shareable downloads have their own no-auth gateway route. The
+		// handler accepts only content reads and still enforces each file's
+		// visibility or HMAC signature.
+		{Pattern: "/public/files/", Handler: a.handlePublicFilesItem, NoAuth: true},
 		// Exact pattern — ServeMux picks this over /files/ for this path.
 		// HTTP wrapper around the files_from_url MCP tool so non-MCP
 		// callers (ad-hoc scripts shipping a Drive/CDN URL) can have
@@ -1074,6 +1078,29 @@ func (a *App) handleFilesItem(w http.ResponseWriter, r *http.Request) {
 	default:
 		httpErr(w, http.StatusNotFound, "not found")
 	}
+}
+
+func (a *App) handlePublicFilesItem(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		httpErr(w, http.StatusMethodNotAllowed, "GET or HEAD only")
+		return
+	}
+	rest := strings.TrimPrefix(r.URL.Path, "/public/files/")
+	parts := strings.SplitN(rest, "/", 2)
+	id, _ := strconv.ParseInt(parts[0], 10, 64)
+	if id <= 0 || len(parts) != 2 {
+		httpErr(w, http.StatusNotFound, "not found")
+		return
+	}
+	tail := parts[1]
+	if i := strings.IndexByte(tail, '/'); i >= 0 {
+		tail = tail[:i]
+	}
+	if tail != "content" {
+		httpErr(w, http.StatusNotFound, "not found")
+		return
+	}
+	a.httpServeContent(w, r, id)
 }
 
 // httpMintSignedURL is the HTTP-protocol wrapper around the
@@ -2338,6 +2365,13 @@ func buildContentURL(f *File) string {
 		return fmt.Sprintf("/files/%d/content", f.ID)
 	}
 	return fmt.Sprintf("/files/%d/content/%s", f.ID, url.PathEscape(f.Name))
+}
+
+// buildPublicContentURL is the read-only, no-auth gateway path used for
+// public files and HMAC-signed shares. Administrative file routes remain
+// under /files and require platform authentication.
+func buildPublicContentURL(f *File) string {
+	return strings.Replace(buildContentURL(f), "/files/", "/public/files/", 1)
 }
 
 func extOf(name, contentType string) string {

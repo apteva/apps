@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: storage
 display_name: Storage
-version: 0.10.18
+version: 0.10.19
 description: |
   File storage for Apteva agents and human teams. Upload bytes,
   organise into folders, share via signed URLs. Pluggable backend:
@@ -56,6 +56,8 @@ requires:
 provides:
   http_routes:
     - prefix: /
+    - prefix: /public/files/
+      no_auth: true
   # Folder is the only resource shape storage exposes. Glob matcher +
   # tree picker means the dashboard renders a folder tree; navigable
   # listing makes ancestor folders visible so an agent scoped to

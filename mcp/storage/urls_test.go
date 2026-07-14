@@ -132,23 +132,26 @@ func TestAbsoluteContentURL_NameMissingFallsBack(t *testing.T) {
 	}
 }
 
-// Same URL shape regardless of visibility — only auth requirements
-// differ. Confirms we don't accidentally fork URL paths by
-// visibility.
-func TestAbsoluteContentURL_VisibilityIndependent(t *testing.T) {
+// Public files use the constrained no-auth route. Signed and private
+// metadata still point at the authenticated file route until a share
+// URL is explicitly minted.
+func TestAbsoluteContentURL_UsesPublicRouteOnlyForPublicFiles(t *testing.T) {
 	t.Setenv("STORAGE_PUBLIC_URL", "https://agents.example.com")
 	pub := absoluteContentURL(nil, &File{ID: 1, Visibility: "public"})
 	sig := absoluteContentURL(nil, &File{ID: 1, Visibility: "signed"})
 	priv := absoluteContentURL(nil, &File{ID: 1, Visibility: "private"})
-	if pub != sig || sig != priv {
-		t.Fatalf("URLs differ by visibility: public=%q signed=%q private=%q", pub, sig, priv)
+	if pub != "https://agents.example.com/api/apps/storage/public/files/1/content" {
+		t.Fatalf("public URL = %q", pub)
+	}
+	if sig != priv || sig != "https://agents.example.com/api/apps/storage/files/1/content" {
+		t.Fatalf("authenticated URLs: signed=%q private=%q", sig, priv)
 	}
 }
 
 func TestSignedAbsoluteURL(t *testing.T) {
 	t.Setenv("STORAGE_PUBLIC_URL", "https://agents.example.com")
 	got := signedAbsoluteURL(nil, &File{ID: 42, Name: "video.mp4"}, "abcdef", 1234567890)
-	want := "https://agents.example.com/api/apps/storage/files/42/content/video.mp4?sig=abcdef&exp=1234567890"
+	want := "https://agents.example.com/api/apps/storage/public/files/42/content/video.mp4?sig=abcdef&exp=1234567890"
 	if got != want {
 		t.Fatalf("got %q, want %q", got, want)
 	}
@@ -167,7 +170,7 @@ func TestSignedAbsoluteURL_IncludesProjectID(t *testing.T) {
 		Name:      "video.mp4",
 		ProjectID: "1776532035349-7aca99abbd8afe9e",
 	}, "abcdef", 1234567890)
-	want := "https://agents.example.com/api/apps/storage/files/42/content/video.mp4?sig=abcdef&exp=1234567890&project_id=1776532035349-7aca99abbd8afe9e"
+	want := "https://agents.example.com/api/apps/storage/public/files/42/content/video.mp4?sig=abcdef&exp=1234567890&project_id=1776532035349-7aca99abbd8afe9e"
 	if got != want {
 		t.Fatalf("got %q, want %q", got, want)
 	}
@@ -255,15 +258,49 @@ func TestHttpServeContent_Signed_AnonymousAllowedWithSig(t *testing.T) {
 		t.Fatal(err)
 	}
 	url := out.(map[string]any)["url"].(string)
-	// Strip everything before the path so httptest sees a clean URL.
-	if i := indexOfStr(url, "/files/"); i >= 0 {
-		url = url[i:] + "&project_id=test-proj"
+	// Strip everything before the public path so httptest sees a clean URL.
+	if i := indexOfStr(url, "/public/files/"); i >= 0 {
+		url = url[i:]
 	}
 	req := httptest.NewRequest(http.MethodGet, url, nil)
 	rec := httptest.NewRecorder()
-	app.httpServeContent(rec, req, f.ID)
+	app.handlePublicFilesItem(rec, req)
 	if rec.Code != 200 {
 		t.Fatalf("signed fetch with valid sig: status=%d body=%s", rec.Code, rec.Body.String())
+	}
+}
+
+func TestPublicFilesRoute_ReadOnlyAndVisibilityAware(t *testing.T) {
+	ctx := newTestCtx(t)
+	publicFile := mustUpload(t, ctx, "public.txt", "/", "public bytes")
+	if _, err := (&App{}).toolSetVisibility(ctx, map[string]any{
+		"id": publicFile.ID, "visibility": "public",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	privateFile := mustUpload(t, ctx, "private.txt", "/", "private bytes")
+	app := &App{}
+
+	tests := []struct {
+		name   string
+		method string
+		path   string
+		status int
+	}{
+		{"public content", http.MethodGet, "/public/files/" + intToString(publicFile.ID) + "/content/public.txt?project_id=test-proj", http.StatusOK},
+		{"private content", http.MethodGet, "/public/files/" + intToString(privateFile.ID) + "/content/private.txt?project_id=test-proj", http.StatusForbidden},
+		{"metadata", http.MethodGet, "/public/files/" + intToString(publicFile.ID) + "?project_id=test-proj", http.StatusNotFound},
+		{"mutation", http.MethodPost, "/public/files/" + intToString(publicFile.ID) + "/content?project_id=test-proj", http.StatusMethodNotAllowed},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			req := httptest.NewRequest(test.method, test.path, nil)
+			rec := httptest.NewRecorder()
+			app.handlePublicFilesItem(rec, req)
+			if rec.Code != test.status {
+				t.Fatalf("status=%d body=%s, want %d", rec.Code, rec.Body.String(), test.status)
+			}
+		})
 	}
 }
 

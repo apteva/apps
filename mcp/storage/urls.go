@@ -3,14 +3,13 @@ package main
 // URL minting — single source of truth for how storage hands shareable
 // links back to callers (agents, dashboards, downstream apps).
 //
-// One URL per file. Same prefix regardless of visibility — like S3,
-// where a public bucket's object URL and a presigned URL share the
-// same path and only differ in auth carriers (query params, headers,
-// or none).
+// Shareable URLs use a dedicated, read-only public path. Authenticated
+// dashboard reads keep using /files so no mutation or metadata route
+// needs to bypass the platform gateway.
 //
-//   <PublicURL>/api/apps/storage/files/<id>/content
+//   <PublicURL>/api/apps/storage/public/files/<id>/content
 //
-// Whether that URL works without auth depends on the file's
+// Whether a shareable URL works without auth depends on the file's
 // visibility, decided server-side in httpServeContent:
 //
 //   public  → anyone can fetch (no session, no signature)
@@ -69,9 +68,9 @@ func envPublicURL() string {
 	return ""
 }
 
-// absoluteContentURL returns the file's canonical URL. Same shape
-// for every visibility level — what differs is whether the request
-// for the URL needs auth.
+// absoluteContentURL returns the file's canonical URL. Public files use
+// the read-only public route; signed and private files use the authenticated
+// route until a signed share URL is explicitly minted.
 //
 // When the install is linked to a cdn zone (cdn_zone_id != 0) AND
 // the file's visibility is public, the URL is minted on the zone's
@@ -84,6 +83,7 @@ func absoluteContentURL(ctx *sdk.AppCtx, f *File) string {
 		if u := cdnURLFor(ctx, rel, f.ProjectID); u != "" {
 			return u
 		}
+		rel = buildPublicContentURL(f)
 	}
 	base := publicBase(ctx)
 	if base == "" {
@@ -185,10 +185,10 @@ func cdnZoneForInstall(ctx *sdk.AppCtx) int64 {
 }
 
 // signedAbsoluteURL returns the absolute form of a signed URL.
-// Same path as absoluteContentURL — including the filename suffix
-// so the URL ends in the proper extension for downstream sniffers.
-// `?sig=&exp=` are appended; the platform's authMiddleware carves
-// out signed URLs for app paths.
+// Uses the read-only public route and includes the filename suffix so
+// the URL ends in the proper extension for downstream sniffers.
+// `?sig=&exp=` are appended; the manifest lets this constrained route
+// through the gateway and httpServeContent validates the signature.
 //
 // project_id rides as a query param so apteva-server's
 // /api/apps/<name>/... proxy (handleAppProxy) can route to the
@@ -200,7 +200,7 @@ func cdnZoneForInstall(ctx *sdk.AppCtx) int64 {
 // has no auth context to disambiguate by, only what the URL
 // itself carries.
 func signedAbsoluteURL(ctx *sdk.AppCtx, f *File, sig string, exp int64) string {
-	rel := buildContentURL(f) // includes filename when present
+	rel := buildPublicContentURL(f) // includes filename when present
 	q := fmt.Sprintf("?sig=%s&exp=%d", sig, exp)
 	if f != nil && f.ProjectID != "" {
 		q += "&project_id=" + f.ProjectID

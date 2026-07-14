@@ -51,11 +51,20 @@ func mustMember(t *testing.T, ctx *sdk.AppCtx, pid string, spaceID int64, args m
 func TestManifestAndSpaceScopedSchemas(t *testing.T) {
 	a := &App{}
 	m := a.Manifest()
-	if m.Name != "creators" || m.Version != "0.2.0" {
+	if m.Name != "creators" || m.Version != "0.2.1" {
 		t.Fatalf("manifest = %s %s", m.Name, m.Version)
 	}
 	if len(a.Workers()) != 1 || len(a.EventHandlers()) != 3 || a.EventHandlers()[0].Event != "invoice.paid" {
 		t.Fatal("membership lifecycle worker and billing lifecycle handlers must be registered")
+	}
+	publicRoutes := map[string]bool{}
+	for _, route := range m.Provides.HTTPRoutes {
+		if route.NoAuth {
+			publicRoutes[route.Prefix] = true
+		}
+	}
+	if !publicRoutes["/public/"] || !publicRoutes["/member/"] {
+		t.Fatalf("public and member routes must be declared no-auth: %#v", m.Provides.HTTPRoutes)
 	}
 	for _, tool := range a.MCPTools() {
 		if strings.HasPrefix(tool.Name, "creators_space_") {
