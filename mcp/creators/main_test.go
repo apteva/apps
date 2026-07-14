@@ -14,6 +14,23 @@ import (
 
 const testProject = "creators-test"
 
+type storageLookupPlatform struct {
+	tk.BasePlatformClient
+	found bool
+}
+
+func (p *storageLookupPlatform) CallAppResult(app, tool string, input map[string]any, out any) error {
+	if app != "storage" || tool != "files_get" {
+		return nil
+	}
+	lookup := out.(*storageFileLookup)
+	lookup.Found = p.found
+	if p.found {
+		lookup.File = &storageFileMetadata{ID: int64Arg(input, "id"), Name: "trusted.png", ContentType: "image/png", SizeBytes: 68}
+	}
+	return nil
+}
+
 func testContext(t *testing.T) *sdk.AppCtx {
 	t.Helper()
 	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID(testProject))
@@ -51,7 +68,7 @@ func mustMember(t *testing.T, ctx *sdk.AppCtx, pid string, spaceID int64, args m
 func TestManifestAndSpaceScopedSchemas(t *testing.T) {
 	a := &App{}
 	m := a.Manifest()
-	if m.Name != "creators" || m.Version != "0.2.3" {
+	if m.Name != "creators" || m.Version != "0.2.4" {
 		t.Fatalf("manifest = %s %s", m.Name, m.Version)
 	}
 	if len(a.Workers()) != 1 || len(a.EventHandlers()) != 3 || a.EventHandlers()[0].Event != "invoice.paid" {
@@ -314,6 +331,31 @@ func TestCRMStateAttributesAreNamespacedByCreatorSpace(t *testing.T) {
 	}
 	if strings.Contains(got, `"key":"creators_status"`) {
 		t.Fatalf("unscoped creator state would collide across spaces: %s", got)
+	}
+}
+
+func TestAddFromStorageValidatesFileAndUsesAuthoritativeMetadata(t *testing.T) {
+	platform := &storageLookupPlatform{found: true}
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID(testProject), tk.WithPlatform(platform))
+	globalCtx = ctx
+	space := mustSpace(t, ctx, testProject, "Primary", "primary")
+	post, err := createPost(ctx, testProject, space.ID, map[string]any{"title": "Picture"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	attachment, err := addAttachment(ctx, testProject, space.ID, map[string]any{
+		"post_id": post.ID, "storage_file_id": int64(9),
+		"filename": "spoofed.exe", "content_type": "application/octet-stream", "size_bytes": int64(999),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if attachment.Filename != "trusted.png" || attachment.ContentType != "image/png" || attachment.SizeBytes != 68 {
+		t.Fatalf("attachment metadata was not resolved from storage: %#v", attachment)
+	}
+	platform.found = false
+	if _, err := addAttachment(ctx, testProject, space.ID, map[string]any{"post_id": post.ID, "storage_file_id": int64(10)}); err == nil {
+		t.Fatal("missing storage file was attached")
 	}
 }
 

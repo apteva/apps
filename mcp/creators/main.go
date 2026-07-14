@@ -225,6 +225,18 @@ type Attachment struct {
 	CreatedAt     string          `json:"created_at"`
 }
 
+type storageFileMetadata struct {
+	ID          int64  `json:"id"`
+	Name        string `json:"name"`
+	ContentType string `json:"content_type"`
+	SizeBytes   int64  `json:"size_bytes"`
+}
+
+type storageFileLookup struct {
+	File  *storageFileMetadata `json:"file"`
+	Found bool                 `json:"found"`
+}
+
 // ─── HTTP handlers ────────────────────────────────────────────────
 
 func (a *App) handleSpaces(w http.ResponseWriter, r *http.Request) {
@@ -1882,6 +1894,18 @@ func addAttachment(ctx *sdk.AppCtx, pid string, spaceID int64, args map[string]a
 		}
 		return nil, fmt.Errorf("post %d not found", postID)
 	}
+	var lookup storageFileLookup
+	if err := ctx.WithProject(pid).PlatformAPI().CallAppResult("storage", "files_get", map[string]any{
+		"id": fileID, "_project_id": pid,
+	}, &lookup); err != nil {
+		return nil, fmt.Errorf("storage.files_get: %w", err)
+	}
+	if !lookup.Found || lookup.File == nil || lookup.File.ID != fileID {
+		return nil, fmt.Errorf("storage file %d not found", fileID)
+	}
+	args["filename"] = lookup.File.Name
+	args["content_type"] = lookup.File.ContentType
+	args["size_bytes"] = lookup.File.SizeBytes
 	vis := strArg(args, "visibility")
 	if vis == "" {
 		vis = "inherit"
