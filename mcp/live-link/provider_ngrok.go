@@ -5,14 +5,13 @@
 // agent instead of cloudflared and reads the authtoken from the
 // bound ngrok integration's credentials.
 //
-// Two future polish items deferred from v0.5.0:
+// One future polish item deferred from v0.5.0:
 //   - Reserved-domain support: paid ngrok plans can pin a hostname.
-//     We pass StartParams.Hostname through as --domain when set, but
+//     We pass StartParams.Hostname through as --url when set, but
 //     the panel doesn't yet have a "reserved domain" field. Operators
 //     who want it can set live-link's `ngrok_domain` config; the
 //     provider picks it up automatically.
-//   - Region selection: ngrok supports --region us|eu|ap|au|sa|jp|in.
-//     Defaults to ngrok's automatic region for now.
+// Region selection is automatic in current ngrok agents.
 
 package main
 
@@ -56,6 +55,9 @@ func (p *ngrokProvider) Start(ctx *sdk.AppCtx) (string, error) {
 	if target == "" {
 		return "", errors.New("no target URL — set target_url in app config or APTEVA_GATEWAY_URL in the env")
 	}
+	if err := validateTargetURL(target); err != nil {
+		return "", err
+	}
 
 	bound := ctx.IntegrationFor("ngrok")
 	if bound == nil || bound.ConnectionID == 0 {
@@ -80,6 +82,12 @@ func (p *ngrokProvider) Start(ctx *sdk.AppCtx) (string, error) {
 	// agent restarts — useful for webhook receivers that can't tolerate
 	// the trycloudflare-style URL churn.
 	domain := strings.TrimSpace(ctx.Config().Get("ngrok_domain"))
+	if domain != "" {
+		domain, err = normalizeDNSName(domain)
+		if err != nil {
+			return "", fmt.Errorf("invalid ngrok domain: %w", err)
+		}
+	}
 
 	runID, err := dbInsertRun(ctx.AppDB(), p.Name(), target, string(ModeNgrok))
 	if err != nil {

@@ -78,9 +78,9 @@ func (p *fakePlatform) ExecuteIntegrationTool(connID int64, tool string, input m
 func (p *fakePlatform) ListConnections(_ sdk.ConnectionFilter) ([]sdk.PlatformConnection, error) {
 	return nil, nil
 }
-func (p *fakePlatform) GetInstance(_ int64) (*sdk.PlatformInstance, error)         { return nil, nil }
-func (p *fakePlatform) SendEvent(_ int64, _ string) error                          { return nil }
-func (p *fakePlatform) SendToChannel(_, _, _ string) error                         { return nil }
+func (p *fakePlatform) GetInstance(_ int64) (*sdk.PlatformInstance, error) { return nil, nil }
+func (p *fakePlatform) SendEvent(_ int64, _ string) error                  { return nil }
+func (p *fakePlatform) SendToChannel(_, _, _ string) error                 { return nil }
 func (p *fakePlatform) CallApp(_, _ string, _ map[string]any) (json.RawMessage, error) {
 	return nil, nil
 }
@@ -88,9 +88,9 @@ func (p *fakePlatform) CallAppResult(_, _ string, _ map[string]any, _ any) error
 func (p *fakePlatform) StartOAuth(_ sdk.OAuthStartRequest) (*sdk.OAuthStartResult, error) {
 	return nil, nil
 }
-func (p *fakePlatform) DisconnectConnection(_ int64) error                  { return nil }
+func (p *fakePlatform) DisconnectConnection(_ int64) error                      { return nil }
 func (p *fakePlatform) ListOwnedConnections() ([]sdk.PlatformConnection, error) { return nil, nil }
-func (p *fakePlatform) GetGrants(_ int64) (*sdk.GrantsResponse, error)      { return nil, nil }
+func (p *fakePlatform) GetGrants(_ int64) (*sdk.GrantsResponse, error)          { return nil, nil }
 
 // ─── helpers ──────────────────────────────────────────────────────
 
@@ -188,15 +188,22 @@ func TestEnsureNamedTunnel_CreateFlow(t *testing.T) {
 	if got == nil || got.Hostname != "h.example.com" {
 		t.Errorf("persisted row=%+v", got)
 	}
+	var persistedToken string
+	if err := ctx.AppDB().QueryRow(`SELECT tunnel_token FROM named_tunnels WHERE hostname = ?`, "h.example.com").Scan(&persistedToken); err != nil {
+		t.Fatal(err)
+	}
+	if persistedToken != "" {
+		t.Fatalf("connector token was persisted: %q", persistedToken)
+	}
 }
 
 func TestEnsureNamedTunnel_AdoptsExistingTunnel(t *testing.T) {
 	// list_tunnels returns one match → app should NOT call create_tunnel
 	// and SHOULD call get_tunnel_token to fetch the connector token.
 	ctx, plat := newTestCtxWithCF(t)
-	plat.on("list_tunnels", func(_ map[string]any) *sdk.ExecuteResult {
+	plat.on("list_tunnels", func(input map[string]any) *sdk.ExecuteResult {
 		return jsonResult([]any{
-			map[string]any{"id": "EXISTING", "name": "apteva-live-link-h-example-com"},
+			map[string]any{"id": "EXISTING", "name": input["name"]},
 		})
 	})
 	plat.on("create_tunnel", func(_ map[string]any) *sdk.ExecuteResult {
@@ -234,6 +241,13 @@ func TestEnsureNamedTunnel_IsIdempotentOnSecondCall(t *testing.T) {
 	plat.on("create_tunnel", func(input map[string]any) *sdk.ExecuteResult {
 		createCalls++
 		return jsonResult(map[string]any{"id": "TUN", "token": "TOK", "name": input["name"]})
+	})
+	plat.on("get_tunnel_token", func(input map[string]any) *sdk.ExecuteResult {
+		if input["tunnel_id"] != "TUN" {
+			t.Errorf("tunnel_id=%v, want TUN", input["tunnel_id"])
+		}
+		body, _ := json.Marshal(map[string]any{"result": "TOK"})
+		return &sdk.ExecuteResult{Success: true, Status: 200, Data: body}
 	})
 	plat.on("update_tunnel_configuration", func(_ map[string]any) *sdk.ExecuteResult { return jsonResult(map[string]any{}) })
 	plat.on("list_dns_records", func(_ map[string]any) *sdk.ExecuteResult { return jsonResult([]any{}) })
@@ -352,6 +366,9 @@ func TestHandleNamedZones_ProxiesListZones(t *testing.T) {
 
 func TestHandleNamedConfigure_PersistsAndPipesArgs(t *testing.T) {
 	ctx, plat := newTestCtxWithCF(t)
+	plat.on("list_zones", func(_ map[string]any) *sdk.ExecuteResult {
+		return jsonResult([]any{map[string]any{"id": "Z", "name": "example.com"}})
+	})
 	plat.on("list_tunnels", func(_ map[string]any) *sdk.ExecuteResult { return jsonResult([]any{}) })
 	plat.on("create_tunnel", func(_ map[string]any) *sdk.ExecuteResult {
 		return jsonResult(map[string]any{"id": "TUN", "token": "TOK"})

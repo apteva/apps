@@ -33,16 +33,19 @@ type cloudflareQuickProvider struct {
 	app *App
 }
 
-func (p *cloudflareQuickProvider) Name() string                          { return providerNameQuick }
-func (p *cloudflareQuickProvider) Configured(_ *sdk.AppCtx) bool         { return false }
-func (p *cloudflareQuickProvider) Snapshot() Snapshot                    { return p.app.mgr.Snapshot() }
-func (p *cloudflareQuickProvider) Stop() error                           { return p.app.mgr.Stop() }
-func (p *cloudflareQuickProvider) Destroy(_ *sdk.AppCtx) (bool, error)   { return false, nil }
+func (p *cloudflareQuickProvider) Name() string                        { return providerNameQuick }
+func (p *cloudflareQuickProvider) Configured(_ *sdk.AppCtx) bool       { return false }
+func (p *cloudflareQuickProvider) Snapshot() Snapshot                  { return p.app.mgr.Snapshot() }
+func (p *cloudflareQuickProvider) Stop() error                         { return p.app.mgr.Stop() }
+func (p *cloudflareQuickProvider) Destroy(_ *sdk.AppCtx) (bool, error) { return false, nil }
 
 func (p *cloudflareQuickProvider) Start(ctx *sdk.AppCtx) (string, error) {
 	target := p.app.resolveTargetURL(ctx)
 	if target == "" {
 		return "", errors.New("no target URL — set target_url in app config or APTEVA_GATEWAY_URL in the env")
+	}
+	if err := validateTargetURL(target); err != nil {
+		return "", err
 	}
 	binary, err := resolveBinary(ctx.Config().Get("cloudflared_path"), ctx.DataDir(), false, ctx.Logger().Info)
 	if err != nil {
@@ -92,6 +95,9 @@ func (p *cloudflareNamedProvider) Start(ctx *sdk.AppCtx) (string, error) {
 	if target == "" {
 		return "", errors.New("no target URL — set target_url in app config or APTEVA_GATEWAY_URL in the env")
 	}
+	if err := validateTargetURL(target); err != nil {
+		return "", err
+	}
 	binary, err := resolveBinary(ctx.Config().Get("cloudflared_path"), ctx.DataDir(), false, ctx.Logger().Info)
 	if err != nil {
 		return "", err
@@ -103,6 +109,12 @@ func (p *cloudflareNamedProvider) Start(ctx *sdk.AppCtx) (string, error) {
 	}
 	if nt == nil {
 		return "", errors.New("named mode: no tunnel configured — pick a hostname in the Live Link panel first")
+	}
+	// Reconcile remote ingress/DNS and retrieve a fresh connector token on
+	// every start. Connector credentials are never read from SQLite.
+	nt, err = p.app.ensureNamedTunnel(ctx, nt.Hostname, nt.ZoneID)
+	if err != nil {
+		return "", fmt.Errorf("reconcile named tunnel: %w", err)
 	}
 
 	runID, err := dbInsertRun(ctx.AppDB(), p.Name(), target, "named")

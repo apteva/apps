@@ -1,26 +1,21 @@
 // provider.go — TunnelProvider interface + active-provider picker.
 //
-// v0.4 collapses the v0.3 "Mode" enum (quick / named) into a real
+// The Provider strategy separates Cloudflare quick/named and ngrok
 // provider strategy so future transports (self-vps, ngrok,
 // tailscale-funnel) plug in behind one interface. Each provider owns
 // the lifecycle of "expose a public URL pointing at the local apteva
 // instance" — it decides what to spawn, what state to persist, what
 // to tear down.
 //
-// v0.4.0 ships two providers, both Cloudflare-shaped:
+// v0.5.0 ships three providers:
 //
 //   - cloudflare-quick  : anonymous trycloudflare.com URL per start
 //   - cloudflare-named  : stable URL on a CF zone the operator owns
+//   - ngrok             : random or reserved ngrok URL
 //
-// They share one Manager (cloudflared subprocess supervisor) because
-// they both spawn the same binary with different args. Future
-// providers (self-vps's frpc, ngrok's ngrok client) bring their own
-// lifecycle and don't share Manager.
-//
-// activeProvider(ctx) reads DB state to pick which provider is the
-// install's current shape. Today: a named_tunnels row → named, else
-// quick. v0.5 generalizes this to a per-install "active_provider"
-// row when more than two providers are realistic.
+// They share one Manager because only one public tunnel may run per install.
+// The operator's explicit selection is persisted in runtime_state; merely
+// binding an integration never changes the active provider.
 
 package main
 
@@ -63,37 +58,25 @@ type Provider interface {
 	Snapshot() Snapshot
 }
 
-// activeProvider picks which provider should handle this install's
-// current request, based on DB state. Order is "most-specific first":
-// any provider with Configured()=true wins. Falls back to the default
-// (cloudflare-quick) when nothing is configured.
-//
-// Why pick on every call instead of caching once at OnMount: the panel
-// can flip the install from quick → named (via /named/configure) or
-// named → quick (via /destroy) at any time; the next request must
-// reflect the new shape immediately.
+// activeProvider resolves the operator's explicit runtime_state selection.
+// Merely binding an optional integration must not silently switch providers.
 func (a *App) activeProvider(ctx *sdk.AppCtx) Provider {
-	// providers slice is ordered most-specific-first. quick is last
-	// because it's the default fallback (Configured() always false
-	// for quick — we use it only when nothing else matched).
-	for _, p := range a.providers {
-		if p.Name() == providerNameQuick {
-			continue
+	selected := providerNameQuick
+	if ctx != nil && ctx.AppDB() != nil {
+		if state, err := dbRuntimeState(ctx.AppDB()); err == nil && state != nil && validProviderName(state.ActiveProvider) {
+			selected = state.ActiveProvider
 		}
-		if p.Configured(ctx) {
+	}
+	for _, p := range a.providers {
+		if p.Name() == selected {
 			return p
 		}
 	}
-	// Default: quick. Look it up in the registry rather than holding
-	// a separate field so the providers slice stays the single source
-	// of truth.
 	for _, p := range a.providers {
 		if p.Name() == providerNameQuick {
 			return p
 		}
 	}
-	// Unreachable as long as App.init wires the quick provider in,
-	// but guarded so a misconfigured test doesn't nil-panic.
 	return nil
 }
 

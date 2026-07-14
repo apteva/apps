@@ -160,6 +160,14 @@ function formatInfo(eccLevel, mask) {
   return ((data << 10) | (bch & 0x3ff)) ^ 0x5412;
 }
 
+// Version information BCH(18,6), required by the QR specification for
+// versions 7 and above.
+function versionInfo(version) {
+  let rem = version;
+  for (let i = 0; i < 12; i++) rem = (rem << 1) ^ ((rem >>> 11) * 0x1f25);
+  return (version << 12) | rem;
+}
+
 // ─── Matrix construction ──────────────────────────────────────────
 
 function buildMatrix(codewords, version) {
@@ -223,6 +231,20 @@ function buildMatrix(codewords, version) {
   // Dark module — always 1, always at (size-8, 8).
   m[size - 8][8] = 1;
   reserved[size - 8][8] = true;
+
+  // Versions 7+ carry two copies of an 18-bit version code in 3×6 areas
+  // beside the top-right and bottom-left finder patterns. Reserve and fill
+  // them before data placement so payload bits cannot overwrite them.
+  if (version >= 7) {
+    const bits = versionInfo(version);
+    for (let i = 0; i < 18; i++) {
+      const bit = (bits >> i) & 1;
+      const a = size - 11 + (i % 3);
+      const b = Math.floor(i / 3);
+      m[b][a] = bit; reserved[b][a] = true;
+      m[a][b] = bit; reserved[a][b] = true;
+    }
+  }
 
   // Place data in the standard zigzag, top-right → bottom-left,
   // skipping reserved cells. Mask 0: invert when (row + col) is even.
