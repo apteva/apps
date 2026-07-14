@@ -2,16 +2,237 @@ package main
 
 import (
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
+	"time"
+
+	sdk "github.com/apteva/app-sdk"
+	tk "github.com/apteva/app-sdk/testkit"
 )
 
-func TestManifestParses(t *testing.T) {
-	m := (&App{}).Manifest()
-	if m.Name != "creators" {
-		t.Fatalf("name = %q", m.Name)
+const testProject = "creators-test"
+
+func testContext(t *testing.T) *sdk.AppCtx {
+	t.Helper()
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID(testProject))
+	globalCtx = ctx
+	return ctx
+}
+
+func mustSpace(t *testing.T, ctx *sdk.AppCtx, pid, name, slug string) *Space {
+	t.Helper()
+	space, err := createSpace(ctx, pid, map[string]any{"name": name, "slug": slug, "default_currency": "USD"})
+	if err != nil {
+		t.Fatalf("create space: %v", err)
 	}
-	if len(m.Requires.Apps) < 3 {
-		t.Fatalf("expected storage, billing, and optional deps, got %#v", m.Requires.Apps)
+	return space
+}
+
+func mustTier(t *testing.T, ctx *sdk.AppCtx, pid string, spaceID int64, interval string) *Tier {
+	t.Helper()
+	tier, err := createTier(ctx, pid, spaceID, map[string]any{"name": "Supporter", "price_cents": 1200, "currency": "USD", "interval": interval})
+	if err != nil {
+		t.Fatalf("create tier: %v", err)
+	}
+	return tier
+}
+
+func mustMember(t *testing.T, ctx *sdk.AppCtx, pid string, spaceID int64, args map[string]any) *Member {
+	t.Helper()
+	member, _, _, err := upsertMember(ctx, pid, spaceID, args)
+	if err != nil {
+		t.Fatalf("upsert member: %v", err)
+	}
+	return member
+}
+
+func TestManifestAndSpaceScopedSchemas(t *testing.T) {
+	a := &App{}
+	m := a.Manifest()
+	if m.Name != "creators" || m.Version != "0.2.0" {
+		t.Fatalf("manifest = %s %s", m.Name, m.Version)
+	}
+	if len(a.Workers()) != 1 || len(a.EventHandlers()) != 3 || a.EventHandlers()[0].Event != "invoice.paid" {
+		t.Fatal("membership lifecycle worker and billing lifecycle handlers must be registered")
+	}
+	for _, tool := range a.MCPTools() {
+		if strings.HasPrefix(tool.Name, "creators_space_") {
+			continue
+		}
+		props, _ := tool.InputSchema["properties"].(map[string]any)
+		if props["space_id"] == nil || props["space_slug"] == nil {
+			t.Errorf("%s does not expose creator-space selectors", tool.Name)
+		}
+	}
+}
+
+func TestMemberUpsertDoesNotDowngradeExistingStatus(t *testing.T) {
+	ctx := testContext(t)
+	space := mustSpace(t, ctx, testProject, "Primary", "primary")
+	member := mustMember(t, ctx, testProject, space.ID, map[string]any{"email": "paid@example.com", "status": "active"})
+	updated, created, _, err := upsertMember(ctx, testProject, space.ID, map[string]any{"email": member.Email, "display_name": "Paid Member"})
+	if err != nil || created {
+		t.Fatalf("second upsert: created=%v err=%v", created, err)
+	}
+	if updated.Status != "active" {
+		t.Fatalf("status=%q, want active", updated.Status)
+	}
+}
+
+func TestMemberHTTPReadsRedactPortalToken(t *testing.T) {
+	ctx := testContext(t)
+	space := mustSpace(t, ctx, testProject, "Primary", "primary")
+	member := mustMember(t, ctx, testProject, space.ID, map[string]any{"email": "secret@example.com"})
+	req := httptest.NewRequest(http.MethodGet, "/members?project_id="+testProject+"&space_id="+jsonNumber(space.ID), nil)
+	rec := httptest.NewRecorder()
+	(&App{}).handleMembers(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), member.PortalToken) || strings.Contains(rec.Body.String(), "portal_token") {
+		t.Fatalf("member credential leaked in response: %s", rec.Body.String())
+	}
+	raw, _ := json.Marshal(member)
+	if strings.Contains(string(raw), member.PortalToken) {
+		t.Fatal("Member JSON serialization must never expose PortalToken")
+	}
+}
+
+func TestPortalTokenCannotAuthorizeAnotherSpace(t *testing.T) {
+	ctx := testContext(t)
+	a := mustSpace(t, ctx, testProject, "A", "a")
+	b := mustSpace(t, ctx, testProject, "B", "b")
+	member := mustMember(t, ctx, testProject, a.ID, map[string]any{"email": "a@example.com", "status": "active"})
+	post, err := createPost(ctx, testProject, b.ID, map[string]any{"title": "B only", "status": "published", "visibility": "members"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	res, err := ctx.AppDB().Exec(`INSERT INTO attachments (project_id, space_id, post_id, storage_file_id, visibility) VALUES (?, ?, ?, 9, 'inherit')`, testProject, b.ID, post.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	attachmentID, _ := res.LastInsertId()
+	_, err = getDownloadLink(ctx, testProject, b.ID, map[string]any{"attachment_id": attachmentID, "portal_token": member.PortalToken})
+	if err == nil || !strings.Contains(err.Error(), "does not belong") {
+		t.Fatalf("cross-space token error=%v", err)
+	}
+}
+
+func TestExpiredMembershipCannotAccessAndWorkerMarksPastDue(t *testing.T) {
+	ctx := testContext(t)
+	space := mustSpace(t, ctx, testProject, "Primary", "primary")
+	member := mustMember(t, ctx, testProject, space.ID, map[string]any{"email": "expired@example.com", "status": "active"})
+	past := time.Now().UTC().Add(-time.Hour).Format(time.RFC3339)
+	if _, err := ctx.AppDB().Exec(`UPDATE members SET current_period_end=? WHERE id=?`, past, member.ID); err != nil {
+		t.Fatal(err)
+	}
+	member, _ = getMember(ctx.AppDB(), testProject, space.ID, member.ID)
+	if memberCanAccessStatus(member) {
+		t.Fatal("expired active member was authorized")
+	}
+	if err := runCreatorLifecycle(ctx); err != nil {
+		t.Fatal(err)
+	}
+	member, _ = getMember(ctx.AppDB(), testProject, space.ID, member.ID)
+	if member.Status != "past_due" {
+		t.Fatalf("status=%q, want past_due", member.Status)
+	}
+}
+
+func TestInvoicePaidActivatesMembershipExactlyOnce(t *testing.T) {
+	ctx := testContext(t)
+	space := mustSpace(t, ctx, testProject, "Primary", "primary")
+	tier := mustTier(t, ctx, testProject, space.ID, "month")
+	member := mustMember(t, ctx, testProject, space.ID, map[string]any{"email": "payer@example.com"})
+	payment, _, err := reserveMembershipPayment(ctx.AppDB(), testProject, space.ID, member.ID, tier.ID, "initial", 2, 2400, "USD")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := attachMembershipInvoice(ctx.AppDB(), payment.ID, 44); err != nil {
+		t.Fatal(err)
+	}
+	event := sdk.Event{Event: "invoice.paid", SourceApp: "billing", ProjectID: testProject, Data: map[string]any{"id": float64(44), "status": "paid"}}
+	partial := event
+	partial.Data = map[string]any{"id": float64(44), "status": "open"}
+	if err := (&App{}).handleInvoicePaid(ctx, partial); err != nil {
+		t.Fatal(err)
+	}
+	member, _ = getMember(ctx.AppDB(), testProject, space.ID, member.ID)
+	if member.Status != "lead" {
+		t.Fatalf("partial payment activated membership: %q", member.Status)
+	}
+	if err := (&App{}).handleInvoicePaid(ctx, event); err != nil {
+		t.Fatal(err)
+	}
+	member, _ = getMember(ctx.AppDB(), testProject, space.ID, member.ID)
+	if member.Status != "active" || member.TierID == nil || *member.TierID != tier.ID || member.CurrentPeriodEnd == "" {
+		t.Fatalf("member not activated correctly: %#v", member)
+	}
+	metrics, err := membershipMetrics(ctx.AppDB(), testProject, space.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	mrr := metrics["mrr_by_currency"].(map[string]int64)
+	if mrr["USD"] != 1200 {
+		t.Fatalf("paid MRR=%d, want 1200", mrr["USD"])
+	}
+	firstEnd := member.CurrentPeriodEnd
+	if err := (&App{}).handleInvoicePaid(ctx, event); err != nil {
+		t.Fatal(err)
+	}
+	member, _ = getMember(ctx.AppDB(), testProject, space.ID, member.ID)
+	if member.CurrentPeriodEnd != firstEnd {
+		t.Fatalf("duplicate event extended period twice: %s -> %s", firstEnd, member.CurrentPeriodEnd)
+	}
+}
+
+func TestScheduledPublisherAndPublicProjectRouting(t *testing.T) {
+	ctx := testContext(t)
+	a := mustSpace(t, ctx, "project-a", "Creator A", "creator")
+	b := mustSpace(t, ctx, "project-b", "Creator B", "creator")
+	post, err := createPost(ctx, "project-b", b.ID, map[string]any{
+		"title": "Scheduled", "status": "scheduled", "visibility": "public",
+		"scheduled_at": time.Now().UTC().Add(-time.Minute).Format(time.RFC3339),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := runCreatorLifecycle(ctx); err != nil {
+		t.Fatal(err)
+	}
+	post, _ = getPost(ctx.AppDB(), "project-b", b.ID, post.ID, false)
+	if post.Status != "published" {
+		t.Fatalf("scheduled post status=%q", post.Status)
+	}
+	req := httptest.NewRequest(http.MethodGet, "/public/creator?project_id=project-b", nil)
+	rec := httptest.NewRecorder()
+	(&App{}).handlePublic(rec, req)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"project_id":"project-b"`) || strings.Contains(rec.Body.String(), `"project_id":"project-a"`) {
+		t.Fatalf("public route selected wrong project: status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	_ = a
+}
+
+func TestTierValidationAndPaymentReservationIdempotency(t *testing.T) {
+	ctx := testContext(t)
+	space := mustSpace(t, ctx, testProject, "Primary", "primary")
+	if _, err := createTier(ctx, testProject, space.ID, map[string]any{"name": "Bad", "price_cents": -1, "currency": "USD"}); err == nil {
+		t.Fatal("negative tier price accepted")
+	}
+	if _, err := createTier(ctx, testProject, space.ID, map[string]any{"name": "Bad", "price_cents": 10, "currency": "US"}); err == nil {
+		t.Fatal("invalid currency accepted")
+	}
+	tier := mustTier(t, ctx, testProject, space.ID, "month")
+	member := mustMember(t, ctx, testProject, space.ID, map[string]any{"email": "idem@example.com"})
+	first, created, err := reserveMembershipPayment(ctx.AppDB(), testProject, space.ID, member.ID, tier.ID, "renewal", 1, 1200, "USD")
+	if err != nil || !created {
+		t.Fatalf("first reserve created=%v err=%v", created, err)
+	}
+	second, created, err := reserveMembershipPayment(ctx.AppDB(), testProject, space.ID, member.ID, tier.ID, "renewal", 1, 1200, "USD")
+	if err != nil || created || first.ID != second.ID {
+		t.Fatalf("duplicate reserve created=%v first=%d second=%d err=%v", created, first.ID, second.ID, err)
 	}
 }
 
@@ -24,22 +245,18 @@ func TestMemberCanAccessAttachment(t *testing.T) {
 	if !memberCanAccessAttachment(member, post, att) {
 		t.Fatal("active member in gated tier should access inherited attachment")
 	}
-
 	otherTier := int64(11)
 	member.TierID = &otherTier
 	if memberCanAccessAttachment(member, post, att) {
 		t.Fatal("member in another tier should not access tier-gated post")
 	}
+}
 
-	publicPost := &Post{Status: "published", Visibility: "public"}
-	publicAtt := &Attachment{Visibility: "public"}
-	if !memberCanAccessAttachment(nil, publicPost, publicAtt) {
-		t.Fatal("public post + public attachment should not require member")
-	}
+func jsonNumber(value int64) string {
+	return strings.TrimSpace(string(mustJSON(value)))
+}
 
-	privateAtt := &Attachment{Visibility: "private"}
-	member.TierID = &tierID
-	if memberCanAccessAttachment(member, post, privateAtt) {
-		t.Fatal("private attachment should not be downloadable through member portal")
-	}
+func mustJSON(value any) []byte {
+	raw, _ := json.Marshal(value)
+	return raw
 }

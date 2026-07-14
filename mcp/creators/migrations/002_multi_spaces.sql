@@ -6,6 +6,7 @@
 -- the current/default space for their project.
 
 PRAGMA foreign_keys = OFF;
+BEGIN IMMEDIATE;
 
 CREATE TABLE IF NOT EXISTS creator_spaces_v2 (
   id               INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -21,7 +22,7 @@ CREATE TABLE IF NOT EXISTS creator_spaces_v2 (
   updated_at       TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
-INSERT OR IGNORE INTO creator_spaces_v2
+INSERT INTO creator_spaces_v2
   (id, project_id, name, slug, description, avatar_file_id, banner_file_id, default_currency, metadata, created_at, updated_at)
 SELECT id, project_id, name, slug, description, avatar_file_id, banner_file_id, default_currency, metadata, created_at, updated_at
 FROM creator_spaces;
@@ -50,7 +51,7 @@ CREATE TABLE IF NOT EXISTS tiers_v2 (
   UNIQUE(space_id, slug)
 );
 
-INSERT OR IGNORE INTO tiers_v2
+INSERT INTO tiers_v2
   (id, project_id, space_id, name, slug, description, price_cents, currency, interval, benefits_json, sort_order, archived_at, created_at, updated_at)
 SELECT t.id, t.project_id, cs.id, t.name, t.slug, t.description, t.price_cents, t.currency, t.interval, t.benefits_json, t.sort_order, t.archived_at, t.created_at, t.updated_at
 FROM tiers t
@@ -81,7 +82,7 @@ CREATE TABLE IF NOT EXISTS members_v2 (
   UNIQUE(space_id, email)
 );
 
-INSERT OR IGNORE INTO members_v2
+INSERT INTO members_v2
   (id, project_id, space_id, email, display_name, status, tier_id, crm_contact_id, billing_customer_id, portal_token, current_period_start, current_period_end, metadata, created_at, updated_at)
 SELECT m.id, m.project_id, cs.id, m.email, m.display_name, m.status, m.tier_id, m.crm_contact_id, m.billing_customer_id, m.portal_token, m.current_period_start, m.current_period_end, m.metadata, m.created_at, m.updated_at
 FROM members m
@@ -113,7 +114,7 @@ CREATE TABLE IF NOT EXISTS posts_v2 (
   UNIQUE(space_id, slug)
 );
 
-INSERT OR IGNORE INTO posts_v2
+INSERT INTO posts_v2
   (id, project_id, space_id, title, slug, body, status, visibility, tier_ids_json, published_at, scheduled_at, created_at, updated_at)
 SELECT p.id, p.project_id, cs.id, p.title, p.slug, p.body, p.status, p.visibility, p.tier_ids_json, p.published_at, p.scheduled_at, p.created_at, p.updated_at
 FROM posts p
@@ -140,7 +141,7 @@ CREATE TABLE IF NOT EXISTS attachments_v2 (
   created_at      TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
-INSERT OR IGNORE INTO attachments_v2
+INSERT INTO attachments_v2
   (id, project_id, space_id, post_id, storage_file_id, filename, content_type, size_bytes, visibility, tier_ids_json, created_at)
 SELECT a.id, a.project_id, p.space_id, a.post_id, a.storage_file_id, a.filename, a.content_type, a.size_bytes, a.visibility, a.tier_ids_json, a.created_at
 FROM attachments a
@@ -163,7 +164,7 @@ CREATE TABLE IF NOT EXISTS creator_events_v2 (
   created_at   TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
-INSERT OR IGNORE INTO creator_events_v2
+INSERT INTO creator_events_v2
   (id, project_id, space_id, kind, actor, subject_type, subject_id, data_json, created_at)
 SELECT e.id, e.project_id, cs.id, e.kind, e.actor, e.subject_type, e.subject_id, e.data_json, e.created_at
 FROM creator_events e
@@ -174,4 +175,5 @@ DROP TABLE creator_events;
 ALTER TABLE creator_events_v2 RENAME TO creator_events;
 CREATE INDEX IF NOT EXISTS ix_creator_events_project ON creator_events(project_id, space_id, id DESC);
 
+COMMIT;
 PRAGMA foreign_keys = ON;
