@@ -45,6 +45,55 @@ type callAppCall struct {
 	Input map[string]any
 }
 
+type paymentEventRaceStub struct {
+	*platformStub
+	onPaid            func() error
+	raceStarted       chan struct{}
+	activationStarted chan struct{}
+	releaseActivation chan struct{}
+	eventDone         chan error
+	activationOnce    sync.Once
+}
+
+func newPaymentEventRaceStub() *paymentEventRaceStub {
+	return &paymentEventRaceStub{
+		platformStub:      paidInvoicePlatformStub(),
+		raceStarted:       make(chan struct{}),
+		activationStarted: make(chan struct{}),
+		releaseActivation: make(chan struct{}),
+		eventDone:         make(chan error, 1),
+	}
+}
+
+func (p *paymentEventRaceStub) CallAppResult(appName, tool string, input map[string]any, out any) error {
+	if appName == "billing" && tool == "payments_record" {
+		if err := p.platformStub.CallAppResult(appName, tool, input, out); err != nil {
+			return err
+		}
+		close(p.raceStarted)
+		go func() { p.eventDone <- p.onPaid() }()
+		select {
+		case <-p.activationStarted:
+		case <-time.After(time.Second):
+			return errors.New("invoice.paid handler did not claim the payment operation")
+		}
+		go func() {
+			time.Sleep(75 * time.Millisecond)
+			close(p.releaseActivation)
+		}()
+		return nil
+	}
+	if appName == "subscriptions" && tool == "subscription_cycles_update" {
+		select {
+		case <-p.raceStarted:
+			p.activationOnce.Do(func() { close(p.activationStarted) })
+			<-p.releaseActivation
+		default:
+		}
+	}
+	return p.platformStub.CallAppResult(appName, tool, input, out)
+}
+
 func (p *platformStub) CallAppResult(appName, tool string, input map[string]any, out any) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -173,6 +222,9 @@ func newTestCtx(t *testing.T, pf sdk.PlatformClient) (*sdk.AppCtx, *sql.DB) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Match the app-sdk runtime, which serializes SQLite access so app
+	// events and tool calls queue instead of competing as separate writers.
+	db.SetMaxOpenConns(1)
 	matches, err := filepath.Glob("migrations/*.sql")
 	if err != nil {
 		t.Fatal(err)
@@ -201,8 +253,8 @@ func TestEmbeddedManifest_Valid(t *testing.T) {
 	if m.Name != "saas" {
 		t.Errorf("manifest.Name=%q, want saas", m.Name)
 	}
-	if m.Version != "0.3.2" {
-		t.Errorf("manifest.Version=%q, want 0.3.2", m.Version)
+	if m.Version != "0.3.3" {
+		t.Errorf("manifest.Version=%q, want 0.3.3", m.Version)
 	}
 	if !m.Requires.DynamicAppCalls {
 		t.Error("manifest should allow dynamic app calls for configured usage sources")
@@ -624,6 +676,61 @@ func TestCheckoutCreate_AdminPaymentActivatesAccountAndStoresBillingRefs(t *test
 	}
 	if int64FromAny(payment.Input["amount_cents"]) != 2900 || payment.Input["method"] != "wire" {
 		t.Fatalf("bad payment input: %+v", payment.Input)
+	}
+}
+
+func TestCheckoutMarkPaid_WaitsForConcurrentInvoicePaidEvent(t *testing.T) {
+	pf := newPaymentEventRaceStub()
+	ctx, db := newTestCtx(t, pf)
+	defer db.Close()
+	app := &App{}
+	pf.onPaid = func() error {
+		return app.handleInvoicePaid(ctx, sdk.Event{
+			Event: "invoice.paid", ProjectID: "proj-test", SourceApp: "billing",
+			Data: map[string]any{"id": 702, "status": "paid"},
+		})
+	}
+	setupPaidCRMPlan(t, app, ctx)
+
+	out, err := app.toolCheckoutCreate(ctx, map[string]any{
+		"owner_email": "race@example.com", "customer_name": "Race Co",
+		"slug": "race-co", "plan_key": "crm-pro",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkout := out.(map[string]any)["checkout"].(*Checkout)
+	paid, err := app.toolCheckoutMarkPaid(ctx, map[string]any{
+		"checkout_id": checkout.ID, "amount_cents": 2900, "method": "wire",
+	})
+	if err != nil {
+		t.Fatalf("concurrent invoice.paid event produced a false payment error: %v", err)
+	}
+	select {
+	case err := <-pf.eventDone:
+		if err != nil {
+			t.Fatalf("invoice.paid event failed: %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("invoice.paid event did not finish")
+	}
+
+	body := paid.(map[string]any)
+	if body["status"] != "active" || body["payment_processing"] == true {
+		t.Fatalf("payment response did not return the completed checkout: %+v", body)
+	}
+	op, err := dbCommerceOperationByInvoice(db, "proj-test", 702)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if op == nil || op.Status != "paid" || op.Stage != "subscription_activated" {
+		t.Fatalf("payment operation not completed: %+v", op)
+	}
+	if got := countCalls(pf.calls, "billing", "payments_record"); got != 1 {
+		t.Fatalf("payments_record calls=%d, want 1", got)
+	}
+	if got := countCalls(pf.calls, "subscriptions", "subscriptions_update_status"); got != 1 {
+		t.Fatalf("subscription activation calls=%d, want 1", got)
 	}
 }
 
