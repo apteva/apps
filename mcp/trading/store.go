@@ -148,6 +148,9 @@ type StrategyAssignment struct {
 	AssignedAgentID int64  `json:"assigned_agent_id,omitempty"`
 	Cadence         string `json:"cadence"`
 	LastEvaluatedAt string `json:"last_evaluated_at,omitempty"`
+	LastMarketBarAt string `json:"last_market_bar_at,omitempty"`
+	LastSeenBarAt   string `json:"last_seen_bar_at,omitempty"`
+	LastCheckedAt   string `json:"last_checked_at,omitempty"`
 	CreatedAt       string `json:"created_at"`
 	UpdatedAt       string `json:"updated_at"`
 }
@@ -1215,13 +1218,15 @@ func dbActiveStrategyAssignment(db *sql.DB, projectID string, portfolioID int64)
 	row := db.QueryRow(`
 		SELECT id, project_id, portfolio_id, strategy_id, strategy_version, control_mode, status,
 		       COALESCE(assigned_agent_id, 0), cadence, COALESCE(last_evaluated_at, ''),
+		       COALESCE(last_market_bar_at, ''), COALESCE(last_seen_bar_at, ''), COALESCE(last_checked_at, ''),
 		       created_at, updated_at
 		FROM portfolio_strategy_assignments
 		WHERE project_id = ? AND portfolio_id = ? AND status = 'active'
 		ORDER BY id DESC LIMIT 1`, projectID, portfolioID)
 	var a StrategyAssignment
 	if err := row.Scan(&a.ID, &a.ProjectID, &a.PortfolioID, &a.StrategyID, &a.StrategyVersion, &a.ControlMode,
-		&a.Status, &a.AssignedAgentID, &a.Cadence, &a.LastEvaluatedAt, &a.CreatedAt, &a.UpdatedAt); err != nil {
+		&a.Status, &a.AssignedAgentID, &a.Cadence, &a.LastEvaluatedAt,
+		&a.LastMarketBarAt, &a.LastSeenBarAt, &a.LastCheckedAt, &a.CreatedAt, &a.UpdatedAt); err != nil {
 		return nil, err
 	}
 	return &a, nil
@@ -1231,6 +1236,7 @@ func dbActiveStrategyAssignments(db *sql.DB) ([]*StrategyAssignment, error) {
 	rows, err := db.Query(`
 		SELECT id, project_id, portfolio_id, strategy_id, strategy_version, control_mode, status,
 		       COALESCE(assigned_agent_id, 0), cadence, COALESCE(last_evaluated_at, ''),
+		       COALESCE(last_market_bar_at, ''), COALESCE(last_seen_bar_at, ''), COALESCE(last_checked_at, ''),
 		       created_at, updated_at
 		FROM portfolio_strategy_assignments
 		WHERE status = 'active'
@@ -1243,7 +1249,8 @@ func dbActiveStrategyAssignments(db *sql.DB) ([]*StrategyAssignment, error) {
 	for rows.Next() {
 		var a StrategyAssignment
 		if err := rows.Scan(&a.ID, &a.ProjectID, &a.PortfolioID, &a.StrategyID, &a.StrategyVersion, &a.ControlMode,
-			&a.Status, &a.AssignedAgentID, &a.Cadence, &a.LastEvaluatedAt, &a.CreatedAt, &a.UpdatedAt); err != nil {
+			&a.Status, &a.AssignedAgentID, &a.Cadence, &a.LastEvaluatedAt,
+			&a.LastMarketBarAt, &a.LastSeenBarAt, &a.LastCheckedAt, &a.CreatedAt, &a.UpdatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, &a)
@@ -1251,11 +1258,30 @@ func dbActiveStrategyAssignments(db *sql.DB) ([]*StrategyAssignment, error) {
 	return out, rows.Err()
 }
 
-func dbSetStrategyAssignmentEvaluated(db *sql.DB, id int64, at time.Time) error {
+func dbSetStrategyAssignmentObserved(db *sql.DB, id int64, marketBarAt, checkedAt time.Time) error {
 	_, err := db.Exec(`
 		UPDATE portfolio_strategy_assignments
-		   SET last_evaluated_at = ?, updated_at = CURRENT_TIMESTAMP
-		 WHERE id = ?`, at.UTC().Format(time.RFC3339), id)
+		   SET last_seen_bar_at = ?, last_checked_at = ?
+		 WHERE id = ?`, marketBarAt.UTC().Format(time.RFC3339), checkedAt.UTC().Format(time.RFC3339), id)
+	return err
+}
+
+func dbInitializeStrategyAssignmentMarketBar(db *sql.DB, id int64, marketBarAt, checkedAt time.Time) error {
+	_, err := db.Exec(`
+		UPDATE portfolio_strategy_assignments
+		   SET last_market_bar_at = ?, last_seen_bar_at = ?, last_checked_at = ?
+		 WHERE id = ?`, marketBarAt.UTC().Format(time.RFC3339), marketBarAt.UTC().Format(time.RFC3339),
+		checkedAt.UTC().Format(time.RFC3339), id)
+	return err
+}
+
+func dbSetStrategyAssignmentEvaluated(db *sql.DB, id int64, evaluatedAt, marketBarAt, checkedAt time.Time) error {
+	_, err := db.Exec(`
+		UPDATE portfolio_strategy_assignments
+		   SET last_evaluated_at = ?, last_market_bar_at = ?, last_seen_bar_at = ?, last_checked_at = ?,
+		       updated_at = CURRENT_TIMESTAMP
+		 WHERE id = ?`, evaluatedAt.UTC().Format(time.RFC3339), marketBarAt.UTC().Format(time.RFC3339),
+		marketBarAt.UTC().Format(time.RFC3339), checkedAt.UTC().Format(time.RFC3339), id)
 	return err
 }
 

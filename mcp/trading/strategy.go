@@ -83,9 +83,10 @@ type StrategyValidationPeriod struct {
 }
 
 type strategyMarket struct {
-	prices  map[string]float64
-	history map[string][]float64
-	asOf    time.Time
+	prices   map[string]float64
+	history  map[string][]float64
+	asOf     time.Time
+	barTimes []time.Time
 }
 
 func parseStrategyDefinition(raw map[string]any) (*StrategyDefinition, error) {
@@ -551,6 +552,12 @@ func liveStrategyMarket(ctx *sdk.AppCtx, def *StrategyDefinition) (strategyMarke
 	market := strategyMarket{prices: map[string]float64{}, history: map[string][]float64{}, asOf: time.Now().UTC()}
 	interval := strategyHistoryInterval(def)
 	limit := strategyRequiredBars(def)
+	if scheduleLimit := strategyRebalanceEvery(def, interval) + 1; scheduleLimit > limit {
+		limit = scheduleLimit
+	}
+	if limit > 1000 {
+		limit = 1000
+	}
 	if globalEngine == nil || globalEngine.provider == nil {
 		return market, errors.New("live strategy market provider not ready")
 	}
@@ -579,6 +586,14 @@ func liveStrategyMarket(ctx *sdk.AppCtx, def *StrategyDefinition) (strategyMarke
 	for result := range results {
 		loaded[result.symbol] = result
 	}
+	scheduleSymbol := def.Universe[0]
+	for _, symbol := range def.Universe {
+		class := inferAssetClass(symbol)
+		if class == "equity" || class == "etf" {
+			scheduleSymbol = symbol
+			break
+		}
+	}
 	for _, symbol := range def.Universe {
 		result, ok := loaded[symbol]
 		if !ok || result.err != nil {
@@ -593,8 +608,37 @@ func liveStrategyMarket(ctx *sdk.AppCtx, def *StrategyDefinition) (strategyMarke
 			return market, fmt.Errorf("strategy history incomplete for %s: need %d valid closed bars, got %d", symbol, limit, len(h))
 		}
 		market.prices[symbol] = h[len(h)-1]
+		if symbol == scheduleSymbol {
+			for _, bar := range result.bars {
+				if bar.T > 0 && strategyBarPrice(bar) > 0 {
+					market.barTimes = append(market.barTimes, time.Unix(bar.T, 0).UTC())
+				}
+			}
+		}
 	}
+	if len(market.barTimes) == 0 {
+		return market, errors.New("strategy schedule has no completed market bars")
+	}
+	sort.Slice(market.barTimes, func(i, j int) bool { return market.barTimes[i].Before(market.barTimes[j]) })
+	deduped := market.barTimes[:0]
+	for _, barAt := range market.barTimes {
+		if len(deduped) == 0 || !barAt.Equal(deduped[len(deduped)-1]) {
+			deduped = append(deduped, barAt)
+		}
+	}
+	market.barTimes = deduped
+	market.asOf = market.barTimes[len(market.barTimes)-1]
 	return market, nil
+}
+
+func strategyBarPrice(bar Bar) float64 {
+	if bar.C > 0 {
+		return bar.C
+	}
+	if bar.Yes > 0 {
+		return bar.Yes
+	}
+	return bar.O
 }
 
 func loadLiveStrategyBars(provider Provider, symbol, interval string, limit int) ([]Bar, error) {
@@ -615,13 +659,7 @@ func loadLiveStrategyBars(provider Provider, symbol, interval string, limit int)
 
 func appendStrategyHistory(history map[string][]float64, symbol string, bars []Bar) {
 	for _, b := range bars {
-		price := b.C
-		if price <= 0 {
-			price = b.Yes
-		}
-		if price <= 0 {
-			price = b.O
-		}
+		price := strategyBarPrice(b)
 		if price > 0 {
 			history[symbol] = append(history[symbol], price)
 		}

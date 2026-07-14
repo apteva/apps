@@ -159,6 +159,31 @@ func TestLiveStrategyMarketUsesCadenceBarsForIndicatorWindow(t *testing.T) {
 	}
 }
 
+func TestLiveStrategyMarketLoadsEnoughBarsForRebalanceSchedule(t *testing.T) {
+	ctx := newTestCtx(t)
+	provider := &recordingStrategyProvider{}
+	globalEngine.provider = provider
+	def := &StrategyDefinition{
+		Universe:       []string{"AAPL"},
+		Cadence:        "1d",
+		RebalanceEvery: 5,
+		Rules: []StrategyRule{{
+			Name: "fixed", Allocate: []StrategyAllocation{{Symbol: "AAPL", Weight: 0.5}},
+		}},
+	}
+	market, err := liveStrategyMarket(ctx, def)
+	if err != nil {
+		t.Fatal(err)
+	}
+	interval, limit, _, _ := provider.calls()
+	if interval != "1d" || limit != 6 {
+		t.Fatalf("history request = %s/%d, want 1d/6 for a five-bar schedule", interval, limit)
+	}
+	if len(market.barTimes) != 6 {
+		t.Fatalf("schedule bars = %d, want 6", len(market.barTimes))
+	}
+}
+
 func TestLiveStrategyMarketFailsClosedOnPartialUniverse(t *testing.T) {
 	ctx := newTestCtx(t)
 	provider := &recordingStrategyProvider{errors: map[string]error{"ETH-USD": errors.New("upstream unavailable")}}
@@ -310,18 +335,79 @@ func TestStockStrategyExecutionWaitsForRegularSession(t *testing.T) {
 	}
 }
 
-func TestStrategyAssignmentCadenceUsesAlignedSlots(t *testing.T) {
-	def := &StrategyDefinition{Cadence: "1h"}
-	a := &StrategyAssignment{Cadence: "1h", LastEvaluatedAt: "2026-07-13T10:00:00Z"}
-	if strategyAssignmentDue(a, def, time.Date(2026, 7, 13, 10, 59, 59, 0, time.UTC)) {
-		t.Fatal("assignment became due before the next hourly candle boundary")
+func TestStrategyAssignmentCadenceCountsCompletedBars(t *testing.T) {
+	def := &StrategyDefinition{Cadence: "1d", RebalanceEvery: 5, Universe: []string{"AAPL"}}
+	a := &StrategyAssignment{LastMarketBarAt: "2026-07-02T13:30:00Z"}
+	market := strategyMarket{barTimes: []time.Time{
+		time.Date(2026, 7, 6, 13, 30, 0, 0, time.UTC),
+		time.Date(2026, 7, 7, 13, 30, 0, 0, time.UTC),
+		time.Date(2026, 7, 8, 13, 30, 0, 0, time.UTC),
+		time.Date(2026, 7, 9, 13, 30, 0, 0, time.UTC),
+	}}
+	if strategyAssignmentDueForMarket(a, def, market) {
+		t.Fatal("four completed sessions became due after a weekend")
 	}
-	next := time.Date(2026, 7, 13, 11, 0, 0, 0, time.UTC)
-	if !strategyAssignmentDue(a, def, next) {
-		t.Fatal("assignment was not due at the next hourly candle boundary")
+	market.barTimes = append(market.barTimes, time.Date(2026, 7, 10, 13, 30, 0, 0, time.UTC))
+	if !strategyAssignmentDueForMarket(a, def, market) {
+		t.Fatal("five completed sessions did not become due")
 	}
-	if slot := strategyAssignmentSlot(a, def, next.Add(37*time.Minute)); !slot.Equal(next) {
-		t.Fatalf("slot = %s, want %s", slot, next)
+}
+
+func TestStrategyAssignmentStockCheckSlotsAlignToSessionBars(t *testing.T) {
+	def := &StrategyDefinition{Cadence: "1h", Universe: []string{"AAPL"}}
+	now := time.Date(2026, 7, 14, 14, 37, 0, 0, time.UTC) // 10:37 New York.
+	slot, ok := strategyAssignmentCheckSlot(def, now)
+	want := time.Date(2026, 7, 14, 14, 30, 0, 0, time.UTC)
+	if !ok || !slot.Equal(want) {
+		t.Fatalf("stock check slot = %s ok=%v, want %s", slot, ok, want)
+	}
+	a := &StrategyAssignment{LastCheckedAt: want.Format(time.RFC3339)}
+	if strategyAssignmentCheckDue(a, slot) {
+		t.Fatal("assignment checked the same completed-bar slot twice")
+	}
+	next, _ := strategyAssignmentCheckSlot(def, time.Date(2026, 7, 14, 15, 31, 0, 0, time.UTC))
+	if !strategyAssignmentCheckDue(a, next) {
+		t.Fatal("assignment did not check the next session-aligned bar slot")
+	}
+}
+
+func TestStrategyAssignmentUpgradeInitializesBarClockWithoutTrading(t *testing.T) {
+	ctx := newTestCtx(t)
+	globalEngine.provider = &recordingStrategyProvider{}
+	portfolioID := mustCreatePortfolio(t, ctx, "Legacy schedule", []string{"crypto"})
+	strategyID := mustCreateFixedStrategy(t, ctx, "Legacy BTC", "BTC-USD", 0.5)
+	if _, err := dbAssignStrategy(ctx.AppDB(), &StrategyAssignment{
+		ProjectID: "test-proj", PortfolioID: portfolioID, StrategyID: strategyID,
+		StrategyVersion: 1, ControlMode: "strategy", Cadence: "1h",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	const previousEvaluation = "2026-07-13T09:00:00Z"
+	if _, err := ctx.AppDB().Exec(`
+		UPDATE portfolio_strategy_assignments SET last_evaluated_at = ?
+		WHERE portfolio_id = ? AND status = 'active'`, previousEvaluation, portfolioID); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := evaluateLiveStrategyAssignments(globalEngine, ctx, time.Date(2026, 7, 13, 10, 37, 0, 0, time.UTC)); got != 0 {
+		t.Fatalf("strategy orders = %d, want no upgrade-time trade", got)
+	}
+	assignment, err := dbActiveStrategyAssignment(ctx.AppDB(), "test-proj", portfolioID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if assignment.LastEvaluatedAt != previousEvaluation {
+		t.Fatalf("last evaluated = %q, want existing value preserved", assignment.LastEvaluatedAt)
+	}
+	if assignment.LastMarketBarAt == "" || assignment.LastSeenBarAt == "" || assignment.LastCheckedAt == "" {
+		t.Fatalf("bar scheduler was not initialized: %#v", assignment)
+	}
+	filled, err := dbListOrders(ctx.AppDB(), portfolioID, "filled", 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(filled) != 0 {
+		t.Fatalf("upgrade initialization created orders: %#v", filled)
 	}
 }
 

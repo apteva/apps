@@ -340,16 +340,33 @@ func evaluateLiveStrategyAssignments(e *engine, app *sdk.AppCtx, now time.Time) 
 			e.logger.Warn("strategy definition invalid", "assignment_id", a.ID, "strategy_id", a.StrategyID, "err", err)
 			continue
 		}
-		if !stockStrategyExecutionReady(e, def, now) {
+		runtimeDef := strategyAssignmentDefinition(a, def)
+		checkSlot, ok := strategyAssignmentCheckSlot(runtimeDef, now)
+		if !ok || !strategyAssignmentCheckDue(a, checkSlot) {
 			continue
 		}
-		slot := strategyAssignmentSlot(a, def, now)
-		if !strategyAssignmentDue(a, def, now) {
+		if !stockStrategyExecutionReady(e, runtimeDef, now) {
 			continue
 		}
-		market, err := liveStrategyMarket(app, def)
+		market, err := liveStrategyMarket(app, runtimeDef)
 		if err != nil {
 			e.logger.Warn("strategy market load failed", "assignment_id", a.ID, "strategy_id", a.StrategyID, "err", err)
+			continue
+		}
+		marketBarAt := market.barTimes[len(market.barTimes)-1]
+		if a.LastMarketBarAt == "" && a.LastEvaluatedAt != "" {
+			if err := dbInitializeStrategyAssignmentMarketBar(e.db, a.ID, marketBarAt, checkSlot); err != nil {
+				e.logger.Warn("strategy assignment schedule initialization failed", "assignment_id", a.ID, "err", err)
+			}
+			continue
+		}
+		if seen, err := time.Parse(time.RFC3339, strings.TrimSpace(a.LastSeenBarAt)); err == nil && !marketBarAt.After(seen) {
+			continue
+		}
+		if !strategyAssignmentDueForMarket(a, runtimeDef, market) {
+			if err := dbSetStrategyAssignmentObserved(e.db, a.ID, marketBarAt, checkSlot); err != nil {
+				e.logger.Warn("strategy assignment observation update failed", "assignment_id", a.ID, "err", err)
+			}
 			continue
 		}
 		eval, err := evaluateStrategy(strategy, market)
@@ -376,7 +393,7 @@ func evaluateLiveStrategyAssignments(e *engine, app *sdk.AppCtx, now time.Time) 
 			}
 		}
 		if resolved {
-			if err := dbSetStrategyAssignmentEvaluated(e.db, a.ID, slot); err != nil {
+			if err := dbSetStrategyAssignmentEvaluated(e.db, a.ID, checkSlot, marketBarAt, checkSlot); err != nil {
 				e.logger.Warn("strategy assignment timestamp update failed", "assignment_id", a.ID, "err", err)
 			}
 		}
@@ -434,56 +451,77 @@ func portfolioUsesBacktestPricing(db *sql.DB, portfolioID int64) bool {
 		fmt.Sprint(cfg["source"]) == "backtest"
 }
 
-func strategyAssignmentDue(a *StrategyAssignment, def *StrategyDefinition, now time.Time) bool {
-	if strings.TrimSpace(a.LastEvaluatedAt) == "" {
+func strategyAssignmentDefinition(a *StrategyAssignment, def *StrategyDefinition) *StrategyDefinition {
+	copyDef := *def
+	if cadence := strings.ToLower(strings.TrimSpace(a.Cadence)); cadence != "" {
+		if _, ok := strategyCadenceDuration(cadence); ok {
+			copyDef.Cadence = cadence
+		}
+	}
+	return &copyDef
+}
+
+func strategyAssignmentCheckDue(a *StrategyAssignment, slot time.Time) bool {
+	if strings.TrimSpace(a.LastCheckedAt) == "" {
 		return true
 	}
-	last, err := time.Parse(time.RFC3339, strings.TrimSpace(a.LastEvaluatedAt))
+	last, err := time.Parse(time.RFC3339, strings.TrimSpace(a.LastCheckedAt))
+	return err != nil || last.Before(slot)
+}
+
+func strategyAssignmentDueForMarket(a *StrategyAssignment, def *StrategyDefinition, market strategyMarket) bool {
+	if strings.TrimSpace(a.LastMarketBarAt) == "" {
+		return strings.TrimSpace(a.LastEvaluatedAt) == ""
+	}
+	last, err := time.Parse(time.RFC3339, strings.TrimSpace(a.LastMarketBarAt))
 	if err != nil {
 		return true
 	}
-	return last.Before(strategyAssignmentSlot(a, def, now))
-}
-
-func strategyAssignmentSlot(a *StrategyAssignment, def *StrategyDefinition, now time.Time) time.Time {
-	cadence := strings.ToLower(strings.TrimSpace(a.Cadence))
-	if cadence == "" && def != nil {
-		cadence = strings.ToLower(strings.TrimSpace(def.Cadence))
-	}
-	if cadence == "" {
-		cadence = "1d"
-	}
-	interval := strategyAssignmentInterval(a, def)
-	if cadence == "1w" {
-		monday := strategyClosedCandleBoundary(now, "1w")
-		if interval <= 7*24*time.Hour {
-			return monday
+	every := strategyRebalanceEvery(def, strategyHistoryInterval(def))
+	completed := 0
+	for _, barAt := range market.barTimes {
+		if barAt.After(last) {
+			completed++
 		}
-		epochMonday := time.Date(1970, 1, 5, 0, 0, 0, 0, time.UTC)
-		weeks := int64(monday.Sub(epochMonday) / (7 * 24 * time.Hour))
-		span := int64(interval / (7 * 24 * time.Hour))
-		return epochMonday.Add(time.Duration((weeks/span)*span) * 7 * 24 * time.Hour)
 	}
-	return now.UTC().Truncate(interval)
+	return completed >= every
 }
 
-func strategyAssignmentInterval(a *StrategyAssignment, def *StrategyDefinition) time.Duration {
-	cadence := strings.ToLower(strings.TrimSpace(a.Cadence))
-	if cadence == "" && def != nil {
-		cadence = strings.ToLower(strings.TrimSpace(def.Cadence))
+func strategyAssignmentCheckSlot(def *StrategyDefinition, now time.Time) (time.Time, bool) {
+	cadence := strategyHistoryInterval(def)
+	hasStocks := false
+	for _, symbol := range def.Universe {
+		class := inferAssetClass(symbol)
+		if class == "equity" || class == "etf" {
+			hasStocks = true
+			break
+		}
 	}
-	if cadence == "" {
-		cadence = "1d"
+	if !hasStocks {
+		return strategyClosedCandleBoundary(now, cadence), true
 	}
-	d, ok := strategyCadenceDuration(cadence)
-	if !ok {
-		d = 24 * time.Hour
+	location, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		return time.Time{}, false
 	}
-	every := 1
-	if def != nil && def.RebalanceEvery > 1 {
-		every = def.RebalanceEvery
+	local := now.In(location)
+	open := time.Date(local.Year(), local.Month(), local.Day(), 9, 30, 0, 0, location)
+	if local.Before(open) {
+		return time.Time{}, false
 	}
-	return d * time.Duration(every)
+	if cadence == "1d" {
+		return open.UTC(), true
+	}
+	if cadence == "1w" {
+		daysSinceMonday := (int(local.Weekday()) + 6) % 7
+		return open.AddDate(0, 0, -daysSinceMonday).UTC(), true
+	}
+	duration, ok := strategyCadenceDuration(cadence)
+	if !ok || duration <= 0 {
+		return open.UTC(), true
+	}
+	elapsed := local.Sub(open)
+	return open.Add(time.Duration(int64(elapsed) / int64(duration) * int64(duration))).UTC(), true
 }
 
 func placeStrategyPaperOrders(e *engine, pf *Portfolio, strategy *Strategy, assignment *StrategyAssignment, eval *StrategyEvaluation) ([]*Order, bool, error) {
