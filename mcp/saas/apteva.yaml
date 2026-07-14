@@ -2,13 +2,14 @@ schema: apteva-app/v1
 
 name: saas
 display_name: SaaS
-version: 0.3.3
+version: 0.4.0
 description: |
   Shared SaaS access control for Apteva apps. SaaS packages installed
   apps into sellable plans, creates customer accounts backed by Auth
   organizations, grants Entitlements, stores live usage gauges from
-  existing app tools, and applies subscription lifecycle state. It does
-  not install apps, run containers, or own invoices/payments directly.
+  existing app tools, orchestrates Catalog discounts, and applies
+  subscription lifecycle state. It does not install apps, run containers,
+  or own catalog eligibility, subscriptions, invoices, or payments directly.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/saas
@@ -25,6 +26,8 @@ requires:
     - platform.apps.call
   apps:
     - name: catalog
+      version: ">=0.2.0"
+      reason: price resolution plus generic discount reservation and redemption
       optional: false
     - name: billing
       version: ">=0.8.17"
@@ -36,8 +39,8 @@ requires:
         - invoice.refunded
         - payment_method.attached
     - name: subscriptions
-      version: ">=0.3.1"
-      reason: durable trial expiration, generic invoice preparation, cycle updates, and cycle_due events
+      version: ">=0.4.0"
+      reason: durable trial expiration, cycle-aware discount application, generic invoice preparation, cycle updates, and cycle_due events
       optional: false
       events:
         - subscription.active
@@ -99,7 +102,7 @@ provides:
       description: Fetch one SaaS plan.
       requires: saas.read
     - name: saas_plan_upsert
-      description: Create or update a SaaS plan linked to Catalog/Billing metadata.
+      description: Create or update a SaaS plan linked to Catalog pricing and an optional automatic Catalog discount.
       requires: saas.admin
     - name: saas_plan_feature_add
       description: Add a feature grant to a SaaS plan.
@@ -126,7 +129,7 @@ provides:
       description: Run or retry configured fulfillment actions for a SaaS account lifecycle event.
       requires: saas.admin
     - name: saas_checkout_create
-      description: Orchestrate free activation, no-card trials, or paid Billing/Subscription checkout for a SaaS account.
+      description: Orchestrate free activation, Catalog discounts, no-card trials, or paid Billing/Subscription checkout for a SaaS account.
       requires: saas.checkout
     - name: saas_checkout_get
       description: Fetch durable checkout status and any payment or setup URL.

@@ -134,7 +134,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "saas_plan_get", Description: "Fetch one SaaS plan.", InputSchema: schemaObject(map[string]any{"plan_key": strSchema()}, []string{"plan_key"}), Handler: a.toolPlanGet},
 		{Name: "saas_plan_upsert", Description: "Create or update a SaaS plan.", InputSchema: schemaObject(map[string]any{
 			"key": strSchema(), "name": strSchema(), "billing_mode": strSchema(), "catalog_product_id": intSchema(), "catalog_price_id": intSchema(),
-			"subscription_required": boolSchema(), "metadata": objSchema(),
+			"catalog_discount_id": intSchema(), "subscription_required": boolSchema(), "metadata": objSchema(),
 		}, []string{"key", "name"}), Handler: a.toolPlanUpsert},
 		{Name: "saas_plan_feature_add", Description: "Add a feature grant to a SaaS plan.", InputSchema: schemaObject(map[string]any{"plan_key": strSchema(), "feature_key": strSchema(), "grant_type": strSchema(), "metadata": objSchema()}, []string{"plan_key", "feature_key"}), Handler: a.toolPlanFeatureAdd},
 		{Name: "saas_plan_limit_set", Description: "Set a plan limit.", InputSchema: schemaObject(map[string]any{"plan_key": strSchema(), "feature_key": strSchema(), "limit_value": intSchema(), "reset_interval": strSchema(), "metadata": objSchema()}, []string{"plan_key", "feature_key"}), Handler: a.toolPlanLimitSet},
@@ -154,7 +154,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "saas_checkout_create", Description: "Create a SaaS checkout: free activation, no-card trials, or paid Billing/Subscription checkout.", InputSchema: schemaObject(map[string]any{
 			"owner_email": strSchema(), "customer_name": strSchema(), "slug": strSchema(), "plan_key": strSchema(),
 			"create_owner_user": boolSchema(), "send_password_reset": boolSchema(),
-			"idempotency_key": strSchema(), "payment_mode": strSchema(),
+			"idempotency_key": strSchema(), "payment_mode": strSchema(), "discount_code": strSchema(),
 			"success_url": strSchema(), "cancel_url": strSchema(),
 		}, []string{"owner_email", "slug"}), Handler: a.toolCheckoutCreate},
 		{Name: "saas_checkout_get", Description: "Fetch durable checkout status and payment/setup URL.", InputSchema: schemaObject(map[string]any{"checkout_id": strSchema()}, []string{"checkout_id"}), Handler: a.toolCheckoutGet},
@@ -204,6 +204,7 @@ type Plan struct {
 	BillingMode          string          `json:"billing_mode"`
 	CatalogProductID     *int64          `json:"catalog_product_id,omitempty"`
 	CatalogPriceID       *int64          `json:"catalog_price_id,omitempty"`
+	CatalogDiscountID    *int64          `json:"catalog_discount_id,omitempty"`
 	SubscriptionRequired bool            `json:"subscription_required"`
 	Metadata             json.RawMessage `json:"metadata,omitempty"`
 	Features             []PlanFeature   `json:"features,omitempty"`
@@ -1558,6 +1559,7 @@ func (a *App) createCheckout(ctx *sdk.AppCtx, args map[string]any) (map[string]a
 	for _, unsafe := range []string{
 		"activate_without_payment", "record_payment", "manual_payment_method",
 		"customer_id", "billing_customer_id", "auth_org_id", "auth_user_id", "subscription_id",
+		"discount_id", "catalog_discount_id",
 		"provider", "period_start", "period_end", "unit_amount_cents", "currency", "interval", "interval_count", "title",
 		"metadata", "subscription_metadata", "trial_start", "trial_end", "trial_days", "trial_requires_payment_method",
 	} {
@@ -1577,13 +1579,21 @@ func (a *App) createCheckout(ctx *sdk.AppCtx, args map[string]any) (map[string]a
 	if plan == nil {
 		return nil, fmt.Errorf("plan %q not found", planKey)
 	}
+	discountID, discountCode, err := checkoutDiscountIdentity(plan, strArg(args, "discount_code"))
+	if err != nil {
+		return nil, err
+	}
+	requiresCommerce := plan.BillingMode != "free" || plan.SubscriptionRequired
+	if (discountID != 0 || discountCode != "") && !requiresCommerce {
+		return nil, errors.New("discounts require a Catalog-backed subscription plan")
+	}
 	customer, err := resolveCustomer(ctx.AppDB(), pid, args)
 	if err != nil {
 		return nil, err
 	}
 	slug := strings.ToLower(strings.TrimSpace(strArg(args, "slug")))
 	idempotencyKey := firstNonEmpty(strArg(args, "idempotency_key"), "slug:"+slug)
-	fingerprint := checkoutFingerprint(customer, plan, slug)
+	fingerprint := checkoutFingerprint(customer, plan, slug, discountID, discountCode)
 	checkout, claimed, err := dbCheckoutClaim(ctx.AppDB(), pid, idempotencyKey, fingerprint, customer, plan, slug, firstNonEmpty(paymentMode, "plan_policy"))
 	if err != nil {
 		return nil, err
@@ -1600,7 +1610,6 @@ func (a *App) createCheckout(ctx *sdk.AppCtx, args map[string]any) (map[string]a
 		}
 		return nil, cause
 	}
-	requiresCommerce := plan.BillingMode != "free" || plan.SubscriptionRequired
 	if !requiresCommerce {
 		acct, _, err := a.ensureCheckoutAccount(ctx, checkout, customer, plan, 0, false, args)
 		if err != nil {
@@ -1614,6 +1623,13 @@ func (a *App) createCheckout(ctx *sdk.AppCtx, args map[string]any) (map[string]a
 	}
 
 	price, err := a.resolveCheckoutPrice(ctx, pid, plan, args)
+	if err != nil {
+		return fail(err)
+	}
+	if (discountID != 0 || discountCode != "") && price.PriceID == 0 {
+		return fail(errors.New("discounts require a configured Catalog price"))
+	}
+	checkoutDiscount, err := a.ensureCheckoutDiscountReservation(ctx, checkout, customer, price, discountID, discountCode)
 	if err != nil {
 		return fail(err)
 	}
@@ -1635,8 +1651,15 @@ func (a *App) createCheckout(ctx *sdk.AppCtx, args map[string]any) (map[string]a
 	if trialDays > 0 {
 		subStatus = "trialing"
 	}
-	subID, _, err := a.ensureCheckoutSubscription(ctx, checkout, customer, plan, price, subStatus, periodStart, periodEnd, trialStart, trialEnd, trialRequiresPaymentMethod, args)
+	zeroNetCheckout := plan.BillingMode == "paid" && trialDays == 0 && checkoutDiscount != nil && checkoutDiscount.TotalCents == 0
+	if zeroNetCheckout {
+		subStatus = StatusActive
+	}
+	subID, _, err := a.ensureCheckoutSubscription(ctx, checkout, customer, plan, price, checkoutDiscount, subStatus, periodStart, periodEnd, trialStart, trialEnd, trialRequiresPaymentMethod, args)
 	if err != nil {
+		return fail(err)
+	}
+	if err := a.ensureCheckoutDiscountRedeemed(ctx, checkoutDiscount); err != nil {
 		return fail(err)
 	}
 	if plan.BillingMode == "free" {
@@ -1645,6 +1668,27 @@ func (a *App) createCheckout(ctx *sdk.AppCtx, args map[string]any) (map[string]a
 			return fail(err)
 		}
 		if err := dbCheckoutComplete(ctx.AppDB(), pid, checkout.ID, "active", map[string]any{"account_id": acct.ID, "subscription_id": subID}); err != nil {
+			return fail(err)
+		}
+		checkout, _ = dbCheckoutGet(ctx.AppDB(), pid, checkout.ID)
+		return a.checkoutResponse(ctx, checkout)
+	}
+	if zeroNetCheckout {
+		acct, _, err := a.ensureCheckoutAccount(ctx, checkout, customer, plan, subID, false, args)
+		if err != nil {
+			return fail(err)
+		}
+		cycleID, err := a.ensureCheckoutCycle(ctx, checkout, subID, periodStart, periodEnd)
+		if err != nil {
+			return fail(err)
+		}
+		var cycleOut map[string]any
+		if err := ctx.PlatformAPI().CallAppResult("subscriptions", "subscription_cycles_update", map[string]any{
+			"_project_id": pid, "id": cycleID, "payment_status": "paid",
+		}, &cycleOut); err != nil {
+			return fail(fmt.Errorf("mark zero-total subscription cycle paid: %w", err))
+		}
+		if err := dbCheckoutComplete(ctx.AppDB(), pid, checkout.ID, "active", map[string]any{"account_id": acct.ID, "subscription_id": subID, "cycle_id": cycleID, "total_cents": 0}); err != nil {
 			return fail(err)
 		}
 		checkout, _ = dbCheckoutGet(ctx.AppDB(), pid, checkout.ID)
@@ -1744,8 +1788,11 @@ func (a *App) createCheckout(ctx *sdk.AppCtx, args map[string]any) (map[string]a
 	return a.checkoutResponse(ctx, checkout)
 }
 
-func checkoutFingerprint(customer *Customer, plan *Plan, slug string) string {
-	return strings.Join([]string{strings.ToLower(customer.Email), slug, plan.Key, strconv.FormatInt(customer.ID, 10)}, "|")
+func checkoutFingerprint(customer *Customer, plan *Plan, slug string, discountID int64, discountCode string) string {
+	return strings.Join([]string{
+		strings.ToLower(customer.Email), slug, plan.Key, strconv.FormatInt(customer.ID, 10),
+		strconv.FormatInt(discountID, 10), normalizeDiscountCode(discountCode),
+	}, "|")
 }
 
 func (a *App) checkoutResponse(ctx *sdk.AppCtx, checkout *Checkout) (map[string]any, error) {
@@ -1770,6 +1817,15 @@ func (a *App) checkoutResponse(ctx *sdk.AppCtx, checkout *Checkout) (map[string]
 	if checkout.TrialEndsAt != "" {
 		out["trial"] = map[string]any{"trial_ends_at": checkout.TrialEndsAt, "payment_required_at": checkout.TrialEndsAt}
 	}
+	if discount, err := dbCheckoutDiscountGet(ctx.AppDB(), checkout.ProjectID, checkout.ID); err != nil {
+		return nil, err
+	} else if discount != nil {
+		out["discount"] = discount
+		out["pricing"] = map[string]any{
+			"currency": discount.Currency, "subtotal_cents": discount.SubtotalCents,
+			"discount_cents": discount.DiscountCents, "total_cents": discount.TotalCents,
+		}
+	}
 	if customer, err := dbCustomerGet(ctx.AppDB(), checkout.ProjectID, checkout.CustomerID); err != nil {
 		return nil, err
 	} else if customer != nil {
@@ -1790,7 +1846,7 @@ func (a *App) checkoutResponse(ctx *sdk.AppCtx, checkout *Checkout) (map[string]
 	return out, nil
 }
 
-func (a *App) ensureCheckoutSubscription(ctx *sdk.AppCtx, checkout *Checkout, customer *Customer, plan *Plan, price checkoutPrice, status, periodStart, periodEnd, trialStart, trialEnd string, trialRequiresPaymentMethod bool, args map[string]any) (int64, map[string]any, error) {
+func (a *App) ensureCheckoutSubscription(ctx *sdk.AppCtx, checkout *Checkout, customer *Customer, plan *Plan, price checkoutPrice, discount *CheckoutDiscount, status, periodStart, periodEnd, trialStart, trialEnd string, trialRequiresPaymentMethod bool, args map[string]any) (int64, map[string]any, error) {
 	if id := int64PtrValue(checkout.SubscriptionID); id != 0 {
 		return id, map[string]any{"id": id, "status": status}, nil
 	}
@@ -1827,7 +1883,7 @@ func (a *App) ensureCheckoutSubscription(ctx *sdk.AppCtx, checkout *Checkout, cu
 			"catalog_product_id":            price.ProductID, "catalog_price_id": price.PriceID,
 		})
 	}
-	subOut, err := a.createSubscription(ctx, checkout.ProjectID, customer, customer.ID, plan, price, status, periodStart, periodEnd, subArgs)
+	subOut, err := a.createSubscription(ctx, checkout.ProjectID, customer, customer.ID, plan, price, discount, status, periodStart, periodEnd, subArgs)
 	if err != nil {
 		return 0, nil, err
 	}
@@ -2003,7 +2059,7 @@ func checkoutTrialConfig(plan *Plan, price checkoutPrice) (int64, bool) {
 	return trialDays, requiresPaymentMethod
 }
 
-func (a *App) createSubscription(ctx *sdk.AppCtx, pid string, customer *Customer, subscriptionCustomerID int64, plan *Plan, price checkoutPrice, status, periodStart, periodEnd string, args map[string]any) (map[string]any, error) {
+func (a *App) createSubscription(ctx *sdk.AppCtx, pid string, customer *Customer, subscriptionCustomerID int64, plan *Plan, price checkoutPrice, discount *CheckoutDiscount, status, periodStart, periodEnd string, args map[string]any) (map[string]any, error) {
 	checkoutID := strArg(args, "checkout_id")
 	input := map[string]any{
 		"_project_id":          pid,
@@ -2047,6 +2103,13 @@ func (a *App) createSubscription(ctx *sdk.AppCtx, pid string, customer *Customer
 	}
 	if extra := mapFromAny(args["subscription_metadata"]); len(extra) > 0 {
 		input["metadata"] = mergeMetadata(input["metadata"], extra)
+	}
+	if discount != nil {
+		input["discounts"] = []any{map[string]any{
+			"source_app": "catalog", "source_ref": discount.ReservationID, "catalog_price_id": price.PriceID,
+			"application": mapFromAny(discount.Application),
+			"metadata":    map[string]any{"source_app": "saas", "saas_checkout_id": checkoutID},
+		}}
 	}
 	var out map[string]any
 	if err := ctx.PlatformAPI().CallAppResult("subscriptions", "subscriptions_create", input, &out); err != nil {
@@ -2612,23 +2675,12 @@ func (a *App) handleSubscriptionCycleDue(ctx *sdk.AppCtx, event sdk.Event) error
 		return cause
 	}
 
-	customer, err := dbCustomerGet(ctx.AppDB(), pid, acct.CustomerID)
-	if err != nil || customer == nil {
-		return fail(firstErr(err, errors.New("SaaS customer not found")))
-	}
-	billingCustomerID, _, err := a.ensureBillingCustomer(ctx, pid, customer, map[string]any{})
-	if err != nil {
-		return fail(err)
-	}
-	if err := dbCommerceOperationSetCustomer(ctx.AppDB(), pid, op.ID, billingCustomerID); err != nil {
-		return fail(err)
-	}
-
 	prepared := mapFromAny(op.Prepared)
 	if len(prepared) == 0 {
 		input := map[string]any{
 			"_project_id":        pid,
 			"subscription_id":    subID,
+			"cycle_id":           cycleID,
 			"period_start":       periodStart,
 			"period_end":         periodEnd,
 			"include_flat":       true,
@@ -2644,6 +2696,49 @@ func (a *App) handleSubscriptionCycleDue(ctx *sdk.AppCtx, event sdk.Event) error
 		if err := dbCommerceOperationSetPrepared(ctx.AppDB(), pid, op.ID, prepared); err != nil {
 			return fail(err)
 		}
+	}
+	if total, hasTotal := prepared["total_cents"]; hasTotal && int64FromAny(total) == 0 {
+		var cycleOut map[string]any
+		if err := ctx.PlatformAPI().CallAppResult("subscriptions", "subscription_cycles_update", map[string]any{
+			"_project_id": pid, "id": cycleID, "payment_status": "paid",
+		}, &cycleOut); err != nil {
+			return fail(fmt.Errorf("mark zero-total subscription cycle paid: %w", err))
+		}
+		statusInput := map[string]any{
+			"_project_id": pid, "id": subID, "status": "active", "actor": "saas", "note": "Zero-total subscription cycle",
+			"current_period_start": periodStart, "current_period_end": periodEnd, "next_renewal_at": periodEnd,
+		}
+		var statusOut map[string]any
+		if err := ctx.PlatformAPI().CallAppResult("subscriptions", "subscriptions_update_status", statusInput, &statusOut); err != nil {
+			return fail(fmt.Errorf("activate zero-total subscription cycle: %w", err))
+		}
+		if _, err := a.toolSubscriptionSync(ctx, map[string]any{
+			"_project_id": pid, "account_id": acct.ID, "subscription_id": subID, "subscription_status": "active", "actor": "saas",
+		}); err != nil {
+			return fail(err)
+		}
+		if err := dbCommerceOperationCompletePayment(ctx.AppDB(), pid, op.ID); err != nil {
+			return fail(err)
+		}
+		if checkoutID != "" {
+			if err := dbCheckoutComplete(ctx.AppDB(), pid, checkoutID, "active", map[string]any{"subscription_id": subID, "cycle_id": cycleID, "total_cents": 0}); err != nil {
+				return fail(err)
+			}
+		}
+		_ = recordEvent(ctx.AppDB(), pid, acct.ID, "subscription.cycle_paid", "saas", map[string]any{"subscription_id": subID, "cycle_id": cycleID, "total_cents": 0})
+		return nil
+	}
+
+	customer, err := dbCustomerGet(ctx.AppDB(), pid, acct.CustomerID)
+	if err != nil || customer == nil {
+		return fail(firstErr(err, errors.New("SaaS customer not found")))
+	}
+	billingCustomerID, _, err := a.ensureBillingCustomer(ctx, pid, customer, map[string]any{})
+	if err != nil {
+		return fail(err)
+	}
+	if err := dbCommerceOperationSetCustomer(ctx.AppDB(), pid, op.ID, billingCustomerID); err != nil {
+		return fail(err)
 	}
 
 	op, err = dbCommerceOperationGet(ctx.AppDB(), pid, op.ID)
@@ -3094,6 +3189,9 @@ func (a *App) recoverExpiredCheckouts(ctx *sdk.AppCtx) error {
 			}, &out)
 		}
 	}
+	if err := a.reconcileCheckoutDiscounts(ctx, pid); err != nil {
+		return err
+	}
 	if err := a.reconcilePendingInvoices(ctx, pid); err != nil {
 		return err
 	}
@@ -3203,21 +3301,35 @@ func dbPlanUpsert(db *sql.DB, pid string, args map[string]any) (*Plan, error) {
 	if name == "" {
 		return nil, errors.New("name required")
 	}
+	billingMode := firstNonEmpty(strArg(args, "billing_mode"), "free")
+	if billingMode != "free" && billingMode != "paid" {
+		return nil, errors.New("billing_mode must be free or paid")
+	}
+	priceID := int64Arg(args, "catalog_price_id")
+	discountID := int64Arg(args, "catalog_discount_id")
+	subscriptionRequired := boolArg(args, "subscription_required")
+	if discountID != 0 && priceID == 0 {
+		return nil, errors.New("catalog_discount_id requires catalog_price_id")
+	}
+	if discountID != 0 && billingMode == "free" && !subscriptionRequired {
+		return nil, errors.New("catalog_discount_id requires a subscription plan")
+	}
 	_, err = db.Exec(`
 		INSERT INTO saas_plans
-			(project_id, key, name, billing_mode, catalog_product_id, catalog_price_id, subscription_required, metadata_json)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+			(project_id, key, name, billing_mode, catalog_product_id, catalog_price_id, catalog_discount_id, subscription_required, metadata_json)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
 		ON CONFLICT(project_id, key) DO UPDATE SET
 			name=excluded.name,
 			billing_mode=excluded.billing_mode,
 			catalog_product_id=excluded.catalog_product_id,
 			catalog_price_id=excluded.catalog_price_id,
+			catalog_discount_id=excluded.catalog_discount_id,
 			subscription_required=excluded.subscription_required,
 			metadata_json=excluded.metadata_json,
 			updated_at=CURRENT_TIMESTAMP`,
-		pid, key, name, firstNonEmpty(strArg(args, "billing_mode"), "free"),
-		nullableInt64(int64Arg(args, "catalog_product_id")), nullableInt64(int64Arg(args, "catalog_price_id")),
-		boolInt(boolArg(args, "subscription_required")), jsonOrEmpty(args["metadata"], "{}"))
+		pid, key, name, billingMode,
+		nullableInt64(int64Arg(args, "catalog_product_id")), nullableInt64(priceID),
+		nullableInt64(discountID), boolInt(subscriptionRequired), jsonOrEmpty(args["metadata"], "{}"))
 	if err != nil {
 		return nil, err
 	}
@@ -3338,15 +3450,15 @@ func hydratePlan(db *sql.DB, p *Plan) error {
 }
 
 func planSelect() string {
-	return `SELECT project_id, key, name, billing_mode, catalog_product_id, catalog_price_id, subscription_required, metadata_json, created_at, updated_at FROM saas_plans`
+	return `SELECT project_id, key, name, billing_mode, catalog_product_id, catalog_price_id, catalog_discount_id, subscription_required, metadata_json, created_at, updated_at FROM saas_plans`
 }
 
 func scanPlan(row rowScanner) (*Plan, error) {
 	var p Plan
-	var product, price sql.NullInt64
+	var product, price, discount sql.NullInt64
 	var subReq int
 	var meta string
-	if err := row.Scan(&p.ProjectID, &p.Key, &p.Name, &p.BillingMode, &product, &price, &subReq, &meta, &p.CreatedAt, &p.UpdatedAt); err != nil {
+	if err := row.Scan(&p.ProjectID, &p.Key, &p.Name, &p.BillingMode, &product, &price, &discount, &subReq, &meta, &p.CreatedAt, &p.UpdatedAt); err != nil {
 		return nil, err
 	}
 	if product.Valid {
@@ -3354,6 +3466,9 @@ func scanPlan(row rowScanner) (*Plan, error) {
 	}
 	if price.Valid {
 		p.CatalogPriceID = &price.Int64
+	}
+	if discount.Valid {
+		p.CatalogDiscountID = &discount.Int64
 	}
 	p.SubscriptionRequired = subReq != 0
 	p.Metadata = json.RawMessage(meta)

@@ -32,7 +32,10 @@ they do not need SaaS-specific hooks.
 
 - creates or links the Billing customer;
 - resolves the Catalog price;
+- reserves an optional Catalog discount from the plan or `discount_code`;
 - creates an idempotent Subscription and durable checkout record;
+- passes Catalog's immutable discount application to Subscriptions and redeems
+  the reservation after the Subscription is durable;
 - creates the first subscription cycle and prepares its lines through
   Subscriptions before asking Billing to create the invoice;
 - returns a payment link and leaves the account `past_due`, or returns a
@@ -42,6 +45,18 @@ they do not need SaaS-specific hooks.
 
 This keeps the sales flow inside SaaS without moving invoices, payments,
 subscriptions, auth, or product data out of their owner apps.
+
+Plans may set `catalog_discount_id` for one automatic promotion. Public checkout
+may instead provide one `discount_code`; automatic and code discounts do not
+stack. SaaS stores reservation and pricing state for recovery, while Catalog
+owns eligibility and redemption limits and Subscriptions owns application by
+billing cycle. Billing receives only the final prepared line items from
+Subscriptions. Checkout responses include `discount` and `pricing` summaries
+when a promotion applies.
+
+If Subscriptions prepares a zero-total cycle, SaaS marks that cycle paid and
+activates it without creating a Billing invoice or payment link. This covers
+100% promotions without inventing a zero-value payment.
 
 Paid plans with `trial_days > 0` and
 `trial_requires_payment_method: false` in plan or Catalog price metadata
