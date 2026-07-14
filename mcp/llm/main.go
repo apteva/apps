@@ -27,7 +27,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: llm
 display_name: LLM Gateway
-version: 0.4.0
+version: 0.5.0
 description: Generic OpenAI-compatible AI access for Apteva-hosted apps and agents.
 author: Apteva
 scopes: [project, global]
@@ -78,6 +78,14 @@ provides:
       description: List configured provider routes.
     - name: llm_provider_configs_upsert
       description: Create or update a provider route.
+    - name: llm_provider_rates_list
+      description: List provider-native model rates used for upstream cost calculation.
+    - name: llm_provider_rates_upsert
+      description: Create a manual provider rate override.
+    - name: llm_provider_rates_delete
+      description: Close an active provider rate without deleting its history.
+    - name: llm_provider_rates_refresh
+      description: Refresh rates found in provider model metadata.
     - name: llm_policy_get
       description: Return the project or subject policy.
     - name: llm_policy_set
@@ -176,7 +184,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		}
 	}
 	globalCtx = ctx
-	ctx.Logger().Info("llm gateway mounted", "version", "0.4.0", "scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
+	ctx.Logger().Info("llm gateway mounted", "version", "0.5.0", "scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
 	return nil
 }
 
@@ -277,6 +285,9 @@ func ensureGatewaySchema(db *sql.DB) error {
 				return err
 			}
 		}
+	}
+	if err := ensureProviderCostSchema(tx); err != nil {
+		return err
 	}
 
 	if _, err := tx.Exec(`DROP INDEX IF EXISTS ux_usage_request_id`); err != nil {
@@ -385,6 +396,8 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/subjects/suspend", Handler: a.handleSubjectSuspend},
 		{Pattern: "/subjects/resume", Handler: a.handleSubjectResume},
 		{Pattern: "/providers", Handler: a.handleProviders},
+		{Pattern: "/provider-rates/refresh", Handler: a.handleProviderRatesRefresh},
+		{Pattern: "/provider-rates", Handler: a.handleProviderRates},
 		{Pattern: "/models/sync", Handler: a.handleModelsSync},
 		{Pattern: "/models", Handler: a.handleModels},
 		{Pattern: "/test/chat", Handler: a.handleTestChat},
@@ -440,6 +453,22 @@ func (a *App) MCPTools() []sdk.Tool {
 			"priority":      map[string]any{"type": "integer"},
 			"metadata":      map[string]any{"type": "object"},
 		}, []string{"provider"}), Handler: a.toolProviderConfigUpsert},
+		{Name: "llm_provider_rates_list", Description: "List provider-native model rates used for upstream cost calculation.", InputSchema: schemaObject(map[string]any{
+			"project_id": map[string]any{"type": "string"}, "provider": map[string]any{"type": "string"}, "model_id": map[string]any{"type": "string"}, "include_history": map[string]any{"type": "boolean"},
+		}, nil), Handler: a.toolProviderRatesList},
+		{Name: "llm_provider_rates_upsert", Description: "Create a manual provider rate override.", InputSchema: schemaObject(map[string]any{
+			"project_id": map[string]any{"type": "string"}, "provider": map[string]any{"type": "string"}, "model_id": map[string]any{"type": "string"},
+			"currency": map[string]any{"type": "string"}, "input_microunits_per_million": map[string]any{"type": "integer"},
+			"output_microunits_per_million": map[string]any{"type": "integer"}, "cached_input_microunits_per_million": map[string]any{"type": "integer"},
+			"cache_write_microunits_per_million": map[string]any{"type": "integer"}, "request_microunits": map[string]any{"type": "integer"},
+			"extra_rates": map[string]any{"type": "object"}, "source_reference": map[string]any{"type": "string"},
+		}, []string{"provider", "model_id"}), Handler: a.toolProviderRateUpsert},
+		{Name: "llm_provider_rates_delete", Description: "Close an active provider rate while retaining history.", InputSchema: schemaObject(map[string]any{
+			"project_id": map[string]any{"type": "string"}, "id": map[string]any{"type": "integer"},
+		}, []string{"id"}), Handler: a.toolProviderRateDelete},
+		{Name: "llm_provider_rates_refresh", Description: "Refresh rates found in provider model metadata.", InputSchema: schemaObject(map[string]any{
+			"project_id": map[string]any{"type": "string"}, "provider": map[string]any{"type": "string"},
+		}, nil), Handler: a.toolProviderRatesRefresh},
 		{Name: "llm_policy_get", Description: "Return a project or subject policy.", InputSchema: schemaObject(map[string]any{
 			"project_id": map[string]any{"type": "string"}, "subject_type": map[string]any{"type": "string"}, "subject_id": map[string]any{"type": "string"},
 		}, nil), Handler: a.toolPolicyGet},
@@ -516,10 +545,13 @@ type Policy struct {
 }
 
 type Limits struct {
-	MonthlyRequestLimit     int64 `json:"monthly_request_limit,omitempty"`
-	MonthlyInputTokenLimit  int64 `json:"monthly_input_token_limit,omitempty"`
-	MonthlyOutputTokenLimit int64 `json:"monthly_output_token_limit,omitempty"`
-	MaxTokensPerRequest     int64 `json:"max_tokens_per_request,omitempty"`
+	MonthlyRequestLimit                int64  `json:"monthly_request_limit,omitempty"`
+	MonthlyInputTokenLimit             int64  `json:"monthly_input_token_limit,omitempty"`
+	MonthlyOutputTokenLimit            int64  `json:"monthly_output_token_limit,omitempty"`
+	MaxTokensPerRequest                int64  `json:"max_tokens_per_request,omitempty"`
+	MonthlyProviderCostLimitMicrounits int64  `json:"monthly_provider_cost_limit_microunits,omitempty"`
+	ProviderCostCurrency               string `json:"provider_cost_currency,omitempty"`
+	UnpricedModelBehavior              string `json:"unpriced_model_behavior,omitempty"`
 }
 
 type TokenIdentity struct {
@@ -531,36 +563,48 @@ type TokenIdentity struct {
 }
 
 type UsageSummary struct {
-	ProjectID          string `json:"project_id"`
-	Period             string `json:"period"`
-	SubjectType        string `json:"subject_type,omitempty"`
-	SubjectID          string `json:"subject_id,omitempty"`
-	Model              string `json:"model,omitempty"`
-	Requests           int64  `json:"requests"`
-	RequestTokens      int64  `json:"request_tokens"`
-	ResponseTokens     int64  `json:"response_tokens"`
-	TotalTokens        int64  `json:"total_tokens"`
-	EstimatedCostCents int64  `json:"-"`
+	ProjectID              string `json:"project_id"`
+	Period                 string `json:"period"`
+	SubjectType            string `json:"subject_type,omitempty"`
+	SubjectID              string `json:"subject_id,omitempty"`
+	Model                  string `json:"model,omitempty"`
+	Requests               int64  `json:"requests"`
+	RequestTokens          int64  `json:"request_tokens"`
+	ResponseTokens         int64  `json:"response_tokens"`
+	TotalTokens            int64  `json:"total_tokens"`
+	EstimatedCostCents     int64  `json:"-"`
+	ProviderCostMicrounits int64  `json:"provider_cost_microunits"`
+	ProviderCostCurrency   string `json:"provider_cost_currency"`
+	ReportedCostRequests   int64  `json:"reported_cost_requests"`
+	CalculatedCostRequests int64  `json:"calculated_cost_requests"`
+	PartialCostRequests    int64  `json:"partial_cost_requests"`
+	UnpricedRequests       int64  `json:"unpriced_requests"`
 }
 
 type UsageEvent struct {
-	ID                 int64  `json:"id"`
-	ProjectID          string `json:"project_id"`
-	SubjectType        string `json:"subject_type"`
-	SubjectID          string `json:"subject_id"`
-	Provider           string `json:"provider"`
-	Model              string `json:"model"`
-	RequestTokens      int64  `json:"request_tokens"`
-	ResponseTokens     int64  `json:"response_tokens"`
-	TotalTokens        int64  `json:"total_tokens"`
-	EstimatedCostCents int64  `json:"-"`
-	Status             string `json:"status"`
-	Period             string `json:"period"`
-	RequestID          string `json:"request_id"`
-	ProviderRequestID  string `json:"provider_request_id"`
-	TokenID            int64  `json:"token_id,omitempty"`
-	CreatedAt          string `json:"created_at"`
-	Duplicate          bool   `json:"duplicate,omitempty"`
+	ID                     int64           `json:"id"`
+	ProjectID              string          `json:"project_id"`
+	SubjectType            string          `json:"subject_type"`
+	SubjectID              string          `json:"subject_id"`
+	Provider               string          `json:"provider"`
+	Model                  string          `json:"model"`
+	RequestTokens          int64           `json:"request_tokens"`
+	ResponseTokens         int64           `json:"response_tokens"`
+	TotalTokens            int64           `json:"total_tokens"`
+	EstimatedCostCents     int64           `json:"-"`
+	ProviderCostMicrounits int64           `json:"provider_cost_microunits"`
+	ProviderCostCurrency   string          `json:"provider_cost_currency"`
+	ProviderCostStatus     string          `json:"provider_cost_status"`
+	ProviderCostSource     string          `json:"provider_cost_source,omitempty"`
+	ProviderRateID         int64           `json:"provider_rate_id,omitempty"`
+	UsageDetails           json.RawMessage `json:"usage_details,omitempty"`
+	Status                 string          `json:"status"`
+	Period                 string          `json:"period"`
+	RequestID              string          `json:"request_id"`
+	ProviderRequestID      string          `json:"provider_request_id"`
+	TokenID                int64           `json:"token_id,omitempty"`
+	CreatedAt              string          `json:"created_at"`
+	Duplicate              bool            `json:"duplicate,omitempty"`
 }
 
 type TokenRecord struct {
@@ -610,11 +654,16 @@ type ModelSyncResult struct {
 }
 
 type chatResult struct {
-	Status         int
-	Body           []byte
-	RequestTokens  int64
-	ResponseTokens int64
-	RequestID      string
+	Status                 int
+	Body                   []byte
+	RequestTokens          int64
+	ResponseTokens         int64
+	RequestID              string
+	ProviderCostMicrounits int64
+	ProviderCostCurrency   string
+	ProviderCostReported   bool
+	UsageDetails           json.RawMessage
+	UsageEvent             *UsageEvent
 }
 
 func (a *App) handleV1(w http.ResponseWriter, r *http.Request) {
@@ -1054,7 +1103,8 @@ func (a *App) executeEmbeddingsContext(reqCtx context.Context, ctx *sdk.AppCtx, 
 	if result.RequestTokens == 0 {
 		result.RequestTokens = estimatedInput
 	}
-	event, err := finishUsageReservation(ctx.AppDB(), reservation.ID, used.Provider, used.Model, result.RequestTokens, 0, "completed", result.RequestID)
+	event, err := finishUsageReservationCost(ctx.AppDB(), reservation.ID, used.Provider, used.Model, result.RequestTokens, 0, "completed", result.RequestID,
+		result.ProviderCostMicrounits, result.ProviderCostCurrency, result.ProviderCostReported, result.UsageDetails)
 	if err != nil {
 		return nil, err
 	}
@@ -1062,6 +1112,7 @@ func (a *App) executeEmbeddingsContext(reqCtx context.Context, ctx *sdk.AppCtx, 
 	_ = dbAudit(ctx.AppDB(), ident, "request.completed", used.Provider, used.Model, "completed", "", map[string]any{"request_id": requestID, "provider_request_id": result.RequestID, "usage_event_id": event.ID, "operation": "embeddings"})
 	ctx.EmitWithProject("llm.usage.recorded", ident.ProjectID, payload)
 	ctx.EmitWithProject("llm.request.completed", ident.ProjectID, payload)
+	result.UsageEvent = event
 	return result, nil
 }
 
@@ -1093,7 +1144,12 @@ func (a *App) callEmbeddings(ctx context.Context, cfg *ProviderConfig, apiKey st
 		return nil, err
 	}
 	result := &chatResult{Status: resp.StatusCode, Body: raw, RequestID: resp.Header.Get("X-Request-Id")}
-	result.RequestTokens, _ = parseOpenAIUsage(raw)
+	metering := parseProviderMetering(raw)
+	result.RequestTokens = metering.InputTokens
+	result.ProviderCostMicrounits = metering.CostMicrounits
+	result.ProviderCostCurrency = metering.CostCurrency
+	result.ProviderCostReported = metering.CostReported
+	result.UsageDetails = providerCostDetails(metering)
 	if result.RequestID == "" {
 		result.RequestID = "llm_" + randomSuffix(16)
 	}
@@ -1162,6 +1218,8 @@ func (a *App) executeChatContext(reqCtx context.Context, ctx *sdk.AppCtx, ident 
 	var lastErr error
 	var result *chatResult
 	used := attempts[0]
+	attemptDetails := []any{}
+	failedAttempts := 0
 	for i, attempt := range attempts {
 		if err := policiesAllow(policies, attempt.Provider, attempt.Model, int64Arg(body, "max_tokens")); err != nil {
 			continue
@@ -1185,9 +1243,12 @@ func (a *App) executeChatContext(reqCtx context.Context, ctx *sdk.AppCtx, ident 
 			}
 		}
 		if err == nil {
+			attemptDetails = append(attemptDetails, map[string]any{"provider": attempt.Provider, "model": attempt.Model, "status": "completed"})
 			break
 		}
 		lastErr = err
+		failedAttempts++
+		attemptDetails = append(attemptDetails, map[string]any{"provider": attempt.Provider, "model": attempt.Model, "status": "failed", "error": err.Error()})
 		retryable := isRetryableProviderError(err)
 		ctx.EmitWithProject("llm.provider.failed", ident.ProjectID, map[string]any{
 			"request_id": requestID, "provider": attempt.Provider, "model": attempt.Model,
@@ -1204,7 +1265,8 @@ func (a *App) executeChatContext(reqCtx context.Context, ctx *sdk.AppCtx, ident 
 		if lastErr == nil {
 			lastErr = errors.New("no allowed provider route is available")
 		}
-		usageEvent, finishErr := finishUsageReservation(ctx.AppDB(), reservation.ID, used.Provider, used.Model, estimatedInput, 0, "failed", "")
+		usageDetails := mergeUsageDetails(nil, attemptDetails, failedAttempts)
+		usageEvent, finishErr := finishUsageReservationCost(ctx.AppDB(), reservation.ID, used.Provider, used.Model, estimatedInput, 0, "failed", "", 0, "", false, usageDetails)
 		if finishErr != nil {
 			return nil, fmt.Errorf("provider failed: %v; record usage: %w", lastErr, finishErr)
 		}
@@ -1217,7 +1279,9 @@ func (a *App) executeChatContext(reqCtx context.Context, ctx *sdk.AppCtx, ident 
 	if result.RequestTokens == 0 {
 		result.RequestTokens = estimatedInput
 	}
-	usageEvent, err := finishUsageReservation(ctx.AppDB(), reservation.ID, used.Provider, used.Model, result.RequestTokens, result.ResponseTokens, "completed", result.RequestID)
+	result.UsageDetails = mergeUsageDetails(result.UsageDetails, attemptDetails, failedAttempts)
+	usageEvent, err := finishUsageReservationCost(ctx.AppDB(), reservation.ID, used.Provider, used.Model, result.RequestTokens, result.ResponseTokens, "completed", result.RequestID,
+		result.ProviderCostMicrounits, result.ProviderCostCurrency, result.ProviderCostReported, result.UsageDetails)
 	if err != nil {
 		return nil, err
 	}
@@ -1225,6 +1289,7 @@ func (a *App) executeChatContext(reqCtx context.Context, ctx *sdk.AppCtx, ident 
 	event := usageEventPayload(usageEvent, nil)
 	ctx.EmitWithProject("llm.usage.recorded", ident.ProjectID, event)
 	ctx.EmitWithProject("llm.request.completed", ident.ProjectID, event)
+	result.UsageEvent = usageEvent
 	return result, nil
 }
 
@@ -1282,7 +1347,13 @@ func (a *App) callOpenAICompatible(ctx context.Context, cfg *ProviderConfig, api
 		return nil, err
 	}
 	result := &chatResult{Status: resp.StatusCode, Body: raw, RequestID: resp.Header.Get("X-Request-Id")}
-	result.RequestTokens, result.ResponseTokens = parseOpenAIUsage(raw)
+	metering := parseProviderMetering(raw)
+	result.RequestTokens = metering.InputTokens
+	result.ResponseTokens = metering.OutputTokens
+	result.ProviderCostMicrounits = metering.CostMicrounits
+	result.ProviderCostCurrency = metering.CostCurrency
+	result.ProviderCostReported = metering.CostReported
+	result.UsageDetails = providerCostDetails(metering)
 	if result.RequestID == "" {
 		result.RequestID = "llm_" + randomSuffix(16)
 	}
@@ -1324,7 +1395,8 @@ func (a *App) callAnthropic(ctx context.Context, cfg *ProviderConfig, apiKey str
 	if err != nil {
 		return nil, err
 	}
-	result := &chatResult{Status: resp.StatusCode, Body: openAI, RequestTokens: inTok, ResponseTokens: outTok, RequestID: resp.Header.Get("Request-Id")}
+	metering := parseProviderMetering(raw)
+	result := &chatResult{Status: resp.StatusCode, Body: openAI, RequestTokens: inTok, ResponseTokens: outTok, RequestID: resp.Header.Get("Request-Id"), UsageDetails: providerCostDetails(metering)}
 	if result.RequestID == "" {
 		result.RequestID = "llm_" + randomSuffix(16)
 	}
@@ -1604,6 +1676,9 @@ func (a *App) toolChatCompleteCtx(reqCtx context.Context, ctx *sdk.AppCtx, args 
 	var out any
 	if err := json.Unmarshal(res.Body, &out); err != nil {
 		return map[string]any{"status": res.Status, "body": string(res.Body)}, nil
+	}
+	if object, ok := out.(map[string]any); ok && res.UsageEvent != nil {
+		object["apteva_usage"] = usageEventPayload(res.UsageEvent, nil)
 	}
 	return out, nil
 }
@@ -1988,6 +2063,10 @@ func (a *App) syncProviderModelsWithContext(reqCtx context.Context, ctx *sdk.App
 		}
 		if err := dbProviderModelsReplace(ctx.AppDB(), projectID, cfg.Provider, models); err != nil {
 			results = append(results, ModelSyncResult{Provider: cfg.Provider, Status: "error", Error: err.Error()})
+			continue
+		}
+		if _, err := a.refreshProviderRates(ctx.AppDB(), projectID, cfg.Provider); err != nil {
+			results = append(results, ModelSyncResult{Provider: cfg.Provider, Status: "error", Error: "refresh provider rates: " + err.Error()})
 			continue
 		}
 		rows, err := dbProviderModelsList(ctx.AppDB(), providerModelFilter{ProjectID: projectID, Provider: cfg.Provider, Status: "active"})
@@ -2576,8 +2655,17 @@ func dbUsageGet(db *sql.DB, f usageFilter) (*UsageSummary, error) {
 	out.SubjectType = f.SubjectType
 	out.SubjectID = f.SubjectID
 	out.Model = f.Model
-	query := `SELECT COUNT(*), COALESCE(SUM(request_tokens),0), COALESCE(SUM(response_tokens),0), COALESCE(SUM(total_tokens),0), COALESCE(SUM(estimated_cost_cents),0) FROM usage_events WHERE ` + strings.Join(conds, " AND ")
-	if err := db.QueryRow(query, args...).Scan(&out.Requests, &out.RequestTokens, &out.ResponseTokens, &out.TotalTokens, &out.EstimatedCostCents); err != nil {
+	query := `SELECT COUNT(*), COALESCE(SUM(request_tokens),0), COALESCE(SUM(response_tokens),0), COALESCE(SUM(total_tokens),0),
+		COALESCE(SUM(estimated_cost_cents),0), COALESCE(SUM(provider_cost_microunits),0),
+		CASE WHEN COUNT(DISTINCT provider_cost_currency) <= 1 THEN COALESCE(MIN(provider_cost_currency),'USD') ELSE 'MIXED' END,
+		COALESCE(SUM(CASE WHEN provider_cost_status='reported' THEN 1 ELSE 0 END),0),
+		COALESCE(SUM(CASE WHEN provider_cost_status='calculated' THEN 1 ELSE 0 END),0),
+		COALESCE(SUM(CASE WHEN provider_cost_status='partial' THEN 1 ELSE 0 END),0),
+		COALESCE(SUM(CASE WHEN provider_cost_status NOT IN ('reported','calculated','partial') THEN 1 ELSE 0 END),0)
+		FROM usage_events WHERE ` + strings.Join(conds, " AND ")
+	if err := db.QueryRow(query, args...).Scan(&out.Requests, &out.RequestTokens, &out.ResponseTokens, &out.TotalTokens,
+		&out.EstimatedCostCents, &out.ProviderCostMicrounits, &out.ProviderCostCurrency,
+		&out.ReportedCostRequests, &out.CalculatedCostRequests, &out.PartialCostRequests, &out.UnpricedRequests); err != nil {
 		return nil, err
 	}
 	return &out, nil
@@ -2589,12 +2677,37 @@ func reserveUsage(db *sql.DB, ident *TokenIdentity, provider, model string, inpu
 		return nil, 0, err
 	}
 	defer tx.Rollback()
+	if err := validateCostCurrency(policies); err != nil {
+		return nil, 0, forbiddenError(err.Error())
+	}
+	rate, err := resolveProviderRate(tx, ident.ProjectID, provider, model)
+	if err != nil {
+		return nil, 0, err
+	}
+	reservedOutput := smallestPolicyOutputReservation(policies, requestedOutput)
+	costMicrounits := int64(0)
+	costCurrency := "USD"
+	costStatus := "unpriced"
+	costSource := ""
+	rateID := int64(0)
+	if rate != nil && rate.hasMeteredRate() {
+		costMicrounits = calculateProviderCost(rate, input, reservedOutput, 0, 0)
+		costCurrency = rate.Currency
+		costStatus = "calculated"
+		costSource = rate.Source
+		rateID = rate.ID
+	} else if !unpricedAllowed(policies) {
+		return nil, 0, forbiddenError("provider rate is required while a provider cost limit is active")
+	}
 	period := currentPeriod()
 	res, err := tx.Exec(`INSERT INTO usage_events
 		(project_id, subject_type, subject_id, provider, model, request_tokens, response_tokens, total_tokens,
-		 estimated_cost_cents, status, period, request_id, provider_request_id, token_id)
-		VALUES (?, ?, ?, ?, ?, ?, 0, ?, 0, 'reserved', ?, ?, '', ?)`,
-		ident.ProjectID, ident.SubjectType, ident.SubjectID, provider, model, input, input, period, requestID, ident.ID)
+		 estimated_cost_cents, provider_cost_microunits, provider_cost_currency, provider_cost_status,
+		 provider_cost_source, provider_rate_id, usage_details_json, status, period, request_id, provider_request_id, token_id)
+		VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, '{}', 'reserved', ?, ?, '', ?)`,
+		ident.ProjectID, ident.SubjectType, ident.SubjectID, provider, model, input, input,
+		(costMicrounits+5000)/10000, costMicrounits, costCurrency, costStatus, costSource, rateID,
+		period, requestID, ident.ID)
 	if err != nil {
 		if strings.Contains(strings.ToLower(err.Error()), "unique constraint") {
 			return nil, 0, conflictError("duplicate request id for this subject")
@@ -2633,17 +2746,36 @@ func reserveUsage(db *sql.DB, ident *TokenIdentity, provider, model string, inpu
 				grantedOutput = minPositive(grantedOutput, policy.Limits.MaxTokensPerRequest)
 			}
 			if policy.Limits.MonthlyOutputTokenLimit <= 0 {
-				continue
+				// Cost limits can still derive a safe output ceiling when the
+				// caller omitted max_tokens.
+			} else {
+				remaining := policy.Limits.MonthlyOutputTokenLimit - usages[i].ResponseTokens
+				if remaining <= 0 || (requestedOutput > 0 && requestedOutput > remaining) {
+					return nil, 0, forbiddenError("monthly output token limit exceeded")
+				}
+				grantedOutput = minPositive(grantedOutput, remaining)
 			}
-			remaining := policy.Limits.MonthlyOutputTokenLimit - usages[i].ResponseTokens
-			if remaining <= 0 || (requestedOutput > 0 && requestedOutput > remaining) {
-				return nil, 0, forbiddenError("monthly output token limit exceeded")
+			if requestedOutput == 0 && policy.Limits.MonthlyProviderCostLimitMicrounits > 0 && rate != nil && rate.OutputMicrounitsPerMillion > 0 {
+				remainingCost := policy.Limits.MonthlyProviderCostLimitMicrounits - usages[i].ProviderCostMicrounits
+				if remainingCost <= 0 {
+					return nil, 0, forbiddenError("monthly provider cost limit exceeded")
+				}
+				maxByCost := remainingCost * 1_000_000 / rate.OutputMicrounitsPerMillion
+				if maxByCost <= 0 {
+					return nil, 0, forbiddenError("monthly provider cost limit leaves no output capacity")
+				}
+				grantedOutput = minPositive(grantedOutput, maxByCost)
 			}
-			grantedOutput = minPositive(grantedOutput, remaining)
 		}
 	}
 	if grantedOutput > 0 {
-		if _, err := tx.Exec(`UPDATE usage_events SET response_tokens=?, total_tokens=request_tokens+? WHERE id=?`, grantedOutput, grantedOutput, id); err != nil {
+		reservedCost := costMicrounits
+		if rate != nil && rate.hasMeteredRate() {
+			reservedCost = calculateProviderCost(rate, input, grantedOutput, 0, 0)
+		}
+		if _, err := tx.Exec(`UPDATE usage_events SET response_tokens=?, total_tokens=request_tokens+?,
+			provider_cost_microunits=?, estimated_cost_cents=? WHERE id=?`,
+			grantedOutput, grantedOutput, reservedCost, (reservedCost+5000)/10000, id); err != nil {
 			return nil, 0, err
 		}
 	}
@@ -2661,13 +2793,58 @@ func enforceReservedLimits(l Limits, usage *UsageSummary) error {
 	if l.MonthlyInputTokenLimit > 0 && usage.RequestTokens > l.MonthlyInputTokenLimit {
 		return forbiddenError("monthly input token limit exceeded")
 	}
+	if l.MonthlyProviderCostLimitMicrounits > 0 && usage.ProviderCostMicrounits > l.MonthlyProviderCostLimitMicrounits {
+		return forbiddenError("monthly provider cost limit exceeded")
+	}
 	return nil
 }
 
 func finishUsageReservation(db *sql.DB, id int64, provider, model string, input, output int64, status, providerRequestID string) (*UsageEvent, error) {
+	return finishUsageReservationCost(db, id, provider, model, input, output, status, providerRequestID, 0, "", false, nil)
+}
+
+func finishUsageReservationCost(db *sql.DB, id int64, provider, model string, input, output int64, status, providerRequestID string,
+	reportedCost int64, reportedCurrency string, costReported bool, usageDetails json.RawMessage) (*UsageEvent, error) {
+	current, err := dbUsageEventByID(db, id)
+	if err != nil {
+		return nil, err
+	}
+	costMicrounits := int64(0)
+	costCurrency := "USD"
+	costStatus := "unpriced"
+	costSource := ""
+	rateID := int64(0)
+	if costReported {
+		costMicrounits = reportedCost
+		costCurrency = firstNonEmpty(strings.ToUpper(reportedCurrency), "USD")
+		costStatus = "reported"
+		costSource = "provider_response"
+	} else if rate, resolveErr := resolveProviderRate(db, current.ProjectID, provider, model); resolveErr != nil {
+		return nil, resolveErr
+	} else if rate != nil && rate.hasMeteredRate() && status == "completed" {
+		var details struct {
+			CachedInputTokens int64 `json:"cached_input_tokens"`
+			CacheWriteTokens  int64 `json:"cache_write_tokens"`
+		}
+		_ = json.Unmarshal(usageDetails, &details)
+		costMicrounits = calculateProviderCost(rate, input, output, details.CachedInputTokens, details.CacheWriteTokens)
+		costCurrency = rate.Currency
+		costStatus = "calculated"
+		costSource = rate.Source
+		rateID = rate.ID
+	}
+	if len(usageDetails) == 0 {
+		usageDetails = json.RawMessage(`{}`)
+	}
+	if usageHasUnknownAttemptCost(usageDetails) {
+		costStatus = "partial"
+	}
 	res, err := db.Exec(`UPDATE usage_events SET provider=?, model=?, request_tokens=?, response_tokens=?, total_tokens=?,
-		status=?, provider_request_id=? WHERE id=? AND status='reserved'`,
-		provider, model, input, output, input+output, status, providerRequestID, id)
+		estimated_cost_cents=?, provider_cost_microunits=?, provider_cost_currency=?, provider_cost_status=?,
+		provider_cost_source=?, provider_rate_id=?, usage_details_json=?, status=?, provider_request_id=?
+		WHERE id=? AND status='reserved'`,
+		provider, model, input, output, input+output, (costMicrounits+5000)/10000, costMicrounits, costCurrency,
+		costStatus, costSource, rateID, string(usageDetails), status, providerRequestID, id)
 	if err != nil {
 		return nil, err
 	}
@@ -2703,8 +2880,17 @@ func dbUsageGetQuerier(db queryRower, f usageFilter, includeReserved bool) (*Usa
 		args = append(args, f.Model)
 	}
 	out := &UsageSummary{ProjectID: f.ProjectID, Period: f.Period, SubjectType: f.SubjectType, SubjectID: f.SubjectID, Model: f.Model}
-	query := `SELECT COUNT(*), COALESCE(SUM(request_tokens),0), COALESCE(SUM(response_tokens),0), COALESCE(SUM(total_tokens),0), COALESCE(SUM(estimated_cost_cents),0) FROM usage_events WHERE ` + strings.Join(conds, " AND ")
-	if err := db.QueryRow(query, args...).Scan(&out.Requests, &out.RequestTokens, &out.ResponseTokens, &out.TotalTokens, &out.EstimatedCostCents); err != nil {
+	query := `SELECT COUNT(*), COALESCE(SUM(request_tokens),0), COALESCE(SUM(response_tokens),0), COALESCE(SUM(total_tokens),0),
+		COALESCE(SUM(estimated_cost_cents),0), COALESCE(SUM(provider_cost_microunits),0),
+		CASE WHEN COUNT(DISTINCT provider_cost_currency) <= 1 THEN COALESCE(MIN(provider_cost_currency),'USD') ELSE 'MIXED' END,
+		COALESCE(SUM(CASE WHEN provider_cost_status='reported' THEN 1 ELSE 0 END),0),
+		COALESCE(SUM(CASE WHEN provider_cost_status='calculated' THEN 1 ELSE 0 END),0),
+		COALESCE(SUM(CASE WHEN provider_cost_status='partial' THEN 1 ELSE 0 END),0),
+		COALESCE(SUM(CASE WHEN provider_cost_status NOT IN ('reported','calculated','partial') THEN 1 ELSE 0 END),0)
+		FROM usage_events WHERE ` + strings.Join(conds, " AND ")
+	if err := db.QueryRow(query, args...).Scan(&out.Requests, &out.RequestTokens, &out.ResponseTokens, &out.TotalTokens,
+		&out.EstimatedCostCents, &out.ProviderCostMicrounits, &out.ProviderCostCurrency,
+		&out.ReportedCostRequests, &out.CalculatedCostRequests, &out.PartialCostRequests, &out.UnpricedRequests); err != nil {
 		return nil, err
 	}
 	return out, nil
@@ -2712,10 +2898,17 @@ func dbUsageGetQuerier(db queryRower, f usageFilter, includeReserved bool) (*Usa
 
 func dbUsageRecord(db *sql.DB, ident *TokenIdentity, provider, model string, input, output, cost int64, status, requestID, providerRequestID string) (*UsageEvent, bool, error) {
 	period := currentPeriod()
+	costStatus := "unpriced"
+	if cost > 0 {
+		costStatus = "calculated"
+	}
 	res, err := db.Exec(`INSERT OR IGNORE INTO usage_events
-		(project_id, subject_type, subject_id, provider, model, request_tokens, response_tokens, total_tokens, estimated_cost_cents, status, period, request_id, provider_request_id, token_id)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		ident.ProjectID, ident.SubjectType, ident.SubjectID, provider, model, input, output, input+output, cost, status, period, requestID, providerRequestID, ident.ID)
+		(project_id, subject_type, subject_id, provider, model, request_tokens, response_tokens, total_tokens,
+		estimated_cost_cents, provider_cost_microunits, provider_cost_currency, provider_cost_status,
+		provider_cost_source, usage_details_json, status, period, request_id, provider_request_id, token_id)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'USD', ?, ?, '{}', ?, ?, ?, ?, ?)`,
+		ident.ProjectID, ident.SubjectType, ident.SubjectID, provider, model, input, output, input+output,
+		(cost+5000)/10000, cost, costStatus, "recorded", status, period, requestID, providerRequestID, ident.ID)
 	if err != nil {
 		return nil, false, err
 	}
@@ -2730,7 +2923,9 @@ func dbUsageRecord(db *sql.DB, ident *TokenIdentity, provider, model string, inp
 func dbUsageEventByRequestID(db *sql.DB, projectID, subjectType, subjectID, requestID string) (*UsageEvent, error) {
 	row := db.QueryRow(`
 		SELECT id, project_id, subject_type, subject_id, provider, model, request_tokens, response_tokens,
-		       total_tokens, estimated_cost_cents, status, period, request_id, provider_request_id, token_id, COALESCE(created_at,'')
+		       total_tokens, estimated_cost_cents, provider_cost_microunits, provider_cost_currency,
+		       provider_cost_status, provider_cost_source, provider_rate_id, usage_details_json,
+		       status, period, request_id, provider_request_id, token_id, COALESCE(created_at,'')
 		  FROM usage_events
 		 WHERE project_id = ? AND subject_type = ? AND subject_id = ? AND request_id = ?
 		 LIMIT 1`, projectID, subjectType, subjectID, requestID)
@@ -2739,7 +2934,9 @@ func dbUsageEventByRequestID(db *sql.DB, projectID, subjectType, subjectID, requ
 
 func dbUsageEventByID(db *sql.DB, id int64) (*UsageEvent, error) {
 	row := db.QueryRow(`SELECT id, project_id, subject_type, subject_id, provider, model, request_tokens, response_tokens,
-		total_tokens, estimated_cost_cents, status, period, request_id, provider_request_id, token_id, COALESCE(created_at,'')
+		total_tokens, estimated_cost_cents, provider_cost_microunits, provider_cost_currency,
+		provider_cost_status, provider_cost_source, provider_rate_id, usage_details_json,
+		status, period, request_id, provider_request_id, token_id, COALESCE(created_at,'')
 		FROM usage_events WHERE id=?`, id)
 	return scanUsageEvent(row)
 }
@@ -2767,7 +2964,9 @@ func dbUsageEventsList(db *sql.DB, f usageFilter, limit int) ([]UsageEvent, erro
 	}
 	args = append(args, limit)
 	rows, err := db.Query(`SELECT id, project_id, subject_type, subject_id, provider, model, request_tokens, response_tokens,
-		total_tokens, estimated_cost_cents, status, period, request_id, provider_request_id, token_id, COALESCE(created_at,'')
+		total_tokens, estimated_cost_cents, provider_cost_microunits, provider_cost_currency,
+		provider_cost_status, provider_cost_source, provider_rate_id, usage_details_json,
+		status, period, request_id, provider_request_id, token_id, COALESCE(created_at,'')
 		FROM usage_events WHERE `+strings.Join(conds, " AND ")+` ORDER BY id DESC LIMIT ?`, args...)
 	if err != nil {
 		return nil, err
@@ -2790,11 +2989,15 @@ type usageEventScanner interface {
 
 func scanUsageEvent(row usageEventScanner) (*UsageEvent, error) {
 	var ev UsageEvent
+	var usageDetails string
 	if err := row.Scan(&ev.ID, &ev.ProjectID, &ev.SubjectType, &ev.SubjectID, &ev.Provider, &ev.Model,
-		&ev.RequestTokens, &ev.ResponseTokens, &ev.TotalTokens, &ev.EstimatedCostCents, &ev.Status, &ev.Period,
+		&ev.RequestTokens, &ev.ResponseTokens, &ev.TotalTokens, &ev.EstimatedCostCents,
+		&ev.ProviderCostMicrounits, &ev.ProviderCostCurrency, &ev.ProviderCostStatus, &ev.ProviderCostSource,
+		&ev.ProviderRateID, &usageDetails, &ev.Status, &ev.Period,
 		&ev.RequestID, &ev.ProviderRequestID, &ev.TokenID, &ev.CreatedAt); err != nil {
 		return nil, err
 	}
+	ev.UsageDetails = json.RawMessage(firstNonEmpty(usageDetails, "{}"))
 	return &ev, nil
 }
 
@@ -3293,6 +3496,7 @@ func copyProviderHeaders(w http.ResponseWriter, res *chatResult) {
 	if res.RequestID != "" {
 		w.Header().Set("X-Request-Id", res.RequestID)
 	}
+	costHeaders(w, res.UsageEvent)
 }
 
 func requestIDFor(r *http.Request, body map[string]any) string {
@@ -3314,22 +3518,28 @@ func requestIDFor(r *http.Request, body map[string]any) string {
 
 func usageEventPayload(ev *UsageEvent, extra map[string]any) map[string]any {
 	out := map[string]any{
-		"schema_version":      "2026-07-llm-usage-v2",
-		"usage_event_id":      int64(0),
-		"request_id":          "",
-		"provider_request_id": "",
-		"token_id":            int64(0),
-		"project_id":          "",
-		"subject_type":        "",
-		"subject_id":          "",
-		"provider":            "",
-		"model":               "",
-		"period":              currentPeriod(),
-		"request_tokens":      int64(0),
-		"response_tokens":     int64(0),
-		"total_tokens":        int64(0),
-		"status":              "",
-		"created_at":          "",
+		"schema_version":           "2026-07-llm-usage-v3",
+		"usage_event_id":           int64(0),
+		"request_id":               "",
+		"provider_request_id":      "",
+		"token_id":                 int64(0),
+		"project_id":               "",
+		"subject_type":             "",
+		"subject_id":               "",
+		"provider":                 "",
+		"model":                    "",
+		"period":                   currentPeriod(),
+		"request_tokens":           int64(0),
+		"response_tokens":          int64(0),
+		"total_tokens":             int64(0),
+		"provider_cost_microunits": int64(0),
+		"provider_cost_currency":   "USD",
+		"provider_cost_status":     "unpriced",
+		"provider_cost_source":     "",
+		"provider_rate_id":         int64(0),
+		"usage_details":            map[string]any{},
+		"status":                   "",
+		"created_at":               "",
 	}
 	if ev != nil {
 		out["usage_event_id"] = ev.ID
@@ -3345,6 +3555,12 @@ func usageEventPayload(ev *UsageEvent, extra map[string]any) map[string]any {
 		out["request_tokens"] = ev.RequestTokens
 		out["response_tokens"] = ev.ResponseTokens
 		out["total_tokens"] = ev.TotalTokens
+		out["provider_cost_microunits"] = ev.ProviderCostMicrounits
+		out["provider_cost_currency"] = ev.ProviderCostCurrency
+		out["provider_cost_status"] = ev.ProviderCostStatus
+		out["provider_cost_source"] = ev.ProviderCostSource
+		out["provider_rate_id"] = ev.ProviderRateID
+		out["usage_details"] = rawJSON(string(ev.UsageDetails))
 		out["status"] = ev.Status
 		out["created_at"] = ev.CreatedAt
 	}
@@ -3555,10 +3771,13 @@ func limitsFromAny(v any) Limits {
 		return Limits{}
 	}
 	return Limits{
-		MonthlyRequestLimit:     int64Arg(m, "monthly_request_limit"),
-		MonthlyInputTokenLimit:  int64Arg(m, "monthly_input_token_limit"),
-		MonthlyOutputTokenLimit: int64Arg(m, "monthly_output_token_limit"),
-		MaxTokensPerRequest:     int64Arg(m, "max_tokens_per_request"),
+		MonthlyRequestLimit:                int64Arg(m, "monthly_request_limit"),
+		MonthlyInputTokenLimit:             int64Arg(m, "monthly_input_token_limit"),
+		MonthlyOutputTokenLimit:            int64Arg(m, "monthly_output_token_limit"),
+		MaxTokensPerRequest:                int64Arg(m, "max_tokens_per_request"),
+		MonthlyProviderCostLimitMicrounits: int64Arg(m, "monthly_provider_cost_limit_microunits"),
+		ProviderCostCurrency:               strings.ToUpper(firstNonEmpty(strArg(m, "provider_cost_currency"), "USD")),
+		UnpricedModelBehavior:              firstNonEmpty(strArg(m, "unpriced_model_behavior"), "deny"),
 	}
 }
 

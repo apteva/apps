@@ -25,6 +25,9 @@ interface Limits {
   monthly_input_token_limit?: number;
   monthly_output_token_limit?: number;
   max_tokens_per_request?: number;
+  monthly_provider_cost_limit_microunits?: number;
+  provider_cost_currency?: string;
+  unpriced_model_behavior?: "allow" | "deny";
 }
 
 interface FallbackRoute {
@@ -51,6 +54,12 @@ interface UsageSummary {
   request_tokens: number;
   response_tokens: number;
   total_tokens: number;
+  provider_cost_microunits: number;
+  provider_cost_currency: string;
+  reported_cost_requests: number;
+  calculated_cost_requests: number;
+  partial_cost_requests: number;
+  unpriced_requests: number;
 }
 
 interface UsageEvent {
@@ -62,6 +71,11 @@ interface UsageEvent {
   request_tokens: number;
   response_tokens: number;
   total_tokens: number;
+  provider_cost_microunits: number;
+  provider_cost_currency: string;
+  provider_cost_status: string;
+  provider_cost_source?: string;
+  provider_rate_id?: number;
   status: string;
   request_id: string;
   created_at: string;
@@ -88,6 +102,23 @@ interface ProviderModel {
   last_seen_at?: string;
 }
 
+interface ProviderRate {
+  id?: number;
+  project_id: string;
+  provider: string;
+  model_id: string;
+  currency: string;
+  input_microunits_per_million: number;
+  output_microunits_per_million: number;
+  cached_input_microunits_per_million: number;
+  cache_write_microunits_per_million: number;
+  request_microunits: number;
+  source: string;
+  source_reference?: string;
+  effective_from?: string;
+  effective_to?: string;
+}
+
 interface AuditLog {
   id: number;
   subject_type: string;
@@ -100,7 +131,7 @@ interface AuditLog {
   created_at: string;
 }
 
-type Tab = "test" | "providers" | "policy" | "tokens" | "usage" | "audit";
+type Tab = "test" | "providers" | "rates" | "policy" | "tokens" | "usage" | "audit";
 
 const API = "/api/apps/llm";
 const knownProviders = ["openai", "anthropic", "opencode-go", "fireworks", "openrouter"];
@@ -120,11 +151,25 @@ const defaultProvider: ProviderConfig = {
   enabled: true,
   priority: 100,
 };
+const defaultRate: ProviderRate = {
+  project_id: "",
+  provider: "",
+  model_id: "",
+  currency: "USD",
+  input_microunits_per_million: 0,
+  output_microunits_per_million: 0,
+  cached_input_microunits_per_million: 0,
+  cache_write_microunits_per_million: 0,
+  request_microunits: 0,
+  source: "manual",
+};
 
 export default function LLMPanel({ projectId }: NativePanelProps) {
   const [tab, setTab] = useState<Tab>("test");
   const [providers, setProviders] = useState<ProviderConfig[]>([]);
   const [models, setModels] = useState<ProviderModel[]>([]);
+  const [providerRates, setProviderRates] = useState<ProviderRate[]>([]);
+  const [rateDraft, setRateDraft] = useState<ProviderRate>({ ...defaultRate, project_id: projectId });
   const [providerDraft, setProviderDraft] = useState<ProviderConfig>({ ...defaultProvider });
   const [policy, setPolicy] = useState<Policy>({ project_id: projectId, limits: {}, fallback_policy: { routes: [] } });
   const [policyScope, setPolicyScope] = useState<"project" | "subject">("project");
@@ -149,6 +194,7 @@ export default function LLMPanel({ projectId }: NativePanelProps) {
   const [prompt, setPrompt] = useState("Reply with one short sentence confirming the gateway works.");
   const [maxTokens, setMaxTokens] = useState(256);
   const [response, setResponse] = useState<any>(null);
+  const [testUsage, setTestUsage] = useState<UsageEvent | null>(null);
   const [status, setStatus] = useState("");
   const [notice, setNotice] = useState("");
   const [busy, setBusy] = useState("");
@@ -173,15 +219,17 @@ export default function LLMPanel({ projectId }: NativePanelProps) {
   const loadCore = useCallback(async () => {
     setStatus("");
     try {
-      const [providerData, modelData, policyData, usageData] = await Promise.all([
+      const [providerData, modelData, rateData, policyData, usageData] = await Promise.all([
         api<{ providers: ProviderConfig[] }>("/providers"),
         api<{ models: ProviderModel[] }>("/models"),
+        api<{ provider_rates: ProviderRate[] }>("/provider-rates"),
         api<{ policy: Policy }>("/policy"),
         api<UsageSummary>("/usage"),
       ]);
       const nextProviders = providerData.providers || [];
       setProviders(nextProviders);
       setModels(modelData.models || []);
+      setProviderRates(rateData.provider_rates || []);
       setSelectedProvider((current) => nextProviders.some((p) => p.enabled && p.provider === current)
         ? current
         : nextProviders.find((p) => p.enabled)?.provider || "");
@@ -207,6 +255,11 @@ export default function LLMPanel({ projectId }: NativePanelProps) {
     setUsageEvents(events.usage_events || []);
   }, [api, usageModel, usageSubjectId, usageSubjectType]);
 
+  const loadRates = useCallback(async () => {
+    const data = await api<{ provider_rates: ProviderRate[] }>("/provider-rates");
+    setProviderRates(data.provider_rates || []);
+  }, [api]);
+
   const loadAudit = useCallback(async () => {
     const data = await api<{ audit_logs: AuditLog[] }>("/audit?limit=200");
     setAuditLogs(data.audit_logs || []);
@@ -216,8 +269,9 @@ export default function LLMPanel({ projectId }: NativePanelProps) {
   useEffect(() => {
     if (tab === "tokens") void loadTokens().catch((error) => setStatus(error.message));
     if (tab === "usage") void loadUsage().catch((error) => setStatus(error.message));
+    if (tab === "rates") void loadRates().catch((error) => setStatus(error.message));
     if (tab === "audit") void loadAudit().catch((error) => setStatus(error.message));
-  }, [loadAudit, loadTokens, loadUsage, tab]);
+  }, [loadAudit, loadRates, loadTokens, loadUsage, tab]);
 
   const activeProviders = useMemo(() => providers.filter((provider) => provider.enabled), [providers]);
   const modelSuggestions = useMemo(() => models
@@ -255,6 +309,7 @@ export default function LLMPanel({ projectId }: NativePanelProps) {
       if (failures.length > 0) throw new Error(failures.map((item) => `${item.provider}: ${item.error || "sync failed"}`).join("; "));
       const modelData = await api<{ models: ProviderModel[] }>("/models");
       setModels(modelData.models || []);
+      await loadRates();
       if (!quiet) setNotice(all ? `${data.results?.reduce((sum, item) => sum + (item.model_count || 0), 0) || 0} models synced` : `${provider}: ${result?.model_count || 0} models synced`);
     } catch (error) {
       if (!quiet) setStatus((error as Error).message);
@@ -265,6 +320,7 @@ export default function LLMPanel({ projectId }: NativePanelProps) {
 
   const runTest = () => perform("test", async () => {
     setResponse(null);
+    setTestUsage(null);
     const data = await api<any>("/test/chat", {
       method: "POST",
       body: JSON.stringify({
@@ -274,8 +330,32 @@ export default function LLMPanel({ projectId }: NativePanelProps) {
       }),
     });
     setResponse(data);
-    const summary = await api<UsageSummary>("/usage");
+    const [summary, events] = await Promise.all([
+      api<UsageSummary>("/usage"),
+      api<{ usage_events: UsageEvent[] }>("/usage/events?subject_type=app&subject_id=llm-panel&limit=1"),
+    ]);
     setUsage(summary);
+    setTestUsage(events.usage_events?.[0] || null);
+  });
+
+  const saveRate = () => perform("rate-save", async () => {
+    await api("/provider-rates", { method: "PUT", body: JSON.stringify({ ...rateDraft, source: "manual" }) });
+    await loadRates();
+    setNotice(`${rateDraft.provider}/${rateDraft.model_id} rate saved`);
+  });
+
+  const refreshRates = () => perform("rate-refresh", async () => {
+    const data = await api<{ updated: number }>("/provider-rates/refresh", { method: "POST", body: JSON.stringify({}) });
+    await loadRates();
+    setNotice(`${data.updated || 0} provider rates refreshed`);
+  });
+
+  const deleteRate = () => perform("rate-delete", async () => {
+    if (!rateDraft.id) return;
+    await api(`/provider-rates?id=${rateDraft.id}`, { method: "DELETE" });
+    await loadRates();
+    setRateDraft({ ...defaultRate, project_id: projectId });
+    setNotice("Provider rate closed");
   });
 
   const saveProvider = () => perform("provider", async () => {
@@ -341,8 +421,8 @@ export default function LLMPanel({ projectId }: NativePanelProps) {
       <header className="flex items-center gap-3 border-b border-border px-4 py-2 min-w-0">
         <div className="font-medium whitespace-nowrap">LLM Gateway</div>
         <nav className="flex items-center gap-1 overflow-x-auto min-w-0" aria-label="LLM Gateway views">
-          {(["test", "providers", "policy", "tokens", "usage", "audit"] as Tab[]).map((item) => (
-            <TabButton key={item} active={tab === item} onClick={() => setTab(item)}>{titleCase(item)}</TabButton>
+          {(["test", "providers", "rates", "policy", "tokens", "usage", "audit"] as Tab[]).map((item) => (
+            <TabButton key={item} active={tab === item} onClick={() => setTab(item)}>{item === "rates" ? "Provider rates" : titleCase(item)}</TabButton>
           ))}
         </nav>
         <div className="ml-auto min-w-0 text-right">
@@ -388,6 +468,7 @@ export default function LLMPanel({ projectId }: NativePanelProps) {
           <section className="overflow-auto p-4 border-t xl:border-t-0 border-border">
             <h2 className="text-sm font-medium mb-3">Response</h2>
             {!response && <div className="text-sm text-text-dim">No response yet</div>}
+            {testUsage && <div className="mb-4 grid grid-cols-3 gap-2"><CompactMetric label="Input" value={testUsage.request_tokens.toLocaleString()} /><CompactMetric label="Output" value={testUsage.response_tokens.toLocaleString()} /><CompactMetric label="Provider cost" value={formatMicrounits(testUsage.provider_cost_microunits, testUsage.provider_cost_currency)} detail={testUsage.provider_cost_status} /></div>}
             {assistantText && <div className="text-sm whitespace-pre-wrap leading-6">{assistantText}</div>}
             {toolCalls.length > 0 && <div className="mt-4 space-y-2">{toolCalls.map((call: any) => <div key={call.id} className="border border-border rounded p-3"><div className="text-xs font-medium">{call.function?.name}</div><pre className="mt-2 text-xs overflow-auto">{prettyJSON(call.function?.arguments)}</pre></div>)}</div>}
             {response && <details className="mt-5"><summary className="text-xs text-text-muted cursor-pointer">Raw response</summary><pre className="mt-2 bg-bg-input border border-border rounded p-3 text-xs overflow-auto max-h-[32rem]">{pretty(response)}</pre></details>}
@@ -428,6 +509,45 @@ export default function LLMPanel({ projectId }: NativePanelProps) {
         </div>
       )}
 
+      {tab === "rates" && (
+        <div className="flex-1 min-h-0 grid grid-cols-1 lg:grid-cols-[360px_1fr]">
+          <aside className="border-b lg:border-b-0 lg:border-r border-border overflow-auto max-h-72 lg:max-h-none">
+            <div className="p-2 border-b border-border flex gap-2">
+              <button type="button" onClick={() => setRateDraft({ ...defaultRate, project_id: projectId, provider: selectedProvider })} className={`${secondaryButton} flex-1`}>New override</button>
+              <button type="button" onClick={refreshRates} disabled={!!busy} className={secondaryButton}>{busy === "rate-refresh" ? "Refreshing..." : "Refresh"}</button>
+            </div>
+            {providerRates.length === 0 && <div className="p-4 text-sm text-text-dim">No provider rates available.</div>}
+            {providerRates.map((rate) => (
+              <button key={rate.id} type="button" onClick={() => setRateDraft({ ...rate })} className="w-full text-left px-3 py-2 border-b border-border hover:bg-bg-input">
+                <div className="flex items-center gap-2 min-w-0"><span className="text-sm font-medium truncate">{rate.provider}/{rate.model_id}</span><span className="ml-auto text-xs text-text-dim">{rate.project_id ? "project" : "global"}</span></div>
+                <div className="mt-1 flex items-center gap-3 text-xs text-text-dim"><span>{formatRate(rate.input_microunits_per_million)} in</span><span>{formatRate(rate.output_microunits_per_million)} out</span><span className="ml-auto">{rate.source}</span></div>
+              </button>
+            ))}
+          </aside>
+          <main className="overflow-auto p-4 max-w-4xl space-y-4">
+            {rateDraft.id && <div className="text-xs text-text-muted">{rateDraft.source} rate effective {formatDate(rateDraft.effective_from)}. Saving creates a project-specific manual override and retains this version in history.</div>}
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+              <Field label="Provider"><input list="known-llm-providers" value={rateDraft.provider} onChange={(event) => setRateDraft({ ...rateDraft, provider: event.target.value.toLowerCase() })} className={`${controlClass} font-mono`} /></Field>
+              <Field label="Native model ID"><input list="known-provider-models" value={rateDraft.model_id} onChange={(event) => setRateDraft({ ...rateDraft, model_id: event.target.value })} className={`${controlClass} font-mono`} /><datalist id="known-provider-models">{models.filter((model) => !rateDraft.provider || model.provider === rateDraft.provider).map((model) => <option key={`${model.provider}:${model.model_id}`} value={model.model_id} />)}</datalist></Field>
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-3">
+              <MoneyField label="Input / 1M tokens" microunits={rateDraft.input_microunits_per_million} onChange={(value) => setRateDraft({ ...rateDraft, input_microunits_per_million: value })} />
+              <MoneyField label="Output / 1M tokens" microunits={rateDraft.output_microunits_per_million} onChange={(value) => setRateDraft({ ...rateDraft, output_microunits_per_million: value })} />
+              <MoneyField label="Cached input / 1M" microunits={rateDraft.cached_input_microunits_per_million} onChange={(value) => setRateDraft({ ...rateDraft, cached_input_microunits_per_million: value })} />
+              <MoneyField label="Cache write / 1M" microunits={rateDraft.cache_write_microunits_per_million} onChange={(value) => setRateDraft({ ...rateDraft, cache_write_microunits_per_million: value })} />
+            </div>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3 max-w-xl">
+              <MoneyField label="Fee per request" microunits={rateDraft.request_microunits} onChange={(value) => setRateDraft({ ...rateDraft, request_microunits: value })} />
+              <Field label="Currency"><input value={rateDraft.currency} maxLength={3} onChange={(event) => setRateDraft({ ...rateDraft, currency: event.target.value.toUpperCase() })} className={`${controlClass} font-mono`} /></Field>
+            </div>
+            <div className="flex flex-wrap gap-2">
+              <button type="button" disabled={!!busy || !rateDraft.provider || !rateDraft.model_id || rateDraft.currency.length !== 3} onClick={saveRate} className={primaryButton}>{busy === "rate-save" ? "Saving..." : "Save manual override"}</button>
+              {rateDraft.id && rateDraft.project_id === projectId && <button type="button" disabled={!!busy} onClick={deleteRate} className={dangerButton}>{busy === "rate-delete" ? "Closing..." : "Close rate"}</button>}
+            </div>
+          </main>
+        </div>
+      )}
+
       {tab === "policy" && (
         <div className="flex-1 overflow-auto p-4 space-y-4">
           <div className="flex flex-wrap items-end gap-3 border-b border-border pb-4">
@@ -444,6 +564,11 @@ export default function LLMPanel({ projectId }: NativePanelProps) {
             <NumberField label="Input tokens per month" value={policy.limits?.monthly_input_token_limit || 0} onChange={(value) => setPolicyLimit(policy, setPolicy, "monthly_input_token_limit", value)} />
             <NumberField label="Output tokens per month" value={policy.limits?.monthly_output_token_limit || 0} onChange={(value) => setPolicyLimit(policy, setPolicy, "monthly_output_token_limit", value)} />
             <NumberField label="Maximum output per request" value={policy.limits?.max_tokens_per_request || 0} onChange={(value) => setPolicyLimit(policy, setPolicy, "max_tokens_per_request", value)} />
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3 max-w-3xl">
+            <MoneyField label="Monthly provider cost limit" microunits={policy.limits?.monthly_provider_cost_limit_microunits || 0} onChange={(value) => setPolicyLimit(policy, setPolicy, "monthly_provider_cost_limit_microunits", value)} />
+            <Field label="Cost currency"><input value={policy.limits?.provider_cost_currency || "USD"} maxLength={3} onChange={(event) => setPolicy({ ...policy, limits: { ...(policy.limits || {}), provider_cost_currency: event.target.value.toUpperCase() } })} className={`${controlClass} font-mono`} /></Field>
+            <Field label="Unpriced models"><select value={policy.limits?.unpriced_model_behavior || "deny"} onChange={(event) => setPolicy({ ...policy, limits: { ...(policy.limits || {}), unpriced_model_behavior: event.target.value as "allow" | "deny" } })} className={controlClass}><option value="deny">Deny when cost cap is active</option><option value="allow">Allow and mark unpriced</option></select></Field>
           </div>
           <Field label="Failover routes"><textarea value={formatFallbackRoutes(policy.fallback_policy?.routes)} onChange={(event) => setPolicy({ ...policy, fallback_policy: { routes: parseFallbackRoutes(event.target.value) } })} placeholder={"openrouter | openrouter/anthropic/claude-sonnet-4\nfireworks | fireworks/accounts/example/models/model-id"} className={`${controlClass} min-h-24 font-mono text-xs`} /></Field>
           {policyScope === "subject" && <label className="flex items-center gap-2 text-sm"><input type="checkbox" checked={!!policy.disabled} onChange={(event) => setPolicy({ ...policy, disabled: event.target.checked })} />Subject access disabled</label>}
@@ -472,8 +597,8 @@ export default function LLMPanel({ projectId }: NativePanelProps) {
       {tab === "usage" && (
         <div className="flex-1 overflow-auto p-4 space-y-4">
           <div className="flex flex-wrap items-end gap-3"><Field label="Subject type"><input value={usageSubjectType} onChange={(event) => setUsageSubjectType(event.target.value)} className={`${controlClass} w-40`} /></Field><Field label="Subject ID"><input value={usageSubjectId} onChange={(event) => setUsageSubjectId(event.target.value)} className={`${controlClass} w-56 font-mono`} /></Field><Field label="Model"><input value={usageModel} onChange={(event) => setUsageModel(event.target.value)} className={`${controlClass} w-72 font-mono`} /></Field><button type="button" onClick={() => void perform("usage", loadUsage)} className={secondaryButton}>{busy === "usage" ? "Loading..." : "Apply filters"}</button></div>
-          {usage && <div className="grid grid-cols-2 lg:grid-cols-4 gap-3"><Metric label="Requests" value={usage.requests} /><Metric label="Input tokens" value={usage.request_tokens} /><Metric label="Output tokens" value={usage.response_tokens} /><Metric label="Total tokens" value={usage.total_tokens} /></div>}
-          <div className="overflow-auto border border-border rounded"><table className="w-full text-xs"><thead className="bg-bg-input text-text-muted"><tr><Th>Time</Th><Th>Subject</Th><Th>Route</Th><Th>Tokens</Th><Th>Status</Th><Th>Request ID</Th></tr></thead><tbody>{usageEvents.map((event) => <tr key={event.id} className="border-t border-border"><Td>{formatDate(event.created_at)}</Td><Td>{event.subject_type}<div className="font-mono text-text-dim">{event.subject_id}</div></Td><Td>{event.provider}<div className="font-mono text-text-dim max-w-72 truncate" title={event.model}>{event.model}</div></Td><Td mono>{event.request_tokens} + {event.response_tokens}</Td><Td>{event.status}</Td><Td mono><span className="block max-w-56 truncate" title={event.request_id}>{event.request_id}</span></Td></tr>)}</tbody></table></div>
+          {usage && <><div className="grid grid-cols-2 lg:grid-cols-5 gap-3"><Metric label="Requests" value={usage.requests} /><Metric label="Input tokens" value={usage.request_tokens} /><Metric label="Output tokens" value={usage.response_tokens} /><Metric label="Total tokens" value={usage.total_tokens} /><Metric label="Provider cost" value={formatMicrounits(usage.provider_cost_microunits, usage.provider_cost_currency)} /></div><div className="text-xs text-text-muted">{usage.reported_cost_requests || 0} reported · {usage.calculated_cost_requests || 0} calculated · {usage.partial_cost_requests || 0} partial · {usage.unpriced_requests || 0} unpriced</div></>}
+          <div className="overflow-auto border border-border rounded"><table className="w-full text-xs"><thead className="bg-bg-input text-text-muted"><tr><Th>Time</Th><Th>Subject</Th><Th>Route</Th><Th>Tokens</Th><Th>Provider cost</Th><Th>Status</Th><Th>Request ID</Th></tr></thead><tbody>{usageEvents.map((event) => <tr key={event.id} className="border-t border-border"><Td>{formatDate(event.created_at)}</Td><Td>{event.subject_type}<div className="font-mono text-text-dim">{event.subject_id}</div></Td><Td>{event.provider}<div className="font-mono text-text-dim max-w-72 truncate" title={event.model}>{event.model}</div></Td><Td mono>{event.request_tokens} + {event.response_tokens}</Td><Td><span className="font-mono tabular-nums">{formatMicrounits(event.provider_cost_microunits, event.provider_cost_currency)}</span><div className="text-text-dim">{event.provider_cost_status}{event.provider_cost_source ? ` · ${event.provider_cost_source}` : ""}</div></Td><Td>{event.status}</Td><Td mono><span className="block max-w-56 truncate" title={event.request_id}>{event.request_id}</span></Td></tr>)}</tbody></table></div>
         </div>
       )}
 
@@ -509,11 +634,19 @@ function NumberField({ label, value, onChange }: { label: string; value: number;
   return <Field label={label}><input type="number" min={0} value={value || ""} onChange={(event) => onChange(Math.max(0, Number(event.target.value) || 0))} className={controlClass} /></Field>;
 }
 
-function Metric({ label, value }: { label: string; value: number }) {
-  return <div className="border border-border rounded p-3 bg-bg-card"><div className="text-xs text-text-muted">{label}</div><div className="mt-1 text-xl font-semibold tabular-nums">{value.toLocaleString()}</div></div>;
+function MoneyField({ label, microunits, onChange }: { label: string; microunits: number; onChange: (value: number) => void }) {
+  return <Field label={label}><div className="relative"><span className="absolute left-2 top-1.5 text-sm text-text-dim">$</span><input type="number" min={0} step="0.000001" value={microunits ? microunits / 1_000_000 : ""} onChange={(event) => onChange(Math.max(0, Math.round((Number(event.target.value) || 0) * 1_000_000)))} className={`${controlClass} pl-6 font-mono`} /></div></Field>;
 }
 
-function Th({ children }: { children: ReactNode }) { return <th className="text-left font-medium px-3 py-2 whitespace-nowrap">{children}</th>; }
+function Metric({ label, value }: { label: string; value: number | string }) {
+  return <div className="border border-border rounded p-3 bg-bg-card"><div className="text-xs text-text-muted">{label}</div><div className="mt-1 text-xl font-semibold tabular-nums">{typeof value === "number" ? value.toLocaleString() : value}</div></div>;
+}
+
+function CompactMetric({ label, value, detail }: { label: string; value: string; detail?: string }) {
+  return <div className="border border-border rounded p-2 min-w-0"><div className="text-[11px] text-text-muted">{label}</div><div className="mt-0.5 text-sm font-medium tabular-nums truncate" title={value}>{value}</div>{detail && <div className="text-[10px] text-text-dim truncate">{detail}</div>}</div>;
+}
+
+function Th({ children }: { children?: ReactNode }) { return <th className="text-left font-medium px-3 py-2 whitespace-nowrap">{children}</th>; }
 function Td({ children, mono = false }: { children: ReactNode; mono?: boolean }) { return <td className={`px-3 py-2 align-top ${mono ? "font-mono tabular-nums" : ""}`}>{children}</td>; }
 
 function normalizePolicy(policy: Policy | undefined, projectId: string): Policy {
@@ -531,6 +664,8 @@ function prettyJSON(value: unknown): string { try { return JSON.stringify(typeof
 function titleCase(value: string): string { return value.charAt(0).toUpperCase() + value.slice(1); }
 function toggleValue(values: string[], value: string): string[] { return values.includes(value) ? values.filter((item) => item !== value) : [...values, value]; }
 function formatDate(value?: string): string { if (!value) return "-"; const date = new Date(value); return Number.isNaN(date.getTime()) ? value : date.toLocaleString(); }
+function formatRate(microunits: number): string { return `$${(microunits / 1_000_000).toLocaleString(undefined, { maximumFractionDigits: 6 })}`; }
+function formatMicrounits(microunits = 0, currency = "USD"): string { try { return new Intl.NumberFormat(undefined, { style: "currency", currency: currency || "USD", minimumFractionDigits: 2, maximumFractionDigits: 6 }).format(microunits / 1_000_000); } catch { return `${currency || "USD"} ${(microunits / 1_000_000).toFixed(6)}`; } }
 function queryString(values: Record<string, string>): string { const query = new URLSearchParams(); Object.entries(values).forEach(([key, value]) => { if (value.trim()) query.set(key, value.trim()); }); const out = query.toString(); return out ? `?${out}` : ""; }
 function modelForRequest(provider: string, modelId: string): string { const cleanProvider = provider.trim(); const cleanModel = modelId.trim(); return cleanProvider && cleanModel && !cleanModel.startsWith(`${cleanProvider}/`) ? `${cleanProvider}/${cleanModel}` : cleanModel; }
 function formatFallbackRoutes(routes?: FallbackRoute[]): string { return (routes || []).map((route) => `${route.provider} | ${route.model}`).join("\n"); }

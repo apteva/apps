@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: llm
 display_name: LLM Gateway
-version: 0.4.0
+version: 0.5.0
 description: |
   Managed AI API access for Apteva-hosted apps and agents. Provides an
   OpenAI-compatible tenant-safe gateway that routes requests to configured
@@ -69,6 +69,14 @@ provides:
       description: List configured provider routes.
     - name: llm_provider_configs_upsert
       description: Create or update a provider route.
+    - name: llm_provider_rates_list
+      description: List provider-native model rates used for upstream cost calculation.
+    - name: llm_provider_rates_upsert
+      description: Create a manual provider rate override.
+    - name: llm_provider_rates_delete
+      description: Close an active provider rate while retaining history.
+    - name: llm_provider_rates_refresh
+      description: Refresh rates found in provider model metadata.
     - name: llm_policy_get
       description: Return the project or subject policy.
     - name: llm_policy_set
