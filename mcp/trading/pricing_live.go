@@ -238,7 +238,8 @@ func (p *liveProvider) StrategyBars(symbol, interval string, limit int) ([]Bar, 
 	if limit > 1000 {
 		limit = 1000
 	}
-	if inferAssetClass(symbol) == "crypto" {
+	class := inferAssetClass(symbol)
+	if class == "crypto" {
 		interval = strings.ToLower(strings.TrimSpace(interval))
 		dur, ok := strategyCadenceDuration(interval)
 		if !ok {
@@ -262,7 +263,66 @@ func (p *liveProvider) StrategyBars(symbol, interval string, limit int) ([]Bar, 
 		p.health.ok("crypto", "binance-public")
 		return bars, nil
 	}
+	if class == "equity" || class == "etf" {
+		interval = strings.ToLower(strings.TrimSpace(interval))
+		dur, ok := strategyCadenceDuration(interval)
+		if !ok {
+			interval = "1d"
+			dur = 24 * time.Hour
+		}
+		now := time.Now
+		if p.now != nil {
+			now = p.now
+		}
+		end := now().UTC()
+		lookbackFactor := time.Duration(6)
+		if interval == "1d" || interval == "1w" {
+			lookbackFactor = 2
+		}
+		start := end.Add(-dur * time.Duration(limit) * lookbackFactor)
+		bars, err := p.yahoo.BacktestBars(symbol, interval, start, end, 1000)
+		if err != nil {
+			p.health.note(class, err)
+			return nil, err
+		}
+		bars = completedYahooStrategyBars(bars, interval, end)
+		if len(bars) < limit {
+			err := fmt.Errorf("Yahoo returned %d completed %s bars for %s; need %d", len(bars), interval, symbol, limit)
+			p.health.note(class, err)
+			return nil, err
+		}
+		p.health.ok(class, "yahoo-finance")
+		return bars[len(bars)-limit:], nil
+	}
 	return p.Bars(symbol, "3M")
+}
+
+func completedYahooStrategyBars(bars []Bar, interval string, now time.Time) []Bar {
+	now = now.UTC()
+	out := make([]Bar, 0, len(bars))
+	if interval == "1d" {
+		location, err := time.LoadLocation("America/New_York")
+		if err != nil {
+			location = time.UTC
+		}
+		nowDate := now.In(location).Format("2006-01-02")
+		for _, bar := range bars {
+			if time.Unix(bar.T, 0).In(location).Format("2006-01-02") < nowDate {
+				out = append(out, bar)
+			}
+		}
+		return out
+	}
+	dur, ok := strategyCadenceDuration(interval)
+	if !ok {
+		dur = 24 * time.Hour
+	}
+	for _, bar := range bars {
+		if !time.Unix(bar.T, 0).UTC().Add(dur).After(now) {
+			out = append(out, bar)
+		}
+	}
+	return out
 }
 
 func strategyClosedCandleBoundary(now time.Time, interval string) time.Time {

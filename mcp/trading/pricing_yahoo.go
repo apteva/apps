@@ -92,6 +92,99 @@ func (y *yahooPublic) Bars(symbol, rng string) ([]Bar, error) {
 	return bars, err
 }
 
+// BacktestBars returns real, date-bounded Yahoo OHLCV for equity and ETF
+// strategy replays. period2 is exclusive in Yahoo's API, while the trading
+// app treats end as inclusive, so the request and local filter use an
+// expanded effective end for daily/weekly bars.
+func (y *yahooPublic) BacktestBars(symbol, interval string, start, end time.Time, limit int) ([]Bar, error) {
+	yahooInterval, aggregateFourHour, err := yahooBacktestInterval(interval)
+	if err != nil {
+		return nil, err
+	}
+	if start.IsZero() || end.IsZero() || end.Before(start) {
+		return nil, fmt.Errorf("yahoo: valid backtest start and end required")
+	}
+	if limit <= 0 || limit > 1000 {
+		limit = 1000
+	}
+	effectiveEnd := end.UTC()
+	if yahooInterval == "1d" || yahooInterval == "1wk" {
+		effectiveEnd = time.Date(effectiveEnd.Year(), effectiveEnd.Month(), effectiveEnd.Day(), 23, 59, 59, 0, time.UTC)
+	}
+	q := url.Values{}
+	q.Set("period1", fmt.Sprint(start.UTC().Unix()))
+	q.Set("period2", fmt.Sprint(effectiveEnd.Add(time.Second).Unix()))
+	q.Set("interval", yahooInterval)
+	bars, _, err := y.fetchChartQuery(symbol, q)
+	if err != nil {
+		return nil, err
+	}
+	filtered := make([]Bar, 0, len(bars))
+	for _, bar := range bars {
+		at := time.Unix(bar.T, 0).UTC()
+		if at.Before(start.UTC()) || at.After(effectiveEnd) {
+			continue
+		}
+		filtered = append(filtered, bar)
+	}
+	if aggregateFourHour {
+		filtered = aggregateYahooFourHourBars(filtered)
+	}
+	return filtered, nil
+}
+
+func yahooBacktestInterval(interval string) (string, bool, error) {
+	switch strings.ToLower(strings.TrimSpace(interval)) {
+	case "5m":
+		return "5m", false, nil
+	case "15m":
+		return "15m", false, nil
+	case "1h":
+		return "1h", false, nil
+	case "4h":
+		return "1h", true, nil
+	case "1d":
+		return "1d", false, nil
+	case "1w":
+		return "1wk", false, nil
+	default:
+		return "", false, fmt.Errorf("yahoo: unsupported backtest interval %q", interval)
+	}
+}
+
+func aggregateYahooFourHourBars(bars []Bar) []Bar {
+	out := make([]Bar, 0, (len(bars)+3)/4)
+	for i := 0; i < len(bars); {
+		day := time.Unix(bars[i].T, 0).UTC().Format("2006-01-02")
+		dayEnd := i
+		for dayEnd < len(bars) && time.Unix(bars[dayEnd].T, 0).UTC().Format("2006-01-02") == day {
+			dayEnd++
+		}
+		for chunkStart := i; chunkStart < dayEnd; chunkStart += 4 {
+			chunkEnd := chunkStart + 4
+			if chunkEnd > dayEnd {
+				chunkEnd = dayEnd
+			}
+			first := bars[chunkStart]
+			aggregated := Bar{T: first.T, O: first.O, H: first.H, L: first.L}
+			for j := chunkStart; j < chunkEnd; j++ {
+				bar := bars[j]
+				if aggregated.H == 0 || bar.H > aggregated.H {
+					aggregated.H = bar.H
+				}
+				if aggregated.L == 0 || (bar.L > 0 && bar.L < aggregated.L) {
+					aggregated.L = bar.L
+				}
+				aggregated.C = bar.C
+				aggregated.V += bar.V
+			}
+			out = append(out, aggregated)
+		}
+		i = dayEnd
+	}
+	return out
+}
+
 // UniverseBatch fetches multiple symbols in parallel (semaphore-limited).
 // Yahoo doesn't expose a true batched quote in the chart API, so this
 // is N concurrent calls — but with our sem=4 cap, even 50 symbols
@@ -146,6 +239,10 @@ func (y *yahooPublic) fetchChart(symbol, rng, interval string) ([]Bar, *yahooMet
 	q := url.Values{}
 	q.Set("range", rng)
 	q.Set("interval", interval)
+	return y.fetchChartQuery(symbol, q)
+}
+
+func (y *yahooPublic) fetchChartQuery(symbol string, q url.Values) ([]Bar, *yahooMeta, error) {
 	// Yahoo silently drops calls with the Go default UA; the integration
 	// catalog declares a browser-ish UA + the client sets the same here
 	// for the direct-call path. If Yahoo tightens auth further (cookie
