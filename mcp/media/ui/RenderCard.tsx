@@ -58,15 +58,13 @@ export default function RenderCard({ render_id, projectId, preview }: Props) {
   const [row, setRow] = useState<RenderRow | null>(preview ? previewSample : null);
   const [missing, setMissing] = useState(false);
 
-  // Polling — render lifecycles are short (seconds to minutes) and
-  // there's no per-render SSE event stream today. 1.5s ticks are
-  // cheap (one HTTP HEAD-style call each) and feel live in the chat
-  // panel. We back off to 5s on terminal status to reduce churn,
-  // and stop entirely after ok/failed/cancelled have stabilised.
+  // Render events drive refreshes; a slow poll remains as a safety
+  // net for reconnect gaps and older hosts without the shared event
+  // bridge.
   useEffect(() => {
     if (preview || !projectId) return;
     let alive = true;
-    let stable = 0;
+    let terminal = false;
 
     const tick = () => {
       const url =
@@ -85,28 +83,41 @@ export default function RenderCard({ render_id, projectId, preview }: Props) {
           const r: RenderRow = (data.render as RenderRow) ?? (data as RenderRow);
           setRow(r);
           if (r.status === "ok" || r.status === "failed" || r.status === "cancelled") {
-            stable++;
-          } else {
-            stable = 0;
+            terminal = true;
           }
         })
         .catch(() => undefined);
     };
 
     tick();
-    const id = setInterval(() => {
-      if (!alive) return;
-      // 1.5s while in flight; once we've seen 3 stable terminal
-      // ticks we stop polling — the row won't change again.
-      if (stable >= 3) {
-        clearInterval(id);
-        return;
-      }
-      tick();
-    }, 1500);
+    const id = setInterval(() => alive && !terminal && tick(), 15000);
+
+    const onEvent = (ev: { topic?: string; data?: { render_id?: string | number } }) => {
+      if (!ev.topic?.startsWith("render.")) return;
+      if (String(ev.data?.render_id ?? "") === String(render_id)) tick();
+    };
+    const bridge = (window as unknown as {
+      __aptevaAppEvents?: {
+        subscribe(app: string, projectId: string, fn: (ev: unknown) => void): () => void;
+      };
+    }).__aptevaAppEvents;
+    let unsubscribe: (() => void) | undefined;
+    let source: EventSource | undefined;
+    if (bridge) {
+      unsubscribe = bridge.subscribe("media", projectId, onEvent as (ev: unknown) => void);
+    } else {
+      source = new EventSource(`/api/app-events/media?project_id=${encodeURIComponent(projectId)}`, {
+        withCredentials: true,
+      });
+      source.onmessage = (event) => {
+        try { onEvent(JSON.parse(event.data)); } catch { /* ignore malformed events */ }
+      };
+    }
     return () => {
       alive = false;
       clearInterval(id);
+      unsubscribe?.();
+      source?.close();
     };
   }, [render_id, projectId, preview]);
 

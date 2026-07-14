@@ -25,22 +25,22 @@ type TranscriptSegment struct {
 }
 
 type TranscriptRow struct {
-	FileID        string  `json:"file_id"`
-	ProjectID     string  `json:"project_id"`
-	SourceSHA256  string  `json:"source_sha256,omitempty"`
-	Status        string  `json:"status"`
-	Language      string  `json:"language,omitempty"`
-	Text          string  `json:"text,omitempty"`
-	Segments      json.RawMessage `json:"segments,omitempty"`
-	Provider      string  `json:"provider,omitempty"`
-	Model         string  `json:"model,omitempty"`
-	DurationMs    int64   `json:"duration_ms,omitempty"`
-	CostCents     float64 `json:"cost_cents,omitempty"`
-	Error         string  `json:"error,omitempty"`
-	SourceKind    string  `json:"source_kind,omitempty"`
-	CreatedAt     string  `json:"created_at,omitempty"`
-	StartedAt     string  `json:"started_at,omitempty"`
-	CompletedAt   string  `json:"completed_at,omitempty"`
+	FileID       string          `json:"file_id"`
+	ProjectID    string          `json:"project_id"`
+	SourceSHA256 string          `json:"source_sha256,omitempty"`
+	Status       string          `json:"status"`
+	Language     string          `json:"language,omitempty"`
+	Text         string          `json:"text,omitempty"`
+	Segments     json.RawMessage `json:"segments,omitempty"`
+	Provider     string          `json:"provider,omitempty"`
+	Model        string          `json:"model,omitempty"`
+	DurationMs   int64           `json:"duration_ms,omitempty"`
+	CostCents    float64         `json:"cost_cents,omitempty"`
+	Error        string          `json:"error,omitempty"`
+	SourceKind   string          `json:"source_kind,omitempty"`
+	CreatedAt    string          `json:"created_at,omitempty"`
+	StartedAt    string          `json:"started_at,omitempty"`
+	CompletedAt  string          `json:"completed_at,omitempty"`
 }
 
 // insertPendingTranscript creates a transcripts row in pending state.
@@ -58,9 +58,13 @@ func insertPendingTranscript(db *sql.DB, projectID, fileID, sourceKind string) e
 		INSERT INTO transcripts (file_id, project_id, status, source_kind)
 		VALUES (?, ?, 'pending', ?)
 		ON CONFLICT(file_id) DO UPDATE SET
-			status      = CASE WHEN transcripts.status IN ('failed','skipped') THEN 'pending' ELSE transcripts.status END,
-			source_kind = excluded.source_kind
-		WHERE transcripts.status IN ('failed','skipped')`,
+			status='pending', source_kind=excluded.source_kind, source_sha256='',
+			language='', text='', segments='[]', error='', started_at=NULL, completed_at=NULL
+		WHERE transcripts.project_id = excluded.project_id
+		  AND (transcripts.status IN ('failed','skipped') OR
+		       (transcripts.status='ok' AND transcripts.source_sha256 != COALESCE(
+		         (SELECT source_sha256 FROM media WHERE project_id=excluded.project_id AND file_id=excluded.file_id),
+		         transcripts.source_sha256)))`,
 		fileID, projectID, sourceKind,
 	)
 	return err
@@ -68,7 +72,7 @@ func insertPendingTranscript(db *sql.DB, projectID, fileID, sourceKind string) e
 
 // upsertTranscript installs a complete row at status=ok. Used for
 // imported transcripts (media_set_transcript) and as the final write
-// after the worker finishes. Resets error to '' so retries clean up.
+// after the worker finishes. Resets error to ” so retries clean up.
 func upsertTranscript(db *sql.DB, t *TranscriptRow) error {
 	if t.FileID == "" || t.ProjectID == "" {
 		return errors.New("file_id and project_id required")
@@ -107,23 +111,34 @@ func upsertTranscript(db *sql.DB, t *TranscriptRow) error {
 // claimNextPendingTranscript atomically claims the oldest pending
 // row and returns it as running. SQLite RETURNING (3.35+) gives us
 // the claim without a tx.
-func claimNextPendingTranscript(db *sql.DB) (*TranscriptRow, error) {
+func claimNextPendingTranscript(db *sql.DB, projectID string) (*TranscriptRow, error) {
+	if projectID == "" {
+		return nil, errors.New("project_id required")
+	}
 	now := time.Now().UTC().Format(time.RFC3339)
 	row := db.QueryRow(`
 		UPDATE transcripts
 		   SET status = 'running', started_at = ?
 		 WHERE file_id = (
 		   SELECT file_id FROM transcripts
-		    WHERE status = 'pending'
+		    WHERE status = 'pending' AND project_id = ?
 		    ORDER BY created_at
 		    LIMIT 1
-		 )
+		 ) AND project_id = ? AND status = 'pending'
 		 RETURNING file_id, project_id, source_sha256, status, language, text, segments,
 		           provider, model, COALESCE(duration_ms,0), COALESCE(cost_cents,0),
 		           error, source_kind, created_at, COALESCE(started_at,''), COALESCE(completed_at,'')`,
-		now,
+		now, projectID, projectID,
 	)
 	return scanTranscriptRow(row)
+}
+
+func recoverInterruptedTranscripts(db *sql.DB) (int64, error) {
+	res, err := db.Exec(`UPDATE transcripts SET status='pending', started_at=NULL, error='' WHERE status='running'`)
+	if err != nil {
+		return 0, err
+	}
+	return res.RowsAffected()
 }
 
 func transcriptMarkOk(db *sql.DB, t *TranscriptRow) error {
@@ -146,21 +161,21 @@ func transcriptMarkOk(db *sql.DB, t *TranscriptRow) error {
 		       raw           = ?,
 		       error         = '',
 		       completed_at  = ?
-		 WHERE file_id = ? AND status = 'running'`,
+		 WHERE project_id = ? AND file_id = ? AND status = 'running'`,
 		t.SourceSHA256, t.Language, t.Text, segs,
 		t.Provider, t.Model, t.DurationMs, t.CostCents,
-		"", now, t.FileID,
+		"", now, t.ProjectID, t.FileID,
 	)
 	return err
 }
 
-func transcriptMarkFailed(db *sql.DB, fileID, errMsg string) error {
+func transcriptMarkFailed(db *sql.DB, projectID, fileID, errMsg string) error {
 	now := time.Now().UTC().Format(time.RFC3339)
 	_, err := db.Exec(`
 		UPDATE transcripts
 		   SET status = 'failed', error = ?, completed_at = ?
-		 WHERE file_id = ? AND status IN ('pending','running')`,
-		errMsg, now, fileID,
+		 WHERE project_id = ? AND file_id = ? AND status IN ('pending','running')`,
+		errMsg, now, projectID, fileID,
 	)
 	return err
 }
@@ -168,13 +183,13 @@ func transcriptMarkFailed(db *sql.DB, fileID, errMsg string) error {
 // transcriptMarkSkipped pulls a row out of the auto-transcribe rotation
 // without flagging it as a failure. Used when the file is too long,
 // or an auto-transcribe gate fails (e.g. integration absent).
-func transcriptMarkSkipped(db *sql.DB, fileID, reason string) error {
+func transcriptMarkSkipped(db *sql.DB, projectID, fileID, reason string) error {
 	now := time.Now().UTC().Format(time.RFC3339)
 	_, err := db.Exec(`
 		UPDATE transcripts
 		   SET status = 'skipped', error = ?, completed_at = ?
-		 WHERE file_id = ? AND status IN ('pending','running')`,
-		reason, now, fileID,
+		 WHERE project_id = ? AND file_id = ? AND status IN ('pending','running')`,
+		reason, now, projectID, fileID,
 	)
 	return err
 }
@@ -251,6 +266,8 @@ func transcribeCandidates(db *sql.DB, projectID string, limit int) ([]string, er
 		   AND (
 		     t.file_id IS NULL
 		     OR (t.status IN ('ok') AND t.source_sha256 != m.source_sha256 AND t.source_sha256 != '')
+		     OR (t.status = 'failed' AND julianday(t.completed_at) <= julianday('now', '-15 minutes'))
+		     OR (t.status = 'skipped' AND t.error LIKE 'no transcripts integration bound%')
 		   )
 		 ORDER BY m.created_at DESC
 		 LIMIT ?`,

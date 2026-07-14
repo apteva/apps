@@ -72,12 +72,11 @@ const previewSample: MediaMeta = {
     "Sci-fi short. Two characters debate her robotic prosthetic on an Amsterdam canal bridge.",
 };
 
-// dbg — always-on for now while we hunt the media-card hang. Filter
-// the DevTools console by "[media-card]" to isolate this component's
-// output from the rest of the dashboard chatter.
 function dbg(...args: unknown[]) {
-  // eslint-disable-next-line no-console
-  console.log("[media-card]", ...args);
+  if (typeof window !== "undefined" && window.localStorage?.getItem("apteva:debug-media-card") === "1") {
+    // eslint-disable-next-line no-console
+    console.debug("[media-card]", ...args);
+  }
 }
 
 // Inlined SSE subscription, mirroring storage's FileCard. Topic

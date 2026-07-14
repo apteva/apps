@@ -307,6 +307,17 @@ func TestPlanConcat_RequiresOutputName(t *testing.T) {
 	}
 }
 
+func TestValidateOutputNameRejectsPaths(t *testing.T) {
+	for _, name := range []string{"../escape.mp4", "subdir/out.mp4", `subdir\out.mp4`, ".", ".."} {
+		if err := validateOutputName(name); err == nil {
+			t.Errorf("validateOutputName(%q) accepted a path", name)
+		}
+	}
+	if err := validateOutputName("safe-output.mp4"); err != nil {
+		t.Fatalf("safe filename rejected: %v", err)
+	}
+}
+
 func TestBuildPlan_UnknownOperation(t *testing.T) {
 	_, err := buildPlan("explode", []string{"42"}, raw(t, map[string]any{}), "", "")
 	if err == nil {

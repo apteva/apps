@@ -278,6 +278,35 @@ func upsertDerivation(db *sql.DB, projectID, fileID, kind string, storageFileID 
 	return err
 }
 
+// upsertDerivationFailed records a terminal derivation attempt so
+// completion coordination can distinguish "still running" from
+// "attempted and failed".
+func upsertDerivationFailed(db *sql.DB, projectID, fileID, kind string, positionMs int64, cause error) error {
+	msg := "derivation failed"
+	if cause != nil {
+		msg = cause.Error()
+	}
+	if len(msg) > 1000 {
+		msg = msg[:1000]
+	}
+	_, err := db.Exec(`
+		INSERT INTO derivations (file_id, project_id, kind, storage_file_id, position_ms, status, error)
+		VALUES (?, ?, ?, '', ?, 'failed', ?)
+		ON CONFLICT(file_id, kind, position_ms) DO UPDATE SET
+			project_id=excluded.project_id,
+			storage_file_id='', width=NULL, height=NULL,
+			status='failed', error=excluded.error,
+			generated_at=CURRENT_TIMESTAMP`,
+		fileID, projectID, kind, positionMs, msg,
+	)
+	return err
+}
+
+func clearDerivations(db *sql.DB, projectID, fileID string) error {
+	_, err := db.Exec(`DELETE FROM derivations WHERE project_id=? AND file_id=?`, projectID, fileID)
+	return err
+}
+
 // getMedia loads one row + its derivations.
 // DescriptionFields carries a partial-update payload for a media
 // row's prose columns. Pointer types let callers distinguish
@@ -303,7 +332,7 @@ type DescriptionFields struct {
 //
 // UPSERT semantics: when no media row exists for (project_id,
 // file_id) yet, a stub row is inserted with probe_status='pending'
-// + source_sha256=''. The indexer's next sweep treats it like any
+// + source_sha256=”. The indexer's next sweep treats it like any
 // other unprobed row and fills in the metadata via upsertMedia,
 // which leaves the description columns alone. This lets agents
 // attach a description to a file the moment it lands in storage
@@ -532,18 +561,14 @@ func purgeOrphans(app *sdk.AppCtx, sc *storageClient, db *sql.DB, projectID stri
 	}
 
 	// 3. Compute the orphan set.
-	orphans := make([]any, 0)
 	orphanIDs := make([]string, 0)
-	placeholders := make([]string, 0)
 	for _, fid := range allMediaIDs {
 		if _, ok := present[fid]; ok {
 			continue
 		}
-		orphans = append(orphans, fid)
 		orphanIDs = append(orphanIDs, fid)
-		placeholders = append(placeholders, "?")
 	}
-	if len(orphans) == 0 {
+	if len(orphanIDs) == 0 {
 		return 0, nil
 	}
 
@@ -553,21 +578,28 @@ func purgeOrphans(app *sdk.AppCtx, sc *storageClient, db *sql.DB, projectID stri
 	//    even if storage is unreachable. Without this, the
 	//    derivation bytes accumulate under /.media/* forever.
 	if sc != nil {
-		derivByFile, _ := listDerivationsByFiles(db, projectID, orphanIDs)
 		ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-		for _, fid := range orphanIDs {
-			for _, d := range derivByFile[fid] {
-				storageID, perr := strconv.ParseInt(d.StorageFileID, 10, 64)
-				if perr != nil || storageID <= 0 {
-					continue
-				}
-				if delErr := sc.DeleteFile(ctx, projectID, storageID); delErr != nil {
-					if app != nil {
-						app.Logger().Warn("purgeOrphans: storage delete failed",
-							"file_id", fid,
-							"derivation_storage_id", storageID,
-							"kind", d.Kind,
-							"err", delErr)
+		for start := 0; start < len(orphanIDs); start += 400 {
+			end := start + 400
+			if end > len(orphanIDs) {
+				end = len(orphanIDs)
+			}
+			chunk := orphanIDs[start:end]
+			derivByFile, _ := listDerivationsByFiles(db, projectID, chunk)
+			for _, fid := range chunk {
+				for _, d := range derivByFile[fid] {
+					storageID, perr := strconv.ParseInt(d.StorageFileID, 10, 64)
+					if perr != nil || storageID <= 0 {
+						continue
+					}
+					if delErr := sc.DeleteFile(ctx, projectID, storageID); delErr != nil {
+						if app != nil {
+							app.Logger().Warn("purgeOrphans: storage delete failed",
+								"file_id", fid,
+								"derivation_storage_id", storageID,
+								"kind", d.Kind,
+								"err", delErr)
+						}
 					}
 				}
 			}
@@ -575,30 +607,34 @@ func purgeOrphans(app *sdk.AppCtx, sc *storageClient, db *sql.DB, projectID stri
 		cancel()
 	}
 
-	in := strings.Join(placeholders, ",")
-	args := append([]any{projectID}, orphans...)
-
-	if _, err := db.Exec(
-		`DELETE FROM derivations WHERE project_id = ? AND file_id IN (`+in+`)`,
-		args...,
-	); err != nil {
-		return 0, fmt.Errorf("delete orphan derivations: %w", err)
+	// SQLite commonly limits statements to 999 bind parameters.
+	// Delete in bounded chunks so large catalogs reconcile safely.
+	var deleted int64
+	for start := 0; start < len(orphanIDs); start += 400 {
+		end := start + 400
+		if end > len(orphanIDs) {
+			end = len(orphanIDs)
+		}
+		chunk := orphanIDs[start:end]
+		marks := strings.TrimSuffix(strings.Repeat("?,", len(chunk)), ",")
+		args := make([]any, 0, len(chunk)+1)
+		args = append(args, projectID)
+		for _, id := range chunk {
+			args = append(args, id)
+		}
+		for _, table := range []string{"derivations", "transcripts"} {
+			if _, err := db.Exec(`DELETE FROM `+table+` WHERE project_id=? AND file_id IN (`+marks+`)`, args...); err != nil {
+				return deleted, fmt.Errorf("delete orphan %s: %w", table, err)
+			}
+		}
+		res, err := db.Exec(`DELETE FROM media WHERE project_id=? AND file_id IN (`+marks+`)`, args...)
+		if err != nil {
+			return deleted, fmt.Errorf("delete orphan media: %w", err)
+		}
+		n, _ := res.RowsAffected()
+		deleted += n
 	}
-	if _, err := db.Exec(
-		`DELETE FROM transcripts WHERE project_id = ? AND file_id IN (`+in+`)`,
-		args...,
-	); err != nil {
-		return 0, fmt.Errorf("delete orphan transcripts: %w", err)
-	}
-	res, err := db.Exec(
-		`DELETE FROM media WHERE project_id = ? AND file_id IN (`+in+`)`,
-		args...,
-	)
-	if err != nil {
-		return 0, fmt.Errorf("delete orphan media: %w", err)
-	}
-	n, _ := res.RowsAffected()
-	return n, nil
+	return deleted, nil
 }
 
 // describeCandidates returns media file_ids the auto-describer

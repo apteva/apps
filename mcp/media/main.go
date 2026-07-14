@@ -22,7 +22,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: media
 display_name: Media
-version: 0.13.54
+version: 0.13.55
 description: |
   Catalog + derivations + renders + transcripts + auto-descriptions
   for media files in storage. Indexes uploads (probe, thumbnail,
@@ -312,6 +312,16 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		"scope_project_id", os.Getenv("APTEVA_PROJECT_ID"),
 		"gateway", os.Getenv("APTEVA_GATEWAY_URL"),
 	)
+	if n, err := recoverInterruptedRenders(ctx.AppDB()); err != nil {
+		return fmt.Errorf("recover interrupted renders: %w", err)
+	} else if n > 0 {
+		ctx.Logger().Warn("requeued interrupted renders", "count", n)
+	}
+	if n, err := recoverInterruptedTranscripts(ctx.AppDB()); err != nil {
+		return fmt.Errorf("recover interrupted transcripts: %w", err)
+	} else if n > 0 {
+		ctx.Logger().Warn("requeued interrupted transcripts", "count", n)
+	}
 	// Render pool runs alongside the indexer worker. Pool size is
 	// independent: the indexer is a single scheduled tick, the pool
 	// is N hot goroutines.
@@ -2061,10 +2071,11 @@ func (a *App) toolCancelRender(ctx *sdk.AppCtx, args map[string]any) (any, error
 	// pending rows there's no child — flip the row directly. The
 	// emit fires from runOneRender for running rows; the pending
 	// branch emits here since no worker ever picked it up.
-	if !triggerCancel(id) {
-		if err := renderMarkCancelled(ctx.AppDB(), id); err != nil {
-			return nil, err
-		}
+	triggered := triggerCancel(id)
+	if err := renderMarkCancelled(ctx.AppDB(), id); err != nil {
+		return nil, err
+	}
+	if !triggered {
 		emitRenderCancelled(ctx, id, r.ProjectID, r.Operation)
 	}
 	return map[string]any{"found": true, "status": "cancelled"}, nil
@@ -2394,11 +2405,12 @@ func (a *App) handleRenderItem(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, map[string]any{"status": row.Status, "noop": true})
 			return
 		}
-		if !triggerCancel(id) {
-			if err := renderMarkCancelled(globalCtx.AppDB(), id); err != nil {
-				http.Error(w, err.Error(), http.StatusInternalServerError)
-				return
-			}
+		triggered := triggerCancel(id)
+		if err := renderMarkCancelled(globalCtx.AppDB(), id); err != nil {
+			http.Error(w, err.Error(), http.StatusInternalServerError)
+			return
+		}
+		if !triggered {
 			emitRenderCancelled(globalCtx, id, row.ProjectID, row.Operation)
 		}
 		writeJSON(w, map[string]any{"status": "cancelled"})

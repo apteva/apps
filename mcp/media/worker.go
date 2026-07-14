@@ -15,6 +15,7 @@ package main
 import (
 	"bytes"
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -207,6 +208,30 @@ func releaseInFlight(projectID, fileID string) {
 	inFlightIndex.Delete(projectID + "|" + fileID)
 }
 
+// clearExistingDerivations removes stale rows and their storage
+// blobs only after a replacement probe has succeeded. A failed
+// reprobe therefore leaves the last usable preview intact.
+func clearExistingDerivations(ctx context.Context, app *sdk.AppCtx, sc *storageClient, projectID, fileID string) {
+	rows, err := listDerivations(app.AppDB(), projectID, fileID)
+	if err != nil {
+		app.Logger().Warn("list stale derivations failed", "file_id", fileID, "err", err)
+		return
+	}
+	for _, d := range rows {
+		storageID, err := strconv.ParseInt(d.StorageFileID, 10, 64)
+		if err != nil || storageID <= 0 {
+			continue
+		}
+		if err := sc.DeleteFile(ctx, projectID, storageID); err != nil {
+			app.Logger().Warn("delete stale derivation blob failed",
+				"file_id", fileID, "storage_file_id", storageID, "err", err)
+		}
+	}
+	if err := clearDerivations(app.AppDB(), projectID, fileID); err != nil {
+		app.Logger().Warn("clear stale derivation rows failed", "file_id", fileID, "err", err)
+	}
+}
+
 func processOne(
 	ctx context.Context, app *sdk.AppCtx, sc *storageClient, projectID string,
 	f StorageFile, ffmpegPath, ffprobePath string,
@@ -327,6 +352,7 @@ func processOne(
 		logger.Warn("upsert failed", "err", err)
 		return
 	}
+	clearExistingDerivations(ctx, app, sc, projectID, fid)
 	logger.Info("indexed",
 		"duration_ms", probe.DurationMs,
 		"video", probe.HasVideo, "audio", probe.HasAudio, "image", probe.IsImage,
@@ -351,8 +377,10 @@ func processOne(
 		thumbPath := filepath.Join(tmpDir, "thumb.jpg")
 		if err := makeThumbnail(ctx, ffmpegPath, srcPath, thumbPath, toFloat(thumbSeek), toInt(thumbWidth), probe.IsImage, probe.DurationMs); err != nil {
 			logger.Warn("thumbnail failed", "err", err)
+			_ = upsertDerivationFailed(app.AppDB(), projectID, fid, "thumbnail", 0, err)
 		} else if err := uploadAndRecord(ctx, app, sc, projectID, fid, "thumbnail", thumbPath, "image/jpeg", toInt(thumbWidth), 0, 0); err != nil {
 			logger.Warn("thumbnail upload failed", "err", err)
+			_ = upsertDerivationFailed(app.AppDB(), projectID, fid, "thumbnail", 0, err)
 		} else {
 			hasThumb = true
 		}
@@ -361,8 +389,10 @@ func processOne(
 		wavePath := filepath.Join(tmpDir, "waveform.png")
 		if err := makeWaveform(ctx, ffmpegPath, srcPath, wavePath, toInt(waveW), toInt(waveH)); err != nil {
 			logger.Warn("waveform failed", "err", err)
+			_ = upsertDerivationFailed(app.AppDB(), projectID, fid, "waveform", 0, err)
 		} else if err := uploadAndRecord(ctx, app, sc, projectID, fid, "waveform", wavePath, "image/png", toInt(waveW), toInt(waveH), 0); err != nil {
 			logger.Warn("waveform upload failed", "err", err)
+			_ = upsertDerivationFailed(app.AppDB(), projectID, fid, "waveform", 0, err)
 		} else {
 			hasWave = true
 		}
@@ -483,6 +513,7 @@ func tryRemoteIndex(
 		logger.Warn("remote index: upsert media", "file_id", fid, "err", err)
 		return false
 	}
+	clearExistingDerivations(ctx, app, sc, projectID, fid)
 	logger.Info("indexed (remote)",
 		"file_id", fid, "host_id", hostID,
 		"duration_ms", probe.DurationMs,
@@ -502,11 +533,15 @@ func tryRemoteIndex(
 		if err := upsertDerivation(app.AppDB(), projectID, fid, "thumbnail", thumbID, toInt(thumbWidth), 0, 0); err != nil {
 			logger.Warn("remote index: upsert thumbnail derivation", "err", err)
 		}
+	} else if probe.HasVideo || probe.IsImage {
+		_ = upsertDerivationFailed(app.AppDB(), projectID, fid, "thumbnail", 0, errors.New("remote index produced no thumbnail"))
 	}
 	if waveID > 0 {
 		if err := upsertDerivation(app.AppDB(), projectID, fid, "waveform", waveID, toInt(waveW), toInt(waveH), 0); err != nil {
 			logger.Warn("remote index: upsert waveform derivation", "err", err)
 		}
+	} else if probe.HasAudio && !probe.HasVideo {
+		_ = upsertDerivationFailed(app.AppDB(), projectID, fid, "waveform", 0, errors.New("remote index produced no waveform"))
 	}
 	// Keyframes (remote): upsert any keyframe rows the remote shell
 	// produced. The shell returns them as a JSON array

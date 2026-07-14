@@ -239,6 +239,7 @@ export default function MediaPanel({ projectId, installId }: NativePanelProps) {
   // want strict per-folder navigation toggle it off; descending
   // into a sub-folder keeps the toggle's current value.
   const [recursive, setRecursive] = useState(true);
+  const loadRequest = useRef<{ seq: number; controller: AbortController } | null>(null);
 
   const withMediaParams = useCallback(
     (extra: Record<string, string> = {}) => {
@@ -275,6 +276,12 @@ export default function MediaPanel({ projectId, installId }: NativePanelProps) {
       setLoading(false);
       return;
     }
+    loadRequest.current?.controller.abort();
+    const request = {
+      seq: (loadRequest.current?.seq ?? 0) + 1,
+      controller: new AbortController(),
+    };
+    loadRequest.current = request;
     setLoading(true);
     setError("");
     try {
@@ -304,13 +311,16 @@ export default function MediaPanel({ projectId, installId }: NativePanelProps) {
         facetParams.folder = folder;
         if (recursive) facetParams.recursive = "true";
       }
-      const [mediaRes, foldersRes, facetsRes] = await Promise.all([
-        fetch(`${API}/media?${withMediaParams(params)}`, { credentials: "same-origin" }),
-        fetch(`${API}/folders?${withMediaParams(folderParams)}`, { credentials: "same-origin" }),
-        fetch(`${API}/media/facets?${withMediaParams(facetParams)}`, { credentials: "same-origin" }),
+      const requestInit = { credentials: "same-origin" as const, signal: request.controller.signal };
+      const [mediaRes, foldersRes, facetsRes, statusRes] = await Promise.all([
+        fetch(`${API}/media?${withMediaParams(params)}`, requestInit),
+        fetch(`${API}/folders?${withMediaParams(folderParams)}`, requestInit),
+        fetch(`${API}/media/facets?${withMediaParams(facetParams)}`, requestInit),
+        fetch(`${API}/status?${withMediaParams()}`, requestInit),
       ]);
       if (!mediaRes.ok) throw new Error(`${mediaRes.status}: ${await mediaRes.text().catch(() => "")}`);
       const data = (await mediaRes.json()) as { media: MediaRow[] };
+      if (loadRequest.current !== request) return;
       const nextRows = data.media || [];
       setRows((prev) => offset > 0 ? [...prev, ...nextRows] : nextRows);
       setHasMore(nextRows.length === PAGE_LIMIT);
@@ -324,23 +334,21 @@ export default function MediaPanel({ projectId, installId }: NativePanelProps) {
         const fdata = (await facetsRes.json()) as { counts?: MediaFacetCounts };
         if (fdata.counts) setCounts(fdata.counts);
       }
+      if (statusRes.ok) {
+        setStatus((await statusRes.json()) as Record<string, number>);
+      }
     } catch (e) {
-      setError((e as Error).message);
+      if ((e as Error).name !== "AbortError" && loadRequest.current === request) {
+        setError((e as Error).message);
+      }
     } finally {
-      setLoading(false);
+      if (loadRequest.current === request) setLoading(false);
     }
   }, [withMediaParams, kind, aspectFilter, durationFilter, ratingFilter, sort, folder, recursive]);
 
-  // Status counts via the MCP-style summary endpoint — implemented as
-  // a fan over rows here to avoid a second roundtrip; once we add a
-  // dedicated /status route we'll switch to that.
-  useEffect(() => {
-    const counts: Record<string, number> = {};
-    for (const r of rows) counts[r.probe_status] = (counts[r.probe_status] || 0) + 1;
-    setStatus(counts);
-  }, [rows]);
-
   useEffect(() => { load(); }, [load]);
+
+  useEffect(() => () => loadRequest.current?.controller.abort(), []);
 
   // Poll while anything is mid-probe so the panel updates live.
   useEffect(() => {
@@ -361,7 +369,11 @@ export default function MediaPanel({ projectId, installId }: NativePanelProps) {
   useAppEvents("media", projectId, (ev) => {
     switch (ev.topic) {
       case "media.indexed":
+      case "media.derived":
       case "media.transcribed":
+      case "media.described":
+      case "media.updated":
+      case "media.completed":
       case "media.deleted":
         load();
         return;

@@ -193,9 +193,29 @@ func runOneRender(app *sdk.AppCtx, row *RenderRow, local *localExecutor, remote 
 		emitRenderFailed(app, row.ID, row.ProjectID, row.Operation, err.Error())
 		return
 	}
+	deregisterCancel(row.ID)
+	if ctx.Err() != nil {
+		if outputFileID > 0 {
+			cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 30*time.Second)
+			_ = newStorageClient().DeleteFile(cleanupCtx, row.ProjectID, outputFileID)
+			cleanupCancel()
+		}
+		if ctx.Err() == context.Canceled {
+			_ = renderMarkCancelled(db, row.ID)
+			emitRenderCancelled(app, row.ID, row.ProjectID, row.Operation)
+			return
+		}
+		msg := fmt.Sprintf("timeout after %ds", timeoutSec)
+		_ = renderMarkFailed(db, row.ID, msg)
+		emitRenderFailed(app, row.ID, row.ProjectID, row.Operation, msg)
+		return
+	}
 
 	outputFileIDStr := strconv.FormatInt(outputFileID, 10)
 	if err := renderMarkOk(db, row.ID, outputFileIDStr); err != nil {
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 30*time.Second)
+		_ = newStorageClient().DeleteFile(cleanupCtx, row.ProjectID, outputFileID)
+		cleanupCancel()
 		log.Error("render mark ok", "id", row.ID, "err", err)
 		return
 	}
