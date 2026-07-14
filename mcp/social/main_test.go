@@ -2118,11 +2118,12 @@ func TestSchedule_DispatchesToJobsApp(t *testing.T) {
 		t.Fatal(err)
 	}
 	res := out.(map[string]any)
+	postID := toInt64Loose(res["post_id"])
 	if res["status"] != "scheduled" {
 		t.Errorf("post status = %v, want scheduled", res["status"])
 	}
 
-	// jobs_schedule was called with run_at + http target back at us.
+	// jobs_schedule was called with run_at + a brokered app_tool target.
 	var sawSchedule bool
 	for _, c := range pf.callAppCalls {
 		if c.AppName == "jobs" && c.Tool == "jobs_schedule" {
@@ -2135,17 +2136,21 @@ func TestSchedule_DispatchesToJobsApp(t *testing.T) {
 				t.Errorf("run_at = %v", schedule["run_at"])
 			}
 			target, _ := c.Input["target"].(map[string]any)
-			if target["kind"] != "http" {
-				t.Errorf("target.kind = %v", target["kind"])
+			if target["kind"] != "app_tool" {
+				t.Errorf("target.kind = %v, want app_tool", target["kind"])
 			}
-			// v0.5.1+: cross-app {app, path} shape (the old `url`
-			// was a relative path that the jobs dispatcher couldn't
-			// resolve at fire time).
 			if target["app"] != "social" {
 				t.Errorf("target.app = %v, want social", target["app"])
 			}
-			if path, _ := target["path"].(string); path != "/jobs/publish_post" {
-				t.Errorf("target.path = %v, want /jobs/publish_post", target["path"])
+			if tool, _ := target["tool"].(string); tool != "post_publish_scheduled" {
+				t.Errorf("target.tool = %v, want post_publish_scheduled", target["tool"])
+			}
+			input, _ := target["input"].(map[string]any)
+			if got := toInt64Loose(input["post_id"]); got != postID {
+				t.Errorf("target.input.post_id = %v, want %d", input["post_id"], postID)
+			}
+			if target["path"] != nil || target["body"] != nil {
+				t.Errorf("app_tool target must not contain legacy HTTP fields: %+v", target)
 			}
 			if c.Input["idempotency_key"] == "" {
 				t.Errorf("missing idempotency_key")
@@ -2506,6 +2511,94 @@ func TestJobCallbackDoesNotAcknowledgeOverlappingPublisher(t *testing.T) {
 	(&App{}).handleJobPublishPost(rr, httptest.NewRequest(http.MethodPost, "/jobs/publish_post", strings.NewReader(fmt.Sprintf(`{"post_id":%d}`, postID))))
 	if rr.Code != http.StatusConflict {
 		t.Fatalf("overlapping callback status=%d body=%s", rr.Code, rr.Body.String())
+	}
+}
+
+func TestScheduledPublishToolReturnsPublishedOnlyAfterDownstreamSuccess(t *testing.T) {
+	pf := newRecordingPlatform()
+	pf.executeResponses["post_tweet"] = &sdk.ExecuteResult{Success: true, Status: 201, Data: json.RawMessage(`{"data":{"id":"scheduled_ok"}}`)}
+	ctx := newSocialCtx(t, pf)
+	acct, _ := ctx.AppDB().Exec(
+		`INSERT INTO social_accounts (project_id, platform, connection_id, display_name, status)
+		 VALUES ('test-proj', 'twitter', 42, 'local', 'active')`,
+	)
+	acctID, _ := acct.LastInsertId()
+	post, _ := ctx.AppDB().Exec(`INSERT INTO posts (project_id, body, status, job_id) VALUES ('test-proj', 'x', 'scheduled', 88)`)
+	postID, _ := post.LastInsertId()
+	_, _ = ctx.AppDB().Exec(`INSERT INTO post_targets (post_id, social_account_id) VALUES (?, ?)`, postID, acctID)
+
+	out, err := (&App{}).toolPostPublishScheduled(ctx, map[string]any{"post_id": postID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := out.(map[string]any)
+	if result["status"] != "published" {
+		t.Fatalf("result=%+v, want published", result)
+	}
+	if len(pf.executeCalls) != 1 {
+		t.Fatalf("execute calls=%d, want 1", len(pf.executeCalls))
+	}
+
+	out, err = (&App{}).toolPostPublishScheduled(ctx, map[string]any{"post_id": postID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result = out.(map[string]any)
+	if result["status"] != "published" || result["idempotent"] != true {
+		t.Fatalf("idempotent result=%+v", result)
+	}
+	if len(pf.executeCalls) != 1 {
+		t.Fatalf("idempotent call republished target: calls=%d", len(pf.executeCalls))
+	}
+}
+
+func TestScheduledPublishToolReturnsFailedAfterTargetRetriesExhausted(t *testing.T) {
+	pf := newRecordingPlatform()
+	pf.executeResponses["post_tweet"] = &sdk.ExecuteResult{Success: false, Status: 400, Data: json.RawMessage(`{"error":"permanent"}`)}
+	ctx := newSocialCtx(t, pf)
+	acct, _ := ctx.AppDB().Exec(
+		`INSERT INTO social_accounts (project_id, platform, connection_id, display_name, status)
+		 VALUES ('test-proj', 'twitter', 42, 'local', 'active')`,
+	)
+	acctID, _ := acct.LastInsertId()
+	post, _ := ctx.AppDB().Exec(`INSERT INTO posts (project_id, body, status, job_id) VALUES ('test-proj', 'x', 'publishing', 88)`)
+	postID, _ := post.LastInsertId()
+	_, _ = ctx.AppDB().Exec(
+		`INSERT INTO post_targets (post_id, social_account_id, status, attempts) VALUES (?, ?, 'pending', 3)`,
+		postID, acctID,
+	)
+
+	out, err := (&App{}).toolPostPublishScheduled(ctx, map[string]any{"post_id": postID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := out.(map[string]any)
+	if result["status"] != "failed" {
+		t.Fatalf("result=%+v, want failed", result)
+	}
+	if !strings.Contains(toString(result["error"]), "upstream 400") {
+		t.Fatalf("result error=%q, want downstream error", result["error"])
+	}
+	var targetStatus, postStatus string
+	var attempts int
+	_ = ctx.AppDB().QueryRow(`SELECT status, attempts FROM post_targets WHERE post_id=?`, postID).Scan(&targetStatus, &attempts)
+	_ = ctx.AppDB().QueryRow(`SELECT status FROM posts WHERE id=?`, postID).Scan(&postStatus)
+	if targetStatus != "failed" || postStatus != "failed" || attempts != 4 {
+		t.Fatalf("target=%q post=%q attempts=%d", targetStatus, postStatus, attempts)
+	}
+}
+
+func TestScheduledPublishToolCannotCrossProjects(t *testing.T) {
+	ctx := newSocialCtx(t, newRecordingPlatform())
+	post, _ := ctx.AppDB().Exec(`INSERT INTO posts (project_id, body, status) VALUES ('other-project', 'x', 'scheduled')`)
+	postID, _ := post.LastInsertId()
+	out, err := (&App{}).toolPostPublishScheduled(ctx, map[string]any{"post_id": postID, "_project_id": "other-project"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := out.(map[string]any)
+	if result["status"] != "failed" || result["error"] != "post not found" {
+		t.Fatalf("foreign result=%+v", result)
 	}
 }
 

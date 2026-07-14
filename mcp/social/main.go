@@ -44,7 +44,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: social
 display_name: Social
-version: 0.14.64
+version: 0.14.65
 description: |
   Schedule and publish posts to your social accounts (X, Facebook,
   Instagram, LinkedIn, TikTok, YouTube, Reddit, Pinterest, Threads).
@@ -101,6 +101,7 @@ provides:
     - { name: post_create,                description: "Create + publish (or schedule) a post across accounts. Scheduled creates are idempotent; retry failed scheduling via post_retry. Pass top-level body or per-target body values." }
     - { name: post_list,                  description: "List recent posts." }
     - { name: post_retry,                 description: "Re-attempt a failed post. Failed scheduled posts retry job creation on the same post." }
+    - { name: post_publish_scheduled,     description: "Internal Jobs callback that publishes one scheduled post and reports the final downstream result." }
     - { name: inbox_list,                 description: "List inbox items (comments, DMs, mentions, reviews) from connected accounts." }
     - { name: inbox_get,                  description: "Fetch one inbox item, optionally with the surrounding thread." }
     - { name: inbox_mark_read,            description: "Mark inbox items read (local-only)." }
@@ -767,6 +768,14 @@ func (a *App) MCPTools() []sdk.Tool {
 				"post_id": map[string]any{"type": "integer"},
 			}, []string{"post_id"}),
 			Handler: a.toolPostRetry,
+		},
+		{
+			Name:        "post_publish_scheduled",
+			Description: "Internal Jobs callback. Publishes one scheduled post and returns status=published only after every downstream target succeeds; failures remain retryable for Jobs. Args: post_id.",
+			InputSchema: schemaObject(map[string]any{
+				"post_id": map[string]any{"type": "integer"},
+			}, []string{"post_id"}),
+			Handler: a.toolPostPublishScheduled,
 		},
 		{
 			Name:        "post_reschedule",
@@ -4053,9 +4062,8 @@ func upstreamError(out *sdk.ExecuteResult) error {
 	return fmt.Errorf("upstream %d: %s", out.Status, body)
 }
 
-// scheduleJob hands off to the jobs app: register an event-style job
-// that POSTs back into /api/apps/social/jobs/publish_post when its
-// scheduled time arrives. Returns the job id so the caller can
+// scheduleJob hands off to the jobs app through its brokered app_tool
+// target. Returns the job id so the caller can
 // persist it on the post row — post_reschedule / post_delete need
 // it to cancel the right job later.
 func (a *App) scheduleJob(ctx *sdk.AppCtx, postID int64, scheduleAt string) (int64, error) {
@@ -4079,11 +4087,10 @@ func (a *App) scheduleJob(ctx *sdk.AppCtx, postID int64, scheduleAt string) (int
 			"run_at": rfc3339,
 		},
 		"target": map[string]any{
-			"kind":   "http",
-			"app":    "social",
-			"path":   "/jobs/publish_post",
-			"method": "POST",
-			"body":   map[string]any{"post_id": postID},
+			"kind":  "app_tool",
+			"app":   "social",
+			"tool":  "post_publish_scheduled",
+			"input": map[string]any{"post_id": postID},
 		},
 		"idempotency_key": fmt.Sprintf("social.post.%d", postID),
 		"max_retries":     3,
@@ -7831,10 +7838,90 @@ func (a *App) handlePostsItem(w http.ResponseWriter, r *http.Request) {
 	http.Error(w, "not found", http.StatusNotFound)
 }
 
-// handleJobPublishPost is the callback the jobs app fires when a
-// scheduled post's run_at arrives. Idempotent: re-running on an
-// already-published post is a no-op (publishPostTargets only touches
-// status='pending' targets).
+func (a *App) toolPostPublishScheduled(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	postID := int64(intArg(args, "post_id", 0))
+	if postID <= 0 {
+		return map[string]any{"status": "failed", "error": "post_id required"}, nil
+	}
+	pid := projectScope(ctx, args)
+	if pid == "" {
+		return map[string]any{"status": "failed", "error": "project required"}, nil
+	}
+	return a.publishScheduledPost(ctx, pid, postID), nil
+}
+
+// publishScheduledPost is shared by the brokered app_tool callback and the
+// legacy HTTP route. It is idempotent: published targets are never claimed
+// again, and a post is acknowledged only when every target was published.
+func (a *App) publishScheduledPost(ctx *sdk.AppCtx, pid string, postID int64) map[string]any {
+	var postStatus string
+	if err := ctx.AppDB().QueryRow(
+		`SELECT status FROM posts WHERE id=? AND project_id=?`,
+		postID, pid,
+	).Scan(&postStatus); err != nil {
+		if err == sql.ErrNoRows {
+			return map[string]any{"status": "failed", "error": "post not found"}
+		}
+		return map[string]any{"status": "error", "error": "load post: " + err.Error()}
+	}
+	if postStatus == "published" {
+		return map[string]any{"status": "published", "post_id": postID, "idempotent": true}
+	}
+	if postStatus != "scheduled" && postStatus != "publishing" && postStatus != "failed" {
+		return map[string]any{"status": "failed", "error": "post is not publishable from its current status: " + postStatus}
+	}
+
+	_, _ = ctx.AppDB().Exec(
+		`UPDATE posts SET status='publishing' WHERE id=? AND project_id=? AND status IN ('scheduled','failed')`,
+		postID, pid,
+	)
+	a.publishPostTargets(ctx, postID)
+
+	res, err := ctx.AppDB().Exec(
+		`UPDATE post_targets
+		    SET status='pending'
+		  WHERE post_id=? AND status='failed' AND attempts < 4
+		    AND EXISTS (SELECT 1 FROM posts p WHERE p.id=post_targets.post_id AND p.project_id=?)`,
+		postID, pid,
+	)
+	if err != nil {
+		return map[string]any{"status": "error", "error": "prepare retry: " + err.Error()}
+	}
+	if n, _ := res.RowsAffected(); n > 0 {
+		_, _ = ctx.AppDB().Exec(`UPDATE posts SET status='publishing' WHERE id=? AND project_id=?`, postID, pid)
+		return map[string]any{"status": "error", "error": "publish failed; retry queued", "post_id": postID}
+	}
+
+	var active, failed, published int
+	var lastError string
+	if err := ctx.AppDB().QueryRow(
+		`SELECT
+		    COALESCE(SUM(CASE WHEN status IN ('pending','publishing') THEN 1 ELSE 0 END),0),
+		    COALESCE(SUM(CASE WHEN status='failed' THEN 1 ELSE 0 END),0),
+		    COALESCE(SUM(CASE WHEN status='published' THEN 1 ELSE 0 END),0),
+		    COALESCE(MAX(CASE WHEN status='failed' THEN last_error END),'')
+		 FROM post_targets WHERE post_id=?`,
+		postID,
+	).Scan(&active, &failed, &published, &lastError); err != nil {
+		return map[string]any{"status": "error", "error": "check publish state: " + err.Error()}
+	}
+	if active > 0 {
+		return map[string]any{"status": "error", "error": "publish still in progress", "post_id": postID}
+	}
+	if failed > 0 {
+		if lastError == "" {
+			lastError = "one or more social targets failed"
+		}
+		return map[string]any{"status": "failed", "error": lastError, "post_id": postID, "failed_targets": failed}
+	}
+	if published == 0 {
+		return map[string]any{"status": "failed", "error": "post has no published targets", "post_id": postID}
+	}
+	return map[string]any{"status": "published", "post_id": postID, "published_targets": published}
+}
+
+// handleJobPublishPost preserves compatibility with legacy Jobs rows. New
+// schedules use post_publish_scheduled through the platform app-call broker.
 func (a *App) handleJobPublishPost(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "POST only", http.StatusMethodNotAllowed)
@@ -7860,45 +7947,17 @@ func (a *App) handleJobPublishPost(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "post not found", http.StatusNotFound)
 		return
 	}
-	// Move from 'scheduled' → 'publishing' before fanning out.
-	_, _ = globalCtx.AppDB().Exec(
-		`UPDATE posts SET status='publishing' WHERE id=? AND status='scheduled'`,
-		body.PostID,
-	)
-	a.publishPostTargets(globalCtx, body.PostID)
-	// Requeue failed targets that have attempts left, then return a
-	// non-2xx response so Jobs applies its configured backoff. The target
-	// claim is conditional, so an overlapping callback cannot publish it
-	// twice. After four attempts failures remain terminal and the callback
-	// acknowledges completion.
-	res, err := globalCtx.AppDB().Exec(
-		`UPDATE post_targets
-		    SET status='pending'
-		  WHERE post_id=? AND status='failed' AND attempts < 4`,
-		body.PostID,
-	)
-	if err != nil {
-		http.Error(w, "prepare retry: "+err.Error(), http.StatusInternalServerError)
+	result := a.publishScheduledPost(globalCtx, postProject, body.PostID)
+	status := toString(result["status"])
+	if status != "published" {
+		code := http.StatusBadGateway
+		if status == "error" && toString(result["error"]) == "publish still in progress" {
+			code = http.StatusConflict
+		}
+		http.Error(w, toString(result["error"]), code)
 		return
 	}
-	if n, _ := res.RowsAffected(); n > 0 {
-		_, _ = globalCtx.AppDB().Exec(`UPDATE posts SET status='publishing' WHERE id=?`, body.PostID)
-		http.Error(w, "publish failed; retry queued", http.StatusBadGateway)
-		return
-	}
-	var active int
-	if err := globalCtx.AppDB().QueryRow(
-		`SELECT COUNT(*) FROM post_targets WHERE post_id=? AND status IN ('pending','publishing')`,
-		body.PostID,
-	).Scan(&active); err != nil {
-		http.Error(w, "check publish state: "+err.Error(), http.StatusInternalServerError)
-		return
-	}
-	if active > 0 {
-		http.Error(w, "publish still in progress", http.StatusConflict)
-		return
-	}
-	writeJSON(w, map[string]any{"published": body.PostID})
+	writeJSON(w, result)
 }
 
 func (a *App) handlePlatforms(w http.ResponseWriter, r *http.Request) {
