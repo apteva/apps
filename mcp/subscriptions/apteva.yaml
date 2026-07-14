@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: subscriptions
 display_name: Subscriptions
-version: 0.4.0
+version: 0.5.0
 description: |
   Generic recurring-commerce lifecycle for SaaS, physical product
   subscriptions, and services. Subscriptions owns recurrence, status,
@@ -17,6 +17,8 @@ description: |
   an external commerce workflow to collect.
   v0.4.0 stores immutable discount applications from external eligibility
   engines and applies once, repeating, or forever pricing by billing cycle.
+  v0.5.0 adds durable immediate and next-cycle item changes with cycle-safe
+  history and generic proration calculations for external orchestrators.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/subscriptions
@@ -74,6 +76,8 @@ provides:
       description: A subscription period invoice was requested.
     - name: subscription.cycle_due
       description: A subscription cycle is due for external collection or fulfillment orchestration.
+    - name: subscription.change.applied
+      description: A durable subscription item change became effective.
   mcp_tools:
     - name: subscriptions_create
       description: Create a SaaS, physical, or service subscription with catalog-backed items.
@@ -92,7 +96,7 @@ provides:
     - name: subscription_items_list
       description: List subscription items.
     - name: subscription_items_update
-      description: Patch item status, quantity, amount, included usage, unit size, or metadata.
+      description: Patch item metadata/status or unbilled pricing; use subscription changes once a cycle is billed.
     - name: subscription_items_cancel
       description: Cancel a subscription item.
     - name: subscription_discounts_create
@@ -117,6 +121,12 @@ provides:
       description: List cycles for a subscription.
     - name: subscription_events_list
       description: List subscription audit events.
+    - name: subscription_changes_create
+      description: Create an idempotent immediate or next-cycle replacement of subscription items; deferred immediate changes await explicit approval.
+    - name: subscription_changes_get
+      description: Fetch a durable subscription item change.
+    - name: subscription_changes_apply
+      description: Apply a due pending subscription item change idempotently.
   skills:
     - name: how-to-use-subscriptions
       command: /subscriptions
