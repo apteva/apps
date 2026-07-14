@@ -115,6 +115,12 @@ interface ProviderRate {
   request_microunits: number;
   source: string;
   source_reference?: string;
+  extra_rates?: {
+    catalog_version?: string;
+    verified_at?: string;
+    cache_write_1h_microunits_per_million?: number;
+    standard_context_max_tokens?: number;
+  };
   effective_from?: string;
   effective_to?: string;
 }
@@ -520,12 +526,12 @@ export default function LLMPanel({ projectId }: NativePanelProps) {
             {providerRates.map((rate) => (
               <button key={rate.id} type="button" onClick={() => setRateDraft({ ...rate })} className="w-full text-left px-3 py-2 border-b border-border hover:bg-bg-input">
                 <div className="flex items-center gap-2 min-w-0"><span className="text-sm font-medium truncate">{rate.provider}/{rate.model_id}</span><span className="ml-auto text-xs text-text-dim">{rate.project_id ? "project" : "global"}</span></div>
-                <div className="mt-1 flex items-center gap-3 text-xs text-text-dim"><span>{formatRate(rate.input_microunits_per_million)} in</span><span>{formatRate(rate.output_microunits_per_million)} out</span><span className="ml-auto">{rate.source}</span></div>
+                <div className="mt-1 flex items-center gap-3 text-xs text-text-dim"><span>{formatRate(rate.input_microunits_per_million)} in</span><span>{formatRate(rate.output_microunits_per_million)} out</span><span className="ml-auto">{rateSourceLabel(rate.source)}</span></div>
               </button>
             ))}
           </aside>
           <main className="overflow-auto p-4 max-w-4xl space-y-4">
-            {rateDraft.id && <div className="text-xs text-text-muted">{rateDraft.source} rate effective {formatDate(rateDraft.effective_from)}. Saving creates a project-specific manual override and retains this version in history.</div>}
+            {rateDraft.id && <div className="text-xs text-text-muted flex flex-wrap gap-x-2"><span>{rateSourceLabel(rateDraft.source)} rate effective {formatDate(rateDraft.effective_from)}{rateDraft.effective_to ? ` through ${formatDate(rateDraft.effective_to)}` : ""}.</span>{rateDraft.extra_rates?.verified_at && <span>Verified {rateDraft.extra_rates.verified_at}.</span>}{rateDraft.source_reference && isHTTPURL(rateDraft.source_reference) && <a href={rateDraft.source_reference} target="_blank" rel="noreferrer" className="text-accent hover:underline">Pricing source</a>}</div>}
             <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
               <Field label="Provider"><input list="known-llm-providers" value={rateDraft.provider} onChange={(event) => setRateDraft({ ...rateDraft, provider: event.target.value.toLowerCase() })} className={`${controlClass} font-mono`} /></Field>
               <Field label="Native model ID"><input list="known-provider-models" value={rateDraft.model_id} onChange={(event) => setRateDraft({ ...rateDraft, model_id: event.target.value })} className={`${controlClass} font-mono`} /><datalist id="known-provider-models">{models.filter((model) => !rateDraft.provider || model.provider === rateDraft.provider).map((model) => <option key={`${model.provider}:${model.model_id}`} value={model.model_id} />)}</datalist></Field>
@@ -658,6 +664,22 @@ function setPolicyLimit(policy: Policy, setPolicy: (policy: Policy) => void, key
 }
 
 function splitLines(value: string): string[] { return value.split(/\r?\n/).map((item) => item.trim()).filter(Boolean); }
+
+function rateSourceLabel(source: string): string {
+  if (source === "builtin_catalog") return "Built-in catalog";
+  if (source === "provider_api") return "Provider API";
+  if (source === "provider_response") return "Provider response";
+  return titleCase(source || "unknown");
+}
+
+function isHTTPURL(value: string): boolean {
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" || url.protocol === "http:";
+  } catch {
+    return false;
+  }
+}
 function textFromList(values?: string[]): string { return (values || []).join("\n"); }
 function pretty(value: unknown): string { return JSON.stringify(value ?? {}, null, 2); }
 function prettyJSON(value: unknown): string { try { return JSON.stringify(typeof value === "string" ? JSON.parse(value) : value, null, 2); } catch { return String(value || ""); } }

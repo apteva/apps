@@ -45,14 +45,15 @@ func (r *ProviderRate) hasMeteredRate() bool {
 }
 
 type ProviderMetering struct {
-	InputTokens       int64           `json:"input_tokens"`
-	OutputTokens      int64           `json:"output_tokens"`
-	CachedInputTokens int64           `json:"cached_input_tokens,omitempty"`
-	CacheWriteTokens  int64           `json:"cache_write_tokens,omitempty"`
-	CostMicrounits    int64           `json:"provider_cost_microunits,omitempty"`
-	CostCurrency      string          `json:"provider_cost_currency,omitempty"`
-	CostReported      bool            `json:"-"`
-	RawUsage          json.RawMessage `json:"raw_usage,omitempty"`
+	InputTokens        int64           `json:"input_tokens"`
+	OutputTokens       int64           `json:"output_tokens"`
+	CachedInputTokens  int64           `json:"cached_input_tokens,omitempty"`
+	CacheWriteTokens   int64           `json:"cache_write_tokens,omitempty"`
+	CacheWrite1hTokens int64           `json:"cache_write_1h_tokens,omitempty"`
+	CostMicrounits     int64           `json:"provider_cost_microunits,omitempty"`
+	CostCurrency       string          `json:"provider_cost_currency,omitempty"`
+	CostReported       bool            `json:"-"`
+	RawUsage           json.RawMessage `json:"raw_usage,omitempty"`
 }
 
 func ensureProviderCostSchema(tx *sql.Tx) error {
@@ -139,7 +140,7 @@ func dbProviderRatesList(db *sql.DB, projectID, provider, modelID string, includ
 		args = append(args, upstreamModel(provider, modelID))
 	}
 	if !includeHistory {
-		conds = append(conds, "effective_to IS NULL")
+		conds = append(conds, "effective_from <= CURRENT_TIMESTAMP", "(effective_to IS NULL OR effective_to > CURRENT_TIMESTAMP)")
 	}
 	rows, err := db.Query(`SELECT `+providerRateColumns+` FROM provider_rates WHERE `+strings.Join(conds, " AND ")+
 		` ORDER BY provider, model_id, CASE WHEN project_id=? THEN 0 ELSE 1 END, effective_from DESC, id DESC`, append(args, projectID)...)
@@ -159,14 +160,20 @@ func dbProviderRatesList(db *sql.DB, projectID, provider, modelID string, includ
 }
 
 func resolveProviderRate(q queryRower, projectID, provider, model string) (*ProviderRate, error) {
+	return resolveProviderRateAt(q, projectID, provider, model, "")
+}
+
+func resolveProviderRateAt(q queryRower, projectID, provider, model, at string) (*ProviderRate, error) {
 	provider = normalizeProvider(provider)
 	modelID := upstreamModel(provider, strings.TrimSpace(model))
 	row := q.QueryRow(`SELECT `+providerRateColumns+` FROM provider_rates
 		WHERE project_id IN ('', ?) AND provider=? AND model_id=?
-		  AND effective_from <= CURRENT_TIMESTAMP
-		  AND (effective_to IS NULL OR effective_to > CURRENT_TIMESTAMP)
-		ORDER BY CASE WHEN project_id=? THEN 0 ELSE 1 END, effective_from DESC, id DESC LIMIT 1`,
-		projectID, provider, modelID, projectID)
+		  AND effective_from <= COALESCE(NULLIF(?,''), CURRENT_TIMESTAMP)
+		  AND (effective_to IS NULL OR effective_to > COALESCE(NULLIF(?,''), CURRENT_TIMESTAMP))
+		ORDER BY CASE WHEN project_id=? THEN 0 ELSE 1 END,
+			CASE source WHEN 'manual' THEN 0 WHEN 'provider_api' THEN 1 WHEN 'builtin_catalog' THEN 2 ELSE 3 END,
+			effective_from DESC, id DESC LIMIT 1`,
+		projectID, provider, modelID, at, at, projectID)
 	rate, err := scanProviderRate(row)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -263,14 +270,19 @@ func (a *App) refreshProviderRates(db *sql.DB, projectID, provider string) (int,
 	updated := 0
 	for _, model := range models {
 		args, ok := rateArgsFromModel(model)
-		if !ok {
+		if ok {
+			if _, changed, err := dbProviderRateUpsert(db, projectID, args, true); err != nil {
+				return updated, err
+			} else if changed {
+				updated++
+			}
 			continue
 		}
-		if _, changed, err := dbProviderRateUpsert(db, projectID, args, true); err != nil {
+		count, err := materializeBuiltinCatalogRates(db, projectID, model.Provider, model.ModelID)
+		if err != nil {
 			return updated, err
-		} else if changed {
-			updated++
 		}
+		updated += count
 	}
 	return updated, nil
 }
@@ -374,14 +386,30 @@ func clampRounded(value float64) int64 {
 }
 
 func calculateProviderCost(rate *ProviderRate, input, output, cachedInput, cacheWrite int64) int64 {
+	return calculateProviderCostDetailed(rate, input, output, cachedInput, cacheWrite, 0)
+}
+
+func calculateProviderCostDetailed(rate *ProviderRate, input, output, cachedInput, cacheWrite, cacheWrite1h int64) int64 {
 	if !rate.hasMeteredRate() {
 		return 0
 	}
+	if cacheWrite1h < 0 {
+		cacheWrite1h = 0
+	}
+	if cacheWrite1h > cacheWrite {
+		cacheWrite1h = cacheWrite
+	}
+	cacheWrite5m := cacheWrite - cacheWrite1h
 	cost := float64(rate.RequestMicrounits)
 	cost += float64(input) * float64(rate.InputMicrounitsPerMillion) / 1_000_000
 	cost += float64(output) * float64(rate.OutputMicrounitsPerMillion) / 1_000_000
 	cost += float64(cachedInput) * float64(rate.CachedInputMicrounitsPerMillion) / 1_000_000
-	cost += float64(cacheWrite) * float64(rate.CacheWriteMicrounitsPerMillion) / 1_000_000
+	cost += float64(cacheWrite5m) * float64(rate.CacheWriteMicrounitsPerMillion) / 1_000_000
+	cacheWrite1hRate := extraRateInt(rate, "cache_write_1h_microunits_per_million")
+	if cacheWrite1hRate == 0 {
+		cacheWrite1hRate = rate.CacheWriteMicrounitsPerMillion
+	}
+	cost += float64(cacheWrite1h) * float64(cacheWrite1hRate) / 1_000_000
 	return clampRounded(cost)
 }
 
@@ -405,6 +433,9 @@ func parseProviderMetering(raw []byte) ProviderMetering {
 		m.CachedInputTokens = int64FromDecimal(firstNonNil(usage["cache_read_input_tokens"], usage["cached_input_tokens"]))
 	}
 	m.CacheWriteTokens = int64FromDecimal(firstNonNil(usage["cache_creation_input_tokens"], usage["cache_write_tokens"]))
+	if cacheCreation, ok := usage["cache_creation"].(map[string]any); ok {
+		m.CacheWrite1hTokens = int64FromDecimal(cacheCreation["ephemeral_1h_input_tokens"])
+	}
 	if b, err := json.Marshal(usage); err == nil && len(usage) > 0 {
 		m.RawUsage = b
 	}
@@ -506,7 +537,8 @@ func providerCostDetails(m ProviderMetering) json.RawMessage {
 	b, _ := json.Marshal(map[string]any{
 		"input_tokens": m.InputTokens, "output_tokens": m.OutputTokens,
 		"cached_input_tokens": m.CachedInputTokens, "cache_write_tokens": m.CacheWriteTokens,
-		"raw_usage": rawJSON(string(m.RawUsage)),
+		"cache_write_1h_tokens": m.CacheWrite1hTokens,
+		"raw_usage":             rawJSON(string(m.RawUsage)),
 	})
 	return b
 }
@@ -531,6 +563,16 @@ func usageHasUnknownAttemptCost(raw json.RawMessage) bool {
 		UnknownCostAttempts int `json:"unknown_cost_attempts"`
 	}
 	return json.Unmarshal(raw, &details) == nil && details.UnknownCostAttempts > 0
+}
+
+func providerCostCalculationPartial(rate *ProviderRate, input, cacheWrite1h int64) bool {
+	if rate == nil {
+		return false
+	}
+	if maxStandardContext := extraRateInt(rate, "standard_context_max_tokens"); maxStandardContext > 0 && input > maxStandardContext {
+		return true
+	}
+	return cacheWrite1h > 0 && extraRateInt(rate, "cache_write_1h_microunits_per_million") == 0
 }
 
 func costHeaders(w http.ResponseWriter, ev *UsageEvent) {

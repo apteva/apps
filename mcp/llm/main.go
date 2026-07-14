@@ -27,8 +27,8 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: llm
 display_name: LLM Gateway
-version: 0.5.0
-description: Generic OpenAI-compatible AI access for Apteva-hosted apps and agents.
+version: 0.5.1
+description: Generic OpenAI-compatible AI access with provider-cost metering for Apteva-hosted apps and agents.
 author: Apteva
 scopes: [project, global]
 icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/llm/icon.svg
@@ -85,7 +85,7 @@ provides:
     - name: llm_provider_rates_delete
       description: Close an active provider rate without deleting its history.
     - name: llm_provider_rates_refresh
-      description: Refresh rates found in provider model metadata.
+      description: Refresh rates from provider model metadata and the built-in catalog.
     - name: llm_policy_get
       description: Return the project or subject policy.
     - name: llm_policy_set
@@ -184,7 +184,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		}
 	}
 	globalCtx = ctx
-	ctx.Logger().Info("llm gateway mounted", "version", "0.5.0", "scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
+	ctx.Logger().Info("llm gateway mounted", "version", "0.5.1", "scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
 	return nil
 }
 
@@ -466,7 +466,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "llm_provider_rates_delete", Description: "Close an active provider rate while retaining history.", InputSchema: schemaObject(map[string]any{
 			"project_id": map[string]any{"type": "string"}, "id": map[string]any{"type": "integer"},
 		}, []string{"id"}), Handler: a.toolProviderRateDelete},
-		{Name: "llm_provider_rates_refresh", Description: "Refresh rates found in provider model metadata.", InputSchema: schemaObject(map[string]any{
+		{Name: "llm_provider_rates_refresh", Description: "Refresh rates from provider model metadata and the built-in catalog.", InputSchema: schemaObject(map[string]any{
 			"project_id": map[string]any{"type": "string"}, "provider": map[string]any{"type": "string"},
 		}, nil), Handler: a.toolProviderRatesRefresh},
 		{Name: "llm_policy_get", Description: "Return a project or subject policy.", InputSchema: schemaObject(map[string]any{
@@ -2823,13 +2823,17 @@ func finishUsageReservationCost(db *sql.DB, id int64, provider, model string, in
 		return nil, resolveErr
 	} else if rate != nil && rate.hasMeteredRate() && status == "completed" {
 		var details struct {
-			CachedInputTokens int64 `json:"cached_input_tokens"`
-			CacheWriteTokens  int64 `json:"cache_write_tokens"`
+			CachedInputTokens  int64 `json:"cached_input_tokens"`
+			CacheWriteTokens   int64 `json:"cache_write_tokens"`
+			CacheWrite1hTokens int64 `json:"cache_write_1h_tokens"`
 		}
 		_ = json.Unmarshal(usageDetails, &details)
-		costMicrounits = calculateProviderCost(rate, input, output, details.CachedInputTokens, details.CacheWriteTokens)
+		costMicrounits = calculateProviderCostDetailed(rate, input, output, details.CachedInputTokens, details.CacheWriteTokens, details.CacheWrite1hTokens)
 		costCurrency = rate.Currency
 		costStatus = "calculated"
+		if providerCostCalculationPartial(rate, input, details.CacheWrite1hTokens) {
+			costStatus = "partial"
+		}
 		costSource = rate.Source
 		rateID = rate.ID
 	}
