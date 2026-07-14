@@ -23,10 +23,9 @@ func (p *storageLookupPlatform) CallAppResult(app, tool string, input map[string
 	if app != "storage" || tool != "files_get" {
 		return nil
 	}
-	lookup := out.(*storageFileLookup)
-	lookup.Found = p.found
+	file := out.(*storageFileMetadata)
 	if p.found {
-		lookup.File = &storageFileMetadata{ID: int64Arg(input, "id"), Name: "trusted.png", ContentType: "image/png", SizeBytes: 68}
+		*file = storageFileMetadata{ID: int64Arg(input, "id"), Name: "trusted.png", ContentType: "image/png", SizeBytes: 68}
 	}
 	return nil
 }
@@ -68,7 +67,7 @@ func mustMember(t *testing.T, ctx *sdk.AppCtx, pid string, spaceID int64, args m
 func TestManifestAndSpaceScopedSchemas(t *testing.T) {
 	a := &App{}
 	m := a.Manifest()
-	if m.Name != "creators" || m.Version != "0.2.4" {
+	if m.Name != "creators" || m.Version != "0.2.5" {
 		t.Fatalf("manifest = %s %s", m.Name, m.Version)
 	}
 	if len(a.Workers()) != 1 || len(a.EventHandlers()) != 3 || a.EventHandlers()[0].Event != "invoice.paid" {
