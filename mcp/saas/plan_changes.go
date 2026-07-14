@@ -195,7 +195,8 @@ func (a *App) continuePlanChange(ctx *sdk.AppCtx, change *PlanChange, targetPlan
 			}},
 			"effective_at": change.EffectiveMode, "proration_policy": change.ProrationPolicy, "discount_policy": change.DiscountPolicy,
 			"interval": targetPrice.Interval, "interval_count": targetPrice.IntervalCount,
-			"idempotency_key": "saas-plan-change:" + change.ID, "source_app": "saas", "source_ref": change.ID,
+			"subscription_metadata_patch": subscriptionPlanMetadataPatch(targetPlan),
+			"idempotency_key":             "saas-plan-change:" + change.ID, "source_app": "saas", "source_ref": change.ID,
 			"defer_apply": change.EffectiveMode == "immediate",
 		}
 		if err := ctx.PlatformAPI().CallAppResult("subscriptions", "subscription_changes_create", input, &out); err != nil {
@@ -241,6 +242,21 @@ func (a *App) continuePlanChange(ctx *sdk.AppCtx, change *PlanChange, targetPlan
 		return err
 	}
 	return a.finalizePlanChange(ctx, pid, change.ID)
+}
+
+func subscriptionPlanMetadataPatch(plan *Plan) map[string]any {
+	patch := map[string]any{"saas_plan_key": plan.Key}
+	if plan.CatalogProductID != nil {
+		patch["catalog_product_id"] = *plan.CatalogProductID
+	} else {
+		patch["catalog_product_id"] = nil
+	}
+	if plan.CatalogPriceID != nil {
+		patch["catalog_price_id"] = *plan.CatalogPriceID
+	} else {
+		patch["catalog_price_id"] = nil
+	}
+	return patch
 }
 
 func (a *App) ensurePlanChangePayment(ctx *sdk.AppCtx, change *PlanChange) error {
@@ -542,6 +558,32 @@ func (a *App) finalizePlanChange(ctx *sdk.AppCtx, pid, changeID string) error {
 }
 
 func (a *App) removeObsoletePlanAccess(ctx *sdk.AppCtx, pid string, acct *Account, fromPlan, targetPlan *Plan) error {
+	if err := a.removeObsoletePlanGrants(ctx, pid, acct, targetPlan); err != nil {
+		return err
+	}
+	if fromPlan == nil {
+		return nil
+	}
+	targetLimits := map[string]bool{}
+	for _, limit := range targetPlan.Limits {
+		targetLimits[limit.FeatureKey] = true
+	}
+	for _, limit := range fromPlan.Limits {
+		if targetLimits[limit.FeatureKey] {
+			continue
+		}
+		var ignored map[string]any
+		if err := ctx.PlatformAPI().CallAppResult("entitlements", "entitlement_limits_set", map[string]any{
+			"_project_id": pid, "subject_type": "saas_account", "subject_id": acct.ID, "feature_key": limit.FeatureKey,
+			"limit_type": "quota", "limit_value": 0, "reset_interval": "none", "metadata": map[string]any{"cleared_by_plan_change": true, "plan_key": targetPlan.Key},
+		}, &ignored); err != nil {
+			return fmt.Errorf("clear obsolete limit %s: %w", limit.FeatureKey, err)
+		}
+	}
+	return nil
+}
+
+func (a *App) removeObsoletePlanGrants(ctx *sdk.AppCtx, pid string, acct *Account, targetPlan *Plan) error {
 	targetFeatures := map[string]bool{}
 	for _, feature := range targetPlan.Features {
 		targetFeatures[feature.FeatureKey] = true
@@ -564,23 +606,62 @@ func (a *App) removeObsoletePlanAccess(ctx *sdk.AppCtx, pid string, acct *Accoun
 			return fmt.Errorf("revoke obsolete grant %s: %w", strArg(grant, "feature_key"), err)
 		}
 	}
-	targetLimits := map[string]bool{}
-	for _, limit := range targetPlan.Limits {
-		targetLimits[limit.FeatureKey] = true
-	}
-	for _, limit := range fromPlan.Limits {
-		if targetLimits[limit.FeatureKey] {
-			continue
-		}
-		var ignored map[string]any
-		if err := ctx.PlatformAPI().CallAppResult("entitlements", "entitlement_limits_set", map[string]any{
-			"_project_id": pid, "subject_type": "saas_account", "subject_id": acct.ID, "feature_key": limit.FeatureKey,
-			"limit_type": "quota", "limit_value": 0, "reset_interval": "none", "metadata": map[string]any{"cleared_by_plan_change": true, "plan_key": targetPlan.Key},
-		}, &ignored); err != nil {
-			return fmt.Errorf("clear obsolete limit %s: %w", limit.FeatureKey, err)
-		}
-	}
 	return nil
+}
+
+func (a *App) toolAccountReconcile(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	pid, err := requireProject(ctx, args)
+	if err != nil {
+		return nil, err
+	}
+	accountID := strings.TrimSpace(strArg(args, "account_id"))
+	if accountID == "" {
+		return nil, errors.New("account_id required")
+	}
+	acct, err := dbAccountGet(ctx.AppDB(), pid, accountID)
+	if err != nil || acct == nil {
+		return nil, firstErr(err, errors.New("account not found"))
+	}
+	plan, err := dbPlanGet(ctx.AppDB(), pid, acct.PlanKey)
+	if err != nil || plan == nil {
+		return nil, firstErr(err, errors.New("account plan not found"))
+	}
+
+	steps := map[string]any{}
+	if subID := int64PtrValue(acct.SubscriptionID); subID != 0 {
+		var out map[string]any
+		if err := ctx.PlatformAPI().CallAppResult("subscriptions", "subscriptions_update_metadata", map[string]any{
+			"_project_id": pid, "id": subID, "metadata_patch": subscriptionPlanMetadataPatch(plan),
+			"actor": "saas", "note": "Reconcile SaaS account plan projection",
+		}, &out); err != nil {
+			return nil, fmt.Errorf("reconcile subscription metadata: %w", err)
+		}
+		steps["subscription_metadata"] = true
+	}
+	if err := a.applyPlanAccess(ctx, pid, acct, plan); err != nil {
+		return nil, err
+	}
+	steps["entitlement_grants"] = true
+	steps["entitlement_limits"] = true
+
+	var previousPlan *Plan
+	previousKey := strArg(mapFromAny(acct.Metadata), "previous_plan_key")
+	if previousKey != "" && previousKey != plan.Key {
+		previousPlan, err = dbPlanGet(ctx.AppDB(), pid, previousKey)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if err := a.removeObsoletePlanAccess(ctx, pid, acct, previousPlan, plan); err != nil {
+		return nil, err
+	}
+	steps["obsolete_access"] = true
+
+	updated, err := dbAccountGet(ctx.AppDB(), pid, acct.ID)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{"account": updated, "plan": plan, "reconciled": true, "steps": steps}, nil
 }
 
 func (a *App) planChangeResponse(ctx *sdk.AppCtx, change *PlanChange) (map[string]any, error) {

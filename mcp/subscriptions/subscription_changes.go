@@ -31,6 +31,7 @@ type SubscriptionChange struct {
 	OldItems           json.RawMessage `json:"old_items"`
 	NewItems           json.RawMessage `json:"new_items"`
 	Proration          json.RawMessage `json:"proration"`
+	MetadataPatch      json.RawMessage `json:"subscription_metadata_patch,omitempty"`
 	Interval           string          `json:"interval,omitempty"`
 	IntervalCount      int64           `json:"interval_count,omitempty"`
 	LastError          string          `json:"last_error,omitempty"`
@@ -48,7 +49,8 @@ func subscriptionChangeTools(a *App) []sdk.Tool {
 			"discount_policy": map[string]any{"type": "string"}, "idempotency_key": map[string]any{"type": "string"},
 			"source_app": map[string]any{"type": "string"}, "source_ref": map[string]any{"type": "string"},
 			"interval": map[string]any{"type": "string"}, "interval_count": map[string]any{"type": "integer"},
-			"defer_apply": map[string]any{"type": "boolean"},
+			"subscription_metadata_patch": map[string]any{"type": "object"},
+			"defer_apply":                 map[string]any{"type": "boolean"},
 		}, []string{"subscription_id", "items", "idempotency_key"}), Handler: a.toolSubscriptionChangesCreate},
 		{Name: "subscription_changes_get", Description: "Fetch one durable subscription item change.", InputSchema: schemaObject(map[string]any{"change_id": map[string]any{"type": "integer"}}, []string{"change_id"}), Handler: a.toolSubscriptionChangesGet},
 		{Name: "subscription_changes_apply", Description: "Apply a due pending subscription item change idempotently.", InputSchema: schemaObject(map[string]any{"change_id": map[string]any{"type": "integer"}}, []string{"change_id"}), Handler: a.toolSubscriptionChangesApply},
@@ -159,7 +161,8 @@ func dbSubscriptionChangeCreate(db *sql.DB, pid string, args map[string]any, now
 		}
 	}
 	itemMaps := normalizedItemMaps(items)
-	fingerprint := subscriptionChangeFingerprint(subID, itemMaps, mode, policy, discountPolicy, strArg(args, "interval"), int64Arg(args, "interval_count"))
+	metadataPatch := mapFromAny(args["subscription_metadata_patch"])
+	fingerprint := subscriptionChangeFingerprint(subID, itemMaps, mode, policy, discountPolicy, strArg(args, "interval"), int64Arg(args, "interval_count"), metadataPatch)
 	existing, err := dbSubscriptionChangeByIdempotency(db, pid, idem)
 	if err != nil {
 		return nil, false, err
@@ -185,11 +188,11 @@ func dbSubscriptionChangeCreate(db *sql.DB, pid string, args map[string]any, now
 	}
 	var id int64
 	err = db.QueryRow(`INSERT INTO subscription_changes
-		(project_id,subscription_id,idempotency_key,request_fingerprint,source_app,source_ref,status,effective_mode,effective_at,proration_policy,discount_policy,old_items_json,new_items_json,proration_json,interval,interval_count)
-		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) RETURNING id`,
+		(project_id,subscription_id,idempotency_key,request_fingerprint,source_app,source_ref,status,effective_mode,effective_at,proration_policy,discount_policy,old_items_json,new_items_json,proration_json,interval,interval_count,subscription_metadata_patch_json)
+		VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) RETURNING id`,
 		pid, subID, idem, fingerprint, firstNonEmpty(strings.ToLower(strArg(args, "source_app")), "manual"), strArg(args, "source_ref"),
 		status, mode, effective.UTC().Format(time.RFC3339), policy, discountPolicy, oldJSON, newJSON, jsonOrEmpty(proration, "{}"),
-		strings.ToLower(strArg(args, "interval")), int64Arg(args, "interval_count")).Scan(&id)
+		strings.ToLower(strArg(args, "interval")), int64Arg(args, "interval_count"), jsonOrEmpty(metadataPatch, "{}")).Scan(&id)
 	if err != nil {
 		return nil, false, err
 	}
@@ -220,8 +223,11 @@ func activeSubscriptionItems(items []*SubItem) []*SubItem {
 	return out
 }
 
-func subscriptionChangeFingerprint(subID int64, items []any, mode, proration, discount, interval string, intervalCount int64) string {
+func subscriptionChangeFingerprint(subID int64, items []any, mode, proration, discount, interval string, intervalCount int64, metadataPatch map[string]any) string {
 	payload := map[string]any{"subscription_id": subID, "items": items, "effective_at": mode, "proration_policy": proration, "discount_policy": discount, "interval": interval, "interval_count": intervalCount}
+	if len(metadataPatch) > 0 {
+		payload["subscription_metadata_patch"] = metadataPatch
+	}
 	sum := sha256.Sum256([]byte(jsonOrEmpty(payload, "{}")))
 	return hex.EncodeToString(sum[:])
 }
@@ -474,7 +480,15 @@ func dbApplySubscriptionChange(db *sql.DB, change *SubscriptionChange, now time.
 	if change.IntervalCount > 0 {
 		intervalCount = change.IntervalCount
 	}
-	if _, err := tx.Exec(`UPDATE subscriptions SET interval=?,interval_count=?,updated_at=CURRENT_TIMESTAMP WHERE project_id=? AND id=?`, interval, intervalCount, change.ProjectID, change.SubscriptionID); err != nil {
+	var currentMetadata string
+	if err := tx.QueryRow(`SELECT metadata FROM subscriptions WHERE project_id=? AND id=?`, change.ProjectID, change.SubscriptionID).Scan(&currentMetadata); err != nil {
+		return err
+	}
+	metadata, err := mergeMetadataPatch(json.RawMessage(currentMetadata), change.MetadataPatch)
+	if err != nil {
+		return err
+	}
+	if _, err := tx.Exec(`UPDATE subscriptions SET interval=?,interval_count=?,metadata=?,updated_at=CURRENT_TIMESTAMP WHERE project_id=? AND id=?`, interval, intervalCount, metadata, change.ProjectID, change.SubscriptionID); err != nil {
 		return err
 	}
 	details := map[string]any{"change_id": change.ID, "source_app": change.SourceApp, "source_ref": change.SourceRef, "effective_at": change.EffectiveMode, "starts_cycle_number": nextCycle, "proration": mapFromAny(change.Proration)}
@@ -574,16 +588,16 @@ func dbSubscriptionChangeByIdempotency(db *sql.DB, pid, key string) (*Subscripti
 }
 
 func subscriptionChangeSelect() string {
-	return `SELECT id,project_id,subscription_id,idempotency_key,request_fingerprint,source_app,source_ref,status,effective_mode,effective_at,proration_policy,discount_policy,old_items_json,new_items_json,proration_json,interval,interval_count,last_error,attempt_count,applied_at,created_at,updated_at FROM subscription_changes`
+	return `SELECT id,project_id,subscription_id,idempotency_key,request_fingerprint,source_app,source_ref,status,effective_mode,effective_at,proration_policy,discount_policy,old_items_json,new_items_json,proration_json,subscription_metadata_patch_json,interval,interval_count,last_error,attempt_count,applied_at,created_at,updated_at FROM subscription_changes`
 }
 
 func scanSubscriptionChange(row rowScanner) (*SubscriptionChange, error) {
 	var change SubscriptionChange
 	var applied sql.NullString
-	var oldItems, newItems, proration string
+	var oldItems, newItems, proration, metadataPatch string
 	err := row.Scan(&change.ID, &change.ProjectID, &change.SubscriptionID, &change.IdempotencyKey, &change.RequestFingerprint,
 		&change.SourceApp, &change.SourceRef, &change.Status, &change.EffectiveMode, &change.EffectiveTime,
-		&change.ProrationPolicy, &change.DiscountPolicy, &oldItems, &newItems, &proration, &change.Interval,
+		&change.ProrationPolicy, &change.DiscountPolicy, &oldItems, &newItems, &proration, &metadataPatch, &change.Interval,
 		&change.IntervalCount, &change.LastError, &change.AttemptCount, &applied, &change.CreatedAt, &change.UpdatedAt)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -594,10 +608,39 @@ func scanSubscriptionChange(row rowScanner) (*SubscriptionChange, error) {
 	change.OldItems = json.RawMessage(oldItems)
 	change.NewItems = json.RawMessage(newItems)
 	change.Proration = json.RawMessage(proration)
+	change.MetadataPatch = json.RawMessage(metadataPatch)
 	if applied.Valid {
 		change.AppliedAt = applied.String
 	}
 	return &change, nil
+}
+
+func mergeMetadataPatch(current json.RawMessage, patch any) (string, error) {
+	base := map[string]any{}
+	if len(current) > 0 && string(current) != "null" {
+		if err := json.Unmarshal(current, &base); err != nil {
+			return "", fmt.Errorf("decode subscription metadata: %w", err)
+		}
+	}
+	mergeMetadataMap(base, mapFromAny(patch))
+	return jsonOrEmpty(base, "{}"), nil
+}
+
+func mergeMetadataMap(target, patch map[string]any) {
+	for key, value := range patch {
+		if value == nil {
+			delete(target, key)
+			continue
+		}
+		childPatch, patchIsMap := value.(map[string]any)
+		childTarget, targetIsMap := target[key].(map[string]any)
+		if patchIsMap && targetIsMap {
+			mergeMetadataMap(childTarget, childPatch)
+			target[key] = childTarget
+			continue
+		}
+		target[key] = value
+	}
 }
 
 func runSubscriptionChangeWorker(ctx *sdk.AppCtx, now time.Time) error {
