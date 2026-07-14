@@ -37,6 +37,8 @@ type platformStub struct {
 	invoiceGetTotal             int64
 	invoiceGetCurrency          string
 	invoiceGetPayments          []map[string]any
+	subscriptionDiscountCents   int64
+	discountPercentageBPS       int64
 }
 
 type callAppCall struct {
@@ -141,6 +143,23 @@ func (p *platformStub) CallAppResult(appName, tool string, input map[string]any,
 			price["metadata"] = p.priceMetadata
 		}
 		body = map[string]any{"price": price}
+	case "catalog_discounts_reserve":
+		discountID := firstNonZero(int64FromAny(input["discount_id"]), 9001)
+		code := normalizeDiscountCode(strFromAny(input["code"]))
+		subtotal := int64FromAny(input["subtotal_cents"])
+		percentageBPS := firstNonZero(p.discountPercentageBPS, 5000)
+		discount := subtotal * percentageBPS / 10000
+		p.subscriptionDiscountCents = discount
+		body = map[string]any{"reservation": map[string]any{
+			"reservation_id": "dres_123", "idempotency_key": input["idempotency_key"], "discount_id": discountID,
+			"code_id": int64(9002), "code": code, "customer_ref": input["customer_ref"], "context_ref": input["context_ref"],
+			"product_id": input["product_id"], "price_id": input["price_id"], "quantity": int64(1), "currency": input["currency"],
+			"subtotal_cents": subtotal, "discount_cents": discount, "total_cents": subtotal - discount,
+			"status": "reserved", "expires_at": "2027-01-01T00:00:00Z",
+			"application": map[string]any{"discount_id": discountID, "code_id": int64(9002), "code": code, "name": "Promotion", "discount_type": "percentage", "percentage_bps": percentageBPS, "duration": "repeating", "duration_cycles": int64(3)},
+		}}
+	case "catalog_discounts_redeem":
+		body = map[string]any{"redemption": map[string]any{"reservation_id": input["reservation_id"], "status": "redeemed", "redeemed_at": "2026-07-14T10:00:00Z"}}
 	case "subscriptions_create":
 		body = map[string]any{"subscription": map[string]any{
 			"id":                   601,
@@ -161,10 +180,12 @@ func (p *platformStub) CallAppResult(appName, tool string, input map[string]any,
 	case "subscriptions_invoice_create":
 		body = map[string]any{"invoice": map[string]any{"id": 701, "status": "open", "total_cents": 2900}, "cycle": map[string]any{"id": 801, "invoice_id": 701, "payment_status": "open"}}
 	case "subscriptions_invoice_prepare":
+		net := int64(2900) - p.subscriptionDiscountCents
 		body = map[string]any{
 			"subscription": map[string]any{"id": input["subscription_id"], "currency": "USD"},
-			"currency":     "USD", "period_start": input["period_start"], "period_end": input["period_end"],
-			"line_items": []any{map[string]any{"description": "CRM Pro", "quantity": 1, "unit_price_cents": 2900}},
+			"currency":     "USD", "period_start": input["period_start"], "period_end": input["period_end"], "cycle_id": input["cycle_id"],
+			"base_subtotal_cents": int64(2900), "discount_cents": p.subscriptionDiscountCents, "total_cents": net,
+			"line_items": []any{map[string]any{"description": "CRM Pro", "quantity": 1, "unit_price_cents": net}},
 		}
 	case "invoices_create_from_prepared_lines":
 		body = map[string]any{"invoice": map[string]any{"id": 702, "customer_id": input["customer_id"], "status": "open", "total_cents": 2900}}
@@ -253,8 +274,8 @@ func TestEmbeddedManifest_Valid(t *testing.T) {
 	if m.Name != "saas" {
 		t.Errorf("manifest.Name=%q, want saas", m.Name)
 	}
-	if m.Version != "0.3.3" {
-		t.Errorf("manifest.Version=%q, want 0.3.3", m.Version)
+	if m.Version != "0.4.0" {
+		t.Errorf("manifest.Version=%q, want 0.4.0", m.Version)
 	}
 	if !m.Requires.DynamicAppCalls {
 		t.Error("manifest should allow dynamic app calls for configured usage sources")
@@ -268,7 +289,7 @@ func TestEmbeddedManifest_Valid(t *testing.T) {
 		required[dep.Name] = !dep.Optional
 		versions[dep.Name] = dep.Version
 	}
-	if versions["billing"] != ">=0.8.17" || versions["subscriptions"] != ">=0.3.1" {
+	if versions["catalog"] != ">=0.2.0" || versions["billing"] != ">=0.8.17" || versions["subscriptions"] != ">=0.4.0" {
 		t.Fatalf("dependency versions not enforced: %+v", versions)
 	}
 	permissions := map[string]bool{}
@@ -947,6 +968,227 @@ func TestCheckoutCreate_IsIdempotentAcrossCompletedRetries(t *testing.T) {
 	}
 }
 
+func TestCheckoutCreate_DiscountCodeReservesPersistsRedeemsAndBillsNetLines(t *testing.T) {
+	pf := &platformStub{}
+	ctx, db := newTestCtx(t, pf)
+	defer db.Close()
+	app := &App{}
+	setupPaidCRMPlan(t, app, ctx)
+
+	out, err := app.toolCheckoutCreate(ctx, map[string]any{
+		"owner_email": "discount@example.com", "slug": "discount", "plan_key": "crm-pro",
+		"discount_code": " half3 ", "idempotency_key": "discount-checkout-1",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := out.(map[string]any)
+	discount := body["discount"].(*CheckoutDiscount)
+	if discount.Status != "redeemed" || discount.DiscountCode != "HALF3" || discount.SubtotalCents != 2900 || discount.DiscountCents != 1450 || discount.TotalCents != 1450 {
+		t.Fatalf("unexpected checkout discount: %+v", discount)
+	}
+	pricing := mapFromAny(body["pricing"])
+	if int64FromAny(pricing["total_cents"]) != 1450 || int64FromAny(pricing["discount_cents"]) != 1450 {
+		t.Fatalf("unexpected pricing: %+v", pricing)
+	}
+	reserve := findCall(pf.calls, "catalog", "catalog_discounts_reserve")
+	if reserve == nil || reserve.Input["code"] != "HALF3" || reserve.Input["context_ref"] != body["checkout"].(*Checkout).ID || int64FromAny(reserve.Input["expires_in_seconds"]) != 86400 {
+		t.Fatalf("bad Catalog reservation call: %+v", reserve)
+	}
+	subCreate := findCall(pf.calls, "subscriptions", "subscriptions_create")
+	if subCreate == nil {
+		t.Fatal("subscriptions_create missing")
+	}
+	discounts := sliceFromAny(subCreate.Input["discounts"])
+	if len(discounts) != 1 {
+		t.Fatalf("subscription discounts=%+v", discounts)
+	}
+	snapshot := mapFromAny(discounts[0])
+	if snapshot["source_app"] != "catalog" || snapshot["source_ref"] != "dres_123" || int64FromAny(snapshot["catalog_price_id"]) != 8001 || int64FromAny(mapFromAny(snapshot["application"])["percentage_bps"]) != 5000 {
+		t.Fatalf("bad immutable subscription snapshot: %+v", snapshot)
+	}
+	prepare := findCall(pf.calls, "subscriptions", "subscriptions_invoice_prepare")
+	if prepare == nil || int64FromAny(prepare.Input["cycle_id"]) != 801 {
+		t.Fatalf("invoice preparation was not tied to its cycle: %+v", prepare)
+	}
+	invoice := findCall(pf.calls, "billing", "invoices_create_from_prepared_lines")
+	line := mapFromAny(sliceFromAny(invoice.Input["line_items"])[0])
+	if int64FromAny(line["unit_price_cents"]) != 1450 {
+		t.Fatalf("Billing did not receive Subscriptions net line: %+v", line)
+	}
+	if countCalls(pf.calls, "catalog", "catalog_discounts_reserve") != 1 || countCalls(pf.calls, "catalog", "catalog_discounts_redeem") != 1 {
+		t.Fatalf("discount calls were not exactly once: %+v", pf.calls)
+	}
+}
+
+func TestCheckoutCreate_ZeroTotalDiscountActivatesWithoutBilling(t *testing.T) {
+	pf := &platformStub{discountPercentageBPS: 10000}
+	ctx, db := newTestCtx(t, pf)
+	defer db.Close()
+	app := &App{}
+	setupPaidCRMPlan(t, app, ctx)
+	out, err := app.toolCheckoutCreate(ctx, map[string]any{
+		"owner_email": "free-cycle@example.com", "slug": "free-cycle", "plan_key": "crm-pro", "discount_code": "FREE100",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	body := out.(map[string]any)
+	if body["status"] != "active" || body["requires_payment"] != false || body["account"].(*Account).Status != StatusActive {
+		t.Fatalf("zero-total checkout did not activate: %+v", body)
+	}
+	if int64FromAny(mapFromAny(body["pricing"])["total_cents"]) != 0 {
+		t.Fatalf("zero-total pricing missing: %+v", body["pricing"])
+	}
+	for _, key := range []string{"billing:customers_upsert_by_email", "billing:invoices_create_from_prepared_lines", "billing:invoices_send_payment_link"} {
+		if hasCall(pf.calls, key) {
+			t.Fatalf("%s should not run for a zero-total cycle: %+v", key, pf.calls)
+		}
+	}
+	cycleUpdate := findCall(pf.calls, "subscriptions", "subscription_cycles_update")
+	if cycleUpdate == nil || cycleUpdate.Input["payment_status"] != "paid" {
+		t.Fatalf("zero-total cycle was not marked paid: %+v", cycleUpdate)
+	}
+	subCreate := findCall(pf.calls, "subscriptions", "subscriptions_create")
+	if subCreate == nil || subCreate.Input["status"] != "active" {
+		t.Fatalf("zero-total subscription was not active: %+v", subCreate)
+	}
+}
+
+func TestCheckoutCreate_AutomaticPlanDiscountAndCodeDoNotStack(t *testing.T) {
+	pf := &platformStub{}
+	ctx, db := newTestCtx(t, pf)
+	defer db.Close()
+	app := &App{}
+	setupPaidCRMPlan(t, app, ctx)
+	if _, err := app.toolPlanUpsert(ctx, map[string]any{
+		"key": "crm-pro", "name": "CRM Pro", "billing_mode": "paid", "catalog_product_id": 7001,
+		"catalog_price_id": 8001, "catalog_discount_id": 9100, "subscription_required": true,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.toolCheckoutCreate(ctx, map[string]any{"owner_email": "stack@example.com", "slug": "stack", "plan_key": "crm-pro", "discount_code": "EXTRA"}); err == nil || !strings.Contains(err.Error(), "cannot be combined") {
+		t.Fatalf("expected stacking rejection, got %v", err)
+	}
+	out, err := app.toolCheckoutCreate(ctx, map[string]any{"owner_email": "auto@example.com", "slug": "auto", "plan_key": "crm-pro"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	reserve := findCall(pf.calls, "catalog", "catalog_discounts_reserve")
+	if reserve == nil || int64FromAny(reserve.Input["discount_id"]) != 9100 {
+		t.Fatalf("automatic plan discount was not reserved: %+v", reserve)
+	}
+	if out.(map[string]any)["discount"].(*CheckoutDiscount).CatalogDiscountID != 9100 {
+		t.Fatalf("automatic discount missing from checkout: %+v", out)
+	}
+}
+
+func TestDiscountConfigurationRejectsInvalidTargetsAndCodes(t *testing.T) {
+	pf := &platformStub{}
+	ctx, db := newTestCtx(t, pf)
+	defer db.Close()
+	app := &App{}
+	if _, err := app.toolPlanUpsert(ctx, map[string]any{"key": "bad", "name": "Bad", "billing_mode": "paid", "catalog_discount_id": 42, "subscription_required": true}); err == nil || !strings.Contains(err.Error(), "requires catalog_price_id") {
+		t.Fatalf("expected price requirement, got %v", err)
+	}
+	setupPaidCRMPlan(t, app, ctx)
+	if _, err := app.toolCheckoutCreate(ctx, map[string]any{"owner_email": "bad@example.com", "slug": "bad", "plan_key": "crm-pro", "discount_code": "not valid"}); err == nil || !strings.Contains(err.Error(), "letters, numbers") {
+		t.Fatalf("expected code validation, got %v", err)
+	}
+	if hasCall(pf.calls, "catalog:catalog_discounts_reserve") {
+		t.Fatalf("invalid code reached Catalog: %+v", pf.calls)
+	}
+}
+
+func TestCheckoutCreate_DiscountReserveRetryUsesSameCatalogIdempotencyKey(t *testing.T) {
+	pf := &platformStub{failures: map[string]int{"catalog:catalog_discounts_reserve": 1}}
+	ctx, db := newTestCtx(t, pf)
+	defer db.Close()
+	app := &App{}
+	setupPaidCRMPlan(t, app, ctx)
+	args := map[string]any{"owner_email": "retry@example.com", "slug": "retry", "plan_key": "crm-pro", "discount_code": "HALF3", "idempotency_key": "retry-discount"}
+	if _, err := app.toolCheckoutCreate(ctx, args); err == nil {
+		t.Fatal("expected injected reserve failure")
+	}
+	if _, err := app.toolCheckoutCreate(ctx, args); err != nil {
+		t.Fatalf("checkout retry failed: %v", err)
+	}
+	var keys []string
+	for _, call := range pf.calls {
+		if call.App == "catalog" && call.Tool == "catalog_discounts_reserve" {
+			keys = append(keys, strFromAny(call.Input["idempotency_key"]))
+		}
+	}
+	if len(keys) != 2 || keys[0] != keys[1] {
+		t.Fatalf("Catalog idempotency keys=%v", keys)
+	}
+	if countCalls(pf.calls, "subscriptions", "subscriptions_create") != 1 {
+		t.Fatalf("subscription creation was duplicated: %+v", pf.calls)
+	}
+}
+
+func TestCheckoutCreate_ExpiredUnusedDiscountGetsANewReservationAttempt(t *testing.T) {
+	pf := &platformStub{failures: map[string]int{"subscriptions:subscriptions_create": 1}}
+	ctx, db := newTestCtx(t, pf)
+	defer db.Close()
+	app := &App{}
+	setupPaidCRMPlan(t, app, ctx)
+	args := map[string]any{"owner_email": "expired@example.com", "slug": "expired", "plan_key": "crm-pro", "discount_code": "HALF3"}
+	if _, err := app.toolCheckoutCreate(ctx, args); err == nil {
+		t.Fatal("expected injected subscription failure")
+	}
+	if _, err := db.Exec(`UPDATE saas_checkout_discounts SET expires_at='2020-01-01T00:00:00Z' WHERE project_id='proj-test'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.toolCheckoutCreate(ctx, args); err != nil {
+		t.Fatalf("retry after expired unused reservation: %v", err)
+	}
+	var keys []string
+	for _, call := range pf.calls {
+		if call.App == "catalog" && call.Tool == "catalog_discounts_reserve" {
+			keys = append(keys, strFromAny(call.Input["idempotency_key"]))
+		}
+	}
+	if len(keys) != 2 || keys[0] == keys[1] || !strings.HasSuffix(keys[1], ":2") {
+		t.Fatalf("reservation attempt keys=%v", keys)
+	}
+	checkout, _ := dbCheckoutLookup(db, "proj-test", map[string]any{"slug": "expired"})
+	discount, _ := dbCheckoutDiscountGet(db, "proj-test", checkout.ID)
+	if discount.AttemptCount != 2 || discount.Status != "redeemed" {
+		t.Fatalf("replacement reservation was not committed: %+v", discount)
+	}
+}
+
+func TestCheckoutRecovery_RedeemsDiscountAfterInterruptedResponse(t *testing.T) {
+	pf := &platformStub{failures: map[string]int{"catalog:catalog_discounts_redeem": 1}}
+	ctx, db := newTestCtx(t, pf)
+	defer db.Close()
+	app := &App{}
+	setupPaidCRMPlan(t, app, ctx)
+	args := map[string]any{"owner_email": "recover@example.com", "slug": "recover", "plan_key": "crm-pro", "discount_code": "HALF3"}
+	if _, err := app.toolCheckoutCreate(ctx, args); err == nil {
+		t.Fatal("expected injected redemption failure")
+	}
+	checkout, err := dbCheckoutLookup(db, "proj-test", map[string]any{"slug": "recover"})
+	if err != nil || checkout == nil || int64PtrValue(checkout.SubscriptionID) == 0 {
+		t.Fatalf("durable subscription state missing: checkout=%+v err=%v", checkout, err)
+	}
+	discount, err := dbCheckoutDiscountGet(db, "proj-test", checkout.ID)
+	if err != nil || discount == nil || discount.Status != "reserved" || discount.LastError == "" {
+		t.Fatalf("durable discount state missing: discount=%+v err=%v", discount, err)
+	}
+	if err := app.recoverExpiredCheckouts(ctx); err != nil {
+		t.Fatal(err)
+	}
+	discount, err = dbCheckoutDiscountGet(db, "proj-test", checkout.ID)
+	if err != nil || discount.Status != "redeemed" || discount.LastError != "" {
+		t.Fatalf("discount was not reconciled: discount=%+v err=%v", discount, err)
+	}
+	if countCalls(pf.calls, "catalog", "catalog_discounts_reserve") != 1 || countCalls(pf.calls, "catalog", "catalog_discounts_redeem") != 2 || countCalls(pf.calls, "subscriptions", "subscriptions_create") != 1 {
+		t.Fatalf("unexpected recovery calls: %+v", pf.calls)
+	}
+}
+
 func TestPaymentMethodAttached_ActivatesCardRequiredTrial(t *testing.T) {
 	pf := &platformStub{priceTrialDays: 7, priceMetadata: map[string]any{"trial_requires_payment_method": true}}
 	ctx, db := newTestCtx(t, pf)
@@ -1016,6 +1258,42 @@ func TestTrialCycleDue_UpdatesCheckoutAndPaidEventActivates(t *testing.T) {
 	checkout, _ = dbCheckoutGet(db, "proj-test", checkout.ID)
 	if checkout.Status != "active" {
 		t.Fatalf("paid trial checkout status=%s, want active", checkout.Status)
+	}
+}
+
+func TestTrialCycleDue_ZeroTotalDiscountActivatesWithoutBilling(t *testing.T) {
+	pf := &platformStub{
+		priceTrialDays: 7, priceMetadata: map[string]any{"trial_requires_payment_method": false}, discountPercentageBPS: 10000,
+	}
+	ctx, db := newTestCtx(t, pf)
+	defer db.Close()
+	app := &App{}
+	setupPaidCRMPlan(t, app, ctx)
+	out, err := app.toolCheckoutCreate(ctx, map[string]any{"owner_email": "trial-free@example.com", "slug": "trial-free", "plan_key": "crm-pro", "discount_code": "FREE100"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	checkout := out.(map[string]any)["checkout"].(*Checkout)
+	if err := app.handleSubscriptionLifecycle(ctx, sdk.Event{Event: "subscription.past_due", ProjectID: "proj-test", Data: map[string]any{"subscription_id": 601, "status": "past_due"}}); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.handleSubscriptionCycleDue(ctx, sdk.Event{Event: "subscription.cycle_due", ProjectID: "proj-test", Data: map[string]any{
+		"subscription_id": 601, "cycle_id": 804, "currency": "USD", "period_start": "2026-07-12T00:00:00Z", "period_end": "2026-08-12T00:00:00Z",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	checkout, _ = dbCheckoutGet(db, "proj-test", checkout.ID)
+	if checkout.Status != "active" || int64PtrValue(checkout.InvoiceID) != 0 {
+		t.Fatalf("zero-total trial cycle did not activate cleanly: %+v", checkout)
+	}
+	for _, key := range []string{"billing:customers_upsert_by_email", "billing:invoices_create_from_prepared_lines", "billing:invoices_send_payment_link"} {
+		if hasCall(pf.calls, key) {
+			t.Fatalf("%s should not run for a zero-total trial cycle: %+v", key, pf.calls)
+		}
+	}
+	statusCall := findCall(pf.calls, "subscriptions", "subscriptions_update_status")
+	if statusCall == nil || statusCall.Input["status"] != "active" {
+		t.Fatalf("zero-total trial subscription was not activated: %+v", statusCall)
 	}
 }
 

@@ -28,6 +28,7 @@ interface Plan {
   name: string;
   billing_mode: string;
   subscription_required: boolean;
+  catalog_discount_id?: number;
   features?: PlanFeature[];
   limits?: PlanLimit[];
   usage_sources?: UsageSource[];
@@ -64,6 +65,17 @@ interface CheckoutResponse {
   status: string;
   requires_payment: boolean;
   url?: string;
+  discount?: {
+    status: string;
+    discount_code?: string;
+    catalog_discount_id: number;
+  };
+  pricing?: {
+    currency: string;
+    subtotal_cents: number;
+    discount_cents: number;
+    total_cents: number;
+  };
 }
 
 interface UsageTotal {
@@ -119,6 +131,10 @@ function compactNumber(n: number | undefined): string {
   return new Intl.NumberFormat(undefined, { notation: "compact", maximumFractionDigits: 1 }).format(n);
 }
 
+function fmtMoney(cents: number, currency: string): string {
+  return new Intl.NumberFormat(undefined, { style: "currency", currency: currency || "USD" }).format(cents / 100);
+}
+
 function featureOptions(plan: Plan | null, usage: UsageTotal[]): string[] {
   const out = new Set<string>();
   for (const f of plan?.features || []) out.add(f.feature_key);
@@ -144,6 +160,7 @@ export default function SaaSPanel({ projectId }: NativePanelProps) {
     customer_name: "",
     slug: "",
     plan_key: "free",
+    discount_code: "",
     create_owner_user: true,
   });
 
@@ -279,12 +296,13 @@ export default function SaaSPanel({ projectId }: NativePanelProps) {
         customer_name: form.customer_name.trim(),
         slug,
         plan_key: form.plan_key,
+        discount_code: form.discount_code.trim(),
         create_owner_user: form.create_owner_user,
         idempotency_key: `panel:${slug}`,
       });
       setCheckout(out);
       if (out.account?.id) setSelectedId(out.account.id);
-      setForm((f) => ({ ...f, slug: "" }));
+      setForm((f) => ({ ...f, slug: "", discount_code: "" }));
       setStatus(out.status);
       await load();
     } catch (e) {
@@ -374,11 +392,20 @@ export default function SaaSPanel({ projectId }: NativePanelProps) {
             <Field label="Plan">
               <select
                 value={form.plan_key}
-                onChange={(e) => setForm((f) => ({ ...f, plan_key: e.target.value }))}
+                onChange={(e) => setForm((f) => ({ ...f, plan_key: e.target.value, discount_code: "" }))}
                 className={CONTROL}
               >
                 {plans.map((p) => <option key={p.key} value={p.key}>{p.name}</option>)}
               </select>
+            </Field>
+            <Field label="Discount code" className="col-span-2">
+              <input
+                value={form.discount_code}
+                onChange={(e) => setForm((f) => ({ ...f, discount_code: e.target.value.toUpperCase().replace(/\s/g, "") }))}
+                className={`${CONTROL} font-mono`}
+                placeholder={createPlan?.catalog_discount_id ? "Automatic plan discount" : "PROMO"}
+                disabled={Boolean(createPlan?.catalog_discount_id)}
+              />
             </Field>
           </div>
           <label className="flex items-center gap-2 text-xs text-text-dim">
@@ -406,12 +433,22 @@ export default function SaaSPanel({ projectId }: NativePanelProps) {
             {busy === "create" ? "Starting..." : "Start Checkout"}
           </button>
           {checkout && (
-            <div className="border-t border-border pt-2 flex items-center gap-2">
-              <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${tone(checkout.status)}`}>{checkout.status}</span>
-              {checkout.url && (
-                <button type="button" onClick={() => window.open(checkout.url, "_blank", "noopener,noreferrer")} className="ml-auto px-2 py-1 rounded bg-bg-input text-xs hover:bg-bg-hover">
-                  Continue
-                </button>
+            <div className="border-t border-border pt-2 space-y-2">
+              <div className="flex items-center gap-2">
+                <span className={`px-1.5 py-0.5 rounded text-[10px] font-medium ${tone(checkout.status)}`}>{checkout.status}</span>
+                {checkout.discount && <span className="text-[11px] font-mono text-text-dim">{checkout.discount.discount_code || `discount #${checkout.discount.catalog_discount_id}`}</span>}
+                {checkout.url && (
+                  <button type="button" onClick={() => window.open(checkout.url, "_blank", "noopener,noreferrer")} className="ml-auto px-2 py-1 rounded bg-bg-input text-xs hover:bg-bg-hover">
+                    Continue
+                  </button>
+                )}
+              </div>
+              {checkout.pricing && (
+                <div className="grid grid-cols-3 gap-2 text-[11px]">
+                  <Metric label="Subtotal" value={fmtMoney(checkout.pricing.subtotal_cents, checkout.pricing.currency)} />
+                  <Metric label="Discount" value={`-${fmtMoney(checkout.pricing.discount_cents, checkout.pricing.currency)}`} />
+                  <Metric label="Total" value={fmtMoney(checkout.pricing.total_cents, checkout.pricing.currency)} />
+                </div>
               )}
             </div>
           )}
