@@ -1,11 +1,11 @@
-// tunnel.go — manage the lifecycle of a cloudflared subprocess.
+// tunnel.go — manage the lifecycle of cloudflared and ngrok subprocesses.
 //
 // Two modes:
 //
 //   Quick (v0.1, default): `cloudflared tunnel --url <target> --no-autoupdate`,
 //   tail stderr for https://*.trycloudflare.com, fresh URL every run.
 //
-//   Named (v0.2): `cloudflared tunnel --no-autoupdate run --token <token>`,
+//   Named: `TUNNEL_TOKEN=… cloudflared tunnel --no-autoupdate run`,
 //   URL is the operator-chosen hostname and known up-front (the API
 //   call that minted the token also configured ingress + DNS), so
 //   there's nothing to scrape. publicURL is populated at Start time
@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"regexp"
 	"strings"
@@ -33,10 +34,12 @@ import (
 
 // ngrokURL matches the URL the ngrok agent prints to stdout under
 // `--log stdout --log-format logfmt`. Format:
-//   t=... lvl=info msg="started tunnel" name=command_line addr=http://localhost:5280 url=https://abc.ngrok-free.app
+//
+//	t=... lvl=info msg="started tunnel" name=command_line addr=http://localhost:5280 url=https://abc.ngrok-free.app
+//
 // Matches both free (*.ngrok-free.app) and paid (*.ngrok.app /
 // *.ngrok.io and operator-reserved domains) forms.
-var ngrokURL = regexp.MustCompile(`url=(https://[a-z0-9.-]+\.(?:ngrok-free\.app|ngrok\.app|ngrok\.io))`)
+var ngrokURL = regexp.MustCompile(`url=(https://[a-zA-Z0-9](?:[a-zA-Z0-9.-]*[a-zA-Z0-9])?(?::[0-9]+)?(?:/[^\s"]*)?)`)
 
 // trycloudflareURL matches the URL cloudflared prints to stderr when a
 // Quick Tunnel has been assigned. Format is stable across cloudflared
@@ -84,7 +87,7 @@ type StartParams struct {
 	Authtoken string // ngrok: agent authtoken from operator's ngrok integration
 }
 
-// Manager owns the cloudflared subprocess for one app install.
+// Manager owns the tunnel-agent subprocess for one app install.
 // Goroutine-safe; all public methods take the mutex.
 type Manager struct {
 	mu sync.Mutex
@@ -109,6 +112,7 @@ type Manager struct {
 	// URL — turning "exit 1" into "exit 1: ERR_NGROK_105 authentication
 	// failed: ..." that the panel + DB row both expose.
 	recentOutput []string
+	redactions   []string
 
 	// Hooks the caller (main.go) installs to persist state.
 	onURLAssigned func(runID int64, url string)
@@ -182,7 +186,7 @@ func (m *Manager) Start(p StartParams) error {
 	case ModeNamed:
 		// Ingress was configured server-side via the API; the connector
 		// just needs the token to dial home.
-		args = []string{"tunnel", "--no-autoupdate", "run", "--token", p.Token}
+		args = []string{"tunnel", "--no-autoupdate", "run"}
 	case ModeNgrok:
 		// `ngrok http <target>` proxies <target> to a fresh public
 		// hostname (or a reserved domain if --domain is given). We force
@@ -191,16 +195,24 @@ func (m *Manager) Start(p StartParams) error {
 		// pipe with debug noise.
 		args = []string{
 			"http", p.Target,
-			"--authtoken", p.Authtoken,
 			"--log", "stdout",
 			"--log-format", "logfmt",
 			"--log-level", "info",
 		}
 		if p.Hostname != "" {
-			args = append(args, "--domain", p.Hostname)
+			args = append(args, "--url", "https://"+p.Hostname)
 		}
 	}
 	cmd := exec.CommandContext(ctx, binary, args...)
+	// Never inherit stale tunnel credentials, and never put live credentials
+	// in argv where process listings and crash reports can expose them.
+	cmd.Env = withoutEnvKeys(os.Environ(), "TUNNEL_TOKEN", "NGROK_AUTHTOKEN")
+	switch p.Mode {
+	case ModeNamed:
+		cmd.Env = append(cmd.Env, "TUNNEL_TOKEN="+p.Token)
+	case ModeNgrok:
+		cmd.Env = append(cmd.Env, "NGROK_AUTHTOKEN="+p.Authtoken)
+	}
 	// Combined stderr is where cloudflared writes the assigned URL.
 	// Stdout is mostly empty but we read it anyway so the pipe doesn't
 	// fill and block the child.
@@ -240,6 +252,13 @@ func (m *Manager) Start(p StartParams) error {
 	// Fresh buffer per run — previous run's tail (success or failure)
 	// has no bearing on this one.
 	m.recentOutput = m.recentOutput[:0]
+	m.redactions = m.redactions[:0]
+	if p.Token != "" {
+		m.redactions = append(m.redactions, p.Token)
+	}
+	if p.Authtoken != "" {
+		m.redactions = append(m.redactions, p.Authtoken)
+	}
 
 	// Wait for exit in the background; clean up when it ends.
 	go m.waitForExit(p.RunID)
@@ -250,15 +269,24 @@ func (m *Manager) Start(p StartParams) error {
 	// front and just drains both streams.
 	switch p.Mode {
 	case ModeQuick:
-		go io.Copy(io.Discard, stdout)
+		go m.scanForURL(stdout, p.RunID, nil)
 		go m.scanForURL(stderr, p.RunID, trycloudflareURL)
 	case ModeNgrok:
-		go io.Copy(io.Discard, stderr)
-		go m.scanForURL(stdout, p.RunID, ngrokURL)
+		go m.scanForURL(stderr, p.RunID, nil)
+		if p.Hostname == "" {
+			go m.scanForURL(stdout, p.RunID, ngrokURL)
+		} else {
+			go m.scanForURL(stdout, p.RunID, nil)
+			m.publicURL = "https://" + p.Hostname
+			url, runID, cb := m.publicURL, p.RunID, m.onURLAssigned
+			if cb != nil {
+				go cb(runID, url)
+			}
+		}
 	case ModeNamed:
-		// URL is known up-front; just drain both streams.
-		go io.Copy(io.Discard, stdout)
-		go io.Copy(io.Discard, stderr)
+		// URL is known up-front; still retain bounded output for diagnostics.
+		go m.scanForURL(stdout, p.RunID, nil)
+		go m.scanForURL(stderr, p.RunID, nil)
 		m.publicURL = "https://" + p.Hostname
 		url, runID, cb := m.publicURL, p.RunID, m.onURLAssigned
 		if cb != nil {
@@ -267,6 +295,22 @@ func (m *Manager) Start(p StartParams) error {
 	}
 
 	return nil
+}
+
+func withoutEnvKeys(env []string, keys ...string) []string {
+	blocked := make(map[string]struct{}, len(keys))
+	for _, key := range keys {
+		blocked[key] = struct{}{}
+	}
+	out := make([]string, 0, len(env))
+	for _, entry := range env {
+		key, _, _ := strings.Cut(entry, "=")
+		if _, remove := blocked[key]; remove {
+			continue
+		}
+		out = append(out, entry)
+	}
+	return out
 }
 
 // scanForURL reads agent output line-by-line until either pattern
@@ -290,6 +334,11 @@ func (m *Manager) scanForURL(r io.ReadCloser, runID int64, re *regexp.Regexp) {
 		// session limit, etc.).
 		m.mu.Lock()
 		if m.runID == runID {
+			for _, secret := range m.redactions {
+				if secret != "" {
+					line = strings.ReplaceAll(line, secret, "[REDACTED]")
+				}
+			}
 			m.recentOutput = append(m.recentOutput, line)
 			if len(m.recentOutput) > recentOutputCap {
 				m.recentOutput = m.recentOutput[len(m.recentOutput)-recentOutputCap:]
@@ -297,7 +346,7 @@ func (m *Manager) scanForURL(r io.ReadCloser, runID int64, re *regexp.Regexp) {
 		}
 		m.mu.Unlock()
 
-		if !captured {
+		if !captured && re != nil {
 			groups := re.FindStringSubmatch(line)
 			if len(groups) > 0 {
 				match := groups[0]
@@ -307,12 +356,13 @@ func (m *Manager) scanForURL(r io.ReadCloser, runID int64, re *regexp.Regexp) {
 				m.mu.Lock()
 				// Only record if this is still the active run — Stop
 				// could have raced ahead of us.
-				if m.runID == runID {
+				active := m.runID == runID
+				if active {
 					m.publicURL = match
 				}
 				cb := m.onURLAssigned
 				m.mu.Unlock()
-				if cb != nil {
+				if active && cb != nil {
 					cb(runID, match)
 				}
 				captured = true
@@ -400,6 +450,7 @@ func (m *Manager) waitForExit(runID int64) {
 		m.cancel = nil
 	}
 	m.status = finalStatus
+	m.redactions = nil
 	if finalStatus == StatusFailed {
 		m.lastError = reason
 	}

@@ -181,12 +181,12 @@ func TestAssetURL_AllSupported(t *testing.T) {
 		want     string
 		archived bool
 	}{
-		{"linux", "amd64", "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64", false},
-		{"linux", "arm64", "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-arm64", false},
-		{"linux", "arm", "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-arm", false},
-		{"linux", "386", "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-386", false},
-		{"darwin", "amd64", "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-darwin-amd64.tgz", true},
-		{"darwin", "arm64", "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-darwin-arm64.tgz", true},
+		{"linux", "amd64", "https://github.com/cloudflare/cloudflared/releases/download/" + cloudflaredPinnedVersion + "/cloudflared-linux-amd64", false},
+		{"linux", "arm64", "https://github.com/cloudflare/cloudflared/releases/download/" + cloudflaredPinnedVersion + "/cloudflared-linux-arm64", false},
+		{"linux", "arm", "https://github.com/cloudflare/cloudflared/releases/download/" + cloudflaredPinnedVersion + "/cloudflared-linux-arm", false},
+		{"linux", "386", "https://github.com/cloudflare/cloudflared/releases/download/" + cloudflaredPinnedVersion + "/cloudflared-linux-386", false},
+		{"darwin", "amd64", "https://github.com/cloudflare/cloudflared/releases/download/" + cloudflaredPinnedVersion + "/cloudflared-darwin-amd64.tgz", true},
+		{"darwin", "arm64", "https://github.com/cloudflare/cloudflared/releases/download/" + cloudflaredPinnedVersion + "/cloudflared-darwin-arm64.tgz", true},
 	}
 	for _, c := range cases {
 		url, archived, err := assetURL(c.os, c.arch)
@@ -307,42 +307,48 @@ func TestShouldAutoRestartOnBoot_Defaults(t *testing.T) {
 // cleanliness. The four cases below prove the four important paths.
 func TestAutoRestartTrigger(t *testing.T) {
 	cases := []struct {
-		name           string
-		cfg            map[string]string
-		seedNamedRow   bool
-		orphanedCount  int64
-		want           string
+		name          string
+		cfg           map[string]string
+		seedNamedRow  bool
+		orphanedCount int64
+		desiredLive   bool
+		want          string
 	}{
 		{
-			name:    "quick mode, no orphan, no row → idle",
-			want:    "",
+			name: "quick mode, no orphan, no row → idle",
+			want: "",
 		},
 		{
 			name:          "quick mode, sidecar died mid-flight (orphan) → restart",
 			orphanedCount: 1,
-			want:          "orphan-detected",
+			desiredLive:   true,
+			want:          "desired-live",
 		},
 		{
 			name:         "named mode after clean stop (no orphan) → restart",
 			seedNamedRow: true,
-			want:         "named-tunnel-persists",
+			desiredLive:  true,
+			want:         "desired-live",
 		},
 		{
 			name:          "named mode after crash (orphan AND row) → restart, named-tunnel wins",
 			seedNamedRow:  true,
 			orphanedCount: 1,
-			want:          "named-tunnel-persists",
+			desiredLive:   true,
+			want:          "desired-live",
 		},
 		{
 			name:          "operator opted out → idle even with orphan",
 			cfg:           map[string]string{"auto_restart_on_boot": "false"},
 			orphanedCount: 1,
+			desiredLive:   true,
 			want:          "",
 		},
 		{
 			name:         "operator opted out + named row → idle (opt-out trumps intent)",
 			cfg:          map[string]string{"auto_restart_on_boot": "false"},
 			seedNamedRow: true,
+			desiredLive:  true,
 			want:         "",
 		},
 	}
@@ -356,6 +362,9 @@ func TestAutoRestartTrigger(t *testing.T) {
 				}); err != nil {
 					t.Fatal(err)
 				}
+			}
+			if err := dbInitRuntimeState(ctx.AppDB(), providerNameQuick, c.desiredLive); err != nil {
+				t.Fatal(err)
 			}
 			got := autoRestartTrigger(ctx, c.orphanedCount)
 			if got != c.want {

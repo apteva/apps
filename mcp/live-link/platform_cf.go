@@ -22,6 +22,7 @@ package main
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 
@@ -49,6 +50,21 @@ type cfDNSRecordRow struct {
 	Content string `json:"content"`
 }
 
+type cfAPIError struct {
+	Tool   string
+	Status int
+	Body   string
+}
+
+func (e *cfAPIError) Error() string {
+	return fmt.Sprintf("cf %s: HTTP %d %s", e.Tool, e.Status, e.Body)
+}
+
+func isCFNotFound(err error) bool {
+	var apiErr *cfAPIError
+	return errors.As(err, &apiErr) && apiErr.Status == 404
+}
+
 // cfExec runs one integration tool and decodes the {"result": …}
 // envelope into dst. Pass dst=nil to ignore the result body.
 func cfExec(ctx *sdk.AppCtx, connID int64, tool string, input map[string]any, dst any) error {
@@ -59,9 +75,12 @@ func cfExec(ctx *sdk.AppCtx, connID int64, tool string, input map[string]any, ds
 	if res == nil || !res.Success {
 		body := ""
 		if res != nil {
-			body = string(res.Data)
+			body = strings.TrimSpace(string(res.Data))
+			if len(body) > 512 {
+				body = body[:512] + "…"
+			}
 		}
-		return fmt.Errorf("cf %s: %d %s", tool, statusOf(res), body)
+		return &cfAPIError{Tool: tool, Status: statusOf(res), Body: body}
 	}
 	if dst == nil {
 		return nil
@@ -88,11 +107,30 @@ func statusOf(res *sdk.ExecuteResult) int {
 }
 
 func cfListZones(ctx *sdk.AppCtx, connID int64) ([]cfZone, error) {
-	var zones []cfZone
-	if err := cfExec(ctx, connID, "list_zones", nil, &zones); err != nil {
-		return nil, err
+	const perPage = 50
+	all := make([]cfZone, 0, perPage)
+	seen := map[string]bool{}
+	for page := 1; page <= 100; page++ {
+		var zones []cfZone
+		if err := cfExec(ctx, connID, "list_zones", map[string]any{
+			"page": page, "per_page": perPage,
+		}, &zones); err != nil {
+			return nil, err
+		}
+		added := 0
+		for _, zone := range zones {
+			if zone.ID == "" || seen[zone.ID] {
+				continue
+			}
+			seen[zone.ID] = true
+			all = append(all, zone)
+			added++
+		}
+		if len(zones) < perPage || added == 0 {
+			return all, nil
+		}
 	}
-	return zones, nil
+	return nil, errors.New("Cloudflare zone pagination exceeded 100 pages")
 }
 
 // cfFindTunnel returns the tunnel with this exact name, or nil if
@@ -137,7 +175,11 @@ func cfGetTunnelToken(ctx *sdk.AppCtx, connID int64, tunnelID string) (string, e
 	}, &token); err != nil {
 		return "", err
 	}
-	return strings.TrimSpace(token), nil
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return "", errors.New("Cloudflare returned an empty tunnel token")
+	}
+	return token, nil
 }
 
 func cfPutTunnelConfig(ctx *sdk.AppCtx, connID int64, tunnelID, hostname, service string) error {
@@ -153,10 +195,17 @@ func cfPutTunnelConfig(ctx *sdk.AppCtx, connID int64, tunnelID, hostname, servic
 }
 
 func cfDeleteTunnel(ctx *sdk.AppCtx, connID int64, tunnelID string) error {
-	return cfExec(ctx, connID, "delete_tunnel", map[string]any{
+	if strings.TrimSpace(tunnelID) == "" {
+		return nil
+	}
+	err := cfExec(ctx, connID, "delete_tunnel", map[string]any{
 		"tunnel_id": tunnelID,
 		"cascade":   true,
 	}, nil)
+	if isCFNotFound(err) {
+		return nil
+	}
+	return err
 }
 
 // cfUpsertCNAME ensures a proxied CNAME points hostname at target.
@@ -182,6 +231,9 @@ func cfUpsertCNAME(ctx *sdk.AppCtx, connID int64, zoneID, hostname, target strin
 	}
 
 	if len(existing) > 0 {
+		if existing[0].ID == "" {
+			return "", errors.New("Cloudflare returned a DNS record with an empty id")
+		}
 		body["record_id"] = existing[0].ID
 		var rec cfDNSRecordRow
 		if err := cfExec(ctx, connID, "update_dns_record", body, &rec); err != nil {
@@ -193,12 +245,22 @@ func cfUpsertCNAME(ctx *sdk.AppCtx, connID int64, zoneID, hostname, target strin
 	if err := cfExec(ctx, connID, "create_dns_record", body, &rec); err != nil {
 		return "", err
 	}
+	if rec.ID == "" {
+		return "", errors.New("Cloudflare returned an empty DNS record id")
+	}
 	return rec.ID, nil
 }
 
 func cfDeleteDNSRecord(ctx *sdk.AppCtx, connID int64, zoneID, recordID string) error {
-	return cfExec(ctx, connID, "delete_dns_record", map[string]any{
+	if strings.TrimSpace(recordID) == "" {
+		return nil
+	}
+	err := cfExec(ctx, connID, "delete_dns_record", map[string]any{
 		"zone_id":   zoneID,
 		"record_id": recordID,
 	}, nil)
+	if isCFNotFound(err) {
+		return nil
+	}
+	return err
 }

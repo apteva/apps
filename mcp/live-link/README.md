@@ -1,181 +1,106 @@
-# Live Link (v0.3)
+# Live Link
 
-Public HTTPS URL for a locally-installed Apteva instance. Two modes:
+Live Link publishes an Apteva instance through an explicitly selected HTTPS
+tunnel provider. The panel shows the active URL, a QR code, lifecycle status,
+and bounded run history.
 
-- **Quick** (default): Cloudflare Quick Tunnel. Anonymous, free,
-  fresh `*.trycloudflare.com` URL on every start. Zero config — no
-  account, no integration, no token.
-- **Named**: a stable URL on a Cloudflare zone you own
-  (`https://tunnel.example.com`). Bind the cloudflare integration at
-  install time (one API token), then pick a zone from the dropdown
-  and a subdomain in the panel. Restarts reuse the same URL.
+## Providers
 
-## What's in v0.3
+| Provider | Account required | URL behavior | Local agent |
+|---|---:|---|---|
+| Cloudflare Quick | No | Fresh `*.trycloudflare.com` URL per start | `cloudflared` |
+| Cloudflare Named | Yes | Stable hostname on a Cloudflare zone | `cloudflared` |
+| ngrok | Yes | Random URL, or a configured reserved domain | `ngrok` |
 
-- **Mode switch** via the `mode` config field (`quick` | `named`).
-- **Quick mode** (unchanged from v0.1): spawns
-  `cloudflared tunnel --url <target>` and parses the assigned
-  `*.trycloudflare.com` URL out of stderr. No account or integration
-  required — install, click "Go live", copy the URL.
-- **Named mode** (rewritten in v0.3 to use the cloudflare integration):
-  - Manifest declares `requires.integrations.cloudflare` so the
-    install dialog handles auth — operator binds one API token, no
-    raw secrets pass through this app.
-  - Panel calls `list_zones` to populate a domain dropdown; operator
-    picks a zone + types a subdomain. `/named/configure` saves it.
-  - On configure (and on every restart): app calls
-    `create_tunnel` / `get_tunnel_token`, `update_tunnel_configuration`
-    (ingress: hostname → target_url + 404 catch-all), and `create/update_dns_record`
-    to upsert a proxied CNAME at `hostname → <tunnel_id>.cfargotunnel.com`.
-  - All Cloudflare traffic goes through `ctx.PlatformAPI().ExecuteIntegrationTool` —
-    the platform proxies with credentials injected; this app never
-    holds a raw API token.
-  - Connector is run with `tunnel run --token <token>`; URL is known
-    up-front, so the runs row gets populated immediately. State (tunnel
-    UUID, connector token, DNS record id) lives in `named_tunnels` so
-    restarts skip the API roundtrip.
-- **One UI toggle** at `project.page` slot: status pill, the live URL
-  with a Copy button, a QR code (scan with a phone camera to open the
-  URL), a Stop button, and a run history. Status now surfaces the
-  configured mode.
-- **4 MCP tools**:
-  - `expose_start` — idempotent; if a tunnel is already up, returns it.
-    Blocks up to 15s for the URL to be assigned before returning.
-  - `expose_stop` — sends SIGTERM, falls back to SIGKILL after 5s.
-    Named tunnels persist on Cloudflare; only the local connector stops.
-  - `expose_status` — current state, last error, mode.
-  - `expose_destroy` — named-mode only: delete CNAME + tunnel on CF
-    and drop the local row. Refuses while running.
-- **Run history** in the app's own SQLite (`runs` table) now tagged
-  with the mode it ran in.
-- **Crash-safe**: on sidecar boot, any leftover `running` rows from a
-  previous process life are marked `orphaned` so the UI doesn't lie.
-- **Auto-restart on boot**: live-link brings the tunnel back two
-  seconds after mount, with the trigger reflecting operator intent
-  rather than the previous shutdown's cleanliness:
-  - **Named mode**: any time a `named_tunnels` row exists. Same
-    hostname comes back whether the previous sidecar died cleanly
-    (SIGTERM during `apteva-server` restart) or unexpectedly
-    (crash / SIGKILL).
-  - **Quick mode**: only when the previous sidecar died while
-    serving traffic (a `running` row got orphaned at boot). Operator
-    who clicks Stop in quick mode won't see a new trycloudflare URL
-    on next boot.
-  Disable via the `auto_restart_on_boot` config toggle.
+Binding an integration does not silently switch providers. Select the provider
+in the panel, acknowledge that the target will be public, then choose **Go
+live**. Provider changes and configuration changes require the current tunnel
+to be stopped.
 
-## What's deliberately deferred
+Cloudflare Named setup lists the zones accessible through the bound connection,
+validates that the requested hostname belongs to the selected zone, and creates
+or reconciles the tunnel ingress and proxied CNAME. Reconfiguration stages the
+new hostname before deleting the previous resource. Deleting the hostname is a
+separate destructive action; switching back to Quick preserves it.
 
-| Capability                                | When  |
-|-------------------------------------------|-------|
-| Auto-rewrite of `PUBLIC_URL`              | v0.4 — needs a new `POST /api/platform/config` endpoint on apteva-server |
-| ngrok provider                            | v0.4 — adds a new `ngrok` integration to the catalog |
-| Tailscale Funnel provider                 | v0.5 |
-| Edge HTTP basic auth                      | v0.4 — cloudflared supports it natively |
-| Auto-restart on tunnel drop with backoff (mid-flight, not just on boot) | v0.4 |
+ngrok reads the bound authtoken just before launch. Set `ngrok_domain` in app
+settings only for a domain already reserved on the ngrok account.
 
-## Why this is cleaner for Apteva than for WordPress
+## Security model
 
-WordPress bakes absolute URLs into the database (`siteurl`, `home`,
-serialized URLs in post content), which is why no one ships a pure WP
-plugin for this — exposing a local WP via tunnel breaks every link
-unless you also rewrite the DB. Apteva reads `PUBLIC_URL` at runtime,
-so v0.2's auto-rewire is just one config write away.
+- Public exposure is opt-in in the panel. Live Link does not add authentication
+  to the target; the target must enforce its own access controls.
+- Cloudflare API requests go through Apteva's integration proxy. The account API
+  token does not enter this process.
+- Cloudflare connector tokens and ngrok authtokens are passed only through the
+  selected child process environment. They are not placed in argv, logs, run
+  history, or the app database.
+- Inherited credentials for inactive providers are removed before launch.
+- Auto-installed agents are version-pinned, downloaded only over HTTPS from an
+  allowlisted host, size-bounded, and SHA-256 verified before atomic install.
+- Target URLs must be absolute HTTP(S) URLs without embedded credentials.
+- HTTP request bodies and retained subprocess diagnostics are bounded; known
+  credential values are redacted from diagnostics.
 
-## Permissions
+The app can expose any HTTP service reachable from its sidecar. The default is
+`APTEVA_GATEWAY_URL`, falling back to `http://localhost:5280`. Treat a custom
+`target_url` as security-sensitive configuration.
 
-This app installs as `scope: global` and the operator must be admin.
+## Lifecycle and persistence
 
-Declared permissions:
+`runtime_state` stores two independent values:
 
-- `db.write.app` — for the `runs` and `named_tunnels` tables
-- `net.egress` — cloudflared dials Cloudflare's edge; the app calls
-  `api.cloudflare.com` directly in named mode
+- `active_provider`: the operator's explicit provider choice.
+- `desired_live`: whether the operator last requested live or off.
 
-No `platform.config.write` yet — that permission ships alongside the
-v0.3 PUBLIC_URL auto-rewrite work.
+When `auto_restart_on_boot` is enabled, a live intent is restored after both
+clean restarts and crashes. A delayed restart is cancelled during unmount, and
+all start, stop, provider, reinstall, configure, and destroy operations are
+serialized.
 
-## Prerequisites
+Cloudflare named-tunnel metadata is persisted, but connector tokens are fetched
+just in time and never persisted. Each start reconciles remote ingress and DNS,
+so configuration drift does not survive unnoticed. Run history is capped at
+1,000 rows and queried newest-first.
 
-None for `linux/{amd64,arm64,arm,386}` and `darwin/{amd64,arm64}` — the
-first time you click "Go live", the app downloads the matching
-cloudflared release from github.com/cloudflare/cloudflared (~30MB,
-one-time) and caches it under the install's data dir. Subsequent
-starts use the cached copy.
+## Binary resolution
 
-If you already manage cloudflared yourself (`brew install cloudflared`,
-`apt install`, custom build, …), the app picks it up from `$PATH`
-automatically. To pin a specific binary, set the `cloudflared_path`
-config field.
+For each provider, Live Link resolves the agent in this order:
 
-To force a fresh download (e.g. after Cloudflare ships a fix), POST
-`/install` or use the "Reinstall binary" link in the UI.
+1. Explicit `cloudflared_path` or `ngrok_path` when it exists.
+2. The corresponding binary on `$PATH`.
+3. A matching managed binary in the app data directory.
+4. A pinned and verified download for supported Linux or macOS architectures.
 
-Hosts on unsupported os/arch combos (Windows, FreeBSD, riscv64, …)
-get a clean error and must install cloudflared manually + set
-`cloudflared_path`. There's no fallback download for those platforms
-because Cloudflare doesn't publish releases for them.
+Version `0.5.0` pins cloudflared `2026.7.1` and ngrok `3.39.9`. The ngrok stable
+download URL is mutable; a changed upstream archive intentionally fails checksum
+verification until a new Live Link version updates the pin.
 
-## Local development
+## API
 
-```bash
-cd apps/mcp/live-link
-go build .
-APTEVA_GATEWAY_URL=http://localhost:5280 \
-APTEVA_APP_TOKEN=dev-1 \
-APTEVA_PROJECT_ID=test \
-DB_PATH=/tmp/live-link.db \
-./live-link
+HTTP routes are mounted under the app proxy:
+
+- `GET /status` — lifecycle, provider, target, and configuration summary.
+- `POST /start` and `POST /stop` — idempotent lifecycle controls.
+- `POST /provider` — select `cloudflare-quick`, `cloudflare-named`, or `ngrok`.
+- `GET /runs` — bounded recent run history.
+- `POST /install` — reinstall the selected provider's verified agent.
+- `GET /named/zones`, `POST /named/configure`, `GET /named/current` — named
+  Cloudflare configuration.
+- `POST /destroy` — delete the configured Cloudflare tunnel and DNS record.
+
+MCP tools expose the same core lifecycle operations as `expose_start`,
+`expose_stop`, `expose_status`, and `expose_destroy`.
+
+## Development
+
+From this directory:
+
+```sh
+GOWORK=off go test -race ./...
+bun test ui/qr.test.ts
 ```
 
-Then:
-
-```bash
-# Start a tunnel (forwards to APTEVA_GATEWAY_URL by default)
-curl -X POST http://localhost:8080/start
-
-# Check status — public_url populates within a few seconds
-curl http://localhost:8080/status
-
-# Copy the URL out of the response, hit it, see your apteva-server.
-
-# Stop
-curl -X POST http://localhost:8080/stop
-
-# Recent runs
-curl http://localhost:8080/runs
-```
-
-## Architecture
-
-```
-┌──────────────┐  POST /start   ┌──────────────────────┐
-│  dashboard   │ ─────────────► │  live-link app       │
-│  (toggle)    │                │   spawns cloudflared │
-└──────────────┘                │   parses public URL  │
-                                └──────┬───────────────┘
-                                       │
-                                       ▼
-                               https://<random>.trycloudflare.com
-                                       │
-                                       ▼
-                               Cloudflare edge → apteva-server
-```
-
-A single in-process `Manager` (`tunnel.go`) holds the `*exec.Cmd`,
-captures stderr to extract the URL, and notifies `main.go` via
-callbacks for DB persistence + event emit. There is at most one tunnel
-per install in v0.1; concurrent `expose_start` calls return the
-existing run rather than spawning a second process.
-
-## Restart semantics
-
-The cloudflared subprocess is the source of truth — if the sidecar
-dies, the tunnel dies with it. There is no daemon mode and no
-PID-file recovery. On sidecar restart, the run's row is reconciled to
-`status='orphaned', exit_reason='sidecar restarted'` so history is
-honest about what happened.
-
-The operator (or an agent via `expose_start`) re-establishes the
-tunnel on the next click. Quick Tunnels mint a *new* random URL each
-time — that's a feature, not a bug, but it's why the v0.2 named-tunnel
-feature exists.
+The shipped panel is `ui/LiveLinkPanel.mjs`, built from
+`ui/LiveLinkPanel.tsx`. Rebuild and commit the bundle whenever the source panel
+or QR encoder changes.
