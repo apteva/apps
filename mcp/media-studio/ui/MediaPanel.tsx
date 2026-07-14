@@ -7,6 +7,7 @@ import {
   clampDuration,
   imageGenerationOptions,
   isDurableMediaReference,
+  mergeHistoryPage,
   projectScopedStorageContentURL,
   providerFromQualifiedId,
   selectedModelProvider,
@@ -258,6 +259,7 @@ interface SourceImageRef {
 }
 
 const API = "/api/apps/media-studio";
+const HISTORY_PAGE_SIZE = 24;
 
 const TAB_LABELS: Record<Exclude<Kind, "audio_sfx">, string> = {
   image: "Images",
@@ -402,6 +404,10 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
     tab === "audio" ? audioSubKind : (tab as Kind);
 
   const [items, setItems] = useState<Generation[]>([]);
+  const [historyCursor, setHistoryCursor] = useState("");
+  const [historyHasMore, setHistoryHasMore] = useState(false);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyLoadingMore, setHistoryLoadingMore] = useState(false);
   const [bindings, setBindings] = useState<BindingsStatus | null>(null);
   const [status, setStatus] = useState("");
   const [generating, setGenerating] = useState(false);
@@ -501,6 +507,7 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
   const [folderSuggestions, setFolderSuggestions] = useState<string[]>([]);
   const activeKindRef = useRef<Kind>(activeKind);
   const promptRef = useRef(prompt);
+  const historyRequestRef = useRef(0);
   activeKindRef.current = activeKind;
   promptRef.current = prompt;
   const durationKind: DurationKind | null =
@@ -530,26 +537,43 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
     } catch {}
   }, [projectId]);
 
-  const loadGenerations = useCallback(async () => {
+  const loadGenerations = useCallback(async (cursor = "") => {
     const requestedKind = activeKind;
+    const requestID = ++historyRequestRef.current;
+    const append = cursor !== "";
+    if (append) setHistoryLoadingMore(true);
+    else setHistoryLoading(true);
     try {
+      const params = new URLSearchParams({
+        project_id: projectId,
+        kind: activeKind,
+        limit: String(HISTORY_PAGE_SIZE),
+      });
+      if (cursor) params.set("cursor", cursor);
       const res = await fetch(
-        `${API}/generations?project_id=${encodeURIComponent(projectId)}&kind=${activeKind}`,
+        `${API}/generations?${params.toString()}`,
         { credentials: "same-origin" },
       );
-      if (!shouldCommitScopedResponse(requestedKind, activeKindRef.current)) return;
+      if (requestID !== historyRequestRef.current || !shouldCommitScopedResponse(requestedKind, activeKindRef.current)) return;
       if (!res.ok) {
         setStatus(`Error: ${res.status}`);
         return;
       }
       const data = await res.json();
-      if (!shouldCommitScopedResponse(requestedKind, activeKindRef.current)) return;
-      setItems(data.generations || []);
-      const n = (data.generations || []).length;
-      setStatus(`${n} generation${n === 1 ? "" : "s"}`);
+      if (requestID !== historyRequestRef.current || !shouldCommitScopedResponse(requestedKind, activeKindRef.current)) return;
+      const incoming: Generation[] = Array.isArray(data.generations) ? data.generations : [];
+      setItems((current) => mergeHistoryPage(current, incoming, append));
+      setHistoryCursor(String(data.next_cursor || ""));
+      setHistoryHasMore(Boolean(data.has_more));
+      setStatus("");
     } catch (e) {
-      if (shouldCommitScopedResponse(requestedKind, activeKindRef.current)) {
+      if (requestID === historyRequestRef.current && shouldCommitScopedResponse(requestedKind, activeKindRef.current)) {
         setStatus("Error: " + (e as Error).message);
+      }
+    } finally {
+      if (requestID === historyRequestRef.current && shouldCommitScopedResponse(requestedKind, activeKindRef.current)) {
+        setHistoryLoading(false);
+        setHistoryLoadingMore(false);
       }
     }
   }, [projectId, activeKind]);
@@ -636,6 +660,9 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
     loadBindings();
   }, [loadBindings]);
   useEffect(() => {
+    setItems([]);
+    setHistoryCursor("");
+    setHistoryHasMore(false);
     loadGenerations();
   }, [loadGenerations]);
 
@@ -1540,7 +1567,7 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
       setDeletingId(null);
     }
   };
-  const generationCountLabel = `${items.length} generation${items.length === 1 ? "" : "s"}`;
+  const generationCountLabel = `${items.length}${historyHasMore ? "+" : ""} generation${items.length === 1 && !historyHasMore ? "" : "s"}`;
 
   return (
     <div className="h-full flex flex-col">
@@ -1859,12 +1886,13 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
           <div className="flex-1 overflow-auto border border-border rounded">
             {items.length === 0 && !generating && pendingVideoJobs.length === 0 ? (
               <div className="py-12 px-6 text-center text-text-muted text-sm">
-                {status || "No generations yet for this kind."}
+                {historyLoading ? "Loading…" : status || "No generations yet for this kind."}
               </div>
             ) : (
-              <Gallery
-                kind={activeKind}
-                items={items}
+              <>
+                <Gallery
+                  kind={activeKind}
+                  items={items}
                   onSelect={setSelected}
                   onOpenLightbox={setLightbox}
                   onGenerateDraft={generateDraft}
@@ -1875,6 +1903,18 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
                   pendingJobs={pendingVideoJobs}
                   generatingDraftId={generatingDraftId}
                 />
+                {historyHasMore && historyCursor && (
+                  <div className="flex justify-center px-3 py-4 border-t border-border">
+                    <button
+                      onClick={() => loadGenerations(historyCursor)}
+                      disabled={historyLoadingMore}
+                      className="px-4 py-2 text-sm border border-border rounded text-text hover:border-accent disabled:opacity-50"
+                    >
+                      {historyLoadingMore ? "Loading…" : "Load more"}
+                    </button>
+                  </div>
+                )}
+              </>
             )}
           </div>
         </div>

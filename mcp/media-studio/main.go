@@ -36,12 +36,15 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: media-studio
 display_name: Media Studio
-version: 0.10.44
+version: 0.10.45
 description: |
   Generate images, video, audio, music, and avatars via compatible
   providers. Optionally saves outputs to Storage, supports stable
   cache keys for app-to-app generation reuse, and can use OpenAI Codex
-  as a subscription-backed image provider. v0.10.44 moves generation into
+  as a subscription-backed image provider. v0.10.45 adds newest-first cursor
+  pagination to media_history and the gallery, a history index, functional
+  since filtering, and 24-item incremental UI pages for large histories.
+  v0.10.44 moves generation into
   a focused responsive dialog with a large prompt editor, grouped settings,
   mobile sheet layout, sticky actions, keyboard focus handling, and automatic
   reference-edit opening. v0.10.43 fixes multi-provider
@@ -152,7 +155,7 @@ provides:
     - { name: media_voice_list, description: "List tracked voice identities and, when bound, provider voice catalog entries." }
     - { name: media_avatar_create, description: "Create/train a reusable avatar from a photo or prompt. Args: name, source_type, source_image?/prompt?, options?." }
     - { name: media_avatar_list, description: "List tracked avatar identities and provider avatar catalog entries." }
-    - { name: media_history,  description: "List recent generations. Args: kind?, limit?, since?." }
+    - { name: media_history,  description: "List generations newest-first. Args: kind?, limit?, cursor?, since?. Returns next_cursor and has_more." }
     - { name: media_get,      description: "Fetch one generation by id. Args: id." }
   ui_panels:
     - slot: project.page
@@ -512,11 +515,12 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "media_history",
-			Description: "List recent generations for this project. Args: kind? (filter), limit? (default 50, max 200), since? (ISO8601).",
+			Description: "List generations for this project newest-first. Args: kind? (filter), limit? (default 50, max 200), cursor? (next_cursor from the previous page), since? (RFC3339). Returns generations, next_cursor, and has_more.",
 			InputSchema: schemaObject(map[string]any{
-				"kind":  map[string]any{"type": "string", "enum": []string{"image", "video", "audio_tts", "audio_sfx", "music"}},
-				"limit": map[string]any{"type": "integer", "default": 50},
-				"since": map[string]any{"type": "string"},
+				"kind":   map[string]any{"type": "string", "enum": []string{"image", "video", "audio_tts", "audio_sfx", "music", "avatar"}},
+				"limit":  map[string]any{"type": "integer", "default": 50, "minimum": 1, "maximum": 200},
+				"cursor": map[string]any{"type": "string", "description": "Opaque next_cursor returned by the previous media_history page."},
+				"since":  map[string]any{"type": "string", "description": "Only include generations created at or after this RFC3339 timestamp."},
 			}, nil),
 			Handler: a.toolMediaHistory,
 		},

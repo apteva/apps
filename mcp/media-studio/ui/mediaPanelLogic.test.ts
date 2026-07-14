@@ -3,6 +3,7 @@ import {
   clampDuration,
   imageGenerationOptions,
   isDurableMediaReference,
+  mergeHistoryPage,
   projectScopedStorageContentURL,
   selectedModelProvider,
   shouldClearSubmittedPrompt,
@@ -47,6 +48,13 @@ describe("Media Panel logic", () => {
     expect(shouldCommitScopedResponse("image", "video")).toBe(false);
     expect(shouldClearSubmittedPrompt("image", "image", "old", "new")).toBe(false);
     expect(shouldClearSubmittedPrompt("image", "image", "same", "same")).toBe(true);
+  });
+
+  test("appends cursor pages without reordering or duplicating generations", () => {
+    const first = [{ id: 5 }, { id: 4 }, { id: 3 }];
+    const next = [{ id: 3 }, { id: 2 }, { id: 1 }];
+    expect(mergeHistoryPage(first, next, true).map((item) => item.id)).toEqual([5, 4, 3, 2, 1]);
+    expect(mergeHistoryPage(first, next, false).map((item) => item.id)).toEqual([3, 2, 1]);
   });
 
   test("only persists durable source references in drafts", () => {

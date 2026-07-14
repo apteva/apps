@@ -2,13 +2,17 @@ schema: apteva-app/v1
 
 name: media-studio
 display_name: Media Studio
-version: 0.10.44
+version: 0.10.45
 description: |
   Generate images, video, audio, music, and avatars via compatible
   providers. ElevenLabs and Fish Audio can power TTS and reusable
   voices; ElevenLabs also powers sound effects and music.
   Optionally saves outputs to the Storage app for permanent, shareable
-  references. v0.10.44 moves generation into a focused responsive dialog
+  references. v0.10.45 adds newest-first cursor pagination to media_history
+  and the gallery, a history index, functional since filtering, and 24-item
+  incremental UI pages for fast projects with large generation histories.
+
+  v0.10.44 moves generation into a focused responsive dialog
   with a large prompt editor, grouped settings, mobile sheet layout, sticky
   actions, keyboard focus handling, and automatic reference-edit opening.
 
@@ -172,7 +176,7 @@ provides:
     - { name: media_voice_list, description: "List tracked voice identities and, when bound, provider voice catalog entries." }
     - { name: media_avatar_create, description: "Create/train a reusable avatar through the bound avatar provider. Generic args: name, source_type (photo|prompt|video), source_image?, source_video?, consent_video?, prompt?, options?. Returns an avatar_create job." }
     - { name: media_avatar_list, description: "List tracked avatar identities and provider avatar catalog entries." }
-    - { name: media_history,  description: "List recent generations for this project. Args: kind?, limit?, since?." }
+    - { name: media_history,  description: "List generations for this project newest-first. Args: kind?, limit?, cursor? (next_cursor from the previous page), since? (RFC3339). Returns generations, next_cursor, and has_more." }
     - { name: media_get,      description: "Fetch one generation for this project. Args: id." }
   ui_panels:
     - slot: project.page

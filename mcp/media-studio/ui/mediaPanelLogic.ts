@@ -61,6 +61,16 @@ export function shouldCommitScopedResponse(requestKind: string, activeKind: stri
   return requestKind === activeKind;
 }
 
+export function mergeHistoryPage<T extends { id: number }>(
+  current: T[],
+  incoming: T[],
+  append: boolean,
+): T[] {
+  if (!append) return incoming;
+  const seen = new Set(current.map((item) => item.id));
+  return [...current, ...incoming.filter((item) => !seen.has(item.id))];
+}
+
 export function isDurableMediaReference(value: string): boolean {
   const normalized = value.trim().toLowerCase();
   return normalized.startsWith("storage:") ||

@@ -747,6 +747,89 @@ func TestToolMediaHistory_LimitCap(t *testing.T) {
 	}
 }
 
+func TestToolMediaHistory_CursorPaginationNewestFirst(t *testing.T) {
+	ctx := newMediaStudioCtx(t, newRecordingPlatform())
+	app := &App{}
+	for i := 0; i < 5; i++ {
+		app.dbInsertGeneration(generationRecord{
+			ProjectID: "test-proj", Kind: "image",
+			Prompt: fmt.Sprintf("p%d", i), Provider: "openai-api", Count: 1,
+		})
+	}
+
+	page1, err := app.toolMediaHistory(ctx, map[string]any{"limit": 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	first := page1.(map[string]any)
+	gens1 := first["generations"].([]map[string]any)
+	if len(gens1) != 2 || gens1[0]["prompt"] != "p4" || gens1[1]["prompt"] != "p3" {
+		t.Fatalf("first page is not newest-first: %+v", gens1)
+	}
+	if first["has_more"] != true || first["next_cursor"] == "" {
+		t.Fatalf("first page metadata = %+v", first)
+	}
+
+	page2, err := app.toolMediaHistory(ctx, map[string]any{
+		"limit": 2, "cursor": first["next_cursor"],
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	second := page2.(map[string]any)
+	gens2 := second["generations"].([]map[string]any)
+	if len(gens2) != 2 || gens2[0]["prompt"] != "p2" || gens2[1]["prompt"] != "p1" {
+		t.Fatalf("second page mismatch: %+v", gens2)
+	}
+	if gens1[1]["id"] == gens2[0]["id"] {
+		t.Fatal("cursor page repeated the final row from the previous page")
+	}
+
+	page3, err := app.toolMediaHistory(ctx, map[string]any{
+		"limit": 2, "cursor": second["next_cursor"],
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	third := page3.(map[string]any)
+	gens3 := third["generations"].([]map[string]any)
+	if len(gens3) != 1 || gens3[0]["prompt"] != "p0" || third["has_more"] != false || third["next_cursor"] != "" {
+		t.Fatalf("final page mismatch: %+v", third)
+	}
+}
+
+func TestToolMediaHistory_SinceAndCursorValidation(t *testing.T) {
+	ctx := newMediaStudioCtx(t, newRecordingPlatform())
+	app := &App{}
+	oldID := app.dbInsertGeneration(generationRecord{ProjectID: "test-proj", Kind: "image", Prompt: "old", Provider: "openai-api", Count: 1})
+	newID := app.dbInsertGeneration(generationRecord{ProjectID: "test-proj", Kind: "image", Prompt: "new", Provider: "openai-api", Count: 1})
+	if _, err := ctx.AppDB().Exec(`UPDATE generations SET created_at='2025-01-01 00:00:00' WHERE id=?`, oldID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ctx.AppDB().Exec(`UPDATE generations SET created_at='2026-01-02 00:00:00' WHERE id=?`, newID); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := app.toolMediaHistory(ctx, map[string]any{"since": "2026-01-01T00:00:00Z"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	gens := out.(map[string]any)["generations"].([]map[string]any)
+	if len(gens) != 1 || gens[0]["prompt"] != "new" {
+		t.Fatalf("since filter mismatch: %+v", gens)
+	}
+	for name, args := range map[string]map[string]any{
+		"cursor": {"cursor": "not-an-id"},
+		"since":  {"since": "yesterday"},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := app.toolMediaHistory(ctx, args); err == nil {
+				t.Fatal("expected validation error")
+			}
+		})
+	}
+}
+
 func TestToolMediaHistory_KindFilter(t *testing.T) {
 	ctx := newMediaStudioCtx(t, newRecordingPlatform())
 	app := &App{}
