@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"html"
@@ -21,14 +22,16 @@ import (
 	"github.com/chromedp/cdproto/emulation"
 	"github.com/chromedp/cdproto/network"
 	cdppage "github.com/chromedp/cdproto/page"
+	cdpruntime "github.com/chromedp/cdproto/runtime"
 	"github.com/chromedp/chromedp"
 	xhtml "golang.org/x/net/html"
 	"golang.org/x/net/html/atom"
 )
 
-const htmlRendererVersion = "chromium-v1"
+const htmlRendererVersion = "chromium-v2"
 
 type DocumentSettings struct {
+	LayoutMode      string   `json:"layout_mode,omitempty"`
 	PageSize        string   `json:"page_size,omitempty"`
 	Landscape       bool     `json:"landscape,omitempty"`
 	MarginTopMM     *float64 `json:"margin_top_mm,omitempty"`
@@ -61,11 +64,34 @@ func renderHTMLToPDF(ctx context.Context, body, stylesheet string, data map[stri
 	if err != nil {
 		return nil, err
 	}
+	cleanBody, err = populatePageMarkers(cleanBody)
+	if err != nil {
+		return nil, err
+	}
 	cleanCSS, err := sanitizeCSS(stylesheet, opts.ImageResolver)
 	if err != nil {
 		return nil, err
 	}
-	pageHTML := buildPrintableHTML(cleanBody, cleanCSS, documentTitle(data))
+	pageSize, err := resolveHTMLPageSize(settings, opts.PageSize)
+	if err != nil {
+		return nil, err
+	}
+	width, height := paperDimensions(pageSize)
+	if settings.Landscape {
+		width, height = height, width
+	}
+	defaultMarginMM := 0.0
+	if settings.LayoutMode == "flow" {
+		defaultMarginMM = 12
+	}
+	marginTop := marginInches(settings.MarginTopMM, defaultMarginMM)
+	marginRight := marginInches(settings.MarginRightMM, defaultMarginMM)
+	marginBottom := marginInches(settings.MarginBottomMM, defaultMarginMM)
+	marginLeft := marginInches(settings.MarginLeftMM, defaultMarginMM)
+	pageHTML := buildPrintableHTML(cleanBody, cleanCSS, documentTitle(data), printGeometry{
+		PaperWidthIn: width, PaperHeightIn: height,
+		ContentWidthIn: width - marginLeft - marginRight, ContentHeightIn: height - marginTop - marginBottom,
+	})
 	chromePath, err := findChromeExecutable()
 	if err != nil {
 		return nil, err
@@ -110,23 +136,10 @@ func renderHTMLToPDF(ctx context.Context, body, stylesheet string, data map[stri
 	browserCtx, browserCancel := chromedp.NewContext(allocCtx)
 	defer browserCancel()
 
-	pageSize := opts.PageSize
-	if pageSize == "" {
-		pageSize = settings.PageSize
-	}
-	width, height := paperDimensions(pageSize)
-	if settings.Landscape {
-		width, height = height, width
-	}
 	printBackground := true
 	if settings.PrintBackground != nil {
 		printBackground = *settings.PrintBackground
 	}
-	marginTop := marginInches(settings.MarginTopMM, 12)
-	marginRight := marginInches(settings.MarginRightMM, 12)
-	marginBottom := marginInches(settings.MarginBottomMM, 12)
-	marginLeft := marginInches(settings.MarginLeftMM, 12)
-
 	dataURL := "data:text/html;base64," + base64.StdEncoding.EncodeToString([]byte(pageHTML))
 	var pdf []byte
 	err = chromedp.Run(browserCtx,
@@ -142,7 +155,8 @@ func renderHTMLToPDF(ctx context.Context, body, stylesheet string, data map[stri
 		emulation.SetScriptExecutionDisabled(true),
 		chromedp.Navigate(dataURL),
 		chromedp.WaitReady("body", chromedp.ByQuery),
-		chromedp.Sleep(75*time.Millisecond),
+		chromedp.ActionFunc(waitForDocumentResources),
+		chromedp.ActionFunc(validateDocumentOverflow),
 		chromedp.ActionFunc(func(actionCtx context.Context) error {
 			var printErr error
 			pdf, _, printErr = cdppage.PrintToPDF().
@@ -155,6 +169,8 @@ func renderHTMLToPDF(ctx context.Context, body, stylesheet string, data map[stri
 				WithMarginLeft(marginLeft).
 				WithDisplayHeaderFooter(false).
 				WithPreferCSSPageSize(false).
+				WithGenerateTaggedPDF(true).
+				WithGenerateDocumentOutline(true).
 				Do(actionCtx)
 			return printErr
 		}),
@@ -169,6 +185,149 @@ func renderHTMLToPDF(ctx context.Context, body, stylesheet string, data map[stri
 		return nil, errors.New("Chromium returned an invalid PDF")
 	}
 	return pdf, nil
+}
+
+type printGeometry struct {
+	PaperWidthIn, PaperHeightIn     float64
+	ContentWidthIn, ContentHeightIn float64
+}
+
+func resolveHTMLPageSize(settings DocumentSettings, requested string) (string, error) {
+	declared, err := resolvePageSize("", settings.PageSize)
+	if err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(requested) == "" {
+		return declared, nil
+	}
+	selected, err := resolvePageSize(requested, "")
+	if err != nil {
+		return "", err
+	}
+	if settings.LayoutMode != "flow" && selected != declared {
+		return "", fmt.Errorf("fixed-layout template is locked to %s; change the template setting instead of overriding page_size", declared)
+	}
+	return selected, nil
+}
+
+const documentResourcesReadyScript = `(async () => {
+  if (document.fonts && document.fonts.ready) await document.fonts.ready;
+  const failed = [];
+  await Promise.all(Array.from(document.images).map(async (image, index) => {
+    try {
+      if (!image.complete) {
+        await new Promise((resolve, reject) => {
+          const loaded = () => resolve();
+          const failed = () => reject(new Error('image load failed'));
+          image.addEventListener('load', loaded, { once: true });
+          image.addEventListener('error', failed, { once: true });
+          if (image.complete) loaded();
+        });
+      }
+      if (typeof image.decode === 'function') await image.decode();
+      if (!image.complete || image.naturalWidth === 0) throw new Error('image has no decoded pixels');
+    } catch (_) {
+      failed.push({ index: index + 1, alt: image.alt || '', source: (image.currentSrc || image.src || '').slice(0, 120) });
+    }
+  }));
+  return { failedImages: failed };
+})()`
+
+const documentOverflowScript = `(() => {
+  const explicit = Array.from(document.querySelectorAll('[data-pdf-page]'));
+  const pages = explicit.length ? explicit : Array.from(document.querySelectorAll('.page, .sheet'));
+  const issues = [];
+  const clippedValues = new Set(['hidden', 'clip', 'auto', 'scroll']);
+  pages.forEach((page, pageIndex) => {
+    const candidates = [page, ...Array.from(page.querySelectorAll('*'))];
+    candidates.forEach((element) => {
+      if (element.hasAttribute('data-allow-overflow')) return;
+      const style = getComputedStyle(element);
+      if (style.display === 'none' || style.visibility === 'hidden') return;
+      const checksClipping = element === page || clippedValues.has(style.overflow) ||
+        clippedValues.has(style.overflowX) || clippedValues.has(style.overflowY);
+      if (!checksClipping || element.clientWidth === 0 || element.clientHeight === 0) return;
+      const overflowX = element.hasAttribute('data-allow-horizontal-overflow') ? 0 :
+        Math.max(0, Math.ceil(element.scrollWidth - element.clientWidth));
+      const overflowY = element.hasAttribute('data-allow-vertical-overflow') ? 0 :
+        Math.max(0, Math.ceil(element.scrollHeight - element.clientHeight));
+      if (overflowX <= 1 && overflowY <= 1) return;
+      const classes = Array.from(element.classList || []).slice(0, 3).join('.');
+      issues.push({
+        page: pageIndex + 1,
+        element: element.tagName.toLowerCase() + (element.id ? '#' + element.id : '') + (classes ? '.' + classes : ''),
+        overflowX,
+        overflowY,
+      });
+    });
+  });
+  return issues.slice(0, 20);
+})()`
+
+func waitForDocumentResources(ctx context.Context) error {
+	var result struct {
+		FailedImages []struct {
+			Index  int    `json:"index"`
+			Alt    string `json:"alt"`
+			Source string `json:"source"`
+		} `json:"failedImages"`
+	}
+	if err := evaluateBrowserValue(ctx, documentResourcesReadyScript, true, &result); err != nil {
+		return fmt.Errorf("wait for document fonts and images: %w", err)
+	}
+	if len(result.FailedImages) > 0 {
+		image := result.FailedImages[0]
+		label := image.Alt
+		if label == "" {
+			label = image.Source
+		}
+		return fmt.Errorf("document image %d failed to decode: %s", image.Index, label)
+	}
+	return nil
+}
+
+func validateDocumentOverflow(ctx context.Context) error {
+	var issues []struct {
+		Page      int    `json:"page"`
+		Element   string `json:"element"`
+		OverflowX int    `json:"overflowX"`
+		OverflowY int    `json:"overflowY"`
+	}
+	if err := evaluateBrowserValue(ctx, documentOverflowScript, false, &issues); err != nil {
+		return fmt.Errorf("validate document layout: %w", err)
+	}
+	if len(issues) == 0 {
+		return nil
+	}
+	issue := issues[0]
+	directions := []string{}
+	if issue.OverflowX > 1 {
+		directions = append(directions, fmt.Sprintf("horizontally by %dpx", issue.OverflowX))
+	}
+	if issue.OverflowY > 1 {
+		directions = append(directions, fmt.Sprintf("vertically by %dpx", issue.OverflowY))
+	}
+	return fmt.Errorf("document page %d overflows %s in %s; shorten the content or adjust the page layout", issue.Page, strings.Join(directions, " and "), issue.Element)
+}
+
+func evaluateBrowserValue(ctx context.Context, expression string, awaitPromise bool, target any) error {
+	result, exception, err := cdpruntime.Evaluate(expression).
+		WithAwaitPromise(awaitPromise).
+		WithReturnByValue(true).
+		Do(ctx)
+	if err != nil {
+		return err
+	}
+	if exception != nil {
+		return errors.New(exception.Text)
+	}
+	if result == nil || len(result.Value) == 0 {
+		return errors.New("browser returned no result")
+	}
+	if err := json.Unmarshal(result.Value, target); err != nil {
+		return fmt.Errorf("decode browser result: %w", err)
+	}
+	return nil
 }
 
 func mergeHTMLTemplate(body string, data map[string]any) (string, error) {
@@ -210,6 +369,119 @@ func sanitizeHTMLFragment(source string, resolve imageResolver) (string, error) 
 		}
 	}
 	return out.String(), nil
+}
+
+func populatePageMarkers(source string) (string, error) {
+	contextNode := &xhtml.Node{Type: xhtml.ElementNode, Data: "body", DataAtom: atom.Body}
+	nodes, err := xhtml.ParseFragment(strings.NewReader(source), contextNode)
+	if err != nil {
+		return "", fmt.Errorf("parse document pages: %w", err)
+	}
+	explicit := []*xhtml.Node{}
+	fallback := []*xhtml.Node{}
+	for _, node := range nodes {
+		walkHTMLNodes(node, func(candidate *xhtml.Node) {
+			if candidate.Type != xhtml.ElementNode {
+				return
+			}
+			if _, ok := htmlAttribute(candidate, "data-pdf-page"); ok {
+				explicit = append(explicit, candidate)
+				return
+			}
+			if classHasToken(candidate, "page") || classHasToken(candidate, "sheet") {
+				fallback = append(fallback, candidate)
+			}
+		})
+	}
+	pages := explicit
+	if len(pages) == 0 {
+		pages = fallback
+	}
+	for index, page := range pages {
+		setHTMLAttribute(page, "data-page-index", strconv.Itoa(index+1))
+		setHTMLAttribute(page, "data-page-total", strconv.Itoa(len(pages)))
+		walkHTMLNodes(page, func(candidate *xhtml.Node) {
+			if candidate.Type != xhtml.ElementNode {
+				return
+			}
+			if classHasToken(candidate, "page-number") {
+				setHTMLAttribute(candidate, "data-page-number-value", formatPageMarker(index+1, len(pages), "decimal-leading-zero"))
+				setHTMLAttribute(candidate, "data-page-total-value", formatPageMarker(len(pages), len(pages), "decimal-leading-zero"))
+			}
+			if format, ok := htmlAttribute(candidate, "data-page-number"); ok {
+				setHTMLText(candidate, formatPageMarker(index+1, len(pages), format))
+			}
+			if format, ok := htmlAttribute(candidate, "data-page-total"); ok && candidate != page {
+				setHTMLText(candidate, formatPageMarker(len(pages), len(pages), format))
+			}
+		})
+	}
+	var out bytes.Buffer
+	for _, node := range nodes {
+		if err := xhtml.Render(&out, node); err != nil {
+			return "", fmt.Errorf("serialize document pages: %w", err)
+		}
+	}
+	return out.String(), nil
+}
+
+func walkHTMLNodes(node *xhtml.Node, visit func(*xhtml.Node)) {
+	visit(node)
+	for child := node.FirstChild; child != nil; child = child.NextSibling {
+		walkHTMLNodes(child, visit)
+	}
+}
+
+func htmlAttribute(node *xhtml.Node, name string) (string, bool) {
+	for _, attr := range node.Attr {
+		if strings.EqualFold(attr.Key, name) {
+			return attr.Val, true
+		}
+	}
+	return "", false
+}
+
+func setHTMLAttribute(node *xhtml.Node, name, value string) {
+	for index := range node.Attr {
+		if strings.EqualFold(node.Attr[index].Key, name) {
+			node.Attr[index].Val = value
+			return
+		}
+	}
+	node.Attr = append(node.Attr, xhtml.Attribute{Key: name, Val: value})
+}
+
+func classHasToken(node *xhtml.Node, token string) bool {
+	classes, ok := htmlAttribute(node, "class")
+	if !ok {
+		return false
+	}
+	for _, className := range strings.Fields(classes) {
+		if className == token {
+			return true
+		}
+	}
+	return false
+}
+
+func setHTMLText(node *xhtml.Node, value string) {
+	for child := node.FirstChild; child != nil; {
+		next := child.NextSibling
+		node.RemoveChild(child)
+		child = next
+	}
+	node.AppendChild(&xhtml.Node{Type: xhtml.TextNode, Data: value})
+}
+
+func formatPageMarker(value, total int, format string) string {
+	if format == "decimal-leading-zero" {
+		width := len(strconv.Itoa(total))
+		if width < 2 {
+			width = 2
+		}
+		return fmt.Sprintf("%0*d", width, value)
+	}
+	return strconv.Itoa(value)
 }
 
 func sanitizeHTMLNode(node *xhtml.Node, resolve imageResolver) error {
@@ -376,11 +648,16 @@ func documentTitle(data map[string]any) string {
 	return title
 }
 
-func buildPrintableHTML(body, stylesheet, title string) string {
+func buildPrintableHTML(body, stylesheet, title string, geometry printGeometry) string {
 	const csp = "default-src 'none'; img-src data:; font-src data:; style-src 'unsafe-inline'; script-src 'none'; connect-src 'none'; frame-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'"
+	geometryCSS := fmt.Sprintf(
+		":root{--document-page-width:%.4fmm;--document-page-height:%.4fmm;--document-content-width:%.4fmm;--document-content-height:%.4fmm}",
+		geometry.PaperWidthIn*25.4, geometry.PaperHeightIn*25.4,
+		geometry.ContentWidthIn*25.4, geometry.ContentHeightIn*25.4,
+	)
 	return "<!doctype html><html><head><meta charset=\"utf-8\"><meta http-equiv=\"Content-Security-Policy\" content=\"" + csp + "\">" +
 		"<title>" + html.EscapeString(title) + "</title>" +
-		"<style>html{-webkit-print-color-adjust:exact;print-color-adjust:exact}body{margin:0}" + stylesheet + "</style>" +
+		"<style>html{-webkit-print-color-adjust:exact;print-color-adjust:exact}body{margin:0}" + stylesheet + geometryCSS + "</style>" +
 		"</head><body>" + body + "</body></html>"
 }
 

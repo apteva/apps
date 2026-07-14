@@ -39,6 +39,7 @@ interface Template {
 }
 
 interface DocumentSettings {
+  layout_mode?: "flow" | "fixed";
   page_size?: "A4" | "letter" | "legal";
   landscape?: boolean;
   margin_top_mm?: number;
@@ -313,6 +314,8 @@ function TemplatesView({
   const [editorTab, setEditorTab] = useState<"source" | "css" | "data" | "settings">("source");
   const [previewDataJSON, setPreviewDataJSON] = useState("{}");
   const [previewDataDirty, setPreviewDataDirty] = useState(false);
+  const [previewWidth, setPreviewWidth] = useState(50);
+  const [previewZoom, setPreviewZoom] = useState("page-width");
   const templateVars = useMemo(
     () => extractTemplateVariables(editing?.body || ""),
     [editing?.body],
@@ -321,6 +324,7 @@ function TemplatesView({
     () => sampleDataForVariables(templateVars),
     [templateVars],
   );
+  const fixedLayout = editing?.source_format === "html" && editing.settings?.layout_mode !== "flow";
 
   // Load body when a template is selected (list view strips body to
   // keep the response light).
@@ -547,56 +551,20 @@ function TemplatesView({
                 </button>
               ))}
             </div>
-            {editorTab === "source" && (
-              <textarea
-                value={editing.body || ""}
-                onChange={(e) => setEditing({ ...editing, body: e.target.value })}
-                placeholder={editing.source_format === "html" ? "<main>HTML with {{.placeholders}}</main>" : "# Markdown with {{.placeholders}}"}
-                className="flex-1 bg-bg-input border border-border rounded p-3 text-xs font-mono min-h-[18rem]"
-                spellCheck={false}
-              />
-            )}
-            {editorTab === "css" && editing.source_format === "html" && (
-              <textarea
-                value={editing.stylesheet || ""}
-                onChange={(e) => setEditing({ ...editing, stylesheet: e.target.value })}
-                placeholder="@page { size: A4; margin: 0; }"
-                className="flex-1 bg-bg-input border border-border rounded p-3 text-xs font-mono min-h-[18rem]"
-                spellCheck={false}
-              />
-            )}
-            {editorTab === "data" && (
-              <textarea
-                value={previewDataJSON}
-                onChange={(e) => {
-                  setPreviewDataJSON(e.target.value);
-                  setPreviewDataDirty(true);
-                }}
-                placeholder="Preview data as JSON"
-                className="flex-1 bg-bg-input border border-border rounded p-3 text-xs font-mono min-h-[18rem]"
-                spellCheck={false}
-              />
-            )}
-            {editorTab === "settings" && editing.source_format === "html" && (
-              <DocumentSettingsEditor
-                settings={editing.settings || { page_size: "A4" }}
-                onChange={(settings) => {
-                  setEditing({ ...editing, settings });
-                  setPageSize(settings.page_size || "A4");
-                }}
-              />
-            )}
             <div className="flex items-center gap-2">
               <select
                 aria-label="Preview page size"
                 value={pageSize}
                 onChange={(e) => setPageSize(e.target.value)}
-                className="bg-bg-input border border-border rounded px-2 py-1 text-sm"
+                disabled={fixedLayout}
+                title={fixedLayout ? "Fixed-layout templates use the page size saved in Settings." : undefined}
+                className="bg-bg-input border border-border rounded px-2 py-1 text-sm disabled:opacity-60"
               >
                 <option value="A4">A4</option>
                 <option value="letter">Letter</option>
                 <option value="legal">Legal</option>
               </select>
+              {fixedLayout && <span className="text-xs text-text-dim">Locked by template</span>}
               <button
                 type="button"
                 onClick={runPreview}
@@ -652,14 +620,88 @@ function TemplatesView({
                 <span className="text-xs text-red truncate">{previewError}</span>
               )}
             </div>
-            {previewURL && (
-              <iframe
-                title="preview"
-                src={previewURL}
-                className="w-full border border-border rounded"
-                style={{ height: "30rem" }}
-              />
-            )}
+            <div
+              className={`flex-1 min-h-[36rem] gap-3 ${previewURL ? "grid" : "flex"}`}
+              style={previewURL ? { gridTemplateColumns: `${100 - previewWidth}fr ${previewWidth}fr` } : undefined}
+            >
+              <div className="min-w-0 flex flex-col">
+                {editorTab === "source" && (
+                  <textarea
+                    value={editing.body || ""}
+                    onChange={(e) => setEditing({ ...editing, body: e.target.value })}
+                    placeholder={editing.source_format === "html" ? "<main>HTML with {{.placeholders}}</main>" : "# Markdown with {{.placeholders}}"}
+                    className="flex-1 bg-bg-input border border-border rounded p-3 text-xs font-mono min-h-[28rem] resize-none"
+                    spellCheck={false}
+                  />
+                )}
+                {editorTab === "css" && editing.source_format === "html" && (
+                  <textarea
+                    value={editing.stylesheet || ""}
+                    onChange={(e) => setEditing({ ...editing, stylesheet: e.target.value })}
+                    placeholder="@page { margin: 0; }"
+                    className="flex-1 bg-bg-input border border-border rounded p-3 text-xs font-mono min-h-[28rem] resize-none"
+                    spellCheck={false}
+                  />
+                )}
+                {editorTab === "data" && (
+                  <textarea
+                    value={previewDataJSON}
+                    onChange={(e) => {
+                      setPreviewDataJSON(e.target.value);
+                      setPreviewDataDirty(true);
+                    }}
+                    placeholder="Preview data as JSON"
+                    className="flex-1 bg-bg-input border border-border rounded p-3 text-xs font-mono min-h-[28rem] resize-none"
+                    spellCheck={false}
+                  />
+                )}
+                {editorTab === "settings" && editing.source_format === "html" && (
+                  <DocumentSettingsEditor
+                    settings={editing.settings || { page_size: "A4" }}
+                    onChange={(settings) => {
+                      setEditing({ ...editing, settings });
+                      setPageSize(settings.page_size || "A4");
+                    }}
+                  />
+                )}
+              </div>
+              {previewURL && (
+                <div className="min-w-0 flex flex-col border border-border rounded overflow-hidden bg-bg-input/20">
+                  <div className="flex items-center gap-2 px-2 py-1.5 border-b border-border text-xs text-text-muted">
+                    <span>Preview</span>
+                    <label className="flex items-center gap-1 ml-auto" title="Resize the preview pane">
+                      Width
+                      <input
+                        aria-label="Preview pane width"
+                        type="range"
+                        min={35}
+                        max={70}
+                        value={previewWidth}
+                        onChange={(e) => setPreviewWidth(Number(e.target.value))}
+                        className="w-20"
+                      />
+                    </label>
+                    <select
+                      aria-label="Preview zoom"
+                      value={previewZoom}
+                      onChange={(e) => setPreviewZoom(e.target.value)}
+                      className="bg-bg-input border border-border rounded px-1.5 py-1"
+                    >
+                      <option value="page-width">Fit width</option>
+                      <option value="75">75%</option>
+                      <option value="100">100%</option>
+                      <option value="125">125%</option>
+                      <option value="150">150%</option>
+                    </select>
+                  </div>
+                  <iframe
+                    title="preview"
+                    src={`${previewURL}#zoom=${previewZoom}`}
+                    className="w-full flex-1 bg-white"
+                  />
+                </div>
+              )}
+            </div>
           </>
         )}
       </div>
@@ -674,6 +716,7 @@ function DocumentSettingsEditor({
   settings: DocumentSettings;
   onChange: (settings: DocumentSettings) => void;
 }) {
+  const defaultMargin = settings.layout_mode === "flow" ? 12 : 0;
   const margin = (key: keyof DocumentSettings, fallback: number) =>
     typeof settings[key] === "number" ? (settings[key] as number) : fallback;
   const setNumber = (key: keyof DocumentSettings, raw: string) => {
@@ -685,10 +728,20 @@ function DocumentSettingsEditor({
       <div>
         <div className="text-sm font-medium text-text">Print settings</div>
         <p className="text-xs text-text-muted mt-1">
-          CSS controls the document design. These settings control the physical PDF page.
+          Fixed layouts lock render-time page-size overrides. Flow layouts can be rendered on different paper sizes.
         </p>
       </div>
-      <div className="grid grid-cols-2 gap-3">
+      <div className="grid grid-cols-3 gap-3">
+        <label className="text-xs text-text-muted">
+          Layout
+          <select
+            value={settings.layout_mode || "fixed"}
+            onChange={(e) => onChange({ ...settings, layout_mode: e.target.value as DocumentSettings["layout_mode"] })}
+            className="mt-1 w-full bg-bg-input border border-border rounded px-2 py-2 text-sm text-text"
+          >
+            <option value="flow">Flow</option><option value="fixed">Fixed pages</option>
+          </select>
+        </label>
         <label className="text-xs text-text-muted">
           Page size
           <select
@@ -721,7 +774,7 @@ function DocumentSettingsEditor({
               {label}
               <input
                 type="number" min={0} max={50} step={1}
-                value={margin(key, 12)}
+                value={margin(key, defaultMargin)}
                 onChange={(e) => setNumber(key, e.target.value)}
                 className="mt-1 w-full bg-bg-input border border-border rounded px-2 py-2 text-sm text-text"
               />
@@ -730,7 +783,7 @@ function DocumentSettingsEditor({
         </div>
       </div>
       <div className="rounded border border-border bg-bg p-3 text-xs text-text-muted">
-        For full-bleed cover designs, set all margins to 0 and add page padding in CSS.
+        CSS can use <code>--document-page-width</code> and <code>--document-page-height</code>. For full-bleed fixed pages, set all margins to 0 and add page padding in CSS.
       </div>
     </div>
   );
@@ -769,6 +822,7 @@ function RenderView({
     () => sampleDataForVariables(templateVars),
     [templateVars],
   );
+  const fixedLayout = templateDetail?.source_format === "html" && templateDetail.settings?.layout_mode !== "flow";
 
   useEffect(() => {
     if (!selectedTemplate) {
@@ -885,12 +939,15 @@ function RenderView({
       <select
         value={pageSize}
         onChange={(e) => setPageSize(e.target.value)}
-        className="w-48 bg-bg-input border border-border rounded px-2 py-1 text-sm"
+        disabled={fixedLayout}
+        title={fixedLayout ? "Fixed-layout templates use their saved page size." : undefined}
+        className="w-48 bg-bg-input border border-border rounded px-2 py-1 text-sm disabled:opacity-60"
       >
         <option value="A4">A4</option>
         <option value="letter">Letter</option>
         <option value="legal">Legal</option>
       </select>
+      {fixedLayout && <span className="text-xs text-text-dim">Locked by template settings</span>}
 
       <div className="flex items-center gap-2">
         <button

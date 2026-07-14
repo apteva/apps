@@ -236,6 +236,7 @@ func schemaObject(props map[string]any, required []string) map[string]any {
 
 func documentSettingsSchema() map[string]any {
 	return schemaObject(map[string]any{
+		"layout_mode":      map[string]any{"type": "string", "enum": []string{"flow", "fixed"}, "description": "Fixed layouts lock page-size overrides and can use --document-page-width/height CSS variables."},
 		"page_size":        map[string]any{"type": "string", "enum": []string{"A4", "letter", "legal"}},
 		"landscape":        map[string]any{"type": "boolean"},
 		"margin_top_mm":    map[string]any{"type": "number", "minimum": 0, "maximum": 50},
