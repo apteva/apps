@@ -10,6 +10,12 @@
 // theme tokens.
 
 import { useCallback, useEffect, useMemo, useState } from "react";
+import {
+  HTML_LEAD_MAGNET_CSS,
+  HTML_LEAD_MAGNET_SAMPLE_DATA,
+  HTML_LEAD_MAGNET_SETTINGS,
+  HTML_LEAD_MAGNET_STARTER,
+} from "./starters";
 
 interface NativePanelProps {
   appName: string;
@@ -24,10 +30,22 @@ interface Template {
   name: string;
   description?: string;
   body?: string;
+  stylesheet?: string;
+  settings?: DocumentSettings;
   source_format?: string;
   output_format?: string;
   default_folder?: string;
   updated_at?: string;
+}
+
+interface DocumentSettings {
+  page_size?: "A4" | "letter" | "legal";
+  landscape?: boolean;
+  margin_top_mm?: number;
+  margin_right_mm?: number;
+  margin_bottom_mm?: number;
+  margin_left_mm?: number;
+  print_background?: boolean;
 }
 
 interface RenderRow {
@@ -41,6 +59,8 @@ interface RenderRow {
   rendered_by?: string;
   rendered_at: string;
   bytes?: number;
+  template_revision_id?: number;
+  renderer_version?: string;
 }
 
 interface RenderResult {
@@ -48,6 +68,8 @@ interface RenderResult {
   url: string;
   warnings?: string[];
   page_size?: string;
+  renderer_version?: string;
+  template_revision_id?: number;
 }
 
 const API = "/api/apps/docs";
@@ -210,6 +232,9 @@ export default function DocsPanel({ projectId, installId }: NativePanelProps) {
                 name: t.name,
                 description: t.description || "",
                 body: t.body || "",
+                stylesheet: t.stylesheet || "",
+                source_format: t.source_format || "markdown",
+                settings: t.settings || {},
                 default_folder: t.default_folder || "",
               });
               const saved = await api<{ template: Template }>("GET", `/templates/${t.id}`);
@@ -222,6 +247,9 @@ export default function DocsPanel({ projectId, installId }: NativePanelProps) {
                 name: t.name,
                 description: t.description || "",
                 body: t.body || "",
+                stylesheet: t.stylesheet || "",
+                source_format: t.source_format || "markdown",
+                settings: t.settings || {},
                 default_folder: t.default_folder || "",
               });
               await loadTemplates();
@@ -282,6 +310,9 @@ function TemplatesView({
   const [saving, setSaving] = useState(false);
   const [previewError, setPreviewError] = useState("");
   const [pageSize, setPageSize] = useState("A4");
+  const [editorTab, setEditorTab] = useState<"source" | "css" | "data" | "settings">("source");
+  const [previewDataJSON, setPreviewDataJSON] = useState("{}");
+  const [previewDataDirty, setPreviewDataDirty] = useState(false);
   const templateVars = useMemo(
     () => extractTemplateVariables(editing?.body || ""),
     [editing?.body],
@@ -300,7 +331,13 @@ function TemplatesView({
     setPreviewURL(null);
     api<{ template: Template }>("GET", `/templates/${selected.id}`)
       .then((d) => {
-        if (alive) setEditing(d.template);
+        if (!alive) return;
+        setEditing(d.template);
+        const generated = sampleDataForVariables(extractTemplateVariables(d.template.body || ""));
+        setPreviewDataJSON(JSON.stringify(generated, null, 2));
+        setPreviewDataDirty(false);
+        setEditorTab("source");
+        setPageSize(d.template.settings?.page_size || "A4");
       })
       .catch((e) => {
         if (alive) setPreviewError(`Could not load template: ${(e as Error).message}`);
@@ -317,13 +354,31 @@ function TemplatesView({
     };
   }, [previewURL]);
 
-  const startNew = (starter: "blank" | "lead-magnet" = "blank") => {
-    setEditing({
+  useEffect(() => {
+    if (!editing || previewDataDirty) return;
+    setPreviewDataJSON(JSON.stringify(sampleData, null, 2));
+  }, [editing?.body, sampleData, previewDataDirty]);
+
+  const startNew = (starter: "blank" | "lead-magnet" | "html-lead-magnet" = "blank") => {
+    const isHTML = starter === "html-lead-magnet";
+    const next: Template = {
       id: 0,
       slug: "",
-      name: "",
-      body: starter === "lead-magnet" ? LEAD_MAGNET_STARTER : BLANK_STARTER,
-    });
+      name: isHTML ? "ESP32 Starter Guide" : "",
+      body: isHTML ? HTML_LEAD_MAGNET_STARTER : starter === "lead-magnet" ? LEAD_MAGNET_STARTER : BLANK_STARTER,
+      stylesheet: isHTML ? HTML_LEAD_MAGNET_CSS : "",
+      source_format: isHTML ? "html" : "markdown",
+      settings: isHTML ? HTML_LEAD_MAGNET_SETTINGS : { page_size: "A4" },
+      default_folder: isHTML ? "/lead-magnets/" : "",
+    };
+    setEditing(next);
+    const data = isHTML
+      ? HTML_LEAD_MAGNET_SAMPLE_DATA
+      : sampleDataForVariables(extractTemplateVariables(next.body || ""));
+    setPreviewDataJSON(JSON.stringify(data, null, 2));
+    setPreviewDataDirty(false);
+    setEditorTab("source");
+    setPageSize(next.settings?.page_size || "A4");
     setPreviewURL(null);
     setPreviewError("");
     onSelect(null);
@@ -334,6 +389,15 @@ function TemplatesView({
     setPreviewing(true);
     setPreviewError("");
     try {
+      let previewData: unknown;
+      try {
+        previewData = JSON.parse(previewDataJSON);
+      } catch (e) {
+        throw new Error("Preview data isn't valid JSON: " + (e as Error).message);
+      }
+      if (!previewData || typeof previewData !== "object" || Array.isArray(previewData)) {
+        throw new Error("Preview data must be a JSON object.");
+      }
       const id = editing.id || 0;
       // POST /templates/:id/preview — id 0 hits the same handler
       // with body= override (panel-edit mode).
@@ -341,7 +405,14 @@ function TemplatesView({
       const res = await api<{ base64: string; content_type: string }>(
         "POST",
         path,
-        { data: sampleData, body: editing.body, page_size: pageSize },
+        {
+          data: previewData,
+          body: editing.body,
+          stylesheet: editing.stylesheet || "",
+          source_format: editing.source_format || "markdown",
+          settings: editing.settings || {},
+          page_size: pageSize,
+        },
       );
       const bytes = Uint8Array.from(atob(res.base64), (char) => char.charCodeAt(0));
       const url = URL.createObjectURL(new Blob([bytes], { type: res.content_type }));
@@ -369,7 +440,14 @@ function TemplatesView({
             onClick={() => startNew("lead-magnet")}
             className="px-2 py-2 text-xs border border-border rounded hover:bg-bg-input"
           >
-            Lead magnet
+            Markdown lead
+          </button>
+          <button
+            type="button"
+            onClick={() => startNew("html-lead-magnet")}
+            className="col-span-2 px-2 py-2 text-xs border border-accent/50 text-text rounded hover:bg-bg-input"
+          >
+            + Professional HTML lead magnet
           </button>
         </div>
         <div className="flex-1 overflow-auto border border-border rounded">
@@ -390,7 +468,10 @@ function TemplatesView({
                 }`}
               >
                 <div className="font-medium truncate">{t.name}</div>
-                <div className="text-xs text-text-dim truncate">{t.slug}</div>
+                <div className="flex items-center justify-between gap-2 text-xs text-text-dim">
+                  <span className="truncate">{t.slug}</span>
+                  <span className="uppercase">{t.source_format || "markdown"}</span>
+                </div>
               </button>
             ))
           )}
@@ -404,7 +485,7 @@ function TemplatesView({
           </div>
         ) : (
           <>
-            <div className="grid grid-cols-2 gap-2">
+            <div className="grid grid-cols-[1fr_1fr_9rem] gap-2">
               <input
                 type="text"
                 value={editing.slug}
@@ -420,6 +501,19 @@ function TemplatesView({
                 placeholder="display name"
                 className="bg-bg-input border border-border rounded px-2 py-1 text-sm"
               />
+              <select
+                aria-label="Template source format"
+                value={editing.source_format || "markdown"}
+                onChange={(e) => {
+                  const sourceFormat = e.target.value as "markdown" | "html";
+                  setEditing({ ...editing, source_format: sourceFormat });
+                  setEditorTab("source");
+                }}
+                className="bg-bg-input border border-border rounded px-2 py-1 text-sm"
+              >
+                <option value="markdown">Markdown</option>
+                <option value="html">HTML/CSS</option>
+              </select>
             </div>
             <input
               type="text"
@@ -436,13 +530,62 @@ function TemplatesView({
               className="bg-bg-input border border-border rounded px-2 py-1 text-sm font-mono"
             />
             <VariablesPanel variables={templateVars} sampleData={sampleData} compact />
-            <textarea
-              value={editing.body || ""}
-              onChange={(e) => setEditing({ ...editing, body: e.target.value })}
-              placeholder="# Markdown body with {{.placeholders}}"
-              className="flex-1 bg-bg-input border border-border rounded p-3 text-xs font-mono min-h-[18rem]"
-              spellCheck={false}
-            />
+            <div className="flex items-center gap-1 border-b border-border">
+              {([
+                ["source", editing.source_format === "html" ? "HTML" : "Markdown"],
+                ...(editing.source_format === "html" ? [["css", "CSS"]] : []),
+                ["data", "Preview data"],
+                ...(editing.source_format === "html" ? [["settings", "Settings"]] : []),
+              ] as Array<["source" | "css" | "data" | "settings", string]>).map(([key, label]) => (
+                <button
+                  key={key}
+                  type="button"
+                  onClick={() => setEditorTab(key)}
+                  className={`px-3 py-1.5 text-xs border-b-2 ${editorTab === key ? "border-accent text-accent" : "border-transparent text-text-muted"}`}
+                >
+                  {label}
+                </button>
+              ))}
+            </div>
+            {editorTab === "source" && (
+              <textarea
+                value={editing.body || ""}
+                onChange={(e) => setEditing({ ...editing, body: e.target.value })}
+                placeholder={editing.source_format === "html" ? "<main>HTML with {{.placeholders}}</main>" : "# Markdown with {{.placeholders}}"}
+                className="flex-1 bg-bg-input border border-border rounded p-3 text-xs font-mono min-h-[18rem]"
+                spellCheck={false}
+              />
+            )}
+            {editorTab === "css" && editing.source_format === "html" && (
+              <textarea
+                value={editing.stylesheet || ""}
+                onChange={(e) => setEditing({ ...editing, stylesheet: e.target.value })}
+                placeholder="@page { size: A4; margin: 0; }"
+                className="flex-1 bg-bg-input border border-border rounded p-3 text-xs font-mono min-h-[18rem]"
+                spellCheck={false}
+              />
+            )}
+            {editorTab === "data" && (
+              <textarea
+                value={previewDataJSON}
+                onChange={(e) => {
+                  setPreviewDataJSON(e.target.value);
+                  setPreviewDataDirty(true);
+                }}
+                placeholder="Preview data as JSON"
+                className="flex-1 bg-bg-input border border-border rounded p-3 text-xs font-mono min-h-[18rem]"
+                spellCheck={false}
+              />
+            )}
+            {editorTab === "settings" && editing.source_format === "html" && (
+              <DocumentSettingsEditor
+                settings={editing.settings || { page_size: "A4" }}
+                onChange={(settings) => {
+                  setEditing({ ...editing, settings });
+                  setPageSize(settings.page_size || "A4");
+                }}
+              />
+            )}
             <div className="flex items-center gap-2">
               <select
                 aria-label="Preview page size"
@@ -524,6 +667,75 @@ function TemplatesView({
   );
 }
 
+function DocumentSettingsEditor({
+  settings,
+  onChange,
+}: {
+  settings: DocumentSettings;
+  onChange: (settings: DocumentSettings) => void;
+}) {
+  const margin = (key: keyof DocumentSettings, fallback: number) =>
+    typeof settings[key] === "number" ? (settings[key] as number) : fallback;
+  const setNumber = (key: keyof DocumentSettings, raw: string) => {
+    const value = Math.max(0, Math.min(50, Number(raw) || 0));
+    onChange({ ...settings, [key]: value });
+  };
+  return (
+    <div className="flex-1 min-h-[18rem] border border-border rounded bg-bg-input/30 p-4 space-y-4">
+      <div>
+        <div className="text-sm font-medium text-text">Print settings</div>
+        <p className="text-xs text-text-muted mt-1">
+          CSS controls the document design. These settings control the physical PDF page.
+        </p>
+      </div>
+      <div className="grid grid-cols-2 gap-3">
+        <label className="text-xs text-text-muted">
+          Page size
+          <select
+            value={settings.page_size || "A4"}
+            onChange={(e) => onChange({ ...settings, page_size: e.target.value as DocumentSettings["page_size"] })}
+            className="mt-1 w-full bg-bg-input border border-border rounded px-2 py-2 text-sm text-text"
+          >
+            <option value="A4">A4</option><option value="letter">Letter</option><option value="legal">Legal</option>
+          </select>
+        </label>
+        <div className="grid grid-cols-2 gap-2 items-end">
+          <label className="flex items-center gap-2 text-xs text-text-muted pb-2">
+            <input type="checkbox" checked={!!settings.landscape} onChange={(e) => onChange({ ...settings, landscape: e.target.checked })} />
+            Landscape
+          </label>
+          <label className="flex items-center gap-2 text-xs text-text-muted pb-2">
+            <input type="checkbox" checked={settings.print_background !== false} onChange={(e) => onChange({ ...settings, print_background: e.target.checked })} />
+            Print backgrounds
+          </label>
+        </div>
+      </div>
+      <div>
+        <div className="text-xs uppercase tracking-wide text-text-dim mb-2">Margins (millimetres)</div>
+        <div className="grid grid-cols-4 gap-2">
+          {([
+            ["margin_top_mm", "Top"], ["margin_right_mm", "Right"],
+            ["margin_bottom_mm", "Bottom"], ["margin_left_mm", "Left"],
+          ] as Array<[keyof DocumentSettings, string]>).map(([key, label]) => (
+            <label key={key} className="text-xs text-text-muted">
+              {label}
+              <input
+                type="number" min={0} max={50} step={1}
+                value={margin(key, 12)}
+                onChange={(e) => setNumber(key, e.target.value)}
+                className="mt-1 w-full bg-bg-input border border-border rounded px-2 py-2 text-sm text-text"
+              />
+            </label>
+          ))}
+        </div>
+      </div>
+      <div className="rounded border border-border bg-bg p-3 text-xs text-text-muted">
+        For full-bleed cover designs, set all margins to 0 and add page padding in CSS.
+      </div>
+    </div>
+  );
+}
+
 // ─── Render view ───────────────────────────────────────────────────
 
 function RenderView({
@@ -586,6 +798,7 @@ function RenderView({
     if (!templateDetail) return;
     setDataJSON(JSON.stringify(sampleData, null, 2));
     setOutputFolder(templateDetail.default_folder || "");
+    setPageSize(templateDetail.settings?.page_size || "A4");
   }, [templateDetail, sampleData]);
 
   const handleRender = async () => {
@@ -638,6 +851,11 @@ function RenderView({
       </select>
 
       <label className="text-xs text-text-dim mt-2">Data (JSON)</label>
+      {templateDetail && (
+        <div className="text-xs text-text-muted">
+          Renderer: <span className="font-medium text-text">{templateDetail.source_format === "html" ? "HTML/CSS · Chromium" : "Markdown · Maroto"}</span>
+        </div>
+      )}
       <textarea
         value={dataJSON}
         onChange={(e) => setDataJSON(e.target.value)}
@@ -689,6 +907,12 @@ function RenderView({
       {result?.url && (
         <div className="border border-green/40 bg-green/5 rounded p-3 flex flex-col gap-2">
           <span className="text-sm text-green">Rendered ✓</span>
+          {(result.renderer_version || result.template_revision_id) && (
+            <span className="text-xs text-text-muted">
+              {result.renderer_version || "renderer"}
+              {result.template_revision_id ? ` · template revision ${result.template_revision_id}` : ""}
+            </span>
+          )}
           <a
             href={result.url}
             target="_blank"
@@ -932,7 +1156,10 @@ function RendersView({
               <tr key={r.id} className="border-t border-border hover:bg-bg-input/30">
                 <td className="px-4 py-2">
                   <div className="text-text font-medium">{r.template_slug}</div>
-                  <div className="text-xs text-text-dim">render #{r.id}</div>
+                  <div className="text-xs text-text-dim">
+                    render #{r.id}{r.renderer_version ? ` · ${r.renderer_version}` : ""}
+                    {r.template_revision_id ? ` · rev ${r.template_revision_id}` : ""}
+                  </div>
                 </td>
                 <td className="px-4 py-2">
                   <div className="text-text truncate max-w-md" title={r.output_name}>

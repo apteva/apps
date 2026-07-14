@@ -2,7 +2,10 @@ package main
 
 import (
 	"database/sql"
+	"encoding/json"
 	"os"
+	"path/filepath"
+	"sort"
 	"strings"
 	"testing"
 
@@ -16,12 +19,19 @@ func testDB(t *testing.T) *sql.DB {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = db.Close() })
-	migration, err := os.ReadFile("migrations/001_init.sql")
+	migrations, err := filepath.Glob("migrations/*.sql")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := db.Exec(string(migration)); err != nil {
-		t.Fatal(err)
+	sort.Strings(migrations)
+	for _, path := range migrations {
+		migration, err := os.ReadFile(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := db.Exec(string(migration)); err != nil {
+			t.Fatalf("apply %s: %v", path, err)
+		}
 	}
 	return db
 }
@@ -60,6 +70,46 @@ func TestTemplateValidationAndStrictUpdates(t *testing.T) {
 	full, _ := getTemplate(db, id, "")
 	if full.Name != "Valid" {
 		t.Fatalf("failed update mutated row: %+v", full)
+	}
+}
+
+func TestTemplateRevisionsSnapshotExactSource(t *testing.T) {
+	db := testDB(t)
+	id, err := createTemplate(db, &Template{
+		Slug: "html-guide", Name: "HTML Guide", SourceFormat: "html",
+		Body: `<main>{{.title}}</main>`, Stylesheet: `main{color:#123456}`,
+		SettingsJSON: json.RawMessage(`{"page_size":"A4"}`),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var count int
+	if err := db.QueryRow(`SELECT count(*) FROM template_revisions WHERE template_id = ?`, id).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("initial revision count = %d", count)
+	}
+	if err := updateTemplate(db, id, map[string]any{"name": "Renamed"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := db.QueryRow(`SELECT count(*) FROM template_revisions WHERE template_id = ?`, id).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("metadata-only update created a revision: %d", count)
+	}
+	if err := updateTemplate(db, id, map[string]any{"stylesheet": `main{color:#654321}`}); err != nil {
+		t.Fatal(err)
+	}
+	var latest TemplateRevision
+	if err := db.QueryRow(`SELECT id, revision_number, source_hash FROM template_revisions
+		WHERE template_id = ? ORDER BY revision_number DESC LIMIT 1`, id).
+		Scan(&latest.ID, &latest.RevisionNumber, &latest.SourceHash); err != nil {
+		t.Fatal(err)
+	}
+	if latest.RevisionNumber != 2 || latest.SourceHash == "" {
+		t.Fatalf("latest revision = %+v", latest)
 	}
 }
 

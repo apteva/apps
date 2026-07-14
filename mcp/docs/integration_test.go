@@ -124,6 +124,11 @@ func TestSidecar_RenderRoundtrip(t *testing.T) {
 	if first["template_slug"] != "invoice-test" {
 		t.Errorf("audit template_slug = %v", first["template_slug"])
 	}
+	audit := sc.MCP("docs_get_render", map[string]any{"render_id": renderID})
+	renderRow, _ := audit["render"].(map[string]any)
+	if renderRow["template_revision"] == nil || renderRow["source_hash"] == "" {
+		t.Errorf("render audit is missing the immutable template revision: %+v", renderRow)
+	}
 }
 
 // Preview returns base64 PDF bytes without persisting — for the
@@ -146,6 +151,33 @@ func TestSidecar_Preview(t *testing.T) {
 	// %PDF- in base64 starts with "JVBERi0".
 	if !strings.HasPrefix(b64, "JVBERi0") {
 		t.Errorf("preview base64 doesn't start with PDF magic: %q", b64[:min(20, len(b64))])
+	}
+}
+
+func TestSidecar_HTMLPreview(t *testing.T) {
+	if _, err := findChromeExecutable(); err != nil {
+		t.Skip(err)
+	}
+	sc := tk.SpawnSidecar(t, ".", tk.WithProjectID("test-proj"))
+	created := sc.MCP("docs_create_template", map[string]any{
+		"slug": "html-guide", "name": "HTML Guide", "source_format": "html",
+		"body":       `<main><p class="eyebrow">FIELD GUIDE</p><h1>{{.title}}</h1><p>{{.summary}}</p></main>`,
+		"stylesheet": `@page{size:A4;margin:0}body{font-family:Arial}main{min-height:260mm;padding:20mm;background:#eef4ff}h1{font-size:36pt;color:#252052}`,
+		"settings":   map[string]any{"page_size": "A4", "margin_top_mm": 0, "margin_right_mm": 0, "margin_bottom_mm": 0, "margin_left_mm": 0},
+	})
+	if created["created"] != true {
+		t.Fatalf("create HTML template: %+v", created)
+	}
+	out := sc.MCP("docs_preview", map[string]any{
+		"template_slug": "html-guide",
+		"data":          map[string]any{"title": "ESP32 Starter Guide", "summary": "Build a sensor dashboard."},
+	})
+	if out["renderer_version"] != htmlRendererVersion {
+		t.Fatalf("renderer = %v, output = %+v", out["renderer_version"], out)
+	}
+	b64, _ := out["base64"].(string)
+	if !strings.HasPrefix(b64, "JVBERi0") {
+		t.Fatalf("HTML preview is not a PDF: %q", b64[:min(20, len(b64))])
 	}
 }
 

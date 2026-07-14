@@ -1,4 +1,4 @@
-// Docs v0.2 — generated client documents stored in storage.
+// Docs v0.4 - generated client documents stored in storage.
 //
 // Templates live in this app's DB; agents call docs_render(template,
 // data) to produce a PDF that lands in storage as a real file. All
@@ -51,7 +51,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		return errors.New("docs requires a db block")
 	}
 	if strings.TrimSpace(ctx.CurrentProject()) == "" {
-		return errors.New("docs v0.3 requires a project-scoped install; reinstall global Docs installs per project")
+		return errors.New("docs v0.4 requires a project-scoped install; reinstall global Docs installs per project")
 	}
 	globalCtx = ctx
 	version := a.Manifest().Version
@@ -111,11 +111,14 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "docs_create_template",
-			Description: "Create a template. Args: slug, name, body, description?, default_folder?.",
+			Description: "Create a Markdown or HTML/CSS template.",
 			InputSchema: schemaObject(map[string]any{
 				"slug":           map[string]any{"type": "string"},
 				"name":           map[string]any{"type": "string"},
 				"body":           map[string]any{"type": "string"},
+				"stylesheet":     map[string]any{"type": "string"},
+				"source_format":  map[string]any{"type": "string", "enum": []string{"markdown", "html"}},
+				"settings":       documentSettingsSchema(),
 				"description":    map[string]any{"type": "string"},
 				"default_folder": map[string]any{"type": "string"},
 			}, []string{"slug", "name", "body"}),
@@ -123,12 +126,15 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "docs_update_template",
-			Description: "Partial update. Args: id, plus any of name/description/body/default_folder.",
+			Description: "Partial template update, including HTML/CSS and document settings.",
 			InputSchema: schemaObject(map[string]any{
 				"id":             map[string]any{"type": "integer"},
 				"name":           map[string]any{"type": "string"},
 				"description":    map[string]any{"type": "string"},
 				"body":           map[string]any{"type": "string"},
+				"stylesheet":     map[string]any{"type": "string"},
+				"source_format":  map[string]any{"type": "string", "enum": []string{"markdown", "html"}},
+				"settings":       documentSettingsSchema(),
 				"default_folder": map[string]any{"type": "string"},
 			}, []string{"id"}),
 			HandlerCtx: a.toolUpdateTemplateCtx,
@@ -141,7 +147,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "docs_render",
-			Description: "Render a template into a file in storage. Markdown supports headings, lists, GFM tables, and images (storage:<id> or data: URI, e.g. a logo). Args: template_id or template_slug, data, output_name?, output_folder?.",
+			Description: "Render a Markdown or HTML/CSS template into a PDF in Storage.",
 			InputSchema: schemaObject(map[string]any{
 				"template_id":   map[string]any{"type": "integer"},
 				"template_slug": map[string]any{"type": "string"},
@@ -154,11 +160,14 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "docs_preview",
-			Description: "Render but don't persist. Returns base64 PDF bytes (images render too).",
+			Description: "Render but don't persist. Returns base64 PDF bytes.",
 			InputSchema: schemaObject(map[string]any{
 				"template_id":   map[string]any{"type": "integer"},
 				"template_slug": map[string]any{"type": "string"},
 				"body":          map[string]any{"type": "string"},
+				"stylesheet":    map[string]any{"type": "string"},
+				"source_format": map[string]any{"type": "string", "enum": []string{"markdown", "html"}},
+				"settings":      documentSettingsSchema(),
 				"data":          map[string]any{"type": "object"},
 				"page_size":     map[string]any{"type": "string", "enum": []string{"A4", "letter", "legal"}},
 			}, []string{"data"}),
@@ -223,4 +232,16 @@ func schemaObject(props map[string]any, required []string) map[string]any {
 		o["required"] = required
 	}
 	return o
+}
+
+func documentSettingsSchema() map[string]any {
+	return schemaObject(map[string]any{
+		"page_size":        map[string]any{"type": "string", "enum": []string{"A4", "letter", "legal"}},
+		"landscape":        map[string]any{"type": "boolean"},
+		"margin_top_mm":    map[string]any{"type": "number", "minimum": 0, "maximum": 50},
+		"margin_right_mm":  map[string]any{"type": "number", "minimum": 0, "maximum": 50},
+		"margin_bottom_mm": map[string]any{"type": "number", "minimum": 0, "maximum": 50},
+		"margin_left_mm":   map[string]any{"type": "number", "minimum": 0, "maximum": 50},
+		"print_background": map[string]any{"type": "boolean"},
+	}, nil)
 }
