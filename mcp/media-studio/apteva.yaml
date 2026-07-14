@@ -2,13 +2,17 @@ schema: apteva-app/v1
 
 name: media-studio
 display_name: Media Studio
-version: 0.10.43
+version: 0.10.44
 description: |
   Generate images, video, audio, music, and avatars via compatible
   providers. ElevenLabs and Fish Audio can power TTS and reusable
   voices; ElevenLabs also powers sound effects and music.
   Optionally saves outputs to the Storage app for permanent, shareable
-  references. v0.10.43 fixes multi-provider image options, stale panel
+  references. v0.10.44 moves generation into a focused responsive dialog
+  with a large prompt editor, grouped settings, mobile sheet layout, sticky
+  actions, keyboard focus handling, and automatic reference-edit opening.
+
+  v0.10.43 fixes multi-provider image options, stale panel
   responses, required video references, project-scoped previews, upload
   validation, and responsive/accessibility behavior.
 

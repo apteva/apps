@@ -2,7 +2,7 @@
 // Loaded by the dashboard via dynamic import; uses host React via
 // importmap; talks to the media-studio sidecar at /api/apps/media-studio/*.
 
-import { useCallback, useEffect, useRef, useState, type DragEvent } from "react";
+import { useCallback, useEffect, useRef, useState, type DragEvent, type ReactNode } from "react";
 import {
   clampDuration,
   imageGenerationOptions,
@@ -267,6 +267,15 @@ const TAB_LABELS: Record<Exclude<Kind, "audio_sfx">, string> = {
   avatar: "Avatar",
 };
 
+const KIND_SINGULAR: Record<Kind, string> = {
+  image: "image",
+  video: "video",
+  audio_tts: "voiceover",
+  audio_sfx: "sound effect",
+  music: "music track",
+  avatar: "avatar video",
+};
+
 // Image-specific option matrices, lifted from the old StudioPanel.
 type ImageModel = string;
 
@@ -401,6 +410,7 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
   const [deletingId, setDeletingId] = useState<number | null>(null);
   const [selected, setSelected] = useState<Generation | null>(null);
   const [lightbox, setLightbox] = useState<Generation | null>(null);
+  const [createOpen, setCreateOpen] = useState(false);
 
   // Per-kind composer state.
   const [prompt, setPrompt] = useState("");
@@ -1313,19 +1323,19 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
     sourceImages,
   ]);
 
-  const submitGeneration = async (mode: "generate" | "draft") => {
-    if (!prompt.trim() || generating || creatingDraft) return;
+  const submitGeneration = async (mode: "generate" | "draft"): Promise<boolean> => {
+    if (!prompt.trim() || generating || creatingDraft) return false;
     if (promptTooLong) {
       setStatus(`Error: prompt is ${promptLength} characters; this model allows ${promptLimit}.`);
-      return;
+      return false;
     }
     if (videoSourceMissing) {
       setStatus("Error: the selected video model requires at least one source image.");
-      return;
+      return false;
     }
     if (mode === "draft" && draftHasInlineSource) {
       setStatus("Error: drafts require Storage references or HTTP(S) source URLs.");
-      return;
+      return false;
     }
     const submittedKind = activeKind;
     const submittedPrompt = prompt;
@@ -1353,7 +1363,7 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
     }
     try {
       const body = buildGenerationBody();
-      if (!body) return;
+      if (!body) return false;
       if (mode === "draft") body.mode = "draft";
       const res = await fetch(`${API}/generate?project_id=${encodeURIComponent(projectId)}`, {
         method: "POST",
@@ -1364,7 +1374,7 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
       const text = await res.text();
       if (!res.ok) {
         commitStatus(`Error ${res.status}: ${text.slice(0, 300)}`);
-        return;
+        return false;
       }
       let result: { isError?: boolean; content?: { type: string; text?: string }[] } = {};
       try {
@@ -1373,7 +1383,7 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
       if (result.isError) {
         const msg = result.content?.find((c) => c.type === "text")?.text || "generation failed";
         commitStatus(`Error: ${msg}`);
-        return;
+        return false;
       }
       // Async kinds (video today) return _meta.status === "queued".
       // Tell the user the bytes will arrive later via the event/poll loop.
@@ -1385,7 +1395,7 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
         const costStr = meta.cost_usd ? ` · est. ${formatCost(meta.cost_usd)}` : "";
         commitStatus(`Draft saved.${costStr}`);
         loadGenerations();
-        return;
+        return true;
       }
       if (meta?.status === "queued") {
         const queuedPrompt = submittedPrompt;
@@ -1410,21 +1420,27 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
             ];
           });
         }
-        return;
+        return true;
       }
       clearPromptIfUnchanged();
       commitStatus("Done.");
       loadGenerations();
+      return true;
     } catch (e) {
       commitStatus("Error: " + (e as Error).message);
+      return false;
     } finally {
       setGenerating(false);
       setCreatingDraft(false);
     }
   };
 
-  const generate = () => submitGeneration("generate");
-  const createDraft = () => submitGeneration("draft");
+  const generate = async () => {
+    if (await submitGeneration("generate")) setCreateOpen(false);
+  };
+  const createDraft = async () => {
+    if (await submitGeneration("draft")) setCreateOpen(false);
+  };
 
   const generateDraft = async (g: Generation) => {
     if (generatingDraftId || g.status !== "draft") return;
@@ -1524,13 +1540,55 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
       setDeletingId(null);
     }
   };
+  const generationCountLabel = `${items.length} generation${items.length === 1 ? "" : "s"}`;
 
   return (
     <div className="h-full flex flex-col">
       <style>{`
         .ms-media-main { flex-direction: row; overflow: hidden; }
-        .ms-media-content { padding: 24px; }
+        .ms-media-content { padding: 12px; }
         .ms-media-detail { width: 384px; border-left-width: 1px; border-left-style: solid; }
+        .ms-create-backdrop {
+          position: fixed;
+          inset: 0;
+          z-index: 9998;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          padding: 24px;
+          background: rgba(0, 0, 0, 0.72);
+        }
+        .ms-create-dialog {
+          width: min(960px, calc(100vw - 48px));
+          max-height: min(820px, calc(100vh - 48px));
+          display: flex;
+          flex-direction: column;
+          overflow: hidden;
+        }
+        .ms-create-body { overflow: auto; padding: 20px; }
+        .ms-create-body > * + * { margin-top: 16px; }
+        .ms-composer { display: flex; flex-direction: column; gap: 20px; }
+        .ms-prompt-input { min-height: 156px; line-height: 1.5; }
+        .ms-composer-options {
+          display: grid;
+          grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+          gap: 14px;
+          align-items: end;
+        }
+        .ms-composer-options select,
+        .ms-composer-options input[type="text"],
+        .ms-composer-options input[type="number"] { width: 100%; min-width: 0 !important; }
+        .ms-option-wide { grid-column: 1 / -1; }
+        .ms-composer-footer {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 16px;
+          padding-top: 16px;
+          border-top-width: 1px;
+          border-top-style: solid;
+        }
+        .ms-composer-actions { margin-left: auto; }
         @media (max-width: 1023px) {
           .ms-media-main { flex-direction: column; overflow: auto; }
           .ms-media-content { padding: 12px; }
@@ -1541,6 +1599,24 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
             border-top-width: 1px;
             border-top-style: solid;
           }
+        }
+        @media (max-width: 640px) {
+          .ms-create-backdrop { padding: 0; align-items: stretch; }
+          .ms-create-dialog { width: 100%; max-height: none; height: 100%; border-radius: 0 !important; }
+          .ms-create-body { padding: 16px; }
+          .ms-composer-options { grid-template-columns: 1fr; }
+          .ms-composer-footer {
+            position: sticky;
+            bottom: -16px;
+            z-index: 2;
+            align-items: stretch;
+            flex-direction: column;
+            margin-bottom: -16px;
+            padding: 16px 0;
+            background: var(--bg-card);
+          }
+          .ms-composer-actions { display: grid; grid-template-columns: 1fr 1fr; margin-left: 0; }
+          .ms-composer-actions button { width: 100%; }
         }
       `}</style>
       {/* Kind tabs */}
@@ -1614,6 +1690,31 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
           role="tabpanel"
           className="ms-media-content flex-1 flex flex-col gap-4 min-w-0 min-h-0"
         >
+          <div className="flex items-center justify-between gap-3 flex-wrap">
+            <div className="min-w-0">
+              <div className="text-sm font-medium text-text">
+                {generationCountLabel}
+              </div>
+              {status && status !== generationCountLabel && (
+                <div className="text-xs text-text-dim truncate">{status}</div>
+              )}
+            </div>
+            <button
+              onClick={() => setCreateOpen(true)}
+              disabled={!isBound}
+              className="flex items-center gap-2 px-3 py-2 text-sm bg-accent text-bg rounded font-bold disabled:opacity-50"
+              title={isBound ? `Create a new ${KIND_SINGULAR[activeKind]}` : "Bind a provider first"}
+            >
+              <span aria-hidden="true" className="text-base leading-none">+</span>
+              New {KIND_SINGULAR[activeKind]}
+            </button>
+          </div>
+
+          {createOpen && (
+            <CreationDialog
+              title={isEditMode ? "Edit image" : `Create ${KIND_SINGULAR[activeKind]}`}
+              onClose={() => setCreateOpen(false)}
+            >
           {(activeKind === "image" || showVideoRefInput) && (
             <ReferenceImageInput
               projectId={projectId}
@@ -1748,6 +1849,8 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
             sourceRequiredMissing={videoSourceMissing}
             draftBlocked={draftHasInlineSource}
           />
+            </CreationDialog>
+          )}
 
           {(activeKind === "video" || activeKind === "avatar") && videoJobs.some((j) => j.status === "failed") && (
             <VideoJobsBanner jobs={videoJobs} />
@@ -1774,7 +1877,6 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
                 />
             )}
           </div>
-          <div className="text-xs text-text-dim">{status}</div>
         </div>
 
         {selected && (
@@ -1790,6 +1892,7 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
                     addSourceImage(`storage:${id}`, `Storage #${id}`);
                     setSelected(null);
                     setTab("image");
+                    setCreateOpen(true);
                   }
                 : undefined
             }
@@ -1808,6 +1911,7 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
                   addSourceImage(`storage:${id}`, `Storage #${id}`);
                   setLightbox(null);
                   setTab("image");
+                  setCreateOpen(true);
                 }
               : undefined
           }
@@ -1818,6 +1922,80 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
 }
 
 // ─── sub-components ────────────────────────────────────────────────
+
+function CreationDialog({
+  title,
+  onClose,
+  children,
+}: {
+  title: string;
+  onClose: () => void;
+  children: ReactNode;
+}) {
+  const dialogRef = useRef<HTMLDivElement>(null);
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+  useEffect(() => {
+    const previouslyFocused = document.activeElement instanceof HTMLElement
+      ? document.activeElement
+      : null;
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        onCloseRef.current();
+        return;
+      }
+      if (event.key !== "Tab" || !dialogRef.current) return;
+      const focusable = Array.from(
+        dialogRef.current.querySelectorAll<HTMLElement>(
+          'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), a[href]',
+        ),
+      );
+      if (focusable.length === 0) return;
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    window.addEventListener("keydown", onKeyDown);
+    dialogRef.current?.querySelector("textarea")?.focus();
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+      previouslyFocused?.focus();
+    };
+  }, []);
+  return (
+    <div className="ms-create-backdrop" onMouseDown={onClose}>
+      <div
+        ref={dialogRef}
+        role="dialog"
+        aria-modal="true"
+        aria-labelledby="media-create-title"
+        className="ms-create-dialog border border-border rounded bg-bg-card"
+        onMouseDown={(event) => event.stopPropagation()}
+      >
+        <header className="flex items-center justify-between gap-4 px-5 py-4 border-b border-border flex-shrink-0">
+          <h2 id="media-create-title" className="text-base font-semibold text-text">
+            {title}
+          </h2>
+          <button
+            onClick={onClose}
+            aria-label="Close creation dialog"
+            className="text-text-muted hover:text-text leading-none px-2 py-1"
+            style={{ fontSize: 22 }}
+          >
+            ×
+          </button>
+        </header>
+        <div className="ms-create-body">{children}</div>
+      </div>
+    </div>
+  );
+}
 
 function KindIcon({ kind }: { kind: Kind }) {
   if (kind === "image") return <IconImage />;
@@ -2020,8 +2198,8 @@ function Composer(p: ComposerProps) {
     !!selectedAvatar &&
     !avatarSupportsEngine(selectedAvatar, "avatar_v");
   return (
-    <div className="flex items-end gap-3 flex-wrap">
-      <div className="flex-1" style={{ minWidth: 240 }}>
+    <div className="ms-composer">
+      <div>
         <label className="text-text-muted text-xs flex items-center justify-between gap-2">
           <span>Prompt</span>
           {p.promptLimit > 0 && (
@@ -2031,16 +2209,18 @@ function Composer(p: ComposerProps) {
           )}
         </label>
         <textarea
-          rows={2}
+          rows={7}
           value={p.prompt}
           onChange={(e) => p.setPrompt(e.target.value)}
           onKeyDown={(e) => {
             if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) p.generate();
           }}
           placeholder={promptPlaceholder}
-          className={`w-full bg-bg-input border rounded px-2 py-1.5 text-sm resize-y ${p.promptTooLong ? "border-red" : "border-border"}`}
+          autoFocus
+          className={`ms-prompt-input w-full bg-bg-input border rounded px-3 py-2.5 text-sm resize-y ${p.promptTooLong ? "border-red" : "border-border"}`}
         />
       </div>
+      <div className="ms-composer-options">
       {p.kind === "image" && p.isEditMode && (
         <EditOptions
           model={p.editModel}
@@ -2237,35 +2417,40 @@ function Composer(p: ComposerProps) {
           suggestions={p.folderSuggestions}
         />
       )}
-      <EstimateBadge estimate={p.estimate} loading={p.estimateLoading} />
-      <button
-        onClick={p.generate}
-        disabled={!p.prompt.trim() || p.promptTooLong || p.generating || p.creatingDraft || p.disabled || avatarVBlocked || p.sourceRequiredMissing}
-        className="px-3 py-1.5 text-sm bg-accent text-bg rounded font-bold disabled:opacity-50"
-        title={
-          avatarVBlocked
-            ? "Selected avatar does not advertise Avatar V support"
-            : p.sourceRequiredMissing
-              ? "The selected video model requires a source image"
-              : undefined
-        }
-      >
-        {p.generating ? "…" : p.isEditMode ? "Edit" : p.kind === "avatar" ? "Generate avatar" : "Generate"}
-      </button>
-      <button
-        onClick={p.createDraft}
-        disabled={!p.prompt.trim() || p.promptTooLong || p.generating || p.creatingDraft || p.sourceRequiredMissing || p.draftBlocked}
-        title={
-          p.sourceRequiredMissing
-            ? "The selected video model requires a source image"
-            : p.draftBlocked
-              ? "Drafts require Storage references or HTTP(S) source URLs"
-              : undefined
-        }
-        className="px-3 py-1.5 text-sm border border-border rounded text-text-muted hover:text-text hover:border-accent disabled:opacity-50"
-      >
-        {p.creatingDraft ? "Saving…" : "Create draft"}
-      </button>
+      </div>
+      <div className="ms-composer-footer border-border">
+        <EstimateBadge estimate={p.estimate} loading={p.estimateLoading} />
+        <div className="ms-composer-actions flex items-center gap-2">
+          <button
+            onClick={p.createDraft}
+            disabled={!p.prompt.trim() || p.promptTooLong || p.generating || p.creatingDraft || p.disabled || p.sourceRequiredMissing || p.draftBlocked}
+            title={
+              p.sourceRequiredMissing
+                ? "The selected video model requires a source image"
+                : p.draftBlocked
+                  ? "Drafts require Storage references or HTTP(S) source URLs"
+                  : undefined
+            }
+            className="px-3 py-2 text-sm border border-border rounded text-text-muted hover:text-text hover:border-accent disabled:opacity-50"
+          >
+            {p.creatingDraft ? "Saving…" : "Save draft"}
+          </button>
+          <button
+            onClick={p.generate}
+            disabled={!p.prompt.trim() || p.promptTooLong || p.generating || p.creatingDraft || p.disabled || avatarVBlocked || p.sourceRequiredMissing}
+            className="px-4 py-2 text-sm bg-accent text-bg rounded font-bold disabled:opacity-50"
+            title={
+              avatarVBlocked
+                ? "Selected avatar does not advertise Avatar V support"
+                : p.sourceRequiredMissing
+                  ? "The selected video model requires a source image"
+                  : undefined
+            }
+          >
+            {p.generating ? "Generating…" : p.isEditMode ? "Generate edit" : p.kind === "avatar" ? "Generate video" : "Generate"}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -2393,7 +2578,7 @@ function VoiceCreatePanel({
   return (
     <div
       style={{ flexBasis: "100%" }}
-      className="border border-border rounded p-2 bg-bg-card"
+      className="ms-option-wide border border-border rounded p-2 bg-bg-card"
     >
       <div className="flex items-center gap-2 flex-wrap">
         <button
@@ -2672,7 +2857,7 @@ function AvatarCreatePanel({
   return (
     <div
       style={{ flexBasis: "100%" }}
-      className="border border-border rounded p-2 bg-bg-card"
+      className="ms-option-wide border border-border rounded p-2 bg-bg-card"
     >
       <div className="flex items-center gap-2">
         <button
@@ -2848,7 +3033,7 @@ function AvatarPicker({
   }
   const sections = avatarSections(avatars);
   return (
-    <div style={{ flexBasis: "100%" }}>
+    <div className="ms-option-wide" style={{ flexBasis: "100%" }}>
       <label className="text-text-muted text-xs block mb-1">Avatar / replica ({avatars.length})</label>
       <div className="flex flex-col gap-2" style={{ maxHeight: 324, overflow: "auto", paddingRight: 4 }}>
         {sections.map((section) => (
@@ -3210,6 +3395,12 @@ function ReferenceImageInput({
       .slice(0, Math.max(0, maxSources - sources.length));
     files.forEach(handleFile);
   };
+  const addURL = () => {
+    const trimmed = urlInput.trim();
+    if (!trimmed || atLimit) return;
+    onAdd(trimmed, trimmed.length > 40 ? trimmed.slice(0, 37) + "..." : trimmed);
+    setUrlInput("");
+  };
 
   return (
     <div
@@ -3265,18 +3456,28 @@ function ReferenceImageInput({
           })}
         </div>
       )}
-      <div className="flex items-center gap-3 flex-wrap">
-        <span className="text-text-muted text-xs">
+      <div className="flex items-center justify-between gap-3 flex-wrap">
+        <span className="text-text-muted text-xs font-medium">
           {hint || "Reference images"}
           <span className="text-text-dim"> · {sources.length}/{maxSources}</span>
         </span>
-        <button
-          disabled={atLimit}
-          onClick={() => fileInputRef.current?.click()}
-          className="text-xs px-2 py-1 border border-border rounded text-text hover:border-accent disabled:opacity-50"
-        >
-          Upload
-        </button>
+        <div className="flex items-center gap-2">
+          {sources.length > 0 && (
+            <button
+              onClick={onClear}
+              className="text-text-muted hover:text-text text-xs px-2 py-1 border border-border rounded"
+            >
+              Clear
+            </button>
+          )}
+          <button
+            disabled={atLimit}
+            onClick={() => fileInputRef.current?.click()}
+            className="text-xs px-2 py-1 border border-border rounded text-text hover:border-accent disabled:opacity-50"
+          >
+            Upload
+          </button>
+        </div>
         <input
           ref={fileInputRef}
           type="file"
@@ -3289,32 +3490,29 @@ function ReferenceImageInput({
           }}
           style={{ display: "none" }}
         />
-        <span className="text-text-dim text-xs">or paste URL:</span>
+      </div>
+      <div className="flex items-end gap-2">
+        <label className="flex-1 min-w-0 text-text-muted text-xs">
+          Image URL
         <input
           type="text"
           value={urlInput}
           disabled={atLimit}
           onChange={(e) => setUrlInput(e.target.value)}
           onKeyDown={(e) => {
-            if (e.key === "Enter" && urlInput.trim() && !atLimit) {
-              const trimmed = urlInput.trim();
-              onAdd(trimmed, trimmed.length > 40 ? trimmed.slice(0, 37) + "..." : trimmed);
-              setUrlInput("");
-            }
+            if (e.key === "Enter") addURL();
           }}
           placeholder={atLimit ? "reference limit reached" : "https://..."}
-          className="flex-1 bg-bg-input border border-border rounded px-2 py-1 text-sm disabled:opacity-50"
-          style={{ minWidth: 180 }}
+          className="block w-full mt-1 bg-bg-input border border-border rounded px-2 py-1.5 text-sm disabled:opacity-50"
         />
-        {sources.length > 0 && (
-          <button
-            onClick={onClear}
-            className="text-text-muted hover:text-text text-xs px-2 py-1 border border-border rounded"
-          >
-            Clear
-          </button>
-        )}
-        <span className="text-text-dim text-xs">pick from history with Use as reference</span>
+        </label>
+        <button
+          onClick={addURL}
+          disabled={atLimit || !urlInput.trim()}
+          className="px-3 py-1.5 text-sm border border-border rounded text-text hover:border-accent disabled:opacity-50"
+        >
+          Add
+        </button>
       </div>
     </div>
   );

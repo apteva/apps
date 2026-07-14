@@ -36,12 +36,15 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: media-studio
 display_name: Media Studio
-version: 0.10.43
+version: 0.10.44
 description: |
   Generate images, video, audio, music, and avatars via compatible
   providers. Optionally saves outputs to Storage, supports stable
   cache keys for app-to-app generation reuse, and can use OpenAI Codex
-  as a subscription-backed image provider. v0.10.43 fixes multi-provider
+  as a subscription-backed image provider. v0.10.44 moves generation into
+  a focused responsive dialog with a large prompt editor, grouped settings,
+  mobile sheet layout, sticky actions, keyboard focus handling, and automatic
+  reference-edit opening. v0.10.43 fixes multi-provider
   image options, stale panel responses, required video references,
   project-scoped previews, upload validation, and responsive/accessibility
   behavior. v0.10.42 includes project_id
