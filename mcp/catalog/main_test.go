@@ -316,6 +316,11 @@ func TestMCPTools_AllRegisteredHaveSchema(t *testing.T) {
 		"catalog_products_update", "catalog_products_archive", "catalog_products_search",
 		"catalog_prices_list", "catalog_prices_create", "catalog_prices_get",
 		"catalog_prices_update", "catalog_prices_archive",
+		"catalog_discounts_list", "catalog_discounts_create", "catalog_discounts_get",
+		"catalog_discounts_update", "catalog_discounts_archive",
+		"catalog_discount_codes_create", "catalog_discount_codes_list", "catalog_discount_codes_update",
+		"catalog_discounts_quote", "catalog_discounts_reserve", "catalog_discounts_redeem",
+		"catalog_discounts_release",
 	}
 	if len(tools) != len(want) {
 		t.Errorf("MCPTools count = %d, want %d", len(tools), len(want))

@@ -1,6 +1,6 @@
 # How to use the Catalog app
 
-The Catalog app is the source of truth for **what your business sells**: SaaS plans, ecommerce products, services. Other apps (billing, future subscriptions/checkout) reference catalog entries and snapshot fields into their own data.
+The Catalog app is the source of truth for **what your business sells**: SaaS plans, ecommerce products, services, and reusable discount rules. Other apps reference catalog entries and snapshot fields into their own data.
 
 ## Mental model
 
@@ -38,6 +38,20 @@ To sell the same product in EUR and USD, create **two prices** under the same pr
 
 `tax_category` on a Product is a *label*, not a resolved rate. The actual rate resolution happens at checkout/invoice time when the tax engine (Stripe Tax or our own) is wired. Today the label is informational.
 
+## Discounts
+
+Discounts are generic and scoped to all Catalog items or selected product/price IDs. They support:
+
+- `percentage` with `percentage_bps` (`5000` = 50%).
+- `amount` with `value_cents` and currency.
+- `price_override` with a final per-unit `value_cents` and currency.
+- `once`, `repeating` with `duration_cycles`, and `forever` application terms.
+- Date windows, minimum subtotals, project-wide limits, per-customer limits, and code-specific limits.
+
+Use `catalog_discounts_quote` for a non-mutating eligibility check. Before creating a purchase or subscription, call `catalog_discounts_reserve` with a stable idempotency key. Persist the returned `application` snapshot in the owning app, then call `catalog_discounts_redeem`; release abandoned reservations.
+
+Catalog does not apply recurring cycles. For example, a 50% discount with `duration=repeating` and `duration_cycles=3` means the Subscriptions caller applies the immutable snapshot to the first three eligible cycles.
+
 ## Triggering this skill
 
-This skill loads when the agent touches anything catalog-related: tools matching `catalog_*`, panel work in the Catalog tab, or chat mentions of "product", "price", "plan", "subscription tier", "SKU".
+This skill loads when the agent touches anything catalog-related: tools matching `catalog_*`, panel work in the Catalog tab, or chat mentions of "product", "price", "discount", "coupon", "plan", "subscription tier", or "SKU".
