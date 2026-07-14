@@ -124,8 +124,8 @@ func noBindings() *stubPlatform {
 func mockStorageURL(t *testing.T) *httptest.Server {
 	t.Helper()
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Match POST /api/apps/storage/files/{id}/url
-		if r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/api/apps/storage/files/") &&
+		// Match POST through the binding-gated Storage proxy.
+		if r.Method == http.MethodPost && strings.HasPrefix(r.URL.Path, "/api/apps/callback/apps/storage/proxy/files/") &&
 			strings.HasSuffix(r.URL.Path, "/url") {
 			parts := strings.Split(strings.Trim(r.URL.Path, "/"), "/")
 			id := "42"
@@ -136,7 +136,7 @@ func mockStorageURL(t *testing.T) *httptest.Server {
 			fmt.Fprintf(w, `{"url":"/files/%s/content?sig=stub&exp=999","expires_at":999}`, id)
 			return
 		}
-		if r.Method == http.MethodGet && r.URL.Path == "/api/apps/storage/files" {
+		if r.Method == http.MethodGet && r.URL.Path == "/api/apps/callback/apps/storage/proxy/files" {
 			ids := strings.Split(r.URL.Query().Get("ids"), ",")
 			w.Header().Set("Content-Type", "application/json")
 			fmt.Fprint(w, `{"files":[`)
@@ -156,7 +156,7 @@ func mockStorageURL(t *testing.T) *httptest.Server {
 			return
 		}
 		// MCP fallback for files_get_url
-		if r.Method == http.MethodPost && r.URL.Path == "/api/apps/storage/mcp" {
+		if r.Method == http.MethodPost && r.URL.Path == "/api/apps/callback/apps/storage/proxy/mcp" {
 			w.Header().Set("Content-Type", "application/json")
 			fmt.Fprintf(w, `{"jsonrpc":"2.0","id":1,"result":{"content":[{"text":"{\"url\":\"/files/42/content?sig=stub&exp=999\"}"}]}}`)
 			return

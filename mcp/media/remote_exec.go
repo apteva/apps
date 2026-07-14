@@ -340,7 +340,7 @@ func (e *remoteExecutor) buildScript(
 	// Env vars carry the inputs so they don't appear in `ps` output
 	// and so the inline JSON / curl args stay readable.
 	fmt.Fprintf(&b, "export STORAGE_TOKEN=%s\n", shellQuote(e.storageToken))
-	fmt.Fprintf(&b, "export STORAGE_BASE=%s\n", shellQuote(publicURL+"/api/apps/storage"))
+	fmt.Fprintf(&b, "export STORAGE_BASE=%s\n", shellQuote(publicURL+boundStorageProxyPath))
 	fmt.Fprintf(&b, "export PROJECT_ID=%s\n", shellQuote(row.ProjectID))
 	fmt.Fprintf(&b, "export FOLDER=%s\n", shellQuote(folder))
 	fmt.Fprintf(&b, "export NAME=%s\n", shellQuote(plan.Filename))

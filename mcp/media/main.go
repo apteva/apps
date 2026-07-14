@@ -22,7 +22,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: media
 display_name: Media
-version: 0.13.55
+version: 0.13.56
 description: |
   Catalog + derivations + renders + transcripts + auto-descriptions
   for media files in storage. Indexes uploads (probe, thumbnail,
@@ -34,6 +34,7 @@ description: |
   through storage.
 author: Apteva
 scopes: [project, global]
+min_apteva_version: "0.25.9"
 requires:
   permissions:
     - db.write.app
@@ -42,7 +43,7 @@ requires:
     - platform.apps.call
   apps:
     - name: storage
-      version: ">=0.1.0"
+      version: ">=0.8.1"
       reason: reads source bytes; writes thumbnails, waveforms, and render outputs back to storage
     - name: jobs
       version: ">=0.1.0"

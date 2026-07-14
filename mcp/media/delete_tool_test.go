@@ -21,7 +21,7 @@ func TestToolDelete_RemovesStorageAndMediaRows(t *testing.T) {
 
 	var deletedIDs []int64
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != http.MethodPost || r.URL.Path != "/api/apps/storage/mcp" {
+		if r.Method != http.MethodPost || r.URL.Path != "/api/apps/callback/apps/storage/proxy/mcp" {
 			t.Fatalf("unexpected request: %s %s", r.Method, r.URL.Path)
 		}
 		var rpc struct {

@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: media
 display_name: Media
-version: 0.13.55
+version: 0.13.56
 description: |
   Catalog + cheap derivations + parameterised renders for media files
   in storage. Probes uploads with ffprobe (duration, dimensions,
@@ -25,7 +25,7 @@ icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/media/icon.png
 tags: [media, video, audio, ffmpeg, catalog, edit, render]
 
 scopes: [project, global]
-min_apteva_version: "0.10.0"
+min_apteva_version: "0.25.9"
 
 requires:
   permissions:
@@ -34,10 +34,8 @@ requires:
     - platform.connections.execute
     # platform.apps.call lets media use the SDK's CallApp() to reach
     # sibling apps (e.g. storage's files_create_folder, files_move).
-    # The legacy storageclient path uses direct /api/apps/storage/*
-    # HTTP and doesn't need this permission, but every tool we ship
-    # going forward (media_create_folder, media_move, …) goes through
-    # CallApp so the binding system gates the call properly.
+    # Required for both SDK CallAppResult calls and the binding-gated
+    # streaming proxy used for large Storage downloads/uploads.
     - platform.apps.call
   apps:
     - name: storage

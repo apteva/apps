@@ -24,7 +24,7 @@ func TestUploadRenderFile_UsesChunkedUploadAndVerifiesStoredBytes(t *testing.T) 
 	var completeSeen bool
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == http.MethodPost && r.URL.Path == "/api/apps/storage/uploads":
+		case r.Method == http.MethodPost && r.URL.Path == "/uploads":
 			initSeen = true
 			var body map[string]any
 			if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -39,11 +39,11 @@ func TestUploadRenderFile_UsesChunkedUploadAndVerifiesStoredBytes(t *testing.T) 
 				"max_parallel": 1,
 				"max_parts":    100,
 			})
-		case r.Method == http.MethodPut && strings.HasPrefix(r.URL.Path, "/api/apps/storage/uploads/UP1/parts/"):
+		case r.Method == http.MethodPut && strings.HasPrefix(r.URL.Path, "/uploads/UP1/parts/"):
 			b, _ := io.ReadAll(r.Body)
 			got.Write(b)
 			json.NewEncoder(w).Encode(map[string]any{"size": len(b)})
-		case r.Method == http.MethodPost && r.URL.Path == "/api/apps/storage/uploads/UP1/complete":
+		case r.Method == http.MethodPost && r.URL.Path == "/uploads/UP1/complete":
 			completeSeen = true
 			json.NewEncoder(w).Encode(map[string]any{
 				"file": map[string]any{
@@ -85,11 +85,11 @@ func TestUploadRenderFile_RejectsStoredSizeMismatch(t *testing.T) {
 
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
-		case r.Method == http.MethodPost && r.URL.Path == "/api/apps/storage/uploads":
+		case r.Method == http.MethodPost && r.URL.Path == "/uploads":
 			json.NewEncoder(w).Encode(map[string]any{"upload_id": "UP1", "part_size": 1024, "max_parts": 100})
 		case r.Method == http.MethodPut:
 			json.NewEncoder(w).Encode(map[string]any{"size": 1})
-		case r.Method == http.MethodPost && r.URL.Path == "/api/apps/storage/uploads/UP1/complete":
+		case r.Method == http.MethodPost && r.URL.Path == "/uploads/UP1/complete":
 			json.NewEncoder(w).Encode(map[string]any{
 				"file": map[string]any{
 					"id":         78,

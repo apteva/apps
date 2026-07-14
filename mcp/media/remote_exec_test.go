@@ -161,7 +161,7 @@ func TestBuildScript_TrimShape(t *testing.T) {
 		`SIZE=$(file_size_bytes "$OUT")`,
 		`SHA=$(sha256sum`,
 		`export STORAGE_TOKEN='tok-xyz'`,
-		`export STORAGE_BASE='https://apt.example.com/api/apps/storage'`,
+		`export STORAGE_BASE='https://apt.example.com/api/apps/callback/apps/storage/proxy'`,
 		`export PROJECT_ID='proj-1'`,
 		`export FOLDER='/renders/'`,
 		`export NAME='clip.mp4'`,

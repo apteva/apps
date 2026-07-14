@@ -1,10 +1,9 @@
 package main
 
-// Cross-app client for the storage app. Hits the platform proxy at
-// <APTEVA_GATEWAY_URL>/api/apps/storage/* with our own install
-// token; the platform's authMiddleware accepts dev-<install_id>
-// tokens for /api/apps/* paths and the proxy then swaps them to
-// storage's own install token before forwarding.
+// Cross-app client for the storage app. All streaming HTTP goes
+// through the platform's binding-gated callback proxy. Media keeps
+// its own install token; the platform verifies platform.apps.call +
+// the exact requires.apps binding, then swaps in Storage's token.
 
 import (
 	"bytes"
@@ -26,7 +25,10 @@ import (
 	"time"
 )
 
-const defaultStorageUploadPartSize int64 = 5 * 1024 * 1024
+const (
+	defaultStorageUploadPartSize int64 = 5 * 1024 * 1024
+	boundStorageProxyPath              = "/api/apps/callback/apps/storage/proxy"
+)
 
 type storageClient struct {
 	base       string
@@ -45,8 +47,13 @@ func newStorageClient() *storageClient {
 	if tok == "" {
 		tok = os.Getenv("APTEVA_APP_TOKEN")
 	}
+	gateway := strings.TrimRight(os.Getenv("APTEVA_GATEWAY_URL"), "/")
+	proxyBase := ""
+	if gateway != "" {
+		proxyBase = gateway + boundStorageProxyPath
+	}
 	return &storageClient{
-		base:       os.Getenv("APTEVA_GATEWAY_URL"),
+		base:       proxyBase,
 		token:      tok,
 		httpClient: &http.Client{Timeout: 30 * time.Minute},
 	}
@@ -199,7 +206,11 @@ func (c *storageClient) GetSignedURL(ctx context.Context, projectID string, id i
 	if err != nil {
 		return "", fmt.Errorf("cannot mint a signed URL reachable from outside the cluster: %w", err)
 	}
-	body, err := c.do(ctx, http.MethodPost, "/files/"+strconv.FormatInt(id, 10)+"/url",
+	q := url.Values{}
+	if projectID != "" {
+		q.Set("project_id", projectID)
+	}
+	body, err := c.do(ctx, http.MethodPost, "/files/"+strconv.FormatInt(id, 10)+"/url?"+q.Encode(),
 		map[string]any{"project_id": projectID, "ttl_seconds": ttlSeconds}, "application/json")
 	if err != nil {
 		// Older storage versions might not have the HTTP route; fall
@@ -216,6 +227,9 @@ func (c *storageClient) GetSignedURL(ctx context.Context, projectID string, id i
 		return "", errors.New("storage returned empty url")
 	}
 	if strings.HasPrefix(resp.URL, "/") {
+		if strings.HasPrefix(resp.URL, "/api/apps/storage/") {
+			return publicURL + resp.URL, nil
+		}
 		return publicURL + "/api/apps/storage" + resp.URL, nil
 	}
 	return resp.URL, nil
@@ -241,7 +255,7 @@ func (c *storageClient) signedURLViaMCP(ctx context.Context, projectID string, i
 	}
 	raw, _ := json.Marshal(rpc)
 	req, _ := http.NewRequestWithContext(ctx, http.MethodPost,
-		c.base+"/api/apps/storage/mcp", bytes.NewReader(raw))
+		c.base+"/mcp?project_id="+url.QueryEscape(projectID), bytes.NewReader(raw))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+c.token)
 	resp, err := c.httpClient.Do(req)
@@ -275,6 +289,9 @@ func (c *storageClient) signedURLViaMCP(ctx context.Context, projectID string, i
 		return "", errors.New("files_get_url returned no url")
 	}
 	if strings.HasPrefix(urlStr, "/") {
+		if strings.HasPrefix(urlStr, "/api/apps/storage/") {
+			return publicURL + urlStr, nil
+		}
 		return publicURL + "/api/apps/storage" + urlStr, nil
 	}
 	return urlStr, nil
@@ -308,7 +325,7 @@ func (c *storageClient) DeleteFile(ctx context.Context, projectID string, id int
 	}
 	raw, _ := json.Marshal(rpc)
 	req, _ := http.NewRequestWithContext(ctx, http.MethodPost,
-		c.base+"/api/apps/storage/mcp", bytes.NewReader(raw))
+		c.base+"/mcp?project_id="+url.QueryEscape(projectID), bytes.NewReader(raw))
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+c.token)
 	resp, err := c.httpClient.Do(req)
@@ -331,7 +348,7 @@ func (c *storageClient) DownloadContent(ctx context.Context, projectID string, i
 		q.Set("project_id", projectID)
 	}
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet,
-		c.base+"/api/apps/storage/files/"+strconv.FormatInt(id, 10)+"/content?"+q.Encode(), nil)
+		c.base+"/files/"+strconv.FormatInt(id, 10)+"/content?"+q.Encode(), nil)
 	if err != nil {
 		return err
 	}
@@ -737,7 +754,7 @@ func (c *storageClient) do(ctx context.Context, method, path string, jsonBody an
 			contentType = "application/json"
 		}
 	}
-	url := c.base + "/api/apps/storage" + path
+	url := c.base + path
 	req, err := http.NewRequestWithContext(ctx, method, url, bodyReader)
 	if err != nil {
 		return nil, err

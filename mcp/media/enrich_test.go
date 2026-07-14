@@ -28,10 +28,10 @@ func newFakeStorage(t *testing.T, files []StorageFile) (*fakeStorage, func()) {
 	}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fs.calls++
-		// Match storage's actual route shape: /api/apps/storage/files?ids=...
+		// Match media's binding-gated Storage proxy route.
 		// (the platform proxy rewrites the prefix away before storage sees
 		// it; we serve at the same final path here.)
-		if !strings.HasPrefix(r.URL.Path, "/api/apps/storage/files") {
+		if !strings.HasPrefix(r.URL.Path, "/api/apps/callback/apps/storage/proxy/files") {
 			http.Error(w, "unexpected path "+r.URL.Path, 404)
 			return
 		}

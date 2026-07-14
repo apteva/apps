@@ -271,7 +271,7 @@ func buildRemoteTranscriptAudioScript(in remoteTranscriptAudioScriptInputs) stri
 	b.WriteString(`mkdir -p "$WORK"; cd "$WORK"` + "\n")
 	b.WriteString(`trap 'cd /tmp && rm -rf "$WORK"' EXIT` + "\n")
 	fmt.Fprintf(&b, "export STORAGE_TOKEN=%s\n", shellQuote(in.StorageToken))
-	fmt.Fprintf(&b, "export STORAGE_BASE=%s\n", shellQuote(in.PublicURL+"/api/apps/storage"))
+	fmt.Fprintf(&b, "export STORAGE_BASE=%s\n", shellQuote(in.PublicURL+boundStorageProxyPath))
 	fmt.Fprintf(&b, "export PROJECT_ID=%s\n", shellQuote(in.ProjectID))
 	fmt.Fprintf(&b, "export SRC_ID=%s\n", shellQuote(in.FileID))
 	fmt.Fprintf(&b, "export SIGNED_URL=%s\n", shellQuote(in.SignedURL))
