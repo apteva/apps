@@ -493,6 +493,77 @@ func TestAccountFinalize_FacebookHappyPath(t *testing.T) {
 	}
 }
 
+func TestAccountFinalize_FacebookLegacyExpiryPreservesProfile(t *testing.T) {
+	pf := newRecordingPlatform()
+	pf.executeResponses["list_pages"] = &sdk.ExecuteResult{
+		Success: true,
+		Data:    json.RawMessage(`{"data":[{"id":"100","name":"Clara Lance"}]}`),
+	}
+	ctx := newSocialCtx(t, pf)
+	profile, err := ctx.AppDB().Exec(
+		`INSERT INTO profiles (project_id, name, slug, is_default) VALUES ('test-proj', 'Clara Lance', 'clara-lance', 0)`,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	profileID, _ := profile.LastInsertId()
+	legacyExpiry := time.Now().UTC().Add(10 * time.Minute)
+	pending, err := ctx.AppDB().Exec(
+		`INSERT INTO pending_accounts
+		   (project_id, platform, integration_slug, connection_id, status, expires_at, profile_id)
+		 VALUES ('test-proj', 'facebook', 'facebook-api', 42, 'ready', ?, ?)`,
+		legacyExpiry, profileID,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pendingID, _ := pending.LastInsertId()
+
+	out, err := (&App{}).toolAccountFinalize(ctx, map[string]any{
+		"pending_account_id": pendingID,
+		"page_id":            "100",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := out.(map[string]any)
+	if result["social_account_id"] == nil {
+		t.Fatalf("finalize result = %+v", result)
+	}
+	var gotProfileID int64
+	if err := ctx.AppDB().QueryRow(
+		`SELECT profile_id FROM social_accounts WHERE id=?`, result["social_account_id"],
+	).Scan(&gotProfileID); err != nil {
+		t.Fatal(err)
+	}
+	if gotProfileID != profileID {
+		t.Fatalf("profile_id = %d, want %d", gotProfileID, profileID)
+	}
+}
+
+func TestPendingAccountExpiredSupportsCurrentAndLegacyFormats(t *testing.T) {
+	now := time.Date(2026, 7, 14, 14, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name    string
+		raw     string
+		expired bool
+	}{
+		{name: "rfc3339 future", raw: pendingExpiry(now.Add(time.Minute)), expired: false},
+		{name: "rfc3339 past", raw: pendingExpiry(now.Add(-time.Minute)), expired: true},
+		{name: "legacy future", raw: now.Add(time.Minute).String(), expired: false},
+		{name: "legacy past", raw: now.Add(-time.Minute).String(), expired: true},
+		{name: "sqlite future", raw: "2026-07-14 14:01:00", expired: false},
+		{name: "invalid fails closed", raw: "not-a-time", expired: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := pendingAccountExpired(tt.raw, now); got != tt.expired {
+				t.Fatalf("pendingAccountExpired(%q) = %v, want %v", tt.raw, got, tt.expired)
+			}
+		})
+	}
+}
+
 // --- account_disconnect -------------------------------------------
 
 func TestAccountDisconnect_LastSiblingDisconnectsConnection(t *testing.T) {

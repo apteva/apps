@@ -44,7 +44,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: social
 display_name: Social
-version: 0.14.65
+version: 0.14.66
 description: |
   Schedule and publish posts to your social accounts (X, Facebook,
   Instagram, LinkedIn, TikTok, YouTube, Reddit, Pinterest, Threads).
@@ -1057,7 +1057,7 @@ func (a *App) toolAccountAdd(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 				`INSERT INTO pending_accounts (project_id, platform, integration_slug, connection_id, status, expires_at, profile_id)
 				 VALUES (?, ?, ?, ?, 'ready', ?, ?)`,
 				pid, def.Platform, def.IntegrationSlug, existingConnID,
-				time.Now().UTC().Add(10*time.Minute), profileID,
+				pendingExpiry(time.Now().UTC().Add(10*time.Minute)), profileID,
 			)
 			if err != nil {
 				return nil, fmt.Errorf("create pending account (reuse path): %w", err)
@@ -1093,7 +1093,7 @@ func (a *App) toolAccountAdd(ctx *sdk.AppCtx, args map[string]any) (any, error) 
 	res, err := ctx.AppDB().Exec(
 		`INSERT INTO pending_accounts (project_id, platform, integration_slug, status, expires_at, profile_id)
 		 VALUES (?, ?, ?, 'pending_oauth', ?, ?)`,
-		pid, def.Platform, def.IntegrationSlug, now.Add(10*time.Minute), profileID,
+		pid, def.Platform, def.IntegrationSlug, pendingExpiry(now.Add(10*time.Minute)), profileID,
 	)
 	if err != nil {
 		return nil, fmt.Errorf("create pending account: %w", err)
@@ -1288,7 +1288,7 @@ func (a *App) toolAccountFinalize(ctx *sdk.AppCtx, args map[string]any) (any, er
 	defer tx.Rollback()
 	claim, err := tx.Exec(
 		`UPDATE pending_accounts SET status='finalizing'
-		  WHERE id=? AND project_id=? AND status='ready' AND datetime(expires_at) > CURRENT_TIMESTAMP`,
+		  WHERE id=? AND project_id=? AND status='ready'`,
 		pendingID, pid,
 	)
 	if err != nil {
@@ -7550,7 +7550,7 @@ func (a *App) handleOAuthDone(w http.ResponseWriter, r *http.Request) {
 			} else if connID > 0 && status == "ok" && a.pendingConnectionAllowed(globalCtx, row, connID) {
 				res, err := globalCtx.AppDB().Exec(
 					`UPDATE pending_accounts SET connection_id=?, status='ready'
-					  WHERE id=? AND project_id=? AND status='pending_oauth' AND datetime(expires_at) > CURRENT_TIMESTAMP`,
+					  WHERE id=? AND project_id=? AND status='pending_oauth'`,
 					connID, pendingID, row.projectID,
 				)
 				if err == nil {
@@ -8048,17 +8048,41 @@ type pendingRow struct {
 
 func (a *App) getPending(id int64) (*pendingRow, error) {
 	var row pendingRow
+	var expiresAt string
 	err := globalCtx.AppDB().QueryRow(
 		`SELECT id, project_id, platform, integration_slug, COALESCE(connection_id,0), status,
 		        COALESCE(profile_id,0), COALESCE(provider_slug,''), COALESCE(provider_profile_id,''),
-		        COALESCE(provider_state,''), COALESCE(provider_data,''),
-		        CASE WHEN datetime(expires_at) <= CURRENT_TIMESTAMP THEN 1 ELSE 0 END
+		        COALESCE(provider_state,''), COALESCE(provider_data,''), COALESCE(expires_at,'')
 		 FROM pending_accounts WHERE id=?`, id,
-	).Scan(&row.id, &row.projectID, &row.platform, &row.integrationSlug, &row.connectionID, &row.status, &row.profileID, &row.providerSlug, &row.providerProfileID, &row.providerState, &row.providerData, &row.expired)
+	).Scan(&row.id, &row.projectID, &row.platform, &row.integrationSlug, &row.connectionID, &row.status, &row.profileID, &row.providerSlug, &row.providerProfileID, &row.providerState, &row.providerData, &expiresAt)
 	if err != nil {
 		return nil, err
 	}
+	row.expired = pendingAccountExpired(expiresAt, time.Now().UTC())
 	return &row, nil
+}
+
+func pendingExpiry(t time.Time) string {
+	return t.UTC().Format(time.RFC3339Nano)
+}
+
+func pendingAccountExpired(raw string, now time.Time) bool {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return true
+	}
+	for _, layout := range []string{
+		time.RFC3339Nano,
+		"2006-01-02 15:04:05.999999999 -0700 MST",
+		"2006-01-02 15:04:05.999999999-07:00",
+		"2006-01-02 15:04:05",
+	} {
+		if expiresAt, err := time.Parse(layout, raw); err == nil {
+			return !expiresAt.After(now)
+		}
+	}
+	// Invalid expiry data must never make an authorization request live forever.
+	return true
 }
 
 func (a *App) getPendingScoped(ctx *sdk.AppCtx, args map[string]any, id int64) (*pendingRow, error) {

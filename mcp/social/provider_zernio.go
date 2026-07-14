@@ -328,7 +328,7 @@ func (a *App) startZernioAccountConnect(ctx *sdk.AppCtx, args map[string]any) (a
 		   (project_id, platform, integration_slug, connection_id, status, expires_at, profile_id,
 		    provider_slug, provider_profile_id)
 		 VALUES (?, ?, ?, ?, 'pending_oauth', ?, ?, ?, ?)`,
-		pid, platform, zernioProviderSlug, connID, now.Add(30*time.Minute), profileID,
+		pid, platform, zernioProviderSlug, connID, pendingExpiry(now.Add(30*time.Minute)), profileID,
 		zernioProviderSlug, zProfileID,
 	)
 	if err != nil {
@@ -435,7 +435,7 @@ func (a *App) completeZernioOAuth(ctx *sdk.AppCtx, r *http.Request, row *pending
 		}
 		updateRes, _ := ctx.AppDB().Exec(
 			`UPDATE pending_accounts SET status='ready', provider_state=?, provider_data=?
-			  WHERE id=? AND project_id=? AND status='pending_oauth' AND datetime(expires_at) > CURRENT_TIMESTAMP`,
+			  WHERE id=? AND project_id=? AND status='pending_oauth'`,
 			state, string(raw), row.id, row.projectID,
 		)
 		if n, _ := updateRes.RowsAffected(); n != 1 {
@@ -444,7 +444,7 @@ func (a *App) completeZernioOAuth(ctx *sdk.AppCtx, r *http.Request, row *pending
 	} else {
 		updateRes, _ := ctx.AppDB().Exec(
 			`UPDATE pending_accounts SET status='ready', provider_state=?
-			  WHERE id=? AND project_id=? AND status='pending_oauth' AND datetime(expires_at) > CURRENT_TIMESTAMP`,
+			  WHERE id=? AND project_id=? AND status='pending_oauth'`,
 			state, row.id, row.projectID,
 		)
 		if n, _ := updateRes.RowsAffected(); n != 1 {
@@ -495,7 +495,7 @@ func (a *App) finalizeZernioAccount(ctx *sdk.AppCtx, args map[string]any, row *p
 	pid := row.projectID
 	claim, err := ctx.AppDB().Exec(
 		`UPDATE pending_accounts SET status='finalizing'
-		  WHERE id=? AND project_id=? AND status='ready' AND datetime(expires_at) > CURRENT_TIMESTAMP`,
+		  WHERE id=? AND project_id=? AND status='ready'`,
 		row.id, pid,
 	)
 	if err != nil {

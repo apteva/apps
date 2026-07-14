@@ -23,6 +23,7 @@ import {
 } from "recharts";
 import { uploadResumable } from "./uploadResumable";
 import { isTrustedOAuthMessage, scopedAppURL } from "./panelScope";
+import { finalizedAccountError, mcpEnvelopeError } from "./accountFlow";
 
 const API = "/api/apps/social";
 const STORAGE_API = "/api/apps/storage";
@@ -412,6 +413,10 @@ export default function SocialPanel({ projectId }: NativePanelProps) {
   }, []);
 
   const activeProfile = profiles.find((p) => p.id === activeProfileId) || null;
+  const clearOauthLanding = useCallback(() => setOauthLanding(null), []);
+  const setOauthLandingFromReuse = useCallback((pendingId: number, connectionId: number) => {
+    setOauthLanding({ pendingId, connectionId });
+  }, []);
 
   return (
     <div className="h-full flex flex-col">
@@ -446,10 +451,8 @@ export default function SocialPanel({ projectId }: NativePanelProps) {
             activeProfile={activeProfile}
             projectId={projectId}
             oauthLanding={oauthLanding}
-            onClearLanding={() => setOauthLanding(null)}
-            onSetLanding={(pendingId, connId) =>
-              setOauthLanding({ pendingId, connectionId: connId })
-            }
+            onClearLanding={clearOauthLanding}
+            onSetLanding={setOauthLandingFromReuse}
             onChange={loadAccounts}
             onImported={loadPosts}
             setStatus={setStatus}
@@ -880,6 +883,10 @@ function AccountsView({
   const [adding, setAdding] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
   const [providerImportOpen, setProviderImportOpen] = useState(false);
+  const closePicker = useCallback(() => {
+    onClearLanding();
+    onChange();
+  }, [onChange, onClearLanding]);
 
   const handleLanded = useCallback(async (pendingId: number) => {
     // After OAuth, fetch the page list. If empty (no picker required),
@@ -889,9 +896,9 @@ function AccountsView({
       const res = await fetch(appURL(`/accounts/${pendingId}/pages`, projectId), { credentials: "same-origin" });
       if (!res.ok) throw new Error(await res.text());
       const data = await res.json();
-      if (data?.isError) {
-        const inner = (data.content || []).find((c: any) => c.type === "text")?.text;
-        setStatus(inner || "Account picker is not ready yet.");
+      const pickerError = mcpEnvelopeError(data);
+      if (pickerError) {
+        setStatus(pickerError);
         return;
       }
       if (!data.requires_picker) {
@@ -902,6 +909,9 @@ function AccountsView({
           body: JSON.stringify({ pending_account_id: pendingId }),
         });
         if (!finalizeRes.ok) throw new Error(await finalizeRes.text());
+        const finalizeData = await finalizeRes.json();
+        const finalizeError = finalizedAccountError(finalizeData);
+        if (finalizeError) throw new Error(finalizeError);
         setStatus("Account added.");
         onClearLanding();
         onChange();
@@ -1001,7 +1011,7 @@ function AccountsView({
         <PagePicker
           pendingId={oauthLanding.pendingId}
           projectId={projectId}
-          onClose={() => { onClearLanding(); onChange(); }}
+          onClose={closePicker}
           setStatus={setStatus}
         />
       )}
@@ -2355,9 +2365,9 @@ function PagePicker({
         return r.json();
       })
       .then((d) => {
-        if (d?.isError) {
-          const inner = (d.content || []).find((c: any) => c.type === "text")?.text;
-          setStatus(inner || "Account picker failed.");
+        const pickerError = mcpEnvelopeError(d);
+        if (pickerError) {
+          setStatus(pickerError);
           setLoading(false);
           return;
         }
@@ -2368,7 +2378,10 @@ function PagePicker({
           onClose();
         }
       })
-      .catch(() => setLoading(false));
+      .catch((e) => {
+        setStatus("Account picker failed: " + (e as Error).message);
+        setLoading(false);
+      });
   }, [pendingId, onClose, projectId, setStatus]);
 
   const pick = async (page: PageEntry) => {
@@ -2385,6 +2398,9 @@ function PagePicker({
         }),
       });
       if (!res.ok) throw new Error(await res.text());
+      const data = await res.json();
+      const finalizeError = finalizedAccountError(data);
+      if (finalizeError) throw new Error(finalizeError);
       setStatus("Account added: " + page.name);
       onClose();
     } catch (e) {
