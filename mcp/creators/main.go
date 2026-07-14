@@ -595,6 +595,10 @@ func (a *App) handleMetrics(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handlePublic(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		httpErr(w, http.StatusMethodNotAllowed, "GET or HEAD only")
+		return
+	}
 	ctx := contextForRequest(r)
 	pid, err := projectFromRequest(ctx, r)
 	if err != nil {
@@ -611,20 +615,38 @@ func (a *App) handlePublic(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, 404, "space not found")
 		return
 	}
+	if len(parts) == 4 && parts[1] == "files" && parts[3] == "download" {
+		id, _ := strconv.ParseInt(parts[2], 10, 64)
+		link, err := getDownloadLink(ctx, space.ProjectID, space.ID, map[string]any{"attachment_id": id})
+		writeOrErr(w, link, err)
+		return
+	}
 	if len(parts) >= 3 && parts[1] == "posts" {
 		post, err := getPostBySlug(ctx.AppDB(), space.ProjectID, space.ID, parts[2], true)
 		if err != nil || post == nil || post.Status != "published" || post.Visibility != "public" {
 			httpErr(w, 404, "post not found")
 			return
 		}
+		post.Attachments = accessibleAttachments(nil, post, post.Attachments)
 		writeJSON(w, map[string]any{"space": space, "post": post})
 		return
 	}
-	posts, _ := listPosts(ctx.AppDB(), space.ProjectID, space.ID, postFilters{status: "published", visibility: "public", limit: 20})
+	posts, err := listPosts(ctx.AppDB(), space.ProjectID, space.ID, postFilters{status: "published", visibility: "public", limit: 20})
+	if err == nil {
+		err = hydrateAccessibleAttachments(ctx.AppDB(), space.ProjectID, space.ID, posts, nil)
+	}
+	if err != nil {
+		httpErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	writeJSON(w, map[string]any{"space": space, "posts": posts})
 }
 
 func (a *App) handleMemberPortal(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet && r.Method != http.MethodHead {
+		httpErr(w, http.StatusMethodNotAllowed, "GET or HEAD only")
+		return
+	}
 	ctx := contextForRequest(r)
 	parts := strings.Split(strings.Trim(strings.TrimPrefix(r.URL.Path, "/member/"), "/"), "/")
 	if len(parts) == 0 || parts[0] == "" {
@@ -636,7 +658,7 @@ func (a *App) handleMemberPortal(w http.ResponseWriter, r *http.Request) {
 		httpErr(w, 404, "member not found")
 		return
 	}
-	if len(parts) >= 4 && parts[1] == "files" && parts[3] == "download" {
+	if len(parts) == 4 && parts[1] == "files" && parts[3] == "download" {
 		id, _ := strconv.ParseInt(parts[2], 10, 64)
 		link, err := getDownloadLink(ctx, member.ProjectID, member.SpaceID, map[string]any{
 			"attachment_id": id,
@@ -645,12 +667,20 @@ func (a *App) handleMemberPortal(w http.ResponseWriter, r *http.Request) {
 		writeOrErr(w, link, err)
 		return
 	}
-	posts, _ := listPosts(ctx.AppDB(), member.ProjectID, member.SpaceID, postFilters{status: "published", limit: 50})
+	posts, err := listPosts(ctx.AppDB(), member.ProjectID, member.SpaceID, postFilters{status: "published", limit: 50})
+	if err != nil {
+		httpErr(w, http.StatusInternalServerError, err.Error())
+		return
+	}
 	visible := make([]Post, 0, len(posts))
 	for _, p := range posts {
 		if memberCanAccessPost(member, &p) {
 			visible = append(visible, p)
 		}
+	}
+	if err := hydrateAccessibleAttachments(ctx.AppDB(), member.ProjectID, member.SpaceID, visible, member); err != nil {
+		httpErr(w, http.StatusInternalServerError, err.Error())
+		return
 	}
 	writeJSON(w, map[string]any{"member": redactMember(member), "posts": visible})
 }
@@ -1896,6 +1926,27 @@ func listAttachments(db *sql.DB, pid string, spaceID, postID int64) ([]Attachmen
 	return out, rows.Err()
 }
 
+func hydrateAccessibleAttachments(db *sql.DB, pid string, spaceID int64, posts []Post, member *Member) error {
+	for i := range posts {
+		attachments, err := listAttachments(db, pid, spaceID, posts[i].ID)
+		if err != nil {
+			return err
+		}
+		posts[i].Attachments = accessibleAttachments(member, &posts[i], attachments)
+	}
+	return nil
+}
+
+func accessibleAttachments(member *Member, post *Post, attachments []Attachment) []Attachment {
+	visible := make([]Attachment, 0, len(attachments))
+	for i := range attachments {
+		if memberCanAccessAttachment(member, post, &attachments[i]) {
+			visible = append(visible, attachments[i])
+		}
+	}
+	return visible
+}
+
 func getAttachment(db *sql.DB, pid string, spaceID, id int64) (*Attachment, error) {
 	row := db.QueryRow(`SELECT `+attachmentColumns()+` FROM attachments WHERE project_id=? AND space_id=? AND id=?`, pid, spaceID, id)
 	return scanAttachment(row)
@@ -1984,7 +2035,7 @@ func memberCanAccessAttachment(member *Member, post *Post, att *Attachment) bool
 	if !memberCanAccessPost(member, post) {
 		return false
 	}
-	if vis == "members" || vis == "inherit" {
+	if vis == "public" || vis == "members" || vis == "inherit" {
 		return true
 	}
 	if vis == "tier" {

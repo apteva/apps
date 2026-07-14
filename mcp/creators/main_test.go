@@ -51,7 +51,7 @@ func mustMember(t *testing.T, ctx *sdk.AppCtx, pid string, spaceID int64, args m
 func TestManifestAndSpaceScopedSchemas(t *testing.T) {
 	a := &App{}
 	m := a.Manifest()
-	if m.Name != "creators" || m.Version != "0.2.1" {
+	if m.Name != "creators" || m.Version != "0.2.2" {
 		t.Fatalf("manifest = %s %s", m.Name, m.Version)
 	}
 	if len(a.Workers()) != 1 || len(a.EventHandlers()) != 3 || a.EventHandlers()[0].Event != "invoice.paid" {
@@ -93,7 +93,7 @@ func TestMemberUpsertDoesNotDowngradeExistingStatus(t *testing.T) {
 func TestMemberHTTPReadsRedactPortalToken(t *testing.T) {
 	ctx := testContext(t)
 	space := mustSpace(t, ctx, testProject, "Primary", "primary")
-	member := mustMember(t, ctx, testProject, space.ID, map[string]any{"email": "secret@example.com"})
+	member := mustMember(t, ctx, testProject, space.ID, map[string]any{"email": "secret@example.com", "status": "comped"})
 	req := httptest.NewRequest(http.MethodGet, "/members?project_id="+testProject+"&space_id="+jsonNumber(space.ID), nil)
 	rec := httptest.NewRecorder()
 	(&App{}).handleMembers(rec, req)
@@ -106,6 +106,24 @@ func TestMemberHTTPReadsRedactPortalToken(t *testing.T) {
 	raw, _ := json.Marshal(member)
 	if strings.Contains(string(raw), member.PortalToken) {
 		t.Fatal("Member JSON serialization must never expose PortalToken")
+	}
+	post, err := createPost(ctx, testProject, space.ID, map[string]any{
+		"title": "Member picture", "status": "published", "visibility": "members",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ctx.AppDB().Exec(`INSERT INTO attachments (project_id, space_id, post_id, storage_file_id, filename, content_type, visibility) VALUES (?, ?, ?, 9, 'member.png', 'image/png', 'inherit')`, testProject, space.ID, post.ID); err != nil {
+		t.Fatal(err)
+	}
+	req = httptest.NewRequest(http.MethodGet, "/member/"+member.PortalToken, nil)
+	rec = httptest.NewRecorder()
+	(&App{}).handleMemberPortal(rec, req)
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"filename":"member.png"`) {
+		t.Fatalf("member portal omitted accessible attachment: status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), member.PortalToken) || strings.Contains(rec.Body.String(), "portal_token") {
+		t.Fatalf("member credential leaked in portal response: %s", rec.Body.String())
 	}
 }
 
@@ -215,11 +233,23 @@ func TestScheduledPublisherAndPublicProjectRouting(t *testing.T) {
 	if post.Status != "published" {
 		t.Fatalf("scheduled post status=%q", post.Status)
 	}
+	if _, err := ctx.AppDB().Exec(`INSERT INTO attachments (project_id, space_id, post_id, storage_file_id, filename, content_type, visibility) VALUES (?, ?, ?, 9, 'public.png', 'image/png', 'inherit')`, "project-b", b.ID, post.ID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ctx.AppDB().Exec(`INSERT INTO attachments (project_id, space_id, post_id, storage_file_id, filename, content_type, visibility) VALUES (?, ?, ?, 10, 'members-secret.png', 'image/png', 'members')`, "project-b", b.ID, post.ID); err != nil {
+		t.Fatal(err)
+	}
 	req := httptest.NewRequest(http.MethodGet, "/public/creator?project_id=project-b", nil)
 	rec := httptest.NewRecorder()
 	(&App{}).handlePublic(rec, req)
 	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), `"project_id":"project-b"`) || strings.Contains(rec.Body.String(), `"project_id":"project-a"`) {
 		t.Fatalf("public route selected wrong project: status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"filename":"public.png"`) {
+		t.Fatalf("public feed omitted accessible attachment: %s", rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "members-secret.png") {
+		t.Fatalf("public feed leaked restricted attachment metadata: %s", rec.Body.String())
 	}
 	_ = a
 }
@@ -258,6 +288,12 @@ func TestMemberCanAccessAttachment(t *testing.T) {
 	member.TierID = &otherTier
 	if memberCanAccessAttachment(member, post, att) {
 		t.Fatal("member in another tier should not access tier-gated post")
+	}
+	post.Visibility = "members"
+	att.Visibility = "public"
+	member.Status = "comped"
+	if !memberCanAccessAttachment(member, post, att) {
+		t.Fatal("entitled member should access a public attachment on a gated post")
 	}
 }
 
