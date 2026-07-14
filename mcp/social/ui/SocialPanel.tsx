@@ -5,8 +5,8 @@
 //     (OAuth in popup → page picker if needed → finalize).
 //   - Tab "Compose": prompt body + multi-select accounts + media picker
 //     (storage app, when bound) + Schedule/Now → post_create.
-//   - Tab "Posts": list of recent posts with per-target status pills,
-//     retry button on failed/partial.
+//   - Tab "Posts": compact list or bounded month/week calendar with
+//     shared filters, post details, and lifecycle actions.
 //
 // Lives in the social app's sidecar at /api/apps/social/ui/SocialPanel.mjs.
 // The host React (19) + react-dom come from the dashboard's importmap;
@@ -24,6 +24,16 @@ import {
 import { uploadResumable } from "./uploadResumable";
 import { isTrustedOAuthMessage, scopedAppURL } from "./panelScope";
 import { finalizedAccountError, mcpEnvelopeError } from "./accountFlow";
+import {
+  calendarWindow,
+  filterCalendarPosts,
+  groupPostsByLocalDay,
+  localDateKey,
+  moveCalendarCursor,
+  postLifecycleDate,
+  type CalendarScale,
+  type PostViewMode,
+} from "./postCalendar";
 
 const API = "/api/apps/social";
 const STORAGE_API = "/api/apps/storage";
@@ -419,8 +429,8 @@ export default function SocialPanel({ projectId }: NativePanelProps) {
   }, []);
 
   return (
-    <div className="h-full flex flex-col">
-      <header className="flex items-center gap-1 border-b border-border px-4 py-2">
+    <div className="h-full min-w-0 overflow-hidden flex flex-col">
+      <header className="flex flex-shrink-0 flex-wrap items-center gap-1 border-b border-border px-4 py-2">
         <ProfileSwitcher
           profiles={profiles}
           activeId={activeProfileId}
@@ -459,7 +469,14 @@ export default function SocialPanel({ projectId }: NativePanelProps) {
           />
         )}
         {tab === "posts" && (
-          <PostsView posts={posts} onChange={loadPosts} setStatus={setStatus} projectId={projectId} />
+          <PostsView
+            posts={posts}
+            accounts={accounts}
+            activeProfileId={activeProfile?.id || null}
+            onChange={loadPosts}
+            setStatus={setStatus}
+            projectId={projectId}
+          />
         )}
         {tab === "inbox" && (
           <InboxView
@@ -3708,20 +3725,105 @@ function StoragePickerDialog({
 // --- PostsView ----------------------------------------------------
 
 function PostsView({
-  posts, onChange, setStatus, projectId,
-}: { posts: Post[]; onChange: () => void; setStatus: (s: string) => void; projectId?: string | null }) {
-  // Open reschedule dialog for a specific post (null = closed).
+  posts, accounts, activeProfileId, onChange, setStatus, projectId,
+}: {
+  posts: Post[];
+  accounts: SocialAccount[];
+  activeProfileId: number | null;
+  onChange: () => void | Promise<void>;
+  setStatus: (s: string) => void;
+  projectId?: string | null;
+}) {
+  const preferenceKey = "social.posts.view";
+  const [view, setView] = useState<PostViewMode>(() => {
+    try {
+      return localStorage.getItem(preferenceKey) === "calendar" ? "calendar" : "list";
+    } catch {
+      return "list";
+    }
+  });
+  const [calendarScale, setCalendarScale] = useState<CalendarScale>("month");
+  const [calendarCursor, setCalendarCursor] = useState(() => new Date());
+  const [calendarPosts, setCalendarPosts] = useState<Post[]>([]);
+  const [calendarLoading, setCalendarLoading] = useState(false);
+  const calendarRequestRef = useRef(0);
+  const [statusFilter, setStatusFilter] = useState("all");
+  const [accountFilter, setAccountFilter] = useState("all");
+  const [selectedPost, setSelectedPost] = useState<Post | null>(null);
+  const [menuPostID, setMenuPostID] = useState<number | null>(null);
+  const [dayDialog, setDayDialog] = useState<{ date: Date; posts: Post[] } | null>(null);
   const [rescheduleFor, setRescheduleFor] = useState<Post | null>(null);
-  // Same pattern for the delete-confirm modal: which post (null = closed).
   const [deleteFor, setDeleteFor] = useState<Post | null>(null);
-  // And for the edit dialog.
   const [editFor, setEditFor] = useState<Post | null>(null);
+
+  useEffect(() => {
+    try { localStorage.setItem(preferenceKey, view); } catch {}
+  }, [view]);
+
+  useEffect(() => {
+    setSelectedPost(null);
+    setMenuPostID(null);
+    setDayDialog(null);
+  }, [activeProfileId]);
+
+  useEffect(() => {
+    if (accountFilter !== "all" && !accounts.some((account) => String(account.id) === accountFilter)) {
+      setAccountFilter("all");
+    }
+  }, [accountFilter, accounts]);
+
+  const range = calendarWindow(calendarCursor, calendarScale);
+  const rangeStart = range.start.toISOString();
+  const rangeEnd = range.end.toISOString();
+  const loadCalendarPosts = useCallback(async () => {
+    const requestID = ++calendarRequestRef.current;
+    setCalendarLoading(true);
+    try {
+      const params = new URLSearchParams({ from: rangeStart, to: rangeEnd, limit: "1000" });
+      if (activeProfileId) params.set("profile_id", String(activeProfileId));
+      const res = await fetch(appURL(`/posts?${params.toString()}`, projectId), { credentials: "same-origin" });
+      if (!res.ok) throw new Error(await res.text());
+      const data = await res.json();
+      const envelopeError = mcpEnvelopeError(data);
+      if (envelopeError) throw new Error(envelopeError);
+      if (calendarRequestRef.current === requestID) setCalendarPosts(data.posts || []);
+    } catch (e) {
+      if (calendarRequestRef.current === requestID) {
+        setCalendarPosts([]);
+        setStatus("Load calendar: " + (e as Error).message);
+      }
+    } finally {
+      if (calendarRequestRef.current === requestID) setCalendarLoading(false);
+    }
+  }, [activeProfileId, projectId, rangeEnd, rangeStart, setStatus]);
+
+  const postsRevision = posts.map((post) => `${post.id}:${post.status}:${post.schedule_at}:${post.published_at}`).join("|");
+  useEffect(() => {
+    if (view === "calendar") loadCalendarPosts();
+  }, [loadCalendarPosts, postsRevision, view]);
+
+  const refreshAll = useCallback(async () => {
+    await Promise.resolve(onChange());
+    if (view === "calendar") await loadCalendarPosts();
+  }, [loadCalendarPosts, onChange, view]);
+
+  const sourcePosts = view === "calendar" ? calendarPosts : posts;
+  const filteredPosts = filterCalendarPosts(sourcePosts, statusFilter, accountFilter);
+  const sortedListPosts = [...filteredPosts].sort((left, right) =>
+    (postLifecycleDate(right)?.getTime() || 0) - (postLifecycleDate(left)?.getTime() || 0));
+
+  useEffect(() => {
+    if (!selectedPost) return;
+    const current = sourcePosts.find((post) => post.id === selectedPost.id);
+    if (current) setSelectedPost(current);
+  }, [sourcePosts, selectedPost?.id]);
 
   const retry = async (postId: number) => {
     try {
-      await fetch(appURL(`/posts/${postId}/retry`, projectId), { method: "POST", credentials: "same-origin" });
+      const res = await fetch(appURL(`/posts/${postId}/retry`, projectId), { method: "POST", credentials: "same-origin" });
+      if (!res.ok) throw new Error(await res.text());
       setStatus("Retry triggered.");
-      onChange();
+      await refreshAll();
     } catch (e) {
       setStatus("Retry failed: " + (e as Error).message);
     }
@@ -3746,96 +3848,123 @@ function PostsView({
       } else {
         setStatus("Deleted.");
       }
-      onChange();
+      setSelectedPost(null);
+      await refreshAll();
     } catch (e) {
       setStatus("Delete failed: " + (e as Error).message);
     }
   };
 
-  if (posts.length === 0) {
-    return (
-      <div className="py-12 text-center text-text-muted text-sm">
-        No posts yet. Compose your first one.
-      </div>
-    );
-  }
-
   return (
-    <div className="p-4 flex flex-col gap-3">
-      {posts.map((p) => (
-        <div key={p.id} className="border border-border rounded p-3">
-          <div className="flex items-start gap-3">
-            <div className="flex-1 min-w-0">
-              <div className="text-text text-sm whitespace-pre-wrap">{p.body}</div>
-              <div className="text-text-dim text-xs mt-1">
-                {new Date(p.created_at).toLocaleString()}
-                {p.schedule_at && ` · scheduled for ${new Date(p.schedule_at).toLocaleString()}`}
-              </div>
-            </div>
-            <StatusPill status={p.status} />
-            {(p.status === "failed" || p.status === "partial") && (
-              <button
-                onClick={() => retry(p.id)}
-                className="text-xs text-accent hover:underline"
-              >
-                Retry
-              </button>
-            )}
-            {p.status === "scheduled" && (
-              <button
-                onClick={() => setRescheduleFor(p)}
-                className="text-xs text-accent hover:underline"
-                title="Pick a new run time"
-              >
-                Reschedule
-              </button>
-            )}
-            {(p.status === "published" || p.status === "partial") &&
-              p.targets.some((t) => isEditablePlatform(t.platform)) && (
-              <button
-                onClick={() => setEditFor(p)}
-                className="text-xs text-accent hover:underline"
-                title="Edit post body and metadata where the platform allows"
-              >
-                Edit
-              </button>
-            )}
-            <button
-              onClick={() => setDeleteFor(p)}
-              className="text-xs text-text-muted hover:text-red"
-              title={p.status === "scheduled" ? "Cancel + delete" : "Delete"}
-            >
-              {p.status === "scheduled" ? "Cancel" : "Delete"}
-            </button>
-          </div>
-          {p.media_storage_ids && p.media_storage_ids.length > 0 && (
-            <div className="mt-3 flex flex-wrap gap-2">
-              {p.media_storage_ids.map((id) => (
-                <MediaThumb key={id} fileId={id} projectId={projectId} />
-              ))}
-            </div>
-          )}
-          {p.external_media_urls && p.external_media_urls.length > 0 && (
-            <div className="mt-3 flex flex-wrap gap-2">
-              {p.external_media_urls.map((url) => (
-                <ExternalMediaThumb key={url} url={url} />
-              ))}
-            </div>
-          )}
-          {p.targets.length > 0 && (
-            <div className="mt-3 flex flex-wrap gap-2">
-              {p.targets.map((t) => (
-                <TargetChip key={t.id} target={t} />
-              ))}
-            </div>
-          )}
+    <div className="p-4 flex flex-col gap-3 min-h-full">
+      <div className="flex flex-wrap items-center gap-2 border-b border-border pb-3">
+        <div className="inline-flex border border-border rounded overflow-hidden" aria-label="Post view">
+          <button
+            type="button"
+            onClick={() => setView("list")}
+            className={`px-3 py-1.5 text-sm ${view === "list" ? "bg-bg-card text-text" : "text-text-muted hover:text-text"}`}
+          >
+            List
+          </button>
+          <button
+            type="button"
+            onClick={() => setView("calendar")}
+            className={`px-3 py-1.5 text-sm border-l border-border ${view === "calendar" ? "bg-bg-card text-text" : "text-text-muted hover:text-text"}`}
+          >
+            Calendar
+          </button>
         </div>
-      ))}
+        <select
+          value={statusFilter}
+          onChange={(event) => setStatusFilter(event.target.value)}
+          className="bg-bg-input border border-border rounded px-2 py-1.5 text-sm text-text"
+          aria-label="Filter posts by status"
+        >
+          <option value="all">All statuses</option>
+          <option value="scheduled">Scheduled</option>
+          <option value="published">Published</option>
+          <option value="failed">Failed</option>
+          <option value="partial">Partial</option>
+          <option value="draft">Draft</option>
+        </select>
+        <select
+          value={accountFilter}
+          onChange={(event) => setAccountFilter(event.target.value)}
+          className="bg-bg-input border border-border rounded px-2 py-1.5 text-sm text-text"
+          style={{ minWidth: 170 }}
+          aria-label="Filter posts by account"
+        >
+          <option value="all">All accounts</option>
+          {accounts.map((account) => (
+            <option key={account.id} value={account.id}>{account.display_name} · {account.platform}</option>
+          ))}
+        </select>
+        <span className="text-text-dim text-xs ml-auto">
+          {filteredPosts.length} post{filteredPosts.length !== 1 ? "s" : ""}
+        </span>
+      </div>
+
+      {view === "list" ? (
+        sortedListPosts.length === 0 ? (
+          <PostsEmptyState filtered={posts.length > 0} />
+        ) : (
+          <div className="flex flex-col gap-2">
+            {sortedListPosts.map((post) => (
+              <PostListRow
+                key={post.id}
+                post={post}
+                projectId={projectId}
+                menuOpen={menuPostID === post.id}
+                onToggleMenu={() => setMenuPostID((current) => current === post.id ? null : post.id)}
+                onOpen={() => setSelectedPost(post)}
+                onRetry={() => retry(post.id)}
+                onReschedule={() => { setMenuPostID(null); setRescheduleFor(post); }}
+                onEdit={() => { setMenuPostID(null); setEditFor(post); }}
+                onDelete={() => { setMenuPostID(null); setDeleteFor(post); }}
+              />
+            ))}
+          </div>
+        )
+      ) : (
+        <PostCalendarView
+          posts={filteredPosts}
+          loading={calendarLoading}
+          cursor={calendarCursor}
+          scale={calendarScale}
+          projectId={projectId}
+          onScaleChange={setCalendarScale}
+          onCursorChange={setCalendarCursor}
+          onOpen={setSelectedPost}
+          onMore={(date, dayPosts) => setDayDialog({ date, posts: dayPosts })}
+        />
+      )}
+
+      {selectedPost && (
+        <PostDetailPanel
+          post={selectedPost}
+          projectId={projectId}
+          onClose={() => setSelectedPost(null)}
+          onRetry={() => retry(selectedPost.id)}
+          onReschedule={() => setRescheduleFor(selectedPost)}
+          onEdit={() => setEditFor(selectedPost)}
+          onDelete={() => setDeleteFor(selectedPost)}
+        />
+      )}
+      {dayDialog && (
+        <CalendarDayDialog
+          date={dayDialog.date}
+          posts={dayDialog.posts}
+          projectId={projectId}
+          onClose={() => setDayDialog(null)}
+          onOpen={(post) => { setDayDialog(null); setSelectedPost(post); }}
+        />
+      )}
       {rescheduleFor && (
         <RescheduleDialog
           post={rescheduleFor}
+          projectId={projectId}
           onClose={() => setRescheduleFor(null)}
-          onChanged={() => { setRescheduleFor(null); onChange(); }}
+          onChanged={() => { setRescheduleFor(null); refreshAll(); }}
           setStatus={setStatus}
         />
       )}
@@ -3844,9 +3973,9 @@ function PostsView({
           post={deleteFor}
           onClose={() => setDeleteFor(null)}
           onConfirm={async () => {
-            const p = deleteFor;
+            const post = deleteFor;
             setDeleteFor(null);
-            await executeDelete(p);
+            await executeDelete(post);
           }}
         />
       )}
@@ -3855,10 +3984,413 @@ function PostsView({
           post={editFor}
           projectId={projectId}
           onClose={() => setEditFor(null)}
-          onSaved={() => { setEditFor(null); onChange(); }}
+          onSaved={() => { setEditFor(null); refreshAll(); }}
           setStatus={setStatus}
         />
       )}
+    </div>
+  );
+}
+
+function PostsEmptyState({ filtered }: { filtered: boolean }) {
+  return (
+    <div className="py-12 text-center text-text-muted text-sm">
+      {filtered ? "No posts match these filters." : "No posts yet. Compose your first one."}
+    </div>
+  );
+}
+
+function PostListRow({
+  post, projectId, menuOpen, onToggleMenu, onOpen, onRetry, onReschedule, onEdit, onDelete,
+}: {
+  post: Post;
+  projectId?: string | null;
+  menuOpen: boolean;
+  onToggleMenu: () => void;
+  onOpen: () => void;
+  onRetry: () => void;
+  onReschedule: () => void;
+  onEdit: () => void;
+  onDelete: () => void;
+}) {
+  const displayDate = postLifecycleDate(post);
+  const targetLabel = post.targets.length > 0
+    ? post.targets.map((target) => `${target.platform} · ${target.display_name}`).join("  ·  ")
+    : "No targets";
+  const editable = (post.status === "published" || post.status === "partial") &&
+    post.targets.some((target) => isEditablePlatform(target.platform));
+  return (
+    <div
+      className="relative border border-border rounded bg-bg-card/30 hover:bg-bg-card/50 transition-colors"
+    >
+      <div className="flex items-stretch gap-3 p-2.5" style={{ minHeight: 116 }}>
+        <button type="button" onClick={onOpen} className="flex flex-1 min-w-0 items-stretch gap-3 text-left">
+          <PostLeadMedia post={post} projectId={projectId} variant="list" />
+          <div className="flex-1 min-w-0 py-1 flex flex-col">
+            <div className="text-text text-sm whitespace-pre-line line-clamp-3 leading-5">
+              {post.body || <span className="text-text-dim italic">No caption</span>}
+            </div>
+            <div className="mt-auto min-w-0 pt-2">
+              <div className="text-text-dim text-xs truncate">{targetLabel}</div>
+              <div className="text-text-muted text-xs mt-0.5">
+                {displayDate ? displayDate.toLocaleString() : "No date"}
+              </div>
+            </div>
+          </div>
+        </button>
+        <div className="flex-shrink-0 flex flex-col items-end gap-2 py-1" style={{ width: 104 }}>
+          <StatusPill status={post.status} />
+          {(post.status === "failed" || post.status === "partial") && (
+            <button
+              type="button"
+              onClick={(event) => { event.stopPropagation(); onRetry(); }}
+              className="text-xs text-accent hover:underline"
+            >
+              Retry
+            </button>
+          )}
+          <div className="relative mt-auto">
+            <button
+              type="button"
+              onClick={onToggleMenu}
+              className="w-8 h-8 grid place-items-center text-text-muted hover:text-text border border-transparent hover:border-border rounded"
+              aria-label="Post actions"
+              title="Post actions"
+            >
+              ⋮
+            </button>
+            {menuOpen && (
+              <div className="absolute right-0 bottom-9 z-20 bg-bg-card border border-border rounded shadow-lg py-1" style={{ minWidth: 150 }}>
+                {post.status === "scheduled" && <PostMenuButton label="Reschedule" onClick={onReschedule} />}
+                {editable && <PostMenuButton label="Edit" onClick={onEdit} />}
+                <PostMenuButton label={post.status === "scheduled" ? "Cancel post" : "Delete"} danger onClick={onDelete} />
+              </div>
+            )}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function PostMenuButton({ label, danger = false, onClick }: { label: string; danger?: boolean; onClick: () => void }) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      className={`w-full text-left px-3 py-2 text-xs hover:bg-bg-input ${danger ? "text-red" : "text-text"}`}
+    >
+      {label}
+    </button>
+  );
+}
+
+function PostCalendarView({
+  posts, loading, cursor, scale, projectId, onScaleChange, onCursorChange, onOpen, onMore,
+}: {
+  posts: Post[];
+  loading: boolean;
+  cursor: Date;
+  scale: CalendarScale;
+  projectId?: string | null;
+  onScaleChange: (scale: CalendarScale) => void;
+  onCursorChange: (date: Date) => void;
+  onOpen: (post: Post) => void;
+  onMore: (date: Date, posts: Post[]) => void;
+}) {
+  const window = calendarWindow(cursor, scale);
+  const grouped = groupPostsByLocalDay(posts);
+  const todayKey = localDateKey(new Date());
+  const heading = scale === "month"
+    ? cursor.toLocaleDateString(undefined, { month: "long", year: "numeric" })
+    : `${window.days[0].toLocaleDateString(undefined, { month: "short", day: "numeric" })} – ${window.days[6].toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" })}`;
+  const daysWithPosts = window.days.filter((day) => (grouped.get(localDateKey(day)) || []).length > 0);
+
+  return (
+    <div className="flex flex-col gap-3">
+      <div className="flex flex-wrap items-center gap-2">
+        <button
+          type="button"
+          onClick={() => onCursorChange(moveCalendarCursor(cursor, scale, -1))}
+          className="w-8 h-8 border border-border rounded text-text hover:bg-bg-card"
+          aria-label="Previous period"
+          title="Previous"
+        >
+          ‹
+        </button>
+        <button
+          type="button"
+          onClick={() => onCursorChange(new Date())}
+          className="px-3 h-8 border border-border rounded text-xs text-text hover:bg-bg-card"
+        >
+          Today
+        </button>
+        <button
+          type="button"
+          onClick={() => onCursorChange(moveCalendarCursor(cursor, scale, 1))}
+          className="w-8 h-8 border border-border rounded text-text hover:bg-bg-card"
+          aria-label="Next period"
+          title="Next"
+        >
+          ›
+        </button>
+        <h2 className="text-text font-medium ml-1">{heading}</h2>
+        {loading && <span className="text-text-dim text-xs">Loading…</span>}
+        <div className="inline-flex ml-auto border border-border rounded overflow-hidden">
+          <button
+            type="button"
+            onClick={() => onScaleChange("month")}
+            className={`px-2.5 py-1.5 text-xs ${scale === "month" ? "bg-bg-card text-text" : "text-text-muted"}`}
+          >
+            Month
+          </button>
+          <button
+            type="button"
+            onClick={() => onScaleChange("week")}
+            className={`px-2.5 py-1.5 text-xs border-l border-border ${scale === "week" ? "bg-bg-card text-text" : "text-text-muted"}`}
+          >
+            Week
+          </button>
+        </div>
+      </div>
+
+      <div className="hidden md:block overflow-x-auto border border-border rounded">
+        <div
+          className="grid border-b border-border bg-bg-card/30"
+          style={{ gridTemplateColumns: "repeat(7, minmax(0, 1fr))", minWidth: 840 }}
+        >
+          {window.days.slice(0, 7).map((day) => (
+            <div key={day.getDay()} className="px-2 py-1.5 text-center text-[11px] uppercase text-text-dim border-r border-border last:border-r-0">
+              {day.toLocaleDateString(undefined, { weekday: "short" })}
+            </div>
+          ))}
+        </div>
+        <div className="grid" style={{ gridTemplateColumns: "repeat(7, minmax(0, 1fr))", minWidth: 840 }}>
+          {window.days.map((day, index) => {
+            const key = localDateKey(day);
+            const dayPosts = grouped.get(key) || [];
+            const outsideMonth = scale === "month" && day.getMonth() !== cursor.getMonth();
+            return (
+              <div
+                key={key}
+                className={`min-h-[150px] p-1.5 border-b border-border ${index % 7 !== 6 ? "border-r" : ""} ${outsideMonth ? "bg-bg/40" : "bg-bg"}`}
+              >
+                <div className="flex items-center justify-between mb-1">
+                  <span className={`w-6 h-6 grid place-items-center text-xs rounded ${key === todayKey ? "bg-accent text-bg font-bold" : outsideMonth ? "text-text-dim" : "text-text"}`}>
+                    {day.getDate()}
+                  </span>
+                  {dayPosts.length > 0 && <span className="text-[10px] text-text-dim">{dayPosts.length}</span>}
+                </div>
+                <div className="flex flex-col gap-1">
+                  {dayPosts.slice(0, 3).map((post) => (
+                    <CalendarPostEvent key={post.id} post={post} projectId={projectId} onOpen={() => onOpen(post)} />
+                  ))}
+                  {dayPosts.length > 3 && (
+                    <button
+                      type="button"
+                      onClick={() => onMore(day, dayPosts)}
+                      className="text-left px-1 py-0.5 text-[10px] text-accent hover:underline"
+                    >
+                      +{dayPosts.length - 3} more
+                    </button>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      </div>
+
+      <div className="md:hidden flex flex-col gap-3">
+        {daysWithPosts.length === 0 && !loading ? (
+          <div className="py-10 text-center text-text-muted text-sm">No posts in this period.</div>
+        ) : daysWithPosts.map((day) => {
+          const dayPosts = grouped.get(localDateKey(day)) || [];
+          return (
+            <section key={localDateKey(day)} className="flex flex-col gap-1.5">
+              <div className="text-xs text-text-dim uppercase">
+                {day.toLocaleDateString(undefined, { weekday: "short", month: "short", day: "numeric" })}
+              </div>
+              {dayPosts.map((post) => (
+                <CalendarPostEvent key={post.id} post={post} projectId={projectId} onOpen={() => onOpen(post)} mobile />
+              ))}
+            </section>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
+function CalendarPostEvent({ post, projectId, onOpen, mobile = false }: {
+  post: Post;
+  projectId?: string | null;
+  onOpen: () => void;
+  mobile?: boolean;
+}) {
+  const date = postLifecycleDate(post);
+  const platform = Array.from(new Set(post.targets.map((target) => target.platform))).join(", ");
+  return (
+    <button
+      type="button"
+      onClick={onOpen}
+      className={`w-full text-left flex items-center gap-1.5 border border-border rounded bg-bg-card/60 hover:border-accent overflow-hidden ${mobile ? "p-2" : "p-1"}`}
+    >
+      <PostLeadMedia post={post} projectId={projectId} variant="calendar" />
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center gap-1 text-[10px]">
+          <span className="text-text">{date?.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })}</span>
+          <StatusPill status={post.status} />
+        </div>
+        <div className={`${mobile ? "text-xs" : "text-[10px]"} text-text truncate`}>{post.body || "No caption"}</div>
+        {mobile && <div className="text-[10px] text-text-dim truncate">{platform || "No target"}</div>}
+      </div>
+    </button>
+  );
+}
+
+function CalendarDayDialog({ date, posts, projectId, onClose, onOpen }: {
+  date: Date;
+  posts: Post[];
+  projectId?: string | null;
+  onClose: () => void;
+  onOpen: (post: Post) => void;
+}) {
+  return (
+    <div className="fixed inset-0 z-50 grid place-items-center bg-black/60 p-4" onClick={onClose}>
+      <div
+        className="max-h-[80vh] bg-bg-card border border-border rounded-lg shadow-lg flex flex-col"
+        style={{ width: "min(560px, 94vw)" }}
+        onClick={(event) => event.stopPropagation()}
+      >
+        <div className="flex items-center justify-between px-4 py-3 border-b border-border">
+          <div>
+            <div className="text-text font-medium">{date.toLocaleDateString(undefined, { weekday: "long", month: "long", day: "numeric" })}</div>
+            <div className="text-text-dim text-xs">{posts.length} posts</div>
+          </div>
+          <button type="button" onClick={onClose} className="w-8 h-8 text-text-muted hover:text-text" aria-label="Close">×</button>
+        </div>
+        <div className="overflow-y-auto p-3 flex flex-col gap-2">
+          {posts.map((post) => (
+            <CalendarPostEvent key={post.id} post={post} projectId={projectId} onOpen={() => onOpen(post)} mobile />
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function PostLeadMedia({ post, projectId, variant }: {
+  post: Post;
+  projectId?: string | null;
+  variant: "list" | "calendar";
+}) {
+  const storageID = post.media_storage_ids?.[0];
+  const externalURL = !storageID ? post.external_media_urls?.[0] : "";
+  const [meta, setMeta] = useState<{ mime: string; name: string } | null>(null);
+  useEffect(() => {
+    let alive = true;
+    if (storageID) loadMediaMeta(storageID, projectId).then((next) => { if (alive) setMeta(next); });
+    else setMeta(null);
+    return () => { alive = false; };
+  }, [projectId, storageID]);
+  const source = storageID ? storageURL(`/files/${storageID}/content`, projectId) : externalURL || "";
+  const total = (post.media_storage_ids?.length || 0) + (post.external_media_urls?.length || 0);
+  const isVideo = !!storageID && !!meta?.mime.startsWith("video/");
+  const size = variant === "list"
+    ? "w-24 h-24"
+    : "w-8 h-8";
+  return (
+    <div className={`${size} flex-shrink-0 relative overflow-hidden rounded border border-border bg-bg-input`} aria-hidden="true">
+      {!source || (storageID && !meta) ? (
+        <div className="w-full h-full grid place-items-center text-text-dim text-[10px] uppercase">
+          {source ? "…" : post.targets[0]?.platform?.slice(0, 2) || "—"}
+        </div>
+      ) : isVideo ? (
+        <>
+          <video src={source} preload="metadata" muted playsInline className="w-full h-full object-cover" />
+          <div className="absolute inset-0 grid place-items-center bg-black/20"><span className="text-white text-xs">▶</span></div>
+        </>
+      ) : (
+        <img src={source} alt="" loading="lazy" className="w-full h-full object-cover" />
+      )}
+      {total > 1 && (
+        <span className="absolute right-1 bottom-1 px-1 py-0.5 rounded bg-black/80 text-white text-[9px]">+{total - 1}</span>
+      )}
+    </div>
+  );
+}
+
+function PostDetailPanel({ post, projectId, onClose, onRetry, onReschedule, onEdit, onDelete }: {
+  post: Post;
+  projectId?: string | null;
+  onClose: () => void;
+  onRetry: () => void;
+  onReschedule: () => void;
+  onEdit: () => void;
+  onDelete: () => void;
+}) {
+  const editable = (post.status === "published" || post.status === "partial") &&
+    post.targets.some((target) => isEditablePlatform(target.platform));
+  return (
+    <div className="fixed inset-0 z-40 bg-black/60" onClick={onClose}>
+      <aside
+        className="ml-auto h-full bg-bg border-l border-border shadow-lg flex flex-col"
+        style={{ width: "min(620px, 100vw)" }}
+        onClick={(event) => event.stopPropagation()}
+        aria-label="Post details"
+      >
+        <div className="flex items-center gap-3 px-4 py-3 border-b border-border">
+          <div className="min-w-0 flex-1">
+            <div className="text-text font-medium">Post #{post.id}</div>
+            <div className="text-text-dim text-xs">{postLifecycleDate(post)?.toLocaleString()}</div>
+          </div>
+          <StatusPill status={post.status} />
+          <button type="button" onClick={onClose} className="w-8 h-8 text-text-muted hover:text-text" aria-label="Close">×</button>
+        </div>
+        <div className="flex-1 overflow-y-auto">
+          {(post.media_storage_ids?.length > 0 || (post.external_media_urls?.length || 0) > 0) && (
+            <section className="p-4 border-b border-border">
+              <div className="flex flex-wrap gap-2">
+                {post.media_storage_ids.map((id) => <MediaThumb key={id} fileId={id} projectId={projectId} />)}
+                {(post.external_media_urls || []).map((url) => <ExternalMediaThumb key={url} url={url} />)}
+              </div>
+            </section>
+          )}
+          <section className="p-4 border-b border-border">
+            <div className="text-xs uppercase text-text-dim mb-2">Caption</div>
+            <div className="text-text text-sm whitespace-pre-wrap leading-6">{post.body || <span className="text-text-dim italic">No caption</span>}</div>
+          </section>
+          <section className="p-4 border-b border-border grid grid-cols-2 gap-3 text-xs">
+            <div><div className="text-text-dim uppercase">Created</div><div className="text-text mt-1">{new Date(post.created_at).toLocaleString()}</div></div>
+            <div><div className="text-text-dim uppercase">Scheduled</div><div className="text-text mt-1">{post.schedule_at ? new Date(post.schedule_at).toLocaleString() : "—"}</div></div>
+            <div><div className="text-text-dim uppercase">Published</div><div className="text-text mt-1">{post.published_at ? new Date(post.published_at).toLocaleString() : "—"}</div></div>
+            <div><div className="text-text-dim uppercase">Targets</div><div className="text-text mt-1">{post.targets.length}</div></div>
+          </section>
+          <section className="p-4">
+            <div className="text-xs uppercase text-text-dim mb-2">Destinations</div>
+            <div className="flex flex-col gap-2">
+              {post.targets.length === 0 ? <div className="text-text-dim text-sm">No targets.</div> : post.targets.map((target) => (
+                <div key={target.id} className="border border-border rounded px-3 py-2">
+                  <div className="flex items-center gap-2 text-sm">
+                    <span className="text-text">{target.display_name}</span>
+                    <span className="text-text-dim">{target.platform}</span>
+                    <span className="ml-auto"><StatusPill status={target.status} /></span>
+                  </div>
+                  {target.last_error && <div className="text-error text-xs mt-1 whitespace-pre-wrap">{target.last_error}</div>}
+                  {target.platform_url && <a href={target.platform_url} target="_blank" rel="noreferrer" className="text-accent text-xs hover:underline mt-1 inline-block">Open platform post ↗</a>}
+                </div>
+              ))}
+            </div>
+          </section>
+        </div>
+        <div className="flex flex-wrap justify-end gap-2 px-4 py-3 border-t border-border bg-bg-card/30">
+          {(post.status === "failed" || post.status === "partial") && <button type="button" onClick={onRetry} className="px-3 py-1.5 text-sm border border-accent text-accent rounded">Retry</button>}
+          {post.status === "scheduled" && <button type="button" onClick={onReschedule} className="px-3 py-1.5 text-sm border border-border text-text rounded">Reschedule</button>}
+          {editable && <button type="button" onClick={onEdit} className="px-3 py-1.5 text-sm border border-border text-text rounded">Edit</button>}
+          <button type="button" onClick={onDelete} className="px-3 py-1.5 text-sm border border-error text-error rounded">{post.status === "scheduled" ? "Cancel post" : "Delete"}</button>
+        </div>
+      </aside>
     </div>
   );
 }
@@ -4304,9 +4836,10 @@ function FieldText({
 }
 
 function RescheduleDialog({
-  post, onClose, onChanged, setStatus,
+  post, projectId, onClose, onChanged, setStatus,
 }: {
   post: Post;
+  projectId?: string | null;
   onClose: () => void;
   onChanged: () => void;
   setStatus: (s: string) => void;
@@ -4322,7 +4855,7 @@ function RescheduleDialog({
     if (!when) return;
     setBusy(true);
     try {
-      const res = await fetch(appURL(`/posts/${post.id}/reschedule`), {
+      const res = await fetch(appURL(`/posts/${post.id}/reschedule`, projectId), {
         method: "POST",
         credentials: "same-origin",
         headers: { "Content-Type": "application/json" },

@@ -44,7 +44,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: social
 display_name: Social
-version: 0.14.66
+version: 0.14.67
 description: |
   Schedule and publish posts to your social accounts (X, Facebook,
   Instagram, LinkedIn, TikTok, YouTube, Reddit, Pinterest, Threads).
@@ -4165,12 +4165,33 @@ func (a *App) markTargetFailed(ctx *sdk.AppCtx, targetID int64, msg string) {
 // ─── post_list ────────────────────────────────────────────────────
 
 func (a *App) toolPostList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
+	return a.listPosts(ctx, args, 200)
+}
+
+// listPosts backs both the MCP tool and the panel HTTP route. The MCP surface
+// keeps its established 200-row ceiling; the panel can request a bounded
+// calendar window with a larger cap without changing the agent-facing schema.
+func (a *App) listPosts(ctx *sdk.AppCtx, args map[string]any, maxLimit int) (any, error) {
 	pid := projectScope(ctx, args)
 	limit := intArg(args, "limit", 50)
-	if limit > 200 {
-		limit = 200
+	if limit < 1 {
+		limit = 1
+	}
+	if limit > maxLimit {
+		limit = maxLimit
 	}
 	statusFilter, _ := args["status"].(string)
+	from, fromErr := postListTimeBound(args, "from")
+	if fromErr != nil {
+		return mcpError(fromErr.Error()), nil
+	}
+	to, toErr := postListTimeBound(args, "to")
+	if toErr != nil {
+		return mcpError(toErr.Error()), nil
+	}
+	if from != nil && to != nil && !from.Before(*to) {
+		return mcpError("from must be before to"), nil
+	}
 	profileID := resolveProfileArg(ctx, pid, args)
 	if profileID < 0 {
 		return mcpError(fmt.Sprintf("profile %q not found in this project", args["profile"])), nil
@@ -4179,6 +4200,11 @@ func (a *App) toolPostList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	             status, created_at, COALESCE(published_at,''), COALESCE(profile_id,0)
 	      FROM posts WHERE project_id=?`
 	qArgs := []any{pid}
+	effectiveTime := `CASE
+		WHEN status IN ('published','partial') AND COALESCE(published_at,'') != '' THEN published_at
+		WHEN COALESCE(schedule_at,'') != '' THEN schedule_at
+		ELSE created_at
+	END`
 	if statusFilter != "" {
 		q += " AND status=?"
 		qArgs = append(qArgs, statusFilter)
@@ -4186,6 +4212,14 @@ func (a *App) toolPostList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if profileID > 0 {
 		q += " AND profile_id=?"
 		qArgs = append(qArgs, profileID)
+	}
+	if from != nil {
+		q += " AND datetime(" + effectiveTime + ") >= datetime(?)"
+		qArgs = append(qArgs, from.UTC().Format(time.RFC3339))
+	}
+	if to != nil {
+		q += " AND datetime(" + effectiveTime + ") < datetime(?)"
+		qArgs = append(qArgs, to.UTC().Format(time.RFC3339))
 	}
 	q += " ORDER BY id DESC LIMIT ?"
 	qArgs = append(qArgs, limit)
@@ -4247,6 +4281,19 @@ func (a *App) toolPostList(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		})
 	}
 	return map[string]any{"posts": out}, nil
+}
+
+func postListTimeBound(args map[string]any, name string) (*time.Time, error) {
+	raw, _ := args[name].(string)
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, nil
+	}
+	parsed, err := time.Parse(time.RFC3339Nano, raw)
+	if err != nil {
+		return nil, fmt.Errorf("invalid %s: expected RFC3339 timestamp", name)
+	}
+	return &parsed, nil
 }
 
 func (a *App) loadTargets(ctx *sdk.AppCtx, postID int64) []map[string]any {
@@ -7719,7 +7766,7 @@ func (a *App) handleAccountsItem(w http.ResponseWriter, r *http.Request) {
 func (a *App) handlePostsAPI(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case http.MethodGet:
-		out, err := a.toolPostList(globalCtx, scopedQueryArgs(r, "profile_id", "profile", "status", "limit"))
+		out, err := a.listPosts(globalCtx, scopedQueryArgs(r, "profile_id", "profile", "status", "limit", "from", "to"), 1000)
 		if err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return

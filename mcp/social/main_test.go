@@ -847,6 +847,67 @@ func TestPostList_DoesNotDeadlockLoadingTargets(t *testing.T) {
 	}
 }
 
+func TestPostList_DateRangeUsesLifecycleDate(t *testing.T) {
+	ctx := newSocialCtx(t, nil)
+	insert := func(body, status, createdAt, scheduleAt, publishedAt string) int64 {
+		t.Helper()
+		res, err := ctx.AppDB().Exec(
+			`INSERT INTO posts (project_id, body, status, created_at, schedule_at, published_at)
+			 VALUES ('test-proj', ?, ?, ?, NULLIF(?, ''), NULLIF(?, ''))`,
+			body, status, createdAt, scheduleAt, publishedAt,
+		)
+		if err != nil {
+			t.Fatal(err)
+		}
+		id, _ := res.LastInsertId()
+		return id
+	}
+
+	scheduledID := insert("scheduled", "scheduled", "2026-06-01 10:00:00", "2026-07-15T10:00:00Z", "")
+	publishedID := insert("published", "published", "2026-06-01 10:00:00", "2026-07-01T10:00:00Z", "2026-07-16T10:00:00Z")
+	draftID := insert("draft", "draft", "2026-07-17 10:00:00", "", "")
+	failedID := insert("failed", "failed", "2026-06-01 10:00:00", "2026-07-18T10:00:00Z", "")
+	_ = insert("outside", "scheduled", "2026-06-01 10:00:00", "2026-07-19T10:00:00Z", "")
+
+	out, err := (&App{}).listPosts(ctx, map[string]any{
+		"from":  "2026-07-15T00:00:00Z",
+		"to":    "2026-07-19T00:00:00Z",
+		"limit": 1000,
+	}, 1000)
+	if err != nil {
+		t.Fatal(err)
+	}
+	posts := out.(map[string]any)["posts"].([]map[string]any)
+	got := map[int64]bool{}
+	for _, post := range posts {
+		got[post["id"].(int64)] = true
+	}
+	for _, id := range []int64{scheduledID, publishedID, draftID, failedID} {
+		if !got[id] {
+			t.Errorf("post %d missing from lifecycle date range: %+v", id, got)
+		}
+	}
+	if len(got) != 4 {
+		t.Fatalf("range returned %d posts, want 4: %+v", len(got), got)
+	}
+}
+
+func TestPostList_DateRangeRejectsInvalidBounds(t *testing.T) {
+	ctx := newSocialCtx(t, nil)
+	for _, args := range []map[string]any{
+		{"from": "not-a-date"},
+		{"from": "2026-07-20T00:00:00Z", "to": "2026-07-19T00:00:00Z"},
+	} {
+		out, err := (&App{}).listPosts(ctx, args, 1000)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if out.(map[string]any)["isError"] != true {
+			t.Fatalf("invalid bounds were accepted: args=%+v out=%+v", args, out)
+		}
+	}
+}
+
 func TestAccountCheckAll_DoesNotDeadlock(t *testing.T) {
 	ctx := newSocialCtx(t, nil)
 	ctx.AppDB().SetMaxOpenConns(1)
