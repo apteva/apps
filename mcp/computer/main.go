@@ -52,10 +52,10 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: computer
 display_name: Computer
-version: 0.7.51
+version: 0.7.52
 description: |
-  Watch, steer, and replay hosted browser sessions. v0.7.51 adds broker-only
-  rendered DOM extraction for bound apps without exposing another agent tool.
+  Watch, steer, and replay hosted browser sessions. v0.7.52 directs agents to
+  open fresh sessions and hides session listing and resume actions from MCP.
 scopes: [project, global]
 requires:
   permissions:
@@ -80,7 +80,7 @@ provides:
     - prefix: /
   mcp_tools:
     - name: browser_session
-      description: "Open, resume, list, inspect, close, or switch tabs in app-owned browser sessions. Args: action, session_id?, tab_id?, backend?, backend_session_id?, url?, context_id?, context_name?, auto_create_context?, persist?, timeout?, proxy?, proxy_country?, viewport?. Usually omit viewport to use Computer's default desktop viewport, 1600x800. Pass viewport when a specific resolution is needed, for example mobile/tablet testing or a site-specific requirement. session_id is the app-owned live br_* handle for status/close/computer_use only. To continue later, open a new session with context_id or context_name. Use backend_session_id only for an explicit provider-level attach. For tab control, call browser_session(action=tabs) to list open tabs, then browser_session(action=switch_tab, tab_id=...) or browser_session(action=close_tab, tab_id=...). Do not use keyboard shortcuts such as Ctrl+Tab, Ctrl+PageDown, or Ctrl+1-9 to switch browser tabs. Browserbase honors timeout as max session lifetime. Prefer context_id from computer_context_list to reopen saved state; context_name works across backends when unique. For a reusable saved context, pass context_name with auto_create_context=true; omitted names are only a fallback and are auto-generated. Sessions consume local or cloud resources. When browser work is complete and the user did not explicitly ask to keep the browser open, close it with browser_session(action=close, session_id=...). Closing is especially important for Browserbase/Steel sessions and persisted contexts because it releases provider resources and lets context state flush cleanly."
+      description: "Open a fresh app-owned browser session, inspect it, close it, or switch its tabs. Args: action, session_id?, tab_id?, backend?, url?, context_id?, context_name?, auto_create_context?, persist?, timeout?, proxy?, proxy_country?, viewport?. Usually omit viewport to use Computer's default desktop viewport, 1600x800. Pass viewport when a specific resolution is needed, for example mobile/tablet testing or a site-specific requirement. session_id is the app-owned live br_* handle for status/close/computer_use only. Always use action=open for new browsing work. To continue saved login and browser state, open a new session with context_id or context_name; do not reuse a prior session_id. For tab control, call browser_session(action=tabs) to list open tabs, then browser_session(action=switch_tab, tab_id=...) or browser_session(action=close_tab, tab_id=...). Do not use keyboard shortcuts such as Ctrl+Tab, Ctrl+PageDown, or Ctrl+1-9 to switch browser tabs. Browserbase honors timeout as max session lifetime. Prefer context_id from computer_context_list to reopen saved state; context_name works across backends when unique. For a reusable saved context, pass context_name with auto_create_context=true; omitted names are only a fallback and are auto-generated. Sessions consume local or cloud resources. When browser work is complete and the user did not explicitly ask to keep the browser open, close it with browser_session(action=close, session_id=...). Closing is especially important for Browserbase/Steel sessions and persisted contexts because it releases provider resources and lets context state flush cleanly."
     - name: computer_use
       description: "Drive an app-owned browser session. Default workflow: call action=screenshot first; screenshots contain Set-of-Mark numeric badges on interactive elements. To click, use action=click with label=N from the latest screenshot. label must be >= 1; do not pass 0. Prefer label over coordinate; use coordinate only for targets with no badge such as canvas or custom rendered widgets. Do not pass both; when both are present, coordinate wins. If the page asks to Browse, choose, attach, upload, or drop a file, use action=upload_file with selector or label plus source_url/base64/file_path; do not operate the native OS file picker. For any native select, dropdown, combobox, listbox, or multiselect, use action=select_option first with label/selector plus text/value or texts/values and optional mode=replace|add|remove|toggle; do not click options one by one or use keyboard navigation unless select_option fails. For checkboxes, radio buttons, and ARIA switches, use action=set_checked with label/selector plus checked=true|false instead of blind clicking. For long text fields, textareas, contenteditable editors, or message/post composers, use action=set_text with label/selector plus text instead of click + Control+A + type; use newline_mode=compact for public messages when blank paragraph gaps are not desired. For native date/time/datetime-local fields or text-like scheduler fields, use action=set_temporal with label/selector plus value such as 2026-07-01 or 11:00 AM. If a click opens exactly one new tab, Computer automatically follows it and reports switched_tab=true. For explicit tab control, call browser_session(action=tabs) to list tabs, then browser_session(action=switch_tab, tab_id=...) or browser_session(action=close_tab, tab_id=...); do not use Ctrl+Tab, Ctrl+PageDown, or Ctrl+1-9 for browser tab switching. Use action=key for page/editor commands such as Tab, Backspace, Control+A, Control+Z; use action=type only for short literal text and full date/time values such as 2026-06-05 or 08:00 PM. For action=scroll, amount is CSS pixels; use 200-500 for a small viewport move and omit amount for the 300px default. After scrolling, tab switching, selection, upload, checked-state changes, text changes, temporal-field changes, or navigation, take a fresh screenshot because labels are re-enumerated. Args: session_id, action, tab_id?, coordinate?, label?, selector?, checked?, source_url?, base64?, filename?, mime_type?, file_path?, text?, value?, texts?, values?, mode?, newline_mode?, key?, direction?, amount?, duration?, annotate? (screenshot only, default true), include_som? (screenshot only, default false). Returns screenshot bytes for visual actions; structured som targets are returned only when include_som=true."
     - name: computer_context_create
@@ -95,8 +95,6 @@ provides:
       description: "Delete or unlink an app-managed browser context. Args: id, delete_provider?."
     - name: browser_open
       description: "Compatibility alias for browser_session(action=open)."
-    - name: browser_list
-      description: "Compatibility alias for browser_session(action=list)."
     - name: browser_screenshot
       description: "Capture a clean PNG of the session viewport. Args: session_id, annotate? (default false; set true for Set-of-Mark labels), include_som? (default false; returns structured SoM targets only when true)."
     - name: browser_recording
@@ -488,13 +486,12 @@ func (a *App) MCPTools() []sdk.Tool {
 	return []sdk.Tool{
 		{
 			Name: "browser_session",
-			Description: "Session lifecycle and tab control for app-owned browsers. Actions: open, resume, status, close, list, tabs, switch_tab, close_tab. " +
-				"Open/resume args: backend? (local|browserbase|steel|browser-engine|service), url?, context_id?, persist?, " +
-				"context_name?, auto_create_context?, backend_session_id? (provider attach), timeout?, proxy?, proxy_country?, viewport?. " +
+			Description: "Session lifecycle and tab control for app-owned browsers. Actions: open, status, close, tabs, switch_tab, close_tab. " +
+				"Open args: backend? (local|browserbase|steel|browser-engine|service), url?, context_id?, persist?, " +
+				"context_name?, auto_create_context?, timeout?, proxy?, proxy_country?, viewport?. " +
 				"Usually omit viewport to use Computer's default desktop viewport, 1600x800. Pass viewport when a specific resolution is needed, for example mobile/tablet testing or a site-specific requirement. " +
-				"session_id is the app-owned live br_* handle for status/close/computer_use, not a durable resume id. " +
-				"To continue work after a session is gone, open a new session with context_id or context_name. " +
-				"Use backend_session_id only for an explicit short-lived provider attach. " +
+				"session_id is the app-owned live br_* handle for status/close/computer_use and cannot reopen a closed session. " +
+				"Always use action=open for new browsing work. To continue saved login and browser state, open a new session with context_id or context_name; do not reuse a prior session_id. " +
 				"For tab control, call action=tabs first, then action=switch_tab with tab_id or action=close_tab with tab_id. " +
 				"Do not use keyboard shortcuts such as Ctrl+Tab, Ctrl+PageDown, or Ctrl+1-9 to switch browser tabs. " +
 				"Browserbase honors timeout as max session lifetime. " +
@@ -504,14 +501,13 @@ func (a *App) MCPTools() []sdk.Tool {
 				"Closing is especially important for Browserbase/Steel sessions and persisted contexts because it releases provider resources and lets context state flush cleanly. " +
 				"Returns {session_id, backend_session_id, backend, current_url, active_tab_id, tabs, context_id, debug_url, width, height}.",
 			InputSchema: schemaObject(map[string]any{
-				"action":             map[string]any{"type": "string", "enum": []string{"open", "resume", "status", "close", "list", "tabs", "switch_tab", "close_tab"}},
-				"session_id":         map[string]any{"type": "string", "description": "App-owned live br_* session id for status/close/computer_use. Not durable; do not use it to attach to Browserbase after the app session is gone."},
-				"tab_id":             map[string]any{"type": "string", "description": "Browser tab/page target id for switch_tab or close_tab."},
-				"backend_session_id": map[string]any{"type": "string", "description": "Explicit provider session id to attach/resume for Browserbase or Browser Engine. Short-lived; prefer context_id/context_name for durable continuation."},
-				"backend":            map[string]any{"type": "string", "enum": []string{"local", "browserbase", "steel", "browser-engine", "service"}},
-				"url":                map[string]any{"type": "string"},
-				"context_id":         map[string]any{"type": "string", "description": "App context id preferred; legacy raw provider context ids still work."},
-				"context_name":       map[string]any{"type": "string", "description": "App-managed context name. Pass this when creating or reopening a reusable saved context."},
+				"action":       map[string]any{"type": "string", "enum": []string{"open", "status", "close", "tabs", "switch_tab", "close_tab"}},
+				"session_id":   map[string]any{"type": "string", "description": "App-owned live br_* session id for status/close/computer_use. It cannot reopen a closed session; start a fresh session with action=open."},
+				"tab_id":       map[string]any{"type": "string", "description": "Browser tab/page target id for switch_tab or close_tab."},
+				"backend":      map[string]any{"type": "string", "enum": []string{"local", "browserbase", "steel", "browser-engine", "service"}},
+				"url":          map[string]any{"type": "string"},
+				"context_id":   map[string]any{"type": "string", "description": "App context id preferred; legacy raw provider context ids still work."},
+				"context_name": map[string]any{"type": "string", "description": "App-managed context name. Pass this when creating or reopening a reusable saved context."},
 				"provider_context_id": map[string]any{
 					"type": "string",
 				},
@@ -656,12 +652,6 @@ func (a *App) MCPTools() []sdk.Tool {
 				},
 			}, nil),
 			Handler: a.toolBrowserOpen,
-		},
-		{
-			Name:        "browser_list",
-			Description: "List sessions currently owned by this sidecar. Returns {sessions:[{session_id, backend, current_url, debug_url, opened_at, last_used_at}]}.",
-			InputSchema: schemaObject(map[string]any{}, nil),
-			Handler:     a.toolBrowserList,
 		},
 		{
 			Name: "browser_screenshot",

@@ -277,6 +277,13 @@ func TestBrowserSessionComputerUseClose(t *testing.T) {
 	if fake.closeCalls != 1 {
 		t.Errorf("Close calls: want 1, got %d", fake.closeCalls)
 	}
+	listOut, err := app.toolBrowserSession(ctx, map[string]any{"action": "list"})
+	if err != nil {
+		t.Fatalf("legacy browser_session list after close: %v", err)
+	}
+	if sessions := listOut.(map[string]any)["sessions"].([]sessionInfo); len(sessions) != 0 {
+		t.Fatalf("legacy browser_session list exposed closed sessions: %+v", sessions)
+	}
 
 	// close again — idempotent
 	closeOut2, err := app.toolBrowserSession(ctx, map[string]any{"action": "close", "session_id": sessionID})
@@ -487,6 +494,48 @@ func TestBrowserExtractRemainsInternalOnly(t *testing.T) {
 	}
 	if !foundRoute {
 		t.Fatal("internal session extraction route is not registered")
+	}
+}
+
+func TestSessionReuseIsNotAdvertisedToAgents(t *testing.T) {
+	app := &App{}
+	for _, tool := range app.MCPTools() {
+		if tool.Name == "browser_list" {
+			t.Fatal("browser_list must not be exposed through MCPTools")
+		}
+	}
+
+	tool := findTool(t, app.MCPTools(), "browser_session")
+	props, ok := tool.InputSchema["properties"].(map[string]any)
+	if !ok {
+		t.Fatalf("browser_session schema has no properties map: %#v", tool.InputSchema)
+	}
+	if _, ok := props["backend_session_id"]; ok {
+		t.Fatal("browser_session must not advertise provider-session attachment")
+	}
+	action, ok := props["action"].(map[string]any)
+	if !ok {
+		t.Fatalf("browser_session action schema missing: %#v", props["action"])
+	}
+	actions, ok := action["enum"].([]string)
+	if !ok {
+		t.Fatalf("browser_session action enum has unexpected type: %#v", action["enum"])
+	}
+	for _, forbidden := range []string{"list", "resume"} {
+		for _, action := range actions {
+			if action == forbidden {
+				t.Fatalf("browser_session advertises %q action: %v", forbidden, actions)
+			}
+		}
+	}
+	if !strings.Contains(tool.Description, "Always use action=open for new browsing work") {
+		t.Fatalf("browser_session does not direct agents to fresh sessions:\n%s", tool.Description)
+	}
+
+	for _, manifestTool := range app.Manifest().Provides.MCPTools {
+		if manifestTool.Name == "browser_list" {
+			t.Fatal("browser_list must not be declared in the manifest")
+		}
 	}
 }
 

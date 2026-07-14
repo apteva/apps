@@ -2,10 +2,10 @@ schema: apteva-app/v1
 
 name: computer
 display_name: Computer
-version: 0.7.51
+version: 0.7.52
 description: |
-  Watch, steer, and replay hosted browser sessions. v0.7.51 adds broker-only
-  rendered DOM extraction for bound apps without exposing another agent tool.
+  Watch, steer, and replay hosted browser sessions. v0.7.52 directs agents to
+  open fresh sessions and hides session listing and resume actions from MCP.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/computer
@@ -40,17 +40,17 @@ provides:
   mcp_tools:
     - name: browser_session
       description: |
-        Open, resume, list, inspect, close, or switch tabs in app-owned browser
-        sessions. Args: action, session_id?, tab_id?, backend?,
-        backend_session_id?, url?, context_id?, context_name?,
-        auto_create_context?, persist?, timeout?, proxy?, proxy_country?,
-        viewport?. session_id is the app-owned live br_* handle for
+        Open a fresh app-owned browser session, inspect it, close it, or switch
+        its tabs. Args: action, session_id?, tab_id?, backend?, url?,
+        context_id?, context_name?, auto_create_context?, persist?, timeout?,
+        proxy?, proxy_country?, viewport?. session_id is the app-owned live br_* handle for
         status/close/computer_use only. Usually omit viewport to use Computer's
         default desktop viewport, 1600x800. Pass viewport when a specific
         resolution is needed, for example mobile/tablet testing or a
-        site-specific requirement. To continue later, open a new session
-        with context_id or context_name. Use backend_session_id only for an
-        explicit provider-level attach. For tab control, call
+        site-specific requirement. Always use action=open for new browsing
+        work. To continue saved login and browser state, open a new session
+        with context_id or context_name; do not reuse a prior
+        session_id. For tab control, call
         browser_session(action=tabs) to list
         open tabs, then browser_session(action=switch_tab, tab_id=...) or
         browser_session(action=close_tab, tab_id=...). Do not use keyboard
@@ -138,9 +138,6 @@ provides:
       description: |
         Compatibility alias for browser_session(action=open). Browserbase
         honors timeout as max session lifetime.
-    - name: browser_list
-      description: |
-        Compatibility alias for browser_session(action=list).
     - name: browser_screenshot
       description: |
         Capture a clean PNG of the session viewport. Args: session_id,
