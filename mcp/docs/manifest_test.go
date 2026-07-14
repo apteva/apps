@@ -20,6 +20,9 @@ func TestEmbeddedManifest_Valid(t *testing.T) {
 	if m.Version == "" {
 		t.Error("version missing")
 	}
+	if len(m.Scopes) != 1 || m.Scopes[0] != "project" {
+		t.Fatalf("docs must be project-only, scopes = %v", m.Scopes)
+	}
 	if m.DB == nil || m.DB.Migrations == "" {
 		t.Error("db.migrations missing")
 	}
