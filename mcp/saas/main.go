@@ -39,6 +39,8 @@ const (
 	defaultUsageFreshness   = 5 * time.Minute
 	fulfillmentClaimTimeout = 15 * time.Minute
 	commerceClaimTimeout    = 15 * time.Minute
+	paymentCompletionWait   = 10 * time.Second
+	paymentCompletionPoll   = 25 * time.Millisecond
 )
 
 const (
@@ -801,10 +803,16 @@ func (a *App) toolCheckoutMarkPaid(ctx *sdk.AppCtx, args map[string]any) (any, e
 		return nil, fmt.Errorf("record checkout payment: %w", err)
 	}
 	invoice := unwrapMap(paymentOut, "invoice")
+	paymentComplete := true
 	if strArg(invoice, "status") == "paid" {
 		if err := a.handleInvoicePaid(ctx, sdk.Event{Event: "invoice.paid", ProjectID: pid, Data: map[string]any{"id": invoiceID, "status": "paid"}}); err != nil {
 			return nil, err
 		}
+		op, err := waitForCommercePayment(ctx.AppDB(), pid, invoiceID, paymentCompletionWait)
+		if err != nil {
+			return nil, err
+		}
+		paymentComplete = op != nil && op.Status == "paid"
 	}
 	checkout, _ = dbCheckoutGet(ctx.AppDB(), pid, checkout.ID)
 	response, err := a.checkoutResponse(ctx, checkout)
@@ -813,6 +821,11 @@ func (a *App) toolCheckoutMarkPaid(ctx *sdk.AppCtx, args map[string]any) (any, e
 	}
 	response["payment"] = unwrapMap(paymentOut, "payment")
 	response["invoice"] = invoice
+	if !paymentComplete {
+		response["status"] = "processing_payment"
+		response["requires_payment"] = false
+		response["payment_processing"] = true
+	}
 	return response, nil
 }
 
@@ -2743,6 +2756,17 @@ func findBillingInvoiceByOperation(ctx *sdk.AppCtx, pid string, billingCustomerI
 }
 
 func (a *App) syncBillingInvoiceProjection(ctx *sdk.AppCtx, pid string, op *CommerceOperation) (*billingInvoiceProjection, error) {
+	projection, err := a.fetchBillingInvoiceProjection(ctx, pid, op)
+	if err != nil {
+		return nil, err
+	}
+	if err := persistBillingInvoiceProjection(ctx.AppDB(), pid, op, projection); err != nil {
+		return nil, err
+	}
+	return projection, nil
+}
+
+func (a *App) fetchBillingInvoiceProjection(ctx *sdk.AppCtx, pid string, op *CommerceOperation) (*billingInvoiceProjection, error) {
 	if op == nil || int64PtrValue(op.InvoiceID) == 0 {
 		return nil, errors.New("linked Billing invoice required")
 	}
@@ -2785,13 +2809,17 @@ func (a *App) syncBillingInvoiceProjection(ctx *sdk.AppCtx, pid string, op *Comm
 			Method:   strArg(payment, "method"), ReceivedAt: receivedAt, SourceCreatedAt: strArg(payment, "created_at"),
 		})
 	}
-	if err := dbBillingProjectionReplace(ctx.AppDB(), pid, projection); err != nil {
-		return nil, err
-	}
-	if err := dbCustomerSetBillingIDByAccount(ctx.AppDB(), pid, op.AccountID, projection.BillingCustomerID); err != nil {
-		return nil, err
-	}
 	return projection, nil
+}
+
+func persistBillingInvoiceProjection(db *sql.DB, pid string, op *CommerceOperation, projection *billingInvoiceProjection) error {
+	if err := dbBillingProjectionReplace(db, pid, projection); err != nil {
+		return err
+	}
+	if err := dbCustomerSetBillingIDByAccount(db, pid, op.AccountID, projection.BillingCustomerID); err != nil {
+		return err
+	}
+	return nil
 }
 
 func (a *App) syncBillingOperations(ctx *sdk.AppCtx, pid, accountID string, missingOnly bool, limit, offset int) (map[string]any, error) {
@@ -2837,11 +2865,14 @@ func (a *App) handleInvoicePaid(ctx *sdk.AppCtx, event sdk.Event) error {
 	if err != nil || op == nil {
 		return err
 	}
-	invoice, err := a.syncBillingInvoiceProjection(ctx, pid, op)
+	invoice, err := a.fetchBillingInvoiceProjection(ctx, pid, op)
 	if err != nil {
 		return err
 	}
 	if invoice.Status != "paid" {
+		if err := persistBillingInvoiceProjection(ctx.AppDB(), pid, op, invoice); err != nil {
+			return err
+		}
 		_ = recordEvent(ctx.AppDB(), pid, op.AccountID, "invoice.payment_received", "billing", map[string]any{
 			"subscription_id": op.SubscriptionID, "cycle_id": op.CycleID, "invoice_id": invoiceID,
 			"invoice_status": invoice.Status, "amount_paid_cents": invoice.AmountPaidCents,
@@ -2853,7 +2884,7 @@ func (a *App) handleInvoicePaid(ctx *sdk.AppCtx, event sdk.Event) error {
 		return err
 	}
 	if !claimed {
-		if op.Status == "paid" {
+		if op.Status == "paid" || op.Status == "processing_payment" {
 			return nil
 		}
 		return fmt.Errorf("invoice %d payment operation is already in progress", invoiceID)
@@ -2863,6 +2894,9 @@ func (a *App) handleInvoicePaid(ctx *sdk.AppCtx, event sdk.Event) error {
 			return fmt.Errorf("%w; persist payment failure: %v", cause, persistErr)
 		}
 		return cause
+	}
+	if err := persistBillingInvoiceProjection(ctx.AppDB(), pid, op, invoice); err != nil {
+		return fail(fmt.Errorf("project paid Billing invoice: %w", err))
 	}
 
 	var cycleOut map[string]any
@@ -2905,6 +2939,29 @@ func (a *App) handleInvoicePaid(ctx *sdk.AppCtx, event sdk.Event) error {
 		"subscription_id": op.SubscriptionID, "cycle_id": op.CycleID, "invoice_id": invoiceID,
 	})
 	return nil
+}
+
+func waitForCommercePayment(db *sql.DB, pid string, invoiceID int64, timeout time.Duration) (*CommerceOperation, error) {
+	deadline := time.Now().Add(timeout)
+	for {
+		op, err := dbCommerceOperationByInvoice(db, pid, invoiceID)
+		if err != nil {
+			return nil, err
+		}
+		if op == nil {
+			return nil, fmt.Errorf("invoice %d payment operation not found", invoiceID)
+		}
+		switch op.Status {
+		case "paid":
+			return op, nil
+		case "failed_payment":
+			return op, fmt.Errorf("invoice %d payment activation failed: %s", invoiceID, firstNonEmpty(op.LastError, "unknown error"))
+		}
+		if !time.Now().Before(deadline) {
+			return op, nil
+		}
+		time.Sleep(paymentCompletionPoll)
+	}
 }
 
 func (a *App) handlePaymentMethodAttached(ctx *sdk.AppCtx, event sdk.Event) error {

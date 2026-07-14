@@ -61,6 +61,10 @@ cycle paid and asks Subscriptions to transition to `active`; the resulting
 Administrative manual payments use the separately permission-gated
 `saas_checkout_mark_paid` tool. Public checkout cannot override plan pricing,
 trial policy, provider, billing/auth IDs, lifecycle dates, or payment state.
+When Billing publishes `invoice.paid` during an administrative payment, the
+tool and event handler share the same idempotent operation: the loser waits for
+the winner and returns the completed checkout instead of a false duplicate
+payment error.
 
 SaaS exposes `saas.read`, `saas.checkout`, and `saas.admin` permissions. Plan,
 fulfillment, account-management, usage-write, and manual-payment tools require
