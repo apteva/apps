@@ -46,6 +46,8 @@ func TestActionTimeoutsAreBounded(t *testing.T) {
 		"scroll":        scrollActionTimeout,
 		"wait":          waitActionTimeout,
 		"navigate":      navigateActionTimeout,
+		"back":          navigateActionTimeout,
+		"reload":        navigateActionTimeout,
 		"upload_file":   30 * time.Second,
 		"select_option": 20 * time.Second,
 		"set_checked":   20 * time.Second,

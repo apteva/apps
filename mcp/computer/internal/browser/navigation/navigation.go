@@ -3,6 +3,7 @@ package navigation
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net/url"
 	"strings"
 	"time"
@@ -10,6 +11,44 @@ import (
 	"github.com/chromedp/cdproto/page"
 	"github.com/chromedp/chromedp"
 )
+
+// Run executes a browser-history navigation with a bounded CDP context. A
+// load timeout is recoverable when Chrome reached a usable page; callers still
+// verify the resulting URL when the action is expected to change it.
+func Run(parent context.Context, action, rawURL string, timeout time.Duration) error {
+	if parent == nil {
+		return errors.New("browser context is not active")
+	}
+	if timeout <= 0 {
+		timeout = 30 * time.Second
+	}
+	ctx, cancel := context.WithTimeout(parent, timeout)
+	defer cancel()
+
+	var task chromedp.Action
+	switch action {
+	case "navigate":
+		if !UsableURL(rawURL) {
+			return fmt.Errorf("invalid navigation URL %q", rawURL)
+		}
+		task = chromedp.Navigate(strings.TrimSpace(rawURL))
+	case "back":
+		task = chromedp.NavigateBack()
+	case "reload":
+		task = chromedp.Reload()
+	default:
+		return fmt.Errorf("unsupported navigation action %q", action)
+	}
+
+	err := chromedp.Run(ctx, task)
+	if err == nil {
+		return nil
+	}
+	if _, recovered := RecoverTimeout(parent, err); recovered {
+		return nil
+	}
+	return err
+}
 
 // RecoverTimeout accepts a navigation timeout only when Chrome reached a real
 // page. Some sites keep loading analytics, ads, or long-lived resources after

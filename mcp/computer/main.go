@@ -52,10 +52,10 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: computer
 display_name: Computer
-version: 0.7.52
+version: 0.7.53
 description: |
-  Watch, steer, and replay hosted browser sessions. v0.7.52 directs agents to
-  open fresh sessions and hides session listing and resume actions from MCP.
+  Watch, steer, and replay hosted browser sessions. v0.7.53 adds compact action
+  deltas, aggregate extraction limits, and reliable navigation actions.
 scopes: [project, global]
 requires:
   permissions:
@@ -82,7 +82,7 @@ provides:
     - name: browser_session
       description: "Open a fresh app-owned browser session, inspect it, close it, or switch its tabs. Args: action, session_id?, tab_id?, backend?, url?, context_id?, context_name?, auto_create_context?, persist?, timeout?, proxy?, proxy_country?, viewport?. Usually omit viewport to use Computer's default desktop viewport, 1600x800. Pass viewport when a specific resolution is needed, for example mobile/tablet testing or a site-specific requirement. session_id is the app-owned live br_* handle for status/close/computer_use only. Always use action=open for new browsing work. To continue saved login and browser state, open a new session with context_id or context_name; do not reuse a prior session_id. For tab control, call browser_session(action=tabs) to list open tabs, then browser_session(action=switch_tab, tab_id=...) or browser_session(action=close_tab, tab_id=...). Do not use keyboard shortcuts such as Ctrl+Tab, Ctrl+PageDown, or Ctrl+1-9 to switch browser tabs. Browserbase honors timeout as max session lifetime. Prefer context_id from computer_context_list to reopen saved state; context_name works across backends when unique. For a reusable saved context, pass context_name with auto_create_context=true; omitted names are only a fallback and are auto-generated. Sessions consume local or cloud resources. When browser work is complete and the user did not explicitly ask to keep the browser open, close it with browser_session(action=close, session_id=...). Closing is especially important for Browserbase/Steel sessions and persisted contexts because it releases provider resources and lets context state flush cleanly."
     - name: computer_use
-      description: "Drive an app-owned browser session. Default workflow: call action=screenshot first; screenshots contain Set-of-Mark numeric badges on interactive elements. To click, use action=click with label=N from the latest screenshot. label must be >= 1; do not pass 0. Prefer label over coordinate; use coordinate only for targets with no badge such as canvas or custom rendered widgets. Do not pass both; when both are present, coordinate wins. If the page asks to Browse, choose, attach, upload, or drop a file, use action=upload_file with selector or label plus source_url/base64/file_path; do not operate the native OS file picker. For any native select, dropdown, combobox, listbox, or multiselect, use action=select_option first with label/selector plus text/value or texts/values and optional mode=replace|add|remove|toggle; do not click options one by one or use keyboard navigation unless select_option fails. For checkboxes, radio buttons, and ARIA switches, use action=set_checked with label/selector plus checked=true|false instead of blind clicking. For long text fields, textareas, contenteditable editors, or message/post composers, use action=set_text with label/selector plus text instead of click + Control+A + type; use newline_mode=compact for public messages when blank paragraph gaps are not desired. For native date/time/datetime-local fields or text-like scheduler fields, use action=set_temporal with label/selector plus value such as 2026-07-01 or 11:00 AM. If a click opens exactly one new tab, Computer automatically follows it and reports switched_tab=true. For explicit tab control, call browser_session(action=tabs) to list tabs, then browser_session(action=switch_tab, tab_id=...) or browser_session(action=close_tab, tab_id=...); do not use Ctrl+Tab, Ctrl+PageDown, or Ctrl+1-9 for browser tab switching. Use action=key for page/editor commands such as Tab, Backspace, Control+A, Control+Z; use action=type only for short literal text and full date/time values such as 2026-06-05 or 08:00 PM. For action=scroll, amount is CSS pixels; use 200-500 for a small viewport move and omit amount for the 300px default. After scrolling, tab switching, selection, upload, checked-state changes, text changes, temporal-field changes, or navigation, take a fresh screenshot because labels are re-enumerated. Args: session_id, action, tab_id?, coordinate?, label?, selector?, checked?, source_url?, base64?, filename?, mime_type?, file_path?, text?, value?, texts?, values?, mode?, newline_mode?, key?, direction?, amount?, duration?, annotate? (screenshot only, default true), include_som? (screenshot only, default false). Returns screenshot bytes for visual actions; structured som targets are returned only when include_som=true."
+      description: "Drive an app-owned browser session. Default workflow: call action=screenshot first; screenshots contain Set-of-Mark numeric badges on interactive elements. To click, use action=click with label=N from the latest screenshot. label must be >= 1; do not pass 0. Prefer label over coordinate; use coordinate only for targets with no badge such as canvas or custom rendered widgets. Do not pass both; when both are present, coordinate wins. If the page asks to Browse, choose, attach, upload, or drop a file, use action=upload_file with selector or label plus source_url/base64/file_path; do not operate the native OS file picker. For any native select, dropdown, combobox, listbox, or multiselect, use action=select_option first with label/selector plus text/value or texts/values and optional mode=replace|add|remove|toggle; do not click options one by one or use keyboard navigation unless select_option fails. For checkboxes, radio buttons, and ARIA switches, use action=set_checked with label/selector plus checked=true|false instead of blind clicking. For long text fields, textareas, contenteditable editors, or message/post composers, use action=set_text with label/selector plus text instead of click + Control+A + type; use newline_mode=compact for public messages when blank paragraph gaps are not desired. For native date/time/datetime-local fields or text-like scheduler fields, use action=set_temporal with label/selector plus value such as 2026-07-01 or 11:00 AM. If a click opens exactly one new tab, Computer automatically follows it and reports switched_tab=true. For explicit tab control, call browser_session(action=tabs) to list tabs, then browser_session(action=switch_tab, tab_id=...) or browser_session(action=close_tab, tab_id=...); do not use Ctrl+Tab, Ctrl+PageDown, or Ctrl+1-9 for browser tab switching. Use action=key for page/editor commands such as Tab, Backspace, Control+A, Control+Z; use action=type only for short literal text and full date/time values such as 2026-06-05 or 08:00 PM. For action=scroll, amount is CSS pixels; use 200-500 for a small viewport move and omit amount for the 300px default. Use action=navigate with url, action=back for browser history, and action=reload to refresh; do not emulate these with Control+L, Alt+ArrowLeft, or F5. After scrolling, tab switching, selection, upload, checked-state changes, text changes, temporal-field changes, or navigation, take a fresh screenshot because labels are re-enumerated. Args: session_id, action, url? (navigate only), tab_id?, coordinate?, label?, selector?, checked?, source_url?, base64?, filename?, mime_type?, file_path?, text?, value?, texts?, values?, mode?, newline_mode?, key?, direction?, amount?, duration?, annotate? (screenshot only, default true), include_som? (screenshot only, default false). Returns screenshot bytes plus compact URL and state-change metadata; structured som targets are returned only for action=screenshot with include_som=true."
     - name: computer_context_create
       description: "Create or import an app-managed browser context. Args: name, backend?, provider_context_id?, persist_default?, metadata?, auto_create_provider?."
     - name: computer_context_list
@@ -241,6 +241,7 @@ const maxUploadBytes = 100 * 1024 * 1024
 const recordingProcessingWindow = 15 * time.Minute
 const internalAppCallerHeader = "X-Apteva-Internal-App-Caller-ID"
 const maxExtractChars = 200000
+const defaultExtractChars = 50000
 const maxExtractWaitMS = 10000
 
 var errExtractSessionNotFound = errors.New("extraction session not found")
@@ -537,12 +538,14 @@ func (a *App) MCPTools() []sdk.Tool {
 				"If a click opens exactly one new tab, Computer automatically follows it and reports switched_tab=true. For explicit tab control, call browser_session(action=tabs) to list tabs, then browser_session(action=switch_tab, tab_id=...) or browser_session(action=close_tab, tab_id=...). " +
 				"Do not use Ctrl+Tab, Ctrl+PageDown, or Ctrl+1-9 for browser tab switching. Use action=key for page/editor commands such as Tab, Backspace, Control+A, Control+Z; use action=type only for short literal text and full date/time values such as 2026-06-05 or 08:00 PM. " +
 				"For action=scroll, amount is CSS pixels; use 200-500 for a small viewport move and omit amount for the 300px default. " +
-				"After scrolling, tab switching, selection, upload, checked-state changes, text changes, temporal-field changes, or navigation, take a fresh screenshot because labels are re-enumerated. Actions: screenshot, click, double_click, type, key, scroll, wait, upload_file, select_option, set_checked, set_text, set_temporal. " +
-				"Args: session_id, action, tab_id?, coordinate? (\"x,y\"), label? (Set-of-Mark label), selector? (CSS selector), checked?, source_url?, base64?, filename?, mime_type?, file_path?, text?, value?, texts?, values?, mode?, newline_mode?, key?, direction?, amount?, duration?, annotate? (screenshot only, default true). " +
-				"Returns a binary screenshot envelope plus current_url, active_tab_id, tabs, width, height.",
+				"Use action=navigate with url for direct navigation, action=back for browser history, and action=reload to refresh the current page. Do not emulate these with Control+L, Alt+ArrowLeft, or F5. " +
+				"After scrolling, tab switching, selection, upload, checked-state changes, text changes, temporal-field changes, or navigation, take a fresh screenshot because labels are re-enumerated. Actions: screenshot, navigate, back, reload, click, double_click, type, key, scroll, wait, upload_file, select_option, set_checked, set_text, set_temporal. " +
+				"Args: session_id, action, url? (navigate only), tab_id?, coordinate? (\"x,y\"), label? (Set-of-Mark label), selector? (CSS selector), checked?, source_url?, base64?, filename?, mime_type?, file_path?, text?, value?, texts?, values?, mode?, newline_mode?, key?, direction?, amount?, duration?, annotate? (screenshot only, default true). " +
+				"Returns a binary screenshot envelope plus compact current URL and state-change metadata. Full tabs and viewport metadata are available from browser_session.",
 			InputSchema: schemaObject(map[string]any{
 				"session_id":   map[string]any{"type": "string"},
-				"action":       map[string]any{"type": "string", "enum": []string{"screenshot", "click", "double_click", "type", "key", "scroll", "wait", "upload_file", "select_option", "set_checked", "set_text", "set_temporal"}},
+				"action":       map[string]any{"type": "string", "enum": []string{"screenshot", "navigate", "back", "reload", "click", "double_click", "type", "key", "scroll", "wait", "upload_file", "select_option", "set_checked", "set_text", "set_temporal"}},
+				"url":          map[string]any{"type": "string", "description": "Required for action=navigate. Absolute http(s) URL to load in the current tab."},
 				"tab_id":       map[string]any{"type": "string", "description": "Optional active tab/page target to switch to before running the action."},
 				"coordinate":   map[string]any{"type": "string"},
 				"label":        map[string]any{"type": "integer", "minimum": 1, "description": "Positive Set-of-Mark target number shown as a colored badge in the latest screenshot. Prefer this over coordinate for click/double_click. Do not pass 0."},
@@ -1532,42 +1535,193 @@ func (a *App) extractSessionDOM(sessionID string, opts extractOptions) (map[stri
 	if !ok {
 		return nil, fmt.Errorf("%w for backend %q", errExtractUnsupported, sess.backend)
 	}
+	formats := opts.Formats
+	if len(formats) == 0 {
+		formats = []string{"text"}
+	}
+	responseLimit := opts.MaxChars
+	if responseLimit <= 0 {
+		responseLimit = defaultExtractChars
+	}
 	res, err := extractor.ExtractDOM(backends.ExtractOptions{
-		Formats:     opts.Formats,
-		MaxChars:    opts.MaxChars,
+		Formats:     formats,
+		MaxChars:    responseLimit,
 		Readability: opts.Readability,
 		WaitMS:      opts.WaitMS,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("rendered DOM extraction: %w", err)
 	}
-	disp := sess.comp.DisplaySize()
-	out := map[string]any{
-		"session_id":         sessionID,
-		"backend":            sess.backend,
-		"current_url":        firstNonEmpty(res.URL, currentURL(sess.comp)),
-		"title":              res.Title,
-		"description":        res.Description,
-		"text":               res.Text,
-		"markdown":           res.Markdown,
-		"html":               res.HTML,
-		"links":              res.Links,
-		"images":             res.Images,
-		"regions":            res.Regions,
-		"metadata":           res.Metadata,
-		"structured_data":    res.StructuredData,
-		"rendered":           res.Rendered,
-		"extraction_backend": res.ExtractionBackend,
-		"width":              disp.Width,
-		"height":             disp.Height,
+	fields := []extractResponseField{
+		{Key: "session_id", Value: sessionID},
+		{Key: "backend", Value: sess.backend},
+		{Key: "current_url", Value: firstNonEmpty(res.URL, currentURL(sess.comp))},
 	}
+	fields = appendNonEmptyExtractField(fields, "title", res.Title)
+	fields = appendNonEmptyExtractField(fields, "description", res.Description)
+	fields = append(fields, extractResponseField{Key: "rendered", Value: res.Rendered})
+	fields = appendNonEmptyExtractField(fields, "extraction_backend", res.ExtractionBackend)
 	if bID := backendSessionID(sess.comp); bID != "" {
-		out["backend_session_id"] = bID
+		fields = append(fields, extractResponseField{Key: "backend_session_id", Value: bID})
 	}
 	if tabID := activeTabID(sess.comp); tabID != "" {
-		out["active_tab_id"] = tabID
+		fields = append(fields, extractResponseField{Key: "active_tab_id", Value: tabID})
 	}
-	return out, nil
+	addedFormats := map[string]bool{}
+	for _, format := range formats {
+		outputKey := format
+		if format == "json" {
+			outputKey = "structured_data"
+		}
+		if addedFormats[outputKey] {
+			continue
+		}
+		addedFormats[outputKey] = true
+		switch format {
+		case "text":
+			fields = appendNonEmptyExtractField(fields, "text", res.Text)
+		case "markdown":
+			fields = appendNonEmptyExtractField(fields, "markdown", res.Markdown)
+		case "html":
+			fields = appendNonEmptyExtractField(fields, "html", res.HTML)
+		case "links":
+			fields = appendNonEmptyExtractField(fields, "links", res.Links)
+		case "images":
+			fields = appendNonEmptyExtractField(fields, "images", res.Images)
+		case "regions":
+			fields = appendNonEmptyExtractField(fields, "regions", res.Regions)
+			disp := sess.comp.DisplaySize()
+			fields = append(fields,
+				extractResponseField{Key: "width", Value: disp.Width},
+				extractResponseField{Key: "height", Value: disp.Height},
+			)
+		case "metadata":
+			fields = appendNonEmptyExtractField(fields, "metadata", res.Metadata)
+		case "structured_data", "json":
+			fields = appendNonEmptyExtractField(fields, "structured_data", res.StructuredData)
+		}
+	}
+	return limitExtractResponse(fields, responseLimit), nil
+}
+
+type extractResponseField struct {
+	Key   string
+	Value any
+}
+
+func appendNonEmptyExtractField(fields []extractResponseField, key string, value any) []extractResponseField {
+	if value == nil {
+		return fields
+	}
+	rv := reflect.ValueOf(value)
+	switch rv.Kind() {
+	case reflect.String, reflect.Array, reflect.Slice, reflect.Map:
+		if rv.Len() == 0 {
+			return fields
+		}
+	}
+	return append(fields, extractResponseField{Key: key, Value: value})
+}
+
+// limitExtractResponse treats max_chars as a cap on the complete serialized
+// response, not a separate allowance for every requested representation.
+func limitExtractResponse(fields []extractResponseField, maxChars int) map[string]any {
+	if maxChars <= 0 {
+		maxChars = defaultExtractChars
+	}
+	full := make(map[string]any, len(fields))
+	for _, field := range fields {
+		full[field.Key] = field.Value
+	}
+	if jsonObjectSize(full) <= maxChars {
+		return full
+	}
+	if maxChars < len(`{"truncated":true}`) {
+		return map[string]any{}
+	}
+
+	out := map[string]any{"truncated": true}
+	for _, field := range fields {
+		out[field.Key] = field.Value
+		if jsonObjectSize(out) <= maxChars {
+			continue
+		}
+		delete(out, field.Key)
+		if partial, ok := fitExtractValue(out, field.Key, field.Value, maxChars); ok {
+			out[field.Key] = partial
+		}
+	}
+	return out
+}
+
+func fitExtractValue(base map[string]any, key string, value any, maxChars int) (any, bool) {
+	switch typed := value.(type) {
+	case string:
+		runes := []rune(typed)
+		low, high := 0, len(runes)
+		for low < high {
+			mid := (low + high + 1) / 2
+			base[key] = string(runes[:mid])
+			if jsonObjectSize(base) <= maxChars {
+				low = mid
+			} else {
+				high = mid - 1
+			}
+		}
+		delete(base, key)
+		if low == 0 {
+			return nil, false
+		}
+		return string(runes[:low]), true
+	case map[string]any:
+		keys := make([]string, 0, len(typed))
+		for itemKey := range typed {
+			keys = append(keys, itemKey)
+		}
+		sort.Strings(keys)
+		partial := map[string]any{}
+		for _, itemKey := range keys {
+			partial[itemKey] = typed[itemKey]
+			base[key] = partial
+			if jsonObjectSize(base) > maxChars {
+				delete(partial, itemKey)
+			}
+		}
+		delete(base, key)
+		if len(partial) == 0 {
+			return nil, false
+		}
+		return partial, true
+	}
+
+	rv := reflect.ValueOf(value)
+	if !rv.IsValid() || rv.Kind() != reflect.Slice {
+		return nil, false
+	}
+	low, high := 0, rv.Len()
+	for low < high {
+		mid := (low + high + 1) / 2
+		partial := rv.Slice(0, mid).Interface()
+		base[key] = partial
+		if jsonObjectSize(base) <= maxChars {
+			low = mid
+		} else {
+			high = mid - 1
+		}
+	}
+	delete(base, key)
+	if low == 0 {
+		return nil, false
+	}
+	return rv.Slice(0, low).Interface(), true
+}
+
+func jsonObjectSize(value map[string]any) int {
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return maxExtractChars + 1
+	}
+	return len(encoded)
 }
 
 func (a *App) toolComputerUse(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -1579,9 +1733,6 @@ func (a *App) toolComputerUse(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	if action == "" {
 		return nil, fmt.Errorf("action required")
 	}
-	if action == "navigate" {
-		return nil, fmt.Errorf("use browser_session(action=open, url=...) to navigate")
-	}
 	sess, ok := a.reg.get(id)
 	if !ok {
 		return nil, computerUseFailure("session_not_active", id, nil, action,
@@ -1591,6 +1742,18 @@ func (a *App) toolComputerUse(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	}
 	sess.actionMu.Lock()
 	defer sess.actionMu.Unlock()
+	if action == "navigate" {
+		if !validToolNavigationURL(stringArg(args, "url")) {
+			return nil, computerUseFailure("invalid_navigation", id, sess, action,
+				"navigate requires a usable absolute URL",
+				"Pass action=navigate with an absolute http(s) URL in url.", nil)
+		}
+	}
+	if (action == "navigate" || action == "back" || action == "reload") && sess.backend == "service" {
+		return nil, computerUseFailure("backend_not_supported", id, sess, action,
+			fmt.Sprintf("backend %q does not expose verifiable navigation", sess.backend),
+			"Use local, Browserbase, Steel, or browser-engine for navigate, back, and reload.", nil)
+	}
 	if err := validateClickTargetArgs(action, args); err != nil {
 		return nil, computerUseFailure("invalid_target", id, sess, action,
 			err.Error(),
@@ -1644,6 +1807,7 @@ func (a *App) toolComputerUse(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		Key:         stringArg(args, "key"),
 		Direction:   stringArg(args, "direction"),
 		Amount:      intArg(args, "amount"),
+		URL:         strings.TrimSpace(stringArg(args, "url")),
 		Duration:    intArg(args, "duration"),
 	}
 	if checked, ok := boolArg(args, "checked"); ok {
@@ -1697,6 +1861,7 @@ func (a *App) toolComputerUse(ctx *sdk.AppCtx, args map[string]any) (any, error)
 			nil)
 	}
 
+	beforeURL := currentURL(sess.comp)
 	beforeTabs := []backends.TabInfo(nil)
 	if action == "click" || action == "double_click" {
 		beforeTabs = tabsFor(sess.comp)
@@ -1704,7 +1869,7 @@ func (a *App) toolComputerUse(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	var shot []byte
 	var err error
 	screenshotSkipped := false
-	includeSOM := boolArgDefault(args, "include_som", false)
+	includeSOM := action == "screenshot" && boolArgDefault(args, "include_som", false)
 	annotate := annotateArg(args, true)
 	if includeSOM {
 		annotate = true
@@ -1743,6 +1908,17 @@ func (a *App) toolComputerUse(ctx *sdk.AppCtx, args map[string]any) (any, error)
 			}
 		}
 	}
+	afterURL := currentURL(sess.comp)
+	if action == "back" && !navigationURLChanged(beforeURL, afterURL) {
+		return nil, computerUseFailure("navigation_ineffective", id, sess, action,
+			"browser history did not move to a different URL",
+			"Take a fresh screenshot and use action=navigate with an explicit URL if the destination is known.", nil)
+	}
+	if action == "navigate" && !navigationURLChanged(beforeURL, afterURL) && !navigationURLsEquivalent(act.URL, afterURL) {
+		return nil, computerUseFailure("navigation_ineffective", id, sess, action,
+			fmt.Sprintf("browser remained at %q", afterURL),
+			"Check the URL, then retry action=navigate once or take a fresh screenshot for redirects and blockers.", nil)
+	}
 	disp := sess.comp.DisplaySize()
 	payload := a.sessionActionPayload(id, sess, act, args)
 	for k, v := range uploadMeta {
@@ -1775,15 +1951,20 @@ func (a *App) toolComputerUse(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	mergeTextResultPayload(payload, textResult)
 	mergeScreenshotRecoveryPayload(payload, recovery)
 	mergeTabFollowPayload(payload, tabEvent)
+	mergeNavigationDelta(payload, action, beforeURL, afterURL, act.URL)
 	emitEvent(ctx, "session.action", payload)
 	out := map[string]any{
-		"session_id":    id,
-		"current_url":   currentURL(sess.comp),
-		"active_tab_id": activeTabID(sess.comp),
-		"tabs":          tabsFor(sess.comp),
-		"width":         disp.Width,
-		"height":        disp.Height,
+		"session_id":  id,
+		"current_url": afterURL,
 	}
+	if tabID := activeTabID(sess.comp); tabID != "" && (action == "screenshot" || tabEvent.Switched || stringArg(args, "tab_id") != "") {
+		out["active_tab_id"] = tabID
+	}
+	if action == "screenshot" {
+		out["width"] = disp.Width
+		out["height"] = disp.Height
+	}
+	mergeNavigationDelta(out, action, beforeURL, afterURL, act.URL)
 	if screenshotSkipped {
 		out["text"] = fmt.Sprintf("Success: %s action dispatched. Call action=wait if needed, then action=screenshot for the visual state.", action)
 		out["screenshot_available"] = false
@@ -1801,9 +1982,6 @@ func (a *App) toolComputerUse(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	}
 	for k, v := range uploadMeta {
 		out[k] = v
-	}
-	if tabs, _ := out["tabs"].([]backends.TabInfo); len(tabs) > 0 {
-		out["tab_count"] = len(tabs)
 	}
 	mergeSelectResultPayload(out, selectResult)
 	mergeCheckedResultPayload(out, checkedResult)
@@ -1869,8 +2047,9 @@ func (a *App) toolBrowserClose(ctx *sdk.AppCtx, args map[string]any) (any, error
 }
 
 type tabFollowResult struct {
-	Switched bool
-	NewTabs  []backends.TabInfo
+	Switched   bool
+	NewTabs    []backends.TabInfo
+	AfterCount int
 }
 
 func autoFollowNewTab(comp backends.Computer, before []backends.TabInfo) tabFollowResult {
@@ -1883,7 +2062,7 @@ func autoFollowNewTab(comp backends.Computer, before []backends.TabInfo) tabFoll
 		return tabFollowResult{}
 	}
 	newTabs := newTabsSince(before, after)
-	result := tabFollowResult{NewTabs: newTabs}
+	result := tabFollowResult{NewTabs: newTabs, AfterCount: len(after)}
 	if len(newTabs) != 1 {
 		return result
 	}
@@ -1914,10 +2093,66 @@ func newTabsSince(before, after []backends.TabInfo) []backends.TabInfo {
 func mergeTabFollowPayload(payload map[string]any, result tabFollowResult) {
 	if len(result.NewTabs) > 0 {
 		payload["new_tabs"] = result.NewTabs
+		payload["tab_count"] = result.AfterCount
 	}
 	if result.Switched {
 		payload["switched_tab"] = true
 	}
+}
+
+func mergeNavigationDelta(payload map[string]any, action, beforeURL, afterURL, requestedURL string) {
+	changed := navigationURLChanged(beforeURL, afterURL)
+	if changed {
+		payload["previous_url"] = beforeURL
+		payload["url_changed"] = true
+	}
+	switch action {
+	case "navigate":
+		payload["navigation"] = "navigate"
+		payload["requested_url"] = requestedURL
+		if !changed {
+			payload["url_changed"] = false
+		}
+	case "back":
+		payload["navigation"] = "back"
+		payload["previous_url"] = beforeURL
+		payload["url_changed"] = changed
+	case "reload":
+		payload["navigation"] = "reload"
+		payload["reloaded"] = true
+		payload["url_changed"] = changed
+	}
+}
+
+func navigationURLChanged(beforeURL, afterURL string) bool {
+	if strings.TrimSpace(beforeURL) == "" || strings.TrimSpace(afterURL) == "" {
+		return false
+	}
+	return !navigationURLsEquivalent(beforeURL, afterURL)
+}
+
+func navigationURLsEquivalent(left, right string) bool {
+	normalize := func(raw string) string {
+		u, err := url.Parse(strings.TrimSpace(raw))
+		if err != nil {
+			return strings.TrimSpace(raw)
+		}
+		u.Scheme = strings.ToLower(u.Scheme)
+		u.Host = strings.ToLower(u.Host)
+		if (u.Scheme == "http" || u.Scheme == "https") && u.Path == "" {
+			u.Path = "/"
+		}
+		return u.String()
+	}
+	return normalize(left) == normalize(right)
+}
+
+func validToolNavigationURL(raw string) bool {
+	u, err := url.Parse(strings.TrimSpace(raw))
+	if err != nil || u.Host == "" {
+		return false
+	}
+	return u.Scheme == "http" || u.Scheme == "https"
 }
 
 type selectResultReporter interface {

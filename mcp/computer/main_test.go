@@ -12,6 +12,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"sort"
 	"strings"
 	"sync"
@@ -234,15 +235,21 @@ func TestBrowserSessionComputerUseClose(t *testing.T) {
 	}
 
 	clickOut, err := app.toolComputerUse(ctx, map[string]any{
-		"session_id": sessionID,
-		"action":     "click",
-		"label":      "3",
+		"session_id":  sessionID,
+		"action":      "click",
+		"label":       "3",
+		"include_som": true,
 	})
 	if err != nil {
 		t.Fatalf("computer_use click with string label: %v", err)
 	}
 	if clickOut.(map[string]any)["current_url"] != "https://example.com" {
 		t.Errorf("click current_url: want example.com, got %v", clickOut.(map[string]any)["current_url"])
+	}
+	for _, omitted := range []string{"som", "tabs", "width", "height"} {
+		if _, ok := clickOut.(map[string]any)[omitted]; ok {
+			t.Errorf("click response should omit repeated %s metadata: %v", omitted, clickOut)
+		}
 	}
 	if fake.lastAction.Type != "click" || fake.lastAction.Label != 3 {
 		t.Errorf("click action: want label 3, got %+v", fake.lastAction)
@@ -297,6 +304,117 @@ func TestBrowserSessionComputerUseClose(t *testing.T) {
 	// screenshot after close — error, not panic
 	if _, err := app.toolComputerUse(ctx, map[string]any{"session_id": sessionID, "action": "screenshot"}); err == nil {
 		t.Errorf("screenshot after close: want error, got nil")
+	}
+}
+
+func TestComputerUseReliableNavigationActions(t *testing.T) {
+	fake := &fakeComp{
+		display: backends.DisplaySize{Width: 1024, Height: 768},
+		png:     []byte{0x89, 0x50, 0x4e, 0x47},
+		url:     "https://example.com/start",
+	}
+	setURL := func(value string) {
+		fake.mu.Lock()
+		fake.url = value
+		fake.mu.Unlock()
+	}
+	backEffective := true
+	fake.executeHook = func(action backends.Action) error {
+		switch action.Type {
+		case "navigate":
+			setURL(action.URL)
+		case "back":
+			if backEffective {
+				setURL("https://example.com/start")
+			}
+		case "reload":
+			// A reload intentionally retains the current URL.
+		default:
+			return fmt.Errorf("unexpected action %q", action.Type)
+		}
+		return nil
+	}
+	app := appWithSession("br_navigation", fake, "browserbase")
+	ctx := tk.NewAppCtx(t, "apteva.yaml")
+
+	navigateOut, err := app.toolComputerUse(ctx, map[string]any{
+		"session_id": "br_navigation",
+		"action":     "navigate",
+		"url":        "https://example.com/next",
+	})
+	if err != nil {
+		t.Fatalf("navigate: %v", err)
+	}
+	navigateMap := navigateOut.(map[string]any)
+	if navigateMap["current_url"] != "https://example.com/next" || navigateMap["previous_url"] != "https://example.com/start" {
+		t.Fatalf("navigate URL delta: %#v", navigateMap)
+	}
+	if navigateMap["url_changed"] != true || navigateMap["navigation"] != "navigate" {
+		t.Fatalf("navigate metadata: %#v", navigateMap)
+	}
+	if fake.lastAction.URL != "https://example.com/next" {
+		t.Fatalf("navigate URL not sent to backend: %+v", fake.lastAction)
+	}
+
+	backOut, err := app.toolComputerUse(ctx, map[string]any{
+		"session_id": "br_navigation",
+		"action":     "back",
+	})
+	if err != nil {
+		t.Fatalf("back: %v", err)
+	}
+	backMap := backOut.(map[string]any)
+	if backMap["current_url"] != "https://example.com/start" || backMap["url_changed"] != true {
+		t.Fatalf("back URL delta: %#v", backMap)
+	}
+
+	reloadOut, err := app.toolComputerUse(ctx, map[string]any{
+		"session_id": "br_navigation",
+		"action":     "reload",
+	})
+	if err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	reloadMap := reloadOut.(map[string]any)
+	if reloadMap["reloaded"] != true || reloadMap["url_changed"] != false {
+		t.Fatalf("reload metadata: %#v", reloadMap)
+	}
+
+	backEffective = false
+	if _, err := app.toolComputerUse(ctx, map[string]any{
+		"session_id": "br_navigation",
+		"action":     "back",
+	}); err == nil || !strings.Contains(err.Error(), "navigation_ineffective") {
+		t.Fatalf("ineffective back should fail explicitly: %v", err)
+	}
+	if _, err := app.toolComputerUse(ctx, map[string]any{
+		"session_id": "br_navigation",
+		"action":     "navigate",
+		"url":        "not a URL",
+	}); err == nil || !strings.Contains(err.Error(), "invalid_navigation") {
+		t.Fatalf("invalid navigate should fail explicitly: %v", err)
+	}
+}
+
+func TestComputerUseNavigationSchemaAndUnsupportedService(t *testing.T) {
+	tool := findTool(t, (&App{}).MCPTools(), "computer_use")
+	properties := tool.InputSchema["properties"].(map[string]any)
+	actions := properties["action"].(map[string]any)["enum"].([]string)
+	for _, required := range []string{"navigate", "back", "reload"} {
+		if !slices.Contains(actions, required) {
+			t.Fatalf("computer_use action schema missing %q: %v", required, actions)
+		}
+	}
+	if _, ok := properties["url"]; !ok {
+		t.Fatal("computer_use schema missing navigate URL")
+	}
+
+	app := appWithSession("br_service", &fakeComp{url: "https://example.com"}, "service")
+	if _, err := app.toolComputerUse(tk.NewAppCtx(t, "apteva.yaml"), map[string]any{
+		"session_id": "br_service",
+		"action":     "reload",
+	}); err == nil || !strings.Contains(err.Error(), "backend_not_supported") {
+		t.Fatalf("service navigation should be rejected as unverifiable: %v", err)
 	}
 }
 
@@ -390,8 +508,8 @@ func TestInternalSessionExtractSuccessfulRenderedExtraction(t *testing.T) {
 	if out["text"] != "Hello from the hydrated page" {
 		t.Errorf("text: got %v", out["text"])
 	}
-	if out["structured_data"] == nil {
-		t.Errorf("structured_data missing")
+	if _, ok := out["structured_data"]; ok {
+		t.Errorf("unrequested structured_data should be omitted: %#v", out["structured_data"])
 	}
 	regions, ok := out["regions"].([]any)
 	if !ok || len(regions) != 1 || regions[0].(map[string]any)["heading"] != "Contact" {
@@ -405,6 +523,77 @@ func TestInternalSessionExtractSuccessfulRenderedExtraction(t *testing.T) {
 	}
 	if !fake.extractOptions.Readability {
 		t.Error("readability should default to true")
+	}
+}
+
+func TestInternalSessionExtractEnforcesAggregateResponseLimit(t *testing.T) {
+	fake := &fakeComp{
+		display: backends.DisplaySize{Width: 1280, Height: 720},
+		url:     "https://example.com/large",
+		extractResult: backends.ExtractResult{
+			URL:               "https://example.com/large",
+			Title:             "Large page",
+			Text:              strings.Repeat("text ", 1000),
+			Markdown:          strings.Repeat("markdown ", 1000),
+			HTML:              strings.Repeat("<p>html</p>", 1000),
+			Links:             []backends.ExtractLink{{URL: "https://example.com/next", Text: strings.Repeat("link ", 200)}},
+			Metadata:          map[string]any{"description": strings.Repeat("metadata ", 500)},
+			Rendered:          true,
+			ExtractionBackend: "browser_dom",
+		},
+	}
+	app := appWithSession("br_large", fake, "local")
+
+	out, err := app.extractSessionDOM("br_large", extractOptions{
+		Formats:  []string{"text", "markdown", "html", "links", "metadata"},
+		MaxChars: 700,
+	})
+	if err != nil {
+		t.Fatalf("extract large response: %v", err)
+	}
+	encoded, err := json.Marshal(out)
+	if err != nil {
+		t.Fatalf("marshal limited response: %v", err)
+	}
+	if len(encoded) > 700 {
+		t.Fatalf("aggregate response exceeds max_chars: got %d bytes\n%s", len(encoded), encoded)
+	}
+	if out["truncated"] != true {
+		t.Fatalf("limited response should report truncated=true: %#v", out)
+	}
+	if got := fake.extractOptions.MaxChars; got != 700 {
+		t.Fatalf("backend max chars: want 700, got %d", got)
+	}
+}
+
+func TestInternalSessionExtractDefaultsToTextOnly(t *testing.T) {
+	fake := &fakeComp{
+		url: "https://example.com/default",
+		extractResult: backends.ExtractResult{
+			URL:      "https://example.com/default",
+			Text:     "default text",
+			Markdown: "default markdown",
+			HTML:     "<p>default html</p>",
+		},
+	}
+	app := appWithSession("br_default", fake, "local")
+	out, err := app.extractSessionDOM("br_default", extractOptions{})
+	if err != nil {
+		t.Fatalf("extract defaults: %v", err)
+	}
+	if out["text"] != "default text" {
+		t.Fatalf("default text missing: %#v", out)
+	}
+	for _, omitted := range []string{"markdown", "html", "links", "metadata", "structured_data"} {
+		if _, ok := out[omitted]; ok {
+			t.Fatalf("default response should omit %s: %#v", omitted, out)
+		}
+	}
+	if !reflect.DeepEqual(fake.extractOptions.Formats, []string{"text"}) {
+		t.Fatalf("default backend formats: got %v", fake.extractOptions.Formats)
+	}
+	if fake.extractOptions.MaxChars != defaultExtractChars {
+		t.Fatalf("default backend max chars: want %d, got %d", defaultExtractChars, fake.extractOptions.MaxChars)
 	}
 }
 
@@ -1215,6 +1404,15 @@ func TestComputerUseAutoFollowsSingleNewTab(t *testing.T) {
 	if got := m["switched_tab"]; got != true {
 		t.Fatalf("switched_tab: want true, got %v", got)
 	}
+	if got := m["tab_count"]; got != 2 {
+		t.Fatalf("tab_count delta: want 2, got %v", got)
+	}
+	if newTabs, ok := m["new_tabs"].([]backends.TabInfo); !ok || len(newTabs) != 1 || newTabs[0].ID != newTab.ID {
+		t.Fatalf("new_tabs delta: got %#v", m["new_tabs"])
+	}
+	if _, ok := m["tabs"]; ok {
+		t.Fatalf("action response should not repeat the full tab list: %#v", m["tabs"])
+	}
 	if len(fake.switchCalls) != 1 || fake.switchCalls[0] != newTab.ID {
 		t.Fatalf("switch calls: want [%s], got %v", newTab.ID, fake.switchCalls)
 	}
@@ -1228,9 +1426,11 @@ func TestComputerUseBrowserbaseReturnsPostActionScreenshotByDefault(t *testing.T
 	t.Cleanup(func() { newBackend = prev })
 
 	fake := &fakeComp{
-		display: backends.DisplaySize{Width: 1024, Height: 768},
-		png:     []byte{0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a},
-		url:     "https://example.com",
+		display:     backends.DisplaySize{Width: 1024, Height: 768},
+		png:         []byte{0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a},
+		url:         "https://example.com",
+		activeTabID: "tab_1",
+		tabs:        []backends.TabInfo{{ID: "tab_1", URL: "https://example.com"}},
 	}
 	newBackend = func(cfg backends.Config) (backends.Computer, error) { return fake, nil }
 
@@ -1259,6 +1459,11 @@ func TestComputerUseBrowserbaseReturnsPostActionScreenshotByDefault(t *testing.T
 	}
 	if fake.lastAction.Type != "click" {
 		t.Fatalf("execute action: want click, got %+v", fake.lastAction)
+	}
+	for _, omitted := range []string{"tabs", "active_tab_id", "width", "height"} {
+		if _, ok := m[omitted]; ok {
+			t.Fatalf("ordinary action should omit repeated %s metadata: %#v", omitted, m)
+		}
 	}
 }
 

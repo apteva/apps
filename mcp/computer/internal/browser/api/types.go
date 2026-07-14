@@ -10,7 +10,7 @@ import (
 
 // Action represents a normalized computer use action.
 type Action struct {
-	Type        string   `json:"type"`                   // "click", "double_click", "type", "key", "scroll", "screenshot", "navigate", "wait", "select_option", "set_checked", "set_temporal", "set_text"
+	Type        string   `json:"type"`                   // "click", "double_click", "type", "key", "scroll", "screenshot", "navigate", "back", "reload", "wait", "select_option", "set_checked", "set_temporal", "set_text"
 	X           int      `json:"x,omitempty"`            // click/scroll coordinate
 	Y           int      `json:"y,omitempty"`            // click/scroll coordinate
 	Selector    string   `json:"selector,omitempty"`     // CSS selector for DOM-targeted actions like upload_file

@@ -85,6 +85,59 @@ func TestLocalNavigationLive(t *testing.T) {
 	t.Logf("url=%s bytes=%d som=%d", c.CurrentURL(), len(shot), len(targets))
 }
 
+func TestLocalExplicitNavigationActionsLive(t *testing.T) {
+	if os.Getenv("RUN_COMPUTER_NAVIGATION_TESTS") == "" {
+		t.Skip("set RUN_COMPUTER_NAVIGATION_TESTS=1")
+	}
+	var firstLoads atomic.Int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html")
+		switch r.URL.Path {
+		case "/first":
+			firstLoads.Add(1)
+			_, _ = w.Write([]byte(`<title>First</title><main>First page</main>`))
+		case "/second":
+			_, _ = w.Write([]byte(`<title>Second</title><main>Second page</main>`))
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer server.Close()
+
+	c, err := New(computer.DisplaySize{Width: 1000, Height: 600})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer c.Close()
+	firstURL := server.URL + "/first"
+	secondURL := server.URL + "/second"
+	if err := c.OpenSession(computer.OpenOptions{URL: firstURL}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.Execute(computer.Action{Type: "navigate", URL: secondURL}); err != nil {
+		t.Fatalf("navigate: %v", err)
+	}
+	if got := c.CurrentURL(); got != secondURL {
+		t.Fatalf("navigate URL: want %q, got %q", secondURL, got)
+	}
+	if _, err := c.Execute(computer.Action{Type: "back"}); err != nil {
+		t.Fatalf("back: %v", err)
+	}
+	if got := c.CurrentURL(); got != firstURL {
+		t.Fatalf("back URL: want %q, got %q", firstURL, got)
+	}
+	loadsBeforeReload := firstLoads.Load()
+	if _, err := c.Execute(computer.Action{Type: "reload"}); err != nil {
+		t.Fatalf("reload: %v", err)
+	}
+	if got := c.CurrentURL(); got != firstURL {
+		t.Fatalf("reload URL: want %q, got %q", firstURL, got)
+	}
+	if firstLoads.Load() <= loadsBeforeReload {
+		t.Fatalf("reload did not request the current page again: before=%d after=%d", loadsBeforeReload, firstLoads.Load())
+	}
+}
+
 func TestLocalCrossOriginIframeSOMLive(t *testing.T) {
 	if os.Getenv("RUN_COMPUTER_NAVIGATION_TESTS") == "" {
 		t.Skip("set RUN_COMPUTER_NAVIGATION_TESTS=1")
