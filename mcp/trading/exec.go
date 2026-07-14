@@ -340,6 +340,9 @@ func evaluateLiveStrategyAssignments(e *engine, app *sdk.AppCtx, now time.Time) 
 			e.logger.Warn("strategy definition invalid", "assignment_id", a.ID, "strategy_id", a.StrategyID, "err", err)
 			continue
 		}
+		if !stockStrategyExecutionReady(e, def, now) {
+			continue
+		}
 		slot := strategyAssignmentSlot(a, def, now)
 		if !strategyAssignmentDue(a, def, now) {
 			continue
@@ -380,6 +383,45 @@ func evaluateLiveStrategyAssignments(e *engine, app *sdk.AppCtx, now time.Time) 
 		totalOrders += len(created)
 	}
 	return totalOrders
+}
+
+func stockStrategyExecutionReady(e *engine, def *StrategyDefinition, now time.Time) bool {
+	stockSymbols := []string{}
+	for _, symbol := range def.Universe {
+		class := inferAssetClass(symbol)
+		if class == "equity" || class == "etf" {
+			stockSymbols = append(stockSymbols, symbol)
+		}
+	}
+	if len(stockSymbols) == 0 {
+		return true
+	}
+	if !usEquityRegularSession(now) {
+		return false
+	}
+	if _, live := e.provider.(*liveProvider); !live {
+		return true
+	}
+	for _, symbol := range stockSymbols {
+		mark, err := dbGetMark(e.db, symbol)
+		if err != nil || !markFresh(mark, now.UTC()) {
+			return false
+		}
+	}
+	return true
+}
+
+func usEquityRegularSession(now time.Time) bool {
+	location, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		return false
+	}
+	local := now.In(location)
+	if local.Weekday() == time.Saturday || local.Weekday() == time.Sunday {
+		return false
+	}
+	minute := local.Hour()*60 + local.Minute()
+	return minute >= 9*60+30 && minute < 16*60
 }
 
 func portfolioUsesBacktestPricing(db *sql.DB, portfolioID int64) bool {

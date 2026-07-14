@@ -1458,8 +1458,18 @@ func stepStrategyBacktestRun(run *BacktestRun) (map[string]any, error) {
 		return nil, err
 	}
 	orders := []*Order{}
-	if rebalance {
-		orders = applyStrategyTargets(run, state, eval.TargetAllocations, prices)
+	executedSignalStep := 0
+	if step > 1 && shouldRebalanceStrategy(def, run.Interval, step-1) {
+		priorMarket, marketErr := backtestStrategyMarket(run, step-1)
+		if marketErr != nil {
+			return nil, marketErr
+		}
+		priorEval, evalErr := evaluateStrategy(strategy, priorMarket)
+		if evalErr != nil {
+			return nil, evalErr
+		}
+		orders = applyStrategyTargets(run, state, priorEval.TargetAllocations, backtestExecutionPrices(prices))
+		executedSignalStep = step - 1
 	}
 	snap := strategySnapshot(run, step, state, prices, orders)
 	if err := dbUpsertBacktestSnapshot(globalCtx.AppDB(), snap); err != nil {
@@ -1473,13 +1483,16 @@ func stepStrategyBacktestRun(run *BacktestRun) (map[string]any, error) {
 		status = "completed"
 	}
 	summary := map[string]any{
-		"last_step":          step,
-		"prices":             prices,
-		"rebalance":          rebalance,
-		"strategy_id":        strategy.ID,
-		"strategy_name":      strategy.Name,
-		"target_allocations": eval.TargetAllocations,
-		"decisions":          eval.Decisions,
+		"last_step":            step,
+		"prices":               prices,
+		"rebalance":            rebalance,
+		"strategy_id":          strategy.ID,
+		"strategy_name":        strategy.Name,
+		"target_allocations":   eval.TargetAllocations,
+		"decisions":            eval.Decisions,
+		"signal_as_of":         eval.AsOf,
+		"executed_signal_step": executedSignalStep,
+		"execution_model":      "next_bar_open",
 	}
 	if err := dbAdvanceBacktestStep(globalCtx.AppDB(), run.ID, step, summary, status); err != nil {
 		return nil, err
@@ -1516,11 +1529,20 @@ func runStrategyBacktestStep(run *BacktestRun, strategy *Strategy, state *strate
 		next.Status = "completed"
 		return &next, nil
 	}
-	prices, err := advanceBacktestStrategyMarket(run, step, market)
+	def, _, err := validateStrategyDefinition(strategy.Definition)
 	if err != nil {
 		return nil, err
 	}
-	def, _, err := validateStrategyDefinition(strategy.Definition)
+	var executionEval *StrategyEvaluation
+	executedSignalStep := 0
+	if step > 1 && shouldRebalanceStrategy(def, run.Interval, step-1) {
+		executionEval, err = evaluateStrategy(strategy, *market)
+		if err != nil {
+			return nil, err
+		}
+		executedSignalStep = step - 1
+	}
+	prices, err := advanceBacktestStrategyMarket(run, step, market)
 	if err != nil {
 		return nil, err
 	}
@@ -1531,8 +1553,8 @@ func runStrategyBacktestStep(run *BacktestRun, strategy *Strategy, state *strate
 	stepRun := *run
 	stepRun.CurrentStep = step - 1
 	orders := []*Order{}
-	if rebalance {
-		orders = applyStrategyTargets(&stepRun, state, eval.TargetAllocations, prices)
+	if executionEval != nil {
+		orders = applyStrategyTargets(&stepRun, state, executionEval.TargetAllocations, backtestExecutionPrices(prices))
 	}
 	snap := strategySnapshot(&stepRun, step, state, prices, orders)
 	if err := dbUpsertBacktestSnapshot(globalCtx.AppDB(), snap); err != nil {
@@ -1546,13 +1568,16 @@ func runStrategyBacktestStep(run *BacktestRun, strategy *Strategy, state *strate
 		status = "completed"
 	}
 	summary := map[string]any{
-		"last_step":          step,
-		"prices":             prices,
-		"rebalance":          rebalance,
-		"strategy_id":        strategy.ID,
-		"strategy_name":      strategy.Name,
-		"target_allocations": eval.TargetAllocations,
-		"decisions":          eval.Decisions,
+		"last_step":            step,
+		"prices":               prices,
+		"rebalance":            rebalance,
+		"strategy_id":          strategy.ID,
+		"strategy_name":        strategy.Name,
+		"target_allocations":   eval.TargetAllocations,
+		"decisions":            eval.Decisions,
+		"signal_as_of":         eval.AsOf,
+		"executed_signal_step": executedSignalStep,
+		"execution_model":      "next_bar_open",
 	}
 	if err := dbAdvanceBacktestStep(globalCtx.AppDB(), run.ID, step, summary, status); err != nil {
 		return nil, err
@@ -1762,6 +1787,21 @@ func applyStrategyTargets(run *BacktestRun, state *strategyBacktestState, target
 		orders = append(orders, order)
 	}
 	return orders
+}
+
+func backtestExecutionPrices(prices []map[string]any) []map[string]any {
+	out := make([]map[string]any, 0, len(prices))
+	for _, row := range prices {
+		copyRow := make(map[string]any, len(row))
+		for key, value := range row {
+			copyRow[key] = value
+		}
+		if open := anyFloat(row["open"]); open > 0 {
+			copyRow["price"] = open
+		}
+		out = append(out, copyRow)
+	}
+	return out
 }
 
 func strategySnapshot(run *BacktestRun, step int, state *strategyBacktestState, prices []map[string]any, orders []*Order) *BacktestSnapshot {

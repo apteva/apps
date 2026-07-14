@@ -10,6 +10,34 @@ import (
 	"time"
 )
 
+func TestYahooQuoteUsesRegularMarketTimestamp(t *testing.T) {
+	tradeTime := time.Date(2026, 7, 14, 15, 45, 0, 0, time.UTC)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		response := map[string]any{"chart": map[string]any{
+			"error": nil,
+			"result": []any{map[string]any{
+				"meta": map[string]any{
+					"symbol": "AAPL", "regularMarketPrice": 211.5,
+					"regularMarketTime": tradeTime.Unix(),
+				},
+				"timestamp":  []int64{},
+				"indicators": map[string]any{"quote": []any{}},
+			}},
+		}}
+		_ = json.NewEncoder(w).Encode(response)
+	}))
+	defer srv.Close()
+
+	yahoo := &yahooPublic{base: srv.URL, client: srv.Client(), sem: make(chan struct{}, 1)}
+	mark, err := yahoo.Quote("AAPL")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mark.MarkedAt != tradeTime.Format(time.RFC3339) {
+		t.Fatalf("marked_at = %q, want exchange timestamp %q", mark.MarkedAt, tradeTime.Format(time.RFC3339))
+	}
+}
+
 func TestYahooBacktestBarsUsesDateBoundedRealHistory(t *testing.T) {
 	start := time.Date(2026, 1, 5, 0, 0, 0, 0, time.UTC)
 	end := time.Date(2026, 1, 7, 0, 0, 0, 0, time.UTC)

@@ -69,7 +69,7 @@ func (y *yahooPublic) Quote(symbol string) (*Mark, error) {
 		Symbol:     strings.ToUpper(symbol),
 		AssetClass: inferAssetClass(symbol),
 		Price:      meta.RegularMarketPrice,
-		MarkedAt:   time.Now().UTC().Format(time.RFC3339),
+		MarkedAt:   yahooRegularMarketTimestamp(meta),
 	}
 	if meta.PreviousClose > 0 {
 		pc := meta.PreviousClose
@@ -226,9 +226,17 @@ func (y *yahooPublic) UniverseBatch(symbols []string) ([]*Mark, error) {
 type yahooMeta struct {
 	Symbol              string  `json:"symbol"`
 	RegularMarketPrice  float64 `json:"regularMarketPrice"`
+	RegularMarketTime   int64   `json:"regularMarketTime"`
 	PreviousClose       float64 `json:"previousClose"`
 	ChartPreviousClose  float64 `json:"chartPreviousClose"`
 	RegularMarketVolume float64 `json:"regularMarketVolume"`
+}
+
+func yahooRegularMarketTimestamp(meta *yahooMeta) string {
+	if meta != nil && meta.RegularMarketTime > 0 {
+		return time.Unix(meta.RegularMarketTime, 0).UTC().Format(time.RFC3339)
+	}
+	return ""
 }
 
 // fetchChart — single HTTP call, returns (bars, meta) split. The chart

@@ -293,6 +293,23 @@ func TestStrategyAssignmentUsesImmutableVersion(t *testing.T) {
 	}
 }
 
+func TestStockStrategyExecutionWaitsForRegularSession(t *testing.T) {
+	def := &StrategyDefinition{Universe: []string{"AAPL", "SPY"}}
+	e := &engine{provider: &recordingStrategyProvider{}}
+	if stockStrategyExecutionReady(e, def, time.Date(2026, 7, 14, 12, 0, 0, 0, time.UTC)) {
+		t.Fatal("stock strategy became executable before the US regular session")
+	}
+	if !stockStrategyExecutionReady(e, def, time.Date(2026, 7, 14, 15, 0, 0, 0, time.UTC)) {
+		t.Fatal("stock strategy did not become executable during the US regular session")
+	}
+	if stockStrategyExecutionReady(e, def, time.Date(2026, 7, 18, 15, 0, 0, 0, time.UTC)) {
+		t.Fatal("stock strategy became executable on a weekend")
+	}
+	if !stockStrategyExecutionReady(e, &StrategyDefinition{Universe: []string{"BTC-USD"}}, time.Date(2026, 7, 18, 15, 0, 0, 0, time.UTC)) {
+		t.Fatal("crypto strategy should not be constrained by the stock session")
+	}
+}
+
 func TestStrategyAssignmentCadenceUsesAlignedSlots(t *testing.T) {
 	def := &StrategyDefinition{Cadence: "1h"}
 	a := &StrategyAssignment{Cadence: "1h", LastEvaluatedAt: "2026-07-13T10:00:00Z"}
@@ -471,8 +488,18 @@ func TestStrategyBacktestUsesExistingSnapshots(t *testing.T) {
 	if len(snaps) != 2 {
 		t.Fatalf("snapshots=%d, want baseline + step", len(snaps))
 	}
-	if len(snaps[1].Positions) != 1 {
-		t.Fatalf("positions=%#v, want one BTC position", snaps[1].Positions)
+	if len(snaps[1].Positions) != 0 || len(snaps[1].Orders) != 0 {
+		t.Fatalf("step-one state positions=%#v orders=%#v, want signal only", snaps[1].Positions, snaps[1].Orders)
+	}
+	if _, err := stepStrategyBacktestRun(next); err != nil {
+		t.Fatal(err)
+	}
+	snaps, err = dbListBacktestSnapshots(ctx.AppDB(), runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snaps[2].Positions) != 1 || len(snaps[2].Orders) != 1 {
+		t.Fatalf("step-two state positions=%#v orders=%#v, want next-open BTC fill", snaps[2].Positions, snaps[2].Orders)
 	}
 	events, err := dbListBacktestEvents(ctx.AppDB(), runID, 20)
 	if err != nil {
@@ -511,6 +538,13 @@ func TestStrategyBacktestUsesPinnedDefinitionAfterUpdate(t *testing.T) {
 	}
 	seedBacktestMarketBars(t, ctx, run.ID, run.Symbols, run.TotalSteps)
 	if _, err := startStrategyBacktestRun(run); err != nil {
+		t.Fatal(err)
+	}
+	next, err := dbGetBacktestRun(ctx.AppDB(), "test-proj", runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := stepStrategyBacktestRun(next); err != nil {
 		t.Fatal(err)
 	}
 	snapshots, err := dbListBacktestSnapshots(ctx.AppDB(), runID)
@@ -760,14 +794,55 @@ func TestStrategyBacktestRebalanceCadenceAndRankThreshold(t *testing.T) {
 	if len(snaps) != 9 {
 		t.Fatalf("snapshots=%d, want baseline + 8 steps", len(snaps))
 	}
-	if len(snaps[4].Orders) != 1 {
-		t.Fatalf("step 4 orders=%d, want first buy after return_3 crosses threshold", len(snaps[4].Orders))
+	if len(snaps[4].Orders) != 0 {
+		t.Fatalf("step 4 orders=%d, want signal only", len(snaps[4].Orders))
 	}
-	if len(snaps[5].Orders) != 0 || len(snaps[5].Positions) != 1 {
-		t.Fatalf("step 5 should hold without a new order; orders=%d positions=%d", len(snaps[5].Orders), len(snaps[5].Positions))
+	if len(snaps[5].Orders) != 1 || len(snaps[5].Positions) != 1 {
+		t.Fatalf("step 5 should execute step 4 signal; orders=%d positions=%d", len(snaps[5].Orders), len(snaps[5].Positions))
 	}
-	if len(snaps[7].Orders) == 0 {
-		t.Fatalf("step 7 should rebalance again; orders=%d", len(snaps[7].Orders))
+	if len(snaps[7].Orders) != 0 || len(snaps[8].Orders) == 0 {
+		t.Fatalf("step 7 should signal and step 8 execute; orders=%d/%d", len(snaps[7].Orders), len(snaps[8].Orders))
+	}
+}
+
+func TestStrategyBacktestExecutesPriorCloseSignalAtNextOpen(t *testing.T) {
+	ctx := newTestCtx(t)
+	portfolioID := mustCreatePortfolio(t, ctx, "Stock timing", []string{"equity"})
+	strategyID := mustCreateFixedStrategy(t, ctx, "AAPL fixed", "AAPL", 0.5)
+	runID, err := dbCreateBacktestRun(ctx.AppDB(), &BacktestRun{
+		ProjectID: "test-proj", PortfolioID: portfolioID, StrategyID: strategyID,
+		RunKind: "strategy", StrategyVersion: 1, Name: "next-open timing", Status: "queued",
+		Symbols: []string{"AAPL"}, StartAt: "2026-07-09", EndAt: "2026-07-10",
+		Interval: "1d", StartingCash: 100000, SlippageBps: 5, TotalSteps: 2, Summary: map[string]any{},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	rows := []*BacktestMarketBar{
+		{Step: 1, Symbol: "AAPL", AssetClass: "equity", T: 1783603800, O: 310, H: 317, L: 309, C: 316.22, Source: "fixture"},
+		{Step: 2, Symbol: "AAPL", AssetClass: "equity", T: 1783690200, O: 300, H: 312, L: 299, C: 310, Source: "fixture"},
+	}
+	if err := dbReplaceBacktestMarketBars(ctx.AppDB(), runID, rows); err != nil {
+		t.Fatal(err)
+	}
+	run, err := dbGetBacktestRun(ctx.AppDB(), "test-proj", runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runStrategyBacktestToEnd(run); err != nil {
+		t.Fatal(err)
+	}
+	snaps, err := dbListBacktestSnapshots(ctx.AppDB(), runID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(snaps) != 3 || len(snaps[1].Orders) != 0 || len(snaps[2].Orders) != 1 {
+		t.Fatalf("snapshot orders = %#v, want no step-one fill and one step-two fill", snaps)
+	}
+	wantFill := 300.0 * 1.0005
+	assertClose(t, "next-open fill", snaps[2].Orders[0].AvgFillPrice, wantFill)
+	if math.Abs(snaps[2].Orders[0].AvgFillPrice-316.22*1.0005) < 0.0001 {
+		t.Fatal("fill still uses the signal session close")
 	}
 }
 
