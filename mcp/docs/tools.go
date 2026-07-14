@@ -75,11 +75,16 @@ func (a *App) toolCreateTemplateCtx(callCtx context.Context, ctx *sdk.AppCtx, ar
 		Name:          strArg(args, "name"),
 		Description:   strArg(args, "description"),
 		Body:          strArg(args, "body"),
-		SourceFormat:  "markdown",
+		Stylesheet:    strArg(args, "stylesheet"),
+		SettingsJSON:  jsonArg(args, "settings"),
+		SourceFormat:  strArg(args, "source_format"),
 		OutputFormat:  "pdf",
 		DefaultFolder: strArg(args, "default_folder"),
 	}
-	if err := validateTemplateSize(ctx, t.Body); err != nil {
+	if t.SourceFormat == "" {
+		t.SourceFormat = "markdown"
+	}
+	if err := validateTemplatePayload(ctx, t.Body, t.Stylesheet); err != nil {
 		return nil, err
 	}
 	id, err := createTemplate(ctx.AppDB(), t)
@@ -104,15 +109,35 @@ func (a *App) toolUpdateTemplateCtx(callCtx context.Context, ctx *sdk.AppCtx, ar
 		return nil, err
 	}
 	fields := map[string]any{}
-	for _, k := range []string{"name", "description", "body", "default_folder"} {
+	for _, k := range []string{"name", "description", "body", "stylesheet", "source_format", "default_folder"} {
 		if v, ok := args[k]; ok {
 			fields[k] = v
 		}
 	}
-	if body, ok := fields["body"].(string); ok {
-		if err := validateTemplateSize(ctx, body); err != nil {
-			return nil, err
+	if settings, ok := args["settings"]; ok {
+		encoded, err := json.Marshal(settings)
+		if err != nil {
+			return nil, errors.New("settings must be a JSON object")
 		}
+		fields["settings_json"] = string(encoded)
+	}
+	current, err := getTemplate(ctx.AppDB(), id, "")
+	if err != nil {
+		return nil, err
+	}
+	if current == nil {
+		return map[string]any{"found": false}, nil
+	}
+	body := current.Body
+	stylesheet := current.Stylesheet
+	if value, ok := fields["body"].(string); ok {
+		body = value
+	}
+	if value, ok := fields["stylesheet"].(string); ok {
+		stylesheet = value
+	}
+	if err := validateTemplatePayload(ctx, body, stylesheet); err != nil {
+		return nil, err
 	}
 	if err := updateTemplate(ctx.AppDB(), id, fields); err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -166,11 +191,15 @@ func (a *App) renderDocument(ctx *sdk.AppCtx, args map[string]any, actor string)
 		return nil, err
 	}
 	warnings := []string{}
-	pageSize, err := resolvePageSize(strArg(args, "page_size"), ctx.Config().Get("page_size"))
+	pageSize, err := resolveTemplatePageSize(strArg(args, "page_size"), t, ctx.Config().Get("page_size"))
 	if err != nil {
 		return nil, err
 	}
-	body, err := renderTemplateToPDF(ctx, t, data, pageSize, &warnings)
+	revision, err := ensureTemplateRevision(ctx.AppDB(), t)
+	if err != nil {
+		return nil, fmt.Errorf("snapshot template revision: %w", err)
+	}
+	body, rendererVersion, err := renderTemplateToPDF(ctx, t, data, pageSize, &warnings)
 	if err != nil {
 		return nil, err
 	}
@@ -215,14 +244,17 @@ func (a *App) renderDocument(ctx *sdk.AppCtx, args map[string]any, actor string)
 	// precise partial-success error if audit persistence fails.
 	dataJSON, _ := json.Marshal(data)
 	renderID, auditErr := insertRender(ctx.AppDB(), &Render{
-		TemplateID:   t.ID,
-		TemplateSlug: t.Slug,
-		OutputFileID: strconv.FormatInt(uploaded.ID, 10),
-		OutputName:   name,
-		OutputFolder: folder,
-		DataSnapshot: dataJSON,
-		RenderedBy:   actor,
-		Bytes:        int64(len(body)),
+		TemplateID:         t.ID,
+		TemplateSlug:       t.Slug,
+		OutputFileID:       strconv.FormatInt(uploaded.ID, 10),
+		OutputName:         name,
+		OutputFolder:       folder,
+		DataSnapshot:       dataJSON,
+		RenderedBy:         actor,
+		Bytes:              int64(len(body)),
+		TemplateRevisionID: revision.ID,
+		SourceHash:         revision.SourceHash,
+		RendererVersion:    rendererVersion,
 	})
 	if auditErr != nil {
 		ctx.Logger().Error("docs audit insert failed", "file_id", uploaded.ID, "err", auditErr)
@@ -230,14 +262,16 @@ func (a *App) renderDocument(ctx *sdk.AppCtx, args map[string]any, actor string)
 	}
 
 	return map[string]any{
-		"file_id":   uploaded.ID,
-		"url":       uploaded.URL,
-		"name":      uploaded.Name,
-		"folder":    uploaded.Folder,
-		"sha256":    uploaded.SHA256,
-		"render_id": renderID,
-		"warnings":  warnings,
-		"page_size": pageSize,
+		"file_id":              uploaded.ID,
+		"url":                  uploaded.URL,
+		"name":                 uploaded.Name,
+		"folder":               uploaded.Folder,
+		"sha256":               uploaded.SHA256,
+		"render_id":            renderID,
+		"warnings":             warnings,
+		"page_size":            pageSize,
+		"template_revision_id": revision.ID,
+		"renderer_version":     rendererVersion,
 	}, nil
 }
 
@@ -272,29 +306,40 @@ func (a *App) toolPreviewCtx(callCtx context.Context, ctx *sdk.AppCtx, args map[
 
 func (a *App) previewDocument(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	body := strArg(args, "body")
+	var t *Template
 	if body == "" {
-		t, err := lookupTemplateForRender(ctx.AppDB(), args)
+		var err error
+		t, err = lookupTemplateForRender(ctx.AppDB(), args)
 		if err != nil {
 			return nil, err
 		}
-		body = t.Body
+	} else {
+		t = &Template{
+			Body:         body,
+			Stylesheet:   strArg(args, "stylesheet"),
+			SettingsJSON: jsonArg(args, "settings"),
+			SourceFormat: strArg(args, "source_format"),
+		}
+		if t.SourceFormat == "" {
+			t.SourceFormat = "markdown"
+		}
 	}
 	data, _ := args["data"].(map[string]any)
 	if data == nil {
 		data = map[string]any{}
 	}
-	if err := validateTemplateSize(ctx, body); err != nil {
+	if err := validateTemplatePayload(ctx, t.Body, t.Stylesheet); err != nil {
 		return nil, err
 	}
 	if err := validateRenderData(ctx, data); err != nil {
 		return nil, err
 	}
-	pageSize, err := resolvePageSize(strArg(args, "page_size"), ctx.Config().Get("page_size"))
+	pageSize, err := resolveTemplatePageSize(strArg(args, "page_size"), t, ctx.Config().Get("page_size"))
 	if err != nil {
 		return nil, err
 	}
 	warnings := []string{}
-	pdf, err := renderPDF(body, data, RenderOptions{PageSize: pageSize, ImageResolver: imageResolverFor(ctx), OnWarning: func(s string) { warnings = append(warnings, s) }})
+	pdf, rendererVersion, err := renderTemplateToPDF(ctx, t, data, pageSize, &warnings)
 	if err != nil {
 		return nil, err
 	}
@@ -302,18 +347,34 @@ func (a *App) previewDocument(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		return nil, fmt.Errorf("generated PDF is %d bytes; maximum is %d", len(pdf), max)
 	}
 	return map[string]any{
-		"content_type": "application/pdf",
-		"size_bytes":   len(pdf),
-		"base64":       base64.StdEncoding.EncodeToString(pdf),
-		"warnings":     warnings,
-		"page_size":    pageSize,
+		"content_type":     "application/pdf",
+		"size_bytes":       len(pdf),
+		"base64":           base64.StdEncoding.EncodeToString(pdf),
+		"warnings":         warnings,
+		"page_size":        pageSize,
+		"renderer_version": rendererVersion,
 	}, nil
 }
 
 // renderTemplateToPDF wraps renderPDF with the install's page-size
 // config. Pulled out for testability — preview uses the same path.
-func renderTemplateToPDF(ctx *sdk.AppCtx, t *Template, data map[string]any, pageSize string, warnings *[]string) ([]byte, error) {
-	return renderPDF(t.Body, data, RenderOptions{
+func renderTemplateToPDF(ctx *sdk.AppCtx, t *Template, data map[string]any, pageSize string, warnings *[]string) ([]byte, string, error) {
+	if t == nil {
+		return nil, "", errors.New("template required")
+	}
+	if t.SourceFormat == "html" {
+		settings, err := parseDocumentSettings(t.SettingsJSON)
+		if err != nil {
+			return nil, "", err
+		}
+		pdf, err := renderHTMLToPDF(context.Background(), t.Body, t.Stylesheet, data, settings, htmlRenderOptions{
+			PageSize:      pageSize,
+			ImageResolver: imageResolverFor(ctx),
+			Timeout:       time.Duration(configIntDefault(ctx.Config().Get("html_render_timeout_seconds"), 25)) * time.Second,
+		})
+		return pdf, htmlRendererVersion, err
+	}
+	pdf, err := renderPDF(t.Body, data, RenderOptions{
 		PageSize:      pageSize,
 		ImageResolver: imageResolverFor(ctx),
 		OnWarning: func(s string) {
@@ -322,6 +383,7 @@ func renderTemplateToPDF(ctx *sdk.AppCtx, t *Template, data map[string]any, page
 			}
 		},
 	})
+	return pdf, "maroto-v2", err
 }
 
 // imageResolverFor binds an imageResolver to this install's storage
@@ -467,6 +529,18 @@ func strArg(args map[string]any, key string) string {
 	return strings.TrimSpace(v)
 }
 
+func jsonArg(args map[string]any, key string) json.RawMessage {
+	value, ok := args[key]
+	if !ok || value == nil {
+		return nil
+	}
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return nil
+	}
+	return json.RawMessage(encoded)
+}
+
 func int64Arg(args map[string]any, key string) (int64, bool) {
 	switch v := args[key].(type) {
 	case int64:
@@ -530,6 +604,18 @@ func validateTemplateSize(ctx *sdk.AppCtx, body string) error {
 	return nil
 }
 
+func validateTemplatePayload(ctx *sdk.AppCtx, body, stylesheet string) error {
+	if err := validateTemplateSize(ctx, body); err != nil {
+		return err
+	}
+	max := configIntDefault(ctx.Config().Get("max_template_bytes"), 512<<10)
+	total := len(body) + len(stylesheet)
+	if max > 0 && total > max {
+		return fmt.Errorf("template HTML and CSS are %d bytes; maximum is %d", total, max)
+	}
+	return nil
+}
+
 func validateRenderData(ctx *sdk.AppCtx, data map[string]any) error {
 	encoded, err := json.Marshal(data)
 	if err != nil {
@@ -560,4 +646,46 @@ func resolvePageSize(requested, configured string) (string, error) {
 	default:
 		return "", errors.New("page_size must be A4, letter, or legal")
 	}
+}
+
+func parseDocumentSettings(raw json.RawMessage) (DocumentSettings, error) {
+	settings := DocumentSettings{}
+	if len(raw) == 0 || string(raw) == "null" || string(raw) == "{}" {
+		return settings, nil
+	}
+	if err := json.Unmarshal(raw, &settings); err != nil {
+		return settings, fmt.Errorf("invalid document settings: %w", err)
+	}
+	if settings.PageSize != "" {
+		pageSize, err := resolvePageSize(settings.PageSize, "")
+		if err != nil {
+			return settings, err
+		}
+		settings.PageSize = pageSize
+	}
+	for name, value := range map[string]*float64{
+		"margin_top_mm": settings.MarginTopMM, "margin_right_mm": settings.MarginRightMM,
+		"margin_bottom_mm": settings.MarginBottomMM, "margin_left_mm": settings.MarginLeftMM,
+	} {
+		if value != nil && (*value < 0 || *value > 50) {
+			return settings, fmt.Errorf("%s must be between 0 and 50", name)
+		}
+	}
+	return settings, nil
+}
+
+func resolveTemplatePageSize(requested string, t *Template, configured string) (string, error) {
+	if strings.TrimSpace(requested) != "" {
+		return resolvePageSize(requested, "")
+	}
+	if t != nil && t.SourceFormat == "html" {
+		settings, err := parseDocumentSettings(t.SettingsJSON)
+		if err != nil {
+			return "", err
+		}
+		if settings.PageSize != "" {
+			return settings.PageSize, nil
+		}
+	}
+	return resolvePageSize("", configured)
 }

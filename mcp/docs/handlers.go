@@ -53,7 +53,7 @@ func (a *App) handleTemplatesCollection(w http.ResponseWriter, r *http.Request) 
 			httpErr(w, http.StatusBadRequest, "invalid json: "+err.Error())
 			return
 		}
-		if err := validateTemplateSize(app, t.Body); err != nil {
+		if err := validateTemplatePayload(app, t.Body, t.Stylesheet); err != nil {
 			httpErr(w, http.StatusBadRequest, err.Error())
 			return
 		}
@@ -109,11 +109,35 @@ func (a *App) handleTemplatesItem(w http.ResponseWriter, r *http.Request) {
 				httpErr(w, http.StatusBadRequest, "invalid json: "+err.Error())
 				return
 			}
-			if body, ok := fields["body"].(string); ok {
-				if err := validateTemplateSize(app, body); err != nil {
-					httpErr(w, http.StatusBadRequest, err.Error())
+			if settings, ok := fields["settings"]; ok {
+				encoded, err := json.Marshal(settings)
+				if err != nil {
+					httpErr(w, http.StatusBadRequest, "settings must be a JSON object")
 					return
 				}
+				delete(fields, "settings")
+				fields["settings_json"] = string(encoded)
+			}
+			current, err := getTemplate(app.AppDB(), id, "")
+			if err != nil {
+				httpErr(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+			if current == nil {
+				httpErr(w, http.StatusNotFound, "template not found")
+				return
+			}
+			body := current.Body
+			stylesheet := current.Stylesheet
+			if value, ok := fields["body"].(string); ok {
+				body = value
+			}
+			if value, ok := fields["stylesheet"].(string); ok {
+				stylesheet = value
+			}
+			if err := validateTemplatePayload(app, body, stylesheet); err != nil {
+				httpErr(w, http.StatusBadRequest, err.Error())
+				return
 			}
 			if err := updateTemplate(app.AppDB(), id, fields); err != nil {
 				if errors.Is(err, errNoRows()) {
@@ -175,9 +199,12 @@ func (a *App) handleTemplatesItem(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		var body struct {
-			Data     map[string]any `json:"data"`
-			Body     string         `json:"body"` // optional inline override
-			PageSize string         `json:"page_size"`
+			Data         map[string]any `json:"data"`
+			Body         string         `json:"body"` // optional inline override
+			Stylesheet   string         `json:"stylesheet"`
+			SourceFormat string         `json:"source_format"`
+			Settings     map[string]any `json:"settings"`
+			PageSize     string         `json:"page_size"`
 		}
 		if err := decodeJSONBody(w, r, &body); err != nil {
 			httpErr(w, http.StatusBadRequest, "invalid json: "+err.Error())
@@ -188,10 +215,13 @@ func (a *App) handleTemplatesItem(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		args := map[string]any{
-			"template_id": id,
-			"data":        body.Data,
-			"body":        body.Body,
-			"page_size":   body.PageSize,
+			"template_id":   id,
+			"data":          body.Data,
+			"body":          body.Body,
+			"stylesheet":    body.Stylesheet,
+			"source_format": body.SourceFormat,
+			"settings":      body.Settings,
+			"page_size":     body.PageSize,
 		}
 		out, err := a.previewDocument(app, args)
 		if err != nil {
