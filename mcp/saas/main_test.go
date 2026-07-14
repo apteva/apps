@@ -274,8 +274,8 @@ func TestEmbeddedManifest_Valid(t *testing.T) {
 	if m.Name != "saas" {
 		t.Errorf("manifest.Name=%q, want saas", m.Name)
 	}
-	if m.Version != "0.4.0" {
-		t.Errorf("manifest.Version=%q, want 0.4.0", m.Version)
+	if m.Version != "0.5.0" {
+		t.Errorf("manifest.Version=%q, want 0.5.0", m.Version)
 	}
 	if !m.Requires.DynamicAppCalls {
 		t.Error("manifest should allow dynamic app calls for configured usage sources")
@@ -289,7 +289,7 @@ func TestEmbeddedManifest_Valid(t *testing.T) {
 		required[dep.Name] = !dep.Optional
 		versions[dep.Name] = dep.Version
 	}
-	if versions["catalog"] != ">=0.2.0" || versions["billing"] != ">=0.8.17" || versions["subscriptions"] != ">=0.4.0" {
+	if versions["catalog"] != ">=0.2.0" || versions["billing"] != ">=0.8.17" || versions["subscriptions"] != ">=0.5.0" {
 		t.Fatalf("dependency versions not enforced: %+v", versions)
 	}
 	permissions := map[string]bool{}
@@ -305,7 +305,7 @@ func TestEmbeddedManifest_Valid(t *testing.T) {
 	for _, tool := range m.Provides.MCPTools {
 		toolRequires[tool.Name] = tool.Requires
 	}
-	if toolRequires["saas_checkout_create"] != "saas.checkout" || toolRequires["saas_account_create"] != "saas.admin" || toolRequires["saas_plan_action_add"] != "saas.admin" || toolRequires["saas_billing_sync"] != "saas.admin" {
+	if toolRequires["saas_checkout_create"] != "saas.checkout" || toolRequires["saas_account_create"] != "saas.admin" || toolRequires["saas_plan_action_add"] != "saas.admin" || toolRequires["saas_billing_sync"] != "saas.admin" || toolRequires["saas_account_change_plan"] != "saas.admin" || toolRequires["saas_plan_change_get"] != "saas.read" {
 		t.Fatalf("sensitive tools are not permission-gated: %+v", toolRequires)
 	}
 	for _, name := range []string{"catalog", "billing", "subscriptions", "entitlements", "auth"} {
@@ -322,8 +322,8 @@ func TestEmbeddedManifest_Valid(t *testing.T) {
 			billingEvents = dep.Events
 		}
 	}
-	if !containsString(subscriptionEvents, "subscription.cycle_due") {
-		t.Fatal("manifest should subscribe to subscription.cycle_due")
+	if !containsString(subscriptionEvents, "subscription.cycle_due") || !containsString(subscriptionEvents, "subscription.change.applied") {
+		t.Fatalf("manifest is missing subscription orchestration events: %v", subscriptionEvents)
 	}
 	if !containsString(billingEvents, "invoice.paid") {
 		t.Fatal("manifest should subscribe to invoice.paid")
@@ -338,7 +338,7 @@ func TestEmbeddedManifest_Valid(t *testing.T) {
 	for _, event := range m.Provides.Publishes {
 		publishes[event.Name] = true
 	}
-	for _, name := range []string{"saas.quota.approaching", "saas.quota.reached", "saas.quota.exceeded", "saas.quota.recovered"} {
+	for _, name := range []string{"saas.quota.approaching", "saas.quota.reached", "saas.quota.exceeded", "saas.quota.recovered", "saas.account.plan_changed"} {
 		if !publishes[name] {
 			t.Errorf("manifest missing published event %s", name)
 		}

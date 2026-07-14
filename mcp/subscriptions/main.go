@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"database/sql"
+	_ "embed"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -18,74 +19,8 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-const manifestYAML = `schema: apteva-app/v1
-name: subscriptions
-display_name: Subscriptions
-version: 0.4.0
-description: Generic recurring-commerce lifecycle, durable trial-end cycle creation, immutable discount applications, subscription items, and metered usage for SaaS, physical subscriptions, and services.
-author: Apteva
-scopes: [project, global]
-requires:
-  permissions:
-    - db.write.app
-    - platform.apps.call
-  apps:
-    - name: catalog
-      optional: false
-      version: ">=0.2.0"
-    - name: billing
-      optional: true
-    - name: orders
-      optional: true
-    - name: entitlements
-      optional: true
-provides:
-  http_routes:
-    - prefix: /
-  ui_panels:
-    - slot: project.page
-      label: Subscriptions
-      icon: repeat
-      entry: /ui/SubscriptionsPanel.mjs
-  publishes:
-    - name: subscription.active
-      description: Subscription entered active status.
-    - name: subscription.trialing
-      description: Subscription entered trialing status.
-    - name: subscription.past_due
-      description: Subscription entered past_due status.
-    - name: subscription.cancelled
-      description: Subscription was cancelled.
-    - name: subscription.paused
-      description: Subscription entered paused status.
-    - name: subscription.ended
-      description: Subscription ended.
-    - name: subscription.item.created
-      description: A subscription item was created.
-    - name: subscription.discount.created
-      description: An immutable discount application was attached to a subscription item.
-    - name: subscription.discount.cancelled
-      description: A discount application was stopped for future cycles.
-    - name: subscription.usage.recorded
-      description: Metered subscription usage was recorded.
-    - name: subscription.invoice.requested
-      description: A subscription period invoice was requested.
-    - name: subscription.cycle_due
-      description: A subscription cycle is due for external collection or fulfillment orchestration.
-runtime:
-  kind: source
-  source:
-    repo: github.com/apteva/apps
-    ref: main
-    entry: mcp/subscriptions
-  port: 8080
-  health_check: /health
-db:
-  driver: sqlite
-  path: /data/subscriptions.db
-  migrations: migrations/
-upgrade_policy: auto-patch
-`
+//go:embed apteva.yaml
+var manifestYAML string
 
 type App struct{}
 
@@ -104,7 +39,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		return errors.New("subscriptions requires a db block")
 	}
 	globalCtx = ctx
-	ctx.Logger().Info("subscriptions mounted", "version", "0.4.0", "scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
+	ctx.Logger().Info("subscriptions mounted", "version", a.Manifest().Version, "scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
 	return nil
 }
 
@@ -119,6 +54,15 @@ func (a *App) Workers() []sdk.Worker {
 				appCtx = globalCtx
 			}
 			return runSubscriptionLifecycle(appCtx, time.Now().UTC())
+		},
+	}, {
+		Name:     "subscription-changes",
+		Schedule: "@every 60s",
+		Run: func(_ context.Context, appCtx *sdk.AppCtx) error {
+			if appCtx == nil {
+				appCtx = globalCtx
+			}
+			return runSubscriptionChangeWorker(appCtx, time.Now().UTC())
 		},
 	}}
 }
@@ -159,7 +103,7 @@ func (a *App) MCPTools() []sdk.Tool {
 			"subscription_id": map[string]any{"type": "integer"}, "product_id": map[string]any{"type": "integer"}, "price_id": map[string]any{"type": "integer"}, "sku": map[string]any{"type": "string"}, "title": map[string]any{"type": "string"}, "quantity": map[string]any{"type": "number"}, "unit_amount_cents": map[string]any{"type": "integer"}, "currency": map[string]any{"type": "string"}, "billing_scheme": map[string]any{"type": "string"}, "meter_key": map[string]any{"type": "string"}, "included_units": map[string]any{"type": "integer"}, "unit_size": map[string]any{"type": "integer"}, "metadata": map[string]any{"type": "object"},
 		}, []string{"subscription_id", "title"}), Handler: a.toolSubscriptionItemsCreate},
 		{Name: "subscription_items_list", Description: "List items for a subscription.", InputSchema: schemaObject(map[string]any{"subscription_id": map[string]any{"type": "integer"}}, []string{"subscription_id"}), Handler: a.toolSubscriptionItemsList},
-		{Name: "subscription_items_update", Description: "Patch a subscription item status, quantity, included_units, unit_size, unit_amount_cents, or metadata.", InputSchema: schemaObject(map[string]any{
+		{Name: "subscription_items_update", Description: "Update item metadata/status or unbilled pricing; use subscription changes once a cycle is billed.", InputSchema: schemaObject(map[string]any{
 			"id": map[string]any{"type": "integer"}, "status": map[string]any{"type": "string"}, "quantity": map[string]any{"type": "number"}, "included_units": map[string]any{"type": "integer"}, "unit_size": map[string]any{"type": "integer"}, "unit_amount_cents": map[string]any{"type": "integer"}, "metadata": map[string]any{"type": "object"},
 		}, []string{"id"}), Handler: a.toolSubscriptionItemsUpdate},
 		{Name: "subscription_items_cancel", Description: "Cancel a subscription item.", InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}, "reason": map[string]any{"type": "string"}}, []string{"id"}), Handler: a.toolSubscriptionItemsCancel},
@@ -182,7 +126,8 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "subscription_cycles_list", Description: "List cycles.", InputSchema: schemaObject(map[string]any{"subscription_id": map[string]any{"type": "integer"}, "limit": map[string]any{"type": "integer"}}, []string{"subscription_id"}), Handler: a.toolCyclesList},
 		{Name: "subscription_events_list", Description: "List subscription events.", InputSchema: schemaObject(map[string]any{"subscription_id": map[string]any{"type": "integer"}, "limit": map[string]any{"type": "integer"}}, []string{"subscription_id"}), Handler: a.toolEventsList},
 	}
-	return append(tools, subscriptionDiscountTools(a)...)
+	tools = append(tools, subscriptionDiscountTools(a)...)
+	return append(tools, subscriptionChangeTools(a)...)
 }
 
 func main() { sdk.Run(&App{}) }
@@ -222,22 +167,24 @@ type Subscription struct {
 }
 
 type SubItem struct {
-	ID               int64           `json:"id"`
-	SubscriptionID   int64           `json:"subscription_id"`
-	Position         int             `json:"position"`
-	CatalogProductID *int64          `json:"catalog_product_id,omitempty"`
-	CatalogPriceID   *int64          `json:"catalog_price_id,omitempty"`
-	SKU              string          `json:"sku,omitempty"`
-	Title            string          `json:"title"`
-	Quantity         float64         `json:"quantity"`
-	UnitAmountCents  int64           `json:"unit_amount_cents"`
-	Currency         string          `json:"currency"`
-	BillingScheme    string          `json:"billing_scheme"`
-	MeterKey         string          `json:"meter_key,omitempty"`
-	IncludedUnits    int64           `json:"included_units"`
-	UnitSize         int64           `json:"unit_size"`
-	Status           string          `json:"status"`
-	Metadata         json.RawMessage `json:"metadata,omitempty"`
+	ID                int64           `json:"id"`
+	SubscriptionID    int64           `json:"subscription_id"`
+	Position          int             `json:"position"`
+	CatalogProductID  *int64          `json:"catalog_product_id,omitempty"`
+	CatalogPriceID    *int64          `json:"catalog_price_id,omitempty"`
+	SKU               string          `json:"sku,omitempty"`
+	Title             string          `json:"title"`
+	Quantity          float64         `json:"quantity"`
+	UnitAmountCents   int64           `json:"unit_amount_cents"`
+	Currency          string          `json:"currency"`
+	BillingScheme     string          `json:"billing_scheme"`
+	MeterKey          string          `json:"meter_key,omitempty"`
+	IncludedUnits     int64           `json:"included_units"`
+	UnitSize          int64           `json:"unit_size"`
+	Status            string          `json:"status"`
+	StartsCycleNumber int64           `json:"starts_cycle_number"`
+	EndsCycleNumber   int64           `json:"ends_cycle_number,omitempty"`
+	Metadata          json.RawMessage `json:"metadata,omitempty"`
 }
 
 type UsageRecord struct {
@@ -740,11 +687,11 @@ func dbSubscriptionCreate(ctx *sdk.AppCtx, pid string, args map[string]any) (*Su
 		result, err := tx.Exec(
 			`INSERT INTO subscription_items
 			   (subscription_id, position, catalog_product_id, catalog_price_id, sku, title, quantity, unit_amount_cents, currency,
-			    billing_scheme, meter_key, included_units, unit_size, status, metadata)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			    billing_scheme, meter_key, included_units, unit_size, status, starts_cycle_number, ends_cycle_number, metadata)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 			id, i, nullablePtr(it.CatalogProductID), nullablePtr(it.CatalogPriceID), nullStr(it.SKU), it.Title,
 			it.Quantity, it.UnitAmountCents, strings.ToUpper(firstNonEmpty(it.Currency, currency)),
-			it.BillingScheme, it.MeterKey, it.IncludedUnits, it.UnitSize, it.Status, jsonOrEmpty(it.Metadata, "{}"))
+			it.BillingScheme, it.MeterKey, it.IncludedUnits, it.UnitSize, it.Status, 1, 0, jsonOrEmpty(it.Metadata, "{}"))
 		if err != nil {
 			return nil, err
 		}
@@ -755,7 +702,7 @@ func dbSubscriptionCreate(ctx *sdk.AppCtx, pid string, args map[string]any) (*Su
 		createdItems = append(createdItems, &SubItem{
 			ID: itemID, SubscriptionID: id, Position: i, CatalogProductID: it.CatalogProductID, CatalogPriceID: it.CatalogPriceID,
 			SKU: it.SKU, Title: it.Title, Quantity: it.Quantity, UnitAmountCents: it.UnitAmountCents, Currency: strings.ToUpper(firstNonEmpty(it.Currency, currency)),
-			BillingScheme: it.BillingScheme, MeterKey: it.MeterKey, IncludedUnits: it.IncludedUnits, UnitSize: it.UnitSize, Status: it.Status,
+			BillingScheme: it.BillingScheme, MeterKey: it.MeterKey, IncludedUnits: it.IncludedUnits, UnitSize: it.UnitSize, Status: it.Status, StartsCycleNumber: 1,
 		})
 	}
 	if err := attachInitialDiscountsTx(tx, pid, id, createdItems, discountInputs); err != nil {
@@ -1227,14 +1174,18 @@ func dbSubscriptionItemCreate(db *sql.DB, pid string, args map[string]any) (*Sub
 		return nil, err
 	}
 	defer tx.Rollback()
+	startsCycle := int64(1)
+	if err := tx.QueryRow(`SELECT COALESCE(MAX(cycle_number),0)+1 FROM subscription_cycles WHERE project_id=? AND subscription_id=?`, pid, subID).Scan(&startsCycle); err != nil {
+		return nil, err
+	}
 	err = tx.QueryRow(
 		`INSERT INTO subscription_items
 		   (subscription_id, position, catalog_product_id, catalog_price_id, sku, title, quantity, unit_amount_cents, currency,
-		    billing_scheme, meter_key, included_units, unit_size, status, metadata)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		    billing_scheme, meter_key, included_units, unit_size, status, starts_cycle_number, ends_cycle_number, metadata)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 RETURNING id`,
 		subID, next, nullablePtr(it.CatalogProductID), nullablePtr(it.CatalogPriceID), nullStr(it.SKU), it.Title, it.Quantity,
-		it.UnitAmountCents, it.Currency, it.BillingScheme, it.MeterKey, it.IncludedUnits, it.UnitSize, it.Status, jsonOrEmpty(it.Metadata, "{}"),
+		it.UnitAmountCents, it.Currency, it.BillingScheme, it.MeterKey, it.IncludedUnits, it.UnitSize, it.Status, startsCycle, 0, jsonOrEmpty(it.Metadata, "{}"),
 	).Scan(&id)
 	if err != nil {
 		return nil, err
@@ -1311,11 +1262,31 @@ func dbSubscriptionItemUpdate(db *sql.DB, pid string, args map[string]any) (*Sub
 	if _, ok := args["metadata"]; ok {
 		meta = json.RawMessage(jsonOrEmpty(args["metadata"], "{}"))
 	}
+	pricingChanged := quantity != item.Quantity || included != item.IncludedUnits || unitSize != item.UnitSize || unitAmount != item.UnitAmountCents
+	if pricingChanged {
+		var historical int64
+		if err := db.QueryRow(`SELECT COUNT(*) FROM subscription_cycles
+			WHERE project_id=? AND subscription_id=? AND cycle_number>=? AND (?=0 OR cycle_number<=?)`,
+			pid, item.SubscriptionID, maxInt64(item.StartsCycleNumber, 1), item.EndsCycleNumber, item.EndsCycleNumber).Scan(&historical); err != nil {
+			return nil, err
+		}
+		if historical > 0 {
+			return nil, errors.New("billed item pricing is immutable; use subscription_changes_create")
+		}
+	}
+	endsCycle := item.EndsCycleNumber
+	if status != "active" && item.Status == "active" {
+		if err := db.QueryRow(`SELECT COALESCE(MAX(cycle_number),0) FROM subscription_cycles WHERE project_id=? AND subscription_id=?`, pid, item.SubscriptionID).Scan(&endsCycle); err != nil {
+			return nil, err
+		}
+	} else if status == "active" {
+		endsCycle = 0
+	}
 	_, err = db.Exec(
 		`UPDATE subscription_items
-		    SET status=?, quantity=?, included_units=?, unit_size=?, unit_amount_cents=?, metadata=?, updated_at=CURRENT_TIMESTAMP
+		    SET status=?, quantity=?, included_units=?, unit_size=?, unit_amount_cents=?, ends_cycle_number=?, metadata=?, updated_at=CURRENT_TIMESTAMP
 		  WHERE id=? AND subscription_id IN (SELECT id FROM subscriptions WHERE project_id=?)`,
-		status, quantity, included, unitSize, unitAmount, string(meta), id, pid)
+		status, quantity, included, unitSize, unitAmount, endsCycle, string(meta), id, pid)
 	if err != nil {
 		return nil, err
 	}
@@ -1326,7 +1297,7 @@ func dbSubscriptionItemGet(db *sql.DB, pid string, id int64) (*SubItem, error) {
 	if id == 0 {
 		return nil, nil
 	}
-	rows, err := db.Query(`SELECT si.id, si.subscription_id, si.position, si.catalog_product_id, si.catalog_price_id, COALESCE(si.sku,''), si.title, si.quantity, si.unit_amount_cents, si.currency, si.billing_scheme, si.meter_key, si.included_units, si.unit_size, si.status, si.metadata
+	rows, err := db.Query(`SELECT si.id, si.subscription_id, si.position, si.catalog_product_id, si.catalog_price_id, COALESCE(si.sku,''), si.title, si.quantity, si.unit_amount_cents, si.currency, si.billing_scheme, si.meter_key, si.included_units, si.unit_size, si.status, si.starts_cycle_number, si.ends_cycle_number, si.metadata
 		FROM subscription_items si JOIN subscriptions s ON s.id=si.subscription_id
 		WHERE si.id=? AND s.project_id=?`, id, pid)
 	if err != nil {
@@ -1352,7 +1323,7 @@ func dbSubscriptionItemResolve(db *sql.DB, pid string, args map[string]any) (*Su
 	if subID == 0 || meter == "" {
 		return nil, errors.New("subscription_item_id or subscription_id+meter_key required")
 	}
-	rows, err := db.Query(`SELECT si.id, si.subscription_id, si.position, si.catalog_product_id, si.catalog_price_id, COALESCE(si.sku,''), si.title, si.quantity, si.unit_amount_cents, si.currency, si.billing_scheme, si.meter_key, si.included_units, si.unit_size, si.status, si.metadata
+	rows, err := db.Query(`SELECT si.id, si.subscription_id, si.position, si.catalog_product_id, si.catalog_price_id, COALESCE(si.sku,''), si.title, si.quantity, si.unit_amount_cents, si.currency, si.billing_scheme, si.meter_key, si.included_units, si.unit_size, si.status, si.starts_cycle_number, si.ends_cycle_number, si.metadata
 		FROM subscription_items si JOIN subscriptions s ON s.id=si.subscription_id
 		WHERE s.project_id=? AND si.subscription_id=? AND si.meter_key=? AND si.billing_scheme='metered' AND si.status='active'
 		ORDER BY si.id LIMIT 1`, pid, subID, meter)
@@ -1487,7 +1458,7 @@ func prepareSubscriptionInvoice(db *sql.DB, pid string, args map[string]any) (ma
 	discountTotal := int64(0)
 	discounts := discountsByItem(sub.Discounts)
 	for _, item := range sub.Items {
-		if item.Status != "active" {
+		if !itemAppliesToCycle(item, cycleNumber) {
 			continue
 		}
 		if item.BillingScheme == "flat" && includeFlat {
@@ -1587,6 +1558,20 @@ func prepareSubscriptionInvoice(db *sql.DB, pid string, args map[string]any) (ma
 		"cycle_number": cycleNumber, "base_subtotal_cents": baseSubtotal, "discount_cents": discountTotal,
 		"total_cents": baseSubtotal - discountTotal, "applied_discounts": appliedDiscounts,
 	}, nil
+}
+
+func itemAppliesToCycle(item *SubItem, cycleNumber int64) bool {
+	if item == nil || cycleNumber <= 0 {
+		return false
+	}
+	if item.Status != "active" && item.EndsCycleNumber == 0 {
+		return false
+	}
+	starts := item.StartsCycleNumber
+	if starts <= 0 {
+		starts = 1
+	}
+	return cycleNumber >= starts && (item.EndsCycleNumber == 0 || cycleNumber <= item.EndsCycleNumber)
 }
 
 func callBillingInvoiceCreate(ctx *sdk.AppCtx, args map[string]any, finalize bool) (map[string]any, error) {
@@ -1808,7 +1793,7 @@ func scanSub(row rowScanner) (*Subscription, error) {
 }
 
 func dbItemsList(db *sql.DB, subID int64) ([]*SubItem, error) {
-	rows, err := db.Query(`SELECT id, subscription_id, position, catalog_product_id, catalog_price_id, COALESCE(sku,''), title, quantity, unit_amount_cents, currency, billing_scheme, meter_key, included_units, unit_size, status, metadata FROM subscription_items WHERE subscription_id=? ORDER BY position,id`, subID)
+	rows, err := db.Query(`SELECT id, subscription_id, position, catalog_product_id, catalog_price_id, COALESCE(sku,''), title, quantity, unit_amount_cents, currency, billing_scheme, meter_key, included_units, unit_size, status, starts_cycle_number, ends_cycle_number, metadata FROM subscription_items WHERE subscription_id=? ORDER BY starts_cycle_number,position,id`, subID)
 	if err != nil {
 		return nil, err
 	}
@@ -1818,7 +1803,7 @@ func dbItemsList(db *sql.DB, subID int64) ([]*SubItem, error) {
 		var it SubItem
 		var pid, price sql.NullInt64
 		var meta string
-		if err := rows.Scan(&it.ID, &it.SubscriptionID, &it.Position, &pid, &price, &it.SKU, &it.Title, &it.Quantity, &it.UnitAmountCents, &it.Currency, &it.BillingScheme, &it.MeterKey, &it.IncludedUnits, &it.UnitSize, &it.Status, &meta); err != nil {
+		if err := rows.Scan(&it.ID, &it.SubscriptionID, &it.Position, &pid, &price, &it.SKU, &it.Title, &it.Quantity, &it.UnitAmountCents, &it.Currency, &it.BillingScheme, &it.MeterKey, &it.IncludedUnits, &it.UnitSize, &it.Status, &it.StartsCycleNumber, &it.EndsCycleNumber, &meta); err != nil {
 			return nil, err
 		}
 		it.CatalogProductID = ptrIfValid(pid)
@@ -1842,7 +1827,7 @@ func scanItemRows(rows *sql.Rows) (*SubItem, error) {
 	var it SubItem
 	var pid, price sql.NullInt64
 	var meta string
-	if err := rows.Scan(&it.ID, &it.SubscriptionID, &it.Position, &pid, &price, &it.SKU, &it.Title, &it.Quantity, &it.UnitAmountCents, &it.Currency, &it.BillingScheme, &it.MeterKey, &it.IncludedUnits, &it.UnitSize, &it.Status, &meta); err != nil {
+	if err := rows.Scan(&it.ID, &it.SubscriptionID, &it.Position, &pid, &price, &it.SKU, &it.Title, &it.Quantity, &it.UnitAmountCents, &it.Currency, &it.BillingScheme, &it.MeterKey, &it.IncludedUnits, &it.UnitSize, &it.Status, &it.StartsCycleNumber, &it.EndsCycleNumber, &meta); err != nil {
 		return nil, err
 	}
 	it.CatalogProductID = ptrIfValid(pid)

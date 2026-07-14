@@ -28,6 +28,8 @@ interface Plan {
   name: string;
   billing_mode: string;
   subscription_required: boolean;
+  catalog_product_id?: number;
+  catalog_price_id?: number;
   catalog_discount_id?: number;
   features?: PlanFeature[];
   limits?: PlanLimit[];
@@ -97,6 +99,25 @@ interface AccessResult {
   usage: UsageTotal[];
 }
 
+interface PlanChangeResponse {
+  plan_change: {
+    id: string;
+    status: string;
+    change_kind: string;
+    target_plan_key: string;
+    proration?: {
+      currency?: string;
+      charge_cents?: number;
+      credit_cents?: number;
+    };
+    last_error?: string;
+  };
+  account?: Account;
+  status: string;
+  requires_payment: boolean;
+  url?: string;
+}
+
 const API = "/api/apps/saas";
 const CONTROL = "w-full bg-bg-card border border-border rounded px-2 py-1.5 text-sm text-text";
 
@@ -106,7 +127,10 @@ function tone(status: string): string {
     case "allowed":
       return "bg-green/15 text-green";
     case "provisioning":
+    case "applying":
       return "bg-accent/15 text-accent";
+    case "scheduled":
+    case "awaiting_payment":
     case "past_due":
     case "suspended":
       return "bg-warn/15 text-warn";
@@ -155,6 +179,13 @@ export default function SaaSPanel({ projectId }: NativePanelProps) {
   const [accessFeature, setAccessFeature] = useState("");
   const [accessResult, setAccessResult] = useState<AccessResult | null>(null);
   const [checkout, setCheckout] = useState<CheckoutResponse | null>(null);
+  const [planChange, setPlanChange] = useState<PlanChangeResponse | null>(null);
+  const [planChangeForm, setPlanChangeForm] = useState({
+    target_plan_key: "",
+    effective_at: "immediate",
+    proration_policy: "prorate",
+    discount_policy: "preserve",
+  });
   const [form, setForm] = useState({
     owner_email: "",
     customer_name: "",
@@ -210,6 +241,11 @@ export default function SaaSPanel({ projectId }: NativePanelProps) {
   const createPlan = useMemo(
     () => plans.find((p) => p.key === form.plan_key) || plans[0] || null,
     [plans, form.plan_key],
+  );
+
+  const compatiblePlans = useMemo(
+    () => plans.filter((p) => p.key !== selectedPlan?.key && Boolean(p.catalog_product_id) && p.catalog_product_id === selectedPlan?.catalog_product_id),
+    [plans, selectedPlan],
   );
 
   const features = useMemo(() => featureOptions(selectedPlan, usage), [selectedPlan, usage]);
@@ -270,6 +306,19 @@ export default function SaaSPanel({ projectId }: NativePanelProps) {
   }, [accessFeature, features]);
 
   useEffect(() => {
+    setPlanChange(null);
+  }, [selected?.id]);
+
+  useEffect(() => {
+    setPlanChangeForm((current) => {
+      const target = compatiblePlans.some((p) => p.key === current.target_plan_key)
+        ? current.target_plan_key
+        : (compatiblePlans[0]?.key || "");
+      return target === current.target_plan_key ? current : { ...current, target_plan_key: target };
+    });
+  }, [compatiblePlans]);
+
+  useEffect(() => {
     if (!checkout?.checkout.id || !["processing", "awaiting_payment", "awaiting_payment_method"].includes(checkout.status)) return;
     const timer = window.setInterval(async () => {
       try {
@@ -283,6 +332,21 @@ export default function SaaSPanel({ projectId }: NativePanelProps) {
     }, 3000);
     return () => window.clearInterval(timer);
   }, [callTool, checkout?.checkout.id, checkout?.status, load]);
+
+  useEffect(() => {
+    const id = planChange?.plan_change.id;
+    if (!id || !["pending", "scheduled", "awaiting_payment", "applying", "failed"].includes(planChange.status)) return;
+    const timer = window.setInterval(async () => {
+      try {
+        const next = await callTool<PlanChangeResponse>("saas_plan_change_get", { change_id: id });
+        setPlanChange(next);
+        if (next.status === "applied") await load();
+      } catch (e) {
+        setError((e as Error).message);
+      }
+    }, 3000);
+    return () => window.clearInterval(timer);
+  }, [callTool, load, planChange?.plan_change.id, planChange?.status]);
 
   const createAccount = useCallback(async () => {
     setBusy("create");
@@ -349,6 +413,29 @@ export default function SaaSPanel({ projectId }: NativePanelProps) {
       setBusy("");
     }
   }, [accessFeature, callTool, selected]);
+
+  const changePlan = useCallback(async () => {
+    if (!selected || !planChangeForm.target_plan_key) return;
+    setBusy(`plan:${selected.id}`);
+    setError("");
+    try {
+      const out = await callTool<PlanChangeResponse>("saas_account_change_plan", {
+        account_id: selected.id,
+        target_plan_key: planChangeForm.target_plan_key,
+        effective_at: planChangeForm.effective_at,
+        proration_policy: planChangeForm.effective_at === "next_cycle" ? "none" : planChangeForm.proration_policy,
+        discount_policy: planChangeForm.discount_policy,
+        idempotency_key: `panel:${selected.id}:${planChangeForm.target_plan_key}:${crypto.randomUUID()}`,
+      });
+      setPlanChange(out);
+      setStatus(`plan change ${out.status}`);
+      if (out.status === "applied") await load();
+    } catch (e) {
+      setError((e as Error).message);
+    } finally {
+      setBusy("");
+    }
+  }, [callTool, load, planChangeForm, selected]);
 
   return (
     <div className="h-full min-h-0 bg-bg text-text grid grid-cols-[340px_minmax(0,1fr)]">
@@ -526,6 +613,69 @@ export default function SaaSPanel({ projectId }: NativePanelProps) {
               <Metric label="Plans" value={String(plans.length)} />
               <Metric label="Over limit" value={String(summary.over)} tone={summary.over > 0 ? "warn" : "normal"} />
             </section>
+
+            {selected.subscription_id && (
+              <section className="p-4 border-b border-border grid grid-cols-[minmax(180px,1fr)_150px_150px_150px_auto] gap-2 items-end">
+                <Field label="Change plan">
+                  <select
+                    value={planChangeForm.target_plan_key}
+                    onChange={(e) => setPlanChangeForm((f) => ({ ...f, target_plan_key: e.target.value }))}
+                    className={CONTROL}
+                    disabled={compatiblePlans.length === 0}
+                  >
+                    {compatiblePlans.length === 0 && <option value="">No compatible plans</option>}
+                    {compatiblePlans.map((p) => <option key={p.key} value={p.key}>{p.name}</option>)}
+                  </select>
+                </Field>
+                <Field label="Effective">
+                  <select value={planChangeForm.effective_at} onChange={(e) => setPlanChangeForm((f) => ({ ...f, effective_at: e.target.value }))} className={CONTROL}>
+                    <option value="immediate">Immediately</option>
+                    <option value="next_cycle">Next cycle</option>
+                  </select>
+                </Field>
+                <Field label="Proration">
+                  <select
+                    value={planChangeForm.effective_at === "next_cycle" ? "none" : planChangeForm.proration_policy}
+                    onChange={(e) => setPlanChangeForm((f) => ({ ...f, proration_policy: e.target.value }))}
+                    className={CONTROL}
+                    disabled={planChangeForm.effective_at === "next_cycle"}
+                  >
+                    <option value="prorate">Prorate</option>
+                    <option value="charge_full">Charge full</option>
+                    <option value="none">No adjustment</option>
+                  </select>
+                </Field>
+                <Field label="Discount">
+                  <select value={planChangeForm.discount_policy} onChange={(e) => setPlanChangeForm((f) => ({ ...f, discount_policy: e.target.value }))} className={CONTROL}>
+                    <option value="preserve">Preserve</option>
+                    <option value="drop">Remove</option>
+                  </select>
+                </Field>
+                <button
+                  type="button"
+                  disabled={selected.status !== "active" || !planChangeForm.target_plan_key || busy === `plan:${selected.id}`}
+                  onClick={changePlan}
+                  className="px-3 py-1.5 rounded bg-accent text-bg text-sm font-semibold disabled:opacity-50"
+                >
+                  {busy === `plan:${selected.id}` ? "Starting..." : "Change Plan"}
+                </button>
+                {planChange && (
+                  <div className="col-span-5 flex items-center gap-2 min-w-0 text-xs">
+                    <span className={`px-1.5 py-0.5 rounded font-medium ${tone(planChange.status)}`}>{planChange.status}</span>
+                    <span className="text-text-dim truncate">{planChange.plan_change.change_kind} to {planChange.plan_change.target_plan_key}</span>
+                    {planChange.plan_change.proration?.charge_cents ? (
+                      <span className="font-mono">{fmtMoney(planChange.plan_change.proration.charge_cents, planChange.plan_change.proration.currency || "USD")}</span>
+                    ) : null}
+                    {planChange.url && (
+                      <button type="button" onClick={() => window.open(planChange.url, "_blank", "noopener,noreferrer")} className="ml-auto px-2 py-1 rounded bg-bg-input hover:bg-bg-hover">
+                        Pay
+                      </button>
+                    )}
+                    {planChange.plan_change.last_error && <span className="text-red truncate">{planChange.plan_change.last_error}</span>}
+                  </div>
+                )}
+              </section>
+            )}
 
             <section className="p-4 border-b border-border grid grid-cols-[minmax(0,1fr)_240px_auto] gap-2 items-end">
               <Field label="Feature">

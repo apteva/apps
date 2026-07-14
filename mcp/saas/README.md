@@ -81,6 +81,33 @@ tool and event handler share the same idempotent operation: the loser waits for
 the winner and returns the completed checkout instead of a false duplicate
 payment error.
 
+## Plan Changes
+
+`saas_account_change_plan` upgrades or downgrades an active subscription-backed
+account between plans attached to the same Catalog product. A move to another
+product is intentionally rejected because it may require a separate data and
+fulfillment migration.
+
+SaaS validates the product boundary, asks Subscriptions to create a durable
+item replacement, coordinates any Billing invoice and payment link, replaces
+Entitlements, and runs the target plan's `plan_upgraded`, `plan_downgraded`, or
+`plan_changed` fulfillment action. The account plan is committed only after
+those steps succeed. Subscriptions remains authoritative for item history,
+cycle-effective changes, generic proration, and discount continuation.
+
+Changes can be `immediate` or `next_cycle`. Immediate upgrades support
+`prorate`, `charge_full`, and `none`; any positive adjustment is held until
+Billing confirms payment. Next-cycle changes use `none` and are applied by the
+Subscriptions due worker. Existing discounts can be `preserve`d or `drop`ped.
+Immediate prorated downgrades are rejected until Billing provides a generic
+credit-note workflow; operators can schedule them for the next cycle instead.
+
+Every request requires an `idempotency_key`. `saas_plan_change_get` returns the
+durable state and payment URL, and the recovery worker resumes interrupted
+Billing, Subscriptions, Entitlements, and fulfillment steps without creating a
+second invoice or subscription transition. Completion emits
+`saas.account.plan_changed`.
+
 SaaS exposes `saas.read`, `saas.checkout`, and `saas.admin` permissions. Plan,
 fulfillment, account-management, usage-write, and manual-payment tools require
 `saas.admin`; customer checkout requires `saas.checkout`.
@@ -128,7 +155,8 @@ Later lifecycle actions can use stored metadata:
 ```
 
 Supported lifecycle events are `account_active`, `account_past_due`,
-`account_suspended`, `account_resumed`, and `account_cancelled`.
+`account_suspended`, `account_resumed`, `account_cancelled`, `plan_upgraded`,
+`plan_downgraded`, and `plan_changed`.
 
 ## Live Usage
 

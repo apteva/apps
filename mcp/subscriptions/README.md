@@ -34,3 +34,19 @@ discount in Catalog, passes Catalog's immutable `application` snapshot to
 `subscriptions_create` or `subscription_discounts_create`, and then redeems the
 reservation. Subscriptions applies the snapshot by cycle number and never calls
 Catalog or Billing while doing so.
+
+## Item changes
+
+`subscription_changes_create` replaces the recurring item set either
+immediately or at the next cycle. Each change is durable and idempotent, keeps
+the old and new item snapshots, calculates generic proration, and versions item
+cycle ranges so historical invoice retries continue to use the original
+prices. Preserved discounts follow the matching replacement item and proration
+uses the effective net recurring amounts.
+
+An immediate change created with `defer_apply: true` remains
+`awaiting_approval`; the due worker will not apply it. An external orchestrator
+uses `subscription_changes_apply` after its payment or policy gate succeeds.
+Next-cycle changes remain automatic and publish `subscription.change.applied`
+when they become effective. Subscriptions never creates an invoice, payment,
+entitlement, or fulfillment operation for a change.

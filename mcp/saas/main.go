@@ -91,6 +91,7 @@ func (a *App) EventHandlers() []sdk.EventHandler {
 		{Topic: "subscription.cancelled", Handler: a.handleSubscriptionLifecycle},
 		{Topic: "subscription.ended", Handler: a.handleSubscriptionLifecycle},
 		{Topic: "subscription.cycle_due", Handler: a.handleSubscriptionCycleDue},
+		{Topic: "subscription.change.applied", Handler: a.handleSubscriptionChangeApplied},
 		{Topic: "invoice.paid", Handler: a.handleInvoicePaid},
 		{Topic: "invoice.voided", Handler: a.handleInvoiceCollectionFailed},
 		{Topic: "invoice.refunded", Handler: a.handleInvoiceCollectionFailed},
@@ -114,6 +115,12 @@ func (a *App) Workers() []sdk.Worker {
 		Schedule: "@every 60s",
 		Run: func(_ context.Context, ctx *sdk.AppCtx) error {
 			return a.recoverExpiredCheckouts(ctx)
+		},
+	}, {
+		Name:     "plan-change-recovery",
+		Schedule: "@every 60s",
+		Run: func(_ context.Context, ctx *sdk.AppCtx) error {
+			return a.recoverPlanChanges(ctx)
 		},
 	}}
 }
@@ -165,6 +172,11 @@ func (a *App) MCPTools() []sdk.Tool {
 			"billing_customer_id": intSchema(), "auth_org_id": intSchema(), "auth_user_id": intSchema(), "subscription_id": intSchema(), "create_owner_user": boolSchema(), "send_password_reset": boolSchema(), "metadata": objSchema(),
 		}, []string{"owner_email", "slug"}), Handler: a.toolAccountCreate},
 		{Name: "saas_account_get", Description: "Fetch one SaaS account with customer and Billing summary.", InputSchema: accountIDSchema(), Handler: a.toolAccountGet},
+		{Name: "saas_account_change_plan", Description: "Upgrade or downgrade an active account within the same SaaS product, with durable proration and payment orchestration.", InputSchema: schemaObject(map[string]any{
+			"account_id": strSchema(), "target_plan_key": strSchema(), "effective_at": strSchema(), "proration_policy": strSchema(),
+			"discount_policy": strSchema(), "idempotency_key": strSchema(), "success_url": strSchema(), "cancel_url": strSchema(),
+		}, []string{"account_id", "target_plan_key", "idempotency_key"}), Handler: a.toolAccountChangePlan},
+		{Name: "saas_plan_change_get", Description: "Fetch a durable SaaS plan-change status and payment URL.", InputSchema: schemaObject(map[string]any{"change_id": strSchema()}, []string{"change_id"}), Handler: a.toolPlanChangeGet},
 		{Name: "saas_account_list", Description: "List SaaS accounts with customer and Billing summaries.", InputSchema: schemaObject(map[string]any{
 			"customer_id": intSchema(), "customer_email": strSchema(), "subscription_id": intSchema(), "status": strSchema(), "plan_key": strSchema(),
 			"created_before": strSchema(), "created_after": strSchema(), "has_paid": boolSchema(),
@@ -2152,6 +2164,10 @@ func (a *App) createPaymentSetupSession(ctx *sdk.AppCtx, pid string, billingCust
 }
 
 func (a *App) runFulfillment(ctx *sdk.AppCtx, pid string, acct *Account, event string, transitionIDs ...string) ([]*FulfillmentRun, error) {
+	return a.runFulfillmentForPlan(ctx, pid, acct, acct.PlanKey, event, transitionIDs...)
+}
+
+func (a *App) runFulfillmentForPlan(ctx *sdk.AppCtx, pid string, acct *Account, planKey, event string, transitionIDs ...string) ([]*FulfillmentRun, error) {
 	event = normalizeFulfillmentEvent(event)
 	if event == "" {
 		return nil, errors.New("fulfillment event required")
@@ -2173,7 +2189,7 @@ func (a *App) runFulfillment(ctx *sdk.AppCtx, pid string, acct *Account, event s
 		}
 		transitionID = transition.ID
 	}
-	actions, err := dbPlanActions(ctx.AppDB(), pid, acct.PlanKey, event, true)
+	actions, err := dbPlanActions(ctx.AppDB(), pid, planKey, event, true)
 	if err != nil || len(actions) == 0 {
 		return nil, err
 	}
@@ -2181,7 +2197,7 @@ func (a *App) runFulfillment(ctx *sdk.AppCtx, pid string, acct *Account, event s
 	if err != nil {
 		return nil, err
 	}
-	plan, err := dbPlanGet(ctx.AppDB(), pid, acct.PlanKey)
+	plan, err := dbPlanGet(ctx.AppDB(), pid, planKey)
 	if err != nil {
 		return nil, err
 	}
@@ -2190,7 +2206,9 @@ func (a *App) runFulfillment(ctx *sdk.AppCtx, pid string, acct *Account, event s
 		if !action.Enabled {
 			continue
 		}
-		args, _ := expandFulfillmentValue(mapFromAny(action.Args), fulfillmentTemplateContext(pid, acct, customer, plan)).(map[string]any)
+		templateAccount := *acct
+		templateAccount.PlanKey = planKey
+		args, _ := expandFulfillmentValue(mapFromAny(action.Args), fulfillmentTemplateContext(pid, &templateAccount, customer, plan)).(map[string]any)
 		if args == nil {
 			args = map[string]any{}
 		}
@@ -2955,6 +2973,9 @@ func (a *App) handleInvoicePaid(ctx *sdk.AppCtx, event sdk.Event) error {
 	}
 	if pid == "" || invoiceID <= 0 {
 		return nil
+	}
+	if handled, err := a.handlePlanChangeInvoicePaid(ctx, pid, invoiceID); err != nil || handled {
+		return err
 	}
 	op, err := dbCommerceOperationByInvoice(ctx.AppDB(), pid, invoiceID)
 	if err != nil || op == nil {
@@ -5056,6 +5077,14 @@ func dbCommerceOperationCompleteBilling(db *sql.DB, pid string, id int64, paymen
 func dbCommerceOperationCompletePayment(db *sql.DB, pid string, id int64) error {
 	_, err := db.Exec(`UPDATE saas_commerce_operations SET
 		status='paid', stage='subscription_activated', last_error='', lease_until=NULL,
+		completed_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP
+		WHERE project_id=? AND id=?`, pid, id)
+	return err
+}
+
+func dbCommerceOperationCompletePlanChangePayment(db *sql.DB, pid string, id int64) error {
+	_, err := db.Exec(`UPDATE saas_commerce_operations SET
+		status='paid', stage='plan_changed', last_error='', lease_until=NULL,
 		completed_at=CURRENT_TIMESTAMP, updated_at=CURRENT_TIMESTAMP
 		WHERE project_id=? AND id=?`, pid, id)
 	return err
