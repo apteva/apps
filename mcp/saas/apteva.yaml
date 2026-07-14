@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: saas
 display_name: SaaS
-version: 0.6.0
+version: 0.6.1
 description: |
   Shared SaaS access control for Apteva apps. SaaS packages installed
   apps into sellable plans, creates customer accounts backed by Auth

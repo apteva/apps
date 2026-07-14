@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: subscriptions
 display_name: Subscriptions
-version: 0.6.0
+version: 0.6.1
 description: |
   Generic recurring-commerce lifecycle for SaaS, physical product
   subscriptions, and services. Subscriptions owns recurrence, status,
