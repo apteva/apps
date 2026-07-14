@@ -66,6 +66,9 @@ type RenderOptions struct {
 	// as a labeled placeholder rather than failing the render — see
 	// imageResolver.
 	ImageResolver imageResolver
+	// OnWarning reports recoverable quality problems such as an image
+	// that could not be resolved and was replaced with a placeholder.
+	OnWarning func(string)
 }
 
 // renderPDF is the one-shot render entry point. Takes the raw
@@ -131,7 +134,7 @@ func markdownToPDF(md string, opts RenderOptions) ([]byte, error) {
 				continue
 			}
 		}
-		rows := blockToRows(n, source, opts.ImageResolver)
+		rows := blockToRows(n, source, opts.ImageResolver, opts.OnWarning)
 		if len(rows) > 0 {
 			if _, ok := n.(*extast.Table); ok {
 				addRowsWithTableGuard(m, rows)
@@ -170,7 +173,7 @@ func addRowsWithTableGuard(m core.Maroto, rows []core.Row) {
 // blockToRows turns one top-level AST block into 0+ maroto rows.
 // Returning a slice (vs a single row) lets a list emit one row per
 // item, a code block split across pages cleanly, etc.
-func blockToRows(n gast.Node, source []byte, resolve imageResolver) []core.Row {
+func blockToRows(n gast.Node, source []byte, resolve imageResolver, warn func(string)) []core.Row {
 	switch b := n.(type) {
 	case *gast.Heading:
 		return []core.Row{headingRow(b, source)}
@@ -180,7 +183,7 @@ func blockToRows(n gast.Node, source []byte, resolve imageResolver) []core.Row {
 		// inline with text). The common "logo on its own line" case
 		// yields a single image row.
 		if paragraphHasImage(b) {
-			return paragraphToRows(b, source, resolve)
+			return paragraphToRows(b, source, resolve, warn)
 		}
 		return paragraphRows(b, source)
 	case *gast.List:
@@ -190,9 +193,9 @@ func blockToRows(n gast.Node, source []byte, resolve imageResolver) []core.Row {
 	case *gast.ThematicBreak:
 		return []core.Row{thematicBreakRow()}
 	case *gast.FencedCodeBlock:
-		return []core.Row{codeRow(extractText(b, source))}
+		return codeRows(extractText(b, source))
 	case *gast.CodeBlock:
-		return []core.Row{codeRow(extractText(b, source))}
+		return codeRows(extractText(b, source))
 	case *gast.Blockquote:
 		return []core.Row{
 			row.New().Add(
@@ -300,7 +303,10 @@ func splitRenderedLines(s string) []string {
 // page breaks. Numbered lists (Ordered=true) get "1. " prefixes.
 func listRows(list *gast.List, source []byte) []core.Row {
 	out := []core.Row{}
-	idx := 1
+	idx := list.Start
+	if idx <= 0 {
+		idx = 1
+	}
 	for li := list.FirstChild(); li != nil; li = li.NextSibling() {
 		txt := extractText(li, source)
 		var prefix string
@@ -341,6 +347,18 @@ func codeRow(s string) core.Row {
 			Color:  bodyColor(),
 		})),
 	)
+}
+
+func codeRows(s string) []core.Row {
+	lines := strings.Split(strings.TrimSuffix(s, "\n"), "\n")
+	if len(lines) == 0 {
+		return nil
+	}
+	rows := make([]core.Row, 0, len(lines))
+	for _, line := range lines {
+		rows = append(rows, codeRow(line))
+	}
+	return rows
 }
 
 // extractText flattens the node's text content. Drops formatting —
@@ -446,6 +464,13 @@ func tableLine(node gast.Node, source []byte, aligns []extast.Alignment, header 
 	if n == 0 {
 		return row.New()
 	}
+	if n > 12 {
+		parts := make([]string, 0, n)
+		for _, cell := range cells {
+			parts = append(parts, strings.TrimSpace(renderInline(cell, source)))
+		}
+		return textRow(strings.Join(parts, " | "), 8.1, 1.2, 0)
+	}
 	spans := tableSpans(n, aligns)
 	cols := make([]core.Col, 0, n)
 	for i, cell := range cells {
@@ -546,7 +571,7 @@ func paragraphHasImage(p gast.Node) bool {
 // paragraphToRows splits a paragraph containing image(s) into a
 // sequence of rows: accumulated inline text flushes to a text row,
 // each image emits its own image row, preserving document order.
-func paragraphToRows(p gast.Node, source []byte, resolve imageResolver) []core.Row {
+func paragraphToRows(p gast.Node, source []byte, resolve imageResolver, warn func(string)) []core.Row {
 	var rows []core.Row
 	var buf strings.Builder
 	flush := func() {
@@ -563,7 +588,7 @@ func paragraphToRows(p gast.Node, source []byte, resolve imageResolver) []core.R
 	for c := p.FirstChild(); c != nil; c = c.NextSibling() {
 		if img, ok := c.(*gast.Image); ok {
 			flush()
-			rows = append(rows, imageRow(img, source, resolve))
+			rows = append(rows, imageRow(img, source, resolve, warn))
 			continue
 		}
 		buf.WriteString(renderInline(c, source))
@@ -576,7 +601,7 @@ func paragraphToRows(p gast.Node, source []byte, resolve imageResolver) []core.R
 // from the image title (`"width=30%"` / `"30%"`), defaulting to 30%.
 // Any resolution failure degrades to a placeholder so the render
 // always completes.
-func imageRow(img *gast.Image, source []byte, resolve imageResolver) core.Row {
+func imageRow(img *gast.Image, source []byte, resolve imageResolver, warn func(string)) core.Row {
 	src := strings.TrimSpace(string(img.Destination))
 	alt := strings.TrimSpace(extractText(img, source))
 	width := parseWidthPercent(string(img.Title))
@@ -584,10 +609,20 @@ func imageRow(img *gast.Image, source []byte, resolve imageResolver) core.Row {
 		width = 30 // sensible logo default
 	}
 	if resolve == nil {
+		if warn != nil {
+			warn("image " + src + " could not be resolved: no image resolver")
+		}
 		return placeholderRow(alt, src)
 	}
 	data, ext, err := resolve(src)
 	if err != nil || len(data) == 0 {
+		if warn != nil {
+			message := "empty image"
+			if err != nil {
+				message = err.Error()
+			}
+			warn("image " + src + " could not be resolved: " + message)
+		}
 		return placeholderRow(alt, src)
 	}
 	return row.New().Add(

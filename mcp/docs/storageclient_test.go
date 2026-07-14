@@ -50,13 +50,25 @@ func TestResolveImageSrc_RejectsHTTP(t *testing.T) {
 }
 
 func TestResolveImageSrc_DataURI(t *testing.T) {
-	uri := "data:image/jpeg;base64," + base64.StdEncoding.EncodeToString([]byte("x"))
+	uri := "data:image/png;base64," + base64.StdEncoding.EncodeToString(tinyPNG(t))
 	_, ext, err := resolveImageSrc(nil, uri)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if ext != "jpg" {
-		t.Errorf("ext = %q, want jpg", ext)
+	if ext != "png" {
+		t.Errorf("ext = %q, want png", ext)
+	}
+}
+
+func TestResolveImageSrc_RejectsInvalidOrMismatchedImage(t *testing.T) {
+	invalid := "data:image/png;base64," + base64.StdEncoding.EncodeToString([]byte("not an image"))
+	if _, _, err := resolveImageSrc(nil, invalid); err == nil || !strings.Contains(err.Error(), "invalid image") {
+		t.Fatalf("invalid image error = %v", err)
+	}
+
+	mismatch := "data:image/jpeg;base64," + base64.StdEncoding.EncodeToString(tinyPNG(t))
+	if _, _, err := resolveImageSrc(nil, mismatch); err == nil || !strings.Contains(err.Error(), "does not match") {
+		t.Fatalf("mismatched image error = %v", err)
 	}
 }
 

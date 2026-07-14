@@ -16,9 +16,13 @@ package main
 // that's pre-existing tech debt, not the pattern to copy.)
 
 import (
+	"bytes"
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"image"
+	_ "image/jpeg"
+	_ "image/png"
 	"strconv"
 	"strings"
 
@@ -88,21 +92,62 @@ func uploadToStorage(app *sdk.AppCtx, name, folder, contentType string, body []b
 // Lift this behind a config flag later if there's demand.
 func resolveImageSrc(app *sdk.AppCtx, src string) ([]byte, string, error) {
 	src = strings.TrimSpace(src)
+	var (
+		data []byte
+		ext  string
+		err  error
+	)
 	switch {
 	case strings.HasPrefix(src, "data:"):
-		return decodeDataURI(src)
+		data, ext, err = decodeDataURI(src)
 	case strings.HasPrefix(strings.ToLower(src), "http://"),
 		strings.HasPrefix(strings.ToLower(src), "https://"):
 		return nil, "", fmt.Errorf("http(s) image sources are disabled (use storage:<id> or a data: URI): %s", src)
 	case strings.HasPrefix(src, "storage:"):
-		return downloadStorageImage(app, strings.TrimPrefix(src, "storage:"))
+		data, ext, err = downloadStorageImage(app, strings.TrimPrefix(src, "storage:"))
 	default:
 		// Bare numeric id is accepted as shorthand for storage:<id>.
 		if _, err := strconv.ParseInt(src, 10, 64); err == nil {
-			return downloadStorageImage(app, src)
+			data, ext, err = downloadStorageImage(app, src)
+			break
 		}
 		return nil, "", fmt.Errorf("unsupported image source %q (use storage:<id> or data:)", src)
 	}
+	if err != nil {
+		return nil, "", err
+	}
+	if err := validateImage(app, data, ext); err != nil {
+		return nil, "", err
+	}
+	return data, ext, nil
+}
+
+// validateImage rejects oversized, unsupported, or decompression-bomb-like
+// inputs before maroto attempts to decode them. The pixel ceiling is fixed to
+// keep memory use bounded even if an operator raises the byte limit.
+func validateImage(app *sdk.AppCtx, data []byte, ext string) error {
+	maxBytes := 10 << 20
+	if app != nil {
+		maxBytes = configIntDefault(app.Config().Get("max_image_bytes"), maxBytes)
+	}
+	if maxBytes > 0 && len(data) > maxBytes {
+		return fmt.Errorf("image is %d bytes; maximum is %d", len(data), maxBytes)
+	}
+	if ext != "png" && ext != "jpg" {
+		return errors.New("image must be PNG or JPEG")
+	}
+	cfg, format, err := image.DecodeConfig(bytes.NewReader(data))
+	if err != nil {
+		return fmt.Errorf("invalid image: %w", err)
+	}
+	if (ext == "png" && format != "png") || (ext == "jpg" && format != "jpeg") {
+		return fmt.Errorf("image content does not match .%s type", ext)
+	}
+	const maxPixels = int64(40_000_000)
+	if cfg.Width <= 0 || cfg.Height <= 0 || int64(cfg.Width)*int64(cfg.Height) > maxPixels {
+		return fmt.Errorf("image dimensions %dx%d exceed the %d-pixel limit", cfg.Width, cfg.Height, maxPixels)
+	}
+	return nil
 }
 
 // downloadStorageImage fetches one storage file's bytes inline via

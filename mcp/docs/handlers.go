@@ -26,7 +26,7 @@ func (a *App) handleTemplatesCollection(w http.ResponseWriter, r *http.Request) 
 		// Without the param, returns the full template list for
 		// the panel.
 		if r.URL.Query().Get("format") == "picker" {
-			ts, err := listTemplates(app.AppDB())
+			ts, err := listTemplateSummaries(app.AppDB())
 			if err != nil {
 				httpErr(w, http.StatusInternalServerError, err.Error())
 				return
@@ -41,7 +41,7 @@ func (a *App) handleTemplatesCollection(w http.ResponseWriter, r *http.Request) 
 			httpJSON(w, map[string]any{"items": items})
 			return
 		}
-		ts, err := listTemplates(app.AppDB())
+		ts, err := listTemplateSummaries(app.AppDB())
 		if err != nil {
 			httpErr(w, http.StatusInternalServerError, err.Error())
 			return
@@ -49,8 +49,12 @@ func (a *App) handleTemplatesCollection(w http.ResponseWriter, r *http.Request) 
 		httpJSON(w, map[string]any{"templates": ts})
 	case http.MethodPost:
 		var t Template
-		if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&t); err != nil {
+		if err := decodeJSONBody(w, r, &t); err != nil {
 			httpErr(w, http.StatusBadRequest, "invalid json: "+err.Error())
+			return
+		}
+		if err := validateTemplateSize(app, t.Body); err != nil {
+			httpErr(w, http.StatusBadRequest, err.Error())
 			return
 		}
 		id, err := createTemplate(app.AppDB(), &t)
@@ -101,9 +105,15 @@ func (a *App) handleTemplatesItem(w http.ResponseWriter, r *http.Request) {
 			httpJSON(w, map[string]any{"template": t})
 		case http.MethodPatch:
 			var fields map[string]any
-			if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&fields); err != nil {
-				httpErr(w, http.StatusBadRequest, "invalid json")
+			if err := decodeJSONBody(w, r, &fields); err != nil {
+				httpErr(w, http.StatusBadRequest, "invalid json: "+err.Error())
 				return
+			}
+			if body, ok := fields["body"].(string); ok {
+				if err := validateTemplateSize(app, body); err != nil {
+					httpErr(w, http.StatusBadRequest, err.Error())
+					return
+				}
 			}
 			if err := updateTemplate(app.AppDB(), id, fields); err != nil {
 				if errors.Is(err, errNoRows()) {
@@ -136,17 +146,26 @@ func (a *App) handleTemplatesItem(w http.ResponseWriter, r *http.Request) {
 			Data         map[string]any `json:"data"`
 			OutputName   string         `json:"output_name"`
 			OutputFolder string         `json:"output_folder"`
+			PageSize     string         `json:"page_size"`
 		}
-		_ = json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&body)
+		if err := decodeJSONBody(w, r, &body); err != nil {
+			httpErr(w, http.StatusBadRequest, "invalid json: "+err.Error())
+			return
+		}
+		if body.Data == nil {
+			httpErr(w, http.StatusBadRequest, "data must be a JSON object")
+			return
+		}
 		args := map[string]any{
 			"template_id":   id,
 			"data":          body.Data,
 			"output_name":   body.OutputName,
 			"output_folder": body.OutputFolder,
+			"page_size":     body.PageSize,
 		}
-		out, err := a.toolRender(app, args)
+		out, err := a.renderDocument(app, args, "dashboard")
 		if err != nil {
-			httpErr(w, http.StatusInternalServerError, err.Error())
+			httpErr(w, http.StatusBadRequest, err.Error())
 			return
 		}
 		httpJSON(w, out)
@@ -156,16 +175,25 @@ func (a *App) handleTemplatesItem(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		var body struct {
-			Data map[string]any `json:"data"`
-			Body string         `json:"body"` // optional inline override
+			Data     map[string]any `json:"data"`
+			Body     string         `json:"body"` // optional inline override
+			PageSize string         `json:"page_size"`
 		}
-		_ = json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&body)
+		if err := decodeJSONBody(w, r, &body); err != nil {
+			httpErr(w, http.StatusBadRequest, "invalid json: "+err.Error())
+			return
+		}
+		if body.Data == nil {
+			httpErr(w, http.StatusBadRequest, "data must be a JSON object")
+			return
+		}
 		args := map[string]any{
 			"template_id": id,
 			"data":        body.Data,
 			"body":        body.Body,
+			"page_size":   body.PageSize,
 		}
-		out, err := a.toolPreview(app, args)
+		out, err := a.previewDocument(app, args)
 		if err != nil {
 			httpErr(w, http.StatusBadRequest, err.Error())
 			return
@@ -186,10 +214,12 @@ func (a *App) handleRendersCollection(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	tID, _ := strconv.ParseInt(q.Get("template_id"), 10, 64)
 	limit, _ := strconv.Atoi(q.Get("limit"))
+	offset, _ := strconv.Atoi(q.Get("offset"))
 	rs, err := listRenders(app.AppDB(), RenderFilters{
 		TemplateID: tID,
 		Since:      q.Get("since"),
 		Limit:      limit,
+		Offset:     offset,
 	})
 	if err != nil {
 		httpErr(w, http.StatusInternalServerError, err.Error())
@@ -229,6 +259,23 @@ func httpJSON(w http.ResponseWriter, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Header().Set("Cache-Control", "no-store")
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+func decodeJSONBody(w http.ResponseWriter, r *http.Request, dst any) error {
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(dst); err != nil {
+		return err
+	}
+	var extra any
+	if err := dec.Decode(&extra); !errors.Is(err, io.EOF) {
+		if err == nil {
+			return errors.New("request body must contain exactly one JSON object")
+		}
+		return err
+	}
+	return nil
 }
 
 func httpErr(w http.ResponseWriter, code int, msg string) {

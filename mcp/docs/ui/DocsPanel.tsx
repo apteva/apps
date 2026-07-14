@@ -9,7 +9,7 @@
 // the per-install bearer token). Inherits the dashboard's Tailwind
 // theme tokens.
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 
 interface NativePanelProps {
   appName: string;
@@ -43,6 +43,13 @@ interface RenderRow {
   bytes?: number;
 }
 
+interface RenderResult {
+  file_id: number;
+  url: string;
+  warnings?: string[];
+  page_size?: string;
+}
+
 const API = "/api/apps/docs";
 type View = "templates" | "render" | "renders";
 
@@ -51,6 +58,39 @@ interface TemplateVar {
   kind: "value" | "list" | "object_list";
   children: string[];
 }
+
+const BLANK_STARTER = `# New template
+
+Replace this with your markdown. Use {{.variable}} placeholders.`;
+
+const LEAD_MAGNET_STARTER = `# {{.title}}
+
+## A practical guide for {{.audience}}
+
+{{.introduction}}
+
+---
+
+## What you'll learn
+
+{{range .takeaways}}- {{.}}
+{{end}}
+
+## The framework
+
+{{range .steps}}### {{.title}}
+
+{{.description}}
+
+{{end}}
+
+---
+
+## Your next step
+
+{{.call_to_action}}
+
+**{{.brand_name}}** · {{.website}}`;
 
 export default function DocsPanel({ projectId, installId }: NativePanelProps) {
   const [view, setView] = useState<View>("templates");
@@ -166,11 +206,28 @@ export default function DocsPanel({ projectId, installId }: NativePanelProps) {
           onSelect={setSelected}
           onSave={async (t) => {
             if (t.id) {
-              await api("PATCH", `/templates/${t.id}`, t);
+              await api("PATCH", `/templates/${t.id}`, {
+                name: t.name,
+                description: t.description || "",
+                body: t.body || "",
+                default_folder: t.default_folder || "",
+              });
+              const saved = await api<{ template: Template }>("GET", `/templates/${t.id}`);
+              await loadTemplates();
+              setSelected(saved.template);
+              return saved.template;
             } else {
-              await api("POST", `/templates`, t);
+              const saved = await api<{ template: Template }>("POST", `/templates`, {
+                slug: t.slug,
+                name: t.name,
+                description: t.description || "",
+                body: t.body || "",
+                default_folder: t.default_folder || "",
+              });
+              await loadTemplates();
+              setSelected(saved.template);
+              return saved.template;
             }
-            await loadTemplates();
           }}
           onDelete={async (id) => {
             await api("DELETE", `/templates/${id}`);
@@ -204,7 +261,7 @@ interface TemplatesViewProps {
   templates: Template[];
   selected: Template | null;
   onSelect: (t: Template | null) => void;
-  onSave: (t: Template) => Promise<void>;
+  onSave: (t: Template) => Promise<Template>;
   onDelete: (id: number) => Promise<void>;
   api: <T>(method: string, path: string, body?: unknown) => Promise<T>;
   loading: boolean;
@@ -222,7 +279,9 @@ function TemplatesView({
   const [editing, setEditing] = useState<Template | null>(null);
   const [previewURL, setPreviewURL] = useState<string | null>(null);
   const [previewing, setPreviewing] = useState(false);
+  const [saving, setSaving] = useState(false);
   const [previewError, setPreviewError] = useState("");
+  const [pageSize, setPageSize] = useState("A4");
   const templateVars = useMemo(
     () => extractTemplateVariables(editing?.body || ""),
     [editing?.body],
@@ -237,11 +296,15 @@ function TemplatesView({
   useEffect(() => {
     if (!selected || selected.id === editing?.id) return;
     let alive = true;
+    setPreviewError("");
+    setPreviewURL(null);
     api<{ template: Template }>("GET", `/templates/${selected.id}`)
       .then((d) => {
         if (alive) setEditing(d.template);
       })
-      .catch(() => {});
+      .catch((e) => {
+        if (alive) setPreviewError(`Could not load template: ${(e as Error).message}`);
+      });
     return () => {
       alive = false;
     };
@@ -254,13 +317,15 @@ function TemplatesView({
     };
   }, [previewURL]);
 
-  const startNew = () => {
+  const startNew = (starter: "blank" | "lead-magnet" = "blank") => {
     setEditing({
       id: 0,
       slug: "",
       name: "",
-      body: "# New template\n\nReplace with markdown body. Use {{.var}} placeholders.",
+      body: starter === "lead-magnet" ? LEAD_MAGNET_STARTER : BLANK_STARTER,
     });
+    setPreviewURL(null);
+    setPreviewError("");
     onSelect(null);
   };
 
@@ -276,9 +341,10 @@ function TemplatesView({
       const res = await api<{ base64: string; content_type: string }>(
         "POST",
         path,
-        { data: sampleData, body: editing.body },
+        { data: sampleData, body: editing.body, page_size: pageSize },
       );
-      const url = `data:${res.content_type};base64,${res.base64}`;
+      const bytes = Uint8Array.from(atob(res.base64), (char) => char.charCodeAt(0));
+      const url = URL.createObjectURL(new Blob([bytes], { type: res.content_type }));
       setPreviewURL(url);
     } catch (e) {
       setPreviewError((e as Error).message);
@@ -290,13 +356,22 @@ function TemplatesView({
   return (
     <div className="flex-1 flex gap-4 min-h-0">
       <div className="w-64 flex flex-col gap-2">
-        <button
-          type="button"
-          onClick={startNew}
-          className="px-3 py-2 text-sm border border-accent text-accent rounded hover:bg-accent hover:text-bg"
-        >
-          + New template
-        </button>
+        <div className="grid grid-cols-2 gap-2">
+          <button
+            type="button"
+            onClick={() => startNew("blank")}
+            className="px-2 py-2 text-xs border border-accent text-accent rounded hover:bg-accent hover:text-bg"
+          >
+            + Blank
+          </button>
+          <button
+            type="button"
+            onClick={() => startNew("lead-magnet")}
+            className="px-2 py-2 text-xs border border-border rounded hover:bg-bg-input"
+          >
+            Lead magnet
+          </button>
+        </div>
         <div className="flex-1 overflow-auto border border-border rounded">
           {loading && templates.length === 0 ? (
             <div className="p-3 text-text-muted text-xs text-center">Loading…</div>
@@ -369,6 +444,16 @@ function TemplatesView({
               spellCheck={false}
             />
             <div className="flex items-center gap-2">
+              <select
+                aria-label="Preview page size"
+                value={pageSize}
+                onChange={(e) => setPageSize(e.target.value)}
+                className="bg-bg-input border border-border rounded px-2 py-1 text-sm"
+              >
+                <option value="A4">A4</option>
+                <option value="letter">Letter</option>
+                <option value="legal">Legal</option>
+              </select>
               <button
                 type="button"
                 onClick={runPreview}
@@ -384,20 +469,34 @@ function TemplatesView({
                     setPreviewError("slug, name, body required");
                     return;
                   }
-                  await onSave(editing);
+                  setSaving(true);
                   setPreviewError("");
+                  try {
+                    const saved = await onSave(editing);
+                    setEditing(saved);
+                  } catch (e) {
+                    setPreviewError((e as Error).message);
+                  } finally {
+                    setSaving(false);
+                  }
                 }}
+                disabled={saving}
                 className="px-3 py-1 text-sm border border-accent text-accent rounded hover:bg-accent hover:text-bg"
               >
-                Save
+                {saving ? "Saving…" : "Save"}
               </button>
               {editing.id ? (
                 <button
                   type="button"
                   onClick={async () => {
                     if (window.confirm("Delete this template? Past renders are kept.")) {
-                      await onDelete(editing.id);
-                      setEditing(null);
+                      try {
+                        await onDelete(editing.id);
+                        setEditing(null);
+                        setPreviewURL(null);
+                      } catch (e) {
+                        setPreviewError((e as Error).message);
+                      }
                     }
                   }}
                   className="px-3 py-1 text-sm border border-red/40 text-red rounded hover:bg-red/10"
@@ -440,16 +539,19 @@ function RenderView({
   const [dataJSON, setDataJSON] = useState('{\n  "customer": { "name": "Acme" }\n}');
   const [outputName, setOutputName] = useState("");
   const [outputFolder, setOutputFolder] = useState("");
+  const [pageSize, setPageSize] = useState("A4");
   const [busy, setBusy] = useState(false);
-  const [result, setResult] = useState<{ url?: string; file_id?: number } | null>(null);
+  const [loadingTemplate, setLoadingTemplate] = useState(false);
+  const [templateDetail, setTemplateDetail] = useState<Template | null>(null);
+  const [result, setResult] = useState<RenderResult | null>(null);
   const [error, setError] = useState("");
   const selectedTemplate = useMemo(
     () => templates.find((t) => t.id === templateID) || null,
     [templates, templateID],
   );
   const templateVars = useMemo(
-    () => extractTemplateVariables(selectedTemplate?.body || ""),
-    [selectedTemplate?.body],
+    () => extractTemplateVariables(templateDetail?.body || ""),
+    [templateDetail?.body],
   );
   const sampleData = useMemo(
     () => sampleDataForVariables(templateVars),
@@ -457,12 +559,34 @@ function RenderView({
   );
 
   useEffect(() => {
-    if (!selectedTemplate) return;
-    setDataJSON(JSON.stringify(sampleData, null, 2));
-    setOutputFolder(selectedTemplate.default_folder || "");
+    if (!selectedTemplate) {
+      setTemplateDetail(null);
+      return;
+    }
+    let alive = true;
+    setLoadingTemplate(true);
     setResult(null);
     setError("");
-  }, [selectedTemplate, sampleData]);
+    api<{ template: Template }>("GET", `/templates/${selectedTemplate.id}`)
+      .then((response) => {
+        if (alive) setTemplateDetail(response.template);
+      })
+      .catch((e) => {
+        if (alive) setError(`Could not load template: ${(e as Error).message}`);
+      })
+      .finally(() => {
+        if (alive) setLoadingTemplate(false);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [selectedTemplate, api]);
+
+  useEffect(() => {
+    if (!templateDetail) return;
+    setDataJSON(JSON.stringify(sampleData, null, 2));
+    setOutputFolder(templateDetail.default_folder || "");
+  }, [templateDetail, sampleData]);
 
   const handleRender = async () => {
     setBusy(true);
@@ -475,13 +599,17 @@ function RenderView({
       } catch (e) {
         throw new Error("Data isn't valid JSON: " + (e as Error).message);
       }
-      const out = await api<{ file_id: number; url: string }>(
+      if (!data || typeof data !== "object" || Array.isArray(data)) {
+        throw new Error("Data must be a JSON object.");
+      }
+      const out = await api<RenderResult>(
         "POST",
         `/templates/${templateID}/render`,
         {
           data,
           output_name: outputName || undefined,
           output_folder: outputFolder || undefined,
+          page_size: pageSize,
         },
       );
       setResult(out);
@@ -535,14 +663,25 @@ function RenderView({
         />
       </div>
 
+      <label className="text-xs text-text-dim">Page size</label>
+      <select
+        value={pageSize}
+        onChange={(e) => setPageSize(e.target.value)}
+        className="w-48 bg-bg-input border border-border rounded px-2 py-1 text-sm"
+      >
+        <option value="A4">A4</option>
+        <option value="letter">Letter</option>
+        <option value="legal">Legal</option>
+      </select>
+
       <div className="flex items-center gap-2">
         <button
           type="button"
           onClick={handleRender}
-          disabled={busy || !templateID}
+          disabled={busy || loadingTemplate || !templateID || !templateDetail}
           className="px-4 py-2 text-sm border border-accent text-accent rounded hover:bg-accent hover:text-bg disabled:opacity-50"
         >
-          {busy ? "Rendering…" : "Render"}
+          {busy ? "Rendering…" : loadingTemplate ? "Loading template…" : "Render PDF"}
         </button>
         {error && <span className="text-xs text-red">{error}</span>}
       </div>
@@ -558,6 +697,17 @@ function RenderView({
           >
             {result.url}
           </a>
+          {result.warnings && result.warnings.length > 0 && (
+            <div className="text-xs text-amber-600">
+              Rendered with {result.warnings.length} warning
+              {result.warnings.length === 1 ? "" : "s"}:
+              <ul className="list-disc ml-5 mt-1">
+                {result.warnings.map((warning, index) => (
+                  <li key={`${index}-${warning}`}>{warning}</li>
+                ))}
+              </ul>
+            </div>
+          )}
         </div>
       )}
     </div>
@@ -824,9 +974,3 @@ function storageContentURL(r: RenderRow, projectId?: string): string {
   const q = projectId ? `?project_id=${encodeURIComponent(projectId)}` : "";
   return `/api/apps/storage/files/${encodeURIComponent(r.output_file_id)}/content/${encodeURIComponent(name)}${q}`;
 }
-
-// silence unused-var warnings for hooks we don't need in v0.1
-const _unused = useMemo;
-const _unusedRef = useRef;
-void _unused;
-void _unusedRef;

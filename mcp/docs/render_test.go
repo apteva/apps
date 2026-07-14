@@ -232,12 +232,48 @@ func TestRender_ImageNilResolverPlaceholder(t *testing.T) {
 	}
 
 	errResolver := func(string) ([]byte, string, error) { return nil, "", errFake }
-	pdf, err = renderPDF(body, nil, RenderOptions{ImageResolver: errResolver})
+	warnings := []string{}
+	pdf, err = renderPDF(body, nil, RenderOptions{
+		ImageResolver: errResolver,
+		OnWarning:     func(message string) { warnings = append(warnings, message) },
+	})
 	if err != nil {
 		t.Fatalf("resolver error should degrade, not fail: %v", err)
 	}
 	if !bytes.HasPrefix(pdf, []byte("%PDF-")) {
 		t.Fatal("not a PDF")
+	}
+	if len(warnings) != 1 || !strings.Contains(warnings[0], "resolve failed") {
+		t.Fatalf("warnings = %v", warnings)
+	}
+}
+
+func TestRender_ReusesResolvedImage(t *testing.T) {
+	requests := 0
+	baseResolver := func(string) ([]byte, string, error) {
+		requests++
+		return tinyPNG(t), "png", nil
+	}
+	type cached struct {
+		data []byte
+		ext  string
+		err  error
+	}
+	cache := map[string]cached{}
+	resolver := func(src string) ([]byte, string, error) {
+		if got, ok := cache[src]; ok {
+			return got.data, got.ext, got.err
+		}
+		data, ext, err := baseResolver(src)
+		cache[src] = cached{data, ext, err}
+		return data, ext, err
+	}
+	_, err := renderPDF("![one](storage:7)\n\n![two](storage:7)", nil, RenderOptions{ImageResolver: resolver})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if requests != 1 {
+		t.Fatalf("resolver called %d times, want 1", requests)
 	}
 }
 
