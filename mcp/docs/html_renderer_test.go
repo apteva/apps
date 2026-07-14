@@ -26,9 +26,34 @@ func TestMergeHTMLTemplateEscapesData(t *testing.T) {
 
 func TestPrintableHTMLUsesEscapedDocumentTitle(t *testing.T) {
 	title := documentTitle(map[string]any{"title": `Guide <2026> & beyond`})
-	page := buildPrintableHTML("<main>Body</main>", "", title)
+	page := buildPrintableHTML("<main>Body</main>", "", title, printGeometry{PaperWidthIn: 8.27, PaperHeightIn: 11.69, ContentWidthIn: 8.27, ContentHeightIn: 11.69})
 	if !strings.Contains(page, "<title>Guide &lt;2026&gt; &amp; beyond</title>") {
 		t.Fatalf("document title was not escaped: %s", page)
+	}
+}
+
+func TestPopulatePageMarkers(t *testing.T) {
+	marked, err := populatePageMarkers(`<article><section data-pdf-page><span data-page-number></span></section><section data-pdf-page><span class="page-number"></span><span data-page-total="decimal-leading-zero"></span></section></article>`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{`data-page-index="1"`, `data-page-total="2"`, `>1</span>`, `data-page-number-value="02"`, `data-page-total-value="02"`, `>02</span>`} {
+		if !strings.Contains(marked, want) {
+			t.Fatalf("prepared HTML missing %q: %s", want, marked)
+		}
+	}
+}
+
+func TestFixedLayoutRejectsPageSizeOverride(t *testing.T) {
+	for _, mode := range []string{"", "fixed"} {
+		_, err := resolveHTMLPageSize(DocumentSettings{LayoutMode: mode, PageSize: "A4"}, "letter")
+		if err == nil || !strings.Contains(err.Error(), "locked to A4") {
+			t.Fatalf("expected fixed-layout error for mode %q, got %v", mode, err)
+		}
+	}
+	pageSize, err := resolveHTMLPageSize(DocumentSettings{LayoutMode: "flow", PageSize: "A4"}, "letter")
+	if err != nil || pageSize != "letter" {
+		t.Fatalf("flow layout override = %q, %v", pageSize, err)
 	}
 }
 
@@ -99,5 +124,52 @@ section { margin-top: 30mm; padding: 8mm; border-left: 4mm solid #5b4ce6; backgr
 	}
 	if !bytes.HasPrefix(pdf, []byte("%PDF-")) || len(pdf) < 3000 {
 		t.Fatalf("invalid or suspiciously small PDF: %d bytes", len(pdf))
+	}
+	if !bytes.Contains(pdf, []byte("/StructTreeRoot")) {
+		t.Fatal("PDF is missing a tagged-document structure tree")
+	}
+	if !bytes.Contains(pdf, []byte("/Outlines")) {
+		t.Fatal("PDF is missing a document outline")
+	}
+}
+
+func TestHTMLRendererRejectsClippedPageContent(t *testing.T) {
+	if _, err := findChromeExecutable(); err != nil {
+		t.Skip(err)
+	}
+	zero := 0.0
+	background := true
+	_, err := renderHTMLToPDF(context.Background(), `
+<main data-pdf-page>
+  <h1>Overflow test</h1>
+  <div class="too-tall">This content cannot fit.</div>
+</main>`, `
+@page { margin: 0; }
+main { width: var(--document-page-width); height: var(--document-page-height); overflow: hidden; }
+.too-tall { height: 400mm; }
+`, map[string]any{"title": "Overflow test"}, DocumentSettings{
+		LayoutMode: "fixed", PageSize: "A4", MarginTopMM: &zero, MarginRightMM: &zero,
+		MarginBottomMM: &zero, MarginLeftMM: &zero, PrintBackground: &background,
+	}, htmlRenderOptions{PageSize: "A4", Timeout: 20 * time.Second})
+	if err == nil || !strings.Contains(err.Error(), "document page 1 overflows vertically") {
+		t.Fatalf("expected actionable overflow error, got %v", err)
+	}
+}
+
+func TestHTMLRendererRejectsUndecodableImage(t *testing.T) {
+	if _, err := findChromeExecutable(); err != nil {
+		t.Skip(err)
+	}
+	zero := 0.0
+	background := true
+	_, err := renderHTMLToPDF(context.Background(), `<main><img src="storage:7" alt="Broken chart"></main>`, ``, nil, DocumentSettings{
+		PageSize: "A4", MarginTopMM: &zero, MarginRightMM: &zero,
+		MarginBottomMM: &zero, MarginLeftMM: &zero, PrintBackground: &background,
+	}, htmlRenderOptions{
+		PageSize: "A4", Timeout: 20 * time.Second,
+		ImageResolver: func(string) ([]byte, string, error) { return []byte("not a png"), "png", nil },
+	})
+	if err == nil || !strings.Contains(err.Error(), "failed to decode: Broken chart") {
+		t.Fatalf("expected image readiness error, got %v", err)
 	}
 }

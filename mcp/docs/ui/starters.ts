@@ -1,5 +1,5 @@
 export const HTML_LEAD_MAGNET_STARTER = `<article class="document">
-  <section class="page cover">
+  <section class="page cover" data-pdf-page data-allow-horizontal-overflow>
     <div class="cover-grid"></div>
     <header class="brand-row">
       <div class="brand-mark">M</div>
@@ -25,7 +25,7 @@ export const HTML_LEAD_MAGNET_STARTER = `<article class="document">
     <footer class="page-footer"><span>{{.brand_name}}</span><span>{{.website}}</span></footer>
   </section>
 
-  <section class="page">
+  <section class="page" data-pdf-page>
     <header class="section-head"><span>01</span><div><p>ORIENT</p><h2>Know what you are building</h2></div></header>
     <p class="lede">This project turns a blank ESP32 into a tiny connected product: it reads a sensor, joins your WiFi network, and serves a clean dashboard directly to your browser.</p>
     <div class="three-up">
@@ -43,10 +43,10 @@ export const HTML_LEAD_MAGNET_STARTER = `<article class="document">
       <div><h3>Before you begin</h3><ul><li>Install Arduino IDE 2.x</li><li>Add the ESP32 board package</li><li>Select the correct board and port</li></ul></div>
       <div><h3>Definition of done</h3><ul><li>Sensor value changes in Serial Monitor</li><li>Board prints a local IP address</li><li>Dashboard opens from your phone</li></ul></div>
     </div>
-    <footer class="page-footer"><span>{{.title}}</span><span>2</span></footer>
+    <footer class="page-footer"><span>{{.title}}</span><span><span data-page-number></span> / <span data-page-total></span></span></footer>
   </section>
 
-  <section class="page">
+  <section class="page" data-pdf-page>
     <header class="section-head"><span>02</span><div><p>BUILD</p><h2>Read the sensor reliably</h2></div></header>
     <div class="step"><b>1</b><div><h3>Wire the input</h3><p>Connect the sensor output to GPIO 34, power to 3.3V, and ground to GND. GPIO 34 is input-only, which makes it a safe choice for this exercise.</p></div></div>
     <div class="wiring">
@@ -67,10 +67,10 @@ void loop() {
     <div class="callout warning"><span>COMMON MISTAKE</span><p>Do not feed a 5V sensor output directly into an ESP32 input. Keep the signal within the board's 3.3V range.</p></div>
     <h3 class="rule-title">Test before moving on</h3>
     <ol class="numbered"><li>Open Serial Monitor at 115200 baud.</li><li>Change the sensor input.</li><li>Confirm the value moves consistently instead of remaining fixed.</li></ol>
-    <footer class="page-footer"><span>{{.title}}</span><span>3</span></footer>
+    <footer class="page-footer"><span>{{.title}}</span><span><span data-page-number></span> / <span data-page-total></span></span></footer>
   </section>
 
-  <section class="page">
+  <section class="page" data-pdf-page>
     <header class="section-head"><span>03</span><div><p>CONNECT</p><h2>Put the dashboard on your network</h2></div></header>
     <p class="lede">Add WiFi only after the sensor works. This keeps failures easy to locate and gives every stage one clear success signal.</p>
     <div class="flow">
@@ -93,10 +93,10 @@ void handleStatus() {
       <div class="panel"><span>IN THE LOOP</span><h3>Handle requests</h3><p>Call <code>server.handleClient()</code> continuously. Long delays make the page feel unresponsive.</p></div>
     </div>
     <div class="callout next"><span>NEXT STEP</span><p>Open the printed IP address on a phone connected to the same WiFi network. If the status endpoint returns a number, the hard part is done.</p></div>
-    <footer class="page-footer"><span>{{.title}}</span><span>4</span></footer>
+    <footer class="page-footer"><span>{{.title}}</span><span><span data-page-number></span> / <span data-page-total></span></span></footer>
   </section>
 
-  <section class="page final-page">
+  <section class="page final-page" data-pdf-page>
     <header class="section-head"><span>04</span><div><p>SHIP</p><h2>Launch with confidence</h2></div></header>
     <h3 class="rule-title">Final checklist</h3>
     <div class="checklist">{{range .checklist}}<div><span>□</span><p>{{.}}</p></div>{{end}}</div>
@@ -115,17 +115,17 @@ void handleStatus() {
       <a href="{{.website}}">Explore the next project →</a>
     </aside>
     <div class="commitment"><span>MY NEXT BUILD</span><div></div><small>Target date</small><div class="short"></div></div>
-    <footer class="page-footer"><span>{{.brand_name}} · {{.website}}</span><span>5</span></footer>
+    <footer class="page-footer"><span>{{.brand_name}} · {{.website}}</span><span><span data-page-number></span> / <span data-page-total></span></span></footer>
   </section>
 </article>`;
 
 export const HTML_LEAD_MAGNET_CSS = `
-@page { size: A4; margin: 0; }
+@page { margin: 0; }
 :root { --ink:#172033; --muted:#657086; --line:#dbe3ee; --paper:#fff; --soft:#f3f6fb; --brand:#5b4ce6; --brand2:#17a8c7; --accent:#ff8a3d; }
 * { box-sizing:border-box; }
 body { font-family:Arial,Helvetica,sans-serif; background:#fff; color:var(--ink); }
 .document { margin:0; }
-.page { position:relative; width:210mm; height:297mm; overflow:hidden; padding:17mm 18mm 15mm; background:var(--paper); break-after:page; }
+.page { position:relative; width:var(--document-page-width); height:var(--document-page-height); overflow:hidden; padding:17mm 18mm 15mm; background:var(--paper); break-after:page; }
 .page:last-child { break-after:auto; }
 .cover { padding:16mm 18mm; color:#fff; background:linear-gradient(145deg,#121936 0%,#282264 54%,#3e2c8f 100%); }
 .cover-grid { position:absolute; inset:0; opacity:.17; background-image:linear-gradient(rgba(255,255,255,.18) 1px,transparent 1px),linear-gradient(90deg,rgba(255,255,255,.18) 1px,transparent 1px); background-size:14mm 14mm; mask-image:linear-gradient(to bottom,#000,transparent 72%); }
@@ -161,6 +161,7 @@ pre { margin:4mm 0 6mm; padding:5mm; overflow:hidden; border-radius:4mm; color:#
 `;
 
 export const HTML_LEAD_MAGNET_SETTINGS = {
+  layout_mode: "fixed" as const,
   page_size: "A4",
   margin_top_mm: 0,
   margin_right_mm: 0,

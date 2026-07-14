@@ -656,6 +656,9 @@ func parseDocumentSettings(raw json.RawMessage) (DocumentSettings, error) {
 	if err := json.Unmarshal(raw, &settings); err != nil {
 		return settings, fmt.Errorf("invalid document settings: %w", err)
 	}
+	if settings.LayoutMode != "" && settings.LayoutMode != "flow" && settings.LayoutMode != "fixed" {
+		return settings, errors.New("layout_mode must be flow or fixed")
+	}
 	if settings.PageSize != "" {
 		pageSize, err := resolvePageSize(settings.PageSize, "")
 		if err != nil {
@@ -675,17 +678,22 @@ func parseDocumentSettings(raw json.RawMessage) (DocumentSettings, error) {
 }
 
 func resolveTemplatePageSize(requested string, t *Template, configured string) (string, error) {
-	if strings.TrimSpace(requested) != "" {
-		return resolvePageSize(requested, "")
-	}
 	if t != nil && t.SourceFormat == "html" {
 		settings, err := parseDocumentSettings(t.SettingsJSON)
 		if err != nil {
 			return "", err
 		}
-		if settings.PageSize != "" {
+		// HTML templates created before layout_mode existed were authored as
+		// fixed pages. Keep them safe by requiring an explicit "flow" opt-in.
+		if settings.LayoutMode != "flow" {
+			return resolveHTMLPageSize(settings, requested)
+		}
+		if strings.TrimSpace(requested) == "" && settings.PageSize != "" {
 			return settings.PageSize, nil
 		}
+	}
+	if strings.TrimSpace(requested) != "" {
+		return resolvePageSize(requested, "")
 	}
 	return resolvePageSize("", configured)
 }
