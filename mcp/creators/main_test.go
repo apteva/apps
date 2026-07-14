@@ -51,7 +51,7 @@ func mustMember(t *testing.T, ctx *sdk.AppCtx, pid string, spaceID int64, args m
 func TestManifestAndSpaceScopedSchemas(t *testing.T) {
 	a := &App{}
 	m := a.Manifest()
-	if m.Name != "creators" || m.Version != "0.2.2" {
+	if m.Name != "creators" || m.Version != "0.2.3" {
 		t.Fatalf("manifest = %s %s", m.Name, m.Version)
 	}
 	if len(a.Workers()) != 1 || len(a.EventHandlers()) != 3 || a.EventHandlers()[0].Event != "invoice.paid" {
@@ -294,6 +294,26 @@ func TestMemberCanAccessAttachment(t *testing.T) {
 	member.Status = "comped"
 	if !memberCanAccessAttachment(member, post, att) {
 		t.Fatal("entitled member should access a public attachment on a gated post")
+	}
+}
+
+func TestCRMStateAttributesAreNamespacedByCreatorSpace(t *testing.T) {
+	tierID := int64(7)
+	member := &Member{SpaceID: 42, Status: "active", TierID: &tierID, CurrentPeriodEnd: "2026-08-14T00:00:00Z"}
+	attributes := crmStateAttributes(member)
+	raw, _ := json.Marshal(attributes)
+	got := string(raw)
+	for _, key := range []string{
+		"creators_space_42_status",
+		"creators_space_42_tier_id",
+		"creators_space_42_period_end",
+	} {
+		if !strings.Contains(got, key) {
+			t.Fatalf("missing %q in %s", key, got)
+		}
+	}
+	if strings.Contains(got, `"key":"creators_status"`) {
+		t.Fatalf("unscoped creator state would collide across spaces: %s", got)
 	}
 }
 

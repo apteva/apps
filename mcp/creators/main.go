@@ -2566,21 +2566,51 @@ func syncCRMState(ctx *sdk.AppCtx, pid string, member *Member) error {
 	if ctx == nil || member == nil || member.CRMContactID == nil || *member.CRMContactID <= 0 {
 		return nil
 	}
+	if err := ensureCRMStateAttributes(ctx, pid, member.SpaceID); err != nil {
+		return err
+	}
+	var out map[string]any
+	return ctx.WithProject(pid).PlatformAPI().CallAppResult("crm", "contacts_update", map[string]any{
+		"id":          *member.CRMContactID,
+		"patch":       map[string]any{"attributes": crmStateAttributes(member)},
+		"source":      "creators",
+		"_project_id": pid,
+	}, &out)
+}
+
+func ensureCRMStateAttributes(ctx *sdk.AppCtx, pid string, spaceID int64) error {
+	prefix := fmt.Sprintf("creators_space_%d_", spaceID)
+	definitions := []struct {
+		key   string
+		label string
+	}{
+		{prefix + "status", fmt.Sprintf("Creators space %d status", spaceID)},
+		{prefix + "tier_id", fmt.Sprintf("Creators space %d tier ID", spaceID)},
+		{prefix + "period_end", fmt.Sprintf("Creators space %d period end", spaceID)},
+	}
+	for i, definition := range definitions {
+		var out map[string]any
+		if err := ctx.WithProject(pid).PlatformAPI().CallAppResult("crm", "contacts_define_attribute", map[string]any{
+			"key": definition.key, "label": definition.label, "type": "text",
+			"sort_order": 1000 + i, "_project_id": pid,
+		}, &out); err != nil {
+			return fmt.Errorf("crm.contacts_define_attribute %s: %w", definition.key, err)
+		}
+	}
+	return nil
+}
+
+func crmStateAttributes(member *Member) []any {
 	tierID := ""
 	if member.TierID != nil {
 		tierID = strconv.FormatInt(*member.TierID, 10)
 	}
-	var out map[string]any
-	return ctx.WithProject(pid).PlatformAPI().CallAppResult("crm", "contacts_update", map[string]any{
-		"id": *member.CRMContactID,
-		"patch": map[string]any{"attributes": []any{
-			map[string]any{"key": "creators_status", "value": member.Status, "source": "creators"},
-			map[string]any{"key": "creators_tier_id", "value": tierID, "source": "creators"},
-			map[string]any{"key": "creators_period_end", "value": member.CurrentPeriodEnd, "source": "creators"},
-		}},
-		"source":      "creators",
-		"_project_id": pid,
-	}, &out)
+	prefix := fmt.Sprintf("creators_space_%d_", member.SpaceID)
+	return []any{
+		map[string]any{"key": prefix + "status", "value": member.Status, "source": "creators"},
+		map[string]any{"key": prefix + "tier_id", "value": tierID, "source": "creators"},
+		map[string]any{"key": prefix + "period_end", "value": member.CurrentPeriodEnd, "source": "creators"},
+	}
 }
 
 func sendPostUpdate(ctx *sdk.AppCtx, pid string, spaceID int64, args map[string]any) (map[string]any, error) {
