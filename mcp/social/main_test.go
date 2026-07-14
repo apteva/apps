@@ -908,6 +908,102 @@ func TestPostList_DateRangeRejectsInvalidBounds(t *testing.T) {
 	}
 }
 
+func TestAccountMetrics_OmitsRawAndHonorsHistoryPeriod(t *testing.T) {
+	pf := newRecordingPlatform()
+	pf.executeResponses["get_my_channel"] = &sdk.ExecuteResult{
+		Success: true,
+		Status:  200,
+		Data: json.RawMessage(`{
+			"items":[{
+				"statistics":{"viewCount":"123","subscriberCount":"45","videoCount":"6"},
+				"snippet":{"title":"Test channel","description":"provider-only detail"}
+			}]
+		}`),
+	}
+	ctx := newSocialCtx(t, pf)
+	inserted, err := ctx.AppDB().Exec(
+		`INSERT INTO social_accounts
+		   (project_id, platform, connection_id, external_account_id, display_name, status)
+		 VALUES ('test-proj', 'youtube', 42, 'channel_1', 'Test channel', 'active')`,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	accountID, _ := inserted.LastInsertId()
+
+	now := time.Now().UTC()
+	for _, point := range []struct {
+		age   time.Duration
+		value int64
+	}{
+		{age: 3 * 24 * time.Hour, value: 40},
+		{age: 20 * 24 * time.Hour, value: 30},
+	} {
+		if err := insertSocialMetricPoint(
+			ctx, "test-proj", 0, accountID, 0, 0, "youtube", "account",
+			"followers", "snapshot", now.Add(-point.age).Format(time.RFC3339),
+			point.value, "test", "ok", "",
+		); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	out, err := (&App{}).toolAccountMetrics(ctx, map[string]any{
+		"social_account_id": accountID,
+		"period":            "7d",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	metrics := out.(accountMetricsResult)
+	if len(metrics.Raw) != 0 {
+		t.Fatalf("raw provider data returned without include_raw: %d bytes", len(metrics.Raw))
+	}
+	encoded, err := json.Marshal(metrics)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(encoded), `"raw"`) {
+		t.Fatalf("default response still contains a raw field: %s", encoded)
+	}
+	cutoff := now.Add(-7 * 24 * time.Hour)
+	for _, point := range metrics.Insights["followers"] {
+		parsed, ok := parseMetricPointTime(point.Time)
+		if !ok || parsed.Before(cutoff) {
+			t.Fatalf("period=7d returned out-of-window point: %+v", point)
+		}
+	}
+
+	debugOut, err := (&App{}).toolAccountMetrics(ctx, map[string]any{
+		"social_account_id": accountID,
+		"period":            "7d",
+		"include_raw":       true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	debugMetrics := debugOut.(accountMetricsResult)
+	if len(debugMetrics.Raw) == 0 || !strings.Contains(string(debugMetrics.Raw), "provider-only detail") {
+		t.Fatalf("include_raw did not return sanitized provider detail: %s", debugMetrics.Raw)
+	}
+}
+
+func TestAccountMetrics_RejectsInvalidHistoryPeriod(t *testing.T) {
+	ctx := newSocialCtx(t, nil)
+	for _, period := range []string{"week", "0d", "731d", "-2d"} {
+		out, err := (&App{}).toolAccountMetrics(ctx, map[string]any{
+			"social_account_id": 1,
+			"period":            period,
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if out.(map[string]any)["isError"] != true {
+			t.Fatalf("invalid period %q was accepted: %+v", period, out)
+		}
+	}
+}
+
 func TestAccountCheckAll_DoesNotDeadlock(t *testing.T) {
 	ctx := newSocialCtx(t, nil)
 	ctx.AppDB().SetMaxOpenConns(1)

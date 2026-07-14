@@ -44,7 +44,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: social
 display_name: Social
-version: 0.14.67
+version: 0.14.68
 description: |
   Schedule and publish posts to your social accounts (X, Facebook,
   Instagram, LinkedIn, TikTok, YouTube, Reddit, Pinterest, Threads).
@@ -809,10 +809,12 @@ func (a *App) MCPTools() []sdk.Tool {
 			Name: "account_metrics",
 			Description: "Fetch account-level totals (followers, total likes/videos where available) for one connected social account. " +
 				"Wired today: X/Twitter (followers, following, post count), YouTube (subscriberCount, videoCount), TikTok (follower_count, following_count, likes_count, video_count), Facebook and Instagram where their insights APIs expose compatible metrics. " +
-				"Args: social_account_id, period? (reserved for time-windowed metrics; ignored today).",
+				"Returns normalized totals and stored history for period (default 30d, maximum 730d). Raw provider JSON is omitted by default; set include_raw=true only for explicit debugging or provider-specific detail. " +
+				"Args: social_account_id, period?, include_raw?.",
 			InputSchema: schemaObject(map[string]any{
 				"social_account_id": map[string]any{"type": "integer"},
-				"period":            map[string]any{"type": "string", "description": "Optional time window like \"7d\" or \"30d\". Reserved for future use; ignored today."},
+				"period":            map[string]any{"type": "string", "description": "Stored history window to return, formatted as Nd (for example 7d, 30d, or 365d). Defaults to 30d; maximum 730d."},
+				"include_raw":       map[string]any{"type": "boolean", "description": "Include the sanitized raw provider response for explicit debugging. Defaults to false."},
 			}, []string{"social_account_id"}),
 			Handler: a.toolAccountMetrics,
 		},
@@ -4515,10 +4517,9 @@ func (a *App) toolPostReschedule(ctx *sdk.AppCtx, args map[string]any) (any, err
 // ─── metrics ──────────────────────────────────────────────────────
 //
 // post_metrics(post_id) and account_metrics(social_account_id) fan out
-// to per-platform analytics tools and return fresh numbers. No DB
-// writes, no caching — every call hits the upstream. Suitable for
-// agent-driven one-off queries; agents looping through 100 posts will
-// burn rate limits (mitigation: add a metrics cache later with a TTL).
+// to per-platform analytics tools, persist normalized points, and return
+// fresh numbers plus bounded stored history. Every refresh still hits the
+// upstream, so callers should avoid tight loops across many accounts.
 //
 // Per-target outcome envelope mirrors post_delete's vocabulary:
 //   ok          — upstream returned numbers; metrics populated
@@ -5441,6 +5442,11 @@ func mergeInsightSeries(dst, src insightSeries) {
 
 const analyticsSnapshotMinInterval = 4 * time.Hour
 
+const (
+	defaultAccountMetricsHistoryDays = 30
+	maxAccountMetricsHistoryDays     = 730
+)
+
 func (a *App) runAnalyticsCollector(ctx context.Context, app *sdk.AppCtx) error {
 	pid := projectScope(app)
 	if pid == "" {
@@ -5476,7 +5482,7 @@ func (a *App) runAnalyticsCollector(ctx context.Context, app *sdk.AppCtx) error 
 		if !due {
 			continue
 		}
-		res := a.collectAndStoreAccountMetrics(app, pid, id, "day")
+		res := a.collectAndStoreAccountMetrics(app, pid, id, defaultAccountMetricsHistoryDays)
 		if res.Status == "failed" {
 			app.Logger().Warn("analytics_collector: account metrics failed",
 				"project", pid, "account", id, "platform", res.Platform, "err", res.Error)
@@ -5506,21 +5512,23 @@ func accountAnalyticsDue(ctx *sdk.AppCtx, pid string, accountID int64, minInterv
 	return time.Since(t) >= minInterval, nil
 }
 
-func (a *App) collectAndStoreAccountMetrics(ctx *sdk.AppCtx, pid string, accountID int64, period string) accountMetricsResult {
-	res := a.getAccountMetrics(ctx, pid, accountID, period)
+func (a *App) collectAndStoreAccountMetrics(ctx *sdk.AppCtx, pid string, accountID int64, historyDays int) accountMetricsResult {
+	// Provider insight endpoints use daily granularity. historyDays only
+	// controls how much persisted history is returned to the caller.
+	res := a.getAccountMetrics(ctx, pid, accountID, "day")
 	res.Raw = sanitizeRawJSON(res.Raw)
 	if err := a.persistAccountMetrics(ctx, pid, res); err != nil {
 		ctx.Logger().Warn("account_metrics: persist failed",
 			"project", pid, "account", accountID, "platform", res.Platform, "err", err)
 	}
-	if history := loadAccountMetricHistory(ctx, pid, accountID, 730); len(history) > 0 {
+	if history := loadAccountMetricHistory(ctx, pid, accountID, historyDays); len(history) > 0 {
 		res.Insights = history
 		res.HistorySource = "social_metric_points"
 	}
 	return res
 }
 
-func (a *App) storedAccountMetrics(ctx *sdk.AppCtx, pid string, accountID int64) accountMetricsResult {
+func (a *App) storedAccountMetrics(ctx *sdk.AppCtx, pid string, accountID int64, historyDays int) accountMetricsResult {
 	var platform, displayName string
 	var profileID int64
 	err := ctx.AppDB().QueryRow(
@@ -5541,7 +5549,7 @@ func (a *App) storedAccountMetrics(ctx *sdk.AppCtx, pid string, accountID int64)
 		Platform:        platform,
 		DisplayName:     displayName,
 	}
-	history := loadAccountMetricHistory(ctx, pid, accountID, 730)
+	history := loadAccountMetricHistory(ctx, pid, accountID, historyDays)
 	if len(history) == 0 {
 		out.Status = "unsupported"
 		out.Reason = "No stored analytics yet. Click Refresh metrics to collect fresh metrics."
@@ -5930,10 +5938,30 @@ func (a *App) toolAccountMetrics(ctx *sdk.AppCtx, args map[string]any) (any, err
 	if id <= 0 {
 		return mcpError("social_account_id required"), nil
 	}
-	period, _ := args["period"].(string) // currently unused; reserved for future
-	_ = period
-	res := a.collectAndStoreAccountMetrics(ctx, projectScope(ctx, args), id, period)
+	historyDays, err := accountMetricsHistoryDays(toString(args["period"]), defaultAccountMetricsHistoryDays)
+	if err != nil {
+		return mcpError(err.Error()), nil
+	}
+	res := a.collectAndStoreAccountMetrics(ctx, projectScope(ctx, args), id, historyDays)
+	if !boolArg(args, "include_raw", false) {
+		res.Raw = nil
+	}
 	return res, nil
+}
+
+func accountMetricsHistoryDays(period string, defaultDays int) (int, error) {
+	period = strings.ToLower(strings.TrimSpace(period))
+	if period == "" {
+		return defaultDays, nil
+	}
+	if !strings.HasSuffix(period, "d") {
+		return 0, fmt.Errorf("invalid period: expected Nd, for example 7d or 30d")
+	}
+	days, err := strconv.Atoi(strings.TrimSuffix(period, "d"))
+	if err != nil || days < 1 || days > maxAccountMetricsHistoryDays {
+		return 0, fmt.Errorf("invalid period: days must be between 1 and %d", maxAccountMetricsHistoryDays)
+	}
+	return days, nil
 }
 
 // ─── import ───────────────────────────────────────────────────────
@@ -7709,10 +7737,20 @@ func (a *App) handleAccountsItem(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if len(parts) == 2 && parts[1] == "metrics" && r.Method == http.MethodGet {
-		args := scopedQueryArgs(r, "period", "refresh")
+		args := scopedQueryArgs(r, "period", "refresh", "include_raw")
+		if strings.TrimSpace(toString(args["period"])) == "" {
+			// The panel charts the complete stored history. MCP callers use
+			// the smaller account_metrics default unless they opt in.
+			args["period"] = fmt.Sprintf("%dd", maxAccountMetricsHistoryDays)
+		}
 		refresh := strings.TrimSpace(strings.ToLower(toString(args["refresh"])))
 		if refresh == "0" || refresh == "false" || refresh == "stored" {
-			out := a.storedAccountMetrics(globalCtx, projectScope(globalCtx, args), id)
+			historyDays, err := accountMetricsHistoryDays(toString(args["period"]), maxAccountMetricsHistoryDays)
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusBadRequest)
+				return
+			}
+			out := a.storedAccountMetrics(globalCtx, projectScope(globalCtx, args), id, historyDays)
 			writeJSON(w, out)
 			return
 		}
