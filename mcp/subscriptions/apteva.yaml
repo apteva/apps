@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: subscriptions
 display_name: Subscriptions
-version: 0.3.1
+version: 0.4.0
 description: |
   Generic recurring-commerce lifecycle for SaaS, physical product
   subscriptions, and services. Subscriptions owns recurrence, status,
@@ -15,6 +15,8 @@ description: |
   v0.3.1 adds project-scoped, durable trial-end processing that creates
   pending subscription cycles and publishes subscription.cycle_due for
   an external commerce workflow to collect.
+  v0.4.0 stores immutable discount applications from external eligibility
+  engines and applies once, repeating, or forever pricing by billing cycle.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/subscriptions
@@ -31,6 +33,7 @@ requires:
   apps:
     - name: catalog
       optional: false
+      version: ">=0.2.0"
     - name: billing
       optional: true
     - name: orders
@@ -61,6 +64,10 @@ provides:
       description: Subscription ended.
     - name: subscription.item.created
       description: A subscription item was created.
+    - name: subscription.discount.created
+      description: An immutable discount application was attached to a subscription item.
+    - name: subscription.discount.cancelled
+      description: A discount application was stopped for future cycles.
     - name: subscription.usage.recorded
       description: Metered subscription usage was recorded.
     - name: subscription.invoice.requested
@@ -88,6 +95,12 @@ provides:
       description: Patch item status, quantity, amount, included usage, unit size, or metadata.
     - name: subscription_items_cancel
       description: Cancel a subscription item.
+    - name: subscription_discounts_create
+      description: Attach an immutable discount application from an external eligibility source to a subscription item.
+    - name: subscription_discounts_list
+      description: List discount applications attached to a subscription.
+    - name: subscription_discounts_cancel
+      description: Stop a discount from applying to future cycles while preserving historical invoice retries.
     - name: subscriptions_usage_record
       description: Record idempotent metered usage against a subscription item.
     - name: subscriptions_usage_summary

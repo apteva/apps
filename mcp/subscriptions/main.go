@@ -21,8 +21,8 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: subscriptions
 display_name: Subscriptions
-version: 0.3.1
-description: Generic recurring-commerce lifecycle, durable trial-end cycle creation, subscription items, and metered usage for SaaS, physical subscriptions, and services.
+version: 0.4.0
+description: Generic recurring-commerce lifecycle, durable trial-end cycle creation, immutable discount applications, subscription items, and metered usage for SaaS, physical subscriptions, and services.
 author: Apteva
 scopes: [project, global]
 requires:
@@ -32,6 +32,7 @@ requires:
   apps:
     - name: catalog
       optional: false
+      version: ">=0.2.0"
     - name: billing
       optional: true
     - name: orders
@@ -61,6 +62,10 @@ provides:
       description: Subscription ended.
     - name: subscription.item.created
       description: A subscription item was created.
+    - name: subscription.discount.created
+      description: An immutable discount application was attached to a subscription item.
+    - name: subscription.discount.cancelled
+      description: A discount application was stopped for future cycles.
     - name: subscription.usage.recorded
       description: Metered subscription usage was recorded.
     - name: subscription.invoice.requested
@@ -99,7 +104,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		return errors.New("subscriptions requires a db block")
 	}
 	globalCtx = ctx
-	ctx.Logger().Info("subscriptions mounted", "version", "0.3.1", "scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
+	ctx.Logger().Info("subscriptions mounted", "version", "0.4.0", "scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
 	return nil
 }
 
@@ -130,14 +135,14 @@ func (a *App) HTTPRoutes() []sdk.Route {
 }
 
 func (a *App) MCPTools() []sdk.Tool {
-	return []sdk.Tool{
+	tools := []sdk.Tool{
 		{Name: "subscriptions_create", Description: "Create a subscription.", InputSchema: schemaObject(map[string]any{
 			"customer_id": map[string]any{"type": "integer"}, "customer_email": map[string]any{"type": "string"}, "customer_name": map[string]any{"type": "string"},
 			"trial_end_behavior": map[string]any{"type": "string"},
 			"kind":               map[string]any{"type": "string"}, "status": map[string]any{"type": "string"}, "billing_provider": map[string]any{"type": "string"}, "external_id": map[string]any{"type": "string"},
 			"currency": map[string]any{"type": "string"}, "interval": map[string]any{"type": "string"}, "interval_count": map[string]any{"type": "integer"}, "quantity": map[string]any{"type": "number"},
 			"trial_start": map[string]any{"type": "string"}, "trial_end": map[string]any{"type": "string"}, "current_period_start": map[string]any{"type": "string"}, "current_period_end": map[string]any{"type": "string"}, "next_renewal_at": map[string]any{"type": "string"},
-			"source": map[string]any{"type": "string"}, "source_ref": map[string]any{"type": "string"}, "items": map[string]any{"type": "array"}, "metadata": map[string]any{"type": "object"},
+			"source": map[string]any{"type": "string"}, "source_ref": map[string]any{"type": "string"}, "items": map[string]any{"type": "array"}, "discounts": map[string]any{"type": "array"}, "metadata": map[string]any{"type": "object"},
 		}, []string{"items"}), Handler: a.toolSubscriptionsCreate},
 		{Name: "subscriptions_get", Description: "Fetch one subscription.", InputSchema: schemaObject(map[string]any{"id": map[string]any{"type": "integer"}}, []string{"id"}), Handler: a.toolSubscriptionsGet},
 		{Name: "subscriptions_search", Description: "Search subscriptions.", InputSchema: schemaObject(map[string]any{
@@ -165,10 +170,10 @@ func (a *App) MCPTools() []sdk.Tool {
 			"subscription_id": map[string]any{"type": "integer"}, "subscription_item_id": map[string]any{"type": "integer"}, "meter_key": map[string]any{"type": "string"}, "period_start": map[string]any{"type": "string"}, "period_end": map[string]any{"type": "string"},
 		}, []string{"period_start", "period_end"}), Handler: a.toolSubscriptionsUsageSummary},
 		{Name: "subscriptions_invoice_prepare", Description: "Prepare generic Billing line items for a subscription period, including flat items and metered overage.", InputSchema: schemaObject(map[string]any{
-			"subscription_id": map[string]any{"type": "integer"}, "period_start": map[string]any{"type": "string"}, "period_end": map[string]any{"type": "string"}, "include_flat": map[string]any{"type": "boolean"}, "include_metered": map[string]any{"type": "boolean"}, "invoice_zero_usage": map[string]any{"type": "boolean"},
+			"subscription_id": map[string]any{"type": "integer"}, "cycle_id": map[string]any{"type": "integer"}, "period_start": map[string]any{"type": "string"}, "period_end": map[string]any{"type": "string"}, "include_flat": map[string]any{"type": "boolean"}, "include_metered": map[string]any{"type": "boolean"}, "invoice_zero_usage": map[string]any{"type": "boolean"},
 		}, []string{"subscription_id", "period_start", "period_end"}), Handler: a.toolSubscriptionsInvoicePrepare},
 		{Name: "subscriptions_invoice_create", Description: "Legacy convenience wrapper that sends prepared period lines to Billing; new orchestrators should prepare and call Billing separately.", InputSchema: schemaObject(map[string]any{
-			"subscription_id": map[string]any{"type": "integer"}, "period_start": map[string]any{"type": "string"}, "period_end": map[string]any{"type": "string"}, "provider": map[string]any{"type": "string"}, "due_date": map[string]any{"type": "string"}, "notes": map[string]any{"type": "string"}, "finalize": map[string]any{"type": "boolean"}, "include_flat": map[string]any{"type": "boolean"}, "include_metered": map[string]any{"type": "boolean"}, "invoice_zero_usage": map[string]any{"type": "boolean"}, "metadata": map[string]any{"type": "object"},
+			"subscription_id": map[string]any{"type": "integer"}, "cycle_id": map[string]any{"type": "integer"}, "period_start": map[string]any{"type": "string"}, "period_end": map[string]any{"type": "string"}, "provider": map[string]any{"type": "string"}, "due_date": map[string]any{"type": "string"}, "notes": map[string]any{"type": "string"}, "finalize": map[string]any{"type": "boolean"}, "include_flat": map[string]any{"type": "boolean"}, "include_metered": map[string]any{"type": "boolean"}, "invoice_zero_usage": map[string]any{"type": "boolean"}, "metadata": map[string]any{"type": "object"},
 		}, []string{"subscription_id", "period_start", "period_end"}), Handler: a.toolSubscriptionsInvoiceCreate},
 		{Name: "subscription_cycles_create", Description: "Create a renewal cycle.", InputSchema: schemaObject(map[string]any{
 			"subscription_id": map[string]any{"type": "integer"}, "period_start": map[string]any{"type": "string"}, "period_end": map[string]any{"type": "string"}, "due_at": map[string]any{"type": "string"}, "invoice_id": map[string]any{"type": "integer"}, "order_id": map[string]any{"type": "integer"}, "entitlement_grant_id": map[string]any{"type": "integer"}, "payment_status": map[string]any{"type": "string"}, "fulfillment_status": map[string]any{"type": "string"}, "metadata": map[string]any{"type": "object"},
@@ -177,41 +182,43 @@ func (a *App) MCPTools() []sdk.Tool {
 		{Name: "subscription_cycles_list", Description: "List cycles.", InputSchema: schemaObject(map[string]any{"subscription_id": map[string]any{"type": "integer"}, "limit": map[string]any{"type": "integer"}}, []string{"subscription_id"}), Handler: a.toolCyclesList},
 		{Name: "subscription_events_list", Description: "List subscription events.", InputSchema: schemaObject(map[string]any{"subscription_id": map[string]any{"type": "integer"}, "limit": map[string]any{"type": "integer"}}, []string{"subscription_id"}), Handler: a.toolEventsList},
 	}
+	return append(tools, subscriptionDiscountTools(a)...)
 }
 
 func main() { sdk.Run(&App{}) }
 
 type Subscription struct {
-	ID                 int64           `json:"id"`
-	ProjectID          string          `json:"project_id"`
-	CustomerID         *int64          `json:"customer_id,omitempty"`
-	CustomerEmail      string          `json:"customer_email,omitempty"`
-	CustomerName       string          `json:"customer_name,omitempty"`
-	Kind               string          `json:"kind"`
-	Status             string          `json:"status"`
-	BillingProvider    string          `json:"billing_provider"`
-	ExternalID         string          `json:"external_id,omitempty"`
-	Currency           string          `json:"currency"`
-	Interval           string          `json:"interval"`
-	IntervalCount      int64           `json:"interval_count"`
-	Quantity           float64         `json:"quantity"`
-	TrialStart         string          `json:"trial_start,omitempty"`
-	TrialEnd           string          `json:"trial_end,omitempty"`
-	TrialEndBehavior   string          `json:"trial_end_behavior"`
-	CurrentPeriodStart string          `json:"current_period_start,omitempty"`
-	CurrentPeriodEnd   string          `json:"current_period_end,omitempty"`
-	NextRenewalAt      string          `json:"next_renewal_at,omitempty"`
-	CancelAt           string          `json:"cancel_at,omitempty"`
-	CancelledAt        string          `json:"cancelled_at,omitempty"`
-	EndedAt            string          `json:"ended_at,omitempty"`
-	Source             string          `json:"source"`
-	SourceRef          string          `json:"source_ref,omitempty"`
-	Metadata           json.RawMessage `json:"metadata,omitempty"`
-	CreatedAt          string          `json:"created_at"`
-	UpdatedAt          string          `json:"updated_at"`
-	Items              []*SubItem      `json:"items,omitempty"`
-	Cycles             []*Cycle        `json:"cycles,omitempty"`
-	Events             []*Event        `json:"events,omitempty"`
+	ID                 int64                   `json:"id"`
+	ProjectID          string                  `json:"project_id"`
+	CustomerID         *int64                  `json:"customer_id,omitempty"`
+	CustomerEmail      string                  `json:"customer_email,omitempty"`
+	CustomerName       string                  `json:"customer_name,omitempty"`
+	Kind               string                  `json:"kind"`
+	Status             string                  `json:"status"`
+	BillingProvider    string                  `json:"billing_provider"`
+	ExternalID         string                  `json:"external_id,omitempty"`
+	Currency           string                  `json:"currency"`
+	Interval           string                  `json:"interval"`
+	IntervalCount      int64                   `json:"interval_count"`
+	Quantity           float64                 `json:"quantity"`
+	TrialStart         string                  `json:"trial_start,omitempty"`
+	TrialEnd           string                  `json:"trial_end,omitempty"`
+	TrialEndBehavior   string                  `json:"trial_end_behavior"`
+	CurrentPeriodStart string                  `json:"current_period_start,omitempty"`
+	CurrentPeriodEnd   string                  `json:"current_period_end,omitempty"`
+	NextRenewalAt      string                  `json:"next_renewal_at,omitempty"`
+	CancelAt           string                  `json:"cancel_at,omitempty"`
+	CancelledAt        string                  `json:"cancelled_at,omitempty"`
+	EndedAt            string                  `json:"ended_at,omitempty"`
+	Source             string                  `json:"source"`
+	SourceRef          string                  `json:"source_ref,omitempty"`
+	Metadata           json.RawMessage         `json:"metadata,omitempty"`
+	CreatedAt          string                  `json:"created_at"`
+	UpdatedAt          string                  `json:"updated_at"`
+	Items              []*SubItem              `json:"items,omitempty"`
+	Cycles             []*Cycle                `json:"cycles,omitempty"`
+	Events             []*Event                `json:"events,omitempty"`
+	Discounts          []*SubscriptionDiscount `json:"discounts,omitempty"`
 }
 
 type SubItem struct {
@@ -280,6 +287,7 @@ type Cycle struct {
 	PaymentStatus      string          `json:"payment_status"`
 	FulfillmentStatus  string          `json:"fulfillment_status"`
 	SubtotalCents      int64           `json:"subtotal_cents"`
+	DiscountCents      int64           `json:"discount_cents"`
 	TaxCents           int64           `json:"tax_cents"`
 	ShippingCents      int64           `json:"shipping_cents"`
 	TotalCents         int64           `json:"total_cents"`
@@ -338,6 +346,9 @@ func (a *App) toolSubscriptionsCreate(ctx *sdk.AppCtx, args map[string]any) (any
 		return nil, err
 	}
 	ctx.Emit("subscription.created", map[string]any{"subscription_id": sub.ID, "kind": sub.Kind, "status": sub.Status})
+	for _, discount := range sub.Discounts {
+		ctx.Emit("subscription.discount.created", map[string]any{"subscription_id": sub.ID, "subscription_item_id": discount.SubscriptionItemID, "discount_id": discount.ID})
+	}
 	return map[string]any{"subscription": sub}, nil
 }
 
@@ -694,6 +705,10 @@ func dbSubscriptionCreate(ctx *sdk.AppCtx, pid string, args map[string]any) (*Su
 	if len(items) == 0 {
 		return nil, errors.New("at least one valid item required")
 	}
+	discountInputs, err := normalizeDiscountInputs(arrayArg(args, "discounts"))
+	if err != nil {
+		return nil, err
+	}
 	tx, err := ctx.AppDB().Begin()
 	if err != nil {
 		return nil, err
@@ -717,11 +732,12 @@ func dbSubscriptionCreate(ctx *sdk.AppCtx, pid string, args map[string]any) (*Su
 	if err != nil {
 		return nil, err
 	}
+	createdItems := make([]*SubItem, 0, len(items))
 	for i, it := range items {
 		if err := validateItem(it); err != nil {
 			return nil, err
 		}
-		_, err := tx.Exec(
+		result, err := tx.Exec(
 			`INSERT INTO subscription_items
 			   (subscription_id, position, catalog_product_id, catalog_price_id, sku, title, quantity, unit_amount_cents, currency,
 			    billing_scheme, meter_key, included_units, unit_size, status, metadata)
@@ -732,6 +748,18 @@ func dbSubscriptionCreate(ctx *sdk.AppCtx, pid string, args map[string]any) (*Su
 		if err != nil {
 			return nil, err
 		}
+		itemID, err := result.LastInsertId()
+		if err != nil {
+			return nil, err
+		}
+		createdItems = append(createdItems, &SubItem{
+			ID: itemID, SubscriptionID: id, Position: i, CatalogProductID: it.CatalogProductID, CatalogPriceID: it.CatalogPriceID,
+			SKU: it.SKU, Title: it.Title, Quantity: it.Quantity, UnitAmountCents: it.UnitAmountCents, Currency: strings.ToUpper(firstNonEmpty(it.Currency, currency)),
+			BillingScheme: it.BillingScheme, MeterKey: it.MeterKey, IncludedUnits: it.IncludedUnits, UnitSize: it.UnitSize, Status: it.Status,
+		})
+	}
+	if err := attachInitialDiscountsTx(tx, pid, id, createdItems, discountInputs); err != nil {
+		return nil, err
 	}
 	if err := writeEventTx(tx, pid, id, "system", "subscription.created", map[string]any{"kind": kind, "status": status}); err != nil {
 		return nil, err
@@ -790,6 +818,7 @@ func dbSubscriptionGet(db *sql.DB, pid string, id int64, nested bool) (*Subscrip
 	}
 	if nested {
 		s.Items, _ = dbItemsList(db, id)
+		s.Discounts, _ = dbSubscriptionDiscountsList(db, pid, id, "")
 		s.Cycles, _ = dbCyclesList(db, pid, id, 50)
 		s.Events, _ = dbEventsList(db, pid, id, 50)
 	}
@@ -1086,7 +1115,8 @@ func dbCompleteLifecycleAttempt(ctx *sdk.AppCtx, attempt *LifecycleAttempt, sub 
 		ctx.Emit("subscription.cycle_due", map[string]any{
 			"subscription_id": updated.ID, "cycle_id": cycle.ID, "customer_id": updated.CustomerID,
 			"customer_email": updated.CustomerEmail, "kind": updated.Kind, "currency": cycle.Currency,
-			"total_cents": cycle.TotalCents, "period_start": cycle.PeriodStart, "period_end": cycle.PeriodEnd,
+			"subtotal_cents": cycle.SubtotalCents, "discount_cents": cycle.DiscountCents, "total_cents": cycle.TotalCents,
+			"period_start": cycle.PeriodStart, "period_end": cycle.PeriodEnd,
 			"source": updated.Source, "source_ref": updated.SourceRef, "metadata": mapFromAny(updated.Metadata),
 		})
 	}
@@ -1438,6 +1468,10 @@ func prepareSubscriptionInvoice(db *sql.DB, pid string, args map[string]any) (ma
 	if err != nil {
 		return nil, err
 	}
+	cycleNumber, err := resolveInvoiceCycleNumber(db, pid, sub.ID, args, start, end)
+	if err != nil {
+		return nil, err
+	}
 	includeFlat := true
 	if _, ok := args["include_flat"]; ok {
 		includeFlat = boolArg(args, "include_flat")
@@ -1448,14 +1482,19 @@ func prepareSubscriptionInvoice(db *sql.DB, pid string, args map[string]any) (ma
 	}
 	lines := []any{}
 	summaries := []any{}
+	appliedDiscounts := []any{}
+	baseSubtotal := int64(0)
+	discountTotal := int64(0)
+	discounts := discountsByItem(sub.Discounts)
 	for _, item := range sub.Items {
 		if item.Status != "active" {
 			continue
 		}
 		if item.BillingScheme == "flat" && includeFlat {
+			quantity := item.Quantity
 			line := map[string]any{
 				"description":      item.Title,
-				"quantity":         item.Quantity,
+				"quantity":         quantity,
 				"unit_price_cents": item.UnitAmountCents,
 				"price_id":         derefInt64(item.CatalogPriceID),
 				"product_id":       derefInt64(item.CatalogProductID),
@@ -1467,6 +1506,25 @@ func prepareSubscriptionInvoice(db *sql.DB, pid string, args map[string]any) (ma
 					"period_start":         start.Format(time.RFC3339),
 					"period_end":           end.Format(time.RFC3339),
 				},
+			}
+			baseAmount := int64(math.Round(float64(item.UnitAmountCents) * quantity))
+			baseSubtotal += baseAmount
+			if discount := discountForItemCycle(discounts, item.ID, cycleNumber); discount != nil {
+				amount, applicationNumber, applies := calculateDiscount(discount, quantity, item.UnitAmountCents, item.Currency, cycleNumber)
+				if applies {
+					discountTotal += amount
+					line["quantity"] = float64(1)
+					line["unit_price_cents"] = baseAmount - amount
+					metadata := line["metadata"].(map[string]any)
+					metadata["original_quantity"] = quantity
+					metadata["original_unit_price_cents"] = item.UnitAmountCents
+					metadata["discount_id"] = discount.ID
+					metadata["discount_source_app"] = discount.SourceApp
+					metadata["discount_source_ref"] = discount.SourceRef
+					metadata["discount_application_number"] = applicationNumber
+					metadata["discount_cents"] = amount
+					appliedDiscounts = append(appliedDiscounts, preparedDiscountSummary(discount, item.ID, cycleNumber, applicationNumber, baseAmount, amount))
+				}
 			}
 			lines = append(lines, line)
 			continue
@@ -1502,9 +1560,33 @@ func prepareSubscriptionInvoice(db *sql.DB, pid string, args map[string]any) (ma
 				"unit_size":            item.UnitSize,
 			},
 		}
+		baseAmount := int64(math.Round(float64(item.UnitAmountCents) * summary.QuantityUnits))
+		baseSubtotal += baseAmount
+		if discount := discountForItemCycle(discounts, item.ID, cycleNumber); discount != nil {
+			amount, applicationNumber, applies := calculateDiscount(discount, summary.QuantityUnits, item.UnitAmountCents, item.Currency, cycleNumber)
+			if applies {
+				discountTotal += amount
+				line["quantity"] = float64(1)
+				line["unit_price_cents"] = baseAmount - amount
+				metadata := line["metadata"].(map[string]any)
+				metadata["original_quantity"] = summary.QuantityUnits
+				metadata["original_unit_price_cents"] = item.UnitAmountCents
+				metadata["discount_id"] = discount.ID
+				metadata["discount_source_app"] = discount.SourceApp
+				metadata["discount_source_ref"] = discount.SourceRef
+				metadata["discount_application_number"] = applicationNumber
+				metadata["discount_cents"] = amount
+				appliedDiscounts = append(appliedDiscounts, preparedDiscountSummary(discount, item.ID, cycleNumber, applicationNumber, baseAmount, amount))
+			}
+		}
 		lines = append(lines, line)
 	}
-	return map[string]any{"subscription": sub, "line_items": lines, "usage_summaries": summaries, "period_start": start.Format(time.RFC3339), "period_end": end.Format(time.RFC3339), "currency": sub.Currency}, nil
+	return map[string]any{
+		"subscription": sub, "line_items": lines, "usage_summaries": summaries,
+		"period_start": start.Format(time.RFC3339), "period_end": end.Format(time.RFC3339), "currency": sub.Currency,
+		"cycle_number": cycleNumber, "base_subtotal_cents": baseSubtotal, "discount_cents": discountTotal,
+		"total_cents": baseSubtotal - discountTotal, "applied_discounts": appliedDiscounts,
+	}, nil
 }
 
 func callBillingInvoiceCreate(ctx *sdk.AppCtx, args map[string]any, finalize bool) (map[string]any, error) {
@@ -1528,14 +1610,23 @@ func dbCycleCreate(db *sql.DB, pid string, args map[string]any) (*Cycle, *Subscr
 	next := int64(1)
 	_ = db.QueryRow(`SELECT COALESCE(MAX(cycle_number),0)+1 FROM subscription_cycles WHERE subscription_id=?`, subID).Scan(&next)
 	subtotal := int64(0)
+	discountTotal := int64(0)
+	discounts := discountsByItem(sub.Discounts)
 	for _, it := range sub.Items {
 		if it.Status == "active" && it.BillingScheme == "flat" {
-			subtotal += int64(float64(it.UnitAmountCents) * it.Quantity)
+			baseAmount := int64(math.Round(float64(it.UnitAmountCents) * it.Quantity))
+			subtotal += baseAmount
+			if discount := discountForItemCycle(discounts, it.ID, next); discount != nil {
+				amount, _, applies := calculateDiscount(discount, it.Quantity, it.UnitAmountCents, it.Currency, next)
+				if applies {
+					discountTotal += amount
+				}
+			}
 		}
 	}
 	tax := int64Arg(args, "tax_cents")
 	ship := int64Arg(args, "shipping_cents")
-	total := firstNonZero(int64Arg(args, "total_cents"), subtotal+tax+ship)
+	total := firstNonZero(int64Arg(args, "total_cents"), subtotal-discountTotal+tax+ship)
 	var id int64
 	tx, err := db.Begin()
 	if err != nil {
@@ -1546,13 +1637,13 @@ func dbCycleCreate(db *sql.DB, pid string, args map[string]any) (*Cycle, *Subscr
 		`INSERT INTO subscription_cycles
 		   (project_id, subscription_id, cycle_number, period_start, period_end, due_at,
 		    invoice_id, order_id, entitlement_grant_id, payment_status, fulfillment_status,
-		    subtotal_cents, tax_cents, shipping_cents, total_cents, currency, metadata, paid_at,lifecycle_attempt_id)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		    subtotal_cents, discount_cents, tax_cents, shipping_cents, total_cents, currency, metadata, paid_at,lifecycle_attempt_id)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		 RETURNING id`,
 		pid, subID, next, strArg(args, "period_start"), strArg(args, "period_end"), nullStr(strArg(args, "due_at")),
 		nullableInt64(int64Arg(args, "invoice_id")), nullableInt64(int64Arg(args, "order_id")), nullableInt64(int64Arg(args, "entitlement_grant_id")),
 		firstNonEmpty(strArg(args, "payment_status"), "pending"), firstNonEmpty(strArg(args, "fulfillment_status"), "none"),
-		subtotal, tax, ship, total, sub.Currency, jsonOrEmpty(args["metadata"], "{}"),
+		subtotal, discountTotal, tax, ship, total, sub.Currency, jsonOrEmpty(args["metadata"], "{}"),
 		nullableTime(strArg(args, "payment_status") == "paid", time.Now().UTC().Format(time.RFC3339)),
 		nullableInt64(int64Arg(args, "lifecycle_attempt_id")),
 	).Scan(&id)
@@ -1783,7 +1874,7 @@ func scanUsage(row rowScanner) (*UsageRecord, error) {
 }
 
 func cycleSelect() string {
-	return `SELECT id, project_id, subscription_id, cycle_number, period_start, period_end, due_at, invoice_id, order_id, entitlement_grant_id, payment_status, fulfillment_status, subtotal_cents, tax_cents, shipping_cents, total_cents, currency, metadata, created_at, updated_at, paid_at, completed_at FROM subscription_cycles`
+	return `SELECT id, project_id, subscription_id, cycle_number, period_start, period_end, due_at, invoice_id, order_id, entitlement_grant_id, payment_status, fulfillment_status, subtotal_cents, discount_cents, tax_cents, shipping_cents, total_cents, currency, metadata, created_at, updated_at, paid_at, completed_at FROM subscription_cycles`
 }
 
 func scanCycle(row rowScanner) (*Cycle, error) {
@@ -1791,7 +1882,7 @@ func scanCycle(row rowScanner) (*Cycle, error) {
 	var due, paid, completed sql.NullString
 	var inv, ord, grant sql.NullInt64
 	var meta string
-	err := row.Scan(&c.ID, &c.ProjectID, &c.SubscriptionID, &c.CycleNumber, &c.PeriodStart, &c.PeriodEnd, &due, &inv, &ord, &grant, &c.PaymentStatus, &c.FulfillmentStatus, &c.SubtotalCents, &c.TaxCents, &c.ShippingCents, &c.TotalCents, &c.Currency, &meta, &c.CreatedAt, &c.UpdatedAt, &paid, &completed)
+	err := row.Scan(&c.ID, &c.ProjectID, &c.SubscriptionID, &c.CycleNumber, &c.PeriodStart, &c.PeriodEnd, &due, &inv, &ord, &grant, &c.PaymentStatus, &c.FulfillmentStatus, &c.SubtotalCents, &c.DiscountCents, &c.TaxCents, &c.ShippingCents, &c.TotalCents, &c.Currency, &meta, &c.CreatedAt, &c.UpdatedAt, &paid, &completed)
 	if err != nil {
 		return nil, err
 	}
