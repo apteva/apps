@@ -455,7 +455,35 @@ func (c *storageClient) UploadRenderFile(ctx context.Context, projectID, folder,
 		return 0, fmt.Errorf("storage render upload sha mismatch: local=%s stored=%s file_id=%d",
 			sha, file.SHA256, file.ID)
 	}
+	if err := validateRenderUploadDestination(file, folder, filename); err != nil {
+		return 0, err
+	}
 	return file.ID, nil
+}
+
+// validateRenderUploadDestination prevents a SHA-only Storage dedupe result
+// from masquerading as a newly-created render output. Render callers asked
+// for a specific filename and folder; returning an older record elsewhere is
+// not success even when the bytes are identical.
+func validateRenderUploadDestination(file *StorageFile, folder, filename string) error {
+	if file == nil {
+		return errors.New("storage returned no file for render upload")
+	}
+	expectedFolder := normalizeFolderFilter(folder)
+	if expectedFolder == "" {
+		expectedFolder = "/"
+	}
+	actualFolder := normalizeFolderFilter(file.Folder)
+	if actualFolder == "" {
+		actualFolder = "/"
+	}
+	if file.Name != filename || actualFolder != expectedFolder {
+		return fmt.Errorf(
+			"storage returned render file_id=%d at %s%s; expected %s%s; refusing to mark render complete",
+			file.ID, actualFolder, file.Name, expectedFolder, filename,
+		)
+	}
+	return nil
 }
 
 func (c *storageClient) uploadFileChunked(ctx context.Context, projectID, folder, filename, contentType, path string, size int64, sha string) (*StorageFile, error) {

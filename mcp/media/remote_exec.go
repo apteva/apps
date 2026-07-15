@@ -233,6 +233,13 @@ func (e *remoteExecutor) Execute(ctx context.Context, app *sdk.AppCtx, row *Rend
 	if err != nil {
 		return 0, fmt.Errorf("parse remote result: %w (output=%s)", err, truncate(out, 500))
 	}
+	uploaded, err := sc.GetFile(ctx, row.ProjectID, res.FileID)
+	if err != nil {
+		return 0, fmt.Errorf("verify remote render destination: %w", err)
+	}
+	if err := validateRenderUploadDestination(uploaded, folder, plan.Filename); err != nil {
+		return 0, err
+	}
 	log.Info("remote render complete",
 		"id", row.ID, "file_id", res.FileID, "size", res.Size, "sha256", res.SHA256)
 	return res.FileID, nil

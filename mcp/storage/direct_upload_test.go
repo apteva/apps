@@ -176,13 +176,13 @@ func TestDirectUpload_InitDedupShortCircuit(t *testing.T) {
 	globalBackend = stub
 
 	// Pre-seed an existing files row with a known sha. Init for the
-	// same sha must skip presigning entirely and return that row.
+	// same sha at the same destination must skip presigning.
 	sha := repeat64Hex("c")
 	if _, err := ctx.AppDB().Exec(`
 		INSERT INTO files (project_id, name, folder, storage_key, content_type,
 		                   size_bytes, sha256, visibility)
 		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		"p1", "existing.mp4", "/", "old-key.mp4", "video/mp4", 999, sha, "private",
+		"p1", "clip.mp4", "/", "old-key.mp4", "video/mp4", 999, sha, "private",
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -205,6 +205,41 @@ func TestDirectUpload_InitDedupShortCircuit(t *testing.T) {
 	}
 	if atomic.LoadInt32(&stub.presigned) != 0 {
 		t.Error("dedup must NOT presign")
+	}
+}
+
+func TestDirectUpload_InitSameBytesDifferentDestinationDoesNotDedup(t *testing.T) {
+	ctx := newTestStorageCtx(t)
+	stub := newFakeS3()
+	globalBackend = stub
+
+	sha := repeat64Hex("c")
+	if _, err := ctx.AppDB().Exec(`
+		INSERT INTO files (project_id, name, folder, storage_key, content_type,
+		                   size_bytes, sha256, visibility)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		"p1", "old.mp4", "/renders/", "old-key.mp4", "video/mp4", 999, sha, "private",
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	body := strings.NewReader(`{"name":"requested.mp4","folder":"/hgv/tracy/","size_bytes":999,"sha256":"` + sha + `"}`)
+	req := httptest.NewRequest(http.MethodPost, "/files/init?project_id=p1", body)
+	rec := httptest.NewRecorder()
+	(&App{}).handleFilesItem(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	var resp map[string]any
+	_ = json.NewDecoder(rec.Body).Decode(&resp)
+	if resp["was_existing"] == true {
+		t.Fatalf("different destination must materialise a new file: %+v", resp)
+	}
+	if resp["mode"] != "presigned" || resp["upload_id"] == nil {
+		t.Fatalf("expected a new presigned upload, got %+v", resp)
+	}
+	if atomic.LoadInt32(&stub.presigned) != 1 {
+		t.Fatalf("presigned calls=%d want 1", atomic.LoadInt32(&stub.presigned))
 	}
 }
 
@@ -281,6 +316,57 @@ func TestDirectUpload_FinalizeRoundtrip(t *testing.T) {
 	}
 	if n != 0 {
 		t.Errorf("pending row not cleaned: %d", n)
+	}
+}
+
+func TestDirectUpload_FinalizeSameBytesElsewhereCreatesRequestedFile(t *testing.T) {
+	ctx := newTestStorageCtx(t)
+	stub := newFakeS3()
+	globalBackend = stub
+
+	sha := repeat64Hex("a")
+	req := httptest.NewRequest(http.MethodPost, "/files/init?project_id=p1",
+		strings.NewReader(`{"name":"requested.png","folder":"/hgv/tracy/","size_bytes":5,"sha256":"`+sha+`"}`))
+	rec := httptest.NewRecorder()
+	(&App{}).handleFilesItem(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("init: %d %s", rec.Code, rec.Body.String())
+	}
+	var initResp map[string]any
+	_ = json.NewDecoder(rec.Body).Decode(&initResp)
+	uploadID := initResp["upload_id"].(string)
+	uploadURL := initResp["upload_url"].(string)
+	key := strings.TrimPrefix(strings.SplitN(uploadURL, "?", 2)[0], "https://fake-s3.example.com/")
+	stub.objects[key] = []byte("hello")
+
+	res, err := ctx.AppDB().Exec(`
+		INSERT INTO files (project_id, name, folder, storage_key, content_type,
+		                   size_bytes, sha256, visibility)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+		"p1", "old.png", "/renders/", "old-key.png", "image/png", 5, sha, "private")
+	if err != nil {
+		t.Fatal(err)
+	}
+	existingID, _ := res.LastInsertId()
+
+	req = httptest.NewRequest(http.MethodPost, "/files/"+uploadID+"/finalize?project_id=p1", strings.NewReader(`{}`))
+	rec = httptest.NewRecorder()
+	(&App{}).handleFilesItem(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("finalize: %d %s", rec.Code, rec.Body.String())
+	}
+	var fin struct {
+		File        *File `json:"file"`
+		WasExisting bool  `json:"was_existing"`
+	}
+	if err := json.NewDecoder(rec.Body).Decode(&fin); err != nil {
+		t.Fatal(err)
+	}
+	if fin.File == nil || fin.File.ID == existingID || fin.File.Name != "requested.png" || fin.File.Folder != "/hgv/tracy/" {
+		t.Fatalf("requested destination was not materialised: existing_id=%d result=%+v", existingID, fin.File)
+	}
+	if fin.WasExisting {
+		t.Fatalf("unexpected reuse: %+v", fin)
 	}
 }
 

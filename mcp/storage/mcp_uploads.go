@@ -43,7 +43,7 @@ func (a *App) toolUploadInitCtx(ctx context.Context, app *sdk.AppCtx, args map[s
 	}
 	sha := strings.ToLower(strings.TrimSpace(strArg(args, "sha256")))
 	if sha != "" {
-		if existing, err := dbFindBySHA(app.AppDB(), pid, sha); err == nil && existing != nil {
+		if existing, err := dbFindExact(app.AppDB(), pid, sha, folder, name); err == nil && existing != nil {
 			return map[string]any{"file": existing, "was_existing": true}, nil
 		}
 	}
@@ -258,7 +258,7 @@ func completeUploadSessionForTool(ctx *sdk.AppCtx, reqCtx context.Context, id, s
 	if meta.DeclaredSHA256 != "" && !strings.EqualFold(meta.DeclaredSHA256, finalSHA) {
 		return nil, errors.New("declared sha256 mismatch - bytes corrupted")
 	}
-	if existing, err := dbFindBySHA(ctx.AppDB(), meta.ProjectID, finalSHA); err == nil && existing != nil {
+	if existing, err := dbFindExact(ctx.AppDB(), meta.ProjectID, finalSHA, meta.Folder, meta.Filename); err == nil && existing != nil {
 		_ = os.RemoveAll(dir)
 		return map[string]any{"file": existing, "was_existing": true}, nil
 	}

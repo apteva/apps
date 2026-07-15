@@ -162,7 +162,7 @@ func (a *App) MCPTools() []sdk.Tool {
 	return []sdk.Tool{
 		{
 			Name:        "files_upload",
-			Description: "Upload bytes via base64. Args: name, content_base64, folder?, content_type?, tags?, source?, visibility?. Returns {id, url, sha256, was_existing} — was_existing=true means an identical file already existed and the upload returned its id.",
+			Description: "Upload bytes via base64. Args: name, content_base64, folder?, content_type?, tags?, source?, visibility?. Returns {id, url, sha256, was_existing}. was_existing=true only when bytes, name, and folder all match; identical bytes at another destination create a distinct file.",
 			InputSchema: schemaObject(map[string]any{
 				"name":           map[string]any{"type": "string"},
 				"content_base64": map[string]any{"type": "string"},
@@ -302,7 +302,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "storage_upload_init",
-			Description: "Start an agent multipart upload. Args: name, size_bytes, folder?, content_type?, sha256?, tags?, visibility?, source?. Returns upload_id/part_size or was_existing=true when sha256 dedup hits.",
+			Description: "Start an agent multipart upload. Args: name, size_bytes, folder?, content_type?, sha256?, tags?, visibility?, source?. Returns upload_id/part_size or was_existing=true when sha256, name, and folder all match. Identical bytes at a different destination create a distinct file.",
 			InputSchema: schemaObject(map[string]any{
 				"name":         map[string]any{"type": "string"},
 				"size_bytes":   map[string]any{"type": "integer"},
