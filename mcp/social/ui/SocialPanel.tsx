@@ -29,6 +29,7 @@ import {
   calendarWindow,
   filterCalendarPosts,
   groupPostsByLocalDay,
+  listLeadMediaStyle,
   localDateKey,
   moveCalendarCursor,
   postLifecycleDate,
@@ -4348,13 +4349,12 @@ function PostLeadMedia({ post, projectId, variant }: {
   const source = storageID ? storageURL(`/files/${storageID}/content`, projectId) : externalURL || "";
   const total = (post.media_storage_ids?.length || 0) + (post.external_media_urls?.length || 0);
   const isVideo = !!storageID && !!meta?.mime.startsWith("video/");
-  const size = variant === "list" ? 96 : 32;
   const primaryPlatform = post.targets[0]?.platform || "";
   const presentation = platformPresentation(primaryPlatform);
   return (
     <div
       className="relative overflow-hidden rounded border border-border bg-bg-input"
-      style={stableSquareStyle(size)}
+      style={variant === "list" ? listLeadMediaStyle() : stableSquareStyle(32)}
       aria-hidden="true"
     >
       {!source || (storageID && !meta) ? (

@@ -24,6 +24,20 @@ export function stableSquareStyle(size: number) {
   } as const;
 }
 
+export function listLeadMediaStyle(width = 96) {
+  return {
+    width,
+    minWidth: width,
+    maxWidth: width,
+    minHeight: width,
+    flex: `0 0 ${width}px`,
+    alignSelf: "stretch",
+    display: "grid",
+    placeItems: "center",
+    lineHeight: 1,
+  } as const;
+}
+
 export function postLifecycleDate(post: CalendarPostLike): Date | null {
   const source =
     (post.status === "published" || post.status === "partial") && post.published_at

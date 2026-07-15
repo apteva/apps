@@ -4,6 +4,7 @@ import {
   filterCalendarPosts,
   groupPostsByLocalDay,
   localDateKey,
+  listLeadMediaStyle,
   moveCalendarCursor,
   postLifecycleDate,
   sortPostList,
@@ -63,6 +64,21 @@ test("critical calendar and media squares do not depend on host utility CSS", ()
   });
   expect(stableSquareStyle(96).width).toBe(stableSquareStyle(96).height);
   expect(stableSquareStyle(32).flex).toBe("0 0 32px");
+});
+
+test("list media keeps a fixed column and stretches to the card margins", () => {
+  expect(listLeadMediaStyle()).toEqual({
+    width: 96,
+    minWidth: 96,
+    maxWidth: 96,
+    minHeight: 96,
+    flex: "0 0 96px",
+    alignSelf: "stretch",
+    display: "grid",
+    placeItems: "center",
+    lineHeight: 1,
+  });
+  expect(listLeadMediaStyle()).not.toHaveProperty("height");
 });
 
 test("list puts the nearest upcoming posts first, then recent history", () => {
