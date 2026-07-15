@@ -24,6 +24,7 @@ import {
 import { uploadResumable } from "./uploadResumable";
 import { isTrustedOAuthMessage, scopedAppURL } from "./panelScope";
 import { finalizedAccountError, mcpEnvelopeError } from "./accountFlow";
+import { platformPresentation } from "./platformPresentation";
 import {
   calendarWindow,
   filterCalendarPosts,
@@ -4001,6 +4002,44 @@ function PostsEmptyState({ filtered }: { filtered: boolean }) {
   );
 }
 
+function PlatformBadge({ platform, size = 18 }: { platform: string; size?: number }) {
+  const presentation = platformPresentation(platform);
+  return (
+    <span
+      title={presentation.label}
+      aria-label={presentation.label}
+      style={{
+        minWidth: size,
+        height: size,
+        padding: "0 4px",
+        display: "inline-flex",
+        alignItems: "center",
+        justifyContent: "center",
+        border: `1px solid ${presentation.color}88`,
+        borderRadius: 4,
+        backgroundColor: `${presentation.color}1F`,
+        color: presentation.color,
+        fontSize: size <= 16 ? 8 : size <= 20 ? 9 : 11,
+        fontWeight: 700,
+        lineHeight: 1,
+        flexShrink: 0,
+      }}
+    >
+      {presentation.mark}
+    </span>
+  );
+}
+
+function PlatformBadges({ targets, size = 18, limit = 3 }: { targets: PostTarget[]; size?: number; limit?: number }) {
+  const platforms = Array.from(new Set(targets.map((target) => target.platform).filter(Boolean)));
+  return (
+    <span className="inline-flex items-center gap-1 flex-shrink-0">
+      {platforms.slice(0, limit).map((platform) => <PlatformBadge key={platform} platform={platform} size={size} />)}
+      {platforms.length > limit && <span className="text-[10px] text-text-dim">+{platforms.length - limit}</span>}
+    </span>
+  );
+}
+
 function PostListRow({
   post, projectId, menuOpen, onToggleMenu, onOpen, onRetry, onReschedule, onEdit, onDelete,
 }: {
@@ -4020,9 +4059,11 @@ function PostListRow({
     : "No targets";
   const editable = (post.status === "published" || post.status === "partial") &&
     post.targets.some((target) => isEditablePlatform(target.platform));
+  const accent = platformPresentation(post.targets[0]?.platform || "").color;
   return (
     <div
       className="relative border border-border rounded bg-bg-card/30 hover:bg-bg-card/50 transition-colors"
+      style={{ borderLeftColor: accent, borderLeftWidth: 3 }}
     >
       <div className="flex items-stretch gap-3 p-2.5" style={{ minHeight: 116 }}>
         <button type="button" onClick={onOpen} className="flex flex-1 min-w-0 items-stretch gap-3 text-left">
@@ -4032,7 +4073,10 @@ function PostListRow({
               {post.body || <span className="text-text-dim italic">No caption</span>}
             </div>
             <div className="mt-auto min-w-0 pt-2">
-              <div className="text-text-dim text-xs truncate">{targetLabel}</div>
+              <div className="flex items-center gap-2 min-w-0">
+                <PlatformBadges targets={post.targets} />
+                <div className="text-text-dim text-xs truncate">{targetLabel}</div>
+              </div>
               <div className="text-text-muted text-xs mt-0.5">
                 {displayDate ? displayDate.toLocaleString() : "No date"}
               </div>
@@ -4234,11 +4278,13 @@ function CalendarPostEvent({ post, projectId, onOpen, mobile = false }: {
 }) {
   const date = postLifecycleDate(post);
   const platform = Array.from(new Set(post.targets.map((target) => target.platform))).join(", ");
+  const accent = platformPresentation(post.targets[0]?.platform || "").color;
   return (
     <button
       type="button"
       onClick={onOpen}
       className={`w-full text-left flex items-center gap-1.5 border border-border rounded bg-bg-card/60 hover:border-accent overflow-hidden ${mobile ? "p-2" : "p-1"}`}
+      style={{ borderLeftColor: accent, borderLeftWidth: 3 }}
     >
       <PostLeadMedia post={post} projectId={projectId} variant="calendar" />
       <div className="min-w-0 flex-1">
@@ -4247,7 +4293,12 @@ function CalendarPostEvent({ post, projectId, onOpen, mobile = false }: {
           <StatusPill status={post.status} />
         </div>
         <div className={`${mobile ? "text-xs" : "text-[10px]"} text-text truncate`}>{post.body || "No caption"}</div>
-        {mobile && <div className="text-[10px] text-text-dim truncate">{platform || "No target"}</div>}
+        {mobile && (
+          <div className="flex items-center gap-1.5 min-w-0 mt-0.5">
+            <PlatformBadges targets={post.targets} size={16} limit={2} />
+            <div className="text-[10px] text-text-dim truncate">{platform || "No target"}</div>
+          </div>
+        )}
       </div>
     </button>
   );
@@ -4302,6 +4353,8 @@ function PostLeadMedia({ post, projectId, variant }: {
   const total = (post.media_storage_ids?.length || 0) + (post.external_media_urls?.length || 0);
   const isVideo = !!storageID && !!meta?.mime.startsWith("video/");
   const size = variant === "list" ? 96 : 32;
+  const primaryPlatform = post.targets[0]?.platform || "";
+  const presentation = platformPresentation(primaryPlatform);
   return (
     <div
       className="relative overflow-hidden rounded border border-border bg-bg-input"
@@ -4311,9 +4364,15 @@ function PostLeadMedia({ post, projectId, variant }: {
       {!source || (storageID && !meta) ? (
         <div
           className="text-text-dim text-[10px] uppercase"
-          style={{ width: "100%", height: "100%", display: "grid", placeItems: "center" }}
+          style={{
+            width: "100%",
+            height: "100%",
+            display: "grid",
+            placeItems: "center",
+            backgroundColor: `${presentation.color}12`,
+          }}
         >
-          {source ? "…" : post.targets[0]?.platform?.slice(0, 2) || "—"}
+          {source ? "..." : <PlatformBadge platform={primaryPlatform} size={variant === "list" ? 36 : 20} />}
         </div>
       ) : isVideo ? (
         <>
