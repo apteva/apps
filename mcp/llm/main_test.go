@@ -356,6 +356,89 @@ func TestBoundOpenCodeGoIntegrationSupportsChatAndModelSync(t *testing.T) {
 	}
 }
 
+func TestBoundOpenAICodexIntegrationSupportsChatAndAccountModelSync(t *testing.T) {
+	var catalogCalls atomic.Int64
+	catalog := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		catalogCalls.Add(1)
+		if r.URL.Path != "/models" || r.URL.Query().Get("client_version") != openAICodexCatalogClientVersion {
+			t.Errorf("catalog URL=%s", r.URL.String())
+		}
+		if r.Header.Get("Authorization") != "Bearer codex-access" || r.Header.Get("ChatGPT-Account-ID") != "acct-1" {
+			t.Errorf("catalog auth=%q account=%q", r.Header.Get("Authorization"), r.Header.Get("ChatGPT-Account-ID"))
+		}
+		_, _ = w.Write([]byte(`{"models":[
+			{"slug":"gpt-5.6-terra","display_name":"GPT-5.6 Terra","visibility":"list","priority":1,"context_window":200000,"input_modalities":["text","image"]},
+			{"slug":"gpt-5.5","display_name":"GPT-5.5","visibility":"list","priority":2,"context_window":128000,"input_modalities":["text"]},
+			{"slug":"gpt-5.6-luna","display_name":"GPT-5.6 Luna","visibility":"list","priority":0},
+			{"slug":"internal-model","display_name":"Internal","visibility":"hidden","priority":0}
+		]}`))
+	}))
+	defer catalog.Close()
+
+	var executedConnection int64
+	var executedTool string
+	var executedInput map[string]any
+	platform := &llmPlatformStub{
+		identity:   &sdk.InstallIdentity{Bindings: map[string]any{"openai_codex_provider": float64(88)}},
+		connection: &sdk.PlatformConnection{ID: 88, AppSlug: "openai-codex", Status: "active", ProjectID: "proj-test"},
+		credentials: map[int64]*sdk.ConnectionCredentials{
+			88: {ConnectionID: 88, Slug: "openai-codex", Fields: map[string]string{"access_token": "codex-access", "account_id": "acct-1"}},
+		},
+		executeIntegration: func(connectionID int64, tool string, input map[string]any) (*sdk.ExecuteResult, error) {
+			executedConnection = connectionID
+			executedTool = tool
+			executedInput = cloneMap(input)
+			return &sdk.ExecuteResult{Success: true, Status: http.StatusOK, Data: json.RawMessage(`{"id":"codex-response","choices":[{"message":{"role":"assistant","content":"ok"},"finish_reason":"stop"}],"usage":{"prompt_tokens":6,"completion_tokens":2}}`)}, nil
+		},
+	}
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("proj-test"), tk.WithPlatform(platform))
+	app := &App{httpClient: catalog.Client()}
+	if err := app.OnMount(ctx); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := providerConfigFor(ctx, "proj-test", "openai-codex")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.Source != "bound_integration" || cfg.ConnectionID != 88 || cfg.BaseURL != "https://chatgpt.com/backend-api/codex" {
+		t.Fatalf("bound config=%+v", cfg)
+	}
+	if _, err := dbProviderConfigUpsert(ctx.AppDB(), "proj-test", map[string]any{
+		"provider": "openai-codex", "base_url": catalog.URL, "auth_mode": "customer_owned", "connection_id": 88,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	results := app.syncProviderModels(ctx, "proj-test", "openai-codex")
+	if len(results) != 1 || results[0].Status != "ok" || results[0].ModelCount != 2 || catalogCalls.Load() != 1 {
+		t.Fatalf("sync results=%+v calls=%d", results, catalogCalls.Load())
+	}
+	var terra *ProviderModel
+	for i := range results[0].Models {
+		if results[0].Models[i].ModelID == "gpt-5.6-terra" {
+			terra = &results[0].Models[i]
+		}
+	}
+	if terra == nil || terra.GatewayModel != "openai-codex/gpt-5.6-terra" || terra.ContextWindow != 200000 {
+		t.Fatalf("terra model=%+v", terra)
+	}
+	result, err := app.executeChat(ctx, &TokenIdentity{ProjectID: "proj-test", SubjectType: "agent", SubjectID: "a"}, map[string]any{
+		"model": "openai-codex/gpt-5.6-terra", "messages": []any{map[string]any{"role": "user", "content": "hello"}}, "max_tokens": 128, "_llm_request_id": "codex-chat",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if executedConnection != 88 || executedTool != "chat_completion" || executedInput["model"] != "gpt-5.6-terra" || intArg(executedInput, "max_tokens", 0) != 128 {
+		t.Fatalf("execute connection=%d tool=%q input=%+v", executedConnection, executedTool, executedInput)
+	}
+	if result.RequestTokens != 6 || result.ResponseTokens != 2 || result.RequestID != "codex-response" {
+		t.Fatalf("result=%+v", result)
+	}
+	usage, err := dbUsageEventByRequestID(ctx.AppDB(), "proj-test", "agent", "a", "codex-chat")
+	if err != nil || usage.Provider != "openai-codex" || usage.ProviderCostStatus != "unpriced" {
+		t.Fatalf("usage=%+v err=%v", usage, err)
+	}
+}
+
 func TestProviderConfigValidatesCustomerOwnedAuth(t *testing.T) {
 	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("proj-test"))
 	app := &App{}
@@ -993,9 +1076,10 @@ func TestEmbeddingsRouteForwardsAndRecordsRawUsage(t *testing.T) {
 }
 
 type llmPlatformStub struct {
-	identity    *sdk.InstallIdentity
-	credentials map[int64]*sdk.ConnectionCredentials
-	connection  *sdk.PlatformConnection
+	identity           *sdk.InstallIdentity
+	credentials        map[int64]*sdk.ConnectionCredentials
+	connection         *sdk.PlatformConnection
+	executeIntegration func(int64, string, map[string]any) (*sdk.ExecuteResult, error)
 }
 
 func (p *llmPlatformStub) GetConnection(id int64) (*sdk.PlatformConnection, error) {
@@ -1012,7 +1096,11 @@ func (p *llmPlatformStub) GetAgent(int64) (*sdk.PlatformAgent, error)       { re
 func (p *llmPlatformStub) SendEvent(int64, string) error                    { return nil }
 func (p *llmPlatformStub) SendToChannel(string, string, string) error       { return nil }
 func (p *llmPlatformStub) WhoAmI() (*sdk.InstallIdentity, error)            { return p.identity, nil }
-func (p *llmPlatformStub) ExecuteIntegrationTool(int64, string, map[string]any) (*sdk.ExecuteResult, error) {
+
+func (p *llmPlatformStub) ExecuteIntegrationTool(connectionID int64, tool string, input map[string]any) (*sdk.ExecuteResult, error) {
+	if p.executeIntegration != nil {
+		return p.executeIntegration(connectionID, tool, input)
+	}
 	return nil, nil
 }
 func (p *llmPlatformStub) CallApp(string, string, map[string]any) (json.RawMessage, error) {

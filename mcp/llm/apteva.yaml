@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: llm
 display_name: LLM Gateway
-version: 0.5.1
+version: 0.5.2
 description: |
   Managed AI API access for Apteva-hosted apps and agents. Provides an
   OpenAI-compatible tenant-safe gateway that routes requests to configured
@@ -22,6 +22,7 @@ requires:
     - db.write.app
     - platform.connections.read
     - platform.connections.read_credentials
+    - platform.connections.execute
   integrations:
     - role: anthropic_provider
       kind: integration
@@ -48,6 +49,11 @@ requires:
       compatible_slugs: [opencode-go]
       required: false
       label: "OpenCode Go provider"
+    - role: openai_codex_provider
+      kind: integration
+      compatible_slugs: [openai-codex]
+      required: false
+      label: "OpenAI Codex provider"
 
 provides:
   http_routes:

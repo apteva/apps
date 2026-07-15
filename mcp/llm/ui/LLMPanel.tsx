@@ -140,12 +140,13 @@ interface AuditLog {
 type Tab = "test" | "providers" | "rates" | "policy" | "tokens" | "usage" | "audit";
 
 const API = "/api/apps/llm";
-const knownProviders = ["openai", "anthropic", "opencode-go", "fireworks", "openrouter"];
+const knownProviders = ["openai", "anthropic", "openai-codex", "opencode-go", "fireworks", "openrouter"];
 const providerBaseURLs: Record<string, string> = {
   openai: "https://api.openai.com/v1",
   anthropic: "https://api.anthropic.com/v1",
   fireworks: "https://api.fireworks.ai/inference/v1",
   openrouter: "https://openrouter.ai/api/v1",
+  "openai-codex": "https://chatgpt.com/backend-api/codex",
   "opencode-go": "https://opencode.ai/zen/go/v1",
 };
 const providerKeyRefs: Record<string, string> = { "opencode-go": "opencode_go_api_key" };
@@ -500,10 +501,10 @@ export default function LLMPanel({ projectId }: NativePanelProps) {
           <main className="overflow-auto p-4 max-w-3xl space-y-3">
             {providerDraft.source === "bound_integration" && <div className="text-xs border border-info/30 bg-info/10 text-info rounded p-3">This route comes from a bound integration. Saving creates a project override; disabling that override disables the provider for this project.</div>}
             <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-              <Field label="Provider ID"><input list="known-llm-providers" value={providerDraft.provider} onChange={(event) => { const provider = event.target.value.toLowerCase(); setProviderDraft({ ...providerDraft, provider, base_url: providerBaseURLs[provider] || providerDraft.base_url, key_ref: providerKeyRefs[provider] || `${provider.replaceAll("-", "_")}_api_key` }); }} className={`${controlClass} font-mono`} /><datalist id="known-llm-providers">{knownProviders.map((provider) => <option key={provider} value={provider} />)}</datalist></Field>
+              <Field label="Provider ID"><input list="known-llm-providers" value={providerDraft.provider} onChange={(event) => { const provider = event.target.value.toLowerCase(); setProviderDraft({ ...providerDraft, provider, base_url: providerBaseURLs[provider] || providerDraft.base_url, auth_mode: provider === "openai-codex" ? "customer_owned" : providerDraft.auth_mode, key_ref: providerKeyRefs[provider] || `${provider.replaceAll("-", "_")}_api_key` }); }} className={`${controlClass} font-mono`} /><datalist id="known-llm-providers">{knownProviders.map((provider) => <option key={provider} value={provider} />)}</datalist></Field>
               <Field label="Authentication"><select value={providerDraft.auth_mode} onChange={(event) => setProviderDraft({ ...providerDraft, auth_mode: event.target.value })} className={controlClass}><option value="platform_shared">Shared app credential</option><option value="customer_owned">Bound connection</option><option value="provider_aggregator">Aggregator credential</option></select></Field>
             </div>
-            <Field label="OpenAI-compatible base URL"><input value={providerDraft.base_url || ""} onChange={(event) => setProviderDraft({ ...providerDraft, base_url: event.target.value })} placeholder="https://provider.example/v1" className={`${controlClass} font-mono`} /></Field>
+            <Field label="Provider base URL"><input value={providerDraft.base_url || ""} onChange={(event) => setProviderDraft({ ...providerDraft, base_url: event.target.value })} placeholder="https://provider.example/v1" className={`${controlClass} font-mono`} /></Field>
             <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
               <Field label="Credential key reference"><input value={providerDraft.key_ref || ""} onChange={(event) => setProviderDraft({ ...providerDraft, key_ref: event.target.value })} className={`${controlClass} font-mono`} /></Field>
               <NumberField label="Connection ID" value={providerDraft.connection_id || 0} onChange={(value) => setProviderDraft({ ...providerDraft, connection_id: value })} />

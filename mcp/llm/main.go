@@ -27,7 +27,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: llm
 display_name: LLM Gateway
-version: 0.5.1
+version: 0.5.2
 description: Generic OpenAI-compatible AI access with provider-cost metering for Apteva-hosted apps and agents.
 author: Apteva
 scopes: [project, global]
@@ -37,6 +37,7 @@ requires:
     - db.write.app
     - platform.connections.read
     - platform.connections.read_credentials
+    - platform.connections.execute
   integrations:
     - role: anthropic_provider
       kind: integration
@@ -57,6 +58,10 @@ requires:
     - role: opencode_go_provider
       kind: integration
       compatible_slugs: [opencode-go]
+      required: false
+    - role: openai_codex_provider
+      kind: integration
+      compatible_slugs: [openai-codex]
       required: false
 provides:
   http_routes:
@@ -1227,19 +1232,23 @@ func (a *App) executeChatContext(reqCtx context.Context, ctx *sdk.AppCtx, ident 
 		used = attempt
 		cfg, err := providerConfigFor(ctx, ident.ProjectID, attempt.Provider)
 		if err == nil {
-			var key string
-			key, err = resolveProviderKey(ctx, cfg)
+			attemptBody := cloneMap(body)
+			attemptBody["model"] = attempt.Model
+			var callResult *chatResult
+			if cfg.Provider == "openai-codex" {
+				callResult, err = a.callOpenAICodexIntegration(reqCtx, ctx, cfg, attemptBody)
+			} else {
+				var key string
+				key, err = resolveProviderKey(ctx, cfg)
+				if err == nil {
+					callResult, err = a.callProvider(reqCtx, cfg, key, attemptBody)
+				}
+			}
 			if err == nil {
-				attemptBody := cloneMap(body)
-				attemptBody["model"] = attempt.Model
-				var callResult *chatResult
-				callResult, err = a.callProvider(reqCtx, cfg, key, attemptBody)
-				if err == nil {
-					err = validateChatCompletion(callResult.Body)
-				}
-				if err == nil {
-					result = callResult
-				}
+				err = validateChatCompletion(callResult.Body)
+			}
+			if err == nil {
+				result = callResult
 			}
 		}
 		if err == nil {
@@ -1315,6 +1324,78 @@ func (a *App) callProvider(ctx context.Context, cfg *ProviderConfig, apiKey stri
 		return a.callAnthropic(ctx, cfg, apiKey, body)
 	}
 	return a.callOpenAICompatible(ctx, cfg, apiKey, body)
+}
+
+func (a *App) callOpenAICodexIntegration(reqCtx context.Context, appCtx *sdk.AppCtx, cfg *ProviderConfig, body map[string]any) (*chatResult, error) {
+	if err := validateBoundProviderConnection(appCtx, cfg); err != nil {
+		return nil, err
+	}
+	if err := reqCtx.Err(); err != nil {
+		return nil, err
+	}
+	outBody := cloneMap(body)
+	delete(outBody, "_llm_request_id")
+	delete(outBody, "request_id")
+	outBody["model"] = upstreamModel(cfg.Provider, strArg(body, "model"))
+	executed, err := appCtx.PlatformAPI().ExecuteIntegrationTool(cfg.ConnectionID, "chat_completion", outBody)
+	if err != nil {
+		return nil, err
+	}
+	if err := reqCtx.Err(); err != nil {
+		return nil, err
+	}
+	if executed == nil {
+		return nil, providerError(http.StatusBadGateway, "OpenAI Codex integration returned no result")
+	}
+	status := executed.Status
+	if status == 0 {
+		if executed.Success {
+			status = http.StatusOK
+		} else {
+			status = http.StatusBadGateway
+		}
+	}
+	raw := append([]byte(nil), executed.Data...)
+	result := &chatResult{Status: status, Body: raw}
+	metering := parseProviderMetering(raw)
+	result.RequestTokens = metering.InputTokens
+	result.ResponseTokens = metering.OutputTokens
+	result.ProviderCostMicrounits = metering.CostMicrounits
+	result.ProviderCostCurrency = metering.CostCurrency
+	result.ProviderCostReported = metering.CostReported
+	result.UsageDetails = providerCostDetails(metering)
+	var envelope struct {
+		ID string `json:"id"`
+	}
+	_ = json.Unmarshal(raw, &envelope)
+	result.RequestID = firstNonEmpty(envelope.ID, "llm_"+randomSuffix(16))
+	if !executed.Success || status < 200 || status >= 300 {
+		return result, providerError(status, string(raw))
+	}
+	return result, nil
+}
+
+func validateBoundProviderConnection(ctx *sdk.AppCtx, cfg *ProviderConfig) error {
+	if cfg == nil || cfg.AuthMode != "customer_owned" || cfg.ConnectionID <= 0 {
+		return errors.New("OpenAI Codex provider requires a bound customer-owned integration")
+	}
+	if ctx == nil || ctx.PlatformAPI() == nil {
+		return errors.New("OpenAI Codex provider requires platform API access")
+	}
+	connection, err := ctx.PlatformAPI().GetConnection(cfg.ConnectionID)
+	if err != nil {
+		return err
+	}
+	if connection == nil || connection.ID != cfg.ConnectionID || !connectionStatusUsable(connection.Status) {
+		return fmt.Errorf("connection %d is not connected", cfg.ConnectionID)
+	}
+	if cfg.ProjectID != "" && connection.ProjectID != "" && connection.ProjectID != cfg.ProjectID {
+		return fmt.Errorf("connection %d belongs to another project", cfg.ConnectionID)
+	}
+	if !providerConnectionCompatible(cfg.Provider, connection.AppSlug) {
+		return fmt.Errorf("connection %d (%s) is not compatible with provider %q", cfg.ConnectionID, connection.AppSlug, cfg.Provider)
+	}
+	return nil
 }
 
 func providerUsesAnthropicMessages(provider, model string) bool {
@@ -1998,11 +2079,12 @@ func boundProviderConfig(ctx *sdk.AppCtx, projectID, provider string) *ProviderC
 
 func providerIntegrationRoles() map[string]string {
 	return map[string]string{
-		"anthropic":   "anthropic_provider",
-		"fireworks":   "fireworks_provider",
-		"openai":      "openai_provider",
-		"openrouter":  "openrouter_provider",
-		"opencode-go": "opencode_go_provider",
+		"anthropic":    "anthropic_provider",
+		"fireworks":    "fireworks_provider",
+		"openai":       "openai_provider",
+		"openrouter":   "openrouter_provider",
+		"opencode-go":  "opencode_go_provider",
+		"openai-codex": "openai_codex_provider",
 	}
 }
 
@@ -2080,6 +2162,9 @@ func (a *App) syncProviderModelsWithContext(reqCtx context.Context, ctx *sdk.App
 }
 
 func (a *App) discoverProviderModels(reqCtx context.Context, appCtx *sdk.AppCtx, cfg *ProviderConfig) ([]ProviderModel, error) {
+	if cfg.Provider == "openai-codex" {
+		return a.discoverOpenAICodexModels(reqCtx, appCtx, cfg)
+	}
 	key, err := resolveProviderKey(appCtx, cfg)
 	if err != nil {
 		return nil, err
@@ -2137,6 +2222,109 @@ func (a *App) discoverProviderModels(reqCtx context.Context, appCtx *sdk.AppCtx,
 		return nil, fmt.Errorf("provider %q returned no models", cfg.Provider)
 	}
 	return models, nil
+}
+
+const openAICodexCatalogClientVersion = "0.144.0"
+
+func (a *App) discoverOpenAICodexModels(reqCtx context.Context, appCtx *sdk.AppCtx, cfg *ProviderConfig) ([]ProviderModel, error) {
+	if err := validateBoundProviderConnection(appCtx, cfg); err != nil {
+		return nil, err
+	}
+	credentials, err := appCtx.PlatformAPI().GetConnectionCredentials(cfg.ConnectionID)
+	if err != nil {
+		return nil, err
+	}
+	if credentials == nil || !providerConnectionCompatible(cfg.Provider, credentials.Slug) {
+		return nil, fmt.Errorf("connection %d credentials are not compatible with provider %q", cfg.ConnectionID, cfg.Provider)
+	}
+	accessToken := strings.TrimSpace(credentials.Fields["access_token"])
+	if accessToken == "" {
+		return nil, fmt.Errorf("connection %d has no access_token credential field", cfg.ConnectionID)
+	}
+	endpoint, err := url.Parse(strings.TrimRight(cfg.BaseURL, "/") + "/models")
+	if err != nil {
+		return nil, err
+	}
+	query := endpoint.Query()
+	query.Set("client_version", openAICodexCatalogClientVersion)
+	endpoint.RawQuery = query.Encode()
+	req, err := http.NewRequestWithContext(reqCtx, http.MethodGet, endpoint.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+accessToken)
+	if accountID := strings.TrimSpace(credentials.Fields["account_id"]); accountID != "" {
+		req.Header.Set("ChatGPT-Account-ID", accountID)
+	}
+	req.Header.Set("Accept", "application/json")
+	req.Header.Set("User-Agent", "apteva-llm/codex-catalog-"+openAICodexCatalogClientVersion)
+	resp, err := a.httpClient.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	raw, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	if err != nil {
+		return nil, err
+	}
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, providerError(resp.StatusCode, string(raw))
+	}
+	models := parseOpenAICodexModels(cfg.Provider, raw)
+	if len(models) == 0 {
+		return nil, errors.New("OpenAI Codex model catalog contained no visible models")
+	}
+	return models, nil
+}
+
+func parseOpenAICodexModels(provider string, raw []byte) []ProviderModel {
+	var payload struct {
+		Models []json.RawMessage `json:"models"`
+	}
+	if json.Unmarshal(raw, &payload) != nil {
+		return nil
+	}
+	models := make([]ProviderModel, 0, len(payload.Models))
+	priorities := make(map[string]int64, len(payload.Models))
+	for _, item := range payload.Models {
+		var model map[string]any
+		if json.Unmarshal(item, &model) != nil {
+			continue
+		}
+		id := strings.TrimSpace(strAny(model["slug"]))
+		visibility := strings.TrimSpace(strAny(model["visibility"]))
+		if id == "" || !strings.EqualFold(visibility, "list") || strings.EqualFold(id, "gpt-5.6-luna") {
+			continue
+		}
+		priorities[id] = int64FromAny(model["priority"])
+		capabilities := map[string]any{}
+		for _, key := range []string{"context_window", "max_context_window", "effective_context_window_percent", "default_reasoning_level", "supported_reasoning_levels", "supports_parallel_tool_calls", "supports_reasoning_summaries", "supports_image_detail_original", "supports_search_tool"} {
+			if value, ok := model[key]; ok {
+				capabilities[key] = value
+			}
+		}
+		models = append(models, ProviderModel{
+			Provider:         provider,
+			ModelID:          id,
+			DisplayName:      firstNonEmpty(strings.TrimSpace(strAny(model["display_name"])), id),
+			GatewayModel:     gatewayModelID(provider, id),
+			Capabilities:     jsonFromAny(capabilities),
+			ContextWindow:    int64FromAny(model["context_window"]),
+			InputModalities:  jsonFromAny(firstNonNil(model["input_modalities"], []any{})),
+			OutputModalities: json.RawMessage(`["text"]`),
+			Status:           "active",
+			Raw:              append(json.RawMessage(nil), item...),
+		})
+	}
+	sort.SliceStable(models, func(i, j int) bool {
+		left := priorities[models[i].ModelID]
+		right := priorities[models[j].ModelID]
+		if left != right {
+			return left < right
+		}
+		return models[i].ModelID < models[j].ModelID
+	})
+	return models
 }
 
 func parseProviderModelsPage(provider string, raw []byte) ([]ProviderModel, bool, string) {
@@ -3891,6 +4079,8 @@ func defaultBaseURL(provider string) string {
 		return "https://openrouter.ai/api/v1"
 	case "opencode-go":
 		return "https://opencode.ai/zen/go/v1"
+	case "openai-codex":
+		return "https://chatgpt.com/backend-api/codex"
 	default:
 		return ""
 	}
