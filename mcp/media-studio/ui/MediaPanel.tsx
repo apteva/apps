@@ -2,9 +2,11 @@
 // Loaded by the dashboard via dynamic import; uses host React via
 // importmap; talks to the media-studio sidecar at /api/apps/media-studio/*.
 
-import { useCallback, useEffect, useRef, useState, type DragEvent, type ReactNode } from "react";
+import { useCallback, useEffect, useId, useRef, useState, type DragEvent, type ReactNode } from "react";
+import { AudioLines, Maximize2, Pause, Play, Volume2, VolumeX } from "lucide-react";
 import {
   clampDuration,
+  formatMediaTime,
   imageGenerationOptions,
   isDurableMediaReference,
   mergeHistoryPage,
@@ -1639,6 +1641,154 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
           border-top-style: solid;
         }
         .ms-composer-actions { margin-left: auto; }
+        .ms-gallery-grid {
+          display: grid;
+          gap: 10px;
+          padding: 10px;
+          align-items: start;
+          align-content: start;
+        }
+        .ms-gallery-video {
+          grid-template-columns: repeat(auto-fill, minmax(min(360px, 100%), 1fr));
+        }
+        .ms-gallery-audio {
+          grid-template-columns: repeat(auto-fill, minmax(min(340px, 100%), 1fr));
+        }
+        .ms-media-card {
+          min-width: 0;
+          overflow: hidden;
+          border: 1px solid var(--border);
+          border-radius: 6px;
+          background: var(--bg-card);
+          transition: border-color 140ms ease, background-color 140ms ease;
+        }
+        .ms-media-card:hover { border-color: color-mix(in srgb, var(--accent) 55%, var(--border)); }
+        .ms-video-player {
+          position: relative;
+          width: 100%;
+          aspect-ratio: 16 / 10;
+          overflow: hidden;
+          background: #050505;
+        }
+        .ms-video-player video {
+          display: block;
+          width: 100%;
+          height: 100%;
+          object-fit: contain;
+        }
+        .ms-video-player.ms-player-lightbox {
+          width: min(1100px, 92vw, calc(82vh * 1.6));
+        }
+        .ms-video-player:fullscreen,
+        .ms-video-player:-webkit-full-screen {
+          width: 100vw;
+          height: 100vh;
+          aspect-ratio: auto;
+        }
+        .ms-audio-player {
+          display: grid;
+          grid-template-columns: 42px minmax(0, 1fr);
+          align-items: center;
+          gap: 10px;
+          min-height: 84px;
+          padding: 12px;
+          background: var(--bg-input);
+        }
+        .ms-audio-player.ms-player-lightbox {
+          width: min(560px, calc(100vw - 32px));
+          border: 1px solid var(--border);
+          border-radius: 6px;
+        }
+        .ms-audio-mark {
+          width: 42px;
+          height: 42px;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          color: var(--accent);
+          border: 1px solid color-mix(in srgb, var(--accent) 55%, var(--border));
+          border-radius: 6px;
+          background: var(--bg-card);
+        }
+        .ms-audio-content { min-width: 0; }
+        .ms-audio-kicker {
+          margin-bottom: 6px;
+          color: var(--text-dim);
+          font-size: 10px;
+          line-height: 1;
+          text-transform: uppercase;
+        }
+        .ms-player-controls {
+          display: grid;
+          grid-template-columns: 32px minmax(56px, 1fr) auto 32px;
+          align-items: center;
+          gap: 8px;
+          min-width: 0;
+        }
+        .ms-video-player .ms-player-controls {
+          position: absolute;
+          inset: auto 0 0;
+          z-index: 2;
+          padding: 8px 10px;
+          color: #fff;
+          background: rgba(0, 0, 0, 0.78);
+          grid-template-columns: 32px minmax(56px, 1fr) auto 32px 32px;
+        }
+        .ms-player-button {
+          width: 32px;
+          height: 32px;
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          flex: 0 0 auto;
+          border: 0;
+          border-radius: 50%;
+          color: inherit;
+          background: transparent;
+          cursor: pointer;
+        }
+        .ms-player-button:hover { color: var(--accent); background: rgba(255, 255, 255, 0.08); }
+        .ms-player-button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+        .ms-player-range {
+          width: 100%;
+          min-width: 0;
+          margin: 0;
+          accent-color: var(--accent);
+          cursor: pointer;
+        }
+        .ms-player-time {
+          min-width: 68px;
+          color: var(--text-muted);
+          font-size: 10px;
+          font-variant-numeric: tabular-nums;
+          text-align: right;
+          white-space: nowrap;
+        }
+        .ms-video-player .ms-player-time { color: rgba(255, 255, 255, 0.82); }
+        .ms-video-play-overlay {
+          position: absolute;
+          inset: 50% auto auto 50%;
+          z-index: 2;
+          width: 48px;
+          height: 48px;
+          transform: translate(-50%, -50%);
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          border: 1px solid rgba(255, 255, 255, 0.28);
+          border-radius: 50%;
+          color: #fff;
+          background: rgba(0, 0, 0, 0.72);
+          cursor: pointer;
+        }
+        .ms-video-play-overlay:hover { color: var(--accent); border-color: var(--accent); }
+        .ms-card-meta { min-height: 54px; }
+        .ms-card-facts {
+          display: grid;
+          grid-template-columns: minmax(0, 1fr) auto;
+          align-items: center;
+          gap: 8px;
+        }
         @media (max-width: 1023px) {
           .ms-media-main { flex-direction: column; overflow: auto; }
           .ms-media-content { padding: 12px; }
@@ -1651,6 +1801,8 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
           }
         }
         @media (max-width: 640px) {
+          .ms-gallery-grid { gap: 8px; padding: 8px; }
+          .ms-gallery-video, .ms-gallery-audio { grid-template-columns: minmax(0, 1fr); }
           .ms-create-backdrop { padding: 0; align-items: stretch; }
           .ms-create-dialog { width: 100%; max-height: none; height: 100%; border-radius: 0 !important; }
           .ms-create-body { padding: 16px; }
@@ -4047,6 +4199,20 @@ function defaultOutputFolder(kind: Kind): string {
   return "/.generated/audio/";
 }
 
+function mediaPlayerLabel(kind: Kind): string {
+  if (kind === "music") return "Music";
+  if (kind === "audio_sfx") return "Sound effect";
+  if (kind === "audio_tts") return "Voiceover";
+  if (kind === "avatar") return "Avatar video";
+  return "Video";
+}
+
+function generationPoster(generation: Generation): string | undefined {
+  return generation.thumbnail_b64
+    ? `data:image/jpeg;base64,${generation.thumbnail_b64}`
+    : undefined;
+}
+
 function storageFoldersFromFiles(files: { folder?: string }[]): string[] {
   const set = new Set<string>();
   for (const file of files || []) {
@@ -4065,6 +4231,187 @@ function normalizeFolderInput(raw: string): string {
 
 function folderHasDotSegment(folder: string): boolean {
   return folder.split("/").some((part) => part.startsWith("."));
+}
+
+const MEDIA_PLAYER_PLAY_EVENT = "media-studio:player-play";
+
+function StudioMediaPlayer({
+  src,
+  mediaType,
+  label,
+  durationSeconds = 0,
+  poster,
+  variant = "card",
+}: {
+  src: string;
+  mediaType: "audio" | "video";
+  label: string;
+  durationSeconds?: number;
+  poster?: string;
+  variant?: "card" | "detail" | "lightbox";
+}) {
+  const playerId = useId();
+  const mediaRef = useRef<HTMLMediaElement | null>(null);
+  const stageRef = useRef<HTMLDivElement | null>(null);
+  const [playing, setPlaying] = useState(false);
+  const [muted, setMuted] = useState(false);
+  const [currentTime, setCurrentTime] = useState(0);
+  const [duration, setDuration] = useState(durationSeconds > 0 ? durationSeconds : 0);
+
+  useEffect(() => {
+    const pauseForOtherPlayer = (event: Event) => {
+      if ((event as CustomEvent<string>).detail !== playerId) mediaRef.current?.pause();
+    };
+    window.addEventListener(MEDIA_PLAYER_PLAY_EVENT, pauseForOtherPlayer);
+    return () => window.removeEventListener(MEDIA_PLAYER_PLAY_EVENT, pauseForOtherPlayer);
+  }, [playerId]);
+
+  useEffect(() => {
+    setPlaying(false);
+    setCurrentTime(0);
+    setDuration(durationSeconds > 0 ? durationSeconds : 0);
+  }, [src, durationSeconds]);
+
+  const announcePlay = () => {
+    window.dispatchEvent(new CustomEvent(MEDIA_PLAYER_PLAY_EVENT, { detail: playerId }));
+  };
+  const togglePlayback = () => {
+    const media = mediaRef.current;
+    if (!media) return;
+    if (media.paused) {
+      announcePlay();
+      void media.play().catch(() => setPlaying(false));
+    } else {
+      media.pause();
+    }
+  };
+  const toggleMuted = () => {
+    const media = mediaRef.current;
+    if (!media) return;
+    media.muted = !media.muted;
+    setMuted(media.muted);
+  };
+  const openFullscreen = () => {
+    const stage = stageRef.current;
+    if (stage?.requestFullscreen) {
+      void stage.requestFullscreen();
+      return;
+    }
+    const video = mediaRef.current as (HTMLVideoElement & { webkitEnterFullscreen?: () => void }) | null;
+    video?.webkitEnterFullscreen?.();
+  };
+  const syncDuration = () => {
+    const value = mediaRef.current?.duration || 0;
+    if (Number.isFinite(value) && value > 0) setDuration(value);
+  };
+  const controls = (
+    <div className="ms-player-controls">
+      <button
+        type="button"
+        className="ms-player-button"
+        onClick={togglePlayback}
+        aria-label={playing ? `Pause ${label}` : `Play ${label}`}
+        title={playing ? "Pause" : "Play"}
+      >
+        {playing ? <Pause size={16} strokeWidth={1.8} /> : <Play size={16} strokeWidth={1.8} fill="currentColor" />}
+      </button>
+      <input
+        type="range"
+        className="ms-player-range"
+        min={0}
+        max={Math.max(duration, 0.01)}
+        step={0.01}
+        value={Math.min(currentTime, Math.max(duration, 0.01))}
+        onChange={(event) => {
+          const value = Number(event.currentTarget.value);
+          if (mediaRef.current) mediaRef.current.currentTime = value;
+          setCurrentTime(value);
+        }}
+        aria-label={`Seek ${label}`}
+      />
+      <span className="ms-player-time">
+        {formatMediaTime(currentTime)} / {formatMediaTime(duration)}
+      </span>
+      <button
+        type="button"
+        className="ms-player-button"
+        onClick={toggleMuted}
+        aria-label={muted ? `Unmute ${label}` : `Mute ${label}`}
+        title={muted ? "Unmute" : "Mute"}
+      >
+        {muted ? <VolumeX size={16} strokeWidth={1.8} /> : <Volume2 size={16} strokeWidth={1.8} />}
+      </button>
+      {mediaType === "video" && (
+        <button
+          type="button"
+          className="ms-player-button"
+          onClick={openFullscreen}
+          aria-label={`View ${label} fullscreen`}
+          title="Fullscreen"
+        >
+          <Maximize2 size={16} strokeWidth={1.8} />
+        </button>
+      )}
+    </div>
+  );
+
+  if (mediaType === "audio") {
+    return (
+      <div className={`ms-audio-player ms-player-${variant}`}>
+        <div className="ms-audio-mark" aria-hidden="true">
+          <AudioLines size={22} strokeWidth={1.7} />
+        </div>
+        <div className="ms-audio-content">
+          <div className="ms-audio-kicker">{label}</div>
+          <audio
+            ref={(node) => { mediaRef.current = node; }}
+            src={src}
+            preload="metadata"
+            onLoadedMetadata={syncDuration}
+            onDurationChange={syncDuration}
+            onTimeUpdate={() => setCurrentTime(mediaRef.current?.currentTime || 0)}
+            onPlay={() => { announcePlay(); setPlaying(true); }}
+            onPause={() => setPlaying(false)}
+            onEnded={() => setPlaying(false)}
+            onVolumeChange={() => setMuted(Boolean(mediaRef.current?.muted))}
+          />
+          {controls}
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div ref={stageRef} className={`ms-video-player ms-player-${variant}`}>
+      <video
+        ref={(node) => { mediaRef.current = node; }}
+        src={src}
+        poster={poster}
+        preload="metadata"
+        playsInline
+        onClick={togglePlayback}
+        onLoadedMetadata={syncDuration}
+        onDurationChange={syncDuration}
+        onTimeUpdate={() => setCurrentTime(mediaRef.current?.currentTime || 0)}
+        onPlay={() => { announcePlay(); setPlaying(true); }}
+        onPause={() => setPlaying(false)}
+        onEnded={() => setPlaying(false)}
+        onVolumeChange={() => setMuted(Boolean(mediaRef.current?.muted))}
+      />
+      {!playing && (
+        <button
+          type="button"
+          className="ms-video-play-overlay"
+          onClick={togglePlayback}
+          aria-label={`Play ${label}`}
+          title="Play"
+        >
+          <Play size={20} strokeWidth={1.8} fill="currentColor" />
+        </button>
+      )}
+      {controls}
+    </div>
+  );
 }
 
 function Gallery({
@@ -4142,19 +4489,10 @@ function Gallery({
     );
   }
   // Video, audio, music: responsive grid of media-card players.
+  const videoKind = kind === "video" || kind === "avatar";
+  const playerLabel = mediaPlayerLabel(kind);
   return (
-    <div
-      style={{
-        display: "grid",
-        gridTemplateColumns: kind === "video" || kind === "avatar"
-          ? "repeat(auto-fill, minmax(min(360px, 100%), 1fr))"
-          : "repeat(auto-fill, minmax(min(280px, 100%), 1fr))",
-        gap: 8,
-        padding: 8,
-        alignItems: "start",
-        alignContent: "start",
-      }}
-    >
+    <div className={`ms-gallery-grid ${videoKind ? "ms-gallery-video" : "ms-gallery-audio"}`}>
       {generating && (
         <GeneratingCard prompt={generatingPrompt} model={generatingModel} costUSD={generatingCostUSD} />
       )}
@@ -4194,16 +4532,18 @@ function Gallery({
           return (
             <div
               key={g.id}
-              className="border border-border rounded overflow-hidden bg-bg-card"
+              className="ms-media-card"
             >
               {draft ? (
                 <DraftPreview generation={g} busy={generatingDraftId === g.id} onGenerate={onGenerateDraft} />
               ) : url ? (
-                kind === "video" || kind === "avatar" ? (
-                  <video controls src={url} className="w-full" />
-                ) : (
-                  <audio controls src={url} className="w-full" />
-                )
+                <StudioMediaPlayer
+                  src={url}
+                  mediaType={videoKind ? "video" : "audio"}
+                  label={playerLabel}
+                  durationSeconds={g.duration_ms > 0 ? g.duration_ms / 1000 : 0}
+                  poster={generationPoster(g)}
+                />
               ) : (
                 <div className="bg-bg-input py-6 text-center text-text-muted text-xs">no source</div>
               )}
@@ -4298,23 +4638,19 @@ function CardMeta({ g }: { g: Generation }) {
   const cost = formatCost(g.cost_usd);
   const status = g.status && g.status !== "ready" ? g.status : "";
   return (
-    <div className="p-2">
+    <div className="ms-card-meta p-2">
       <div className="text-text text-xs truncate flex items-center gap-1.5">
         {status && <span className="text-[10px] px-1.5 py-0.5 rounded bg-border text-text-muted uppercase">{status}</span>}
         <span className="truncate">{g.prompt}</span>
       </div>
-      <div className="text-text-dim mt-0.5 flex items-center gap-1.5" style={{ fontSize: 10 }}>
-        <span>{g.provider}</span>
-        <span>·</span>
-        <span>{g.model || g.size || "—"}</span>
-        <span>·</span>
-        <span>{new Date(g.created_at).toLocaleString()}</span>
-        {cost && (
-          <>
-            <span>·</span>
-            <span className="text-accent">{cost}</span>
-          </>
-        )}
+      <div className="ms-card-facts text-text-dim mt-1" style={{ fontSize: 10 }}>
+        <span className="truncate" title={`${g.provider} · ${g.model || g.size || "—"}`}>
+          {g.provider} · {g.model || g.size || "—"}
+        </span>
+        <span className="flex items-center gap-1.5 whitespace-nowrap">
+          <span>{new Date(g.created_at).toLocaleString()}</span>
+          {cost && <span className="text-accent">· {cost}</span>}
+        </span>
       </div>
     </div>
   );
@@ -4334,6 +4670,7 @@ function DetailAside({
   onUseAsReference?: () => void;
 }) {
   const url = selected.storage_urls?.[0] || selected.local_cache_url || selected.upstream_urls?.[0] || "";
+  const playerLabel = mediaPlayerLabel(selected.kind);
   return (
     <aside
       className="ms-media-detail flex-shrink-0 border-border bg-bg-card flex flex-col"
@@ -4368,9 +4705,24 @@ function DetailAside({
       </header>
       <div className="flex-1 overflow-auto">
         {url && selected.kind === "image" && <img src={url} alt="" className="w-full" />}
-        {url && (selected.kind === "video" || selected.kind === "avatar") && <video controls src={url} className="w-full" />}
+        {url && (selected.kind === "video" || selected.kind === "avatar") && (
+          <StudioMediaPlayer
+            src={url}
+            mediaType="video"
+            label={playerLabel}
+            durationSeconds={selected.duration_ms > 0 ? selected.duration_ms / 1000 : 0}
+            poster={generationPoster(selected)}
+            variant="detail"
+          />
+        )}
         {url && (selected.kind === "audio_tts" || selected.kind === "audio_sfx" || selected.kind === "music") && (
-          <audio controls src={url} className="w-full p-3" />
+          <StudioMediaPlayer
+            src={url}
+            mediaType="audio"
+            label={playerLabel}
+            durationSeconds={selected.duration_ms > 0 ? selected.duration_ms / 1000 : 0}
+            variant="detail"
+          />
         )}
         <dl className="px-4 py-3 text-xs flex flex-col gap-2">
           <Row label="Kind" value={selected.kind} />
@@ -4444,6 +4796,7 @@ function Lightbox({
   onUseAsReference?: () => void;
 }) {
   const url = item.storage_urls?.[0] || item.local_cache_url || item.upstream_urls?.[0] || imageSrc(item);
+  const playerLabel = mediaPlayerLabel(item.kind);
   const dialogRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     const previouslyFocused = document.activeElement instanceof HTMLElement
@@ -4498,10 +4851,23 @@ function Lightbox({
           />
         )}
         {url && (item.kind === "video" || item.kind === "avatar") && (
-          <video controls src={url} style={{ maxWidth: "92vw", maxHeight: "82vh" }} />
+          <StudioMediaPlayer
+            src={url}
+            mediaType="video"
+            label={playerLabel}
+            durationSeconds={item.duration_ms > 0 ? item.duration_ms / 1000 : 0}
+            poster={generationPoster(item)}
+            variant="lightbox"
+          />
         )}
         {url && (item.kind === "audio_tts" || item.kind === "audio_sfx" || item.kind === "music") && (
-          <audio controls src={url} style={{ width: "min(480px, calc(100vw - 48px))", maxWidth: "100%" }} />
+          <StudioMediaPlayer
+            src={url}
+            mediaType="audio"
+            label={playerLabel}
+            durationSeconds={item.duration_ms > 0 ? item.duration_ms / 1000 : 0}
+            variant="lightbox"
+          />
         )}
         <div className="text-text text-sm text-center" style={{ maxWidth: 700 }}>
           {item.prompt}

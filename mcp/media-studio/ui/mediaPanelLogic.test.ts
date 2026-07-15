@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   clampDuration,
+  formatMediaTime,
   imageGenerationOptions,
   isDurableMediaReference,
   mergeHistoryPage,
@@ -63,6 +64,13 @@ describe("Media Panel logic", () => {
     expect(ttsOutputFormats("deepgram")).toEqual(["mp3", "wav", "opus", "flac", "aac"]);
     expect(ttsOutputFormats("fish-audio")).toEqual(["mp3", "wav", "opus", "pcm"]);
     expect(ttsOutputFormats("elevenlabs")).toEqual([]);
+  });
+
+  test("formats player time without invalid or shifting values", () => {
+    expect(formatMediaTime(Number.NaN)).toBe("0:00");
+    expect(formatMediaTime(0)).toBe("0:00");
+    expect(formatMediaTime(65.9)).toBe("1:05");
+    expect(formatMediaTime(3661)).toBe("1:01:01");
   });
 
   test("rejects stale tab responses and preserves newer prompts", () => {

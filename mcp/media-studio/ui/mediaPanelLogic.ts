@@ -74,6 +74,18 @@ export function ttsOutputFormats(provider: string): string[] {
   return [];
 }
 
+export function formatMediaTime(seconds: number): string {
+  if (!Number.isFinite(seconds) || seconds < 0) return "0:00";
+  const total = Math.floor(seconds);
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  const remainingSeconds = total % 60;
+  if (hours > 0) {
+    return `${hours}:${String(minutes).padStart(2, "0")}:${String(remainingSeconds).padStart(2, "0")}`;
+  }
+  return `${minutes}:${String(remainingSeconds).padStart(2, "0")}`;
+}
+
 export function shouldCommitScopedResponse(requestKind: string, activeKind: string): boolean {
   return requestKind === activeKind;
 }
