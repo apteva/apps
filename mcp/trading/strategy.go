@@ -1,6 +1,7 @@
 package main
 
 import (
+	"database/sql"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -807,6 +808,9 @@ func (a *App) toolStrategyGet(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	if err != nil {
 		return nil, err
 	}
+	if err := enrichStrategyRuntime(ctx.AppDB(), pid, []*Strategy{strategy}, time.Now()); err != nil {
+		return nil, err
+	}
 	return map[string]any{"strategy": strategy}, nil
 }
 
@@ -819,7 +823,149 @@ func (a *App) toolStrategyList(ctx *sdk.AppCtx, args map[string]any) (any, error
 	if err != nil {
 		return nil, err
 	}
+	if err := enrichStrategyRuntime(ctx.AppDB(), pid, rows, time.Now()); err != nil {
+		return nil, err
+	}
 	return map[string]any{"strategies": rows, "count": len(rows)}, nil
+}
+
+func enrichStrategyRuntime(db *sql.DB, projectID string, strategies []*Strategy, now time.Time) error {
+	assignments, err := dbActiveStrategyAssignmentsForProject(db, projectID)
+	if err != nil {
+		return err
+	}
+	portfolios, err := dbListPortfolios(db, projectID)
+	if err != nil {
+		return err
+	}
+	portfolioNames := map[int64]string{}
+	for _, portfolio := range portfolios {
+		portfolioNames[portfolio.ID] = portfolio.Name
+	}
+	byStrategy := map[int64][]*StrategyAssignment{}
+	for _, assignment := range assignments {
+		assignment.PortfolioName = portfolioNames[assignment.PortfolioID]
+		pinned, err := dbGetStrategyVersion(db, projectID, assignment.StrategyID, assignment.StrategyVersion)
+		if err == nil {
+			if def, _, validationErr := validateStrategyDefinition(pinned.Definition); validationErr == nil {
+				decorateStrategyAssignmentSchedule(assignment, def, now)
+			}
+		}
+		byStrategy[assignment.StrategyID] = append(byStrategy[assignment.StrategyID], assignment)
+	}
+	for _, strategy := range strategies {
+		strategy.Assignments = byStrategy[strategy.ID]
+		if len(strategy.Assignments) == 0 {
+			strategy.AssignmentStatus = "unassigned"
+		} else {
+			strategy.AssignmentStatus = "assigned"
+		}
+	}
+	return nil
+}
+
+func decorateStrategyAssignmentSchedule(assignment *StrategyAssignment, def *StrategyDefinition, now time.Time) {
+	if !strategyHasStocks(def) {
+		slot, _ := strategyAssignmentCheckSlot(def, now)
+		if strategyAssignmentCheckDue(assignment, slot) {
+			assignment.Eligibility = "eligible"
+			assignment.EligibilityReason = "cadence_ready"
+			assignment.NextEligibleAt = now.UTC().Format(time.RFC3339)
+			return
+		}
+		duration, ok := strategyCadenceDuration(strategyHistoryInterval(def))
+		if !ok || duration <= 0 {
+			duration = time.Hour
+		}
+		assignment.Eligibility = "waiting"
+		assignment.EligibilityReason = "waiting_for_next_cadence"
+		assignment.NextEligibleAt = slot.Add(duration).UTC().Format(time.RFC3339)
+		return
+	}
+
+	session := usEquitySessionAt(now)
+	if session.OpenDay {
+		assignment.SessionOpenAt = session.Open.UTC().Format(time.RFC3339)
+		assignment.SessionCloseAt = session.Close.UTC().Format(time.RFC3339)
+	}
+	if !session.OpenDay {
+		assignment.Eligibility = "waiting"
+		assignment.EligibilityReason = session.Reason
+		assignment.NextEligibleAt = nextUSEquityOpen(now).Format(time.RFC3339)
+		return
+	}
+	if now.Before(session.Open) {
+		assignment.Eligibility = "waiting"
+		assignment.EligibilityReason = "before_market_open"
+		assignment.NextEligibleAt = session.Open.UTC().Format(time.RFC3339)
+		return
+	}
+	if !now.Before(session.Close) {
+		assignment.Eligibility = "waiting"
+		assignment.EligibilityReason = "market_closed"
+		assignment.NextEligibleAt = nextUSEquityOpen(session.Close.Add(time.Second)).Format(time.RFC3339)
+		return
+	}
+	slot, ok := strategyAssignmentCheckSlot(def, now)
+	if !ok || !strategyAssignmentCheckDue(assignment, slot) {
+		assignment.Eligibility = "waiting"
+		assignment.EligibilityReason = "waiting_for_next_cadence"
+		assignment.NextEligibleAt = nextStockStrategyCheck(def, slot, session).Format(time.RFC3339)
+		return
+	}
+	if globalEngine != nil {
+		if _, live := globalEngine.provider.(*liveProvider); !live {
+			assignment.Eligibility = "eligible"
+			assignment.EligibilityReason = "regular_session_ready"
+			assignment.NextEligibleAt = now.UTC().Format(time.RFC3339)
+			return
+		}
+		for _, symbol := range def.Universe {
+			class := inferAssetClass(symbol)
+			if class != "equity" && class != "etf" {
+				continue
+			}
+			mark, err := dbGetMark(globalEngine.db, symbol)
+			if err != nil || !markFresh(mark, now.UTC()) {
+				assignment.Eligibility = "waiting"
+				assignment.EligibilityReason = "waiting_for_fresh_market_data"
+				assignment.NextEligibleAt = now.UTC().Format(time.RFC3339)
+				return
+			}
+		}
+	}
+	assignment.Eligibility = "eligible"
+	assignment.EligibilityReason = "regular_session_ready"
+	assignment.NextEligibleAt = now.UTC().Format(time.RFC3339)
+}
+
+func strategyHasStocks(def *StrategyDefinition) bool {
+	for _, symbol := range def.Universe {
+		class := inferAssetClass(symbol)
+		if class == "equity" || class == "etf" {
+			return true
+		}
+	}
+	return false
+}
+
+func nextStockStrategyCheck(def *StrategyDefinition, slot time.Time, session usEquitySession) time.Time {
+	cadence := strategyHistoryInterval(def)
+	if cadence == "1d" {
+		return nextUSEquityOpen(session.Close.Add(time.Second))
+	}
+	if cadence == "1w" {
+		return nextUSEquityOpen(slot.AddDate(0, 0, 7))
+	}
+	duration, ok := strategyCadenceDuration(cadence)
+	if !ok || duration <= 0 {
+		duration = time.Hour
+	}
+	next := slot.Add(duration)
+	if next.Before(session.Close) {
+		return next.UTC()
+	}
+	return nextUSEquityOpen(session.Close.Add(time.Second))
 }
 
 func (a *App) toolStrategyValidate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
@@ -1229,6 +1375,10 @@ func (a *App) handleHTTPStrategies(w http.ResponseWriter, r *http.Request) {
 				httpErr(w, 500, err.Error())
 				return
 			}
+			if err := enrichStrategyRuntime(globalCtx.AppDB(), pid, rows, time.Now()); err != nil {
+				httpErr(w, 500, err.Error())
+				return
+			}
 			httpJSON(w, 200, map[string]any{"strategies": rows})
 		case http.MethodPost:
 			var body struct {
@@ -1275,6 +1425,10 @@ func (a *App) handleHTTPStrategies(w http.ResponseWriter, r *http.Request) {
 		strategy, err := dbGetStrategy(globalCtx.AppDB(), pid, id)
 		if err != nil {
 			httpErr(w, 404, "strategy not found")
+			return
+		}
+		if err := enrichStrategyRuntime(globalCtx.AppDB(), pid, []*Strategy{strategy}, time.Now()); err != nil {
+			httpErr(w, 500, err.Error())
 			return
 		}
 		httpJSON(w, 200, map[string]any{"strategy": strategy})

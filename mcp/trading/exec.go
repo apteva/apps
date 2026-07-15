@@ -255,7 +255,7 @@ func markTick(ctx context.Context, app *sdk.AppCtx) error {
 // fetches are bounded and concurrent so one slow symbol does not serialize the
 // entire execution tick.
 func refreshPersistedMarks(e *engine, refreshed []*Mark) []*Mark {
-	persisted, err := dbListMarks(e.db)
+	persisted, err := dbListRefreshSymbols(e.db)
 	if err != nil {
 		return nil
 	}
@@ -266,9 +266,9 @@ func refreshPersistedMarks(e *engine, refreshed []*Mark) []*Mark {
 		}
 	}
 	symbols := []string{}
-	for _, mark := range persisted {
-		if mark != nil && !base[strings.ToUpper(mark.Symbol)] {
-			symbols = append(symbols, mark.Symbol)
+	for _, symbol := range persisted {
+		if !base[strings.ToUpper(symbol)] {
+			symbols = append(symbols, symbol)
 		}
 	}
 	if len(symbols) == 0 {
@@ -429,16 +429,8 @@ func stockStrategyExecutionReady(e *engine, def *StrategyDefinition, now time.Ti
 }
 
 func usEquityRegularSession(now time.Time) bool {
-	location, err := time.LoadLocation("America/New_York")
-	if err != nil {
-		return false
-	}
-	local := now.In(location)
-	if local.Weekday() == time.Saturday || local.Weekday() == time.Sunday {
-		return false
-	}
-	minute := local.Hour()*60 + local.Minute()
-	return minute >= 9*60+30 && minute < 16*60
+	session := usEquitySessionAt(now)
+	return session.OpenDay && !now.Before(session.Open) && now.Before(session.Close)
 }
 
 func portfolioUsesBacktestPricing(db *sql.DB, portfolioID int64) bool {
@@ -500,15 +492,12 @@ func strategyAssignmentCheckSlot(def *StrategyDefinition, now time.Time) (time.T
 	if !hasStocks {
 		return strategyClosedCandleBoundary(now, cadence), true
 	}
-	location, err := time.LoadLocation("America/New_York")
-	if err != nil {
+	session := usEquitySessionAt(now)
+	if !session.OpenDay || now.Before(session.Open) || !now.Before(session.Close) {
 		return time.Time{}, false
 	}
-	local := now.In(location)
-	open := time.Date(local.Year(), local.Month(), local.Day(), 9, 30, 0, 0, location)
-	if local.Before(open) {
-		return time.Time{}, false
-	}
+	local := now.In(session.Open.Location())
+	open := session.Open
 	if cadence == "1d" {
 		return open.UTC(), true
 	}
@@ -884,6 +873,10 @@ func tryFill(e *engine, o *Order) error {
 		_ = tx.Rollback()
 		return err
 	}
+	if err := dbAccruePositionAccountingTx(tx, pf.ID, o.Symbol, polyOutcome(o), 0, fee); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
 	if fee > 0 {
 		if _, err := tx.Exec(`UPDATE portfolios SET cash = cash - ?, updated_at = CURRENT_TIMESTAMP WHERE id = ?`, fee, pf.ID); err != nil {
 			_ = tx.Rollback()
@@ -1231,6 +1224,10 @@ func applyBrokerProgress(db *sql.DB, projectID string, pf *Portfolio, o *Order, 
 			return false, err
 		}
 		if err := dbApplyFill(tx, pf.ID, projectID, o, deltaQty, deltaPrice); err != nil {
+			_ = tx.Rollback()
+			return false, err
+		}
+		if err := dbAccruePositionAccountingTx(tx, pf.ID, o.Symbol, polyOutcome(o), 0, fee); err != nil {
 			_ = tx.Rollback()
 			return false, err
 		}

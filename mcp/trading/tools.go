@@ -726,6 +726,9 @@ func (a *App) toolPortfolioList(ctx *sdk.AppCtx, args map[string]any) (any, erro
 			"allowed_classes": snap.AllowedClasses, "status": snap.Status,
 			"equity": snap.Equity, "cash": snap.Cash,
 			"day_pnl": snap.DayPnL, "day_pnl_pct": snap.DayPnLPct,
+			"open_pnl": snap.OpenPnL, "open_pnl_pct": snap.OpenPnLPct,
+			"realized_pnl": snap.RealizedPnL, "fees_paid": snap.FeesPaid,
+			"total_pnl": snap.TotalPnL, "total_pnl_pct": snap.TotalPnLPct,
 		})
 	}
 	return map[string]any{"portfolios": out}, nil
@@ -763,6 +766,8 @@ func (a *App) toolAccountSummary(ctx *sdk.AppCtx, args map[string]any) (any, err
 		"equity": snap.Equity, "cash": snap.Cash, "buying_power": snap.BuyingPower,
 		"day_pnl": snap.DayPnL, "day_pnl_pct": snap.DayPnLPct,
 		"open_pnl": snap.OpenPnL, "open_pnl_pct": snap.OpenPnLPct,
+		"realized_pnl": snap.RealizedPnL, "fees_paid": snap.FeesPaid,
+		"total_pnl": snap.TotalPnL, "total_pnl_pct": snap.TotalPnLPct,
 		"status": snap.Status, "mode": snap.Mode,
 	}, nil
 }

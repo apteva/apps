@@ -335,6 +335,79 @@ func TestStockStrategyExecutionWaitsForRegularSession(t *testing.T) {
 	}
 }
 
+func TestStockStrategyExecutionHonorsUSHolidaysAndEarlyClose(t *testing.T) {
+	def := &StrategyDefinition{Universe: []string{"AAPL"}}
+	e := &engine{provider: &recordingStrategyProvider{}}
+	// July 4 falls on Saturday in 2026, so Friday July 3 is the observed
+	// exchange holiday.
+	holiday := time.Date(2026, 7, 3, 15, 0, 0, 0, time.UTC)
+	if usEquityRegularSession(holiday) || stockStrategyExecutionReady(e, def, holiday) {
+		t.Fatal("stock strategy became executable on observed Independence Day")
+	}
+	if _, ok := strategyAssignmentCheckSlot(def, holiday); ok {
+		t.Fatal("holiday produced a strategy check slot")
+	}
+
+	// The session after Thanksgiving closes at 13:00 New York.
+	afterEarlyClose := time.Date(2026, 11, 27, 19, 0, 0, 0, time.UTC)
+	if usEquityRegularSession(afterEarlyClose) {
+		t.Fatal("stock session remained open after the scheduled early close")
+	}
+	// NYSE explicitly does not observe Saturday New Year's Day on the
+	// preceding Friday.
+	newYearsEve := time.Date(2027, 12, 31, 16, 0, 0, 0, time.UTC)
+	if !usEquityRegularSession(newYearsEve) {
+		t.Fatal("Friday before Saturday New Year's Day should remain open")
+	}
+}
+
+func TestStrategyAssignmentScheduleExposesHolidayDecision(t *testing.T) {
+	assignment := &StrategyAssignment{}
+	def := &StrategyDefinition{Universe: []string{"AAPL"}, Cadence: "1d"}
+	now := time.Date(2026, 7, 3, 15, 0, 0, 0, time.UTC)
+	decorateStrategyAssignmentSchedule(assignment, def, now)
+
+	if assignment.Eligibility != "waiting" || assignment.EligibilityReason != "market_holiday: Independence Day" {
+		t.Fatalf("schedule = %#v", assignment)
+	}
+	if assignment.NextEligibleAt != "2026-07-06T13:30:00Z" {
+		t.Fatalf("next eligible = %q", assignment.NextEligibleAt)
+	}
+}
+
+func TestStrategyRuntimeDistinguishesAssignedAndUnassigned(t *testing.T) {
+	ctx := newTestCtx(t)
+	portfolioID := mustCreatePortfolio(t, ctx, "Assigned portfolio", []string{"crypto"})
+	assignedID := mustCreateFixedStrategy(t, ctx, "Assigned strategy", "BTC-USD", 0.5)
+	unassignedID := mustCreateFixedStrategy(t, ctx, "Unassigned strategy", "ETH-USD", 0.5)
+	if _, err := dbAssignStrategy(ctx.AppDB(), &StrategyAssignment{
+		ProjectID: "test-proj", PortfolioID: portfolioID, StrategyID: assignedID,
+		StrategyVersion: 1, ControlMode: "strategy", Cadence: "1h",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	strategies, err := dbListStrategies(ctx.AppDB(), "test-proj", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := enrichStrategyRuntime(ctx.AppDB(), "test-proj", strategies, time.Date(2026, 7, 15, 8, 0, 0, 0, time.UTC)); err != nil {
+		t.Fatal(err)
+	}
+	byID := map[int64]*Strategy{}
+	for _, strategy := range strategies {
+		byID[strategy.ID] = strategy
+	}
+	if byID[assignedID].AssignmentStatus != "assigned" || len(byID[assignedID].Assignments) != 1 {
+		t.Fatalf("assigned strategy = %#v", byID[assignedID])
+	}
+	if byID[assignedID].Assignments[0].PortfolioName != "Assigned portfolio" {
+		t.Fatalf("portfolio name = %q", byID[assignedID].Assignments[0].PortfolioName)
+	}
+	if byID[unassignedID].AssignmentStatus != "unassigned" || len(byID[unassignedID].Assignments) != 0 {
+		t.Fatalf("unassigned strategy = %#v", byID[unassignedID])
+	}
+}
+
 func TestStrategyAssignmentCadenceCountsCompletedBars(t *testing.T) {
 	def := &StrategyDefinition{Cadence: "1d", RebalanceEvery: 5, Universe: []string{"AAPL"}}
 	a := &StrategyAssignment{LastMarketBarAt: "2026-07-02T13:30:00Z"}

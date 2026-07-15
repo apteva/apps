@@ -5,9 +5,8 @@ package main
 //
 // What it creates:
 //   - one paper portfolio with starting cash from config
-//   - the bootstrap watchlist (default: BTC-USD, ETH-USD, SOL-USD,
-//     POLY:btc-100k-2026 — covers crypto + a polymarket so the
-//     operator sees both UI surfaces immediately)
+//   - the bootstrap crypto watchlist (Polymarket markets are discovered
+//     dynamically because event slugs expire)
 //   - one welcome journal entry
 //
 // Gated by the `bootstrap_demo` config flag (default true). Set to

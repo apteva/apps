@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: trading
 display_name: Trading
-version: 0.4.38
+version: 0.4.39
 description: |
   Trading desk for Apteva agents. Multi-portfolio, multi-asset (equity,
   etf, crypto, polymarket prediction markets). Each portfolio runs in
@@ -209,7 +209,7 @@ config_schema:
       install empty (operator or agent creates everything by hand).
   - name: bootstrap_watchlist
     type: text
-    default: "BTC-USD,ETH-USD,SOL-USD,POLY:btc-100k-2026"
+    default: "BTC-USD,ETH-USD,SOL-USD"
     label: Bootstrap watchlist (comma-separated)
     description: Symbols added to the demo book's watchlist when bootstrap_demo is on.
 
