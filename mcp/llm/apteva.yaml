@@ -2,17 +2,17 @@ schema: apteva-app/v1
 
 name: llm
 display_name: LLM Gateway
-version: 0.5.2
+version: 0.5.3
 description: |
   Managed AI API access for Apteva-hosted apps and agents. Provides an
-  OpenAI-compatible tenant-safe gateway that routes requests to configured
+  OpenAI-compatible tenant-safe gateway that routes text and image requests to configured
   model providers, enforces project and subject policy, and records raw token,
   request, and upstream provider-cost usage for orchestration apps.
 
 author: Apteva
 homepage: https://github.com/apteva/apps/tree/main/mcp/llm
 icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/llm/icon.svg
-tags: [llm, ai, gateway, openai-compatible, usage]
+tags: [llm, ai, gateway, openai-compatible, multimodal, vision, usage]
 
 scopes: [project, global]
 min_apteva_version: "0.11.0"
@@ -62,7 +62,7 @@ provides:
       no_auth: true
   mcp_tools:
     - name: llm_chat_complete
-      description: OpenAI-compatible chat completion through the configured LLM gateway.
+      description: OpenAI-compatible text or image chat completion through the configured LLM gateway.
     - name: llm_models_list
       description: List models allowed by the current policy.
     - name: llm_models_sync

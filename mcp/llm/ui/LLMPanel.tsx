@@ -98,8 +98,15 @@ interface ProviderModel {
   model_id: string;
   display_name?: string;
   gateway_model: string;
+  input_modalities?: string[];
+  output_modalities?: string[];
   status: string;
   last_seen_at?: string;
+}
+
+interface TestImage {
+  name: string;
+  dataUrl: string;
 }
 
 interface ProviderRate {
@@ -199,6 +206,7 @@ export default function LLMPanel({ projectId }: NativePanelProps) {
   const [modelId, setModelId] = useState("");
   const [customModel, setCustomModel] = useState(false);
   const [prompt, setPrompt] = useState("Reply with one short sentence confirming the gateway works.");
+  const [testImage, setTestImage] = useState<TestImage | null>(null);
   const [maxTokens, setMaxTokens] = useState(256);
   const [response, setResponse] = useState<any>(null);
   const [testUsage, setTestUsage] = useState<UsageEvent | null>(null);
@@ -284,6 +292,9 @@ export default function LLMPanel({ projectId }: NativePanelProps) {
   const modelSuggestions = useMemo(() => models
     .filter((model) => model.provider === selectedProvider && model.status === "active")
     .map((model) => ({ id: model.model_id, label: model.display_name || model.model_id })), [models, selectedProvider]);
+  const selectedModel = useMemo(() => models.find((model) => model.provider === selectedProvider && model.model_id === modelId && model.status === "active"), [modelId, models, selectedProvider]);
+  const selectedModalities = selectedModel?.input_modalities || [];
+  const imageUnsupported = !!testImage && selectedModalities.length > 0 && !selectedModalities.some(isImageModality);
 
   useEffect(() => {
     if (!selectedProvider || modelSuggestions.length === 0 || customModel) return;
@@ -328,11 +339,14 @@ export default function LLMPanel({ projectId }: NativePanelProps) {
   const runTest = () => perform("test", async () => {
     setResponse(null);
     setTestUsage(null);
+    const content = testImage
+      ? [...(prompt.trim() ? [{ type: "text", text: prompt }] : []), { type: "image_url", image_url: { url: testImage.dataUrl } }]
+      : prompt;
     const data = await api<any>("/test/chat", {
       method: "POST",
       body: JSON.stringify({
         model: modelForRequest(selectedProvider, modelId),
-        messages: [{ role: "user", content: prompt }],
+        messages: [{ role: "user", content }],
         max_tokens: maxTokens,
       }),
     });
@@ -344,6 +358,24 @@ export default function LLMPanel({ projectId }: NativePanelProps) {
     setUsage(summary);
     setTestUsage(events.usage_events?.[0] || null);
   });
+
+  const selectTestImage = async (file?: File) => {
+    if (!file) return;
+    setStatus("");
+    if (!file.type.startsWith("image/")) {
+      setStatus("Select an image file.");
+      return;
+    }
+    if (file.size > 5 * 1024 * 1024) {
+      setStatus("The test image must be 5 MiB or smaller.");
+      return;
+    }
+    try {
+      setTestImage({ name: file.name, dataUrl: await fileAsDataURL(file) });
+    } catch (error) {
+      setStatus((error as Error).message);
+    }
+  };
 
   const saveRate = () => perform("rate-save", async () => {
     await api("/provider-rates", { method: "PUT", body: JSON.stringify({ ...rateDraft, source: "manual" }) });
@@ -469,8 +501,18 @@ export default function LLMPanel({ projectId }: NativePanelProps) {
             <Field label="Prompt">
               <textarea value={prompt} onChange={(event) => setPrompt(event.target.value)} className={`${controlClass} min-h-[180px] resize-y`} />
             </Field>
+            <div className="flex items-center gap-2 min-w-0">
+              <label className={`${secondaryButton} cursor-pointer`}>
+                {testImage ? "Replace image" : "Add image"}
+                <input type="file" accept="image/*" className="sr-only" onChange={(event) => { void selectTestImage(event.target.files?.[0]); event.target.value = ""; }} />
+              </label>
+              {testImage && <button type="button" onClick={() => setTestImage(null)} className={secondaryButton}>Remove</button>}
+              {testImage && <span className="text-xs text-text-muted truncate" title={testImage.name}>{testImage.name}</span>}
+            </div>
+            {testImage && <div className="border border-border rounded bg-bg-input p-2 w-fit max-w-full"><img src={testImage.dataUrl} alt={testImage.name} className="block max-h-40 max-w-full object-contain" /></div>}
+            {imageUnsupported && <div className="text-xs text-error">Selected model does not support image input.</div>}
             <NumberField label="Maximum output tokens" value={maxTokens} onChange={setMaxTokens} />
-            <button type="button" disabled={!!busy || !selectedProvider || !modelId || !prompt} onClick={runTest} className={primaryButton}>{busy === "test" ? "Running..." : "Run"}</button>
+            <button type="button" disabled={!!busy || !selectedProvider || !modelId || (!prompt.trim() && !testImage) || imageUnsupported} onClick={runTest} className={primaryButton}>{busy === "test" ? "Running..." : "Run"}</button>
           </main>
           <section className="overflow-auto p-4 border-t xl:border-t-0 border-border">
             <h2 className="text-sm font-medium mb-3">Response</h2>
@@ -693,3 +735,5 @@ function queryString(values: Record<string, string>): string { const query = new
 function modelForRequest(provider: string, modelId: string): string { const cleanProvider = provider.trim(); const cleanModel = modelId.trim(); return cleanProvider && cleanModel && !cleanModel.startsWith(`${cleanProvider}/`) ? `${cleanProvider}/${cleanModel}` : cleanModel; }
 function formatFallbackRoutes(routes?: FallbackRoute[]): string { return (routes || []).map((route) => `${route.provider} | ${route.model}`).join("\n"); }
 function parseFallbackRoutes(value: string): FallbackRoute[] { return value.split(/\r?\n/).map((line) => line.trim()).filter(Boolean).map((line) => { const [provider, ...model] = line.split("|"); return { provider: provider.trim(), model: model.join("|").trim() }; }).filter((route) => route.model); }
+function isImageModality(value: string): boolean { return ["image", "images", "vision", "image_url", "input_image"].includes(value.toLowerCase()); }
+function fileAsDataURL(file: File): Promise<string> { return new Promise((resolve, reject) => { const reader = new FileReader(); reader.onload = () => typeof reader.result === "string" ? resolve(reader.result) : reject(new Error("Could not read the image.")); reader.onerror = () => reject(new Error("Could not read the image.")); reader.readAsDataURL(file); }); }

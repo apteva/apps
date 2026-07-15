@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"database/sql"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -27,8 +28,8 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: llm
 display_name: LLM Gateway
-version: 0.5.2
-description: Generic OpenAI-compatible AI access with provider-cost metering for Apteva-hosted apps and agents.
+version: 0.5.3
+description: Generic OpenAI-compatible text and image access with provider-cost metering for Apteva-hosted apps and agents.
 author: Apteva
 scopes: [project, global]
 icon: https://raw.githubusercontent.com/apteva/apps/main/mcp/llm/icon.svg
@@ -149,6 +150,12 @@ config_schema:
 upgrade_policy: auto-patch
 `
 
+const (
+	maxImageRequestBytes = 16 << 20
+	maxDataImageBytes    = 10 << 20
+	imageTokenEstimate   = 1024
+)
+
 type App struct {
 	httpClient *http.Client
 }
@@ -189,7 +196,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		}
 	}
 	globalCtx = ctx
-	ctx.Logger().Info("llm gateway mounted", "version", "0.5.1", "scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
+	ctx.Logger().Info("llm gateway mounted", "version", "0.5.3", "scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
 	return nil
 }
 
@@ -415,15 +422,18 @@ func (a *App) HTTPRoutes() []sdk.Route {
 
 func (a *App) MCPTools() []sdk.Tool {
 	return []sdk.Tool{
-		{Name: "llm_chat_complete", Description: "OpenAI-compatible chat completion through the configured gateway.", InputSchema: schemaObject(map[string]any{
+		{Name: "llm_chat_complete", Description: "OpenAI-compatible text or image chat completion through the configured gateway.", InputSchema: schemaObject(map[string]any{
 			"project_id":   map[string]any{"type": "string"},
 			"subject_type": map[string]any{"type": "string"},
 			"subject_id":   map[string]any{"type": "string"},
 			"request_id":   map[string]any{"type": "string"},
 			"model":        map[string]any{"type": "string"},
-			"messages":     map[string]any{"type": "array"},
-			"tools":        map[string]any{"type": "array"},
-			"tool_choice":  map[string]any{},
+			"messages": map[string]any{
+				"type":        "array",
+				"description": "Chat messages. Content may be text or text/input_text and image_url/input_image blocks using an http(s) URL or base64 image data URL.",
+			},
+			"tools":       map[string]any{"type": "array"},
+			"tool_choice": map[string]any{},
 			"temperature": map[string]any{
 				"type": "number",
 			},
@@ -743,7 +753,10 @@ func (a *App) handleV1Models(ctx *sdk.AppCtx, ident *TokenIdentity, w http.Respo
 			continue
 		}
 		seen[id] = true
-		data = append(data, map[string]any{"id": id, "object": "model", "owned_by": model.Provider, "display_name": model.DisplayName})
+		data = append(data, map[string]any{
+			"id": id, "object": "model", "owned_by": model.Provider, "display_name": model.DisplayName,
+			"input_modalities": model.InputModalities, "output_modalities": model.OutputModalities, "capabilities": model.Capabilities,
+		})
 	}
 	for _, pol := range policies {
 		for _, model := range pol.AllowedModels {
@@ -789,7 +802,7 @@ func (a *App) handleV1Usage(ctx *sdk.AppCtx, ident *TokenIdentity, w http.Respon
 
 func (a *App) handleV1Chat(ctx *sdk.AppCtx, ident *TokenIdentity, w http.ResponseWriter, r *http.Request) {
 	var body map[string]any
-	if err := json.NewDecoder(io.LimitReader(r.Body, 8<<20)).Decode(&body); err != nil {
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxImageRequestBytes)).Decode(&body); err != nil {
 		writeOpenAIError(w, http.StatusBadRequest, "invalid_request_error", "invalid JSON")
 		return
 	}
@@ -818,7 +831,7 @@ func (a *App) handleV1Chat(ctx *sdk.AppCtx, ident *TokenIdentity, w http.Respons
 
 func (a *App) handleV1Responses(ctx *sdk.AppCtx, ident *TokenIdentity, w http.ResponseWriter, r *http.Request) {
 	var req map[string]any
-	if err := json.NewDecoder(io.LimitReader(r.Body, 8<<20)).Decode(&req); err != nil {
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxImageRequestBytes)).Decode(&req); err != nil {
 		writeOpenAIError(w, http.StatusBadRequest, "invalid_request_error", "invalid JSON")
 		return
 	}
@@ -1187,6 +1200,9 @@ type providerAttempt struct {
 }
 
 func (a *App) executeChatContext(reqCtx context.Context, ctx *sdk.AppCtx, ident *TokenIdentity, body map[string]any) (*chatResult, error) {
+	if err := normalizeChatImageInputs(body); err != nil {
+		return nil, err
+	}
 	model := strArg(body, "model")
 	if model == "" {
 		return nil, userError("model is required")
@@ -1203,8 +1219,12 @@ func (a *App) executeChatContext(reqCtx context.Context, ctx *sdk.AppCtx, ident 
 		_ = dbAudit(ctx.AppDB(), ident, "request.denied", provider, model, "denied", err.Error(), nil)
 		return nil, err
 	}
+	if err := ensureModelSupportsRequest(ctx.AppDB(), ident.ProjectID, provider, model, body); err != nil {
+		_ = dbAudit(ctx.AppDB(), ident, "request.denied", provider, model, "denied", err.Error(), map[string]any{"input_modality": "image"})
+		return nil, err
+	}
 	attempts := fallbackAttempts(policies, provider, model)
-	estimatedInput := estimateTokens(body)
+	estimatedInput := estimateChatTokens(body)
 	requestID := firstNonEmpty(strArg(body, "_llm_request_id"), "llm_req_"+randomSuffix(16))
 	reservation, grantedMax, err := reserveUsage(ctx.AppDB(), ident, provider, model, estimatedInput, int64Arg(body, "max_tokens"), requestID, policies, true)
 	if err != nil {
@@ -1230,6 +1250,14 @@ func (a *App) executeChatContext(reqCtx context.Context, ctx *sdk.AppCtx, ident 
 			continue
 		}
 		used = attempt
+		if i > 0 {
+			if err := ensureModelSupportsRequest(ctx.AppDB(), ident.ProjectID, attempt.Provider, attempt.Model, body); err != nil {
+				lastErr = err
+				failedAttempts++
+				attemptDetails = append(attemptDetails, map[string]any{"provider": attempt.Provider, "model": attempt.Model, "status": "skipped", "error": err.Error()})
+				continue
+			}
+		}
 		cfg, err := providerConfigFor(ctx, ident.ProjectID, attempt.Provider)
 		if err == nil {
 			attemptBody := cloneMap(body)
@@ -1651,7 +1679,7 @@ func (a *App) handleTestChat(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var args map[string]any
-	if err := json.NewDecoder(io.LimitReader(r.Body, 8<<20)).Decode(&args); err != nil {
+	if err := json.NewDecoder(io.LimitReader(r.Body, maxImageRequestBytes)).Decode(&args); err != nil {
 		http.Error(w, "invalid json", http.StatusBadRequest)
 		return
 	}
@@ -2492,6 +2520,34 @@ func dbProviderModelsList(db *sql.DB, f providerModelFilter) ([]ProviderModel, e
 		out = append(out, model)
 	}
 	return out, rows.Err()
+}
+
+func ensureModelSupportsRequest(db *sql.DB, projectID, provider, model string, body map[string]any) error {
+	if !requestContainsImage(body) {
+		return nil
+	}
+	var raw string
+	err := db.QueryRow(`SELECT input_modalities_json FROM provider_models
+		WHERE (project_id=? OR project_id='') AND provider=? AND model_id=? AND status='active'
+		ORDER BY CASE WHEN project_id=? THEN 0 ELSE 1 END LIMIT 1`,
+		projectID, provider, upstreamModel(provider, model), projectID).Scan(&raw)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+	modalities := []string{}
+	if json.Unmarshal([]byte(raw), &modalities) != nil || len(modalities) == 0 {
+		return nil
+	}
+	for _, modality := range modalities {
+		switch strings.ToLower(strings.TrimSpace(modality)) {
+		case "image", "images", "vision", "image_url", "input_image":
+			return nil
+		}
+	}
+	return userError(fmt.Sprintf("model %q does not support image input according to its provider metadata", model))
 }
 
 func dbPolicyGet(db *sql.DB, projectID, subjectType, subjectID string) (*Policy, error) {
@@ -4116,6 +4172,188 @@ func estimateTokens(v any) int64 {
 		n = 1
 	}
 	return n
+}
+
+func estimateChatTokens(v any) int64 {
+	characters, images := estimateChatInput(v)
+	tokens := characters/4 + images*imageTokenEstimate
+	if tokens < 1 {
+		return 1
+	}
+	return tokens
+}
+
+func estimateChatInput(v any) (characters, images int64) {
+	switch value := v.(type) {
+	case string:
+		return int64(len(value)), 0
+	case []any:
+		for _, item := range value {
+			itemCharacters, itemImages := estimateChatInput(item)
+			characters += itemCharacters
+			images += itemImages
+		}
+	case map[string]any:
+		if isImageContentType(strArg(value, "type")) {
+			return 0, 1
+		}
+		for _, item := range value {
+			itemCharacters, itemImages := estimateChatInput(item)
+			characters += itemCharacters
+			images += itemImages
+		}
+	default:
+		if value != nil {
+			characters = int64(len(fmt.Sprint(value)))
+		}
+	}
+	return characters, images
+}
+
+func normalizeChatImageInputs(body map[string]any) error {
+	messages, ok := body["messages"].([]any)
+	if !ok {
+		return nil
+	}
+	normalized := make([]any, 0, len(messages))
+	for _, raw := range messages {
+		message, ok := raw.(map[string]any)
+		if !ok {
+			normalized = append(normalized, raw)
+			continue
+		}
+		copyMessage := cloneMap(message)
+		content, err := normalizeChatContent(copyMessage["content"])
+		if err != nil {
+			return err
+		}
+		copyMessage["content"] = content
+		normalized = append(normalized, copyMessage)
+	}
+	body["messages"] = normalized
+	return nil
+}
+
+func normalizeChatContent(content any) (any, error) {
+	blocks, ok := content.([]any)
+	if !ok {
+		return content, nil
+	}
+	normalized := make([]any, 0, len(blocks))
+	for _, raw := range blocks {
+		block, ok := raw.(map[string]any)
+		if !ok {
+			normalized = append(normalized, raw)
+			continue
+		}
+		blockType := strings.ToLower(strings.TrimSpace(strArg(block, "type")))
+		switch blockType {
+		case "input_text":
+			copyBlock := cloneMap(block)
+			copyBlock["type"] = "text"
+			normalized = append(normalized, copyBlock)
+		case "image_url", "input_image":
+			image, err := canonicalImageBlock(block)
+			if err != nil {
+				return nil, err
+			}
+			normalized = append(normalized, image)
+		default:
+			normalized = append(normalized, block)
+		}
+	}
+	return normalized, nil
+}
+
+func canonicalImageBlock(block map[string]any) (map[string]any, error) {
+	if strArg(block, "file_id") != "" {
+		return nil, userError("image file_id inputs are not supported; provide an https URL or base64 data URL")
+	}
+	imageURL := ""
+	detail := strArg(block, "detail")
+	switch value := block["image_url"].(type) {
+	case string:
+		imageURL = strings.TrimSpace(value)
+	case map[string]any:
+		imageURL = strings.TrimSpace(strArg(value, "url"))
+		if detail == "" {
+			detail = strArg(value, "detail")
+		}
+	}
+	if imageURL == "" {
+		return nil, userError("image content block requires image_url")
+	}
+	normalizedURL, err := normalizeImageReference(imageURL)
+	if err != nil {
+		return nil, err
+	}
+	ref := map[string]any{"url": normalizedURL}
+	if detail != "" {
+		ref["detail"] = detail
+	}
+	return map[string]any{"type": "image_url", "image_url": ref}, nil
+}
+
+func normalizeImageReference(reference string) (string, error) {
+	lower := strings.ToLower(reference)
+	if strings.HasPrefix(lower, "data:") {
+		header, payload, ok := strings.Cut(reference, ",")
+		headerParts := strings.Split(strings.TrimPrefix(strings.ToLower(header), "data:"), ";")
+		mediaType := strings.TrimSpace(headerParts[0])
+		if !ok || len(headerParts) < 2 || headerParts[len(headerParts)-1] != "base64" || !strings.HasPrefix(mediaType, "image/") {
+			return "", userError("image data URL must contain a base64-encoded image MIME type")
+		}
+		if base64.StdEncoding.DecodedLen(len(payload)) > maxDataImageBytes {
+			return "", userError("base64 image exceeds the 10 MiB decoded limit")
+		}
+		encoding := base64.StdEncoding
+		if len(payload)%4 != 0 {
+			encoding = base64.RawStdEncoding
+		}
+		decodedBytes, err := io.Copy(io.Discard, io.LimitReader(base64.NewDecoder(encoding, strings.NewReader(payload)), maxDataImageBytes+1))
+		if err != nil {
+			return "", userError("image data URL contains invalid base64 data")
+		}
+		if decodedBytes > maxDataImageBytes {
+			return "", userError("base64 image exceeds the 10 MiB decoded limit")
+		}
+		return "data:" + mediaType + ";base64," + payload, nil
+	}
+	parsed, err := url.Parse(reference)
+	if err != nil || (!strings.EqualFold(parsed.Scheme, "https") && !strings.EqualFold(parsed.Scheme, "http")) || parsed.Host == "" {
+		return "", userError("image_url must be an http(s) URL or base64 image data URL")
+	}
+	return reference, nil
+}
+
+func requestContainsImage(v any) bool {
+	switch value := v.(type) {
+	case []any:
+		for _, item := range value {
+			if requestContainsImage(item) {
+				return true
+			}
+		}
+	case map[string]any:
+		if isImageContentType(strArg(value, "type")) {
+			return true
+		}
+		for _, item := range value {
+			if requestContainsImage(item) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func isImageContentType(value string) bool {
+	switch strings.ToLower(strings.TrimSpace(value)) {
+	case "image_url", "input_image":
+		return true
+	default:
+		return false
+	}
 }
 
 func contentText(v any) string {

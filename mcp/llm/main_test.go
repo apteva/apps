@@ -221,6 +221,175 @@ func TestOpenAICompatibleRouteForwardsAndRecordsUsage(t *testing.T) {
 	}
 }
 
+func TestResponsesImageInputNormalizesForOpenAICompatibleProvider(t *testing.T) {
+	var upstreamBody map[string]any
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/chat/completions" {
+			t.Fatalf("path=%s", r.URL.Path)
+		}
+		if err := json.NewDecoder(r.Body).Decode(&upstreamBody); err != nil {
+			t.Fatal(err)
+		}
+		_, _ = w.Write([]byte(`{"id":"vision-response","model":"vision-model","choices":[{"message":{"role":"assistant","content":"a chart"},"finish_reason":"stop"}],"usage":{"prompt_tokens":1200,"completion_tokens":4}}`))
+	}))
+	defer upstream.Close()
+
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("proj-test"), tk.WithConfig(map[string]string{"openai_api_key": "test"}))
+	app := &App{httpClient: upstream.Client()}
+	if err := app.OnMount(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := dbProviderConfigUpsert(ctx.AppDB(), "proj-test", map[string]any{"provider": "openai", "base_url": upstream.URL}); err != nil {
+		t.Fatal(err)
+	}
+	if err := dbProviderModelsReplace(ctx.AppDB(), "proj-test", "openai", []ProviderModel{{
+		ModelID: "vision-model", DisplayName: "Vision", InputModalities: json.RawMessage(`["text","image"]`), Status: "active",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	token, err := createToken(ctx.AppDB(), map[string]any{"project_id": "proj-test", "subject_type": "agent", "subject_id": "vision-agent"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	req := httptest.NewRequest(http.MethodPost, "/v1/responses", strings.NewReader(`{
+		"model":"openai/vision-model",
+		"input":[{"type":"message","role":"user","content":[
+			{"type":"input_text","text":"What is shown?"},
+			{"type":"input_image","image_url":"https://images.example/chart.png","detail":"high"}
+		]}]
+	}`))
+	req.Header.Set("Authorization", "Bearer "+token["token"].(string))
+	rec := httptest.NewRecorder()
+	app.handleV1(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status=%d body=%s", rec.Code, rec.Body.String())
+	}
+	messages, _ := upstreamBody["messages"].([]any)
+	message, _ := messages[0].(map[string]any)
+	content, _ := message["content"].([]any)
+	textBlock, _ := content[0].(map[string]any)
+	imageBlock, _ := content[1].(map[string]any)
+	imageRef, _ := imageBlock["image_url"].(map[string]any)
+	if textBlock["type"] != "text" || imageBlock["type"] != "image_url" || imageRef["url"] != "https://images.example/chart.png" || imageRef["detail"] != "high" {
+		t.Fatalf("upstream content=%+v", content)
+	}
+	var response map[string]any
+	if json.Unmarshal(rec.Body.Bytes(), &response) != nil || response["object"] != "response" {
+		t.Fatalf("response=%s", rec.Body.String())
+	}
+
+	modelsReq := httptest.NewRequest(http.MethodGet, "/v1/models", nil)
+	modelsReq.Header.Set("Authorization", "Bearer "+token["token"].(string))
+	modelsRec := httptest.NewRecorder()
+	app.handleV1(modelsRec, modelsReq)
+	if modelsRec.Code != http.StatusOK || !strings.Contains(modelsRec.Body.String(), `"input_modalities":["text","image"]`) {
+		t.Fatalf("models status=%d body=%s", modelsRec.Code, modelsRec.Body.String())
+	}
+}
+
+func TestImageInputRejectsExplicitTextOnlyModelBeforeReservation(t *testing.T) {
+	var calls atomic.Int64
+	upstream := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls.Add(1)
+		_, _ = w.Write([]byte(`{"choices":[{"message":{"content":"unexpected"}}]}`))
+	}))
+	defer upstream.Close()
+	ctx := tk.NewAppCtx(t, "apteva.yaml", tk.WithProjectID("proj-test"), tk.WithConfig(map[string]string{"openai_api_key": "test"}))
+	app := &App{httpClient: upstream.Client()}
+	if err := app.OnMount(ctx); err != nil {
+		t.Fatal(err)
+	}
+	_, _ = dbProviderConfigUpsert(ctx.AppDB(), "proj-test", map[string]any{"provider": "openai", "base_url": upstream.URL})
+	if err := dbProviderModelsReplace(ctx.AppDB(), "proj-test", "openai", []ProviderModel{{
+		ModelID: "text-model", InputModalities: json.RawMessage(`["text"]`), Status: "active",
+	}}); err != nil {
+		t.Fatal(err)
+	}
+	_, err := app.executeChat(ctx, &TokenIdentity{ProjectID: "proj-test", SubjectType: "agent", SubjectID: "a"}, map[string]any{
+		"model": "openai/text-model",
+		"messages": []any{
+			map[string]any{
+				"role": "user",
+				"content": []any{
+					map[string]any{"type": "image_url", "image_url": "https://images.example/a.png"},
+				},
+			},
+		},
+	})
+	if err == nil || !strings.Contains(err.Error(), "does not support image input") {
+		t.Fatalf("error=%v", err)
+	}
+	if calls.Load() != 0 {
+		t.Fatalf("provider calls=%d", calls.Load())
+	}
+	usage, usageErr := dbUsageGet(ctx.AppDB(), usageFilter{ProjectID: "proj-test", Period: currentPeriod()})
+	if usageErr != nil || usage.Requests != 0 {
+		t.Fatalf("usage=%+v err=%v", usage, usageErr)
+	}
+}
+
+func TestImageNormalizationValidationAndTokenEstimate(t *testing.T) {
+	payload := strings.Repeat("A", 4<<20)
+	body := map[string]any{
+		"messages": []any{
+			map[string]any{
+				"role": "user",
+				"content": []any{
+					map[string]any{"type": "input_text", "text": "describe"},
+					map[string]any{"type": "input_image", "image_url": "data:image/png;base64," + payload},
+				},
+			},
+		},
+	}
+	if err := normalizeChatImageInputs(body); err != nil {
+		t.Fatal(err)
+	}
+	estimate := estimateChatTokens(body)
+	if estimate < imageTokenEstimate || estimate > imageTokenEstimate+100 {
+		t.Fatalf("image token estimate=%d", estimate)
+	}
+
+	invalid := []map[string]any{
+		{"type": "input_image", "file_id": "file-1"},
+		{"type": "input_image", "image_url": "data:text/plain;base64,SGVsbG8="},
+		{"type": "image_url", "image_url": "file:///tmp/image.png"},
+		{"type": "image_url", "image_url": "data:image/png;base64,not-valid"},
+	}
+	for _, block := range invalid {
+		request := map[string]any{"messages": []any{map[string]any{"role": "user", "content": []any{block}}}}
+		if err := normalizeChatImageInputs(request); err == nil {
+			t.Fatalf("expected invalid image block to fail: %+v", block)
+		}
+	}
+}
+
+func TestAnthropicImageTranslationSupportsURLAndBase64(t *testing.T) {
+	body := map[string]any{
+		"model": "anthropic/claude-vision",
+		"messages": []any{
+			map[string]any{
+				"role": "user",
+				"content": []any{
+					map[string]any{"type": "image_url", "image_url": map[string]any{"url": "https://images.example/a.jpg"}},
+					map[string]any{"type": "input_image", "image_url": "data:image/png;base64,iVBORw0KGgo="},
+				},
+			},
+		},
+	}
+	if err := normalizeChatImageInputs(body); err != nil {
+		t.Fatal(err)
+	}
+	translated, err := openAIChatToAnthropic("anthropic", body)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := json.Marshal(translated)
+	text := string(raw)
+	if !strings.Contains(text, `"type":"url"`) || !strings.Contains(text, `"type":"base64"`) || !strings.Contains(text, `"media_type":"image/png"`) {
+		t.Fatalf("translated=%s", text)
+	}
+}
+
 func TestBoundAnthropicIntegrationBecomesProviderRoute(t *testing.T) {
 	ctx := tk.NewAppCtx(t, "apteva.yaml",
 		tk.WithProjectID("proj-test"),
@@ -422,13 +591,22 @@ func TestBoundOpenAICodexIntegrationSupportsChatAndAccountModelSync(t *testing.T
 		t.Fatalf("terra model=%+v", terra)
 	}
 	result, err := app.executeChat(ctx, &TokenIdentity{ProjectID: "proj-test", SubjectType: "agent", SubjectID: "a"}, map[string]any{
-		"model": "openai-codex/gpt-5.6-terra", "messages": []any{map[string]any{"role": "user", "content": "hello"}}, "max_tokens": 128, "_llm_request_id": "codex-chat",
+		"model": "openai-codex/gpt-5.6-terra", "messages": []any{map[string]any{"role": "user", "content": []any{
+			map[string]any{"type": "text", "text": "hello"}, map[string]any{"type": "input_image", "image_url": "https://images.example/codex.png"},
+		}}}, "max_tokens": 128, "_llm_request_id": "codex-chat",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
 	if executedConnection != 88 || executedTool != "chat_completion" || executedInput["model"] != "gpt-5.6-terra" || intArg(executedInput, "max_tokens", 0) != 128 {
 		t.Fatalf("execute connection=%d tool=%q input=%+v", executedConnection, executedTool, executedInput)
+	}
+	messages, _ := executedInput["messages"].([]any)
+	message, _ := messages[0].(map[string]any)
+	content, _ := message["content"].([]any)
+	image, _ := content[1].(map[string]any)
+	if image["type"] != "image_url" {
+		t.Fatalf("codex image content=%+v", content)
 	}
 	if result.RequestTokens != 6 || result.ResponseTokens != 2 || result.RequestID != "codex-response" {
 		t.Fatalf("result=%+v", result)
