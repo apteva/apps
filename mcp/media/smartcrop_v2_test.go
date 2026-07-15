@@ -209,8 +209,8 @@ func TestTemporalSubjectConsensusFindsMovingSubjectOverStaticTexture(t *testing.
 	if !ok {
 		t.Fatal("expected temporal consensus")
 	}
-	if result.X < 240 || result.X > 400 {
-		t.Fatalf("subject crop x=%d is not in the left subject region: %+v", result.X, result)
+	if result.X < 300 || result.X > 360 {
+		t.Fatalf("subject crop x=%d does not center the moving person: %+v", result.X, result)
 	}
 	if result.Concentration < smartCropTemporalMinConcentration ||
 		result.MeanActivity < smartCropTemporalMinMeanActivity ||
@@ -263,10 +263,85 @@ func TestTemporalSubjectConsensusRejectsStaticOrInsufficientFrames(t *testing.T)
 
 func TestTemporalOverrideKeepsSmallDisagreementsStable(t *testing.T) {
 	result := smartCropTemporalResult{
-		X: 500, Samples: 9, Concentration: 0.95, MeanActivity: 2.0, ActiveFraction: 0.08,
+		X: 460, Samples: 9, Concentration: 0.95, MeanActivity: 2.0, ActiveFraction: 0.08,
 	}
 	if x, changed := applySmartCropTemporalOverride(420, result, 404, 1280); changed || x != 420 {
 		t.Fatalf("small disagreement should preserve saliency crop: x=%d changed=%v", x, changed)
+	}
+}
+
+func TestTemporalWarmAnchorCannotBypassConcentrationGate(t *testing.T) {
+	result := smartCropTemporalResult{
+		X: 40, Samples: 9, Concentration: 0.39, MeanActivity: 2.0, ActiveFraction: 0.08,
+		SubjectAnchored: true, AnchorCoverage: 9, AnchorScore: 1_200,
+	}
+	if smartCropTemporalResultConfident(result) {
+		t.Fatalf("persistent room feature bypassed temporal concentration: %+v", result)
+	}
+	if x, changed := applySmartCropTemporalOverride(412, result, 404, 1280); changed || x != 412 {
+		t.Fatalf("unfocused anchor changed crop: x=%d changed=%v", x, changed)
+	}
+}
+
+func TestTemporalWarmAnchorCertifiesStaticPersonWithoutCenteringOneLimb(t *testing.T) {
+	samples := make([]smartCropV2Sample, 0, 7)
+	for i := 0; i < 7; i++ {
+		img := image.NewRGBA(image.Rect(0, 0, 320, 180))
+		// Vertical blinds reproduce the static background that dominated 2655.
+		for x := 0; x < 320; x++ {
+			shade := uint8(215)
+			if (x/10)%2 == 0 {
+				shade = 245
+			}
+			for y := 0; y < 180; y++ {
+				img.SetRGBA(x, y, color.RGBA{R: shade, G: shade - 7, B: shade - 14, A: 255})
+			}
+		}
+		// A mostly static dark torso has two separated warm arms. The left arm
+		// is larger, so a color-component locator alone would center the limb.
+		shift := i % 3
+		for y := 45; y < 170; y++ {
+			for x := 150 + shift; x < 210+shift; x++ {
+				img.SetRGBA(x, y, color.RGBA{R: 35, G: 45, B: 85, A: 255})
+			}
+		}
+		for y := 55; y < 160; y++ {
+			for x := 130; x < 148; x++ {
+				img.SetRGBA(x, y, color.RGBA{R: 200, G: 130, B: 110, A: 255})
+			}
+		}
+		for y := 65; y < 150; y++ {
+			for x := 212; x < 224; x++ {
+				img.SetRGBA(x, y, color.RGBA{R: 200, G: 130, B: 110, A: 255})
+			}
+		}
+		samples = append(samples, smartCropV2Sample{
+			point: cropPathPoint{AtMs: int64(i) * 5_000, X: 740}, img: img,
+		})
+	}
+	result, ok := temporalSubjectConsensus(samples, 1280, 404)
+	if !ok || !result.SubjectAnchored {
+		t.Fatalf("static person was not certified: ok=%v result=%+v", ok, result)
+	}
+	if result.X < 450 || result.X > 580 {
+		t.Fatalf("crop centered a limb instead of the torso: %+v", result)
+	}
+	if !smartCropTemporalResultConfident(result) {
+		t.Fatalf("concentrated static person did not pass anchor confidence: %+v", result)
+	}
+}
+
+func TestReelTemporalConsensusRejectsLowConfidenceScene(t *testing.T) {
+	samples := make([]smartCropV2Sample, 0, 9)
+	for i := 0; i < 9; i++ {
+		img := image.NewRGBA(image.Rect(0, 0, 320, 180))
+		fillImage(img, color.RGBA{R: uint8(70 + i), G: uint8(80 + i), B: uint8(90 + i), A: 255})
+		samples = append(samples, smartCropV2Sample{
+			point: cropPathPoint{AtMs: int64(i) * 5_000, X: 740}, img: img,
+		})
+	}
+	if corrected := correctSmartCropReelTemporalOutliers(samples, 1280, 404); corrected != 0 {
+		t.Fatalf("low-confidence reel scene changed %d path points", corrected)
 	}
 }
 
