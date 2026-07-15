@@ -2750,6 +2750,56 @@ func TestVeniceImageVideoModelsRequireSourceImage(t *testing.T) {
 	}
 }
 
+func TestListVideoJobs_DefaultOnlyReturnsActiveJobs(t *testing.T) {
+	ctx := newMediaStudioCtx(t, newRecordingPlatform())
+	for _, row := range []struct {
+		queueID string
+		status  string
+	}{
+		{queueID: "q-active", status: "polling"},
+		{queueID: "q-failed", status: "failed"},
+		{queueID: "q-complete", status: "complete"},
+	} {
+		if _, err := ctx.AppDB().Exec(
+			`INSERT INTO video_jobs (project_id, queue_id, provider, model, prompt, status)
+			 VALUES (?, ?, 'venice-ai', 'wan-2-7-image-to-video', 'animate', ?)`,
+			"test-proj", row.queueID, row.status,
+		); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	request := httptest.NewRequest(http.MethodGet, "/video-jobs?project_id=test-proj", nil)
+	response := httptest.NewRecorder()
+	(&App{}).handleListVideoJobs(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("default response = %d: %s", response.Code, response.Body.String())
+	}
+	var body struct {
+		Jobs []map[string]any `json:"jobs"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.Jobs) != 1 || body.Jobs[0]["queue_id"] != "q-active" {
+		t.Fatalf("default jobs = %+v, want only active job", body.Jobs)
+	}
+
+	request = httptest.NewRequest(http.MethodGet, "/video-jobs?project_id=test-proj&status=failed", nil)
+	response = httptest.NewRecorder()
+	(&App{}).handleListVideoJobs(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("failed response = %d: %s", response.Code, response.Body.String())
+	}
+	body.Jobs = nil
+	if err := json.Unmarshal(response.Body.Bytes(), &body); err != nil {
+		t.Fatal(err)
+	}
+	if len(body.Jobs) != 1 || body.Jobs[0]["queue_id"] != "q-failed" {
+		t.Fatalf("failed jobs = %+v, want explicit failed job", body.Jobs)
+	}
+}
+
 func TestToolMediaGenerate_Video_VeniceWANImageToVideoOmitsUnsupportedAspect(t *testing.T) {
 	pf := newRecordingPlatform()
 	pf.appSlug = "venice-ai"

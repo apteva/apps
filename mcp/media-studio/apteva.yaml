@@ -2,13 +2,16 @@ schema: apteva-app/v1
 
 name: media-studio
 display_name: Media Studio
-version: 0.10.46
+version: 0.10.47
 description: |
   Generate images, video, audio, music, and avatars via compatible
   providers. ElevenLabs and Fish Audio can power TTS and reusable
   voices; ElevenLabs also powers sound effects and music.
   Optionally saves outputs to the Storage app for permanent, shareable
-  references. v0.10.46 omits aspect_ratio for Venice video models whose live
+  references. v0.10.47 keeps historical failed jobs out of the active gallery
+  feed and makes current UI errors dismissible and temporary.
+
+  v0.10.46 omits aspect_ratio for Venice video models whose live
   constraints do not support it, including WAN image-to-video variants.
 
   v0.10.45 adds newest-first cursor pagination to media_history

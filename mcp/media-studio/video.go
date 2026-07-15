@@ -400,8 +400,8 @@ func videoJobUpdateStatus(ctx *sdk.AppCtx, jobID int64, status, errMsg string) {
 	}
 }
 
-// HTTP /video-jobs — panel polls this to render an "X processing" badge
-// and to surface failures the user might otherwise miss.
+// HTTP /video-jobs — panel polls this to render active processing jobs.
+// Historical failures remain available through ?status=failed.
 func (a *App) handleListVideoJobs(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodGet {
 		http.Error(w, "GET only", http.StatusMethodNotAllowed)
@@ -427,8 +427,7 @@ func (a *App) handleListVideoJobs(w http.ResponseWriter, r *http.Request) {
 		q += ` AND status = ?`
 		args = append(args, statusFilter)
 	} else {
-		// Default: in-flight + recently-failed (last 24h).
-		q += ` AND (status IN ('queued','polling','finalizing','failed') OR updated_at > datetime('now','-1 day'))`
+		q += ` AND status IN ('queued','polling','finalizing')`
 	}
 	q += ` ORDER BY id DESC LIMIT 100`
 

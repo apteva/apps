@@ -36,12 +36,14 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: media-studio
 display_name: Media Studio
-version: 0.10.46
+version: 0.10.47
 description: |
   Generate images, video, audio, music, and avatars via compatible
   providers. Optionally saves outputs to Storage, supports stable
   cache keys for app-to-app generation reuse, and can use OpenAI Codex
-  as a subscription-backed image provider. v0.10.46 omits aspect_ratio for
+  as a subscription-backed image provider. v0.10.47 keeps historical failed
+  jobs out of the active gallery feed and makes current UI errors dismissible
+  and temporary. v0.10.46 omits aspect_ratio for
   Venice video models whose live constraints do not support it, including WAN
   image-to-video variants. v0.10.45 adds newest-first cursor
   pagination to media_history and the gallery, a history index, functional

@@ -750,6 +750,15 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
   }, [activeKind, projectId, loadGenerations]);
 
   useEffect(() => {
+    if (!status.startsWith("Error") && !status.startsWith("Delete failed")) return;
+    const current = status;
+    const timer = window.setTimeout(() => {
+      setStatus((value) => (value === current ? "" : value));
+    }, 12000);
+    return () => window.clearTimeout(timer);
+  }, [status]);
+
+  useEffect(() => {
     if (activeKind !== "avatar") return;
     let cancelled = false;
     let prevInFlight = new Set<number>();
@@ -1726,11 +1735,30 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
                 {generationCountLabel}
               </div>
               {status && status !== generationCountLabel && (
-                <div className="text-xs text-text-dim truncate">{status}</div>
+                <div
+                  role={status.startsWith("Error") || status.startsWith("Delete failed") ? "alert" : "status"}
+                  className="flex items-center gap-1 text-xs text-text-dim min-w-0"
+                >
+                  <span className="truncate" title={status}>{status}</span>
+                  {(status.startsWith("Error") || status.startsWith("Delete failed")) && (
+                    <button
+                      type="button"
+                      onClick={() => setStatus("")}
+                      className="flex-shrink-0 px-1 text-text-muted hover:text-text"
+                      aria-label="Dismiss error"
+                      title="Dismiss"
+                    >
+                      ×
+                    </button>
+                  )}
+                </div>
               )}
             </div>
             <button
-              onClick={() => setCreateOpen(true)}
+              onClick={() => {
+                setStatus("");
+                setCreateOpen(true);
+              }}
               disabled={!isBound}
               className="flex items-center gap-2 px-3 py-2 text-sm bg-accent text-bg rounded font-bold disabled:opacity-50"
               title={isBound ? `Create a new ${KIND_SINGULAR[activeKind]}` : "Bind a provider first"}
@@ -1880,10 +1908,6 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
             draftBlocked={draftHasInlineSource}
           />
             </CreationDialog>
-          )}
-
-          {(activeKind === "video" || activeKind === "avatar") && videoJobs.some((j) => j.status === "failed") && (
-            <VideoJobsBanner jobs={videoJobs} />
           )}
 
           <div className="flex-1 overflow-auto border border-border rounded">
@@ -4368,29 +4392,6 @@ function DetailAside({
         )}
       </div>
     </aside>
-  );
-}
-
-function VideoJobsBanner({
-  jobs,
-}: {
-  jobs: VideoJob[];
-}) {
-  const failed = jobs.filter((j) => j.status === "failed");
-  if (failed.length === 0) return null;
-  return (
-    <div className="flex flex-col gap-1 p-2 rounded border border-border bg-bg-card">
-      {failed.map((j) => (
-        <div key={j.id} className="flex items-start gap-2 text-xs">
-          <span className="text-text" style={{ color: "var(--apteva-danger, #ef4444)" }}>
-            Failed #{j.id} ({j.model})
-          </span>
-          <span className="text-text-dim flex-1 truncate" title={j.error}>
-            {j.error || "(no detail)"}
-          </span>
-        </div>
-      ))}
-    </div>
   );
 }
 
