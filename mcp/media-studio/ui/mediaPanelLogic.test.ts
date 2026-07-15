@@ -9,6 +9,8 @@ import {
   shouldClearSubmittedPrompt,
   shouldCommitScopedResponse,
   shouldSendVideoAspect,
+  ttsOutputFormats,
+  ttsProviderUsesSeparateVoice,
   uploadValidationError,
   videoSourceRequired,
 } from "./mediaPanelLogic";
@@ -49,6 +51,18 @@ describe("Media Panel logic", () => {
     expect(shouldSendVideoAspect(["16:9", "9:16"], true)).toBe(true);
     expect(shouldSendVideoAspect(undefined, true)).toBe(false);
     expect(shouldSendVideoAspect(undefined, false)).toBe(true);
+  });
+
+  test("treats Deepgram Aura models as voices", () => {
+    expect(ttsProviderUsesSeparateVoice("deepgram")).toBe(false);
+    expect(ttsProviderUsesSeparateVoice("elevenlabs")).toBe(true);
+    expect(ttsProviderUsesSeparateVoice("fish-audio")).toBe(true);
+  });
+
+  test("exposes only provider-supported TTS output formats", () => {
+    expect(ttsOutputFormats("deepgram")).toEqual(["mp3", "wav", "opus", "flac", "aac"]);
+    expect(ttsOutputFormats("fish-audio")).toEqual(["mp3", "wav", "opus", "pcm"]);
+    expect(ttsOutputFormats("elevenlabs")).toEqual([]);
   });
 
   test("rejects stale tab responses and preserves newer prompts", () => {

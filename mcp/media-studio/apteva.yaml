@@ -2,13 +2,16 @@ schema: apteva-app/v1
 
 name: media-studio
 display_name: Media Studio
-version: 0.10.47
+version: 0.10.48
 description: |
   Generate images, video, audio, music, and avatars via compatible
   providers. ElevenLabs and Fish Audio can power TTS and reusable
   voices; ElevenLabs also powers sound effects and music.
   Optionally saves outputs to the Storage app for permanent, shareable
-  references. v0.10.47 keeps historical failed jobs out of the active gallery
+  references. v0.10.48 adds Deepgram Aura as a generic TTS provider with
+  provider-specific routing, model choices, output formats, and Storage saves.
+
+  v0.10.47 keeps historical failed jobs out of the active gallery
   feed and makes current UI errors dismissible and temporary.
 
   v0.10.46 omits aspect_ratio for Venice video models whose live
@@ -129,7 +132,7 @@ requires:
     - role: audio_provider
       kind: integration
       mode: multiple
-      compatible_slugs: [elevenlabs, fish-audio]
+      compatible_slugs: [elevenlabs, fish-audio, deepgram]
       capabilities: [audio.tts, audio.sfx, voice.create]
       tools:
         audio.tts: text_to_speech
@@ -137,7 +140,7 @@ requires:
         voice.create: design_voice
       required: false
       label: "Audio provider"
-      hint: "Bind ElevenLabs and/or Fish Audio for text-to-speech and reusable voices. Sound effects and prompt-based Voice Design remain ElevenLabs-specific; Fish Audio supports instant cloning from consented audio."
+      hint: "Bind ElevenLabs, Fish Audio, and/or Deepgram for text-to-speech. Deepgram Aura voices are selected as models. Sound effects and prompt-based Voice Design remain ElevenLabs-specific; Fish Audio supports instant cloning from consented audio."
 
     - role: music_provider
       kind: integration

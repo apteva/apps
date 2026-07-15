@@ -36,12 +36,14 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: media-studio
 display_name: Media Studio
-version: 0.10.47
+version: 0.10.48
 description: |
   Generate images, video, audio, music, and avatars via compatible
   providers. Optionally saves outputs to Storage, supports stable
   cache keys for app-to-app generation reuse, and can use OpenAI Codex
-  as a subscription-backed image provider. v0.10.47 keeps historical failed
+  as a subscription-backed image provider. v0.10.48 adds Deepgram Aura as a
+  generic TTS provider with provider-specific routing, model choices, output
+  formats, and Storage saves. v0.10.47 keeps historical failed
   jobs out of the active gallery feed and makes current UI errors dismissible
   and temporary. v0.10.46 omits aspect_ratio for
   Venice video models whose live constraints do not support it, including WAN
@@ -116,7 +118,7 @@ requires:
     - role: audio_provider
       kind: integration
       mode: multiple
-      compatible_slugs: [elevenlabs, fish-audio]
+      compatible_slugs: [elevenlabs, fish-audio, deepgram]
       capabilities: [audio.tts, audio.sfx, voice.create]
       tools:
         audio.tts: text_to_speech

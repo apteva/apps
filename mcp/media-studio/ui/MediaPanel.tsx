@@ -14,6 +14,8 @@ import {
   shouldClearSubmittedPrompt,
   shouldCommitScopedResponse,
   shouldSendVideoAspect,
+  ttsOutputFormats,
+  ttsProviderUsesSeparateVoice,
   uploadValidationError,
   videoSourceRequired,
   type DurationKind,
@@ -325,6 +327,7 @@ function modelLabel(m: LiveModel): string {
 function providerLabel(provider: string): string {
   if (provider === "fish-audio") return "Fish Audio";
   if (provider === "elevenlabs") return "ElevenLabs";
+  if (provider === "deepgram") return "Deepgram";
   return provider;
 }
 
@@ -941,6 +944,12 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
       setVoice(candidates[0].id);
     }
   }, [activeKind, selectedAudioProvider, voices, voice]);
+  useEffect(() => {
+    const formats = ttsOutputFormats(selectedAudioProvider);
+    if (formats.length > 0 && !formats.includes(audioFormat)) {
+      setAudioFormat(formats[0]);
+    }
+  }, [selectedAudioProvider, audioFormat]);
   const promptLength = Array.from(prompt).length;
   const promptLimit =
     currentModel?.prompt_char_limit ||
@@ -1107,7 +1116,7 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
     };
     const name = voiceCreateName.trim();
     const description = voiceCreateDescription.trim();
-    const provider = voiceCreateProvider || selectedAudioProvider || audioProviders[0]?.slug;
+    const provider = voiceCreateProvider || audioProviders.find((item) => item.slug === "elevenlabs" || item.slug === "fish-audio")?.slug;
     const sourceType = provider === "fish-audio" ? "audio" : voiceCreateSourceType;
     if (!name) {
       setStatus("Voice name required.");
@@ -1260,12 +1269,14 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
       }
     } else if (activeKind === "audio_tts") {
       if (audioModel) body.model = audioModel;
-      if (voice) body.voice = voice;
+      if (voice && ttsProviderUsesSeparateVoice(selectedAudioProvider)) body.voice = voice;
       if (selectedAudioProvider === "fish-audio") {
         body.options = {
           output_format: audioFormat,
           prosody: { speed: audioSpeed, normalize_loudness: true },
         };
+      } else if (selectedAudioProvider === "deepgram") {
+        body.options = { output_format: audioFormat };
       }
     } else if (activeKind === "audio_sfx") {
       if (sfxModel) body.model = sfxModel;
@@ -2257,6 +2268,12 @@ function Composer(p: ComposerProps) {
             : "a cat in a hat";
   const selectedAvatar = p.avatars.find((av) => av.id === p.selectedAvatar);
   const ttsProvider = p.currentModel?.provider || providerFromQualifiedId(p.audioModel) || p.audioProviders[0]?.slug || "";
+  const voiceCreationProviders = p.audioProviders.filter(
+    (item) => item.slug === "elevenlabs" || item.slug === "fish-audio",
+  );
+  const voiceCreationProvider = voiceCreationProviders.some((item) => item.slug === p.voiceCreateProvider)
+    ? p.voiceCreateProvider
+    : voiceCreationProviders[0]?.slug || "";
   const ttsVoices = ttsProvider ? p.voices.filter((item) => !item.provider || item.provider === ttsProvider) : p.voices;
   const avatarVBlocked =
     p.kind === "avatar" &&
@@ -2353,58 +2370,61 @@ function Composer(p: ComposerProps) {
       )}
       {p.kind === "audio_tts" && (
         <>
-          <VoiceCreatePanel
-            providers={p.audioProviders}
-            provider={p.voiceCreateProvider || ttsProvider}
-            setProvider={p.setVoiceCreateProvider}
-            sourceType={p.voiceCreateSourceType}
-            setSourceType={p.setVoiceCreateSourceType}
-            identities={p.voiceIdentities}
-            open={p.voiceCreateOpen}
-            setOpen={p.setVoiceCreateOpen}
-            name={p.voiceCreateName}
-            setName={p.setVoiceCreateName}
-            description={p.voiceCreateDescription}
-            setDescription={p.setVoiceCreateDescription}
-            model={p.voiceCreateModel}
-            setModel={p.setVoiceCreateModel}
-            previewText={p.voiceCreatePreviewText}
-            setPreviewText={p.setVoiceCreatePreviewText}
-            enhance={p.voiceCreateEnhance}
-            setEnhance={p.setVoiceCreateEnhance}
-            audio={p.voiceCreateAudio}
-            setAudio={p.setVoiceCreateAudio}
-            audioFilename={p.voiceCreateAudioFilename}
-            setAudioFilename={p.setVoiceCreateAudioFilename}
-            transcript={p.voiceCreateTranscript}
-            setTranscript={p.setVoiceCreateTranscript}
-            creating={p.voiceCreating}
-            createVoice={p.createVoice}
-            onError={p.onError}
-            selectedVoice={p.voice}
-            setSelectedVoice={p.setVoice}
-          />
+          {voiceCreationProviders.length > 0 && (
+            <VoiceCreatePanel
+              providers={voiceCreationProviders}
+              provider={voiceCreationProvider}
+              setProvider={p.setVoiceCreateProvider}
+              sourceType={p.voiceCreateSourceType}
+              setSourceType={p.setVoiceCreateSourceType}
+              identities={p.voiceIdentities}
+              open={p.voiceCreateOpen}
+              setOpen={p.setVoiceCreateOpen}
+              name={p.voiceCreateName}
+              setName={p.setVoiceCreateName}
+              description={p.voiceCreateDescription}
+              setDescription={p.setVoiceCreateDescription}
+              model={p.voiceCreateModel}
+              setModel={p.setVoiceCreateModel}
+              previewText={p.voiceCreatePreviewText}
+              setPreviewText={p.setVoiceCreatePreviewText}
+              enhance={p.voiceCreateEnhance}
+              setEnhance={p.setVoiceCreateEnhance}
+              audio={p.voiceCreateAudio}
+              setAudio={p.setVoiceCreateAudio}
+              audioFilename={p.voiceCreateAudioFilename}
+              setAudioFilename={p.setVoiceCreateAudioFilename}
+              transcript={p.voiceCreateTranscript}
+              setTranscript={p.setVoiceCreateTranscript}
+              creating={p.voiceCreating}
+              createVoice={p.createVoice}
+              onError={p.onError}
+              selectedVoice={p.voice}
+              setSelectedVoice={p.setVoice}
+            />
+          )}
           <MediaModelPicker
             model={p.audioModel}
             setModel={p.setAudioModel}
             liveModels={p.liveModels}
             liveProvider={p.liveProvider}
           />
-          {ttsProvider === "fish-audio" && (
+          {(ttsProvider === "fish-audio" || ttsProvider === "deepgram") && (
             <>
               <div>
                 <label className="text-text-muted text-xs block">Format</label>
                 <select value={p.audioFormat} onChange={(e) => p.setAudioFormat(e.target.value)} className="bg-bg-input border border-border rounded px-2 py-1.5 text-sm">
-                  <option value="mp3">MP3</option>
-                  <option value="wav">WAV</option>
-                  <option value="opus">Opus</option>
-                  <option value="pcm">PCM</option>
+                  {ttsOutputFormats(ttsProvider).map((format) => (
+                    <option key={format} value={format}>{format.toUpperCase()}</option>
+                  ))}
                 </select>
               </div>
-              <NumberField label="Speed" value={p.audioSpeed} onChange={p.setAudioSpeed} min={0.5} max={2} step={0.1} />
+              {ttsProvider === "fish-audio" && (
+                <NumberField label="Speed" value={p.audioSpeed} onChange={p.setAudioSpeed} min={0.5} max={2} step={0.1} />
+              )}
             </>
           )}
-          {ttsVoices.length > 0 ? (
+          {!ttsProviderUsesSeparateVoice(ttsProvider) ? null : ttsVoices.length > 0 ? (
             <VoiceSelect voice={p.voice} setVoice={p.setVoice} voices={ttsVoices} />
           ) : (
             <TextField label="Voice" value={p.voice} onChange={p.setVoice} placeholder="voice_id" />

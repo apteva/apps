@@ -64,6 +64,16 @@ export function shouldSendVideoAspect(
   return !hasModelMetadata || !!aspectRatios?.length;
 }
 
+export function ttsProviderUsesSeparateVoice(provider: string): boolean {
+  return provider !== "deepgram";
+}
+
+export function ttsOutputFormats(provider: string): string[] {
+  if (provider === "deepgram") return ["mp3", "wav", "opus", "flac", "aac"];
+  if (provider === "fish-audio") return ["mp3", "wav", "opus", "pcm"];
+  return [];
+}
+
 export function shouldCommitScopedResponse(requestKind: string, activeKind: string): boolean {
   return requestKind === activeKind;
 }
