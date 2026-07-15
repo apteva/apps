@@ -31,6 +31,7 @@ import {
   localDateKey,
   moveCalendarCursor,
   postLifecycleDate,
+  sortPostList,
   stableSquareStyle,
   type CalendarScale,
   type PostViewMode,
@@ -3810,8 +3811,7 @@ function PostsView({
 
   const sourcePosts = view === "calendar" ? calendarPosts : posts;
   const filteredPosts = filterCalendarPosts(sourcePosts, statusFilter, accountFilter);
-  const sortedListPosts = [...filteredPosts].sort((left, right) =>
-    (postLifecycleDate(right)?.getTime() || 0) - (postLifecycleDate(left)?.getTime() || 0));
+  const sortedListPosts = sortPostList(filteredPosts);
 
   useEffect(() => {
     if (!selectedPost) return;

@@ -87,6 +87,24 @@ export function filterCalendarPosts<T extends CalendarPostLike>(
   });
 }
 
+export function sortPostList<T extends CalendarPostLike>(posts: T[], now = new Date()): T[] {
+  const nowTime = now.getTime();
+  const isUpcoming = (post: T) => {
+    if (post.status !== "scheduled" || !post.schedule_at) return false;
+    const scheduledTime = new Date(post.schedule_at).getTime();
+    return !Number.isNaN(scheduledTime) && scheduledTime >= nowTime;
+  };
+  return [...posts].sort((left, right) => {
+    const leftUpcoming = isUpcoming(left);
+    const rightUpcoming = isUpcoming(right);
+    if (leftUpcoming && rightUpcoming) {
+      return new Date(left.schedule_at!).getTime() - new Date(right.schedule_at!).getTime();
+    }
+    if (leftUpcoming !== rightUpcoming) return leftUpcoming ? -1 : 1;
+    return (postLifecycleDate(right)?.getTime() || 0) - (postLifecycleDate(left)?.getTime() || 0);
+  });
+}
+
 export function groupPostsByLocalDay<T extends CalendarPostLike>(posts: T[]): Map<string, T[]> {
   const grouped = new Map<string, T[]>();
   for (const post of posts) {

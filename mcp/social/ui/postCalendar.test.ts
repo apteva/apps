@@ -6,6 +6,7 @@ import {
   localDateKey,
   moveCalendarCursor,
   postLifecycleDate,
+  sortPostList,
   stableSquareStyle,
 } from "./postCalendar";
 
@@ -62,4 +63,17 @@ test("critical calendar and media squares do not depend on host utility CSS", ()
   });
   expect(stableSquareStyle(96).width).toBe(stableSquareStyle(96).height);
   expect(stableSquareStyle(32).flex).toBe("0 0 32px");
+});
+
+test("list puts the nearest upcoming posts first, then recent history", () => {
+  const posts = [
+    { id: 17, status: "scheduled", schedule_at: "2026-07-17T19:00:00Z", created_at: "2026-07-10T00:00:00Z", targets: [] },
+    { id: 11, status: "published", published_at: "2026-07-14T18:00:00Z", created_at: "2026-07-14T18:00:00Z", targets: [] },
+    { id: 15, status: "scheduled", schedule_at: "2026-07-15T19:00:00Z", created_at: "2026-07-10T00:00:00Z", targets: [] },
+    { id: 9, status: "published", published_at: "2026-07-13T18:00:00Z", created_at: "2026-07-13T18:00:00Z", targets: [] },
+    { id: 16, status: "scheduled", schedule_at: "2026-07-16T19:00:00Z", created_at: "2026-07-10T00:00:00Z", targets: [] },
+  ];
+  const sorted = sortPostList(posts, new Date("2026-07-15T12:00:00Z"));
+  expect(sorted.map((post) => post.id)).toEqual([15, 16, 17, 11, 9]);
+  expect(posts.map((post) => post.id)).toEqual([17, 11, 15, 9, 16]);
 });
