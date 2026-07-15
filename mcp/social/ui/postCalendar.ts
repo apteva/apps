@@ -38,6 +38,14 @@ export function listLeadMediaStyle(width = 96) {
   } as const;
 }
 
+export function listPostRowStyle(height = 176) {
+  return {
+    height,
+    minHeight: height,
+    maxHeight: height,
+  } as const;
+}
+
 export function postLifecycleDate(post: CalendarPostLike): Date | null {
   const source =
     (post.status === "published" || post.status === "partial") && post.published_at

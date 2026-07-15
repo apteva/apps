@@ -5,6 +5,7 @@ import {
   groupPostsByLocalDay,
   localDateKey,
   listLeadMediaStyle,
+  listPostRowStyle,
   moveCalendarCursor,
   postLifecycleDate,
   sortPostList,
@@ -79,6 +80,10 @@ test("list media keeps a fixed column and stretches to the card margins", () => 
     lineHeight: 1,
   });
   expect(listLeadMediaStyle()).not.toHaveProperty("height");
+});
+
+test("list rows use one height for every media aspect ratio", () => {
+  expect(listPostRowStyle()).toEqual({ height: 176, minHeight: 176, maxHeight: 176 });
 });
 
 test("list puts the nearest upcoming posts first, then recent history", () => {

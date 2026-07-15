@@ -30,6 +30,7 @@ import {
   filterCalendarPosts,
   groupPostsByLocalDay,
   listLeadMediaStyle,
+  listPostRowStyle,
   localDateKey,
   moveCalendarCursor,
   postLifecycleDate,
@@ -4064,11 +4065,24 @@ function PostListRow({
     <div
       className="relative border border-border rounded bg-bg-card/30 hover:bg-bg-card/50 transition-colors"
     >
-      <div className="flex items-stretch gap-3 p-2.5" style={{ minHeight: 116 }}>
-        <button type="button" onClick={onOpen} className="flex flex-1 min-w-0 items-stretch gap-3 text-left">
+      <div className="flex items-stretch gap-3 p-2.5" style={listPostRowStyle()}>
+        <button
+          type="button"
+          onClick={onOpen}
+          className="flex flex-1 min-w-0 items-stretch gap-3 text-left"
+          style={{ overflow: "hidden" }}
+        >
           <PostLeadMedia post={post} projectId={projectId} variant="list" />
           <div className="flex-1 min-w-0 py-1 flex flex-col">
-            <div className="text-text text-sm whitespace-pre-line line-clamp-3 leading-5">
+            <div
+              className="text-text text-sm whitespace-pre-line leading-5"
+              style={{
+                display: "-webkit-box",
+                WebkitBoxOrient: "vertical",
+                WebkitLineClamp: 3,
+                overflow: "hidden",
+              }}
+            >
               {post.body || <span className="text-text-dim italic">No caption</span>}
             </div>
             <div className="mt-auto min-w-0 pt-2">
