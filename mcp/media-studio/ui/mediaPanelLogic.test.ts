@@ -8,6 +8,7 @@ import {
   selectedModelProvider,
   shouldClearSubmittedPrompt,
   shouldCommitScopedResponse,
+  shouldSendVideoAspect,
   uploadValidationError,
   videoSourceRequired,
 } from "./mediaPanelLogic";
@@ -42,6 +43,12 @@ describe("Media Panel logic", () => {
     expect(videoSourceRequired("image-to-video", "model")).toBe(true);
     expect(videoSourceRequired(undefined, "seedance-reference-to-video")).toBe(true);
     expect(videoSourceRequired("text-to-video", "model")).toBe(false);
+  });
+
+  test("only sends video aspect when live model metadata supports it", () => {
+    expect(shouldSendVideoAspect(["16:9", "9:16"], true)).toBe(true);
+    expect(shouldSendVideoAspect(undefined, true)).toBe(false);
+    expect(shouldSendVideoAspect(undefined, false)).toBe(true);
   });
 
   test("rejects stale tab responses and preserves newer prompts", () => {

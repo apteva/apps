@@ -228,7 +228,7 @@ func (a *App) toolMediaGenerate(ctx *sdk.AppCtx, args map[string]any) (any, erro
 	}
 	args["_storage_folder"] = storageFolder
 	if kind == KindVideo && bound.AppSlug == "venice-ai" {
-		normalizeVeniceVideoDurationForModel(ctx, args, capability)
+		normalizeVeniceVideoArgsForModel(ctx, args, capability)
 		estimatedSeconds = estimatedDurationSeconds(kind, args)
 	}
 	if err := validateProviderPrompt(ctx, bound, kind, capability, args); err != nil {

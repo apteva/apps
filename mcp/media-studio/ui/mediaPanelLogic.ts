@@ -57,6 +57,13 @@ export function videoSourceRequired(modelType: string | undefined, modelID: stri
     normalizedID.includes("reference-to-video");
 }
 
+export function shouldSendVideoAspect(
+  aspectRatios: string[] | undefined,
+  hasModelMetadata: boolean,
+): boolean {
+  return !hasModelMetadata || !!aspectRatios?.length;
+}
+
 export function shouldCommitScopedResponse(requestKind: string, activeKind: string): boolean {
   return requestKind === activeKind;
 }

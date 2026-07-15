@@ -297,6 +297,7 @@ func veniceVideoQuote(ctx *sdk.AppCtx, providerSlug string, args map[string]any)
 	if bound == nil {
 		return 0
 	}
+	normalizeVeniceVideoArgsForModel(ctx, args, "video.generate")
 	// Quote accepts a subset of queue's args — model + duration required;
 	// aspect_ratio, resolution, upscale_factor, audio optional.
 	quoteArgs := map[string]any{
@@ -330,11 +331,7 @@ func videoDurationArg(args map[string]any) string {
 	return "5s"
 }
 
-func normalizeVeniceVideoDurationForModel(ctx *sdk.AppCtx, args map[string]any, capability string) {
-	requested := durationArgSeconds(args)
-	if requested <= 0 {
-		return
-	}
+func normalizeVeniceVideoArgsForModel(ctx *sdk.AppCtx, args map[string]any, capability string) {
 	model := strings.TrimSpace(strArg(args, "model", ""))
 	if model == "" {
 		return
@@ -347,8 +344,15 @@ func normalizeVeniceVideoDurationForModel(ctx *sdk.AppCtx, args map[string]any, 
 		if entry.ID != model {
 			continue
 		}
-		if snapped := snapDurationToSupported(requested, entry.Durations); snapped > 0 {
-			args["duration"] = fmt.Sprintf("%ds", snapped)
+		if requested := durationArgSeconds(args); requested > 0 {
+			if snapped := snapDurationToSupported(requested, entry.Durations); snapped > 0 {
+				args["duration"] = fmt.Sprintf("%ds", snapped)
+			}
+		}
+		// An empty published aspect list means Venice rejects the
+		// aspect_ratio field entirely.
+		if len(entry.AspectRatios) == 0 {
+			delete(args, "aspect")
 		}
 		return
 	}

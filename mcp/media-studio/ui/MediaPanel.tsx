@@ -13,6 +13,7 @@ import {
   selectedModelProvider,
   shouldClearSubmittedPrompt,
   shouldCommitScopedResponse,
+  shouldSendVideoAspect,
   uploadValidationError,
   videoSourceRequired,
   type DurationKind,
@@ -1233,7 +1234,9 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
     } else if (activeKind === "video") {
       if (videoModel) body.model = videoModel;
       body.duration = duration;
-      body.aspect = aspect;
+      if (shouldSendVideoAspect(currentModel?.aspect_ratios, !!currentModel)) {
+        body.aspect = aspect;
+      }
       if (videoNoSound) {
         body.options = { audio: false };
       }
@@ -2310,8 +2313,10 @@ function Composer(p: ComposerProps) {
             value={p.aspect}
             onChange={p.setAspect}
             disabledHint={
-              p.currentModel?.model_type === "image-to-video"
-                ? "Inherited from source image"
+              p.currentModel && !shouldSendVideoAspect(p.currentModel.aspect_ratios, true)
+                ? p.currentModel.model_type === "image-to-video"
+                  ? "Inherited from source image"
+                  : "Not supported by this model"
                 : undefined
             }
           />

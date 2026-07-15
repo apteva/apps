@@ -2189,7 +2189,7 @@ func TestToolMediaGenerate_Video_VeniceQueue(t *testing.T) {
 	pf.perExecuteResults = map[string]*sdk.ExecuteResult{
 		"list_models": {
 			Success: true, Status: 200,
-			Data: json.RawMessage(`{"data":[{"id":"kling-2","model_spec":{"constraints":{"model_type":"text-to-video","durations":["3s","5s","8s","10s"]}}}]}`),
+			Data: json.RawMessage(`{"data":[{"id":"kling-2","model_spec":{"constraints":{"model_type":"text-to-video","aspect_ratios":["16:9","9:16"],"durations":["3s","5s","8s","10s"]}}}]}`),
 		},
 		"queue_video": {
 			Success: true, Status: 200,
@@ -2203,6 +2203,7 @@ func TestToolMediaGenerate_Video_VeniceQueue(t *testing.T) {
 		"prompt":   "a cat walking through a sunlit garden",
 		"model":    "kling-2",
 		"duration": "9s",
+		"aspect":   "9:16",
 	})
 	if err != nil {
 		t.Fatalf("toolMediaGenerate: %v", err)
@@ -2220,6 +2221,11 @@ func TestToolMediaGenerate_Video_VeniceQueue(t *testing.T) {
 	}
 	if pf.executeCalls[1].Input["duration"] != "10s" {
 		t.Errorf("duration not normalized: %+v", pf.executeCalls[1].Input)
+	}
+	for _, call := range pf.executeCalls[1:] {
+		if call.Input["aspect_ratio"] != "9:16" {
+			t.Errorf("supported aspect missing from %s: %+v", call.Tool, call.Input)
+		}
 	}
 
 	// video_jobs row landed in 'queued' state.
@@ -2345,10 +2351,16 @@ func TestToolMediaGenerate_Video_VeniceImageToVideo_RejectsMultipleSourceImages(
 func TestToolMediaEstimate_Video_VeniceQuote(t *testing.T) {
 	pf := newRecordingPlatform()
 	pf.appSlug = "venice-ai"
-	pf.identity.Bindings["video_provider"] = float64(77)
-	pf.nextExecuteResult = &sdk.ExecuteResult{
-		Success: true, Status: 200,
-		Data: json.RawMessage(`{"data":{"quote":{"usd":0.42}}}`),
+	pf.identity.Bindings["video_provider"] = float64(277)
+	pf.perExecuteResults = map[string]*sdk.ExecuteResult{
+		"list_models": {
+			Success: true, Status: 200,
+			Data: json.RawMessage(`{"data":[{"id":"kling-2","model_spec":{"constraints":{"model_type":"text-to-video","aspect_ratios":["16:9"],"durations":["5s","10s"]}}}]}`),
+		},
+		"quote_video": {
+			Success: true, Status: 200,
+			Data: json.RawMessage(`{"data":{"quote":{"usd":0.42}}}`),
+		},
 	}
 	ctx := newMediaStudioCtx(t, pf)
 	app := &App{}
@@ -2366,13 +2378,13 @@ func TestToolMediaEstimate_Video_VeniceQuote(t *testing.T) {
 	if !meta.Available || meta.CostUSD != 0.42 || meta.Source != "provider_quote" {
 		t.Fatalf("estimate meta = %+v", meta)
 	}
-	if len(pf.executeCalls) != 1 || pf.executeCalls[0].Tool != "quote_video" {
+	if len(pf.executeCalls) != 2 || pf.executeCalls[0].Tool != "list_models" || pf.executeCalls[1].Tool != "quote_video" {
 		t.Fatalf("expected quote_video call, got %+v", pf.executeCalls)
 	}
-	if got := pf.executeCalls[0].Input["duration"]; got != "10s" {
+	if got := pf.executeCalls[1].Input["duration"]; got != "10s" {
 		t.Fatalf("quote duration = %v, want 10s", got)
 	}
-	if got := pf.executeCalls[0].Input["audio"]; got != false {
+	if got := pf.executeCalls[1].Input["audio"]; got != false {
 		t.Fatalf("quote audio = %v, want false", got)
 	}
 }
@@ -2735,6 +2747,46 @@ func TestVeniceImageVideoModelsRequireSourceImage(t *testing.T) {
 		"source_image": "data:image/jpeg;base64,/9j/",
 	}); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestToolMediaGenerate_Video_VeniceWANImageToVideoOmitsUnsupportedAspect(t *testing.T) {
+	pf := newRecordingPlatform()
+	pf.appSlug = "venice-ai"
+	pf.identity.Bindings["video_provider"] = float64(1777)
+	pf.perExecuteResults = map[string]*sdk.ExecuteResult{
+		"list_models": {
+			Success: true, Status: 200,
+			Data: json.RawMessage(`{"data":[{"id":"wan-2-7-image-to-video","model_spec":{"constraints":{"model_type":"image-to-video","durations":["5s","10s"]}}}]}`),
+		},
+		"queue_video": {
+			Success: true, Status: 200,
+			Data: json.RawMessage(`{"model":"wan-2-7-image-to-video","queue_id":"q-wan-i2v"}`),
+		},
+	}
+	ctx := newMediaStudioCtx(t, pf)
+	app := &App{}
+	out, err := app.toolMediaGenerate(ctx, map[string]any{
+		"kind":         "video",
+		"prompt":       "animate this frame",
+		"model":        "wan-2-7-image-to-video",
+		"duration":     "5s",
+		"aspect":       "16:9",
+		"source_image": "https://example.com/source.jpg",
+	})
+	if err != nil {
+		t.Fatalf("toolMediaGenerate: %v", err)
+	}
+	if result, ok := out.(map[string]any); !ok || result["isError"] == true {
+		t.Fatalf("unexpected result: %+v", out)
+	}
+	for _, call := range pf.executeCalls {
+		if call.Tool != "queue_video" && call.Tool != "quote_video" {
+			continue
+		}
+		if _, exists := call.Input["aspect_ratio"]; exists {
+			t.Fatalf("%s received unsupported aspect_ratio: %+v", call.Tool, call.Input)
+		}
 	}
 }
 
