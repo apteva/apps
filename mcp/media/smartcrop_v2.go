@@ -17,6 +17,7 @@ import (
 	"image"
 	"math"
 	"sort"
+	"sync"
 
 	sdk "github.com/apteva/app-sdk"
 	"github.com/muesli/smartcrop"
@@ -24,7 +25,8 @@ import (
 )
 
 const (
-	smartCropV2MaxSamples = 24
+	smartCropV2MaxSamples           = 24
+	smartCropV2MaxParallelDownloads = 4
 	// With the new five-second storyboard default, eight seconds leaves
 	// room for an occasional failed derivation without accepting the old
 	// 30-second sampling that caused the Tracy failures.
@@ -47,10 +49,10 @@ type smartCropV2Sample struct {
 
 // computeSmartCropStillV2 reframes both ordinary images and exact video
 // frames. Images need one canonical thumbnail. Timed video frames use the
-// two storyboard frames bracketing the requested timestamp and interpolate
-// their crop positions. That avoids both a five-second nearest-frame jump
-// and v1's unreliable pixel-difference "motion" guess, while downloading
-// no more cached images than the old path.
+// storyboard frames bracketing the requested timestamp and interpolate their
+// crop positions. Up to nine nearby cached frames also provide a conservative
+// temporal subject consensus. It suppresses static, high-saliency backgrounds
+// (for example blinds) but only overrides a large, high-confidence disagreement.
 func computeSmartCropStillV2(
 	ctx context.Context,
 	app *sdk.AppCtx,
@@ -84,37 +86,22 @@ func computeSmartCropStillV2(
 		return nil, fmt.Errorf("smartcrop v2: no usable frame derivation")
 	}
 
-	samples := make([]smartCropV2Sample, 0, len(derivs))
-	for _, d := range derivs {
-		img, downloadErr := downloadAndDecodeImage(ctx, sc, projectID, d.StorageFileID)
-		if downloadErr != nil {
-			continue
-		}
-		win, analyzeErr := analyzeSmartCropV2Frame(row.Width, row.Height, targetW, targetH, img)
-		if analyzeErr != nil {
-			continue
-		}
-		samples = append(samples, smartCropV2Sample{
-			point: cropPathPoint{AtMs: d.PositionMs, X: win.X},
-			img:   img,
-		})
-	}
+	samples := analyzeSmartCropV2Derivations(ctx, sc, projectID, derivs, row.Width, row.Height, targetW, targetH)
 	if len(samples) == 0 {
 		return nil, fmt.Errorf("smartcrop v2: no decodable frame derivation")
 	}
 
-	x := samples[0].point.X
-	method := "single"
-	if len(samples) >= 2 {
-		before, after := samples[0], samples[1]
-		if sceneCutScore(before.img, after.img) >= 0.28 {
-			method = "scene-cut-nearest"
-			if absInt64(after.point.AtMs-target.FocusMs) < absInt64(target.FocusMs-before.point.AtMs) {
-				x = after.point.X
-			}
-		} else {
-			method = "interpolated"
-			x = interpolateSmartCropStillX(before.point, after.point, target.FocusMs)
+	x, method, err := resolveSmartCropStillBase(samples, target.FocusMs)
+	if err != nil {
+		return nil, err
+	}
+	temporal := smartCropTemporalResult{}
+	sceneSamples := smartCropSceneSamples(samples, target.FocusMs)
+	if result, ok := temporalSubjectConsensus(sceneSamples, row.Width, cw); ok {
+		temporal = result
+		if corrected, changed := applySmartCropTemporalOverride(x, result, cw, row.Width); changed {
+			x = corrected
+			method += "+temporal"
 		}
 	}
 	x = clampInt(roundEven(x), 0, row.Width-cw)
@@ -125,34 +112,122 @@ func computeSmartCropStillV2(
 		"focus_ms", target.FocusMs,
 		"crop_w", cw,
 		"crop_h", ch,
-		"crop_x", x)
+		"crop_x", x,
+		"temporal_samples", temporal.Samples,
+		"temporal_concentration", temporal.Concentration,
+		"temporal_mean_activity", temporal.MeanActivity,
+		"temporal_active_fraction", temporal.ActiveFraction)
 	return &cropWindow{W: cw, H: ch, X: x, Y: 0}, nil
 }
 
 func selectSmartCropStillDerivations(derivs []DerivationRow, focusMs int64) []DerivationRow {
-	var before, after DerivationRow
+	keyframes := make([]DerivationRow, 0, len(derivs))
+	closeEnough := false
 	for _, d := range derivs {
 		if d.Kind != "keyframe" || d.Status != "ok" || d.StorageFileID == "" {
 			continue
 		}
-		if d.PositionMs == focusMs {
-			return []DerivationRow{d}
-		}
-		if d.PositionMs < focusMs && (before.StorageFileID == "" || d.PositionMs > before.PositionMs) {
-			before = d
-		}
-		if d.PositionMs > focusMs && (after.StorageFileID == "" || d.PositionMs < after.PositionMs) {
-			after = d
+		keyframes = append(keyframes, d)
+		if absInt64(d.PositionMs-focusMs) <= smartCropV2MaxGapMs {
+			closeEnough = true
 		}
 	}
-	selected := make([]DerivationRow, 0, 2)
-	if before.StorageFileID != "" && focusMs-before.PositionMs <= smartCropV2MaxGapMs {
-		selected = append(selected, before)
+	if !closeEnough {
+		return nil
 	}
-	if after.StorageFileID != "" && after.PositionMs-focusMs <= smartCropV2MaxGapMs {
-		selected = append(selected, after)
+	sort.Slice(keyframes, func(i, j int) bool {
+		di := absInt64(keyframes[i].PositionMs - focusMs)
+		dj := absInt64(keyframes[j].PositionMs - focusMs)
+		if di == dj {
+			return keyframes[i].PositionMs < keyframes[j].PositionMs
+		}
+		return di < dj
+	})
+	if len(keyframes) > smartCropTemporalMaxSamples {
+		keyframes = keyframes[:smartCropTemporalMaxSamples]
 	}
-	return selected
+	sort.Slice(keyframes, func(i, j int) bool { return keyframes[i].PositionMs < keyframes[j].PositionMs })
+	return keyframes
+}
+
+func analyzeSmartCropV2Derivations(
+	ctx context.Context,
+	sc *storageClient,
+	projectID string,
+	derivs []DerivationRow,
+	srcW, srcH, targetW, targetH int,
+) []smartCropV2Sample {
+	results := make([]*smartCropV2Sample, len(derivs))
+	sem := make(chan struct{}, smartCropV2MaxParallelDownloads)
+	var wg sync.WaitGroup
+	for i, d := range derivs {
+		i, d := i, d
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			select {
+			case sem <- struct{}{}:
+			case <-ctx.Done():
+				return
+			}
+			defer func() { <-sem }()
+			img, err := downloadAndDecodeImage(ctx, sc, projectID, d.StorageFileID)
+			if err != nil {
+				return
+			}
+			win, err := analyzeSmartCropV2Frame(srcW, srcH, targetW, targetH, img)
+			if err != nil {
+				return
+			}
+			results[i] = &smartCropV2Sample{
+				point: cropPathPoint{AtMs: d.PositionMs, X: win.X},
+				img:   img,
+			}
+		}()
+	}
+	wg.Wait()
+	samples := make([]smartCropV2Sample, 0, len(results))
+	for _, sample := range results {
+		if sample != nil {
+			samples = append(samples, *sample)
+		}
+	}
+	return samples
+}
+
+func resolveSmartCropStillBase(samples []smartCropV2Sample, focusMs int64) (int, string, error) {
+	var before, after *smartCropV2Sample
+	for i := range samples {
+		sample := &samples[i]
+		if sample.point.AtMs <= focusMs && (before == nil || sample.point.AtMs > before.point.AtMs) {
+			before = sample
+		}
+		if sample.point.AtMs >= focusMs && (after == nil || sample.point.AtMs < after.point.AtMs) {
+			after = sample
+		}
+	}
+	if before != nil && focusMs-before.point.AtMs > smartCropV2MaxGapMs {
+		before = nil
+	}
+	if after != nil && after.point.AtMs-focusMs > smartCropV2MaxGapMs {
+		after = nil
+	}
+	if before == nil && after == nil {
+		return 0, "", fmt.Errorf("smartcrop v2: no usable frame near requested timestamp")
+	}
+	if before == nil {
+		return after.point.X, "single-after", nil
+	}
+	if after == nil || before.point.AtMs == after.point.AtMs {
+		return before.point.X, "single-before", nil
+	}
+	if sceneCutScore(before.img, after.img) >= smartCropSceneCutThreshold {
+		if absInt64(after.point.AtMs-focusMs) < absInt64(focusMs-before.point.AtMs) {
+			return after.point.X, "scene-cut-nearest", nil
+		}
+		return before.point.X, "scene-cut-nearest", nil
+	}
+	return interpolateSmartCropStillX(before.point, after.point, focusMs), "interpolated", nil
 }
 
 func interpolateSmartCropStillX(before, after cropPathPoint, focusMs int64) int {
@@ -197,28 +272,16 @@ func computeSmartCropReelV2(
 		return nil, nil, fmt.Errorf("smartcrop v2: storyboard is too sparse; use v1")
 	}
 
-	samples := make([]smartCropV2Sample, 0, len(derivs))
-	for _, d := range derivs {
-		img, err := downloadAndDecodeImage(ctx, sc, projectID, d.StorageFileID)
-		if err != nil {
-			continue
+	samples := analyzeSmartCropV2Derivations(ctx, sc, projectID, derivs, row.Width, row.Height, targetW, targetH)
+	for i := range samples {
+		if i > 0 {
+			samples[i].point.Cut = sceneCutScore(samples[i-1].img, samples[i].img) >= smartCropSceneCutThreshold
 		}
-		win, err := analyzeSmartCropV2Frame(row.Width, row.Height, targetW, targetH, img)
-		if err != nil {
-			continue
-		}
-		sample := smartCropV2Sample{
-			point: cropPathPoint{AtMs: d.PositionMs, X: win.X},
-			img:   img,
-		}
-		if len(samples) > 0 {
-			sample.point.Cut = sceneCutScore(samples[len(samples)-1].img, img) >= 0.28
-		}
-		samples = append(samples, sample)
 	}
 	if len(samples) < 2 {
 		return nil, nil, fmt.Errorf("smartcrop v2: fewer than two usable samples")
 	}
+	temporalCorrections := correctSmartCropReelTemporalOutliers(samples, row.Width, cw)
 
 	path := make([]cropPathPoint, 0, len(samples)+2)
 	for _, sample := range samples {
@@ -233,13 +296,15 @@ func computeSmartCropReelV2(
 	if x, ok := staticSmartCropPathX(path, cw); ok {
 		app.Logger().Info("smartcrop v2 resolved static reel",
 			"file_id", sourceFileID, "samples", len(samples),
-			"crop_w", cw, "crop_h", ch, "crop_x", x)
+			"crop_w", cw, "crop_h", ch, "crop_x", x,
+			"temporal_corrections", temporalCorrections)
 		return &cropWindow{W: cw, H: ch, X: x, Y: 0}, nil, nil
 	}
 
 	app.Logger().Info("smartcrop v2 resolved tracked reel",
 		"file_id", sourceFileID, "samples", len(samples),
-		"path_points", len(path), "crop_w", cw, "crop_h", ch)
+		"path_points", len(path), "crop_w", cw, "crop_h", ch,
+		"temporal_corrections", temporalCorrections)
 	return &cropWindow{W: cw, H: ch, X: path[0].X, Y: 0}, path, nil
 }
 
