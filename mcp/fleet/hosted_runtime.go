@@ -26,7 +26,7 @@ go_ready() {
 }
 
 required_ready() {
-  for cmd in node npm python3 tar gzip curl git setsid base64 df tail dirname mktemp mv grep sed; do
+  for cmd in node npm python3 tar gzip curl git setsid base64 df tail dirname mktemp mv grep sed ss; do
     command -v "$cmd" >/dev/null 2>&1 || return 1
   done
   major=$(node -p 'Number(process.versions.node.split(".")[0])' 2>/dev/null || echo 0)
@@ -45,7 +45,7 @@ if ! required_ready; then
 
   if command -v apt-get >/dev/null 2>&1; then
     $SUDO apt-get update -qq
-    $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq ca-certificates curl git python3 tar gzip util-linux coreutils grep sed bash
+    $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq ca-certificates curl git python3 tar gzip util-linux coreutils grep sed bash iproute2
     $SUDO env DEBIAN_FRONTEND=noninteractive apt-get install -y -qq golang-go || true
     if ! command -v node >/dev/null 2>&1 || ! command -v npm >/dev/null 2>&1 || [ "$(node -p 'Number(process.versions.node.split(".")[0])' 2>/dev/null || echo 0)" -lt 18 ]; then
       setup=$(mktemp /tmp/fleet-nodesource-XXXXXX.sh)
@@ -57,13 +57,13 @@ if ! required_ready; then
       trap - EXIT
     fi
   elif command -v apk >/dev/null 2>&1; then
-    $SUDO apk add --no-cache nodejs npm python3 tar gzip curl git ca-certificates util-linux coreutils grep sed
+    $SUDO apk add --no-cache nodejs npm python3 tar gzip curl git ca-certificates util-linux coreutils grep sed iproute2
     $SUDO apk add --no-cache go || true
   elif command -v dnf >/dev/null 2>&1; then
-    $SUDO dnf install -y nodejs npm python3 tar gzip curl git ca-certificates util-linux coreutils grep sed
+    $SUDO dnf install -y nodejs npm python3 tar gzip curl git ca-certificates util-linux coreutils grep sed iproute
     $SUDO dnf install -y golang || true
   elif command -v yum >/dev/null 2>&1; then
-    $SUDO yum install -y nodejs npm python3 tar gzip curl git ca-certificates util-linux coreutils grep sed
+    $SUDO yum install -y nodejs npm python3 tar gzip curl git ca-certificates util-linux coreutils grep sed iproute
     $SUDO yum install -y golang || true
   else
     echo "unsupported package manager; Fleet supports apt, apk, dnf, and yum" >&2

@@ -605,9 +605,11 @@ func (a *App) reconcileOnBoot(app *sdk.AppCtx) error {
 				continue
 			}
 			if alive {
-				if baseURL, tunnelErr := a.internalTenantBaseURL(app, t); tunnelErr == nil {
-					if routeErr := a.refreshTenantIngressTargets(app, t, baseURL); routeErr != nil {
-						app.Logger().Warn("fleet: hosted route reconcile", "tenant", t.ID, "err", routeErr)
+				if t.IngressMode != IngressDirect {
+					if baseURL, tunnelErr := a.internalTenantBaseURL(app, t); tunnelErr == nil {
+						if routeErr := a.refreshTenantIngressTargets(app, t, baseURL); routeErr != nil {
+							app.Logger().Warn("fleet: hosted route reconcile", "tenant", t.ID, "err", routeErr)
+						}
 					}
 				}
 				if t.Status == StatusStopped {
@@ -891,14 +893,7 @@ func (a *App) tryRespawnHosted(ctx context.Context, app *sdk.AppCtx, t *Tenant) 
 		return
 	}
 	_ = a.store.bumpRespawn(t.ID)
-	_, _, err = a.spawnHostedTenant(app, hostedSpawnSpec{
-		InstanceID: t.InstanceID,
-		InstanceIP: info.PublicIPv4,
-		Slug:       t.Slug,
-		Port:       port,
-		AptevaVer:  tenantVersion(t),
-		FreshSetup: false,
-	})
+	_, _, err = a.spawnHostedTenant(app, hostedSpawnSpecForTenant(t, info.PublicIPv4, port))
 	if err != nil {
 		_ = a.store.recordEvent(t.ID, "auto_respawn_failed", "worker:auto_respawn", map[string]any{"error": err.Error()})
 		return

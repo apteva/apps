@@ -32,6 +32,12 @@ const (
 	KindRemote = "remote"
 )
 
+const (
+	IngressParent        = "parent"
+	IngressDirectPending = "direct_pending"
+	IngressDirect        = "direct"
+)
+
 type Tenant struct {
 	ID             string     `json:"id"`
 	Slug           string     `json:"slug"`
@@ -66,11 +72,21 @@ type Tenant struct {
 	//   >0 = row id in the Instances app's table; tenant runs as an
 	//        apteva-server on that VPS, driven via instance_run_command.
 	InstanceID int64 `json:"instance_id"`
+
+	// IngressMode controls only hosted tenant traffic. Existing tenants and
+	// every tenant on the parent host use parent ingress. direct_pending keeps
+	// the parent route available while the remote listener and DNS are checked.
+	IngressMode  string `json:"ingress_mode"`
+	IngressError string `json:"ingress_error,omitempty"`
 }
 
 // IsHosted returns true when this tenant runs on a remote instance
 // (managed via the Instances app), not on the parent.
 func (t *Tenant) IsHosted() bool { return t.InstanceID > 0 }
+
+func (t *Tenant) UsesDirectIngress() bool {
+	return t != nil && t.IsHosted() && (t.IngressMode == IngressDirectPending || t.IngressMode == IngressDirect)
+}
 
 // DomainGrant delegates a base domain to a tenant. It is separate
 // from Tenant.Domain, which is the public hostname of the tenant's own
@@ -169,16 +185,19 @@ func (s *store) insert(t *Tenant, apiKeyEnc, setupTokenEnc []byte) error {
 	if t.Kind == "" {
 		t.Kind = KindRemote
 	}
+	if t.IngressMode == "" {
+		t.IngressMode = IngressParent
+	}
 	var stTok any
 	if len(setupTokenEnc) > 0 {
 		stTok = setupTokenEnc
 	}
 	_, err := s.db.Exec(`
-		INSERT INTO fleet_tenants (id, slug, kind, base_url, config_dir, api_key_enc, setup_token_enc, owner_email, owner_user_id, current_version, target_version, status, last_seen_at, last_health, created_at, updated_at, instance_id)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+		INSERT INTO fleet_tenants (id, slug, kind, base_url, config_dir, api_key_enc, setup_token_enc, owner_email, owner_user_id, current_version, target_version, status, last_seen_at, last_health, created_at, updated_at, instance_id, ingress_mode, ingress_error)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 	`, t.ID, t.Slug, t.Kind, t.BaseURL, nullStr(t.ConfigDir), apiKeyEnc, stTok, t.OwnerEmail, nullStr(t.OwnerUserID),
 		nullStr(t.CurrentVersion), nullStr(t.TargetVersion), t.Status,
-		nil, nil, t.CreatedAt, t.UpdatedAt, t.InstanceID)
+		nil, nil, t.CreatedAt, t.UpdatedAt, t.InstanceID, t.IngressMode, nullStr(t.IngressError))
 	return err
 }
 
@@ -205,7 +224,7 @@ func (s *store) attachAPIKey(id string, apiKeyEnc []byte) error {
 
 func (s *store) get(id string) (*Tenant, []byte, error) {
 	row := s.db.QueryRow(`
-		SELECT id, slug, kind, base_url, config_dir, api_key_enc, owner_email, owner_user_id, current_version, target_version, status, last_seen_at, last_health, created_at, updated_at, domain, domain_record_id, domain_attached_at, respawn_attempts, last_respawn_at, instance_id
+		SELECT id, slug, kind, base_url, config_dir, api_key_enc, owner_email, owner_user_id, current_version, target_version, status, last_seen_at, last_health, created_at, updated_at, domain, domain_record_id, domain_attached_at, respawn_attempts, last_respawn_at, instance_id, COALESCE(ingress_mode, 'parent'), COALESCE(ingress_error, '')
 		FROM fleet_tenants WHERE id = ?
 	`, id)
 	return scanTenant(row)
@@ -213,7 +232,7 @@ func (s *store) get(id string) (*Tenant, []byte, error) {
 
 func (s *store) getBySlug(slug string) (*Tenant, []byte, error) {
 	row := s.db.QueryRow(`
-		SELECT id, slug, kind, base_url, config_dir, api_key_enc, owner_email, owner_user_id, current_version, target_version, status, last_seen_at, last_health, created_at, updated_at, domain, domain_record_id, domain_attached_at, respawn_attempts, last_respawn_at, instance_id
+		SELECT id, slug, kind, base_url, config_dir, api_key_enc, owner_email, owner_user_id, current_version, target_version, status, last_seen_at, last_health, created_at, updated_at, domain, domain_record_id, domain_attached_at, respawn_attempts, last_respawn_at, instance_id, COALESCE(ingress_mode, 'parent'), COALESCE(ingress_error, '')
 		FROM fleet_tenants WHERE slug = ?
 	`, slug)
 	return scanTenant(row)
@@ -222,7 +241,7 @@ func (s *store) getBySlug(slug string) (*Tenant, []byte, error) {
 func (s *store) list(filter map[string]string) ([]*Tenant, error) {
 	q := strings.Builder{}
 	// api_key_enc is intentionally elided from list results.
-	q.WriteString(`SELECT id, slug, kind, base_url, config_dir, X'00' AS api_key_enc, owner_email, owner_user_id, current_version, target_version, status, last_seen_at, last_health, created_at, updated_at, domain, domain_record_id, domain_attached_at, respawn_attempts, last_respawn_at, instance_id FROM fleet_tenants WHERE 1=1`)
+	q.WriteString(`SELECT id, slug, kind, base_url, config_dir, X'00' AS api_key_enc, owner_email, owner_user_id, current_version, target_version, status, last_seen_at, last_health, created_at, updated_at, domain, domain_record_id, domain_attached_at, respawn_attempts, last_respawn_at, instance_id, COALESCE(ingress_mode, 'parent'), COALESCE(ingress_error, '') FROM fleet_tenants WHERE 1=1`)
 	args := []any{}
 	cols := map[string]string{
 		"status":      "status",
@@ -351,7 +370,7 @@ func scanTenant(r rowScanner) (*Tenant, []byte, error) {
 		&t.OwnerEmail, &ownerUID, &curVer, &tgtVer, &t.Status,
 		&lastSeen, &lastHealthRaw, &t.CreatedAt, &t.UpdatedAt,
 		&domain, &domainRec, &domainAt, &t.RespawnAttempts, &lastRespawn,
-		&t.InstanceID,
+		&t.InstanceID, &t.IngressMode, &t.IngressError,
 	)
 	if err != nil {
 		if errors.Is(err, sql.ErrNoRows) {
@@ -392,7 +411,37 @@ func scanTenant(r rowScanner) (*Tenant, []byte, error) {
 		lr := lastRespawn.Time
 		t.LastRespawnAt = &lr
 	}
+	if t.IngressMode == "" {
+		t.IngressMode = IngressParent
+	}
 	return &t, apiKeyEnc, nil
+}
+
+func validIngressMode(mode string) bool {
+	switch mode {
+	case IngressParent, IngressDirectPending, IngressDirect:
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *store) setIngressMode(id, mode, lastError string) error {
+	if !validIngressMode(mode) {
+		return fmt.Errorf("unsupported ingress mode %q", mode)
+	}
+	t, _, err := s.get(id)
+	if err != nil {
+		return err
+	}
+	if mode != IngressParent && !t.IsHosted() {
+		return errors.New("direct ingress is only available for hosted tenants")
+	}
+	_, err = s.db.Exec(
+		`UPDATE fleet_tenants SET ingress_mode = ?, ingress_error = ?, updated_at = ? WHERE id = ?`,
+		mode, nullStr(lastError), time.Now().UTC(), id,
+	)
+	return err
 }
 
 // setDomain stamps the domain link triple atomically. Called by

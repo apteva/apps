@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -174,6 +175,23 @@ func (a *App) resolveTarget(spec attachDomainSpec) string {
 	return ""
 }
 
+func (a *App) resolveTenantTarget(ctx *sdk.AppCtx, t *Tenant, spec attachDomainSpec) (string, error) {
+	if target := strings.TrimSpace(spec.Target); target != "" {
+		return target, nil
+	}
+	if t != nil && t.UsesDirectIngress() {
+		info, err := a.getInstanceInfo(ctx, t.InstanceID)
+		if err != nil {
+			return "", fmt.Errorf("resolve hosted ingress target: %w", err)
+		}
+		if net.ParseIP(info.PublicIPv4) == nil {
+			return "", fmt.Errorf("hosted instance has no usable public IPv4 address")
+		}
+		return info.PublicIPv4, nil
+	}
+	return a.resolveTarget(spec), nil
+}
+
 // inferRecordType: IP literal → A, else CNAME. Same heuristic as
 // deploy/domain_link.go.
 func inferRecordType(target string) string {
@@ -303,6 +321,9 @@ func (a *App) attachDomain(ctx *sdk.AppCtx, projectID string, t *Tenant, spec at
 	if t == nil {
 		return errors.New("tenant required")
 	}
+	if t.UsesDirectIngress() {
+		return errors.New("restore parent ingress before changing the tenant primary domain")
+	}
 	done, err := a.beginTenantOperation(t.ID, "attach domain")
 	if err != nil {
 		return err
@@ -318,7 +339,10 @@ func (a *App) attachDomain(ctx *sdk.AppCtx, projectID string, t *Tenant, spec at
 		if !a.domainsAvailable(ctx) {
 			return errors.New("domains app not installed — install + bind it as fleet's domains integration, or pass manage_dns=false if the client already pointed DNS at this machine")
 		}
-		target := a.resolveTarget(spec)
+		target, err := a.resolveTenantTarget(ctx, t, spec)
+		if err != nil {
+			return err
+		}
 		if target == "" {
 			return errors.New("target required — pass target explicitly or ensure APTEVA_PUBLIC_URL / detectPublicHost yields a usable IP")
 		}
@@ -411,6 +435,9 @@ func (a *App) detachDomain(ctx *sdk.AppCtx, projectID string, t *Tenant) error {
 	if t == nil {
 		return errors.New("tenant required")
 	}
+	if t.UsesDirectIngress() {
+		return errors.New("restore parent ingress before detaching the tenant domain")
+	}
 	done, err := a.beginTenantOperation(t.ID, "detach domain")
 	if err != nil {
 		return err
@@ -477,7 +504,10 @@ func (a *App) grantDomain(ctx *sdk.AppCtx, projectID string, t *Tenant, spec att
 	if !a.domainsAvailable(ctx) {
 		return nil, errors.New("domains app not installed — install + bind it as fleet's domains integration")
 	}
-	target := a.resolveTarget(spec)
+	target, err := a.resolveTenantTarget(ctx, t, spec)
+	if err != nil {
+		return nil, err
+	}
 	if target == "" {
 		return nil, errors.New("target required — pass target explicitly or ensure APTEVA_PUBLIC_URL / detectPublicHost yields a usable IP")
 	}
@@ -738,6 +768,16 @@ func (a *App) registerRouteForTenantHost(ctx *sdk.AppCtx, t *Tenant, hostname, c
 			map[string]any{"reason": "no_port_in_base_url"})
 		return fmt.Errorf("tenant %s has no port in base_url", t.ID)
 	}
+	if t.IngressMode == IngressDirect {
+		if err := a.verifyTenantLocalIngressRoute(context.Background(), ctx, t, hostname); err != nil {
+			_ = a.store.recordEvent(t.ID, "route.register_failed", actor,
+				map[string]any{"fqdn": hostname, "error": err.Error(), "mode": IngressDirect})
+			return err
+		}
+		_ = a.store.recordEvent(t.ID, "route.registered", actor,
+			map[string]any{"fqdn": hostname, "mode": IngressDirect})
+		return nil
+	}
 	target, err := a.internalTenantBaseURL(ctx, t)
 	if err != nil {
 		_ = a.store.recordEvent(t.ID, "route.register_failed", actor,
@@ -763,6 +803,13 @@ func (a *App) refreshTenantIngressTargets(ctx *sdk.AppCtx, t *Tenant, target str
 	if t == nil {
 		return errors.New("tenant required")
 	}
+	if t.IngressMode == IngressDirect {
+		return nil
+	}
+	return a.refreshParentTenantIngressTargets(ctx, t, target)
+}
+
+func (a *App) refreshParentTenantIngressTargets(ctx *sdk.AppCtx, t *Tenant, target string) error {
 	hosts, err := a.store.listTenantHosts(t.ID)
 	if err != nil {
 		return err
@@ -806,6 +853,13 @@ func (a *App) refreshTenantIngress(ctx *sdk.AppCtx, t *Tenant) error {
 	if t == nil {
 		return errors.New("tenant required")
 	}
+	if t.IngressMode == IngressDirect {
+		return nil
+	}
+	return a.refreshParentTenantIngress(ctx, t)
+}
+
+func (a *App) refreshParentTenantIngress(ctx *sdk.AppCtx, t *Tenant) error {
 	hosts, err := a.store.listTenantHosts(t.ID)
 	if err != nil {
 		return err
@@ -817,7 +871,7 @@ func (a *App) refreshTenantIngress(ctx *sdk.AppCtx, t *Tenant) error {
 	if err != nil {
 		return err
 	}
-	return a.refreshTenantIngressTargets(ctx, t, target)
+	return a.refreshParentTenantIngressTargets(ctx, t, target)
 }
 
 func (a *App) resolveTenantHostGrant(tenantID, hostname string, grantID int64) (*DomainGrant, error) {
@@ -918,9 +972,11 @@ func (a *App) removeTenantHost(ctx *sdk.AppCtx, t *Tenant, rawHostname string) (
 	if host == nil {
 		return nil, fmt.Errorf("tenant hostname not found: %s", hostname)
 	}
-	if err := a.unregisterTenantHost(ctx, hostname); err != nil {
-		_ = a.store.setTenantHostStatus(t.ID, hostname, "error", err.Error())
-		return nil, err
+	if t.IngressMode != IngressDirect {
+		if err := a.unregisterTenantHost(ctx, hostname); err != nil {
+			_ = a.store.setTenantHostStatus(t.ID, hostname, "error", err.Error())
+			return nil, err
+		}
 	}
 	if err := a.store.deleteTenantHost(t.ID, hostname); err != nil {
 		return nil, err
@@ -930,6 +986,13 @@ func (a *App) removeTenantHost(ctx *sdk.AppCtx, t *Tenant, rawHostname string) (
 }
 
 func (a *App) unregisterTenantHostMappings(ctx *sdk.AppCtx, tenantID string) error {
+	tenant, _, err := a.store.get(tenantID)
+	if err != nil {
+		return err
+	}
+	if tenant.IngressMode == IngressDirect {
+		return nil
+	}
 	hosts, err := a.store.listTenantHosts(tenantID)
 	if err != nil {
 		return err

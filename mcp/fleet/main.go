@@ -18,7 +18,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: fleet
 display_name: Fleet
-version: 0.8.20
+version: 0.8.21
 description: Control plane for a local fleet of apteva tenants.
 author: Apteva
 scopes: [project, global]
@@ -102,6 +102,14 @@ provides:
       description: List exact tenant host mappings.
     - name: tenant_host_remove
       description: Remove one exact tenant host mapping.
+    - name: tenant_ingress_prepare_direct
+      description: Prepare a hosted tenant to serve its domains directly on its Instances host.
+    - name: tenant_ingress_verify
+      description: Verify hosted direct-ingress DNS, HTTPS, and tenant-local routes.
+    - name: tenant_ingress_finalize
+      description: Finalize hosted direct ingress after successful verification.
+    - name: tenant_ingress_rollback
+      description: Restore parent ingress for a hosted direct-ingress tenant.
     - name: tenant_domain_record_set
       description: Proxy a DNS upsert for a tenant inherited domain.
     - name: tenant_domain_record_delete
@@ -141,7 +149,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: fleet/v0.8.20
+    ref: fleet/v0.8.21
     entry: mcp/fleet
   image: ghcr.io/apteva/fleet:0.1.0
   port: 8080
@@ -590,6 +598,51 @@ func (a *App) MCPTools() []sdk.Tool {
 				"required": []string{"tenant_id", "hostname"},
 			},
 			Handler: a.toolTenantHostRemove,
+		},
+		{
+			Name:        "tenant_ingress_prepare_direct",
+			Description: "Prepare a hosted tenant for direct ingress on its Instances host. Opens host HTTP/HTTPS firewall services, restarts the tenant with native ingress, and repoints Fleet-managed DNS while retaining parent routes. Client-managed DNS must be pointed to the returned target_ip. Args: tenant_id.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"tenant_id": map[string]any{"type": "string"},
+				},
+				"required": []string{"tenant_id"},
+			},
+			Handler: a.toolIngressPrepareDirect,
+		},
+		{
+			Name:        "tenant_ingress_verify",
+			Description: "Verify a prepared hosted tenant's DNS targets, public HTTPS, native listeners, and recorded tenant-local application routes. Args: tenant_id.",
+			InputSchema: map[string]any{
+				"type":       "object",
+				"properties": map[string]any{"tenant_id": map[string]any{"type": "string"}},
+				"required":   []string{"tenant_id"},
+			},
+			Handler: a.toolIngressVerify,
+		},
+		{
+			Name:        "tenant_ingress_finalize",
+			Description: "Re-run direct-ingress verification and remove parent ingress routes only after every check passes. Args: tenant_id.",
+			InputSchema: map[string]any{
+				"type":       "object",
+				"properties": map[string]any{"tenant_id": map[string]any{"type": "string"}},
+				"required":   []string{"tenant_id"},
+			},
+			Handler: a.toolIngressFinalize,
+		},
+		{
+			Name:        "tenant_ingress_rollback",
+			Description: "Restore parent routes and Fleet-managed DNS for a hosted direct-ingress tenant. The first call preserves native ingress during DNS TTL; call again with confirm_disable=true after the TTL to restart in parent mode. Args: tenant_id, confirm_disable?.",
+			InputSchema: map[string]any{
+				"type": "object",
+				"properties": map[string]any{
+					"tenant_id":       map[string]any{"type": "string"},
+					"confirm_disable": map[string]any{"type": "boolean"},
+				},
+				"required": []string{"tenant_id"},
+			},
+			Handler: a.toolIngressRollback,
 		},
 		{
 			Name:        "tenant_domain_record_set",

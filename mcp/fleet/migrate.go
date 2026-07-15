@@ -36,6 +36,9 @@ func (a *App) toolMigrate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if t.Kind != KindLocal {
 		return nil, fmt.Errorf("only Fleet-managed local-kind tenants can be moved (this one is %q)", t.Kind)
 	}
+	if t.UsesDirectIngress() {
+		return nil, errors.New("restore parent ingress before migrating a direct-ingress tenant; migrate it, then prepare direct ingress on the target host")
+	}
 	sourceHost, err := a.resolveFleetHost(ctx, t.InstanceID)
 	if err != nil {
 		return nil, fmt.Errorf("source host: %w", err)
@@ -114,7 +117,7 @@ func (a *App) toolMigrate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	rollback := func(stage string, cause error) (any, error) {
 		_ = a.store.recordEvent(t.ID, "migrate_failed", "user",
 			map[string]any{"stage": stage, "error": cause.Error()})
-		if baseURL, status, rerr := a.startTenantOnHost(ctx, sourceHost, t.ID, t.Slug, sourceDir, version, sourcePort, prevStatus); rerr == nil {
+		if baseURL, status, rerr := a.startTenantOnHost(ctx, sourceHost, t, sourceDir, version, sourcePort, prevStatus); rerr == nil {
 			sourceTenant := *t
 			sourceTenant.BaseURL = baseURL
 			if routeErr := a.refreshTenantIngress(ctx, &sourceTenant); routeErr != nil {
@@ -133,7 +136,7 @@ func (a *App) toolMigrate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return nil, fmt.Errorf("migrate %s: %w (source tenant restart attempted)", stage, cause)
 	}
 	if t.InstanceID == targetID {
-		baseURL, newStatus, err := a.startTenantOnHost(ctx, sourceHost, t.ID, t.Slug, sourceDir, version, targetPort, prevStatus)
+		baseURL, newStatus, err := a.startTenantOnHost(ctx, sourceHost, t, sourceDir, version, targetPort, prevStatus)
 		if err != nil {
 			return rollback("restart on new port", err)
 		}
@@ -166,7 +169,7 @@ func (a *App) toolMigrate(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return rollback("transfer", err)
 	}
 	targetStarted := false
-	baseURL, newStatus, err := a.startTenantOnHost(ctx, targetHost, t.ID, t.Slug, targetDir, version, targetPort, prevStatus)
+	baseURL, newStatus, err := a.startTenantOnHost(ctx, targetHost, t, targetDir, version, targetPort, prevStatus)
 	if err != nil {
 		_ = a.removeTenantData(ctx, targetHost, t.Slug, targetDir)
 		return rollback("target start", err)

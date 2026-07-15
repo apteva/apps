@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: fleet
 display_name: Fleet
-version: 0.8.20
+version: 0.8.21
 description: |
   Control plane for a fleet of client apteva instances. Spawns every
   tenant as a local apteva process on the parent host with admin-
@@ -112,6 +112,14 @@ provides:
       description: "List exact tenant host mappings and reconciliation status. Args: tenant_id? (optional filter)."
     - name: tenant_host_remove
       description: "Remove one exact tenant hostname from ingress and Fleet persistence without changing DNS or tenant data. Args: tenant_id, hostname."
+    - name: tenant_ingress_prepare_direct
+      description: "Prepare a hosted tenant to serve its primary and application hostnames directly on the Instances host. Parent routes remain available during transition. Args: tenant_id."
+    - name: tenant_ingress_verify
+      description: "Verify remote listeners, DNS, public HTTPS, and tenant-local routes before direct ingress is finalized. Args: tenant_id."
+    - name: tenant_ingress_finalize
+      description: "Finalize verified hosted direct ingress and remove the parent routes. Args: tenant_id."
+    - name: tenant_ingress_rollback
+      description: "Restore parent routes and managed DNS, then optionally disable remote ingress after DNS propagation. Args: tenant_id, confirm_disable?."
     - name: tenant_domain_record_set
       description: "Proxy a DNS upsert for a tenant-owned inherited domain. Intended for the tenant Domains facade. Args: tenant_id, domain, name, type, value, ttl?."
     - name: tenant_domain_record_delete
@@ -157,7 +165,7 @@ runtime:
   kind: source
   source:
     repo: github.com/apteva/apps
-    ref: fleet/v0.8.20
+    ref: fleet/v0.8.21
     entry: mcp/fleet
   image: ghcr.io/apteva/fleet:0.1.0
   port: 8080

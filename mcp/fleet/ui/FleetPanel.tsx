@@ -158,6 +158,8 @@ interface Tenant {
   // v0.6+ — host placement. instance_id 0 = local parent host;
   // >0 = a row in the Instances app (tenant runs on that VPS).
   instance_id?: number;
+  ingress_mode?: "parent" | "direct_pending" | "direct";
+  ingress_error?: string;
 }
 
 interface InstanceOption {
@@ -1115,6 +1117,22 @@ function TenantDetail({
           onDetach={() =>
             run("detach-domain", "tenant_detach_domain", { tenant_id: tenant.id })
           }
+        />
+      )}
+
+      {!isSetupPending && !onParentHost && (
+        <HostedIngressBlock
+          tenant={tenant}
+          instance={hostInstance}
+          busy={busy}
+          onPrepare={() => run("ingress-prepare", "tenant_ingress_prepare_direct", { tenant_id: tenant.id })}
+          onVerify={() => run("ingress-verify", "tenant_ingress_verify", { tenant_id: tenant.id })}
+          onFinalize={() => run("ingress-finalize", "tenant_ingress_finalize", { tenant_id: tenant.id })}
+          onRestore={() => run("ingress-restore", "tenant_ingress_rollback", { tenant_id: tenant.id })}
+          onDisable={() => run("ingress-disable", "tenant_ingress_rollback", {
+            tenant_id: tenant.id,
+            confirm_disable: true,
+          })}
         />
       )}
 
@@ -2146,7 +2164,11 @@ function DomainBlock({
     );
   }
   const clientManagedDNS = !tenant.domain_record_id;
-  const cert = clientManagedDNS ? undefined : meta?.certs?.[tenant.domain];
+  const directIngress = tenant.ingress_mode === "direct";
+  const transitioningIngress = tenant.ingress_mode === "direct_pending";
+  const cert = clientManagedDNS || directIngress || transitioningIngress
+    ? undefined
+    : meta?.certs?.[tenant.domain];
   const certVariant: PillVariant = !cert
     ? "neutral"
     : cert.status === "live"
@@ -2175,10 +2197,14 @@ function DomainBlock({
         </span>
       )}
       {clientManagedDNS && (
-        <StatusPill variant="success">server ingress</StatusPill>
+        <StatusPill variant={directIngress ? "success" : transitioningIngress ? "warn" : "success"}>
+          {directIngress ? "instance HTTPS" : transitioningIngress ? "transitioning" : "server ingress"}
+        </StatusPill>
       )}
       {!cert && tenant.domain && !clientManagedDNS && (
-        <StatusPill variant="info">server ingress</StatusPill>
+        <StatusPill variant={directIngress ? "success" : transitioningIngress ? "warn" : "info"}>
+          {directIngress ? "instance HTTPS" : transitioningIngress ? "transitioning" : "server ingress"}
+        </StatusPill>
       )}
       <span className="flex-1" />
       <ActionButton
@@ -2187,6 +2213,65 @@ function DomainBlock({
         tone="danger"
         onClick={onDetach}
       />
+    </div>
+  );
+}
+
+function HostedIngressBlock({
+  tenant,
+  instance,
+  busy,
+  onPrepare,
+  onVerify,
+  onFinalize,
+  onRestore,
+  onDisable,
+}: {
+  tenant: Tenant;
+  instance?: InstanceOption;
+  busy: string | null;
+  onPrepare: () => void;
+  onVerify: () => void;
+  onFinalize: () => void;
+  onRestore: () => void;
+  onDisable: () => void;
+}) {
+  const mode = tenant.ingress_mode || "parent";
+  const variant: PillVariant = mode === "direct" ? "success" : mode === "direct_pending" ? "warn" : "neutral";
+  const label = mode === "direct" ? "direct" : mode === "direct_pending" ? "transitioning" : "via parent";
+  return (
+    <div className="flex flex-wrap items-center gap-2 px-4 py-2 border-b border-border">
+      <span className="text-[11px] uppercase tracking-wider text-text-dim font-semibold">
+        Hosted ingress
+      </span>
+      <StatusPill variant={variant}>{label}</StatusPill>
+      {instance?.public_ipv4 && (
+        <span className="font-mono text-xs text-text-dim">{instance.public_ipv4}</span>
+      )}
+      {tenant.ingress_error && (
+        <span className="basis-full text-xs text-error" title={tenant.ingress_error}>
+          {tenant.ingress_error}
+        </span>
+      )}
+      <span className="flex-1" />
+      {mode === "parent" && (
+        <ActionButton
+          label="Use instance ingress"
+          busy={busy === "ingress-prepare"}
+          onClick={onPrepare}
+        />
+      )}
+      {mode === "direct_pending" && (
+        <>
+          <ActionButton label="Verify" busy={busy === "ingress-verify"} onClick={onVerify} />
+          <ActionButton label="Finalize" busy={busy === "ingress-finalize"} onClick={onFinalize} />
+          <ActionButton label="Restore parent" busy={busy === "ingress-restore"} onClick={onRestore} />
+          <ActionButton label="Disable direct" busy={busy === "ingress-disable"} tone="danger" onClick={onDisable} />
+        </>
+      )}
+      {mode === "direct" && (
+        <ActionButton label="Restore parent" busy={busy === "ingress-restore"} onClick={onRestore} />
+      )}
     </div>
   );
 }

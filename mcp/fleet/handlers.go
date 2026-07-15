@@ -468,14 +468,9 @@ func (a *App) toolStart(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		}
 		prevStatus := t.Status
 		_ = a.store.setStatus(t.ID, StatusStarting, "user")
-		_, _, spawnErr := a.spawnHostedTenant(ctx, hostedSpawnSpec{
-			InstanceID: t.InstanceID,
-			InstanceIP: info.PublicIPv4,
-			Slug:       t.Slug,
-			Port:       port,
-			AptevaVer:  t.TargetVersion,
-			FreshSetup: false,
-		})
+		spec := hostedSpawnSpecForTenant(t, info.PublicIPv4, port)
+		spec.AptevaVer = t.TargetVersion
+		_, _, spawnErr := a.spawnHostedTenant(ctx, spec)
 		if spawnErr != nil {
 			_ = a.store.setStatus(t.ID, StatusFailed, "user")
 			return nil, spawnErr
