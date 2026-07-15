@@ -4059,11 +4059,9 @@ function PostListRow({
     : "No targets";
   const editable = (post.status === "published" || post.status === "partial") &&
     post.targets.some((target) => isEditablePlatform(target.platform));
-  const accent = platformPresentation(post.targets[0]?.platform || "").color;
   return (
     <div
       className="relative border border-border rounded bg-bg-card/30 hover:bg-bg-card/50 transition-colors"
-      style={{ borderLeftColor: accent, borderLeftWidth: 3 }}
     >
       <div className="flex items-stretch gap-3 p-2.5" style={{ minHeight: 116 }}>
         <button type="button" onClick={onOpen} className="flex flex-1 min-w-0 items-stretch gap-3 text-left">
@@ -4278,13 +4276,11 @@ function CalendarPostEvent({ post, projectId, onOpen, mobile = false }: {
 }) {
   const date = postLifecycleDate(post);
   const platform = Array.from(new Set(post.targets.map((target) => target.platform))).join(", ");
-  const accent = platformPresentation(post.targets[0]?.platform || "").color;
   return (
     <button
       type="button"
       onClick={onOpen}
       className={`w-full text-left flex items-center gap-1.5 border border-border rounded bg-bg-card/60 hover:border-accent overflow-hidden ${mobile ? "p-2" : "p-1"}`}
-      style={{ borderLeftColor: accent, borderLeftWidth: 3 }}
     >
       <PostLeadMedia post={post} projectId={projectId} variant="calendar" />
       <div className="min-w-0 flex-1">
