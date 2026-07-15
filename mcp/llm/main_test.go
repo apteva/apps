@@ -538,7 +538,7 @@ func TestBoundOpenAICodexIntegrationSupportsChatAndAccountModelSync(t *testing.T
 		_, _ = w.Write([]byte(`{"models":[
 			{"slug":"gpt-5.6-terra","display_name":"GPT-5.6 Terra","visibility":"list","priority":1,"context_window":200000,"input_modalities":["text","image"]},
 			{"slug":"gpt-5.5","display_name":"GPT-5.5","visibility":"list","priority":2,"context_window":128000,"input_modalities":["text"]},
-			{"slug":"gpt-5.6-luna","display_name":"GPT-5.6 Luna","visibility":"list","priority":0},
+			{"slug":"gpt-5.6-luna","display_name":"GPT-5.6 Luna","visibility":"list","priority":0,"supported_in_api":true,"context_window":272000,"input_modalities":["text","image"]},
 			{"slug":"internal-model","display_name":"Internal","visibility":"hidden","priority":0}
 		]}`))
 	}))
@@ -578,27 +578,27 @@ func TestBoundOpenAICodexIntegrationSupportsChatAndAccountModelSync(t *testing.T
 		t.Fatal(err)
 	}
 	results := app.syncProviderModels(ctx, "proj-test", "openai-codex")
-	if len(results) != 1 || results[0].Status != "ok" || results[0].ModelCount != 2 || catalogCalls.Load() != 1 {
+	if len(results) != 1 || results[0].Status != "ok" || results[0].ModelCount != 3 || catalogCalls.Load() != 1 {
 		t.Fatalf("sync results=%+v calls=%d", results, catalogCalls.Load())
 	}
-	var terra *ProviderModel
+	var luna *ProviderModel
 	for i := range results[0].Models {
-		if results[0].Models[i].ModelID == "gpt-5.6-terra" {
-			terra = &results[0].Models[i]
+		if results[0].Models[i].ModelID == "gpt-5.6-luna" {
+			luna = &results[0].Models[i]
 		}
 	}
-	if terra == nil || terra.GatewayModel != "openai-codex/gpt-5.6-terra" || terra.ContextWindow != 200000 {
-		t.Fatalf("terra model=%+v", terra)
+	if luna == nil || luna.GatewayModel != "openai-codex/gpt-5.6-luna" || luna.ContextWindow != 272000 || !strings.Contains(string(luna.InputModalities), `"image"`) {
+		t.Fatalf("Luna model=%+v", luna)
 	}
 	result, err := app.executeChat(ctx, &TokenIdentity{ProjectID: "proj-test", SubjectType: "agent", SubjectID: "a"}, map[string]any{
-		"model": "openai-codex/gpt-5.6-terra", "messages": []any{map[string]any{"role": "user", "content": []any{
+		"model": "openai-codex/gpt-5.6-luna", "messages": []any{map[string]any{"role": "user", "content": []any{
 			map[string]any{"type": "text", "text": "hello"}, map[string]any{"type": "input_image", "image_url": "https://images.example/codex.png"},
 		}}}, "max_tokens": 128, "_llm_request_id": "codex-chat",
 	})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if executedConnection != 88 || executedTool != "chat_completion" || executedInput["model"] != "gpt-5.6-terra" || intArg(executedInput, "max_tokens", 0) != 128 {
+	if executedConnection != 88 || executedTool != "chat_completion" || executedInput["model"] != "gpt-5.6-luna" || intArg(executedInput, "max_tokens", 0) != 128 {
 		t.Fatalf("execute connection=%d tool=%q input=%+v", executedConnection, executedTool, executedInput)
 	}
 	messages, _ := executedInput["messages"].([]any)

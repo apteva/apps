@@ -28,7 +28,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: llm
 display_name: LLM Gateway
-version: 0.5.3
+version: 0.5.4
 description: Generic OpenAI-compatible text and image access with provider-cost metering for Apteva-hosted apps and agents.
 author: Apteva
 scopes: [project, global]
@@ -196,7 +196,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		}
 	}
 	globalCtx = ctx
-	ctx.Logger().Info("llm gateway mounted", "version", "0.5.3", "scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
+	ctx.Logger().Info("llm gateway mounted", "version", "0.5.4", "scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
 	return nil
 }
 
@@ -2321,7 +2321,7 @@ func parseOpenAICodexModels(provider string, raw []byte) []ProviderModel {
 		}
 		id := strings.TrimSpace(strAny(model["slug"]))
 		visibility := strings.TrimSpace(strAny(model["visibility"]))
-		if id == "" || !strings.EqualFold(visibility, "list") || strings.EqualFold(id, "gpt-5.6-luna") {
+		if id == "" || !strings.EqualFold(visibility, "list") {
 			continue
 		}
 		priorities[id] = int64FromAny(model["priority"])
