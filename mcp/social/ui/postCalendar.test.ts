@@ -67,19 +67,20 @@ test("critical calendar and media squares do not depend on host utility CSS", ()
   expect(stableSquareStyle(32).flex).toBe("0 0 32px");
 });
 
-test("list media keeps a fixed column and stretches to the card margins", () => {
+test("list media uses a fixed square that fills the card margins", () => {
   expect(listLeadMediaStyle()).toEqual({
-    width: 96,
-    minWidth: 96,
-    maxWidth: 96,
-    minHeight: 96,
-    flex: "0 0 96px",
-    alignSelf: "stretch",
+    width: 156,
+    height: 156,
+    minWidth: 156,
+    minHeight: 156,
+    maxWidth: 156,
+    maxHeight: 156,
+    flex: "0 0 156px",
     display: "grid",
     placeItems: "center",
     lineHeight: 1,
   });
-  expect(listLeadMediaStyle()).not.toHaveProperty("height");
+  expect(listLeadMediaStyle().width).toBe(listLeadMediaStyle().height);
 });
 
 test("list rows use one height for every media aspect ratio", () => {

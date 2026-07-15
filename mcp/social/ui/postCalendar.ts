@@ -24,14 +24,15 @@ export function stableSquareStyle(size: number) {
   } as const;
 }
 
-export function listLeadMediaStyle(width = 96) {
+export function listLeadMediaStyle(size = 156) {
   return {
-    width,
-    minWidth: width,
-    maxWidth: width,
-    minHeight: width,
-    flex: `0 0 ${width}px`,
-    alignSelf: "stretch",
+    width: size,
+    height: size,
+    minWidth: size,
+    minHeight: size,
+    maxWidth: size,
+    maxHeight: size,
+    flex: `0 0 ${size}px`,
     display: "grid",
     placeItems: "center",
     lineHeight: 1,
