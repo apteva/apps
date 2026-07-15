@@ -9,6 +9,21 @@ export interface CalendarPostLike {
 export type PostViewMode = "list" | "calendar";
 export type CalendarScale = "month" | "week";
 
+export function stableSquareStyle(size: number) {
+  return {
+    width: size,
+    height: size,
+    minWidth: size,
+    minHeight: size,
+    maxWidth: size,
+    maxHeight: size,
+    flex: `0 0 ${size}px`,
+    display: "grid",
+    placeItems: "center",
+    lineHeight: 1,
+  } as const;
+}
+
 export function postLifecycleDate(post: CalendarPostLike): Date | null {
   const source =
     (post.status === "published" || post.status === "partial") && post.published_at

@@ -6,6 +6,7 @@ import {
   localDateKey,
   moveCalendarCursor,
   postLifecycleDate,
+  stableSquareStyle,
 } from "./postCalendar";
 
 test("postLifecycleDate follows lifecycle status", () => {
@@ -44,4 +45,21 @@ test("filters by status/account and groups in lifecycle order", () => {
   const grouped = groupPostsByLocalDay(filtered);
   const key = localDateKey(postLifecycleDate(filtered[0])!);
   expect(grouped.get(key)?.map((post) => post.id)).toEqual([2, 1]);
+});
+
+test("critical calendar and media squares do not depend on host utility CSS", () => {
+  expect(stableSquareStyle(24)).toEqual({
+    width: 24,
+    height: 24,
+    minWidth: 24,
+    minHeight: 24,
+    maxWidth: 24,
+    maxHeight: 24,
+    flex: "0 0 24px",
+    display: "grid",
+    placeItems: "center",
+    lineHeight: 1,
+  });
+  expect(stableSquareStyle(96).width).toBe(stableSquareStyle(96).height);
+  expect(stableSquareStyle(32).flex).toBe("0 0 32px");
 });

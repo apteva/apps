@@ -31,6 +31,7 @@ import {
   localDateKey,
   moveCalendarCursor,
   postLifecycleDate,
+  stableSquareStyle,
   type CalendarScale,
   type PostViewMode,
 } from "./postCalendar";
@@ -4176,7 +4177,10 @@ function PostCalendarView({
                 className={`min-h-[150px] p-1.5 border-b border-border ${index % 7 !== 6 ? "border-r" : ""} ${outsideMonth ? "bg-bg/40" : "bg-bg"}`}
               >
                 <div className="flex items-center justify-between mb-1">
-                  <span className={`w-6 h-6 grid place-items-center text-xs rounded ${key === todayKey ? "bg-accent text-bg font-bold" : outsideMonth ? "text-text-dim" : "text-text"}`}>
+                  <span
+                    className={`text-xs rounded ${key === todayKey ? "bg-accent text-bg font-bold" : outsideMonth ? "text-text-dim" : "text-text"}`}
+                    style={stableSquareStyle(24)}
+                  >
                     {day.getDate()}
                   </span>
                   {dayPosts.length > 0 && <span className="text-[10px] text-text-dim">{dayPosts.length}</span>}
@@ -4297,22 +4301,43 @@ function PostLeadMedia({ post, projectId, variant }: {
   const source = storageID ? storageURL(`/files/${storageID}/content`, projectId) : externalURL || "";
   const total = (post.media_storage_ids?.length || 0) + (post.external_media_urls?.length || 0);
   const isVideo = !!storageID && !!meta?.mime.startsWith("video/");
-  const size = variant === "list"
-    ? "w-24 h-24"
-    : "w-8 h-8";
+  const size = variant === "list" ? 96 : 32;
   return (
-    <div className={`${size} flex-shrink-0 relative overflow-hidden rounded border border-border bg-bg-input`} aria-hidden="true">
+    <div
+      className="relative overflow-hidden rounded border border-border bg-bg-input"
+      style={stableSquareStyle(size)}
+      aria-hidden="true"
+    >
       {!source || (storageID && !meta) ? (
-        <div className="w-full h-full grid place-items-center text-text-dim text-[10px] uppercase">
+        <div
+          className="text-text-dim text-[10px] uppercase"
+          style={{ width: "100%", height: "100%", display: "grid", placeItems: "center" }}
+        >
           {source ? "…" : post.targets[0]?.platform?.slice(0, 2) || "—"}
         </div>
       ) : isVideo ? (
         <>
-          <video src={source} preload="metadata" muted playsInline className="w-full h-full object-cover" />
-          <div className="absolute inset-0 grid place-items-center bg-black/20"><span className="text-white text-xs">▶</span></div>
+          <video
+            src={source}
+            preload="metadata"
+            muted
+            playsInline
+            style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
+          />
+          <div
+            className="absolute inset-0 bg-black/20"
+            style={{ display: "grid", placeItems: "center" }}
+          >
+            <span className="text-white text-xs">▶</span>
+          </div>
         </>
       ) : (
-        <img src={source} alt="" loading="lazy" className="w-full h-full object-cover" />
+        <img
+          src={source}
+          alt=""
+          loading="lazy"
+          style={{ width: "100%", height: "100%", objectFit: "cover", display: "block" }}
+        />
       )}
       {total > 1 && (
         <span className="absolute right-1 bottom-1 px-1 py-0.5 rounded bg-black/80 text-white text-[9px]">+{total - 1}</span>
