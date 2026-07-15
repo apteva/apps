@@ -293,6 +293,43 @@ func TestReelTemporalConsensusCorrectsOnlySceneOutliers(t *testing.T) {
 	}
 }
 
+func TestReelTemporalConsensusPreservesOpposingSubjectMovement(t *testing.T) {
+	samples := makeTemporalTestSamples([]int{92, 98, 104, 110, 116, 122, 128, 134, 140}, 300)
+	result, ok := temporalSubjectConsensus(samples, 1280, 404)
+	if !ok {
+		t.Fatal("expected temporal consensus")
+	}
+	original := []int{
+		result.X - 180, result.X - 150, result.X - 120,
+		result.X, result.X, result.X,
+		result.X + 120, result.X + 150, result.X + 180,
+	}
+	for i := range samples {
+		samples[i].point.X = original[i]
+	}
+	if corrected := correctSmartCropReelTemporalOutliers(samples, 1280, 404); corrected != 0 {
+		t.Fatalf("opposing motion was flattened; corrected=%d", corrected)
+	}
+	for i := range samples {
+		if samples[i].point.X != original[i] {
+			t.Fatalf("tracked point %d changed from %d to %d", i, original[i], samples[i].point.X)
+		}
+	}
+}
+
+func TestReelTemporalConsensusPreservesShortScene(t *testing.T) {
+	samples := makeTemporalTestSamples([]int{92, 116, 140}, 740)
+	original := []int{740, 740, 740}
+	if corrected := correctSmartCropReelTemporalOutliers(samples, 1280, 404); corrected != 0 {
+		t.Fatalf("short scene was corrected from too little evidence: %d", corrected)
+	}
+	for i := range samples {
+		if samples[i].point.X != original[i] {
+			t.Fatalf("short-scene point %d changed to %d", i, samples[i].point.X)
+		}
+	}
+}
+
 func BenchmarkAnalyzeSmartCropV2Frame320(b *testing.B) {
 	img := image.NewRGBA(image.Rect(0, 0, 320, 180))
 	fillImage(img, color.RGBA{R: 82, G: 88, B: 96, A: 255})

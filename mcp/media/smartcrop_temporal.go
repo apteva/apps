@@ -226,9 +226,34 @@ func correctSmartCropReelTemporalOutliers(samples []smartCropV2Sample, srcW, cro
 			end++
 		}
 		if result, ok := temporalSubjectConsensus(samples[start:end], srcW, cropW); ok {
+			deadZone := cropW / 4
+			left, right := 0, 0
 			for i := start; i < end; i++ {
-				if x, changed := applySmartCropTemporalOverride(samples[i].point.X, result, cropW, srcW); changed {
-					samples[i].point.X = x
+				switch {
+				case samples[i].point.X < result.X-deadZone:
+					left++
+				case samples[i].point.X > result.X+deadZone:
+					right++
+				}
+			}
+			// A static-background failure pushes most saliency samples away
+			// from the subject in the same direction. Opposing outliers mean
+			// the subject is genuinely traversing the frame; keep the tracked
+			// path rather than flattening it to one scene-wide consensus.
+			// Four agreeing frames are the minimum for modifying a reel path.
+			// Three-frame scenes are too short to distinguish a static saliency
+			// miss from deliberate subject movement reliably.
+			required := maxInt(4, (2*(end-start)+2)/3)
+			direction := 0
+			if left >= required && right == 0 {
+				direction = -1
+			} else if right >= required && left == 0 {
+				direction = 1
+			}
+			for i := start; direction != 0 && i < end; i++ {
+				delta := samples[i].point.X - result.X
+				if (direction < 0 && delta < -deadZone) || (direction > 0 && delta > deadZone) {
+					samples[i].point.X = clampInt(roundEven(result.X), 0, srcW-cropW)
 					corrected++
 				}
 			}
