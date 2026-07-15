@@ -170,11 +170,13 @@ func prepareTranscriptAudioLocal(ctx context.Context, app *sdk.AppCtx, sc *stora
 	defer os.RemoveAll(work)
 
 	outPath := filepath.Join(work, fileID+".mp3")
-	args := transcriptAudioFFmpegArgs(sourceURL, outPath)
-	cmd := exec.CommandContext(ctx, ffmpegPath, args...)
-	out, err := cmd.CombinedOutput()
+	usedVBRFallback, err := runTranscriptAudioFFmpeg(ctx, ffmpegPath, sourceURL, outPath)
 	if err != nil {
-		return 0, fmt.Errorf("ffmpeg transcript audio: %w: %s", err, strings.TrimSpace(string(out)))
+		return 0, err
+	}
+	if usedVBRFallback {
+		app.Logger().Warn("transcript audio CBR encode failed; VBR MP3 retry succeeded",
+			"file_id", fileID)
 	}
 	f, err := os.Open(outPath)
 	if err != nil {
@@ -191,7 +193,15 @@ func prepareTranscriptAudioLocal(ctx context.Context, app *sdk.AppCtx, sc *stora
 }
 
 func transcriptAudioFFmpegArgs(sourceURL, outPath string) []string {
-	return []string{
+	return transcriptAudioFFmpegArgsWithRateControl(sourceURL, outPath, false)
+}
+
+func transcriptAudioVBRFFmpegArgs(sourceURL, outPath string) []string {
+	return transcriptAudioFFmpegArgsWithRateControl(sourceURL, outPath, true)
+}
+
+func transcriptAudioFFmpegArgsWithRateControl(sourceURL, outPath string, vbr bool) []string {
+	args := []string{
 		"-y",
 		"-loglevel", "error",
 		"-nostdin",
@@ -202,9 +212,64 @@ func transcriptAudioFFmpegArgs(sourceURL, outPath string) []string {
 		"-ar", "16000",
 		"-af", transcriptAudioFilter,
 		"-c:a", "libmp3lame",
-		"-b:a", "64k",
-		outPath,
 	}
+	if vbr {
+		args = append(args, "-q:a", "5")
+	} else {
+		args = append(args, "-b:a", "64k")
+	}
+	return append(args, outPath)
+}
+
+// runTranscriptAudioFFmpeg preserves the established 64 kbit/s CBR MP3
+// output for the common path. Some valid mono inputs make libmp3lame abort in
+// its CBR iteration loop after leaving a truncated file behind. When that
+// happens, remove the partial output and retry with LAME's VBR path. The
+// fallback remains an MP3, so upload names, content types, Deepgram requests,
+// and existing transcript-audio caches keep the same contract.
+func runTranscriptAudioFFmpeg(ctx context.Context, ffmpegPath, sourceURL, outPath string) (bool, error) {
+	primaryOut, primaryErr := executeTranscriptAudioFFmpeg(ctx, ffmpegPath, transcriptAudioFFmpegArgs(sourceURL, outPath), outPath)
+	if primaryErr == nil {
+		return false, nil
+	}
+	primaryFailure := transcriptAudioFFmpegFailure(primaryErr, primaryOut)
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return false, fmt.Errorf("ffmpeg transcript audio CBR: %w: %s", ctxErr, primaryFailure)
+	}
+	if err := os.Remove(outPath); err != nil && !os.IsNotExist(err) {
+		return false, fmt.Errorf("remove partial transcript audio after CBR failure: %w (CBR: %s)", err, primaryFailure)
+	}
+
+	fallbackOut, fallbackErr := executeTranscriptAudioFFmpeg(ctx, ffmpegPath, transcriptAudioVBRFFmpegArgs(sourceURL, outPath), outPath)
+	if fallbackErr != nil {
+		return true, fmt.Errorf("ffmpeg transcript audio failed (CBR: %s; VBR retry: %s)",
+			primaryFailure, transcriptAudioFFmpegFailure(fallbackErr, fallbackOut))
+	}
+	return true, nil
+}
+
+func executeTranscriptAudioFFmpeg(ctx context.Context, ffmpegPath string, args []string, outPath string) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, ffmpegPath, args...)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return out, err
+	}
+	info, err := os.Stat(outPath)
+	if err != nil {
+		return out, fmt.Errorf("stat output: %w", err)
+	}
+	if info.Size() == 0 {
+		return out, errors.New("ffmpeg produced an empty transcript audio output")
+	}
+	return out, nil
+}
+
+func transcriptAudioFFmpegFailure(err error, out []byte) string {
+	detail := strings.TrimSpace(string(out))
+	if detail == "" {
+		return err.Error()
+	}
+	return fmt.Sprintf("%v: %s", err, truncate(detail, 1200))
 }
 
 type remoteTranscriptAudioResult struct {
@@ -277,7 +342,13 @@ func buildRemoteTranscriptAudioScript(in remoteTranscriptAudioScriptInputs) stri
 	fmt.Fprintf(&b, "export SIGNED_URL=%s\n", shellQuote(in.SignedURL))
 	fmt.Fprintf(&b, "export FFMPEG=%s\n", shellQuote(in.FFmpeg))
 	fmt.Fprintf(&b, "export AUDIO_FILTER=%s\n", shellQuote(transcriptAudioFilter))
-	b.WriteString(`"$FFMPEG" -y -loglevel error -nostdin -i "$SIGNED_URL" -vn -map 0:a:0 -ac 1 -ar 16000 -af "$AUDIO_FILTER" -c:a libmp3lame -b:a 64k audio.mp3` + "\n")
+	b.WriteString(`if "$FFMPEG" -y -loglevel error -nostdin -i "$SIGNED_URL" -vn -map 0:a:0 -ac 1 -ar 16000 -af "$AUDIO_FILTER" -c:a libmp3lame -b:a 64k audio.mp3 && [ -s audio.mp3 ]; then` + "\n")
+	b.WriteString(`  : # Preserve the established CBR output on the common path.` + "\n")
+	b.WriteString(`else` + "\n")
+	b.WriteString(`  echo "ffmpeg CBR transcript audio failed; retrying VBR MP3" >&2` + "\n")
+	b.WriteString(`  rm -f audio.mp3` + "\n")
+	b.WriteString(`  "$FFMPEG" -y -loglevel error -nostdin -i "$SIGNED_URL" -vn -map 0:a:0 -ac 1 -ar 16000 -af "$AUDIO_FILTER" -c:a libmp3lame -q:a 5 audio.mp3` + "\n")
+	b.WriteString(`fi` + "\n")
 	b.WriteString(`if [ ! -s audio.mp3 ]; then echo "ffmpeg produced no transcript audio output" >&2; exit 1; fi` + "\n")
 	b.WriteString(`RESP=$(curl -sS --fail -X POST \
   -H "Authorization: Bearer $STORAGE_TOKEN" \
