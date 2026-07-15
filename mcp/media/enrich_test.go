@@ -107,7 +107,7 @@ func TestSearch_EnrichesURLsAndMetadata(t *testing.T) {
 	defer cleanup()
 
 	app := &App{}
-	out, err := app.toolSearch(ctx, map[string]any{"_project_id": testProj})
+	out, err := app.toolSearch(ctx, map[string]any{"_project_id": testProj, "detail": true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -216,7 +216,7 @@ func TestSearch_StorageUnavailable_FlagsAndDegrades(t *testing.T) {
 	t.Setenv("APTEVA_OUTBOUND_TOKEN", "dev-1")
 
 	app := &App{}
-	out, err := app.toolSearch(ctx, map[string]any{"_project_id": testProj})
+	out, err := app.toolSearch(ctx, map[string]any{"_project_id": testProj, "detail": true})
 	if err != nil {
 		t.Fatalf("search itself shouldn't fail: %v", err)
 	}
@@ -246,7 +246,7 @@ func TestSearch_FileDeleted_LeavesURLEmpty(t *testing.T) {
 	defer cleanup()
 
 	app := &App{}
-	out, _ := app.toolSearch(ctx, map[string]any{"_project_id": testProj})
+	out, _ := app.toolSearch(ctx, map[string]any{"_project_id": testProj, "detail": true})
 	rows := out.(map[string]any)["media"].([]MediaResponseRow)
 	if len(rows) != 2 {
 		t.Fatalf("want 2 rows (one alive, one stale), got %d", len(rows))
@@ -291,7 +291,7 @@ func TestSearch_OneBatchRoundtripPerCall(t *testing.T) {
 	defer cleanup()
 
 	app := &App{}
-	out, _ := app.toolSearch(ctx, map[string]any{"_project_id": testProj, "limit": 100})
+	out, _ := app.toolSearch(ctx, map[string]any{"_project_id": testProj, "limit": 100, "detail": true})
 	rows := out.(map[string]any)["media"].([]MediaResponseRow)
 	if len(rows) != 50 {
 		t.Errorf("want 50 enriched rows, got %d", len(rows))

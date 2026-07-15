@@ -22,7 +22,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: media
 display_name: Media
-version: 0.13.56
+version: 0.13.57
 description: |
   Catalog + derivations + renders + transcripts + auto-descriptions
   for media files in storage. Indexes uploads (probe, thumbnail,
@@ -106,7 +106,7 @@ provides:
     - prefix: /
   mcp_tools:
     - { name: media_get,             description: "Fetch one media record by storage file_id. The returned url is a fresh public/signed fetch URL suitable for third-party ingestion such as Bunny Stream fetch uploads." }
-    - { name: media_search,          description: "Filter by folder / canonical media_type / aspect / duration / dimensions / codec." }
+    - { name: media_search,          description: "Compact catalog discovery with q/filename/title, folder, type, aspect, duration, rating, dimensions, and codec filters; call media_get for full details." }
     - { name: media_list_folders,    description: "List immediate child folders of parent that contain media." }
     - { name: media_create_folder,   description: "Create an empty folder in storage that media files can later land in. Idempotent. Args - path." }
     - { name: media_move,            description: "Move and/or rename a media file in storage. Media's row auto-updates via the file.updated event handler. Args - file_id, folder?, name?." }
@@ -172,7 +172,7 @@ provides:
             render_id: "$result.render_id"
           expires_after: 24h
     - name: media_crop
-      description: "Crop or smart-reframe an existing video/image. Exact mode: file_id, x, y, width, height. Smart image/video reframe mode: file_id, target_ratio (e.g. 9:16), crop_mode? (smart|center), output_width?. Returns render_id."
+      description: "Crop or smart-reframe an image/video. Smart Crop v2 analyzes the cached canonical thumbnail. Returns render_id."
       async_result:
         id_field: render_id
         notify:
@@ -186,7 +186,7 @@ provides:
             render_id: "$result.render_id"
           expires_after: 24h
     - name: media_extract_frame
-      description: "Save a single frame at a specific timestamp as PNG. Returns render_id."
+      description: "Save a frame as PNG; Smart Crop v2 interpolates between bracketing storyboard frames when reframing. Returns render_id."
       async_result:
         id_field: render_id
         notify:
@@ -228,7 +228,7 @@ provides:
             render_id: "$result.render_id"
           expires_after: 24h
     - name: media_extract_reel
-      description: "Trim + reframe to a target aspect ratio in one ffmpeg pass. Replaces media_trim → media_crop → media_resize for vertical-reel workflows. Args - file_id, start_ms, end_ms, target_ratio? (default 9:16), output_width? (default 1080). Returns immediately with render_id; Apteva notifies the calling agent when this render completes, fails, or is cancelled, so agents should not poll media_get_render unless the user explicitly asks for progress."
+      description: "Trim + reframe in one pass. Smart Crop v2 tracks subjects across bounded storyboard frames and uses a stable fixed crop when movement is low. Returns render_id."
       async_result:
         id_field: render_id
         notify:
@@ -458,8 +458,11 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "media_search",
-			Description: "Filter the catalog. Prefer media_type ('image'|'video'|'audio'), aspect ('portrait'|'landscape'|'square'|'reel'|'wide'), and duration ('short'|'medium'|'long'|'extended') over raw probe flags. Returned width/height/orientation are display-space. Raw ffprobe JSON and renderer-only rotation metadata are hidden unless include_raw_probe=true. Args: folder, recursive, media_type, aspect, duration, duration_min_ms, duration_max_ms, width_min, width_max, video_codec, audio_codec, limit, offset, order_by ('duration_ms'|'created_at'|'updated_at').",
+			Description: "Search the media catalog before calling media_get. Use q for a case-insensitive match across filename, title, description, and alt text; use filename or title for narrower matching. Results are compact discovery rows (file_id, filename/title, type, duration, dimensions, folder, thumbnail) by default. Filters include folder, media_type, aspect (portrait|landscape|square|reel|wide), duration, rating, dimensions, and codec. Call media_get with the chosen file_id for complete metadata and source URLs. Default limit is 20, maximum 100. If has_more is true, repeat the same filters with next_cursor. detail and include_raw_probe are exceptional opt-ins.",
 			InputSchema: schemaObject(map[string]any{
+				"q":               map[string]any{"type": "string", "description": "Case-insensitive contains match across filename, title, description, and alt text."},
+				"filename":        map[string]any{"type": "string", "description": "Case-insensitive contains match on the storage filename only."},
+				"title":           map[string]any{"type": "string", "description": "Case-insensitive contains match on the media title only."},
 				"folder":          map[string]any{"type": "string"},
 				"recursive":       map[string]any{"type": "boolean"},
 				"media_type":      map[string]any{"type": "string", "enum": []string{"image", "video", "audio"}},
@@ -488,10 +491,12 @@ func (a *App) MCPTools() []sdk.Tool {
 						{"type": "array", "items": map[string]any{"type": "string", "enum": []string{"general", "mature", "adult", "unrated"}}},
 					},
 				},
-				"limit":             map[string]any{"type": "integer"},
-				"offset":            map[string]any{"type": "integer"},
-				"order_by":          map[string]any{"type": "string"},
-				"include_raw_probe": map[string]any{"type": "boolean"},
+				"limit":             map[string]any{"type": "integer", "minimum": 1, "maximum": mediaSearchMaxLimit, "default": mediaSearchDefaultLimit},
+				"cursor":            map[string]any{"type": "string", "description": "Opaque next_cursor from the preceding page. Reuse the same filters."},
+				"offset":            map[string]any{"type": "integer", "minimum": 0, "description": "Legacy pagination offset. Prefer cursor; do not pass both."},
+				"order_by":          map[string]any{"type": "string", "enum": []string{"duration_ms", "created_at", "updated_at"}},
+				"detail":            map[string]any{"type": "boolean", "default": false, "description": "Return full metadata rows. Prefer media_get for a selected file."},
+				"include_raw_probe": map[string]any{"type": "boolean", "default": false, "description": "Include raw ffprobe JSON. Implies detail=true."},
 			}, nil),
 			Handler: a.toolSearch,
 		},
@@ -614,7 +619,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "media_crop",
-			Description: "Crop or smart-reframe an existing video/image. Exact mode: file_id, x, y, width, height (pixels). Smart reframe mode: file_id, target_ratio (e.g. '9:16', '1:1', '4:5'), crop_mode? ('smart' default uses the same cached-thumbnail/keyframe saliency as extract_frame/extract_reel; 'center' uses geometric center), output_width? (optional scale width; omitted preserves crop size). Use this for still images; use media_extract_frame when selecting a video timestamp.",
+			Description: "Crop or smart-reframe an existing video/image. Exact mode: file_id, x, y, width, height. Smart Crop v2 mode analyzes the canonical cached image/video thumbnail: file_id, target_ratio, crop_mode? ('smart' default|'center'), output_width?. Use this for still images or a whole video; use media_extract_frame for a video timestamp.",
 			InputSchema: schemaObject(map[string]any{
 				"file_id":       map[string]any{"type": "string"},
 				"x":             map[string]any{"type": "integer", "description": "Exact crop left offset in pixels. Used with y, width, and height when target_ratio is not set."},
@@ -631,7 +636,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "media_extract_frame",
-			Description: "Save a single frame at a specific timestamp as PNG. Args: file_id, at_ms (int), width (int, optional). For reframed crops (e.g. square thumbnail from a 16:9 source) pass target_ratio (\"1:1\", \"9:16\", \"4:5\", …) and optionally output_width (default 1080) + crop_mode (\"smart\" default = subject-aware via the nearest cached keyframe for timed operations; \"center\" = geometric center). Without target_ratio, the frame keeps the source aspect (scaled to width if set).",
+			Description: "Save a video frame as PNG. With target_ratio, Smart Crop v2 interpolates the subject-aware crop between indexed storyboard frames bracketing at_ms; sparse indexes fall back to one cached frame, then center. Args: file_id, at_ms, width?, target_ratio?, output_width?, crop_mode?.",
 			InputSchema: schemaObject(map[string]any{
 				"file_id":       map[string]any{"type": "string"},
 				"at_ms":         map[string]any{"type": "integer"},
@@ -670,7 +675,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "media_extract_reel",
-			Description: "Cut a clip from a video AND reframe it to a target aspect ratio in a single ffmpeg pass. Replaces the manual chain media_trim → media_crop → media_resize for the common 'make a 9:16 reel from a 16:9 source' workflow. Args: file_id, start_ms, end_ms (same units + names as media_trim), target_ratio? (default '9:16', e.g. '1:1', '4:5'), output_width? (default 1080; height auto-derives from ratio), output_name?, output_folder?. Returns immediately with render_id; Apteva notifies the calling agent when this render completes, fails, or is cancelled, so do not poll media_get_render unless the user explicitly asks for progress.",
+			Description: "Cut and reframe a clip in one ffmpeg pass. Smart Crop v2 analyzes bounded cached storyboard frames, uses a fixed crop for a stable subject, and follows movement with a smoothed path. Sparse legacy indexes fall back safely; reindex for dense tracking. Args: file_id, start_ms, end_ms, target_ratio? (default '9:16'), output_width?, crop_mode? ('smart' default|'center').",
 			InputSchema: schemaObject(map[string]any{
 				"file_id":       map[string]any{"type": "string", "description": "Storage file_id of the source video."},
 				"start_ms":      map[string]any{"type": "integer", "description": "Clip start, milliseconds from start of source. Same convention as media_trim."},
@@ -1246,6 +1251,9 @@ func (a *App) toolSearch(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		return nil, err
 	}
 	f := SearchFilters{}
+	f.Q, _ = args["q"].(string)
+	f.Filename, _ = args["filename"].(string)
+	f.Title, _ = args["title"].(string)
 	f.DurationMinMs = int64Arg(args["duration_min_ms"])
 	f.DurationMaxMs = int64Arg(args["duration_max_ms"])
 	if v, ok := args["duration"].(string); ok {
@@ -1275,8 +1283,14 @@ func (a *App) toolSearch(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if v, ok := boolArg(args["recursive"]); ok {
 		f.Recursive = v
 	}
-	f.Limit = int(int64Arg(args["limit"]))
-	f.Offset = int(int64Arg(args["offset"]))
+	pageLimit := mediaSearchLimit(args["limit"])
+	pageOffset, err := mediaSearchOffset(args)
+	if err != nil {
+		return nil, err
+	}
+	// Fetch one extra row so has_more does not require a COUNT query.
+	f.Limit = pageLimit + 1
+	f.Offset = pageOffset
 	f.OrderBy, _ = args["order_by"].(string)
 	f.AudienceRatingIn = ratingFilterArg(args["audience_rating"])
 	f.AudienceRatingNotIn = ratingFilterArg(args["exclude_audience_rating"])
@@ -1284,7 +1298,27 @@ func (a *App) toolSearch(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 	if err != nil {
 		return nil, err
 	}
+	moreFromDB := len(rows) > pageLimit
+	if moreFromDB {
+		rows = rows[:pageLimit]
+	}
 	includeRawProbe, _ := boolArg(args["include_raw_probe"])
+	detail, _ := boolArg(args["detail"])
+	if includeRawProbe {
+		detail = true
+	}
+
+	if !detail {
+		compact, eerr := compactMediaSearchRows(context.Background(), pid, rows)
+		if eerr != nil {
+			// Compact discovery still works without Storage; only resolved
+			// thumbnail URLs may be absent.
+			compact = projectMediaSearchRows(rows, nil)
+			return fitMediaSearchPage(compact, pageOffset, moreFromDB, true)
+		}
+		return fitMediaSearchPage(compact, pageOffset, moreFromDB, false)
+	}
+
 	rows = sanitizeMediaToolRows(rows, includeRawProbe)
 	enriched, _, eerr := enrichRows(context.Background(), pid, rows)
 	if eerr != nil {
@@ -1292,9 +1326,9 @@ func (a *App) toolSearch(ctx *sdk.AppCtx, args map[string]any) (any, error) {
 		// with a flag so the agent doesn't read missing URLs as
 		// "files deleted". media's own probe + description data is
 		// still useful even without storage's metadata.
-		return map[string]any{"media": rows, "storage_unavailable": true}, nil
+		return fitMediaSearchPage(rows, pageOffset, moreFromDB, true)
 	}
-	return map[string]any{"media": enriched}, nil
+	return fitMediaSearchPage(enriched, pageOffset, moreFromDB, false)
 }
 
 // toolListFolders mirrors storage's files_list_folders semantics —

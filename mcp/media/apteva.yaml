@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: media
 display_name: Media
-version: 0.13.56
+version: 0.13.57
 description: |
   Catalog + cheap derivations + parameterised renders for media files
   in storage. Probes uploads with ffprobe (duration, dimensions,
@@ -106,7 +106,7 @@ provides:
     - name: media_get
       description: Fetch one media record by storage file_id (probe + derivation pointers). The returned url is a fresh public/signed fetch URL suitable for third-party ingestion such as Bunny Stream fetch uploads.
     - name: media_search
-      description: Filter by folder, canonical media_type (image|video|audio), aspect (portrait|landscape|square|reel|wide), duration bucket or duration_min_ms/duration_max_ms, audience_rating or exclude_audience_rating, dimensions, and codec. Returns rows with absolute storage URLs. Args include folder (e.g. "/clips/"), recursive, limit, and offset.
+      description: Search the catalog with q, filename, or title plus folder, media_type, aspect (portrait|landscape|square|reel|wide), duration, audience rating, dimensions, and codec filters. Returns compact discovery rows by default; call media_get for complete metadata and source URLs. Default limit 20, maximum 100; use next_cursor when has_more is true. detail and include_raw_probe are opt-in.
     - name: media_list_folders
       description: List immediate child folders of `parent` that contain media. Args - parent (default "/"). Mirrors storage's files_list_folders semantics; only folders with at least one audio/video/image row appear.
     - name: media_create_folder
@@ -182,7 +182,7 @@ provides:
             render_id: "$result.render_id"
           expires_after: 24h
     - name: media_crop
-      description: Crop or smart-reframe an existing video/image. Exact mode args — file_id, x, y, width, height. Smart reframe mode args — file_id, target_ratio (e.g. "9:16"), crop_mode? ("smart" default | "center"), output_width?. Use this for still images; use media_extract_frame when selecting a video timestamp.
+      description: Crop or smart-reframe an existing video/image. Exact mode args — file_id, x, y, width, height. Smart Crop v2 analyzes the canonical cached image/video thumbnail; args — file_id, target_ratio, crop_mode? (smart default | center), output_width?. Use this for still images or a whole video; use media_extract_frame when selecting a video timestamp.
       async_result:
         id_field: render_id
         notify:
@@ -196,7 +196,7 @@ provides:
             render_id: "$result.render_id"
           expires_after: 24h
     - name: media_extract_frame
-      description: Save a single frame from a video at a specific timestamp as PNG. Distinct from media_get_thumbnail (parameterised, multi-output). Args — file_id, at_ms, width?.
+      description: Save a video frame as PNG. With target_ratio, Smart Crop v2 interpolates between the two indexed storyboard frames surrounding at_ms; sparse indexes safely fall back to single-frame saliency, then center. Args — file_id, at_ms, width?, target_ratio?, output_width?, crop_mode?.
       async_result:
         id_field: render_id
         notify:
@@ -239,7 +239,7 @@ provides:
           expires_after: 24h
     - name: media_extract_reel
       description: |
-        Cut a clip from a video AND reframe it to a target aspect ratio in a single ffmpeg pass. Replaces the chain media_trim → media_crop → media_resize for the common "make a 9:16 reel from a 16:9 source" workflow — one render row, one download from storage, one re-encode, one upload. Time fields use the same units + names as media_trim (start_ms, end_ms in milliseconds). Args — file_id, start_ms, end_ms, target_ratio? (default "9:16", also accepts "1:1", "4:5", "16:9", …), output_width? (default 1080; height auto-derives from ratio). Returns immediately with render_id; Apteva notifies the calling agent when this render completes, fails, or is cancelled, so agents should not poll media_get_render unless the user explicitly asks for progress.
+        Cut and reframe a clip in one ffmpeg pass. Smart Crop v2 analyzes bounded cached storyboard frames across the range, uses a fixed crop for a stable subject, and follows movement with a smoothed path when needed. Sparse legacy indexes safely fall back to single-frame crop; reindex to enable dense tracking. Args — file_id, start_ms, end_ms, target_ratio? (default 9:16), output_width? (default 1080), crop_mode? (smart default | center). Returns render_id and notifies the caller on completion.
       async_result:
         id_field: render_id
         notify:
@@ -520,6 +520,21 @@ config_schema:
     default: "320"
     label: Thumbnail width (px)
     description: Generated thumbnails are scaled to this width, height auto.
+  - name: keyframes_enabled
+    type: text
+    default: "true"
+    label: Generate storyboard frames
+    description: Generate small timeline frames used by descriptions, scrubbing, and Smart Crop v2.
+  - name: keyframe_interval_seconds
+    type: text
+    default: "5"
+    label: Storyboard interval (seconds)
+    description: Target spacing for 320px storyboard frames. Long videos are automatically stretched to the maximum count.
+  - name: keyframe_max_count
+    type: text
+    default: "120"
+    label: Maximum storyboard frames
+    description: Storage and indexing cap per video. Smart Crop v2 falls back safely when an older storyboard is too sparse.
   - name: waveform_width
     type: text
     default: "800"

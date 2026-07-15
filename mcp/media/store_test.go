@@ -243,6 +243,7 @@ func TestToolSearchAcceptsStringScalars(t *testing.T) {
 		"offset":            "0",
 		"order_by":          "updated_at",
 		"include_raw_probe": "false",
+		"detail":            "true",
 	})
 	if err != nil {
 		t.Fatal(err)

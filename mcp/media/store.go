@@ -783,6 +783,12 @@ func scanMedia(row interface{ Scan(...any) error }) (*MediaRow, error) {
 
 // SearchFilters drive media_search and the GET /media handler.
 type SearchFilters struct {
+	// Q is a broad, case-insensitive contains search across filename,
+	// title, description, and alt text. Filename and Title are narrower
+	// contains filters for callers that know which field they want.
+	Q             string
+	Filename      string
+	Title         string
 	DurationMinMs int64
 	DurationMaxMs int64
 	// MediaType is the canonical type filter agents and UI should
@@ -842,6 +848,21 @@ type MediaFacetCounts struct {
 func searchMedia(db *sql.DB, projectID string, f SearchFilters) ([]MediaRow, error) {
 	clauses := []string{"project_id = ?", "probe_status = 'ok'"}
 	args := []any{projectID}
+	if q := mediaSearchContainsPattern(f.Q); q != "" {
+		clauses = append(clauses, `(LOWER(COALESCE(m.name, '')) LIKE ? ESCAPE '\'
+			OR LOWER(COALESCE(m.title, '')) LIKE ? ESCAPE '\'
+			OR LOWER(COALESCE(m.description, '')) LIKE ? ESCAPE '\'
+			OR LOWER(COALESCE(m.alt_text, '')) LIKE ? ESCAPE '\')`)
+		args = append(args, q, q, q, q)
+	}
+	if filename := mediaSearchContainsPattern(f.Filename); filename != "" {
+		clauses = append(clauses, `LOWER(COALESCE(m.name, '')) LIKE ? ESCAPE '\'`)
+		args = append(args, filename)
+	}
+	if title := mediaSearchContainsPattern(f.Title); title != "" {
+		clauses = append(clauses, `LOWER(COALESCE(m.title, '')) LIKE ? ESCAPE '\'`)
+		args = append(args, title)
+	}
 
 	if f.DurationMinMs > 0 {
 		clauses = append(clauses, "m.duration_ms >= ?")
@@ -943,7 +964,7 @@ func searchMedia(db *sql.DB, projectID string, f SearchFilters) ([]MediaRow, err
 		order = "created_at DESC"
 	}
 
-	limit := 50
+	limit := mediaSearchDefaultLimit
 	if f.Limit > 0 && f.Limit <= 500 {
 		limit = f.Limit
 	}
@@ -1047,6 +1068,19 @@ func mediaFacetCounts(db *sql.DB, projectID string, f SearchFilters) (MediaFacet
 		&c.Duration.Short, &c.Duration.Medium, &c.Duration.Long, &c.Duration.Extended,
 	)
 	return c, err
+}
+
+func mediaSearchContainsPattern(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	if value == "" {
+		return ""
+	}
+	// LIKE wildcards in user text are literals. This makes q="100%" search
+	// for that phrase instead of accidentally matching every 100-prefixed row.
+	value = strings.ReplaceAll(value, `\`, `\\`)
+	value = strings.ReplaceAll(value, `%`, `\%`)
+	value = strings.ReplaceAll(value, `_`, `\_`)
+	return "%" + value + "%"
 }
 
 func listDerivations(db *sql.DB, projectID, fileID string) ([]DerivationRow, error) {

@@ -421,6 +421,9 @@ type extractReelParams struct {
 	CropH int `json:"crop_h,omitempty"`
 	CropX int `json:"crop_x,omitempty"`
 	CropY int `json:"crop_y,omitempty"`
+	// CropPath is injected by Smart Crop v2 for reels whose subject moves.
+	// Times are source-timeline milliseconds; callers should not set it.
+	CropPath []cropPathPoint `json:"crop_path,omitempty"`
 }
 
 func planExtractReel(sources []string, raw json.RawMessage, outputName string) (*opPlan, error) {
@@ -462,6 +465,11 @@ func planExtractReel(sources []string, raw json.RawMessage, outputName string) (
 	}
 	outputSeekMs := p.StartMs - seekStartMs
 	durationMs := p.EndMs - p.StartMs
+	if p.CropW > 0 && p.CropH > 0 && len(p.CropPath) > 1 {
+		// The input clock starts at seekStartMs because of the preroll. Shift
+		// the source-timeline path to that clock before building x(t).
+		cropExpr = cropFilterForPath(p.CropW, p.CropH, p.CropY, seekStartMs, p.CropPath)
+	}
 	args := []string{
 		"-y",
 		"-loglevel", "error",

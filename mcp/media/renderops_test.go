@@ -543,6 +543,33 @@ func TestPlanExtractReel_Defaults(t *testing.T) {
 	}
 }
 
+func TestPlanExtractReel_DynamicCropPathAccountsForPreroll(t *testing.T) {
+	plan, err := buildPlan("extract_reel", []string{"42"}, raw(t, map[string]any{
+		"start_ms": 60_000, "end_ms": 70_000,
+		"target_ratio": "9:16", "output_width": 404,
+		"crop_w": 404, "crop_h": 720,
+		"crop_path": []map[string]any{
+			{"at_ms": 60_000, "x": 100},
+			{"at_ms": 65_000, "x": 300},
+		},
+	}), "", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var vf string
+	for i, arg := range plan.Args {
+		if arg == "-vf" && i+1 < len(plan.Args) {
+			vf = plan.Args[i+1]
+			break
+		}
+	}
+	// Filter t=2 is the first emitted frame because of the preroll, so the
+	// sample five seconds into the reel is t=7 on the filter timeline.
+	if !strings.Contains(vf, `lt(t\,7.000)`) {
+		t.Fatalf("dynamic path is not aligned with preroll: %s", vf)
+	}
+}
+
 func TestPlanExtractReel_CustomRatio(t *testing.T) {
 	plan, err := buildPlan("extract_reel", []string{"42"},
 		raw(t, map[string]any{

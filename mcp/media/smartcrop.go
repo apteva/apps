@@ -185,16 +185,6 @@ func computeSmartCrop(
 			"crop_x_after", subjectX)
 		srcX = subjectX
 	}
-	if motionX, ok := motionAwareNarrowSmartCropX(ctx, app, sc, projectID, sourceFileID, row.Derivations, cropSource, thumb, srcX, row.Width, row.Height, cw, ch, tCropW); ok {
-		app.Logger().Info("smartcrop motion correction applied",
-			"file_id", sourceFileID,
-			"derivation_kind", cropSource.Kind,
-			"derivation_file_id", cropSource.StorageFileID,
-			"derivation_position_ms", cropSource.PositionMs,
-			"crop_x_before", srcX,
-			"crop_x_after", motionX)
-		srcX = motionX
-	}
 	app.Logger().Info("smartcrop resolved",
 		"file_id", sourceFileID,
 		"derivation_kind", cropSource.Kind,
@@ -352,8 +342,15 @@ func subjectAwareNarrowSmartCropX(img image.Image, rawSrcX, srcX, srcW, srcH, cr
 		edgeGuard := cropW / 4
 		rawNearEdge := rawSrcX <= edgeGuard || rawSrcX >= maxX-edgeGuard
 		if rawNearEdge {
-			centerX := clampInt(roundEven(maxX/2), 0, maxX)
-			return centerX, true
+			// A strong, concentrated subject window is a better recovery
+			// than geometric center when generic saliency has parked at a
+			// frame edge.
+			return x, true
+		}
+		// A concentrated foreground subject may legitimately be far from
+		// a center-ish generic crop. Broad warm backgrounds remain guarded.
+		if bestScore >= total*0.55 {
+			return x, true
 		}
 		return srcX, false
 	}
@@ -832,6 +829,43 @@ func preprocessSmartCrop(
 		return params
 	}
 	target := smartCropFocus(op, parsed)
+	// V2 uses at most two cached frames for a still and a bounded sample
+	// set for a reel. Sparse/legacy indexes safely fall through to v1.
+	if op == "extract_reel" && mode == "smart" {
+		if win, path, v2Err := computeSmartCropReelV2(ctx, app, sc, projectID, sources[0], rw, rh, target); v2Err == nil {
+			parsed["crop_w"] = win.W
+			parsed["crop_h"] = win.H
+			parsed["crop_x"] = win.X
+			parsed["crop_y"] = win.Y
+			parsed["crop_mode"] = mode
+			parsed["crop_version"] = "v2"
+			if len(path) > 1 {
+				parsed["crop_path"] = path
+			}
+			if out, marshalErr := json.Marshal(parsed); marshalErr == nil {
+				return out
+			}
+		} else {
+			app.Logger().Info("smartcrop v2 fallback to v1",
+				"op", op, "file_id", sources[0], "reason", v2Err.Error())
+		}
+	}
+	if (op == "extract_frame" || op == "crop") && mode == "smart" {
+		if win, v2Err := computeSmartCropStillV2(ctx, app, sc, projectID, sources[0], rw, rh, target); v2Err == nil {
+			parsed["crop_w"] = win.W
+			parsed["crop_h"] = win.H
+			parsed["crop_x"] = win.X
+			parsed["crop_y"] = win.Y
+			parsed["crop_mode"] = mode
+			parsed["crop_version"] = "v2"
+			if out, marshalErr := json.Marshal(parsed); marshalErr == nil {
+				return out
+			}
+		} else {
+			app.Logger().Info("smartcrop v2 fallback to v1",
+				"op", op, "file_id", sources[0], "reason", v2Err.Error())
+		}
+	}
 	win, err := computeSmartCrop(ctx, app, sc, projectID, sources[0], rw, rh, mode, target)
 	if err != nil {
 		// Symbolic filter is fine — log + skip.

@@ -1,0 +1,472 @@
+package main
+
+// Smart Crop v2 keeps the inexpensive cached-frame design, but stops
+// treating an entire reel as one still image. Dense storyboard frames
+// are analysed independently and converted into either:
+//
+//   - one fixed crop when the interesting region stays put; or
+//   - a short, smoothed crop path when it moves.
+//
+// Old/sparse indexes deliberately fall back to v1. This makes the
+// rollout safe: reindexing adds the denser frames v2 needs, while
+// existing media continues to render with the released behaviour.
+
+import (
+	"context"
+	"fmt"
+	"image"
+	"math"
+	"sort"
+
+	sdk "github.com/apteva/app-sdk"
+	"github.com/muesli/smartcrop"
+	"github.com/muesli/smartcrop/nfnt"
+)
+
+const (
+	smartCropV2MaxSamples = 24
+	// With the new five-second storyboard default, eight seconds leaves
+	// room for an occasional failed derivation without accepting the old
+	// 30-second sampling that caused the Tracy failures.
+	smartCropV2MaxGapMs = int64(8000)
+)
+
+// cropPathPoint is persisted only in the in-memory render params. AtMs
+// uses source-timeline milliseconds; renderops converts it to filter
+// time after subtracting the reel start.
+type cropPathPoint struct {
+	AtMs int64 `json:"at_ms"`
+	X    int   `json:"x"`
+	Cut  bool  `json:"cut,omitempty"`
+}
+
+type smartCropV2Sample struct {
+	point cropPathPoint
+	img   image.Image
+}
+
+// computeSmartCropStillV2 reframes both ordinary images and exact video
+// frames. Images need one canonical thumbnail. Timed video frames use the
+// two storyboard frames bracketing the requested timestamp and interpolate
+// their crop positions. That avoids both a five-second nearest-frame jump
+// and v1's unreliable pixel-difference "motion" guess, while downloading
+// no more cached images than the old path.
+func computeSmartCropStillV2(
+	ctx context.Context,
+	app *sdk.AppCtx,
+	sc *storageClient,
+	projectID, sourceFileID string,
+	targetW, targetH int,
+	target smartCropTarget,
+) (*cropWindow, error) {
+	row, err := getMedia(app.AppDB(), projectID, sourceFileID)
+	if err != nil {
+		return nil, fmt.Errorf("smartcrop v2 get source: %w", err)
+	}
+	if row == nil || row.Width <= 0 || row.Height <= 0 {
+		return nil, fmt.Errorf("smartcrop v2: source dimensions unavailable")
+	}
+	cw, ch := cropDimsForRatio(row.Width, row.Height, targetW, targetH)
+	if cw <= 0 || ch <= 0 {
+		return nil, fmt.Errorf("smartcrop v2: invalid crop dimensions")
+	}
+	if cw == row.Width && ch == row.Height {
+		return &cropWindow{W: cw, H: ch}, nil
+	}
+
+	var derivs []DerivationRow
+	if target.PreferKeyframe {
+		derivs = selectSmartCropStillDerivations(row.Derivations, target.FocusMs)
+	} else if d := pickSmartCropDerivation(row.Derivations, target); d.StorageFileID != "" {
+		derivs = []DerivationRow{d}
+	}
+	if len(derivs) == 0 {
+		return nil, fmt.Errorf("smartcrop v2: no usable frame derivation")
+	}
+
+	samples := make([]smartCropV2Sample, 0, len(derivs))
+	for _, d := range derivs {
+		img, downloadErr := downloadAndDecodeImage(ctx, sc, projectID, d.StorageFileID)
+		if downloadErr != nil {
+			continue
+		}
+		win, analyzeErr := analyzeSmartCropV2Frame(row.Width, row.Height, targetW, targetH, img)
+		if analyzeErr != nil {
+			continue
+		}
+		samples = append(samples, smartCropV2Sample{
+			point: cropPathPoint{AtMs: d.PositionMs, X: win.X},
+			img:   img,
+		})
+	}
+	if len(samples) == 0 {
+		return nil, fmt.Errorf("smartcrop v2: no decodable frame derivation")
+	}
+
+	x := samples[0].point.X
+	method := "single"
+	if len(samples) >= 2 {
+		before, after := samples[0], samples[1]
+		if sceneCutScore(before.img, after.img) >= 0.28 {
+			method = "scene-cut-nearest"
+			if absInt64(after.point.AtMs-target.FocusMs) < absInt64(target.FocusMs-before.point.AtMs) {
+				x = after.point.X
+			}
+		} else {
+			method = "interpolated"
+			x = interpolateSmartCropStillX(before.point, after.point, target.FocusMs)
+		}
+	}
+	x = clampInt(roundEven(x), 0, row.Width-cw)
+	app.Logger().Info("smartcrop v2 resolved still",
+		"file_id", sourceFileID,
+		"samples", len(samples),
+		"method", method,
+		"focus_ms", target.FocusMs,
+		"crop_w", cw,
+		"crop_h", ch,
+		"crop_x", x)
+	return &cropWindow{W: cw, H: ch, X: x, Y: 0}, nil
+}
+
+func selectSmartCropStillDerivations(derivs []DerivationRow, focusMs int64) []DerivationRow {
+	var before, after DerivationRow
+	for _, d := range derivs {
+		if d.Kind != "keyframe" || d.Status != "ok" || d.StorageFileID == "" {
+			continue
+		}
+		if d.PositionMs == focusMs {
+			return []DerivationRow{d}
+		}
+		if d.PositionMs < focusMs && (before.StorageFileID == "" || d.PositionMs > before.PositionMs) {
+			before = d
+		}
+		if d.PositionMs > focusMs && (after.StorageFileID == "" || d.PositionMs < after.PositionMs) {
+			after = d
+		}
+	}
+	selected := make([]DerivationRow, 0, 2)
+	if before.StorageFileID != "" && focusMs-before.PositionMs <= smartCropV2MaxGapMs {
+		selected = append(selected, before)
+	}
+	if after.StorageFileID != "" && after.PositionMs-focusMs <= smartCropV2MaxGapMs {
+		selected = append(selected, after)
+	}
+	return selected
+}
+
+func interpolateSmartCropStillX(before, after cropPathPoint, focusMs int64) int {
+	if after.AtMs <= before.AtMs || focusMs <= before.AtMs {
+		return before.X
+	}
+	if focusMs >= after.AtMs {
+		return after.X
+	}
+	t := float64(focusMs-before.AtMs) / float64(after.AtMs-before.AtMs)
+	return roundEven(int(math.Round(float64(before.X) + float64(after.X-before.X)*t)))
+}
+
+func computeSmartCropReelV2(
+	ctx context.Context,
+	app *sdk.AppCtx,
+	sc *storageClient,
+	projectID, sourceFileID string,
+	targetW, targetH int,
+	target smartCropTarget,
+) (*cropWindow, []cropPathPoint, error) {
+	if !target.HasRange() {
+		return nil, nil, fmt.Errorf("smartcrop v2: reel range is missing")
+	}
+	row, err := getMedia(app.AppDB(), projectID, sourceFileID)
+	if err != nil {
+		return nil, nil, fmt.Errorf("smartcrop v2 get source: %w", err)
+	}
+	if row == nil || row.Width <= 0 || row.Height <= 0 {
+		return nil, nil, fmt.Errorf("smartcrop v2: source dimensions unavailable")
+	}
+	cw, ch := cropDimsForRatio(row.Width, row.Height, targetW, targetH)
+	if cw <= 0 || ch <= 0 {
+		return nil, nil, fmt.Errorf("smartcrop v2: invalid crop dimensions")
+	}
+	if cw == row.Width && ch == row.Height {
+		return &cropWindow{W: cw, H: ch}, nil, nil
+	}
+
+	derivs := selectSmartCropReelDerivations(row.Derivations, target)
+	if !smartCropSamplesAreDense(derivs, target) {
+		return nil, nil, fmt.Errorf("smartcrop v2: storyboard is too sparse; use v1")
+	}
+
+	samples := make([]smartCropV2Sample, 0, len(derivs))
+	for _, d := range derivs {
+		img, err := downloadAndDecodeImage(ctx, sc, projectID, d.StorageFileID)
+		if err != nil {
+			continue
+		}
+		win, err := analyzeSmartCropV2Frame(row.Width, row.Height, targetW, targetH, img)
+		if err != nil {
+			continue
+		}
+		sample := smartCropV2Sample{
+			point: cropPathPoint{AtMs: d.PositionMs, X: win.X},
+			img:   img,
+		}
+		if len(samples) > 0 {
+			sample.point.Cut = sceneCutScore(samples[len(samples)-1].img, img) >= 0.28
+		}
+		samples = append(samples, sample)
+	}
+	if len(samples) < 2 {
+		return nil, nil, fmt.Errorf("smartcrop v2: fewer than two usable samples")
+	}
+
+	path := make([]cropPathPoint, 0, len(samples)+2)
+	for _, sample := range samples {
+		path = append(path, sample.point)
+	}
+	path = anchorSmartCropPath(path, target.StartMs, target.EndMs)
+	path = stabilizeSmartCropPath(path, cw, row.Width)
+	if len(path) == 0 {
+		return nil, nil, fmt.Errorf("smartcrop v2: empty crop path")
+	}
+
+	if x, ok := staticSmartCropPathX(path, cw); ok {
+		app.Logger().Info("smartcrop v2 resolved static reel",
+			"file_id", sourceFileID, "samples", len(samples),
+			"crop_w", cw, "crop_h", ch, "crop_x", x)
+		return &cropWindow{W: cw, H: ch, X: x, Y: 0}, nil, nil
+	}
+
+	app.Logger().Info("smartcrop v2 resolved tracked reel",
+		"file_id", sourceFileID, "samples", len(samples),
+		"path_points", len(path), "crop_w", cw, "crop_h", ch)
+	return &cropWindow{W: cw, H: ch, X: path[0].X, Y: 0}, path, nil
+}
+
+// analyzeSmartCropV2Frame preserves v1's generic saliency so animals,
+// animation and product shots keep working, then applies the released
+// warm-subject guard to narrow social crops. The difference is that v2
+// runs it for every relevant storyboard frame instead of only one.
+func analyzeSmartCropV2Frame(srcW, srcH, targetW, targetH int, img image.Image) (*cropWindow, error) {
+	if img == nil || srcW <= 0 || srcH <= 0 {
+		return nil, fmt.Errorf("invalid smartcrop v2 frame")
+	}
+	cw, ch := cropDimsForRatio(srcW, srcH, targetW, targetH)
+	centerX := roundEven((srcW - cw) / 2)
+	centerY := roundEven((srcH - ch) / 2)
+	b := img.Bounds()
+	tw, th := b.Dx(), b.Dy()
+	if tw <= 0 || th <= 0 || cw == srcW && ch == srcH {
+		return &cropWindow{W: cw, H: ch, X: centerX, Y: centerY}, nil
+	}
+	tcw, tch := cropDimsForRatio(tw, th, targetW, targetH)
+	analyzer := smartcrop.NewAnalyzer(nfnt.NewDefaultResizer())
+	rect, err := analyzer.FindBestCrop(img, tcw, tch)
+	if err != nil {
+		return nil, err
+	}
+	rawX := clampInt(int(float64(rect.Min.X)*float64(srcW)/float64(tw)), 0, srcW-cw)
+	rawY := clampInt(int(float64(rect.Min.Y)*float64(srcH)/float64(th)), 0, srcH-ch)
+	x, y := stabilizeNarrowSmartCrop(rawX, rawY, srcW, srcH, cw, ch)
+	if subjectX, ok := subjectAwareNarrowSmartCropX(img, rawX, x, srcW, srcH, cw, ch, tcw); ok {
+		x = subjectX
+	}
+	return &cropWindow{W: cw, H: ch, X: roundEven(x), Y: roundEven(y)}, nil
+}
+
+func selectSmartCropReelDerivations(derivs []DerivationRow, target smartCropTarget) []DerivationRow {
+	keyframes := make([]DerivationRow, 0)
+	for _, d := range derivs {
+		if d.Kind == "keyframe" && d.Status == "ok" && d.StorageFileID != "" {
+			keyframes = append(keyframes, d)
+		}
+	}
+	sort.Slice(keyframes, func(i, j int) bool { return keyframes[i].PositionMs < keyframes[j].PositionMs })
+	if len(keyframes) == 0 {
+		return nil
+	}
+
+	selected := make([]DerivationRow, 0)
+	var before, after DerivationRow
+	for _, d := range keyframes {
+		switch {
+		case d.PositionMs < target.StartMs:
+			before = d
+		case d.PositionMs > target.EndMs:
+			if after.StorageFileID == "" {
+				after = d
+			}
+		default:
+			selected = append(selected, d)
+		}
+	}
+	if before.StorageFileID != "" {
+		selected = append([]DerivationRow{before}, selected...)
+	}
+	if after.StorageFileID != "" {
+		selected = append(selected, after)
+	}
+	if len(selected) <= smartCropV2MaxSamples {
+		return selected
+	}
+
+	// Evenly cap analysis work while keeping both boundaries.
+	out := make([]DerivationRow, 0, smartCropV2MaxSamples)
+	for i := 0; i < smartCropV2MaxSamples; i++ {
+		idx := int(math.Round(float64(i) * float64(len(selected)-1) / float64(smartCropV2MaxSamples-1)))
+		if len(out) == 0 || out[len(out)-1].PositionMs != selected[idx].PositionMs {
+			out = append(out, selected[idx])
+		}
+	}
+	return out
+}
+
+func smartCropSamplesAreDense(samples []DerivationRow, target smartCropTarget) bool {
+	if len(samples) < 2 {
+		return false
+	}
+	if samples[0].PositionMs-target.StartMs > smartCropV2MaxGapMs ||
+		target.StartMs-samples[0].PositionMs > smartCropV2MaxGapMs {
+		return false
+	}
+	last := samples[len(samples)-1].PositionMs
+	if last-target.EndMs > smartCropV2MaxGapMs || target.EndMs-last > smartCropV2MaxGapMs {
+		return false
+	}
+	for i := 1; i < len(samples); i++ {
+		if samples[i].PositionMs-samples[i-1].PositionMs > smartCropV2MaxGapMs {
+			return false
+		}
+	}
+	return true
+}
+
+func anchorSmartCropPath(path []cropPathPoint, startMs, endMs int64) []cropPathPoint {
+	if len(path) == 0 {
+		return nil
+	}
+	if path[0].AtMs > startMs {
+		path = append([]cropPathPoint{{AtMs: startMs, X: path[0].X}}, path...)
+	} else {
+		path[0].AtMs = startMs
+	}
+	last := len(path) - 1
+	if path[last].AtMs < endMs {
+		path = append(path, cropPathPoint{AtMs: endMs, X: path[last].X})
+	} else {
+		path[last].AtMs = endMs
+	}
+	return path
+}
+
+func stabilizeSmartCropPath(path []cropPathPoint, cropW, srcW int) []cropPathPoint {
+	if len(path) < 2 {
+		return path
+	}
+	maxX := srcW - cropW
+	original := append([]cropPathPoint(nil), path...)
+	// Three-point smoothing stays inside a scene. Cut boundaries are
+	// intentionally discontinuous so we do not pan through an edit.
+	for i := 1; i < len(path)-1; i++ {
+		if path[i].Cut || path[i+1].Cut {
+			continue
+		}
+		path[i].X = roundEven((original[i-1].X + 2*original[i].X + original[i+1].X) / 4)
+	}
+	deadZone := maxInt(16, cropW/12)
+	for i := range path {
+		path[i].X = clampInt(roundEven(path[i].X), 0, maxX)
+		if i == 0 || path[i].Cut {
+			continue
+		}
+		if absInt(path[i].X-path[i-1].X) <= deadZone {
+			path[i].X = path[i-1].X
+		}
+	}
+
+	// Remove redundant points; interpolation between the remaining
+	// anchors is smoother and produces a shorter ffmpeg expression.
+	out := make([]cropPathPoint, 0, len(path))
+	for i, p := range path {
+		if i > 0 && i < len(path)-1 && !p.Cut && !path[i+1].Cut &&
+			p.X == path[i-1].X && p.X == path[i+1].X {
+			continue
+		}
+		out = append(out, p)
+	}
+	return out
+}
+
+func staticSmartCropPathX(path []cropPathPoint, cropW int) (int, bool) {
+	if len(path) == 0 {
+		return 0, false
+	}
+	xs := make([]int, len(path))
+	minX, maxX := path[0].X, path[0].X
+	for i, p := range path {
+		xs[i] = p.X
+		if p.X < minX {
+			minX = p.X
+		}
+		if p.X > maxX {
+			maxX = p.X
+		}
+	}
+	if maxX-minX > maxInt(24, cropW/8) {
+		return 0, false
+	}
+	sort.Ints(xs)
+	return roundEven(xs[len(xs)/2]), true
+}
+
+// sceneCutScore compares a small normalized luminance grid. Subject
+// motion changes only part of the grid; a real edit changes most cells.
+func sceneCutScore(a, b image.Image) float64 {
+	if a == nil || b == nil {
+		return 0
+	}
+	const gw, gh = 16, 9
+	var total float64
+	for gy := 0; gy < gh; gy++ {
+		for gx := 0; gx < gw; gx++ {
+			la := sampledLuma(a, gx, gy, gw, gh)
+			lb := sampledLuma(b, gx, gy, gw, gh)
+			total += math.Abs(la - lb)
+		}
+	}
+	return total / float64(gw*gh) / 255.0
+}
+
+func sampledLuma(img image.Image, gx, gy, gw, gh int) float64 {
+	b := img.Bounds()
+	x := b.Min.X + (2*gx+1)*b.Dx()/(2*gw)
+	y := b.Min.Y + (2*gy+1)*b.Dy()/(2*gh)
+	r, g, bl, _ := img.At(x, y).RGBA()
+	return 0.2126*float64(r>>8) + 0.7152*float64(g>>8) + 0.0722*float64(bl>>8)
+}
+
+// cropFilterForPath emits a piecewise-linear x(t) expression. Scene
+// cuts remain steps; normal movement interpolates smoothly. Commas are
+// escaped for libavfilter's option parser (there is no shell involved,
+// but the filter graph itself still treats bare commas as separators).
+func cropFilterForPath(w, h, y int, startMs int64, path []cropPathPoint) string {
+	if len(path) < 2 {
+		x := 0
+		if len(path) == 1 {
+			x = path[0].X
+		}
+		return fmt.Sprintf("crop=%d:%d:%d:%d", w, h, x, y)
+	}
+	expr := fmt.Sprintf("%d", path[len(path)-1].X)
+	for i := len(path) - 2; i >= 0; i-- {
+		cur, next := path[i], path[i+1]
+		t0 := math.Max(0, float64(cur.AtMs-startMs)/1000.0)
+		t1 := math.Max(t0+0.001, float64(next.AtMs-startMs)/1000.0)
+		segment := fmt.Sprintf("%d", cur.X)
+		if !next.Cut && next.X != cur.X {
+			segment = fmt.Sprintf("%d+(%d)*(t-%.3f)/%.3f", cur.X, next.X-cur.X, t0, t1-t0)
+		}
+		expr = fmt.Sprintf("if(lt(t\\,%.3f)\\,%s\\,%s)", t1, segment, expr)
+	}
+	return fmt.Sprintf("crop=%d:%d:%s:%d", w, h, expr, y)
+}
