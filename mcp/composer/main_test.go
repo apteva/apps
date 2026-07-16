@@ -9,6 +9,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"image"
 	"image/color"
 	"net/http"
@@ -2053,6 +2054,7 @@ func TestRemoteRenderScriptUsesStorageUploadLadder(t *testing.T) {
 		"https://agents.example.com/api/apps/composer/render-font?project_id=project-1",
 	)
 	for _, want := range []string{
+		`export STORAGE_BASE="https://agents.example.com/api/apps/callback/apps/storage/proxy"`,
 		"$STORAGE_BASE/files/init?project_id=$PROJECT_ID",
 		"$STORAGE_BASE/uploads?project_id=$PROJECT_ID",
 		"$STORAGE_BASE/uploads/$CHUNK_UPLOAD_ID/parts/$PART?project_id=$PROJECT_ID",
@@ -2062,15 +2064,29 @@ func TestRemoteRenderScriptUsesStorageUploadLadder(t *testing.T) {
 		"-o ./composer-go-mono.ttf",
 		"/api/apps/composer/render-font?project_id=project-1",
 		"APTEVA_RESULT:{\\\"storage_id\\\":${STORAGE_ID}",
+		"STORAGE_INIT_FAILED code=$INIT_CODE",
+		"STORAGE_LEGACY_UPLOAD_FAILED code=$LEGACY_CODE",
 	} {
 		if !strings.Contains(script, want) {
 			t.Fatalf("remote script missing %q\n%s", want, script)
 		}
+	}
+	if strings.Contains(script, `export STORAGE_BASE="https://agents.example.com/api/apps/storage"`) {
+		t.Fatal("remote script uses the direct cross-install Storage route")
 	}
 	oneShot := "$STORAGE_BASE/files?project_id=$PROJECT_ID"
 	if first := strings.Index(script, "$STORAGE_BASE/files/init?project_id=$PROJECT_ID"); first < 0 {
 		t.Fatalf("missing direct upload init")
 	} else if last := strings.LastIndex(script, oneShot); last < first {
 		t.Fatalf("legacy one-shot upload should only appear after upload ladder")
+	}
+}
+
+func TestRemoteExecFailurePreservesRemoteOutput(t *testing.T) {
+	err := remoteExecFailure(errors.New("remote exit_code=22"), "curl: HTTP 403\nstorage upload rejected")
+	for _, want := range []string{"remote exit_code=22", "HTTP 403", "storage upload rejected"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("error %q missing %q", err, want)
+		}
 	}
 }

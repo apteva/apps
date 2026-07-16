@@ -16,6 +16,8 @@ import (
 	sdk "github.com/apteva/app-sdk"
 )
 
+const composerBoundStorageProxyPath = "/api/apps/callback/apps/storage/proxy"
+
 // remoteFFmpegExecutor runs the same ffmpeg command on a host managed
 // by the `instances` app. Strategy lifted from media's remote_exec.go:
 //
@@ -26,12 +28,13 @@ import (
 //  3. SSH a single bash script via instances.instance_run_command
 //     that downloads the inputs, runs ffmpeg with the same filter
 //     graph the local executor builds, then multipart-POSTs the
-//     output back to storage's /files endpoint and echoes a result
+//     output back to Storage through the binding-gated callback proxy and echoes a result
 //     marker the sidecar parses.
 //
 // Remote renders return a Storage file id directly. We do not stream
 // the result through the Composer sidecar; the selected host uploads
-// the finished file to Storage with Composer's outbound token.
+// the finished file through the platform callback proxy. The platform
+// validates Composer's Storage binding and swaps in Storage's token.
 type remoteFFmpegExecutor struct {
 	hostID int64
 }
@@ -138,7 +141,7 @@ func (e *remoteFFmpegExecutor) Render(
 
 	res, err := remoteRunScript(ctx, e.hostID, script)
 	if err != nil {
-		return Result{FFmpegCommand: cmd}, fmt.Errorf("remote exec: %w", err)
+		return Result{FFmpegCommand: cmd}, remoteExecFailure(err, res)
 	}
 
 	storageID, parseErr := parseRemoteResult(res)
@@ -152,6 +155,14 @@ func (e *remoteFFmpegExecutor) Render(
 		DurationMS:    time.Since(start).Milliseconds(),
 		FFmpegCommand: cmd,
 	}, nil
+}
+
+func remoteExecFailure(err error, output string) error {
+	detail := strings.TrimSpace(output)
+	if detail == "" {
+		return fmt.Errorf("remote exec: %w", err)
+	}
+	return fmt.Errorf("remote exec: %w\nremote output (last 4KB):\n%s", err, truncTail(detail, 4096))
 }
 
 func remoteVisualAudioDefaults(edit *Edit) []bool {
@@ -223,7 +234,7 @@ func remoteRenderScript(urls []string, ffmpegCmd, format, projectID, publicURL, 
 	b.WriteString("  exit 127\n")
 	b.WriteString("fi\n")
 	fmt.Fprintf(&b, "export STORAGE_TOKEN=%q\n", token)
-	fmt.Fprintf(&b, "export STORAGE_BASE=%q\n", strings.TrimRight(publicURL, "/")+"/api/apps/storage")
+	fmt.Fprintf(&b, "export STORAGE_BASE=%q\n", strings.TrimRight(publicURL, "/")+composerBoundStorageProxyPath)
 	fmt.Fprintf(&b, "export PROJECT_ID=%q\n", projectID)
 	b.WriteString("export FOLDER=/.composer/\n")
 	fmt.Fprintf(&b, "export NAME=%q\n", shellFormValue(filename))
@@ -272,6 +283,8 @@ if [ "$INIT_CODE" = "200" ]; then
   else
     echo "STORAGE_INIT_UNPARSEABLE code=$INIT_CODE body[0:300]=$(head -c 300 "$INIT_BODY_FILE" | tr '\n\r\t' '   ')" >&2
   fi
+else
+  echo "STORAGE_INIT_FAILED code=$INIT_CODE body[0:300]=$(head -c 300 "$INIT_BODY_FILE" | tr '\n\r\t' '   ')" >&2
 fi
 rm -f "$INIT_BODY_FILE"
 if [ "$NEED_MULTIPART" = "1" ]; then
@@ -329,7 +342,8 @@ if [ "$NEED_MULTIPART" = "1" ]; then
   rm -f "$UPLOADS_INIT_FILE"
 fi
 if [ "$NEED_MULTIPART" = "1" ]; then
-  RESP=$(curl -sS "${CURL_RETRY[@]}" --fail -X POST \
+  LEGACY_BODY_FILE=$(mktemp)
+  LEGACY_CODE=$(curl -sS "${CURL_RETRY[@]}" -o "$LEGACY_BODY_FILE" -w "%{http_code}" -X POST \
     -H "Authorization: Bearer $STORAGE_TOKEN" \
     -F "folder=$FOLDER" \
     -F "visibility=private" \
@@ -337,8 +351,13 @@ if [ "$NEED_MULTIPART" = "1" ]; then
     -F "tags=composer" \
     -F "tags=render" \
     -F "file=@$OUT;type=$CT;filename=$NAME" \
-    "$STORAGE_BASE/files?project_id=$PROJECT_ID")
-  STORAGE_ID=$(echo "$RESP" | sed -n 's/.*"id":[[:space:]]*\([0-9]*\).*/\1/p' | head -1)
+    "$STORAGE_BASE/files?project_id=$PROJECT_ID" || echo 000)
+  if [ "$LEGACY_CODE" -ge 200 ] 2>/dev/null && [ "$LEGACY_CODE" -lt 300 ] 2>/dev/null; then
+    STORAGE_ID=$(sed -n 's/.*"id":[[:space:]]*\([0-9]*\).*/\1/p' "$LEGACY_BODY_FILE" | head -1)
+  else
+    echo "STORAGE_LEGACY_UPLOAD_FAILED code=$LEGACY_CODE body[0:300]=$(head -c 300 "$LEGACY_BODY_FILE" | tr '\n\r\t' '   ')" >&2
+  fi
+  rm -f "$LEGACY_BODY_FILE"
 fi
 if [ -z "$STORAGE_ID" ]; then
   echo "STORAGE_UPLOAD_FAILED" >&2
