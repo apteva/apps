@@ -6,12 +6,15 @@ import (
 )
 
 const (
-	smartCropTemporalMaxSamples        = 9
-	smartCropTemporalMinSamples        = 3
-	smartCropSceneCutThreshold         = 0.28
-	smartCropTemporalMinConcentration  = 0.60
-	smartCropTemporalMinMeanActivity   = 0.50
-	smartCropTemporalMinActiveFraction = 0.015
+	smartCropTemporalMaxSamples             = 9
+	smartCropTemporalMinSamples             = 3
+	smartCropSceneCutThreshold              = 0.28
+	smartCropTemporalMinConcentration       = 0.60
+	smartCropTemporalMinMeanActivity        = 0.50
+	smartCropTemporalMinActiveFraction      = 0.015
+	smartCropTemporalDenseMinConcentration  = 0.50
+	smartCropTemporalDenseMinMeanActivity   = 2.0
+	smartCropTemporalDenseMinActiveFraction = 0.04
 )
 
 type smartCropTemporalResult struct {
@@ -214,6 +217,15 @@ func smartCropTemporalResultConfident(result smartCropTemporalResult) bool {
 	if result.SubjectAnchored &&
 		result.AnchorCoverage >= (result.Samples+1)/2 &&
 		result.Concentration >= smartCropTemporalMinConcentration {
+		return true
+	}
+	// Strong, dense motion can extend beyond a portrait window when a person
+	// raises an arm or casts a moving shadow. Accept a slightly lower spatial
+	// concentration only when both activity measures are decisively high. This
+	// keeps broad exposure changes and weak compression motion rejected.
+	if result.Concentration >= smartCropTemporalDenseMinConcentration &&
+		result.MeanActivity >= smartCropTemporalDenseMinMeanActivity &&
+		result.ActiveFraction >= smartCropTemporalDenseMinActiveFraction {
 		return true
 	}
 	return result.Concentration >= smartCropTemporalMinConcentration &&

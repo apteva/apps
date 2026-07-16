@@ -283,6 +283,34 @@ func TestTemporalWarmAnchorCannotBypassConcentrationGate(t *testing.T) {
 	}
 }
 
+func TestTemporalDenseActivityAcceptsPatriciaRaisedArmProfile(t *testing.T) {
+	// Captures the confidence profile from Patricia reel 5223: the person and
+	// raised arm span more than one portrait window, but activity is strong and
+	// every sampled path point is displaced in the same direction.
+	result := smartCropTemporalResult{
+		X: 196, Samples: 6, Concentration: 0.534, MeanActivity: 5.116, ActiveFraction: 0.143,
+	}
+	if !smartCropTemporalResultConfident(result) {
+		t.Fatalf("strong dense subject motion was rejected: %+v", result)
+	}
+	if x, changed := applySmartCropTemporalOverride(0, result, 404, 1280); !changed || x != 196 {
+		t.Fatalf("edge-biased crop was not corrected: x=%d changed=%v", x, changed)
+	}
+}
+
+func TestTemporalDenseActivityFallbackRemainsConservative(t *testing.T) {
+	tests := []smartCropTemporalResult{
+		{X: 196, Samples: 6, Concentration: 0.499, MeanActivity: 5.2, ActiveFraction: 0.15},
+		{X: 196, Samples: 6, Concentration: 0.534, MeanActivity: 1.99, ActiveFraction: 0.15},
+		{X: 196, Samples: 6, Concentration: 0.534, MeanActivity: 5.2, ActiveFraction: 0.039},
+	}
+	for _, result := range tests {
+		if smartCropTemporalResultConfident(result) {
+			t.Fatalf("weak or diffuse activity passed dense fallback: %+v", result)
+		}
+	}
+}
+
 func TestTemporalWarmAnchorCertifiesStaticPersonWithoutCenteringOneLimb(t *testing.T) {
 	samples := make([]smartCropV2Sample, 0, 7)
 	for i := 0; i < 7; i++ {
