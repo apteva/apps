@@ -384,6 +384,37 @@ func TestTemporalStaticPersonFallbackRequiresHumanEvidence(t *testing.T) {
 	}
 }
 
+func TestTemporalStableMinorityCorrects5912Profile(t *testing.T) {
+	result := smartCropTemporalResult{
+		X: 368, Samples: 7, Concentration: 0.9495,
+		AnchorCoverage: 7, AnchorScore: 512.2,
+	}
+	if got := smartCropTemporalCorrectionDirection(result, 2, 0, 5, 7); got != -1 {
+		t.Fatalf("5912 correction direction=%d want=-1", got)
+	}
+}
+
+func TestTemporalStableMinorityRejectsMovementAndWeakEvidence(t *testing.T) {
+	base := smartCropTemporalResult{
+		X: 368, Samples: 7, Concentration: 0.9495,
+		AnchorCoverage: 7, AnchorScore: 512.2,
+	}
+	tests := []struct {
+		result               smartCropTemporalResult
+		left, right, aligned int
+	}{
+		{base, 2, 1, 4},
+		{func() smartCropTemporalResult { r := base; r.Concentration = 0.89; return r }(), 2, 0, 5},
+		{func() smartCropTemporalResult { r := base; r.AnchorCoverage = 4; return r }(), 2, 0, 5},
+		{func() smartCropTemporalResult { r := base; r.AnchorScore = 900; return r }(), 2, 0, 5},
+	}
+	for _, tc := range tests {
+		if got := smartCropTemporalCorrectionDirection(tc.result, tc.left, tc.right, tc.aligned, 7); got != 0 {
+			t.Fatalf("unstable minority direction=%d result=%+v counts=%d/%d/%d", got, tc.result, tc.left, tc.right, tc.aligned)
+		}
+	}
+}
+
 func TestStaticWarmSubjectConsensusCentersMotionlessPerson(t *testing.T) {
 	samples := make([]smartCropV2Sample, 9)
 	for i := range samples {

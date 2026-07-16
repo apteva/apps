@@ -516,13 +516,15 @@ func correctSmartCropReelTemporalOutliers(samples []smartCropV2Sample, srcW, cro
 				continue
 			}
 			deadZone := cropW / 8
-			left, right := 0, 0
+			left, right, aligned := 0, 0, 0
 			for i := start; i < end; i++ {
 				switch {
 				case samples[i].point.X < result.X-deadZone:
 					left++
 				case samples[i].point.X > result.X+deadZone:
 					right++
+				default:
+					aligned++
 				}
 			}
 			// A static-background failure pushes most saliency samples away
@@ -532,13 +534,7 @@ func correctSmartCropReelTemporalOutliers(samples []smartCropV2Sample, srcW, cro
 			// Four agreeing frames are the minimum for modifying a reel path.
 			// Three-frame scenes are too short to distinguish a static saliency
 			// miss from deliberate subject movement reliably.
-			required := maxInt(4, (2*(end-start)+2)/3)
-			direction := 0
-			if left >= required && right == 0 {
-				direction = -1
-			} else if right >= required && left == 0 {
-				direction = 1
-			}
+			direction := smartCropTemporalCorrectionDirection(result, left, right, aligned, end-start)
 			for i := start; direction != 0 && i < end; i++ {
 				delta := samples[i].point.X - result.X
 				if (direction < 0 && delta < -deadZone) || (direction > 0 && delta > deadZone) {
@@ -550,4 +546,34 @@ func correctSmartCropReelTemporalOutliers(samples []smartCropV2Sample, srcW, cro
 		start = end
 	}
 	return corrected
+}
+
+func smartCropTemporalCorrectionDirection(result smartCropTemporalResult, left, right, aligned, samples int) int {
+	required := maxInt(4, (2*samples+2)/3)
+	if left >= required && right == 0 {
+		return -1
+	}
+	if right >= required && left == 0 {
+		return 1
+	}
+
+	// A short run of bad saliency frames can occur at one edge of an
+	// otherwise static shot (for example, two bad frames followed by five good
+	// ones). Correct that minority only when a highly concentrated temporal
+	// region is backed by the same modest, person-like warm component across
+	// the scene. Real traversal loses that recurring anchor or produces
+	// outliers on both sides, so its path remains tracked.
+	stableRequired := maxInt(3, (2*samples+2)/3)
+	stableMinority := result.Concentration >= 0.90 &&
+		result.AnchorCoverage >= stableRequired &&
+		result.AnchorScore >= smartCropTemporalStaticMinAnchorScore &&
+		result.AnchorScore < smartCropTemporalStaticMaxAnchorScore &&
+		aligned >= stableRequired
+	if stableMinority && left > 0 && right == 0 {
+		return -1
+	}
+	if stableMinority && right > 0 && left == 0 {
+		return 1
+	}
+	return 0
 }
