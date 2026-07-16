@@ -301,12 +301,10 @@ func buildVeniceImageArgs(args map[string]any) map[string]any {
 		"prompt":        prompt,
 		"variants":      n,
 		"return_binary": false, // we want JSON+base64 — saveToStorage handles bytes
-		// Default to PNG so the stdlib image decoder (used by
-		// makeThumbnail) can read the bytes. Venice's own default
-		// is webp which Go's image package doesn't understand —
-		// thumbnails would silently fall back to no-preview.
-		// User can override via the provider-neutral options.output_format.
-		"format": "png",
+		// JPEG is Media Studio's default final image contract. The shared
+		// enforcement path re-encodes provider mismatches and keeps the final
+		// file below 2 MB before thumbnailing, cache, or Storage.
+		"format": "jpeg",
 		// Quality defaults — SD / Flux / Qwen models honour these,
 		// resolution-tier models (gpt-image-2, nano-banana) silently
 		// ignore. Without these Venice falls back to ~8 steps which

@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import {
   clampDuration,
+  DEFAULT_IMAGE_FORMAT,
   formatMediaTime,
   imageGenerationOptions,
   isDurableMediaReference,
@@ -17,6 +18,10 @@ import {
 } from "./mediaPanelLogic";
 
 describe("Media Panel logic", () => {
+  test("defaults image generation to JPEG", () => {
+    expect(DEFAULT_IMAGE_FORMAT).toBe("jpeg");
+  });
+
   test("uses the selected model provider instead of an aggregate provider label", () => {
     expect(selectedModelProvider("venice-ai", "venice-ai:gpt-image-2", "openai-api,venice-ai"))
       .toBe("venice-ai");

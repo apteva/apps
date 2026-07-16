@@ -36,12 +36,15 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: media-studio
 display_name: Media Studio
-version: 0.10.49
+version: 0.10.50
 description: |
   Generate images, video, audio, music, and avatars via compatible
   providers. Optionally saves outputs to Storage, supports stable
   cache keys for app-to-app generation reuse, and can use OpenAI Codex
-  as a subscription-backed image provider. v0.10.49 replaces browser-default
+  as a subscription-backed image provider. v0.10.50 makes JPEG the default
+  image output and guarantees final JPEG files stay below 2 MB, preserving
+  quality 90 when possible and adapting quality or dimensions only when
+  required. v0.10.49 replaces browser-default
   audio and video controls with a reusable Media Studio player, stable video
   stages, generated thumbnail posters, exclusive playback, responsive controls,
   and consistent card metadata. v0.10.48 adds Deepgram Aura as a
@@ -335,7 +338,7 @@ func (a *App) MCPTools() []sdk.Tool {
 				},
 				"options": map[string]any{
 					"type":        "object",
-					"description": "Per-provider extras. For images, output_format (png|jpeg|webp) guarantees the final stored format even when the provider returns different bytes. Other extras include background, lyrics, style, seed, image_storage_id, background_url, fast, …",
+					"description": "Per-provider extras. Images default to JPEG below 2 MB. output_format (png|jpeg|webp) can override the format and guarantees final stored bytes match it even when the provider returns something different. Other extras include background, lyrics, style, seed, image_storage_id, background_url, fast, …",
 				},
 			}, []string{"kind", "prompt"}),
 			Handler: a.toolMediaGenerate,

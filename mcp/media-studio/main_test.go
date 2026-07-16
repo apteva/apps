@@ -440,12 +440,23 @@ func TestToolMediaGenerate_Image_HappyPath_WithStorage(t *testing.T) {
 	if pf.executeCalls[0].Input["prompt"] != "a cat in a hat" {
 		t.Errorf("prompt mismatch")
 	}
+	if pf.executeCalls[0].Input["output_format"] != "jpeg" {
+		t.Errorf("default output_format = %v, want jpeg", pf.executeCalls[0].Input["output_format"])
+	}
 
 	if len(pf.callAppCalls) != 1 {
 		t.Fatalf("expected 1 CallApp, got %d", len(pf.callAppCalls))
 	}
-	if pf.callAppCalls[0].AppName != "storage" || pf.callAppCalls[0].Tool != "files_from_url" {
+	if pf.callAppCalls[0].AppName != "storage" || pf.callAppCalls[0].Tool != "files_upload" {
 		t.Errorf("storage call = %+v", pf.callAppCalls[0])
+	}
+	if pf.callAppCalls[0].Input["content_type"] != "image/jpeg" ||
+		!strings.HasSuffix(pf.callAppCalls[0].Input["name"].(string), ".jpg") {
+		t.Errorf("storage output is not JPEG: %+v", pf.callAppCalls[0].Input)
+	}
+	stored, err := base64.StdEncoding.DecodeString(pf.callAppCalls[0].Input["content_base64"].(string))
+	if err != nil || len(stored) >= maxGeneratedImageBytes {
+		t.Fatalf("stored JPEG bytes=%d err=%v", len(stored), err)
 	}
 	// Folder must be the dotted convention.
 	if folder, _ := pf.callAppCalls[0].Input["folder"].(string); folder != "/.generated/images/" {
@@ -1226,7 +1237,7 @@ func TestToolMediaGenerate_GPTImage_B64_StorageUpload(t *testing.T) {
 	}
 }
 
-func TestToolMediaGenerate_VeniceB64_SniffsJPEGWithoutRequestedFormat(t *testing.T) {
+func TestToolMediaGenerate_VeniceB64_DefaultsToJPEG(t *testing.T) {
 	jpegB64 := base64.StdEncoding.EncodeToString(fakeJPEG())
 
 	pf := newRecordingPlatform()
@@ -1256,6 +1267,9 @@ func TestToolMediaGenerate_VeniceB64_SniffsJPEGWithoutRequestedFormat(t *testing
 
 	if len(pf.callAppCalls) != 1 {
 		t.Fatalf("expected 1 storage call, got %d", len(pf.callAppCalls))
+	}
+	if got := pf.executeCalls[0].Input["format"]; got != "jpeg" {
+		t.Fatalf("default Venice format = %v, want jpeg", got)
 	}
 	got := pf.callAppCalls[0]
 	if got.Tool != "files_upload" {
@@ -1977,6 +1991,7 @@ func TestResolveSourceImage_Empty(t *testing.T) {
 // Full toolMediaGenerate edit-path coverage
 
 func TestToolMediaGenerate_Image_EditPath_VeniceStorageSource(t *testing.T) {
+	pngB64 := base64.StdEncoding.EncodeToString(fakePNG())
 	pf := newRecordingPlatform()
 	pf.appSlug = "venice-ai"
 	// Storage returns the source bytes; Venice returns a binary envelope;
@@ -1991,7 +2006,7 @@ func TestToolMediaGenerate_Image_EditPath_VeniceStorageSource(t *testing.T) {
 	}
 	pf.nextExecuteResult = &sdk.ExecuteResult{
 		Success: true, Status: 200,
-		Data: json.RawMessage(`{"_binary":true,"base64":"RURJVA==","mimeType":"image/png","size":4}`),
+		Data: json.RawMessage(fmt.Sprintf(`{"_binary":true,"base64":%q,"mimeType":"image/png","size":%d}`, pngB64, len(fakePNG()))),
 	}
 	ctx := newMediaStudioCtx(t, pf)
 	app := &App{}
@@ -2051,6 +2066,7 @@ func TestToolMediaGenerate_Image_EditPath_VeniceStorageSource(t *testing.T) {
 }
 
 func TestToolMediaGenerate_Image_MultiEditPath_VeniceStorageSources(t *testing.T) {
+	pngB64 := base64.StdEncoding.EncodeToString(fakePNG())
 	pf := newRecordingPlatform()
 	pf.appSlug = "venice-ai"
 	pf.perAppCallResults = map[string]json.RawMessage{
@@ -2060,7 +2076,7 @@ func TestToolMediaGenerate_Image_MultiEditPath_VeniceStorageSources(t *testing.T
 	}
 	pf.nextExecuteResult = &sdk.ExecuteResult{
 		Success: true, Status: 200,
-		Data: json.RawMessage(`{"_binary":true,"base64":"RURJVA==","mimeType":"image/png","size":4}`),
+		Data: json.RawMessage(fmt.Sprintf(`{"_binary":true,"base64":%q,"mimeType":"image/png","size":%d}`, pngB64, len(fakePNG()))),
 	}
 	pf.identity.Bindings = map[string]any{"image_provider": float64(42)}
 	ctx := newMediaStudioCtx(t, pf)

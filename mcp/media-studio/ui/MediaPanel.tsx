@@ -6,6 +6,7 @@ import { useCallback, useEffect, useId, useRef, useState, type DragEvent, type R
 import { AudioLines, Maximize2, Pause, Play, Volume2, VolumeX } from "lucide-react";
 import {
   clampDuration,
+  DEFAULT_IMAGE_FORMAT,
   formatMediaTime,
   imageGenerationOptions,
   isDurableMediaReference,
@@ -430,7 +431,7 @@ export default function MediaPanel({ projectId }: NativePanelProps) {
   const [imageSize, setImageSize] = useState("1024x1024");
   const [imageResolution, setImageResolution] = useState("1K");
   const [imageQuality, setImageQuality] = useState("auto");
-  const [imageFormat, setImageFormat] = useState("png");
+  const [imageFormat, setImageFormat] = useState(DEFAULT_IMAGE_FORMAT);
   const [durations, setDurations] = useState<Record<DurationKind, number>>({
     video: 5,
     audio_sfx: 5,
