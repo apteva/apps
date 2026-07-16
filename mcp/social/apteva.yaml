@@ -97,6 +97,32 @@ provides:
       label: Social
       icon: megaphone
       entry: /ui/SocialPanel.mjs
+  ui_components:
+    - name: calendar-card
+      entry: /ui/SocialCalendarCard.mjs
+      slots: [chat.message_attachment]
+      props_schema:
+        type: object
+        properties:
+          profile_id: { type: integer }
+          social_account_id: { type: integer }
+          view: { type: string, enum: [week, month] }
+          status: { type: string, enum: [all, scheduled, published, failed, partial, draft] }
+          anchor_date: { type: string }
+      preview_props:
+        preview: true
+        view: week
+    - name: post-card
+      entry: /ui/SocialPostCard.mjs
+      slots: [chat.message_attachment]
+      props_schema:
+        type: object
+        required: [post_id]
+        properties:
+          post_id: { type: integer }
+      preview_props:
+        preview: true
+        post_id: 1
 
 runtime:
   kind: source

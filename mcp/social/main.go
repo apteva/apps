@@ -19,6 +19,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"database/sql"
@@ -27,6 +28,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"image"
+	"image/jpeg"
+	_ "image/png"
 	"io"
 	"net/http"
 	"net/url"
@@ -119,6 +123,32 @@ provides:
       label: Social
       icon: megaphone
       entry: /ui/SocialPanel.mjs
+  ui_components:
+    - name: calendar-card
+      entry: /ui/SocialCalendarCard.mjs
+      slots: [chat.message_attachment]
+      props_schema:
+        type: object
+        properties:
+          profile_id: { type: integer }
+          social_account_id: { type: integer }
+          view: { type: string, enum: [week, month] }
+          status: { type: string, enum: [all, scheduled, published, failed, partial, draft] }
+          anchor_date: { type: string }
+      preview_props:
+        preview: true
+        view: week
+    - name: post-card
+      entry: /ui/SocialPostCard.mjs
+      slots: [chat.message_attachment]
+      props_schema:
+        type: object
+        required: [post_id]
+        properties:
+          post_id: { type: integer }
+      preview_props:
+        preview: true
+        post_id: 1
 runtime:
   kind: source
   source:
@@ -3252,11 +3282,6 @@ func (a *App) publishYoutube(ctx *sdk.AppCtx, def platformDef, j publishJob) (st
 	if err != nil {
 		return "", "", err
 	}
-	if thumbnail != nil {
-		if err := validateYouTubeThumbnail(*thumbnail); err != nil {
-			return "", "", err
-		}
-	}
 
 	// Step 1: init the upload session.
 	//
@@ -3901,7 +3926,11 @@ func (a *App) resolveMedia(ctx *sdk.AppCtx, ids []int64, projectID string) ([]me
 	return out, nil
 }
 
-const youtubeThumbnailMaxBytes int64 = 2 * 1024 * 1024
+const (
+	youtubeThumbnailMaxBytes       int64 = 2 * 1024 * 1024
+	youtubeThumbnailSourceMaxBytes int64 = 10 * 1024 * 1024
+	youtubeThumbnailMaxPixels            = 40_000_000
+)
 
 func thumbnailStorageID(opts map[string]any) int64 {
 	if opts == nil {
@@ -3943,19 +3972,48 @@ func (a *App) resolveThumbnailOption(ctx *sdk.AppCtx, opts map[string]any, defau
 	return &items[0], nil
 }
 
-func validateYouTubeThumbnail(m mediaItem) error {
-	if m.Bytes > youtubeThumbnailMaxBytes {
-		return fmt.Errorf("youtube thumbnail too large: %d bytes (max 2 MB)", m.Bytes)
-	}
-	switch m.Mime {
+func validateYouTubeThumbnailMime(mime string) error {
+	switch mime {
 	case "", "image/jpeg", "image/jpg", "image/png", "application/octet-stream":
 		return nil
 	default:
-		return fmt.Errorf("youtube thumbnail must be JPEG or PNG, got %q", m.Mime)
+		return fmt.Errorf("youtube thumbnail must be JPEG or PNG, got %q", mime)
 	}
 }
 
-func fetchBinaryEnvelope(url, mime string, limit int64) (map[string]any, error) {
+func prepareYouTubeThumbnail(body []byte, mime string) ([]byte, string, error) {
+	if err := validateYouTubeThumbnailMime(mime); err != nil {
+		return nil, "", err
+	}
+	if int64(len(body)) <= youtubeThumbnailMaxBytes {
+		if mime == "" {
+			mime = "image/jpeg"
+		}
+		return body, mime, nil
+	}
+
+	config, _, err := image.DecodeConfig(bytes.NewReader(body))
+	if err != nil {
+		return nil, "", fmt.Errorf("decode oversized youtube thumbnail: %w", err)
+	}
+	if config.Width <= 0 || config.Height <= 0 || int64(config.Width)*int64(config.Height) > youtubeThumbnailMaxPixels {
+		return nil, "", fmt.Errorf("youtube thumbnail dimensions are too large: %dx%d", config.Width, config.Height)
+	}
+	img, _, err := image.Decode(bytes.NewReader(body))
+	if err != nil {
+		return nil, "", fmt.Errorf("decode oversized youtube thumbnail: %w", err)
+	}
+	var optimized bytes.Buffer
+	if err := jpeg.Encode(&optimized, img, &jpeg.Options{Quality: 85}); err != nil {
+		return nil, "", fmt.Errorf("optimize youtube thumbnail: %w", err)
+	}
+	if int64(optimized.Len()) > youtubeThumbnailMaxBytes {
+		return nil, "", fmt.Errorf("youtube thumbnail remains too large after optimization: %d bytes (max 2 MB)", optimized.Len())
+	}
+	return optimized.Bytes(), "image/jpeg", nil
+}
+
+func fetchYouTubeThumbnailEnvelope(url, mime string) (map[string]any, error) {
 	req, err := http.NewRequest(http.MethodGet, url, nil)
 	if err != nil {
 		return nil, err
@@ -3968,15 +4026,16 @@ func fetchBinaryEnvelope(url, mime string, limit int64) (map[string]any, error) 
 	if resp.StatusCode != http.StatusOK {
 		return nil, fmt.Errorf("fetch thumbnail: storage returned %d", resp.StatusCode)
 	}
-	body, err := io.ReadAll(io.LimitReader(resp.Body, limit+1))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, youtubeThumbnailSourceMaxBytes+1))
 	if err != nil {
 		return nil, err
 	}
-	if int64(len(body)) > limit {
-		return nil, fmt.Errorf("thumbnail exceeds %d bytes", limit)
+	if int64(len(body)) > youtubeThumbnailSourceMaxBytes {
+		return nil, fmt.Errorf("youtube thumbnail source exceeds %d bytes", youtubeThumbnailSourceMaxBytes)
 	}
-	if mime == "" {
-		mime = "image/jpeg"
+	body, mime, err = prepareYouTubeThumbnail(body, mime)
+	if err != nil {
+		return nil, err
 	}
 	return map[string]any{
 		"_binary":  true,
@@ -3992,8 +4051,11 @@ func (a *App) setBinaryThumbnail(ctx *sdk.AppCtx, def platformDef, connID int64,
 	if platformPostID == "" {
 		return errors.New("platform post id required to set thumbnail")
 	}
-	if err := validateYouTubeThumbnail(thumb); err != nil {
+	if err := validateYouTubeThumbnailMime(thumb.Mime); err != nil {
 		return err
+	}
+	if thumb.Bytes > youtubeThumbnailSourceMaxBytes {
+		return fmt.Errorf("youtube thumbnail source exceeds %d bytes", youtubeThumbnailSourceMaxBytes)
 	}
 	binaryField := def.ThumbnailBinaryField
 	if binaryField == "" {
@@ -4003,7 +4065,7 @@ func (a *App) setBinaryThumbnail(ctx *sdk.AppCtx, def platformDef, connID int64,
 	if idField == "" {
 		idField = "videoId"
 	}
-	envelope, err := fetchBinaryEnvelope(thumb.URL, thumb.Mime, youtubeThumbnailMaxBytes)
+	envelope, err := fetchYouTubeThumbnailEnvelope(thumb.URL, thumb.Mime)
 	if err != nil {
 		return err
 	}
@@ -4283,6 +4345,38 @@ func (a *App) listPosts(ctx *sdk.AppCtx, args map[string]any, maxLimit int) (any
 		})
 	}
 	return map[string]any{"posts": out}, nil
+}
+
+func (a *App) loadPostByID(ctx *sdk.AppCtx, projectID string, postID int64) (map[string]any, error) {
+	var (
+		id, profileID                                                             int64
+		body, mediaJSON, externalJSON, scheduleAt, status, createdAt, publishedAt string
+	)
+	err := ctx.AppDB().QueryRow(
+		`SELECT id, body, COALESCE(media_storage_ids,'[]'), COALESCE(external_media_urls,'[]'), COALESCE(schedule_at,''),
+		        status, created_at, COALESCE(published_at,''), COALESCE(profile_id,0)
+		   FROM posts WHERE id=? AND project_id=?`,
+		postID, projectID,
+	).Scan(&id, &body, &mediaJSON, &externalJSON, &scheduleAt, &status, &createdAt, &publishedAt, &profileID)
+	if err != nil {
+		return nil, err
+	}
+	var mediaIDs []int64
+	_ = json.Unmarshal([]byte(mediaJSON), &mediaIDs)
+	var externalURLs []string
+	_ = json.Unmarshal([]byte(externalJSON), &externalURLs)
+	return map[string]any{
+		"id":                  id,
+		"body":                body,
+		"media_storage_ids":   mediaIDs,
+		"external_media_urls": externalURLs,
+		"profile_id":          profileID,
+		"schedule_at":         scheduleAt,
+		"status":              status,
+		"created_at":          createdAt,
+		"published_at":        publishedAt,
+		"targets":             a.loadTargets(ctx, id),
+	}, nil
 }
 
 func postListTimeBound(args map[string]any, name string) (*time.Time, error) {
@@ -7842,9 +7936,20 @@ func (a *App) handlePostsItem(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if len(parts) == 1 {
-		// /posts/:id — only DELETE for now (no GET on a single
-		// post; post_list is granular enough).
 		switch r.Method {
+		case http.MethodGet:
+			args := projectArgsFromRequest(r)
+			post, err := a.loadPostByID(globalCtx, projectScope(globalCtx, args), id)
+			if errors.Is(err, sql.ErrNoRows) {
+				http.Error(w, "post not found", http.StatusNotFound)
+				return
+			}
+			if err != nil {
+				http.Error(w, err.Error(), http.StatusInternalServerError)
+				return
+			}
+			writeJSON(w, map[string]any{"post": post})
+			return
 		case http.MethodDelete:
 			args := projectArgsFromRequest(r)
 			args["post_id"] = id
@@ -7856,7 +7961,7 @@ func (a *App) handlePostsItem(w http.ResponseWriter, r *http.Request) {
 			writeJSON(w, out)
 			return
 		default:
-			http.Error(w, "DELETE only at this path", http.StatusMethodNotAllowed)
+			http.Error(w, "GET or DELETE only at this path", http.StatusMethodNotAllowed)
 			return
 		}
 	}

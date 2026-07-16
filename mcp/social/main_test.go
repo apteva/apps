@@ -18,10 +18,15 @@ package main
 //   - post_retry: resets failed → pending and re-publishes
 
 import (
+	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"image"
+	"image/jpeg"
+	"image/png"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -905,6 +910,47 @@ func TestPostList_DateRangeRejectsInvalidBounds(t *testing.T) {
 		if out.(map[string]any)["isError"] != true {
 			t.Fatalf("invalid bounds were accepted: args=%+v out=%+v", args, out)
 		}
+	}
+}
+
+func TestLoadPostByID_IsProjectScopedAndIncludesTargets(t *testing.T) {
+	ctx := newSocialCtx(t, nil)
+	accountResult, err := ctx.AppDB().Exec(
+		`INSERT INTO social_accounts (project_id, platform, connection_id, display_name, status)
+		 VALUES ('test-proj', 'youtube', 42, 'Channel', 'active')`,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	accountID, _ := accountResult.LastInsertId()
+	postResult, err := ctx.AppDB().Exec(
+		`INSERT INTO posts (project_id, body, media_storage_ids, external_media_urls, status, schedule_at)
+		 VALUES ('test-proj', 'Scheduled video', '[17]', '[]', 'scheduled', '2026-07-20T18:00:00Z')`,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	postID, _ := postResult.LastInsertId()
+	if _, err := ctx.AppDB().Exec(
+		`INSERT INTO post_targets (post_id, social_account_id, status) VALUES (?, ?, 'pending')`,
+		postID, accountID,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	post, err := (&App{}).loadPostByID(ctx, "test-proj", postID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if post["body"] != "Scheduled video" || post["status"] != "scheduled" {
+		t.Fatalf("unexpected post: %+v", post)
+	}
+	targets, _ := post["targets"].([]map[string]any)
+	if len(targets) != 1 || targets[0]["social_account_id"] != accountID {
+		t.Fatalf("unexpected targets: %+v", post["targets"])
+	}
+	if _, err := (&App{}).loadPostByID(ctx, "other-project", postID); err == nil {
+		t.Fatal("cross-project post lookup unexpectedly succeeded")
 	}
 }
 
@@ -2318,6 +2364,108 @@ func TestPublishYouTube_InitCallShape(t *testing.T) {
 	).Scan(&lastErr)
 	if !strings.Contains(lastErr, "no Location header") {
 		t.Errorf("expected 'no Location header' error; got %q", lastErr)
+	}
+}
+
+func TestPrepareYouTubeThumbnail_PreservesSmallImage(t *testing.T) {
+	var source bytes.Buffer
+	if err := png.Encode(&source, image.NewRGBA(image.Rect(0, 0, 16, 9))); err != nil {
+		t.Fatal(err)
+	}
+
+	got, mime, err := prepareYouTubeThumbnail(source.Bytes(), "image/png")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mime != "image/png" {
+		t.Fatalf("mime = %q, want image/png", mime)
+	}
+	if !bytes.Equal(got, source.Bytes()) {
+		t.Fatal("small thumbnail bytes changed")
+	}
+}
+
+func TestPrepareYouTubeThumbnail_CompressesOversizedPNG(t *testing.T) {
+	img := image.NewNRGBA(image.Rect(0, 0, 900, 900))
+	var state uint32 = 1
+	for i := 0; i < len(img.Pix); i += 4 {
+		state = state*1664525 + 1013904223
+		img.Pix[i] = byte(state >> 24)
+		img.Pix[i+1] = byte(state >> 16)
+		img.Pix[i+2] = byte(state >> 8)
+		img.Pix[i+3] = 0xff
+	}
+	var source bytes.Buffer
+	encoder := png.Encoder{CompressionLevel: png.NoCompression}
+	if err := encoder.Encode(&source, img); err != nil {
+		t.Fatal(err)
+	}
+	if int64(source.Len()) <= youtubeThumbnailMaxBytes {
+		t.Fatalf("test image is only %d bytes; expected oversized input", source.Len())
+	}
+
+	got, mime, err := prepareYouTubeThumbnail(source.Bytes(), "image/png")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if mime != "image/jpeg" {
+		t.Fatalf("mime = %q, want image/jpeg", mime)
+	}
+	if int64(len(got)) > youtubeThumbnailMaxBytes {
+		t.Fatalf("optimized thumbnail = %d bytes, max %d", len(got), youtubeThumbnailMaxBytes)
+	}
+	config, err := jpeg.DecodeConfig(bytes.NewReader(got))
+	if err != nil {
+		t.Fatalf("optimized output is not valid JPEG: %v", err)
+	}
+	if config.Width != 900 || config.Height != 900 {
+		t.Fatalf("optimized dimensions = %dx%d, want 900x900", config.Width, config.Height)
+	}
+}
+
+func TestPrepareYouTubeThumbnail_RejectsInvalidOversizedImage(t *testing.T) {
+	bad := bytes.Repeat([]byte("not-an-image"), int(youtubeThumbnailMaxBytes/12)+1)
+	if int64(len(bad)) <= youtubeThumbnailMaxBytes {
+		bad = append(bad, make([]byte, youtubeThumbnailMaxBytes-int64(len(bad))+1)...)
+	}
+	if _, _, err := prepareYouTubeThumbnail(bad, "image/png"); err == nil || !strings.Contains(err.Error(), "decode oversized youtube thumbnail") {
+		t.Fatalf("error = %v, want oversized image decode error", err)
+	}
+}
+
+func TestFetchYouTubeThumbnailEnvelope_UsesOptimizedMime(t *testing.T) {
+	img := image.NewNRGBA(image.Rect(0, 0, 900, 900))
+	for i := 0; i < len(img.Pix); i += 4 {
+		img.Pix[i] = byte(i)
+		img.Pix[i+1] = byte(i >> 3)
+		img.Pix[i+2] = byte(i >> 7)
+		img.Pix[i+3] = 0xff
+	}
+	var source bytes.Buffer
+	encoder := png.Encoder{CompressionLevel: png.NoCompression}
+	if err := encoder.Encode(&source, img); err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "image/png")
+		_, _ = w.Write(source.Bytes())
+	}))
+	defer srv.Close()
+
+	envelope, err := fetchYouTubeThumbnailEnvelope(srv.URL, "image/png")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if envelope["mimeType"] != "image/jpeg" {
+		t.Fatalf("mimeType = %v, want image/jpeg", envelope["mimeType"])
+	}
+	encoded, _ := envelope["base64"].(string)
+	body, err := base64.StdEncoding.DecodeString(encoded)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if int64(len(body)) > youtubeThumbnailMaxBytes {
+		t.Fatalf("envelope body = %d bytes, max %d", len(body), youtubeThumbnailMaxBytes)
 	}
 }
 
