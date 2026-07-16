@@ -44,6 +44,17 @@ the invoice's exact outstanding balance. It requires either Billing's direct
 Stripe configuration or a bound `payment_processor` integration. The verified
 webhook records the payment idempotently.
 
+**Stripe availability is a capability, never the default invoice workflow.**
+Only call `invoices_send_payment_link` when the user's current request
+explicitly asks for a Stripe link or payment link. Do not infer permission from
+Stripe being connected, an invoice being created or finalized, the invoice
+being open or due, or the customer having an email address. If the user merely
+asks to create, finalize, or send an invoice, do not create a Stripe Session.
+
+The tool creates and returns a URL; it does **not** email or otherwise deliver
+it. Share or email the returned URL only through a separate channel or email
+tool, and only when the user explicitly requested that delivery.
+
 - Use `payment_method_setup_create` to create a hosted setup link.
 - Use `payment_methods_list` before an off-session charge workflow.
 - Never collect or store raw card/bank credentials in Billing metadata.
@@ -175,8 +186,9 @@ is supported for reconciliation, but always include the provider's unique
 - Don't include sensitive data (card numbers, SSNs) in `notes` or
   `metadata`. Notes show in the dashboard panel; metadata is JSON
   the agent can read back.
-- Don't use `confirm` rules as a soft gate — they're the gate.
-  Ask before voiding. Ask before issuing a payment link in chat channels.
+- Don't use `confirm` rules as a soft gate — they're the gate. Ask before
+  voiding. Never issue a Stripe payment link by default; create one only when
+  the user explicitly asks for it.
 
 ## When in doubt
 

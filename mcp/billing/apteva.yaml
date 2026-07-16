@@ -2,13 +2,12 @@ schema: apteva-app/v1
 
 name: billing
 display_name: Billing
-version: 0.8.17
+version: 0.8.18
 description: |
   Customers, invoices, and payments for Apteva agents and human teams.
-  Per-invoice provider — local for internal/wire/cash records, stripe
-  for card-payable hosted invoices — chosen at create time and frozen
-  for the invoice's lifetime. v0.1.0 ships local-only; v0.1.1 adds the
-  Stripe provider via the integrations catalog. Lifecycle is explicit
+  Billing issues local invoices. Stripe is an optional payment processor;
+  connecting it never creates a Checkout link by default. Payment links are
+  created only when explicitly requested. Lifecycle is explicit
   (draft → open → paid/void/uncollectible) with an append-only audit
   log per invoice.
   v0.8.16 includes reusable payment-method metadata in generic events
@@ -91,12 +90,16 @@ provides:
         a file_id + URL the agent can attach to chat or email.
     - name: invoices_send_payment_link
       description: |
-        Generate a Stripe-hosted payment URL for an open invoice. Returns
-        {url, expires_at}. Uses stripe_secret_key from Billing config
-        and auto-creates the Stripe webhook endpoint; legacy installs can
-        still use a bound payment_processor integration. URL is a Stripe
-        Checkout Session, valid for 24h. On payment success, the webhook
-        records the payment + transitions the invoice to 'paid' automatically.
+        ON DEMAND ONLY. Create a Stripe-hosted Checkout payment URL only when
+        the user explicitly asks for a Stripe or payment link. Never call this
+        tool automatically because Stripe is configured, because an invoice
+        was created or finalized, or because the customer has an email address.
+        This tool does not send email or deliver the URL; it only returns
+        {url, stripe_session_id, expires_at}. Sharing it requires a separate,
+        explicitly requested channel or email action. Uses stripe_secret_key
+        from Billing config; legacy installs can use a bound payment_processor
+        integration. On payment success, the verified webhook records the
+        payment and transitions the invoice to paid.
     - name: payment_method_setup_create
       description: Create a provider-hosted setup session so a customer can save a reusable payment method. Supports card and bank-debit types such as sepa_debit where the processor supports them.
     - name: payment_methods_list
