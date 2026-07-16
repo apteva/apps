@@ -37,11 +37,11 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: billing
 display_name: Billing
-version: 0.8.17
+version: 0.8.18
 description: |
   Customers, invoices, payments, and reusable customer payment methods.
-  Per-invoice provider — local for internal/wire/cash, stripe for
-  card-payable hosted invoices.
+  Billing issues local invoices. Stripe is an optional payment processor;
+  Checkout links are created only when explicitly requested.
 author: Apteva
 scopes: [project, global]
 requires:
@@ -117,7 +117,7 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	}
 
 	ctx.Logger().Info("billing mounted",
-		"version", "0.8.17",
+		"version", "0.8.18",
 		"scope_project_id", os.Getenv("APTEVA_PROJECT_ID"))
 	return nil
 }
@@ -434,7 +434,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "invoices_send_payment_link",
-			Description: "Generate a Stripe-hosted payment URL for an open invoice. Returns {url, stripe_session_id, expires_at}. Uses stripe_secret_key config when present, otherwise falls back to the bound payment_processor integration (Stripe). URL is a Stripe Checkout Session, valid for 24h. On payment success, the /webhooks/stripe handler records the payment and transitions the invoice to 'paid' automatically (idempotent on the payment_intent id). Args: invoice_id (required), success_url, cancel_url.",
+			Description: "ON DEMAND ONLY: Create a Stripe-hosted Checkout payment URL for an existing open or uncollectible invoice, and only when the user explicitly asks for a Stripe or payment link. Never call this tool automatically because Stripe is configured, because an invoice was created or finalized, or because the customer has an email address. This tool does NOT send email or deliver the URL; it only returns {url, stripe_session_id, expires_at}. Sharing the returned URL requires a separate, explicitly requested channel or email action. Uses stripe_secret_key config when present, otherwise falls back to the bound payment_processor integration (Stripe). The URL is valid for 24h. On payment success, the verified webhook records the payment and transitions the invoice to 'paid' automatically. Args: invoice_id (required), success_url, cancel_url.",
 			InputSchema: schemaObject(map[string]any{
 				"invoice_id":  map[string]any{"type": "integer"},
 				"success_url": map[string]any{"type": "string"},
