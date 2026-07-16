@@ -1237,6 +1237,100 @@ printf '6.75\n'
 	}
 }
 
+func TestAsyncRenderCreatesDurableQueuedRow(t *testing.T) {
+	ctx := tk.NewAppCtx(t, "apteva.yaml").WithProject("project-live")
+	edit := `{"timeline":{"tracks":[{"type":"visual","clips":[{"uid":"hero","asset":{"type":"image","src":"https://example.test/hero.jpg"},"start":0,"length":5}]}]}}`
+	output := `{"format":"mp4","resolution":"hd","aspect":"16:9","fps":30}`
+	res, err := ctx.AppDB().Exec(
+		`INSERT INTO compositions(project_id,name,edit_json,output_json,duration_seconds) VALUES(?,?,?,?,?)`,
+		"project-live", "Live card test", edit, output, 5,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	compositionID, _ := res.LastInsertId()
+
+	got, err := (&App{}).toolCompositionRender(ctx, map[string]any{"id": compositionID, "wait": false})
+	if err != nil {
+		t.Fatal(err)
+	}
+	row := got.(map[string]any)
+	renderID, _ := row["render_id"].(int64)
+	if renderID == 0 || row["status"] != "queued" {
+		t.Fatalf("unexpected result: %#v", row)
+	}
+
+	var status, phase, editSnapshot, outputSnapshot string
+	if err := ctx.AppDB().QueryRow(
+		`SELECT status,phase,edit_snapshot,output_snapshot FROM renders WHERE id=?`, renderID,
+	).Scan(&status, &phase, &editSnapshot, &outputSnapshot); err != nil {
+		t.Fatal(err)
+	}
+	if status != "queued" || phase != "queued" || editSnapshot != edit || outputSnapshot != output {
+		t.Fatalf("durable row mismatch: status=%s phase=%s edit=%q output=%q", status, phase, editSnapshot, outputSnapshot)
+	}
+}
+
+func TestCompositionAndRenderCardDataAreProjectScoped(t *testing.T) {
+	ctx := tk.NewAppCtx(t, "apteva.yaml").WithProject("project-card")
+	edit := `{"timeline":{"tracks":[{"type":"visual","clips":[{"uid":"hero","asset":{"type":"image","src":"storage:1"},"start":0,"length":5,"ai":{"media_kind":"image","prompt":"hero","status":"ready","storage_id":1}}]},{"type":"audio","clips":[{"uid":"pause","asset":{"type":"silence","src":""},"start":1,"length":2}]}]}}`
+	output := `{"format":"mp4","resolution":"hd","aspect":"16:9","fps":30}`
+	res, err := ctx.AppDB().Exec(`INSERT INTO compositions(project_id,name,edit_json,output_json,duration_seconds) VALUES(?,?,?,?,?)`, "project-card", "Card test", edit, output, 5)
+	if err != nil {
+		t.Fatal(err)
+	}
+	compositionID, _ := res.LastInsertId()
+	renderID, err := createRenderRow(ctx, compositionID, "project-card", "auto", edit, output, "queued", "queued")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	composition, err := compositionCardData(ctx, compositionID, "project-card")
+	if err != nil {
+		t.Fatal(err)
+	}
+	counts := composition["counts"].(map[string]int)
+	if counts["visual"] != 1 || counts["silence"] != 1 || counts["ai"] != 1 {
+		t.Fatalf("bad counts: %#v", counts)
+	}
+	if _, err := compositionCardData(ctx, compositionID, "other-project"); err == nil {
+		t.Fatal("cross-project composition lookup succeeded")
+	}
+	render, err := renderCardData(ctx, renderID, "project-card")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if render["composition_name"] != "Card test" || render["status"] != "queued" {
+		t.Fatalf("bad render card: %#v", render)
+	}
+	if _, err := renderCardData(ctx, renderID, "other-project"); err == nil {
+		t.Fatal("cross-project render lookup succeeded")
+	}
+}
+
+func TestRecoverInterruptedComposerRenders(t *testing.T) {
+	ctx := tk.NewAppCtx(t, "apteva.yaml").WithProject("project-recovery")
+	res, err := ctx.AppDB().Exec(`INSERT INTO compositions(project_id,name,edit_json,output_json,duration_seconds) VALUES(?,?,?,?,0)`, "project-recovery", "Recovery", `{"timeline":{"tracks":[]}}`, `{}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	compositionID, _ := res.LastInsertId()
+	renderID, err := createRenderRow(ctx, compositionID, "project-recovery", "auto", `{}`, `{}`, "rendering", "uploading")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n, err := recoverInterruptedComposerRenders(ctx.AppDB()); err != nil || n != 1 {
+		t.Fatalf("recover = %d, %v", n, err)
+	}
+	var status, phase string
+	if err := ctx.AppDB().QueryRow(`SELECT status,phase FROM renders WHERE id=?`, renderID).Scan(&status, &phase); err != nil {
+		t.Fatal(err)
+	}
+	if status != "queued" || phase != "queued" {
+		t.Fatalf("status=%s phase=%s", status, phase)
+	}
+}
+
 func TestStorageLocalPathForKey_FindsSiblingStorageBlob(t *testing.T) {
 	root := t.TempDir()
 	appData := filepath.Join(root, "apps", "composer", "data", "60")

@@ -15,6 +15,7 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"errors"
 	"os"
@@ -28,7 +29,7 @@ import (
 const manifestYAML = `schema: apteva-app/v1
 name: composer
 display_name: Composer
-version: 0.5.8
+version: 0.5.9
 description: |
   Multi-clip video compositions with a structured timeline panel,
   universal generated-asset clip editing, first-class AI avatar clips,
@@ -76,6 +77,10 @@ description: |
   legacy implicit tracks keep the efficient concat path.
   Renders locally via ffmpeg, on a render host via instances, or against a
   bound render_executor integration.
+  Live chat cards expose evolving compositions and durable render progress.
+  Render rows are created before AI materialization, asynchronous submissions
+  continue through generation, rendering, upload, and QA without a second
+  render call, and interrupted queued work resumes after sidecar restarts.
 author: Apteva
 scopes: [project, global]
 requires:
@@ -105,8 +110,17 @@ provides:
     - { name: composition_get }
     - { name: composition_list }
     - { name: composition_delete }
-    - { name: composition_render }
+    - name: composition_render
+      async_result:
+        id_field: render_id
+        notify:
+          target: caller
+          mode: once
+          events: [composition.rendered, composition.failed, render.cancelled]
+          match: { render_id: "$result.render_id" }
+          expires_after: 24h
     - { name: render_status }
+    - { name: render_cancel }
     - { name: asset_inspect }
     - { name: asset_search }
   ui_panels:
@@ -114,6 +128,26 @@ provides:
       label: Composer
       icon: film
       entry: /ui/ComposerPanel.mjs
+  ui_components:
+    - name: composition-card
+      entry: /ui/CompositionCard.mjs
+      slots: [chat.message_attachment]
+      props_schema: { type: object, required: [composition_id], properties: { composition_id: { type: integer } } }
+      preview_props: { preview: true, composition_id: 1 }
+    - name: render-card
+      entry: /ui/RenderCard.mjs
+      slots: [chat.message_attachment]
+      props_schema: { type: object, required: [render_id], properties: { render_id: { type: integer } } }
+      preview_props: { preview: true, render_id: 1 }
+  publishes:
+    - { name: composition.created, description: "A composition was created." }
+    - { name: composition.updated, description: "A composition changed." }
+    - { name: composition.deleted, description: "A composition was deleted." }
+    - { name: render.queued, description: "A render was queued." }
+    - { name: render.progress, description: "A render changed phase or progress." }
+    - { name: composition.rendered, description: "A composition render completed." }
+    - { name: composition.failed, description: "A composition render failed." }
+    - { name: render.cancelled, description: "A render was cancelled." }
 runtime:
   kind: source
   source:
@@ -158,7 +192,9 @@ upgrade_policy: auto-patch
 
 var globalCtx *sdk.AppCtx
 
-type App struct{}
+type App struct {
+	renderPoolCancel context.CancelFunc
+}
 
 func (a *App) Manifest() sdk.Manifest {
 	m, err := sdk.ParseManifest([]byte(manifestYAML))
@@ -173,6 +209,12 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 		return errors.New("composer requires a db block")
 	}
 	globalCtx = ctx
+	if n, err := recoverInterruptedComposerRenders(ctx.AppDB()); err != nil {
+		return errors.New("recover interrupted renders: " + err.Error())
+	} else if n > 0 {
+		ctx.Logger().Warn("requeued interrupted Composer renders", "count", n)
+	}
+	a.renderPoolCancel = startComposerRenderPool(ctx)
 	ctx.Logger().Info("composer mounted",
 		"ffmpeg_path", ffmpegPath(),
 		"render_host_id", renderHostID(ctx),
@@ -180,7 +222,12 @@ func (a *App) OnMount(ctx *sdk.AppCtx) error {
 	return nil
 }
 
-func (a *App) OnUnmount(*sdk.AppCtx) error       { return nil }
+func (a *App) OnUnmount(*sdk.AppCtx) error {
+	if a.renderPoolCancel != nil {
+		a.renderPoolCancel()
+	}
+	return nil
+}
 func (a *App) Channels() []sdk.ChannelFactory    { return nil }
 func (a *App) Workers() []sdk.Worker             { return nil }
 func (a *App) EventHandlers() []sdk.EventHandler { return nil }

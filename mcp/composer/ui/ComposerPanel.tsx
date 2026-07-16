@@ -32,6 +32,8 @@ interface RenderRow {
   id: number;
   executor: string;
   status: "queued" | "rendering" | "complete" | "failed" | "cancelled";
+  phase?: string;
+  progress_pct?: number;
   storage_id: number;
   duration_ms: number;
   cost_usd: number;
@@ -1147,6 +1149,13 @@ export default function ComposerPanel({ projectId, installId }: NativePanelProps
   }, [selectedId, selectedDetail?.id, loadCompositionDetail]);
 
   useEffect(() => {
+    const render = selectedFull?.latest_render;
+    if (selectedId == null || !render || ["complete", "failed", "cancelled"].includes(render.status)) return;
+    const timer = window.setInterval(() => loadCompositionDetail(selectedId), 2500);
+    return () => window.clearInterval(timer);
+  }, [selectedId, selectedFull?.latest_render?.id, selectedFull?.latest_render?.status, loadCompositionDetail]);
+
+  useEffect(() => {
     if (selectedId != null && !selectedFull) return;
     const next = parseComposition(selectedFull);
     setDraft(next);
@@ -1496,7 +1505,7 @@ export default function ComposerPanel({ projectId, installId }: NativePanelProps
     setRendering(true);
     setStatus("Rendering...");
     try {
-      const body: Record<string, unknown> = { id: selectedId };
+      const body: Record<string, unknown> = { id: selectedId, wait: false };
       if (executor !== "auto") body.executor = executor;
       const res = await fetch(withProject(`${API}/render`, projectId), {
         method: "POST",
@@ -1510,15 +1519,7 @@ export default function ComposerPanel({ projectId, installId }: NativePanelProps
         return;
       }
       const result = JSON.parse(text);
-      if (result.status === "waiting_ai") {
-        const pending = Array.isArray(result.pending) ? result.pending.join("; ") : result.message || "";
-        setStatus(`AI assets started. ${pending} Render again when they are ready.`);
-        await load();
-        if (selectedId) await loadCompositionDetail(selectedId);
-        return;
-      }
-      const costStr = result.cost_usd ? ` (${formatCost(result.cost_usd)})` : "";
-      setStatus(`Render ${result.status}${costStr} via ${result.executor} in ${(result.duration_ms / 1000).toFixed(1)}s`);
+      setStatus(`Render #${result.render_id} queued. AI generation and rendering will continue automatically.`);
       await load();
       if (selectedId) await loadCompositionDetail(selectedId);
     } catch (e) {

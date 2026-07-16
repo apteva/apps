@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: composer
 display_name: Composer
-version: 0.5.8
+version: 0.5.9
 description: |
   Multi-clip video composition. Stitch generated or uploaded assets
   into a single video — layered visual tracks, timed audio tracks, optional
@@ -10,6 +10,12 @@ description: |
   default, on a render host via instances when render_host_id is
   set, or against a SaaS render backend (Shotstack et al) when one
   is bound to the render_executor role.
+
+  v0.5.9 adds live Composer chat cards and a durable asynchronous render
+  lifecycle. Composition cards update as agents build timelines; render cards
+  follow AI generation, rendering, upload, and QA before becoming playable.
+  Render rows are created before AI materialization, queued work resumes after
+  sidecar restarts, and existing synchronous callers retain their wait behavior.
 
   v0.5.8 preserves reserved visual slots for fit_generated_keep_start:
   generated avatar/video actual duration is recorded without replacing the
@@ -246,8 +252,19 @@ provides:
     - { name: composition_get,    description: "Fetch one composition with its latest render row. Args: id." }
     - { name: composition_list,   description: "List compositions for this project. Args: limit? (default 50)." }
     - { name: composition_delete, description: "Delete a composition (cascades renders). Args: id." }
-    - { name: composition_render, description: "Submit a composition for rendering. Args: id, executor? ('local'|'remote' — overrides the auto ladder). Returns {status:'waiting_ai'} while async AI assets generate, otherwise render result." }
+    - name: composition_render
+      description: "Submit a composition for rendering. Args: id, executor? ('local'|'remote'), wait? (default true for compatibility; false returns render_id immediately and continues durably in the background)."
+      async_result:
+        id_field: render_id
+        notify:
+          target: caller
+          mode: once
+          events: [composition.rendered, composition.failed, render.cancelled]
+          match:
+            render_id: "$result.render_id"
+          expires_after: 24h
     - { name: render_status,      description: "Poll one render row. Args: render_id." }
+    - { name: render_cancel,      description: "Cancel a queued render. Args: render_id." }
     - { name: asset_inspect,      description: "Probe an asset via ffprobe. Args: src (storage:N | https://… | mediastudio:N). Returns {kind, duration, dimensions, codec, fps}." }
     - { name: asset_search,       description: "Search reusable Storage assets for composition. Args: q?, kind?, tags?, folder?, recursive?, limit?, inspect?, include_generated?. Excludes generated/system assets by default and returns composition-ready src values like storage:N." }
   ui_panels:
@@ -255,6 +272,34 @@ provides:
       label: Composer
       icon: film
       entry: /ui/ComposerPanel.mjs
+  ui_components:
+    - name: composition-card
+      entry: /ui/CompositionCard.mjs
+      slots: [chat.message_attachment]
+      props_schema:
+        type: object
+        required: [composition_id]
+        properties:
+          composition_id: { type: integer }
+      preview_props: { preview: true, composition_id: 1 }
+    - name: render-card
+      entry: /ui/RenderCard.mjs
+      slots: [chat.message_attachment]
+      props_schema:
+        type: object
+        required: [render_id]
+        properties:
+          render_id: { type: integer }
+      preview_props: { preview: true, render_id: 1 }
+  publishes:
+    - { name: composition.created, description: "A composition was created." }
+    - { name: composition.updated, description: "A composition timeline or metadata changed." }
+    - { name: composition.deleted, description: "A composition was deleted." }
+    - { name: render.queued, description: "A render was queued for durable background processing." }
+    - { name: render.progress, description: "A render changed phase or progress." }
+    - { name: composition.rendered, description: "A composition render completed." }
+    - { name: composition.failed, description: "A composition render failed." }
+    - { name: render.cancelled, description: "A queued render was cancelled." }
 
 runtime:
   kind: source

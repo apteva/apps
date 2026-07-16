@@ -8,6 +8,8 @@ func (a *App) HTTPRoutes() []sdk.Route {
 		{Pattern: "/composition/", Handler: a.handleCompositionByID},
 		{Pattern: "/render", Handler: a.handleRender},
 		{Pattern: "/render-status/", Handler: a.handleRenderStatus},
+		{Pattern: "/cards/composition/", Handler: a.handleCompositionCard},
+		{Pattern: "/cards/render/", Handler: a.handleRenderCard},
 		{Pattern: "/ai/generate", Handler: a.handleAIGenerate},
 		{Pattern: "/cache/", Handler: a.handleCacheGet},
 		{Pattern: "/bindings", Handler: a.handleBindings},
@@ -83,10 +85,11 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "composition_render",
-			Description: "Submit a composition for rendering. Args: id, executor? ('local'|'remote' — overrides the auto ladder). If missing AI assets queue at Media Studio, returns {status:'waiting_ai', pending}. Local executors return {status:'complete'}.",
+			Description: "Submit a composition for rendering. Args: id, executor? ('local'|'remote' — overrides the auto ladder), wait? (default true for compatibility). Set wait=false for a durable background render: the call returns {render_id,status:'queued'} immediately, AI assets generate automatically, and render_status or the Composer render-card follows the result.",
 			InputSchema: schemaObject(map[string]any{
 				"id":       map[string]any{"type": "integer"},
 				"executor": map[string]any{"type": "string", "enum": []string{"local", "remote"}},
+				"wait":     map[string]any{"type": "boolean", "default": true},
 			}, []string{"id"}),
 			Handler: a.toolCompositionRender,
 		},
@@ -97,6 +100,14 @@ func (a *App) MCPTools() []sdk.Tool {
 				"render_id": map[string]any{"type": "integer"},
 			}, []string{"render_id"}),
 			Handler: a.toolRenderStatus,
+		},
+		{
+			Name:        "render_cancel",
+			Description: "Cancel a queued render before execution begins. Args: render_id. Completed, failed, or already-cancelled renders are idempotent; an actively executing render cannot yet be interrupted safely.",
+			InputSchema: schemaObject(map[string]any{
+				"render_id": map[string]any{"type": "integer"},
+			}, []string{"render_id"}),
+			Handler: a.toolRenderCancel,
 		},
 		{
 			Name:        "asset_inspect",
