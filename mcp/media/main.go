@@ -186,7 +186,7 @@ provides:
             render_id: "$result.render_id"
           expires_after: 24h
     - name: media_extract_frame
-      description: "Save a frame as PNG; Smart Crop v2 interpolates between bracketing storyboard frames when reframing. Returns render_id."
+      description: "Save a frame as PNG; Smart Crop v2 uses cached storyboard frames when dense and bounded temporary source screenshots when sparse. Returns render_id."
       async_result:
         id_field: render_id
         notify:
@@ -228,7 +228,7 @@ provides:
             render_id: "$result.render_id"
           expires_after: 24h
     - name: media_extract_reel
-      description: "Trim + reframe in one pass. Smart Crop v2 tracks subjects across bounded storyboard frames and uses a stable fixed crop when movement is low. Returns render_id."
+      description: "Trim + reframe in one pass. Smart Crop v2 tracks subjects across bounded cached or temporary source screenshots and uses a stable fixed crop when movement is low. Returns render_id."
       async_result:
         id_field: render_id
         notify:
@@ -636,7 +636,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "media_extract_frame",
-			Description: "Save a video frame as PNG. With target_ratio, Smart Crop v2 interpolates the subject-aware crop between indexed storyboard frames bracketing at_ms; sparse indexes fall back to one cached frame, then center. Args: file_id, at_ms, width?, target_ratio?, output_width?, crop_mode?.",
+			Description: "Save a video frame as PNG. With target_ratio, Smart Crop v2 uses dense cached storyboard frames or bounded temporary source screenshots around at_ms, including zero-motion person centering. Args: file_id, at_ms, width?, target_ratio?, output_width?, crop_mode?.",
 			InputSchema: schemaObject(map[string]any{
 				"file_id":       map[string]any{"type": "string"},
 				"at_ms":         map[string]any{"type": "integer"},
@@ -675,7 +675,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		},
 		{
 			Name:        "media_extract_reel",
-			Description: "Cut and reframe a clip in one ffmpeg pass. Smart Crop v2 analyzes bounded cached storyboard frames, uses a fixed crop for a stable subject, and follows movement with a smoothed path. Sparse legacy indexes fall back safely; reindex for dense tracking. Args: file_id, start_ms, end_ms, target_ratio? (default '9:16'), output_width?, crop_mode? ('smart' default|'center').",
+			Description: "Cut and reframe a clip in one ffmpeg pass. Smart Crop v2 analyzes a bounded cached storyboard or temporary source screenshots when sparse, centers stable people, and follows movement with a smoothed path. Args: file_id, start_ms, end_ms, target_ratio? (default '9:16'), output_width?, crop_mode? ('smart' default|'center').",
 			InputSchema: schemaObject(map[string]any{
 				"file_id":       map[string]any{"type": "string", "description": "Storage file_id of the source video."},
 				"start_ms":      map[string]any{"type": "integer", "description": "Clip start, milliseconds from start of source. Same convention as media_trim."},

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"fmt"
 	"image"
 	"image/color"
 	"strings"
@@ -26,6 +27,43 @@ func TestSmartCropV2DenseStoryboardGate(t *testing.T) {
 	}
 	if !smartCropSamplesAreDense(capped, smartCropTarget{StartMs: 760_250, EndMs: 788_260}) {
 		t.Fatal("120-frame-capped eleven-second storyboard should enable v2")
+	}
+}
+
+func TestSmartCropStoryboardDensityCheckedBeforeAnalysisCap(t *testing.T) {
+	target := smartCropTarget{StartMs: 100_000, EndMs: 700_000}
+	derivs := make([]DerivationRow, 0, 123)
+	for pos := int64(95_000); pos <= 705_000; pos += 5_000 {
+		derivs = append(derivs, DerivationRow{
+			Kind: "keyframe", Status: "ok", StorageFileID: fmt.Sprintf("%d", pos), PositionMs: pos,
+		})
+	}
+	uncapped := selectSmartCropReelDerivationsUncapped(derivs, target)
+	if !smartCropSamplesAreDense(uncapped, target) {
+		t.Fatal("dense source storyboard was rejected before analysis capping")
+	}
+	capped := capSmartCropReelDerivations(uncapped)
+	if len(capped) != smartCropV2MaxSamples {
+		t.Fatalf("analysis samples=%d want=%d", len(capped), smartCropV2MaxSamples)
+	}
+	if smartCropSamplesAreDense(capped, target) {
+		t.Fatal("test requires capping to create gaps above the source-density limit")
+	}
+}
+
+func TestSmartCropStoryboardDenseAtFocus(t *testing.T) {
+	makeDerivs := func(gap int64) []DerivationRow {
+		out := make([]DerivationRow, 0, 5)
+		for i := int64(0); i < 5; i++ {
+			out = append(out, DerivationRow{Kind: "keyframe", Status: "ok", StorageFileID: fmt.Sprint(i + 1), PositionMs: 1_000 + i*gap})
+		}
+		return out
+	}
+	if !smartCropStoryboardDenseAtFocus(makeDerivs(11_000), 23_000) {
+		t.Fatal("capped eleven-second storyboard should use cached frames")
+	}
+	if smartCropStoryboardDenseAtFocus(makeDerivs(30_000), 61_000) {
+		t.Fatal("thirty-second storyboard should request local supplemental frames")
 	}
 }
 
@@ -342,6 +380,60 @@ func TestTemporalStaticPersonFallbackRequiresHumanEvidence(t *testing.T) {
 	for _, result := range tests {
 		if smartCropTemporalResultConfident(result) {
 			t.Fatalf("static fallback accepted insufficient evidence: %+v", result)
+		}
+	}
+}
+
+func TestStaticWarmSubjectConsensusCentersMotionlessPerson(t *testing.T) {
+	samples := make([]smartCropV2Sample, 9)
+	for i := range samples {
+		img := image.NewRGBA(image.Rect(0, 0, 320, 180))
+		fillSmartCropTestRect(img, image.Rect(0, 0, 320, 180), color.RGBA{R: 90, G: 95, B: 100, A: 255})
+		fillSmartCropTestRect(img, image.Rect(125, 50, 135, 80), color.RGBA{R: 205, G: 160, B: 140, A: 255})
+		samples[i] = smartCropV2Sample{point: cropPathPoint{AtMs: int64(i) * 5_000, X: 128}, img: img}
+	}
+	if _, ok := temporalSubjectConsensus(samples, 1280, 404); ok {
+		t.Fatal("identical frames must not manufacture temporal activity")
+	}
+	result, ok := staticWarmSubjectConsensus(samples, 1280, 404)
+	if !ok || !result.StaticAnchored {
+		t.Fatalf("motionless person was not anchored: ok=%v result=%+v", ok, result)
+	}
+	if x, changed := applySmartCropTemporalOverride(128, result, 404, 1280); !changed || x < 280 || x > 350 {
+		t.Fatalf("motionless person was not centered: x=%d changed=%v result=%+v", x, changed, result)
+	}
+}
+
+func TestStaticWarmSubjectConsensusRejectsSmallFurnitureHighlight(t *testing.T) {
+	samples := make([]smartCropV2Sample, 9)
+	for i := range samples {
+		img := image.NewRGBA(image.Rect(0, 0, 320, 180))
+		fillSmartCropTestRect(img, image.Rect(0, 0, 320, 180), color.RGBA{R: 90, G: 95, B: 100, A: 255})
+		fillSmartCropTestRect(img, image.Rect(245, 130, 255, 140), color.RGBA{R: 205, G: 160, B: 140, A: 255})
+		samples[i] = smartCropV2Sample{img: img}
+	}
+	if result, ok := staticWarmSubjectConsensus(samples, 1280, 404); ok {
+		t.Fatalf("small static highlight was accepted as a person: %+v", result)
+	}
+}
+
+func TestStaticWarmSubjectConsensusRejectsBroadWarmSurface(t *testing.T) {
+	samples := make([]smartCropV2Sample, 9)
+	for i := range samples {
+		img := image.NewRGBA(image.Rect(0, 0, 320, 180))
+		fillSmartCropTestRect(img, image.Rect(0, 0, 320, 180), color.RGBA{R: 90, G: 95, B: 100, A: 255})
+		fillSmartCropTestRect(img, image.Rect(105, 35, 180, 155), color.RGBA{R: 205, G: 160, B: 140, A: 255})
+		samples[i] = smartCropV2Sample{img: img}
+	}
+	if result, ok := staticWarmSubjectConsensus(samples, 1280, 404); ok {
+		t.Fatalf("broad static warm surface was accepted as a person: %+v", result)
+	}
+}
+
+func fillSmartCropTestRect(img *image.RGBA, rect image.Rectangle, c color.RGBA) {
+	for y := rect.Min.Y; y < rect.Max.Y; y++ {
+		for x := rect.Min.X; x < rect.Max.X; x++ {
+			img.SetRGBA(x, y, c)
 		}
 	}
 }

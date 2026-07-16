@@ -7,9 +7,10 @@ package main
 //   - one fixed crop when the interesting region stays put; or
 //   - a short, smoothed crop path when it moves.
 //
-// Old/sparse indexes deliberately fall back to v1. This makes the
-// rollout safe: reindexing adds the denser frames v2 needs, while
-// existing media continues to render with the released behaviour.
+// Dense indexes stay on the cached fast path. Old, capped, or sparse
+// indexes get a bounded temporary storyboard sampled directly from the
+// source around the requested output; those screenshots are deleted after
+// analysis and do not multiply stored derivatives on long videos.
 
 import (
 	"context"
@@ -77,16 +78,30 @@ func computeSmartCropStillV2(
 	}
 
 	var derivs []DerivationRow
+	sampleSource := "storyboard"
 	if target.PreferKeyframe {
-		derivs = selectSmartCropStillDerivations(row.Derivations, target.FocusMs)
+		if smartCropStoryboardDenseAtFocus(row.Derivations, target.FocusMs) {
+			derivs = selectSmartCropStillDerivations(row.Derivations, target.FocusMs)
+		}
 	} else if d := pickSmartCropDerivation(row.Derivations, target); d.StorageFileID != "" {
 		derivs = []DerivationRow{d}
 	}
-	if len(derivs) == 0 {
-		return nil, fmt.Errorf("smartcrop v2: no usable frame derivation")
+	var samples []smartCropV2Sample
+	if target.PreferKeyframe && len(derivs) == 0 {
+		sampleSource = "source"
+		positions := smartCropSupplementPositions(target, row.DurationMs)
+		var sampleErr error
+		samples, sampleErr = analyzeSmartCropV2Source(ctx, app, sc, projectID, sourceFileID,
+			positions, row.Width, row.Height, targetW, targetH)
+		if sampleErr != nil {
+			return nil, fmt.Errorf("smartcrop v2 sample source: %w", sampleErr)
+		}
+	} else {
+		if len(derivs) == 0 {
+			return nil, fmt.Errorf("smartcrop v2: no usable frame derivation")
+		}
+		samples = analyzeSmartCropV2Derivations(ctx, sc, projectID, derivs, row.Width, row.Height, targetW, targetH)
 	}
-
-	samples := analyzeSmartCropV2Derivations(ctx, sc, projectID, derivs, row.Width, row.Height, targetW, targetH)
 	if len(samples) == 0 {
 		return nil, fmt.Errorf("smartcrop v2: no decodable frame derivation")
 	}
@@ -97,7 +112,11 @@ func computeSmartCropStillV2(
 	}
 	temporal := smartCropTemporalResult{}
 	sceneSamples := smartCropSceneSamples(samples, target.FocusMs)
-	if result, ok := temporalSubjectConsensus(sceneSamples, row.Width, cw); ok {
+	result, ok := temporalSubjectConsensus(sceneSamples, row.Width, cw)
+	if !ok {
+		result, ok = staticWarmSubjectConsensus(sceneSamples, row.Width, cw)
+	}
+	if ok {
 		temporal = result
 		if corrected, changed := applySmartCropTemporalOverride(x, result, cw, row.Width); changed {
 			x = corrected
@@ -108,6 +127,7 @@ func computeSmartCropStillV2(
 	app.Logger().Info("smartcrop v2 resolved still",
 		"file_id", sourceFileID,
 		"samples", len(samples),
+		"sample_source", sampleSource,
 		"method", method,
 		"focus_ms", target.FocusMs,
 		"crop_w", cw,
@@ -267,12 +287,22 @@ func computeSmartCropReelV2(
 		return &cropWindow{W: cw, H: ch}, nil, nil
 	}
 
-	derivs := selectSmartCropReelDerivations(row.Derivations, target)
-	if !smartCropSamplesAreDense(derivs, target) {
-		return nil, nil, fmt.Errorf("smartcrop v2: storyboard is too sparse; use v1")
+	uncapped := selectSmartCropReelDerivationsUncapped(row.Derivations, target)
+	var samples []smartCropV2Sample
+	sampleSource := "storyboard"
+	if smartCropSamplesAreDense(uncapped, target) {
+		derivs := capSmartCropReelDerivations(uncapped)
+		samples = analyzeSmartCropV2Derivations(ctx, sc, projectID, derivs, row.Width, row.Height, targetW, targetH)
+	} else {
+		sampleSource = "source"
+		positions := smartCropSupplementPositions(target, row.DurationMs)
+		var sampleErr error
+		samples, sampleErr = analyzeSmartCropV2Source(ctx, app, sc, projectID, sourceFileID,
+			positions, row.Width, row.Height, targetW, targetH)
+		if sampleErr != nil {
+			return nil, nil, fmt.Errorf("smartcrop v2 sample source: %w", sampleErr)
+		}
 	}
-
-	samples := analyzeSmartCropV2Derivations(ctx, sc, projectID, derivs, row.Width, row.Height, targetW, targetH)
 	for i := range samples {
 		if i > 0 {
 			samples[i].point.Cut = sceneCutScore(samples[i-1].img, samples[i].img) >= smartCropSceneCutThreshold
@@ -296,6 +326,7 @@ func computeSmartCropReelV2(
 	if x, ok := staticSmartCropPathX(path, cw); ok {
 		app.Logger().Info("smartcrop v2 resolved static reel",
 			"file_id", sourceFileID, "samples", len(samples),
+			"sample_source", sampleSource,
 			"crop_w", cw, "crop_h", ch, "crop_x", x,
 			"temporal_corrections", temporalCorrections)
 		return &cropWindow{W: cw, H: ch, X: x, Y: 0}, nil, nil
@@ -303,6 +334,7 @@ func computeSmartCropReelV2(
 
 	app.Logger().Info("smartcrop v2 resolved tracked reel",
 		"file_id", sourceFileID, "samples", len(samples),
+		"sample_source", sampleSource,
 		"path_points", len(path), "crop_w", cw, "crop_h", ch,
 		"temporal_corrections", temporalCorrections)
 	return &cropWindow{W: cw, H: ch, X: path[0].X, Y: 0}, path, nil
@@ -340,6 +372,10 @@ func analyzeSmartCropV2Frame(srcW, srcH, targetW, targetH int, img image.Image) 
 }
 
 func selectSmartCropReelDerivations(derivs []DerivationRow, target smartCropTarget) []DerivationRow {
+	return capSmartCropReelDerivations(selectSmartCropReelDerivationsUncapped(derivs, target))
+}
+
+func selectSmartCropReelDerivationsUncapped(derivs []DerivationRow, target smartCropTarget) []DerivationRow {
 	keyframes := make([]DerivationRow, 0)
 	for _, d := range derivs {
 		if d.Kind == "keyframe" && d.Status == "ok" && d.StorageFileID != "" {
@@ -371,6 +407,10 @@ func selectSmartCropReelDerivations(derivs []DerivationRow, target smartCropTarg
 	if after.StorageFileID != "" {
 		selected = append(selected, after)
 	}
+	return selected
+}
+
+func capSmartCropReelDerivations(selected []DerivationRow) []DerivationRow {
 	if len(selected) <= smartCropV2MaxSamples {
 		return selected
 	}
@@ -384,6 +424,35 @@ func selectSmartCropReelDerivations(derivs []DerivationRow, target smartCropTarg
 		}
 	}
 	return out
+}
+
+func smartCropStoryboardDenseAtFocus(derivs []DerivationRow, focusMs int64) bool {
+	keyframes := make([]DerivationRow, 0, len(derivs))
+	for _, d := range derivs {
+		if d.Kind == "keyframe" && d.Status == "ok" && d.StorageFileID != "" {
+			keyframes = append(keyframes, d)
+		}
+	}
+	if len(keyframes) < 2 {
+		return false
+	}
+	sort.Slice(keyframes, func(i, j int) bool { return keyframes[i].PositionMs < keyframes[j].PositionMs })
+	nearest := 0
+	for i := 1; i < len(keyframes); i++ {
+		if absInt64(keyframes[i].PositionMs-focusMs) < absInt64(keyframes[nearest].PositionMs-focusMs) {
+			nearest = i
+		}
+	}
+	if absInt64(keyframes[nearest].PositionMs-focusMs) > smartCropV2MaxGapMs {
+		return false
+	}
+	if nearest > 0 && keyframes[nearest].PositionMs-keyframes[nearest-1].PositionMs > smartCropV2MaxGapMs {
+		return false
+	}
+	if nearest+1 < len(keyframes) && keyframes[nearest+1].PositionMs-keyframes[nearest].PositionMs > smartCropV2MaxGapMs {
+		return false
+	}
+	return true
 }
 
 func smartCropSamplesAreDense(samples []DerivationRow, target smartCropTarget) bool {

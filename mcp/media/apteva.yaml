@@ -196,7 +196,7 @@ provides:
             render_id: "$result.render_id"
           expires_after: 24h
     - name: media_extract_frame
-      description: Save a video frame as PNG. With target_ratio, Smart Crop v2 interpolates between the two indexed storyboard frames surrounding at_ms; sparse indexes safely fall back to single-frame saliency, then center. Args — file_id, at_ms, width?, target_ratio?, output_width?, crop_mode?.
+      description: Save a video frame as PNG. With target_ratio, Smart Crop v2 uses dense cached storyboard frames or bounded temporary source screenshots around at_ms, including zero-motion person centering. Args — file_id, at_ms, width?, target_ratio?, output_width?, crop_mode?.
       async_result:
         id_field: render_id
         notify:
@@ -239,7 +239,7 @@ provides:
           expires_after: 24h
     - name: media_extract_reel
       description: |
-        Cut and reframe a clip in one ffmpeg pass. Smart Crop v2 analyzes bounded cached storyboard frames across the range, uses a fixed crop for a stable subject, and follows movement with a smoothed path when needed. Sparse legacy indexes safely fall back to single-frame crop; reindex to enable dense tracking. Args — file_id, start_ms, end_ms, target_ratio? (default 9:16), output_width? (default 1080), crop_mode? (smart default | center). Returns render_id and notifies the caller on completion.
+        Cut and reframe a clip in one ffmpeg pass. Smart Crop v2 analyzes a bounded cached storyboard or temporary source screenshots when sparse, centers stable people, and follows movement with a smoothed path. Args — file_id, start_ms, end_ms, target_ratio? (default 9:16), output_width? (default 1080), crop_mode? (smart default | center). Returns render_id and notifies the caller on completion.
       async_result:
         id_field: render_id
         notify:

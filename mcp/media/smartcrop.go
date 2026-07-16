@@ -829,8 +829,9 @@ func preprocessSmartCrop(
 		return params
 	}
 	target := smartCropFocus(op, parsed)
-	// V2 uses at most two cached frames for a still and a bounded sample
-	// set for a reel. Sparse/legacy indexes safely fall through to v1.
+	// V2 uses a bounded sample set. Dense storyboards stay on the cached fast
+	// path; sparse indexes are supplemented with temporary source screenshots.
+	// Source-sampling failures still fall through safely to v1.
 	if op == "extract_reel" && mode == "smart" {
 		if win, path, v2Err := computeSmartCropReelV2(ctx, app, sc, projectID, sources[0], rw, rh, target); v2Err == nil {
 			parsed["crop_w"] = win.W

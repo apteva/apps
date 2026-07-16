@@ -19,6 +19,7 @@ const (
 	smartCropTemporalStaticMinMeanActivity   = 0.25
 	smartCropTemporalStaticMinActiveFraction = 0.008
 	smartCropTemporalStaticMinAnchorScore    = 300.0
+	smartCropTemporalStaticMaxAnchorScore    = 800.0
 )
 
 type smartCropTemporalResult struct {
@@ -28,6 +29,7 @@ type smartCropTemporalResult struct {
 	MeanActivity    float64
 	ActiveFraction  float64
 	SubjectAnchored bool
+	StaticAnchored  bool
 	AnchorCoverage  int
 	AnchorScore     float64
 }
@@ -208,6 +210,18 @@ func applySmartCropTemporalOverride(baseX int, result smartCropTemporalResult, c
 	if !smartCropTemporalResultConfident(result) || absInt(baseX-result.X) <= cropW/8 {
 		return baseX, false
 	}
+	if result.StaticAnchored {
+		// Static colour evidence is intentionally only an edge-recovery signal.
+		// The candidate person's centre must already be inside the saliency crop
+		// and stranded in its outer fifth. Otherwise a warm lamp or chair across
+		// the room could pull a perfectly usable frozen crop to the wrong side.
+		subjectCenter := result.X + cropW/2
+		edgeBand := maxInt(16, cropW/5)
+		if subjectCenter < baseX || subjectCenter > baseX+cropW ||
+			(subjectCenter-baseX > edgeBand && baseX+cropW-subjectCenter > edgeBand) {
+			return baseX, false
+		}
+	}
 	return clampInt(roundEven(result.X), 0, srcW-cropW), true
 }
 
@@ -221,6 +235,15 @@ func smartCropTemporalResultConfident(result smartCropTemporalResult) bool {
 	if result.SubjectAnchored &&
 		result.AnchorCoverage >= (result.Samples+1)/2 &&
 		result.Concentration >= smartCropTemporalMinConcentration {
+		return true
+	}
+	// Completely motionless footage has no temporal activity to concentrate.
+	// In that case, accept a crop only when a strict person-like warm component
+	// recurs across at least two thirds of the sampled frames.
+	if result.StaticAnchored &&
+		result.AnchorCoverage >= maxInt(3, (2*result.Samples+2)/3) &&
+		result.AnchorScore >= smartCropTemporalStaticMinAnchorScore &&
+		result.AnchorScore < smartCropTemporalStaticMaxAnchorScore {
 		return true
 	}
 	// Strong, dense motion can extend beyond a portrait window when a person
@@ -312,9 +335,50 @@ func persistentWarmSubjectCenter(
 	// so unusually small derivations use the same evidence requirement.
 	normalizedScore = bestTotal / float64(len(frames)) * (320.0 * 180.0 / float64(w*h))
 	if normalizedScore < 800.0 {
-		return 0, bestCoverage, normalizedScore, false
+		return bestCenter, bestCoverage, normalizedScore, false
 	}
 	return bestCenter, bestCoverage, normalizedScore, true
+}
+
+func staticWarmSubjectConsensus(samples []smartCropV2Sample, srcW, cropW int) (smartCropTemporalResult, bool) {
+	if len(samples) < smartCropTemporalMinSamples || srcW <= cropW || cropW <= 0 ||
+		float64(srcW)/float64(cropW) < 1.8 {
+		return smartCropTemporalResult{}, false
+	}
+	if len(samples) > smartCropTemporalMaxSamples {
+		samples = evenlyCapSmartCropSamples(samples, smartCropTemporalMaxSamples)
+	}
+	if samples[0].img == nil {
+		return smartCropTemporalResult{}, false
+	}
+	bounds := samples[0].img.Bounds()
+	if bounds.Dx() <= 0 || bounds.Dy() <= 0 {
+		return smartCropTemporalResult{}, false
+	}
+	w := minInt(320, bounds.Dx())
+	h := maxInt(1, int(math.Round(float64(w)*float64(bounds.Dy())/float64(bounds.Dx()))))
+	pixels := make([][]uint8, len(samples))
+	for i, sample := range samples {
+		if sample.img == nil {
+			return smartCropTemporalResult{}, false
+		}
+		pixels[i] = normalizedSmartCropRGB(sample.img, w, h)
+	}
+	center, coverage, score, _ := persistentWarmSubjectCenter(pixels, w, h, 0, w)
+	requiredCoverage := maxInt(3, (2*len(samples)+2)/3)
+	if coverage < requiredCoverage || score < smartCropTemporalStaticMinAnchorScore ||
+		score >= smartCropTemporalStaticMaxAnchorScore {
+		return smartCropTemporalResult{}, false
+	}
+	normalizedCropW := clampInt(int(math.Round(float64(w)*float64(cropW)/float64(srcW))), 1, w)
+	start := clampInt(int(math.Round(center-float64(normalizedCropW)/2)), 0, w-normalizedCropW)
+	return smartCropTemporalResult{
+		X:              clampInt(roundEven(int(math.Round(float64(start)*float64(srcW)/float64(w)))), 0, srcW-cropW),
+		Samples:        len(samples),
+		StaticAnchored: true,
+		AnchorCoverage: coverage,
+		AnchorScore:    score,
+	}, true
 }
 
 func warmSubjectComponents(frame []uint8, w, h, cropW, regionMin, regionMax int) []warmSubjectComponent {
@@ -442,7 +506,11 @@ func correctSmartCropReelTemporalOutliers(samples []smartCropV2Sample, srcW, cro
 		for end < len(samples) && !samples[end].point.Cut {
 			end++
 		}
-		if result, ok := temporalSubjectConsensus(samples[start:end], srcW, cropW); ok {
+		result, ok := temporalSubjectConsensus(samples[start:end], srcW, cropW)
+		if !ok {
+			result, ok = staticWarmSubjectConsensus(samples[start:end], srcW, cropW)
+		}
+		if ok {
 			if !smartCropTemporalResultConfident(result) {
 				start = end
 				continue
