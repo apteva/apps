@@ -180,7 +180,7 @@ export default function CallsPanel({ projectId }: NativePanelProps) {
     if (!call || !LIVE_STATUSES.has(call.status)) return;
     setEnding(call.id);
     try {
-      const res = await fetch(`${API}/calls/${encodeURIComponent(call.id)}/hangup`, {
+		const res = await fetch(withProject(`/calls/${encodeURIComponent(call.id)}/hangup`), {
         method: "POST",
         credentials: "same-origin",
       });
