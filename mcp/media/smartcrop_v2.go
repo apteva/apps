@@ -27,10 +27,10 @@ import (
 const (
 	smartCropV2MaxSamples           = 24
 	smartCropV2MaxParallelDownloads = 4
-	// With the new five-second storyboard default, eight seconds leaves
-	// room for an occasional failed derivation without accepting the old
-	// 30-second sampling that caused the Tracy failures.
-	smartCropV2MaxGapMs = int64(8000)
+	// The 120-frame storyboard cap stretches five-second sampling to about
+	// eleven seconds on 20-minute sources. Twelve seconds admits that capped
+	// cadence while continuing to reject legacy 30-second storyboards.
+	smartCropV2MaxGapMs = int64(12000)
 )
 
 // cropPathPoint is persisted only in the in-memory render params. AtMs

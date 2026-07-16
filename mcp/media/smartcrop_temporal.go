@@ -6,15 +6,19 @@ import (
 )
 
 const (
-	smartCropTemporalMaxSamples             = 9
-	smartCropTemporalMinSamples             = 3
-	smartCropSceneCutThreshold              = 0.28
-	smartCropTemporalMinConcentration       = 0.60
-	smartCropTemporalMinMeanActivity        = 0.50
-	smartCropTemporalMinActiveFraction      = 0.015
-	smartCropTemporalDenseMinConcentration  = 0.50
-	smartCropTemporalDenseMinMeanActivity   = 2.0
-	smartCropTemporalDenseMinActiveFraction = 0.04
+	smartCropTemporalMaxSamples              = 9
+	smartCropTemporalMinSamples              = 3
+	smartCropSceneCutThreshold               = 0.28
+	smartCropTemporalMinConcentration        = 0.60
+	smartCropTemporalMinMeanActivity         = 0.50
+	smartCropTemporalMinActiveFraction       = 0.015
+	smartCropTemporalDenseMinConcentration   = 0.50
+	smartCropTemporalDenseMinMeanActivity    = 2.0
+	smartCropTemporalDenseMinActiveFraction  = 0.04
+	smartCropTemporalStaticMinConcentration  = 0.98
+	smartCropTemporalStaticMinMeanActivity   = 0.25
+	smartCropTemporalStaticMinActiveFraction = 0.008
+	smartCropTemporalStaticMinAnchorScore    = 300.0
 )
 
 type smartCropTemporalResult struct {
@@ -226,6 +230,17 @@ func smartCropTemporalResultConfident(result smartCropTemporalResult) bool {
 	if result.Concentration >= smartCropTemporalDenseMinConcentration &&
 		result.MeanActivity >= smartCropTemporalDenseMinMeanActivity &&
 		result.ActiveFraction >= smartCropTemporalDenseMinActiveFraction {
+		return true
+	}
+	// A nearly motionless person may only produce subtle compression-level
+	// activity. Accept that signal only when it is extremely concentrated and
+	// backed by a recurring warm human component. The anchor requirement keeps
+	// isolated codec noise from moving a crop.
+	if result.Concentration >= smartCropTemporalStaticMinConcentration &&
+		result.MeanActivity >= smartCropTemporalStaticMinMeanActivity &&
+		result.ActiveFraction >= smartCropTemporalStaticMinActiveFraction &&
+		result.AnchorCoverage >= (result.Samples+1)/2 &&
+		result.AnchorScore >= smartCropTemporalStaticMinAnchorScore {
 		return true
 	}
 	return result.Concentration >= smartCropTemporalMinConcentration &&

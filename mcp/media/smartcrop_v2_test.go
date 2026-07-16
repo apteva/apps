@@ -20,6 +20,13 @@ func TestSmartCropV2DenseStoryboardGate(t *testing.T) {
 	if smartCropSamplesAreDense(sparse, target) {
 		t.Fatal("legacy 30-second storyboard must fall back to v1")
 	}
+	capped := []DerivationRow{
+		{PositionMs: 758_068}, {PositionMs: 769_040},
+		{PositionMs: 780_012}, {PositionMs: 790_984},
+	}
+	if !smartCropSamplesAreDense(capped, smartCropTarget{StartMs: 760_250, EndMs: 788_260}) {
+		t.Fatal("120-frame-capped eleven-second storyboard should enable v2")
+	}
 }
 
 func TestSelectSmartCropReelDerivationsIncludesBoundariesAndCaps(t *testing.T) {
@@ -307,6 +314,34 @@ func TestTemporalDenseActivityFallbackRemainsConservative(t *testing.T) {
 	for _, result := range tests {
 		if smartCropTemporalResultConfident(result) {
 			t.Fatalf("weak or diffuse activity passed dense fallback: %+v", result)
+		}
+	}
+}
+
+func TestTemporalStaticPersonAcceptsPatriciaProfile(t *testing.T) {
+	result := smartCropTemporalResult{
+		X: 284, Samples: 9, Concentration: 0.9897,
+		MeanActivity: 0.302, ActiveFraction: 0.0098,
+		AnchorCoverage: 9, AnchorScore: 364.6,
+	}
+	if !smartCropTemporalResultConfident(result) {
+		t.Fatalf("static person profile was rejected: %+v", result)
+	}
+	if x, changed := applySmartCropTemporalOverride(128, result, 404, 1280); !changed || x != 284 {
+		t.Fatalf("static edge crop was not corrected: x=%d changed=%v", x, changed)
+	}
+}
+
+func TestTemporalStaticPersonFallbackRequiresHumanEvidence(t *testing.T) {
+	tests := []smartCropTemporalResult{
+		{X: 284, Samples: 9, Concentration: 0.979, MeanActivity: 0.31, ActiveFraction: 0.01, AnchorCoverage: 9, AnchorScore: 365},
+		{X: 284, Samples: 9, Concentration: 0.99, MeanActivity: 0.24, ActiveFraction: 0.01, AnchorCoverage: 9, AnchorScore: 365},
+		{X: 284, Samples: 9, Concentration: 0.99, MeanActivity: 0.31, ActiveFraction: 0.007, AnchorCoverage: 9, AnchorScore: 365},
+		{X: 284, Samples: 9, Concentration: 0.99, MeanActivity: 0.31, ActiveFraction: 0.01, AnchorCoverage: 9, AnchorScore: 299},
+	}
+	for _, result := range tests {
+		if smartCropTemporalResultConfident(result) {
+			t.Fatalf("static fallback accepted insufficient evidence: %+v", result)
 		}
 	}
 }
