@@ -37,7 +37,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/url"
-	"strings"
 
 	"github.com/gobwas/ws"
 	"github.com/gobwas/ws/wsutil"
@@ -68,9 +67,15 @@ type twilioOutbound struct {
 	} `json:"media"`
 }
 
+func realtimeInterruptControl(data []byte) bool {
+	var control struct {
+		Type string `json:"type"`
+	}
+	return json.Unmarshal(data, &control) == nil && control.Type == "interrupt"
+}
+
 func (a *App) handleTwilioMediaStream(w http.ResponseWriter, r *http.Request) {
-	callID := strings.TrimPrefix(r.URL.Path, "/media/twilio/")
-	callID = strings.TrimSuffix(callID, "/")
+	callID := callIDFromMediaPath(r.URL.Path, "/media/twilio/")
 	if callID == "" {
 		http.Error(w, "missing call_id", http.StatusBadRequest)
 		return
@@ -80,8 +85,27 @@ func (a *App) handleTwilioMediaStream(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "unknown call_id", http.StatusNotFound)
 		return
 	}
-	if row.AudioBridgeURL == "" {
+	if err := a.authorizeCallRequest(r, row); err != nil {
+		http.Error(w, "forbidden", http.StatusForbidden)
+		return
+	}
+	if row.CarrierSlug != "twilio" || row.AudioBridgeURL == "" || row.AudioBridgeURL == "pending" || isTerminalStatus(row.Status) {
 		http.Error(w, "no audio bridge for this call", http.StatusGone)
+		return
+	}
+	claimed, err := a.db().claimMedia(callID)
+	if err != nil {
+		http.Error(w, "claim media", http.StatusInternalServerError)
+		return
+	}
+	if !claimed {
+		http.Error(w, "media bridge already active", http.StatusConflict)
+		return
+	}
+	defer a.db().releaseMedia(callID)
+	bridgeURL, err := a.mediaBridgeURL(row)
+	if err != nil {
+		http.Error(w, "audio bridge unavailable", http.StatusBadGateway)
 		return
 	}
 
@@ -91,26 +115,33 @@ func (a *App) handleTwilioMediaStream(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer tw.Close()
+	defer a.finishMediaBridge(callID, "media-disconnected")
 
 	// Open core's audio bridge WS using the URL stamped on the call row.
-	coreURL, err := url.Parse(row.AudioBridgeURL)
+	coreURL, err := url.Parse(bridgeURL)
 	if err != nil {
-		globalCtx.Logger().Warn("parse audio bridge url", "err", err, "url", row.AudioBridgeURL)
+		globalCtx.Logger().Warn("parse audio bridge url", "err", err, "url", redactURL(row.AudioBridgeURL))
 		return
 	}
 	dialer := ws.Dialer{}
 	core, _, _, err := dialer.Dial(r.Context(), coreURL.String())
 	if err != nil {
-		globalCtx.Logger().Warn("dial core audio bridge", "err", err, "url", coreURL.String())
+		globalCtx.Logger().Warn("dial core audio bridge", "err", err, "url", redactURL(coreURL.String()))
 		return
 	}
 	defer core.Close()
 
 	globalCtx.Logger().Info("bridge up", "call", callID, "thread", row.ThreadID)
 	_ = a.db().updateStatus(callID, "in-progress", "")
+	_ = a.db().clearStateExpiry(callID)
 
 	ctx, cancel := context.WithCancel(r.Context())
 	defer cancel()
+	go func() {
+		<-ctx.Done()
+		_ = tw.Close()
+		_ = core.Close()
+	}()
 
 	// streamSid is learned from Twilio's "start" frame; until we have
 	// it we can't send outbound media frames (Twilio rejects them).
@@ -133,6 +164,9 @@ func (a *App) handleTwilioMediaStream(w http.ResponseWriter, r *http.Request) {
 			if err != nil {
 				return
 			}
+			if len(data) > maxCarrierFrameBytes {
+				return
+			}
 			if op != ws.OpText || len(data) == 0 {
 				continue
 			}
@@ -142,6 +176,15 @@ func (a *App) handleTwilioMediaStream(w http.ResponseWriter, r *http.Request) {
 			}
 			switch f.Event {
 			case "start":
+				if f.Start == nil || f.Start.CallSID == "" {
+					return
+				}
+				if row.CarrierSID != "" && row.CarrierSID != f.Start.CallSID {
+					return
+				}
+				if row.CarrierSID == "" {
+					_ = a.db().updateCarrierIdentity(callID, f.Start.CallSID, row.CarrierRequestID)
+				}
 				if f.StreamSID != "" {
 					select {
 					case streamSidCh <- f.StreamSID:
@@ -184,6 +227,13 @@ func (a *App) handleTwilioMediaStream(w http.ResponseWriter, r *http.Request) {
 		data, op, err := wsutil.ReadServerData(core)
 		if err != nil {
 			return
+		}
+		if op == ws.OpText && realtimeInterruptControl(data) {
+			clearFrame, _ := json.Marshal(map[string]string{"event": "clear", "streamSid": streamSID})
+			if err := wsutil.WriteServerText(tw, clearFrame); err != nil {
+				return
+			}
+			continue
 		}
 		if op != ws.OpBinary || len(data) == 0 {
 			continue
