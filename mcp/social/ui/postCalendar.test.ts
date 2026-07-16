@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import {
+  calendarPlatformMarkStyle,
   calendarWindow,
   filterCalendarPosts,
   groupPostsByLocalDay,
@@ -65,6 +66,15 @@ test("critical calendar and media squares do not depend on host utility CSS", ()
   });
   expect(stableSquareStyle(96).width).toBe(stableSquareStyle(96).height);
   expect(stableSquareStyle(32).flex).toBe("0 0 32px");
+
+  const platformMark = calendarPlatformMarkStyle();
+  expect(platformMark.width).toBe(18);
+  expect(platformMark.height).toBe(18);
+  expect(platformMark.display).toBe("grid");
+  expect(platformMark.placeItems).toBe("center");
+  expect(platformMark.lineHeight).toBe(1);
+  expect(platformMark.boxSizing).toBe("border-box");
+  expect(platformMark.letterSpacing).toBe(0);
 });
 
 test("list media uses a fixed square that fills the card margins", () => {

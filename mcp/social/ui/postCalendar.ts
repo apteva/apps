@@ -24,6 +24,18 @@ export function stableSquareStyle(size: number) {
   } as const;
 }
 
+export function calendarPlatformMarkStyle(size = 18) {
+  return {
+    ...stableSquareStyle(size),
+    boxSizing: "border-box",
+    borderRadius: 4,
+    fontSize: size <= 18 ? 8 : 9,
+    fontWeight: 700,
+    letterSpacing: 0,
+    overflow: "hidden",
+  } as const;
+}
+
 export function listLeadMediaStyle(size = 156) {
   return {
     width: size,

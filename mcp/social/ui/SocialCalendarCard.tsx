@@ -3,6 +3,7 @@ import { CalendarDays, ChevronLeft, ChevronRight } from "lucide-react";
 import { Card, CardHeader, type CardVendor } from "@apteva/ui-kit";
 import { platformPresentation } from "./platformPresentation";
 import {
+  calendarPlatformMarkStyle,
   calendarWindow,
   filterCalendarPosts,
   groupPostsByLocalDay,
@@ -232,17 +233,21 @@ function Agenda({ days, grouped, loading }: { days: Date[]; grouped: Map<string,
 function CalendarEvent({ post, compact = false }: { post: SocialPost; compact?: boolean }) {
   const date = postLifecycleDate(post);
   const platforms = Array.from(new Set(post.targets.map((target) => target.platform).filter(Boolean)));
+  const markSize = compact ? 18 : 22;
   return (
     <a
       href={`/apps/social?view=calendar&post=${post.id}`}
       className={`block border border-border rounded bg-bg-card hover:border-border-strong ${compact ? "px-1 py-1" : "px-2 py-2"}`}
       style={{ borderLeftColor: postStatusColor(post.status), borderLeftWidth: 2 }}
     >
-      <div className="flex items-center gap-1.5 min-w-0">
-        <span className={`${compact ? "text-[9px]" : "text-xs"} text-text tabular-nums flex-shrink-0`}>
+      <div className="flex items-center gap-1.5 min-w-0" style={{ minHeight: markSize }}>
+        <span
+          className={`${compact ? "text-[9px]" : "text-xs"} text-text tabular-nums flex-shrink-0`}
+          style={{ display: "inline-flex", alignItems: "center", height: markSize, lineHeight: 1 }}
+        >
           {date?.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" })}
         </span>
-        <span className="flex gap-0.5 min-w-0">
+        <span className="min-w-0" style={{ display: "flex", alignItems: "center", gap: 2 }}>
           {platforms.slice(0, compact ? 1 : 3).map((platform) => <PlatformMark key={platform} platform={platform} compact={compact} />)}
         </span>
         {!compact && <span className="text-[10px] uppercase text-text-dim ml-auto">{post.status}</span>}
@@ -254,14 +259,12 @@ function CalendarEvent({ post, compact = false }: { post: SocialPost; compact?: 
 
 function PlatformMark({ platform, compact }: { platform: string; compact: boolean }) {
   const presentation = platformPresentation(platform);
+  const size = compact ? 18 : 22;
   return (
     <span
       title={presentation.label}
-      className="inline-grid place-items-center rounded font-bold flex-shrink-0"
       style={{
-        width: compact ? 16 : 20,
-        height: compact ? 16 : 20,
-        fontSize: compact ? 7 : 8,
+        ...calendarPlatformMarkStyle(size),
         color: presentation.color,
         backgroundColor: `${presentation.color}1F`,
         border: `1px solid ${presentation.color}88`,
