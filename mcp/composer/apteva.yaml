@@ -2,7 +2,7 @@ schema: apteva-app/v1
 
 name: composer
 display_name: Composer
-version: 0.5.9
+version: 0.5.10
 description: |
   Multi-clip video composition. Stitch generated or uploaded assets
   into a single video — layered visual tracks, timed audio tracks, optional
@@ -10,6 +10,12 @@ description: |
   default, on a render host via instances when render_host_id is
   set, or against a SaaS render backend (Shotstack et al) when one
   is bound to the render_executor role.
+
+  v0.5.10 makes V1 text rendering independent of fonts installed on the
+  executor host. Composer supplies its bundled Go Mono TTF to both local and
+  remote ffmpeg renders and uses an explicit fontfile in every drawtext
+  filter, so legacy family values such as Courier New cannot fail through a
+  missing Fontconfig catalog.
 
   v0.5.9 adds live Composer chat cards and a durable asynchronous render
   lifecycle. Composition cards update as agents build timelines; render cards

@@ -11,6 +11,8 @@ import (
 	"encoding/json"
 	"image"
 	"image/color"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -447,6 +449,68 @@ func TestBuildLocalFFmpegArgs_TextOverlay(t *testing.T) {
 	}
 	if !strings.Contains(cmd, "fontsize=40") {
 		t.Errorf("font_size should plumb through: %s", cmd)
+	}
+	if !strings.Contains(cmd, "fontfile='"+composerFontToken+"'") {
+		t.Errorf("text overlay should use the bundled font token: %s", cmd)
+	}
+}
+
+func TestBuildLocalFFmpegArgs_RichTextIgnoresUnavailableFontFamily(t *testing.T) {
+	e, err := parseEditJSON(`{"timeline":{"tracks":[
+		{"type":"visual","clips":[{"asset":{"src":"https://a","type":"video"},"start":0,"length":3}]},
+		{"type":"overlay","clips":[{"asset":{"type":"text","text":"Remote-safe","font":{"family":"Courier New","size":42}},"start":0,"length":2}]}
+	]}}`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	args := buildLocalFFmpegArgs(e, defaultOutput(), []string{"https://a"}, -1, "out.mp4")
+	cmd := strings.Join(args, " ")
+	if strings.Contains(cmd, "font='Courier New'") {
+		t.Fatalf("font family must not require host Fontconfig: %s", cmd)
+	}
+	if !strings.Contains(cmd, "fontfile='"+composerFontToken+"'") {
+		t.Fatalf("rich text should use the bundled font token: %s", cmd)
+	}
+	materialized := strings.Join(materializeComposerFontArgs(args, "./"+composerFontFilename), " ")
+	if strings.Contains(materialized, composerFontToken) || !strings.Contains(materialized, "fontfile='./"+composerFontFilename+"'") {
+		t.Fatalf("font token was not materialized: %s", materialized)
+	}
+}
+
+func TestRenderFontEndpointServesBundledTTF(t *testing.T) {
+	req := httptest.NewRequest(http.MethodGet, "/render-font", nil)
+	rec := httptest.NewRecorder()
+	(&App{}).handleRenderFont(rec, req)
+	res := rec.Result()
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK || res.Header.Get("Content-Type") != "font/ttf" {
+		t.Fatalf("status=%d content-type=%q", res.StatusCode, res.Header.Get("Content-Type"))
+	}
+	body := rec.Body.Bytes()
+	if len(body) < 4 || body[0] != 0 || body[1] != 1 || body[2] != 0 || body[3] != 0 {
+		t.Fatalf("response is not a TrueType font: len=%d prefix=%v", len(body), body[:min(4, len(body))])
+	}
+}
+
+func TestBundledFontRendersWithFFmpeg(t *testing.T) {
+	ffmpeg, err := exec.LookPath("ffmpeg")
+	if err != nil {
+		t.Skip("ffmpeg not installed")
+	}
+	dir := t.TempDir()
+	fontPath, err := writeComposerFont(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	filter := materializeComposerFontArgs([]string{buildDrawText(&TextOver{
+		Body: "Remote-safe text", FontSize: 32, Color: "white", Position: "center",
+	}, 320, 180)}, fontPath)[0]
+	cmd := exec.Command(ffmpeg,
+		"-v", "error", "-f", "lavfi", "-i", "color=c=black:s=320x180:d=0.1",
+		"-vf", filter, "-frames:v", "1", "-f", "null", "-",
+	)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("ffmpeg rejected bundled font filter: %v\n%s\nfilter=%s", err, output, filter)
 	}
 }
 
@@ -1986,6 +2050,7 @@ func TestRemoteRenderScriptUsesStorageUploadLadder(t *testing.T) {
 		"token-redacted",
 		"composition.mp4",
 		"video/mp4",
+		"https://agents.example.com/api/apps/composer/render-font?project_id=project-1",
 	)
 	for _, want := range []string{
 		"$STORAGE_BASE/files/init?project_id=$PROJECT_ID",
@@ -1993,6 +2058,9 @@ func TestRemoteRenderScriptUsesStorageUploadLadder(t *testing.T) {
 		"$STORAGE_BASE/uploads/$CHUNK_UPLOAD_ID/parts/$PART?project_id=$PROJECT_ID",
 		"$STORAGE_BASE/uploads/$CHUNK_UPLOAD_ID/complete?project_id=$PROJECT_ID",
 		"composer-render",
+		"Authorization: Bearer token-redacted",
+		"-o ./composer-go-mono.ttf",
+		"/api/apps/composer/render-font?project_id=project-1",
 		"APTEVA_RESULT:{\\\"storage_id\\\":${STORAGE_ID}",
 	} {
 		if !strings.Contains(script, want) {

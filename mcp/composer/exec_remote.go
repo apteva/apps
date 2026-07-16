@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -112,6 +113,10 @@ func (e *remoteFFmpegExecutor) Render(
 	} else {
 		args = buildLocalFFmpegArgsWithAudioInfo(edit, output, localPaths, soundtrackIdx, "./out."+output.Format, remoteVisualAudioDefaults(edit))
 	}
+	usesFont := argsUseComposerFont(args)
+	if usesFont {
+		args = materializeComposerFontArgs(args, "./"+composerFontFilename)
+	}
 	cmd := shellEcho("ffmpeg", args)
 
 	publicURL, err := resolveComposerPublicURL(app)
@@ -123,7 +128,11 @@ func (e *remoteFFmpegExecutor) Render(
 		return Result{FFmpegCommand: cmd}, errors.New("remote render requires APTEVA_OUTBOUND_TOKEN or APTEVA_APP_TOKEN for Storage upload")
 	}
 	filename := fmt.Sprintf("composition-remote-%d.%s", time.Now().UnixNano(), output.Format)
-	script := remoteRenderScript(urls, cmd, output.Format, projectID, publicURL, token, filename, renderContentType(output.Format))
+	fontURL := ""
+	if usesFont {
+		fontURL = strings.TrimRight(publicURL, "/") + "/api/apps/composer/render-font?project_id=" + url.QueryEscape(projectID)
+	}
+	script := remoteRenderScript(urls, cmd, output.Format, projectID, publicURL, token, filename, renderContentType(output.Format), fontURL)
 
 	app.Logger().Info("remote ffmpeg render", "host_id", e.hostID, "inputs", len(urls), "format", output.Format)
 
@@ -189,13 +198,16 @@ func remotePreflight(app *sdk.AppCtx, hostID int64) error {
 // Convention: input URLs become ./in0, ./in1, … in the working dir,
 // the ffmpeg command is appended verbatim, and the output is
 // echoed back as APTEVA_RESULT:{...} for the parser.
-func remoteRenderScript(urls []string, ffmpegCmd, format, projectID, publicURL, token, filename, contentType string) string {
+func remoteRenderScript(urls []string, ffmpegCmd, format, projectID, publicURL, token, filename, contentType, fontURL string) string {
 	var b strings.Builder
 	b.WriteString("set -eu -o pipefail\n")
 	b.WriteString("WORKDIR=$(mktemp -d)\n")
 	b.WriteString("trap 'rm -rf \"$WORKDIR\"' EXIT\n")
 	b.WriteString("cd \"$WORKDIR\"\n")
 	b.WriteString(remoteFFmpegBootstrapScript())
+	if strings.TrimSpace(fontURL) != "" {
+		fmt.Fprintf(&b, "curl -fsSL --retry 3 -H %q -o ./%s %q\n", "Authorization: Bearer "+token, composerFontFilename, fontURL)
+	}
 	for i, u := range urls {
 		fmt.Fprintf(&b, "curl -fsSL --retry 3 -o ./in%d %q\n", i, u)
 	}

@@ -118,6 +118,14 @@ func (e *localFFmpegExecutor) Render(
 
 	outFile := filepath.Join(scratch, "out."+output.Format)
 	args := buildLocalFFmpegArgsWithAudioInfo(edit, output, inputs, soundtrackIdx, outFile, visualHasAudio)
+	if argsUseComposerFont(args) {
+		fontPath, fontErr := writeComposerFont(scratch)
+		if fontErr != nil {
+			cleanup()
+			return Result{}, fontErr
+		}
+		args = materializeComposerFontArgs(args, fontPath)
+	}
 
 	result, runErr := runLocalFFmpeg(ctx, app, start, scratch, len(inputs), outFile, args)
 	if runErr != nil {
@@ -881,8 +889,8 @@ func buildDrawText(t *TextOver, w, h int) string {
 		x, y = "(w-text_w)/2", strconv.Itoa(h-h/8-fs)
 	}
 	return fmt.Sprintf(
-		"drawtext=text='%s':fontsize=%d:fontcolor=%s:borderw=2:bordercolor=black@0.6:x=%s:y=%s",
-		escDrawText(t.Body), fs, color, x, y,
+		"drawtext=text='%s':fontfile='%s':fontsize=%d:fontcolor=%s:borderw=2:bordercolor=black@0.6:x=%s:y=%s",
+		escDrawText(t.Body), composerFontToken, fs, color, x, y,
 	)
 }
 
@@ -989,6 +997,7 @@ func buildTimedDrawTextWithBody(c Clip, w, h int, body string) string {
 	}
 	parts := []string{
 		fmt.Sprintf("drawtext=text='%s'", escDrawText(body)),
+		fmt.Sprintf("fontfile='%s'", composerFontToken),
 		fmt.Sprintf("fontsize=%d", fs),
 		fmt.Sprintf("fontcolor=%s", color),
 		fmt.Sprintf("borderw=%d", borderW),
@@ -1002,9 +1011,6 @@ func buildTimedDrawTextWithBody(c Clip, w, h int, body string) string {
 	}
 	if alpha := drawTextAlpha(c); alpha != "" {
 		parts = append(parts, "alpha='"+escapeDrawTextExpr(alpha)+"'")
-	}
-	if c.Asset.Font != nil && strings.TrimSpace(c.Asset.Font.Family) != "" {
-		parts = append(parts, "font='"+escDrawText(c.Asset.Font.Family)+"'")
 	}
 	return strings.Join(parts, ":")
 }
