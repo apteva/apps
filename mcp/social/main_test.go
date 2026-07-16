@@ -1050,6 +1050,166 @@ func TestAccountMetrics_RejectsInvalidHistoryPeriod(t *testing.T) {
 	}
 }
 
+func TestAccountMetrics_ZernioUsesProviderAdapterAndCurrentPayloadShape(t *testing.T) {
+	pf := newRecordingPlatform()
+	now := time.Now().UTC()
+	day1 := now.AddDate(0, 0, -2).Format("2006-01-02")
+	day2 := now.AddDate(0, 0, -1).Format("2006-01-02")
+	pf.executeResponses["get_daily_metrics"] = &sdk.ExecuteResult{
+		Success: true,
+		Status:  http.StatusOK,
+		Data: json.RawMessage(fmt.Sprintf(`{
+			"dailyData":[
+				{"date":%q,"postCount":2,"platforms":{"linkedin":2},"metrics":{"impressions":100,"reach":80,"likes":7,"comments":2,"shares":1,"views":10}},
+				{"date":%q,"postCount":1,"platforms":{"linkedin":1},"metrics":{"impressions":50,"reach":40,"likes":3,"comments":0,"shares":0,"views":5}}
+			],
+			"platformBreakdown":[]
+		}`, day1, day2)),
+	}
+	pf.executeResponses["get_follower_stats"] = &sdk.ExecuteResult{
+		Success: true,
+		Status:  http.StatusOK,
+		Data: json.RawMessage(fmt.Sprintf(`{
+			"accounts":[{"_id":"za_linkedin","platform":"linkedin","currentFollowers":1250}],
+			"stats":{"za_linkedin":[{"date":%q,"followers":1230},{"date":%q,"followers":1250}]},
+			"granularity":"daily"
+		}`, day1, day2)),
+	}
+	ctx := newSocialCtx(t, pf)
+	inserted, err := ctx.AppDB().Exec(
+		`INSERT INTO social_accounts
+		   (project_id, platform, connection_id, display_name, status, provider_slug, provider_account_id)
+		 VALUES ('test-proj', 'linkedin', 77, 'Company', 'active', 'zernio', 'za_linkedin')`,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	accountID, _ := inserted.LastInsertId()
+
+	out, err := (&App{}).toolAccountMetrics(ctx, map[string]any{
+		"social_account_id": accountID,
+		"period":            "30d",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	metrics := out.(accountMetricsResult)
+	if metrics.Status != "ok" || metrics.Followers != 1250 || metrics.Posts != 3 || metrics.Impressions != 150 || metrics.Reach != 120 || metrics.Views != 15 || metrics.Engagements != 13 {
+		t.Fatalf("unexpected zernio account metrics: %+v", metrics)
+	}
+	if metrics.HistorySource != "social_metric_points" || len(metrics.Insights["followers"]) < 2 || len(metrics.Insights["impressions"]) != 2 || len(metrics.Insights["comments"]) != 2 || metrics.Insights["comments"][1].Value != 0 {
+		t.Fatalf("provider history was not normalized and persisted: %+v", metrics.Insights)
+	}
+	if len(metrics.Raw) != 0 {
+		t.Fatalf("raw provider response leaked by default: %s", metrics.Raw)
+	}
+	if len(pf.executeCalls) != 2 || pf.executeCalls[0].Tool != "get_daily_metrics" || pf.executeCalls[1].Tool != "get_follower_stats" {
+		t.Fatalf("unexpected provider calls: %+v", pf.executeCalls)
+	}
+	if pf.executeCalls[0].Input["accountId"] != "za_linkedin" || pf.executeCalls[0].Input["attribution"] != "received" {
+		t.Fatalf("daily metrics input = %+v", pf.executeCalls[0].Input)
+	}
+	if pf.executeCalls[1].Input["granularity"] != "daily" {
+		t.Fatalf("follower metrics input = %+v", pf.executeCalls[1].Input)
+	}
+}
+
+func TestPostMetrics_ZernioUsesProviderAdapterForLinkedIn(t *testing.T) {
+	pf := newRecordingPlatform()
+	pf.executeResponses["get_analytics"] = &sdk.ExecuteResult{
+		Success: true,
+		Status:  http.StatusOK,
+		Data: json.RawMessage(`{
+			"postId":"zp_123",
+			"analytics":{"impressions":1000,"reach":800,"likes":20,"comments":4,"shares":3,"views":0},
+			"platformAnalytics":[{
+				"platform":"linkedin","platformPostId":"urn:li:share:456","accountId":"za_linkedin",
+				"analytics":{"impressions":1000,"reach":800,"likes":20,"comments":4,"shares":3,"views":0}
+			}]
+		}`),
+	}
+	ctx := newSocialCtx(t, pf)
+	accountResult, err := ctx.AppDB().Exec(
+		`INSERT INTO social_accounts
+		   (project_id, platform, connection_id, display_name, status, provider_slug, provider_account_id)
+		 VALUES ('test-proj', 'linkedin', 77, 'Company', 'active', 'zernio', 'za_linkedin')`,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	accountID, _ := accountResult.LastInsertId()
+	postResult, err := ctx.AppDB().Exec(
+		`INSERT INTO posts (project_id, body, status, published_at) VALUES ('test-proj', 'Provider post', 'published', datetime('now'))`,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	postID, _ := postResult.LastInsertId()
+	if _, err := ctx.AppDB().Exec(
+		`INSERT INTO post_targets
+		   (post_id, social_account_id, status, platform_post_id, provider_post_id)
+		 VALUES (?, ?, 'published', 'urn:li:share:456', 'zp_123')`,
+		postID, accountID,
+	); err != nil {
+		t.Fatal(err)
+	}
+
+	out, err := (&App{}).toolPostMetrics(ctx, map[string]any{"post_id": postID})
+	if err != nil {
+		t.Fatal(err)
+	}
+	result := out.(map[string]any)
+	targets := result["targets"].([]targetMetricsOutcome)
+	if len(targets) != 1 || targets[0].Status != "ok" || targets[0].Metrics == nil {
+		t.Fatalf("unexpected provider post metrics: %+v", targets)
+	}
+	got := targets[0].Metrics
+	if got.Views != 1000 || got.Likes != 20 || got.Comments != 4 || got.Shares != 3 {
+		t.Fatalf("normalized provider post metrics = %+v", got)
+	}
+	if len(pf.executeCalls) != 1 || pf.executeCalls[0].Tool != "get_analytics" {
+		t.Fatalf("unexpected provider calls: %+v", pf.executeCalls)
+	}
+	if pf.executeCalls[0].Input["postId"] != "zp_123" || pf.executeCalls[0].Input["accountId"] != "za_linkedin" {
+		t.Fatalf("post analytics input = %+v", pf.executeCalls[0].Input)
+	}
+	var points int
+	if err := ctx.AppDB().QueryRow(
+		`SELECT COUNT(*) FROM social_metric_points WHERE project_id='test-proj' AND post_id=? AND scope='post'`,
+		postID,
+	).Scan(&points); err != nil {
+		t.Fatal(err)
+	}
+	if points != 4 {
+		t.Fatalf("persisted metric points = %d, want 4", points)
+	}
+}
+
+func TestPostMetrics_ZernioFallsBackToExternalPostID(t *testing.T) {
+	pf := newRecordingPlatform()
+	pf.executeResponses["get_analytics"] = &sdk.ExecuteResult{
+		Success: true,
+		Status:  http.StatusOK,
+		Data:    json.RawMessage(`{"analytics":{"impressions":42,"likes":2,"comments":1,"shares":0}}`),
+	}
+	ctx := newSocialCtx(t, pf)
+	out := (&App{}).getPostMetrics(ctx, metricsTarget{
+		TargetID:          1,
+		SocialAccountID:   2,
+		ConnID:            77,
+		Platform:          "linkedin",
+		ExtPostID:         "urn:li:share:external",
+		ProviderSlug:      "zernio",
+		ProviderAccountID: "za_linkedin",
+	})
+	if out.Status != "ok" || out.Metrics == nil || out.Metrics.Views != 42 {
+		t.Fatalf("external provider post metrics = %+v", out)
+	}
+	if len(pf.executeCalls) != 1 || pf.executeCalls[0].Input["postId"] != "urn:li:share:external" {
+		t.Fatalf("external post id was not forwarded: %+v", pf.executeCalls)
+	}
+}
+
 func TestAccountCheckAll_DoesNotDeadlock(t *testing.T) {
 	ctx := newSocialCtx(t, nil)
 	ctx.AppDB().SetMaxOpenConns(1)

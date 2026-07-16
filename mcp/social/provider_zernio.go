@@ -1013,14 +1013,20 @@ func (a *App) importZernioPosts(ctx *sdk.AppCtx, pid string, out importResult, a
 	return out
 }
 
-func (a *App) getZernioAccountMetrics(ctx *sdk.AppCtx, out accountMetricsResult, connID int64, providerAccountID string) accountMetricsResult {
+func (a *App) getZernioAccountMetrics(ctx *sdk.AppCtx, out accountMetricsResult, connID int64, providerAccountID, platform string) accountMetricsResult {
 	if providerAccountID == "" {
 		out.Status = "failed"
 		out.Error = "zernio account missing provider_account_id"
 		return out
 	}
+	now := time.Now().UTC()
+	from := now.AddDate(0, 0, -180)
 	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "get_daily_metrics", map[string]any{
-		"accountId": providerAccountID,
+		"accountId":   providerAccountID,
+		"platform":    platform,
+		"fromDate":    from.Format(time.RFC3339),
+		"toDate":      now.Format(time.RFC3339),
+		"attribution": "received",
 	})
 	if err != nil {
 		out.Status, out.Error = "failed", err.Error()
@@ -1033,12 +1039,84 @@ func (a *App) getZernioAccountMetrics(ctx *sdk.AppCtx, out accountMetricsResult,
 	series := parseZernioMetricSeries(res.Data)
 	out.Status = "ok"
 	out.Insights = series
-	out.Followers = latestZernioInsight(series, "followers", "follower_count", "followers_count")
-	out.Views = latestZernioInsight(series, "views", "view_count")
-	out.Impressions = latestInsight(series, "impressions")
-	out.Reach = latestInsight(series, "reach")
-	out.Engagements = latestZernioInsight(series, "engagements", "likes", "comments")
-	out.Raw = sanitizeRawJSON(res.Data)
+	out.Posts = sumZernioInsights(series, "posts", "post_count")
+	out.Views = sumZernioInsights(series, "views", "view_count")
+	out.Impressions = sumZernioInsights(series, "impressions")
+	out.Reach = sumZernioInsights(series, "reach")
+	out.Engagements = sumZernioInsights(series, "engagements")
+	if out.Engagements == 0 {
+		out.Engagements = sumZernioInsights(series, "likes") + sumZernioInsights(series, "comments") +
+			sumZernioInsights(series, "shares") + sumZernioInsights(series, "saves") + sumZernioInsights(series, "clicks")
+	}
+
+	raw := map[string]json.RawMessage{"daily_metrics": sanitizeRawJSON(res.Data)}
+	followers, followerSeries, followerRaw, followerErr := a.getZernioFollowerMetrics(ctx, connID, providerAccountID, from, now)
+	if followerErr == nil {
+		out.Followers = followers
+		mergeInsightSeries(out.Insights, followerSeries)
+		raw["follower_stats"] = followerRaw
+	} else {
+		out.Reason = "zernio follower history unavailable: " + followerErr.Error()
+	}
+	out.Raw, _ = json.Marshal(raw)
+	return out
+}
+
+func (a *App) getZernioFollowerMetrics(ctx *sdk.AppCtx, connID int64, providerAccountID string, from, until time.Time) (int64, insightSeries, json.RawMessage, error) {
+	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(connID, "get_follower_stats", map[string]any{
+		"accountIds":  providerAccountID,
+		"fromDate":    from.Format("2006-01-02"),
+		"toDate":      until.Format("2006-01-02"),
+		"granularity": "daily",
+	})
+	if err != nil {
+		return 0, nil, nil, err
+	}
+	if res == nil || !res.Success {
+		return 0, nil, nil, upstreamError(res)
+	}
+	followers, series := parseZernioFollowerSeries(res.Data, providerAccountID)
+	return followers, series, sanitizeRawJSON(res.Data), nil
+}
+
+func (a *App) getZernioPostMetrics(ctx *sdk.AppCtx, out targetMetricsOutcome, target metricsTarget) targetMetricsOutcome {
+	postID := strings.TrimSpace(target.ProviderPostID)
+	if postID == "" {
+		postID = strings.TrimSpace(target.ExtPostID)
+	}
+	if postID == "" {
+		out.Status = "skipped"
+		out.Reason = "zernio target has no provider or platform post id"
+		return out
+	}
+	input := map[string]any{
+		"postId":    postID,
+		"accountId": target.ProviderAccountID,
+		"platform":  target.Platform,
+	}
+	res, err := ctx.PlatformAPI().ExecuteIntegrationTool(target.ConnID, "get_analytics", input)
+	if err != nil {
+		out.Status, out.Error = "failed", err.Error()
+		return out
+	}
+	if res == nil || !res.Success {
+		out.Status, out.Error = "failed", upstreamError(res).Error()
+		return out
+	}
+	metrics := zernioPostMetricMap(res.Data, target.ProviderAccountID, target.Platform, target.ExtPostID)
+	if metrics == nil {
+		out.Status = "failed"
+		out.Error = "zernio analytics response did not contain post metrics"
+		return out
+	}
+	out.Status = "ok"
+	out.Metrics = &normalizedMetrics{
+		Views:    firstZernioMetric(metrics, "views", "impressions", "reach"),
+		Likes:    firstZernioMetric(metrics, "likes", "reactions", "reaction"),
+		Comments: firstZernioMetric(metrics, "comments", "replies"),
+		Shares:   firstZernioMetric(metrics, "shares", "reshares", "reposts"),
+		Raw:      sanitizeRawJSON(res.Data),
+	}
 	return out
 }
 
@@ -1312,35 +1390,195 @@ func zernioConnForInboxItem(ctx *sdk.AppCtx, item *inboxItem) (int64, error) {
 	return connID, nil
 }
 
-func latestZernioInsight(series insightSeries, names ...string) int64 {
-	for _, name := range names {
-		if v := latestInsight(series, name); v != 0 {
-			return v
-		}
-	}
-	return 0
-}
-
 func parseZernioMetricSeries(raw json.RawMessage) insightSeries {
-	items := jsonItems(raw, "metrics", "data", "items", "results", "series")
+	items := jsonItems(raw, "dailyData", "daily_data", "metrics", "items", "results", "series")
 	out := insightSeries{}
 	for _, item := range items {
 		t := firstString(item, "date", "day", "time", "timestamp", "point_time", "createdAt")
 		if t == "" {
 			continue
 		}
-		for k, v := range item {
-			if k == "date" || k == "day" || k == "time" || k == "timestamp" || k == "point_time" || k == "createdAt" {
+		if postCount, ok := zernioNumber(item["postCount"]); ok {
+			out["posts"] = append(out["posts"], insightPoint{Time: t, Value: postCount})
+		}
+		metrics, _ := item["metrics"].(map[string]any)
+		if len(metrics) == 0 {
+			metrics = item
+		}
+		for k, v := range metrics {
+			if isZernioMetricMetadata(k) {
 				continue
 			}
-			n := insightValueToInt64(v)
-			if n == 0 {
+			n, ok := zernioNumber(v)
+			if !ok {
 				continue
 			}
-			out[k] = append(out[k], insightPoint{Time: t, Value: n})
+			name := normaliseZernioMetricName(k)
+			out[name] = append(out[name], insightPoint{Time: t, Value: n})
 		}
 	}
 	return out
+}
+
+func parseZernioFollowerSeries(raw json.RawMessage, providerAccountID string) (int64, insightSeries) {
+	root := zernioResponseMap(raw)
+	out := insightSeries{}
+	stats, _ := root["stats"].(map[string]any)
+	if points, ok := stats[providerAccountID].([]any); ok {
+		for _, value := range points {
+			point, _ := value.(map[string]any)
+			when := firstString(point, "date", "day", "time", "timestamp")
+			followers, ok := zernioNumber(point["followers"])
+			if when != "" && ok {
+				out["followers"] = append(out["followers"], insightPoint{Time: when, Value: followers})
+			}
+		}
+	}
+	current := latestInsight(out, "followers")
+	if accounts, ok := root["accounts"].([]any); ok {
+		for _, value := range accounts {
+			account, _ := value.(map[string]any)
+			if firstString(account, "_id", "id", "accountId", "account_id") != providerAccountID {
+				continue
+			}
+			if followers, ok := zernioNumber(account["currentFollowers"]); ok {
+				current = followers
+			}
+			break
+		}
+	}
+	return current, out
+}
+
+func sumZernioInsights(series insightSeries, names ...string) int64 {
+	for _, name := range names {
+		points := series[name]
+		if len(points) == 0 {
+			continue
+		}
+		var total int64
+		for _, point := range points {
+			total += point.Value
+		}
+		return total
+	}
+	return 0
+}
+
+func zernioPostMetricMap(raw json.RawMessage, accountID, platform, platformPostID string) map[string]any {
+	root := zernioResponseMap(raw)
+	if rows, ok := root["platformAnalytics"].([]any); ok {
+		var platformMatch map[string]any
+		for _, value := range rows {
+			row, _ := value.(map[string]any)
+			if len(row) == 0 {
+				continue
+			}
+			rowPlatform := strings.ToLower(firstString(row, "platform"))
+			if platform != "" && rowPlatform != "" && rowPlatform != strings.ToLower(platform) {
+				continue
+			}
+			rowAccount := firstString(row, "accountId", "account_id")
+			if accountID != "" && rowAccount != "" && rowAccount != accountID {
+				continue
+			}
+			metrics, _ := row["analytics"].(map[string]any)
+			if len(metrics) == 0 {
+				continue
+			}
+			platformMatch = metrics
+			rowPostID := firstString(row, "platformPostId", "platform_post_id")
+			if platformPostID == "" || rowPostID == "" || rowPostID == platformPostID {
+				return metrics
+			}
+		}
+		if platformMatch != nil {
+			return platformMatch
+		}
+	}
+	if metrics, ok := root["analytics"].(map[string]any); ok {
+		return metrics
+	}
+	return nil
+}
+
+func firstZernioMetric(metrics map[string]any, names ...string) int64 {
+	for _, name := range names {
+		if value, ok := zernioNumber(metrics[name]); ok {
+			if value > 0 {
+				return value
+			}
+		}
+	}
+	return 0
+}
+
+func zernioResponseMap(raw json.RawMessage) map[string]any {
+	var root map[string]any
+	if json.Unmarshal(raw, &root) != nil {
+		return map[string]any{}
+	}
+	if data, ok := root["data"].(map[string]any); ok {
+		return data
+	}
+	return root
+}
+
+func zernioNumber(value any) (int64, bool) {
+	switch x := value.(type) {
+	case float64:
+		if x < 0 {
+			return 0, false
+		}
+		return int64(x), true
+	case float32:
+		if x < 0 {
+			return 0, false
+		}
+		return int64(x), true
+	case int:
+		return int64(x), x >= 0
+	case int64:
+		return x, x >= 0
+	case json.Number:
+		n, err := strconv.ParseFloat(string(x), 64)
+		return int64(n), err == nil && n >= 0
+	case string:
+		n, err := strconv.ParseFloat(strings.TrimSpace(x), 64)
+		return int64(n), err == nil && n >= 0
+	default:
+		return 0, false
+	}
+}
+
+func normaliseZernioMetricName(name string) string {
+	switch name {
+	case "postCount", "post_count":
+		return "posts"
+	case "currentFollowers", "followerCount", "followersCount", "follower_count", "followers_count":
+		return "followers"
+	}
+	var out strings.Builder
+	for i, r := range name {
+		if r >= 'A' && r <= 'Z' {
+			if i > 0 {
+				out.WriteByte('_')
+			}
+			out.WriteRune(r + ('a' - 'A'))
+			continue
+		}
+		out.WriteRune(r)
+	}
+	return strings.ToLower(out.String())
+}
+
+func isZernioMetricMetadata(name string) bool {
+	switch name {
+	case "date", "day", "time", "timestamp", "point_time", "createdAt", "platforms", "metrics":
+		return true
+	default:
+		return false
+	}
 }
 
 func zernioCapabilities(platform string) map[string]any {

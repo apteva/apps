@@ -828,8 +828,8 @@ func (a *App) MCPTools() []sdk.Tool {
 		{
 			Name: "post_metrics",
 			Description: "Fetch fresh per-target performance metrics for a post by fanning out to each platform's analytics tool. Returns a per-target array of {status: ok|unsupported|skipped|failed, metrics?: {views, likes, comments, shares, raw}, reason?, error?}. " +
-				"Wired today: Twitter, YouTube, TikTok. Other platforms return status=unsupported until their analytics tools are wired. " +
-				"Direct calls — no caching, no DB writes. Be mindful of upstream rate limits when looping over many posts. Args: post_id.",
+				"Native accounts use their platform adapter; provider-backed accounts use the bound provider adapter, including LinkedIn through Zernio. " +
+				"Fresh normalized snapshots are stored for history. Be mindful of upstream rate limits when looping over many posts. Args: post_id.",
 			InputSchema: schemaObject(map[string]any{
 				"post_id": map[string]any{"type": "integer"},
 			}, []string{"post_id"}),
@@ -838,7 +838,7 @@ func (a *App) MCPTools() []sdk.Tool {
 		{
 			Name: "account_metrics",
 			Description: "Fetch account-level totals (followers, total likes/videos where available) for one connected social account. " +
-				"Wired today: X/Twitter (followers, following, post count), YouTube (subscriberCount, videoCount), TikTok (follower_count, following_count, likes_count, video_count), Facebook and Instagram where their insights APIs expose compatible metrics. " +
+				"Native accounts use their platform adapter; provider-backed accounts use the bound provider adapter, including LinkedIn and other Zernio-backed platforms. " +
 				"Returns normalized totals and stored history for period (default 30d, maximum 730d). Raw provider JSON is omitted by default; set include_raw=true only for explicit debugging or provider-specific detail. " +
 				"Args: social_account_id, period?, include_raw?.",
 			InputSchema: schemaObject(map[string]any{
@@ -4656,6 +4656,9 @@ type metricsTarget struct {
 	TargetID, SocialAccountID, ConnID int64
 	Platform, ExtPostID, ExtURL       string
 	PageCreds                         string
+	ProviderSlug                      string
+	ProviderAccountID                 string
+	ProviderPostID                    string
 }
 
 // getPostMetrics dispatches to the per-platform fetcher for one
@@ -4669,10 +4672,13 @@ func (a *App) getPostMetrics(ctx *sdk.AppCtx, target metricsTarget) targetMetric
 		PlatformPostID:  target.ExtPostID,
 		PlatformURL:     target.ExtURL,
 	}
-	if target.ExtPostID == "" {
+	if target.ExtPostID == "" && target.ProviderPostID == "" {
 		out.Status = "skipped"
-		out.Reason = "target was never published — no platform_post_id"
+		out.Reason = "target was never published — no platform or provider post id"
 		return out
+	}
+	if target.ProviderSlug != "" && target.ProviderSlug != "native" {
+		return a.getProviderPostMetrics(ctx, out, target)
 	}
 	switch target.Platform {
 	case "twitter":
@@ -4691,6 +4697,17 @@ func (a *App) getPostMetrics(ctx *sdk.AppCtx, target metricsTarget) targetMetric
 		// that don't resolve. Surface as unsupported.
 		out.Status = "unsupported"
 		out.Reason = "no analytics tool wired for this platform yet"
+		return out
+	}
+}
+
+func (a *App) getProviderPostMetrics(ctx *sdk.AppCtx, out targetMetricsOutcome, target metricsTarget) targetMetricsOutcome {
+	switch target.ProviderSlug {
+	case zernioProviderSlug:
+		return a.getZernioPostMetrics(ctx, out, target)
+	default:
+		out.Status = "unsupported"
+		out.Reason = "analytics not wired for provider " + target.ProviderSlug
 		return out
 	}
 }
@@ -5096,8 +5113,8 @@ func (a *App) getAccountMetrics(ctx *sdk.AppCtx, pid string, accountID int64, pe
 		Platform:        platform,
 		DisplayName:     displayName,
 	}
-	if providerSlug == zernioProviderSlug {
-		return a.getZernioAccountMetrics(ctx, out, connID, providerAccountID)
+	if providerSlug != "" && providerSlug != "native" {
+		return a.getProviderAccountMetrics(ctx, out, connID, providerSlug, providerAccountID, platform)
 	}
 	switch platform {
 	case "twitter":
@@ -5113,6 +5130,17 @@ func (a *App) getAccountMetrics(ctx *sdk.AppCtx, pid string, accountID int64, pe
 	default:
 		out.Status = "unsupported"
 		out.Reason = "account-level metrics not wired for this platform yet"
+		return out
+	}
+}
+
+func (a *App) getProviderAccountMetrics(ctx *sdk.AppCtx, out accountMetricsResult, connID int64, providerSlug, providerAccountID, platform string) accountMetricsResult {
+	switch providerSlug {
+	case zernioProviderSlug:
+		return a.getZernioAccountMetrics(ctx, out, connID, providerAccountID, platform)
+	default:
+		out.Status = "unsupported"
+		out.Reason = "analytics not wired for provider " + providerSlug
 		return out
 	}
 }
@@ -5973,7 +6001,8 @@ func (a *App) toolPostMetrics(ctx *sdk.AppCtx, args map[string]any) (any, error)
 	rows, err := ctx.AppDB().Query(
 		`SELECT t.id, t.social_account_id, COALESCE(t.platform_post_id,''),
 		        COALESCE(t.platform_url,''), a.platform, a.connection_id,
-		        COALESCE(a.page_credentials,'')
+		        COALESCE(a.page_credentials,''), COALESCE(a.provider_slug,'native'),
+		        COALESCE(a.provider_account_id,''), COALESCE(t.provider_post_id,'')
 		 FROM post_targets t
 		 LEFT JOIN social_accounts a ON a.id=t.social_account_id
 		 WHERE t.post_id=?`,
@@ -5988,7 +6017,10 @@ func (a *App) toolPostMetrics(ctx *sdk.AppCtx, args map[string]any) (any, error)
 		var r metricsTarget
 		var connID sql.NullInt64
 		var platform sql.NullString
-		if err := rows.Scan(&r.TargetID, &r.SocialAccountID, &r.ExtPostID, &r.ExtURL, &platform, &connID, &r.PageCreds); err == nil {
+		if err := rows.Scan(
+			&r.TargetID, &r.SocialAccountID, &r.ExtPostID, &r.ExtURL, &platform, &connID,
+			&r.PageCreds, &r.ProviderSlug, &r.ProviderAccountID, &r.ProviderPostID,
+		); err == nil {
 			if platform.Valid {
 				r.Platform = platform.String
 			}
